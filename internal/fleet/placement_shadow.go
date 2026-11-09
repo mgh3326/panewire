@@ -683,11 +683,11 @@ func (a *App) recordPlacementShadow(s Spawn, role string, tags []string, hosts, 
 // snap is the waste_first order taken during admission (snapErr its failure).
 // The event outcome and detail stay those of the host arms. A nil rec (shadow
 // off, dry run, or nothing to record) writes nothing.
-func (a *App) finishPlacementShadow(rec *shadowRecord, snap wasteSnap, snapErr string, p *selPlan, usable []selHost, livePass int) {
+func (a *App) finishPlacementShadow(rec *shadowRecord, snap wasteSnap, snapErr string, st *hostAdmission, p *selPlan, usable []selHost, livePass int) {
 	if rec == nil {
 		return
 	}
 	defer func() { _ = recover() }()
-	rec.sh.WasteFirst = a.runWasteFirst(snap, snapErr, p, usable, livePass)
+	rec.sh.WasteFirst = a.runWasteFirst(snap, snapErr, p, usable, st, livePass)
 	a.fleetEventWriter().EmitEvent(fleetevent.Event{Kind: "placement_shadow", Job: rec.job, RequestID: a.RequestID, Outcome: rec.outcome, Reason: rec.reason, Detail: rec.detail, Shadow: rec.sh})
 }

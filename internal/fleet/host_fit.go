@@ -324,7 +324,7 @@ func (sp *selPresence) admitHostFirst(ctx context.Context, s Spawn, p *selPlan, 
 			}
 		}
 	}
-	st := &hostAdmission{refusedOn: map[*selCand]string{}, exhausted: map[string]hostTry{}, down: map[string]string{}}
+	st := &hostAdmission{refusedOn: map[*selCand]string{}, exhausted: map[string]hostTry{}, down: map[string]string{}, failedOn: map[*selCand]map[string]bool{}}
 	sp.admitPass(ctx, s, p, pending, ranked, st, 1, func(i int) []*selCand { return bands[i][0] })
 	livePass := 1
 	if p.chosen == nil && creditBand {
@@ -342,7 +342,7 @@ func (sp *selPresence) admitHostFirst(ctx context.Context, s Spawn, p *selPlan, 
 		}
 	}
 	snap, snapErr := wb.done()
-	sp.a.finishPlacementShadow(shadow, snap, snapErr, p, usable, livePass)
+	sp.a.finishPlacementShadow(shadow, snap, snapErr, st, p, usable, livePass)
 	for _, h := range sp.hosts {
 		if h.fit != "" {
 			p.hosts = append(p.hosts, hostTrace{host: h, missing: missingCaps(h.cfg, p.req.tags), outcome: h.fit})
@@ -361,6 +361,17 @@ type hostAdmission struct {
 	refusedOn map[*selCand]string
 	exhausted map[string]hostTry
 	down      map[string]string
+	// failedOn holds each host a candidate's gate failed on (hostGateFailure).
+	// Unlike refusedOn, the walk does not skip the candidate on other hosts for
+	// it; the waste_first arm reads it per host.
+	failedOn map[*selCand]map[string]bool
+}
+
+func (st *hostAdmission) markFailed(c *selCand, host string) {
+	if st.failedOn[c] == nil {
+		st.failedOn[c] = map[string]bool{}
+	}
+	st.failedOn[c][host] = true
 }
 
 // admitPass walks the ranked hosts once with the candidates cands(i) gives
@@ -441,6 +452,9 @@ func (sp *selPresence) admitPass(ctx context.Context, s Spawn, p *selPlan, pendi
 			t.tries = append(t.tries, hostTry{cand: c, result: "refused", reason: c.reason, code: c.code})
 			if c.code == outcomeQuotaExhausted && c.reason != "projected_exhaust" {
 				st.exhausted[c.accountKey] = hostTry{result: "skipped", reason: "refused_on:" + h.name + ":" + c.reason, code: c.code}
+			}
+			if hostGateFailure(err) {
+				st.markFailed(c, h.name)
 			}
 			switch {
 			case !hostGateFailure(err):

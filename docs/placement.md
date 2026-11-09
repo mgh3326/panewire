@@ -524,12 +524,15 @@ spent instead, next to the live choice. Live placement is unchanged.
 - **Usable hosts.** The ranked hosts the walk could still use. A host the walk
   found unreachable, or that reported no eligible host, is left out.
 - **Quota state.** Read from the readings the live run already holds; the arm
-  makes no call. `admitted`: the live gate passed it. `admissible`: its
-  readings passed and the live run never gated it. `refused`: the gate, or a
-  cached exhaustion, refused it. `unknown`: no reading reached it. The first
-  `admitted` or `admissible` candidate on a usable host is the choice. An
-  `unknown` account is never chosen and never assumed admitted; it is listed in
-  `unknown`.
+  makes no call. The state is read per usable host. `admitted`: the live gate
+  passed it on that host. `admissible`: its readings passed and the live run
+  did not refuse it there. `refused`: it was refused before admission; or the
+  gate refused it on some host (the live walk then skips it on every host); or
+  an account-wide exhaustion is cached for its account; or the gate failed on
+  that host (a host-scoped failure holds on that host only). `unknown`: no
+  reading reached it. The first `admitted` or `admissible` (candidate, host)
+  pair in pool-first order is the choice. An `unknown` account is never chosen
+  and never assumed admitted; it is listed in `unknown`.
 - **Failure.** A panic in the arm, or a failed snapshot, is `shadow_error` with
   the reason; the spawn goes on on the live choice.
 

@@ -3,7 +3,6 @@ package fleet
 import (
 	"fmt"
 	"slices"
-	"strings"
 
 	"github.com/mgh3326/panewire/internal/fleetevent"
 )
@@ -15,11 +14,14 @@ import (
 // reached. This arm asks which account a pool-first order would have spent
 // instead: the pass-1 candidates, sorted by the live comparator (sortSelCands),
 // over the hosts the walk could still use. It makes no call and reads no new
-// reading. Each candidate's state is the one the live run already holds:
+// reading. Each candidate's state is read per host, from what the live run
+// already holds:
 //
-//	admitted    the live gate passed it on some host
-//	admissible  its readings passed and the live run never gated it
-//	refused     the live gate, or a cached exhaustion, refused it
+//	admitted    the live gate passed it on that host
+//	admissible  its readings passed and the live run did not refuse it there
+//	refused     refused before admission, refused by the gate on some host (the
+//	            live walk skips it everywhere after that), refused by a cached
+//	            account-wide exhaustion, or failed by the gate on that host
 //	unknown     no reading reached it; never chosen, never assumed admitted
 
 const (
@@ -30,7 +32,6 @@ const (
 	wasteStateAdmissible  = "admissible"
 	wasteStateRefused     = "refused"
 	wasteStateUnknown     = "unknown"
-	wasteRefusedPrefix    = "dropped:"
 	wasteLiveOutcomeChose = "chosen"
 )
 
@@ -47,7 +48,7 @@ type wasteSnap struct {
 // its copy keeps that host's behindCredit. The walk re-derives the flag per host
 // (T2997), so a value read once for the whole selection is not the one a pass-1
 // band used. A candidate the readings dropped before admission joins too;
-// wasteState reads it as refused or unknown, so it is never chosen.
+// wasteStateOn reads it as refused or unknown, so it is never chosen.
 type wasteSnapBuilder struct {
 	snap wasteSnap
 	seen map[*selCand]bool
@@ -88,16 +89,26 @@ func quotaUnobserved(c *selCand) bool {
 	return c.code == outcomeQuotaUnknown || slices.ContainsFunc(c.judgments, func(j quotaJudgment) bool { return j.Outcome == "unknown" })
 }
 
-// wasteState is the candidate's quota state as the live run observed it. It is
-// read after admission, so a gated candidate carries its outcome. A candidate
-// with a drop reason is refused or unknown, never admissible.
-func wasteState(c *selCand) string {
+// wasteStateOn is the state of candidate o (copy c) on one usable host, as the
+// live run left it. Only the admitting host is admitted; a gate refusal the walk
+// skips on other hosts (refusedOn) and a cached exhaustion hold everywhere; a
+// gate failure holds on the host it failed on only.
+func wasteStateOn(c, o *selCand, host string, st *hostAdmission) string {
 	switch {
-	case c.outcome == wasteLiveOutcomeChose:
+	case o.outcome == wasteLiveOutcomeChose && o.host == host:
 		return wasteStateAdmitted
-	case quotaUnobserved(c):
+	case quotaUnobserved(o):
 		return wasteStateUnknown
-	case c.reason != "" || strings.HasPrefix(c.outcome, wasteRefusedPrefix):
+	case c.reason != "":
+		return wasteStateRefused
+	}
+	if _, ok := st.refusedOn[o]; ok {
+		return wasteStateRefused
+	}
+	if _, ok := st.exhausted[o.accountKey]; ok {
+		return wasteStateRefused
+	}
+	if st.failedOn[o][host] {
 		return wasteStateRefused
 	}
 	return wasteStateAdmissible
@@ -114,6 +125,27 @@ func wasteHost(c *selCand, usable []selHost) string {
 	return ""
 }
 
+// wasteFind returns the first candidate in the snapshot order that matches and
+// is admitted or admissible on some usable host it is present on, with that
+// host. Hosts are tried in rank order.
+func wasteFind(snap wasteSnap, usable []selHost, st *hostAdmission, match func(o *selCand) bool) (*selCand, string) {
+	for _, c := range snap.order {
+		o := snap.orig[c]
+		if !match(o) {
+			continue
+		}
+		for _, h := range usable {
+			if !slices.ContainsFunc(c.hosts, func(x selHost) bool { return x.name == h.name }) {
+				continue
+			}
+			if s := wasteStateOn(c, o, h.name, st); s == wasteStateAdmitted || s == wasteStateAdmissible {
+				return o, h.name
+			}
+		}
+	}
+	return nil, ""
+}
+
 // wasteAccount names one waste-risk account as the event records it.
 func wasteAccount(c *selCand, host string) *fleetevent.ShadowAccount {
 	return &fleetevent.ShadowAccount{Host: host, Pool: c.row.Pool, AccountKey: c.accountKey, UnusedAtResetPct: c.unused, ResetHours: c.resetHrs}
@@ -125,27 +157,16 @@ func wasteChoice(c *selCand, host string, pass int) *fleetevent.ShadowChoice {
 }
 
 // wasteFirst is the pure arm: the first admitted or admissible candidate in the
-// snapshot order that a usable host holds. It reads p and the snapshot only.
-func wasteFirst(snap wasteSnap, p *selPlan, usable []selHost, livePass int) *fleetevent.WasteFirst {
+// snapshot order that a usable host holds. It reads p, the snapshot and the
+// admission record only.
+func wasteFirst(snap wasteSnap, p *selPlan, usable []selHost, st *hostAdmission, livePass int) *fleetevent.WasteFirst {
 	x := &fleetevent.WasteFirst{Outcome: shadowNoChoice}
 	liveAccount := ""
 	if p.chosen != nil {
 		x.Live = wasteChoice(p.chosen, p.chosen.host, livePass)
 		liveAccount = p.chosen.accountKey
 	}
-	var pick *selCand
-	pickHost := ""
-	for _, c := range snap.order {
-		o := snap.orig[c]
-		host := wasteHost(c, usable)
-		if host == "" {
-			continue
-		}
-		if st := wasteState(o); st == wasteStateAdmitted || st == wasteStateAdmissible {
-			pick, pickHost = o, host
-			break
-		}
-	}
+	pick, pickHost := wasteFind(snap, usable, st, func(*selCand) bool { return true })
 	if pick != nil {
 		x.Choice = wasteChoice(pick, pickHost, 1)
 		x.Outcome = shadowAgree
@@ -156,16 +177,8 @@ func wasteFirst(snap wasteSnap, p *selPlan, usable []selHost, livePass int) *fle
 	if x.Outcome == shadowAccountDiffers {
 		// Name the waste-risk account the live choice left unspent: the first
 		// risk candidate, in this order, that is spendable and not the live one.
-		for _, c := range snap.order {
-			o := snap.orig[c]
-			host := wasteHost(c, usable)
-			if !o.risk || host == "" || o.accountKey == liveAccount {
-				continue
-			}
-			if st := wasteState(o); st == wasteStateAdmitted || st == wasteStateAdmissible {
-				x.LeftUnspent = wasteAccount(o, host)
-				break
-			}
+		if o, host := wasteFind(snap, usable, st, func(o *selCand) bool { return o.risk && o.accountKey != liveAccount }); o != nil {
+			x.LeftUnspent = wasteAccount(o, host)
 		}
 	}
 	seen := map[string]bool{}
@@ -183,7 +196,7 @@ func wasteFirst(snap wasteSnap, p *selPlan, usable []selHost, livePass int) *fle
 
 // runWasteFirst runs the arm under a recover. A snapshot failure or a panic in
 // the arm is recorded as shadow_error with the reason; the spawn goes on.
-func (a *App) runWasteFirst(snap wasteSnap, snapErr string, p *selPlan, usable []selHost, livePass int) (x *fleetevent.WasteFirst) {
+func (a *App) runWasteFirst(snap wasteSnap, snapErr string, p *selPlan, usable []selHost, st *hostAdmission, livePass int) (x *fleetevent.WasteFirst) {
 	defer func() {
 		if r := recover(); r != nil {
 			x = &fleetevent.WasteFirst{Outcome: shadowError, Error: fmt.Sprint("panic: ", r)}
@@ -198,5 +211,5 @@ func (a *App) runWasteFirst(snap wasteSnap, snapErr string, p *selPlan, usable [
 	if a.shadowProbe != nil {
 		a.shadowProbe(shadowArmWasteFirst)
 	}
-	return wasteFirst(snap, p, usable, livePass)
+	return wasteFirst(snap, p, usable, st, livePass)
 }

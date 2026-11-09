@@ -11,6 +11,7 @@ package fleetevent
 
 import (
 	"encoding/json"
+	"math"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -436,6 +437,15 @@ func (p *PlacementShadow) bounded() *PlacementShadow {
 	return out
 }
 
+// finiteOrNil drops a NaN or infinite quota figure: encoding/json cannot write
+// it, and a bad figure must not cost the whole placement_shadow line.
+func finiteOrNil(p *float64) *float64 {
+	if p == nil || math.IsNaN(*p) || math.IsInf(*p, 0) {
+		return nil
+	}
+	return p
+}
+
 // bounded keeps the waste_first arm to its own contract: labels through Code,
 // account keys (fleet ids, which Code would rewrite) through Redact and Bound.
 func (w *WasteFirst) bounded() *WasteFirst {
@@ -458,6 +468,7 @@ func (a *ShadowAccount) bounded() *ShadowAccount {
 	}
 	out := *a
 	out.Host, out.Pool = Code(a.Host), Code(a.Pool)
+	out.UnusedAtResetPct, out.ResetHours = finiteOrNil(a.UnusedAtResetPct), finiteOrNil(a.ResetHours)
 	out.AccountKey = Bound(Redact(a.AccountKey), maxAccountKey)
 	return &out
 }
@@ -468,6 +479,7 @@ func (c *ShadowChoice) bounded() *ShadowChoice {
 	}
 	out := *c
 	out.Host, out.Profile, out.Seat, out.Pool, out.Tier = Code(c.Host), Code(c.Profile), Code(c.Seat), Code(c.Pool), Code(c.Tier)
+	out.UnusedAtResetPct, out.ResetHours = finiteOrNil(c.UnusedAtResetPct), finiteOrNil(c.ResetHours)
 	out.AccountKey = Bound(Redact(c.AccountKey), maxAccountKey)
 	return &out
 }
