@@ -303,6 +303,31 @@ func TestSpawnedSelectionTrimsUnderHKLimit(t *testing.T) {
 	}
 }
 
+func TestSpawnedSelectionKeepsLocalHostForAutoPlacement(t *testing.T) {
+	s := Spawn{Host: "auto", placement: &placementDecision{
+		plan:      &placePlan{candidates: []placeCandidate{{name: "local", eligible: true}}},
+		execution: placementExecution{Host: "local"},
+	}}
+	got := jobSelection(s, jobSelectionSource(s))
+	host := got["host"].(map[string]any)
+	if host["chosen"] != "local" || host["candidates"].([]any)[0].(map[string]any)["outcome"] != "admitted" {
+		t.Fatalf("auto local placement=%v", host)
+	}
+}
+
+func TestSpawnedSelectionBoundsOversizedHostID(t *testing.T) {
+	s := Spawn{Host: strings.Repeat("h", 40*1024)}
+	got := jobSelection(s, jobSelectionSource(s))
+	b, err := json.Marshal(got)
+	if err != nil || len(b) > maxJobSelectionBytes {
+		t.Fatalf("selection size=%d err=%v", len(b), err)
+	}
+	chosen := got["host"].(map[string]any)["chosen"].(string)
+	if !strings.HasPrefix(chosen, "hhhh") || len(chosen) >= 40*1024 {
+		t.Fatalf("oversized host was not safely bounded: %d bytes", len(chosen))
+	}
+}
+
 func TestSpawnedSelectionBadRequestRetriesWithoutSelection(t *testing.T) {
 	a, s, _, _ := cmdFixture(t)
 	h := newFakeHK(t)
