@@ -547,8 +547,8 @@ once per host:
 
 | Machine | Seconds | Conditions |
 |---|---|---|
-| mac-dev | 37.6 | as it was |
-| mac-work | 40.6 | under load (43% memory free, swapping) |
+| mac-dev | 37.6 | idle |
+| mac-work | 40.6 | under load: 18% memory available (node_exporter), 43% free by `memory_pressure`, paging in about 25 MB/s |
 | oci | 87.2 | idle |
 | desktop | 96.0 | nearly idle |
 | rpi | 308.8 | idle |
