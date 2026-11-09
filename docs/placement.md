@@ -424,6 +424,82 @@ threshold left. It is a crash guard on the node-reported `memory_free_pct`
 (macOS `memory_pressure` free percentage, Linux `MemAvailable`), not a load
 signal.
 
+### Shadow comparison
+
+hk 3650. The static `power` is not re-tuned by hand
+(`decision/2026-11-09/placement-measurement-direction` §1, §3). Instead, each
+time the spawn engine has ranked the hosts for a job (spawn, delegate and panel
+selection all rank in `admitHostFirst`), it ranks the same hosts again under two
+alternative rules and writes one fleet event, `kind=placement_shadow`
+([observability](observability.md#fleet-events)). The arms are pure functions of
+the readings the live ranking already had: no extra call, the App's clock, and
+nothing they compute is read by the live path. A dry run records nothing. A
+panic in an arm is caught and recorded as `shadow_error`; the spawn goes on.
+`placement.shadow.enabled = false` turns the event off.
+
+**Two confirmed defects, recorded here and not fixed live.**
+
+- *A, unit mismatch.* A remote host's `load_ratio` is the hub's five-minute
+  CPU-busy fraction; the local host's is load5 divided by cores. Host-first
+  compares both with one `placement.load_threshold`, and the load bucket
+  outranks the score.
+- *B, hub rules dropped.* The hub's hysteresis and all-loaded rules reach the
+  spawn engine only through `HostView.Decided`, which only the `/v1/placement`
+  parser sets. The fleet-state path (the default, also for hub spawns) never
+  sets it, and the hub's `usable` verdict (job cap, not accepting, unknown
+  metrics) is ignored.
+
+**Arms.**
+
+| Arm | What it changes against the live order |
+| --- | --- |
+| `fixed` | Defect A: one load measure for every host, never mixed: the hub's CPU-busy fraction when any candidate has one (`load_measure=cpu_busy`, threshold `shadow.cpu_busy_over`, default `load_threshold`), else load5 per core for every host alike (`load5_per_core`; a host without a reading ranks as unknown). The local `max_load_ratio` guard keeps its own unit. Defect B: a host the hub marks unusable leaves the order; the hub's decision (policy order = configuration order, local first; `shadow.hysteresis`, `shadow.all_loaded_below`; none for a tagged request) is applied when the hub did not already send one. The score is the hub's. |
+| `measured` | `fixed`, plus: one memory signal for admission and rank, the capability map, and each of CPU busy and load per core used once. Memory signal: a macOS node's pressure level (normal, warn, critical) when it sent one, else available memory (Linux `MemAvailable`/`MemTotal`; macOS Prometheus available); with the swap-in rate (node `swap_in_per_s`, else the Linux `pswpin` rate). Critical pressure, or available memory under `shadow.mem_refuse_below_pct`, refuses the host; a host the hub dropped only for its own memory floor is judged again by this signal. The score is rebuilt as `mem * swap * load * jobs * capability - bridged * claim_cost` (the `cpu` term is dropped: CPU busy already decides the bucket), without the hub's hold and burst bonuses; a host with no score signals keeps the hub's score. |
+
+`capability` is `placement.capability.light.<host>` or
+`placement.capability.heavy.<host>`; a host with no entry for the class falls
+back to the hub's `power` (100 when the hub sent none). The map is empty by
+default. The work class comes from the spawn role in one function,
+`workClassOf`: `light` for reviewer, counsel (consult) and design-type seats,
+`heavy` for everything else (worker, tester). It is a recorded guess, to be
+checked by measurement; the role is recorded with it.
+
+**Reading the event.** `live` is the live host order, each host with its bucket
+(0 awake under the threshold, 1 awake without a reading, 2 awake over it, 3
+asleep) and score. Each arm in `arms` has its own `order`, its `first` host and
+an `outcome`:
+
+- `agree`: the same order as live.
+- `order_differs`: the same first host, another order behind it. The placement
+  would not have moved; the fallback order would have.
+- `disagree`: another first host. This is the one that matters: the arm would
+  have started the job elsewhere.
+- `shadow_error`: the arm failed (`shadow_error` holds the reason); the live
+  path was not touched.
+
+The event `outcome` is the worst of the arms. `inputs` has one row per host with
+what the arms read: `cpu_busy`, `load5_per_core` (local host only),
+`load1_per_core`, `mem_available`, `mem_free_pct`, `pressure`, `swap_in_per_s`,
+`jobs`, `power`, `capability` (only when the policy has an entry),
+`signal_age_s` and `memory_source` (`pressure`, `available` or `none`). A
+missing value is a reading the hub did not send: the fleet-state load value
+carries no `pressure`, `memory_free_pct` or node swap rate, only the
+Prometheus signals, so on that path a macOS host reads `available`; the
+`/v1/placement` path carries the node memory fields but no `signals`. Orders and
+inputs are cut at 16 hosts (`truncated`). `arms` is a map: later arms (hk 3651)
+add a key.
+
+One real event (macOS `mac-b` at warn pressure, 60% free, swapping hard; the
+hub scores it 100, so live and `fixed` keep it first and `measured` does not):
+
+```json
+{"ts":"2026-11-09T00:00:00Z","host":"node","tool":"panewire","kind":"placement_shadow","job":"job-a","outcome":"disagree","reason":"heavy","detail":"work_class=heavy role=worker fixed=agree measured=disagree","request_id":"req-1","shadow":{"role":"worker","work_class":"heavy","live":{"first":"mac-b","order":[{"host":"mac-b","bucket":0,"score":100},{"host":"cloud-small","bucket":0,"score":90},{"host":"cloud-tiny","bucket":1,"score":1},{"host":"pi","bucket":1,"score":1}]},"arms":{"fixed":{"outcome":"agree","first":"mac-b","order":[{"host":"mac-b","bucket":0,"score":100},{"host":"cloud-small","bucket":0,"score":90},{"host":"cloud-tiny","bucket":1,"score":1},{"host":"pi","bucket":1,"score":1}]},"measured":{"outcome":"disagree","first":"cloud-small","order":[{"host":"cloud-small","bucket":0,"score":100},{"host":"mac-b","bucket":0,"score":10},{"host":"cloud-tiny","bucket":1,"score":1},{"host":"pi","bucket":1,"score":1}]}},"load_measure":"cpu_busy","inputs":[{"host":"mac-b","cpu_busy":0.2,"load1_per_core":0.1,"mem_available":0.8,"mem_free_pct":60,"pressure":1,"swap_in_per_s":20000,"jobs":0,"power":100,"memory_source":"pressure"},{"host":"cloud-small","cpu_busy":0.1,"load1_per_core":0.1,"mem_available":0.8,"jobs":0,"power":100,"memory_source":"available"},{"host":"cloud-tiny","memory_source":"none"},{"host":"pi","memory_source":"none"}]}}
+```
+
+hk 3649 adds `swap_out_per_s` and `user_idle_s` to the node heartbeat. Until it
+lands the arms read the swap-in rate only; swap-out and user idle are not used
+by any arm (TODO hk 3649).
+
 ### Active jobs
 
 The node heartbeat's active-job list feeds the bridge, `active_jobs`, task

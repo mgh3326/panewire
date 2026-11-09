@@ -157,12 +157,13 @@ present except `request_id`; a panewire `placement` line adds `chosen` and
 | `ts` | RFC 3339 UTC time; Alloy uses it as the entry timestamp |
 | `host` | Short OS hostname of the writer. Alloy ships it as the `os_host` label; the `host` label is the fleet machine id (see below) |
 | `tool` | `panewire`, `panewire` or `mergewake` (label) |
-| `kind` | What happened: `spawn`, `plan`, `placement`, `quota_observation`, `relay`, `spawn_held`, `job_result` (panewire); `node_spawn` (panewire); `reviewer`, `review` (mergewake) (label) |
+| `kind` | What happened: `spawn`, `plan`, `placement`, `placement_shadow`, `quota_observation`, `relay`, `spawn_held`, `job_result` (panewire); `node_spawn` (panewire); `reviewer`, `review` (mergewake) (label) |
 | `job` | Job id, or `<repo>#<pr>` for reviews |
 | `request_id` | Hub spawn request id, on panewire `node_spawn`, `placement` and hub `spawn` `stuck` lines only; omitted when empty. It joins the line to the hub's spawn operation and the `request` tag of its Sentry event |
 | `chosen` | Panewire `placement` lines only: the host placement chose |
 | `candidates` | Panewire `placement` lines only: an array with one object per candidate host: `host`, `score`, the terms `cpu`, `mem`, `io`, `load`, `jobs` (each 0..1), `power`, `bridge` (claims inside the spawn bridge) and `outcome`. A host the hub reported nothing for has only `host` and `outcome`. At most 16 hosts. See panewire `docs/placement.md` |
 | `selection` | Automatic panewire `placement` lines only, including refusals: hosts in admission rank order with `host`, `rank`, `outcome`, and `tried` rungs. Each rung has `profile`, `effort`, `pool`, and `outcome`. Outcomes are `admitted`, `quota_exhausted`, `quota_unknown`, `no_rung`, or `not_tried`. At most 16 hosts and 32 rungs per host. Account identities and gate output are omitted. See panewire `docs/placement.md` |
+| `shadow` | Panewire `placement_shadow` lines only: `role`, `work_class`, `live`, `arms` (name to `outcome`, `first`, `order`, `shadow_error`), `inputs` per host, `load_measure`. At most 16 hosts. See panewire `docs/placement.md` ("Shadow comparison") |
 | `profile` | Panewire `node_spawn` lines of a successful spawn only: the launch profile |
 | `duration_ms` | Panewire `node_spawn` lines of a successful spawn only: milliseconds the node took, as a number |
 | `outcome` | `refused`, `failed`, `skipped`, `missing`, `placed`, `stale`, `unusable`, `ok`, `stuck` (a hub spawn request still pending 30 minutes past its deadline), `delivered`, `dropped:<reason>`, `unconfirmed:<reason>`, `attached`, `conflict` (label). The relay, held-reservation and job-result outcomes are described in panewire `docs/observability.md` |

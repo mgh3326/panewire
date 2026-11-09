@@ -227,6 +227,9 @@ func LoadConfig(path string) (Config, error) {
 			}
 		}
 	}
+	if e := validShadowPolicy(c.Placement); e != nil {
+		return c, e
+	}
 	for _, k := range []string{"wake_after_s", "presence_ttl_s", "fresh_ttl_s"} {
 		for _, m := range []map[string]any{c.Placement, c.Quota} {
 			if v, ok := m[k]; ok {

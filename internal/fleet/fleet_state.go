@@ -79,8 +79,10 @@ type FleetStateMessage struct {
 		SlotFull  bool    `json:"slot_full"`
 		Reason    string  `json:"reason"`
 		Source    string  `json:"source"`
+		// Usable is the hub's own verdict for the host (placementUsable).
+		Usable softBool `json:"usable,omitempty"`
 		PlacementSignals
-		Signals *PlacementSignals `json:"signals,omitempty"`
+		Signals *hubSignals `json:"signals,omitempty"`
 	} `json:"load,omitempty"`
 	Publisher *struct {
 		Connected bool      `json:"connected"`
@@ -249,8 +251,10 @@ func (a *App) hubHosts(ctx context.Context) ([]HostView, string) {
 			continue
 		}
 		hv := HostView{Name: m.Host, Connected: true, Reason: m.Load.Reason, Signals: m.Load.PlacementSignals, Source: m.Load.Source}
+		hv.Extra = HostExtra{Usable: m.Load.Usable.v, MeasuredAt: m.MeasuredAt}
 		if m.Load.Signals != nil {
-			hv.Signals = *m.Load.Signals
+			hv.Signals = m.Load.Signals.PlacementSignals
+			hv.Extra.CPUBusy1m, hv.Extra.SwapInLinux = m.Load.Signals.CPUBusy1m.v, m.Load.Signals.SwapInLinux.true()
 		}
 		score := m.Load.Score
 		hv.Score = &score

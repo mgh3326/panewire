@@ -283,6 +283,13 @@ func capsGap(hosts []selHost, required []string) string {
 // See docs/placement.md for the selection order and trace fields.
 func (sp *selPresence) admitHostFirst(ctx context.Context, s Spawn, p *selPlan, pending []*selCand) {
 	ranked := rankHosts(sp.hosts)
+	role := s.Role
+	if p.req.route.top() {
+		role = p.req.route.role
+	}
+	// Record how the shadow arms would have ordered the same hosts. The live
+	// order above is not touched.
+	sp.a.recordPlacementShadow(s, role, p.req.tags, sp.hosts, ranked, sp.now)
 	// Order each host's present candidates once, on the whole host, so the
 	// credit-pacing rule sees every candidate the host holds. The passes then
 	// take their share in that order.
