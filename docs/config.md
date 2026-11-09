@@ -635,7 +635,8 @@ names the urgency source. `candidates[]` lists other model candidates by `seat`,
 model or host override. `host.chosen` and `host.source` identify the machine and
 placement path, with `host.candidates[]` giving ranked machines and their outcome
 or exclusion reason when a ranking exists. `host.chosen` is the execution machine,
-including `local` when an automatic request falls back to local execution.
+including `local` when an automatic request falls back to local execution; an
+invalid host id is stored as `unknown` rather than being cut into another id.
 Candidate lists are trimmed in rank order to keep `selection` below hk's 32 KiB
 limit.
 `panewire done` writes `{state:"completed", report_doc}` plus `result` when
