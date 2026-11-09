@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io/fs"
+	"net/http"
 	"os"
 	"path/filepath"
 	"slices"
@@ -55,8 +56,13 @@ func doneJob(t *testing.T, a *App) {
 	}
 }
 
+// reapJob reaps job j. hk lists no open PR for its task, so a completed
+// worker with a worktree is not kept for one (hk 3734).
 func reapJob(t *testing.T, a *App) {
 	t.Helper()
+	useFakeHK(t).Handle(func(r hkRequest) (int, string, bool) {
+		return http.StatusOK, `{"changes":[]}`, r.Route() == "GET /v1/changes"
+	})
 	a.Now = func() time.Time { return time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC) }
 	if err := a.hygiene(t.Context(), "reap", []string{"--job", "j", "--grace", "0s", "--apply"}); err != nil {
 		t.Fatal(err)

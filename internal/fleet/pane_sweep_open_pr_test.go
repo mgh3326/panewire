@@ -207,27 +207,162 @@ func TestPaneSweepKeepsAPaneWhenThePRLookupFails(t *testing.T) {
 	}
 }
 
-// (e) A job whose own record ended is swept even with an open PR: its result
-// is already in hk, so keeping it gains nothing.
-func TestPaneSweepClosesATerminalJobEvenWithAnOpenPR(t *testing.T) {
-	g := newSweepGitFake(t)
-	f := newPaneSweepFixture(t)
-	f.withGit(g)
-	cwd := g.worktree(t, "j")
-	pane := f.sweptJob("j", "42", cwd)
-	f.tasks["42"], f.category["42"] = "deployed", "completed"
-	g.head = paneSweepPRHead
-	f.prChanges["42"] = []PRChange{{Number: 306, State: "open", Head: paneSweepPRHead}}
-	putEvent(t, f.a, "j", "job.completed", map[string]any{})
-	f.at(0)
-	f.at(11)
-	if !slices.Equal(f.closed(), []string{pane}) {
-		t.Fatalf("closed %v, want [%s]", f.closed(), pane)
+// (e) A worker whose own job.completed (READY) ended it stays its PR's author
+// (the wake method): while its worktree is on an open PR its pane is kept,
+// whether the task is still in review or has ended (hk 3734). The hk 3383
+// expectation, that such a job is swept whatever its PRs say, is replaced.
+func TestPaneSweepKeepsACompletedAuthorWithAnOpenPR(t *testing.T) {
+	for _, tc := range []struct{ state, category string }{{"reviewing", "started"}, {"deployed", "completed"}} {
+		t.Run(tc.state, func(t *testing.T) {
+			g := newSweepGitFake(t)
+			f := newPaneSweepFixture(t)
+			f.withGit(g)
+			cwd := g.worktree(t, "j")
+			f.sweptJob("j", "42", cwd)
+			f.tasks["42"], f.category["42"] = tc.state, tc.category
+			g.head = paneSweepPRHead
+			f.prChanges["42"] = []PRChange{{Number: 306, State: "open", Head: paneSweepPRHead}}
+			putEvent(t, f.a, "j", "job.completed", map[string]any{})
+			f.at(0)
+			f.at(11)
+			if len(f.closed()) != 0 || f.reaped("j") != nil {
+				t.Fatalf("a completed author's pane was closed while its PR is open (closed %v)", f.closed())
+			}
+			if !f.infoHas("task pane kept", "job=j", "task=42", "task_state="+tc.state, "reason=open_pr", "pr=306") {
+				t.Fatalf("info lines = %q", f.info)
+			}
+		})
 	}
-	if payload := f.reaped("j"); payload["reason"] != "task_deployed" {
-		t.Fatalf("job.reaped payload = %v", payload)
+}
+
+// A completed author whose PR state cannot be read is kept: hk's change list
+// fails, or the task has an open PR and origin cannot say whether it is the
+// worktree's.
+func TestPaneSweepKeepsACompletedAuthorWhenPRStateIsUnknown(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		break_ func(f *paneSweepFixture, g *sweepGitFake)
+	}{
+		{"change list unreadable", func(f *paneSweepFixture, _ *sweepGitFake) { f.prErr = errors.New("hk down") }},
+		{"origin unreadable", func(f *paneSweepFixture, g *sweepGitFake) {
+			g.head, g.lsRemoteErr = paneSweepTestHead, true
+			f.prChanges["42"] = []PRChange{{Number: 306, State: "open", Head: paneSweepPRHead}}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			g := newSweepGitFake(t)
+			f := newPaneSweepFixture(t)
+			f.withGit(g)
+			cwd := g.worktree(t, "j")
+			f.sweptJob("j", "42", cwd)
+			f.tasks["42"], f.category["42"] = "reviewing", "started"
+			tc.break_(f, g)
+			putEvent(t, f.a, "j", "job.completed", map[string]any{})
+			f.at(0)
+			f.at(11)
+			if len(f.closed()) != 0 || f.reaped("j") != nil {
+				t.Fatalf("a completed author's pane was closed although its PR state is unknown")
+			}
+			if !f.infoHas("task pane kept", "job=j", "reason=pr_state_unknown") {
+				t.Fatalf("info lines = %q", f.info)
+			}
+		})
 	}
-	if f.prRead != 0 {
-		t.Fatalf("the PR lookup ran %d times for a job whose own record ended", f.prRead)
+}
+
+// A completed author with no open PR left (merged or closed) is swept as
+// before, by its own record.
+func TestPaneSweepClosesACompletedAuthorWithNoOpenPR(t *testing.T) {
+	for _, state := range []string{"merged", "closed"} {
+		t.Run(state, func(t *testing.T) {
+			g := newSweepGitFake(t)
+			f := newPaneSweepFixture(t)
+			f.withGit(g)
+			cwd := g.worktree(t, "j")
+			pane := f.sweptJob("j", "42", cwd)
+			f.tasks["42"], f.category["42"] = "reviewing", "started"
+			g.head = paneSweepPRHead
+			f.prChanges["42"] = []PRChange{{Number: 306, State: state, Head: paneSweepPRHead}}
+			putEvent(t, f.a, "j", "job.completed", map[string]any{})
+			f.at(0)
+			f.at(11)
+			if !slices.Equal(f.closed(), []string{pane}) {
+				t.Fatalf("closed %v, want [%s]", f.closed(), pane)
+			}
+			if payload := f.reaped("j"); payload["reason"] != "job_completed" {
+				t.Fatalf("job.reaped payload = %v", payload)
+			}
+		})
+	}
+}
+
+// A job its owner closed (panewire job close: abandoned, superseded, or
+// released as completed) is swept even with an open PR, without a PR read:
+// hk 3383's rule still holds for a job that was given up or released.
+func TestPaneSweepClosesAGivenUpJobEvenWithAnOpenPR(t *testing.T) {
+	for _, outcome := range []string{"abandoned", "superseded", "completed"} {
+		t.Run(outcome, func(t *testing.T) {
+			g := newSweepGitFake(t)
+			f := newPaneSweepFixture(t)
+			f.withGit(g)
+			cwd := g.worktree(t, "j")
+			pane := f.sweptJob("j", "42", cwd)
+			f.tasks["42"], f.category["42"] = "reviewing", "started"
+			g.head = paneSweepPRHead
+			f.prChanges["42"] = []PRChange{{Number: 306, State: "open", Head: paneSweepPRHead}}
+			f.closeJob("j", outcome)
+			f.at(0)
+			f.at(11)
+			if !slices.Equal(f.closed(), []string{pane}) {
+				t.Fatalf("closed %v, want [%s]", f.closed(), pane)
+			}
+			if payload := f.reaped("j"); payload["reason"] != "job_"+outcome {
+				t.Fatalf("job.reaped payload = %v", payload)
+			}
+			if f.prRead != 0 {
+				t.Fatalf("the PR lookup ran %d times for a job its owner closed", f.prRead)
+			}
+		})
+	}
+}
+
+// A reviewer (role reviewer, or a mergewake mwr-* label) or a tester never
+// authors the PR it looked at: once its own record completed it is swept even
+// though its detached worktree sits at the open PR's head.
+func TestPaneSweepClosesACompletedReviewerAtAnOpenPRHead(t *testing.T) {
+	for _, tc := range []struct {
+		name, id, role string
+		extra          map[string]any
+	}{
+		{"reviewer role", "rv", "worker", map[string]any{"role": "reviewer"}},
+		{"mwr label", "mw", "worker", map[string]any{"label": "mwr-306"}},
+		{"tester", "ts", "tester", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			g := newSweepGitFake(t)
+			f := newPaneSweepFixture(t)
+			f.withGit(g)
+			cwd := g.worktree(t, tc.id)
+			extra := map[string]any{"cwd": cwd}
+			for key, value := range tc.extra {
+				extra[key] = value
+			}
+			pane := f.job(tc.id, tc.role, "42", extra)
+			if label, ok := extra["label"].(string); ok {
+				f.names[pane] = label
+			}
+			f.tasks["42"], f.category["42"] = "reviewing", "started"
+			g.detached, g.head = true, paneSweepPRHead
+			f.prChanges["42"] = []PRChange{{Number: 306, State: "open", Head: paneSweepPRHead}}
+			putEvent(t, f.a, tc.id, "job.completed", map[string]any{})
+			f.at(0)
+			f.at(11)
+			if !slices.Equal(f.closed(), []string{pane}) {
+				t.Fatalf("closed %v, want [%s]; info %q", f.closed(), pane, f.info)
+			}
+			if payload := f.reaped(tc.id); payload["reason"] != "job_completed" {
+				t.Fatalf("job.reaped payload = %v", payload)
+			}
+		})
 	}
 }
