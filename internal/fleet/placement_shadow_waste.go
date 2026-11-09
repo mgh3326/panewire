@@ -34,43 +34,51 @@ const (
 	wasteLiveOutcomeChose = "chosen"
 )
 
-// wasteSnap is the bound candidates as they stood before admission, in the pass-1
-// order. The live walk rewrites behindCredit per host, so the order is taken
-// first. Its entries are copies, so the walk's later writes never reach the
-// order; orig maps each copy back to the candidate the walk judged.
+// wasteSnap is the candidates the arm orders, as copies in the pass-1 order.
+// The copies keep the live walk's later writes (behindCredit, reason, outcome)
+// away from the order; orig maps each copy back to the candidate the walk judged.
 type wasteSnap struct {
 	order []*selCand
 	orig  map[*selCand]*selCand
 }
 
-// takeWasteSnap copies every candidate bound to an account, pass-1 band only,
-// and sorts the copies with the live comparator. Candidates the readings already
-// dropped are kept: wasteState reads them as refused or unknown, so the order
-// needs no separate rule for them. A candidate in the credit band (pass 2) is
-// left out, as the live walk leaves it out of pass 1.
-func takeWasteSnap(cands []*selCand) wasteSnap {
-	snap := wasteSnap{orig: map[*selCand]*selCand{}}
-	for _, c := range cands {
-		if c.accountKey == "" || c.behindCredit || c.creditPool && !c.risk {
-			continue
-		}
-		cp := *c
-		snap.order = append(snap.order, &cp)
-		snap.orig[&cp] = c
-	}
-	sortSelCands(snap.order)
-	return snap
+// wasteSnapBuilder collects the candidates while admission is about to run. A
+// pass-1 candidate joins at the first host whose walk ranks it in pass 1, and
+// its copy keeps that host's behindCredit. The walk re-derives the flag per host
+// (T2997), so a value read once for the whole selection is not the one a pass-1
+// band used. A candidate the readings dropped before admission joins too;
+// wasteState reads it as refused or unknown, so it is never chosen.
+type wasteSnapBuilder struct {
+	snap wasteSnap
+	seen map[*selCand]bool
 }
 
-// wasteSnapOf takes the snapshot under a recover. A failure is recorded as the
+func newWasteSnapBuilder() *wasteSnapBuilder {
+	return &wasteSnapBuilder{snap: wasteSnap{orig: map[*selCand]*selCand{}}, seen: map[*selCand]bool{}}
+}
+
+// add copies c into the order once. Call it right after the walk of a host has
+// ordered that host's present candidates, so the copy takes that host's flag.
+func (b *wasteSnapBuilder) add(c *selCand) {
+	if c.accountKey == "" || b.seen[c] {
+		return
+	}
+	b.seen[c] = true
+	cp := *c
+	b.snap.order = append(b.snap.order, &cp)
+	b.snap.orig[&cp] = c
+}
+
+// done sorts the copies with the live comparator. A failure is recorded as the
 // arm's shadow_error; the live walk goes on.
-func wasteSnapOf(cands []*selCand) (snap wasteSnap, failure string) {
+func (b *wasteSnapBuilder) done() (snap wasteSnap, failure string) {
 	defer func() {
 		if r := recover(); r != nil {
 			snap, failure = wasteSnap{}, fmt.Sprint("panic: ", r)
 		}
 	}()
-	return takeWasteSnap(cands), ""
+	sortSelCands(b.snap.order)
+	return b.snap, ""
 }
 
 // quotaUnobserved reports that no reading reached the candidate: its rung could
@@ -183,6 +191,9 @@ func (a *App) runWasteFirst(snap wasteSnap, snapErr string, p *selPlan, usable [
 	}()
 	if snapErr != "" {
 		return &fleetevent.WasteFirst{Outcome: shadowError, Error: snapErr}
+	}
+	if a.shadowSnapProbe != nil {
+		a.shadowSnapProbe(snap.order)
 	}
 	if a.shadowProbe != nil {
 		a.shadowProbe(shadowArmWasteFirst)

@@ -514,7 +514,9 @@ The `waste_first` object records which account a pool-first order would have
 spent instead, next to the live choice. Live placement is unchanged.
 
 - **Candidates.** The pass-1 candidates of the job: every profile, rung and
-  account the live run bound to a host. They are sorted by the live comparator
+  account the live run bound to a host. A candidate joins at the first usable
+  host whose walk ranks it in pass 1, judged with that host's own credit-pacing
+  flag (T2997), not the selection-wide one. They are sorted by the live comparator
   (`sortSelCands`: waste-risk pools first, then tier, grade, urgency and the
   rest), the same comparison the live path uses. **Pass 2 is not modelled.**
   Pass 2 is the credit band the live walk tries only when pass 1 chose nothing.

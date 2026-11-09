@@ -290,7 +290,16 @@ func (sp *selPresence) admitHostFirst(ctx context.Context, s Spawn, p *selPlan, 
 	// Record how the shadow arms would have ordered the same hosts. The live
 	// order above is not touched. The event is written after the passes below,
 	// once the waste_first arm can read the quota states they produce.
-	shadow := sp.a.recordPlacementShadow(s, role, p.req.tags, sp.hosts, ranked, sp.now, p.cands)
+	shadow := sp.a.recordPlacementShadow(s, role, p.req.tags, sp.hosts, ranked, sp.now)
+	// The waste_first order is collected as the walk below judges each host
+	// (wasteSnapBuilder). Candidates the readings dropped before admission go in
+	// first: the arm reads them as refused or unknown.
+	wb := newWasteSnapBuilder()
+	for _, c := range p.cands {
+		if !slices.Contains(pending, c) {
+			wb.add(c)
+		}
+	}
 	// Order each host's present candidates once, on the whole host, so the
 	// credit-pacing rule sees every candidate the host holds. The passes then
 	// take their share in that order.
@@ -310,6 +319,9 @@ func (sp *selPresence) admitHostFirst(ctx context.Context, s Spawn, p *selPlan, 
 				band, creditBand = 1, true
 			}
 			bands[i][band] = append(bands[i][band], c)
+			if band == 0 {
+				wb.add(c)
+			}
 		}
 	}
 	st := &hostAdmission{refusedOn: map[*selCand]string{}, exhausted: map[string]hostTry{}, down: map[string]string{}}
@@ -329,7 +341,8 @@ func (sp *selPresence) admitHostFirst(ctx context.Context, s Spawn, p *selPlan, 
 			usable = append(usable, h)
 		}
 	}
-	sp.a.finishPlacementShadow(shadow, p, usable, livePass)
+	snap, snapErr := wb.done()
+	sp.a.finishPlacementShadow(shadow, snap, snapErr, p, usable, livePass)
 	for _, h := range sp.hosts {
 		if h.fit != "" {
 			p.hosts = append(p.hosts, hostTrace{host: h, missing: missingCaps(h.cfg, p.req.tags), outcome: h.fit})

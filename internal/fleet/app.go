@@ -74,6 +74,9 @@ type App struct {
 	// shadowProbe runs at the start of each placement shadow arm; tests only
 	// (placement_shadow.go).
 	shadowProbe func(arm string)
+	// shadowSnapProbe receives the waste_first arm's pass-1 order before the arm
+	// reads it; tests only (placement_shadow_waste.go).
+	shadowSnapProbe func(order []*selCand)
 	// SentryWarning sends one warning-level Sentry event. Tests substitute it;
 	// nil uses SENTRY_DSN_PANEWIRE (sentry_warning.go).
 	SentryWarning func(fingerprint []string, message string, tags map[string]string)
