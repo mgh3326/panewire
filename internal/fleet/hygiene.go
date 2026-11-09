@@ -193,8 +193,9 @@ func (a *App) hygiene(ctx context.Context, kind string, args []string) error {
 // reapPRKeep is the task pane sweep's open-PR keep (paneSweepPRKeep) for a
 // completed author that reap would close: the reason its pane stays, or ""
 // when no open PR holds it. Its task is the sweep's: the claim's, else the
-// parent job's. A task that could not be established keeps the pane; a job
-// confirmed to have none has no PR to wait on.
+// parent job's. A task that could not be established (hk unreadable, or a
+// named parent that does not resolve to a task yet) keeps the pane; a job that
+// names no parent anywhere has no PR to wait on.
 func (a *App) reapPRKeep(ctx context.Context, j Job, parents map[string]paneSweepInherited, prs map[string]paneSweepPRRead) string {
 	s := &TaskPaneSweeper{PR: a.PRs}
 	task := j.Task

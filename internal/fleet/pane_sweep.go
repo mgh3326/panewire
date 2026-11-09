@@ -496,7 +496,8 @@ func (s *TaskPaneSweeper) readPRs(ctx context.Context, task string) paneSweepPRR
 // task-derived end or a completed author), and the open PR's number when one
 // is found. "" means no open PR: the close goes ahead. task is the job's task,
 // "" when it has none; taskErr says the task could not be established
-// (inheritedTask). A task that could not be established, a worktree that
+// (inheritedTask: hk could not be read, or a named parent did not resolve to a
+// task). A task that could not be established, a worktree that
 // cannot be read, or an unreadable change list keeps the pane, so a failure
 // never closes a pane that may still own an open PR. The worktree is read
 // before the change list: an empty or merged-only list says nothing about a
@@ -511,7 +512,8 @@ func (s *TaskPaneSweeper) paneSweepPRKeep(ctx context.Context, a *App, j Job, ta
 		return "pr_state_unknown", 0
 	}
 	if task == "" {
-		// No task: hk links PRs to a task, so there is no change list to wait on.
+		// No task, and no parent named: hk links PRs to a task, so there is no
+		// change list to wait on.
 		return "", 0
 	}
 	heads, ok := paneSweepHeads(ctx, a, cwd)
@@ -590,19 +592,26 @@ type paneSweepInherited struct {
 	err  error
 }
 
+// errParentTaskUnresolved says the job names a parent whose task no answer
+// names yet: neither the parent's record on this node nor its hk record names
+// one, or hk holds no record of the parent. An hk record can lag its job
+// (resolveParent waits on such a lag), so this is not a confirmed absence: the
+// next pass reads the parent again.
+var errParentTaskUnresolved = errors.New("parent job's task not resolved")
+
 // inheritedTask resolves the task of a job whose claim names none: the task of
 // the job it was spawned under (--parent-job), through that job's record on
 // this node, else its hk job record's task_id. The parent id is the claim's
 // task_inherited_from, else the job's own hk record's parent_job.
 //
-// "" with a nil error is a confirmed absence, decided only on answers: no
-// parent is named (the claim names none, and hk's record of the job names
-// none or hk holds no record of it), or the parent's task is named nowhere
-// (its record on this node names none, and its hk record names none or hk
-// holds no record of it). An error means the task could not be established:
-// hk, which the answer needed, could not be built or read. A live job keeps
-// its pane either way (no_task); a completed author is kept only on an error
-// (paneSweepPRKeep).
+// "" with a nil error is a confirmed absence, and only one answer gives it: no
+// parent is named anywhere (the claim names none, and hk's record of the job
+// names none or hk holds no record of it). A named parent must resolve to a
+// task; one that does not (hk holds no record of it, its records name no task,
+// or the name is not a job id) is errParentTaskUnresolved. Any other error
+// means hk, which the answer needed, could not be built or read. A live job
+// keeps its pane either way (no_task); a completed author is kept only on an
+// error (paneSweepPRKeep).
 func (s *TaskPaneSweeper) inheritedTask(ctx context.Context, a *App, j Job, cache map[string]paneSweepInherited) (string, error) {
 	store, storeErr := a.jobStore()
 	parent := j.Inherited
@@ -618,8 +627,11 @@ func (s *TaskPaneSweeper) inheritedTask(ctx context.Context, a *App, j Job, cach
 			return "", err
 		}
 	}
-	if parent == "" || parent == j.ID || !validID(parent) {
+	if parent == "" {
 		return "", nil
+	}
+	if parent == j.ID || !validID(parent) {
+		return "", errParentTaskUnresolved
 	}
 	if read, ok := cache[parent]; ok {
 		return read.task, read.err
@@ -635,6 +647,9 @@ func (s *TaskPaneSweeper) inheritedTask(ctx context.Context, a *App, j Job, cach
 			read.task = scalar(rec["task_id"])
 		} else if !errors.Is(err, errJobNotFound) {
 			read.err = err
+		}
+		if read.task == "" && read.err == nil {
+			read.err = errParentTaskUnresolved
 		}
 	}
 	cache[parent] = read

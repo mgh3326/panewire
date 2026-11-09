@@ -51,13 +51,17 @@ swept whatever its PRs say. So is a completed reviewer, tester or counsel,
 whose worktree may sit at the PR head it looked at.
 
 A completed fix author's task is its parent's (see above). Its pane closes
-without a PR read only when hk confirms it has no task, since hk links PRs to
-a task: no parent is named (the claim names none, and hk's record of the job
-names none or hk holds no record of it), or the parent's task is named
-nowhere (the parent's record on this node names none, and its hk record names
-none or hk holds no record of it). When hk cannot be read for the job or its
-parent and the node does not hold the parent's task, the task is unknown and
-the pane is kept (`reason=pr_state_unknown`).
+without a PR read only when it names no parent anywhere, since hk links PRs to
+a task: the claim names none, and hk's record of the job names none or hk
+holds no record of it. A parent that is named must resolve to a task. When it
+does not (the parent's record on this node names no task, and hk holds no
+record of the parent or its record names no task), or when hk cannot be read
+for the job or its parent, the task is unknown and the pane is kept
+(`reason=pr_state_unknown`). hk can answer `not_found` for a record that has
+not propagated yet, as `--parent-job` resolution allows for, so the next pass
+reads the parent again and judges the job on its task once it resolves. A
+parent whose records never name a task keeps the pane until the job's owner
+closes it (`panewire job close`).
 
 The sweep first reads the worktree: its `HEAD`, and the tip of its branch on
 origin (hk's change carries the PR head, not its branch). The tip is read from
