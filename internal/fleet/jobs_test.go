@@ -315,16 +315,31 @@ func TestSpawnedSelectionKeepsLocalHostForAutoPlacement(t *testing.T) {
 	}
 }
 
-func TestSpawnedSelectionBoundsOversizedHostID(t *testing.T) {
-	s := Spawn{Host: strings.Repeat("h", 40*1024)}
+func TestSpawnedSelectionKeepsInvalidWinnerAdmittedAndFirst(t *testing.T) {
+	s := Spawn{Host: "auto", placement: &placementDecision{
+		plan:      &placePlan{candidates: []placeCandidate{{name: "Mac Studio", eligible: true}, {name: "remote-2", eligible: true}}},
+		execution: placementExecution{Host: "Mac Studio"},
+	}}
+	got := jobSelection(s, jobSelectionSource(s))
+	host := got["host"].(map[string]any)
+	candidates := host["candidates"].([]any)
+	first := candidates[0].(map[string]any)
+	if host["chosen"] != unknownSelectionHostID || first["machine"] != unknownSelectionHostID || first["outcome"] != "admitted" {
+		t.Fatalf("invalid winning host=%v", host)
+	}
+}
+
+func TestSpawnedSelectionReplacesOversizedHostID(t *testing.T) {
+	oversizedHost := strings.Repeat("h", 40*1024)
+	s := Spawn{Host: oversizedHost}
 	got := jobSelection(s, jobSelectionSource(s))
 	b, err := json.Marshal(got)
 	if err != nil || len(b) > maxJobSelectionBytes {
 		t.Fatalf("selection size=%d err=%v", len(b), err)
 	}
 	chosen := got["host"].(map[string]any)["chosen"].(string)
-	if !strings.HasPrefix(chosen, "hhhh") || len(chosen) >= 40*1024 {
-		t.Fatalf("oversized host was not safely bounded: %d bytes", len(chosen))
+	if chosen != unknownSelectionHostID || strings.Contains(string(b), oversizedHost) {
+		t.Fatalf("oversized host was not replaced safely: chosen=%q size=%d", chosen, len(b))
 	}
 }
 
