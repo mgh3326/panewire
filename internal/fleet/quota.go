@@ -292,14 +292,22 @@ func clipGateReason(reason string, max int) string {
 	if len(reason) <= max {
 		return reason
 	}
-	cut := textbound.PrefixWithin(reason, max)
-	if i := strings.LastIndexByte(cut, ' '); i > 0 {
-		cut = cut[:i]
+	const ellipsis = "…"
+	if max <= len(ellipsis) {
+		return textbound.PrefixWithin(reason, max)
 	}
-	if cut == "" {
-		cut = textbound.PrefixWithin(reason, max)
+	contentLimit := max - len(ellipsis)
+	headLimit := contentLimit / 2
+	tailLimit := contentLimit - headLimit
+	head := textbound.PrefixWithin(reason, headLimit)
+	if i := strings.LastIndexByte(head, ' '); i > 0 {
+		head = head[:i]
 	}
-	return cut + "…"
+	tail := textbound.SuffixWithin(reason, tailLimit)
+	if i := strings.IndexByte(tail, ' '); i >= 0 && i+1 < len(tail) {
+		tail = tail[i+1:]
+	}
+	return head + ellipsis + tail
 }
 
 // gateRefusal carries a gate outcome independently of diagnostic prose;
