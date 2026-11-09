@@ -98,6 +98,10 @@ type fleetStateLog struct {
 	fetchedAt time.Time
 	hosts     *StateUse
 	quota     map[string]StateUse
+	// slotFull names the hosts hubHosts left out because the hub reported
+	// them slot-full. Only the placement shadow reads it (placement_shadow.go);
+	// the live host list is unchanged.
+	slotFull map[string]bool
 }
 
 // hubStateHTTP is the production reader: the operator credential from [hub],
@@ -234,6 +238,8 @@ func (a *App) hubHosts(ctx context.Context) ([]HostView, string) {
 		return nil, why
 	}
 	var out []HostView
+	slotFull := map[string]bool{}
+	a.fleetLog.slotFull = nil
 	for _, m := range snap.States {
 		if m.Kind != "load" || m.Load == nil {
 			continue
@@ -248,6 +254,7 @@ func (a *App) hubHosts(ctx context.Context) ([]HostView, string) {
 		}
 		if m.Load.SlotFull {
 			// /v1/placement drops a slot-full machine from its candidates.
+			slotFull[m.Host] = true
 			continue
 		}
 		hv := HostView{Name: m.Host, Connected: true, Reason: m.Load.Reason, Signals: m.Load.PlacementSignals, Source: m.Load.Source}
@@ -268,6 +275,7 @@ func (a *App) hubHosts(ctx context.Context) ([]HostView, string) {
 	if out == nil {
 		return nil, stateAbsent
 	}
+	a.fleetLog.slotFull = slotFull
 	sort.SliceStable(out, func(i, j int) bool { return *out[i].Score > *out[j].Score })
 	return out, ""
 }

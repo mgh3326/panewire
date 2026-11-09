@@ -278,6 +278,9 @@ func onlyMemoryNotAccepting(reason string) bool {
 // floor, which the measured arm replaces. A host the hub said nothing about is
 // usable: that is today's behaviour.
 func hubUsable(h selHost, ignoreMemory bool) bool {
+	if h.slotFull {
+		return false
+	}
 	v := h.view
 	if v == nil {
 		return true
@@ -503,7 +506,8 @@ func shadowFixed(hosts []selHost, req shadowReq, pol shadowPolicy) ([]selHost, s
 
 // shadowMeasured is fixed plus the memory signal, the capability map and the
 // rescored hosts. A host the hub dropped only for its memory floor is judged
-// again by the one memory signal; a host that signal refuses is dropped.
+// again by the one memory signal when that signal is known; a host that signal
+// refuses, or one with no memory reading at all, stays dropped.
 func shadowMeasured(hosts []selHost, req shadowReq, pol shadowPolicy) []selHost {
 	out, _ := shadowFixed(hosts, req, pol)
 	mems := make([]shadowMem, len(out))
@@ -512,7 +516,9 @@ func shadowMeasured(hosts []selHost, req shadowReq, pol shadowPolicy) []selHost 
 		mems[i] = pol.memory(*h)
 		switch {
 		case h.memExcluded:
-			if h.fit = h.fitNoMem; h.fit == "" && (mems[i].refuse || h.awake && !hubUsable(*h, true)) {
+			// The hub's refusal stands unless the one memory signal is known and
+			// clears the host: with no reading there is nothing to replace it.
+			if h.fit = h.fitNoMem; h.fit == "" && (mems[i].src == "none" || mems[i].refuse || h.awake && !hubUsable(*h, true)) {
 				h.fit = "memory_refused"
 			}
 		case h.fit == "" && mems[i].refuse:

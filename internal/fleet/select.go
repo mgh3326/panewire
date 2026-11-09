@@ -559,6 +559,9 @@ type selHost struct {
 	guard       *float64
 	memExcluded bool
 	fitNoMem    string
+	// slotFull marks a host the hub reported slot-full and hubHosts left out of
+	// the host list, so it has no view.
+	slotFull bool
 }
 
 // selPresence snapshots eligible hosts and their current account bindings for
@@ -657,6 +660,7 @@ func (a *App) newSelPresence(ctx context.Context, s Spawn, req selReq) *selPrese
 		missing := missingCaps(cfg, required)
 		refusal := roleRefusal(cfg, req.role, grade)
 		h.eligible = len(missing) == 0 && refusal == ""
+		h.slotFull = a.fleetLog != nil && a.fleetLog.slotFull[name]
 		fit := func(excluded bool) string {
 			switch {
 			case excluded:

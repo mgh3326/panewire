@@ -279,6 +279,13 @@ func TestPlacementShadowMemoryAdmission_T3650(t *testing.T) {
 	critical.view.Signals.MemAvailable = ptrF(0.6)
 	healthy := mk("healthy", "available", ptrF(0), ptrF(60))
 	hosts := []selHost{refusedByHub, critical, healthy}
+	// With no memory reading the hub's refusal stands.
+	blind := refusedByHub
+	blind.name = "blind"
+	blind.view = &HostView{Name: "blind", Connected: true, Reason: "not_accepting(memory_pressure)"}
+	if got := rankNames(shadowRank(rankHosts(shadowMeasured([]selHost{blind, healthy}, shadowReq{}, pol)))); got != "healthy" {
+		t.Fatalf("a hub memory refusal with no replacement reading was lifted: %s", got)
+	}
 	if got := rankNames(shadowRank(rankHosts(hosts))); got != "critical,healthy" {
 		t.Fatalf("live order %s", got)
 	}
@@ -487,5 +494,38 @@ func TestPlacementShadowPressureNeedsMacOS_T3650(t *testing.T) {
 	}
 	if m := pol.memory(mk("macos")); !m.refuse || m.src != "pressure" {
 		t.Fatalf("macOS critical not refused: %+v", m)
+	}
+}
+
+// A host the hub reports slot-full is left out of the fleet-state host list
+// (hubHosts), so it has no view; the live order still contains it, and the
+// arms apply the hub's verdict and leave it out.
+func TestPlacementShadowSlotFullHost_T3650(t *testing.T) {
+	a, s, _, src := hostFirstFixture(t, "worker", "B", workerRows,
+		map[string]string{"mac-b": testClaudeB, "cloud-small": testClaudeB, "cloud-tiny": testClaudeB, "pi": testClaudeB}, nil)
+	a.Config.Hub = map[string]any{"hub_url": "https://hub.invalid"}
+	now := a.Now()
+	load := func(host string, slotFull bool) map[string]any {
+		m := fsLoad(host, true, 50, 0.1, now.Add(-5*time.Second))
+		m["load"].(map[string]any)["slot_full"] = slotFull
+		return m
+	}
+	a.State = &fakeStateReader{snap: fsSnapshot(t, now,
+		fsPublisher("mac-b", true, now), fsPublisher("cloud-small", true, now), fsPublisher("cloud-tiny", true, now), fsPublisher("pi", true, now),
+		load("mac-b", true), load("cloud-small", false), load("cloud-tiny", false), load("pi", false))}
+	a.Source = stateSource{a: a, inner: src}
+	events := shadowEvents(a)
+	sel, err := a.selectProfile(context.Background(), s)
+	if err != nil || sel == nil {
+		t.Fatal(err)
+	}
+	sh := shadowEventOf(t, *events).Shadow
+	if !strings.Contains(rankNames(sh.Live.Order), "mac-b") {
+		t.Fatalf("live order %s must still list the slot-full host", rankNames(sh.Live.Order))
+	}
+	for _, arm := range []string{"fixed", "measured"} {
+		if strings.Contains(rankNames(sh.Arms[arm].Order), "mac-b") {
+			t.Fatalf("%s order %s ranks the slot-full host", arm, rankNames(sh.Arms[arm].Order))
+		}
 	}
 }
