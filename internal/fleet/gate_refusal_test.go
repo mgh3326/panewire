@@ -113,6 +113,12 @@ func TestAllHostsRoleDeniedReturnsRoleRestricted(t *testing.T) {
 	if calls != 2 {
 		t.Fatalf("role denied %d accounts, want each host account", calls)
 	}
+	for _, host := range []string{"host-a", "host-b"} {
+		row := hostRow(t, sel, host)
+		if row["admission_outcome"] == "quota_unknown" {
+			t.Fatalf("role denial was recorded as quota_unknown on %s: %v", host, row)
+		}
+	}
 }
 
 func TestMixedQuotaUnknownAndRoleDenialReturnsRoleRestricted(t *testing.T) {
@@ -136,6 +142,32 @@ func TestMixedQuotaUnknownAndRoleDenialReturnsRoleRestricted(t *testing.T) {
 	}
 	if calls != 2 {
 		t.Fatalf("mixed outcome fixture reached %d accounts, want both", calls)
+	}
+}
+
+func TestNonRoleNoRoleCandidateDoesNotBeatAuthFailure(t *testing.T) {
+	a := testApp(t)
+	p := &selPlan{cands: []*selCand{
+		{accountKey: "credit:one", code: outcomeNoRoleCandidate, reason: "pool_excluded"},
+		{accountKey: "claude:two", code: outcomeAuthUnavailable, reason: "auth_unavailable"},
+	}}
+	_, err := a.selectionRefused(context.Background(), Spawn{}, selReq{role: "worker"}, p)
+	if exitCode(err) != exitAuthUnavailable || !strings.Contains(err.Error(), "AUTH_UNAVAILABLE") || strings.Contains(err.Error(), "role_restricted") {
+		t.Fatalf("pool exclusion masked sign-in refusal: %v", err)
+	}
+}
+
+func TestRoleRestrictedRefusalKeepsDiagnosticSuffixAndAllPurposeHints(t *testing.T) {
+	a := testApp(t)
+	p := &selPlan{poolCaps: map[string]int{"codex": 2}, cands: []*selCand{
+		{accountKey: "codex:one", code: outcomeNoRoleCandidate, reason: "role_restricted: astra requires director, architect, or operator-request purpose"},
+		{accountKey: "codex:two", reason: reasonPoolAtCap, cap: "codex"},
+	}}
+	_, err := a.selectionRefused(context.Background(), Spawn{Profile: "codex-astra", Host: "host-a"}, selReq{role: "counsel"}, p)
+	for _, want := range []string{"role_restricted: astra requires director, architect, or operator-request purpose", "routing role counsel", "--host host-a restricts accounts", "pool_at_cap: codex=2", "round-extension"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("refusal lost %q: %v", want, err)
+		}
 	}
 }
 

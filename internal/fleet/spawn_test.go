@@ -39,6 +39,7 @@ func TestSpawnParseValidatesAstraPurpose(t *testing.T) {
 	}{
 		{"free text refused", []string{"-m", "codex-astra", "--purpose", "design consult"}, true},
 		{"architect accepted", []string{"-m", "codex-astra", "--purpose", "architect"}, false},
+		{"round extension accepted", []string{"-m", "codex-astra", "--purpose", "round-extension"}, false},
 		{"operator request fills purpose", []string{"-m", "codex-astra", "--operator-request", "X"}, false},
 		{"other profile accepts free text", []string{"-m", "codex-sol", "--purpose", "design consult"}, false},
 	} {

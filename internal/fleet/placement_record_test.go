@@ -911,3 +911,10 @@ func TestBackendReasonIsBoundedToOneLine(t *testing.T) {
 		t.Fatalf("reason not bounded/flattened: %d bytes", len(got))
 	}
 }
+
+func TestCreditBandRefusalRetainsRoleDeniedTriesAsNoRung(t *testing.T) {
+	got, ok := creditBandRefusal(map[string]any{"admission_outcome": "no_rung", "outcome": "all_refused", "tried": []any{map[string]any{"outcome_code": outcomeNoRoleCandidate, "result": "refused"}}})
+	if !ok || got != "all_refused" {
+		t.Fatalf("credit role refusal=(%q,%v), want retained all_refused row", got, ok)
+	}
+}
