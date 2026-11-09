@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io/fs"
+	"net/http"
 	"os"
 	"path/filepath"
 	"slices"
@@ -55,8 +56,28 @@ func doneJob(t *testing.T, a *App) {
 	}
 }
 
+// reapJob reaps job j. Its worktree's HEAD reads and hk lists no open PR for
+// its task, so a completed worker with a worktree is not kept for one (hk
+// 3734); an unreadable worktree would keep it.
 func reapJob(t *testing.T, a *App) {
 	t.Helper()
+	runner, ok := a.Runner.(*fakeRunner)
+	if !ok {
+		t.Fatalf("reapJob needs a fakeRunner, got %T", a.Runner)
+	}
+	base := runner.Do
+	runner.Do = func(c Command) Result {
+		if c.Name == "git" && len(c.Args) >= 4 && c.Args[2] == "rev-parse" && c.Args[3] == "HEAD" {
+			return Result{Out: paneSweepTestHead + "\n"}
+		}
+		if base == nil {
+			return Result{}
+		}
+		return base(c)
+	}
+	useFakeHK(t).Handle(func(r hkRequest) (int, string, bool) {
+		return http.StatusOK, `{"changes":[]}`, r.Route() == "GET /v1/changes"
+	})
 	a.Now = func() time.Time { return time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC) }
 	if err := a.hygiene(t.Context(), "reap", []string{"--job", "j", "--grace", "0s", "--apply"}); err != nil {
 		t.Fatal(err)

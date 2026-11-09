@@ -67,6 +67,7 @@ func (a *App) hygiene(ctx context.Context, kind string, args []string) error {
 	if e != nil {
 		return e
 	}
+	parents, prs := map[string]paneSweepInherited{}, map[string]paneSweepPRRead{}
 	for _, entry := range entries {
 		if !entry.IsDir() || !validID(entry.Name()) {
 			continue
@@ -108,6 +109,11 @@ func (a *App) hygiene(ctx context.Context, kind string, args []string) error {
 		if reason == "" && working {
 			reason = "pane-working-or-mismatch"
 		}
+		if reason == "" && paneSweepAwaitsPR(j) {
+			// A completed author waits on its open PR, as in the task pane
+			// sweep (docs/pane-sweep.md); a job its owner closed does not.
+			reason = a.reapPRKeep(ctx, j, parents, prs)
+		}
 		if kind == "prune" && reason == "live" && !present && !j.Keep {
 			events := j.Events
 			if len(events) > 0 && a.Now().Sub(events[len(events)-1].when) >= staleAge {
@@ -125,7 +131,8 @@ func (a *App) hygiene(ctx context.Context, kind string, args []string) error {
 		if e != nil {
 			return e
 		}
-		if latest.Keep || latest.Pane != j.Pane || (!latest.Terminal && reason != "stale-pane-absent") {
+		if latest.Keep || latest.Pane != j.Pane || (!latest.Terminal && reason != "stale-pane-absent") ||
+			(paneSweepAwaitsPR(latest) && !paneSweepAwaitsPR(j)) {
 			continue
 		}
 		fresh, e := a.agents(ctx)
@@ -181,6 +188,23 @@ func (a *App) hygiene(ctx context.Context, kind string, args []string) error {
 	}
 	_, e = expiry.Pass(ctx, a)
 	return e
+}
+
+// reapPRKeep is the task pane sweep's open-PR keep (paneSweepPRKeep) for a
+// completed author that reap would close: the reason its pane stays, or ""
+// when no open PR holds it. Its task is the sweep's: the claim's, else the
+// parent job's. A task that could not be established (hk unreadable, or a
+// named parent that does not resolve to a task yet) keeps the pane; a job that
+// names no parent anywhere has no PR to wait on.
+func (a *App) reapPRKeep(ctx context.Context, j Job, parents map[string]paneSweepInherited, prs map[string]paneSweepPRRead) string {
+	s := &TaskPaneSweeper{PR: a.PRs}
+	task := j.Task
+	var taskErr error
+	if task == "" {
+		task, taskErr = s.inheritedTask(ctx, a, j, parents)
+	}
+	reason, _ := s.paneSweepPRKeep(ctx, a, j, task, taskErr, prs)
+	return reason
 }
 
 // laneRoute is the App as the job's lane credential sees it: the herdr session

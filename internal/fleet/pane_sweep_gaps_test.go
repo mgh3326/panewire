@@ -33,12 +33,18 @@ func (f *paneSweepFixture) closeJob(id, outcome string) {
 }
 
 // fixAuthor seeds a worker spawned with --parent-job: its claim names no task
-// of its own, only the job it inherited from.
-func (f *paneSweepFixture) fixAuthor(id, parent string) string {
+// of its own, only the job it inherited from. extra adds receipt fields.
+func (f *paneSweepFixture) fixAuthor(id, parent string, extra ...map[string]any) string {
 	f.t.Helper()
 	pane := "p-" + id
 	putEvent(f.t, f.a, id, "job.claim", map[string]any{"owner_lane": "owner", "parent_lane": "parent", "t_level": "T1", "role": "worker", "task_inherited_from": parent})
-	putEvent(f.t, f.a, id, "job.spawned", map[string]any{"pane_id": pane, "tab_id": "t-" + pane, "label": "agent-" + id, "profile": "cmd-dsflash41", "family": "deepseek"})
+	spawned := map[string]any{"pane_id": pane, "tab_id": "t-" + pane, "label": "agent-" + id, "profile": "cmd-dsflash41", "family": "deepseek"}
+	for _, more := range extra {
+		for key, value := range more {
+			spawned[key] = value
+		}
+	}
+	putEvent(f.t, f.a, id, "job.spawned", spawned)
 	f.status[pane], f.names[pane] = "idle", "agent-"+id
 	return pane
 }

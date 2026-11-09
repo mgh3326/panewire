@@ -1,11 +1,13 @@
 # Task pane sweep
 
-A worker stays in its pane after READY, so `panewire reap` (terminal jobs
-only) never reaches it, and mergewake's reap, which runs once at merge time,
-skips a worker that is busy then and never retries. The node daemon therefore
-sweeps its own jobs: it closes the pane of a worker or tester once the hk task
-the job is bound to has ended, or the job itself was closed, and the pane has
-stayed not working for a grace.
+A worker stays in its pane after READY: it is its PR's author and fixes later
+review findings until the PR merges or its owner releases it (the wake
+method). mergewake's reap, which runs once at merge time, skips a worker that
+is busy then and never retries. The node daemon therefore sweeps its own jobs:
+it closes the pane of a worker or tester once the hk task the job is bound to
+has ended, or the job itself was closed, and the pane has stayed not working
+for a grace. A completed author's pane waits while its PR is open; a job its
+owner gave up or released does not.
 
 ## Which jobs
 
@@ -20,29 +22,80 @@ A local job is swept when all of these hold:
     spawned with `--parent-job` whose claim names none, the task of the parent
     job: read from the parent's job record on this node, else from the hk job
     record's `task_id` (the parent is the claim's `task_inherited_from`, else
-    the hk record's `parent_job`). If no task resolves the pane stays, logged
-    `no_task`. A task has ended when its hk **category** is `completed` (the
+    the hk record's `parent_job`). If no task resolves the pane of a live job
+    stays, logged `no_task`. A task has ended when its hk **category** is `completed` (the
     job ends `completed`; any state such as `merged`, `done` or `deployed`) or
     `canceled` (the job ends `lost`). Only when the record carries no category
     do the state names `merged`, `done` (completed) and `dropped` (lost) decide;
   - **the job was closed.** Its latest record is terminal: a `job.revoked`
     with any outcome (`panewire job close`), or a `job.completed`. This holds
-    whatever the task's state, and whether or not hk can be read. The job ends
-    `completed` for outcome `completed` or a `job.completed`, else `lost`. A
-    job reprompted after its close is live again and is kept.
+    whatever the task's state, and whether or not the task can be read. The
+    job ends `completed` for outcome `completed` or a `job.completed`, else
+    `lost`. A job reprompted after its close is live again and is kept.
 
-A task-derived end waits while the job's worktree is on an open PR. The sweep
+### A pane that waits on its open PR
+
+Two ends wait while the job's worktree is on an open PR:
+
+- a **task-derived end** (the task ended; the job has no terminal record of its
+  own);
+- a **completed author**: the job's own latest record is the worker's
+  `job.completed` (READY), and the job is not a reviewer (spawn role
+  `reviewer`, or a mergewake `mwr-*` label), a tester or a counsel. The task's
+  state does not matter: a task still `reviewing` and one already `deployed`
+  both wait.
+
+A job its owner closed with `panewire job close` (`job.revoked` with outcome
+`abandoned`, `superseded` or `completed`) was given up or released, and is
+swept whatever its PRs say. So is a completed reviewer, tester or counsel,
+whose worktree may sit at the PR head it looked at.
+
+A completed fix author's task is its parent's (see above). Its pane closes
+without a PR read only when it names no parent anywhere, since hk links PRs to
+a task: the claim names none, and hk's record of the job names none or hk
+holds no record of it. A parent that is named must resolve to a task. When it
+does not (the parent's record on this node names no task, and hk holds no
+record of the parent or its record names no task), or when hk cannot be read
+for the job or its parent, the task is unknown and the pane is kept
+(`reason=pr_state_unknown`). hk can answer `not_found` for a record that has
+not propagated yet, as `--parent-job` resolution allows for, so the next pass
+reads the parent again and judges the job on its task once it resolves. A
+parent whose records never name a task keeps the pane until the job's owner
+closes it (`panewire job close`).
+
+The sweep first reads the worktree: its `HEAD`, and the tip of its branch on
+origin (hk's change carries the PR head, not its branch). The tip is read from
+origin with `git ls-remote`, not from the clone's
+`refs/remotes/origin/<branch>`, which can be older than a PR head pushed from
+another checkout; a branch origin does not have leaves `HEAD` alone. It then
 reads hk's changes for the task (`GET /v1/changes?task=<id>`, the source
-`panewire pr status` uses) and keeps the pane when an open change names the
-worktree's `HEAD`, or the tip of the worktree's branch on origin (hk's change
-carries the PR head, not its branch). The tip is read from origin with
-`git ls-remote`, not from the clone's `refs/remotes/origin/<branch>`, which can
-be older than a PR head pushed from another checkout; if origin cannot be read
-the pane is kept (`reason=pr_state_unknown`). The line says `reason=open_pr` and
-the PR number. A job whose own record ended (`job.completed` or `job.revoked`) is
-still swept: its result is already in hk. An hk read that fails keeps the pane
-(`reason=pr_state_unknown`), so a failure never closes a pane that may still
-own an open PR.
+`panewire pr status` uses) and keeps the pane when an open change names one of
+those commits. The line says `reason=open_pr` and the PR number. A worktree or
+origin that cannot be read, or an hk read that fails, keeps the pane
+(`reason=pr_state_unknown`) whatever the change list says, so a failure never
+closes a pane that may still own an open PR.
+
+`panewire reap --apply` (and `prune`) apply the same rule to a completed
+author they would close: the job line says `action=keep reason=open_pr` or
+`reason=pr_state_unknown`. They read hk with the host's svc-panewire
+credential (`~/.config/panewire/hk-svc.env`, as the CLI's other hk reads do);
+a host without it keeps such a pane, `reason=pr_state_unknown`.
+
+A task's change list is read at most once per pass: the first read, for this
+check or for recording a merged outcome, serves every later job on the task in
+that pass. The close does not read git or hk's changes again, so a PR opened
+for the worktree after that first read does not keep the pane. The window runs
+from the task's first PR read in the pass through the close, and has no fixed
+bound: the close waits for the node's acting-command lock, saves the pane's
+screen and re-reads the job and herdr first.
+
+The close's re-read of the job (step 2 below) detects one transition: a job
+that did not wait on its PR when the pass judged it (one its owner closed)
+and does now (it was revived, or revived and then reported READY). Such a job
+is kept (`reason=job-changed`) and judged again, PR read included, on the
+next pass that finds it past the grace. A live job that reports READY in the
+window is not such a transition: it already waited on its PR, and the pass's
+PR read applied to it.
 
 Each job is judged alone. Another live job on the same task, such as a fix
 author, does not keep this job's pane open.
@@ -146,7 +199,9 @@ a git call that cannot be read keeps the worktree.
 One INFO line per closed pane (`task pane closed`: job, task, task_state, pane,
 idle_seconds) and one per kept candidate (`task pane kept`, with a `reason`).
 A candidate is a job whose task is in an ending state, whose task could not be
-read, whose task did not resolve (`no_task`), or that was closed. A job whose
+read, whose task did not resolve (`no_task`), or that was closed. A completed
+author kept for its PR logs `reason=open_pr` (with `pr`) or
+`reason=pr_state_unknown` at every pass while that holds. A job whose
 task is still live logs nothing. A `task pane closed` and a `task worktree
 removed` line carry the `reason` (`task_<state>` or `job_<outcome>`); a kept
 line whose worktree is on an open PR also carries its `pr` number. Lines carry ids only: no
