@@ -18,7 +18,7 @@
           "datasourceUid": "${LOKI_DATASOURCE_UID}",
           "model": {
             "refId": "A",
-            "expr": "sum by (host, reason) (count_over_time({source=\"fleet_events\", tool=\"panewire\", kind=\"spawn\", outcome=~\"refused|failed\"} | json reason=\"reason\" | label_format reason=`{{ if .reason }}{{ .reason }}{{ else }}unspecified{{ end }}` [30m]))",
+            "expr": "sum by (host, reason) (count_over_time({source=\"fleet_events\", host=\"ncp\", tool=~\"runtug|panewire\", kind=\"spawn\", outcome=~\"refused|failed\"} | json reason=\"reason\" | label_format reason=`{{ if .reason }}{{ .reason }}{{ else }}unspecified{{ end }}` [30m]))",
             "queryType": "instant",
             "editorMode": "code",
             "intervalMs": 1000,

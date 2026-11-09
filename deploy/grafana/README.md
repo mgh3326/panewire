@@ -12,7 +12,7 @@ these files once after merge and again whenever they change.
 
 대시보드 패널:
 
-- 호스트와 사유별 spawn 최종 거절 (`spawn`); 같은 시도의 `node_spawn`은 중복 집계하지 않음
+- hub coordinator `host=ncp`의 spawn 최종 거절을 호스트·사유별 집계 (`spawn`); 노드가 중간 거절을 같은 kind로 기록한 행은 제외하고 `runtug` 구형 이벤트도 포함
 - 선택 호스트와 순위별 배치 (`placement`); `request_id`가 있는 허브 기록만 선택하며 `raw_load`는 대체 순위
 - 호스트와 사유별 placement 거절 (`placement`, `outcome=refused`)
 - `spawn`의 `outcome=stuck` 및 `spawn_held` 분기별 추이
@@ -35,7 +35,7 @@ The rule group has these rules:
 
 | Rule | Fires when |
 | --- | --- |
-| Repeated spawn refusals | More than 3 refusals for the same host and reason within 30 m. |
+| Repeated spawn refusals | hub coordinator `host=ncp` reports more than 3 refusals for the same reason within 30 m; legacy `runtug` events are included. |
 | Review missing | No reviewer produced a pass within 1 h. |
 | Reviewer failing repeatedly | The same reviewer on the same fleet host fails 3 or more times within 2 h. |
 | Quota observation stale | A refusing quota observation is older than 30 min (`age_min`). |
