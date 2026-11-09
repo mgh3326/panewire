@@ -89,6 +89,7 @@ local_delete_at = "drive_confirmed"
 | `cmd_dsflash41` | `false` | Literal capability opt-in required by cmd policy rows. The provisioned cmd account must have no persisted MCP servers. |
 | `clinepass` | `false` | Literal capability opt-in required by the `cc-*` seats, which route the Claude Code harness through the host's local ClinePass proxy (`CLINEPASS_GATE_URL`, key read at spawn time from `CLINEPASS_GATE_KEY_FILE`; defaults are a loopback URL and `~/.config/cliproxyapi-key.txt`). |
 | `omp_commandcode` | `false` | Literal capability opt-in required by the `omp-dsflash41` seat: the host's omp has the Command Code provider configured (`omp models` lists `commandcode/deepseek/deepseek-v4.1-flash`). The seat is a regular seat (hk 3532): it needs no `PANEWIRE_E6_ARM` once its catalog row is graded; an unrated row still admits only with the arm. The Command Code rules it shares with `cmd-dsflash41` are in [quota](quota.md#command-code-seats). |
+| `report_user_idle` | `false` | Literal boolean, read on each heartbeat. `true` makes a macOS node report whole seconds since the last keyboard or pointer input, as `host_activity.user_idle_s`, to a hub that accepts `host_activity`. Linux never sends it. The node reads no app names, window titles, input content or process lists. See [placement telemetry](placement.md#telemetry). |
 | `tags` | unset | Capability tags offered by this host for job placement (`spawn --tags`). Lowercase tag names. `caps` is an alias; both lists merge. |
 | `roles`, `grades` | unset | Light-host limits, as for [`[hosts.NAME]`](#hostsname): the spawn roles and task grades this machine accepts. |
 | `presence_id` | `machine_id` | Identity this host uses in pacelever host-presence records. |
@@ -655,8 +656,10 @@ names the urgency source. `candidates[]` lists other model candidates by `seat`,
 `canon`, or `model_id` and their `outcome`; `override_reason` explains an explicit
 model or host override. `host.chosen` and `host.source` identify the machine and
 placement path, with `host.candidates[]` giving ranked machines and their outcome
-or exclusion reason when a ranking exists. Candidate lists are trimmed in rank
-order to keep `selection` below hk's 32 KiB limit.
+or exclusion reason when a ranking exists. `host.chosen` is the execution machine,
+including `local` when an automatic request falls back to local execution.
+Candidate lists are trimmed in rank order to keep `selection` below hk's 32 KiB
+limit.
 `panewire done` writes `{state:"completed", report_doc}` plus `result` when
 `--result FILE` (a JSON object of at most 64 KiB) is given, in the same PUT,
 and emits the relay only after the PUT returns; `escalate` writes

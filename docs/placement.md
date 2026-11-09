@@ -406,6 +406,21 @@ Every decision leaves two kinds of Loki fleet event (`tool=panewire`, see
 
 Neither carries screen text, a brief or argv.
 
+**Live node signals.** A candidate's `signals` object, which `signals=1` and the
+hk fleet state `load` value both carry, also holds the node's last heartbeat
+readings: `swap_in_per_s` and `swap_out_per_s` (page rates from the deltas of
+`pswpin`/`pswpout` or vm_stat `Swapins`/`Swapouts`), `pressure`, `power_source`,
+`cpu_busy_short` (the hub's 1-minute CPU busy), `signal_age_s` (seconds since the
+heartbeat they came from; a cached answer can be up to 30 seconds older) and
+`user_idle_s`. Placement records these and never reads them: admission, ranking
+and the score are unchanged. The user-activity value is privacy-bounded. A macOS
+node sends `user_idle_s`, the whole seconds since the last keyboard or pointer
+input, only when its `[local] report_user_idle` is `true` (default off); it reads
+no app names, window titles, input content or process lists, and Linux never
+sends it. A node sends `host_activity` and `host_memory.swap_out_per_s` only after
+its hub sends `hub.features` with `host_activity`, because an older hub rejects
+those names.
+
 `panewire place --explain` prints the terms and the readings behind each score
 (columns `FREE CPU MEM IO LOAD JOBS CPU_BUSY MEM_AVAIL PAGEIN_MBPS LOAD1_CORE
 POWER BRIDGED`); see `testdata/place_explain.golden`. It asks the hub with
