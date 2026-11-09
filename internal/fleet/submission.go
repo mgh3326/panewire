@@ -405,6 +405,27 @@ func (s SpawnAttempt) print(out io.Writer, job string) {
 	fmt.Fprintf(out, "SPAWNED job=%s %s pane=%s%s\n", job, s, firstNonempty(s.Pane, "none"), laneUnregisteredSuffix(s.LaneUnregistered))
 }
 
+// SpawnStatus reads a hub spawn operation's status once (GET
+// /v1/spawns/<id>): accepted, dispatching, succeeded, failed, retryable,
+// reconciling or deadline_exceeded. An id that is not a plain id, a
+// transport failure, a non-200 answer or a body with no status is an error.
+func (c *hubHTTP) SpawnStatus(ctx context.Context, id string) (string, error) {
+	if !validID(id) {
+		return "", fail(exitUsage, "invalid spawn operation id")
+	}
+	status, raw, err := c.do(ctx, http.MethodGet, "/v1/spawns/"+id, nil, 5*time.Second)
+	if err != nil {
+		return "", err
+	}
+	var result struct {
+		Status string `json:"status"`
+	}
+	if status != http.StatusOK || json.Unmarshal(raw, &result) != nil || result.Status == "" {
+		return "", fail(exitStateConflict, "spawn status unreadable; inspect operation %s", id)
+	}
+	return result.Status, nil
+}
+
 // WaitSpawn observes durable spawn state before the existing --wait completion
 // path. Admission/node refusal codes remain visible to synchronous callers.
 func (c *hubHTTP) WaitSpawn(ctx context.Context, id string) (SpawnAttempt, error) {

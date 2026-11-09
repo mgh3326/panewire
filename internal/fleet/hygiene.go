@@ -31,11 +31,22 @@ func (a *App) hygiene(ctx context.Context, kind string, args []string) error {
 	stale := f.String("stale-age", "24h", "")
 	_ = f.String("heavy-age", "24h", "")
 	_ = f.String("policy", "", "")
+	// --expire-job-dirs adds the job dir TTL pass (job_dir_ttl.go): a dry run
+	// unless --apply is also given. A plain reap --apply never deletes a dir.
+	expire := f.Bool("expire-job-dirs", false, "")
 	if e := f.Parse(args); e != nil {
 		return fail(exitUsage, "%v", e)
 	}
 	if f.NArg() != 0 {
 		return fail(exitUsage, "unexpected hygiene argument")
+	}
+	if *expire && kind != "reap" {
+		return fail(exitUsage, "--expire-job-dirs belongs to reap")
+	}
+	if *expire && *lane != "" {
+		// The TTL pass has no lane filter; with --lane it would expire
+		// every lane's dirs while the reap kept to one.
+		return fail(exitUsage, "--expire-job-dirs takes no --lane; limit it with --job")
 	}
 	age, e := duration(*grace)
 	if e != nil || age < 0 {
@@ -157,7 +168,19 @@ func (a *App) hygiene(ctx context.Context, kind string, args []string) error {
 			}
 		}
 	}
-	return nil
+	if !*expire {
+		return nil
+	}
+	ttl, ok := ConfiguredJobDirTTL(a.Config)
+	if !ok {
+		ttl = DefaultJobDirTTL
+	}
+	expiry := &JobDirTTL{TTL: ttl, Apply: *apply, Out: a.Out}
+	if *job != "" {
+		expiry.Only = strings.Split(*job, ",")
+	}
+	_, e = expiry.Pass(ctx, a)
+	return e
 }
 
 // laneRoute is the App as the job's lane credential sees it: the herdr session
@@ -398,7 +421,8 @@ func (a *App) lanesMissing(ctx context.Context) error {
 	}
 	count, missing := 0, 0
 	for _, entry := range entries {
-		if !entry.IsDir() {
+		// A job dir TTL tombstone (.expiring-*) is not a job.
+		if !entry.IsDir() || strings.HasPrefix(entry.Name(), jobDirTombstone) {
 			continue
 		}
 		j, e := a.job(entry.Name())
