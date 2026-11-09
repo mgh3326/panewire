@@ -626,6 +626,16 @@ pane_id, worktree:{origin, branch|null, head}}` — the allowlisted fields only
 (hk's `JobUpdate` accepts `harness` and `effort` since handoffkeep v0.0.39;
 production runs v0.0.63); brief
 text, command lines, pane output and absolute local paths are never written.
+The optional `selection` object records why the model and host were chosen.
+`chosen.why` is the one-line reason; `chosen.grade`, `tier`, `projected_pct`,
+`reset_in_s`, and `waste_urgency` describe the quota choice, and
+`chosen.model_id` supplies the model when `model` is absent. `policy.urgency_source`
+names the urgency source. `candidates[]` lists other model candidates by `seat`,
+`canon`, or `model_id` and their `outcome`; `override_reason` explains an explicit
+model or host override. `host.chosen` and `host.source` identify the machine and
+placement path, with `host.candidates[]` giving ranked machines and their outcome
+or exclusion reason when a ranking exists. Candidate lists are trimmed in rank
+order to keep `selection` below hk's 32 KiB limit.
 `panewire done` writes `{state:"completed", report_doc}` plus `result` when
 `--result FILE` (a JSON object of at most 64 KiB) is given, in the same PUT,
 and emits the relay only after the PUT returns; `escalate` writes

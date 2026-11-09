@@ -699,6 +699,11 @@ func TestDelegateHeadlessInsideJobRecordsParent(t *testing.T) {
 	if rec["parent_job"] != "task42-builder" || rec["task_id"] != "42" || rec["owner_lane"] != "lane-a" {
 		t.Fatalf("the delegation's job record must name the delegate id, parent job, task and owner lane: %v", rec)
 	}
+	selection, selectionOK := rec["selection"].(map[string]any)
+	host, hostOK := selection["host"].(map[string]any)
+	if !selectionOK || !hostOK || host["source"] != "delegate" {
+		t.Fatalf("delegate spawned record must retain its selection: %v", rec["selection"])
+	}
 	j, err := a.job("delegate-task42-builder-1")
 	if err != nil || j.Owner != "lane-a" || !j.Terminal || j.Task != "42" {
 		t.Fatalf("local job record: %+v %v", j, err)

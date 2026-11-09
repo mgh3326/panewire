@@ -268,6 +268,7 @@ func (a *App) spawnedJobRecord(ctx context.Context, s Spawn, seat Seat, launch L
 		"pool":       pool,
 		"owner_lane": owner,
 		"pane_id":    pane,
+		"selection":  jobSelection(s, jobSelectionSource(s)),
 	}
 	if s.Parent != "" {
 		rec["parent_lane"] = s.Parent
@@ -278,9 +279,7 @@ func (a *App) spawnedJobRecord(ctx context.Context, s Spawn, seat Seat, launch L
 	if wt := a.worktreeRef(ctx, s.CWD); wt != nil {
 		rec["worktree"] = wt
 	}
-	if e := a.putJobRecord(ctx, s.Job, rec); e != nil {
-		a.jobRecordFailed(ctx, s.Job, "spawned", e)
-	}
+	putSpawnedJobRecord(ctx, a, s.Job, rec)
 }
 
 // worktreeRef builds the {origin, branch|null, head} record for the job's
