@@ -102,14 +102,16 @@ hk confirms an artifact when:
 ### Leftovers without `events/`
 
 A dir with neither `events/` nor `submission.json` is a leftover when the job's
-ledger is gone (hk 3685): it goes through this gate like any other dir, and the
-hk job record is what proves the job ended. The record must be `completed` or
-`lost` (condition (b)); a dir hk holds no record for is `not-a-job`, and a dir
-whose record read fails is `hk-unreadable`. The pane check (c) does not apply,
-because the dir has no receipt that names a pane; left in place it would keep
-every leftover as `pane-unknown`. The TTL age, the watcher check (a), the
-`.panewire-operation.lock`, the tombstone and the dry run are the same as for
-any other dir.
+ledger is gone (hk 3685). It goes through this gate like any other dir, with
+two differences. The hk job record is what proves the job ended: it must be
+`completed` or `lost` (condition (b)); a dir hk holds no record for is
+`not-a-job`, and a dir whose record read fails is `hk-unreadable`. And the
+dir has no receipt, so its pane is taken from the record's `pane_id` and
+`label` (hk 3700), with the herdr session this node runs in. The pane check (c)
+then applies as for any job. A leftover whose record names no pane is kept as
+`pane-unknown`, because its absence cannot be shown. The TTL age, the watcher
+check (a), the `.panewire-operation.lock`, the tombstone and the dry run are
+the same as for any other dir.
 
 ### Submitter-side dirs
 

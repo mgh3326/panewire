@@ -278,21 +278,35 @@ func (p *JobDirTTL) decide(ctx context.Context, a *App, root, id string, panes j
 	if a.Now().Sub(newest) < p.TTL {
 		return keep("too-young")
 	}
-	// A leftover has no receipt, so it names no pane to check; the pane gate
-	// would keep every leftover as pane-unknown. The hk terminal record
-	// below stands in for it (hk 3685).
-	if !submitter && !leftover {
-		if reason := panes.check(ctx, a, j); reason != "" {
+	// A leftover has no receipt, so its pane is named only by the hk job
+	// record (pane_id, label), when the record holds them (hk 3700). The record
+	// is read first. A leftover whose record names no pane keeps the dir as
+	// pane-unknown, because absence cannot be shown.
+	var rec map[string]any
+	var reason string
+	if leftover {
+		rec, reason = a.jobDirRecord(ctx, id, false, "")
+		if reason == "hk-missing" {
+			// hk holds no record for this dir: it was never a job.
+			reason = "not-a-job"
+		}
+		if reason != "" {
 			return keep(reason)
 		}
+		j.Pane, j.Label = str(rec, "pane_id"), str(rec, "label")
+		// The job ran on this node, so its pane is in this node's herdr session.
+		j.Receipt = map[string]any{"herdr_session": a.herdrSession()}
 	}
-	rec, reason := a.jobDirRecord(ctx, id, submitter, request)
-	if leftover && reason == "hk-missing" {
-		// hk holds no record for this dir: it was never a job (not-a-job).
-		reason = "not-a-job"
+	if !submitter {
+		if pane := panes.check(ctx, a, j); pane != "" {
+			return keep(pane)
+		}
 	}
-	if reason != "" {
-		return keep(reason)
+	if !leftover {
+		rec, reason = a.jobDirRecord(ctx, id, submitter, request)
+		if reason != "" {
+			return keep(reason)
+		}
 	}
 	if reason, v.note = a.jobDirArtifacts(ctx, root, path, j, rec, recorded); reason != "" {
 		v.note = ""

@@ -187,18 +187,27 @@ func TestHygieneSkipsDamagedJobDirAndAuditsTheRest(t *testing.T) {
 // check failed: not-a-job for a dir hk has no record for, hk-unreadable for a
 // read error.
 func TestJobDirTTLLeftoverFollowsTheHKRecord(t *testing.T) {
+	// The record names the pane the job ran in (the spawned record's pane_id
+	// and label), so the pane check can prove it gone (hk 3700 review).
+	withPane := func(state string) map[string]any {
+		return map[string]any{"state": state, "pane_id": "w:left", "label": "left"}
+	}
+	const emptyPanes = `{"result":{"panes":[]}}`
 	for _, tt := range []struct {
 		name   string
 		record map[string]any // nil: hk holds no record for the job
 		getErr error
+		panes  string // herdr pane list; "" is empty
 		reason string // "confirmed" removes the dir
 	}{
-		{"terminal completed is a leftover", map[string]any{"state": "completed"}, nil, "confirmed"},
-		{"terminal lost is a leftover", map[string]any{"state": "lost"}, nil, "confirmed"},
-		{"no hk record is not a job", nil, nil, "not-a-job"},
-		{"hk read error is kept", nil, errors.New("hk unavailable"), "hk-unreadable"},
-		{"escalated stays, as the TTL confirmation set has it", map[string]any{"state": "escalated"}, nil, "hk-not-terminal"},
-		{"live state stays", map[string]any{"state": "spawned"}, nil, "hk-not-terminal"},
+		{"terminal completed with its pane gone is a leftover", withPane("completed"), nil, emptyPanes, "confirmed"},
+		{"terminal lost with its pane gone is a leftover", withPane("lost"), nil, emptyPanes, "confirmed"},
+		{"terminal with its pane still listed stays", withPane("lost"), nil, `{"result":{"panes":[{"pane_id":"w:left","tab_id":"w:t1","agent_status":"idle","cwd":"/work/a"}]}}`, "pane-live"},
+		{"terminal with no pane identity stays", map[string]any{"state": "completed"}, nil, emptyPanes, "pane-unknown"},
+		{"no hk record is not a job", nil, nil, emptyPanes, "not-a-job"},
+		{"hk read error is kept", nil, errors.New("hk unavailable"), emptyPanes, "hk-unreadable"},
+		{"escalated stays, as the TTL confirmation set has it", withPane("escalated"), nil, emptyPanes, "hk-not-terminal"},
+		{"live state stays", withPane("spawned"), nil, emptyPanes, "hk-not-terminal"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			r := newTTLRig(t)
@@ -207,6 +216,9 @@ func TestJobDirTTLLeftoverFollowsTheHKRecord(t *testing.T) {
 			if tt.record != nil {
 				tt.record["job_id"] = id
 				r.store.records[id] = tt.record
+			}
+			if tt.panes != "" {
+				r.panes = tt.panes
 			}
 			r.store.getErr = tt.getErr
 			r.age(id)
