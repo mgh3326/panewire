@@ -29,9 +29,10 @@ that job's directory.
 
 The node also closes finished worker panes by itself, without a hub command:
 see [pane-sweep.md](pane-sweep.md). It matches a pane by id, name and tab and
-requires an idle status, and writes the same `pane-screen.txt` as
-`pane.capture` and uploads it to hk as the same screen document. It does not
-run `pane.close`'s composer guard.
+requires an idle status, and uploads the screen to hk as the same screen
+document `pane.capture` uploads. It writes `pane-screen.txt` only when that
+upload fails (see [pane-sweep.md](pane-sweep.md)). It does not run
+`pane.close`'s composer guard.
 
 ## Hub endpoints
 

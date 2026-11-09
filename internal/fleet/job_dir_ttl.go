@@ -103,9 +103,9 @@ type JobDirTTLSummary struct {
 // jobDirVerdict is the gate's answer for one dir: delete or keep, why, and
 // the dir's shape when it was read.
 type jobDirVerdict struct {
-	remove       bool
-	reason, note string
-	shape        jobDirShape
+	remove bool
+	reason string
+	shape  jobDirShape
 }
 
 // jobDirShape is the inventory a re-check compares to see that a dir did not
@@ -180,11 +180,7 @@ func (p *JobDirTTL) Pass(ctx context.Context, a *App) (JobDirTTLSummary, error) 
 			sum.Keep++
 		}
 		sum.Reasons[v.reason]++
-		note := ""
-		if v.note != "" {
-			note = " note=" + v.note
-		}
-		fmt.Fprintf(out, "job=%s action=%s reason=%s bytes=%d%s\n", id, action, v.reason, v.shape.bytes, note)
+		fmt.Fprintf(out, "job=%s action=%s reason=%s bytes=%d\n", id, action, v.reason, v.shape.bytes)
 	}
 	var reasons []string
 	for _, reason := range slices.Sorted(maps.Keys(sum.Reasons)) {
@@ -308,8 +304,7 @@ func (p *JobDirTTL) decide(ctx context.Context, a *App, root, id string, panes j
 			return keep(reason)
 		}
 	}
-	if reason, v.note = a.jobDirArtifacts(ctx, root, path, j, rec, recorded); reason != "" {
-		v.note = ""
+	if reason = a.jobDirArtifacts(ctx, root, path, j, rec, recorded); reason != "" {
 		return keep(reason)
 	}
 	v.remove, v.reason = true, "confirmed"
@@ -334,7 +329,7 @@ func (p *JobDirTTL) expire(ctx context.Context, a *App, root, id string, scan jo
 		defer p.Exclusive()()
 	}
 	kept := func(reason string) jobDirVerdict {
-		scan.remove, scan.reason, scan.note = false, reason, ""
+		scan.remove, scan.reason = false, reason
 		return scan
 	}
 	path := filepath.Join(a.Jobs, id)
@@ -598,28 +593,22 @@ func (a *App) spawnStatus(ctx context.Context, request string) (string, error) {
 }
 
 // jobDirArtifacts names the first artifact in dir (root/<job>) hk does not
-// confirm; recorded are the report paths the job recorded. note records an
-// accepted cut pane screen.
-func (a *App) jobDirArtifacts(ctx context.Context, root, dir string, j Job, rec map[string]any, recorded []any) (reason, note string) {
+// confirm; recorded are the report paths the job recorded. A leftover
+// pane-screen.txt is not confirmed here: it is an ordinary file of the dir.
+func (a *App) jobDirArtifacts(ctx context.Context, root, dir string, j Job, rec map[string]any, recorded []any) string {
 	reports, reason := jobDirReportFiles(root, dir, j.ID, recorded)
 	if reason != "" {
-		return reason, ""
+		return reason
 	}
 	if reason = jobDirReports(ctx, reports, j.ID, rec); reason != "" {
-		return reason, ""
+		return reason
 	}
 	for _, name := range []string{"findings.json", "result.json"} {
 		if _, err := os.Lstat(filepath.Join(dir, name)); err == nil && !jobRecordHasResult(rec) || err != nil && !errors.Is(err, fs.ErrNotExist) {
-			return "result-unconfirmed", ""
+			return "result-unconfirmed"
 		}
 	}
-	if reason, note = jobDirScreen(ctx, dir, j.ID); reason != "" {
-		return reason, ""
-	}
-	if reason = a.jobDirEvidence(ctx, dir, j); reason != "" {
-		return reason, ""
-	}
-	return "", note
+	return a.jobDirEvidence(ctx, dir, j)
 }
 
 // jobDirReportFiles lists the report files in dir (named id, under the real
@@ -733,34 +722,6 @@ func jobDirReports(ctx context.Context, reports []string, id string, rec map[str
 		}
 	}
 	return ""
-}
-
-// jobDirScreen confirms a local pane-screen.txt against
-// screens/<job>/pane-screen.txt. A screen over hk's document cap was stored
-// cut (paneScreenDocBody), so for it the doc's existence is accepted and
-// noted.
-func jobDirScreen(ctx context.Context, dir, id string) (reason, note string) {
-	path := filepath.Join(dir, PaneScreenFile)
-	if _, err := os.Lstat(path); errors.Is(err, fs.ErrNotExist) {
-		return "", ""
-	} else if err != nil {
-		return "screen-unconfirmed", ""
-	}
-	n, local, err := hashFile(path)
-	if err != nil {
-		return "screen-unconfirmed", ""
-	}
-	want, reason := hkDocumentSHA(ctx, PaneScreenDocKey(id), "screen-unconfirmed")
-	if reason != "" {
-		return reason, ""
-	}
-	if n > PaneScreenDocMaxBytes {
-		return "", "screen-cut"
-	}
-	if !strings.EqualFold(want, local) {
-		return "screen-sha-mismatch", ""
-	}
-	return "", ""
 }
 
 // hkDocumentSHA is the sha256 hk holds for document key; missing is the

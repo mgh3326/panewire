@@ -57,8 +57,12 @@ func TestPaneSweepUploadsTheScreenAsEvidence(t *testing.T) {
 			if put["key"] != "screens/j/pane-screen.txt" || put["kind"] != "evidence" || put["job"] != "j" || put["origin_class"] != "job" {
 				t.Fatalf("screen put = %v, want key screens/j/pane-screen.txt, kind evidence, job j, origin_class job", put)
 			}
-			if body, _ := put["body"].(string); body != f.screen("j") || body != "last screen of "+pane {
-				t.Fatalf("screen put body = %q, want the local file %q", body, f.screen("j"))
+			// hk 3702: a stored upload writes no local screen; the document is the copy.
+			if body, _ := put["body"].(string); body != "last screen of "+pane {
+				t.Fatalf("screen put body = %q, want the pane's screen", body)
+			}
+			if f.localScreenFile("j") {
+				t.Fatalf("a stored screen left %s in the job dir", PaneScreenFile)
 			}
 			taskID, linked := put["task_id"]
 			switch {
@@ -132,8 +136,9 @@ func TestPaneSweepUploadsTheTailOfAnOversizedScreen(t *testing.T) {
 	if got := f.closed(); !slices.Equal(got, []string{pane}) {
 		t.Fatalf("closed panes = %v, want [%s]", got, pane)
 	}
-	if f.screen("j") != full {
-		t.Fatalf("local screen is %d bytes, want the whole %d", len(f.screen("j")), len(full))
+	// hk 3702: the stored upload leaves no local copy; the document keeps the tail.
+	if f.localScreenFile("j") {
+		t.Fatalf("a stored oversized screen left %s in the job dir", PaneScreenFile)
 	}
 	put := screenDocPut(t, hk, "j")
 	if put == nil {
