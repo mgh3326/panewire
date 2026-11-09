@@ -1,0 +1,8 @@
++-o IOHIDSystem  <class IOHIDSystem, id 0x100000265, registered, matched, active, busy 0 (2 ms), retain 24>
+  {
+    "IOClass" = "IOHIDSystem"
+    "IOProviderClass" = "IOHIDResource"
+    "IOHIDEventServiceFastPathType" = "Keyboard"
+    "HIDIdleTime" = 4215000000000
+    "IOPowerManagement" = {"CurrentPowerState"=2,"MaxPowerState"=2}
+  }

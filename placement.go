@@ -278,6 +278,18 @@ type PlacementSignals struct {
 	SwapInLinux  bool     `json:"swap_in_linux,omitempty"`
 	Load1PerCore *float64 `json:"load1_per_core,omitempty"`
 	LiveJobs     int      `json:"live_jobs"`
+	// The node's live signals (host_activity.go) are recorded for the hk
+	// placement record and --explain. No decision reads them yet (hk 3650 is the
+	// later decision that may). CPUBusyShort is the 1-minute busy the hk record
+	// names cpu_busy_short; SignalAgeS is the age of the heartbeat the node
+	// readings came from.
+	CPUBusyShort *float64 `json:"cpu_busy_short,omitempty"`
+	SignalAgeS   *float64 `json:"signal_age_s,omitempty"`
+	PowerSource  string   `json:"power_source,omitempty"`
+	SwapInPerS   *float64 `json:"swap_in_per_s,omitempty"`
+	SwapOutPerS  *float64 `json:"swap_out_per_s,omitempty"`
+	Pressure     *float64 `json:"pressure,omitempty"`
+	UserIdleS    *int64   `json:"user_idle_s,omitempty"`
 	// Terms are the factors of Free; nil from a hub that predates score v2.
 	Terms       *PlacementTerms `json:"terms,omitempty"`
 	Free        float64         `json:"free"`
@@ -676,6 +688,7 @@ func (h *HubServer) placementCandidates(policy PlacementPolicy, metrics placemen
 			fallback := *memory.FreePct / 100
 			signals.MemAvailable = &fallback
 		}
+		recordNodeLiveSignals(&signals, record, memory, now)
 		k := policy.scoreK()
 		terms := k.terms(signals, jobs)
 		signals.Terms, signals.LiveJobs = &terms, jobs

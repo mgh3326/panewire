@@ -185,11 +185,14 @@ type hubNodeRecord struct {
 	// lastHeartbeat is the last authenticated liveness proof: the hello that
 	// created the session and each successfully decoded heartbeat event. Wake
 	// confirmation keys on it, not on the looser "any message touched" state.
-	lastHeartbeat   time.Time
-	agent           *hubAgent
-	activeJobs      map[string]HubActiveJob
-	hostLoad        *HubHostLoad
-	hostMemory      *HubHostMemory
+	lastHeartbeat time.Time
+	agent         *hubAgent
+	activeJobs    map[string]HubActiveJob
+	hostLoad      *HubHostLoad
+	hostMemory    *HubHostMemory
+	// hostActivity is the last heartbeat's user-input report, nil when the node
+	// sent none (host_activity.go). It is recorded only.
+	hostActivity    *HubHostActivity
 	sessionSnapshot *hubSessionSnapshotRecord
 	// powerSource and powerAt are the last power report (host_signals.go).
 	powerSource string
@@ -1348,6 +1351,7 @@ func (h *HubServer) handleAgentMessage(machineID, remoteAddr string, agent *hubA
 			if record := h.nodes[machineID]; record != nil && record.agent == agent {
 				record.lastHeartbeat = received
 				record.hostLoad = cloneHubHostLoad(heartbeat.HostLoad)
+				record.hostActivity = heartbeat.HostActivity
 				h.observeHostSignalsLocked(record, heartbeat.HostSignals, received)
 				h.observeReadinessLocked(record, heartbeat.Readiness, received)
 				if !equalHubHostMemory(record.hostMemory, heartbeat.HostMemory) {
@@ -1584,6 +1588,7 @@ type hubHeartbeatPayload struct {
 	HostMemory      *HubHostMemory            `json:"host_memory,omitempty"`
 	ActiveJobs      []HubActiveJob            `json:"active_jobs,omitempty"`
 	HostSignals     *HubHostSignals           `json:"host_signals,omitempty"`
+	HostActivity    *HubHostActivity          `json:"host_activity,omitempty"`
 	Readiness       *fleet.Readiness          `json:"readiness,omitempty"`
 	Sessions        *[]HubSession             `json:"sessions,omitempty"`
 	PaneIDs         *[]string                 `json:"pane_ids,omitempty"`
@@ -1635,7 +1640,7 @@ func decodeHubHeartbeatPayload(payload []byte) (hubHeartbeatPayload, bool) {
 		return hubHeartbeatPayload{}, false
 	}
 	for name := range fields {
-		if name != "status" && name != "checks" && name != "host_load" && name != "load_error" && name != "host_memory" && name != "quota" && name != "active_jobs" && name != "holds_active" && name != "host_signals" && name != "readiness" && name != "sessions" && name != "snapshot_status" && name != "truncated" && name != "stall_detect" && name != "pane_ids" && name != "pane_ids_complete" {
+		if name != "status" && name != "checks" && name != "host_load" && name != "load_error" && name != "host_memory" && name != "quota" && name != "active_jobs" && name != "holds_active" && name != "host_signals" && name != "host_activity" && name != "readiness" && name != "sessions" && name != "snapshot_status" && name != "truncated" && name != "stall_detect" && name != "pane_ids" && name != "pane_ids_complete" {
 			return hubHeartbeatPayload{}, false
 		}
 	}
@@ -1688,7 +1693,7 @@ func decodeHubHeartbeatPayload(payload []byte) (hubHeartbeatPayload, bool) {
 			}
 		}
 		for name := range memoryFields {
-			if name != "free_pct" && name != "compressed_mb" && name != "swap_used_mb" && name != "psi_some_avg10" && name != "source" && name != "swap_in_per_s" && name != "pressure" {
+			if name != "free_pct" && name != "compressed_mb" && name != "swap_used_mb" && name != "psi_some_avg10" && name != "source" && name != "swap_in_per_s" && name != "swap_out_per_s" && name != "pressure" {
 				return hubHeartbeatPayload{}, false
 			}
 		}
@@ -1703,6 +1708,9 @@ func decodeHubHeartbeatPayload(payload []byte) (hubHeartbeatPayload, bool) {
 	// unread. A hub that advertises host_signals reads them leniently.
 	if rawSignals, exists := fields["host_signals"]; exists {
 		heartbeat.HostSignals = decodeHubHostSignals(rawSignals)
+	}
+	if rawActivity, exists := fields["host_activity"]; exists {
+		heartbeat.HostActivity = decodeHubHostActivity(rawActivity)
 	}
 	if rawReadiness, exists := fields["readiness"]; exists {
 		heartbeat.Readiness = decodeHubReadiness(rawReadiness)

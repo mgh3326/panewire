@@ -227,6 +227,13 @@ type HubClient struct {
 	// signalsPeer is the current connection, whose hub decides on host_signals.
 	signalsPeer          atomic.Pointer[hubClientConnection]
 	hostSignalsCollector func(context.Context) *HubHostSignals // fixture seam; nil collects
+	// userIdleSwitch and userIdleProbe are the host_activity seams: nil reads the
+	// node's [local] report_user_idle and runs the platform probe. The warn
+	// throttle is userIdleWarnedAt (host_activity.go).
+	userIdleSwitch   func() bool
+	userIdleProbe    func(context.Context) (int64, error)
+	userIdleWarnMu   sync.Mutex
+	userIdleWarnedAt time.Time
 	// readiness caches the node's readiness report (readiness_node.go);
 	// readinessCollector and readinessDeps are fixture seams.
 	readiness          nodeReadinessState
@@ -599,8 +606,11 @@ type hubClientConnection struct {
 	// acceptsPaneCaptureDoc is the same for hubFeaturePaneCaptureDoc
 	// (node_command.go).
 	acceptsPaneCaptureDoc atomic.Bool
-	connection            *websocket.Conn
-	writeMu               sync.Mutex
+	// acceptsHostActivity is the same for hubFeatureHostActivity
+	// (host_activity.go).
+	acceptsHostActivity atomic.Bool
+	connection          *websocket.Conn
+	writeMu             sync.Mutex
 }
 
 type hubOutboundMessage struct {
@@ -1928,6 +1938,7 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 				peer.acceptsReadiness.Store(slices.Contains(message.Features, hubFeatureReadiness))
 				peer.acceptsLaneEventPane.Store(slices.Contains(message.Features, hubFeatureLaneEventPane))
 				peer.acceptsPaneCaptureDoc.Store(slices.Contains(message.Features, hubFeaturePaneCaptureDoc))
+				peer.acceptsHostActivity.Store(slices.Contains(message.Features, hubFeatureHostActivity))
 				continue
 			case "burst.holds":
 				client.burstMu.Lock()
@@ -2156,7 +2167,7 @@ func (client *HubClient) heartbeatEvent(ctx context.Context) hubClientEvent {
 	case collectSessions != nil:
 		client.resetIdleClock()
 	}
-	heartbeat := hubHeartbeatPayload{Status: "alive", Checks: runHubChecks(ctx, client.checks, client.execute), ActiveJobs: active, HostSignals: client.hostSignalsForHeartbeat(ctx), Readiness: client.readinessForHeartbeat(ctx)}
+	heartbeat := hubHeartbeatPayload{Status: "alive", Checks: runHubChecks(ctx, client.checks, client.execute), ActiveJobs: active, HostSignals: client.hostSignalsForHeartbeat(ctx), HostActivity: client.hostActivityForHeartbeat(ctx), Readiness: client.readinessForHeartbeat(ctx)}
 	if provider := client.stallBeatProvider(); provider != nil {
 		if beat := provider(); beat != nil {
 			heartbeat.StallDetect = beat
@@ -2177,6 +2188,12 @@ func (client *HubClient) heartbeatEvent(ctx context.Context) hubClientEvent {
 		collectMemory = collectHubHostMemory
 	}
 	if memory, err := collectMemory(ctx); err == nil {
+		if !client.activityPeerAccepted() && memory != nil && memory.SwapOutPerS != nil {
+			// An older hub rejects an unknown host_memory name. The rate is
+			// still sampled, so the next one stays a delta.
+			memory = cloneHubHostMemory(memory)
+			memory.SwapOutPerS = nil
+		}
 		heartbeat.HostMemory = memory
 	}
 	if collectSessions == nil {
