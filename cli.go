@@ -128,6 +128,8 @@ func RunCLI(args []string, cfg CLIConfig) int {
 		return ExitUsage
 	}
 	if *agent != "" && !validStatus(*status) {
+		// Never echo the rejected value: it is caller input (hk 3733).
+		fmt.Fprintln(os.Stderr, "panewire wait: --status must be idle, working, blocked, done or unknown")
 		return ExitConditionInvalid
 	}
 	path := cfg.SocketPath
@@ -158,9 +160,7 @@ func RunCLI(args []string, cfg CLIConfig) int {
 		return ExitInternal
 	}
 	if !resp.OK {
-		if resp.Error != "" {
-			fmt.Fprintln(os.Stderr, resp.Error)
-		}
+		printRefusal(os.Stderr, "panewire wait", resp)
 		return resp.Code
 	}
 	if result, ok := resp.Result.(map[string]any); ok {
@@ -192,7 +192,8 @@ func runPromptCLI(args []string, cfg CLIConfig) int {
 	if err := fs.Parse(args); err != nil {
 		return ExitUsage
 	}
-	if *sender == "" || *target == "" || *file == "" || *timeout <= 0 || (*uptake != "" && *uptake != "tool" && *uptake != "status-transition") {
+	if problem := promptUsageProblem(*sender, *target, *file, *uptake, *timeout); problem != "" {
+		fmt.Fprintf(os.Stderr, "panewire prompt: %s\n", problem)
 		return ExitConditionInvalid
 	}
 	path := cfg.SocketPath
@@ -219,12 +220,46 @@ func runPromptCLI(args []string, cfg CLIConfig) int {
 		return ExitInternal
 	}
 	if !resp.OK {
-		if resp.Error != "" {
-			fmt.Fprintln(os.Stderr, resp.Error)
-		}
+		printRefusal(os.Stderr, "panewire prompt", resp)
 		return resp.Code
 	}
 	return ExitOK
+}
+
+// promptUsageProblem names everything wrong with a prompt invocation in one
+// line, or returns "" when the flags are usable. A usage error is never silent
+// (hk 3733): a call without --from once exited 5 and two replies were lost.
+func promptUsageProblem(sender, target, file, uptake string, timeout time.Duration) string {
+	var missing, problems []string
+	for _, want := range []struct{ value, name string }{
+		{sender, "--from (sender provenance)"},
+		{target, "--to (recipient target)"},
+		{file, "--file (prompt file)"},
+	} {
+		if want.value == "" {
+			missing = append(missing, want.name)
+		}
+	}
+	if len(missing) > 0 {
+		problems = append(problems, "missing "+strings.Join(missing, ", "))
+	}
+	if timeout <= 0 {
+		problems = append(problems, "--timeout must be > 0")
+	}
+	if uptake != "" && uptake != "tool" && uptake != "status-transition" {
+		problems = append(problems, "--uptake must be tool or status-transition")
+	}
+	return strings.Join(problems, "; ")
+}
+
+// printRefusal reports a daemon refusal: its error text, or its code when the
+// daemon sent none, so a nonzero exit is never silent.
+func printRefusal(stderr io.Writer, command string, resp localResponse) {
+	if resp.Error != "" {
+		fmt.Fprintln(stderr, resp.Error)
+		return
+	}
+	fmt.Fprintf(stderr, "%s: refused (code %d)\n", command, resp.Code)
 }
 
 func socketPathFromEnv() string {
