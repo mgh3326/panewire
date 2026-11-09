@@ -261,9 +261,12 @@ check needs only the agent list. Only when both proofs hold does it write
 | `panes-unknown` | `herdr pane list` failed, so a pane check proves nothing. |
 | `completed` | the local ledger holds a `job.completed` event; nothing is written. |
 | `newer-claim` | the local ledger holds a `job.reclaim` event; nothing is written. |
+| `ledger_missing` | the job dir or its `events/` is gone, so the ledger cannot prove the attempt; nothing is written. |
 
-A failed ledger read or handoffkeep write answers `mark_lost_failed`; a node
-without a jobs root answers `jobs_root_unset`.
+A missing job dir or `events/` is a ledger that is unknown, not an empty one, so
+it answers `ledger_missing` and the node never writes `lost` over a record it
+cannot check. A failed ledger read or handoffkeep write answers
+`mark_lost_failed`; a node without a jobs root answers `jobs_root_unset`.
 
 ### `worktree.inspect`
 

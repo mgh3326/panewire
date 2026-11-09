@@ -217,6 +217,9 @@ func (p *JobDirTTL) decide(ctx context.Context, a *App, root, id string, panes j
 	newest := shape.newest
 	var j Job
 	submitter, request := false, ""
+	// leftover is a dir with neither events/ nor a submission whose job
+	// ledger is gone: it is kept unless hk holds a terminal record (hk 3685).
+	leftover := false
 	// recorded holds every report path the receipt, a completion or the
 	// submission named, as recorded; jobDirReports confirms those in the dir.
 	var recorded []any
@@ -240,26 +243,30 @@ func (p *JobDirTTL) decide(ctx context.Context, a *App, root, id string, panes j
 		sub, s, err := readSubmissionSpawn(path)
 		switch {
 		case errors.Is(err, fs.ErrNotExist):
-			return keep("not-a-job")
+			// Neither events/ nor a submission: the job's ledger is gone, not
+			// the job. hk decides at the record check below.
+			leftover = true
+			j = Job{ID: id}
 		case err != nil:
 			return keep("submission-unreadable")
 		case s.Job != id:
 			return keep("submission-mismatch")
-		}
-		submitter, request = true, sub.RequestID
-		j = Job{ID: id, Task: s.Task, Keep: s.Keep}
-		recorded = append(recorded, s.Report)
-		if s.ReportRelative != "" {
-			// Relative to the jobs root of the node that ran it; the same
-			// layout here names this dir. Joined as written, never through
-			// filepath.Join: cleaning would turn link/../summary.md into
-			// summary.md before jobDirReportFiles sees it. A value that is
-			// absolute or not clean (a . or .. segment, a doubled or
-			// trailing separator) is not clean once joined either, so it
-			// keeps the dir there as report-path-unreadable, at its place
-			// in the gate order.
-			jobs := strings.TrimSuffix(filepath.Clean(a.Jobs), "/")
-			recorded = append(recorded, jobs+"/"+s.ReportRelative)
+		default:
+			submitter, request = true, sub.RequestID
+			j = Job{ID: id, Task: s.Task, Keep: s.Keep}
+			recorded = append(recorded, s.Report)
+			if s.ReportRelative != "" {
+				// Relative to the jobs root of the node that ran it; the same
+				// layout here names this dir. Joined as written, never through
+				// filepath.Join: cleaning would turn link/../summary.md into
+				// summary.md before jobDirReportFiles sees it. A value that is
+				// absolute or not clean (a . or .. segment, a doubled or
+				// trailing separator) is not clean once joined either, so it
+				// keeps the dir there as report-path-unreadable, at its place
+				// in the gate order.
+				jobs := strings.TrimSuffix(filepath.Clean(a.Jobs), "/")
+				recorded = append(recorded, jobs+"/"+s.ReportRelative)
+			}
 		}
 	}
 	if j.Keep {
@@ -271,12 +278,19 @@ func (p *JobDirTTL) decide(ctx context.Context, a *App, root, id string, panes j
 	if a.Now().Sub(newest) < p.TTL {
 		return keep("too-young")
 	}
-	if !submitter {
+	// A leftover has no receipt, so it names no pane to check; the pane gate
+	// would keep every leftover as pane-unknown. The hk terminal record
+	// below stands in for it (hk 3685).
+	if !submitter && !leftover {
 		if reason := panes.check(ctx, a, j); reason != "" {
 			return keep(reason)
 		}
 	}
 	rec, reason := a.jobDirRecord(ctx, id, submitter, request)
+	if leftover && reason == "hk-missing" {
+		// hk holds no record for this dir: it was never a job (not-a-job).
+		reason = "not-a-job"
+	}
 	if reason != "" {
 		return keep(reason)
 	}

@@ -6,6 +6,7 @@ import (
 	_ "embed"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -604,7 +605,13 @@ func (a *App) artifactSweep(ctx context.Context, args []string) error {
 		}
 		j, e := a.job(entry.Name())
 		if e != nil {
-			return e
+			// A dir whose events/ is gone has no ledger to sweep (hk 3685), and
+			// one whose events cannot be read is named and skipped; either way
+			// the pass goes on to the other jobs.
+			if !errors.Is(e, os.ErrNotExist) {
+				a.warn("skip job %s: %v", entry.Name(), e)
+			}
+			continue
 		}
 		if !j.Terminal || j.Keep || a.Now().Sub(j.At) < age {
 			continue

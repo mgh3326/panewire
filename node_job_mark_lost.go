@@ -26,6 +26,9 @@ const (
 	nodeJobMarkLostPanesUnknown = "panes-unknown"
 	nodeJobMarkLostCompleted    = "completed"
 	nodeJobMarkLostNewerClaim   = "newer-claim"
+	// nodeJobMarkLostLedgerMissing: the job dir or its events/ is gone, so the
+	// local ledger cannot prove the attempt is not completed (hk 3685).
+	nodeJobMarkLostLedgerMissing = "ledger_missing"
 )
 
 type nodeJobMarkLostArgs struct {
@@ -71,7 +74,7 @@ func validNodeJobMarkLostArgs(args nodeJobMarkLostArgs) bool {
 func validNodeJobMarkLostResult(result nodeJobMarkLostResult) bool {
 	switch result.Outcome {
 	case nodeJobMarkLostLost, nodeJobMarkLostPaneListed, nodeJobMarkLostLabelListed,
-		nodeJobMarkLostPanesUnknown, nodeJobMarkLostCompleted, nodeJobMarkLostNewerClaim:
+		nodeJobMarkLostPanesUnknown, nodeJobMarkLostCompleted, nodeJobMarkLostNewerClaim, nodeJobMarkLostLedgerMissing:
 		return true
 	}
 	return false
@@ -144,10 +147,9 @@ func readNodeJobLedger(job *os.Root, pane, label string) (nodeJobLedger, error) 
 // readNodeJobLedgerEvents parses the job's events in file order, which is
 // sequence order.
 func readNodeJobLedgerEvents(job *os.Root) ([]nodeJobLedgerEvent, error) {
+	// A missing events/ is os.ErrNotExist, not an empty ledger: callers that
+	// must prove something from the ledger refuse on it.
 	root, err := job.OpenRoot("events")
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil
-	}
 	if err != nil {
 		return nil, err
 	}
@@ -219,6 +221,10 @@ func (client *HubClient) nodeJobMarkLost(ctx context.Context, args nodeJobMarkLo
 	if errors.Is(err, errNodeJobsRootUnset) {
 		return nil, "jobs_root_unset"
 	}
+	if errors.Is(err, os.ErrNotExist) {
+		// Ledger unknown, not "not completed": refuse, write nothing (hk 3685).
+		return nodeJobMarkLostResult{Outcome: nodeJobMarkLostLedgerMissing}, ""
+	}
 	if err != nil {
 		return nil, "mark_lost_failed"
 	}
@@ -264,14 +270,15 @@ func (client *HubClient) nodeJobMarkLost(ctx context.Context, args nodeJobMarkLo
 }
 
 // openNodeJobLedger reads the job's local ledger; a node without a jobs root
-// cannot prove anything.
+// cannot prove anything, and a missing job dir (os.ErrNotExist) leaves the
+// ledger unknown rather than empty.
 func (client *HubClient) openNodeJobLedger(job, pane, label string) (nodeJobLedger, error) {
 	root, _, found, err := client.openNodeJobDir(job)
 	if err != nil {
 		return nodeJobLedger{}, err
 	}
 	if !found {
-		return nodeJobLedger{}, nil
+		return nodeJobLedger{}, os.ErrNotExist
 	}
 	defer root.Close()
 	return readNodeJobLedger(root, pane, label)
@@ -309,6 +316,10 @@ func (client *HubClient) nodeJobRole(name string) (string, error) {
 	}
 	defer root.Close()
 	events, err := readNodeJobLedgerEvents(root)
+	if errors.Is(err, os.ErrNotExist) {
+		// No events/ names no role; that is not a read failure here.
+		err = nil
+	}
 	role := ""
 	for _, event := range events {
 		if event.role != "" && (nodeJobClaimKind(event.kind) || event.kind == "job.spawned") {
