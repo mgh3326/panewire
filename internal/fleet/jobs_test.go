@@ -315,6 +315,20 @@ func TestSpawnedSelectionKeepsLocalHostForAutoPlacement(t *testing.T) {
 	}
 }
 
+func TestSpawnedSelectionKeepsInvalidWinnerAdmittedAndFirst(t *testing.T) {
+	s := Spawn{Host: "auto", placement: &placementDecision{
+		plan:      &placePlan{candidates: []placeCandidate{{name: "Mac Studio", eligible: true}, {name: "remote-2", eligible: true}}},
+		execution: placementExecution{Host: "Mac Studio"},
+	}}
+	got := jobSelection(s, jobSelectionSource(s))
+	host := got["host"].(map[string]any)
+	candidates := host["candidates"].([]any)
+	first := candidates[0].(map[string]any)
+	if host["chosen"] != unknownSelectionHostID || first["machine"] != unknownSelectionHostID || first["outcome"] != "admitted" {
+		t.Fatalf("invalid winning host=%v", host)
+	}
+}
+
 func TestSpawnedSelectionReplacesOversizedHostID(t *testing.T) {
 	oversizedHost := strings.Repeat("h", 40*1024)
 	s := Spawn{Host: oversizedHost}

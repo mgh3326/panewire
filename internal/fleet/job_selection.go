@@ -49,17 +49,17 @@ func jobSelection(s Spawn, source string) map[string]any {
 	if s.OverrideReason != "" {
 		selection["override_reason"] = s.OverrideReason
 	}
-	host := map[string]any{"chosen": selectionHostID(firstNonempty(func() string {
+	chosenHost := firstNonempty(func() string {
 		if s.placement != nil {
 			return s.placement.execution.Host
 		}
 		return ""
-	}(), s.Host, "local"))}
+	}(), s.Host, "local")
+	host := map[string]any{"chosen": selectionHostID(chosenHost)}
 	host["source"] = source
 	if s.placement != nil && s.placement.plan != nil {
 		plan := s.placement.plan
 		rows := make([]any, 0, len(plan.candidates))
-		chosen := host["chosen"].(string)
 		appendCandidate := func(c placeCandidate) {
 			row := map[string]any{"machine": selectionHostID(c.name)}
 			outcome := c.outcome
@@ -72,7 +72,7 @@ func jobSelection(s Spawn, source string) map[string]any {
 						break
 					}
 				}
-			} else if outcome == "" && c.name == chosen {
+			} else if outcome == "" && c.name == chosenHost {
 				outcome = "admitted"
 			} else if outcome == "" {
 				outcome = "below_choice"
@@ -83,13 +83,13 @@ func jobSelection(s Spawn, source string) map[string]any {
 			rows = append(rows, row)
 		}
 		for _, c := range plan.candidates {
-			if c.name == chosen {
+			if c.name == chosenHost {
 				appendCandidate(c)
 				break
 			}
 		}
 		for _, c := range plan.candidates {
-			if c.name != chosen {
+			if c.name != chosenHost {
 				appendCandidate(c)
 			}
 		}
