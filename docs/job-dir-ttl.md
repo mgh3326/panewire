@@ -58,7 +58,7 @@ directory is kept. Any read error or doubt keeps it.
 | | Condition | Kept as |
 | --- | --- | --- |
 | path | A plain directory directly under the jobs root, named a valid job id. A symlink whose real path leaves the root, or any other symlink, is never followed. A `.expiring-*` tombstone (below) is listed and never touched. | `outside-root`, `symlink`, `invalid-id`, `unreadable`, `tombstone` |
-| kind | It has `events/` (a job that ran here), or `submission.json` and no `events/` (a submitter-side dir, below). Anything else — lead scratch, a consult folder — is not a job. | `not-a-job`, `events-unreadable`, `submission-unreadable`, `submission-mismatch` |
+| kind | It has `events/` (a job that ran here), or `submission.json` and no `events/` (a submitter-side dir, below), or neither and an hk record for its job (a leftover, below). Anything else — lead scratch, a consult folder — is not a job. | `not-a-job`, `events-unreadable`, `submission-unreadable`, `submission-mismatch` |
 | (a) | The job is not `--keep`, and no completion watcher holds it (`watchActive`). | `protected`, `watcher-active` |
 | (d) | The newest file mtime and event time under it are at least the TTL old. | `too-young` |
 | (c) | In the herdr session the receipt recorded, `herdr pane list` (the full inventory, plain shells included) names no pane with the job's recorded pane id or label, and neither does `herdr agent list`. The agent list alone never proves a pane gone: a shell pane whose agent exited is only in the pane list. A job that recorded neither a pane nor a label, a receipt that names no `herdr_session` (one from before it was recorded), or a list that cannot be read keeps it. A pane list answer that carries an error (an `error` member or `"ok":false`), or any row that is not an object with a pane id (`null`, `{}`), cannot be read. Only the pane list is read that strictly; the agent list still vetoes. The agent list is decoded leniently: an `error` member is ignored, and any decoded agent with the job's pane id or label keeps the directory (`pane-live`), even beside an `error` member. `"agents": null`, a `null` row and a `{}` row read as no agent. An agent answer with no `agents` key, or malformed JSON, cannot be decoded and keeps the directory (`pane-unreadable`). | `pane-live`, `pane-unknown`, `pane-session-unknown`, `pane-unreadable` |
@@ -98,6 +98,20 @@ hk confirms an artifact when:
   `final-build` class — a jobs root the policy's `herdr-inbox/jobs` root
   does not match, such as `/srv/jobs` — keeps the directory
   (`evidence-unclassified`), since its mirror requirement is unknown.
+
+### Leftovers without `events/`
+
+A dir with neither `events/` nor `submission.json` is a leftover when the job's
+ledger is gone (hk 3685). It goes through this gate like any other dir, with
+two differences. The hk job record is what proves the job ended: it must be
+`completed` or `lost` (condition (b)); a dir hk holds no record for is
+`not-a-job`, and a dir whose record read fails is `hk-unreadable`. And the
+dir has no receipt, so its pane is taken from the record's `pane_id` and
+`label` (hk 3700), with the herdr session this node runs in. The pane check (c)
+then applies as for any job. A leftover whose record names no pane is kept as
+`pane-unknown`, because its absence cannot be shown. The TTL age, the watcher
+check (a), the `.panewire-operation.lock`, the tombstone and the dry run are
+the same as for any other dir.
 
 ### Submitter-side dirs
 

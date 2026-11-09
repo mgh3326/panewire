@@ -77,7 +77,9 @@ func TestNodeJobMarkLostRefusesAListedPaneOrLabel(t *testing.T) {
 		{"label listed under another pane", nodeAgentList(nodeAgentJSON("w3:p1", "job-a", "idle", "/work/x")), nodeJobMarkLostArgs{Job: "job-a", PaneID: "w2:p3", Label: "job-a"}, nodeJobMarkLostLabelListed},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			client, store, _ := markLostClient(t, t.TempDir(), []string{test.agents}, markLostEmptyPanes)
+			inbox := t.TempDir()
+			markLostJobDir(t, inbox, "job-a", "job.claim", "job.spawned")
+			client, store, _ := markLostClient(t, inbox, []string{test.agents}, markLostEmptyPanes)
 			result, code := nodeRun(t, client, nodeCommandJobMarkLost, test.args)
 			if code != "" || result["outcome"] != test.want {
 				t.Fatalf("code=%q result=%v", code, result)
@@ -90,7 +92,9 @@ func TestNodeJobMarkLostRefusesAListedPaneOrLabel(t *testing.T) {
 }
 
 func TestNodeJobMarkLostRefusesWithoutACompletePaneList(t *testing.T) {
-	client, store, fake := markLostClient(t, t.TempDir(), []string{nodeAgentList()}, markLostEmptyPanes)
+	inbox := t.TempDir()
+	markLostJobDir(t, inbox, "job-a", "job.claim", "job.spawned")
+	client, store, fake := markLostClient(t, inbox, []string{nodeAgentList()}, markLostEmptyPanes)
 	fake.panesErr = errors.New("herdr list failed")
 	result, code := nodeRun(t, client, nodeCommandJobMarkLost, nodeJobMarkLostArgs{Job: "job-a", PaneID: "w2:p3", Label: "job-a"})
 	if code != "" || result["outcome"] != nodeJobMarkLostPanesUnknown {
@@ -103,7 +107,9 @@ func TestNodeJobMarkLostRefusesWithoutACompletePaneList(t *testing.T) {
 
 // A label-only check needs no pane list: the agent list is the completer.
 func TestNodeJobMarkLostLabelOnlyIgnoresAFailedPaneList(t *testing.T) {
-	client, store, fake := markLostClient(t, t.TempDir(), []string{nodeAgentList()}, markLostEmptyPanes)
+	inbox := t.TempDir()
+	markLostJobDir(t, inbox, "job-a", "job.claim", "job.spawned")
+	client, store, fake := markLostClient(t, inbox, []string{nodeAgentList()}, markLostEmptyPanes)
 	fake.panesErr = errors.New("herdr list failed")
 	result, code := nodeRun(t, client, nodeCommandJobMarkLost, nodeJobMarkLostArgs{Job: "job-a", Label: "job-a"})
 	if code != "" || result["outcome"] != nodeJobMarkLostLost {
@@ -188,6 +194,7 @@ func TestNodeJobMarkLostFailsClosed(t *testing.T) {
 	})
 	t.Run("hk write fails", func(t *testing.T) {
 		inbox := t.TempDir()
+		markLostJobDir(t, inbox, "job-a", "job.claim", "job.spawned")
 		client, store, _ := markLostClient(t, inbox, []string{nodeAgentList()}, markLostEmptyPanes)
 		store.putErr = errors.New("job_host_forbidden")
 		if _, code := nodeRun(t, client, nodeCommandJobMarkLost, nodeJobMarkLostArgs{Job: "job-a", PaneID: "w2:p3"}); code != "mark_lost_failed" {

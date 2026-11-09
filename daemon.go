@@ -289,9 +289,13 @@ func idleShutdownJobLeases(root string, panesAlive panesAliveFunc, ctx context.C
 // idleShutdownJobEventsLegible applies the readability rules
 // scanHubJobEventDetails uses, but returns a verdict instead of silently
 // dropping the job: an unreadable directory or file, an oversized record, or
-// unparseable JSON all mean the lease state is unknown.
+// unparseable JSON all mean the lease state is unknown. A missing events
+// directory (or job directory) holds no lease at all (hk 3685).
 func idleShutdownJobEventsLegible(eventsDir string) bool {
 	entries, err := os.ReadDir(eventsDir)
+	if errors.Is(err, os.ErrNotExist) {
+		return true
+	}
 	if err != nil {
 		return false
 	}

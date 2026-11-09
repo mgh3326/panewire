@@ -427,7 +427,12 @@ func (a *App) lanesMissing(ctx context.Context) error {
 		}
 		j, e := a.job(entry.Name())
 		if e != nil {
-			return e
+			// As in the artifact sweep: a dir with no events/ is skipped, and
+			// unreadable events are named; the pass goes on (hk 3685).
+			if !errors.Is(e, os.ErrNotExist) {
+				a.warn("skip job %s: %v", entry.Name(), e)
+			}
+			continue
 		}
 		if j.Terminal || j.Reaped {
 			continue

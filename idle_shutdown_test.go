@@ -379,14 +379,8 @@ func TestIdleShutdownJobLeasesUnreadable(t *testing.T) {
 	if err != nil || len(leases) != 1 || leases[0].JobID != "job-bad" {
 		t.Fatalf("unparsable events: leases=%v err=%v", leases, err)
 	}
-	// A job dir with no readable events dir at all -> synthetic lease.
-	if err := os.MkdirAll(filepath.Join(root, "jobs", "job-noevents"), 0700); err != nil {
-		t.Fatal(err)
-	}
-	leases, err = idleShutdownJobLeases(root, nil, context.Background())
-	if err != nil || len(leases) != 1 {
-		t.Fatalf("missing events dir: leases=%v err=%v", leases, err)
-	}
+	// A job dir with no events/ at all holds no lease: see
+	// TestIdleShutdownJobDirWithoutEventsHoldsNoLease (hk 3685).
 	// An existing but unreadable events dir -> synthetic lease.
 	sealed := filepath.Join(root, "jobs", "job-sealed", "events")
 	if err := os.MkdirAll(sealed, 0700); err != nil {
