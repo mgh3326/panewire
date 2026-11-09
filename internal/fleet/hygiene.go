@@ -67,7 +67,7 @@ func (a *App) hygiene(ctx context.Context, kind string, args []string) error {
 	if e != nil {
 		return e
 	}
-	parents, prs := map[string]string{}, map[string]paneSweepPRRead{}
+	parents, prs := map[string]paneSweepInherited{}, map[string]paneSweepPRRead{}
 	for _, entry := range entries {
 		if !entry.IsDir() || !validID(entry.Name()) {
 			continue
@@ -193,17 +193,16 @@ func (a *App) hygiene(ctx context.Context, kind string, args []string) error {
 // reapPRKeep is the task pane sweep's open-PR keep (paneSweepPRKeep) for a
 // completed author that reap would close: the reason its pane stays, or ""
 // when no open PR holds it. Its task is the sweep's: the claim's, else the
-// parent job's; a job whose task does not resolve has no PR to wait on.
-func (a *App) reapPRKeep(ctx context.Context, j Job, parents map[string]string, prs map[string]paneSweepPRRead) string {
+// parent job's. A task that could not be established keeps the pane; a job
+// confirmed to have none has no PR to wait on.
+func (a *App) reapPRKeep(ctx context.Context, j Job, parents map[string]paneSweepInherited, prs map[string]paneSweepPRRead) string {
 	s := &TaskPaneSweeper{PR: a.PRs}
 	task := j.Task
+	var taskErr error
 	if task == "" {
-		task = s.inheritedTask(ctx, a, j, parents)
+		task, taskErr = s.inheritedTask(ctx, a, j, parents)
 	}
-	if task == "" {
-		return ""
-	}
-	reason, _ := s.paneSweepPRKeep(ctx, a, j, task, prs)
+	reason, _ := s.paneSweepPRKeep(ctx, a, j, task, taskErr, prs)
 	return reason
 }
 

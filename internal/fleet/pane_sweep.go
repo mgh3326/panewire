@@ -374,13 +374,16 @@ func (s *TaskPaneSweeper) Pass(ctx context.Context, a *App) error {
 	}
 	statuses := map[string]paneSweepTaskRead{}
 	prs := map[string]paneSweepPRRead{}
-	parents := map[string]string{}
+	parents := map[string]paneSweepInherited{}
 	for _, j := range candidates {
 		closed := paneSweepClosed(j)
 		task := j.Task
+		var taskErr error
 		if task == "" {
-			// A fix author spawned with --parent-job is judged on its parent's task.
-			task = s.inheritedTask(ctx, a, j, parents)
+			// A fix author spawned with --parent-job is judged on its parent's
+			// task. A task that could not be established (taskErr) keeps a
+			// completed author's pane below.
+			task, taskErr = s.inheritedTask(ctx, a, j, parents)
 		}
 		var status TaskStatus
 		switch {
@@ -440,10 +443,9 @@ func (s *TaskPaneSweeper) Pass(ctx context.Context, a *App) error {
 		default:
 			// A task-derived end, and a completed author (paneSweepAwaitsPR),
 			// wait on an open PR. A job its owner closed is swept whatever its
-			// PRs say (hk 3383). A completed author whose task did not
-			// resolve has no change list to wait on.
-			if paneSweepWaitsOnPR(j) && task != "" {
-				if reason, number := s.paneSweepPRKeep(ctx, a, j, task, prs); reason != "" {
+			// PRs say (hk 3383).
+			if paneSweepWaitsOnPR(j) {
+				if reason, number := s.paneSweepPRKeep(ctx, a, j, task, taskErr, prs); reason != "" {
 					attrs := []any{"job", j.ID, "task", task, "task_state", end.taskState, "pane", j.Pane, "reason", reason}
 					if number > 0 {
 						attrs = append(attrs, "pr", number)
@@ -492,15 +494,29 @@ func (s *TaskPaneSweeper) readPRs(ctx context.Context, task string) paneSweepPRR
 
 // paneSweepPRKeep reports why the job's worktree keeps its close (a
 // task-derived end or a completed author), and the open PR's number when one
-// is found. "" means no open PR: the close goes ahead. An unreadable change
-// list, or a worktree that cannot be read while the task has an open PR, keeps
-// the pane, so a failure never closes a pane that may still own an open PR.
-// The change list is read first: a task with no open PR needs no git call.
-func (s *TaskPaneSweeper) paneSweepPRKeep(ctx context.Context, a *App, j Job, task string, cache map[string]paneSweepPRRead) (reason string, number int) {
+// is found. "" means no open PR: the close goes ahead. task is the job's task,
+// "" when it has none; taskErr says the task could not be established
+// (inheritedTask). A task that could not be established, a worktree that
+// cannot be read, or an unreadable change list keeps the pane, so a failure
+// never closes a pane that may still own an open PR. The worktree is read
+// before the change list: an empty or merged-only list says nothing about a
+// worktree whose head is unknown.
+func (s *TaskPaneSweeper) paneSweepPRKeep(ctx context.Context, a *App, j Job, task string, taskErr error, cache map[string]paneSweepPRRead) (reason string, number int) {
 	cwd := str(j.Receipt, "cwd")
 	if cwd == "" {
 		// No worktree: nothing it could have an open PR on.
 		return "", 0
+	}
+	if taskErr != nil {
+		return "pr_state_unknown", 0
+	}
+	if task == "" {
+		// No task: hk links PRs to a task, so there is no change list to wait on.
+		return "", 0
+	}
+	heads, ok := paneSweepHeads(ctx, a, cwd)
+	if !ok {
+		return "pr_state_unknown", 0
 	}
 	read, known := cache[task]
 	if !known {
@@ -508,13 +524,6 @@ func (s *TaskPaneSweeper) paneSweepPRKeep(ctx context.Context, a *App, j Job, ta
 		cache[task] = read
 	}
 	if read.err != nil {
-		return "pr_state_unknown", 0
-	}
-	if !slices.ContainsFunc(read.changes, func(c PRChange) bool { return strings.EqualFold(c.State, "open") }) {
-		return "", 0
-	}
-	heads, ok := paneSweepHeads(ctx, a, cwd)
-	if !ok {
 		return "pr_state_unknown", 0
 	}
 	if number, open := paneSweepOpenPR(read.changes, heads); open {
@@ -574,36 +583,62 @@ func paneSweepOpenPR(changes []PRChange, heads []string) (int, bool) {
 	return 0, false
 }
 
+// paneSweepInherited is one parent job's task, kept for the pass so a parent
+// shared by several fix authors is read once.
+type paneSweepInherited struct {
+	task string
+	err  error
+}
+
 // inheritedTask resolves the task of a job whose claim names none: the task of
 // the job it was spawned under (--parent-job), through that job's record on
 // this node, else its hk job record's task_id. The parent id is the claim's
-// task_inherited_from, else the job's own hk record's parent_job. "" means
-// neither resolved, and the pane stays.
-func (s *TaskPaneSweeper) inheritedTask(ctx context.Context, a *App, j Job, cache map[string]string) string {
+// task_inherited_from, else the job's own hk record's parent_job.
+//
+// "" with a nil error is a confirmed absence, decided only on answers: no
+// parent is named (the claim names none, and hk's record of the job names
+// none or hk holds no record of it), or the parent's task is named nowhere
+// (its record on this node names none, and its hk record names none or hk
+// holds no record of it). An error means the task could not be established:
+// hk, which the answer needed, could not be built or read. A live job keeps
+// its pane either way (no_task); a completed author is kept only on an error
+// (paneSweepPRKeep).
+func (s *TaskPaneSweeper) inheritedTask(ctx context.Context, a *App, j Job, cache map[string]paneSweepInherited) (string, error) {
 	store, storeErr := a.jobStore()
 	parent := j.Inherited
-	if parent == "" && storeErr == nil {
-		if rec, err := store.Get(ctx, j.ID); err == nil {
+	if parent == "" {
+		if storeErr != nil {
+			return "", storeErr
+		}
+		rec, err := store.Get(ctx, j.ID)
+		switch {
+		case err == nil:
 			parent = str(rec, "parent_job")
+		case !errors.Is(err, errJobNotFound):
+			return "", err
 		}
 	}
 	if parent == "" || parent == j.ID || !validID(parent) {
-		return ""
+		return "", nil
 	}
-	if task, ok := cache[parent]; ok {
-		return task
+	if read, ok := cache[parent]; ok {
+		return read.task, read.err
 	}
-	task := ""
+	var read paneSweepInherited
 	if local, err := a.job(parent); err == nil {
-		task = local.Task
+		read.task = local.Task
 	}
-	if task == "" && storeErr == nil {
-		if rec, err := store.Get(ctx, parent); err == nil {
-			task = scalar(rec["task_id"])
+	if read.task == "" {
+		if storeErr != nil {
+			read.err = storeErr
+		} else if rec, err := store.Get(ctx, parent); err == nil {
+			read.task = scalar(rec["task_id"])
+		} else if !errors.Is(err, errJobNotFound) {
+			read.err = err
 		}
 	}
-	cache[parent] = task
-	return task
+	cache[parent] = read
+	return read.task, read.err
 }
 
 // idle reports that the job's pane is listed under the job's own name and is
