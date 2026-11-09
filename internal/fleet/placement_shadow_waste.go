@@ -41,45 +41,72 @@ const (
 type wasteSnap struct {
 	order []*selCand
 	orig  map[*selCand]*selCand
+	// pre marks a copy the readings dropped before admission: refused on
+	// every host, whatever its reason field says.
+	pre map[*selCand]bool
 }
 
-// wasteSnapBuilder collects the candidates while admission is about to run. A
-// pass-1 candidate joins at the first host whose walk ranks it in pass 1, and
-// its copy keeps that host's behindCredit. The walk re-derives the flag per host
-// (T2997), so a value read once for the whole selection is not the one a pass-1
-// band used. A candidate the readings dropped before admission joins too;
-// wasteStateOn reads it as refused or unknown, so it is never chosen.
+// wasteSnapBuilder collects the candidates while admission runs. Each walk
+// records a copy per candidate per host it ranks the candidate in pass 1 on,
+// with that host's behindCredit: the walk re-derives the flag per host (T2997).
+// A candidate the readings dropped before admission is recorded under host "".
+// done picks each candidate's copy from its first usable host, so a host the
+// walk could not use never supplies the order.
 type wasteSnapBuilder struct {
-	snap wasteSnap
-	seen map[*selCand]bool
+	originals []*selCand
+	copies    map[*selCand]map[string]*selCand
 }
 
 func newWasteSnapBuilder() *wasteSnapBuilder {
-	return &wasteSnapBuilder{snap: wasteSnap{orig: map[*selCand]*selCand{}}, seen: map[*selCand]bool{}}
+	return &wasteSnapBuilder{copies: map[*selCand]map[string]*selCand{}}
 }
 
-// add copies c into the order once. Call it right after the walk of a host has
-// ordered that host's present candidates, so the copy takes that host's flag.
-func (b *wasteSnapBuilder) add(c *selCand) {
-	if c.accountKey == "" || b.seen[c] {
+// add records c as judged in pass 1 on host ("" for a candidate the readings
+// dropped before admission). Call it right after that host's walk has ordered
+// its present candidates, so the copy takes that host's flag.
+func (b *wasteSnapBuilder) add(c *selCand, host string) {
+	if c.accountKey == "" {
 		return
 	}
-	b.seen[c] = true
-	cp := *c
-	b.snap.order = append(b.snap.order, &cp)
-	b.snap.orig[&cp] = c
+	m := b.copies[c]
+	if m == nil {
+		m = map[string]*selCand{}
+		b.copies[c] = m
+		b.originals = append(b.originals, c)
+	}
+	if _, ok := m[host]; !ok {
+		cp := *c
+		m[host] = &cp
+	}
 }
 
-// done sorts the copies with the live comparator. A failure is recorded as the
-// arm's shadow_error; the live walk goes on.
-func (b *wasteSnapBuilder) done() (snap wasteSnap, failure string) {
+// done builds the order from the usable hosts (rank order). A failure is
+// recorded as the arm's shadow_error; the live walk goes on.
+func (b *wasteSnapBuilder) done(usable []selHost) (snap wasteSnap, failure string) {
 	defer func() {
 		if r := recover(); r != nil {
 			snap, failure = wasteSnap{}, fmt.Sprint("panic: ", r)
 		}
 	}()
-	sortSelCands(b.snap.order)
-	return b.snap, ""
+	snap = wasteSnap{orig: map[*selCand]*selCand{}, pre: map[*selCand]bool{}}
+	for _, o := range b.originals {
+		m := b.copies[o]
+		cp, pre := m[""], m[""] != nil
+		for _, h := range usable {
+			if cp != nil {
+				break
+			}
+			cp = m[h.name]
+		}
+		if cp == nil {
+			continue
+		}
+		snap.order = append(snap.order, cp)
+		snap.orig[cp] = o
+		snap.pre[cp] = pre
+	}
+	sortSelCands(snap.order)
+	return snap, ""
 }
 
 // quotaUnobserved reports that no reading reached the candidate: its rung could
@@ -89,17 +116,17 @@ func quotaUnobserved(c *selCand) bool {
 	return c.code == outcomeQuotaUnknown || slices.ContainsFunc(c.judgments, func(j quotaJudgment) bool { return j.Outcome == "unknown" })
 }
 
-// wasteStateOn is the state of candidate o (copy c) on one usable host, as the
+// wasteStateOn is the state of candidate o (pre: dropped before admission) on one usable host, as the
 // live run left it. Only the admitting host is admitted; a gate refusal the walk
 // skips on other hosts (refusedOn) and a cached exhaustion hold everywhere; a
 // gate failure holds on the host it failed on only.
-func wasteStateOn(c, o *selCand, host string, st *hostAdmission) string {
+func wasteStateOn(o *selCand, pre bool, host string, st *hostAdmission) string {
 	switch {
 	case o.outcome == wasteLiveOutcomeChose && o.host == host:
 		return wasteStateAdmitted
 	case quotaUnobserved(o):
 		return wasteStateUnknown
-	case c.reason != "":
+	case pre:
 		return wasteStateRefused
 	}
 	if _, ok := st.refusedOn[o]; ok {
@@ -138,7 +165,7 @@ func wasteFind(snap wasteSnap, usable []selHost, st *hostAdmission, match func(o
 			if !slices.ContainsFunc(c.hosts, func(x selHost) bool { return x.name == h.name }) {
 				continue
 			}
-			if s := wasteStateOn(c, o, h.name, st); s == wasteStateAdmitted || s == wasteStateAdmissible {
+			if s := wasteStateOn(o, snap.pre[c], h.name, st); s == wasteStateAdmitted || s == wasteStateAdmissible {
 				return o, h.name
 			}
 		}

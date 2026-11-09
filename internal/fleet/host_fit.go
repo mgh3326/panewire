@@ -297,7 +297,7 @@ func (sp *selPresence) admitHostFirst(ctx context.Context, s Spawn, p *selPlan, 
 	wb := newWasteSnapBuilder()
 	for _, c := range p.cands {
 		if !slices.Contains(pending, c) {
-			wb.add(c)
+			wb.add(c, "")
 		}
 	}
 	// Order each host's present candidates once, on the whole host, so the
@@ -320,7 +320,7 @@ func (sp *selPresence) admitHostFirst(ctx context.Context, s Spawn, p *selPlan, 
 			}
 			bands[i][band] = append(bands[i][band], c)
 			if band == 0 {
-				wb.add(c)
+				wb.add(c, h.name)
 			}
 		}
 	}
@@ -341,7 +341,7 @@ func (sp *selPresence) admitHostFirst(ctx context.Context, s Spawn, p *selPlan, 
 			usable = append(usable, h)
 		}
 	}
-	snap, snapErr := wb.done()
+	snap, snapErr := wb.done(usable)
 	sp.a.finishPlacementShadow(shadow, snap, snapErr, st, p, usable, livePass)
 	for _, h := range sp.hosts {
 		if h.fit != "" {
