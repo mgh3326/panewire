@@ -422,8 +422,8 @@ func TestJobDirTTLReportThroughAnotherAlias(t *testing.T) {
 }
 
 // Case 15: a writer that runs MkdirAll after the rename makes a fresh dir
-// under the job's name. An empty one is never deleted, and a changed
-// tombstone renamed back replaces it; a non-empty one blocks the rename
+// under the job's name. An empty one survives while the tombstone is
+// unchanged, and a changed tombstone renamed back replaces it; a non-empty one blocks the rename
 // back and the tombstone stays.
 func TestJobDirTTLFreshDirAfterRename(t *testing.T) {
 	t.Run("empty fresh dir, unchanged tombstone", func(t *testing.T) {
