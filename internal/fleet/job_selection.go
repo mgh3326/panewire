@@ -69,6 +69,8 @@ func jobSelection(s Spawn, source string) map[string]any {
 				}
 			} else if outcome == "" && c.name == chosen {
 				outcome = "admitted"
+			} else if outcome == "" {
+				outcome = "below_choice"
 			}
 			if outcome != "" {
 				row["outcome"] = outcome
@@ -193,8 +195,9 @@ func trimJobSelection(selection map[string]any) {
 				}
 			}
 			if !trimmed {
+				host, _ := selection["host"].(map[string]any)
 				clear(selection)
-				selection["host"] = map[string]any{"chosen": "local", "source": "local"}
+				selection["host"] = host
 				trimmed = true
 			}
 		}
