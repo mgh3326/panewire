@@ -22,6 +22,27 @@ and are read with `| json`.
 | `job_result` | `conflict` | `different_result` | node | a later `done --result` met a different stored result |
 | `job_result` | `missing` | `no_result` | node | a reviewer's completed `done` carried no result |
 
+## Grafana에서 차트로 보는 kind
+
+`deploy/grafana/fleet-dashboard.json`은 다음 kind를 차트로 표시합니다:
+`spawn`, `placement`, `spawn_held`, `quota_gate_shadow`, `quota_pools_shadow`,
+`node_spawn`, `quota_observation`, `reviewer`, `review`. 최근 실패 로그 패널은
+이 kind 목록에 한정하지 않고 실패 outcome을 표시합니다.
+
+배치 후보의 `candidates`와 자동 선택의 `selection`은 이벤트 안의 배열입니다.
+현재 LogQL은 배열 원소마다 별도 시계열을 만들지 못하므로 대시보드는 제외
+결과가 담긴 배치 원본 행을 보여 주며, 후보 호스트·결과별 건수로 해석하면 안
+됩니다. refusal 패널과 alert는 coordinator가 기록한 `request_id`가 있는 `spawn`
+결과만 세어 같은 호스트에 기록될 수 있는 노드 측 `spawn` 거절을 제외합니다.
+`request_id`가 없는 `kind=spawn` 거절은 별도 진단 패널에 표시하며, 직접 CLI 실행과
+허브 실행 노드의 기록이 포함될 수 있어 고유 시도 수로 해석하면 안 됩니다.
+배치 차트는 허브 `placement` 이벤트의 `request_id` 필드가 비어 있지
+않은 행만 세어 request_id가 없는 노드의 `reason=forced` 실행 echo를 제외합니다.
+`node-local placement records (direct spawn + hub spawn node record)` 패널은
+request_id 없는 placement 성공 행을 따로 보여 줍니다. 배치 결과 패널은 호스트별 `placed`와
+최종 `refused`를 비교하며, 현재 완료 이벤트가 없으므로 완료 수를 나타내지
+않습니다.
+
 `relay` lines are emitted for worker lanes (a lane whose route names a parent)
 and design lanes (a lane another route reports to). There is one line per row
 outcome, not one per retry. `detail` names `lane=`, `machine=`, `pane=` and the

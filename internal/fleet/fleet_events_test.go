@@ -44,20 +44,64 @@ func readFleetEvents(t *testing.T, a *App) (string, []map[string]string) {
 			}
 			ev[k] = v
 		}
-		// Only a placement line carries the optional request_id, chosen and
-		// candidates fields; every other line keeps the eight-field v1 shape.
+		// Placement lines and coordinator spawn refusals may carry request_id;
+		// only placements may carry the placement-specific fields.
 		extras := 0
 		for _, k := range []string{"request_id", "chosen", "candidates", "selection"} {
 			if _, ok := fields[k]; ok {
 				extras++
 			}
 		}
-		if len(fields) != 8+extras || extras > 0 && fields["kind"] != "placement" {
+		allowed := fields["kind"] == "placement" || fields["kind"] == "spawn" && extras == 1 && fields["request_id"] != nil
+		if len(fields) != 8+extras || extras > 0 && !allowed || fields["kind"] == "spawn" && extras > 0 && (extras != 1 || fields["request_id"] == nil) {
 			t.Fatalf("event has fields beyond the v1 shape: %q", line)
+		}
+		if value, ok := fields["request_id"].(string); ok {
+			ev["request_id"] = value
 		}
 		events = append(events, ev)
 	}
 	return string(raw), events
+}
+
+func TestSpawnRefusalRequestIDDistinguishesCoordinatorAndNode(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		requestID string
+		want      string
+	}{
+		{name: "coordinator refusal", requestID: "11111111-2222-4333-8444-555555555555", want: "11111111-2222-4333-8444-555555555555"},
+		{name: "direct CLI refusal"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, s, _, _ := cmdFixture(t)
+			a.RequestID = tc.requestID
+			a.Quota.(*fakeQuota).GateDo = func(QuotaRequest) (string, error) {
+				return "", fail(exitConfig, "refused")
+			}
+			if err := a.Spawn(context.Background(), s); code(err) != exitConfig {
+				t.Fatalf("spawn error=%v, want exit code %d", err, exitConfig)
+			}
+			raw, events := readFleetEvents(t, a)
+			if len(events) != 1 {
+				t.Fatalf("want exactly one refusal event, got %d: %s", len(events), raw)
+			}
+			if got := events[0]["request_id"]; got != tc.want {
+				t.Fatalf("request_id=%q, want %q; event=%s", got, tc.want, raw)
+			}
+			if got := events[0]["outcome"]; got != "refused" {
+				t.Fatalf("outcome=%q, want refused; event=%s", got, raw)
+			}
+		})
+	}
+
+	a := testApp(t)
+	a.RequestID = "11111111-2222-4333-8444-555555555555"
+	a.refusalEvent("spawn", "job-a", fail(exitWaitTimeout, "timed out"))
+	_, events := readFleetEvents(t, a)
+	if len(events) != 1 || events[0]["request_id"] != a.RequestID || events[0]["outcome"] != "failed" {
+		t.Fatalf("coordinator post-admission failure must keep request_id: %+v", events)
+	}
 }
 
 func TestSpawnRefusalWritesOneRedactedFleetEvent(t *testing.T) {

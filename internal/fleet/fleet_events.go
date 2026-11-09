@@ -63,6 +63,13 @@ func (a *App) refusalEvent(kind, job string, err error) {
 		// The job got past admission; these are failures after the fact.
 		outcome = "failed"
 	}
+	if kind == "spawn" && a.RequestID != "" {
+		a.fleetEventWriter().EmitEvent(fleetevent.Event{
+			Kind: kind, Job: job, RequestID: a.RequestID, Outcome: outcome,
+			Reason: exitReason(code), Detail: fmt.Sprintf("exit=%d %s", code, err.Error()),
+		})
+		return
+	}
 	a.emitFleetEvent(kind, job, outcome, exitReason(code), fmt.Sprintf("exit=%d %s", code, err.Error()))
 }
 

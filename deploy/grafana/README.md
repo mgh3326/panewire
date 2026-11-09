@@ -10,21 +10,33 @@ these files once after merge and again whenever they change.
 | `fleet-alert-rules.json` | Rule group `fleet-observability` in folder `fleet-observability`; the rules are listed below. |
 | `apply.sh` | Idempotent apply: creates the folder (tolerates an existing one), then overwrites the dashboard and the rule group by uid. |
 
-The dashboard has these panels:
+대시보드 패널:
 
-- spawn refusals by host and reason;
-- placements by chosen host and ranking metric (`raw_load` marks the fallback);
-- review outcomes;
-- reviewer failures by reviewer;
-- node spawn refusals by reason;
-- quota observation age at refusal;
-- a log panel of recent failures.
+- `request_id`가 있는 hub coordinator의 spawn 최종 거절을 호스트·사유별 집계 (`spawn`); 같은 호스트의 노드 거절 기록은 제외
+- `request_id`가 없는 node-side `spawn` 거절 기록은 진단용 별도 표시; 직접 CLI와 허브 실행 노드 기록을 포함할 수 있어 고유 시도 수가 아님
+- 선택 호스트와 순위별 배치 (`placement`); `request_id`가 있는 허브 기록만 선택하며 `raw_load`는 대체 순위
+- 호스트와 사유별 placement 거절 (`placement`, `outcome=refused`)
+- `spawn`의 `outcome=stuck` 및 `spawn_held` 분기별 추이
+- kind별 quota shadow 합의 결과 (`quota_gate_shadow`, `quota_pools_shadow`)
+- 후보 제외 배열이 포함된 배치 기록 로그; LogQL이 배열을 후보별 행으로 펼치지 못해 호스트·결과별 집계 대신 원본 배열을 표시
+- 호스트별 배치 결과 (`placement`, `placed` 대 최종 `refused`); 완료 수가 아님
+- request_id 없는 node-local placement records (직접 스폰 + 허브 스폰의 노드 기록); 허브 배치 성공 집계와 분리
+- review 결과;
+- reviewer별 실패;
+- outcome이 `refused` 또는 `failed`인 node spawn 거절 (`node_spawn`)
+- 거절 시점의 quota observation 경과 시간;
+- 최근 실패 로그.
+
+대시보드가 집계하는 fleet-event `kind`는 `spawn`, `placement`, `spawn_held`,
+`quota_gate_shadow`, `quota_pools_shadow`, `reviewer`, `review`, `node_spawn`,
+`quota_observation`입니다. 최근 실패 로그 패널은 `kind`를 제한하지 않고 실패
+`outcome`을 선택합니다.
 
 The rule group has these rules:
 
 | Rule | Fires when |
 | --- | --- |
-| Repeated spawn refusals | More than 3 refusals for the same host and reason within 30 m. |
+| Repeated spawn refusals | `request_id`가 있는 hub coordinator `spawn` 기록에서 같은 사유의 거절이 30분 동안 3건 초과일 때 발생합니다. |
 | Review missing | No reviewer produced a pass within 1 h. |
 | Reviewer failing repeatedly | The same reviewer on the same fleet host fails 3 or more times within 2 h. |
 | Quota observation stale | A refusing quota observation is older than 30 min (`age_min`). |
