@@ -634,8 +634,10 @@ names the urgency source. `candidates[]` lists other model candidates by `seat`,
 `canon`, or `model_id` and their `outcome`; `override_reason` explains an explicit
 model or host override. `host.chosen` and `host.source` identify the machine and
 placement path, with `host.candidates[]` giving ranked machines and their outcome
-or exclusion reason when a ranking exists. Candidate lists are trimmed in rank
-order to keep `selection` below hk's 32 KiB limit.
+or exclusion reason when a ranking exists. `host.chosen` is the execution machine,
+including `local` when an automatic request falls back to local execution.
+Candidate lists are trimmed in rank order to keep `selection` below hk's 32 KiB
+limit.
 `panewire done` writes `{state:"completed", report_doc}` plus `result` when
 `--result FILE` (a JSON object of at most 64 KiB) is given, in the same PUT,
 and emits the relay only after the PUT returns; `escalate` writes
