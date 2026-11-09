@@ -68,18 +68,20 @@ func TestSpawnRefusalRequestIDDistinguishesCoordinatorAndNode(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
 		requestID string
-		err       error
-		outcome   string
 		want      string
 	}{
-		{name: "coordinator refusal", requestID: "11111111-2222-4333-8444-555555555555", err: fail(exitConfig, "refused"), outcome: "refused", want: "11111111-2222-4333-8444-555555555555"},
-		{name: "coordinator post-admission failure", requestID: "11111111-2222-4333-8444-555555555555", err: fail(exitWaitTimeout, "timed out"), outcome: "failed", want: "11111111-2222-4333-8444-555555555555"},
-		{name: "direct CLI refusal", err: fail(exitConfig, "refused"), outcome: "refused"},
+		{name: "coordinator refusal", requestID: "11111111-2222-4333-8444-555555555555", want: "11111111-2222-4333-8444-555555555555"},
+		{name: "direct CLI refusal"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			a := testApp(t)
+			a, s, _, _ := cmdFixture(t)
 			a.RequestID = tc.requestID
-			a.refusalEvent("spawn", "job-a", tc.err)
+			a.Quota.(*fakeQuota).GateDo = func(QuotaRequest) (string, error) {
+				return "", fail(exitConfig, "refused")
+			}
+			if err := a.Spawn(context.Background(), s); code(err) != exitConfig {
+				t.Fatalf("spawn error=%v, want exit code %d", err, exitConfig)
+			}
 			raw, events := readFleetEvents(t, a)
 			if len(events) != 1 {
 				t.Fatalf("want exactly one refusal event, got %d: %s", len(events), raw)
@@ -87,10 +89,18 @@ func TestSpawnRefusalRequestIDDistinguishesCoordinatorAndNode(t *testing.T) {
 			if got := events[0]["request_id"]; got != tc.want {
 				t.Fatalf("request_id=%q, want %q; event=%s", got, tc.want, raw)
 			}
-			if got := events[0]["outcome"]; got != tc.outcome {
-				t.Fatalf("outcome=%q, want %q; event=%s", got, tc.outcome, raw)
+			if got := events[0]["outcome"]; got != "refused" {
+				t.Fatalf("outcome=%q, want refused; event=%s", got, raw)
 			}
 		})
+	}
+
+	a := testApp(t)
+	a.RequestID = "11111111-2222-4333-8444-555555555555"
+	a.refusalEvent("spawn", "job-a", fail(exitWaitTimeout, "timed out"))
+	_, events := readFleetEvents(t, a)
+	if len(events) != 1 || events[0]["request_id"] != a.RequestID || events[0]["outcome"] != "failed" {
+		t.Fatalf("coordinator post-admission failure must keep request_id: %+v", events)
 	}
 }
 
