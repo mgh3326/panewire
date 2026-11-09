@@ -469,6 +469,7 @@ panic in an arm is caught and recorded as `shadow_error`; the spawn goes on.
 | Arm | What it changes against the live order |
 | --- | --- |
 | `fixed` | Defect A: one load measure for every host, never mixed: the hub's CPU-busy fraction when any candidate has one (`load_measure=cpu_busy`, threshold `shadow.cpu_busy_over`, default `load_threshold`), else load5 per core for every host alike (`load5_per_core`; a host without a reading ranks as unknown). The local `max_load_ratio` guard keeps its own unit. Defect B: a host the hub marks unusable leaves the order, a slot-full host included (the fleet-state host list omits it, so the spawn engine keeps its name for the shadow only); the hub's decision (policy order = configuration order, local first; `shadow.hysteresis`, `shadow.all_loaded_below`; none for a tagged request) is applied when the hub did not already send one. The score is the hub's. |
+| `waste_first` | Not a host order, so it is not a key of `arms`: the account a pool-first order would have spent, recorded beside the host arms (hk 3651, [below](#the-waste_first-account-arm-hk-3651)). It does not enter the event `outcome`. |
 | `measured` | `fixed`, plus: one memory signal for admission and rank, the capability map, and each of CPU busy and load per core used once. Memory signal: the pressure level (normal, warn, critical) of a host that declares the `macos` capability when it sent one (the wire does not say which OS a pressure value is from, so any other host's pressure is ignored), else available memory (Linux `MemAvailable`/`MemTotal`; macOS Prometheus available); with the swap-in rate (node `swap_in_per_s`, else the Linux `pswpin` rate). Critical pressure, or available memory under `shadow.mem_refuse_below_pct`, refuses the host; a host the hub dropped only for its own memory floor is judged again by this signal when it is known; a host with no memory reading stays dropped. The score is rebuilt as `mem * swap * load * jobs * capability - bridged * claim_cost` (the `cpu` term is dropped: CPU busy already decides the bucket), without the hub's hold and burst bonuses; a host with no score signals keeps the hub's score. |
 
 `capability` is `placement.capability.light.<host>` or
@@ -501,8 +502,68 @@ missing value is a reading the hub did not send: the fleet-state load value
 carries no `pressure`, `memory_free_pct` or node swap rate, only the
 Prometheus signals, so on that path a macOS host reads `available`; the
 `/v1/placement` path carries the node memory fields but no `signals`. Orders and
-inputs are cut at 16 hosts (`truncated`). `arms` is a map: later arms (hk 3651)
-add a key.
+inputs are cut at 16 hosts (`truncated`). `arms` is a map: later host-order arms
+add a key. The account arm `waste_first` is a separate object beside it.
+
+#### The waste_first account arm (hk 3651)
+
+The live walk ranks hosts first and then takes the best account on the best
+host that admits one. An account at waste risk that exists only on a
+lower-ranked host is never reached, and waste risk never moves a host's rank.
+The `waste_first` object records which account a pool-first order would have
+spent instead, next to the live choice. Live placement is unchanged.
+
+- **Candidates.** The pass-1 candidates of the job: every profile, rung and
+  account the live run bound to a host. A candidate joins at the first usable
+  host whose walk ranks it in pass 1, judged with that host's own credit-pacing
+  flag (T2997), not the selection-wide one. They are sorted by the live comparator
+  (`sortSelCands`: waste-risk pools first, then tier, grade, urgency and the
+  rest), the same comparison the live path uses. **Pass 2 is not modelled.**
+  Pass 2 is the credit band the live walk tries only when pass 1 chose nothing.
+  A live choice that came from pass 2 is recorded with `pass: 2`.
+- **Usable hosts.** The ranked hosts the walk could still use. A host the walk
+  found unreachable, or that reported no eligible host, is left out.
+- **Quota state.** Read from the readings the live run already holds; the arm
+  makes no call. The state is read per usable host. `admitted`: the live gate
+  passed it on that host. `admissible`: its readings passed and the live run
+  did not refuse it there. `refused`: it was refused before admission; or the
+  gate refused it on some host (the live walk then skips it on every host); or
+  an account-wide exhaustion is cached for its account; or the gate failed on
+  that host (a host-scoped failure holds on that host only). `unknown`: no
+  reading reached it. The first `admitted` or `admissible` (candidate, host)
+  pair in pool-first order is the choice. An `unknown` account is never chosen
+  and never assumed admitted; it is listed in `unknown`.
+- **Failure.** A panic in the arm, or a failed snapshot, is `shadow_error` with
+  the reason; the spawn goes on on the live choice.
+
+`waste_first` carries:
+
+- `outcome`: `agree` (the same account as live), `differs` (another account),
+  `no_choice` (no admitted or admissible account; the live choice is still
+  recorded), or `shadow_error` (`shadow_error` holds the reason).
+- `live` and `waste_first`: a choice each, with `host`, `profile`, `seat`,
+  `account_key`, `pool`, `tier`, `pass`, `waste_risk`, `unused_at_reset_pct`
+  and `reset_hours`. The last two are present only when the reading has them.
+- `left_unspent`, when the outcome is `differs`: the first waste-risk account
+  the arm could spend that the live choice did not, with `host`, `pool`,
+  `account_key`, `unused_at_reset_pct` and `reset_hours`.
+- `unknown`: account keys on a usable host whose quota state the live run never
+  observed (at most 16).
+
+The event's `outcome`, `detail` and host arms are the same as before this arm.
+The line is now written once admission has run, not before it. Its fields are
+unchanged; only its place in the events file moves. `placement.shadow.enabled =
+false` turns this arm off with the rest of the event.
+
+Example, from a fixture run (three hosts; `mac-b` ranks first and holds the
+ranked-tier account, `cloud-tiny` ranks last and holds the account at waste
+risk, 60% unused at an 8 h reset). The live walk spends `mac-b`; the arm would
+have spent `cloud-tiny`. The event's own `outcome` is still the host arms'
+(`agree`):
+
+```json
+"waste_first":{"outcome":"differs","live":{"host":"mac-b","profile":"sonnet","seat":"sonnet","account_key":"claude:00000000000000b2","pool":"claude","tier":"ranked","pass":1,"waste_risk":false},"waste_first":{"host":"cloud-tiny","profile":"sonnet","seat":"sonnet","account_key":"claude:00000000000000a1","pool":"claude","tier":"waste","pass":1,"waste_risk":true,"unused_at_reset_pct":60,"reset_hours":8},"left_unspent":{"host":"cloud-tiny","pool":"claude","account_key":"claude:00000000000000a1","unused_at_reset_pct":60,"reset_hours":8}}
+```
 
 One real event (macOS `mac-b` at warn pressure, 60% free, swapping hard; the
 hub scores it 100, so live and `fixed` keep it first and `measured` does not):

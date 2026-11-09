@@ -11,6 +11,7 @@ package fleetevent
 
 import (
 	"encoding/json"
+	"math"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -60,6 +61,55 @@ type PlacementShadow struct {
 	Truncated bool `json:"truncated,omitempty"`
 	// Inputs are the readings the arms used, one row per host, once per event.
 	Inputs []ShadowInput `json:"inputs,omitempty"`
+	// WasteFirst is the account arm (hk 3651). It is not a host order, so it
+	// sits beside Arms and never changes the event outcome.
+	WasteFirst *WasteFirst `json:"waste_first,omitempty"`
+}
+
+// WasteFirst records which account a pool-first order would have spent, next
+// to the account the live host-first order spent. Outcome is agree (same
+// account), differs (another account), no_choice (the arm found no admitted or
+// admissible account) or shadow_error (Error says how). Pass 1 only: the credit
+// band that admission tries last is not modelled (docs/placement.md).
+type WasteFirst struct {
+	Outcome string `json:"outcome"`
+	// Live is the account the live path chose, nil when it chose none.
+	Live *ShadowChoice `json:"live,omitempty"`
+	// Choice is the account the waste-first order would have chosen.
+	Choice *ShadowChoice `json:"waste_first,omitempty"`
+	// LeftUnspent is, when the outcome is differs, the first waste-risk account
+	// the waste-first order could spend that the live choice did not.
+	LeftUnspent *ShadowAccount `json:"left_unspent,omitempty"`
+	// Unknown lists accounts on a usable host whose quota state the live run
+	// never observed. They are never chosen; at most MaxCandidates.
+	Unknown []string `json:"unknown,omitempty"`
+	Error   string   `json:"shadow_error,omitempty"`
+}
+
+// ShadowChoice is one account choice: where it runs and the quota figures it
+// was ordered by. Pass is 1 for the ranked band and 2 for the credit band that
+// the live path tries only when pass 1 chose nothing.
+type ShadowChoice struct {
+	Host             string   `json:"host"`
+	Profile          string   `json:"profile"`
+	Seat             string   `json:"seat,omitempty"`
+	AccountKey       string   `json:"account_key"`
+	Pool             string   `json:"pool"`
+	Tier             string   `json:"tier,omitempty"`
+	Pass             int      `json:"pass"`
+	WasteRisk        bool     `json:"waste_risk"`
+	UnusedAtResetPct *float64 `json:"unused_at_reset_pct,omitempty"`
+	ResetHours       *float64 `json:"reset_hours,omitempty"`
+}
+
+// ShadowAccount names a waste-risk account that a choice left unspent, with the
+// unused share its longest window would have lost at reset.
+type ShadowAccount struct {
+	Host             string   `json:"host"`
+	Pool             string   `json:"pool"`
+	AccountKey       string   `json:"account_key"`
+	UnusedAtResetPct *float64 `json:"unused_at_reset_pct"`
+	ResetHours       *float64 `json:"reset_hours,omitempty"`
 }
 
 // ShadowOrder is a host order, best first.
@@ -157,6 +207,8 @@ const (
 	maxCode = 64
 	// maxJob bounds the job field.
 	maxJob = 128
+	// maxAccountKey bounds an account key, a fleet id (waste_first arm).
+	maxAccountKey = 128
 	// DefaultMaxBytes is the size at which the file rotates to <path>.1.
 	DefaultMaxBytes = 4 << 20
 	// FileName is the events file inside a tool's events directory.
@@ -361,6 +413,7 @@ func (p *PlacementShadow) bounded() *PlacementShadow {
 		return nil
 	}
 	out := &PlacementShadow{Role: Code(p.Role), WorkClass: Code(p.WorkClass), Live: p.Live.bounded(), Arms: map[string]ShadowArm{}, LoadMeasure: Code(p.LoadMeasure), Truncated: p.Truncated}
+	out.WasteFirst = p.WasteFirst.bounded()
 	out.Truncated = out.Truncated || len(p.Live.Order) > MaxCandidates || len(p.Inputs) > MaxCandidates || len(p.Arms) > MaxShadowArms
 	names := make([]string, 0, len(p.Arms))
 	for name := range p.Arms {
@@ -382,6 +435,53 @@ func (p *PlacementShadow) bounded() *PlacementShadow {
 		out.Inputs = append(out.Inputs, in)
 	}
 	return out
+}
+
+// finiteOrNil drops a NaN or infinite quota figure: encoding/json cannot write
+// it, and a bad figure must not cost the whole placement_shadow line.
+func finiteOrNil(p *float64) *float64 {
+	if p == nil || math.IsNaN(*p) || math.IsInf(*p, 0) {
+		return nil
+	}
+	return p
+}
+
+// bounded keeps the waste_first arm to its own contract: labels through Code,
+// account keys (fleet ids, which Code would rewrite) through Redact and Bound.
+func (w *WasteFirst) bounded() *WasteFirst {
+	if w == nil {
+		return nil
+	}
+	out := &WasteFirst{Outcome: Code(w.Outcome), Live: w.Live.bounded(), Choice: w.Choice.bounded(), LeftUnspent: w.LeftUnspent.bounded(), Error: Bound(Redact(w.Error), MaxDetail)}
+	for i, u := range w.Unknown {
+		if i == MaxCandidates {
+			break
+		}
+		out.Unknown = append(out.Unknown, Bound(Redact(u), maxAccountKey))
+	}
+	return out
+}
+
+func (a *ShadowAccount) bounded() *ShadowAccount {
+	if a == nil {
+		return nil
+	}
+	out := *a
+	out.Host, out.Pool = Code(a.Host), Code(a.Pool)
+	out.UnusedAtResetPct, out.ResetHours = finiteOrNil(a.UnusedAtResetPct), finiteOrNil(a.ResetHours)
+	out.AccountKey = Bound(Redact(a.AccountKey), maxAccountKey)
+	return &out
+}
+
+func (c *ShadowChoice) bounded() *ShadowChoice {
+	if c == nil {
+		return nil
+	}
+	out := *c
+	out.Host, out.Profile, out.Seat, out.Pool, out.Tier = Code(c.Host), Code(c.Profile), Code(c.Seat), Code(c.Pool), Code(c.Tier)
+	out.UnusedAtResetPct, out.ResetHours = finiteOrNil(c.UnusedAtResetPct), finiteOrNil(c.ResetHours)
+	out.AccountKey = Bound(Redact(c.AccountKey), maxAccountKey)
+	return &out
 }
 
 func (o ShadowOrder) bounded() ShadowOrder {

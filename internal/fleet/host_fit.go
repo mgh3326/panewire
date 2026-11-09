@@ -288,8 +288,18 @@ func (sp *selPresence) admitHostFirst(ctx context.Context, s Spawn, p *selPlan, 
 		role = p.req.route.role
 	}
 	// Record how the shadow arms would have ordered the same hosts. The live
-	// order above is not touched.
-	sp.a.recordPlacementShadow(s, role, p.req.tags, sp.hosts, ranked, sp.now)
+	// order above is not touched. The event is written after the passes below,
+	// once the waste_first arm can read the quota states they produce.
+	shadow := sp.a.recordPlacementShadow(s, role, p.req.tags, sp.hosts, ranked, sp.now)
+	// The waste_first order is collected as the walk below judges each host
+	// (wasteSnapBuilder). Candidates the readings dropped before admission go in
+	// first: the arm reads them as refused or unknown.
+	wb := newWasteSnapBuilder()
+	for _, c := range p.cands {
+		if !slices.Contains(pending, c) {
+			wb.add(c, "")
+		}
+	}
 	// Order each host's present candidates once, on the whole host, so the
 	// credit-pacing rule sees every candidate the host holds. The passes then
 	// take their share in that order.
@@ -309,13 +319,30 @@ func (sp *selPresence) admitHostFirst(ctx context.Context, s Spawn, p *selPlan, 
 				band, creditBand = 1, true
 			}
 			bands[i][band] = append(bands[i][band], c)
+			if band == 0 {
+				wb.add(c, h.name)
+			}
 		}
 	}
-	st := &hostAdmission{refusedOn: map[*selCand]string{}, exhausted: map[string]hostTry{}, down: map[string]string{}}
+	st := &hostAdmission{refusedOn: map[*selCand]string{}, exhausted: map[string]hostTry{}, down: map[string]string{}, failedOn: map[*selCand]map[string]bool{}}
 	sp.admitPass(ctx, s, p, pending, ranked, st, 1, func(i int) []*selCand { return bands[i][0] })
+	livePass := 1
 	if p.chosen == nil && creditBand {
 		sp.admitPass(ctx, s, p, pending, ranked, st, 2, func(i int) []*selCand { return bands[i][1] })
+		if p.chosen != nil {
+			livePass = 2
+		}
 	}
+	// The waste_first arm reads the states the passes left. A host the walk
+	// could not reach, or that failed its gate, is not usable for it.
+	var usable []selHost
+	for _, h := range ranked {
+		if sp.unreachable[h.name] == "" && st.down[h.name] == "" {
+			usable = append(usable, h)
+		}
+	}
+	snap, snapErr := wb.done(usable)
+	sp.a.finishPlacementShadow(shadow, snap, snapErr, st, p, usable, livePass)
 	for _, h := range sp.hosts {
 		if h.fit != "" {
 			p.hosts = append(p.hosts, hostTrace{host: h, missing: missingCaps(h.cfg, p.req.tags), outcome: h.fit})
@@ -334,6 +361,17 @@ type hostAdmission struct {
 	refusedOn map[*selCand]string
 	exhausted map[string]hostTry
 	down      map[string]string
+	// failedOn holds each host a candidate's gate failed on (hostGateFailure).
+	// Unlike refusedOn, the walk does not skip the candidate on other hosts for
+	// it; the waste_first arm reads it per host.
+	failedOn map[*selCand]map[string]bool
+}
+
+func (st *hostAdmission) markFailed(c *selCand, host string) {
+	if st.failedOn[c] == nil {
+		st.failedOn[c] = map[string]bool{}
+	}
+	st.failedOn[c][host] = true
 }
 
 // admitPass walks the ranked hosts once with the candidates cands(i) gives
@@ -414,6 +452,9 @@ func (sp *selPresence) admitPass(ctx context.Context, s Spawn, p *selPlan, pendi
 			t.tries = append(t.tries, hostTry{cand: c, result: "refused", reason: c.reason, code: c.code})
 			if c.code == outcomeQuotaExhausted && c.reason != "projected_exhaust" {
 				st.exhausted[c.accountKey] = hostTry{result: "skipped", reason: "refused_on:" + h.name + ":" + c.reason, code: c.code}
+			}
+			if hostGateFailure(err) {
+				st.markFailed(c, h.name)
 			}
 			switch {
 			case !hostGateFailure(err):

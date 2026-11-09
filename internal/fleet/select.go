@@ -985,6 +985,14 @@ func orderSelCands(pending []*selCand) {
 	for _, c := range pending {
 		c.behindCredit = creditLeft && c.paced
 	}
+	sortSelCands(pending)
+}
+
+// sortSelCands is the comparator of orderSelCands without its credit-pacing
+// step: it reads each candidate's behindCredit as already set and writes
+// nothing. The waste_first shadow (placement_shadow_waste.go) sorts copies with
+// it, so the live order and the shadow order come from one comparison.
+func sortSelCands(pending []*selCand) {
 	slices.SortStableFunc(pending, func(x, y *selCand) int {
 		// Waste-risk pools rank ahead of every tier, free included, and among
 		// themselves by waste urgency first; everything else keeps the tier
