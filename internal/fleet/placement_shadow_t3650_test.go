@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -501,31 +502,78 @@ func TestPlacementShadowPressureNeedsMacOS_T3650(t *testing.T) {
 // (hubHosts), so it has no view; the live order still contains it, and the
 // arms apply the hub's verdict and leave it out.
 func TestPlacementShadowSlotFullHost_T3650(t *testing.T) {
-	a, s, _, src := hostFirstFixture(t, "worker", "B", workerRows,
-		map[string]string{"mac-b": testClaudeB, "cloud-small": testClaudeB, "cloud-tiny": testClaudeB, "pi": testClaudeB}, nil)
-	a.Config.Hub = map[string]any{"hub_url": "https://hub.invalid"}
-	now := a.Now()
-	load := func(host string, slotFull bool) map[string]any {
-		m := fsLoad(host, true, 50, 0.1, now.Add(-5*time.Second))
-		m["load"].(map[string]any)["slot_full"] = slotFull
-		return m
+	hosts := []string{"mac-b", "cloud-small", "cloud-tiny", "pi"}
+	fixture := func(t *testing.T, full ...string) (*App, Spawn, *fakeStateReader) {
+		a, s, _, src := hostFirstFixture(t, "worker", "B", workerRows,
+			map[string]string{"mac-b": testClaudeB, "cloud-small": testClaudeB, "cloud-tiny": testClaudeB, "pi": testClaudeB}, nil)
+		a.Config.Hub = map[string]any{"hub_url": "https://hub.invalid"}
+		reader := &fakeStateReader{}
+		a.State = reader
+		a.Source = stateSource{a: a, inner: src}
+		reader.snap = slotFullSnapshot(t, a, full...)
+		return a, s, reader
 	}
-	a.State = &fakeStateReader{snap: fsSnapshot(t, now,
-		fsPublisher("mac-b", true, now), fsPublisher("cloud-small", true, now), fsPublisher("cloud-tiny", true, now), fsPublisher("pi", true, now),
-		load("mac-b", true), load("cloud-small", false), load("cloud-tiny", false), load("pi", false))}
-	a.Source = stateSource{a: a, inner: src}
-	events := shadowEvents(a)
-	sel, err := a.selectProfile(context.Background(), s)
-	if err != nil || sel == nil {
-		t.Fatal(err)
-	}
-	sh := shadowEventOf(t, *events).Shadow
-	if !strings.Contains(rankNames(sh.Live.Order), "mac-b") {
-		t.Fatalf("live order %s must still list the slot-full host", rankNames(sh.Live.Order))
-	}
-	for _, arm := range []string{"fixed", "measured"} {
-		if strings.Contains(rankNames(sh.Arms[arm].Order), "mac-b") {
-			t.Fatalf("%s order %s ranks the slot-full host", arm, rankNames(sh.Arms[arm].Order))
+	armsExclude := func(t *testing.T, sh *fleetevent.PlacementShadow, host string, excluded bool) {
+		t.Helper()
+		for _, arm := range []string{"fixed", "measured"} {
+			if got := strings.Contains(rankNames(sh.Arms[arm].Order), host); got == excluded {
+				t.Fatalf("%s order %s: %s excluded=%v, want %v", arm, rankNames(sh.Arms[arm].Order), host, !got, excluded)
+			}
 		}
 	}
+	run := func(t *testing.T, a *App, s Spawn) *fleetevent.PlacementShadow {
+		t.Helper()
+		events := shadowEvents(a)
+		if sel, err := a.selectProfile(context.Background(), s); err != nil || sel == nil {
+			t.Fatal(err)
+		}
+		return shadowEventOf(t, *events).Shadow
+	}
+
+	t.Run("one full host", func(t *testing.T) {
+		a, s, _ := fixture(t, "mac-b")
+		sh := run(t, a, s)
+		if !strings.Contains(rankNames(sh.Live.Order), "mac-b") {
+			t.Fatalf("live order %s must still list the slot-full host", rankNames(sh.Live.Order))
+		}
+		armsExclude(t, sh, "mac-b", true)
+	})
+	t.Run("every host full", func(t *testing.T) {
+		a, s, _ := fixture(t, hosts...)
+		sh := run(t, a, s)
+		for _, h := range hosts {
+			armsExclude(t, sh, h, true)
+		}
+	})
+	t.Run("a wakeable full host is not a sleeper fallback", func(t *testing.T) {
+		a, s, _ := fixture(t, "mac-b")
+		a.Config.Hosts["mac-b"]["wake"] = "panewire"
+		sh := run(t, a, s)
+		armsExclude(t, sh, "mac-b", true)
+	})
+	t.Run("the next read forgets the previous one", func(t *testing.T) {
+		a, s, reader := fixture(t, "mac-b")
+		clock := a.Now()
+		a.Now = func() time.Time { return clock }
+		reader.snap = slotFullSnapshot(t, a, "mac-b")
+		run(t, a, s)
+		clock = clock.Add(stateSnapshotMaxAge)
+		reader.snap, reader.err = FleetSnapshot{}, fmt.Errorf("hub down")
+		sh := run(t, a, s)
+		armsExclude(t, sh, "mac-b", false)
+	})
+}
+
+// slotFullSnapshot is a fleet-state snapshot with every placement host
+// connected and the named ones slot-full.
+func slotFullSnapshot(t *testing.T, a *App, full ...string) FleetSnapshot {
+	t.Helper()
+	now := a.Now()
+	var states []map[string]any
+	for _, host := range []string{"mac-b", "cloud-small", "cloud-tiny", "pi"} {
+		m := fsLoad(host, true, 50, 0.1, now.Add(-5*time.Second))
+		m["load"].(map[string]any)["slot_full"] = slices.Contains(full, host)
+		states = append(states, fsPublisher(host, true, now), m)
+	}
+	return fsSnapshot(t, now, states...)
 }

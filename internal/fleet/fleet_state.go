@@ -233,13 +233,17 @@ func (m FleetStateMessage) validAt() time.Time {
 // value: any other case falls back to `panewire place`, whose placement call
 // is also what triggers the hub's wake-on-spill for a sleeping host.
 func (a *App) hubHosts(ctx context.Context) ([]HostView, string) {
+	// The slot-full names belong to one successful read of the host list: drop
+	// the previous read's before trying another.
+	if a.fleetLog != nil {
+		a.fleetLog.slotFull = nil
+	}
 	snap, why := a.fleetSnapshot(ctx)
 	if snap == nil {
 		return nil, why
 	}
 	var out []HostView
 	slotFull := map[string]bool{}
-	a.fleetLog.slotFull = nil
 	for _, m := range snap.States {
 		if m.Kind != "load" || m.Load == nil {
 			continue
@@ -272,10 +276,12 @@ func (a *App) hubHosts(ctx context.Context) ([]HostView, string) {
 		}
 		out = append(out, hv)
 	}
+	// Kept even when every host is slot-full (out is nil and the live path
+	// falls back to the direct read, which omits them too).
+	a.fleetLog.slotFull = slotFull
 	if out == nil {
 		return nil, stateAbsent
 	}
-	a.fleetLog.slotFull = slotFull
 	sort.SliceStable(out, func(i, j int) bool { return *out[i].Score > *out[j].Score })
 	return out, ""
 }

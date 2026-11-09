@@ -491,7 +491,8 @@ func shadowFixed(hosts []selHost, req shadowReq, pol shadowPolicy) ([]selHost, s
 		}
 		h.over = h.load != nil && *h.load >= threshold ||
 			h.local && h.guard != nil && (h.local5 == nil || *h.local5 >= *h.guard)
-		if h.fit == "" && h.awake && !hubUsable(*h, false) {
+		// A slot-full host is unusable awake or asleep: the hub's verdict.
+		if h.fit == "" && (h.slotFull || h.awake && !hubUsable(*h, false)) {
 			h.fit = "unusable"
 		}
 	}
