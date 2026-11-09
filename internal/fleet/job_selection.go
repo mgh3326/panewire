@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+
+	"github.com/mgh3326/panewire/internal/textbound"
 )
 
 const maxJobSelectionBytes = 32 * 1024
@@ -47,9 +49,6 @@ func jobSelection(s Spawn, source string) map[string]any {
 		}
 		return ""
 	}(), s.Host, "local")}
-	if host["chosen"] == "local" {
-		host["chosen"] = firstNonempty(s.Host, "local")
-	}
 	host["source"] = source
 	if s.placement != nil && s.placement.plan != nil {
 		plan := s.placement.plan
@@ -196,6 +195,9 @@ func trimJobSelection(selection map[string]any) {
 			}
 			if !trimmed {
 				host, _ := selection["host"].(map[string]any)
+				if chosen, ok := host["chosen"].(string); ok {
+					host["chosen"] = textbound.PrefixWithin(chosen, 4_000)
+				}
 				clear(selection)
 				selection["host"] = host
 				trimmed = true
