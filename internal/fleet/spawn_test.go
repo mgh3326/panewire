@@ -55,9 +55,9 @@ func TestSpawnParseValidatesAstraPurpose(t *testing.T) {
 }
 
 func TestAstraPurposeParseRefusalDoesNotSubmit(t *testing.T) {
-	a, _, runner, _ := cmdFixture(t)
+	a, s, runner, _ := cmdFixture(t)
 	before := len(runner.Calls)
-	err := a.Run(context.Background(), []string{"spawn", "-m", "codex-astra", "--purpose", "free text"})
+	err := a.Run(context.Background(), []string{"spawn", "-c", s.CWD, "-p", s.Prompt, "-w", s.Workspace, "-l", s.Label, "--job", s.Job, "--t", s.T, "--task", s.Task, "--owner", "parent", "--role", "worker", "-m", "codex-astra", "--host", "local", "--override-reason", "fixture", "--containment", "hk:12", "--purpose", "free text"})
 	if exitCode(err) != exitUsage || len(runner.Calls) != before {
 		t.Fatalf("parse refusal submitted work: err=%v calls=%d before=%d", err, len(runner.Calls), before)
 	}
