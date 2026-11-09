@@ -128,7 +128,8 @@ func RunCLI(args []string, cfg CLIConfig) int {
 		return ExitUsage
 	}
 	if *agent != "" && !validStatus(*status) {
-		fmt.Fprintf(os.Stderr, "panewire wait: --status must be idle, working, blocked, done or unknown, not %q\n", *status)
+		// Never echo the rejected value: it is caller input (hk 3733).
+		fmt.Fprintln(os.Stderr, "panewire wait: --status must be idle, working, blocked, done or unknown")
 		return ExitConditionInvalid
 	}
 	path := cfg.SocketPath

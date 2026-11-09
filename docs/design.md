@@ -166,7 +166,7 @@ expect: name=orch-mock cwd=auto_trader
 
 실패 모드: prompt 파일 부재/읽기 실패, provenance 누락, metadata 누락, target 모호성, 수신자 identity 불일치, herdr schema capability 불능은 exit 5 또는 4다. `agent.prompt` 정상 응답만 받고 성공으로 끝내지 않으며, 제출 또는 요청한 uptake 증거가 없으면 exit 6이다. 본문은 기본적으로 DB에 저장하지 않고 hash와 경로만 기록한다.
 
-사용 오류는 조용히 끝나지 않는다(hk 3733). `--from`·`--to`·`--file` 누락, `--timeout` ≤ 0, `tool|status-transition` 이외의 `--uptake`는 exit 5와 함께 stderr에 `panewire prompt: missing --from (sender provenance), --to (recipient target); --timeout must be > 0`처럼 문제 전부를 한 줄로 적는다. 데몬이 오류 문구 없이 거부하면 `panewire prompt: refused (code N)`을 적는다. `panewire wait`도 같다: `--agent`의 `--status`가 허용값이 아니면 exit 5와 그 값을, 문구 없는 거부는 `panewire wait: refused (code N)`을 적는다.
+사용 오류는 조용히 끝나지 않는다(hk 3733). `--from`·`--to`·`--file` 누락, `--timeout` ≤ 0, `tool|status-transition` 이외의 `--uptake`는 exit 5와 함께 stderr에 `panewire prompt: missing --from (sender provenance), --to (recipient target); --timeout must be > 0`처럼 문제 전부를 한 줄로 적는다. 데몬이 오류 문구 없이 거부하면 `panewire prompt: refused (code N)`을 적는다. `panewire wait`도 같다: `--agent`의 `--status`가 허용값이 아니면 exit 5와 허용값 목록을(거부된 값은 호출자 입력이라 되풀이하지 않는다), 문구 없는 거부는 `panewire wait: refused (code N)`을 적는다.
 
 ## 오배송 방지와 uptake
 
