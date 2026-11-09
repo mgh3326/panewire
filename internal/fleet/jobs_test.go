@@ -102,15 +102,17 @@ func (s *fakeJobStore) record(t *testing.T, jobID string) map[string]any {
 // states, 404 not_found. calls records the request order for assertions
 // against runner calls.
 type fakeHK struct {
-	srv     *httptest.Server
-	mu      sync.Mutex
-	records map[string]map[string]any
-	calls   []string
-	missing map[string]int // job → remaining 404s before its record appears
-	down    bool
+	srv             *httptest.Server
+	mu              sync.Mutex
+	records         map[string]map[string]any
+	calls           []string
+	missing         map[string]int // job → remaining 404s before its record appears
+	down            bool
+	rejectSelection bool
+	putBodies       []map[string]any
 }
 
-var jobRecordFields = []string{"state", "role", "label", "family", "profile", "model", "harness", "effort", "pool", "owner_lane", "parent_lane", "parent_job", "pane_id", "worktree", "report_doc", "report_sha256", "result", "end_reason"}
+var jobRecordFields = []string{"state", "role", "label", "family", "profile", "model", "harness", "effort", "pool", "owner_lane", "parent_lane", "parent_job", "pane_id", "worktree", "report_doc", "report_sha256", "result", "end_reason", "selection"}
 
 func newFakeHK(t *testing.T) *fakeHK {
 	t.Helper()
@@ -192,6 +194,12 @@ func (h *fakeHK) serve(w http.ResponseWriter, r *http.Request) {
 				h.fail(w, 400, "invalid_context")
 				return
 			}
+			h.putBodies = append(h.putBodies, fields)
+			if h.rejectSelection && fields["selection"] != nil {
+				h.rejectSelection = false
+				h.fail(w, 400, "invalid_selection")
+				return
+			}
 			for k := range fields {
 				if !slices.Contains(jobRecordFields, k) {
 					h.fail(w, 400, "invalid_context")
@@ -221,6 +229,113 @@ func (h *fakeHK) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.fail(w, 404, "not_found")
+}
+
+func TestSpawnedSelectionMapsTraceAndOverride(t *testing.T) {
+	a := testApp(t)
+	h := newFakeHK(t)
+	a.JobStore = h.client()
+	s := Spawn{Job: "selection-job", Sel: map[string]any{
+		"chosen":         map[string]any{"seat": "codex-sol", "canon": "codex-sol", "model_id": "model-x", "why": "grade B fits", "grade": "B", "tier": "free", "projected_pct": 12.0, "secret_internal": "omit"},
+		"urgency_source": "quota_policy",
+		"absolute_path":  a.Home,
+		"brief_text":     "Please implement and verify the requested change.",
+		"candidates":     []any{map[string]any{"seat": "codex-sol", "outcome": "admitted", "account_key": "omit"}, map[string]any{"seat": "sonnet", "outcome": "below_choice"}},
+	}, OverrideReason: "fixture"}
+	s.placement = &placementDecision{
+		plan:      &placePlan{candidates: []placeCandidate{{name: "host-b", eligible: true}, {name: "host-a", outcome: "unreachable"}}},
+		execution: placementExecution{Host: "host-b"},
+	}
+	h.claimJob(s.Job, float64(42), "test-host")
+	a.spawnedJobRecord(context.Background(), s, Seat{Family: "openai", Kind: "cmd"}, Launch{ModelID: "model-x"}, "pane", "pool", "owner")
+	selection, ok := h.record(t, s.Job)["selection"].(map[string]any)
+	if !ok || selection["override_reason"] != "fixture" {
+		t.Fatalf("selection missing override: %v", selection)
+	}
+	chosen := selection["chosen"].(map[string]any)
+	if chosen["why"] != "grade B fits" || chosen["grade"] != "B" || chosen["secret_internal"] != nil {
+		t.Fatalf("chosen mapping=%v", chosen)
+	}
+	if got := selection["candidates"].([]any)[0].(map[string]any)["seat"]; got != "codex-sol" {
+		t.Fatalf("chosen candidate first: %v", selection["candidates"])
+	}
+	b, _ := json.Marshal(selection)
+	t.Logf("fixture selection JSON: %s", b)
+	if strings.Contains(string(b), a.Home) || strings.Contains(string(b), "Please implement and verify") {
+		t.Fatalf("private trace data reached the selection body: %s", b)
+	}
+	host := selection["host"].(map[string]any)
+	if host["chosen"] != "host-b" || host["source"] != "score" {
+		t.Fatalf("host selection=%v", selection["host"])
+	}
+	hostCandidates := host["candidates"].([]any)
+	if hostCandidates[0].(map[string]any)["machine"] != "host-b" || hostCandidates[1].(map[string]any)["outcome"] != "unreachable" {
+		t.Fatalf("host candidates=%v", hostCandidates)
+	}
+}
+
+func TestSpawnedSelectionIncludesModelOverrideReason(t *testing.T) {
+	a, s, _, _ := cmdFixture(t)
+	h := newFakeHK(t)
+	a.JobStore = h.client()
+	if err := a.Spawn(context.Background(), s); err != nil {
+		t.Fatal(err)
+	}
+	selection, _ := h.record(t, s.Job)["selection"].(map[string]any)
+	if selection["override_reason"] != "fixture" {
+		t.Fatalf("selection override_reason=%v", selection["override_reason"])
+	}
+}
+
+func TestSpawnedSelectionTrimsUnderHKLimit(t *testing.T) {
+	candidates := make([]any, 0, 1000)
+	for i := 0; i < 1000; i++ {
+		candidates = append(candidates, map[string]any{"seat": "candidate", "outcome": strings.Repeat("x", 100)})
+	}
+	s := Spawn{Sel: map[string]any{"chosen": map[string]any{"seat": "chosen", "why": "kept"}, "candidates": candidates}}
+	got := jobSelection(s, "local")
+	b, err := json.Marshal(got)
+	if err != nil || len(b) > maxJobSelectionBytes {
+		t.Fatalf("selection size=%d err=%v", len(b), err)
+	}
+	if got["chosen"].(map[string]any)["why"] != "kept" || len(got["candidates"].([]any)) == len(candidates) {
+		t.Fatalf("selection not safely trimmed: %d candidates", len(got["candidates"].([]any)))
+	}
+}
+
+func TestSpawnedSelectionBadRequestRetriesWithoutSelection(t *testing.T) {
+	a, s, _, _ := cmdFixture(t)
+	h := newFakeHK(t)
+	h.rejectSelection = true
+	a.JobStore = h.client()
+	s.Sel = map[string]any{"chosen": map[string]any{"why": "fixture"}}
+	if err := a.Spawn(context.Background(), s); err != nil {
+		t.Fatal(err)
+	}
+	if len(h.putBodies) != 2 || h.putBodies[0]["selection"] == nil || h.putBodies[1]["selection"] != nil {
+		t.Fatalf("PUT retry bodies=%v", h.putBodies)
+	}
+	if h.record(t, s.Job)["state"] != "spawned" {
+		t.Fatalf("spawned record lost: %v", h.record(t, s.Job))
+	}
+}
+
+func TestSpawnedSelectionNeverCarriesPromptOrAbsolutePaths(t *testing.T) {
+	a := testApp(t)
+	h := newFakeHK(t)
+	a.JobStore = h.client()
+	s := Spawn{Job: "private-input", Sel: map[string]any{
+		"chosen":        map[string]any{"why": "grade B"},
+		"absolute_path": a.Home,
+		"brief_text":    "Please implement and verify the requested change.",
+		"candidates":    []any{map[string]any{"seat": "seat", "outcome": "admitted"}},
+	}}
+	h.claimJob(s.Job, float64(42), "test-host")
+	a.spawnedJobRecord(context.Background(), s, Seat{Family: "openai"}, Launch{}, "pane", "pool", "owner")
+	b, _ := json.Marshal(h.record(t, s.Job)["selection"])
+	if strings.Contains(string(b), a.Home) || strings.Contains(string(b), "Please implement and verify") || strings.Contains(string(b), "brief_text") {
+		t.Fatalf("sensitive spawn input reached hk: %s", b)
+	}
 }
 
 func (h *fakeHK) client() JobStore { return newHKJobs(&hkQuota{base: h.srv.URL, token: "test-token"}) }
