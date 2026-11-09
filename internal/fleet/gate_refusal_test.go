@@ -162,8 +162,15 @@ func TestRoleDeniedTraceBoundsAndFlattensGateReason(t *testing.T) {
 		t.Fatalf("expected one attempted gate row, got %v", tried)
 	}
 	reason := tried[0].(map[string]any)["reason"].(string)
-	if len(reason) > 201 || strings.ContainsAny(reason, "\r\n") || !strings.HasPrefix(reason, "role_restricted:") {
+	if len(reason) > 200 || strings.ContainsAny(reason, "\r\n") || !strings.HasPrefix(reason, "role_restricted:") || !strings.HasSuffix(reason, "host=mac-personal") {
 		t.Fatalf("role gate trace is not bounded and flattened: %d bytes %q", len(reason), reason)
+	}
+}
+
+func TestGateReasonClipBoundIncludesEllipsis(t *testing.T) {
+	got := clipGateReason("role_restricted:"+strings.Repeat("x", 250), 200)
+	if len(got) > 200 || !strings.HasPrefix(got, "role_restricted:") {
+		t.Fatalf("clipped role reason exceeds bound or lost prefix: %d bytes %q", len(got), got)
 	}
 }
 
