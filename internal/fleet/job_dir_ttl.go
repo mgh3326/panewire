@@ -344,9 +344,10 @@ func (p *JobDirTTL) expire(ctx context.Context, a *App, root, id string, scan jo
 	// in the same root. A writer that wrote before it shows in the
 	// tombstone's inventory. One that runs MkdirAll under the job's name
 	// after it makes a fresh dir there, which this pass does not delete: a
-	// later pass judges it like any other dir. The one exception is below:
-	// a changed tombstone renamed back replaces a fresh dir that is still
-	// empty. A writer holding an fd opened before the rename can still
+	// later pass judges it like any other dir. If the tombstone changed, any
+	// dir under the job's name, empty or not, makes the rename back fail
+	// (os.Rename refuses an existing directory target) and the tombstone
+	// stays. A writer holding an fd opened before the rename can still
 	// write unseen (docs/job-dir-ttl.md).
 	tomb := filepath.Join(root, fmt.Sprintf("%s%s-%d", jobDirTombstone, id, a.Now().UnixNano()))
 	if _, err = os.Lstat(tomb); !errors.Is(err, fs.ErrNotExist) {

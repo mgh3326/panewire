@@ -167,9 +167,10 @@ After the rename, the job's name no longer exists: a writer that opens a
 file under it fails, while a writer that first runs `MkdirAll` recreates a
 fresh, empty directory under that name. That fresh directory is not
 deleted; a later pass judges it as any other. The one exception is step 3:
-when the tombstone changed and the fresh directory is still empty, the
-rename back replaces it, and no data is lost. A non-empty fresh directory
-makes the rename back fail, so the tombstone stays (`tombstone-left`). A
+when the tombstone changed and any directory exists under the job's name,
+empty or not, the rename back fails (Go's `os.Rename` refuses an existing
+directory target), so the tombstone stays as `tombstone-left` for the
+operator and nothing is deleted. A
 writer that wrote before the rename shows in the tombstone's inventory.
 **Residual
 window:** a writer holding a file descriptor it opened in the directory

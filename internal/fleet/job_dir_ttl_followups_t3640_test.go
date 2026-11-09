@@ -423,8 +423,9 @@ func TestJobDirTTLReportThroughAnotherAlias(t *testing.T) {
 
 // Case 15: a writer that runs MkdirAll after the rename makes a fresh dir
 // under the job's name. An empty one survives while the tombstone is
-// unchanged, and a changed tombstone renamed back replaces it; a non-empty one blocks the rename
-// back and the tombstone stays.
+// unchanged. When the tombstone changed, any fresh dir under the job's name,
+// empty or not, makes the rename back fail (os.Rename refuses an existing
+// directory target) and the tombstone stays.
 func TestJobDirTTLFreshDirAfterRename(t *testing.T) {
 	t.Run("empty fresh dir, unchanged tombstone", func(t *testing.T) {
 		r := newTTLRig(t)
@@ -466,17 +467,27 @@ func TestJobDirTTLFreshDirAfterRename(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		wantKeep(t, r, out, "j1", "changed-during-pass")
+		wantKeep(t, r, out, "j1", "tombstone-left")
+		left := r.tombstones()
+		if len(left) != 1 {
+			t.Fatalf("tombstones = %v, want exactly one", left)
+		}
 		for _, name := range []string{"report.md", "brief.md", "findings.json", "events"} {
-			if !r.present("j1", name) {
-				t.Fatalf("the renamed-back dir lacks %s", name)
+			if _, err := os.Lstat(filepath.Join(r.a.Jobs, left[0], name)); err != nil {
+				t.Fatalf("the tombstone lost %s: %v", name, err)
 			}
 		}
-		if left := r.tombstones(); len(left) != 0 {
-			t.Fatalf("tombstones left behind: %v", left)
+		entries, err := os.ReadDir(r.dir("j1"))
+		if err != nil || len(entries) != 0 {
+			t.Fatalf("the fresh dir = %v, %v; want it kept and empty", entries, err)
 		}
-		if len(r.events) != 0 {
-			t.Fatalf("a kept dir recorded fleet events %+v", r.events)
+		for _, e := range r.events {
+			if e.Outcome == "deleted" {
+				t.Fatalf("a deletion event was recorded: %+v", e)
+			}
+		}
+		if len(r.events) != 1 || r.events[0].Kind != "job_dir_expired" || r.events[0].Outcome != "tombstone_left" {
+			t.Fatalf("fleet events = %+v, want one tombstone_left", r.events)
 		}
 	})
 	t.Run("non-empty fresh dir, changed tombstone", func(t *testing.T) {
