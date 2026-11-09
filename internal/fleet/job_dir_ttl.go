@@ -251,8 +251,15 @@ func (p *JobDirTTL) decide(ctx context.Context, a *App, root, id string, panes j
 		recorded = append(recorded, s.Report)
 		if s.ReportRelative != "" {
 			// Relative to the jobs root of the node that ran it; the same
-			// layout here names this dir.
-			recorded = append(recorded, filepath.Join(a.Jobs, s.ReportRelative))
+			// layout here names this dir. Joined as written, never through
+			// filepath.Join: cleaning would turn link/../summary.md into
+			// summary.md before jobDirReportFiles sees it. A value that is
+			// absolute or not clean (a . or .. segment, a doubled or
+			// trailing separator) is not clean once joined either, so it
+			// keeps the dir there as report-path-unreadable, at its place
+			// in the gate order.
+			jobs := strings.TrimSuffix(filepath.Clean(a.Jobs), "/")
+			recorded = append(recorded, jobs+"/"+s.ReportRelative)
 		}
 	}
 	if j.Keep {
@@ -334,10 +341,13 @@ func (p *JobDirTTL) expire(ctx context.Context, a *App, root, id string, scan jo
 		return kept(reason)
 	}
 	// The dir leaves the job namespace in one atomic rename to a tombstone
-	// in the same root. A writer that opens a path under the job's name
-	// after it fails; one that wrote before it shows in the tombstone's
-	// inventory. Only a writer holding an fd opened before the rename can
-	// still write unseen (docs/job-dir-ttl.md).
+	// in the same root. A writer that wrote before it shows in the
+	// tombstone's inventory. One that runs MkdirAll under the job's name
+	// after it makes a fresh dir there, which this pass does not delete: a
+	// later pass judges it like any other dir. The one exception is below:
+	// a changed tombstone renamed back replaces a fresh dir that is still
+	// empty. A writer holding an fd opened before the rename can still
+	// write unseen (docs/job-dir-ttl.md).
 	tomb := filepath.Join(root, fmt.Sprintf("%s%s-%d", jobDirTombstone, id, a.Now().UnixNano()))
 	if _, err = os.Lstat(tomb); !errors.Is(err, fs.ErrNotExist) {
 		return kept("tombstone-busy")
