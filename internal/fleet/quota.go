@@ -169,16 +169,6 @@ type CLIQuota struct {
 	Accounts     map[string]string
 }
 
-func (q CLIQuota) Launch(ctx context.Context, r QuotaRequest) (Launch, error) {
-	return launchResult(q.runLaunch(ctx, r))
-}
-
-// runLaunch runs `pacelever policy launch PROFILE --json` for one request.
-func (q CLIQuota) runLaunch(ctx context.Context, r QuotaRequest) Result {
-	a := quotaArgs([]string{"policy", "launch", r.Profile, "--json"}, r)
-	return runQuotaCommand(ctx, q.Runner, Command{Name: q.Binary, Args: a, Env: quotaE6Env(r.E6Arm)}, "quota catalog", 15*time.Second)
-}
-
 // launchResult reads a policy launch run into the launch it resolved; a stale
 // catalog is refused.
 func launchResult(result Result) (Launch, error) {
@@ -204,33 +194,6 @@ func quotaArgs(a []string, r QuotaRequest) []string {
 		}
 	}
 	return a
-}
-func (q CLIQuota) Gate(ctx context.Context, r QuotaRequest) (string, error) {
-	return gateResult(q.runGate(ctx, r), r)
-}
-
-// runGate runs `pacelever gate --json` for one request.
-func (q CLIQuota) runGate(ctx context.Context, r QuotaRequest) Result {
-	name := r.Profile
-	if r.GateProfile != "" {
-		name = r.GateProfile
-	}
-	args := quotaArgs([]string{"gate", "-m", name}, r)
-	if r.AccountKey != "" {
-		args = append(args, "--account-key", r.AccountKey)
-	}
-	args = append(args, "--json")
-	return runQuotaCommand(ctx, q.Runner, Command{Name: q.Binary, Args: args, Env: quotaE6Env(r.E6Arm)}, "quota gate", 30*time.Second)
-}
-
-// quotaE6Env supplies pacelever the experiment marker a hub submission carried.
-// pacelever reads PACELEVER_E6_ARM (then the retired SCOPEFUEL_E6_ARM); an
-// empty marker adds nothing, so a local spawn keeps inheriting its environment.
-func quotaE6Env(arm string) []string {
-	if arm == "" {
-		return nil
-	}
-	return []string{"PACELEVER_E6_ARM=" + arm}
 }
 
 // gateResult reads a gate's exit status and JSON receipt — pacelever's or
@@ -499,23 +462,20 @@ func (a *App) heldAccountKeys(ctx context.Context, pools []string) map[string][]
 	return held
 }
 
-// refreshCommand is the on-demand refresh of pool on this host: panewire's own
-// quota command for a pool panewire measures (native), pacelever's binary for
-// every other pool.
-func refreshCommand(pool, paceleverBinary string, native bool) Command {
-	if native {
-		return Command{Name: "panewire", Args: []string{"quota", "refresh", pool}}
+func refreshCommand(pool, _ string, native bool) Command {
+	if !native {
+		return Command{}
 	}
-	return Command{Name: paceleverBinary, Args: []string{"refresh", pool}}
+	return Command{Name: "panewire", Args: []string{"quota", "refresh", pool}}
 }
 
 // remoteRefreshLine is refreshCommand as the one shell line ssh runs on the
 // target.
 func remoteRefreshLine(pool string, native bool) string {
-	if native {
-		return "panewire quota refresh " + shellQuote(pool)
+	if !native {
+		return "printf '%s\\n' 'quota pool has no measurement source' >&2; exit 4"
 	}
-	return "pacelever refresh " + shellQuote(pool)
+	return "panewire quota refresh " + shellQuote(pool)
 }
 
 // measureTarget runs the on-demand refresh for the pool on the target over the
@@ -525,6 +485,9 @@ func (a *App) measureTarget(ctx context.Context, host, pool string) error {
 	h, ok := a.Config.Hosts[host]
 	if !ok || !validID(pool) {
 		return fail(exitConfig, "target %s pool %s cannot be measured", host, pool)
+	}
+	if !a.nativeQuotaPool(pool) {
+		return fail(exitQuotaUnknown, "%s 풀에는 native 측정 소스가 없습니다", pool)
 	}
 	if str(h, "via") == "hub" {
 		return a.refreshViaHub(ctx, host, pool)
@@ -537,7 +500,7 @@ func (a *App) measureTarget(ctx context.Context, host, pool string) error {
 	if timeout <= 0 || timeout > time.Minute {
 		timeout = time.Minute
 	}
-	r := runQuotaCommand(ctx, a.Runner, Command{Name: "ssh", Args: []string{"-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "--", target, remoteRefreshLine(pool, a.nativeQuotaPool(pool))}}, "quota refresh", timeout)
+	r := runQuotaCommand(ctx, a.Runner, Command{Name: "ssh", Args: []string{"-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "--", target, remoteRefreshLine(pool, true)}}, "quota refresh", timeout)
 	return checkQuotaPlain(r, "quota refresh")
 }
 
@@ -676,6 +639,29 @@ func (q CLIQuota) Catalog(ctx context.Context) ([]CatalogRow, error) {
 		rows[i] = entry.row()
 	}
 	return rows, nil
+}
+
+func (q CLIQuota) Launch(ctx context.Context, r QuotaRequest) (Launch, error) {
+	args := quotaArgs([]string{"policy", "launch", r.Profile, "--json"}, r)
+	result := runQuotaCommand(ctx, q.Runner, Command{Name: q.Binary, Args: args, Env: quotaE6Env(r.E6Arm)}, "quota catalog", 15*time.Second)
+	return launchResult(result)
+}
+
+func (q CLIQuota) Gate(ctx context.Context, r QuotaRequest) (string, error) {
+	name := firstNonempty(r.GateProfile, r.Profile)
+	args := quotaArgs([]string{"gate", "-m", name}, r)
+	if r.AccountKey != "" {
+		args = append(args, "--account-key", r.AccountKey)
+	}
+	args = append(args, "--json")
+	return gateResult(runQuotaCommand(ctx, q.Runner, Command{Name: q.Binary, Args: args, Env: quotaE6Env(r.E6Arm)}, "quota gate", 30*time.Second), r)
+}
+
+func quotaE6Env(arm string) []string {
+	if arm == "" {
+		return nil
+	}
+	return []string{"PACELEVER_E6_ARM=" + arm}
 }
 
 // Pools reads the quota CLI's status document and reduces it to

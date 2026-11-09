@@ -112,15 +112,13 @@ publishes:
 
 - `quota` for each pool in `--state-quota-pools` (comma-separated, empty by
   default, which disables quota publishing). Every `--state-quota-interval`
-  (default 60 s, minimum 10 s) it refreshes the pool: `claude`, `codex` and (once
-  their switch is flipped) `commandcode`, `devin` and `agy` are
-  measured by the node itself ([docs/quota.md](quota.md#native-measurement-claude)),
-  every other pool runs `pacelever refresh <pool>`; a pool in
-  [shadow](quota.md#shadow-and-native) also logs the node's own measurement
-  beside pacelever's. Both read the shared cache first
-  and probe only when the reading is stale, so a 60 s interval keeps the
-  account's shared reading fresh at the cost of one cache read per pool per
-  minute. The node publishes a reading only when it is current and carries an
+  (default 60 s, minimum 10 s) it refreshes the pool. The node measures
+  `claude`, `codex`, `commandcode`, `devin` and `agy` in its own process
+  ([docs/quota.md](quota.md#native-측정-풀)). Other pools are unmeasurable:
+  they are neither refreshed nor published. The node reads the shared cache
+  first and probes only when the reading is stale, so a 60 s interval keeps
+  the account's shared reading fresh at the cost of one cache read per pool
+  per minute. The node publishes a reading only when it is current and carries an
   account fingerprint of kind `account`. It republishes
   when the reading changes, and otherwise at least every 5 minutes. A failing
   refresh logs one warning per failure streak and publishes nothing. The
@@ -129,8 +127,9 @@ publishes:
 Every new hub connection re-announces the node's current readings, so a
 restarted hub regains them immediately.
 
-List only pools whose accounts this host measures: pacelever's
-`measurable_accounts`, plus the pools it derives from the local login.
+`--state-quota-pools`에는 이 호스트가 측정할 수 있는 풀만 지정합니다. 지원 풀은
+`claude`, `codex`, `commandcode`, `devin`, `agy`입니다. `measurable_accounts`와
+로컬 로그인 정보가 측정 계정의 범위를 결정합니다.
 
 ## Rollout
 

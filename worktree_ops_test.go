@@ -745,11 +745,11 @@ func TestNodeQuotaRefresh(t *testing.T) {
 		return []byte("refreshed\n"), nil
 	}}
 	result, code := nodeRun(t, client, nodeCommandQuotaRefresh, map[string]any{"pool": "pool-a"})
-	if code != "" || result["outcome"] != nodeQuotaRefreshed {
+	if code != "refresh_failed" || result != nil {
 		t.Fatalf("outcome=%v code=%q", result["outcome"], code)
 	}
-	if len(calls) != 1 || strings.Join(calls[0], " ") != "refresh pool-a" {
-		t.Fatalf("refresh must build exactly `pacelever refresh <pool>`: %v", calls)
+	if len(calls) != 0 {
+		t.Fatalf("unmeasurable refresh ran an external command: %v", calls)
 	}
 
 	for _, pool := range []string{"", "POOL", "pool a", "pool;rm", "-pool", "pool-", "../pool", "pool/x"} {

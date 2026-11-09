@@ -184,8 +184,8 @@ func TestSelectUnknownOrDegradedQuotaNotAdmitted(t *testing.T) {
 	if e != nil || sel.chosen.seatName != "devin-swe2" {
 		t.Fatalf("%v", e)
 	}
-	if got := candOutcome(sel.record(), "sonnet", "high")["outcome"]; got != "dropped:quota_unknown" {
-		t.Fatalf("a pool with no status must not be guessed admissible: %v", got)
+	if got := candOutcome(sel.record(), "sonnet", "high")["outcome"]; got != "dropped:policy_unavailable" {
+		t.Fatalf("a pool without a measurement source must not be guessed admissible: %v", got)
 	}
 	// Degraded, stale and excluded pools drop the same way.
 	for _, pv := range []PoolView{
@@ -199,8 +199,8 @@ func TestSelectUnknownOrDegradedQuotaNotAdmitted(t *testing.T) {
 		if e == nil || sel == nil {
 			t.Fatalf("status %+v must refuse", pv)
 		}
-		if got := candOutcome(sel.record(), "sonnet", "high")["outcome"]; got != "dropped:quota_unknown" {
-			t.Fatalf("status %+v must be quota_unknown: %v", pv, got)
+		if got := candOutcome(sel.record(), "sonnet", "high")["outcome"]; got != "dropped:policy_unavailable" {
+			t.Fatalf("status %+v must remain unmeasurable: %v", pv, got)
 		}
 	}
 	// When the status read itself fails, free candidates still run.
@@ -212,7 +212,7 @@ func TestSelectUnknownOrDegradedQuotaNotAdmitted(t *testing.T) {
 		t.Fatalf("%v", e)
 	}
 	rec := sel.record()
-	if got := candOutcome(rec, "sonnet", "high")["outcome"]; got != "dropped:quota_unknown" {
+	if got := candOutcome(rec, "sonnet", "high")["outcome"]; got != "dropped:policy_unavailable" {
 		t.Fatalf("%v", got)
 	}
 	if rec["outcome_code"] != outcomeAdmitted {

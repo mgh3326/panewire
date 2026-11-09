@@ -82,6 +82,11 @@ func configPath(errw io.Writer) string {
 // warnRetiredQuotaKeys prints one migration line per retired [quota] key the
 // loaded config still sets. It names the key, never its value.
 func warnRetiredQuotaKeys(c Config, errw io.Writer) {
+	for _, key := range []string{"gate", "launch", "native_pools"} {
+		if _, ok := c.Quota[key]; ok {
+			fmt.Fprintf(errw, "panewire: 경고: [quota] %s 설정은 폐기되었습니다; panewire는 native quota 동작을 사용합니다\n", key)
+		}
+	}
 	if str(c.Quota, "credential_env") != "" {
 		fmt.Fprintln(errw, "panewire: warning: [quota] credential_env is retired; panewire reads HANDOFFKEEP_TOKEN_SVC_PANEWIRE or ~/.config/panewire/hk-svc.env")
 	}

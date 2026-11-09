@@ -87,27 +87,44 @@ func TestFleetQuotaFromPacelever(t *testing.T) {
 
 // The node refreshes its configured pools on a schedule and the hub holds the
 // reading under the node's own host.
-func TestFleetStateNodePublishesQuota(t *testing.T) {
+func TestFleetStateNodeSkipsUnmeasurableQuota(t *testing.T) {
 	hub, server := fsHub(t, "")
-	var calls atomic.Int32
+	var calls, warnings atomic.Int32
 	fsRunNode(t, server.URL, func(client *HubClient) {
-		client.stateQuotaPools = []string{"devin"}
-		isolateDevinShadow(client)
+		client.stateQuotaPools = []string{"grok"}
 		client.stateQuotaInterval = 10 * time.Second
-		client.nodePacelever = func(_ context.Context, args ...string) ([]byte, error) {
-			calls.Add(1)
-			if strings.Join(args, " ") != "refresh devin" {
-				t.Errorf("pacelever argv = %q", args)
+		client.nodePacelever = func(context.Context, ...string) ([]byte, error) { calls.Add(1); return nil, nil }
+		client.warn = func(message string) {
+			if strings.Contains(message, "grok") && strings.Contains(message, "unmeasurable") {
+				warnings.Add(1)
 			}
-			return []byte(fsPaceleverFreshDevin), nil
 		}
 	})
-	eventually(t, 3*time.Second, "quota from node", func() bool {
-		message, ok := fsLatest(hub, "node-a", fleetStateKindQuota, "devin:0123456789abcdef")
-		return ok && message.Quota.Buckets[0].UsedPct != nil && *message.Quota.Buckets[0].UsedPct == 42
-	})
-	if calls.Load() < 1 {
-		t.Fatal("pacelever was not run")
+	eventually(t, 3*time.Second, "unmeasurable quota warning", func() bool { return warnings.Load() == 1 })
+	if calls.Load() != 0 {
+		t.Fatalf("node executed external quota CLI %d times", calls.Load())
+	}
+	hub.fleetState.mu.Lock()
+	defer hub.fleetState.mu.Unlock()
+	for key := range hub.fleetState.latest {
+		if key.kind == fleetStateKindQuota {
+			t.Fatalf("unmeasurable quota was published: %+v", key)
+		}
+	}
+}
+
+func TestQuotaRefreshOpSkipsUnmeasurablePool(t *testing.T) {
+	client := &HubClient{}
+	var calls int
+	var warnings []string
+	client.nodePacelever = func(context.Context, ...string) ([]byte, error) { calls++; return nil, nil }
+	client.warn = func(message string) { warnings = append(warnings, message) }
+	result, code := nodeRun(t, client, nodeCommandQuotaRefresh, map[string]any{"pool": "grok"})
+	if code != "refresh_failed" || result != nil {
+		t.Fatalf("unmeasurable op result=%v code=%q", result, code)
+	}
+	if calls != 0 || len(warnings) != 1 || !strings.Contains(warnings[0], "grok") || !strings.Contains(warnings[0], "측정 소스가 없습니다") {
+		t.Fatalf("external calls=%d warnings=%q", calls, warnings)
 	}
 }
 

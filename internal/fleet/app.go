@@ -148,15 +148,10 @@ func New(out, errout io.Writer) (*App, error) {
 			a.Bins[bin] = v
 		}
 	}
-	// The quota CLI is pacelever; PANEWIRE_QUOTA_BIN is an explicit override.
-	if os.Getenv("SCOPEFUEL_BIN") != "" {
-		fmt.Fprintln(errout, "panewire: warning: SCOPEFUEL_BIN is retired and ignored; the quota CLI defaults to pacelever, override it with PANEWIRE_QUOTA_BIN")
+	if os.Getenv("PANEWIRE_QUOTA_BIN") != "" {
+		fmt.Fprintln(errout, "panewire: 경고: PANEWIRE_QUOTA_BIN 설정은 폐기되어 무시됩니다")
 	}
-	quota := "pacelever"
-	if v := os.Getenv("PANEWIRE_QUOTA_BIN"); v != "" {
-		quota = v
-	}
-	cliQuota := CLIQuota{Runner: a.Runner, Binary: quota, CreditTotalUSD: creditTotals(c.Quota), Accounts: quotaAccounts(c.Quota)}
+	cliQuota := CLIQuota{Runner: a.Runner, CreditTotalUSD: creditTotals(c.Quota), Accounts: quotaAccounts(c.Quota)}
 	cliQuota.SharedLatest = a.sharedLatest
 	a.Quota = admissionQuota{cliQuota, a}
 	a.Source = stateSource{a: a, inner: fleetSource{a}}

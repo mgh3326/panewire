@@ -131,29 +131,6 @@ func paceleverAgyOutput() string {
 		group("gemini", "5h", 20, reset5h), group("3p", "5h", 50, reset5h), group("3p", "7d", 60, reset7d), claudeTestNow.Unix(), agyFPForTest)
 }
 
-func agyShadowLines(warnings []string) []string {
-	var lines []string
-	for _, w := range warnings {
-		if strings.HasPrefix(w, "quota shadow agy:") {
-			lines = append(lines, w)
-		}
-	}
-	return lines
-}
-
-func agyShadowLine(t *testing.T, w *warnLog) string {
-	t.Helper()
-	eventually(t, 5*time.Second, "the agy shadow comparison line", func() bool { return len(agyShadowLines(w.all())) > 0 })
-	lines := agyShadowLines(w.all())
-	if len(lines) != 1 {
-		t.Fatalf("shadow lines %q (all %q)", lines, w.all())
-	}
-	return lines[0]
-}
-
-// Native mode: with the switch flipped the fleet-state loop measures agy itself
-// — shared store, hub publish, every group bucket with its scope — and never
-// runs pacelever for it.
 func TestFleetQuotaAgyNativeNeverRunsPacelever(t *testing.T) {
 	setAgySwitch(t, true, true)
 	hk := newClaudeHK(t)
@@ -319,181 +296,6 @@ func TestFleetQuotaAgyNativePublishesPresenceWhenMeasurementFails(t *testing.T) 
 // pacelever for agy, publishes pacelever's reading, and the node logs one
 // comparison line from its own unshared measurement — per group, since gemini
 // and 3p both have a 5h window.
-func TestFleetQuotaAgyShadowStillRunsPacelever(t *testing.T) {
-	setAgySwitch(t, false, true)
-	hk := newClaudeHK(t)
-	client := quotaClient(t)
-	client.spawnConfigPath = claudeStore(t, hk.server.URL)
-	client.nativeQuota = map[string]*nativeQuotaSource{"agy": agyTestSource(client.spawnConfigPath, agyLoginFiles(agyToken), newAgyAPI(), agyFPForTest, true)}
-	pacelever := &paceleverRunnerFake{pool: "agy", output: paceleverAgyOutput()}
-	client.nodePacelever = pacelever.run
-	warned := newWarnLog(client)
-
-	client.refreshFleetQuota(t.Context(), "agy", map[string]fleetQuotaSent{})
-
-	if calls := pacelever.called(); len(calls) != 1 || calls[0] != "refresh agy" {
-		t.Fatalf("pacelever calls %v, want exactly one refresh of agy", calls)
-	}
-	if hk.published() != 0 {
-		t.Fatalf("shadow mode published %d observations to the shared store", hk.published())
-	}
-	line := agyShadowLine(t, warned)
-	hk.mu.Lock()
-	for _, call := range hk.calls {
-		if strings.Contains(call, "/lease") || strings.Contains(call, "/observation") || strings.Contains(call, "/presence") {
-			t.Fatalf("shadow mode touched the store: %s", call)
-		}
-	}
-	hk.mu.Unlock()
-	// Native's 5h resets at 15:00, three hours after claudeTestNow, as pacelever's
-	// fixture says: the two agree window by window and group by group.
-	for _, want := range []string{
-		"match=true", "account=same",
-		"pacelever=[5h/gemini=20.0%@2026-11-05T15:00:00Z 5h/3p=50.0%@2026-11-05T15:00:00Z 7d/3p=60.0%@2026-11-09T01:00:00Z]",
-		"native=[5h/gemini=20.0%@2026-11-05T15:00:00Z 5h/3p=50.0%@2026-11-05T15:00:00Z 7d/3p=60.0%@2026-11-09T01:00:00Z]",
-		"diff=none",
-	} {
-		if !strings.Contains(line, want) {
-			t.Fatalf("line lacks %q:\n%s", want, line)
-		}
-	}
-	if strings.Contains(line, agyToken) {
-		t.Fatalf("line %s", line)
-	}
-	select {
-	case event := <-client.events:
-		var publish FleetStatePublish
-		if err := json.Unmarshal(event.Payload, &publish); err != nil || publish.Key != agyKeyForTest || publish.Quota == nil || publish.Quota.Source != "usage-api" || len(publish.Quota.Buckets) != 3 {
-			t.Fatalf("publish %s err=%v", event.Payload, err)
-		}
-	default:
-		t.Fatal("nothing was published to the hub")
-	}
-}
-
-// The comparison names a difference in one group's window, not just the window.
-func TestAgyShadowReportsADifferenceInOneGroup(t *testing.T) {
-	setAgySwitch(t, false, true)
-	client := quotaClient(t)
-	client.spawnConfigPath = "/nonexistent"
-	api := newAgyAPI()
-	// The 3p group is 20 points more used than pacelever read a moment ago.
-	api.replies["/v1internal:retrieveUserQuotaSummary"] = strings.Replace(agySummaryReply, `"remainingFraction":0.5`, `"remainingFraction":0.3`, 1)
-	client.nativeQuota = map[string]*nativeQuotaSource{"agy": agyTestSource("/nonexistent", agyLoginFiles(agyToken), api, agyFPForTest, true)}
-	client.nodePacelever = (&paceleverRunnerFake{pool: "agy", output: paceleverAgyOutput()}).run
-	warned := newWarnLog(client)
-	client.refreshFleetQuota(t.Context(), "agy", map[string]fleetQuotaSent{})
-	line := agyShadowLine(t, warned)
-	if !strings.Contains(line, "match=false") || !strings.Contains(line, "diff=5h/3p: used 50.0% vs 70.0%") {
-		t.Fatalf("line %s", line)
-	}
-}
-
-// With no account configured the native side fails as credentials and the line
-// says so, while pacelever's reading is still the one published.
-func TestFleetQuotaAgyShadowReportsFailures(t *testing.T) {
-	setAgySwitch(t, false, false)
-	for _, test := range []struct {
-		name     string
-		pacelike *paceleverRunnerFake
-		fp       string
-		measure  bool
-		want     []string
-	}{
-		{"no account here", &paceleverRunnerFake{pool: "agy", output: paceleverAgyOutput()}, "", false,
-			[]string{"match=false", "account=unknown", "native=error credentials", "diff=native failed (credentials), pacelever measured"}},
-		{"pacelever failed", &paceleverRunnerFake{pool: "agy", status: `{"providers":[{"id":"agy","status":"error","error_kind":"auth_failed"}]}`}, agyFPForTest, true,
-			[]string{"match=false", "pacelever=error auth_failed", "native=[5h/gemini=", "diff=pacelever failed (auth_failed), native measured"}},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			client := quotaClient(t)
-			client.spawnConfigPath = "/nonexistent"
-			client.nativeQuota = map[string]*nativeQuotaSource{"agy": agyTestSource("/nonexistent", agyLoginFiles(agyToken), newAgyAPI(), test.fp, test.measure)}
-			client.nodePacelever = test.pacelike.run
-			warned := newWarnLog(client)
-			client.refreshFleetQuota(t.Context(), "agy", map[string]fleetQuotaSent{})
-			line := agyShadowLine(t, warned)
-			for _, want := range test.want {
-				if !strings.Contains(line, want) {
-					t.Fatalf("line lacks %q:\n%s", want, line)
-				}
-			}
-			if strings.Contains(strings.Join(warned.all(), "\n"), agyToken) {
-				t.Fatal("token in a warning")
-			}
-		})
-	}
-}
-
-// With no switch configured at all, agy is in shadow.
-func TestAgyDefaultsToShadow(t *testing.T) {
-	t.Setenv("FLEET_HOSTS_CONFIG", filepath.Join(t.TempDir(), "absent.toml"))
-	if isNativeQuotaPool("agy") || !isShadowQuotaPool("agy") {
-		t.Fatal("agy is not in shadow by default")
-	}
-	setAgySwitch(t, true, true)
-	if !isNativeQuotaPool("agy") || isShadowQuotaPool("agy") {
-		t.Fatal("agy is not native once listed")
-	}
-}
-
-// compareShadow tells two groups' windows of one label apart.
-func TestCompareShadowGroupWindows(t *testing.T) {
-	reset := claudeTestNow.Add(time.Hour)
-	reading := func(gemini, third float64) shadowReading {
-		return shadowReading{key: "agy:a", buckets: []shadowBucket{
-			{window: "5h", group: "gemini", used: gemini, reset: reset},
-			{window: "5h", group: "3p", used: third, reset: reset},
-		}}
-	}
-	if diff := compareShadow(reading(10, 20), reading(10.2, 20.3)); len(diff) != 0 {
-		t.Fatalf("agreeing readings differ: %v", diff)
-	}
-	if got := strings.Join(compareShadow(reading(10, 20), reading(10, 40)), "; "); got != "5h/3p: used 20.0% vs 40.0%" {
-		t.Fatalf("diff %q", got)
-	}
-	only := shadowReading{key: "agy:a", buckets: []shadowBucket{{window: "5h", group: "3p", used: 20, reset: reset}}}
-	if got := strings.Join(compareShadow(reading(10, 20), only), "; "); got != "5h/gemini: pacelever only" {
-		t.Fatalf("diff %q", got)
-	}
-}
-
-// quota.refresh in shadow runs pacelever (and compares); in native it never does.
-func TestNodeQuotaRefreshAgyShadowAndNative(t *testing.T) {
-	for _, native := range []bool{false, true} {
-		t.Run(fmt.Sprintf("native=%t", native), func(t *testing.T) {
-			setAgySwitch(t, native, true)
-			hk := newClaudeHK(t)
-			client := &HubClient{}
-			client.spawnConfigPath = claudeStore(t, hk.server.URL)
-			client.nativeQuota = map[string]*nativeQuotaSource{"agy": agyTestSource(client.spawnConfigPath, agyLoginFiles(agyToken), newAgyAPI(), agyFPForTest, true)}
-			pacelever := &paceleverRunnerFake{pool: "agy", output: paceleverAgyOutput()}
-			client.nodePacelever = pacelever.run
-			warned := newWarnLog(client)
-
-			result, code := nodeRun(t, client, nodeCommandQuotaRefresh, map[string]any{"pool": "agy"})
-			if code != "" || result["outcome"] != nodeQuotaRefreshed {
-				t.Fatalf("refresh: result=%v code=%q", result, code)
-			}
-			calls := pacelever.called()
-			if native {
-				if len(calls) != 0 || hk.published() != 1 || len(agyShadowLines(warned.all())) != 0 {
-					t.Fatalf("native: pacelever=%v published=%d warnings=%q", calls, hk.published(), warned.all())
-				}
-				return
-			}
-			if len(calls) != 1 || calls[0] != "refresh agy" || hk.published() != 0 {
-				t.Fatalf("shadow: pacelever=%v published=%d", calls, hk.published())
-			}
-			if line := agyShadowLine(t, warned); !strings.Contains(line, "native=[5h/gemini=20.0%") {
-				t.Fatalf("shadow line %q", line)
-			}
-		})
-	}
-}
-
-// A refresh on a host that may not measure agy fails as refresh_failed, native
-// or not, without asking the provider.
 func TestNodeQuotaRefreshAgyWithoutAnAccountFails(t *testing.T) {
 	setAgySwitch(t, true, false)
 	api := newAgyAPI()
@@ -615,14 +417,12 @@ func TestQuotaCLIRefreshAgy(t *testing.T) {
 		t.Fatalf("no account: exit %d out %q err %q", code, out.String(), errOut.String())
 	}
 
-	// In shadow the CLI is pacelever's: a fake pacelever on PATH, never the host's.
+	// Retired pool switches are ignored: agy stays native and reports its source result.
 	setAgySwitch(t, false, true)
-	pools = nil
-	quotaFake(t, `echo "pacelever ran: $*"`)
 	out.Reset()
 	errOut.Reset()
-	if code := runQuotaCLI([]string{"refresh", "agy"}, &out, &errOut); code != 0 || len(pools) != 0 || out.String() != "pacelever ran: refresh agy\n" {
-		t.Fatalf("shadow CLI refresh: exit %d pools %v out %q err %q", code, pools, out.String(), errOut.String())
+	if code := runQuotaCLI([]string{"refresh", "agy"}, &out, &errOut); code == 0 || !strings.Contains(errOut.String(), "credentials") {
+		t.Fatalf("native CLI refresh: exit %d out %q err %q", code, out.String(), errOut.String())
 	}
 }
 

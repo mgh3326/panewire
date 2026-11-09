@@ -219,26 +219,22 @@ func TestFleetQuotaClaudeIsMeasuredNatively(t *testing.T) {
 }
 
 // The same loop still runs pacelever for a pool it measures.
-func TestFleetQuotaOtherPoolStillRunsPacelever(t *testing.T) {
+func TestFleetQuotaOtherPoolIsUnmeasurable(t *testing.T) {
 	client := quotaClient(t)
 	var calls []string
 	client.nodePacelever = func(_ context.Context, args ...string) ([]byte, error) {
 		calls = append(calls, strings.Join(args, " "))
-		return []byte(fsPaceleverFreshDevin), nil
+		return nil, nil
 	}
-	client.nativeQuota = map[string]*nativeQuotaSource{"claude": {Pool: "claude", SpawnConfigPath: "/nonexistent"}}
-	client.refreshFleetQuota(t.Context(), "devin", map[string]fleetQuotaSent{})
-	if len(calls) != 1 || calls[0] != "refresh devin" {
-		t.Fatalf("pacelever calls: %v", calls)
+	client.refreshFleetQuota(t.Context(), "grok", map[string]fleetQuotaSent{})
+	if len(calls) != 0 {
+		t.Fatalf("unmeasurable pool executed commands: %v", calls)
 	}
-	if got := poolLogin(t, client, "devin"); got.Login != fleet.ReadinessLoginPresent {
-		t.Fatalf("codex login %+v", got)
+	if got := poolLogin(t, client, "grok"); got.Login == fleet.ReadinessLoginMissing {
+		t.Fatalf("login %+v", got)
 	}
 }
 
-// hk 3087's rule for the native pool: Login missing only for
-// auth|auth_failed|credentials|token_expired; every other failure leaves the
-// login unknown. No failure reaches pacelever's status.
 func TestFleetQuotaClaudeLoginClassification(t *testing.T) {
 	expired := claudeLoginFiles(claudeSecret, claudeTestNow.Add(-time.Hour))
 	valid := claudeLoginFiles(claudeSecret, claudeTestNow.Add(time.Hour))
@@ -306,8 +302,8 @@ func TestNodeQuotaRefreshClaudeIsNative(t *testing.T) {
 	if len(pacelever) != 0 || hk.published() != 1 {
 		t.Fatalf("pacelever=%v published=%d", pacelever, hk.published())
 	}
-	if result, code := nodeRun(t, client, nodeCommandQuotaRefresh, map[string]any{"pool": "kimi"}); code != "" || result["outcome"] != nodeQuotaRefreshed || len(pacelever) != 1 || pacelever[0] != "refresh kimi" {
-		t.Fatalf("codex refresh: result=%v code=%q pacelever=%v", result, code, pacelever)
+	if result, code := nodeRun(t, client, nodeCommandQuotaRefresh, map[string]any{"pool": "kimi"}); code != "refresh_failed" || result != nil || len(pacelever) != 0 {
+		t.Fatalf("unmeasurable refresh: result=%v code=%q external=%v", result, code, pacelever)
 	}
 
 	failing := &HubClient{nativeQuota: map[string]*nativeQuotaSource{"claude": claudeTestSource("/nonexistent", claudeLoginFiles("", time.Time{}), claudeAPIReply(200, claudeAPIBody))}}

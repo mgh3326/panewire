@@ -355,7 +355,7 @@ func newDaemonForCLI(args []string, deps daemonCLIDeps) (*Daemon, int, error) {
 	burstPoweroffAllowed := fs.Bool("burst-poweroff-allowed", false, "allow authenticated hub burst down events to run sudo -n /usr/sbin/poweroff")
 	wakeTargets := fs.String("wake-targets", "", "waker node's JSON allowlist: target machine → MAC and UDP broadcast for hub wake events")
 	statePublish := fs.Bool("state-publish", false, "publish this host's fleet state (quota for --state-quota-pools) to the hub; see docs/fleet-state.md")
-	stateQuotaPools := fs.String("state-quota-pools", "", "comma-separated pacelever pools whose accounts this host measures; requires --state-publish")
+	stateQuotaPools := fs.String("state-quota-pools", "", "comma-separated native quota pools this host measures; requires --state-publish")
 	stateQuotaInterval := fs.Duration("state-quota-interval", defaultFleetQuotaInterval, "how often to refresh and publish --state-quota-pools")
 	taskPaneSweepInterval := fs.Duration("task-pane-sweep-interval", defaultTaskPaneSweepInterval, "how often the node closes worker panes whose hk task is merged, done or dropped (0 = off); see docs/pane-sweep.md")
 	taskPaneSweepGrace := fs.Duration("task-pane-sweep-grace", fleet.DefaultPaneSweepGrace, "how long a pane must have stayed not working before the sweep closes it")

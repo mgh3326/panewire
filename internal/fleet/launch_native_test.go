@@ -4,12 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -17,6 +16,26 @@ import (
 )
 
 var launchNow = time.Date(2026, 11, 8, 3, 0, 0, 0, time.UTC)
+
+func awaitShadowIdle(t *testing.T) { t.Helper() }
+
+func cacheLaunchRows(t *testing.T, rows []CatalogRow, now time.Time) {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("handoffkeep was asked: %s %s", r.Method, r.URL.Path)
+		http.Error(w, "unexpected", http.StatusInternalServerError)
+	}))
+	t.Cleanup(server.Close)
+	t.Setenv("HANDOFFKEEP_URL", server.URL)
+	t.Setenv("HANDOFFKEEP_TOKEN_SVC_PANEWIRE", "test-token")
+	t.Setenv("PANEWIRE_HK_ENV", filepath.Join(t.TempDir(), "absent.env"))
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	client, err := NewCatalogClient(CatalogClientConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeUndatedCatalogCache(t, client, rows, now.Add(-10*time.Minute).Format(time.RFC3339Nano))
+}
 
 // launchApp is an App whose quota is the production admissionQuota over a fake
 // pacelever. paceleverLaunch answers `pacelever policy launch`; nil means the
@@ -338,6 +357,17 @@ func TestLaunchNativeCatalogUnavailable(t *testing.T) {
 	}
 }
 
+func TestLaunchDefaultsToNativeWithoutExecutingQuotaCLI(t *testing.T) {
+	a, runner, events := launchApp(t, "", launchRulesCatalog(), nil)
+	got, err := a.Quota.Launch(context.Background(), QuotaRequest{Profile: "opus", Effort: "high", Role: "worker"})
+	if err != nil || got != opusLaunch {
+		t.Fatalf("native launch = %+v, %v", got, err)
+	}
+	if len(runner.Calls) != 0 || len(*events) != 0 {
+		t.Fatalf("default launch used external quota CLI or comparison events: calls=%+v events=%+v", runner.Calls, *events)
+	}
+}
+
 func paceleverLaunchJSON(l Launch) *Result {
 	b, _ := json.Marshal(l)
 	return &Result{Out: string(b)}
@@ -347,156 +377,3 @@ var opusLaunch = Launch{Profile: "opus", ModelID: "claude-opus-5-5", Effort: "hi
 
 // TestLaunchShadowRecordsAgreement: by default pacelever decides and the
 // native lookup is recorded beside it.
-func TestLaunchShadowRecordsAgreement(t *testing.T) {
-	a, runner, events := launchApp(t, "", launchRulesCatalog(), paceleverLaunchJSON(opusLaunch))
-	got, err := a.Quota.Launch(context.Background(), QuotaRequest{Profile: "opus", Effort: "high", Role: "worker"})
-	if err != nil || got != opusLaunch {
-		t.Fatalf("shadow returns pacelever's launch: %+v %v", got, err)
-	}
-	if policyLaunchRuns(runner) != 1 {
-		t.Fatalf("shadow runs pacelever policy launch once, got %d", policyLaunchRuns(runner))
-	}
-	awaitShadowIdle(t)
-	if len(*events) != 1 {
-		t.Fatalf("want one shadow event, got %+v", *events)
-	}
-	if e := (*events)[0]; e.Kind != "quota_launch_shadow" || e.Outcome != "agree" || e.Reason != "claude" || !strings.Contains(e.Detail, "profile=opus") {
-		t.Fatalf("shadow event = %+v", e)
-	}
-}
-
-// TestLaunchShadowRecordsDisagreement: a native answer that differs is
-// recorded with both answers and the differing fields, and never changes the
-// spawn's outcome — pacelever's admit or refusal stands.
-func TestLaunchShadowRecordsDisagreement(t *testing.T) {
-	other := opusLaunch
-	other.ModelID, other.Grade = "claude-opus-5-1", "S+"
-	a, _, events := launchApp(t, launchModeShadowForTest, launchRulesCatalog(), paceleverLaunchJSON(other))
-	got, err := a.Quota.Launch(context.Background(), QuotaRequest{Profile: "opus", Effort: "high", Role: "worker"})
-	if err != nil || got != other {
-		t.Fatalf("shadow must return pacelever's launch: %+v %v", got, err)
-	}
-	awaitShadowIdle(t)
-	if len(*events) != 1 {
-		t.Fatalf("want one shadow event, got %+v", *events)
-	}
-	e := (*events)[0]
-	if e.Kind != "quota_launch_shadow" || e.Outcome != "disagree" {
-		t.Fatalf("shadow event = %+v", e)
-	}
-	for _, want := range []string{"pacelever{exit=0 profile=opus model=claude-opus-5-1", "native{exit=0 profile=opus model=claude-opus-5-5", "diff=model_id,grade"} {
-		if !strings.Contains(e.Detail, want) {
-			t.Errorf("shadow detail lacks %q: %s", want, e.Detail)
-		}
-	}
-
-	// The incident: pacelever's stale cache refuses a rung handoffkeep has.
-	refused := &Result{Code: 3, Err: "error: e6_arm_required: unplaced profile requires exact measurement marker\n"}
-	a, _, events = launchApp(t, "", launchRulesCatalog(), refused)
-	if _, err := a.Quota.Launch(context.Background(), QuotaRequest{Profile: "opus", Effort: "high", Role: "worker"}); exitCode(err) != 3 {
-		t.Fatalf("shadow must keep pacelever's refusal: %v", err)
-	}
-	awaitShadowIdle(t)
-	if len(*events) != 1 || (*events)[0].Outcome != "disagree" {
-		t.Fatalf("shadow event = %+v", *events)
-	}
-	for _, want := range []string{`pacelever{exit=3`, `reason="e6_arm_required: unplaced profile requires exact measurement marker"`, "native{exit=0", "diff=exit"} {
-		if !strings.Contains((*events)[0].Detail, want) {
-			t.Errorf("shadow detail lacks %q: %s", want, (*events)[0].Detail)
-		}
-	}
-
-	// Both refuse alike: agreement, with pacelever's stderr reason read.
-	a, _, events = launchApp(t, "", launchRulesCatalog(), &Result{Code: 3, Err: "warning: cache old\nerror: rung is retired in the catalog\n"})
-	if _, err := a.Quota.Launch(context.Background(), QuotaRequest{Profile: "test-retired", Effort: "high", Role: "worker"}); exitCode(err) != 3 {
-		t.Fatalf("shadow must keep pacelever's refusal: %v", err)
-	}
-	awaitShadowIdle(t)
-	if len(*events) != 1 || (*events)[0].Outcome != "agree" {
-		t.Fatalf("matching refusals must agree: %+v", *events)
-	}
-}
-
-const launchModeShadowForTest = "shadow"
-
-// TestLaunchNativeNeverRunsPacelever: in native mode `pacelever policy
-// launch` is never run and nothing is recorded as a comparison.
-func TestLaunchNativeNeverRunsPacelever(t *testing.T) {
-	a, runner, events := launchApp(t, "native", launchRulesCatalog(), nil)
-	got, err := a.Quota.Launch(context.Background(), QuotaRequest{Profile: "opus", Effort: "high", Role: "worker"})
-	if err != nil || got != opusLaunch {
-		t.Fatalf("native launch: %+v %v", got, err)
-	}
-	awaitShadowIdle(t)
-	if len(runner.Calls) != 0 || len(*events) != 0 {
-		t.Fatalf("native mode ran %v and recorded %+v", runner.Calls, *events)
-	}
-}
-
-// TestLaunchModeConfig: `[quota].launch` takes shadow or native, like gate.
-func TestLaunchModeConfig(t *testing.T) {
-	for _, tc := range []struct {
-		value string
-		ok    bool
-	}{{`"shadow"`, true}, {`"native"`, true}, {`"pacelever"`, false}, {`true`, false}} {
-		path := filepath.Join(t.TempDir(), "hosts.toml")
-		if err := os.WriteFile(path, []byte("[quota]\nlaunch = "+tc.value+"\n"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := LoadConfig(path); (err == nil) != tc.ok {
-			t.Errorf("quota.launch=%s: err=%v want ok=%v", tc.value, err, tc.ok)
-		}
-	}
-}
-
-// TestSpawnAdmissionDefaultRunsPaceleverLaunch is the default on every host
-// until the switch is flipped: a spawn's admission resolves the rung with
-// `pacelever policy launch`, and the native lookup is only recorded.
-func TestSpawnAdmissionDefaultRunsPaceleverLaunch(t *testing.T) {
-	a := testApp(t)
-	t.Setenv("PACELEVER_CONFIG", filepath.Join(t.TempDir(), "absent.toml"))
-	pacelever := opusLaunch
-	pacelever.Grade = "S+"
-	launchOut, _ := json.Marshal(pacelever)
-	receipt := `{"schema":"scopefuel.gate.v1","provider_id":"claude","profile":"opus","ok":true,"exit_code":0,"reason":"opus pool=claude used=10% class=spend"}`
-	runner := &fakeRunner{Do: func(c Command) Result {
-		switch {
-		case len(c.Args) >= 2 && c.Args[0] == "policy" && c.Args[1] == "launch":
-			return Result{Out: string(launchOut)}
-		case len(c.Args) > 0 && c.Args[0] == "gate":
-			return Result{Out: receipt}
-		}
-		return Result{Code: 1, Err: "unexpected command"}
-	}}
-	a.Runner = runner
-	a.Quota = admissionQuota{CLIQuota{Runner: runner, Binary: "pacelever"}, a}
-	a.BenchCatalog = func(context.Context) ([]CatalogRow, error) { return launchRulesCatalog(), nil }
-	cacheLaunchRows(t, launchRulesCatalog(), a.Now())
-	// The gate's events arrive on this goroutine and the launch shadow's on
-	// its own.
-	var mu sync.Mutex
-	var events []fleetevent.Event
-	a.EventSink = func(e fleetevent.Event) {
-		mu.Lock()
-		defer mu.Unlock()
-		events = append(events, e)
-	}
-	s := Spawn{CWD: "/work/project", Profile: "opus", Role: "worker", Effort: "high"}
-	launch, _, err := a.admitLaunch(context.Background(), s, a.Policy.Profiles["opus"], "high", "", "", "", false)
-	if err != nil {
-		t.Fatalf("admission: %v", err)
-	}
-	if launch.Grade != "S+" {
-		t.Fatalf("the spawn must take pacelever's launch, got %+v", launch)
-	}
-	if n := policyLaunchRuns(runner); n != 1 {
-		t.Fatalf("pacelever policy launch ran %d times, want 1", n)
-	}
-	awaitShadowIdle(t)
-	mu.Lock()
-	defer mu.Unlock()
-	shadow := slices.IndexFunc(events, func(e fleetevent.Event) bool { return e.Kind == "quota_launch_shadow" })
-	if shadow < 0 || events[shadow].Outcome != "disagree" || !strings.Contains(events[shadow].Detail, "diff=grade") {
-		t.Fatalf("native lookup not recorded as a disagreement: %+v", events)
-	}
-}
