@@ -173,6 +173,9 @@ func parseSpawn(args []string) (Spawn, error) {
 	if f.NArg() != 0 {
 		return s, fail(exitUsage, "unexpected spawn arguments")
 	}
+	if s.Profile == "codex-astra" && s.Purpose != "" && s.Purpose != "director" && s.Purpose != "architect" && s.Purpose != "operator-request" && s.Purpose != "round-extension" {
+		return s, fail(exitUsage, "-m codex-astra --purpose must be director, architect, operator-request, or round-extension")
+	}
 	if flagPassed(f, "review-pass") && (s.Role != "reviewer" || !reviewPassPattern.MatchString(s.ReviewPass)) {
 		return s, fail(exitUsage, "--review-pass N (1..9) is accepted only with --role reviewer")
 	}

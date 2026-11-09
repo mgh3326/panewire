@@ -1673,7 +1673,7 @@ HTTP 409 warns and drops the conflicting file. Local attempt markers under
 | 74 | Active job duplicate, including an hk `job_id_taken` claim refusal. |
 | 75 | Unreadable duplicate state (the ledger's record of a duplicate job has no state or an unreadable `job.spawned` receipt; a released job has no receipt and is reclaimed), changed artifact, or a `--parent-job` that resolves neither locally nor in hk within the bound. |
 | 76 | `BRIEF_SUBMISSION_UNCONFIRMED`: no working transition or submitted brief turn on the launch session and pane. Codex retries a submit key once only for composer residue; other harnesses retain one submit-key retry when submission remains unconfirmed. |
-| 77 | `NO_ROLE_CANDIDATE` or seat, grade, family, or E6 refusal; quota gate exit 5 is remapped here. |
+| 77 | `NO_ROLE_CANDIDATE` or seat, grade, family, or E6 refusal; quota gate exit 5 is remapped here. `role_restricted:` preserves the gate reason; codex-astra accepts only `director`, `architect`, `operator-request`, or `round-extension` as `--purpose`. |
 | 78 | `preflight`: at least one checked remote host failed a check; the reasons are on stdout and in the error. |
 | 79 | Mock isolation refusal. |
 | 80 | Local spawning disabled/unavailable without a remote fallback. |

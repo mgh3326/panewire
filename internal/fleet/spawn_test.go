@@ -31,6 +31,29 @@ type fakeQuota struct {
 	mu          sync.Mutex // delegate --panel asks the gate from several goroutines
 }
 
+func TestSpawnParseValidatesAstraPurpose(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		args    []string
+		wantErr bool
+	}{
+		{"free text refused", []string{"-m", "codex-astra", "--purpose", "design consult"}, true},
+		{"architect accepted", []string{"-m", "codex-astra", "--purpose", "architect"}, false},
+		{"operator request fills purpose", []string{"-m", "codex-astra", "--operator-request", "X"}, false},
+		{"other profile accepts free text", []string{"-m", "codex-sol", "--purpose", "design consult"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := parseSpawn(tc.args)
+			if tc.wantErr && exitCode(err) != exitUsage {
+				t.Fatalf("err=%v, want usage", err)
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("parse rejected: %v", err)
+			}
+		})
+	}
+}
+
 func (q *fakeQuota) Launch(_ context.Context, r QuotaRequest) (Launch, error) {
 	q.mu.Lock()
 	q.Calls = append(q.Calls, r)

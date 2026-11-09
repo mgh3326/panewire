@@ -150,6 +150,7 @@ var spawnRefusals = []spawnRefusal{
 	{match: "--override-reason", code: "override_reason_required", hint: "Use -m auto --host auto, or provide --override-reason TEXT for an intentional pin."},
 	{match: "alias", code: "host_alias", hint: "Run panewire hosts and use the canonical host key, or fix the aliases list in the hosts config."},
 	{match: "requires PANEWIRE_E6_ARM=", code: "e6_arm_required", hint: "Set the exact PANEWIRE_E6_ARM value named in the refusal only if the operator authorized that rung; otherwise select an admitted rung."},
+	{match: "role_restricted:", code: "role_restricted", hint: "codex-astra에는 --purpose director|architect|operator-request|round-extension 중 하나를 지정하세요."},
 	{rc: exitDuplicate, code: "duplicate", hint: "Inspect the existing job with panewire find JOB. Use a new --job only for new work; never override a live duplicate. Failed launches with verified cleanup can retry on the same host."},
 	{rc: exitSubmitUnconfirmed, code: "submit_unconfirmed", hint: "Read the saved jobs/JOB/spawn-failure-*.txt capture and fix the harness submission failure; retry the same command after verified cleanup."},
 	{rc: exitAuthUnavailable, code: "auth_unavailable", hint: "Sign in to the selected quota account on the executing host and refresh that pool with panewire quota refresh POOL, then retry."},

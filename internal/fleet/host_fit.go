@@ -211,7 +211,7 @@ func (t hostTrace) record() map[string]any {
 
 func admissionOutcome(code string) string {
 	switch code {
-	case outcomeAdmitted, outcomeQuotaExhausted, outcomeQuotaUnknown:
+	case outcomeAdmitted, outcomeQuotaExhausted, outcomeQuotaUnknown, outcomeNoRoleCandidate:
 		return strings.ToLower(code)
 	default:
 		return "no_rung"
@@ -229,6 +229,8 @@ func (t hostTrace) admissionOutcome() string {
 			return "admitted"
 		case outcomeQuotaUnknown:
 			outcome = "quota_unknown"
+		case outcomeNoRoleCandidate:
+			outcome = strings.ToLower(outcomeNoRoleCandidate)
 		case outcomeQuotaExhausted:
 			if outcome == "no_rung" {
 				outcome = "quota_exhausted"
@@ -401,7 +403,12 @@ func (sp *selPresence) admitPass(ctx context.Context, s Spawn, p *selPlan, pendi
 				break
 			}
 			if c.reason == "" {
-				c.reason, c.code = fmt.Sprintf("gate_refused:%d", exitCode(err)), gateOutcome(err)
+				c.code = gateOutcome(err)
+				if c.code == outcomeNoRoleCandidate {
+					c.reason = roleRestrictedReason(err.Error())
+				} else {
+					c.reason = fmt.Sprintf("gate_refused:%d", exitCode(err))
+				}
 				c.outcome = "dropped:gate_refused"
 			} else {
 				c.outcome = "dropped:" + c.reason

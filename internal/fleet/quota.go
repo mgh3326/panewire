@@ -12,6 +12,7 @@ import (
 
 	"github.com/mgh3326/panewire/internal/quota/agy"
 	"github.com/mgh3326/panewire/internal/quota/shared"
+	"github.com/mgh3326/panewire/internal/textbound"
 )
 
 type Launch struct {
@@ -237,8 +238,16 @@ func quotaE6Env(arm string) []string {
 // records or the typed refusal it surfaces.
 func gateResult(x Result, r QuotaRequest) (string, error) {
 	if x.Code == quotaGateRoleDenied {
-		err := checkQuota(x, "quota role-denied (gate exit 5 → panewire exit 77)")
-		return "", fail(exitSeatRefused, "%s", err)
+		var body struct {
+			Reason string `json:"reason"`
+		}
+		_ = json.Unmarshal([]byte(x.Out), &body)
+		reason := body.Reason
+		if reason == "" {
+			reason = "gate denied this role"
+		}
+		reason = roleRestrictedReason(reason)
+		return "", &gateRefusal{cause: fail(exitSeatRefused, "%s", reason), outcome: outcomeNoRoleCandidate}
 	}
 	if r.AccountKey != "" && (x.Code == 0 || x.Code == quotaGateBlocked) {
 		receipt, err := readAccountGateReceipt(x, r.AccountKey)
@@ -247,11 +256,14 @@ func gateResult(x Result, r QuotaRequest) (string, error) {
 			if err == nil {
 				outcome, err = receipt.refusalOutcome()
 			}
-			reason := clip(receipt.Reason, 200)
+			reason := clipGateReason(receipt.Reason, 200)
 			if err != nil {
 				// A blocked gate with untrusted evidence cannot establish
 				// exhaustion or a policy failure. Keep it typed for refresh.
 				outcome, reason = outcomeQuotaUnknown, err.Error()
+			}
+			if outcome == outcomeNoRoleCandidate {
+				return "", &gateRefusal{cause: fail(exitSeatRefused, "%s", roleRestrictedReason(reason)), outcome: outcome}
 			}
 			return "", &gateRefusal{cause: fail(x.Code, "quota gate: %s", reason), outcome: outcome}
 		}
@@ -266,6 +278,27 @@ func gateResult(x Result, r QuotaRequest) (string, error) {
 		return "", fail(exitConfig, "invalid quota gate JSON")
 	}
 	return x.Out, nil
+}
+
+func roleRestrictedReason(reason string) string {
+	if strings.HasPrefix(reason, "role_restricted:") {
+		return reason
+	}
+	return "role_restricted: " + reason
+}
+
+func clipGateReason(reason string, max int) string {
+	if len(reason) <= max {
+		return reason
+	}
+	cut := textbound.PrefixWithin(reason, max)
+	if i := strings.LastIndexByte(cut, ' '); i > 0 {
+		cut = cut[:i]
+	}
+	if cut == "" {
+		cut = textbound.PrefixWithin(reason, max)
+	}
+	return cut + "…"
 }
 
 // gateRefusal carries a gate outcome independently of diagnostic prose;

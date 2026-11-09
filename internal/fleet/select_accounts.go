@@ -412,7 +412,7 @@ func (a *App) selectionRefused(ctx context.Context, s Spawn, req selReq, p *selP
 	if len(accounts) == 0 {
 		accounts = p.cands
 	}
-	order := []string{outcomeQuotaUnknown, outcomeAuthUnavailable, outcomeNoEligibleHost, outcomePolicyUnavailable, outcomeNoRoleCandidate}
+	order := []string{outcomeNoRoleCandidate, outcomeQuotaUnknown, outcomeAuthUnavailable, outcomeNoEligibleHost, outcomePolicyUnavailable}
 	if !slices.ContainsFunc(p.cands, func(c *selCand) bool { return c.accountKey != "" }) {
 		// No account was bound, so no measured account failure decided this.
 		// A host-side drop (repo_unmapped, caps, readiness) names the cause
@@ -430,6 +430,16 @@ func (a *App) selectionRefused(ctx context.Context, s Spawn, req selReq, p *selP
 		if code == outcomeNoEligibleHost {
 			gap = p.capsGap + p.hostDropNote()
 		}
+		if code == outcomeNoRoleCandidate {
+			reason := "role_restricted: no eligible host admits the requested role"
+			for _, c := range accounts {
+				if c.code == outcomeNoRoleCandidate && c.reason != "" {
+					reason = roleRestrictedReason(c.reason)
+					break
+				}
+			}
+			return p, fail(exitSeatRefused, "%s%s", reason, rolePurposeHint(s))
+		}
 		return p, fail(exit, "%s: no account admitted routing role %s%s%s%s", code, routingRole(req), hostScope(s), gap, p.poolAtCapNote())
 	}
 	if slices.ContainsFunc(accounts, func(c *selCand) bool { return c.code == outcomeQuotaExhausted }) {
@@ -444,6 +454,13 @@ func (a *App) selectionRefused(ctx context.Context, s Spawn, req selReq, p *selP
 		return p, fail(exitSeatRefused, "%s: %s: every eligible candidate is in a pool at its concurrency cap%s", reasonRoleNoCandidate, outcomeNoRoleCandidate, note)
 	}
 	return p, fail(exitSeatRefused, "%s: %s: no profile passes role, retirement, grade, gate and seat rules", reasonRoleNoCandidate, outcomeNoRoleCandidate)
+}
+
+func rolePurposeHint(s Spawn) string {
+	if s.Profile == "codex-astra" {
+		return " (use --purpose director|architect|operator-request)"
+	}
+	return ""
 }
 
 func routingRole(req selReq) string {
