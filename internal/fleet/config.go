@@ -87,6 +87,14 @@ func warnRetiredQuotaKeys(c Config, errw io.Writer) {
 	}
 }
 
+// ReportUserIdle reads [local] report_user_idle from the node's hosts config. The
+// node reads it on each heartbeat, so an edit applies at the next one. A
+// missing or unreadable config means off: the node reports no user input.
+func ReportUserIdle() bool {
+	c, err := LoadConfig(configPath(io.Discard))
+	return err == nil && boolean(c.Local, "report_user_idle", false)
+}
+
 func LoadConfig(path string) (Config, error) {
 	c := Config{}
 	b, e := os.ReadFile(path)

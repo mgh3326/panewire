@@ -5,11 +5,17 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-
-	"github.com/mgh3326/panewire/internal/textbound"
 )
 
 const maxJobSelectionBytes = 32 * 1024
+const unknownSelectionHostID = "unknown"
+
+func selectionHostID(host string) string {
+	if validID(host) {
+		return host
+	}
+	return unknownSelectionHostID
+}
 
 func jobSelectionSource(s Spawn) string {
 	switch {
@@ -43,19 +49,19 @@ func jobSelection(s Spawn, source string) map[string]any {
 	if s.OverrideReason != "" {
 		selection["override_reason"] = s.OverrideReason
 	}
-	host := map[string]any{"chosen": firstNonempty(func() string {
+	chosenHost := firstNonempty(func() string {
 		if s.placement != nil {
 			return s.placement.execution.Host
 		}
 		return ""
-	}(), s.Host, "local")}
+	}(), s.Host, "local")
+	host := map[string]any{"chosen": selectionHostID(chosenHost)}
 	host["source"] = source
 	if s.placement != nil && s.placement.plan != nil {
 		plan := s.placement.plan
 		rows := make([]any, 0, len(plan.candidates))
-		chosen := host["chosen"].(string)
 		appendCandidate := func(c placeCandidate) {
-			row := map[string]any{"machine": c.name}
+			row := map[string]any{"machine": selectionHostID(c.name)}
 			outcome := c.outcome
 			if c.excluded != "" {
 				outcome = "excluded:" + c.excluded
@@ -66,7 +72,7 @@ func jobSelection(s Spawn, source string) map[string]any {
 						break
 					}
 				}
-			} else if outcome == "" && c.name == chosen {
+			} else if outcome == "" && c.name == chosenHost {
 				outcome = "admitted"
 			} else if outcome == "" {
 				outcome = "below_choice"
@@ -77,13 +83,13 @@ func jobSelection(s Spawn, source string) map[string]any {
 			rows = append(rows, row)
 		}
 		for _, c := range plan.candidates {
-			if c.name == chosen {
+			if c.name == chosenHost {
 				appendCandidate(c)
 				break
 			}
 		}
 		for _, c := range plan.candidates {
-			if c.name != chosen {
+			if c.name != chosenHost {
 				appendCandidate(c)
 			}
 		}
@@ -196,7 +202,7 @@ func trimJobSelection(selection map[string]any) {
 			if !trimmed {
 				host, _ := selection["host"].(map[string]any)
 				if chosen, ok := host["chosen"].(string); ok {
-					host["chosen"] = textbound.PrefixWithin(chosen, 4_000)
+					host["chosen"] = selectionHostID(chosen)
 				}
 				clear(selection)
 				selection["host"] = host
