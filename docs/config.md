@@ -1833,7 +1833,8 @@ state, so a retained completed record can still appear after reap.
 ## Task pane sweep
 
 `panewire daemon` closes the pane of a worker or tester whose bound hk task is
-merged, done or dropped, once the pane has stayed not working for a grace. The
+merged, done or dropped, or whose job was closed, once the pane has stayed not
+working for a grace; a completed author's pane waits while its PR is open. The
 rules are in [pane-sweep.md](pane-sweep.md). Two daemon flags configure it:
 
 - `--task-pane-sweep-interval DURATION` — how often the sweep runs. Default
