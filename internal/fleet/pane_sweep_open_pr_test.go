@@ -458,11 +458,10 @@ func TestPaneSweepKeepsACompletedFixAuthorWhoseTaskIsUnknown(t *testing.T) {
 	}
 }
 
-// A completed author that hk confirms has no task closes by its own record as
-// before: it names no parent (the claim names none, and hk's record of the job
-// names none or hk holds no record of it), or its parent, read in hk, names no
-// task or is held nowhere. hk links PRs to a task, so there is no change list
-// to wait on.
+// A completed author that names no parent anywhere closes by its own record as
+// before: the claim names none, and hk's record of the job names none or hk
+// holds no record of it. hk links PRs to a task, so there is no change list to
+// wait on.
 func TestPaneSweepClosesACompletedAuthorWithNoTask(t *testing.T) {
 	for _, tc := range []struct {
 		name, parent string
@@ -470,8 +469,6 @@ func TestPaneSweepClosesACompletedAuthorWithNoTask(t *testing.T) {
 	}{
 		{"no parent in hk's record", "", map[string]map[string]any{"fix": {"job_id": "fix", "state": "spawned"}}},
 		{"no hk record of the job", "", nil},
-		{"parent has no task", "parent", map[string]map[string]any{"parent": {"job_id": "parent", "state": "completed"}}},
-		{"parent held nowhere", "parent", nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			g := newSweepGitFake(t)
@@ -493,6 +490,76 @@ func TestPaneSweepClosesACompletedAuthorWithNoTask(t *testing.T) {
 				t.Fatalf("job.reaped payload = %v", payload)
 			}
 		})
+	}
+}
+
+// A completed fix author whose named parent does not resolve to a task is
+// kept, not closed as if it had none: hk answers not_found for a record that
+// has not propagated yet (resolveParent waits on such a lag), and a parent
+// record without a task names no change list either. The parent is named by
+// the claim, or only by hk's record of the job.
+func TestPaneSweepKeepsACompletedFixAuthorWhoseParentIsUnresolved(t *testing.T) {
+	for _, tc := range []struct {
+		name, parent string
+		records      map[string]map[string]any
+	}{
+		{"parent held nowhere", "parent", nil},
+		{"parent has no task", "parent", map[string]map[string]any{"parent": {"job_id": "parent", "state": "completed"}}},
+		{"parent named only by hk, held nowhere", "", map[string]map[string]any{"fix": {"job_id": "fix", "state": "spawned", "parent_job": "parent"}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			g := newSweepGitFake(t)
+			f := newPaneSweepFixture(t)
+			f.withGit(g)
+			cwd := g.worktree(t, "fix")
+			f.fixAuthor("fix", tc.parent, map[string]any{"cwd": cwd})
+			for id, rec := range tc.records {
+				f.store.records[id] = rec
+			}
+			g.head = paneSweepPRHead
+			f.tasks["42"], f.category["42"] = "reviewing", "started"
+			f.prChanges["42"] = []PRChange{{Number: 306, State: "open", Head: paneSweepPRHead}}
+			putEvent(t, f.a, "fix", "job.completed", map[string]any{})
+			f.at(0)
+			f.at(11)
+			if len(f.closed()) != 0 || f.reaped("fix") != nil {
+				t.Fatalf("a completed fix author whose parent is unresolved was closed; info %q", f.info)
+			}
+			if !f.infoHas("task pane kept", "job=fix", "reason=pr_state_unknown") {
+				t.Fatalf("info lines = %q", f.info)
+			}
+		})
+	}
+}
+
+// A parent record that hk answers not_found for during one pass and holds on
+// the next (a lagging record) keeps the completed fix author through the gap,
+// and the next pass judges it on the parent's task: its open PR keeps it.
+func TestPaneSweepKeepsACompletedFixAuthorWhileItsParentRecordLags(t *testing.T) {
+	g := newSweepGitFake(t)
+	f := newPaneSweepFixture(t)
+	f.withGit(g)
+	cwd := g.worktree(t, "fix")
+	f.fixAuthor("fix", "parent", map[string]any{"cwd": cwd})
+	g.head = paneSweepPRHead
+	f.tasks["42"], f.category["42"] = "reviewing", "started"
+	f.prChanges["42"] = []PRChange{{Number: 306, State: "open", Head: paneSweepPRHead}}
+	putEvent(t, f.a, "fix", "job.completed", map[string]any{})
+	f.at(0)
+	f.at(11)
+	if len(f.closed()) != 0 || f.reaped("fix") != nil {
+		t.Fatalf("a completed fix author was closed while its parent's record was not found; info %q", f.info)
+	}
+	if !f.infoHas("task pane kept", "job=fix", "reason=pr_state_unknown") {
+		t.Fatalf("info lines = %q", f.info)
+	}
+	f.store.records["parent"] = map[string]any{"job_id": "parent", "task_id": float64(42), "state": "completed"}
+	f.at(22)
+	if len(f.closed()) != 0 || f.reaped("fix") != nil {
+		t.Fatalf("a completed fix author with an open PR was closed once its parent resolved; info %q", f.info)
+	}
+	if !f.infoHas("task pane kept", "job=fix", "task=42", "reason=open_pr", "pr=306") {
+		t.Fatalf("info lines = %q", f.info)
 	}
 }
 

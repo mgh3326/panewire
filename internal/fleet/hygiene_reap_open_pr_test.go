@@ -184,3 +184,32 @@ func TestReapKeepsACompletedFixAuthorOnItsParentsOpenPR(t *testing.T) {
 		t.Fatalf("reap output = %q", out)
 	}
 }
+
+// A completed fix author whose parent hk answers not_found for (a record that
+// has not propagated yet) is kept by reap, not reaped as if it had no task;
+// once the parent's record appears, the next reap judges it on the parent's
+// task and its open PR keeps it.
+func TestReapKeepsACompletedFixAuthorWhileItsParentRecordLags(t *testing.T) {
+	a, out, closed := reapPRJob(t, reapPRCase{
+		claim:    map[string]any{"task_inherited_from": "parent"},
+		terminal: map[string]any{"kind": "job.completed"},
+		status:   http.StatusOK, changes: reapOpenPRChanges,
+	})
+	if len(closed) != 0 || slices.Contains(eventKindsOf(t, a, "j"), "job.reaped") {
+		t.Fatalf("reap closed a completed fix author whose parent was not found: closed %v, out %q", closed, out)
+	}
+	if !strings.Contains(out, "job=j pane=w:p1 action=keep reason=pr_state_unknown") {
+		t.Fatalf("reap output = %q", out)
+	}
+	a.JobStore.(*fakeJobStore).records["parent"] = map[string]any{"job_id": "parent", "task_id": float64(42), "state": "completed"}
+	if err := a.hygiene(t.Context(), "reap", []string{"--job", "j", "--grace", "0s", "--apply"}); err != nil {
+		t.Fatal(err)
+	}
+	again := strings.TrimPrefix(a.Out.(interface{ String() string }).String(), out)
+	if slices.Contains(eventKindsOf(t, a, "j"), "job.reaped") {
+		t.Fatalf("reap closed a completed fix author with an open PR once its parent resolved: out %q", again)
+	}
+	if !strings.Contains(again, "job=j pane=w:p1 action=keep reason=open_pr") {
+		t.Fatalf("second reap output = %q", again)
+	}
+}
