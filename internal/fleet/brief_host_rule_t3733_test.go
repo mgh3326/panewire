@@ -35,6 +35,17 @@ func TestSpawnBriefPreambleStatesTestHostRuleT3733(t *testing.T) {
 	if bullet == "" {
 		t.Fatalf("fleet-v1 block has no bullet naming mbp-server: %q", brief[start:end])
 	}
+	// The rule's polarity: mbp-server is forbidden and every other host is
+	// told to run the tests itself. Substrings alone would let "never" turn
+	// into "always" or the permission drop out unnoticed.
+	for _, want := range []string{
+		"never run `go test` on mbp-server",
+		"run `go test` for the packages you changed directly in your worktree",
+	} {
+		if !strings.Contains(bullet, want) {
+			t.Errorf("host-test bullet lacks the rule %q: %q", want, bullet)
+		}
+	}
 	for _, want := range []string{
 		"`hostname -s`",
 		"`go test`",

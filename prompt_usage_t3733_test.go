@@ -155,11 +155,18 @@ func TestPromptRefusalWithoutErrorTextPrintsCodeT3733(t *testing.T) {
 // returns (hk 3733).
 func TestWaitConditionErrorsAreNotSilentT3733(t *testing.T) {
 	t.Run("invalid status", func(t *testing.T) {
-		code, stderr := runCLIChild(t, absentSocket(t), "wait", "--agent", "orch", "--status", "landed", "--timeout", "1s")
+		// The rejected value is caller input and may be anything, a secret
+		// included, so the diagnostic names the flag and the allowed values
+		// but never echoes the value.
+		const rejected = "sk-synthetic-3733-do-not-echo"
+		code, stderr := runCLIChild(t, absentSocket(t), "wait", "--agent", "orch", "--status", rejected, "--timeout", "1s")
 		if code != panewire.ExitConditionInvalid {
 			t.Fatalf("exit=%d want %d; stderr=%q", code, panewire.ExitConditionInvalid, stderr)
 		}
-		oneStderrLine(t, stderr, "panewire wait: ", "--status", "landed")
+		oneStderrLine(t, stderr, "panewire wait: ", "--status", "idle, working, blocked, done or unknown")
+		if strings.Contains(stderr, rejected) {
+			t.Fatalf("stderr echoes the rejected --status value: %q", stderr)
+		}
 	})
 	t.Run("refusal without error text", func(t *testing.T) {
 		socket := refusingDaemon(t, `{"ok":false,"code":5}`)
