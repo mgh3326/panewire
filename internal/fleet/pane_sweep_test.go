@@ -4,8 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -168,6 +166,9 @@ func (f *paneSweepFixture) reaped(id string) map[string]any {
 
 func TestPaneSweepClosesAMergedTaskPaneAfterTheGrace(t *testing.T) {
 	f := newPaneSweepFixture(t)
+	// hk 3702: the fake hk stores the screen, so the screen lives there and the
+	// job dir gets no local copy; the environment does not decide this.
+	hk := useFakeHK(t)
 	pane := f.job("j", "worker", "42")
 	f.tasks["42"] = "merged"
 	f.at(0)
@@ -175,12 +176,11 @@ func TestPaneSweepClosesAMergedTaskPaneAfterTheGrace(t *testing.T) {
 	if got := f.closed(); !slices.Equal(got, []string{pane}) {
 		t.Fatalf("closed panes = %v, want [%s]", got, pane)
 	}
-	screen, err := os.ReadFile(filepath.Join(f.a.Jobs, "j", "pane-screen.txt"))
-	if err != nil || string(screen) != "last screen of "+pane {
-		t.Fatalf("saved screen = %q, %v", screen, err)
+	if put := screenDocPut(t, hk, "j"); put == nil || put["body"] != "last screen of "+pane {
+		t.Fatalf("screen document = %v, want the pane's screen", put)
 	}
-	if info, err := os.Stat(filepath.Join(f.a.Jobs, "j", "pane-screen.txt")); err != nil || info.Mode().Perm() != 0600 {
-		t.Fatalf("screen mode = %v, %v", info, err)
+	if f.localScreenFile("j") {
+		t.Fatalf("a stored screen left %s in the job dir", PaneScreenFile)
 	}
 	if state := f.store.record(t, "j")["state"]; state != "completed" {
 		t.Fatalf("hk job state = %v, want completed", state)

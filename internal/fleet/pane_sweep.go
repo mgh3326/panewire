@@ -755,9 +755,10 @@ func (s *TaskPaneSweeper) close(ctx context.Context, a *App, j Job, task string,
 // document (UploadPaneScreen) and writes no local copy when hk stores it. A
 // failed upload is one warning, and the screen is then written to
 // <job dir>/pane-screen.txt through an os.Root on the job directory, mode 0600,
-// so the evidence survives until hk holds it. Only a failed pane read, or a
-// failed upload followed by a failed local write, is an error: the pane is
-// kept. See docs/pane-sweep.md.
+// as the only copy: nothing uploads it again, and the job dir's TTL net removes
+// it with the dir (decision hk 3685 §3). Only a failed pane read, or a failed
+// upload followed by a failed local write, is an error: the pane is kept. See
+// docs/pane-sweep.md.
 func (a *App) savePaneScreen(ctx context.Context, j Job) error {
 	r := a.call(ctx, "herdr", "pane", "read", j.Pane)
 	if err := check(r, "pane screen"); err != nil {

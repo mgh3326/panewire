@@ -162,6 +162,7 @@ func TestPaneSweepClosesARevokedJobWhoseTaskIsLive(t *testing.T) {
 	for _, outcome := range []string{"abandoned", "superseded", "completed"} {
 		t.Run(outcome, func(t *testing.T) {
 			f := newPaneSweepFixture(t)
+			hk := useFakeHK(t)
 			pane := f.job("j", "worker", "42")
 			f.tasks["42"], f.category["42"] = "developing", "started"
 			f.closeJob("j", outcome)
@@ -174,9 +175,12 @@ func TestPaneSweepClosesARevokedJobWhoseTaskIsLive(t *testing.T) {
 			if !slices.Equal(f.closed(), []string{pane}) {
 				t.Fatalf("closed %v, want [%s]", f.closed(), pane)
 			}
-			screen, err := os.ReadFile(filepath.Join(f.a.Jobs, "j", PaneScreenFile))
-			if err != nil || string(screen) != "last screen of "+pane {
-				t.Fatalf("saved screen = %q, %v", screen, err)
+			// hk 3702: the stored screen is the copy; no local file is written.
+			if put := screenDocPut(t, hk, "j"); put == nil || put["body"] != "last screen of "+pane {
+				t.Fatalf("screen document = %v, want the pane's screen", put)
+			}
+			if f.localScreenFile("j") {
+				t.Fatalf("a stored screen left %s in the job dir", PaneScreenFile)
 			}
 			want := "lost"
 			if outcome == "completed" {
