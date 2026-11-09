@@ -38,7 +38,7 @@ func TestWaitSpawnPreservesRefusalAndUnknownOwnership(t *testing.T) {
 	for _, test := range []struct {
 		status   string
 		rc, want int
-	}{{"succeeded", 0, 0}, {"failed", 77, 77}, {"retryable", 70, 70}, {"deadline_exceeded", 124, exitStateConflict}, {"reconciling", 75, exitStateConflict}} {
+	}{{"succeeded", 0, 0}, {"failed", 77, 77}, {"retryable", 70, 70}, {"deadline_exceeded", 124, exitStateConflict}} {
 		t.Run(test.status, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				json.NewEncoder(w).Encode(map[string]any{"status": test.status, "result": map[string]any{"rc": test.rc, "reason": "fixture"}})

@@ -9,7 +9,8 @@ The CLI prints `ACCEPTED job=… request=…` after the hub commits a reservatio
 That confirms ownership of the operation, not a pane or brief delivery. Wait for
 `SPAWNED` or `SPAWN_FAILED` and perform the usual read-only landing check.
 `--wait` observes spawn state first, preserving admission/node refusal codes,
-then uses the existing job-completion wait and timeout behavior. Delegate panes
+keeps polling through `reconciling` (which sends no notice), then uses the
+existing job-completion wait and timeout behavior. Delegate panes
 use the same submission path.
 
 ## Acceptance and identity
@@ -326,6 +327,13 @@ differs from the owner: `--requested-by`, else `--parent`. The owner's event id
 stays `<request_id>:<attempt>:<status>`; the submitting lane's is the same id
 with `:<lane>` appended.
 `SPAWNED` stays type `report`.
+
+`reconciling` (the node's answer is unknown, or the node is disconnected) writes
+no `spawn_notifications` row, so neither lane is notified. The owner keeps
+ownership. A request that later lands notifies one `SPAWNED`; one that fails or
+passes its deadline notifies one `SPAWN_FAILED`, as above. The hub journal logs
+the transition as `hub spawn reconciling`, not as a refusal, and captures no
+Sentry event for it.
 
 | Reason code | Meaning |
 | --- | --- |
