@@ -121,7 +121,7 @@ func TestAllHostsRoleDeniedReturnsRoleRestricted(t *testing.T) {
 	}
 }
 
-func TestMixedQuotaUnknownAndRoleDenialReturnsRoleRestricted(t *testing.T) {
+func TestMixedQuotaUnknownAndRoleDenialPrefersUnknownQuota(t *testing.T) {
 	a, s, q, src := accountConsultFixture(t)
 	q.CatalogRows = []CatalogRow{{Profile: "codex-astra", Effort: "high", Grade: "S", Pool: "codex", Gate: "default", ModelID: "astra"}}
 	secondAccount := "codex:00000000000000d4"
@@ -129,19 +129,41 @@ func TestMixedQuotaUnknownAndRoleDenialReturnsRoleRestricted(t *testing.T) {
 	src.accounts[secondAccount] = SharedAccount{Key: secondAccount, Observed: true, Fresh: true, MeasuredAt: a.Now(), Quota: ptrPool(riskPool(30, 8))}
 	denial := "role_restricted: astra requires director, architect, or operator-request purpose"
 	calls := 0
+	visited := map[string]bool{}
 	q.GateDo = func(r QuotaRequest) (string, error) {
 		calls++
+		visited[r.AccountKey] = true
 		if r.AccountKey == testCodexA {
 			return "", fail(exitSeatRefused, "%s", denial)
 		}
-		return "", fail(exitQuotaUnknown, "quota unknown")
+		return "", fail(exitEvictionUnconfirmed, "quota unknown")
 	}
 	sel, err := a.selectProfile(context.Background(), s)
-	if err == nil || !strings.HasPrefix(err.Error(), "role_restricted:") || strings.Contains(err.Error(), "quota_unknown") || exitCode(err) != exitSeatRefused {
-		t.Fatalf("mixed denials should report role restriction: %v (%s)", err, sel.outcome)
+	if err == nil || !strings.Contains(err.Error(), "QUOTA_UNKNOWN") || sel.outcome != outcomeQuotaUnknown || exitCode(err) != exitQuotaUnknown {
+		t.Fatalf("mixed denials should report unknown quota: %v (%s)", err, sel.outcome)
 	}
-	if calls != 2 {
-		t.Fatalf("mixed outcome fixture reached %d accounts, want both", calls)
+	if len(visited) != 2 {
+		t.Fatalf("mixed outcome fixture reached accounts %v, want both", visited)
+	}
+}
+
+func TestRoleDeniedTraceBoundsAndFlattensGateReason(t *testing.T) {
+	a, s, q, src := accountConsultFixture(t)
+	q.CatalogRows = []CatalogRow{{Profile: "codex-astra", Effort: "high", Grade: "S", Pool: "codex", Gate: "default", ModelID: "astra"}}
+	src.presence = []PresenceRecord{{HostID: "host-a", AccountKey: testCodexA, LastSeen: a.Now()}}
+	longReason := "role_restricted: " + strings.Repeat("x", 230) + "\nhost=mac-personal"
+	q.GateDo = func(QuotaRequest) (string, error) { return "", fail(exitSeatRefused, "%s", longReason) }
+	sel, err := a.selectProfile(context.Background(), s)
+	if err == nil || exitCode(err) != exitSeatRefused {
+		t.Fatalf("role denial not returned: %v", err)
+	}
+	tried := hostRow(t, sel, "host-a")["tried"].([]any)
+	if len(tried) != 1 {
+		t.Fatalf("expected one attempted gate row, got %v", tried)
+	}
+	reason := tried[0].(map[string]any)["reason"].(string)
+	if len(reason) > 201 || strings.ContainsAny(reason, "\r\n") || !strings.HasPrefix(reason, "role_restricted:") {
+		t.Fatalf("role gate trace is not bounded and flattened: %d bytes %q", len(reason), reason)
 	}
 }
 

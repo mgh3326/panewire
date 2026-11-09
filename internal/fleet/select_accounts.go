@@ -415,7 +415,15 @@ func (a *App) selectionRefused(ctx context.Context, s Spawn, req selReq, p *selP
 	roleRestricted := slices.ContainsFunc(accounts, func(c *selCand) bool {
 		return c.code == outcomeNoRoleCandidate && strings.HasPrefix(c.reason, "role_restricted:")
 	})
-	if roleRestricted {
+	preemptingOutcome := slices.ContainsFunc(accounts, func(c *selCand) bool {
+		switch c.code {
+		case outcomeQuotaUnknown, outcomeAuthUnavailable, outcomeNoEligibleHost, outcomePolicyUnavailable:
+			return true
+		default:
+			return false
+		}
+	})
+	if roleRestricted && !preemptingOutcome {
 		for _, c := range accounts {
 			if c.code != outcomeNoRoleCandidate || !strings.HasPrefix(c.reason, "role_restricted:") {
 				continue
