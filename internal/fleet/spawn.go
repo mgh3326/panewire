@@ -18,6 +18,8 @@ import (
 	"github.com/mgh3326/panewire/internal/arbiter"
 )
 
+var astraPurposeValues = [...]string{"director", "architect", "operator-request", "round-extension"}
+
 type Spawn struct {
 	// hubRetryHost is the host the hub's own verified-cleanup retry pinned,
 	// copied from Submission.RetryHost by ValidateSubmission. Nothing parses
@@ -172,6 +174,9 @@ func parseSpawn(args []string) (Spawn, error) {
 	}
 	if f.NArg() != 0 {
 		return s, fail(exitUsage, "unexpected spawn arguments")
+	}
+	if s.Profile == "codex-astra" && s.Purpose != "" && !slices.Contains(astraPurposeValues[:], s.Purpose) {
+		return s, fail(exitUsage, "codex-astra의 --purpose 값은 다음 중 하나여야 합니다: %s", strings.Join(astraPurposeValues[:], ", "))
 	}
 	if flagPassed(f, "review-pass") && (s.Role != "reviewer" || !reviewPassPattern.MatchString(s.ReviewPass)) {
 		return s, fail(exitUsage, "--review-pass N (1..9) is accepted only with --role reviewer")

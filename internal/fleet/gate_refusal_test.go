@@ -23,7 +23,7 @@ func TestRawGateExitThreeUsesCodeInsteadOfProse(t *testing.T) {
 			a, s, q, src := accountConsultFixture(t)
 			q.CatalogRows = q.CatalogRows[1:2]
 			src.presence = src.presence[1:2]
-			q.GateDo = func(QuotaRequest) (string, error) { return "", fail(3, "%s", message) }
+			q.GateDo = func(r QuotaRequest) (string, error) { return "", fail(3, "%s", message) }
 			sel, err := a.selectProfile(context.Background(), s)
 			if exitCode(err) != exitRoleWait || sel.outcome != outcomeQuotaExhausted {
 				t.Fatalf("gate prose changed exhaustion: %v/%s", err, sel.outcome)
@@ -41,7 +41,7 @@ func TestStructuredGateRefusalsAreIndependentOfMessages(t *testing.T) {
 		{"typed exhaustion", outcomeQuotaExhausted, "", "weekly limit reached", outcomeQuotaExhausted, exitRoleWait, false},
 		{"reason code", "", "window_exhausted", "사용량 한도 초과", outcomeQuotaExhausted, exitRoleWait, false},
 		{"typed policy", outcomeNoRoleCandidate, "", "quota exhausted is not the reason", outcomeNoRoleCandidate, exitSeatRefused, false},
-		{"role flag", "", "", "quota exhausted is not the reason", outcomeNoRoleCandidate, exitSeatRefused, true},
+		{"role flag", "", "", "role_restricted: astra requires director, architect, or operator-request purpose", outcomeNoRoleCandidate, exitSeatRefused, true},
 		{"ambiguous measured block", "", "", "weekly limit reached", outcomeQuotaUnknown, exitQuotaUnknown, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -73,6 +73,9 @@ func TestStructuredGateRefusalsAreIndependentOfMessages(t *testing.T) {
 			if calls != wantCalls {
 				t.Fatalf("gate calls=%d want=%d", calls, wantCalls)
 			}
+			if tc.roleDenied && !strings.Contains(err.Error(), tc.message) {
+				t.Fatalf("role reason lost: %v", err)
+			}
 		})
 	}
 }
@@ -91,6 +94,98 @@ func TestRefreshExitThreeIsNotGateExhaustion(t *testing.T) {
 	sel, err := a.selectProfile(context.Background(), s)
 	if exitCode(err) != exitConfig || sel.outcome != outcomePolicyUnavailable {
 		t.Fatalf("refresh process exit became measured gate exhaustion: %v/%s", err, sel.outcome)
+	}
+}
+
+func TestAllHostsRoleDeniedReturnsRoleRestricted(t *testing.T) {
+	a, s, q, src := accountConsultFixture(t)
+	q.CatalogRows = []CatalogRow{{Profile: "codex-astra", Effort: "high", Grade: "S", Pool: "codex", Gate: "default", ModelID: "astra"}}
+	secondAccount := "codex:00000000000000d4"
+	src.presence = []PresenceRecord{{HostID: "host-a", AccountKey: testCodexA, LastSeen: a.Now()}, {HostID: "host-b", AccountKey: secondAccount, LastSeen: a.Now()}}
+	src.accounts[secondAccount] = SharedAccount{Key: secondAccount, Observed: true, Fresh: true, MeasuredAt: a.Now(), Quota: ptrPool(riskPool(30, 8))}
+	reason := "role_restricted: astra requires director, architect, or operator-request purpose"
+	calls := 0
+	q.GateDo = func(r QuotaRequest) (string, error) { calls++; return "", fail(exitSeatRefused, "%s", reason) }
+	sel, err := a.selectProfile(context.Background(), s)
+	if err == nil || !strings.HasPrefix(err.Error(), "role_restricted:") || !strings.Contains(err.Error(), reason) || strings.Contains(err.Error(), "quota_unknown") || exitCode(err) != exitSeatRefused {
+		t.Fatalf("role denial was masked: %v (%s)", err, sel.outcome)
+	}
+	if calls != 2 {
+		t.Fatalf("role denied %d accounts, want each host account", calls)
+	}
+	for _, host := range []string{"host-a", "host-b"} {
+		row := hostRow(t, sel, host)
+		if row["admission_outcome"] == "quota_unknown" {
+			t.Fatalf("role denial was recorded as quota_unknown on %s: %v", host, row)
+		}
+	}
+}
+
+func TestMixedQuotaUnknownAndRoleDenialReturnsRoleRestricted(t *testing.T) {
+	a, s, q, src := accountConsultFixture(t)
+	q.CatalogRows = []CatalogRow{{Profile: "codex-astra", Effort: "high", Grade: "S", Pool: "codex", Gate: "default", ModelID: "astra"}}
+	secondAccount := "codex:00000000000000d4"
+	src.presence = []PresenceRecord{{HostID: "host-a", AccountKey: testCodexA, LastSeen: a.Now()}, {HostID: "host-b", AccountKey: secondAccount, LastSeen: a.Now()}}
+	src.accounts[secondAccount] = SharedAccount{Key: secondAccount, Observed: true, Fresh: true, MeasuredAt: a.Now(), Quota: ptrPool(riskPool(30, 8))}
+	denial := "role_restricted: astra requires director, architect, or operator-request purpose"
+	calls := 0
+	q.GateDo = func(r QuotaRequest) (string, error) {
+		calls++
+		if r.AccountKey == testCodexA {
+			return "", fail(exitSeatRefused, "%s", denial)
+		}
+		return "", fail(exitQuotaUnknown, "quota unknown")
+	}
+	sel, err := a.selectProfile(context.Background(), s)
+	if err == nil || !strings.HasPrefix(err.Error(), "role_restricted:") || strings.Contains(err.Error(), "quota_unknown") || exitCode(err) != exitSeatRefused {
+		t.Fatalf("mixed denials should report role restriction: %v (%s)", err, sel.outcome)
+	}
+	if calls != 2 {
+		t.Fatalf("mixed outcome fixture reached %d accounts, want both", calls)
+	}
+}
+
+func TestNonRoleNoRoleCandidateDoesNotBeatAuthFailure(t *testing.T) {
+	a := testApp(t)
+	p := &selPlan{cands: []*selCand{
+		{accountKey: "credit:one", code: outcomeNoRoleCandidate, reason: "pool_excluded"},
+		{accountKey: "claude:two", code: outcomeAuthUnavailable, reason: "auth_unavailable"},
+	}}
+	_, err := a.selectionRefused(context.Background(), Spawn{}, selReq{role: "worker"}, p)
+	if exitCode(err) != exitAuthUnavailable || !strings.Contains(err.Error(), "AUTH_UNAVAILABLE") || strings.Contains(err.Error(), "role_restricted") {
+		t.Fatalf("pool exclusion masked sign-in refusal: %v", err)
+	}
+}
+
+func TestRoleRestrictedRefusalKeepsDiagnosticSuffixAndAllPurposeHints(t *testing.T) {
+	a := testApp(t)
+	p := &selPlan{poolCaps: map[string]int{"codex": 2}, cands: []*selCand{
+		{accountKey: "codex:one", code: outcomeNoRoleCandidate, reason: "role_restricted: astra requires director, architect, or operator-request purpose"},
+		{accountKey: "codex:two", reason: reasonPoolAtCap, cap: "codex"},
+	}}
+	_, err := a.selectionRefused(context.Background(), Spawn{Profile: "codex-astra", Host: "host-a"}, selReq{role: "counsel"}, p)
+	for _, want := range []string{"role_restricted: astra requires director, architect, or operator-request purpose", "routing role counsel", "--host host-a restricts accounts", "pool_at_cap: codex=2", "round-extension"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("refusal lost %q: %v", want, err)
+		}
+	}
+}
+
+func TestGateRefusalTruncationKeepsHostNameWhole(t *testing.T) {
+	got := clipGateReason(strings.Repeat("x", 185)+" mac-personal quota_unknown", 200)
+	if strings.Contains(got, "mac-persona…") || !strings.Contains(got, "mac-personal") {
+		t.Fatalf("truncated refusal split host name: %q", got)
+	}
+}
+
+func TestAllHostsQuotaUnknownKeepsUnknownRefusalAndExit(t *testing.T) {
+	a, s, q, src := accountConsultFixture(t)
+	q.CatalogRows = []CatalogRow{q.CatalogRows[1]}
+	src.accounts[testClaudeA] = SharedAccount{Key: testClaudeA, Observed: true, Fresh: true}
+	src.accounts[testClaudeB] = SharedAccount{Key: testClaudeB, Observed: true, Fresh: true}
+	sel, err := a.selectProfile(context.Background(), s)
+	if err == nil || exitCode(err) != exitQuotaUnknown || sel.outcome != outcomeQuotaUnknown || !strings.Contains(err.Error(), "QUOTA_UNKNOWN") {
+		t.Fatalf("unknown quota refusal changed: err=%v outcome=%s", err, sel.outcome)
 	}
 }
 
@@ -156,7 +251,7 @@ func TestPlanKeepsTypedGateRefusalOutcome(t *testing.T) {
 	q.CatalogRows = q.CatalogRows[1:2]
 	q.LaunchValue = Launch{Profile: "opus", ModelID: "opus-m", Effort: "high", Grade: "S", Gate: "default", Pool: "claude"}
 	gates := 0
-	q.GateDo = func(QuotaRequest) (string, error) {
+	q.GateDo = func(r QuotaRequest) (string, error) {
 		gates++
 		if gates == 1 {
 			return "pool=claude\n", nil

@@ -412,6 +412,19 @@ func (a *App) selectionRefused(ctx context.Context, s Spawn, req selReq, p *selP
 	if len(accounts) == 0 {
 		accounts = p.cands
 	}
+	roleRestricted := slices.ContainsFunc(accounts, func(c *selCand) bool {
+		return c.code == outcomeNoRoleCandidate && strings.HasPrefix(c.reason, "role_restricted:")
+	})
+	if roleRestricted {
+		for _, c := range accounts {
+			if c.code != outcomeNoRoleCandidate || !strings.HasPrefix(c.reason, "role_restricted:") {
+				continue
+			}
+			p.outcome = outcomeNoRoleCandidate
+			note := fmt.Sprintf(": no account admitted routing role %s%s%s%s", routingRole(req), hostScope(s), p.capsGap+p.hostDropNote(), p.poolAtCapNote())
+			return p, fail(exitSeatRefused, "%s%s%s", c.reason, note, rolePurposeHint(s))
+		}
+	}
 	order := []string{outcomeQuotaUnknown, outcomeAuthUnavailable, outcomeNoEligibleHost, outcomePolicyUnavailable, outcomeNoRoleCandidate}
 	if !slices.ContainsFunc(p.cands, func(c *selCand) bool { return c.accountKey != "" }) {
 		// No account was bound, so no measured account failure decided this.
@@ -444,6 +457,13 @@ func (a *App) selectionRefused(ctx context.Context, s Spawn, req selReq, p *selP
 		return p, fail(exitSeatRefused, "%s: %s: every eligible candidate is in a pool at its concurrency cap%s", reasonRoleNoCandidate, outcomeNoRoleCandidate, note)
 	}
 	return p, fail(exitSeatRefused, "%s: %s: no profile passes role, retirement, grade, gate and seat rules", reasonRoleNoCandidate, outcomeNoRoleCandidate)
+}
+
+func rolePurposeHint(s Spawn) string {
+	if s.Profile == "codex-astra" {
+		return " (codex-astra는 --purpose " + strings.Join(astraPurposeValues[:], "|") + " 중 하나를 지정하세요)"
+	}
+	return ""
 }
 
 func routingRole(req selReq) string {

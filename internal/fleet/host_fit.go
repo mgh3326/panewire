@@ -401,7 +401,12 @@ func (sp *selPresence) admitPass(ctx context.Context, s Spawn, p *selPlan, pendi
 				break
 			}
 			if c.reason == "" {
-				c.reason, c.code = fmt.Sprintf("gate_refused:%d", exitCode(err)), gateOutcome(err)
+				c.code = gateOutcome(err)
+				if c.code == outcomeNoRoleCandidate && strings.HasPrefix(err.Error(), "role_restricted:") {
+					c.reason = err.Error()
+				} else {
+					c.reason = fmt.Sprintf("gate_refused:%d", exitCode(err))
+				}
 				c.outcome = "dropped:gate_refused"
 			} else {
 				c.outcome = "dropped:" + c.reason
