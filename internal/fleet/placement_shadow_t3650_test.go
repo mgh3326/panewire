@@ -12,13 +12,6 @@ import (
 	"github.com/mgh3326/panewire/internal/fleetevent"
 )
 
-// shadowEvents collects the fleet events of an App.
-func shadowEvents(a *App) *[]fleetevent.Event {
-	var events []fleetevent.Event
-	a.EventSink = func(e fleetevent.Event) { events = append(events, e) }
-	return &events
-}
-
 func shadowEventOf(t *testing.T, events []fleetevent.Event) fleetevent.Event {
 	t.Helper()
 	var found []fleetevent.Event
@@ -39,56 +32,6 @@ func rankNames(o []fleetevent.ShadowHostRank) string {
 		names = append(names, r.Host)
 	}
 	return strings.Join(names, ",")
-}
-
-// workerFleet is the host-first fixture for a worker, every fit host holding
-// account B, with the hub's score for each host (a fleet-state reading: no
-// Decided).
-func workerFleet(t *testing.T, scores map[string]float64) (*App, Spawn, *fakePlacementSource) {
-	t.Helper()
-	a, s, _, src := hostFirstFixture(t, "worker", "B", workerRows,
-		map[string]string{"mac-b": testClaudeB, "cloud-small": testClaudeB, "cloud-tiny": testClaudeB, "pi": testClaudeB}, nil)
-	for i := range src.hosts {
-		if sc, ok := scores[src.hosts[i].Name]; ok {
-			src.hosts[i].Score = ptrF(sc)
-		}
-	}
-	return a, s, src
-}
-
-func sigs(power float64) PlacementSignals {
-	return PlacementSignals{Power: ptrF(power), LiveJobs: ptrI(0), BridgedJobs: ptrI(0), MemAvailable: ptrF(0.8), Load1PerCore: ptrF(0.1)}
-}
-
-// liveRecord is everything a caller can observe about one selection except
-// the placement_shadow event: the error, the chosen pair, the full host/rung
-// trace and the other fleet events.
-func liveRecord(t *testing.T, a *App, s Spawn, events *[]fleetevent.Event) string {
-	t.Helper()
-	sel, err := a.selectProfile(context.Background(), s)
-	out := map[string]any{}
-	if err != nil {
-		out["err"] = err.Error()
-	}
-	if sel != nil {
-		out["record"] = sel.record()
-		if sel.chosen != nil {
-			out["chosen"] = sel.chosen.host + "/" + sel.chosen.accountKey
-		}
-	}
-	var others []fleetevent.Event
-	for _, e := range *events {
-		if e.Kind != "placement_shadow" {
-			e.TS = ""
-			others = append(others, e)
-		}
-	}
-	out["events"] = others
-	b, e := json.Marshal(out)
-	if e != nil {
-		t.Fatal(e)
-	}
-	return string(b)
 }
 
 // (a) The live path is byte for byte the same with the shadow on and off, on
@@ -327,7 +270,7 @@ func TestPlacementShadowMemoryAdmission_T3650(t *testing.T) {
 		memFloor: 0.2, memSpan: 0.2, swapInHalf: 5000, loadKnee: 0.75, loadCap: 4, jobsHalf: 8, claimCost: 10}
 	mk := func(name, reason string, pressure, free *float64) selHost {
 		hv := &HostView{Name: name, Connected: true, Reason: reason, Signals: sigs(100), Extra: HostExtra{Pressure: pressure, MemFreePct: free}}
-		return selHost{name: name, awake: true, view: hv, score: ptrF(50)}
+		return selHost{name: name, awake: true, view: hv, score: ptrF(50), cfg: map[string]any{"tags": []any{"macos"}}}
 	}
 	// refusedByHub: the hub dropped it on its 30% floor (free 25, pressure normal).
 	refusedByHub := mk("hub-refused", "not_accepting(memory_pressure)", ptrF(0), ptrF(25))
@@ -525,5 +468,24 @@ func TestPlacementShadowNaNCapability_T3650(t *testing.T) {
 	}
 	if _, err := json.Marshal(in); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// A Linux PSI percent (1 or 2 are ordinary values there) is never read as a
+// macOS pressure level: the wire carries no OS, so only a host declaring the
+// macos capability has its pressure read as a level.
+func TestPlacementShadowPressureNeedsMacOS_T3650(t *testing.T) {
+	pol := shadowPolicy{pressureRefuseLevel: 2, pressureWarnMem: 0.5, memRefuseBelowPct: 30, memFloor: 0.2, memSpan: 0.2, swapInHalf: 5000}
+	mk := func(tags ...any) selHost {
+		return selHost{name: "h", awake: true, cfg: map[string]any{"tags": tags}, view: &HostView{Connected: true, Signals: sigs(100), Extra: HostExtra{Pressure: ptrF(2)}}}
+	}
+	if m := pol.memory(mk("linux")); m.refuse || m.src != "available" {
+		t.Fatalf("linux PSI 2 read as critical: %+v", m)
+	}
+	if m := pol.memory(mk()); m.refuse || m.src != "available" {
+		t.Fatalf("ambiguous pressure used: %+v", m)
+	}
+	if m := pol.memory(mk("macos")); !m.refuse || m.src != "pressure" {
+		t.Fatalf("macOS critical not refused: %+v", m)
 	}
 }

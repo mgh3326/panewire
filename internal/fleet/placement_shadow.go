@@ -324,9 +324,13 @@ func (pol shadowPolicy) memory(h selHost) shadowMem {
 		return m
 	}
 	x, sig := v.Extra, v.Signals
-	// pressure is a level 0..2 on macOS and a PSI percent on Linux; a Linux
-	// host is the one that reports swap-ins as real swap (swap_in_linux).
-	macLevel := x.Pressure != nil && !x.SwapInLinux && *x.Pressure <= 2
+	// pressure is a level 0..2 on macOS and a PSI percent on Linux, and the
+	// wire does not say which. Only a host that declares the macos capability
+	// has its pressure read as a level; for any other host it is ambiguous and
+	// unused, and available memory decides. swap_in_linux is absent on the
+	// /v1/placement path, so it cannot tell the systems apart.
+	linux := x.SwapInLinux || slices.Contains(hostCaps(h.cfg), "linux")
+	macLevel := x.Pressure != nil && !linux && slices.Contains(hostCaps(h.cfg), "macos") && *x.Pressure <= 2
 	m.swap = x.SwapInPerS
 	if m.swap == nil && x.SwapInLinux && sig.SwapInMBPS != nil {
 		pages := *sig.SwapInMBPS * shadowSwapPagesPerMBps
@@ -336,7 +340,7 @@ func (pol shadowPolicy) memory(h selHost) shadowMem {
 		m.io = 1 / (1 + *m.swap/pol.swapInHalf)
 	}
 	avail := sig.MemAvailable
-	if avail == nil && x.SwapInLinux && x.MemFreePct != nil {
+	if avail == nil && linux && x.MemFreePct != nil {
 		f := *x.MemFreePct / 100
 		avail = &f
 	}
