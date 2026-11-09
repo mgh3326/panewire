@@ -39,9 +39,11 @@ type sweepGitFake struct {
 	onOrigin bool
 	forced   []string
 	onRemove func(path string)
-	// head is the worktree's HEAD; originTip is what
-	// refs/remotes/origin/<branch> resolves to ("" means it does not exist).
+	// head is the worktree's HEAD (headErr makes it unreadable); originTip is
+	// what refs/remotes/origin/<branch> resolves to ("" means it does not
+	// exist).
 	head      string
+	headErr   bool
 	originTip string
 	// remoteTip is the branch tip ls-remote reads from origin itself
 	// (originTip when empty, "none" when origin has no such branch);
@@ -78,6 +80,9 @@ func (g *sweepGitFake) do(c Command) Result {
 	args := c.Args
 	switch {
 	case len(args) >= 4 && args[2] == "rev-parse" && args[3] == "HEAD":
+		if g.headErr {
+			return Result{Code: 128, Err: "fatal: not a git repository"}
+		}
 		return Result{Out: g.head + "\n"}
 	case len(args) >= 5 && args[2] == "rev-parse" && args[3] == "--verify":
 		if g.originTip == "" {
