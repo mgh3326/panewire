@@ -54,6 +54,15 @@ func TestSpawnParseValidatesAstraPurpose(t *testing.T) {
 	}
 }
 
+func TestAstraPurposeParseRefusalDoesNotSubmit(t *testing.T) {
+	a, _, runner, _ := cmdFixture(t)
+	before := len(runner.Calls)
+	err := a.Run(context.Background(), []string{"spawn", "-m", "codex-astra", "--purpose", "free text"})
+	if exitCode(err) != exitUsage || len(runner.Calls) != before {
+		t.Fatalf("parse refusal submitted work: err=%v calls=%d before=%d", err, len(runner.Calls), before)
+	}
+}
+
 func (q *fakeQuota) Launch(_ context.Context, r QuotaRequest) (Launch, error) {
 	q.mu.Lock()
 	q.Calls = append(q.Calls, r)

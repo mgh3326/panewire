@@ -146,6 +146,17 @@ func TestGateRefusalTruncationKeepsHostNameWhole(t *testing.T) {
 	}
 }
 
+func TestAllHostsQuotaUnknownKeepsUnknownRefusalAndExit(t *testing.T) {
+	a, s, q, src := accountConsultFixture(t)
+	q.CatalogRows = []CatalogRow{q.CatalogRows[1]}
+	src.accounts[testClaudeA] = SharedAccount{Key: testClaudeA, Observed: true, Fresh: true}
+	src.accounts[testClaudeB] = SharedAccount{Key: testClaudeB, Observed: true, Fresh: true}
+	sel, err := a.selectProfile(context.Background(), s)
+	if err == nil || exitCode(err) != exitQuotaUnknown || sel.outcome != outcomeQuotaUnknown || !strings.Contains(err.Error(), "QUOTA_UNKNOWN") {
+		t.Fatalf("unknown quota refusal changed: err=%v outcome=%s", err, sel.outcome)
+	}
+}
+
 func TestUnreadableGateExitThreeGetsOneRefresh(t *testing.T) {
 	bound := `{"schema":"scopefuel.gate.v1","provider_id":"claude","account_key":"` + testClaudeB + `","ok":false,"exit_code":3,"outcome_code":"QUOTA_EXHAUSTED"}`
 	admitted := `{"schema":"scopefuel.gate.v1","provider_id":"claude","account_key":"` + testClaudeB + `","ok":true,"exit_code":0}`
