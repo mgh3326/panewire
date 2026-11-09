@@ -119,12 +119,14 @@ When the pane has been not working for at least the grace, the sweep:
 1. uploads the screen to hk as `screens/<job>/pane-screen.txt` (kind `evidence`,
    the job, `origin_class` `job`, and `task_id` for a numeric task), cut to its
    tail as `pane.capture` does (see [node-commands.md](node-commands.md#panecapture)).
-   A stored upload writes no local copy: the screen document is the evidence,
-   and an existing `<job dir>/pane-screen.txt` from an earlier pass is left
-   alone. A failed upload is one warning, and the screen is then written to
-   `<job dir>/pane-screen.txt` (mode 0600, replaced atomically) as its only
-   copy; the close goes on. A pane whose screen cannot be read is kept, and so
-   is a pane whose upload failed and whose local write failed;
+   A stored upload of a screen within hk's cap writes no local copy: the
+   screen document is the evidence, and an existing `<job dir>/pane-screen.txt`
+   from an earlier pass is left alone. A failed upload is one warning, and the
+   screen is then written to `<job dir>/pane-screen.txt` (mode 0600, replaced
+   atomically) as its only copy. A screen over the cap is stored as its tail,
+   so its whole copy is written locally too. The close goes on either way. A
+   pane whose screen cannot be read is kept, and so is a pane whose local write
+   failed where a local copy is needed;
 2. re-reads the job and the pane immediately before closing, as
    `panewire reap` does, and keeps the pane if either changed;
 3. reads the job's token usage while herdr still lists the pane, then closes

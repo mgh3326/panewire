@@ -136,9 +136,9 @@ func TestPaneSweepUploadsTheTailOfAnOversizedScreen(t *testing.T) {
 	if got := f.closed(); !slices.Equal(got, []string{pane}) {
 		t.Fatalf("closed panes = %v, want [%s]", got, pane)
 	}
-	// hk 3702: the stored upload leaves no local copy; the document keeps the tail.
-	if f.localScreenFile("j") {
-		t.Fatalf("a stored oversized screen left %s in the job dir", PaneScreenFile)
+	// hk 3702: the document keeps only the tail, so the whole screen stays locally.
+	if f.screen("j") != full {
+		t.Fatalf("local screen is %d bytes, want the whole %d", len(f.screen("j")), len(full))
 	}
 	put := screenDocPut(t, hk, "j")
 	if put == nil {

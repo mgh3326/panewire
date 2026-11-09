@@ -136,3 +136,36 @@ func TestPaneSweepKeepsThePaneWhenItsReadFailsBeforeUpload(t *testing.T) {
 		t.Fatalf("an unread screen was uploaded: %v", put)
 	}
 }
+
+// A screen over hk's document cap is stored as its tail, so the stored copy is
+// not the whole screen: the full screen stays locally, and the document holds
+// the cut (PR 377 review). The pane still closes.
+func TestPaneSweepKeepsTheWholeOversizedScreenLocally(t *testing.T) {
+	f := newPaneSweepFixture(t)
+	hk := useFakeHK(t)
+	pane := f.job("j", "worker", "42")
+	f.tasks["42"] = "merged"
+	full := "first line\n" + strings.Repeat("x", PaneScreenDocMaxBytes+100) + "\nlast line\n"
+	base := f.runner.Do
+	f.runner.Do = func(c Command) Result {
+		if c.Name == "herdr" && strings.Join(c.Args, " ") == "pane read "+pane {
+			return Result{Out: full}
+		}
+		return base(c)
+	}
+	f.at(0)
+	f.at(11)
+	if got := f.closed(); !slices.Equal(got, []string{pane}) {
+		t.Fatalf("closed panes = %v, want [%s]", got, pane)
+	}
+	if got := f.screen("j"); got != full {
+		t.Fatalf("local screen is %d bytes, want the whole %d", len(got), len(full))
+	}
+	put := screenDocPut(t, hk, "j")
+	if put == nil {
+		t.Fatalf("hk routes = %q, want the screen document PUT", hk.Routes())
+	}
+	if body, _ := put["body"].(string); body == full || len(body) > PaneScreenDocMaxBytes {
+		t.Fatalf("stored body is %d bytes, want the cut copy at most %d", len(body), PaneScreenDocMaxBytes)
+	}
+}

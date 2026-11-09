@@ -752,22 +752,25 @@ func (s *TaskPaneSweeper) close(ctx context.Context, a *App, j Job, task string,
 }
 
 // savePaneScreen uploads the pane's last screen to hk as the job's screen
-// document (UploadPaneScreen) and writes no local copy when hk stores it. A
-// failed upload is one warning, and the screen is then written to
-// <job dir>/pane-screen.txt through an os.Root on the job directory, mode 0600,
-// as the only copy: nothing uploads it again, and the job dir's TTL net removes
+// document (UploadPaneScreen). A stored screen of at most PaneScreenDocMaxBytes
+// is the whole screen, so no local copy is written. A failed upload is one
+// warning, and a screen hk stored only as a cut tail keeps its whole copy in
+// <job dir>/pane-screen.txt, mode 0600, through an os.Root on the job
+// directory. Nothing uploads a local copy again: the job dir's TTL net removes
 // it with the dir (decision hk 3685 §3). Only a failed pane read, or a failed
-// upload followed by a failed local write, is an error: the pane is kept. See
-// docs/pane-sweep.md.
+// local write where a local copy is needed, is an error: the pane is kept.
+// See docs/pane-sweep.md.
 func (a *App) savePaneScreen(ctx context.Context, j Job) error {
 	r := a.call(ctx, "herdr", "pane", "read", j.Pane)
 	if err := check(r, "pane screen"); err != nil {
 		return err
 	}
-	if _, err := UploadPaneScreen(ctx, j.ID, j.Task, []byte(r.Out)); err == nil {
-		return nil
-	} else {
+	_, err := UploadPaneScreen(ctx, j.ID, j.Task, []byte(r.Out))
+	switch {
+	case err != nil:
 		a.warn("pane screen upload failed for job %s; local screen retained: %v", j.ID, err)
+	case len(r.Out) <= PaneScreenDocMaxBytes:
+		return nil
 	}
 	root, err := os.OpenRoot(filepath.Join(a.Jobs, j.ID))
 	if err != nil {
