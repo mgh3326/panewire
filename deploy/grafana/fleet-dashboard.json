@@ -582,7 +582,7 @@
             "type": "loki",
             "uid": "${datasource}"
           },
-          "expr": "{source=\"fleet_events\", tool=\"panewire\", kind=\"placement\"} |~ \"\\\"outcome\\\":\\\"(different_account|spawn_disabled|excluded_host|not_accepting|launch_backoff|login_missing)\\\"\" | json candidates=\"candidates\", selection=\"selection\", request_id=\"request_id\" | request_id != \"\" | line_format \"host={{.host}} outcome={{.outcome}} candidates={{.candidates}} selection={{.selection}}\"",
+          "expr": "{source=\"fleet_events\", tool=\"panewire\", kind=\"placement\"} |~ \"\\\"outcome\\\":\\\"(different_account|not_chosen|spawn_disabled|excluded_host|missing_capability|not_accepting|repo_unmapped|disconnected|launch_backoff|login_missing|quota_refused|missing_tags|harness_missing|harness_version|dialog_pending|brief_unavailable|toolchain_missing|role_not_accepted|grade_not_accepted|deferred_over_threshold|refused_rc_|cwd_unmapped|panewire_missing|brief_doc_unavailable)\" | json candidates=\"candidates\", selection=\"selection\", request_id=\"request_id\" | request_id != \"\" | line_format \"host={{.host}} outcome={{.outcome}} candidates={{.candidates}} selection={{.selection}}\"",
           "queryType": "range",
           "editorMode": "code"
         }
