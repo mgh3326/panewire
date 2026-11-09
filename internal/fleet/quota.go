@@ -288,6 +288,7 @@ func roleRestrictedReason(reason string) string {
 }
 
 func clipGateReason(reason string, max int) string {
+	reason = strings.Join(strings.Fields(reason), " ")
 	if len(reason) <= max {
 		return reason
 	}
