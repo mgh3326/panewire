@@ -17,8 +17,9 @@ import (
 // The node's task pane sweep (docs/pane-sweep.md) closes the pane of a worker
 // or tester whose bound hk task has ended, or whose job was closed
 // (job.revoked, job.completed), once that pane has stayed not working for a
-// grace. It exists because a worker stays in its pane after READY, so
-// `panewire reap` (terminal jobs only) never reaches it.
+// grace. It exists because mergewake's one reap at merge time skips a worker
+// that is busy then. A worker stays in its pane after READY as its PR's
+// author, so a completed author waits on its open PR (paneSweepAwaitsPR).
 
 // PaneScreenFile is the job-directory file the sweep saves the pane's last
 // screen to before it closes the pane; mergewake reap used to leave it.
@@ -104,6 +105,24 @@ func NewPRReader(baseURL, token, cfID, cfSecret string) (PRReader, error) {
 	if err != nil {
 		return nil, err
 	}
+	return prReader(client), nil
+}
+
+// PRs lists the PRs hk links to a task through the App's handoffkeep client,
+// as TaskStatus reads the task. A nil PR is built on first use; a client that
+// cannot be built is an error for this read and is tried again on the next.
+func (a *App) PRs(ctx context.Context, task string) ([]PRChange, error) {
+	if a.PR == nil {
+		client, err := a.quotaClient()
+		if err != nil {
+			return nil, err
+		}
+		a.PR = prReader(client)
+	}
+	return a.PR(ctx, task)
+}
+
+func prReader(client *hkQuota) PRReader {
 	return func(ctx context.Context, task string) ([]PRChange, error) {
 		id, err := strconv.ParseInt(task, 10, 64)
 		if err != nil || id <= 0 {
@@ -131,7 +150,7 @@ func NewPRReader(baseURL, token, cfID, cfSecret string) (PRReader, error) {
 				Repo: change.Repo, OpenedAt: change.OpenedAt, MergedAt: change.MergedAt})
 		}
 		return changes, nil
-	}, nil
+	}
 }
 
 // The hk task categories that end a job. A state such as deployed or merged
@@ -206,6 +225,29 @@ func paneSweepTaskEnd(t TaskStatus) (paneSweepEnd, bool) {
 func paneSweepClosed(j Job) bool {
 	return j.Terminal && (j.Ended == "job.revoked" || j.Ended == "job.completed")
 }
+
+// paneSweepAwaitsPR reports that the job's own record completed it: the
+// worker's job.completed (READY), with no other outcome. Such a worker stays
+// its PR's author until the PR merges or its owner releases it (the wake
+// method), so its pane waits on an open PR from its worktree. A job.revoked of
+// any outcome (panewire job close: abandoned, superseded, or released as
+// completed) is the owner giving the job up or releasing it, and is swept
+// whatever its PRs say (hk 3383). A reviewer, a tester or a counsel never
+// authors the PR it looked at.
+func paneSweepAwaitsPR(j Job) bool {
+	if !paneSweepClosed(j) || j.Ended != "job.completed" || (j.Outcome != "" && j.Outcome != "completed") {
+		return false
+	}
+	switch firstNonempty(j.SpawnRole, j.Role) {
+	case "reviewer", "tester", "counsel":
+		return false
+	}
+	return !strings.HasPrefix(j.Label, "mwr-")
+}
+
+// paneSweepWaitsOnPR reports that an open PR from the job's worktree keeps its
+// pane: a task-derived end, or a completed author.
+func paneSweepWaitsOnPR(j Job) bool { return !paneSweepClosed(j) || paneSweepAwaitsPR(j) }
 
 // paneSweepJobEnd is the end a closed job gives when its task has not ended.
 func paneSweepJobEnd(j Job, taskState string) paneSweepEnd {
@@ -396,10 +438,11 @@ func (s *TaskPaneSweeper) Pass(ctx context.Context, a *App) error {
 		case now.Sub(since) < s.Grace:
 			s.info("task pane kept", "job", j.ID, "task", task, "task_state", end.taskState, "pane", j.Pane, "reason", "grace", "idle_seconds", int(now.Sub(since).Seconds()))
 		default:
-			// A job whose own record ended is swept whatever its PRs say (hk
-			// 3383): its result is already in hk. Only a task-derived end can
-			// wait on an open PR.
-			if !closed {
+			// A task-derived end, and a completed author (paneSweepAwaitsPR),
+			// wait on an open PR. A job its owner closed is swept whatever its
+			// PRs say (hk 3383). A completed author whose task did not
+			// resolve has no change list to wait on.
+			if paneSweepWaitsOnPR(j) && task != "" {
 				if reason, number := s.paneSweepPRKeep(ctx, a, j, task, prs); reason != "" {
 					attrs := []any{"job", j.ID, "task", task, "task_state", end.taskState, "pane", j.Pane, "reason", reason}
 					if number > 0 {
@@ -447,19 +490,17 @@ func (s *TaskPaneSweeper) readPRs(ctx context.Context, task string) paneSweepPRR
 	return paneSweepPRRead{changes: changes, err: err}
 }
 
-// paneSweepPRKeep reports why the job's worktree keeps a task-derived close,
-// and the open PR's number when one is found. "" means no open PR: the close
-// goes ahead. An unreadable worktree or change list keeps the pane, so a
-// failure never closes a pane that may still own an open PR.
+// paneSweepPRKeep reports why the job's worktree keeps its close (a
+// task-derived end or a completed author), and the open PR's number when one
+// is found. "" means no open PR: the close goes ahead. An unreadable change
+// list, or a worktree that cannot be read while the task has an open PR, keeps
+// the pane, so a failure never closes a pane that may still own an open PR.
+// The change list is read first: a task with no open PR needs no git call.
 func (s *TaskPaneSweeper) paneSweepPRKeep(ctx context.Context, a *App, j Job, task string, cache map[string]paneSweepPRRead) (reason string, number int) {
 	cwd := str(j.Receipt, "cwd")
 	if cwd == "" {
 		// No worktree: nothing it could have an open PR on.
 		return "", 0
-	}
-	heads, ok := paneSweepHeads(ctx, a, cwd)
-	if !ok {
-		return "pr_state_unknown", 0
 	}
 	read, known := cache[task]
 	if !known {
@@ -467,6 +508,13 @@ func (s *TaskPaneSweeper) paneSweepPRKeep(ctx context.Context, a *App, j Job, ta
 		cache[task] = read
 	}
 	if read.err != nil {
+		return "pr_state_unknown", 0
+	}
+	if !slices.ContainsFunc(read.changes, func(c PRChange) bool { return strings.EqualFold(c.State, "open") }) {
+		return "", 0
+	}
+	heads, ok := paneSweepHeads(ctx, a, cwd)
+	if !ok {
 		return "pr_state_unknown", 0
 	}
 	if number, open := paneSweepOpenPR(read.changes, heads); open {
@@ -597,7 +645,10 @@ func (s *TaskPaneSweeper) close(ctx context.Context, a *App, j Job, task string,
 	if err != nil {
 		return "job-unreadable"
 	}
-	if !paneSweepCandidate(latest) || latest.Pane != j.Pane || latest.Label != j.Label || (end.byJob && !paneSweepClosed(latest)) {
+	// A job that now waits on its PR (it completed, or was revived, since the
+	// pass judged it) is judged again on the next pass, PR read included.
+	if !paneSweepCandidate(latest) || latest.Pane != j.Pane || latest.Label != j.Label || (end.byJob && !paneSweepClosed(latest)) ||
+		(paneSweepWaitsOnPR(latest) && !paneSweepWaitsOnPR(j)) {
 		delete(s.idleSince, key)
 		return "job-changed"
 	}

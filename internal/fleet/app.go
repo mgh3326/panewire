@@ -53,6 +53,9 @@ type App struct {
 	// TaskState reads one hk task; nil builds it from [quota] / the
 	// handoffkeep env on first use (TaskStatus).
 	TaskState TaskStateReader
+	// PR lists the PRs hk links to one task; nil builds it the same way on
+	// first use (PRs). Reap reads it to keep a completed author's pane.
+	PR PRReader
 	// BenchStore reads and writes the shared bench reps. Nil builds it from
 	// [quota] / the handoffkeep env on first use; a node sets the store built
 	// from its own spawn.json credential.
