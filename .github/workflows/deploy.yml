@@ -240,7 +240,10 @@ jobs:
             "$RUNNER_TEMP/old-release/panewire_${tag}_linux_amd64" "$tag"
 
   deploy-ok:
-    name: deploy-ok
+    # The display name must differ from the deploy-ok commit status this job
+    # posts: a check run and a status with one name make that name ambiguous
+    # to mergewake watch when they disagree (job success, status failure).
+    name: post deploy-ok
     needs: [candidate, race, macos, release, postgres, compat]
     # The verdict is always posted, including on a failed check, so the head is
     # never left looking green by a missing status. Candidate must have run, or
