@@ -1245,20 +1245,6 @@
       "billing": "unknown",
       "family": "openai",
       "group": null
-    },
-    {
-      "profile": "agy-flash",
-      "effort": "",
-      "model_id": "gemini-3.7-flash",
-      "pool": "agy",
-      "grade": "A+",
-      "score": 57,
-      "gate": "default",
-      "gate_reason": null,
-      "placed": true,
-      "billing": "unknown",
-      "family": "google",
-      "group": "gemini"
     }
   ],
   "defaults": {

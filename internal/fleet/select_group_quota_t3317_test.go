@@ -73,7 +73,7 @@ func agyGroupRows() []CatalogRow {
 
 func TestSelectOffersAgyWithGroupOnlyReading(t *testing.T) {
 	a, s, q := agyGroupFixture(t, 0, agyGroupRows(), []string{"agy"})
-	q.GateDo = gatePools(map[string]string{"agy-flash": "agy"})
+	q.GateDo = gatePools(withAgyGates(nil))
 	sel, e := a.selectProfile(context.Background(), s)
 	if e != nil {
 		t.Fatalf("agy with a measured group reading must be admitted: %v", e)
@@ -93,7 +93,7 @@ func TestSelectOffersAgyWithGroupOnlyReading(t *testing.T) {
 func TestSelectRanksAgyByWasteUrgencyMidWindow(t *testing.T) {
 	rows := []CatalogRow{{Profile: "agy-sonnet46", Effort: "medium", Grade: "B", Pool: "agy", Gate: "default", ModelID: "claude-sonnet-4-6"}}
 	a, s, q := agyGroupFixture(t, 3*24*time.Hour, rows, []string{"agy"})
-	q.GateDo = gatePools(map[string]string{"agy-flash": "agy"})
+	q.GateDo = gatePools(withAgyGates(nil))
 	sel, e := a.selectProfile(context.Background(), s)
 	if e != nil {
 		t.Fatal(e)
@@ -125,7 +125,6 @@ func TestAccountPoolViewGroupBuckets(t *testing.T) {
 // three agy rungs that passed role and grade, commandcode and codex.
 func productionShapeRows() []CatalogRow {
 	return []CatalogRow{
-		{Profile: "agy-flash", Effort: "", Grade: "A+", Pool: "agy", Gate: "default", ModelID: "gemini-3.7-flash"},
 		{Profile: "agy-flash38-high", Effort: "", Grade: "A", Pool: "agy", Gate: "default", ModelID: "gemini-3.8-flash-high"},
 		{Profile: "agy-flash38-medium", Effort: "", Grade: "B", Pool: "agy", Gate: "default", ModelID: "gemini-3.8-flash-medium"},
 		{Profile: "agy-sonnet46", Effort: "", Grade: "B", Pool: "agy", Gate: "default", ModelID: "claude-sonnet-4-6"},
@@ -147,7 +146,7 @@ func TestSelectDryRunProductionShapeOffersAgyAndCommandcode(t *testing.T) {
 	}
 	a.Config.Hosts = map[string]map[string]any{"mac-dev": {"cmd_dsflash41": true}}
 	a.Config.HostOrder = []string{"mac-dev"}
-	q.GateDo = gatePools(map[string]string{"agy-flash": "agy", "cmd-dsflash41": "commandcode", "codex-luna": "codex"})
+	q.GateDo = gatePools(withAgyGates(map[string]string{"cmd-dsflash41": "commandcode", "codex-luna": "codex"}))
 	sel, e := a.selectProfile(context.Background(), s)
 	if e != nil {
 		t.Fatal(e)
@@ -156,7 +155,7 @@ func TestSelectDryRunProductionShapeOffersAgyAndCommandcode(t *testing.T) {
 	for _, c := range []struct {
 		profile, effort string
 		urgency         bool
-	}{{"agy-flash", "", false}, {"agy-flash38-high", "", false}, {"agy-flash38-medium", "", false}, {"agy-sonnet46", "", true}, {"cmd-dsflash41", "high", true}} {
+	}{{"agy-flash38-high", "", false}, {"agy-flash38-medium", "", false}, {"agy-sonnet46", "", true}, {"cmd-dsflash41", "high", true}} {
 		row := candOutcome(rec, c.profile, c.effort)
 		if row == nil || row["outcome"] == "dropped:quota_unknown" || row["tier"] == nil || row["tier"] == "" {
 			t.Fatalf("%s must be a ranked candidate with a tier: %v", c.profile, row)

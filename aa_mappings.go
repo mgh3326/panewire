@@ -91,7 +91,6 @@ var aaMappings = map[aaRowKey]string{
 	{"grok-hi", "grok-4.7", "xhigh"}:                         "59627802-1546-422c-9a65-65b61c022d36", // Grok 4.7 (Xhigh)
 	{"grok-hi", "grok-4.7", "low"}:                           "208c16f0-8c5b-4524-ac8a-ac74c02e80a9", // Grok 4.7 (Low)
 	{"grok", "grok-4.7", "low"}:                              "208c16f0-8c5b-4524-ac8a-ac74c02e80a9", // Grok 4.7 (Low)
-	{"agy-flash", "gemini-3.7-flash", ""}:                    "b2331108-72ed-415a-82d1-188633875bbc", // Gemini 3.7 Flash (High)
 	{"agy-flash38-high", "gemini-3.8-flash-high", ""}:        "8a999846-4c1d-4ce7-a8b7-1310a7166fd7", // Gemini 3.8 Flash (High)
 	{"agy-flash38-medium", "gemini-3.8-flash-medium", ""}:    "744fa3c1-42a7-4995-b138-fb6be11f463c", // Gemini 3.8 Flash (Medium)
 	{"agy-flash38-low", "gemini-3.8-flash-low", ""}:          "f6db039b-0f3b-485c-9d7f-982988e44f26", // Gemini 3.8 Flash (Low)
