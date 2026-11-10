@@ -130,6 +130,9 @@ func (q CLIQuota) manualStore(ctx context.Context) (manualStoreData, error) {
 		}
 		return out, nil
 	}
+	if q.Binary == "" {
+		return out, fail(exitConfig, "native manual store reader required")
+	}
 	r := runQuotaCommand(ctx, q.Runner, Command{Name: q.Binary, Args: []string{"manual", "list"}}, "manual store", 30*time.Second)
 	if e := checkQuota(r, "manual store"); e != nil {
 		return out, e

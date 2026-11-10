@@ -642,12 +642,18 @@ func (q CLIQuota) Catalog(ctx context.Context) ([]CatalogRow, error) {
 }
 
 func (q CLIQuota) Launch(ctx context.Context, r QuotaRequest) (Launch, error) {
+	if q.Binary == "" {
+		return Launch{}, fail(exitConfig, "native quota launch adapter required")
+	}
 	args := quotaArgs([]string{"policy", "launch", r.Profile, "--json"}, r)
 	result := runQuotaCommand(ctx, q.Runner, Command{Name: q.Binary, Args: args, Env: quotaE6Env(r.E6Arm)}, "quota catalog", 15*time.Second)
 	return launchResult(result)
 }
 
 func (q CLIQuota) Gate(ctx context.Context, r QuotaRequest) (string, error) {
+	if q.Binary == "" {
+		return "", fail(exitConfig, "native quota gate adapter required")
+	}
 	name := firstNonempty(r.GateProfile, r.Profile)
 	args := quotaArgs([]string{"gate", "-m", name}, r)
 	if r.AccountKey != "" {
@@ -669,6 +675,9 @@ func quotaE6Env(arm string) []string {
 // adapter does not report waste flags or a blocking percentage; the selector
 // degrades those inputs rather than inventing them.
 func (q CLIQuota) Pools(ctx context.Context) (map[string]PoolView, error) {
+	if q.Binary == "" {
+		return nil, fail(exitConfig, "native quota pool adapter required")
+	}
 	r := runQuotaCommand(ctx, q.Runner, Command{Name: q.Binary, Args: []string{"--json"}}, "quota status", 30*time.Second)
 	if e := checkQuota(r, "quota status"); e != nil {
 		return nil, e

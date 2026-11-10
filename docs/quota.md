@@ -6,7 +6,7 @@
 - `panewire quota refresh POOL`은 `claude`, `codex`, `commandcode`, `devin`, `agy`만 측정합니다. 다른 풀은 측정 소스가 없다는 이유와 함께 거부합니다.
 - `[quota].gate`, `[quota].launch`, `[quota].native_pools`, `PANEWIRE_QUOTA_BIN`은 폐기되었습니다. 설정 파일에 키가 있으면 migration 경고를 출력합니다. `gate`와 `launch`는 지정할 경우 `"native"`만 허용하며, `native_pools`는 무시됩니다. 환경 변수 `PANEWIRE_QUOTA_BIN`도 무시됩니다.
 - operator credit pools (`anthropic-api`, `openai-api`)의 수동 기록은 shared store에서 계속 읽습니다.
-- `panewire quota observe KIND ...`는 현재 native observation 명령이 없어 실행되지 않습니다.
+- `panewire quota observe devin-free-limit`은 Devin SWE-2 free-tier limit을 호환 cache에 기록하거나 지웁니다. `--reset <RFC3339>`을 지정하고, reset을 모르면 `--unparsed`로 1시간 보수 hold를 기록합니다. `--clear`는 local 기록을 지웁니다.
 
 ## Status JSON v2
 
@@ -229,8 +229,9 @@ source, bucket, error kind, account fingerprint 및 shared store 형식을 유�
 - **Free tier.** devin's SWE-2 models have no used percentage, so a reading also
   carries `free_bucket` (`available`, `exhausted` with `resets_at`, or
   `unknown`), which pacelever's gate requires of any devin reading. It comes
-  from the host's own free-limit record (`devin-free-limit.json` in pacelever's
-  cache directory, written by `panewire quota observe devin-free-limit`): an
+  from the host's own free-limit record (`devin-free-limit.json` in the
+  pacelever-compatible cache directory, written by panewire's native
+  `panewire quota observe devin-free-limit` command): an
   exceed that still holds is `exhausted` until its reset, a record with no
   readable reset holds for an hour after its observation, one with no readable
   time is `unknown`, none is `available`. A record file that is present but unreadable or

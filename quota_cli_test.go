@@ -84,3 +84,30 @@ func TestQuotaStatusNativeOnly(t *testing.T) {
 		t.Fatalf("text status %d: %q %q", code, out.String(), errOut.String())
 	}
 }
+
+func TestQuotaObserveDevinFreeLimitUsesNativeWriter(t *testing.T) {
+	home := t.TempDir()
+	cache := filepath.Join(t.TempDir(), "cache")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CACHE_HOME", cache)
+	reset := time.Now().UTC().Add(time.Hour).Format(time.RFC3339Nano)
+	var out, errOut bytes.Buffer
+	if code := runQuotaCLI([]string{"observe", "devin-free-limit", "--reset", reset, "--rung", "swe-2-high", "--source", "job:test"}, &out, &errOut); code != 0 {
+		t.Fatalf("observe code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	path := filepath.Join(cache, "pacelever", "devin-free-limit.json")
+	info, err := os.Stat(path)
+	if err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("record info=%v error=%v; want mode 0600", info, err)
+	}
+	out.Reset()
+	errOut.Reset()
+	if code := runQuotaCLI([]string{"observe", "devin-free-limit", "--clear"}, &out, &errOut); code != 0 || !strings.Contains(out.String(), "cleared devin-free-limit") {
+		t.Fatalf("clear code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	out.Reset()
+	errOut.Reset()
+	if code := runQuotaCLI([]string{"observe", "devin-free-limit", "--reset", "not-a-time"}, &out, &errOut); code != ExitUsage || !strings.Contains(errOut.String(), "reset 시간이") {
+		t.Fatalf("invalid reset code=%d stderr=%q", code, errOut.String())
+	}
+}

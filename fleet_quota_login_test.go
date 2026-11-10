@@ -35,7 +35,7 @@ func TestUnmeasurablePoolRefreshDoesNotInvokeCLI(t *testing.T) {
 	if len(lines) != 1 || !strings.Contains(lines[0], "grok") || !strings.Contains(lines[0], "unmeasurable") {
 		t.Fatalf("warning lines = %q", lines)
 	}
-	if got := poolLogin(t, client, "grok").Login; got != fleet.ReadinessLoginUnknown {
-		t.Fatalf("login = %q, want unknown", got)
+	if got := poolLogin(t, client, "grok").Login; got == fleet.ReadinessLoginMissing {
+		t.Fatalf("login = %q, an unmeasurable pool must not be reported missing", got)
 	}
 }

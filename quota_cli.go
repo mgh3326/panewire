@@ -6,7 +6,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"time"
+
+	"github.com/mgh3326/panewire/internal/quota/devin"
 )
 
 type quotaBucket struct {
@@ -126,11 +129,52 @@ func runQuotaCLI(args []string, out, errOut io.Writer) int {
 		}
 		return runNativeQuotaRefresh(ctx, args[1], out, errOut)
 	case "observe":
-		if len(args) < 2 {
-			return ExitUsage
-		}
-		fmt.Fprintln(errOut, "quota observe: no native observation command is available")
-		return ExitUsage
+		return runNativeQuotaObserve(args[1:], out, errOut)
 	}
 	return ExitUsage
+}
+
+func runNativeQuotaObserve(args []string, out, errOut io.Writer) int {
+	if len(args) == 0 || args[0] != "devin-free-limit" {
+		fmt.Fprintln(errOut, "quota observe: devin-free-limit만 지원합니다")
+		return ExitUsage
+	}
+	values := map[string]string{}
+	flags := map[string]bool{}
+	for i := 1; i < len(args); i++ {
+		arg := args[i]
+		switch arg {
+		case "--clear", "--unparsed":
+			if flags[arg] {
+				return ExitUsage
+			}
+			flags[arg] = true
+		case "--reset", "--observed", "--rung", "--source", "--account-key":
+			if i+1 >= len(args) || strings.HasPrefix(args[i+1], "--") {
+				return ExitUsage
+			}
+			i++
+			key := strings.TrimPrefix(arg, "--")
+			if _, exists := values[key]; exists {
+				return ExitUsage
+			}
+			values[key] = args[i]
+		default:
+			return ExitUsage
+		}
+	}
+	if flags["--clear"] && (len(values) != 0 || flags["--unparsed"]) {
+		return ExitUsage
+	}
+	err := devin.ObserveFreeLimit(devin.Config{}, values["reset"], values["observed"], values["rung"], values["source"], values["account-key"], flags["--unparsed"], flags["--clear"])
+	if err != nil {
+		fmt.Fprintf(errOut, "quota observe: %v\n", err)
+		return ExitUsage
+	}
+	if flags["--clear"] {
+		fmt.Fprintln(out, "cleared devin-free-limit")
+	} else {
+		fmt.Fprintln(out, "observed devin-free-limit")
+	}
+	return 0
 }

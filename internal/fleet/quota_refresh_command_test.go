@@ -33,6 +33,27 @@ func TestMeasureTargetRefusesUnmeasurablePoolWithoutExec(t *testing.T) {
 	}
 }
 
+func TestCLIQuotaWithoutBinaryFailsClosed(t *testing.T) {
+	runner := &fakeRunner{}
+	q := CLIQuota{Runner: runner}
+	ctx := context.Background()
+	if _, err := q.Gate(ctx, QuotaRequest{Profile: "opus"}); err == nil {
+		t.Fatal("gate without a configured binary should require the native adapter")
+	}
+	if _, err := q.Launch(ctx, QuotaRequest{Profile: "opus"}); err == nil {
+		t.Fatal("launch without a configured binary should require the native adapter")
+	}
+	if _, err := q.Pools(ctx); err == nil {
+		t.Fatal("pool read without a configured binary should require the native adapter")
+	}
+	if _, err := q.manualStore(ctx); err == nil {
+		t.Fatal("manual-store read without a configured binary should require the shared reader")
+	}
+	if len(runner.Calls) != 0 {
+		t.Fatalf("empty binary reached runner: %+v", runner.Calls)
+	}
+}
+
 func writeHostsConfig(t *testing.T, body string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "hosts.toml")

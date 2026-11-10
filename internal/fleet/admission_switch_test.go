@@ -142,6 +142,17 @@ native_pools = ["commandcode"]
 	}
 }
 
+func TestLoadConfigRejectsRetiredQuotaSwitchValues(t *testing.T) {
+	for _, key := range []string{"gate", "launch"} {
+		t.Run(key, func(t *testing.T) {
+			path := writeHostsConfig(t, "[quota]\n"+key+" = \"shadow\"\n")
+			if _, err := LoadConfig(path); err == nil {
+				t.Fatalf("LoadConfig accepted retired %s=shadow", key)
+			}
+		})
+	}
+}
+
 // TestAdmissionShadowLogsDisagreement: in shadow mode pacelever's verdict
 // decides the spawn, and a native verdict that differs is logged with the
 // profile, pool and both verdicts and reasons.
