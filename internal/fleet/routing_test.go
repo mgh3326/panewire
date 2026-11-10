@@ -451,7 +451,7 @@ func TestRoutingPolicyValidation(t *testing.T) {
 	a := testApp(t)
 	a.Runner = &fakeRunner{}
 	serveRouting(t, routingDocV1)
-	if _, e := a.routeFor(context.Background(), "worker", "boss"); exitCode(e) != exitUsage {
+	if _, e := a.routeFor(context.Background(), "worker", "boss", false); exitCode(e) != exitUsage {
 		t.Fatalf("an unknown --routing-role is a usage error: %v", e)
 	}
 }

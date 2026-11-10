@@ -31,7 +31,7 @@ import (
 // keeps its own code.
 type planOpts struct {
 	grade, t, role, tags, effort, urgency, exclude, excludePool, builderFamily, routingRole, creditAt string
-	allowEscalation, json                                                                             bool
+	allowEscalation, strong, json                                                                     bool
 }
 
 func (a *App) planCmd(ctx context.Context, args []string) (err error) {
@@ -49,6 +49,7 @@ func (a *App) planCmd(ctx context.Context, args []string) (err error) {
 	f.StringVar(&o.builderFamily, "builder-family", "", "builder model family (tester/reviewer)")
 	f.StringVar(&o.routingRole, "routing-role", "", "override the policy/model-routing role")
 	f.BoolVar(&o.allowEscalation, "allow-escalation", false, "admit escalation and consult-only rungs")
+	f.BoolVar(&o.strong, "strong", false, "keep to the strong_profiles of policy/model-routing")
 	f.BoolVar(&o.json, "json", false, "print the full decision as JSON")
 	f.StringVar(&o.creditAt, "credit-at", "", "judge credit expiry as of this RFC3339 time or YYYY-MM-DD (dry run; quota and presence keep the clock)")
 	if e := f.Parse(args); e != nil {
@@ -106,7 +107,7 @@ func (a *App) planCmd(ctx context.Context, args []string) (err error) {
 	if o.urgency != "" {
 		req.urgency, req.urgencySource = o.urgency, "flag"
 	}
-	if req.route, e = a.routeFor(ctx, o.role, o.routingRole); e != nil {
+	if req.route, e = a.routeFor(ctx, o.role, o.routingRole, o.strong); e != nil {
 		a.printPlan(o.json, map[string]any{"mode": "plan", "routing_role": firstNonempty(o.routingRole, builtinRoleMap[o.role]), "outcome_code": outcomeForError(e)}, nil, nil, nil, "", e)
 		return e
 	}
