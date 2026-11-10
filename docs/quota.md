@@ -3,10 +3,10 @@
 `panewire quota`가 쿼터 인터페이스입니다. 판정, launch lookup, 측정은 panewire의 native 구현만 사용합니다.
 
 - `panewire quota status [--json]`은 측정 가능한 native 풀의 저장된 값을 읽습니다. 측정이나 게시를 실행하지 않습니다.
-- `panewire quota refresh POOL`은 `claude`, `codex`, `commandcode`, `devin`, `agy`만 측정합니다. 다른 풀은 측정 소스가 없다는 이유와 함께 거부합니다.
+- `panewire quota refresh POOL`은 `claude`, `codex`, `commandcode`, `devin`, `agy`만 측정합니다. 다른 풀은 측정 소스가 없다는 이유와 함께 exit 5(`ExitConditionInvalid`)로 거부합니다.
 - `[quota].gate`, `[quota].launch`, `[quota].native_pools`, `PANEWIRE_QUOTA_BIN`은 폐기되었습니다. 설정 파일에 키가 있으면 migration 경고를 출력합니다. `gate`와 `launch`는 지정할 경우 `"native"`만 허용하며, `native_pools`는 무시됩니다. 환경 변수 `PANEWIRE_QUOTA_BIN`도 무시됩니다.
 - operator credit pools (`anthropic-api`, `openai-api`)의 수동 기록은 shared store에서 계속 읽습니다.
-- `panewire quota observe devin-free-limit`은 Devin SWE-2 free-tier limit을 호환 cache에 기록하거나 지웁니다. `--reset <RFC3339>`을 지정하고, reset을 모르면 `--unparsed`로 1시간 보수 hold를 기록합니다. `--unparsed`는 아직 유효한 기존 hold를 단축하지 않습니다. `--reset`은 운영자가 기존 hold를 명시적으로 수정할 때 사용합니다. `--clear`는 local 기록을 지우며 손상된 cache 파일도 제거합니다.
+- `panewire quota observe devin-free-limit`은 Devin SWE-2 free-tier limit을 호환 cache에 기록하거나 지웁니다. `--reset <RFC3339>`을 지정하고, reset을 모르면 `--unparsed`로 1시간 보수 hold를 기록합니다. `--unparsed`는 아직 유효한 기존 hold를 단축하지 않습니다. `--reset`은 운영자가 기존 hold를 명시적으로 수정할 때 사용합니다. `--clear`는 local 기록을 지우며 손상된 cache 파일도 제거합니다. 손상된 파일을 account 단위로 clear할 수는 없으므로 이 경우 `--account-key` 없이 `--clear`를 실행합니다.
 
 ## Status JSON v2
 

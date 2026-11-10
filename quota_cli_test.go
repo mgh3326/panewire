@@ -74,7 +74,7 @@ func TestQuotaStatusNativeOnly(t *testing.T) {
 	}
 	out.Reset()
 	errOut.Reset()
-	if code := runQuotaCLI([]string{"refresh", "grok"}, &out, &errOut); code != 4 || !strings.Contains(errOut.String(), "native 측정 소스가 없습니다") {
+	if code := runQuotaCLI([]string{"refresh", "grok"}, &out, &errOut); code != ExitConditionInvalid || !strings.Contains(errOut.String(), "native 측정 소스가 없습니다") {
 		t.Fatalf("unmeasurable refresh code=%d stderr=%q", code, errOut.String())
 	}
 
@@ -118,6 +118,14 @@ func TestQuotaObserveDevinFreeLimitUsesNativeWriter(t *testing.T) {
 	}
 	if err := os.Chmod(path, 0o644); err != nil {
 		t.Fatal(err)
+	}
+	out.Reset()
+	errOut.Reset()
+	if code := runQuotaCLI([]string{"observe", "devin-free-limit", "--clear", "--account-key", "devin:0123456789abcdef"}, &out, &errOut); code != ExitInternal || !strings.Contains(errOut.String(), "without --account-key") {
+		t.Fatalf("account-scoped corrupt clear code=%d stderr=%q", code, errOut.String())
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("account-scoped clear removed the entire corrupt cache: %v", err)
 	}
 	out.Reset()
 	errOut.Reset()

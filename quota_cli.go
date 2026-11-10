@@ -126,7 +126,7 @@ func runQuotaCLI(args []string, out, errOut io.Writer) int {
 		}
 		if !isNativeQuotaPool(args[1]) {
 			fmt.Fprintf(errOut, "quota refresh: %s 풀에는 native 측정 소스가 없습니다\n", args[1])
-			return 4
+			return ExitConditionInvalid
 		}
 		return runNativeQuotaRefresh(ctx, args[1], out, errOut)
 	case "observe":
@@ -164,8 +164,10 @@ func runNativeQuotaObserve(args []string, out, errOut io.Writer) int {
 			return ExitUsage
 		}
 	}
-	if flags["--clear"] && (len(values) != 0 || flags["--unparsed"]) {
-		return ExitUsage
+	if flags["--clear"] {
+		if flags["--unparsed"] || len(values) > 0 && (len(values) != 1 || values["account-key"] == "") {
+			return ExitUsage
+		}
 	}
 	err := devin.ObserveFreeLimit(devin.Config{}, values["reset"], values["observed"], values["rung"], values["source"], values["account-key"], flags["--unparsed"], flags["--clear"])
 	if err != nil {

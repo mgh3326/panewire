@@ -164,6 +164,51 @@ func TestUnparsedObserveDoesNotShortenAnActiveKnownHold(t *testing.T) {
 	}
 }
 
+func TestUnparsedObserveReplacesDamagedPriorEntry(t *testing.T) {
+	for _, previous := range []json.RawMessage{json.RawMessage(`"not a record"`), json.RawMessage(`{"reset_at":"bad","observed_at":"bad"}`)} {
+		t.Run(string(previous), func(t *testing.T) {
+			now := testNow.UTC()
+			cache := filepath.Join(t.TempDir(), "cache")
+			cfg := Config{
+				Home:     t.TempDir(),
+				Now:      func() time.Time { return now },
+				Hostname: func() (string, error) { return "host-a", nil },
+				UID:      func() int { return 1000 },
+				LookupEnv: func(name string) (string, bool) {
+					if name == "XDG_CACHE_HOME" {
+						return cache, true
+					}
+					return "", false
+				},
+			}
+			path := filepath.Join(cache, "pacelever", "devin-free-limit.json")
+			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			id := hostUserID("host-a", 1000)
+			var records map[string]json.RawMessage
+			if err := json.Unmarshal([]byte(`{}`), &records); err != nil {
+				t.Fatal(err)
+			}
+			records[id] = previous
+			encoded, err := json.Marshal(map[string]any{"schema": limitRecordSchema, "records": records})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, encoded, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := ObserveFreeLimit(cfg, "", "", "swe-2-high", "job:recovered", "", true, false); err != nil {
+				t.Fatal(err)
+			}
+			got := LocalFree(cfg)(now)
+			if got.State != shared.FreeExhausted || got.ResetsAt == nil || !got.ResetsAt.Equal(now.Add(unknownResetHold)) {
+				t.Fatalf("unparsed observation did not replace damaged prior entry: %+v", got)
+			}
+		})
+	}
+}
+
 func TestConcurrentObserveFreeLimitPreservesBothAccounts(t *testing.T) {
 	cache := filepath.Join(t.TempDir(), "cache")
 	cfg := Config{

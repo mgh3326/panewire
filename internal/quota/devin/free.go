@@ -98,8 +98,8 @@ func ObserveFreeLimit(cfg Config, resetAt, observedAt, rung, source, accountKey 
 	records := map[string]json.RawMessage{}
 	info, statErr := os.Lstat(path)
 	if statErr != nil && !errors.Is(statErr, fs.ErrNotExist) {
-		if clear && removeLimitFile(path) == nil {
-			return nil
+		if clear {
+			return clearCorruptLimitFile(path, accountKey)
 		}
 		return fmt.Errorf("%w: devin 쿼터 캐시를 확인할 수 없습니다", ErrFreeLimitStore)
 	}
@@ -109,8 +109,8 @@ func ObserveFreeLimit(cfg Config, resetAt, observedAt, rung, source, accountKey 
 		}
 	} else {
 		if !info.Mode().IsRegular() {
-			if clear && removeLimitFile(path) == nil {
-				return nil
+			if clear {
+				return clearCorruptLimitFile(path, accountKey)
 			}
 			return fmt.Errorf("%w: devin 쿼터 캐시는 일반 파일이어야 합니다", ErrFreeLimitStore)
 		}
@@ -119,14 +119,14 @@ func ObserveFreeLimit(cfg Config, resetAt, observedAt, rung, source, accountKey 
 		}
 		data, err := os.ReadFile(path)
 		if err != nil || !decodeJSONObject(data, &document) {
-			if clear && removeLimitFile(path) == nil {
-				return nil
+			if clear {
+				return clearCorruptLimitFile(path, accountKey)
 			}
 			return fmt.Errorf("%w: devin 쿼터 캐시를 읽을 수 없습니다; 복구하려면 quota observe devin-free-limit --clear를 실행하세요", ErrFreeLimitStore)
 		}
 		if raw := document["records"]; len(raw) == 0 || json.Unmarshal(raw, &records) != nil || records == nil {
-			if clear && removeLimitFile(path) == nil {
-				return nil
+			if clear {
+				return clearCorruptLimitFile(path, accountKey)
 			}
 			return fmt.Errorf("%w: devin 쿼터 캐시 records가 올바르지 않습니다; 복구하려면 quota observe devin-free-limit --clear를 실행하세요", ErrFreeLimitStore)
 		}
@@ -148,13 +148,12 @@ func ObserveFreeLimit(cfg Config, resetAt, observedAt, rung, source, accountKey 
 			if unparsed {
 				if raw, exists := records[id]; exists {
 					var previous limitRecord
-					if err := json.Unmarshal(raw, &previous); err != nil {
-						continue
-					}
-					previousReset, ok := previous.effectiveReset()
-					newReset, _ := record.effectiveReset()
-					if !ok || previousReset.After(observed) && previousReset.After(newReset) {
-						continue
+					if err := json.Unmarshal(raw, &previous); err == nil {
+						previousReset, ok := previous.effectiveReset()
+						newReset, _ := record.effectiveReset()
+						if ok && previousReset.After(observed) && previousReset.After(newReset) {
+							continue
+						}
 					}
 				}
 			}
@@ -190,6 +189,13 @@ func removeLimitFile(path string) error {
 	}
 	durable.SyncDirectoryBestEffort(filepath.Dir(path))
 	return nil
+}
+
+func clearCorruptLimitFile(path, accountKey string) error {
+	if accountKey != "" {
+		return fmt.Errorf("%w: account-scoped clear cannot recover a damaged cache; run quota observe devin-free-limit --clear without --account-key", ErrFreeLimitStore)
+	}
+	return removeLimitFile(path)
 }
 
 // effectiveReset is when the record stops holding. An unreadable reset falls
