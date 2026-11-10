@@ -127,6 +127,45 @@ publishes:
 Every new hub connection re-announces the node's current readings, so a
 restarted hub regains them immediately.
 
+### Login probe
+
+The agy account is shared by several hosts, and a shared reading is per
+account. While it is fresh the loop above returns it without measuring, so a
+host can go on indefinitely without using its own credential and never learn
+that the credential stopped working (hk 3857). Two node-side signals close
+that gap. Both feed the `login` field of the node's readiness report
+([placement.md](placement.md#readiness)); the hub's one-time "log in" notice
+and the `login_missing` placement drop are unchanged.
+
+- **Probe.** With `[quota] login_probe_interval = "<duration>"` set (a Go
+  duration such as `"30m"`; default unset, which disables the probe), the node
+  measures each pool in `--state-quota-pools` once per interval with this
+  host's own credential, even when the shared reading is fresh. The probe runs
+  right after the loop's own measurement of that pool in the same goroutine,
+  so the two never overlap. It takes no lease, publishes no reading and
+  announces no presence. A pool is probed only when this host lists its
+  account in `[quota].measurable_accounts` (for agy, the `[quota.accounts]`
+  fingerprint); a host with no measurable account is never probed and never
+  marked by the probe (hk 3783). A failure of kind `auth`, `auth_failed`,
+  `credentials` or `token_expired` sets `login_missing`, as a failed loop
+  measurement does. A pass clears it. Any other failure (network, rate limit,
+  timeout) changes nothing. The node logs one line per state change and never
+  the credential. The key is read at each round, so a change needs no restart.
+  Enable it per host only after checking that a probe does not rotate a token
+  other hosts share.
+- **Login screen on rc=76.** A hub spawn that ends rc=76
+  (`BRIEF_SUBMISSION_UNCONFIRMED`) leaves the executing node a screen capture,
+  `jobs/<job>/spawn-failure-*.txt` (`captureFailure`). When the newest capture
+  is the harness's login screen, the node marks that (host, harness)
+  `login_missing` at once, with no two-failure threshold. The screens are the
+  `harnessLoginScreens` table in `relay_harness_adapter.go`; every listed line
+  must appear. Only agy has a row: it comes from the 2026-11-10 mac-dev
+  captures ("Open the URL below in your browser:" and "After authenticating,
+  copy the code displayed in the browser and paste it below:"). claude and
+  codex have none until someone records their login screen. The mark is
+  cleared by a passing probe or a launch that succeeds, and expires after 30
+  minutes (the first-run dialog TTL) so the pair gets one more launch.
+
 `--state-quota-pools`에는 이 호스트가 측정할 수 있는 풀만 지정합니다. 지원 풀은
 `claude`, `codex`, `commandcode`, `devin`, `agy`입니다. `measurable_accounts`와
 로컬 로그인 정보가 측정 계정의 범위를 결정합니다.

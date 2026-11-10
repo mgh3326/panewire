@@ -63,6 +63,10 @@ type nativeQuotaSource struct {
 	// whether `[quota].measurable_accounts` lets the host measure it. agy has no
 	// login to derive a key from. Nil reads this host's fleet config.
 	AgyAccount func() (fp string, measurable bool)
+	// MeasurableAccount says whether this host lists an account key in
+	// `[quota].measurable_accounts` (the login probe's gate for a pool whose
+	// account comes from its login). Nil reads this host's fleet config.
+	MeasurableAccount func(key string) bool
 	// Warn reports a line to the node's log; nil is silent.
 	Warn func(string)
 	// SpawnConfigPath is the spawn.json whose handoffkeep_env names the store.

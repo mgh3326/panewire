@@ -238,6 +238,9 @@ type HubClient struct {
 	readiness          nodeReadinessState
 	readinessCollector func(context.Context) *fleet.Readiness
 	readinessDeps      nodeReadinessDeps
+	// loginProbeIntervalOf is a fixture seam for `[quota].login_probe_interval`;
+	// nil reads this host's fleet config.
+	loginProbeIntervalOf func() time.Duration
 	// spawnConfigDefault is set when no spawn.json path was configured, so a
 	// missing file at the default path means "run on defaults".
 	spawnConfigDefault bool

@@ -272,6 +272,9 @@ func LoadConfig(path string) (Config, error) {
 	if err := validateMeasurableAccounts(c.Quota); err != nil {
 		return c, err
 	}
+	if err := validateLoginProbeInterval(c.Quota); err != nil {
+		return c, err
+	}
 	if err := validateGateMode(c.Quota); err != nil {
 		return c, err
 	}

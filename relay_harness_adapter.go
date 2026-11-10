@@ -95,6 +95,31 @@ var relayHarnessAdapters = map[string]relayHarnessAdapter{
 	"cmd":    {composerEdge: isClaudeDividerLine, composerGlyph: "❯", proof: relayProofEchoAndWorking, observe: true, paneTransport: true, workingUnprovable: true},
 }
 
+// harnessLoginScreens is the closed table of the screen each harness shows when
+// it has no login: every line of a row must appear on the screen. The node
+// reads it on the capture of a spawn that ended rc=76 (quota_login_probe.go).
+// A harness has a row only from a recorded capture of its login screen:
+// claude and codex have none yet, so a screen of theirs is never read as a
+// login screen. agy: jobs/at-3816-retro-read-views/spawn-failure-*.txt on
+// mac-dev, 2026-11-10.
+var harnessLoginScreens = map[string][]string{
+	"agy": {"Open the URL below in your browser:", "After authenticating, copy the code displayed in the browser and paste it below:"},
+}
+
+// harnessLoginScreen reports whether screen is kind's login screen.
+func harnessLoginScreen(kind, screen string) bool {
+	lines := harnessLoginScreens[kind]
+	if len(lines) == 0 {
+		return false
+	}
+	for _, line := range lines {
+		if !strings.Contains(screen, line) {
+			return false
+		}
+	}
+	return true
+}
+
 // relayAdapterFor looks a harness name up case-insensitively. An empty or
 // unknown name has no adapter.
 func relayAdapterFor(harness string) (relayHarnessAdapter, bool) {
