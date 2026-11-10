@@ -83,7 +83,8 @@ var topProfiles = []string{"opus", "fable", "codex-sol", "codex-astra"}
 
 var ompTopModels = map[string]string{
 	"anthropic/claude-opus-5-5":  "opus",
-	"anthropic/claude-fable-5-1": "fable",
+	"anthropic/claude-fable-5-2": "fable",
+	"anthropic/claude-fable-5-1": "fable", // kept for rollback
 	"openai/gpt-6.1-sol":         "codex-sol",
 	"openai/gpt-6-astra":         "codex-astra",
 }
