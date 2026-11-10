@@ -437,7 +437,7 @@
     {
       "profile": "fable",
       "effort": "",
-      "model_id": "claude-fable-5-1",
+      "model_id": "claude-fable-5-2",
       "pool": "claude",
       "grade": "S+",
       "score": null,

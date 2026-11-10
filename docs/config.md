@@ -982,8 +982,9 @@ is refused before placement.
 
 `--role counsel` maps to routing role `consult`. It admits only `opus` and `fable` through `claude`, or
 `codex-sol` and `codex-astra` through `codex`. OMP also admits the exact model
-selectors `anthropic/claude-opus-5-5`, `anthropic/claude-fable-5-1`,
-`openai/gpt-6.1-sol`, and `openai/gpt-6-astra`.
+selectors `anthropic/claude-opus-5-5`, `anthropic/claude-fable-5-2`,
+`openai/gpt-6.1-sol`, and `openai/gpt-6-astra`. The Fable 5.1 selector
+`anthropic/claude-fable-5-1` is still accepted as the rollback path.
 The shipped `omp-opus` and `omp-sol` profiles qualify. `omp-sonnet` and
 `omp-terra61` cannot consult. An `agy` or `pi` seat running an
 Anthropic model is ineligible. These constraints also apply to a wildcard
