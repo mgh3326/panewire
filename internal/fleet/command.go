@@ -70,7 +70,7 @@ const (
 	exitConfig              = 70  // configuration, trust or unverified admission evidence
 	exitDuplicate           = 74  // active job duplicate
 	exitStateConflict       = 75  // unreadable/changed durable state
-	exitSubmitUnconfirmed   = 76  // initial brief submission unconfirmed
+	exitSubmitUnconfirmed   = 76  // initial brief submission unconfirmed (ExitSubmitUnconfirmed outside this package)
 	exitSeatRefused         = 77  // role/seat/grade/family/E6 refusal
 	exitPreflight           = 78  // preflight: a remote host failed a check
 	exitMockRefused         = 79  // mock isolation refusal
@@ -117,3 +117,7 @@ func writeJSON(w io.Writer, v any) error {
 	}
 	return e
 }
+
+// ExitSubmitUnconfirmed is the rc of a spawn whose initial brief submission was
+// not confirmed. The node reads it to tell that kind of failure apart.
+const ExitSubmitUnconfirmed = exitSubmitUnconfirmed

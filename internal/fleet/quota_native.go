@@ -4,6 +4,7 @@ import (
 	"io"
 	"slices"
 	"strings"
+	"time"
 )
 
 // Native quota sources are the providers implemented in internal/quota.
@@ -64,4 +65,48 @@ func validateMeasurableAccounts(quota map[string]any) error {
 		}
 	}
 	return nil
+}
+
+// HostMeasurableAccount says whether this host's `[quota].measurable_accounts`
+// lists key (`pool:<16-hex>`). It reads the host's own fleet config now; a
+// missing or invalid config lists nothing.
+func HostMeasurableAccount(key string) bool {
+	config, err := LoadConfig(configPath(io.Discard))
+	if err != nil {
+		return false
+	}
+	listed, _ := config.Quota["measurable_accounts"].([]any)
+	return slices.Contains(listed, any(key))
+}
+
+// HostLoginProbeInterval is `[quota].login_probe_interval`: how often the node
+// measures a pool with this host's own credential even when the shared reading
+// is fresh (docs/fleet-state.md, "Login probe"). Zero, an unset key or an
+// unreadable config is disabled. It is read at each use, so a change needs no
+// restart.
+func HostLoginProbeInterval() time.Duration {
+	config, err := LoadConfig(configPath(io.Discard))
+	if err != nil {
+		return 0
+	}
+	interval, _ := loginProbeInterval(config.Quota)
+	return interval
+}
+
+func loginProbeInterval(quota map[string]any) (time.Duration, error) {
+	value, ok := quota["login_probe_interval"]
+	if !ok {
+		return 0, nil
+	}
+	text, isString := value.(string)
+	interval, err := time.ParseDuration(text)
+	if !isString || err != nil || interval < 0 {
+		return 0, fail(exitConfig, "quota.login_probe_interval must be a non-negative duration such as \"30m\"")
+	}
+	return interval, nil
+}
+
+func validateLoginProbeInterval(quota map[string]any) error {
+	_, err := loginProbeInterval(quota)
+	return err
 }

@@ -192,6 +192,9 @@ var fleetQuotaErrorKindPattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,31}$`)
 const fleetQuotaErrorKindUnreadable = "unreadable"
 
 func (client *HubClient) refreshFleetQuota(ctx context.Context, pool string, sent map[string]fleetQuotaSent) {
+	// The login probe follows this pool's own measurement in the same
+	// goroutine, so it never runs beside it (quota_login_probe.go).
+	defer client.probeFleetLogin(ctx, pool)
 	run, cancel := context.WithTimeout(ctx, fleetQuotaTimeout)
 	defer cancel()
 	publish, ok, kind := client.measureFleetQuota(run, ctx, pool)

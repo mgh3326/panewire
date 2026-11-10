@@ -135,6 +135,13 @@ type nodeReadinessState struct {
 	// accounts maps a pool to its last pacelever refresh outcome. A pool not
 	// in it is not measured here, or its login is unknown.
 	accounts map[string]quotaAccountNote
+	// probedAt, probeMissing and loginScreens are the host's own login
+	// evidence the quota loop's refresh cannot give (quota_login_probe.go): when
+	// each pool was last probed, the pools whose last probe failed with a login
+	// error, and the kinds whose last rc=76 launch showed the login screen.
+	probedAt     map[string]time.Time
+	probeMissing map[string]bool
+	loginScreens map[string]time.Time
 	// sentPeer, sentAt and sentCheckedAt mark what the current connection has
 	// been sent.
 	sentPeer      *hubClientConnection
@@ -203,6 +210,16 @@ func classifyLaunchDialog(kind, tail string) string {
 // every failure asks for a refresh of the whole report.
 func (client *HubClient) noteLaunchResult(message hubOutboundMessage, result hubSpawnResult) {
 	kind := fleet.ProfileKind(hubSpawnArg(message.Args, "-m"))
+	// The capture is read before the lock. rc=76 with the harness's login
+	// screen on it is a login missing at once, with no two-failure threshold.
+	loginScreen := false
+	if result.RC == fleet.ExitSubmitUnconfirmed && kind != "" {
+		job := result.JobID
+		if job == "" {
+			job = hubSpawnArg(message.Args, "--job")
+		}
+		loginScreen = client.launchShowedLoginScreen(kind, job)
+	}
 	client.readiness.mu.Lock()
 	defer client.readiness.mu.Unlock()
 	if result.RC != 0 {
@@ -210,6 +227,17 @@ func (client *HubClient) noteLaunchResult(message hubOutboundMessage, result hub
 	}
 	if kind == "" {
 		return
+	}
+	if loginScreen {
+		if client.readiness.loginScreens == nil {
+			client.readiness.loginScreens = map[string]time.Time{}
+		}
+		if !loginScreenFresh(client.readiness.loginScreens, kind, client.nowUTC()) {
+			client.warnMessage("launch of " + kind + " ended rc=76 at its login screen; harness login missing")
+		}
+		client.readiness.loginScreens[kind] = client.nowUTC()
+	} else if result.RC == 0 {
+		delete(client.readiness.loginScreens, kind)
 	}
 	if client.readiness.dialogs == nil {
 		client.readiness.dialogs = map[string]dialogMark{}
@@ -304,6 +332,7 @@ func (client *HubClient) collectReadiness(ctx context.Context) *fleet.Readiness 
 	integrations := parseHerdrIntegrations(deps.output(ctx, "herdr", "integration", "status"))
 	client.readiness.mu.Lock()
 	dialogs, accounts := cloneStringMap(client.readiness.dialogs), cloneStringMap(client.readiness.accounts)
+	probeMissing, loginScreens := cloneStringMap(client.readiness.probeMissing), cloneStringMap(client.readiness.loginScreens)
 	client.readiness.mu.Unlock()
 	for _, kind := range fleet.ReadinessKinds {
 		h := fleet.HarnessReadiness{Login: fleet.ReadinessLoginUnknown}
@@ -320,12 +349,15 @@ func (client *HubClient) collectReadiness(ctx context.Context) *fleet.Readiness 
 			h.Version = versionToken(deps.output(ctx, path, "--version"))
 		}
 		h.HerdrIntegration = integrations[nodeHerdrIntegrations[kind]]
-		if note, measured := accounts[kind]; measured {
-			if note.key == "" {
-				h.Login = fleet.ReadinessLoginMissing
-			} else {
-				h.Login, h.Account = fleet.ReadinessLoginPresent, note.key
-			}
+		note, measured := accounts[kind]
+		switch {
+		case probeMissing[kind] || loginScreenFresh(loginScreens, kind, out.CheckedAt) || measured && note.key == "":
+			// The loop's last refresh, a login probe and a launch that stopped at
+			// the login screen each say the login is missing; a refresh that read
+			// a shared reading says nothing against them.
+			h.Login = fleet.ReadinessLoginMissing
+		case measured:
+			h.Login, h.Account = fleet.ReadinessLoginPresent, note.key
 		}
 		out.Harnesses[kind] = h
 	}

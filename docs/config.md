@@ -468,6 +468,7 @@ below overrides the URL.
 | `measure_timeout_s` | `60` | 대상 계정의 native refresh(`panewire quota refresh <pool>`) 제한 시간입니다. 다른 풀은 측정 소스가 없습니다. |
 | `accounts` | unset | Optional pool → 16-hex account-fingerprint table for exact account keys. For `agy` it is the account the node measures: agy has no login to derive a key from ([docs/quota.md](quota.md#native-measurement-agy)). |
 | `measurable_accounts` | `[]` | `pool:<16-hex>` account keys this host may measure. A host measures agy, announces it and publishes under its key only when `accounts.agy` is set and `agy:<fp>` is listed here; otherwise it does not measure agy and logs one line. Read at each use. |
+| `login_probe_interval` | unset (off) | Duration string such as `"30m"`. When set, the node measures each pool in `--state-quota-pools` whose account this host lists in `measurable_accounts` with this host's own credential at most once per interval, even when the shared reading is fresh, and marks the harness login missing on a login failure. Nothing is published. Read at each round. Enable it per host only after checking that a probe does not rotate a token other hosts share. A value that is not a non-negative duration is refused at config load. See [fleet-state.md](fleet-state.md#login-probe). |
 | `node_env` | `~/.config/panewire/hub-node.env` | Panewire node env file; `HUB_MACHINE_ID` in it is the host id written to job records. `PANEWIRE_NODE_ENV` overrides the path. |
 
 ## `[sweep]`
