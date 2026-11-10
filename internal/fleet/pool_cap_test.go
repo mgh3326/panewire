@@ -271,7 +271,7 @@ func devinCapFixture(t *testing.T, rows []CatalogRow, caps map[string]any, live 
 	a, s, q := selFixture(t, "B", rows, nil, []string{"devin"})
 	q.GateDo = gatePools(map[string]string{
 		"devin-swe2": "devin", "devin-swe2-medium": "devin", "devin-swe2-max": "devin",
-		"devin-swe2-flash": "devin", "devin-swe2-flash-medium": "devin", "devin-ds41": "devin",
+		"devin-swe2-flash": "devin", "devin-swe2-flash-medium": "devin", "devin-swe2-flash-max": "devin", "devin-ds41": "devin",
 	})
 	a.Config.Quota = map[string]any{"pool_max_concurrent": caps}
 	a.LiveSpawnProfiles = func(context.Context, string) (map[string]int, error) { return live, nil }
@@ -354,6 +354,25 @@ func TestPoolCapDevinFreeCountsFlashRung(t *testing.T) {
 		t.Fatalf("chosen = %s, want devin-ds41: the flash rung is a free rung", seat)
 	}
 	wantDroppedAtCap(t, sel.record(), "devin-swe2-flash", "high", devinFreeCapKey)
+}
+
+func TestPoolCapDevinFreeCountsFlashMaxRung(t *testing.T) {
+	rows := []CatalogRow{
+		{Profile: "devin-swe2-flash-max", Effort: "max", Grade: "B", Pool: "devin", Gate: "default", ModelID: "swe-2-flash-max"},
+		{Profile: "devin-ds41", Effort: "high", Grade: "A+", Pool: "devin", Gate: "default", ModelID: "deepseek-v4-1-flash-high"},
+	}
+	a, s := devinCapFixture(t, rows, nil, nil)
+	sel, seat := chosenSeat(t, a, s)
+	if seat != "devin-swe2-flash-max" || sel.chosen.row.ModelID != "swe-2-flash-max" {
+		t.Fatalf("chosen = %s model %s, want devin-swe2-flash-max / swe-2-flash-max", seat, sel.chosen.row.ModelID)
+	}
+
+	a, s = devinCapFixture(t, rows, map[string]any{devinFreeCapKey: int64(2)}, map[string]int{"devin-swe2-flash-max": 2})
+	sel, seat = chosenSeat(t, a, s)
+	if seat != "devin-ds41" {
+		t.Fatalf("chosen = %s, want paid devin after flash-max fills devin-free cap", seat)
+	}
+	wantDroppedAtCap(t, sel.record(), "devin-swe2-flash-max", "max", devinFreeCapKey)
 }
 
 // A live paid devin spawn does not count against devin-free: only the free

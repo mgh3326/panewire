@@ -106,7 +106,9 @@ at least one only for `pool_at_cap`, the refusal names the caps and their
 limits (`pool_at_cap: openai-api=2 at [quota].pool_max_concurrent`).
 
 The reserved key `devin-free` caps only the SWE-2 free rungs
-(`devinFreeRungs`): their live spawns are counted by catalog profile, seat
+(`devinFreeRungs`): `devin-swe2`, `devin-swe2-medium`, `devin-swe2-max`,
+`devin-swe2-flash`, `devin-swe2-flash-medium`, and `devin-swe2-flash-max`;
+their live spawns are counted by catalog profile, seat
 aliases included. It exists because those rungs spend Devin's free-model quota
 while paid `devin-ds41` spends the account's paid window. `devin` remains a
 whole-pool cap, so a free rung must pass both keys when both are set.

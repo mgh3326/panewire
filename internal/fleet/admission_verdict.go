@@ -532,6 +532,7 @@ var devinFreeRungs = map[string]string{
 	"devin-swe2-max":          "swe-2-max",
 	"devin-swe2-flash":        "swe-2-flash-high",
 	"devin-swe2-flash-medium": "swe-2-flash-medium",
+	"devin-swe2-flash-max":    "swe-2-flash-max",
 }
 
 func (in admissionInputs) judgeWith(req admissionRequest, allowUnrated bool) admissionVerdict {
