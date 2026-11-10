@@ -110,8 +110,14 @@ func validCatalogGrade(grade string) bool {
 }
 
 // Task titles declare their marker as "(grade B, T1)" or the bare sentence
-// form "Grade S+, T3"; both are accepted. Grade and scale must be adjacent.
-var taskMarker = regexp.MustCompile(`(?i)(?:\(|\b)grade (S\+|S|A\+|A|B|C),\s*(T[0-3])\b`)
+// form "Grade S+, T3"; both are accepted. Grade and scale must be adjacent. A
+// third word ", strong" after the scale (capture 3) marks the task strong:
+// selection then keeps to the policy/model-routing strong_profiles list
+// (docs/placement.md). Any other word after the scale is ignored.
+var taskMarker = regexp.MustCompile(`(?i)(?:\(|\b)grade (S\+|S|A\+|A|B|C),\s*(T[0-3])\b(?:,\s*(strong)(?:[^\w-]|$))?`)
+
+// markerStrong reports whether a taskMarker match carries the strong word.
+func markerStrong(m []string) bool { return len(m) > 3 && m[3] != "" }
 
 // Check admits one launch row for a seat role.
 func (s Seat) Check(l Launch, role, grade, builderFamily, arm string, host map[string]any) error {
