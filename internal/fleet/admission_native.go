@@ -3,6 +3,7 @@ package fleet
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -162,6 +163,16 @@ func (q admissionQuota) RequestRefusal(ctx context.Context, r QuotaRequest) erro
 		return nil
 	}
 	_, err := gateResult(verdictResult(q.app.Now(), r, d, ""), r)
+	var refusal *gateRefusal
+	if errors.As(err, &refusal) {
+		// gateResult reads the receipt, which clips and re-spaces a long
+		// reason; the verdict holds it whole. Keep its exit status and prefix.
+		text := "quota gate: " + d.Reason
+		if d.Exit == gateRoleDenied {
+			text = roleRestrictedReason(d.Reason)
+		}
+		refusal.cause = fail(exitCode(refusal.cause), "%s", text)
+	}
 	return err
 }
 

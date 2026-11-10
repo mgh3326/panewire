@@ -251,3 +251,22 @@ func TestAdmittedRequestKeepsItsVerdictAndPlacement(t *testing.T) {
 		t.Fatalf("receipt fields: %v, want %v", got, want)
 	}
 }
+
+// The refusal the pre-check returns carries the gate's reason whole, with an
+// account bound to the request too: no clipping, no re-spacing.
+func TestRequestRefusalKeepsTheGateReasonVerbatim(t *testing.T) {
+	a, s, q, _ := gateReasonFixture(t, 40)
+	long := strings.Repeat("x", 230)
+	a.BenchCatalog = func(context.Context) ([]CatalogRow, error) { return nil, nil }
+	s.Profile = "sonnet"
+	qr, _ := a.quotaRequest(s)
+	qr.GateProfile = long + "  y"
+	for _, key := range []string{"", "claude:0123456789abcdef"} {
+		qr.AccountKey = key
+		err := q.RequestRefusal(context.Background(), qr)
+		want := `quota gate: profile "` + long + `  y" is unknown or retired`
+		if err == nil || err.Error() != want || exitCode(err) != quotaGateBlocked {
+			t.Fatalf("account %q: rc=%d %v, want %q", key, exitCode(err), err, want)
+		}
+	}
+}
