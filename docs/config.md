@@ -381,8 +381,8 @@ longer refuses an account another holder can measure.
 
 Before trying a remote candidate (including an explicit `--host NAME`), panewire
 resolves that host's most recent fresh presence for the launch pool, then asks
-`pacelever gate --account-key POOL:FINGERPRINT --json` to judge its shared
-observation. The spawner's `[quota.accounts]` does not pin remote accounts.
+panewire's native gate to judge its shared observation using the exact
+`POOL:FINGERPRINT` account key. The spawner's `[quota.accounts]` does not pin remote accounts.
 Missing, ambiguous, stale or degraded target evidence refuses that host; auto
 placement tries the next candidate. A pinned `-m` with a forced remote
 `--host NAME` that has no selected account resolves the pool from
@@ -937,7 +937,8 @@ resolution, seat check and gate for this host, the shared-account quota
 gate for each remote host — and stops at the first host that admits it. It
 never spawns, wakes a host, claims a local job, writes an hk task or job
 record or emits a job event; a stale remote account is measured on its
-host (`pacelever refresh`) exactly as a spawn would. Remote-only spawn
+host with `panewire quota refresh` when its pool has a native source. Other
+pools are unmeasurable. Remote-only spawn
 checks (repository mapping, the remote seat check) are not run.
 
 The text output is `plan …` (request), `chosen host=… seat=…@… model=…
@@ -1173,7 +1174,7 @@ host is connected with an alive publisher. A sleeping host sends placement back
 to `panewire place`, because that call also triggers the hub's wake-on-spill.
 
 Otherwise panewire falls back to the direct path: `panewire place`, the shared
-quota cache, and the on-target `pacelever refresh` when that reading is stale.
+quota cache, and the on-target native quota refresh when that reading is stale.
 It never falls back silently. The placement record, and the selection record
 inside it, carry a `state` object:
 

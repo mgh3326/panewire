@@ -124,10 +124,9 @@ through the same four paths and the same shared store flow as claude.
 
 ## Native measurement: commandcode
 
-panewire measures the `commandcode` pool in its own process
-(`internal/quota/commandcode`) through the same shared store flow as claude and
-codex. Unlike them it ships behind a switch, in [shadow](#shadow-and-native)
-first.
+`commandcode` pool은 panewire 프로세스(`internal/quota/commandcode`)에서 측정하며
+claude, codex와 같은 shared store 흐름을 사용합니다. 모든 호스트에서 항상 native로
+측정합니다.
 
 - **Requests.** `GET` on the commandcode API host: `/alpha/whoami?limits=1`
   (who the key is), `/alpha/billing/credits` (scoped with `?orgId=` when whoami
@@ -182,9 +181,9 @@ first.
 
 ## Native measurement: devin
 
-panewire measures the `devin` pool in its own process (`internal/quota/devin`)
-with pacelever's sources, buckets, error kinds and account fingerprint, and the
-shared store flow. It has a switch and ships in [shadow](#shadow-and-native).
+`devin` pool은 panewire 프로세스(`internal/quota/devin`)에서 측정합니다. 기존
+source, bucket, error kind, account fingerprint 및 shared store 형식을 유지하며,
+모든 호스트에서 항상 native로 측정합니다.
 
 - **Only a host with a devin login measures.** The login is a non-blank
   `windsurf_api_key` in `<XDG data>/devin/credentials.toml` (`~/.local/share`
@@ -253,9 +252,9 @@ shared store flow. It has a switch and ships in [shadow](#shadow-and-native).
 
 ## Native measurement: agy
 
-panewire measures the `agy` (Antigravity) pool in its own process
-(`internal/quota/agy`) with pacelever's sources, buckets, error kinds and
-shared-store flow. It has a switch and ships in [shadow](#shadow-and-native).
+`agy` (Antigravity) pool은 panewire 프로세스(`internal/quota/agy`)에서 측정합니다.
+기존 source, bucket, error kind 및 shared store 형식을 유지하며, 모든 호스트에서
+항상 native로 측정합니다.
 
 - **agy meters per group, and the groups have separate quotas.** The `gemini`
   group covers the Gemini models (`agy-flash`, `agy-flash38-*`); the `3p` group
