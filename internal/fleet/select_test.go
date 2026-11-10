@@ -573,3 +573,16 @@ func TestSpawnWaitValidatesTimeoutBeforePane(t *testing.T) {
 		t.Fatalf("no pane may launch after a timeout usage error: %s", joined)
 	}
 }
+
+// withAgyGates adds every agy profile to a gatePools map as its own gate name:
+// no agy profile is gated under another profile's name any more (hk 3859).
+func withAgyGates(pools map[string]string) map[string]string {
+	out := map[string]string{}
+	for _, name := range []string{"agy-flash38-high", "agy-flash38-medium", "agy-flash38-low", "agy-sonnet46", "agy-opus46", "agy-oss120"} {
+		out[name] = "agy"
+	}
+	for name, pool := range pools {
+		out[name] = pool
+	}
+	return out
+}

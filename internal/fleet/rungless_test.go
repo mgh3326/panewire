@@ -50,7 +50,7 @@ func TestPolicyAgyAndCCSeats(t *testing.T) {
 	}
 	for _, n := range []string{"agy-flash38-high", "agy-flash38-medium", "agy-flash38-low", "agy-sonnet46", "agy-opus46", "agy-oss120"} {
 		s, ok := p.Profiles[n]
-		if !ok || s.Kind != "agy" || s.Gate != "agy-flash" || s.Canon != n || s.Effort != "" || s.needsEffort() {
+		if !ok || s.Kind != "agy" || s.Gate != "" || s.gateName() != n || s.Canon != n || s.Effort != "" || s.needsEffort() {
 			t.Errorf("%s: %+v", n, s)
 		}
 		if slices.Contains(s.Roles, "builder") {
@@ -84,17 +84,17 @@ func TestLoadPolicyRejectsBadAliasAndRoute(t *testing.T) {
 	}
 }
 
-func TestCLIQuotaGateUsesGateAlias(t *testing.T) {
+func TestCLIQuotaGateUsesGateName(t *testing.T) {
 	f := &fakeRunner{Do: func(Command) Result { return Result{Out: `{}`} }}
 	q := CLIQuota{Runner: f, Binary: "quota"}
-	if _, e := q.Gate(context.Background(), QuotaRequest{Profile: "agy-sonnet46", GateProfile: "agy-flash", Role: "worker"}); e != nil {
+	if _, e := q.Gate(context.Background(), QuotaRequest{Profile: "agy-sonnet46", GateProfile: "agy-flash38-high", Role: "worker"}); e != nil {
 		t.Fatal(e)
 	}
-	if got := strings.Join(f.Calls[0].Args, " "); got != "gate -m agy-flash --role worker --json" {
+	if got := strings.Join(f.Calls[0].Args, " "); got != "gate -m agy-flash38-high --role worker --json" {
 		t.Fatalf("gate must be called by its alias and without --effort: %s", got)
 	}
 	f.Calls = nil
-	q.Launch(context.Background(), QuotaRequest{Profile: "agy-sonnet46", GateProfile: "agy-flash"})
+	q.Launch(context.Background(), QuotaRequest{Profile: "agy-sonnet46", GateProfile: "agy-flash38-high"})
 	if got := strings.Join(f.Calls[0].Args, " "); got != "policy launch agy-sonnet46 --json" {
 		t.Fatalf("launch resolves the canon, not the alias: %s", got)
 	}
@@ -151,7 +151,7 @@ func TestSelectAdmitsAgyRungless(t *testing.T) {
 	waste := true
 	pools := map[string]PoolView{"agy": {Status: "ok", Class: "spend", Waste: &waste}, "claude": {Status: "ok", Class: "spend"}}
 	a, s, q := selFixture(t, "B", agyRows(), pools, []string{"agy", "claude"})
-	q.GateDo = gatePools(map[string]string{"agy-flash": "agy", "sonnet": "claude"})
+	q.GateDo = gatePools(withAgyGates(map[string]string{"sonnet": "claude"}))
 	sel, e := a.selectProfile(context.Background(), s)
 	if e != nil {
 		t.Fatal(e)
@@ -167,8 +167,8 @@ func TestSelectAdmitsAgyRungless(t *testing.T) {
 		}
 	}
 	last := q.Calls[len(q.Calls)-1]
-	if last.GateProfile != "agy-flash" || last.Profile != "agy-flash38-medium" || last.Effort != "" {
-		t.Fatalf("the gate is called by its alias with no effort: %+v", last)
+	if last.GateProfile != "agy-flash38-medium" || last.Profile != "agy-flash38-medium" || last.Effort != "" {
+		t.Fatalf("the gate is called by the profile's own name with no effort: %+v", last)
 	}
 }
 
@@ -177,7 +177,7 @@ func TestSelectEscalationAgyNeedsAllowEscalation(t *testing.T) {
 	pools := map[string]PoolView{"agy": {Status: "ok", Class: "spend", Waste: &waste}}
 	rows := []CatalogRow{agyRows()[3]}
 	a, s, q := selFixture(t, "S", rows, pools, []string{"agy"})
-	q.GateDo = gatePools(map[string]string{"agy-flash": "agy"})
+	q.GateDo = gatePools(withAgyGates(nil))
 	if _, e := a.selectProfile(context.Background(), s); code(e) != 77 {
 		t.Fatalf("an escalation rung must not be selected by default: %v", e)
 	}
@@ -201,17 +201,20 @@ func TestSelectRunglessSeatNeedingEffortStaysDropped(t *testing.T) {
 	}
 }
 
-func TestSpawnAliasedEscalationSeatRefusesWithoutFlag(t *testing.T) {
+func TestSpawnEscalationAgySeatRefusesWithoutFlag(t *testing.T) {
 	a, s, f, _ := cmdFixture(t)
 	s.Profile = "agy-opus46"
 	q := a.Quota.(*fakeQuota)
 	q.LaunchValue = Launch{Profile: "agy-opus46", ModelID: "claude-opus-4-6-thinking", Grade: "S", Gate: "escalation", Pool: "agy"}
+	// An operator request admits an escalation row at the gate, but never
+	// stands in for --allow-escalation (hk 3859 review finding).
+	s.OperatorRequest = "hk:1"
 	e := a.Spawn(context.Background(), s)
 	if code(e) != 77 || !strings.Contains(e.Error(), "--allow-escalation") {
-		t.Fatalf("-m on an aliased escalation rung needs --allow-escalation: %v", e)
+		t.Fatalf("-m on an escalation rung needs --allow-escalation: %v", e)
 	}
 	for _, c := range q.Calls {
-		if c.GateProfile != "" && c.GateProfile != "agy-flash" {
+		if c.GateProfile != "" && c.GateProfile != "agy-opus46" {
 			t.Fatalf("%+v", c)
 		}
 	}
@@ -222,8 +225,8 @@ func TestSpawnAliasedEscalationSeatRefusesWithoutFlag(t *testing.T) {
 	s.AllowEscalation = true
 	a.Spawn(context.Background(), s)
 	last := q.Calls[len(q.Calls)-1]
-	if last.GateProfile != "agy-flash" || last.Effort != "" {
-		t.Fatalf("an allowed spawn gates by the alias with no effort: %+v", last)
+	if last.GateProfile != "agy-opus46" || last.Effort != "" {
+		t.Fatalf("an allowed spawn gates by its own name with no effort: %+v", last)
 	}
 }
 

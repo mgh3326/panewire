@@ -37,7 +37,7 @@ func agyBothGroupsRows() []CatalogRow {
 func agySelect(t *testing.T, buckets func(time.Time) []map[string]any, rows []CatalogRow) (map[string]any, *selPlan) {
 	t.Helper()
 	a, s, q := agyReadingFixture(t, buckets, rows, []string{"agy"})
-	q.GateDo = gatePools(map[string]string{"agy-flash": "agy"})
+	q.GateDo = gatePools(withAgyGates(nil))
 	sel, e := a.selectProfile(context.Background(), s)
 	if e != nil {
 		t.Fatalf("one agy group still has quota, so a rung is offered: %v", e)

@@ -321,7 +321,7 @@ func TestSubmitUnconfirmedAtTheLoginScreenMarksLoginMissingAtOnce(t *testing.T) 
 		if got := poolLogin(t, client, "agy").Login; got != fleet.ReadinessLoginPresent {
 			t.Fatalf("login before = %q", got)
 		}
-		launchWithCapture(t, client, "agy-flash", fleet.ExitSubmitUnconfirmed, agyLoginScreen)
+		launchWithCapture(t, client, "agy-flash38-medium", fleet.ExitSubmitUnconfirmed, agyLoginScreen)
 		client.noteQuotaAccount("agy", agyKeyForTest) // the next loop round still reads it
 		report := client.collectReadiness(t.Context())
 		if got := report.Harnesses["agy"].Login; got != fleet.ReadinessLoginMissing {
@@ -359,7 +359,7 @@ func TestSubmitUnconfirmedAtTheLoginScreenMarksLoginMissingAtOnce(t *testing.T) 
 		client.readiness.mu.Lock()
 		client.readiness.dirty = false
 		client.readiness.mu.Unlock()
-		client.noteLaunchResult(hubOutboundMessage{Args: []string{"-m", "agy-flash"}}, hubSpawnResult{RC: 0})
+		client.noteLaunchResult(hubOutboundMessage{Args: []string{"-m", "agy-flash38-medium"}}, hubSpawnResult{RC: 0})
 		if got := poolLogin(t, client, "agy").Login; got != fleet.ReadinessLoginPresent {
 			t.Fatalf("login after a good launch = %q", got)
 		}
@@ -369,7 +369,7 @@ func TestSubmitUnconfirmedAtTheLoginScreenMarksLoginMissingAtOnce(t *testing.T) 
 		if !dirty {
 			t.Fatal("a launch that cleared login_missing did not ask for a readiness refresh")
 		}
-		launchWithCapture(t, client, "agy-flash", fleet.ExitSubmitUnconfirmed, agyLoginScreen)
+		launchWithCapture(t, client, "agy-flash38-medium", fleet.ExitSubmitUnconfirmed, agyLoginScreen)
 		client.noteLoginProbe("agy", false)
 		if got := poolLogin(t, client, "agy").Login; got != fleet.ReadinessLoginPresent {
 			t.Fatalf("login after a passing probe = %q", got)
@@ -378,7 +378,7 @@ func TestSubmitUnconfirmedAtTheLoginScreenMarksLoginMissingAtOnce(t *testing.T) 
 	t.Run("expires so the pair gets one more launch", func(t *testing.T) {
 		client := newClient()
 		now := client.now()
-		launchWithCapture(t, client, "agy-flash", fleet.ExitSubmitUnconfirmed, agyLoginScreen)
+		launchWithCapture(t, client, "agy-flash38-medium", fleet.ExitSubmitUnconfirmed, agyLoginScreen)
 		client.now = func() time.Time { return now.Add(nodeLoginScreenTTL + time.Second) }
 		if got := poolLogin(t, client, "agy").Login; got != fleet.ReadinessLoginUnknown {
 			t.Fatalf("login after the TTL = %q", got)
@@ -389,10 +389,10 @@ func TestSubmitUnconfirmedAtTheLoginScreenMarksLoginMissingAtOnce(t *testing.T) 
 		rc      int
 		capture string
 	}{
-		"rc=76 without the screen":              {"agy-flash", fleet.ExitSubmitUnconfirmed, agyComposerScreen},
-		"rc=76 with half of the screen":         {"agy-flash", fleet.ExitSubmitUnconfirmed, " Open the URL below in your browser:\n"},
-		"rc=76 and no capture":                  {"agy-flash", fleet.ExitSubmitUnconfirmed, ""},
-		"login screen, other rc":                {"agy-flash", 75, agyLoginScreen},
+		"rc=76 without the screen":              {"agy-flash38-medium", fleet.ExitSubmitUnconfirmed, agyComposerScreen},
+		"rc=76 with half of the screen":         {"agy-flash38-medium", fleet.ExitSubmitUnconfirmed, " Open the URL below in your browser:\n"},
+		"rc=76 and no capture":                  {"agy-flash38-medium", fleet.ExitSubmitUnconfirmed, ""},
+		"login screen, other rc":                {"agy-flash38-medium", 75, agyLoginScreen},
 		"login screen, harness with no pattern": {"opus", fleet.ExitSubmitUnconfirmed, agyLoginScreen},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -428,7 +428,7 @@ func TestSuccessfulLaunchClearsAFailedLoginProbe(t *testing.T) {
 	client.readiness.mu.Lock()
 	client.readiness.dirty = false
 	client.readiness.mu.Unlock()
-	client.noteLaunchResult(hubOutboundMessage{Args: []string{"-m", "agy-flash"}}, hubSpawnResult{RC: 0})
+	client.noteLaunchResult(hubOutboundMessage{Args: []string{"-m", "agy-flash38-medium"}}, hubSpawnResult{RC: 0})
 	if got := poolLogin(t, client, "agy").Login; got != fleet.ReadinessLoginPresent {
 		t.Fatalf("login after a good launch = %q, want present", got)
 	}

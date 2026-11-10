@@ -258,7 +258,7 @@ source, bucket, error kind, account fingerprint 및 shared store 형식을 유�
 항상 native로 측정합니다.
 
 - **agy meters per group, and the groups have separate quotas.** The `gemini`
-  group covers the Gemini models (`agy-flash`, `agy-flash38-*`); the `3p` group
+  group covers the Gemini models (`agy-flash38-*`); the `3p` group
   covers the third-party models, Claude and GPT (`agy-sonnet46`, `agy-opus46`,
   `agy-oss120`). A reading has only group buckets — `scope` `group`, the group
   name in `model` (`gemini`, `3p`, or `unknown` for an identity that maps to
@@ -304,7 +304,7 @@ source, bucket, error kind, account fingerprint 및 shared store 형식을 유�
   catalog row's `group` when pacelever's catalog names one, else the group of its
   model id by pacelever's rule (`gemini*` → gemini; `3p-*`, or a name containing
   `claude`, `gpt` or `oss` → 3p). Placement ranks and blocks a rung on its own
-  group's windows only: with gemini exhausted `agy-flash*` is `window_exhausted`
+  group's windows only: with gemini exhausted `agy-flash38-*` is `window_exhausted`
   and `agy-sonnet46` is still offered, and the reverse. A rung whose group the
   reading has no window for is `quota_unknown` (no other group's window stands in
   for it). A rung that maps to no group keeps the conservative rule: the

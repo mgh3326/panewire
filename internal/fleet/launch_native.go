@@ -134,7 +134,8 @@ type launchRow struct {
 
 // catalogSnapshotJSON is pacelever v0.3.28's catalog_snapshot.json, byte for
 // byte: the local fields (placement, family), effort defaults and aliases that
-// pacelever's own catalog adds to handoffkeep's rows.
+// pacelever's own catalog adds to handoffkeep's rows. Its agy-flash row
+// (Gemini 3.7) is dropped: that rung is retired (hk 3859).
 //
 //go:embed catalog-snapshot.json
 var catalogSnapshotJSON []byte

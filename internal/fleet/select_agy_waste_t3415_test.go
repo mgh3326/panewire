@@ -30,7 +30,7 @@ func agyWasteRows() []CatalogRow {
 func agyWasteSelect(t *testing.T, buckets func(time.Time) []map[string]any, rows []CatalogRow) (map[string]any, *selPlan) {
 	t.Helper()
 	a, s, q := agyReadingFixture(t, buckets, rows, []string{"agy", "codex"})
-	q.GateDo = gatePools(map[string]string{"agy-flash": "agy", "codex-luna": "codex"})
+	q.GateDo = gatePools(withAgyGates(map[string]string{"codex-luna": "codex"}))
 	sel, e := a.selectProfile(context.Background(), s)
 	if e != nil {
 		t.Fatal(e)
@@ -113,7 +113,7 @@ func TestSelectAgyUnmappedRungUsesMostRestrictiveGroupForWaste(t *testing.T) {
 	// The default policy has no seat for the unmapped rung; one alias is
 	// enough for it to reach classification.
 	a.Policy.Profiles["agy-mystery"] = Seat{Canon: "agy-mystery", Kind: "agy", Family: "google", Capability: "standard", Roles: []string{"worker", "tester", "reviewer", "counsel"}}
-	q.GateDo = gatePools(map[string]string{"agy-flash": "agy", "codex-luna": "codex"})
+	q.GateDo = gatePools(withAgyGates(map[string]string{"codex-luna": "codex"}))
 	sel, e := a.selectProfile(context.Background(), s)
 	if e != nil {
 		t.Fatal(e)

@@ -1282,30 +1282,6 @@
         "counsel"
       ]
     },
-    "agy-flash": {
-      "canon": "agy-flash",
-      "kind": "agy",
-      "family": "google",
-      "capability": "standard",
-      "roles": [
-        "worker",
-        "tester",
-        "reviewer",
-        "counsel"
-      ]
-    },
-    "agy-flash36": {
-      "canon": "agy-flash36",
-      "kind": "agy",
-      "family": "google",
-      "capability": "standard",
-      "roles": [
-        "worker",
-        "tester",
-        "reviewer",
-        "counsel"
-      ]
-    },
     "agy-flash37": {
       "canon": "agy-flash37",
       "kind": "agy",
@@ -1342,8 +1318,7 @@
         "tester",
         "reviewer",
         "counsel"
-      ],
-      "gate": "agy-flash"
+      ]
     },
     "agy-flash38-medium": {
       "canon": "agy-flash38-medium",
@@ -1355,8 +1330,7 @@
         "tester",
         "reviewer",
         "counsel"
-      ],
-      "gate": "agy-flash"
+      ]
     },
     "agy-flash38-low": {
       "canon": "agy-flash38-low",
@@ -1368,8 +1342,7 @@
         "tester",
         "reviewer",
         "counsel"
-      ],
-      "gate": "agy-flash"
+      ]
     },
     "agy-sonnet46": {
       "canon": "agy-sonnet46",
@@ -1381,8 +1354,7 @@
         "tester",
         "reviewer",
         "counsel"
-      ],
-      "gate": "agy-flash"
+      ]
     },
     "agy-opus46": {
       "canon": "agy-opus46",
@@ -1394,8 +1366,7 @@
         "tester",
         "reviewer",
         "counsel"
-      ],
-      "gate": "agy-flash"
+      ]
     },
     "agy-oss120": {
       "canon": "agy-oss120",
@@ -1407,8 +1378,7 @@
         "tester",
         "reviewer",
         "counsel"
-      ],
-      "gate": "agy-flash"
+      ]
     },
     "cc-qwen38": {
       "canon": "cc-qwen38",
