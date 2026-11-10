@@ -38,7 +38,7 @@ func TestPolicyWithoutLeadEntryRoutesEverySeatRole(t *testing.T) {
 		a := testApp(t)
 		a.Runner = &fakeRunner{}
 		serveRouting(t, routingDocV1)
-		r, err := a.routeFor(context.Background(), seat, "", false)
+		r, err := a.routeFor(context.Background(), seat, "")
 		if err != nil || r.role != want {
 			t.Fatalf("%s: want routing role %s, got %+v %v", seat, want, r, err)
 		}
@@ -52,10 +52,10 @@ func TestLeadEntryInPolicyIsNeverRead(t *testing.T) {
 	a := testApp(t)
 	a.Runner = &fakeRunner{}
 	serveRouting(t, routingDoc(leadOnly))
-	if _, err := a.routeFor(context.Background(), "counsel", "", false); exitCode(err) != exitConfig || err == nil || !strings.Contains(err.Error(), "POLICY_UNAVAILABLE") {
+	if _, err := a.routeFor(context.Background(), "counsel", ""); exitCode(err) != exitConfig || err == nil || !strings.Contains(err.Error(), "POLICY_UNAVAILABLE") {
 		t.Fatalf("counsel must not fall back to a lead entry: %v", err)
 	}
-	if _, err := a.routeFor(context.Background(), "worker", "lead", false); exitCode(err) != exitUsage {
+	if _, err := a.routeFor(context.Background(), "worker", "lead"); exitCode(err) != exitUsage {
 		t.Fatalf("--routing-role lead must be a usage refusal: %v", err)
 	}
 	if err := a.resolveCmd(context.Background(), []string{"--role", "lead"}); exitCode(err) != exitUsage {

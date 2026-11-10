@@ -929,7 +929,7 @@ carries `policy_file` and `policy_overrides`.
 
 `panewire plan [--grade G] --t T0..T3 [--role R] [--tags a,b] [--effort E]
 [--urgency normal|urgent] [--exclude-host a,b] [--exclude-pool P,P] [--builder-family F]
-[--routing-role R] [--allow-escalation] [--strong] [--json]` answers "right now, which host and which
+[--routing-role R] [--allow-escalation] [--json]` answers "right now, which host and which
 model would a spawn get" without a task or brief. It is live and read-only:
 it runs the spawn's selection core with catalog, account observations,
 presence, and account-bound gates. Worker roles use `--grade` instead of a
@@ -1102,38 +1102,6 @@ unreadable, a usable cache supplies `policy_source=cache@v<N>`.
 Without either source, consult and verifier return
 `POLICY_UNAVAILABLE`. The existing v1 fallback for other roles uses
 `builtin_default`.
-
-### Strong tasks
-
-A task title may end its marker with `, strong`: `(grade A, T2, strong)`.
-The word is case-insensitive and must be exactly `strong`; `strongish` or
-`strong-ish` leaves the title a plain `(grade A, T2)` marker, and a title
-without the word behaves as it always did. `panewire spawn` and `panewire plan`
-also take `--strong` (for a spawn without a task, and to preview a strong
-selection). With a task, the flag and the marker are OR-ed.
-
-A strong spawn keeps its routing role (a worker is still an `implementer`,
-with that role's allowed list, `min_effort` and family rules) and also keeps
-only the profiles listed under `strong_profiles`, an optional top-level array
-in the v1 block of `policy/model-routing`. The list is read and cached with
-the rest of the table. A candidate it removes is recorded with reason
-`not_strong`; the usual grade, gate, seat, quota and tier rules then decide
-among the rest (see `docs/placement.md`). The sample below is an illustration:
-the live list is set in hk, and the binary compiles none in.
-
-```json
-"strong_profiles": ["fable", "opus", "codex-astra", "codex-sol", "codex-luna"]
-```
-
-If neither hk nor the cache supplies a non-empty `strong_profiles`, a strong
-spawn is refused with `POLICY_UNAVAILABLE` (exit 70), as consult and verifier
-are; it never falls back to an unrestricted selection. A name in the list must
-be a profile ID, not `"*"`; a table that carries another value is unreadable
-and the cache is used instead. The selection record (`job.placement`
-`selection`, `plan --json`) carries `strong: true`, and its `routing` stamp
-lists the `strong_profiles` applied; the handoffkeep placement record gains no
-field. An explicit `-m PROFILE` pin is not restricted: it is already an
-operator override.
 
 ### Accounts and placement
 
