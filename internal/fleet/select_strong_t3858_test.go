@@ -120,7 +120,7 @@ func TestStrongDropsCandidatesOutsideTheList(t *testing.T) {
 		t.Fatalf("a strong spawn keeps its routing role and stamps the list: %v", rt)
 	}
 	for _, c := range q.Calls {
-		if firstNonempty(c.GateProfile, c.Profile) == "agy-flash" {
+		if firstNonempty(c.GateProfile, c.Profile) == "agy-flash38-high" {
 			t.Fatalf("a dropped profile's gate must never be asked: %+v", q.Calls)
 		}
 	}
