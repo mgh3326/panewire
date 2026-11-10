@@ -5,11 +5,13 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/mgh3326/panewire/internal/durable"
@@ -31,19 +33,24 @@ type limitRecord struct {
 
 const limitRecordSchema = "pacelever.devin-free-limit.v1"
 
+var (
+	ErrInvalidFreeLimitObservation = errors.New("invalid devin free-limit observation")
+	ErrFreeLimitStore              = errors.New("devin free-limit store failure")
+)
+
 // ObserveFreeLimit records or clears a local devin free-tier limit observation
 // in the compatible cache format. An unparsed reset is held for one hour.
 func ObserveFreeLimit(cfg Config, resetAt, observedAt, rung, source, accountKey string, unparsed, clear bool) error {
 	path := filepath.Join(cfg.cacheDir(), "devin-free-limit.json")
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return errors.New("devin 쿼터 캐시 디렉터리를 만들 수 없습니다")
+		return fmt.Errorf("%w: devin 쿼터 캐시 디렉터리를 만들 수 없습니다", ErrFreeLimitStore)
 	}
 	identities := cfg.limitIdentities()
 	if accountKey != "" {
 		pool, fp, ok := strings.Cut(accountKey, ":")
 		if !ok || pool != "devin" || len(fp) != 16 || strings.Trim(fp, "0123456789abcdef") != "" {
-			return errors.New("devin account key가 올바르지 않습니다")
+			return fmt.Errorf("%w: devin account key가 올바르지 않습니다", ErrInvalidFreeLimitObservation)
 		}
 		identities = []string{"account-" + longFingerprint("account\x00"+fp)}
 	}
@@ -51,7 +58,7 @@ func ObserveFreeLimit(cfg Config, resetAt, observedAt, rung, source, accountKey 
 	if observedAt != "" {
 		parsed, err := time.Parse(time.RFC3339Nano, observedAt)
 		if err != nil {
-			return errors.New("observation 시간이 올바르지 않습니다")
+			return fmt.Errorf("%w: observation 시간이 올바르지 않습니다", ErrInvalidFreeLimitObservation)
 		}
 		observed = parsed.UTC()
 	}
@@ -59,34 +66,70 @@ func ObserveFreeLimit(cfg Config, resetAt, observedAt, rung, source, accountKey 
 	if reset != "" {
 		parsed, err := time.Parse(time.RFC3339Nano, reset)
 		if err != nil {
-			return errors.New("reset 시간이 올바르지 않습니다")
+			return fmt.Errorf("%w: reset 시간이 올바르지 않습니다", ErrInvalidFreeLimitObservation)
 		}
 		reset = parsed.UTC().Format(time.RFC3339Nano)
 	} else if !clear {
 		if !unparsed {
-			return errors.New("--unparsed 또는 --reset이 필요합니다")
+			return fmt.Errorf("%w: --unparsed 또는 --reset이 필요합니다", ErrInvalidFreeLimitObservation)
 		}
 		reset = observed.Add(unknownResetHold).Format(time.RFC3339Nano)
 	}
 	if len(rung) > 256 || len(source) > 256 {
-		return errors.New("observation metadata가 너무 깁니다")
+		return fmt.Errorf("%w: observation metadata가 너무 깁니다", ErrInvalidFreeLimitObservation)
 	}
+	if len(accountKey) > 128 {
+		return fmt.Errorf("%w: account key가 너무 깁니다", ErrInvalidFreeLimitObservation)
+	}
+	lock, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW, 0o600)
+	if err != nil {
+		return fmt.Errorf("%w: devin 쿼터 캐시 lock을 열 수 없습니다", ErrFreeLimitStore)
+	}
+	defer lock.Close()
+	if err := lock.Chmod(0o600); err != nil {
+		return fmt.Errorf("%w: devin 쿼터 캐시 lock을 보호할 수 없습니다", ErrFreeLimitStore)
+	}
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
+		return fmt.Errorf("%w: devin 쿼터 캐시 lock을 얻을 수 없습니다", ErrFreeLimitStore)
+	}
+	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
 
 	document := map[string]json.RawMessage{}
 	records := map[string]json.RawMessage{}
-	if info, err := os.Lstat(path); err == nil {
-		if !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 {
-			return errors.New("devin 쿼터 캐시는 mode 0600인 일반 파일이어야 합니다")
+	info, statErr := os.Lstat(path)
+	if statErr != nil && !errors.Is(statErr, fs.ErrNotExist) {
+		if clear && removeLimitFile(path) == nil {
+			return nil
+		}
+		return fmt.Errorf("%w: devin 쿼터 캐시를 확인할 수 없습니다", ErrFreeLimitStore)
+	}
+	if errors.Is(statErr, fs.ErrNotExist) {
+		if clear {
+			return nil
+		}
+	} else {
+		if !info.Mode().IsRegular() {
+			if clear && removeLimitFile(path) == nil {
+				return nil
+			}
+			return fmt.Errorf("%w: devin 쿼터 캐시는 일반 파일이어야 합니다", ErrFreeLimitStore)
+		}
+		if info.Mode().Perm()&0o077 != 0 && !clear {
+			return fmt.Errorf("%w: devin 쿼터 캐시는 mode 0600이어야 합니다; 복구하려면 quota observe devin-free-limit --clear를 실행하세요", ErrFreeLimitStore)
 		}
 		data, err := os.ReadFile(path)
 		if err != nil || !decodeJSONObject(data, &document) {
-			return errors.New("devin 쿼터 캐시를 읽을 수 없습니다")
+			if clear && removeLimitFile(path) == nil {
+				return nil
+			}
+			return fmt.Errorf("%w: devin 쿼터 캐시를 읽을 수 없습니다; 복구하려면 quota observe devin-free-limit --clear를 실행하세요", ErrFreeLimitStore)
 		}
 		if raw := document["records"]; len(raw) == 0 || json.Unmarshal(raw, &records) != nil || records == nil {
-			return errors.New("devin 쿼터 캐시 records가 올바르지 않습니다")
+			if clear && removeLimitFile(path) == nil {
+				return nil
+			}
+			return fmt.Errorf("%w: devin 쿼터 캐시 records가 올바르지 않습니다; 복구하려면 quota observe devin-free-limit --clear를 실행하세요", ErrFreeLimitStore)
 		}
-	} else if !errors.Is(err, fs.ErrNotExist) {
-		return errors.New("devin 쿼터 캐시를 사용할 수 없습니다")
 	}
 	if records == nil {
 		records = map[string]json.RawMessage{}
@@ -99,25 +142,53 @@ func ObserveFreeLimit(cfg Config, resetAt, observedAt, rung, source, accountKey 
 		record := limitRecord{ResetAt: reset, ObservedAt: observed.Format(time.RFC3339Nano), Rung: rung, Source: source, Unparsed: unparsed}
 		encoded, err := json.Marshal(record)
 		if err != nil {
-			return errors.New("devin 쿼터 observation을 인코딩할 수 없습니다")
+			return fmt.Errorf("%w: devin 쿼터 observation을 인코딩할 수 없습니다", ErrFreeLimitStore)
 		}
 		for _, id := range identities {
+			if unparsed {
+				if raw, exists := records[id]; exists {
+					var previous limitRecord
+					if err := json.Unmarshal(raw, &previous); err != nil {
+						continue
+					}
+					previousReset, ok := previous.effectiveReset()
+					newReset, _ := record.effectiveReset()
+					if !ok || previousReset.After(observed) && previousReset.After(newReset) {
+						continue
+					}
+				}
+			}
 			records[id] = encoded
 		}
 	}
+	if clear && len(records) == 0 {
+		return removeLimitFile(path)
+	}
 	encodedRecords, err := json.Marshal(records)
 	if err != nil {
-		return errors.New("devin 쿼터 캐시를 인코딩할 수 없습니다")
+		return fmt.Errorf("%w: devin 쿼터 캐시를 인코딩할 수 없습니다", ErrFreeLimitStore)
 	}
 	encodedSchema, _ := json.Marshal(limitRecordSchema)
 	document["schema"], document["records"] = encodedSchema, encodedRecords
 	data, err := json.MarshalIndent(document, "", "  ")
 	if err != nil {
-		return errors.New("devin 쿼터 캐시를 인코딩할 수 없습니다")
+		return fmt.Errorf("%w: devin 쿼터 캐시를 인코딩할 수 없습니다", ErrFreeLimitStore)
 	}
 	if err := durable.ReplaceFileAtomically(path, ".devin-free-limit-*", append(data, '\n'), 0o600); err != nil {
-		return errors.New("devin 쿼터 observation을 저장할 수 없습니다")
+		return fmt.Errorf("%w: devin 쿼터 observation을 저장할 수 없습니다", ErrFreeLimitStore)
 	}
+	return nil
+}
+
+func removeLimitFile(path string) error {
+	err := os.Remove(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("%w: devin 쿼터 캐시를 제거할 수 없습니다", ErrFreeLimitStore)
+	}
+	durable.SyncDirectoryBestEffort(filepath.Dir(path))
 	return nil
 }
 

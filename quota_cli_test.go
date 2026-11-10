@@ -110,4 +110,31 @@ func TestQuotaObserveDevinFreeLimitUsesNativeWriter(t *testing.T) {
 	if code := runQuotaCLI([]string{"observe", "devin-free-limit", "--reset", "not-a-time"}, &out, &errOut); code != ExitUsage || !strings.Contains(errOut.String(), "reset 시간이") {
 		t.Fatalf("invalid reset code=%d stderr=%q", code, errOut.String())
 	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	errOut.Reset()
+	if code := runQuotaCLI([]string{"observe", "devin-free-limit", "--clear"}, &out, &errOut); code != 0 {
+		t.Fatalf("clear corrupt record code=%d stderr=%q", code, errOut.String())
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("corrupt record remains after clear: %v", err)
+	}
+	cacheObstacle := filepath.Join(t.TempDir(), "cache-is-a-file")
+	if err := os.WriteFile(cacheObstacle, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_CACHE_HOME", cacheObstacle)
+	out.Reset()
+	errOut.Reset()
+	if code := runQuotaCLI([]string{"observe", "devin-free-limit", "--unparsed"}, &out, &errOut); code != ExitInternal {
+		t.Fatalf("storage failure exit=%d stderr=%q, want %d", code, errOut.String(), ExitInternal)
+	}
 }

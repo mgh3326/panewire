@@ -3,6 +3,7 @@ package panewire
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -169,7 +170,10 @@ func runNativeQuotaObserve(args []string, out, errOut io.Writer) int {
 	err := devin.ObserveFreeLimit(devin.Config{}, values["reset"], values["observed"], values["rung"], values["source"], values["account-key"], flags["--unparsed"], flags["--clear"])
 	if err != nil {
 		fmt.Fprintf(errOut, "quota observe: %v\n", err)
-		return ExitUsage
+		if errors.Is(err, devin.ErrInvalidFreeLimitObservation) {
+			return ExitUsage
+		}
+		return ExitInternal
 	}
 	if flags["--clear"] {
 		fmt.Fprintln(out, "cleared devin-free-limit")
