@@ -106,65 +106,56 @@ func gateRuns(r *fakeRunner) int {
 
 var opusRequest = QuotaRequest{Profile: "opus", Effort: "high", Role: "worker", AccountKey: switchKey}
 
+func TestAdmissionDefaultsToNativeWithoutExecutingQuotaCLI(t *testing.T) {
+	a, runner, _ := switchApp(t, "", switchReading(20, 40), Result{Code: 99})
+	if _, err := a.Quota.Gate(context.Background(), opusRequest); err != nil {
+		t.Fatalf("native gate refused: %v", err)
+	}
+	if len(runner.Calls) != 0 {
+		t.Fatalf("default gate executed an external quota CLI: %+v", runner.Calls)
+	}
+}
+
+func TestRetiredQuotaKeysWarnOnceAndModesValidate(t *testing.T) {
+	path := writeHostsConfig(t, `[quota]
+gate = "native"
+launch = "native"
+native_pools = ["commandcode"]
+`)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("FLEET_HOSTS_CONFIG", path)
+	t.Setenv("PANEWIRE_QUOTA_BIN", "/ignored")
+	var warnings strings.Builder
+	if _, err := New(io.Discard, &warnings); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"gate", "launch", "native_pools", "PANEWIRE_QUOTA_BIN"} {
+		if n := strings.Count(warnings.String(), key); n != 1 {
+			t.Errorf("%s warning count=%d output=%q", key, n, warnings.String())
+		}
+	}
+	for _, key := range []string{"gate", "launch"} {
+		bad := writeHostsConfig(t, "[quota]\n"+key+" = \"shadow\"\n")
+		if _, err := LoadConfig(bad); err == nil {
+			t.Errorf("retired %s=shadow loaded", key)
+		}
+	}
+}
+
+func TestLoadConfigRejectsRetiredQuotaSwitchValues(t *testing.T) {
+	for _, key := range []string{"gate", "launch"} {
+		t.Run(key, func(t *testing.T) {
+			path := writeHostsConfig(t, "[quota]\n"+key+" = \"shadow\"\n")
+			if _, err := LoadConfig(path); err == nil {
+				t.Fatalf("LoadConfig accepted retired %s=shadow", key)
+			}
+		})
+	}
+}
+
 // TestAdmissionShadowLogsDisagreement: in shadow mode pacelever's verdict
 // decides the spawn, and a native verdict that differs is logged with the
 // profile, pool and both verdicts and reasons.
-func TestAdmissionShadowLogsDisagreement(t *testing.T) {
-	a, runner, events := switchApp(t, "", switchReading(99.5, 40), paceleverReceipt(true, 0, "opus pool=claude used=99.5% class=spend"))
-	out, err := a.Quota.Gate(context.Background(), opusRequest)
-	if err != nil || gatePool(out) != "claude" {
-		t.Fatalf("shadow must return pacelever's admit: %q %v", out, err)
-	}
-	if gateRuns(runner) != 1 {
-		t.Fatalf("shadow runs pacelever's gate once, got %d", gateRuns(runner))
-	}
-	if len(*events) != 1 {
-		t.Fatalf("want one shadow event, got %+v", *events)
-	}
-	e := (*events)[0]
-	if e.Kind != "quota_gate_shadow" || e.Outcome != "disagree" || e.Reason != "claude" {
-		t.Fatalf("shadow event = %+v", e)
-	}
-	for _, want := range []string{"profile=opus", "pacelever{exit=0 pool=claude", "native{exit=3 pool=claude", `reason="quota exhausted window=5h cutoff=99"`, `reason="opus pool=claude used=99.5% class=spend"`} {
-		if !strings.Contains(e.Detail, want) {
-			t.Errorf("shadow detail lacks %q: %s", want, e.Detail)
-		}
-	}
-}
-
-func TestAdmissionShadowRecordsAgreement(t *testing.T) {
-	native := "opus pool=claude used=40% class=spend [rung opus@high]\npace-warning pool=claude window=7d multiple=1.40"
-	a, _, events := switchApp(t, gateModeShadow, switchReading(20, 40), paceleverReceipt(true, 0, native))
-	if _, err := a.Quota.Gate(context.Background(), opusRequest); err != nil {
-		t.Fatal(err)
-	}
-	if len(*events) != 1 || (*events)[0].Outcome != "agree" {
-		t.Fatalf("shadow agreement event = %+v", *events)
-	}
-}
-
-// TestAdmissionShadowNeverMeasures: the shadow verdict reads only; a stale
-// reading of an account this host holds is not refreshed beside pacelever.
-func TestAdmissionShadowNeverMeasures(t *testing.T) {
-	stale := switchReading(20, 40)
-	stale.MeasuredAt = switchNow.Add(-time.Hour)
-	a, runner, events := switchApp(t, gateModeShadow, stale, paceleverReceipt(true, 0, "opus pool=claude used=40% class=spend"))
-	a.Config.Quota["accounts"] = map[string]any{"claude": "0123456789abcdef"}
-	if _, err := a.Quota.Gate(context.Background(), opusRequest); err != nil {
-		t.Fatal(err)
-	}
-	for _, c := range runner.Calls {
-		if slices.Contains(c.Args, "refresh") {
-			t.Fatalf("shadow verdict measured: %v", c)
-		}
-	}
-	if len(*events) != 1 || (*events)[0].Outcome != "disagree" || !strings.Contains((*events)[0].Detail, msgAccountStale) {
-		t.Fatalf("stale shadow reading must show as a disagreement: %+v", *events)
-	}
-}
-
-// TestAdmissionNativeNeverRunsPaceleverGate: native mode decides from the
-// stored reading and the handoffkeep catalog, and runs no pacelever command.
 func TestAdmissionNativeNeverRunsPaceleverGate(t *testing.T) {
 	a, runner, events := switchApp(t, gateModeNative, switchReading(20, 40), Result{Code: 99})
 	j, err := a.judgeGate(context.Background(), opusRequest, "claude", quotaJudgment{Host: "local", Source: "shared", AccountKey: switchKey})
@@ -337,24 +328,6 @@ func TestAdmissionLocalRequestFallsBackToManualWindows(t *testing.T) {
 
 // TestAdmissionKeepsConfiguredQuotaBinary: wrapping the quota CLI keeps
 // PANEWIRE_QUOTA_BIN for the refreshes panewire runs through pacelever.
-func TestAdmissionKeepsConfiguredQuotaBinary(t *testing.T) {
-	a := &App{}
-	a.Quota = admissionQuota{CLIQuota{Runner: &fakeRunner{}, Binary: "/custom/pacelever"}, a}
-	if got := a.paceleverBinary(); got != "/custom/pacelever" {
-		t.Fatalf("wrapped quota binary = %q", got)
-	}
-	if got := refreshCommand("kiro", a.paceleverBinary(), false); got.Name != "/custom/pacelever" {
-		t.Fatalf("selection refresh runs %q", got.Name)
-	}
-	a.Quota = &fakeQuota{}
-	if a.paceleverBinary() != "pacelever" {
-		t.Fatal("a non-CLI quota gate refreshes with pacelever")
-	}
-}
-
-// TestAdmissionNativeReadsStoredReadingOverHandoffkeep: the production
-// native gate reads the account's reading over handoffkeep's HTTP API and the
-// catalog from the injected reader, and runs no pacelever command.
 func TestAdmissionNativeReadsStoredReadingOverHandoffkeep(t *testing.T) {
 	var paths []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -411,14 +384,14 @@ func TestAdmissionGateModeConfig(t *testing.T) {
 	for _, tc := range []struct {
 		value any
 		ok    bool
-	}{{"shadow", true}, {"native", true}, {"pacelever", false}, {true, false}} {
+	}{{"shadow", false}, {"native", true}, {"pacelever", false}, {true, false}} {
 		if err := validateGateMode(map[string]any{"gate": tc.value}); (err == nil) != tc.ok {
 			t.Errorf("quota.gate=%v: err=%v want ok=%v", tc.value, err, tc.ok)
 		}
 	}
 	a := &App{Config: Config{Quota: map[string]any{}}}
-	if a.gateMode() != gateModeShadow {
-		t.Fatal("an unset switch is shadow")
+	if a.gateMode() != gateModeNative {
+		t.Fatal("an unset switch is native")
 	}
 }
 

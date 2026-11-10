@@ -2,11 +2,8 @@ package fleet
 
 import (
 	"context"
-	"fmt"
-	"maps"
 	"os"
 	"slices"
-	"strings"
 )
 
 // Pools is the pool view selection ranks a credit pool on and
@@ -27,21 +24,16 @@ import (
 //     wired — the view is built here and `pacelever --json` is not started;
 //     otherwise pacelever's status document is read as in shadow.
 func (q admissionQuota) Pools(ctx context.Context) (map[string]PoolView, error) {
-	if q.app.launchMode() == launchModeNative {
-		pools, served := q.nativeCreditPools()
-		if !served {
-			return q.CLIQuota.Pools(ctx)
-		}
-		views, err := q.creditStoreViews(ctx, pools)
-		if err != nil {
-			return nil, err
-		}
-		q.addCreditBalances(ctx, views)
-		return views, nil
+	pools, served := q.nativeCreditPools()
+	if !served {
+		return nil, fail(exitConfig, "quota status: shared manual store unavailable")
 	}
-	views, err := q.CLIQuota.Pools(ctx)
-	q.shadowPools(maps.Clone(views), err)
-	return views, err
+	views, err := q.creditStoreViews(ctx, pools)
+	if err != nil {
+		return nil, err
+	}
+	q.addCreditBalances(ctx, views)
+	return views, nil
 }
 
 // nativeCreditPools lists the policy's credit pools when the shared store
@@ -119,68 +111,4 @@ func (q admissionQuota) addCreditBalances(ctx context.Context, views map[string]
 			views[pool] = v
 		}
 	}
-}
-
-// shadowPools starts the comparison of each credit pool's class from
-// pacelever's pool policy, read offline, with pacelever's status document
-// (runShadow) and returns at once; pacelever is a copy of the caller's
-// views. When the shared store serves every credit pool, the comparison
-// records its outcome as fleet event quota_pools_shadow. Only the class is compared: the used
-// share is read from the shared store, which the comparison never reads, and
-// the balance is the same store's on both paths. Outcome agree: both read and
-// every credit pool has the same class; disagree otherwise, with the
-// differing pool:field pairs; skipped (reason shadow_timeout) when the local
-// reads outlast shadowBound. A comparison skipped because another was running
-// records nothing; the next event's detail starts with skipped_busy=N. The
-// event is best effort.
-func (q admissionQuota) shadowPools(pacelever map[string]PoolView, perr error) {
-	type answer struct {
-		pools  []string
-		served bool
-		views  map[string]PoolView
-		err    error
-	}
-	runShadow(shadows, func() answer {
-		pools, served := q.nativeCreditPools()
-		if !served {
-			return answer{}
-		}
-		views, _, err := q.creditPolicyViews(pools)
-		return answer{pools, true, views, err}
-	}, func(native answer, inTime bool, skipped func() string) {
-		events := q.app.fleetEventWriter()
-		switch {
-		case !inTime:
-			events.Emit("quota_pools_shadow", "", "skipped", "shadow_timeout", strings.TrimSpace(skipped()))
-			return
-		case !native.served:
-			return
-		}
-		var diff, sides []string
-		switch {
-		case perr != nil || native.err != nil:
-			diff = append(diff, "error")
-			sides = append(sides, fmt.Sprintf("pacelever{error=%q} native{error=%q}", errText(perr), errText(native.err)))
-		default:
-			for _, pool := range native.pools {
-				p, n := pacelever[pool], native.views[pool]
-				if p.Class != n.Class {
-					diff = append(diff, pool+":class")
-				}
-				sides = append(sides, fmt.Sprintf("%s pacelever{class=%s} native{class=%s}", pool, p.Class, n.Class))
-			}
-		}
-		outcome := "agree"
-		if len(diff) > 0 {
-			outcome = "disagree"
-		}
-		events.Emit("quota_pools_shadow", "", outcome, "credit", skipped()+strings.Join(sides, " ")+" diff="+strings.Join(diff, ","))
-	})
-}
-
-func errText(err error) string {
-	if err == nil {
-		return ""
-	}
-	return err.Error()
 }

@@ -307,9 +307,9 @@ panewire:
    `brief_doc_unavailable` refuse that host (recorded as `hub_<reason>`) and
    `--host auto` moves to the next candidate.
 
-The target account is refreshed with the `quota.refresh` node command instead
-of `ssh <host> pacelever refresh` (or `panewire quota refresh <pool>` for the
-claude and codex pools, and for commandcode, devin and agy once native); `measure_timeout_s` still bounds it.
+대상 계정은 `quota.refresh` 노드 명령으로 갱신합니다. `claude`, `codex`,
+`commandcode`, `devin`, `agy`만 native 측정 대상이며, 다른 풀은 측정하지 않습니다.
+`measure_timeout_s`가 갱신 제한 시간을 정합니다.
 
 Failures never fall back to ssh (design D4):
 
@@ -381,8 +381,8 @@ longer refuses an account another holder can measure.
 
 Before trying a remote candidate (including an explicit `--host NAME`), panewire
 resolves that host's most recent fresh presence for the launch pool, then asks
-`pacelever gate --account-key POOL:FINGERPRINT --json` to judge its shared
-observation. The spawner's `[quota.accounts]` does not pin remote accounts.
+panewire's native gate to judge its shared observation using the exact
+`POOL:FINGERPRINT` account key. The spawner's `[quota.accounts]` does not pin remote accounts.
 Missing, ambiguous, stale or degraded target evidence refuses that host; auto
 placement tries the next candidate. A pinned `-m` with a forced remote
 `--host NAME` that has no selected account resolves the pool from
@@ -401,22 +401,17 @@ When the target's shared observation is missing or stale and the spawning host
 does not hold that account (no `[quota.accounts]` pin or local presence record
 for the key), the gate cannot refresh it on demand. panewire then runs
 `panewire quota refresh POOL` on the target over SSH for a pool the target
-measures itself, else `pacelever refresh POOL`, bounded by `measure_timeout_s`,
+measures itself, only for one of the five native pools, bounded by `measure_timeout_s`,
 re-reads the shared observation and judges it (for a `via = "hub"` host the
 refresh is the hub's `quota.refresh` node command, not ssh). A failed, timed-out or
 unpublished measurement keeps the refusal; `quota_gates` records
 `measured` (`ok` or `failed`) and a `measure_*` reason. A gate that reports its
 `gate_basis` is also recorded as `basis`.
 
-The spawning host needs a pacelever version that supports account-bound gate
-receipts. A successful response must confirm the requested `account_key` and
-pool; versions that silently ignore the flag are refused. Pane and headless
-launches recheck that binding before recording the quota lease, including
-when a quota adapter bypasses the CLI client. A selected account requires a
-JSON receipt; legacy text cannot confirm its identity. The target still runs
-its own final local gate before spawning. Upgrade pacelever on spawning
-hosts before rolling out this change; roll back panewire to restore the earlier
-placement path if needed. No remote checkout provisioning changes are included.
+실행 호스트는 native gate receipt에서 요청한 `account_key`와 pool을 확인합니다.
+선택 계정은 JSON receipt가 필요하며, pane 및 headless launch는 quota lease를
+기록하기 전에 계정 연결을 다시 검사합니다. 대상 호스트도 spawn 전에 마지막
+local gate를 수행합니다. 원격 checkout provisioning은 변경하지 않습니다.
 
 Panewire must already be installed on SSH targets. `_spawn-stdin` transports a
 structured request and original brief through stdin, uses a private temporary
@@ -464,13 +459,13 @@ below overrides the URL.
 | `credential_env` | retired | Ignored since hk 3570; the bearer is always `HANDOFFKEEP_TOKEN_SVC_PANEWIRE` from the [service credential](#handoffkeep-service-credential). Still accepted so an old file loads, with a one-line warning that names the key. |
 | `presence_ttl_s` | `86400` | How recent a host-presence record must be to count as login evidence. |
 | `fresh_ttl_s` | `900` for `claude`, `300` otherwise | How recent a shared observation must be to count as fresh, for every pool without its own `pool_fresh_ttl_s` entry. A reading is valid as of the later of `measured_at` and `confirmed_at`: handoffkeep keeps `measured_at` when a re-measurement publishes the same values and only advances `confirmed_at`. This is pacelever's rule, so `pacelever --json` and the gate agree on a reading. A spawn delegated over ssh with a selected account carries the placing host's window for that account's pool, and the executing host rechecks that account with it (up to 86400). |
-| `native_pools` | `[]` | Pools with a native/shadow switch that this host measures itself instead of through pacelever (`["commandcode", "devin", "agy"]`; no other pool is accepted). Unlisted, the pool is in shadow: spawns keep running pacelever for it and the node logs a comparison ([docs/quota.md](quota.md#shadow-and-native)). Read at each use by the node and the CLI; an invalid file is shadow. |
-| `gate` | `"shadow"` | Who decides spawn admission: `"shadow"` runs `pacelever gate` and records how panewire's own verdict compares (fleet event `quota_gate_shadow`); `"native"` decides from panewire's verdict and runs no `pacelever gate` ([docs/quota.md](quota.md#admission)). Any other value is a config error. |
-| `launch` | `"shadow"` | Who resolves a spawn's launch rung (profile, effort, model, grade, gate, pool, family): `"shadow"` runs `pacelever policy launch` and records how panewire's own lookup, offline over its catalog cache, compares (fleet event `quota_launch_shadow`); `"native"` resolves it from panewire's catalog and runs no `pacelever policy launch` ([docs/quota.md](quota.md#launch)). The credit pool views follow the same switch: `"shadow"` reads them from `pacelever --json` and records how each pool's class from the pool policy compares (fleet event `quota_pools_shadow`); `"native"` builds them from the pool policy and the shared store when it serves every credit pool, without `pacelever --json` ([docs/quota.md](quota.md#credit-pool-views)). Any other value is a config error. Independent of `gate`. |
+| `native_pools` | 폐기 | migration 경고를 출력한 뒤 무시합니다. `claude`, `codex`, `commandcode`, `devin`, `agy`는 항상 native 측정하며 다른 풀은 측정하지 않습니다. |
+| `gate` | `"native"` | 폐기 키입니다. 남아 있으면 경고 후 native verdict를 사용합니다. `"native"` 이외의 값은 설정 오류입니다. |
+| `launch` | `"native"` | 폐기 키입니다. 남아 있으면 경고 후 native catalog lookup을 사용합니다. `"native"` 이외의 값은 설정 오류입니다. |
 | `pool_fresh_ttl_s` | unset | Optional pool → seconds table (`[quota.pool_fresh_ttl_s]`, nonnegative integers) that overrides `fresh_ttl_s` for one pool. |
 | `pool_max_concurrent` | unset | Optional pool → positive integer table (`pool_max_concurrent = { "openai-api" = 2 }`; pool name as in the catalog's `pool` column) that caps live spawns on a pool fleet-wide. A candidate whose pool is at its cap is dropped `pool_at_cap` and selection moves to the next pool; a spawn never waits for a slot. A pool not named has no cap. Read at each placement. A value that is not a positive integer is refused at config load with the key named (`quota.pool_max_concurrent.openai-api must be a positive integer`). When the live count cannot be read from the hub the cap does not apply and the reason is logged. The reserved key `devin-free` caps only the SWE-2 free rungs (`devin-swe2`, `devin-swe2-medium`, `devin-swe2-max`, `devin-swe2-flash`, `devin-swe2-flash-medium`) by their live spawns: those rungs draw on Devin's free-model quota while paid `devin-ds41` draws on the account's paid window, so capping them must not cap paid devin. `devin` stays a whole-pool cap; when both keys are set a free rung must pass both. How the count is made and the refusal text: [placement](placement.md#pool-concurrency-cap). |
 | `credit_total_usd` | unset | Optional pool → dollars table (`[quota.credit_total_usd]`, positive numbers): each prepaid credit pool's grant total. A shared manual entry records only its used percentage, so panewire derives the dollar balance `total × (100 − used_pct) / 100` for credit ranking, dollars at risk and burn; an entry's own `remaining_usd` still wins. Set it on the hub and every node, and **update it whenever a new grant is bought** — a stale total gives wrong dollars. Keeping the dollars in the shared record needs hk 3418; until it lands this table stays the source. |
-| `measure_timeout_s` | `60` | Bound on the on-target refresh (`panewire quota refresh <pool>` for claude, codex and native commandcode, devin or agy, else `pacelever refresh`) for a remote account the spawning host does not hold. |
+| `measure_timeout_s` | `60` | 대상 계정의 native refresh(`panewire quota refresh <pool>`) 제한 시간입니다. 다른 풀은 측정 소스가 없습니다. |
 | `accounts` | unset | Optional pool → 16-hex account-fingerprint table for exact account keys. For `agy` it is the account the node measures: agy has no login to derive a key from ([docs/quota.md](quota.md#native-measurement-agy)). |
 | `measurable_accounts` | `[]` | `pool:<16-hex>` account keys this host may measure. A host measures agy, announces it and publishes under its key only when `accounts.agy` is set and `agy:<fp>` is listed here; otherwise it does not measure agy and logs one line. Read at each use. |
 | `node_env` | `~/.config/panewire/hub-node.env` | Panewire node env file; `HUB_MACHINE_ID` in it is the host id written to job records. `PANEWIRE_NODE_ENV` overrides the path. |
@@ -942,7 +937,8 @@ resolution, seat check and gate for this host, the shared-account quota
 gate for each remote host — and stops at the first host that admits it. It
 never spawns, wakes a host, claims a local job, writes an hk task or job
 record or emits a job event; a stale remote account is measured on its
-host (`pacelever refresh`) exactly as a spawn would. Remote-only spawn
+host with `panewire quota refresh` when its pool has a native source. Other
+pools are unmeasurable. Remote-only spawn
 checks (repository mapping, the remote seat check) are not run.
 
 The text output is `plan …` (request), `chosen host=… seat=…@… model=…
@@ -1178,7 +1174,7 @@ host is connected with an alive publisher. A sleeping host sends placement back
 to `panewire place`, because that call also triggers the hub's wake-on-spill.
 
 Otherwise panewire falls back to the direct path: `panewire place`, the shared
-quota cache, and the on-target `pacelever refresh` when that reading is stale.
+quota cache, and the on-target native quota refresh when that reading is stale.
 It never falls back silently. The placement record, and the selection record
 inside it, carry a `state` object:
 
@@ -1487,7 +1483,7 @@ for ownership and distribution.
 | `HANDOFFKEEP_BIN` | Must resolve to the canonical current-user ~/.local/bin executable in production (the spawn trust check); panewire no longer runs it. |
 | `XDG_DATA_HOME` | Data home of the local ledger (`$XDG_DATA_HOME/arbiter/state.db`); production guard requires the canonical `~/.local/share`. |
 | `XDG_STATE_HOME` | State home of the role routing cache (`$XDG_STATE_HOME/panewire/model-routing.json`); default `~/.local/state`. |
-| `PANEWIRE_QUOTA_BIN` | Quota executable override; default `pacelever`. The claude and codex pools, and commandcode, devin and agy once switched native, are measured by panewire itself and ignore it. The bench catalog is handoffkeep's and never uses it, nor does `[quota].launch = "native"` or `[quota].gate = "native"`, nor, with `[quota].launch = "native"`, the credit pool view when the shared store serves every credit pool ([docs/quota.md](quota.md#credit-pool-views)). |
+| `PANEWIRE_QUOTA_BIN` | 폐기된 환경 변수입니다. 설정되어 있어도 무시하며 한 번 migration 경고를 출력합니다. |
 | `HANDOFFKEEP_URL`, `HANDOFFKEEP_TOKEN_SVC_PANEWIRE` | panewire's svc-panewire hk credential; both must be set to win over the file ([handoffkeep service credential](#handoffkeep-service-credential)). `HANDOFFKEEP_TOKEN` and `HANDOFFKEEP_CONFIG` are not read. |
 | `PANEWIRE_HK_ENV` | The svc-panewire credential file; default `~/.config/panewire/hk-svc.env` (regular, mode 0600, read through a descriptor opened without following a leaf symlink). A node with no `spawn.json` reads it too, after the environment pair and with the svc key only. |
 | `XDG_CACHE_HOME` | Cache home of the bench catalog read (`$XDG_CACHE_HOME/panewire/bench`); default `~/.cache`. |

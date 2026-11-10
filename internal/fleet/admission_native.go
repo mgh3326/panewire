@@ -13,24 +13,8 @@ import (
 	"github.com/mgh3326/panewire/internal/quota/shared"
 )
 
-// The spawn gate switch (docs/quota.md §Admission). `[quota].gate` in the
-// host's fleet config picks who decides an admission:
-//
-//   - shadow (the default): `pacelever gate` decides, and panewire computes its
-//     own verdict beside it from the same stored readings and records whether
-//     the two agree (fleet event quota_gate_shadow). The shadow verdict never
-//     measures, refreshes or changes the spawn's outcome.
-//   - native: panewire's verdict decides and pacelever's gate is never run.
-//
-// The desk flips the switch once the shadow events show agreement.
-const (
-	gateModeShadow = "shadow"
-	gateModeNative = "native"
-)
-
-// shadowGateTimeout bounds the shadow verdict so it cannot hold up the spawn
-// it rides on.
-const shadowGateTimeout = 10 * time.Second
+const gateModeNative = "native"
+const gateModeShadow = "shadow" // retired config value retained for migration diagnostics
 
 // Refusals for a named account's stored reading, worded as pacelever words them.
 const (
@@ -44,18 +28,15 @@ func validateGateMode(quota map[string]any) error {
 	if !ok {
 		return nil
 	}
-	if s, isString := v.(string); !isString || s != gateModeShadow && s != gateModeNative {
-		return fail(exitConfig, "quota.gate must be %q or %q", gateModeShadow, gateModeNative)
+	if s, isString := v.(string); !isString || s != gateModeNative {
+		return fail(exitConfig, "quota.gate에는 %q만 지정할 수 있습니다", gateModeNative)
 	}
 	return nil
 }
 
-func (a *App) gateMode() string {
-	if str(a.Config.Quota, "gate") == gateModeNative {
-		return gateModeNative
-	}
-	return gateModeShadow
-}
+func (a *App) gateMode() string { return gateModeNative }
+
+func (a *App) paceleverBinary() string { return "" }
 
 // admissionQuota is the production QuotaGate. Catalog is handoffkeep's
 // (CLIQuota); Gate and Launch each follow their switch (launch_native.go), and
@@ -70,15 +51,7 @@ type admissionQuota struct {
 }
 
 func (q admissionQuota) Gate(ctx context.Context, r QuotaRequest) (string, error) {
-	if q.app.gateMode() == gateModeNative {
-		return gateResult(q.app.nativeGate(ctx, r, true), r)
-	}
-	// The shadow verdict reads only: no measurement, no alternatives.
-	x := q.CLIQuota.runGate(ctx, r)
-	shadow, cancel := context.WithTimeout(ctx, shadowGateTimeout)
-	q.app.shadowGate(r, x, q.app.nativeGate(shadow, r, false))
-	cancel()
-	return gateResult(x, r)
+	return gateResult(q.app.nativeGate(ctx, r, true), r)
 }
 
 // gateReceipt is the decision as `pacelever gate --json` prints it: the
@@ -278,18 +251,6 @@ func (a *App) loadAccount(ctx context.Context, in *admissionInputs, key string, 
 	return ""
 }
 
-// paceleverBinary is the configured quota CLI (PANEWIRE_QUOTA_BIN, else
-// pacelever), for a refresh of a pool panewire does not measure itself.
-func (a *App) paceleverBinary() string {
-	switch q := a.Quota.(type) {
-	case CLIQuota:
-		return q.Binary
-	case admissionQuota:
-		return q.Binary
-	}
-	return "pacelever"
-}
-
 // benchCatalog is the bench catalog the gate judges with: handoffkeep's rows,
 // validated and cached by catalog.go. The gate runs no pacelever command.
 func (a *App) benchCatalog(ctx context.Context) ([]CatalogRow, error) {
@@ -393,49 +354,4 @@ func admissionManualFrom(xs []shared.Observation) []admissionManual {
 		out = append(out, m)
 	}
 	return out
-}
-
-// shadowSide is one gate's answer in the shadow comparison.
-type shadowSide struct {
-	code             int
-	pool, basis, why string
-}
-
-// shadowSideOf reads a gate run. A run with no receipt (pacelever failing
-// before it decides, or timing out) keeps the first line of its output.
-func shadowSideOf(x Result) shadowSide {
-	s := shadowSide{code: x.Code}
-	var receipt struct {
-		Pool   string `json:"provider_id"`
-		Basis  string `json:"gate_basis"`
-		Reason string `json:"reason"`
-	}
-	if json.Unmarshal([]byte(x.Out), &receipt) != nil {
-		s.why, _, _ = strings.Cut(firstNonempty(strings.TrimSpace(x.Err), strings.TrimSpace(x.Out)), "\n")
-		return s
-	}
-	s.pool, s.basis, s.why = receipt.Pool, receipt.Basis, receipt.Reason
-	return s
-}
-
-func (s shadowSide) String() string {
-	return fmt.Sprintf("exit=%d pool=%s basis=%s reason=%q", s.code, s.pool, s.basis, s.why)
-}
-
-// shadowGate records how panewire's verdict compares with pacelever's for one
-// request (fleet event quota_gate_shadow). Outcome agree: the same exit
-// status, pool and basis; reason_differs: those agree but the reason text
-// does not; disagree: anything else.
-func (a *App) shadowGate(r QuotaRequest, pacelever, native Result) {
-	p, n := shadowSideOf(pacelever), shadowSideOf(native)
-	outcome := "agree"
-	switch {
-	case p.code != n.code || p.pool != n.pool || p.basis != n.basis:
-		outcome = "disagree"
-	case p.why != n.why:
-		outcome = "reason_differs"
-	}
-	profile := firstNonempty(r.GateProfile, r.Profile)
-	detail := fmt.Sprintf("profile=%s effort=%s role=%s account=%s pacelever{%s} native{%s}", profile, r.Effort, r.Role, firstNonempty(r.AccountKey, "local"), p, n)
-	a.emitFleetEvent("quota_gate_shadow", "", outcome, firstNonempty(n.pool, p.pool, "unknown"), detail)
 }

@@ -295,8 +295,8 @@ func TestNodeQuotaRefreshCodexIsNative(t *testing.T) {
 	if len(pacelever) != 0 || hk.published() != 1 || rpc.starts != 1 || rpc.closes == 0 {
 		t.Fatalf("pacelever=%v published=%d starts=%d closes=%d", pacelever, hk.published(), rpc.starts, rpc.closes)
 	}
-	if _, code = nodeRun(t, client, nodeCommandQuotaRefresh, map[string]any{"pool": "kimi"}); code != "refresh_failed" || len(pacelever) != 1 || pacelever[0] != "refresh kimi" {
-		t.Fatalf("kimi still goes to pacelever: code=%q calls=%v", code, pacelever)
+	if result, code := nodeRun(t, client, nodeCommandQuotaRefresh, map[string]any{"pool": "kimi"}); code != "refresh_failed" || result != nil || len(pacelever) != 0 {
+		t.Fatalf("unmeasurable kimi refresh: code=%q calls=%v result=%v", code, pacelever, result)
 	}
 
 	failing := &HubClient{nativeQuota: map[string]*nativeQuotaSource{"codex": codexTestSource("/nonexistent", codexLoginFiles("", ""), &codexRPCFake{}, claudeAPIReply(200, codexAPIBody()))}}

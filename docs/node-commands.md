@@ -494,11 +494,10 @@ The refusal outcomes mirror mergewake's reap receipt reasons verbatim.
 ### `quota.refresh`
 
 `args: {pool}` — `pool` matches `^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`. A
-closed call: `claude` and `codex` (and `commandcode`, `devin` and `agy` once their
-[switch](quota.md#shadow-and-native) is flipped) are measured in the node's own
-process (no exec of pacelever), every other pool runs exactly `pacelever refresh
-<pool>` (a pool in shadow also logs the node's own measurement beside it); no
-other argv is reachable.
+closed call: `claude`, `codex`, `commandcode`, `devin` and `agy` are measured
+in the node's own process. Other pools are unmeasurable and return
+`refresh_failed`; they are not executed or published. The retired
+`[quota].native_pools` key does not change this fixed pool set.
 Result `{"outcome":"refreshed"}`; a failed run answers `refresh_failed`.
 
 ## Wire

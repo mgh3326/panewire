@@ -674,6 +674,9 @@ func hubEnv(t *testing.T, content string, mode os.FileMode) string {
 	if e := os.WriteFile(p, []byte(content), mode); e != nil {
 		t.Fatal(e)
 	}
+	if e := os.Chmod(p, mode); e != nil {
+		t.Fatal(e)
+	}
 	return p
 }
 

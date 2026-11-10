@@ -10,144 +10,27 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"time"
 )
 
-// The launch lookup switch (docs/quota.md §Launch). `[quota].launch` in the
-// host's fleet config picks who resolves a launch rung — the profile, effort,
-// model, grade, gate, pool and family a spawn runs:
-//
-//   - shadow (the default): `pacelever policy launch` resolves it. After it
-//     answers, panewire resolves the same request offline — from pacelever's
-//     config.toml and panewire's catalog cache, read only — and records
-//     whether the two agree (fleet event quota_launch_shadow). The comparison
-//     runs in the background after the answer is returned (runShadow): it
-//     never asks handoffkeep, never writes the cache, never runs on the
-//     caller's context or holds up the spawn, and never changes its outcome.
-//   - native: panewire resolves it and `pacelever policy launch` is never run.
-//
-// panewire-design flips the switch once the shadow events show agreement.
-const (
-	launchModeShadow = "shadow"
-	launchModeNative = "native"
-)
+const launchModeNative = "native"
+const launchModeShadow = "shadow" // retired config value retained for migration diagnostics
 
-// shadowBound is how long a shadow comparison's local reads may take. The
-// reads take milliseconds; an answer that comes later — a hung filesystem —
-// is dropped and recorded as skipped (reason shadow_timeout). The bound never
-// holds up a caller: the comparison runs off the caller's path.
-const shadowBound = 2 * time.Second
-
-// shadowReadHook, when set, runs in each shadow comparison's goroutine just
-// before its local reads. Tests use it to hold a comparison as a hung
-// filesystem would and to count the comparisons started; production leaves it
-// nil.
-var shadowReadHook func()
-
-// shadowFlight is the process's one shadow comparison slot: the launch and
-// credit pool comparisons run one at a time, each in its own background
-// goroutine. While one runs, a new comparison is skipped and counted instead
-// of starting a goroutine, so a hung filesystem holds at most one goroutine.
-// The slot is freed only when the comparison — its reads and its event
-// append — really returns.
-type shadowFlight struct {
-	mu sync.Mutex
-	// running is open while a comparison runs and closed when it ends.
-	running chan struct{}
-	// skipped counts the comparisons skipped since one last recorded the
-	// count.
-	skipped int
-	now     func() time.Time
-}
-
-// shadows is the process's comparison slot. The comparisons are sampling: a
-// short-lived CLI process may exit before one ends, and nothing waits for it.
-var shadows = &shadowFlight{now: time.Now}
-
-// runShadow starts the comparison in the background unless one is running,
-// and returns at once. The goroutine runs read, then record with read's
-// answer, whether it came within shadowBound, and skipped, which returns the
-// note "skipped_busy=N " for the comparisons skipped since the last one that
-// recorded it ("" for none) and resets the count; record calls it when it
-// appends an event.
-func runShadow[T any](f *shadowFlight, read func() T, record func(answer T, inTime bool, skipped func() string)) {
-	f.mu.Lock()
-	if f.running != nil {
-		f.skipped++
-		f.mu.Unlock()
-		return
-	}
-	done := make(chan struct{})
-	f.running = done
-	f.mu.Unlock()
-	go func() {
-		defer func() {
-			f.mu.Lock()
-			f.running = nil
-			f.mu.Unlock()
-			close(done)
-		}()
-		start := f.now()
-		if hook := shadowReadHook; hook != nil {
-			hook()
-		}
-		answer := read()
-		record(answer, f.now().Sub(start) <= shadowBound, f.takeSkipped)
-	}()
-}
-
-func (f *shadowFlight) takeSkipped() string {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	n := f.skipped
-	f.skipped = 0
-	if n == 0 {
-		return ""
-	}
-	return fmt.Sprintf("skipped_busy=%d ", n)
-}
-
-// idle is closed once no comparison runs.
-func (f *shadowFlight) idle() <-chan struct{} {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if f.running != nil {
-		return f.running
-	}
-	done := make(chan struct{})
-	close(done)
-	return done
-}
+func (a *App) launchMode() string { return launchModeNative }
 
 func validateLaunchMode(quota map[string]any) error {
 	v, ok := quota["launch"]
 	if !ok {
 		return nil
 	}
-	if s, isString := v.(string); !isString || s != launchModeShadow && s != launchModeNative {
-		return fail(exitConfig, "quota.launch must be %q or %q", launchModeShadow, launchModeNative)
+	if s, isString := v.(string); !isString || s != launchModeNative {
+		return fail(exitConfig, "quota.launch에는 %q만 지정할 수 있습니다", launchModeNative)
 	}
 	return nil
 }
 
-func (a *App) launchMode() string {
-	if str(a.Config.Quota, "launch") == launchModeNative {
-		return launchModeNative
-	}
-	return launchModeShadow
-}
-
-// Launch resolves the launch rung following the switch. In shadow mode the
-// answer is pacelever's, returned at once; the comparison starts in the
-// background after it, with no context of the caller's (runShadow).
+// Launch resolves each request with panewire's native lookup.
 func (q admissionQuota) Launch(ctx context.Context, r QuotaRequest) (Launch, error) {
-	if q.app.launchMode() == launchModeNative {
-		return q.app.nativeLaunch(ctx, r)
-	}
-	x := q.CLIQuota.runLaunch(ctx, r)
-	l, err := launchResult(x)
-	q.app.shadowLaunch(r, x)
-	return l, err
+	return q.app.nativeLaunch(ctx, r)
 }
 
 // nativeLaunch is `pacelever policy launch PROFILE --json` as CLIQuota.Launch
@@ -537,106 +420,4 @@ func launchRoleCheck(req admissionRequest, row launchRow) string {
 		return "role_restricted: astra requires director, architect, or operator-request purpose"
 	}
 	return ""
-}
-
-// launchSide is one lookup's answer as the spawn would see it: the exit
-// status, the launch fields and, on a refusal, the reason.
-type launchSide struct {
-	code int
-	l    Launch
-	why  string
-}
-
-// paceleverLaunchSide reads pacelever's run. Its refusal reason is the
-// `error: ` line pacelever prints on stderr, which CLIQuota does not keep.
-func paceleverLaunchSide(x Result) launchSide {
-	l, err := launchResult(x)
-	s := launchSide{code: exitCode(err), l: l}
-	if err == nil {
-		return s
-	}
-	s.why = strings.TrimPrefix(err.Error(), "quota catalog: ")
-	for _, line := range strings.Split(x.Err, "\n") {
-		if reason, ok := strings.CutPrefix(strings.TrimSpace(line), "error: "); ok {
-			s.why = reason
-			break
-		}
-	}
-	return s
-}
-
-func nativeLaunchSide(l Launch, err error) launchSide {
-	s := launchSide{code: exitCode(err), l: l}
-	if err != nil {
-		s.why = strings.TrimPrefix(err.Error(), "quota catalog: ")
-	}
-	return s
-}
-
-func (s launchSide) String() string {
-	return fmt.Sprintf("exit=%d profile=%s model=%s effort=%s grade=%s gate=%s pool=%s family=%s stale=%t reason=%q", s.code, s.l.Profile, s.l.ModelID, s.l.Effort, s.l.Grade, s.l.Gate, s.l.Pool, s.l.Family, s.l.Catalog.Stale, s.why)
-}
-
-// diff names the fields where two answers differ.
-func (s launchSide) diff(o launchSide) []string {
-	var out []string
-	for _, f := range []struct {
-		name string
-		same bool
-	}{
-		{"exit", s.code == o.code}, {"profile", s.l.Profile == o.l.Profile}, {"model_id", s.l.ModelID == o.l.ModelID},
-		{"effort", s.l.Effort == o.l.Effort}, {"grade", s.l.Grade == o.l.Grade}, {"gate", s.l.Gate == o.l.Gate},
-		{"pool", s.l.Pool == o.l.Pool}, {"family", s.l.Family == o.l.Family}, {"stale", s.l.Catalog.Stale == o.l.Catalog.Stale},
-	} {
-		if !f.same {
-			out = append(out, f.name)
-		}
-	}
-	return out
-}
-
-// shadowLaunch starts the comparison of the offline native lookup with
-// pacelever's run for one request (runShadow) and returns at once. The
-// comparison records its outcome as fleet event quota_launch_shadow. Outcome
-// agree: the same exit status, launch fields and reason; reason_differs: the
-// same exit status and fields, other refusal words; disagree: anything else,
-// with the differing fields listed; skipped: nothing compared, because the
-// catalog cache holds no entry fresh under pacelever's [bench] settings
-// (reason no_fresh_cache) or the local reads outlasted shadowBound (reason
-// shadow_timeout). A comparison skipped because another was running records
-// nothing; the next event's detail starts with skipped_busy=N. The event is
-// best effort.
-func (a *App) shadowLaunch(r QuotaRequest, pacelever Result) {
-	type answer struct {
-		l     Launch
-		err   error
-		found bool
-	}
-	runShadow(shadows, func() answer {
-		l, found, err := a.offlineLaunch(r)
-		return answer{l, err, found}
-	}, func(native answer, inTime bool, skipped func() string) {
-		events := a.fleetEventWriter()
-		p := paceleverLaunchSide(pacelever)
-		request := fmt.Sprintf("profile=%s effort=%s role=%s purpose=%s", r.Profile, r.Effort, r.Role, r.Purpose)
-		switch {
-		case !inTime:
-			events.Emit("quota_launch_shadow", "", "skipped", "shadow_timeout", fmt.Sprintf("%s%s pacelever{%s}", skipped(), request, p))
-			return
-		case !native.found:
-			events.Emit("quota_launch_shadow", "", "skipped", "no_fresh_cache", fmt.Sprintf("%s%s pacelever{%s}", skipped(), request, p))
-			return
-		}
-		n := nativeLaunchSide(native.l, native.err)
-		diff := p.diff(n)
-		outcome := "agree"
-		switch {
-		case len(diff) > 0:
-			outcome = "disagree"
-		case p.why != n.why:
-			outcome = "reason_differs"
-		}
-		detail := fmt.Sprintf("%s%s pacelever{%s} native{%s} diff=%s", skipped(), request, p, n, strings.Join(diff, ","))
-		events.Emit("quota_launch_shadow", "", outcome, firstNonempty(n.l.Pool, p.l.Pool, "unknown"), detail)
-	})
 }

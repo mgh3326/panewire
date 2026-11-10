@@ -3,7 +3,6 @@ package panewire
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -247,42 +246,12 @@ func (client *HubClient) measureFleetQuota(run, parent context.Context, pool str
 		}
 		return publish, true, ""
 	}
-	shadow := isShadowQuotaPool(pool)
-	publish, ok, kind, output := client.measureFleetQuotaWithPacelever(run, parent, pool)
-	if shadow {
-		client.logShadowQuota(parent, pool, shadowFromPacelever(pool, output, publish, ok, kind))
-	}
-	return publish, ok, kind
+	return FleetStatePublish{}, false, "unmeasurable"
 }
 
 // measureFleetQuotaWithPacelever is the fleet-state measurement of a pool the
 // node does not measure itself, or measures only in shadow. It also returns
 // pacelever's raw output, which the shadow comparison reads on its own terms.
-func (client *HubClient) measureFleetQuotaWithPacelever(run, parent context.Context, pool string) (FleetStatePublish, bool, string, []byte) {
-	output, err := client.nodePaceleverRunner()(run, "refresh", pool)
-	publish, ok := FleetStatePublish{}, false
-	if err == nil {
-		publish, ok = fleetQuotaFromPacelever(pool, output)
-	}
-	if ok {
-		if confirmed := client.fleetQuotaConfirmedAt(run, publish.Key, publish.MeasuredAt); !confirmed.IsZero() {
-			publish.ConfirmedAt = &confirmed
-		}
-		return publish, true, "", output
-	}
-	// refresh prints no error kind; pacelever's status names it. A timed-out
-	// refresh is not asked again: its login is unknown either way.
-	kind := fleetQuotaErrorKindUnreadable
-	if run.Err() == nil && !errors.Is(err, context.DeadlineExceeded) {
-		kind = client.fleetQuotaErrorKind(parent, pool)
-	}
-	return FleetStatePublish{}, false, kind, output
-}
-
-// fleetQuotaFromReading turns a native reading into a publishable value. It
-// refuses a reading with no account key or no measured bucket, as
-// fleetQuotaFromPacelever does for pacelever's output. The store's
-// confirmed_at travels with it when it is later than the measurement.
 func fleetQuotaFromReading(pool string, reading shared.Reading, now time.Time) (FleetStatePublish, bool) {
 	if !fleetStateAccountKeyPattern.MatchString(reading.Key) || !strings.HasPrefix(reading.Key, pool+":") {
 		return FleetStatePublish{}, false
@@ -320,38 +289,9 @@ func fleetQuotaFromReading(pool string, reading shared.Reading, now time.Time) (
 // fleetQuotaErrorKind reads pool's error_kind from `pacelever --json` with its
 // own fleetQuotaTimeout. A status that exits non-zero but still lists the pool
 // is read: pacelever reports failing providers that way.
-func (client *HubClient) fleetQuotaErrorKind(ctx context.Context, pool string) string {
-	run, cancel := context.WithTimeout(ctx, fleetQuotaTimeout)
-	defer cancel()
-	output, _ := client.nodePaceleverRunner()(run, "--json")
-	var status struct {
-		Providers []struct {
-			ID        string `json:"id"`
-			ErrorKind string `json:"error_kind"`
-		} `json:"providers"`
-	}
-	if json.Unmarshal(output, &status) != nil {
-		return fleetQuotaErrorKindUnreadable
-	}
-	for _, provider := range status.Providers {
-		if provider.ID == pool && fleetQuotaErrorKindPattern.MatchString(provider.ErrorKind) {
-			return provider.ErrorKind
-		}
-	}
-	return fleetQuotaErrorKindUnreadable
-}
-
-// fleetQuotaObservationTransport is the confirmed_at read's transport; nil is
-// the default. Tests point it at a test server.
+// fleetQuotaObservationTransport is the confirmed_at read transport; nil uses the default.
 var fleetQuotaObservationTransport http.RoundTripper
 
-// fleetQuotaConfirmedAt reads handoffkeep's latest shared observation of key
-// with this node's spawn.json handoffkeep_env and answers its confirmed_at
-// when it is the reading pacelever just returned (same measured_at, within a
-// second). pacelever's refresh output carries only measured_at (fetched_at),
-// and handoffkeep keeps measured_at when a re-measurement publishes the same
-// values, so without this an unchanged account always reads stale through the
-// hub (hk 3058). Zero means unknown: the reading is published as before.
 func (client *HubClient) fleetQuotaConfirmedAt(ctx context.Context, key string, measured time.Time) time.Time {
 	if !fleetStateAccountKeyPattern.MatchString(key) {
 		return time.Time{}

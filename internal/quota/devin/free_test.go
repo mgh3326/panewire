@@ -3,8 +3,12 @@ package devin
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"io/fs"
+	"os"
+	"path/filepath"
 	"strconv"
+	"syscall"
 	"testing"
 	"time"
 
@@ -85,6 +89,216 @@ func TestPaceleverCacheEnvOverride(t *testing.T) {
 	got := LocalFree(config(files, map[string]string{"PACELEVER_CACHE": "/elsewhere/snapshots.json"}))(testNow)
 	if got.State != shared.FreeExhausted {
 		t.Fatalf("PACELEVER_CACHE not followed: %+v", got)
+	}
+}
+
+func TestObserveFreeLimitWritesAndClearsPrivateRecord(t *testing.T) {
+	now := testNow.UTC()
+	cache := filepath.Join(t.TempDir(), "cache")
+	cfg := Config{
+		Home:     t.TempDir(),
+		Now:      func() time.Time { return now },
+		Hostname: func() (string, error) { return "host-a", nil },
+		UID:      func() int { return 1000 },
+		LookupEnv: func(name string) (string, bool) {
+			if name == "XDG_CACHE_HOME" {
+				return cache, true
+			}
+			return "", false
+		},
+	}
+	reset := now.Add(2 * time.Hour).Format(time.RFC3339Nano)
+	if err := ObserveFreeLimit(cfg, reset, "", "swe-2-high", "job:test", "", false, false); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(cache, "pacelever", "devin-free-limit.json")
+	info, err := os.Stat(path)
+	if err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("record mode/info = %v, %v; want 0600", info, err)
+	}
+	var doc struct {
+		Schema  string                     `json:"schema"`
+		Records map[string]json.RawMessage `json:"records"`
+	}
+	data, err := os.ReadFile(path)
+	if err != nil || json.Unmarshal(data, &doc) != nil || doc.Schema != limitRecordSchema || len(doc.Records) != 1 {
+		t.Fatalf("record document = %s, %v", data, err)
+	}
+	if got := LocalFree(cfg)(now); got.State != shared.FreeExhausted || got.ResetsAt == nil || !got.ResetsAt.Equal(now.Add(2*time.Hour)) {
+		t.Fatalf("observed free limit = %+v", got)
+	}
+	if err := ObserveFreeLimit(cfg, "", "", "", "", "", false, true); err != nil {
+		t.Fatal(err)
+	}
+	if got := LocalFree(cfg)(now); got.State != shared.FreeAvailable {
+		t.Fatalf("cleared free limit = %+v", got)
+	}
+}
+
+func TestObserveFreeLimitUnknownResetUsesConservativeHold(t *testing.T) {
+	now := testNow.UTC()
+	cfg := Config{Home: t.TempDir(), Now: func() time.Time { return now }, Hostname: func() (string, error) { return "host-a", nil }, UID: func() int { return 1000 }}
+	if err := ObserveFreeLimit(cfg, "", "", "swe-2-high", "job:test", "", true, false); err != nil {
+		t.Fatal(err)
+	}
+	got := LocalFree(cfg)(now)
+	if got.State != shared.FreeExhausted || got.ResetsAt == nil || !got.ResetsAt.Equal(now.Add(unknownResetHold)) {
+		t.Fatalf("unparsed reset = %+v", got)
+	}
+}
+
+func TestUnparsedObserveDoesNotShortenAnActiveKnownHold(t *testing.T) {
+	now := testNow.UTC()
+	cfg := Config{Home: t.TempDir(), Now: func() time.Time { return now }, Hostname: func() (string, error) { return "host-a", nil }, UID: func() int { return 1000 }}
+	knownReset := now.Add(5 * time.Hour)
+	if err := ObserveFreeLimit(cfg, knownReset.Format(time.RFC3339Nano), "", "swe-2-high", "job:first", "", false, false); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(time.Hour)
+	if err := ObserveFreeLimit(cfg, "", "", "swe-2-high", "job:later", "", true, false); err != nil {
+		t.Fatal(err)
+	}
+	got := LocalFree(cfg)(now)
+	if got.State != shared.FreeExhausted || got.ResetsAt == nil || !got.ResetsAt.Equal(knownReset) {
+		t.Fatalf("unparsed observation shortened active known hold: %+v", got)
+	}
+}
+
+func TestUnparsedObserveReplacesDamagedPriorEntry(t *testing.T) {
+	for _, previous := range []json.RawMessage{json.RawMessage(`"not a record"`), json.RawMessage(`{"reset_at":"bad","observed_at":"bad"}`)} {
+		t.Run(string(previous), func(t *testing.T) {
+			now := testNow.UTC()
+			cache := filepath.Join(t.TempDir(), "cache")
+			cfg := Config{
+				Home:     t.TempDir(),
+				Now:      func() time.Time { return now },
+				Hostname: func() (string, error) { return "host-a", nil },
+				UID:      func() int { return 1000 },
+				LookupEnv: func(name string) (string, bool) {
+					if name == "XDG_CACHE_HOME" {
+						return cache, true
+					}
+					return "", false
+				},
+			}
+			path := filepath.Join(cache, "pacelever", "devin-free-limit.json")
+			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			id := hostUserID("host-a", 1000)
+			var records map[string]json.RawMessage
+			if err := json.Unmarshal([]byte(`{}`), &records); err != nil {
+				t.Fatal(err)
+			}
+			records[id] = previous
+			encoded, err := json.Marshal(map[string]any{"schema": limitRecordSchema, "records": records})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, encoded, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := ObserveFreeLimit(cfg, "", "", "swe-2-high", "job:recovered", "", true, false); err != nil {
+				t.Fatal(err)
+			}
+			got := LocalFree(cfg)(now)
+			if got.State != shared.FreeExhausted || got.ResetsAt == nil || !got.ResetsAt.Equal(now.Add(unknownResetHold)) {
+				t.Fatalf("unparsed observation did not replace damaged prior entry: %+v", got)
+			}
+		})
+	}
+}
+
+func TestConcurrentObserveFreeLimitPreservesBothAccounts(t *testing.T) {
+	cache := filepath.Join(t.TempDir(), "cache")
+	cfg := Config{
+		Home:     t.TempDir(),
+		Now:      func() time.Time { return testNow.UTC() },
+		Hostname: func() (string, error) { return "host-a", nil },
+		UID:      func() int { return 1000 },
+		LookupEnv: func(name string) (string, bool) {
+			if name == "XDG_CACHE_HOME" {
+				return cache, true
+			}
+			return "", false
+		},
+	}
+	start := make(chan struct{})
+	errs := make(chan error, 2)
+	for _, fp := range []string{"0123456789abcdef", "fedcba9876543210"} {
+		go func(fp string) {
+			<-start
+			errs <- ObserveFreeLimit(cfg, testNow.Add(time.Hour).Format(time.RFC3339Nano), "", "swe-2-high", "job:test", "devin:"+fp, false, false)
+		}(fp)
+	}
+	close(start)
+	for range 2 {
+		if err := <-errs; err != nil {
+			t.Fatal(err)
+		}
+	}
+	data, err := os.ReadFile(filepath.Join(cache, "pacelever", "devin-free-limit.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc struct {
+		Records map[string]json.RawMessage `json:"records"`
+	}
+	if err := json.Unmarshal(data, &doc); err != nil || len(doc.Records) != 2 {
+		t.Fatalf("concurrent account records = %v (err %v)", doc.Records, err)
+	}
+}
+
+func TestObserveFreeLimitSerializesReadModifyWrite(t *testing.T) {
+	cache := filepath.Join(t.TempDir(), "cache")
+	cfg := Config{
+		Home:     t.TempDir(),
+		Now:      func() time.Time { return testNow.UTC() },
+		Hostname: func() (string, error) { return "host-a", nil },
+		UID:      func() int { return 1000 },
+		LookupEnv: func(name string) (string, bool) {
+			if name == "XDG_CACHE_HOME" {
+				return cache, true
+			}
+			return "", false
+		},
+	}
+	path := filepath.Join(cache, "pacelever", "devin-free-limit.json.lock")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	lock, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	started := make(chan struct{})
+	go func() {
+		close(started)
+		done <- ObserveFreeLimit(cfg, testNow.Add(time.Hour).Format(time.RFC3339Nano), "", "swe-2-high", "job:test", "", false, false)
+	}()
+	<-started
+	// This wait proves the writer cannot pass its advisory lock while another
+	// writer owns it; unlock below then allows the write to complete.
+	select {
+	case err := <-done:
+		t.Fatalf("writer passed a held advisory lock: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_UN); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("writer did not continue after lock release")
 	}
 }
 

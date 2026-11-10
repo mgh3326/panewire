@@ -137,7 +137,11 @@ func (sp *selPresence) account(ctx context.Context, key, pool string, hosts []se
 	for _, h := range ordered {
 		result.host = h.name
 		if h.local {
-			result.err = checkQuotaPlain(runQuotaCommand(refresh, sp.a.Runner, refreshCommand(pool, sp.a.paceleverBinary(), sp.a.nativeQuotaPool(pool)), "quota refresh", 60*time.Second), "quota refresh")
+			if !sp.a.nativeQuotaPool(pool) {
+				result.err = fail(exitQuotaUnknown, "pool %s has no native measurement source", pool)
+			} else {
+				result.err = checkQuotaPlain(runQuotaCommand(refresh, sp.a.Runner, refreshCommand(pool, "", true), "quota refresh", 60*time.Second), "quota refresh")
+			}
 		} else {
 			result.err = sp.a.measureTarget(refresh, h.name, pool)
 		}

@@ -818,23 +818,25 @@ func TestQuotaClientPlaintextOnlyForOptedInTailnet(t *testing.T) {
 	}
 }
 
-func TestQuotaBinaryDefaultsToPacelever(t *testing.T) {
+func TestQuotaBinaryOverrideIsRetired(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("PANEWIRE_QUOTA_BIN", "")
-	a, e := New(io.Discard, io.Discard)
+	var warnings strings.Builder
+	a, e := New(io.Discard, &warnings)
 	if e != nil {
 		t.Fatalf("New: %v", e)
 	}
 	q, ok := a.Quota.(admissionQuota)
-	if !ok || q.Binary != "pacelever" {
-		t.Fatalf("quota CLI default = %+v, want pacelever", a.Quota)
+	if !ok || q.Binary != "" {
+		t.Fatalf("quota CLI default = %+v, want no external quota binary", a.Quota)
 	}
 	t.Setenv("PANEWIRE_QUOTA_BIN", "/opt/quota")
-	if a, e = New(io.Discard, io.Discard); e != nil {
+	warnings.Reset()
+	if a, e = New(io.Discard, &warnings); e != nil {
 		t.Fatalf("New: %v", e)
 	}
-	if q, ok = a.Quota.(admissionQuota); !ok || q.Binary != "/opt/quota" {
-		t.Fatalf("PANEWIRE_QUOTA_BIN must override: %+v %v", a.Quota, e)
+	if q, ok = a.Quota.(admissionQuota); !ok || q.Binary != "" || strings.Count(warnings.String(), "PANEWIRE_QUOTA_BIN 설정은 폐기되어 무시됩니다") != 1 {
+		t.Fatalf("PANEWIRE_QUOTA_BIN must be ignored with one warning: %+v %q %v", a.Quota, warnings.String(), e)
 	}
 }
 

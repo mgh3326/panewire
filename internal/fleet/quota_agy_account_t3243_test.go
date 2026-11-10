@@ -6,16 +6,13 @@ import (
 	"time"
 )
 
-// agy has a native/shadow switch like commandcode and devin.
-func TestAgyHasSwitchAndDefaultsToShadow(t *testing.T) {
-	if !QuotaPoolHasSwitch("agy") {
-		t.Fatal("agy has no switch")
-	}
+// Every pool with an internal quota implementation is always native.
+func TestNativeQuotaPoolsDoNotDependOnConfig(t *testing.T) {
 	for quota, want := range map[string]bool{
-		"":                                false,
-		`native_pools = []`:               false,
+		"":                                true,
+		`native_pools = []`:               true,
 		`native_pools = ["agy"]`:          true,
-		`native_pools = ["devin"]`:        false,
+		`native_pools = ["devin"]`:        true,
 		`native_pools = ["agy", "devin"]`: true,
 	} {
 		config, err := LoadConfig(writeHostsConfig(t, "[quota]\n"+quota+"\n"))
@@ -24,6 +21,11 @@ func TestAgyHasSwitchAndDefaultsToShadow(t *testing.T) {
 		}
 		if got := IsNativeQuotaPool("agy", config.Quota); got != want {
 			t.Errorf("%q: native = %v, want %v", quota, got, want)
+		}
+	}
+	for _, pool := range []string{"grok", "kimi", "kiro", "clinepass", "upstage"} {
+		if IsNativeQuotaPool(pool, nil) {
+			t.Errorf("%s unexpectedly has a native source", pool)
 		}
 	}
 }

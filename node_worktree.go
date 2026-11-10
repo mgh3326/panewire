@@ -335,13 +335,6 @@ func (client *HubClient) nodeGitOpWait() time.Duration {
 	return nodeGitOpLockWait
 }
 
-func (client *HubClient) nodePaceleverRunner() relayCommandRunner {
-	if client.nodePacelever != nil {
-		return client.nodePacelever
-	}
-	return defaultNodeCommandRunner("pacelever")
-}
-
 // acquireNodeGitOpLock polls the per-clone lock until it is taken, the wait
 // budget runs out, or the caller's context ends. A wait that runs out — the
 // node's own budget or the run deadline — reports busy, so a retry is legal;
@@ -1300,26 +1293,11 @@ func (client *HubClient) nodePaneInUse(ctx context.Context, path string) (bool, 
 func (client *HubClient) nodeQuotaRefresh(ctx context.Context, args nodeQuotaRefreshArgs) (any, string) {
 	ctx, cancel := context.WithTimeout(ctx, fleetQuotaTimeout)
 	defer cancel()
-	if isNativeQuotaPool(args.Pool) {
-		if _, err := client.nativeQuotaSource(args.Pool).Refresh(ctx); err != nil {
-			return nil, "refresh_failed"
-		}
-		return nodeQuotaRefreshResult{Outcome: nodeQuotaRefreshed}, ""
+	if !isNativeQuotaPool(args.Pool) {
+		client.warnMessage("quota.refresh: " + args.Pool + " 풀에는 native 측정 소스가 없습니다")
+		return nil, "refresh_failed"
 	}
-	shadow := isShadowQuotaPool(args.Pool)
-	output, err := client.nodePaceleverRunner()(ctx, "refresh", args.Pool)
-	if shadow {
-		publish, ok := FleetStatePublish{}, false
-		if err == nil {
-			publish, ok = fleetQuotaFromPacelever(args.Pool, output)
-		}
-		kind := fleetQuotaErrorKindUnreadable
-		if !ok && ctx.Err() == nil && !errors.Is(err, context.DeadlineExceeded) {
-			kind = client.fleetQuotaErrorKind(ctx, args.Pool)
-		}
-		client.logShadowQuota(ctx, args.Pool, shadowFromPacelever(args.Pool, output, publish, ok, kind))
-	}
-	if err != nil {
+	if _, err := client.nativeQuotaSource(args.Pool).Refresh(ctx); err != nil {
 		return nil, "refresh_failed"
 	}
 	return nodeQuotaRefreshResult{Outcome: nodeQuotaRefreshed}, ""

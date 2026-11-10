@@ -1,34 +1,16 @@
-# Quota commands
+# 쿼터 명령
 
-`panewire quota` is the quota entry point. Pacelever is an internal dependency
-scheduled for removal; callers should use panewire's interface.
+`panewire quota`가 쿼터 인터페이스입니다. 판정, launch lookup, 측정은 panewire의 native 구현만 사용합니다.
 
-- `panewire quota status [--json]` reads the local host's cached readings. On a
-  host with no `pacelever` on `PATH` it does not fail: it reports, for each pool
-  this host measures itself, the shared store's stored reading of the host's
-  account (read only: no measurement, lease or publication), sets
-  `"pacelever": "absent"` on the host, and prints
-  `quota status: pacelever absent; native readings only` on stderr. A pool whose
-  reading cannot be read is listed with `source` `unavailable`.
-- `panewire quota refresh POOL` measures the named pool now, with a 60-second bound. `claude` and `codex` are measured by panewire itself ([claude](#native-measurement-claude), [codex](#native-measurement-codex)), and so are `commandcode`, `devin` and `agy` once their switch is flipped ([commandcode](#native-measurement-commandcode), [devin](#native-measurement-devin), [agy](#native-measurement-agy)); every other pool, and those two until then, runs the dependency.
-- `panewire quota observe KIND ...` forwards the observation kind and all remaining arguments, including `devin-free-limit` options, and returns the dependency's exit code.
+- `panewire quota status [--json]`은 측정 가능한 native 풀의 저장된 값을 읽습니다. 측정이나 게시를 실행하지 않습니다.
+- `panewire quota refresh POOL`은 `claude`, `codex`, `commandcode`, `devin`, `agy`만 측정합니다. 다른 풀은 측정 소스가 없다는 이유와 함께 exit 5(`ExitConditionInvalid`)로 거부합니다.
+- `[quota].gate`, `[quota].launch`, `[quota].native_pools`, `PANEWIRE_QUOTA_BIN`은 폐기되었습니다. 설정 파일에 키가 있으면 migration 경고를 출력합니다. `gate`와 `launch`는 지정할 경우 `"native"`만 허용하며, `native_pools`는 무시됩니다. 환경 변수 `PANEWIRE_QUOTA_BIN`도 무시됩니다.
+- operator credit pools (`anthropic-api`, `openai-api`)의 수동 기록은 shared store에서 계속 읽습니다.
+- `panewire quota observe devin-free-limit`은 Devin SWE-2 free-tier limit을 호환 cache에 기록하거나 지웁니다. `--reset <RFC3339>`을 지정하고, reset을 모르면 `--unparsed`로 1시간 보수 hold를 기록합니다. `--unparsed`는 아직 유효한 기존 hold를 단축하지 않습니다. `--reset`은 운영자가 기존 hold를 명시적으로 수정할 때 사용합니다. `--clear`는 local 기록을 지우며 손상된 cache 파일도 제거합니다. 손상된 파일을 account 단위로 clear할 수는 없으므로 이 경우 `--account-key` 없이 `--clear`를 실행합니다.
 
-Status and version calls each have a 30-second bound; gate calls have a
-30-second bound. A timeout reports `<what>: timed out after <duration>`.
-Warnings from the dependency are omitted. The catalog read is not a
-dependency call; it has an 8-second bound ([catalog.md](catalog.md)).
+## Status JSON v2
 
-## Status JSON v1
-
-`status --json` emits an object with `schema` set to
-`panewire.quota.status.v1`, `generated_at` (the source timestamp), and a
-`hosts` array. Each host contains `host`, `pacelever_version`, and `readings`,
-plus `pacelever: "absent"` when the readings are panewire's own.
-Each reading has `pool`, `account` (empty if unknown), `source`, `age_seconds`
-(number or null), `stale`, and `buckets`. Each bucket contains `window`,
-`used_pct` (number or null), optional `resets_at`, and `scope` with `kind` and
-optional `name`. Age is measured by the source, in seconds. A refresh that
-returns a JSON reading emits the same reading shape; text responses pass through.
+`status --json`은 `schema`가 `panewire.quota.status.v2`인 객체를 출력하며 `generated_at`과 `hosts`를 포함합니다. 각 host에는 `host`와 `readings`가 있습니다. pacelever 관련 필드는 없습니다. reading에는 `pool`, `account`, `source`, `age_seconds`, `stale`, `buckets`가 있습니다.
 
 ## Native measurement: claude
 
@@ -142,10 +124,9 @@ through the same four paths and the same shared store flow as claude.
 
 ## Native measurement: commandcode
 
-panewire measures the `commandcode` pool in its own process
-(`internal/quota/commandcode`) through the same shared store flow as claude and
-codex. Unlike them it ships behind a switch, in [shadow](#shadow-and-native)
-first.
+`commandcode` pool은 panewire 프로세스(`internal/quota/commandcode`)에서 측정하며
+claude, codex와 같은 shared store 흐름을 사용합니다. 모든 호스트에서 항상 native로
+측정합니다.
 
 - **Requests.** `GET` on the commandcode API host: `/alpha/whoami?limits=1`
   (who the key is), `/alpha/billing/credits` (scoped with `?orgId=` when whoami
@@ -200,9 +181,9 @@ first.
 
 ## Native measurement: devin
 
-panewire measures the `devin` pool in its own process (`internal/quota/devin`)
-with pacelever's sources, buckets, error kinds and account fingerprint, and the
-shared store flow. It has a switch and ships in [shadow](#shadow-and-native).
+`devin` pool은 panewire 프로세스(`internal/quota/devin`)에서 측정합니다. 기존
+source, bucket, error kind, account fingerprint 및 shared store 형식을 유지하며,
+모든 호스트에서 항상 native로 측정합니다.
 
 - **Only a host with a devin login measures.** The login is a non-blank
   `windsurf_api_key` in `<XDG data>/devin/credentials.toml` (`~/.local/share`
@@ -248,8 +229,9 @@ shared store flow. It has a switch and ships in [shadow](#shadow-and-native).
 - **Free tier.** devin's SWE-2 models have no used percentage, so a reading also
   carries `free_bucket` (`available`, `exhausted` with `resets_at`, or
   `unknown`), which pacelever's gate requires of any devin reading. It comes
-  from the host's own free-limit record (`devin-free-limit.json` in pacelever's
-  cache directory, written by `panewire quota observe devin-free-limit`): an
+  from the host's own free-limit record (`devin-free-limit.json` in the
+  pacelever-compatible cache directory, written by panewire's native
+  `panewire quota observe devin-free-limit` command): an
   exceed that still holds is `exhausted` until its reset, a record with no
   readable reset holds for an hour after its observation, one with no readable
   time is `unknown`, none is `available`. A record file that is present but unreadable or
@@ -271,9 +253,9 @@ shared store flow. It has a switch and ships in [shadow](#shadow-and-native).
 
 ## Native measurement: agy
 
-panewire measures the `agy` (Antigravity) pool in its own process
-(`internal/quota/agy`) with pacelever's sources, buckets, error kinds and
-shared-store flow. It has a switch and ships in [shadow](#shadow-and-native).
+`agy` (Antigravity) pool은 panewire 프로세스(`internal/quota/agy`)에서 측정합니다.
+기존 source, bucket, error kind 및 shared store 형식을 유지하며, 모든 호스트에서
+항상 native로 측정합니다.
 
 - **agy meters per group, and the groups have separate quotas.** The `gemini`
   group covers the Gemini models (`agy-flash`, `agy-flash38-*`); the `3p` group
@@ -329,58 +311,11 @@ shared-store flow. It has a switch and ships in [shadow](#shadow-and-native).
   strictest group blocks it. The admission gate (`pacelever gate`) already
   matches a row to its own group.
 
-### Shadow and native
+### Native 측정 풀
 
-`commandcode`, `devin` and `agy` are native only when the host's fleet config
-(`~/.config/fleet/hosts.toml`, or `FLEET_HOSTS_CONFIG`) lists them:
+`claude`, `codex`, `commandcode`, `devin`, `agy`는 모든 호스트에서 native로 측정합니다. `[quota].native_pools`는 폐기된 키이며 무시됩니다. 다른 풀(`grok`, `kimi`, `kiro`, `clinepass`, `upstage` 등)은 자동 측정하지 않습니다. quota refresh, node quota loop, `quota.refresh` op, 선택 시 refresh는 해당 풀을 측정하지 않고 소스 없음으로 보고합니다.
 
-```toml
-[quota]
-native_pools = ["commandcode", "devin", "agy"]
-measurable_accounts = ["agy:0123456789abcdef"]   # agy: the account this host measures
-
-[quota.accounts]
-agy = "0123456789abcdef"                       # agy: its fingerprint (configured, not derived)
-```
-
-The file is read at each use, so flipping the switch needs no restart. A
-missing, unreadable or invalid file leaves the pool in shadow; `native_pools`
-lists only pools that have a switch (today `commandcode`, `devin` and `agy`) and any other entry is
-a config error. `claude` and `codex` are always native and need no entry.
-
-- **Shadow (the default).** Spawns, placement refresh, the `quota.refresh` node
-  command and `panewire quota refresh commandcode` still run pacelever for the
-  pool, and the fleet-state loop still publishes pacelever's reading. Beside each
-  pacelever refresh the node measures commandcode itself — once, directly, with
-  no store lease, no publication and no presence, so no other host's reading
-  changes — and logs one line (the node's warning log). The measurement runs in the
-  background with a 25 s bound, so it never delays or fails the refresh it
-  rides on, and a pool already being measured in shadow is skipped, not queued:
-
-  ```
-  quota shadow commandcode: match=false account=same pacelever=[5h=0.0%@2026-11-06T09:00:00Z 7d=1.3%@2026-11-12T00:00:00Z] native=[5h=0.0%@2026-11-06T09:00:00Z 7d=1.3%@2026-11-12T00:00:00Z 30d=9.3%@2026-11-27T07:38:00Z] diff=30d: native only
-  ```
-
-  `match` is true when the account key and every window agree: used percentages
-  within 1 point and resets within 60 s, a window on one side only is a
-  difference. A failed side prints `error <kind>` in place of its windows, and
-  `diff` says which side failed. pacelever cannot read 30d (its response has no
-  `planId`), so a healthy shadow line reads `diff=30d: native only`: that is the
-  expected difference, not a fault. The desk reads the lines and flips the switch.
-  For `devin` the line is `quota shadow devin: …` and healthy means `match=true`;
-  pacelever's windowless per-model Free tag is not a window and is left out of the
-  comparison. A host without a devin login reads `native=error credentials` (the
-  node starts no probe and sends no request there). For `agy` the line is
-  `quota shadow agy: …` and a window is told apart by its group
-  (`5h/gemini=20.0%@…  5h/3p=50.0%@…  7d/3p=60.0%@…`); healthy means
-  `match=true`. A host with no measurable agy account reads
-  `native=error credentials`.
-- **Native.** The fleet-state loop, `quota.refresh`, placement refresh and
-  `panewire quota refresh commandcode` use the node's measurement and the shared
-  store as for codex, and no spawn-side step runs `pacelever refresh` for the
-  pool (an ssh refresh of a remote account runs `panewire quota refresh
-  commandcode`, which follows the target's own switch). The `pacelever gate`
-  call is not part of this switch; [Admission](#admission) has its own.
+`[quota].accounts`와 `measurable_accounts`는 계정 식별 및 host 측정 허용 범위에 계속 사용됩니다.
 
 ### Artificial Analysis annotations
 
@@ -472,123 +407,13 @@ seats](#command-code-seats)) still refuses at admission. pacelever's
 exploration does not apply: panewire passes no `--task`, so pacelever keeps
 its baseline answer.
 
-### Shadow and native launch
+### Native launch lookup
 
-`[quota].launch` in the host's fleet config picks who resolves the rung:
-
-```toml
-[quota]
-launch = "native"   # or "shadow", the default
-```
-
-- **Shadow (the default).** `pacelever policy launch` resolves it, and the
-  spawn gets exactly its answer, as before. After pacelever answers, panewire
-  resolves the same request offline and records one fleet event. The
-  comparison is side-effect free:
-
-  - it reads only local state: pacelever's `config.toml` and panewire's
-    catalog cache, read only (and the handoffkeep endpoint from the
-    svc-panewire credential, environment or `~/.config/panewire/hk-svc.env`,
-    only to name the cache file);
-  - it never asks handoffkeep, never refreshes after a refusal, and never
-    writes, renames or touches a cache file, so it cannot change what the
-    selection reads;
-  - it never holds up the spawn: the lookup returns pacelever's answer at
-    once, and the comparison — its local reads and its event append — runs
-    in a background goroutine with no context of the caller's, so it cannot
-    spend the deadline the next gate call needs;
-  - the event is a best-effort fleet event append, to the local state
-    directory only (no network).
-
-  **One comparison at a time.** A process runs at most one shadow comparison,
-  launch or [credit pool](#credit-pool-views), at a time. While one runs, a
-  new one is skipped — no goroutine starts — and counted; the next event a
-  comparison records starts its detail with `skipped_busy=N`. The slot is
-  freed only when the running comparison really returns, so a hung
-  filesystem holds one goroutine, not one per spawn. A comparison whose
-  local reads take more than 2 s records `outcome=skipped
-  reason=shadow_timeout` instead of its answer when they do return.
-
-  **Sampling, not a record of every spawn.** Nothing waits for a comparison
-  at process exit. A spawn admitted in a short-lived `panewire` process — a
-  `spawn --dry-run`, `plan`, `resolve`, `delegate --headless`, or the legacy
-  ssh `_spawn-stdin` — may exit before its comparison ends, and that
-  comparison is lost. A real spawn submitted with `panewire spawn` or `work`
-  is admitted in the hub server (placement: `launchPool` and the pool views)
-  and then in the node daemon (`ExecuteNode`: `admitLaunch` and the pool
-  views), both long-lived, so their comparisons complete; the losses are
-  dry runs and the CLI-only commands above, plus comparisons skipped as busy.
-
-  The cache counts as fresh under pacelever's `[bench] catalog_ttl_s` in its
-  `config.toml` (default one hour), read in the same local config read the
-  comparison makes, so the shadow and native mode agree on which cache is
-  fresh. When the cache holds no fresh entry for the endpoint, nothing is
-  compared: `outcome=skipped reason=no_fresh_cache`. A cache entry whose
-  `fetched_at` is missing or unreadable is never fresh, whatever the TTL.
-  Otherwise:
-
-  ```
-  kind=quota_launch_shadow outcome=disagree reason=commandcode
-  detail=profile=omp-dsflash41 effort=max role=worker purpose= pacelever{exit=3 profile= model= effort= grade= gate= pool= family= stale=false reason="e6_arm_required: unplaced profile requires exact measurement marker"} native{exit=0 profile=omp-dsflash41 model=deepseek/deepseek-v4.1-flash effort=max grade=A+ gate=default pool=commandcode family= stale=false reason=""} diff=exit,profile,model_id,effort,grade,gate,pool
-  ```
-
-  `agree` means the same exit status, launch fields and reason;
-  `reason_differs` the same status and fields in other words; `disagree`
-  anything else, and `diff` lists the fields that differ. pacelever's reason is
-  the `error:` line it prints on stderr. The native answer never changes the
-  spawn's outcome. Expected differences: pacelever's own catalog cache is not
-  panewire's, so a row changed in the last hour can differ until both caches
-  read it, and the shadow never refreshes to close that gap; and pacelever
-  with no catalog backend configured serves its snapshot as fresh where
-  panewire refuses it as stale.
-- **Native.** panewire's lookup decides and `pacelever policy launch` is never
-  run. panewire-design flips it on a host after the shadow events agree; it is
-  host config, independent of `[quota].gate`. Only native mode reads
-  handoffkeep for the lookup, and only native mode refreshes after a cached
-  refusal. That refresh replaces panewire's shared catalog cache, which the
-  selection (`CLIQuota.Catalog`) also reads, so on a native host the
-  selection can see a newer catalog before its own TTL expires. This is
-  accepted: native is a deliberate host switch, and the refreshed catalog is
-  handoffkeep's current one.
+`[quota].launch`는 폐기된 설정 키입니다. 설정에 남아 있어도 경고 후 native lookup을 사용하며, 지정한 값이 `"native"`가 아니면 설정 오류입니다. panewire의 catalog lookup이 launch 결과를 결정합니다. `quota_launch_shadow` 이벤트와 shadow 비교 코드는 제거되었습니다.
 
 ### Credit pool views
 
-Selection ranks a credit pool, and admission refuses an excluded one, from the
-pool's view: its class, the used share of its current operator credit entry
-and its balance. The view follows `[quota].launch`:
-
-- **Shadow (the default).** The view is pacelever's status document, read by
-  one `pacelever --json` run, and the caller gets exactly that, as before.
-  After it is read, when the shared store serves every credit pool (see
-  Native), panewire reads each credit pool's class offline from pacelever's
-  `config.toml` and records one fleet event per read:
-
-  ```
-  kind=quota_pools_shadow outcome=disagree reason=credit
-  detail=anthropic-api pacelever{class=spend} native{class=exclude} openai-api pacelever{class=spend} native{class=spend} diff=anthropic-api:class
-  ```
-
-  The comparison is offline and side-effect free, as the launch shadow is: it
-  reads only the pool policy files, never the shared store, in the background
-  after the views are returned, one comparison per process at a time, and
-  may be lost when a short-lived process exits ([Shadow and native
-  launch](#shadow-and-native-launch); `outcome=skipped reason=shadow_timeout`
-  when its reads take more than 2 s). So only the class is
-  compared: the used share lives only in the shared store, and the balance is
-  the same store's on both paths. `agree` means every credit pool has the same
-  class; `disagree` anything else, with `diff` listing the differing
-  `pool:class` pairs, or `error` when either side failed to read. The native
-  view never reaches selection or admission.
-- **Native.** When every credit pool of the pool policy (`credit_pools`) is a
-  hand-recorded API pool (`anthropic-api`, `openai-api`) and the shared store
-  is wired, panewire builds the view itself: the class from pacelever's
-  `config.toml` as [Admission](#admission) reads it, the entry and balance
-  from the shared store for the account `[quota.accounts]` (else pacelever's
-  own `[quota.accounts]`) names. `pacelever --json` is not started. Otherwise
-  — a credit pool the store does not serve, or no shared reader — the
-  `pacelever --json` status read runs as in shadow.
-
-panewire-design switches a host to native after its shadow events agree.
+Selection과 admission은 pool policy 및 shared store에서 credit pool class, manual entry, balance를 읽습니다. shared store를 쓸 수 없으면 status를 조회한 것으로 추측하지 않고 오류를 반환합니다. `quota_pools_shadow` 비교는 제거되었습니다. `anthropic-api`와 `openai-api`의 operator manual entries는 유지됩니다.
 
 ## Admission
 
@@ -669,37 +494,8 @@ rather than guesses:
 - the catalog JSON has no `placed` flag or effort defaults: a graded rung is
   placed, and an effortless rung's reason names no default effort.
 
-### Shadow and native gate
+### Native admission gate
 
-`[quota].gate` in the host's fleet config picks who decides:
+`[quota].gate`는 폐기된 설정 키입니다. 설정에 남아 있어도 경고 후 panewire native verdict를 사용하며, 지정한 값이 `"native"`가 아니면 설정 오류입니다. `pacelever gate`, `quota_gate_shadow` 이벤트 및 shadow 비교 코드는 제거되었습니다. native verdict는 기존 shared quota store와 handoffkeep catalog를 사용합니다.
 
-```toml
-[quota]
-gate = "native"   # or "shadow", the default
-```
-
-- **Shadow (the default).** `pacelever gate` decides. Beside each call panewire
-  computes its own verdict within 10 s — reading only: no measurement, no
-  alternatives — and records one fleet event:
-
-  ```
-  kind=quota_gate_shadow outcome=disagree reason=claude
-  detail=profile=opus effort=high role=worker account=claude:… pacelever{exit=0 pool=claude basis= reason="…"} native{exit=3 pool=claude basis= reason="quota exhausted window=5h cutoff=99"}
-  ```
-
-  `agree` means the same exit status, pool and gate basis and the same reason;
-  `reason_differs` the same decision in other words; `disagree` anything else.
-  A commandcode spawn on a host whose commandcode readings pacelever publishes
-  reads `disagree` (no `30d`): that is the expected difference until the pool
-  is native. The desk reads the events and flips the switch.
-- **Native.** panewire's verdict decides: no `pacelever gate` and no
-  `pacelever refresh` run in the gate, and the catalog comes from handoffkeep
-  ([catalog.md](catalog.md)). `pacelever policy launch` follows its own switch
-  ([Launch](#launch)); the status read of a pool the shared store does not
-  serve and the selector's refresh of a pool panewire does not measure stay
-  until hk 3250.
-
-The golden verdicts in `internal/fleet/testdata/admission_golden/verdicts.json`
-are pacelever's own: `generator/regen.sh` runs its gate over the scenarios in a
-throwaway clone. A scenario where panewire differs on purpose records the
-native verdict and why.
+Golden verdicts in `internal/fleet/testdata/admission_golden/verdicts.json`은 이전 구현과의 보존 비교 자료입니다. 현재 production 경로에서는 외부 quota CLI를 실행하지 않습니다.
