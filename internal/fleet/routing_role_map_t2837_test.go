@@ -74,7 +74,7 @@ func TestRoutingUnmappedSeatRoleUsesBuiltinRole(t *testing.T) {
 	a := testApp(t)
 	a.Runner = &fakeRunner{}
 	serveRouting(t, routingDoc(block))
-	r, e := a.routeFor(context.Background(), "worker", "")
+	r, e := a.routeFor(context.Background(), "worker", "", false)
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -90,7 +90,7 @@ func TestRoutingCacheStoresPanewireRoleMap(t *testing.T) {
 	a := testApp(t)
 	a.Runner = &fakeRunner{}
 	serveRouting(t, routingDoc(routingBlockPublished))
-	if _, e := a.routeFor(ctx, "worker", ""); e != nil {
+	if _, e := a.routeFor(ctx, "worker", "", false); e != nil {
 		t.Fatal(e)
 	}
 	b, e := os.ReadFile(a.routingCachePath())
@@ -102,7 +102,7 @@ func TestRoutingCacheStoresPanewireRoleMap(t *testing.T) {
 	}
 	a.Runner = &fakeRunner{}
 	serveRouting(t, "")
-	r, e := a.routeFor(ctx, "worker", "")
+	r, e := a.routeFor(ctx, "worker", "", false)
 	if e != nil || r.role != "implementer" || r.admits("codex-luna") {
 		t.Fatalf("the cached policy routes workers as implementers: %+v %v", r, e)
 	}
