@@ -1222,9 +1222,28 @@ func (a *App) place(ctx context.Context, s Spawn, brief string) (handled bool, r
 	return a.placeAuto(ctx, s, brief)
 }
 
+// requestRefusal is the gate's refusal of the spawn's request that no quota
+// reading can lift (see requestGate), decided once for the chosen rung, or nil.
+func (a *App) requestRefusal(ctx context.Context, s Spawn) error {
+	gate, ok := a.Quota.(requestGate)
+	if !ok {
+		return nil
+	}
+	qr, ok := a.quotaRequest(s)
+	if !ok {
+		return nil
+	}
+	return gate.RequestRefusal(ctx, qr)
+}
+
 func (a *App) placeAuto(ctx context.Context, s Spawn, brief string) (bool, map[string]any, error) {
 	task, _, e := a.taskPrecheck(ctx, s)
 	if e != nil {
+		return true, nil, e
+	}
+	// A request the gate refuses whatever any host's reading says fails here
+	// with the gate's own reason, before a host is judged or contacted.
+	if e := a.requestRefusal(ctx, s); e != nil {
 		return true, nil, e
 	}
 	waited := taskWaited(task, a.Now())
@@ -1279,7 +1298,7 @@ func (a *App) placeAuto(ctx context.Context, s Spawn, brief string) (bool, map[s
 			if j.Reason == hubDown {
 				return candResult{rc: exitCode(err), note: hubDown}
 			}
-			return candResult{rc: exitCode(err), note: "quota_" + j.Outcome, quotaRefused: true}
+			return candResult{rc: exitCode(err), note: hostGateNote(j, err), quotaRefused: true}
 		}
 		return a.spawnRemote(ctx, s, brief, c, resolveRepo(), false)
 	}
@@ -1321,7 +1340,7 @@ func (a *App) placeAuto(ctx context.Context, s Spawn, brief string) (bool, map[s
 			j, err := a.judgeHost(ctx, qr, pool, c.name, true, "", SharedAccount{})
 			c.judgment = &j
 			if err != nil {
-				c.outcome, localRefusal = "quota_refused", err
+				c.outcome, localRefusal = firstNonempty(gateCodeNote(err), "quota_refused"), err
 				return false
 			}
 		}

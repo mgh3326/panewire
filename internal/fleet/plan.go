@@ -179,7 +179,7 @@ func (a *App) planHosts(ctx context.Context, s Spawn, grade string) (*placePlan,
 		j, err := a.judgeHost(ctx, qr, pool, c.name, true, "", SharedAccount{})
 		c.judgment = &j
 		if err != nil {
-			c.outcome, localRefusal = "quota_refused", err
+			c.outcome, localRefusal = firstNonempty(gateCodeNote(err), "quota_refused"), err
 			return false
 		}
 		return true
@@ -202,7 +202,7 @@ func (a *App) planHosts(ctx context.Context, s Spawn, grade string) (*placePlan,
 		j, err := a.judgeHost(ctx, qr, pool, c.name, false, key, acc)
 		c.judgment = &j
 		if err != nil {
-			c.outcome = "quota_" + j.Outcome
+			c.outcome = hostGateNote(j, err)
 			continue
 		}
 		c.outcome = "would_spawn"

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mgh3326/panewire/internal/fleetevent"
 	"github.com/mgh3326/panewire/internal/quota/agy"
 	"github.com/mgh3326/panewire/internal/quota/shared"
 	"github.com/mgh3326/panewire/internal/textbound"
@@ -153,6 +154,16 @@ type QuotaGate interface {
 	Catalog(context.Context) ([]CatalogRow, error)
 	Pools(context.Context) (map[string]PoolView, error)
 }
+
+// requestGate is the optional half of a QuotaGate that refuses, before any
+// host is judged, a request no quota reading can lift: role, subscription,
+// request shape, catalog or an excluded pool. It returns the gate's typed
+// refusal (gateRefusal.code set), or nil for a request that is admitted or
+// needs a reading. A gate without it is judged host by host.
+type requestGate interface {
+	RequestRefusal(context.Context, QuotaRequest) error
+}
+
 type CLIQuota struct {
 	Runner Runner
 	Binary string
@@ -210,7 +221,7 @@ func gateResult(x Result, r QuotaRequest) (string, error) {
 			reason = "gate denied this role"
 		}
 		reason = roleRestrictedReason(reason)
-		return "", &gateRefusal{cause: fail(exitSeatRefused, "%s", reason), outcome: outcomeNoRoleCandidate}
+		return "", &gateRefusal{cause: fail(exitSeatRefused, "%s", reason), outcome: outcomeNoRoleCandidate, code: receiptGateCode(x.Out)}
 	}
 	if r.AccountKey != "" && (x.Code == 0 || x.Code == quotaGateBlocked) {
 		receipt, err := readAccountGateReceipt(x, r.AccountKey)
@@ -225,22 +236,65 @@ func gateResult(x Result, r QuotaRequest) (string, error) {
 				// exhaustion or a policy failure. Keep it typed for refresh.
 				outcome, reason = outcomeQuotaUnknown, err.Error()
 			}
-			if outcome == outcomeNoRoleCandidate {
-				return "", &gateRefusal{cause: fail(exitSeatRefused, "%s", roleRestrictedReason(reason)), outcome: outcome}
+			code := ""
+			if err == nil {
+				code = receiptGateCode(x.Out)
 			}
-			return "", &gateRefusal{cause: fail(x.Code, "quota gate: %s", reason), outcome: outcome}
+			if outcome == outcomeNoRoleCandidate {
+				return "", &gateRefusal{cause: fail(exitSeatRefused, "%s", roleRestrictedReason(reason)), outcome: outcome, code: code}
+			}
+			return "", &gateRefusal{cause: fail(x.Code, "quota gate: %s", reason), outcome: outcome, code: code}
 		}
 		if err != nil {
 			return "", err
 		}
 	}
 	if e := checkQuota(x, "quota gate"); e != nil {
+		if code := receiptGateCode(x.Out); code != "" && (x.Code == quotaGateBlocked || x.Code == gateUnsubscribed) {
+			// A refusal no reading decided keeps its gate code. Raw exit 3
+			// stays the legacy quota block at this boundary, as judgeGate reads it.
+			outcome := outcomeQuotaExhausted
+			if x.Code != quotaGateBlocked {
+				outcome = gateOutcome(e)
+			}
+			return "", &gateRefusal{cause: e, outcome: outcome, code: code}
+		}
 		return "", e
 	}
 	if !json.Valid([]byte(x.Out)) {
 		return "", fail(exitConfig, "invalid quota gate JSON")
 	}
 	return x.Out, nil
+}
+
+// receiptGateCode reads the gate_code of a refusal receipt: the code of a
+// refusal decided by the request, the catalog or policy alone, never by a
+// reading (admissionVerdict.GateCode). It is empty for every other receipt.
+func receiptGateCode(out string) string {
+	var body struct {
+		GateCode string `json:"gate_code"`
+	}
+	if json.Unmarshal([]byte(out), &body) != nil || fleetevent.Code(body.GateCode) != body.GateCode {
+		return ""
+	}
+	return body.GateCode
+}
+
+// gateCodeNote is the host note of a refusal the gate decided from the
+// request, the catalog or policy, never from a reading: "gate_blocked:" and
+// the gate's code. It is empty for any other error.
+func gateCodeNote(err error) string {
+	var refusal *gateRefusal
+	if errors.As(err, &refusal) && refusal.code != "" {
+		return "gate_blocked:" + refusal.code
+	}
+	return ""
+}
+
+// hostGateNote is the note a refused host carries in the placement record: the
+// gate's own code for a refusal no reading decided, else quota_<outcome>.
+func hostGateNote(j quotaJudgment, err error) string {
+	return firstNonempty(gateCodeNote(err), "quota_"+j.Outcome)
 }
 
 func roleRestrictedReason(reason string) string {
@@ -278,6 +332,10 @@ func clipGateReason(reason string, max int) string {
 type gateRefusal struct {
 	cause   error
 	outcome string
+	// code is the gate's own code for a refusal no quota reading decided (the
+	// request, the catalog or policy did); empty when a reading or the
+	// evidence behind one did.
+	code string
 }
 
 func (e *gateRefusal) Error() string { return e.cause.Error() }

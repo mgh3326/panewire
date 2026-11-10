@@ -889,3 +889,30 @@ the provider measurement tool; this decision does not bypass its final gate.
 A quota-stop job end cools its pool across hosts until its reset, or for five minutes when no reset is known. Candidates are recorded as `pool_cooling` during that period. Cooling is held in hub memory and is lost on hub restart.
 
 When hub state is unavailable or disabled, the selection record reports `pool_cooling_hub_unavailable` or `pool_cooling_hub_state_off` in `degraded`; cooling cannot be checked.
+
+## Gate refusals
+
+A refusal the quota gate decides from the request, the catalog or policy
+alone, never from a quota reading, is not a quota refusal. `placeAuto` asks
+the gate once for the chosen rung before it judges any host
+(`requestGate.RequestRefusal`, admission_native.go); a refusal ends the spawn
+with the gate's reason verbatim and the exit status the gate maps it to, and no
+host is judged or contacted. `-m auto` keeps skipping such a rung in selection
+and trying the next.
+
+The refusals decided without a reading are the first judgment of
+`admissionInputs.judgeWith` (admission_verdict.go) with no reading: the role
+check, a subscription, a request shape (`requested_by_requires_operator_request`,
+`operator_request_ref_invalid`, `requested_by_invalid`,
+`operator_request_not_applicable`, `consult_only`), the catalog resolution
+(`resolveRow`: unknown effort, credit effort, retired model identity, unknown
+or retired profile, `e6_arm_required`, retired or missing rung) and a pool
+excluded by policy.
+
+A host the gate refuses with such a reason is recorded in the placement
+record's host row `reason` as `gate_blocked:<code>`, where `<code>` is the
+reason's leading word before the first colon (`gate_blocked:operator_request_not_applicable`),
+or the whole reason as a code when it has no colon. `quota_refused` stays for a
+refusal the gate derives from a reading: a window past its cutoff, a missing
+window, stale or unknown evidence. The placement record has no field for the
+gate code besides this reason.
