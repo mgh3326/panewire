@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -95,6 +96,79 @@ func TestSelectGradeFilterPrefersCheapestCovering(t *testing.T) {
 	}
 	if got := candOutcome(rec, "devin-swe2", "high")["outcome"]; got != "below_choice" {
 		t.Fatalf("a higher free rung ranks below the chosen rung: %v", got)
+	}
+}
+
+func TestSelectDevinFlashRungsUseFreeTier(t *testing.T) {
+	t.Setenv("PANEWIRE_POOL_POLICY", "")
+	rows := []CatalogRow{
+		{Profile: "devin-swe2-flash", Effort: "high", Grade: "B", Pool: "devin", Gate: "default", ModelID: "swe-2-flash-high"},
+		{Profile: "devin-swe2-flash-medium", Effort: "medium", Grade: "C", Pool: "devin", Gate: "default", ModelID: "swe-2-flash-medium"},
+	}
+	a, s, q := selFixture(t, "C", rows, nil, []string{"devin"})
+	serveRouting(t, strings.Replace(routingBlockV1,
+		`"devin-swe2-max", "cmd-dsflash41"`,
+		`"devin-swe2-max", "devin-swe2-flash", "devin-swe2-flash-medium", "devin-swe2-flash-max", "cmd-dsflash41"`, 1))
+	q.GateDo = gatePools(map[string]string{"devin-swe2-flash": "devin", "devin-swe2-flash-medium": "devin"})
+	sel, err := a.selectProfile(context.Background(), s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{"devin-swe2-flash": "high", "devin-swe2-flash-medium": "medium"}
+	for profile, effort := range want {
+		row := candOutcome(sel.record(), profile, effort)
+		if row == nil {
+			t.Fatalf("missing candidate %s@%s", profile, effort)
+		}
+		if row["tier"] != "free" {
+			t.Errorf("%s@%s tier = %v, want free", profile, effort, row["tier"])
+		}
+		if row["outcome"] == "dropped:gate_refused" || row["reason"] == "gate_blocked:pool_excluded_by_policy" {
+			t.Errorf("%s@%s was refused by pool policy: %v", profile, effort, row)
+		}
+	}
+}
+
+func TestSelectNonDevinGradeBPreservesCandidate(t *testing.T) {
+	t.Setenv("PANEWIRE_POOL_POLICY", "")
+	rows := []CatalogRow{
+		{Profile: "devin-swe2-flash", Effort: "high", Grade: "B", Pool: "devin", Gate: "default", ModelID: "swe-2-flash-high"},
+		{Profile: "devin-swe2-flash-medium", Effort: "medium", Grade: "C", Pool: "devin", Gate: "default", ModelID: "swe-2-flash-medium"},
+		{Profile: "codex-sol", Effort: "high", Grade: "B", Pool: "codex", Gate: "default", ModelID: "gpt-6.1-sol"},
+	}
+	a, s, q := selFixture(t, "B", rows, nil, []string{"devin", "codex"})
+	serveRouting(t, strings.Replace(routingBlockV1,
+		`"devin-swe2-max", "cmd-dsflash41"`,
+		`"devin-swe2-max", "devin-swe2-flash", "devin-swe2-flash-medium", "devin-swe2-flash-max", "cmd-dsflash41"`, 1))
+	s.OnlyFamily = "openai"
+	q.GateDo = gatePools(map[string]string{"devin-swe2-flash": "devin", "devin-swe2-flash-medium": "devin", "codex-sol": "codex"})
+	q.PoolViews = map[string]PoolView{"codex": {Status: "ok", Class: "spend", Blocking: ptrF(0)}}
+	basePolicy := map[string]any{}
+	if err := json.Unmarshal(defaultPoolOrder, &basePolicy); err != nil {
+		t.Fatal(err)
+	}
+	freeSets := basePolicy["free"].([]any)
+	freeSets[0].(map[string]any)["models"] = []any{"swe-2", "swe-2-medium", "swe-2-max"}
+	baseBytes, err := json.Marshal(basePolicy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	basePath := filepath.Join(t.TempDir(), "pool-order.json")
+	if err := os.WriteFile(basePath, baseBytes, 0600); err != nil {
+		t.Fatal(err)
+	}
+	a.Config.Local["pool_policy"] = basePath
+	baseSel, err := a.selectProfile(context.Background(), s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.Config.Local["pool_policy"] = ""
+	headSel, err := a.selectProfile(context.Background(), s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if baseSel.chosen.seatName != "codex-sol" || headSel.chosen.seatName != baseSel.chosen.seatName || headSel.chosen.row.ModelID != baseSel.chosen.row.ModelID {
+		t.Fatalf("non-Devin grade B candidate changed: base=%s/%s head=%s/%s", baseSel.chosen.seatName, baseSel.chosen.row.ModelID, headSel.chosen.seatName, headSel.chosen.row.ModelID)
 	}
 }
 

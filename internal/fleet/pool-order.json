@@ -5,7 +5,7 @@
   "free": [
     {
       "pool": "devin",
-      "models": ["swe-2", "swe-2-medium", "swe-2-max"]
+      "models": ["swe-2", "swe-2-medium", "swe-2-max", "swe-2-flash-high", "swe-2-flash-medium", "swe-2-flash-max"]
     }
   ],
   "credit_pools": ["anthropic-api", "openai-api"],

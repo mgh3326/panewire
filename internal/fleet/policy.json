@@ -1494,6 +1494,18 @@
         "reviewer",
         "counsel"
       ]
+    },
+    "devin-swe2-flash-max": {
+      "canon": "devin-swe2-flash-max",
+      "kind": "devin",
+      "family": "cognition",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel"
+      ]
     }
   }
 }
