@@ -429,7 +429,7 @@ func hubArgs(jobs string, s Spawn) ([]string, error) {
 	for _, u := range []struct {
 		flag string
 		set  bool
-	}{{"--keep", s.Keep}, {"--job-dup-ok", s.DupOK}, {"--task-hk-bypass", s.Bypass}, {"--allow-escalation", s.AllowEscalation}, {"--strong", s.Strong}} {
+	}{{"--keep", s.Keep}, {"--job-dup-ok", s.DupOK}, {"--task-hk-bypass", s.Bypass}, {"--allow-escalation", s.AllowEscalation}} {
 		if u.set {
 			args = append(args, u.flag)
 		}

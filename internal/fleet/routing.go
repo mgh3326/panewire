@@ -38,11 +38,6 @@ type RoutingPolicy struct {
 	// hk policy/model-routing still publishes it, so parseRoutingJSON reads it
 	// into RoleMap; it is never kept or cached under this name.
 	LegacyRoleMap map[string]string `json:"runtug_role_map,omitempty"`
-	// StrongProfiles lists the profiles a strong spawn may run on (a task title
-	// marked ", strong", or --strong). A strong selection keeps its routing role
-	// and additionally drops every candidate outside this list. Optional; a
-	// strong spawn is refused when it is absent or empty.
-	StrongProfiles []string `json:"strong_profiles,omitempty"`
 }
 
 // RoutingRule is one routing role's entry. Allowed names catalog profiles
@@ -173,11 +168,6 @@ func (p RoutingPolicy) validate() error {
 	for name, r := range p.Roles {
 		if e := r.validateFamilyEffort(name); e != nil {
 			return e
-		}
-	}
-	for _, profile := range p.StrongProfiles {
-		if !validID(profile) {
-			return fmt.Errorf("strong_profiles names invalid profile %q", profile)
 		}
 	}
 	for seat, role := range p.RoleMap {
@@ -351,15 +341,6 @@ type routing struct {
 	// downgradedFrom names the role whose exhaustion led to this downgrade
 	// selection.
 	downgradedFrom string
-	// strong keeps selection to strongProfiles on top of the role's allowed
-	// list; routeFor only sets it with a non-empty list.
-	strong         bool
-	strongProfiles []string
-}
-
-// notStrong reports whether a strong selection drops this profile.
-func (r *routing) notStrong(profile string) bool {
-	return r != nil && r.strong && !slices.Contains(r.strongProfiles, profile)
 }
 
 func (r *routing) admits(profile string) bool {
@@ -367,10 +348,8 @@ func (r *routing) admits(profile string) bool {
 }
 
 // routeFor resolves the routing role for a seat role (or the explicit
-// override) against the policy table. A strong request is refused, like a
-// strict role, when the table cannot be read or lists no strong_profiles:
-// it never falls back to an unrestricted selection.
-func (a *App) routeFor(ctx context.Context, seatRole, override string, strong bool) (*routing, error) {
+// override) against the policy table.
+func (a *App) routeFor(ctx context.Context, seatRole, override string) (*routing, error) {
 	if override != "" && !slices.Contains(routingRoles, override) {
 		return nil, fail(exitUsage, "--routing-role must be one of %s", strings.Join(routingRoles, "|"))
 	}
@@ -387,22 +366,13 @@ func (a *App) routeFor(ctx context.Context, seatRole, override string, strong bo
 		if slices.Contains(routingStrictRoles, role) {
 			return nil, fail(exitConfig, "POLICY_UNAVAILABLE: routing role %s refused: %s unavailable (%v)", role, routingDocKey, e)
 		}
-		if strong {
-			return nil, fail(exitConfig, "POLICY_UNAVAILABLE: strong spawn refused: %s unavailable (%v)", routingDocKey, e)
-		}
 		a.warn("%s unavailable (%v); %s proceeds unfiltered (builtin_default)", routingDocKey, e, firstNonempty(role, seatRole))
 		return &routing{role: role, source: routingSourceBuiltin}, nil
-	}
-	if strong && len(p.StrongProfiles) == 0 {
-		return nil, fail(exitConfig, "POLICY_UNAVAILABLE: strong spawn refused: %s v%d (%s) lists no strong_profiles", routingDocKey, p.Version, source)
 	}
 	// A seat role the table does not map takes the builtin routing role: a
 	// missing or renamed map must not leave the role unfiltered (hk 2837).
 	role := firstNonempty(override, p.RoleMap[seatRole], builtinRoleMap[seatRole])
-	r := &routing{role: role, version: p.Version, source: source, strong: strong}
-	if strong {
-		r.strongProfiles = slices.Clone(p.StrongProfiles)
-	}
+	r := &routing{role: role, version: p.Version, source: source}
 	if role == "" {
 		return r, nil
 	}
@@ -519,9 +489,6 @@ func (r *routing) record(refusal string) map[string]any {
 	if r.downgradedFrom != "" {
 		m["downgraded_from"] = r.downgradedFrom
 	}
-	if r.strong {
-		m["strong"], m["strong_profiles"] = true, r.strongProfiles
-	}
 	if refusal != "" {
 		m["refused"] = refusal
 	}
@@ -543,9 +510,6 @@ const (
 
 // reasonBelowRoleMinEffort drops a rung below the role's min_effort.
 const reasonBelowRoleMinEffort = "below_role_min_effort"
-
-// reasonNotStrong drops a profile outside strong_profiles on a strong spawn.
-const reasonNotStrong = "not_strong"
 
 // roleExhausted handles a routed selection that admitted nothing. With no
 // in-role candidate left after the static filters it refuses

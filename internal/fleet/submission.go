@@ -369,7 +369,7 @@ func submissionArgs(s Spawn) []string {
 	for _, flag := range []struct {
 		name string
 		set  bool
-	}{{"--keep", s.Keep}, {"--job-dup-ok", s.DupOK}, {"--task-hk-bypass", s.Bypass}, {"--allow-escalation", s.AllowEscalation}, {"--strong", s.Strong}} {
+	}{{"--keep", s.Keep}, {"--job-dup-ok", s.DupOK}, {"--task-hk-bypass", s.Bypass}, {"--allow-escalation", s.AllowEscalation}} {
 		if flag.set {
 			args = append(args, flag.name)
 		}

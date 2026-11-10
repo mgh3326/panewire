@@ -21,7 +21,7 @@ func (a *App) admitPinnedProfile(ctx context.Context, s *Spawn) error {
 	if s.Host == "local" && seat.Capability != "standard" && !boolean(a.Config.Local, seat.Capability, false) {
 		return fail(exitConfig, "host lacks capability %s", seat.Capability)
 	}
-	route, err := a.routeFor(ctx, s.Role, s.RoutingRole, false)
+	route, err := a.routeFor(ctx, s.Role, s.RoutingRole)
 	if err != nil {
 		return err
 	}

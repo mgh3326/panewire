@@ -38,10 +38,6 @@ type Spawn struct {
 	ReviewPass                                         string `json:"review_pass,omitempty"`
 	Keep, DupOK, Bypass, DryRun, Wait, AllowEscalation bool
 	Inherited, ParentFamily                            string
-	// Strong restricts automatic selection to the strong_profiles of
-	// policy/model-routing (--strong); a task title marked ", strong" does the
-	// same. Initiator-local like Sel: the hub re-reads the flag from its args.
-	Strong bool `json:"-"`
 	// Tags lists the capability tags a host must carry and ExcludeHosts the
 	// hosts placement must not pick. Delegated marks a spawn delivered by
 	// another initiator. Sel carries the selection decision record; all four
@@ -169,7 +165,6 @@ func parseSpawn(args []string) (Spawn, error) {
 	f.BoolVar(&s.DryRun, "dry-run", false, "")
 	f.BoolVar(&s.Wait, "wait", false, "")
 	f.BoolVar(&s.AllowEscalation, "allow-escalation", false, "")
-	f.BoolVar(&s.Strong, "strong", false, "")
 	if e := f.Parse(args); e != nil {
 		return s, fail(exitUsage, "%v", e)
 	}

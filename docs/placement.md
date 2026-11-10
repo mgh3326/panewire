@@ -53,17 +53,6 @@ ranks ahead of waste-risk subscriptions. A credit entry without a recorded
 dollar balance keeps the percentage rule (remaining percent per hour) and
 ranks after any credit that has dollars.
 
-A strong spawn (a `, strong` title marker or `--strong`; see
-[Strong tasks](config.md#strong-tasks)) additionally intersects its
-candidates with `strong_profiles` of `policy/model-routing`, after the routing
-role's own allowed list. A candidate outside the list is dropped as
-`not_strong`. Every other rule is unchanged, so a listed profile in the waste
-tier is used first like any other waste candidate, the role's `min_effort`
-still applies, and the selection record names `strong: true`. The list is
-illustrated by `"strong_profiles": ["fable", "opus", "codex-astra",
-"codex-sol", "codex-luna"]`; the live one is set in hk. Without a non-empty
-list in hk or its cache, the spawn is refused as a strict role is.
-
 Credit is a fleet-wide last band. Selection walks the ranked hosts twice.
 Pass 1 tries every candidate except plain credit and the pools ranked behind
 credit (a subscription paced to use up its window, on a host that also holds

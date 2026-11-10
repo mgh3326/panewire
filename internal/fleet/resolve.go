@@ -89,7 +89,7 @@ func (a *App) resolveCmd(ctx context.Context, args []string) error {
 	if a.Quota == nil {
 		return fail(exitConfig, "resolve needs the quota catalog")
 	}
-	route, e := a.routeFor(ctx, seatRole, role, false)
+	route, e := a.routeFor(ctx, seatRole, role)
 	if e != nil {
 		if asJSON {
 			_ = writeJSON(a.Out, resolveResult{RoutingRole: role, OutcomeCode: outcomeForError(e), Error: e.Error()})

@@ -730,8 +730,7 @@ func (a *App) selectProfile(ctx context.Context, s Spawn) (*selPlan, error) {
 	if e != nil {
 		return nil, e
 	}
-	marker := taskMarker.FindStringSubmatch(task.Title)
-	if req.route, e = a.routeFor(ctx, s.Role, s.RoutingRole, s.Strong || markerStrong(marker)); e != nil {
+	if req.route, e = a.routeFor(ctx, s.Role, s.RoutingRole); e != nil {
 		return nil, e
 	}
 	if s.Grade != "" {
@@ -739,7 +738,7 @@ func (a *App) selectProfile(ctx context.Context, s Spawn) (*selPlan, error) {
 			return nil, fail(exitConfig, "%s: --grade is not accepted for routing role %s", noLeadGradeRule, req.route.role)
 		}
 		req.grade = s.Grade
-	} else if m := marker; m != nil {
+	} else if m := taskMarker.FindStringSubmatch(task.Title); m != nil {
 		req.grade = strings.ToUpper(m[1])
 		if strings.ToUpper(m[2]) != s.T {
 			return nil, fail(exitSeatRefused, "task scale does not match --t")
@@ -800,8 +799,6 @@ func (a *App) selectFor(ctx context.Context, s Spawn, req selReq) (*selPlan, err
 			c.reason = "catalog_incomplete"
 		case !req.route.admits(row.Profile):
 			c.reason = "role_filtered"
-		case req.route.notStrong(row.Profile):
-			c.reason = reasonNotStrong
 		case !validCatalogGrade(row.Grade):
 			c.reason = "grade_invalid"
 		case row.Grade == gradeUnrated && !req.route.top():
@@ -1269,9 +1266,6 @@ func (p *selPlan) record() map[string]any {
 		rec["host_rule"] = "hosts that fit (caps, roles, grades, hub availability) ranked by load bucket, then hub score or load; on each host its present accounts in pool order; first admitted pair wins; credit, and pools ranked behind credit, are a last band tried on the hosts again (pass 2) only when no other account was admitted on any host (pass 1); expiring credit with dollars at risk is waste-risk and stays in pass 1"
 	}
 	if p.req.route != nil {
-		if p.req.route.strong {
-			rec["strong"] = true
-		}
 		rt := p.req.route.record(p.routeRefusal)
 		if p.before != nil {
 			// The role's own attempt, every profile exhausted, before the
