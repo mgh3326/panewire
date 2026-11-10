@@ -356,9 +356,18 @@ func TestSubmitUnconfirmedAtTheLoginScreenMarksLoginMissingAtOnce(t *testing.T) 
 		}
 
 		// A launch that gets through clears it, and a probe pass does too.
+		client.readiness.mu.Lock()
+		client.readiness.dirty = false
+		client.readiness.mu.Unlock()
 		client.noteLaunchResult(hubOutboundMessage{Args: []string{"-m", "agy-flash"}}, hubSpawnResult{RC: 0})
 		if got := poolLogin(t, client, "agy").Login; got != fleet.ReadinessLoginPresent {
 			t.Fatalf("login after a good launch = %q", got)
+		}
+		client.readiness.mu.Lock()
+		dirty := client.readiness.dirty
+		client.readiness.mu.Unlock()
+		if !dirty {
+			t.Fatal("a launch that cleared login_missing did not ask for a readiness refresh")
 		}
 		launchWithCapture(t, client, "agy-flash", fleet.ExitSubmitUnconfirmed, agyLoginScreen)
 		client.noteLoginProbe("agy", false)
@@ -404,5 +413,29 @@ func TestSubmitUnconfirmedAtTheLoginScreenMarksLoginMissingAtOnce(t *testing.T) 
 				t.Fatal("a failed launch no longer asks for a readiness refresh")
 			}
 		})
+	}
+}
+
+// A launch that gets through also clears a failed login probe of its kind, so a
+// host does not stay excluded when probes are off or inconclusive afterwards.
+func TestSuccessfulLaunchClearsAFailedLoginProbe(t *testing.T) {
+	client := quotaClient(t)
+	client.noteQuotaAccount("agy", agyKeyForTest)
+	client.noteLoginProbe("agy", true)
+	if got := poolLogin(t, client, "agy").Login; got != fleet.ReadinessLoginMissing {
+		t.Fatalf("login after a failed probe = %q", got)
+	}
+	client.readiness.mu.Lock()
+	client.readiness.dirty = false
+	client.readiness.mu.Unlock()
+	client.noteLaunchResult(hubOutboundMessage{Args: []string{"-m", "agy-flash"}}, hubSpawnResult{RC: 0})
+	if got := poolLogin(t, client, "agy").Login; got != fleet.ReadinessLoginPresent {
+		t.Fatalf("login after a good launch = %q, want present", got)
+	}
+	client.readiness.mu.Lock()
+	dirty := client.readiness.dirty
+	client.readiness.mu.Unlock()
+	if !dirty {
+		t.Fatal("clearing the probe state did not ask for a readiness refresh")
 	}
 }

@@ -237,7 +237,14 @@ func (client *HubClient) noteLaunchResult(message hubOutboundMessage, result hub
 		}
 		client.readiness.loginScreens[kind] = client.nowUTC()
 	} else if result.RC == 0 {
-		delete(client.readiness.loginScreens, kind)
+		// A launch that got through shows this host's login works: it clears the
+		// host's own login evidence for the kind, and the report is re-sent.
+		_, marked := client.readiness.loginScreens[kind]
+		if marked || client.readiness.probeMissing[kind] {
+			delete(client.readiness.loginScreens, kind)
+			delete(client.readiness.probeMissing, kind)
+			client.readiness.dirty = true
+		}
 	}
 	if client.readiness.dialogs == nil {
 		client.readiness.dialogs = map[string]dialogMark{}
