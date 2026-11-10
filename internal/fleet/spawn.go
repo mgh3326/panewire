@@ -1049,8 +1049,10 @@ func (a *App) admitLaunch(ctx context.Context, s Spawn, seat Seat, effort, selEf
 	}
 	// A gate alias is the pool gate for a whole family of spellings, so it
 	// cannot tell an escalation rung from a default one; the launch row can.
+	// An agy profile is gated under its own name now (hk 3859), so the launch
+	// row's escalation gate is checked for it too.
 	familyGate := s.route.familyAdmitsGate(launch.row())
-	if seat.Gate != "" && launch.Gate != "default" && !s.AllowEscalation && !familyGate {
+	if (seat.Gate != "" || seat.Kind == "agy" && launch.Gate == escalationGate) && launch.Gate != "default" && !s.AllowEscalation && !familyGate {
 		return Launch{}, "", fail(exitSeatRefused, "%s is a %s rung; pass --allow-escalation", seat.Canon, launch.Gate)
 	}
 	qr.Effort = launch.Effort

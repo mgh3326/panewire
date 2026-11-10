@@ -201,22 +201,20 @@ func TestSelectRunglessSeatNeedingEffortStaysDropped(t *testing.T) {
 	}
 }
 
-func TestSpawnAliasedEscalationSeatRefusesWithoutFlag(t *testing.T) {
+func TestSpawnEscalationAgySeatRefusesWithoutFlag(t *testing.T) {
 	a, s, f, _ := cmdFixture(t)
 	s.Profile = "agy-opus46"
-	// No shipped profile is gated under another name any more (hk 3859); give
-	// this seat an alias so the gate-alias escalation check stays covered.
-	seat := a.Policy.Profiles["agy-opus46"]
-	seat.Gate = "agy-flash38-high"
-	a.Policy.Profiles["agy-opus46"] = seat
 	q := a.Quota.(*fakeQuota)
 	q.LaunchValue = Launch{Profile: "agy-opus46", ModelID: "claude-opus-4-6-thinking", Grade: "S", Gate: "escalation", Pool: "agy"}
+	// An operator request admits an escalation row at the gate, but never
+	// stands in for --allow-escalation (hk 3859 review finding).
+	s.OperatorRequest = "hk:1"
 	e := a.Spawn(context.Background(), s)
 	if code(e) != 77 || !strings.Contains(e.Error(), "--allow-escalation") {
-		t.Fatalf("-m on an aliased escalation rung needs --allow-escalation: %v", e)
+		t.Fatalf("-m on an escalation rung needs --allow-escalation: %v", e)
 	}
 	for _, c := range q.Calls {
-		if c.GateProfile != "" && c.GateProfile != "agy-flash38-high" {
+		if c.GateProfile != "" && c.GateProfile != "agy-opus46" {
 			t.Fatalf("%+v", c)
 		}
 	}
@@ -227,8 +225,8 @@ func TestSpawnAliasedEscalationSeatRefusesWithoutFlag(t *testing.T) {
 	s.AllowEscalation = true
 	a.Spawn(context.Background(), s)
 	last := q.Calls[len(q.Calls)-1]
-	if last.GateProfile != "agy-flash38-high" || last.Effort != "" {
-		t.Fatalf("an allowed spawn gates by the alias with no effort: %+v", last)
+	if last.GateProfile != "agy-opus46" || last.Effort != "" {
+		t.Fatalf("an allowed spawn gates by its own name with no effort: %+v", last)
 	}
 }
 
