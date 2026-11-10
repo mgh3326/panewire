@@ -43,7 +43,7 @@ func strongFixture(t *testing.T, block string, extra ...CatalogRow) (*App, Spawn
 	}, extra...)
 	pools := map[string]PoolView{"claude": {Status: "ok", Class: "spend", Blocking: ptrF(40)}, "agy": riskPool(30, 8), "codex": {Status: "ok", Class: "spend", Blocking: ptrF(40)}}
 	a, s, q := selFixture(t, "A", rows, pools, []string{"claude", "agy", "codex"})
-	q.GateDo = gatePools(map[string]string{"opus": "claude", "agy-flash": "agy", "codex-sol": "codex"})
+	q.GateDo = gatePools(withAgyGates(map[string]string{"opus": "claude", "codex-sol": "codex"}))
 	serveRouting(t, routingDoc(block))
 	return a, s, q
 }
