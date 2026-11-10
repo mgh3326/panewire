@@ -110,12 +110,17 @@ The embedded OMP profiles use the `omp` binary with standard host admission:
 | `omp-sonnet` | `omp` | `anthropic/claude-sonnet-5-5` | `credit` | `anthropic-api` |
 | `omp-sol` | `omp` | `openai/gpt-6.1-sol` | `credit` | `openai-api` |
 | `omp-terra61` | `omp` | `openai/gpt-6.1-terra` | `credit` | `openai-api` |
+| `omp-haiku` | `omp` | `anthropic/claude-haiku-5-5` | `credit` | `anthropic-api` |
+| `omp-luna` | `omp` | `openai/gpt-6-luna` | `credit` | `openai-api` |
 
 OMP launches with `--model <provider/model>:<effort>` and uses `-p` for a
 headless delegate. Startup and brief delivery require a visible footer that
 matches the model, effort, and working directory. The catalog seed at
 [`catalog/omp-credit-seed.json`](catalog/omp-credit-seed.json) mirrors native
-grades and gates for each effort. The desk publishes the seed after merge.
+grades and gates for each effort. The `omp-haiku` and `omp-luna` rungs are
+`unrated`: a graded `-m auto` spawn never picks them, and only a pinned spawn
+with `--containment` reaches them until routing-policy measures them. The desk
+publishes the seed after merge.
 
 ## `[hub]`
 
@@ -987,7 +992,7 @@ selectors `anthropic/claude-opus-5-5`, `anthropic/claude-fable-5-2`,
 `openai/gpt-6.1-sol`, and `openai/gpt-6-astra`. The Fable 5.1 selector
 `anthropic/claude-fable-5-1` is still accepted as the rollback path.
 The shipped `omp-opus` and `omp-sol` profiles qualify. `omp-sonnet` and
-`omp-terra61` cannot consult. An `agy` or `pi` seat running an
+`omp-terra61`, `omp-haiku`, and `omp-luna` cannot consult. An `agy` or `pi` seat running an
 Anthropic model is ineligible. These constraints also apply to a wildcard
 in the v1 table and to explicit profiles.
 

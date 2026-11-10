@@ -1459,6 +1459,32 @@
         "counsel"
       ]
     },
+    "omp-haiku": {
+      "canon": "omp-haiku",
+      "kind": "omp",
+      "family": "anthropic",
+      "capability": "standard",
+      "effort": "high",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel"
+      ]
+    },
+    "omp-luna": {
+      "canon": "omp-luna",
+      "kind": "omp",
+      "family": "openai",
+      "capability": "standard",
+      "effort": "high",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel"
+      ]
+    },
     "omp-dsflash41": {
       "canon": "omp-dsflash41",
       "kind": "omp",
