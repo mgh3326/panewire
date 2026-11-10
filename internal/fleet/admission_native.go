@@ -86,6 +86,8 @@ type gateReceipt struct {
 	Source             *string  `json:"source"`
 	ManualIDs          []string `json:"manual_observation_ids"`
 	Purpose            *string  `json:"purpose"`
+	// GateCode is set only on a refusal no reading decided (admissionVerdict.GateCode).
+	GateCode string `json:"gate_code,omitempty"`
 }
 
 // nativeGate is panewire's own gate run: the verdict as the exit status and
@@ -95,7 +97,12 @@ type gateReceipt struct {
 // a refusal. The shadow run is not live: it only reads.
 func (a *App) nativeGate(ctx context.Context, r QuotaRequest, live bool) Result {
 	d, readingKey := a.nativeVerdict(ctx, r, live)
-	receipt := gateReceipt{Schema: "scopefuel.gate.v1", GeneratedAt: a.Now().UTC().Format(time.RFC3339Nano), JudgedBy: "panewire", AccountKey: r.AccountKey, OK: d.OK, ExitCode: d.Exit,
+	return verdictResult(a.Now(), r, d, readingKey)
+}
+
+// verdictResult is a verdict as the gate's exit status and JSON receipt.
+func verdictResult(now time.Time, r QuotaRequest, d admissionVerdict, readingKey string) Result {
+	receipt := gateReceipt{Schema: "scopefuel.gate.v1", GeneratedAt: now.UTC().Format(time.RFC3339Nano), JudgedBy: "panewire", AccountKey: r.AccountKey, OK: d.OK, ExitCode: d.Exit, GateCode: d.GateCode,
 		Profile: d.Profile, Pool: d.Pool, Reason: d.Reason, UsedPct: d.UsedPct, Unmeasurable: d.Exit == gateUnmeasurable, RoleDenied: d.Exit == gateRoleDenied, Unsubscribed: d.Exit == gateUnsubscribed,
 		Alternatives: d.Alternatives, MissingWindows: d.Missing, GateBasis: d.Basis, E6Arm: d.E6Arm, Inflight: d.Inflight, EscalationOverride: d.EscalationOverride, ManualIDs: d.ManualIDs}
 	if readingKey != r.AccountKey {
@@ -118,30 +125,63 @@ func (a *App) nativeGate(ctx context.Context, r QuotaRequest, live bool) Result 
 	return Result{Code: d.Exit, Out: string(out)}
 }
 
+func invalidVerdict(req admissionRequest) admissionVerdict {
+	return admissionVerdict{Profile: req.Profile, Exit: gateInvalid, Missing: []string{}, Alternatives: []string{}, ManualIDs: []string{}}
+}
+
+// requestVerdict is the gate's first judgment: the request against the catalog
+// and policy with no reading. A refusal it gives other than an unmeasurable one
+// is decided by the request, the catalog or policy alone and carries its
+// GateCode. invalid is true when d is the final verdict because a gate input
+// (the pool policy or the catalog) is unusable.
+func (a *App) requestVerdict(ctx context.Context, r QuotaRequest) (req admissionRequest, in admissionInputs, d admissionVerdict, invalid bool) {
+	req = admissionRequest{Profile: firstNonempty(r.GateProfile, r.Profile), Effort: r.Effort, Role: r.Role, Purpose: r.Purpose, OperatorRequest: r.OperatorRequest, RequestedBy: r.RequestedBy, E6Arm: firstNonempty(r.E6Arm, os.Getenv("PACELEVER_E6_ARM"))}
+	policy, err := loadAdmissionPolicy(os.Getenv, a.Home)
+	if err != nil {
+		return req, in, invalidVerdict(req).refuse(gateInvalid, err.Error()), true
+	}
+	rows, err := a.benchCatalog(ctx)
+	if err != nil {
+		return req, in, invalidVerdict(req).refuse(gateInvalid, "bench catalog unavailable"), true
+	}
+	in = admissionInputs{Now: a.Now(), Rows: admissionRows(rows), Policy: policy}
+	d = in.admit(req)
+	if !d.OK && d.Exit != gateUnmeasurable {
+		d.GateCode = gateReasonCode(d.Reason)
+	}
+	return req, in, d, false
+}
+
+// RequestRefusal is the gate's refusal of a request no reading can lift (role,
+// subscription, request shape, catalog, excluded pool), as the typed refusal
+// Gate would give, or nil when the request is admitted or needs a reading. It
+// reads no account, so one answer holds for every host.
+func (q admissionQuota) RequestRefusal(ctx context.Context, r QuotaRequest) error {
+	_, _, d, invalid := q.app.requestVerdict(ctx, r)
+	if invalid || d.GateCode == "" {
+		return nil
+	}
+	_, err := gateResult(verdictResult(q.app.Now(), r, d, ""), r)
+	return err
+}
+
 // nativeVerdict follows `pacelever gate`: a first judgment with no readings
 // settles every refusal no reading can lift (role, subscription, request
 // shape, catalog, excluded pool); only an admit or an unmeasurable one goes on
 // to the account's stored reading. It returns the account key it read.
 func (a *App) nativeVerdict(ctx context.Context, r QuotaRequest, live bool) (admissionVerdict, string) {
-	req := admissionRequest{Profile: firstNonempty(r.GateProfile, r.Profile), Effort: r.Effort, Role: r.Role, Purpose: r.Purpose, OperatorRequest: r.OperatorRequest, RequestedBy: r.RequestedBy, E6Arm: firstNonempty(r.E6Arm, os.Getenv("PACELEVER_E6_ARM"))}
-	invalid := admissionVerdict{Profile: req.Profile, Exit: gateInvalid, Missing: []string{}, Alternatives: []string{}, ManualIDs: []string{}}
-	policy, err := loadAdmissionPolicy(os.Getenv, a.Home)
-	if err != nil {
-		return invalid.refuse(gateInvalid, err.Error()), ""
+	req, in, d, invalid := a.requestVerdict(ctx, r)
+	if invalid {
+		return d, ""
 	}
-	rows, err := a.benchCatalog(ctx)
-	if err != nil {
-		return invalid.refuse(gateInvalid, "bench catalog unavailable"), ""
-	}
-	in := admissionInputs{Now: a.Now(), Rows: admissionRows(rows), Policy: policy}
-	d := in.admit(req)
+	policy := in.Policy
 	key := r.AccountKey
 	if key != "" {
 		if !validAccountKey(key) {
-			return invalid.refuse(gateInvalid, "invalid --account-key"), ""
+			return invalidVerdict(req).refuse(gateInvalid, "invalid --account-key"), ""
 		}
 		if accountPool(key) != d.Pool {
-			return invalid.refuse(gateInvalid, "--account-key does not match profile pool"), ""
+			return invalidVerdict(req).refuse(gateInvalid, "--account-key does not match profile pool"), ""
 		}
 	}
 	if !d.OK && d.Exit != gateUnmeasurable {

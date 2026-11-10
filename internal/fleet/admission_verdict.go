@@ -7,6 +7,9 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/mgh3326/panewire/internal/fleetevent"
+	"github.com/mgh3326/panewire/internal/textbound"
 )
 
 // The admission verdict is panewire's port of pacelever v0.3.28's spawn gate
@@ -127,6 +130,9 @@ type admissionVerdict struct {
 	Source             string
 	ManualIDs          []string
 	Inflight           string
+	// GateCode names a refusal the request, the catalog or policy decided
+	// without any quota reading (gateReasonCode of Reason); empty otherwise.
+	GateCode string
 }
 
 func (d admissionVerdict) refuse(code int, reason string) admissionVerdict {
@@ -138,6 +144,19 @@ func (d admissionVerdict) refuse(code int, reason string) admissionVerdict {
 type gateDenial struct {
 	code int
 	msg  string
+}
+
+// gateCodeMax bounds a gate code so "gate_blocked:"+code fits a 64-byte
+// placement skip reason (fleetevent.Code).
+const gateCodeMax = 48
+
+// gateReasonCode is the code of a gate refusal reason: its leading word before
+// the first colon ("operator_request_not_applicable: ordinary placement"), or
+// the whole reason as a code when it has no colon ("rung is retired in the
+// catalog" -> "rung_is_retired_in_the_catalog").
+func gateReasonCode(reason string) string {
+	head, _, _ := strings.Cut(reason, ":")
+	return textbound.PrefixWithin(fleetevent.Code(head), gateCodeMax)
 }
 
 func admissionNormalize(s string) string { return strings.ToLower(strings.TrimSpace(s)) }
