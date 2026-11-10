@@ -407,17 +407,21 @@ func TestOMPCatalogSeed(t *testing.T) {
 	if err := json.Unmarshal(b, &seed); err != nil {
 		t.Fatal(err)
 	}
-	wantGrades := map[string][]string{"omp-opus": {"S", "S+", "S+", "S+", "S+"}, "omp-sonnet": {"C", "C", "A", "A+", "A+"}, "omp-sol": {"C", "C", "C", "S+", "S+"}, "omp-terra61": {"C", "C", "C", "C", "C"}}
-	wantModels := map[string]string{"omp-opus": "anthropic/claude-opus-5-5", "omp-sonnet": "anthropic/claude-sonnet-5-5", "omp-sol": "openai/gpt-6.1-sol", "omp-terra61": "openai/gpt-6.1-terra"}
-	if len(seed.Catalog) != 20 {
-		t.Fatalf("want four profiles with five rungs, got %d", len(seed.Catalog))
+	unrated := []string{"unrated", "unrated", "unrated", "unrated", "unrated"}
+	wantGrades := map[string][]string{"omp-opus": {"S", "S+", "S+", "S+", "S+"}, "omp-sonnet": {"C", "C", "A", "A+", "A+"}, "omp-sol": {"C", "C", "C", "S+", "S+"}, "omp-terra61": {"C", "C", "C", "C", "C"}, "omp-haiku": unrated, "omp-luna": unrated}
+	wantModels := map[string]string{"omp-opus": "anthropic/claude-opus-5-5", "omp-sonnet": "anthropic/claude-sonnet-5-5", "omp-sol": "openai/gpt-6.1-sol", "omp-terra61": "openai/gpt-6.1-terra", "omp-haiku": "anthropic/claude-haiku-5-5", "omp-luna": "openai/gpt-6-luna"}
+	// The two new seats are unrated (hk 3875 decision) and carry that ref;
+	// the original four keep the seed's ref.
+	wantRef := map[string]string{"omp-haiku": "hk:task/3875", "omp-luna": "hk:task/3875"}
+	if len(seed.Catalog) != 30 {
+		t.Fatalf("want six profiles with five rungs, got %d", len(seed.Catalog))
 	}
 	seen := map[string]bool{}
 	for _, row := range seed.Catalog {
 		i := slices.Index([]string{"low", "medium", "high", "xhigh", "max"}, row.Effort)
 		grades := wantGrades[row.Profile]
 		key := row.Profile + "@" + row.Effort
-		if len(grades) == 0 || i < 0 || seen[key] || row.Grade != grades[i] || row.ModelID != wantModels[row.Profile] || row.DecidedBy != "operator-desk" || row.DeviationRef != "hk:task/2476" {
+		if len(grades) == 0 || i < 0 || seen[key] || row.Grade != grades[i] || row.ModelID != wantModels[row.Profile] || row.DecidedBy != "operator-desk" || row.DeviationRef != firstNonEmpty(wantRef[row.Profile], "hk:task/2476") {
 			t.Fatalf("invalid seed row: %+v", row)
 		}
 		seen[key] = true
