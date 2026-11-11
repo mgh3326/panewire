@@ -65,6 +65,22 @@ func TestQuotaStopTaskLookupAcceptsStringPriority(t *testing.T) {
 	}
 }
 
+func TestQuotaStopTaskLookupRejectsInvalidPriority(t *testing.T) {
+	for name, answer := range map[string]string{
+		"unparseable string": `{"priority":"urgent","expected":"4h","refs":{"job_id":"job-active"}}`,
+		"non-integer number": `{"priority":1.5,"expected":"4h","refs":{"job_id":"job-active"}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			rig := newRoleStopRig(t, "worker", time.Hour, roleStopTask)
+			rig.q.hk.task = func(context.Context, string) ([]byte, error) { return []byte(answer), nil }
+			rig.run()
+			if decision, reason := rig.decision(t); decision != "handover" || reason != "task_unavailable" {
+				t.Fatalf("decision=%s reason=%s, want handover task_unavailable", decision, reason)
+			}
+		})
+	}
+}
+
 func TestQuotaStopTaskListAcceptsStringPriorityWithoutReceiptID(t *testing.T) {
 	rig := newRoleStopRig(t, "worker", time.Hour, `{"tasks":[{"priority":"3","expected":"4h","refs":{"job_id":"job-active"}}]}`)
 	for _, name := range []string{"00001-job.claimed.json", "00002-job.spawned.json"} {

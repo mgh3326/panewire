@@ -355,19 +355,32 @@ func cliQuotaTask(code int, out string, job, inherited string) (int, time.Durati
 	if json.Unmarshal([]byte(out), &v) != nil || len(v.Tasks) >= 1000 {
 		return 0, 0, false
 	}
+	priorities := make([]int, len(v.Tasks))
+	for i, task := range v.Tasks {
+		switch value := task.Priority.(type) {
+		case nil:
+			// A missing or null priority decoded as zero into the old int field.
+		case float64:
+			if value != float64(int(value)) {
+				return 0, 0, false
+			}
+			priorities[i] = int(value)
+		case string:
+			priority, err := strconv.Atoi(strings.TrimSpace(value))
+			if err != nil {
+				return 0, 0, false
+			}
+			priorities[i] = priority
+		default:
+			return 0, 0, false
+		}
+	}
 	n, priority := 0, 0
 	var duration time.Duration
-	for _, t := range v.Tasks {
+	for i, t := range v.Tasks {
 		if t.Refs.Job == job || inherited != "" && t.Refs.Job == inherited {
 			n++
-			switch value := t.Priority.(type) {
-			case float64:
-				if value == float64(int(value)) {
-					priority = int(value)
-				}
-			case string:
-				priority, _ = strconv.Atoi(strings.TrimSpace(value))
-			}
+			priority = priorities[i]
 			if t.Expected != nil {
 				duration, _ = quotaDuration(*t.Expected)
 			}
@@ -420,6 +433,8 @@ func TestQuotaStopCLIHTTPParity(t *testing.T) {
 		{"no match", 200, `{"tasks":[{"priority":1,"refs":{"job_id":"job-other"}}]}`, 0, 0, false},
 		{"no tasks", 200, `{"tasks":[]}`, 0, 0, false},
 		{"string priority", 200, `{"tasks":[{"priority":"2","refs":{"job_id":"job-active"}}]}`, 2, 0, true},
+		{"invalid string priority", 200, `{"tasks":[{"priority":"urgent","refs":{"job_id":"job-active"}}]}`, 0, 0, false},
+		{"non-integer priority", 200, `{"tasks":[{"priority":1.5,"refs":{"job_id":"job-active"}}]}`, 0, 0, false},
 		{"numeric expected", 200, `{"tasks":[{"priority":2,"expected":4,"refs":{"job_id":"job-active"}}]}`, 0, 0, false},
 		{"non-string job_id", 200, `{"tasks":[{"priority":2,"refs":{"job_id":7}}]}`, 0, 0, false},
 		{"a full page", 200, `{"tasks":[` + strings.Join(append(many[:999:999], `{"priority":2,"refs":{"job_id":"job-active"}}`), ",") + `]}`, 0, 0, false},

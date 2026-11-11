@@ -126,17 +126,19 @@ func quotaTaskID(value any) string {
 	return fmt.Sprint(value)
 }
 
-func quotaTaskPriority(value any) int {
+func quotaTaskPriority(value any) (int, bool) {
 	switch n := value.(type) {
+	case nil:
+		return 0, true
 	case float64:
 		if n == float64(int(n)) {
-			return int(n)
+			return int(n), true
 		}
 	case string:
-		priority, _ := strconv.Atoi(strings.TrimSpace(n))
-		return priority
+		priority, err := strconv.Atoi(strings.TrimSpace(n))
+		return priority, err == nil
 	}
-	return 0
+	return 0, false
 }
 
 func (q *quotaStopManager) jobForPane(ctx context.Context, pane string) (HubActiveJob, bool) {
@@ -279,11 +281,16 @@ func (q *quotaStopManager) task(ctx context.Context, job HubActiveJob, inherited
 			q.logger.Warn("quota-stop task lookup failed", "job", job.JobID, "task", taskID, "error", "unreadable_or_unbound_task")
 			return 0, 0, false
 		}
+		priority, valid := quotaTaskPriority(t.Priority)
+		if !valid {
+			q.logger.Warn("quota-stop task lookup failed", "job", job.JobID, "task", taskID, "error", "invalid_priority")
+			return 0, 0, false
+		}
 		var duration time.Duration
 		if t.Expected != nil {
 			duration, _ = quotaDuration(*t.Expected)
 		}
-		return quotaTaskPriority(t.Priority), duration, true
+		return priority, duration, true
 	}
 	b, err := q.hk.tasks(ctx)
 	if err != nil {
@@ -305,9 +312,14 @@ func (q *quotaStopManager) task(ctx context.Context, job HubActiveJob, inherited
 	priority := 0
 	var duration time.Duration
 	for _, t := range v.Tasks {
+		parsedPriority, valid := quotaTaskPriority(t.Priority)
+		if !valid {
+			q.logger.Warn("quota-stop task lookup failed", "job", job.JobID, "error", "invalid_priority")
+			return 0, 0, false
+		}
 		if t.Refs.Job == job.JobID || inherited != "" && t.Refs.Job == inherited {
 			n++
-			priority = quotaTaskPriority(t.Priority)
+			priority = parsedPriority
 			if t.Expected != nil {
 				duration, _ = quotaDuration(*t.Expected)
 			}
