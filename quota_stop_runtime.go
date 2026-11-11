@@ -312,13 +312,13 @@ func (q *quotaStopManager) task(ctx context.Context, job HubActiveJob, inherited
 	priority := 0
 	var duration time.Duration
 	for _, t := range v.Tasks {
-		parsedPriority, valid := quotaTaskPriority(t.Priority)
-		if !valid {
-			q.logger.Warn("quota-stop task lookup failed", "job", job.JobID, "error", "invalid_priority")
-			return 0, 0, false
-		}
 		if t.Refs.Job == job.JobID || inherited != "" && t.Refs.Job == inherited {
 			n++
+			parsedPriority, valid := quotaTaskPriority(t.Priority)
+			if !valid {
+				q.logger.Warn("quota-stop task lookup failed", "job", job.JobID, "error", "invalid_priority")
+				return 0, 0, false
+			}
 			priority = parsedPriority
 			if t.Expected != nil {
 				duration, _ = quotaDuration(*t.Expected)

@@ -99,3 +99,23 @@ func TestQuotaStopTaskListAcceptsStringPriorityWithoutReceiptID(t *testing.T) {
 		t.Fatalf("decision=%s reason=%s, want wait reset_within_expected", decision, reason)
 	}
 }
+
+func TestQuotaStopTaskListIgnoresUnrelatedInvalidPriority(t *testing.T) {
+	answer := `{"tasks":[{"priority":"urgent","refs":{"job_id":"other-job"}},{"priority":3,"expected":"4h","refs":{"job_id":"job-active"}}]}`
+	rig := newRoleStopRig(t, "worker", time.Hour, answer)
+	for _, name := range []string{"00001-job.claimed.json", "00002-job.spawned.json"} {
+		path := filepath.Join(rig.manager.inboxRoot, "jobs", "job-active", "events", name)
+		b, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		updated := strings.ReplaceAll(string(b), `,"task_id":"42"`, "")
+		if err := os.WriteFile(path, []byte(updated), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rig.run()
+	if decision, reason := rig.decision(t); decision != "wait" || reason != "reset_within_expected" {
+		t.Fatalf("decision=%s reason=%s, want wait reset_within_expected", decision, reason)
+	}
+}
