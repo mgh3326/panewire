@@ -816,7 +816,7 @@ func relayInjectForHarnessGuarded(ctx context.Context, pane, harness, text strin
 		returnSpent = true
 	}
 	result := relayVerifyOutcome(ctx, pane, harness, text, presend.visible, "", presendQueued, returnSpent, relayReadPane(ctx, pane, harness).withPresend(presend).withStaleScreen(ctx, pane))
-	if !known || !adapter.observe || !strings.HasPrefix(result.Evidence, "unproven:") || len(relayNoncesIn(text)) == 0 {
+	if !known || !adapter.observe || (!strings.HasPrefix(result.Evidence, "unproven:") && !(strings.EqualFold(harness, "claude") && result.Evidence == "after_return:composer_divider")) || len(relayNoncesIn(text)) == 0 {
 		return result
 	}
 	// A harness can accept input while busy before it appears in either read.

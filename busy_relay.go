@@ -586,16 +586,19 @@ func (manager *relayBusyManager) inject(ctx context.Context, group []relayHeld, 
 // stopWithoutRetry ends a held item whose message may already be in the pane
 // (#547): re-injecting it could duplicate it, so the row is removed without a
 // rearm. relay.dropped clears the hub's held projection; the hub's durable
-// row stays undelivered, and a later hub replay meets devinRelayInject's
-// presend check before anything is typed.
-func (manager *relayBusyManager) stopWithoutRetry(item relayHeld, harness string) {
+// row stays undelivered. The drop reports an actionable reason.
+func (manager *relayBusyManager) stopWithoutRetry(item relayHeld, harness, evidence string) {
 	if item.EventID == 0 || item.Lane == "" {
 		return
 	}
 	if store := manager.client.relayStore(); store != nil {
 		_, _ = store.DeleteRelayHeld(context.Background(), item.EventID)
 	}
-	manager.emit("relay.dropped", relayDroppedPayload{JobID: item.JobID, Pane: item.Pane, Lane: item.Lane, OriginalEventID: item.EventID, Reason: "maybe_in_pane", Harness: harness})
+	reason := relayDroppedCheckPane
+	if strings.HasPrefix(evidence, "presend:unproven:read_failed") {
+		reason = relayDroppedPaneReadFailed
+	}
+	manager.emit("relay.dropped", relayDroppedPayload{JobID: item.JobID, Pane: item.Pane, Lane: item.Lane, OriginalEventID: item.EventID, Reason: reason, Harness: harness})
 }
 
 // relayAckReason keeps a reason inside the hub's relay ack bounds: one line,
@@ -1207,7 +1210,9 @@ func (manager *relayBusyManager) deliver(parent context.Context, items []relayHe
 		result := manager.inject(ctx, group, text)
 		cancel()
 		immediate := relayGroupImmediate(group)
+		previousUncertain := false
 		if immediate && staleScreen == "" && relayRetriesOnce(result) {
+			previousUncertain = (result.Evidence == "prompt_failed" && strings.EqualFold(result.Harness, "devin")) || (result.Outcome == relayInjectMaybeInPane && !strings.HasPrefix(result.Evidence, "presend:"))
 			// hk 3276: a worker directive is not held for a quieter pane, so a
 			// send that was rejected or never showed up is typed once more
 			// right away. The row's nonce is unchanged, and the text already
@@ -1221,6 +1226,13 @@ func (manager *relayBusyManager) deliver(parent context.Context, items []relayHe
 		}
 		switch result.Outcome {
 		case relayInjectRetryable:
+			if previousUncertain {
+				for _, item := range group {
+					manager.emit("relay.unconfirmed", relayAckPayload{JobID: item.JobID, Pane: item.Pane, Reason: relayAckReason("maybe_in_pane previous_attempt_unproven " + result.Evidence), OriginalEventID: item.EventID})
+					manager.stopWithoutRetry(item, result.Harness, "previous_attempt_unproven:"+result.Evidence)
+				}
+				continue
+			}
 			maxAttempts := relayMaxInjectAttempts
 			if adapter, known := relayAdapterFor(result.Harness); known {
 				maxAttempts = adapter.injectAttempts()
@@ -1236,9 +1248,13 @@ func (manager *relayBusyManager) deliver(parent context.Context, items []relayHe
 			}
 			continue
 		case relayInjectMaybeInPane:
+			dropEvidence := result.Evidence
+			if previousUncertain {
+				dropEvidence = "previous_attempt_unproven:" + dropEvidence
+			}
 			for _, item := range group {
 				manager.emit("relay.unconfirmed", relayAckPayload{JobID: item.JobID, Pane: item.Pane, Reason: relayAckReason("maybe_in_pane " + result.Evidence), OriginalEventID: item.EventID})
-				manager.stopWithoutRetry(item, result.Harness)
+				manager.stopWithoutRetry(item, result.Harness, dropEvidence)
 			}
 			continue
 		}
@@ -1260,7 +1276,7 @@ func (manager *relayBusyManager) deliver(parent context.Context, items []relayHe
 		for _, item := range group {
 			if !proven(item) {
 				manager.emit("relay.unconfirmed", relayAckPayload{JobID: item.JobID, Pane: item.Pane, Reason: relayAckReason("maybe_in_pane nonce_missing " + result.Evidence), OriginalEventID: item.EventID})
-				manager.stopWithoutRetry(item, result.Harness)
+				manager.stopWithoutRetry(item, result.Harness, result.Evidence)
 				continue
 			}
 			landed = append(landed, item)
@@ -1327,6 +1343,10 @@ func relayRetriesOnce(result relayInjectResult) bool {
 	case relayInjectRetryable:
 		return true
 	case relayInjectMaybeInPane:
+		// Omp has no composer rule to guard a repeat after a send.
+		if strings.EqualFold(result.Harness, "omp") && !strings.HasPrefix(result.Evidence, "presend:") {
+			return false
+		}
 		// "unproven:..." (also behind a "presend:" prefix) is the reads
 		// showing nothing: no adapter, an unreadable pane, an empty or
 		// unlocated composer. The scope contract is one retry for all of them;

@@ -428,7 +428,7 @@ func TestTask547DevinMaybeInPaneIsNeverReinjected(t *testing.T) {
 		t.Fatalf("relay.unconfirmed=%s err=%v, want maybe_in_pane reason with evidence", unconfirmed.Payload, err)
 	}
 	dropped := awaitClientEvent(t, task547AwaitTimeout, events, "relay.dropped")
-	if !strings.Contains(string(dropped.Payload), `"reason":"maybe_in_pane"`) {
+	if !strings.Contains(string(dropped.Payload), `"reason":"delivery_uncertain_check_pane"`) {
 		t.Fatalf("relay.dropped=%s", dropped.Payload)
 	}
 	time.Sleep(300 * time.Millisecond)

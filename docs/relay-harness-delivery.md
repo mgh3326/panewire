@@ -27,7 +27,10 @@ other type keep their delivery policy, and so still wait for an idle pane
 ([R27](r27-busy-relay.md)).
 
 A Claude pane queues input typed mid-turn for its next turn, and codex takes
-it directly. Both show it on screen, which is the proof.
+it directly. Both show it on screen, which is the proof. When a Claude composer
+still shows the text immediately after the gated return, the relay observes the
+screen for the existing eight-second window without typing or pressing return
+again. A nonce in the queue or transcript proves delivery.
 
 `panewire prompt --uptake ...` refuses a working target (exit 6), because an
 idle-to-working transition cannot be seen on a pane that is already working.
@@ -48,7 +51,7 @@ report, has no adapter and no delivery proof.
 | codex | same as claude; the working case is `queued_banner` ("Messages to be submitted after next tool call") | observed 8 s |
 | devin | nonce in the transcript, or devin's own queue banner (`nonce_echo`, `devin_queue_banner`) | no |
 | grok | nonce on screen and herdr reports idle/done before the send and `working` after it (`nonce_echo+status_working`) | observed 8 s |
-| omp | same as grok | observed 8 s |
+| omp | same as grok; an unproven send is never retyped | observed 8 s |
 | cmd | same as grok, typed through `pane send-text` plus `pane send-keys return`; the composer is found with claude's rule (below); `workingUnprovable`: a directive waits for idle or done; nothing is typed into it while working, and a held row waits for idle while the job is live, unless its pane is proven stuck at working (below); one row per inject | observed 8 s |
 | anything else | none | n/a |
 
@@ -143,9 +146,10 @@ Grok and omp have no captured screens to read a composer or queue banner
 from, so their proof needs neither: a paste that was never submitted shows the
 nonce too, but it does not start a turn. That rule needs an idle or done pane
 before the send. A directive typed into a *working* grok or omp pane is
-therefore injected but stays unconfirmed (one retry, then the escalation below)
-until a live capture gives a transcript rule that tells a queued message from a
-pending paste.
+therefore injected but stays unconfirmed until a live capture gives a transcript
+rule that tells a queued message from a pending paste. An unproven omp send is
+not retyped: the pane may already contain it. A failed pre-send read can be
+retried safely because no text has been sent.
 
 cmd uses the same proof, and its transport is different: herdr answers
 `agent get` and `agent read` for a cmd pane but refuses `agent prompt` and
@@ -199,13 +203,14 @@ the table. Everything else is `relay.unconfirmed`:
 - a send herdr rejected (`agent prompt`), or a send herdr accepted whose proof never shows
   (`unproven:...`, including a harness with no adapter, and an unreadable pane
   before or after the send, devin's included),
-  is typed once more at once (a directive) and then dropped
-  as `inject_failed_max_attempts` or `maybe_in_pane`. The text already tells the
+  is typed once more at once (a directive), except for an unproven omp send,
+  and then dropped as `inject_failed_max_attempts`, `pane_read_failed`, or
+  `delivery_uncertain_check_pane`. The text already tells the
   reader that seeing it twice is not a reason to re-run it;
-- any other `maybe_in_pane` verdict (a foreign draft in the composer, a changed
+- any other uncertain verdict (a foreign draft in the composer, a changed
   harness, an unreadable pane, a cmd `pane send-text` failure) is final,
   because the text may already be in the pane;
-- a harness with no adapter is `maybe_in_pane` with `unproven:no_adapter`.
+- a harness with no adapter is unconfirmed with `unproven:no_adapter`.
 
 Messages that are not worker directives keep their earlier budgets: a rejected
 send is re-held until the pane is idle, up to 3 sends (devin 2), and an unproven
@@ -216,8 +221,13 @@ or `blocked` item stays unread until the worker runs `panewire inbox ack <id>`.
 
 ## Escalation
 
+The internal verdict `maybe_in_pane` is not the terminal inbox reason.
+`pane_read_failed` means the pre-send pane read failed
+and no text was sent. `delivery_uncertain_check_pane` means delivery could not
+be proven; inspect the pane before resending. Both appear in inbox status.
+
 When a node drops an event as `inject_failed_max_attempts`,
-`maybe_in_pane` or `working_wait_expired`, the hub tells the job's design lane once. A handoffkeep outage
+`maybe_in_pane`, `pane_read_failed`, `delivery_uncertain_check_pane` or `working_wait_expired`, the hub tells the job's design lane once. A handoffkeep outage
 while the hub reads the row or writes the escalation is retried (2 s, 10 s,
 1 min, 5 min) until the escalation is durable. The design lane is
 the parent of the worker lane's route (the lane `job.escalate` already reaches),
