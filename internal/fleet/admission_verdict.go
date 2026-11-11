@@ -50,7 +50,6 @@ type admissionRow struct {
 	Profile, Effort, ModelID, Pool, Grade, Gate, Group string
 	Placed                                             bool
 	Retired                                            bool
-	NoThinking                                         bool
 }
 
 // admissionRows reads the bench catalog rows. A rung is placed when it has a
@@ -58,7 +57,7 @@ type admissionRow struct {
 func admissionRows(rows []CatalogRow) []admissionRow {
 	out := make([]admissionRow, 0, len(rows))
 	for _, r := range rows {
-		out = append(out, admissionRow{Profile: r.Profile, Effort: r.Effort, ModelID: r.ModelID, Pool: r.Pool, Grade: r.Grade, Gate: r.Gate, Group: r.meteringGroup(), Placed: r.Grade != gradeUnrated, Retired: r.RetiredAt != nil, NoThinking: r.NoThinking})
+		out = append(out, admissionRow{Profile: r.Profile, Effort: r.Effort, ModelID: r.ModelID, Pool: r.Pool, Grade: r.Grade, Gate: r.Gate, Group: r.meteringGroup(), Placed: r.Grade != gradeUnrated, Retired: r.RetiredAt != nil})
 	}
 	return out
 }
@@ -106,6 +105,10 @@ type admissionInputs struct {
 	Policy   admissionPolicy
 	Readings map[string]admissionReading
 	Manual   map[string][]admissionManual
+	// Seats is the embedded seat policy, keyed by profile. The gate reads
+	// "this model has no thinking levels" from the seat; the catalog row
+	// carries only the rung's profile, effort, model id, pool and grade.
+	Seats map[string]Seat
 	// AccountScoped judges a named account: a free rung needs the account's
 	// stored free-bucket state.
 	AccountScoped bool
@@ -337,7 +340,7 @@ func (in admissionInputs) resolveRow(req admissionRequest, allowUnrated bool) (a
 	if in.profileCredit(profile) {
 		allowed := requested == "low" || requested == "high" || requested == "max"
 		if requested == "off" {
-			allowed = slices.ContainsFunc(in.profileRows(profile), func(r admissionRow) bool { return r.Effort == "off" && r.Pool == commandcodePool && r.NoThinking })
+			allowed = in.Seats[profile].NoThinking && slices.ContainsFunc(in.profileRows(profile), func(r admissionRow) bool { return r.Effort == "off" && r.Pool == commandcodePool })
 		}
 		if strings.HasPrefix(profile, "pi-") {
 			allowed = slices.Contains([]string{"off", "minimal", "low", "medium", "high", "xhigh", "max"}, requested)

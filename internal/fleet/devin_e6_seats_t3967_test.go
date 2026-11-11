@@ -51,11 +51,11 @@ func TestDevinE6SeatsPinnedSpawnResolvesLikeDS41Max(t *testing.T) {
 			}
 			catalog := overlayLaunchCatalog(found, false)
 			req := admissionRequest{Profile: profile, Effort: "", Role: "worker", E6Arm: profile + "@"}
-			resolved, effort, why := catalog.resolveRow(req, true)
+			resolved, effort, why := catalog.resolveRow(req, true, a.Policy.Profiles)
 			if why != "" || resolved.ModelID != want.model || resolved.Pool != "devin" || effort != "" {
 				t.Fatalf("resolved row=%+v effort=%q why=%q", resolved, effort, why)
 			}
-			in := admissionInputs{Rows: admissionRows(found)}
+			in := admissionInputs{Rows: admissionRows(found), Seats: a.Policy.Profiles}
 			if _, _, _, denial := in.resolveRow(req, true); denial != nil {
 				t.Fatalf("admission refused the pinned arm: %+v", denial)
 			}

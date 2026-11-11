@@ -474,11 +474,21 @@ the pool:
 | `cmd-dsflash41` | cmd | the cmd harness's Command Code provider | worker, tester | Operator 2026-11-07 (hk 3248): no builder. |
 | `omp-dsflash41` | omp | omp's `commandcode` provider, gated by the host's `omp_commandcode` capability | worker, tester, reviewer | The policy seat lists reviewer, but admission refuses it on a credit rung (see below). |
 | `omp-musespark13` | omp | `commandcode/meta/muse-spark-1.3`, gated by `omp_commandcode` | worker, tester, reviewer | low, high, max; unrated until routing-policy grades it. |
-| `omp-argon4` | omp | `commandcode/google/gemini-4-argon`, gated by `omp_commandcode` | worker, tester, reviewer | off only; omp reports no thinking levels for this model. |
-| `omp-mimo26pro` | omp | `commandcode/xiaomi/mimo-v2.6-pro`, gated by `omp_commandcode` | worker, tester, reviewer | off only; omp reports no thinking levels for this model. |
+| `omp-argon4` | omp | `commandcode/google/gemini-4-argon`, gated by `omp_commandcode` | worker, tester, reviewer | off only; no thinking levels. |
+| `omp-mimo26pro` | omp | `commandcode/xiaomi/mimo-v2.6-pro`, gated by `omp_commandcode` | worker, tester, reviewer | off only; no thinking levels. |
 | `omp-cc-opus55` | omp | `commandcode/claude-opus-5-5`, gated by `omp_commandcode` | worker, tester, reviewer | low, high, max; separate from `omp-opus`. |
 | `omp-cc-sonnet55` | omp | `commandcode/claude-sonnet-5-5`, gated by `omp_commandcode` | worker, tester, reviewer | low, high, max; separate from `omp-sonnet`. |
-| `omp-cc-sol61` | omp | `commandcode/gpt-6.1-sol`, gated by `omp_commandcode` | worker, tester, reviewer | off only; omp reports no thinking levels; separate from `omp-sol`. |
+| `omp-cc-sol61` | omp | `commandcode/gpt-6.1-sol`, gated by `omp_commandcode` | worker, tester, reviewer | off only; no thinking levels; separate from `omp-sol`. |
+
+A seat whose model has no controllable thinking levels carries `no_thinking` in
+the seat policy (`internal/fleet/policy.json`, hk 3974). Admission admits its
+`off` rung only from that property, the launcher passes `--model <id>` without
+an effort, and the landing proof accepts the footer without an effort glyph.
+The property belongs to the seat, not to a catalog row: the row keeps the
+rung's profile, effort, model id, pool and grade, and a row that still carries
+a `no_thinking` field is ignored. `omp-dsflash41@off` and any
+other credit rung at `off` whose seat lacks the property are refused
+(`credit effort is not placed`).
 
 All seven omp profiles and cmd-dsflash41 share one Command Code account, its 30-day window
 (`commandcode_required_window_missing:30d`), and any

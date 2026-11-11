@@ -426,10 +426,22 @@ func TestOMPCatalogSeed(t *testing.T) {
 		i := slices.Index(wantEfforts[row.Profile], row.Effort)
 		grades := wantGrades[row.Profile]
 		key := row.Profile + "@" + row.Effort
-		wantNoThinking := row.Profile == "omp-argon4" || row.Profile == "omp-mimo26pro" || row.Profile == "omp-cc-sol61"
-		if len(grades) == 0 || i < 0 || seen[key] || row.Grade != grades[i] || row.ModelID != wantModels[row.Profile] || row.DecidedBy != "operator-desk" || row.DeviationRef != firstNonEmpty(wantRef[row.Profile], "hk:task/2476") || row.NoThinking != wantNoThinking {
+		if len(grades) == 0 || i < 0 || seen[key] || row.Grade != grades[i] || row.ModelID != wantModels[row.Profile] || row.DecidedBy != "operator-desk" || row.DeviationRef != firstNonEmpty(wantRef[row.Profile], "hk:task/2476") {
 			t.Fatalf("invalid seed row: %+v", row)
 		}
 		seen[key] = true
+	}
+	// "This model has no thinking levels" is the seat's property, so the
+	// published seed carries no no_thinking field at all (hk 3974).
+	var raw struct {
+		Catalog []map[string]any `json:"catalog"`
+	}
+	if err := json.Unmarshal(b, &raw); err != nil {
+		t.Fatal(err)
+	}
+	for i, row := range raw.Catalog {
+		if _, ok := row["no_thinking"]; ok {
+			t.Fatalf("seed row %d carries no_thinking; the seat owns it (hk 3974)", i)
+		}
 	}
 }

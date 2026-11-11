@@ -185,8 +185,10 @@ func ompSetupWizard(screen string) bool {
 }
 
 // ompProof re-reads the screen because omp paints well after herdr reports it
-// ready; a blank screen right after launch is not a refusal yet.
-func (a *App) ompProof(ctx context.Context, l Launch, cwd, pane, brief string, wait time.Duration) error {
+// ready; a blank screen right after launch is not a refusal yet. noThinking is
+// the seat's property (Seat.NoThinking): only such a rung may prove without an
+// effort glyph.
+func (a *App) ompProof(ctx context.Context, l Launch, noThinking bool, cwd, pane, brief string, wait time.Duration) error {
 	name, e := a.ompModelName(ctx, l.ModelID)
 	if e != nil {
 		return e
@@ -200,7 +202,7 @@ func (a *App) ompProof(ctx context.Context, l Launch, cwd, pane, brief string, w
 		if ompSetupWizard(screen) {
 			return fail(exitConfig, "OMP_SETUP_WIZARD: omp is in its setup wizard despite OMP_SKIP_SETUP; seat withheld")
 		}
-		if OMPFooterProof(screen, name, l.Effort, cwd, a.Home, brief, l.NoThinking) {
+		if OMPFooterProof(screen, name, l.Effort, cwd, a.Home, brief, noThinking) {
 			return nil
 		}
 		if !a.Now().Before(deadline) {

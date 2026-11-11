@@ -58,7 +58,7 @@ func (a *App) nativeLaunch(ctx context.Context, r QuotaRequest) (Launch, error) 
 		return Launch{}, fail(gateInvalid, "quota catalog: %v", err)
 	}
 	catalog := a.launchCatalog(ctx, policy.Freshness, false)
-	return decideLaunch(policy.admissionPolicy, launchRequest(r), catalog, func() launchCatalog {
+	return decideLaunch(policy.admissionPolicy, a.Policy.Profiles, launchRequest(r), catalog, func() launchCatalog {
 		return a.launchCatalog(ctx, policy.Freshness, true)
 	})
 }
@@ -80,7 +80,7 @@ func (a *App) offlineLaunch(r QuotaRequest) (l Launch, found bool, err error) {
 	if !found {
 		return Launch{}, false, nil
 	}
-	l, err = decideLaunch(policy.admissionPolicy, launchRequest(r), catalog, nil)
+	l, err = decideLaunch(policy.admissionPolicy, a.Policy.Profiles, launchRequest(r), catalog, nil)
 	return l, true, err
 }
 
@@ -94,11 +94,11 @@ func launchRequest(r QuotaRequest) admissionRequest {
 // decideLaunch resolves req against catalog. A refusal from a cached catalog
 // is resolved once more against refetch's catalog when refetch is set. A
 // refusal exits 3; a launch from a stale catalog exits 70.
-func decideLaunch(policy admissionPolicy, req admissionRequest, catalog launchCatalog, refetch func() launchCatalog) (Launch, error) {
-	l, why := catalog.resolve(policy, req)
+func decideLaunch(policy admissionPolicy, seats map[string]Seat, req admissionRequest, catalog launchCatalog, refetch func() launchCatalog) (Launch, error) {
+	l, why := catalog.resolve(policy, seats, req)
 	if why != "" && catalog.cached && refetch != nil {
 		catalog = refetch()
-		l, why = catalog.resolve(policy, req)
+		l, why = catalog.resolve(policy, seats, req)
 	}
 	if why != "" {
 		return Launch{}, fail(gateBlocked, "quota catalog: %s", why)
@@ -163,7 +163,7 @@ var catalogSnapshot = sync.OnceValue(func() launchCatalog {
 })
 
 func launchRowFrom(r CatalogRow) launchRow {
-	return launchRow{admissionRow: admissionRow{Profile: r.Profile, Effort: r.Effort, ModelID: r.ModelID, Pool: r.Pool, Grade: r.Grade, Gate: r.Gate, Placed: r.Grade != gradeUnrated, Retired: r.RetiredAt != nil, NoThinking: r.NoThinking}, Family: r.Family}
+	return launchRow{admissionRow: admissionRow{Profile: r.Profile, Effort: r.Effort, ModelID: r.ModelID, Pool: r.Pool, Grade: r.Grade, Gate: r.Gate, Placed: r.Grade != gradeUnrated, Retired: r.RetiredAt != nil}, Family: r.Family}
 }
 
 // launchCatalog reads the catalog: a.BenchCatalog when set (a fixture), else
@@ -275,9 +275,10 @@ func (c launchCatalog) profileCredit(profile string) bool {
 }
 
 // resolve is pacelever's resolveLaunch: the launch a request resolves to, or
-// the reason it is refused.
-func (c launchCatalog) resolve(policy admissionPolicy, req admissionRequest) (Launch, string) {
-	row, resolved, why := c.resolveRow(req, admissionUnratedRole(req))
+// the reason it is refused. seats is the embedded seat policy: a profile's
+// no-thinking property is read there, never from a catalog row.
+func (c launchCatalog) resolve(policy admissionPolicy, seats map[string]Seat, req admissionRequest) (Launch, string) {
+	row, resolved, why := c.resolveRow(req, admissionUnratedRole(req), seats)
 	if why != "" {
 		return Launch{}, why
 	}
@@ -297,14 +298,14 @@ func (c launchCatalog) resolve(policy admissionPolicy, req admissionRequest) (La
 	if c.Stale && row.Gate != defaultGate && row.Gate != consultOnlyGate && req.OperatorRequest == "" {
 		return Launch{}, "catalog is stale; non-default gate requires --operator-request"
 	}
-	l := Launch{Profile: req.Profile, ModelID: row.ModelID, Effort: resolved, Grade: row.Grade, Gate: row.Gate, Pool: row.Pool, Family: row.Family, NoThinking: row.NoThinking}
+	l := Launch{Profile: req.Profile, ModelID: row.ModelID, Effort: resolved, Grade: row.Grade, Gate: row.Gate, Pool: row.Pool, Family: row.Family}
 	l.Catalog.Stale = c.Stale
 	return l, ""
 }
 
 // resolveRow is pacelever's resolveRow: the rung a request names and the
 // effort it resolves to.
-func (c launchCatalog) resolveRow(req admissionRequest, allowUnrated bool) (launchRow, string, string) {
+func (c launchCatalog) resolveRow(req admissionRequest, allowUnrated bool, seats map[string]Seat) (launchRow, string, string) {
 	profile := c.canonical(req.Profile)
 	requested := admissionNormalize(req.Effort)
 	if c.profileCredit(profile) && requested == "" {
@@ -317,7 +318,7 @@ func (c launchCatalog) resolveRow(req admissionRequest, allowUnrated bool) (laun
 		allowed := []string{"low", "high", "max"}
 		if requested == "off" {
 			allowed = nil
-			if slices.ContainsFunc(c.profileRows(profile), func(r launchRow) bool { return r.Effort == "off" && r.Pool == commandcodePool && r.NoThinking }) {
+			if seats[profile].NoThinking && slices.ContainsFunc(c.profileRows(profile), func(r launchRow) bool { return r.Effort == "off" && r.Pool == commandcodePool }) {
 				allowed = []string{"off"}
 			}
 		}
