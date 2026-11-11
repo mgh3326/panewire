@@ -1000,6 +1000,22 @@ func orderSelCands(pending []*selCand) {
 	sortSelCands(pending)
 }
 
+// candGroup is a candidate's ordering group inside its band: a dollar credit
+// (money at risk) first, then a candidate whose reset can be paced (urgency),
+// then an unpaceable one. The group is compared before its own key so a credit
+// rung and a free rung in one band compare transitively; comparing the USD
+// rule pairwise with the nil-urgency rule does not.
+func candGroup(c *selCand) int {
+	switch {
+	case c.usdUrgency != nil:
+		return 0
+	case c.urgency != nil:
+		return 1
+	default:
+		return 2
+	}
+}
+
 // sortSelCands is the comparator of orderSelCands without its credit-pacing
 // step: it reads each candidate's behindCredit as already set and writes
 // nothing. The waste_first shadow (placement_shadow_waste.go) sorts copies with
@@ -1035,33 +1051,25 @@ func sortSelCands(pending []*selCand) {
 		if gx, gy := gradeOrder[x.row.Grade], gradeOrder[y.row.Grade]; !x.ignoreGrade && gx != gy {
 			return gx - gy
 		}
-		if !x.risk && x.creditPool && y.creditPool {
-			// Among credit pools a dollar balance outranks a percentage-only
-			// entry and is ordered by dollars at risk per hour.
-			if (x.usdUrgency != nil) != (y.usdUrgency != nil) {
-				if x.usdUrgency != nil {
-					return -1
-				}
-				return 1
+		if !x.risk {
+			// One group key, then that group's own key: a dollar credit first
+			// by dollars at risk, then a candidate whose reset can be paced by
+			// urgency, then an unpaceable one. Comparing the group before its
+			// key keeps a credit rung and a free rung in one strict weak
+			// ordering; mixing the USD pairwise rule with the nil-urgency rule
+			// produced a cycle (A before B, B before C, C before A).
+			if xg, yg := candGroup(x), candGroup(y); xg != yg {
+				return xg - yg
 			}
-			if x.usdUrgency != nil {
+			if x.usdUrgency != nil && y.usdUrgency != nil {
 				if c := cmp.Compare(*y.usdUrgency, *x.usdUrgency); c != 0 {
 					return c
 				}
 			}
-		}
-		// Paceable resets rank ahead of unpaceable ones: mixing the urgency
-		// and projected orders in one comparison is not a strict weak
-		// ordering.
-		if (x.urgency != nil) != (y.urgency != nil) {
-			if x.urgency != nil {
-				return -1
-			}
-			return 1
-		}
-		if x.urgency != nil {
-			if c := cmp.Compare(*y.urgency, *x.urgency); c != 0 {
-				return c
+			if x.urgency != nil && y.urgency != nil {
+				if c := cmp.Compare(*y.urgency, *x.urgency); c != 0 {
+					return c
+				}
 			}
 		}
 		if c := cmp.Compare(rankBlocking(firstPct(x.longProj, x.blocking)), rankBlocking(firstPct(y.longProj, y.blocking))); c != 0 {
