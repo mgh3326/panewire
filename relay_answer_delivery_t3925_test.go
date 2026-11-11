@@ -123,3 +123,13 @@ func TestRelayWaitingDecisionAnswersReportFailure_t3925(t *testing.T) {
 		})
 	}
 }
+
+func TestRelayAgyDoesNotTreatQueueBannerAsProof_t3925(t *testing.T) {
+	text := task687Text(3927, "answer")
+	queued := task626Claude([]string{"❯ " + text}, "❯ Press up to edit queued messages")
+	_, _ = task683FakeHerdr(t, "agy", []string{task626ClaudeEmpty, queued}, []string{"", queued})
+	result := defaultHubRelayInjectVerdict(context.Background(), "w1:p1", text, nil)
+	if result.Outcome != relayInjectMaybeInPane || result.Evidence != "unproven:no_adapter" {
+		t.Fatalf("agy outcome=%+v, want unproven without an adapter", result)
+	}
+}
