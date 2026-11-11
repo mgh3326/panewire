@@ -266,6 +266,9 @@ func (c launchCatalog) profileRows(profile string) []launchRow {
 // profileCredit follows admissionCredit: a pi- profile or any profile with a
 // commandcode-pool rung is a credit profile.
 func (c launchCatalog) profileCredit(profile string) bool {
+	if admissionCredit(profile, "") || profile == "cmd-dsflash41" {
+		return true
+	}
 	return slices.ContainsFunc(c.profileRows(profile), func(r launchRow) bool {
 		return admissionCredit(profile, r.Pool)
 	})

@@ -1550,7 +1550,7 @@
       "kind": "omp",
       "family": "google",
       "capability": "omp_commandcode",
-      "effort": "high",
+      "effort": "off",
       "roles": [
         "worker",
         "tester",
@@ -1562,7 +1562,43 @@
       "kind": "omp",
       "family": "other",
       "capability": "omp_commandcode",
+      "effort": "off",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer"
+      ]
+    },
+    "omp-cc-opus55": {
+      "canon": "omp-cc-opus55",
+      "kind": "omp",
+      "family": "anthropic",
+      "capability": "omp_commandcode",
       "effort": "high",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer"
+      ]
+    },
+    "omp-cc-sonnet55": {
+      "canon": "omp-cc-sonnet55",
+      "kind": "omp",
+      "family": "anthropic",
+      "capability": "omp_commandcode",
+      "effort": "high",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer"
+      ]
+    },
+    "omp-cc-sol61": {
+      "canon": "omp-cc-sol61",
+      "kind": "omp",
+      "family": "openai",
+      "capability": "omp_commandcode",
+      "effort": "off",
       "roles": [
         "worker",
         "tester",
