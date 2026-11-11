@@ -205,6 +205,7 @@ func (a *App) watch(ctx context.Context, args []string) error {
 			if e := a.event(ctx, id, "job.lost", map[string]any{"pane_id": j.Pane, "reason": "decision_unanswered"}); e != nil {
 				return e
 			}
+			a.recordLostFailure(ctx, j)
 			return a.releaseQuota(ctx, j)
 		}
 		// An announced quota stop is watched through its hand-off grace, past
@@ -277,6 +278,7 @@ func (a *App) watch(ctx context.Context, args []string) error {
 			if e = a.event(ctx, id, "job.lost", map[string]any{"pane_id": j.Pane}); e != nil {
 				return e
 			}
+			a.recordLostFailure(ctx, j)
 			return a.releaseQuota(ctx, j)
 		}
 		if e = a.Sleep(ctx, 5*time.Second); e != nil {
