@@ -208,6 +208,33 @@ func TestSelectCreditUnusableNotChosen_T4006(t *testing.T) {
 	}
 }
 
+// The free band is one strict weak ordering: a dollar credit first by dollars
+// at risk, then the urgency-keyed group by urgency. Mixing the USD pairwise
+// rule with the nil-urgency rule produced a cycle (USD credit before percent
+// credit, percent credit before a free rung by urgency, free rung before USD
+// credit by paceability), so the order depended on input order.
+func TestOrderSelCandsFreeBandIsTotal_T4006(t *testing.T) {
+	mk := func(profile string, credit bool, usd, urgency *float64) *selCand {
+		return &selCand{
+			row:        CatalogRow{Profile: profile, Grade: "A", Pool: "p", Effort: "high", ModelID: "m"},
+			tier:       1,
+			creditPool: credit,
+			usdUrgency: usd,
+			urgency:    urgency,
+		}
+	}
+	a := mk("a", true, ptrF(2), nil)  // dollar credit
+	b := mk("b", true, nil, ptrF(5))  // percent-only credit
+	c := mk("c", false, nil, ptrF(1)) // free rung with a paid urgency
+	for _, perm := range [][3]*selCand{{a, b, c}, {a, c, b}, {b, a, c}, {b, c, a}, {c, a, b}, {c, b, a}} {
+		pending := []*selCand{perm[0], perm[1], perm[2]}
+		orderSelCands(pending)
+		if pending[0] != a || pending[1] != b || pending[2] != c {
+			t.Fatalf("permutation must sort a, b, c: %s %s %s", pending[0].row.Profile, pending[1].row.Profile, pending[2].row.Profile)
+		}
+	}
+}
+
 func seatIndex(xs []string, want string) int {
 	for i, x := range xs {
 		if x == want {
