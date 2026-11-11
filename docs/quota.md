@@ -484,9 +484,9 @@ A seat whose model has no controllable thinking levels carries `no_thinking` in
 the seat policy (`internal/fleet/policy.json`, hk 3974). Admission admits its
 `off` rung only from that property, the launcher passes `--model <id>` without
 an effort, and the landing proof accepts the footer without an effort glyph.
-The property belongs to the seat, not to a catalog row: handoffkeep stores only
-the rung's profile, effort, model id, pool and grade, and ignores a
-`no_thinking` field if a row still carries one. `omp-dsflash41@off` and any
+The property belongs to the seat, not to a catalog row: the row keeps the
+rung's profile, effort, model id, pool and grade, and a row that still carries
+a `no_thinking` field is ignored. `omp-dsflash41@off` and any
 other credit rung at `off` whose seat lacks the property are refused
 (`credit effort is not placed`).
 

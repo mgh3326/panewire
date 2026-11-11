@@ -41,7 +41,7 @@ type Seat struct {
 	// NoThinking marks a model with no controllable thinking levels. Its
 	// launcher passes no effort, the gate admits only its "off" rung, and the
 	// landing proof accepts a footer without an effort glyph. The property
-	// belongs to the seat; a catalog row never carries it (hk 3974).
+	// belongs to the seat; a catalog row does not carry it (hk 3974).
 	NoThinking bool `json:"no_thinking,omitempty"`
 }
 type Rung struct {
