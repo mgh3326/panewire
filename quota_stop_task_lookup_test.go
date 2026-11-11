@@ -3,6 +3,8 @@ package panewire
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -49,5 +51,35 @@ func TestQuotaStopTaskLookupPreservesFoundTaskDecision(t *testing.T) {
 	}
 	if rig.sends != 1 || len(rig.announce) != 0 {
 		t.Fatalf("sends=%d announced=%d, want one resume and no hand-over", rig.sends, len(rig.announce))
+	}
+}
+
+func TestQuotaStopTaskLookupAcceptsStringPriority(t *testing.T) {
+	rig := newRoleStopRig(t, "worker", time.Hour, roleStopTask)
+	rig.q.hk.task = func(context.Context, string) ([]byte, error) {
+		return []byte(`{"priority":"3","expected":"4h","refs":{"job_id":"job-active"}}`), nil
+	}
+	rig.run()
+	if decision, reason := rig.decision(t); decision != "wait" || reason != "reset_within_expected" {
+		t.Fatalf("decision=%s reason=%s, want wait reset_within_expected", decision, reason)
+	}
+}
+
+func TestQuotaStopTaskListAcceptsStringPriorityWithoutReceiptID(t *testing.T) {
+	rig := newRoleStopRig(t, "worker", time.Hour, `{"tasks":[{"priority":"3","expected":"4h","refs":{"job_id":"job-active"}}]}`)
+	for _, name := range []string{"00001-job.claimed.json", "00002-job.spawned.json"} {
+		path := filepath.Join(rig.manager.inboxRoot, "jobs", "job-active", "events", name)
+		b, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		updated := strings.ReplaceAll(string(b), `,"task_id":"42"`, "")
+		if err := os.WriteFile(path, []byte(updated), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rig.run()
+	if decision, reason := rig.decision(t); decision != "wait" || reason != "reset_within_expected" {
+		t.Fatalf("decision=%s reason=%s, want wait reset_within_expected", decision, reason)
 	}
 }
