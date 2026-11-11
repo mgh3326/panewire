@@ -751,6 +751,18 @@
         "counsel"
       ]
     },
+    "devin-ds41-low": {
+      "canon": "devin-ds41-low",
+      "kind": "devin",
+      "family": "deepseek",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel"
+      ]
+    },
     "devin-argon4-high": {
       "canon": "devin-argon4-high",
       "kind": "devin",
