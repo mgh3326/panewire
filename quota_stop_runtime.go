@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -123,6 +124,19 @@ func quotaTaskID(value any) string {
 		return ""
 	}
 	return fmt.Sprint(value)
+}
+
+func quotaTaskPriority(value any) int {
+	switch n := value.(type) {
+	case float64:
+		if n == float64(int(n)) {
+			return int(n)
+		}
+	case string:
+		priority, _ := strconv.Atoi(strings.TrimSpace(n))
+		return priority
+	}
+	return 0
 }
 
 func (q *quotaStopManager) jobForPane(ctx context.Context, pane string) (HubActiveJob, bool) {
@@ -255,7 +269,7 @@ func (q *quotaStopManager) task(ctx context.Context, job HubActiveJob, inherited
 			return 0, 0, false
 		}
 		var t struct {
-			Priority int     `json:"priority"`
+			Priority any     `json:"priority"`
 			Expected *string `json:"expected"`
 			Refs     struct {
 				Job string `json:"job_id"`
@@ -269,7 +283,7 @@ func (q *quotaStopManager) task(ctx context.Context, job HubActiveJob, inherited
 		if t.Expected != nil {
 			duration, _ = quotaDuration(*t.Expected)
 		}
-		return t.Priority, duration, true
+		return quotaTaskPriority(t.Priority), duration, true
 	}
 	b, err := q.hk.tasks(ctx)
 	if err != nil {
@@ -277,7 +291,7 @@ func (q *quotaStopManager) task(ctx context.Context, job HubActiveJob, inherited
 	}
 	var v struct {
 		Tasks []struct {
-			Priority int     `json:"priority"`
+			Priority any     `json:"priority"`
 			Expected *string `json:"expected"`
 			Refs     struct {
 				Job string `json:"job_id"`
@@ -293,7 +307,7 @@ func (q *quotaStopManager) task(ctx context.Context, job HubActiveJob, inherited
 	for _, t := range v.Tasks {
 		if t.Refs.Job == job.JobID || inherited != "" && t.Refs.Job == inherited {
 			n++
-			priority = t.Priority
+			priority = quotaTaskPriority(t.Priority)
 			if t.Expected != nil {
 				duration, _ = quotaDuration(*t.Expected)
 			}
