@@ -166,7 +166,9 @@ func (c Client) Presence(ctx context.Context) ([]Presence, error) {
 		if !ok {
 			continue
 		}
-		if json.Unmarshal(v, &rows) != nil {
+		// A null field decodes without error into a nil slice; only a real
+		// list (an empty one included) is an answer.
+		if json.Unmarshal(v, &rows) != nil || rows == nil {
 			return nil, fmt.Errorf("handoffkeep presence response invalid")
 		}
 		return rows, nil

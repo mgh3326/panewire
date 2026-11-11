@@ -57,10 +57,13 @@ func TestPresenceReadsEveryAcceptedShape(t *testing.T) {
 // account" (hk 3998 review).
 func TestPresenceRejectsAnUnrecognisedShape(t *testing.T) {
 	for name, body := range map[string]string{
-		"other key":  `{"items":[]}`,
-		"not a list": `{"records":{"host_id":"node-a"}}`,
-		"not json":   `not json`,
-		"null":       `null`,
+		"other key":     `{"items":[]}`,
+		"not a list":    `{"records":{"host_id":"node-a"}}`,
+		"null field":    `{"records":null}`,
+		"null presence": `{"presence":null}`,
+		"null rows":     `{"rows":null}`,
+		"not json":      `not json`,
+		"null":          `null`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			if rows, err := presenceClient(t, body).Presence(context.Background()); err == nil {
