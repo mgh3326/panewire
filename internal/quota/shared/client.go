@@ -143,6 +143,37 @@ func (c Client) PublishPresence(ctx context.Context, record Presence) error {
 	return c.send(ctx, http.MethodPut, "/v1/quota/presence", record, nil)
 }
 
+// Presence lists the store's presence records: which host holds which account.
+// The store answers with the records themselves or inside an envelope naming
+// them (records, presence or rows). An answer in none of those shapes is an
+// error, never an empty list: a caller must not read a reply it did not
+// understand as "no host holds this account".
+func (c Client) Presence(ctx context.Context) ([]Presence, error) {
+	var body json.RawMessage
+	if err := c.send(ctx, http.MethodGet, "/v1/quota/presence", nil, &body); err != nil {
+		return nil, err
+	}
+	var rows []Presence
+	if json.Unmarshal(body, &rows) == nil && rows != nil {
+		return rows, nil
+	}
+	var envelope map[string]json.RawMessage
+	if json.Unmarshal(body, &envelope) != nil {
+		return nil, fmt.Errorf("handoffkeep presence response invalid")
+	}
+	for _, key := range []string{"records", "presence", "rows"} {
+		v, ok := envelope[key]
+		if !ok {
+			continue
+		}
+		if json.Unmarshal(v, &rows) != nil {
+			return nil, fmt.Errorf("handoffkeep presence response invalid")
+		}
+		return rows, nil
+	}
+	return nil, fmt.Errorf("handoffkeep presence response invalid")
+}
+
 func (c Client) send(ctx context.Context, method, path string, body, out any) error {
 	var payload io.Reader
 	if body != nil {

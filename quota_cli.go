@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mgh3326/panewire/internal/fleet"
 	"github.com/mgh3326/panewire/internal/quota/devin"
 )
 
@@ -29,6 +30,14 @@ type quotaReading struct {
 	AgeSeconds *float64      `json:"age_seconds"`
 	Stale      bool          `json:"stale"`
 	Buckets    []quotaBucket `json:"buckets"`
+	// Class, Credit and Presence are set only for a credit pool's line: the
+	// operator's pool class, the manual credit entry's state (live, expired,
+	// absent, or unknown when the store could not be read) and whether this
+	// host's presence record for the account is current (present, absent or
+	// unknown).
+	Class    string `json:"class,omitempty"`
+	Credit   string `json:"credit,omitempty"`
+	Presence string `json:"presence,omitempty"`
 }
 type quotaProvider struct {
 	ID          string        `json:"id"`
@@ -50,7 +59,7 @@ func (p quotaProvider) reading() quotaReading {
 	if p.PublishKind == "account" {
 		account = p.Publish
 	}
-	return quotaReading{p.ID, account, p.Source, p.Age, p.Stale, p.Buckets}
+	return quotaReading{Pool: p.ID, Account: account, Source: p.Source, AgeSeconds: p.Age, Stale: p.Stale, Buckets: p.Buckets}
 }
 
 // quotaStatusHost is one host of the status document (docs/quota.md §Status
@@ -76,7 +85,11 @@ func writeQuotaStatus(out io.Writer, jsonOutput bool, generatedAt string, host q
 			age = fmt.Sprint(*v.AgeSeconds)
 		}
 		buckets, _ := json.Marshal(v.Buckets)
-		fmt.Fprintf(out, "%s %s account=%s source=%s age_seconds=%s stale=%t buckets=%s\n", host.Host, v.Pool, v.Account, v.Source, age, v.Stale, buckets)
+		extra := ""
+		if v.Class != "" || v.Credit != "" || v.Presence != "" {
+			extra = fmt.Sprintf(" class=%s credit=%s presence=%s", v.Class, v.Credit, v.Presence)
+		}
+		fmt.Fprintf(out, "%s %s account=%s source=%s age_seconds=%s stale=%t buckets=%s%s\n", host.Host, v.Pool, v.Account, v.Source, age, v.Stale, buckets, extra)
 	}
 }
 
@@ -101,6 +114,20 @@ func runNativeQuotaStatus(ctx context.Context, jsonOutput bool, out, errOut io.W
 		if err != nil {
 			fmt.Fprintf(errOut, "quota status: %s: %s\n", pool, quotaErrorKind(err))
 			reading = quotaReading{Pool: pool, Source: "unavailable", Stale: true, Buckets: []quotaBucket{}}
+		}
+		readings = append(readings, reading)
+	}
+	// A credit pool has no reading to measure; its line shows the operator's
+	// class, the manual credit entry and this host's presence, on a host that
+	// publishes it (quota_credit_presence.go).
+	credit := quotaCLICreditSource()
+	for _, pool := range fleet.CreditAccountPools() {
+		reading, ok := credit.Status(ctx, pool)
+		if !ok {
+			continue
+		}
+		if generatedAt.IsZero() {
+			generatedAt = credit.now()
 		}
 		readings = append(readings, reading)
 	}

@@ -2,7 +2,7 @@
 
 `panewire quota`가 쿼터 인터페이스입니다. 판정, launch lookup, 측정은 panewire의 native 구현만 사용합니다.
 
-- `panewire quota status [--json]`은 측정 가능한 native 풀의 저장된 값을 읽습니다. 측정이나 게시를 실행하지 않습니다.
+- `panewire quota status [--json]`은 측정 가능한 native 풀의 저장된 값을 읽습니다. 측정이나 게시를 실행하지 않습니다. 이 host가 presence를 게시하는 credit pool도 각각 한 줄로 보여 줍니다 ([Credit pool presence](#credit-pool-presence)).
 - `panewire quota refresh POOL`은 `claude`, `codex`, `commandcode`, `devin`, `agy`만 측정합니다. 다른 풀은 측정 소스가 없다는 이유와 함께 exit 5(`ExitConditionInvalid`)로 거부합니다.
 - `[quota].gate`, `[quota].launch`, `[quota].native_pools`, `PANEWIRE_QUOTA_BIN`은 폐기되었습니다. 설정 파일에 키가 있으면 migration 경고를 출력합니다. `gate`와 `launch`는 지정할 경우 `"native"`만 허용하며, `native_pools`는 무시됩니다. 환경 변수 `PANEWIRE_QUOTA_BIN`도 무시됩니다.
 - operator credit pools (`anthropic-api`, `openai-api`)의 수동 기록은 shared store에서 계속 읽습니다.
@@ -10,7 +10,7 @@
 
 ## Status JSON v2
 
-`status --json`은 `schema`가 `panewire.quota.status.v2`인 객체를 출력하며 `generated_at`과 `hosts`를 포함합니다. 각 host에는 `host`와 `readings`가 있습니다. pacelever 관련 필드는 없습니다. reading에는 `pool`, `account`, `source`, `age_seconds`, `stale`, `buckets`가 있습니다.
+`status --json`은 `schema`가 `panewire.quota.status.v2`인 객체를 출력하며 `generated_at`과 `hosts`를 포함합니다. 각 host에는 `host`와 `readings`가 있습니다. pacelever 관련 필드는 없습니다. reading에는 `pool`, `account`, `source`, `age_seconds`, `stale`, `buckets`가 있습니다. 이 host가 presence를 게시하는 credit pool의 reading에는 `class`, `credit`, `presence`도 있습니다 ([Credit pool presence](#credit-pool-presence)).
 
 ## Native measurement: claude
 
@@ -417,6 +417,58 @@ its baseline answer.
 ### Credit pool views
 
 Selection과 admission은 pool policy 및 shared store에서 credit pool class, manual entry, balance를 읽습니다. shared store를 쓸 수 없으면 status를 조회한 것으로 추측하지 않고 오류를 반환합니다. `quota_pools_shadow` 비교는 제거되었습니다. `anthropic-api`와 `openai-api`의 operator manual entries는 유지됩니다.
+
+### Credit pool presence
+
+A credit pool (`anthropic-api`, `openai-api`) has no login to derive an account
+from and nothing to measure: the operator records its balance by hand and the
+`omp` harness spends it. Placement binds a pool's rungs to a host only through
+that host's presence record for the pool's account, so a credit pool is
+placeable on a host exactly when the node publishes presence for it. The node's
+quota loop (the one that runs with `--state-publish`, [fleet-state.md](fleet-state.md#node-publisher))
+publishes it once per presence interval (10 minutes) when all three hold — this
+is pacelever's `maybeCreditPresence`, the only publisher these pools had before
+pacelever retired (hk 3998):
+
+- `omp` is installed on the host. The node looks on `PATH` and in the fleet's
+  install directories, because a daemon's `PATH` can be narrower than an
+  operator shell's.
+- The operator's pool class is not `exclude`: `[pools.<pool>]` in pacelever's
+  `config.toml` (`PACELEVER_CONFIG`, else `~/.config/pacelever/config.toml`). An
+  `until` date that has passed lifts the exclusion, as it does for the gate.
+- The shared store holds an unexpired manual `window=credit` entry for the
+  pool's account (`manual` in `/v1/quota/accounts/<key>/latest`).
+
+The account key is `<pool>:<fingerprint>`: panewire's `[quota].accounts` entry
+for the pool when this host has one (the key `panewire manual set` writes),
+else pacelever's `[quota.accounts]`, so the key the pacelever era published
+still names the same account. The host id is the one placement reads the local
+host's records under: `[local].presence_id`, else the fleet machine id. A host
+without the harness, an excluded pool, a missing or expired entry and an
+unreadable store publish nothing; the publisher never invents a key or a
+balance.
+
+Record the credit with the remaining balance, the grant total and the expiry
+(the window defaults to `credit` for a credit pool):
+
+```sh
+panewire manual set --pool anthropic-api --credit-balance 180 --credit-total 200 --expires 2026-11-16
+```
+
+`--credit-balance` is the remaining dollars, `--credit-total` the grant total
+and `--expires` the date the credit expires (`YYYY-MM-DD` or RFC 3339). The
+entry is stored under the pool's `[quota].accounts` key in the shared store, so
+every host reads the same entry; a pool with no fingerprint there refuses with
+`shared account fingerprint required`. The same command with
+`--pool openai-api` records the other pool.
+
+`panewire quota status` lists a line for each credit pool on a host that
+publishes it (the harness is installed), with the class, the manual entry's
+state (`live`, `expired`, `absent`, or `unknown` when the store could not be
+read) and this host's presence (`present`, `absent` or `unknown`), so an
+operator can see why a credit rung is or is not placeable there. The presence
+record carries the id placement reads the local host under:
+`[local].presence_id`, else the fleet machine id.
 
 ## Admission
 

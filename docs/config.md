@@ -811,6 +811,18 @@ panewire manual set --pool <pool> --credit-balance <usd> --credit-total <usd> --
 pacelever writes. The command's JSON reply keeps the dollar fields; the shared
 wire carries only the used percentage, so `credit_total_usd` supplies the
 dollars on read. Keeping `remaining_usd`/`total_usd` in hk itself is hk 3418.
+The entry is written under the pool's `[quota].accounts` fingerprint, so that
+key is required before a credit can be recorded.
+
+A credit pool is placeable on a host only through that host's presence record
+for the pool's account. The node publishes presence once per presence interval
+(10 minutes) when all three hold: `omp` is installed on the host, the pool's
+class is not `exclude`, and the shared store carries an unexpired manual
+`window=credit` entry for the pool's account. The key is the pool's
+`[quota].accounts` fingerprint, else pacelever's `[quota.accounts]`, so the key
+the pacelever era published still matches. `panewire quota status` shows the
+class, the manual entry's state and the presence for each credit pool on a host
+that publishes it. See [quota.md](quota.md#credit-pool-presence).
 
 The selection record and the chosen `why` text carry `balance_usd`,
 `burn_usd_per_h`, `at_risk_usd` and `usd_urgency`.

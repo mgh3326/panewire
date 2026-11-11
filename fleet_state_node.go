@@ -148,9 +148,11 @@ type fleetQuotaSent struct {
 // runFleetQuota refreshes every configured pool on a fixed interval and
 // publishes a reading when it changed or the republish bound passed.
 // pacelever reads the shared cache first and probes only a stale reading, so
-// the interval bounds how long the account's shared reading stays stale.
+// the interval bounds how long the account's shared reading stays stale. Each
+// round also announces presence for the credit pools this host holds
+// (quota_credit_presence.go); that is the only publisher they have.
 func (client *HubClient) runFleetQuota(ctx context.Context) {
-	if !client.statePublish || len(client.stateQuotaPools) == 0 {
+	if !client.statePublish {
 		return
 	}
 	interval := client.stateQuotaInterval
@@ -167,6 +169,7 @@ func (client *HubClient) runFleetQuota(ctx context.Context) {
 			clear(sent)
 		}
 		client.fleetStateMu.Unlock()
+		client.creditPresencePublisher().Publish(ctx)
 		for _, pool := range client.stateQuotaPools {
 			if ctx.Err() != nil {
 				return
