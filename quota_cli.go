@@ -31,9 +31,10 @@ type quotaReading struct {
 	Stale      bool          `json:"stale"`
 	Buckets    []quotaBucket `json:"buckets"`
 	// Class, Credit and Presence are set only for a credit pool's line: the
-	// operator's pool class, the manual credit entry's state (live, expired or
-	// absent) and whether this host's presence record for the account is
-	// current (present, absent or unknown).
+	// operator's pool class, the manual credit entry's state (live, expired,
+	// absent, or unknown when the store could not be read) and whether this
+	// host's presence record for the account is current (present, absent or
+	// unknown).
 	Class    string `json:"class,omitempty"`
 	Credit   string `json:"credit,omitempty"`
 	Presence string `json:"presence,omitempty"`
@@ -85,7 +86,7 @@ func writeQuotaStatus(out io.Writer, jsonOutput bool, generatedAt string, host q
 		}
 		buckets, _ := json.Marshal(v.Buckets)
 		extra := ""
-		if v.Credit != "" {
+		if v.Class != "" || v.Credit != "" || v.Presence != "" {
 			extra = fmt.Sprintf(" class=%s credit=%s presence=%s", v.Class, v.Credit, v.Presence)
 		}
 		fmt.Fprintf(out, "%s %s account=%s source=%s age_seconds=%s stale=%t buckets=%s%s\n", host.Host, v.Pool, v.Account, v.Source, age, v.Stale, buckets, extra)

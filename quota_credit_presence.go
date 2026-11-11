@@ -152,8 +152,7 @@ func (s *creditPresenceSource) Status(ctx context.Context, pool string) (quotaRe
 	if !s.installed() {
 		return quotaReading{}, false
 	}
-	reading := quotaReading{Pool: pool, Source: "unavailable", Stale: true, Buckets: []quotaBucket{}, Class: s.class(pool, now)}
-	reading.Presence = "unknown"
+	reading := quotaReading{Pool: pool, Source: "unavailable", Stale: true, Buckets: []quotaBucket{}, Class: s.class(pool, now), Credit: "unknown", Presence: "unknown"}
 	key, ok := s.account(pool)
 	if !ok {
 		return reading, true
@@ -187,6 +186,17 @@ func (s *creditPresenceSource) Status(ctx context.Context, pool string) (quotaRe
 	return reading, true
 }
 
+// creditPresenceHostID is the id a credit presence record carries: the id
+// placement reads the local host's records under (`[local].presence_id`, else
+// the fleet machine id), else fallback. Publishing under any other id would
+// leave the record invisible to placement and to `quota status`.
+func creditPresenceHostID(fallback string) string {
+	if id := fleet.HostPresenceID(); id != "" {
+		return id
+	}
+	return fallback
+}
+
 // creditPresencePublisher is the node's credit presence publisher, built on
 // first use from the client's clock, machine id, spawn.json and tool lookup. A
 // fixture sets it first.
@@ -196,8 +206,8 @@ func (client *HubClient) creditPresencePublisher() *creditPresenceSource {
 	if client.creditPresence == nil {
 		source := &creditPresenceSource{SpawnConfigPath: client.spawnConfigPath, Now: client.nowUTC,
 			Installed: func(name string) bool { _, ok := client.readinessDeps.find(name); return ok }}
-		if quotaPresenceHostPattern.MatchString(client.machineID) {
-			source.HostID = client.machineID
+		if id := creditPresenceHostID(client.machineID); quotaPresenceHostPattern.MatchString(id) {
+			source.HostID = id
 		}
 		client.creditPresence = source
 	}
@@ -209,10 +219,7 @@ func (client *HubClient) creditPresencePublisher() *creditPresenceSource {
 // the local host's records under. Tests replace it.
 var quotaCLICreditSource = func() *creditPresenceSource {
 	source := &creditPresenceSource{SpawnConfigPath: defaultHubSpawnConfigPath("")}
-	id := fleet.HostPresenceID()
-	if id == "" {
-		id = fleetCensusMachineID(fleetCensusOptions{})
-	}
+	id := creditPresenceHostID(fleetCensusMachineID(fleetCensusOptions{}))
 	if quotaPresenceHostPattern.MatchString(id) {
 		source.HostID = id
 	}

@@ -442,10 +442,11 @@ pacelever retired (hk 3998):
 The account key is `<pool>:<fingerprint>`: panewire's `[quota].accounts` entry
 for the pool when this host has one (the key `panewire manual set` writes),
 else pacelever's `[quota.accounts]`, so the key the pacelever era published
-still names the same account. The host id is the node's machine id, the one
-every other presence record uses. A host without the harness, an excluded
-pool, a missing or expired entry and an unreadable store publish nothing; the
-publisher never invents a key or a balance.
+still names the same account. The host id is the one placement reads the local
+host's records under: `[local].presence_id`, else the fleet machine id. A host
+without the harness, an excluded pool, a missing or expired entry and an
+unreadable store publish nothing; the publisher never invents a key or a
+balance.
 
 Record the credit with the remaining balance, the grant total and the expiry
 (the window defaults to `credit` for a credit pool):
@@ -463,9 +464,11 @@ every host reads the same entry; a pool with no fingerprint there refuses with
 
 `panewire quota status` lists a line for each credit pool on a host that
 publishes it (the harness is installed), with the class, the manual entry's
-state (`live`, `expired` or `absent`) and this host's presence (`present`,
-`absent` or `unknown`), so an operator can see why a credit rung is or is not
-placeable there.
+state (`live`, `expired`, `absent`, or `unknown` when the store could not be
+read) and this host's presence (`present`, `absent` or `unknown`), so an
+operator can see why a credit rung is or is not placeable there. The presence
+record carries the id placement reads the local host under:
+`[local].presence_id`, else the fleet machine id.
 
 ## Admission
 

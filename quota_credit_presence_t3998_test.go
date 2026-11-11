@@ -160,6 +160,32 @@ func TestCreditPresencePublishesForLiveCredit(t *testing.T) {
 	}
 }
 
+// hk 3998 review: a record carries the id placement reads the local host under,
+// `[local].presence_id` when the fleet config sets one, not the node's machine
+// id; without one the machine id is the id.
+func TestCreditPresenceHostIDFollowsPresenceID(t *testing.T) {
+	hosts := filepath.Join(t.TempDir(), "hosts.toml")
+	if err := os.WriteFile(hosts, []byte("[local]\npresence_id = \"node-p\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("FLEET_HOSTS_CONFIG", hosts)
+	client := quotaClient(t)
+	client.machineID = "node-a"
+	if id := client.creditPresencePublisher().HostID; id != "node-p" {
+		t.Fatalf("publisher host id = %q, want the presence id placement reads", id)
+	}
+	if id := quotaCLICreditSource().HostID; id != "node-p" {
+		t.Fatalf("status host id = %q, want the presence id placement reads", id)
+	}
+	if err := os.WriteFile(hosts, []byte("[local]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	client.creditPresence = nil
+	if id := client.creditPresencePublisher().HostID; id != "node-a" {
+		t.Fatalf("publisher host id = %q, want the machine id when no presence id is set", id)
+	}
+}
+
 // hk 3998 (a): the node's quota loop is the publisher. It announces the credit
 // pool even when the node measures no native pool itself, and only once per
 // presence interval across rounds.
@@ -331,6 +357,29 @@ func TestQuotaStatusShowsCreditPools(t *testing.T) {
 	errOut.Reset()
 	if code := runQuotaCLI([]string{"status"}, &out, &errOut); code != 0 || !strings.Contains(out.String(), "anthropic-api account="+creditFPForTest+" source=manual") || !strings.Contains(out.String(), "class=spend credit=live presence=present") {
 		t.Fatalf("text status %d: %q %q", code, out.String(), errOut.String())
+	}
+}
+
+// A store that cannot be read keeps the line's shape: the class and both states
+// are printed as unknown rather than dropped, so the operator sees the cause.
+func TestQuotaStatusShowsAnUnreadableCreditStore(t *testing.T) {
+	hk := newCreditHK(t)
+	hk.failLatest = true
+	spawn := claudeStore(t, hk.server.URL)
+	previousNative, previousCredit := quotaCLISource, quotaCLICreditSource
+	t.Cleanup(func() { quotaCLISource, quotaCLICreditSource = previousNative, previousCredit })
+	quotaCLISource = func(pool string) *nativeQuotaSource {
+		return &nativeQuotaSource{Pool: pool, Now: func() time.Time { return creditTestNow }}
+	}
+	quotaCLICreditSource = func() *creditPresenceSource {
+		return creditTestSource(spawn, func() time.Time { return creditTestNow })
+	}
+	var out, errOut bytes.Buffer
+	if code := runQuotaCLI([]string{"status"}, &out, &errOut); code != 0 {
+		t.Fatalf("exit %d: %s", code, errOut.String())
+	}
+	if !strings.Contains(out.String(), "anthropic-api account="+creditFPForTest+" source=unavailable") || !strings.Contains(out.String(), "class=spend credit=unknown presence=unknown") {
+		t.Fatalf("text status: %q", out.String())
 	}
 }
 
