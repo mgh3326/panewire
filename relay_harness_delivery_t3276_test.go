@@ -407,8 +407,12 @@ func TestHarnessMissingProofEscalatesOnce_t3276(t *testing.T) {
 
 				rig.node.relayBusyManager().offer(t.Context(), t3276Message(directive))
 
-				if got := pane.calls(t, "prompt"); got != 2 {
-					t.Fatalf("pane got %d prompts, want 2: the first and the one immediate retry", got)
+				wantPrompts := 2
+				if sc.harness == "omp" {
+					wantPrompts = 1
+				}
+				if got := pane.calls(t, "prompt"); got != wantPrompts {
+					t.Fatalf("pane got %d prompts, want %d", got, wantPrompts)
 				}
 				kinds, _ := rig.drainEvents()
 				if t3276Count(kinds, "relay.delivered") != 0 {
@@ -424,7 +428,7 @@ func TestHarnessMissingProofEscalatesOnce_t3276(t *testing.T) {
 				if len(got) != 1 {
 					t.Fatalf("design lane got %d escalations, want exactly 1: %+v", len(got), got)
 				}
-				if want := fmt.Sprintf("event %d", directive.EventID); !strings.Contains(got[0].Text, want) || !strings.Contains(got[0].Text, "maybe_in_pane") || !strings.Contains(got[0].Text, t3276Worker) {
+				if want := fmt.Sprintf("event %d", directive.EventID); !strings.Contains(got[0].Text, want) || !strings.Contains(got[0].Text, relayDroppedCheckPane) || !strings.Contains(got[0].Text, t3276Worker) {
 					t.Fatalf("escalation lacks the event id, the reason or the lane (%q): %q", want, got[0].Text)
 				}
 
@@ -484,7 +488,7 @@ func mustReadFile(t *testing.T, path string) string {
 
 // A working grok or omp pane gets the directive at once too. With no captured
 // screen the only proof those harnesses have needs an idle or done pane before
-// the send, so the typed text stays unconfirmed: one retry, then one escalation.
+// the send, so the typed text stays unconfirmed and triggers an escalation.
 func TestWorkingGrokAndOmpAreInjectedThenEscalated_t3276(t *testing.T) {
 	prevWindow := relayObserveWindow
 	relayObserveWindow = 300 * time.Millisecond
@@ -497,8 +501,12 @@ func TestWorkingGrokAndOmpAreInjectedThenEscalated_t3276(t *testing.T) {
 
 			rig.node.relayBusyManager().offer(t.Context(), t3276Message(directive))
 
-			if got := pane.calls(t, "prompt"); got != 2 {
-				t.Fatalf("a working %s pane got %d prompts, want the directive and one retry", sc.harness, got)
+			wantPrompts := 2
+			if sc.harness == "omp" {
+				wantPrompts = 1
+			}
+			if got := pane.calls(t, "prompt"); got != wantPrompts {
+				t.Fatalf("a working %s pane got %d prompts, want %d", sc.harness, got, wantPrompts)
 			}
 			kinds, _ := rig.drainEvents()
 			if t3276Count(kinds, "relay.held") != 0 || t3276Count(kinds, "relay.delivered") != 0 {

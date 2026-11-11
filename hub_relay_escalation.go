@@ -32,6 +32,8 @@ const (
 	// send that may already be in the pane and is never re-injected.
 	relayDroppedRetriesExhausted = "inject_failed_max_attempts"
 	relayDroppedMaybeInPane      = "maybe_in_pane"
+	relayDroppedCheckPane        = "delivery_uncertain_check_pane"
+	relayDroppedPaneReadFailed   = "pane_read_failed"
 	// relayDroppedWorkingExpired ends a row held for a working cmd pane that
 	// never turned idle within relay.cmd_hold_max (hk 3370, hk 3411). Nothing
 	// was typed; the next idle wake re-delivers it once
@@ -45,7 +47,7 @@ const (
 var unconfirmedEscalationBackoff = []time.Duration{2 * time.Second, 10 * time.Second, time.Minute, 5 * time.Minute}
 
 func relayDroppedIsUnconfirmed(reason string) bool {
-	return reason == relayDroppedRetriesExhausted || reason == relayDroppedMaybeInPane || reason == relayDroppedWorkingExpired
+	return reason == relayDroppedRetriesExhausted || reason == relayDroppedMaybeInPane || reason == relayDroppedCheckPane || reason == relayDroppedPaneReadFailed || reason == relayDroppedWorkingExpired
 }
 
 // designLaneFor names the lane that owns the job a worker lane belongs to: the
@@ -172,8 +174,14 @@ func (h *HubServer) escalateUnconfirmedRelayAttempt(machine string, dropped rela
 // the durable event id, the worker lane and pane, the producer's event id and
 // the reason, so the receiver can re-send the original or look at the pane.
 func unconfirmedEscalationText(record handoffkeepRelayEvent, dropped relayDroppedPayload, machine string) string {
-	return fmt.Sprintf("[delivery unconfirmed] event %d (%s, producer id %s) for lane %s was not confirmed on %s pane %s: %s. The worker may not have it; read the pane or re-send. Reported once.",
-		record.ID, record.Kind, truncateRelayText(record.EventID, 64), dropped.Lane, truncateRelayText(machine, 64), truncateRelayText(dropped.Pane, 64), dropped.Reason)
+	action := "The worker may not have it; read the pane or re-send."
+	if dropped.Reason == relayDroppedCheckPane {
+		action = "Check the pane before resending; it may already contain the message."
+	} else if dropped.Reason == relayDroppedPaneReadFailed {
+		action = "The pane could not be read before sending; restore pane access and resend."
+	}
+	return fmt.Sprintf("[delivery unconfirmed] event %d (%s, producer id %s) for lane %s was not confirmed on %s pane %s: %s. %s Reported once.",
+		record.ID, record.Kind, truncateRelayText(record.EventID, 64), dropped.Lane, truncateRelayText(machine, 64), truncateRelayText(dropped.Pane, 64), dropped.Reason, action)
 }
 
 // unconfirmedNoticeMoot names why nobody can act on a notice about the worker
