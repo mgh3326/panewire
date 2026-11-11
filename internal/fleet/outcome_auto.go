@@ -16,7 +16,7 @@ import (
 // already reads, not a new mergewake call. The origin id is derived from the
 // job, so a second merged signal is an idempotent resend.
 func (a *App) recordMergedOutcome(ctx context.Context, j Job, task string, status TaskStatus, change PRChange) error {
-	if task == "" {
+	if task == "" || outcomeExcluded(j) {
 		return nil
 	}
 	pr, head := joinedPR(j)

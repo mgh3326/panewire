@@ -295,6 +295,11 @@ type TaskPaneSweeper struct {
 	Exclusive func() (release func())
 
 	idleSince map[string]time.Time
+	// failures holds the failure reps the sweep still owes (their joined PR is
+	// open or unread); settledFailures holds the jobs whose rep is final
+	// (outcome_failed.go).
+	failures        map[string]deferredFailure
+	settledFailures map[string]bool
 }
 
 func (s *TaskPaneSweeper) info(message string, attrs ...any) {
@@ -318,6 +323,7 @@ func paneSweepMatches(j Job, ag Agent) bool {
 // Pass runs one sweep over the jobs under a.Jobs. A pass that cannot read
 // herdr changes nothing; one that cannot read a task keeps that job's pane.
 func (s *TaskPaneSweeper) Pass(ctx context.Context, a *App) error {
+	s.retryDeferredFailures(ctx, a)
 	entries, err := os.ReadDir(a.Jobs)
 	if errors.Is(err, os.ErrNotExist) {
 		clear(s.idleSince)
@@ -425,6 +431,9 @@ func (s *TaskPaneSweeper) Pass(ctx context.Context, a *App) error {
 				}
 			}
 		}
+		// A live job that already ended as escalated or lost keeps its failure
+		// rep owed until it is final (outcome_failed.go).
+		s.observeFailure(ctx, a, j, task)
 		// A task that ended decides the end state; a closed job whose task is
 		// still live, or unreadable, ends by its own record.
 		end, eligible := paneSweepTaskEnd(status)
@@ -456,6 +465,8 @@ func (s *TaskPaneSweeper) Pass(ctx context.Context, a *App) error {
 			}
 			if reason := s.close(ctx, a, j, task, end, since, now); reason != "" {
 				s.info("task pane kept", "job", j.ID, "task", task, "task_state", end.taskState, "pane", j.Pane, "reason", reason)
+			} else {
+				s.closedFailure(ctx, a, j, task)
 			}
 		}
 	}
