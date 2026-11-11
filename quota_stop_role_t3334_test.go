@@ -38,8 +38,8 @@ func newRoleStopRig(t *testing.T, role string, startedAgo time.Duration, task st
 	}
 	started := rig.now.Add(-startedAgo).UTC().Format(time.RFC3339)
 	for name, body := range map[string]string{
-		"00001-job.claimed.json": `{"type":"job.claimed","created_at":"` + started + `","agent_label":"worker-synthetic","owner_lane":"owner","role":"worker","epoch":1}`,
-		"00002-job.spawned.json": `{"type":"job.spawned","created_at":"` + started + `","pane_id":"workspace:pane-1","role":"` + role + `"}`} {
+		"00001-job.claimed.json": `{"type":"job.claimed","created_at":"` + started + `","agent_label":"worker-synthetic","owner_lane":"owner","role":"worker","task_id":"42","epoch":1}`,
+		"00002-job.spawned.json": `{"type":"job.spawned","created_at":"` + started + `","pane_id":"workspace:pane-1","role":"` + role + `","task_id":"42"}`} {
 		if err := os.WriteFile(filepath.Join(events, name), []byte(body), 0600); err != nil {
 			t.Fatal(err)
 		}

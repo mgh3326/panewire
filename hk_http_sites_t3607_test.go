@@ -189,7 +189,16 @@ func TestJobReportUploadGoesOverHTTP(t *testing.T) {
 func quotaStopHKFixture(policyAnswer, taskAnswer string, notes *int) quotaStopHK {
 	return quotaStopHK{
 		policy: func(context.Context) ([]byte, error) { return []byte(policyAnswer), nil },
-		tasks:  func(context.Context) ([]byte, error) { return []byte(taskAnswer), nil },
+		task: func(context.Context, string) ([]byte, error) {
+			var answer struct {
+				Tasks []json.RawMessage `json:"tasks"`
+			}
+			if json.Unmarshal([]byte(taskAnswer), &answer) != nil || len(answer.Tasks) == 0 {
+				return nil, os.ErrNotExist
+			}
+			return answer.Tasks[0], nil
+		},
+		tasks: func(context.Context) ([]byte, error) { return []byte(taskAnswer), nil },
 		note: func(context.Context, string, string, string) error {
 			if notes != nil {
 				*notes++
@@ -209,6 +218,7 @@ func quotaStopHKDown(calls *int) quotaStopHK {
 	}
 	return quotaStopHK{
 		policy: func(context.Context) ([]byte, error) { return nil, down() },
+		task:   func(context.Context, string) ([]byte, error) { return nil, down() },
 		tasks:  func(context.Context) ([]byte, error) { return nil, down() },
 		note:   func(context.Context, string, string, string) error { return down() },
 	}
@@ -254,7 +264,7 @@ func TestQuotaStopHKCallsGoOverHTTP(t *testing.T) {
 	if p, ok := q.loadPolicy(ctx, time.Now()); !ok || p.ResumeText != "continue" {
 		t.Fatalf("policy=%+v ok=%t", p, ok)
 	}
-	if priority, expected, ok := q.task(ctx, HubActiveJob{JobID: "job-active"}, ""); !ok || priority != 2 || expected != 4*time.Hour {
+	if priority, expected, ok := q.task(ctx, HubActiveJob{JobID: "job-active"}, "", ""); !ok || priority != 2 || expected != 4*time.Hour {
 		t.Fatalf("task priority=%d expected=%v ok=%t", priority, expected, ok)
 	}
 	now := time.Now().UTC()
@@ -303,7 +313,7 @@ func TestQuotaStopHKFailuresKeepCLIHandling(t *testing.T) {
 			if _, ok := q.loadPolicy(ctx, time.Now()); ok {
 				t.Fatal("policy read without hk")
 			}
-			if _, _, ok := q.task(ctx, HubActiveJob{JobID: "job-active"}, ""); ok {
+			if _, _, ok := q.task(ctx, HubActiveJob{JobID: "job-active"}, "", ""); ok {
 				t.Fatal("task found without hk")
 			}
 			now := time.Now().UTC()
@@ -426,7 +436,7 @@ func TestQuotaStopCLIHTTPParity(t *testing.T) {
 				return tc.status, tc.answer
 			})
 			q := quotaSitesManager(t)
-			p, d, ok = q.task(ctx, HubActiveJob{JobID: "job-active"}, "job-builder")
+			p, d, ok = q.task(ctx, HubActiveJob{JobID: "job-active"}, "job-builder", "")
 			if p != tc.priority || d != tc.expected || ok != tc.found || ran() {
 				t.Fatalf("HTTP gives %d %v %t (hk CLI ran=%t); CLI %d %v %t", p, d, ok, ran(), tc.priority, tc.expected, tc.found)
 			}
