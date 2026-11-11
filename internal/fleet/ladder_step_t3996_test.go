@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -74,8 +75,8 @@ func TestLadderStepSpawnWritesOneRowNamingReplacedAndTakingOverRung(t *testing.T
 		taking["effort"] != "high" || taking["model"] != "provider/example-model" || taking["harness"] != takeover {
 		t.Fatalf("notes = %v", notes)
 	}
-	if notes["reviewed_heads"] != nil {
-		t.Fatalf("reviewed_heads = %v, want null (unknown)", notes["reviewed_heads"])
+	if notes["reviewed_heads"] != nil || notes["pr_source"] != "joined" {
+		t.Fatalf("reviewed_heads = %v, pr_source = %v, want null and joined", notes["reviewed_heads"], notes["pr_source"])
 	}
 	if row["origin_id"] != float64(stableRepOriginID("panewire-ladder:"+rebindParent)) {
 		t.Fatalf("origin_id = %v, want the ladder origin of the replaced job", row["origin_id"])
@@ -195,8 +196,35 @@ func TestLadderStepLeavesReplacedJobFailureRowAlone(t *testing.T) {
 	}
 }
 
-// A spawn that is not a ladder step, or a ladder step whose replaced job joined
-// no PR, writes no ladder row.
+// A parent resolved from its hk record (no local job events, so no joined PR and
+// no profile receipt on this path) still gets its row: the PR comes from the
+// override reason's "PR <n>", and the rung from the hk record.
+func TestLadderStepOnHKResolvedParentTakesPRFromOverrideReason(t *testing.T) {
+	fx, fake := ladderFixture(t)
+	if err := os.RemoveAll(filepath.Join(fx.a.Jobs, rebindParent)); err != nil {
+		t.Fatal(err)
+	}
+	fx.store.records[rebindParent] = map[string]any{
+		"job_id": rebindParent, "task_id": "42", "host": "test-host", "state": "spawned",
+		"family": "anthropic", "owner_lane": "owner", "profile": "sonnet", "effort": "high",
+		"model": "claude-sonnet-5-5", "harness": "claude",
+	}
+	if e := fx.a.Spawn(context.Background(), fx.s); e != nil {
+		t.Fatal(e)
+	}
+	if len(fake.reps) != 1 {
+		t.Fatalf("rows = %d, want 1 (hk-resolved parent)", len(fake.reps))
+	}
+	notes := ladderNotes(t, fake.reps[0])
+	replaced, _ := notes["replaced"].(map[string]any)
+	if notes["pr"] != float64(77) || notes["pr_source"] != "override_reason" || replaced["profile"] != "sonnet" ||
+		replaced["effort"] != "high" || replaced["model"] != "claude-sonnet-5-5" || fake.reps[0]["effort"] != "high" {
+		t.Fatalf("row = %v notes = %v", fake.reps[0], notes)
+	}
+}
+
+// A spawn that is not a ladder step, or a ladder step whose replaced job and
+// override reason name no PR, writes no ladder row.
 func TestLadderStepNeedsParentJobAndReplacedPR(t *testing.T) {
 	fx, fake := ladderFixture(t)
 	plain := fx.s
@@ -206,6 +234,7 @@ func TestLadderStepNeedsParentJobAndReplacedPR(t *testing.T) {
 		t.Fatal(err)
 	}
 	bare := fx.s
+	bare.OverrideReason = "ladder step sonnet high → opus high"
 	bare.replacedRung = &Job{ID: rebindParent, Task: "42"}
 	if err := fx.a.recordLadderStep(context.Background(), bare, Launch{Effort: "high"}, seat); err == nil {
 		t.Fatal("ladder step over a parent with no PR was not refused")

@@ -80,7 +80,9 @@ no automatic row, failed or merged.
 A ladder step is a pinned re-spawn that replaces a rung on a PR that is still
 open: `panewire spawn --parent-job JOB` with an override reason that starts
 `ladder step` (for example `ladder step sonnet high → opus high, PR 77`). The
-replaced job is `JOB`; the PR is the one it joined. When that spawn lands (its
+replaced job is `JOB`; the PR is the one it joined or, when the parent is read
+from its hk record and carries no job events, the `PR <n>` the override reason
+names. `notes.pr_source` says which. When that spawn lands (its
 `job.spawned` event is committed), panewire writes one bench rep for the
 replaced rung. The write is best effort: the spawn is kept whatever the write
 does, and a failure is logged as a warning.
@@ -93,7 +95,7 @@ The row:
 - origin id `panewire-ladder:<replaced job id>`. A job has at most one ladder
   row, so a retry of the same step gets a 409 from hk and keeps the first row;
 - `notes` with `kind = "ladder_step"`, `job` (the replaced job), `pr`,
-  `rounds`, `replaced` (profile, effort, model, harness of the replaced rung),
+  `pr_source` (`joined` or `override_reason`), `rounds`, `replaced` (profile, effort, model, harness of the replaced rung),
   `takes_over` (job, profile, effort, model, harness of the rung that takes
   over) and `reviewed_heads`.
 
@@ -114,5 +116,6 @@ Two things hold regardless of what happens to the PR later:
 is a real failed attempt, but a replaced job that later closes unmerged also
 gets a failure row, so the two can both count against one rung.
 
-A spawn that names no parent job, or a parent that joined no PR, writes no
-ladder row. The spawn still succeeds and a warning is logged.
+A spawn that names no parent job, or whose parent joined no PR and whose
+override reason names no `PR <n>`, writes no ladder row. The spawn still
+succeeds and a warning is logged.
