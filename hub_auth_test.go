@@ -71,6 +71,36 @@ func (caller pw2Caller) do(t *testing.T, server *httptest.Server, method, path, 
 	return response.StatusCode, string(data)
 }
 
+// doAsync sends one request with this caller's headers and answers its status
+// and body on a channel, so a test can read the node command the request
+// triggers before the response is written.
+func (caller pw2Caller) doAsync(t *testing.T, server *httptest.Server, method, path, body string) <-chan t14HTTPResult {
+	t.Helper()
+	result := make(chan t14HTTPResult, 1)
+	go func() {
+		request, err := http.NewRequest(method, server.URL+path, strings.NewReader(body))
+		if err != nil {
+			result <- t14HTTPResult{status: -1, body: []byte(err.Error())}
+			return
+		}
+		if caller.id != "" {
+			request.Header.Set(hubMachineIDHeader, caller.id)
+		}
+		if caller.token != "" {
+			request.Header.Set(hubAuthorizationHeader, "Bearer "+caller.token)
+		}
+		response, err := server.Client().Do(request)
+		if err != nil {
+			result <- t14HTTPResult{status: -1, body: []byte(err.Error())}
+			return
+		}
+		defer response.Body.Close()
+		data, _ := io.ReadAll(response.Body)
+		result <- t14HTTPResult{status: response.StatusCode, header: response.Header, body: data}
+	}()
+	return result
+}
+
 func pw2Hub(t *testing.T, scopes map[string]string, authPath string, logs io.Writer) (*HubServer, *httptest.Server) {
 	t.Helper()
 	tokens := map[string]string{"operator": pw2OperatorToken, "node-a": pw2NodeAToken, "node-b": pw2NodeBToken}
@@ -131,6 +161,8 @@ func TestHubAuthScopesPerRoute(t *testing.T) {
 		{"inbox-read", "POST", "/v1/inbox/1/read?lane=lane-a", ""},
 		{"inbox-ack", "POST", "/v1/inbox/ack?lane=lane-a", `{"id":1}`},
 		{"inbox-ack-state", "GET", "/v1/inbox/ack-state?event_id=ev-1", ""},
+		{"jobs-mine", "GET", "/v1/jobs/mine?lane=lane-a", ""},
+		{"jobs-reap", "POST", "/v1/jobs/reap", `{"lane":"lane-a","job":"job-a","force":false}`},
 	}
 	callers := []pw2Caller{
 		{"operator", "", pw2OperatorToken},
@@ -145,18 +177,18 @@ func TestHubAuthScopesPerRoute(t *testing.T) {
 
 	// G granted, D 401, F 403 — in routes order.
 	want := map[string]string{
-		"operator":           "GGGGGGGGGGGGG",
-		"node-a":             "DDDDDDDGGGGGG",
-		"node-b":             "DDDDDDDDDDDDG",
-		"anonymous":          "DDDDDDDDDDDDD",
-		"svc-ok":             "GGGGGGGGGGGGF",
-		"svc-none":           "FFFFFFFFFFFFF",
-		"svc-other":          "FFFFFFFFFFFFF",
-		"svc-wild":           "GGGGGGGFFFFFF",
-		"svc-readonly":       "FFFFFFFGGGGFF",
-		"svc-mergewake":      "GGGGFFFFFFFFF",
-		"svc-ok-wrong-token": "DDDDDDDDDDDDD",
-		"svc-ackstate":       "FFFFFFFFFFFFG",
+		"operator":           "GGGGGGGGGGGGGGG",
+		"node-a":             "DDDDDDDGGGGGGGG",
+		"node-b":             "DDDDDDDDDDDDGFF",
+		"anonymous":          "DDDDDDDDDDDDDDD",
+		"svc-ok":             "GGGGGGGGGGGGFFF",
+		"svc-none":           "FFFFFFFFFFFFFFF",
+		"svc-other":          "FFFFFFFFFFFFFFF",
+		"svc-wild":           "GGGGGGGFFFFFFFF",
+		"svc-readonly":       "FFFFFFFGGGGFFFF",
+		"svc-mergewake":      "GGGGFFFFFFFFFFF",
+		"svc-ok-wrong-token": "DDDDDDDDDDDDDDD",
+		"svc-ackstate":       "FFFFFFFFFFFFGFF",
 	}
 	for _, caller := range callers {
 		for index, route := range routes {
@@ -167,7 +199,9 @@ func TestHubAuthScopesPerRoute(t *testing.T) {
 				got = "D"
 			case http.StatusForbidden:
 				got = "F"
-				if !strings.Contains(body, `"scope_forbidden"`) {
+				// A 403 always names why. The lane's own jobs routes answer a
+				// node whose lane is routed elsewhere with that reason.
+				if !strings.Contains(body, `"scope_forbidden"`) && !strings.Contains(body, `"lane_not_routed_to_caller"`) {
 					t.Errorf("%s %s: 403 body %q", caller.name, route.name, body)
 				}
 			}

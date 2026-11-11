@@ -642,6 +642,7 @@ func (d *Daemon) serve(ctx context.Context) {
 type localRequest struct {
 	JobClose      *hubJobCloseRequest   `json:"job_close,omitempty"`
 	Inbox         *inboxRequest         `json:"inbox,omitempty"`
+	OwnJobs       *ownJobsRequest       `json:"own_jobs,omitempty"`
 	PRStatus      *localPRStatusRequest `json:"pr_status,omitempty"`
 	DeliveryClass string                `json:"delivery_class,omitempty"`
 	Late          bool                  `json:"late,omitempty"`
@@ -731,6 +732,8 @@ func (d *Daemon) handle(ctx context.Context, c net.Conn) {
 			err = d.emitRelayEvent(req)
 		case "inbox":
 			result, err = d.handleInbox(callCtx, req.Inbox)
+		case "jobs.own":
+			result, err = d.handleOwnJobs(callCtx, req.OwnJobs)
 		case daemonop.LanesPutOp:
 			result, err = d.handleLanesPut(callCtx, req.LanesPut)
 		case "job.close":

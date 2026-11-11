@@ -664,8 +664,11 @@ func renderHubStatus(writer io.Writer, nodes []HubNode) {
 }
 
 func runJobsCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
-	if len(args) == 0 || (args[0] != "jobs" && args[0] != "list" && args[0] != "orphaned" && args[0] != "reassign") {
-		return writeHubCLIUsage(stderr, "jobs: expected list, jobs, orphaned, or reassign subcommand", jobsUsage)
+	if len(args) == 0 || (args[0] != "jobs" && args[0] != "list" && args[0] != "orphaned" && args[0] != "reassign" && args[0] != "mine" && args[0] != "close") {
+		return writeHubCLIUsage(stderr, "jobs: expected list, jobs, orphaned, reassign, mine, or close subcommand", jobsUsage)
+	}
+	if args[0] == "mine" || args[0] == "close" {
+		return runOwnJobsCLI(args[0], args[1:], stdout, stderr, deps)
 	}
 	flags := flag.NewFlagSet("panewire jobs "+args[0], flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
@@ -684,13 +687,7 @@ func runJobsCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 		*cfEnvPath = os.Getenv("PANEWIRE_HUB_CF_ENV")
 	}
 	if err := flags.Parse(args[1:]); err != nil {
-		reason := "jobs: invalid flag value"
-		if strings.HasPrefix(err.Error(), "flag provided but not defined:") {
-			reason = "jobs: unknown flag"
-		} else if strings.HasPrefix(err.Error(), "flag needs an argument:") {
-			reason = "jobs: flag value is required"
-		}
-		return writeHubCLIUsage(stderr, reason, jobsUsage)
+		return writeHubCLIUsage(stderr, jobsFlagReason(err), jobsUsage)
 	}
 	if flags.NArg() != 0 {
 		return writeHubCLIUsage(stderr, "jobs: unexpected positional argument", jobsUsage)
@@ -824,6 +821,18 @@ func runJobsCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 	}
 	fmt.Fprintf(stdout, "%s\t%s\t%s\t%d\n", result.JobID, result.From, result.To, result.Epoch)
 	return ExitOK
+}
+
+// jobsFlagReason names what a flag parse error was about, for the usage line
+// every `panewire jobs` subcommand prints.
+func jobsFlagReason(err error) string {
+	switch {
+	case strings.HasPrefix(err.Error(), "flag provided but not defined:"):
+		return "jobs: unknown flag"
+	case strings.HasPrefix(err.Error(), "flag needs an argument:"):
+		return "jobs: flag value is required"
+	}
+	return "jobs: invalid flag value"
 }
 
 func renderHubLastNote(note *HubLastNote, now time.Time) string {

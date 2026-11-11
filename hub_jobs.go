@@ -503,13 +503,7 @@ func (h *HubServer) consoleJobs(machine, lane string, includeCompleted bool) []h
 		if (!includeCompleted && job.Completed) || h.jobRecordStaleLocked(job, now) || (machine != "" && job.Node != machine) || (lane != "" && job.OwnerLane != lane) {
 			continue
 		}
-		state := "active"
-		if job.Completed {
-			state = "completed"
-		} else if job.Orphaned {
-			state = "orphaned"
-		}
-		jobs = append(jobs, hubConsoleJob{Machine: job.Node, State: state, JobID: job.JobID, OwnerLane: job.OwnerLane, Pane: job.Pane, Tier: job.Tier, Role: job.Role, StartedAt: job.StartedAt, LastEventKind: job.LastEventKind, LastEventAt: job.LastEventAt})
+		jobs = append(jobs, hubConsoleJob{Machine: job.Node, State: hubJobState(job), JobID: job.JobID, OwnerLane: job.OwnerLane, Pane: job.Pane, Tier: job.Tier, Role: job.Role, StartedAt: job.StartedAt, LastEventKind: job.LastEventKind, LastEventAt: job.LastEventAt})
 	}
 	sort.Slice(jobs, func(i, j int) bool { return jobs[i].JobID < jobs[j].JobID })
 	return jobs

@@ -23,7 +23,9 @@ need no extra opt-in: the hub can already type into any pane through
 `relay.inject`, and every op here is narrower than that. Each op is a closed
 shape; no op runs a shell, and no op takes a caller-chosen file path to write.
 The one report path an op reads (`job.done`) must be one of two fixed files in
-that job's directory.
+that job's directory. `job.close` and `job.reap` are issued by the hub after
+its own ownership checks, and the HTTP command endpoint refuses them for every
+caller, as it does `job.mark_lost`.
 
 ## Task pane sweep
 
@@ -268,6 +270,41 @@ A missing job dir or `events/` is a ledger that is unknown, not an empty one, so
 it answers `ledger_missing` and the node never writes `lost` over a record it
 cannot check. A failed ledger read or handoffkeep write answers
 `mark_lost_failed`; a node without a jobs root answers `jobs_root_unset`.
+
+### `job.reap`
+
+`args: {job, lane, force}` — all three required, and `force:false` must be
+stated. This is the node half of `panewire jobs close`
+([jobs-own.md](jobs-own.md)): the hub has already checked that the caller's
+lane owns the job, and the node re-proves it from the job's own ledger and
+herdr before it closes a pane it did not spawn in this process.
+
+The node reads `<inbox>/jobs/<job>/events` and takes the owner lane from the
+newest claim, and the pane, label and keep flag from the `job.spawned` receipt.
+It then re-reads `herdr agent list` and requires the row for that pane id to
+carry the receipt's label; a pane id is host-local and reused, so a different
+label is another pane. `pane.close`'s settle applies to a non-forced close:
+two matching reads one interval apart, an unchanged `state_change_seq` where
+herdr reports one, and an empty composer both times.
+
+| `outcome` | `pane` | Meaning |
+| --- | --- | --- |
+| `closed` | the closed pane | Matched and `herdr pane close` succeeded. |
+| `pane-gone` | the receipt's pane, when it names one | No such agent pane; nothing to close. |
+| `pane-changed` | the receipt's pane | The pane carries another label, is in no closable status, or its composer is not proven empty; not closed. |
+| `job-working` | the receipt's pane | The pane is `working`; `force` closes it. Not closed. |
+| `pane-blocked` | the receipt's pane | The pane waits at a prompt; `force` closes it. Not closed. |
+| `protected` | the receipt's pane | The job was spawned with `--keep`; never closed, whatever `force` says. |
+| `owner-mismatch` | the receipt's pane | The ledger's owner lane is not `lane`; not closed. |
+| `not-a-job` | — | The job directory is missing or is a symlink; the fleet did not spawn it here. |
+
+A node without a jobs root answers `jobs_root_unset`, a failed ledger read
+answers `reap_failed`, and a failed agent list or close answers `herdr_failed`
+or `close_failed`. The op takes the node's one-at-a-time acting lock, so it
+cannot interleave with `pane.close`, `job.done` or `job.mark_lost`.
+
+A node older than this op refuses it as `invalid_args` without acting; deploy
+the nodes before the hub for `panewire jobs close` to work end to end.
 
 ### `worktree.inspect`
 

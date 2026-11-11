@@ -26,7 +26,8 @@ const jobsUsage = `Usage:
   panewire jobs list --lane LANE [--json] ` + hubCredentialUsage + `
   panewire jobs jobs [--machine MACHINE] [--include-completed] ` + hubCredentialUsage + `
   panewire jobs orphaned ` + hubCredentialUsage + `
-  panewire jobs reassign --job-id JOB --to MACHINE ` + hubCredentialUsage
+  panewire jobs reassign --job-id JOB --to MACHINE ` + hubCredentialUsage + `
+` + ownJobsUsage
 
 const fleetCensusFindUsage = "Usage: panewire fleet-census find LABEL [--contains] [--machine MACHINE] [--json] " + hubCredentialUsage
 const fleetCensusUsage = "Usage: panewire fleet-census [--json] [--grace D] [--jobs-root PATH] [--herdr-socket PATH] [--machine-id ID] [--node-env FILE] [" + hubCredentialUsage + "]\n" + fleetCensusFindUsage

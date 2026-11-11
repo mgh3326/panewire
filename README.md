@@ -193,6 +193,19 @@ reaper selects its pane. The owner lane can declare the job ended with this
 command. See [job close](docs/job-close.md) for ownership, remote routing,
 refusals, and the record contract.
 
+### A lane's own jobs on other hosts (`panewire jobs mine`, `jobs close`)
+
+```sh
+panewire jobs mine --lane LANE [--json]
+panewire jobs close --lane LANE --job JOB [--force] [--json]
+```
+
+A session that spawned panes on another host lists and closes them through the
+local node daemon and its own node credential, with no operator token. `close`
+asks the job's machine to close its pane with reap's safety rules and retires
+the lane route that pointed at it. See [a lane's own jobs](docs/jobs-own.md)
+for the authorization rule, the refusals, and the rollout order.
+
 ## Agent launch and lifecycle
 
 Use `panewire spawn` with the existing task, role, quota and landing checks, or

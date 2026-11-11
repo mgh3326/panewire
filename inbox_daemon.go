@@ -25,7 +25,9 @@ type inboxRequest struct {
 	EventIDs []string `json:"event_ids,omitempty"`
 }
 
-type inboxResult struct {
+// localTextResult is a daemon op's rendered answer: the same text, streams and
+// exit status the CLI would have printed itself.
+type localTextResult struct {
 	Code   int    `json:"code"`
 	Stdout string `json:"stdout,omitempty"`
 	Stderr string `json:"stderr,omitempty"`
@@ -65,10 +67,10 @@ func runInboxLocal(req inboxRequest, stdout, stderr io.Writer, socket string) in
 		return ExitDaemonUnavailable
 	}
 	var resp struct {
-		OK     bool        `json:"ok"`
-		Code   int         `json:"code"`
-		Error  string      `json:"error"`
-		Result inboxResult `json:"result"`
+		OK     bool            `json:"ok"`
+		Code   int             `json:"code"`
+		Error  string          `json:"error"`
+		Result localTextResult `json:"result"`
 	}
 	if json.Unmarshal(scan.Bytes(), &resp) != nil {
 		fmt.Fprintln(stderr, "inbox: invalid daemon response")
@@ -117,5 +119,5 @@ func (d *Daemon) handleInbox(ctx context.Context, req *inboxRequest) (any, error
 	var out, errOut bytes.Buffer
 	client := nodeHubClient{ctx: ctx, client: d.cfg.Hub.Client}
 	code := executeInbox(client, &out, &errOut, *req, false)
-	return inboxResult{Code: code, Stdout: out.String(), Stderr: errOut.String()}, nil
+	return localTextResult{Code: code, Stdout: out.String(), Stderr: errOut.String()}, nil
 }

@@ -75,7 +75,7 @@ func knownNodeCommandOp(op string) bool {
 	switch op {
 	case nodeCommandAgentsList, nodeCommandPaneClose, nodeCommandPaneCapture, nodeCommandPaneRead,
 		nodeCommandWorktreeInspect, nodeCommandWorktreeList, nodeCommandWorktreePrepare, nodeCommandWorktreeRemove,
-		nodeCommandQuotaRefresh, nodeCommandJobDone, nodeCommandJobResult, nodeCommandJobMarkLost, nodeCommandPRStatus, nodeCommandJobClose:
+		nodeCommandQuotaRefresh, nodeCommandJobDone, nodeCommandJobResult, nodeCommandJobMarkLost, nodeCommandPRStatus, nodeCommandJobClose, nodeCommandJobReap:
 		return true
 	}
 	return false
@@ -85,7 +85,7 @@ func knownNodeCommandOp(op string) bool {
 // result. node_lost and node_timeout are hub-local and never on the wire.
 func validNodeCommandError(code string) bool {
 	switch code {
-	case "invalid_args", "herdr_failed", "close_failed", "capture_failed", "jobs_root_unset", "work_root_unset", "refresh_failed", "done_failed", "result_failed", "mark_lost_failed", "result_too_large":
+	case "invalid_args", "herdr_failed", "close_failed", "capture_failed", "jobs_root_unset", "work_root_unset", "refresh_failed", "done_failed", "result_failed", "mark_lost_failed", "reap_failed", "result_too_large":
 		return true
 	}
 	return false
@@ -192,6 +192,7 @@ func decodeNodeCommandStrict(raw []byte, target any) bool {
 // the caller must state, never a default for an omitted field.
 var nodeCommandArgFields = map[string][]string{
 	nodeCommandJobClose:        {"job", "lane", "outcome", "reason", "override"},
+	nodeCommandJobReap:         {"job", "lane", "force"},
 	nodeCommandAgentsList:      {},
 	nodeCommandPaneClose:       {"pane_id", "name", "agent_status", "cwd"},
 	nodeCommandPaneCapture:     {"pane_id", "name", "cwd", "merged_after", "write"},
@@ -270,6 +271,9 @@ func parseNodeCommandArgs(op string, raw json.RawMessage) (any, bool) {
 		}
 		_, err := args.options()
 		return args, err == nil
+	case nodeCommandJobReap:
+		var args nodeJobReapArgs
+		return args, decodeNodeCommandStrict(raw, &args) && validNodeJobReapArgs(args)
 	case nodeCommandJobDone:
 		var args nodeJobDoneArgs
 		return args, decodeNodeCommandStrict(raw, &args) && validNodeJobName(args.Job) && validNodeCommandPath(args.Report)
@@ -411,6 +415,10 @@ func canonicalNodeCommandResult(op string, raw json.RawMessage) (json.RawMessage
 		var result hubJobCloseResult
 		valid = decodeNodeCommandStrict(raw, &result) && ((result.Refusal != "" && result.Failure == "" && result.Name == "") || (result.Failure == "close_failed" && result.Refusal == "" && result.Name == "") || (result.Refusal == "" && result.Failure == "" && result.Name != "" && result.Record.Kind == jobCloseKind))
 		target = result
+	case nodeCommandJobReap:
+		var result nodeJobReapResult
+		valid = decodeNodeCommandStrict(raw, &result) && validNodeJobReapResult(result)
+		target = result
 	case nodeCommandPRStatus:
 		var result nodePRStatusResult
 		valid = decodeNodeCommandStrict(raw, &result) && validNodePRStatusResult(result)
@@ -485,7 +493,7 @@ func (client *HubClient) handleNodeCommand(ctx context.Context, peer *hubClientC
 	reply := nodeCommandReply{Type: "node.command.result", RequestID: message.RequestID, Op: message.CommandOp}
 	result, code := client.runNodeCommand(runContext, message.CommandOp, message.CommandArgs)
 	result = peer.nodeCommandWire(result)
-	if nodeCommandReapOnly(message.CommandOp) {
+	if nodeCommandAudited(message.CommandOp) {
 		decoded, _ := decodeNodeCommandArgs(message.CommandOp, message.CommandArgs)
 		logNodeReapCommand(message.CommandOp, decoded, result, code)
 	}
@@ -551,6 +559,12 @@ func (client *HubClient) runNodeCommand(ctx context.Context, op string, raw json
 		return client.nodeJobMarkLost(ctx, args)
 	case hubJobCloseRequest:
 		return client.nodeJobClose(args)
+	case nodeJobReapArgs:
+		// A job close acts on herdr, so it takes the same one-at-a-time lock
+		// pane.close and job.done take.
+		client.nodeCommandMu.Lock()
+		defer client.nodeCommandMu.Unlock()
+		return client.nodeJobReap(ctx, args)
 	case nodeJobDoneArgs:
 		client.nodeCommandMu.Lock()
 		defer client.nodeCommandMu.Unlock()
