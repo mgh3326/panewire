@@ -102,16 +102,16 @@ func TestOMPNoThinkingSeatLaunchAndProof(t *testing.T) {
 		}
 	}
 	const cwd = "/home/user/work/tree"
-	screen := "π > Gemini 4 Argon > 🌳 project/tree ▶─1%──…─1M─"
+	screen := "π > ⬢ Gemini 4 Argon > 🌳 project/tree ▶─1%──…─1M─"
 	if !OMPFooterProof(screen, "Gemini 4 Argon", "off", cwd, "/home/user", "", a.Policy.Profiles["omp-argon4"].NoThinking) {
-		t.Fatal("the no-thinking seat's footer without a glyph was refused")
+		t.Fatal("the no-thinking seat's footer with ⬢ was refused")
 	}
 	if OMPFooterProof(screen, "Gemini 4 Argon", "off", cwd, "/home/user", "", a.Policy.Profiles["omp-musespark13"].NoThinking) {
-		t.Fatal("a thinking seat accepted the footer without a glyph")
+		t.Fatal("a thinking seat accepted the footer with ⬢")
 	}
 }
 
-// The proof path a spawn runs reads the seat: the same no-glyph footer proves
+// The proof path a spawn runs reads the seat: the real ⬢ footer proves
 // a no-thinking seat and is refused for a thinking one.
 func TestOMPNoThinkingSeatProofReadsSeat(t *testing.T) {
 	for profile, want := range ompNoThinkingSeats {
@@ -123,9 +123,9 @@ func TestOMPNoThinkingSeatProofReadsSeat(t *testing.T) {
 			q.LaunchValue = Launch{Profile: profile, ModelID: want.model, Effort: "off", Grade: gradeUnrated, Pool: commandcodePool, Gate: defaultGate}
 			q.GateDo = gatePools(map[string]string{profile: commandcodePool})
 			ompModelCatalog(fr, want.model, want.footer)
-			ompSeat(fr, "", func(int) string { return "π > " + want.footer + " > 🌳 panewire/tree ▶─1%──…─1M─" })
+			ompSeat(fr, "", func(int) string { return "π > ⬢ " + want.footer + " > 🌳 panewire/tree ▶─1%──…─1M─" })
 			if err := a.Spawn(context.Background(), s); err != nil {
-				t.Fatalf("no-glyph footer did not prove %s@off: %v", profile, err)
+				t.Fatalf("⬢ footer did not prove %s@off: %v", profile, err)
 			}
 		})
 	}
@@ -137,10 +137,10 @@ func TestOMPNoThinkingSeatProofReadsSeat(t *testing.T) {
 		q.LaunchValue = Launch{Profile: "omp-musespark13", ModelID: "commandcode/meta/muse-spark-1.3", Effort: "high", Grade: gradeUnrated, Pool: commandcodePool, Gate: defaultGate}
 		q.GateDo = gatePools(map[string]string{"omp-musespark13": commandcodePool})
 		ompModelCatalog(fr, "commandcode/meta/muse-spark-1.3", "Muse Spark 1.3")
-		ompSeat(fr, "", func(int) string { return "π > Muse Spark 1.3 > 🌳 panewire/tree ▶─1%──…─1M─" })
+		ompSeat(fr, "", func(int) string { return "π > ⬢ Muse Spark 1.3 > 🌳 panewire/tree ▶─1%──…─1M─" })
 		err := a.Spawn(context.Background(), s)
 		if err == nil || !strings.Contains(err.Error(), "omp model/effort not proven") {
-			t.Fatalf("a thinking seat proved without an effort glyph: %v", err)
+			t.Fatalf("a thinking seat proved with ⬢ icon instead of an effort glyph: %v", err)
 		}
 	})
 }

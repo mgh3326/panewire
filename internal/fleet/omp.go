@@ -32,6 +32,11 @@ func ompBunScript(argv []string) bool {
 // mark, the only place its footer shows effort. Other presets are refused.
 var ompEffortGlyphs = map[string]string{"minimal": "○", "low": "◔", "medium": "◑", "high": "◒", "xhigh": "◕", "max": "◉"}
 
+// ompNoThinkingIcon is omp's model icon when a model has no thinking display
+// (pi-tui/src/status-line/segments.ts:358-360 uses theme.icon.model;
+// pi-tui/src/theme/symbols.ts:469 sets icon.model to "⬢" in the unicode preset).
+const ompNoThinkingIcon = "⬢"
+
 // ompWorkingLead is the first footer segment while omp is working: a braille
 // spinner frame and the elapsed time ("⠸ 16s", "⠙ 1m 4s").
 var ompWorkingLead = regexp.MustCompile(`^[\x{2800}-\x{28FF}] (?:\d+[hms] ?)*\d+[hms]$`)
@@ -70,7 +75,7 @@ func OMPFooterProof(screen, modelName, effort, cwd, home, brief string, noThinki
 		return false
 	}
 	// A usage-limit badge follows " · "; any other tail is another model's name.
-	modelPrefix := modelName
+	modelPrefix := ompNoThinkingIcon + " " + modelName
 	if !noThinking {
 		modelPrefix = glyph + " " + modelName
 	}
