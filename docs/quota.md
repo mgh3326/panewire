@@ -278,10 +278,13 @@ source, bucket, error kind, account fingerprint 및 shared store 형식을 유�
   (`fetchAvailableModels`, best effort) that supplies a group the summary omits.
   A refused token is re-armed once with `agy models` under the lock file
   pacelever uses (`<cache>/pacelever/agy-wake.lock`, so the two never wake the
-  CLI at once) and retried; a token another holder just refreshed is reused. On
-  macOS the keychain item the CLI keeps (`security find-generic-password -s
-  gemini -a antigravity`) is the login when the file has none, and the fallback
-  when the file's token stays refused.
+  CLI at once) and retried; a token another holder just refreshed is reused. The
+  OS keyring item the CLI keeps is the login when the file has none, and the
+  fallback when the file's token stays refused: on macOS the keychain item
+  (`security find-generic-password -s gemini -a antigravity`), on Linux the
+  secret service item with attributes `service=gemini` and `username=antigravity`
+  (the item go-keyring writes), read over the session bus with no prompt and a
+  10 s bound; a locked item, a missing session bus or no answer is no login.
 - **Credentials** are located, not copied: the token is `token.access_token` of
   `~/.gemini/antigravity-cli/antigravity-oauth-token`, else of
   `$XDG_CONFIG_HOME/antigravity-cli/antigravity-oauth-token`. It is read into

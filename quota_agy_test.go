@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mgh3326/panewire/internal/fleet"
 	"github.com/mgh3326/panewire/internal/quota"
 	"github.com/mgh3326/panewire/internal/quota/agy"
 	"github.com/mgh3326/panewire/internal/quota/shared"
@@ -78,8 +79,8 @@ func agyLoginFiles(access string) map[string]string {
 }
 
 // agyTestSource is an agy measurement over fakes: the login file, the cloud API,
-// no app process and no keychain or agy binary. account is the host's
-// configured fingerprint and whether it may measure it.
+// no app process and no keychain, secret service or agy binary. account is the
+// host's configured fingerprint and whether it may measure it.
 func agyTestSource(spawnConfig string, files map[string]string, api agy.Doer, fp string, measurable bool) *nativeQuotaSource {
 	return &nativeQuotaSource{
 		Pool: "agy", SpawnConfigPath: spawnConfig, HostID: "node-a", Now: func() time.Time { return claudeTestNow }, Wait: 5 * time.Millisecond,
@@ -92,10 +93,11 @@ func agyTestSource(spawnConfig string, files map[string]string, api agy.Doer, fp
 				}
 				return nil, os.ErrNotExist
 			},
-			LookPath:    func(string) (string, error) { return "", errors.New("not found") },
-			Processes:   func(context.Context) []agy.Proc { return nil },
-			ListenPorts: func(context.Context, int) []int { return nil },
-			Locked:      func(_ string, fn func() error) error { return fn() },
+			SecretService: func(context.Context) (string, error) { return "", errors.New("no secret service") },
+			LookPath:      func(string) (string, error) { return "", errors.New("not found") },
+			Processes:     func(context.Context) []agy.Proc { return nil },
+			ListenPorts:   func(context.Context, int) []int { return nil },
+			Locked:        func(_ string, fn func() error) error { return fn() },
 		},
 	}
 }
@@ -209,6 +211,51 @@ func TestFleetQuotaAgyNativeNeverRunsPacelever(t *testing.T) {
 		if r.Header.Get("Authorization") != "Bearer "+agyToken {
 			t.Fatalf("request auth %q", r.Header.Get("Authorization"))
 		}
+	}
+}
+
+// Linux: agy's login lives in the secret service when the CLI keeps no login
+// file, so the quota path reports the host logged in instead of login_missing.
+func TestFleetQuotaAgyLinuxSecretServiceLogin(t *testing.T) {
+	setAgySwitch(t, true, true)
+	hk := newClaudeHK(t)
+	client := quotaClient(t)
+	client.spawnConfigPath = claudeStore(t, hk.server.URL)
+	const secret = "agy-secret-service-token-must-not-leak"
+	api := claudeAPIFunc(func(r *http.Request) (*http.Response, error) {
+		if r.Header.Get("Authorization") != "Bearer "+secret {
+			return claudeAPIReply(401, `{}`)(r)
+		}
+		if strings.HasSuffix(r.URL.Path, ":fetchAvailableModels") {
+			return claudeAPIReply(200, `{"models":{}}`)(r)
+		}
+		return claudeAPIReply(200, agySummaryReply)(r)
+	})
+	source := agyTestSource(client.spawnConfigPath, agyLoginFiles(""), api, agyFPForTest, true)
+	source.Agy.SecretService = func(context.Context) (string, error) {
+		return `{"token":{"access_token":"` + secret + `"}}`, nil
+	}
+	client.nativeQuota = map[string]*nativeQuotaSource{"agy": source}
+	client.nodePacelever = (&paceleverRunnerFake{pool: "agy"}).run
+	warned := newWarnLog(client)
+
+	client.refreshFleetQuota(t.Context(), "agy", map[string]fleetQuotaSent{})
+
+	if got := warned.all(); len(got) != 0 {
+		t.Fatalf("warnings %q", got)
+	}
+	if hk.published() != 1 {
+		t.Fatalf("the shared store got %d observations", hk.published())
+	}
+	login := poolLogin(t, client, "agy")
+	if login.Login != fleet.ReadinessLoginPresent || login.Account != agyKeyForTest {
+		t.Fatalf("login %+v, want present under %s", login, agyKeyForTest)
+	}
+	hk.mu.Lock()
+	published := string(hk.pubs[0])
+	hk.mu.Unlock()
+	if strings.Contains(published, secret) {
+		t.Fatal("the secret service token is in the published reading")
 	}
 }
 

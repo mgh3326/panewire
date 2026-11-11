@@ -51,28 +51,44 @@ func (c Config) readFile(path string) ([]byte, error) {
 	return data, nil
 }
 
-// secretToken is the keychain copy of the login the CLI keeps on macOS, ""
-// elsewhere and when the item is absent or unreadable.
+// secretToken is the OS keyring copy of the login: the keychain item on macOS,
+// the secret service item on Linux, "" elsewhere and when the item is absent,
+// locked or unreadable. The read is bounded at 10 s and never prompts.
 func (c Config) secretToken(ctx context.Context) string {
-	if c.goos() != "darwin" {
+	read := c.secretReader()
+	if read == nil {
 		return ""
 	}
-	keychain := c.Keychain
-	if keychain == nil {
-		keychain = securityKeychain
-	}
-	out, err := keychain(ctx)
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	out, err := read(ctx)
 	if err != nil {
 		return ""
 	}
 	return envelopeToken(strings.TrimSpace(out))
 }
 
+// secretReader is the platform's keyring read: the keychain on macOS, the
+// secret service on Linux, none elsewhere.
+func (c Config) secretReader() func(context.Context) (string, error) {
+	switch c.goos() {
+	case "darwin":
+		if c.Keychain != nil {
+			return c.Keychain
+		}
+		return securityKeychain
+	case "linux":
+		if c.SecretService != nil {
+			return c.SecretService
+		}
+		return secretServiceItem
+	}
+	return nil
+}
+
 // securityKeychain reads the item's secret through `security`. The service and
 // account names are fixed and hold no secret.
 func securityKeychain(ctx context.Context) (string, error) {
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
 	out, err := exec.CommandContext(ctx, "security", "find-generic-password", "-s", "gemini", "-a", "antigravity", "-w").Output()
 	return string(out), err
 }
@@ -139,7 +155,7 @@ func (c Config) wake(ctx context.Context, binary string) error {
 
 // refresh re-arms a refused token under the lock shared with pacelever. A token
 // another holder just refreshed is reused instead of waking the CLI again. It
-// returns the token to retry with and whether it came from the keychain.
+// returns the token to retry with and whether it came from the OS keyring.
 func (c Config) refresh(ctx context.Context, binary, token string, usedSecret bool) (string, bool, error) {
 	// Re-read whichever store supplied the token: the wake or a concurrent
 	// refresh may have replaced it in either one.
