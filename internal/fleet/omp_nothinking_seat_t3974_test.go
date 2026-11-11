@@ -59,9 +59,9 @@ func noThinkingSpawnApp(t *testing.T, extra ...CatalogRow) *App {
 	return a
 }
 
-// pinnedNoThinkingSpawn is a pinned worker spawn of one no-thinking seat, with
-// the marker named by PANEWIRE_E6_ARM as the operator passes it.
-func pinnedNoThinkingSpawn(a *App, profile string) Spawn {
+// pinnedWorkerSpawn is a pinned worker spawn of one seat, with the marker
+// named by PANEWIRE_E6_ARM as the operator passes it.
+func pinnedWorkerSpawn(a *App, profile string) Spawn {
 	return Spawn{Profile: profile, Role: "worker", T: "T1", Task: "3974", Effort: "off", Containment: "hk:3974", CWD: a.Home}
 }
 
@@ -73,7 +73,7 @@ func TestOMPNoThinkingSeatAdmitsPinnedSpawn(t *testing.T) {
 	for profile, want := range ompNoThinkingSeats {
 		t.Run(profile, func(t *testing.T) {
 			t.Setenv("PANEWIRE_E6_ARM", profile+"@off")
-			launch, _, err := a.admitLaunch(context.Background(), pinnedNoThinkingSpawn(a, profile), a.Policy.Profiles[profile], "off", "", "B", "", false)
+			launch, _, err := a.admitLaunch(context.Background(), pinnedWorkerSpawn(a, profile), a.Policy.Profiles[profile], "off", "", "B", "", false)
 			if err != nil {
 				t.Fatalf("pinned %s@off refused: %v", profile, err)
 			}
@@ -168,7 +168,7 @@ func TestOMPThinkingSeatsRefuseOff(t *testing.T) {
 				t.Fatalf("%s is marked no-thinking", profile)
 			}
 			t.Setenv("PANEWIRE_E6_ARM", profile+"@off")
-			_, _, err := a.admitLaunch(context.Background(), pinnedNoThinkingSpawn(a, profile), a.Policy.Profiles[profile], "off", "", "B", "", false)
+			_, _, err := a.admitLaunch(context.Background(), pinnedWorkerSpawn(a, profile), a.Policy.Profiles[profile], "off", "", "B", "", false)
 			if err == nil || !strings.Contains(err.Error(), "credit effort is not placed") {
 				t.Fatalf("%s@off was admitted: %v", profile, err)
 			}
@@ -189,13 +189,13 @@ func TestOMPNoThinkingSeatLeavesOtherRungsUnchanged(t *testing.T) {
 	}
 	seed := ompSeedCatalog(t)
 	for _, tc := range []struct {
-		profile, model, effort string
-		efforts                []string
+		profile, model, pool, effort string
+		efforts                      []string
 	}{
-		{"omp-musespark13", "commandcode/meta/muse-spark-1.3", "high", []string{"low", "high", "max"}},
-		{"omp-cc-opus55", "commandcode/claude-opus-5-5", "high", []string{"low", "high", "max"}},
-		{"omp-cc-sonnet55", "commandcode/claude-sonnet-5-5", "high", []string{"low", "high", "max"}},
-		{"omp-opus", "anthropic/claude-opus-5-5", "high", []string{"low", "medium", "high", "xhigh", "max"}},
+		{"omp-musespark13", "commandcode/meta/muse-spark-1.3", commandcodePool, "high", []string{"low", "high", "max"}},
+		{"omp-cc-opus55", "commandcode/claude-opus-5-5", commandcodePool, "high", []string{"low", "high", "max"}},
+		{"omp-cc-sonnet55", "commandcode/claude-sonnet-5-5", commandcodePool, "high", []string{"low", "high", "max"}},
+		{"omp-opus", "anthropic/claude-opus-5-5", "anthropic-api", "high", []string{"low", "medium", "high", "xhigh", "max"}},
 	} {
 		t.Run(tc.profile, func(t *testing.T) {
 			seat := a.Policy.Profiles[tc.profile]
@@ -213,7 +213,7 @@ func TestOMPNoThinkingSeatLeavesOtherRungsUnchanged(t *testing.T) {
 			for _, row := range seed {
 				if row.Profile == tc.profile {
 					got = append(got, row.Effort)
-					if row.Pool == "" || row.ModelID != tc.model {
+					if row.Pool != tc.pool || row.ModelID != tc.model {
 						t.Fatalf("row %s@%s = %+v", tc.profile, row.Effort, row)
 					}
 				}
