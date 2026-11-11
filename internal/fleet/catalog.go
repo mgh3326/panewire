@@ -55,6 +55,7 @@ type CatalogEntry struct {
 	Profile             string   `json:"profile"`
 	Effort              string   `json:"effort"`
 	ModelID             string   `json:"model_id"`
+	Family              string   `json:"family,omitempty"`
 	Pool                string   `json:"pool"`
 	Grade               string   `json:"grade"`
 	Score               *float64 `json:"score"`
@@ -69,12 +70,13 @@ type CatalogEntry struct {
 	BenchmarkAnnotation string   `json:"benchmark_annotation,omitempty"`
 	// Group is the metering group of an agy rung ("gemini", "3p"), empty
 	// for other pools and for a rung that maps to no group.
-	Group string `json:"group,omitempty"`
+	Group      string `json:"group,omitempty"`
+	NoThinking bool   `json:"no_thinking,omitempty"`
 }
 
 // row is the admission-facing projection of an entry.
 func (e CatalogEntry) row() CatalogRow {
-	return CatalogRow{Profile: e.Profile, Effort: e.Effort, Grade: e.Grade, ModelID: e.ModelID, Pool: e.Pool, Gate: e.Gate, Score: e.Score, RetiredAt: e.RetiredAt, Group: e.Group}
+	return CatalogRow{Profile: e.Profile, Effort: e.Effort, Grade: e.Grade, ModelID: e.ModelID, Pool: e.Pool, Gate: e.Gate, Score: e.Score, RetiredAt: e.RetiredAt, Group: e.Group, Family: e.Family, NoThinking: e.NoThinking}
 }
 
 // CatalogData is one catalog read. Raw carries the rows exactly as they were

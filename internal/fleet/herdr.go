@@ -40,6 +40,9 @@ func (a *App) launchArgs(s Seat, l Launch) ([]string, []string, error) {
 	case "devin":
 		return []string{"--model", m, "--permission-mode", "dangerous", "--respect-workspace-trust", "false"}, env, nil
 	case "omp":
+		if l.NoThinking && e == "off" {
+			return []string{"--model", m}, []string{"OMP_SKIP_SETUP=1"}, nil
+		}
 		return []string{"--model", m + ":" + e}, []string{"OMP_SKIP_SETUP=1"}, nil
 	case "cmd":
 		return []string{"-m", m, "--effort", e, "--yolo", "--skip-onboarding", "--no-session"}, env, nil

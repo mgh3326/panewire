@@ -163,7 +163,7 @@ var catalogSnapshot = sync.OnceValue(func() launchCatalog {
 })
 
 func launchRowFrom(r CatalogRow) launchRow {
-	return launchRow{admissionRow: admissionRow{Profile: r.Profile, Effort: r.Effort, ModelID: r.ModelID, Pool: r.Pool, Grade: r.Grade, Gate: r.Gate, Placed: r.Grade != gradeUnrated, Retired: r.RetiredAt != nil}}
+	return launchRow{admissionRow: admissionRow{Profile: r.Profile, Effort: r.Effort, ModelID: r.ModelID, Pool: r.Pool, Grade: r.Grade, Gate: r.Gate, Placed: r.Grade != gradeUnrated, Retired: r.RetiredAt != nil, NoThinking: r.NoThinking}, Family: r.Family}
 }
 
 // launchCatalog reads the catalog: a.BenchCatalog when set (a fixture), else
@@ -263,11 +263,12 @@ func (c launchCatalog) profileRows(profile string) []launchRow {
 	return rows
 }
 
-// launchCredit is pacelever's credit(): a pi- profile or cmd-dsflash41. The
-// gate decides a credit rung by its pool instead (admissionCredit, hk 3532);
-// the lookup keeps pacelever's rule so it refuses exactly what pacelever does.
-func launchCredit(profile string) bool {
-	return strings.HasPrefix(profile, "pi-") || profile == "cmd-dsflash41"
+// profileCredit follows admissionCredit: a pi- profile or any profile with a
+// commandcode-pool rung is a credit profile.
+func (c launchCatalog) profileCredit(profile string) bool {
+	return slices.ContainsFunc(c.profileRows(profile), func(r launchRow) bool {
+		return admissionCredit(profile, r.Pool)
+	})
 }
 
 // resolve is pacelever's resolveLaunch: the launch a request resolves to, or
@@ -293,7 +294,7 @@ func (c launchCatalog) resolve(policy admissionPolicy, req admissionRequest) (La
 	if c.Stale && row.Gate != defaultGate && row.Gate != consultOnlyGate && req.OperatorRequest == "" {
 		return Launch{}, "catalog is stale; non-default gate requires --operator-request"
 	}
-	l := Launch{Profile: req.Profile, ModelID: row.ModelID, Effort: resolved, Grade: row.Grade, Gate: row.Gate, Pool: row.Pool, Family: row.Family}
+	l := Launch{Profile: req.Profile, ModelID: row.ModelID, Effort: resolved, Grade: row.Grade, Gate: row.Gate, Pool: row.Pool, Family: row.Family, NoThinking: row.NoThinking}
 	l.Catalog.Stale = c.Stale
 	return l, ""
 }
@@ -303,14 +304,20 @@ func (c launchCatalog) resolve(policy admissionPolicy, req admissionRequest) (La
 func (c launchCatalog) resolveRow(req admissionRequest, allowUnrated bool) (launchRow, string, string) {
 	profile := c.canonical(req.Profile)
 	requested := admissionNormalize(req.Effort)
-	if launchCredit(profile) && requested == "" {
+	if c.profileCredit(profile) && requested == "" {
 		return launchRow{}, "", "explicit --effort required for credit profile"
 	}
 	if requested != "" && admissionEffortRank(requested) == 99 && !slices.ContainsFunc(c.Rows, func(r launchRow) bool { return r.Profile == profile && r.Effort == requested }) {
 		return launchRow{}, "", "unknown effort rung"
 	}
-	if launchCredit(profile) {
+	if c.profileCredit(profile) {
 		allowed := []string{"low", "high", "max"}
+		if requested == "off" {
+			allowed = nil
+			if slices.ContainsFunc(c.profileRows(profile), func(r launchRow) bool { return r.Effort == "off" && r.Pool == commandcodePool && r.NoThinking }) {
+				allowed = []string{"off"}
+			}
+		}
 		if strings.HasPrefix(profile, "pi-") {
 			allowed = []string{"off", "minimal", "low", "medium", "high", "xhigh", "max"}
 		}
@@ -351,7 +358,7 @@ func (c launchCatalog) resolveRow(req admissionRequest, allowUnrated bool) (laun
 	}
 	i := slices.IndexFunc(eligible, func(r launchRow) bool { return r.Effort == resolved })
 	if i < 0 {
-		if launchCredit(profile) || profile == "codex-terra61" {
+		if c.profileCredit(profile) || profile == "codex-terra61" {
 			return launchRow{}, "", "e6_arm_required: rung is not placed"
 		}
 		i = slices.IndexFunc(eligible, func(r launchRow) bool { return r.Effort == fallback })
@@ -403,7 +410,7 @@ func launchDefaultEffort(profile string, rows []launchRow, defaults map[string]s
 // launchRoleCheck is pacelever's roleCheck with its credit() rule.
 func launchRoleCheck(req admissionRequest, row launchRow) string {
 	role, purpose := admissionNormalize(req.Role), admissionNormalize(req.Purpose)
-	if launchCredit(req.Profile) && role != "worker" && role != "tester" && (role != "builder" || !row.Placed || row.Gate != defaultGate) {
+	if admissionCredit(req.Profile, row.Pool) && role != "worker" && role != "tester" && (role != "builder" || !row.Placed || row.Gate != defaultGate) {
 		return "role_restricted: credit rung requires worker/tester; placed default rungs also allow builder"
 	}
 	if req.Profile == "codex-astra" || req.Profile == "fable" {
