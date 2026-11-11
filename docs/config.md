@@ -779,6 +779,15 @@ admissible without a balance observation. An operator pool class of `exclude`
 refuses them. Their selection record carries `tier=credit`, with absent
 balance values left unset.
 
+An operator pool class of `exclude` on the `devin` pool does not refuse the
+SWE-2 free rungs (`devin-swe2`, `devin-swe2-medium`, `devin-swe2-max`,
+`devin-swe2-flash`, `devin-swe2-flash-medium`, `devin-swe2-flash-max`). They
+draw on Devin's free-model bucket, not the pool, so they are judged on that
+bucket exactly as when the pool is not excluded, both for `-m auto` and for a
+pin. Every other devin rung, such as the paid `devin-ds41`, stays refused as
+`pool excluded by policy`. The bucket cap `devin-free` is set separately, see
+[placement](placement.md#pool-concurrency-cap).
+
 A credit pool with a recorded balance and future expiry competes for work.
 With a dollar balance (`credit.remaining_usd`) its rank is the money at risk:
 the balance less the spend projected before expiry (the burn rate times the

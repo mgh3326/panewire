@@ -389,3 +389,9 @@ func HKTaskListAnswer(ctx context.Context, limit int) ([]byte, error) {
 		return e
 	})
 }
+
+// HKTaskAnswer is hk's 2xx answer to GET /v1/tasks/{id}, for callers that
+// already know the task id and need the same answer body as `tasks show`.
+func HKTaskAnswer(ctx context.Context, task string) ([]byte, error) {
+	return hkTaskBody(ctx, task)
+}
