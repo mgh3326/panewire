@@ -217,7 +217,7 @@ func (f *Flow) Refresh(ctx context.Context, c Client, key string, measure Measur
 	// before the lease and the measurement, so a measurement that fails, a
 	// lease held elsewhere or a deadline in the wait cannot leave a host with a
 	// working login unknown to placement.
-	f.announce(ctx, c, key)
+	f.Announce(ctx, c, key)
 	fresh := func() (Reading, bool) { return f.current(latest.Observation, key, f.now()) }
 	if reading, ok := fresh(); ok {
 		return reading, nil
@@ -377,11 +377,14 @@ func (f *Flow) release(c Client, key, holder string) error {
 	return c.Release(ctx, key, holder)
 }
 
-// announce tells the store this host holds key, at most once per presence
-// interval. A lost announcement is retried on the next refresh rather than
-// suppressed for the whole interval; it never changes the reading's outcome.
-func (f *Flow) announce(ctx context.Context, c Client, key string) {
-	if f.HostID == "" {
+// Announce tells the store this host holds key, at most once per presence
+// interval. Refresh announces through it before the lease and the measurement;
+// a pool with no reading of its own to publish (a credit pool, which no host
+// measures) announces through it directly. A lost announcement is retried on
+// the next call rather than suppressed for the whole interval; it never
+// changes a reading's outcome.
+func (f *Flow) Announce(ctx context.Context, c Client, key string) {
+	if f.HostID == "" || !accountKeyPattern.MatchString(key) {
 		return
 	}
 	now := f.now()

@@ -143,6 +143,30 @@ func (c Client) PublishPresence(ctx context.Context, record Presence) error {
 	return c.send(ctx, http.MethodPut, "/v1/quota/presence", record, nil)
 }
 
+// Presence lists the store's presence records: which host holds which account.
+// The store answers with the records themselves or inside an envelope naming
+// them (records, presence or rows).
+func (c Client) Presence(ctx context.Context) ([]Presence, error) {
+	var body json.RawMessage
+	if err := c.send(ctx, http.MethodGet, "/v1/quota/presence", nil, &body); err != nil {
+		return nil, err
+	}
+	var rows []Presence
+	if json.Unmarshal(body, &rows) == nil && rows != nil {
+		return rows, nil
+	}
+	var envelope map[string]json.RawMessage
+	if json.Unmarshal(body, &envelope) != nil {
+		return nil, fmt.Errorf("handoffkeep response is not valid JSON")
+	}
+	for _, key := range []string{"records", "presence", "rows"} {
+		if v, ok := envelope[key]; ok && json.Unmarshal(v, &rows) == nil && rows != nil {
+			return rows, nil
+		}
+	}
+	return nil, nil
+}
+
 func (c Client) send(ctx context.Context, method, path string, body, out any) error {
 	var payload io.Reader
 	if body != nil {

@@ -213,8 +213,10 @@ type HubClient struct {
 	nodePacelever      relayCommandRunner // legacy test fixture seam; production quota refresh never invokes an external quota CLI.
 	nativeQuotaMu      sync.Mutex
 	nativeQuota        map[string]*nativeQuotaSource // the node's own measurement per native pool; fixtures set it, a missing pool builds the default.
-	nodeCloseSettle    time.Duration                 // fixture seam; zero is nodePaneCloseSettle.
-	nodeGitLockWait    time.Duration                 // fixture seam; zero is nodeGitOpLockWait.
+	creditPresenceMu   sync.Mutex
+	creditPresence     *creditPresenceSource // the node's credit pool presence publisher; fixtures set it, a missing one builds the default.
+	nodeCloseSettle    time.Duration         // fixture seam; zero is nodePaneCloseSettle.
+	nodeGitLockWait    time.Duration         // fixture seam; zero is nodeGitOpLockWait.
 	busyRelayMu        sync.Mutex
 	busyRelay          *relayBusyManager
 	relayCommand       relayCommandRunner   // fixture seam for agent get/wait.
@@ -502,7 +504,7 @@ func (client *HubClient) Run(ctx context.Context) {
 	client.rearmWatchers()
 	go client.runLaneReconcile(ctx)
 	go client.runTaskPaneSweep(ctx)
-	if client.statePublish && len(client.stateQuotaPools) > 0 {
+	if client.statePublish {
 		go client.runFleetQuota(ctx)
 	}
 	backoff := client.initialBackoff

@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"os"
 	"slices"
 	"sort"
 	"strconv"
@@ -255,6 +256,14 @@ func sharedManualObservation(m ManualObservation) (shared.Observation, error) {
 func manualAccountKey(a *App, pool string) (string, error) {
 	accounts, _ := a.Config.Quota["accounts"].(map[string]any)
 	fp := str(accounts, pool)
+	if !accountFP.MatchString(fp) && slices.Contains(creditAccountPools, pool) {
+		// A credit pool's account is the one presence publishes under
+		// (CreditAccountKey): pacelever's [quota.accounts] when this host pins
+		// none of its own.
+		if policy, err := loadAdmissionPolicy(os.Getenv, a.Home); err == nil {
+			fp = policy.Accounts[pool]
+		}
+	}
 	if !accountFP.MatchString(fp) {
 		return "", fmt.Errorf("shared account fingerprint required")
 	}
