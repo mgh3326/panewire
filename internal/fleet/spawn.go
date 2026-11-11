@@ -476,6 +476,15 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 		fmt.Fprintf(a.Out, "host_alias=%s machine=%s\n", s.Host, resolved)
 		s.Host = resolved
 	}
+	// A pinned hub host sends these flags to a node, whose own argument rule
+	// refuses the whole job.spawn on a mismatch. Refuse here so a dry-run names
+	// the flag before admission answers for another reason. A local or ssh host
+	// never sees the hub wire, and an auto placement decides its host later.
+	if str(a.Config.Hosts[s.Host], "via") == "hub" {
+		if reason := hubSpawnArgRefusal(a.Jobs, s); reason != "" {
+			return fail(exitUsage, "hub spawn: %s", reason)
+		}
+	}
 	autoSel := s.Profile == "" || s.Profile == "auto"
 	if !s.Delegated && (!autoSel || s.Host != "auto") && strings.TrimSpace(s.OverrideReason) == "" {
 		return fail(exitUsage, "explicit -m or --host requires --override-reason")

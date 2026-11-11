@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/mgh3326/panewire/internal/fleet"
+	"github.com/mgh3326/panewire/internal/spawnargs"
 )
 
 // A quota-stopped job is handled by role (hk 3334, docs/quota-stop.md): a
@@ -202,7 +203,7 @@ func (h *HubServer) replaceQuotaStopped(ctx context.Context, machine string, eve
 	cancel()
 	state, _ := record["state"].(string)
 	pool, _ := record["pool"].(string)
-	if err != nil || !exists || (state != "claimed" && state != "spawned") || !hubSpawnArgValuePattern.MatchString(pool) {
+	if err != nil || !exists || (state != "claimed" && state != "spawned") || !spawnargs.ValuePattern.MatchString(pool) {
 		return skip("job_record", "state", state)
 	}
 	// The pointer to the successor is written once, with state=lost, so its
@@ -430,7 +431,7 @@ func (h *HubServer) reconcileQuotaReplacements(ctx context.Context) int {
 		cancel()
 		state, _ := record["state"].(string)
 		pool, _ := record["pool"].(string)
-		if err != nil || !exists || (state != "claimed" && state != "spawned") || !hubSpawnArgValuePattern.MatchString(pool) {
+		if err != nil || !exists || (state != "claimed" && state != "spawned") || !spawnargs.ValuePattern.MatchString(pool) {
 			continue
 		}
 		endReason := fleet.QuotaStopEndReason(pool, time.Time{}, "replaced_by", successor.Job)

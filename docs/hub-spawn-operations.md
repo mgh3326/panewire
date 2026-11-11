@@ -180,6 +180,27 @@ its pane cleanup, and the hub tells `operator-desk` which one-time action the
 host needs ([placement.md](placement.md#first-run-refusals-and-the-desk-notice)).
 A pinned `--host` keeps any of these refusals as its result.
 
+### A job.spawn the node cannot accept
+
+The node applies one argument rule (`internal/spawnargs`) to every `job.spawn`.
+A value outside it, such as a `#` in `--operator-request`, used to drop the
+whole message with a warn line, and the operation then waited out its deadline.
+The node now answers such a frame: `invalid_args` with the flag and the rule in
+the result's stderr section, or `invalid_request` for any other parse refusal
+whose request id is readable. The operation ends `failed` with that reason at
+once. A frame whose request id cannot be read stays a logged drop, and the warn
+line now names the reason class (`json`, `unknown_type`, `argument_pattern`,
+`invalid_request`).
+
+The submitter applies the same rule before sending: `panewire spawn` (including
+`--dry-run`) and `POST /v1/spawns` refuse the request and name the flag.
+
+| Order | Result |
+|---|---|
+| Hub upgraded first, then nodes | A new node's refusal is parsed and ends the operation `failed`. |
+| Node upgraded first (old hub) | The old hub's result parser does not know the new error codes, so it ignores the answer and the operation waits for its deadline as before. Nothing else changes. |
+| Hub rolled back after nodes upgraded | Same as an old hub: refusals are ignored and operations wait out their deadline. |
+
 | Status | Meaning |
 | --- | --- |
 | `accepted` | Reservation durable; no node binding yet. |
