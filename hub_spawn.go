@@ -10,6 +10,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/mgh3326/panewire/internal/fleet"
+	"github.com/mgh3326/panewire/internal/spawnargs"
 )
 
 const (
@@ -23,13 +24,9 @@ const (
 )
 
 var (
-	hubSpawnRequestIDPattern     = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
-	hubSpawnMachinePattern       = regexp.MustCompile(`^[a-z0-9-]{1,32}$`)
-	hubSpawnCWDKeyPattern        = regexp.MustCompile(`^[a-z0-9._-]{1,64}$`)
-	hubSpawnArgValuePattern      = regexp.MustCompile(`^[A-Za-z0-9._:/@-]{1,200}$`)
-	hubSpawnTagsValuePattern     = regexp.MustCompile(`^[A-Za-z0-9._:/@-]+(,[A-Za-z0-9._:/@-]+){0,15}$`)
-	hubSpawnExcludedHostsPattern = regexp.MustCompile(`^[A-Za-z0-9._:/@-]+(,[A-Za-z0-9._:/@-]+)*$`)
-	hubSpawnGradeValuePattern    = regexp.MustCompile(`^(C|B|A|A\+|S|S\+)$`)
+	hubSpawnRequestIDPattern = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
+	hubSpawnMachinePattern   = regexp.MustCompile(`^[a-z0-9-]{1,32}$`)
+	hubSpawnCWDKeyPattern    = regexp.MustCompile(`^[a-z0-9._-]{1,64}$`)
 )
 
 type hubSpawnBrief struct {
@@ -135,15 +132,7 @@ func validHubSpawnRequestForMode(request hubSpawnRequest, operator bool) bool {
 }
 
 func validHubSpawnDocKey(key string) bool {
-	if len(key) == 0 || len(key) > 200 || !regexp.MustCompile(`^[A-Za-z0-9._/-]+$`).MatchString(key) || strings.HasPrefix(key, "/") || strings.HasSuffix(key, "/") {
-		return false
-	}
-	for _, segment := range strings.Split(key, "/") {
-		if segment == "" || segment == "." || segment == ".." {
-			return false
-		}
-	}
-	return true
+	return spawnargs.ValidDocKey(key)
 }
 
 func validHubSpawnCheckout(checkout hubSpawnCheckout) bool {
@@ -169,76 +158,10 @@ func validHubSpawnArgs(args []string) bool {
 	return validHubSpawnArgsForMode(args, false)
 }
 
+// validHubSpawnArgsForMode is the node's argument rule; spawnargs states it
+// once for the node and for the submitter that builds the same args.
 func validHubSpawnArgsForMode(args []string, operator bool) bool {
-	allowed := map[string]bool{}
-	for _, flag := range []string{"-m", "-w", "-l", "--t", "--effort", "--e6-arm", "--job", "--owner", "--report", "--report-relative", "--role", "--lane", "--parent", "-L", "--task", "--parent-job", "--tags", "--urgency", "--builder-family", "--builder-job", "--review-pass"} {
-		allowed[flag] = true
-	}
-	booleans := map[string]bool{}
-	if operator {
-		for _, flag := range []string{"-c", "-p", "--host", "--exclude-host", "--exclude-pool", "--grade", "--routing-role", "--override-reason", "--containment", "--operator-request", "--requested-by", "--purpose"} {
-			allowed[flag] = true
-		}
-		booleans = map[string]bool{"--keep": true, "--job-dup-ok": true, "--task-hk-bypass": true, "--allow-escalation": true}
-	}
-	seen := map[string]bool{}
-	for i := 0; i < len(args); {
-		flag := args[i]
-		if seen[flag] {
-			return false
-		}
-		seen[flag] = true
-		if booleans[flag] {
-			i++
-			continue
-		}
-		if !allowed[flag] || i+1 >= len(args) {
-			return false
-		}
-		value := args[i+1]
-		pattern := hubSpawnArgValuePattern
-		if flag == "--tags" {
-			pattern = hubSpawnTagsValuePattern
-		}
-		if flag == "--grade" {
-			pattern = hubSpawnGradeValuePattern
-		}
-		if flag == "--exclude-host" || flag == "--exclude-pool" {
-			pattern = hubSpawnExcludedHostsPattern
-		}
-		path := operator && (flag == "-c" || flag == "-p")
-		maxBytes := 200
-		if path {
-			maxBytes = nodeCommandMaxPathBytes
-		}
-		freeText := operator && (path || flag == "--override-reason" || flag == "--purpose" || flag == "-w")
-		validValue := validHubSpawnArgValue(flag, value) || operator && flag == "--role" && value == "counsel"
-		if len(value) > maxBytes || value == "" || !utf8.ValidString(value) || strings.ContainsAny(value, "\x00\r\n") || (!freeText && !pattern.MatchString(value)) || !validValue {
-			return false
-		}
-		i += 2
-	}
-	return true
-}
-
-func validHubSpawnArgValue(flag, value string) bool {
-	switch flag {
-	case "--role":
-		return value == "worker" || value == "reviewer" || value == "tester"
-	case "--builder-family":
-		return value == "anthropic" || value == "openai" || value == "google" || value == "xai" || value == "deepseek" || value == "meta" || value == "mistral" || value == "other"
-	case "--review-pass":
-		return len(value) == 1 && value[0] >= '1' && value[0] <= '9'
-	case "--parent-job", "--builder-job":
-		return regexp.MustCompile(`^[A-Za-z0-9._-]{1,128}$`).MatchString(value)
-	case "--report-relative":
-		// Relative to the node's own jobs root, which the caller cannot see:
-		// refuse absolute paths and empty, "." and ".." segments, the same
-		// shape rule brief.doc keys follow.
-		return validHubSpawnDocKey(value)
-	default:
-		return true
-	}
+	return spawnargs.Refusal(args, operator) == ""
 }
 
 // parseHubSpawnResult is deliberately separate from parseHubInbound: a spawn
@@ -297,7 +220,7 @@ func parseHubSpawnResult(raw []byte) (hubSpawnResult, bool) {
 
 func validHubSpawnResultError(value string) bool {
 	switch value {
-	case "spawn_disabled", "cwd_unmapped", "spawn_failed", "timeout", "brief_doc_unavailable", "journal_unavailable", "journal_conflict", "reconciling", "unknown", "deadline_not_started":
+	case "spawn_disabled", "cwd_unmapped", "spawn_failed", "timeout", "brief_doc_unavailable", "journal_unavailable", "journal_conflict", "reconciling", "unknown", "deadline_not_started", "invalid_args", "invalid_request":
 		return true
 	default:
 		return strings.HasPrefix(value, "checkout_refused:") && len(value) <= 80 && regexp.MustCompile(`^checkout_refused:[a-z0-9_.-]+$`).MatchString(value)

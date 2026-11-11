@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/mgh3326/panewire/internal/fleet"
+	"github.com/mgh3326/panewire/internal/spawnargs"
 )
 
 func (h *HubServer) newSpawnApp(out, errout io.Writer) (*fleet.App, error) {
@@ -50,6 +51,13 @@ func (h *HubServer) handleSpawnSubmit(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil || !validHubSpawnRequestID(request.RequestID) || !hubSpawnMachinePattern.MatchString(request.OriginMachine) {
 		writeJSON(w, 400, map[string]string{"error": "invalid_request", "fix": "rebuild the request with panewire spawn"})
+		return
+	}
+	// The node applies this same rule to the args it receives; refusing here
+	// keeps a submitter whose own check is older from binding an operation the
+	// node would drop.
+	if reason := spawnargs.Refusal(request.Args, true); reason != "" {
+		writeJSON(w, 400, map[string]string{"error": "invalid_request", "reason": reason, "fix": "correct the named flag; the node would refuse this request"})
 		return
 	}
 	if h.inbox == nil {

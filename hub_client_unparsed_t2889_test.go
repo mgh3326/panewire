@@ -125,15 +125,22 @@ func TestUnparsedHubMessageWarnRateLimit(t *testing.T) {
 	client := &HubClient{warn: func(message string) { warnings = append(warnings, message) }}
 	now := time.Date(2026, 11, 4, 12, 0, 0, 0, time.UTC)
 	client.now = func() time.Time { return now }
-	for i := 0; i < 4; i++ {
-		client.handleUnparsedHubMessage([]byte(`{"type":"nonsense"}`))
+	drop := func(payload string) {
+		_, rejection := parseHubOutboundRejection([]byte(payload))
+		if rejection.Class == "" {
+			t.Fatalf("fixture %q parses", payload)
+		}
+		client.handleUnparsedHubMessage(t.Context(), nil, []byte(payload), rejection)
 	}
-	if len(warnings) != 1 {
+	for i := 0; i < 4; i++ {
+		drop(`{"type":"nonsense"}`)
+	}
+	if len(warnings) != 1 || !strings.Contains(warnings[0], "class=unknown_type") {
 		t.Fatalf("burst warned %d times: %q", len(warnings), warnings)
 	}
 	now = now.Add(hubUnparsedWarnEvery)
-	client.handleUnparsedHubMessage([]byte(`not json`))
-	if len(warnings) != 2 || !strings.Contains(warnings[1], "type=unknown") || !strings.Contains(warnings[1], "rejected=4") {
+	drop(`not json`)
+	if len(warnings) != 2 || !strings.Contains(warnings[1], "type=unknown") || !strings.Contains(warnings[1], "class=json") || !strings.Contains(warnings[1], "rejected=4") {
 		t.Fatalf("after the window: %q", warnings)
 	}
 }

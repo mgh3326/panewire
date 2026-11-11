@@ -27,6 +27,7 @@ import (
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
 	"github.com/mgh3326/panewire/internal/fleet"
+	"github.com/mgh3326/panewire/internal/spawnargs"
 )
 
 // HubDial and HubWait make retry behavior deterministic in fixture tests. The
@@ -1883,9 +1884,9 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 			if messageType != websocket.MessageText {
 				continue
 			}
-			message, ok := parseHubOutbound(payload)
-			if !ok {
-				client.handleUnparsedHubMessage(payload)
+			message, rejection := parseHubOutboundRejection(payload)
+			if rejection.Class != "" {
+				client.handleUnparsedHubMessage(ctx, peer, payload, rejection)
 				continue
 			}
 			if message.Type == "relay.inject" {
@@ -2682,107 +2683,116 @@ func hubClientWireEvent(event hubClientEvent) struct {
 }
 
 func parseHubOutbound(payload []byte) (hubOutboundMessage, bool) {
+	message, rejection := parseHubOutboundRejection(payload)
+	return message, rejection.Class == ""
+}
+
+// parseHubOutboundRejection is parseHubOutbound with the reason a frame was
+// refused. The drop path reports that class and answers the hub where the
+// frame still names a request.
+func parseHubOutboundRejection(payload []byte) (hubOutboundMessage, hubOutboundRejection) {
 	var fields map[string]json.RawMessage
 	if json.Unmarshal(payload, &fields) != nil || fields == nil {
-		return hubOutboundMessage{}, false
+		return hubOutboundMessage{}, hubOutboundRejection{Class: hubUnparsedJSON}
 	}
 	rawType, exists := fields["type"]
 	if !exists {
-		return hubOutboundMessage{}, false
+		return hubOutboundMessage{}, hubOutboundRejection{Class: hubUnparsedJSON}
 	}
 	var message hubOutboundMessage
 	if json.Unmarshal(rawType, &message.Type) != nil {
-		return hubOutboundMessage{}, false
+		return hubOutboundMessage{}, hubOutboundRejection{Class: hubUnparsedJSON}
 	}
+	reject := hubOutboundRejection{Class: hubUnparsedInvalidRequest, Type: message.Type}
 	switch message.Type {
 	case "ping", "pong":
 		if len(fields) != 1 {
-			return hubOutboundMessage{}, false
+			return hubOutboundMessage{}, reject
 		}
 	case "failover":
 		var emittedAt string
 		if len(fields) != 4 || json.Unmarshal(fields["machine"], &message.Machine) != nil || json.Unmarshal(fields["phase"], &message.Phase) != nil || json.Unmarshal(fields["emitted_at"], &emittedAt) != nil || !parseHubFailoverEmittedAt(emittedAt, &message.EmittedAt) || !machineIDPattern.MatchString(message.Machine) || !validHubFailoverPhase(message.Phase) {
-			return hubOutboundMessage{}, false
+			return hubOutboundMessage{}, reject
 		}
 	case "burst":
 		var emittedAt string
 		if json.Unmarshal(fields["machine"], &message.Machine) != nil || json.Unmarshal(fields["phase"], &message.Phase) != nil || json.Unmarshal(fields["emitted_at"], &emittedAt) != nil || !parseHubFailoverEmittedAt(emittedAt, &message.EmittedAt) || !machineIDPattern.MatchString(message.Machine) || !validHubBurstPhase(message.Phase) {
-			return hubOutboundMessage{}, false
+			return hubOutboundMessage{}, reject
 		}
 		if message.Phase == hubFailoverPhaseUp {
 			if len(fields) != 5 || json.Unmarshal(fields["wake_mac"], &message.WakeMAC) != nil {
-				return hubOutboundMessage{}, false
+				return hubOutboundMessage{}, reject
 			}
 			mac, err := parseHubFailoverWakeMAC(message.WakeMAC)
 			if err != nil || len(mac) != 6 {
-				return hubOutboundMessage{}, false
+				return hubOutboundMessage{}, reject
 			}
 		} else if len(fields) != 4 {
-			return hubOutboundMessage{}, false
+			return hubOutboundMessage{}, reject
 		}
 	case "job.revoked":
 		if len(fields) != 3 || json.Unmarshal(fields["job_id"], &message.JobID) != nil || json.Unmarshal(fields["epoch"], &message.Epoch) != nil || !hubJobIDPattern.MatchString(message.JobID) || message.Epoch == 0 {
-			return hubOutboundMessage{}, false
+			return hubOutboundMessage{}, reject
 		}
 	case "job.assigned":
 		if len(fields) != 3 || json.Unmarshal(fields["job_id"], &message.JobID) != nil || json.Unmarshal(fields["epoch"], &message.Epoch) != nil || !hubJobIDPattern.MatchString(message.JobID) || message.Epoch == 0 {
-			return hubOutboundMessage{}, false
+			return hubOutboundMessage{}, reject
 		}
 	case "hub.features":
 		// Extra fields are a newer hub's; features alone is this node's business.
 		if json.Unmarshal(fields["features"], &message.Features) != nil {
-			return hubOutboundMessage{}, false
+			return hubOutboundMessage{}, reject
 		}
 	case "burst.holds":
 		if len(fields) != 2 || json.Unmarshal(fields["holds_active"], &message.HoldsActive) != nil {
-			return hubOutboundMessage{}, false
+			return hubOutboundMessage{}, reject
 		}
 	case "wake":
 		var emittedAt string
 		if len(fields) != 3 || json.Unmarshal(fields["machine"], &message.Machine) != nil || json.Unmarshal(fields["emitted_at"], &emittedAt) != nil || !parseHubFailoverEmittedAt(emittedAt, &message.EmittedAt) || !machineIDPattern.MatchString(message.Machine) {
-			return hubOutboundMessage{}, false
+			return hubOutboundMessage{}, reject
 		}
 	case "relay.inject":
 		if json.Unmarshal(fields["job_id"], &message.JobID) != nil || json.Unmarshal(fields["pane"], &message.Pane) != nil || json.Unmarshal(fields["text"], &message.Text) != nil || !hubJobIDPattern.MatchString(message.JobID) || message.Pane == "" || len(message.Pane) > 128 {
-			return hubOutboundMessage{}, false
+			return hubOutboundMessage{}, reject
 		}
 		if len(fields) == 4 {
 			if !validHubNoteText(message.Text) {
-				return hubOutboundMessage{}, false
+				return hubOutboundMessage{}, reject
 			}
 		} else if len(fields) == 5 {
 			var kind string
 			if json.Unmarshal(fields["kind"], &kind) != nil || kind != "lane.event" || !validLaneRelayText(message.Text) {
-				return hubOutboundMessage{}, false
+				return hubOutboundMessage{}, reject
 			}
 		} else if len(fields) == 8 {
 			if json.Unmarshal(fields["kind"], &message.Kind) != nil || (message.Kind != "lane.event" && message.Kind != "job.completed" && message.Kind != "job.escalate" && message.Kind != "job.joined") {
-				return hubOutboundMessage{}, false
+				return hubOutboundMessage{}, reject
 			}
 			if json.Unmarshal(fields["lane"], &message.Lane) != nil || json.Unmarshal(fields["event_id"], &message.EventID) != nil || json.Unmarshal(fields["deliver"], &message.DeliverPolicy) != nil || !hubAgentLabelPattern.MatchString(message.Lane) || message.EventID < 1 {
-				return hubOutboundMessage{}, false
+				return hubOutboundMessage{}, reject
 			}
 			if _, valid := parseRelayDeliveryPolicy(message.DeliverPolicy); !valid || !validRelayInjectedText(message.Kind, message.Text) {
-				return hubOutboundMessage{}, false
+				return hubOutboundMessage{}, reject
 			}
 		} else {
-			return hubOutboundMessage{}, false
+			return hubOutboundMessage{}, reject
 		}
 	case "relay.edit":
 		if len(fields) != 3 || json.Unmarshal(fields["event_id"], &message.EventID) != nil || json.Unmarshal(fields["text"], &message.Text) != nil || message.EventID < 1 || !validRelayFinalText(message.Text) {
-			return hubOutboundMessage{}, false
+			return hubOutboundMessage{}, reject
 		}
 	case "relay.cancel":
 		if len(fields) != 2 || json.Unmarshal(fields["event_id"], &message.EventID) != nil || message.EventID < 1 {
-			return hubOutboundMessage{}, false
+			return hubOutboundMessage{}, reject
 		}
 	case "relay.persisted", "pool.cooling.ack":
 		if json.Unmarshal(fields["job_id"], &message.JobID) != nil || json.Unmarshal(fields["kind"], &message.Kind) != nil || json.Unmarshal(fields["epoch"], &message.Epoch) != nil || json.Unmarshal(fields["report_path"], &message.ReportPath) != nil || json.Unmarshal(fields["reason"], &message.Reason) != nil || json.Unmarshal(fields["event_id"], &message.EventID) != nil || !hubJobIDPattern.MatchString(message.JobID) || !(relayPersistedKinds[message.Kind] || message.Type == "pool.cooling.ack" && message.Kind == "job.lost") || message.EventID < 1 {
-			return hubOutboundMessage{}, false
+			return hubOutboundMessage{}, reject
 		}
 		if message.Kind == "lane.event" {
 			if len(fields) != 9 || json.Unmarshal(fields["lane"], &message.Lane) != nil || json.Unmarshal(fields["producer_event_id"], &message.ProducerEventID) != nil || !hubAgentLabelPattern.MatchString(message.Lane) || !validLaneEventID(message.ProducerEventID) {
-				return hubOutboundMessage{}, false
+				return hubOutboundMessage{}, reject
 			}
 		} else if len(fields) == 8 {
 			// Newer hubs echo the producer's event identity so the
@@ -2790,97 +2800,103 @@ func parseHubOutbound(payload []byte) (hubOutboundMessage, bool) {
 			// older seven-field acknowledgement leaves it empty and keeps
 			// the legacy five-field match.
 			if json.Unmarshal(fields["producer_event_id"], &message.ProducerEventID) != nil || len(message.ProducerEventID) > 240 {
-				return hubOutboundMessage{}, false
+				return hubOutboundMessage{}, reject
 			}
 		} else if len(fields) != 7 {
-			return hubOutboundMessage{}, false
+			return hubOutboundMessage{}, reject
 		}
 	case "idle-wake.route":
 		for name := range fields {
 			if name != "type" && name != "event_id" && name != "pane" && name != "eligible" && name != "lane" && name != "text" && name != "job_id" && name != "reason" {
-				return hubOutboundMessage{}, false
+				return hubOutboundMessage{}, reject
 			}
 		}
 		if json.Unmarshal(fields["event_id"], &message.IdleWakeEventID) != nil || json.Unmarshal(fields["pane"], &message.Pane) != nil || json.Unmarshal(fields["eligible"], &message.Eligible) != nil {
-			return hubOutboundMessage{}, false
+			return hubOutboundMessage{}, reject
 		}
 		if raw, exists := fields["lane"]; exists && json.Unmarshal(raw, &message.Lane) != nil {
-			return hubOutboundMessage{}, false
+			return hubOutboundMessage{}, reject
 		}
 		if raw, exists := fields["text"]; exists && json.Unmarshal(raw, &message.Text) != nil {
-			return hubOutboundMessage{}, false
+			return hubOutboundMessage{}, reject
 		}
 		if raw, exists := fields["job_id"]; exists && json.Unmarshal(raw, &message.JobID) != nil {
-			return hubOutboundMessage{}, false
+			return hubOutboundMessage{}, reject
 		}
 		if raw, exists := fields["reason"]; exists && json.Unmarshal(raw, &message.Reason) != nil {
-			return hubOutboundMessage{}, false
+			return hubOutboundMessage{}, reject
 		}
 		if !validHubIdleWakeRouteEvent(hubIdleWakeRouteEvent{Type: message.Type, EventID: message.IdleWakeEventID, Pane: message.Pane, Eligible: message.Eligible, Lane: message.Lane, Text: message.Text, JobID: message.JobID, Reason: message.Reason}) {
-			return hubOutboundMessage{}, false
+			return hubOutboundMessage{}, reject
 		}
 	case "quota.request":
 		// "scopefuel" is the retired quota tool's wire spelling; a legacy hub
 		// still sends it, so the name stays admitted for one release.
 		var tool string
 		if len(fields) != 3 || json.Unmarshal(fields["request_id"], &message.RequestID) != nil || json.Unmarshal(fields["tool"], &tool) != nil || !validHubRequestID(message.RequestID) || tool != "scopefuel" {
-			return hubOutboundMessage{}, false
+			return hubOutboundMessage{}, reject
 		}
 	case "job.spawn":
+		// Read the request id first: every refusal below can still answer the
+		// hub for it, so the operation ends failed instead of at its deadline.
+		_ = json.Unmarshal(fields["request_id"], &reject.RequestID)
 		var brief hubSpawnBrief
 		var briefFields map[string]json.RawMessage
 		for name := range fields {
 			if name != "type" && name != "request_id" && name != "cwd_key" && name != "brief" && name != "checkout" && name != "args" && name != "wait_seconds" && name != "deadline_ms" && name != "operator_authorized" {
-				return hubOutboundMessage{}, false
+				return hubOutboundMessage{}, reject
 			}
 		}
 		if (len(fields) < 6 || len(fields) > 9) || json.Unmarshal(fields["request_id"], &message.RequestID) != nil || json.Unmarshal(fields["cwd_key"], &message.CWDKey) != nil || json.Unmarshal(fields["brief"], &brief) != nil || json.Unmarshal(fields["brief"], &briefFields) != nil || (len(briefFields) != 1) || json.Unmarshal(fields["args"], &message.Args) != nil || message.Args == nil || json.Unmarshal(fields["wait_seconds"], &message.WaitSeconds) != nil {
-			return hubOutboundMessage{}, false
+			return hubOutboundMessage{}, reject
 		}
 		if raw, ok := briefFields["inline"]; ok {
 			if json.Unmarshal(raw, &brief.Inline) != nil {
-				return hubOutboundMessage{}, false
+				return hubOutboundMessage{}, reject
 			}
 		} else if raw, ok := briefFields["doc"]; ok {
 			if json.Unmarshal(raw, &brief.Doc) != nil {
-				return hubOutboundMessage{}, false
+				return hubOutboundMessage{}, reject
 			}
 		} else {
-			return hubOutboundMessage{}, false
+			return hubOutboundMessage{}, reject
 		}
 		if raw, ok := fields["checkout"]; ok {
 			var checkout hubSpawnCheckout
 			if !decodeNodeCommandStrict(raw, &checkout) || !validHubSpawnCheckout(checkout) {
-				return hubOutboundMessage{}, false
+				return hubOutboundMessage{}, reject
 			}
 			message.Checkout = &checkout
 		}
 		if raw, ok := fields["deadline_ms"]; ok {
 			if json.Unmarshal(raw, &message.DeadlineMS) != nil || message.DeadlineMS <= 0 {
-				return hubOutboundMessage{}, false
+				return hubOutboundMessage{}, reject
 			}
 		}
 		if raw, ok := fields["operator_authorized"]; ok {
 			if json.Unmarshal(raw, &message.OperatorAuthorized) != nil || !message.OperatorAuthorized {
-				return hubOutboundMessage{}, false
+				return hubOutboundMessage{}, reject
 			}
 		}
 		message.BriefInline = brief.Inline
 		message.BriefDoc = brief.Doc
 		if !validHubSpawnRequestForMode(hubSpawnRequest{RequestID: message.RequestID, Machine: "machine-a", CWDKey: message.CWDKey, Brief: brief, Checkout: message.Checkout, Args: message.Args, WaitSeconds: message.WaitSeconds, DeadlineMS: message.DeadlineMS}, message.OperatorAuthorized) {
-			return hubOutboundMessage{}, false
+			if detail := spawnargs.Refusal(message.Args, message.OperatorAuthorized); detail != "" {
+				reject.Class, reject.Detail = hubUnparsedArgumentPattern, detail
+			}
+			return hubOutboundMessage{}, reject
 		}
 	case "node.command":
 		// Arguments are validated per op when the command runs, so a bad one
 		// still answers invalid_args instead of leaving the hub to time out.
 		if len(fields) != 4 || json.Unmarshal(fields["request_id"], &message.RequestID) != nil || !validHubRequestID(message.RequestID) || json.Unmarshal(fields["op"], &message.CommandOp) != nil || !knownNodeCommandOp(message.CommandOp) || len(fields["args"]) == 0 {
-			return hubOutboundMessage{}, false
+			return hubOutboundMessage{}, reject
 		}
 		message.CommandArgs = append(json.RawMessage(nil), fields["args"]...)
 	default:
-		return hubOutboundMessage{}, false
+		return hubOutboundMessage{}, hubOutboundRejection{Class: hubUnparsedUnknownType, Type: message.Type}
 	}
-	return message, true
+	return message, hubOutboundRejection{}
 }
 
 func validRelayInjectedText(kind, text string) bool {

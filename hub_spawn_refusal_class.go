@@ -13,11 +13,13 @@ import "strings"
 // is replayable, and so is git_too_old, which the operator repairs by upgrading
 // git. origin-mismatch and branch-elsewhere ask the operator to inspect and
 // correct the node's checkout mapping, so the same request meets the same
-// conflict. Every other reason keeps its caller's classification.
+// conflict. The argument refusals are the request's own flags: replaying the
+// saved request meets the same rule, so the operator corrects it instead.
+// Every other reason keeps its caller's classification.
 func spawnRefusalReplayable(reason string) bool {
 	code, _, _ := strings.Cut(reason, ": ")
 	switch code {
-	case "checkout_refused:origin-mismatch", "checkout_refused:branch-elsewhere":
+	case "checkout_refused:origin-mismatch", "checkout_refused:branch-elsewhere", "invalid_args", "invalid_request":
 		return false
 	}
 	return true

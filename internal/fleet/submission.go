@@ -65,10 +65,15 @@ func (c *hubHTTP) Submit(ctx context.Context, request Submission) (Accepted, err
 		Job     string `json:"job_id"`
 		Request string `json:"request_id"`
 		Error   string `json:"error"`
+		Reason  string `json:"reason"`
 		Fix     string `json:"fix"`
 	}
 	if json.Unmarshal(raw, &response) != nil || status != http.StatusAccepted || !validID(response.Job) || response.Request != request.RequestID {
-		return Accepted{}, fail(exitConfig, "hub did not accept spawn (HTTP %d, %s); fix: %s", status, response.Error, firstNonempty(response.Fix, "inspect the hub operation and restore its configuration, then replay the saved request"))
+		message := fmt.Sprintf("hub did not accept spawn (HTTP %d, %s)", status, response.Error)
+		if response.Reason != "" {
+			message += ": " + response.Reason
+		}
+		return Accepted{}, fail(exitConfig, "%s; fix: %s", message, firstNonempty(response.Fix, "inspect the hub operation and restore its configuration, then replay the saved request"))
 	}
 	return Accepted{Job: response.Job, Request: response.Request}, nil
 }
@@ -177,7 +182,7 @@ func (a *App) PrepareSubmission(ctx context.Context, s Spawn) (Submission, error
 		return Submission{}, fail(exitUsage, "spawn requires -c CWD -p BRIEF -l LABEL --task TASK_ID (or --parent-job JOB)")
 	}
 	if _, err := hubArgs(a.Jobs, s); err != nil {
-		return Submission{}, fail(exitUsage, "%v; remove the unsupported flag before submitting through the hub", err)
+		return Submission{}, fail(exitUsage, "%v; correct the flag before submitting through the hub", err)
 	}
 	if err := validateContainment(s); err != nil {
 		return Submission{}, err

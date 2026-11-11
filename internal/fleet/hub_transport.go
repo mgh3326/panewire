@@ -20,6 +20,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/mgh3326/handoffkeep/client"
+	"github.com/mgh3326/panewire/internal/spawnargs"
 )
 
 // Hub transport (hosts.<name>.via = "hub"): a remote spawn goes through the
@@ -469,7 +470,25 @@ func hubArgs(jobs string, s Spawn) ([]string, error) {
 	add("--review-pass", s.ReviewPass)
 	add("--override-reason", s.OverrideReason)
 	add("--containment", s.Containment)
+	// The node applies its own argument rule to every job.spawn and drops the
+	// whole message on a mismatch. Building the same args through that rule
+	// here turns a silent node drop into a submit-time refusal naming the flag.
+	if reason := spawnargs.Refusal(args, true); reason != "" {
+		return nil, errors.New(reason)
+	}
 	return args, nil
+}
+
+// hubSpawnArgRefusal is the node's argument rule applied to the args the hub
+// will send for s. A dry-run refuses here, before admission can answer for
+// another reason; "" when the hub args cannot be built at all, whose error
+// still surfaces where those args are built.
+func hubSpawnArgRefusal(jobs string, s Spawn) string {
+	args, err := hubArgs(jobs, s)
+	if err != nil {
+		return ""
+	}
+	return spawnargs.Refusal(args, true)
 }
 
 // hubReportValue is the shape the hub accepts for --report-relative: the same

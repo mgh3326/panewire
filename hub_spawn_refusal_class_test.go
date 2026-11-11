@@ -26,6 +26,9 @@ func TestSpawnRefusalReplayableTable(t *testing.T) {
 		{"disconnected", true},
 		{"node_upgrade_required", true},
 		{"admission_refused: cannot place", true},
+		{"invalid_args", false},
+		{"invalid_args: --operator-request value has a character outside [A-Za-z0-9._:/@-]", false},
+		{"invalid_request", false},
 	} {
 		if got := spawnRefusalReplayable(test.reason); got != test.want {
 			t.Errorf("spawnRefusalReplayable(%q)=%v, want %v", test.reason, got, test.want)

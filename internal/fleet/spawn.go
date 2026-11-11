@@ -461,6 +461,11 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 	if err := validateContainment(s); err != nil {
 		return err
 	}
+	// A flag the node's own argument rule refuses would be dropped with the
+	// whole job.spawn. Refuse it here so a dry-run names the flag.
+	if reason := hubSpawnArgRefusal(a.Jobs, s); reason != "" {
+		return fail(exitUsage, "hub spawn: %s", reason)
+	}
 	resolved, aliasErr := a.resolveHost(s.Host)
 	if aliasErr != nil {
 		return aliasErr
