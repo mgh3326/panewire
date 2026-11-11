@@ -1021,94 +1021,133 @@ func candGroup(c *selCand) int {
 // nothing. The waste_first shadow (placement_shadow_waste.go) sorts copies with
 // it, so the live order and the shadow order come from one comparison.
 func sortSelCands(pending []*selCand) {
-	slices.SortStableFunc(pending, func(x, y *selCand) int {
-		// Waste-risk pools rank ahead of every tier, free included, and among
-		// themselves by waste urgency first; everything else keeps the tier
-		// order.
-		if x.risk != y.risk {
-			if x.risk {
-				return -1
-			}
-			return 1
+	slices.SortStableFunc(pending, selCandComparator(pending))
+}
+
+func selCandComparator(pending []*selCand) func(*selCand, *selCand) int {
+	// A pool's lowest fitting row supplies its cross-pool key. Grouping all
+	// its rows behind that key makes the comparison transitive.
+	type poolKey struct {
+		pool         string
+		tier         int
+		risk, behind bool
+	}
+	seats := make(map[poolKey]*selCand)
+	key := func(c *selCand) poolKey { return poolKey{c.row.Pool, c.tier, c.risk, c.behindCredit} }
+	grouped := func(c *selCand) bool {
+		return !c.ignoreGrade && (c.risk || c.tierName == "free" || c.tierName == creditTier)
+	}
+	for _, c := range pending {
+		if !grouped(c) {
+			continue
 		}
-		if x.behindCredit != y.behindCredit {
-			if y.behindCredit {
-				return -1
-			}
-			return 1
+		k := key(c)
+		if seat := seats[k]; seat == nil || compareSelCands(c, seat, true) < 0 {
+			seats[k] = c
 		}
+	}
+	return func(x, y *selCand) int {
+		if grouped(x) && grouped(y) {
+			kx, ky := key(x), key(y)
+			if kx == ky {
+				return compareSelCands(x, y, true)
+			}
+			if c := compareSelCands(seats[kx], seats[ky], false); c != 0 {
+				return c
+			}
+			return cmp.Compare(kx.pool, ky.pool)
+		}
+		return compareSelCands(x, y, true)
+	}
+}
+
+func compareSelCands(x, y *selCand, compareGrade bool) int {
+	// Waste-risk pools rank ahead of every tier, free included, and among
+	// themselves by waste urgency first; everything else keeps the tier
+	// order.
+	if x.risk != y.risk {
 		if x.risk {
-			// Waste-risk pools rank among themselves by the higher urgency.
+			return -1
+		}
+		return 1
+	}
+	if x.behindCredit != y.behindCredit {
+		if y.behindCredit {
+			return -1
+		}
+		return 1
+	}
+	if x.risk {
+		// Waste-risk pools rank among themselves by the higher urgency.
+		if c := cmp.Compare(*y.urgency, *x.urgency); c != 0 {
+			return c
+		}
+	} else {
+		if x.tier != y.tier {
+			return x.tier - y.tier
+		}
+	}
+	// Grade fit: the lowest grade that satisfies the task.
+	if gx, gy := gradeOrder[x.row.Grade], gradeOrder[y.row.Grade]; compareGrade && !x.ignoreGrade && gx != gy {
+		return gx - gy
+	}
+	if !x.risk {
+		// One group key, then that group's own key: a dollar credit first
+		// by dollars at risk, then a candidate whose reset can be paced by
+		// urgency, then an unpaceable one. Comparing the group before its
+		// key keeps a credit rung and a free rung in one strict weak
+		// ordering; mixing the USD pairwise rule with the nil-urgency rule
+		// produced a cycle (A before B, B before C, C before A).
+		if xg, yg := candGroup(x), candGroup(y); xg != yg {
+			return xg - yg
+		}
+		if x.usdUrgency != nil && y.usdUrgency != nil {
+			if c := cmp.Compare(*y.usdUrgency, *x.usdUrgency); c != 0 {
+				return c
+			}
+		}
+		// A paceable reset ranks ahead of an unpaceable one at this
+		// position, as it did before the group key. Without the presence
+		// rule a USD-credit tie with one urgency set fell through to the
+		// profile key, which closed a cycle with the urgency key.
+		if (x.urgency != nil) != (y.urgency != nil) {
+			if x.urgency != nil {
+				return -1
+			}
+			return 1
+		}
+		if x.urgency != nil {
 			if c := cmp.Compare(*y.urgency, *x.urgency); c != 0 {
 				return c
 			}
-		} else {
-			if x.tier != y.tier {
-				return x.tier - y.tier
-			}
 		}
-		// Grade fit: the lowest grade that satisfies the task.
-		if gx, gy := gradeOrder[x.row.Grade], gradeOrder[y.row.Grade]; !x.ignoreGrade && gx != gy {
-			return gx - gy
-		}
-		if !x.risk {
-			// One group key, then that group's own key: a dollar credit first
-			// by dollars at risk, then a candidate whose reset can be paced by
-			// urgency, then an unpaceable one. Comparing the group before its
-			// key keeps a credit rung and a free rung in one strict weak
-			// ordering; mixing the USD pairwise rule with the nil-urgency rule
-			// produced a cycle (A before B, B before C, C before A).
-			if xg, yg := candGroup(x), candGroup(y); xg != yg {
-				return xg - yg
-			}
-			if x.usdUrgency != nil && y.usdUrgency != nil {
-				if c := cmp.Compare(*y.usdUrgency, *x.usdUrgency); c != 0 {
-					return c
-				}
-			}
-			// A paceable reset ranks ahead of an unpaceable one at this
-			// position, as it did before the group key. Without the presence
-			// rule a USD-credit tie with one urgency set fell through to the
-			// profile key, which closed a cycle with the urgency key.
-			if (x.urgency != nil) != (y.urgency != nil) {
-				if x.urgency != nil {
-					return -1
-				}
-				return 1
-			}
-			if x.urgency != nil {
-				if c := cmp.Compare(*y.urgency, *x.urgency); c != 0 {
-					return c
-				}
-			}
-		}
-		if c := cmp.Compare(rankBlocking(firstPct(x.longProj, x.blocking)), rankBlocking(firstPct(y.longProj, y.blocking))); c != 0 {
+	}
+	if c := cmp.Compare(rankBlocking(firstPct(x.longProj, x.blocking)), rankBlocking(firstPct(y.longProj, y.blocking))); c != 0 {
+		return c
+	}
+	if x.ignoreGrade {
+		if c := cmp.Compare(topProfileRank(x.row), topProfileRank(y.row)); c != 0 {
 			return c
 		}
-		if x.ignoreGrade {
-			if c := cmp.Compare(topProfileRank(x.row), topProfileRank(y.row)); c != 0 {
-				return c
-			}
+	}
+	if ex, ey := rankEffort(x.row.Effort), rankEffort(y.row.Effort); ex != ey {
+		return ex - ey
+	}
+	if c := cmp.Compare(rankScore(x.row.Score), rankScore(y.row.Score)); c != 0 {
+		return c
+	}
+	// Full tie inside the free band: unspent credit is lost at expiry and
+	// the free model is not, so the credit rung goes first.
+	if x.creditPool != y.creditPool {
+		if x.creditPool {
+			return -1
 		}
-		if ex, ey := rankEffort(x.row.Effort), rankEffort(y.row.Effort); ex != ey {
-			return ex - ey
-		}
-		if c := cmp.Compare(rankScore(x.row.Score), rankScore(y.row.Score)); c != 0 {
-			return c
-		}
-		// Full tie inside the free band: unspent credit is lost at expiry and
-		// the free model is not, so the credit rung goes first.
-		if x.creditPool != y.creditPool {
-			if x.creditPool {
-				return -1
-			}
-			return 1
-		}
-		if c := cmp.Compare(x.row.Profile, y.row.Profile); c != 0 {
-			return c
-		}
-		return cmp.Compare(x.row.Effort, y.row.Effort)
-	})
+		return 1
+	}
+	if c := cmp.Compare(x.row.Profile, y.row.Profile); c != 0 {
+		return c
+	}
+	return cmp.Compare(x.row.Effort, y.row.Effort)
 }
 
 // horizonClause renders the optional waste-risk horizon for the rule text.
@@ -1231,7 +1270,7 @@ func (p *selPlan) record() map[string]any {
 		"outcome_code":   p.outcome,
 		"mode":           "auto",
 		"decision":       fmt.Sprintf("urgency=%s source=%s tiers=%s", p.req.urgency, p.req.urgencySource, strings.Join(p.order, ">")),
-		"rule":           fmt.Sprintf("hosts first; within each host, waste-risk subscription pools rank by waste urgency (unused share per hour until reset), then band (waste, then free and credit together), lowest grade >= %s, credit expiry (dollars at risk per hour, else remaining percent per hour), waste urgency and smaller effort; a credit rung goes before a free rung on a full tie; waste < %g%%, excluded >= %g%% projected", p.req.grade, *p.policy.WasteBelow, *p.policy.ExcludeAt),
+		"rule":           fmt.Sprintf("hosts first; within each host, waste-risk subscription pools rank by waste urgency (unused share per hour until reset), then band (waste, free and credit together, then ranked); within risk and free bands pools compete by their lowest fitting seat, with higher rows after that seat; ranked uses lowest grade >= %s across pools; credit expiry (dollars at risk per hour, else remaining percent per hour), waste urgency and smaller effort; a credit rung goes before a free rung on a full tie; waste < %g%%, excluded >= %g%% projected", p.req.grade, *p.policy.WasteBelow, *p.policy.ExcludeAt),
 		"waste_risk":     map[string]any{"horizon_hours": *p.policy.WasteRisk.HorizonHours, "min_unused_pct": *p.policy.WasteRisk.MinUnusedPct},
 		"policy_version": p.policy.Version,
 		"policy_source":  p.policy.SourceDoc,
