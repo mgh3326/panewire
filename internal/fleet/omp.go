@@ -49,9 +49,10 @@ func ompFooterLead(segment string) bool {
 //	⠸ 16s > ◉ GPT-6.1 Sol > 🌳 project/tree > ⑂ detached > $0.03 ▶─1%──…─1M─
 //
 // modelName is omp's footer name for the launched model (see ompModelName).
-func OMPFooterProof(screen, modelName, effort, cwd, home, brief string) bool {
+func OMPFooterProof(screen, modelName, effort, cwd, home, brief string, noThinkingRung ...bool) bool {
 	glyph, ok := ompEffortGlyphs[effort]
-	if !ok || modelName == "" {
+	noThinking := effort == "off" && len(noThinkingRung) > 0 && noThinkingRung[0]
+	if !noThinking && !ok || modelName == "" {
 		return false
 	}
 	row := ""
@@ -69,7 +70,11 @@ func OMPFooterProof(screen, modelName, effort, cwd, home, brief string) bool {
 		return false
 	}
 	// A usage-limit badge follows " · "; any other tail is another model's name.
-	tail, ok := strings.CutPrefix(segments[1], glyph+" "+modelName)
+	modelPrefix := modelName
+	if !noThinking {
+		modelPrefix = glyph + " " + modelName
+	}
+	tail, ok := strings.CutPrefix(segments[1], modelPrefix)
 	if !ok || tail != "" && !strings.HasPrefix(tail, " · ") {
 		return false
 	}
@@ -195,7 +200,7 @@ func (a *App) ompProof(ctx context.Context, l Launch, cwd, pane, brief string, w
 		if ompSetupWizard(screen) {
 			return fail(exitConfig, "OMP_SETUP_WIZARD: omp is in its setup wizard despite OMP_SKIP_SETUP; seat withheld")
 		}
-		if OMPFooterProof(screen, name, l.Effort, cwd, a.Home, brief) {
+		if OMPFooterProof(screen, name, l.Effort, cwd, a.Home, brief, l.NoThinking) {
 			return nil
 		}
 		if !a.Now().Before(deadline) {

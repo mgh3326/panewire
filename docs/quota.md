@@ -470,11 +470,14 @@ the pool:
 |---|---|---|---|---|
 | `cmd-dsflash41` | cmd | the cmd harness's Command Code provider | worker, tester | Operator 2026-11-07 (hk 3248): no builder. |
 | `omp-dsflash41` | omp | omp's `commandcode` provider, gated by the host's `omp_commandcode` capability | worker, tester, reviewer | The policy seat lists reviewer, but admission refuses it on a credit rung (see below). |
+| `omp-musespark13` | omp | `commandcode/meta/muse-spark-1.3`, gated by `omp_commandcode` | worker, tester, reviewer | low, high, max; unrated until routing-policy grades it. |
+| `omp-argon4` | omp | `commandcode/google/gemini-4-argon`, gated by `omp_commandcode` | worker, tester, reviewer | off only; omp reports no thinking levels for this model. |
+| `omp-mimo26pro` | omp | `commandcode/xiaomi/mimo-v2.6-pro`, gated by `omp_commandcode` | worker, tester, reviewer | off only; omp reports no thinking levels for this model. |
 
-Both profiles share one Command Code account, its 30-day window
+All four omp profiles and cmd-dsflash41 share one Command Code account, its 30-day window
 (`commandcode_required_window_missing:30d`), and any
 `quota.pool_max_concurrent.commandcode` cap (see [config](config.md)). A spawn
-on either profile counts against the same account reading.
+on any of these profiles counts against the same account reading.
 
 Admission refuses the reviewer role for omp-dsflash41 today, because the credit
 rule admits only a worker or tester. The policy seat still lists reviewer, so a

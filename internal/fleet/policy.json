@@ -1532,6 +1532,42 @@
         "reviewer",
         "counsel"
       ]
+    },
+    "omp-musespark13": {
+      "canon": "omp-musespark13",
+      "kind": "omp",
+      "family": "meta",
+      "capability": "omp_commandcode",
+      "effort": "high",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer"
+      ]
+    },
+    "omp-argon4": {
+      "canon": "omp-argon4",
+      "kind": "omp",
+      "family": "google",
+      "capability": "omp_commandcode",
+      "effort": "high",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer"
+      ]
+    },
+    "omp-mimo26pro": {
+      "canon": "omp-mimo26pro",
+      "kind": "omp",
+      "family": "other",
+      "capability": "omp_commandcode",
+      "effort": "high",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer"
+      ]
     }
   }
 }

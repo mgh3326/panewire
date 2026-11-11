@@ -20,18 +20,19 @@ type Launch struct {
 	Catalog struct {
 		Stale bool `json:"stale"`
 	} `json:"catalog"`
-	Profile string `json:"profile"`
-	ModelID string `json:"model_id"`
-	Effort  string `json:"effort"`
-	Grade   string `json:"grade"`
-	Gate    string `json:"gate"`
-	Pool    string `json:"pool"`
-	Family  string `json:"family"`
+	Profile    string `json:"profile"`
+	ModelID    string `json:"model_id"`
+	Effort     string `json:"effort"`
+	Grade      string `json:"grade"`
+	Gate       string `json:"gate"`
+	Pool       string `json:"pool"`
+	Family     string `json:"family"`
+	NoThinking bool   `json:"no_thinking,omitempty"`
 }
 
 // row is the catalog rung a launch row stands for, for routing checks.
 func (l Launch) row() CatalogRow {
-	return CatalogRow{Profile: l.Profile, ModelID: l.ModelID, Effort: l.Effort, Gate: l.Gate, Grade: l.Grade, Pool: l.Pool}
+	return CatalogRow{Profile: l.Profile, ModelID: l.ModelID, Effort: l.Effort, Gate: l.Gate, Grade: l.Grade, Pool: l.Pool, Family: l.Family, NoThinking: l.NoThinking}
 }
 
 // QuotaRequest asks the quota CLI about one launch. Profile is the launch
@@ -52,6 +53,7 @@ type QuotaRequest struct {
 type CatalogRow struct {
 	Profile   string   `json:"profile"`
 	Effort    string   `json:"effort"`
+	Family    string   `json:"family,omitempty"`
 	Grade     string   `json:"grade"`
 	ModelID   string   `json:"model_id"`
 	Pool      string   `json:"pool"`
@@ -62,6 +64,10 @@ type CatalogRow struct {
 	// pacelever's catalog names it; empty for other pools and for a rung it
 	// does not group (meteringGroup).
 	Group string `json:"group,omitempty"`
+	// NoThinking is set for a model whose catalog entry has no controllable
+	// thinking levels. It travels with the rung so admission and launch share
+	// the seed's one source of truth.
+	NoThinking bool `json:"no_thinking,omitempty"`
 }
 
 // PoolView is one quota pool's status from the quota CLI's status
