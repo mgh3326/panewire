@@ -618,7 +618,8 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 	if s.Workspace == "" {
 		return fail(exitConfig, "WORKSPACE_UNCONFIGURED: set local.workspace on the executing host or pass -w WORKSPACE_ID")
 	}
-	if !boolean(a.Config.Local, "spawn", true) {
+	// A dry run starts nothing, so disabled local spawns do not refuse its preview.
+	if !s.DryRun && !boolean(a.Config.Local, "spawn", true) {
 		return fail(exitLocalDisabled, "local spawns disabled")
 	}
 	cwd, e := filepath.Abs(expand(s.CWD))
