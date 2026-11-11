@@ -41,7 +41,7 @@ func TestOMPCommandCodeSeatsResolveAndLaunch(t *testing.T) {
 	for profile, want := range ompCommandCodeModels {
 		t.Run(profile, func(t *testing.T) {
 			seat, ok := a.Policy.Profiles[profile]
-			if !ok || seat.Kind != "omp" || seat.Family != want.family || seat.Capability != "omp_commandcode" || seat.Effort != want.defaultEffort {
+			if !ok || seat.Kind != "omp" || seat.Family != want.family || seat.Capability != "omp_commandcode" || seat.Effort != want.defaultEffort || seat.NoThinking != want.noThinking {
 				t.Fatalf("policy seat for %s: %+v", profile, seat)
 			}
 			var found []CatalogRow
@@ -60,7 +60,7 @@ func TestOMPCommandCodeSeatsResolveAndLaunch(t *testing.T) {
 						row = candidate
 					}
 				}
-				if row.ModelID != want.model || row.Pool != commandcodePool || row.Family != want.family || row.Grade != gradeUnrated || row.NoThinking != want.noThinking {
+				if row.ModelID != want.model || row.Pool != commandcodePool || row.Family != want.family || row.Grade != gradeUnrated {
 					t.Fatalf("%s@%s row=%+v", profile, effort, row)
 				}
 			}
@@ -69,11 +69,11 @@ func TestOMPCommandCodeSeatsResolveAndLaunch(t *testing.T) {
 				launchEffort = "off"
 			}
 			catalog := overlayLaunchCatalog(found, false)
-			resolved, effort, why := catalog.resolveRow(admissionRequest{Profile: profile, Effort: launchEffort, Role: "worker", E6Arm: profile + "@" + launchEffort}, true)
-			if why != "" || resolved.ModelID != want.model || resolved.Pool != commandcodePool || resolved.Family != want.family || resolved.NoThinking != want.noThinking || effort != launchEffort {
+			resolved, effort, why := catalog.resolveRow(admissionRequest{Profile: profile, Effort: launchEffort, Role: "worker", E6Arm: profile + "@" + launchEffort}, true, a.Policy.Profiles)
+			if why != "" || resolved.ModelID != want.model || resolved.Pool != commandcodePool || resolved.Family != want.family || effort != launchEffort {
 				t.Fatalf("resolved row=%+v effort=%q why=%q", resolved, effort, why)
 			}
-			argv, env, err := a.launchArgs(seat, Launch{ModelID: resolved.ModelID, Effort: effort, NoThinking: resolved.NoThinking})
+			argv, env, err := a.launchArgs(seat, Launch{ModelID: resolved.ModelID, Effort: effort})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -97,28 +97,30 @@ func TestLaunchProfileCreditRetainsLegacyProfiles(t *testing.T) {
 }
 
 func TestOMPCommandCodeEffortAdmission(t *testing.T) {
+	a := testApp(t)
+	seats := a.Policy.Profiles
 	rows := admissionRows(ompCommandCodeSeed(t))
 	for profile, spec := range ompCommandCodeModels {
 		for _, effort := range []string{"low", "high", "max", "medium", "xhigh", "off"} {
 			want := slices.Contains(spec.efforts, effort)
 			t.Run(profile+"@"+effort, func(t *testing.T) {
-				in := admissionInputs{Rows: rows}
+				in := admissionInputs{Rows: rows, Seats: seats}
 				req := admissionRequest{Profile: profile, Effort: effort, Role: "worker", E6Arm: profile + "@" + effort}
 				_, _, _, admissionErr := in.resolveRow(req, true)
 				catalog := overlayLaunchCatalog(ompCommandCodeSeed(t), false)
-				_, _, launchErr := catalog.resolveRow(req, true)
+				_, _, launchErr := catalog.resolveRow(req, true, seats)
 				if (admissionErr == nil) != want || (launchErr == "") != want {
 					t.Fatalf("admission err=%v launch err=%q, want admitted=%t", admissionErr, launchErr, want)
 				}
 			})
 		}
 	}
-	in := admissionInputs{Rows: append(rows, admissionRow{Profile: "omp-dsflash41", Effort: "off", ModelID: "deepseek/deepseek-v4.1-flash", Pool: commandcodePool, Grade: gradeUnrated, Gate: defaultGate})}
+	in := admissionInputs{Rows: append(rows, admissionRow{Profile: "omp-dsflash41", Effort: "off", ModelID: "deepseek/deepseek-v4.1-flash", Pool: commandcodePool, Grade: gradeUnrated, Gate: defaultGate}), Seats: seats}
 	if _, _, _, err := in.resolveRow(admissionRequest{Profile: "omp-dsflash41", Effort: "off", Role: "worker", E6Arm: "omp-dsflash41@off"}, true); err == nil {
 		t.Fatal("omp-dsflash41@off was admitted")
 	}
 	legacy := launchCatalog{Rows: []launchRow{launchRowFrom(CatalogRow{Profile: "omp-dsflash41", Effort: "off", ModelID: "deepseek/deepseek-v4.1-flash", Pool: commandcodePool, Grade: gradeUnrated, Gate: defaultGate})}}
-	if _, _, err := legacy.resolveRow(admissionRequest{Profile: "omp-dsflash41", Effort: "off", Role: "worker", E6Arm: "omp-dsflash41@off"}, true); err == "" {
+	if _, _, err := legacy.resolveRow(admissionRequest{Profile: "omp-dsflash41", Effort: "off", Role: "worker", E6Arm: "omp-dsflash41@off"}, true, seats); err == "" {
 		t.Fatal("launch lookup admitted omp-dsflash41@off")
 	}
 }
@@ -192,20 +194,20 @@ func TestOMPAndCommandCodeExistingSeatsUnchanged(t *testing.T) {
 		}
 		if tc.profile != "omp-dsflash41" {
 			for effort, row := range ompSeedRowsFor(t, tc.profile) {
-				if row.ModelID != tc.model || row.Pool != tc.pool || row.Family != tc.family || row.NoThinking || effort == "off" {
+				if row.ModelID != tc.model || row.Pool != tc.pool || row.Family != tc.family || effort == "off" {
 					t.Fatalf("existing seed row %s@%s changed: %+v", tc.profile, effort, row)
 				}
 			}
 		}
 	}
 	for _, effort := range []string{"low", "high", "max"} {
-		in := admissionInputs{Rows: []admissionRow{{Profile: "omp-dsflash41", Effort: effort, ModelID: "commandcode/deepseek/deepseek-v4.1-flash", Pool: commandcodePool, Grade: gradeUnrated, Gate: defaultGate}}}
+		in := admissionInputs{Rows: []admissionRow{{Profile: "omp-dsflash41", Effort: effort, ModelID: "commandcode/deepseek/deepseek-v4.1-flash", Pool: commandcodePool, Grade: gradeUnrated, Gate: defaultGate}}, Seats: a.Policy.Profiles}
 		if _, _, _, err := in.resolveRow(admissionRequest{Profile: "omp-dsflash41", Effort: effort, Role: "worker", E6Arm: "omp-dsflash41@" + effort}, true); err != nil {
 			t.Fatalf("existing omp-dsflash41@%s refused: %v", effort, err)
 		}
 	}
 	for _, effort := range []string{"medium", "xhigh"} {
-		in := admissionInputs{Rows: []admissionRow{{Profile: "omp-dsflash41", Effort: effort, ModelID: "commandcode/deepseek/deepseek-v4.1-flash", Pool: commandcodePool, Grade: gradeUnrated, Gate: defaultGate}}}
+		in := admissionInputs{Rows: []admissionRow{{Profile: "omp-dsflash41", Effort: effort, ModelID: "commandcode/deepseek/deepseek-v4.1-flash", Pool: commandcodePool, Grade: gradeUnrated, Gate: defaultGate}}, Seats: a.Policy.Profiles}
 		if _, _, _, err := in.resolveRow(admissionRequest{Profile: "omp-dsflash41", Effort: effort, Role: "worker", E6Arm: "omp-dsflash41@" + effort}, true); err == nil {
 			t.Fatalf("existing omp-dsflash41@%s admitted", effort)
 		}

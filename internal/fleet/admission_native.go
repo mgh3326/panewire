@@ -144,7 +144,7 @@ func (a *App) requestVerdict(ctx context.Context, r QuotaRequest) (req admission
 	if err != nil {
 		return req, in, invalidVerdict(req).refuse(gateInvalid, "bench catalog unavailable"), true
 	}
-	in = admissionInputs{Now: a.Now(), Rows: admissionRows(rows), Policy: policy}
+	in = admissionInputs{Now: a.Now(), Rows: admissionRows(rows), Policy: policy, Seats: a.Policy.Profiles}
 	d = in.admit(req)
 	if !d.OK && d.Exit != gateUnmeasurable {
 		d.GateCode = gateReasonCode(d.Reason)

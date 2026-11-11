@@ -1551,6 +1551,7 @@
       "family": "google",
       "capability": "omp_commandcode",
       "effort": "off",
+      "no_thinking": true,
       "roles": [
         "worker",
         "tester",
@@ -1563,6 +1564,7 @@
       "family": "other",
       "capability": "omp_commandcode",
       "effort": "off",
+      "no_thinking": true,
       "roles": [
         "worker",
         "tester",
@@ -1599,6 +1601,7 @@
       "family": "openai",
       "capability": "omp_commandcode",
       "effort": "off",
+      "no_thinking": true,
       "roles": [
         "worker",
         "tester",

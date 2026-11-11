@@ -38,6 +38,11 @@ type Seat struct {
 	Route string `json:"route,omitempty"`
 	// ContextTokens caps CLAUDE_CODE_MAX_CONTEXT_TOKENS for a routed seat.
 	ContextTokens int `json:"context_tokens,omitempty"`
+	// NoThinking marks a model with no controllable thinking levels. Its
+	// launcher passes no effort, the gate admits only its "off" rung, and the
+	// landing proof accepts a footer without an effort glyph. The property
+	// belongs to the seat; a catalog row never carries it (hk 3974).
+	NoThinking bool `json:"no_thinking,omitempty"`
 }
 type Rung struct {
 	Roles []string `json:"roles"`

@@ -40,7 +40,7 @@ func (a *App) launchArgs(s Seat, l Launch) ([]string, []string, error) {
 	case "devin":
 		return []string{"--model", m, "--permission-mode", "dangerous", "--respect-workspace-trust", "false"}, env, nil
 	case "omp":
-		if l.NoThinking && e == "off" {
+		if s.NoThinking && e == "off" {
 			return []string{"--model", m}, []string{"OMP_SKIP_SETUP=1"}, nil
 		}
 		return []string{"--model", m + ":" + e}, []string{"OMP_SKIP_SETUP=1"}, nil
@@ -285,7 +285,7 @@ func CmdProof(screen, model, effort, cwd, home, brief string) bool {
 }
 func (a *App) modelProof(ctx context.Context, s Seat, l Launch, cwd, pane, brief string) error {
 	if s.Kind == "omp" {
-		return a.ompProof(ctx, l, cwd, pane, brief, ompLandedProofWait)
+		return a.ompProof(ctx, l, s.NoThinking, cwd, pane, brief, ompLandedProofWait)
 	}
 	screen, e := a.visible(ctx, pane)
 	if e != nil {
@@ -450,7 +450,7 @@ func (a *App) start(ctx context.Context, s Spawn, seat Seat, l Launch, pane stri
 		}
 	}
 	if seat.Kind == "omp" {
-		if e := a.ompProof(ctx, l, s.CWD, pane, "", timeout); e != nil {
+		if e := a.ompProof(ctx, l, seat.NoThinking, s.CWD, pane, "", timeout); e != nil {
 			return e
 		}
 		if e := a.ompProcessCWD(ctx, s.CWD, pane); e != nil {
