@@ -703,16 +703,22 @@ spawn.
 Automatic model selection (`spawn` with `-m` omitted or `-m auto`) reads the
 live bench catalog from handoffkeep and pool status from the quota CLI, then
 orders candidates under the versioned pool-order policy (`[local].pool_policy` or
-`PANEWIRE_POOL_POLICY`, else the embedded copy): paid pools at waste risk
-first (see below), then other WASTE subscription pools, then free pool/model
-sets, then ranked subscription pools, then credit pools without a usable expiry. Expiring credit joins the waste-risk ordering by dollars at risk per hour until expiry (below); an entry without recorded dollars keeps the percentage rule. Inside a tier the lowest catalog grade that satisfies the task wins,
-then the pool with the higher waste urgency — the unused projected share
+`PANEWIRE_POOL_POLICY`, else the embedded copy): subscription pools at waste
+risk first (see below), then other WASTE subscription pools, then the free
+pool/model sets and the credit pools **together**, then ranked subscription
+pools. A credit pool is a candidate in the free band: an omp credit rung ranks
+beside the SWE-2 free rung, after waste and before ranked. Inside that band the
+lowest catalog grade that satisfies the task wins, then the pool with the higher waste urgency — the unused projected share
 (100 − projected) per hour until its longest account window's reset (7d,
 monthly; sub-daily windows such as a 5h rate window never rank an account's
 pool, they stay admission gates only). A pool whose longest window's reset can
 be paced always ranks ahead of one whose cannot; unpaceable pools keep the
 lower projected use at reset (the used percentage when it cannot be paced yet) —
-then the smaller effort, then the catalog score. A pool whose reading has no
+then the smaller effort, then the catalog score. On a full tie inside the free
+band a credit rung goes before a free rung: unspent credit is lost at expiry
+and the free model is not. Among credit rungs, one with a dollar balance
+outranks one without, ordered by dollars at risk per hour; a percent-only entry
+keeps the remaining-percent-per-hour rule (below). A pool whose reading has no
 account window (agy publishes only group windows) is paced, ranked and put at
 waste risk on the group the rung draws from: `gemini` or `3p`, from the catalog
 row's `group` or its model id. That group's longest window is used exactly as an
@@ -724,15 +730,18 @@ group keeps the conservative rule: it is blocked and paced on the strictest
 group (highest used share, then highest projection). The selection record names
 the group as `waste_group`.
 
-The pool-order policy is version `2`. A version `1` file supplied through
-`[local].pool_policy`, `PANEWIRE_POOL_POLICY`, or `simulate --policy` is refused
-with exit 70 and a migration error. To migrate, copy
+The pool-order policy is version `3`. A version `1` or `2` file supplied
+through `[local].pool_policy`, `PANEWIRE_POOL_POLICY`, or `simulate --policy` is
+refused with exit 70 and a migration error. To migrate, copy
 `internal/fleet/pool-order.json`, retain any custom thresholds and free
-model sets, and set `version` to `2`. The order is
-`["waste", "free", "ranked", "credit"]`, and `credit_pools` includes both
-`anthropic-api` and `openai-api`. Version 2 requires credit last, after ranked.
-This version changes credit admission as well as the tier order: credit no
-longer requires a balance observation, but its pool class must remain readable.
+model sets, and set `version` to `3`. The order is
+`["waste", "free", "ranked"]`, and `credit_pools` includes both
+`anthropic-api` and `openai-api`. A credit pool is not a band of its own:
+version 3 puts it in the free band, and naming `credit` in `order` is refused.
+The selection record keeps `tier: credit` on a credit rung (the pool class
+inside that band) and lists the bands in `tiers`. Credit admission is unchanged
+from version 2: credit no longer requires a balance observation, but its pool
+class must remain readable.
 
 The projection is pacelever's pace: for each account-scope bucket in the
 quota status, used percentage ÷ elapsed share of its window, paced at the
@@ -749,12 +758,14 @@ A paid pool is at **waste risk** when the projected unused share of its
 longest window (a day or more) at that window's reset — waste urgency ×
 hours to reset, i.e. 100 − its projection — is at least
 `waste_risk.min_unused_pct`, however far the reset is. Free seats and
-`credit_pools` use their balance and expiry instead (below), and neither is a pool whose
-longest window cannot be paced (for example the first 5% of a fresh
-window). Waste-risk pools rank ahead of every tier, free included, and
+`credit_pools` are never waste-risk: a credit pool is ordered by its balance
+and expiry inside the free band (below), and a free seat by the free bucket.
+Neither is a pool whose longest window cannot be paced (for example the first
+5% of a fresh window). Waste-risk subscription pools rank ahead of every band,
+free and credit included, and
 among themselves by waste urgency first (a pool resetting sooner with the
 same unused share comes first), then grade fit, effort and score; every
-other pool keeps the tier order above. For a waste-risk pool sub-daily
+other pool keeps the band order above. For a waste-risk pool sub-daily
 windows (e.g. 5h) are used up rather than paced: they never contribute to
 its `projected_exhaust` check and refuse it only when exhausted — used at
 or above 100% (dropped as `window_exhausted`) or the quota gate's own
@@ -788,20 +799,20 @@ pin. Every other devin rung, such as the paid `devin-ds41`, stays refused as
 `pool excluded by policy`. The bucket cap `devin-free` is set separately, see
 [placement](placement.md#pool-concurrency-cap).
 
-A credit pool with a recorded balance and future expiry competes for work.
-With a dollar balance (`credit.remaining_usd`) its rank is the money at risk:
-the balance less the spend projected before expiry (the burn rate times the
-hours to expiry). The burn rate is the fall in dollar balance between the two
-latest credit entries of the pool, divided by the hours between their
-`measured_at`; it is `0` when fewer than two entries record dollars or the
-balance rose. `at_risk_usd = max(0, balance − projected spend)` and
-`usd_urgency = at_risk_usd ÷ hours to expiry`. The pool is waste-risk only
-when `at_risk_usd > 0`, and then ranks inside the waste band ahead of
-waste-risk subscriptions; otherwise it stays in the plain `credit` tier.
-Among credit pools a dollar balance outranks one without, ordered by
-`usd_urgency`. An entry without dollars keeps the percentage rule (remaining
-percent per hour until expiry), ranks after any credit that has dollars, and
-the plan logs `credit_usd_missing pool=<pool>` once so it can be recorded:
+A credit pool with a recorded balance and future expiry competes for work
+inside the free band. With a dollar balance (`credit.remaining_usd`) its rank
+there is the money at risk: the balance less the spend projected before expiry
+(the burn rate times the hours to expiry). The burn rate is the fall in dollar
+balance between the two latest credit entries of the pool, divided by the hours
+between their `measured_at`; it is `0` when fewer than two entries record
+dollars or the balance rose. `at_risk_usd = max(0, balance − projected spend)`
+and `usd_urgency = at_risk_usd ÷ hours to expiry`. A credit pool is never
+waste-risk: the waste band is subscription pools only, and a credit rung stays
+in the free band with `tier: credit` and `waste_risk: false`. Among credit
+pools a dollar balance outranks one without, ordered by `usd_urgency`. An entry
+without dollars keeps the percentage rule (remaining percent per hour until
+expiry), ranks after any credit that has dollars, and the plan logs
+`credit_usd_missing pool=<pool>` once so it can be recorded:
 
 ```sh
 panewire manual set --pool <pool> --credit-balance <usd> --credit-total <usd> --expires <YYYY-MM-DD>
@@ -827,14 +838,26 @@ that publishes it. See [quota.md](quota.md#credit-pool-presence).
 The selection record and the chosen `why` text carry `balance_usd`,
 `burn_usd_per_h`, `at_risk_usd` and `usd_urgency`.
 
-Its account-bound gate still decides admission. Credit without a
-recorded balance or expiry, already expired, or used up stays in tier `credit`.
-`credit_final_days` is deprecated, has no effect, and emits a warning when set.
+Its account-bound gate still decides admission. Credit without a recorded
+balance or expiry stays in the free band (`tier: credit`) and the gate decides
+it. A credit entry whose expiry has passed is dropped as `credit_expired`; an
+entry with no expiry at all is left to the gate. `credit_final_days` is
+deprecated, has no effect, and emits a warning when set.
 `panewire plan --credit-at TIME` evaluates expiry at the supplied time.
 
-A subscription pool on pace to use its longest window ranks behind credit with
-a recorded positive balance and future expiry. Sub-daily windows do not pace a
-pool, and exhausted windows still refuse it.
+A free-tier rung is dropped as `free_limit` while the devin account's
+published free bucket reads `exhausted` with its reset still ahead. The bucket
+is the shared reading's `free_bucket` (the hub's fleet state carries it too).
+A devin pane that reports "Reached free model rate limit" writes this host's
+`devin-free-limit.json` — the same record `panewire quota observe
+devin-free-limit` writes — and the next devin measurement publishes it to the
+shared store. An unknown reset holds for one hour. The rung returns on its own
+once the reset passes. The quota gate refuses the same rung on the same
+reading; selection drops it before the gate.
+
+A subscription pool on pace to use its longest window ranks behind the free
+band, credit with a recorded positive balance and future expiry included.
+Sub-daily windows do not pace a pool, and exhausted windows still refuse it.
 
 If the pool-status query fails, credit candidates are dropped as
 `QUOTA_UNKNOWN` with reason `quota_unknown` and the selection records
@@ -870,18 +893,24 @@ order: the waste-risk override, the policy `order` and the grade-fit rule
 apply to every task, and urgent work reaches a paid pool that is not at
 waste risk when the free rung is refused or excluded. The `job.placement` selection
 record carries `urgency`, `urgency_source` (`flag`, `task-priority` or
-`default`), the `tiers` order used, a one-line `decision`, the ordering
+`default`), the `tiers` bands used (`waste>free>ranked` in version 3), a
+one-line `decision`, the ordering
 `rule` with both thresholds and the waste-risk rule, `waste_risk` (the
 `horizon_hours`/`min_unused_pct` in force), `projected_pct` and `used_pct`
 per candidate, `waste_risk` (`true`/`false`) on every candidate and
 `unused_at_reset_pct` (its input) whenever the longest window could be
 paced,
-`waste_urgency`, `reset_hours` and `waste_order` (`reset` or
+`waste_urgency`, `reset_hours` and `waste_order` (`usd`, `reset` or
 `projected_fallback`) per ranked candidate,
 `waste_group` (`gemini` or `3p`) on a candidate of a pool that publishes only
 group windows,
+`tier: credit` and the `credit` object (`balance_usd`, `burn_usd_per_h`,
+`at_risk_usd`, `usd_urgency`, `days_left`, `balance_pct`, `expires_at`) on a
+credit rung,
+`free_limit` as the drop reason of a held free rung and `credit_expired` on an
+entry past its expiry,
 and on `chosen` its `tier`, `grade`, `waste_risk`, `waste_group`,
-`projected_pct`, `waste_urgency` and a one-line `why`;
+`projected_pct`, `waste_urgency`, `credit` and a one-line `why`;
 `--dry-run` prints `urgency=<v> source=<s> tiers=<a>><b>...` before the full
 record.
 
@@ -923,7 +952,10 @@ projection is `projected_pct` when given, else pacelever's pace over
 urgency is (100 − projected) ÷ hours-to-reset of the longest window of a
 day or more (sub-daily windows never rank), and pools without a readable
 reset rank by projected order. `credit_left_pct` records a credit pool's
-balance left (percent of its total); `resets_at` or `reset_hours` supplies its expiry for urgency ranking. Without either value it remains last. `free` marks a free-tier rung; `free_limit`
+balance left (percent of its total); `resets_at` or `reset_hours` supplies its
+expiry for urgency ranking. Without either value the credit rung still ranks in
+the free band, with no expiry signal. A pool with `class: credit` is in the
+free band, and the record's `tier` for its rung is `credit`. `free` marks a free-tier rung; `free_limit`
 records an observed free limit — the only exclusion a free rung honors, so a
 shared pool's `used_pct` or projection never drops it. `--set` (repeatable)
 overrides or creates a pool and repaces it: `used` and `projected` are
@@ -1319,8 +1351,8 @@ panewire delegate --role reader|verifier|reviewer --prompt FILE [--grade G] [--c
 
 **Selection.** The seat is chosen by the same code as `spawn` auto-selection
 and `panewire plan`: catalog rungs that cover the grade and the role, ordered by
-the pool policy (waste-risk pools first, then the tier order), admitted through
-presence and the quota gate. Free models are one tier of that policy, not a
+the pool policy (waste-risk pools first, then the band order), admitted through
+presence and the quota gate. Free models are one band of that policy, not a
 default target. A reviewer drops every seat of the caller's family.
 
 **Job record.** Each delegation is a job: `delegate-<parent>-<n>`, where

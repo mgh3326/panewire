@@ -9,6 +9,8 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/mgh3326/panewire/internal/quota/shared"
 )
 
 const (
@@ -234,9 +236,22 @@ func (p *selPlan) classify(c *selCand, v PoolView) {
 	if p.policy.isCredit(c.row.Pool) || v.Class == "credit" {
 		c.creditPool = true
 		c.creditLeft = false
-		c.tierName, c.tier = "credit", slices.Index(p.order, "credit")
+		// A credit pool ranks in the free band (version 3); "credit" names
+		// the pool class inside it.
+		c.tierName, c.tier = creditTier, slices.Index(p.order, "free")
 		if v.Class == "exclude" {
 			c.reason, c.code, c.outcome = "pool_excluded", outcomeNoRoleCandidate, "dropped:pool_excluded"
+			return
+		}
+		at := p.req.creditAt
+		if at.IsZero() {
+			at = p.at
+		}
+		// An entry whose credit expiry has passed is not a candidate. An
+		// entry with no expiry at all stays, as it always has, for the gate
+		// to judge.
+		if v.Credit != nil && !v.Credit.ExpiresAt.IsZero() && !v.Credit.ExpiresAt.After(at) {
+			c.reason, c.code, c.outcome = "credit_expired", outcomeQuotaExhausted, "dropped:credit_expired"
 			return
 		}
 		// A recorded balance competes until its expiry. With dollars, rank by
@@ -244,10 +259,6 @@ func (p *selPlan) classify(c *selCand, v PoolView) {
 		// keep the percentage rule and tell the operator to record dollars.
 		if v.Credit != nil && v.Credit.BalanceUSD == nil && !slices.Contains(p.creditMissing, c.row.Pool) {
 			p.creditMissing = append(p.creditMissing, c.row.Pool)
-		}
-		at := p.req.creditAt
-		if at.IsZero() {
-			at = p.at
 		}
 		if ok, hours := v.Credit.expiring(at); ok {
 			c.creditLeft = true
@@ -258,17 +269,10 @@ func (p *selPlan) classify(c *selCand, v PoolView) {
 				usdUrgency := atRisk / hours
 				c.credit.burnUSDPerH, c.credit.atRiskUSD, c.credit.usdUrgency = &burn, &atRisk, &usdUrgency
 				c.usdUrgency = &usdUrgency
-				// Only money that will be lost makes credit waste risk; a
-				// balance the pace uses up first stays in the plain credit tier.
-				if atRisk > 0 {
-					c.tierName, c.tier = "waste", slices.Index(p.order, "waste")
-					c.risk = true
-				}
 				return
 			}
 			left, urgency := v.Credit.LeftPct, v.Credit.LeftPct/hours
-			c.tierName, c.tier = "waste", slices.Index(p.order, "waste")
-			c.risk, c.urgency, c.resetHrs, c.unused = true, &urgency, &hours, &left
+			c.urgency, c.resetHrs, c.unused = &urgency, &hours, &left
 		}
 		return
 	}
@@ -277,6 +281,11 @@ func (p *selPlan) classify(c *selCand, v PoolView) {
 	c.paced = p.policy.paced(c.row, free, c.risk, v)
 	if free {
 		c.exhausted = v.Projected != nil && *v.Projected >= *p.policy.ExcludeAt
+		// The free tier's own reading decides a limit; the shared paid
+		// window never does.
+		if freeLimitHeld(v.Free, p.at) {
+			c.reason, c.code = "free_limit", outcomeQuotaExhausted
+		}
 	} else {
 		c.reason = p.policy.exhaustReason(v, c.risk)
 		if c.reason == "" && v.Blocking != nil && *v.Blocking >= 100 {
@@ -294,6 +303,14 @@ func (p *selPlan) classify(c *selCand, v PoolView) {
 	if c.reason != "" {
 		c.outcome = "dropped:" + c.reason
 	}
+}
+
+// freeLimitHeld reports a free-tier reading at its limit: the shared bucket is
+// exhausted and its reset is still ahead. A reset that has passed reads as
+// available (shared.NormalizeFree), so the free rung returns on its own.
+func freeLimitHeld(f *shared.FreeBucket, now time.Time) bool {
+	n, ok := shared.NormalizeFree(f, now)
+	return ok && n != nil && n.State == shared.FreeExhausted
 }
 
 func gateOutcome(err error) string {

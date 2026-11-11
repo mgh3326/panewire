@@ -61,32 +61,32 @@ func hostPasses(sel *selPlan) []string {
 	return out
 }
 
-// Plain credit is a fleet-wide last band: a ranked subscription on a later
-// host is chosen before credit on the first host.
-func TestHostFirstCreditIsLastBandAcrossHosts(t *testing.T) {
+// Credit ranks in the free band, so credit on the first host beats a ranked
+// subscription on a later host: host-first applies inside the band.
+func TestHostFirstCreditRanksWithFreeAcrossHosts(t *testing.T) {
 	a, s, _, _ := creditBandFixture(t, []CatalogRow{creditRow, codexRow}, map[string]string{"mac-b": testCreditA, "cloud-small": testCodexA}, noBalance)
 	sel, err := a.selectProfile(context.Background(), s)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if sel.chosen.seatName != "codex-sol" || sel.chosen.host != "cloud-small" {
-		t.Fatalf("ranked subscription on rank 2 must beat credit on rank 1: %s on %s", sel.chosen.row.Profile, sel.chosen.host)
+	if sel.chosen.seatName != "omp-opus" || sel.chosen.host != "mac-b" {
+		t.Fatalf("credit on rank 1 must beat a ranked subscription on rank 2: %s on %s", sel.chosen.row.Profile, sel.chosen.host)
 	}
-	if got := outcomeOf(t, sel, "omp-opus"); got != "below_choice" {
-		t.Fatalf("credit outcome = %q, want below_choice", got)
+	if got := outcomeOf(t, sel, "codex-sol"); got != "below_choice" {
+		t.Fatalf("ranked outcome = %q, want below_choice", got)
 	}
 	for _, got := range hostPasses(sel) {
 		if got[len(got)-1] != '1' {
 			t.Fatalf("a chosen pass 1 leaves pass 2 untried: %v", hostPasses(sel))
 		}
 	}
-	if got := hostRow(t, sel, "mac-b")["outcome"]; got != "no_candidate_present" {
-		t.Fatalf("rank 1 holds only credit, which is not a pass 1 candidate: outcome %v", got)
+	if got := hostRow(t, sel, "mac-b")["outcome"]; got != "chosen" {
+		t.Fatalf("rank 1 holds the chosen credit rung: outcome %v", got)
 	}
 }
 
 // With nothing else admissible, credit is chosen on the first host that
-// admits it, in a second pass over the same ranked hosts.
+// admits it, in pass 1.
 func TestHostFirstCreditOnlyAdmissibleChosenOnFirstHost(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
@@ -105,31 +105,31 @@ func TestHostFirstCreditOnlyAdmissibleChosenOnFirstHost(t *testing.T) {
 			if sel.chosen.seatName != "omp-opus" || sel.chosen.host != tc.wantHost {
 				t.Fatalf("credit chosen on %s, want %s", sel.chosen.host, tc.wantHost)
 			}
-			if !slices.Contains(hostPasses(sel), tc.wantHost+"/2") {
-				t.Fatalf("credit is admitted in pass 2: %v", hostPasses(sel))
+			if !slices.Contains(hostPasses(sel), tc.wantHost+"/1") {
+				t.Fatalf("credit is admitted in pass 1: %v", hostPasses(sel))
 			}
 			for _, h := range sel.record()["hosts"].([]any) {
-				if row := h.(map[string]any); row["host"] == tc.wantHost && row["pass"] == 2 && row["outcome"] != "chosen" {
-					t.Fatalf("pass 2 row must be the chosen one: %v", row)
+				if row := h.(map[string]any); row["host"] == tc.wantHost && row["pass"] == 1 && row["outcome"] != "chosen" {
+					t.Fatalf("pass 1 row must be the chosen one: %v", row)
 				}
 			}
 		})
 	}
 }
 
-// Expiring credit is waste-risk: it keeps its place ahead of ranked
-// subscriptions, so it is a pass 1 candidate and wins on rank 1.
+// Expiring credit ranks in the free band (never the waste band), so it is a
+// pass 1 candidate and wins on rank 1.
 func TestHostFirstExpiringCreditStaysInPassOne(t *testing.T) {
 	a, s, _, _ := creditBandFixture(t, []CatalogRow{creditRow, codexRow}, map[string]string{"mac-b": testCreditA, "cloud-small": testCodexA}, balance(80, 100*time.Hour))
 	sel, err := a.selectProfile(context.Background(), s)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if sel.chosen.seatName != "omp-opus" || sel.chosen.host != "mac-b" || !sel.chosen.risk {
-		t.Fatalf("waste-risk credit must be chosen on rank 1: %s on %s risk=%v", sel.chosen.row.Profile, sel.chosen.host, sel.chosen.risk)
+	if sel.chosen.seatName != "omp-opus" || sel.chosen.host != "mac-b" || sel.chosen.risk || sel.chosen.tierName != "credit" {
+		t.Fatalf("expiring credit must be chosen on rank 1 in the credit band: %s on %s tier=%s risk=%v", sel.chosen.row.Profile, sel.chosen.host, sel.chosen.tierName, sel.chosen.risk)
 	}
 	if got := hostPasses(sel); got[0] != "mac-b/1" {
-		t.Fatalf("waste-risk credit is judged in pass 1: %v", got)
+		t.Fatalf("credit is judged in pass 1: %v", got)
 	}
 }
 
@@ -154,7 +154,7 @@ func TestHostFirstPacedPoolIsInLastBand(t *testing.T) {
 		return a.selectProfile(context.Background(), s)
 	}
 	sel, err := setup(false)
-	if err != nil || sel.chosen.seatName != "omp-opus" || !sel.chosen.risk {
+	if err != nil || sel.chosen.seatName != "omp-opus" || sel.chosen.tierName != "credit" {
 		t.Fatalf("credit on the host is chosen before its paced pool: %v %+v", err, sel)
 	}
 	if got := outcomeOf(t, sel, "sonnet"); got != "below_choice" {
@@ -170,8 +170,8 @@ func TestHostFirstPacedPoolIsInLastBand(t *testing.T) {
 }
 
 // T2997 stands: a pool is paced behind credit only when that credit is on its
-// own host. Credit on another host is only the pass 2 last band, so it never
-// pre-empts a paced pool: the paced pool on rank 1 is chosen in pass 1.
+// own host. Credit on another host never demotes a paced pool, so the paced
+// pool on rank 1 is chosen in pass 1.
 func TestHostFirstPacedPoolOnAWithCreditOnlyOnBChosenInPassOne(t *testing.T) {
 	paced := PoolView{Status: "ok", Class: "spend", Blocking: ptrF(60), LongProjected: ptrF(120), Projected: ptrF(120), ShortUsed: ptrF(40)}
 	for _, tc := range []struct {
@@ -204,38 +204,47 @@ func TestHostFirstPacedPoolOnAWithCreditOnlyOnBChosenInPassOne(t *testing.T) {
 }
 
 // A credit-only host whose gate says quota exhausted keeps that refusal in the
-// placement record, though pass 1 listed the host as having no candidate.
-func TestPlacementRecordKeepsCreditBandRefusal(t *testing.T) {
+// placement record.
+func TestPlacementRecordKeepsCreditRefusal(t *testing.T) {
 	a, s, q, _ := creditBandFixture(t, []CatalogRow{creditRow}, map[string]string{"mac-b": testCreditA}, noBalance)
 	q.GateDo = func(QuotaRequest) (string, error) { return "", fail(3, "quota exhausted") }
 	sel, err := a.selectProfile(context.Background(), s)
 	if err == nil {
 		t.Fatal("the only credit account is exhausted: selection must refuse")
 	}
-	rec := sel.record()
-	if got := hostRow(t, sel, "mac-b")["outcome"]; got != "no_candidate_present" && got != "all_refused" {
-		t.Fatalf("unexpected pass 1 row outcome %v", got)
-	}
-	rows := selectionCandidates(rec, "", false)
 	var seen int
-	for _, r := range rows {
-		if r.Host != "mac-b" {
+	for _, h := range selectionTerms(sel.record()) {
+		if h.Host != "mac-b" {
 			continue
 		}
 		seen++
-		if r.Reason != "quota_exhausted" {
-			t.Fatalf("mac-b record reason = %q, want quota_exhausted (the credit band's refusal)", r.Reason)
+		if h.Outcome != "quota_exhausted" && h.Outcome != "quota_unknown" {
+			t.Fatalf("mac-b outcome = %q, want the credit rung's refusal", h.Outcome)
+		}
+		if len(h.Tried) != 1 || (h.Tried[0].Outcome != "quota_exhausted" && h.Tried[0].Outcome != "quota_unknown") {
+			t.Fatalf("mac-b tried rung = %+v, want the credit refusal", h.Tried)
 		}
 	}
 	if seen != 1 {
-		t.Fatalf("mac-b must appear once in the record, got %d: %+v", seen, rows)
+		t.Fatalf("mac-b must appear once in the record, got %d", seen)
 	}
 }
 
 // A two-pass selection lists each host once in the job.placement event, so a
-// repeated host does not use up MaxCandidates.
+// repeated host does not use up MaxCandidates. Pass 1 refuses the credit rung;
+// pass 2 admits the paced subscription pool on the same host.
 func TestSelectionTermsListEachHostOnce(t *testing.T) {
-	a, s, _, _ := creditBandFixture(t, []CatalogRow{creditRow}, map[string]string{"mac-b": testCreditA, "cloud-small": testCreditA}, noBalance)
+	paced := PoolView{Status: "ok", Class: "spend", Blocking: ptrF(60), LongProjected: ptrF(120), Projected: ptrF(120), ShortUsed: ptrF(40)}
+	a, s, q, src := creditBandFixture(t, []CatalogRow{creditRow, sonnetRow}, map[string]string{"mac-b": testCreditA}, balance(80, 100*time.Hour))
+	src.presence = append(src.presence, PresenceRecord{HostID: "mac-b", AccountKey: testClaudeA, LastSeen: a.Now()})
+	src.accounts[testClaudeA] = SharedAccount{Key: testClaudeA, Observed: true, Fresh: true, MeasuredAt: a.Now(), Quota: &paced}
+	gate := q.GateDo
+	q.GateDo = func(r QuotaRequest) (string, error) {
+		if r.AccountKey == testCreditA {
+			return "", fail(3, "quota exhausted")
+		}
+		return gate(r)
+	}
 	sel, err := a.selectProfile(context.Background(), s)
 	if err != nil {
 		t.Fatal(err)
@@ -267,18 +276,17 @@ func TestPlacementRecordDoesNotMergeAdmittedCreditBandRow(t *testing.T) {
 	if err != nil || sel.chosen.host != "mac-b" {
 		t.Fatalf("credit chosen on mac-b: %v %+v", err, sel)
 	}
-	for _, r := range selectionCandidates(sel.record(), "mac-b", false) {
+	for _, r := range selectionCandidates(sel.record(), "mac-b") {
 		if r.Host == "mac-b" && (r.Reason == "chosen" || r.Reason == "admitted") {
 			t.Fatalf("an admitted pass 2 row must not become a skip reason: %+v", r)
 		}
 	}
 }
 
-// A pass 2 row that was never tried (an earlier host admitted the credit)
-// does not erase the refusal pass 1 recorded for a later host.
-func TestSelectionTermsKeepPassOneRefusalOverNotTriedPassTwo(t *testing.T) {
-	a, s, q, src := creditBandFixture(t, []CatalogRow{creditRow, codexRow}, map[string]string{"mac-b": testCreditA, "cloud-small": testCodexA}, noBalance)
-	src.presence = append(src.presence, PresenceRecord{HostID: "cloud-small", AccountKey: testCreditA, LastSeen: a.Now()})
+// A host the walk leaves not_tried (an earlier host admitted) does not erase
+// the refusal recorded for the host that was tried first.
+func TestSelectionTermsKeepHostRefusal(t *testing.T) {
+	a, s, q, _ := creditBandFixture(t, []CatalogRow{creditRow, codexRow}, map[string]string{"mac-b": testCodexA, "cloud-small": testCreditA}, noBalance)
 	gate := q.GateDo
 	q.GateDo = func(r QuotaRequest) (string, error) {
 		if r.AccountKey == testCodexA {
@@ -287,12 +295,12 @@ func TestSelectionTermsKeepPassOneRefusalOverNotTriedPassTwo(t *testing.T) {
 		return gate(r)
 	}
 	sel, err := a.selectProfile(context.Background(), s)
-	if err != nil || sel.chosen.seatName != "omp-opus" || sel.chosen.host != "mac-b" {
-		t.Fatalf("credit band admits on mac-b: %v %+v", err, sel)
+	if err != nil || sel.chosen.seatName != "omp-opus" || sel.chosen.host != "cloud-small" {
+		t.Fatalf("credit admits on cloud-small: %v %+v", err, sel)
 	}
 	for _, h := range selectionTerms(sel.record()) {
-		if h.Host == "cloud-small" && (h.Outcome != "quota_exhausted" || len(h.Tried) == 0) {
-			t.Fatalf("cloud-small keeps pass 1's refusal, got %+v", h)
+		if h.Host == "mac-b" && (h.Outcome != "quota_exhausted" || len(h.Tried) == 0) {
+			t.Fatalf("mac-b keeps its refusal, got %+v", h)
 		}
 	}
 }

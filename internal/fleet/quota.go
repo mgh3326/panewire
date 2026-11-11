@@ -96,6 +96,10 @@ type PoolView struct {
 	// Credit is a prepaid credit pool's hand-entered balance, nil when the
 	// manual store records none.
 	Credit *CreditBalance
+	// Free is a pool's free-tier availability (devin's SWE-2 bucket), nil for
+	// a pool without one. Selection drops a free rung as free_limit while it
+	// reads exhausted with a reset still ahead.
+	Free *shared.FreeBucket
 	// Groups is the view of each metering group of a reading that has only
 	// group-scoped windows (agy), by group name. Each group view ranks on that
 	// group's longest window even when it is sub-daily, since the group has no

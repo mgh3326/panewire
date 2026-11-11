@@ -145,7 +145,7 @@ func TestSelectRefreshedClassificationKeepsItsOutcome(t *testing.T) {
 	}
 }
 
-func TestSelectAccountTiersPreserveImplementerOrder(t *testing.T) {
+func TestSelectAccountTiersFollowPolicyOrder(t *testing.T) {
 	rows := []CatalogRow{
 		{Profile: "devin-swe2", Effort: "high", Grade: "S", Pool: "devin", Gate: "default", ModelID: "swe-2"},
 		{Profile: "sonnet", Effort: "high", Grade: "S", Pool: "claude", Gate: "default", ModelID: "sonnet-m"},
@@ -169,7 +169,7 @@ func TestSelectAccountTiersPreserveImplementerOrder(t *testing.T) {
 	for _, c := range sel.ranked {
 		got = append(got, c.row.Profile+":"+c.tierName)
 	}
-	if fmt.Sprint(got) != "[sonnet:waste devin-swe2:free codex-sol:ranked opus:credit]" {
+	if fmt.Sprint(got) != "[sonnet:waste devin-swe2:free opus:credit codex-sol:ranked]" {
 		t.Fatalf("account tier order changed: %v", got)
 	}
 }

@@ -37,7 +37,7 @@ Each `(host, kind, key)` triple names one latest value.
 
 | kind | key | publisher | body |
 |---|---|---|---|
-| `quota` | account key (`<pool>:<16-hex>`) | the node that runs the measurement | `quota`: `account_key`, `pool`, `source` (측정 소스), `buckets[]` (`window`, `used_pct`, `resets_at`, `scope`, `model`) |
+| `quota` | account key (`<pool>:<16-hex>`) | the node that runs the measurement | `quota`: `account_key`, `pool`, `source` (측정 소스), `buckets[]` (`window`, `used_pct`, `resets_at`, `scope`, `model`), `free_bucket` (`state`, `resets_at`) for a pool with a free tier (devin's SWE-2 bucket; a free-only reading may carry no bucket) |
 | `load` | empty | the hub, computed from the node's own heartbeats with `/etc/panewire/placement.json` | `load`: `load_ratio`, `score`, `accepting`, `usable`, `connected`, `slot_full`, `active_jobs`, `reason` |
 | `publisher` | empty | the hub, from the node's connection | `publisher`: `connected`, `last_seen` |
 | `readiness` | empty | the hub, from the node's heartbeat and its own launch counts | `readiness`: `readiness_unknown`, `readiness` (the node's report), `backoff_until` (harness kind to time). See [placement.md](placement.md#readiness) |

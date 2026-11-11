@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -48,42 +49,43 @@ func pctOnly(left float64, in time.Duration) func(time.Time) *CreditBalance {
 	}
 }
 
-func TestCreditUrgencyCompetesWithWaste(t *testing.T) {
-	for _, tc := range []struct {
-		name  string
-		hours float64
-		want  string
-	}{
-		{"higher subscription urgency", 100, "sonnet"},
-		{"lower subscription urgency", 300, "omp-opus"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			// 77/220 = 0.35; subscription unused is 80%.
-			a, s := creditFixture(t, pctOnly(77, 220*time.Hour), riskPool(20, tc.hours), `, "credit_final_days": 30`, nil)
-			sel, err := a.selectProfile(context.Background(), s)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if sel.chosen.seatName != tc.want {
-				t.Fatalf("chosen %s, want %s", sel.chosen.seatName, tc.want)
-			}
-			row := candOutcome(sel.record(), "omp-opus", "high")
-			if row["waste_urgency"] != 0.35 || row["waste_risk"] != true {
-				t.Fatalf("credit urgency: %v", row)
-			}
-		})
+// A waste-risk subscription pool goes first whatever the credit's expiry
+// urgency: credit ranks in the free band, after waste.
+func TestCreditUrgencyRanksInsideFreeBand(t *testing.T) {
+	for _, hours := range []float64{100, 300} {
+		// 77/220 = 0.35; the subscription's unused share is 80%.
+		a, s := creditFixture(t, pctOnly(77, 220*time.Hour), riskPool(20, hours), `, "credit_final_days": 30`, nil)
+		sel, err := a.selectProfile(context.Background(), s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if sel.chosen.seatName != "sonnet" || sel.chosen.tierName != "waste" {
+			t.Fatalf("hours=%g: chosen %s in %s, want the waste pool", hours, sel.chosen.seatName, sel.chosen.tierName)
+		}
+		row := candOutcome(sel.record(), "omp-opus", "high")
+		if row["waste_urgency"] != 0.35 || row["waste_risk"] != false || row["tier"] != "credit" {
+			t.Fatalf("credit urgency in the free band: %v", row)
+		}
 	}
 }
 
-func TestCreditWithoutExpiryRanksLast(t *testing.T) {
+// A credit entry without an expiry still ranks in the free band, ahead of a
+// ranked subscription pool. It sits behind the free rung on the in-tier
+// projection tie-break (devin's blocking share is lower here).
+func TestCreditWithoutExpiryRanksWithFree(t *testing.T) {
 	noExpiry := func(time.Time) *CreditBalance { return &CreditBalance{LeftPct: 77} }
-	a, s := creditFixture(t, noExpiry, riskPool(20, 100), "", nil)
+	ranked := PoolView{Status: "ok", Class: "spend", Blocking: ptrF(10)}
+	a, s := creditFixture(t, noExpiry, ranked, "", nil)
 	sel, err := a.selectProfile(context.Background(), s)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := sel.ranked[len(sel.ranked)-1].seatName; got != "omp-opus" {
-		t.Fatalf("last = %s", got)
+	if got := candOutcome(sel.record(), "omp-opus", "high")["tier"]; got != "credit" {
+		t.Fatalf("credit without expiry must rank in the free band: %v", got)
+	}
+	seats := rankedSeats(sel)
+	if credit, sub := slices.Index(seats, "omp-opus"), slices.Index(seats, "sonnet"); credit < 0 || sub < 0 || credit > sub {
+		t.Fatalf("ranked order %v: credit must precede the ranked pool", seats)
 	}
 }
 

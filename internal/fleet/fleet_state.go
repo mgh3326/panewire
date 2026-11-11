@@ -7,6 +7,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/mgh3326/panewire/internal/quota/shared"
 )
 
 // Fleet state (panewire docs/fleet-state.md): nodes publish quota and load to
@@ -69,8 +71,9 @@ type FleetStateMessage struct {
 	MeasuredAt  time.Time  `json:"measured_at"`
 	ConfirmedAt *time.Time `json:"confirmed_at,omitempty"`
 	Quota       *struct {
-		AccountKey string          `json:"account_key"`
-		Buckets    []accountBucket `json:"buckets"`
+		AccountKey string             `json:"account_key"`
+		Buckets    []accountBucket    `json:"buckets"`
+		FreeBucket *shared.FreeBucket `json:"free_bucket,omitempty"`
 	} `json:"quota,omitempty"`
 	Load *struct {
 		LoadRatio float64 `json:"load_ratio"`
@@ -211,7 +214,7 @@ func (a *App) hubSharedAccount(ctx context.Context, key string) (SharedAccount, 
 	if best == nil {
 		return SharedAccount{}, reason
 	}
-	quota := accountPoolView(best.Quota.Buckets, now)
+	quota := withFree(accountPoolView(best.Quota.Buckets, now), best.Quota.FreeBucket, now)
 	if quota == nil {
 		return SharedAccount{}, stateStale
 	}

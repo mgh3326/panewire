@@ -28,6 +28,12 @@ var defaultPoolOrder []byte
 // above "exclude_at_projected_pct" is never selected. Both default to 100
 // when absent; an explicit 0 waste threshold disables projected waste.
 //
+// Version 3's "order" names bands, not tiers: "waste", "free", "ranked". A
+// credit pool is a candidate in the free band, ordered there by its expiry
+// (PoolPolicy.isCredit), so the operator's omp credit pools sit beside the
+// SWE-2 free set: after waste, before ranked. Its selection record still says
+// tier "credit", which names the pool class inside that band.
+//
 // "waste_risk" names when a paid pool is about to lose quota at its longest
 // window's reset: the projected unused share at that reset is at least
 // min_unused_pct (default 20), however far the reset is. An optional
@@ -64,7 +70,13 @@ type FreeSet struct {
 	Models []string `json:"models"`
 }
 
-var poolTiers = []string{"waste", "free", "ranked", "credit"}
+// poolBands are the policy order's bands (version 3). A credit pool is not a
+// band of its own: it ranks inside the free band.
+var poolBands = []string{"waste", "free", "ranked"}
+
+// creditTier is a credit pool's selection-record tier name. It ranks in the
+// free band (PoolPolicy.tierOf).
+const creditTier = "credit"
 
 func LoadPoolPolicy(path string) (PoolPolicy, error) {
 	b := defaultPoolOrder
@@ -90,24 +102,21 @@ func LoadPoolPolicy(path string) (PoolPolicy, error) {
 // validate checks a decoded pool policy and fills absent thresholds with
 // their defaults. It is rerun after simulate's --policy-set overrides.
 func (p *PoolPolicy) validate() error {
-	if p.Version != 2 {
-		return fail(exitConfig, "pool order policy version %d is unsupported; migrate to version 2 with order waste,free,ranked,credit and credit_pools anthropic-api,openai-api (docs/config.md)", p.Version)
+	if p.Version != 3 {
+		return fail(exitConfig, "pool order policy version %d is unsupported; migrate to version 3 with order waste,free,ranked (a credit pool ranks in the free band) and credit_pools anthropic-api,openai-api (docs/config.md)", p.Version)
 	}
-	if len(p.Order) == 0 {
-		return fail(exitConfig, "invalid pool order policy")
-	}
-	for _, tier := range poolTiers {
-		if !slices.Contains(p.Order, tier) {
-			return fail(exitConfig, "pool order policy missing tier %q", tier)
+	for _, band := range p.Order {
+		if !slices.Contains(poolBands, band) {
+			return fail(exitConfig, "unknown pool order band %q (a credit pool ranks in the free band)", band)
 		}
 	}
-	for _, tier := range p.Order {
-		if !slices.Contains(poolTiers, tier) {
-			return fail(exitConfig, "unknown pool order tier %q", tier)
-		}
+	if len(p.Order) != len(poolBands) {
+		return fail(exitConfig, "pool order policy v3 order must name exactly waste,free,ranked")
 	}
-	if slices.Index(p.Order, "credit") != len(p.Order)-1 {
-		return fail(exitConfig, "pool order policy v2 requires credit last, after ranked")
+	for _, band := range poolBands {
+		if !slices.Contains(p.Order, band) {
+			return fail(exitConfig, "pool order policy missing band %q", band)
+		}
 	}
 	for _, fs := range p.Free {
 		if !validID(fs.Pool) {
@@ -402,8 +411,9 @@ func (p PoolPolicy) isCredit(pool string) bool {
 	return slices.Contains(p.CreditPools, pool)
 }
 
-// tierOf assigns a tier from this account's view and the pool policy.
-// Cross-candidate ordering belongs to orderSelCands, not tier assignment.
+// tierOf assigns a tier from this account's view and the pool policy. A credit
+// pool ranks in the free band and keeps its own record name. Cross-candidate
+// ordering belongs to orderSelCands, not tier assignment.
 func (p PoolPolicy) tierOf(row CatalogRow, order []string, v PoolView) (string, int) {
 	if p.isFree(row) {
 		return "free", slices.Index(order, "free")
@@ -412,7 +422,7 @@ func (p PoolPolicy) tierOf(row CatalogRow, order []string, v PoolView) (string, 
 		return "", -1
 	}
 	if p.isCredit(row.Pool) || v.Class == "credit" {
-		return "credit", slices.Index(order, "credit")
+		return creditTier, slices.Index(order, "free")
 	}
 	if v.Status != "ok" || v.Stale || v.Class != "spend" {
 		return "", -1
@@ -463,8 +473,8 @@ func (p PoolPolicy) paced(row CatalogRow, free, risk bool, v PoolView) bool {
 // policy minimum and, when the policy sets a horizon above 0, that reset
 // falls within it. The unused
 // share is (100 − projected) of that window, i.e. waste urgency × hours to
-// reset. Free seats and credit pools are never at waste risk here (an
-// expiring credit balance is judged in selPlan.classify), and a pool
+// reset. Free seats and credit pools are never at waste risk: a credit pool is
+// ordered by its expiry inside the free band (selPlan.classify), and a pool
 // without a readable ok spend status, or whose longest window cannot be
 // paced, is not either. The returned share is set whenever it is readable.
 func (p PoolPolicy) wasteRisk(row CatalogRow, free bool, v PoolView, ok bool) (bool, *float64) {
@@ -966,16 +976,18 @@ func (p *selPlan) markRoleEffort() {
 	}
 }
 
-// orderSelCands ranks tiered candidates: waste-risk pools first, then policy
-// tier, then the lowest grade that fits, then waste urgency — the unused
-// projected share per hour until the pool's longest window's reset, highest
-// first. A waste-risk credit pool with a dollar balance ranks by the dollars
-// at risk per hour until expiry and ahead of percent-ranked waste risk; a
-// credit pool without dollars keeps the percentage rule and ranks after any
-// credit that has dollars. A candidate whose pool reset can be paced always
-// ranks ahead of one whose cannot; candidates without urgency keep the lower
-// projected use at reset (the used percentage when it cannot be paced yet),
-// then smaller effort, catalog score, profile.
+// orderSelCands ranks tiered candidates: waste-risk subscription pools first,
+// by waste urgency, then policy band (waste, then free and credit together,
+// then ranked), then the lowest grade that fits, then the remaining
+// tie-breaks. Inside the free band a credit pool with a dollar balance
+// outranks one without and is ordered by the dollars at risk per hour until
+// expiry; a percent-only entry keeps the percentage rule. A candidate whose
+// pool reset can be paced always ranks ahead of one whose cannot; candidates
+// without urgency keep the lower projected use at reset (the used percentage
+// when it cannot be paced yet), then smaller effort and catalog score. On a
+// full tie a credit rung goes before a free rung: unspent credit is lost at
+// expiry and the free model is not. Profile is the final deterministic
+// tie-break.
 func orderSelCands(pending []*selCand) {
 	// Credit pacing: a pool on pace to use up its longest window ranks behind
 	// credit, but only when a credit pool with a recorded balance is a
@@ -1010,8 +1022,22 @@ func sortSelCands(pending []*selCand) {
 			return 1
 		}
 		if x.risk {
-			// A dollar credit ranks ahead of percent-ranked waste risk, and
-			// within each group the higher urgency wins.
+			// Waste-risk pools rank among themselves by the higher urgency.
+			if c := cmp.Compare(*y.urgency, *x.urgency); c != 0 {
+				return c
+			}
+		} else {
+			if x.tier != y.tier {
+				return x.tier - y.tier
+			}
+		}
+		// Grade fit: the lowest grade that satisfies the task.
+		if gx, gy := gradeOrder[x.row.Grade], gradeOrder[y.row.Grade]; !x.ignoreGrade && gx != gy {
+			return gx - gy
+		}
+		if !x.risk && x.creditPool && y.creditPool {
+			// Among credit pools a dollar balance outranks a percentage-only
+			// entry and is ordered by dollars at risk per hour.
 			if (x.usdUrgency != nil) != (y.usdUrgency != nil) {
 				if x.usdUrgency != nil {
 					return -1
@@ -1022,32 +1048,7 @@ func sortSelCands(pending []*selCand) {
 				if c := cmp.Compare(*y.usdUrgency, *x.usdUrgency); c != 0 {
 					return c
 				}
-			} else if c := cmp.Compare(*y.urgency, *x.urgency); c != 0 {
-				return c
 			}
-		} else {
-			if x.tier != y.tier {
-				return x.tier - y.tier
-			}
-			// Among credit pools a dollar balance outranks a percentage-only
-			// entry and is ordered by dollars at risk per hour.
-			if x.creditPool && y.creditPool {
-				if (x.usdUrgency != nil) != (y.usdUrgency != nil) {
-					if x.usdUrgency != nil {
-						return -1
-					}
-					return 1
-				}
-				if x.usdUrgency != nil {
-					if c := cmp.Compare(*y.usdUrgency, *x.usdUrgency); c != 0 {
-						return c
-					}
-				}
-			}
-		}
-		// Grade fit: the lowest grade that satisfies the task.
-		if gx, gy := gradeOrder[x.row.Grade], gradeOrder[y.row.Grade]; !x.ignoreGrade && gx != gy {
-			return gx - gy
 		}
 		// Paceable resets rank ahead of unpaceable ones: mixing the urgency
 		// and projected orders in one comparison is not a strict weak
@@ -1076,6 +1077,14 @@ func sortSelCands(pending []*selCand) {
 		}
 		if c := cmp.Compare(rankScore(x.row.Score), rankScore(y.row.Score)); c != 0 {
 			return c
+		}
+		// Full tie inside the free band: unspent credit is lost at expiry and
+		// the free model is not, so the credit rung goes first.
+		if x.creditPool != y.creditPool {
+			if x.creditPool {
+				return -1
+			}
+			return 1
 		}
 		if c := cmp.Compare(x.row.Profile, y.row.Profile); c != 0 {
 			return c
@@ -1169,7 +1178,6 @@ func (p *selPlan) record() map[string]any {
 			row["unused_at_reset_pct"] = *c.unused
 		}
 		if c.credit != nil {
-			row["waste_reason"] = "credit_expiring"
 			row["credit"] = c.credit.record()
 		}
 		if c.tier >= 0 {
@@ -1205,7 +1213,7 @@ func (p *selPlan) record() map[string]any {
 		"outcome_code":   p.outcome,
 		"mode":           "auto",
 		"decision":       fmt.Sprintf("urgency=%s source=%s tiers=%s", p.req.urgency, p.req.urgencySource, strings.Join(p.order, ">")),
-		"rule":           fmt.Sprintf("hosts first; within each host, waste-risk pools rank by waste urgency (unused share per hour until reset) and expiring credit by dollars at risk per hour until expiry, then tier, lowest grade >= %s, waste urgency and smaller effort; waste < %g%%, excluded >= %g%% projected", p.req.grade, *p.policy.WasteBelow, *p.policy.ExcludeAt),
+		"rule":           fmt.Sprintf("hosts first; within each host, waste-risk subscription pools rank by waste urgency (unused share per hour until reset), then band (waste, then free and credit together), lowest grade >= %s, credit expiry (dollars at risk per hour, else remaining percent per hour), waste urgency and smaller effort; a credit rung goes before a free rung on a full tie; waste < %g%%, excluded >= %g%% projected", p.req.grade, *p.policy.WasteBelow, *p.policy.ExcludeAt),
 		"waste_risk":     map[string]any{"horizon_hours": *p.policy.WasteRisk.HorizonHours, "min_unused_pct": *p.policy.WasteRisk.MinUnusedPct},
 		"policy_version": p.policy.Version,
 		"policy_source":  p.policy.SourceDoc,
@@ -1233,7 +1241,7 @@ func (p *selPlan) record() map[string]any {
 		}
 		if c.credit != nil {
 			why += " " + c.credit.note()
-			chosen["waste_reason"], chosen["credit"] = "credit_expiring", c.credit.record()
+			chosen["credit"] = c.credit.record()
 		}
 		if c.projected != nil {
 			chosen["projected_pct"] = *c.projected
@@ -1263,7 +1271,7 @@ func (p *selPlan) record() map[string]any {
 		}
 		rec["hosts"] = hosts
 		rec["host_order"] = order
-		rec["host_rule"] = "hosts that fit (caps, roles, grades, hub availability) ranked by load bucket, then hub score or load; on each host its present accounts in pool order; first admitted pair wins; credit, and pools ranked behind credit, are a last band tried on the hosts again (pass 2) only when no other account was admitted on any host (pass 1); expiring credit with dollars at risk is waste-risk and stays in pass 1"
+		rec["host_rule"] = "hosts that fit (caps, roles, grades, hub availability) ranked by load bucket, then hub score or load; on each host its present accounts in pool order (waste, then free and credit together, then ranked); first admitted pair wins; subscription pools paced behind credit are a last band tried on the hosts again (pass 2) only when no other account was admitted on any host (pass 1)"
 	}
 	if p.req.route != nil {
 		rt := p.req.route.record(p.routeRefusal)

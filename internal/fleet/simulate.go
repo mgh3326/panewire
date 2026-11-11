@@ -533,8 +533,9 @@ func (a *App) simulate(ctx context.Context, args []string) error {
 }
 
 // simTierOf is PoolPolicy.tierOf for simulate: the free flag on the input
-// candidate (or the policy free set) decides the free tier. Credit has no
-// balance reader; other pools without an entry are quota_unknown.
+// candidate (or the policy free set) decides the free tier, and a credit pool
+// ranks in that band under its own tier name. Other pools without an entry are
+// quota_unknown.
 func simTierOf(policy PoolPolicy, row CatalogRow, free bool, pools map[string]PoolView) (string, int) {
 	if free {
 		return "free", slices.Index(policy.Order, "free")

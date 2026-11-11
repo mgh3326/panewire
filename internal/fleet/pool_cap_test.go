@@ -11,13 +11,13 @@ import (
 	"testing"
 )
 
-// poolCapPolicy keeps openai-api out of the credit tier so the test selection
-// ranks it first on its own merits; the credit two-pass case has its own
-// policy below. The cap itself is tier-independent.
-const poolCapPolicy = `{"version": 2, "source_doc": "policy/quota-stop", "order": ["waste", "free", "ranked", "credit"], "free": [], "credit_pools": []}`
+// poolCapPolicy keeps openai-api out of the credit pools so the test selection
+// ranks it first on its own merits; the credit case has its own policy below.
+// The cap itself is tier-independent.
+const poolCapPolicy = `{"version": 3, "source_doc": "policy/quota-stop", "order": ["waste", "free", "ranked"], "free": [], "credit_pools": []}`
 
 // poolCapCreditPolicy is the shipped ordering for the two credit pools.
-const poolCapCreditPolicy = `{"version": 2, "source_doc": "policy/quota-stop", "order": ["waste", "free", "ranked", "credit"], "free": [], "credit_pools": ["anthropic-api", "openai-api"]}`
+const poolCapCreditPolicy = `{"version": 3, "source_doc": "policy/quota-stop", "order": ["waste", "free", "ranked"], "free": [], "credit_pools": ["anthropic-api", "openai-api"]}`
 
 // poolCapRows is an openai-api rung that ranks first and a ranked claude rung
 // that takes the spawn when openai-api is full.
@@ -209,10 +209,10 @@ func TestPoolCapInvalidConfigRefusedAtLoad(t *testing.T) {
 	}
 }
 
-// (g) #290's fleet-wide credit last band runs two passes. A capped credit pool
-// on the first host is dropped there, in pass 2, and the pass goes on to the
+// (g) Credit ranks in the free band and walks in pass 1. A capped credit pool
+// on the first host is dropped before admission and the walk goes on to the
 // next host's credit candidate: the capped pool is never counted as admitted.
-func TestPoolCapDropsCappedCreditPoolInSecondPass(t *testing.T) {
+func TestPoolCapDropsCappedCreditPool(t *testing.T) {
 	const openaiKey = "openai-api:00000000000000e1"
 	rows := []CatalogRow{
 		ompRow("omp-sol", "openai/gpt-6.1-sol", "openai-api"),
@@ -243,8 +243,8 @@ func TestPoolCapDropsCappedCreditPoolInSecondPass(t *testing.T) {
 	if got := outcomeOf(t, sel, "omp-sol"); got != "dropped:pool_at_cap" {
 		t.Fatalf("openai-api outcome = %q, want dropped:pool_at_cap", got)
 	}
-	if !slices.Contains(hostPasses(sel), "cloud-small/2") {
-		t.Fatalf("the credit band is admitted in pass 2: %v", hostPasses(sel))
+	if !slices.Contains(hostPasses(sel), "cloud-small/1") {
+		t.Fatalf("credit is admitted in pass 1: %v", hostPasses(sel))
 	}
 	for _, c := range sel.cands {
 		if c.row.Pool == "openai-api" && (c.outcome == "chosen" || c.outcome == "below_choice") {

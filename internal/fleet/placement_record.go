@@ -193,7 +193,7 @@ func (a *App) finishPlacement(ctx context.Context, s Spawn, err error) {
 	// Selection can refuse before a placePlan exists. Keep its host trace
 	// too, projecting only the host, scores, and structured skip reasons.
 	if d.plan == nil {
-		r.Candidates = append(r.Candidates, selectionCandidates(s.Sel, d.execution.Host, d.placed || d.started)...)
+		r.Candidates = append(r.Candidates, selectionCandidates(s.Sel, d.execution.Host)...)
 	}
 	if d.plan != nil {
 		r.Pool, r.Repo = d.plan.pool, d.plan.repo
@@ -272,7 +272,7 @@ func (a *App) finishPlacement(ctx context.Context, s Spawn, err error) {
 
 // selectionCandidates projects a selection's host trace into one candidate row
 // per host. launched says the host named chosen took the job.
-func selectionCandidates(sel map[string]any, chosen string, launched bool) []placementCandidateRecord {
+func selectionCandidates(sel map[string]any, chosen string) []placementCandidateRecord {
 	var out []placementCandidateRecord
 	hosts, _ := sel["hosts"].([]any)
 	at, untried := map[string]int{}, map[string]bool{}
@@ -291,7 +291,9 @@ func selectionCandidates(sel map[string]any, chosen string, launched bool) []pla
 			}
 		}
 		row := placementCandidateRecord{Host: name, Outcome: "skipped", Reason: placementSkipReason(str(host, "outcome"))}
-		if name == chosen && launched {
+		// A chosen host carries no refusal, whether or not execution started:
+		// the selection chose it, so "chosen" is never a skip reason.
+		if name == chosen {
 			row.Outcome, row.Reason = "chosen", "available"
 		}
 		if score, ok := number(host, "score"); ok {

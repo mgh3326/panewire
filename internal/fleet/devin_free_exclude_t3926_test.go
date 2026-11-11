@@ -99,10 +99,10 @@ func TestExcludedDevinPoolAutoTiersFreeRungs(t *testing.T) {
 	excluded := PoolView{Status: "ok", Class: "exclude"}
 	free := CatalogRow{Profile: "devin-swe2-medium", Pool: "devin", ModelID: "swe-2-medium"}
 	paid := CatalogRow{Profile: "devin-ds41", Pool: "devin", ModelID: "deepseek-v4-1-flash-high"}
-	if tier, idx := policy.tierOf(free, poolTiers, excluded); tier != "free" || idx < 0 {
+	if tier, idx := policy.tierOf(free, poolBands, excluded); tier != "free" || idx < 0 {
 		t.Fatalf("free rung under exclude: tier=%q idx=%d, want free", tier, idx)
 	}
-	if tier, idx := policy.tierOf(paid, poolTiers, excluded); tier != "" || idx != -1 {
+	if tier, idx := policy.tierOf(paid, poolBands, excluded); tier != "" || idx != -1 {
 		t.Fatalf("paid devin under exclude: tier=%q idx=%d, want no tier", tier, idx)
 	}
 }

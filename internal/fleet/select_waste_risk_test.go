@@ -41,7 +41,7 @@ func riskFixture(t *testing.T, claude PoolView, policyJSON string) (*App, Spawn)
 }
 
 func riskPolicy(extra string) string {
-	return `{"version": 2, "source_doc": "policy/quota-stop", "order": ["free", "waste", "ranked", "credit"],
+	return `{"version": 3, "source_doc": "policy/quota-stop", "order": ["free", "waste", "ranked"],
 	  "free": [{"pool": "devin", "models": ["swe-2"]}], "credit_pools": ["anthropic-api"]` + extra + `}`
 }
 
