@@ -235,6 +235,52 @@ func TestOrderSelCandsFreeBandIsTotal_T4006(t *testing.T) {
 	}
 }
 
+// On a USD-credit tie the paceable candidate goes first, as it did before the
+// group key: a USD credit's at-risk dollars can be 0 while its pool still
+// carries an urgency, and both sides must order by presence, not by profile.
+func TestOrderSelCandsUSDCreditTieIsPaceableFirst_T4006(t *testing.T) {
+	mk := func(profile string, urgency *float64) *selCand {
+		return &selCand{
+			row:        CatalogRow{Profile: profile, Grade: "A", Pool: "p", Effort: "high", ModelID: "m"},
+			tier:       1,
+			creditPool: true,
+			usdUrgency: ptrF(0),
+			urgency:    urgency,
+		}
+	}
+	paceable, unpaceable := mk("z", ptrF(5)), mk("a", nil)
+	for _, perm := range [][2]*selCand{{paceable, unpaceable}, {unpaceable, paceable}} {
+		pending := []*selCand{perm[0], perm[1]}
+		orderSelCands(pending)
+		if pending[0] != paceable {
+			t.Fatalf("the paceable USD credit must go first: %s", pending[0].row.Profile)
+		}
+	}
+}
+
+// A USD-credit tie with urgency and no urgency, and two urgencies, is one
+// strict weak ordering: presence first, then the higher urgency. Without the
+// presence rule the profile key closed a cycle (Y<X, X<Z, Z<Y).
+func TestOrderSelCandsUSDTieIsTotal_T4006(t *testing.T) {
+	mk := func(profile string, urgency *float64) *selCand {
+		return &selCand{
+			row:        CatalogRow{Profile: profile, Grade: "A", Pool: "p", Effort: "high", ModelID: "m"},
+			tier:       1,
+			creditPool: true,
+			usdUrgency: ptrF(0),
+			urgency:    urgency,
+		}
+	}
+	x, y, z := mk("c", ptrF(5)), mk("b", nil), mk("a", ptrF(3))
+	for _, perm := range [][3]*selCand{{x, y, z}, {x, z, y}, {y, x, z}, {y, z, x}, {z, x, y}, {z, y, x}} {
+		pending := []*selCand{perm[0], perm[1], perm[2]}
+		orderSelCands(pending)
+		if pending[0] != x || pending[1] != z || pending[2] != y {
+			t.Fatalf("permutation must sort x, z, y: %s %s %s", pending[0].row.Profile, pending[1].row.Profile, pending[2].row.Profile)
+		}
+	}
+}
+
 func seatIndex(xs []string, want string) int {
 	for i, x := range xs {
 		if x == want {

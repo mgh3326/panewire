@@ -1066,7 +1066,17 @@ func sortSelCands(pending []*selCand) {
 					return c
 				}
 			}
-			if x.urgency != nil && y.urgency != nil {
+			// A paceable reset ranks ahead of an unpaceable one at this
+			// position, as it did before the group key. Without the presence
+			// rule a USD-credit tie with one urgency set fell through to the
+			// profile key, which closed a cycle with the urgency key.
+			if (x.urgency != nil) != (y.urgency != nil) {
+				if x.urgency != nil {
+					return -1
+				}
+				return 1
+			}
+			if x.urgency != nil {
 				if c := cmp.Compare(*y.urgency, *x.urgency); c != 0 {
 					return c
 				}
