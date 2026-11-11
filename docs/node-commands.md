@@ -290,7 +290,7 @@ herdr reports one, and an empty composer both times.
 | `outcome` | `pane` | Meaning |
 | --- | --- | --- |
 | `closed` | the closed pane | Matched and `herdr pane close` succeeded. |
-| `pane-gone` | the receipt's pane, when it names one | No such agent pane; nothing to close. |
+| `pane-gone` | the receipt's pane, when it names one | No such agent pane; nothing to close. With no pane, the ledger names none and the node verified nothing. |
 | `pane-changed` | the receipt's pane | The pane carries another label, is in no closable status, or its composer is not proven empty; not closed. |
 | `job-working` | the receipt's pane | The pane is `working`; `force` closes it. Not closed. |
 | `pane-blocked` | the receipt's pane | The pane waits at a prompt; `force` closes it. Not closed. |

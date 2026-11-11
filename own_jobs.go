@@ -174,9 +174,9 @@ func (h *HubServer) handleJobReap(writer http.ResponseWriter, request *http.Requ
 	}
 	h.mu.Lock()
 	job := h.jobs[body.Job]
-	var node, owner, pane string
+	var node, owner string
 	if job != nil {
-		node, owner, pane = job.Node, job.OwnerLane, job.Pane
+		node, owner = job.Node, job.OwnerLane
 	}
 	h.mu.Unlock()
 	if job == nil {
@@ -214,14 +214,15 @@ func (h *HubServer) handleJobReap(writer http.ResponseWriter, request *http.Requ
 		writeJSON(writer, http.StatusBadGateway, hubJobReapResult{Refusal: "invalid_node_response"})
 		return
 	}
-	answer := hubJobReapResult{Lane: body.Lane, Job: body.Job, Machine: node, Pane: pane, Outcome: reaped.Outcome}
-	if reaped.Pane != "" {
-		answer.Pane = reaped.Pane
-	}
+	// The node names the pane it verified, and only that pane is released. A
+	// job whose ledger names no pane proves nothing about the hub record's
+	// pane: that id may have been reused by a live unrelated pane since, and
+	// retiring its lane row would cut a route nobody asked to close.
+	answer := hubJobReapResult{Lane: body.Lane, Job: body.Job, Machine: node, Pane: reaped.Pane, Outcome: reaped.Outcome}
 	switch reaped.Outcome {
 	case nodeJobReapClosed, nodeJobReapPaneGone:
-		if answer.Pane != "" {
-			answer.Released = h.releasePaneLanes(node, answer.Pane, commandStart)
+		if reaped.Pane != "" {
+			answer.Released = h.releasePaneLanes(node, reaped.Pane, commandStart)
 		}
 		h.logger.Info("job reaped", "client", caller.id, "lane", body.Lane, "job", body.Job, "machine", node, "pane", answer.Pane, "outcome", reaped.Outcome, "released", answer.Released)
 		writeJSON(writer, http.StatusOK, answer)

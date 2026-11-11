@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/coder/websocket"
 	"github.com/mgh3326/panewire/internal/fleet"
 )
 
@@ -36,37 +37,38 @@ func ownJobsHubLogs(t *testing.T, logs io.Writer) (*HubServer, *httptest.Server)
 	return hub, server
 }
 
+// ownJobsResult waits for one own-jobs response. A close that retires a lane
+// row rewrites the lanes file, and the first such write in a process pays the
+// directory's cold-cache cost (seconds on a slow disk), so this budget is
+// wider than t14Result's.
+func ownJobsResult(t *testing.T, results <-chan t14HTTPResult) t14HTTPResult {
+	t.Helper()
+	select {
+	case result := <-results:
+		if result.status < 0 {
+			t.Fatal(string(result.body))
+		}
+		return result
+	case <-time.After(30 * time.Second):
+		t.Fatal("HTTP response did not arrive")
+		return t14HTTPResult{}
+	}
+}
+
 func ownJobsLaneRows(t *testing.T, hub *HubServer) map[string]reportRelayRoute {
 	t.Helper()
 	return loadReportRelayRoutes(hub.reportRelayPath)
 }
 
 // TestJobsMineListsOneLaneAcrossMachines is acceptance (a): `jobs mine` returns
-// only the lane's jobs, and it names each one's machine, pane, state, task and
-// last observation.
+// only the lane's jobs, and it names each one's machine, pane, state and last
+// observation.
 func TestJobsMineListsOneLaneAcrossMachines(t *testing.T) {
 	hub, server := ownJobsHub(t)
-	inbox, err := newHubInbox("default", filepath.Join(t.TempDir(), "inbox.sqlite3"), "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	hub.inbox = inbox
-	t.Cleanup(func() { inbox.store.close() })
 	seen := hub.now().UTC()
 	hub.jobs["job-a"] = &hubJobRecord{HubActiveJob: HubActiveJob{JobID: "job-a", OwnerLane: "lane-a", Pane: "w1:p1"}, Node: "node-a", LastSeen: seen}
 	hub.jobs["job-b"] = &hubJobRecord{HubActiveJob: HubActiveJob{JobID: "job-b", OwnerLane: "lane-a", Pane: "w2:p1"}, Node: "node-b", LastSeen: seen.Add(-time.Minute), Completed: true}
 	hub.jobs["job-c"] = &hubJobRecord{HubActiveJob: HubActiveJob{JobID: "job-c", OwnerLane: "lane-b", Pane: "w1:p2"}, Node: "node-a", LastSeen: seen}
-	submission := fleet.Submission{
-		RequestID:       t14RequestID(3968),
-		Args:            []string{"-c", "/work/repo", "-p", "/work/brief.md", "-m", "auto", "-w", "worker", "-l", "label-a", "--job", "job-b", "--t", "T1", "--owner", "lane-a", "--task", "3968", "--host", "auto"},
-		Brief:           "task",
-		Repository:      fleet.Repository{Name: "project", Origin: "https://github.com/example/project.git", LocalRoot: "/work/repo"},
-		OriginMachine:   "node-a",
-		DeadlineSeconds: 600,
-	}
-	if _, _, err := inbox.store.claimSpawn(t.Context(), submission, "job-b", "lane-a", hub.now()); err != nil {
-		t.Fatal(err)
-	}
 
 	status, body := (pw2Caller{"node", "node-a", pw2NodeAToken}).do(t, server, http.MethodGet, "/v1/jobs/mine?lane=lane-a", "")
 	var result struct {
@@ -81,7 +83,7 @@ func TestJobsMineListsOneLaneAcrossMachines(t *testing.T) {
 	if result.Jobs[0].Machine != "node-a" || result.Jobs[0].Pane != "w1:p1" || result.Jobs[0].State != "active" || result.Jobs[0].Task != "" {
 		t.Fatalf("job-a row=%+v", result.Jobs[0])
 	}
-	if result.Jobs[1].Machine != "node-b" || result.Jobs[1].State != "completed" || result.Jobs[1].Task != "3968" || result.Jobs[1].LastSeen != seen.Add(-time.Minute).Format(time.RFC3339) {
+	if result.Jobs[1].Machine != "node-b" || result.Jobs[1].State != "completed" || result.Jobs[1].LastSeen != seen.Add(-time.Minute).Format(time.RFC3339) {
 		t.Fatalf("job-b row=%+v", result.Jobs[1])
 	}
 
@@ -92,6 +94,42 @@ func TestJobsMineListsOneLaneAcrossMachines(t *testing.T) {
 	_, svcServer := pw2Hub(t, map[string]string{"svc-jobs": "inbox.read:lane-a"}, "", nil)
 	if status, body := (pw2Caller{"svc-jobs", "svc-jobs", pw2ServiceToken("svc-jobs")}).do(t, svcServer, http.MethodGet, "/v1/jobs/mine?lane=lane-a", ""); status != http.StatusForbidden || !strings.Contains(body, "scope_forbidden") {
 		t.Fatalf("service: %d %s", status, body)
+	}
+}
+
+// TestJobsMineNamesTheTaskFromTheSpawnOperation: the task column is the task
+// the hub's own spawn operation named, and a job this hub did not spawn through
+// its store lists none.
+func TestJobsMineNamesTheTaskFromTheSpawnOperation(t *testing.T) {
+	hub, server := ownJobsHub(t)
+	inbox, err := newHubInbox("default", filepath.Join(t.TempDir(), "inbox.sqlite3"), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	hub.inbox = inbox
+	t.Cleanup(func() { inbox.store.close() })
+	hub.jobs["job-a"] = &hubJobRecord{HubActiveJob: HubActiveJob{JobID: "job-a", OwnerLane: "lane-a"}, Node: "node-a"}
+	hub.jobs["job-b"] = &hubJobRecord{HubActiveJob: HubActiveJob{JobID: "job-b", OwnerLane: "lane-a"}, Node: "node-a"}
+	submission := fleet.Submission{
+		RequestID:       t14RequestID(3968),
+		Args:            []string{"-c", "/work/repo", "-p", "/work/brief.md", "-m", "auto", "-w", "worker", "-l", "label-a", "--job", "job-b", "--t", "T1", "--owner", "lane-a", "--task", "3968", "--host", "auto"},
+		Brief:           "task",
+		Repository:      fleet.Repository{Name: "project", Origin: "https://github.com/example/project.git", LocalRoot: "/work/repo"},
+		OriginMachine:   "node-a",
+		DeadlineSeconds: 600,
+	}
+	if _, _, err := inbox.store.claimSpawn(t.Context(), submission, "job-b", "lane-a", hub.now()); err != nil {
+		t.Fatal(err)
+	}
+	status, body := (pw2Caller{"node", "node-a", pw2NodeAToken}).do(t, server, http.MethodGet, "/v1/jobs/mine?lane=lane-a", "")
+	var result struct {
+		Jobs []hubOwnJob `json:"jobs"`
+	}
+	if status != http.StatusOK || json.Unmarshal([]byte(body), &result) != nil || len(result.Jobs) != 2 {
+		t.Fatalf("status=%d body=%s", status, body)
+	}
+	if result.Jobs[0].JobID != "job-a" || result.Jobs[0].Task != "" || result.Jobs[1].JobID != "job-b" || result.Jobs[1].Task != "3968" {
+		t.Fatalf("jobs=%+v", result.Jobs)
 	}
 }
 
@@ -126,7 +164,7 @@ func TestJobsCloseClosesOnAnotherMachineAndRetiresTheLane(t *testing.T) {
 		t.Fatalf("node received %v", command)
 	}
 	nodeCommandReplyTo(t, connection, command, map[string]any{"result": map[string]any{"outcome": "closed", "pane": "w2:p1"}})
-	result := t14Result(t, results)
+	result := ownJobsResult(t, results)
 	body := nodeCommandDecode(t, result.body)
 	if result.status != http.StatusOK || body["outcome"] != "closed" || body["machine"] != "node-b" || body["pane"] != "w2:p1" || body["job"] != "job-b" || body["lane"] != "lane-a" {
 		t.Fatalf("status=%d body=%s", result.status, result.body)
@@ -167,7 +205,7 @@ func TestJobsCloseRefusesAnotherLanesJob(t *testing.T) {
 		t.Fatalf("first command the node saw: %v", command)
 	}
 	nodeCommandReplyTo(t, connection, command, map[string]any{"result": map[string]any{"outcome": "closed", "pane": "w2:p1"}})
-	if result := t14Result(t, results); result.status != http.StatusOK {
+	if result := ownJobsResult(t, results); result.status != http.StatusOK {
 		t.Fatalf("status=%d body=%s", result.status, result.body)
 	}
 }
@@ -195,7 +233,7 @@ func TestJobsCloseReportsTheNodeRefusal(t *testing.T) {
 	results := ownJobsCaller.doAsync(t, server, http.MethodPost, "/v1/jobs/reap", `{"lane":"lane-a","job":"job-b","force":false}`)
 	command := nodeCommandRead(t, connection)
 	nodeCommandReplyTo(t, connection, command, map[string]any{"result": map[string]any{"outcome": "job-working", "pane": "w2:p1"}})
-	result := t14Result(t, results)
+	result := ownJobsResult(t, results)
 	if result.status != http.StatusConflict || !strings.Contains(string(result.body), `"refusal":"job-working"`) || !strings.Contains(string(result.body), `"pane":"w2:p1"`) {
 		t.Fatalf("status=%d body=%s", result.status, result.body)
 	}
@@ -345,4 +383,77 @@ func TestOwnJobsRequestIsClosed(t *testing.T) {
 	if code := runOwnJobsLocal(ownJobsRequest{Command: "close", Lane: "lane-a"}, &out, &errOut, socket); code != ExitUsage {
 		t.Fatalf("invalid daemon request: %d %q", code, errOut.String())
 	}
+}
+
+// TestJobsCloseReleasesOnlyThePaneTheNodeVerified pins the release to the pane
+// the node named. A job whose ledger names no pane proves nothing about the
+// hub record's pane — that id may have been reused by a live unrelated pane
+// since — so no lane row is retired for it.
+func TestJobsCloseReleasesOnlyThePaneTheNodeVerified(t *testing.T) {
+	cases := []struct {
+		name     string
+		reply    map[string]any
+		released bool
+	}{
+		{name: "a verified pane is retired", reply: map[string]any{"outcome": "pane-gone", "pane": "w2:p1"}, released: true},
+		{name: "a ledger with no pane retires nothing", reply: map[string]any{"outcome": "pane-gone"}, released: false},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			hub, server := ownJobsHub(t)
+			connection := t14NamedNodeToken(t, hub, server, "node-b", pw2NodeBToken, false, true)
+			hub.jobs["job-b"] = &hubJobRecord{HubActiveJob: HubActiveJob{JobID: "job-b", OwnerLane: "lane-a", Pane: "w2:p1"}, Node: "node-b"}
+			results := ownJobsCaller.doAsync(t, server, http.MethodPost, "/v1/jobs/reap", `{"lane":"lane-a","job":"job-b","force":false}`)
+			nodeCommandReplyTo(t, connection, nodeCommandRead(t, connection), map[string]any{"result": test.reply})
+			result := ownJobsResult(t, results)
+			body := nodeCommandDecode(t, result.body)
+			if result.status != http.StatusOK || body["outcome"] != "pane-gone" {
+				t.Fatalf("status=%d body=%s", result.status, result.body)
+			}
+			_, present := ownJobsLaneRows(t, hub)["job-b"]
+			if wantPresent := !test.released; present != wantPresent {
+				t.Fatalf("lane row present=%t, want %t: body=%s", present, wantPresent, result.body)
+			}
+			if released, _ := body["released"].([]any); test.released != (len(released) == 1 && released[0] == "job-b") {
+				t.Fatalf("released=%v", body["released"])
+			}
+		})
+	}
+}
+
+// TestJobsCloseReportsAnUnconfirmedSend: a failed write to the node may still
+// have delivered job.reap, so the hub answers close_unconfirmed, never
+// node_offline, and the lane is told the outcome is unknown.
+func TestJobsCloseReportsAnUnconfirmedSend(t *testing.T) {
+	hub, server := ownJobsHub(t)
+	hub.jobs["job-b"] = &hubJobRecord{HubActiveJob: HubActiveJob{JobID: "job-b", OwnerLane: "lane-a", Pane: "w2:p1"}, Node: "node-b"}
+	// A connection the hub still believes in, whose peer is gone: the write
+	// fails the way a half-open socket's does.
+	hub.mu.Lock()
+	hub.nodes["node-b"] = &hubNodeRecord{machineID: "node-b", state: "connected", stateSince: hub.now(), agent: &hubAgent{conn: ownJobsDeadConn(t), machineID: "node-b"}}
+	hub.mu.Unlock()
+	status, body := ownJobsCaller.do(t, server, http.MethodPost, "/v1/jobs/reap", `{"lane":"lane-a","job":"job-b","force":false}`)
+	if status != http.StatusServiceUnavailable || !strings.Contains(body, `"refusal":"close_unconfirmed"`) {
+		t.Fatalf("status=%d body=%s", status, body)
+	}
+	if _, still := ownJobsLaneRows(t, hub)["job-b"]; !still {
+		t.Fatal("an unconfirmed send retired the lane route")
+	}
+}
+
+// ownJobsDeadConn is a websocket whose peer has closed, so a write to it fails.
+func ownJobsDeadConn(t *testing.T) *websocket.Conn {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if conn, err := websocket.Accept(w, r, nil); err == nil {
+			_ = conn.CloseNow()
+		}
+	}))
+	t.Cleanup(server.Close)
+	conn, _, err := websocket.Dial(t.Context(), t14WSURL(server.URL, "/"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn.CloseNow()
+	return conn
 }

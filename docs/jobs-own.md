@@ -62,22 +62,26 @@ herdr on that node:
 `--force` skips the status and composer checks; it never skips the label check
 or the keep flag.
 
-On `closed` or `pane-gone` the hub drops the lane rows that pointed at that
-pane on that machine, under the same rules as a `pane.close` release: the row
-must be that machine's own, not a sink, not protected, not referenced by
-another machine, and not older than the command. The caller's own lane points
-at another pane, so it stays. The hub logs one line per close with the caller,
-lane, job, machine, pane and outcome.
+On `closed` or `pane-gone` the hub drops the lane rows that pointed at the pane
+the node named, under the same rules as a `pane.close` release: the row must be
+that machine's own, not a sink, not protected, not referenced by another
+machine, and not older than the command. The caller's own lane points at
+another pane, so it stays. Only a pane the node verified is released: a job
+whose ledger names no pane proves nothing about the pane the hub's record
+names — that id may have been reused by a live unrelated pane since — so a
+`pane-gone` with no pane retires nothing. The hub logs one line per close with
+the caller, lane, job, machine, pane and outcome.
 
 | Result | Meaning |
 | --- | --- |
 | `OK job=… machine=… pane=… outcome=closed released=<lane>` | The pane was closed; the named lane rows were retired. |
-| `OK … outcome=pane-gone` | The pane was already gone; any lane row pointing at it was retired. |
+| `OK … outcome=pane-gone pane=<pane>` | The node verified that pane is gone; the lane rows pointing at it were retired. |
+| `OK … outcome=pane-gone pane=-` | The job's ledger names no pane, so nothing was verified and nothing was retired. |
 | `jobs close refused: … (job-working)` | The pane is still working; use `--force` to close it anyway. |
 | `jobs close refused: … (pane-blocked)` | The pane waits at a prompt; use `--force`. |
 | `jobs close refused: … (protected)` | The job was spawned with `--keep`. |
 | `jobs close refused: … (pane-changed)` | The pane is no longer the job's, or its composer is not proven empty. |
-| `jobs unavailable: … (close_unconfirmed)` | The node did not answer; the pane may already be closed. Inspect it before retrying. |
+| `jobs unavailable: … (close_unconfirmed)` | The node did not answer, or the command could not be written to it and may still have arrived; the pane may already be closed. Inspect it before retrying. |
 
 ## Rollout
 
@@ -100,7 +104,7 @@ The hub and the nodes deploy in either order, and neither misreads the other:
 
 The node compares the pane's herdr label, not its tab: herdr's agent list
 carries no tab id, so a tab mismatch cannot be seen over the hub. A job whose
-ledger names no pane has nothing to close (`pane-gone`); the hub then retires
-the lane rows that pointed at the pane its own record names. `jobs close` does
-not remove worktrees or release quota; run `panewire reap` on the machine for
-those.
+ledger names no pane has nothing to close and nothing the hub may retire
+(`pane-gone`, no pane); check the machine's own `panewire reap` for it.
+`jobs close` does not remove worktrees or release quota; run `panewire reap` on
+the machine for those.

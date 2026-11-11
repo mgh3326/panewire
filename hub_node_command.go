@@ -154,7 +154,10 @@ func (h *HubServer) sendNodeCommand(machine, op string, args json.RawMessage) (p
 	}{Type: "node.command", RequestID: requestID, Op: op, Args: args}
 	if err := agent.writeJSON(message); err != nil {
 		h.forgetNodeCommand(requestID)
-		if op == nodeCommandJobClose {
+		// A write that failed may still have delivered a command that acts, so
+		// the two acting job commands report an unknown outcome rather than
+		// "nothing was sent"; every other op answers a plain disconnect.
+		if op == nodeCommandJobClose || op == nodeCommandJobReap {
 			return nil, "", "send_failed", false
 		}
 		return nil, "", "disconnected", false
