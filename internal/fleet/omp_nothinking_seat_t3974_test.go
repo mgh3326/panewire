@@ -31,9 +31,9 @@ var ompNoThinkingSeats = map[string]struct{ model, footer string }{
 // seat policy and a handoffkeep-shaped catalog, and whose host holds one fresh
 // commandcode reading. Its quota is the production admissionQuota, so a test
 // exercises the same launch and gate steps a pinned spawn runs.
-func noThinkingSpawnApp(t *testing.T) *App {
+func noThinkingSpawnApp(t *testing.T, extra ...CatalogRow) *App {
 	t.Helper()
-	rows := ompSeedCatalog(t)
+	rows := append(ompSeedCatalog(t), extra...)
 	a := testApp(t)
 	a.Config.Local = map[string]any{"omp_commandcode": true}
 	a.Config.Quota = map[string]any{"accounts": map[string]any{"commandcode": noThinkingAccountFP}}
@@ -160,7 +160,8 @@ func ompModelCatalog(fr *fakeRunner, model, footerName string) {
 // Code rung (omp-dsflash41) and a thinking seat with graded rungs
 // (omp-musespark13).
 func TestOMPThinkingSeatsRefuseOff(t *testing.T) {
-	a := noThinkingSpawnApp(t)
+	// omp-dsflash41's rungs are not in the omp seed; handoffkeep carries them.
+	a := noThinkingSpawnApp(t, CatalogRow{Profile: "omp-dsflash41", Effort: "off", ModelID: "commandcode/deepseek/deepseek-v4.1-flash", Pool: commandcodePool, Grade: gradeUnrated, Gate: defaultGate})
 	for _, profile := range []string{"omp-dsflash41", "omp-musespark13"} {
 		t.Run(profile, func(t *testing.T) {
 			if a.Policy.Profiles[profile].NoThinking {
@@ -219,7 +220,9 @@ func TestOMPNoThinkingSeatLeavesOtherRungsUnchanged(t *testing.T) {
 				}
 			}
 			slices.Sort(got)
-			if !reflect.DeepEqual(got, tc.efforts) {
+			want := slices.Clone(tc.efforts)
+			slices.Sort(want)
+			if !reflect.DeepEqual(got, want) {
 				t.Fatalf("rungs = %v, want %v", got, tc.efforts)
 			}
 			for _, effort := range tc.efforts {
