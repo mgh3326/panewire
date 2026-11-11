@@ -473,8 +473,11 @@ the pool:
 | `omp-musespark13` | omp | `commandcode/meta/muse-spark-1.3`, gated by `omp_commandcode` | worker, tester, reviewer | low, high, max; unrated until routing-policy grades it. |
 | `omp-argon4` | omp | `commandcode/google/gemini-4-argon`, gated by `omp_commandcode` | worker, tester, reviewer | off only; omp reports no thinking levels for this model. |
 | `omp-mimo26pro` | omp | `commandcode/xiaomi/mimo-v2.6-pro`, gated by `omp_commandcode` | worker, tester, reviewer | off only; omp reports no thinking levels for this model. |
+| `omp-cc-opus55` | omp | `commandcode/claude-opus-5-5`, gated by `omp_commandcode` | worker, tester, reviewer | low, high, max; separate from `omp-opus`. |
+| `omp-cc-sonnet55` | omp | `commandcode/claude-sonnet-5-5`, gated by `omp_commandcode` | worker, tester, reviewer | low, high, max; separate from `omp-sonnet`. |
+| `omp-cc-sol61` | omp | `commandcode/gpt-6.1-sol`, gated by `omp_commandcode` | worker, tester, reviewer | off only; omp reports no thinking levels; separate from `omp-sol`. |
 
-All four omp profiles and cmd-dsflash41 share one Command Code account, its 30-day window
+All seven omp profiles and cmd-dsflash41 share one Command Code account, its 30-day window
 (`commandcode_required_window_missing:30d`), and any
 `quota.pool_max_concurrent.commandcode` cap (see [config](config.md)). A spawn
 on any of these profiles counts against the same account reading.

@@ -409,22 +409,24 @@ func TestOMPCatalogSeed(t *testing.T) {
 	}
 	unrated := []string{"unrated", "unrated", "unrated", "unrated", "unrated"}
 	wantGrades := map[string][]string{"omp-opus": {"S", "S+", "S+", "S+", "S+"}, "omp-sonnet": {"C", "C", "A", "A+", "A+"}, "omp-sol": {"C", "C", "C", "S+", "S+"}, "omp-terra61": {"C", "C", "C", "C", "C"}, "omp-haiku": unrated, "omp-luna": unrated,
-		"omp-musespark13": {"unrated", "unrated", "unrated"}, "omp-argon4": {"unrated"}, "omp-mimo26pro": {"unrated"}}
+		"omp-musespark13": {"unrated", "unrated", "unrated"}, "omp-argon4": {"unrated"}, "omp-mimo26pro": {"unrated"},
+		"omp-cc-opus55": {"unrated", "unrated", "unrated"}, "omp-cc-sonnet55": {"unrated", "unrated", "unrated"}, "omp-cc-sol61": {"unrated"}}
 	wantModels := map[string]string{"omp-opus": "anthropic/claude-opus-5-5", "omp-sonnet": "anthropic/claude-sonnet-5-5", "omp-sol": "openai/gpt-6.1-sol", "omp-terra61": "openai/gpt-6.1-terra", "omp-haiku": "anthropic/claude-haiku-5-5", "omp-luna": "openai/gpt-6-luna",
-		"omp-musespark13": "meta/muse-spark-1.3", "omp-argon4": "google/gemini-4-argon", "omp-mimo26pro": "xiaomi/mimo-v2.6-pro"}
-	wantEfforts := map[string][]string{"omp-opus": {"low", "medium", "high", "xhigh", "max"}, "omp-sonnet": {"low", "medium", "high", "xhigh", "max"}, "omp-sol": {"low", "medium", "high", "xhigh", "max"}, "omp-terra61": {"low", "medium", "high", "xhigh", "max"}, "omp-haiku": {"low", "medium", "high", "xhigh", "max"}, "omp-luna": {"low", "medium", "high", "xhigh", "max"}, "omp-musespark13": {"low", "high", "max"}, "omp-argon4": {"off"}, "omp-mimo26pro": {"off"}}
+		"omp-musespark13": "commandcode/meta/muse-spark-1.3", "omp-argon4": "commandcode/google/gemini-4-argon", "omp-mimo26pro": "commandcode/xiaomi/mimo-v2.6-pro",
+		"omp-cc-opus55": "commandcode/claude-opus-5-5", "omp-cc-sonnet55": "commandcode/claude-sonnet-5-5", "omp-cc-sol61": "commandcode/gpt-6.1-sol"}
+	wantEfforts := map[string][]string{"omp-opus": {"low", "medium", "high", "xhigh", "max"}, "omp-sonnet": {"low", "medium", "high", "xhigh", "max"}, "omp-sol": {"low", "medium", "high", "xhigh", "max"}, "omp-terra61": {"low", "medium", "high", "xhigh", "max"}, "omp-haiku": {"low", "medium", "high", "xhigh", "max"}, "omp-luna": {"low", "medium", "high", "xhigh", "max"}, "omp-musespark13": {"low", "high", "max"}, "omp-argon4": {"off"}, "omp-mimo26pro": {"off"}, "omp-cc-opus55": {"low", "high", "max"}, "omp-cc-sonnet55": {"low", "high", "max"}, "omp-cc-sol61": {"off"}}
 	// New unrated seats carry their own decision reference; the original four
 	// keep the seed's ref.
-	wantRef := map[string]string{"omp-haiku": "hk:task/3875", "omp-luna": "hk:task/3875", "omp-musespark13": "hk:task/3955", "omp-argon4": "hk:task/3955", "omp-mimo26pro": "hk:task/3955"}
-	if len(seed.Catalog) != 35 {
-		t.Fatalf("want 35 catalog rows, got %d", len(seed.Catalog))
+	wantRef := map[string]string{"omp-haiku": "hk:task/3875", "omp-luna": "hk:task/3875", "omp-musespark13": "hk:task/3955", "omp-argon4": "hk:task/3955", "omp-mimo26pro": "hk:task/3955", "omp-cc-opus55": "hk:task/3955", "omp-cc-sonnet55": "hk:task/3955", "omp-cc-sol61": "hk:task/3955"}
+	if len(seed.Catalog) != 42 {
+		t.Fatalf("want 42 catalog rows, got %d", len(seed.Catalog))
 	}
 	seen := map[string]bool{}
 	for _, row := range seed.Catalog {
 		i := slices.Index(wantEfforts[row.Profile], row.Effort)
 		grades := wantGrades[row.Profile]
 		key := row.Profile + "@" + row.Effort
-		wantNoThinking := row.Profile == "omp-argon4" || row.Profile == "omp-mimo26pro"
+		wantNoThinking := row.Profile == "omp-argon4" || row.Profile == "omp-mimo26pro" || row.Profile == "omp-cc-sol61"
 		if len(grades) == 0 || i < 0 || seen[key] || row.Grade != grades[i] || row.ModelID != wantModels[row.Profile] || row.DecidedBy != "operator-desk" || row.DeviationRef != firstNonEmpty(wantRef[row.Profile], "hk:task/2476") || row.NoThinking != wantNoThinking {
 			t.Fatalf("invalid seed row: %+v", row)
 		}
