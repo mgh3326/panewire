@@ -212,8 +212,8 @@ func (a *App) PrepareSubmission(ctx context.Context, s Spawn) (Submission, error
 		}
 	}
 	s.E6Arm = a.e6Arm("")
-	if s.E6Arm != "" && !validE6Arm(s.E6Arm, s.Profile) {
-		return Submission{}, fail(exitUsage, "PANEWIRE_E6_ARM must be <canon>@<effort> with canon %s, got %q", s.Profile, s.E6Arm)
+	if s.E6Arm != "" && !ValidE6Arm(s.E6Arm, s.Profile) {
+		return Submission{}, fail(exitUsage, "PANEWIRE_E6_ARM must be <canon>@ or <canon>@<effort> with canon %s, got %q", s.Profile, s.E6Arm)
 	}
 	cwd, err := filepath.Abs(expand(s.CWD))
 	if err != nil {
@@ -317,8 +317,8 @@ func ValidateSubmission(request Submission) (Spawn, error) {
 	if err != nil {
 		return s, err
 	}
-	if request.E6Arm != "" && !validE6Arm(request.E6Arm, s.Profile) {
-		return s, fail(exitUsage, "e6_arm %q must be <canon>@<effort> with canon %q", request.E6Arm, s.Profile)
+	if request.E6Arm != "" && !ValidE6Arm(request.E6Arm, s.Profile) {
+		return s, fail(exitUsage, "e6_arm %q must be <canon>@ or <canon>@<effort> with canon %q", request.E6Arm, s.Profile)
 	}
 	s.E6Arm = request.E6Arm
 	s.hubRetryHost = request.RetryHost

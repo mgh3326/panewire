@@ -218,6 +218,10 @@ func validHubSpawnArgsForMode(args []string, operator bool) bool {
 		}
 		i += 2
 	}
+	// The arm names the spawn's own canon (-m), the rule submission applies.
+	if arm := hubSpawnArg(args, "--e6-arm"); arm != "" && !fleet.ValidE6Arm(arm, hubSpawnArg(args, "-m")) {
+		return false
+	}
 	return true
 }
 
