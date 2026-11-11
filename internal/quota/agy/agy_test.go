@@ -2,6 +2,7 @@ package agy
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
@@ -84,7 +85,7 @@ func loginFiles(access string) map[string]string {
 }
 
 // config is a measurement over fakes: no app process, the given login files and
-// cloud server, no keychain, no agy binary.
+// cloud server, no keychain or secret service, no agy binary.
 func config(files map[string]string, cloud Doer) Config {
 	return Config{
 		HTTP: cloud, Home: "/home/u", GOOS: "linux", Now: func() time.Time { return testNow },
@@ -95,10 +96,11 @@ func config(files map[string]string, cloud Doer) Config {
 			}
 			return nil, os.ErrNotExist
 		},
-		LookPath:    func(string) (string, error) { return "", errors.New("not found") },
-		Processes:   func(context.Context) []Proc { return nil },
-		ListenPorts: func(context.Context, int) []int { return nil },
-		Locked:      func(_ string, fn func() error) error { return fn() },
+		SecretService: func(context.Context) (string, error) { return "", errors.New("no secret service") },
+		LookPath:      func(string) (string, error) { return "", errors.New("not found") },
+		Processes:     func(context.Context) []Proc { return nil },
+		ListenPorts:   func(context.Context, int) []int { return nil },
+		Locked:        func(_ string, fn func() error) error { return fn() },
 	}
 }
 
@@ -430,6 +432,161 @@ func TestMeasureKeychainLogin(t *testing.T) {
 	}
 	if _, err := Measure(context.Background(), cfg); quota.KindOf(err) != quota.ErrKindCredentials {
 		t.Fatalf("no login off darwin: %v", err)
+	}
+}
+
+// Linux: the secret service copy of the login is used when the file has none,
+// and as the fallback when the file's token stays refused.
+func TestMeasureSecretServiceLogin(t *testing.T) {
+	envelope := `go-keyring-base64:` + base64.StdEncoding.EncodeToString([]byte(`{"token":{"access_token":"secret-service-token"}}`))
+	byToken := func(want string) Doer {
+		return doer(func(r *http.Request) (*http.Response, error) {
+			if r.Header.Get("Authorization") != "Bearer "+want {
+				return respond(401, `{}`)(r)
+			}
+			if strings.HasSuffix(r.URL.Path, ":fetchAvailableModels") {
+				return respond(200, `{"models":{}}`)(r)
+			}
+			return respond(200, fixture(t, "summary.json"))(r)
+		})
+	}
+	// File has no login: the secret service's is used.
+	cfg := config(loginFiles(""), byToken("secret-service-token"))
+	cfg.SecretService = func(context.Context) (string, error) { return envelope, nil }
+	if _, err := Measure(context.Background(), cfg); err != nil {
+		t.Fatalf("secret service login: %v", err)
+	}
+	// File login refused, the secret service's accepted.
+	cfg = config(loginFiles("file-token"), byToken("secret-service-token"))
+	cfg.SecretService = func(context.Context) (string, error) { return envelope, nil }
+	if _, err := Measure(context.Background(), cfg); err != nil {
+		t.Fatalf("secret service fallback: %v", err)
+	}
+}
+
+// secretServiceConfig is a linux measurement with no login file and the given
+// secret service read.
+func secretServiceConfig(read func(context.Context) (string, error)) Config {
+	cfg := config(loginFiles(""), nil)
+	cfg.SecretService = read
+	return cfg
+}
+
+// Linux: the secret service item is the login, unwrapped like the keychain's.
+// go-keyring stores the CLI's value as it was given, and the envelope prefixes
+// are handled too.
+func TestSecretTokenLinuxSecretService(t *testing.T) {
+	value := `{"token":{"access_token":"secret-service-token"}}`
+	for name, raw := range map[string]string{
+		"raw JSON":        value,
+		"base64 envelope": "go-keyring-base64:" + base64.StdEncoding.EncodeToString([]byte(value)),
+		"hex envelope":    "go-keyring-encoded:" + hexOf(value),
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg := secretServiceConfig(func(context.Context) (string, error) { return raw, nil })
+			if got := cfg.secretToken(context.Background()); got != "secret-service-token" {
+				t.Fatalf("secretToken = %q", got)
+			}
+		})
+	}
+}
+
+// Linux without a usable secret service — no session bus, a locked or absent
+// item, a value that is no login — has no token and never panics.
+func TestSecretTokenLinuxWithoutASecretService(t *testing.T) {
+	for name, read := range map[string]func(context.Context) (string, error){
+		"no session bus": func(context.Context) (string, error) {
+			return "", errors.New("dbus: couldn't determine address of session bus")
+		},
+		"locked item": func(context.Context) (string, error) { return "", errors.New("agy login item is locked") },
+		"absent item": func(context.Context) (string, error) { return "", nil },
+		"not a login": func(context.Context) (string, error) { return "not a token", nil },
+	} {
+		t.Run(name, func(t *testing.T) {
+			called := false
+			cfg := secretServiceConfig(func(ctx context.Context) (string, error) {
+				called = true
+				return read(ctx)
+			})
+			if got := cfg.secretToken(context.Background()); got != "" {
+				t.Fatalf("secretToken = %q", got)
+			}
+			if !called {
+				t.Fatal("the linux secret service was not read")
+			}
+		})
+	}
+}
+
+// The secret read is bounded at 10 s: a reader that waits for its deadline
+// returns "" and the caller's earlier deadline is the one that ends it.
+func TestSecretTokenReadIsBounded(t *testing.T) {
+	var deadline time.Duration
+	cfg := secretServiceConfig(func(ctx context.Context) (string, error) {
+		at, ok := ctx.Deadline()
+		if !ok {
+			t.Fatal("the read has no deadline")
+		}
+		deadline = time.Until(at)
+		return "", errors.New("no session bus")
+	})
+	if got := cfg.secretToken(context.Background()); got != "" {
+		t.Fatalf("secretToken = %q", got)
+	}
+	if deadline <= 0 || deadline > 10*time.Second {
+		t.Fatalf("the read's deadline is %v, want at most 10s", deadline)
+	}
+
+	cfg = secretServiceConfig(func(ctx context.Context) (string, error) {
+		<-ctx.Done()
+		return "", ctx.Err()
+	})
+	parent, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	if got := cfg.secretToken(parent); got != "" {
+		t.Fatalf("secretToken = %q", got)
+	}
+	if elapsed := time.Since(started); elapsed > 5*time.Second {
+		t.Fatalf("the read ran %v past its deadline", elapsed)
+	}
+}
+
+// macOS reads the keychain and never the secret service; Linux reads the
+// secret service and never the keychain; other platforms read neither.
+func TestSecretTokenPlatforms(t *testing.T) {
+	cfg := secretServiceConfig(func(context.Context) (string, error) {
+		t.Fatal("the secret service was read on darwin")
+		return "", nil
+	})
+	cfg.GOOS = "darwin"
+	cfg.Keychain = func(context.Context) (string, error) { return `{"token":{"access_token":"keychain-token"}}`, nil }
+	if got := cfg.secretToken(context.Background()); got != "keychain-token" {
+		t.Fatalf("darwin secretToken = %q", got)
+	}
+
+	cfg = secretServiceConfig(func(context.Context) (string, error) { return `{"token":{"access_token":"secret-service-token"}}`, nil })
+	cfg.Keychain = func(context.Context) (string, error) {
+		t.Fatal("the keychain was read on linux")
+		return "", nil
+	}
+	if got := cfg.secretToken(context.Background()); got != "secret-service-token" {
+		t.Fatalf("linux secretToken = %q", got)
+	}
+
+	for _, goos := range []string{"windows", "freebsd"} {
+		cfg = secretServiceConfig(func(context.Context) (string, error) {
+			t.Fatalf("the secret service was read on %s", goos)
+			return "", nil
+		})
+		cfg.GOOS = goos
+		cfg.Keychain = func(context.Context) (string, error) {
+			t.Fatalf("the keychain was read on %s", goos)
+			return "", nil
+		}
+		if got := cfg.secretToken(context.Background()); got != "" {
+			t.Fatalf("%s secretToken = %q", goos, got)
+		}
 	}
 }
 

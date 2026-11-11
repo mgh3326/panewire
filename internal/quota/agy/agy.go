@@ -68,7 +68,7 @@ type Config struct {
 	// Home is the home directory; empty is os.UserHomeDir.
 	Home string
 	// GOOS names the platform; empty is runtime.GOOS. The keychain is read on
-	// darwin only.
+	// darwin, the secret service on linux, and neither elsewhere.
 	GOOS string
 	// LookupEnv reads the environment; nil is os.LookupEnv.
 	LookupEnv func(string) (string, bool)
@@ -77,6 +77,9 @@ type Config struct {
 	// Keychain returns the CLI's keychain item (`security find-generic-password
 	// -s gemini -a antigravity -w`); nil runs `security`.
 	Keychain func(ctx context.Context) (string, error)
+	// SecretService returns the CLI's secret service item (attributes service
+	// "gemini" and username "antigravity"); nil reads the session bus.
+	SecretService func(ctx context.Context) (string, error)
 	// LookPath finds agy on PATH; nil is exec.LookPath.
 	LookPath func(string) (string, error)
 	// Wake re-arms the login by listing models with the agy binary; nil runs
@@ -153,8 +156,9 @@ func Measure(ctx context.Context, cfg Config) (quota.Observation, error) {
 }
 
 // cloud is pacelever's agyProvider.Fetch after the local source: the file
-// login, else the keychain's; a refused login is re-armed once and retried,
-// and a refused file login falls back to the keychain copy.
+// login, else the OS keyring's (the keychain on macOS, the secret service on
+// Linux); a refused login is re-armed once and retried, and a refused file
+// login falls back to the keyring copy.
 func (c Config) cloud(ctx context.Context) (quota.Observation, error) {
 	token := c.fileToken()
 	usedSecret := false
@@ -190,7 +194,7 @@ func (c Config) cloud(ctx context.Context) (quota.Observation, error) {
 		}
 	}
 	// A file login that is missing or still refused after the re-arm falls back
-	// to the keychain copy. A refused fallback keeps the refresh hint rather
+	// to the keyring copy. A refused fallback keeps the refresh hint rather
 	// than masking it behind the same failure.
 	if !secretRefused {
 		if secret := c.secretToken(ctx); secret != "" && secret != token {
