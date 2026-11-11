@@ -96,6 +96,9 @@ type Spawn struct {
 	SelHost   string `json:"-"`
 	TaskGrade string `json:"-"`
 	placement *placementDecision
+	// replacedRung is the parent job a --parent-job spawn resolved in this
+	// process. A ladder step writes its row from it (outcome_ladder.go).
+	replacedRung *Job
 }
 
 var containmentPattern = regexp.MustCompile(`^hk:[1-9][0-9]{0,8}$`)
@@ -517,6 +520,7 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 		}
 		s.Task = j.Task
 		s.Inherited = s.ParentJob
+		s.replacedRung = &j
 		builderFamily = j.Family
 		if builderFamily == "" {
 			if seat, ok := a.Policy.Profiles[j.Profile]; ok {
@@ -994,6 +998,9 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 	}
 	committed = true
 	s.placement.placed = true
+	if rerr := a.recordLadderStep(ctx, s, launch, seat); rerr != nil {
+		a.warn("ladder step not recorded: %v", rerr)
+	}
 	s.placement.execution.Repo = a.placementRepo(ctx, s.CWD)
 	if e = a.startWatch(s.Job); e != nil {
 		a.warn("completion watcher failed: %v", e)
