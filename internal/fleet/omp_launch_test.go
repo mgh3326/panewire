@@ -429,7 +429,7 @@ func TestOMPLiveProof(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Logf("catalog name for %s: %q", l.ModelID, name)
-	if err := a.ompProof(ctx, l, cwd, pane, "", 2*time.Minute); err != nil {
+	if err := a.ompProof(ctx, l, false, cwd, pane, "", 2*time.Minute); err != nil {
 		t.Fatal(err)
 	}
 	if err := a.ompProcessCWD(ctx, cwd, pane); err != nil {
@@ -440,10 +440,10 @@ func TestOMPLiveProof(t *testing.T) {
 	if l.ModelID == other {
 		other = "anthropic/claude-opus-5-5"
 	}
-	if err := a.ompProof(ctx, Launch{ModelID: other, Effort: l.Effort}, cwd, pane, "", 0); err == nil {
+	if err := a.ompProof(ctx, Launch{ModelID: other, Effort: l.Effort}, false, cwd, pane, "", 0); err == nil {
 		t.Fatal("a different model was proven")
 	}
-	if err := a.ompProof(ctx, l, filepath.Join(filepath.Dir(cwd), "other"), pane, "", 0); err == nil {
+	if err := a.ompProof(ctx, l, false, filepath.Join(filepath.Dir(cwd), "other"), pane, "", 0); err == nil {
 		t.Fatal("a different cwd was proven")
 	}
 	t.Log("negative controls refused: different model, different cwd")

@@ -2,6 +2,7 @@ package fleet
 
 import (
 	"context"
+	"os"
 	"reflect"
 	"strings"
 	"testing"
@@ -45,8 +46,11 @@ func TestHubSpawnLocalDryRunKeepsItsOwnArgs(t *testing.T) {
 	a, s, _, hub, _ := hubFixture(t, gitState{pushed: true}, "wk/feat", hubHosts())
 	s.DryRun, s.Profile, s.Host, s.OverrideReason, s.Effort, s.T, s.Label, s.Workspace = true, "sonnet", "local", "fixture", "high", "T1", "job-a", "workers"
 	s.Prompt = writeBrief(t, a)
+	if err := os.MkdirAll(s.CWD, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	s.OperatorRequest = "hk:doc/x#y"
-	a.Quota = &fakeQuota{LaunchValue: Launch{Profile: "sonnet", Effort: "high", ModelID: "sonnet-m", Gate: "default", Pool: "claude"}, GateDo: gatePools(map[string]string{"sonnet": "claude"})}
+	a.Quota = &fakeQuota{LaunchValue: Launch{Profile: "sonnet", Effort: "high", Grade: "A", ModelID: "sonnet-m", Gate: "default", Pool: "claude"}, GateDo: gatePools(map[string]string{"sonnet": "claude"})}
 	if err := a.Spawn(context.Background(), s); err != nil {
 		t.Fatalf("a local dry-run lost an input local admission accepts: %v", err)
 	}

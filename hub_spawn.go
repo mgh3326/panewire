@@ -161,7 +161,12 @@ func validHubSpawnArgs(args []string) bool {
 // validHubSpawnArgsForMode is the node's argument rule; spawnargs states it
 // once for the node and for the submitter that builds the same args.
 func validHubSpawnArgsForMode(args []string, operator bool) bool {
-	return spawnargs.Refusal(args, operator) == ""
+	if spawnargs.Refusal(args, operator) != "" {
+		return false
+	}
+	// The arm names the spawn's own canon (-m), the rule submission applies.
+	arm := hubSpawnArg(args, "--e6-arm")
+	return arm == "" || fleet.ValidE6Arm(arm, hubSpawnArg(args, "-m"))
 }
 
 // parseHubSpawnResult is deliberately separate from parseHubInbound: a spawn

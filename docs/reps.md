@@ -74,3 +74,45 @@ and `PATCH` only fills NULL columns, so the merged row can never replace a
 failure row. Holding failure rows until the PR closes is what keeps one row per
 job. A job spawned with `--override-reason` starting `catalog experiment` writes
 no automatic row, failed or merged.
+
+## Ladder steps
+
+A ladder step is a pinned re-spawn that replaces a rung on a PR that is still
+open: `panewire spawn --parent-job JOB` with an override reason that starts
+`ladder step` (for example `ladder step sonnet high → opus high, PR 77`). The
+replaced job is `JOB`; the PR is the one it joined. When that spawn lands (its
+`job.spawned` event is committed), panewire writes one bench rep for the
+replaced rung. The write is best effort: the spawn is kept whatever the write
+does, and a failure is logged as a warning.
+
+The row:
+
+- `completed = 0`, with `profile`, `effort`, `model_id` and `role` of the
+  replaced job, `task_ref` `hk<task>`, `tier` from the spawn and `grade` from
+  the task title marker;
+- origin id `panewire-ladder:<replaced job id>`. A job has at most one ladder
+  row, so a retry of the same step gets a 409 from hk and keeps the first row;
+- `notes` with `kind = "ladder_step"`, `job` (the replaced job), `pr`,
+  `rounds`, `replaced` (profile, effort, model, harness of the replaced rung),
+  `takes_over` (job, profile, effort, model, harness of the rung that takes
+  over) and `reviewed_heads`.
+
+`reviewed_heads` is always `null`. panewire keeps no record of the PR heads
+mergewake reviewed, so the count is unknown, never zero. `blockers_found` goes
+as 0, as in failure rows, because the envelope cannot send it as NULL.
+
+Two things hold regardless of what happens to the PR later:
+
+- `panewire reps list --profile P --effort E` shows the row under the replaced
+  rung. The rung that takes over does not claim it.
+- A later merge writes the merging job's own outcome row (origin
+  `panewire-outcome:<job id>`). The ladder row is not altered, and the replaced
+  job keeps its own outcome or failure row under its own origin id.
+
+`panewire reps compare` counts the ladder row in `count` like any other
+`completed = 0` rep, so a rung can show one more attempt than it had. The row
+is a real failed attempt, but a replaced job that later closes unmerged also
+gets a failure row, so the two can both count against one rung.
+
+A spawn that names no parent job, or a parent that joined no PR, writes no
+ladder row. The spawn still succeeds and a warning is logged.
