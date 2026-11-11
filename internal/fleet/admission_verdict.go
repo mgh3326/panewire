@@ -591,7 +591,11 @@ func (in admissionInputs) judgeWith(req admissionRequest, allowUnrated bool) adm
 	}
 	policy := in.Policy.pool(row.Pool, now)
 	d.Class = policy.Class
-	if policy.Class == "exclude" {
+	// The SWE-2 free rungs draw on the free bucket, not the devin pool, so an
+	// excluded devin pool does not refuse them: they are judged below on the
+	// free bucket exactly as in an unexcluded pool (hk 3926).
+	_, freeRung := devinFreeRungs[profile]
+	if policy.Class == "exclude" && !freeRung {
 		return d.refuse(gateBlocked, "pool excluded by policy")
 	}
 	reading, observed := in.Readings[row.Pool]

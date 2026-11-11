@@ -898,7 +898,9 @@ check, a subscription, a request shape (`requested_by_requires_operator_request`
 `operator_request_not_applicable`, `consult_only`), the catalog resolution
 (`resolveRow`: unknown effort, credit effort, retired model identity, unknown
 or retired profile, `e6_arm_required`, retired or missing rung) and a pool
-excluded by policy.
+excluded by policy. The SWE-2 free rungs of an excluded `devin` pool are not
+refused by that class: they pass this judgment and are decided on their free
+bucket ([config](config.md)).
 
 A host the gate refuses with such a reason is recorded in the placement
 record's host row `reason` as `gate_blocked:<code>`, where `<code>` is the
