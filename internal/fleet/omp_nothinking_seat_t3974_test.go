@@ -192,7 +192,6 @@ func TestOMPNoThinkingSeatLeavesOtherRungsUnchanged(t *testing.T) {
 		profile, model, effort string
 		efforts                []string
 	}{
-		{"omp-dsflash41", "commandcode/deepseek/deepseek-v4.1-flash", "high", []string{"low", "high", "max"}},
 		{"omp-musespark13", "commandcode/meta/muse-spark-1.3", "high", []string{"low", "high", "max"}},
 		{"omp-cc-opus55", "commandcode/claude-opus-5-5", "high", []string{"low", "high", "max"}},
 		{"omp-cc-sonnet55", "commandcode/claude-sonnet-5-5", "high", []string{"low", "high", "max"}},
@@ -233,4 +232,30 @@ func TestOMPNoThinkingSeatLeavesOtherRungsUnchanged(t *testing.T) {
 			}
 		})
 	}
+	// omp-dsflash41 keeps its rungs and its argv; its rows are handoffkeep's,
+	// not the omp seed's.
+	t.Run("omp-dsflash41", func(t *testing.T) {
+		const model = "commandcode/deepseek/deepseek-v4.1-flash"
+		seat := a.Policy.Profiles["omp-dsflash41"]
+		if seat.NoThinking || seat.Effort != "high" {
+			t.Fatalf("seat = %+v", seat)
+		}
+		argv, _, err := a.launchArgs(seat, Launch{ModelID: model, Effort: seat.Effort})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(argv, []string{"--model", model + ":high"}) {
+			t.Fatalf("argv = %v", argv)
+		}
+		var rows []admissionRow
+		for _, effort := range []string{"low", "high", "max"} {
+			rows = append(rows, admissionRow{Profile: "omp-dsflash41", Effort: effort, ModelID: model, Pool: commandcodePool, Grade: gradeUnrated, Gate: defaultGate})
+		}
+		in := admissionInputs{Rows: rows, Seats: a.Policy.Profiles}
+		for _, effort := range []string{"low", "high", "max"} {
+			if _, _, _, err := in.resolveRow(admissionRequest{Profile: "omp-dsflash41", Effort: effort, Role: "worker", E6Arm: "omp-dsflash41@" + effort}, true); err != nil {
+				t.Fatalf("omp-dsflash41@%s refused: %v", effort, err)
+			}
+		}
+	})
 }
