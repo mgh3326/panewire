@@ -157,12 +157,67 @@ func failedEndOf(j Job) string {
 	return ""
 }
 
-// deferredFailure is a failure rep the sweep still owes: the job, its task, and
-// the ended reason it will be written with.
+// Event kinds that make a deferred failure rep durable: the job's own log holds
+// the debt until a failure_settled event clears it, so a restarted sweep finds it
+// even when the pane is gone.
+const (
+	failureDeferredKind = "job.failure_deferred"
+	failureSettledKind  = "job.failure_settled"
+)
+
+// deferredFailure is a failure rep the sweep still owes: the job, its task, the
+// ended reason it will be written with, and whether its deferred event is
+// already in the job's log.
 type deferredFailure struct {
-	job   Job
-	task  string
-	ended string
+	job      Job
+	task     string
+	ended    string
+	recorded bool
+}
+
+// deferredFailureOf reads the failure rep a job still owes from its events: the
+// newest failure_deferred, unless a failure_settled came after it.
+func deferredFailureOf(j Job) (deferredFailure, bool) {
+	for i := len(j.Events) - 1; i >= 0; i-- {
+		switch j.Events[i].Kind {
+		case failureSettledKind:
+			return deferredFailure{}, false
+		case failureDeferredKind:
+			p := j.Events[i].Payload
+			ended, task := str(p, "ended"), str(p, "task_id")
+			if ended == "" || task == "" {
+				return deferredFailure{}, false
+			}
+			return deferredFailure{job: j, task: task, ended: ended, recorded: true}, true
+		}
+	}
+	return deferredFailure{}, false
+}
+
+// deferFailure appends the deferred event once, so the job's log carries the debt.
+func (a *App) deferFailure(ctx context.Context, d deferredFailure) error {
+	return a.event(ctx, d.job.ID, failureDeferredKind, map[string]any{"task_id": d.task, "ended": d.ended})
+}
+
+// settleFailure appends the settled event that clears the debt.
+func (a *App) settleFailure(ctx context.Context, d deferredFailure) error {
+	return a.event(ctx, d.job.ID, failureSettledKind, map[string]any{"ended": d.ended})
+}
+
+// recordFailureAtEvent writes the failure rep for a terminal event the escalate
+// or watch path recorded. A rep that is not final yet is left as a durable debt
+// for the sweep.
+func (a *App) recordFailureAtEvent(ctx context.Context, j Job, ended string) {
+	final, err := a.recordFailedOutcome(ctx, j, j.Task, ended, a.PRs)
+	if err != nil {
+		a.warn("failure rep not recorded: %v", err)
+	}
+	if err != nil || !final {
+		d := deferredFailure{job: j, task: j.Task, ended: ended}
+		if derr := a.deferFailure(ctx, d); derr != nil {
+			a.warn("failure rep debt not recorded: %v", derr)
+		}
+	}
 }
 
 // closedFailure is the failure rep for a job the pane sweep just closed. A job
@@ -190,7 +245,11 @@ func (s *TaskPaneSweeper) observeFailure(ctx context.Context, a *App, j Job, tas
 	if _, pending := s.failures[j.ID]; pending {
 		return
 	}
-	s.attemptFailure(ctx, a, deferredFailure{job: j, task: task, ended: ended})
+	d := deferredFailure{job: j, task: task, ended: ended}
+	if owed, ok := deferredFailureOf(j); ok {
+		d.recorded = owed.recorded
+	}
+	s.attemptFailure(ctx, a, d)
 }
 
 // retryDeferredFailures asks again for every failure rep still open. It runs
@@ -211,19 +270,29 @@ func (s *TaskPaneSweeper) attemptFailure(ctx context.Context, a *App, d deferred
 		return
 	}
 	final, err := a.recordFailedOutcome(ctx, d.job, d.task, d.ended, s.PR)
-	switch {
-	case err != nil:
+	if err != nil {
 		s.info("failure rep not recorded", "job", id, "reason", err.Error())
-		s.keepFailure(d)
-	case final:
-		if s.settledFailures == nil {
-			s.settledFailures = map[string]bool{}
-		}
-		s.settledFailures[id] = true
-		delete(s.failures, id)
-	default:
-		s.keepFailure(d)
 	}
+	if err != nil || !final {
+		// The debt goes into the job's log once, so a restarted sweep finds it.
+		if !d.recorded {
+			if derr := a.deferFailure(ctx, d); derr != nil {
+				s.info("failure rep debt not recorded", "job", id, "reason", derr.Error())
+			} else {
+				d.recorded = true
+			}
+		}
+		s.keepFailure(d)
+		return
+	}
+	if serr := a.settleFailure(ctx, d); serr != nil {
+		s.info("failure rep settled event not recorded", "job", id, "reason", serr.Error())
+	}
+	if s.settledFailures == nil {
+		s.settledFailures = map[string]bool{}
+	}
+	s.settledFailures[id] = true
+	delete(s.failures, id)
 }
 
 func (s *TaskPaneSweeper) keepFailure(d deferredFailure) {
@@ -233,10 +302,8 @@ func (s *TaskPaneSweeper) keepFailure(d deferredFailure) {
 	s.failures[d.job.ID] = d
 }
 
-// recordLostFailure writes the failure rep for a job the watcher ended as lost
-// (decision unanswered, or its pane gone) when its outcome is already final.
+// recordLostFailure is the failure rep for a job the watcher ended as lost
+// (decision unanswered, or its pane gone).
 func (a *App) recordLostFailure(ctx context.Context, j Job) {
-	if _, err := a.recordFailedOutcome(ctx, j, j.Task, "lost", a.PRs); err != nil {
-		a.warn("failure rep not recorded: %v", err)
-	}
+	a.recordFailureAtEvent(ctx, j, "lost")
 }

@@ -63,7 +63,9 @@ A failure row is written only once the job's outcome is final:
   success and leaves no row);
 - the job's joined PR is closed unmerged: the row is written then;
 - the joined PR is open, or its state cannot be read: nothing is written. The
-  pane sweep asks again on each pass.
+  debt is recorded in the job's own events (`job.failure_deferred`), and the
+  pane sweep asks again on each pass, even after a restart or once the pane is
+  gone. A `job.failure_settled` event clears the debt when the rep is final.
 - the joined PR merged: the merged path writes the job's one row, and no
   failure row is written.
 

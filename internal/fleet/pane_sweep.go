@@ -323,7 +323,6 @@ func paneSweepMatches(j Job, ag Agent) bool {
 // Pass runs one sweep over the jobs under a.Jobs. A pass that cannot read
 // herdr changes nothing; one that cannot read a task keeps that job's pane.
 func (s *TaskPaneSweeper) Pass(ctx context.Context, a *App) error {
-	s.retryDeferredFailures(ctx, a)
 	entries, err := os.ReadDir(a.Jobs)
 	if errors.Is(err, os.ErrNotExist) {
 		clear(s.idleSince)
@@ -341,10 +340,16 @@ func (s *TaskPaneSweeper) Pass(ctx context.Context, a *App) error {
 		if err != nil {
 			continue
 		}
+		// A failure rep still owed is read from the job's own events, so it
+		// survives a restart and a job already reaped (outcome_failed.go).
+		if d, owed := deferredFailureOf(j); owed {
+			s.keepFailure(d)
+		}
 		if paneSweepCandidate(j) {
 			candidates = append(candidates, j)
 		}
 	}
+	s.retryDeferredFailures(ctx, a)
 	if len(candidates) == 0 {
 		clear(s.idleSince)
 		return nil

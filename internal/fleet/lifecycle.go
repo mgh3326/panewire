@@ -223,9 +223,7 @@ func (a *App) lifecycleWithOptions(ctx context.Context, kind string, args []stri
 		return e
 	}
 	if kind == "escalate" {
-		if _, rerr := a.recordFailedOutcome(ctx, j, j.Task, "escalated", a.PRs); rerr != nil {
-			a.warn("failure rep not recorded: %v", rerr)
-		}
+		a.recordFailureAtEvent(ctx, j, "escalated")
 	}
 	if kind == "done" && result == nil && j.SpawnRole == "reviewer" {
 		a.jobResultEvent(id, "missing", "no_result", "")

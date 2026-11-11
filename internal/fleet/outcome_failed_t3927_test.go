@@ -407,3 +407,84 @@ func TestSweepWritesRowsByOutcomeFinality(t *testing.T) {
 		t.Fatalf("completed job without a PR wrote a failure row")
 	}
 }
+
+// A reaped job whose joined PR is open owes its failure rep through its own
+// events. A restarted sweeper, with nothing in memory and the pane gone, writes
+// the row once the PR closes unmerged (the review finding on PR 390).
+func TestSweepRediscoversOwedFailureRepAfterRestart(t *testing.T) {
+	fake := &hkBenchFake{}
+	srv := httptest.NewServer(fake)
+	defer srv.Close()
+	f := newPaneSweepFixture(t)
+	f.a.BenchStore = &BenchStore{hk: &hkQuota{base: srv.URL, token: "test-token", now: f.a.Now}, now: f.a.Now}
+	f.job("j", "worker", "42")
+	putEvent(t, f.a, "j", "job.joined", map[string]any{"pr": "https://github.com/mgh3326/panewire/pull/9", "head": "head-9"})
+	putEvent(t, f.a, "j", "job.revoked", map[string]any{})
+	f.tasks["42"] = "in_progress"
+	f.prChanges["42"] = []PRChange{{Number: 9, State: "open", Head: "head-9"}}
+	f.at(0)
+	f.at(11)
+	if len(f.closed()) != 1 || len(fake.reps) != 0 {
+		t.Fatalf("closed=%v rows=%d, want one closed pane and no rows yet", f.closed(), len(fake.reps))
+	}
+	old := f.sweeper
+	f.sweeper = &TaskPaneSweeper{Grace: old.Grace, TaskState: old.TaskState, PR: old.PR, Info: old.Info}
+	f.prChanges["42"] = []PRChange{{Number: 9, State: "closed", Head: "head-9"}}
+	f.at(12)
+	if len(fake.reps) != 1 {
+		t.Fatalf("rows after restart and PR close = %d, want 1", len(fake.reps))
+	}
+	if notes, _ := fake.reps[0]["notes"].(string); !strings.Contains(notes, `"ended":"reaped"`) {
+		t.Fatalf("notes = %s", notes)
+	}
+	f.at(13)
+	if len(fake.reps) != 1 {
+		t.Fatalf("a settled debt wrote again: %d rows", len(fake.reps))
+	}
+}
+
+// The escalate path, which runs in its own process, leaves a durable debt when
+// the joined PR is open; the sweep pays it once the PR closes unmerged.
+func TestEscalateLeavesDebtThatSweepPaysWhenPRCloses(t *testing.T) {
+	fake := &hkBenchFake{}
+	srv := httptest.NewServer(fake)
+	defer srv.Close()
+	f := newPaneSweepFixture(t)
+	f.a.BenchStore = &BenchStore{hk: &hkQuota{base: srv.URL, token: "test-token", now: f.a.Now}, now: f.a.Now}
+	f.job("e", "worker", "44")
+	putEvent(t, f.a, "e", "job.joined", map[string]any{"pr": "https://github.com/mgh3326/panewire/pull/10", "head": "head-10"})
+	putEvent(t, f.a, "e", "job.escalate", map[string]any{})
+	f.tasks["44"] = "in_progress"
+	f.prChanges["44"] = []PRChange{{Number: 10, State: "open", Head: "head-10"}}
+	f.a.PR = f.sweeper.PR
+	f.recordEscalate("e")
+	if len(fake.reps) != 0 {
+		t.Fatalf("open PR wrote %d rows at escalate, want 0", len(fake.reps))
+	}
+	events, err := f.a.events("e")
+	if err != nil {
+		t.Fatal(err)
+	}
+	owed := false
+	for _, ev := range events {
+		owed = owed || ev.Kind == failureDeferredKind
+	}
+	if !owed {
+		t.Fatal("escalate with an open PR left no durable debt")
+	}
+	f.prChanges["44"] = []PRChange{{Number: 10, State: "closed", Head: "head-10"}}
+	f.at(0)
+	if len(fake.reps) != 1 {
+		t.Fatalf("rows after PR closed = %d, want 1", len(fake.reps))
+	}
+	if notes, _ := fake.reps[0]["notes"].(string); !strings.Contains(notes, `"ended":"escalated"`) {
+		t.Fatalf("notes = %s", notes)
+	}
+}
+
+// recordEscalate runs the escalate site's failure step for a job, as the escalate
+// command does in its own process.
+func (f *paneSweepFixture) recordEscalate(id string) {
+	f.t.Helper()
+	f.a.recordFailureAtEvent(f.t.Context(), mustFailureJob(f.t, f.a, id), "escalated")
+}
