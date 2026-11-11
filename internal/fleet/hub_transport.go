@@ -421,6 +421,22 @@ func (a *App) refsAt(ctx context.Context, dir, selector, sha string, patterns ..
 // allowlist cannot carry is refused rather than dropped, so a hub spawn never
 // runs with weaker settings than the same spawn over ssh.
 func hubArgs(jobs string, s Spawn) ([]string, error) {
+	args, err := hubSpawnArgs(jobs, s)
+	if err != nil {
+		return nil, err
+	}
+	// The node applies its own argument rule to every job.spawn and drops the
+	// whole message on a mismatch. Building the same args through that rule
+	// here turns a silent node drop into a submit-time refusal naming the flag.
+	if reason := spawnargs.Refusal(args, true); reason != "" {
+		return nil, errors.New(reason)
+	}
+	return args, nil
+}
+
+// hubSpawnArgs renders the flags without applying the node's argument rule,
+// which the callers that need a reason rather than an error apply themselves.
+func hubSpawnArgs(jobs string, s Spawn) ([]string, error) {
 	var args []string
 	add := func(flag, v string) {
 		if v != "" {
@@ -470,12 +486,6 @@ func hubArgs(jobs string, s Spawn) ([]string, error) {
 	add("--review-pass", s.ReviewPass)
 	add("--override-reason", s.OverrideReason)
 	add("--containment", s.Containment)
-	// The node applies its own argument rule to every job.spawn and drops the
-	// whole message on a mismatch. Building the same args through that rule
-	// here turns a silent node drop into a submit-time refusal naming the flag.
-	if reason := spawnargs.Refusal(args, true); reason != "" {
-		return nil, errors.New(reason)
-	}
 	return args, nil
 }
 
@@ -484,7 +494,7 @@ func hubArgs(jobs string, s Spawn) ([]string, error) {
 // another reason; "" when the hub args cannot be built at all, whose error
 // still surfaces where those args are built.
 func hubSpawnArgRefusal(jobs string, s Spawn) string {
-	args, err := hubArgs(jobs, s)
+	args, err := hubSpawnArgs(jobs, s)
 	if err != nil {
 		return ""
 	}

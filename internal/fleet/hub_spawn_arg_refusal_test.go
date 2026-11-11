@@ -39,6 +39,25 @@ func TestHubSpawnDryRunRefusesArgTheNodeWouldDrop(t *testing.T) {
 	}
 }
 
+// A local spawn never becomes a hub job.spawn, so the hub wire rule does not
+// apply to it: a value local admission accepts stays accepted.
+func TestHubSpawnLocalDryRunKeepsItsOwnArgs(t *testing.T) {
+	a, s, _, hub, _ := hubFixture(t, gitState{pushed: true}, "wk/feat", hubHosts())
+	s.DryRun, s.Profile, s.Host, s.OverrideReason, s.Effort, s.T, s.Label, s.Workspace = true, "sonnet", "local", "fixture", "high", "T1", "job-a", "workers"
+	s.Prompt = writeBrief(t, a)
+	s.OperatorRequest = "hk:doc/x#y"
+	a.Quota = &fakeQuota{LaunchValue: Launch{Profile: "sonnet", Effort: "high", ModelID: "sonnet-m", Gate: "default", Pool: "claude"}, GateDo: gatePools(map[string]string{"sonnet": "claude"})}
+	if err := a.Spawn(context.Background(), s); err != nil {
+		t.Fatalf("a local dry-run lost an input local admission accepts: %v", err)
+	}
+	if out := a.Out.(interface{ String() string }).String(); !strings.Contains(out, "dry-run host=") {
+		t.Fatalf("local dry-run did not print: %q", out)
+	}
+	if len(hub.spawns) != 0 {
+		t.Fatalf("local dry-run reached the hub: %v", hub.spawns)
+	}
+}
+
 // The hub sends a valid spawn's flags unchanged, in the same order: the node
 // accepts this exact list, and nothing about a valid request moved.
 func TestHubArgsValidSpawnUnchanged(t *testing.T) {

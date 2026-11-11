@@ -461,11 +461,6 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 	if err := validateContainment(s); err != nil {
 		return err
 	}
-	// A flag the node's own argument rule refuses would be dropped with the
-	// whole job.spawn. Refuse it here so a dry-run names the flag.
-	if reason := hubSpawnArgRefusal(a.Jobs, s); reason != "" {
-		return fail(exitUsage, "hub spawn: %s", reason)
-	}
 	resolved, aliasErr := a.resolveHost(s.Host)
 	if aliasErr != nil {
 		return aliasErr
@@ -473,6 +468,15 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 	if resolved != s.Host {
 		fmt.Fprintf(a.Out, "host_alias=%s machine=%s\n", s.Host, resolved)
 		s.Host = resolved
+	}
+	// A pinned hub host sends these flags to a node, whose own argument rule
+	// refuses the whole job.spawn on a mismatch. Refuse here so a dry-run names
+	// the flag before admission answers for another reason. A local or ssh host
+	// never sees the hub wire, and an auto placement decides its host later.
+	if str(a.Config.Hosts[s.Host], "via") == "hub" {
+		if reason := hubSpawnArgRefusal(a.Jobs, s); reason != "" {
+			return fail(exitUsage, "hub spawn: %s", reason)
+		}
 	}
 	autoSel := s.Profile == "" || s.Profile == "auto"
 	if !s.Delegated && (!autoSel || s.Host != "auto") && strings.TrimSpace(s.OverrideReason) == "" {
