@@ -206,13 +206,17 @@ func (a *App) e6Arm(carried string) string {
 	return firstNonempty(carried, a.envOr("PANEWIRE_E6_ARM", "SCOPEFUEL_E6_ARM"))
 }
 
-// validE6Arm reports whether arm is exactly canon@effort with the given canon.
-func validE6Arm(arm, canon string) bool {
+// ValidE6Arm reports whether arm is the experiment marker for canon: canon@
+// for a rung whose catalog effort is empty, or canon@<effort>. Submission, the
+// dry run and the node all call it. It checks the form only; the seat gate
+// decides whether the rung the marker names is armed.
+func ValidE6Arm(arm, canon string) bool {
 	at := strings.IndexByte(arm, '@')
-	if at <= 0 || at == len(arm)-1 || arm[:at] != canon {
+	if at <= 0 || arm[:at] != canon || strings.ContainsAny(arm, " \t\r\n") {
 		return false
 	}
-	return validID(arm[at+1:]) && !strings.ContainsAny(arm, " \t\r\n")
+	effort := arm[at+1:]
+	return effort == "" || validID(effort)
 }
 
 type Task struct {
@@ -614,20 +618,6 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 	if s.Workspace == "" {
 		return fail(exitConfig, "WORKSPACE_UNCONFIGURED: set local.workspace on the executing host or pass -w WORKSPACE_ID")
 	}
-	if s.DryRun {
-		seat := a.Policy.Profiles[s.Profile]
-		payload, e := a.prepareBrief(s, seat, Launch{Effort: firstNonempty(s.Effort, seat.Effort)}, string(brief))
-		if e != nil {
-			return e
-		}
-		// The local preview must still refuse what Seat.Check would refuse:
-		// a capability-bound seat on a host that lacks the flag.
-		if seat := a.Policy.Profiles[s.Profile]; seat.Capability != "standard" && !boolean(a.Config.Local, seat.Capability, false) {
-			return fail(exitConfig, "host %s lacks capability %s", a.machine(), seat.Capability)
-		}
-		fmt.Fprintf(a.Out, "dry-run host=%s profile=%s role=%s job=%s\n%s\n", a.machine(), s.Profile, s.Role, s.Job, payload)
-		return nil
-	}
 	if !boolean(a.Config.Local, "spawn", true) {
 		return fail(exitLocalDisabled, "local spawns disabled")
 	}
@@ -687,6 +677,28 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 	s.TaskGrade = grade
 	if s.Sel != nil && s.Sel["requested"] == nil {
 		s.Sel["requested"] = map[string]any{"grade": grade, "role": s.Role, "t": s.T, "effort": effort}
+	}
+	if s.DryRun {
+		// A dry run takes the seat gate a real spawn takes (the catalog row and
+		// Seat.Check, E6 marker included) and nothing after it: no gate receipt,
+		// lease, hub reservation or pane.
+		if seat.Capability != "standard" && !boolean(a.Config.Local, seat.Capability, false) {
+			return fail(exitConfig, "host %s lacks capability %s", a.machine(), seat.Capability)
+		}
+		// A pinned seat takes the launch-row gate here. An auto pick was
+		// already resolved from the catalog by selectProfile, which this
+		// dry run does not repeat.
+		if !autoSel {
+			if _, e := a.checkLaunchRow(ctx, s, seat, a.spawnQuotaRequest(s, seat, effort), effort, selEffort, grade, builderFamily, autoSel); e != nil {
+				return e
+			}
+		}
+		payload, e := a.prepareBrief(s, seat, Launch{Effort: firstNonempty(s.Effort, seat.Effort)}, string(brief))
+		if e != nil {
+			return e
+		}
+		fmt.Fprintf(a.Out, "dry-run host=%s profile=%s role=%s job=%s\n%s\n", a.machine(), s.Profile, s.Role, s.Job, payload)
+		return nil
 	}
 	launch, gate, e := a.admitLaunch(ctx, s, seat, effort, selEffort, grade, builderFamily, autoSel)
 	if e != nil {
@@ -1015,36 +1027,53 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 	return a.afterSpawn(ctx, s, false)
 }
 
-// admitLaunch resolves the launch rung for a selected seat and asks the quota
-// gate and the hub for the spawn. It is the admission half shared by spawn and
-// `panewire delegate --headless`; it claims and writes nothing.
-func (a *App) admitLaunch(ctx context.Context, s Spawn, seat Seat, effort, selEffort, grade, builderFamily string, autoSel bool) (Launch, string, error) {
-	qr := QuotaRequest{Profile: seat.Canon, GateProfile: seat.gateName(), Effort: effort, Role: s.Role, OperatorRequest: s.OperatorRequest, RequestedBy: s.RequestedBy, Purpose: s.Purpose, AccountKey: s.AccountKey, E6Arm: a.e6Arm(s.E6Arm)}
+// spawnQuotaRequest is the catalog and gate request for a spawn's seat and rung.
+func (a *App) spawnQuotaRequest(s Spawn, seat Seat, effort string) QuotaRequest {
+	return QuotaRequest{Profile: seat.Canon, GateProfile: seat.gateName(), Effort: effort, Role: s.Role, OperatorRequest: s.OperatorRequest, RequestedBy: s.RequestedBy, Purpose: s.Purpose, AccountKey: s.AccountKey, E6Arm: a.e6Arm(s.E6Arm)}
+}
+
+// checkLaunchRow is the launch-row half of admitLaunch: the catalog row the
+// request resolves to, then the seat's own rules (grade cover, E6 marker). A
+// dry run runs it too, so the preview refuses what a real spawn refuses. It
+// takes no gate receipt, lease or reservation.
+func (a *App) checkLaunchRow(ctx context.Context, s Spawn, seat Seat, qr QuotaRequest, effort, selEffort, grade, builderFamily string, autoSel bool) (Launch, error) {
 	launch, e := a.Quota.Launch(ctx, qr)
 	if e != nil {
 		// Preserve the gate's role/quota refusal even when the catalog also
 		// refuses this launch; no fallback launch data is ever invented.
 		if _, gateErr := a.Quota.Gate(ctx, qr); gateErr != nil {
-			return Launch{}, "", gateErr
+			return Launch{}, gateErr
 		}
-		return Launch{}, "", e
+		return Launch{}, e
 	}
 	if effort != "" && launch.Effort != effort {
-		return Launch{}, "", fail(exitConfig, "catalog effort does not match request")
+		return Launch{}, fail(exitConfig, "catalog effort does not match request")
 	}
 	if autoSel && selEffort != "" && launch.Effort != selEffort {
-		return Launch{}, "", fail(exitConfig, "launch rung does not match selected catalog rung")
+		return Launch{}, fail(exitConfig, "launch rung does not match selected catalog rung")
 	}
 	if launch.Profile != seat.Canon {
-		return Launch{}, "", fail(exitConfig, "catalog profile mismatch")
+		return Launch{}, fail(exitConfig, "catalog profile mismatch")
 	}
 	if topRoutingRole(s.RoutingRole) {
 		grade = ""
 		if !(&routing{role: s.RoutingRole}).admitsSeat(seat, launch.ModelID) {
-			return Launch{}, "", fail(exitSeatRefused, "NO_ROLE_CANDIDATE: model %s in harness %s cannot consult", launch.ModelID, seat.Kind)
+			return Launch{}, fail(exitSeatRefused, "NO_ROLE_CANDIDATE: model %s in harness %s cannot consult", launch.ModelID, seat.Kind)
 		}
 	}
 	if e = seat.Check(launch, s.Role, grade, builderFamily, a.e6Arm(s.E6Arm), a.Config.Local); e != nil {
+		return Launch{}, e
+	}
+	return launch, nil
+}
+
+// admitLaunch resolves the launch rung for a selected seat and asks the quota
+// gate and the hub for the spawn. It is the admission half shared by spawn and
+// `panewire delegate --headless`; it claims and writes nothing.
+func (a *App) admitLaunch(ctx context.Context, s Spawn, seat Seat, effort, selEffort, grade, builderFamily string, autoSel bool) (Launch, string, error) {
+	qr := a.spawnQuotaRequest(s, seat, effort)
+	launch, e := a.checkLaunchRow(ctx, s, seat, qr, effort, selEffort, grade, builderFamily, autoSel)
+	if e != nil {
 		return Launch{}, "", e
 	}
 	// A gate alias is the pool gate for a whole family of spellings, so it

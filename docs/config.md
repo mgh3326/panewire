@@ -1507,7 +1507,7 @@ for ownership and distribution.
 | `PANEWIRE_NODE_ENV` | Panewire node env file for `HUB_MACHINE_ID` (job record host id); default `~/.config/panewire/hub-node.env`, or `[quota].node_env`. |
 | `ARBITER_INBOX_ROOT` | Jobs root; production guard requires the canonical inbox. |
 | `HERDR_SESSION` | Herdr session passed through or selected for remote execution. |
-| `PANEWIRE_E6_ARM` | Exact canon@effort experiment marker when policy requires one. A hub spawn carries it to the hub and node, so it applies to `--host auto|local|NAME` alike; a marker whose canon differs from `-m` is refused at submit (exit 2). |
+| `PANEWIRE_E6_ARM` | Exact experiment marker when policy requires one: `<canon>@<effort>`, or `<canon>@` (nothing after the `@`) for a rung whose catalog effort is empty, such as `devin-ds41-max@`. The marker names the rung the spawn resolves to: the seat gate refuses `<canon>@` for a rung with an effort and `<canon>@<effort>` for an effortless rung. A hub spawn carries it to the hub and node, so it applies to `--host auto|local|NAME` alike; a marker whose canon differs from `-m` is refused at submit (exit 2). |
 | `ARBITER_JOB`, `HK_TASK_ID` | Calling job/task inheritance; populated in spawned panes. |
 | `PANEWIRE_LANE_STRICT=1` | A committed spawn whose hub lane registration failed returns 82 (see [Lane registration failure](#lane-registration-failure)). |
 | `PANEWIRE_COMPLETION_TIMEOUT_S` | Positive watcher lifetime; duration or bare seconds, default 1h. Expiry retains the job. The watcher completes a job only on a [terminal signal](r21-lane-event.md#job-completion-signal), never on a stable report alone. |

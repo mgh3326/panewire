@@ -373,7 +373,7 @@ reads:
   in-flight reserve and `credit_max_age_s`. A file pacelever refuses exits 2.
   The pool policy in it, read as [Admission](#admission) reads it, gives
   subscription. The gate and the credit pool views keep their narrower read.
-- **The E6 marker** from the request, else `PACELEVER_E6_ARM`.
+- **The E6 marker** from the request, else `PACELEVER_E6_ARM`. For a rung whose catalog effort is empty the marker is `<canon>@`; [config](config.md) lists the forms.
 
 It answers as `pacelever policy launch` does through panewire: a refusal exits 3
 with pacelever's reason (`quota catalog: e6_arm_required: …`; the pacelever path
