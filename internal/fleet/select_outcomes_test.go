@@ -145,7 +145,7 @@ func TestSelectRefreshedClassificationKeepsItsOutcome(t *testing.T) {
 	}
 }
 
-func TestSelectAccountTiersPreserveImplementerOrder(t *testing.T) {
+func TestSelectAccountTiersFollowPolicyOrder(t *testing.T) {
 	rows := []CatalogRow{
 		{Profile: "devin-swe2", Effort: "high", Grade: "S", Pool: "devin", Gate: "default", ModelID: "swe-2"},
 		{Profile: "sonnet", Effort: "high", Grade: "S", Pool: "claude", Gate: "default", ModelID: "sonnet-m"},
