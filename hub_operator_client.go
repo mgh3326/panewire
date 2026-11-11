@@ -39,6 +39,8 @@ var hubOperatorAPIPaths = map[string]bool{
 	"/v1/jobs":            true,
 	// Shared with nodeHubClient, which uses this boundary for daemon requests.
 	"/v1/jobs/close":    true,
+	"/v1/jobs/mine":     true,
+	"/v1/jobs/reap":     true,
 	"/v1/jobs/orphaned": true,
 	"/v1/jobs/reassign": true,
 	"/v1/lanes":         true,

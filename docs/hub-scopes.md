@@ -57,6 +57,12 @@ On the routes whose resource is in the body (node command, spawn, wake) the
 body is validated before the scope check, so a malformed request answers `400`.
 `GET /v1/spawn/{id}` answers `404` for an unknown id before the scope check.
 
+`GET /v1/jobs/mine` and `POST /v1/jobs/reap` are the lane's own jobs routes
+([jobs-own.md](jobs-own.md)). They take no scope: the operator may name any
+lane, a node credential only a lane routed to its own machine, and a service
+is refused. `jobs close` also requires the job's owner lane to be the named
+lane.
+
 The `svc-mergewake` line for hub reap (operator decision D1: every machine):
 
 ```sh

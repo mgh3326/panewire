@@ -89,8 +89,13 @@ type nodeJobLedger struct {
 	newerClaim bool
 }
 
+// nodeJobLedgerEvent is one parsed ledger event. owner and keep are read for
+// job.reap, which must prove the job's own identity before it closes a pane;
+// the mark-lost path ignores them.
 type nodeJobLedgerEvent struct {
 	kind, pane, label, role, task string
+	owner                         string
+	keep                          bool
 }
 
 func nodeJobClaimKind(kind string) bool {
@@ -190,6 +195,8 @@ func readNodeJobLedgerEvents(job *os.Root) ([]nodeJobLedgerEvent, error) {
 				Label      string `json:"label"`
 				AgentLabel string `json:"agent_label"`
 				Role       string `json:"role"`
+				OwnerLane  string `json:"owner_lane"`
+				Keep       bool   `json:"keep"`
 				// TaskID is a string or a number in the ledger.
 				TaskID any `json:"task_id"`
 			} `json:"payload"`
@@ -208,7 +215,7 @@ func readNodeJobLedgerEvents(job *os.Root) ([]nodeJobLedgerEvent, error) {
 		case float64:
 			task = strconv.FormatFloat(id, 'f', -1, 64)
 		}
-		events = append(events, nodeJobLedgerEvent{kind: event.Kind, pane: event.Payload.PaneID, label: label, role: event.Payload.Role, task: task})
+		events = append(events, nodeJobLedgerEvent{kind: event.Kind, pane: event.Payload.PaneID, label: label, role: event.Payload.Role, task: task, owner: event.Payload.OwnerLane, keep: event.Payload.Keep})
 	}
 	return events, nil
 }

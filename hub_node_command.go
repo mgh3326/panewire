@@ -154,7 +154,10 @@ func (h *HubServer) sendNodeCommand(machine, op string, args json.RawMessage) (p
 	}{Type: "node.command", RequestID: requestID, Op: op, Args: args}
 	if err := agent.writeJSON(message); err != nil {
 		h.forgetNodeCommand(requestID)
-		if op == nodeCommandJobClose {
+		// A write that failed may still have delivered a command that acts, so
+		// the two acting job commands report an unknown outcome rather than
+		// "nothing was sent"; every other op answers a plain disconnect.
+		if op == nodeCommandJobClose || op == nodeCommandJobReap {
 			return nil, "", "send_failed", false
 		}
 		return nil, "", "disconnected", false
@@ -230,7 +233,7 @@ func (h *HubServer) handleNodeCommand(writer http.ResponseWriter, request *http.
 	}
 	decoded, valid := decodeNodeCommandArgs(body.Op, body.Args)
 	logReap := func(outcome string) {
-		if nodeCommandReapOnly(body.Op) {
+		if nodeCommandAudited(body.Op) {
 			pane, job := nodeReapCommandSubject(decoded)
 			h.logger.Info("node command", "client", h.authenticate(request).id, "machine", machine, "op", body.Op, "pane", pane, "job", job, "outcome", outcome)
 		}
@@ -292,8 +295,8 @@ func (h *HubServer) handleNodeCommand(writer http.ResponseWriter, request *http.
 // authorizeNodeCommand adds one rule to authorize: a reap-only op is for a
 // service whose scopes name it, so the operator credential is refused too.
 func (h *HubServer) authorizeNodeCommand(request *http.Request, op, machine string) hubAccess {
-	if op == nodeCommandJobMarkLost || op == nodeCommandJobClose {
-		// These commands are issued by the hub after its own checks; neither is
+	if op == nodeCommandJobMarkLost || op == nodeCommandJobClose || op == nodeCommandJobReap {
+		// These commands are issued by the hub after its own checks; none is
 		// available through the public node-command endpoint.
 		return hubAccessForbidden
 	}

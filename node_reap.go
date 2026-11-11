@@ -83,6 +83,13 @@ func nodeCommandReapOnly(op string) bool {
 	return op == nodeCommandPaneRead || op == nodeCommandJobDone
 }
 
+// nodeCommandAudited names the ops whose call is logged with the pane or job
+// it acted on, on the hub and on the node alike. job.reap joins them without
+// being reachable through the public node-command endpoint.
+func nodeCommandAudited(op string) bool {
+	return nodeCommandReapOnly(op) || op == nodeCommandJobReap
+}
+
 func validPaneReadResult(result PaneReadResult) bool {
 	switch result.Outcome {
 	case nodePaneReadOK:
@@ -444,6 +451,8 @@ func nodeReapCommandSubject(decoded any) (pane, job string) {
 	case nodePaneReadArgs:
 		return args.PaneID, args.Name
 	case nodeJobDoneArgs:
+		return "", args.Job
+	case nodeJobReapArgs:
 		return "", args.Job
 	}
 	return "", ""

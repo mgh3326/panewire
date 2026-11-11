@@ -494,6 +494,18 @@ func (h *HubServer) activeConsoleJobs(machine string) []hubConsoleJob {
 	return h.consoleJobs(machine, "", false)
 }
 
+// hubJobState is the closed state vocabulary of the operator console and the
+// lane's own listing.
+func hubJobState(job *hubJobRecord) string {
+	switch {
+	case job.Completed:
+		return "completed"
+	case job.Orphaned:
+		return "orphaned"
+	}
+	return "active"
+}
+
 func (h *HubServer) consoleJobs(machine, lane string, includeCompleted bool) []hubConsoleJob {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -503,13 +515,7 @@ func (h *HubServer) consoleJobs(machine, lane string, includeCompleted bool) []h
 		if (!includeCompleted && job.Completed) || h.jobRecordStaleLocked(job, now) || (machine != "" && job.Node != machine) || (lane != "" && job.OwnerLane != lane) {
 			continue
 		}
-		state := "active"
-		if job.Completed {
-			state = "completed"
-		} else if job.Orphaned {
-			state = "orphaned"
-		}
-		jobs = append(jobs, hubConsoleJob{Machine: job.Node, State: state, JobID: job.JobID, OwnerLane: job.OwnerLane, Pane: job.Pane, Tier: job.Tier, Role: job.Role, StartedAt: job.StartedAt, LastEventKind: job.LastEventKind, LastEventAt: job.LastEventAt})
+		jobs = append(jobs, hubConsoleJob{Machine: job.Node, State: hubJobState(job), JobID: job.JobID, OwnerLane: job.OwnerLane, Pane: job.Pane, Tier: job.Tier, Role: job.Role, StartedAt: job.StartedAt, LastEventKind: job.LastEventKind, LastEventAt: job.LastEventAt})
 	}
 	sort.Slice(jobs, func(i, j int) bool { return jobs[i].JobID < jobs[j].JobID })
 	return jobs

@@ -66,9 +66,16 @@ func t14NodeWithSpawnV2(t *testing.T, hub *HubServer, server *httptest.Server, a
 // t14NamedNode connects a spawn-capable node as machine; its token is "node-token".
 func t14NamedNode(t *testing.T, hub *HubServer, server *httptest.Server, machine string, accepting, spawnV2 bool) *websocket.Conn {
 	t.Helper()
+	return t14NamedNodeToken(t, hub, server, machine, "node-token", accepting, spawnV2)
+}
+
+// t14NamedNodeToken connects a node as machine with the given token, for a
+// fixture whose auth set is not t14Hub's.
+func t14NamedNodeToken(t *testing.T, hub *HubServer, server *httptest.Server, machine, token string, accepting, spawnV2 bool) *websocket.Conn {
+	t.Helper()
 	headers := http.Header{}
 	headers.Set(hubMachineIDHeader, machine)
-	headers.Set(hubAuthorizationHeader, "Bearer node-token")
+	headers.Set(hubAuthorizationHeader, "Bearer "+token)
 	connection, _, err := websocket.Dial(t.Context(), t14WSURL(server.URL, "/v1/agent"), &websocket.DialOptions{HTTPHeader: headers})
 	if err != nil {
 		t.Fatal(err)

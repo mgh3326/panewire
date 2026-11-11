@@ -599,6 +599,14 @@ or ack across lanes. The count path uses a partial index, reads no message body,
 and neither reads nor acknowledges items. A zero count for a specified lane is
 returned explicitly. Hub failures display as unavailable, never as zero.
 
+The same node rule governs a lane's own jobs. `GET /v1/jobs/mine?lane=L` and
+`POST /v1/jobs/reap` admit the operator for any lane, and a node credential
+only for a lane routed to its own machine; a node naming another machine's
+lane is refused `403 {"error":"lane_not_routed_to_caller"}`, and a service is
+refused `403 {"error":"scope_forbidden"}` because no scope grants these
+routes. `jobs close` additionally requires the job's owner lane to be L
+(`403 owner_mismatch`). See [a lane's own jobs](jobs-own.md).
+
 ## Claude Code examples (not installed)
 
 [Status line script](examples/claude-inbox-statusline.sh) prints `inbox: N unread`

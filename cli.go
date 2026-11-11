@@ -76,7 +76,7 @@ func RunCLI(args []string, cfg CLIConfig) int {
 		return runDeliveriesCLI(args[1:], os.Stdout, os.Stderr)
 	}
 	if args[0] == "jobs" {
-		return runJobsCLI(args[1:], os.Stdout, os.Stderr, hubCLIDeps{})
+		return runJobsCLI(args[1:], os.Stdout, os.Stderr, hubCLIDeps{SocketPath: cfg.SocketPath})
 	}
 	if args[0] == "lanes" {
 		return runLanesCLI(args[1:], os.Stdout, os.Stderr, hubCLIDeps{})
