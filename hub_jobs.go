@@ -494,6 +494,18 @@ func (h *HubServer) activeConsoleJobs(machine string) []hubConsoleJob {
 	return h.consoleJobs(machine, "", false)
 }
 
+// hubJobState is the closed state vocabulary of the operator console and the
+// lane's own listing.
+func hubJobState(job *hubJobRecord) string {
+	switch {
+	case job.Completed:
+		return "completed"
+	case job.Orphaned:
+		return "orphaned"
+	}
+	return "active"
+}
+
 func (h *HubServer) consoleJobs(machine, lane string, includeCompleted bool) []hubConsoleJob {
 	h.mu.Lock()
 	defer h.mu.Unlock()

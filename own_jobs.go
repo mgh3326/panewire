@@ -29,18 +29,6 @@ type hubOwnJob struct {
 	LastSeen string `json:"last_seen,omitempty"`
 }
 
-// hubJobState is the closed state vocabulary of the operator console and the
-// lane's own listing.
-func hubJobState(job *hubJobRecord) string {
-	switch {
-	case job.Completed:
-		return "completed"
-	case job.Orphaned:
-		return "orphaned"
-	}
-	return "active"
-}
-
 // ownJobsDenial is the lane rule a node credential already follows for its
 // inbox: the lane must be routed to the caller's own machine. The operator
 // keeps every lane; a service is not a lane and is refused. It answers the
