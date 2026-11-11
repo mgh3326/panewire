@@ -751,6 +751,30 @@
         "counsel"
       ]
     },
+    "devin-argon4-high": {
+      "canon": "devin-argon4-high",
+      "kind": "devin",
+      "family": "google",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel"
+      ]
+    },
+    "devin-glm53-high": {
+      "canon": "devin-glm53-high",
+      "kind": "devin",
+      "family": "other",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel"
+      ]
+    },
     "devin-fusion-opus55": {
       "canon": "devin-fusion-opus55",
       "kind": "devin",
