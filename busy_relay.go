@@ -1212,7 +1212,7 @@ func (manager *relayBusyManager) deliver(parent context.Context, items []relayHe
 		immediate := relayGroupImmediate(group)
 		previousUncertain := false
 		if immediate && staleScreen == "" && relayRetriesOnce(result) {
-			previousUncertain = result.Evidence == "prompt_failed" || (result.Outcome == relayInjectMaybeInPane && !strings.HasPrefix(result.Evidence, "presend:"))
+			previousUncertain = (result.Evidence == "prompt_failed" && strings.EqualFold(result.Harness, "devin")) || (result.Outcome == relayInjectMaybeInPane && !strings.HasPrefix(result.Evidence, "presend:"))
 			// hk 3276: a worker directive is not held for a quieter pane, so a
 			// send that was rejected or never showed up is typed once more
 			// right away. The row's nonce is unchanged, and the text already

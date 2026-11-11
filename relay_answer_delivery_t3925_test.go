@@ -133,3 +133,57 @@ func TestRelayAgyDoesNotTreatQueueBannerAsProof_t3925(t *testing.T) {
 		t.Fatalf("agy outcome=%+v, want unproven without an adapter", result)
 	}
 }
+
+func TestRelayConsecutiveRejectedPromptsReportExhaustion_t3925(t *testing.T) {
+	for _, harness := range []string{"claude", "codex", "omp"} {
+		t.Run(harness, func(t *testing.T) {
+			calls := 0
+			events := make(chan hubClientEvent, 8)
+			client := &HubClient{relayInjectVerdict: func(context.Context, string, string, []string) relayInjectResult {
+				calls++
+				return relayInjectResult{Outcome: relayInjectRetryable, Harness: harness, Evidence: "prompt_failed"}
+			}}
+			client.setRelayEmitter(func(event hubClientEvent) { events <- event })
+			client.relayBusyManager().deliver(context.Background(), []relayHeld{{Pane: "w1:p1", Lane: "worker", JobID: "job", EventID: 3928, Text: "answer", DeliverPolicy: relayDeliverDirective, HeldSince: time.Now()}}, false)
+			close(events)
+			for event := range events {
+				if event.Kind != "relay.dropped" {
+					continue
+				}
+				var drop relayDroppedPayload
+				if err := json.Unmarshal(event.Payload, &drop); err != nil {
+					t.Fatal(err)
+				}
+				if calls != 2 || drop.Reason != "inject_failed_max_attempts" {
+					t.Fatalf("calls=%d drop reason=%q, want two rejected sends and inject_failed_max_attempts", calls, drop.Reason)
+				}
+				return
+			}
+			t.Fatal("rejected sends produced no terminal reason")
+		})
+	}
+}
+
+func TestRelayDevinRejectedPromptRemainsUncertain_t3925(t *testing.T) {
+	events := make(chan hubClientEvent, 8)
+	client := &HubClient{relayInjectVerdict: func(context.Context, string, string, []string) relayInjectResult {
+		return relayInjectResult{Outcome: relayInjectRetryable, Harness: "devin", Evidence: "prompt_failed"}
+	}}
+	client.setRelayEmitter(func(event hubClientEvent) { events <- event })
+	client.relayBusyManager().deliver(context.Background(), []relayHeld{{Pane: "w1:p1", Lane: "worker", JobID: "job", EventID: 3929, Text: "answer", DeliverPolicy: relayDeliverDirective, HeldSince: time.Now()}}, false)
+	close(events)
+	for event := range events {
+		if event.Kind != "relay.dropped" {
+			continue
+		}
+		var drop relayDroppedPayload
+		if err := json.Unmarshal(event.Payload, &drop); err != nil {
+			t.Fatal(err)
+		}
+		if drop.Reason != "delivery_uncertain_check_pane" {
+			t.Fatalf("devin drop reason=%q, want check pane after possible partial send", drop.Reason)
+		}
+		return
+	}
+	t.Fatal("rejected sends produced no terminal reason")
+}
