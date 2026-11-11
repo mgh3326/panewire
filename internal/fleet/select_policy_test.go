@@ -55,11 +55,11 @@ func paceStatus(now time.Time, pools map[string]pace) string {
 // from the shipped pool-order policy.
 func TestSelectionPolicyScenarios(t *testing.T) {
 	embedded, err := LoadPoolPolicy("")
-	if err != nil || strings.Join(embedded.Order, ",") != "waste,free,ranked,credit" {
+	if err != nil || strings.Join(embedded.Order, ",") != "waste,free,ranked" {
 		t.Fatalf("embedded operator order=%v err=%v", embedded.Order, err)
 	}
-	// Credit has no automated balance reader and remains eligible after all
-	// subscription candidates are exhausted.
+	// A credit pool ranks in the free band, with or without a balance
+	// reading, so it is spent before the ranked subscription pools.
 	roomy := map[string]pace{"devin": {10, 0.5}, "claude": {15, 0.5}, "codex": {20, 0.5}}
 	// Paid pools near their projected cap: under 20% unused at reset, so not
 	// at waste risk.
@@ -110,10 +110,10 @@ func TestSelectionPolicyScenarios(t *testing.T) {
 			"codex-sol@high", "codex", "waste"},
 		{"credit balance recorded, every subscription on pace to use up its week → credit before the paced pools", "B", "T2", "3",
 			with(map[string]pace{"devin": exhausted, "claude": {60, 0.5}, "codex": {70, 0.5}, "anthropic-api": {10, 0.5}}),
-			"omp-sonnet@high", "anthropic-api", "waste"},
-		{"no credit balance recorded, every subscription on pace to use up its week → the paced pool stays ahead of credit", "B", "T2", "3",
+			"omp-sonnet@high", "anthropic-api", "credit"},
+		{"no credit balance recorded, credit still ranks in the free band before the paced pools", "B", "T2", "3",
 			with(map[string]pace{"devin": exhausted, "claude": {60, 0.5}, "codex": {70, 0.5}, "anthropic-api": {10, 0.5}}),
-			"sonnet@medium", "claude", "ranked"},
+			"omp-sonnet@high", "anthropic-api", "credit"},
 		{"credit pool readable, claude 16% → waste before credit", "B", "T2", "3",
 			with(map[string]pace{"devin": exhausted, "claude": {8, 0.5}, "anthropic-api": {10, 0.5}}),
 			"sonnet@medium", "claude", "waste"},
@@ -213,11 +213,11 @@ func TestPoolPolicyProjectionThresholds(t *testing.T) {
 	}
 	dir := t.TempDir()
 	for body, ok := range map[string]bool{
-		`{"version":2,"order":["free","waste","ranked","credit"]}`:                                                                true,
-		`{"version":2,"order":["free","waste","ranked","credit"],"waste_below_projected_pct":80,"exclude_at_projected_pct":100}`:  true,
-		`{"version":2,"order":["free","waste","ranked","credit"],"waste_below_projected_pct":110,"exclude_at_projected_pct":100}`: false,
-		`{"version":2,"order":["free","waste","ranked","credit"],"waste_below_projected_pct":0}`:                                  true,
-		`{"version":2,"order":["free","waste","ranked","credit"],"exclude_at_projected_pct":0}`:                                   false,
+		`{"version":3,"order":["free","waste","ranked"]}`:                                                                true,
+		`{"version":3,"order":["free","waste","ranked"],"waste_below_projected_pct":80,"exclude_at_projected_pct":100}`:  true,
+		`{"version":3,"order":["free","waste","ranked"],"waste_below_projected_pct":110,"exclude_at_projected_pct":100}`: false,
+		`{"version":3,"order":["free","waste","ranked"],"waste_below_projected_pct":0}`:                                  true,
+		`{"version":3,"order":["free","waste","ranked"],"exclude_at_projected_pct":0}`:                                   false,
 	} {
 		path := dir + "/p.json"
 		if e := os.WriteFile(path, []byte(body), 0600); e != nil {

@@ -14,7 +14,7 @@ alone. `docs/spawn-import.json` records source and initial-import SHA-256 hashes
 Post-import changes are confined to CLI routing, combined-binary version
 preflight, presets, aliases, workspace defaults/label resolution, actionable
 refusal output, verified failure retry cleanup, and the operator-directed embedded
-`waste > free > ranked > credit` default. Custom policy overrides remain supported. The original package tests
+`waste > free+credit > ranked` default. Custom policy overrides remain supported. The original package tests
 remain in the package. The two version checks collapse to one because the
 launcher and hub are now one binary. Job ledger schema and exit codes stay the
 same. The parent repository's SQLite dependency remains in use.

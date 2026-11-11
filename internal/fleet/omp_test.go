@@ -210,7 +210,7 @@ func TestOMPExplicitConsultCannotChangeModel(t *testing.T) {
 	}
 }
 
-func TestOMPCreditAfterSubscriptions(t *testing.T) {
+func TestOMPCreditBesideFree(t *testing.T) {
 	for _, tc := range []struct{ profile, model, pool string }{
 		{"omp-opus", "anthropic/claude-opus-5-5", "anthropic-api"},
 		{"omp-sol", "openai/gpt-6.1-sol", "openai-api"},
@@ -230,10 +230,9 @@ func TestOMPCreditAfterSubscriptions(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				wantProfile, wantTier := "sonnet", "ranked"
-				if exhausted {
-					wantProfile, wantTier = tc.profile, "credit"
-				}
+				// Credit ranks in the free band, so it is spent before the
+				// ranked subscription pool whether or not that pool is used up.
+				wantProfile, wantTier := tc.profile, "credit"
 				chosen := sel.record()["chosen"].(map[string]any)
 				if chosen["canon"] != wantProfile || chosen["tier"] != wantTier {
 					t.Fatalf("want %s tier=%s, got %v", wantProfile, wantTier, chosen)
@@ -345,20 +344,19 @@ func TestOMPDelegateHeadless(t *testing.T) {
 	}
 }
 
-func TestOMPSimulateCreditOrder(t *testing.T) {
-	// Credit pacing: a subscription pool on pace to use up its longest window
-	// ranks behind a credit pool that has a recorded balance; with no balance
-	// recorded the subscription pool keeps its place ahead of credit.
+func TestOMPSimulateCreditBesideFree(t *testing.T) {
+	// A credit pool ranks in the free band whatever its pacing or balance, so
+	// it is chosen before a ranked subscription pool.
 	for _, tc := range []struct {
 		name               string
 		projected          float64
 		creditLeft         *float64
 		wantSeat, wantTier string
 	}{
-		{"pool leaves quota unused", 90, ptrF(80), "sonnet", "ranked"},
-		{"pool on pace to use up, credit without expiry", 100, ptrF(80), "sonnet", "ranked"},
-		{"pool on pace to use up, no credit balance recorded", 100, nil, "sonnet", "ranked"},
-		{"pool on pace to use up, credit balance zero", 100, ptrF(0), "sonnet", "ranked"},
+		{"pool leaves quota unused", 90, ptrF(80), "omp-opus", "credit"},
+		{"pool on pace to use up, credit without expiry", 100, ptrF(80), "omp-opus", "credit"},
+		{"pool on pace to use up, no credit balance recorded", 100, nil, "omp-opus", "credit"},
+		{"pool on pace to use up, credit balance zero", 100, ptrF(0), "omp-opus", "credit"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			a := testApp(t)

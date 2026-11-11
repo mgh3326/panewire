@@ -31,7 +31,7 @@ func TestWasteSnapshotKeepsHostPassOneCandidate_T3651(t *testing.T) {
 	if !found {
 		t.Fatalf("the pass-1 candidate the live walk chose is missing from the waste_first order (%d candidates)", len(order))
 	}
-	// Pool-first across hosts: the expiring credit is waste risk, so it leads.
+	// Pool-first across hosts: credit ranks in the free band, so it leads.
 	w := shadowEventOf(t, *events).Shadow.WasteFirst
 	if w == nil || w.Outcome != "differs" || w.Choice == nil || w.Choice.AccountKey != testCreditA || w.Choice.Host != "cloud-small" {
 		t.Fatalf("waste_first %+v, want the expiring credit on cloud-small", w)

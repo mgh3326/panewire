@@ -274,7 +274,15 @@ func fleetQuotaFromReading(pool string, reading shared.Reading, now time.Time) (
 		}
 		quotaValue.Buckets = append(quotaValue.Buckets, out)
 	}
-	if len(quotaValue.Buckets) == 0 {
+	if reading.Free != nil {
+		free := &FleetStateFree{State: reading.Free.State}
+		if reading.Free.ResetsAt != nil {
+			at := reading.Free.ResetsAt.UTC()
+			free.ResetsAt = &at
+		}
+		quotaValue.Free = free
+	}
+	if len(quotaValue.Buckets) == 0 && quotaValue.Free == nil {
 		return FleetStatePublish{}, false
 	}
 	publish := FleetStatePublish{Kind: fleetStateKindQuota, Key: reading.Key, MeasuredAt: reading.MeasuredAt.UTC().Truncate(time.Millisecond), Quota: quotaValue}

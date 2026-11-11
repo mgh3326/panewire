@@ -6,6 +6,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/mgh3326/panewire/internal/quota/devin"
 	"github.com/mgh3326/panewire/internal/quotastop"
 )
 
@@ -165,9 +166,34 @@ func announcedQuotaStop(j Job) (quotastop.Stop, bool) {
 }
 
 // quotaStopAnnounce records job.lost for a quota stop without ending the hk
-// record, so the hub sees the stop and can replace the job first.
+// record, so the hub sees the stop and can replace the job first. A devin
+// free-tier limit is also written to this host's free-limit record first, so
+// the next devin measurement publishes it and later selections skip the free
+// rung until its reset (RecordFreeLimit).
 func (a *App) quotaStopAnnounce(ctx context.Context, j Job, stop quotastop.Stop) error {
+	if stop.Pool == "devin-free" {
+		if e := RecordFreeLimit(devin.Config{Home: a.Home, Now: a.Now}, j.ID, stop); e != nil {
+			a.warn("free-limit observation failed: %v", e)
+		}
+	}
 	return a.event(ctx, j.ID, "job.lost", quotaStopPayload(j, stop))
+}
+
+// RecordFreeLimit writes a devin free-tier limit a quota-stopped pane reported
+// into cfg's host free-limit record (internal/quota/devin), the same record
+// `panewire quota observe devin-free-limit` writes. The node merges it into the
+// devin account's next published reading (shared.Flow.LocalFree), and selection
+// drops the free rung as free_limit until the reset. A zero stop.Reset uses the
+// record's one-hour unknown-reset hold. A stop of another pool is a no-op.
+func RecordFreeLimit(cfg devin.Config, job string, stop quotastop.Stop) error {
+	if stop.Pool != "devin-free" {
+		return nil
+	}
+	reset := ""
+	if !stop.Reset.IsZero() {
+		reset = stop.Reset.UTC().Format(time.RFC3339Nano)
+	}
+	return devin.ObserveFreeLimit(cfg, reset, "", "", "job:"+job, "", stop.Reset.IsZero(), false)
 }
 
 // quotaStopLost ends a job whose idle pane shows a quota stop and has no

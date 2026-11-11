@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/mgh3326/panewire/internal/hkcred"
+	"github.com/mgh3326/panewire/internal/quota/shared"
 	"github.com/mgh3326/panewire/internal/textbound"
 )
 
@@ -239,10 +240,11 @@ func (c *hkQuota) presence(ctx context.Context) ([]PresenceRecord, error) {
 func (c *hkQuota) sharedAccount(ctx context.Context, key string) (SharedAccount, error) {
 	var body struct {
 		Observation *struct {
-			Kind        string          `json:"kind"`
-			MeasuredAt  time.Time       `json:"measured_at"`
-			ConfirmedAt *time.Time      `json:"confirmed_at"`
-			Buckets     []accountBucket `json:"buckets"`
+			Kind        string             `json:"kind"`
+			MeasuredAt  time.Time          `json:"measured_at"`
+			ConfirmedAt *time.Time         `json:"confirmed_at"`
+			Buckets     []accountBucket    `json:"buckets"`
+			FreeBucket  *shared.FreeBucket `json:"free_bucket"`
 		} `json:"observation"`
 	}
 	if i := strings.IndexByte(key, ':'); i <= 0 || !validID(key[:i]) || !accountFP.MatchString(key[i+1:]) {
@@ -268,9 +270,24 @@ func (c *hkQuota) sharedAccount(ctx context.Context, key string) (SharedAccount,
 		if age := c.now().Sub(acc.MeasuredAt); age >= -time.Minute && age <= ttl {
 			acc.Fresh = true
 		}
-		acc.Quota = accountPoolView(o.Buckets, c.now())
+		acc.Quota = withFree(accountPoolView(o.Buckets, c.now()), o.FreeBucket, c.now())
 	}
 	return acc, nil
+}
+
+// withFree attaches a reading's free-tier state (devin's SWE-2 bucket) to its
+// pool view. A free-only reading (no paid window) still yields a view: the
+// free rung ranks on it, and every paid rung of that pool stays quota_unknown.
+func withFree(v *PoolView, free *shared.FreeBucket, now time.Time) *PoolView {
+	f, ok := shared.NormalizeFree(free, now)
+	if !ok || f == nil {
+		return v
+	}
+	if v == nil {
+		v = &PoolView{Status: "ok", Class: "spend"}
+	}
+	v.Free = f
+	return v
 }
 
 // accountBucket is the allowlisted shared-observation wire format. Model

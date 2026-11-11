@@ -66,7 +66,7 @@ func usdCreditFixture(t *testing.T, entries func(now time.Time) []map[string]any
 	a, s, q := selFixture(t, "A", rows, nil, present)
 	serveOMPRouting(t, a)
 	policy := filepath.Join(t.TempDir(), "pool-order.json")
-	const doc = `{"version": 2, "source_doc": "policy/quota-stop", "order": ["free", "waste", "ranked", "credit"],
+	const doc = `{"version": 3, "source_doc": "policy/quota-stop", "order": ["free", "waste", "ranked"],
 	  "free": [], "credit_pools": ["anthropic-api", "openai-api"]}`
 	if e := os.WriteFile(policy, []byte(doc), 0o600); e != nil {
 		t.Fatal(e)
@@ -137,8 +137,8 @@ func TestCreditUSDDollarsAtRiskRankAbovePercent(t *testing.T) {
 		t.Fatalf("usd_urgency = %v, want 300/216h", credit["usd_urgency"])
 	}
 	row := candOutcome(sel.record(), "omp-opus", "high")
-	if row["waste_risk"] != true || row["waste_order"] != "usd" || row["usd_urgency"] == nil {
-		t.Fatalf("anthropic-api must be waste-risk ordered by dollars: %v", row)
+	if row["waste_risk"] != false || row["tier"] != "credit" || row["waste_order"] != "usd" || row["usd_urgency"] == nil {
+		t.Fatalf("anthropic-api must be ordered by dollars inside the credit band: %v", row)
 	}
 }
 
@@ -194,7 +194,7 @@ func TestCreditUSDOutranksPercentOnlyAndWarns(t *testing.T) {
 		t.Fatalf("openai-api records no dollars: %v", got)
 	}
 	row := candOutcome(sel.record(), "omp-sol", "high")
-	if row["waste_order"] != "reset" || row["waste_risk"] != true {
+	if row["waste_order"] != "reset" || row["waste_risk"] != false || row["tier"] != "credit" {
 		t.Fatalf("percent-only credit keeps the percentage rule: %v", row)
 	}
 	if n := strings.Count(warnings.String(), "credit_usd_missing pool=openai-api"); n != 1 {
@@ -202,9 +202,8 @@ func TestCreditUSDOutranksPercentOnlyAndWarns(t *testing.T) {
 	}
 }
 
-// (d) Inside the waste band dollars-at-risk credit ranks ahead of a
-// waste-risk subscription, and a subscription beats a credit with no money at
-// risk.
+// (d) A waste-risk subscription ranks ahead of credit in the free band, with
+// or without money at risk.
 func TestCreditUSDWasteBandOrdering(t *testing.T) {
 	atRisk := func(now time.Time) []map[string]any {
 		return []map[string]any{usdCreditEntry("a1", "anthropic-api", 75, ptrF(100), now.Add(-time.Hour), onDay(now, 240*time.Hour))}
@@ -221,7 +220,7 @@ func TestCreditUSDWasteBandOrdering(t *testing.T) {
 		entries func(time.Time) []map[string]any
 		want    string
 	}{
-		{"waste-risk credit beats a waste-risk subscription", atRisk, "omp-opus"},
+		{"a waste-risk subscription beats credit at risk", atRisk, "sonnet"},
 		{"a subscription beats credit with nothing at risk", burned, "sonnet"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

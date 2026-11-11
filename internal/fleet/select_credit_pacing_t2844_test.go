@@ -31,8 +31,8 @@ func TestCreditPacingRanksPacedPoolBehindCredit(t *testing.T) {
 		behindCredit bool
 	}{
 		{"paced pool, credit balance recorded → credit first", balance(80, month), paced, noFree, "omp-opus", true, true},
-		{"paced pool, no credit balance recorded → paced pool keeps its place", noBalance, paced, noFree, "sonnet", true, false},
-		{"paced pool, credit balance zero → paced pool keeps its place", balance(0, month), paced, noFree, "sonnet", true, false},
+		{"paced pool, no credit balance recorded → credit still ranks in the free band", noBalance, paced, noFree, "omp-opus", true, false},
+		{"paced pool, credit balance zero → credit still ranks in the free band", balance(0, month), paced, noFree, "omp-opus", true, false},
 		{"paced pool, credit gate refuses → the paced pool is next", balance(80, month), paced, map[string]string{"sonnet": "claude"}, "sonnet", true, true},
 		{"pool leaves quota unused without urgency → credit first", balance(80, month), unused, noFree, "omp-opus", false, false},
 		{"fast 5h window, week leaves quota → not paced", balance(80, month), fastShort, noFree, "omp-opus", false, false},
@@ -61,8 +61,11 @@ func TestCreditPacingRanksPacedPoolBehindCredit(t *testing.T) {
 				t.Fatalf("a pool on pace is never excluded: %v", row)
 			}
 			seats := rankedSeats(sel)
-			if credit, sub := slices.Index(seats, "omp-opus"), slices.Index(seats, "sonnet"); tt.paced && tt.behindCredit != (credit < sub) {
-				t.Fatalf("ranked order %v: behind credit=%t", seats, tt.behindCredit)
+			// Credit ranks in the free band, so a paced subscription pool
+			// never ranks ahead of a present credit rung, whether or not the
+			// credit-pacing flag demoted it.
+			if credit, sub := slices.Index(seats, "omp-opus"), slices.Index(seats, "sonnet"); tt.paced && credit >= 0 && sub >= 0 && credit > sub {
+				t.Fatalf("ranked order %v: paced pool must not precede credit", seats)
 			}
 		})
 	}

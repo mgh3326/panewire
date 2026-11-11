@@ -46,30 +46,26 @@ has a score, otherwise load, then configuration order.
 On each host in that order, selection considers only the accounts it holds
 and the rungs its harnesses can launch. Grade, role, routing, effort, and seat
 checks still apply. The quota policy orders those rungs within that host:
-waste, free, ranked, credit, including the existing waste-risk, expiring-credit,
-and credit-pacing rules. Expiring credit competes by the dollars at risk per
-hour until expiry — the balance less the spend projected before expiry — and
-ranks ahead of waste-risk subscriptions. A credit entry without a recorded
-dollar balance keeps the percentage rule (remaining percent per hour) and
-ranks after any credit that has dollars.
+waste, then free and credit together, then ranked, including the existing
+waste-risk and credit-pacing rules. A credit pool is never waste-risk: it
+ranks in the free band and is ordered there by the dollars at risk per hour
+until expiry — the balance less the spend projected before expiry — or, for an
+entry without a recorded dollar balance, by the percentage rule (remaining
+percent per hour). On a full tie inside the band a credit rung goes before a
+free rung.
 
-Credit is a fleet-wide last band. Selection walks the ranked hosts twice.
-Pass 1 tries every candidate except plain credit and the pools ranked behind
-credit (a subscription paced to use up its window, on a host that also holds
-credit worth spending). Pass 2 walks the same hosts again with those
-candidates, credit first, and runs only when pass 1 admitted nothing on any
-host. Expiring credit with dollars at risk is waste-risk, so it stays in pass 1
-and keeps its dollars-at-risk order against waste-risk subscriptions; credit
-whose balance the projected spend uses up first drops back to the plain credit
-tier. The first admitted host,
+Selection walks the ranked hosts twice. Pass 1 tries every candidate except a
+subscription pool paced behind credit (a subscription on pace to use up its
+window, on a host that also holds credit worth spending). Pass 2 walks the same
+hosts again with those candidates and runs only when pass 1 admitted nothing on
+any host. Credit is a pass-1 candidate with the free band. The first admitted host,
 rung, and account wins. A host whose accounts are exhausted or unknown is
 skipped. A credit candidate left unchosen because pass 1 admitted another
 account records `below_choice`. A pool is paced behind credit only when that credit is present on its own host
-(T2997): credit on another host never demotes a paced pool, and is only the
-pass 2 last band. A paced pool on a higher-ranked host is therefore chosen in
-pass 1 even when the only credit is on a later host. Pass 1 is also host-first:
-a higher-ranked host's paced pool is admitted before a later host's
-waste-risk credit is reached.
+(T2997): credit on another host never demotes a paced pool. A paced pool on a
+higher-ranked host is therefore chosen in pass 1 even when the only credit is
+on a later host. Pass 1 is also host-first: a higher-ranked host's paced pool
+is admitted before a later host's ranked rung is reached.
 
 Measured quota exhaustion is cached by account for the decision. Several
 hosts holding one account share one quota and do not repeat its exhausted
@@ -79,10 +75,10 @@ Explicit `-m PROFILE`, `--host`, and hub-directed spawns keep their existing
 placement and admission paths.
 
 The `job.placement` event's `selection` object and `plan --json` include
-`host_order` and each host's `rank`, `pass` (1, or 2 for the credit band),
-`tried` rungs, and `admission_outcome`. `plan --json` lists a host once per
-pass that tried it; pass 2 rows exist only for hosts that hold a credit-band
-candidate. The `job.placement` selection and the placement record list each
+`host_order` and each host's `rank`, `pass` (1, or 2 for a subscription pool
+paced behind credit), `tried` rungs, and `admission_outcome`. `plan --json`
+lists a host once per pass that tried it; pass 2 rows exist only for hosts that
+hold a paced candidate. The `job.placement` selection and the placement record list each
 host once, keeping the pass 2 row (the record keeps pass 1 when it tried
 something).
 An attempt records `admitted`, `quota_exhausted`, `quota_unknown`, or `no_rung`.
@@ -519,10 +515,10 @@ spent instead, next to the live choice. Live placement is unchanged.
   account the live run bound to a host. A candidate joins at the first usable
   host whose walk ranks it in pass 1, judged with that host's own credit-pacing
   flag (T2997), not the selection-wide one. They are sorted by the live comparator
-  (`sortSelCands`: waste-risk pools first, then tier, grade, urgency and the
+  (`sortSelCands`: waste-risk pools first, then band, grade, urgency and the
   rest), the same comparison the live path uses. **Pass 2 is not modelled.**
-  Pass 2 is the credit band the live walk tries only when pass 1 chose nothing.
-  A live choice that came from pass 2 is recorded with `pass: 2`.
+  Pass 2 is the paced-pool band the live walk tries only when pass 1 chose
+  nothing. A live choice that came from pass 2 is recorded with `pass: 2`.
 - **Usable hosts.** The ranked hosts the walk could still use. A host the walk
   found unreachable, or that reported no eligible host, is left out.
 - **Quota state.** Read from the readings the live run already holds; the arm

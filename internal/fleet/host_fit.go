@@ -304,7 +304,7 @@ func (sp *selPresence) admitHostFirst(ctx context.Context, s Spawn, p *selPlan, 
 	// credit-pacing rule sees every candidate the host holds. The passes then
 	// take their share in that order.
 	bands := make([][2][]*selCand, len(ranked))
-	creditBand := false
+	pacedBand := false
 	for i, h := range ranked {
 		var present []*selCand
 		for _, c := range pending {
@@ -314,9 +314,11 @@ func (sp *selPresence) admitHostFirst(ctx context.Context, s Spawn, p *selPlan, 
 		}
 		orderSelCands(present)
 		for _, c := range present {
+			// Credit is a free-band candidate and walks in pass 1. Only a
+			// subscription pool paced behind credit waits for pass 2.
 			band := 0
-			if c.behindCredit || c.creditPool && !c.risk {
-				band, creditBand = 1, true
+			if c.behindCredit {
+				band, pacedBand = 1, true
 			}
 			bands[i][band] = append(bands[i][band], c)
 			if band == 0 {
@@ -327,7 +329,7 @@ func (sp *selPresence) admitHostFirst(ctx context.Context, s Spawn, p *selPlan, 
 	st := &hostAdmission{refusedOn: map[*selCand]string{}, exhausted: map[string]hostTry{}, down: map[string]string{}, failedOn: map[*selCand]map[string]bool{}}
 	sp.admitPass(ctx, s, p, pending, ranked, st, 1, func(i int) []*selCand { return bands[i][0] })
 	livePass := 1
-	if p.chosen == nil && creditBand {
+	if p.chosen == nil && pacedBand {
 		sp.admitPass(ctx, s, p, pending, ranked, st, 2, func(i int) []*selCand { return bands[i][1] })
 		if p.chosen != nil {
 			livePass = 2

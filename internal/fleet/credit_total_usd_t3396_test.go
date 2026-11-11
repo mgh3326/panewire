@@ -21,7 +21,7 @@ func creditTotalFixture(t *testing.T, totals map[string]any, entries func(now ti
 	a, s, q := selFixture(t, "A", rows, nil, []string{"anthropic-api"})
 	serveOMPRouting(t, a)
 	policy := filepath.Join(t.TempDir(), "pool-order.json")
-	const doc = `{"version": 2, "source_doc": "policy/quota-stop", "order": ["free", "waste", "ranked", "credit"],
+	const doc = `{"version": 3, "source_doc": "policy/quota-stop", "order": ["free", "waste", "ranked"],
 	  "free": [], "credit_pools": ["anthropic-api", "openai-api"]}`
 	if e := os.WriteFile(policy, []byte(doc), 0o600); e != nil {
 		t.Fatal(e)

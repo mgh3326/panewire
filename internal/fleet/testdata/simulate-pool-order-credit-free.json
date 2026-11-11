@@ -1,0 +1,15 @@
+{
+  "now": "2026-11-11T00:00:00Z",
+  "grade": "A",
+  "role": "worker",
+  "pools": [
+    {"id": "devin", "class": "spend", "used_pct": 4},
+    {"id": "anthropic-api", "class": "credit", "credit_left_pct": 46.4, "resets_at": "2026-11-16T00:00:00Z"},
+    {"id": "claude", "class": "spend", "used_pct": 31}
+  ],
+  "candidates": [
+    {"profile": "devin-swe2", "seat": "devin-swe2", "effort": "high", "grade": "A", "pool": "devin", "gate": "default", "model_id": "swe-2", "free": true},
+    {"profile": "omp-opus", "seat": "omp-opus", "effort": "high", "grade": "A", "pool": "anthropic-api", "gate": "default", "model_id": "anthropic/claude-opus-5-5"},
+    {"profile": "sonnet", "seat": "sonnet", "effort": "high", "grade": "A", "pool": "claude", "gate": "default", "model_id": "claude-sonnet-5-5"}
+  ]
+}

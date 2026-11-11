@@ -88,6 +88,17 @@ type FleetStateQuota struct {
 	Pool       string             `json:"pool"`
 	Source     string             `json:"source,omitempty"`
 	Buckets    []FleetStateBucket `json:"buckets"`
+	// Free is a pool's free-tier state (devin's SWE-2 bucket), the shared
+	// reading's free_bucket. A free-only reading may carry no paid bucket.
+	Free *FleetStateFree `json:"free_bucket,omitempty"`
+}
+
+// FleetStateFree is the free-tier state of a pool that has one. State is
+// "available", "exhausted" or "unknown"; ResetsAt is set exactly when it is
+// "exhausted".
+type FleetStateFree struct {
+	State    string     `json:"state"`
+	ResetsAt *time.Time `json:"resets_at,omitempty"`
 }
 
 type FleetStateBucket struct {
@@ -181,8 +192,22 @@ func validFleetStateQuota(key string, quota *FleetStateQuota) bool {
 	if quota.Pool != pool || (quota.Source != "" && !fleetStateTokenPattern.MatchString(quota.Source)) {
 		return false
 	}
-	if len(quota.Buckets) == 0 || len(quota.Buckets) > fleetStateMaxBuckets {
+	if len(quota.Buckets) == 0 && quota.Free == nil || len(quota.Buckets) > fleetStateMaxBuckets {
 		return false
+	}
+	if quota.Free != nil {
+		switch quota.Free.State {
+		case "available", "unknown":
+			if quota.Free.ResetsAt != nil {
+				return false
+			}
+		case "exhausted":
+			if quota.Free.ResetsAt == nil {
+				return false
+			}
+		default:
+			return false
+		}
 	}
 	for _, bucket := range quota.Buckets {
 		if !fleetStateTokenPattern.MatchString(bucket.Window) || bucket.UsedPct == nil {

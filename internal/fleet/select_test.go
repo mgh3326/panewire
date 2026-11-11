@@ -172,7 +172,7 @@ func TestSelectNonDevinGradeBPreservesCandidate(t *testing.T) {
 	}
 }
 
-func TestSelectPolicyOrderWasteFreeRankedCredit(t *testing.T) {
+func TestSelectPolicyOrderWasteFreeCreditRanked(t *testing.T) {
 	waste, noWaste := true, false
 	mk := func() []CatalogRow {
 		return []CatalogRow{
@@ -198,7 +198,7 @@ func TestSelectPolicyOrderWasteFreeRankedCredit(t *testing.T) {
 	}{
 		{"waste beats free", mk(), pools, []string{"devin", "claude", "anthropic-api", "codex"}, "sonnet"},
 		{"waste beats credit and ranked", mk()[1:], pools, []string{"claude", "anthropic-api", "codex"}, "sonnet"},
-		{"ranked beats credit", mk()[2:], pools, []string{"anthropic-api", "codex"}, "codex-sol"},
+		{"credit beside free beats ranked", mk()[2:], pools, []string{"anthropic-api", "codex"}, "opus"},
 		{"ranked by blocking", mk()[3:], pools, []string{"codex"}, "codex-sol"},
 	}
 	for _, tt := range cases {
@@ -220,7 +220,8 @@ func TestSelectPolicyOrderWasteFreeRankedCredit(t *testing.T) {
 }
 
 func TestSelectWasteNeedsVerdict(t *testing.T) {
-	// A spend pool without a verdict flag is ranked, not waste-promoted.
+	// A spend pool without a verdict flag is ranked, not waste-promoted. It
+	// ranks behind the free band, where the credit pool sits.
 	waste, noWaste := true, false
 	rows := []CatalogRow{
 		{Profile: "sonnet", Effort: "high", Grade: "S", Pool: "claude", Gate: "default", ModelID: "m"},
@@ -236,10 +237,13 @@ func TestSelectWasteNeedsVerdict(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	if sel.chosen.seatName != "sonnet" || sel.chosen.tierName != "ranked" {
-		t.Fatalf("subscription must come before credit even without a waste flag: %s", sel.chosen.seatName)
+	if got := candOutcome(sel.record(), "sonnet", "high")["tier"]; got != "ranked" {
+		t.Fatalf("a spend pool without a verdict flag must stay ranked: %v", got)
 	}
-	// With the flag set the same pool moves into the waste tier.
+	if sel.chosen.seatName != "opus" || sel.chosen.tierName != "credit" {
+		t.Fatalf("credit ranks in the free band before the ranked pool: %s in %s", sel.chosen.seatName, sel.chosen.tierName)
+	}
+	// With the flag set the same pool moves into the waste tier and wins.
 	pools["claude"] = PoolView{Status: "ok", Class: "spend", Waste: &waste, Blocking: ptrF(5)}
 	sel, e = a.selectProfile(context.Background(), s)
 	if e != nil || sel.chosen.seatName != "sonnet" {
@@ -466,7 +470,7 @@ func TestSelectRecordsPolicyVersionAndOverride(t *testing.T) {
 		t.Fatal(e)
 	}
 	rec := sel.record()
-	if rec["policy_version"] != float64(2) && rec["policy_version"] != 2 {
+	if rec["policy_version"] != float64(3) && rec["policy_version"] != 3 {
 		t.Fatalf("policy version must be recorded: %v", rec["policy_version"])
 	}
 	if rec["policy_source"] != "policy/quota-stop" {

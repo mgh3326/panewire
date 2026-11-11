@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/mgh3326/panewire/internal/fleet"
+	"github.com/mgh3326/panewire/internal/quota/devin"
 	"github.com/mgh3326/panewire/internal/quotastop"
 )
 
@@ -405,6 +406,14 @@ func (q *quotaStopManager) observe(ctx context.Context, c idleWakeCandidate, now
 	q.logger.Info("quota-stop observation", append([]any{"pane", c.PaneID, "outcome", outcome}, timing...)...)
 	if !ok {
 		return
+	}
+	// A devin free-tier limit is a fact about the host, not the pane: record
+	// it even when this stop is only observed, so the next devin measurement
+	// publishes it and later selections skip the free rung until its reset.
+	if stop.Pool == "devin-free" {
+		if err := fleet.RecordFreeLimit(devin.Config{Now: func() time.Time { return now }}, job.JobID, stop); err != nil {
+			q.logger.Warn("free-limit observation failed", "error", err)
+		}
 	}
 	lookupCtx, lookupCancel := context.WithTimeout(ctx, quotaStopLookupBudget)
 	defer lookupCancel()

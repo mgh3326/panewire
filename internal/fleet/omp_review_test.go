@@ -55,13 +55,14 @@ func TestOMPCreditPoolReadFailure(t *testing.T) {
 	}
 }
 
-func TestPoolPolicyV2Migration(t *testing.T) {
+func TestPoolPolicyV3Migration(t *testing.T) {
 	for _, tc := range []struct {
 		name, body, errorText string
 	}{
 		{"legacy v1", `{"version":1,"order":["free","waste","credit","ranked"]}`, "migrate"},
-		{"v2 credit before ranked", `{"version":2,"order":["free","waste","credit","ranked"]}`, "credit"},
-		{"v2 credit last", `{"version":2,"order":["free","waste","ranked","credit"],"credit_pools":["anthropic-api","openai-api"]}`, ""},
+		{"legacy v2", `{"version":2,"order":["free","waste","ranked","credit"],"credit_pools":["anthropic-api","openai-api"]}`, "migrate"},
+		{"v3 credit in the order", `{"version":3,"order":["free","waste","ranked","credit"]}`, "credit"},
+		{"v3 bands", `{"version":3,"order":["free","waste","ranked"],"credit_pools":["anthropic-api","openai-api"]}`, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "pool-order.json")
@@ -70,8 +71,8 @@ func TestPoolPolicyV2Migration(t *testing.T) {
 			}
 			policy, err := LoadPoolPolicy(path)
 			if tc.errorText == "" {
-				if err != nil || policy.Version != 2 {
-					t.Fatalf("v2 credit-last policy refused: %v", err)
+				if err != nil || policy.Version != 3 {
+					t.Fatalf("v3 band policy refused: %v", err)
 				}
 			} else if code(err) != exitConfig || !strings.Contains(err.Error(), tc.errorText) {
 				t.Fatalf("unsafe policy must refuse with %q migration evidence: %v", tc.errorText, err)
@@ -79,8 +80,8 @@ func TestPoolPolicyV2Migration(t *testing.T) {
 		})
 	}
 	policy, err := LoadPoolPolicy("")
-	if err != nil || policy.Version != 2 {
-		t.Fatalf("embedded policy must be v2: version=%d err=%v", policy.Version, err)
+	if err != nil || policy.Version != 3 {
+		t.Fatalf("embedded policy must be v3: version=%d err=%v", policy.Version, err)
 	}
 }
 
