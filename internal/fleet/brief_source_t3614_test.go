@@ -244,7 +244,7 @@ func TestWorkBriefFromHKDocRef(t *testing.T) {
 	a, s, _, _ := cmdFixture(t)
 	useFakeHK(t).SetTask("42", `{"id":42,"title":"implement (grade B, T1)","state":"ready","refs":{"brief_path":"hk:doc/`+briefDocTestKey+`"}}`).
 		SetDoc(briefDocTestKey, "work brief from hk marker")
-	err := a.Run(context.Background(), []string{"work", "42", "-c", s.CWD, "-m", "cmd-dsflash41", "-w", "workspace", "-l", "worker-a", "--job", "job-a", "--host", "local", "--owner", "parent", "--override-reason", "fixture", "--containment", "hk:12", "--dry-run"})
+	err := a.Run(context.Background(), []string{"work", "42", "-c", s.CWD, "-m", "cmd-dsflash41", "-w", "workspace", "-l", "worker-a", "--job", "job-a", "--report", filepath.Join(a.Jobs, "job-a", "report.md"), "--host", "local", "--owner", "parent", "--override-reason", "fixture", "--containment", "hk:12", "--dry-run"})
 	if err != nil {
 		t.Fatal(err)
 	}
