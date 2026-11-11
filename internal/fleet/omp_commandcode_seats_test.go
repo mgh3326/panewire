@@ -9,13 +9,16 @@ import (
 )
 
 var ompCommandCodeModels = map[string]struct {
-	model, family string
-	noThinking    bool
-	efforts       []string
+	model, family, defaultEffort string
+	noThinking                   bool
+	efforts                      []string
 }{
-	"omp-musespark13": {"meta/muse-spark-1.3", "meta", false, []string{"low", "high", "max"}},
-	"omp-argon4":      {"google/gemini-4-argon", "google", true, []string{"off"}},
-	"omp-mimo26pro":   {"xiaomi/mimo-v2.6-pro", "other", true, []string{"off"}},
+	"omp-musespark13": {"commandcode/meta/muse-spark-1.3", "meta", "high", false, []string{"low", "high", "max"}},
+	"omp-argon4":      {"commandcode/google/gemini-4-argon", "google", "off", true, []string{"off"}},
+	"omp-mimo26pro":   {"commandcode/xiaomi/mimo-v2.6-pro", "other", "off", true, []string{"off"}},
+	"omp-cc-opus55":   {"commandcode/claude-opus-5-5", "anthropic", "high", false, []string{"low", "high", "max"}},
+	"omp-cc-sonnet55": {"commandcode/claude-sonnet-5-5", "anthropic", "high", false, []string{"low", "high", "max"}},
+	"omp-cc-sol61":    {"commandcode/gpt-6.1-sol", "openai", "off", true, []string{"off"}},
 }
 
 func ompCommandCodeSeed(t *testing.T) []CatalogRow {
@@ -38,7 +41,7 @@ func TestOMPCommandCodeSeatsResolveAndLaunch(t *testing.T) {
 	for profile, want := range ompCommandCodeModels {
 		t.Run(profile, func(t *testing.T) {
 			seat, ok := a.Policy.Profiles[profile]
-			if !ok || seat.Kind != "omp" || seat.Family != want.family || seat.Capability != "omp_commandcode" {
+			if !ok || seat.Kind != "omp" || seat.Family != want.family || seat.Capability != "omp_commandcode" || seat.Effort != want.defaultEffort {
 				t.Fatalf("policy seat for %s: %+v", profile, seat)
 			}
 			var found []CatalogRow
@@ -85,6 +88,14 @@ func TestOMPCommandCodeSeatsResolveAndLaunch(t *testing.T) {
 	}
 }
 
+func TestLaunchProfileCreditRetainsLegacyProfiles(t *testing.T) {
+	for _, profile := range []string{"pi-unlisted", "cmd-dsflash41"} {
+		if !(launchCatalog{}).profileCredit(profile) {
+			t.Errorf("empty catalog lost credit identity for %s", profile)
+		}
+	}
+}
+
 func TestOMPCommandCodeEffortAdmission(t *testing.T) {
 	rows := admissionRows(ompCommandCodeSeed(t))
 	for profile, spec := range ompCommandCodeModels {
@@ -114,8 +125,8 @@ func TestOMPCommandCodeEffortAdmission(t *testing.T) {
 
 func TestOMPCommandCodeUnratedSeatsNotAutoSelected(t *testing.T) {
 	rows := ompCommandCodeSeed(t)
-	if len(rows) != 5 {
-		t.Fatalf("catalog has %d new unrated Command Code rows, want 5", len(rows))
+	if len(rows) != 12 {
+		t.Fatalf("catalog has %d new unrated Command Code rows, want 12", len(rows))
 	}
 	rows = append(rows, ompRow("sonnet", "claude-sonnet-5-5", "claude"))
 	pools := map[string]PoolView{
@@ -123,7 +134,7 @@ func TestOMPCommandCodeUnratedSeatsNotAutoSelected(t *testing.T) {
 		commandcodePool: {Class: "credit"},
 	}
 	a, s, q := selFixture(t, "A", rows, pools, []string{"claude", commandcodePool})
-	q.GateDo = gatePools(map[string]string{"sonnet": "claude", "omp-musespark13": commandcodePool, "omp-argon4": commandcodePool, "omp-mimo26pro": commandcodePool})
+	q.GateDo = gatePools(map[string]string{"sonnet": "claude", "omp-musespark13": commandcodePool, "omp-argon4": commandcodePool, "omp-mimo26pro": commandcodePool, "omp-cc-opus55": commandcodePool, "omp-cc-sonnet55": commandcodePool, "omp-cc-sol61": commandcodePool})
 	serveOMPRouting(t, a)
 	s.Profile = "auto"
 	sel, err := a.selectProfile(context.Background(), s)
@@ -163,7 +174,7 @@ func TestOMPAndCommandCodeExistingSeatsUnchanged(t *testing.T) {
 		{"omp-terra61", "openai/gpt-6.1-terra", "openai-api", "openai"},
 		{"omp-haiku", "anthropic/claude-haiku-5-5", "anthropic-api", "anthropic"},
 		{"omp-luna", "openai/gpt-6-luna", "openai-api", "openai"},
-		{"omp-dsflash41", "deepseek/deepseek-v4.1-flash", commandcodePool, "deepseek"},
+		{"omp-dsflash41", "commandcode/deepseek/deepseek-v4.1-flash", commandcodePool, "deepseek"},
 	} {
 		seat := a.Policy.Profiles[tc.profile]
 		if seat.Family != tc.family || seat.Effort != "high" {
@@ -188,15 +199,31 @@ func TestOMPAndCommandCodeExistingSeatsUnchanged(t *testing.T) {
 		}
 	}
 	for _, effort := range []string{"low", "high", "max"} {
-		in := admissionInputs{Rows: []admissionRow{{Profile: "omp-dsflash41", Effort: effort, ModelID: "deepseek/deepseek-v4.1-flash", Pool: commandcodePool, Grade: gradeUnrated, Gate: defaultGate}}}
+		in := admissionInputs{Rows: []admissionRow{{Profile: "omp-dsflash41", Effort: effort, ModelID: "commandcode/deepseek/deepseek-v4.1-flash", Pool: commandcodePool, Grade: gradeUnrated, Gate: defaultGate}}}
 		if _, _, _, err := in.resolveRow(admissionRequest{Profile: "omp-dsflash41", Effort: effort, Role: "worker", E6Arm: "omp-dsflash41@" + effort}, true); err != nil {
 			t.Fatalf("existing omp-dsflash41@%s refused: %v", effort, err)
 		}
 	}
 	for _, effort := range []string{"medium", "xhigh"} {
-		in := admissionInputs{Rows: []admissionRow{{Profile: "omp-dsflash41", Effort: effort, ModelID: "deepseek/deepseek-v4.1-flash", Pool: commandcodePool, Grade: gradeUnrated, Gate: defaultGate}}}
+		in := admissionInputs{Rows: []admissionRow{{Profile: "omp-dsflash41", Effort: effort, ModelID: "commandcode/deepseek/deepseek-v4.1-flash", Pool: commandcodePool, Grade: gradeUnrated, Gate: defaultGate}}}
 		if _, _, _, err := in.resolveRow(admissionRequest{Profile: "omp-dsflash41", Effort: effort, Role: "worker", E6Arm: "omp-dsflash41@" + effort}, true); err == nil {
 			t.Fatalf("existing omp-dsflash41@%s admitted", effort)
+		}
+	}
+	for _, pair := range []struct{ old, commandcode string }{{"omp-opus", "omp-cc-opus55"}, {"omp-sonnet", "omp-cc-sonnet55"}, {"omp-sol", "omp-cc-sol61"}} {
+		oldRows, ccRows := ompSeedRowsFor(t, pair.old), ompSeedRowsFor(t, pair.commandcode)
+		if len(oldRows) != 5 || len(ccRows) != len(ompCommandCodeModels[pair.commandcode].efforts) {
+			t.Fatalf("seat rows %s=%d, %s=%d", pair.old, len(oldRows), pair.commandcode, len(ccRows))
+		}
+		for effort, oldRow := range oldRows {
+			if oldRow.Pool == commandcodePool || oldRow.ModelID == ccRows[effort].ModelID {
+				t.Fatalf("existing %s@%s collided with %s: old=%+v new=%+v", pair.old, effort, pair.commandcode, oldRow, ccRows[effort])
+			}
+		}
+		for effort, row := range ccRows {
+			if row.Pool != commandcodePool || row.ModelID != ompCommandCodeModels[pair.commandcode].model {
+				t.Fatalf("new Command Code row %s@%s: %+v", pair.commandcode, effort, row)
+			}
 		}
 	}
 }
