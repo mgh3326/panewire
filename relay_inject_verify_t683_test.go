@@ -414,7 +414,7 @@ func TestTask683QueuedBannerIsLanded(t *testing.T) {
 
 // AC2/AC4: an undecidable pane -- reads answer, no nonce of this row is
 // visible -- stops after one prompt. deliver() reports it unconfirmed and
-// drops the local row with reason maybe_in_pane instead of re-arming for a
+// drops the local row with an actionable reason instead of re-arming for a
 // retry; the durable hub row stays undelivered for a later replay. Restoring
 // re-inject-on-unproven turns this RED: the prompt count grows to
 // relayMaxInjectAttempts.
@@ -462,7 +462,7 @@ drained:
 	if unconfirmed == nil || !strings.HasPrefix(unconfirmed.Reason, "maybe_in_pane") {
 		t.Fatalf("undecidable inject was not reported unconfirmed: %+v", unconfirmed)
 	}
-	if dropped == nil || dropped.Reason != "maybe_in_pane" {
+	if dropped == nil || dropped.Reason != "delivery_uncertain_check_pane" {
 		t.Fatalf("undecidable inject was not observably dropped: %+v", dropped)
 	}
 	if heldReports != 0 {
