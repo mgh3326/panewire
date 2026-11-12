@@ -506,50 +506,90 @@ func (client *HubClient) herdrSessionFor(jobID, pane string) string {
 	return client.nodeSpawnSession()
 }
 
+// nodePaneBinding is the verified binding of a pane to a job and herdr session.
+type nodePaneBinding struct {
+	jobID       string
+	session     string
+	eventsMtime time.Time
+}
+
 // nodeJobHerdrSessionByPane searches this node's jobs for the one bound to
-// pane and returns its recorded herdr_session.
+// pane and returns its recorded herdr_session, validating cached bindings
+// against filesystem modification times.
 func (client *HubClient) nodeJobHerdrSessionByPane(pane string) string {
 	if pane == "" || client == nil || client.jobsInboxRoot == "" {
 		return ""
 	}
+	jobsRoot := filepath.Join(client.jobsInboxRoot, "jobs")
+	var jobsMtime time.Time
+	if fi, err := os.Stat(jobsRoot); err == nil {
+		jobsMtime = fi.ModTime()
+	}
+
 	client.sessionCacheMu.RLock()
 	if client.paneSessions != nil {
-		if entry, ok := client.paneSessions[pane]; ok && time.Since(entry.cachedAt) < 10*time.Second {
-			client.sessionCacheMu.RUnlock()
-			return entry.session
+		if entry, ok := client.paneSessions[pane]; ok {
+			if !jobsMtime.IsZero() && jobsMtime.Equal(entry.jobsMtime) {
+				if entry.jobID == "" {
+					client.sessionCacheMu.RUnlock()
+					return ""
+				}
+				eventsDir := filepath.Join(jobsRoot, entry.jobID, "events")
+				if efi, err := os.Stat(eventsDir); err == nil && efi.ModTime().Equal(entry.eventsMtime) {
+					client.sessionCacheMu.RUnlock()
+					return entry.session
+				}
+			}
 		}
 	}
 	client.sessionCacheMu.RUnlock()
 
-	session := nodeJobHerdrSessionByPaneFromRoot(client.jobsInboxRoot, pane)
+	binding, found := nodeJobHerdrBindingByPaneFromRoot(client.jobsInboxRoot, pane)
 
 	client.sessionCacheMu.Lock()
 	if client.paneSessions == nil {
-		client.paneSessions = make(map[string]sessionCacheEntry)
+		client.paneSessions = make(map[string]paneCacheEntry)
 	}
-	client.paneSessions[pane] = sessionCacheEntry{session: session, cachedAt: time.Now()}
+	if found {
+		client.paneSessions[pane] = paneCacheEntry{
+			jobID:       binding.jobID,
+			session:     binding.session,
+			jobsMtime:   jobsMtime,
+			eventsMtime: binding.eventsMtime,
+		}
+	} else {
+		client.paneSessions[pane] = paneCacheEntry{
+			jobID:     "",
+			session:   "",
+			jobsMtime: jobsMtime,
+		}
+	}
 	client.sessionCacheMu.Unlock()
 
-	return session
+	if found {
+		return binding.session
+	}
+	return ""
 }
 
-// nodeJobHerdrSessionByPaneFromRoot inspects job directories under inboxRoot to find
-// the session recorded on the event binding this pane, preferring live (un-ended)
-// jobs and the newest binding event.
-func nodeJobHerdrSessionByPaneFromRoot(inboxRoot, pane string) string {
+// nodeJobHerdrBindingByPaneFromRoot inspects job directories under inboxRoot to find
+// the binding event for this pane, preferring live (un-ended) jobs and the newest binding event.
+func nodeJobHerdrBindingByPaneFromRoot(inboxRoot, pane string) (nodePaneBinding, bool) {
 	if pane == "" || inboxRoot == "" {
-		return ""
+		return nodePaneBinding{}, false
 	}
 	jobsRoot := filepath.Join(inboxRoot, "jobs")
 	entries, err := os.ReadDir(jobsRoot)
 	if err != nil {
-		return ""
+		return nodePaneBinding{}, false
 	}
 	type paneCandidate struct {
-		session   string
-		live      bool
-		createdAt string
-		seq       int64
+		jobID       string
+		session     string
+		eventsMtime time.Time
+		live        bool
+		createdAt   string
+		seq         int64
 	}
 	var best paneCandidate
 	found := false
@@ -562,6 +602,10 @@ func nodeJobHerdrSessionByPaneFromRoot(inboxRoot, pane string) string {
 		eventEntries, err := os.ReadDir(eventsDir)
 		if err != nil {
 			continue
+		}
+		var eventsMtime time.Time
+		if fi, err := os.Stat(eventsDir); err == nil {
+			eventsMtime = fi.ModTime()
 		}
 		sort.Slice(eventEntries, func(i, j int) bool {
 			return eventEntries[i].Name() > eventEntries[j].Name()
@@ -614,10 +658,12 @@ func nodeJobHerdrSessionByPaneFromRoot(inboxRoot, pane string) string {
 
 		if jobMatched && jobSession != "" {
 			cand := paneCandidate{
-				session:   jobSession,
-				live:      !jobEnded,
-				createdAt: jobCreatedAt,
-				seq:       jobSeq,
+				jobID:       entry.Name(),
+				session:     jobSession,
+				eventsMtime: eventsMtime,
+				live:        !jobEnded,
+				createdAt:   jobCreatedAt,
+				seq:         jobSeq,
 			}
 			if !found {
 				best = cand
@@ -631,7 +677,21 @@ func nodeJobHerdrSessionByPaneFromRoot(inboxRoot, pane string) string {
 		}
 	}
 	if found {
-		return best.session
+		return nodePaneBinding{
+			jobID:       best.jobID,
+			session:     best.session,
+			eventsMtime: best.eventsMtime,
+		}, true
+	}
+	return nodePaneBinding{}, false
+}
+
+// nodeJobHerdrSessionByPaneFromRoot inspects job directories under inboxRoot to find
+// the session recorded on the event binding this pane, preferring live (un-ended)
+// jobs and the newest binding event.
+func nodeJobHerdrSessionByPaneFromRoot(inboxRoot, pane string) string {
+	if b, ok := nodeJobHerdrBindingByPaneFromRoot(inboxRoot, pane); ok {
+		return b.session
 	}
 	return ""
 }
@@ -816,13 +876,13 @@ func (client *HubClient) readNodeAgents(ctx context.Context) ([]nodeHerdrRow, er
 	return client.readNodeAgentsInSession(ctx, client.nodeSpawnSession())
 }
 
-func (client *HubClient) nodeAgentsList(ctx context.Context) (any, string) {
-	agents, err := client.readNodeAgents(ctx)
+func (client *HubClient) nodeAgentsListInSession(ctx context.Context, session string) (nodeAgentsListResult, string) {
+	agents, err := client.readNodeAgentsInSession(ctx, session)
 	if err != nil {
-		return nil, "herdr_failed"
+		return nodeAgentsListResult{}, "herdr_failed"
 	}
 	result := nodeAgentsListResult{Agents: nodeAgentRows(agents)}
-	if output, err := client.nodeHerdrRunner()(ctx, "pane", "list"); err == nil {
+	if output, err := client.nodeHerdrRunnerForSession(session)(ctx, "pane", "list"); err == nil {
 		if rows, err := nodeHerdrRows(output, "panes"); err == nil {
 			panes := nodeAgentRows(rows)
 			for index := range panes {
@@ -833,6 +893,10 @@ func (client *HubClient) nodeAgentsList(ctx context.Context) (any, string) {
 		}
 	}
 	return result, ""
+}
+
+func (client *HubClient) nodeAgentsList(ctx context.Context) (any, string) {
+	return client.nodeAgentsListInSession(ctx, client.nodeSpawnSession())
 }
 
 // nodePaneMatch re-reads herdr and classifies the caller's expected pane; on

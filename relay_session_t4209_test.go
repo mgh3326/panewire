@@ -337,17 +337,55 @@ func TestNodeJobHerdrSessionByPanePrefersLiveAndNewest_t4209(t *testing.T) {
 		t.Fatalf("expected sess-second, got %q", got)
 	}
 
-	// 4. Cache test on client
+	// 4. Cache test on client: validates without re-parsing when eventsDir has not changed,
+	// and immediately invalidates when eventsDir changes.
 	client := &HubClient{jobsInboxRoot: inbox}
 	if got := client.nodeJobHerdrSessionByPane("w1:pSecond"); got != "sess-second" {
 		t.Fatalf("expected sess-second, got %q", got)
 	}
-	// Modify event on disk; cache should still return "sess-second" within TTL
+	// Removing event changes eventsDir mtime; cache immediately invalidates
 	if err := os.Remove(filepath.Join(eventsDir, "0002-job.spawned.json")); err != nil {
 		t.Fatal(err)
 	}
-	if got := client.nodeJobHerdrSessionByPane("w1:pSecond"); got != "sess-second" {
-		t.Fatalf("expected cached sess-second, got %q", got)
+	if got := client.nodeJobHerdrSessionByPane("w1:pSecond"); got != "" {
+		t.Fatalf("expected empty session after event removal, got %q", got)
+	}
+}
+
+// Review Finding 2 (Round 2): nodeJobMarkLost inspects the job's own session, not the node spawn session.
+func TestNodeJobMarkLostUsesJobSession_t4209(t *testing.T) {
+	fakeDir := t.TempDir()
+	// Herdr only lists the agent in session "fleet"
+	fakeFleetHerdr(t, fakeDir, "fleet")
+	t.Setenv("HERDR_SESSION", "default")
+
+	inbox := t.TempDir()
+	setupSpawnedJobSession(t, inbox, "job-lost-check", "w1:pW", "fleet")
+
+	spawnJSON := filepath.Join(t.TempDir(), "spawn.json")
+	if err := os.WriteFile(spawnJSON, []byte(`{"herdr_session":"default","enabled":true}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	client := &HubClient{
+		jobsInboxRoot:   inbox,
+		spawnConfigPath: spawnJSON,
+	}
+
+	res, code := client.nodeJobMarkLost(t.Context(), nodeJobMarkLostArgs{
+		Job:    "job-lost-check",
+		PaneID: "w1:pW",
+	})
+	if code != "" {
+		t.Fatalf("nodeJobMarkLost failed with code: %s", code)
+	}
+	result, ok := res.(nodeJobMarkLostResult)
+	if !ok {
+		t.Fatalf("unexpected result type: %T", res)
+	}
+	// The pane is still alive in session "fleet", so it must be reported PaneListed, NOT lost!
+	if result.Outcome != nodeJobMarkLostPaneListed {
+		t.Fatalf("expected Outcome %q, got %q", nodeJobMarkLostPaneListed, result.Outcome)
 	}
 }
 

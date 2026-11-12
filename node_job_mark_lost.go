@@ -243,11 +243,11 @@ func (client *HubClient) nodeJobMarkLost(ctx context.Context, args nodeJobMarkLo
 	case ledger.newerClaim:
 		return nodeJobMarkLostResult{Outcome: nodeJobMarkLostNewerClaim}, ""
 	}
-	list, code := client.nodeAgentsList(ctx)
+	session := client.herdrSessionFor(args.Job, args.PaneID)
+	agents, code := client.nodeAgentsListInSession(ctx, session)
 	if code != "" {
 		return nil, code
 	}
-	agents := list.(nodeAgentsListResult)
 	for _, row := range agents.Agents {
 		if args.PaneID != "" && row.PaneID == args.PaneID {
 			return nodeJobMarkLostResult{Outcome: nodeJobMarkLostPaneListed}, ""
