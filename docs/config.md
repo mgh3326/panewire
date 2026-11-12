@@ -686,7 +686,8 @@ or `secret_like_content:<pattern>` (pattern matches `[a-z0-9_]{1,40}`),
 `terminal_without_result`, `result_conflict`, `report_conflict`,
 `job_escalated`, `job_lost`, `no_spawn_evidence`, a validated hk code matching
 `[a-z0-9_]{1,64}`, `http_<status>`, `hk_unreachable`, `hk_unconfigured`, or
-`local_event_failed` when the local result-attachment event cannot be recorded.
+`local_io_error`, `local_state_error`, or `local_event_failed` when the local
+result-attachment event cannot be recorded.
 The watcher and headless delegate keep warn-and-continue on report upload
 failure. A non-headless CLI `done` fails closed even without `--result`;
 completion without `--report` does not publish a report document. `escalate` writes

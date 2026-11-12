@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/mgh3326/handoffkeep/client"
 )
 
 func completionReport(t *testing.T, a *App, content string) string {
@@ -74,6 +76,43 @@ func TestDoneArtifactSameCompletionIDRejectsChangedBytes(t *testing.T) {
 	}
 	if got := len(completionDocumentRequests(hk)); got != before {
 		t.Fatalf("document PUT count=%d, want no upload after completion-id conflict", got)
+	}
+}
+
+func TestDoneArtifactReentryRepairsMissingTerminalReportPin(t *testing.T) {
+	ctx := context.Background()
+	a := testApp(t)
+	ledgerRunner(t, a)
+	hk := useFakeHK(t)
+	hk.Handle(hkCommentAnswer)
+	seedDoneJob(t, a)
+	first := completionReport(t, a, "first answer\n")
+	if err := a.JobStore.Put(ctx, "j", map[string]any{"state": "completed"}); err != nil {
+		t.Fatal(err)
+	}
+	putEvent(t, a, "j", "job.completed", map[string]any{
+		"report": first, "report_sha256": sha256String("first answer\n"), "document": "",
+	})
+	second := filepath.Join(a.Jobs, "j", "second.md")
+	if err := os.WriteFile(second, []byte("second answer\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.lifecycle(ctx, "done", []string{"j", "--report", second, "--completion-id", "second-answer"}); err != nil {
+		t.Fatal(err)
+	}
+	record := a.JobStore.(*fakeJobStore).record(t, "j")
+	job, err := a.job("j")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var eventDocument string
+	for _, event := range job.Events {
+		if event.Kind == "job.completed" && str(event.Payload, "report") == second {
+			eventDocument = str(event.Payload, "document")
+		}
+	}
+	if eventDocument == "" || str(record, "report_doc") != eventDocument || str(record, "report_sha256") != sha256String("second answer\n") {
+		t.Fatalf("record=%v eventDocument=%q, want the newly published report pin", record, eventDocument)
 	}
 }
 
@@ -244,6 +283,49 @@ func TestDoneArtifactStrictUploadFailureReportsHKReason(t *testing.T) {
 	err := a.lifecycle(ctx, "done", []string{"j", "--report", reportPath, "--result", resultPath})
 	if err == nil || !strings.Contains(err.Error(), "reason=secret_like_content:private_key") {
 		t.Fatalf("error=%v, want exact safe HK refusal reason", err)
+	}
+	if got := exitCode(err); got != exitStateConflict {
+		t.Fatalf("exit code=%d, want refusal conflict %d", got, exitStateConflict)
+	}
+}
+
+func TestCompletionRefusalPathDoesNotCollideWithIntentID(t *testing.T) {
+	ctx := context.Background()
+	a := testApp(t)
+	useFakeHK(t)
+	body := []byte("stable report\n")
+	completionID := "refused-" + sha256String(string(body))
+	if _, _, err := a.publishCompletionReport(ctx, "j", "42", completionID, body); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := a.publishCompletionReport(ctx, "j", "42", completionID, body); err != nil {
+		t.Fatalf("reusing a valid completion id that resembles a refusal key: %v", err)
+	}
+}
+
+func TestCompletionUploadErrorReasonsDistinguishHKAndLocalFailures(t *testing.T) {
+	ctx := context.Background()
+	hk := useFakeHK(t)
+	hk.Handle(func(req hkRequest) (int, string, bool) {
+		if strings.HasPrefix(req.Route(), "PUT /v1/documents/") {
+			return http.StatusOK, `{}`, true
+		}
+		return 0, "", false
+	})
+	err := putCompletionDocument(ctx, client.Document{Key: "reports/j/answer.md", Kind: "report", Job: "j", Body: "answer"})
+	if err == nil {
+		t.Fatal("unconfirmed document write succeeded")
+	}
+	if got := completionUploadReason(err); got != "hk_unreachable" || !completionUploadCanRetry(err) {
+		t.Fatalf("unconfirmed write reason=%q retry=%v, want hk_unreachable and retryable", got, completionUploadCanRetry(err))
+	}
+	localErr := &os.PathError{Op: "write", Path: filepath.Join(t.TempDir(), "intent.json"), Err: os.ErrPermission}
+	if got := completionUploadReason(localErr); got != "local_io_error" || completionUploadCanRetry(localErr) {
+		t.Fatalf("filesystem error reason=%q retry=%v, want local_io_error and non-retryable", got, completionUploadCanRetry(localErr))
+	}
+	stateErr := fail(exitUsage, "intent path is a symlink")
+	if got := completionUploadReason(stateErr); got != "local_state_error" || completionUploadCanRetry(stateErr) {
+		t.Fatalf("local state error reason=%q retry=%v, want local_state_error and non-retryable", got, completionUploadCanRetry(stateErr))
 	}
 }
 

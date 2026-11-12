@@ -214,7 +214,11 @@ func (a *App) lifecycleWithOptions(ctx context.Context, kind string, args []stri
 		if e != nil {
 			reason := completionUploadReason(e)
 			if strictResult {
-				return a.strictDoneFailure(ctx, id, &doneResultFailure{code: exitFailure, reason: reason})
+				code := exitFailure
+				if reason == "report_conflict" || strings.HasPrefix(reason, "secret_like_content") {
+					code = exitStateConflict
+				}
+				return a.strictDoneFailure(ctx, id, &doneResultFailure{code: code, reason: reason})
 			}
 			if watchResult || boolean(j.Receipt, "headless", false) {
 				a.warn("report upload failed; local report retained reason=%s", reason)
@@ -251,6 +255,22 @@ func (a *App) lifecycleWithOptions(ctx context.Context, kind string, args []stri
 			}
 		}
 	}
+	recordWrite := !priorCompletion
+	pinOnlyRecordWrite := false
+	if priorCompletion && kind == "done" && doc != "" {
+		store, storeErr := a.jobStore()
+		if storeErr == nil {
+			current, getErr := store.Get(ctx, id)
+			if getErr == nil && str(current, "report_doc") == "" {
+				recordWrite = true
+				pinOnlyRecordWrite = true
+			} else if getErr != nil {
+				a.warn("completed report pin check failed: reason=%s", doneResultReason(getErr))
+			}
+		} else {
+			a.warn("completed report pin check failed: reason=hk_unconfigured")
+		}
+	}
 	a.recordJobUsage(ctx, j, false)
 	// The hk record state is written before the relay: one PUT carries the
 	// terminal state, the report doc with its sha256 pin and — for done
@@ -267,15 +287,21 @@ func (a *App) lifecycleWithOptions(ctx context.Context, kind string, args []stri
 	if result != nil {
 		rec["result"] = result
 	}
-	if strictResult && !priorCompletion {
-		if e = a.strictCompletedPut(ctx, id, rec, result, doc, spawnReceiptForRepair(j.Events)); e != nil {
+	recordFields := rec
+	putResult := result
+	if pinOnlyRecordWrite {
+		recordFields = map[string]any{"state": state, "report_doc": doc, "report_sha256": docSHA}
+		putResult = nil
+	}
+	if strictResult && recordWrite {
+		if e = a.strictCompletedPut(ctx, id, recordFields, putResult, doc, spawnReceiptForRepair(j.Events)); e != nil {
 			if isDoneResultFailure(e, "result_conflict") {
 				a.recordDoneResultConflict(id)
 			}
 			return a.strictDoneFailure(ctx, id, e)
 		}
-	} else if !priorCompletion {
-		if e := a.putJobRecord(ctx, id, rec); e != nil {
+	} else if recordWrite {
+		if e := a.putJobRecord(ctx, id, recordFields); e != nil {
 			if kind == "done" && result != nil && boolean(j.Receipt, "headless", false) {
 				a.warn("job %s completed record failed: reason=%s", id, doneResultReason(e))
 				_ = a.event(ctx, id, "job.record_failed", map[string]any{"op": state})

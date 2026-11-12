@@ -15,6 +15,7 @@ import (
 
 	"github.com/mgh3326/handoffkeep/client"
 	"github.com/mgh3326/panewire/internal/durable"
+	"github.com/mgh3326/panewire/internal/hkcred"
 )
 
 const reportDocumentMaxBytes = 512 << 10
@@ -43,6 +44,10 @@ func completionIntentPath(jobs, jobID, completionID string) string {
 }
 
 func completionRefusalPath(jobs, jobID, digest string) string {
+	return filepath.Join(jobs, jobID, ".completion-refusals", digest+".json")
+}
+
+func legacyCompletionRefusalPath(jobs, jobID, digest string) string {
 	return filepath.Join(jobs, jobID, ".completion-intents", "refused-"+digest+".json")
 }
 
@@ -94,19 +99,35 @@ func (a *App) publishCompletionReport(ctx context.Context, jobID, taskID, comple
 	sum := sha256.Sum256(body)
 	digest := hex.EncodeToString(sum[:])
 	refusalPath := completionRefusalPath(a.Jobs, jobID, digest)
-	if err := noSymlinks(refusalPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return "", "", err
-	}
-	if refusal, err := os.ReadFile(refusalPath); err == nil {
-		var rejected struct {
-			Reason string `json:"reason"`
+	for _, refusalPath := range []string{refusalPath, legacyCompletionRefusalPath(a.Jobs, jobID, digest)} {
+		if err := noSymlinks(refusalPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return "", "", err
 		}
-		if json.Unmarshal(refusal, &rejected) != nil || rejected.Reason == "" {
+		refusal, err := os.ReadFile(refusalPath)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return "", "", err
+		}
+		var record struct {
+			Reason       string `json:"reason"`
+			CompletionID string `json:"completion_id"`
+			ReportSHA256 string `json:"report_sha256"`
+			DocumentKey  string `json:"document_key"`
+		}
+		if json.Unmarshal(refusal, &record) != nil {
 			return "", "", fail(exitStateConflict, "report refusal record is unreadable")
 		}
-		return "", "", fail(exitStateConflict, "report bytes were permanently refused reason=%s", rejected.Reason)
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return "", "", err
+		if record.Reason != "" {
+			return "", "", fail(exitStateConflict, "report bytes were permanently refused reason=%s", record.Reason)
+		}
+		// Before refusal markers had their own directory, a valid completion
+		// intent for the id "refused-<digest>" occupied this same path.
+		if refusalPath == legacyCompletionRefusalPath(a.Jobs, jobID, digest) && record.CompletionID == "refused-"+digest && record.ReportSHA256 == digest && record.DocumentKey != "" {
+			continue
+		}
+		return "", "", fail(exitStateConflict, "report refusal record is unreadable")
 	}
 	large := len(body) > reportDocumentMaxBytes
 	key := reportDocumentKey(jobID, completionID, digest, large)
@@ -248,18 +269,20 @@ func putCompletionDocument(ctx context.Context, doc client.Document) error {
 			if getErr != nil {
 				return getErr
 			}
-			return fmt.Errorf("report document write was not confirmed")
+			return errCompletionDocumentUnconfirmed
 		}
 	}
-	return fmt.Errorf("report document write was not confirmed")
+	return errCompletionDocumentUnconfirmed
 }
+
+var errCompletionDocumentUnconfirmed = errors.New("report document write was not confirmed")
 
 func retryableCompletionUpload(err error) bool {
 	var httpErr *client.HTTPError
 	if errors.As(err, &httpErr) {
 		return httpErr.Status >= 500 || httpErr.Status == 429
 	}
-	return true
+	return completionUploadReason(err) == "hk_unreachable"
 }
 
 func completionUploadReason(err error) string {
@@ -288,13 +311,25 @@ func completionUploadReason(err error) string {
 		if commandErr.Code == exitStateConflict {
 			return "report_conflict"
 		}
+		return "local_state_error"
+	}
+	if errors.Is(err, errCompletionDocumentUnconfirmed) {
+		return "hk_unreachable"
+	}
+	var pathErr *os.PathError
+	if errors.As(err, &pathErr) {
+		return "local_io_error"
+	}
+	var unconfigured *hkcred.UnconfiguredError
+	if errors.As(err, &unconfigured) {
+		return "hk_unconfigured"
 	}
 	var urlErr *url.Error
 	var timeout interface{ Timeout() bool }
 	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) || errors.Is(err, errHKTransport) || errors.As(err, &urlErr) || errors.As(err, &timeout) && timeout.Timeout() {
 		return "hk_unreachable"
 	}
-	return "hk_unconfigured"
+	return "hk_unreachable"
 }
 
 func completionUploadCanRetry(err error) bool {
@@ -306,7 +341,7 @@ func completionUploadCanRetry(err error) bool {
 	if errors.As(err, &httpErr) {
 		return httpErr.Status >= 500 || httpErr.Status == 429
 	}
-	return completionUploadReason(err) != "hk_unconfigured"
+	return completionUploadReason(err) == "hk_unreachable"
 }
 
 func recordCompletionRefusal(path, reason string) error {
