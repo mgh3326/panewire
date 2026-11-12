@@ -106,6 +106,11 @@ func TestWrappedProviderCreditErrorClassifies(t *testing.T) {
 			pool:   "anthropic-api",
 		},
 		{
+			name:   "Anthropic JSON wraps before message field",
+			screen: "API Error: 400 {\"type\":\"error\",\"error\":{\"type\":\"invalid_reque\nst_error\",\"message\":\"Your credit balance is too low to access the Anthropic API\"}}\n❯ Ask Claude",
+			pool:   "anthropic-api",
+		},
+		{
 			name:   "OpenAI wrapped body",
 			screen: "| API Error: 429 {\"error\":{\n| \"type\":\"insufficient_\n| quota\"}}\n| › Ask Codex",
 			pool:   "openai-api",
@@ -133,6 +138,10 @@ Retried; the call succeeded
 }}
 ❯ Ask Claude`,
 		"│ API Error: 429 insufficient_quota\n│ Retried the request and it succeeded before\n│ ❯ Ask Codex",
+		"API Error: 429 insufficient_quota\n}\n❯ Ask Claude",
+		"API Error: 429 insufficient_quota\n,,\n❯ Ask Claude",
+		"API Error: 429 insufficient_quota\n:::\n❯ Ask Claude",
+		"API Error: 429 insufficient_quota\n]]]]\n❯ Ask Claude",
 		"API Error: 429 insufficient_quota\n[retry] succeeded\n› Ask Codex",
 		"| API Error: 429 insufficient_quota\n| Retried; the call succeeded\n| ⎿ file1\n| › Ask Codex",
 		"API Error: 429 insufficient_quota\n}\n❯ Ask Codex",

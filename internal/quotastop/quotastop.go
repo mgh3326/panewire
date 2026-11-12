@@ -193,12 +193,26 @@ func providerErrorBlock(lines []string, start int) (string, bool) {
 			json = scanJSON(currentBlock)
 		}
 		joined := currentBlock + "\n" + content
-		if json.open && (json.inString && providerTextPrefix(currentJSONString(currentBlock)+content) || !json.inString && (jsonContinuation(content) || jsonScalarContinuation(content, json))) {
-			blockLines = append(blockLines, content)
-			continue
+		if json.open {
+			if json.inString {
+				currentText := currentJSONString(currentBlock)
+				if (providerTextPrefix(currentText) || providerCreditPool(currentBlock) != "") && !providerTextPrefix(currentText+content) {
+					return "", false
+				}
+				blockLines = append(blockLines, content)
+				continue
+			}
+			if jsonContinuation(content) || jsonScalarContinuation(content, json) {
+				blockLines = append(blockLines, content)
+				continue
+			}
 		}
-		plainContinuation := providerTextPrefix(plainProviderText(joined)) || anthropicRequestBracketComplete(joined)
-		if !jsonBody && plainContinuation && (border == 0 || screenBorderPrefix(line) == border || anthropicRequestBracketOpen(currentBlock)) {
+		currentPlain := plainProviderText(currentBlock)
+		joinedPlain := plainProviderText(joined)
+		plainTextContinuation := providerTextPrefix(joinedPlain) && len(compactProviderText(joinedPlain)) > len(compactProviderText(currentPlain))
+		plainContinuation := plainTextContinuation || anthropicRequestBracketOpen(currentBlock) && anthropicRequestBracketComplete(joined)
+		plainMessageStarted := providerTextPrefix(plainProviderText(blockLines[0])) || anthropicRequestBracketOpen(blockLines[0])
+		if !jsonBody && plainMessageStarted && plainContinuation && (border == 0 || screenBorderPrefix(line) == border || anthropicRequestBracketOpen(currentBlock)) {
 			blockLines = append(blockLines, content)
 			continue
 		}
@@ -378,13 +392,7 @@ func hasProviderJSONBody(line string) bool {
 }
 
 func providerTextPrefix(message string) bool {
-	var compact strings.Builder
-	for _, r := range strings.ToLower(message) {
-		if r >= 'a' && r <= 'z' || r >= '0' && r <= '9' {
-			compact.WriteRune(r)
-		}
-	}
-	value := compact.String()
+	value := compactProviderText(message)
 	if value == "" {
 		return false
 	}
@@ -401,6 +409,16 @@ func providerTextPrefix(message string) bool {
 		}
 	}
 	return false
+}
+
+func compactProviderText(message string) string {
+	var compact strings.Builder
+	for _, r := range strings.ToLower(message) {
+		if r >= 'a' && r <= 'z' || r >= '0' && r <= '9' {
+			compact.WriteRune(r)
+		}
+	}
+	return compact.String()
 }
 
 func anthropicRequestBracketOpen(block string) bool {
