@@ -108,6 +108,14 @@ func (a *App) staticDrop(row CatalogRow, req selReq, floor string, rungs rungInd
 	case slices.Contains(req.excludePools, row.Pool):
 		return "pool_excluded", "", nil
 	case cooling:
+		if floor != "" {
+			// A cooling rung passes only if it would pass the floor once the
+			// pool cools off. A rung below the floor is a floor drop, so the
+			// no_rung_at_floor retry still counts it as a fallback candidate.
+			if r, _, _ := a.staticDrop(row, req, floor, rungs, false); r == "grade_insufficient" {
+				return r, "", nil
+			}
+		}
 		return "pool_cooling", "", nil
 	}
 	name, seat, reason := a.seatFor(row, req)
@@ -115,9 +123,11 @@ func (a *App) staticDrop(row CatalogRow, req selReq, floor string, rungs rungInd
 		return reason, "", nil
 	}
 	if req.route.top() {
-		// After the seat rules, so a row they drop keeps its own reason, as
-		// before the floor existed.
-		if reason := topGradeDrop(row, req.route.effort(row), floor, rungs); reason != "" {
+		// Judged on the rung the spawn launches: spawn pins the launch to the
+		// chosen row's own effort, not the role-effort rung. After the seat
+		// rules, so a row they drop keeps its own reason, as before the floor
+		// existed.
+		if reason := topGradeDrop(row, a.rowLaunchEffort(row), floor, rungs); reason != "" {
 			return reason, "", nil
 		}
 	}
