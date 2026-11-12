@@ -680,7 +680,7 @@ func briefWaitOutcome(r Result) string {
 			Code string `json:"code"`
 		} `json:"error"`
 	}
-	if json.Unmarshal([]byte(r.Out), &reply) != nil {
+	if json.Unmarshal([]byte(firstNonempty(r.Out, r.Err)), &reply) != nil {
 		return ""
 	}
 	if r.Code != 0 && reply.Error.Code == "timeout" {

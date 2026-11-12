@@ -67,7 +67,7 @@ func waitAnswer(status string) Result {
 	return Result{Out: fmt.Sprintf(`{"id":"cli:agent:wait","result":{"type":"agent_info","agent":{"agent_status":%q}}}`, status)}
 }
 func waitTimeout() Result {
-	return Result{Code: 1, Out: `{"error":{"code":"timeout","message":"timed out"}}`}
+	return Result{Code: 1, Err: `{"error":{"code":"timeout","message":"timed out"}}`}
 }
 
 func TestDeliverWaitWorkingRequiresScreenProof(t *testing.T) {
@@ -154,5 +154,16 @@ func TestDeliverWaitTimeoutStillAcceptsSubmittedTurn(t *testing.T) {
 	f.screen = claudeScreenSubmitted()
 	if err := a.deliver(t.Context(), "claude", "w:p1", claudeTestBrief); err != nil || f.waits != 1 || f.lists != 1 {
 		t.Fatalf("err=%v waits=%d lists=%d", err, f.waits, f.lists)
+	}
+}
+
+func TestBriefWaitTimeoutAcceptsBothStreams(t *testing.T) {
+	body := `{"error":{"code":"timeout","message":"timed out"}}`
+	for name, r := range map[string]Result{"stdout": {Code: 1, Out: body}, "stderr": {Code: 1, Err: body}} {
+		t.Run(name, func(t *testing.T) {
+			if got := briefWaitOutcome(r); got != "timeout" {
+				t.Fatalf("outcome=%q", got)
+			}
+		})
 	}
 }
