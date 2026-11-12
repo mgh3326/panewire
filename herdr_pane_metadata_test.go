@@ -323,6 +323,29 @@ func TestPaneMetadataPaneNotFoundSkipsOnlyThatPane(t *testing.T) {
 	}
 }
 
+// Shutdown cancels ctx while the first report is in flight. herdr replies
+// after the cancel, so the cycle must send no further reports: it may not
+// spend another paneMetadataCallTimeout per pane after shutdown started.
+func TestPaneMetadataCycleStopsOnceShutdownStarts(t *testing.T) {
+	store := newPaneMetaStore(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var once sync.Once
+	server := startFakeHerdrPaneServer(t, func(params map[string]any) string {
+		once.Do(cancel)
+		return okPaneReply(params)
+	})
+	seedPaneJob(t, store, paneJobRow("job-a", "pane-a", "lane-owner", time.Now()))
+	seedPaneJob(t, store, paneJobRow("job-b", "pane-b", "lane-owner", time.Now()))
+	seedPaneJob(t, store, paneJobRow("job-c", "pane-c", "lane-owner", time.Now()))
+	p := newTestPaneMetadataPublisher(store, server.socket)
+
+	p.cycle(ctx)
+	if got := len(server.reportsCopy()); got != 1 {
+		t.Fatalf("reports after shutdown=%d, want 1 (the in-flight one)", got)
+	}
+}
+
 func TestPaneMetadataValueIsCutOnUTF8Boundary(t *testing.T) {
 	store := newPaneMetaStore(t)
 	server := startFakeHerdrPaneServer(t, okPaneReply)

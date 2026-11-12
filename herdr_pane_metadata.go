@@ -213,8 +213,12 @@ func (p *paneMetadataPublisher) desiredPanes(ctx context.Context) (map[string]ma
 
 // report sends the difference between what herdr was last told and next; a
 // nil next clears every key the pane carried. It returns false when the cycle
-// must end: herdr refused publishing, or the connection failed.
+// must end: herdr refused publishing, the connection failed, or ctx ended.
 func (p *paneMetadataPublisher) report(ctx context.Context, client *HerdrClient, pane string, next map[string]string, now time.Time) bool {
+	if ctx.Err() != nil {
+		// Shutdown started: send nothing more. Run returns on its next select.
+		return false
+	}
 	prev := p.published[pane].tokens
 	tokens := map[string]any{}
 	for key := range prev {
