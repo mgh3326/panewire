@@ -28,9 +28,9 @@ import (
 // lines, so a larger file is not a capture it wrote.
 const loginScreenCaptureMax = 64 << 10
 
-// nodeLoginScreenTTL is how long a login-screen mark stays reported when this
-// host cannot measure the pool. A measurable host keeps the mark until a probe,
-// successful launch, or successful own-credential quota measurement clears it.
+// nodeLoginScreenTTL is how long a login-screen mark stays reported when the
+// daemon has no periodic measurement path for the pool. A pool that the daemon
+// polls and this host can measure stays marked until proof clears it.
 const nodeLoginScreenTTL = nodeDialogTTL
 
 // loginProbeOutcome is what one probe of a pool found.
@@ -218,9 +218,9 @@ func loginScreenFresh(marks map[string]time.Time, kind string, now time.Time) bo
 	return marked && !at.After(now) && now.Sub(at) < nodeLoginScreenTTL
 }
 
-func loginScreenActive(marks map[string]time.Time, kind string, now time.Time, measurableHere bool) bool {
+func loginScreenActive(marks map[string]time.Time, kind string, now time.Time, periodicMeasurementPath bool) bool {
 	if _, marked := marks[kind]; !marked {
 		return false
 	}
-	return measurableHere || loginScreenFresh(marks, kind, now)
+	return periodicMeasurementPath || loginScreenFresh(marks, kind, now)
 }

@@ -173,13 +173,16 @@ and the `login_missing` placement drop are unchanged.
   must appear. Only agy has a row: it comes from the 2026-11-10 mac-dev
   captures ("Open the URL below in your browser:" and "After authenticating,
   copy the code displayed in the browser and paste it below:"). claude and
-  codex have none until someone records their login screen. On a host that can
-  measure the pool, the mark stays until a passing login probe, a successful
-  launch of that kind, or a successful quota measurement made with this host's
-  credential clears it. A fresh shared reading does not clear it. When this
-  host cannot measure the pool, the mark expires after 30 minutes (the
-  first-run dialog TTL). The marks are in node memory; a node restart forgets
-  them.
+  codex have none until someone records their login screen. When the daemon
+  publishes state and polls this measurable pool through
+  `--state-quota-pools`, the mark stays until a passing login probe, a
+  successful launch of that kind, or a successful quota measurement made with
+  this host's credential clears it. A fresh shared reading does not clear it;
+  a hub `quota.refresh` checks this host's credential when the mark is set.
+  When the daemon has no periodic measurement path for the pool (it is not
+  measurable here, is not polled, or state publishing is off), the mark expires
+  after 30 minutes (the first-run dialog TTL). The marks are in node memory; a
+  node restart forgets them.
 
 `--state-quota-pools`에는 이 호스트가 측정할 수 있는 풀만 지정합니다. 지원 풀은
 `claude`, `codex`, `commandcode`, `devin`, `agy`입니다. `measurable_accounts`와

@@ -1297,9 +1297,19 @@ func (client *HubClient) nodeQuotaRefresh(ctx context.Context, args nodeQuotaRef
 		client.warnMessage("quota.refresh: " + args.Pool + " 풀에는 native 측정 소스가 없습니다")
 		return nil, "refresh_failed"
 	}
-	_, measuredHere, err := client.nativeQuotaSource(args.Pool).RefreshWithMeasurement(ctx)
+	source := client.nativeQuotaSource(args.Pool)
+	marked := client.loginScreenMarked(args.Pool)
+	_, measuredHere, err := source.RefreshWithMeasurement(ctx)
 	if err != nil {
 		return nil, "refresh_failed"
+	}
+	if marked && !measuredHere && source.measurableHere(ctx) {
+		switch source.probeLogin(ctx) {
+		case loginProbeLoginPresent:
+			client.noteOwnQuotaMeasurement(args.Pool)
+		case loginProbeLoginMissing:
+			return nil, "refresh_failed"
+		}
 	}
 	if measuredHere {
 		client.noteOwnQuotaMeasurement(args.Pool)

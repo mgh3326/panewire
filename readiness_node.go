@@ -186,6 +186,13 @@ func (client *HubClient) noteOwnQuotaMeasurement(pool string) {
 	client.readiness.mu.Unlock()
 }
 
+func (client *HubClient) loginScreenMarked(pool string) bool {
+	client.readiness.mu.Lock()
+	defer client.readiness.mu.Unlock()
+	_, marked := client.readiness.loginScreens[pool]
+	return marked
+}
+
 // noteQuotaUnknown records a refresh that failed for a reason other than the
 // login (timeout, transient error, excluded pool, unreadable status). The
 // rule: a present account stays reported while its last successful refresh
@@ -370,12 +377,12 @@ func (client *HubClient) collectReadiness(ctx context.Context) *fleet.Readiness 
 		}
 		h.HerdrIntegration = integrations[nodeHerdrIntegrations[kind]]
 		note, measured := accounts[kind]
-		measurable := false
+		periodicMeasurementPath := false
 		if _, marked := loginScreens[kind]; marked {
-			measurable = client.nativeQuotaSource(kind).measurableHere(ctx)
+			periodicMeasurementPath = client.statePublish && slices.Contains(client.stateQuotaPools, kind) && client.nativeQuotaSource(kind).measurableHere(ctx)
 		}
 		switch {
-		case probeMissing[kind] || loginScreenActive(loginScreens, kind, out.CheckedAt, measurable) || measured && note.key == "":
+		case probeMissing[kind] || loginScreenActive(loginScreens, kind, out.CheckedAt, periodicMeasurementPath) || measured && note.key == "":
 			// The loop's last refresh, a login probe and a launch that stopped at
 			// the login screen each say the login is missing; a refresh that read
 			// a shared reading says nothing against them.

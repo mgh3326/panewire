@@ -27,6 +27,8 @@ func markT3891LoginScreen(t *testing.T, client *HubClient) {
 func TestLoginScreenMarkMeasurableLifetimeAndOwnMeasurementT3891(t *testing.T) {
 	rig := newLoginProbeRig(t, agyLoginFiles(agyToken), true, 0)
 	rig.client.nativeQuota["agy"].Now = func() time.Time { return rig.clock }
+	rig.client.statePublish = true
+	rig.client.stateQuotaPools = []string{"agy"}
 	markT3891LoginScreen(t, rig.client)
 	rig.clock = rig.clock.Add(nodeLoginScreenTTL + time.Second)
 	if got := rig.login(t); got != fleet.ReadinessLoginMissing {
@@ -50,6 +52,17 @@ func TestLoginScreenMarkMeasurableLifetimeAndOwnMeasurementT3891(t *testing.T) {
 	}
 }
 
+func TestLoginScreenMarkMeasurableButNotPolledExpiresT3891(t *testing.T) {
+	client := quotaClient(t)
+	client.now = func() time.Time { return claudeTestNow }
+	client.nativeQuota = map[string]*nativeQuotaSource{"agy": agyTestSource("", agyLoginFiles(agyToken), newAgyAPI(), agyFPForTest, true)}
+	markT3891LoginScreen(t, client)
+	client.now = func() time.Time { return claudeTestNow.Add(nodeLoginScreenTTL + time.Second) }
+	if got := poolLogin(t, client, "agy").Login; got != fleet.ReadinessLoginUnknown {
+		t.Fatalf("measurable but unpolled host login after TTL = %q, want unknown", got)
+	}
+}
+
 func TestLoginScreenMarkUnmeasurableExpiresT3891(t *testing.T) {
 	client := quotaClient(t)
 	client.now = func() time.Time { return claudeTestNow }
@@ -67,9 +80,12 @@ func TestLoginScreenMarkClearedByHubQuotaRefreshT3891(t *testing.T) {
 	rig.client.nativeQuota["agy"].Now = func() time.Time { return rig.clock }
 	markT3891LoginScreen(t, rig.client)
 	rig.clock = rig.clock.Add(nodeLoginScreenTTL + time.Second)
-	setT3891SharedReading(t, rig, rig.clock.Add(-6*time.Minute))
+	setT3891SharedReading(t, rig, rig.clock)
 	if _, failure := rig.client.nodeQuotaRefresh(t.Context(), nodeQuotaRefreshArgs{Pool: "agy"}); failure != "" {
 		t.Fatalf("quota.refresh failed: %q", failure)
+	}
+	if got := rig.api.count(); got == 0 {
+		t.Fatal("quota.refresh returned the shared reading without checking this host's credential")
 	}
 	if got := rig.login(t); got == fleet.ReadinessLoginMissing {
 		t.Fatalf("hub quota.refresh did not clear measured login-screen mark: %q", got)
