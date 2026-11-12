@@ -665,10 +665,12 @@ limit.
 `panewire done` writes `{state:"completed", report_doc}` plus `result` when
 `--result FILE` (a JSON object of at most 64 KiB) is given, in the same PUT.
 For CLI `done --result`, success requires hk to confirm that record or a read
-back to show the same completed result and report pin. An ambiguous PUT is
-read back and retried at most twice more with the same payload, within a 30 s
-completion budget. A refusal or unresolved state exits non-zero, emits no
-completion event or relay, and records `job.record_failed` with `op` and a safe
+back to show the same completed result and report pin. An ambiguous
+completed-record PUT is read back and retried at most twice more with the same
+payload, within a 30 s completion budget. The single spawned repair PUT is also
+read back after an ambiguous reply but is never repeated. A refusal or
+unresolved state exits non-zero, emits no completion event or relay, and records
+`job.record_failed` with `op` and a safe
 `reason` token. Conflicts use exit 75. Safe reasons are `secret_like_content`
 or `secret_like_content:<pattern>` (pattern matches `[a-z0-9_]{1,40}`),
 `terminal_without_result`, `result_conflict`, `report_conflict`,

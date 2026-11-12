@@ -103,18 +103,19 @@ func (s *fakeJobStore) record(t *testing.T, jobID string) map[string]any {
 // states, 404 not_found. calls records the request order for assertions
 // against runner calls.
 type fakeHK struct {
-	srv             *httptest.Server
-	mu              sync.Mutex
-	records         map[string]map[string]any
-	calls           []string
-	missing         map[string]int // job → remaining 404s before its record appears
-	down            bool
-	rejectSelection bool
-	putBodies       []map[string]any
-	putStatuses     []int
-	putPattern      string
-	putErrorBody    string
-	dropAfterCommit bool
+	srv                    *httptest.Server
+	mu                     sync.Mutex
+	records                map[string]map[string]any
+	calls                  []string
+	missing                map[string]int // job → remaining 404s before its record appears
+	down                   bool
+	rejectSelection        bool
+	putBodies              []map[string]any
+	putStatuses            []int
+	putPattern             string
+	putErrorBody           string
+	dropAfterCommit        bool
+	dropSpawnedAfterCommit bool
 }
 
 var jobRecordFields = []string{"state", "role", "label", "family", "profile", "model", "harness", "effort", "pool", "owner_lane", "parent_lane", "parent_job", "pane_id", "worktree", "report_doc", "report_sha256", "result", "end_reason", "selection"}
@@ -243,8 +244,9 @@ func (h *fakeHK) serve(w http.ResponseWriter, r *http.Request) {
 			for k, v := range fields {
 				rec[k] = v
 			}
-			if h.dropAfterCommit {
+			if h.dropAfterCommit || (h.dropSpawnedAfterCommit && fields["state"] == "spawned") {
 				h.dropAfterCommit = false
+				h.dropSpawnedAfterCommit = false
 				conn, _, err := w.(http.Hijacker).Hijack()
 				if err == nil {
 					_ = conn.Close()

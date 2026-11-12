@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -208,6 +209,50 @@ func TestDoneResultStrictReadsBackDroppedCommit(t *testing.T) {
 	}
 }
 
+func TestDoneResultStrictConflictEmitsJobResultAndSentry(t *testing.T) {
+	a, _, h, _, report, result := strictDoneFixture(t, "completed")
+	h.records["j"]["result"] = map[string]any{"different": true}
+	resultEvents := jobResultEvents(a)
+	warnings := 0
+	a.SentryWarning = func(fingerprint []string, _ string, _ map[string]string) {
+		if slices.Equal(fingerprint, []string{"job-result-conflict"}) {
+			warnings++
+		}
+	}
+	err := strictDone(t, a, report, result)
+	assertStrictFailure(t, a, err, exitStateConflict, "result_conflict")
+	if len(*resultEvents) != 1 || (*resultEvents)[0].Outcome != "conflict" || warnings != 1 {
+		t.Fatalf("job_result=%+v Sentry warnings=%d", *resultEvents, warnings)
+	}
+}
+
+func TestDoneResultStrictDuplicateEqualRepairsMissingAttachEvent(t *testing.T) {
+	a, _, h, _, report, result := strictDoneFixture(t, "completed")
+	seedDuplicateCompletion(t, a, report)
+	h.records["j"]["result"] = map[string]any{"findings": []any{map[string]any{"severity": "high"}}}
+	if countEvents(t, a, "job.result_attached") != 0 {
+		t.Fatal("fixture unexpectedly has a result attach event")
+	}
+	if err := strictDone(t, a, report, result); err != nil {
+		t.Fatal(err)
+	}
+	if countEvents(t, a, "job.result_attached") != 1 {
+		t.Fatal("equal stored result did not repair the missing attach event")
+	}
+}
+
+func TestDoneResultEventWriteFailureIsNotReportedAsHKFailure(t *testing.T) {
+	a := testApp(t)
+	putEvent(t, a, "j", "job.claim", map[string]any{"task_id": "42"})
+	err := a.strictDoneFailure(context.Background(), "j", &doneResultEventWriteFailure{cause: errors.New("local ledger unavailable")})
+	if code(err) != exitFailure || !strings.Contains(err.Error(), "result attachment event could not be recorded") || strings.Contains(err.Error(), "hk_unconfigured") {
+		t.Fatalf("error=%v", err)
+	}
+	if kinds := eventKindsOf(t, a, "j"); slices.Contains(kinds, "job.record_failed") {
+		t.Fatalf("local event failure was misrecorded as an hk write failure: %v", kinds)
+	}
+}
+
 func TestDoneResultStrictRepairsClaimedFromReceipt(t *testing.T) {
 	a, _, h, _, report, result := strictDoneFixture(t, "claimed")
 	if err := strictDone(t, a, report, result); err != nil {
@@ -218,6 +263,28 @@ func TestDoneResultStrictRepairsClaimedFromReceipt(t *testing.T) {
 	}
 	if _, ok := h.putBodies[1]["host"]; ok {
 		t.Fatalf("repair included host: %v", h.putBodies[1])
+	}
+}
+
+func TestDoneResultStrictReadsBackAmbiguousSpawnRepair(t *testing.T) {
+	a, _, h, _, report, result := strictDoneFixture(t, "claimed")
+	h.dropSpawnedAfterCommit = true
+	if err := strictDone(t, a, report, result); err != nil {
+		t.Fatal(err)
+	}
+	spawnedPuts, gets := 0, 0
+	for _, body := range h.putBodies {
+		if body["state"] == "spawned" {
+			spawnedPuts++
+		}
+	}
+	for _, call := range h.calls {
+		if strings.HasPrefix(call, "GET /v1/jobs/") {
+			gets++
+		}
+	}
+	if spawnedPuts != 1 || gets != 2 || str(h.record(t, "j"), "state") != "completed" {
+		t.Fatalf("spawned PUTs=%d GETs=%d record=%v", spawnedPuts, gets, h.record(t, "j"))
 	}
 }
 
