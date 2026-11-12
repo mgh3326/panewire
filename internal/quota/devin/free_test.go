@@ -109,6 +109,105 @@ func TestPanewireCacheOverrideWinsAndReadsLegacyFallback(t *testing.T) {
 	}
 }
 
+func TestObserveMergesLegacyHoldBeforeWritingPanewireRecord(t *testing.T) {
+	now := testNow.UTC()
+	cache := t.TempDir()
+	cfg := Config{
+		Home:     t.TempDir(),
+		Now:      func() time.Time { return now },
+		Hostname: func() (string, error) { return "host-a", nil },
+		UID:      func() int { return 1000 },
+		LookupEnv: func(name string) (string, bool) {
+			if name == "XDG_CACHE_HOME" {
+				return cache, true
+			}
+			return "", false
+		},
+	}
+	legacyPath := filepath.Join(cache, "pacelever", "devin-free-limit.json")
+	if err := os.MkdirAll(filepath.Dir(legacyPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	hostID := hostUserID("host-a", 1000)
+	legacy := `{"schema":"pacelever.devin-free-limit.v1","records":{` + record(hostID, now.Add(2*time.Hour).Format(time.RFC3339Nano), now.Format(time.RFC3339Nano)) + `}}`
+	if err := os.WriteFile(legacyPath, []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := ObserveFreeLimit(cfg, now.Add(time.Hour).Format(time.RFC3339Nano), "", "swe-2-high", "job:new-account", "devin:0123456789abcdef", false, false); err != nil {
+		t.Fatal(err)
+	}
+	got := LocalFree(cfg)(now)
+	if got.State != shared.FreeExhausted || got.ResetsAt == nil || !got.ResetsAt.Equal(now.Add(2*time.Hour)) {
+		t.Fatalf("legacy hold lost after new write: %+v", got)
+	}
+}
+
+func TestObserveFreeLimitClearRemovesLegacyOnlyHold(t *testing.T) {
+	now := testNow.UTC()
+	cache := t.TempDir()
+	cfg := Config{
+		Home:     t.TempDir(),
+		Now:      func() time.Time { return now },
+		Hostname: func() (string, error) { return "host-a", nil },
+		UID:      func() int { return 1000 },
+		LookupEnv: func(name string) (string, bool) {
+			if name == "XDG_CACHE_HOME" {
+				return cache, true
+			}
+			return "", false
+		},
+	}
+	legacyPath := filepath.Join(cache, "pacelever", "devin-free-limit.json")
+	if err := os.MkdirAll(filepath.Dir(legacyPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	hostID := hostUserID("host-a", 1000)
+	legacy := `{"schema":"pacelever.devin-free-limit.v1","records":{` + record(hostID, now.Add(time.Hour).Format(time.RFC3339Nano), now.Format(time.RFC3339Nano)) + `}}`
+	if err := os.WriteFile(legacyPath, []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := ObserveFreeLimit(cfg, "", "", "", "", "", false, true); err != nil {
+		t.Fatal(err)
+	}
+	if got := LocalFree(cfg)(now); got.State != shared.FreeAvailable {
+		t.Fatalf("legacy hold remained after clear: %+v", got)
+	}
+}
+
+func TestLocalFreeKeepsLongestHoldAcrossBothCacheFiles(t *testing.T) {
+	now := testNow.UTC()
+	cache := t.TempDir()
+	cfg := Config{
+		Home:     t.TempDir(),
+		Now:      func() time.Time { return now },
+		Hostname: func() (string, error) { return "host-a", nil },
+		UID:      func() int { return 1000 },
+		LookupEnv: func(name string) (string, bool) {
+			if name == "XDG_CACHE_HOME" {
+				return cache, true
+			}
+			return "", false
+		},
+	}
+	id := hostUserID("host-a", 1000)
+	for path, reset := range map[string]time.Time{
+		filepath.Join(cache, "panewire", "devin-free-limit.json"):  now.Add(time.Hour),
+		filepath.Join(cache, "pacelever", "devin-free-limit.json"): now.Add(3 * time.Hour),
+	} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		data := `{"records":{` + record(id, reset.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano)) + `}}`
+		if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got := LocalFree(cfg)(now)
+	if got.State != shared.FreeExhausted || got.ResetsAt == nil || !got.ResetsAt.Equal(now.Add(3*time.Hour)) {
+		t.Fatalf("merged cache hold = %+v", got)
+	}
+}
+
 func TestObserveFreeLimitWritesAndClearsPrivateRecord(t *testing.T) {
 	now := testNow.UTC()
 	cache := filepath.Join(t.TempDir(), "cache")

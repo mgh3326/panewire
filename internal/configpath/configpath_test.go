@@ -10,23 +10,49 @@ func TestCandidatesPreferPanewireAndRetainLegacyPaths(t *testing.T) {
 	want := []string{
 		"/home/u/.config/panewire/config.toml",
 		"/home/u/.config/pacelever/config.toml",
-		"/home/u/.config/scopefuel/config.toml",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("Candidates = %v, want %v", got, want)
 	}
 }
 
-func TestCandidatesHonorNewOverrideBeforeLegacyOverride(t *testing.T) {
+func TestCandidatesExplicitOverridesAreExclusiveAndOrdered(t *testing.T) {
 	env := map[string]string{
 		"PANEWIRE_CONFIG":  "/new/config.toml",
 		"PACELEVER_CONFIG": "/old/config.toml",
 		"XDG_CONFIG_HOME":  "/xdg",
 	}
 	got := Candidates(func(key string) string { return env[key] }, "/home/u", "config.toml")
-	want := []string{"/new/config.toml", "/xdg/panewire/config.toml", "/old/config.toml", "/xdg/pacelever/config.toml", "/xdg/scopefuel/config.toml"}
+	want := []string{"/new/config.toml"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("Candidates = %v, want %v", got, want)
+	}
+	env = map[string]string{"PACELEVER_CONFIG": "/old/config.toml", "XDG_CONFIG_HOME": "/xdg"}
+	got = Candidates(func(key string) string { return env[key] }, "/home/u", "config.toml")
+	want = []string{"/old/config.toml"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("legacy explicit Candidates = %v, want %v", got, want)
+	}
+}
+
+func TestAdmissionCandidatesRetainImplicitScopefuelOnly(t *testing.T) {
+	getenv := func(string) string { return "" }
+	want := []string{
+		"/home/u/.config/panewire/config.toml",
+		"/home/u/.config/pacelever/config.toml",
+		"/home/u/.config/scopefuel/config.toml",
+	}
+	if got := AdmissionCandidates(getenv, "/home/u", "config.toml"); !reflect.DeepEqual(got, want) {
+		t.Fatalf("AdmissionCandidates = %v, want %v", got, want)
+	}
+	getenv = func(key string) string {
+		if key == "PACELEVER_CONFIG" {
+			return "/explicit/config.toml"
+		}
+		return ""
+	}
+	if got := AdmissionCandidates(getenv, "/home/u", "config.toml"); !reflect.DeepEqual(got, []string{"/explicit/config.toml"}) {
+		t.Fatalf("explicit AdmissionCandidates = %v", got)
 	}
 }
 

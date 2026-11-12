@@ -14,6 +14,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"os/exec"
@@ -178,8 +179,9 @@ func AccountFP(cfg Config) string {
 // settings are the two values pacelever's config.toml sets for the devin pool.
 type settings struct{ orgID, bin string }
 
-func (c Config) settings() settings {
+func (c Config) settings() (settings, error) {
 	paths := configpath.Candidates(c.env, c.home(), "config.toml")
+	_, variable, explicit := configpath.Explicit(c.env)
 	var file struct {
 		Pools struct {
 			Devin struct {
@@ -191,14 +193,17 @@ func (c Config) settings() settings {
 	for _, path := range paths {
 		body, err := c.readFileErr(path)
 		if errors.Is(err, os.ErrNotExist) {
+			if explicit {
+				return settings{}, fmt.Errorf("%s %q does not exist", variable, path)
+			}
 			continue
 		}
 		if err != nil || toml.Unmarshal(body, &file) != nil {
-			return settings{}
+			return settings{}, nil
 		}
-		return settings{orgID: strings.TrimSpace(file.Pools.Devin.OrgID), bin: strings.TrimSpace(file.Pools.Devin.Bin)}
+		return settings{orgID: strings.TrimSpace(file.Pools.Devin.OrgID), bin: strings.TrimSpace(file.Pools.Devin.Bin)}, nil
 	}
-	return settings{}
+	return settings{}, nil
 }
 
 // binary is the devin executable: PANEWIRE_DEVIN_BIN (PACELEVER_DEVIN_BIN
@@ -240,7 +245,10 @@ func Measure(ctx context.Context, cfg Config) (quota.Observation, error) {
 		return quota.Observation{}, quota.Fail(quota.ErrKindCredentials, "credentials unavailable")
 	}
 	login := AccountFP(cfg)
-	s := cfg.settings()
+	s, err := cfg.settings()
+	if err != nil {
+		return quota.Observation{}, err
+	}
 	if observed, err := cfg.fetchWeb(ctx, cfg.env("DEVIN_BEARER_TOKEN"), s.orgID); err == nil {
 		// The web source selects its organization independently of the CLI
 		// login, so its measurement carries the organization it measured; the

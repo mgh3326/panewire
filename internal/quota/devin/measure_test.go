@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -229,12 +230,41 @@ func TestBinaryResolution(t *testing.T) {
 	for _, test := range cases {
 		cfg := test.cfg
 		cfg.LookPath = look
-		if got := cfg.binary(cfg.settings()); got != test.want {
+		s, err := cfg.settings()
+		if err != nil {
+			t.Fatalf("%s settings: %v", test.name, err)
+		}
+		if got := cfg.binary(s); got != test.want {
 			t.Errorf("%s: binary %q, want %q", test.name, got, test.want)
 		}
 	}
 	none := config(nil, nil)
-	if got := none.binary(none.settings()); got != "devin" {
+	s, err := none.settings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := none.binary(s); got != "devin" {
 		t.Errorf("not found: binary %q", got)
+	}
+}
+
+func TestDevinSettingsMissingExplicitDoesNotFallThroughToLegacy(t *testing.T) {
+	legacy := "/home/u/.config/pacelever/config.toml"
+	missing := filepath.Join(t.TempDir(), "missing.toml")
+	cfg := config(map[string]string{legacy: "[pools.devin]\nbin='/legacy/devin'\n"}, map[string]string{
+		"PANEWIRE_CONFIG": missing,
+	})
+	_, err := cfg.settings()
+	if err == nil || !strings.Contains(err.Error(), "PANEWIRE_CONFIG") || !strings.Contains(err.Error(), missing) {
+		t.Fatalf("missing explicit path error = %v", err)
+	}
+}
+
+func TestDevinSettingsDoesNotReadScopefuelSnapshot(t *testing.T) {
+	scopefuel := "/home/u/.config/scopefuel/config.toml"
+	cfg := config(map[string]string{scopefuel: "[pools.devin]\nbin='/scopefuel/devin'\n"}, nil)
+	s, err := cfg.settings()
+	if err != nil || s.bin != "" || s.orgID != "" {
+		t.Fatalf("scopefuel settings = %+v, err=%v", s, err)
 	}
 }

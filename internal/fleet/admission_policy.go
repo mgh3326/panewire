@@ -42,13 +42,21 @@ var admissionPolicyPools = []string{"claude", "codex", "grok", "kimi", "devin", 
 // readPanewireConfig checks panewire's path before the pacelever and scopefuel
 // paths. Only a missing file falls through; an unreadable file fails closed.
 func readPanewireConfig(getenv func(string) string, home string) (data []byte, found bool, err error) {
-	for _, path := range configpath.Candidates(getenv, home, "config.toml") {
+	paths := configpath.AdmissionCandidates(getenv, home, "config.toml")
+	_, variable, explicit := configpath.Explicit(getenv)
+	for _, path := range paths {
 		data, err = os.ReadFile(path)
 		if errors.Is(err, fs.ErrNotExist) {
+			if explicit {
+				return nil, false, fmt.Errorf("%s %q does not exist", variable, path)
+			}
 			continue
 		}
 		if err != nil {
-			return nil, false, fmt.Errorf("cannot read panewire configuration")
+			if explicit {
+				return nil, false, fmt.Errorf("cannot read %s %q", variable, path)
+			}
+			return nil, false, fmt.Errorf("cannot read panewire configuration %q", path)
 		}
 		return data, true, nil
 	}
