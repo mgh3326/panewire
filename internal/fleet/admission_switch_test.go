@@ -237,9 +237,7 @@ func TestAdmissionNativeAlternativesReadOtherHeldPools(t *testing.T) {
 		}
 		return shared.Latest{Observation: switchReading(99.5, 40)}, nil
 	}
-	r := opusRequest
-	r.Effort = ""
-	x := a.nativeGate(context.Background(), r, true)
+	x := a.nativeGate(context.Background(), opusRequest, true)
 	var receipt gateReceipt
 	if err := json.Unmarshal([]byte(x.Out), &receipt); err != nil || x.Code != quotaGateBlocked {
 		t.Fatalf("opus must be refused: %d %s", x.Code, x.Out)
@@ -262,7 +260,9 @@ func TestAdmissionNativeSameGradeEscalationIncludesGateCode(t *testing.T) {
 		return shared.Latest{Observation: switchReading(20, 40)}, nil
 	}
 
-	x := a.nativeGate(context.Background(), opusRequest, true)
+	r := opusRequest
+	r.Effort = ""
+	x := a.nativeGate(context.Background(), r, true)
 	var receipt gateReceipt
 	if err := json.Unmarshal([]byte(x.Out), &receipt); err != nil || x.Code != quotaGateBlocked {
 		t.Fatalf("escalation must be refused with a gate receipt: %d %s (%v)", x.Code, x.Out, err)
