@@ -528,12 +528,8 @@ func (client *HubClient) nodeJobHerdrSessionByPane(pane string) string {
 
 	client.sessionCacheMu.RLock()
 	if client.paneSessions != nil {
-		if entry, ok := client.paneSessions[pane]; ok {
+		if entry, ok := client.paneSessions[pane]; ok && entry.jobID != "" {
 			if !jobsMtime.IsZero() && jobsMtime.Equal(entry.jobsMtime) {
-				if entry.jobID == "" {
-					client.sessionCacheMu.RUnlock()
-					return ""
-				}
 				eventsDir := filepath.Join(jobsRoot, entry.jobID, "events")
 				if efi, err := os.Stat(eventsDir); err == nil && efi.ModTime().Equal(entry.eventsMtime) {
 					client.sessionCacheMu.RUnlock()
@@ -545,31 +541,23 @@ func (client *HubClient) nodeJobHerdrSessionByPane(pane string) string {
 	client.sessionCacheMu.RUnlock()
 
 	binding, found := nodeJobHerdrBindingByPaneFromRoot(client.jobsInboxRoot, pane)
+	if !found {
+		return ""
+	}
 
 	client.sessionCacheMu.Lock()
 	if client.paneSessions == nil {
 		client.paneSessions = make(map[string]paneCacheEntry)
 	}
-	if found {
-		client.paneSessions[pane] = paneCacheEntry{
-			jobID:       binding.jobID,
-			session:     binding.session,
-			jobsMtime:   jobsMtime,
-			eventsMtime: binding.eventsMtime,
-		}
-	} else {
-		client.paneSessions[pane] = paneCacheEntry{
-			jobID:     "",
-			session:   "",
-			jobsMtime: jobsMtime,
-		}
+	client.paneSessions[pane] = paneCacheEntry{
+		jobID:       binding.jobID,
+		session:     binding.session,
+		jobsMtime:   jobsMtime,
+		eventsMtime: binding.eventsMtime,
 	}
 	client.sessionCacheMu.Unlock()
 
-	if found {
-		return binding.session
-	}
-	return ""
+	return binding.session
 }
 
 // nodeJobHerdrBindingByPaneFromRoot inspects job directories under inboxRoot to find
@@ -608,7 +596,7 @@ func nodeJobHerdrBindingByPaneFromRoot(inboxRoot, pane string) (nodePaneBinding,
 			eventsMtime = fi.ModTime()
 		}
 		sort.Slice(eventEntries, func(i, j int) bool {
-			return eventEntries[i].Name() > eventEntries[j].Name()
+			return eventEntries[i].Name() < eventEntries[j].Name()
 		})
 
 		jobEnded := false
@@ -625,16 +613,21 @@ func nodeJobHerdrBindingByPaneFromRoot(inboxRoot, pane string) (nodePaneBinding,
 			if strings.HasSuffix(name, "-job.completed.json") ||
 				strings.HasSuffix(name, "-job.lost.json") ||
 				strings.HasSuffix(name, "-job.revoked.json") ||
-				strings.HasSuffix(name, "-job.handed_off.json") {
+				strings.HasSuffix(name, "-job.handed_off.json") ||
+				strings.HasSuffix(name, "-job.joined.json") {
 				jobEnded = true
 			}
 			if strings.HasSuffix(name, "-job.spawned.json") ||
 				strings.HasSuffix(name, "-job.claim.json") ||
 				strings.HasSuffix(name, "-job.claimed.json") ||
+				strings.HasSuffix(name, "-job.reclaim.json") ||
+				strings.HasSuffix(name, "-job.reprompted.json") {
+				jobEnded = false
+			}
+			if strings.HasSuffix(name, "-job.spawned.json") ||
+				strings.HasSuffix(name, "-job.claim.json") ||
+				strings.HasSuffix(name, "-job.claimed.json") ||
 				strings.HasSuffix(name, "-job.reclaim.json") {
-				if jobMatched {
-					continue
-				}
 				data, err := os.ReadFile(filepath.Join(eventsDir, name))
 				if err != nil {
 					continue

@@ -279,6 +279,11 @@ func TestRelaySessionFromContextResolvesPane_t4209(t *testing.T) {
 	fakeFleetHerdr(t, fakeDir, "fleet")
 	t.Setenv("HERDR_SESSION", "default")
 
+	origResolver := activePaneSessionResolver.Load()
+	t.Cleanup(func() {
+		activePaneSessionResolver.Store(origResolver)
+	})
+
 	inbox := t.TempDir()
 	setupSpawnedJobSession(t, inbox, "job-pane-1", "w1:pW", "fleet")
 
@@ -395,5 +400,65 @@ func TestHerdrExecutableHonorsHerdrBin_t4209(t *testing.T) {
 	t.Setenv("HERDR_BIN", "/custom/bin/herdr")
 	if got := herdrExecutable(); got != "/custom/bin/herdr" {
 		t.Fatalf("expected /custom/bin/herdr, got %q", got)
+	}
+}
+
+// Review Finding 1 (Round 3): nodeJobHerdrSessionByPane does not cache negative misses.
+func TestNodeJobHerdrSessionByPaneDoesNotCacheMisses_t4209(t *testing.T) {
+	inbox := t.TempDir()
+	client := &HubClient{jobsInboxRoot: inbox}
+
+	// 1. Lookup an unbound pane before any job is created -> empty
+	if got := client.nodeJobHerdrSessionByPane("w1:pNew"); got != "" {
+		t.Fatalf("expected empty for unbound pane, got %q", got)
+	}
+
+	// 2. Setup job for that pane without touching jobs/ root (create job dir first, query, then write event)
+	jobDir := filepath.Join(inbox, "jobs", "job-existing", "events")
+	if err := os.MkdirAll(jobDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// Querying now still yields empty
+	if got := client.nodeJobHerdrSessionByPane("w1:pNew"); got != "" {
+		t.Fatalf("expected empty before spawn event, got %q", got)
+	}
+
+	// Now write the spawn event into eventsDir
+	ev := `{"seq":1,"created_at":"2026-11-12T03:00:00Z","kind":"job.spawned","payload":{"pane_id":"w1:pNew","herdr_session":"fleet-session"}}`
+	if err := os.WriteFile(filepath.Join(jobDir, "0001-job.spawned.json"), []byte(ev), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Because misses are not cached, it immediately finds the newly bound session!
+	if got := client.nodeJobHerdrSessionByPane("w1:pNew"); got != "fleet-session" {
+		t.Fatalf("expected fleet-session after event write, got %q", got)
+	}
+}
+
+// Review Finding 2 (Round 3): Replaying lifecycle in event order clears jobEnded when revived by a later claim/reclaim.
+func TestNodeJobHerdrSessionByPaneReplayRevivesJob_t4209(t *testing.T) {
+	inbox := t.TempDir()
+
+	// Job 1 was completed and never revived
+	setupSpawnedJobSession(t, inbox, "job-1-dead", "w1:pShared", "session-dead")
+	if err := os.WriteFile(filepath.Join(inbox, "jobs", "job-1-dead", "events", "0002-job.completed.json"), []byte(`{"kind":"job.completed"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Job 2 was spawned, then completed, then revived via job.reclaim
+	setupSpawnedJobSession(t, inbox, "job-2-revived", "w1:pShared", "session-old")
+	eventsDir2 := filepath.Join(inbox, "jobs", "job-2-revived", "events")
+	if err := os.WriteFile(filepath.Join(eventsDir2, "0002-job.completed.json"), []byte(`{"kind":"job.completed"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	reclaimEv := `{"seq":3,"created_at":"2026-11-12T04:00:00Z","kind":"job.reclaim","payload":{"pane_id":"w1:pShared","herdr_session":"session-revived"}}`
+	if err := os.WriteFile(filepath.Join(eventsDir2, "0003-job.reclaim.json"), []byte(reclaimEv), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Job 2 is live because job.reclaim revived it after job.completed.
+	session := nodeJobHerdrSessionByPaneFromRoot(inbox, "w1:pShared")
+	if session != "session-revived" {
+		t.Fatalf("expected session-revived, got %q", session)
 	}
 }
