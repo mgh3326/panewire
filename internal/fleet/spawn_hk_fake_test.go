@@ -23,6 +23,7 @@ const (
 // hkRequest is one request a fake hk received.
 type hkRequest struct {
 	Method, Path, Auth string
+	HKName, HKRef      string
 	// Query is the raw query string, for the list routes.
 	Query string
 	Body  []byte
@@ -144,7 +145,7 @@ var hkDocumentKinds = map[string]bool{"brief": true, "report": true, "answer": t
 
 func (hk *spawnHK) serve(w http.ResponseWriter, r *http.Request) {
 	body, _ := io.ReadAll(r.Body)
-	req := hkRequest{Method: r.Method, Path: r.URL.EscapedPath(), Auth: r.Header.Get("Authorization"), Query: r.URL.RawQuery, Body: body}
+	req := hkRequest{Method: r.Method, Path: r.URL.EscapedPath(), Auth: r.Header.Get("Authorization"), HKName: r.Header.Get("X-HK-Name"), HKRef: r.Header.Get("X-HK-Ref"), Query: r.URL.RawQuery, Body: body}
 	hk.mu.Lock()
 	hk.reqs = append(hk.reqs, req)
 	handlers := append([]func(hkRequest) (int, string, bool)(nil), hk.handle...)

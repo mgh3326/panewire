@@ -281,7 +281,7 @@ func spawnReceiptForRepair(events []Event) map[string]any {
 	return receipt
 }
 
-func (a *App) attachDuplicateResultStrict(ctx context.Context, j Job, id, report, digest string, result json.RawMessage, reportDoc, reportSHA string) (string, error) {
+func (a *App) attachDuplicateResultStrict(ctx context.Context, j Job, id, report, digest string, result json.RawMessage) (string, error) {
 	if result == nil {
 		return "", nil
 	}
@@ -311,9 +311,6 @@ func (a *App) attachDuplicateResultStrict(ctx context.Context, j Job, id, report
 			// was written after an earlier failed attempt; strict read-back
 			// will classify the terminal 409 safely.
 		} else {
-			if reportDoc != "" && str(record, "report_doc") != reportDoc {
-				return "", &doneResultFailure{code: exitStateConflict, reason: "report_conflict"}
-			}
 			written, eventErr := a.ensureResultAttachedEvent(ctx, j.Events, id, report, digest)
 			if eventErr != nil {
 				return "", &doneResultEventWriteFailure{cause: eventErr}
@@ -325,13 +322,7 @@ func (a *App) attachDuplicateResultStrict(ctx context.Context, j Job, id, report
 		}
 	}
 	fields := map[string]any{"state": "completed", "result": result}
-	if reportDoc != "" {
-		fields["report_doc"] = reportDoc
-		if reportSHA != "" {
-			fields["report_sha256"] = reportSHA
-		}
-	}
-	attached, e := a.strictCompletedPutUntil(ctx, id, fields, result, reportDoc, spawnReceiptForRepair(j.Events), deadline)
+	attached, e := a.strictCompletedPutUntil(ctx, id, fields, result, "", spawnReceiptForRepair(j.Events), deadline)
 	if e != nil {
 		if isDoneResultFailure(e, "result_conflict") {
 			a.recordDoneResultConflict(id)

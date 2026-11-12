@@ -27,10 +27,12 @@ func (r *ttlRig) seedRelative(rel string, extra ...string) {
 }
 
 // pin makes body the report hk confirms for job id: the record's report_doc
-// names reports/<id>/<base> and pins body's sha256, so no document is read.
+// names reports/<id>/<base> and pins body's sha256.
 func (r *ttlRig) pin(id, base string, body []byte) {
-	r.store.records[id]["report_doc"] = "reports/" + id + "/" + base
+	key := "reports/" + id + "/" + base
+	r.store.records[id]["report_doc"] = key
 	r.store.records[id]["report_sha256"] = sha(body)
+	r.doc(key, body, "")
 }
 
 // linkDeep makes <id>/link -> sub/deep beside an unconfirmed

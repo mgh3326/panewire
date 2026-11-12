@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -126,7 +127,8 @@ func (a *App) publishCompletionReport(ctx context.Context, jobID, taskID, comple
 
 	documentBody := body
 	if large {
-		if err := putCompletionAttachment(ctx, key, body); err != nil {
+		attachmentName := "answer-" + digest + ".md"
+		if err := putCompletionAttachment(ctx, key, attachmentName, body); err != nil {
 			if reason := completionUploadReason(err); strings.HasPrefix(reason, "secret_like_content") {
 				if writeErr := recordCompletionRefusal(refusalPath, reason); writeErr != nil {
 					return "", "", writeErr
@@ -162,8 +164,22 @@ func (a *App) publishCompletionReport(ctx context.Context, jobID, taskID, comple
 	return key, digest, nil
 }
 
-func putCompletionAttachment(ctx context.Context, key string, body []byte) error {
-	attachmentKey := strings.TrimPrefix(key, "reports/")
+func (a *App) publishEscalationReport(ctx context.Context, jobID, taskID, reportPath string, body []byte) (string, string, error) {
+	key := "reports/" + jobID + "/" + filepath.Base(reportPath)
+	task, taskErr := hkTaskID(taskID)
+	var taskPointer *int64
+	if taskErr == nil {
+		taskPointer = &task
+	}
+	doc := client.Document{Key: key, Kind: "report", Job: jobID, Body: string(body), TaskID: taskPointer, OriginClass: "job"}
+	if err := hkPutDocument(ctx, doc); err != nil {
+		return "", "", err
+	}
+	sum := sha256.Sum256(body)
+	return key, hex.EncodeToString(sum[:]), nil
+}
+
+func putCompletionAttachment(ctx context.Context, key, attachmentName string, body []byte) error {
 	sum := sha256.Sum256(body)
 	want := hex.EncodeToString(sum[:])
 	var lastErr error
@@ -172,7 +188,7 @@ func putCompletionAttachment(ctx context.Context, key string, body []byte) error
 		if err != nil {
 			return err
 		}
-		attachment, _, putErr := client.PutAttachment(ctx, filepath.Base(attachmentKey), "text/markdown", "none", body)
+		attachment, _, putErr := client.PutAttachment(ctx, attachmentName, "text/markdown", "none", body)
 		if putErr == nil {
 			if attachment.SHA256 != want || attachment.SizeBytes != int64(len(body)) {
 				return fail(exitStateConflict, "report attachment did not match submitted bytes")
@@ -257,10 +273,40 @@ func completionUploadReason(err error) string {
 	if errors.As(err, &httpErr) && httpErr.Status > 0 {
 		return fmt.Sprintf("http_%d", httpErr.Status)
 	}
-	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) || errors.Is(err, errHKTransport) {
+	var commandErr *ExitError
+	if errors.As(err, &commandErr) {
+		const refusalPrefix = "report bytes were permanently refused reason="
+		if i := strings.Index(commandErr.Message, refusalPrefix); i >= 0 {
+			reason := strings.TrimSpace(commandErr.Message[i+len(refusalPrefix):])
+			if pattern, ok := strings.CutPrefix(reason, "secret_like_content:"); ok && safeHKPattern.MatchString(pattern) {
+				return "secret_like_content:" + pattern
+			}
+			if reason == "secret_like_content" {
+				return reason
+			}
+		}
+		if commandErr.Code == exitStateConflict {
+			return "report_conflict"
+		}
+	}
+	var urlErr *url.Error
+	var timeout interface{ Timeout() bool }
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) || errors.Is(err, errHKTransport) || errors.As(err, &urlErr) || errors.As(err, &timeout) && timeout.Timeout() {
 		return "hk_unreachable"
 	}
 	return "hk_unconfigured"
+}
+
+func completionUploadCanRetry(err error) bool {
+	var commandErr *ExitError
+	if errors.As(err, &commandErr) {
+		return false
+	}
+	var httpErr *client.HTTPError
+	if errors.As(err, &httpErr) {
+		return httpErr.Status >= 500 || httpErr.Status == 429
+	}
+	return completionUploadReason(err) != "hk_unconfigured"
 }
 
 func recordCompletionRefusal(path, reason string) error {

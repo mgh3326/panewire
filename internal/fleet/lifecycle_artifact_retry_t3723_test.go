@@ -33,6 +33,225 @@ func completionDocumentRequests(hk *spawnHK) []hkRequest {
 	return out
 }
 
+func TestDoneArtifactDuplicateSkipsHKUpload(t *testing.T) {
+	ctx := context.Background()
+	a := testApp(t)
+	ledgerRunner(t, a)
+	hk := useFakeHK(t)
+	hk.Handle(hkCommentAnswer)
+	seedDoneJob(t, a)
+	path := completionReport(t, a, "same answer\n")
+	args := []string{"j", "--report", path, "--completion-id", "same-answer"}
+	if err := a.lifecycle(ctx, "done", args); err != nil {
+		t.Fatal(err)
+	}
+	before := len(hk.Requests())
+	if err := a.lifecycle(ctx, "done", args); err != nil {
+		t.Fatalf("duplicate completion: %v", err)
+	}
+	if got := len(hk.Requests()); got != before {
+		t.Fatalf("HK requests after duplicate = %d, before = %d; duplicate must not depend on HK availability", got, before)
+	}
+}
+
+func TestDoneArtifactSameCompletionIDRejectsChangedBytes(t *testing.T) {
+	ctx := context.Background()
+	a := testApp(t)
+	ledgerRunner(t, a)
+	hk := useFakeHK(t)
+	hk.Handle(hkCommentAnswer)
+	seedDoneJob(t, a)
+	path := completionReport(t, a, "first bytes\n")
+	args := []string{"j", "--report", path, "--completion-id", "fixed-id"}
+	if err := a.lifecycle(ctx, "done", args); err != nil {
+		t.Fatal(err)
+	}
+	before := len(completionDocumentRequests(hk))
+	completionReport(t, a, "changed bytes\n")
+	err := a.lifecycle(ctx, "done", args)
+	if err == nil || !strings.Contains(err.Error(), "reason=report_conflict") || strings.Contains(err.Error(), "retry") {
+		t.Fatalf("error=%v, want permanent report_conflict with no retry instruction", err)
+	}
+	if got := len(completionDocumentRequests(hk)); got != before {
+		t.Fatalf("document PUT count=%d, want no upload after completion-id conflict", got)
+	}
+}
+
+func TestDoneArtifactWatcherUploadFailureStillCompletes(t *testing.T) {
+	ctx := context.Background()
+	a := testApp(t)
+	f := ledgerRunner(t, a)
+	hk := useFakeHK(t)
+	hk.Handle(hkFails("PUT /v1/documents/", http.StatusServiceUnavailable, `{"error":"unavailable"}`))
+	seedDoneJob(t, a)
+	path := completionReport(t, a, "watcher answer\n")
+	if err := a.lifecycleWithOptions(ctx, "done", []string{"j", "--report", path}, true, false); err != nil {
+		t.Fatalf("watcher completion: %v", err)
+	}
+	job, err := a.job("j")
+	if err != nil {
+		t.Fatal(err)
+	}
+	completed := 0
+	for _, event := range job.Events {
+		if event.Kind == "job.completed" {
+			completed++
+			if str(event.Payload, "document") != "" {
+				t.Fatalf("completion document=%q, want empty after upload failure", str(event.Payload, "document"))
+			}
+		}
+	}
+	if completed != 1 {
+		t.Fatalf("job.completed events=%d, want one", completed)
+	}
+	if got := str(a.JobStore.(*fakeJobStore).record(t, "j"), "state"); got != "completed" {
+		t.Fatalf("job state=%q, want completed", got)
+	}
+	if _, relays := completions(t, a, f); relays != 1 {
+		t.Fatalf("completion relays=%d, want one", relays)
+	}
+}
+
+func TestDoneArtifactHeadlessUploadFailureStillCompletes(t *testing.T) {
+	ctx := context.Background()
+	a := testApp(t)
+	f := ledgerRunner(t, a)
+	hk := useFakeHK(t)
+	hk.Handle(hkFails("PUT /v1/documents/", http.StatusServiceUnavailable, `{"error":"unavailable"}`))
+	seedDoneJob(t, a)
+	putEvent(t, a, "j", "job.spawned", map[string]any{"headless": true})
+	path := completionReport(t, a, "headless answer\n")
+	resultPath := filepath.Join(a.Jobs, "j", "result.json")
+	if err := os.WriteFile(resultPath, []byte(`{"answer":"headless answer"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.lifecycle(ctx, "done", []string{"j", "--report", path, "--result", resultPath}); err != nil {
+		t.Fatalf("headless completion: %v", err)
+	}
+	if _, relays := completions(t, a, f); relays != 1 {
+		t.Fatalf("completion relays=%d, want one", relays)
+	}
+	if got := str(a.JobStore.(*fakeJobStore).record(t, "j"), "state"); got != "completed" {
+		t.Fatalf("job state=%q, want completed", got)
+	}
+}
+
+func TestDoneArtifactEscalateStillPublishesReport(t *testing.T) {
+	ctx := context.Background()
+	a := testApp(t)
+	f := ledgerRunner(t, a)
+	hk := useFakeHK(t)
+	hk.Handle(hkCommentAnswer)
+	seedDoneJob(t, a)
+	path := completionReport(t, a, "escalation evidence\n")
+	if err := a.lifecycle(ctx, "escalate", []string{"j", "--question", "Which option?", "--report", path}); err != nil {
+		t.Fatal(err)
+	}
+	const wantKey = "reports/j/report.md"
+	if got := str(a.JobStore.(*fakeJobStore).record(t, "j"), "report_doc"); got != wantKey {
+		t.Fatalf("report_doc=%q, want legacy escalation key %q", got, wantKey)
+	}
+	job, err := a.job("j")
+	if err != nil {
+		t.Fatal(err)
+	}
+	escalated := false
+	for _, event := range job.Events {
+		if event.Kind == "job.escalate" {
+			escalated = true
+			if str(event.Payload, "document") != wantKey {
+				t.Fatalf("escalate document=%q, want %q", str(event.Payload, "document"), wantKey)
+			}
+		}
+	}
+	if !escalated {
+		t.Fatal("job.escalate event missing")
+	}
+	if routes := hk.Routes(); !strings.Contains(strings.Join(routes, "\n"), docRoute(http.MethodPut, wantKey)) {
+		t.Fatalf("HK routes=%q, want escalation report PUT", routes)
+	}
+	if len(f.Calls) == 0 {
+		t.Fatal("escalation relay was not run")
+	}
+}
+
+func TestDoneArtifactLaterStrictResultAttachesWithoutReplacingPin(t *testing.T) {
+	ctx := context.Background()
+	a := testApp(t)
+	ledgerRunner(t, a)
+	hk := useFakeHK(t)
+	hk.Handle(hkCommentAnswer)
+	seedDoneJob(t, a)
+	firstPath := completionReport(t, a, "first answer\n")
+	if err := a.lifecycle(ctx, "done", []string{"j", "--report", firstPath, "--completion-id", "answer-1"}); err != nil {
+		t.Fatal(err)
+	}
+	firstPin := str(a.JobStore.(*fakeJobStore).record(t, "j"), "report_doc")
+	secondPath := completionReport(t, a, "second answer\n")
+	resultPath := filepath.Join(a.Jobs, "j", "result.json")
+	if err := os.WriteFile(resultPath, []byte(`{"findings":["second"]}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.lifecycle(ctx, "done", []string{"j", "--report", secondPath, "--completion-id", "answer-2", "--result", resultPath}); err != nil {
+		t.Fatalf("later strict result: %v", err)
+	}
+	record := a.JobStore.(*fakeJobStore).record(t, "j")
+	if got := str(record, "report_doc"); got != firstPin {
+		t.Fatalf("terminal report_doc=%q, want original %q", got, firstPin)
+	}
+	if !sameJSONValue(record["result"], map[string]any{"findings": []any{"second"}}) {
+		t.Fatalf("record result=%v, want the second answer result", record["result"])
+	}
+	if !containsString(eventKindsOf(t, a, "j"), "job.result_attached") {
+		t.Fatal("later result did not emit job.result_attached")
+	}
+}
+
+func TestDoneArtifactLegacyCompletionKeepsOriginalPin(t *testing.T) {
+	ctx := context.Background()
+	a := testApp(t)
+	ledgerRunner(t, a)
+	hk := useFakeHK(t)
+	hk.Handle(hkCommentAnswer)
+	seedDoneJob(t, a)
+	path := completionReport(t, a, "legacy answer\n")
+	const oldKey = "reports/j/legacy.md"
+	if err := a.JobStore.Put(ctx, "j", map[string]any{"state": "completed", "report_doc": oldKey, "report_sha256": sha256String("legacy answer\n")}); err != nil {
+		t.Fatal(err)
+	}
+	putEvent(t, a, "j", "job.completed", map[string]any{"report": path, "report_sha256": sha256String("legacy answer\n"), "document": oldKey})
+	completionReport(t, a, "later answer\n")
+	if err := a.lifecycle(ctx, "done", []string{"j", "--report", path, "--completion-id", "later-answer"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := str(a.JobStore.(*fakeJobStore).record(t, "j"), "report_doc"); got != oldKey {
+		t.Fatalf("terminal report_doc=%q, want original legacy pin %q", got, oldKey)
+	}
+}
+
+func TestDoneArtifactStrictUploadFailureReportsHKReason(t *testing.T) {
+	ctx := context.Background()
+	a := testApp(t)
+	ledgerRunner(t, a)
+	hk := useFakeHK(t)
+	seedDoneJob(t, a)
+	hk.Handle(hkFails("PUT /v1/documents/", http.StatusBadRequest, `{"error":"secret_like_content","pattern":"private_key"}`))
+	reportPath := completionReport(t, a, "secret answer\n")
+	resultPath := filepath.Join(a.Jobs, "j", "result.json")
+	if err := os.WriteFile(resultPath, []byte(`{"findings":[]}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	err := a.lifecycle(ctx, "done", []string{"j", "--report", reportPath, "--result", resultPath})
+	if err == nil || !strings.Contains(err.Error(), "reason=secret_like_content:private_key") {
+		t.Fatalf("error=%v, want exact safe HK refusal reason", err)
+	}
+}
+
+func sha256String(body string) string {
+	sum := sha256.Sum256([]byte(body))
+	return hex.EncodeToString(sum[:])
+}
+
 func TestDoneArtifactRetryReuploadsSameCompletion(t *testing.T) {
 	ctx := context.Background()
 	a := testApp(t)
@@ -195,6 +414,12 @@ func TestDoneArtifactUsesAttachmentManifestAbove512KiB(t *testing.T) {
 	}
 	if !attachmentSeen {
 		t.Fatal("large report was not uploaded as an attachment")
+	}
+	wantAttachmentName := "answer-" + hex.EncodeToString(attachmentSHA[:]) + ".md"
+	for _, req := range hk.Requests() {
+		if req.Route() == "PUT /v1/attachments" && req.HKName != wantAttachmentName {
+			t.Fatalf("attachment original_name=%q, want manifest name %q", req.HKName, wantAttachmentName)
+		}
 	}
 	reqs := completionDocumentRequests(hk)
 	if len(reqs) != 1 {

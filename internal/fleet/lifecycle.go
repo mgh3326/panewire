@@ -124,16 +124,6 @@ func (a *App) lifecycleWithOptions(ctx context.Context, kind string, args []stri
 		if e != nil {
 			return e
 		}
-		doc, docSHA, e = a.publishCompletionReport(ctx, id, j.Task, completionID, body)
-		if e != nil {
-			if strictResult {
-				return a.strictDoneFailure(ctx, id, e)
-			}
-			reason := completionUploadReason(e)
-			_ = a.event(ctx, id, "job.record_failed", map[string]any{"op": "report_upload", "reason": reason})
-			a.warn("report upload failed; local report retained; retry with the same --completion-id")
-			return fail(exitFailure, "job %s report upload failed reason=%s; retry with --completion-id %s", id, reason, completionID)
-		}
 	}
 	eventKind := "job.completed"
 	if kind == "escalate" {
@@ -142,22 +132,26 @@ func (a *App) lifecycleWithOptions(ctx context.Context, kind string, args []stri
 	rounds := 0
 	usedPath := false
 	priorCompletion := false
+	completionIDConflict := false
 	for _, ev := range j.Events {
 		if ev.Kind == eventKind {
 			rounds++
-			if kind == "done" && str(ev.Payload, "completion_id") != "" {
+			if kind == "done" {
 				priorCompletion = true
 			}
 			matches := str(ev.Payload, "report_sha256") == digest && str(ev.Payload, "question") == *question
 			if kind == "done" && str(ev.Payload, "completion_id") != "" {
-				matches = str(ev.Payload, "completion_id") == completionID
+				matches = str(ev.Payload, "completion_id") == completionID && str(ev.Payload, "report_sha256") == digest
+				if str(ev.Payload, "completion_id") == completionID && str(ev.Payload, "report_sha256") != digest {
+					completionIDConflict = true
+				}
 			}
 			if matches {
 				suffix := ""
 				if kind == "done" {
 					var status string
 					if strictResult {
-						status, e = a.attachDuplicateResultStrict(ctx, j, id, *report, digest, result, str(ev.Payload, "document"), str(ev.Payload, "report_sha256"))
+						status, e = a.attachDuplicateResultStrict(ctx, j, id, *report, digest, result)
 						if e != nil {
 							return a.strictDoneFailure(ctx, id, e)
 						}
@@ -187,6 +181,10 @@ func (a *App) lifecycleWithOptions(ctx context.Context, kind string, args []stri
 			}
 		}
 	}
+	if completionIDConflict {
+		_ = a.event(ctx, id, "job.record_failed", map[string]any{"op": "report_upload", "reason": "report_conflict"})
+		return fail(exitStateConflict, "job %s report upload failed reason=report_conflict", id)
+	}
 	if kind != "done" && usedPath && *report != "" {
 		ext := filepath.Ext(*report)
 		stem := strings.TrimSuffix(*report, ext)
@@ -209,6 +207,48 @@ func (a *App) lifecycleWithOptions(ctx context.Context, kind string, args []stri
 			}
 			*report = path
 			break
+		}
+	}
+	if kind == "done" && *report != "" {
+		doc, docSHA, e = a.publishCompletionReport(ctx, id, j.Task, completionID, body)
+		if e != nil {
+			reason := completionUploadReason(e)
+			if strictResult {
+				return a.strictDoneFailure(ctx, id, &doneResultFailure{code: exitFailure, reason: reason})
+			}
+			if watchResult || boolean(j.Receipt, "headless", false) {
+				a.warn("report upload failed; local report retained reason=%s", reason)
+			} else {
+				_ = a.event(ctx, id, "job.record_failed", map[string]any{"op": "report_upload", "reason": reason})
+				if completionUploadCanRetry(e) {
+					a.warn("report upload failed; local report retained; retry with the same --completion-id")
+					return fail(exitFailure, "job %s report upload failed reason=%s; retry with --completion-id %s", id, reason, completionID)
+				}
+				if reason == "report_conflict" || strings.HasPrefix(reason, "secret_like_content") {
+					a.warn("report publication refused; local report retained reason=%s", reason)
+					return fail(exitStateConflict, "job %s report publication refused reason=%s", id, reason)
+				}
+				a.warn("report upload failed; local report retained reason=%s", reason)
+				return fail(exitFailure, "job %s report upload failed reason=%s", id, reason)
+			}
+		}
+	} else if kind == "escalate" && *report != "" {
+		doc, docSHA, e = a.publishEscalationReport(ctx, id, j.Task, *report, body)
+		if e != nil {
+			a.warn("report upload failed; local report retained")
+			doc, docSHA = "", ""
+		}
+	}
+	if priorCompletion && result != nil && kind == "done" {
+		if strictResult {
+			_, e = a.attachDuplicateResultStrict(ctx, j, id, *report, digest, result)
+			if e != nil {
+				return a.strictDoneFailure(ctx, id, e)
+			}
+		} else {
+			if _, e = a.attachDuplicateResult(ctx, id, *report, digest, result); e != nil {
+				return e
+			}
 		}
 	}
 	a.recordJobUsage(ctx, j, false)

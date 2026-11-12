@@ -297,7 +297,7 @@ func TestHKSiteFailuresKeepCLIHandling(t *testing.T) {
 			t.Fatal("completion succeeded despite the refused report upload")
 		}
 		errs := a.Err.(*bytes.Buffer).String()
-		if !strings.Contains(errs, "panewire: warning: report upload failed; local report retained; retry with the same --completion-id\n") {
+		if !strings.Contains(errs, "panewire: warning: report upload failed; local report retained reason=too_large\n") {
 			t.Fatalf("warnings=%q", errs)
 		}
 		if out := a.Out.(*bytes.Buffer).String(); out != "" {

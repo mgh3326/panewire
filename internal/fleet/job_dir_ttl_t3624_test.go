@@ -135,6 +135,7 @@ func (r *ttlRig) seedJob(id string) {
 	r.write(id, "report.md", report)
 	r.write(id, "brief.md", []byte("the brief\n"))
 	r.store.records[id] = map[string]any{"job_id": id, "task_id": "42", "state": "completed", "report_doc": "reports/" + id + "/report.md", "report_sha256": sha(report)}
+	r.doc("reports/"+id+"/report.md", report, "")
 	r.age(id)
 }
 
