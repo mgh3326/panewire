@@ -358,7 +358,9 @@ When the line is sent:
 - When the hub starts, every inbox-only lane with unread items above `info`
   gets one line after the same wake window, with `startup` as the fleet-event
   reason. Restarts inside the window coalesce into one line after the last
-  restart. A lane whose unread items cannot be read gets none.
+  restart. Repeated restarts less than one wake window apart can defer this
+  line until the hub stays up for a full window; the window is not persisted.
+  A lane whose unread items cannot be read gets none.
 
 The wake decision lives in the hub, which owns the inbox store and sees each
 arrival. The node does not keep an inbox copy, so it would have to poll the
