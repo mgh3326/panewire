@@ -270,7 +270,8 @@ func TestAdmissionNativeSameGradeEscalationIncludesGateCode(t *testing.T) {
 	if receipt.Reason != "escalation: same-grade ordinary alternative available" || receipt.GateCode != "escalation" {
 		t.Fatalf("same-grade escalation refusal lost its gate code: %+v", receipt)
 	}
-	if got := hostGateNote(quotaJudgment{Outcome: outcomeQuotaExhausted}, &gateRefusal{cause: fail(quotaGateBlocked, "%s", receipt.Reason), outcome: outcomeQuotaExhausted, code: receipt.GateCode}); got != "gate_blocked:escalation" {
+	_, err := gateResult(x, r)
+	if got := hostGateNote(quotaJudgment{Outcome: outcomeQuotaExhausted}, err); got != "gate_blocked:escalation" {
 		t.Fatalf("remote host note = %q, want gate code", got)
 	}
 }
