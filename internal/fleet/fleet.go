@@ -387,10 +387,7 @@ func pct(v *float64) float64 {
 // group is set — after checking that every bucket in the reading is valid and
 // still running.
 //
-// A group view ranks on its longest window even when that is sub-daily: the
-// group has no longer one to pace, so its 5h reset is the only point where the
-// rest is lost (hk 3415). Every other view ranks on a window of a day or more
-// only, since a sub-daily rate window is an admission gate.
+// Only windows of a day or more rank a pool or group; shorter windows gate admission.
 func rankedPoolView(buckets []accountBucket, now time.Time, rankScope, group string) *PoolView {
 	inView := func(b accountBucket) bool { return b.Scope == rankScope && (group == "" || b.Model == group) }
 	var rankLen time.Duration
@@ -408,7 +405,7 @@ func rankedPoolView(buckets []accountBucket, now time.Time, rankScope, group str
 			rankLen = w
 		}
 	}
-	if group == "" && rankLen < 24*time.Hour {
+	if rankLen < 24*time.Hour {
 		rankLen = 0
 	}
 	v := &PoolView{Status: "ok", Class: "spend", Group: group}
@@ -420,6 +417,9 @@ func rankedPoolView(buckets []accountBucket, now time.Time, rankScope, group str
 			v.Blocking = b.UsedPct
 		}
 		w, err := windowDuration(b.Window)
+		if err == nil {
+			v.windowObserved = true
+		}
 		long := err == nil && w >= 24*time.Hour
 		if err == nil && !long && (v.ShortUsed == nil || *b.UsedPct > *v.ShortUsed) {
 			v.ShortUsed = b.UsedPct
@@ -431,10 +431,11 @@ func rankedPoolView(buckets []accountBucket, now time.Time, rankScope, group str
 		if v.Projected == nil || *x > *v.Projected {
 			v.Projected = x
 		}
-		// LongProjected is a day-or-more window's projection, or the group's
-		// ranking window when that group has no longer one.
-		if (long || err == nil && w == rankLen) && (v.LongProjected == nil || *x > *v.LongProjected) {
-			v.LongProjected = x
+		if long && (v.WorstLongProjected == nil || *x > *v.WorstLongProjected) {
+			v.WorstLongProjected = x
+		}
+		if rankLen != 0 && err == nil && w == rankLen && (v.RankProjected == nil || *x > *v.RankProjected) {
+			v.RankProjected = x
 		}
 		if rankLen == 0 || err != nil || w != rankLen {
 			continue

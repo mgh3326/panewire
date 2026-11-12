@@ -25,8 +25,8 @@ func TestSimulatePoolOrderCreditBesideFree_T4006(t *testing.T) {
 		t.Fatalf("tiers = %s", got)
 	}
 	chosen := rec["chosen"].(map[string]any)
-	if chosen["seat"] != "omp-opus" || chosen["tier"] != "credit" {
-		t.Fatalf("the credit rung is chosen in the free band: %v", chosen)
+	if chosen["seat"] != "devin-swe2" || chosen["tier"] != "free" {
+		t.Fatalf("the free rung is chosen before credit: %v", chosen)
 	}
 	if got := candOutcome(rec, "sonnet", "high")["outcome"]; got != "below_choice" {
 		t.Fatalf("the ranked pool is below the choice: %v", got)

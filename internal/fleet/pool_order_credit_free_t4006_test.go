@@ -44,12 +44,12 @@ func TestSelectCreditRanksBesideFree_T4006(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if sel.chosen.seatName != "omp-opus" || sel.chosen.tierName != "credit" {
-		t.Fatalf("the live credit rung must win inside the free band: %s in %s", sel.chosen.seatName, sel.chosen.tierName)
+	if sel.chosen.seatName != "devin-swe2" || sel.chosen.tierName != "free" {
+		t.Fatalf("the free rung must win before credit: %s in %s", sel.chosen.seatName, sel.chosen.tierName)
 	}
 	seats := rankedSeats(sel)
 	credit, free, ranked := seatIndex(seats, "omp-opus"), seatIndex(seats, "devin-swe2"), seatIndex(seats, "sonnet")
-	if credit < 0 || free < 0 || ranked < 0 || ranked < credit || ranked < free {
+	if credit < 0 || free < 0 || ranked < 0 || credit < free || ranked < credit {
 		t.Fatalf("ranked order %v: credit and free must precede the ranked pool", seats)
 	}
 	if got := candOutcome(sel.record(), "sonnet", "high")["outcome"]; got != "below_choice" {
@@ -69,11 +69,11 @@ func TestSelectCreditBeatsFreeOnFullTie_T4006(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if sel.chosen.seatName != "omp-opus" || sel.chosen.tierName != "credit" {
-		t.Fatalf("a full tie must put the credit rung first: %s in %s", sel.chosen.seatName, sel.chosen.tierName)
+	if sel.chosen.seatName != "devin-swe2" || sel.chosen.tierName != "free" {
+		t.Fatalf("a full tie must put the free rung first: %s in %s", sel.chosen.seatName, sel.chosen.tierName)
 	}
-	if got := candOutcome(sel.record(), "devin-swe2", "high")["outcome"]; got != "below_choice" {
-		t.Fatalf("the free rung is the runner-up: %v", got)
+	if got := candOutcome(sel.record(), "omp-opus", "high")["outcome"]; got != "below_choice" {
+		t.Fatalf("the credit rung is the runner-up: %v", got)
 	}
 }
 

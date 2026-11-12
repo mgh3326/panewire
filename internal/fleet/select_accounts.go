@@ -236,8 +236,7 @@ func (p *selPlan) classify(c *selCand, v PoolView) {
 	if p.policy.isCredit(c.row.Pool) || v.Class == "credit" {
 		c.creditPool = true
 		c.creditLeft = false
-		// A credit pool ranks in the free band (version 3); "credit" names
-		// the pool class inside it.
+		// Version 3 retains the free index; the comparator places credit after free.
 		c.tierName, c.tier = creditTier, slices.Index(p.order, "free")
 		if v.Class == "exclude" {
 			c.reason, c.code, c.outcome = "pool_excluded", outcomeNoRoleCandidate, "dropped:pool_excluded"

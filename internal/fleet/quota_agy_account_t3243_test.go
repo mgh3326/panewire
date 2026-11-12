@@ -99,7 +99,7 @@ func TestAccountPoolViewGroupViews(t *testing.T) {
 		t.Fatalf("the account view names its group: %+v", v)
 	}
 	gemini, third := v.Groups["gemini"], v.Groups["3p"]
-	if gemini.Blocking == nil || *gemini.Blocking != 100 || gemini.Urgency == nil || gemini.Group != "gemini" {
+	if gemini.Blocking == nil || *gemini.Blocking != 100 || gemini.Urgency != nil || gemini.Group != "gemini" {
 		t.Fatalf("gemini view %+v", gemini)
 	}
 	// The 7d window is 3p's longest, so its 5h window never paces the group.

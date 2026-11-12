@@ -98,7 +98,7 @@ func TestPanelFollowsPolicyNotFreeFirst(t *testing.T) {
 	// A paid pool at waste risk outranks the free rung (the normal policy), so a
 	// panel of 2 includes it and the second family is the free one.
 	e := panelEnv(t)
-	e.a.Quota.(rowQuota).fakeQuota.PoolViews["codex"] = PoolView{Status: "ok", Class: "spend", Blocking: ptrF(10), Projected: ptrF(40), Urgency: ptrF(1), ResetHours: ptrF(100), LongProjected: ptrF(40)}
+	e.a.Quota.(rowQuota).fakeQuota.PoolViews["codex"] = PoolView{Status: "ok", Class: "spend", Blocking: ptrF(10), Projected: ptrF(40), Urgency: ptrF(1), ResetHours: ptrF(100), RankProjected: ptrF(40)}
 	r, _, err := runPanel(t, e, "--role", "reader", "--panel", "2")
 	if err != nil {
 		t.Fatal(err)

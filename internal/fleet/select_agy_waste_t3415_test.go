@@ -52,30 +52,11 @@ func wantPct(t *testing.T, row map[string]any, key string, want float64) {
 func TestSelectAgyFlashWasteRiskFromGeminiFiveHour(t *testing.T) {
 	rec, sel := agyWasteSelect(t, agyUsed(0, 0, 0), agyWasteRows())
 	flash := candOutcome(rec, "agy-flash38-medium", "")
-	if flash["waste_risk"] != true {
-		t.Fatalf("a fresh gemini group is at waste risk: %v", flash)
+	if flash["waste_risk"] != false || flash["tier"] != "ranked" || flash["waste_group"] != "gemini" {
+		t.Fatalf("gemini's 5h window must not rank as waste: %v", flash)
 	}
-	if flash["waste_group"] != "gemini" {
-		t.Fatalf("the trace names the group used: %v", flash)
-	}
-	if flash["waste_order"] != "reset" {
-		t.Fatalf("waste is judged on the group's 5h reset: %v", flash)
-	}
-	wantPct(t, flash, "waste_urgency", 25)
-	wantPct(t, flash, "unused_at_reset_pct", 100)
-
-	codex := candOutcome(rec, "codex-luna", "medium")
-	if codex["waste_risk"] != true {
-		t.Fatalf("the fixture's codex candidate is also waste risk: %v", codex)
-	}
-	if cu, ok := codex["waste_urgency"].(float64); !ok || cu >= 25 {
-		t.Fatalf("codex urgency must be lower than gemini's 25: %v", codex)
-	}
-	if sel.chosen.seatName != "agy-flash38-medium" {
-		t.Fatalf("the higher-urgency gemini rung wins the waste band: %s", sel.chosen.seatName)
-	}
-	if chosen := rec["chosen"].(map[string]any); chosen["waste_group"] != "gemini" {
-		t.Fatalf("the chosen record names the group: %v", chosen)
+	if sel.chosen.seatName != "codex-luna" {
+		t.Fatalf("codex waste risk should win: %s", sel.chosen.seatName)
 	}
 }
 

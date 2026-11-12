@@ -22,13 +22,13 @@ func TestSimulateWasteRiskBeatsFree(t *testing.T) {
 	if chosen["seat"] != "sonnet" || chosen["waste_risk"] != true {
 		t.Fatalf("claude at waste risk beats SWE-2 on 2026-10-31: %v", chosen)
 	}
-	// After the reset the fresh window cannot be paced: no risk, SWE-2 first.
+	// After reset the fresh long window uses its unused share for risk.
 	rec, _, err = runSimulate(t, "--selection", riskFixturePath(), "--set", "claude:used=0,reset=+168h")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := rec["chosen"].(map[string]any)["seat"]; got != "devin-swe2" {
-		t.Fatalf("after claude's reset SWE-2 is first again: %v", got)
+	if got := rec["chosen"].(map[string]any)["seat"]; got != "sonnet" {
+		t.Fatalf("after reset claude remains at waste risk: %v", got)
 	}
 }
 

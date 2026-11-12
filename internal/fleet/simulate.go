@@ -216,14 +216,14 @@ func (v *PoolView) pace(used, projected *float64, window string, left float64, n
 		p = projectAtReset(used, window, resetsAt.Format(time.RFC3339Nano), now)
 	}
 	v.Projected = p
-	v.Urgency, v.ResetHours, v.LongProjected, v.ShortUsed = nil, nil, nil, nil
+	v.Urgency, v.ResetHours, v.RankProjected, v.ShortUsed = nil, nil, nil, nil
 	// Sub-daily windows never rank a pool; an unlabeled window ranks (the
 	// fixture's only window is its longest by definition).
 	if w, e := windowDuration(window); e == nil && w < 24*time.Hour {
 		v.ShortUsed = used
 		return
 	}
-	v.LongProjected = p
+	v.RankProjected = p
 	if p != nil && left > 0 {
 		u, h := (100-*p)/left, left
 		v.Urgency, v.ResetHours = &u, &h

@@ -198,8 +198,8 @@ func TestPoolsProjectAtReset(t *testing.T) {
 	if p := pools["hot"].Projected; p == nil || *p != 120 {
 		t.Fatalf("the highest account bucket projection wins: %v", p)
 	}
-	if pools["fresh"].Projected != nil {
-		t.Fatal("a window under 5% elapsed has no projection")
+	if p := pools["fresh"].Projected; p == nil || *p != 1 {
+		t.Fatalf("a fresh long window projects its used share: %v", p)
 	}
 	if p := pools["over"].Projected; p == nil || *p != 208 {
 		t.Fatalf("an over-consumed reading still projects: %v", p)

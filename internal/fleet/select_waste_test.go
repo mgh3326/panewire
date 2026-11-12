@@ -115,8 +115,8 @@ func TestPoolsWasteUrgencyUsesLongestWindow(t *testing.T) {
 	if u := pools["short"].Urgency; u != nil {
 		t.Fatalf("a sub-daily-only pool must not rank by urgency: %v", *u)
 	}
-	if u := pools["long-unpaced"].Urgency; u != nil {
-		t.Fatalf("an unpaceable longest window leaves no urgency: %v", *u)
+	if u := pools["long-unpaced"].Urgency; u == nil || math.Abs(*u-99.0/(29*24)) > 0.0001 {
+		t.Fatalf("fresh longest window uses unused share per hour: %v", u)
 	}
 	// Blocking still sees the short window: it stays an admission gate.
 	if b := pools["short"].Blocking; b == nil || *b != 3 {

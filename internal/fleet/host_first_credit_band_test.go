@@ -137,7 +137,7 @@ func TestHostFirstExpiringCreditStaysInPassOne(t *testing.T) {
 // worth spending (expiring). When that credit is refused, the paced pool is
 // still in the last band: a ranked subscription on a later host wins first.
 func TestHostFirstPacedPoolIsInLastBand(t *testing.T) {
-	paced := PoolView{Status: "ok", Class: "spend", Blocking: ptrF(60), LongProjected: ptrF(120), Projected: ptrF(120), ShortUsed: ptrF(40)}
+	paced := PoolView{Status: "ok", Class: "spend", Blocking: ptrF(60), RankProjected: ptrF(120), Projected: ptrF(120), ShortUsed: ptrF(40)}
 	setup := func(refuseCredit bool) (*selPlan, error) {
 		a, s, q, src := creditBandFixture(t, []CatalogRow{creditRow, sonnetRow, codexRow}, map[string]string{"mac-b": testClaudeA, "cloud-small": testCodexA}, balance(80, 100*time.Hour))
 		src.presence = append(src.presence, PresenceRecord{HostID: "mac-b", AccountKey: testCreditA, LastSeen: a.Now()})
@@ -173,7 +173,7 @@ func TestHostFirstPacedPoolIsInLastBand(t *testing.T) {
 // own host. Credit on another host never demotes a paced pool, so the paced
 // pool on rank 1 is chosen in pass 1.
 func TestHostFirstPacedPoolOnAWithCreditOnlyOnBChosenInPassOne(t *testing.T) {
-	paced := PoolView{Status: "ok", Class: "spend", Blocking: ptrF(60), LongProjected: ptrF(120), Projected: ptrF(120), ShortUsed: ptrF(40)}
+	paced := PoolView{Status: "ok", Class: "spend", Blocking: ptrF(60), RankProjected: ptrF(120), Projected: ptrF(120), ShortUsed: ptrF(40)}
 	for _, tc := range []struct {
 		name   string
 		credit func(time.Time) *CreditBalance
@@ -234,7 +234,7 @@ func TestPlacementRecordKeepsCreditRefusal(t *testing.T) {
 // repeated host does not use up MaxCandidates. Pass 1 refuses the credit rung;
 // pass 2 admits the paced subscription pool on the same host.
 func TestSelectionTermsListEachHostOnce(t *testing.T) {
-	paced := PoolView{Status: "ok", Class: "spend", Blocking: ptrF(60), LongProjected: ptrF(120), Projected: ptrF(120), ShortUsed: ptrF(40)}
+	paced := PoolView{Status: "ok", Class: "spend", Blocking: ptrF(60), RankProjected: ptrF(120), Projected: ptrF(120), ShortUsed: ptrF(40)}
 	a, s, q, src := creditBandFixture(t, []CatalogRow{creditRow, sonnetRow}, map[string]string{"mac-b": testCreditA}, balance(80, 100*time.Hour))
 	src.presence = append(src.presence, PresenceRecord{HostID: "mac-b", AccountKey: testClaudeA, LastSeen: a.Now()})
 	src.accounts[testClaudeA] = SharedAccount{Key: testClaudeA, Observed: true, Fresh: true, MeasuredAt: a.Now(), Quota: &paced}
