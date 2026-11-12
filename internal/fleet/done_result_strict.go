@@ -339,6 +339,13 @@ func (a *App) attachDuplicateResultStrict(ctx context.Context, j Job, id, report
 		return "", e
 	}
 	if !attached {
+		written, e := a.ensureResultAttachedEvent(ctx, j.Events, id, report, digest)
+		if e != nil {
+			return "", &doneResultEventWriteFailure{cause: e}
+		}
+		if written {
+			a.jobResultEvent(id, "attached", "duplicate_done", "duplicate completion")
+		}
 		return "result=equal", nil
 	}
 	written, e := a.ensureResultAttachedEvent(ctx, j.Events, id, report, digest)
