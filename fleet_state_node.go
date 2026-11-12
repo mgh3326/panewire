@@ -203,6 +203,9 @@ func (client *HubClient) refreshFleetQuota(ctx context.Context, pool string, sen
 	publish, ok, measuredHere, kind := client.measureFleetQuotaObserved(run, ctx, pool)
 	previous := sent[pool]
 	if !ok {
+		if measuredHere {
+			client.noteOwnQuotaMeasurement(pool)
+		}
 		// One warning per failure streak, not one per interval. Consumers see
 		// the reading age past its TTL and measure directly.
 		if !previous.failing {
@@ -259,13 +262,13 @@ func (client *HubClient) measureFleetQuotaObserved(run, parent context.Context, 
 		if err != nil {
 			// A timed-out refresh says nothing about the login.
 			if run.Err() != nil {
-				return FleetStatePublish{}, false, false, fleetQuotaErrorKindUnreadable
+				return FleetStatePublish{}, false, measuredHere, fleetQuotaErrorKindUnreadable
 			}
-			return FleetStatePublish{}, false, false, quotaErrorKind(err)
+			return FleetStatePublish{}, false, measuredHere, quotaErrorKind(err)
 		}
 		publish, ok := fleetQuotaFromReading(pool, reading, client.nowUTC())
 		if !ok {
-			return FleetStatePublish{}, false, false, quota.ErrKindParse
+			return FleetStatePublish{}, false, measuredHere, quota.ErrKindParse
 		}
 		return publish, true, measuredHere, ""
 	}

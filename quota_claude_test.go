@@ -48,12 +48,13 @@ const claudeAPIBody = `{"five_hour":{"utilization":42,"resets_at":"2026-11-05T15
 
 // claudeHK is a small handoffkeep: one account's reading and lease.
 type claudeHK struct {
-	t      *testing.T
-	server *httptest.Server
-	mu     sync.Mutex
-	calls  []string
-	latest json.RawMessage
-	holder string
+	t           *testing.T
+	server      *httptest.Server
+	mu          sync.Mutex
+	calls       []string
+	latest      json.RawMessage
+	holder      string
+	failPublish bool
 	// foreignHolder, when set, holds every lease for a minute: this node never
 	// gets it.
 	foreignHolder string
@@ -84,6 +85,10 @@ func newClaudeHK(t *testing.T) *claudeHK {
 			h.holder = body.Holder
 			_ = json.NewEncoder(w).Encode(shared.Lease{Holder: body.Holder, ExpiresAt: time.Now().Add(time.Minute), Acquired: true})
 		case r.Method == "PUT" && strings.HasSuffix(r.URL.Path, "/observation"):
+			if h.failPublish {
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
 			h.pubs = append(h.pubs, body.Observation)
 			h.latest = body.Observation
 			w.WriteHeader(204)

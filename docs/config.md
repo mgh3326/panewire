@@ -1070,9 +1070,9 @@ Consult grade is a floor on the rung, not the seat grade. The floor is one grade
 Within the floor:
 
 - A rung graded `unrated` is never chosen and never asks its quota gate (`grade_unrated`).
-- A rung below the floor, or whose launch rung is absent or below it, is dropped (`grade_insufficient`).
+- A row is dropped (`grade_insufficient`) when the rung it launches at is below the floor. That rung is the row's own effort; a rung-less row launches at its profile's default effort.
 - `--builder-family F` on `plan` or `resolve` drops consult rungs of family `F` (`family_excluded`). With no family, nothing is excluded and the stamp records `unknown`.
-- If no rung passes at the floor but a below-floor rung passes every other rule, consult retries once at the asker's own grade and stamps `fallback: no_rung_at_floor`. Unrated, absent-rung, and family-excluded rungs never trigger the retry. A session without a task grade never retries.
+- If no rung passes at the floor but a below-floor rung passes every other rule, consult retries once at the asker's own grade and stamps `fallback: no_rung_at_floor`. A below-floor rung on a cooling pool counts as such a rung. Unrated, absent-rung, and family-excluded rungs never trigger the retry. A session without a task grade never retries.
 
 The selection record carries a `consult` object with `asker_grade`, `asker_family`, `grade_source` (`flag`, `task`, or `without_task`), `floor`, `used_floor`, and `fallback`. `resolve --role consult` prints `floor=<G>` on its text line.
 
@@ -1757,7 +1757,7 @@ HTTP 409 warns and drops the conflicting file. Local attempt markers under
 | 74 | Active job duplicate, including an hk `job_id_taken` claim refusal. |
 | 75 | Unreadable duplicate state (the ledger's record of a duplicate job has no state or an unreadable `job.spawned` receipt; a released job has no receipt and is reclaimed), changed artifact, or a `--parent-job` that resolves neither locally nor in hk within the bound. |
 | 76 | `BRIEF_SUBMISSION_UNCONFIRMED`: no working transition or submitted brief turn on the launch session and pane. Codex retries a submit key once only for composer residue; other harnesses retain one submit-key retry when submission remains unconfirmed. |
-| 77 | `NO_ROLE_CANDIDATE` or seat, grade, family, or E6 refusal; quota gate exit 5 is remapped here. `role_restricted:` preserves the gate reason; codex-astra accepts only `director`, `architect`, `operator-request`, or `round-extension` as `--purpose`. 역할 제한 이유가 표시되면 해당 `--purpose` 허용값을 지정하세요. |
+| 77 | `NO_ROLE_CANDIDATE` or seat, grade, family, or E6 refusal; quota gate exit 5 is remapped here. `role_restricted:` preserves the gate reason and names the rule that refused. 역할 제한 이유가 표시되면 그 사유가 가리키는 역할 또는 프로필을 선택하세요. |
 | 78 | `preflight`: at least one checked remote host failed a check; the reasons are on stdout and in the error. |
 | 79 | Mock isolation refusal. |
 | 80 | Local spawning disabled/unavailable without a remote fallback. |

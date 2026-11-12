@@ -17,6 +17,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"math"
 	"net/http"
 	"os"
@@ -43,6 +44,10 @@ const (
 	authFileLimit = 1 << 20
 	wakeTimeout   = 30 * time.Second
 	authHint      = "antigravity authentication failed; run agy to refresh the login"
+	// UserAgent is the User-Agent header sent to the cloud quota endpoints: the
+	// agy CLI's own header string, which restores the Gemini weekly and Argon
+	// quota pools.
+	UserAgent = "antigravity/cli/1.4.12 (aidev_client; os_type=darwin; arch=arm64; auth_method=consumer)"
 )
 
 // cloudBases are the cloud quota hosts, in pacelever's order.
@@ -208,7 +213,7 @@ func (c Config) cloud(ctx context.Context) (quota.Observation, error) {
 
 // fetch reads the cloud summary with token from the first host that answers.
 func (c Config) fetch(ctx context.Context, token string) (quota.Observation, error) {
-	headers := map[string]string{"Authorization": "Bearer " + token, "User-Agent": "antigravity", "Content-Type": "application/json"}
+	headers := map[string]string{"Authorization": "Bearer " + token, "User-Agent": UserAgent, "Content-Type": "application/json"}
 	var last jsonReply
 	gotStatus := false
 	for _, base := range cloudBases {
@@ -323,7 +328,10 @@ func parse(raw, extraModels map[string]any) (quota.Observation, error) {
 		if group == "" {
 			group = GroupUnknown
 		}
-		if window == "" || math.IsNaN(fraction) || fraction < 0 || fraction > 1 {
+		if window == "" {
+			window = "unknown"
+		}
+		if math.IsNaN(fraction) || fraction < 0 || fraction > 1 {
 			return
 		}
 		bucket := quota.Bucket{Window: window, UsedPct: quota.Pct(100 * (1 - fraction)), ResetsAt: reset, Scope: quota.Scope{Kind: quota.ScopeGroup, Name: group}}
@@ -333,16 +341,23 @@ func parse(raw, extraModels map[string]any) (quota.Observation, error) {
 		}
 	}
 	for _, groupValue := range list(root["groups"]) {
-		group := object(groupValue)
-		display := text(group["displayName"]) + " " + text(group["description"])
-		for _, value := range list(group["buckets"]) {
+		for _, value := range list(object(groupValue)["buckets"]) {
 			bucket := object(value)
 			fraction, ok := number(bucket["remainingFraction"])
 			if !ok {
 				continue
 			}
 			id := text(bucket["bucketId"])
-			add(Group(id, display), bucketWindow(text(bucket["window"]), id), fraction, resetTime(bucket["resetTime"]))
+			grp, win, known := summaryBucket(id, text(bucket["window"]))
+			if !known {
+				slog.Warn("agy unknown quota bucket", "bucket_id", id)
+				grp = GroupUnknown
+				win = bucketWindow(text(bucket["window"]), id)
+				if win == "" {
+					win = "unknown"
+				}
+			}
+			add(grp, win, fraction, resetTime(bucket["resetTime"]))
 		}
 	}
 	addModels := func(models map[string]any) {
@@ -398,6 +413,34 @@ func parse(raw, extraModels map[string]any) (quota.Observation, error) {
 	return observed, nil
 }
 
+// summaryBucket maps a quota summary bucket's id to its metering group and
+// window length. Known bucket IDs match exactly; Argon is kept separate from
+// the Gemini group so an exhausted Argon pool does not block flash38 rungs.
+// An unknown bucket returns known=false.
+func summaryBucket(bucketID, windowAttr string) (group, window string, known bool) {
+	id := strings.ToLower(strings.TrimSpace(bucketID))
+	switch id {
+	case "gemini-5h":
+		return GroupGemini, "5h", true
+	case "gemini-weekly":
+		return GroupGemini, "7d", true
+	case "3p-5h":
+		return Group3P, "5h", true
+	case "3p-weekly":
+		return Group3P, "7d", true
+	case "gemini-argon-wtu-weekly":
+		return GroupUnknown, "7d", true
+	}
+	if strings.Contains(id, "argon") {
+		w := bucketWindow(windowAttr, id)
+		if w == "" {
+			w = "7d"
+		}
+		return GroupUnknown, w, true
+	}
+	return "", "", false
+}
+
 // bucketWindow is a bucket's window label: the reported period, else the
 // bucket id's suffix; "" when neither names one.
 func bucketWindow(window, bucketID string) string {
@@ -426,6 +469,8 @@ func bucketWindow(window, bucketID string) string {
 func Group(id, display string) string {
 	identity := strings.ToLower(strings.TrimSpace(id))
 	switch {
+	case strings.Contains(identity, "argon"):
+		return GroupUnknown
 	case strings.HasPrefix(identity, "gemini"):
 		return GroupGemini
 	case strings.HasPrefix(identity, "3p-"), strings.HasPrefix(identity, "3p_"):
@@ -433,6 +478,8 @@ func Group(id, display string) string {
 	}
 	joined := strings.ToLower(display + " " + identity)
 	switch {
+	case strings.Contains(joined, "argon"):
+		return GroupUnknown
 	case strings.Contains(joined, "gemini"):
 		return GroupGemini
 	case strings.Contains(joined, "claude"), strings.Contains(joined, "gpt"), strings.Contains(joined, "oss"):

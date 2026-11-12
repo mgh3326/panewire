@@ -814,12 +814,18 @@ func (a *App) selectFor(ctx context.Context, s Spawn, req selReq) (*selPlan, err
 		c := &selCand{row: row, tier: -1, ignoreGrade: req.route.top()}
 		cooling := snapshot != nil && snapshot.poolCooling(row.Pool, p.at)
 		reason, seatName, seat := a.staticDrop(row, req, floor, rungs, cooling)
+		probeReason := reason
+		if reason == "pool_cooling" {
+			// Keep the recorded cooling reason, but count the row according to
+			// the static result it would have once the pool cools off.
+			probeReason, _, _ = a.staticDrop(row, req, floor, rungs, false)
+		}
 		switch {
-		case reason == "" || reason == "pool_cooling":
+		case probeReason == "":
 			staticPassing++
-		case floor != "" && reason == "grade_insufficient":
+		case floor != "" && probeReason == "grade_insufficient":
 			// The rung passes every other rule with the floor off: a fallback candidate.
-			if off, _, _ := a.staticDrop(row, req, "", rungs, cooling); off == "" || off == "pool_cooling" {
+			if off, _, _ := a.staticDrop(row, req, "", rungs, false); off == "" {
 				fallbackRungs++
 			}
 		}

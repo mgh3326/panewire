@@ -115,9 +115,11 @@ func (a *App) staticDrop(row CatalogRow, req selReq, floor string, rungs rungInd
 		return reason, "", nil
 	}
 	if req.route.top() {
-		// After the seat rules, so a row they drop keeps its own reason, as
-		// before the floor existed.
-		if reason := topGradeDrop(row, req.route.effort(row), floor, rungs); reason != "" {
+		// Judged on the rung the spawn launches: spawn pins the launch to the
+		// chosen row's own effort, not the role-effort rung. After the seat
+		// rules, so a row they drop keeps its own reason, as before the floor
+		// existed.
+		if reason := topGradeDrop(row, a.rowLaunchEffort(row), floor, rungs); reason != "" {
 			return reason, "", nil
 		}
 	}

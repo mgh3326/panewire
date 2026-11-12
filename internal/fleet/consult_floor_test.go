@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 )
 
 // consultFloorRung is a synthetic catalog rung for the consult floor tests.
@@ -12,28 +13,46 @@ func consultFloorRung(profile, effort, grade, pool string) CatalogRow {
 	return CatalogRow{Profile: profile, Effort: effort, Grade: grade, Pool: pool, Gate: "default", ModelID: profile + "-m"}
 }
 
+// consultFloorOpts varies one consult selection: the routing block (default
+// routingBlockV1), --allow-escalation, and pools cooling for an hour.
+type consultFloorOpts struct {
+	block           string
+	allowEscalation bool
+	cooling         []string
+}
+
 // consultFloorSelect runs the selection core the way resolve builds its
 // request for a consult asker. grade "" is a session without a task, family ""
 // an asker whose family is unknown.
 func consultFloorSelect(t *testing.T, rows []CatalogRow, present []string, grade, family string) (*selPlan, error) {
 	t.Helper()
-	return consultFloorSelectRouting(t, routingBlockV1, rows, present, grade, family, false)
+	return consultFloorSelectWith(t, consultFloorOpts{}, rows, present, grade, family)
 }
 
-// consultFloorSelectRouting is consultFloorSelect under the given routing
-// block, with --allow-escalation when allowEscalation is set.
-func consultFloorSelectRouting(t *testing.T, block string, rows []CatalogRow, present []string, grade, family string, allowEscalation bool) (*selPlan, error) {
+func consultFloorSelectWith(t *testing.T, o consultFloorOpts, rows []CatalogRow, present []string, grade, family string) (*selPlan, error) {
 	t.Helper()
+	block := o.block
+	if block == "" {
+		block = routingBlockV1
+	}
 	pools := map[string]PoolView{"claude": riskPool(30, 8), "codex": {Status: "ok", Class: "spend", Blocking: ptrF(40)}}
 	a, s, q := selFixture(t, "S", rows, pools, present)
 	q.GateDo = gatePools(map[string]string{"opus": "claude", "codex-sol": "codex"})
+	if len(o.cooling) > 0 {
+		until := a.Now().Add(time.Hour)
+		cooling := map[string]time.Time{}
+		for _, pool := range o.cooling {
+			cooling[pool] = until
+		}
+		a.State = &fakeStateReader{snap: FleetSnapshot{Cooling: cooling}}
+	}
 	serveRouting(t, routingDoc(block))
 	route, e := a.routeFor(context.Background(), "worker", "consult")
 	if e != nil {
 		t.Fatalf("route: %v", e)
 	}
-	s.Role, s.RoutingRole, s.Task, s.AllowEscalation = "worker", "consult", "", allowEscalation
-	req := selReq{grade: grade, t: "T1", role: "worker", builderFamily: family, allowEscalation: allowEscalation, urgency: urgencyNormal, urgencySource: "default", route: route}
+	s.Role, s.RoutingRole, s.Task, s.AllowEscalation = "worker", "consult", "", o.allowEscalation
+	req := selReq{grade: grade, t: "T1", role: "worker", builderFamily: family, allowEscalation: o.allowEscalation, urgency: urgencyNormal, urgencySource: "default", route: route}
 	return a.selectFor(context.Background(), s, req)
 }
 
@@ -222,7 +241,7 @@ func TestConsultFloorResolveGradeFlag(t *testing.T) {
 func TestConsultFloorFamilyEffortBelowFloorRow(t *testing.T) {
 	block := consultFamilyEffortBlock(t, `{"codex-sol": "xhigh"}`)
 	rows := []CatalogRow{consultFloorRung("codex-sol", "xhigh", "S", "codex"), consultFloorRung("codex-sol", "max", "S+", "codex")}
-	sel, e := consultFloorSelectRouting(t, block, rows, []string{"codex"}, "S+", "anthropic", false)
+	sel, e := consultFloorSelectWith(t, consultFloorOpts{block: block}, rows, []string{"codex"}, "S+", "anthropic")
 	if e == nil || !strings.Contains(e.Error(), reasonRoleNoCandidate) {
 		t.Fatalf("S+ asker without escalation must refuse with %s; got %v", reasonRoleNoCandidate, e)
 	}
@@ -236,11 +255,83 @@ func TestConsultFloorFamilyEffortBelowFloorRow(t *testing.T) {
 		t.Fatalf("codex-sol@max reason = %v, want %s", got, reasonRoleEffortUnplaced)
 	}
 
-	sel, e = consultFloorSelectRouting(t, block, rows, []string{"codex"}, "S+", "anthropic", true)
+	sel, e = consultFloorSelectWith(t, consultFloorOpts{block: block, allowEscalation: true}, rows, []string{"codex"}, "S+", "anthropic")
 	if e != nil {
 		t.Fatalf("select with --allow-escalation: %v", e)
 	}
 	if got := sel.chosen.row.Effort; got != "max" {
 		t.Fatalf("escalated S+ asker must get codex-sol@max; got %s", got)
+	}
+}
+
+// TestConsultFloorJudgesLaunchedRung: a row launches at its own effort, so the
+// floor judges that rung, not the role-effort rung. codex-sol@min graded C
+// must not borrow codex-sol@high's S+ grade, and codex-sol@min graded S+ must
+// not be refused for a C role-effort rung.
+func TestConsultFloorJudgesLaunchedRung(t *testing.T) {
+	t.Run("below_floor_own_rung", func(t *testing.T) {
+		rows := []CatalogRow{consultFloorRung("codex-sol", "low", "C", "codex"), consultFloorRung("codex-sol", "high", "S+", "codex")}
+		sel, e := consultFloorSelect(t, rows, []string{"codex"}, "S", "")
+		if e != nil {
+			t.Fatalf("select: %v", e)
+		}
+		if got := candOutcome(sel.record(), "codex-sol", "low")["reason"]; got != "grade_insufficient" {
+			t.Fatalf("codex-sol@low launches at low (grade C); reason = %v, want grade_insufficient", got)
+		}
+	})
+	t.Run("above_floor_own_rung", func(t *testing.T) {
+		rows := []CatalogRow{consultFloorRung("codex-sol", "low", "S+", "codex"), consultFloorRung("codex-sol", "high", "C", "codex")}
+		sel, e := consultFloorSelect(t, rows, []string{"codex"}, "S", "")
+		if e != nil {
+			t.Fatalf("select: %v", e)
+		}
+		if got := sel.chosen.row.Effort; got != "low" {
+			t.Fatalf("codex-sol@low (grade S+) launches at low; chose effort %s", got)
+		}
+	})
+}
+
+// TestConsultFloorCoolingBelowFloorRetries: a below-floor rung on a cooling
+// pool is a fallback candidate, not a passing one, so no_rung_at_floor retries
+// at the asker's grade and admits the healthy rung.
+func TestConsultFloorCoolingBelowFloorRetries(t *testing.T) {
+	rows := []CatalogRow{consultFloorRung("codex-sol", "high", "S", "codex"), consultFloorRung("opus", "high", "S", "claude")}
+	sel, e := consultFloorSelectWith(t, consultFloorOpts{cooling: []string{"codex"}}, rows, consultFloorBothPools, "S", "")
+	if e != nil {
+		t.Fatalf("select: %v", e)
+	}
+	if got := sel.chosen.seat.Canon; got != "opus" {
+		t.Fatalf("retry at asker grade must admit opus@high; got %s", got)
+	}
+	if c := consultFloorStamp(t, sel); c["fallback"] != "no_rung_at_floor" {
+		t.Fatalf("fallback stamp = %v, want no_rung_at_floor", c)
+	}
+	// The record is the retry pass at the asker's grade, where the cooling
+	// codex-sol@high passes the grade and drops on its pool.
+	if got := candOutcome(sel.record(), "codex-sol", "high")["reason"]; got != "pool_cooling" {
+		t.Fatalf("cooling codex-sol@high at retry grade S; reason = %v, want pool_cooling", got)
+	}
+}
+
+// TestConsultFloorCoolingUnratedDoesNotSuppressFallback: an unrated rung in a
+// cooling pool is still unrated, so it must not count as a passing floor rung
+// and suppress fallback for a separate below-floor candidate.
+func TestConsultFloorCoolingUnratedDoesNotSuppressFallback(t *testing.T) {
+	rows := []CatalogRow{
+		consultFloorRung("codex-sol", "high", gradeUnrated, "codex"),
+		consultFloorRung("opus", "high", "S+", "claude"),
+	}
+	sel, e := consultFloorSelectWith(t, consultFloorOpts{cooling: []string{"codex"}}, rows, consultFloorBothPools, "S+", "")
+	if e != nil {
+		t.Fatalf("select with fallback: %v", e)
+	}
+	if got := sel.chosen.seat.Canon; got != "opus" {
+		t.Fatalf("fallback must select the healthy S+ rung; got %s", got)
+	}
+	if c := consultFloorStamp(t, sel); c["fallback"] != "no_rung_at_floor" {
+		t.Fatalf("fallback stamp = %v, want no_rung_at_floor", c)
+	}
+	if got := candOutcome(sel.record(), "codex-sol", "high")["reason"]; got != "pool_cooling" {
+		t.Fatalf("cooling unrated codex-sol@high reason = %v, want pool_cooling", got)
 	}
 }

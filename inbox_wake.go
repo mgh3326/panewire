@@ -300,8 +300,14 @@ func (h *HubServer) sendInboxWake(lane, class string, startup bool) inboxWakeOut
 	}
 	most := inboxWakeMostUrgent(items)
 	route, agent, routed := h.resolveRelayRoute("lane.event", hubJobEventPayload{OwnerLane: lane})
-	text := inboxWakeText(lane, unread, most)
+	route, agent, routed, text, deskFallback := h.inboxWakeDestination(lane, class, route, agent, routed, unread, most)
 	detail := fmt.Sprintf("lane=%s class=%s unread=%d most_urgent=%s machine=%s pane=%s", lane, class, unread, most, route.Machine, route.Pane)
+	if deskFallback {
+		detail = fmt.Sprintf("lane=%s class=%s unread=%d most_urgent=%s desk=%s machine=%s pane=%s", lane, class, unread, most, deskPolicyLane, route.Machine, route.Pane)
+		if startup {
+			detail += " startup=true"
+		}
+	}
 	if !routed || route.Sink || route.Pane == "" || !agent.queueRelay(hubRelayInjectEvent{Type: "relay.inject", JobID: laneEventTransportID(lane, "inbox-wake"), Pane: route.Pane, Text: text}) {
 		h.logger.Info("inbox wake not sent: lane pane unreachable; retrying at the window's end or the next node hello", "lane", lane)
 		h.emitFleet(fleetEvent{Kind: "inbox_wake", Job: lane, Outcome: "skipped", Reason: "unrouted", Detail: detail})
@@ -310,6 +316,9 @@ func (h *HubServer) sendInboxWake(lane, class string, startup bool) inboxWakeOut
 	reason := class
 	if startup {
 		reason = "startup"
+	}
+	if deskFallback {
+		reason = "desk_fallback"
 	}
 	h.emitFleet(fleetEvent{Kind: "inbox_wake", Job: lane, Outcome: "sent", Reason: reason, Detail: detail})
 	return inboxWakeSent

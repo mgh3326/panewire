@@ -413,23 +413,12 @@ func launchDefaultEffort(profile string, rows []launchRow, defaults map[string]s
 
 // launchRoleCheck is pacelever's roleCheck with its credit() rule.
 func launchRoleCheck(req admissionRequest, row launchRow) string {
-	role, purpose := admissionNormalize(req.Role), admissionNormalize(req.Purpose)
+	role := admissionNormalize(req.Role)
 	if admissionCredit(req.Profile, row.Pool) && role != "worker" && role != "tester" && (role != "builder" || !row.Placed || row.Gate != defaultGate) {
 		return "role_restricted: credit rung requires worker/tester; placed default rungs also allow builder"
 	}
-	if req.Profile == "codex-astra" || req.Profile == "fable" {
-		if role == "worker" || role == "captain" {
-			return "role_restricted: consult model cannot hold this seat"
-		}
-		if (role == "builder" || role == "tester" || role == "reviewer") && (purpose != "round-extension" || !strings.HasPrefix(req.OperatorRequest, "hk:doc/round-ext/")) {
-			return "role_restricted: round-extension and a round-ext document required"
-		}
-	}
 	if strings.Contains(req.Profile, "astra") && req.Profile != "codex-astra" {
 		return "role_restricted: removed astra seat alias"
-	}
-	if req.Profile == "codex-astra" && purpose != "director" && purpose != "architect" && purpose != "operator-request" && purpose != "round-extension" {
-		return "role_restricted: astra requires director, architect, or operator-request purpose"
 	}
 	return ""
 }
