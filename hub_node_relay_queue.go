@@ -1,5 +1,7 @@
 package panewire
 
+import "time"
+
 const nodeRelayQueueCapacity = 128
 
 type hubNodeRelayMessage struct {
@@ -21,6 +23,7 @@ func (h *HubServer) queueNodeRelayMessage(machineID, remoteAddr string, agent *h
 	if !ok || message.Type != "event" || !nodeRelayMessageKind(message.Kind) {
 		return false, true
 	}
+	queued := hubNodeRelayMessage{machineID: machineID, remoteAddr: remoteAddr, agent: agent, payload: append([]byte(nil), payload...)}
 	h.mu.Lock()
 	if h.nodeRelayQueues == nil {
 		h.nodeRelayQueues = make(map[string]*hubNodeRelayQueue)
@@ -31,12 +34,12 @@ func (h *HubServer) queueNodeRelayMessage(machineID, remoteAddr string, agent *h
 		h.nodeRelayQueues[machineID] = queue
 		go h.runNodeRelayQueue(machineID, queue)
 	}
-	h.mu.Unlock()
-	queued := hubNodeRelayMessage{machineID: machineID, remoteAddr: remoteAddr, agent: agent, payload: append([]byte(nil), payload...)}
 	select {
 	case queue.messages <- queued:
+		h.mu.Unlock()
 		return true, true
 	default:
+		h.mu.Unlock()
 		// Do not disconnect and lose one-shot relay.dropped reports. At
 		// saturation, process the durable event before reading more messages.
 		h.logger.Warn("node relay queue full; processing event inline", "machine", machineID, "kind", message.Kind)
@@ -50,11 +53,30 @@ func nodeRelayMessageKind(kind string) bool {
 }
 
 func (h *HubServer) runNodeRelayQueue(machineID string, queue *hubNodeRelayQueue) {
+	idle := time.NewTimer(time.Minute)
+	defer idle.Stop()
 	for {
 		select {
 		case <-h.closeCtx.Done():
 			return
+		case <-idle.C:
+			h.mu.Lock()
+			record := h.nodes[machineID]
+			if h.nodeRelayQueues[machineID] == queue && (record == nil || record.agent == nil) && len(queue.messages) == 0 {
+				delete(h.nodeRelayQueues, machineID)
+				h.mu.Unlock()
+				return
+			}
+			h.mu.Unlock()
+			idle.Reset(time.Minute)
 		case message := <-queue.messages:
+			if !idle.Stop() {
+				select {
+				case <-idle.C:
+				default:
+				}
+			}
+			idle.Reset(time.Minute)
 			kind, _ := queuedNodeRelayKind(message.payload)
 			if kind == "relay.delivered" || kind == "relay.unconfirmed" {
 				// Ack authorization is bound to machine/pane in handleRelayAck;
