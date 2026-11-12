@@ -256,8 +256,8 @@ func TestAdmissionNativeSameGradeEscalationIncludesGateCode(t *testing.T) {
 	a, _, _ := switchApp(t, gateModeNative, switchReading(20, 40), Result{Code: 99})
 	rows := switchRows(t)
 	rows[0].Gate = escalationGate
+	rows = append(rows, CatalogRow{Profile: "sonnet", Effort: "high", ModelID: "claude-sonnet-5-5", Pool: "claude", Grade: "S+", Gate: defaultGate})
 	a.BenchCatalog = func(context.Context) ([]CatalogRow, error) { return rows, nil }
-	a.Config.Quota["accounts"] = map[string]any{"codex": "fedcba9876543210"}
 	a.SharedLatest = func(context.Context, string) (shared.Latest, error) {
 		return shared.Latest{Observation: switchReading(20, 40)}, nil
 	}
