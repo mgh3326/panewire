@@ -442,6 +442,9 @@ func plainHeaderRowsAreErrorType(lines []string) bool {
 		token.WriteString(fragment)
 	}
 	value := strings.ToLower(token.String())
+	if providerErrType.MatchString(value) {
+		return true
+	}
 	for _, expected := range providerErrorTypes {
 		if value == expected {
 			return true
@@ -451,6 +454,9 @@ func plainHeaderRowsAreErrorType(lines []string) bool {
 }
 
 func providerErrTypePrefix(value string) bool {
+	if providerErrType.MatchString(value) {
+		return true
+	}
 	for _, expected := range providerErrorTypes {
 		if strings.HasPrefix(expected, value) {
 			return true
@@ -472,7 +478,10 @@ var providerErrorTypes = []string{
 
 func providerJSONStart(line string) bool {
 	body := strings.TrimSpace(plainProviderText(line))
-	return strings.HasPrefix(body, "{") && strings.ContainsRune(body, '"')
+	if body == "{" || body == "[" {
+		return true
+	}
+	return (strings.HasPrefix(body, "{") || strings.HasPrefix(body, "[")) && strings.ContainsRune(body, '"')
 }
 
 func jsonStringContinuationText(content string) string {
@@ -515,7 +524,9 @@ func providerTextPrefix(message string) bool {
 		"insufficientquotapleasecheckyourplanandbillingdetails",
 		"youexceededyourcurrentquota",
 		"youexceededyourcurrentquotapleasecheckyourplanandbillingdetails",
+		"youexceededyourcurrentquotapleasecheckyourplanandbillingdetailsformoreinformationonthiserrorreadthedocs",
 		"exceededyourcurrentquotapleasecheckyourplanandbillingdetails",
+		"exceededyourcurrentquotapleasecheckyourplanandbillingdetailsformoreinformationonthiserrorreadthedocs",
 	} {
 		if strings.HasPrefix(expected, value) {
 			return true
