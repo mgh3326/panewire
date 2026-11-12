@@ -374,14 +374,8 @@ func (q *quotaStopManager) observe(ctx context.Context, c idleWakeCandidate, now
 	var taskID string
 	job.Role, inherited, taskID = q.jobFacts(job.JobID, job.Role)
 	// Reserve the wake before touching the screen. A restart can never reread it.
-	q.store.mu.Lock()
-	result, err := q.store.db.ExecContext(scanCtx, `INSERT OR IGNORE INTO quota_stop_decisions(event_id,job,pane,label,created,role,owner) VALUES(?,?,?,?,?,?,?)`, c.EventID, job.JobID, c.PaneID, job.AgentLabel, now.UnixMilli(), job.Role, job.OwnerLane)
-	q.store.mu.Unlock()
-	if err != nil {
-		return
-	}
-	n, _ := result.RowsAffected()
-	if n != 1 {
+	fresh, _, err := q.reserveDecision(scanCtx, c, job, now)
+	if err != nil || !fresh {
 		return
 	}
 	scanned := clock()
@@ -435,17 +429,45 @@ func (q *quotaStopManager) observe(ctx context.Context, c idleWakeCandidate, now
 	_ = q.actOnQuotaStop(ctx, c, job, inherited, taskID, stop, basis, now)
 }
 
+// reserveDecision creates the decision row for candidate c if it does not
+// exist yet. fresh reports that this call created it; decided reports that the
+// row already carries a decision, so the stop was acted on before.
+func (q *quotaStopManager) reserveDecision(ctx context.Context, c idleWakeCandidate, job HubActiveJob, now time.Time) (fresh, decided bool, err error) {
+	q.store.mu.Lock()
+	defer q.store.mu.Unlock()
+	result, err := q.store.db.ExecContext(ctx, `INSERT OR IGNORE INTO quota_stop_decisions(event_id,job,pane,label,created,role,owner) VALUES(?,?,?,?,?,?,?)`, c.EventID, job.JobID, c.PaneID, job.AgentLabel, now.UnixMilli(), job.Role, job.OwnerLane)
+	if err != nil {
+		return false, false, err
+	}
+	if n, _ := result.RowsAffected(); n == 1 {
+		return true, false, nil
+	}
+	var decision string
+	if err := q.store.db.QueryRowContext(ctx, `SELECT decision FROM quota_stop_decisions WHERE event_id=?`, c.EventID).Scan(&decision); err != nil {
+		return false, false, err
+	}
+	return false, decision != "", nil
+}
+
 // herdrQuotaSignal reads herdr's agent detection for pane: the rule that
 // matched and the agent kind. Any failure reads as no signal, so the
-// classifier decides alone. The JSON keys are not verified against a live
-// quota stop: herdr 0.9.5 ships no quota_limit rule to match.
+// classifier decides alone. herdr 0.9.5 returns agent and matched_rule at the
+// top level; the result-wrapped shape is accepted too.
 func herdrQuotaSignal(ctx context.Context, pane string) (rule, agent string) {
 	out, err := herdrCommandOutput(ctx, pane, "agent", "explain", pane, "--json")
 	if err != nil {
 		return "", ""
 	}
+	return parseHerdrExplain(out)
+}
+
+// parseHerdrExplain reads the matched rule and agent kind from herdr agent
+// explain JSON. The top-level keys win; a result wrapper fills what they lack.
+func parseHerdrExplain(out []byte) (rule, agent string) {
 	var reply struct {
-		Result struct {
+		Agent       string          `json:"agent"`
+		MatchedRule json.RawMessage `json:"matched_rule"`
+		Result      *struct {
 			Agent       string          `json:"agent"`
 			MatchedRule json.RawMessage `json:"matched_rule"`
 		} `json:"result"`
@@ -453,7 +475,16 @@ func herdrQuotaSignal(ctx context.Context, pane string) (rule, agent string) {
 	if json.Unmarshal(out, &reply) != nil {
 		return "", ""
 	}
-	return ruleName(reply.Result.MatchedRule), reply.Result.Agent
+	agent, matched := reply.Agent, reply.MatchedRule
+	if reply.Result != nil {
+		if agent == "" {
+			agent = reply.Result.Agent
+		}
+		if len(matched) == 0 {
+			matched = reply.Result.MatchedRule
+		}
+	}
+	return ruleName(matched), agent
 }
 
 // ruleName accepts a matched rule as a bare id or as an object with an id.
@@ -475,6 +506,18 @@ func ruleName(raw json.RawMessage) string {
 // records it in the outbox. tick then writes the hk quota-stop note and runs
 // the hand-over or resume. basis names the signal that recognised the stop.
 func (q *quotaStopManager) actOnQuotaStop(ctx context.Context, c idleWakeCandidate, job HubActiveJob, inherited, taskID string, stop quotaStop, basis string, now time.Time) error {
+	// The action owns the reservation so direct callers (the stall net) work
+	// without observe. A row already decided means this stop was acted on.
+	resCtx, resCancel := context.WithTimeout(context.WithoutCancel(ctx), time.Second)
+	_, decided, err := q.reserveDecision(resCtx, c, job, now)
+	resCancel()
+	if err != nil {
+		q.logger.Warn("quota-stop decision was not reserved", "error", err)
+		return err
+	}
+	if decided {
+		return nil
+	}
 	lookupCtx, lookupCancel := context.WithTimeout(ctx, quotaStopLookupBudget)
 	defer lookupCancel()
 	policy, policyOK := q.loadPolicy(lookupCtx, now)
@@ -522,7 +565,7 @@ func (q *quotaStopManager) recordDecision(ctx context.Context, c idleWakeCandida
 func (q *quotaStopManager) recordDecisionFor(ctx context.Context, c idleWakeCandidate, role string, now time.Time, pool, reset, decision, reason, resume string, due int64) error {
 	shadow := !q.act && !quotaActsOn(role, pool)
 	q.store.mu.Lock()
-	result, err := q.store.db.ExecContext(ctx, `UPDATE quota_stop_decisions SET pool=?,reset=?,decision=?,reason=?,resume_text=?,due=?,action_recorded=? WHERE event_id=? AND NOT EXISTS (SELECT 1 FROM quota_stop_decisions d WHERE d.pane=? AND d.reset=? AND d.decision<>'' AND d.event_id<>? AND (? <> 'unknown' OR d.created / 3600000 = ?))`, pool, reset, decision, reason, resume, due, boolInt(shadow), c.EventID, c.PaneID, reset, c.EventID, reset, now.UnixMilli()/3600000)
+	result, err := q.store.db.ExecContext(ctx, `UPDATE quota_stop_decisions SET pool=?,reset=?,decision=?,reason=?,resume_text=?,due=?,action_recorded=? WHERE event_id=? AND decision='' AND NOT EXISTS (SELECT 1 FROM quota_stop_decisions d WHERE d.pane=? AND d.reset=? AND d.decision<>'' AND d.event_id<>? AND (? <> 'unknown' OR d.created / 3600000 = ?))`, pool, reset, decision, reason, resume, due, boolInt(shadow), c.EventID, c.PaneID, reset, c.EventID, reset, now.UnixMilli()/3600000)
 	q.store.mu.Unlock()
 	if err != nil {
 		q.logger.Warn("quota-stop decision was not recorded", "error", err)
