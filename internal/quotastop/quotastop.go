@@ -392,16 +392,19 @@ func scanJSON(block string) jsonProgress {
 
 func plainProviderText(block string) string {
 	body := strings.TrimSpace(apiErrorStart.ReplaceAllString(block, ""))
-	lines := strings.Split(body, "\n")
-	var tokenParts []string
-	for i, line := range lines {
-		token := strings.TrimSpace(line)
-		if !providerErrToken.MatchString(token) {
+	fields := strings.Fields(body)
+	var token strings.Builder
+	for i, fragment := range fields {
+		if !providerErrToken.MatchString(fragment) {
 			break
 		}
-		tokenParts = append(tokenParts, token)
-		if providerErrType.MatchString(strings.Join(tokenParts, "")) {
-			return strings.TrimSpace(strings.Join(lines[i+1:], "\n"))
+		token.WriteString(fragment)
+		value := token.String()
+		if providerErrType.MatchString(value) {
+			return strings.Join(fields[i+1:], " ")
+		}
+		if !providerErrTypePrefix(strings.ToLower(value)) {
+			break
 		}
 	}
 	return providerErrType.ReplaceAllString(body, "")
