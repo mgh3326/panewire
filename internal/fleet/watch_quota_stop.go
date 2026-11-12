@@ -55,7 +55,23 @@ type quotaStopWatch struct {
 // the visible screen; it never sends input to the pane, so no "send a message
 // to retry" automation exists here. A failed read is not a stop.
 func (a *App) quotaStopped(ctx context.Context, j Job, ag Agent, seen *quotaStopWatch) (quotastop.Stop, bool) {
-	if !slices.Contains(quotaStopRoles, j.QuotaRole()) || (ag.Status != "idle" && ag.Status != "done") {
+	if ag.Status != "idle" && ag.Status != "done" {
+		return quotastop.Stop{}, false
+	}
+	if live := FindHarnessSession([]Agent{ag}, j.Pane, "omp"); live.Source != "unavailable" {
+		receipt := make(map[string]any, len(j.Receipt)+1)
+		for key, value := range j.Receipt {
+			receipt[key] = value
+		}
+		receipt["harness_session"] = map[string]any{"kind": live.Kind, "id": live.ID, "source": live.Source}
+		j.Receipt = receipt
+	}
+	if slices.Contains([]string{"worker", "tester", "reviewer"}, j.QuotaRole()) {
+		if stop, ok := ompCreditStop(a.Home, j); ok {
+			return stop, true
+		}
+	}
+	if !slices.Contains(quotaStopRoles, j.QuotaRole()) {
 		return quotastop.Stop{}, false
 	}
 	if ag.StateChangeSeq != nil {
@@ -97,6 +113,9 @@ type quotaHandOff struct {
 // unchanged reports whether the pane is still in the state the stop was read
 // in. A pane that went back to work is not stopped any more.
 func (h quotaHandOff) unchanged(ag Agent) bool {
+	if !h.stop.CreditExhaustedAt.IsZero() {
+		return true
+	}
 	if ag.Status != "idle" && ag.Status != "done" {
 		return false
 	}
@@ -113,6 +132,9 @@ func quotaStopPayload(j Job, stop quotastop.Stop) map[string]any {
 	payload := map[string]any{"pane_id": j.Pane, "reason": "quota_stop", "pool": stop.Pool}
 	if !stop.Reset.IsZero() {
 		payload["reset_at"] = stop.Reset.UTC().Format(time.RFC3339)
+	}
+	if !stop.CreditExhaustedAt.IsZero() {
+		payload["credit_exhausted_at"] = stop.CreditExhaustedAt.UTC().Format(time.RFC3339Nano)
 	}
 	return payload
 }
@@ -160,6 +182,7 @@ func announcedQuotaStop(j Job) (quotastop.Stop, bool) {
 		if reset, err := time.Parse(time.RFC3339, str(ev.Payload, "reset_at")); err == nil {
 			stop.Reset = reset
 		}
+		stop.CreditExhaustedAt, _ = time.Parse(time.RFC3339Nano, str(ev.Payload, "credit_exhausted_at"))
 		return stop, stop.Pool != ""
 	}
 	return quotastop.Stop{}, false

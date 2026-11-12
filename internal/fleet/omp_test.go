@@ -384,8 +384,7 @@ func TestOMPDelegateHeadless(t *testing.T) {
 }
 
 func TestOMPSimulateCreditBesideFree(t *testing.T) {
-	// A credit pool ranks in the free band whatever its pacing or balance, so
-	// it is chosen before a ranked subscription pool.
+	// A credit pool with balance ranks in the free band; zero credit is excluded.
 	for _, tc := range []struct {
 		name               string
 		projected          float64
@@ -395,7 +394,7 @@ func TestOMPSimulateCreditBesideFree(t *testing.T) {
 		{"pool leaves quota unused", 90, ptrF(80), "omp-opus", "credit"},
 		{"pool on pace to use up, credit without expiry", 100, ptrF(80), "omp-opus", "credit"},
 		{"pool on pace to use up, no credit balance recorded", 100, nil, "omp-opus", "credit"},
-		{"pool on pace to use up, credit balance zero", 100, ptrF(0), "omp-opus", "credit"},
+		{"pool on pace to use up, credit balance zero", 100, ptrF(0), "sonnet", "ranked"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			a := testApp(t)

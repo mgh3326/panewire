@@ -11,6 +11,8 @@ import (
 	"regexp"
 	"syscall"
 	"time"
+
+	"github.com/mgh3326/panewire/internal/quotastop"
 )
 
 // laneEventMaxBytes bounds one events-lane record, as the relay scanner does.
@@ -150,6 +152,7 @@ func (a *App) watch(ctx context.Context, args []string) error {
 	latePoll := false
 	var screenRead quotaStopWatch
 	var handOff quotaHandOff
+	var pendingCredit *quotastop.Stop
 	for {
 		j, e := a.job(id)
 		if e != nil {
@@ -211,7 +214,7 @@ func (a *App) watch(ctx context.Context, args []string) error {
 		// An announced quota stop is watched through its hand-off grace, past
 		// the ordinary completion deadline: its fallback ends the job and
 		// releases the lease, which nothing else would.
-		if waiting == nil && !handOff.active && a.Now().After(deadline) && (!pending || latePoll) {
+		if waiting == nil && !handOff.active && pendingCredit == nil && a.Now().After(deadline) && (!pending || latePoll) {
 			fmt.Fprintln(a.Err, "watch-expired: job stays live; quota retained")
 			return nil
 		}
@@ -238,8 +241,23 @@ func (a *App) watch(ctx context.Context, args []string) error {
 		// Not while a hand-off is active: its stop is already announced, and a
 		// pane that reports no state_change_seq would be read and announced on
 		// every poll, moving the grace deadline each time.
-		if present && !pending && !handOff.active {
-			if stop, ok := a.quotaStopped(ctx, j, paneAgent, &screenRead); ok {
+		if (present && !pending || pendingCredit != nil) && !handOff.active {
+			var stop quotastop.Stop
+			var ok bool
+			if pendingCredit != nil {
+				stop, ok = *pendingCredit, true
+			} else {
+				stop, ok = a.quotaStopped(ctx, j, paneAgent, &screenRead)
+			}
+			if ok {
+				if !stop.CreditExhaustedAt.IsZero() {
+					if err := a.publishCreditRejection(ctx, j, stop); err != nil {
+						a.warn("credit rejection publication failed; retrying")
+						pendingCredit = &stop
+						goto afterQuotaStop
+					}
+					pendingCredit = nil
+				}
 				if a.QuotaHandOffGrace <= 0 {
 					return a.quotaStopLost(ctx, j, stop, true)
 				}
@@ -252,6 +270,7 @@ func (a *App) watch(ctx context.Context, args []string) error {
 				handOff = quotaHandOff{stop: stop, until: a.Now().Add(a.QuotaHandOffGrace), seq: paneAgent.StateChangeSeq, active: true}
 			}
 		}
+	afterQuotaStop:
 		if handOff.active {
 			if handOff.expired(a.Now(), paneAgent, present) {
 				return a.quotaStopLost(ctx, j, handOff.stop, false)
@@ -271,7 +290,7 @@ func (a *App) watch(ctx context.Context, args []string) error {
 		// after placing the successor: the hk record is the hub's to write
 		// (with the successor pointer), and the watcher ends the job after the
 		// grace instead.
-		if missing >= 2 && !handOff.active {
+		if missing >= 2 && !handOff.active && pendingCredit == nil {
 			if e := a.putJobRecord(ctx, id, map[string]any{"state": "lost"}); e != nil {
 				a.jobRecordFailed(ctx, id, "lost", e)
 			}

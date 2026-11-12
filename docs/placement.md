@@ -89,6 +89,21 @@ order, with each host's outcome and tried profile, effort, pool, and outcome.
 It omits account identities and gate output. Refused automatic selections
 emit this trace too. The handoffkeep placement API payload is unchanged.
 
+### Exhausted API credit
+
+An idle omp job closes its own API credit account when its session records a
+provider credit rejection. The watcher reads the final structured assistant
+error, not pane text, and uses omp's completion timestamp (or the session entry
+timestamp when completion time is absent). This is the harness host's time;
+the provider response does not include a recorded rejection timestamp. The
+watcher writes a zero balance to the shared manual credit store before it
+announces the quota stop. The stored observation has no billing expiry; a later
+manual credit measurement reopens the account. Replaying an older rejection
+cannot replace a newer entry. Selection and `plan` show `credit_exhausted` and
+its `since` time. The shared store keeps the close across a hub restart and
+when `/v1/state` is unavailable. If the shared store cannot be read, admission
+fails closed.
+
 ### Pool concurrency cap
 
 `[quota].pool_max_concurrent = { "openai-api" = 2 }` limits live spawns on a pool,
