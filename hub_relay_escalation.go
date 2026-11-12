@@ -100,13 +100,20 @@ func (h *HubServer) escalateUnconfirmedRelay(machine string, dropped relayDroppe
 	if !relayDroppedIsUnconfirmed(dropped.Reason) || dropped.OriginalEventID < 1 || dropped.Lane == "" || h.handoffkeep == nil {
 		return
 	}
-	first := h.noteUnconfirmedRow(machine, dropped)
+	first, tracked := h.noteUnconfirmedRow(machine, dropped)
 	h.noteHostFault(machine, dropped)
 	if !first {
 		return // the retried copy dropped too; the unread timer already runs
 	}
 	h.scheduleUnconfirmedRetry(machine, dropped)
-	if h.quiet.timings.unconfirmedUnreadAfter <= 0 {
+	if h.quiet.timings.unconfirmedUnreadAfter <= 0 || !tracked {
+		h.escalateUnconfirmedRelayAttempt(machine, dropped, 0, false)
+		return
+	}
+	// The deadline is kept in hk so a hub restart cannot lose it. When hk
+	// refuses it the row is told at once, the pre-hk-4270 behavior.
+	if !h.persistUnconfirmedWatch(machine, dropped) {
+		h.forgetUnconfirmedRow(dropped.OriginalEventID)
 		h.escalateUnconfirmedRelayAttempt(machine, dropped, 0, false)
 		return
 	}
@@ -120,10 +127,14 @@ func (h *HubServer) escalateUnconfirmedRelay(machine string, dropped relayDroppe
 // escalation, is retried on unconfirmedEscalationBackoff until the escalation
 // is durable: the durable id keeps the retries to one escalation. unproven is
 // set for a row a retry already retired: hk then reads it as delivered, and
-// only a confirmation (confirmUnconfirmedRow) clears it.
+// only a confirmation (confirmUnconfirmedRow), checked again on every
+// retry, clears it.
 func (h *HubServer) escalateUnconfirmedRelayAttempt(machine string, dropped relayDroppedPayload, attempt int, unproven bool) {
 	if !relayDroppedIsUnconfirmed(dropped.Reason) || dropped.OriginalEventID < 1 || dropped.Lane == "" || h.handoffkeep == nil {
 		return
+	}
+	if h.unconfirmedRowConfirmed(dropped.OriginalEventID) {
+		return // a delivery confirmed since this notice was queued
 	}
 	design := h.designLaneFor(dropped.Lane)
 	retry := func(why string) {
@@ -346,14 +357,13 @@ func (n *unconfirmedNoticeWindows) admitWithin(design, worker string, row int64,
 	return note, 0, true
 }
 
-// closeWindow ends one window: it returns the rows folded and the count past
-// the bound, with the earliest fold time, and forgets the window so the next
-// drop opens a new one.
-func (n *unconfirmedNoticeWindows) closeWindow(design, worker string) (rows []int64, over int, since time.Time) {
+// snapshot reads the rows a window folded and the count past the bound, with
+// the earliest fold time. It changes nothing: the caller settles the window
+// only once the summary it names them in is durable.
+func (n *unconfirmedNoticeWindows) snapshot(design, worker string) (rows []int64, over int, since time.Time) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	key := [2]string{design, worker}
-	w := n.byLanes[key]
+	w := n.byLanes[[2]string{design, worker}]
 	if w == nil {
 		return nil, 0, time.Time{}
 	}
@@ -365,9 +375,33 @@ func (n *unconfirmedNoticeWindows) closeWindow(design, worker string) (rows []in
 		}
 	}
 	slices.Sort(rows)
-	over = w.over
-	delete(n.byLanes, key)
-	return rows, over, since
+	return rows, w.over, since
+}
+
+// settle ends a window after its summary named rows and over. Rows folded
+// since stay counted and remain in the window; the window no longer holds
+// (told is cleared), so the next drop opens a new fault. It reports how many
+// folds remain unnamed.
+func (n *unconfirmedNoticeWindows) settle(design, worker string, rows []int64, over int) (remaining int) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	key := [2]string{design, worker}
+	w := n.byLanes[key]
+	if w == nil {
+		return 0
+	}
+	for _, id := range rows {
+		delete(w.folded, id)
+	}
+	if w.over -= over; w.over <= 0 {
+		w.over, w.overAt = 0, time.Time{}
+		clear(w.overRows)
+	}
+	w.told, w.row = time.Time{}, 0
+	if remaining = len(w.folded) + w.over; remaining == 0 {
+		delete(n.byLanes, key)
+	}
+	return remaining
 }
 
 // record notes that the store accepted row's notice: it holds the window from

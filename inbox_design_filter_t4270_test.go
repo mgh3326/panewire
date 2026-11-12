@@ -313,3 +313,54 @@ func TestDesignLaneOwnSpawnFailureIsUnchanged_t4270(t *testing.T) {
 		t.Fatalf("design lane items=%+v, want its own worker's SPAWN_FAILED at once", items)
 	}
 }
+
+// A completion whose filing failed is sent again by its producer and must be
+// filed again: the READY that made it a repeat is spent only by a successful
+// filing.
+func TestDesignInboxReadyNoteSurvivesFailedFiling_t4270(t *testing.T) {
+	h, agent, fake := t3434Hub(t, filepath.Join(t.TempDir(), "inbox.sqlite3"))
+	ready := t3434Event(t3426Design, t3434WorkerPane, "ready", "READY hk3430 PR #221 head abc1234")
+	h.relayLaneEvent(ready, agent)
+	completion := t3426Completion(t3434WorkerJob, t3426Design, "https://github.com/example/repo/pull/221")
+
+	fake.mu.Lock()
+	fake.status = 500
+	fake.mu.Unlock()
+	h.relayJobCompletionFrom("host-a", completion)
+	fake.mu.Lock()
+	fake.status = 201
+	fake.mu.Unlock()
+	if items := t4270Items(t, h, t3426Design); len(items) != 1 {
+		t.Fatalf("a failed filing listed %d items, want only the READY", len(items))
+	}
+	h.relayJobCompletionFrom("host-a", completion)
+	for _, item := range t4270Items(t, h, t3426Design) {
+		if item.Kind == "job.completed" {
+			t.Fatalf("the retried completion was delivered instead of filed: %+v", item)
+		}
+	}
+	if _, to := t4270Rows(fake, t3434WorkerJob); len(to) != 1 || to[0] != "hub/filtered:repeats-ready" {
+		t.Fatalf("hk rows delivered_to=%q, want one hub/filtered:repeats-ready", to)
+	}
+}
+
+// A design session's own reviewer spawn (the owner is also the requester, so
+// no second copy exists) hears its retryable failure at once: it is the only
+// notice it can act on.
+func TestReviewerSpawnFailureWithoutDistinctRequesterIsNotHeld_t4270(t *testing.T) {
+	h, _, _ := spawnNotifyHubLanes(t, "", "mergewake-design")
+	for _, requester := range []string{"", "mergewake-design"} {
+		job := fmt.Sprintf("mwr-5-aaaaaaa-p1-%d", len(requester))
+		task, _, err := h.inbox.store.claimSpawn(t.Context(), t4270Request(job, "mergewake-design", requester, "reviewer"), job, "mergewake-design", time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err = h.inbox.store.completeSpawn(t.Context(), task, hubSpawnOutcome{RC: 81, Stage: "checkout", Reason: "checkout_refused:locked", Retryable: true}, time.Now()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	h.flushSpawnNotifications(t.Context())
+	if items := t4270Items(t, h, "mergewake-design"); len(items) != 2 {
+		t.Fatalf("design lane items=%d, want both failures at once", len(items))
+	}
+}

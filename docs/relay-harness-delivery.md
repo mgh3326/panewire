@@ -249,11 +249,22 @@ once:
   goes to the worker's design lane 15 minutes after the first drop
   (`unconfirmedUnreadAfter`) and only if no `relay.delivered` confirmed the row
   since, the retry's copy included. A retry that dropped too is still
-  unconfirmed, so it is told. The wait is memory only: after a hub restart the
-  startup replay gives every marked row its one labelled replay.
+  unconfirmed, so it is told. The deadline is kept in hk as a watch row
+  (`hub/unconfirmed-watch`, event id `unconfirmed-watch-<row id>`, delivered as
+  `watch-closed:<why>` when the row is confirmed or told). A restarted hub finds
+  open watch rows in its startup and node-hello walks and re-arms them, at once
+  when the deadline has passed. When hk refuses the watch row, or the hub's
+  in-memory table of 4096 rows is full, the design lane is told at the drop, as
+  before hk 4270. The host fault summary is settled only once stored; a failed
+  write is retried after 10 s, 1 min and 5 min without waiting for another drop.
 
-The durable row stays in hk undelivered until the pane confirms it, so no
-notice carries information the row does not.
+The durable row stays in hk undelivered until the pane confirms it or its one
+replay (the retry, or the startup replay) retires it. After a retry the open
+watch row is what keeps the unconfirmed state durable until the pane confirms
+the copy or the design lane has been told. A `relay.delivered` is kept as proof
+in memory even if hk refuses the delivery write, so the retry never types a row
+the pane has; the retry reads its row again with backoff (10 s, 1 min, 5 min)
+when hk cannot be read. No notice carries information the rows do not.
 
 When a node drops an event as `inject_failed_max_attempts`,
 `maybe_in_pane`, `pane_read_failed`, `delivery_uncertain_check_pane` or `working_wait_expired`, the hub tells the job's design lane once. A handoffkeep outage

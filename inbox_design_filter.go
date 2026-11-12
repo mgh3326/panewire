@@ -67,6 +67,9 @@ type designQuietTimings struct {
 	hostFaultWindow time.Duration
 	// hostFaultLane is the lane told once per host fault; empty disables it.
 	hostFaultLane string
+	// hkRetryBackoff spaces the retries of an hk read or write the timers
+	// depend on: the retry's row read and a host fault summary.
+	hkRetryBackoff []time.Duration
 }
 
 func defaultDesignQuietTimings() designQuietTimings {
@@ -76,6 +79,7 @@ func defaultDesignQuietTimings() designQuietTimings {
 		unconfirmedUnreadAfter: 15 * time.Minute,
 		hostFaultWindow:        30 * time.Minute,
 		hostFaultLane:          "panewire-design",
+		hkRetryBackoff:         []time.Duration{10 * time.Second, time.Minute, 5 * time.Minute},
 	}
 }
 
@@ -151,8 +155,9 @@ func (h *HubServer) noteWorkerReady(job, lane string) {
 }
 
 // completionRepeatsReady reports whether a completion of job into lane comes
-// within readyRepeatWindow of that job's READY into the same lane, and spends
-// the note: one READY explains one completion.
+// within readyRepeatWindow of that job's READY into the same lane. It does not
+// spend the note: a completion whose filing failed is sent again by its
+// producer and must be filtered again (spendWorkerReady runs after the filing).
 func (h *HubServer) completionRepeatsReady(job, lane string) bool {
 	h.quiet.mu.Lock()
 	defer h.quiet.mu.Unlock()
@@ -160,9 +165,15 @@ func (h *HubServer) completionRepeatsReady(job, lane string) bool {
 	if !ok {
 		return false
 	}
-	delete(h.quiet.ready, job)
 	age := h.now().Sub(note.at)
 	return note.lane == lane && age >= 0 && age <= readyRepeatWindow
+}
+
+// spendWorkerReady spends job's READY note: one READY explains one completion.
+func (h *HubServer) spendWorkerReady(job string) {
+	h.quiet.mu.Lock()
+	delete(h.quiet.ready, job)
+	h.quiet.mu.Unlock()
 }
 
 // designFilterReason names why a record for a design lane is kept in hk only,

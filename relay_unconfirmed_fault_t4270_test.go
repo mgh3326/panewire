@@ -8,6 +8,8 @@ package panewire
 
 import (
 	"fmt"
+	"net/http"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -186,5 +188,126 @@ func TestRelayFailedRetryStillReachesDesignLane_t4270(t *testing.T) {
 	})
 	if len(notices) != 1 || !strings.Contains(notices[0].Text, fmt.Sprintf("event %d", row)) {
 		t.Fatalf("design lane notices=%+v, want one naming row %d", notices, row)
+	}
+}
+
+// The unread deadline survives a hub restart: the watch row in hk re-arms it,
+// and a row still unconfirmed past its deadline is told at once.
+func TestRelayUnreadDeadlineSurvivesRestart_t4270(t *testing.T) {
+	rig := t4270Rig(t, designQuietTimings{unconfirmedUnreadAfter: time.Hour})
+
+	row, _ := rig.drop()
+	watches := func() (n int) {
+		rig.fake.mu.Lock()
+		defer rig.fake.mu.Unlock()
+		for _, r := range rig.fake.stored {
+			if r.OwnerLane == relayUnconfirmedWatchLane && r.DeliveredAt == "" {
+				n++
+			}
+		}
+		return n
+	}
+	if watches() != 1 {
+		t.Fatalf("open watch rows=%d, want the deadline kept in hk", watches())
+	}
+	// The restart: memory is gone, the clock has passed the deadline.
+	rig.hub.quiet.mu.Lock()
+	rig.hub.quiet.unconfirmed = nil
+	rig.hub.quiet.mu.Unlock()
+	rig.clock.advance(2 * time.Hour)
+	rig.hub.replayUndeliveredLaneEvents(t.Context())
+	var got []hubRelayInjectEvent
+	eventually(t, 5*time.Second, "the notice after the restart", func() bool {
+		got = append(got, rig.notices()...)
+		return len(got) > 0
+	})
+	if len(got) != 1 || !strings.Contains(got[0].Text, fmt.Sprintf("event %d", row)) {
+		t.Fatalf("notices after the restart=%+v", got)
+	}
+	// A second walk (a node hello) does not tell again.
+	rig.hub.replayUndeliveredLaneEvents(t.Context())
+	time.Sleep(100 * time.Millisecond) // proves nothing more happens
+	if more := rig.notices(); len(more) != 0 {
+		t.Fatalf("a second walk told again: %+v", more)
+	}
+}
+
+// A confirmed row closes its watch, so a restart does not tell about it.
+func TestRelayConfirmedRowClosesItsWatch_t4270(t *testing.T) {
+	rig := t4270Rig(t, designQuietTimings{unconfirmedUnreadAfter: time.Hour})
+	row, dropped := rig.drop()
+	rig.hub.markRelayEventDelivered(relayPending{machine: "host-a", pane: dropped.Pane, eventID: row, kind: "lane.event", event: hubJobEventPayload{JobID: dropped.JobID, OwnerLane: t3431Worker}})
+	eventually(t, 5*time.Second, "the watch row closed", func() bool {
+		rig.fake.mu.Lock()
+		defer rig.fake.mu.Unlock()
+		for _, r := range rig.fake.rows {
+			if r.OwnerLane == relayUnconfirmedWatchLane {
+				return r.DeliveredAt != ""
+			}
+		}
+		return false
+	})
+}
+
+// With no room to track a row, its design lane is told at once rather than
+// trusting a missing entry to mean "confirmed".
+func TestRelayUntrackedRowIsToldAtOnce_t4270(t *testing.T) {
+	rig := t4270Rig(t, designQuietTimings{unconfirmedUnreadAfter: time.Hour})
+	rig.hub.quiet.mu.Lock()
+	rig.hub.quiet.unconfirmed = make(map[int64]unconfirmedRow)
+	for i := range unconfirmedRowsMax {
+		rig.hub.quiet.unconfirmed[int64(-i-1)] = unconfirmedRow{}
+	}
+	rig.hub.quiet.mu.Unlock()
+	row, _ := rig.drop()
+	if got := rig.notices(); len(got) != 1 || !strings.Contains(got[0].Text, fmt.Sprintf("event %d", row)) {
+		t.Fatalf("notices=%+v, want the row told at the drop", got)
+	}
+}
+
+// A summary that could not be stored is retried without waiting for another
+// drop, and still names every folded row.
+func TestRelayHostFaultSummaryIsRetried_t4270(t *testing.T) {
+	rig := t4270Rig(t, designQuietTimings{hkRetryBackoff: slices.Repeat([]time.Duration{50 * time.Millisecond}, 40), hostFaultLane: t4270FaultLane, hostFaultWindow: 150 * time.Millisecond, unconfirmedUnreadAfter: time.Hour})
+
+	rig.dropAs(relayDroppedPaneReadFailed)
+	rig.fake.mu.Lock()
+	rig.fake.failPostOwnerLane = t4270FaultLane
+	rig.fake.mu.Unlock()
+	a := rig.dropAs(relayDroppedPaneReadFailed)
+	b := rig.dropAs(relayDroppedPaneReadFailed)
+	time.Sleep(300 * time.Millisecond) // the first summary attempt fails inside this wait
+	if got := rig.faultNotices(); len(got) != 1 {
+		t.Fatalf("a summary was stored while hk refused it: %q", got)
+	}
+	rig.fake.mu.Lock()
+	rig.fake.failPostOwnerLane = ""
+	rig.fake.mu.Unlock()
+	eventually(t, 5*time.Second, "the retried summary", func() bool { return len(rig.faultNotices()) == 2 })
+	summary := rig.faultNotices()[1]
+	if !strings.Contains(summary, fmt.Sprint(a)) || !strings.Contains(summary, fmt.Sprint(b)) {
+		t.Fatalf("summary omits a folded row: %q", summary)
+	}
+}
+
+// A delivery the pane confirmed stays proven when hk refuses the delivery
+// write: the timed retry does not type the row again and the design lane is
+// not told.
+func TestRelayConfirmationProofSurvivesFailedDeliveryWrite_t4270(t *testing.T) {
+	rig := t4270Rig(t, designQuietTimings{unconfirmedRetryAfter: 150 * time.Millisecond, unconfirmedUnreadAfter: 300 * time.Millisecond})
+	row := rig.dropAs(relayDroppedPaneReadFailed)
+	rig.fake.mu.Lock()
+	rig.fake.deliveredStatus = http.StatusInternalServerError
+	rig.fake.mu.Unlock()
+	pending := relayPending{machine: "host-a", pane: "w1:pW", eventID: row, kind: "lane.event", event: hubJobEventPayload{JobID: laneEventTransportID(t3431Worker, "mergewake-findings-1"), OwnerLane: t3431Worker}}
+	if rig.hub.markRelayEventDelivered(pending) {
+		t.Fatal("the delivery write was expected to fail")
+	}
+	// The window proves nothing more happens: past both the retry and the unread limit.
+	time.Sleep(600 * time.Millisecond)
+	select {
+	case d := <-rig.dest.relays:
+		t.Fatalf("a confirmed row was typed or told after the failed write: %+v", d)
+	default:
 	}
 }

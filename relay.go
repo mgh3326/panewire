@@ -992,9 +992,12 @@ func (h *HubServer) markRelayEventDelivered(pending relayPending) bool {
 		return true
 	}
 	if err := h.handoffkeep.markDelivered(context.Background(), pending.eventID, pending.machine, pending.pane); err != nil {
+		// The confirmation proof stays (confirmUnconfirmedRow) so the timed
+		// retry cannot type a row the pane has.
 		h.logger.Warn("relay delivery was not recorded", "event_id", pending.eventID, "machine", pending.machine)
 		return false
 	}
+	h.settleConfirmedRow(pending.eventID)
 	h.observeRelayDelivered(pending)
 	return true
 }
@@ -1286,6 +1289,8 @@ func (h *HubServer) replayUndeliveredRelayRows(ctx context.Context, kind, source
 			switch {
 			case isUnconfirmedMarkRecord(record):
 				h.settleUnconfirmedMarker(ctx, record)
+			case isUnconfirmedWatchRecord(record):
+				h.resumeUnconfirmedWatch(ctx, record)
 			case marks[record.ID]:
 				h.replayMarkedUnconfirmed(ctx, record, source, digestMarks[record.ID])
 			default:

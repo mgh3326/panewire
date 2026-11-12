@@ -274,7 +274,7 @@ unread count and wake never see it:
 | Record | Reason | How it is recognised |
 | --- | --- | --- |
 | `job.completed`, `job.revoked` and the SPAWNED notice of a reviewer a daemon started | `reviewer-lifecycle` | The hub's saved spawn request for the job has `--role reviewer` and a job id that starts `mwr-` (mergewake's reviewer naming, as `nodeReviewerDirPattern` relies on). A job the hub did not place is not one. The submitter's `--requested-by` is not part of the test: the value mergewake sends is not visible to the hub, and a lane name proves nothing about what the job is. |
-| `job.completed` that repeats a READY | `repeats-ready` | A READY (`lane.event --type ready`) from the worker job into the same lane arrived at most 10 minutes earlier (`readyRepeatWindow`). The worker is the live job in the sending pane, as in the worker rules above. One READY explains one completion: the next completion is delivered. The note is in memory; after a hub restart the completion is delivered. |
+| `job.completed` that repeats a READY | `repeats-ready` | A READY (`lane.event --type ready`) from the worker job into the same lane arrived at most 10 minutes earlier (`readyRepeatWindow`). The worker is the live job in the sending pane, as in the worker rules above. One READY explains one completion, spent once the completion is filed in hk (a failed filing is retried by its producer and filtered again): the next completion is delivered. The note is in memory; after a hub restart the completion is delivered. |
 
 Nothing is dropped. The hk row is the durable copy (`handoffkeep` relay
 events list it with `delivered_to` `hub/filtered:<reason>`); the job's own hk

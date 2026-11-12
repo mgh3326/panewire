@@ -28,7 +28,7 @@ func TestSubmitValidAgentNameFollowsHerdrRule_t4270(t *testing.T) {
 }
 
 // submitPreflightFixture is a hub submission for task 42 whose hk answer is task.
-func submitPreflightFixture(t *testing.T, label, task string) (*App, Spawn) {
+func submitPreflightFixture(t *testing.T, label, task string, extra ...string) (*App, Spawn) {
 	t.Helper()
 	a, s, _, _, _ := hubFixture(t, gitState{pushed: true}, "wk/feat", hubHosts())
 	a.Config.Local["machine_id"] = "source-a"
@@ -39,7 +39,8 @@ func submitPreflightFixture(t *testing.T, label, task string) (*App, Spawn) {
 	if err := os.WriteFile(brief, []byte("brief"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	parsed, err := parseSpawn([]string{"-c", s.CWD, "-p", brief, "-l", label, "--job", "job-a", "--t", "T1", "--task", "42", "--host", "h1", "--override-reason", "fixture", "--owner", "panewire-design", "--containment", "hk:12"})
+	args := []string{"-c", s.CWD, "-p", brief, "-l", label, "--job", "job-a", "--t", "T1", "--task", "42", "--host", "h1", "--override-reason", "fixture", "--owner", "panewire-design", "--containment", "hk:12"}
+	parsed, err := parseSpawn(append(args, extra...))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -138,6 +139,66 @@ func TestSubmitHostRefusalNamesTheMissingCapability_t4270(t *testing.T) {
 				t.Fatalf("refused: %v", err)
 			case tc.want != "" && (err == nil || !strings.Contains(err.Error(), "NO_ELIGIBLE_HOST") || !strings.Contains(err.Error(), tc.want)):
 				t.Fatalf("err=%v, want NO_ELIGIBLE_HOST naming %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// A review pass of a claimed task names the builder, and the node accepts the
+// task bound to that builder; the submit must not refuse what the node takes.
+func TestSubmitPrepareAcceptsReviewPassOfBuilderBoundTask_t4270(t *testing.T) {
+	task := taskJSON(map[string]any{"state": "developing", "title": "task (grade A, T1)", "claimed_by": "builder-label", "refs": map[string]any{"job_id": "builder-1"}})
+	a, s := submitPreflightFixture(t, "job-a", task, "--role", "reviewer", "--builder-family", "openai", "--builder-job", "builder-1", "--report-relative", "job-a/report.md")
+	if err := a.submitPreflight(context.Background(), s); err != nil {
+		t.Fatalf("a review pass of the builder's task was refused: %v", err)
+	}
+	// Without the builder the same task is bound to another job.
+	a, s = submitPreflightFixture(t, "job-a", task)
+	if err := a.submitPreflight(context.Background(), s); err == nil || !strings.Contains(err.Error(), "bound to another job") {
+		t.Fatalf("err=%v, want the bound-to-another-job refusal", err)
+	}
+}
+
+// Replaying an accepted submission reaches the hub's idempotent lookup even
+// when the task has moved on since (merged, rebound, retitled).
+func TestSubmitPrepareReplayIgnoresLaterTaskState_t4270(t *testing.T) {
+	good := taskJSON(map[string]any{"state": "developing", "title": "task (grade A, T1)"})
+	a, s := submitPreflightFixture(t, "job-a", good)
+	request, err := a.PrepareSubmission(context.Background(), s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = a.saveSubmission(request); err != nil {
+		t.Fatal(err)
+	}
+	useFakeHK(t).SetTask("42", taskJSON(map[string]any{"state": "merged", "title": "task (grade A, T1)"}))
+	if _, err = a.PrepareSubmission(context.Background(), s); err != nil {
+		t.Fatalf("the replay of an accepted request was refused: %v", err)
+	}
+	// A different job id with the merged task is still refused.
+	s.Job, s.Label = "job-b", "job-b"
+	if _, err = a.PrepareSubmission(context.Background(), s); err == nil || !strings.Contains(err.Error(), "task unavailable") {
+		t.Fatalf("err=%v, want a fresh job refused on the merged task", err)
+	}
+}
+
+// A counsel is a consult and needs no title marker, and a reviewer that names
+// only the author's family takes any task: the node accepts both, so the
+// submit must too.
+func TestSubmitPrepareAcceptsWhatTheNodeExempts_t4270(t *testing.T) {
+	merged := taskJSON(map[string]any{"state": "merged", "title": "task (grade A, T1)"})
+	for name, extra := range map[string][]string{
+		"counsel":                   {"--role", "counsel"},
+		"reviewer with family only": {"--role", "reviewer", "--builder-family", "openai"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			task := merged
+			if name == "counsel" {
+				task = taskJSON(map[string]any{"state": "developing", "title": "task without a marker"})
+			}
+			a, s := submitPreflightFixture(t, "job-a", task, extra...)
+			if err := a.submitPreflight(context.Background(), s); err != nil {
+				t.Fatalf("refused what the node accepts: %v", err)
 			}
 		})
 	}

@@ -176,7 +176,11 @@ func (h *HubServer) receiveInbox(kind string, event *hubJobEventPayload, sender 
 	}
 	lane := h.receivingLane(kind, *event)
 	if reason := h.designFilterReason(kind, *event, lane); reason != "" {
-		return h.receiveFiltered(kind, event, sender, senderID, reason)
+		result, handled := h.receiveFiltered(kind, event, sender, senderID, reason)
+		if reason == filteredReasonRepeatsReady && !result.PersistFailed {
+			h.spendWorkerReady(event.JobID)
+		}
+		return result, handled
 	}
 	if event.NotifyType == "" && h.inbox.policy.Lanes[lane].InboxSummary != nil {
 		switch kind {

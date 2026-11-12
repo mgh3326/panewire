@@ -9,7 +9,8 @@ package panewire
 //
 //   - SPAWNED is a lifecycle record: kept in hk only (inbox_design_filter.go).
 //   - A failure the saved request can still be replayed after (status
-//     retryable) is held for the requester, which replays it: the requester's
+//     retryable) is held for the requester when one other than the owner
+//     submitted it, which replays it: the requester's
 //     own copy (`--requested-by`, else `--parent`) is delivered at once and
 //     stays an unread item in its inbox. The design lane hears nothing for
 //     the attempt unless the request is still unreplayed after
@@ -126,7 +127,10 @@ func (h *HubServer) spawnNoticeFor(ctx context.Context, n spawnNotification, res
 		return spawnNoticeFile
 	case n.owner != task.Owner:
 		return spawnNoticeDeliver // the requester's own copy reaches it at once
-	case result.Retryable && h.quiet.timings.spawnFailureHold > 0:
+	case result.Retryable && h.quiet.timings.spawnFailureHold > 0 && spawnSubmitterLane(task.Request.Args) != "" && spawnSubmitterLane(task.Request.Args) != task.Owner:
+		// Held only for a requester that has its own copy (completeSpawn
+		// writes one when the submitting lane differs from the owner). With
+		// none, the owner row is the only notice the requester can act on.
 		return spawnNoticeHold
 	}
 	return spawnNoticeDeliver

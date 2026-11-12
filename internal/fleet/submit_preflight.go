@@ -23,6 +23,8 @@ package fleet
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
@@ -38,14 +40,24 @@ func agentNameRefusal(label string) error {
 }
 
 // submitPreflight runs the checks of the caller's terminal: the label, then
-// the task. A spawn that names no task (it inherits its parent job's) has no
-// task to read.
+// the task. The label is a property of the command and is always checked. The
+// task checks read mutable state, so they are skipped when the job already has
+// a saved submission: that is a replay of an accepted request, which must reach
+// the hub's idempotent lookup even if the task has moved on since. A spawn that
+// names no task (it inherits its parent job's) has no task to read.
 func (a *App) submitPreflight(ctx context.Context, s Spawn) error {
 	if !ValidAgentName(s.Label) {
 		return agentNameRefusal(s.Label)
 	}
-	if s.Task == "" {
+	if s.Task == "" || s.ParentJob != "" || a.hasSubmissionReceipt(s.Job) {
 		return nil
+	}
+	// Spawn translates the builder flags into the inherited-parent fields
+	// taskTakesSpawn reads; do the same here so a review pass of a claimed
+	// task is judged as the node judges it. Spawn validates the flags.
+	if (s.Role == "reviewer" || s.Role == "tester") && (s.BuilderFamily != "" || s.BuilderJob != "") {
+		s.ParentFamily = s.BuilderFamily
+		s.Inherited = s.BuilderJob
 	}
 	t, err := hkGetTask(ctx, s.Task)
 	switch {
@@ -61,8 +73,21 @@ func (a *App) submitPreflight(ctx context.Context, s Spawn) error {
 	if e := taskTakesSpawn(t, s); e != nil {
 		return e
 	}
+	// A counsel is a consult, which needs no marker; the engine resolves it
+	// before the marker check (routeFor). The policy table is not read here (a
+	// submit reads no hk document of its own); a role the table maps to consult
+	// beyond the built-in counsel is judged by the engine.
+	if s.RoutingRole == "" {
+		s.RoutingRole = builtinRoleMap[s.Role]
+	}
 	_, e := taskMarkerGrade(t, s, s.Bypass)
 	return e
+}
+
+// hasSubmissionReceipt reports whether the job's submission receipt exists.
+func (a *App) hasSubmissionReceipt(job string) bool {
+	_, err := os.Lstat(filepath.Join(a.Jobs, job, "submission.json"))
+	return err == nil
 }
 
 // SubmitHostRefusal refuses a request no configured host can take: one whose

@@ -153,7 +153,11 @@ keeps every check, so a request that passes here is judged again on the node.
 | Host eligibility: some configured host is not excluded, is the `--host` pin when one is given, and declares every `--tags` capability | the hub (`400 no_eligible_host`) | `NO_ELIGIBLE_HOST: no host declares cap unity; …` |
 
 The task checks read hk from the submitter. When hk cannot answer, the submit
-goes on and the node decides, as before. Host eligibility reads the hub's own
+goes on and the node decides, as before. They are skipped for a job that already
+has a saved `submission.json` (a replay of an accepted request must reach the
+hub's idempotent lookup even if the task has moved on) and for `--parent-job`
+spawns; `--builder-family`/`--builder-job` are translated as the node does, so a
+review pass of a builder-bound task is accepted. Host eligibility reads the hub's own
 fleet configuration (`local` and `hosts`), the same hosts placement ranks, so a
 request no host can take is refused before it reserves a job id. A refused
 request leaves no operation behind.
@@ -384,7 +388,9 @@ with `:<lane>` appended.
 routed differently when the owner is a design lane (hk 4270, decision 152).
 SPAWNED is kept in hk only. A failure the saved request can be replayed after
 (`replay=yes`, status `retryable`) goes to the submitting lane at once, as
-above, and is held for the owner: the design lane hears nothing for that
+above, and is held for the owner when that lane differs from the owner (the
+requester then has its own copy; with none, the owner's row is the only notice
+and is delivered at once): the design lane hears nothing for that
 attempt while the requester can replay it. A later attempt supersedes the held
 row, so the design lane is told the request's last outcome once (a terminal
 `replay=no` failure, or no event when the replay lands). A request nobody
