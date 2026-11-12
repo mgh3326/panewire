@@ -7,8 +7,7 @@ import (
 )
 
 // The 2026-11-11 order on a fixture: a free SWE-2 rung, a live omp credit rung
-// and a ranked subscription rung. The credit rung ranks in the free band and
-// is chosen; the ranked pool is below the choice.
+// and a ranked subscription rung. Free is chosen before credit and ranked.
 func TestSimulatePoolOrderCreditBesideFree_T4006(t *testing.T) {
 	rec, fr, err := runSimulate(t, "--selection", filepath.Join("testdata", "simulate-pool-order-credit-free.json"))
 	if err != nil {

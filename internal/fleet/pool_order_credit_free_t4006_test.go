@@ -30,9 +30,7 @@ func creditFreeFixture(t *testing.T, pools map[string]PoolView, present []string
 	return a, s, q
 }
 
-// (a) With no pool in the waste band, a credit rung with a live entry ranks
-// in the free band: chosen or tied with the free rung, never behind the ranked
-// subscription pool.
+// Free ranks before credit, and credit ranks before the ranked subscription.
 func TestSelectCreditRanksBesideFree_T4006(t *testing.T) {
 	pools := map[string]PoolView{
 		"devin":         {Status: "ok", Class: "spend", Blocking: ptrF(4)},
@@ -57,8 +55,7 @@ func TestSelectCreditRanksBesideFree_T4006(t *testing.T) {
 	}
 }
 
-// (b) On a full tie a credit rung goes before a free rung: unspent credit is
-// lost at expiry and the free model is not.
+// A free rung also wins a full tie against a credit rung.
 func TestSelectCreditBeatsFreeOnFullTie_T4006(t *testing.T) {
 	pools := map[string]PoolView{
 		"devin":         {Status: "ok", Class: "spend", Blocking: ptrF(10)},
@@ -127,7 +124,7 @@ func TestSelectWasteBeatsCredit_T4006(t *testing.T) {
 		t.Fatalf("the waste-risk subscription goes first: %s in %s", sel.chosen.seatName, sel.chosen.tierName)
 	}
 	if got := candOutcome(sel.record(), "omp-opus", "high"); got["tier"] != "credit" || got["waste_risk"] != false {
-		t.Fatalf("the credit rung stays in the free band: %v", got)
+		t.Fatalf("the credit rung keeps its tier: %v", got)
 	}
 }
 

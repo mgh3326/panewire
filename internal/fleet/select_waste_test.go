@@ -79,7 +79,7 @@ func TestSelectWasteUrgency(t *testing.T) {
 // must not outrank by itself — the 7d window still decides, and the
 // 2026-10-31 case still picks claude (≈67% unused in 9.4 h) over codex
 // (≈70% unused in 95 h). A pool whose only window is sub-daily, and a pool
-// whose longest window cannot be paced, get no urgency at all.
+// whose longest window is fresh, uses its unused share for urgency.
 func TestPoolsWasteUrgencyUsesLongestWindow(t *testing.T) {
 	a := testApp(t)
 	now := a.Now()
