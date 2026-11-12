@@ -250,6 +250,29 @@ func TestAdmissionNativeAlternativesReadOtherHeldPools(t *testing.T) {
 	}
 }
 
+func TestAdmissionNativeSameGradeEscalationIncludesGateCode(t *testing.T) {
+	a, _, _ := switchApp(t, gateModeNative, switchReading(20, 40), Result{Code: 99})
+	rows := switchRows(t)
+	rows[0].Gate = escalationGate
+	a.BenchCatalog = func(context.Context) ([]CatalogRow, error) { return rows, nil }
+	a.Config.Quota["accounts"] = map[string]any{"codex": "fedcba9876543210"}
+	a.SharedLatest = func(context.Context, string) (shared.Latest, error) {
+		return shared.Latest{Observation: switchReading(20, 40)}, nil
+	}
+
+	x := a.nativeGate(context.Background(), opusRequest, true)
+	var receipt gateReceipt
+	if err := json.Unmarshal([]byte(x.Out), &receipt); err != nil || x.Code != quotaGateBlocked {
+		t.Fatalf("escalation must be refused with a gate receipt: %d %s (%v)", x.Code, x.Out, err)
+	}
+	if receipt.Reason != "escalation: same-grade ordinary alternative available" || receipt.GateCode != "escalation" {
+		t.Fatalf("same-grade escalation refusal lost its gate code: %+v", receipt)
+	}
+	if got := hostGateNote(quotaJudgment{Outcome: outcomeQuotaExhausted}, &gateRefusal{cause: fail(quotaGateBlocked, "%s", receipt.Reason), outcome: outcomeQuotaExhausted, code: receipt.GateCode}); got != "gate_blocked:escalation" {
+		t.Fatalf("remote host note = %q, want gate code", got)
+	}
+}
+
 // TestAdmissionNativeRefreshesHeldStaleAccount: like pacelever's gate, a stale
 // reading of an account this host holds is measured once and read again.
 func TestAdmissionNativeRefreshesHeldStaleAccount(t *testing.T) {
