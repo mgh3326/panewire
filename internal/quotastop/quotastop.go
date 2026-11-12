@@ -23,20 +23,21 @@ type Stop struct {
 var (
 	// devin matches the phrase anywhere in the status line: the live screen
 	// prefixes it with "▲ Something went wrong — ".
-	devin           = regexp.MustCompile(`(?i)reached free model rate limit(?:\s|[·.…:]|$)`)
-	apiErrorStart   = regexp.MustCompile(`(?i)^api error:\s*[0-9]{3}\b`)
-	providerErrType = regexp.MustCompile(`(?i)^[a-z][a-z0-9_]*_error\b[\s:,-]*`)
-	jsonScalar      = regexp.MustCompile(`^(?:-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?|true|false|null)[,}\]]?$`)
-	requestOpen     = regexp.MustCompile(`^\[\s*request\s*:\s*[a-z0-9_-]*$`)
-	requestClosed   = regexp.MustCompile(`^\[\s*request\s*:\s*[a-z0-9_-]+\s*\][\s.,;:!?]*$`)
-	anthropicCredit = regexp.MustCompile(`(?is)^api error:\s*[0-9]{3}\b.*credit balance is too low to access the anthropic api`)
-	openAICredit    = regexp.MustCompile(`(?is)^api error:\s*[0-9]{3}\b.*(insufficient_\s*quota|exceeded\s*your\s*current\s*quota)`)
-	claude          = regexp.MustCompile(`(?i)^you've hit your (?:(?:weekly|session) )?limit(?:\s|[·.:]|$)`)
-	codexSignal     = regexp.MustCompile(`(?i)^you've hit your usage limit[.·:].*try again at`)
-	codex           = regexp.MustCompile(`(?i)try again at\s+([0-9]{1,2}:[0-9]{2}\s*(?:AM|PM)?)(?:\s+(UTC|GMT|Z))?`)
-	atClock         = regexp.MustCompile(`(?i)\bat\s+([0-9]{1,2}:[0-9]{2}\s*(?:AM|PM)?)(?:\s+(UTC|GMT|Z))?`)
-	relative        = regexp.MustCompile(`(?i)reset(?:s)? in\s+(\d+)\s*(seconds?|minutes?|hours?)`)
-	dateReset       = regexp.MustCompile(`(?i)resets?\s+([A-Za-z]{3,9})\s+(\d{1,2}),?\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm))(?:\s+(UTC|GMT|Z)|\s*\(([A-Za-z_]+/[A-Za-z_]+)\))?`)
+	devin            = regexp.MustCompile(`(?i)reached free model rate limit(?:\s|[·.…:]|$)`)
+	apiErrorStart    = regexp.MustCompile(`(?i)^api error:\s*[0-9]{3}\b`)
+	plainErrorHeader = regexp.MustCompile(`(?i)^api error:\s*(?:400|429)\s*(?:invalid_request_error)?\s*$`)
+	providerErrType  = regexp.MustCompile(`(?i)^[a-z][a-z0-9_]*_error\b[\s:,-]*`)
+	jsonScalar       = regexp.MustCompile(`^(?:-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?|true|false|null)[,}\]]?$`)
+	requestOpen      = regexp.MustCompile(`^\[\s*request\s*:\s*[a-z0-9_-]*$`)
+	requestClosed    = regexp.MustCompile(`^\[\s*request\s*:\s*[a-z0-9_-]+\s*\][\s.,;:!?]*$`)
+	anthropicCredit  = regexp.MustCompile(`(?is)^api error:\s*[0-9]{3}\b.*credit balance is too low to access the anthropic api`)
+	openAICredit     = regexp.MustCompile(`(?is)^api error:\s*[0-9]{3}\b.*(insufficient_\s*quota|exceeded\s*your\s*current\s*quota)`)
+	claude           = regexp.MustCompile(`(?i)^you've hit your (?:(?:weekly|session) )?limit(?:\s|[·.:]|$)`)
+	codexSignal      = regexp.MustCompile(`(?i)^you've hit your usage limit[.·:].*try again at`)
+	codex            = regexp.MustCompile(`(?i)try again at\s+([0-9]{1,2}:[0-9]{2}\s*(?:AM|PM)?)(?:\s+(UTC|GMT|Z))?`)
+	atClock          = regexp.MustCompile(`(?i)\bat\s+([0-9]{1,2}:[0-9]{2}\s*(?:AM|PM)?)(?:\s+(UTC|GMT|Z))?`)
+	relative         = regexp.MustCompile(`(?i)reset(?:s)? in\s+(\d+)\s*(seconds?|minutes?|hours?)`)
+	dateReset        = regexp.MustCompile(`(?i)resets?\s+([A-Za-z]{3,9})\s+(\d{1,2}),?\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm))(?:\s+(UTC|GMT|Z)|\s*\(([A-Za-z_]+/[A-Za-z_]+)\))?`)
 )
 
 // Classify reports the quota stop shown as the last activity of screen.
@@ -196,7 +197,7 @@ func providerErrorBlock(lines []string, start int) (string, bool) {
 		if json.open {
 			if json.inString {
 				currentText := currentJSONString(currentBlock)
-				if (providerTextPrefix(currentText) || providerCreditPool(currentBlock) != "") && !providerTextPrefix(currentText+content) {
+				if providerTextPrefix(currentText) && !providerTextPrefix(currentText+content) {
 					return "", false
 				}
 				blockLines = append(blockLines, content)
@@ -211,7 +212,7 @@ func providerErrorBlock(lines []string, start int) (string, bool) {
 		joinedPlain := plainProviderText(joined)
 		plainTextContinuation := providerTextPrefix(joinedPlain) && len(compactProviderText(joinedPlain)) > len(compactProviderText(currentPlain))
 		plainContinuation := plainTextContinuation || anthropicRequestBracketOpen(currentBlock) && anthropicRequestBracketComplete(joined)
-		plainMessageStarted := providerTextPrefix(plainProviderText(blockLines[0])) || anthropicRequestBracketOpen(blockLines[0])
+		plainMessageStarted := providerTextPrefix(plainProviderText(blockLines[0])) || anthropicRequestBracketOpen(blockLines[0]) || plainErrorHeader.MatchString(blockLines[0])
 		if !jsonBody && plainMessageStarted && plainContinuation && (border == 0 || screenBorderPrefix(line) == border || anthropicRequestBracketOpen(currentBlock)) {
 			blockLines = append(blockLines, content)
 			continue
