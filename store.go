@@ -14,9 +14,10 @@ import (
 )
 
 type Store struct {
-	db   *sql.DB
-	path string
-	mu   sync.Mutex
+	db               *sql.DB
+	path             string
+	mu               sync.Mutex
+	relayHeldChanged func()
 }
 
 // Delivery is the durable, body-free audit record for one prompt request.

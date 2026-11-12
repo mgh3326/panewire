@@ -74,7 +74,7 @@ func readResponse(ctx context.Context, r *bufio.Reader, id string) (json.RawMess
 			continue
 		}
 		if er := msg["error"]; len(er) > 0 {
-			return nil, fmt.Errorf("herdr %s", string(er))
+			return nil, &herdrReplyError{raw: er}
 		}
 		return msg["result"], nil
 	}
@@ -94,6 +94,12 @@ func (c *HerdrClient) Call(ctx context.Context, method string, params any) (json
 	}
 	return readResponse(ctx, bufio.NewReader(conn), id)
 }
+
+// herdrReplyError is an error object herdr returned for a request. It keeps the
+// raw object so a caller can read the error code; the text is unchanged.
+type herdrReplyError struct{ raw json.RawMessage }
+
+func (e *herdrReplyError) Error() string { return "herdr " + string(e.raw) }
 
 // PanesAlive reports the panes herdr currently has an agent on. agent.list
 // returns live agents only, which is the definition this needs: a pane with no

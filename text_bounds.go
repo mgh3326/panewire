@@ -15,6 +15,17 @@ import (
 
 const hubRelayPayloadTextLimit = 240
 
+// paneMetadataValueLimit bounds one pane.report_metadata token value in bytes.
+// herdr's schema caps token keys but not values; this cut is panewire's own
+// contract with herdr's pane display, so a value is never split inside a rune.
+const paneMetadataValueLimit = 128
+
+// truncatePaneMetadataValue is the only cut applied to a pane metadata value
+// before it is compared or sent (herdr_pane_metadata.go).
+func truncatePaneMetadataValue(value string) string {
+	return utf8PrefixWithin(value, paneMetadataValueLimit)
+}
+
 // utf8PrefixWithin and utf8SuffixWithin are the root package's names for the
 // shared cuts in internal/textbound.
 func utf8PrefixWithin(value string, limit int) string { return textbound.PrefixWithin(value, limit) }

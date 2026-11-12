@@ -50,12 +50,14 @@ type Daemon struct {
 	herdr        *HerdrClient
 	idleWake     *idleWakeManager
 	stall        *stallDetectManager
+	paneMeta     *paneMetadataPublisher
 	idleShutdown *idleShutdownManager
 	caps         GuardResult
 	eventDone    chan struct{}
 	idleDone     chan struct{}
 	hubDone      chan struct{}
 	stallDone    chan struct{}
+	paneMetaDone chan struct{}
 	shutdownDone chan struct{}
 	resub        chan struct{}
 	subscribed   map[string]bool
@@ -172,6 +174,15 @@ func (d *Daemon) Start(ctx context.Context) error {
 			d.cfg.Hub.Client.SetStallDetect(manager.StallBeat)
 		}
 	}
+	switch {
+	case d.stall == nil:
+		d.cfg.Logger.Info("stall detect disabled; job panes will not carry pw_ tokens")
+	case d.capabilities().PaneMetadata:
+		d.paneMeta = newPaneMetadataPublisher(d.store, d.cfg.HerdrSocket, d.cfg.Logger)
+		d.store.SetRelayHeldObserver(d.paneMeta.Kick)
+	default:
+		d.cfg.Logger.Warn("herdr lacks pane.report_metadata; job panes will not carry pw_ tokens")
+	}
 	path := d.cfg.SocketPath
 	if path == "" {
 		path = defaultSocketPath()
@@ -222,6 +233,13 @@ func (d *Daemon) Start(ctx context.Context) error {
 		go func() {
 			defer close(d.stallDone)
 			d.stall.Run(runCtx)
+		}()
+	}
+	if d.paneMeta != nil {
+		d.paneMetaDone = make(chan struct{})
+		go func() {
+			defer close(d.paneMetaDone)
+			d.paneMeta.Run(runCtx)
 		}()
 	}
 	if d.cfg.IdleShutdown.Enabled && d.cfg.Hub.Client != nil {
@@ -802,6 +820,10 @@ func (d *Daemon) Stop() error {
 	if d.stallDone != nil {
 		<-d.stallDone
 		d.stallDone = nil
+	}
+	if d.paneMetaDone != nil {
+		<-d.paneMetaDone
+		d.paneMetaDone = nil
 	}
 	if d.shutdownDone != nil {
 		<-d.shutdownDone
