@@ -27,6 +27,7 @@ var (
 	apiErrorStart    = regexp.MustCompile(`(?i)^api error:\s*[0-9]{3}\b`)
 	plainErrorHeader = regexp.MustCompile(`(?i)^api error:\s*(?:400|429)\s*(?:invalid_request_error)?\s*$`)
 	providerErrType  = regexp.MustCompile(`(?i)^[a-z][a-z0-9_]*_error\b[\s:,-]*`)
+	providerErrToken = regexp.MustCompile(`(?i)^[a-z][a-z0-9_]*$`)
 	jsonScalar       = regexp.MustCompile(`^(?:-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?|true|false|null)[,}\]]?$`)
 	requestOpen      = regexp.MustCompile(`^\[\s*request\s*:\s*[a-z0-9_-]*$`)
 	requestClosed    = regexp.MustCompile(`^\[\s*request\s*:\s*[a-z0-9_-]+\s*\][\s.,;:!?]*$`)
@@ -188,6 +189,11 @@ func providerErrorBlock(lines []string, start int) (string, bool) {
 		if chromeLine(line) {
 			continue
 		}
+		if !jsonBody && plainErrorHeader.MatchString(blockLines[0]) && hasProviderJSONBody(content) {
+			jsonBody = true
+			blockLines = append(blockLines, content)
+			continue
+		}
 		currentBlock := strings.Join(blockLines, "\n")
 		json := jsonProgress{}
 		if jsonBody {
@@ -197,7 +203,8 @@ func providerErrorBlock(lines []string, start int) (string, bool) {
 		if json.open {
 			if json.inString {
 				currentText := currentJSONString(currentBlock)
-				if providerTextPrefix(currentText) && !providerTextPrefix(currentText+content) {
+				continuedText := jsonStringContinuationText(content)
+				if providerTextPrefix(currentText) && providerCreditPool(currentBlock) == "" && !providerTextPrefix(currentText+continuedText) {
 					return "", false
 				}
 				blockLines = append(blockLines, content)
@@ -212,6 +219,7 @@ func providerErrorBlock(lines []string, start int) (string, bool) {
 		joinedPlain := plainProviderText(joined)
 		plainTextContinuation := providerTextPrefix(joinedPlain) && len(compactProviderText(joinedPlain)) > len(compactProviderText(currentPlain))
 		plainContinuation := plainTextContinuation || anthropicRequestBracketOpen(currentBlock) && anthropicRequestBracketComplete(joined)
+		plainContinuation = plainContinuation || providerErrorTypeContinuation(blockLines, content)
 		plainMessageStarted := providerTextPrefix(plainProviderText(blockLines[0])) || anthropicRequestBracketOpen(blockLines[0]) || plainErrorHeader.MatchString(blockLines[0])
 		if !jsonBody && plainMessageStarted && plainContinuation && (border == 0 || screenBorderPrefix(line) == border || anthropicRequestBracketOpen(currentBlock)) {
 			blockLines = append(blockLines, content)
@@ -384,7 +392,83 @@ func scanJSON(block string) jsonProgress {
 
 func plainProviderText(block string) string {
 	body := strings.TrimSpace(apiErrorStart.ReplaceAllString(block, ""))
+	lines := strings.Split(body, "\n")
+	var tokenParts []string
+	for i, line := range lines {
+		token := strings.TrimSpace(line)
+		if !providerErrToken.MatchString(token) {
+			break
+		}
+		tokenParts = append(tokenParts, token)
+		if providerErrType.MatchString(strings.Join(tokenParts, "")) {
+			return strings.TrimSpace(strings.Join(lines[i+1:], "\n"))
+		}
+	}
 	return providerErrType.ReplaceAllString(body, "")
+}
+
+func providerErrorTypeContinuation(lines []string, content string) bool {
+	if len(lines) == 0 || !plainErrorHeader.MatchString(lines[0]) {
+		return false
+	}
+	var token strings.Builder
+	for _, line := range append(append([]string(nil), lines[1:]...), content) {
+		fragment := strings.TrimSpace(line)
+		if !providerErrToken.MatchString(fragment) {
+			return false
+		}
+		token.WriteString(fragment)
+		value := strings.ToLower(token.String())
+		if providerErrType.MatchString(value) {
+			return true
+		}
+		if !providerErrTypePrefix(value) {
+			return false
+		}
+	}
+	return providerErrTypePrefix(strings.ToLower(token.String()))
+}
+
+func providerErrTypePrefix(value string) bool {
+	for _, expected := range []string{
+		"invalid_request_error",
+		"authentication_error",
+		"permission_error",
+		"not_found_error",
+		"rate_limit_error",
+		"api_error",
+		"server_error",
+		"overloaded_error",
+	} {
+		if strings.HasPrefix(expected, value) {
+			return true
+		}
+	}
+	return false
+}
+
+func jsonStringContinuationText(content string) string {
+	var text strings.Builder
+	escaped := false
+	for _, r := range content {
+		if escaped {
+			text.WriteRune(r)
+			escaped = false
+			continue
+		}
+		if r == '\\' {
+			escaped = true
+			continue
+		}
+		if r == '"' {
+			break
+		}
+		text.WriteRune(r)
+	}
+	if escaped {
+		text.WriteRune('\\')
+	}
+	return text.String()
 }
 
 func hasProviderJSONBody(line string) bool {

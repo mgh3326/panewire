@@ -116,13 +116,38 @@ func TestWrappedProviderCreditErrorClassifies(t *testing.T) {
 			pool:   "anthropic-api",
 		},
 		{
+			name:   "Anthropic JSON message wrap closes before request ID",
+			screen: "API Error: 400 {\"type\":\"error\",\"error\":{\"message\":\"Your credit balance is too low to access the An\nthropic API\",\"request_id\":\"req_abc\"}}\n❯ Ask Claude",
+			pool:   "anthropic-api",
+		},
+		{
+			name:   "OpenAI JSON message wrap closes before type",
+			screen: "API Error: 429 {\"error\":{\"message\":\"You exceeded your current quo\nta\",\"type\":\"insufficient_quota\"}}\n› Ask Codex",
+			pool:   "openai-api",
+		},
+		{
 			name:   "Anthropic plain message begins after error header",
 			screen: "API Error: 400 invalid_request_error\nYour credit balance is too low to access the Anthropic API\n❯ Ask Claude",
 			pool:   "anthropic-api",
 		},
 		{
+			name:   "Anthropic error type is on continuation row",
+			screen: "API Error: 400\ninvalid_request_error\nYour credit balance is too low to access the Anthropic API\n❯ Ask Claude",
+			pool:   "anthropic-api",
+		},
+		{
+			name:   "Anthropic error type wraps across continuation rows",
+			screen: "API Error: 400\ninvalid_reque\nst_error\nYour credit balance is too low to access the Anthropic API\n❯ Ask Claude",
+			pool:   "anthropic-api",
+		},
+		{
 			name:   "OpenAI plain message begins after status",
 			screen: "API Error: 429\ninsufficient_quota\n› Ask Codex",
+			pool:   "openai-api",
+		},
+		{
+			name:   "OpenAI JSON body begins after status",
+			screen: "API Error: 429\n{\"error\":{\"type\":\"insufficient_quota\"}}\n› Ask Codex",
 			pool:   "openai-api",
 		},
 		{
