@@ -345,9 +345,12 @@ func runInboxWait(client inboxHTTPClient, stdout, stderr io.Writer, lane string,
 			waitFor = hubInboxWaitMaxWait
 		}
 		query := url.Values{"lane": {lane}, "timeout": {waitFor.String()}}
-		// A retried long poll stays inside the CLI deadline: a retry that would
-		// run past it is not sent.
-		answer, stats, err := inboxCall{method: http.MethodGet, path: "/v1/inbox/wait", query: query, timeout: waitFor + 10*time.Second}.send(context.Background(), client, policy.Within(remaining))
+		// The long poll and its retries both stay inside the CLI deadline: no
+		// attempt outlives --timeout, and a retry that would run past it is not
+		// sent.
+		ctx, cancel := context.WithDeadline(context.Background(), deadline)
+		answer, stats, err := inboxCall{method: http.MethodGet, path: "/v1/inbox/wait", query: query, timeout: waitFor + 10*time.Second}.send(ctx, client, policy.Within(remaining))
+		cancel()
 		retried.Add(stats)
 		if err != nil {
 			if time.Until(deadline) <= 0 {

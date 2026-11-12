@@ -114,8 +114,9 @@ func TestInboxReadGivesUpWithTheLastAnswerAndItsExitCode(t *testing.T) {
 }
 
 // A long poll is a repeatable GET, but its retries stop at the CLI deadline and
-// do not run past --timeout. A 503 still standing at the deadline is reported
-// as the HTTP status it was, with the exit code an unretried 503 gets.
+// do not run past --timeout. A 503 still standing when the deadline ends the
+// retries makes the wait a timeout: exit 3, nothing on stdout, and the retry
+// line on stderr.
 func TestInboxWaitRetriesStayInsideItsDeadline(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusServiceUnavailable)
@@ -125,10 +126,30 @@ func TestInboxWaitRetriesStayInsideItsDeadline(t *testing.T) {
 	args := []string{"wait", "--lane", "lane-a", "--timeout", "40ms", "--hub-url", server.URL, "--hub-token-env", retryInboxTokenEnv(t)}
 	started := time.Now()
 	code := runInboxCLI(args, &out, &errOut, retryInboxDeps(server, time.Minute))
-	if code != ExitDeliveryFailure || out.Len() != 0 || !strings.Contains(errOut.String(), "hub: retried ") {
+	if code != ExitTimeout || out.Len() != 0 || !strings.Contains(errOut.String(), "hub: retried ") {
 		t.Fatalf("code=%d out=%q err=%q", code, out.String(), errOut.String())
 	}
 	if elapsed := time.Since(started); elapsed > 5*time.Second {
 		t.Fatalf("wait ran %v past its 40ms deadline", elapsed)
+	}
+}
+
+// A long poll that the hub never answers ends at the CLI deadline, not after
+// the per-request grace: no attempt, first or retried, outlives --timeout.
+func TestInboxWaitStalledAttemptEndsAtTheDeadline(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Simulated stall: hold the poll until the client gives up.
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+	var out, errOut bytes.Buffer
+	args := []string{"wait", "--lane", "lane-a", "--timeout", "100ms", "--hub-url", server.URL, "--hub-token-env", retryInboxTokenEnv(t)}
+	started := time.Now()
+	code := runInboxCLI(args, &out, &errOut, retryInboxDeps(server, time.Minute))
+	if code != ExitTimeout || out.Len() != 0 {
+		t.Fatalf("code=%d out=%q err=%q", code, out.String(), errOut.String())
+	}
+	if elapsed := time.Since(started); elapsed > 5*time.Second {
+		t.Fatalf("stalled wait ran %v past its 100ms deadline", elapsed)
 	}
 }
