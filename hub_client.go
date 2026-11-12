@@ -2002,7 +2002,9 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 			}
 			message, rejection := parseHubOutboundRejection(payload)
 			if rejection.Class != "" {
-				client.handleUnparsedHubMessage(ctx, peer, payload, rejection)
+				// The refusal answers with a peer write; it cannot sit in the
+				// read loop behind writeMu while a resync batch holds it.
+				go client.handleUnparsedHubMessage(ctx, peer, payload, rejection)
 				continue
 			}
 			if message.Type == "relay.inject" {
@@ -2033,13 +2035,18 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 				default:
 				}
 			case "ping":
-				if err := peer.write(ctx, hubOutbound{Type: "pong"}); err != nil {
-					select {
-					case readErrors <- err:
-					case <-ctx.Done():
+				// The pong write contends on writeMu, which a long
+				// writeRelayEvents resync batch can hold for minutes; it goes
+				// to its own goroutine so the loop keeps reading. A failed
+				// write still ends the session.
+				go func() {
+					if err := peer.write(ctx, hubOutbound{Type: "pong"}); err != nil {
+						select {
+						case readErrors <- err:
+						case <-ctx.Done():
+						}
 					}
-					return
-				}
+				}()
 			case "failover", "burst", "wake", "job.revoked", "job.assigned", "relay.persisted", "pool.cooling.ack", "idle-wake.route", "burst.holds", "relay.edit", "relay.cancel":
 				select {
 				case inbound <- message:
