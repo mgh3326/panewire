@@ -289,7 +289,7 @@ func TestPlanKeepsTypedGateRefusalOutcome(t *testing.T) {
 	}
 	out := &bytes.Buffer{}
 	a.Out = out
-	err := a.planCmd(context.Background(), []string{"--role", "counsel", "--t", "T1", "--json"})
+	err := a.planCmd(context.Background(), []string{"--role", "counsel", "--t", "T1", "--grade", "A", "--json"})
 	var doc map[string]any
 	if parseErr := json.Unmarshal(out.Bytes(), &doc); parseErr != nil {
 		t.Fatalf("plan JSON: %v", parseErr)

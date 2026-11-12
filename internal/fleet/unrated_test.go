@@ -47,16 +47,9 @@ func TestUnratedLeadConsultResolve(t *testing.T) {
 		t.Run(role, func(t *testing.T) {
 			a, _, q := consultFixture(t)
 			q.CatalogRows = []CatalogRow{{Profile: "codex-sol", Effort: "high", Grade: "unrated", Pool: "codex", Gate: "default", ModelID: "sol-m"}}
-			if err := a.resolveCmd(context.Background(), []string{"--role", role, "--json"}); err != nil {
-				t.Fatal(err)
-			}
-			var result resolveResult
-			if err := json.Unmarshal([]byte(a.Out.(interface{ String() string }).String()), &result); err != nil {
-				t.Fatal(err)
-			}
-			chosen, _ := result.Selection["chosen"].(map[string]any)
-			if result.Profile != "codex-sol" || result.Effort != "high" || result.Grade != "" || chosen["grade"] != "unrated" || result.OutcomeCode != outcomeAdmitted {
-				t.Fatalf("unrated %s resolve: %+v", role, result)
+			err := a.resolveCmd(context.Background(), []string{"--role", role, "--json"})
+			if exitCode(err) != exitSeatRefused || !strings.HasPrefix(err.Error(), reasonRoleNoCandidate) {
+				t.Fatalf("unrated %s resolve must refuse, never choose the unrated rung: %v", role, err)
 			}
 		})
 	}
@@ -86,7 +79,7 @@ func TestUnratedPlanOutput(t *testing.T) {
 			q.CatalogRows = append(q.CatalogRows, CatalogRow{Profile: "codex-sol", Effort: "high", Grade: "unrated", Pool: "codex", Gate: "default", ModelID: "sol-m"})
 			args := []string{"--grade", "A", "--t", "T1"}
 			if top {
-				q.CatalogRows = []CatalogRow{{Profile: "opus", Effort: "high", Grade: "unrated", Pool: "claude", Gate: "default", ModelID: "opus-m"}}
+				q.CatalogRows = []CatalogRow{{Profile: "opus", Effort: "high", Grade: "S+", Pool: "claude", Gate: "default", ModelID: "opus-m"}, {Profile: "codex-sol", Effort: "high", Grade: "unrated", Pool: "codex", Gate: "default", ModelID: "sol-m"}}
 				q.GateDo = gatePools(map[string]string{"opus": "claude"})
 				serveRouting(t, routingDocV1)
 				args = []string{"--role", "counsel", "--t", "T1"}

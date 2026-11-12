@@ -179,7 +179,7 @@ func TestPlanJSONExplainsHosts(t *testing.T) {
 		map[string]string{"cloud-small": testClaudeA, "mac-b": testClaudeB},
 		map[string]float64{"cloud-small": 0.1, "mac-b": 0.5})
 	out := a.Out.(interface{ String() string })
-	if err := a.planCmd(context.Background(), []string{"--t", "T2", "--role", "counsel", "--tags", "unity", "--json"}); err != nil {
+	if err := a.planCmd(context.Background(), []string{"--t", "T2", "--role", "counsel", "--tags", "unity", "--grade", "A", "--json"}); err != nil {
 		t.Fatalf("%v\n%s", err, out.String())
 	}
 	var doc struct {

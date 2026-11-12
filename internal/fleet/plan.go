@@ -38,7 +38,7 @@ func (a *App) planCmd(ctx context.Context, args []string) (err error) {
 	defer func() { a.refusalEvent("plan", "", err) }()
 	var o planOpts
 	f := flags("plan")
-	f.StringVar(&o.grade, "grade", "", "task grade (C, B, A, A+, S, S+, SS)")
+	f.StringVar(&o.grade, "grade", "", "task grade (C, B, A, A+, S, S+, SS); for consult, the asker's grade, optional")
 	f.StringVar(&o.t, "t", "", "task scale T0..T3")
 	f.StringVar(&o.role, "role", "worker", "seat role")
 	f.StringVar(&o.tags, "tags", "", "required host capability tags")
@@ -59,10 +59,7 @@ func (a *App) planCmd(ctx context.Context, args []string) (err error) {
 	}
 	o.grade = strings.ToUpper(o.grade)
 	top := topRoutingRole(builtinRoleMap[o.role]) || topRoutingRole(o.routingRole)
-	if top && flagPassed(f, "grade") {
-		return fail(exitConfig, "%s: --grade is not accepted for consult", noLeadGradeRule)
-	}
-	if _, ok := gradeOrder[o.grade]; !ok && !top {
+	if _, ok := gradeOrder[o.grade]; !ok && (!top || flagPassed(f, "grade")) {
 		return fail(exitUsage, "plan needs --grade C|B|A|A+|S|S+|SS")
 	}
 	o.t = strings.ToUpper(o.t)
@@ -72,8 +69,8 @@ func (a *App) planCmd(ctx context.Context, args []string) (err error) {
 	if !slices.Contains([]string{"worker", "tester", "reviewer", "counsel"}, o.role) {
 		return fail(exitUsage, "invalid role %q", o.role)
 	}
-	if (o.role == "tester" || o.role == "reviewer") != (o.builderFamily != "") {
-		return fail(exitUsage, "--builder-family goes with --role tester|reviewer, and they need it")
+	if (o.role == "tester" || o.role == "reviewer") != (o.builderFamily != "") && !(top && o.builderFamily != "") {
+		return fail(exitUsage, "--builder-family goes with --role tester|reviewer, and they need it; consult takes it optionally")
 	}
 	if o.urgency != "" && o.urgency != urgencyNormal && o.urgency != urgencyUrgent {
 		return fail(exitUsage, "--urgency must be normal or urgent")
@@ -103,6 +100,10 @@ func (a *App) planCmd(ctx context.Context, args []string) (err error) {
 	cwd, _ := os.Getwd()
 	s := Spawn{CWD: cwd, Profile: "auto", Host: "auto", Role: o.role, T: o.t, Tags: o.tags, Effort: o.effort, ExcludeHosts: o.exclude, ExcludePools: o.excludePool, AllowEscalation: o.allowEscalation, ParentFamily: o.builderFamily, Urgency: o.urgency, DryRun: true}
 	req := selReq{grade: o.grade, t: o.t, role: o.role, tags: tags, effort: o.effort, allowEscalation: o.allowEscalation, builderFamily: o.builderFamily, excludePools: excludePools, urgency: urgencyNormal, urgencySource: "default", creditAt: creditAt}
+	req.gradeSource = "without_task"
+	if flagPassed(f, "grade") {
+		req.gradeSource = "flag"
+	}
 	if o.urgency != "" {
 		req.urgency, req.urgencySource = o.urgency, "flag"
 	}

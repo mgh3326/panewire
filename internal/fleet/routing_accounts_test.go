@@ -72,40 +72,16 @@ func TestAccountLeadTriesHealthyAccountOnAnotherHost(t *testing.T) {
 	}
 }
 
-func TestAccountLeadIgnoresTaskGrade(t *testing.T) {
-	a, s, q := consultFixture(t)
-	s.Role = "counsel"
-	// The task grade is metadata; it must not promote fable over opus.
-	q.CatalogRows[1].Grade = "C"
-	sel, err := a.selectProfile(context.Background(), s)
-	if err != nil || sel.chosen.row.Profile != "opus" {
-		t.Fatalf("task grade must neither filter nor rank lead profiles: %v, %+v", err, sel)
-	}
-}
-
-func TestLeadConsultRejectExplicitGrade(t *testing.T) {
-	for _, role := range []string{"counsel"} {
-		a, _, _, _ := cmdFixture(t)
-		err := a.Run(context.Background(), []string{"spawn", "--role", role, "--grade", "A"})
-		if exitCode(err) != exitConfig || !strings.Contains(err.Error(), "lead_consult_take_no_grade") {
-			t.Fatalf("%s: explicit grade must name lead_consult_take_no_grade, exit 70: %v", role, err)
-		}
-	}
-}
-
 func TestLeadConsultRejectEmptyGradeFlag(t *testing.T) {
 	for _, args := range [][]string{
 		{"spawn", "--role", "counsel", "--grade="},
-		{"spawn", "--role", "counsel", "--grade="},
 		{"plan", "--role", "counsel", "--t", "T1", "--grade="},
-		{"plan", "--role", "counsel", "--t", "T1", "--grade="},
-		{"resolve", "--role", "consult", "--grade="},
 		{"resolve", "--role", "consult", "--grade="},
 	} {
 		a, _, _, _ := accountConsultFixture(t)
 		err := a.Run(context.Background(), args)
-		if exitCode(err) != exitConfig || !strings.Contains(err.Error(), noLeadGradeRule) {
-			t.Fatalf("%v: an explicit empty grade must still refuse: %v", args, err)
+		if exitCode(err) != exitUsage {
+			t.Fatalf("%v: an explicit empty grade must refuse as usage: %v", args, err)
 		}
 	}
 }
@@ -242,13 +218,13 @@ func TestLeadConsultResolveAndPlanWithoutGrade(t *testing.T) {
 		if err := json.Unmarshal([]byte(a.Out.(interface{ String() string }).String()), &result); err != nil {
 			t.Fatal(err)
 		}
-		if result.RoutingRole != role || result.Profile != "opus" || result.Grade != "" || result.AccountKey == "" || result.Host == "" || result.OutcomeCode != outcomeAdmitted {
+		if result.RoutingRole != role || result.Profile != "fable" || result.Grade != "" || result.AccountKey == "" || result.Host == "" || result.OutcomeCode != outcomeAdmitted {
 			t.Fatalf("no-grade %s receipt: %+v", role, result)
 		}
 	}
 	for _, role := range []string{"counsel"} {
 		a, q, _, _, _ := planFixture(t)
-		q.CatalogRows = []CatalogRow{{Profile: "opus", Effort: "high", Grade: "C", Pool: "claude", Gate: "default", ModelID: "opus-m"}}
+		q.CatalogRows = []CatalogRow{{Profile: "opus", Effort: "high", Grade: "S+", Pool: "claude", Gate: "default", ModelID: "opus-m"}}
 		q.GateDo = gatePools(map[string]string{"opus": "claude"})
 		serveRouting(t, routingDocV1)
 		if err := a.planCmd(context.Background(), []string{"--role", role, "--t", "T1", "--json"}); err != nil {
@@ -306,7 +282,7 @@ func TestLeadConsultSpawnWithoutTaskGrade(t *testing.T) {
 			s.Lane, s.Parent = "test-lane", "test-parent"
 		}
 		q := a.Quota.(*fakeQuota)
-		q.CatalogRows = []CatalogRow{{Profile: "opus", Effort: "high", Grade: "C", Pool: "claude", Gate: "default", ModelID: "opus-m"}}
+		q.CatalogRows = []CatalogRow{{Profile: "opus", Effort: "high", Grade: "S+", Pool: "claude", Gate: "default", ModelID: "opus-m"}}
 		q.GateDo = gatePools(map[string]string{"opus": "claude"})
 		a.Source = &fakePlacementSource{presence: []PresenceRecord{{HostID: "local", AccountKey: testClaudeA, LastSeen: a.Now()}}, accounts: map[string]SharedAccount{testClaudeA: {Key: testClaudeA, Observed: true, Fresh: true, Quota: &PoolView{Status: "ok", Class: "spend", Blocking: ptrF(10)}}}}
 		serveRouting(t, routingDocV1)

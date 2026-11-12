@@ -2,7 +2,6 @@ package fleet
 
 import (
 	"context"
-	"encoding/json"
 	"testing"
 )
 
@@ -11,22 +10,14 @@ func TestUnratedTopRoleReachesQuota(t *testing.T) {
 		t.Run(role, func(t *testing.T) {
 			a, _, q := consultFixture(t)
 			q.CatalogRows = []CatalogRow{{Profile: "codex-sol", Effort: "high", Grade: "unrated", Pool: "codex", Gate: "default", ModelID: "sol-m"}}
-			admit := gatePools(map[string]string{"codex-sol": "codex"})
-			q.GateDo = func(req QuotaRequest) (string, error) {
-				if req.Role != role {
-					return "", fail(exitSeatRefused, "unrated %s quota request received seat role %s", role, req.Role)
-				}
-				return admit(req)
+			gates := 0
+			q.GateDo = func(QuotaRequest) (string, error) {
+				gates++
+				return "", fail(exitSeatRefused, "unrated %s rung reached quota", role)
 			}
-			if err := a.resolveCmd(context.Background(), []string{"--role", role, "--json"}); err != nil {
-				t.Fatal(err)
-			}
-			var result resolveResult
-			if err := json.Unmarshal([]byte(a.Out.(interface{ String() string }).String()), &result); err != nil {
-				t.Fatal(err)
-			}
-			if result.Profile != "codex-sol" || result.SeatRole != "worker" || result.RoutingRole != role {
-				t.Fatalf("routing role changed seat behavior: %+v", result)
+			err := a.resolveCmd(context.Background(), []string{"--role", role, "--json"})
+			if exitCode(err) != exitSeatRefused || gates != 0 {
+				t.Fatalf("unrated %s: err=%v gates=%d; an unrated rung must never reach quota", role, err, gates)
 			}
 		})
 	}

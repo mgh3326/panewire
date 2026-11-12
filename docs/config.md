@@ -991,7 +991,8 @@ carries `policy_file` and `policy_overrides`.
 model would a spawn get" without a task or brief. It is live and read-only:
 it runs the spawn's selection core with catalog, account observations,
 presence, and account-bound gates. Worker roles use `--grade` instead of a
-task title. Consult omits the grade. Selection then walks the same placement plan for the chosen seat — the local launch
+task title. Consult takes an optional `--grade` that sets its floor (see
+[Consult](#consult)); absent, the floor is `S+`. Selection then walks the same placement plan for the chosen seat — the local launch
 resolution, seat check and gate for this host, the shared-account quota
 gate for each remote host — and stops at the first host that admits it. It
 never spawns, wakes a host, claims a local job, writes an hk task or job
@@ -1053,11 +1054,18 @@ The routing table's profile allowlist still applies. OMP profiles must be
 listed by name or covered by `"*"`. Catalog and launch model IDs are checked,
 so a top-profile name cannot admit a non-top OMP model.
 
-Task grade is recorded but does not filter or rank a consult.
-`spawn --role counsel` and its `plan` form accept no `--grade`. An explicit grade returns exit 70 and the named rule
-`lead_consult_take_no_grade` (the code keeps its historical spelling).
-`resolve --role consult` also takes no grade. Other resolve roles default to
-grade `C`. Other plan roles require a grade.
+Consult grade is a floor on the rung, not the seat grade. The floor is one grade above the asker's task grade, capped at `SS`. A consult without a task grade takes `S+`. `plan --role counsel`, `resolve --role consult`, and `spawn --role counsel` accept `--grade C|B|A|A+|S|S+|SS` as the asker grade; an empty or unknown value exits 2 and names the accepted grades.
+
+Within the floor:
+
+- A rung graded `unrated` is never chosen and never asks its quota gate (`grade_unrated`).
+- A rung below the floor, or whose launch rung is absent or below it, is dropped (`grade_insufficient`).
+- `--builder-family F` on `plan` or `resolve` drops consult rungs of family `F` (`family_excluded`). With no family, nothing is excluded and the stamp records `unknown`.
+- If no rung passes at the floor but a below-floor rung passes every other rule, consult retries once at the asker's own grade and stamps `fallback: no_rung_at_floor`. Unrated, absent-rung, and family-excluded rungs never trigger the retry. A session without a task grade never retries.
+
+The selection record carries a `consult` object with `asker_grade`, `asker_family`, `grade_source` (`flag`, `task`, or `without_task`), `floor`, `used_floor`, and `fallback`. `resolve --role consult` prints `floor=<G>` on its text line.
+
+`resolve` defaults other roles to grade `C`. Other `plan` roles require a grade.
 
 ### Role effort for consult
 
@@ -1727,7 +1735,7 @@ HTTP 409 warns and drops the conflicting file. Local attempt markers under
 | 2 | Usage/task/policy target refusal. |
 | 3 / 4 | Quota-tool refusal, unchanged; artifacts use 3 for upload confirmation timeout and 4 for unconfirmed Drive eviction. |
 | 5 / 6 | Hub quota denial / authentication refusal. |
-| 70 | Configuration or trust refusal, including `POLICY_UNAVAILABLE` and `lead_consult_take_no_grade`. |
+| 70 | Configuration or trust refusal, including `POLICY_UNAVAILABLE`. |
 | 74 | Active job duplicate, including an hk `job_id_taken` claim refusal. |
 | 75 | Unreadable duplicate state (the ledger's record of a duplicate job has no state or an unreadable `job.spawned` receipt; a released job has no receipt and is reclaimed), changed artifact, or a `--parent-job` that resolves neither locally nor in hk within the bound. |
 | 76 | `BRIEF_SUBMISSION_UNCONFIRMED`: no working transition or submitted brief turn on the launch session and pane. Codex retries a submit key once only for composer residue; other harnesses retain one submit-key retry when submission remains unconfirmed. |

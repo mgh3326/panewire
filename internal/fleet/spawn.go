@@ -197,7 +197,10 @@ func parseSpawn(args []string) (Spawn, error) {
 		s.Purpose = "operator-request"
 	}
 	if flagPassed(f, "grade") && (topRoutingRole(builtinRoleMap[s.Role]) || topRoutingRole(s.RoutingRole)) {
-		return s, fail(exitConfig, "%s: --grade is not accepted for consult", noLeadGradeRule)
+		s.Grade = strings.ToUpper(s.Grade)
+		if _, ok := gradeOrder[s.Grade]; !ok {
+			return s, fail(exitUsage, "--grade needs C|B|A|A+|S|S+|SS")
+		}
 	}
 	return s, nil
 }
@@ -450,9 +453,6 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 
 	defer func() { a.finishPlacement(ctx, s, err) }()
 	defer func() { a.spawnEvents(s, err) }()
-	if s.Grade != "" && (topRoutingRole(builtinRoleMap[s.Role]) || topRoutingRole(s.RoutingRole)) {
-		return fail(exitConfig, "%s: --grade is not accepted for consult", noLeadGradeRule)
-	}
 	if s.CWD == "" || s.Prompt == "" || s.Label == "" || !slices.Contains([]string{"T0", "T1", "T2", "T3"}, s.T) {
 		return fail(exitUsage, "spawn requires -c -p -l --t T0..T3; supply the missing flags (workspace defaults to executing local.workspace)")
 	}
