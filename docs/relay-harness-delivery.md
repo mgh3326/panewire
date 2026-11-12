@@ -264,7 +264,7 @@ watch row is what keeps the unconfirmed state durable until the pane confirms
 the copy or the design lane has been told. A `relay.delivered` is kept as proof
 in memory even if hk refuses the delivery write, so the retry never types a row
 the pane has; the retry reads its row again with backoff (10 s, 1 min, 5 min)
-when hk cannot be read. No notice carries information the rows do not.
+when hk cannot be read. A delivery write hk refused is retried the same way until durable, and the watch row stays open until then, and until the design lane's notice is durable (or moot). A late `relay.delivered` for a row a replay retired settles its watch. No notice carries information the rows do not.
 
 When a node drops an event as `inject_failed_max_attempts`,
 `maybe_in_pane`, `pane_read_failed`, `delivery_uncertain_check_pane` or `working_wait_expired`, the hub tells the job's design lane once. A handoffkeep outage

@@ -145,9 +145,9 @@ func TestDesignLaneKeepsReviewerSpawnedInHKOnly_t4270(t *testing.T) {
 }
 
 // A completion that arrives within the repeat window of the same worker's
-// READY into the same lane is the same news: kept in hk only. One READY
-// explains one completion, and a completion without a READY (or long after
-// it) is delivered as before.
+// READY into the same lane is the same news: kept in hk only, however often
+// it is seen. A completion without a READY (or long after it) is delivered as
+// before.
 func TestDesignInboxOmitsCompletionThatRepeatsReady_t4270(t *testing.T) {
 	h, agent, fake := t3434Hub(t, filepath.Join(t.TempDir(), "inbox.sqlite3"))
 	now := time.Now()
@@ -171,17 +171,19 @@ func TestDesignInboxOmitsCompletionThatRepeatsReady_t4270(t *testing.T) {
 		t.Fatalf("hk rows for the repeat completion=%d delivered_to=%q, want one hub/filtered:repeats-ready", len(rows), deliveredTo)
 	}
 
-	// The READY is spent: the next completion is new information.
-	next := t3426Completion(t3434WorkerJob, t3426Design, "https://github.com/example/repo/pull/221")
-	next.EventID, next.ReportPath = "00002-job.completed.json", "/jobs/second/report.md"
-	h.relayJobCompletionFrom("host-a", next)
-	if item := t3426Item(t, h, t3426Design, "job.completed", t3434WorkerJob); item.ReadAt != 0 {
-		t.Fatalf("second completion stored as %+v, want an unread inbox item", item)
+	// The note is not spent: a retry after a lost acknowledgement, or a second
+	// turn end inside the window, is the same news and is filed again.
+	again := t3426Completion(t3434WorkerJob, t3426Design, "https://github.com/example/repo/pull/221")
+	again.EventID, again.ReportPath = "00002-job.completed.json", "/jobs/second/report.md"
+	h.relayJobCompletionFrom("host-a", again)
+	h.relayJobCompletionFrom("host-a", completion)
+	for _, item := range t4270Items(t, h, t3426Design) {
+		if item.Kind == "job.completed" {
+			t.Fatalf("a completion inside the window was listed: %+v", item)
+		}
 	}
 
 	// A completion long after a READY is not its repeat.
-	late := t3434Event(t3426Design, t3434WorkerPane, "ready", "READY hk3430 PR #221 head def5678")
-	h.relayLaneEvent(late, agent)
 	now = now.Add(readyRepeatWindow + time.Minute)
 	after := t3426Completion(t3434WorkerJob, t3426Design, "https://github.com/example/repo/pull/221")
 	after.EventID, after.ReportPath = "00003-job.completed.json", "/jobs/third/report.md"
@@ -192,8 +194,8 @@ func TestDesignInboxOmitsCompletionThatRepeatsReady_t4270(t *testing.T) {
 			completions++
 		}
 	}
-	if completions != 2 {
-		t.Fatalf("listed completions=%d, want the second and the late one", completions)
+	if completions != 1 {
+		t.Fatalf("listed completions=%d, want only the one after the window", completions)
 	}
 }
 

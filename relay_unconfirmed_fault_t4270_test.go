@@ -311,3 +311,48 @@ func TestRelayConfirmationProofSurvivesFailedDeliveryWrite_t4270(t *testing.T) {
 	default:
 	}
 }
+
+// The watch row stays open until the design lane's notice is durable: when hk
+// refuses the notice, a restart can still tell it.
+func TestRelayWatchStaysOpenUntilNoticeIsDurable_t4270(t *testing.T) {
+	rig := t4270Rig(t, designQuietTimings{unconfirmedUnreadAfter: 100 * time.Millisecond})
+	rig.drop()
+	rig.fake.mu.Lock()
+	rig.fake.failPostOwnerLane = t3431Design
+	rig.fake.mu.Unlock()
+	time.Sleep(400 * time.Millisecond) // the deadline passes while hk refuses the notice
+	open := func() (n int) {
+		rig.fake.mu.Lock()
+		defer rig.fake.mu.Unlock()
+		for _, r := range rig.fake.rows {
+			if r.OwnerLane == relayUnconfirmedWatchLane && r.DeliveredAt == "" {
+				n++
+			}
+		}
+		return n
+	}
+	if open() != 1 {
+		t.Fatalf("open watch rows=%d, want the watch kept while the notice is not durable", open())
+	}
+}
+
+// A late acknowledgement for a row a replay retired proves the copy and closes
+// its watch: no false notice at the deadline.
+func TestRelayLateAckOfReplayRetiredRowSettlesItsWatch_t4270(t *testing.T) {
+	rig := t4270Rig(t, designQuietTimings{unconfirmedRetryAfter: 50 * time.Millisecond, unconfirmedUnreadAfter: 400 * time.Millisecond})
+	row := rig.dropAs(relayDroppedPaneReadFailed)
+	eventually(t, 5*time.Second, "the retry's injection", func() bool {
+		select {
+		case d := <-rig.dest.relays:
+			return d.Lane == t3431Worker && d.EventID == row
+		default:
+			return false
+		}
+	})
+	// The replay's ack window is gone; the pane's confirmation arrives late.
+	t650Send(t, rig.hub, "host-a", rig.dest, "relay.delivered", relayAckPayload{JobID: laneEventTransportID(t3431Worker, "mergewake-findings-1"), Pane: "w1:pW", OriginalEventID: row})
+	time.Sleep(700 * time.Millisecond) // proves nothing more happens: past the unread deadline
+	if got := rig.notices(); len(got) != 0 {
+		t.Fatalf("a confirmed copy was told as unconfirmed: %+v", got)
+	}
+}

@@ -155,9 +155,11 @@ func (h *HubServer) noteWorkerReady(job, lane string) {
 }
 
 // completionRepeatsReady reports whether a completion of job into lane comes
-// within readyRepeatWindow of that job's READY into the same lane. It does not
-// spend the note: a completion whose filing failed is sent again by its
-// producer and must be filtered again (spendWorkerReady runs after the filing).
+// within readyRepeatWindow of that job's READY into the same lane. The note is
+// never spent: a completion is filtered by what it is, not by how often it was
+// seen, so a producer's retry after a lost acknowledgement is filed again (and
+// answered by the same hk row) instead of reaching the inbox. A worker that
+// finishes a turn twice inside the window is reporting the same news twice.
 func (h *HubServer) completionRepeatsReady(job, lane string) bool {
 	h.quiet.mu.Lock()
 	defer h.quiet.mu.Unlock()
@@ -167,13 +169,6 @@ func (h *HubServer) completionRepeatsReady(job, lane string) bool {
 	}
 	age := h.now().Sub(note.at)
 	return note.lane == lane && age >= 0 && age <= readyRepeatWindow
-}
-
-// spendWorkerReady spends job's READY note: one READY explains one completion.
-func (h *HubServer) spendWorkerReady(job string) {
-	h.quiet.mu.Lock()
-	delete(h.quiet.ready, job)
-	h.quiet.mu.Unlock()
 }
 
 // designFilterReason names why a record for a design lane is kept in hk only,

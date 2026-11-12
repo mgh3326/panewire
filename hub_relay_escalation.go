@@ -107,14 +107,14 @@ func (h *HubServer) escalateUnconfirmedRelay(machine string, dropped relayDroppe
 	}
 	h.scheduleUnconfirmedRetry(machine, dropped)
 	if h.quiet.timings.unconfirmedUnreadAfter <= 0 || !tracked {
-		h.escalateUnconfirmedRelayAttempt(machine, dropped, 0, false)
+		h.escalateUnconfirmedRelayAttempt(machine, dropped, 0, false, nil)
 		return
 	}
 	// The deadline is kept in hk so a hub restart cannot lose it. When hk
 	// refuses it the row is told at once, the pre-hk-4270 behavior.
 	if !h.persistUnconfirmedWatch(machine, dropped) {
 		h.forgetUnconfirmedRow(dropped.OriginalEventID)
-		h.escalateUnconfirmedRelayAttempt(machine, dropped, 0, false)
+		h.escalateUnconfirmedRelayAttempt(machine, dropped, 0, false, nil)
 		return
 	}
 	h.scheduleUnreadEscalation(machine, dropped)
@@ -128,13 +128,21 @@ func (h *HubServer) escalateUnconfirmedRelay(machine string, dropped relayDroppe
 // is durable: the durable id keeps the retries to one escalation. unproven is
 // set for a row a retry already retired: hk then reads it as delivered, and
 // only a confirmation (confirmUnconfirmedRow), checked again on every
-// retry, clears it.
-func (h *HubServer) escalateUnconfirmedRelayAttempt(machine string, dropped relayDroppedPayload, attempt int, unproven bool) {
+// retry, clears it. settled, when set, runs once the notice is durable or the
+// row needs none (moot, delivered, folded, refused); it does not run while a
+// retry is pending or after the retries gave up, so a caller that keeps a
+// durable deadline keeps it until then.
+func (h *HubServer) escalateUnconfirmedRelayAttempt(machine string, dropped relayDroppedPayload, attempt int, unproven bool, settled func()) {
 	if !relayDroppedIsUnconfirmed(dropped.Reason) || dropped.OriginalEventID < 1 || dropped.Lane == "" || h.handoffkeep == nil {
 		return
 	}
 	if h.unconfirmedRowConfirmed(dropped.OriginalEventID) {
 		return // a delivery confirmed since this notice was queued
+	}
+	done := func() {
+		if settled != nil {
+			settled()
+		}
 	}
 	design := h.designLaneFor(dropped.Lane)
 	retry := func(why string) {
@@ -147,7 +155,7 @@ func (h *HubServer) escalateUnconfirmedRelayAttempt(machine string, dropped rela
 			return
 		}
 		h.logger.Warn("relay unconfirmed escalation will retry", "event_id", dropped.OriginalEventID, "lane", dropped.Lane, "why", why, "attempt", attempt+1)
-		time.AfterFunc(unconfirmedEscalationBackoff[attempt], func() { h.escalateUnconfirmedRelayAttempt(machine, dropped, attempt+1, unproven) })
+		time.AfterFunc(unconfirmedEscalationBackoff[attempt], func() { h.escalateUnconfirmedRelayAttempt(machine, dropped, attempt+1, unproven, settled) })
 	}
 	ctx := context.Background()
 	record, found, err := h.handoffkeep.relayEvent(ctx, dropped.OriginalEventID)
@@ -156,19 +164,23 @@ func (h *HubServer) escalateUnconfirmedRelayAttempt(machine string, dropped rela
 		return
 	}
 	if !found || (record.DeliveredAt != "" && !unproven) || !escalatesWhenUnconfirmed(record) {
+		done()
 		return
 	}
 	if design == "" {
 		h.logger.Warn("relay unconfirmed escalation has no design lane", "event_id", record.ID, "lane", dropped.Lane, "reason", dropped.Reason)
+		done()
 		return
 	}
 	if why := h.unconfirmedNoticeMoot(dropped.Lane); why != "" {
 		h.logger.Info("relay unconfirmed escalation skipped; nobody can act on it", "event_id", record.ID, "lane", dropped.Lane, "design_lane", design, "reason", dropped.Reason, "why", why)
+		done()
 		return
 	}
 	note, folded, send := h.unconfirmedNotices.admit(design, dropped.Lane, record.ID, h.now())
 	if !send {
 		h.logger.Info("relay unconfirmed escalation folded into the next notice", "event_id", record.ID, "lane", dropped.Lane, "design_lane", design, "reason", dropped.Reason, "why", "folded", "folded", folded)
+		done()
 		return
 	}
 	eventID := fmt.Sprintf("%s%d", unconfirmedEscalationPrefix, record.ID)
@@ -184,6 +196,9 @@ func (h *HubServer) escalateUnconfirmedRelayAttempt(machine string, dropped rela
 		Text:       unconfirmedEscalationText(record, dropped, machine) + note.text,
 	}
 	result := h.relayLaneEventContext(ctx, event, nil)
+	if result.ID != 0 {
+		done()
+	}
 	switch {
 	case result.ID != 0 && result.Duplicate && attempt > 0:
 		// The first writer's body is authoritative. Clear no folds from this
@@ -204,6 +219,7 @@ func (h *HubServer) escalateUnconfirmedRelayAttempt(machine string, dropped rela
 	default:
 		// The store refused the notice: nobody was told.
 		h.unconfirmedNotices.fold(design, dropped.Lane, record.ID, h.now())
+		done()
 	}
 }
 

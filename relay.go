@@ -995,6 +995,7 @@ func (h *HubServer) markRelayEventDelivered(pending relayPending) bool {
 		// The confirmation proof stays (confirmUnconfirmedRow) so the timed
 		// retry cannot type a row the pane has.
 		h.logger.Warn("relay delivery was not recorded", "event_id", pending.eventID, "machine", pending.machine)
+		h.deferConfirmedWrite(pending, 0)
 		return false
 	}
 	h.settleConfirmedRow(pending.eventID)
@@ -1071,6 +1072,13 @@ func (h *HubServer) recordLateRelayDelivery(machineID string, ack relayAckPayloa
 		return false
 	}
 	if record.DeliveredAt != "" {
+		// A row a replay retired reads as delivered, but its copy was not
+		// proven. This validated acknowledgement proves it: settle the row's
+		// unconfirmed tracking and close its watch.
+		if strings.HasPrefix(record.DeliveredTo, relayReplayRetiredMarker) {
+			h.confirmUnconfirmedRow(record.ID)
+			h.settleConfirmedRow(record.ID)
+		}
 		return true
 	}
 	// Only a durable write accepts the ack: a rejected one leaves the row

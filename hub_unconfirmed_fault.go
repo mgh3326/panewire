@@ -301,11 +301,10 @@ func (h *HubServer) escalateUnreadRow(machine string, dropped relayDroppedPayloa
 		h.quiet.mu.Unlock()
 		return // settled since
 	case row.confirmed:
-		delete(h.quiet.unconfirmed, dropped.OriginalEventID)
+		// The pane has it. The entry and the watch stay until hk records the
+		// delivery (deferConfirmedWrite settles them): closing the watch here
+		// would leave an undelivered original with no deadline behind it.
 		h.quiet.mu.Unlock()
-		if row.watchID > 0 {
-			h.retireUnconfirmedWatch(row.watchID, "confirmed")
-		}
 		return
 	}
 	// The entry stays while the notice is in flight, so each of its retries
@@ -313,15 +312,37 @@ func (h *HubServer) escalateUnreadRow(machine string, dropped relayDroppedPayloa
 	row.escalating = true
 	h.quiet.unconfirmed[dropped.OriginalEventID] = row
 	h.quiet.mu.Unlock()
-	h.escalateUnconfirmedRelayAttempt(machine, dropped, 0, row.retried)
+	var settled func()
 	if row.watchID > 0 {
-		h.retireUnconfirmedWatch(row.watchID, "told")
+		settled = func() { h.retireUnconfirmedWatch(row.watchID, "told") }
 	}
+	h.escalateUnconfirmedRelayAttempt(machine, dropped, 0, row.retried, settled)
 	var settle time.Duration = time.Minute
 	for _, d := range unconfirmedEscalationBackoff {
 		settle += d
 	}
 	time.AfterFunc(settle, func() { h.forgetUnconfirmedRow(dropped.OriginalEventID) })
+}
+
+// deferConfirmedWrite retries the delivery write hk refused for a row the pane
+// confirmed, on hkRetryBackoff, until it is durable; then the row's tracking
+// and watch are settled. The proof stays in the entry meanwhile, so neither
+// the retry nor the notice acts on the row.
+func (h *HubServer) deferConfirmedWrite(pending relayPending, attempt int) {
+	backoff := h.quiet.timings.hkRetryBackoff
+	if attempt >= len(backoff) || h.closeCtx.Err() != nil {
+		return
+	}
+	time.AfterFunc(backoff[attempt], func() {
+		if h.closeCtx.Err() != nil || !h.unconfirmedRowConfirmed(pending.eventID) {
+			return
+		}
+		if err := h.handoffkeep.markDelivered(h.closeCtx, pending.eventID, pending.machine, pending.pane); err != nil {
+			h.deferConfirmedWrite(pending, attempt+1)
+			return
+		}
+		h.settleConfirmedRow(pending.eventID)
+	})
 }
 
 // noteHostFault tells the host fault lane about a drop: at once for the first
