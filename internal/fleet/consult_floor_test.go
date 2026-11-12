@@ -331,7 +331,7 @@ func TestConsultFloorCoolingUnratedDoesNotSuppressFallback(t *testing.T) {
 	if c := consultFloorStamp(t, sel); c["fallback"] != "no_rung_at_floor" {
 		t.Fatalf("fallback stamp = %v, want no_rung_at_floor", c)
 	}
-	if got := candOutcome(sel.record(), "codex-sol", "high")["reason"]; got != "grade_unrated" {
-		t.Fatalf("cooling unrated codex-sol@high reason = %v, want grade_unrated", got)
+	if got := candOutcome(sel.record(), "codex-sol", "high")["reason"]; got != "pool_cooling" {
+		t.Fatalf("cooling unrated codex-sol@high reason = %v, want pool_cooling", got)
 	}
 }
