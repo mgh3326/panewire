@@ -186,11 +186,12 @@ func (h *HubServer) publishFleetReadiness(machine string, now time.Time) {
 
 // observeLaunchOutcome counts one node answer to a spawn against its
 // (machine, kind). The threshold-th consecutive failure excludes the pair for
-// the policy's backoff; a success clears it. A busy checkout is not a launch
-// failure: the engine retries it on the same host.
+// the policy's backoff; a success clears it. Busy and moved-on checkout
+// refusals are not launch failures: they describe checkout state, not the
+// harness's ability to launch.
 func (h *HubServer) observeLaunchOutcome(machine, profile string, rc int, reason string, now time.Time) {
 	kind := fleet.ProfileKind(profile)
-	if kind == "" || machine == "" || reason == "checkout_refused:busy" {
+	if kind == "" || machine == "" || reason == "checkout_refused:busy" || checkoutRefusalMovesNextHost(reason) {
 		return
 	}
 	h.mu.Lock()

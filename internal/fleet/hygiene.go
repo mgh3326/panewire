@@ -298,7 +298,7 @@ func (a *App) diagnostics(ctx context.Context, kind string, args []string) error
 		fmt.Fprintf(a.Out, "config=%s\nlocal spawn=%t\n", path, boolean(a.Config.Local, "spawn", true))
 		for _, host := range slices.Sorted(maps.Keys(a.Config.Hosts)) {
 			h := a.Config.Hosts[host]
-			fmt.Fprintf(a.Out, "host=%s via=%s capacity=%d\n", host, str(h, "via"), integer(h, "capacity", 0))
+			fmt.Fprintf(a.Out, "host=%s via=%s\n", host, str(h, "via"))
 		}
 		return nil
 	}

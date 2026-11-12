@@ -255,7 +255,7 @@ func TestReplayOfNodeRefusalIsNotPinnedToThatNode(t *testing.T) {
 		"brief_doc_unavailable":        false,
 		"spawn_disabled: rule":         false,
 		"spawn_failed: pane uncertain": false,
-		"checkout_refused:dirty":       false,
+		"checkout_refused:dirty":       true,
 	} {
 		if got := spawnRefusalTriesNextHost(reason); got != want {
 			t.Errorf("%q: got %v", reason, got)
