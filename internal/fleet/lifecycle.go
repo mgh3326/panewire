@@ -45,7 +45,6 @@ func (a *App) lifecycleWithOptions(ctx context.Context, kind string, args []stri
 	if e != nil {
 		return e
 	}
-	strictResult := kind == "done" && !watchResult && result != nil && !boolean(j.Receipt, "headless", false)
 	if kind == "restore" {
 		if *report != "" || *question != "" {
 			return fail(exitUsage, "restore accepts only JOB")
@@ -81,6 +80,7 @@ func (a *App) lifecycleWithOptions(ctx context.Context, kind string, args []stri
 			}
 		}
 	}
+	strictResult := kind == "done" && !watchResult && result != nil && !boolean(j.Receipt, "headless", false)
 	body := []byte{}
 	if *report != "" {
 		if e = noSymlinks(*report); e != nil {
