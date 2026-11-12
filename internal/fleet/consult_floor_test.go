@@ -106,8 +106,8 @@ func TestConsultOtherLaneKeepsAskerPlusOneFloor(t *testing.T) {
 	if err != nil {
 		t.Fatalf("select: %v", err)
 	}
-	if got := sel.chosen.seat.Canon; got != "codex-sol" {
-		t.Fatalf("operator-desk A asker must select A+; got %s", got)
+	if got := sel.chosen.row.Grade; got != "A+" {
+		t.Fatalf("operator-desk A asker selected grade %s, want A+", got)
 	}
 	c := consultFloorStamp(t, sel)
 	if c["floor"] != "A+" || c["used_floor"] != "A+" {
