@@ -23,13 +23,32 @@ type doneResultFailure struct {
 
 func (e *doneResultFailure) Error() string { return e.reason }
 
+type doneResultEventWriteFailure struct{ cause error }
+
+func (e *doneResultEventWriteFailure) Error() string { return "result attachment event write failed" }
+func (e *doneResultEventWriteFailure) Unwrap() error { return e.cause }
+
 func (a *App) strictDoneFailure(ctx context.Context, id string, e error) error {
+	var eventFailure *doneResultEventWriteFailure
+	if errors.As(e, &eventFailure) {
+		return fail(exitFailure, "job %s reason=local_event_failed", id)
+	}
 	var failure *doneResultFailure
 	if !errors.As(e, &failure) {
 		failure = &doneResultFailure{code: exitFailure, reason: doneResultReason(e)}
 	}
 	_ = a.event(ctx, id, "job.record_failed", map[string]any{"op": "completed", "reason": failure.reason})
 	return fail(failure.code, "job %s reason=%s", id, failure.reason)
+}
+
+func isDoneResultFailure(e error, reason string) bool {
+	var failure *doneResultFailure
+	return errors.As(e, &failure) && failure.reason == reason
+}
+
+func (a *App) recordDoneResultConflict(id string) {
+	a.jobResultEvent(id, "conflict", "different_result", "stored result kept")
+	a.captureSentryWarning([]string{"job-result-conflict"}, "JOB_RESULT_CONFLICT "+id, map[string]string{"job": id})
 }
 
 func doneResultReason(e error) string {
@@ -117,15 +136,8 @@ func (a *App) strictCompletedPutUntil(ctx context.Context, id string, fields map
 		}
 		switch state := str(record, "state"); state {
 		case "completed":
-			stored, hasResult := record["result"]
-			if !hasResult || stored == nil {
-				return false, &doneResultFailure{code: exitStateConflict, reason: "terminal_without_result"}
-			}
-			if !sameJSONValue(stored, result) {
-				return false, &doneResultFailure{code: exitStateConflict, reason: "result_conflict"}
-			}
-			if reportDoc != "" && str(record, "report_doc") != reportDoc {
-				return false, &doneResultFailure{code: exitStateConflict, reason: "report_conflict"}
+			if failure := completedResultReadbackFailure(record, result, reportDoc); failure != nil {
+				return false, failure
 			}
 			return false, nil
 		case "escalated":
@@ -149,7 +161,34 @@ func (a *App) strictCompletedPutUntil(ctx context.Context, id string, fields map
 			repairErr := store.Put(callCtx, id, spawned)
 			cancel()
 			if repairErr != nil {
-				return false, &doneResultFailure{code: exitFailure, reason: doneResultReason(repairErr)}
+				if ctx.Err() != nil || (!ambiguousDoneResultFailure(repairErr) && !isJobStateConflict(repairErr)) {
+					return false, &doneResultFailure{code: exitFailure, reason: doneResultReason(repairErr)}
+				}
+				left = time.Until(deadline)
+				if left <= 0 {
+					return false, &doneResultFailure{code: exitFailure, reason: doneResultReason(repairErr)}
+				}
+				callCtx, cancel = context.WithTimeout(ctx, left)
+				record, getErr := store.Get(callCtx, id)
+				cancel()
+				if getErr != nil {
+					return false, &doneResultFailure{code: exitFailure, reason: doneResultReason(repairErr)}
+				}
+				switch str(record, "state") {
+				case "spawned":
+					// The single repair PUT committed despite its ambiguous reply.
+				case "completed":
+					if failure := completedResultReadbackFailure(record, result, reportDoc); failure != nil {
+						return false, failure
+					}
+					return false, nil
+				case "escalated":
+					return false, &doneResultFailure{code: exitStateConflict, reason: "job_escalated"}
+				case "lost":
+					return false, &doneResultFailure{code: exitStateConflict, reason: "job_lost"}
+				default:
+					return false, &doneResultFailure{code: exitFailure, reason: doneResultReason(repairErr)}
+				}
 			}
 			continue
 		case "spawned":
@@ -175,6 +214,20 @@ func (a *App) strictCompletedPutUntil(ctx context.Context, id string, fields map
 		}
 	}
 	return false, &doneResultFailure{code: exitFailure, reason: doneResultReason(last)}
+}
+
+func completedResultReadbackFailure(record map[string]any, result any, reportDoc string) *doneResultFailure {
+	stored, hasResult := record["result"]
+	if !hasResult || stored == nil {
+		return &doneResultFailure{code: exitStateConflict, reason: "terminal_without_result"}
+	}
+	if !sameJSONValue(stored, result) {
+		return &doneResultFailure{code: exitStateConflict, reason: "result_conflict"}
+	}
+	if reportDoc != "" && str(record, "report_doc") != reportDoc {
+		return &doneResultFailure{code: exitStateConflict, reason: "report_conflict"}
+	}
+	return nil
 }
 
 func ambiguousDoneResultFailure(e error) bool {
@@ -248,9 +301,7 @@ func (a *App) attachDuplicateResultStrict(ctx context.Context, j Job, id, report
 		return "", &doneResultFailure{code: exitFailure, reason: doneResultReason(e)}
 	}
 	if stored, ok := record["result"]; ok && stored != nil && !sameJSONValue(stored, result) {
-		a.warn("result conflict: job %s already has a different result; keeping it", id)
-		a.jobResultEvent(id, "conflict", "different_result", "stored result kept")
-		a.captureSentryWarning([]string{"job-result-conflict"}, "JOB_RESULT_CONFLICT "+id, map[string]string{"job": id})
+		a.recordDoneResultConflict(id)
 		return "", &doneResultFailure{code: exitStateConflict, reason: "result_conflict"}
 	}
 	if str(record, "state") == "completed" {
@@ -262,6 +313,13 @@ func (a *App) attachDuplicateResultStrict(ctx context.Context, j Job, id, report
 		} else {
 			if reportDoc != "" && str(record, "report_doc") != reportDoc {
 				return "", &doneResultFailure{code: exitStateConflict, reason: "report_conflict"}
+			}
+			written, eventErr := a.ensureResultAttachedEvent(ctx, j.Events, id, report, digest)
+			if eventErr != nil {
+				return "", &doneResultEventWriteFailure{cause: eventErr}
+			}
+			if written {
+				a.jobResultEvent(id, "attached", "duplicate_done", "duplicate completion")
 			}
 			return "result=equal", nil
 		}
@@ -275,19 +333,33 @@ func (a *App) attachDuplicateResultStrict(ctx context.Context, j Job, id, report
 	}
 	attached, e := a.strictCompletedPutUntil(ctx, id, fields, result, reportDoc, spawnReceiptForRepair(j.Events), deadline)
 	if e != nil {
-		var failure *doneResultFailure
-		if errors.As(e, &failure) && failure.reason == "result_conflict" {
-			a.jobResultEvent(id, "conflict", "different_result", "stored result kept")
-			a.captureSentryWarning([]string{"job-result-conflict"}, "JOB_RESULT_CONFLICT "+id, map[string]string{"job": id})
+		if isDoneResultFailure(e, "result_conflict") {
+			a.recordDoneResultConflict(id)
 		}
 		return "", e
 	}
 	if !attached {
 		return "result=equal", nil
 	}
-	if e = a.event(ctx, id, "job.result_attached", map[string]any{"report": report, "report_sha256": digest}); e != nil {
-		return "", e
+	written, e := a.ensureResultAttachedEvent(ctx, j.Events, id, report, digest)
+	if e != nil {
+		return "", &doneResultEventWriteFailure{cause: e}
+	}
+	if !written {
+		return "result=equal", nil
 	}
 	a.jobResultEvent(id, "attached", "duplicate_done", "duplicate completion")
 	return "result=attached", nil
+}
+
+func (a *App) ensureResultAttachedEvent(ctx context.Context, events []Event, id, report, digest string) (bool, error) {
+	for _, event := range events {
+		if event.Kind == "job.result_attached" && str(event.Payload, "report") == report && str(event.Payload, "report_sha256") == digest {
+			return false, nil
+		}
+	}
+	if e := a.event(ctx, id, "job.result_attached", map[string]any{"report": report, "report_sha256": digest}); e != nil {
+		return false, e
+	}
+	return true, nil
 }

@@ -134,13 +134,18 @@ func (a *App) lifecycleWithOptions(ctx context.Context, kind string, args []stri
 							return a.strictDoneFailure(ctx, id, e)
 						}
 					} else {
+						if e = a.releaseQuota(ctx, j); e != nil {
+							return e
+						}
 						status, e = a.attachDuplicateResult(ctx, id, *report, digest, result)
 						if e != nil {
 							return e
 						}
 					}
-					if e = a.releaseQuota(ctx, j); e != nil {
-						return e
+					if strictResult {
+						if e = a.releaseQuota(ctx, j); e != nil {
+							return e
+						}
 					}
 					if status != "" {
 						suffix = " " + status
@@ -221,6 +226,9 @@ func (a *App) lifecycleWithOptions(ctx context.Context, kind string, args []stri
 	}
 	if strictResult {
 		if e = a.strictCompletedPut(ctx, id, rec, result, doc, spawnReceiptForRepair(j.Events)); e != nil {
+			if isDoneResultFailure(e, "result_conflict") {
+				a.recordDoneResultConflict(id)
+			}
 			return a.strictDoneFailure(ctx, id, e)
 		}
 	} else if e := a.putJobRecord(ctx, id, rec); e != nil {
