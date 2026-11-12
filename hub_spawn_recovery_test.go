@@ -151,7 +151,7 @@ func TestAsyncSpawnLostEventRetriesWithStableJobIdentity(t *testing.T) {
 func TestAsyncSpawnWorkersBoundedAndIndependentOfHTTP(t *testing.T) {
 	h := asyncSpawnHub(t)
 	req := durableSpawnRequest()
-	for i := 0; i < 6; i++ {
+	for i := 0; i < hubSpawnWorkerCount+2; i++ {
 		current := req
 		current.RequestID = t14RequestID(900 + i)
 		current.Args = append([]string(nil), req.Args...)
@@ -167,7 +167,7 @@ func TestAsyncSpawnWorkersBoundedAndIndependentOfHTTP(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	started := make(chan struct{}, 10)
+	started := make(chan struct{}, hubSpawnWorkerCount+2)
 	release := make(chan struct{})
 	defer close(release)
 	var active, peak atomic.Int32
@@ -187,7 +187,7 @@ func TestAsyncSpawnWorkersBoundedAndIndependentOfHTTP(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	h.startSpawnCoordinator(ctx)
-	for range 4 {
+	for range hubSpawnWorkerCount {
 		select {
 		case <-started:
 		case <-time.After(time.Second):
@@ -196,10 +196,10 @@ func TestAsyncSpawnWorkersBoundedAndIndependentOfHTTP(t *testing.T) {
 	}
 	select {
 	case <-started:
-		t.Fatal("more than four workers executed")
+		t.Fatalf("more than %d workers executed", hubSpawnWorkerCount)
 	case <-time.After(30 * time.Millisecond):
 	}
-	if peak.Load() != 4 {
+	if peak.Load() != hubSpawnWorkerCount {
 		t.Fatal(peak.Load())
 	}
 }
