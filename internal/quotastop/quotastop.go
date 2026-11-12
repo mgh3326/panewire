@@ -13,21 +13,25 @@ import (
 // Stop is evidence from a single visible screen, not proof that sending
 // input to the pane is safe. An unknown reset is represented by a zero time.
 type Stop struct {
-	Pool   string
-	Reset  time.Time
-	Choice bool
+	Pool              string
+	Reset             time.Time
+	Choice            bool
+	CreditExhausted   bool
+	CreditExhaustedAt time.Time
 }
 
 var (
 	// devin matches the phrase anywhere in the status line: the live screen
 	// prefixes it with "▲ Something went wrong — ".
-	devin       = regexp.MustCompile(`(?i)reached free model rate limit(?:\s|[·.…:]|$)`)
-	claude      = regexp.MustCompile(`(?i)^you've hit your (?:(?:weekly|session) )?limit(?:\s|[·.:]|$)`)
-	codexSignal = regexp.MustCompile(`(?i)^you've hit your usage limit[.·:].*try again at`)
-	codex       = regexp.MustCompile(`(?i)try again at\s+([0-9]{1,2}:[0-9]{2}\s*(?:AM|PM)?)(?:\s+(UTC|GMT|Z))?`)
-	atClock     = regexp.MustCompile(`(?i)\bat\s+([0-9]{1,2}:[0-9]{2}\s*(?:AM|PM)?)(?:\s+(UTC|GMT|Z))?`)
-	relative    = regexp.MustCompile(`(?i)reset(?:s)? in\s+(\d+)\s*(seconds?|minutes?|hours?)`)
-	dateReset   = regexp.MustCompile(`(?i)resets?\s+([A-Za-z]{3,9})\s+(\d{1,2}),?\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm))(?:\s+(UTC|GMT|Z)|\s*\(([A-Za-z_]+/[A-Za-z_]+)\))?`)
+	devin           = regexp.MustCompile(`(?i)reached free model rate limit(?:\s|[·.…:]|$)`)
+	anthropicCredit = regexp.MustCompile(`(?i)credit balance is too low to access the anthropic api`)
+	openAICredit    = regexp.MustCompile(`(?i)(insufficient_quota|exceeded your current quota)`)
+	claude          = regexp.MustCompile(`(?i)^you've hit your (?:(?:weekly|session) )?limit(?:\s|[·.:]|$)`)
+	codexSignal     = regexp.MustCompile(`(?i)^you've hit your usage limit[.·:].*try again at`)
+	codex           = regexp.MustCompile(`(?i)try again at\s+([0-9]{1,2}:[0-9]{2}\s*(?:AM|PM)?)(?:\s+(UTC|GMT|Z))?`)
+	atClock         = regexp.MustCompile(`(?i)\bat\s+([0-9]{1,2}:[0-9]{2}\s*(?:AM|PM)?)(?:\s+(UTC|GMT|Z))?`)
+	relative        = regexp.MustCompile(`(?i)reset(?:s)? in\s+(\d+)\s*(seconds?|minutes?|hours?)`)
+	dateReset       = regexp.MustCompile(`(?i)resets?\s+([A-Za-z]{3,9})\s+(\d{1,2}),?\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm))(?:\s+(UTC|GMT|Z)|\s*\(([A-Za-z_]+/[A-Za-z_]+)\))?`)
 )
 
 // Classify reports the quota stop shown as the last activity of screen.
@@ -42,6 +46,10 @@ func Classify(screen string, now time.Time, local *time.Location) (Stop, bool) {
 	screen = block
 	var out Stop
 	switch {
+	case anthropicCredit.MatchString(screen):
+		out.Pool, out.CreditExhausted, out.CreditExhaustedAt = "anthropic-api", true, now.UTC()
+	case openAICredit.MatchString(screen):
+		out.Pool, out.CreditExhausted, out.CreditExhaustedAt = "openai-api", true, now.UTC()
 	case devin.MatchString(screen):
 		out.Pool = "devin-free"
 	case codexSignal.MatchString(screen) && (strings.Contains(strings.ToLower(screen), "limit") || strings.Contains(strings.ToLower(screen), "quota")):
@@ -135,7 +143,7 @@ func statusBlock(screen string) (string, bool) {
 	for i := len(lines) - 1; i >= 0; i-- {
 		line := strings.TrimSpace(lines[i])
 		line = strings.TrimLeft(line, "│┃•⚠️ ")
-		if devin.MatchString(line) || claude.MatchString(line) || codexSignal.MatchString(line) {
+		if devin.MatchString(line) || claude.MatchString(line) || codexSignal.MatchString(line) || anthropicCredit.MatchString(line) || openAICredit.MatchString(line) {
 			if len(lines)-i > 16 {
 				return "", false
 			}

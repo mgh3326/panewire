@@ -16,6 +16,27 @@ func (h *HubServer) observePoolCooling(reason string, now time.Time) bool {
 	if !fleetStateTokenPattern.MatchString(pool) {
 		return false
 	}
+	for _, field := range fields[2:] {
+		if field == "provider_credit_exhausted=true" {
+			at := now.UTC()
+			for _, detail := range fields[2:] {
+				if value, ok := strings.CutPrefix(detail, "exhausted_at="); ok {
+					if parsed, err := time.Parse(time.RFC3339Nano, value); err == nil {
+						at = parsed.UTC()
+					}
+				}
+			}
+			h.mu.Lock()
+			if h.poolCreditExhausted == nil {
+				h.poolCreditExhausted = make(map[string]time.Time)
+			}
+			if at.After(h.poolCreditExhausted[pool]) {
+				h.poolCreditExhausted[pool] = at
+			}
+			h.mu.Unlock()
+			return true
+		}
+	}
 	until := now.Add(5 * time.Minute)
 	if len(fields) >= 3 && strings.HasPrefix(fields[2], "reset_at=") {
 		parsed, err := time.Parse(time.RFC3339Nano, strings.TrimPrefix(fields[2], "reset_at="))
@@ -51,5 +72,6 @@ func (h *HubServer) fleetSnapshot(now time.Time) fleetStateSnapshot {
 		}
 	}
 	snap.Cooling = maps.Clone(h.poolCooling)
+	snap.CreditExhausted = maps.Clone(h.poolCreditExhausted)
 	return snap
 }

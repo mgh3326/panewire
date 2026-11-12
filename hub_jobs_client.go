@@ -312,10 +312,19 @@ func scanHubRelayEventsWithin(inboxRoot string, maxAge time.Duration) []hubScann
 			reason := event.reason()
 			if kind == "job.lost" && reason == "quota_stop" && event.Payload.Pool != "" {
 				reset := event.Payload.ResetAt
-				if reset == "" {
+				if reset == "" && !event.Payload.ProviderCreditExhausted {
 					reset = eventTime.Add(5 * time.Minute).UTC().Format(time.RFC3339Nano)
 				}
-				reason += " pool=" + event.Payload.Pool + " reset_at=" + reset
+				reason += " pool=" + event.Payload.Pool
+				if reset != "" {
+					reason += " reset_at=" + reset
+				}
+				if event.Payload.ProviderCreditExhausted {
+					reason += " provider_credit_exhausted=true"
+					if event.Payload.ProviderCreditExhaustedAt != "" {
+						reason += " exhausted_at=" + event.Payload.ProviderCreditExhaustedAt
+					}
+				}
 			}
 			// The event file name is the job event's durable identity: it is
 			// unique per emission, stable across node restarts, and shared by
@@ -479,24 +488,26 @@ type hubInboxEvent struct {
 	Text           string `json:"text"`
 	Truncated      bool   `json:"truncated"`
 	Payload        struct {
-		Late           bool   `json:"late,omitempty"`
-		AgentLabel     string `json:"agent_label"`
-		OwnerLane      string `json:"owner_lane"`
-		ParentLane     string `json:"parent_lane"`
-		Label          string `json:"label"`
-		Host           string `json:"host"`
-		Report         string `json:"report"`
-		ReportPath     string `json:"report_path"`
-		ReportLastLine string `json:"report_last_line"`
-		Reason         string `json:"reason"`
-		Pool           string `json:"pool"`
-		ResetAt        string `json:"reset_at"`
-		Question       string `json:"question"`
-		PR             string `json:"pr"`
-		Head           string `json:"head"`
-		PaneID         string `json:"pane_id"`
-		Role           string `json:"role"`
-		TLevel         string `json:"t_level"`
+		Late                      bool   `json:"late,omitempty"`
+		AgentLabel                string `json:"agent_label"`
+		OwnerLane                 string `json:"owner_lane"`
+		ParentLane                string `json:"parent_lane"`
+		Label                     string `json:"label"`
+		Host                      string `json:"host"`
+		Report                    string `json:"report"`
+		ReportPath                string `json:"report_path"`
+		ReportLastLine            string `json:"report_last_line"`
+		Reason                    string `json:"reason"`
+		Pool                      string `json:"pool"`
+		ResetAt                   string `json:"reset_at"`
+		ProviderCreditExhausted   bool   `json:"provider_credit_exhausted"`
+		ProviderCreditExhaustedAt string `json:"provider_credit_exhausted_at"`
+		Question                  string `json:"question"`
+		PR                        string `json:"pr"`
+		Head                      string `json:"head"`
+		PaneID                    string `json:"pane_id"`
+		Role                      string `json:"role"`
+		TLevel                    string `json:"t_level"`
 	} `json:"payload"`
 }
 

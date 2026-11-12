@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/mgh3326/panewire/internal/quota/devin"
@@ -55,7 +56,8 @@ type quotaStopWatch struct {
 // the visible screen; it never sends input to the pane, so no "send a message
 // to retry" automation exists here. A failed read is not a stop.
 func (a *App) quotaStopped(ctx context.Context, j Job, ag Agent, seen *quotaStopWatch) (quotastop.Stop, bool) {
-	if !slices.Contains(quotaStopRoles, j.QuotaRole()) || (ag.Status != "idle" && ag.Status != "done") {
+	creditOMP := strings.HasPrefix(j.Profile, "omp-") && slices.Contains(creditAccountPools, str(j.Receipt, "pool"))
+	if (!creditOMP && !slices.Contains(quotaStopRoles, j.QuotaRole())) || (ag.Status != "idle" && ag.Status != "done") {
 		return quotastop.Stop{}, false
 	}
 	if ag.StateChangeSeq != nil {
@@ -71,7 +73,17 @@ func (a *App) quotaStopped(ctx context.Context, j Job, ag Agent, seen *quotaStop
 		}
 		return quotastop.Stop{}, false
 	}
-	return quotastop.Classify(r.Out, a.Now(), time.Local)
+	stop, ok := quotastop.Classify(r.Out, a.Now(), time.Local)
+	if ok {
+		if stop.CreditExhausted {
+			if !creditOMP || str(j.Receipt, "pool") != stop.Pool {
+				return quotastop.Stop{}, false
+			}
+		} else if !slices.Contains(quotaStopRoles, j.QuotaRole()) {
+			return quotastop.Stop{}, false
+		}
+	}
+	return stop, ok
 }
 
 // QuotaRole is the role a quota stop is handled by: the spawn receipt's
@@ -111,6 +123,10 @@ func (h quotaHandOff) expired(now time.Time, ag Agent, present bool) bool {
 
 func quotaStopPayload(j Job, stop quotastop.Stop) map[string]any {
 	payload := map[string]any{"pane_id": j.Pane, "reason": "quota_stop", "pool": stop.Pool}
+	if stop.CreditExhausted {
+		payload["provider_credit_exhausted"] = true
+		payload["provider_credit_exhausted_at"] = stop.CreditExhaustedAt.UTC().Format(time.RFC3339Nano)
+	}
 	if !stop.Reset.IsZero() {
 		payload["reset_at"] = stop.Reset.UTC().Format(time.RFC3339)
 	}
@@ -160,6 +176,10 @@ func announcedQuotaStop(j Job) (quotastop.Stop, bool) {
 		if reset, err := time.Parse(time.RFC3339, str(ev.Payload, "reset_at")); err == nil {
 			stop.Reset = reset
 		}
+		stop.CreditExhausted = boolean(ev.Payload, "provider_credit_exhausted", false)
+		if exhaustedAt, err := time.Parse(time.RFC3339Nano, str(ev.Payload, "provider_credit_exhausted_at")); err == nil {
+			stop.CreditExhaustedAt = exhaustedAt
+		}
 		return stop, stop.Pool != ""
 	}
 	return quotastop.Stop{}, false
@@ -204,6 +224,12 @@ func RecordFreeLimit(cfg devin.Config, job string, stop quotastop.Stop) error {
 // emit is false when quotaStopAnnounce already recorded job.lost.
 func (a *App) quotaStopLost(ctx context.Context, j Job, stop quotastop.Stop, emit bool) error {
 	endReason := QuotaStopEndReason(stop.Pool, stop.Reset, "", "")
+	if stop.CreditExhausted {
+		endReason += " provider_credit_exhausted=true"
+		if !stop.CreditExhaustedAt.IsZero() {
+			endReason += " exhausted_at=" + stop.CreditExhaustedAt.UTC().Format(time.RFC3339)
+		}
+	}
 	// After a hand-off grace the hub may already have written the record lost
 	// with the successor pointer; hk would refuse a rewrite, so leave it.
 	if emit || !a.hkJobEnded(ctx, j.ID) {
