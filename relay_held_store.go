@@ -54,7 +54,20 @@ VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(lane,event_id) DO NOTHING`, held.Pan
 		return false, err
 	}
 	inserted, err := result.RowsAffected()
+	if err == nil && inserted == 1 && s.relayHeldChanged != nil {
+		s.relayHeldChanged()
+	}
 	return inserted == 1, err
+}
+
+// SetRelayHeldObserver registers fn to run after a relay_held row is added or
+// removed, so the pane metadata publisher can republish a held count without
+// waiting for its next tick. fn runs under the store lock: it must only signal
+// and must not call the Store.
+func (s *Store) SetRelayHeldObserver(fn func()) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.relayHeldChanged = fn
 }
 
 func (s *Store) RelayHeldForPane(ctx context.Context, pane string) ([]relayHeld, error) {
@@ -148,5 +161,8 @@ func (s *Store) DeleteRelayHeld(ctx context.Context, eventID int64) (bool, error
 		return false, err
 	}
 	n, err := result.RowsAffected()
+	if err == nil && n > 0 && s.relayHeldChanged != nil {
+		s.relayHeldChanged()
+	}
 	return n == 1, err
 }

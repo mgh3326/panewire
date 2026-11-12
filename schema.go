@@ -10,14 +10,15 @@ import (
 // GuardResult is the capability decision made from one herdr schema snapshot.
 // A missing required contract disables only the capability that needs it.
 type GuardResult struct {
-	Protocol    int      `json:"protocol"`
-	Schema      int      `json:"schema_version"`
-	Events      bool     `json:"events"`
-	AgentWait   bool     `json:"agent_wait"`
-	AgentRead   bool     `json:"agent_read"`
-	Prompt      bool     `json:"prompt"`
-	Warnings    []string `json:"warnings,omitempty"`
-	Unavailable []string `json:"unavailable,omitempty"`
+	Protocol     int      `json:"protocol"`
+	Schema       int      `json:"schema_version"`
+	Events       bool     `json:"events"`
+	AgentWait    bool     `json:"agent_wait"`
+	AgentRead    bool     `json:"agent_read"`
+	Prompt       bool     `json:"prompt"`
+	Warnings     []string `json:"warnings,omitempty"`
+	PaneMetadata bool     `json:"pane_metadata,omitempty"`
+	Unavailable  []string `json:"unavailable,omitempty"`
 }
 
 func (g GuardResult) AgentCapability() bool { return g.AgentWait && g.AgentRead }
@@ -55,6 +56,7 @@ func GuardSchema(r io.Reader) (GuardResult, error) {
 	result.AgentWait = methods["agent.wait"] && (hasDefField(defs, "AgentWaitParams", "target") || compactHas(raw, "agent_status"))
 	result.AgentRead = (methods["agent.read"] || methods["pane.read"]) && (hasDefField(defs, "AgentReadParams", "source") || hasDefField(defs, "PaneReadParams", "source") || compactHas(raw, "read_source"))
 	result.Prompt = methods["agent.prompt"] && (hasDefField(defs, "AgentPromptParams", "text") || compactHas(raw, "methods"))
+	result.PaneMetadata = methods["pane.report_metadata"] && hasDefField(defs, "PaneReportMetadataParams", "tokens")
 
 	if !result.Events {
 		result.Unavailable = append(result.Unavailable, "events")
