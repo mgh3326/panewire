@@ -123,6 +123,7 @@ func (d *Daemon) Start(ctx context.Context) error {
 			if err != nil {
 				return err
 			}
+			manager.quota.session = d.cfg.Hub.Client.herdrSessionFor
 			manager.quota.enqueue = manager.enqueue
 			d.idleWake = manager
 			d.cfg.Hub.Client.SetIdleWakeManager(manager)

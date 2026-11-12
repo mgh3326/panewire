@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/mgh3326/panewire/internal/fleet"
 )
@@ -340,6 +341,18 @@ func (client *HubClient) nodeJobRole(name string) (string, error) {
 // nodeJobHerdrSession is the herdr session recorded in the job's ledger: the
 // newest spawned or claim event that carries one.
 func (client *HubClient) nodeJobHerdrSession(name string) (string, error) {
+	if name == "" || client == nil || client.jobsInboxRoot == "" {
+		return "", errors.New("empty job or client")
+	}
+	client.sessionCacheMu.RLock()
+	if client.jobSessions != nil {
+		if entry, ok := client.jobSessions[name]; ok && time.Since(entry.cachedAt) < 10*time.Second {
+			client.sessionCacheMu.RUnlock()
+			return entry.session, nil
+		}
+	}
+	client.sessionCacheMu.RUnlock()
+
 	root, _, found, err := client.openNodeJobDir(name)
 	if err != nil || !found {
 		return "", err
@@ -354,6 +367,14 @@ func (client *HubClient) nodeJobHerdrSession(name string) (string, error) {
 		if event.session != "" && (nodeJobClaimKind(event.kind) || event.kind == "job.spawned") {
 			session = event.session
 		}
+	}
+	if err == nil {
+		client.sessionCacheMu.Lock()
+		if client.jobSessions == nil {
+			client.jobSessions = make(map[string]sessionCacheEntry)
+		}
+		client.jobSessions[name] = sessionCacheEntry{session: session, cachedAt: time.Now()}
+		client.sessionCacheMu.Unlock()
 	}
 	return session, err
 }

@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -483,19 +484,22 @@ func herdrExecutable() string {
 	return "herdr"
 }
 
-// herdrSessionFor returns that job's recorded herdr_session, else the node's
+// herdrSessionFor returns that pane or job's recorded herdr_session, else the node's
 // configured herdr_session, never silently "default".
 func (client *HubClient) herdrSessionFor(jobID, pane string) string {
 	if client == nil {
 		return firstNonempty(os.Getenv("HERDR_SESSION"), hubSpawnDefaultSession)
 	}
-	if jobID != "" {
-		if session, err := client.nodeJobHerdrSession(jobID); err == nil && session != "" {
+	setPaneSessionResolver(func(p string) string {
+		return client.herdrSessionFor("", p)
+	})
+	if pane != "" {
+		if session := client.nodeJobHerdrSessionByPane(pane); session != "" {
 			return session
 		}
 	}
-	if pane != "" {
-		if session := client.nodeJobHerdrSessionByPane(pane); session != "" {
+	if jobID != "" {
+		if session, err := client.nodeJobHerdrSession(jobID); err == nil && session != "" {
 			return session
 		}
 	}
@@ -508,44 +512,134 @@ func (client *HubClient) nodeJobHerdrSessionByPane(pane string) string {
 	if pane == "" || client == nil || client.jobsInboxRoot == "" {
 		return ""
 	}
-	jobsRoot := filepath.Join(client.jobsInboxRoot, "jobs")
+	client.sessionCacheMu.RLock()
+	if client.paneSessions != nil {
+		if entry, ok := client.paneSessions[pane]; ok && time.Since(entry.cachedAt) < 10*time.Second {
+			client.sessionCacheMu.RUnlock()
+			return entry.session
+		}
+	}
+	client.sessionCacheMu.RUnlock()
+
+	session := nodeJobHerdrSessionByPaneFromRoot(client.jobsInboxRoot, pane)
+
+	client.sessionCacheMu.Lock()
+	if client.paneSessions == nil {
+		client.paneSessions = make(map[string]sessionCacheEntry)
+	}
+	client.paneSessions[pane] = sessionCacheEntry{session: session, cachedAt: time.Now()}
+	client.sessionCacheMu.Unlock()
+
+	return session
+}
+
+// nodeJobHerdrSessionByPaneFromRoot inspects job directories under inboxRoot to find
+// the session recorded on the event binding this pane, preferring live (un-ended)
+// jobs and the newest binding event.
+func nodeJobHerdrSessionByPaneFromRoot(inboxRoot, pane string) string {
+	if pane == "" || inboxRoot == "" {
+		return ""
+	}
+	jobsRoot := filepath.Join(inboxRoot, "jobs")
 	entries, err := os.ReadDir(jobsRoot)
 	if err != nil {
 		return ""
 	}
+	type paneCandidate struct {
+		session   string
+		live      bool
+		createdAt string
+		seq       int64
+	}
+	var best paneCandidate
+	found := false
+
 	for _, entry := range entries {
 		if !entry.IsDir() || !hubJobIDPattern.MatchString(entry.Name()) {
 			continue
 		}
-		root, _, found, err := client.openNodeJobDir(entry.Name())
-		if err != nil || !found {
-			continue
-		}
-		events, err := readNodeJobLedgerEvents(root)
-		root.Close()
+		eventsDir := filepath.Join(jobsRoot, entry.Name(), "events")
+		eventEntries, err := os.ReadDir(eventsDir)
 		if err != nil {
 			continue
 		}
-		matched := false
-		session := ""
-		for _, event := range events {
-			if event.pane == pane {
-				matched = true
+		sort.Slice(eventEntries, func(i, j int) bool {
+			return eventEntries[i].Name() > eventEntries[j].Name()
+		})
+
+		jobEnded := false
+		var jobSession string
+		var jobCreatedAt string
+		var jobSeq int64
+		jobMatched := false
+
+		for _, ee := range eventEntries {
+			name := ee.Name()
+			if ee.IsDir() || !strings.HasSuffix(name, ".json") {
+				continue
 			}
-			if event.session != "" {
-				session = event.session
+			if strings.HasSuffix(name, "-job.completed.json") ||
+				strings.HasSuffix(name, "-job.lost.json") ||
+				strings.HasSuffix(name, "-job.revoked.json") ||
+				strings.HasSuffix(name, "-job.handed_off.json") {
+				jobEnded = true
+			}
+			if strings.HasSuffix(name, "-job.spawned.json") ||
+				strings.HasSuffix(name, "-job.claim.json") ||
+				strings.HasSuffix(name, "-job.claimed.json") ||
+				strings.HasSuffix(name, "-job.reclaim.json") {
+				if jobMatched {
+					continue
+				}
+				data, err := os.ReadFile(filepath.Join(eventsDir, name))
+				if err != nil {
+					continue
+				}
+				var ev struct {
+					Seq       int64  `json:"seq"`
+					CreatedAt string `json:"created_at"`
+					Payload   struct {
+						PaneID       string `json:"pane_id"`
+						HerdrSession string `json:"herdr_session"`
+					} `json:"payload"`
+				}
+				if json.Unmarshal(data, &ev) == nil && ev.Payload.PaneID == pane && ev.Payload.HerdrSession != "" {
+					jobMatched = true
+					jobSession = ev.Payload.HerdrSession
+					jobCreatedAt = ev.CreatedAt
+					jobSeq = ev.Seq
+				}
 			}
 		}
-		if matched && session != "" {
-			return session
+
+		if jobMatched && jobSession != "" {
+			cand := paneCandidate{
+				session:   jobSession,
+				live:      !jobEnded,
+				createdAt: jobCreatedAt,
+				seq:       jobSeq,
+			}
+			if !found {
+				best = cand
+				found = true
+			} else {
+				if (!best.live && cand.live) ||
+					(best.live == cand.live && (cand.createdAt > best.createdAt || (cand.createdAt == best.createdAt && cand.seq > best.seq))) {
+					best = cand
+				}
+			}
 		}
+	}
+	if found {
+		return best.session
 	}
 	return ""
 }
 
 // nodeHerdrExecutable is the herdr binary node commands run; tests point it at
-// a fake so they never reach a real herdr on the host.
-var nodeHerdrExecutable = "herdr"
+// a fake so they never reach a real herdr on the host. When empty, HERDR_BIN
+// or "herdr" is used.
+var nodeHerdrExecutable string
 
 // nodeSpawnSession is the herdr session spawns on this node use.
 func (client *HubClient) nodeSpawnSession() string {

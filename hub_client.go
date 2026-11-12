@@ -118,6 +118,9 @@ type HubClient struct {
 	accepting             bool
 	relayControl          clientRelayControlState
 	jobsInboxRoot         string
+	sessionCacheMu        sync.RWMutex
+	paneSessions          map[string]sessionCacheEntry
+	jobSessions           map[string]sessionCacheEntry
 	laneReconcileTicks    <-chan time.Time
 	laneReconcileJobs     func(context.Context) []HubActiveJob
 	laneReconcileList     func(context.Context) (map[string]hubLaneProjection, error)
@@ -367,7 +370,7 @@ func NewHubClient(config HubClientConfig) (*HubClient, error) {
 	if config.helloAckTimeout <= 0 {
 		config.helloAckTimeout = defaultHubHelloAckTimeout
 	}
-	return &HubClient{
+	client := &HubClient{
 		endpoint: endpoints[0], endpoints: endpoints, machineID: config.MachineID, token: config.Token, cfAccessClientID: config.CFAccessClientID, cfAccessSecret: config.CFAccessClientSecret, accepting: config.Accepting, jobsInboxRoot: config.JobsInboxRoot, spawnConfigPath: defaultHubSpawnConfigPath(config.SpawnConfigPath), spawnConfigDefault: config.SpawnConfigPath == "", spawnJournalDir: config.SpawnJournalDir, spawnTimeoutExtra: 0,
 		failoverWakeOn: config.FailoverWakeOn, failoverWakeMAC: wakeMAC, failoverWakeDest: wakeDestination, failoverWakeArmed: wakeRequested,
 		burstWakeMAC: burstMAC, burstPoweroffAllowed: config.BurstPoweroffAllowed, burstPoweroff: config.burstPoweroff, helloAckTimeout: config.helloAckTimeout, burstSeen: make(map[string]time.Time),
@@ -376,7 +379,12 @@ func NewHubClient(config HubClientConfig) (*HubClient, error) {
 		checks:       cloneHubChecks(config.Checks), execute: config.Execute,
 		pingInterval: config.PingInterval, initialBackoff: config.InitialBackoff, maxBackoff: config.MaxBackoff, preferRetry: config.PreferRetry, version: config.Version,
 		dial: config.Dial, wait: config.Wait, warn: config.Warn, relayInject: config.relayInject, relayCommand: config.relayCommand, hostLoadCollector: config.hostLoadCollector, hostMemoryCollector: config.hostMemoryCollector, sessionCollector: config.sessionCollector, events: make(chan hubClientEvent, 64), completedJobs: make(map[string]uint64), completedReports: make(map[string]struct{}), assignedJobs: make(map[string]uint64),
-	}, nil
+		paneSessions: make(map[string]sessionCacheEntry), jobSessions: make(map[string]sessionCacheEntry),
+	}
+	setPaneSessionResolver(func(p string) string {
+		return client.herdrSessionFor("", p)
+	})
+	return client, nil
 }
 
 const hubFailoverWakeBroadcastAddress = "255.255.255.255:9"
@@ -849,6 +857,24 @@ func relayInjectForHarnessGuarded(ctx context.Context, pane, harness, text strin
 
 type relaySessionKey struct{}
 
+type sessionCacheEntry struct {
+	session  string
+	cachedAt time.Time
+}
+
+var activePaneSessionResolver atomic.Pointer[func(pane string) string]
+
+func setPaneSessionResolver(resolver func(pane string) string) {
+	activePaneSessionResolver.Store(&resolver)
+}
+
+func activePaneSession(pane string) string {
+	if r := activePaneSessionResolver.Load(); r != nil && *r != nil {
+		return (*r)(pane)
+	}
+	return ""
+}
+
 func withRelaySession(ctx context.Context, session string) context.Context {
 	if session == "" {
 		return ctx
@@ -864,6 +890,11 @@ func relaySessionFrom(ctx context.Context) (string, bool) {
 func relaySessionFromContext(ctx context.Context, pane string) string {
 	if session, ok := relaySessionFrom(ctx); ok && session != "" {
 		return session
+	}
+	if pane != "" {
+		if session := activePaneSession(pane); session != "" {
+			return session
+		}
 	}
 	return firstNonempty(os.Getenv("HERDR_SESSION"), "default")
 }
