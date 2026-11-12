@@ -2015,10 +2015,16 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 			switch message.Type {
 			case "redial":
 				// The hub is restarting and has finished what it owed this
-				// node. End the session so Run dials again at once.
+				// node. The session ends through the inbound queue, so every
+				// frame the hub sent ahead of the redial is applied before the
+				// dispatcher reports it.
 				select {
-				case readErrors <- errHubRedial:
-				case <-ctx.Done():
+				case inbound <- message:
+				default:
+					select {
+					case readErrors <- errHubInboundQueueFull:
+					case <-ctx.Done():
+					}
 				}
 				return
 			case "pong":
@@ -2202,7 +2208,20 @@ func (client *HubClient) serveHubInbound(ctx context.Context, peer *hubClientCon
 		case <-ctx.Done():
 			return
 		case <-done:
-			return
+			// The session is ending on a read error or an endpoint switch
+			// (a redial already reached the worker in order). Apply what the
+			// reader managed to queue before leaving, so a received
+			// job.revoked or relay.persisted is never silently dropped.
+			for {
+				select {
+				case message := <-inbound:
+					if client.handleHubInboundMessage(ctx, peer, message) != nil {
+						return
+					}
+				default:
+					return
+				}
+			}
 		case message := <-inbound:
 			if err := client.handleHubInboundMessage(ctx, peer, message); err != nil {
 				select {
@@ -2224,6 +2243,8 @@ func (client *HubClient) serveHubInbound(ctx context.Context, peer *hubClientCon
 // inside each case.
 func (client *HubClient) handleHubInboundMessage(ctx context.Context, peer *hubClientConnection, message hubOutboundMessage) error {
 	switch message.Type {
+	case "redial":
+		return errHubRedial
 	case "failover":
 		client.handleHubFailover(ctx, message)
 	case "burst":

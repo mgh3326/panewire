@@ -2,6 +2,7 @@ package panewire
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"testing"
@@ -144,5 +145,54 @@ func TestHubInboundDispatchPreservesReceiveOrder(t *testing.T) {
 	want := []string{"relay.persisted", "job.assigned", "burst.holds", "relay.persisted"}
 	if fmt.Sprint(handled[:4]) != fmt.Sprint(want) {
 		t.Fatalf("dispatch order %v, want wire order %v", handled[:4], want)
+	}
+}
+
+// A redial ends the session through the same queue, so every frame the hub
+// sent ahead of it is applied before serveConnection reports errHubRedial -
+// the drain contract docs/hub-drain.md gives a restarting hub.
+func TestHubInboundRedialAppliesQueuedFramesFirst(t *testing.T) {
+	var warnings warningLog
+	hub := &spawnDropHub{frames: [][]byte{
+		[]byte(`{"type":"job.assigned","job_id":"job-c","epoch":4}`),
+		[]byte(`{"type":"redial"}`),
+	}}
+	server := hub.serve(t)
+	client := inboundDispatchClient(t, t14WSURL(server.URL, ""), &warnings)
+	var handledMu sync.Mutex
+	var handled []string
+	client.inboundHandled = func(message hubOutboundMessage) {
+		handledMu.Lock()
+		defer handledMu.Unlock()
+		handled = append(handled, message.Type)
+	}
+
+	connection, _, err := websocket.Dial(t.Context(), client.endpoint, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() {
+		_, err := client.serveConnection(ctx, connection)
+		done <- err
+	}()
+	t.Cleanup(cancel)
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, errHubRedial) {
+			t.Fatalf("serveConnection returned %v, want errHubRedial", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("session did not end on redial")
+	}
+	handledMu.Lock()
+	defer handledMu.Unlock()
+	if fmt.Sprint(handled) != "[job.assigned]" {
+		t.Fatalf("frames applied before redial: %v, want [job.assigned]", handled)
+	}
+	if epoch := client.assignedJobs["job-c"]; epoch != 4 {
+		t.Fatalf("job.assigned was dropped at session end: epoch=%d", epoch)
 	}
 }
