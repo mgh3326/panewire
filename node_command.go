@@ -508,55 +508,22 @@ func (client *HubClient) herdrSessionFor(jobID, pane string) string {
 
 // nodePaneBinding is the verified binding of a pane to a job and herdr session.
 type nodePaneBinding struct {
-	jobID       string
-	session     string
-	eventsMtime time.Time
+	jobID   string
+	session string
 }
 
 // nodeJobHerdrSessionByPane searches this node's jobs for the one bound to
-// pane and returns its recorded herdr_session, validating cached bindings
-// against filesystem modification times.
+// pane and returns its recorded herdr_session. It scans the filesystem directly
+// without caching so that rebound panes across jobs and sessions are immediately
+// observed without stale cache windows.
 func (client *HubClient) nodeJobHerdrSessionByPane(pane string) string {
 	if pane == "" || client == nil || client.jobsInboxRoot == "" {
 		return ""
 	}
-	jobsRoot := filepath.Join(client.jobsInboxRoot, "jobs")
-	var jobsMtime time.Time
-	if fi, err := os.Stat(jobsRoot); err == nil {
-		jobsMtime = fi.ModTime()
-	}
-
-	client.sessionCacheMu.RLock()
-	if client.paneSessions != nil {
-		if entry, ok := client.paneSessions[pane]; ok && entry.jobID != "" {
-			if !jobsMtime.IsZero() && jobsMtime.Equal(entry.jobsMtime) {
-				eventsDir := filepath.Join(jobsRoot, entry.jobID, "events")
-				if efi, err := os.Stat(eventsDir); err == nil && efi.ModTime().Equal(entry.eventsMtime) {
-					client.sessionCacheMu.RUnlock()
-					return entry.session
-				}
-			}
-		}
-	}
-	client.sessionCacheMu.RUnlock()
-
 	binding, found := nodeJobHerdrBindingByPaneFromRoot(client.jobsInboxRoot, pane)
 	if !found {
 		return ""
 	}
-
-	client.sessionCacheMu.Lock()
-	if client.paneSessions == nil {
-		client.paneSessions = make(map[string]paneCacheEntry)
-	}
-	client.paneSessions[pane] = paneCacheEntry{
-		jobID:       binding.jobID,
-		session:     binding.session,
-		jobsMtime:   jobsMtime,
-		eventsMtime: binding.eventsMtime,
-	}
-	client.sessionCacheMu.Unlock()
-
 	return binding.session
 }
 
@@ -671,9 +638,8 @@ func nodeJobHerdrBindingByPaneFromRoot(inboxRoot, pane string) (nodePaneBinding,
 	}
 	if found {
 		return nodePaneBinding{
-			jobID:       best.jobID,
-			session:     best.session,
-			eventsMtime: best.eventsMtime,
+			jobID:   best.jobID,
+			session: best.session,
 		}, true
 	}
 	return nodePaneBinding{}, false

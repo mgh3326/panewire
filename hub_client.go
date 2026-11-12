@@ -119,7 +119,6 @@ type HubClient struct {
 	relayControl          clientRelayControlState
 	jobsInboxRoot         string
 	sessionCacheMu        sync.RWMutex
-	paneSessions          map[string]paneCacheEntry
 	jobSessions           map[string]sessionCacheEntry
 	laneReconcileTicks    <-chan time.Time
 	laneReconcileJobs     func(context.Context) []HubActiveJob
@@ -379,7 +378,7 @@ func NewHubClient(config HubClientConfig) (*HubClient, error) {
 		checks:       cloneHubChecks(config.Checks), execute: config.Execute,
 		pingInterval: config.PingInterval, initialBackoff: config.InitialBackoff, maxBackoff: config.MaxBackoff, preferRetry: config.PreferRetry, version: config.Version,
 		dial: config.Dial, wait: config.Wait, warn: config.Warn, relayInject: config.relayInject, relayCommand: config.relayCommand, hostLoadCollector: config.hostLoadCollector, hostMemoryCollector: config.hostMemoryCollector, sessionCollector: config.sessionCollector, events: make(chan hubClientEvent, 64), completedJobs: make(map[string]uint64), completedReports: make(map[string]struct{}), assignedJobs: make(map[string]uint64),
-		paneSessions: make(map[string]paneCacheEntry), jobSessions: make(map[string]sessionCacheEntry),
+		jobSessions: make(map[string]sessionCacheEntry),
 	}
 	setPaneSessionResolver(func(p string) string {
 		return client.herdrSessionFor("", p)
@@ -856,13 +855,6 @@ func relayInjectForHarnessGuarded(ctx context.Context, pane, harness, text strin
 }
 
 type relaySessionKey struct{}
-
-type paneCacheEntry struct {
-	jobID       string
-	session     string
-	jobsMtime   time.Time
-	eventsMtime time.Time
-}
 
 type sessionCacheEntry struct {
 	session  string

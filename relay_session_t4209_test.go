@@ -403,35 +403,29 @@ func TestHerdrExecutableHonorsHerdrBin_t4209(t *testing.T) {
 	}
 }
 
-// Review Finding 1 (Round 3): nodeJobHerdrSessionByPane does not cache negative misses.
-func TestNodeJobHerdrSessionByPaneDoesNotCacheMisses_t4209(t *testing.T) {
+// Review Finding 1 (Round 4): nodeJobHerdrSessionByPane does not cache pane lookups,
+// ensuring rebound panes across jobs and sessions are immediately observed.
+func TestNodeJobHerdrSessionByPaneReboundPaneObservedImmediately_t4209(t *testing.T) {
 	inbox := t.TempDir()
 	client := &HubClient{jobsInboxRoot: inbox}
 
-	// 1. Lookup an unbound pane before any job is created -> empty
-	if got := client.nodeJobHerdrSessionByPane("w1:pNew"); got != "" {
-		t.Fatalf("expected empty for unbound pane, got %q", got)
+	// 1. Initial binding for pane to job A in session-A
+	setupSpawnedJobSession(t, inbox, "job-A", "w1:pShared", "session-A")
+	if got := client.nodeJobHerdrSessionByPane("w1:pShared"); got != "session-A" {
+		t.Fatalf("expected session-A, got %q", got)
 	}
 
-	// 2. Setup job for that pane without touching jobs/ root (create job dir first, query, then write event)
-	jobDir := filepath.Join(inbox, "jobs", "job-existing", "events")
-	if err := os.MkdirAll(jobDir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	// Querying now still yields empty
-	if got := client.nodeJobHerdrSessionByPane("w1:pNew"); got != "" {
-		t.Fatalf("expected empty before spawn event, got %q", got)
-	}
-
-	// Now write the spawn event into eventsDir
-	ev := `{"seq":1,"created_at":"2026-11-12T03:00:00Z","kind":"job.spawned","payload":{"pane_id":"w1:pNew","herdr_session":"fleet-session"}}`
-	if err := os.WriteFile(filepath.Join(jobDir, "0001-job.spawned.json"), []byte(ev), 0o600); err != nil {
+	// 2. Job A completes
+	if err := os.WriteFile(filepath.Join(inbox, "jobs", "job-A", "events", "0002-job.completed.json"), []byte(`{"kind":"job.completed"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
-	// Because misses are not cached, it immediately finds the newly bound session!
-	if got := client.nodeJobHerdrSessionByPane("w1:pNew"); got != "fleet-session" {
-		t.Fatalf("expected fleet-session after event write, got %q", got)
+	// 3. Job B binds the same pane in session-B
+	setupSpawnedJobSession(t, inbox, "job-B", "w1:pShared", "session-B")
+
+	// Must immediately observe session-B without any stale cache returning session-A
+	if got := client.nodeJobHerdrSessionByPane("w1:pShared"); got != "session-B" {
+		t.Fatalf("expected session-B, got %q", got)
 	}
 }
 
