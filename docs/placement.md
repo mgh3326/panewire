@@ -54,6 +54,14 @@ entry without a recorded dollar balance, by the percentage rule (remaining
 percent per hour). On a full tie inside the band a credit rung goes before a
 free rung.
 
+A manually recorded dollar balance stays dollar-ranked for four hours after
+`measured_at`; after that it is stale, loses its dollar value, and ranks behind
+subscription quota. Entries with only a percentage never become stale because
+they have no dollar source to age; they continue to rank by remaining percent
+per hour. A configured total supplies a dollar source for an entry with only a
+percentage. Plan output records `state=stale` and `stale_since` for aged dollar
+balances.
+
 Selection walks the ranked hosts twice. Pass 1 tries every candidate except a
 subscription pool paced behind credit (a subscription on pace to use up its
 window, on a host that also holds credit worth spending). Pass 2 walks the same
@@ -112,9 +120,11 @@ fails closed.
 `[quota].pool_max_concurrent = { "openai-api" = 2 }` limits live spawns on a pool,
 fleet-wide ([config](config.md#quota)). Selection drops a candidate whose pool
 is at its cap with the reason `pool_at_cap`, naming the cap in `cap` (the
-candidate's pool, or the reserved `devin-free` key). The reason shows in the
-selection record and as `dropped … reason=pool_at_cap cap=…` in `plan` and
-`--dry-run`. Selection then goes on to the next candidate or pool as for any
+candidate's pool, or the reserved `devin-free` key). The selection record in
+`job.placement` and JSON plan output also includes `cap_live` and `cap_limit`:
+the count and limit used for that decision. Text plan output shows `live` and
+`limit` beside the cap. These counts are a snapshot, not a reservation.
+Selection then goes on to the next candidate or pool as for any
 other drop. A spawn never waits for a slot. If every candidate is dropped and
 at least one only for `pool_at_cap`, the refusal names the caps and their
 limits (`pool_at_cap: openai-api=2 at [quota].pool_max_concurrent`).
@@ -535,7 +545,7 @@ spent instead, next to the live choice. Live placement is unchanged.
   account the live run bound to a host. A candidate joins at the first usable
   host whose walk ranks it in pass 1, judged with that host's own credit-pacing
   flag (T2997), not the selection-wide one. They are sorted by the live comparator
-  (`sortSelCands`: waste-risk pools first, then band, grade, urgency and the
+  (`sortSelCands`: waste-risk pools first, then band, the headroom fit for a known job length (`plan --expected`, config.md), grade, urgency and the
   rest), the same comparison the live path uses. **Pass 2 is not modelled.**
   Pass 2 is the paced-pool band the live walk tries only when pass 1 chose
   nothing. A live choice that came from pass 2 is recorded with `pass: 2`.

@@ -32,6 +32,9 @@ const (
 	hubMaxMessageBytes     = 32 << 10
 	hubUIEventLimit        = 20
 	hubVersion             = "panewire-r13"
+	// nodeLoopHKTimeout bounds each message's synchronous handoffkeep work so
+	// the websocket loop resumes and can process later node messages.
+	nodeLoopHKTimeout = 5 * time.Second
 )
 
 var hubVersionPattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
@@ -1263,7 +1266,9 @@ func (h *HubServer) handleAgent(writer http.ResponseWriter, request *http.Reques
 			h.countUnknownMessage()
 			continue
 		}
-		h.handleAgentMessage(machineID, request.RemoteAddr, agent, payload)
+		ctx, cancel := context.WithTimeout(request.Context(), nodeLoopHKTimeout)
+		h.handleAgentMessageContext(ctx, machineID, request.RemoteAddr, agent, payload)
+		cancel()
 		if !h.agentCredentialCurrent(machineID, agent) {
 			h.closeRevokedAgent(machineID, agent)
 			return
@@ -1272,6 +1277,10 @@ func (h *HubServer) handleAgent(writer http.ResponseWriter, request *http.Reques
 }
 
 func (h *HubServer) handleAgentMessage(machineID, remoteAddr string, agent *hubAgent, payload []byte) {
+	h.handleAgentMessageContext(context.Background(), machineID, remoteAddr, agent, payload)
+}
+
+func (h *HubServer) handleAgentMessageContext(ctx context.Context, machineID, remoteAddr string, agent *hubAgent, payload []byte) {
 	if result, ok := parseHubSpawnResult(payload); ok {
 		h.resolveSpawn(machineID, result)
 		return
@@ -1331,7 +1340,7 @@ func (h *HubServer) handleAgentMessage(machineID, remoteAddr string, agent *hubA
 			// showed, not connection state: a report arriving on a superseded
 			// connection is still this row's answer, and the entitlement
 			// checks inside already bind it to this machine (#989).
-			h.handleRelayAck(machineID, message)
+			h.handleRelayAckContext(ctx, machineID, message)
 			return
 		}
 		if !agent.transient && !h.touch(machineID, agent) {
@@ -1405,7 +1414,7 @@ func (h *HubServer) handleAgentMessage(machineID, remoteAddr string, agent *hubA
 			if completion.Replay {
 				h.logger.Info("relay record replayed after node restart", "job", completion.JobID, "kind", message.Kind, "node", machineID)
 			}
-			h.relayJobCompletionFrom(machineID, completion)
+			h.relayJobCompletionFromContext(ctx, machineID, completion)
 		}
 		if message.Kind == "job.escalate" || message.Kind == "job.joined" || relayTerminalSignalKinds[message.Kind] {
 			event, truncated, valid := decodeHubJobEscalationPayloadDetailed(message.Payload)
@@ -1433,7 +1442,7 @@ func (h *HubServer) handleAgentMessage(machineID, remoteAddr string, agent *hubA
 				// This acknowledges in-memory cooling, not durable relay persistence.
 				agent.queuePersisted(hubRelayPersistedEvent{Type: "pool.cooling.ack", JobID: event.JobID, Kind: message.Kind, Epoch: event.Epoch, ReportPath: event.ReportPath, Reason: event.Reason, EventID: 1, ProducerEventID: event.EventID})
 			}
-			h.relayJobEventFrom(machineID, message.Kind, event)
+			h.relayJobEventFromContext(ctx, machineID, message.Kind, event)
 			if message.Kind == "job.lost" && !event.Replay {
 				h.startQuotaReplacement(machineID, event)
 			}
@@ -1444,7 +1453,7 @@ func (h *HubServer) handleAgentMessage(machineID, remoteAddr string, agent *hubA
 				h.countUnknownMessage()
 				return
 			}
-			h.relayLaneEvent(event, agent)
+			h.relayLaneEventContext(ctx, event, agent)
 		}
 		if message.Kind == "idle-wake.route.request" {
 			request, valid := decodeIdleWakeRouteRequest(message.Payload)
@@ -1495,7 +1504,7 @@ func (h *HubServer) handleAgentMessage(machineID, remoteAddr string, agent *hubA
 			}
 			h.recordInboxStageByRelayID(dropped.OriginalEventID, laneInboxStageDropped, dropped.Reason, machineID, dropped.Pane)
 			h.observeRelayDropped(machineID, dropped)
-			h.escalateUnconfirmedRelay(machineID, dropped)
+			h.escalateUnconfirmedRelayContext(ctx, machineID, dropped)
 		}
 		if message.Kind == "job.revocation.ack" {
 			ack, valid := decodeHubJobCompletionPayload(message.Payload)
@@ -1526,6 +1535,10 @@ func (h *HubServer) handleAgentMessage(machineID, remoteAddr string, agent *hubA
 // a WARN naming the reason — a silent drop is how #989's pane-mismatch rows
 // stayed undelivered and replayed at every restart.
 func (h *HubServer) handleRelayAck(machineID string, message hubInbound) {
+	h.handleRelayAckContext(context.Background(), machineID, message)
+}
+
+func (h *HubServer) handleRelayAckContext(ctx context.Context, machineID string, message hubInbound) {
 	received := h.now().UTC()
 	ack, valid := decodeRelayAckPayload(message.Payload)
 	if !valid {
@@ -1547,7 +1560,7 @@ func (h *HubServer) handleRelayAck(machineID string, message hubInbound) {
 			h.countUnknownMessage()
 			return
 		}
-		if !h.markRelayEventUnconfirmed(pending) {
+		if !h.markRelayEventUnconfirmedContext(ctx, pending) {
 			return
 		}
 		h.consumeRelayPending(key)
@@ -1564,11 +1577,11 @@ func (h *HubServer) handleRelayAck(machineID string, message hubInbound) {
 		// A delivery that outlived its window (unconfirmed first, a restart,
 		// a late ack) is still a delivery, and handoffkeep must hear it or
 		// replay re-sends it.
-		if !h.recordLateRelayDelivery(machineID, ack) {
+		if !h.recordLateRelayDeliveryContext(ctx, machineID, ack) {
 			h.countUnknownMessage()
 			return
 		}
-	} else if !h.markRelayEventDelivered(pending) {
+	} else if !h.markRelayEventDeliveredContext(ctx, pending) {
 		// The window is spent but the durable write failed; the row is
 		// still undelivered, and claiming it in the feed would hide that.
 		h.countUnknownMessage()

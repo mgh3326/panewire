@@ -1,9 +1,11 @@
 package devin
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -92,6 +94,300 @@ func TestPaceleverCacheEnvOverride(t *testing.T) {
 	}
 }
 
+func TestPanewireCacheOverrideWinsAndReadsLegacyFallback(t *testing.T) {
+	files := loginFiles()
+	files["/new/devin-free-limit.json"] = `{"records":{` + record(hostUserID("host-a", 1000), testNow.Add(time.Hour).Format(time.RFC3339), testNow.Format(time.RFC3339)) + `}}`
+	files["/old/devin-free-limit.json"] = `{"records":{}}`
+	got := LocalFree(config(files, map[string]string{
+		"PANEWIRE_CACHE":  "/new/cache.json",
+		"PACELEVER_CACHE": "/old/cache.json",
+	}))(testNow)
+	if got.State != shared.FreeExhausted {
+		t.Fatalf("PANEWIRE_CACHE precedence not followed: %+v", got)
+	}
+	legacy := LocalFree(config(files, map[string]string{"PACELEVER_CACHE": "/old/cache.json"}))(testNow)
+	if legacy.State != shared.FreeAvailable {
+		t.Fatalf("legacy cache fallback not read: %+v", legacy)
+	}
+}
+
+func TestObserveMergesLegacyHoldBeforeWritingPanewireRecord(t *testing.T) {
+	now := testNow.UTC()
+	cache := t.TempDir()
+	cfg := Config{
+		Home:     t.TempDir(),
+		Now:      func() time.Time { return now },
+		Hostname: func() (string, error) { return "host-a", nil },
+		UID:      func() int { return 1000 },
+		LookupEnv: func(name string) (string, bool) {
+			if name == "XDG_CACHE_HOME" {
+				return cache, true
+			}
+			return "", false
+		},
+	}
+	legacyPath := filepath.Join(cache, "pacelever", "devin-free-limit.json")
+	if err := os.MkdirAll(filepath.Dir(legacyPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	hostID := hostUserID("host-a", 1000)
+	legacy := `{"schema":"pacelever.devin-free-limit.v1","records":{` + record(hostID, now.Add(2*time.Hour).Format(time.RFC3339Nano), now.Format(time.RFC3339Nano)) + `}}`
+	if err := os.WriteFile(legacyPath, []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := ObserveFreeLimit(cfg, now.Add(time.Hour).Format(time.RFC3339Nano), "", "swe-2-high", "job:new-account", "devin:0123456789abcdef", false, false); err != nil {
+		t.Fatal(err)
+	}
+	got := LocalFree(cfg)(now)
+	if got.State != shared.FreeExhausted || got.ResetsAt == nil || !got.ResetsAt.Equal(now.Add(2*time.Hour)) {
+		t.Fatalf("legacy hold lost after new write: %+v", got)
+	}
+}
+
+func TestObserveDoesNotDeleteNewCacheWhenCandidatesDeduplicate(t *testing.T) {
+	now := testNow.UTC()
+	cache := t.TempDir()
+	path := filepath.Join(cache, "devin-free-limit.json")
+	cfg := Config{
+		Home:     t.TempDir(),
+		Now:      func() time.Time { return now },
+		Hostname: func() (string, error) { return "host-a", nil },
+		UID:      func() int { return 1000 },
+	}
+	cfg.LookupEnv = func(name string) (string, bool) {
+		switch name {
+		case "PANEWIRE_CACHE":
+			return filepath.Join(cache, "panewire-placeholder.json"), true
+		case "PACELEVER_CACHE":
+			return filepath.Join(cache, "pacelever-placeholder.json"), true
+		case "XDG_CACHE_HOME":
+			return cache, true
+		default:
+			return "", false
+		}
+	}
+	if got := cfg.cachePaths(); len(got) != 1 || got[0] != path {
+		t.Fatalf("deduplicated cache paths = %v", got)
+	}
+	if err := ObserveFreeLimit(cfg, now.Add(time.Hour).Format(time.RFC3339Nano), "", "swe-2-high", "job:test", "", false, false); err != nil {
+		t.Fatal(err)
+	}
+	if got := LocalFree(cfg)(now); got.State != shared.FreeExhausted {
+		t.Fatalf("observation disappeared after deduplicated write: %+v", got)
+	}
+}
+
+func TestObserveFreeLimitClearRemovesLegacyOnlyHold(t *testing.T) {
+	now := testNow.UTC()
+	cache := t.TempDir()
+	cfg := Config{
+		Home:     t.TempDir(),
+		Now:      func() time.Time { return now },
+		Hostname: func() (string, error) { return "host-a", nil },
+		UID:      func() int { return 1000 },
+		LookupEnv: func(name string) (string, bool) {
+			if name == "XDG_CACHE_HOME" {
+				return cache, true
+			}
+			return "", false
+		},
+	}
+	legacyPath := filepath.Join(cache, "pacelever", "devin-free-limit.json")
+	if err := os.MkdirAll(filepath.Dir(legacyPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	hostID := hostUserID("host-a", 1000)
+	legacy := `{"schema":"pacelever.devin-free-limit.v1","records":{` + record(hostID, now.Add(time.Hour).Format(time.RFC3339Nano), now.Format(time.RFC3339Nano)) + `}}`
+	if err := os.WriteFile(legacyPath, []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := ObserveFreeLimit(cfg, "", "", "", "", "", false, true); err != nil {
+		t.Fatal(err)
+	}
+	if got := LocalFree(cfg)(now); got.State != shared.FreeAvailable {
+		t.Fatalf("legacy hold remained after clear: %+v", got)
+	}
+}
+
+func TestLocalFreeKeepsLongestHoldAcrossBothCacheFiles(t *testing.T) {
+	now := testNow.UTC()
+	cache := t.TempDir()
+	cfg := Config{
+		Home:     t.TempDir(),
+		Now:      func() time.Time { return now },
+		Hostname: func() (string, error) { return "host-a", nil },
+		UID:      func() int { return 1000 },
+		LookupEnv: func(name string) (string, bool) {
+			if name == "XDG_CACHE_HOME" {
+				return cache, true
+			}
+			return "", false
+		},
+	}
+	id := hostUserID("host-a", 1000)
+	for path, reset := range map[string]time.Time{
+		filepath.Join(cache, "panewire", "devin-free-limit.json"):  now.Add(time.Hour),
+		filepath.Join(cache, "pacelever", "devin-free-limit.json"): now.Add(3 * time.Hour),
+	} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		data := `{"records":{` + record(id, reset.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano)) + `}}`
+		if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got := LocalFree(cfg)(now)
+	if got.State != shared.FreeExhausted || got.ResetsAt == nil || !got.ResetsAt.Equal(now.Add(3*time.Hour)) {
+		t.Fatalf("merged cache hold = %+v", got)
+	}
+}
+
+func TestObservePreservesKnownHoldAndDamagedCopyAcrossCacheMigration(t *testing.T) {
+	for _, damaged := range []string{`{}`, `"not a record"`} {
+		t.Run(damaged, func(t *testing.T) {
+			now := testNow.UTC()
+			cache := t.TempDir()
+			cfg := Config{
+				Home:     t.TempDir(),
+				Now:      func() time.Time { return now },
+				Hostname: func() (string, error) { return "host-a", nil },
+				UID:      func() int { return 1000 },
+				LookupEnv: func(name string) (string, bool) {
+					if name == "XDG_CACHE_HOME" {
+						return cache, true
+					}
+					return "", false
+				},
+			}
+			id := hostUserID("host-a", 1000)
+			primaryPath := filepath.Join(cache, "panewire", "devin-free-limit.json")
+			legacyPath := filepath.Join(cache, "pacelever", "devin-free-limit.json")
+			for path, raw := range map[string]string{
+				primaryPath: `{"records":{"` + id + `":` + damaged + `}}`,
+				legacyPath:  `{"records":{` + record(id, now.Add(2*time.Hour).Format(time.RFC3339Nano), now.Format(time.RFC3339Nano)) + `}}`,
+			} {
+				if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			got := LocalFree(cfg)(now)
+			if got.State != shared.FreeExhausted || got.ResetsAt == nil || !got.ResetsAt.Equal(now.Add(2*time.Hour)) {
+				t.Fatalf("known hold hidden by damaged cache copy: %+v", got)
+			}
+			if err := ObserveFreeLimit(cfg, now.Add(time.Hour).Format(time.RFC3339Nano), "", "swe-2-high", "job:new-account", "devin:0123456789abcdef", false, false); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Stat(legacyPath); !errors.Is(err, fs.ErrNotExist) {
+				t.Fatalf("legacy cache still exists after migration: %v", err)
+			}
+			got = LocalFree(cfg)(now)
+			if got.State != shared.FreeExhausted || got.ResetsAt == nil || !got.ResetsAt.Equal(now.Add(2*time.Hour)) {
+				t.Fatalf("known hold lost after migration write: %+v", got)
+			}
+			now = now.Add(3 * time.Hour)
+			if got = LocalFree(cfg)(now); got.State != shared.FreeUnknown {
+				t.Fatalf("damaged copy stopped holding after known reset: %+v", got)
+			}
+		})
+	}
+}
+
+func TestObserveKeepsLegacyWhenPanewireWriteOrReadbackFails(t *testing.T) {
+	for _, failAt := range []string{"write", "readback"} {
+		t.Run(failAt, func(t *testing.T) {
+			now := testNow.UTC()
+			cache := t.TempDir()
+			legacyPath := filepath.Join(cache, "pacelever", "devin-free-limit.json")
+			primaryPath := filepath.Join(cache, "panewire", "devin-free-limit.json")
+			if err := os.MkdirAll(filepath.Dir(legacyPath), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			id := hostUserID("host-a", 1000)
+			legacy := []byte(`{"schema":"pacelever.devin-free-limit.v1","records":{` + record(id, now.Add(2*time.Hour).Format(time.RFC3339Nano), now.Format(time.RFC3339Nano)) + `}}`)
+			if err := os.WriteFile(legacyPath, legacy, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cfg := Config{
+				Home:     t.TempDir(),
+				Now:      func() time.Time { return now },
+				Hostname: func() (string, error) { return "host-a", nil },
+				UID:      func() int { return 1000 },
+				LookupEnv: func(name string) (string, bool) {
+					if name == "XDG_CACHE_HOME" {
+						return cache, true
+					}
+					return "", false
+				},
+			}
+			if failAt == "write" {
+				cfg.ReplaceFile = func(string, string, []byte, os.FileMode) error { return errors.New("injected write failure") }
+			} else {
+				cfg.ReadFile = func(path string) ([]byte, error) {
+					if path == primaryPath {
+						if _, err := os.Stat(path); err == nil {
+							return nil, fs.ErrPermission
+						}
+					}
+					return os.ReadFile(path)
+				}
+			}
+
+			err := ObserveFreeLimit(cfg, now.Add(time.Hour).Format(time.RFC3339Nano), "", "swe-2-high", "job:new-account", "devin:0123456789abcdef", false, false)
+			if err == nil {
+				t.Fatal("observe succeeded despite injected panewire write/readback failure")
+			}
+			got, err := os.ReadFile(legacyPath)
+			if err != nil || !bytes.Equal(got, legacy) {
+				t.Fatalf("legacy file changed or disappeared after %s failure: %s, %v", failAt, got, err)
+			}
+		})
+	}
+}
+
+func TestObserveDoesNotRemoveLegacyPathAliasedToPanewireFile(t *testing.T) {
+	now := testNow.UTC()
+	root := t.TempDir()
+	primaryDir := filepath.Join(root, "panewire")
+	legacyAlias := filepath.Join(root, "pacelever")
+	if err := os.MkdirAll(primaryDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(primaryDir, legacyAlias); err != nil {
+		t.Fatal(err)
+	}
+	cfg := Config{
+		Home:     t.TempDir(),
+		Now:      func() time.Time { return now },
+		Hostname: func() (string, error) { return "host-a", nil },
+		UID:      func() int { return 1000 },
+		LookupEnv: func(name string) (string, bool) {
+			switch name {
+			case "PANEWIRE_CACHE":
+				return filepath.Join(primaryDir, "cache.json"), true
+			case "PACELEVER_CACHE":
+				return filepath.Join(legacyAlias, "cache.json"), true
+			default:
+				return "", false
+			}
+		},
+	}
+	paths := cfg.cachePaths()
+	if len(paths) != 2 || paths[0] == paths[1] {
+		t.Fatalf("cache candidates = %v, want two distinct aliased paths", paths)
+	}
+	if err := ObserveFreeLimit(cfg, now.Add(time.Hour).Format(time.RFC3339Nano), "", "swe-2-high", "job:test", "", false, false); err != nil {
+		t.Fatal(err)
+	}
+	if got := LocalFree(cfg)(now); got.State != shared.FreeExhausted || got.ResetsAt == nil || !got.ResetsAt.Equal(now.Add(time.Hour)) {
+		t.Fatalf("aliased legacy cleanup deleted the primary hold: %+v", got)
+	}
+}
+
 func TestObserveFreeLimitWritesAndClearsPrivateRecord(t *testing.T) {
 	now := testNow.UTC()
 	cache := filepath.Join(t.TempDir(), "cache")
@@ -111,7 +407,7 @@ func TestObserveFreeLimitWritesAndClearsPrivateRecord(t *testing.T) {
 	if err := ObserveFreeLimit(cfg, reset, "", "swe-2-high", "job:test", "", false, false); err != nil {
 		t.Fatal(err)
 	}
-	path := filepath.Join(cache, "pacelever", "devin-free-limit.json")
+	path := filepath.Join(cache, "panewire", "devin-free-limit.json")
 	info, err := os.Stat(path)
 	if err != nil || info.Mode().Perm() != 0o600 {
 		t.Fatalf("record mode/info = %v, %v; want 0600", info, err)
@@ -237,7 +533,7 @@ func TestConcurrentObserveFreeLimitPreservesBothAccounts(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	data, err := os.ReadFile(filepath.Join(cache, "pacelever", "devin-free-limit.json"))
+	data, err := os.ReadFile(filepath.Join(cache, "panewire", "devin-free-limit.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -263,7 +559,7 @@ func TestObserveFreeLimitSerializesReadModifyWrite(t *testing.T) {
 			return "", false
 		},
 	}
-	path := filepath.Join(cache, "pacelever", "devin-free-limit.json.lock")
+	path := filepath.Join(cache, "panewire", "devin-free-limit.json.lock")
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		t.Fatal(err)
 	}

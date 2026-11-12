@@ -172,7 +172,6 @@ func TestFleetQuotaClaudeIsMeasuredNatively(t *testing.T) {
 		return claudeAPIReply(200, claudeAPIBody)(r)
 	})}
 	var pacelever []string
-	client.nodePacelever = paceleverNeverForClaude(t, &pacelever)
 	var warnings []string
 	client.warn = func(m string) { warnings = append(warnings, m) }
 
@@ -227,10 +226,6 @@ func TestFleetQuotaClaudeIsMeasuredNatively(t *testing.T) {
 func TestFleetQuotaOtherPoolIsUnmeasurable(t *testing.T) {
 	client := quotaClient(t)
 	var calls []string
-	client.nodePacelever = func(_ context.Context, args ...string) ([]byte, error) {
-		calls = append(calls, strings.Join(args, " "))
-		return nil, nil
-	}
 	client.refreshFleetQuota(t.Context(), "grok", map[string]fleetQuotaSent{})
 	if len(calls) != 0 {
 		t.Fatalf("unmeasurable pool executed commands: %v", calls)
@@ -265,7 +260,6 @@ func TestFleetQuotaClaudeLoginClassification(t *testing.T) {
 			client.spawnConfigPath = claudeStore(t, hk.server.URL)
 			client.nativeQuota = map[string]*nativeQuotaSource{"claude": claudeTestSource(client.spawnConfigPath, test.files, test.api)}
 			var pacelever []string
-			client.nodePacelever = paceleverNeverForClaude(t, &pacelever)
 			var warnings []string
 			client.warn = func(m string) { warnings = append(warnings, m) }
 			client.refreshFleetQuota(t.Context(), "claude", map[string]fleetQuotaSent{})
@@ -293,13 +287,6 @@ func TestNodeQuotaRefreshClaudeIsNative(t *testing.T) {
 	client.spawnConfigPath = claudeStore(t, hk.server.URL)
 	client.nativeQuota = map[string]*nativeQuotaSource{"claude": claudeTestSource(client.spawnConfigPath, claudeLoginFiles(claudeSecret, claudeTestNow.Add(time.Hour)), claudeAPIReply(200, claudeAPIBody))}
 	var pacelever []string
-	client.nodePacelever = func(_ context.Context, args ...string) ([]byte, error) {
-		pacelever = append(pacelever, strings.Join(args, " "))
-		if strings.Contains(strings.Join(args, " "), "claude") {
-			t.Errorf("pacelever was run for claude: %v", args)
-		}
-		return []byte("refreshed\n"), nil
-	}
 	result, code := nodeRun(t, client, nodeCommandQuotaRefresh, map[string]any{"pool": "claude"})
 	if code != "" || result["outcome"] != nodeQuotaRefreshed {
 		t.Fatalf("claude refresh: result=%v code=%q", result, code)
@@ -312,7 +299,6 @@ func TestNodeQuotaRefreshClaudeIsNative(t *testing.T) {
 	}
 
 	failing := &HubClient{nativeQuota: map[string]*nativeQuotaSource{"claude": claudeTestSource("/nonexistent", claudeLoginFiles("", time.Time{}), claudeAPIReply(200, claudeAPIBody))}}
-	failing.nodePacelever = paceleverNeverForClaude(t, &pacelever)
 	if _, code := nodeRun(t, failing, nodeCommandQuotaRefresh, map[string]any{"pool": "claude"}); code != "refresh_failed" {
 		t.Fatalf("failing claude refresh code=%q", code)
 	}

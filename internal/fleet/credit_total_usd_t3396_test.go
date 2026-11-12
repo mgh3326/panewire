@@ -32,7 +32,7 @@ func creditTotalFixture(t *testing.T, totals map[string]any, entries func(now ti
 	}
 	now := a.Now()
 	store, status := usdCreditStore(entries(now)), usdCreditStatus(now, "anthropic-api")
-	pools, e := CLIQuota{Binary: "pacelever", CreditTotalUSD: creditTotals(a.Config.Quota), Runner: &fakeRunner{Do: func(c Command) Result {
+	pools, e := CLIQuota{Binary: "pacelever", Now: a.Now, CreditTotalUSD: creditTotals(a.Config.Quota), Runner: &fakeRunner{Do: func(c Command) Result {
 		switch strings.Join(c.Args, " ") {
 		case "manual list":
 			return Result{Out: store}
@@ -73,7 +73,7 @@ func TestCreditTotalDerivesBalanceAndUSDUrgency(t *testing.T) {
 func TestCreditTotalEntryRemainingWins(t *testing.T) {
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	store := usdCreditStore([]map[string]any{usdCreditEntry("a1", "anthropic-api", 42.35, ptrF(50), now.Add(-time.Hour), onDay(now, 9*24*time.Hour))})
-	balances, err := CLIQuota{Binary: "pacelever", CreditTotalUSD: map[string]float64{"anthropic-api": 65}, Runner: &fakeRunner{Do: func(Command) Result {
+	balances, err := CLIQuota{Binary: "pacelever", Now: func() time.Time { return now }, CreditTotalUSD: map[string]float64{"anthropic-api": 65}, Runner: &fakeRunner{Do: func(Command) Result {
 		return Result{Out: store}
 	}}}.creditBalances(context.Background())
 	if err != nil {
@@ -128,7 +128,7 @@ func TestCreditTotalBurnFromSharedEntries(t *testing.T) {
 		usdCreditEntry("a1", "anthropic-api", 30, nil, now.Add(-25*time.Hour), expires),
 		usdCreditEntry("a2", "anthropic-api", 42.35, nil, now.Add(-time.Hour), expires),
 	})
-	balances, err := CLIQuota{Binary: "pacelever", CreditTotalUSD: map[string]float64{"anthropic-api": 65}, Runner: &fakeRunner{Do: func(Command) Result {
+	balances, err := CLIQuota{Binary: "pacelever", Now: func() time.Time { return now }, CreditTotalUSD: map[string]float64{"anthropic-api": 65}, Runner: &fakeRunner{Do: func(Command) Result {
 		return Result{Out: store}
 	}}}.creditBalances(context.Background())
 	if err != nil {

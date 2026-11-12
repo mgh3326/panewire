@@ -2,7 +2,6 @@ package fleet
 
 import (
 	"context"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -50,7 +49,8 @@ func t4212Pools() map[string]PoolView {
 
 func t4212Selection(t *testing.T, grade string) (*App, Spawn) {
 	t.Helper()
-	t.Setenv("PACELEVER_CONFIG", filepath.Join(t.TempDir(), "absent.toml"))
+	isolateConfigHome(t)
+	t.Setenv("PACELEVER_CONFIG", "")
 	t.Setenv("PACELEVER_E6_ARM", "")
 	rows := t4212Rows()
 	a, s, q := selFixture(t, grade, rows, t4212Pools(), []string{"claude", "codex"})

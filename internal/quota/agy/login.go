@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/mgh3326/panewire/internal/configpath"
 )
 
 // fileToken is the CLI's OAuth access token from its login file, in
@@ -120,18 +122,25 @@ func envelopeToken(raw string) string {
 	return strings.TrimSpace(data.Token.AccessToken)
 }
 
-// wakeLockPath is the lock pacelever's refresh takes too, so a node and
-// pacelever never run `agy models` at once: PACELEVER_CACHE's directory, else
-// <XDG cache>/pacelever.
+// wakeLockPath keeps local quota refreshes single-flight. It selects an
+// existing legacy lock path only when no panewire cache path exists.
 func (c Config) wakeLockPath() string {
 	if c.WakeLock != "" {
 		return c.WakeLock
 	}
-	dir := filepath.Join(c.base("XDG_CACHE_HOME", ".cache"), "pacelever")
-	if cache := c.env("PACELEVER_CACHE"); cache != "" {
-		dir = filepath.Dir(cache)
+	paths := configpath.CacheCandidates(c.env, c.home(), "agy-wake.lock")
+	if c.env("PANEWIRE_CACHE") != "" {
+		return paths[0]
 	}
-	return filepath.Join(dir, "agy-wake.lock")
+	if c.env("PACELEVER_CACHE") != "" && len(paths) > 1 {
+		return paths[1]
+	}
+	if _, err := os.Stat(paths[0]); errors.Is(err, os.ErrNotExist) && len(paths) > 1 {
+		if _, legacyErr := os.Stat(paths[1]); legacyErr == nil {
+			return paths[1]
+		}
+	}
+	return paths[0]
 }
 
 func (c Config) locked(fn func() error) error {

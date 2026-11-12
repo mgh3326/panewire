@@ -316,7 +316,12 @@ func payload(body map[string]any) map[string]any {
 // windowBuckets reads windowLimits.fiveHour and .weekly as 5h and 7d: used
 // over cap. A window with no positive cap or a malformed used value is left
 // out (a malformed value must never read as an unused window); one past its
-// cap is exhausted, 100%.
+// cap is exhausted, 100%. The vendor's 7d limit is a rolling window whose
+// resetAt reads relative to the reading time (exactly 5 days after the reading
+// time), not a fixed calendar reset boundary. It is marked unpaceable (no
+// ResetsAt) so projectAtReset does not turn a moving relative reset into a
+// false pace (hk 4330). The 30d window carries the billing period reset
+// (currentPeriodEnd), and the 5h window keeps its reset.
 func windowBuckets(credits map[string]any) []quota.Bucket {
 	limits := object(payload(credits)["windowLimits"])
 	var buckets []quota.Bucket
@@ -331,7 +336,14 @@ func windowBuckets(credits map[string]any) []quota.Bucket {
 		if pct == nil {
 			continue
 		}
-		buckets = append(buckets, quota.Bucket{Window: axis.window, UsedPct: pct, ResetsAt: resetTime(w["resetAt"]), Scope: quota.Scope{Kind: quota.ScopeAccount}})
+		reset := resetTime(w["resetAt"])
+		if axis.window == "7d" {
+			// hk 4330: the vendor's weekly limit is a rolling window whose resetAt
+			// always reads reading_time + 5 days. It has no fixed calendar reset
+			// boundary and is unpaceable.
+			reset = ""
+		}
+		buckets = append(buckets, quota.Bucket{Window: axis.window, UsedPct: pct, ResetsAt: reset, Scope: quota.Scope{Kind: quota.ScopeAccount}})
 	}
 	return buckets
 }
