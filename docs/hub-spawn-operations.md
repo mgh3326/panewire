@@ -178,7 +178,12 @@ root is not answered that way: the node clones into the work root, following
 `omp_setup_wizard`, `auth_unavailable`) does the same once the node verified
 its pane cleanup, and the hub tells `operator-desk` which one-time action the
 host needs ([placement.md](placement.md#first-run-refusals-and-the-desk-notice)).
-A pinned `--host` keeps any of these refusals as its result.
+For agy, a verified rc=76 (`BRIEF_SUBMISSION_UNCONFIRMED`) whose newest saved
+capture matches the harness login screen is sent as rc=88 with an
+`AUTH_UNAVAILABLE` refusal; the unchanged hub classifies it as
+`auth_unavailable`. Other rc=76 results and results with unverified cleanup
+keep their original refusal. A pinned `--host` keeps any of these refusals as
+its result.
 
 ### A job.spawn the node cannot accept
 
