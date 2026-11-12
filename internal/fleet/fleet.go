@@ -437,6 +437,14 @@ func rankedPoolView(buckets []accountBucket, now time.Time, rankScope, group str
 		if err == nil {
 			v.windowObserved = true
 		}
+		if err == nil && (v.Shortest == nil || w < v.Shortest.window) {
+			room := windowRoom{usedPct: *b.UsedPct, window: w}
+			if reset, perr := time.Parse(time.RFC3339Nano, b.ResetsAt); perr == nil {
+				h := reset.Sub(now).Hours()
+				room.resetHours = &h
+			}
+			v.Shortest = &room
+		}
 		long := err == nil && w >= 24*time.Hour
 		if err == nil && !long && (v.ShortUsed == nil || *b.UsedPct > *v.ShortUsed) {
 			v.ShortUsed = b.UsedPct
@@ -465,4 +473,12 @@ func rankedPoolView(buckets []accountBucket, now time.Time, rankScope, group str
 		}
 	}
 	return v
+}
+
+// windowRoom is one window's used share and time to its reset. It is the view
+// a job's expected hours must fit inside (headroomFit, select.go).
+type windowRoom struct {
+	usedPct    float64
+	window     time.Duration
+	resetHours *float64
 }
