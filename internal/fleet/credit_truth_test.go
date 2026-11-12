@@ -66,6 +66,11 @@ func TestWrappedProviderCreditErrorClassifies(t *testing.T) {
 			pool:   "anthropic-api",
 		},
 		{
+			name:   "Anthropic plain text wrapped by border",
+			screen: "│ API Error: 400 Your credit balance is too low to access the\n│ Anthropic API. Please go to Plans & Billing to upgrade or purchase credits.\n│ ❯ Ask Claude",
+			pool:   "anthropic-api",
+		},
+		{
 			name:   "Anthropic unbordered JSON wrap",
 			screen: "API Error: 400 invalid_request_error {\"type\":\"error\",\"error\":{\"message\":\"Your credit balance is too low to access\nthe Anthropic API\"}}\n❯ Ask Claude",
 			pool:   "anthropic-api",

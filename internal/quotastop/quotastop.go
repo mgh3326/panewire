@@ -162,7 +162,8 @@ func statusBlock(screen string) (string, bool) {
 }
 
 func providerErrorBlock(lines []string, start int) (string, bool) {
-	if len(lines)-start > 16 || screenBorderPrefix(lines[start]) == '┌' {
+	border := screenBorderPrefix(lines[start])
+	if len(lines)-start > 16 || border == '┌' {
 		return "", false
 	}
 	blockLines := []string{trimScreenBorder(strings.TrimSpace(lines[start]))}
@@ -183,7 +184,7 @@ func providerErrorBlock(lines []string, start int) (string, bool) {
 		}
 		currentBlock := strings.Join(blockLines, "\n")
 		json := scanJSON(currentBlock)
-		if json.open {
+		if json.open || !json.started && border != 0 && screenBorderPrefix(line) == border && providerCreditPool(currentBlock) == "" {
 			blockLines = append(blockLines, content)
 			continue
 		}
