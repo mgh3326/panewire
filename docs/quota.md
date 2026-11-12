@@ -139,7 +139,12 @@ claude, codex와 같은 shared store 흐름을 사용합니다. 모든 호스트
   response: `used / cap`, clamped to 100 when past the cap. A window without a
   positive `cap` or a numeric `used >= 0` is left out; a malformed value never
   reads as an unused window. `resetAt` is epoch seconds, milliseconds or
-  microseconds, RFC 3339 or an HTTP date.
+  microseconds, RFC 3339 or an HTTP date. The vendor's 7d limit is a rolling
+  window whose `resetAt` reads relative to the reading time (exactly 5 days after
+  the reading time), not a fixed calendar reset boundary; it is marked
+  unpaceable (no `ResetsAt`) so `projectAtReset` does not turn a moving reset into
+  an artificial pace (hk 4330). 5h keeps its `resetAt`, and 30d carries the
+  subscription `currentPeriodEnd`.
 - **30d** is the share of this billing period's plan credits already spent:
   `totalMonthlyCredits / (totalMonthlyCredits + credits.monthlyCredits)`, with
   `totalMonthlyCredits` from the usage summary (its `periodBasis` must be
@@ -215,8 +220,9 @@ source, bucket, error kind, account fingerprint 및 shared store 형식을 유�
   own), `›`, `> ` or `Shift+Tab`** — without U+276D the probe never types and ends
   at its timeout (pacelever#57). A line naming weekly/7-day, 5h/5-hour, daily
   or monthly with a percentage is a `7d`/`5h`/`1d`/`30d` bucket (`% used`,
-  `% left` or `% remaining`; a reset of "resets in 6d 2h" is now + that); a panel
-  with none falls back to the plan line's "NN% remaining". A trust prompt, a
+  `% left` or `% remaining`); an absolute reset date (such as `resets Nov 15, 8:00 AM (UTC)`)
+  is parsed directly as a stable UTC timestamp, while a duration like "resets in 6d 2h"
+  is now + that (hk 4330); a panel with none falls back to the plan line's "NN% remaining". A trust prompt, a
   timeout, an early exit or a missing binary is `probe_error` with the stage
   reached; an unreadable panel is `parse_error`. The TUI's whole process group is
   killed and reaped on every exit path. pacelever's `devin models list` Free tags

@@ -15,10 +15,8 @@ func windowPanel(planReset, dailyReset, weekly string) string {
 		"Daily: 10% used · resets in " + dailyReset + "\n" + weekly + "\n"
 }
 
-// The live 2026-11-12 panel: the plan line's reset phrase was rewritten to
-// "3d 5h" because the captured one ("3d 4h") did not carry the defect. The
-// Weekly line names its reset as a date, so the weekly bucket takes the plan
-// line's reset only because both report 55% used.
+// The live 2026-11-12 panel: the Weekly line names its reset as a date,
+// so the weekly bucket keeps its stable absolute reset date (hk 4330).
 func TestScreenUsageLiveLabelsWindowsByWindowWords(t *testing.T) {
 	o, err := ParseScreen(fixture(t, "screen_usage_live.txt"), testNow)
 	if err != nil {
@@ -26,7 +24,7 @@ func TestScreenUsageLiveLabelsWindowsByWindowWords(t *testing.T) {
 	}
 	checkBuckets(t, o.Buckets, []wantBucket{
 		{"1d", 10, resetAt(4*time.Hour + 42*time.Minute)},
-		{"7d", 55, resetAt(3*24*time.Hour + 5*time.Hour)},
+		{"7d", 55, "2026-11-15T08:00:00Z"},
 	})
 }
 
@@ -53,7 +51,7 @@ func TestScreenResetPhraseNeverNamesTheWindow(t *testing.T) {
 			}
 			checkBuckets(t, o.Buckets, []wantBucket{
 				{"1d", 10, resetAt(test.after)},
-				{"7d", 55, resetAt(test.after)},
+				{"7d", 55, "2026-11-15T08:00:00Z"},
 			})
 		})
 	}
@@ -101,6 +99,15 @@ func TestScreenWeeklyResetRules(t *testing.T) {
 			t.Fatal(err)
 		}
 		checkBuckets(t, o.Buckets, []wantBucket{{"7d", 55, resetAt(6*24*time.Hour + 2*time.Hour)}})
+	})
+	t.Run("own absolute reset date wins", func(t *testing.T) {
+		panel := "Pro · 45% remaining · resets in 3d 5h\n" +
+			"Weekly: 55% used · resets Nov 15, 8:00 AM (UTC)\n"
+		o, err := ParseScreen(panel, testNow)
+		if err != nil {
+			t.Fatal(err)
+		}
+		checkBuckets(t, o.Buckets, []wantBucket{{"7d", 55, "2026-11-15T08:00:00Z"}})
 	})
 	t.Run("disagreeing plan leaves weekly resetless", func(t *testing.T) {
 		panel := "Pro · 40% remaining · resets in 3d 5h\n" +
