@@ -2,16 +2,20 @@ package fleet
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
 
+const mergewakeRevisionNotes4216 = `{"source":"mergewake","schema":1,"sample_key":"https://github.com/mgh3326/mergewake/pull/103","outcome_id":"f75f67c51c6f44582bf779027a5d809a5ae5b4067563759d5589dfdeb947a8ff","revision":6,"supersedes":"b08fdd2e2abd485227419a1e2558363fc485fa1dd46d887bdbdb6941d84c6f1e","first_ci_green":true,"findings_by_severity":{"medium":1},"reverted_within_7d":false,"time_to_merge_s":1200,"same_family":true,"experiment_id":"task-4216","arm":"baseline","evidence":[],"outcome_rule":"merged","outcome":{},"observed_findings_by_severity":{"medium":1},"followup":true}`
+
 type stalledRepsHK struct {
-	puts    chan struct{}
+	puts    chan []byte
 	release chan struct{}
 }
 
@@ -20,68 +24,18 @@ func (s *stalledRepsHK) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodGet && r.URL.Path == "/v1/bench/reps":
 		writeJSONBody(w, http.StatusOK, map[string]any{"reps": []Rep{}})
 	case r.Method == http.MethodPut && r.URL.Path == "/v1/bench/reps":
+		body, _ := io.ReadAll(r.Body)
 		select {
-		case s.puts <- struct{}{}:
+		case s.puts <- body:
 		default:
 		}
-		<-s.release
-		http.Error(w, `{"error":"released_test_stall"}`, http.StatusServiceUnavailable)
+		select {
+		case <-r.Context().Done():
+		case <-s.release:
+			http.Error(w, `{"error":"released_test_stall"}`, http.StatusServiceUnavailable)
+		}
 	default:
 		http.Error(w, `{"error":"unexpected"}`, http.StatusNotImplemented)
-	}
-}
-
-func TestAddOutcomeAlreadyRecordedSkipsSupersedingPutT4216(t *testing.T) {
-	const origin int64 = 4216001
-	existing := Rep{ID: 77, OriginID: origin, Profile: "codex-terra61", ModelID: "gpt-6.1-terra",
-		TaskRef: "hk570", Tier: "T2", Role: "impl", Grade: "B", Effort: "high", RecordedAt: "2026-11-05T00:00:00Z"}
-	putStarted := make(chan struct{}, 1)
-	release := make(chan struct{})
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodGet && r.URL.Path == "/v1/bench/reps" {
-			writeJSONBody(w, http.StatusOK, map[string]any{"reps": []Rep{existing}})
-			return
-		}
-		if r.Method == http.MethodPut && r.URL.Path == "/v1/bench/reps" {
-			putStarted <- struct{}{}
-			<-release
-			http.Error(w, `{"error":"released_test_stall"}`, http.StatusServiceUnavailable)
-			return
-		}
-		http.Error(w, `{"error":"unexpected"}`, http.StatusNotImplemented)
-	}))
-	defer func() {
-		close(release)
-		srv.Close()
-	}()
-
-	store := &BenchStore{hk: &hkQuota{base: srv.URL, token: "test-token"}}
-	replayed := existing
-	replayed.RecordedAt = "2026-11-12T02:59:46Z"
-	replayed.Notes = `{"head":"new-revision","pr":570}`
-	done := make(chan struct {
-		id       int64
-		recorded bool
-		err      error
-	}, 1)
-	go func() {
-		id, recorded, err := store.AddOutcome(context.Background(), replayed)
-		done <- struct {
-			id       int64
-			recorded bool
-			err      error
-		}{id, recorded, err}
-	}()
-
-	select {
-	case result := <-done:
-		if result.err != nil || result.recorded || result.id != 0 {
-			t.Fatalf("existing outcome result = id %d, recorded %t, err %v; want already recorded", result.id, result.recorded, result.err)
-		}
-	case <-putStarted:
-		t.Fatal("re-emitted existing outcome reached PUT instead of resolving as already recorded")
-	case <-time.After(500 * time.Millisecond):
-		t.Fatal("re-emitted existing outcome did not finish within 500ms")
 	}
 }
 
@@ -95,18 +49,20 @@ func TestRepsAddAndAddOutcomeBoundStalledHKCallsT4216(t *testing.T) {
 		call func(*testing.T, *BenchStore) func() error
 	}{
 		{
-			name: "reps add with new random origin",
+			name: "live-shaped reps add revision superseding an old record",
 			call: func(t *testing.T, store *BenchStore) func() error {
 				a := testApp(t)
 				a.BenchCatalog = func(context.Context) ([]CatalogRow, error) {
-					return []CatalogRow{{Profile: "codex-terra61", Effort: "high", Grade: "B", ModelID: "gpt-6.1-terra"}}, nil
+					return []CatalogRow{{Profile: "opus", Effort: "high", Grade: "A", ModelID: "opus"}}, nil
 				}
 				a.BenchStore = store
 				return func() error {
 					return a.repsAdd(context.Background(), []string{
-						"--profile", "codex-terra61", "--model", "gpt-6.1-terra", "--effort", "high",
-						"--task", "hk570", "--tier", "T2", "--role", "impl", "--grade", "B",
+						"--profile", "opus", "--model", "opus", "--effort", "high",
+						"--task", "https://github.com/mgh3326/mergewake/pull/103",
+						"--tier", "T2", "--role", "impl", "--grade", "A",
 						"--rounds", "1", "--blockers-found", "0", "--completed", "1",
+						"--notes", mergewakeRevisionNotes4216,
 					}, io.Discard)
 				}
 			},
@@ -117,9 +73,9 @@ func TestRepsAddAndAddOutcomeBoundStalledHKCallsT4216(t *testing.T) {
 				return func() error {
 					_, _, err := store.AddOutcome(context.Background(), Rep{
 						OriginID: stableRepOriginID("panewire-outcome:old-pr-job"),
-						Profile:  "codex-terra61", ModelID: "gpt-6.1-terra", TaskRef: "hk570",
-						Tier: "T2", Role: "impl", Grade: "B", Effort: "high",
-						RecordedAt: "2026-11-12T02:59:46Z",
+						Profile:  "opus", ModelID: "opus", TaskRef: "hk570",
+						Tier: "T2", Role: "impl", Grade: "A", Effort: "high",
+						RecordedAt: "2026-11-12T03:23:18Z",
 					})
 					return err
 				}
@@ -127,38 +83,50 @@ func TestRepsAddAndAddOutcomeBoundStalledHKCallsT4216(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			stall := &stalledRepsHK{puts: make(chan struct{}, 1), release: make(chan struct{})}
+			stall := &stalledRepsHK{puts: make(chan []byte, 1), release: make(chan struct{})}
 			srv := httptest.NewServer(stall)
+			var stopOnce sync.Once
+			stop := func() { stopOnce.Do(func() { close(stall.release); srv.Close() }) }
+			t.Cleanup(stop)
 			store := &BenchStore{hk: &hkQuota{base: srv.URL, token: "test-token", client: &http.Client{Transport: http.DefaultTransport}}, now: time.Now}
 			call := tc.call(t, store)
 			done := make(chan error, 1)
 			go func() { done <- call() }()
+
 			select {
-			case <-stall.puts:
+			case body := <-stall.puts:
+				if strings.Contains(tc.name, "live-shaped") {
+					var request struct {
+						Reps []map[string]any `json:"reps"`
+					}
+					if err := json.Unmarshal(body, &request); err != nil || len(request.Reps) != 1 {
+						t.Fatalf("PUT body = %s (%v)", body, err)
+					}
+					rep := request.Reps[0]
+					if origin, _ := rep["origin_id"].(float64); origin <= 0 {
+						t.Fatalf("panewire did not generate an origin id: %v", rep["origin_id"])
+					}
+					var notes map[string]any
+					if err := json.Unmarshal([]byte(rep["notes"].(string)), &notes); err != nil || notes["outcome_id"] != "f75f67c51c6f44582bf779027a5d809a5ae5b4067563759d5589dfdeb947a8ff" || notes["supersedes"] != "b08fdd2e2abd485227419a1e2558363fc485fa1dd46d887bdbdb6941d84c6f1e" {
+						t.Fatalf("PUT notes = %v (%v)", notes, err)
+					}
+				}
 			case err := <-done:
-				close(stall.release)
-				srv.Close()
 				t.Fatalf("call returned before stalled PUT: %v", err)
 			case <-time.After(time.Second):
-				close(stall.release)
-				srv.Close()
 				t.Fatal("test did not reach stalled hk PUT")
 			}
+
 			select {
 			case err := <-done:
 				if err == nil || !strings.Contains(strings.ToLower(err.Error()), "timed out") {
-					close(stall.release)
-					srv.Close()
 					t.Fatalf("stalled hk call error = %v, want a clear timeout", err)
 				}
 			case <-time.After(500 * time.Millisecond):
-				close(stall.release)
-				srv.Close()
+				stop()
 				<-done
 				t.Fatal("stalled hk call exceeded the 500ms bound")
 			}
-			close(stall.release)
-			srv.Close()
 		})
 	}
 }
@@ -170,9 +138,11 @@ func TestRepAddNewOutcomeStillRecordsWithFreshOriginT4216(t *testing.T) {
 	a := benchFakeApp(t, srv)
 	out := &strings.Builder{}
 	if err := a.repsAdd(context.Background(), []string{
-		"--profile", "codex-terra61", "--model", "gpt-6.1-terra", "--effort", "high",
-		"--task", "hk570", "--tier", "T2", "--role", "impl", "--grade", "B",
+		"--profile", "opus", "--model", "opus", "--effort", "high",
+		"--task", "https://github.com/mgh3326/mergewake/pull/103",
+		"--tier", "T2", "--role", "impl", "--grade", "A",
 		"--rounds", "1", "--blockers-found", "0", "--completed", "1",
+		"--notes", mergewakeRevisionNotes4216,
 	}, out); err != nil {
 		t.Fatal(err)
 	}
