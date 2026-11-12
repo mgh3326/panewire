@@ -123,6 +123,12 @@ func (d *Daemon) Start(ctx context.Context) error {
 			if err != nil {
 				return err
 			}
+			manager.quota.session = func(job, pane string) string {
+				if session := nodeJobHerdrSessionByPaneFromRoot(idleRoot, pane); session != "" {
+					return session
+				}
+				return d.cfg.Hub.Client.herdrSessionFor(job, pane)
+			}
 			manager.quota.enqueue = manager.enqueue
 			d.idleWake = manager
 			d.cfg.Hub.Client.SetIdleWakeManager(manager)

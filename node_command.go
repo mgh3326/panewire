@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -448,20 +449,216 @@ func defaultNodeCommandRunner(name string) relayCommandRunner {
 // the panes the node launched. A plain herdr call would read the daemon's own
 // session and report a landed pane in another session as gone (hk 2966).
 func (client *HubClient) nodeHerdrRunner() relayCommandRunner {
-	if client.nodeHerdr != nil {
+	return client.nodeHerdrRunnerFor("", "")
+}
+
+func (client *HubClient) nodeHerdrRunnerForSession(session string) relayCommandRunner {
+	if client != nil && client.nodeHerdr != nil {
 		return client.nodeHerdr
 	}
-	session := client.nodeSpawnSession()
 	return func(ctx context.Context, args ...string) ([]byte, error) {
-		cmd := exec.CommandContext(ctx, nodeHerdrExecutable, args...)
+		cmd := exec.CommandContext(ctx, herdrExecutable(), args...)
 		cmd.Env = hubSpawnEnvironment(os.Environ(), session)
 		return cmd.Output()
 	}
 }
 
+// nodeHerdrRunnerFor returns a herdr runner for the specific job and/or pane,
+// using that job's recorded herdr_session, else the node's configured session.
+func (client *HubClient) nodeHerdrRunnerFor(jobID, pane string) relayCommandRunner {
+	if client != nil && client.nodeHerdr != nil {
+		return client.nodeHerdr
+	}
+	session := client.herdrSessionFor(jobID, pane)
+	return client.nodeHerdrRunnerForSession(session)
+}
+
+// herdrExecutable returns the executable to invoke for herdr.
+func herdrExecutable() string {
+	if nodeHerdrExecutable != "" {
+		return nodeHerdrExecutable
+	}
+	if bin := os.Getenv("HERDR_BIN"); bin != "" {
+		return bin
+	}
+	return "herdr"
+}
+
+// herdrSessionFor returns that pane or job's recorded herdr_session, else the node's
+// configured herdr_session, never silently "default".
+func (client *HubClient) herdrSessionFor(jobID, pane string) string {
+	if client == nil {
+		return firstNonempty(os.Getenv("HERDR_SESSION"), hubSpawnDefaultSession)
+	}
+	setPaneSessionResolver(func(p string) string {
+		return client.herdrSessionFor("", p)
+	})
+	if pane != "" {
+		if session := client.nodeJobHerdrSessionByPane(pane); session != "" {
+			return session
+		}
+	}
+	if jobID != "" {
+		if session, err := client.nodeJobHerdrSession(jobID); err == nil && session != "" {
+			return session
+		}
+	}
+	return client.nodeSpawnSession()
+}
+
+// nodePaneBinding is the verified binding of a pane to a job and herdr session.
+type nodePaneBinding struct {
+	jobID   string
+	session string
+}
+
+// nodeJobHerdrSessionByPane searches this node's jobs for the one bound to
+// pane and returns its recorded herdr_session. It scans the filesystem directly
+// without caching so that rebound panes across jobs and sessions are immediately
+// observed without stale cache windows.
+func (client *HubClient) nodeJobHerdrSessionByPane(pane string) string {
+	if pane == "" || client == nil || client.jobsInboxRoot == "" {
+		return ""
+	}
+	binding, found := nodeJobHerdrBindingByPaneFromRoot(client.jobsInboxRoot, pane)
+	if !found {
+		return ""
+	}
+	return binding.session
+}
+
+// nodeJobHerdrBindingByPaneFromRoot inspects job directories under inboxRoot to find
+// the binding event for this pane, preferring live (un-ended) jobs and the newest binding event.
+func nodeJobHerdrBindingByPaneFromRoot(inboxRoot, pane string) (nodePaneBinding, bool) {
+	if pane == "" || inboxRoot == "" {
+		return nodePaneBinding{}, false
+	}
+	jobsRoot := filepath.Join(inboxRoot, "jobs")
+	entries, err := os.ReadDir(jobsRoot)
+	if err != nil {
+		return nodePaneBinding{}, false
+	}
+	type paneCandidate struct {
+		jobID       string
+		session     string
+		eventsMtime time.Time
+		live        bool
+		createdAt   string
+		seq         int64
+	}
+	var best paneCandidate
+	found := false
+
+	for _, entry := range entries {
+		if !entry.IsDir() || !hubJobIDPattern.MatchString(entry.Name()) {
+			continue
+		}
+		eventsDir := filepath.Join(jobsRoot, entry.Name(), "events")
+		eventEntries, err := os.ReadDir(eventsDir)
+		if err != nil {
+			continue
+		}
+		var eventsMtime time.Time
+		if fi, err := os.Stat(eventsDir); err == nil {
+			eventsMtime = fi.ModTime()
+		}
+		sort.Slice(eventEntries, func(i, j int) bool {
+			return eventEntries[i].Name() < eventEntries[j].Name()
+		})
+
+		jobEnded := false
+		var jobSession string
+		var jobCreatedAt string
+		var jobSeq int64
+		jobMatched := false
+
+		for _, ee := range eventEntries {
+			name := ee.Name()
+			if ee.IsDir() || !strings.HasSuffix(name, ".json") {
+				continue
+			}
+			if strings.HasSuffix(name, "-job.completed.json") ||
+				strings.HasSuffix(name, "-job.lost.json") ||
+				strings.HasSuffix(name, "-job.revoked.json") ||
+				strings.HasSuffix(name, "-job.handed_off.json") ||
+				strings.HasSuffix(name, "-job.joined.json") {
+				jobEnded = true
+			}
+			if strings.HasSuffix(name, "-job.spawned.json") ||
+				strings.HasSuffix(name, "-job.claim.json") ||
+				strings.HasSuffix(name, "-job.claimed.json") ||
+				strings.HasSuffix(name, "-job.reclaim.json") ||
+				strings.HasSuffix(name, "-job.reprompted.json") {
+				jobEnded = false
+			}
+			if strings.HasSuffix(name, "-job.spawned.json") ||
+				strings.HasSuffix(name, "-job.claim.json") ||
+				strings.HasSuffix(name, "-job.claimed.json") ||
+				strings.HasSuffix(name, "-job.reclaim.json") {
+				data, err := os.ReadFile(filepath.Join(eventsDir, name))
+				if err != nil {
+					continue
+				}
+				var ev struct {
+					Seq       int64  `json:"seq"`
+					CreatedAt string `json:"created_at"`
+					Payload   struct {
+						PaneID       string `json:"pane_id"`
+						HerdrSession string `json:"herdr_session"`
+					} `json:"payload"`
+				}
+				if json.Unmarshal(data, &ev) == nil && ev.Payload.PaneID == pane && ev.Payload.HerdrSession != "" {
+					jobMatched = true
+					jobSession = ev.Payload.HerdrSession
+					jobCreatedAt = ev.CreatedAt
+					jobSeq = ev.Seq
+				}
+			}
+		}
+
+		if jobMatched && jobSession != "" {
+			cand := paneCandidate{
+				jobID:       entry.Name(),
+				session:     jobSession,
+				eventsMtime: eventsMtime,
+				live:        !jobEnded,
+				createdAt:   jobCreatedAt,
+				seq:         jobSeq,
+			}
+			if !found {
+				best = cand
+				found = true
+			} else {
+				if (!best.live && cand.live) ||
+					(best.live == cand.live && (cand.createdAt > best.createdAt || (cand.createdAt == best.createdAt && cand.seq > best.seq))) {
+					best = cand
+				}
+			}
+		}
+	}
+	if found {
+		return nodePaneBinding{
+			jobID:   best.jobID,
+			session: best.session,
+		}, true
+	}
+	return nodePaneBinding{}, false
+}
+
+// nodeJobHerdrSessionByPaneFromRoot inspects job directories under inboxRoot to find
+// the session recorded on the event binding this pane, preferring live (un-ended)
+// jobs and the newest binding event.
+func nodeJobHerdrSessionByPaneFromRoot(inboxRoot, pane string) string {
+	if b, ok := nodeJobHerdrBindingByPaneFromRoot(inboxRoot, pane); ok {
+		return b.session
+	}
+	return ""
+}
+
 // nodeHerdrExecutable is the herdr binary node commands run; tests point it at
-// a fake so they never reach a real herdr on the host.
-var nodeHerdrExecutable = "herdr"
+// a fake so they never reach a real herdr on the host. When empty, HERDR_BIN
+// or "herdr" is used.
+var nodeHerdrExecutable string
 
 // nodeSpawnSession is the herdr session spawns on this node use.
 func (client *HubClient) nodeSpawnSession() string {
@@ -469,6 +666,15 @@ func (client *HubClient) nodeSpawnSession() string {
 		return config.HERDRSession
 	}
 	return hubSpawnDefaultSession
+}
+
+func firstNonempty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func (client *HubClient) nodeGitRunner() relayCommandRunner {
@@ -617,21 +823,25 @@ func nodeAgentRows(rows []nodeHerdrRow) []nodeAgentRow {
 	return out
 }
 
-func (client *HubClient) readNodeAgents(ctx context.Context) ([]nodeHerdrRow, error) {
-	output, err := client.nodeHerdrRunner()(ctx, "agent", "list")
+func (client *HubClient) readNodeAgentsInSession(ctx context.Context, session string) ([]nodeHerdrRow, error) {
+	output, err := client.nodeHerdrRunnerForSession(session)(ctx, "agent", "list")
 	if err != nil {
 		return nil, err
 	}
 	return nodeHerdrRows(output, "agents")
 }
 
-func (client *HubClient) nodeAgentsList(ctx context.Context) (any, string) {
-	agents, err := client.readNodeAgents(ctx)
+func (client *HubClient) readNodeAgents(ctx context.Context) ([]nodeHerdrRow, error) {
+	return client.readNodeAgentsInSession(ctx, client.nodeSpawnSession())
+}
+
+func (client *HubClient) nodeAgentsListInSession(ctx context.Context, session string) (nodeAgentsListResult, string) {
+	agents, err := client.readNodeAgentsInSession(ctx, session)
 	if err != nil {
-		return nil, "herdr_failed"
+		return nodeAgentsListResult{}, "herdr_failed"
 	}
 	result := nodeAgentsListResult{Agents: nodeAgentRows(agents)}
-	if output, err := client.nodeHerdrRunner()(ctx, "pane", "list"); err == nil {
+	if output, err := client.nodeHerdrRunnerForSession(session)(ctx, "pane", "list"); err == nil {
 		if rows, err := nodeHerdrRows(output, "panes"); err == nil {
 			panes := nodeAgentRows(rows)
 			for index := range panes {
@@ -644,10 +854,15 @@ func (client *HubClient) nodeAgentsList(ctx context.Context) (any, string) {
 	return result, ""
 }
 
+func (client *HubClient) nodeAgentsList(ctx context.Context) (any, string) {
+	return client.nodeAgentsListInSession(ctx, client.nodeSpawnSession())
+}
+
 // nodePaneMatch re-reads herdr and classifies the caller's expected pane; on
 // a match it also returns the row, for its state_change_seq.
 func (client *HubClient) nodePaneMatch(ctx context.Context, paneID, name, status, cwd string, checkStatus bool) (string, nodeHerdrRow, error) {
-	agents, err := client.readNodeAgents(ctx)
+	session := client.herdrSessionFor(name, paneID)
+	agents, err := client.readNodeAgentsInSession(ctx, session)
 	if err != nil {
 		return "", nodeHerdrRow{}, err
 	}
@@ -688,7 +903,7 @@ func (client *HubClient) nodePaneClose(ctx context.Context, args nodePaneCloseAr
 		return nodePaneCloseResult{Outcome: outcome}, ""
 	}
 	composerEmpty := func(row nodeHerdrRow) bool {
-		screen, err := client.nodeReadScreen(ctx, args.PaneID)
+		screen, err := client.nodeReadScreen(ctx, args.Name, args.PaneID)
 		return err == nil && nodeComposerState(row.Agent, screen) == nodeComposerEmpty
 	}
 	if !composerEmpty(first) {
@@ -718,7 +933,7 @@ func (client *HubClient) nodePaneClose(ctx context.Context, args nodePaneCloseAr
 	if !composerEmpty(second) {
 		return nodePaneCloseResult{Outcome: nodePaneChanged}, ""
 	}
-	if _, err := client.nodeHerdrRunner()(ctx, "pane", "close", args.PaneID); err != nil {
+	if _, err := client.nodeHerdrRunnerFor(args.Name, args.PaneID)(ctx, "pane", "close", args.PaneID); err != nil {
 		return nil, "close_failed"
 	}
 	return nodePaneCloseResult{Outcome: nodePaneClosed}, ""
@@ -766,7 +981,7 @@ func (client *HubClient) nodePaneCapture(ctx context.Context, args nodePaneCaptu
 	if outcome != "" {
 		return nodePaneCaptureResult{Outcome: outcome}, ""
 	}
-	output, err := client.nodeHerdrRunner()(ctx, "pane", "read", args.PaneID)
+	output, err := client.nodeHerdrRunnerFor(args.Name, args.PaneID)(ctx, "pane", "read", args.PaneID)
 	if err != nil {
 		return nil, "capture_failed"
 	}

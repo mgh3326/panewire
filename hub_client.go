@@ -118,6 +118,8 @@ type HubClient struct {
 	accepting             bool
 	relayControl          clientRelayControlState
 	jobsInboxRoot         string
+	sessionCacheMu        sync.RWMutex
+	jobSessions           map[string]sessionCacheEntry
 	laneReconcileTicks    <-chan time.Time
 	laneReconcileJobs     func(context.Context) []HubActiveJob
 	laneReconcileList     func(context.Context) (map[string]hubLaneProjection, error)
@@ -367,7 +369,7 @@ func NewHubClient(config HubClientConfig) (*HubClient, error) {
 	if config.helloAckTimeout <= 0 {
 		config.helloAckTimeout = defaultHubHelloAckTimeout
 	}
-	return &HubClient{
+	client := &HubClient{
 		endpoint: endpoints[0], endpoints: endpoints, machineID: config.MachineID, token: config.Token, cfAccessClientID: config.CFAccessClientID, cfAccessSecret: config.CFAccessClientSecret, accepting: config.Accepting, jobsInboxRoot: config.JobsInboxRoot, spawnConfigPath: defaultHubSpawnConfigPath(config.SpawnConfigPath), spawnConfigDefault: config.SpawnConfigPath == "", spawnJournalDir: config.SpawnJournalDir, spawnTimeoutExtra: 0,
 		failoverWakeOn: config.FailoverWakeOn, failoverWakeMAC: wakeMAC, failoverWakeDest: wakeDestination, failoverWakeArmed: wakeRequested,
 		burstWakeMAC: burstMAC, burstPoweroffAllowed: config.BurstPoweroffAllowed, burstPoweroff: config.burstPoweroff, helloAckTimeout: config.helloAckTimeout, burstSeen: make(map[string]time.Time),
@@ -376,7 +378,12 @@ func NewHubClient(config HubClientConfig) (*HubClient, error) {
 		checks:       cloneHubChecks(config.Checks), execute: config.Execute,
 		pingInterval: config.PingInterval, initialBackoff: config.InitialBackoff, maxBackoff: config.MaxBackoff, preferRetry: config.PreferRetry, version: config.Version,
 		dial: config.Dial, wait: config.Wait, warn: config.Warn, relayInject: config.relayInject, relayCommand: config.relayCommand, hostLoadCollector: config.hostLoadCollector, hostMemoryCollector: config.hostMemoryCollector, sessionCollector: config.sessionCollector, events: make(chan hubClientEvent, 64), completedJobs: make(map[string]uint64), completedReports: make(map[string]struct{}), assignedJobs: make(map[string]uint64),
-	}, nil
+		jobSessions: make(map[string]sessionCacheEntry),
+	}
+	setPaneSessionResolver(func(p string) string {
+		return client.herdrSessionFor("", p)
+	})
+	return client, nil
 }
 
 const hubFailoverWakeBroadcastAddress = "255.255.255.255:9"
@@ -847,15 +854,74 @@ func relayInjectForHarnessGuarded(ctx context.Context, pane, harness, text strin
 	}
 }
 
+type relaySessionKey struct{}
+
+type sessionCacheEntry struct {
+	session  string
+	cachedAt time.Time
+}
+
+var activePaneSessionResolver atomic.Pointer[func(pane string) string]
+
+func setPaneSessionResolver(resolver func(pane string) string) {
+	activePaneSessionResolver.Store(&resolver)
+}
+
+func activePaneSession(pane string) string {
+	if r := activePaneSessionResolver.Load(); r != nil && *r != nil {
+		return (*r)(pane)
+	}
+	return ""
+}
+
+func withRelaySession(ctx context.Context, session string) context.Context {
+	if session == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, relaySessionKey{}, session)
+}
+
+func relaySessionFrom(ctx context.Context) (string, bool) {
+	session, ok := ctx.Value(relaySessionKey{}).(string)
+	return session, ok && session != ""
+}
+
+func relaySessionFromContext(ctx context.Context, pane string) string {
+	if session, ok := relaySessionFrom(ctx); ok && session != "" {
+		return session
+	}
+	if pane != "" {
+		if session := activePaneSession(pane); session != "" {
+			return session
+		}
+	}
+	return firstNonempty(os.Getenv("HERDR_SESSION"), "default")
+}
+
+func herdrCommand(ctx context.Context, pane string, args ...string) *exec.Cmd {
+	session := relaySessionFromContext(ctx, pane)
+	cmd := exec.CommandContext(ctx, herdrExecutable(), args...)
+	cmd.Env = hubSpawnEnvironment(os.Environ(), session)
+	return cmd
+}
+
+func herdrCommandOutput(ctx context.Context, pane string, args ...string) ([]byte, error) {
+	return herdrCommand(ctx, pane, args...).Output()
+}
+
+func herdrCommandRun(ctx context.Context, pane string, args ...string) error {
+	return herdrCommand(ctx, pane, args...).Run()
+}
+
 // relaySendText types text into pane. A pane-level harness (cmd) gets the
 // pane call, because herdr refuses agent prompt for it with agent_not_ready
 // (hk 3330); every other harness keeps herdr's agent prompt. The caller
 // decides what a failure means.
 func relaySendText(ctx context.Context, pane, harness, text string) error {
 	if adapter, ok := relayAdapterFor(harness); ok && adapter.paneTransport {
-		return exec.CommandContext(ctx, "herdr", "pane", "send-text", pane, text).Run()
+		return herdrCommandRun(ctx, pane, "pane", "send-text", pane, text)
 	}
-	return exec.CommandContext(ctx, "herdr", "agent", "prompt", pane, text).Run()
+	return herdrCommandRun(ctx, pane, "agent", "prompt", pane, text)
 }
 
 // relaySendReturn presses return in pane, at the same level as the text: a
@@ -863,13 +929,13 @@ func relaySendText(ctx context.Context, pane, harness, text string) error {
 // would type through one transport and submit through another.
 func relaySendReturn(ctx context.Context, pane, harness string) error {
 	if adapter, ok := relayAdapterFor(harness); ok && adapter.paneTransport {
-		return exec.CommandContext(ctx, "herdr", "pane", "send-keys", pane, "return").Run()
+		return herdrCommandRun(ctx, pane, "pane", "send-keys", pane, "return")
 	}
-	return exec.CommandContext(ctx, "herdr", "agent", "send-keys", pane, "return").Run()
+	return herdrCommandRun(ctx, pane, "agent", "send-keys", pane, "return")
 }
 
 func relayInjectHarness(ctx context.Context, pane string) string {
-	out, err := exec.CommandContext(ctx, "herdr", "agent", "get", pane).Output()
+	out, err := herdrCommandOutput(ctx, pane, "agent", "get", pane)
 	if err != nil {
 		return ""
 	}
@@ -1086,14 +1152,14 @@ type relayPaneReads struct {
 // of pane. For a harness whose proof needs the agent status it reads that too.
 func relayReadPane(ctx context.Context, pane, harness string) relayPaneReads {
 	var reads relayPaneReads
-	if out, err := exec.CommandContext(ctx, "herdr", "agent", "read", pane, "--source", "visible", "--lines", relayVerifyVisibleLines).Output(); err == nil {
+	if out, err := herdrCommandOutput(ctx, pane, "agent", "read", pane, "--source", "visible", "--lines", relayVerifyVisibleLines); err == nil {
 		reads.visible, reads.anyOK, reads.visibleOK = string(out), true, true
 	}
-	if out, err := exec.CommandContext(ctx, "herdr", "agent", "read", pane, "--source", "recent-unwrapped", "--lines", relayVerifyUnwrappedLines).Output(); err == nil {
+	if out, err := herdrCommandOutput(ctx, pane, "agent", "read", pane, "--source", "recent-unwrapped", "--lines", relayVerifyUnwrappedLines); err == nil {
 		reads.unwrapped, reads.anyOK = string(out), true
 	}
 	if adapter, ok := relayAdapterFor(harness); ok && adapter.proof == relayProofEchoAndWorking {
-		if out, err := exec.CommandContext(ctx, "herdr", "agent", "get", pane).Output(); err == nil {
+		if out, err := herdrCommandOutput(ctx, pane, "agent", "get", pane); err == nil {
 			reads.status, _ = parseRelayAgentStatus(out)
 		}
 	}
@@ -1423,7 +1489,7 @@ func relayComposerState(harness, visible string) string {
 // relayReadPaneANSI reads pane's visible screen with its SGR attributes, the
 // source relayAnsiComposerState needs to tell a dim suggestion from a draft.
 func relayReadPaneANSI(ctx context.Context, pane string) (string, error) {
-	out, err := exec.CommandContext(ctx, "herdr", "pane", "read", pane, "--source", "visible", "--format", "ansi").Output()
+	out, err := herdrCommandOutput(ctx, pane, "pane", "read", pane, "--source", "visible", "--format", "ansi")
 	return string(out), err
 }
 
@@ -1551,11 +1617,11 @@ type devinPaneRead struct {
 }
 
 func readDevinPane(ctx context.Context, pane string) (devinPaneRead, error) {
-	visible, err := exec.CommandContext(ctx, "herdr", "agent", "read", pane, "--source", "visible", "--lines", devinRelayVisibleLines).Output()
+	visible, err := herdrCommandOutput(ctx, pane, "agent", "read", pane, "--source", "visible", "--lines", devinRelayVisibleLines)
 	if err != nil {
 		return devinPaneRead{}, err
 	}
-	unwrapped, err := exec.CommandContext(ctx, "herdr", "agent", "read", pane, "--source", "recent-unwrapped", "--lines", devinRelayUnwrappedLines).Output()
+	unwrapped, err := herdrCommandOutput(ctx, pane, "agent", "read", pane, "--source", "recent-unwrapped", "--lines", devinRelayUnwrappedLines)
 	if err != nil {
 		return devinPaneRead{}, err
 	}
@@ -1668,7 +1734,7 @@ func devinRelayInjectGuarded(ctx context.Context, pane, text string, members []s
 	}
 	after := before
 	if !devinComposerHolds(before.visible, text, nonces) {
-		if exec.CommandContext(ctx, "herdr", "agent", "prompt", pane, text).Run() != nil {
+		if herdrCommandRun(ctx, pane, "agent", "prompt", pane, text) != nil {
 			// herdr may have typed part of the text before failing; the next
 			// attempt's composer check decides whether a retry would
 			// duplicate it.
@@ -1708,7 +1774,7 @@ func devinRelayInjectGuarded(ctx context.Context, pane, text string, members []s
 		result.Outcome, result.Evidence = relayInjectMaybeInPane, evidence+" return_withheld:"+rule
 		return result
 	}
-	if exec.CommandContext(ctx, "herdr", "agent", "send-keys", pane, "return").Run() != nil {
+	if herdrCommandRun(ctx, pane, "agent", "send-keys", pane, "return") != nil {
 		result.Outcome, result.Evidence = relayInjectMaybeInPane, evidence+" return_failed"
 		return result
 	}
@@ -1777,7 +1843,7 @@ func devinActivity(screen string) string {
 }
 
 func relayAgentStatus(ctx context.Context, pane string) (string, bool) {
-	out, err := exec.CommandContext(ctx, "herdr", "agent", "get", pane).Output()
+	out, err := herdrCommandOutput(ctx, pane, "agent", "get", pane)
 	if err != nil {
 		return "", false
 	}

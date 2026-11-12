@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -22,11 +21,12 @@ import (
 )
 
 type quotaStopManager struct {
-	store  *Store
-	root   string
-	act    bool
-	logger *slog.Logger
-	read   func(context.Context, string) (string, error)
+	store   *Store
+	root    string
+	act     bool
+	logger  *slog.Logger
+	read    func(context.Context, string) (string, error)
+	session func(job, pane string) string
 	// hk is the manager's hk access, over HTTP with the svc-panewire
 	// credential (hk 3607); tests substitute it.
 	hk      quotaStopHK
@@ -67,11 +67,19 @@ func newQuotaStopManager(s *Store, root string, act bool, logger *slog.Logger) (
 		}
 	}
 	q := &quotaStopManager{store: s, root: root, act: act, logger: logger}
+	q.session = func(job, pane string) string {
+		return nodeJobHerdrSessionByPaneFromRoot(root, pane)
+	}
 	q.announce = func(ctx context.Context, job, pane string, stop quotastop.Stop) error {
 		return fleet.AnnounceQuotaStop(ctx, filepath.Join(root, "jobs"), job, pane, stop)
 	}
 	q.read = func(ctx context.Context, pane string) (string, error) {
-		b, e := exec.CommandContext(ctx, "herdr", "agent", "read", pane, "--source", "visible", "--lines", "60").Output()
+		session := ""
+		if q.session != nil {
+			session = q.session("", pane)
+		}
+		readCtx := withRelaySession(ctx, session)
+		b, e := herdrCommandOutput(readCtx, pane, "agent", "read", pane, "--source", "visible", "--lines", "60")
 		return string(b), e
 	}
 	q.hk = quotaStopHK{
@@ -83,11 +91,16 @@ func newQuotaStopManager(s *Store, root string, act bool, logger *slog.Logger) (
 		},
 	}
 	q.send = func(ctx context.Context, pane, pool, text string) relayInjectResult {
-		harness := strings.ToLower(relayInjectHarness(ctx, pane))
+		session := ""
+		if q.session != nil {
+			session = q.session("", pane)
+		}
+		sendCtx := withRelaySession(ctx, session)
+		harness := strings.ToLower(relayInjectHarness(sendCtx, pane))
 		if (pool == "devin-free" && harness != "devin") || (pool == "claude" && harness != "claude") || (pool == "codex" && harness != "codex") {
 			return relayInjectResult{Outcome: relayInjectMaybeInPane, Evidence: "harness_changed"}
 		}
-		return relayInjectForHarnessGuarded(ctx, pane, harness, text, nil, func(screen string) bool {
+		return relayInjectForHarnessGuarded(sendCtx, pane, harness, text, nil, func(screen string) bool {
 			stop, ok := classifyQuotaStop(screen, time.Now(), time.Local)
 			_, composerOK := relayComposer(harness, screen)
 			return ok && stop.Pool == pool && !stop.Choice && composerOK

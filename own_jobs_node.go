@@ -105,7 +105,7 @@ func (client *HubClient) nodeJobReap(ctx context.Context, args nodeJobReapArgs) 
 	if target.pane == "" {
 		return nodeJobReapResult{Outcome: nodeJobReapPaneGone}, ""
 	}
-	row, found, err := client.nodeJobReapRow(ctx, target.pane)
+	row, found, err := client.nodeJobReapRow(ctx, args.Job, target.pane)
 	if err != nil {
 		return nil, "herdr_failed"
 	}
@@ -126,7 +126,7 @@ func (client *HubClient) nodeJobReap(ctx context.Context, args nodeJobReapArgs) 
 		case !nodePaneIdleStatus[row.AgentStatus]:
 			return nodeJobReapResult{Outcome: nodeJobReapPaneChanged, Pane: target.pane}, ""
 		}
-		settled, err := client.nodeJobReapSettled(ctx, row)
+		settled, err := client.nodeJobReapSettled(ctx, args.Job, row)
 		if err != nil {
 			return nil, "herdr_failed"
 		}
@@ -134,7 +134,7 @@ func (client *HubClient) nodeJobReap(ctx context.Context, args nodeJobReapArgs) 
 			return nodeJobReapResult{Outcome: nodeJobReapPaneChanged, Pane: target.pane}, ""
 		}
 	}
-	if _, err := client.nodeHerdrRunner()(ctx, "pane", "close", target.pane); err != nil {
+	if _, err := client.nodeHerdrRunnerFor(args.Job, target.pane)(ctx, "pane", "close", target.pane); err != nil {
 		return nil, "close_failed"
 	}
 	return nodeJobReapResult{Outcome: nodeJobReapClosed, Pane: target.pane}, ""
@@ -142,8 +142,8 @@ func (client *HubClient) nodeJobReap(ctx context.Context, args nodeJobReapArgs) 
 
 // nodeJobReapRow finds the pane's agent row. A pane that is not an agent — a
 // plain shell reusing the id — is not the job's pane, and reads as gone.
-func (client *HubClient) nodeJobReapRow(ctx context.Context, pane string) (nodeHerdrRow, bool, error) {
-	agents, err := client.readNodeAgents(ctx)
+func (client *HubClient) nodeJobReapRow(ctx context.Context, job, pane string) (nodeHerdrRow, bool, error) {
+	agents, err := client.readNodeAgentsInSession(ctx, client.herdrSessionFor(job, pane))
 	if err != nil {
 		return nodeHerdrRow{}, false, err
 	}
@@ -159,9 +159,9 @@ func (client *HubClient) nodeJobReapRow(ctx context.Context, pane string) (nodeH
 // finished status and an empty composer must still hold one settle interval
 // later, with an unchanged state_change_seq where herdr reports one. A failed
 // screen read refuses the close, because an unknown composer is never empty.
-func (client *HubClient) nodeJobReapSettled(ctx context.Context, first nodeHerdrRow) (bool, error) {
+func (client *HubClient) nodeJobReapSettled(ctx context.Context, job string, first nodeHerdrRow) (bool, error) {
 	composerEmpty := func() bool {
-		screen, err := client.nodeReadScreen(ctx, first.PaneID)
+		screen, err := client.nodeReadScreen(ctx, job, first.PaneID)
 		return err == nil && nodeComposerState(first.Agent, screen) == nodeComposerEmpty
 	}
 	if !composerEmpty() {
@@ -178,7 +178,7 @@ func (client *HubClient) nodeJobReapSettled(ctx context.Context, first nodeHerdr
 		timer.Stop()
 		return false, nil
 	}
-	second, found, err := client.nodeJobReapRow(ctx, first.PaneID)
+	second, found, err := client.nodeJobReapRow(ctx, job, first.PaneID)
 	if err != nil {
 		return false, err
 	}

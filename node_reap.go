@@ -263,8 +263,8 @@ func nodeScreenTail(screen string, lines int) string {
 
 // nodeReadScreen reads a pane's visible screen with its SGR attributes, which
 // nodeComposerState needs to tell a dim prompt suggestion from typed text.
-func (client *HubClient) nodeReadScreen(ctx context.Context, paneID string) (string, error) {
-	output, err := client.nodeHerdrRunner()(ctx, "pane", "read", paneID, "--source", "visible", "--format", "ansi")
+func (client *HubClient) nodeReadScreen(ctx context.Context, name, paneID string) (string, error) {
+	output, err := client.nodeHerdrRunnerFor(name, paneID)(ctx, "pane", "read", paneID, "--source", "visible", "--format", "ansi")
 	return string(output), err
 }
 
@@ -290,7 +290,7 @@ func (client *HubClient) nodePaneRead(ctx context.Context, args nodePaneReadArgs
 		result.AgentStatus = "unknown"
 	}
 	result.AgentStatus = utf8PrefixWithin(result.AgentStatus, nodePaneReadMaxStatus)
-	screen, err := client.nodeReadScreen(ctx, args.PaneID)
+	screen, err := client.nodeReadScreen(ctx, args.Name, args.PaneID)
 	if err != nil {
 		return result, ""
 	}
