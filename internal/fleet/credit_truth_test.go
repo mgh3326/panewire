@@ -64,6 +64,23 @@ func TestStaleCreditDoesNotRankAsDollarsAtRisk(t *testing.T) {
 	}
 }
 
+func TestStaleZeroDollarCreditRemainsExhausted(t *testing.T) {
+	a, s, _ := usdCreditFixture(t, func(now time.Time) []map[string]any {
+		return []map[string]any{usdCreditEntry("a1", "anthropic-api", 100, ptrF(0), now.Add(-5*time.Hour), onDay(now, 9*24*time.Hour))}
+	}, ptrPool(PoolView{Status: "ok", Class: "spend", RankProjected: ptrF(50)}), false)
+	sel, err := a.selectProfile(context.Background(), s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sel.chosen.seatName != "sonnet" {
+		t.Fatalf("stale zero-left credit remained a candidate: chose %s", sel.chosen.seatName)
+	}
+	row := candOutcome(sel.record(), "omp-opus", "high")
+	if row["reason"] != "credit_exhausted" || row["outcome"] != "dropped:credit_exhausted" {
+		t.Fatalf("zero-left plan outcome = %v, want credit_exhausted", row)
+	}
+}
+
 func jsonCreditStore(latest map[string]string, history []map[string]any) (string, error) {
 	b, err := json.Marshal(map[string]any{"schema": "pacelever.manual.v1", "latest": latest, "history": history})
 	return string(b), err
