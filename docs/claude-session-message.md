@@ -54,7 +54,15 @@ exports `CLAUDE_CODE_MESSAGING_SOCKET` before any hook runs. Host configuration
 
 `panewire claude-socket register [--lane L] [--inbox-root DIR]` writes
 `<inbox-root>/claude-sockets/<lane>.json` (mode 0600, replaced atomically) with
-the lane, the path and a time. It prints nothing on success, since a
+the lane, the herdr pane the session runs in (`--pane`, else `HERDR_PANE_ID`,
+which herdr sets in the pane and hooks inherit), the path and a time. A
+registration with no pane is refused.
+
+The node posts only when the registered pane is the pane the hub routed the wake
+line to. A lane moved to another pane while its old session is still alive, or a
+host-wide hook registering a different session, therefore falls back to typing
+into the routed pane (`reason=other_pane`) instead of reaching the wrong
+session; the new session's own hook run takes the registration over. It prints nothing on success, since a
 `SessionStart` hook's stdout becomes session context. It refuses a path that is
 not absolute, clean and a socket.
 
@@ -126,7 +134,7 @@ and `panewire inbox status` remain the record of what the lane has and has not
 read.
 
 Fallbacks to the typed line, each logged as `stage=fell_back_to_typed` with a
-reason (`not_registered`, `registration_invalid`, `socket_gone`, `timeout`,
+reason (`not_registered`, `registration_invalid`, `other_pane`, `socket_gone`, `timeout`,
 `post_failed`): no registration; a registration that is not a socket or names
 another lane; a socket that no longer exists or refuses the connection; a failed
 write; a read error after the write.
@@ -135,8 +143,8 @@ write; a read error after the write.
 
 - The idle-wake line (`docs/idle-wake.md`) and every other typed line keep their
   path.
-- A stale registration whose socket path a live session of another lane now
-  holds is not detected; Claude Code's per-pid socket names make it unlikely.
+- A second Claude session started in the same pane without the hook is not
+  detected until the first one's socket is gone (then the line is typed).
 - Claude Code's `--messaging-socket-path` flag (in the binary, not in
   `claude --help`) would give a panewire-started session a path the node already
   knows, with no hook. It is undocumented and not used.

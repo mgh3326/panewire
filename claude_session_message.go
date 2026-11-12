@@ -86,7 +86,7 @@ func (client *HubClient) deliverWakeAsSessionMessage(ctx context.Context, messag
 	if lane == "" {
 		return false
 	}
-	socket, err := readClaudeSocketRegistration(client.jobsInboxRoot, lane)
+	socket, err := readClaudeSocketRegistration(client.jobsInboxRoot, lane, message.Pane)
 	if err == nil {
 		err = postClaudeSessionMessage(ctx, socket, message.Text)
 	}
@@ -103,6 +103,8 @@ func claudeSessionFailureReason(err error) string {
 	switch {
 	case errors.Is(err, errClaudeSocketMissing):
 		return "not_registered"
+	case errors.Is(err, errClaudeSocketOtherPane):
+		return "other_pane"
 	case errors.Is(err, errClaudeSocketInvalid):
 		return "registration_invalid"
 	case errors.Is(err, os.ErrNotExist):

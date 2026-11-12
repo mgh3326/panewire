@@ -93,6 +93,7 @@ func newClaudeWakeNode(t *testing.T, lanes ...string) claudeWakeNode {
 func registerClaudeSocket(t *testing.T, root, lane, socket string) int {
 	t.Helper()
 	t.Setenv(claudeSocketEnv, socket)
+	t.Setenv("HERDR_PANE_ID", "w:p4")
 	t.Setenv("CLAUDE_CODE_MESSAGING_TOKEN", claudeTestTokenCanary)
 	var stdout, stderr bytes.Buffer
 	code := runClaudeSocketCLI([]string{"register", "--lane", lane, "--inbox-root", root}, &stdout, &stderr, time.Now)
@@ -192,7 +193,7 @@ func TestClaudeWakeFallsBackToTyping(t *testing.T) {
 			if err := os.MkdirAll(dir, 0o700); err != nil {
 				t.Fatal(err)
 			}
-			body, _ := json.Marshal(claudeSocketRegistration{Lane: "routing-policy", Socket: regular})
+			body, _ := json.Marshal(claudeSocketRegistration{Lane: "routing-policy", Pane: "w:p4", Socket: regular})
 			if err := os.WriteFile(claudeSocketRegistryPath(node.root, "routing-policy"), body, 0o600); err != nil {
 				t.Fatal(err)
 			}
@@ -304,7 +305,59 @@ func TestClaudeSocketRegisterRefusals(t *testing.T) {
 	if code := runClaudeSocketCLI([]string{"register", "--inbox-root", root}, &out, &out, time.Now); code != ExitOK {
 		t.Fatalf("PANEWIRE_LANE default exited %d: %s", code, out.String())
 	}
-	if _, err := readClaudeSocketRegistration(root, "routing-policy"); err != nil {
+	if _, err := readClaudeSocketRegistration(root, "routing-policy", "w:p4"); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// The lane moved to another pane while its old session lives on: the live
+// socket must not take the line meant for the routed pane (review of #447).
+func TestClaudeWakeIgnoresRegistrationFromAnotherPane(t *testing.T) {
+	logs := captureSlog(t)
+	session := newFakeClaudeSession(t)
+	node := newClaudeWakeNode(t, "routing-policy")
+	t.Setenv(claudeSocketEnv, session.path)
+	t.Setenv("HERDR_PANE_ID", "w:old")
+	var out bytes.Buffer
+	if code := runClaudeSocketCLI([]string{"register", "--lane", "routing-policy", "--inbox-root", node.root}, &out, &out, time.Now); code != ExitOK {
+		t.Fatalf("register exited %d", code)
+	}
+	message := wakeInject("routing-policy", 1, "decision") // routed to w:p4
+	node.client.relayBusyManager().offer(t.Context(), message)
+	if len(*node.typed) != 1 || !strings.HasPrefix((*node.typed)[0], "w:p4\x00") {
+		t.Fatalf("typed %q, want the line typed into the routed pane", *node.typed)
+	}
+	if got := len(session.messages()); got != 0 {
+		t.Fatalf("the old pane's session received %d messages", got)
+	}
+	if !strings.Contains(logs.String(), "reason=other_pane") {
+		t.Fatalf("log: %s", logs)
+	}
+	// Re-registering from the routed pane (the new session's hook) takes over.
+	t.Setenv("HERDR_PANE_ID", "w:p4")
+	if code := runClaudeSocketCLI([]string{"register", "--lane", "routing-policy", "--inbox-root", node.root}, &out, &out, time.Now); code != ExitOK {
+		t.Fatalf("register exited %d", code)
+	}
+	*node.typed = nil
+	node.client.relayBusyManager().offer(t.Context(), message)
+	eventually(t, 2*time.Second, "the routed pane's session to receive the line", func() bool { return len(session.messages()) == 1 })
+	if len(*node.typed) != 0 {
+		t.Fatalf("typed %q", *node.typed)
+	}
+}
+
+func TestClaudeSocketRegisterNeedsAPane(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HERDR_PANE_ID", "")
+	t.Setenv(claudeSocketEnv, newFakeClaudeSession(t).path)
+	var out bytes.Buffer
+	if code := runClaudeSocketCLI([]string{"register", "--lane", "routing-policy", "--inbox-root", root}, &out, &out, time.Now); code != ExitUsage {
+		t.Fatalf("a registration with no pane exited %d", code)
+	}
+	if entries, _ := os.ReadDir(root); len(entries) != 0 {
+		t.Fatalf("left %v", entries)
+	}
+	if code := runClaudeSocketCLI([]string{"register", "--lane", "routing-policy", "--pane", "w:p4", "--inbox-root", root}, &out, &out, time.Now); code != ExitOK {
+		t.Fatalf("--pane exited %d", code)
 	}
 }
