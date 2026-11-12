@@ -562,6 +562,7 @@ func (h failingHub) Refresh(context.Context, string, string) error {
 func TestHubDryRunTouchesNothing(t *testing.T) {
 	a, s, f, hub, events := hubFixture(t, gitState{pushed: true}, "wk/feat", hubHosts())
 	s.DryRun = true
+	a.Quota = &fakeQuota{LaunchValue: Launch{Profile: "sonnet", Effort: "high", Grade: "A", ModelID: "sonnet-m", Gate: "default", Pool: "claude"}, GateDo: gatePools(map[string]string{"sonnet": "claude"})}
 	if _, _, e := a.placeAuto(context.Background(), s, "brief"); e != nil {
 		t.Fatal(e)
 	}
