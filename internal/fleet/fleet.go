@@ -142,9 +142,12 @@ func (c *hkQuota) get(ctx context.Context, path string, out any) error {
 // another origin. Non-2xx answers yield BackendError carrying the status and,
 // when the body names one, the hk error code — never the body itself.
 func (c *hkQuota) request(ctx context.Context, method, path string, body, out any) error {
+	callCtx, cancel := context.WithTimeout(ctx, hkCallTimeout)
+	defer cancel()
+
 	client := c.client
 	if client == nil {
-		client = &http.Client{Timeout: 8 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+		client = &http.Client{Timeout: hkCallTimeout, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	}
 	var rdr io.Reader
 	if body != nil {
@@ -154,7 +157,7 @@ func (c *hkQuota) request(ctx context.Context, method, path string, body, out an
 		}
 		rdr = bytes.NewReader(b)
 	}
-	req, e := http.NewRequestWithContext(ctx, method, c.base+path, rdr)
+	req, e := http.NewRequestWithContext(callCtx, method, c.base+path, rdr)
 	if e != nil {
 		return fmt.Errorf("invalid backend request")
 	}
@@ -171,6 +174,9 @@ func (c *hkQuota) request(ctx context.Context, method, path string, body, out an
 	if e != nil {
 		if ctx.Err() != nil {
 			return ctx.Err()
+		}
+		if errors.Is(callCtx.Err(), context.DeadlineExceeded) || hkRequestTimedOut(e) {
+			return fmt.Errorf("handoffkeep request timed out after %s", hkCallTimeout)
 		}
 		return fmt.Errorf("%w", errHKTransport)
 	}
@@ -190,10 +196,21 @@ func (c *hkQuota) request(ctx context.Context, method, path string, body, out an
 	}
 	if out != nil {
 		if e := json.NewDecoder(io.LimitReader(resp.Body, 16<<20)).Decode(out); e != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			if errors.Is(callCtx.Err(), context.DeadlineExceeded) {
+				return fmt.Errorf("handoffkeep request timed out after %s", hkCallTimeout)
+			}
 			return fmt.Errorf("handoffkeep response is not valid JSON")
 		}
 	}
 	return nil
+}
+
+func hkRequestTimedOut(err error) bool {
+	var timeout interface{ Timeout() bool }
+	return errors.As(err, &timeout) && timeout.Timeout()
 }
 
 // BackendError reports an HTTP failure without response details. Reason is
