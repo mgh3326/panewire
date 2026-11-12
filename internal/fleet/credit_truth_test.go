@@ -49,6 +49,13 @@ func TestProviderCreditExhaustionTexts(t *testing.T) {
 	}
 }
 
+func TestQuotedProviderCreditErrorIsNotExhaustion(t *testing.T) {
+	screen := "Here is the error I saw earlier: API Error: 429 insufficient_quota\n❯ Ask Codex"
+	if stop, ok := quotastop.Classify(screen, time.Now().UTC(), time.UTC); ok {
+		t.Fatalf("quoted provider error classified as stop = %+v", stop)
+	}
+}
+
 func TestManualCreditBalanceStalesAfterFourHours(t *testing.T) {
 	now := time.Now().UTC()
 	measured := now.Add(-4 * time.Hour)
@@ -67,6 +74,25 @@ func TestManualCreditBalanceStalesAfterFourHours(t *testing.T) {
 	credit := balances["anthropic-api"]
 	if credit == nil || credit.BalanceUSD != nil {
 		t.Fatalf("stale balance = %+v", credit)
+	}
+}
+
+func TestPercentOnlyCreditDoesNotBecomeStale(t *testing.T) {
+	now := time.Date(2026, 11, 12, 6, 0, 0, 0, time.UTC)
+	entry := map[string]any{
+		"manual_observation_id": "a1", "event": "set", "pool": "anthropic-api", "window": "credit",
+		"used_pct": 50.0, "measured_at": now.Add(-5 * time.Hour).Format(time.RFC3339Nano),
+		"expires_at": now.Add(24 * time.Hour).Format(time.RFC3339Nano),
+	}
+	store, _ := jsonCreditStore(map[string]string{"anthropic-api:credit": "a1"}, []map[string]any{entry})
+	q := CLIQuota{Binary: "pacelever", Now: func() time.Time { return now }, Runner: &fakeRunner{Do: func(Command) Result { return Result{Out: store} }}}
+	balances, err := q.creditBalances(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	credit := balances["anthropic-api"]
+	if credit == nil || !credit.StaleAt.IsZero() || credit.BalanceUSD != nil {
+		t.Fatalf("percent-only credit = %+v, want no dollar balance and no stale timestamp", credit)
 	}
 }
 

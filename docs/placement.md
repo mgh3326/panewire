@@ -54,10 +54,12 @@ entry without a recorded dollar balance, by the percentage rule (remaining
 percent per hour). On a full tie inside the band a credit rung goes before a
 free rung.
 
-A manually recorded credit balance stays dollar-ranked for four hours after
-`measured_at`; after that it is stale, loses its dollar value for ranking, and
-cannot push a paced subscription behind credit. Plan output records
-`state=stale` and `stale_since`. Provider exhaustion reported by an omp pane
+A manually recorded dollar balance stays dollar-ranked for four hours after
+`measured_at`; after that it is stale, loses its dollar value, and ranks behind
+subscription quota. Entries with only a percentage never become stale because
+they have no dollar value to age; they continue to rank by remaining percent
+per hour. Plan output records `state=stale` and `stale_since` for aged dollar
+balances. Provider exhaustion reported by an omp pane
 ends the job with `quota_stop`, and the hub's `/v1/state` exposes
 `pool_credit_exhausted` until a newer manual entry is measured. Plan output
 records `credit_exhausted_since` for a blocked pool.

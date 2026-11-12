@@ -1077,8 +1077,8 @@ func selCandComparator(pending []*selCand) func(*selCand, *selCand) int {
 
 func compareSelCands(x, y *selCand, compareGrade bool) int {
 	// Waste-risk pools rank ahead of every tier, free included, and among
-	// themselves by waste urgency first; everything else keeps the tier
-	// order.
+	// themselves by waste urgency first. Stale dollar-bearing credit ranks
+	// behind subscriptions because it no longer has a usable balance.
 	if x.risk != y.risk {
 		if x.risk {
 			return -1

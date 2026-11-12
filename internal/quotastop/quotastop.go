@@ -24,8 +24,8 @@ var (
 	// devin matches the phrase anywhere in the status line: the live screen
 	// prefixes it with "▲ Something went wrong — ".
 	devin           = regexp.MustCompile(`(?i)reached free model rate limit(?:\s|[·.…:]|$)`)
-	anthropicCredit = regexp.MustCompile(`(?i)credit balance is too low to access the anthropic api`)
-	openAICredit    = regexp.MustCompile(`(?i)(insufficient_quota|exceeded your current quota)`)
+	anthropicCredit = regexp.MustCompile(`(?i)^api error:.*credit balance is too low to access the anthropic api`)
+	openAICredit    = regexp.MustCompile(`(?i)^api error:.*(insufficient_quota|exceeded your current quota)`)
 	claude          = regexp.MustCompile(`(?i)^you've hit your (?:(?:weekly|session) )?limit(?:\s|[·.:]|$)`)
 	codexSignal     = regexp.MustCompile(`(?i)^you've hit your usage limit[.·:].*try again at`)
 	codex           = regexp.MustCompile(`(?i)try again at\s+([0-9]{1,2}:[0-9]{2}\s*(?:AM|PM)?)(?:\s+(UTC|GMT|Z))?`)

@@ -193,15 +193,17 @@ func (q CLIQuota) creditBalances(ctx context.Context) (map[string]*CreditBalance
 			measuredAt = time.Time{}
 		}
 		c := &CreditBalance{LeftPct: 100 - *current.UsedPct, MeasuredAt: measuredAt, ExpiresAt: expires}
-		if measuredAt.IsZero() {
-			c.StaleAt = q.now()
-		} else if !measuredAt.Add(creditBalanceFreshFor).After(q.now()) {
-			c.StaleAt = measuredAt.Add(creditBalanceFreshFor)
-		}
 		total, hasTotal := q.CreditTotalUSD[pool]
-		if usd, ok := creditEntryUSD(*current, total, hasTotal); ok && c.StaleAt.IsZero() {
-			c.BalanceUSD = &usd
-			c.BurnUSDPerH = creditBurnUSDPerH(entries, total, hasTotal)
+		if usd, hasDollars := creditEntryUSD(*current, total, hasTotal); hasDollars {
+			if measuredAt.IsZero() {
+				c.StaleAt = q.now()
+			} else if !measuredAt.Add(creditBalanceFreshFor).After(q.now()) {
+				c.StaleAt = measuredAt.Add(creditBalanceFreshFor)
+			}
+			if c.StaleAt.IsZero() {
+				c.BalanceUSD = &usd
+				c.BurnUSDPerH = creditBurnUSDPerH(entries, total, hasTotal)
+			}
 		}
 		out[pool] = c
 	}
