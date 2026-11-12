@@ -13,9 +13,10 @@ import (
 // Stop is evidence from a single visible screen, not proof that sending
 // input to the pane is safe. An unknown reset is represented by a zero time.
 type Stop struct {
-	Pool   string
-	Reset  time.Time
-	Choice bool
+	CreditExhaustedAt time.Time
+	Pool              string
+	Reset             time.Time
+	Choice            bool
 }
 
 var (

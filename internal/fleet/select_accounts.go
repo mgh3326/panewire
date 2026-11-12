@@ -242,6 +242,11 @@ func (p *selPlan) classify(c *selCand, v PoolView) {
 			c.reason, c.code, c.outcome = "pool_excluded", outcomeNoRoleCandidate, "dropped:pool_excluded"
 			return
 		}
+		if v.Credit != nil && v.Credit.LeftPct <= 0 {
+			c.reason, c.code, c.outcome = "credit_exhausted", outcomeQuotaExhausted, "dropped:credit_exhausted"
+			c.tier, c.creditSince = -1, v.Credit.MeasuredAt
+			return
+		}
 		at := p.req.creditAt
 		if at.IsZero() {
 			at = p.at

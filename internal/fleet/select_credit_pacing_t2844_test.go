@@ -32,7 +32,7 @@ func TestCreditPacingRanksPacedPoolBehindCredit(t *testing.T) {
 	}{
 		{"paced pool, credit balance recorded → credit first", balance(80, month), paced, noFree, "omp-opus", true, true},
 		{"paced pool, no credit balance recorded → credit still ranks in the free band", noBalance, paced, noFree, "omp-opus", true, false},
-		{"paced pool, credit balance zero → credit still ranks in the free band", balance(0, month), paced, noFree, "omp-opus", true, false},
+		{"paced pool, credit balance zero → credit excluded", balance(0, month), paced, noFree, "sonnet", true, false},
 		{"paced pool, credit gate refuses → the paced pool is next", balance(80, month), paced, map[string]string{"sonnet": "claude"}, "sonnet", true, true},
 		{"pool leaves quota unused without urgency → credit first", balance(80, month), unused, noFree, "omp-opus", false, false},
 		{"fast 5h window, week leaves quota → not paced", balance(80, month), fastShort, noFree, "omp-opus", false, false},

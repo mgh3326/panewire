@@ -23,6 +23,7 @@ type CreditBalance struct {
 	// exist or the balance did not fall.
 	BurnUSDPerH float64
 	ExpiresAt   time.Time
+	MeasuredAt  time.Time
 }
 
 // expiring reports a positive balance with a future expiry.
@@ -179,6 +180,7 @@ func (q CLIQuota) creditBalances(ctx context.Context) (map[string]*CreditBalance
 			continue
 		}
 		c := &CreditBalance{LeftPct: 100 - *current.UsedPct, ExpiresAt: expires}
+		c.MeasuredAt, _ = time.Parse(time.RFC3339Nano, current.MeasuredAt)
 		total, hasTotal := q.CreditTotalUSD[pool]
 		if usd, ok := creditEntryUSD(*current, total, hasTotal); ok {
 			c.BalanceUSD = &usd

@@ -65,6 +65,10 @@ func watchCommand(exe, job string, rearmed bool) *exec.Cmd {
 
 // RearmWatchers starts missing completion watchers for live jobs at node startup.
 func (a *App) RearmWatchers(start func(string) error, log func(string)) error {
+	return a.rearmWatchers(start, log, false)
+}
+
+func (a *App) rearmWatchers(start func(string) error, log func(string), pendingOnly bool) error {
 	entries, err := os.ReadDir(a.Jobs)
 	if os.IsNotExist(err) {
 		return nil
@@ -82,12 +86,16 @@ func (a *App) RearmWatchers(start func(string) error, log func(string)) error {
 		if err != nil {
 			continue
 		}
-		if j.Reaped || j.Pane == "" || a.watchActive(id) {
+		_, pendingCredit := pendingCreditRejection(j)
+		if pendingOnly && !pendingCredit {
+			continue
+		}
+		if (j.Reaped || j.Pane == "") && !pendingCredit || a.watchActive(id) {
 			continue
 		}
 		// A job ended by an announced quota stop is not finished until its
 		// hand-off grace has run: a watcher that died during it is re-armed.
-		if _, announced := announcedQuotaStop(j); j.Terminal && !announced {
+		if _, announced := announcedQuotaStop(j); j.Terminal && !announced && !pendingCredit {
 			continue
 		}
 		if err := start(id); err != nil {
@@ -97,6 +105,20 @@ func (a *App) RearmWatchers(start func(string) error, log func(string)) error {
 		log(id)
 	}
 	return errors.Join(failures...)
+}
+
+// RearmPendingCreditWatchers retries durable credit publications without
+// restarting other completion watchers.
+func RearmPendingCreditWatchers(jobs, session string, start func(string) error, log func(string)) error {
+	a, err := New(os.Stdout, os.Stderr)
+	if err != nil {
+		return err
+	}
+	a.Jobs, a.HerdrSession = jobs, session
+	if start == nil {
+		start = func(id string) error { return a.startWatchMode(id, true) }
+	}
+	return a.rearmWatchers(start, log, true)
 }
 
 // RearmNodeWatchers uses the node's jobs root and session for detached watchers.
@@ -150,6 +172,8 @@ func (a *App) watch(ctx context.Context, args []string) error {
 	latePoll := false
 	var screenRead quotaStopWatch
 	var handOff quotaHandOff
+	var creditAttempts int
+	var lastCredit time.Time
 	for {
 		j, e := a.job(id)
 		if e != nil {
@@ -163,15 +187,76 @@ func (a *App) watch(ctx context.Context, args []string) error {
 				handOff = quotaHandOff{stop: stop, until: a.Now().Add(a.QuotaHandOffGrace), active: true}
 			}
 		}
+		credit, creditPending := pendingCreditRejection(j)
+		agents, e := a.agents(ctx)
+		if e != nil && !creditPending {
+			if workerEscalated(j) {
+				return a.releaseQuota(ctx, j)
+			}
+			if j.Reaped || j.Terminal && !handOff.active {
+				return nil
+			}
+			return e
+		}
+		present := false
+		var paneAgent Agent
+		for _, ag := range agents {
+			if ag.Pane == j.Pane {
+				present, paneAgent = true, ag
+			}
+		}
+		if !creditPending && present {
+			if stop, ok := a.creditStopped(j, paneAgent); ok && !stop.CreditExhaustedAt.Equal(lastCredit) && !creditRejectionPublished(j, stop) {
+				credit = stop
+				payload := map[string]any{"pool": stop.Pool, "at": stop.CreditExhaustedAt.UTC().Format(time.RFC3339Nano)}
+				if err := a.event(ctx, id, "job.credit_rejection", payload); err != nil {
+					return err
+				}
+				creditPending = true
+			}
+		}
+		if creditPending {
+			if err := a.publishCreditRejection(ctx, j, credit); err != nil {
+				creditAttempts++
+				a.warn("credit rejection publication failed (attempt %d): %v", creditAttempts, err)
+				if creditAttempts >= 3 {
+					if j.Terminal || j.Reaped || j.QuotaRole() == "counsel" {
+						return nil
+					}
+					if workerEscalated(j) {
+						return a.releaseQuota(ctx, j)
+					}
+					return a.quotaStopLost(ctx, j, credit, true)
+				}
+				if err := a.Sleep(ctx, 5*time.Second); err != nil {
+					return err
+				}
+				continue
+			}
+			creditAttempts = 0
+			lastCredit = credit.CreditExhaustedAt
+			published := map[string]any{"pool": credit.Pool, "at": credit.CreditExhaustedAt.UTC().Format(time.RFC3339Nano)}
+			if !j.Terminal && !j.Reaped && !workerEscalated(j) && j.QuotaRole() != "counsel" && !handOff.active {
+				if a.QuotaHandOffGrace <= 0 {
+					if err := a.quotaStopLost(ctx, j, credit, true); err != nil {
+						return err
+					}
+					return a.event(ctx, id, "job.credit_published", published)
+				}
+				if err := a.quotaStopAnnounce(ctx, j, credit); err != nil {
+					return err
+				}
+				handOff = quotaHandOff{stop: credit, until: a.Now().Add(a.QuotaHandOffGrace), seq: paneAgent.StateChangeSeq, active: true}
+			}
+			if err := a.event(ctx, id, "job.credit_published", published); err != nil {
+				return err
+			}
+		}
 		if j.Reaped || j.Terminal && !handOff.active {
 			return nil
 		}
 		if workerEscalated(j) {
 			return a.releaseQuota(ctx, j)
-		}
-		agents, e := a.agents(ctx)
-		if e != nil {
-			return e
 		}
 		waiting, err := a.updateDecision(ctx, j)
 		if err != nil && waiting == nil {
@@ -188,7 +273,7 @@ func (a *App) watch(ctx context.Context, args []string) error {
 
 		if j.Report != "" {
 			if info, e := os.Stat(j.Report); e == nil && info.Mode().IsRegular() {
-				if pending && size == info.Size() && modified.Equal(info.ModTime()) && a.workerSignalledEnd(j) {
+				if !handOff.active && pending && size == info.Size() && modified.Equal(info.ModTime()) && a.workerSignalledEnd(j) {
 					return a.lifecycleWithOptions(ctx, "done", []string{id, "--report", j.Report}, true, len(args) == 2)
 				}
 				pending = true
@@ -218,14 +303,6 @@ func (a *App) watch(ctx context.Context, args []string) error {
 		if waiting == nil && a.Now().After(deadline) {
 			latePoll = true
 		}
-		present := false
-		var paneAgent Agent
-		for _, ag := range agents {
-			if ag.Pane == j.Pane {
-				present = true
-				paneAgent = ag
-			}
-		}
 		if present {
 			seen = true
 			missing = 0
@@ -238,20 +315,18 @@ func (a *App) watch(ctx context.Context, args []string) error {
 		// Not while a hand-off is active: its stop is already announced, and a
 		// pane that reports no state_change_seq would be read and announced on
 		// every poll, moving the grace deadline each time.
-		if present && !pending && !handOff.active {
-			if stop, ok := a.quotaStopped(ctx, j, paneAgent, &screenRead); ok {
+		if present && !pending && !handOff.active && j.QuotaRole() != "counsel" {
+			if stop, ok := a.quotaStopped(ctx, j, paneAgent, &screenRead); ok && stop.CreditExhaustedAt.IsZero() {
 				if a.QuotaHandOffGrace <= 0 {
 					return a.quotaStopLost(ctx, j, stop, true)
 				}
-				// A reviewer is replaced on another pool at once, by the
-				// hub (hk 3334): announce the stop, then leave the hk
-				// record to the hub for a grace period.
-				if e := a.quotaStopAnnounce(ctx, j, stop); e != nil {
-					return e
+				if err := a.quotaStopAnnounce(ctx, j, stop); err != nil {
+					return err
 				}
 				handOff = quotaHandOff{stop: stop, until: a.Now().Add(a.QuotaHandOffGrace), seq: paneAgent.StateChangeSeq, active: true}
 			}
 		}
+
 		if handOff.active {
 			if handOff.expired(a.Now(), paneAgent, present) {
 				return a.quotaStopLost(ctx, j, handOff.stop, false)

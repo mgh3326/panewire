@@ -191,8 +191,9 @@ type selCand struct {
 	risk   bool
 	unused *float64
 	// creditPool identifies a prepaid pool; credit records its expiry reading.
-	creditPool bool
-	credit     *creditFinal
+	creditPool  bool
+	credit      *creditFinal
+	creditSince time.Time
 	// usdUrgency is a credit pool's dollars at risk per hour until expiry;
 	// nil for a credit entry without a dollar balance.
 	usdUrgency *float64
@@ -1213,6 +1214,9 @@ func (p *selPlan) record() map[string]any {
 		}
 		if c.reason != "" {
 			row["reason"] = c.reason
+		}
+		if !c.creditSince.IsZero() {
+			row["since"] = c.creditSince.UTC().Format(time.RFC3339Nano)
 		}
 		if c.cap != "" {
 			row["cap"] = c.cap

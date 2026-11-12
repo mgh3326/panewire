@@ -223,6 +223,9 @@ func (p *JobDirTTL) decide(ctx context.Context, a *App, root, id string, panes j
 		if j, err = a.job(id); err != nil {
 			return keep("events-unreadable")
 		}
+		if _, pending := pendingCreditRejection(j); pending {
+			return keep("credit-publication-pending")
+		}
 		for _, ev := range j.Events {
 			if ev.when.After(newest) {
 				newest = ev.when
