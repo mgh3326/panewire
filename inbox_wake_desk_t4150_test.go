@@ -162,11 +162,45 @@ func TestInboxWakeDesignProvenGonePaneWithLiveJobKeepsLaneRoute(t *testing.T) {
 	}
 	r.h.mu.Unlock()
 	got := t4150Event(t, r, t3602Design)
-	t3602OneWake(t, got, "w1:design", t3602Wake(t3602Design, 1, "decision"))
+	t3602OneWake(t, got, "w1:job", t3602Wake(t3602Design, 1, "decision"))
 	for _, ev := range r.wakeEvents() {
 		if ev.Reason == "desk_fallback" {
 			t.Fatalf("live job was diverted to desk: %+v", ev)
 		}
+	}
+}
+
+func TestInboxWakeDesignProvenGonePaneWithUnroutableLiveJobStaysOwed(t *testing.T) {
+	r := newT3602Rig(t, "default")
+	routes := t4150BaseRoutes()
+	t4150Routes(t, r, routes)
+	t4150Snapshot(t, r, "w1:desk", "w1:workdesk", "w1:worker", "w1:review", "w1:trial", "w1:job")
+	obs, ok := r.h.observeNodePanes("host-a")
+	if !ok || r.h.laneProvablyGone(t3602Design, routes[t3602Design], obs) {
+		t.Fatal("initial absence did not seed the design row write time")
+	}
+	r.clock.advance(laneWriteSettle + time.Second)
+	t4150Snapshot(t, r, "w1:desk", "w1:workdesk", "w1:worker", "w1:review", "w1:trial", "w1:job")
+	r.h.mu.Lock()
+	r.h.jobs["job-4150-unroutable"] = &hubJobRecord{
+		HubActiveJob: HubActiveJob{JobID: "job-4150-unroutable", AgentLabel: t3602Design, OwnerLane: t3602Design, Pane: "w1:job", Epoch: 1},
+		Node:         "host-a",
+		LastSeen:     r.clock.Now(),
+	}
+	r.h.nodes["host-a"].agent = nil
+	r.h.mu.Unlock()
+	if got := t4150Event(t, r, t3602Design); len(got) != 0 {
+		t.Fatalf("unroutable live job injections=%+v", got)
+	}
+	if got := r.wakeEvents(); len(got) != 1 || got[0].Outcome != "skipped" || got[0].Reason != "unrouted" {
+		t.Fatalf("unroutable live job events=%+v", got)
+	}
+	r.h.inbox.wakes.mu.Lock()
+	state := r.h.inbox.wakes.lanes[t3602Design]
+	owed := state != nil && state.pending && state.unrouted
+	r.h.inbox.wakes.mu.Unlock()
+	if !owed {
+		t.Fatal("unroutable live job wake was not left owed")
 	}
 }
 
