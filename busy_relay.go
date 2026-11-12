@@ -362,6 +362,11 @@ func (manager *relayBusyManager) offer(parent context.Context, message hubOutbou
 	if message.Pane == relayCancelledPane {
 		return
 	}
+	// hk 4258: a trial lane's wake line goes to its Claude session instead of
+	// the pane; a miss falls through to the typed line below.
+	if manager.client.deliverWakeAsSessionMessage(parent, message) {
+		return
+	}
 	// Every lane-carrying inject is a fresh route observation — including
 	// replays that resolve to a different pane after a re-route. Recording it
 	// before the dedupe path returns early is what lets a later release judge

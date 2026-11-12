@@ -23,6 +23,10 @@ direct notification for the pane's owner after a default 60-second settle. It
 does not decide job completion or alter job lifecycle state. See the
 [idle-wake contract and isolated E2E runbook](docs/idle-wake.md).
 
+Claude seats start under their job id (`--name`). A trial, off by default, can
+deliver a lane's inbox wake line to its Claude Code session as a session message
+instead of typing it; see [Claude session names and session messages](docs/claude-session-message.md).
+
 Escalation `question` text is capped at 240 characters for hub relay; read the
 full question from the referenced events file (or its explicit report file).
 
