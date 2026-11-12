@@ -361,3 +361,31 @@ func TestClaudeSocketRegisterNeedsAPane(t *testing.T) {
 		t.Fatalf("--pane exited %d", code)
 	}
 }
+
+// A daemon started with no --inbox-root and no --hub-jobs-root has an empty
+// client root; it must read the registration where the hook wrote it.
+func TestClaudeWakeReadsDefaultRegistryRoot(t *testing.T) {
+	session := newFakeClaudeSession(t)
+	node := newClaudeWakeNode(t, "routing-policy")
+	root := t.TempDir()
+	t.Setenv("PANEWIRE_INBOX_ROOT", root)
+	node.client.jobsInboxRoot = ""
+	registerClaudeSocketAt(t, "routing-policy", session.path)
+	node.client.relayBusyManager().offer(t.Context(), wakeInject("routing-policy", 1, "decision"))
+	eventually(t, 2*time.Second, "the default-root registration to be used", func() bool { return len(session.messages()) == 1 })
+	if len(*node.typed) != 0 {
+		t.Fatalf("typed %q", *node.typed)
+	}
+}
+
+// registerClaudeSocketAt registers through the hook's own default-root path
+// (no --inbox-root), as a SessionStart hook does.
+func registerClaudeSocketAt(t *testing.T, lane, socket string) {
+	t.Helper()
+	t.Setenv(claudeSocketEnv, socket)
+	t.Setenv("HERDR_PANE_ID", "w:p4")
+	var out bytes.Buffer
+	if code := runClaudeSocketCLI([]string{"register", "--lane", lane}, &out, &out, time.Now); code != ExitOK {
+		t.Fatalf("register exited %d: %s", code, out.String())
+	}
+}

@@ -86,7 +86,9 @@ func (client *HubClient) deliverWakeAsSessionMessage(ctx context.Context, messag
 	if lane == "" {
 		return false
 	}
-	socket, err := readClaudeSocketRegistration(client.jobsInboxRoot, lane, message.Pane)
+	// The hook registers under the same default root as panewire emit, so a
+	// daemon started without --inbox-root or --hub-jobs-root reads it there.
+	socket, err := readClaudeSocketRegistration(emitInboxRoot(client.jobsInboxRoot), lane, message.Pane)
 	if err == nil {
 		err = postClaudeSessionMessage(ctx, socket, message.Text)
 	}
@@ -129,9 +131,11 @@ type claudeSessionContent struct {
 }
 
 // postClaudeSessionMessage writes one message to the socket, half-closes, and
-// waits briefly for the session to close its end, which it does once it has
-// read the line. Success means the line was written to the socket: not that it
-// was delivered to Claude, which the session decides by its own inbound rules.
+// waits briefly for the session to close its end (a live session does once it
+// has read the line). Success means the line was completely written to the
+// socket: neither that the session read it nor that it was delivered to Claude,
+// which the session decides by its own inbound rules. A session that holds the
+// connection open past the wait still counts as written.
 func postClaudeSessionMessage(ctx context.Context, socket, text string) error {
 	if err := validClaudeSocketPath(socket); err != nil {
 		return err

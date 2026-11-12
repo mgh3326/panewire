@@ -79,7 +79,7 @@ not apply there.
 The post is one JSON line, the form Claude Code's own `--messaging-socket-path`
 banner prints: `{"type":"user","message":{"role":"user","content":"<line>"}}`.
 The node writes it, half-closes and waits up to 5 s for the session to close its
-end. The socket path and the text are never logged.
+end (not required for success). The socket path and the text are never logged.
 
 ### What a post from the node daemon does
 
@@ -122,8 +122,10 @@ Consequences:
 
 ### The delivery stage panewire reports
 
-Only **`reached_socket`**: the line was written to the session's socket and the
-session closed its end. It is logged by the node (`stage=reached_socket`), not
+Only **`reached_socket`**: the line was completely written to the session's socket.
+A live session closes its end once it has read the line, but a session that
+keeps the connection open past the 5 s wait still counts, so the stage is not
+proof that the session read it. It is logged by the node (`stage=reached_socket`), not
 written to the hub inbox. Claude Code gives a poster no acknowledgement: a
 message held for approval, denied, expired, dropped (rate limit, a repeated
 identical message, a full queue of 50) or simply unread by Claude looks like a
