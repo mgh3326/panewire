@@ -16,7 +16,7 @@ func TestHubSpawnDryRunRefusesArgTheNodeWouldDrop(t *testing.T) {
 		a, s, _, hub, _ := hubFixture(t, gitState{pushed: true}, "wk/feat", hubHosts())
 		s.DryRun, s.Profile, s.Host, s.OverrideReason, s.Effort, s.T, s.Label = true, "sonnet", "h1", "fixture", "high", "T1", "job-a"
 		s.Prompt = writeBrief(t, a)
-		a.Quota = &fakeQuota{LaunchValue: Launch{Profile: "sonnet", Effort: "high", ModelID: "sonnet-m", Gate: "default", Pool: "claude"}, GateDo: gatePools(map[string]string{"sonnet": "claude"})}
+		a.Quota = &fakeQuota{LaunchValue: Launch{Profile: "sonnet", Effort: "high", Grade: "A", ModelID: "sonnet-m", Gate: "default", Pool: "claude"}, GateDo: gatePools(map[string]string{"sonnet": "claude"})}
 		return a, s, hub
 	}
 
@@ -37,6 +37,53 @@ func TestHubSpawnDryRunRefusesArgTheNodeWouldDrop(t *testing.T) {
 	}
 	if out := a.Out.(interface{ String() string }).String(); !strings.Contains(out, "dry-run host=h1") {
 		t.Fatalf("valid dry-run did not reach h1: %q", out)
+	}
+}
+
+func TestHubSpawnDryRunRequiresEscalationOptIn(t *testing.T) {
+	a, s, _, hub, _ := hubFixture(t, gitState{pushed: true}, "wk/feat", hubHosts())
+	setHubAgyPresence(a)
+	s.DryRun, s.Profile, s.Host, s.OverrideReason, s.T, s.Label = true, "agy-sonnet46", "h1", "fixture", "T1", "job-a"
+	s.Containment = "hk:4174"
+	s.Prompt = writeBrief(t, a)
+	a.Quota = &fakeQuota{LaunchValue: Launch{Profile: "agy-sonnet46", ModelID: "claude-sonnet-4-6", Grade: "B", Gate: escalationGate, Pool: "agy"}, GateDo: gatePools(map[string]string{"agy-sonnet46": "agy"})}
+
+	err := a.Spawn(context.Background(), s)
+	if err == nil || exitCode(err) != exitSeatRefused || !strings.Contains(err.Error(), "agy-sonnet46 is a escalation rung; pass --allow-escalation") {
+		t.Fatalf("hub dry-run without escalation opt-in must match node refusal: %v", err)
+	}
+	if len(hub.spawns) != 0 {
+		t.Fatalf("dry-run reached the hub: %v", hub.spawns)
+	}
+
+	a, s, _, hub, _ = hubFixture(t, gitState{pushed: true}, "wk/feat", hubHosts())
+	setHubAgyPresence(a)
+	s.DryRun, s.Profile, s.Host, s.OverrideReason, s.T, s.Label, s.AllowEscalation = true, "agy-sonnet46", "h1", "fixture", "T1", "job-a", true
+	s.Containment = "hk:4174"
+	s.Prompt = writeBrief(t, a)
+	a.Quota = &fakeQuota{LaunchValue: Launch{Profile: "agy-sonnet46", ModelID: "claude-sonnet-4-6", Grade: "B", Gate: escalationGate, Pool: "agy"}, GateDo: gatePools(map[string]string{"agy-sonnet46": "agy"})}
+	if err := a.Spawn(context.Background(), s); err != nil {
+		t.Fatalf("hub dry-run with escalation opt-in was refused: %v", err)
+	}
+	if out := a.Out.(interface{ String() string }).String(); !strings.Contains(out, "dry-run host=h1") {
+		t.Fatalf("admitted hub dry-run did not print its preview: %q", out)
+	}
+	if len(hub.spawns) != 0 {
+		t.Fatalf("dry-run reached the hub: %v", hub.spawns)
+	}
+}
+
+func setHubAgyPresence(a *App) {
+	source := a.Source.(*fakePlacementSource)
+	key := "agy:0123456789abcdef"
+	source.accounts[key] = SharedAccount{Key: key, Observed: true, Fresh: true, MeasuredAt: a.Now()}
+	base := source.presenceDo
+	source.presenceDo = func() []PresenceRecord {
+		records := base()
+		for _, host := range []string{"h1", "h2"} {
+			records = append(records, PresenceRecord{HostID: host, AccountKey: key, LastSeen: a.Now()})
+		}
+		return records
 	}
 }
 

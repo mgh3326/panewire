@@ -1295,6 +1295,11 @@ func (a *App) placeAuto(ctx context.Context, s Spawn, brief string) (bool, map[s
 		if !ok {
 			return candResult{rc: exitConfig, note: "quota_request_unavailable"}
 		}
+		if s.DryRun {
+			if err := a.checkDryRunAdmission(ctx, s, c.cfg); err != nil {
+				return candResult{stop: err}
+			}
+		}
 		key, acc := a.remoteAccount(ctx, pool, c.name, c.cfg)
 		j, err := a.judgeHost(ctx, qr, pool, c.name, false, key, acc)
 		c.judgment = &j
@@ -1460,8 +1465,18 @@ func (a *App) placeForced(ctx context.Context, s Spawn, brief string) (bool, map
 	if seat, ok := a.Policy.Profiles[s.Profile]; ok && seat.Capability != "standard" && !boolean(h, seat.Capability, false) {
 		return true, nil, fail(exitConfig, "host %s lacks capability %s", s.Host, seat.Capability)
 	}
-	if _, _, e := a.taskPrecheck(ctx, s); e != nil {
+	task, _, e := a.taskPrecheck(ctx, s)
+	if e != nil {
 		return true, nil, e
+	}
+	s.TaskGrade = s.Grade
+	if s.TaskGrade == "" {
+		if m := taskMarker.FindStringSubmatch(task.Title); m != nil {
+			s.TaskGrade = strings.ToUpper(m[1])
+		}
+	}
+	if topRoutingRole(s.RoutingRole) {
+		s.TaskGrade = ""
 	}
 	emit := func() {
 		if s.DryRun {
@@ -1487,6 +1502,11 @@ func (a *App) placeForced(ctx context.Context, s Spawn, brief string) (bool, map
 		return true, nil, fail(code, "quota pool for %s@%s unresolved: %v", s.Profile, qr.Effort, e)
 	}
 	spawn := func() candResult {
+		if s.DryRun {
+			if err := a.checkDryRunAdmission(ctx, s, c.cfg); err != nil {
+				return candResult{stop: err}
+			}
+		}
 		key, acc := a.remoteAccount(ctx, pool, c.name, c.cfg)
 		if s.AccountKey != "" && key != s.AccountKey {
 			return candResult{stop: fail(exitAuthUnavailable, "AUTH_UNAVAILABLE: target no longer holds the selected account")}

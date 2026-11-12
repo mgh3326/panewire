@@ -706,7 +706,9 @@ func (in admissionInputs) judgeWith(req admissionRequest, allowUnrated bool) adm
 				continue
 			}
 			if in.judge(admissionRequest{Profile: other.Profile, Effort: other.Effort, Role: req.Role}).OK {
-				return d.refuse(gateBlocked, "escalation: same-grade ordinary alternative available")
+				d = d.refuse(gateBlocked, "escalation: same-grade ordinary alternative available")
+				d.GateCode = gateReasonCode(d.Reason)
+				return d
 			}
 		}
 	}
