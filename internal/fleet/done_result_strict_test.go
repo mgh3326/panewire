@@ -43,6 +43,27 @@ func strictDoneFixture(t *testing.T, state string) (*App, *fakeRunner, *fakeHK, 
 	return a, runner, h, docs, report, result
 }
 
+func strictClaimedWithoutReceiptFixture(t *testing.T) (*App, *fakeHK, string, string) {
+	t.Helper()
+	a := testApp(t)
+	runner := ledgerRunner(t, a)
+	docs := useFakeHK(t)
+	docs.Handle(hkCommentAnswer)
+	noHKCLI(t, runner)
+	h := newFakeHK(t)
+	h.claimJob("j", float64(42), "test-host")
+	a.JobStore = h.client()
+	seedLedger(t, a, "j")
+	fixtureNow := a.Now
+	a.Now = func() time.Time { return fixtureNow().Add(3 * time.Second) }
+	putEvent(t, a, "j", "job.claim", map[string]any{"owner_lane": "owner", "parent_lane": "parent", "task_id": "42", "role": "reviewer"})
+	report := filepath.Join(a.Jobs, "j", "report.md")
+	result := filepath.Join(a.Jobs, "j", "findings.json")
+	writeReport(t, report, "final report\n")
+	writeReport(t, result, `{"findings":[{"severity":"high"}]}`)
+	return a, h, report, result
+}
+
 func seedDuplicateCompletion(t *testing.T, a *App, report string) {
 	t.Helper()
 	body, err := os.ReadFile(report)
@@ -201,14 +222,7 @@ func TestDoneResultStrictRepairsClaimedFromReceipt(t *testing.T) {
 }
 
 func TestDoneResultStrictClaimedWithoutReceiptDoesNotRepair(t *testing.T) {
-	a, _, h, _, report, result := strictDoneFixture(t, "claimed")
-	// Replace the fixture's spawned receipt with only its claim event.
-	for _, event := range mustEvents(t, a, "j") {
-		if event.Kind == "job.spawned" {
-			_ = a.event(context.Background(), "j", "job.revoked", map[string]any{"reason": "fixture"})
-			break
-		}
-	}
+	a, h, report, result := strictClaimedWithoutReceiptFixture(t)
 	err := strictDone(t, a, report, result)
 	assertStrictFailure(t, a, err, exitStateConflict, "no_spawn_evidence")
 	for _, body := range h.putBodies {
