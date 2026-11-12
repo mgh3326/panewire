@@ -13,32 +13,21 @@ import (
 // Stop is evidence from a single visible screen, not proof that sending
 // input to the pane is safe. An unknown reset is represented by a zero time.
 type Stop struct {
-	Pool              string
-	Reset             time.Time
-	Choice            bool
-	CreditExhausted   bool
-	CreditExhaustedAt time.Time
+	Pool   string
+	Reset  time.Time
+	Choice bool
 }
 
 var (
 	// devin matches the phrase anywhere in the status line: the live screen
 	// prefixes it with "▲ Something went wrong — ".
-	devin            = regexp.MustCompile(`(?i)reached free model rate limit(?:\s|[·.…:]|$)`)
-	apiErrorStart    = regexp.MustCompile(`(?i)^api error:\s*[0-9]{3}\b`)
-	plainErrorHeader = regexp.MustCompile(`(?i)^api error:\s*(?:400|429)\s*(?:invalid_request_error)?\s*$`)
-	providerErrType  = regexp.MustCompile(`(?i)^[a-z][a-z0-9_]*_error\b[\s:,-]*`)
-	providerErrToken = regexp.MustCompile(`(?i)^[a-z][a-z0-9_]*$`)
-	jsonScalar       = regexp.MustCompile(`^(?:-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?|true|false|null)[,}\]]?$`)
-	requestOpen      = regexp.MustCompile(`^\[\s*request\s*:\s*[a-z0-9_-]*$`)
-	requestClosed    = regexp.MustCompile(`^\[\s*request\s*:\s*[a-z0-9_-]+\s*\][\s.,;:!?]*$`)
-	anthropicCredit  = regexp.MustCompile(`(?is)^api error:\s*[0-9]{3}\b.*credit balance is too low to access the anthropic api`)
-	openAICredit     = regexp.MustCompile(`(?is)^api error:\s*[0-9]{3}\b.*(insufficient_\s*quota|exceeded\s*your\s*current\s*quota)`)
-	claude           = regexp.MustCompile(`(?i)^you've hit your (?:(?:weekly|session) )?limit(?:\s|[·.:]|$)`)
-	codexSignal      = regexp.MustCompile(`(?i)^you've hit your usage limit[.·:].*try again at`)
-	codex            = regexp.MustCompile(`(?i)try again at\s+([0-9]{1,2}:[0-9]{2}\s*(?:AM|PM)?)(?:\s+(UTC|GMT|Z))?`)
-	atClock          = regexp.MustCompile(`(?i)\bat\s+([0-9]{1,2}:[0-9]{2}\s*(?:AM|PM)?)(?:\s+(UTC|GMT|Z))?`)
-	relative         = regexp.MustCompile(`(?i)reset(?:s)? in\s+(\d+)\s*(seconds?|minutes?|hours?)`)
-	dateReset        = regexp.MustCompile(`(?i)resets?\s+([A-Za-z]{3,9})\s+(\d{1,2}),?\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm))(?:\s+(UTC|GMT|Z)|\s*\(([A-Za-z_]+/[A-Za-z_]+)\))?`)
+	devin       = regexp.MustCompile(`(?i)reached free model rate limit(?:\s|[·.…:]|$)`)
+	claude      = regexp.MustCompile(`(?i)^you've hit your (?:(?:weekly|session) )?limit(?:\s|[·.:]|$)`)
+	codexSignal = regexp.MustCompile(`(?i)^you've hit your usage limit[.·:].*try again at`)
+	codex       = regexp.MustCompile(`(?i)try again at\s+([0-9]{1,2}:[0-9]{2}\s*(?:AM|PM)?)(?:\s+(UTC|GMT|Z))?`)
+	atClock     = regexp.MustCompile(`(?i)\bat\s+([0-9]{1,2}:[0-9]{2}\s*(?:AM|PM)?)(?:\s+(UTC|GMT|Z))?`)
+	relative    = regexp.MustCompile(`(?i)reset(?:s)? in\s+(\d+)\s*(seconds?|minutes?|hours?)`)
+	dateReset   = regexp.MustCompile(`(?i)resets?\s+([A-Za-z]{3,9})\s+(\d{1,2}),?\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm))(?:\s+(UTC|GMT|Z)|\s*\(([A-Za-z_]+/[A-Za-z_]+)\))?`)
 )
 
 // Classify reports the quota stop shown as the last activity of screen.
@@ -51,11 +40,8 @@ func Classify(screen string, now time.Time, local *time.Location) (Stop, bool) {
 		return Stop{}, false
 	}
 	screen = block
-	providerPool := providerCreditPool(screen)
 	var out Stop
 	switch {
-	case providerPool != "":
-		out.Pool, out.CreditExhausted, out.CreditExhaustedAt = providerPool, true, now.UTC()
 	case devin.MatchString(screen):
 		out.Pool = "devin-free"
 	case codexSignal.MatchString(screen) && (strings.Contains(strings.ToLower(screen), "limit") || strings.Contains(strings.ToLower(screen), "quota")):
@@ -142,16 +128,13 @@ func Classify(screen string, now time.Time, local *time.Location) (Stop, bool) {
 	return out, true
 }
 
-// statusBlock accepts only an exact CLI status line as the last activity.
-// Provider error continuations stay inside an open JSON body.
+// statusBlock accepts only an exact CLI status line as the last
+// activity; later ordinary output, source code, or a completed answer invalidates it.
 func statusBlock(screen string) (string, bool) {
 	lines := strings.Split(strings.ReplaceAll(screen, "\r", ""), "\n")
 	for i := len(lines) - 1; i >= 0; i-- {
 		line := strings.TrimSpace(lines[i])
-		line = trimScreenBorder(line)
-		if apiErrorStart.MatchString(line) {
-			return providerErrorBlock(lines, i)
-		}
+		line = strings.TrimLeft(line, "│┃•⚠️ ")
 		if devin.MatchString(line) || claude.MatchString(line) || codexSignal.MatchString(line) {
 			if len(lines)-i > 16 {
 				return "", false
@@ -167,115 +150,8 @@ func statusBlock(screen string) (string, bool) {
 	return "", false
 }
 
-func providerErrorBlock(lines []string, start int) (string, bool) {
-	border := screenBorderPrefix(lines[start])
-	if len(lines)-start > 16 || border == '┌' {
-		return "", false
-	}
-	blockLines := []string{trimScreenBorder(strings.TrimSpace(lines[start]))}
-	jsonBody := hasProviderJSONBody(blockLines[0])
-	end := len(lines)
-	promptFound := false
-	for i := start + 1; i < len(lines); i++ {
-		line := strings.TrimSpace(lines[i])
-		content := trimScreenBorder(line)
-		if promptLine(line) {
-			end, promptFound = i, true
-			break
-		}
-		if apiErrorStart.MatchString(content) {
-			return "", false
-		}
-		if chromeLine(line) {
-			continue
-		}
-		if !jsonBody && plainHeaderRowsAreErrorType(blockLines) && providerJSONStart(content) {
-			jsonBody = true
-			blockLines = append(blockLines, content)
-			continue
-		}
-		currentBlock := strings.Join(blockLines, "\n")
-		json := jsonProgress{}
-		if jsonBody {
-			json = scanJSON(currentBlock)
-		}
-		joined := currentBlock + "\n" + content
-		if json.open {
-			if json.inString {
-				currentText := currentJSONString(currentBlock)
-				continuedText := jsonStringContinuationText(content)
-				if providerTextPrefix(currentText) && providerCreditPool(currentBlock) == "" && !providerTextPrefix(currentText+continuedText) && !providerTextComplete(currentText+continuedText) {
-					return "", false
-				}
-				blockLines = append(blockLines, content)
-				continue
-			}
-			if jsonContinuation(content) || jsonScalarContinuation(content, json) {
-				blockLines = append(blockLines, content)
-				continue
-			}
-		}
-		currentPlain := plainProviderText(currentBlock)
-		joinedPlain := plainProviderText(joined)
-		plainTextContinuation := providerTextPrefix(joinedPlain) && len(compactProviderText(joinedPlain)) > len(compactProviderText(currentPlain))
-		plainTextContinuation = plainTextContinuation || !providerTextComplete(currentPlain) && providerTextComplete(joinedPlain)
-		plainContinuation := plainTextContinuation || anthropicRequestBracketOpen(currentBlock) && anthropicRequestBracketComplete(joined)
-		plainContinuation = plainContinuation || providerErrorTypeContinuation(blockLines, content)
-		plainMessageStarted := providerTextPrefix(plainProviderText(blockLines[0])) || providerTextComplete(plainProviderText(blockLines[0])) || anthropicRequestBracketOpen(blockLines[0]) || plainErrorHeader.MatchString(blockLines[0])
-		if !jsonBody && plainMessageStarted && plainContinuation && (border == 0 || screenBorderPrefix(line) == border || anthropicRequestBracketOpen(currentBlock)) {
-			blockLines = append(blockLines, content)
-			continue
-		}
-		return "", false
-	}
-	if !promptFound {
-		return "", false
-	}
-	block := strings.Join(blockLines, " ")
-	json := jsonProgress{}
-	if jsonBody {
-		json = scanJSON(strings.Join(blockLines, "\n"))
-	}
-	if json.started && json.open {
-		return "", false
-	}
-	if !jsonBody && !providerTextPrefix(plainProviderText(block)) && !providerTextComplete(plainProviderText(block)) && !anthropicRequestBracketComplete(block) {
-		return "", false
-	}
-	for _, tail := range lines[end:] {
-		if !chromeLine(tail) {
-			return "", false
-		}
-	}
-	if providerCreditPool(block) == "" {
-		return "", false
-	}
-	return block, true
-}
-
-func providerCreditPool(block string) string {
-	if anthropicCredit.MatchString(block) {
-		return "anthropic-api"
-	}
-	if openAICredit.MatchString(block) {
-		return "openai-api"
-	}
-	compact := strings.Join(strings.Fields(block), "")
-	compact = strings.ToLower(compact)
-	if strings.HasPrefix(compact, "apierror:") {
-		if strings.Contains(compact, "creditbalanceistoolowtoaccesstheanthropicapi") {
-			return "anthropic-api"
-		}
-		if strings.Contains(compact, "insufficient_quota") || strings.Contains(compact, "exceededyourcurrentquota") {
-			return "openai-api"
-		}
-	}
-	return ""
-}
-
 func chromeLine(line string) bool {
 	line = strings.TrimSpace(line)
-	line = trimScreenBorder(line)
 	if line == "" {
 		return true
 	}
@@ -297,339 +173,4 @@ func chromeLine(line string) bool {
 		}
 	}
 	return false
-}
-
-func promptLine(line string) bool {
-	line = trimScreenBorder(strings.TrimSpace(line))
-	lower := strings.ToLower(line)
-	for _, glyph := range []string{"❯", "❭", "›"} {
-		if line == glyph || strings.HasPrefix(lower, strings.ToLower(glyph+" ask ")) {
-			return true
-		}
-	}
-	return false
-}
-
-func jsonContinuation(line string) bool {
-	line = strings.TrimSpace(line)
-	if line == "" {
-		return false
-	}
-	return strings.ContainsRune(`{}[],:"`, []rune(line)[0])
-}
-
-func jsonScalarContinuation(line string, state jsonProgress) bool {
-	return state.expectValue && jsonScalar.MatchString(strings.TrimSpace(line))
-}
-
-type jsonProgress struct {
-	started     bool
-	open        bool
-	inString    bool
-	expectValue bool
-}
-
-func scanJSON(block string) jsonProgress {
-	var state jsonProgress
-	depth, inString, escaped := 0, false, false
-	var containers []rune
-	for _, r := range block {
-		if !state.started {
-			if r == '{' || r == '[' {
-				state.started = true
-				depth++
-				containers = append(containers, r)
-				state.expectValue = r == '['
-			}
-			continue
-		}
-		if escaped {
-			escaped = false
-			continue
-		}
-		if inString && r == '\\' {
-			escaped = true
-			continue
-		}
-		if r == '"' {
-			inString = !inString
-			if inString {
-				state.expectValue = false
-			}
-			continue
-		}
-		if !inString {
-			switch r {
-			case '{', '[':
-				depth++
-				containers = append(containers, r)
-				state.expectValue = r == '['
-			case '}':
-				depth--
-				if len(containers) > 0 {
-					containers = containers[:len(containers)-1]
-				}
-				state.expectValue = false
-			case ']':
-				depth--
-				if len(containers) > 0 {
-					containers = containers[:len(containers)-1]
-				}
-				state.expectValue = false
-			case ':':
-				state.expectValue = true
-			case ',':
-				state.expectValue = len(containers) > 0 && containers[len(containers)-1] == '['
-			case ' ', '\t', '\n', '\r':
-			default:
-				state.expectValue = false
-			}
-		}
-	}
-	state.open = depth != 0 || inString
-	state.inString = inString
-	return state
-}
-
-func plainProviderText(block string) string {
-	body := strings.TrimSpace(apiErrorStart.ReplaceAllString(block, ""))
-	fields := strings.Fields(body)
-	var token strings.Builder
-	for i, fragment := range fields {
-		if !providerErrToken.MatchString(fragment) {
-			break
-		}
-		token.WriteString(fragment)
-		value := token.String()
-		if providerErrType.MatchString(value) {
-			return strings.Join(fields[i+1:], " ")
-		}
-		if !providerErrTypePrefix(strings.ToLower(value)) {
-			break
-		}
-	}
-	return providerErrType.ReplaceAllString(body, "")
-}
-
-func providerErrorTypeContinuation(lines []string, content string) bool {
-	if len(lines) == 0 || !plainErrorHeader.MatchString(lines[0]) {
-		return false
-	}
-	var token strings.Builder
-	for _, line := range append(append([]string(nil), lines[1:]...), content) {
-		fragment := strings.TrimSpace(line)
-		if !providerErrToken.MatchString(fragment) {
-			return false
-		}
-		token.WriteString(fragment)
-	}
-	return providerErrTypePrefix(strings.ToLower(token.String()))
-}
-
-func plainHeaderRowsAreErrorType(lines []string) bool {
-	if len(lines) == 0 || !plainErrorHeader.MatchString(lines[0]) {
-		return false
-	}
-	if len(lines) == 1 {
-		return true
-	}
-	var token strings.Builder
-	for _, line := range lines[1:] {
-		fragment := strings.TrimSpace(line)
-		if !providerErrToken.MatchString(fragment) {
-			return false
-		}
-		token.WriteString(fragment)
-	}
-	value := strings.ToLower(token.String())
-	if providerErrType.MatchString(value) {
-		return true
-	}
-	for _, expected := range providerErrorTypes {
-		if value == expected {
-			return true
-		}
-	}
-	return false
-}
-
-func providerErrTypePrefix(value string) bool {
-	if providerErrType.MatchString(value) {
-		return true
-	}
-	for _, expected := range providerErrorTypes {
-		if strings.HasPrefix(expected, value) {
-			return true
-		}
-	}
-	return false
-}
-
-var providerErrorTypes = []string{
-	"invalid_request_error",
-	"authentication_error",
-	"permission_error",
-	"not_found_error",
-	"rate_limit_error",
-	"api_error",
-	"server_error",
-	"overloaded_error",
-}
-
-func providerJSONStart(line string) bool {
-	body := strings.TrimSpace(plainProviderText(line))
-	if body == "{" || body == "[" {
-		return true
-	}
-	return (strings.HasPrefix(body, "{") || strings.HasPrefix(body, "[")) && strings.ContainsRune(body, '"')
-}
-
-func jsonStringContinuationText(content string) string {
-	var text strings.Builder
-	escaped := false
-	for _, r := range content {
-		if escaped {
-			text.WriteRune(r)
-			escaped = false
-			continue
-		}
-		if r == '\\' {
-			escaped = true
-			continue
-		}
-		if r == '"' {
-			break
-		}
-		text.WriteRune(r)
-	}
-	if escaped {
-		text.WriteRune('\\')
-	}
-	return text.String()
-}
-
-func hasProviderJSONBody(line string) bool {
-	body := plainProviderText(line)
-	return strings.HasPrefix(strings.TrimSpace(body), "{") || strings.HasPrefix(strings.TrimSpace(body), "[")
-}
-
-func providerTextPrefix(message string) bool {
-	value := compactProviderText(message)
-	if value == "" {
-		return false
-	}
-	for _, expected := range []string{
-		"yourcreditbalanceistoolowtoaccesstheanthropicapipleasegotoplansbillingtoupgradeorpurchasecredits",
-		"insufficientquota",
-		"insufficientquotapleasecheckyourplanandbillingdetails",
-		"youexceededyourcurrentquota",
-		"youexceededyourcurrentquotapleasecheckyourplanandbillingdetails",
-		"youexceededyourcurrentquotapleasecheckyourplanandbillingdetailsformoreinformationonthiserrorreadthedocs",
-		"exceededyourcurrentquotapleasecheckyourplanandbillingdetails",
-		"exceededyourcurrentquotapleasecheckyourplanandbillingdetailsformoreinformationonthiserrorreadthedocs",
-	} {
-		if strings.HasPrefix(expected, value) {
-			return true
-		}
-	}
-	return false
-}
-
-func providerTextComplete(message string) bool {
-	value := compactProviderText(message)
-	for _, prefix := range []string{
-		"yourcreditbalanceistoolowtoaccesstheanthropicapi",
-		"insufficientquota",
-		"youexceededyourcurrentquota",
-		"exceededyourcurrentquota",
-	} {
-		if strings.HasPrefix(value, prefix) {
-			return true
-		}
-	}
-	return false
-}
-
-func compactProviderText(message string) string {
-	var compact strings.Builder
-	for _, r := range strings.ToLower(message) {
-		if r >= 'a' && r <= 'z' || r >= '0' && r <= '9' {
-			compact.WriteRune(r)
-		}
-	}
-	return compact.String()
-}
-
-func anthropicRequestBracketOpen(block string) bool {
-	tail, ok := anthropicRequestTail(block)
-	return ok && requestOpen.MatchString(tail)
-}
-
-func anthropicRequestBracketComplete(block string) bool {
-	tail, ok := anthropicRequestTail(block)
-	return ok && requestClosed.MatchString(tail)
-}
-
-func anthropicRequestTail(block string) (string, bool) {
-	body := strings.ToLower(strings.Join(strings.Fields(plainProviderText(block)), " "))
-	message := "your credit balance is too low to access the anthropic api"
-	start := strings.Index(body, message)
-	if start < 0 {
-		return "", false
-	}
-	tail := strings.TrimLeft(body[start+len(message):], " .,:;!?")
-	return tail, true
-}
-
-func currentJSONString(block string) string {
-	start := strings.IndexAny(block, "{")
-	if start < 0 {
-		return ""
-	}
-	inString, escaped := false, false
-	var value strings.Builder
-	for _, r := range block[start:] {
-		if escaped {
-			value.WriteRune(r)
-			escaped = false
-			continue
-		}
-		if inString && r == '\\' {
-			escaped = true
-			continue
-		}
-		if r == '"' {
-			if inString {
-				inString = false
-				value.Reset()
-			} else {
-				inString = true
-				value.Reset()
-			}
-			continue
-		}
-		if inString {
-			value.WriteRune(r)
-		}
-	}
-	if !inString {
-		return ""
-	}
-	return value.String()
-}
-
-func screenBorderPrefix(line string) rune {
-	line = strings.TrimLeft(line, " \t")
-	if line == "" {
-		return 0
-	}
-	r := []rune(line)[0]
-	if strings.ContainsRune("│┃┌└|", r) {
-		return r
-	}
-	return 0
-}
-
-func trimScreenBorder(line string) string {
-	return strings.TrimLeft(line, "│┃┌┐└┘╭╮╰╯|•⚠️ ")
 }

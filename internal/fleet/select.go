@@ -191,10 +191,9 @@ type selCand struct {
 	risk   bool
 	unused *float64
 	// creditPool identifies a prepaid pool; credit records its expiry reading.
-	creditPool           bool
-	credit               *creditFinal
-	creditExhaustedSince time.Time
-	staleCredit          bool
+	creditPool  bool
+	credit      *creditFinal
+	staleCredit bool
 	// usdUrgency is a credit pool's dollars at risk per hour until expiry;
 	// nil for a credit entry without a dollar balance.
 	usdUrgency *float64
@@ -873,14 +872,6 @@ func (a *App) selectFor(ctx context.Context, s Spawn, req selReq) (*selPlan, err
 						p.degraded = append(p.degraded, "credit_balance_unavailable")
 					}
 				}
-				if snapshot != nil {
-					if exhaustedAt := snapshot.CreditExhausted[row.Pool]; !exhaustedAt.IsZero() &&
-						(view.Credit == nil || !view.Credit.MeasuredAt.After(exhaustedAt)) {
-						x.creditExhaustedSince = exhaustedAt
-						x.reason, x.code, x.outcome = "provider_credit_exhausted", outcomeQuotaExhausted, "dropped:provider_credit_exhausted"
-						continue
-					}
-				}
 				p.classify(&x, view)
 				if x.reason == "" {
 					pending = append(pending, &x)
@@ -1254,9 +1245,6 @@ func (p *selPlan) record() map[string]any {
 		}
 		if c.credit != nil {
 			row["credit"] = c.credit.record()
-		}
-		if !c.creditExhaustedSince.IsZero() {
-			row["credit_exhausted_since"] = c.creditExhaustedSince.UTC().Format(time.RFC3339)
 		}
 		if c.tier >= 0 {
 			// Ranked candidates state how they were ordered: by dollars at

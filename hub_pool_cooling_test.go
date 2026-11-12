@@ -49,34 +49,6 @@ func TestQuotaStopCoolingRelayAndExpiry(t *testing.T) {
 	}
 }
 
-func TestProviderCreditExhaustionRelaysToSharedFleetState(t *testing.T) {
-	now := time.Now().UTC().Truncate(time.Second)
-	root := t.TempDir()
-	dir := filepath.Join(root, "jobs", "credit-job", "events")
-	if err := os.MkdirAll(dir, 0700); err != nil {
-		t.Fatal(err)
-	}
-	event := map[string]any{"kind": "job.lost", "created_at": now.Format(time.RFC3339), "payload": map[string]any{
-		"reason": "quota_stop", "pool": "anthropic-api", "provider_credit_exhausted": true,
-	}}
-	b, _ := json.Marshal(event)
-	if err := os.WriteFile(filepath.Join(dir, "00001-job.lost.json"), b, 0600); err != nil {
-		t.Fatal(err)
-	}
-	events := scanHubRelayEvents(root)
-	if len(events) != 1 || !strings.Contains(events[0].Reason, "provider_credit_exhausted=true") {
-		t.Fatalf("events: %+v", events)
-	}
-	h := &HubServer{}
-	if !h.observePoolCooling(events[0].Reason, now) {
-		t.Fatal("provider exhaustion was not recognized")
-	}
-	got := h.fleetSnapshot(now).CreditExhausted["anthropic-api"]
-	if !got.Equal(now) {
-		t.Fatalf("exhaustion time = %s, want %s", got, now)
-	}
-}
-
 func TestOwnerlessQuotaStopAcknowledgedOnce(t *testing.T) {
 	_, hk, closeServer := newFakeHandoffkeep(t)
 	defer closeServer()

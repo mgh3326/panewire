@@ -240,9 +240,6 @@ func (a *App) watch(ctx context.Context, args []string) error {
 		// every poll, moving the grace deadline each time.
 		if present && !pending && !handOff.active {
 			if stop, ok := a.quotaStopped(ctx, j, paneAgent, &screenRead); ok {
-				if stop.CreditExhausted {
-					return a.quotaStopLost(ctx, j, stop, true)
-				}
 				if a.QuotaHandOffGrace <= 0 {
 					return a.quotaStopLost(ctx, j, stop, true)
 				}

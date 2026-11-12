@@ -60,10 +60,7 @@ subscription quota. Entries with only a percentage never become stale because
 they have no dollar source to age; they continue to rank by remaining percent
 per hour. A configured total supplies a dollar source for an entry with only a
 percentage. Plan output records `state=stale` and `stale_since` for aged dollar
-balances. Provider exhaustion reported by an omp pane
-ends the job with `quota_stop`, and the hub's `/v1/state` exposes
-`pool_credit_exhausted` until a newer manual entry is measured. Plan output
-records `credit_exhausted_since` for a blocked pool.
+balances.
 
 Selection walks the ranked hosts twice. Pass 1 tries every candidate except a
 subscription pool paced behind credit (a subscription on pace to use up its

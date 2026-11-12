@@ -488,7 +488,6 @@ type HubServer struct {
 	prometheusBasicPass              string
 	placementCache                   placementCache
 	poolCooling                      map[string]time.Time
-	poolCreditExhausted              map[string]time.Time
 	relayControl                     hubRelayControlState
 	reportRelayPath                  string
 	lanesNodeRowCap                  int

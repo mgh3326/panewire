@@ -51,11 +51,10 @@ type FleetStateReader interface {
 
 // FleetSnapshot is the subset of GET /v1/state panewire reads.
 type FleetSnapshot struct {
-	V               int                  `json:"v"`
-	At              time.Time            `json:"at"`
-	States          []FleetStateMessage  `json:"states"`
-	Cooling         map[string]time.Time `json:"pool_cooling,omitempty"`
-	CreditExhausted map[string]time.Time `json:"pool_credit_exhausted,omitempty"`
+	V       int                  `json:"v"`
+	At      time.Time            `json:"at"`
+	States  []FleetStateMessage  `json:"states"`
+	Cooling map[string]time.Time `json:"pool_cooling,omitempty"`
 }
 
 func (s *FleetSnapshot) poolCooling(pool string, now time.Time) bool {
