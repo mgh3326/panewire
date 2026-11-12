@@ -236,6 +236,7 @@ func (client *HubClient) runHubSpawn(parent context.Context, message hubOutbound
 	started := client.fleetClock()()
 	defer func() {
 		client.noteLaunchResult(message, result)
+		result = client.loginScreenSpawnRefusal(message, result)
 		if result.RC != 0 && spawnResultFix(result.StdoutTail) == "" {
 			fix := "Fix: " + nodeSpawnRefusalFix(result.Error, reason)
 			if strings.HasPrefix(result.StdoutTail, "stderr: ") {
@@ -401,6 +402,28 @@ func (client *HubClient) runHubSpawn(parent context.Context, message hubOutbound
 		result.StdoutTail = hubSpawnTailWithStderr(result.StdoutTail, stderr)
 		detail = fmt.Sprintf("rc=%d stderr: %s", result.RC, utf8SuffixWithin(stderr, fleetEventMaxDetail-32))
 	}
+	return result
+}
+
+const authUnavailableSpawnHint = "Sign in to the selected quota account on the executing host and refresh that pool with panewire quota refresh POOL, then retry."
+
+// loginScreenSpawnRefusal translates a verified rc=76 login-screen capture to
+// the refusal code understood by older hubs. It changes only the hub result;
+// the saved capture and job record remain the original spawn outcome.
+func (client *HubClient) loginScreenSpawnRefusal(message hubOutboundMessage, result hubSpawnResult) hubSpawnResult {
+	if result.RC != fleet.ExitSubmitUnconfirmed || !result.Retryable {
+		return result
+	}
+	kind := fleet.ProfileKind(hubSpawnArg(message.Args, "-m"))
+	job := result.JobID
+	if job == "" {
+		job = hubSpawnArg(message.Args, "--job")
+	}
+	if kind == "" || !client.launchShowedLoginScreen(kind, job) {
+		return result
+	}
+	result.RC = fleet.ExitAuthUnavailable
+	result.StdoutTail = hubSpawnTailWithStderr("", "AUTH_UNAVAILABLE: selected quota account login missing\nFix: "+authUnavailableSpawnHint)
 	return result
 }
 

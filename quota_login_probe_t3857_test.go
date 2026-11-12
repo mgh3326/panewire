@@ -377,6 +377,7 @@ func TestSubmitUnconfirmedAtTheLoginScreenMarksLoginMissingAtOnce(t *testing.T) 
 	})
 	t.Run("expires so the pair gets one more launch", func(t *testing.T) {
 		client := newClient()
+		client.nativeQuota = map[string]*nativeQuotaSource{"agy": agyTestSource("", agyLoginFiles(""), newAgyAPI(), agyFPForTest, false)}
 		now := client.now()
 		launchWithCapture(t, client, "agy-flash38-medium", fleet.ExitSubmitUnconfirmed, agyLoginScreen)
 		client.now = func() time.Time { return now.Add(nodeLoginScreenTTL + time.Second) }

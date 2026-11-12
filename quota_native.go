@@ -236,20 +236,36 @@ func (s *nativeQuotaSource) agyMeasurement() (shared.Measurer, func(context.Cont
 // a measurement published under the shared lease. With no shared store
 // configured it measures directly. The error is a *quota.Error.
 func (s *nativeQuotaSource) Refresh(ctx context.Context) (shared.Reading, error) {
+	reading, _, err := s.RefreshWithMeasurement(ctx)
+	return reading, err
+}
+
+// RefreshWithMeasurement reports whether this call measured successfully with
+// this host's credential. A shared fresh reading returns measured=false.
+func (s *nativeQuotaSource) RefreshWithMeasurement(ctx context.Context) (shared.Reading, bool, error) {
 	measure, accountFP, freshTTL := s.poolMeasurement()
+	measured := false
+	ownMeasure := func(ctx context.Context) (quota.Observation, error) {
+		observation, err := measure(ctx)
+		if err == nil {
+			measured = true
+		}
+		return observation, err
+	}
 	store, err := quotaStoreClient(s.SpawnConfigPath, s.StoreTransport)
 	if errors.Is(err, errQuotaStoreUnconfigured) {
-		return s.measureDirect(ctx, measure)
+		reading, err := s.measureDirect(ctx, ownMeasure)
+		return reading, measured, err
 	}
 	if err != nil {
-		return shared.Reading{}, quota.Fail(quota.ErrKindSharedUnavailable, "shared quota unavailable")
+		return shared.Reading{}, false, quota.Fail(quota.ErrKindSharedUnavailable, "shared quota unavailable")
 	}
 	fp, err := accountFP(ctx)
 	if err != nil {
-		return shared.Reading{}, err
+		return shared.Reading{}, false, err
 	}
 	if fp == "" {
-		return shared.Reading{}, quota.Fail(quota.ErrKindAccountUnknown, "no account key")
+		return shared.Reading{}, false, quota.Fail(quota.ErrKindAccountUnknown, "no account key")
 	}
 	s.flowOnce.Do(func() {
 		s.flow = &shared.Flow{Now: s.Now, FreshTTL: freshTTL, HostID: s.HostID, Wait: s.Wait}
@@ -260,7 +276,8 @@ func (s *nativeQuotaSource) Refresh(ctx context.Context) (shared.Reading, error)
 			s.flow.MaxWait = devinLeaseWait
 		}
 	})
-	return s.flow.Refresh(ctx, store, s.Pool+":"+fp, measure)
+	reading, err := s.flow.Refresh(ctx, store, s.Pool+":"+fp, ownMeasure)
+	return reading, measured, err
 }
 
 // nativeStatusPools are the pools panewire can measure itself, in the order
