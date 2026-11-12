@@ -108,12 +108,6 @@ func (a *App) staticDrop(row CatalogRow, req selReq, floor string, rungs rungInd
 	case slices.Contains(req.excludePools, row.Pool):
 		return "pool_excluded", "", nil
 	case cooling:
-		// Preserve any other static drop before treating the pool as cooling.
-		// In particular, unrated rows must not count as passing the floor and
-		// suppress the no_rung_at_floor retry.
-		if reason, _, _ := a.staticDrop(row, req, floor, rungs, false); reason != "" {
-			return reason, "", nil
-		}
 		return "pool_cooling", "", nil
 	}
 	name, seat, reason := a.seatFor(row, req)
