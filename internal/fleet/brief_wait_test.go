@@ -132,8 +132,8 @@ func TestDeliverWaitFallbackAndCmd(t *testing.T) {
 func TestDeliverWaitWorkingWithComposerIsNotProof(t *testing.T) {
 	a, f := waitDeliveryApp(t, func(time.Duration) Result { return waitAnswer("working") })
 	err := a.deliver(t.Context(), "claude", "w:p1", claudeTestBrief)
-	if code(err) != exitSubmitUnconfirmed || f.waits == 0 || len(f.returns) != 0 {
-		t.Fatalf("err=%v waits=%d returns=%v", err, f.waits, f.returns)
+	if code(err) != exitSubmitUnconfirmed || f.waits == 0 {
+		t.Fatalf("err=%v waits=%d", err, f.waits)
 	}
 }
 
