@@ -377,8 +377,32 @@ warning, records the skip and retries at the next window's end. A lane whose
 pane cannot be reached (no route, no connected node) is retried the same way,
 or at once when a node next says hello. Every wake writes one
 [fleet event](config.md#fleet-events) of kind `inbox_wake`: outcome `sent`
-with the lane class (`design`, `desk` or `trial`) or `startup` as the reason,
-or `skipped` with `count_failed` or `unrouted`.
+with the lane class (`design`, `desk` or `trial`), `startup` or `desk_fallback`
+as the reason, or `skipped` with `count_failed` or `unrouted`.
+
+### A design lane with no live pane
+
+When a design lane has no route row, its row has an empty pane, or a connected
+node's fresh pane snapshot proves its pane is gone, the hub sends that lane's
+one-line wake to `operator-desk` through the desk's own route. The line names
+the design lane and its unread count, and says `no pane: desk takes it`. The
+item remains unread in the design lane; it is not copied into the desk inbox.
+The paneless lane keeps its own wake window and retries. Each attempt checks
+the route again, so a pane that returns receives the next line itself.
+
+A missing row is paneless only when there is no live job record for the lane.
+A disconnected node or a stale, missing or incomplete snapshot does not prove
+the pane is gone, so the hub keeps today's route behavior. A row can outlive
+its pane when `laneHasForeignChild` (`lanes_write.go`) prevents release because
+a worker on another machine names the design lane as its parent. After a hub
+start, `writeOrSeed` (`lanes_release.go`) treats its first sighting of an
+existing row as a new write; a snapshot must arrive more than the 10-second
+settle interval after that sighting before absence can trigger desk fallback.
+
+If the desk has no usable route, the wake remains owed to the design lane and
+is retried at the window's end or the next node hello. A desk-routed line is
+an `inbox_wake` with outcome `sent` and reason `desk_fallback`; a startup line
+also includes `startup=true` in its detail.
 
 Worker lanes are unchanged: a job, reviewer, tester or counsel lane keeps
 body injection for READY, findings, an ESC answer, chat and everything else.
