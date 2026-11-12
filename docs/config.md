@@ -323,7 +323,7 @@ Failures never fall back to ssh (design D4):
 | 503 `spawn_capability_required` | Node predates `spawn_v2`: host refused, reason `hub_spawn_capability_required`. |
 | 503 `node_unavailable` | Node asleep or not accepting: treated like an unreachable host, so a wakeable host is woken (and waited for through the hub connection, never ssh). |
 | 401 / 403 / 400 | Host refused, reasons `hub_auth` / `hub_invalid_request` (exit 70 semantics). |
-| `checkout_refused:<outcome>` (rc 81) | Exit 81 naming the outcome (`branch-elsewhere`, `sha-missing`, `origin-mismatch`, `dirty`, `locked`, `git-failed`, `git_too_old`); no other host is tried. `busy` is retried once. |
+| `checkout_refused:<outcome>` (rc 81) | `dirty`, `sha-missing`, or `branch-elsewhere` with verified cleanup (`retryable`) moves `--host auto` to the next candidate; if all candidates refuse, the operation ends as `admission_refused` with the tried hosts (exit 80 when local spawning is disabled). Without `NextHost`, a checkout refusal exits 81 naming the outcome. Pinned hosts and unverified cleanup keep the refusal as the answer. `busy` is retried once on the same host. |
 | 504 pending, `lost`, node `timeout` | Exit 75: the node may still run the job, so nothing is spawned elsewhere. |
 | Node spawn rc 0 | The `OK pane=… job=…` receipt is printed with `host=NAME`. Other rc values follow the ssh rules (2, 70, 74, 75, 76, 79 and 82 stop the round; others refuse the host). |
 

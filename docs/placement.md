@@ -211,8 +211,10 @@ launch-failure backoff, which the hub observes itself, still applies to it.
 The hub sees every node answer to a spawn. It counts consecutive launch
 failures per (host, harness kind). Two in a row exclude that pair for 30
 minutes; a success clears the count at once. A busy checkout
-(`checkout_refused:busy`) is not a launch failure, and a profile with no
-harness kind is not counted. The constants live in `placement.json`:
+(`checkout_refused:busy`) and `dirty`, `sha-missing`, or `branch-elsewhere`
+checkout refusals are not launch failures, on either the
+terminal or next-host path. A profile with no harness kind is not counted. The
+constants live in `placement.json`:
 
 ```json
 {"launch_failure_threshold": 2, "launch_backoff_minutes": 30}
