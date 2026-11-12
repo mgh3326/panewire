@@ -232,10 +232,13 @@ on the node that sent it. The node names the emitting pane in the wire payload's
 `pane_id` (see [R21 direct lane events](r21-lane-event.md)), and the hub looks
 for a job that the sending node's latest heartbeat lists in that pane and that
 the hub holds as not completed and not orphaned on that node, with role
-`worker`. Every `panewire spawn` job claims as `worker`, whether it was spawned
-as a worker, tester, reviewer or counsel; a builder or captain is not one.
-Design sessions, the desk and workers share hosts, so the node match alone does
-not decide. Whatever the hub cannot attribute this way is delivered as before:
+`worker` and the owner lane equal to the lane the event is for. A worker of
+another design lane sharing the pane is not this lane's: its progress is not
+quieted for this lane. Every `panewire spawn` job claims as `worker`, whether
+it was spawned as a worker, tester, reviewer or counsel; a builder or captain
+is not one. Design sessions, the desk and workers share hosts, so the node
+match alone does not decide. Whatever the hub cannot attribute this way is
+delivered as before:
 
 - a `lane.event` with no `pane_id` (an older node, or a hub that has not
   advertised it to the node yet);

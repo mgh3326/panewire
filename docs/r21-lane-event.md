@@ -39,7 +39,7 @@ Without `--pane`, the command records the pane named by `HERDR_PANE_ID`, if any.
 The node sends that pane to the hub as the wire payload's `pane_id`, the
 emitting pane, so a design lane can keep a worker's own progress in its inbox
 (see [quiet delivery](quiet-delivery.md), "Worker results stay in a design
-lane's inbox"). It is bounded to 128 bytes with no control byte; a pane over the
+lane's inbox"). It is bounded to 128 bytes with no control byte (below 0x20, or DEL); a pane over the
 bound is sent as no pane, never cut. A node's own notice about a pane, a stall
 notice (`stall:` event id) or an idle-wake, sends none. The hub reads a
 `pane_id` it cannot use as no pane.
