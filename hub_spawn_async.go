@@ -408,17 +408,23 @@ type directSpawnTransport struct {
 
 // nextHostRefusals are the refusals that say only that this host cannot run the
 // request now. cwd_unmapped is answered before any checkout or engine call, and
-// the hub cannot see a node's spawn.json to rule the node out first. The rest
-// are the first-run refusals a person clears once on the host: a dialog the
-// engine stopped at (hooks review, workspace trust, the omp setup wizard) and a
-// missing login. The reason names the engine's code as spawnResultReason
-// writes it. docs/placement.md, "Readiness".
+// the hub cannot see a node's spawn.json to rule the node out first. The checkout
+// refusals identify host-local state or a missing branch; the other entries are
+// first-run refusals a person clears once on the host. The reason names the
+// engine's code as spawnResultReason writes it. docs/placement.md, "Readiness".
 var nextHostRefusals = map[string]bool{
-	"cwd_unmapped":                  true,
-	"spawn_failed:hooks_review":     true,
-	"spawn_failed:trust_prompt":     true,
-	"spawn_failed:omp_setup_wizard": true,
-	"spawn_failed:auth_unavailable": true,
+	"cwd_unmapped":                      true,
+	"checkout_refused:dirty":            true,
+	"checkout_refused:sha-missing":      true,
+	"checkout_refused:branch-elsewhere": true,
+	"spawn_failed:hooks_review":         true,
+	"spawn_failed:trust_prompt":         true,
+	"spawn_failed:omp_setup_wizard":     true,
+	"spawn_failed:auth_unavailable":     true,
+}
+
+func checkoutRefusalMovesNextHost(reason string) bool {
+	return reason == "checkout_refused:dirty" || reason == "checkout_refused:sha-missing" || reason == "checkout_refused:branch-elsewhere"
 }
 
 // spawnRefusalTriesNextHost names a node refusal that moves an auto placement
@@ -479,9 +485,6 @@ func (t *directSpawnTransport) nextHostAfterRefusal(ctx context.Context, node hu
 		return false
 	}
 	t.task, t.bound = task, false
-	// A refusal that moves the request to another host still counts against
-	// this host's launch backoff: cwd_unmapped and a first-run dialog are such
-	// failures.
 	reason := spawnResultReason(result)
 	t.h.observeLaunchOutcome(node.Machine, hubSpawnArg(node.Args, "-m"), result.RC, reason, t.h.now().UTC())
 	t.h.logger.Warn("hub spawn refused by node; trying next candidate", "request_id", task.Request.RequestID, "node_request_id", node.RequestID, "job", task.Job, "host", node.Machine, "profile", hubSpawnArg(node.Args, "-m"), "rc", result.RC, "reason", reason)

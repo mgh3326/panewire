@@ -686,15 +686,15 @@ func (a *App) hubFailure(host, id string, err error, forced bool) candResult {
 
 // hubReply maps a node answer to a candidate result, mirroring the ssh leg.
 func (a *App) hubReply(host string, checkout *HubCheckout, r HubSpawnReply, forced bool) candResult {
+	if r.NextHost {
+		return candResult{rc: exitConfig, note: "hub_" + strings.TrimPrefix(r.Error, "spawn_failed:")}
+	}
 	if outcome, ok := strings.CutPrefix(r.Error, "checkout_refused:"); ok {
 		dir := ""
 		if checkout != nil {
 			dir = checkout.Dir
 		}
 		return candResult{stop: fail(exitPlacement, "cannot prepare worktree %s on %s: checkout refused (%s)", dir, host, outcome)}
-	}
-	if r.NextHost {
-		return candResult{rc: exitConfig, note: "hub_" + strings.TrimPrefix(r.Error, "spawn_failed:")}
 	}
 	switch r.Error {
 	case "spawn_disabled", "cwd_unmapped", "panewire_missing", "brief_doc_unavailable":
