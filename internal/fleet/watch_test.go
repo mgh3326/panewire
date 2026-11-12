@@ -111,6 +111,7 @@ func TestCodexFooterWithoutContextColumn(t *testing.T) {
 // recorded in the spawn receipt, as a real spawn leaves it.
 func watchFixture(t *testing.T) (*App, *fakeRunner, string) {
 	t.Helper()
+	useFakeHK(t).Handle(hkCommentAnswer)
 	a := testApp(t)
 	f := ledgerRunner(t, a)
 	original := f.Do

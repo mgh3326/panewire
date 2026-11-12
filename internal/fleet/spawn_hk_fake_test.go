@@ -1,6 +1,8 @@
 package fleet
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -36,14 +38,15 @@ func (r hkRequest) Route() string { return r.Method + " " + r.Path }
 // caught. It serves tasks, project owners and documents from its maps; a
 // handler set with Handle answers first.
 type spawnHK struct {
-	t      *testing.T
-	srv    *httptest.Server
-	mu     sync.Mutex
-	reqs   []hkRequest
-	tasks  map[string]string
-	owners map[string]string
-	docs   map[string]string
-	handle []func(hkRequest) (int, string, bool)
+	t           *testing.T
+	srv         *httptest.Server
+	mu          sync.Mutex
+	reqs        []hkRequest
+	tasks       map[string]string
+	owners      map[string]string
+	docs        map[string]string
+	attachments map[string][]byte
+	handle      []func(hkRequest) (int, string, bool)
 }
 
 var spawnHKs sync.Map // *testing.T -> *spawnHK
@@ -56,7 +59,7 @@ func useFakeHK(t *testing.T) *spawnHK {
 		hk.(*spawnHK).env(t)
 		return hk.(*spawnHK)
 	}
-	hk := &spawnHK{t: t, tasks: map[string]string{}, owners: map[string]string{}, docs: map[string]string{}}
+	hk := &spawnHK{t: t, tasks: map[string]string{}, owners: map[string]string{}, docs: map[string]string{}, attachments: map[string][]byte{}}
 	hk.srv = httptest.NewServer(http.HandlerFunc(hk.serve))
 	spawnHKs.Store(t, hk)
 	t.Cleanup(func() {
@@ -175,6 +178,9 @@ func (hk *spawnHK) serve(w http.ResponseWriter, r *http.Request) {
 			answer(http.StatusOK, out)
 			return
 		}
+	case r.Method == http.MethodPost && strings.HasSuffix(req.Path, "/comments"):
+		answer(http.StatusCreated, `{"id":5,"task_id":42,"body":"x","author":"svc-panewire","created_at":"2026-11-08T08:00:00Z"}`)
+		return
 	case r.Method == http.MethodGet && strings.HasPrefix(req.Path, "/v1/documents/"):
 		if out, ok := hk.docs[strings.TrimPrefix(r.URL.Path, "/v1/documents/")]; ok {
 			answer(http.StatusOK, out)
@@ -190,9 +196,32 @@ func (hk *spawnHK) serve(w http.ResponseWriter, r *http.Request) {
 			answer(http.StatusBadRequest, `{"error":"invalid_context","reason":"invalid kind"}`)
 			return
 		}
+		key := strings.TrimPrefix(r.URL.Path, "/v1/documents/")
+		doc["key"] = key
+		content, _ := doc["body"].(string)
+		sum := sha256.Sum256([]byte(content))
+		doc["sha256"] = hex.EncodeToString(sum[:])
+		stored, _ := json.Marshal(doc)
+		hk.docs[key] = string(stored)
 		out, _ := json.Marshal(map[string]any{"document": doc, "changed": true})
 		answer(http.StatusOK, string(out))
 		return
+	case r.Method == http.MethodPut && req.Path == "/v1/attachments":
+		sum := sha256.Sum256(body)
+		sha := hex.EncodeToString(sum[:])
+		hk.attachments[sha] = append([]byte(nil), body...)
+		out, _ := json.Marshal(map[string]any{"attachment": map[string]any{"sha256": sha, "size_bytes": len(body), "mime": r.Header.Get("Content-Type")}, "created": true})
+		answer(http.StatusCreated, string(out))
+		return
+	case r.Method == http.MethodGet && strings.HasPrefix(req.Path, "/v1/attachments/"):
+		sha := strings.TrimPrefix(req.Path, "/v1/attachments/")
+		if attachment, ok := hk.attachments[sha]; ok {
+			w.Header().Set("Content-Type", "text/markdown")
+			w.Header().Set("Content-Disposition", `attachment; filename="report.md"`)
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(attachment)
+			return
+		}
 	}
 	answer(http.StatusNotFound, notFound)
 }

@@ -10,6 +10,7 @@ import (
 // command it ran (empty when none), plus reap's stderr and stdout.
 func reapLaneJob(t *testing.T, hostMachine, laneMachine string) (laneRM, stderr, stdout string) {
 	t.Helper()
+	useFakeHK(t)
 	a := testApp(t)
 	a.Config.Local = map[string]any{"machine_id": hostMachine}
 	f := ledgerRunner(t, a)

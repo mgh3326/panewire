@@ -12,11 +12,8 @@ import (
 	"testing"
 )
 
-// hk 3615: `panewire done` links the report document it uploads to the job's
-// hk task (task_id, origin_class job), and the job record update that names
-// the report also pins its sha256, so hk confirms the stored bytes. A failed
-// upload is still a warning: the local report stays, no pin is written and
-// the relay still goes out.
+// hk 3615 and hk 3723: completion reports are content-addressed, linked to
+// the hk task, and published before the terminal event and job record update.
 
 // doneReportLink runs `done --report` for job "j" seeded with task, which
 // "" leaves without a task, and returns the fake hk's report PUT body, the
@@ -47,7 +44,7 @@ func doneReportLink(t *testing.T, task string) (put, rec map[string]any, eventSH
 		t.Fatal(e)
 	}
 	for _, r := range hk.Requests() {
-		if r.Route() == docRoute(http.MethodPut, "reports/j/report.md") {
+		if strings.HasPrefix(r.Route(), docRoute(http.MethodPut, "reports/j/")) {
 			put = hkJSON(t, r)
 		}
 	}
@@ -78,7 +75,7 @@ func TestDoneReportDocLinksTaskAndPinsSHA(t *testing.T) {
 		}
 		body, _ := put["body"].(string)
 		sum := sha256.Sum256([]byte(body))
-		if str(rec, "report_doc") != "reports/j/report.md" || str(rec, "report_sha256") != hex.EncodeToString(sum[:]) {
+		if !strings.HasPrefix(str(rec, "report_doc"), "reports/j/auto-") || str(rec, "report_sha256") != hex.EncodeToString(sum[:]) {
 			t.Errorf("record=%v, want report_doc and report_sha256 of the uploaded body", rec)
 		}
 		if str(rec, "report_sha256") != reportSHA || eventSHA != reportSHA {
@@ -102,9 +99,8 @@ func TestDoneReportDocLinksTaskAndPinsSHA(t *testing.T) {
 	}
 }
 
-// A refused upload keeps the existing failure handling: the warning, the
-// local report, the relay and the event digest, and the record names neither
-// a report doc nor a pin (hk refuses a pin without a report).
+// A failed upload leaves the durable intent and report in place for a retry,
+// without terminalizing the job or emitting a completion relay.
 func TestDoneReportUploadFailureWritesNoPin(t *testing.T) {
 	ctx := context.Background()
 	a := testApp(t)
@@ -118,10 +114,10 @@ func TestDoneReportUploadFailureWritesNoPin(t *testing.T) {
 	if e := os.WriteFile(path, report, 0600); e != nil {
 		t.Fatal(e)
 	}
-	if e := a.lifecycle(ctx, "done", []string{"j", "--report", path}); e != nil {
-		t.Fatal(e)
+	if e := a.lifecycle(ctx, "done", []string{"j", "--report", path, "--completion-id", "retry-1"}); e == nil {
+		t.Fatal("completion succeeded despite the failed report upload")
 	}
-	if errs := a.Err.(*bytes.Buffer).String(); !strings.Contains(errs, "panewire: warning: report upload failed; local report retained\n") {
+	if errs := a.Err.(*bytes.Buffer).String(); !strings.Contains(errs, "panewire: warning: report upload failed; local report retained; retry with the same --completion-id\n") {
 		t.Fatalf("warnings=%q", errs)
 	}
 	if b, e := os.ReadFile(path); e != nil || !bytes.Equal(b, report) {
@@ -134,8 +130,8 @@ func TestDoneReportUploadFailureWritesNoPin(t *testing.T) {
 	if _, ok := rec["report_sha256"]; ok {
 		t.Fatalf("record=%v, want no report_sha256", rec)
 	}
-	if str(rec, "state") != "completed" {
-		t.Fatalf("record=%v, want state completed", rec)
+	if str(rec, "state") != "claimed" {
+		t.Fatalf("record=%v, want state claimed", rec)
 	}
 	relayed := false
 	for _, c := range f.Calls {
@@ -143,20 +139,22 @@ func TestDoneReportUploadFailureWritesNoPin(t *testing.T) {
 			relayed = true
 		}
 	}
-	if !relayed {
-		t.Fatalf("calls=%v, want the relay emit", f.Calls)
+	if relayed {
+		t.Fatalf("calls=%v, want no relay after failed upload", f.Calls)
 	}
 	j, e := a.job("j")
 	if e != nil {
 		t.Fatal(e)
 	}
-	sum := sha256.Sum256(report)
 	for _, ev := range j.Events {
-		if ev.Kind == "job.completed" && (str(ev.Payload, "report_sha256") != hex.EncodeToString(sum[:]) || str(ev.Payload, "document") != "") {
-			t.Fatalf("event=%v, want the local digest and no document", ev.Payload)
+		if ev.Kind == "job.completed" {
+			t.Fatalf("event=%v, want no completion", ev.Payload)
 		}
 	}
-	if out := a.Out.(*bytes.Buffer).String(); !strings.Contains(out, "OK job=j ") {
-		t.Fatalf("out=%q", out)
+	if out := a.Out.(*bytes.Buffer).String(); out != "" {
+		t.Fatalf("out=%q, want no success output", out)
+	}
+	if _, err := os.Stat(completionIntentPath(a.Jobs, "j", "retry-1")); err != nil {
+		t.Fatalf("durable completion intent missing: %v", err)
 	}
 }

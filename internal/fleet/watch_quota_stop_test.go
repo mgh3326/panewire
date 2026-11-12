@@ -19,6 +19,7 @@ import (
 // was only read, never typed into.
 func quotaStopFixture(t *testing.T, role, status, screen string) (*App, *fakeRunner, *fakeHK, string) {
 	t.Helper()
+	useFakeHK(t)
 	a := testApp(t)
 	f := ledgerRunner(t, a)
 	h := newFakeHK(t)

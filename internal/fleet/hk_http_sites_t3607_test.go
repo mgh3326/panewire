@@ -3,6 +3,8 @@ package fleet
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/url"
@@ -109,6 +111,7 @@ func asCLI(a hkAnswerFixture) cliOut {
 // claimed.
 func seedDoneJob(t *testing.T, a *App) {
 	t.Helper()
+	useFakeHK(t)
 	seedJob(t, a, "j", "worker")
 	if e := a.JobStore.Claim(context.Background(), "j", "42", a.machine()); e != nil {
 		t.Fatal(e)
@@ -237,13 +240,26 @@ func TestHKSitesGoOverHTTPWithSvcToken(t *testing.T) {
 		if e := a.lifecycle(ctx, "done", []string{"j", "--report", path}); e != nil {
 			t.Fatal(e)
 		}
-		key := "reports/j/report.md"
-		reqs := hkOnly(t, hk, docRoute(http.MethodPut, key), "POST /v1/tasks/42/comments")
-		put := hkJSON(t, reqs[0])
-		if put["key"] != key || put["kind"] != "report" || put["job"] != "j" || put["body"] != report {
-			t.Fatalf("report put key=%v kind=%v job=%v body bytes=%d, want the CLI's doc put: the key, kind report, the job and the whole file (%d bytes)", put["key"], put["kind"], put["job"], len(put["body"].(string)), len(report))
+		reportBytes := []byte(report)
+		sum := sha256.Sum256(reportBytes)
+		completionID, err := completionIdentity("j", "", reportBytes)
+		if err != nil {
+			t.Fatal(err)
 		}
-		if got := hkJSON(t, reqs[1]); len(got) != 1 || got["body"] != "panewire job.completed job=j report="+path {
+		key := reportDocumentKey("j", completionID, hex.EncodeToString(sum[:]), true)
+		reqs := hkOnly(t, hk, "PUT /v1/attachments", docRoute(http.MethodPut, key), "POST /v1/tasks/42/comments")
+		if string(reqs[0].Body) != report {
+			t.Fatalf("attachment bytes=%d, want the full report (%d bytes)", len(reqs[0].Body), len(report))
+		}
+		put := hkJSON(t, reqs[1])
+		if put["key"] != key || put["kind"] != "report" || put["job"] != "j" {
+			t.Fatalf("manifest put key=%v kind=%v job=%v, want report manifest", put["key"], put["kind"], put["job"])
+		}
+		var manifest map[string]any
+		if err := json.Unmarshal([]byte(put["body"].(string)), &manifest); err != nil || manifest["attachment_sha256"] != hex.EncodeToString(sum[:]) {
+			t.Fatalf("manifest=%v err=%v, want attachment sha256", manifest, err)
+		}
+		if got := hkJSON(t, reqs[2]); len(got) != 1 || got["body"] != "panewire job.completed job=j report="+path {
 			t.Fatalf("comment body=%v", got)
 		}
 		if out := a.Out.(*bytes.Buffer).String(); !strings.Contains(out, "OK job=j report="+path+" kind=job.completed") {
@@ -277,23 +293,22 @@ func TestHKSiteFailuresKeepCLIHandling(t *testing.T) {
 		if e := os.WriteFile(path, []byte("done\n"), 0600); e != nil {
 			t.Fatal(e)
 		}
-		if e := a.lifecycle(ctx, "done", []string{"j", "--report", path}); e != nil {
-			t.Fatal(e)
+		if e := a.lifecycle(ctx, "done", []string{"j", "--report", path, "--completion-id", "retry-1"}); e == nil {
+			t.Fatal("completion succeeded despite the refused report upload")
 		}
 		errs := a.Err.(*bytes.Buffer).String()
-		if !strings.Contains(errs, "panewire: warning: report upload failed; local report retained\n") {
+		if !strings.Contains(errs, "panewire: warning: report upload failed; local report retained; retry with the same --completion-id\n") {
 			t.Fatalf("warnings=%q", errs)
 		}
-		if !strings.Contains(errs, "panewire: warning: task comment failed: handoffkeep: handoffkeep: ") || !strings.Contains(errs, "invalid_comment") {
-			t.Fatalf("warnings=%q, want the CLI path's text: check(r, \"handoffkeep\") over the CLI's \"handoffkeep: <error>\"", errs)
-		}
-		if out := a.Out.(*bytes.Buffer).String(); !strings.Contains(out, "OK job=j ") {
-			t.Fatalf("out=%q", out)
+		if out := a.Out.(*bytes.Buffer).String(); out != "" {
+			t.Fatalf("out=%q, want no success output", out)
 		}
 		if rec := a.JobStore.(*fakeJobStore).record(t, "j"); rec["report_doc"] != nil {
 			t.Fatalf("record=%v, want no report_doc", rec)
 		}
-		hkOnly(t, hk, docRoute(http.MethodPut, "reports/j/report.md"), "POST /v1/tasks/42/comments")
+		if requests := hk.Requests(); len(requests) != 1 || !strings.HasPrefix(requests[0].Route(), "PUT /v1/documents/") {
+			t.Fatalf("requests after document refusal = %v, want one document PUT and no comment", hk.Routes())
+		}
 	})
 
 	t.Run("artifact record write refused", func(t *testing.T) {
@@ -345,7 +360,6 @@ func TestHKSiteFailuresKeepCLIHandling(t *testing.T) {
 // reports is the credential's unconfigured error.
 func TestHKSitesUnconfigured(t *testing.T) {
 	ctx := context.Background()
-	unconfigured := "hk service credential unconfigured"
 
 	t.Run("work preset", func(t *testing.T) {
 		a := testApp(t)
@@ -363,15 +377,17 @@ func TestHKSitesUnconfigured(t *testing.T) {
 		f := ledgerRunner(t, a)
 		noHKCLI(t, f)
 		seedDoneJob(t, a)
+		t.Setenv("HANDOFFKEEP_URL", "")
+		t.Setenv("HANDOFFKEEP_TOKEN_SVC_PANEWIRE", "")
 		path := filepath.Join(a.Jobs, "j", "report.md")
 		if e := os.WriteFile(path, []byte("done\n"), 0600); e != nil {
 			t.Fatal(e)
 		}
-		if e := a.lifecycle(ctx, "done", []string{"j", "--report", path}); e != nil {
-			t.Fatal(e)
+		if e := a.lifecycle(ctx, "done", []string{"j", "--report", path}); e == nil {
+			t.Fatal("completion succeeded without an hk credential")
 		}
 		errs := a.Err.(*bytes.Buffer).String()
-		if !strings.Contains(errs, "report upload failed; local report retained") || !strings.Contains(errs, "task comment failed: handoffkeep: handoffkeep: "+unconfigured) {
+		if !strings.Contains(errs, "report upload failed; local report retained") || strings.Contains(errs, "task comment failed") {
 			t.Fatalf("warnings=%q", errs)
 		}
 	})
@@ -670,7 +686,14 @@ func TestHKSiteUploadsUseTheUploadBound(t *testing.T) {
 	if e := a.lifecycle(ctx, "done", []string{"j", "--report", path}); e != nil {
 		t.Fatal(e)
 	}
-	if rec := a.JobStore.(*fakeJobStore).record(t, "j"); str(rec, "report_doc") != "reports/j/report.md" {
+	report := []byte("done\n")
+	sum := sha256.Sum256(report)
+	completionID, err := completionIdentity("j", "", report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantKey := reportDocumentKey("j", completionID, hex.EncodeToString(sum[:]), false)
+	if rec := a.JobStore.(*fakeJobStore).record(t, "j"); str(rec, "report_doc") != wantKey {
 		t.Fatalf("record=%v, want the report uploaded under the upload bound", rec)
 	}
 	if errs := a.Err.(*bytes.Buffer).String(); !strings.Contains(errs, "task comment failed: ") {

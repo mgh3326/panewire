@@ -174,8 +174,9 @@ func TestR08RestoreVerifiesExistingReleasedPane(t *testing.T) {
 		t.Fatalf("no reclaim event: %v", kinds)
 	}
 }
-func TestDoneDeduplicatesAndSnapshotsChangedReport(t *testing.T) {
+func TestDoneDeduplicatesAndPublishesChangedReport(t *testing.T) {
 	a := testApp(t)
+	useFakeHK(t).Handle(hkCommentAnswer)
 	f := ledgerRunner(t, a)
 	seedJob(t, a, "j", "worker")
 	path := filepath.Join(a.Jobs, "j", "report.md")
@@ -202,8 +203,18 @@ func TestDoneDeduplicatesAndSnapshotsChangedReport(t *testing.T) {
 	if emits != 2 {
 		t.Fatalf("emits=%d", emits)
 	}
-	if b, e := os.ReadFile(filepath.Join(a.Jobs, "j", "report-r2.md")); e != nil || string(b) != "second\n" {
-		t.Fatalf("snapshot %q %v", b, e)
+	job, err := a.job("j")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var docs []string
+	for _, event := range job.Events {
+		if event.Kind == "job.completed" {
+			docs = append(docs, str(event.Payload, "document"))
+		}
+	}
+	if len(docs) != 2 || docs[0] == "" || docs[1] == "" || docs[0] == docs[1] {
+		t.Fatalf("completion documents = %q, want distinct content-addressed reports", docs)
 	}
 }
 func TestR01R09R10R11ExternalServicesRemainExternal(t *testing.T) {

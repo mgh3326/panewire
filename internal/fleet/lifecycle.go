@@ -14,8 +14,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/mgh3326/handoffkeep/client"
-
 	"github.com/mgh3326/panewire/internal/arbiter"
 )
 
@@ -35,6 +33,7 @@ func (a *App) lifecycleWithOptions(ctx context.Context, kind string, args []stri
 	report := f.String("report", "", "")
 	question := f.String("question", "", "")
 	resultFile := f.String("result", "", "")
+	completionIDFlag := f.String("completion-id", "", "")
 	if e := f.Parse(args[1:]); e != nil {
 		return fail(exitUsage, "%v", e)
 	}
@@ -53,6 +52,9 @@ func (a *App) lifecycleWithOptions(ctx context.Context, kind string, args []stri
 	}
 	if kind == "escalate" && (*question == "" || j.Parent == "") {
 		return fail(exitUsage, "escalate requires --question and a recorded parent lane")
+	}
+	if kind != "done" && *completionIDFlag != "" {
+		return fail(exitUsage, "%s accepts no --completion-id", kind)
 	}
 	var result json.RawMessage
 	var rejected string
@@ -115,16 +117,42 @@ func (a *App) lifecycleWithOptions(ctx context.Context, kind string, args []stri
 	}
 	hash := sha256.Sum256(body)
 	digest := hex.EncodeToString(hash[:])
+	completionID := ""
+	doc, docSHA := "", ""
+	if kind == "done" && *report != "" {
+		completionID, e = completionIdentity(id, *completionIDFlag, body)
+		if e != nil {
+			return e
+		}
+		doc, docSHA, e = a.publishCompletionReport(ctx, id, j.Task, completionID, body)
+		if e != nil {
+			if strictResult {
+				return a.strictDoneFailure(ctx, id, e)
+			}
+			reason := completionUploadReason(e)
+			_ = a.event(ctx, id, "job.record_failed", map[string]any{"op": "report_upload", "reason": reason})
+			a.warn("report upload failed; local report retained; retry with the same --completion-id")
+			return fail(exitFailure, "job %s report upload failed reason=%s; retry with --completion-id %s", id, reason, completionID)
+		}
+	}
 	eventKind := "job.completed"
 	if kind == "escalate" {
 		eventKind = "job.escalate"
 	}
 	rounds := 0
 	usedPath := false
+	priorCompletion := false
 	for _, ev := range j.Events {
 		if ev.Kind == eventKind {
 			rounds++
-			if str(ev.Payload, "report_sha256") == digest && str(ev.Payload, "question") == *question {
+			if kind == "done" && str(ev.Payload, "completion_id") != "" {
+				priorCompletion = true
+			}
+			matches := str(ev.Payload, "report_sha256") == digest && str(ev.Payload, "question") == *question
+			if kind == "done" && str(ev.Payload, "completion_id") != "" {
+				matches = str(ev.Payload, "completion_id") == completionID
+			}
+			if matches {
 				suffix := ""
 				if kind == "done" {
 					var status string
@@ -159,7 +187,7 @@ func (a *App) lifecycleWithOptions(ctx context.Context, kind string, args []stri
 			}
 		}
 	}
-	if usedPath && *report != "" {
+	if kind != "done" && usedPath && *report != "" {
 		ext := filepath.Ext(*report)
 		stem := strings.TrimSuffix(*report, ext)
 		for n := rounds + 1; ; n++ {
@@ -183,31 +211,6 @@ func (a *App) lifecycleWithOptions(ctx context.Context, kind string, args []stri
 			break
 		}
 	}
-	// The report goes to hk over HTTP with the svc-panewire credential (hk
-	// 3607): kind report, the job and the report file's bytes, read when
-	// sent as `handoffkeep doc put --file` read them, under the upload bound.
-	// The document is linked to the job's hk task when the job has a numeric
-	// one, with origin class job (hk 3615); docSHA is the uploaded bytes'
-	// sha256, which the record pins next to report_doc.
-	doc, docSHA := "", ""
-	if *report != "" {
-		key := "reports/" + id + "/" + filepath.Base(*report)
-		b, e := os.ReadFile(*report)
-		if e == nil {
-			upload := client.Document{Key: key, Kind: "report", Job: id, Body: string(b), OriginClass: "job"}
-			if task, err := hkTaskID(j.Task); err == nil {
-				upload.TaskID = &task
-			}
-			e = hkPutDocument(ctx, upload)
-		}
-		if e == nil {
-			doc = key
-			sum := sha256.Sum256(b)
-			docSHA = hex.EncodeToString(sum[:])
-		} else {
-			a.warn("report upload failed; local report retained")
-		}
-	}
 	a.recordJobUsage(ctx, j, false)
 	// The hk record state is written before the relay: one PUT carries the
 	// terminal state, the report doc with its sha256 pin and — for done
@@ -224,22 +227,27 @@ func (a *App) lifecycleWithOptions(ctx context.Context, kind string, args []stri
 	if result != nil {
 		rec["result"] = result
 	}
-	if strictResult {
+	if strictResult && !priorCompletion {
 		if e = a.strictCompletedPut(ctx, id, rec, result, doc, spawnReceiptForRepair(j.Events)); e != nil {
 			if isDoneResultFailure(e, "result_conflict") {
 				a.recordDoneResultConflict(id)
 			}
 			return a.strictDoneFailure(ctx, id, e)
 		}
-	} else if e := a.putJobRecord(ctx, id, rec); e != nil {
-		if kind == "done" && result != nil && boolean(j.Receipt, "headless", false) {
-			a.warn("job %s completed record failed: reason=%s", id, doneResultReason(e))
-			_ = a.event(ctx, id, "job.record_failed", map[string]any{"op": state})
-		} else {
-			a.jobRecordFailed(ctx, id, state, e)
+	} else if !priorCompletion {
+		if e := a.putJobRecord(ctx, id, rec); e != nil {
+			if kind == "done" && result != nil && boolean(j.Receipt, "headless", false) {
+				a.warn("job %s completed record failed: reason=%s", id, doneResultReason(e))
+				_ = a.event(ctx, id, "job.record_failed", map[string]any{"op": state})
+			} else {
+				a.jobRecordFailed(ctx, id, state, e)
+			}
 		}
 	}
 	p := map[string]any{"report": *report, "report_sha256": digest, "question": *question, "owner_lane": j.Owner, "parent_lane": j.Parent, "label": j.Label, "pane_id": j.Pane, "document": doc}
+	if completionID != "" {
+		p["completion_id"] = completionID
+	}
 	if late {
 		p["late"] = true
 	}
@@ -265,6 +273,9 @@ func (a *App) lifecycleWithOptions(ctx context.Context, kind string, args []stri
 	}
 	if doc != "" {
 		last += " doc:" + doc
+	}
+	if completionID != "" {
+		last += " completion:" + completionID
 	}
 	argsEmit := []string{"emit", "--kind", eventKind, "--job", id, "--owner-lane", owner, "--epoch", "1", "--label", j.Label, "--host", a.machine(), "--pane", j.Pane, "--inbox-root", filepath.Dir(a.Jobs)}
 	if late {

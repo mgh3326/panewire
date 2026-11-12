@@ -652,6 +652,7 @@ func TestDoneRejectsNonObjectResult(t *testing.T) {
 // relay still goes out so a waiter falls back per the design.
 func TestDoneRecordWriteFailureStillRelays(t *testing.T) {
 	a := testApp(t)
+	useFakeHK(t)
 	f := ledgerRunner(t, a)
 	h := newFakeHK(t)
 	h.down = true

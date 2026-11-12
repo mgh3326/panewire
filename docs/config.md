@@ -663,6 +663,17 @@ Candidate lists are trimmed in rank order to keep `selection` below hk's 32 KiB
 limit.
 `panewire done` writes `{state:"completed", report_doc}` plus `result` when
 `--result FILE` (a JSON object of at most 64 KiB) is given, in the same PUT.
+When `--report FILE` is supplied, the report is published before the completed
+record or completion relay. Its document key includes a completion id and the
+report SHA-256. `--completion-id ID` sets that id; without it, panewire derives
+a stable id from the job id and report bytes. If publication fails, `done`
+returns non-zero, retains a durable local intent, and emits no completion; retry
+with the same id and unchanged report bytes. Reusing an id for different bytes
+is a conflict. A later answer uses a different id and gets its own document and
+completion event while the terminal record keeps its original report pin.
+Reports larger than 512 KiB are stored as an attachment with a SHA-256 manifest
+document. A refused secret-like report is remembered by content hash and will
+not be retried under another completion id.
 For CLI `done --result`, success requires hk to confirm that record or a read
 back to show the same completed result and report pin. An ambiguous
 completed-record PUT is read back and retried at most twice more with the same
@@ -676,8 +687,9 @@ or `secret_like_content:<pattern>` (pattern matches `[a-z0-9_]{1,40}`),
 `job_escalated`, `job_lost`, `no_spawn_evidence`, a validated hk code matching
 `[a-z0-9_]{1,64}`, `http_<status>`, `hk_unreachable`, `hk_unconfigured`, or
 `local_event_failed` when the local result-attachment event cannot be recorded.
-The headless delegate keeps warn-and-continue; so does `done` without
-`--result`. Watcher completion is unchanged. `escalate` writes
+The headless delegate keeps warn-and-continue. Report upload failure from
+`done` is fail-closed even without `--result`; completion without `--report`
+does not publish a report document. Watcher completion is unchanged. `escalate` writes
 `{state:"escalated"}` and the watcher writes `{state:"lost"}` after two
 missing-pane observations, or when a reviewer pane is idle on a quota or
 rate-limit screen with no report (see `docs/quota-stop.md`; a worker or tester is

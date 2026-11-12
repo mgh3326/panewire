@@ -80,6 +80,7 @@ func TestSpawnClaimMeasurementsIncludeLocalLease(t *testing.T) {
 
 func TestLifecycleUsesExplicitNodeRoot(t *testing.T) {
 	a := testApp(t)
+	useFakeHK(t)
 	ledgerRunner(t, a)
 	root, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
