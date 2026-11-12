@@ -35,9 +35,16 @@ else
 fi
 
 # Keep only test names: drop go's trailing "ok  <pkg>  <time>" line.
-# Assign tests to shards balanced by recorded durations.
-names=$(printf '%s\n' "$all" | grep -v -e '^ok[[:space:]]' -e '^$' |
-	python3 "$script_dir/ci-test-shard-balance.py" "$index" "$total" "$durations_arg")
+# Assign tests to shards balanced by recorded durations if python3 is available;
+# otherwise fall back to round-robin partition so hosts without python3 (e.g. minimal
+# containers) still run tests reliably.
+if command -v python3 >/dev/null 2>&1; then
+	names=$(printf '%s\n' "$all" | grep -v -e '^ok[[:space:]]' -e '^$' |
+		python3 "$script_dir/ci-test-shard-balance.py" "$index" "$total" "$durations_arg")
+else
+	names=$(printf '%s\n' "$all" | grep -v -e '^ok[[:space:]]' -e '^$' | LC_ALL=C sort |
+		awk -v i="$index" -v n="$total" '(NR - 1) % n == i')
+fi
 if [ -z "$names" ]; then
 	echo "shard $spec selected no tests" >&2
 	exit 1

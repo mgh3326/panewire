@@ -219,8 +219,8 @@ func TestCIShardsAreBalancedByRecordedDurations(t *testing.T) {
 }
 
 // TestCIShardsHandleUnrecordedAndEmptyDurations verifies that a new test
-// absent from recorded durations or an empty durations file still assigns
-// every test to exactly one shard without failing.
+// absent from recorded durations, an empty durations file, or a missing durations
+// file still assigns every test to exactly one shard without failing.
 func TestCIShardsHandleUnrecordedAndEmptyDurations(t *testing.T) {
 	shard := readCIPRJobs(t)["shard"]
 	specs := shard.Strategy.Matrix["shard"]
@@ -239,34 +239,52 @@ func TestCIShardsHandleUnrecordedAndEmptyDurations(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	durationsFile := filepath.Join(t.TempDir(), "partial-durations.json")
-	if err := os.WriteFile(durationsFile, durationsBytes, 0o600); err != nil {
+	partialFile := filepath.Join(t.TempDir(), "partial-durations.json")
+	if err := os.WriteFile(partialFile, durationsBytes, 0o600); err != nil {
 		t.Fatal(err)
 	}
 
-	ran := map[string][]string{}
-	for _, spec := range specs {
-		cmd := exec.Command("sh", "scripts/ci-test-shard.sh", spec)
-		cmd.Env = append(os.Environ(),
-			"PANEWIRE_SHARD_DRY_RUN=1",
-			"PANEWIRE_SHARD_NAMES_FILE="+namesFile,
-			"PANEWIRE_SHARD_DURATIONS_FILE="+durationsFile,
-		)
-		out, err := cmd.Output()
-		if err != nil {
-			t.Fatalf("shard %s: %v", spec, err)
-		}
-		pattern := regexp.MustCompile(strings.TrimSpace(string(out)))
-		for _, name := range names {
-			if pattern.MatchString(name) {
-				ran[name] = append(ran[name], spec)
-			}
-		}
+	emptyFile := filepath.Join(t.TempDir(), "empty-durations.json")
+	if err := os.WriteFile(emptyFile, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
 	}
 
-	for _, name := range names {
-		if len(ran[name]) != 1 {
-			t.Errorf("%s assigned to %d shards: %v", name, len(ran[name]), ran[name])
-		}
+	missingFile := filepath.Join(t.TempDir(), "absent-durations.json")
+
+	for _, tc := range []struct {
+		name          string
+		durationsFile string
+	}{
+		{"partial", partialFile},
+		{"empty", emptyFile},
+		{"missing", missingFile},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ran := map[string][]string{}
+			for _, spec := range specs {
+				cmd := exec.Command("sh", "scripts/ci-test-shard.sh", spec)
+				cmd.Env = append(os.Environ(),
+					"PANEWIRE_SHARD_DRY_RUN=1",
+					"PANEWIRE_SHARD_NAMES_FILE="+namesFile,
+					"PANEWIRE_SHARD_DURATIONS_FILE="+tc.durationsFile,
+				)
+				out, err := cmd.Output()
+				if err != nil {
+					t.Fatalf("shard %s: %v", spec, err)
+				}
+				pattern := regexp.MustCompile(strings.TrimSpace(string(out)))
+				for _, name := range names {
+					if pattern.MatchString(name) {
+						ran[name] = append(ran[name], spec)
+					}
+				}
+			}
+
+			for _, name := range names {
+				if len(ran[name]) != 1 {
+					t.Errorf("%s assigned to %d shards: %v", name, len(ran[name]), ran[name])
+				}
+			}
+		})
 	}
 }
