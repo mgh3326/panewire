@@ -189,7 +189,7 @@ func providerErrorBlock(lines []string, start int) (string, bool) {
 		if chromeLine(line) {
 			continue
 		}
-		if !jsonBody && plainErrorHeader.MatchString(blockLines[0]) && hasProviderJSONBody(content) {
+		if !jsonBody && plainHeaderRowsAreErrorType(blockLines) && providerJSONStart(content) {
 			jsonBody = true
 			blockLines = append(blockLines, content)
 			continue
@@ -204,7 +204,7 @@ func providerErrorBlock(lines []string, start int) (string, bool) {
 			if json.inString {
 				currentText := currentJSONString(currentBlock)
 				continuedText := jsonStringContinuationText(content)
-				if providerTextPrefix(currentText) && providerCreditPool(currentBlock) == "" && !providerTextPrefix(currentText+continuedText) {
+				if providerTextPrefix(currentText) && providerCreditPool(currentBlock) == "" && !providerTextPrefix(currentText+continuedText) && !providerTextComplete(currentText+continuedText) {
 					return "", false
 				}
 				blockLines = append(blockLines, content)
@@ -218,9 +218,10 @@ func providerErrorBlock(lines []string, start int) (string, bool) {
 		currentPlain := plainProviderText(currentBlock)
 		joinedPlain := plainProviderText(joined)
 		plainTextContinuation := providerTextPrefix(joinedPlain) && len(compactProviderText(joinedPlain)) > len(compactProviderText(currentPlain))
+		plainTextContinuation = plainTextContinuation || !providerTextComplete(currentPlain) && providerTextComplete(joinedPlain)
 		plainContinuation := plainTextContinuation || anthropicRequestBracketOpen(currentBlock) && anthropicRequestBracketComplete(joined)
 		plainContinuation = plainContinuation || providerErrorTypeContinuation(blockLines, content)
-		plainMessageStarted := providerTextPrefix(plainProviderText(blockLines[0])) || anthropicRequestBracketOpen(blockLines[0]) || plainErrorHeader.MatchString(blockLines[0])
+		plainMessageStarted := providerTextPrefix(plainProviderText(blockLines[0])) || providerTextComplete(plainProviderText(blockLines[0])) || anthropicRequestBracketOpen(blockLines[0]) || plainErrorHeader.MatchString(blockLines[0])
 		if !jsonBody && plainMessageStarted && plainContinuation && (border == 0 || screenBorderPrefix(line) == border || anthropicRequestBracketOpen(currentBlock)) {
 			blockLines = append(blockLines, content)
 			continue
@@ -238,7 +239,7 @@ func providerErrorBlock(lines []string, start int) (string, bool) {
 	if json.started && json.open {
 		return "", false
 	}
-	if !jsonBody && !providerTextPrefix(plainProviderText(block)) && !anthropicRequestBracketComplete(block) {
+	if !jsonBody && !providerTextPrefix(plainProviderText(block)) && !providerTextComplete(plainProviderText(block)) && !anthropicRequestBracketComplete(block) {
 		return "", false
 	}
 	for _, tail := range lines[end:] {
@@ -421,33 +422,57 @@ func providerErrorTypeContinuation(lines []string, content string) bool {
 			return false
 		}
 		token.WriteString(fragment)
-		value := strings.ToLower(token.String())
-		if providerErrType.MatchString(value) {
-			return true
-		}
-		if !providerErrTypePrefix(value) {
-			return false
-		}
 	}
 	return providerErrTypePrefix(strings.ToLower(token.String()))
 }
 
+func plainHeaderRowsAreErrorType(lines []string) bool {
+	if len(lines) == 0 || !plainErrorHeader.MatchString(lines[0]) {
+		return false
+	}
+	if len(lines) == 1 {
+		return true
+	}
+	var token strings.Builder
+	for _, line := range lines[1:] {
+		fragment := strings.TrimSpace(line)
+		if !providerErrToken.MatchString(fragment) {
+			return false
+		}
+		token.WriteString(fragment)
+	}
+	value := strings.ToLower(token.String())
+	for _, expected := range providerErrorTypes {
+		if value == expected {
+			return true
+		}
+	}
+	return false
+}
+
 func providerErrTypePrefix(value string) bool {
-	for _, expected := range []string{
-		"invalid_request_error",
-		"authentication_error",
-		"permission_error",
-		"not_found_error",
-		"rate_limit_error",
-		"api_error",
-		"server_error",
-		"overloaded_error",
-	} {
+	for _, expected := range providerErrorTypes {
 		if strings.HasPrefix(expected, value) {
 			return true
 		}
 	}
 	return false
+}
+
+var providerErrorTypes = []string{
+	"invalid_request_error",
+	"authentication_error",
+	"permission_error",
+	"not_found_error",
+	"rate_limit_error",
+	"api_error",
+	"server_error",
+	"overloaded_error",
+}
+
+func providerJSONStart(line string) bool {
+	body := strings.TrimSpace(plainProviderText(line))
+	return strings.HasPrefix(body, "{") && strings.ContainsRune(body, '"')
 }
 
 func jsonStringContinuationText(content string) string {
@@ -493,6 +518,21 @@ func providerTextPrefix(message string) bool {
 		"exceededyourcurrentquotapleasecheckyourplanandbillingdetails",
 	} {
 		if strings.HasPrefix(expected, value) {
+			return true
+		}
+	}
+	return false
+}
+
+func providerTextComplete(message string) bool {
+	value := compactProviderText(message)
+	for _, prefix := range []string{
+		"yourcreditbalanceistoolowtoaccesstheanthropicapi",
+		"insufficientquota",
+		"youexceededyourcurrentquota",
+		"exceededyourcurrentquota",
+	} {
+		if strings.HasPrefix(value, prefix) {
 			return true
 		}
 	}
