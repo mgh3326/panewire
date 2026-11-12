@@ -307,12 +307,10 @@ func (a *App) attachDuplicateResultStrict(ctx context.Context, j Job, id, report
 		a.recordDoneResultConflict(id)
 		return "", &doneResultFailure{code: exitStateConflict, reason: "result_conflict"}
 	}
-	reportDoc, reportSHA := str(record, "report_doc"), str(record, "report_sha256")
-	if reportDoc == "" {
-		reportDoc, reportSHA = "", ""
-		if eventDoc != "" {
-			reportDoc, reportSHA = eventDoc, eventSHA
-		}
+	storedReportDoc, storedReportSHA := str(record, "report_doc"), str(record, "report_sha256")
+	reportDoc, reportSHA := storedReportDoc, storedReportSHA
+	if storedReportDoc == "" && eventDoc != "" {
+		reportDoc, reportSHA = eventDoc, eventSHA
 	}
 	if str(record, "state") == "completed" {
 		stored, hasResult := record["result"]
@@ -321,7 +319,7 @@ func (a *App) attachDuplicateResultStrict(ctx context.Context, j Job, id, report
 			// was written after an earlier failed attempt; strict read-back
 			// will classify the terminal 409 safely.
 		} else {
-			if reportDoc != "" && (str(record, "report_doc") != reportDoc || reportSHA != "" && str(record, "report_sha256") != reportSHA) {
+			if storedReportDoc != "" && (storedReportDoc != reportDoc || reportSHA != "" && storedReportSHA != reportSHA) {
 				return "", &doneResultFailure{code: exitStateConflict, reason: "report_conflict"}
 			}
 			written, eventErr := a.ensureResultAttachedEvent(ctx, j.Events, id, report, digest)

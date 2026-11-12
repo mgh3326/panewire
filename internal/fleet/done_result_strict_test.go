@@ -293,6 +293,79 @@ func TestDoneResultStrictDuplicateAddsPublishedReportPin(t *testing.T) {
 	}
 }
 
+func TestDoneResultRetryUnpinnedTerminalKeepsEqualStoredResult(t *testing.T) {
+	a, _, h, docs, report, resultPath := strictDoneFixture(t, "completed")
+	resultBody, err := os.ReadFile(resultPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var storedResult any
+	if err := json.Unmarshal(resultBody, &storedResult); err != nil {
+		t.Fatal(err)
+	}
+	h.records["j"]["result"] = storedResult
+	reportBody, err := os.ReadFile(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(reportBody)
+	reportSHA := hex.EncodeToString(digest[:])
+	completionID, err := completionIdentity("j", "", reportBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	putEvent(t, a, "j", "job.completed", map[string]any{
+		"report": report, "report_sha256": reportSHA, "completion_id": completionID, "document": "",
+	})
+
+	err = a.lifecycle(context.Background(), "done", []string{"j", "--report", report, "--result", resultPath})
+	if err != nil {
+		t.Fatalf("retry with an equal stored result and no existing pin: %v", err)
+	}
+	if len(completionDocumentRequests(docs)) == 0 {
+		t.Fatal("retry did not publish the report")
+	}
+	if !sameJSONValue(h.records["j"]["result"], storedResult) {
+		t.Fatalf("stored result=%v, want %v", h.records["j"]["result"], storedResult)
+	}
+	job, err := a.job("j")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var published bool
+	for _, event := range job.Events {
+		if event.Kind == "job.completed" && str(event.Payload, "document") != "" {
+			published = true
+		}
+	}
+	if !published {
+		t.Fatalf("completion events=%+v, want a document-bearing retry event", job.Events)
+	}
+}
+
+func TestDoneDuplicateCompletesSpawnedRecordFromPublishedEvent(t *testing.T) {
+	a, _, h, _, report, _ := strictDoneFixture(t, "spawned")
+	reportBody, err := os.ReadFile(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(reportBody)
+	reportSHA := hex.EncodeToString(digest[:])
+	completionID := "published-before-record"
+	document := reportDocumentKey("j", completionID, reportSHA, false)
+	putEvent(t, a, "j", "job.completed", map[string]any{
+		"report": report, "report_sha256": reportSHA, "completion_id": completionID, "document": document,
+	})
+
+	err = a.lifecycle(context.Background(), "done", []string{"j", "--report", report, "--completion-id", completionID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if str(h.records["j"], "state") != "completed" || str(h.records["j"], "report_doc") != document || str(h.records["j"], "report_sha256") != reportSHA {
+		t.Fatalf("record=%v, want completed with the matching event pin", h.records["j"])
+	}
+}
+
 func TestDoneResultStrictPinReadbackUsesTheStoredResult(t *testing.T) {
 	a, _, h, _, report, resultPath := strictDoneFixture(t, "completed")
 	resultBody, err := os.ReadFile(resultPath)

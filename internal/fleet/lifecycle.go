@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -165,7 +166,7 @@ func (a *App) lifecycleWithOptions(ctx context.Context, kind string, args []stri
 						if e = a.releaseQuota(ctx, j); e != nil {
 							return e
 						}
-						status, e = a.attachDuplicateResult(ctx, id, *report, digest, result)
+						status, e = a.attachDuplicateResult(ctx, id, *report, digest, result, str(ev.Payload, "document"), str(ev.Payload, "report_sha256"))
 						if e != nil {
 							return e
 						}
@@ -256,7 +257,7 @@ func (a *App) lifecycleWithOptions(ctx context.Context, kind string, args []stri
 				return a.strictDoneFailure(ctx, id, e)
 			}
 		} else {
-			if _, e = a.attachDuplicateResult(ctx, id, *report, digest, result); e != nil {
+			if _, e = a.attachDuplicateResult(ctx, id, *report, digest, result, doc, docSHA); e != nil {
 				return e
 			}
 		}
@@ -436,37 +437,75 @@ func watcherResultFile(jobs, id, report string) (string, string) {
 }
 
 // attachDuplicateResult stores the result a later `done --result` carries when
-// a completion for the same report already exists and this call returned
-// duplicate. The record may still have no result (the watcher or an earlier
-// done completed without one); a stored result is never overwritten.
-func (a *App) attachDuplicateResult(ctx context.Context, id, report, digest string, result json.RawMessage) (string, error) {
-	if result == nil {
-		return "", nil
-	}
+// attachDuplicateResult repairs the record for an already-published duplicate.
+// It completes a spawned record from the event pin, preserves existing pins,
+// and never overwrites a stored result.
+func (a *App) attachDuplicateResult(ctx context.Context, id, report, digest string, result json.RawMessage, eventDoc, eventSHA string) (string, error) {
 	store, e := a.jobStore()
 	if e != nil {
-		a.warn("result attach failed: %v", e)
-		return "result=unattached", nil
+		return "", fail(exitFailure, "job %s completion record unavailable reason=%s", id, doneResultReason(e))
 	}
 	rec, e := store.Get(ctx, id)
 	if e != nil {
-		a.warn("result attach: job record unreadable: %v", e)
-		return "result=unattached", nil
+		if errors.Is(e, errJobNotFound) {
+			if result != nil {
+				return "result=unattached", nil
+			}
+			return "", nil
+		}
+		return "", fail(exitFailure, "job %s completion record unreadable reason=%s", id, doneResultReason(e))
 	}
-	if stored := rec["result"]; stored != nil {
-		if sameJSONValue(stored, result) {
+	storedResult := rec["result"]
+	storedResultSame := false
+	if result != nil && storedResult != nil {
+		if !sameJSONValue(storedResult, result) {
+			a.warn("result conflict: job %s already has a different result; keeping it", id)
+			a.jobResultEvent(id, "conflict", "different_result", "stored result kept")
+			a.captureSentryWarning([]string{"job-result-conflict"}, "JOB_RESULT_CONFLICT "+id, map[string]string{"job": id})
+			return "result=conflict", nil
+		}
+		storedResultSame = true
+	}
+	if str(rec, "state") == "completed" {
+		if storedResultSame {
 			return "result=equal", nil
 		}
-		a.warn("result conflict: job %s already has a different result; keeping it", id)
-		a.jobResultEvent(id, "conflict", "different_result", "stored result kept")
-		a.captureSentryWarning([]string{"job-result-conflict"}, "JOB_RESULT_CONFLICT "+id, map[string]string{"job": id})
-		return "result=conflict", nil
+		if result != nil {
+			return "result=unattached", nil
+		}
+		return "", nil
 	}
-	// hk accepts a result only in a write that also names completed; the job is
-	// already completed locally, so this re-states the same state.
-	if e := store.Put(ctx, id, map[string]any{"state": "completed", "result": result}); e != nil {
-		a.warn("result attach failed: %v", e)
-		return "result=unattached", nil
+	if str(rec, "state") != "spawned" {
+		return "", fail(exitStateConflict, "job %s cannot complete from state=%s", id, str(rec, "state"))
+	}
+	fields := map[string]any{"state": "completed"}
+	if result != nil && !storedResultSame {
+		fields["result"] = result
+	}
+	wantDoc, wantSHA := str(rec, "report_doc"), str(rec, "report_sha256")
+	if wantDoc == "" && eventDoc != "" {
+		fields["report_doc"], fields["report_sha256"] = eventDoc, eventSHA
+		wantDoc, wantSHA = eventDoc, eventSHA
+	}
+	if e := store.Put(ctx, id, fields); e != nil {
+		readback, readErr := store.Get(ctx, id)
+		confirmed := readErr == nil && str(readback, "state") == "completed"
+		if confirmed && result != nil && !storedResultSame {
+			confirmed = sameJSONValue(readback["result"], result)
+		}
+		if confirmed && wantDoc != "" {
+			confirmed = str(readback, "report_doc") == wantDoc && str(readback, "report_sha256") == wantSHA
+		}
+		if !confirmed {
+			a.jobRecordFailed(ctx, id, "completed", e)
+			return "", fail(exitFailure, "job %s completion record failed reason=%s", id, doneResultReason(e))
+		}
+	}
+	if result == nil {
+		return "", nil
+	}
+	if storedResultSame {
+		return "result=equal", nil
 	}
 	if e := a.event(ctx, id, "job.result_attached", map[string]any{"report": report, "report_sha256": digest}); e != nil {
 		return "", e
