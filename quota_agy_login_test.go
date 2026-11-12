@@ -1,6 +1,8 @@
 package panewire
 
 import (
+	"io"
+	"net/http"
 	"strings"
 	"testing"
 
@@ -44,5 +46,41 @@ func TestFleetQuotaAgyWithoutAMeasurableAccountIsNotLoginMissing(t *testing.T) {
 				t.Fatalf("warnings %q, want the credentials failure", warned.all())
 			}
 		})
+	}
+}
+
+// agyRefusingAPI answers every request 401, so the agy measurement fails with
+// auth_failed: the login really is gone on a host that may measure agy.
+type agyRefusingAPI struct{}
+
+func (agyRefusingAPI) Do(*http.Request) (*http.Response, error) {
+	return &http.Response{StatusCode: http.StatusUnauthorized, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(""))}, nil
+}
+
+// The guard for the rule above: with a measurable account the same login
+// failure still marks the login missing (hk 3783, Do 1(e)).
+func TestFleetQuotaAgyMeasurableAuthFailedIsLoginMissing(t *testing.T) {
+	setAgySwitch(t, true, true)
+	hk := newClaudeHK(t)
+	client := quotaClient(t)
+	client.spawnConfigPath = claudeStore(t, hk.server.URL)
+	client.nativeQuota = map[string]*nativeQuotaSource{"agy": agyTestSource(client.spawnConfigPath, agyLoginFiles(agyToken), agyRefusingAPI{}, agyFPForTest, true)}
+	client.nodePacelever = (&paceleverRunnerFake{pool: "agy"}).run
+	warned := newWarnLog(client)
+	client.nativeQuota["agy"].Warn = client.warnMessage
+
+	client.refreshFleetQuota(t.Context(), "agy", map[string]fleetQuotaSent{})
+
+	if got := poolLogin(t, client, "agy").Login; got != fleet.ReadinessLoginMissing {
+		t.Fatalf("login = %q, want missing", got)
+	}
+	var authFailed bool
+	for _, line := range warned.all() {
+		if strings.Contains(line, "error_kind auth_failed") {
+			authFailed = true
+		}
+	}
+	if !authFailed {
+		t.Fatalf("warnings %q, want the auth_failed failure", warned.all())
 	}
 }
