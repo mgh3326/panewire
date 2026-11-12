@@ -62,12 +62,22 @@ func TestWrappedProviderCreditErrorClassifies(t *testing.T) {
 	}{
 		{
 			name:   "Anthropic with border prefix",
-			screen: "└ API Error: 400 invalid_request_error {\"type\":\"error\",\n└ \"error\":{\"message\":\"Your credit balance is too low to access\n└ the Anthropic API\"}}\n└ ❯ Ask Claude",
+			screen: "└ API Error: 400 invalid_request_error {\"type\":\"error\",\n└ \"error\":{\"message\":\"Your credit balance is too low to access\n\n└ ─────────\n└ the Anthropic API\"}}\n└ ❯ Ask Claude",
+			pool:   "anthropic-api",
+		},
+		{
+			name:   "Anthropic unbordered JSON wrap",
+			screen: "API Error: 400 invalid_request_error {\"type\":\"error\",\"error\":{\"message\":\"Your credit balance is too low to access\nthe Anthropic API\"}}\n❯ Ask Claude",
 			pool:   "anthropic-api",
 		},
 		{
 			name:   "OpenAI wrapped body",
-			screen: "| API Error: 429 {\"error\":{\n| \"type\":\"insufficient_quota\"}}\n| › Ask Codex",
+			screen: "| API Error: 429 {\"error\":{\n| \"type\":\"insufficient_\n| quota\"}}\n| › Ask Codex",
+			pool:   "openai-api",
+		},
+		{
+			name:   "OpenAI unbordered token wrap",
+			screen: "API Error: 429 {\"error\":{\"type\":\"insufficient_\nquota\"}}\n› Ask Codex",
 			pool:   "openai-api",
 		},
 	} {
@@ -77,6 +87,19 @@ func TestWrappedProviderCreditErrorClassifies(t *testing.T) {
 				t.Fatalf("wrapped provider stop = %+v, %t", stop, ok)
 			}
 		})
+	}
+}
+
+func TestProviderCreditErrorRequiresLastActivity(t *testing.T) {
+	for _, screen := range []string{
+		"API Error: 429 {\"error\":{\"type\":\"insufficient_quota\"}}\nRetried; the call succeeded\n❯ Ask Claude",
+		"API Error: 400 invalid_request_error {\"message\":\"Your credit balance is too low to access the Anthropic API\"}\nAPI Error: 500 internal_error\n❯ Ask Claude",
+		"API Error: 429 {\"error\":{\"type\":\"insufficient_quota\"}}",
+		"┌ API Error: 429 insufficient_quota\n│ boxed quote text\n└ ❯ Ask Codex",
+	} {
+		if stop, ok := quotastop.Classify(screen, time.Now().UTC(), time.UTC); ok {
+			t.Errorf("superseded or quoted provider error classified as stop = %+v", stop)
+		}
 	}
 }
 

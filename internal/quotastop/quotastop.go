@@ -26,7 +26,7 @@ var (
 	devin           = regexp.MustCompile(`(?i)reached free model rate limit(?:\s|[·.…:]|$)`)
 	apiErrorStart   = regexp.MustCompile(`(?i)^api error:\s*[0-9]{3}\b`)
 	anthropicCredit = regexp.MustCompile(`(?is)^api error:\s*[0-9]{3}\b.*credit balance is too low to access the anthropic api`)
-	openAICredit    = regexp.MustCompile(`(?is)^api error:\s*[0-9]{3}\b.*(insufficient_quota|exceeded your current quota)`)
+	openAICredit    = regexp.MustCompile(`(?is)^api error:\s*[0-9]{3}\b.*(insufficient_\s*quota|exceeded\s*your\s*current\s*quota)`)
 	claude          = regexp.MustCompile(`(?i)^you've hit your (?:(?:weekly|session) )?limit(?:\s|[·.:]|$)`)
 	codexSignal     = regexp.MustCompile(`(?i)^you've hit your usage limit[.·:].*try again at`)
 	codex           = regexp.MustCompile(`(?i)try again at\s+([0-9]{1,2}:[0-9]{2}\s*(?:AM|PM)?)(?:\s+(UTC|GMT|Z))?`)
@@ -45,12 +45,11 @@ func Classify(screen string, now time.Time, local *time.Location) (Stop, bool) {
 		return Stop{}, false
 	}
 	screen = block
+	providerPool := providerCreditPool(screen)
 	var out Stop
 	switch {
-	case anthropicCredit.MatchString(screen):
-		out.Pool, out.CreditExhausted, out.CreditExhaustedAt = "anthropic-api", true, now.UTC()
-	case openAICredit.MatchString(screen):
-		out.Pool, out.CreditExhausted, out.CreditExhaustedAt = "openai-api", true, now.UTC()
+	case providerPool != "":
+		out.Pool, out.CreditExhausted, out.CreditExhaustedAt = providerPool, true, now.UTC()
 	case devin.MatchString(screen):
 		out.Pool = "devin-free"
 	case codexSignal.MatchString(screen) && (strings.Contains(strings.ToLower(screen), "limit") || strings.Contains(strings.ToLower(screen), "quota")):
@@ -137,38 +136,15 @@ func Classify(screen string, now time.Time, local *time.Location) (Stop, bool) {
 	return out, true
 }
 
-// statusBlock accepts only an exact CLI status line as the last
-// activity; later ordinary output, source code, or a completed answer invalidates it.
+// statusBlock accepts only an exact CLI status line as the last activity.
+// Provider error continuations stay inside their bounded border or JSON block.
 func statusBlock(screen string) (string, bool) {
 	lines := strings.Split(strings.ReplaceAll(screen, "\r", ""), "\n")
 	for i := len(lines) - 1; i >= 0; i-- {
 		line := strings.TrimSpace(lines[i])
 		line = trimScreenBorder(line)
 		if apiErrorStart.MatchString(line) {
-			if len(lines)-i > 16 {
-				return "", false
-			}
-			end := len(lines)
-			for j := i + 1; j < len(lines); j++ {
-				if chromeLine(lines[j]) {
-					end = j
-					break
-				}
-			}
-			for _, tail := range lines[end:] {
-				if !chromeLine(tail) {
-					return "", false
-				}
-			}
-			blockLines := make([]string, 0, end-i)
-			for j := i; j < end; j++ {
-				blockLines = append(blockLines, trimScreenBorder(strings.TrimSpace(lines[j])))
-			}
-			block := strings.Join(blockLines, " ")
-			if anthropicCredit.MatchString(block) || openAICredit.MatchString(block) {
-				return block, true
-			}
-			continue
+			return providerErrorBlock(lines, i)
 		}
 		if devin.MatchString(line) || claude.MatchString(line) || codexSignal.MatchString(line) {
 			if len(lines)-i > 16 {
@@ -183,6 +159,66 @@ func statusBlock(screen string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+func providerErrorBlock(lines []string, start int) (string, bool) {
+	if len(lines)-start > 16 || screenBorderPrefix(lines[start]) == '┌' {
+		return "", false
+	}
+	border := screenBorderPrefix(lines[start])
+	blockLines := []string{trimScreenBorder(strings.TrimSpace(lines[start]))}
+	end := len(lines)
+	promptFound := false
+	for i := start + 1; i < len(lines); i++ {
+		line := strings.TrimSpace(lines[i])
+		content := trimScreenBorder(line)
+		if promptLine(line) {
+			end, promptFound = i, true
+			break
+		}
+		if apiErrorStart.MatchString(content) {
+			return "", false
+		}
+		currentBlock := strings.Join(blockLines, "\n")
+		if chromeLine(line) || border != 0 && screenBorderPrefix(line) == border || jsonContinuation(content) || jsonStringOpen(currentBlock) {
+			blockLines = append(blockLines, content)
+			continue
+		}
+		return "", false
+	}
+	if !promptFound {
+		return "", false
+	}
+	for _, tail := range lines[end:] {
+		if !chromeLine(tail) {
+			return "", false
+		}
+	}
+	block := strings.Join(blockLines, " ")
+	if providerCreditPool(block) == "" {
+		return "", false
+	}
+	return block, true
+}
+
+func providerCreditPool(block string) string {
+	if anthropicCredit.MatchString(block) {
+		return "anthropic-api"
+	}
+	if openAICredit.MatchString(block) {
+		return "openai-api"
+	}
+	compact := strings.Join(strings.Fields(block), "")
+	compact = strings.ToLower(compact)
+	if strings.HasPrefix(compact, "apierror:") {
+		if strings.Contains(compact, "creditbalanceistoolowtoaccesstheanthropicapi") {
+			return "anthropic-api"
+		}
+		if strings.Contains(compact, "insufficient_quota") || strings.Contains(compact, "exceededyourcurrentquota") {
+			return "openai-api"
+		}
+	}
+	return ""
 }
 
 func chromeLine(line string) bool {
@@ -209,6 +245,59 @@ func chromeLine(line string) bool {
 		}
 	}
 	return false
+}
+
+func promptLine(line string) bool {
+	line = trimScreenBorder(strings.TrimSpace(line))
+	lower := strings.ToLower(line)
+	for _, glyph := range []string{"❯", "❭", "›"} {
+		if line == glyph || strings.HasPrefix(lower, strings.ToLower(glyph+" ask ")) {
+			return true
+		}
+	}
+	return false
+}
+
+func jsonContinuation(line string) bool {
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return false
+	}
+	return strings.ContainsRune(`{}[],:"`, []rune(line)[0])
+}
+
+func jsonStringOpen(block string) bool {
+	start := strings.IndexByte(block, '{')
+	if start < 0 {
+		return false
+	}
+	inString, escaped := false, false
+	for _, r := range block[start:] {
+		if escaped {
+			escaped = false
+			continue
+		}
+		if inString && r == '\\' {
+			escaped = true
+			continue
+		}
+		if r == '"' {
+			inString = !inString
+		}
+	}
+	return inString
+}
+
+func screenBorderPrefix(line string) rune {
+	line = strings.TrimLeft(line, " \t")
+	if line == "" {
+		return 0
+	}
+	r := []rune(line)[0]
+	if strings.ContainsRune("│┃┌└|", r) {
+		return r
+	}
+	return 0
 }
 
 func trimScreenBorder(line string) string {
