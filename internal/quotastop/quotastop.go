@@ -392,6 +392,7 @@ func providerTextPrefix(message string) bool {
 	for _, expected := range []string{
 		"yourcreditbalanceistoolowtoaccesstheanthropicapipleasegotoplansbillingtoupgradeorpurchasecredits",
 		"insufficientquota",
+		"youexceededyourcurrentquota",
 		"exceededyourcurrentquota",
 	} {
 		if strings.HasPrefix(expected, value) {

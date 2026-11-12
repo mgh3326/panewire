@@ -82,7 +82,7 @@ func TestWrappedProviderCreditErrorClassifies(t *testing.T) {
 		},
 		{
 			name:   "Anthropic JSON scalar continuation",
-			screen: "API Error: 400 {\"error\":{\"message\":\"Your credit balance is too low to access the Anthropic API\",\"status\":\n30}}\n❯ Ask Claude",
+			screen: "API Error: 400 {\"error\":{\"message\":\"Your credit balance is too low to access the Anthropic API\",\"status\":\n30\n}}\n❯ Ask Claude",
 			pool:   "anthropic-api",
 		},
 		{
