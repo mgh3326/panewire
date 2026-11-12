@@ -109,3 +109,22 @@ func TestLoginScreenMarkClearsWhenMeasurementPublishFailsT3891(t *testing.T) {
 		t.Fatalf("successful own measurement followed by publish failure kept login mark: %q", got)
 	}
 }
+
+func TestLoginScreenMarkClearsOnLoopMeasurementWhenPublishFailsT3891(t *testing.T) {
+	setAgySwitch(t, true, true)
+	rig := newLoginProbeRig(t, agyLoginFiles(agyToken), true, 0)
+	rig.client.nativeQuota["agy"].Now = func() time.Time { return rig.clock }
+	markT3891LoginScreen(t, rig.client)
+	rig.clock = rig.clock.Add(nodeLoginScreenTTL + time.Second)
+	setT3891SharedReading(t, rig, rig.clock.Add(-6*time.Minute))
+	rig.hk.mu.Lock()
+	rig.hk.failPublish = true
+	rig.hk.mu.Unlock()
+	rig.round(t)
+	if got := rig.api.count(); got == 0 {
+		t.Fatal("quota loop did not measure this host's credential")
+	}
+	if got := rig.login(t); got == fleet.ReadinessLoginMissing {
+		t.Fatalf("successful own measurement followed by publish failure kept login mark: %q", got)
+	}
+}
