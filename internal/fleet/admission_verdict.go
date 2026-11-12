@@ -218,7 +218,6 @@ func admissionPct(v float64) *float64 {
 // restrictions. cmd-dsflash41 is narrower still: worker or tester only.
 func admissionRoleCheck(req admissionRequest, row admissionRow) *gateDenial {
 	role := admissionNormalize(req.Role)
-	purpose := admissionNormalize(req.Purpose)
 	if admissionCredit(req.Profile, row.Pool) {
 		allowed := role == "worker" || role == "tester" || (role == "builder" && row.Placed && row.Gate == defaultGate)
 		if !allowed {
@@ -230,21 +229,8 @@ func admissionRoleCheck(req admissionRequest, row admissionRow) *gateDenial {
 	if req.Profile == "cmd-dsflash41" && role != "worker" && role != "tester" {
 		return &gateDenial{gateRoleDenied, "role_restricted: cmd-dsflash41 seats only a worker or tester"}
 	}
-	if req.Profile == "codex-astra" || req.Profile == "fable" {
-		if role == "worker" || role == "captain" {
-			return &gateDenial{gateRoleDenied, "role_restricted: consult model cannot hold this seat"}
-		}
-		if role == "builder" || role == "tester" || role == "reviewer" {
-			if purpose != "round-extension" || !strings.HasPrefix(req.OperatorRequest, "hk:doc/round-ext/") {
-				return &gateDenial{gateRoleDenied, "role_restricted: round-extension and a round-ext document required"}
-			}
-		}
-	}
 	if strings.Contains(req.Profile, "astra") && req.Profile != "codex-astra" {
 		return &gateDenial{gateRoleDenied, "role_restricted: removed astra seat alias"}
-	}
-	if req.Profile == "codex-astra" && purpose != "director" && purpose != "architect" && purpose != "operator-request" && purpose != "round-extension" {
-		return &gateDenial{gateRoleDenied, "role_restricted: astra requires director, architect, or operator-request purpose"}
 	}
 	return nil
 }

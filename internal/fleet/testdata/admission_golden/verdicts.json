@@ -1084,6 +1084,7 @@
   },
   {
    "config": "[pools.grok]\nclass = \"exclude\"\n",
+   "disagreement": "Operator decision (hk 4212): fable holds worker seats like other profiles; panewire no longer refuses the role. The recorded catalog row is consult_only, so the gate refuses on that row's rule (no --operator-request). pacelever v0.3.28 still refuses the role.",
    "latest": {
     "observation": {
      "id": 7,
@@ -1105,7 +1106,13 @@
      ]
     }
    },
-   "name": "fable-worker-role-denied",
+   "name": "fable-worker-consult-gate",
+   "native": {
+    "ok": false,
+    "exit_code": 3,
+    "provider_id": "claude",
+    "reason": "consult_only: pass --operator-request"
+   },
    "now": "2026-11-07T03:00:00Z",
    "pacelever": {
     "ok": false,
@@ -1125,6 +1132,7 @@
   },
   {
    "config": "[pools.grok]\nclass = \"exclude\"\n",
+   "disagreement": "Operator decision (hk 4212): fable holds builder seats like other profiles; panewire no longer refuses the role. The recorded catalog row is consult_only, so the gate refuses on that row's rule (no --operator-request). pacelever v0.3.28 still refuses the role.",
    "latest": {
     "observation": {
      "id": 7,
@@ -1146,7 +1154,13 @@
      ]
     }
    },
-   "name": "fable-builder-needs-round-ext",
+   "name": "fable-builder-consult-gate",
+   "native": {
+    "ok": false,
+    "exit_code": 3,
+    "provider_id": "claude",
+    "reason": "consult_only: pass --operator-request"
+   },
    "now": "2026-11-07T03:00:00Z",
    "pacelever": {
     "ok": false,
@@ -1207,6 +1221,7 @@
   },
   {
    "config": "[pools.grok]\nclass = \"exclude\"\n",
+   "disagreement": "Operator decision (hk 4212): codex-astra's purpose limit is removed; panewire admits a lead request without --purpose. pacelever v0.3.28 still refuses it.",
    "latest": {
     "observation": {
      "id": 7,
@@ -1229,7 +1244,13 @@
      "plan": "pro"
     }
    },
-   "name": "codex-astra-needs-purpose",
+   "name": "codex-astra-lead-without-purpose",
+   "native": {
+    "ok": true,
+    "exit_code": 0,
+    "provider_id": "codex",
+    "reason": "codex-astra pool=codex used=10% class=spend"
+   },
    "now": "2026-11-07T03:00:00Z",
    "pacelever": {
     "ok": false,

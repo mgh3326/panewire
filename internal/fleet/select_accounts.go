@@ -450,7 +450,7 @@ func (a *App) selectionRefused(ctx context.Context, s Spawn, req selReq, p *selP
 			}
 			p.outcome = outcomeNoRoleCandidate
 			note := fmt.Sprintf(": no account admitted routing role %s%s%s%s", routingRole(req), hostScope(s), p.capsGap+p.hostDropNote(), p.poolAtCapNote())
-			return p, fail(exitSeatRefused, "%s%s%s", c.reason, note, rolePurposeHint(s))
+			return p, fail(exitSeatRefused, "%s%s", c.reason, note)
 		}
 	}
 	order := []string{outcomeQuotaUnknown, outcomeAuthUnavailable, outcomeNoEligibleHost, outcomePolicyUnavailable, outcomeNoRoleCandidate}
@@ -485,13 +485,6 @@ func (a *App) selectionRefused(ctx context.Context, s Spawn, req selReq, p *selP
 		return p, fail(exitSeatRefused, "%s: %s: every eligible candidate is in a pool at its concurrency cap%s", reasonRoleNoCandidate, outcomeNoRoleCandidate, note)
 	}
 	return p, fail(exitSeatRefused, "%s: %s: no profile passes role, retirement, grade, gate and seat rules", reasonRoleNoCandidate, outcomeNoRoleCandidate)
-}
-
-func rolePurposeHint(s Spawn) string {
-	if s.Profile == "codex-astra" {
-		return " (codex-astra는 --purpose " + strings.Join(astraPurposeValues[:], "|") + " 중 하나를 지정하세요)"
-	}
-	return ""
 }
 
 func routingRole(req selReq) string {
