@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -71,7 +72,10 @@ func TestCreditRejectionPublishesBeforeQuotaStop(t *testing.T) {
 		hk.ServeHTTP(w, r)
 	}))
 	defer srv.Close()
-	a, _, jobs, _ := quotaStopFixture(t, "worker", "idle", "")
+	a, _, jobs, report := quotaStopFixture(t, "worker", "idle", "")
+	if err := os.WriteFile(report, []byte("partial report"), 0600); err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("HANDOFFKEEP_URL", "https://hk.test.invalid")
 	t.Setenv("HANDOFFKEEP_TOKEN_SVC_PANEWIRE", "test-token")
 	a.Config.Quota = map[string]any{"url": srv.URL, "accounts": map[string]any{"anthropic-api": "0123456789abcdef"}}
@@ -239,5 +243,202 @@ func TestOmpCreditOpenAIProviderError(t *testing.T) {
 				t.Fatalf("wrong rejection: %+v", stop)
 			}
 		})
+	}
+}
+
+func TestOmpCreditSessionID(t *testing.T) {
+	a := testApp(t)
+	dir := filepath.Join(a.Home, ".omp", "agent", "sessions", "test")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	data := `{"type":"session","id":"session-123","cwd":"/tmp/project"}` + "\n" + `{"type":"message","timestamp":"2026-01-01T00:00:00Z","message":{"role":"assistant","stopReason":"error","errorStatus":429,"provider":"openai","errorMessage":"429 {\"error\":{\"code\":\"insufficient_quota\"}}"}}` + "\n"
+	if err := os.WriteFile(filepath.Join(dir, "one.jsonl"), []byte(data), 0600); err != nil {
+		t.Fatal(err)
+	}
+	job := Job{Receipt: map[string]any{"pool": "openai-api", "cwd": "/tmp/project", "harness_session": map[string]any{"kind": "omp", "id": "session-123"}}}
+	if _, ok := ompCreditStop(a.Home, job); !ok {
+		t.Fatal("session ID did not find its unique rejection")
+	}
+	if err := os.WriteFile(filepath.Join(dir, "two.jsonl"), []byte(data), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := ompCreditStop(a.Home, job); ok {
+		t.Fatal("ambiguous session ID produced a stop")
+	}
+}
+
+func creditWatchSession(t *testing.T, a *App, role string) {
+	t.Helper()
+	dir := filepath.Join(a.Home, ".omp", "agent", "sessions", "test")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "session.jsonl")
+	data := `{"type":"session","cwd":"/tmp/project"}` + "\n" + fmt.Sprintf(`{"type":"message","message":{"role":"assistant","stopReason":"error","errorStatus":400,"provider":"anthropic","completedAt":%d,"errorMessage":"400 {\"error\":{\"type\":\"invalid_request_error\",\"message\":\"Your credit balance is too low\"}}"}}`, a.Now().UnixMilli()) + "\n"
+	if err := os.WriteFile(path, []byte(data), 0600); err != nil {
+		t.Fatal(err)
+	}
+	putEvent(t, a, "j", "job.spawned", map[string]any{"pane_id": "w:p1", "role": role, "pool": "anthropic-api", "cwd": "/tmp/project", "harness_session": map[string]any{"kind": "omp", "id": path}})
+}
+
+func TestCreditPublicationFailureIsBoundedAndRearmed(t *testing.T) {
+	hk := &hkBenchFake{}
+	var fail atomic.Bool
+	fail.Store(true)
+	var attempts atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPut && strings.HasSuffix(r.URL.Path, "/observation") {
+			attempts.Add(1)
+			if fail.Load() {
+				http.Error(w, "unavailable", 503)
+				return
+			}
+		}
+		hk.ServeHTTP(w, r)
+	}))
+	defer srv.Close()
+	a, _, jobs, _ := quotaStopFixture(t, "worker", "idle", "")
+	t.Setenv("HANDOFFKEEP_URL", "https://hk.test.invalid")
+	t.Setenv("HANDOFFKEEP_TOKEN_SVC_PANEWIRE", "test-token")
+	a.Config.Quota = map[string]any{"url": srv.URL, "accounts": map[string]any{"anthropic-api": "0123456789abcdef"}}
+	creditWatchSession(t, a, "worker")
+	if err := a.watch(context.Background(), []string{"j"}); err != nil {
+		t.Fatal(err)
+	}
+	if attempts.Load() != 3 {
+		t.Fatalf("publication attempts = %d, want 3", attempts.Load())
+	}
+	if got := str(jobs.record(t, "j"), "end_reason"); got != "quota_stop pool=anthropic-api" {
+		t.Fatalf("end reason = %q", got)
+	}
+	job, err := a.job("j")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := pendingCreditRejection(job); !ok {
+		t.Fatal("failed publication was not recorded for recovery")
+	}
+	fail.Store(false)
+	started := 0
+	if err := a.rearmWatchers(func(id string) error { started++; return a.watch(context.Background(), []string{id, "--rearmed"}) }, func(string) {}, true); err != nil {
+		t.Fatal(err)
+	}
+	if started != 1 || len(hk.manual) != 1 {
+		t.Fatalf("rearm started=%d, published=%d", started, len(hk.manual))
+	}
+	job, err = a.job("j")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := pendingCreditRejection(job); ok {
+		t.Fatal("published rejection remained pending")
+	}
+}
+
+func TestCreditCounselPublishesWithoutEndingJob(t *testing.T) {
+	hk := &hkBenchFake{}
+	srv := httptest.NewServer(hk)
+	defer srv.Close()
+	a, _, jobs, _ := quotaStopFixture(t, "counsel", "idle", "")
+	t.Setenv("HANDOFFKEEP_URL", "https://hk.test.invalid")
+	t.Setenv("HANDOFFKEEP_TOKEN_SVC_PANEWIRE", "test-token")
+	a.Config.Quota = map[string]any{"url": srv.URL, "accounts": map[string]any{"anthropic-api": "0123456789abcdef"}}
+	creditWatchSession(t, a, "counsel")
+	if err := a.watch(context.Background(), []string{"j"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(hk.manual) != 1 {
+		t.Fatalf("published observations = %d, want 1", len(hk.manual))
+	}
+	if got := str(jobs.record(t, "j"), "state"); got != "spawned" {
+		t.Fatalf("counsel job ended: %q", got)
+	}
+	if p := lostPayload(t, a); p != nil {
+		t.Fatalf("counsel quota handoff = %v", p)
+	}
+}
+
+func TestCreditHandOffRecognizesResumedPane(t *testing.T) {
+	seq := int64(1)
+	h := quotaHandOff{stop: quotastop.Stop{Pool: "anthropic-api", CreditExhaustedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}, seq: &seq, active: true}
+	if h.unchanged(Agent{Status: "working", StateChangeSeq: &seq}) {
+		t.Fatal("working pane considered unchanged")
+	}
+	next := int64(2)
+	if h.unchanged(Agent{Status: "idle", StateChangeSeq: &next}) {
+		t.Fatal("changed pane considered unchanged")
+	}
+}
+
+func TestCreditSpawnReceiptKeepsAdmittedAccount(t *testing.T) {
+	a, s, _ := ompSpawnFixture(t)
+	const admitted = "anthropic-api:0123456789abcdef"
+	q := a.Quota.(*fakeQuota)
+	q.GateDo = func(QuotaRequest) (string, error) {
+		return `{"schema":"scopefuel.gate.v1","provider_id":"anthropic-api","profile":"omp-opus","ok":true,"exit_code":0,"reading_account_key":"` + admitted + `"}`, nil
+	}
+	if err := a.Spawn(context.Background(), s); err != nil {
+		t.Fatal(err)
+	}
+	job, err := a.job(s.Job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := str(job.Receipt, "account_key"); got != admitted {
+		t.Fatalf("spawn receipt account = %q, want admitted %q", got, admitted)
+	}
+}
+
+func TestCreditWatcherResumedDuringHandoff(t *testing.T) {
+	hk := &hkBenchFake{}
+	srv := httptest.NewServer(hk)
+	defer srv.Close()
+	a, runner, jobs, _ := quotaStopFixture(t, "worker", "idle", "")
+	t.Setenv("HANDOFFKEEP_URL", "https://hk.test.invalid")
+	t.Setenv("HANDOFFKEEP_TOKEN_SVC_PANEWIRE", "test-token")
+	t.Setenv("PANEWIRE_COMPLETION_TIMEOUT_S", "600")
+	a.Config.Quota = map[string]any{"url": srv.URL, "accounts": map[string]any{"anthropic-api": "0123456789abcdef"}}
+	a.QuotaHandOffGrace = 2 * time.Minute
+	creditWatchSession(t, a, "worker")
+	original := runner.Do
+	lists := 0
+	runner.Do = func(c Command) Result {
+		if c.Name == "herdr" && strings.Join(c.Args, " ") == "agent list" {
+			lists++
+			if lists > 1 {
+				return Result{Out: `{"result":{"agents":[{"pane_id":"w:p1","agent_status":"working","state_change_seq":8}]}}`}
+			}
+		}
+		return original(c)
+	}
+	if err := a.watch(context.Background(), []string{"j"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := str(jobs.record(t, "j"), "state"); got == "lost" {
+		t.Fatal("resumed job ended lost")
+	}
+	if !slices.Contains(eventKindsOf(t, a, "j"), "job.reprompted") {
+		t.Fatal("resumed job was not reprompted")
+	}
+}
+
+func TestCreditPendingPublicationKeepsJobDirectory(t *testing.T) {
+	r := newTTLRig(t)
+	r.seedJob("j1")
+	putEvent(t, r.a, "j1", "job.credit_rejection", map[string]any{"pool": "anthropic-api", "at": r.a.Now().Format(time.RFC3339Nano)})
+	r.age("j1")
+	out := r.pass(true)
+	wantKeep(t, r, out, "j1", "credit-publication-pending")
+}
+
+func TestCreditSpawnRejectsMismatchedAdmittedAccount(t *testing.T) {
+	a, s, _ := ompSpawnFixture(t)
+	q := a.Quota.(*fakeQuota)
+	q.GateDo = func(QuotaRequest) (string, error) {
+		return `{"schema":"scopefuel.gate.v1","provider_id":"anthropic-api","profile":"omp-opus","ok":true,"exit_code":0,"reading_account_key":"openai-api:0123456789abcdef"}`, nil
+	}
+	if err := a.Spawn(context.Background(), s); err == nil || !strings.Contains(err.Error(), "reading account") {
+		t.Fatalf("mismatched admitted account error = %v", err)
 	}
 }

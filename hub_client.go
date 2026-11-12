@@ -510,6 +510,7 @@ func (client *HubClient) Run(ctx context.Context) {
 		return
 	}
 	client.rearmWatchers()
+	go client.runCreditRejectionRecovery(ctx)
 	go client.runLaneReconcile(ctx)
 	go client.runTaskPaneSweep(ctx)
 	if client.statePublish {
@@ -537,6 +538,30 @@ func (client *HubClient) Run(ctx context.Context) {
 			return
 		}
 		backoff = nextHubBackoff(backoff, client.maxBackoff)
+	}
+}
+
+// A failed shared-store write is retained in the job ledger. Retry bounded
+// watcher runs independently of the pane and the fleet-state publisher.
+func (client *HubClient) runCreditRejectionRecovery(ctx context.Context) {
+	if client.jobsInboxRoot == "" {
+		return
+	}
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			config, _, err := client.resolveHubSpawnConfig()
+			if err == nil {
+				err = fleet.RearmPendingCreditWatchers(filepath.Join(client.jobsInboxRoot, "jobs"), config.HERDRSession, client.rearmStart, func(id string) { slog.Info("credit publication re-armed", "job", id) })
+			}
+			if err != nil {
+				slog.Warn("credit publication re-arm failed", "error", err)
+			}
+		}
 	}
 }
 

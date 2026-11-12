@@ -51,10 +51,38 @@ type quotaStopWatch struct {
 	seq  int64
 }
 
-// quotaStopped reports the quota stop an idle pane of j shows. It only reads
-// the visible screen; it never sends input to the pane, so no "send a message
-// to retry" automation exists here. A failed read is not a stop.
-func (a *App) quotaStopped(ctx context.Context, j Job, ag Agent, seen *quotaStopWatch) (quotastop.Stop, bool) {
+// pendingCreditRejection recovers a recorded rejection until publication is
+// acknowledged. The event contains only the pool and the fixed timestamp.
+func pendingCreditRejection(j Job) (quotastop.Stop, bool) {
+	var pending quotastop.Stop
+	for _, ev := range j.Events {
+		switch ev.Kind {
+		case "job.credit_rejection":
+			at, err := time.Parse(time.RFC3339Nano, str(ev.Payload, "at"))
+			if err == nil {
+				pending = quotastop.Stop{Pool: str(ev.Payload, "pool"), CreditExhaustedAt: at}
+			}
+		case "job.credit_published":
+			if str(ev.Payload, "pool") == pending.Pool && str(ev.Payload, "at") == pending.CreditExhaustedAt.UTC().Format(time.RFC3339Nano) {
+				pending = quotastop.Stop{}
+			}
+		}
+	}
+	return pending, pending.Pool != "" && !pending.CreditExhaustedAt.IsZero()
+}
+
+func creditRejectionPublished(j Job, stop quotastop.Stop) bool {
+	for i := len(j.Events) - 1; i >= 0; i-- {
+		ev := j.Events[i]
+		if ev.Kind == "job.credit_published" && str(ev.Payload, "pool") == stop.Pool && str(ev.Payload, "at") == stop.CreditExhaustedAt.UTC().Format(time.RFC3339Nano) {
+			return true
+		}
+	}
+	return false
+}
+
+// creditStopped uses the session's structured provider error, not pane text.
+func (a *App) creditStopped(j Job, ag Agent) (quotastop.Stop, bool) {
 	if ag.Status != "idle" && ag.Status != "done" {
 		return quotastop.Stop{}, false
 	}
@@ -66,10 +94,22 @@ func (a *App) quotaStopped(ctx context.Context, j Job, ag Agent, seen *quotaStop
 		receipt["harness_session"] = map[string]any{"kind": live.Kind, "id": live.ID, "source": live.Source}
 		j.Receipt = receipt
 	}
-	if slices.Contains([]string{"worker", "tester", "reviewer"}, j.QuotaRole()) {
+	if slices.Contains([]string{"worker", "tester", "reviewer", "counsel"}, j.QuotaRole()) {
 		if stop, ok := ompCreditStop(a.Home, j); ok {
 			return stop, true
 		}
+	}
+	return quotastop.Stop{}, false
+}
+
+// quotaStopped also recognizes the existing visible quota status lines. A
+// failed read is not a stop; neither path sends input to the pane.
+func (a *App) quotaStopped(ctx context.Context, j Job, ag Agent, seen *quotaStopWatch) (quotastop.Stop, bool) {
+	if stop, ok := a.creditStopped(j, ag); ok {
+		return stop, true
+	}
+	if ag.Status != "idle" && ag.Status != "done" {
+		return quotastop.Stop{}, false
 	}
 	if !slices.Contains(quotaStopRoles, j.QuotaRole()) {
 		return quotastop.Stop{}, false
@@ -113,9 +153,6 @@ type quotaHandOff struct {
 // unchanged reports whether the pane is still in the state the stop was read
 // in. A pane that went back to work is not stopped any more.
 func (h quotaHandOff) unchanged(ag Agent) bool {
-	if !h.stop.CreditExhaustedAt.IsZero() {
-		return true
-	}
 	if ag.Status != "idle" && ag.Status != "done" {
 		return false
 	}

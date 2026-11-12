@@ -749,8 +749,18 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 		}
 	}()
 	if s.AccountKey == "" {
-		key, _ := a.remoteAccount(ctx, firstNonempty(launch.Pool, gatePool(gate)), a.machine(), a.Config.Local)
-		s.AccountKey = key
+		var receipt struct {
+			ReadingKey string `json:"reading_account_key"`
+		}
+		if json.Unmarshal([]byte(gate), &receipt) == nil && receipt.ReadingKey != "" {
+			if !validAccountKey(receipt.ReadingKey) || accountPool(receipt.ReadingKey) != firstNonempty(launch.Pool, gatePool(gate)) {
+				return fail(exitConfig, "quota receipt reading account does not match the launch pool")
+			}
+			s.AccountKey = receipt.ReadingKey
+		} else {
+			key, _ := a.remoteAccount(ctx, firstNonempty(launch.Pool, gatePool(gate)), a.machine(), a.Config.Local)
+			s.AccountKey = key
+		}
 	}
 	a.stampSelection(&s, a.machine())
 	s.placement.execution = placementExecution{Host: a.machine(), Family: seat.Family, Model: launch.ModelID, Role: placementRole(s), Profile: s.Profile, Pool: firstNonempty(launch.Pool, gatePool(gate)), AccountKey: placementAccount(s.AccountKey)}

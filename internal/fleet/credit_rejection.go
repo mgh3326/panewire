@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -51,19 +52,27 @@ func ompCreditStop(home string, j Job) (quotastop.Stop, bool) {
 		return quotastop.Stop{}, false
 	}
 	rootPath := filepath.Join(home, ".omp", "agent", "sessions")
-	path := ref.ID
-	if !filepath.IsAbs(path) || filepath.Clean(path) != path || !strings.HasSuffix(path, ".jsonl") {
-		return quotastop.Stop{}, false
-	}
-	rel, err := filepath.Rel(rootPath, path)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return quotastop.Stop{}, false
-	}
 	root, err := os.OpenRoot(rootPath)
 	if err != nil {
 		return quotastop.Stop{}, false
 	}
 	defer root.Close()
+	path := ref.ID
+	var rel string
+	if filepath.IsAbs(path) {
+		if filepath.Clean(path) != path || !strings.HasSuffix(path, ".jsonl") {
+			return quotastop.Stop{}, false
+		}
+		rel, err = filepath.Rel(rootPath, path)
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return quotastop.Stop{}, false
+		}
+	} else {
+		rel, err = findOMPSession(root, path, str(j.Receipt, "cwd"))
+		if err != nil {
+			return quotastop.Stop{}, false
+		}
+	}
 	f, err := root.Open(rel)
 	if err != nil {
 		return quotastop.Stop{}, false
@@ -172,4 +181,44 @@ func ompCreditStop(home string, j Job) (quotastop.Stop, bool) {
 		}
 	}
 	return quotastop.Stop{Pool: pool, CreditExhaustedAt: at}, true
+}
+
+// findOMPSession accepts an ID only when one bounded, confined search finds a
+// unique matching session header for the job's working directory.
+func findOMPSession(root *os.Root, id, cwd string) (string, error) {
+	if !usageSessionIDRE.MatchString(id) || id == "unknown" || cwd == "" {
+		return "", fmt.Errorf("invalid session identity")
+	}
+	var found string
+	count := 0
+	err := fs.WalkDir(root.FS(), ".", func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		count++
+		if count > 10000 {
+			return fmt.Errorf("session search limit exceeded")
+		}
+		if !entry.Type().IsRegular() || !strings.HasSuffix(path, ".jsonl") {
+			return nil
+		}
+		f, err := root.Open(path)
+		if err != nil {
+			return err
+		}
+		line, err := bufio.NewReader(io.LimitReader(f, 64<<10)).ReadBytes('\n')
+		f.Close()
+		var header struct{ Type, ID, CWD string }
+		if err == nil && json.Unmarshal(line, &header) == nil && header.Type == "session" && header.ID == id && header.CWD == cwd {
+			if found != "" {
+				return fmt.Errorf("ambiguous session identity")
+			}
+			found = path
+		}
+		return nil
+	})
+	if err != nil || found == "" {
+		return "", fmt.Errorf("session identity unavailable")
+	}
+	return found, nil
 }

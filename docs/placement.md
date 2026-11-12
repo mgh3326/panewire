@@ -97,7 +97,10 @@ error, not pane text, and uses omp's completion timestamp (or the session entry
 timestamp when completion time is absent). This is the harness host's time;
 the provider response does not include a recorded rejection timestamp. The
 watcher writes a zero balance to the shared manual credit store before it
-announces the quota stop. The stored observation has no billing expiry; a later
+announces the quota stop. It records a pending publication locally first. After
+three failed attempts it ends the job as quota-stopped; the node retries the
+pending publication on restart and periodically thereafter, retaining the job
+directory until publication succeeds. The stored observation has no billing expiry; a later
 manual credit measurement reopens the account. Replaying an older rejection
 cannot replace a newer entry. Selection and `plan` show `credit_exhausted` and
 its `since` time. The shared store keeps the close across a hub restart and
