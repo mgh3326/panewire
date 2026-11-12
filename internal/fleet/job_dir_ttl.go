@@ -712,6 +712,9 @@ func jobDirReports(ctx context.Context, reports []string, id string, rec map[str
 		want := ""
 		for _, event := range events {
 			if event.Kind == "job.completed" && str(event.Payload, "report") == path && strings.EqualFold(str(event.Payload, "report_sha256"), local) {
+				if str(event.Payload, "document") == "" {
+					continue
+				}
 				key, want = str(event.Payload, "document"), str(event.Payload, "report_sha256")
 				break
 			}

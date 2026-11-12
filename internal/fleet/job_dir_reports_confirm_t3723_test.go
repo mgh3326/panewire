@@ -46,3 +46,25 @@ func TestJobDirReportsUsesPinnedDocumentWithoutEvents(t *testing.T) {
 		t.Fatalf("reason=%q, want pinned report confirmed without local events", got)
 	}
 }
+
+func TestJobDirReportsSkipsUnpublishedEventForLaterPublishedMatch(t *testing.T) {
+	r := newTTLRig(t)
+	body := []byte("later answer\n")
+	path := filepath.Join(r.dir("j1"), "report.md")
+	r.write("j1", "report.md", body)
+	firstBody := []byte("first answer\n")
+	pinnedKey := "reports/j1/first.md"
+	r.doc(pinnedKey, firstBody, "")
+	digest := sha(body)
+	operationKey := "reports/j1/second-answer/answer-" + digest + ".md"
+	r.doc(operationKey, body, "")
+	events := []Event{
+		{Kind: "job.completed", Payload: map[string]any{"report": path, "report_sha256": digest, "document": ""}},
+		{Kind: "job.completed", Payload: map[string]any{"report": path, "report_sha256": digest, "document": operationKey}},
+	}
+	record := map[string]any{"report_doc": pinnedKey, "report_sha256": sha(firstBody)}
+
+	if got := jobDirReports(t.Context(), []string{path}, "j1", record, events); got != "" {
+		t.Fatalf("reason=%q, want later published matching event to confirm the report", got)
+	}
+}

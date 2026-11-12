@@ -41,6 +41,9 @@ func (a *App) lifecycleWithOptions(ctx context.Context, kind string, args []stri
 	if f.NArg() > 0 {
 		return fail(exitUsage, "unexpected arguments")
 	}
+	if kind != "done" && *completionIDFlag != "" {
+		return fail(exitUsage, "%s accepts no --completion-id", kind)
+	}
 	j, e := a.job(id)
 	if e != nil {
 		return e
@@ -53,9 +56,6 @@ func (a *App) lifecycleWithOptions(ctx context.Context, kind string, args []stri
 	}
 	if kind == "escalate" && (*question == "" || j.Parent == "") {
 		return fail(exitUsage, "escalate requires --question and a recorded parent lane")
-	}
-	if kind != "done" && *completionIDFlag != "" {
-		return fail(exitUsage, "%s accepts no --completion-id", kind)
 	}
 	var result json.RawMessage
 	var rejected string
