@@ -106,6 +106,11 @@ func TestWrappedProviderCreditErrorClassifies(t *testing.T) {
 			pool:   "openai-api",
 		},
 		{
+			name:   "OpenAI plain message wraps after completed quota phrase",
+			screen: "API Error: 429 You exceeded your current quota, please check your plan and billing details. For more\ninformation on this error, read the docs.\n› Ask Codex",
+			pool:   "openai-api",
+		},
+		{
 			name:   "OpenAI plain message includes documentation suffix",
 			screen: "API Error: 429 You exceeded your current quota, please check your plan and billing details. For more information on this error, read the docs.\n› Ask Codex",
 			pool:   "openai-api",
@@ -159,6 +164,21 @@ func TestWrappedProviderCreditErrorClassifies(t *testing.T) {
 			name:   "OpenAI JSON body begins after status",
 			screen: "API Error: 429\n{\"error\":{\"type\":\"insufficient_quota\"}}\n› Ask Codex",
 			pool:   "openai-api",
+		},
+		{
+			name:   "OpenAI JSON body brace wraps to its own row",
+			screen: "API Error: 429\n{\n\"error\":{\"type\":\"insufficient_quota\"}}\n› Ask Codex",
+			pool:   "openai-api",
+		},
+		{
+			name:   "OpenAI JSON array starts on a continuation row",
+			screen: "API Error: 429\n[\n{\"error\":{\"type\":\"insufficient_quota\"}}\n]\n› Ask Codex",
+			pool:   "openai-api",
+		},
+		{
+			name:   "Anthropic wrapped generic provider error type",
+			screen: "API Error: 400\nbilling_error\nYour credit balance is too low to access the Anthropic API\n❯ Ask Claude",
+			pool:   "anthropic-api",
 		},
 		{
 			name:   "OpenAI wrapped body",
