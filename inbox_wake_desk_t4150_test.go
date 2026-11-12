@@ -97,7 +97,8 @@ func TestInboxWakeDesignWithProvenGonePaneFallsBackToDesk(t *testing.T) {
 	r := newT3602Rig(t, "default")
 	routes := t4150BaseRoutes()
 	t4150Routes(t, r, routes)
-	if _, ok := r.h.observeNodePanes("host-a"); !ok || r.h.laneProvablyGone(t3602Design, routes[t3602Design], laneObservation{panes: map[string]struct{}{"w1:design": {}}, receivedAt: r.clock.Now()}) {
+	obs, ok := r.h.observeNodePanes("host-a")
+	if !ok || r.h.laneProvablyGone(t3602Design, routes[t3602Design], obs) {
 		t.Fatal("initial sighting did not establish the live design row")
 	}
 	r.clock.advance(laneWriteSettle + time.Second)
