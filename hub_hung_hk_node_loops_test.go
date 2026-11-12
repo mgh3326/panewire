@@ -248,23 +248,33 @@ func TestNodeRelayQueueAcceptsTransientSender(t *testing.T) {
 	t.Cleanup(closeHK)
 	h, _ := t3426Hub(t, filepath.Join(t.TempDir(), "inbox.sqlite3"), hk, t3426Records)
 	agent := &hubAgent{machineID: "host-a", credential: "node", transient: true}
+	lanePayload := mustJSON(map[string]any{"type": "event", "kind": "lane.event", "payload": map[string]any{
+		"owner_lane": t3426Design, "event_id": "transient-lane-3432", "text": "transient lane event", "epoch": 1,
+	}})
+	if handled, enqueued := h.queueNodeRelayMessage("host-a", "fixture", agent, lanePayload); !handled || !enqueued {
+		t.Fatalf("queue transient lane event handled=%v enqueued=%v", handled, enqueued)
+	}
 	event := hubJobEventPayload{JobID: "hk3432-transient", Epoch: 1, AgentLabel: "worker-3432", OwnerLane: t3426Design, EventID: "transient-3432", ReportPath: "/jobs/hk3432-transient/report.md"}
 	job := HubActiveJob{JobID: event.JobID, Epoch: event.Epoch, AgentLabel: event.AgentLabel, OwnerLane: event.OwnerLane, ReportPath: event.ReportPath}
 	payload := mustJSON(hubClientWireEvent(hubClientEvent{Kind: "job.completed", Payload: hubJobCompletionPayloadForJob(job, event.EventID, false)}))
 	if handled, enqueued := h.queueNodeRelayMessage("host-a", "fixture", agent, payload); !handled || !enqueued {
 		t.Fatalf("queue transient event handled=%v enqueued=%v", handled, enqueued)
 	}
-	eventually(t, time.Second, "transient lane event relayed", func() bool {
+	eventually(t, time.Second, "transient lane event and completion relayed", func() bool {
 		items, err := h.inbox.store.list(t3426Design, false)
 		if err != nil {
 			return false
 		}
+		lane, completion := false, false
 		for _, item := range items {
+			if item.Kind == "lane.event" && item.Event.EventID == "transient-lane-3432" {
+				lane = true
+			}
 			if item.Kind == "job.completed" && item.Event.EventID == event.EventID {
-				return true
+				completion = true
 			}
 		}
-		return false
+		return lane && completion
 	})
 }
 
