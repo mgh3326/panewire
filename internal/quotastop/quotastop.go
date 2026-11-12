@@ -167,6 +167,7 @@ func providerErrorBlock(lines []string, start int) (string, bool) {
 		return "", false
 	}
 	blockLines := []string{trimScreenBorder(strings.TrimSpace(lines[start]))}
+	plainMessageStarted := providerMessagePrefix(blockLines[0])
 	end := len(lines)
 	promptFound := false
 	for i := start + 1; i < len(lines); i++ {
@@ -184,7 +185,12 @@ func providerErrorBlock(lines []string, start int) (string, bool) {
 		}
 		currentBlock := strings.Join(blockLines, "\n")
 		json := scanJSON(currentBlock)
-		if json.open || !json.started && border != 0 && screenBorderPrefix(line) == border && providerCreditPool(currentBlock) == "" {
+		joined := currentBlock + "\n" + content
+		if json.open && (json.inString && providerMessagePrefix(joined) || !json.inString && jsonContinuation(content)) {
+			blockLines = append(blockLines, content)
+			continue
+		}
+		if !json.started && plainMessageStarted && border != 0 && screenBorderPrefix(line) == border && providerMessagePrefix(joined) {
 			blockLines = append(blockLines, content)
 			continue
 		}
@@ -266,9 +272,18 @@ func promptLine(line string) bool {
 	return false
 }
 
+func jsonContinuation(line string) bool {
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return false
+	}
+	return strings.ContainsRune(`{}[],:"`, []rune(line)[0])
+}
+
 type jsonProgress struct {
-	started bool
-	open    bool
+	started  bool
+	open     bool
+	inString bool
 }
 
 func scanJSON(block string) jsonProgress {
@@ -304,7 +319,32 @@ func scanJSON(block string) jsonProgress {
 		}
 	}
 	state.open = depth != 0 || inString
+	state.inString = inString
 	return state
+}
+
+func providerMessagePrefix(block string) bool {
+	body := apiErrorStart.ReplaceAllString(block, "")
+	var compact strings.Builder
+	for _, r := range strings.ToLower(body) {
+		if r >= 'a' && r <= 'z' || r >= '0' && r <= '9' {
+			compact.WriteRune(r)
+		}
+	}
+	value := compact.String()
+	for start := 0; start < len(value); start++ {
+		suffix := value[start:]
+		for _, message := range []string{
+			"yourcreditbalanceistoolowtoaccesstheanthropicapipleasegotoplansbillingtoupgradeorpurchasecredits",
+			"insufficientquota",
+			"exceededyourcurrentquota",
+		} {
+			if strings.HasPrefix(message, suffix) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func screenBorderPrefix(line string) rune {

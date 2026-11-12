@@ -71,6 +71,11 @@ func TestWrappedProviderCreditErrorClassifies(t *testing.T) {
 			pool:   "anthropic-api",
 		},
 		{
+			name:   "Anthropic text and standard continuation wrapped by border",
+			screen: "│ API Error: 400 Your credit balance is too low to access the Anthropic API. Please go to\n│ Plans & Billing to upgrade.\n│ ❯ Ask Claude",
+			pool:   "anthropic-api",
+		},
+		{
 			name:   "Anthropic unbordered JSON wrap",
 			screen: "API Error: 400 invalid_request_error {\"type\":\"error\",\"error\":{\"message\":\"Your credit balance is too low to access\nthe Anthropic API\"}}\n❯ Ask Claude",
 			pool:   "anthropic-api",
@@ -98,9 +103,14 @@ func TestWrappedProviderCreditErrorClassifies(t *testing.T) {
 func TestProviderCreditErrorRequiresLastActivity(t *testing.T) {
 	for _, screen := range []string{
 		"API Error: 429 {\"error\":{\"type\":\"insufficient_quota\"}}\nRetried; the call succeeded\n❯ Ask Claude",
+		`API Error: 400 {"error":{"message":"Your credit balance is too low to access the Anthropic API"
+Retried; the call succeeded
+}}
+❯ Ask Claude`,
 		"API Error: 429 insufficient_quota\n[retry] succeeded\n› Ask Codex",
 		"| API Error: 429 insufficient_quota\n| Retried; the call succeeded\n| ⎿ file1\n| › Ask Codex",
 		"API Error: 429 insufficient_quota\n}\n❯ Ask Codex",
+		"│ API Error: 429 rate_limit_error\n│ note: your credit balance is too low to access the Anthropic API\n│ ❯ Ask Claude",
 		"API Error: 400 invalid_request_error {\"message\":\"Your credit balance is too low to access the Anthropic API\"}\nAPI Error: 500 internal_error\n❯ Ask Claude",
 		"API Error: 429 {\"error\":{\"type\":\"insufficient_quota\"}}",
 		"┌ API Error: 429 insufficient_quota\n│ boxed quote text\n└ ❯ Ask Codex",
