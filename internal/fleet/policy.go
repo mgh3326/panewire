@@ -10,6 +10,8 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+
+	"github.com/mgh3326/panewire/internal/grade"
 )
 
 //go:embed policy.json
@@ -105,7 +107,14 @@ func LoadPolicy(path string) (Policy, error) {
 	return p, nil
 }
 
-var gradeOrder = map[string]int{"C": 0, "B": 1, "A": 2, "A+": 3, "S": 4, "S+": 5}
+var gradeOrder = func() map[string]int {
+	grades := grade.Grades()
+	ranks := make(map[string]int, len(grades))
+	for rank, value := range grades {
+		ranks[value] = rank
+	}
+	return ranks
+}()
 
 const gradeUnrated = "unrated"
 
@@ -114,9 +123,21 @@ func validCatalogGrade(grade string) bool {
 	return rated || grade == gradeUnrated
 }
 
-// Task titles declare their marker as "(grade B, T1)" or the bare sentence
-// form "Grade S+, T3"; both are accepted. Grade and scale must be adjacent.
-var taskMarker = regexp.MustCompile(`(?i)(?:\(|\b)grade (S\+|S|A\+|A|B|C),\s*(T[0-3])\b`)
+func taskMarkerPattern() string {
+	grades := grade.Grades()
+	for left, right := 0, len(grades)-1; left < right; left, right = left+1, right-1 {
+		grades[left], grades[right] = grades[right], grades[left]
+	}
+	for i := range grades {
+		grades[i] = regexp.QuoteMeta(grades[i])
+	}
+	return `(?i)(?:\(|\b)grade (` + strings.Join(grades, `|`) + `),\s*(T[0-3])\b`
+}
+
+// Task grades are C, B, A, A+, S, S+ and SS. Titles declare a marker as
+// "(grade B, T1)" or the bare sentence form "Grade SS, T3"; both are accepted.
+// Grade and scale must be adjacent.
+var taskMarker = regexp.MustCompile(taskMarkerPattern())
 
 // Check admits one launch row for a seat role.
 func (s Seat) Check(l Launch, role, grade, builderFamily, arm string, host map[string]any) error {

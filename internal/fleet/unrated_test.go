@@ -16,12 +16,16 @@ func TestUnratedCatalogDecode(t *testing.T) {
 }
 
 func TestUnratedGradedSelection(t *testing.T) {
-	for _, grade := range []string{"C", "B", "A", "A+", "S", "S+"} {
+	for _, grade := range []string{"C", "B", "A", "A+", "S", "S+", "SS"} {
 		t.Run(grade, func(t *testing.T) {
 			a, s, q := consultFixture(t)
+			coveredGrade := "S+"
+			if grade == "SS" {
+				coveredGrade = "SS"
+			}
 			q.CatalogRows = []CatalogRow{
 				{Profile: "codex-sol", Effort: "high", Grade: "unrated", Pool: "codex", Gate: "default", ModelID: "sol-m"},
-				{Profile: "sonnet", Effort: "high", Grade: "S+", Pool: "claude", Gate: "default", ModelID: "sonnet-m"},
+				{Profile: "sonnet", Effort: "high", Grade: coveredGrade, Pool: "claude", Gate: "default", ModelID: "sonnet-m"},
 			}
 			s.Grade = grade
 			sel, err := a.selectProfile(context.Background(), s)

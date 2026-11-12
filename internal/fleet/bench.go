@@ -48,7 +48,15 @@ type Rep struct {
 	SpawnToMergeS    *int  `json:"spawn_to_merge_s,omitempty"`
 }
 
-var repGrades = map[string]int{"S+": 0, "S": 1, "A+": 2, "A": 3, "B": 4, "C": 5, "unrated": 6}
+var repGrades = func() map[string]int {
+	grades := gradeOrderKeys()
+	reps := make(map[string]int, len(grades)+1)
+	for rank := range grades {
+		reps[grades[len(grades)-1-rank]] = rank
+	}
+	reps[gradeUnrated] = len(grades)
+	return reps
+}()
 
 func validRepGrade(grade string) bool {
 	_, ok := repGrades[grade]

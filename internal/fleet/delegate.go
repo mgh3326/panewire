@@ -125,7 +125,7 @@ func (a *App) delegate(ctx context.Context, args []string) error {
 	}
 	d.o.grade = strings.ToUpper(o.grade)
 	if _, ok := gradeOrder[d.o.grade]; !ok {
-		return fail(exitUsage, "--grade must be C|B|A|A+|S|S+")
+		return fail(exitUsage, "--grade must be C|B|A|A+|S|S+|SS")
 	}
 	d.timeout = delegateDefaultTimeout
 	if o.timeout != "" {

@@ -9,8 +9,21 @@ import (
 	"time"
 
 	"github.com/mgh3326/panewire/internal/fleetevent"
+	"github.com/mgh3326/panewire/internal/grade"
 	"github.com/mgh3326/panewire/internal/textbound"
 )
+
+func bestFirstGrades() []string {
+	grades := gradeOrderKeys()
+	for left, right := 0, len(grades)-1; left < right; left, right = left+1, right-1 {
+		grades[left], grades[right] = grades[right], grades[left]
+	}
+	return append(grades, gradeUnrated)
+}
+
+func gradeOrderKeys() []string {
+	return grade.Grades()
+}
 
 // The admission verdict is panewire's port of pacelever v0.3.28's spawn gate
 // (gate.go gateWithUnrated and Gate, catalog.go roleCheck and resolveRow,
@@ -39,7 +52,7 @@ const (
 )
 
 // admissionGrades orders the catalog grades, best first.
-var admissionGrades = []string{"S+", "S", "A+", "A", "B", "C", gradeUnrated}
+var admissionGrades = bestFirstGrades()
 
 // creditAccountPools are pacelever's hand-recorded API credit pools.
 var creditAccountPools = []string{"anthropic-api", "openai-api"}

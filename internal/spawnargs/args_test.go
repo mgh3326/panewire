@@ -21,7 +21,7 @@ func TestRefusalNamesFlagAndRule(t *testing.T) {
 		"control character":      {[]string{"--job", "a\nb"}, true, "--job value contains a control character"},
 		"too long":               {[]string{"--job", strings.Repeat("a", 201)}, true, "--job value is longer than 200 bytes"},
 		"tags shape":             {[]string{"--tags", "a b"}, true, "--tags value must be comma-separated values of [A-Za-z0-9._:/@-], at most 16"},
-		"grade shape":            {[]string{"--grade", "A++"}, true, "--grade value must be C, B, A, A+, S or S+"},
+		"grade shape":            {[]string{"--grade", "A++"}, true, "--grade value must be C, B, A, A+, S, S+ or SS"},
 		"excluded host shape":    {[]string{"--exclude-host", "a b"}, true, "--exclude-host value must be comma-separated values of [A-Za-z0-9._:/@-]"},
 		"role shape":             {[]string{"--role", "captain"}, true, "--role value must be worker, reviewer or tester"},
 		"builder family shape":   {[]string{"--builder-family", "acme"}, true, "--builder-family value must be anthropic"},
@@ -66,6 +66,19 @@ func TestValidDocKey(t *testing.T) {
 	} {
 		if got := ValidDocKey(key); got != want {
 			t.Errorf("ValidDocKey(%q)=%v, want %v", key, got, want)
+		}
+	}
+}
+
+func TestGradeSSSpawnArgs(t *testing.T) {
+	for _, value := range []string{"SS"} {
+		if got := Refusal([]string{"--grade", value}, true); got != "" {
+			t.Errorf("--grade %q refused: %s", value, got)
+		}
+	}
+	for _, value := range []string{"A++", "Z", "SS\n"} {
+		if got := Refusal([]string{"--grade", value}, true); got == "" {
+			t.Errorf("--grade %q was accepted", value)
 		}
 	}
 }
