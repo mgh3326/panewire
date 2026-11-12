@@ -1303,6 +1303,10 @@ func (client *HubClient) nodeQuotaRefresh(ctx context.Context, args nodeQuotaRef
 			return nil, "refresh_failed"
 		}
 	}
-	client.noteQuotaAccount(args.Pool, reading.Key)
+	if reading.Key == "" {
+		client.noteQuotaUnknown(args.Pool)
+	} else {
+		client.noteQuotaAccount(args.Pool, reading.Key)
+	}
 	return nodeQuotaRefreshResult{Outcome: nodeQuotaRefreshed}, ""
 }
