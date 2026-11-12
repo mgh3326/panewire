@@ -164,9 +164,6 @@ func TestDoneResultConflictOnDuplicateKeepsStored(t *testing.T) {
 	if !ok || res["source"] != "stored" {
 		t.Fatalf("stored result overwritten: %v", store.record(t, "j")["result"])
 	}
-	if !strings.Contains(a.Err.(*bytes.Buffer).String(), "conflict") {
-		t.Fatalf("missing conflict warning: %q", a.Err)
-	}
 }
 
 // Acceptance (d): an explicit done whose --result file does not exist fails

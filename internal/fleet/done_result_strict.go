@@ -29,11 +29,16 @@ func (a *App) strictDoneFailure(ctx context.Context, id string, e error) error {
 		failure = &doneResultFailure{code: exitFailure, reason: doneResultReason(e)}
 	}
 	_ = a.event(ctx, id, "job.record_failed", map[string]any{"op": "completed", "reason": failure.reason})
-	a.warn("job %s completed record failed: reason=%s", id, failure.reason)
 	return fail(failure.code, "job %s reason=%s", id, failure.reason)
 }
 
 func doneResultReason(e error) string {
+	if errors.Is(e, errJobNotFound) {
+		return "not_found"
+	}
+	if errors.Is(e, errJobTaken) {
+		return "job_id_taken"
+	}
 	var backend *BackendError
 	if errors.As(e, &backend) {
 		if backend.Code == "secret_like_content" {
@@ -146,7 +151,6 @@ func (a *App) strictCompletedPutUntil(ctx context.Context, id string, fields map
 			if repairErr != nil {
 				return false, &doneResultFailure{code: exitFailure, reason: doneResultReason(repairErr)}
 			}
-			attempts--
 			continue
 		case "spawned":
 			if attempts >= 3 {
@@ -273,7 +277,6 @@ func (a *App) attachDuplicateResultStrict(ctx context.Context, j Job, id, report
 	if e != nil {
 		var failure *doneResultFailure
 		if errors.As(e, &failure) && failure.reason == "result_conflict" {
-			a.warn("result conflict: job %s already has a different result; keeping it", id)
 			a.jobResultEvent(id, "conflict", "different_result", "stored result kept")
 			a.captureSentryWarning([]string{"job-result-conflict"}, "JOB_RESULT_CONFLICT "+id, map[string]string{"job": id})
 		}
