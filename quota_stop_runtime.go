@@ -379,10 +379,12 @@ func (q *quotaStopManager) observe(ctx context.Context, c idleWakeCandidate, now
 		return
 	}
 	scanned := clock()
+	// The screen read and herdr's agent explain share one budget, so the herdr
+	// lookup cannot add a second timeout to each serial scan.
 	readCtx, cancel := context.WithTimeout(ctx, quotaStopReadBudget)
+	defer cancel()
 	screen, err := q.read(readCtx, c.PaneID)
 	readErr := readCtx.Err()
-	cancel()
 	read := clock()
 	timing := []any{"scan_ms", scanned.Sub(started).Milliseconds(), "read_ms", read.Sub(scanned).Milliseconds()}
 	if err != nil {
@@ -403,9 +405,7 @@ func (q *quotaStopManager) observe(ctx context.Context, c idleWakeCandidate, now
 		q.recordDecisionFor(dbCtx, c, job.Role, now, "unknown", "unknown", "handover", reason, "", 0)
 		return
 	}
-	signalCtx, signalCancel := context.WithTimeout(ctx, quotaStopReadBudget)
-	rule, agent := herdrQuotaSignal(signalCtx, c.PaneID)
-	signalCancel()
+	rule, agent := herdrQuotaSignal(readCtx, c.PaneID)
 	stop, basis, ok := quotastop.Detect(screen, agent, rule, now, time.Local)
 	outcome := "not_quota"
 	if ok {
