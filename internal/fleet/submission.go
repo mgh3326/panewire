@@ -187,6 +187,9 @@ func (a *App) PrepareSubmission(ctx context.Context, s Spawn) (Submission, error
 	if err := validateContainment(s); err != nil {
 		return Submission{}, err
 	}
+	if err := a.submitPreflight(ctx, s); err != nil {
+		return Submission{}, err
+	}
 	originalHost := s.Host
 	resolved, err := a.resolveHost(s.Host)
 	if err != nil {

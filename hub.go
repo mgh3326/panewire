@@ -524,6 +524,10 @@ type HubServer struct {
 	// cannot announce the same retire twice (#658).
 	replayRetired      map[int64]struct{}
 	replayRetiredOrder lruIndex[int64]
+	// quietTimings are the time limits of the design-lane filters
+	// (inbox_design_filter.go).
+	quietTimings designQuietTimings
+
 	// unconfirmedNotices spaces delivery-unconfirmed notices (hk 3431).
 	unconfirmedNotices unconfirmedNoticeWindows
 	handoffkeep        *handoffkeepRelayClient
@@ -789,6 +793,7 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 	}
 	hub.auth.Store(&authSet)
 	hub.fleetState = newFleetStateStore()
+	hub.quietTimings = defaultDesignQuietTimings()
 	hub.prepareInbox()
 	return hub, nil
 }

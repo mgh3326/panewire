@@ -139,6 +139,29 @@ It never exposes the saved brief, argv, credentials or submitting paths. Its
 `reason` is a stable code followed by the refusal text (`<code>: <text>`), which
 is redacted, on one line and bounded, and can name a path on the executing node.
 
+### Checks at submit
+
+Mistakes in a spawn's own input are refused in the submitter's terminal, not
+by a SPAWN_FAILED event after acceptance (hk 4270, decision 152). The engine
+keeps every check, so a request that passes here is judged again on the node.
+
+| Check | Where | Refusal |
+| --- | --- | --- |
+| Agent name: `-l LABEL` is a lowercase letter, then `[a-z0-9_-]`, at most 32 characters (herdr's rule, hk 4142) | `panewire spawn` and the hub (`400 label_invalid`) | `label "…" is not a valid agent name` |
+| Task title marker `(grade X, Tn)`, and its scale against `--t` | `panewire spawn` | `task title lacks (grade X, Tn marker`, `task scale does not match --t` |
+| Task claim: the task exists, is not `merged`, `dropped`, `hold` or `needs_decision`, and is bound to no other job or claimant | `panewire spawn` | `task does not exist`, `task unavailable: <state>`, `task bound to another job`, `task has another claimant …` |
+| Host eligibility: some configured host is not excluded, is the `--host` pin when one is given, and declares every `--tags` capability | the hub (`400 no_eligible_host`) | `NO_ELIGIBLE_HOST: no host declares cap unity; …` |
+
+The task checks read hk from the submitter. When hk cannot answer, the submit
+goes on and the node decides, as before. They are skipped for a job that already
+has a saved `submission.json` (a replay of an accepted request must reach the
+hub's idempotent lookup even if the task has moved on) and for `--parent-job`
+spawns; `--builder-family`/`--builder-job` are translated as the node does, so a
+review pass of a builder-bound task is accepted. Host eligibility reads the hub's own
+fleet configuration (`local` and `hosts`), the same hosts placement ranks, so a
+request no host can take is refused before it reserves a job id. A refused
+request leaves no operation behind.
+
 ## State and recovery
 
 The hub stores logical operation, attempt, absolute deadline, immutable node
@@ -359,6 +382,29 @@ differs from the owner: `--requested-by`, else `--parent`. The owner's event id
 stays `<request_id>:<attempt>:<status>`; the submitting lane's is the same id
 with `:<lane>` appended.
 `SPAWNED` stays type `report`.
+
+**Reviewer jobs a daemon started** (`--role reviewer`, job id starting `mwr-`;
+[how the hub recognises them](quiet-delivery.md#records-kept-in-hk-only)) are
+routed differently when the owner is a design lane (hk 4270, decision 152).
+SPAWNED is kept in hk only. A failure the saved request can be replayed after
+(`replay=yes`, status `retryable`) goes to the submitting lane at once, as
+above, and is held for the owner when that lane differs from the owner (the
+requester then has its own copy; with none, the owner's row is the only notice
+and is delivered at once): the design lane hears nothing for that
+attempt while the requester can replay it. A later attempt supersedes the held
+row, so the design lane is told the request's last outcome once (a terminal
+`replay=no` failure, or no event when the replay lands). A request nobody
+replays within 30 minutes (`designQuietTimings.spawnFailureHold`) is delivered
+to the design lane with the failure's own text, so a requester that gave up
+cannot leave it unreported. The 30 minutes is the aggregation boundary: "after
+the last replay" cannot mean a retry that may never come. A held row has
+`delivered=2` in `spawn_notifications`; at expiry it is claimed (`delivered=3`)
+in one statement conditioned on the request still being at the row's attempt
+and `retryable`, so a replay that advances the attempt first wins and only the
+current attempt's notice is published; a crash while publishing leaves `3`, and
+the next flush publishes again (the event id makes that idempotent). A row is
+closed (`delivered=1`) when delivered or superseded; every row stays there, and
+the requester's copy is an ordinary lane event. A design session's own spawns, and every other owner, are unchanged.
 
 `reconciling` (the node's answer is unknown, or the node is disconnected) writes
 no `spawn_notifications` row, so neither lane is notified. The owner keeps
