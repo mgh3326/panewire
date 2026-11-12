@@ -53,8 +53,7 @@ const (
 // configuration gap, not a login problem (hk 3783), so it is never probed.
 func (s *nativeQuotaSource) measurableHere(ctx context.Context) bool {
 	if s.Pool == "agy" {
-		fp, measurable := s.agyAccount()
-		return fp != "" && measurable
+		return s.agyMeasurable()
 	}
 	_, accountFP, _ := s.poolMeasurement()
 	fp, err := accountFP(ctx)

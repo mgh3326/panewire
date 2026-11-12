@@ -124,6 +124,12 @@ publishes:
   refresh logs one warning per failure streak and publishes nothing. The
   reading then ages past its TTL, and consumers measure directly.
 
+A failing refresh of kind `auth`, `auth_failed`, `credentials` or `token_expired`
+marks the pool's login missing. The one exception is agy on a host with no
+measurable account (`[quota].measurable_accounts` lacks its `[quota.accounts]`
+fingerprint): that failure reads unknown, because the host is a configuration
+gap, not a login problem (hk 3783). The login probe leaves that host alone too.
+
 Every new hub connection re-announces the node's current readings, so a
 restarted hub regains them immediately.
 
