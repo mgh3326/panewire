@@ -10,6 +10,8 @@ import (
 	"io"
 	"net"
 	"time"
+
+	"github.com/mgh3326/panewire/internal/hubretry"
 )
 
 type inboxRequest struct {
@@ -117,7 +119,9 @@ func (d *Daemon) handleInbox(ctx context.Context, req *inboxRequest) (any, error
 		return nil, &codedError{ExitUsage, errors.New("inbox: invalid request")}
 	}
 	var out, errOut bytes.Buffer
-	client := nodeHubClient{ctx: ctx, client: d.cfg.Hub.Client}
-	code := executeInbox(client, &out, &errOut, *req, false)
+	// executeInbox owns this command's retries, so the stderr line it prints
+	// reaches the CLI that asked; the node client sends each call once.
+	client := nodeHubClient{ctx: ctx, client: d.cfg.Hub.Client, retry: hubretry.Policy{Budget: -1}}
+	code := executeInbox(client, &out, &errOut, *req, false, hubretry.Policy{})
 	return localTextResult{Code: code, Stdout: out.String(), Stderr: errOut.String()}, nil
 }

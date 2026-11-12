@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+
+	"github.com/mgh3326/panewire/internal/hubretry"
 )
 
 const statusTestOperation = "00000000-0000-4000-8000-000000000001"
@@ -94,7 +96,9 @@ func TestWaitSpawnSustainedOutageStillAnswersUnavailable(t *testing.T) {
 		w.WriteHeader(http.StatusServiceUnavailable)
 	}))
 	defer server.Close()
-	c := hubHTTP{base: server.URL, token: "fixture", client: server.Client(), statusPoll: 1}
+	// The per-read retry is off so this counts the status reads WaitSpawn
+	// itself makes before it gives up; the retry is covered by hub_retry_test.go.
+	c := hubHTTP{base: server.URL, token: "fixture", client: server.Client(), statusPoll: 1, retry: hubretry.Policy{Budget: -1}}
 	_, err := c.WaitSpawn(t.Context(), statusTestOperation)
 	if ErrorCode(err) != exitStateConflict || !strings.Contains(err.Error(), "spawn status unavailable") {
 		t.Fatalf("err=%v", err)

@@ -23,6 +23,8 @@ import (
 
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
+
+	"github.com/mgh3326/panewire/internal/hubretry"
 )
 
 // loadHubAuthFile accepts the intentionally small server-side token format:
@@ -470,6 +472,9 @@ type hubCLIDeps struct {
 	HTTPClient            *http.Client
 	AllowInsecureForTests bool
 	Now                   func() time.Time
+	// HubRetry bounds how an idempotent hub call is sent again; the zero value
+	// is the production policy (hubretry.Budget).
+	HubRetry hubretry.Policy
 }
 
 // runHubEmitCLI sends one display-only note as an authenticated node and
