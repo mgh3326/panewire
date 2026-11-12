@@ -1299,7 +1299,10 @@ func (client *HubClient) nodeQuotaRefresh(ctx context.Context, args nodeQuotaRef
 	}
 	source := client.nativeQuotaSource(args.Pool)
 	marked := client.loginScreenMarked(args.Pool)
-	_, measuredHere, err := source.RefreshWithMeasurement(ctx)
+	reading, measuredHere, err := source.RefreshWithMeasurement(ctx)
+	if measuredHere {
+		client.noteOwnQuotaMeasurement(args.Pool)
+	}
 	if err != nil {
 		return nil, "refresh_failed"
 	}
@@ -1311,8 +1314,6 @@ func (client *HubClient) nodeQuotaRefresh(ctx context.Context, args nodeQuotaRef
 			return nil, "refresh_failed"
 		}
 	}
-	if measuredHere {
-		client.noteOwnQuotaMeasurement(args.Pool)
-	}
+	client.noteQuotaAccount(args.Pool, reading.Key)
 	return nodeQuotaRefreshResult{Outcome: nodeQuotaRefreshed}, ""
 }
