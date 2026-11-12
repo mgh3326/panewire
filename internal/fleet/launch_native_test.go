@@ -44,7 +44,7 @@ func cacheLaunchRows(t *testing.T, rows []CatalogRow, now time.Time) {
 // shadow comparison reads, for a handoffkeep that must not be asked.
 func launchApp(t *testing.T, mode string, rows []CatalogRow, paceleverLaunch *Result) (*App, *fakeRunner, *[]fleetevent.Event) {
 	t.Helper()
-	t.Setenv("PACELEVER_CONFIG", filepath.Join(t.TempDir(), "absent.toml"))
+	t.Setenv("PACELEVER_CONFIG", "")
 	t.Setenv("PACELEVER_E6_ARM", "")
 	runner := &fakeRunner{Do: func(c Command) Result {
 		if len(c.Args) >= 2 && c.Args[0] == "policy" && c.Args[1] == "launch" {
