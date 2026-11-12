@@ -178,7 +178,12 @@ root is not answered that way: the node clones into the work root, following
 `omp_setup_wizard`, `auth_unavailable`) does the same once the node verified
 its pane cleanup, and the hub tells `operator-desk` which one-time action the
 host needs ([placement.md](placement.md#first-run-refusals-and-the-desk-notice)).
-A pinned `--host` keeps any of these refusals as its result.
+For agy, a verified rc=76 (`BRIEF_SUBMISSION_UNCONFIRMED`) whose newest saved
+capture matches the harness login screen is sent as rc=88 with an
+`AUTH_UNAVAILABLE` refusal; the unchanged hub classifies it as
+`auth_unavailable`. Other rc=76 results and results with unverified cleanup
+keep their original refusal. A pinned `--host` keeps any of these refusals as
+its result.
 
 ### A job.spawn the node cannot accept
 
@@ -321,12 +326,18 @@ A checkout-busy result completes one retryable attempt. The engine cannot bind a
 fresh node UUID inside that completed attempt; replay the saved logical submission
 to create the next attempt after the node's checkout operation finishes.
 
-A checkout refusal whose fix is to inspect and correct the node's checkout
-(`checkout_refused:branch-elsewhere`, `checkout_refused:origin-mismatch`) is
-`failed`, whatever retryable flag the node sent: the same saved request meets the
-same conflict. The other checkout refusals (`busy`, `dirty`, `sha-missing`,
-`work_root_unset`, `git_too_old`) name a fix that ends in a replay and stay
-`retryable`. `spawnRefusalReplayable` holds the mapping.
+A terminal checkout refusal whose fix is to inspect and correct the node's
+checkout is `failed` (`checkout_refused:branch-elsewhere` and
+`checkout_refused:origin-mismatch`), whatever retryable flag the node sent. For
+`--host auto`, a retryable `checkout_refused:dirty`,
+`checkout_refused:sha-missing`, or `checkout_refused:branch-elsewhere` moves to
+the next candidate after the hub unbinds the refused node. These three reasons
+are not pinned to that host when the saved operation is replayed; placement
+starts again. An exhaustion is the generic retryable `admission_refused` with
+each tried host and its checkout outcome. `busy` still retries once on the same
+host. The terminal checkout refusals that remain retryable (`dirty`,
+`sha-missing`, `work_root_unset`, `git_too_old`) name a fix that ends in replay;
+`spawnRefusalReplayable` holds that classification.
 
 ## Notifications and telemetry
 

@@ -232,10 +232,13 @@ on the node that sent it. The node names the emitting pane in the wire payload's
 `pane_id` (see [R21 direct lane events](r21-lane-event.md)), and the hub looks
 for a job that the sending node's latest heartbeat lists in that pane and that
 the hub holds as not completed and not orphaned on that node, with role
-`worker`. Every `panewire spawn` job claims as `worker`, whether it was spawned
-as a worker, tester, reviewer or counsel; a builder or captain is not one.
-Design sessions, the desk and workers share hosts, so the node match alone does
-not decide. Whatever the hub cannot attribute this way is delivered as before:
+`worker` and the owner lane equal to the lane the event is for. A worker of
+another design lane sharing the pane is not this lane's: its progress is not
+quieted for this lane. Every `panewire spawn` job claims as `worker`, whether
+it was spawned as a worker, tester, reviewer or counsel; a builder or captain
+is not one. Design sessions, the desk and workers share hosts, so the node
+match alone does not decide. Whatever the hub cannot attribute this way is
+delivered as before:
 
 - a `lane.event` with no `pane_id` (an older node, or a hub that has not
   advertised it to the node yet);
@@ -292,7 +295,8 @@ Two kinds of traffic keep their existing delivery in every lane:
   merely looks like `chat-N` (a `panewire emit --event-id chat-7`, a job event)
   is a lane notification. A restart replay of a chat row keeps its delivery
   only when the chat store holds the operator message whose id and body hash
-  make up the row's event id;
+  make up the row's event id, and the row's text matches the hub-rendered
+  message and question ids;
 - events the operator posts through the [R24 HTTP ingress](r24-http-ingress.md)
   with the operator token, including the assistant's `deliver` tool and its
   outbox notices. This is the explicit operator path into a pane, so it is
@@ -355,8 +359,11 @@ When the line is sent:
 - A line still owed to a [trial](#worker-trial) lane when its trial ends is
   dropped: the lane is a worker lane again.
 - When the hub starts, every inbox-only lane with unread items above `info`
-  gets one line, through the same window, with `startup` as the fleet-event
-  reason. A lane whose unread items cannot be read gets none.
+  gets one line after the same wake window, with `startup` as the fleet-event
+  reason. Restarts inside the window coalesce into one line after the last
+  restart. Repeated restarts less than one wake window apart can defer this
+  line until the hub stays up for a full window; the window is not persisted.
+  A lane whose unread items cannot be read gets none.
 
 The wake decision lives in the hub, which owns the inbox store and sees each
 arrival. The node does not keep an inbox copy, so it would have to poll the

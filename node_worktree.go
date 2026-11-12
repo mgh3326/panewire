@@ -115,22 +115,11 @@ type nodeQuotaRefreshResult struct {
 	Outcome string `json:"outcome"`
 }
 
-// nodeHasControlByte reports any ASCII control byte (< 0x20, or DEL): git's
-// check-ref-format refuses every one, and none belongs in an origin or glob.
-func nodeHasControlByte(s string) bool {
-	for i := 0; i < len(s); i++ {
-		if s[i] < 0x20 || s[i] == 0x7f {
-			return true
-		}
-	}
-	return false
-}
-
 // validNodeRefName mirrors git's check-ref-format rules for the argument
 // shapes these ops accept: no control bytes, "..", "@{", whitespace or git's
 // magic chars, no segment leading with '.' or ending ".lock".
 func validNodeRefName(name string) bool {
-	if name == "" || name == "@" || len(name) > 200 || nodeHasControlByte(name) {
+	if name == "" || name == "@" || len(name) > 200 || hasControlByte(name) {
 		return false
 	}
 	if strings.HasPrefix(name, "/") || strings.HasSuffix(name, "/") || strings.HasSuffix(name, ".") ||
@@ -156,7 +145,7 @@ func validNodeFetchRef(fetch string) bool {
 }
 
 func validNodeGlob(glob string) bool {
-	if glob == "" || len(glob) > 128 || nodeHasControlByte(glob) {
+	if glob == "" || len(glob) > 128 || hasControlByte(glob) {
 		return false
 	}
 	// A pattern made only of wildcards ("*", "**", "*/?") would approve any
@@ -174,7 +163,7 @@ func nodeOriginRepo(raw string) (string, bool) {
 	// git clone receives the raw argument, so its control bytes are refused
 	// before trimming could hide a trailing one.
 	u := strings.TrimSpace(raw)
-	if nodeHasControlByte(raw) || !nodeOriginShapeOK(u) {
+	if hasControlByte(raw) || !nodeOriginShapeOK(u) {
 		return "", false
 	}
 	switch {
@@ -229,7 +218,7 @@ func nodeCloneRemoteRepo(raw string) (string, bool) {
 // nodeOriginShapeOK is the check every origin form shares.
 func nodeOriginShapeOK(u string) bool {
 	// A leading '-' would reach git as an option, never a repository.
-	return u != "" && !strings.HasPrefix(u, "-") && len(u) <= 2048 && !nodeHasControlByte(u) && !strings.Contains(u, " ")
+	return u != "" && !strings.HasPrefix(u, "-") && len(u) <= 2048 && !hasControlByte(u) && !strings.Contains(u, " ")
 }
 
 func nodeURLOriginRepo(u string) (string, bool) {
@@ -1297,8 +1286,22 @@ func (client *HubClient) nodeQuotaRefresh(ctx context.Context, args nodeQuotaRef
 		client.warnMessage("quota.refresh: " + args.Pool + " 풀에는 native 측정 소스가 없습니다")
 		return nil, "refresh_failed"
 	}
-	if _, err := client.nativeQuotaSource(args.Pool).Refresh(ctx); err != nil {
+	source := client.nativeQuotaSource(args.Pool)
+	marked := client.loginScreenMarked(args.Pool)
+	_, measuredHere, err := source.RefreshWithMeasurement(ctx)
+	if err != nil {
 		return nil, "refresh_failed"
+	}
+	if marked && !measuredHere && source.measurableHere(ctx) {
+		switch source.probeLogin(ctx) {
+		case loginProbeLoginPresent:
+			client.noteOwnQuotaMeasurement(args.Pool)
+		case loginProbeLoginMissing:
+			return nil, "refresh_failed"
+		}
+	}
+	if measuredHere {
+		client.noteOwnQuotaMeasurement(args.Pool)
 	}
 	return nodeQuotaRefreshResult{Outcome: nodeQuotaRefreshed}, ""
 }

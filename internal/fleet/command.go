@@ -121,3 +121,7 @@ func writeJSON(w io.Writer, v any) error {
 // ExitSubmitUnconfirmed is the rc of a spawn whose initial brief submission was
 // not confirmed. The node reads it to tell that kind of failure apart.
 const ExitSubmitUnconfirmed = exitSubmitUnconfirmed
+
+// ExitAuthUnavailable is the rc of a spawn refused because the executing host
+// cannot confirm the selected account's login.
+const ExitAuthUnavailable = exitAuthUnavailable
