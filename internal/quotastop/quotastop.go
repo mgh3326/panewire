@@ -129,13 +129,19 @@ func Classify(screen string, now time.Time, local *time.Location) (Stop, bool) {
 	return out, true
 }
 
+// statusPrefixes are the TUI marks a limit line can carry before its text: the
+// bullet and warning marks, the square (■) and the tool-output corner (⎿).
+// The square and corner were seen in a probe of the status line, not in a
+// captured stop screen; no captured footer is accepted by chromeLine yet.
+const statusPrefixes = "│┃•⚠️■⎿ "
+
 // statusBlock accepts only an exact CLI status line as the last
 // activity; later ordinary output, source code, or a completed answer invalidates it.
 func statusBlock(screen string) (string, bool) {
 	lines := strings.Split(strings.ReplaceAll(screen, "\r", ""), "\n")
 	for i := len(lines) - 1; i >= 0; i-- {
 		line := strings.TrimSpace(lines[i])
-		line = strings.TrimLeft(line, "│┃•⚠️ ")
+		line = strings.TrimLeft(line, statusPrefixes)
 		if devin.MatchString(line) || claude.MatchString(line) || codexSignal.MatchString(line) {
 			if len(lines)-i > 16 {
 				return "", false
