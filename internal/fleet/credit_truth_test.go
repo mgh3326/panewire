@@ -93,6 +93,9 @@ func TestWrappedProviderCreditErrorClassifies(t *testing.T) {
 func TestProviderCreditErrorRequiresLastActivity(t *testing.T) {
 	for _, screen := range []string{
 		"API Error: 429 {\"error\":{\"type\":\"insufficient_quota\"}}\nRetried; the call succeeded\n❯ Ask Claude",
+		"API Error: 429 insufficient_quota\n[retry] succeeded\n› Ask Codex",
+		"| API Error: 429 insufficient_quota\n| Retried; the call succeeded\n| ⎿ file1\n| › Ask Codex",
+		"API Error: 429 insufficient_quota\n}\n❯ Ask Codex",
 		"API Error: 400 invalid_request_error {\"message\":\"Your credit balance is too low to access the Anthropic API\"}\nAPI Error: 500 internal_error\n❯ Ask Claude",
 		"API Error: 429 {\"error\":{\"type\":\"insufficient_quota\"}}",
 		"┌ API Error: 429 insufficient_quota\n│ boxed quote text\n└ ❯ Ask Codex",

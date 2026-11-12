@@ -137,7 +137,7 @@ func Classify(screen string, now time.Time, local *time.Location) (Stop, bool) {
 }
 
 // statusBlock accepts only an exact CLI status line as the last activity.
-// Provider error continuations stay inside their bounded border or JSON block.
+// Provider error continuations stay inside an open JSON body.
 func statusBlock(screen string) (string, bool) {
 	lines := strings.Split(strings.ReplaceAll(screen, "\r", ""), "\n")
 	for i := len(lines) - 1; i >= 0; i-- {
@@ -165,7 +165,6 @@ func providerErrorBlock(lines []string, start int) (string, bool) {
 	if len(lines)-start > 16 || screenBorderPrefix(lines[start]) == '┌' {
 		return "", false
 	}
-	border := screenBorderPrefix(lines[start])
 	blockLines := []string{trimScreenBorder(strings.TrimSpace(lines[start]))}
 	end := len(lines)
 	promptFound := false
@@ -183,13 +182,18 @@ func providerErrorBlock(lines []string, start int) (string, bool) {
 			continue
 		}
 		currentBlock := strings.Join(blockLines, "\n")
-		if border != 0 && screenBorderPrefix(line) == border || jsonContinuation(content) || jsonStringOpen(currentBlock) {
+		json := scanJSON(currentBlock)
+		if json.open {
 			blockLines = append(blockLines, content)
 			continue
 		}
 		return "", false
 	}
 	if !promptFound {
+		return "", false
+	}
+	json := scanJSON(strings.Join(blockLines, "\n"))
+	if json.started && json.open {
 		return "", false
 	}
 	for _, tail := range lines[end:] {
@@ -261,21 +265,22 @@ func promptLine(line string) bool {
 	return false
 }
 
-func jsonContinuation(line string) bool {
-	line = strings.TrimSpace(line)
-	if line == "" {
-		return false
-	}
-	return strings.ContainsRune(`{}[],:"`, []rune(line)[0])
+type jsonProgress struct {
+	started bool
+	open    bool
 }
 
-func jsonStringOpen(block string) bool {
-	start := strings.IndexByte(block, '{')
-	if start < 0 {
-		return false
-	}
-	inString, escaped := false, false
-	for _, r := range block[start:] {
+func scanJSON(block string) jsonProgress {
+	var state jsonProgress
+	depth, inString, escaped := 0, false, false
+	for _, r := range block {
+		if !state.started {
+			if r == '{' || r == '[' {
+				state.started = true
+				depth++
+			}
+			continue
+		}
 		if escaped {
 			escaped = false
 			continue
@@ -286,9 +291,19 @@ func jsonStringOpen(block string) bool {
 		}
 		if r == '"' {
 			inString = !inString
+			continue
+		}
+		if !inString {
+			switch r {
+			case '{', '[':
+				depth++
+			case '}', ']':
+				depth--
+			}
 		}
 	}
-	return inString
+	state.open = depth != 0 || inString
+	return state
 }
 
 func screenBorderPrefix(line string) rune {
