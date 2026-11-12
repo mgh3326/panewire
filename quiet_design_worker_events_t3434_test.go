@@ -466,7 +466,7 @@ func TestQuietDesignWorkerLaneEventEndToEnd(t *testing.T) {
 
 	eventually(t, 10*time.Second, "the hub sees the worker job and the node the feature", func() bool {
 		peer := client.signalsPeer.Load()
-		return peer != nil && peer.acceptsLaneEventPane.Load() && h.laneEventFromWorker("host-a", t3434WorkerPane)
+		return peer != nil && peer.acceptsLaneEventPane.Load() && h.laneEventFromWorker("host-a", t3434WorkerPane, t3426Design)
 	})
 	progress := emitRecord{Type: "lane.event", Epoch: 1, CreatedAt: now, OwnerLane: t3426Design, EventID: "e2e-progress", PaneID: t3434WorkerPane, Text: "hk 3430: PR #221 open"}
 	decision := emitRecord{Type: "lane.event", Epoch: 1, CreatedAt: now, OwnerLane: t3426Design, EventID: "e2e-decision", PaneID: t3434WorkerPane, NotifyType: "decision", Text: "ESC hk 3430: which order do we ship?"}
