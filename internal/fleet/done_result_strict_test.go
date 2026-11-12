@@ -244,9 +244,12 @@ func TestDoneResultStrictDuplicateEqualRepairsMissingAttachEvent(t *testing.T) {
 func TestDoneResultEventWriteFailureIsNotReportedAsHKFailure(t *testing.T) {
 	a := testApp(t)
 	putEvent(t, a, "j", "job.claim", map[string]any{"task_id": "42"})
-	err := a.strictDoneFailure(context.Background(), "j", &doneResultEventWriteFailure{cause: errors.New("local ledger unavailable")})
-	if code(err) != exitFailure || !strings.Contains(err.Error(), "result attachment event could not be recorded") || strings.Contains(err.Error(), "hk_unconfigured") {
+	err := a.strictDoneFailure(context.Background(), "j", &doneResultEventWriteFailure{cause: errors.New("local ledger /private/path unavailable")})
+	if code(err) != exitFailure || !strings.Contains(err.Error(), "reason=local_event_failed") || strings.Contains(err.Error(), "hk_unconfigured") {
 		t.Fatalf("error=%v", err)
+	}
+	if strings.Contains(err.Error(), "/private/path") || strings.Contains(err.Error(), "unavailable") {
+		t.Fatalf("local event error details escaped: %v", err)
 	}
 	if kinds := eventKindsOf(t, a, "j"); slices.Contains(kinds, "job.record_failed") {
 		t.Fatalf("local event failure was misrecorded as an hk write failure: %v", kinds)

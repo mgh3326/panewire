@@ -675,7 +675,8 @@ unresolved state exits non-zero, emits no completion event or relay, and records
 or `secret_like_content:<pattern>` (pattern matches `[a-z0-9_]{1,40}`),
 `terminal_without_result`, `result_conflict`, `report_conflict`,
 `job_escalated`, `job_lost`, `no_spawn_evidence`, a validated hk code matching
-`[a-z0-9_]{1,64}`, `http_<status>`, `hk_unreachable`, and `hk_unconfigured`.
+`[a-z0-9_]{1,64}`, `http_<status>`, `hk_unreachable`, `hk_unconfigured`, or
+`local_event_failed` when the local result-attachment event cannot be recorded.
 The headless delegate keeps warn-and-continue; so does `done` without
 `--result`. Watcher completion is unchanged. `escalate` writes
 `{state:"escalated"}` and the watcher writes `{state:"lost"}` after two

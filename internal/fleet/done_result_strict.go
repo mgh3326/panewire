@@ -31,7 +31,7 @@ func (e *doneResultEventWriteFailure) Unwrap() error { return e.cause }
 func (a *App) strictDoneFailure(ctx context.Context, id string, e error) error {
 	var eventFailure *doneResultEventWriteFailure
 	if errors.As(e, &eventFailure) {
-		return fail(exitFailure, "job %s result attachment event could not be recorded", id)
+		return fail(exitFailure, "job %s reason=local_event_failed", id)
 	}
 	var failure *doneResultFailure
 	if !errors.As(e, &failure) {

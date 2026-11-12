@@ -23,14 +23,17 @@ and are read with `| json`.
 | `job_result` | `missing` | `no_result` | node | a reviewer's completed `done` carried no result |
 | `placement_shadow` | `agree`, `order_differs`, `disagree` or `shadow_error` (the worst of the arms) | the work class (`light`, `heavy`) | node | the spawn engine ranked the hosts for a job; the line compares the live order with the shadow arms and changes nothing live. See [Shadow comparison](placement.md#shadow-comparison) |
 
-Strict CLI `done --result` failures write one `job.record_failed` event with
-`{op:"completed", reason:<token>}` and print the same safe token to stderr.
-Tokens are `secret_like_content[:<pattern>]`, `terminal_without_result`,
+Strict CLI `done --result` completion write refusals write one
+`job.record_failed` event with `{op:"completed", reason:<token>}` and print the
+same safe token to stderr. A local result-attachment event failure prints
+`reason=local_event_failed`; it does not append `job.record_failed`. Tokens are
+`secret_like_content[:<pattern>]`, `terminal_without_result`,
 `result_conflict`, `report_conflict`, `job_escalated`, `job_lost`,
 `no_spawn_evidence`, a validated hk code (`[a-z0-9_]{1,64}`), `http_<status>`,
-`hk_unreachable`, or `hk_unconfigured`. A secret pattern is included only when
-it matches `[a-z0-9_]{1,40}`. The response body and hk refusal reason are never
-logged.
+`hk_unreachable`, `hk_unconfigured`, or `local_event_failed` when the local
+result-attachment event cannot be recorded. A secret pattern is included only
+when it matches `[a-z0-9_]{1,40}`. The response body, hk refusal reason and
+local event error details are never logged.
 
 A `placement_shadow` line carries `job`, `request_id` when known, and a `shadow`
 object: `role`, `work_class`, `live` (the live order), `arms` (a map of arm name
