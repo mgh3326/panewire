@@ -87,7 +87,25 @@ func TestLoginScreenMarkClearedByHubQuotaRefreshT3891(t *testing.T) {
 	if got := rig.api.count(); got == 0 {
 		t.Fatal("quota.refresh returned the shared reading without checking this host's credential")
 	}
+	if got := rig.login(t); got != fleet.ReadinessLoginPresent {
+		t.Fatalf("hub quota.refresh did not clear and report the measured login-screen mark: %q", got)
+	}
+}
+
+func TestLoginScreenMarkClearsWhenMeasurementPublishFailsT3891(t *testing.T) {
+	setAgySwitch(t, true, true)
+	rig := newLoginProbeRig(t, agyLoginFiles(agyToken), true, 0)
+	rig.client.nativeQuota["agy"].Now = func() time.Time { return rig.clock }
+	markT3891LoginScreen(t, rig.client)
+	rig.clock = rig.clock.Add(nodeLoginScreenTTL + time.Second)
+	setT3891SharedReading(t, rig, rig.clock.Add(-6*time.Minute))
+	rig.hk.mu.Lock()
+	rig.hk.failPublish = true
+	rig.hk.mu.Unlock()
+	if _, failure := rig.client.nodeQuotaRefresh(t.Context(), nodeQuotaRefreshArgs{Pool: "agy"}); failure != "refresh_failed" {
+		t.Fatalf("quota.refresh failure = %q, want publish failure", failure)
+	}
 	if got := rig.login(t); got == fleet.ReadinessLoginMissing {
-		t.Fatalf("hub quota.refresh did not clear measured login-screen mark: %q", got)
+		t.Fatalf("successful own measurement followed by publish failure kept login mark: %q", got)
 	}
 }

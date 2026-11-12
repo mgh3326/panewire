@@ -179,6 +179,8 @@ and the `login_missing` placement drop are unchanged.
   successful launch of that kind, or a successful quota measurement made with
   this host's credential clears it. A fresh shared reading does not clear it;
   a hub `quota.refresh` checks this host's credential when the mark is set.
+  With probes off, if another host keeps the shared reading fresh, the mark can
+  remain until this node restarts (O1).
   When the daemon has no periodic measurement path for the pool (it is not
   measurable here, is not polled, or state publishing is off), the mark expires
   after 30 minutes (the first-run dialog TTL). The marks are in node memory; a
