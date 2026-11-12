@@ -173,7 +173,7 @@ outcome, in this order:
 | `harness_missing` | The harness binary is not installed |
 | `harness_version` | `placement.harness_min_version.<kind>` (in the spawner's `hosts.toml`) is set and the version is lower or unreadable |
 | `dialog_pending` | The last launch of this kind stopped at a first-run dialog ([desk notice](#first-run-refusals-and-the-desk-notice)) |
-| `login_missing` | The node's refresh of the kind's pool failed with a login error kind, or its login probe did, or its last launch ended rc=76 at the harness's login screen ([fleet-state.md](fleet-state.md#login-probe)); `cmd` needs no login ([desk notice](#first-run-refusals-and-the-desk-notice)) |
+| `login_missing` | The node's refresh of the kind's pool failed with a login error kind, or its login probe did, or its last launch ended rc=76 at the harness's login screen ([fleet-state.md](fleet-state.md#login-probe)); that verified agy login-screen result is sent as rc=88 `auth_unavailable` so auto placement can try another host; `cmd` needs no login ([desk notice](#first-run-refusals-and-the-desk-notice)) |
 | `repo_unmapped` | The spawn's repository is not in the node's `repos` |
 | `brief_unavailable` | The spawn goes through the hub with a brief document and the node cannot fetch one |
 | `toolchain_missing` | `placement.repo_toolchains.<repo>` lists a toolchain the node lacks |
@@ -235,7 +235,7 @@ host:
 | `hooks_review` | Codex "Hooks need review" | `run codex once and choose "Trust all and continue"` |
 | `trust_prompt` | Codex or Claude workspace trust | `trust the workspace` |
 | `omp_setup_wizard` | omp setup wizard | `run omp once and finish its setup` |
-| `auth_unavailable` | No usable login for the account | `log in` |
+| `auth_unavailable` | No usable login for the account, including a verified rc=76 launch at a harness login screen | `log in` |
 
 `cwd_unmapped` moves on the same way. The refusing host still counts the
 failure in its launch backoff. A refusal moves on only when the node verified

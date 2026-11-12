@@ -200,7 +200,7 @@ func (client *HubClient) refreshFleetQuota(ctx context.Context, pool string, sen
 	defer client.probeFleetLogin(ctx, pool)
 	run, cancel := context.WithTimeout(ctx, fleetQuotaTimeout)
 	defer cancel()
-	publish, ok, kind := client.measureFleetQuota(run, ctx, pool)
+	publish, ok, measuredHere, kind := client.measureFleetQuotaObserved(run, ctx, pool)
 	previous := sent[pool]
 	if !ok {
 		// One warning per failure streak, not one per interval. Consumers see
@@ -221,6 +221,9 @@ func (client *HubClient) refreshFleetQuota(ctx context.Context, pool string, sen
 		return
 	}
 	client.noteQuotaAccount(pool, publish.Key)
+	if measuredHere {
+		client.noteOwnQuotaMeasurement(pool)
+	}
 	now := client.nowUTC()
 	body, _ := json.Marshal(publish)
 	if previous.body == string(body) && now.Sub(previous.at) < fleetQuotaRepublish {
@@ -246,22 +249,27 @@ func (client *HubClient) agyUnmeasurableHere(pool string) bool {
 // parent the loop's context, which the failure-kind status lookup outlives it
 // on.
 func (client *HubClient) measureFleetQuota(run, parent context.Context, pool string) (FleetStatePublish, bool, string) {
+	publish, ok, _, kind := client.measureFleetQuotaObserved(run, parent, pool)
+	return publish, ok, kind
+}
+
+func (client *HubClient) measureFleetQuotaObserved(run, parent context.Context, pool string) (FleetStatePublish, bool, bool, string) {
 	if isNativeQuotaPool(pool) {
-		reading, err := client.nativeQuotaSource(pool).Refresh(run)
+		reading, measuredHere, err := client.nativeQuotaSource(pool).RefreshWithMeasurement(run)
 		if err != nil {
 			// A timed-out refresh says nothing about the login.
 			if run.Err() != nil {
-				return FleetStatePublish{}, false, fleetQuotaErrorKindUnreadable
+				return FleetStatePublish{}, false, false, fleetQuotaErrorKindUnreadable
 			}
-			return FleetStatePublish{}, false, quotaErrorKind(err)
+			return FleetStatePublish{}, false, false, quotaErrorKind(err)
 		}
 		publish, ok := fleetQuotaFromReading(pool, reading, client.nowUTC())
 		if !ok {
-			return FleetStatePublish{}, false, quota.ErrKindParse
+			return FleetStatePublish{}, false, false, quota.ErrKindParse
 		}
-		return publish, true, ""
+		return publish, true, measuredHere, ""
 	}
-	return FleetStatePublish{}, false, "unmeasurable"
+	return FleetStatePublish{}, false, false, "unmeasurable"
 }
 
 // measureFleetQuotaWithPacelever is the fleet-state measurement of a pool the

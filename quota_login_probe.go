@@ -28,10 +28,9 @@ import (
 // lines, so a larger file is not a capture it wrote.
 const loginScreenCaptureMax = 64 << 10
 
-// nodeLoginScreenTTL is how long a login-screen mark stays reported when
-// nothing else clears it. A host with the mark is not launched on, so no
-// launch could clear it once the host owner has logged in; after the TTL the
-// pair gets one more launch, as with a first-run dialog.
+// nodeLoginScreenTTL is how long a login-screen mark stays reported when the
+// daemon has no periodic measurement path for the pool. A pool that the daemon
+// polls and this host can measure stays marked until proof clears it.
 const nodeLoginScreenTTL = nodeDialogTTL
 
 // loginProbeOutcome is what one probe of a pool found.
@@ -217,4 +216,11 @@ func (client *HubClient) launchShowedLoginScreen(kind, job string) bool {
 func loginScreenFresh(marks map[string]time.Time, kind string, now time.Time) bool {
 	at, marked := marks[kind]
 	return marked && !at.After(now) && now.Sub(at) < nodeLoginScreenTTL
+}
+
+func loginScreenActive(marks map[string]time.Time, kind string, now time.Time, periodicMeasurementPath bool) bool {
+	if _, marked := marks[kind]; !marked {
+		return false
+	}
+	return periodicMeasurementPath || loginScreenFresh(marks, kind, now)
 }
