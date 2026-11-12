@@ -430,3 +430,37 @@ func TestPoolCapDevinFreeInvalidConfigRefusedAtLoad(t *testing.T) {
 		})
 	}
 }
+
+func TestPlacementPoolCapEvidenceInEvent(t *testing.T) {
+	selectionApp, selectionSpawn := devinCapFixture(t, devinCapRows(), map[string]any{devinFreeCapKey: int64(2)}, map[string]int{"devin-swe2": 2})
+	sel, _ := chosenSeat(t, selectionApp, selectionSpawn)
+	src := &fakePlacementSource{hosts: []HostView{{Name: "h1", Connected: true, LoadRatio: ptrF(0.1)}}}
+	a, s, _ := remoteFixture(t, src, &fakeWaker{}, "2026-01-01T00:00:00Z", func(args string) Result {
+		if strings.Contains(args, "_spawn-stdin") {
+			return Result{Out: "OK pane=w:p1 job=job-a\n"}
+		}
+		return Result{}
+	})
+	a.Config.Hosts = map[string]map[string]any{"h1": {}}
+	a.Config.HostOrder = []string{"h1"}
+	s.Sel = sel.record()
+	if handled, _, err := a.placeAuto(context.Background(), s, "brief"); err != nil || !handled {
+		t.Fatalf("placement: handled=%v err=%v", handled, err)
+	}
+	events, err := a.events("job-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range events {
+		if event.Kind != "job.placement" {
+			continue
+		}
+		selection, _ := event.Payload["selection"].(map[string]any)
+		row := candOutcome(selection, "devin-swe2", "high")
+		if row["outcome"] != "dropped:pool_at_cap" || row["cap"] != "devin-free" || row["cap_live"] != float64(2) || row["cap_limit"] != float64(2) {
+			t.Fatalf("placement cap evidence = %v, want devin-free with 2 live and limit 2", row)
+		}
+		return
+	}
+	t.Fatal("job.placement event missing")
+}

@@ -426,7 +426,7 @@ func (a *App) taskLink(ctx context.Context, s Spawn, task client.Task, bypassed 
 		} else {
 			// hk answered: an answer that cannot be read did not confirm
 			// the binding, and --bypass does not cover it.
-			if err != nil || t.ClaimedBy != s.Label || t.Refs.JobID != s.Job {
+			if err != nil || slices.Contains([]string{"merged", "dropped", "hold", "needs_decision"}, t.State) || t.ClaimedBy != s.Label || t.Refs.JobID != s.Job {
 				claimFailure = &taskClaimFailure{reason: "task claim did not confirm claimed_by and refs.job_id"}
 				status = "failed"
 			} else {

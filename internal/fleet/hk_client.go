@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/mgh3326/handoffkeep/client"
 
@@ -179,6 +180,9 @@ func hkTaskCall(task string, call func(client.Client, int64) (client.Task, error
 	})
 	if !answered {
 		return client.Task{}, err
+	}
+	if !utf8.Valid(body) {
+		return client.Task{}, errHKUnreadable
 	}
 	t, ok := cliTaskAnswer(body, task)
 	if !ok {

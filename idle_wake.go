@@ -576,6 +576,30 @@ func (s *Store) assignedIdleWakeCandidates(ctx context.Context) ([]idleWakeCandi
 	return candidates, rows.Err()
 }
 
+// designSuppressedIdleWakeCandidates returns settled design-lane candidates the
+// quota observer has not read yet. A design lane gets no idle-wake, so its
+// candidates never reach assignedIdleWakeCandidates; without this read a
+// design-owned worker's quota stop was never observed (hk 4233). The
+// quota_stop_decisions row keyed by event_id makes each candidate a one-time read.
+func (s *Store) designSuppressedIdleWakeCandidates(ctx context.Context) ([]idleWakeCandidate, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rows, err := s.db.QueryContext(ctx, `SELECT pane_id,state_change_seq,workspace_id,label,agent_status,changed_at,due_at,settled_at,event_id,owner_lane,text,job_id FROM idle_wake_candidates WHERE decision=? AND decision_reason=? AND settled_at IS NOT NULL AND event_id NOT IN (SELECT event_id FROM quota_stop_decisions) ORDER BY settled_at,pane_id,state_change_seq`, idleWakeDecisionSuppressed, idleWakeReasonDesignLane)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var candidates []idleWakeCandidate
+	for rows.Next() {
+		candidate, scanErr := scanIdleWakeCandidate(rows)
+		if scanErr != nil {
+			return nil, scanErr
+		}
+		candidates = append(candidates, candidate)
+	}
+	return candidates, rows.Err()
+}
+
 func (s *Store) markIdleWakeMaterialized(ctx context.Context, eventID string, at time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -685,7 +709,19 @@ func (m *idleWakeManager) flushSuppressionLogLocked(at time.Time) {
 	m.suppressWindowStart = at
 }
 
+// materializeAssigned also reads the quota stops of design-lane candidates
+// (see designSuppressedIdleWakeCandidates): they get no event, but a stopped
+// worker still needs its quota decision.
 func (m *idleWakeManager) materializeAssigned(ctx context.Context, at time.Time) {
+	if m.quota != nil {
+		if designs, err := m.store.designSuppressedIdleWakeCandidates(ctx); err != nil {
+			m.logger.Warn("idle-wake design quota scan unavailable")
+		} else {
+			for _, candidate := range designs {
+				m.quota.observeBounded(ctx, candidate, at)
+			}
+		}
+	}
 	candidates, err := m.store.assignedIdleWakeCandidates(ctx)
 	if err != nil {
 		m.logger.Warn("idle-wake materialization scan unavailable")
