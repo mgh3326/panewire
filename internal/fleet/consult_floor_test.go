@@ -37,7 +37,7 @@ func consultFloorSelectWith(t *testing.T, o consultFloorOpts, rows []CatalogRow,
 	}
 	pools := map[string]PoolView{"claude": riskPool(30, 8), "codex": {Status: "ok", Class: "spend", Blocking: ptrF(40)}}
 	a, s, q := selFixture(t, "S", rows, pools, present)
-	q.GateDo = gatePools(map[string]string{"opus": "claude", "codex-sol": "codex"})
+	q.GateDo = gatePools(map[string]string{"opus": "claude", "codex-sol": "codex", "codex-astra": "codex"})
 	if len(o.cooling) > 0 {
 		until := a.Now().Add(time.Hour)
 		cooling := map[string]time.Time{}
@@ -54,6 +54,65 @@ func consultFloorSelectWith(t *testing.T, o consultFloorOpts, rows []CatalogRow,
 	s.Role, s.RoutingRole, s.Task, s.AllowEscalation = "worker", "consult", "", o.allowEscalation
 	req := selReq{grade: grade, t: "T1", role: "worker", builderFamily: family, allowEscalation: o.allowEscalation, urgency: urgencyNormal, urgencySource: "default", route: route}
 	return a.selectFor(context.Background(), s, req)
+}
+
+func consultFloorSpawnSelect(t *testing.T, rows []CatalogRow, present []string, grade, family, parentLane string) (*selPlan, error) {
+	t.Helper()
+	pools := map[string]PoolView{"claude": riskPool(30, 8), "codex": {Status: "ok", Class: "spend", Blocking: ptrF(40)}}
+	a, s, q := selFixture(t, grade, rows, pools, present)
+	q.GateDo = gatePools(map[string]string{"opus": "claude", "codex-sol": "codex", "codex-astra": "codex"})
+	serveRouting(t, routingDoc(routingBlockV1))
+	s.Role, s.RoutingRole, s.Parent, s.ParentFamily = "worker", "consult", parentLane, family
+	return a.selectProfile(context.Background(), s)
+}
+
+func TestConsultDesignSessionUsesSSFloor(t *testing.T) {
+	rows := []CatalogRow{consultFloorRung("opus", "high", "A+", "claude"), consultFloorRung("codex-sol", "high", "A+", "codex"), consultFloorRung("codex-astra", "high", "SS", "codex")}
+	for _, lane := range []string{"panewire-design", "routing-policy", "fleet-policy"} {
+		t.Run(lane, func(t *testing.T) {
+			sel, err := consultFloorSpawnSelect(t, rows, consultFloorBothPools, "A", "anthropic", lane)
+			if err != nil {
+				t.Fatalf("select: %v", err)
+			}
+			if got := sel.chosen.seat.Canon; got != "codex-astra" {
+				t.Fatalf("design-session asker must select the other family's SS row; got %s", got)
+			}
+			c := consultFloorStamp(t, sel)
+			if c["floor"] != "SS" || c["used_floor"] != "SS" || c["fallback"] != "" {
+				t.Fatalf("design-session consult stamp = %v, want SS without fallback", c)
+			}
+		})
+	}
+}
+
+func TestConsultDesignSessionFallsBackWhenNoOtherFamilySS(t *testing.T) {
+	rows := []CatalogRow{consultFloorRung("opus", "high", "A+", "claude"), consultFloorRung("codex-sol", "high", "A+", "codex")}
+	sel, err := consultFloorSpawnSelect(t, rows, consultFloorBothPools, "A", "anthropic", "panewire-design")
+	if err != nil {
+		t.Fatalf("select with fallback: %v", err)
+	}
+	if got := sel.chosen.seat.Canon; got != "codex-sol" {
+		t.Fatalf("fallback must select the other family's rung; got %s", got)
+	}
+	c := consultFloorStamp(t, sel)
+	if c["floor"] != "SS" || c["used_floor"] != "A" || c["fallback"] != "no_rung_at_floor" {
+		t.Fatalf("design-session fallback stamp = %v, want floor SS, used A, no_rung_at_floor", c)
+	}
+}
+
+func TestConsultOtherLaneKeepsAskerPlusOneFloor(t *testing.T) {
+	rows := []CatalogRow{consultFloorRung("opus", "high", "A+", "claude"), consultFloorRung("codex-sol", "high", "A+", "codex"), consultFloorRung("codex-astra", "high", "SS", "codex")}
+	sel, err := consultFloorSpawnSelect(t, rows, consultFloorBothPools, "A", "", "operator-desk")
+	if err != nil {
+		t.Fatalf("select: %v", err)
+	}
+	if got := sel.chosen.row.Grade; got != "A+" {
+		t.Fatalf("operator-desk A asker selected grade %s, want A+", got)
+	}
+	c := consultFloorStamp(t, sel)
+	if c["floor"] != "A+" || c["used_floor"] != "A+" {
+		t.Fatalf("operator-desk consult stamp = %v, want A+ floor", c)
+	}
 }
 
 // consultFloorStamp reads the consult stamp of a selection record.
@@ -209,7 +268,7 @@ func TestConsultFloorResolveGradeFlag(t *testing.T) {
 	rows := []CatalogRow{consultFloorRung("opus", "high", "SS", "claude"), consultFloorRung("codex-sol", "high", "SS", "codex")}
 	pools := map[string]PoolView{"claude": riskPool(30, 8), "codex": {Status: "ok", Class: "spend", Blocking: ptrF(40)}}
 	a, _, q := selFixture(t, "S", rows, pools, consultFloorBothPools)
-	q.GateDo = gatePools(map[string]string{"opus": "claude", "codex-sol": "codex"})
+	q.GateDo = gatePools(map[string]string{"opus": "claude", "codex-sol": "codex", "codex-astra": "codex"})
 	serveRouting(t, routingDocV1)
 	out := captureOut(a)
 	if e := a.Run(context.Background(), []string{"resolve", "--role", "consult", "--t", "T1", "--grade", "S+", "--builder-family", "anthropic", "--json"}); e != nil {
@@ -229,6 +288,33 @@ func TestConsultFloorResolveGradeFlag(t *testing.T) {
 		if exitCode(e) != exitUsage {
 			t.Fatalf("resolve --grade %q: exit %d, want %d (%v)", grade, exitCode(e), exitUsage, e)
 		}
+	}
+}
+
+func TestConsultResolveLaneUsesDesignFloor(t *testing.T) {
+	rows := []CatalogRow{consultFloorRung("opus", "high", "A+", "claude"), consultFloorRung("codex-sol", "high", "A+", "codex"), consultFloorRung("codex-astra", "high", "SS", "codex")}
+	pools := map[string]PoolView{"claude": riskPool(30, 8), "codex": {Status: "ok", Class: "spend", Blocking: ptrF(40)}}
+	a, _, q := selFixture(t, "A", rows, pools, consultFloorBothPools)
+	q.GateDo = gatePools(map[string]string{"opus": "claude", "codex-sol": "codex", "codex-astra": "codex"})
+	serveRouting(t, routingDoc(routingBlockV1))
+	out := captureOut(a)
+	if err := a.Run(context.Background(), []string{"resolve", "--role", "consult", "--t", "T1", "--grade", "A", "--lane", "routing-policy", "--builder-family", "anthropic", "--json"}); err != nil {
+		t.Fatalf("resolve consult: %v", err)
+	}
+	var r map[string]any
+	if err := json.Unmarshal(out.Bytes(), &r); err != nil {
+		t.Fatalf("resolve json: %v\n%s", err, out)
+	}
+	if r["profile"] != "codex-astra" {
+		t.Fatalf("resolve --lane routing-policy selected %v, want codex-astra SS", r["profile"])
+	}
+	selection, ok := r["selection"].(map[string]any)
+	if !ok {
+		t.Fatalf("resolve selection missing: %v", r["selection"])
+	}
+	consult, ok := selection["consult"].(map[string]any)
+	if !ok || consult["floor"] != "SS" || consult["used_floor"] != "SS" {
+		t.Fatalf("resolve consult stamp = %v, want SS floor", selection["consult"])
 	}
 }
 

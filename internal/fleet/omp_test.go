@@ -106,6 +106,45 @@ func TestOMPSpawnLaunchAndProof(t *testing.T) {
 	}
 }
 
+func TestOMPReviewerLaunchUsesExtendedContextOverlay(t *testing.T) {
+	for _, role := range []string{"reviewer", "counsel"} {
+		t.Run(role, func(t *testing.T) {
+			a, s, fr := ompSpawnFixture(t)
+			s.Role = role
+			if role == "reviewer" {
+				s.BuilderFamily = "openai"
+			}
+			base := fr.Do
+			var configPath string
+			var config string
+			fr.Do = func(c Command) Result {
+				if c.Name == "herdr" && strings.HasPrefix(strings.Join(c.Args, " "), "agent start") {
+					index := slices.Index(c.Args, "--config")
+					if index < 0 || index+1 == len(c.Args) {
+						t.Fatalf("%s launch has no config overlay: %v", role, c.Args)
+					}
+					configPath = c.Args[index+1]
+					contents, err := os.ReadFile(configPath)
+					if err != nil {
+						t.Fatalf("read %s config overlay: %v", role, err)
+					}
+					config = string(contents)
+				}
+				return base(c)
+			}
+			if err := a.Spawn(context.Background(), s); err != nil {
+				t.Fatal(err)
+			}
+			if config != "extendedContext: true\n" {
+				t.Fatalf("%s config overlay = %q", role, config)
+			}
+			if _, err := os.Stat(configPath); !os.IsNotExist(err) {
+				t.Fatalf("%s config overlay still exists after launch: %v", role, err)
+			}
+		})
+	}
+}
+
 func TestOMPSpawnRefusesMismatchedScreen(t *testing.T) {
 	for _, afterBrief := range []bool{false, true} {
 		t.Run(fmt.Sprintf("afterBrief=%t", afterBrief), func(t *testing.T) {
@@ -345,8 +384,7 @@ func TestOMPDelegateHeadless(t *testing.T) {
 }
 
 func TestOMPSimulateCreditBesideFree(t *testing.T) {
-	// A credit pool ranks in the free band whatever its pacing or balance, so
-	// it is chosen before a ranked subscription pool.
+	// A credit pool with balance ranks in the free band; zero credit is excluded.
 	for _, tc := range []struct {
 		name               string
 		projected          float64
@@ -356,7 +394,7 @@ func TestOMPSimulateCreditBesideFree(t *testing.T) {
 		{"pool leaves quota unused", 90, ptrF(80), "omp-opus", "credit"},
 		{"pool on pace to use up, credit without expiry", 100, ptrF(80), "omp-opus", "credit"},
 		{"pool on pace to use up, no credit balance recorded", 100, nil, "omp-opus", "credit"},
-		{"pool on pace to use up, credit balance zero", 100, ptrF(0), "omp-opus", "credit"},
+		{"pool on pace to use up, credit balance zero", 100, ptrF(0), "sonnet", "ranked"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			a := testApp(t)

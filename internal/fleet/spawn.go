@@ -263,19 +263,46 @@ func (a *App) taskPrecheck(ctx context.Context, s Spawn) (client.Task, bool, err
 	if !hkTaskIDIs(t, s.Task) {
 		return t, false, fail(exitConfig, "task response ID mismatch")
 	}
+	return t, false, taskTakesSpawn(t, s)
+}
+
+// taskTakesSpawn refuses a spawn the task cannot take: it is in a state that
+// ends or parks the work, or is bound to another job or claimant. An
+// inherited spawn and an unlinked reviewer take any task.
+func taskTakesSpawn(t client.Task, s Spawn) error {
 	if s.Inherited != "" || s.unlinkedReviewer() {
-		return t, false, nil
+		return nil
 	}
 	if slices.Contains([]string{"merged", "dropped", "hold", "needs_decision"}, t.State) {
-		return t, false, fail(exitUsage, "task unavailable: %s", t.State)
+		return fail(exitUsage, "task unavailable: %s", t.State)
 	}
 	if j := t.Refs.JobID; j != "" && j != s.Job {
-		return t, false, fail(exitUsage, "task bound to another job")
+		return fail(exitUsage, "task bound to another job")
 	}
 	if t.Refs.JobID == "" && t.ClaimedBy != "" && t.ClaimedBy != s.Label {
-		return t, false, fail(exitUsage, "task has another claimant without a job binding")
+		return fail(exitUsage, "task has another claimant without a job binding")
 	}
-	return t, false, nil
+	return nil
+}
+
+// taskMarkerGrade is the grade the task title's (grade X, Tn) marker names,
+// or s.Grade when the spawn carries one. A marker whose scale differs from
+// --t, or no marker where one is required, refuses the spawn. A bypassed
+// precheck and a consult need none.
+func taskMarkerGrade(t client.Task, s Spawn, bypassed bool) (string, error) {
+	if s.Grade != "" {
+		return s.Grade, nil
+	}
+	if m := taskMarker.FindStringSubmatch(t.Title); m != nil {
+		if strings.ToUpper(m[2]) != s.T {
+			return "", fail(exitSeatRefused, "task scale does not match --t")
+		}
+		return strings.ToUpper(m[1]), nil
+	}
+	if !bypassed && !topRoutingRole(s.RoutingRole) {
+		return "", fail(exitSeatRefused, "task title lacks (grade X, Tn marker")
+	}
+	return "", nil
 }
 
 // replacesParent reports whether this inherited spawn can take the parent's
@@ -671,16 +698,9 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 	if e != nil {
 		return e
 	}
-	grade := s.Grade
-	if s.Grade == "" {
-		if m := taskMarker.FindStringSubmatch(task.Title); m != nil {
-			grade = strings.ToUpper(m[1])
-			if strings.ToUpper(m[2]) != s.T {
-				return fail(exitSeatRefused, "task scale does not match --t")
-			}
-		} else if !bypassed && !topRoutingRole(s.RoutingRole) {
-			return fail(exitSeatRefused, "task title lacks (grade X, Tn marker")
-		}
+	grade, e := taskMarkerGrade(task, s, bypassed)
+	if e != nil {
+		return e
 	}
 	s.TaskGrade = grade
 	if s.Sel != nil && s.Sel["requested"] == nil {
@@ -697,7 +717,7 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 		// already resolved from the catalog by selectProfile, which this
 		// dry run does not repeat.
 		if !autoSel {
-			if _, e := a.checkLaunchRow(ctx, s, seat, a.spawnQuotaRequest(s, seat, effort), effort, selEffort, grade, builderFamily, autoSel); e != nil {
+			if _, e := a.checkSpawnAdmission(ctx, s, seat, a.spawnQuotaRequest(s, seat, effort), effort, selEffort, grade, builderFamily, autoSel, a.Config.Local); e != nil {
 				return e
 			}
 		}
@@ -749,8 +769,18 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 		}
 	}()
 	if s.AccountKey == "" {
-		key, _ := a.remoteAccount(ctx, firstNonempty(launch.Pool, gatePool(gate)), a.machine(), a.Config.Local)
-		s.AccountKey = key
+		var receipt struct {
+			ReadingKey string `json:"reading_account_key"`
+		}
+		if json.Unmarshal([]byte(gate), &receipt) == nil && receipt.ReadingKey != "" {
+			if !validAccountKey(receipt.ReadingKey) || accountPool(receipt.ReadingKey) != firstNonempty(launch.Pool, gatePool(gate)) {
+				return fail(exitConfig, "quota receipt reading account does not match the launch pool")
+			}
+			s.AccountKey = receipt.ReadingKey
+		} else {
+			key, _ := a.remoteAccount(ctx, firstNonempty(launch.Pool, gatePool(gate)), a.machine(), a.Config.Local)
+			s.AccountKey = key
+		}
 	}
 	a.stampSelection(&s, a.machine())
 	s.placement.execution = placementExecution{Host: a.machine(), Family: seat.Family, Model: launch.ModelID, Role: placementRole(s), Profile: s.Profile, Pool: firstNonempty(launch.Pool, gatePool(gate)), AccountKey: placementAccount(s.AccountKey)}
@@ -879,6 +909,19 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 	if e != nil {
 		return e
 	}
+	argv = withSessionName(seat.Kind, argv, s.Job)
+	if seat.Kind == "omp" && (s.Role == "reviewer" || s.Role == "counsel") {
+		configPath, err := writeOMPExtendedContextOverlay()
+		if err != nil {
+			return fail(exitConfig, "omp extended context settings: %v", err)
+		}
+		defer func() {
+			if err := os.Remove(configPath); err != nil && !os.IsNotExist(err) {
+				a.warn("omp extended context settings cleanup failed: %v", err)
+			}
+		}()
+		argv = append(argv, "--config", configPath)
+	}
 	for _, v := range mockEnv {
 		if path, ok := strings.CutPrefix(v, "PANEWIRE_MOCK_CONFIG="); ok {
 			argv = append(argv, "--strict-mcp-config", "--mcp-config", path)
@@ -996,6 +1039,9 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 	}
 	receipt := map[string]any{"pane_id": pane, "tab_id": tab, "herdr_session": a.herdrSession(), "label": s.Label, "profile": s.Profile, "launch_profile": launchProfile(seat.Canon, launch.Effort), "model_id": launch.ModelID, "effort": launch.Effort, "family": seat.Family, "role": s.Role, "lane_role": s.Role, "owner_lane": owner, "parent_lane": s.Parent, "task_id": s.Task, "report": s.Report, "cwd": s.CWD, "keep": s.Keep, "pool": pool, "host": machine}
 	receipt["harness_session"] = a.harnessSession(ctx, pane, seat.Kind)
+	if s.AccountKey != "" {
+		receipt["account_key"] = s.AccountKey
+	}
 	if s.E6Arm != "" {
 		receipt["e6_arm"] = s.E6Arm
 	}
@@ -1047,7 +1093,7 @@ func (a *App) spawnQuotaRequest(s Spawn, seat Seat, effort string) QuotaRequest 
 // request resolves to, then the seat's own rules (grade cover, E6 marker). A
 // dry run runs it too, so the preview refuses what a real spawn refuses. It
 // takes no gate receipt, lease or reservation.
-func (a *App) checkLaunchRow(ctx context.Context, s Spawn, seat Seat, qr QuotaRequest, effort, selEffort, grade, builderFamily string, autoSel bool) (Launch, error) {
+func (a *App) checkLaunchRow(ctx context.Context, s Spawn, seat Seat, qr QuotaRequest, effort, selEffort, grade, builderFamily string, autoSel bool, host map[string]any) (Launch, error) {
 	launch, e := a.Quota.Launch(ctx, qr)
 	if e != nil {
 		// Preserve the gate's role/quota refusal even when the catalog also
@@ -1072,10 +1118,34 @@ func (a *App) checkLaunchRow(ctx context.Context, s Spawn, seat Seat, qr QuotaRe
 			return Launch{}, fail(exitSeatRefused, "NO_ROLE_CANDIDATE: model %s in harness %s cannot consult", launch.ModelID, seat.Kind)
 		}
 	}
-	if e = seat.Check(launch, s.Role, grade, builderFamily, a.e6Arm(s.E6Arm), a.Config.Local); e != nil {
+	if e = seat.Check(launch, s.Role, grade, builderFamily, a.e6Arm(s.E6Arm), host); e != nil {
 		return Launch{}, e
 	}
 	return launch, nil
+}
+
+// checkSpawnAdmission covers the catalog row, seat rules and escalation gate
+// shared by a dry-run and a real spawn. It does not read quota or claim a seat.
+func (a *App) checkSpawnAdmission(ctx context.Context, s Spawn, seat Seat, qr QuotaRequest, effort, selEffort, grade, builderFamily string, autoSel bool, host map[string]any) (Launch, error) {
+	launch, err := a.checkLaunchRow(ctx, s, seat, qr, effort, selEffort, grade, builderFamily, autoSel, host)
+	if err != nil {
+		return Launch{}, err
+	}
+	familyGate := s.route.familyAdmitsGate(launch.row())
+	if (seat.Gate != "" || seat.Kind == "agy" && launch.Gate == escalationGate) && launch.Gate != defaultGate && !s.AllowEscalation && !familyGate {
+		return Launch{}, fail(exitSeatRefused, "%s is a %s rung; pass --allow-escalation", seat.Canon, launch.Gate)
+	}
+	return launch, nil
+}
+
+func (a *App) checkDryRunAdmission(ctx context.Context, s Spawn, host map[string]any) error {
+	seat, ok := a.Policy.Profiles[s.Profile]
+	if !ok {
+		return fail(exitConfig, "missing seat policy for %s", s.Profile)
+	}
+	effort := firstNonempty(s.Effort, seat.Effort)
+	_, err := a.checkSpawnAdmission(ctx, s, seat, a.spawnQuotaRequest(s, seat, effort), effort, effort, s.TaskGrade, s.ParentFamily, false, host)
+	return err
 }
 
 // admitLaunch resolves the launch rung for a selected seat and asks the quota
@@ -1083,17 +1153,9 @@ func (a *App) checkLaunchRow(ctx context.Context, s Spawn, seat Seat, qr QuotaRe
 // `panewire delegate --headless`; it claims and writes nothing.
 func (a *App) admitLaunch(ctx context.Context, s Spawn, seat Seat, effort, selEffort, grade, builderFamily string, autoSel bool) (Launch, string, error) {
 	qr := a.spawnQuotaRequest(s, seat, effort)
-	launch, e := a.checkLaunchRow(ctx, s, seat, qr, effort, selEffort, grade, builderFamily, autoSel)
+	launch, e := a.checkSpawnAdmission(ctx, s, seat, qr, effort, selEffort, grade, builderFamily, autoSel, a.Config.Local)
 	if e != nil {
 		return Launch{}, "", e
-	}
-	// A gate alias is the pool gate for a whole family of spellings, so it
-	// cannot tell an escalation rung from a default one; the launch row can.
-	// An agy profile is gated under its own name now (hk 3859), so the launch
-	// row's escalation gate is checked for it too.
-	familyGate := s.route.familyAdmitsGate(launch.row())
-	if (seat.Gate != "" || seat.Kind == "agy" && launch.Gate == escalationGate) && launch.Gate != "default" && !s.AllowEscalation && !familyGate {
-		return Launch{}, "", fail(exitSeatRefused, "%s is a %s rung; pass --allow-escalation", seat.Canon, launch.Gate)
 	}
 	qr.Effort = launch.Effort
 	accountPool, _, _ := strings.Cut(s.AccountKey, ":")

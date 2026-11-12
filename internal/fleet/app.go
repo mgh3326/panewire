@@ -352,7 +352,7 @@ func (a *App) help(cmd string) error {
 	case "plan":
 		fmt.Fprintln(a.Out, "Usage: panewire plan [--grade G] --t T0..T3 [--role R] [--tags a,b] [--effort E] [--urgency normal|urgent] [--exclude-host a,b] [--exclude-pool P,P] [--builder-family F] [--routing-role R] [--allow-escalation] [--credit-at TIME] [--json] (live, read-only: the host and model a spawn would get now; no task, spawn or job write)")
 	case "resolve":
-		fmt.Fprintln(a.Out, "Usage: panewire resolve --role consult|implementer|explorer|verifier|reviewer|judge [--grade G] [--t T0..T3] [--builder-family F] [--harness KIND] [--allow-escalation] [--json] (read-only: the profile and effort role routing and quota ordering pick now, for an in-session subagent; no host placement, spawn or job write; the answer is the last thing printed)")
+		fmt.Fprintln(a.Out, "Usage: panewire resolve --role consult|implementer|explorer|verifier|reviewer|judge [--grade G] [--t T0..T3] [--builder-family F] [--lane L (consult asker lane)] [--harness KIND] [--allow-escalation] [--json] (read-only: the profile and effort role routing and quota ordering pick now, for an in-session subagent; no host placement, spawn or job write; the answer is the last thing printed)")
 	case "preflight":
 		fmt.Fprintln(a.Out, "Usage: panewire preflight [--host NAME] [--pool P] [--json] (read-only: per remote host, hub acceptance, shared quota observation age, quota transport setting, hub load/memory, mergewake review config and panewire/panewire version skew, each with a named reason; exit 0 when all good, 78 otherwise)")
 	default:

@@ -22,7 +22,9 @@ import (
 // that finds nothing unread closes it. A line owed to a worker lane whose
 // trial has ended is dropped. The hub owns the
 // decision because it owns the inbox store and sees each arrival; the line
-// travels to the lane's node like any relay and the node daemon types it.
+// travels to the lane's node like any relay and the node daemon types it (for a
+// lane in PANEWIRE_CLAUDE_SESSION_MESSAGE_LANES it posts the line to the lane's
+// Claude Code session first: docs/claude-session-message.md).
 // The line is a plain, unidentified inject: it writes no handoffkeep row, so
 // nothing replays it after a hub restart, and the window state is in memory:
 // a hub start owes each inbox-only lane with unread items above info one line

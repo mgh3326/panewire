@@ -57,6 +57,19 @@ func (a *App) launchArgs(s Seat, l Launch) ([]string, []string, error) {
 	}
 }
 
+// withSessionName names a Claude session after its job, so ListAgents,
+// /list-agents and `@name` address it by the id the fleet already uses
+// (hk 4258). Only claude takes --name; every other kind's argv is returned
+// unchanged. panewire starts no design, desk or policy session (those are
+// operator-opened and carry their lane name through /rename), so the job id
+// is the one name a panewire-started session gets.
+func withSessionName(kind string, argv []string, job string) []string {
+	if kind != "claude" || job == "" {
+		return argv
+	}
+	return append(argv, "--name", job)
+}
+
 // launchProfile names the launched rung; a rung-less launch has no @effort.
 func launchProfile(canon, effort string) string {
 	if effort == "" {

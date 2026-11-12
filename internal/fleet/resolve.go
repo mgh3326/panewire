@@ -44,13 +44,14 @@ type resolveResult struct {
 }
 
 func (a *App) resolveCmd(ctx context.Context, args []string) error {
-	var role, grade, t, builderFamily, harness string
+	var role, grade, t, builderFamily, harness, lane string
 	var asJSON, allowEscalation bool
 	f := flags("resolve")
 	f.StringVar(&role, "role", "", "routing role")
 	f.StringVar(&grade, "grade", "", "task grade (C, B, A, A+, S, S+, SS); for consult, the asker's grade, optional")
 	f.StringVar(&t, "t", "T0", "task scale T0..T3")
 	f.StringVar(&builderFamily, "builder-family", "", "author or parent family (reviewer/judge/consult)")
+	f.StringVar(&lane, "lane", "", "asker's lane (consult)")
 	f.StringVar(&harness, "harness", "", "restrict selection to an agent harness, e.g. omp")
 	f.BoolVar(&allowEscalation, "allow-escalation", false, "admit escalation rungs, and consult rungs above the role effort")
 	f.BoolVar(&asJSON, "json", false, "print the decision as JSON")
@@ -76,6 +77,9 @@ func (a *App) resolveCmd(ctx context.Context, args []string) error {
 		if _, ok := gradeOrder[grade]; !ok {
 			return fail(exitUsage, "resolve needs --grade C|B|A|A+|S|S+|SS")
 		}
+	}
+	if lane != "" && !topRoutingRole(role) {
+		return fail(exitUsage, "--lane goes with --role consult")
 	}
 	t = strings.ToUpper(t)
 	if !slices.Contains([]string{"T0", "T1", "T2", "T3"}, t) {
@@ -106,7 +110,7 @@ func (a *App) resolveCmd(ctx context.Context, args []string) error {
 	if flagPassed(f, "grade") {
 		gradeSource = "flag"
 	}
-	req := selReq{grade: grade, gradeSource: gradeSource, t: t, role: seatRole, allowEscalation: allowEscalation, builderFamily: builderFamily, harness: harness, urgency: urgencyNormal, urgencySource: "default", route: route}
+	req := selReq{grade: grade, lane: lane, gradeSource: gradeSource, t: t, role: seatRole, allowEscalation: allowEscalation, builderFamily: builderFamily, harness: harness, urgency: urgencyNormal, urgencySource: "default", route: route}
 	sel, selErr := a.selectFor(ctx, s, req)
 	r := resolveResult{RoutingRole: role, SeatRole: seatRole, Grade: grade, T: t, RoutingVersion: route.version, PolicySource: route.source}
 	r.OutcomeCode = outcomeForError(selErr)
@@ -139,7 +143,7 @@ func (a *App) resolveCmd(ctx context.Context, args []string) error {
 	}
 	fmt.Fprintf(a.Out, "resolve role=%s seat_role=%s grade=%s t=%s routing_version=%d policy_source=%s", r.RoutingRole, r.SeatRole, r.Grade, r.T, r.RoutingVersion, r.PolicySource)
 	if topRoutingRole(role) {
-		fmt.Fprintf(a.Out, " floor=%s", consultFloorOf(r.Grade))
+		fmt.Fprintf(a.Out, " floor=%s", consultFloorFor(r.Grade, lane))
 	}
 	if r.DowngradedFrom != "" {
 		fmt.Fprintf(a.Out, " downgraded_from=%s", r.DowngradedFrom)

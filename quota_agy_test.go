@@ -357,9 +357,9 @@ func TestNodeQuotaRefreshAgyWithoutAnAccountFails(t *testing.T) {
 	}
 }
 
-// Shared flow: a reading is current for 300 s — four minutes later it is
-// reused, six minutes later measured again — and it is published under the
-// configured account key with the lease released.
+// Shared flow refreshes a reading with a two-minute margin before its
+// 300-second reader TTL, publishing under the configured account key with the
+// lease released.
 func TestAgySharedReadingFreshnessAndPublish(t *testing.T) {
 	hk := newClaudeHK(t)
 	api := newAgyAPI()
@@ -370,7 +370,7 @@ func TestAgySharedReadingFreshnessAndPublish(t *testing.T) {
 	for _, step := range []struct {
 		after     time.Duration
 		published int
-	}{{0, 1}, {4 * time.Minute, 1}, {6 * time.Minute, 2}} {
+	}{{0, 1}, {3 * time.Minute, 1}, {4 * time.Minute, 2}} {
 		now = claudeTestNow.Add(step.after)
 		reading, err := source.Refresh(t.Context())
 		if err != nil {

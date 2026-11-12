@@ -99,6 +99,17 @@ func (h *HubServer) handleSpawnSubmit(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 503, map[string]string{"error": "spawn_config_unavailable", "fix": "configure hub fleet policy and trust before retrying this request"})
 		return
 	}
+	// Input the saved request can never fix is refused here, in the
+	// submitter's terminal, not by a SPAWN_FAILED event after acceptance
+	// (hk 4270; internal/fleet/submit_preflight.go).
+	if !fleet.ValidAgentName(spawn.Label) {
+		writeJSON(w, 400, map[string]string{"error": "invalid_request", "reason": "label_invalid", "fix": "pass -l LABEL as a herdr agent name: a lowercase letter first, then lowercase letters, digits, - or _, at most 32 characters"})
+		return
+	}
+	if err := app.SubmitHostRefusal(spawn); err != nil {
+		writeJSON(w, 400, map[string]string{"error": "invalid_request", "reason": "no_eligible_host", "fix": spawnRefusalLine(err.Error())})
+		return
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 	existing, found, err := app.ExistingJob(ctx, spawn.Job)
@@ -638,52 +649,6 @@ func (h *HubServer) verifySpawnPane(ctx context.Context, machine string, result 
 		return task == "" || fmt.Sprint(record["task_id"]) == task
 	case <-ctx.Done():
 		return false
-	}
-}
-
-func (h *HubServer) flushSpawnNotifications(ctx context.Context) {
-	if h.inbox == nil {
-		return
-	}
-	store := h.inbox.store
-	op, done := store.op(ctx)
-	rows, err := store.db.QueryContext(op, `SELECT event_id,request_id,job,owner,result,created_ms FROM spawn_notifications WHERE delivered=0 ORDER BY created_ms LIMIT 32`)
-	if err != nil {
-		done()
-		return
-	}
-	type notification struct {
-		id, request, job, owner, raw string
-		at                           int64
-	}
-	var batch []notification
-	for rows.Next() {
-		var n notification
-		if rows.Scan(&n.id, &n.request, &n.job, &n.owner, &n.raw, &n.at) != nil {
-			break
-		}
-		batch = append(batch, n)
-	}
-	rows.Close()
-	done()
-	for _, n := range batch {
-		var result hubSpawnOutcome
-		if json.Unmarshal([]byte(n.raw), &result) != nil {
-			continue
-		}
-		if h.handoffkeep == nil {
-			continue
-		}
-		event := hubJobEventPayload{EventID: n.id, JobID: n.job, OwnerLane: n.owner, NotifyType: spawnNotificationType(result), Text: spawnNotificationText(n.job, n.request, result), Host: "hub", Epoch: 1}
-		// The relay owns the durable write. Persisting here first makes its own
-		// POST a 200 duplicate, which it leaves to replay instead of injecting.
-		delivered := h.relayLaneEventContext(ctx, event, nil)
-		if delivered.ID == 0 {
-			continue
-		}
-		op, done := store.op(ctx)
-		_, _ = store.db.ExecContext(op, store.q(`UPDATE spawn_notifications SET delivered=1 WHERE event_id=?`), n.id)
-		done()
 	}
 }
 

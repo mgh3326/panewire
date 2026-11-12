@@ -23,6 +23,10 @@ direct notification for the pane's owner after a default 60-second settle. It
 does not decide job completion or alter job lifecycle state. See the
 [idle-wake contract and isolated E2E runbook](docs/idle-wake.md).
 
+Claude seats start under their job id (`--name`). A trial, off by default, can
+deliver a lane's inbox wake line to its Claude Code session as a session message
+instead of typing it; see [Claude session names and session messages](docs/claude-session-message.md).
+
 Escalation `question` text is capped at 240 characters for hub relay; read the
 full question from the referenced events file (or its explicit report file).
 
@@ -82,7 +86,7 @@ Prompt files begin with recipient metadata such as `expect: name=orch-mock cwd=/
 
 The CLI never falls back to herdr directly. If the daemon socket is absent it exits 4. `PANEWIRE_SOCKET` is available for tests and non-default local installations.
 
-Quota readings, refreshes, and observations use `panewire quota`; see [the quota command contract](docs/quota.md). The bench catalog, its grades and Artificial Analysis annotations use `panewire catalog`; see [the catalog command contract](docs/catalog.md). Reps, manual credit, and automatic model outcomes use `panewire reps` and `panewire manual`; see [reps and outcomes](docs/reps.md).
+Quota readings, refreshes, and observations use `panewire quota`; see [the quota command contract](docs/quota.md) and [exhausted API credit](docs/placement.md#exhausted-api-credit). The bench catalog, its grades and Artificial Analysis annotations use `panewire catalog`; see [the catalog command contract](docs/catalog.md). Reps, manual credit, and automatic model outcomes use `panewire reps` and `panewire manual`; see [reps and outcomes](docs/reps.md).
 
 ## Status
 

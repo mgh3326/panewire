@@ -175,6 +175,12 @@ func (h *HubServer) receiveInbox(kind string, event *hubJobEventPayload, sender 
 		return result, false
 	}
 	lane := h.receivingLane(kind, *event)
+	if reason := h.designFilterReason(kind, *event, lane); reason != "" {
+		if result, handled := h.receiveFiltered(kind, event, sender, senderID, reason); handled {
+			return result, true
+		}
+		// hk's row belongs to another event: this one takes the inbox path.
+	}
 	if event.NotifyType == "" && h.inbox.policy.Lanes[lane].InboxSummary != nil {
 		switch kind {
 		case "job.completed", "job.joined":
@@ -427,7 +433,7 @@ func (h *HubServer) replayInboxAged(record handoffkeepRelayEvent, receiptAge boo
 	if !handled {
 		return false
 	}
-	if !result.PersistFailed && h.handoffkeep != nil {
+	if !result.PersistFailed && !result.AlreadyDelivered && h.handoffkeep != nil {
 		if err := h.handoffkeep.markDelivered(context.Background(), record.ID, "hub", "inbox"); err != nil {
 			h.logger.Warn("inbox replay row retirement deferred", "event_id", record.ID)
 		}
