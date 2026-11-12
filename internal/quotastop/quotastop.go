@@ -179,8 +179,11 @@ func providerErrorBlock(lines []string, start int) (string, bool) {
 		if apiErrorStart.MatchString(content) {
 			return "", false
 		}
+		if chromeLine(line) {
+			continue
+		}
 		currentBlock := strings.Join(blockLines, "\n")
-		if chromeLine(line) || border != 0 && screenBorderPrefix(line) == border || jsonContinuation(content) || jsonStringOpen(currentBlock) {
+		if border != 0 && screenBorderPrefix(line) == border || jsonContinuation(content) || jsonStringOpen(currentBlock) {
 			blockLines = append(blockLines, content)
 			continue
 		}
