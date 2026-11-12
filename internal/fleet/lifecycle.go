@@ -45,6 +45,7 @@ func (a *App) lifecycleWithOptions(ctx context.Context, kind string, args []stri
 	if e != nil {
 		return e
 	}
+	strictResult := kind == "done" && !watchResult && result != nil && !boolean(j.Receipt, "headless", false)
 	if kind == "restore" {
 		if *report != "" || *question != "" {
 			return fail(exitUsage, "restore accepts only JOB")
@@ -126,11 +127,19 @@ func (a *App) lifecycleWithOptions(ctx context.Context, kind string, args []stri
 			if str(ev.Payload, "report_sha256") == digest && str(ev.Payload, "question") == *question {
 				suffix := ""
 				if kind == "done" {
-					if e = a.releaseQuota(ctx, j); e != nil {
-						return e
-					}
 					var status string
-					if status, e = a.attachDuplicateResult(ctx, id, *report, digest, result); e != nil {
+					if strictResult {
+						status, e = a.attachDuplicateResultStrict(ctx, j, id, *report, digest, result, str(ev.Payload, "document"), str(ev.Payload, "report_sha256"))
+						if e != nil {
+							return a.strictDoneFailure(ctx, id, e)
+						}
+					} else {
+						status, e = a.attachDuplicateResult(ctx, id, *report, digest, result)
+						if e != nil {
+							return e
+						}
+					}
+					if e = a.releaseQuota(ctx, j); e != nil {
 						return e
 					}
 					if status != "" {
@@ -198,8 +207,6 @@ func (a *App) lifecycleWithOptions(ctx context.Context, kind string, args []stri
 	// The hk record state is written before the relay: one PUT carries the
 	// terminal state, the report doc with its sha256 pin and — for done
 	// --result — the findings.
-	// A failed write degrades to a job.record_failed event and the relay
-	// still goes out, so a cross-host reader falls back per the design.
 	state := "completed"
 	if kind == "escalate" {
 		state = "escalated"
@@ -212,8 +219,17 @@ func (a *App) lifecycleWithOptions(ctx context.Context, kind string, args []stri
 	if result != nil {
 		rec["result"] = result
 	}
-	if e := a.putJobRecord(ctx, id, rec); e != nil {
-		a.jobRecordFailed(ctx, id, state, e)
+	if strictResult {
+		if e = a.strictCompletedPut(ctx, id, rec, result, doc, spawnReceiptForRepair(j.Events)); e != nil {
+			return a.strictDoneFailure(ctx, id, e)
+		}
+	} else if e := a.putJobRecord(ctx, id, rec); e != nil {
+		if kind == "done" && result != nil && boolean(j.Receipt, "headless", false) {
+			a.warn("job %s completed record failed: reason=%s", id, doneResultReason(e))
+			_ = a.event(ctx, id, "job.record_failed", map[string]any{"op": state})
+		} else {
+			a.jobRecordFailed(ctx, id, state, e)
+		}
 	}
 	p := map[string]any{"report": *report, "report_sha256": digest, "question": *question, "owner_lane": j.Owner, "parent_lane": j.Parent, "label": j.Label, "pane_id": j.Pane, "document": doc}
 	if late {

@@ -293,7 +293,7 @@ func TestDoneResultHeadlessDelegateKeepsWarnAndContinue(t *testing.T) {
 	if err := strictDone(t, a, report, result); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(a.Err.(*bytes.Buffer).String(), "reason=invalid_context") {
+	if !strings.Contains(a.Err.(*bytes.Buffer).String(), "reason=http_400") {
 		t.Fatalf("safe refusal token absent: %q", a.Err)
 	}
 	if _, pools := ledgerState(t, a, "j"); len(pools) != 0 {
