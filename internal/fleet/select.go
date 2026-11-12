@@ -872,7 +872,13 @@ func (a *App) selectFor(ctx context.Context, s Spawn, req selReq) (*selPlan, err
 					x.reason, x.code, x.outcome = "quota_unknown", outcomeQuotaUnknown, "dropped:quota_unknown"
 					continue
 				}
-				p.classify(&x, creditViews[row.Pool])
+				view := creditViews[row.Pool]
+				if view.CreditUnavailable {
+					if !slices.Contains(p.degraded, "credit_balance_unavailable") {
+						p.degraded = append(p.degraded, "credit_balance_unavailable")
+					}
+				}
+				p.classify(&x, view)
 				if x.reason == "" {
 					pending = append(pending, &x)
 				}
