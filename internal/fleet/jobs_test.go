@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -110,6 +111,10 @@ type fakeHK struct {
 	down            bool
 	rejectSelection bool
 	putBodies       []map[string]any
+	putStatuses     []int
+	putPattern      string
+	putErrorBody    string
+	dropAfterCommit bool
 }
 
 var jobRecordFields = []string{"state", "role", "label", "family", "profile", "model", "harness", "effort", "pool", "owner_lane", "parent_lane", "parent_job", "pane_id", "worktree", "report_doc", "report_sha256", "result", "end_reason", "selection"}
@@ -195,6 +200,22 @@ func (h *fakeHK) serve(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			h.putBodies = append(h.putBodies, fields)
+			if len(h.putStatuses) > 0 {
+				status := h.putStatuses[0]
+				h.putStatuses = h.putStatuses[1:]
+				if status != http.StatusOK {
+					if h.putErrorBody != "" {
+						w.WriteHeader(status)
+						_, _ = w.Write([]byte(h.putErrorBody))
+					} else if h.putPattern != "" {
+						w.WriteHeader(status)
+						_, _ = fmt.Fprintf(w, `{"error":"secret_like_content","pattern":%q}`, h.putPattern)
+					} else {
+						h.fail(w, status, "")
+					}
+					return
+				}
+			}
 			if h.rejectSelection && fields["selection"] != nil {
 				h.rejectSelection = false
 				h.fail(w, 400, "invalid_selection")
@@ -221,6 +242,14 @@ func (h *fakeHK) serve(w http.ResponseWriter, r *http.Request) {
 			}
 			for k, v := range fields {
 				rec[k] = v
+			}
+			if h.dropAfterCommit {
+				h.dropAfterCommit = false
+				conn, _, err := w.(http.Hijacker).Hijack()
+				if err == nil {
+					_ = conn.Close()
+				}
+				return
 			}
 			h.writeJSON(w, 200, rec)
 		default:

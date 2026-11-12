@@ -154,10 +154,10 @@ func TestDoneResultConflictOnDuplicateKeepsStored(t *testing.T) {
 	writeReport(t, findings, `{"source":"later"}`)
 	out := a.Out.(*bytes.Buffer)
 	out.Reset()
-	if e := a.lifecycle(context.Background(), "done", []string{"j", "--report", report, "--result", findings}); e != nil {
-		t.Fatal(e)
+	if e := a.lifecycle(context.Background(), "done", []string{"j", "--report", report, "--result", findings}); code(e) != exitStateConflict || !strings.Contains(e.Error(), "reason=result_conflict") {
+		t.Fatalf("error=%v, want strict result conflict", e)
 	}
-	if got := out.String(); !strings.Contains(got, "duplicate=yes result=conflict") {
+	if got := out.String(); strings.Contains(got, "OK") {
 		t.Fatalf("output=%q", got)
 	}
 	res, ok := recordResult(t, store.record(t, "j")).(map[string]any)
