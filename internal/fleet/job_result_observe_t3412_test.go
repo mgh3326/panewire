@@ -57,8 +57,8 @@ func TestDuplicateDoneConflictEmitsJobResultAndSentry(t *testing.T) {
 	}
 	findings := filepath.Join(a.Jobs, "j", "findings.json")
 	writeReport(t, findings, `{"source":"later"}`)
-	if e := a.lifecycle(context.Background(), "done", []string{"j", "--report", report, "--result", findings}); e != nil {
-		t.Fatal(e)
+	if e := a.lifecycle(context.Background(), "done", []string{"j", "--report", report, "--result", findings}); code(e) != exitStateConflict || !strings.Contains(e.Error(), "reason=result_conflict") {
+		t.Fatalf("error=%v, want strict result conflict", e)
 	}
 	if len(*events) != 1 || (*events)[0].Outcome != "conflict" {
 		t.Fatalf("job_result events=%+v", *events)

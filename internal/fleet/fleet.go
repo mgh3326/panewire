@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -167,16 +169,24 @@ func (c *hkQuota) request(ctx context.Context, method, path string, body, out an
 	}
 	resp, e := client.Do(req)
 	if e != nil {
-		return fmt.Errorf("handoffkeep request failed")
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return fmt.Errorf("%w", errHKTransport)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		var er struct {
-			Code   string `json:"error"`
-			Reason string `json:"reason"`
+			Code    string `json:"error"`
+			Reason  string `json:"reason"`
+			Pattern string `json:"pattern"`
 		}
 		_ = json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&er)
-		return &BackendError{Status: resp.StatusCode, Code: er.Code, Reason: backendReason(er.Reason)}
+		pattern := ""
+		if safeHKPattern.MatchString(er.Pattern) {
+			pattern = er.Pattern
+		}
+		return &BackendError{Status: resp.StatusCode, Code: er.Code, Reason: backendReason(er.Reason), Pattern: pattern}
 	}
 	if out != nil {
 		if e := json.NewDecoder(io.LimitReader(resp.Body, 16<<20)).Decode(out); e != nil {
@@ -190,10 +200,15 @@ func (c *hkQuota) request(ctx context.Context, method, path string, body, out an
 // hk's store-authored refusal reason (the failing field or rule, hk #197),
 // bounded and flattened to one line; nothing else of the body is kept.
 type BackendError struct {
-	Status int
-	Code   string
-	Reason string
+	Status  int
+	Code    string
+	Reason  string
+	Pattern string
 }
+
+var safeHKPattern = regexp.MustCompile(`^[a-z0-9_]{1,40}$`)
+
+var errHKTransport = errors.New("handoffkeep transport failure")
 
 // backendReasonMaxBytes bounds the hk refusal reason a warning or a
 // quarantine sidecar may carry.

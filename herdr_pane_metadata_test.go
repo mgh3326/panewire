@@ -12,6 +12,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -73,7 +74,11 @@ func (s *fakeHerdrPaneServer) serve(conn net.Conn) {
 		s.reports = append(s.reports, req.Params)
 		s.mu.Unlock()
 	}
-	_, _ = fmt.Fprintf(conn, "{\"id\":%q,%s}\n", req.ID, s.reply(req.Params))
+	body := s.reply(req.Params)
+	if body == "" {
+		return // no reply: the client sees the connection close
+	}
+	_, _ = fmt.Fprintf(conn, "{\"id\":%q,%s}\n", req.ID, body)
 }
 
 func (s *fakeHerdrPaneServer) reportsCopy() []map[string]any {
@@ -318,6 +323,29 @@ func TestPaneMetadataPaneNotFoundSkipsOnlyThatPane(t *testing.T) {
 	}
 }
 
+// Shutdown cancels ctx while the first report is in flight. herdr replies
+// after the cancel, so the cycle must send no further reports: it may not
+// spend another paneMetadataCallTimeout per pane after shutdown started.
+func TestPaneMetadataCycleStopsOnceShutdownStarts(t *testing.T) {
+	store := newPaneMetaStore(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var once sync.Once
+	server := startFakeHerdrPaneServer(t, func(params map[string]any) string {
+		once.Do(cancel)
+		return okPaneReply(params)
+	})
+	seedPaneJob(t, store, paneJobRow("job-a", "pane-a", "lane-owner", time.Now()))
+	seedPaneJob(t, store, paneJobRow("job-b", "pane-b", "lane-owner", time.Now()))
+	seedPaneJob(t, store, paneJobRow("job-c", "pane-c", "lane-owner", time.Now()))
+	p := newTestPaneMetadataPublisher(store, server.socket)
+
+	p.cycle(ctx)
+	if got := len(server.reportsCopy()); got != 1 {
+		t.Fatalf("reports after shutdown=%d, want 1 (the in-flight one)", got)
+	}
+}
+
 func TestPaneMetadataValueIsCutOnUTF8Boundary(t *testing.T) {
 	store := newPaneMetaStore(t)
 	server := startFakeHerdrPaneServer(t, okPaneReply)
@@ -358,5 +386,64 @@ func TestPaneMetadataCapabilityNeedsMethodAndTokensField(t *testing.T) {
 		if guard.PaneMetadata != tc.want {
 			t.Fatalf("%s: PaneMetadata=%v, want %v", tc.name, guard.PaneMetadata, tc.want)
 		}
+	}
+}
+
+func TestPaneMetadataTransportFailureRetriesWithoutStopping(t *testing.T) {
+	store := newPaneMetaStore(t)
+	var calls atomic.Int32
+	server := startFakeHerdrPaneServer(t, func(params map[string]any) string {
+		if calls.Add(1) == 1 {
+			return "" // first request: the connection drops with no reply
+		}
+		return okPaneReply(params)
+	})
+	seedPaneJob(t, store, paneJobRow("job-1", "pane-1", "lane-owner", time.Now()))
+	p := newTestPaneMetadataPublisher(store, server.socket)
+
+	p.cycle(context.Background())
+	if p.stopped {
+		t.Fatal("a dropped connection stopped publishing; it must retry on the next cycle")
+	}
+	p.cycle(context.Background())
+	if _, ok := p.published["pane-1"]; !ok {
+		t.Fatal("pane not published after the retry")
+	}
+	if got := len(server.reportsCopy()); got != 2 {
+		t.Fatalf("reports=%d, want 2 (dropped attempt, then retry)", got)
+	}
+}
+
+func TestPaneMetadataReportIsBoundedWhenHerdrNeverReplies(t *testing.T) {
+	saved := paneMetadataCallTimeout
+	paneMetadataCallTimeout = 100 * time.Millisecond
+	t.Cleanup(func() { paneMetadataCallTimeout = saved })
+	release := make(chan struct{})
+	server := startFakeHerdrPaneServer(t, func(map[string]any) string {
+		<-release // herdr accepts the request and never answers
+		return ""
+	})
+	t.Cleanup(func() { close(release) })
+	client, err := NewHerdrClient(server.socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	done := make(chan error, 1)
+	go func() {
+		done <- client.ReportPaneMetadata(context.Background(), paneMetadataReport{
+			PaneID: "pane-1", Source: paneMetadataSource,
+			Tokens: map[string]any{paneTokenJob: "job-1"}, TTLms: 1000, Seq: 1,
+		})
+	}()
+	// The 10 s bound only fails the test when the call never returns; the
+	// passing path returns as soon as the 100 ms call timeout fires.
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("a call with no reply returned nil")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("ReportPaneMetadata blocked with no caller deadline")
 	}
 }
