@@ -44,6 +44,10 @@ no visible row.`
 // until this deadline, so there is no tight polling.
 const inboxWaitDefaultTimeout = 60 * time.Second
 
+// hubInboxRequestTimeout gives node-daemon requests room for the Cloudflare
+// Access path, which can consume most of the old five-second request budget.
+const hubInboxRequestTimeout = 15 * time.Second
+
 func runInboxCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 	if len(args) == 0 {
 		fmt.Fprintln(stderr, inboxUsage)
@@ -235,7 +239,7 @@ func executeInbox(client inboxHTTPClient, stdout, stderr io.Writer, req inboxReq
 		}{id, all, lane})
 		body = bytes.NewReader(raw)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), hubInboxRequestTimeout)
 	defer cancel()
 	response, err := client.do(ctx, method, path, query, body)
 	if err != nil {
