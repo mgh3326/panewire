@@ -454,6 +454,7 @@ type HubServer struct {
 
 	mu                               sync.Mutex
 	nodes                            map[string]*hubNodeRecord
+	nodeRelayQueues                  map[string]*hubNodeRelayQueue
 	lastNotes                        map[string]*HubLastNote
 	subscribers                      map[*hubEventSubscriber]struct{}
 	alerts                           map[string]*hubAlertState
@@ -789,7 +790,7 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 		authPath: config.AuthPath, alertNodes: alertNodes, relayControl: newHubRelayControlState(config, overrides), now: config.Now, staleAfter: config.StaleAfter, keepaliveInterval: config.KeepaliveInterval,
 		gracePeriod: config.GracePeriod, orphanGrace: config.OrphanGrace, unworkedLandingGrace: config.UnworkedLandingGrace, alertObservations: defaultHubAlertObservations, notifier: config.Notifier, logger: config.Logger, burstPolicyPath: config.BurstPolicyPath,
 		placementPolicyPath: config.PlacementPolicyPath, placementPolicy: placementPolicy, placementPolicyModTime: placementPolicyModTime, placementPolicyObservedModTime: placementPolicyObservedModTime, placementPolicyLoaded: placementPolicyLoaded, placementPolicyStatus: placementPolicyStatus, placementPolicyLastFailure: placementPolicyLastFailure, prometheusURL: config.PrometheusURL, prometheusClient: config.PrometheusClient, prometheusBearer: config.PrometheusBearer, prometheusBasicUser: config.PrometheusBasicUser, prometheusBasicPass: config.PrometheusBasicPass,
-		nodes: make(map[string]*hubNodeRecord), lastNotes: make(map[string]*HubLastNote), subscribers: make(map[*hubEventSubscriber]struct{}), alerts: make(map[string]*hubAlertState), burstPolicy: burstPolicy, burstPolicyModTime: burstPolicyModTime, wakeConfigPath: config.WakeConfigPath, wakeTargets: wakeTargets, wakeConfigModTime: wakeConfigModTime, burstState: &hubBurstState{}, startedAt: config.Now().UTC(), uiAllowCFOnly: config.UIAllowCFOnly, jobs: make(map[string]*hubJobRecord), pendingRevocations: make(map[string]map[string]hubJobRevokedEvent), holds: make(map[string]*hubBurstHold), reportRelayPath: config.ReportRelayPath, lanesNodeRowCap: config.LanesNodeRowCap, prStatusHost: config.PRStatusHost, controlPlaneLanesPath: config.ControlPlaneLanesPath, controlPlaneLanes: controlPlaneLanes, controlPlaneLanesModTime: controlPlaneLanesModTime, controlPlaneLanesObservedModTime: controlPlaneLanesObservedModTime, controlPlaneLanesLoaded: controlPlaneLanesLoaded, controlPlaneLanesStatus: controlPlaneLanesStatus, controlPlaneLanesLastFailure: controlPlaneLanesLastFailure, relayDedupe: make(map[string]int64), relayHeld: make(map[int64]hubRelayHeldProjection), relayCancelled: make(map[int64]struct{}), lanePersisted: make(map[string]int64), laneEventSHA: make(map[string]string), replayExhausted: make(map[int64]struct{}), handoffkeep: config.handoffkeep, chatStore: config.ChatStore, chatDeskLane: config.ChatDeskLane, chatKick: make(chan struct{}, 1), chatPending: make(map[int64]chatPendingMessage), chatLaneOf: make(map[int64]string), chatCancelled: make(map[int64]struct{}), chatRetriedFrom: make(map[int64]int64), cfAccess: cfAccess, spawnRecords: make(map[string]*hubSpawnRecord), stallBeats: make(map[string]*hubStallBeatState), closeCtx: closeCtx, closeCancel: closeCancel,
+		nodes: make(map[string]*hubNodeRecord), nodeRelayQueues: make(map[string]*hubNodeRelayQueue), lastNotes: make(map[string]*HubLastNote), subscribers: make(map[*hubEventSubscriber]struct{}), alerts: make(map[string]*hubAlertState), burstPolicy: burstPolicy, burstPolicyModTime: burstPolicyModTime, wakeConfigPath: config.WakeConfigPath, wakeTargets: wakeTargets, wakeConfigModTime: wakeConfigModTime, burstState: &hubBurstState{}, startedAt: config.Now().UTC(), uiAllowCFOnly: config.UIAllowCFOnly, jobs: make(map[string]*hubJobRecord), pendingRevocations: make(map[string]map[string]hubJobRevokedEvent), holds: make(map[string]*hubBurstHold), reportRelayPath: config.ReportRelayPath, lanesNodeRowCap: config.LanesNodeRowCap, prStatusHost: config.PRStatusHost, controlPlaneLanesPath: config.ControlPlaneLanesPath, controlPlaneLanes: controlPlaneLanes, controlPlaneLanesModTime: controlPlaneLanesModTime, controlPlaneLanesObservedModTime: controlPlaneLanesObservedModTime, controlPlaneLanesLoaded: controlPlaneLanesLoaded, controlPlaneLanesStatus: controlPlaneLanesStatus, controlPlaneLanesLastFailure: controlPlaneLanesLastFailure, relayDedupe: make(map[string]int64), relayHeld: make(map[int64]hubRelayHeldProjection), relayCancelled: make(map[int64]struct{}), lanePersisted: make(map[string]int64), laneEventSHA: make(map[string]string), replayExhausted: make(map[int64]struct{}), handoffkeep: config.handoffkeep, chatStore: config.ChatStore, chatDeskLane: config.ChatDeskLane, chatKick: make(chan struct{}, 1), chatPending: make(map[int64]chatPendingMessage), chatLaneOf: make(map[int64]string), chatCancelled: make(map[int64]struct{}), chatRetriedFrom: make(map[int64]int64), cfAccess: cfAccess, spawnRecords: make(map[string]*hubSpawnRecord), stallBeats: make(map[string]*hubStallBeatState), closeCtx: closeCtx, closeCancel: closeCancel,
 	}
 	hub.auth.Store(&authSet)
 	hub.fleetState = newFleetStateStore()
@@ -1263,7 +1264,20 @@ func (h *HubServer) handleAgent(writer http.ResponseWriter, request *http.Reques
 			h.countUnknownMessage()
 			continue
 		}
-		h.handleAgentMessageForNodeLoop(machineID, request.RemoteAddr, agent, payload)
+		queued, enqueued := h.queueNodeRelayMessage(machineID, request.RemoteAddr, agent, payload)
+		if queued {
+			if !enqueued {
+				h.logger.Warn("node relay queue full; reconnecting so the node can replay", "machine", machineID)
+				h.disconnect(machineID, agent)
+				return
+			}
+			if !h.agentCredentialCurrent(machineID, agent) {
+				h.closeRevokedAgent(machineID, agent)
+				return
+			}
+			continue
+		}
+		h.handleAgentMessage(machineID, request.RemoteAddr, agent, payload)
 		if !h.agentCredentialCurrent(machineID, agent) {
 			h.closeRevokedAgent(machineID, agent)
 			return
@@ -1272,14 +1286,6 @@ func (h *HubServer) handleAgent(writer http.ResponseWriter, request *http.Reques
 }
 
 func (h *HubServer) handleAgentMessage(machineID, remoteAddr string, agent *hubAgent, payload []byte) {
-	h.handleAgentMessageImpl(machineID, remoteAddr, agent, payload, false)
-}
-
-func (h *HubServer) handleAgentMessageForNodeLoop(machineID, remoteAddr string, agent *hubAgent, payload []byte) {
-	h.handleAgentMessageImpl(machineID, remoteAddr, agent, payload, true)
-}
-
-func (h *HubServer) handleAgentMessageImpl(machineID, remoteAddr string, agent *hubAgent, payload []byte, nodeReadLoop bool) {
 	if result, ok := parseHubSpawnResult(payload); ok {
 		h.resolveSpawn(machineID, result)
 		return
@@ -1413,14 +1419,7 @@ func (h *HubServer) handleAgentMessageImpl(machineID, remoteAddr string, agent *
 			if completion.Replay {
 				h.logger.Info("relay record replayed after node restart", "job", completion.JobID, "kind", message.Kind, "node", machineID)
 			}
-			if nodeReadLoop {
-				// Inbox classification may read the job record from handoffkeep.
-				// Keep that bounded but potentially slow lookup off this node's
-				// websocket read loop so later heartbeats and commands are handled.
-				go h.relayJobCompletionFrom(machineID, completion)
-			} else {
-				h.relayJobCompletionFrom(machineID, completion)
-			}
+			h.relayJobCompletionFrom(machineID, completion)
 		}
 		if message.Kind == "job.escalate" || message.Kind == "job.joined" || relayTerminalSignalKinds[message.Kind] {
 			event, truncated, valid := decodeHubJobEscalationPayloadDetailed(message.Payload)
@@ -1510,11 +1509,7 @@ func (h *HubServer) handleAgentMessageImpl(machineID, remoteAddr string, agent *
 			}
 			h.recordInboxStageByRelayID(dropped.OriginalEventID, laneInboxStageDropped, dropped.Reason, machineID, dropped.Pane)
 			h.observeRelayDropped(machineID, dropped)
-			if nodeReadLoop {
-				go h.escalateUnconfirmedRelay(machineID, dropped)
-			} else {
-				h.escalateUnconfirmedRelay(machineID, dropped)
-			}
+			h.escalateUnconfirmedRelay(machineID, dropped)
 		}
 		if message.Kind == "job.revocation.ack" {
 			ack, valid := decodeHubJobCompletionPayload(message.Payload)

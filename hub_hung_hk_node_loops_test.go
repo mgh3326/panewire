@@ -154,4 +154,93 @@ func TestHungHKUnconfirmedEscalationDoesNotBlockNodeReadLoop(t *testing.T) {
 	}
 }
 
+func TestNodeRelayQueueKeepsCompletionBeforeEscalation(t *testing.T) {
+	_, hk, closeHK := newFakeHandoffkeep(t)
+	t.Cleanup(closeHK)
+	h, _ := t3426Hub(t, filepath.Join(t.TempDir(), "inbox.sqlite3"), hk, t3426Records)
+	h.mu.Lock()
+	h.nodes["host-a"].agent = nil
+	h.mu.Unlock()
+	server := httptest.NewServer(h.Handler())
+	t.Cleanup(server.Close)
+
+	jobs := &t3432BlockedJobStore{release: make(chan struct{})}
+	h.spawnNewApp = func(out, errout io.Writer) (*fleet.App, error) {
+		return &fleet.App{JobStore: jobs, Out: out, Err: errout}, nil
+	}
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(jobs.release) }) }
+	defer release()
+	connection, response, err := websocket.Dial(t.Context(), "ws"+server.URL[len("http"):]+"/v1/agent", &websocket.DialOptions{HTTPHeader: http.Header{
+		"X-Panewire-Machine-ID": {"host-a"},
+		"Authorization":         {"Bearer node"},
+	}})
+	if err != nil {
+		t.Fatalf("agent dial response=%v err=%v", response, err)
+	}
+	t.Cleanup(func() { _ = connection.Close(websocket.StatusNormalClosure, "") })
+	write := func(value any) {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+		defer cancel()
+		if err := wsjson.Write(ctx, connection, value); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(map[string]any{"type": "hello", "machine_id": "host-a", "version": "test"})
+	completion := hubJobEventPayload{JobID: "hk3432-ordered", Epoch: 1, AgentLabel: "worker-3432", OwnerLane: t3426Design, EventID: "completion-ordered", ReportPath: "/jobs/hk3432-ordered/report.md"}
+	write(hubClientWireEvent(hubClientEvent{Kind: "job.completed", Payload: hubJobCompletionPayloadForJob(HubActiveJob{JobID: completion.JobID, Epoch: completion.Epoch, AgentLabel: completion.AgentLabel, OwnerLane: completion.OwnerLane, ReportPath: completion.ReportPath}, completion.EventID, false)}))
+	eventually(t, time.Second, "hk job-record lookup started", func() bool { return jobs.started.Load() })
+	escalation, _ := json.Marshal(map[string]any{
+		"job_id": completion.JobID, "epoch": completion.Epoch, "agent_label": "worker-3432",
+		"owner_lane": "worker-3404", "event_id": "escalation-ordered", "reason": "needs_decision",
+		"question": "Which action should be taken?", "report_path": completion.ReportPath,
+	})
+	write(hubClientWireEvent(hubClientEvent{Kind: "job.escalate", Payload: escalation}))
+	write(map[string]any{"type": "ping"})
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	for {
+		var message struct {
+			Type string `json:"type"`
+		}
+		if err := wsjson.Read(ctx, connection, &message); err != nil {
+			t.Fatalf("node read loop did not answer while hk was hung: %v", err)
+		}
+		if message.Type == "pong" {
+			break
+		}
+	}
+	items, err := h.inbox.store.list(t3426Design, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range items {
+		if item.Kind == "job.escalate" && item.Event.EventID == "escalation-ordered" {
+			t.Fatal("job.escalate was persisted while the preceding completion was blocked on hk")
+		}
+	}
+
+	release()
+	var completionID, escalationID int64
+	eventually(t, time.Second, "ordered completion and escalation stored", func() bool {
+		items, err := h.inbox.store.list(t3426Design, false)
+		if err != nil {
+			return false
+		}
+		for _, item := range items {
+			switch {
+			case item.Kind == "job.completed" && item.Event.JobID == completion.JobID:
+				completionID = item.ID
+			case item.Kind == "job.escalate" && item.Event.EventID == "escalation-ordered":
+				escalationID = item.ID
+			}
+		}
+		return completionID != 0 && escalationID != 0
+	})
+	if completionID >= escalationID {
+		t.Fatalf("completion inbox id=%d, escalation inbox id=%d; want completion first", completionID, escalationID)
+	}
+}
+
 var _ fleet.JobStore = (*t3432BlockedJobStore)(nil)
