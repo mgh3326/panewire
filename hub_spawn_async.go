@@ -432,6 +432,7 @@ var nextHostRefusals = map[string]bool{
 	"spawn_failed:trust_prompt":         true,
 	"spawn_failed:omp_setup_wizard":     true,
 	"spawn_failed:auth_unavailable":     true,
+	"launch_proof_failed":               true,
 }
 
 func checkoutRefusalMovesNextHost(reason string) bool {
@@ -490,6 +491,9 @@ func (t *directSpawnTransport) nextHostAfterRefusal(ctx context.Context, node hu
 	// A dialog refusal comes after the engine launched a pane, so only a
 	// verified cleanup (Retryable) lets another host take the job id.
 	if !t.placing || result.RC == 0 || !result.Retryable || !spawnRefusalTriesNextHost(spawnResultReason(result)) || firstNonEmptyString(hubSpawnArg(t.task.Request.Args, "--host"), "auto") != "auto" {
+		return false
+	}
+	if result.Error == "launch_proof_failed" && result.RC != 70 {
 		return false
 	}
 	task, err := t.h.inbox.store.unbindRefusedSpawn(ctx, t.task.Request.RequestID, t.task.Attempt, node.RequestID)

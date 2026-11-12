@@ -78,6 +78,8 @@ type Spawn struct {
 	// other families, or of one family (`panewire delegate --panel`).
 	ExcludeFamilies []string `json:"-"`
 	OnlyFamily      string   `json:"-"`
+	failedHarnesses []string
+	requestedEffort string
 	// RoutingRole and AccountKey bind delegated admission to the selection.
 	RoutingRole string `json:"routing_role,omitempty"`
 	AccountKey  string `json:"account_key,omitempty"`
@@ -507,6 +509,7 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 		}
 	}
 	autoSel := s.Profile == "" || s.Profile == "auto"
+	s.requestedEffort = s.Effort
 	if !s.Delegated && (!autoSel || s.Host != "auto") && strings.TrimSpace(s.OverrideReason) == "" {
 		return fail(exitUsage, "explicit -m or --host requires --override-reason")
 	}
