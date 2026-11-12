@@ -1213,6 +1213,10 @@ func (manager *relayBusyManager) deliver(parent context.Context, items []relayHe
 	if len(items) == 0 || items[0].Pane == relayCancelledPane {
 		return
 	}
+	// A stop waits for the injection that is typing into the pane, so the
+	// delivered record and the hub's acknowledgement are not left half written.
+	endWork, _ := manager.client.beginWork(false)
+	defer endWork()
 	sort.SliceStable(items, func(i, j int) bool { return items[i].RecvSeq < items[j].RecvSeq })
 	now := manager.client.nowUTC()
 	for _, group := range relayBatchGroups(items, expired, now) {

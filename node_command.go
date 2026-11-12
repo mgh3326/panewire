@@ -694,6 +694,9 @@ type nodeCommandReply struct {
 }
 
 func (client *HubClient) handleNodeCommand(ctx context.Context, peer *hubClientConnection, message hubOutboundMessage) {
+	// A command such as job.done uploads a result; a stop waits for it.
+	endWork, _ := client.beginWork(false)
+	defer endWork()
 	runContext, cancel := context.WithTimeout(ctx, nodeCommandRunTimeout)
 	defer cancel()
 	reply := nodeCommandReply{Type: "node.command.result", RequestID: message.RequestID, Op: message.CommandOp}

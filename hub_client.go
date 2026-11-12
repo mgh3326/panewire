@@ -193,6 +193,13 @@ type HubClient struct {
 	// executing entry missing from it was left by a restart.
 	spawnActiveMu sync.Mutex
 	spawnActive   map[string]bool
+	// work counts the operations a stop waits for (hub_client_drain.go);
+	// stopDrain is that wait's bound, zero meaning defaultStopDrain; serving
+	// counts live hub connections, so a stop with no hub does not wait for an
+	// event queue nothing is writing.
+	work      workDrain
+	stopDrain time.Duration
+	serving   atomic.Int32
 	// Task pane sweep (node_pane_sweep.go, docs/pane-sweep.md). An interval of
 	// zero leaves the sweep off, as in every fixture.
 	taskPaneSweepInterval time.Duration
@@ -509,6 +516,7 @@ func (client *HubClient) Run(ctx context.Context) {
 		return
 	}
 	client.rearmWatchers()
+	go client.runSpawnSettle(ctx)
 	go client.runCreditRejectionRecovery(ctx)
 	go client.runLaneReconcile(ctx)
 	go client.runTaskPaneSweep(ctx)
@@ -1941,6 +1949,8 @@ func (client *HubClient) writeHello(ctx context.Context, peer *hubClientConnecti
 // connection has been closed by then.
 func (client *HubClient) serveConnection(ctx context.Context, connection *websocket.Conn) (*websocket.Conn, error) {
 	connection.SetReadLimit(hubSpawnMaxBodyBytes)
+	client.serving.Add(1)
+	defer client.serving.Add(-1)
 	peer := &hubClientConnection{connection: connection}
 	// Each connection may reach a different hub build (failover, redeploy).
 	client.signalsPeer.Store(peer)

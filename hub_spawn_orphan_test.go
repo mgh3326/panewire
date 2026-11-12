@@ -377,7 +377,7 @@ func TestNodeSpawnReplayAnswersUnknownAfterRestart(t *testing.T) {
 	}
 	root := t.TempDir()
 	started, release := make(chan struct{}), make(chan struct{})
-	client := &HubClient{spawnConfigPath: t14SpawnConfig(t, t.TempDir()), spawnJournalDir: root, fleetEvents: (&fleetEventRecorder{}).write, spawnEngine: func(context.Context, string, string, string, string, []string) (*hubSpawnOutput, fleet.Execution) {
+	client := &HubClient{nodeHerdr: func(context.Context, ...string) ([]byte, error) { return nil, errors.New("herdr down") }, spawnConfigPath: t14SpawnConfig(t, t.TempDir()), spawnJournalDir: root, fleetEvents: (&fleetEventRecorder{}).write, spawnEngine: func(context.Context, string, string, string, string, []string) (*hubSpawnOutput, fleet.Execution) {
 		close(started)
 		<-release
 		return t14EngineOK()
