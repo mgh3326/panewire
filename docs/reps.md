@@ -43,8 +43,10 @@ PR number), panewire writes one bench rep for that job:
   `merged_at`;
 - `task_ref` `hk<task>`.
 
-The origin id is derived from the job id, so a second merged signal is an
-idempotent resend: hk returns the existing row, or a conflicting resend is
+The origin id is derived from the job id. Before an automatic outcome write,
+panewire checks the shared rep list for that origin; a row already present is
+treated as already recorded, even if the re-emitted outcome has a newer PR
+revision. If another writer races that check, a conflicting resend is also
 treated as already recorded. Unknown fields stay NULL, never zero.
 
 ### Failure rows
