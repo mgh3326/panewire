@@ -112,9 +112,11 @@ fails closed.
 `[quota].pool_max_concurrent = { "openai-api" = 2 }` limits live spawns on a pool,
 fleet-wide ([config](config.md#quota)). Selection drops a candidate whose pool
 is at its cap with the reason `pool_at_cap`, naming the cap in `cap` (the
-candidate's pool, or the reserved `devin-free` key). The reason shows in the
-selection record and as `dropped … reason=pool_at_cap cap=…` in `plan` and
-`--dry-run`. Selection then goes on to the next candidate or pool as for any
+candidate's pool, or the reserved `devin-free` key). The selection record in
+`job.placement` and JSON plan output also includes `cap_live` and `cap_limit`:
+the count and limit used for that decision. Text plan output shows `live` and
+`limit` beside the cap. These counts are a snapshot, not a reservation.
+Selection then goes on to the next candidate or pool as for any
 other drop. A spawn never waits for a slot. If every candidate is dropped and
 at least one only for `pool_at_cap`, the refusal names the caps and their
 limits (`pool_at_cap: openai-api=2 at [quota].pool_max_concurrent`).
