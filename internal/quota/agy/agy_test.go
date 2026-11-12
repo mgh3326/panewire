@@ -1,11 +1,13 @@
 package agy
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"math"
 	"net/http"
 	"os"
@@ -140,9 +142,11 @@ func TestMeasureCloudSummaryEveryGroupWithItsScope(t *testing.T) {
 	// session masquerade.
 	wants := []want{
 		{"gemini", "5h", 20, "2026-11-06T09:00:00Z"},
+		{"gemini", "7d", 20, "2026-11-10T01:00:00Z"},
 		{"3p", "5h", 50, "2026-11-06T09:00:00Z"},
 		{"3p", "7d", 60, "2026-11-10T01:00:00Z"},
 		{"unknown", "5h", 50, "2026-11-06T09:00:00Z"},
+		{"unknown", "7d", 90, "2026-11-10T01:00:00Z"},
 		{"unknown", "unknown", 10, "2026-11-06T09:00:00Z"},
 	}
 	if len(observed.Buckets) != len(wants) {
@@ -162,8 +166,8 @@ func TestMeasureCloudSummaryEveryGroupWithItsScope(t *testing.T) {
 		t.Fatalf("requests %v", urls)
 	}
 	for _, r := range cloud.requests {
-		if r.Header.Get("Authorization") != "Bearer "+token || r.Method != http.MethodPost {
-			t.Fatalf("request %s %s auth %q", r.Method, r.URL, r.Header.Get("Authorization"))
+		if r.Header.Get("Authorization") != "Bearer "+token || r.Method != http.MethodPost || r.Header.Get("User-Agent") != UserAgent {
+			t.Fatalf("request %s %s auth %q ua %q", r.Method, r.URL, r.Header.Get("Authorization"), r.Header.Get("User-Agent"))
 		}
 	}
 }
@@ -238,11 +242,112 @@ func TestGroupMapping(t *testing.T) {
 		{"model-x", "Gemini X", GroupGemini},
 		{"model-x", "Claude and GPT models", Group3P},
 		{"mystery-1", "", GroupUnknown},
+		{"gemini-argon-wtu-weekly", "", GroupUnknown},
+		{"gemini-argon-model", "", GroupUnknown},
+		{"model-argon", "Argon Weekly", GroupUnknown},
 		{"", "", GroupUnknown},
 	} {
 		if got := Group(c.id, c.display); got != c.want {
 			t.Errorf("Group(%q, %q) = %q, want %q", c.id, c.display, got, c.want)
 		}
+	}
+}
+
+// The live-shaped response yields gemini 7d and 5h, 3p 7d and 5h; an exhausted
+// Argon weekly bucket is published under group unknown and does not fold into
+// gemini 7d (so flash38 rungs are not blocked).
+func TestSummaryExactBucketMatchingAndArgonSeparation(t *testing.T) {
+	summary := `{
+		"groups": [
+			{
+				"displayName": "Gemini Models",
+				"buckets": [
+					{"bucketId": "gemini-5h", "window": "5h", "remainingFraction": 0.95, "resetTime": "2026-11-12T09:00:00Z"},
+					{"bucketId": "gemini-weekly", "window": "weekly", "remainingFraction": 0.75, "resetTime": "2026-11-19T01:00:00Z"},
+					{"bucketId": "gemini-argon-wtu-weekly", "window": "weekly", "remainingFraction": 0.0, "resetTime": "2026-11-19T01:00:00Z"}
+				]
+			},
+			{
+				"displayName": "Claude and GPT models",
+				"buckets": [
+					{"bucketId": "3p-5h", "window": "5h", "remainingFraction": 0.1, "resetTime": "2026-11-12T08:00:00Z"},
+					{"bucketId": "3p-weekly", "window": "weekly", "remainingFraction": 0.5, "resetTime": "2026-11-19T03:00:00Z"}
+				]
+			}
+		]
+	}`
+	observed, err := parse(mustObject(t, summary), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	gemini5h := group(observed.Buckets, "gemini", "5h")
+	if gemini5h == nil || !near(gemini5h.UsedPct, 5) {
+		t.Fatalf("gemini 5h: %+v", gemini5h)
+	}
+
+	gemini7d := group(observed.Buckets, "gemini", "7d")
+	if gemini7d == nil || !near(gemini7d.UsedPct, 25) {
+		t.Fatalf("gemini 7d must be 25%% (from gemini-weekly), not tainted by argon: %+v", gemini7d)
+	}
+
+	threeP5h := group(observed.Buckets, "3p", "5h")
+	if threeP5h == nil || !near(threeP5h.UsedPct, 90) {
+		t.Fatalf("3p 5h: %+v", threeP5h)
+	}
+
+	threeP7d := group(observed.Buckets, "3p", "7d")
+	if threeP7d == nil || !near(threeP7d.UsedPct, 50) {
+		t.Fatalf("3p 7d: %+v", threeP7d)
+	}
+
+	argon := group(observed.Buckets, "unknown", "7d")
+	if argon == nil || !near(argon.UsedPct, 100) {
+		t.Fatalf("argon weekly must be published under group unknown: %+v", argon)
+	}
+}
+
+// Unknown buckets and unrecognized windows are logged by id and published
+// under group unknown rather than silently dropped.
+func TestSummaryUnknownBucketsLoggedAndNotDropped(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	summary := `{
+		"groups": [
+			{
+				"displayName": "Gemini Models",
+				"buckets": [
+					{"bucketId": "gemini-5h", "window": "5h", "remainingFraction": 0.8},
+					{"bucketId": "future-experiment-bucket", "window": "daily", "remainingFraction": 0.6},
+					{"bucketId": "strange-window-bucket", "window": "quarterly", "remainingFraction": 0.4}
+				]
+			}
+		]
+	}`
+	observed, err := parse(mustObject(t, summary), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	daily := group(observed.Buckets, "unknown", "1d")
+	if daily == nil || !near(daily.UsedPct, 40) {
+		t.Fatalf("unknown daily bucket not published: %+v", observed.Buckets)
+	}
+
+	unknown := group(observed.Buckets, "unknown", "unknown")
+	if unknown == nil || !near(unknown.UsedPct, 60) {
+		t.Fatalf("unknown quarterly window bucket not published: %+v", observed.Buckets)
+	}
+
+	logs := buf.String()
+	if !strings.Contains(logs, "future-experiment-bucket") {
+		t.Fatalf("expected log mentioning future-experiment-bucket, got %q", logs)
+	}
+	if !strings.Contains(logs, "strange-window-bucket") {
+		t.Fatalf("expected log mentioning strange-window-bucket, got %q", logs)
 	}
 }
 
