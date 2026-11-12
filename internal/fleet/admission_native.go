@@ -36,8 +36,6 @@ func validateGateMode(quota map[string]any) error {
 
 func (a *App) gateMode() string { return gateModeNative }
 
-func (a *App) paceleverBinary() string { return "" }
-
 // admissionQuota is the production QuotaGate. Catalog is handoffkeep's
 // (CLIQuota); Gate and Launch each follow their switch (launch_native.go), and
 // Pools follows the launch switch, reading the credit pools without pacelever
@@ -135,7 +133,11 @@ func invalidVerdict(req admissionRequest) admissionVerdict {
 // GateCode. invalid is true when d is the final verdict because a gate input
 // (the pool policy or the catalog) is unusable.
 func (a *App) requestVerdict(ctx context.Context, r QuotaRequest) (req admissionRequest, in admissionInputs, d admissionVerdict, invalid bool) {
-	req = admissionRequest{Profile: firstNonempty(r.GateProfile, r.Profile), Effort: r.Effort, Role: r.Role, Purpose: r.Purpose, OperatorRequest: r.OperatorRequest, RequestedBy: r.RequestedBy, E6Arm: firstNonempty(r.E6Arm, os.Getenv("PACELEVER_E6_ARM"))}
+	e6Arm := strings.TrimSpace(os.Getenv("PANEWIRE_E6_ARM"))
+	if e6Arm == "" {
+		e6Arm = strings.TrimSpace(os.Getenv("PACELEVER_E6_ARM"))
+	}
+	req = admissionRequest{Profile: firstNonempty(r.GateProfile, r.Profile), Effort: r.Effort, Role: r.Role, Purpose: r.Purpose, OperatorRequest: r.OperatorRequest, RequestedBy: r.RequestedBy, E6Arm: firstNonempty(r.E6Arm, e6Arm)}
 	policy, err := loadAdmissionPolicy(os.Getenv, a.Home)
 	if err != nil {
 		return req, in, invalidVerdict(req).refuse(gateInvalid, err.Error()), true

@@ -452,6 +452,19 @@ default.
 
 ## `[quota]`
 
+Panewire's pool and profile settings are read from
+`~/.config/panewire/config.toml` (or `$XDG_CONFIG_HOME/panewire/config.toml`).
+`PANEWIRE_CONFIG` selects an explicit file. During migration, panewire also
+checks `~/.config/pacelever/config.toml` and the older scopefuel path when the
+panewire file is absent; `PACELEVER_CONFIG` remains a fallback override.
+Create the panewire file before removing the legacy file so host behavior
+continues unchanged.
+
+Quota cache records use `<XDG cache>/panewire/` (or `~/.cache/panewire/`).
+`PANEWIRE_CACHE` is a file path override; records are stored beside it.
+`PACELEVER_CACHE` is checked as a legacy fallback. Native writes go to the
+panewire location.
+
 Shared-quota read settings for presence-aware placement. The URL and bearer
 are panewire's svc-panewire credential
 ([handoffkeep service credential](#handoffkeep-service-credential)); `url`

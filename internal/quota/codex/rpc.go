@@ -27,8 +27,9 @@ import (
 const rpcTimeout = 15 * time.Second
 
 // BinaryOverrideEnv names the environment override of the codex executable.
-// It is pacelever's name, so a host that already sets it keeps working.
-const BinaryOverrideEnv = "PACELEVER_CODEX_BIN"
+const BinaryOverrideEnv = "PANEWIRE_CODEX_BIN"
+
+const legacyBinaryOverrideEnv = "PACELEVER_CODEX_BIN"
 
 // Transport is the stdin/stdout line channel of one app-server process. Tests
 // inject a fake so no test needs a real CLI. Close kills and reaps the
@@ -42,7 +43,11 @@ type Transport interface {
 // binary resolves the codex CLI: the environment override, the configured
 // path, PATH, then the desktop app's bundled copy. "" means none.
 func (c Config) binary() string {
-	if explicit, _ := c.lookupEnv(BinaryOverrideEnv); strings.TrimSpace(explicit) != "" {
+	explicit, _ := c.lookupEnv(BinaryOverrideEnv)
+	if strings.TrimSpace(explicit) == "" {
+		explicit, _ = c.lookupEnv(legacyBinaryOverrideEnv)
+	}
+	if strings.TrimSpace(explicit) != "" {
 		return c.expandHome(strings.TrimSpace(explicit))
 	}
 	if c.Binary != "" {

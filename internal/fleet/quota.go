@@ -739,7 +739,7 @@ func quotaE6Env(arm string) []string {
 	if arm == "" {
 		return nil
 	}
-	return []string{"PACELEVER_E6_ARM=" + arm}
+	return []string{"PANEWIRE_E6_ARM=" + arm}
 }
 
 // Pools reads the quota CLI's status document and reduces it to
