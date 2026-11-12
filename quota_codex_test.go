@@ -15,6 +15,7 @@ import (
 	"github.com/mgh3326/panewire/internal/fleet"
 	"github.com/mgh3326/panewire/internal/quota"
 	"github.com/mgh3326/panewire/internal/quota/codex"
+	"github.com/mgh3326/panewire/internal/quota/shared"
 )
 
 // codexSecret is the access token of the test login. It may appear only in the
@@ -306,8 +307,9 @@ func TestNodeQuotaRefreshCodexIsNative(t *testing.T) {
 	}
 }
 
-// A reading is current for 300 s, pacelever's rule for every pool but claude:
-// four minutes later it is reused, six minutes later it is measured again.
+// The shared reading is refreshed with a two-minute margin before its
+// 300-second reader TTL: three minutes later it is reused, four minutes later
+// it is measured again.
 func TestCodexSharedReadingFreshnessIsFiveMinutes(t *testing.T) {
 	hk := newClaudeHK(t)
 	rpc := &codexRPCFake{}
@@ -318,7 +320,7 @@ func TestCodexSharedReadingFreshnessIsFiveMinutes(t *testing.T) {
 	for _, step := range []struct {
 		after  time.Duration
 		starts int
-	}{{0, 1}, {4 * time.Minute, 1}, {6 * time.Minute, 2}} {
+	}{{0, 1}, {3 * time.Minute, 1}, {4 * time.Minute, 2}} {
 		now = claudeTestNow.Add(step.after)
 		if _, err := source.Refresh(t.Context()); err != nil {
 			t.Fatalf("after %v: %v", step.after, err)
@@ -326,6 +328,14 @@ func TestCodexSharedReadingFreshnessIsFiveMinutes(t *testing.T) {
 		if rpc.starts != step.starts {
 			t.Fatalf("after %v: %d measurements, want %d", step.after, rpc.starts, step.starts)
 		}
+	}
+}
+
+func TestOtherPoolRefreshesBeforeReaderTTL(t *testing.T) {
+	source := &nativeQuotaSource{Pool: "codex"}
+	_, _, freshTTL := source.poolMeasurement()
+	if freshTTL != shared.OtherFreshTTL-2*time.Minute {
+		t.Fatalf("publisher refresh TTL=%s, want reader TTL %s minus two minutes", freshTTL, shared.OtherFreshTTL)
 	}
 }
 

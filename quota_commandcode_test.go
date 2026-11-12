@@ -328,7 +328,7 @@ func TestCommandcodeSharedReadingFreshnessAndPublish(t *testing.T) {
 	for _, step := range []struct {
 		after     time.Duration
 		published int
-	}{{0, 1}, {4 * time.Minute, 1}, {6 * time.Minute, 2}} {
+	}{{0, 1}, {3 * time.Minute, 1}, {4 * time.Minute, 2}} {
 		now = claudeTestNow.Add(step.after)
 		reading, err := source.Refresh(t.Context())
 		if err != nil {

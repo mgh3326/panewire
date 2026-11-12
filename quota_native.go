@@ -145,7 +145,7 @@ func (s *nativeQuotaSource) poolMeasurement() (measure shared.Measurer, accountF
 		// The account is the one whoami names, so the fingerprint needs a
 		// request the first time a login is seen (cached after that).
 		return func(ctx context.Context) (quota.Observation, error) { return commandcode.Measure(ctx, config) },
-			func(ctx context.Context) (string, error) { return commandcode.AccountFP(ctx, config) }, shared.OtherFreshTTL
+			func(ctx context.Context) (string, error) { return commandcode.AccountFP(ctx, config) }, shared.OtherRefreshTTL
 	case "agy":
 		return s.agyMeasurement()
 	case "devin":
@@ -159,7 +159,7 @@ func (s *nativeQuotaSource) poolMeasurement() (measure shared.Measurer, accountF
 					return "", quota.Fail(quota.ErrKindCredentials, "credentials unavailable")
 				}
 				return devin.AccountFP(config), nil
-			}, shared.OtherFreshTTL
+			}, shared.OtherRefreshTTL
 	case "codex":
 		config := s.Codex
 		config.Now = s.Now
@@ -171,7 +171,7 @@ func (s *nativeQuotaSource) poolMeasurement() (measure shared.Measurer, accountF
 					return "", quota.Fail(quota.ErrKindCredentials, "credentials unavailable")
 				}
 				return codex.AccountFP(config), nil
-			}, shared.OtherFreshTTL
+			}, shared.OtherRefreshTTL
 	default:
 		config := s.Claude
 		config.Now = s.Now
@@ -229,7 +229,7 @@ func (s *nativeQuotaSource) agyMeasurement() (shared.Measurer, func(context.Cont
 		}, func(context.Context) (string, error) {
 			cfg, err := config()
 			return cfg.Account, err
-		}, shared.OtherFreshTTL
+		}, shared.OtherRefreshTTL
 }
 
 // Refresh answers the pool's current reading: the shared one when fresh, else

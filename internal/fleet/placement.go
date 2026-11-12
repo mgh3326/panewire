@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/mgh3326/handoffkeep/client"
+	"github.com/mgh3326/panewire/internal/quota/shared"
 )
 
 // HostView is one machine's connectivity and load as reported by the hub's
@@ -299,6 +300,9 @@ func accountPool(key string) string {
 func (a *App) placementTTL(key string, def int64) time.Duration {
 	if n := integer(a.Config.Quota, key, 0); n > 0 {
 		return time.Duration(n) * time.Second
+	}
+	if key == "fresh_ttl_s" && def == 300 {
+		return shared.OtherFreshTTL
 	}
 	return time.Duration(def) * time.Second
 }
