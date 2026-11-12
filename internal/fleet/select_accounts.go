@@ -261,6 +261,7 @@ func (p *selPlan) classify(c *selCand, v PoolView) {
 		}
 		if ok, hours := v.Credit.expiring(at); ok {
 			c.creditLeft = v.Credit.StaleAt.IsZero()
+			c.staleCredit = !v.Credit.StaleAt.IsZero()
 			c.credit = &creditFinal{balance: v.Credit, hoursLeft: hours}
 			if v.Credit.BalanceUSD != nil {
 				burn := v.Credit.BurnUSDPerH

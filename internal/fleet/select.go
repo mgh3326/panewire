@@ -194,6 +194,7 @@ type selCand struct {
 	creditPool           bool
 	credit               *creditFinal
 	creditExhaustedSince time.Time
+	staleCredit          bool
 	// usdUrgency is a credit pool's dollars at risk per hour until expiry;
 	// nil for a credit entry without a dollar balance.
 	usdUrgency *float64
@@ -1089,6 +1090,12 @@ func compareSelCands(x, y *selCand, compareGrade bool) int {
 			return -1
 		}
 		return 1
+	}
+	if x.staleCredit != y.staleCredit {
+		if x.staleCredit {
+			return 1
+		}
+		return -1
 	}
 	if x.risk {
 		// Waste-risk pools rank among themselves by the higher urgency.

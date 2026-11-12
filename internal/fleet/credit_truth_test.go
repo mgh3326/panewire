@@ -83,7 +83,7 @@ func TestCreditExhaustionBlocksUntilFreshManualEntry(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			a, s, _ := usdCreditFixture(t, func(now time.Time) []map[string]any {
 				return []map[string]any{usdCreditEntry("a1", "anthropic-api", 50, ptrF(100), now.Add(tc.measured), onDay(now, 9*24*time.Hour))}
-			}, ptrPool(riskPool(20, 8)), false)
+			}, ptrPool(PoolView{Status: "ok", Class: "spend", RankProjected: ptrF(50)}), false)
 			exhaustedAt := a.Now().Add(-30 * time.Minute)
 			a.State = &fakeStateReader{snap: FleetSnapshot{V: 1, At: a.Now(), CreditExhausted: map[string]time.Time{"anthropic-api": exhaustedAt}}}
 			sel, err := a.selectProfile(context.Background(), s)
