@@ -145,7 +145,7 @@ func (s *nativeQuotaSource) poolMeasurement() (measure shared.Measurer, accountF
 		// The account is the one whoami names, so the fingerprint needs a
 		// request the first time a login is seen (cached after that).
 		return func(ctx context.Context) (quota.Observation, error) { return commandcode.Measure(ctx, config) },
-			func(ctx context.Context) (string, error) { return commandcode.AccountFP(ctx, config) }, shared.OtherRefreshTTL
+			func(ctx context.Context) (string, error) { return commandcode.AccountFP(ctx, config) }, shared.OtherFreshTTL
 	case "agy":
 		return s.agyMeasurement()
 	case "devin":
@@ -159,7 +159,7 @@ func (s *nativeQuotaSource) poolMeasurement() (measure shared.Measurer, accountF
 					return "", quota.Fail(quota.ErrKindCredentials, "credentials unavailable")
 				}
 				return devin.AccountFP(config), nil
-			}, shared.OtherRefreshTTL
+			}, shared.OtherFreshTTL
 	case "codex":
 		config := s.Codex
 		config.Now = s.Now
@@ -171,7 +171,7 @@ func (s *nativeQuotaSource) poolMeasurement() (measure shared.Measurer, accountF
 					return "", quota.Fail(quota.ErrKindCredentials, "credentials unavailable")
 				}
 				return codex.AccountFP(config), nil
-			}, shared.OtherRefreshTTL
+			}, shared.OtherFreshTTL
 	default:
 		config := s.Claude
 		config.Now = s.Now
@@ -229,7 +229,17 @@ func (s *nativeQuotaSource) agyMeasurement() (shared.Measurer, func(context.Cont
 		}, func(context.Context) (string, error) {
 			cfg, err := config()
 			return cfg.Account, err
-		}, shared.OtherRefreshTTL
+		}, shared.OtherFreshTTL
+}
+
+// refreshTTL reserves one publisher cycle and one measurement timeout before
+// the reader freshness window ends. The longer reader TTL remains the status
+// contract and the bound for readers that consume the shared store directly.
+func (s *nativeQuotaSource) refreshTTL(readerTTL time.Duration) time.Duration {
+	if s.Pool == "claude" {
+		return readerTTL
+	}
+	return readerTTL - shared.DefaultRefreshMargin
 }
 
 // Refresh answers the pool's current reading: the shared one when fresh, else
@@ -268,7 +278,7 @@ func (s *nativeQuotaSource) RefreshWithMeasurement(ctx context.Context) (shared.
 		return shared.Reading{}, false, quota.Fail(quota.ErrKindAccountUnknown, "no account key")
 	}
 	s.flowOnce.Do(func() {
-		s.flow = &shared.Flow{Now: s.Now, FreshTTL: freshTTL, HostID: s.HostID, Wait: s.Wait}
+		s.flow = &shared.Flow{Now: s.Now, FreshTTL: s.refreshTTL(freshTTL), HostID: s.HostID, Wait: s.Wait}
 		if s.Pool == "devin" {
 			config := s.Devin
 			config.Now = s.Now

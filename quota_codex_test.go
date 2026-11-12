@@ -333,9 +333,12 @@ func TestCodexSharedReadingFreshnessIsFiveMinutes(t *testing.T) {
 
 func TestOtherPoolRefreshesBeforeReaderTTL(t *testing.T) {
 	source := &nativeQuotaSource{Pool: "codex"}
-	_, _, freshTTL := source.poolMeasurement()
-	if freshTTL != shared.OtherFreshTTL-2*time.Minute {
-		t.Fatalf("publisher refresh TTL=%s, want reader TTL %s minus two minutes", freshTTL, shared.OtherFreshTTL)
+	_, _, readerTTL := source.poolMeasurement()
+	if readerTTL != shared.OtherFreshTTL {
+		t.Fatalf("reader TTL=%s, want %s", readerTTL, shared.OtherFreshTTL)
+	}
+	if got := source.refreshTTL(readerTTL); got != shared.OtherRefreshTTL {
+		t.Fatalf("publisher refresh TTL=%s, want %s", got, shared.OtherRefreshTTL)
 	}
 }
 
