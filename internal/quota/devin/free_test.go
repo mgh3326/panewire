@@ -142,6 +142,39 @@ func TestObserveMergesLegacyHoldBeforeWritingPanewireRecord(t *testing.T) {
 	}
 }
 
+func TestObserveDoesNotDeleteNewCacheWhenCandidatesDeduplicate(t *testing.T) {
+	now := testNow.UTC()
+	cache := t.TempDir()
+	path := filepath.Join(cache, "devin-free-limit.json")
+	cfg := Config{
+		Home:     t.TempDir(),
+		Now:      func() time.Time { return now },
+		Hostname: func() (string, error) { return "host-a", nil },
+		UID:      func() int { return 1000 },
+	}
+	cfg.LookupEnv = func(name string) (string, bool) {
+		switch name {
+		case "PANEWIRE_CACHE":
+			return filepath.Join(cache, "panewire-placeholder.json"), true
+		case "PACELEVER_CACHE":
+			return filepath.Join(cache, "pacelever-placeholder.json"), true
+		case "XDG_CACHE_HOME":
+			return cache, true
+		default:
+			return "", false
+		}
+	}
+	if got := cfg.cachePaths(); len(got) != 1 || got[0] != path {
+		t.Fatalf("deduplicated cache paths = %v", got)
+	}
+	if err := ObserveFreeLimit(cfg, now.Add(time.Hour).Format(time.RFC3339Nano), "", "swe-2-high", "job:test", "", false, false); err != nil {
+		t.Fatal(err)
+	}
+	if got := LocalFree(cfg)(now); got.State != shared.FreeExhausted {
+		t.Fatalf("observation disappeared after deduplicated write: %+v", got)
+	}
+}
+
 func TestObserveFreeLimitClearRemovesLegacyOnlyHold(t *testing.T) {
 	now := testNow.UTC()
 	cache := t.TempDir()

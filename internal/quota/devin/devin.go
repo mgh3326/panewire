@@ -198,12 +198,22 @@ func (c Config) settings() (settings, error) {
 			}
 			continue
 		}
-		if err != nil || toml.Unmarshal(body, &file) != nil {
-			return settings{}, nil
+		if err != nil {
+			return settings{}, fmt.Errorf("cannot read %s %q: %w", configPathLabel(variable, explicit), path, err)
+		}
+		if err := toml.Unmarshal(body, &file); err != nil {
+			return settings{}, fmt.Errorf("invalid %s %q: %w", configPathLabel(variable, explicit), path, err)
 		}
 		return settings{orgID: strings.TrimSpace(file.Pools.Devin.OrgID), bin: strings.TrimSpace(file.Pools.Devin.Bin)}, nil
 	}
 	return settings{}, nil
+}
+
+func configPathLabel(variable string, explicit bool) string {
+	if explicit {
+		return variable
+	}
+	return "Devin config"
 }
 
 // binary is the devin executable: PANEWIRE_DEVIN_BIN (PACELEVER_DEVIN_BIN
@@ -247,7 +257,7 @@ func Measure(ctx context.Context, cfg Config) (quota.Observation, error) {
 	login := AccountFP(cfg)
 	s, err := cfg.settings()
 	if err != nil {
-		return quota.Observation{}, err
+		return quota.Observation{}, quota.Fail(quota.ErrKindCredentials, err.Error())
 	}
 	if observed, err := cfg.fetchWeb(ctx, cfg.env("DEVIN_BEARER_TOKEN"), s.orgID); err == nil {
 		// The web source selects its organization independently of the CLI

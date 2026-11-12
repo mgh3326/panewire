@@ -146,10 +146,8 @@ func ObserveFreeLimit(cfg Config, resetAt, observedAt, rung, source, accountKey 
 			records[id] = encoded
 		}
 	}
-	legacyPaths := cfg.cachePaths()
-	if len(legacyPaths) > 1 {
-		legacyPaths = legacyPaths[1:]
-	}
+	cachePaths := cfg.cachePaths()
+	legacyPaths := cachePaths[1:]
 	if clear && len(records) == 0 {
 		if err := removeLimitFile(path); err != nil {
 			return err
@@ -250,7 +248,7 @@ func (c Config) cachePaths() []string {
 // cacheDir is panewire's cache directory, used for new records and locks.
 func (c Config) cacheDir() string {
 	if p := c.env("PANEWIRE_CACHE"); p != "" {
-		return filepath.Dir(p)
+		return filepath.Dir(filepath.Join(filepath.Dir(p), "devin-free-limit.json"))
 	}
 	return filepath.Join(c.cacheBase(), "panewire")
 }
@@ -293,12 +291,21 @@ func readLimitRecords(c Config) (map[string]json.RawMessage, bool, error) {
 
 func conservativeLimitRecord(a, b json.RawMessage) json.RawMessage {
 	var left, right limitRecord
-	if json.Unmarshal(a, &left) != nil || json.Unmarshal(b, &right) != nil {
-		return json.RawMessage(`{"reset_at":"invalid","observed_at":"invalid"}`)
+	if json.Unmarshal(a, &left) != nil {
+		return a
+	}
+	if json.Unmarshal(b, &right) != nil {
+		return b
 	}
 	leftReset, leftOK := left.effectiveReset()
 	rightReset, rightOK := right.effectiveReset()
-	if !leftOK || rightOK && rightReset.After(leftReset) {
+	if !leftOK {
+		return a
+	}
+	if !rightOK {
+		return b
+	}
+	if rightReset.After(leftReset) {
 		return b
 	}
 	return a

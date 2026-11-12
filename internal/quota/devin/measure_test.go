@@ -268,3 +268,36 @@ func TestDevinSettingsDoesNotReadScopefuelSnapshot(t *testing.T) {
 		t.Fatalf("scopefuel settings = %+v, err=%v", s, err)
 	}
 }
+
+func TestDevinSettingsDoesNotIgnoreInvalidExplicitConfig(t *testing.T) {
+	path := "/home/u/.config/panewire/config.toml"
+	cfg := config(map[string]string{path: "[pools.devin\nbin = 'broken'"}, map[string]string{"PANEWIRE_CONFIG": path})
+	_, err := cfg.settings()
+	if err == nil || !strings.Contains(err.Error(), "PANEWIRE_CONFIG") || !strings.Contains(err.Error(), path) {
+		t.Fatalf("invalid explicit config error = %v", err)
+	}
+}
+
+func TestDevinSettingsMalformedImplicitConfigFailsInsteadOfUsingEmptySettings(t *testing.T) {
+	path := "/home/u/.config/panewire/config.toml"
+	cfg := config(map[string]string{path: "[pools.devin\nbin = 'broken'"}, nil)
+	_, err := cfg.settings()
+	if err == nil || !strings.Contains(err.Error(), path) {
+		t.Fatalf("invalid implicit config error = %v", err)
+	}
+}
+
+func TestMeasureReportsMissingConfigAsQuotaError(t *testing.T) {
+	missing := "/explicit/missing.toml"
+	cfg := config(loginFiles(), map[string]string{"PANEWIRE_CONFIG": missing})
+	cfg.HTTP = neverCalled(t, "web request should not proceed with missing explicit config")
+	cfg.StartProbe = func(context.Context, string, string, []string) (Terminal, error) {
+		t.Fatal("probe should not proceed with missing explicit config")
+		return nil, errors.New("unexpected")
+	}
+	_, err := Measure(t.Context(), cfg)
+	var quotaErr *quota.Error
+	if !errors.As(err, &quotaErr) || quotaErr.Kind != quota.ErrKindCredentials || !strings.Contains(quotaErr.Message, "PANEWIRE_CONFIG") || !strings.Contains(quotaErr.Message, missing) {
+		t.Fatalf("missing config measurement error = %#v", err)
+	}
+}
