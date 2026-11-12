@@ -290,7 +290,7 @@ func (a *App) printPlan(asJSON bool, out map[string]any, sel *selPlan, pp *place
 		name := firstNonempty(c.seatName, c.row.Profile)
 		capNote := ""
 		if c.cap != "" {
-			capNote = " cap=" + c.cap
+			capNote = fmt.Sprintf(" cap=%s live=%d limit=%d", c.cap, c.capLive, c.capLimit)
 		}
 		if !c.creditSince.IsZero() {
 			capNote += " since=" + c.creditSince.UTC().Format(time.RFC3339Nano)
