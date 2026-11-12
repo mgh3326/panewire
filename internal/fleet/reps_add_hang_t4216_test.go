@@ -6,8 +6,10 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -22,7 +24,7 @@ type stalledRepsHK struct {
 func (s *stalledRepsHK) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case r.Method == http.MethodGet && r.URL.Path == "/v1/bench/reps":
-		writeJSONBody(w, http.StatusOK, map[string]any{"reps": []Rep{}})
+		http.Error(w, `{"error":"unexpected_list_preflight"}`, http.StatusNotImplemented)
 	case r.Method == http.MethodPut && r.URL.Path == "/v1/bench/reps":
 		body, _ := io.ReadAll(r.Body)
 		select {
@@ -151,5 +153,52 @@ func TestRepAddNewOutcomeStillRecordsWithFreshOriginT4216(t *testing.T) {
 	}
 	if origin, ok := fake.reps[0]["origin_id"].(float64); !ok || origin <= 0 {
 		t.Fatalf("new outcome origin_id = %v", fake.reps[0]["origin_id"])
+	}
+}
+
+func TestRepsAddConflictReturnsClearErrorOnceT4226(t *testing.T) {
+	var calls atomic.Int32
+	var origin atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPut || r.URL.Path != "/v1/bench/reps" {
+			http.Error(w, `{"error":"unexpected"}`, http.StatusNotFound)
+			return
+		}
+		calls.Add(1)
+		var input struct {
+			Reps []struct {
+				OriginID int64 `json:"origin_id"`
+			} `json:"reps"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&input); err != nil || len(input.Reps) != 1 {
+			http.Error(w, `{"error":"invalid_rep"}`, http.StatusBadRequest)
+			return
+		}
+		origin.Store(input.Reps[0].OriginID)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		_, _ = io.WriteString(w, `{"error":"bench_rep_conflict"}`)
+	}))
+	defer srv.Close()
+
+	store := &BenchStore{hk: &hkQuota{base: srv.URL, token: "test-token", client: &http.Client{Transport: http.DefaultTransport}}, now: time.Now, pendingPath: filepath.Join(t.TempDir(), "reps.json")}
+	a := &App{BenchStore: store, BenchCatalog: func(context.Context) ([]CatalogRow, error) { return nil, nil }}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	err := a.repsAdd(ctx, []string{
+		"--profile", "opus", "--model", "opus", "--effort", "high",
+		"--task", "https://github.com/mgh3326/mergewake/pull/103",
+		"--tier", "T2", "--role", "impl", "--grade", "A",
+		"--rounds", "1", "--blockers-found", "0", "--completed", "1",
+		"--notes", mergewakeRevisionNotes4216,
+	}, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "bench_rep_conflict") || !strings.Contains(err.Error(), "fresh origin id") {
+		t.Fatalf("reps add conflict error = %v, want clear bench_rep_conflict guidance for new content", err)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("reps add made %d PUTs after immediate conflict, want exactly one", got)
+	}
+	if got := origin.Load(); got <= 0 {
+		t.Fatalf("reps add origin_id = %d, want generated positive id", got)
 	}
 }
