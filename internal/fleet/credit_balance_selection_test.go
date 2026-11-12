@@ -92,8 +92,8 @@ func TestProductionSelectionPoolsAttachCreditBalance(t *testing.T) {
 	if row == nil || row["usd_urgency"] == nil {
 		t.Fatalf("OpenAI credit candidate lacks usd_urgency: %v", row)
 	}
-	if sel.chosen.row.Profile != "omp-luna" || sel.chosen.row.Effort != "high" {
-		t.Fatalf("chosen %s@%s, want omp-luna@high", sel.chosen.row.Profile, sel.chosen.row.Effort)
+	if sel.chosen.row.Profile != "devin-swe2-flash-medium" || sel.chosen.row.Effort != "medium" {
+		t.Fatalf("chosen %s@%s, want devin-swe2-flash-medium@medium", sel.chosen.row.Profile, sel.chosen.row.Effort)
 	}
 }
 
@@ -103,8 +103,8 @@ func TestProductionSelectionCreditDollarUrgencyBeatsFreeWasteUrgency(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if sel.chosen.row.Profile != "omp-luna" || sel.chosen.row.Effort != "high" {
-		t.Fatalf("chosen %s@%s, want omp-luna@high", sel.chosen.row.Profile, sel.chosen.row.Effort)
+	if sel.chosen.row.Profile != "devin-swe2-flash-medium" || sel.chosen.row.Effort != "medium" {
+		t.Fatalf("chosen %s@%s, want devin-swe2-flash-medium@medium", sel.chosen.row.Profile, sel.chosen.row.Effort)
 	}
 	free := candOutcome(sel.record(), "devin-swe2-flash-medium", "medium")
 	credit := candOutcome(sel.record(), "omp-luna", "high")

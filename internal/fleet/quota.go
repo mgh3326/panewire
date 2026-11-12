@@ -78,21 +78,24 @@ type CatalogRow struct {
 // stay admission gates only. ResetHours is that window's time to reset.
 // Both are nil when the longest window cannot be paced.
 //
-// LongProjected is the highest projection among windows of a day or more and
+// RankProjected is the longest window projection. WorstLongProjected is the
+// highest projection among windows of a day or more, and
 // ShortUsed the highest used share among sub-daily windows; a waste-risk pool
 // is excluded on those (a sub-daily window only when exhausted) instead of on
 // Projected, which also carries the sub-daily windows' pace.
 type PoolView struct {
-	Status        string
-	Stale         bool
-	Class         string
-	Waste         *bool
-	Blocking      *float64
-	Projected     *float64
-	Urgency       *float64
-	ResetHours    *float64
-	LongProjected *float64
-	ShortUsed     *float64
+	windowObserved     bool
+	Status             string
+	Stale              bool
+	Class              string
+	Waste              *bool
+	Blocking           *float64
+	Projected          *float64
+	Urgency            *float64
+	ResetHours         *float64
+	RankProjected      *float64
+	WorstLongProjected *float64
+	ShortUsed          *float64
 	// Credit is a prepaid credit pool's hand-entered balance, nil when the
 	// manual store records none.
 	Credit *CreditBalance
@@ -105,8 +108,7 @@ type PoolView struct {
 	Free *shared.FreeBucket
 	// Groups is the view of each metering group of a reading that has only
 	// group-scoped windows (agy), by group name. Each group view ranks on that
-	// group's longest window even when it is sub-daily, since the group has no
-	// longer one (hk 3415): gemini's 5h window paces and can be wasted. The
+	// group's longest window of a day or more. The
 	// fields above then carry the strictest group's view whole, so a rung that
 	// maps to no group is blocked and paced on the same group. A rung that maps
 	// to a group ranks on its own group's view instead (forRung).
@@ -826,10 +828,13 @@ func (q CLIQuota) Pools(ctx context.Context) (map[string]PoolView, error) {
 					v.Blocking = b.UsedPct
 				}
 				w, werr := windowDuration(b.Window)
+				if werr == nil {
+					v.windowObserved = true
+				}
 				ranking := werr == nil && w >= 24*time.Hour
 				if ranking && w > longestW {
 					longestW = w
-					v.Urgency, v.ResetHours = nil, nil
+					v.Urgency, v.ResetHours, v.RankProjected = nil, nil, nil
 				}
 				if werr == nil && !ranking && b.UsedPct != nil && (v.ShortUsed == nil || *b.UsedPct > *v.ShortUsed) {
 					v.ShortUsed = b.UsedPct
@@ -838,8 +843,11 @@ func (q CLIQuota) Pools(ctx context.Context) (map[string]PoolView, error) {
 					if v.Projected == nil || *x > *v.Projected {
 						v.Projected = x
 					}
-					if ranking && (v.LongProjected == nil || *x > *v.LongProjected) {
-						v.LongProjected = x
+					if ranking && (v.WorstLongProjected == nil || *x > *v.WorstLongProjected) {
+						v.WorstLongProjected = x
+					}
+					if ranking && w == longestW && (v.RankProjected == nil || *x > *v.RankProjected) {
+						v.RankProjected = x
 					}
 					if ranking && w == longestW {
 						if reset, e := time.Parse(time.RFC3339Nano, b.ResetsAt); e == nil {
@@ -877,7 +885,8 @@ func (q CLIQuota) Pools(ctx context.Context) (map[string]PoolView, error) {
 
 // projectAtReset is pacelever's Pace expressed as a percentage: the used
 // share divided by the elapsed share of the window. A bucket that is past its
-// reset, less than 5% into its window, or unreadable has no projection. Unlike
+// reset or unreadable has no projection. A long window less than 5% elapsed
+// projects its used share; a sub-daily one has no projection yet. Unlike
 // Pace, an over-consumed reading above 100% still projects, so the pool is
 // excluded rather than treated as unpaceable.
 func projectAtReset(used *float64, window, resetsAt string, now time.Time) *float64 {
@@ -894,8 +903,15 @@ func projectAtReset(used *float64, window, resetsAt string, now time.Time) *floa
 	}
 	left := reset.Sub(now)
 	fraction := 1 - float64(left)/float64(w)
-	if left <= 0 || fraction < 0.05 || fraction > 1 {
+	if left <= 0 || fraction > 1 {
 		return nil
+	}
+	if fraction < 0.05 {
+		if w < 24*time.Hour {
+			return nil
+		}
+		x := *used
+		return &x
 	}
 	x := *used / fraction
 	return &x

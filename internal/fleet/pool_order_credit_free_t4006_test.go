@@ -30,9 +30,7 @@ func creditFreeFixture(t *testing.T, pools map[string]PoolView, present []string
 	return a, s, q
 }
 
-// (a) With no pool in the waste band, a credit rung with a live entry ranks
-// in the free band: chosen or tied with the free rung, never behind the ranked
-// subscription pool.
+// Free ranks before credit, and credit ranks before the ranked subscription.
 func TestSelectCreditRanksBesideFree_T4006(t *testing.T) {
 	pools := map[string]PoolView{
 		"devin":         {Status: "ok", Class: "spend", Blocking: ptrF(4)},
@@ -44,12 +42,12 @@ func TestSelectCreditRanksBesideFree_T4006(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if sel.chosen.seatName != "omp-opus" || sel.chosen.tierName != "credit" {
-		t.Fatalf("the live credit rung must win inside the free band: %s in %s", sel.chosen.seatName, sel.chosen.tierName)
+	if sel.chosen.seatName != "devin-swe2" || sel.chosen.tierName != "free" {
+		t.Fatalf("the free rung must win before credit: %s in %s", sel.chosen.seatName, sel.chosen.tierName)
 	}
 	seats := rankedSeats(sel)
 	credit, free, ranked := seatIndex(seats, "omp-opus"), seatIndex(seats, "devin-swe2"), seatIndex(seats, "sonnet")
-	if credit < 0 || free < 0 || ranked < 0 || ranked < credit || ranked < free {
+	if credit < 0 || free < 0 || ranked < 0 || credit < free || ranked < credit {
 		t.Fatalf("ranked order %v: credit and free must precede the ranked pool", seats)
 	}
 	if got := candOutcome(sel.record(), "sonnet", "high")["outcome"]; got != "below_choice" {
@@ -57,8 +55,7 @@ func TestSelectCreditRanksBesideFree_T4006(t *testing.T) {
 	}
 }
 
-// (b) On a full tie a credit rung goes before a free rung: unspent credit is
-// lost at expiry and the free model is not.
+// A free rung also wins a full tie against a credit rung.
 func TestSelectCreditBeatsFreeOnFullTie_T4006(t *testing.T) {
 	pools := map[string]PoolView{
 		"devin":         {Status: "ok", Class: "spend", Blocking: ptrF(10)},
@@ -69,11 +66,11 @@ func TestSelectCreditBeatsFreeOnFullTie_T4006(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if sel.chosen.seatName != "omp-opus" || sel.chosen.tierName != "credit" {
-		t.Fatalf("a full tie must put the credit rung first: %s in %s", sel.chosen.seatName, sel.chosen.tierName)
+	if sel.chosen.seatName != "devin-swe2" || sel.chosen.tierName != "free" {
+		t.Fatalf("a full tie must put the free rung first: %s in %s", sel.chosen.seatName, sel.chosen.tierName)
 	}
-	if got := candOutcome(sel.record(), "devin-swe2", "high")["outcome"]; got != "below_choice" {
-		t.Fatalf("the free rung is the runner-up: %v", got)
+	if got := candOutcome(sel.record(), "omp-opus", "high")["outcome"]; got != "below_choice" {
+		t.Fatalf("the credit rung is the runner-up: %v", got)
 	}
 }
 
@@ -127,7 +124,7 @@ func TestSelectWasteBeatsCredit_T4006(t *testing.T) {
 		t.Fatalf("the waste-risk subscription goes first: %s in %s", sel.chosen.seatName, sel.chosen.tierName)
 	}
 	if got := candOutcome(sel.record(), "omp-opus", "high"); got["tier"] != "credit" || got["waste_risk"] != false {
-		t.Fatalf("the credit rung stays in the free band: %v", got)
+		t.Fatalf("the credit rung keeps its tier: %v", got)
 	}
 }
 
