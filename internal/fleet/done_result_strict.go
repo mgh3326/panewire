@@ -64,12 +64,14 @@ func (a *App) strictCompletedPut(ctx context.Context, id string, fields map[stri
 }
 
 func (a *App) strictCompletedPutStatus(ctx context.Context, id string, fields map[string]any, result any, reportDoc string, receipt map[string]any) (bool, error) {
+	return a.strictCompletedPutUntil(ctx, id, fields, result, reportDoc, receipt, time.Now().Add(doneResultBudget))
+}
+
+func (a *App) strictCompletedPutUntil(ctx context.Context, id string, fields map[string]any, result any, reportDoc string, receipt map[string]any, deadline time.Time) (bool, error) {
 	store, e := a.jobStore()
 	if e != nil {
 		return false, &doneResultFailure{code: exitFailure, reason: "hk_unconfigured"}
 	}
-	started := time.Now()
-	deadline := started.Add(doneResultBudget)
 	attempts := 0
 	var last error
 	repaired := false
@@ -226,6 +228,40 @@ func (a *App) attachDuplicateResultStrict(ctx context.Context, j Job, id, report
 	if result == nil {
 		return "", nil
 	}
+	deadline := time.Now().Add(doneResultBudget)
+	store, e := a.jobStore()
+	if e != nil {
+		return "", &doneResultFailure{code: exitFailure, reason: "hk_unconfigured"}
+	}
+	left := time.Until(deadline)
+	if left <= 0 {
+		return "", &doneResultFailure{code: exitFailure, reason: "hk_unreachable"}
+	}
+	getCtx, cancel := context.WithTimeout(ctx, left)
+	record, e := store.Get(getCtx, id)
+	cancel()
+	if e != nil {
+		return "", &doneResultFailure{code: exitFailure, reason: doneResultReason(e)}
+	}
+	if stored, ok := record["result"]; ok && stored != nil && !sameJSONValue(stored, result) {
+		a.warn("result conflict: job %s already has a different result; keeping it", id)
+		a.jobResultEvent(id, "conflict", "different_result", "stored result kept")
+		a.captureSentryWarning([]string{"job-result-conflict"}, "JOB_RESULT_CONFLICT "+id, map[string]string{"job": id})
+		return "", &doneResultFailure{code: exitStateConflict, reason: "result_conflict"}
+	}
+	if str(record, "state") == "completed" {
+		stored, hasResult := record["result"]
+		if !hasResult || stored == nil {
+			// The record may still accept a completion PUT if the local event
+			// was written after an earlier failed attempt; strict read-back
+			// will classify the terminal 409 safely.
+		} else {
+			if reportDoc != "" && str(record, "report_doc") != reportDoc {
+				return "", &doneResultFailure{code: exitStateConflict, reason: "report_conflict"}
+			}
+			return "result=equal", nil
+		}
+	}
 	fields := map[string]any{"state": "completed", "result": result}
 	if reportDoc != "" {
 		fields["report_doc"] = reportDoc
@@ -233,7 +269,7 @@ func (a *App) attachDuplicateResultStrict(ctx context.Context, j Job, id, report
 			fields["report_sha256"] = reportSHA
 		}
 	}
-	attached, e := a.strictCompletedPutStatus(ctx, id, fields, result, reportDoc, spawnReceiptForRepair(j.Events))
+	attached, e := a.strictCompletedPutUntil(ctx, id, fields, result, reportDoc, spawnReceiptForRepair(j.Events), deadline)
 	if e != nil {
 		var failure *doneResultFailure
 		if errors.As(e, &failure) && failure.reason == "result_conflict" {

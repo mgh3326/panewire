@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 func strictDoneFixture(t *testing.T, state string) (*App, *fakeRunner, *fakeHK, *spawnHK, string, string) {
@@ -32,6 +33,9 @@ func strictDoneFixture(t *testing.T, state string) (*App, *fakeRunner, *fakeHK, 
 		t.Fatalf("fixture task unavailable: task=%q err=%v", job.Task, err)
 	}
 	seedLedger(t, a, "j")
+	fixtureNow := a.Now
+	a.Now = func() time.Time { return fixtureNow().Add(3 * time.Second) }
+	putEvent(t, a, "j", "job.claim", map[string]any{"owner_lane": "owner", "parent_lane": "parent", "task_id": "42", "role": "reviewer"})
 	report := filepath.Join(a.Jobs, "j", "report.md")
 	result := filepath.Join(a.Jobs, "j", "findings.json")
 	writeReport(t, report, "final report\n")
