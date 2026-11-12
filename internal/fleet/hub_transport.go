@@ -590,9 +590,6 @@ func (a *App) spawnHub(ctx context.Context, s Spawn, brief string, c *placeCandi
 		return candResult{stop: fail(exitUsage, "hub spawn: %v", e)}
 	}
 	if s.DryRun {
-		if e := a.checkDryRunAdmission(ctx, s, h); e != nil {
-			return candResult{stop: e}
-		}
 		payload, e := a.prepareBriefForHost(s, c.name, brief)
 		if e != nil {
 			return candResult{stop: e}
