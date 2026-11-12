@@ -95,10 +95,14 @@ func escalatesWhenUnconfirmed(record handoffkeepRelayEvent) bool {
 // the escalation, is retried on unconfirmedEscalationBackoff until the
 // escalation is durable: the durable id keeps the retries to one escalation.
 func (h *HubServer) escalateUnconfirmedRelay(machine string, dropped relayDroppedPayload) {
-	h.escalateUnconfirmedRelayAttempt(machine, dropped, 0)
+	h.escalateUnconfirmedRelayContext(context.Background(), machine, dropped)
 }
 
-func (h *HubServer) escalateUnconfirmedRelayAttempt(machine string, dropped relayDroppedPayload, attempt int) {
+func (h *HubServer) escalateUnconfirmedRelayContext(ctx context.Context, machine string, dropped relayDroppedPayload) {
+	h.escalateUnconfirmedRelayAttempt(ctx, machine, dropped, 0)
+}
+
+func (h *HubServer) escalateUnconfirmedRelayAttempt(parent context.Context, machine string, dropped relayDroppedPayload, attempt int) {
 	if !relayDroppedIsUnconfirmed(dropped.Reason) || dropped.OriginalEventID < 1 || dropped.Lane == "" || h.handoffkeep == nil {
 		return
 	}
@@ -113,12 +117,13 @@ func (h *HubServer) escalateUnconfirmedRelayAttempt(machine string, dropped rela
 			return
 		}
 		h.logger.Warn("relay unconfirmed escalation will retry", "event_id", dropped.OriginalEventID, "lane", dropped.Lane, "why", why, "attempt", attempt+1)
-		time.AfterFunc(unconfirmedEscalationBackoff[attempt], func() { h.escalateUnconfirmedRelayAttempt(machine, dropped, attempt+1) })
+		time.AfterFunc(unconfirmedEscalationBackoff[attempt], func() { h.escalateUnconfirmedRelayAttempt(context.Background(), machine, dropped, attempt+1) })
 	}
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(parent, nodeLoopHKTimeout)
+	defer cancel()
 	record, found, err := h.handoffkeep.relayEvent(ctx, dropped.OriginalEventID)
 	if err != nil {
-		retry("row_read_failed")
+		retry("row_read_" + hubHKReadErrorClass(err))
 		return
 	}
 	if !found || record.DeliveredAt != "" || !escalatesWhenUnconfirmed(record) {
@@ -166,7 +171,11 @@ func (h *HubServer) escalateUnconfirmedRelayAttempt(machine string, dropped rela
 		// A second drop of the same row posts the same event id and the
 		// durable idempotency answers it: the design lane was told already.
 	case result.PersistFailed && (result.PersistStatus == 0 || result.PersistStatus >= 500):
-		retry("persist_failed")
+		if ctx.Err() != nil {
+			retry("persist_" + hubHKReadErrorClass(ctx.Err()))
+		} else {
+			retry("persist_failed")
+		}
 	default:
 		// The store refused the notice: nobody was told.
 		h.unconfirmedNotices.fold(design, dropped.Lane, record.ID, h.now())

@@ -32,6 +32,9 @@ const (
 	hubMaxMessageBytes     = 32 << 10
 	hubUIEventLimit        = 20
 	hubVersion             = "panewire-r13"
+	// nodeLoopHKTimeout bounds each message's synchronous handoffkeep work so
+	// the websocket loop resumes and can process later node messages.
+	nodeLoopHKTimeout = 5 * time.Second
 )
 
 var hubVersionPattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
@@ -454,7 +457,6 @@ type HubServer struct {
 
 	mu                               sync.Mutex
 	nodes                            map[string]*hubNodeRecord
-	nodeRelayQueues                  map[string]*hubNodeRelayQueue
 	lastNotes                        map[string]*HubLastNote
 	subscribers                      map[*hubEventSubscriber]struct{}
 	alerts                           map[string]*hubAlertState
@@ -790,7 +792,7 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 		authPath: config.AuthPath, alertNodes: alertNodes, relayControl: newHubRelayControlState(config, overrides), now: config.Now, staleAfter: config.StaleAfter, keepaliveInterval: config.KeepaliveInterval,
 		gracePeriod: config.GracePeriod, orphanGrace: config.OrphanGrace, unworkedLandingGrace: config.UnworkedLandingGrace, alertObservations: defaultHubAlertObservations, notifier: config.Notifier, logger: config.Logger, burstPolicyPath: config.BurstPolicyPath,
 		placementPolicyPath: config.PlacementPolicyPath, placementPolicy: placementPolicy, placementPolicyModTime: placementPolicyModTime, placementPolicyObservedModTime: placementPolicyObservedModTime, placementPolicyLoaded: placementPolicyLoaded, placementPolicyStatus: placementPolicyStatus, placementPolicyLastFailure: placementPolicyLastFailure, prometheusURL: config.PrometheusURL, prometheusClient: config.PrometheusClient, prometheusBearer: config.PrometheusBearer, prometheusBasicUser: config.PrometheusBasicUser, prometheusBasicPass: config.PrometheusBasicPass,
-		nodes: make(map[string]*hubNodeRecord), nodeRelayQueues: make(map[string]*hubNodeRelayQueue), lastNotes: make(map[string]*HubLastNote), subscribers: make(map[*hubEventSubscriber]struct{}), alerts: make(map[string]*hubAlertState), burstPolicy: burstPolicy, burstPolicyModTime: burstPolicyModTime, wakeConfigPath: config.WakeConfigPath, wakeTargets: wakeTargets, wakeConfigModTime: wakeConfigModTime, burstState: &hubBurstState{}, startedAt: config.Now().UTC(), uiAllowCFOnly: config.UIAllowCFOnly, jobs: make(map[string]*hubJobRecord), pendingRevocations: make(map[string]map[string]hubJobRevokedEvent), holds: make(map[string]*hubBurstHold), reportRelayPath: config.ReportRelayPath, lanesNodeRowCap: config.LanesNodeRowCap, prStatusHost: config.PRStatusHost, controlPlaneLanesPath: config.ControlPlaneLanesPath, controlPlaneLanes: controlPlaneLanes, controlPlaneLanesModTime: controlPlaneLanesModTime, controlPlaneLanesObservedModTime: controlPlaneLanesObservedModTime, controlPlaneLanesLoaded: controlPlaneLanesLoaded, controlPlaneLanesStatus: controlPlaneLanesStatus, controlPlaneLanesLastFailure: controlPlaneLanesLastFailure, relayDedupe: make(map[string]int64), relayHeld: make(map[int64]hubRelayHeldProjection), relayCancelled: make(map[int64]struct{}), lanePersisted: make(map[string]int64), laneEventSHA: make(map[string]string), replayExhausted: make(map[int64]struct{}), handoffkeep: config.handoffkeep, chatStore: config.ChatStore, chatDeskLane: config.ChatDeskLane, chatKick: make(chan struct{}, 1), chatPending: make(map[int64]chatPendingMessage), chatLaneOf: make(map[int64]string), chatCancelled: make(map[int64]struct{}), chatRetriedFrom: make(map[int64]int64), cfAccess: cfAccess, spawnRecords: make(map[string]*hubSpawnRecord), stallBeats: make(map[string]*hubStallBeatState), closeCtx: closeCtx, closeCancel: closeCancel,
+		nodes: make(map[string]*hubNodeRecord), lastNotes: make(map[string]*HubLastNote), subscribers: make(map[*hubEventSubscriber]struct{}), alerts: make(map[string]*hubAlertState), burstPolicy: burstPolicy, burstPolicyModTime: burstPolicyModTime, wakeConfigPath: config.WakeConfigPath, wakeTargets: wakeTargets, wakeConfigModTime: wakeConfigModTime, burstState: &hubBurstState{}, startedAt: config.Now().UTC(), uiAllowCFOnly: config.UIAllowCFOnly, jobs: make(map[string]*hubJobRecord), pendingRevocations: make(map[string]map[string]hubJobRevokedEvent), holds: make(map[string]*hubBurstHold), reportRelayPath: config.ReportRelayPath, lanesNodeRowCap: config.LanesNodeRowCap, prStatusHost: config.PRStatusHost, controlPlaneLanesPath: config.ControlPlaneLanesPath, controlPlaneLanes: controlPlaneLanes, controlPlaneLanesModTime: controlPlaneLanesModTime, controlPlaneLanesObservedModTime: controlPlaneLanesObservedModTime, controlPlaneLanesLoaded: controlPlaneLanesLoaded, controlPlaneLanesStatus: controlPlaneLanesStatus, controlPlaneLanesLastFailure: controlPlaneLanesLastFailure, relayDedupe: make(map[string]int64), relayHeld: make(map[int64]hubRelayHeldProjection), relayCancelled: make(map[int64]struct{}), lanePersisted: make(map[string]int64), laneEventSHA: make(map[string]string), replayExhausted: make(map[int64]struct{}), handoffkeep: config.handoffkeep, chatStore: config.ChatStore, chatDeskLane: config.ChatDeskLane, chatKick: make(chan struct{}, 1), chatPending: make(map[int64]chatPendingMessage), chatLaneOf: make(map[int64]string), chatCancelled: make(map[int64]struct{}), chatRetriedFrom: make(map[int64]int64), cfAccess: cfAccess, spawnRecords: make(map[string]*hubSpawnRecord), stallBeats: make(map[string]*hubStallBeatState), closeCtx: closeCtx, closeCancel: closeCancel,
 	}
 	hub.auth.Store(&authSet)
 	hub.fleetState = newFleetStateStore()
@@ -1264,18 +1266,9 @@ func (h *HubServer) handleAgent(writer http.ResponseWriter, request *http.Reques
 			h.countUnknownMessage()
 			continue
 		}
-		queued, enqueued := h.queueNodeRelayMessage(machineID, request.RemoteAddr, agent, payload)
-		if queued {
-			if !enqueued {
-				h.logger.Warn("node relay queue full; preserving event before reading more", "machine", machineID)
-			}
-			if !h.agentCredentialCurrent(machineID, agent) {
-				h.closeRevokedAgent(machineID, agent)
-				return
-			}
-			continue
-		}
-		h.handleAgentMessage(machineID, request.RemoteAddr, agent, payload)
+		ctx, cancel := context.WithTimeout(request.Context(), nodeLoopHKTimeout)
+		h.handleAgentMessageContext(ctx, machineID, request.RemoteAddr, agent, payload)
+		cancel()
 		if !h.agentCredentialCurrent(machineID, agent) {
 			h.closeRevokedAgent(machineID, agent)
 			return
@@ -1284,6 +1277,10 @@ func (h *HubServer) handleAgent(writer http.ResponseWriter, request *http.Reques
 }
 
 func (h *HubServer) handleAgentMessage(machineID, remoteAddr string, agent *hubAgent, payload []byte) {
+	h.handleAgentMessageContext(context.Background(), machineID, remoteAddr, agent, payload)
+}
+
+func (h *HubServer) handleAgentMessageContext(ctx context.Context, machineID, remoteAddr string, agent *hubAgent, payload []byte) {
 	if result, ok := parseHubSpawnResult(payload); ok {
 		h.resolveSpawn(machineID, result)
 		return
@@ -1343,7 +1340,7 @@ func (h *HubServer) handleAgentMessage(machineID, remoteAddr string, agent *hubA
 			// showed, not connection state: a report arriving on a superseded
 			// connection is still this row's answer, and the entitlement
 			// checks inside already bind it to this machine (#989).
-			h.handleRelayAck(machineID, message)
+			h.handleRelayAckContext(ctx, machineID, message)
 			return
 		}
 		if !agent.transient && !h.touch(machineID, agent) {
@@ -1417,7 +1414,7 @@ func (h *HubServer) handleAgentMessage(machineID, remoteAddr string, agent *hubA
 			if completion.Replay {
 				h.logger.Info("relay record replayed after node restart", "job", completion.JobID, "kind", message.Kind, "node", machineID)
 			}
-			h.relayJobCompletionFrom(machineID, completion)
+			h.relayJobCompletionFromContext(ctx, machineID, completion)
 		}
 		if message.Kind == "job.escalate" || message.Kind == "job.joined" || relayTerminalSignalKinds[message.Kind] {
 			event, truncated, valid := decodeHubJobEscalationPayloadDetailed(message.Payload)
@@ -1445,7 +1442,7 @@ func (h *HubServer) handleAgentMessage(machineID, remoteAddr string, agent *hubA
 				// This acknowledges in-memory cooling, not durable relay persistence.
 				agent.queuePersisted(hubRelayPersistedEvent{Type: "pool.cooling.ack", JobID: event.JobID, Kind: message.Kind, Epoch: event.Epoch, ReportPath: event.ReportPath, Reason: event.Reason, EventID: 1, ProducerEventID: event.EventID})
 			}
-			h.relayJobEventFrom(machineID, message.Kind, event)
+			h.relayJobEventFromContext(ctx, machineID, message.Kind, event)
 			if message.Kind == "job.lost" && !event.Replay {
 				h.startQuotaReplacement(machineID, event)
 			}
@@ -1456,7 +1453,7 @@ func (h *HubServer) handleAgentMessage(machineID, remoteAddr string, agent *hubA
 				h.countUnknownMessage()
 				return
 			}
-			h.relayLaneEvent(event, agent)
+			h.relayLaneEventContext(ctx, event, agent)
 		}
 		if message.Kind == "idle-wake.route.request" {
 			request, valid := decodeIdleWakeRouteRequest(message.Payload)
@@ -1507,7 +1504,7 @@ func (h *HubServer) handleAgentMessage(machineID, remoteAddr string, agent *hubA
 			}
 			h.recordInboxStageByRelayID(dropped.OriginalEventID, laneInboxStageDropped, dropped.Reason, machineID, dropped.Pane)
 			h.observeRelayDropped(machineID, dropped)
-			h.escalateUnconfirmedRelay(machineID, dropped)
+			h.escalateUnconfirmedRelayContext(ctx, machineID, dropped)
 		}
 		if message.Kind == "job.revocation.ack" {
 			ack, valid := decodeHubJobCompletionPayload(message.Payload)
@@ -1538,6 +1535,10 @@ func (h *HubServer) handleAgentMessage(machineID, remoteAddr string, agent *hubA
 // a WARN naming the reason — a silent drop is how #989's pane-mismatch rows
 // stayed undelivered and replayed at every restart.
 func (h *HubServer) handleRelayAck(machineID string, message hubInbound) {
+	h.handleRelayAckContext(context.Background(), machineID, message)
+}
+
+func (h *HubServer) handleRelayAckContext(ctx context.Context, machineID string, message hubInbound) {
 	received := h.now().UTC()
 	ack, valid := decodeRelayAckPayload(message.Payload)
 	if !valid {
@@ -1559,7 +1560,7 @@ func (h *HubServer) handleRelayAck(machineID string, message hubInbound) {
 			h.countUnknownMessage()
 			return
 		}
-		if !h.markRelayEventUnconfirmed(pending) {
+		if !h.markRelayEventUnconfirmedContext(ctx, pending) {
 			return
 		}
 		h.consumeRelayPending(key)
@@ -1576,11 +1577,11 @@ func (h *HubServer) handleRelayAck(machineID string, message hubInbound) {
 		// A delivery that outlived its window (unconfirmed first, a restart,
 		// a late ack) is still a delivery, and handoffkeep must hear it or
 		// replay re-sends it.
-		if !h.recordLateRelayDelivery(machineID, ack) {
+		if !h.recordLateRelayDeliveryContext(ctx, machineID, ack) {
 			h.countUnknownMessage()
 			return
 		}
-	} else if !h.markRelayEventDelivered(pending) {
+	} else if !h.markRelayEventDeliveredContext(ctx, pending) {
 		// The window is spent but the durable write failed; the row is
 		// still undelivered, and claiming it in the feed would hide that.
 		h.countUnknownMessage()

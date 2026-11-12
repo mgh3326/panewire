@@ -167,7 +167,11 @@ func (h *HubServer) receivingLane(kind string, e hubJobEventPayload) string {
 // senderID is the node that relayed the event, or "" when the hub itself did
 // (replay, HTTP ingress, its own digests); the row records it for the ack-state
 // lookup.
-func (h *HubServer) receiveInbox(kind string, event *hubJobEventPayload, sender *hubAgent, senderID string, replay bool) (result relayLaneEventResult, handled bool) {
+func (h *HubServer) receiveInbox(kind string, event *hubJobEventPayload, sender *hubAgent, senderID string, replay bool, contexts ...context.Context) (result relayLaneEventResult, handled bool) {
+	jobLookupContext := h.closeCtx
+	if len(contexts) > 0 && contexts[0] != nil {
+		jobLookupContext = contexts[0]
+	}
 	if h.inbox == nil && kind == "job.completed" && event.Late {
 		return relayLaneEventResult{PersistFailed: true}, true
 	}
@@ -192,7 +196,7 @@ func (h *HubServer) receiveInbox(kind string, event *hubJobEventPayload, sender 
 	class := h.inbox.policy.classify(lane, kind, *event, replay)
 	// hk 3426: a design lane keeps a worker's routine result in its inbox; no
 	// owner-completion or idle promotion below puts it in the pane.
-	quiet := h.inbox.policy.designQuiet(lane, kind, *event, func() bool { return h.jobHasTask(event.JobID) }, func() bool { return h.laneEventFromWorker(senderID, event.PaneID, lane) })
+	quiet := h.inbox.policy.designQuiet(lane, kind, *event, func() bool { return h.jobHasTaskContext(jobLookupContext, event.JobID) }, func() bool { return h.laneEventFromWorker(senderID, event.PaneID, lane) })
 	if quiet || (kind == "job.completed" && event.Late) {
 		class = "inbox"
 	}
@@ -327,7 +331,11 @@ func (h *HubServer) receiverInboxState(lane string) receiverInboxState {
 // hub-placed spawns use. A missing or unreadable record counts as no task, so
 // the completion is delivered as before (hk 3426).
 func (h *HubServer) jobHasTask(jobID string) bool {
-	ctx, cancel := context.WithTimeout(h.closeCtx, handoffkeepTimeout)
+	return h.jobHasTaskContext(h.closeCtx, jobID)
+}
+
+func (h *HubServer) jobHasTaskContext(parent context.Context, jobID string) bool {
+	ctx, cancel := context.WithTimeout(parent, nodeLoopHKTimeout)
 	defer cancel()
 	task, _, err := h.jobTaskID(ctx, jobID)
 	if err != nil {

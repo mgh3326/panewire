@@ -74,7 +74,7 @@ func TestHungHKCompletionLookupDoesNotBlockNodeReadLoop(t *testing.T) {
 
 	eventually(t, time.Second, "hk job-record lookup started", func() bool { return jobs.started.Load() })
 	write(map[string]any{"type": "ping"})
-	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 7*time.Second)
 	defer cancel()
 	for {
 		var message struct {
@@ -106,6 +106,9 @@ func TestHungHKUnconfirmedEscalationDoesNotBlockNodeReadLoop(t *testing.T) {
 	h, _ := t3426Hub(t, filepath.Join(t.TempDir(), "inbox.sqlite3"), hk, t3426Records)
 	h.mu.Lock()
 	h.nodes["host-a"].agent = nil
+	jobID := laneEventTransportID("worker-3404", "drop-3432")
+	h.relayHeld[100] = hubRelayHeldProjection{ID: 100, Lane: "worker-3404", Pane: "w1:worker", Machine: "host-a", JobID: jobID}
+	h.relayControl.relayPending[relayPendingKey(100, jobID)] = relayPending{machine: "host-a", pane: "w1:worker", eventID: 100, kind: "lane.event", event: hubJobEventPayload{JobID: jobID}, held: true}
 	h.mu.Unlock()
 	server := httptest.NewServer(h.Handler())
 	t.Cleanup(server.Close)
@@ -139,7 +142,7 @@ func TestHungHKUnconfirmedEscalationDoesNotBlockNodeReadLoop(t *testing.T) {
 		t.Fatal("hk relay-row read did not start")
 	}
 	write(map[string]any{"type": "ping"})
-	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 7*time.Second)
 	defer cancel()
 	for {
 		var message struct {
@@ -152,9 +155,76 @@ func TestHungHKUnconfirmedEscalationDoesNotBlockNodeReadLoop(t *testing.T) {
 			break
 		}
 	}
+	h.mu.Lock()
+	_, held := h.relayHeld[100]
+	h.mu.Unlock()
+	if held {
+		t.Fatal("relay.dropped was not consumed while its hk escalation lookup was blocked")
+	}
 }
 
-func TestNodeRelayQueueKeepsCompletionBeforeEscalation(t *testing.T) {
+func TestHungHKRelayDeliveredAckDoesNotBlockNodeReadLoop(t *testing.T) {
+	fake, hk, closeHK := newFakeHandoffkeep(t)
+	t.Cleanup(closeHK)
+	delivered, release := make(chan struct{}), make(chan struct{})
+	var deliveredOnce sync.Once
+	fake.mu.Lock()
+	fake.observe = func(method, path string) {
+		if method == http.MethodPost && path == "/v1/relay/events/100/delivered" {
+			deliveredOnce.Do(func() { close(delivered) })
+			<-release
+		}
+	}
+	fake.mu.Unlock()
+	h, _ := t3426Hub(t, filepath.Join(t.TempDir(), "inbox.sqlite3"), hk, t3426Records)
+	h.mu.Lock()
+	h.nodes["host-a"].agent = nil
+	h.mu.Unlock()
+	h.startRelayAckEvent("lane.event", hubJobEventPayload{JobID: laneEventTransportID(t3426Design, "delivered-3432"), OwnerLane: t3426Design, EventID: "delivered-3432"}, "host-a", "w1:worker", 100)
+	server := httptest.NewServer(h.Handler())
+	t.Cleanup(server.Close)
+	defer close(release)
+	connection, response, err := websocket.Dial(t.Context(), "ws"+server.URL[len("http"):]+"/v1/agent", &websocket.DialOptions{HTTPHeader: http.Header{
+		"X-Panewire-Machine-ID": {"host-a"},
+		"Authorization":         {"Bearer node"},
+	}})
+	if err != nil {
+		t.Fatalf("agent dial response=%v err=%v", response, err)
+	}
+	t.Cleanup(func() { _ = connection.Close(websocket.StatusNormalClosure, "") })
+	write := func(value any) {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+		defer cancel()
+		if err := wsjson.Write(ctx, connection, value); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(map[string]any{"type": "hello", "machine_id": "host-a", "version": "test"})
+	ack := map[string]any{"job_id": laneEventTransportID(t3426Design, "delivered-3432"), "pane": "w1:worker", "original_event_id": 100}
+	write(hubClientWireEvent(hubClientEvent{Kind: "relay.delivered", Payload: mustJSON(ack)}))
+	select {
+	case <-delivered:
+	case <-time.After(time.Second):
+		t.Fatal("fake hk delivery mark did not start")
+	}
+	write(map[string]any{"type": "ping"})
+	ctx, cancel := context.WithTimeout(t.Context(), 7*time.Second)
+	defer cancel()
+	for {
+		var message struct {
+			Type string `json:"type"`
+		}
+		if err := wsjson.Read(ctx, connection, &message); err != nil {
+			t.Fatalf("read loop did not resume after bounded hk delivery mark: %v", err)
+		}
+		if message.Type == "pong" {
+			break
+		}
+	}
+}
+
+func TestNodeRelayReadLoopPreservesCompletionOrderAfterHKDeadline(t *testing.T) {
 	_, hk, closeHK := newFakeHandoffkeep(t)
 	t.Cleanup(closeHK)
 	h, _ := t3426Hub(t, filepath.Join(t.TempDir(), "inbox.sqlite3"), hk, t3426Records)
@@ -168,9 +238,7 @@ func TestNodeRelayQueueKeepsCompletionBeforeEscalation(t *testing.T) {
 	h.spawnNewApp = func(out, errout io.Writer) (*fleet.App, error) {
 		return &fleet.App{JobStore: jobs, Out: out, Err: errout}, nil
 	}
-	var releaseOnce sync.Once
-	release := func() { releaseOnce.Do(func() { close(jobs.release) }) }
-	defer release()
+	defer close(jobs.release)
 	connection, response, err := websocket.Dial(t.Context(), "ws"+server.URL[len("http"):]+"/v1/agent", &websocket.DialOptions{HTTPHeader: http.Header{
 		"X-Panewire-Machine-ID": {"host-a"},
 		"Authorization":         {"Bearer node"},
@@ -189,39 +257,29 @@ func TestNodeRelayQueueKeepsCompletionBeforeEscalation(t *testing.T) {
 	}
 	write(map[string]any{"type": "hello", "machine_id": "host-a", "version": "test"})
 	completion := hubJobEventPayload{JobID: "hk3432-ordered", Epoch: 1, AgentLabel: "worker-3432", OwnerLane: t3426Design, EventID: "completion-ordered", ReportPath: "/jobs/hk3432-ordered/report.md"}
-	write(hubClientWireEvent(hubClientEvent{Kind: "job.completed", Payload: hubJobCompletionPayloadForJob(HubActiveJob{JobID: completion.JobID, Epoch: completion.Epoch, AgentLabel: completion.AgentLabel, OwnerLane: completion.OwnerLane, ReportPath: completion.ReportPath}, completion.EventID, false)}))
+	job := HubActiveJob{JobID: completion.JobID, Epoch: completion.Epoch, AgentLabel: completion.AgentLabel, OwnerLane: completion.OwnerLane, ReportPath: completion.ReportPath}
+	write(hubClientWireEvent(hubClientEvent{Kind: "job.completed", Payload: hubJobCompletionPayloadForJob(job, completion.EventID, false)}))
 	eventually(t, time.Second, "hk job-record lookup started", func() bool { return jobs.started.Load() })
 	escalation, _ := json.Marshal(map[string]any{
-		"job_id": completion.JobID, "epoch": completion.Epoch, "agent_label": "worker-3432",
+		"job_id": completion.JobID, "epoch": completion.Epoch, "agent_label": completion.AgentLabel,
 		"owner_lane": "worker-3404", "event_id": "escalation-ordered", "reason": "needs_decision",
 		"question": "Which action should be taken?", "report_path": completion.ReportPath,
 	})
 	write(hubClientWireEvent(hubClientEvent{Kind: "job.escalate", Payload: escalation}))
 	write(map[string]any{"type": "ping"})
-	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 7*time.Second)
 	defer cancel()
 	for {
 		var message struct {
 			Type string `json:"type"`
 		}
 		if err := wsjson.Read(ctx, connection, &message); err != nil {
-			t.Fatalf("node read loop did not answer while hk was hung: %v", err)
+			t.Fatalf("read loop did not resume after bounded hk lookup: %v", err)
 		}
 		if message.Type == "pong" {
 			break
 		}
 	}
-	items, err := h.inbox.store.list(t3426Design, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, item := range items {
-		if item.Kind == "job.escalate" && item.Event.EventID == "escalation-ordered" {
-			t.Fatal("job.escalate was persisted while the preceding completion was blocked on hk")
-		}
-	}
-
-	release()
 	var completionID, escalationID int64
 	eventually(t, time.Second, "ordered completion and escalation stored", func() bool {
 		items, err := h.inbox.store.list(t3426Design, false)
@@ -241,41 +299,6 @@ func TestNodeRelayQueueKeepsCompletionBeforeEscalation(t *testing.T) {
 	if completionID >= escalationID {
 		t.Fatalf("completion inbox id=%d, escalation inbox id=%d; want completion first", completionID, escalationID)
 	}
-}
-
-func TestNodeRelayQueueAcceptsTransientSender(t *testing.T) {
-	_, hk, closeHK := newFakeHandoffkeep(t)
-	t.Cleanup(closeHK)
-	h, _ := t3426Hub(t, filepath.Join(t.TempDir(), "inbox.sqlite3"), hk, t3426Records)
-	agent := &hubAgent{machineID: "host-a", credential: "node", transient: true}
-	lanePayload := mustJSON(map[string]any{"type": "event", "kind": "lane.event", "payload": map[string]any{
-		"owner_lane": t3426Design, "event_id": "transient-lane-3432", "text": "transient lane event", "epoch": 1,
-	}})
-	if handled, enqueued := h.queueNodeRelayMessage("host-a", "fixture", agent, lanePayload); !handled || !enqueued {
-		t.Fatalf("queue transient lane event handled=%v enqueued=%v", handled, enqueued)
-	}
-	event := hubJobEventPayload{JobID: "hk3432-transient", Epoch: 1, AgentLabel: "worker-3432", OwnerLane: t3426Design, EventID: "transient-3432", ReportPath: "/jobs/hk3432-transient/report.md"}
-	job := HubActiveJob{JobID: event.JobID, Epoch: event.Epoch, AgentLabel: event.AgentLabel, OwnerLane: event.OwnerLane, ReportPath: event.ReportPath}
-	payload := mustJSON(hubClientWireEvent(hubClientEvent{Kind: "job.completed", Payload: hubJobCompletionPayloadForJob(job, event.EventID, false)}))
-	if handled, enqueued := h.queueNodeRelayMessage("host-a", "fixture", agent, payload); !handled || !enqueued {
-		t.Fatalf("queue transient event handled=%v enqueued=%v", handled, enqueued)
-	}
-	eventually(t, time.Second, "transient lane event and completion relayed", func() bool {
-		items, err := h.inbox.store.list(t3426Design, false)
-		if err != nil {
-			return false
-		}
-		lane, completion := false, false
-		for _, item := range items {
-			if item.Kind == "lane.event" && item.Event.EventID == "transient-lane-3432" {
-				lane = true
-			}
-			if item.Kind == "job.completed" && item.Event.EventID == event.EventID {
-				completion = true
-			}
-		}
-		return lane && completion
-	})
 }
 
 var _ fleet.JobStore = (*t3432BlockedJobStore)(nil)
