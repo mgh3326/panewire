@@ -663,14 +663,23 @@ invalid host id is stored as `unknown` rather than being cut into another id.
 Candidate lists are trimmed in rank order to keep `selection` below hk's 32 KiB
 limit.
 `panewire done` writes `{state:"completed", report_doc}` plus `result` when
-`--result FILE` (a JSON object of at most 64 KiB) is given, in the same PUT,
-and emits the relay only after the PUT returns; `escalate` writes
+`--result FILE` (a JSON object of at most 64 KiB) is given, in the same PUT.
+For CLI `done --result`, success requires hk to confirm that record or a read
+back to show the same completed result and report pin. An ambiguous PUT is
+read back and retried at most twice more with the same payload, within a 30 s
+completion budget. A refusal or unresolved state exits non-zero, emits no
+completion event or relay, and records `job.record_failed` with `op` and a safe
+`reason` token. Conflicts use exit 75. Safe reasons are `secret_like_content`
+or `secret_like_content:<pattern>` (pattern matches `[a-z0-9_]{1,40}`),
+`terminal_without_result`, `result_conflict`, `report_conflict`,
+`job_escalated`, `job_lost`, `no_spawn_evidence`, a validated hk code matching
+`[a-z0-9_]{1,64}`, `http_<status>`, `hk_unreachable`, and `hk_unconfigured`.
+The headless delegate keeps warn-and-continue; so does `done` without
+`--result`. Watcher completion is unchanged. `escalate` writes
 `{state:"escalated"}` and the watcher writes `{state:"lost"}` after two
 missing-pane observations, or when a reviewer pane is idle on a quota or
 rate-limit screen with no report (see `docs/quota-stop.md`; a worker or tester is
-the quota-stop manager's). A failed write after the pane exists degrades to a
-`job.record_failed` event and a warning; the relay still goes out so readers
-fall back.
+the quota-stop manager's). Their failed record writes remain best effort.
 
 `--parent-job` resolves the local job directory first, then `GET
 /v1/jobs/<job>` on any host — waiting up to 30 s for a lagging record before
