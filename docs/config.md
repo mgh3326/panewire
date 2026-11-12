@@ -47,7 +47,6 @@ ssh = "host-b"
 via = "ssh"
 herdr_session = "workers"
 workspace = "workers"
-capacity = 4
 tags = ["linux", "gpu", "unity"]
 presence_id = "host-b"
 cwd_map = { "/work/project" = "/srv/work/project" }
@@ -169,7 +168,7 @@ and its error is preserved in the registration warning.
 | `roles` | unset (all) | Nonempty list of spawn roles (`worker`, `tester`, `reviewer`, `counsel`) this host accepts. Other roles record `role_not_accepted:<role>`. A list that still names the retired `builder` role is a config error (exit 70) that names the key to edit: delete `"builder"` from `<host>.roles`. |
 | `grades` | unset (all) | Nonempty list of task grades (`C`, `B`, `A`, `A+`, `S`, `S+`, `SS`) this host accepts. Other grades record `grade_not_accepted:<grade>`; a consult has no grade and records `grade_not_accepted:none`. |
 | `presence_id` | host `NAME` | Identity this host uses in pacelever host-presence records. |
-| `capacity` | unset | Inventory value displayed by hosts. Authoritative capacity comes from panewire placement and remote admission. |
+| `capacity` | legacy | Accepted and ignored; hosts no longer displays this inventory value. |
 | `heavy` | legacy | Accepted and ignored; the `heavy` command and its host lock were removed. |
 | `wake` | off | `"panewire"` marks the host wakeable: the placement policy may request `panewire node wake` when asleep, then waits for the node to connect. |
 | `wake_hold` | `10` | Burst hold in minutes. |
