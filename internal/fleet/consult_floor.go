@@ -1,10 +1,23 @@
 package fleet
 
 import (
+	"path"
 	"slices"
+	"strings"
 
 	"github.com/mgh3326/panewire/internal/grade"
 )
+
+// consultDesignLane matches the hub's current relay.design_lanes list:
+// ["*-design", "routing-policy", "fleet-policy"]. The policy's
+// consult.design_session floor is SS (hk:doc policy/model-families).
+func consultDesignLane(lane string) bool {
+	if lane == "" || lane == "operator-desk" || strings.HasSuffix(lane, "-operator-desk") {
+		return false
+	}
+	patternMatch, _ := path.Match("*-design", lane)
+	return patternMatch || lane == "routing-policy" || lane == "fleet-policy"
+}
 
 // consultFloorOf is the lowest grade a consult rung may launch at for an asker
 // of grade askerGrade: one grade above the asker, capped at SS. A session
@@ -16,6 +29,15 @@ func consultFloorOf(askerGrade string) string {
 	}
 	grades := grade.Grades()
 	return grades[min(gradeOrder[askerGrade]+1, len(grades)-1)]
+}
+
+// consultFloorFor applies the policy floor for a design-session asker and the
+// ordinary asker+1 floor for every other lane.
+func consultFloorFor(askerGrade, lane string) string {
+	if consultDesignLane(lane) {
+		return "SS"
+	}
+	return consultFloorOf(askerGrade)
 }
 
 // rungIndex groups catalog rows by profile and effort, so a consult candidate
@@ -134,7 +156,7 @@ func (p *selPlan) consultStamp() map[string]any {
 	if family == "" {
 		family = "unknown"
 	}
-	floor := consultFloorOf(p.req.grade)
+	floor := consultFloorFor(p.req.grade, p.req.lane)
 	used := p.req.usedFloor
 	if used == "" {
 		used = floor
