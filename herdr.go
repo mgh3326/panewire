@@ -381,7 +381,10 @@ func decodeHerdrEvent(line []byte) (HerdrEvent, bool) {
 		e.AgentStatus = d.AgentStatus
 	}
 	var object map[string]json.RawMessage
-	if json.Unmarshal(env.Event, &object) != nil {
+	payload := env.Data
+	if json.Unmarshal(env.Event, &object) == nil {
+		payload = env.Event
+	} else {
 		_ = json.Unmarshal(env.Data, &object)
 	}
 	known := map[string]bool{
@@ -408,7 +411,10 @@ func decodeHerdrEvent(line []byte) (HerdrEvent, bool) {
 			Agent    json.RawMessage `json:"agent"`
 			Released bool            `json:"released"`
 		}
-		if json.Unmarshal(env.Data, &data) == nil {
+		// payload is whichever member carried the event's fields — the
+		// object-valued form keeps them under "event", the string form
+		// under "data" — so lifecycle extraction sees both shapes.
+		if json.Unmarshal(payload, &data) == nil {
 			// pane_created nests identity under data.pane; the lifecycle
 			// payloads carry no agent_status, so the event's status fields
 			// stay empty and cannot leak into status-change consumers.
