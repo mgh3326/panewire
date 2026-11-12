@@ -284,22 +284,11 @@ func (s *BenchStore) PendingReps() ([]Rep, error) {
 func (s *BenchStore) DropPendingRep(origin int64) error { return s.dropPending(origin) }
 
 // AddOutcome writes panewire's automatic outcome. The caller supplies a stable
-// origin id; a row already present under that id is treated as already recorded,
-// including when the re-emitted outcome carries a newer PR revision.
+// origin id, so a repeat is a no-op; a conflicting repeat is an existing record,
+// not a duplicate.
 func (s *BenchStore) AddOutcome(ctx context.Context, r Rep) (int64, bool, error) {
 	if err := hydrateRepOutcomes(&r); err != nil {
 		return 0, false, err
-	}
-	var existing struct {
-		Reps []Rep `json:"reps"`
-	}
-	if err := s.hk.request(ctx, http.MethodGet, "/v1/bench/reps?limit=5000", nil, &existing); err != nil {
-		return 0, false, fmt.Errorf("check existing bench outcome: %w", err)
-	}
-	for _, prior := range existing.Reps {
-		if prior.OriginID == r.OriginID {
-			return 0, false, nil
-		}
 	}
 	var result struct {
 		IDs []int64 `json:"ids"`
