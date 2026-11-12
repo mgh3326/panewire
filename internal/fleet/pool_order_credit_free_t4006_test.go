@@ -143,6 +143,7 @@ func subscriptionPreserved() []CatalogRow {
 		{Profile: "codex-sol", Effort: "max", Grade: "S+", Pool: "codex", Gate: "default", ModelID: "m"},
 		{Profile: "devin-ds41", Effort: "high", Grade: "A+", Pool: "devin", Gate: "default", ModelID: "m"},
 		{Profile: "haiku", Effort: "low", Grade: "C", Pool: "claude", Gate: "default", ModelID: "m"},
+		{Profile: "haiku", Effort: "high", Grade: "SS", Pool: "claude", Gate: "default", ModelID: "m"},
 	}
 }
 

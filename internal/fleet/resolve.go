@@ -48,7 +48,7 @@ func (a *App) resolveCmd(ctx context.Context, args []string) error {
 	var asJSON, allowEscalation bool
 	f := flags("resolve")
 	f.StringVar(&role, "role", "", "routing role")
-	f.StringVar(&grade, "grade", "", "task grade (C, B, A, A+, S, S+; not for consult)")
+	f.StringVar(&grade, "grade", "", "task grade (C, B, A, A+, S, S+, SS; not for consult)")
 	f.StringVar(&t, "t", "T0", "task scale T0..T3")
 	f.StringVar(&builderFamily, "builder-family", "", "author or parent family (reviewer/judge)")
 	f.StringVar(&harness, "harness", "", "restrict selection to an agent harness, e.g. omp")
@@ -71,7 +71,7 @@ func (a *App) resolveCmd(ctx context.Context, args []string) error {
 		grade = "C"
 	}
 	if _, ok := gradeOrder[grade]; !ok && !topRoutingRole(role) {
-		return fail(exitUsage, "resolve needs --grade C|B|A|A+|S|S+")
+		return fail(exitUsage, "resolve needs --grade C|B|A|A+|S|S+|SS")
 	}
 	t = strings.ToUpper(t)
 	if !slices.Contains([]string{"T0", "T1", "T2", "T3"}, t) {

@@ -83,8 +83,8 @@ func TestCatalogPushMatchesPaceleverPayload(t *testing.T) {
 	}
 }
 
-func TestCatalogPushDryRun(t *testing.T) {
-	path := writeCatalogFile(t, `{"catalog":[{"profile":"example","effort":"high","model_id":"example-model","pool":"claude","grade":"A","gate":"default","deviation_ref":"hk:task/1","decided_at":"2026-10-28T00:00:00Z","decided_by":"operator"}]}`)
+func TestGradeSSCatalogPushDryRun(t *testing.T) {
+	path := writeCatalogFile(t, `{"catalog":[{"profile":"example","effort":"high","model_id":"example-model","pool":"claude","grade":"SS","gate":"default","deviation_ref":"hk:task/4044","decided_at":"2026-10-28T00:00:00Z","decided_by":"operator"}]}`)
 	var out, errs bytes.Buffer
 	if code := runCatalogCLI([]string{"push", path, "--dry-run"}, &out, &errs); code != ExitOK {
 		t.Fatalf("exit=%d stderr=%s", code, errs.String())
@@ -95,11 +95,11 @@ func TestCatalogPushDryRun(t *testing.T) {
       "boundary_version": "",
       "decided_at": "2026-10-28T00:00:00Z",
       "decided_by": "operator",
-      "deviation_ref": "hk:task/1",
+      "deviation_ref": "hk:task/4044",
       "effort": "high",
       "gate": "default",
       "gate_reason": null,
-      "grade": "A",
+      "grade": "SS",
       "model_id": "example-model",
       "pool": "claude",
       "profile": "example",
@@ -237,12 +237,12 @@ func TestCatalogGradeSetPayload(t *testing.T) {
 	}
 }
 
-func TestCatalogGradeSetDryRun(t *testing.T) {
+func TestGradeSSCatalogGradeSetDryRun(t *testing.T) {
 	var out, errs bytes.Buffer
-	if code := runCatalogCLI([]string{"grade", "set", "--profile", "example", "--grade", "A", "--deviation-ref", "hk:task/1", "--dry-run"}, &out, &errs); code != ExitOK {
+	if code := runCatalogCLI([]string{"grade", "set", "--profile", "example", "--grade", "SS", "--deviation-ref", "hk:task/4044", "--dry-run"}, &out, &errs); code != ExitOK {
 		t.Fatalf("exit=%d stderr=%s", code, errs.String())
 	}
-	want := "{\n  \"boundary_version\": \"\",\n  \"deviation_ref\": \"hk:task/1\",\n  \"grade\": \"A\",\n  \"profile\": \"example\"\n}\n"
+	want := "{\n  \"boundary_version\": \"\",\n  \"deviation_ref\": \"hk:task/4044\",\n  \"grade\": \"SS\",\n  \"profile\": \"example\"\n}\n"
 	if out.String() != want {
 		t.Fatalf("grade dry-run output differs: %q", out.String())
 	}

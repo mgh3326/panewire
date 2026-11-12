@@ -68,7 +68,7 @@ func TestOperatorSpawnAcceptsCanonicalSubmissionArgs(t *testing.T) {
 }
 
 func TestOperatorSpawnGradeAndRoleBoundary(t *testing.T) {
-	for _, grade := range []string{"C", "B", "A", "A+", "S", "S+"} {
+	for _, grade := range []string{"C", "B", "A", "A+", "S", "S+", "SS"} {
 		args := []string{"--grade", grade, "--role", "counsel"}
 		if !validHubSpawnArgsForMode(args, true) {
 			t.Fatalf("operator grade rejected: %s", grade)
@@ -77,7 +77,7 @@ func TestOperatorSpawnGradeAndRoleBoundary(t *testing.T) {
 			t.Fatal("legacy request gained operator authority")
 		}
 	}
-	for _, args := range [][]string{{"--grade", "A++"}, {"--grade", "Z"}, {"--job", "job+"}, {"--grade", "S+\n"}} {
+	for _, args := range [][]string{{"--grade", "A++"}, {"--grade", "Z"}, {"--job", "job+"}, {"--grade", "SS\n"}} {
 		if validHubSpawnArgsForMode(args, true) {
 			t.Fatalf("invalid argument accepted: %q", args)
 		}

@@ -195,7 +195,7 @@ func TestRepsAddWritesPaceleverEnvelopeAndReceipt(t *testing.T) {
 	}
 }
 
-func TestRepsListAndCompareReadTheSharedStore(t *testing.T) {
+func TestGradeSSRepsListAndCompareReadTheSharedStore(t *testing.T) {
 	fake := &hkBenchFake{}
 	srv := httptest.NewServer(fake)
 	defer srv.Close()
@@ -206,6 +206,10 @@ func TestRepsListAndCompareReadTheSharedStore(t *testing.T) {
 			"task_ref": "hk1", "tier": "T1", "role": "impl", "rounds": float64(1),
 			"blockers_found": float64(0), "completed": float64(1), "recorded_at": "2026-01-01T00:00:00Z",
 			"effort": "high", "grade": "A", "table_grade": "A", "notes": ""},
+		{"id": float64(2), "origin_id": float64(11), "profile": "omp-opus", "model_id": "m",
+			"task_ref": "hk4044", "tier": "T2", "role": "impl", "rounds": float64(1),
+			"blockers_found": float64(0), "completed": float64(1), "recorded_at": "2026-01-01T00:00:00Z",
+			"effort": "high", "grade": "SS", "table_grade": "SS", "notes": ""},
 	}
 	_ = completed
 	out := &strings.Builder{}
@@ -216,11 +220,18 @@ func TestRepsListAndCompareReadTheSharedStore(t *testing.T) {
 		Reps   []Rep  `json:"reps"`
 		Source string `json:"source"`
 	}
-	if err := json.Unmarshal([]byte(out.String()), &listed); err != nil || len(listed.Reps) != 1 || listed.Source != "handoffkeep" {
+	if err := json.Unmarshal([]byte(out.String()), &listed); err != nil || len(listed.Reps) != 2 || listed.Source != "handoffkeep" {
 		t.Fatalf("list = %s (%v)", out.String(), err)
 	}
 	out.Reset()
-	if err := a.repsList(context.Background(), "compare", []string{}, out, io.Discard); err != nil {
+	if err := a.repsList(context.Background(), "list", []string{"--grade", "SS", "--json"}, out, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal([]byte(out.String()), &listed); err != nil || len(listed.Reps) != 1 || listed.Reps[0].Grade != "SS" {
+		t.Fatalf("SS reps filter = %s (%v)", out.String(), err)
+	}
+	out.Reset()
+	if err := a.repsList(context.Background(), "compare", []string{"--grade", "SS"}, out, io.Discard); err != nil {
 		t.Fatal(err)
 	}
 	var compared struct {

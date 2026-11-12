@@ -38,7 +38,7 @@ func (a *App) planCmd(ctx context.Context, args []string) (err error) {
 	defer func() { a.refusalEvent("plan", "", err) }()
 	var o planOpts
 	f := flags("plan")
-	f.StringVar(&o.grade, "grade", "", "task grade (C, B, A, A+, S, S+)")
+	f.StringVar(&o.grade, "grade", "", "task grade (C, B, A, A+, S, S+, SS)")
 	f.StringVar(&o.t, "t", "", "task scale T0..T3")
 	f.StringVar(&o.role, "role", "worker", "seat role")
 	f.StringVar(&o.tags, "tags", "", "required host capability tags")
@@ -63,7 +63,7 @@ func (a *App) planCmd(ctx context.Context, args []string) (err error) {
 		return fail(exitConfig, "%s: --grade is not accepted for consult", noLeadGradeRule)
 	}
 	if _, ok := gradeOrder[o.grade]; !ok && !top {
-		return fail(exitUsage, "plan needs --grade C|B|A|A+|S|S+")
+		return fail(exitUsage, "plan needs --grade C|B|A|A+|S|S+|SS")
 	}
 	o.t = strings.ToUpper(o.t)
 	if !slices.Contains([]string{"T0", "T1", "T2", "T3"}, o.t) {

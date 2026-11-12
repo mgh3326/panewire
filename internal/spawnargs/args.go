@@ -9,6 +9,8 @@ import (
 	"regexp"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/mgh3326/panewire/internal/grade"
 )
 
 const (
@@ -28,10 +30,23 @@ var (
 	ValuePattern         = regexp.MustCompile(`^` + valueCharset + `{1,200}$`)
 	tagsPattern          = regexp.MustCompile(`^[A-Za-z0-9._:/@-]+(,[A-Za-z0-9._:/@-]+){0,15}$`)
 	excludedHostsPattern = regexp.MustCompile(`^[A-Za-z0-9._:/@-]+(,[A-Za-z0-9._:/@-]+)*$`)
-	gradePattern         = regexp.MustCompile(`^(C|B|A|A\+|S|S\+)$`)
+	gradePattern         = regexp.MustCompile(`^(` + strings.Join(quotedGrades(), `|`) + `)$`)
 	docKeyPattern        = regexp.MustCompile(`^[A-Za-z0-9._/-]+$`)
 	jobIDPattern         = regexp.MustCompile(`^[A-Za-z0-9._-]{1,128}$`)
 )
+
+func quotedGrades() []string {
+	grades := grade.Grades()
+	for i := range grades {
+		grades[i] = regexp.QuoteMeta(grades[i])
+	}
+	return grades
+}
+
+func gradeDescription() string {
+	grades := grade.Grades()
+	return strings.Join(grades[:len(grades)-1], ", ") + " or " + grades[len(grades)-1]
+}
 
 var baseFlags = []string{"-m", "-w", "-l", "--t", "--effort", "--e6-arm", "--job", "--owner", "--report", "--report-relative", "--role", "--lane", "--parent", "-L", "--task", "--parent-job", "--tags", "--urgency", "--builder-family", "--builder-job", "--review-pass"}
 
@@ -111,7 +126,7 @@ func valueRefusal(flag, value string, operator bool) string {
 		}
 	case "--grade":
 		if !gradePattern.MatchString(value) {
-			return "--grade value must be C, B, A, A+, S or S+"
+			return "--grade value must be " + gradeDescription()
 		}
 	case "--exclude-host", "--exclude-pool":
 		if !excludedHostsPattern.MatchString(value) {

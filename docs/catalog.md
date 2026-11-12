@@ -13,7 +13,7 @@ and its grades in `/v1/bench/grades`; no subcommand runs pacelever.
   ignored`.
 - `panewire catalog grade set --profile P --grade G --deviation-ref REF
   [--boundary-version V] [--dry-run]` writes one grade projection. `G` is one
-  of `S+`, `S`, `A+`, `A`, `B`, `C` or `unrated`.
+  of `C`, `B`, `A`, `A+`, `S`, `S+`, `SS` or `unrated`.
 - `panewire catalog aa-sync [--out FILE] [--dry-run]` fetches the free
   Artificial Analysis Data API and annotates the explicit model mappings.
   Annotations are written to `FILE` for review; sync itself never pushes.
