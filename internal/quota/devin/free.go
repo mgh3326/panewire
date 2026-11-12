@@ -106,6 +106,9 @@ func ObserveFreeLimit(cfg Config, resetAt, observedAt, rung, source, accountKey 
 			}
 			return nil
 		}
+		if clear && accountKey != "" {
+			return clearCorruptLimitFile(path, accountKey)
+		}
 		return fmt.Errorf("%w: devin 쿼터 캐시를 읽을 수 없습니다; 복구하려면 quota observe devin-free-limit --clear를 실행하세요", ErrFreeLimitStore)
 	}
 	if clear && !found {
