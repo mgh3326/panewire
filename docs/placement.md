@@ -238,10 +238,24 @@ launch-failure backoff, which the hub observes itself, still applies to it.
 
 The hub sees every node answer to a spawn. It counts consecutive launch
 failures per (host, harness kind). Two in a row exclude that pair for 30
-minutes; a success clears the count at once. A busy checkout
-(`checkout_refused:busy`) and `dirty`, `sha-missing`, or `branch-elsewhere`
-checkout refusals are not launch failures, on either the
-terminal or next-host path. A profile with no harness kind is not counted. The
+minutes; a success clears the count at once. Only a failure that shows the host
+failed to launch counts:
+
+| Node reason | Counts | Why |
+|---|---|---|
+| `spawn_failed`, with or without its engine code (`spawn_failed:<code>`) | yes | the engine did not launch on this host |
+| `spawn_disabled` | yes | the host's spawn policy refuses every launch |
+| `cwd_unmapped` | yes | the host has no path for the repository |
+| `brief_doc_unavailable` | yes | the host cannot fetch or resolve its brief document |
+| `timeout` (landing or queue) | no | the answer was late; the launch state is unknown |
+| `deadline_not_started` | no | the node claimed the request after its deadline |
+| `unknown`, `reconciling` | no | the hub could not tell whether the launch happened |
+| `journal_unavailable`, `journal_conflict` | no | the node's spawn journal, not the launch |
+| `invalid_args`, `invalid_request` | no | the request is malformed |
+| `checkout_refused:<code>` (`busy`, `dirty`, `sha-missing`, `branch-elsewhere`, and the rest) | no | checkout state, not the harness's ability to launch, on either the terminal or next-host path |
+| any other reason, or none | no | not a host launch fault |
+
+A profile with no harness kind is not counted. The
 constants live in `placement.json`:
 
 ```json
