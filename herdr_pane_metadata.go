@@ -31,6 +31,10 @@ const (
 	paneMetadataTTL = 3 * paneMetadataPublishInterval
 )
 
+// paneMetadataCallTimeout bounds one pane.report_metadata round trip. It is a
+// var so a test can shorten it.
+var paneMetadataCallTimeout = 5 * time.Second
+
 // The only token keys panewire sends. Anything else on a pane is not ours.
 const (
 	paneTokenJob   = "pw_job"
@@ -49,8 +53,13 @@ type paneMetadataReport struct {
 }
 
 // ReportPaneMetadata sends one pane.report_metadata request. A herdr refusal
-// is a *herdrReplyError; any other error is a connection failure.
+// is a *herdrReplyError; any other error is a connection failure. The round
+// trip is bounded: Call sets a socket deadline only when ctx has one, and the
+// daemon's run context has none, so a herdr that accepts the request and never
+// replies would block Daemon.Stop on paneMetaDone.
 func (c *HerdrClient) ReportPaneMetadata(ctx context.Context, report paneMetadataReport) error {
+	ctx, cancel := context.WithTimeout(ctx, paneMetadataCallTimeout)
+	defer cancel()
 	_, err := c.Call(ctx, "pane.report_metadata", report)
 	return err
 }
