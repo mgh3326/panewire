@@ -244,7 +244,12 @@ func (h *HubServer) seedStartupInboxWakes() {
 		if w.lanes == nil {
 			w.lanes = map[string]*inboxWakeLane{}
 		}
-		w.lanes[lane] = &inboxWakeLane{pending: true, class: class, startup: true}
+		w.lanes[lane] = &inboxWakeLane{
+			windowEnd: now.Add(h.inbox.policy.Relay.wakeWindow),
+			pending:   true,
+			class:     class,
+			startup:   true,
+		}
 	}
 }
 

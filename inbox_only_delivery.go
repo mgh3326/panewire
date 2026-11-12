@@ -3,6 +3,7 @@ package panewire
 import (
 	"context"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -67,13 +68,10 @@ func (h *HubServer) fileInboxOnlyBatch(lane, class, id string) error {
 	if err != nil {
 		return err
 	}
-	if err := h.inbox.store.quarantineBatch(id, inboxOnlyBatchReason); err != nil {
-		return err
-	}
 	if inboxWakeFiledWorthy(items) {
 		h.noteInboxWakeArrival(lane, class)
 	}
-	return nil
+	return h.inbox.store.quarantineBatch(id, inboxOnlyBatchReason)
 }
 
 // inboxOnlyBatchReason is the quarantine reason of a batch filed untyped.
@@ -120,7 +118,14 @@ func (h *HubServer) hubChatTurn(record handoffkeepRelayEvent) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), hubChatStoreTimeout)
 	defer cancel()
 	message, found, err := h.chatStore.GetChatMessage(ctx, id)
-	return err == nil && found && message.Author == hubChatOperatorName && message.SourceChannel != "assistant" && chatRelayEventID(id, message.Body) == record.EventID
+	if err != nil || !found || message.Author != hubChatOperatorName || message.SourceChannel == "assistant" || chatRelayEventID(id, message.Body) != record.EventID {
+		return false
+	}
+	var questionIDs []string
+	if record.Question != "" {
+		questionIDs = strings.Split(record.Question, ",")
+	}
+	return record.Text == chatRelayText(id, questionIDs, message.Body)
 }
 
 // hasBatch reports whether id names a hub digest, escalation or hold batch

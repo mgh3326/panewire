@@ -292,7 +292,8 @@ Two kinds of traffic keep their existing delivery in every lane:
   merely looks like `chat-N` (a `panewire emit --event-id chat-7`, a job event)
   is a lane notification. A restart replay of a chat row keeps its delivery
   only when the chat store holds the operator message whose id and body hash
-  make up the row's event id;
+  make up the row's event id, and the row's text matches the hub-rendered
+  message and question ids;
 - events the operator posts through the [R24 HTTP ingress](r24-http-ingress.md)
   with the operator token, including the assistant's `deliver` tool and its
   outbox notices. This is the explicit operator path into a pane, so it is
@@ -355,8 +356,9 @@ When the line is sent:
 - A line still owed to a [trial](#worker-trial) lane when its trial ends is
   dropped: the lane is a worker lane again.
 - When the hub starts, every inbox-only lane with unread items above `info`
-  gets one line, through the same window, with `startup` as the fleet-event
-  reason. A lane whose unread items cannot be read gets none.
+  gets one line after the same wake window, with `startup` as the fleet-event
+  reason. Restarts inside the window coalesce into one line after the last
+  restart. A lane whose unread items cannot be read gets none.
 
 The wake decision lives in the hub, which owns the inbox store and sees each
 arrival. The node does not keep an inbox copy, so it would have to poll the
