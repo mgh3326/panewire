@@ -1267,9 +1267,7 @@ func (h *HubServer) handleAgent(writer http.ResponseWriter, request *http.Reques
 		queued, enqueued := h.queueNodeRelayMessage(machineID, request.RemoteAddr, agent, payload)
 		if queued {
 			if !enqueued {
-				h.logger.Warn("node relay queue full; reconnecting so the node can replay", "machine", machineID)
-				h.disconnect(machineID, agent)
-				return
+				h.logger.Warn("node relay queue full; preserving event before reading more", "machine", machineID)
 			}
 			if !h.agentCredentialCurrent(machineID, agent) {
 				h.closeRevokedAgent(machineID, agent)

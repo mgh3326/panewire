@@ -37,12 +37,16 @@ func (h *HubServer) queueNodeRelayMessage(machineID, remoteAddr string, agent *h
 	case queue.messages <- queued:
 		return true, true
 	default:
-		return true, false
+		// Do not disconnect and lose one-shot relay.dropped reports. At
+		// saturation, process the durable event before reading more messages.
+		h.logger.Warn("node relay queue full; processing event inline", "machine", machineID, "kind", message.Kind)
+		h.handleAgentMessage(machineID, remoteAddr, agent, queued.payload)
+		return true, true
 	}
 }
 
 func nodeRelayMessageKind(kind string) bool {
-	return kind == "lane.event" || kind == "job.completed" || kind == "job.escalate" || kind == "job.joined" || relayTerminalSignalKinds[kind] || kind == "relay.dropped"
+	return kind == "lane.event" || kind == "job.completed" || kind == "job.escalate" || kind == "job.joined" || relayTerminalSignalKinds[kind] || kind == "relay.dropped" || kind == "relay.delivered" || kind == "relay.unconfirmed"
 }
 
 func (h *HubServer) runNodeRelayQueue(machineID string, queue *hubNodeRelayQueue) {
@@ -51,13 +55,31 @@ func (h *HubServer) runNodeRelayQueue(machineID string, queue *hubNodeRelayQueue
 		case <-h.closeCtx.Done():
 			return
 		case message := <-queue.messages:
+			kind, _ := queuedNodeRelayKind(message.payload)
+			if kind == "relay.delivered" || kind == "relay.unconfirmed" {
+				// Ack authorization is bound to machine/pane in handleRelayAck;
+				// it deliberately remains valid after a socket is superseded.
+				h.handleAgentMessage(message.machineID, message.remoteAddr, message.agent, message.payload)
+				continue
+			}
 			h.mu.Lock()
 			record := h.nodes[machineID]
 			current := record != nil && record.agent == message.agent
 			h.mu.Unlock()
-			if current {
+			if message.agent.transient {
+				current = h.agentCredentialCurrent(machineID, message.agent)
+			}
+			if kind == "relay.dropped" || current {
 				h.handleAgentMessage(message.machineID, message.remoteAddr, message.agent, message.payload)
 			}
 		}
 	}
+}
+
+func queuedNodeRelayKind(payload []byte) (string, bool) {
+	message, ok := parseHubInbound(payload)
+	if !ok || message.Type != "event" {
+		return "", false
+	}
+	return message.Kind, true
 }
