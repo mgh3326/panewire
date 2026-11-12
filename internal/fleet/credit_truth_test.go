@@ -101,6 +101,16 @@ func TestWrappedProviderCreditErrorClassifies(t *testing.T) {
 			pool:   "openai-api",
 		},
 		{
+			name:   "OpenAI JSON message wraps with documentation suffix",
+			screen: "API Error: 429 {\"error\":{\"message\":\"You exceeded your current quo\nta, please check your plan and billing details. For more information on this error, read the docs.\",\"type\":\"insufficient_quota\"}}\n› Ask Codex",
+			pool:   "openai-api",
+		},
+		{
+			name:   "OpenAI plain message includes documentation suffix",
+			screen: "API Error: 429 You exceeded your current quota, please check your plan and billing details. For more information on this error, read the docs.\n› Ask Codex",
+			pool:   "openai-api",
+		},
+		{
 			name:   "Anthropic unbordered JSON wrap",
 			screen: "API Error: 400 invalid_request_error {\"type\":\"error\",\"error\":{\"message\":\"Your credit balance is too low to access\nthe Anthropic API\"}}\n❯ Ask Claude",
 			pool:   "anthropic-api",
@@ -183,6 +193,9 @@ Retried; the call succeeded
 		"API Error: 429 insufficient_quota\n:::\n❯ Ask Claude",
 		"API Error: 429 insufficient_quota\n]]]]\n❯ Ask Claude",
 		"API Error: 429 insufficient_quota\n[retry] succeeded\n› Ask Codex",
+		"API Error: 429\ninsufficient_quota\n[retrying]\n› Ask Codex",
+		"API Error: 429\nrate_limit_error\n[retry] insufficient_quota\n› Ask Codex",
+		"API Error: 400\ninvalid_request_error\nnote: your credit balance is too low to access the Anthropic API [request:req_1]\n❯ Ask Claude",
 		"| API Error: 429 insufficient_quota\n| Retried; the call succeeded\n| ⎿ file1\n| › Ask Codex",
 		"API Error: 429 insufficient_quota\n}\n❯ Ask Codex",
 		"│ API Error: 429 rate_limit_error\n│ note: your credit balance is too low to access the Anthropic API\n│ ❯ Ask Claude",
