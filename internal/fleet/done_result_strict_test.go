@@ -26,6 +26,7 @@ func strictDoneFixture(t *testing.T, state string) (*App, *fakeRunner, *fakeHK, 
 	h.records["j"]["state"] = state
 	a.JobStore = h.client()
 	seedJob(t, a, "j", "reviewer")
+	putEvent(t, a, "j", "job.spawned", map[string]any{"pane_id": "w:p1", "label": "agent-a", "profile": "cmd-dsflash41", "family": "deepseek", "task_id": "42"})
 	job, err := a.job("j")
 	if err != nil || job.Task == "" {
 		t.Fatalf("fixture task unavailable: task=%q err=%v", job.Task, err)

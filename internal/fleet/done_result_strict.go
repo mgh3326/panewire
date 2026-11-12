@@ -59,9 +59,14 @@ func doneResultReason(e error) string {
 }
 
 func (a *App) strictCompletedPut(ctx context.Context, id string, fields map[string]any, result any, reportDoc string, receipt map[string]any) error {
+	_, e := a.strictCompletedPutStatus(ctx, id, fields, result, reportDoc, receipt)
+	return e
+}
+
+func (a *App) strictCompletedPutStatus(ctx context.Context, id string, fields map[string]any, result any, reportDoc string, receipt map[string]any) (bool, error) {
 	store, e := a.jobStore()
 	if e != nil {
-		return &doneResultFailure{code: exitFailure, reason: "hk_unconfigured"}
+		return false, &doneResultFailure{code: exitFailure, reason: "hk_unconfigured"}
 	}
 	started := time.Now()
 	deadline := started.Add(doneResultBudget)
@@ -75,78 +80,78 @@ func (a *App) strictCompletedPut(ctx context.Context, id string, fields map[stri
 			if last != nil {
 				reason = doneResultReason(last)
 			}
-			return &doneResultFailure{code: exitFailure, reason: reason}
+			return false, &doneResultFailure{code: exitFailure, reason: reason}
 		}
 		if ctx.Err() != nil {
-			return &doneResultFailure{code: exitFailure, reason: doneResultReason(ctx.Err())}
+			return false, &doneResultFailure{code: exitFailure, reason: doneResultReason(ctx.Err())}
 		}
 		callCtx, cancel := context.WithTimeout(ctx, left)
 		attempts++
 		last = store.Put(callCtx, id, fields)
 		cancel()
 		if last == nil {
-			return nil
+			return true, nil
 		}
 		if ctx.Err() != nil {
-			return &doneResultFailure{code: exitFailure, reason: doneResultReason(ctx.Err())}
+			return false, &doneResultFailure{code: exitFailure, reason: doneResultReason(ctx.Err())}
 		}
 		if !ambiguousDoneResultFailure(last) && !isJobStateConflict(last) {
-			return &doneResultFailure{code: exitFailure, reason: doneResultReason(last)}
+			return false, &doneResultFailure{code: exitFailure, reason: doneResultReason(last)}
 		}
 		callCtx, cancel = context.WithTimeout(ctx, time.Until(deadline))
 		if time.Until(deadline) <= 0 {
 			cancel()
-			return &doneResultFailure{code: exitFailure, reason: doneResultReason(last)}
+			return false, &doneResultFailure{code: exitFailure, reason: doneResultReason(last)}
 		}
 		record, getErr := store.Get(callCtx, id)
 		cancel()
 		if getErr != nil {
-			return &doneResultFailure{code: exitFailure, reason: doneResultReason(last)}
+			return false, &doneResultFailure{code: exitFailure, reason: doneResultReason(last)}
 		}
 		switch state := str(record, "state"); state {
 		case "completed":
 			stored, hasResult := record["result"]
 			if !hasResult || stored == nil {
-				return &doneResultFailure{code: exitStateConflict, reason: "terminal_without_result"}
+				return false, &doneResultFailure{code: exitStateConflict, reason: "terminal_without_result"}
 			}
 			if !sameJSONValue(stored, result) {
-				return &doneResultFailure{code: exitStateConflict, reason: "result_conflict"}
+				return false, &doneResultFailure{code: exitStateConflict, reason: "result_conflict"}
 			}
 			if reportDoc != "" && str(record, "report_doc") != reportDoc {
-				return &doneResultFailure{code: exitStateConflict, reason: "report_conflict"}
+				return false, &doneResultFailure{code: exitStateConflict, reason: "report_conflict"}
 			}
-			return nil
+			return false, nil
 		case "escalated":
-			return &doneResultFailure{code: exitStateConflict, reason: "job_escalated"}
+			return false, &doneResultFailure{code: exitStateConflict, reason: "job_escalated"}
 		case "lost":
-			return &doneResultFailure{code: exitStateConflict, reason: "job_lost"}
+			return false, &doneResultFailure{code: exitStateConflict, reason: "job_lost"}
 		case "claimed":
 			if repaired {
-				return &doneResultFailure{code: exitStateConflict, reason: "no_spawn_evidence"}
+				return false, &doneResultFailure{code: exitStateConflict, reason: "no_spawn_evidence"}
 			}
 			spawned, ok := localSpawnRepair(receipt)
 			if !ok {
-				return &doneResultFailure{code: exitStateConflict, reason: "no_spawn_evidence"}
+				return false, &doneResultFailure{code: exitStateConflict, reason: "no_spawn_evidence"}
 			}
 			repaired = true
 			left = time.Until(deadline)
 			if left <= 0 {
-				return &doneResultFailure{code: exitFailure, reason: doneResultReason(last)}
+				return false, &doneResultFailure{code: exitFailure, reason: doneResultReason(last)}
 			}
 			callCtx, cancel = context.WithTimeout(ctx, left)
 			repairErr := store.Put(callCtx, id, spawned)
 			cancel()
 			if repairErr != nil {
-				return &doneResultFailure{code: exitFailure, reason: doneResultReason(repairErr)}
+				return false, &doneResultFailure{code: exitFailure, reason: doneResultReason(repairErr)}
 			}
 			attempts--
 			continue
 		case "spawned":
 			if attempts >= 3 {
-				return &doneResultFailure{code: exitFailure, reason: doneResultReason(last)}
+				return false, &doneResultFailure{code: exitFailure, reason: doneResultReason(last)}
 			}
 		default:
-			return &doneResultFailure{code: exitStateConflict, reason: "no_spawn_evidence"}
+			return false, &doneResultFailure{code: exitStateConflict, reason: "no_spawn_evidence"}
 		}
 		if attempts > 0 && attempts <= len(doneResultBackoff) {
 			wait := doneResultBackoff[attempts-1]
@@ -158,12 +163,12 @@ func (a *App) strictCompletedPut(ctx context.Context, id string, fields map[stri
 			select {
 			case <-ctx.Done():
 				timer.Stop()
-				return &doneResultFailure{code: exitFailure, reason: doneResultReason(ctx.Err())}
+				return false, &doneResultFailure{code: exitFailure, reason: doneResultReason(ctx.Err())}
 			case <-timer.C:
 			}
 		}
 	}
-	return &doneResultFailure{code: exitFailure, reason: doneResultReason(last)}
+	return false, &doneResultFailure{code: exitFailure, reason: doneResultReason(last)}
 }
 
 func ambiguousDoneResultFailure(e error) bool {
@@ -221,26 +226,6 @@ func (a *App) attachDuplicateResultStrict(ctx context.Context, j Job, id, report
 	if result == nil {
 		return "", nil
 	}
-	store, e := a.jobStore()
-	if e != nil {
-		return "", &doneResultFailure{code: exitFailure, reason: "hk_unconfigured"}
-	}
-	record, e := store.Get(ctx, id)
-	if e != nil {
-		return "", &doneResultFailure{code: exitFailure, reason: doneResultReason(e)}
-	}
-	if stored, ok := record["result"]; ok && stored != nil {
-		if sameJSONValue(stored, result) {
-			if reportDoc != "" && str(record, "report_doc") != reportDoc {
-				return "", &doneResultFailure{code: exitStateConflict, reason: "report_conflict"}
-			}
-			return "result=equal", nil
-		}
-		a.warn("result conflict: job %s already has a different result; keeping it", id)
-		a.jobResultEvent(id, "conflict", "different_result", "stored result kept")
-		a.captureSentryWarning([]string{"job-result-conflict"}, "JOB_RESULT_CONFLICT "+id, map[string]string{"job": id})
-		return "", &doneResultFailure{code: exitStateConflict, reason: "result_conflict"}
-	}
 	fields := map[string]any{"state": "completed", "result": result}
 	if reportDoc != "" {
 		fields["report_doc"] = reportDoc
@@ -248,8 +233,18 @@ func (a *App) attachDuplicateResultStrict(ctx context.Context, j Job, id, report
 			fields["report_sha256"] = reportSHA
 		}
 	}
-	if e = a.strictCompletedPut(ctx, id, fields, result, reportDoc, spawnReceiptForRepair(j.Events)); e != nil {
+	attached, e := a.strictCompletedPutStatus(ctx, id, fields, result, reportDoc, spawnReceiptForRepair(j.Events))
+	if e != nil {
+		var failure *doneResultFailure
+		if errors.As(e, &failure) && failure.reason == "result_conflict" {
+			a.warn("result conflict: job %s already has a different result; keeping it", id)
+			a.jobResultEvent(id, "conflict", "different_result", "stored result kept")
+			a.captureSentryWarning([]string{"job-result-conflict"}, "JOB_RESULT_CONFLICT "+id, map[string]string{"job": id})
+		}
 		return "", e
+	}
+	if !attached {
+		return "result=equal", nil
 	}
 	if e = a.event(ctx, id, "job.result_attached", map[string]any{"report": report, "report_sha256": digest}); e != nil {
 		return "", e
