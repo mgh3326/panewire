@@ -268,7 +268,7 @@ func TestConsultFloorResolveGradeFlag(t *testing.T) {
 	rows := []CatalogRow{consultFloorRung("opus", "high", "SS", "claude"), consultFloorRung("codex-sol", "high", "SS", "codex")}
 	pools := map[string]PoolView{"claude": riskPool(30, 8), "codex": {Status: "ok", Class: "spend", Blocking: ptrF(40)}}
 	a, _, q := selFixture(t, "S", rows, pools, consultFloorBothPools)
-	q.GateDo = gatePools(map[string]string{"opus": "claude", "codex-sol": "codex"})
+	q.GateDo = gatePools(map[string]string{"opus": "claude", "codex-sol": "codex", "codex-astra": "codex"})
 	serveRouting(t, routingDocV1)
 	out := captureOut(a)
 	if e := a.Run(context.Background(), []string{"resolve", "--role", "consult", "--t", "T1", "--grade", "S+", "--builder-family", "anthropic", "--json"}); e != nil {
