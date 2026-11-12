@@ -1120,6 +1120,9 @@ func (a *App) spawnRemote(ctx context.Context, s Spawn, brief string, c *placeCa
 		return candResult{note: "repo_unmappable"}
 	}
 	if s.DryRun {
+		if e := a.checkDryRunAdmission(ctx, s, h); e != nil {
+			return candResult{stop: e}
+		}
 		payload, e := a.prepareBriefForHost(s, c.name, brief)
 		if e != nil {
 			return candResult{stop: e}
@@ -1456,8 +1459,18 @@ func (a *App) placeForced(ctx context.Context, s Spawn, brief string) (bool, map
 	if seat, ok := a.Policy.Profiles[s.Profile]; ok && seat.Capability != "standard" && !boolean(h, seat.Capability, false) {
 		return true, nil, fail(exitConfig, "host %s lacks capability %s", s.Host, seat.Capability)
 	}
-	if _, _, e := a.taskPrecheck(ctx, s); e != nil {
+	task, _, e := a.taskPrecheck(ctx, s)
+	if e != nil {
 		return true, nil, e
+	}
+	s.TaskGrade = s.Grade
+	if s.TaskGrade == "" {
+		if m := taskMarker.FindStringSubmatch(task.Title); m != nil {
+			s.TaskGrade = strings.ToUpper(m[1])
+		}
+	}
+	if topRoutingRole(s.RoutingRole) {
+		s.TaskGrade = ""
 	}
 	emit := func() {
 		if s.DryRun {
@@ -1491,6 +1504,11 @@ func (a *App) placeForced(ctx context.Context, s Spawn, brief string) (bool, map
 		rec["quota_gate"] = j
 		if err != nil {
 			return candResult{stop: err}
+		}
+		if s.DryRun {
+			if err := a.checkDryRunAdmission(ctx, s, c.cfg); err != nil {
+				return candResult{stop: err}
+			}
 		}
 		return a.spawnRemote(ctx, s, brief, &c, a.localRepo(ctx, s.CWD), true)
 	}

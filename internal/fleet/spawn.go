@@ -697,7 +697,7 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 		// already resolved from the catalog by selectProfile, which this
 		// dry run does not repeat.
 		if !autoSel {
-			if _, e := a.checkLaunchRow(ctx, s, seat, a.spawnQuotaRequest(s, seat, effort), effort, selEffort, grade, builderFamily, autoSel); e != nil {
+			if _, e := a.checkSpawnAdmission(ctx, s, seat, a.spawnQuotaRequest(s, seat, effort), effort, selEffort, grade, builderFamily, autoSel, a.Config.Local); e != nil {
 				return e
 			}
 		}
@@ -1047,7 +1047,7 @@ func (a *App) spawnQuotaRequest(s Spawn, seat Seat, effort string) QuotaRequest 
 // request resolves to, then the seat's own rules (grade cover, E6 marker). A
 // dry run runs it too, so the preview refuses what a real spawn refuses. It
 // takes no gate receipt, lease or reservation.
-func (a *App) checkLaunchRow(ctx context.Context, s Spawn, seat Seat, qr QuotaRequest, effort, selEffort, grade, builderFamily string, autoSel bool) (Launch, error) {
+func (a *App) checkLaunchRow(ctx context.Context, s Spawn, seat Seat, qr QuotaRequest, effort, selEffort, grade, builderFamily string, autoSel bool, host map[string]any) (Launch, error) {
 	launch, e := a.Quota.Launch(ctx, qr)
 	if e != nil {
 		// Preserve the gate's role/quota refusal even when the catalog also
@@ -1072,10 +1072,34 @@ func (a *App) checkLaunchRow(ctx context.Context, s Spawn, seat Seat, qr QuotaRe
 			return Launch{}, fail(exitSeatRefused, "NO_ROLE_CANDIDATE: model %s in harness %s cannot consult", launch.ModelID, seat.Kind)
 		}
 	}
-	if e = seat.Check(launch, s.Role, grade, builderFamily, a.e6Arm(s.E6Arm), a.Config.Local); e != nil {
+	if e = seat.Check(launch, s.Role, grade, builderFamily, a.e6Arm(s.E6Arm), host); e != nil {
 		return Launch{}, e
 	}
 	return launch, nil
+}
+
+// checkSpawnAdmission covers the catalog row, seat rules and escalation gate
+// shared by a dry-run and a real spawn. It does not read quota or claim a seat.
+func (a *App) checkSpawnAdmission(ctx context.Context, s Spawn, seat Seat, qr QuotaRequest, effort, selEffort, grade, builderFamily string, autoSel bool, host map[string]any) (Launch, error) {
+	launch, err := a.checkLaunchRow(ctx, s, seat, qr, effort, selEffort, grade, builderFamily, autoSel, host)
+	if err != nil {
+		return Launch{}, err
+	}
+	familyGate := s.route.familyAdmitsGate(launch.row())
+	if (seat.Gate != "" || seat.Kind == "agy" && launch.Gate == escalationGate) && launch.Gate != defaultGate && !s.AllowEscalation && !familyGate {
+		return Launch{}, fail(exitSeatRefused, "%s is a %s rung; pass --allow-escalation", seat.Canon, launch.Gate)
+	}
+	return launch, nil
+}
+
+func (a *App) checkDryRunAdmission(ctx context.Context, s Spawn, host map[string]any) error {
+	seat, ok := a.Policy.Profiles[s.Profile]
+	if !ok {
+		return fail(exitConfig, "missing seat policy for %s", s.Profile)
+	}
+	effort := firstNonempty(s.Effort, seat.Effort)
+	_, err := a.checkSpawnAdmission(ctx, s, seat, a.spawnQuotaRequest(s, seat, effort), effort, effort, s.TaskGrade, s.ParentFamily, false, host)
+	return err
 }
 
 // admitLaunch resolves the launch rung for a selected seat and asks the quota
@@ -1083,17 +1107,9 @@ func (a *App) checkLaunchRow(ctx context.Context, s Spawn, seat Seat, qr QuotaRe
 // `panewire delegate --headless`; it claims and writes nothing.
 func (a *App) admitLaunch(ctx context.Context, s Spawn, seat Seat, effort, selEffort, grade, builderFamily string, autoSel bool) (Launch, string, error) {
 	qr := a.spawnQuotaRequest(s, seat, effort)
-	launch, e := a.checkLaunchRow(ctx, s, seat, qr, effort, selEffort, grade, builderFamily, autoSel)
+	launch, e := a.checkSpawnAdmission(ctx, s, seat, qr, effort, selEffort, grade, builderFamily, autoSel, a.Config.Local)
 	if e != nil {
 		return Launch{}, "", e
-	}
-	// A gate alias is the pool gate for a whole family of spellings, so it
-	// cannot tell an escalation rung from a default one; the launch row can.
-	// An agy profile is gated under its own name now (hk 3859), so the launch
-	// row's escalation gate is checked for it too.
-	familyGate := s.route.familyAdmitsGate(launch.row())
-	if (seat.Gate != "" || seat.Kind == "agy" && launch.Gate == escalationGate) && launch.Gate != "default" && !s.AllowEscalation && !familyGate {
-		return Launch{}, "", fail(exitSeatRefused, "%s is a %s rung; pass --allow-escalation", seat.Canon, launch.Gate)
 	}
 	qr.Effort = launch.Effort
 	accountPool, _, _ := strings.Cut(s.AccountKey, ":")
