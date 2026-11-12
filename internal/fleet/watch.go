@@ -188,11 +188,14 @@ func (a *App) watch(ctx context.Context, args []string) error {
 			}
 		}
 		credit, creditPending := pendingCreditRejection(j)
-		if (j.Reaped || j.Terminal && !handOff.active) && !creditPending {
-			return nil
-		}
 		agents, e := a.agents(ctx)
 		if e != nil && !creditPending {
+			if workerEscalated(j) {
+				return a.releaseQuota(ctx, j)
+			}
+			if j.Reaped || j.Terminal && !handOff.active {
+				return nil
+			}
 			return e
 		}
 		present := false
@@ -202,7 +205,7 @@ func (a *App) watch(ctx context.Context, args []string) error {
 				present, paneAgent = true, ag
 			}
 		}
-		if !creditPending && !j.Terminal && !j.Reaped && present {
+		if !creditPending && present {
 			if stop, ok := a.creditStopped(j, paneAgent); ok && !stop.CreditExhaustedAt.Equal(lastCredit) && !creditRejectionPublished(j, stop) {
 				credit = stop
 				payload := map[string]any{"pool": stop.Pool, "at": stop.CreditExhaustedAt.UTC().Format(time.RFC3339Nano)}
@@ -217,8 +220,11 @@ func (a *App) watch(ctx context.Context, args []string) error {
 				creditAttempts++
 				a.warn("credit rejection publication failed (attempt %d): %v", creditAttempts, err)
 				if creditAttempts >= 3 {
-					if j.Terminal || j.Reaped {
+					if j.Terminal || j.Reaped || j.QuotaRole() == "counsel" {
 						return nil
+					}
+					if workerEscalated(j) {
+						return a.releaseQuota(ctx, j)
 					}
 					return a.quotaStopLost(ctx, j, credit, true)
 				}
@@ -230,7 +236,7 @@ func (a *App) watch(ctx context.Context, args []string) error {
 			creditAttempts = 0
 			lastCredit = credit.CreditExhaustedAt
 			published := map[string]any{"pool": credit.Pool, "at": credit.CreditExhaustedAt.UTC().Format(time.RFC3339Nano)}
-			if !j.Terminal && !j.Reaped && j.QuotaRole() != "counsel" && !handOff.active {
+			if !j.Terminal && !j.Reaped && !workerEscalated(j) && j.QuotaRole() != "counsel" && !handOff.active {
 				if a.QuotaHandOffGrace <= 0 {
 					if err := a.quotaStopLost(ctx, j, credit, true); err != nil {
 						return err

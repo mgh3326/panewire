@@ -220,7 +220,7 @@ func TestOmpCreditOpenAIProviderError(t *testing.T) {
 		t.Fatal(err)
 	}
 	path := filepath.Join(dir, "session.jsonl")
-	header := "{\"type\":\"session\",\"cwd\":\"/tmp/project\"}\n"
+	header := "{\"type\":\"title\",\"v\":1}\n{\"type\":\"session\",\"cwd\":\"/tmp/project\"}\n"
 	rejection := `{"type":"message","timestamp":"2026-01-01T00:00:00Z","message":{"role":"assistant","stopReason":"error","errorStatus":429,"provider":"openai","errorMessage":"429 {\"error\":{\"code\":\"insufficient_quota\",\"message\":\"Quota exceeded\"}}"}}` + "\n"
 	job := Job{Receipt: map[string]any{"pool": "openai-api", "cwd": "/tmp/project", "harness_session": map[string]any{"kind": "omp", "id": path}}}
 	for _, tc := range []struct {
@@ -252,7 +252,7 @@ func TestOmpCreditSessionID(t *testing.T) {
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		t.Fatal(err)
 	}
-	data := `{"type":"session","id":"session-123","cwd":"/tmp/project"}` + "\n" + `{"type":"message","timestamp":"2026-01-01T00:00:00Z","message":{"role":"assistant","stopReason":"error","errorStatus":429,"provider":"openai","errorMessage":"429 {\"error\":{\"code\":\"insufficient_quota\"}}"}}` + "\n"
+	data := `{"type":"title","v":1}` + "\n" + `{"type":"session","id":"session-123","cwd":"/tmp/project"}` + "\n" + `{"type":"message","timestamp":"2026-01-01T00:00:00Z","message":{"role":"assistant","stopReason":"error","errorStatus":429,"provider":"openai","errorMessage":"429 {\"error\":{\"code\":\"insufficient_quota\"}}"}}` + "\n"
 	if err := os.WriteFile(filepath.Join(dir, "one.jsonl"), []byte(data), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -440,5 +440,87 @@ func TestCreditSpawnRejectsMismatchedAdmittedAccount(t *testing.T) {
 	}
 	if err := a.Spawn(context.Background(), s); err == nil || !strings.Contains(err.Error(), "reading account") {
 		t.Fatalf("mismatched admitted account error = %v", err)
+	}
+}
+
+func TestCreditTerminalPaneStillPublishes(t *testing.T) {
+	hk := &hkBenchFake{}
+	srv := httptest.NewServer(hk)
+	defer srv.Close()
+	a, _, _, _ := quotaStopFixture(t, "worker", "idle", "")
+	t.Setenv("HANDOFFKEEP_URL", "https://hk.test.invalid")
+	t.Setenv("HANDOFFKEEP_TOKEN_SVC_PANEWIRE", "test-token")
+	a.Config.Quota = map[string]any{"url": srv.URL, "accounts": map[string]any{"anthropic-api": "0123456789abcdef"}}
+	creditWatchSession(t, a, "worker")
+	if err := a.Sleep(context.Background(), 2*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	putEvent(t, a, "j", "job.completed", map[string]any{})
+	job, err := a.job("j")
+	if err != nil || !job.Terminal {
+		t.Fatalf("fixture is not terminal: %+v, %v", job, err)
+	}
+	if err := a.watch(context.Background(), []string{"j"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(hk.manual) != 1 {
+		t.Fatalf("terminal job published %d observations, want 1", len(hk.manual))
+	}
+}
+
+func TestCreditCounselFailureKeepsJobLive(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { http.Error(w, "unavailable", 503) }))
+	defer srv.Close()
+	a, _, jobs, _ := quotaStopFixture(t, "counsel", "idle", "")
+	t.Setenv("HANDOFFKEEP_URL", "https://hk.test.invalid")
+	t.Setenv("HANDOFFKEEP_TOKEN_SVC_PANEWIRE", "test-token")
+	a.Config.Quota = map[string]any{"url": srv.URL, "accounts": map[string]any{"anthropic-api": "0123456789abcdef"}}
+	creditWatchSession(t, a, "counsel")
+	if err := a.watch(context.Background(), []string{"j"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := str(jobs.record(t, "j"), "state"); got != "spawned" {
+		t.Fatalf("counsel state = %q, want spawned", got)
+	}
+}
+
+func TestCreditEscalationReleasesWhenHerdrUnavailable(t *testing.T) {
+	a, runner, _, _ := quotaStopFixture(t, "worker", "idle", "")
+	putEvent(t, a, "j", "job.escalate", map[string]any{})
+	runner.Do = func(c Command) Result {
+		if c.Name == "herdr" {
+			return Result{Code: 1, Err: "offline"}
+		}
+		return Result{}
+	}
+	if err := a.watch(context.Background(), []string{"j"}); err != nil {
+		t.Fatalf("escalation failed when herdr unavailable: %v", err)
+	}
+	if st, _ := ledgerState(t, a, "j"); st != "released" {
+		t.Fatalf("quota state = %s, want released", st)
+	}
+}
+
+func TestCreditEscalatedJobDoesNotAnnounceStop(t *testing.T) {
+	hk := &hkBenchFake{}
+	srv := httptest.NewServer(hk)
+	defer srv.Close()
+	a, _, _, _ := quotaStopFixture(t, "worker", "idle", "")
+	t.Setenv("HANDOFFKEEP_URL", "https://hk.test.invalid")
+	t.Setenv("HANDOFFKEEP_TOKEN_SVC_PANEWIRE", "test-token")
+	a.Config.Quota = map[string]any{"url": srv.URL, "accounts": map[string]any{"anthropic-api": "0123456789abcdef"}}
+	creditWatchSession(t, a, "worker")
+	putEvent(t, a, "j", "job.escalate", map[string]any{})
+	if err := a.watch(context.Background(), []string{"j"}); err != nil {
+		t.Fatal(err)
+	}
+	if p := lostPayload(t, a); p != nil {
+		t.Fatalf("escalated job announced quota stop: %v", p)
+	}
+	if len(hk.manual) != 1 {
+		t.Fatalf("escalated job published %d observations, want 1", len(hk.manual))
+	}
+	if state, _ := ledgerState(t, a, "j"); state != "released" {
+		t.Fatalf("escalated job quota state = %s, want released", state)
 	}
 }

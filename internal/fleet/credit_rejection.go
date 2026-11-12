@@ -82,12 +82,8 @@ func ompCreditStop(home string, j Job) (quotastop.Stop, bool) {
 	if err != nil || !info.Mode().IsRegular() {
 		return quotastop.Stop{}, false
 	}
-	header, err := bufio.NewReader(io.LimitReader(f, 64<<10)).ReadBytes('\n')
-	var h struct {
-		Type string `json:"type"`
-		CWD  string `json:"cwd"`
-	}
-	if err != nil || json.Unmarshal(header, &h) != nil || h.Type != "session" || h.CWD == "" || h.CWD != str(j.Receipt, "cwd") {
+	h, err := readOMPSessionHeader(f)
+	if err != nil || h.CWD == "" || h.CWD != str(j.Receipt, "cwd") {
 		return quotastop.Stop{}, false
 	}
 	const maxTail = 4 << 20
@@ -183,6 +179,35 @@ func ompCreditStop(home string, j Job) (quotastop.Stop, bool) {
 	return quotastop.Stop{Pool: pool, CreditExhaustedAt: at}, true
 }
 
+type ompSessionHeader struct {
+	Type string `json:"type"`
+	ID   string `json:"id"`
+	CWD  string `json:"cwd"`
+}
+
+// Omp writes a title prologue before the session header. Bound the search
+// and reject other records before the header rather than guessing an identity.
+func readOMPSessionHeader(r io.Reader) (ompSessionHeader, error) {
+	reader := bufio.NewReader(io.LimitReader(r, 64<<10))
+	for i := 0; i < 8; i++ {
+		line, err := reader.ReadBytes('\n')
+		if err != nil {
+			break
+		}
+		var header ompSessionHeader
+		if json.Unmarshal(line, &header) != nil {
+			break
+		}
+		if header.Type == "session" {
+			return header, nil
+		}
+		if header.Type != "title" {
+			break
+		}
+	}
+	return ompSessionHeader{}, fmt.Errorf("session header unavailable")
+}
+
 // findOMPSession accepts an ID only when one bounded, confined search finds a
 // unique matching session header for the job's working directory.
 func findOMPSession(root *os.Root, id, cwd string) (string, error) {
@@ -206,10 +231,9 @@ func findOMPSession(root *os.Root, id, cwd string) (string, error) {
 		if err != nil {
 			return err
 		}
-		line, err := bufio.NewReader(io.LimitReader(f, 64<<10)).ReadBytes('\n')
+		header, err := readOMPSessionHeader(f)
 		f.Close()
-		var header struct{ Type, ID, CWD string }
-		if err == nil && json.Unmarshal(line, &header) == nil && header.Type == "session" && header.ID == id && header.CWD == cwd {
+		if err == nil && header.ID == id && header.CWD == cwd {
 			if found != "" {
 				return fmt.Errorf("ambiguous session identity")
 			}
