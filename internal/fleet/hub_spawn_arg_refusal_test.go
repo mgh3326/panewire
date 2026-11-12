@@ -44,6 +44,7 @@ func TestHubSpawnDryRunRequiresEscalationOptIn(t *testing.T) {
 	a, s, _, hub, _ := hubFixture(t, gitState{pushed: true}, "wk/feat", hubHosts())
 	setHubAgyPresence(a)
 	s.DryRun, s.Profile, s.Host, s.OverrideReason, s.T, s.Label = true, "agy-sonnet46", "h1", "fixture", "T1", "job-a"
+	s.Containment = "hk:4174"
 	s.Prompt = writeBrief(t, a)
 	a.Quota = &fakeQuota{LaunchValue: Launch{Profile: "agy-sonnet46", ModelID: "claude-sonnet-4-6", Grade: "B", Gate: escalationGate, Pool: "agy"}, GateDo: gatePools(map[string]string{"agy-sonnet46": "agy"})}
 
@@ -58,6 +59,7 @@ func TestHubSpawnDryRunRequiresEscalationOptIn(t *testing.T) {
 	a, s, _, hub, _ = hubFixture(t, gitState{pushed: true}, "wk/feat", hubHosts())
 	setHubAgyPresence(a)
 	s.DryRun, s.Profile, s.Host, s.OverrideReason, s.T, s.Label, s.AllowEscalation = true, "agy-sonnet46", "h1", "fixture", "T1", "job-a", true
+	s.Containment = "hk:4174"
 	s.Prompt = writeBrief(t, a)
 	a.Quota = &fakeQuota{LaunchValue: Launch{Profile: "agy-sonnet46", ModelID: "claude-sonnet-4-6", Grade: "B", Gate: escalationGate, Pool: "agy"}, GateDo: gatePools(map[string]string{"agy-sonnet46": "agy"})}
 	if err := a.Spawn(context.Background(), s); err != nil {
