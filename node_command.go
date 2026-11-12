@@ -168,7 +168,7 @@ func validNodeJobName(name string) bool {
 	if name == "" || len(name) > 128 || name[0] == '-' || name[0] == '.' {
 		return false
 	}
-	return !nodeHasControlByte(name) && !strings.ContainsAny(name, "/\\ ") && !strings.Contains(name, "..")
+	return !hasControlByte(name) && !strings.ContainsAny(name, "/\\ ") && !strings.Contains(name, "..")
 }
 
 func validNodeCommandPath(path string) bool {

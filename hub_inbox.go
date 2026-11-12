@@ -186,7 +186,7 @@ func (h *HubServer) receiveInbox(kind string, event *hubJobEventPayload, sender 
 	class := h.inbox.policy.classify(lane, kind, *event, replay)
 	// hk 3426: a design lane keeps a worker's routine result in its inbox; no
 	// owner-completion or idle promotion below puts it in the pane.
-	quiet := h.inbox.policy.designQuiet(lane, kind, *event, func() bool { return h.jobHasTask(event.JobID) }, func() bool { return h.laneEventFromWorker(senderID, event.PaneID) })
+	quiet := h.inbox.policy.designQuiet(lane, kind, *event, func() bool { return h.jobHasTask(event.JobID) }, func() bool { return h.laneEventFromWorker(senderID, event.PaneID, lane) })
 	if quiet || (kind == "job.completed" && event.Late) {
 		class = "inbox"
 	}
@@ -530,16 +530,25 @@ func (h *HubServer) flushInbox() {
 	// A held-batching failure must not starve ordinary digests or batches
 	// that are already pending for other lanes.
 	if err := h.makeHeldBatches(); err != nil {
+		if h.closeCtx.Err() != nil {
+			return
+		}
 		h.logger.Error("held inbox batching failed; continuing with ordinary batches")
 		failed = true
 	}
 	if err := h.inbox.store.makeBatches(h.now().UTC()); err != nil {
+		if h.closeCtx.Err() != nil {
+			return
+		}
 		h.logger.Error("inbox batching failed")
 		failed = true
 		return
 	}
 	batches, err := h.inbox.store.pendingBatches()
 	if err != nil {
+		if h.closeCtx.Err() != nil {
+			return
+		}
 		h.logger.Error("inbox batch listing failed")
 		failed = true
 		return

@@ -37,16 +37,18 @@ func (peer *hubClientConnection) relayWire(event hubClientEvent) any {
 	return hubClientWireEvent(event)
 }
 
-// laneEventFromWorker reports whether a lane.event came from a worker's own
-// pane: the authenticated sending node's latest heartbeat lists a job in that
-// pane, and the hub holds the job live (not completed, not orphaned) on that
-// node with role worker. Every spawned worker, tester, reviewer and counsel
-// claims as role worker (internal/fleet/spawn.go), and the hub keeps only
-// worker or captain (normalizeHubActiveJobMetadata), so a builder or captain
-// is not one. An empty machine (a hub notice, HTTP ingress, a replay) or pane
-// (an older node) is never a worker's.
-func (h *HubServer) laneEventFromWorker(machine, pane string) bool {
-	if machine == "" || pane == "" {
+// laneEventFromWorker reports whether a lane.event came from a worker of lane:
+// the authenticated sending node's latest heartbeat lists a job in that pane,
+// and the hub holds the job live (not completed, not orphaned) on that node
+// with role worker and OwnerLane == lane. The owner check makes the event lane's
+// own: another design lane's worker in the same pane is not lane's. Every
+// spawned worker, tester, reviewer and counsel claims as role worker
+// (internal/fleet/spawn.go), and the hub keeps only worker or captain
+// (normalizeHubActiveJobMetadata), so a builder or captain is not one. An empty
+// machine (a hub notice, HTTP ingress, a replay), pane (an older node) or lane
+// is never a worker's.
+func (h *HubServer) laneEventFromWorker(machine, pane, lane string) bool {
+	if machine == "" || pane == "" || lane == "" {
 		return false
 	}
 	h.mu.Lock()
@@ -59,7 +61,7 @@ func (h *HubServer) laneEventFromWorker(machine, pane string) bool {
 		if active.Pane != pane {
 			continue
 		}
-		if job := h.jobs[id]; job != nil && !job.Completed && !job.Orphaned && job.Node == machine && job.Pane == pane && job.Role == "worker" {
+		if job := h.jobs[id]; job != nil && !job.Completed && !job.Orphaned && job.Node == machine && job.Pane == pane && job.Role == "worker" && job.OwnerLane == lane {
 			return true
 		}
 	}
