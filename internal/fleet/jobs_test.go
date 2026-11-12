@@ -19,8 +19,75 @@ import (
 	"github.com/mgh3326/panewire/internal/arbiter"
 )
 
+// hkJobTerminal are the states hk never rewrites (handoffkeep
+// internal/store/jobs.go, jobTerminal).
+var hkJobTerminal = map[string]bool{"completed": true, "escalated": true, "lost": true}
+
+// hkJobRank orders the states: a write never moves one backwards.
+var hkJobRank = map[string]int{"claimed": 0, "spawned": 1, "completed": 2, "escalated": 2, "lost": 2}
+
+// hkJobUpdateRefusal is hk's UpdateJob verdict on fields written over rec,
+// "" when hk accepts it: a result needs state completed; a terminal record
+// is never rewritten except by a usage-only update (usage, skills,
+// skills_supported) or the once-only late pin of report_doc together with
+// report_sha256 (hk 4354: allowed while the record holds neither, idempotent
+// for the same two values, job_state_conflict for any other); states only
+// move forward; completed needs a spawned record; a pin needs a report doc.
+// It returns the HTTP status and the error code hk answers with.
+func hkJobUpdateRefusal(rec, fields map[string]any) (int, string) {
+	state := str(rec, "state")
+	if _, hasResult := fields["result"]; hasResult && fields["state"] != "completed" {
+		return http.StatusBadRequest, "invalid_context"
+	}
+	if _, pin := fields["report_sha256"]; pin && str(fields, "report_doc") == "" && str(rec, "report_doc") == "" {
+		return http.StatusBadRequest, "invalid_context"
+	}
+	if hkJobTerminal[state] {
+		switch {
+		case hkUsageOnlyUpdate(fields):
+		case hkLatePin(fields):
+			held, sha := str(rec, "report_doc"), str(rec, "report_sha256")
+			if held == "" && sha == "" || held == str(fields, "report_doc") && sha == str(fields, "report_sha256") {
+				return 0, ""
+			}
+			return http.StatusConflict, "job_state_conflict"
+		default:
+			return http.StatusConflict, "job_state_conflict"
+		}
+	}
+	if next := str(fields, "state"); next != "" {
+		if hkJobRank[next] < hkJobRank[state] || next == "completed" && state != "spawned" {
+			return http.StatusConflict, "job_state_conflict"
+		}
+	}
+	return 0, ""
+}
+
+// hkUsageOnlyUpdate is JobUpdate.usageOnly: some of usage, skills and
+// skills_supported, and nothing else.
+func hkUsageOnlyUpdate(fields map[string]any) bool {
+	found := false
+	for k := range fields {
+		switch k {
+		case "usage", "skills", "skills_supported":
+			found = true
+		default:
+			return false
+		}
+	}
+	return found
+}
+
+// hkLatePin is an update of exactly report_doc and report_sha256.
+func hkLatePin(fields map[string]any) bool {
+	_, doc := fields["report_doc"]
+	_, sha := fields["report_sha256"]
+	return doc && sha && len(fields) == 2
+}
+
 // fakeJobStore is an in-memory JobStore mirroring the hk write rules: a claim
-// replays only an identical claim, and a taken id conflicts.
+// replays only an identical claim, a taken id conflicts, and Put applies
+// hkJobUpdateRefusal.
 type fakeJobStore struct {
 	mu      sync.Mutex
 	records map[string]map[string]any
@@ -45,6 +112,16 @@ func (s *fakeJobStore) Claim(_ context.Context, jobID, taskID, host string) erro
 	s.records[jobID] = map[string]any{"job_id": jobID, "task_id": taskID, "host": host, "state": "claimed"}
 	return nil
 }
+
+// claimSpawned claims the record and leaves it spawned, as a started spawn
+// does: hk completes only a spawned record.
+func (s *fakeJobStore) claimSpawned(ctx context.Context, jobID, taskID, host string) error {
+	if e := s.Claim(ctx, jobID, taskID, host); e != nil {
+		return e
+	}
+	return s.Put(ctx, jobID, map[string]any{"state": "spawned"})
+}
+
 func (s *fakeJobStore) Put(_ context.Context, jobID string, fields map[string]any) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -52,13 +129,12 @@ func (s *fakeJobStore) Put(_ context.Context, jobID string, fields map[string]an
 	if s.putErr != nil {
 		return s.putErr
 	}
-	// handoffkeep's checkJobUpdate: a result needs state=completed.
-	if _, hasResult := fields["result"]; hasResult && fields["state"] != "completed" {
-		return &BackendError{Status: http.StatusBadRequest, Code: "invalid_context"}
-	}
 	rec, ok := s.records[jobID]
 	if !ok {
 		return errJobNotFound
+	}
+	if status, code := hkJobUpdateRefusal(rec, fields); status != 0 {
+		return &BackendError{Status: status, Code: code}
 	}
 	for k, v := range fields {
 		rec[k] = v
@@ -191,14 +267,16 @@ func (h *fakeHK) serve(w http.ResponseWriter, r *http.Request) {
 				h.fail(w, 404, "not_found")
 				return
 			}
-			if slices.Contains([]string{"completed", "escalated", "lost"}, str(rec, "state")) {
-				h.fail(w, 409, "job_state_conflict")
-				return
-			}
 			var fields map[string]any
 			if e := json.NewDecoder(r.Body).Decode(&fields); e != nil {
 				h.fail(w, 400, "invalid_context")
 				return
+			}
+			if hkJobTerminal[str(rec, "state")] {
+				if status, code := hkJobUpdateRefusal(rec, fields); status != 0 {
+					h.fail(w, status, code)
+					return
+				}
 			}
 			h.putBodies = append(h.putBodies, fields)
 			if len(h.putStatuses) > 0 {

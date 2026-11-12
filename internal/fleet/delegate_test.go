@@ -192,7 +192,7 @@ func (e *delegateEnv) worker(t *testing.T, answer string, seen *[]Spawn, chosen 
 		}
 		res, _ := json.Marshal(body)
 		store := a.JobStore.(*fakeJobStore)
-		if err := store.Claim(ctx, s.Job, "42", "test-host"); err != nil {
+		if err := store.claimSpawned(ctx, s.Job, "42", "test-host"); err != nil {
 			return err
 		}
 		_ = store.Put(ctx, s.Job, map[string]any{"state": "completed", "result": json.RawMessage(res)})

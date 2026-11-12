@@ -88,7 +88,7 @@ func TestLifecycleUsesExplicitNodeRoot(t *testing.T) {
 	a.Jobs = root
 	seedJob(t, a, "j", "worker")
 	store := a.JobStore.(*fakeJobStore)
-	if err := store.Claim(t.Context(), "j", "42", "test-host"); err != nil {
+	if err := store.claimSpawned(t.Context(), "j", "42", "test-host"); err != nil {
 		t.Fatal(err)
 	}
 	path := filepath.Join(root, "j", "report.md")

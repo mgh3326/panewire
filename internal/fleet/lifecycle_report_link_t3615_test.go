@@ -35,7 +35,7 @@ func doneReportLink(t *testing.T, task string) (put, rec map[string]any, eventSH
 	}
 	putEvent(t, a, "j", "job.claim", claim)
 	putEvent(t, a, "j", "job.spawned", map[string]any{"pane_id": "w:p1", "tab_id": "w:t1", "label": "agent-a", "profile": "cmd-dsflash41", "family": "deepseek", "keep": false})
-	if e := a.JobStore.Claim(ctx, "j", task, a.machine()); e != nil {
+	if e := a.JobStore.(*fakeJobStore).claimSpawned(ctx, "j", task, a.machine()); e != nil {
 		t.Fatal(e)
 	}
 	path := filepath.Join(a.Jobs, "j", "report.md")

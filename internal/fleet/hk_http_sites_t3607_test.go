@@ -110,7 +110,7 @@ func asCLI(a hkAnswerFixture) cliOut {
 func seedDoneJob(t *testing.T, a *App) {
 	t.Helper()
 	seedJob(t, a, "j", "worker")
-	if e := a.JobStore.Claim(context.Background(), "j", "42", a.machine()); e != nil {
+	if e := a.JobStore.(*fakeJobStore).claimSpawned(context.Background(), "j", "42", a.machine()); e != nil {
 		t.Fatal(e)
 	}
 }
