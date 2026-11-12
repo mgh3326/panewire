@@ -563,6 +563,7 @@ func executables(kind string) []string {
 const (
 	defaultBriefSubmitTimeoutMS = 120000
 	defaultBriefSubmitRetryMS   = 15000
+	briefSubmitWaitSlice        = 5 * time.Second
 	// briefSubmitReserve leaves the node time to capture the pane and finish
 	// cleanup (10s bound plus the 2s settle) inside its spawn budget.
 	briefSubmitReserve = 20 * time.Second
@@ -605,10 +606,27 @@ func (a *App) deliver(ctx context.Context, kind, pane, brief string) error {
 	polls := int(timeout / time.Second)
 	nextReturn := a.Now().Add(retry)
 	residue := false
+	useWait := kind != "cmd"
 	for n := 1; n <= polls && a.Now().Before(deadline); n++ {
-		status, e := a.status(ctx, pane)
-		if e != nil {
-			return e
+		status := ""
+		wake := ""
+		if useWait {
+			left := min(briefSubmitWaitSlice, deadline.Sub(a.Now()), nextReturn.Sub(a.Now()))
+			if left >= time.Millisecond {
+				r := a.call(ctx, "herdr", "agent", "wait", pane, "--until", "working", "--until", "blocked", "--timeout", fmt.Sprint(left.Milliseconds()))
+				wake = briefWaitOutcome(r)
+				if wake == "" {
+					useWait = false
+				} else if wake == "working" {
+					status = wake
+				}
+			}
+		}
+		if status == "" {
+			status, e = a.status(ctx, pane)
+			if e != nil {
+				return e
+			}
 		}
 		visible, e := a.visible(ctx, pane)
 		if e != nil {
@@ -620,8 +638,10 @@ func (a *App) deliver(ctx context.Context, kind, pane, brief string) error {
 		if !residue && (status == "working" || submittedBrief(kind, visible, brief) && !submittedBrief(kind, initial, brief)) {
 			return nil
 		}
-		if e = a.Sleep(ctx, time.Second); e != nil {
-			return e
+		if !useWait || wake != "timeout" {
+			if e = a.Sleep(ctx, time.Second); e != nil {
+				return e
+			}
 		}
 		// Retry the submit key, never paste a second copy of an ambiguous payload.
 		// The cadence is wall-clock: one poll can take seconds on a loaded host.
@@ -647,6 +667,32 @@ func (a *App) deliver(ctx context.Context, kind, pane, brief string) error {
 		return fail(exitSubmitUnconfirmed, "BRIEF_SUBMISSION_UNCONFIRMED: session=%s pane=%s; no working transition or submitted brief turn%s", a.herdrSession(), pane, note)
 	}
 	return fail(exitSubmitUnconfirmed, "BRIEF_SUBMISSION_UNCONFIRMED: session=%s pane=%s; no working transition or submitted brief turn", a.herdrSession(), pane)
+}
+
+// briefWaitOutcome accepts only the lifecycle responses understood by deliver.
+func briefWaitOutcome(r Result) string {
+	var reply struct {
+		Result struct {
+			Type  string `json:"type"`
+			Agent *Agent `json:"agent"`
+		} `json:"result"`
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if json.Unmarshal([]byte(r.Out), &reply) != nil {
+		return ""
+	}
+	if r.Code != 0 && reply.Error.Code == "timeout" {
+		return "timeout"
+	}
+	if r.Code == 0 && reply.Result.Type == "agent_info" && reply.Result.Agent != nil {
+		switch reply.Result.Agent.Status {
+		case "working", "blocked":
+			return reply.Result.Agent.Status
+		}
+	}
+	return ""
 }
 
 // briefSubmitWindow is how long deliver waits for a turn to start and how often
