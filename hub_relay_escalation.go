@@ -102,7 +102,7 @@ func (h *HubServer) escalateUnconfirmedRelayAttempt(machine string, dropped rela
 	if !relayDroppedIsUnconfirmed(dropped.Reason) || dropped.OriginalEventID < 1 || dropped.Lane == "" || h.handoffkeep == nil {
 		return
 	}
-	var design string
+	design := h.designLaneFor(dropped.Lane)
 	retry := func(why string) {
 		if attempt >= len(unconfirmedEscalationBackoff) {
 			if design != "" {
@@ -124,7 +124,6 @@ func (h *HubServer) escalateUnconfirmedRelayAttempt(machine string, dropped rela
 	if !found || record.DeliveredAt != "" || !escalatesWhenUnconfirmed(record) {
 		return
 	}
-	design = h.designLaneFor(dropped.Lane)
 	if design == "" {
 		h.logger.Warn("relay unconfirmed escalation has no design lane", "event_id", record.ID, "lane", dropped.Lane, "reason", dropped.Reason)
 		return
@@ -152,7 +151,11 @@ func (h *HubServer) escalateUnconfirmedRelayAttempt(machine string, dropped rela
 	}
 	result := h.relayLaneEventContext(ctx, event, nil)
 	switch {
-	case result.Duplicate && attempt > 0 || result.ID != 0 && !result.Duplicate:
+	case result.ID != 0 && result.Duplicate && attempt > 0:
+		// The first writer's body is authoritative. Clear no folds from this
+		// retry's newly built note; they were not in the stored text.
+		h.unconfirmedNotices.record(design, dropped.Lane, record.ID, unconfirmedNoticeNote{}, h.now())
+	case result.ID != 0 && !result.Duplicate:
 		// Stored: a new row, or a retry whose earlier post was stored though
 		// its reply was lost.
 		h.unconfirmedNotices.record(design, dropped.Lane, record.ID, note, h.now())
@@ -256,11 +259,12 @@ type unconfirmedNoticeWindows struct {
 }
 
 type unconfirmedNoticeWindow struct {
-	told   time.Time           // when the last stored notice was recorded; zero for none
-	row    int64               // the row that notice reports
-	folded map[int64]time.Time // rows folded and not yet announced, by fold time
-	over   int                 // folds past unconfirmedNoticeFoldLimit, counted only
-	overAt time.Time           // the first of them
+	told     time.Time           // when the last stored notice was recorded; zero for none
+	row      int64               // the row that notice reports
+	folded   map[int64]time.Time // rows folded and not yet announced, by fold time
+	over     int                 // folds past unconfirmedNoticeFoldLimit, counted only
+	overAt   time.Time           // the first of them
+	overRows map[int64]struct{}  // bounded identities of overflow rows
 }
 
 // unconfirmedNoticeNote is what one notice announces: its text, and the folds
@@ -278,7 +282,7 @@ func (n *unconfirmedNoticeWindows) window(design, worker string) *unconfirmedNot
 	}
 	key := [2]string{design, worker}
 	if n.byLanes[key] == nil {
-		n.byLanes[key] = &unconfirmedNoticeWindow{folded: make(map[int64]time.Time)}
+		n.byLanes[key] = &unconfirmedNoticeWindow{folded: make(map[int64]time.Time), overRows: make(map[int64]struct{})}
 	}
 	return n.byLanes[key]
 }
@@ -326,6 +330,7 @@ func (n *unconfirmedNoticeWindows) record(design, worker string, row int64, note
 	}
 	if w.over -= note.over; w.over <= 0 {
 		w.over, w.overAt = 0, time.Time{}
+		clear(w.overRows)
 	}
 }
 
@@ -337,12 +342,21 @@ func (n *unconfirmedNoticeWindows) fold(design, worker string, row int64, now ti
 }
 
 func (w *unconfirmedNoticeWindow) fold(row int64, now time.Time) {
+	if w.overRows == nil {
+		w.overRows = make(map[int64]struct{})
+	}
 	if _, seen := w.folded[row]; seen {
 		return
 	}
 	if len(w.folded) < unconfirmedNoticeFoldLimit {
 		w.folded[row] = now
 		return
+	}
+	if _, seen := w.overRows[row]; seen {
+		return
+	}
+	if len(w.overRows) < unconfirmedNoticeFoldLimit {
+		w.overRows[row] = struct{}{}
 	}
 	if w.over == 0 {
 		w.overAt = now
