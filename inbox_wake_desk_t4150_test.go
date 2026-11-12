@@ -97,9 +97,10 @@ func TestInboxWakeDesignWithProvenGonePaneFallsBackToDesk(t *testing.T) {
 	r := newT3602Rig(t, "default")
 	routes := t4150BaseRoutes()
 	t4150Routes(t, r, routes)
+	t4150Snapshot(t, r, "w1:desk", "w1:workdesk", "w1:worker", "w1:review", "w1:trial")
 	obs, ok := r.h.observeNodePanes("host-a")
 	if !ok || r.h.laneProvablyGone(t3602Design, routes[t3602Design], obs) {
-		t.Fatal("initial sighting did not establish the live design row")
+		t.Fatal("initial absence did not seed the design row write time")
 	}
 	r.clock.advance(laneWriteSettle + time.Second)
 	t4150Snapshot(t, r, "w1:desk", "w1:workdesk", "w1:worker", "w1:review", "w1:trial")
