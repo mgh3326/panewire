@@ -1111,6 +1111,13 @@ role's `effort`. The current table carries `{"codex-sol": "xhigh"}`.
   With `family_effort` `codex-sol=xhigh`, a consult admits `codex-sol@xhigh`
   (gate `escalation`). It still drops `codex-sol@max` as
   `above_role_effort`.
+- The floor applies to the mapped rung too. If the catalog grades that rung
+  below the asker's floor (for example `codex-sol@xhigh` graded `S` for an
+  `S+` asker), it is dropped `grade_insufficient`, and its family's `max`
+  rung is `role_effort_unplaced` with that cause. The choice is then
+  `role_no_candidate` (exit 77) unless `--allow-escalation` admits
+  `codex-sol@max`. panewire does not move the cap above `family_effort`
+  for the floor.
 - Family rule: a key matches a catalog row whose profile is the key. A key
   that names a top profile also matches an OMP row whose catalog model is
   that profile's top model. `omp-sol` runs `openai/gpt-6.1-sol`, so a

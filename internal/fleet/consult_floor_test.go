@@ -3,6 +3,7 @@ package fleet
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -16,16 +17,23 @@ func consultFloorRung(profile, effort, grade, pool string) CatalogRow {
 // an asker whose family is unknown.
 func consultFloorSelect(t *testing.T, rows []CatalogRow, present []string, grade, family string) (*selPlan, error) {
 	t.Helper()
+	return consultFloorSelectRouting(t, routingBlockV1, rows, present, grade, family, false)
+}
+
+// consultFloorSelectRouting is consultFloorSelect under the given routing
+// block, with --allow-escalation when allowEscalation is set.
+func consultFloorSelectRouting(t *testing.T, block string, rows []CatalogRow, present []string, grade, family string, allowEscalation bool) (*selPlan, error) {
+	t.Helper()
 	pools := map[string]PoolView{"claude": riskPool(30, 8), "codex": {Status: "ok", Class: "spend", Blocking: ptrF(40)}}
 	a, s, q := selFixture(t, "S", rows, pools, present)
 	q.GateDo = gatePools(map[string]string{"opus": "claude", "codex-sol": "codex"})
-	serveRouting(t, routingDocV1)
+	serveRouting(t, routingDoc(block))
 	route, e := a.routeFor(context.Background(), "worker", "consult")
 	if e != nil {
 		t.Fatalf("route: %v", e)
 	}
-	s.Role, s.RoutingRole, s.Task = "worker", "consult", ""
-	req := selReq{grade: grade, t: "T1", role: "worker", builderFamily: family, urgency: urgencyNormal, urgencySource: "default", route: route}
+	s.Role, s.RoutingRole, s.Task, s.AllowEscalation = "worker", "consult", "", allowEscalation
+	req := selReq{grade: grade, t: "T1", role: "worker", builderFamily: family, allowEscalation: allowEscalation, urgency: urgencyNormal, urgencySource: "default", route: route}
 	return a.selectFor(context.Background(), s, req)
 }
 
@@ -202,5 +210,37 @@ func TestConsultFloorResolveGradeFlag(t *testing.T) {
 		if exitCode(e) != exitUsage {
 			t.Fatalf("resolve --grade %q: exit %d, want %d (%v)", grade, exitCode(e), exitUsage, e)
 		}
+	}
+}
+
+// TestConsultFloorFamilyEffortBelowFloorRow: family_effort names codex-sol at
+// xhigh, which the catalog grades S. An S+ asker must not get that row: its
+// launched effort fails the floor (grade_insufficient). The family's max rung
+// sits above the role effort, so without --allow-escalation nothing is chosen
+// and the refusal is role_no_candidate; with --allow-escalation the S+ max
+// rung is the escalation.
+func TestConsultFloorFamilyEffortBelowFloorRow(t *testing.T) {
+	block := consultFamilyEffortBlock(t, `{"codex-sol": "xhigh"}`)
+	rows := []CatalogRow{consultFloorRung("codex-sol", "xhigh", "S", "codex"), consultFloorRung("codex-sol", "max", "S+", "codex")}
+	sel, e := consultFloorSelectRouting(t, block, rows, []string{"codex"}, "S+", "anthropic", false)
+	if e == nil || !strings.Contains(e.Error(), reasonRoleNoCandidate) {
+		t.Fatalf("S+ asker without escalation must refuse with %s; got %v", reasonRoleNoCandidate, e)
+	}
+	if sel == nil {
+		t.Fatal("no selection plan")
+	}
+	if got := candOutcome(sel.record(), "codex-sol", "xhigh")["reason"]; got != "grade_insufficient" {
+		t.Fatalf("codex-sol@xhigh reason = %v, want grade_insufficient", got)
+	}
+	if got := candOutcome(sel.record(), "codex-sol", "max")["reason"]; got != reasonRoleEffortUnplaced {
+		t.Fatalf("codex-sol@max reason = %v, want %s", got, reasonRoleEffortUnplaced)
+	}
+
+	sel, e = consultFloorSelectRouting(t, block, rows, []string{"codex"}, "S+", "anthropic", true)
+	if e != nil {
+		t.Fatalf("select with --allow-escalation: %v", e)
+	}
+	if got := sel.chosen.row.Effort; got != "max" {
+		t.Fatalf("escalated S+ asker must get codex-sol@max; got %s", got)
 	}
 }
