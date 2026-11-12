@@ -567,6 +567,9 @@ func (h *HubServer) flushInbox() {
 			// An inbox-only lane is never typed a batch (hk 3602): its items
 			// are filed unread and the batch is retired untyped.
 			if err := h.fileInboxOnlyBatch(b.Lane, class, b.ID); err != nil {
+				if h.closeCtx.Err() != nil {
+					return
+				}
 				h.logger.Error("inbox-only batch filing failed; batch retained", "lane", b.Lane)
 				failed = true
 			}
@@ -574,6 +577,9 @@ func (h *HubServer) flushInbox() {
 		}
 		if h.inbox.policy.Lanes[b.Lane].InboxSummary != nil {
 			if err := h.inbox.store.quarantineBatch(b.ID, "external scheduler owns lane digest"); err != nil {
+				if h.closeCtx.Err() != nil {
+					return
+				}
 				failed = true
 			}
 			continue
@@ -584,6 +590,9 @@ func (h *HubServer) flushInbox() {
 			var err error
 			b, err = h.prepareHeldBatch(b)
 			if err != nil {
+				if h.closeCtx.Err() != nil {
+					return
+				}
 				h.logger.Error("held inbox preparation failed; batch retained", "lane", lane)
 				failed = true
 				blockedLanes[lane] = true
@@ -595,6 +604,9 @@ func (h *HubServer) flushInbox() {
 		}
 		if reason := b.invalidReason(); reason != "" {
 			if err := h.inbox.store.quarantineBatch(b.ID, reason); err != nil {
+				if h.closeCtx.Err() != nil {
+					return
+				}
 				h.logger.Error("inbox batch quarantine failed")
 				failed = true
 				return
@@ -611,6 +623,9 @@ func (h *HubServer) flushInbox() {
 		// batch. Its usual replay owns retries from here, without re-escalating.
 		if result.ID > 0 && !result.PersistFailed {
 			if err := h.inbox.store.markBatchSent(b.ID); err != nil {
+				if h.closeCtx.Err() != nil {
+					return
+				}
 				h.logger.Error("inbox batch handoff recording failed")
 				failed = true
 				return
@@ -623,11 +638,17 @@ func (h *HubServer) flushInbox() {
 		if inboxBatchPermanentlyRejected(result.PersistStatus) {
 			reason := fmt.Sprintf("handoffkeep permanently rejected batch: HTTP %d", result.PersistStatus)
 			if err := h.inbox.store.quarantineBatch(b.ID, reason); err != nil {
+				if h.closeCtx.Err() != nil {
+					return
+				}
 				h.logger.Error("inbox batch quarantine failed")
 				failed = true
 				return
 			}
 			continue
+		}
+		if h.closeCtx.Err() != nil {
+			return
 		}
 		failed = true
 		// One failed persistence attempt ends the pass: whatever made this
