@@ -332,13 +332,35 @@ func TestCodexSharedReadingFreshnessIsFiveMinutes(t *testing.T) {
 }
 
 func TestOtherPoolRefreshesBeforeReaderTTL(t *testing.T) {
-	source := &nativeQuotaSource{Pool: "codex"}
+	hk := newClaudeHK(t)
+	rpc := &codexRPCFake{lines: codexRPCLines()}
+	source := codexTestSource(claudeStore(t, hk.server.URL), codexLoginFiles(codexSecret, "fixture-acct"), rpc, claudeAPIReply(500, "unused"))
+	now := claudeTestNow
+	source.Now = func() time.Time { return now }
 	_, _, readerTTL := source.poolMeasurement()
 	if readerTTL != shared.OtherFreshTTL {
 		t.Fatalf("reader TTL=%s, want %s", readerTTL, shared.OtherFreshTTL)
 	}
 	if got := source.refreshTTL(readerTTL); got != shared.OtherRefreshTTL {
 		t.Fatalf("publisher refresh TTL=%s, want %s", got, shared.OtherRefreshTTL)
+	}
+	for elapsed := time.Duration(0); elapsed <= 10*time.Minute; elapsed += time.Second {
+		now = claudeTestNow.Add(elapsed)
+		if elapsed%time.Minute == 0 {
+			if _, err := source.Refresh(t.Context()); err != nil {
+				t.Fatalf("publisher refresh at %s: %v", elapsed, err)
+			}
+		}
+		reading, err := source.stored(t.Context())
+		if err != nil {
+			t.Fatalf("stored reader at %s: %v", elapsed, err)
+		}
+		if reading.Stale {
+			t.Fatalf("stored reader marked healthy publisher's reading stale at %s (age %v)", elapsed, reading.AgeSeconds)
+		}
+	}
+	if rpc.starts != 3 {
+		t.Fatalf("measurements=%d, want one at initial publish and one at each 4-minute refresh cycle", rpc.starts)
 	}
 }
 
