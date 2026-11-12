@@ -220,7 +220,11 @@ func (h *HubServer) relayJobCompletion(completion hubJobEventPayload) {
 }
 
 func (h *HubServer) relayJobCompletionFrom(senderMachine string, completion hubJobEventPayload) {
-	h.relayJobEventFrom(senderMachine, "job.completed", completion)
+	h.relayJobCompletionFromContext(context.Background(), senderMachine, completion)
+}
+
+func (h *HubServer) relayJobCompletionFromContext(ctx context.Context, senderMachine string, completion hubJobEventPayload) {
+	h.relayJobEventFromContext(ctx, senderMachine, "job.completed", completion)
 }
 
 // relayLaneEventResult is the HTTP ingress view of the existing lane-event
@@ -264,7 +268,7 @@ func (h *HubServer) relayLaneEventContext(ctx context.Context, event hubJobEvent
 		h.broadcastRelayRejected(event, "text_too_long")
 		return relayLaneEventResult{RejectedTooLong: true}
 	}
-	if result, handled := h.receiveInbox("lane.event", &event, sender, hubAgentMachineID(sender), false); handled {
+	if result, handled := h.receiveInbox("lane.event", &event, sender, hubAgentMachineID(sender), false, ctx); handled {
 		return result
 	}
 	key := relayEventDedupeKey("lane.event", event)
@@ -433,10 +437,14 @@ func (h *HubServer) relayJobEvent(kind string, event hubJobEventPayload) {
 }
 
 func (h *HubServer) relayJobEventFrom(senderMachine, kind string, event hubJobEventPayload) {
+	h.relayJobEventFromContext(context.Background(), senderMachine, kind, event)
+}
+
+func (h *HubServer) relayJobEventFromContext(ctx context.Context, senderMachine, kind string, event hubJobEventPayload) {
 	if event.OwnerLane == "" || event.JobID == "" {
 		return
 	}
-	if _, handled := h.receiveInbox(kind, &event, h.relayPersistedAgent(senderMachine, nil), senderMachine, false); handled {
+	if _, handled := h.receiveInbox(kind, &event, h.relayPersistedAgent(senderMachine, nil), senderMachine, false, ctx); handled {
 		return
 	}
 	key := relayEventDedupeKey(kind, event)
@@ -461,7 +469,7 @@ func (h *HubServer) relayJobEventFrom(senderMachine, kind string, event hubJobEv
 		h.broadcastRelayUnrouted(event)
 		return
 	}
-	stored, status, persisted := h.persistRelayEventRecord(context.Background(), kind, event, route)
+	stored, status, persisted := h.persistRelayEventRecord(ctx, kind, event, route)
 	if !persisted {
 		// The event must stay resendable: the node still holds it, and its
 		// next attempt has to survive this hub's in-memory dedupe.
@@ -920,7 +928,11 @@ func (h *HubServer) persistRelayEventRecord(ctx context.Context, kind string, ev
 	}
 	stored, status, err := h.handoffkeep.appendEvent(ctx, h.relayEventRequest(kind, event, route))
 	if err != nil {
-		h.logger.Warn("relay event was not persisted", "job", event.JobID, "kind", kind, "status", status)
+		attrs := []any{"job", event.JobID, "kind", kind, "status", status}
+		if ctx.Err() != nil {
+			attrs = append(attrs, "error_class", hubHKReadErrorClass(ctx.Err()))
+		}
+		h.logger.Warn("relay event was not persisted", attrs...)
 		return handoffkeepRelayEvent{}, status, false
 	}
 	// owner_lane is not part of handoffkeep's idempotency key, so a duplicate
@@ -943,6 +955,10 @@ func (h *HubServer) persistRelayEventRecord(ctx context.Context, kind string, ev
 // failure here is operator signal only; it must never stall the relay path.
 // It reports whether delivered_at was written (or there is no durable row).
 func (h *HubServer) markRelayEventDelivered(pending relayPending) bool {
+	return h.markRelayEventDeliveredContext(context.Background(), pending)
+}
+
+func (h *HubServer) markRelayEventDeliveredContext(ctx context.Context, pending relayPending) bool {
 	// One INFO line per proven delivery, so a delivery can be confirmed from
 	// the hub journal without reading its database. Ids only, never text.
 	h.logger.Info("relay delivered", "route", "ack", "kind", pending.kind, "lane", pending.event.OwnerLane, "event_id", pending.event.EventID, "job", pending.event.JobID, "machine", pending.machine, "pane", pending.pane)
@@ -990,8 +1006,12 @@ func (h *HubServer) markRelayEventDelivered(pending relayPending) bool {
 		h.observeRelayDelivered(pending)
 		return true
 	}
-	if err := h.handoffkeep.markDelivered(context.Background(), pending.eventID, pending.machine, pending.pane); err != nil {
-		h.logger.Warn("relay delivery was not recorded", "event_id", pending.eventID, "machine", pending.machine)
+	if err := h.handoffkeep.markDelivered(ctx, pending.eventID, pending.machine, pending.pane); err != nil {
+		attrs := []any{"event_id", pending.eventID, "machine", pending.machine}
+		if ctx.Err() != nil {
+			attrs = append(attrs, "error_class", hubHKReadErrorClass(ctx.Err()))
+		}
+		h.logger.Warn("relay delivery was not recorded", attrs...)
 		return false
 	}
 	h.observeRelayDelivered(pending)
@@ -1010,6 +1030,10 @@ func (h *HubServer) markRelayEventDelivered(pending relayPending) bool {
 // re-pointed between forward and ack must not strand the row (#989). Every
 // rejection leaves a WARN naming the reason.
 func (h *HubServer) recordLateRelayDelivery(machineID string, ack relayAckPayload) bool {
+	return h.recordLateRelayDeliveryContext(context.Background(), machineID, ack)
+}
+
+func (h *HubServer) recordLateRelayDeliveryContext(ctx context.Context, machineID string, ack relayAckPayload) bool {
 	if h.handoffkeep == nil {
 		return false
 	}
@@ -1017,9 +1041,9 @@ func (h *HubServer) recordLateRelayDelivery(machineID string, ack relayAckPayloa
 	var found bool
 	if ack.OriginalEventID >= 1 {
 		var err error
-		record, found, err = h.handoffkeep.relayEvent(context.Background(), ack.OriginalEventID)
+		record, found, err = h.handoffkeep.relayEvent(ctx, ack.OriginalEventID)
 		if err != nil {
-			h.logger.Warn("late relay delivery could not be checked", "event_id", ack.OriginalEventID, "machine", machineID)
+			h.logger.Warn("late relay delivery could not be checked", "event_id", ack.OriginalEventID, "machine", machineID, "error_class", hubHKReadErrorClass(err))
 			return false
 		}
 		if !found {
@@ -1039,7 +1063,7 @@ func (h *HubServer) recordLateRelayDelivery(machineID string, ack relayAckPayloa
 			return false
 		}
 		var err error
-		record, found, err = h.relayEventByTransportID(context.Background(), ack.JobID)
+		record, found, err = h.relayEventByTransportID(ctx, ack.JobID)
 		if err != nil {
 			h.logger.Warn("late relay delivery could not be resolved", "job", ack.JobID, "machine", machineID)
 			return false
@@ -1071,7 +1095,7 @@ func (h *HubServer) recordLateRelayDelivery(machineID string, ack relayAckPayloa
 	}
 	// Only a durable write accepts the ack: a rejected one leaves the row
 	// undelivered, and broadcasting it as delivered would hide that.
-	return h.markRelayEventDelivered(relayPending{machine: machineID, pane: ack.Pane, eventID: record.ID, kind: record.Kind, event: event})
+	return h.markRelayEventDeliveredContext(ctx, relayPending{machine: machineID, pane: ack.Pane, eventID: record.ID, kind: record.Kind, event: event})
 }
 
 // relayEventByTransportID resolves a lane.event row for an ack that carries
