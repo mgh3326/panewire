@@ -8,6 +8,11 @@ import (
 	"time"
 )
 
+// Credit balances turn into percent-only credit after four hours without a
+// fresh manual measurement. This is shorter than the observed six-hour spend
+// interval for openai-api and prevents an old dollar value winning selection.
+const creditBalanceFreshFor = 4 * time.Hour
+
 // CreditBalance is a prepaid credit pool's latest hand-entered balance, read
 // from pacelever's manual observation store (`pacelever manual list`), the
 // same record its credit gate admits on. Nothing here is measured: the
@@ -22,8 +27,12 @@ type CreditBalance struct {
 	// between their measurements. It is 0 when fewer than two such entries
 	// exist or the balance did not fall.
 	BurnUSDPerH float64
-	ExpiresAt   time.Time
-	MeasuredAt  time.Time
+	// MeasuredAt is the manual entry's measurement time.
+	MeasuredAt time.Time
+	// StaleAt is when a measured entry stopped being fresh, or now when its
+	// measurement timestamp is missing.
+	StaleAt   time.Time
+	ExpiresAt time.Time
 }
 
 // expiring reports a positive balance with a future expiry.
@@ -179,16 +188,33 @@ func (q CLIQuota) creditBalances(ctx context.Context) (map[string]*CreditBalance
 		if e != nil {
 			continue
 		}
-		c := &CreditBalance{LeftPct: 100 - *current.UsedPct, ExpiresAt: expires}
-		c.MeasuredAt, _ = time.Parse(time.RFC3339Nano, current.MeasuredAt)
+		measuredAt, measuredErr := time.Parse(time.RFC3339Nano, current.MeasuredAt)
+		if measuredErr != nil {
+			measuredAt = time.Time{}
+		}
+		c := &CreditBalance{LeftPct: 100 - *current.UsedPct, MeasuredAt: measuredAt, ExpiresAt: expires}
 		total, hasTotal := q.CreditTotalUSD[pool]
-		if usd, ok := creditEntryUSD(*current, total, hasTotal); ok {
-			c.BalanceUSD = &usd
-			c.BurnUSDPerH = creditBurnUSDPerH(entries, total, hasTotal)
+		if usd, hasDollars := creditEntryUSD(*current, total, hasTotal); hasDollars {
+			if measuredAt.IsZero() {
+				c.StaleAt = q.now()
+			} else if !measuredAt.Add(creditBalanceFreshFor).After(q.now()) {
+				c.StaleAt = measuredAt.Add(creditBalanceFreshFor)
+			}
+			if c.StaleAt.IsZero() {
+				c.BalanceUSD = &usd
+				c.BurnUSDPerH = creditBurnUSDPerH(entries, total, hasTotal)
+			}
 		}
 		out[pool] = c
 	}
 	return out, nil
+}
+
+func (q CLIQuota) now() time.Time {
+	if q.Now != nil {
+		return q.Now()
+	}
+	return time.Now()
 }
 
 // creditBurnUSDPerH is a credit pool's spend rate from its two latest entries
@@ -251,6 +277,9 @@ type creditFinal struct {
 
 func (c *creditFinal) note() string {
 	s := fmt.Sprintf("credit_expiring days_left=%.1f balance_pct=%.1f", c.hoursLeft/24, c.balance.LeftPct)
+	if !c.balance.StaleAt.IsZero() {
+		s += " stale_since=" + c.balance.StaleAt.UTC().Format(time.RFC3339)
+	}
 	if c.balance.BalanceUSD != nil {
 		s += fmt.Sprintf(" balance_usd=%.2f", *c.balance.BalanceUSD)
 	}
@@ -268,6 +297,12 @@ func (c *creditFinal) note() string {
 
 func (c *creditFinal) record() map[string]any {
 	r := map[string]any{"days_left": c.hoursLeft / 24, "balance_pct": c.balance.LeftPct, "expires_at": c.balance.ExpiresAt.Format(time.RFC3339)}
+	if !c.balance.StaleAt.IsZero() {
+		r["state"] = "stale"
+		r["stale_since"] = c.balance.StaleAt.UTC().Format(time.RFC3339)
+	} else {
+		r["state"] = "live"
+	}
 	if c.balance.BalanceUSD != nil {
 		r["balance_usd"] = *c.balance.BalanceUSD
 	}

@@ -206,12 +206,13 @@ type selCand struct {
 	// creditPool identifies a prepaid pool; credit records its expiry reading.
 	creditPool  bool
 	credit      *creditFinal
+	staleCredit bool
 	creditSince time.Time
 	// usdUrgency is a credit pool's dollars at risk per hour until expiry;
 	// nil for a credit entry without a dollar balance.
 	usdUrgency *float64
-	// creditLeft marks a credit pool with a recorded balance above zero; only
-	// then may a paced pool rank behind credit.
+	// creditLeft marks a fresh credit balance above zero; stale readings do not
+	// push a paced subscription behind credit.
 	creditLeft bool
 	// longProj is the pool's projection at reset over windows of a day or
 	// more; sub-daily windows never rank a pool.
@@ -1095,10 +1096,10 @@ func selCandComparator(pending []*selCand) func(*selCand, *selCand) int {
 }
 
 func compareSelCands(x, y *selCand, compareGrade bool) int {
-	// Waste-risk pools rank ahead of every tier, free included. Inside a
-	// tier, a candidate whose shortest window fits the job ranks first; then
-	// waste-risk pools rank among themselves by the higher urgency, and
-	// everything else keeps the tier order.
+	// Waste-risk pools rank ahead of every tier, free included. Stale
+	// dollar-bearing credit ranks behind subscriptions because it no longer
+	// has a usable balance. Inside a tier, candidates whose shortest window
+	// fits the job rank first.
 	if x.risk != y.risk {
 		if x.risk {
 			return -1
@@ -1110,6 +1111,12 @@ func compareSelCands(x, y *selCand, compareGrade bool) int {
 			return -1
 		}
 		return 1
+	}
+	if x.staleCredit != y.staleCredit {
+		if x.staleCredit {
+			return 1
+		}
+		return -1
 	}
 	if !x.risk {
 		xb, yb := x.tier*2, y.tier*2

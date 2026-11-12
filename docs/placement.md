@@ -54,6 +54,14 @@ entry without a recorded dollar balance, by the percentage rule (remaining
 percent per hour). On a full tie inside the band a credit rung goes before a
 free rung.
 
+A manually recorded dollar balance stays dollar-ranked for four hours after
+`measured_at`; after that it is stale, loses its dollar value, and ranks behind
+subscription quota. Entries with only a percentage never become stale because
+they have no dollar source to age; they continue to rank by remaining percent
+per hour. A configured total supplies a dollar source for an entry with only a
+percentage. Plan output records `state=stale` and `stale_since` for aged dollar
+balances.
+
 Selection walks the ranked hosts twice. Pass 1 tries every candidate except a
 subscription pool paced behind credit (a subscription on pace to use up its
 window, on a host that also holds credit worth spending). Pass 2 walks the same

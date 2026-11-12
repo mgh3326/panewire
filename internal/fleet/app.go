@@ -151,7 +151,7 @@ func New(out, errout io.Writer) (*App, error) {
 	if os.Getenv("PANEWIRE_QUOTA_BIN") != "" {
 		fmt.Fprintln(errout, "panewire: 경고: PANEWIRE_QUOTA_BIN 설정은 폐기되어 무시됩니다")
 	}
-	cliQuota := CLIQuota{Runner: a.Runner, CreditTotalUSD: creditTotals(c.Quota), Accounts: quotaAccounts(c.Quota)}
+	cliQuota := CLIQuota{Runner: a.Runner, Now: a.Now, CreditTotalUSD: creditTotals(c.Quota), Accounts: quotaAccounts(c.Quota)}
 	cliQuota.SharedLatest = a.sharedLatest
 	a.Quota = admissionQuota{cliQuota, a}
 	a.Source = stateSource{a: a, inner: fleetSource{a}}

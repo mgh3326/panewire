@@ -180,6 +180,7 @@ type requestGate interface {
 type CLIQuota struct {
 	Runner Runner
 	Binary string
+	Now    func() time.Time
 	// CreditTotalUSD is each prepaid credit pool's fixed grant total in
 	// dollars, from `[quota].credit_total_usd`. A shared manual entry records
 	// only its used percentage, so credit_expiry.go derives the dollar balance
