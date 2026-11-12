@@ -106,6 +106,45 @@ func TestOMPSpawnLaunchAndProof(t *testing.T) {
 	}
 }
 
+func TestOMPReviewerLaunchUsesExtendedContextOverlay(t *testing.T) {
+	for _, role := range []string{"reviewer", "counsel"} {
+		t.Run(role, func(t *testing.T) {
+			a, s, fr := ompSpawnFixture(t)
+			s.Role = role
+			if role == "reviewer" {
+				s.BuilderFamily = "openai"
+			}
+			base := fr.Do
+			var configPath string
+			var config string
+			fr.Do = func(c Command) Result {
+				if c.Name == "herdr" && strings.HasPrefix(strings.Join(c.Args, " "), "agent start") {
+					index := slices.Index(c.Args, "--config")
+					if index < 0 || index+1 == len(c.Args) {
+						t.Fatalf("%s launch has no config overlay: %v", role, c.Args)
+					}
+					configPath = c.Args[index+1]
+					contents, err := os.ReadFile(configPath)
+					if err != nil {
+						t.Fatalf("read %s config overlay: %v", role, err)
+					}
+					config = string(contents)
+				}
+				return base(c)
+			}
+			if err := a.Spawn(context.Background(), s); err != nil {
+				t.Fatal(err)
+			}
+			if config != "extendedContext: true\n" {
+				t.Fatalf("%s config overlay = %q", role, config)
+			}
+			if _, err := os.Stat(configPath); !os.IsNotExist(err) {
+				t.Fatalf("%s config overlay still exists after launch: %v", role, err)
+			}
+		})
+	}
+}
+
 func TestOMPSpawnRefusesMismatchedScreen(t *testing.T) {
 	for _, afterBrief := range []bool{false, true} {
 		t.Run(fmt.Sprintf("afterBrief=%t", afterBrief), func(t *testing.T) {

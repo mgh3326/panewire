@@ -879,6 +879,18 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 	if e != nil {
 		return e
 	}
+	if seat.Kind == "omp" && (s.Role == "reviewer" || s.Role == "counsel") {
+		configPath, err := writeOMPExtendedContextOverlay()
+		if err != nil {
+			return fail(exitConfig, "omp extended context settings: %v", err)
+		}
+		defer func() {
+			if err := os.Remove(configPath); err != nil && !os.IsNotExist(err) {
+				a.warn("omp extended context settings cleanup failed: %v", err)
+			}
+		}()
+		argv = append(argv, "--config", configPath)
+	}
 	for _, v := range mockEnv {
 		if path, ok := strings.CutPrefix(v, "PANEWIRE_MOCK_CONFIG="); ok {
 			argv = append(argv, "--strict-mcp-config", "--mcp-config", path)
