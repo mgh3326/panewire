@@ -406,13 +406,16 @@ type directSpawnWake struct{ h *HubServer }
 // wake_wait. requestNodeWake otherwise waits until ctx is done — the whole
 // spawn deadline — and a coordinator worker holding a wake open that long
 // starves the four-worker spawn queue, so unrelated requests expire before a
-// worker starts them.
+// worker starts them. A nonpositive wake_wait takes the same 90s default the
+// CLI waker (cliWaker) and waitForNode apply, so an unvalidated host setting
+// cannot leave this path unbounded.
 func (w directSpawnWake) Wake(ctx context.Context, host string, request fleet.WakeRequest) error {
-	if request.WaitSeconds > 0 {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, time.Duration(request.WaitSeconds)*time.Second)
-		defer cancel()
+	wait := request.WaitSeconds
+	if wait <= 0 {
+		wait = defaultWakeWaitSeconds
 	}
+	ctx, cancel := context.WithTimeout(ctx, time.Duration(wait)*time.Second)
+	defer cancel()
 	_, code := w.h.requestNodeWake(ctx, host)
 	if code != "" {
 		return errors.New("node wake refused")
@@ -420,12 +423,23 @@ func (w directSpawnWake) Wake(ctx context.Context, host string, request fleet.Wa
 	return nil
 }
 
+// defaultWakeWaitSeconds is `wake_wait`'s default, the bound the CLI waker and
+// waitForNode fall back to when the setting is absent or nonpositive. A
+// variable only so a test can shrink it.
+var defaultWakeWaitSeconds = 90
+
 // spawnQueueWaitFix names the step that ran out of time when the coordinator
 // finds a request already past its deadline: the hub's own spawn queue. The
 // stage this branch reports is the last of the closed set, which reads as a
-// node landing that never ran, so the fix text carries the wait instead.
+// node landing that never ran, so the fix text carries the wait instead. An
+// unbound request was never sent anywhere; a bound one had an earlier attempt
+// whose ownership is uncertain, so it is never told to resubmit blind.
 func spawnQueueWaitFix(task hubSpawnTask, now time.Time) string {
-	return fmt.Sprintf("the hub did not start this request within its %ds deadline (about %ds in the spawn queue, host=%s); no node ran its landing — check hub spawn worker occupancy, then resubmit", task.Request.DeadlineSeconds, spawnQueueWaitSeconds(task, now), firstNonEmptyString(spawnTaskHost(task), "none"))
+	wait := spawnQueueWaitSeconds(task, now)
+	if task.Node == nil {
+		return fmt.Sprintf("the hub did not start this request within its %ds deadline (about %ds in the spawn queue); no node was asked to run it — check hub spawn worker occupancy, then resubmit", task.Request.DeadlineSeconds, wait)
+	}
+	return fmt.Sprintf("the hub did not start this request again within its %ds deadline (about %ds in the spawn queue); an earlier attempt is bound to host=%s and may still hold a pane — inspect its saved operation and that node before resubmitting", task.Request.DeadlineSeconds, wait, task.Node.Machine)
 }
 
 // spawnQueueWaitSeconds is how long a request waited for a coordinator worker:
