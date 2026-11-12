@@ -185,7 +185,7 @@ func ObserveFreeLimit(cfg Config, resetAt, observedAt, rung, source, accountKey 
 		return fmt.Errorf("%w: devin 쿼터 observation을 저장 후 확인할 수 없습니다", ErrFreeLimitStore)
 	}
 	for _, candidate := range legacyPaths {
-		if err := removeLimitFile(candidate); err != nil {
+		if err := removeLegacyLimitFile(path, candidate); err != nil {
 			return err
 		}
 	}
@@ -228,6 +228,24 @@ func sameLimitRecords(left, right map[string]json.RawMessage) bool {
 		}
 	}
 	return true
+}
+
+func removeLegacyLimitFile(primary, candidate string) error {
+	primaryInfo, err := os.Stat(primary)
+	if err != nil {
+		return fmt.Errorf("%w: devin 쿼터 캐시 파일을 비교할 수 없습니다", ErrFreeLimitStore)
+	}
+	candidateInfo, err := os.Stat(candidate)
+	if errors.Is(err, fs.ErrNotExist) {
+		return removeLimitFile(candidate)
+	}
+	if err != nil {
+		return fmt.Errorf("%w: devin 쿼터 캐시 파일을 비교할 수 없습니다", ErrFreeLimitStore)
+	}
+	if os.SameFile(primaryInfo, candidateInfo) {
+		return nil
+	}
+	return removeLimitFile(candidate)
 }
 
 func removeLimitFile(path string) error {

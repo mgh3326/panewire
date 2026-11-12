@@ -349,6 +349,45 @@ func TestObserveKeepsLegacyWhenPanewireWriteOrReadbackFails(t *testing.T) {
 	}
 }
 
+func TestObserveDoesNotRemoveLegacyPathAliasedToPanewireFile(t *testing.T) {
+	now := testNow.UTC()
+	root := t.TempDir()
+	primaryDir := filepath.Join(root, "panewire")
+	legacyAlias := filepath.Join(root, "pacelever")
+	if err := os.MkdirAll(primaryDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(primaryDir, legacyAlias); err != nil {
+		t.Fatal(err)
+	}
+	cfg := Config{
+		Home:     t.TempDir(),
+		Now:      func() time.Time { return now },
+		Hostname: func() (string, error) { return "host-a", nil },
+		UID:      func() int { return 1000 },
+		LookupEnv: func(name string) (string, bool) {
+			switch name {
+			case "PANEWIRE_CACHE":
+				return filepath.Join(primaryDir, "cache.json"), true
+			case "PACELEVER_CACHE":
+				return filepath.Join(legacyAlias, "cache.json"), true
+			default:
+				return "", false
+			}
+		},
+	}
+	paths := cfg.cachePaths()
+	if len(paths) != 2 || paths[0] == paths[1] {
+		t.Fatalf("cache candidates = %v, want two distinct aliased paths", paths)
+	}
+	if err := ObserveFreeLimit(cfg, now.Add(time.Hour).Format(time.RFC3339Nano), "", "swe-2-high", "job:test", "", false, false); err != nil {
+		t.Fatal(err)
+	}
+	if got := LocalFree(cfg)(now); got.State != shared.FreeExhausted || got.ResetsAt == nil || !got.ResetsAt.Equal(now.Add(time.Hour)) {
+		t.Fatalf("aliased legacy cleanup deleted the primary hold: %+v", got)
+	}
+}
+
 func TestObserveFreeLimitWritesAndClearsPrivateRecord(t *testing.T) {
 	now := testNow.UTC()
 	cache := filepath.Join(t.TempDir(), "cache")
