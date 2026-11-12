@@ -166,7 +166,7 @@ func (a *App) lifecycleWithOptions(ctx context.Context, kind string, args []stri
 						if e = a.releaseQuota(ctx, j); e != nil {
 							return e
 						}
-						status, e = a.attachDuplicateResult(ctx, id, *report, digest, result, str(ev.Payload, "document"), str(ev.Payload, "report_sha256"))
+						status, e = a.attachDuplicateResult(ctx, j, id, *report, digest, result, str(ev.Payload, "document"), str(ev.Payload, "report_sha256"))
 						if e != nil {
 							return e
 						}
@@ -257,7 +257,7 @@ func (a *App) lifecycleWithOptions(ctx context.Context, kind string, args []stri
 				return a.strictDoneFailure(ctx, id, e)
 			}
 		} else {
-			if _, e = a.attachDuplicateResult(ctx, id, *report, digest, result, doc, docSHA); e != nil {
+			if _, e = a.attachDuplicateResult(ctx, j, id, *report, digest, result, doc, docSHA); e != nil {
 				return e
 			}
 		}
@@ -440,7 +440,7 @@ func watcherResultFile(jobs, id, report string) (string, string) {
 // attachDuplicateResult repairs the record for an already-published duplicate.
 // It completes a spawned record from the event pin, preserves existing pins,
 // and never overwrites a stored result.
-func (a *App) attachDuplicateResult(ctx context.Context, id, report, digest string, result json.RawMessage, eventDoc, eventSHA string) (string, error) {
+func (a *App) attachDuplicateResult(ctx context.Context, j Job, id, report, digest string, result json.RawMessage, eventDoc, eventSHA string) (string, error) {
 	store, e := a.jobStore()
 	if e != nil {
 		if result == nil {
@@ -463,6 +463,33 @@ func (a *App) attachDuplicateResult(ctx context.Context, id, report, digest stri
 		}
 		return "", fail(exitFailure, "job %s completion record unreadable reason=%s", id, doneResultReason(e))
 	}
+	state := str(rec, "state")
+	if state == "claimed" {
+		spawned, ok := localSpawnRepair(spawnReceiptForRepair(j.Events))
+		if !ok {
+			if result == nil {
+				a.warn("duplicate job record repair skipped: state=claimed reason=no_spawn_evidence")
+				return "", nil
+			}
+			return "", fail(exitStateConflict, "job %s cannot complete from state=claimed reason=no_spawn_evidence", id)
+		}
+		if putErr := store.Put(ctx, id, spawned); putErr != nil {
+			readback, readErr := store.Get(ctx, id)
+			readbackState := str(readback, "state")
+			if readErr == nil && (readbackState == "spawned" || readbackState == "completed") {
+				rec, state = readback, readbackState
+			} else {
+				if result == nil {
+					a.warn("duplicate job record repair unconfirmed: reason=%s", doneResultReason(putErr))
+					return "", nil
+				}
+				a.jobRecordFailed(ctx, id, "spawned", putErr)
+				return "", fail(exitFailure, "job %s completion record failed reason=%s", id, doneResultReason(putErr))
+			}
+		} else {
+			state = "spawned"
+		}
+	}
 	storedResult := rec["result"]
 	storedResultSame := false
 	if result != nil && storedResult != nil {
@@ -474,7 +501,6 @@ func (a *App) attachDuplicateResult(ctx context.Context, id, report, digest stri
 		}
 		storedResultSame = true
 	}
-	state := str(rec, "state")
 	if state == "completed" && storedResultSame {
 		return "result=equal", nil
 	}
@@ -482,6 +508,10 @@ func (a *App) attachDuplicateResult(ctx context.Context, id, report, digest stri
 		return "", nil
 	}
 	if state != "spawned" && state != "completed" {
+		if result == nil {
+			a.warn("duplicate job record repair skipped: state=%s", state)
+			return "", nil
+		}
 		return "", fail(exitStateConflict, "job %s cannot complete from state=%s", id, state)
 	}
 	fields := map[string]any{"state": "completed"}

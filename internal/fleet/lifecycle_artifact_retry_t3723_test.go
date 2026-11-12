@@ -81,6 +81,60 @@ func TestDoneArtifactDuplicateWithoutResultSurvivesRecordStoreFailure(t *testing
 	}
 }
 
+func TestDoneArtifactDuplicateWithoutResultSurvivesClaimedRecord(t *testing.T) {
+	a, _, store, _, report, _ := strictDoneFixture(t, "claimed")
+	body, err := os.ReadFile(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(body)
+	putEvent(t, a, "j", "job.completed", map[string]any{
+		"report": report, "report_sha256": hex.EncodeToString(digest[:]), "question": "",
+		"document": "reports/j/already-published/answer.md",
+	})
+
+	if err := a.lifecycle(context.Background(), "done", []string{"j", "--report", report}); err != nil {
+		t.Fatalf("duplicate without --result should survive a claimed remote record: %v", err)
+	}
+	if !strings.Contains(a.Out.(*bytes.Buffer).String(), "duplicate=yes") {
+		t.Fatalf("stdout=%q, want duplicate success", a.Out.(*bytes.Buffer).String())
+	}
+	if !strings.Contains(strings.Join(store.calls, "\n"), "GET /v1/jobs/j") {
+		t.Fatalf("job record reads=%v, want a best-effort repair check", store.calls)
+	}
+}
+
+func TestDoneArtifactHeadlessDuplicateRepairsClaimedRecordForResult(t *testing.T) {
+	a, _, store, _, report, result := strictDoneFixture(t, "claimed")
+	putEvent(t, a, "j", "job.spawned", map[string]any{
+		"headless": true, "role": "delegate", "pane_id": "w:p1", "label": "agent-a",
+		"profile": "cmd-dsflash41", "family": "deepseek", "task_id": "42",
+	})
+	body, err := os.ReadFile(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(body)
+	const eventDoc = "reports/j/already-published/answer.md"
+	putEvent(t, a, "j", "job.completed", map[string]any{
+		"report": report, "report_sha256": hex.EncodeToString(digest[:]), "question": "", "document": eventDoc,
+	})
+	store.dropAfterCommit = true
+
+	if err := a.lifecycle(context.Background(), "done", []string{"j", "--report", report, "--result", result}); err != nil {
+		t.Fatalf("headless duplicate should repair a claimed record and attach result: %v", err)
+	}
+	if str(store.records["j"], "state") != "completed" || store.records["j"]["result"] == nil {
+		t.Fatalf("record=%v, want completed with the result", store.records["j"])
+	}
+	if len(store.putBodies) != 2 || str(store.putBodies[0], "state") != "spawned" || str(store.putBodies[1], "state") != "completed" || store.putBodies[1]["result"] == nil {
+		t.Fatalf("record PUTs=%v, want spawn-repair then completed+result", store.putBodies)
+	}
+	if strings.Join(store.calls, ",") != "GET /v1/jobs/j,PUT /v1/jobs/j,GET /v1/jobs/j,PUT /v1/jobs/j" {
+		t.Fatalf("job record calls=%v, want spawn repair readback before result write", store.calls)
+	}
+}
+
 func TestDoneArtifactDuplicateAttachesResultToCompletedRecordWithoutResult(t *testing.T) {
 	a, _, _, _, report, result := strictDoneFixture(t, "completed")
 	store := newFakeJobStore()
