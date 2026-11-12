@@ -86,10 +86,16 @@ sc("claude-escalation-operator-override", {"pool": "claude", "profile": "sonnet"
 sc("claude-escalation-default-request-refused", {"pool": "claude", "profile": "opus", "effort": "high", "operator_request": "hk:task/3248"}, {"observation": auto(CLAUDE_OK)})
 sc("requested-by-needs-operator-request", {"pool": "claude", "profile": "opus", "effort": "high", "requested_by": "desk"}, {"observation": auto(CLAUDE_OK)})
 sc("operator-request-ref-invalid", {"pool": "claude", "profile": "sonnet", "effort": "xhigh", "operator_request": "task 12"}, {"observation": auto(CLAUDE_OK)})
-sc("fable-worker-role-denied", {"pool": "claude", "profile": "fable"}, {"observation": auto(CLAUDE_OK)})
-sc("fable-builder-needs-round-ext", {"pool": "claude", "profile": "fable", "role": "builder"}, {"observation": auto(CLAUDE_OK)})
+sc("fable-worker-consult-gate", {"pool": "claude", "profile": "fable"}, {"observation": auto(CLAUDE_OK)},
+   note="Operator decision (hk 4212): fable holds worker seats like other profiles; panewire no longer refuses the role. The recorded catalog row is consult_only, so the gate refuses on that row's rule (no --operator-request). pacelever v0.3.28 still refuses the role.",
+   native={"ok": False, "exit_code": 3, "provider_id": "claude", "reason": "consult_only: pass --operator-request"})
+sc("fable-builder-consult-gate", {"pool": "claude", "profile": "fable", "role": "builder"}, {"observation": auto(CLAUDE_OK)},
+   note="Operator decision (hk 4212): fable holds builder seats like other profiles; panewire no longer refuses the role. The recorded catalog row is consult_only, so the gate refuses on that row's rule (no --operator-request). pacelever v0.3.28 still refuses the role.",
+   native={"ok": False, "exit_code": 3, "provider_id": "claude", "reason": "consult_only: pass --operator-request"})
 sc("fable-consult-only-needs-request", {"pool": "claude", "profile": "fable", "role": "lead"}, {"observation": auto(CLAUDE_OK)})
-sc("codex-astra-needs-purpose", {"pool": "codex", "profile": "codex-astra", "role": "lead"}, {"observation": auto([b("5h", 10, t(h=3)), b("7d", 10, t(d=5))], plan="pro")})
+sc("codex-astra-lead-without-purpose", {"pool": "codex", "profile": "codex-astra", "role": "lead"}, {"observation": auto([b("5h", 10, t(h=3)), b("7d", 10, t(d=5))], plan="pro")},
+   note="Operator decision (hk 4212): codex-astra's purpose limit is removed; panewire admits a lead request without --purpose. pacelever v0.3.28 still refuses it.",
+   native={"ok": True, "exit_code": 0, "provider_id": "codex", "reason": "codex-astra pool=codex used=10% class=spend"})
 sc("codex-astra-director-admit", {"pool": "codex", "profile": "codex-astra", "role": "lead", "purpose": "director"}, {"observation": auto([b("5h", 10, t(h=3)), b("7d", 10, t(d=5))], plan="pro")},
    note="Same verdict; only the reason's rung suffix differs. pacelever names the effortless rung after its bundled default effort (codex-astra@xhigh); the bench catalog JSON carries no defaults, so panewire's reason names no rung. The admitted row is the same.",
    native={"ok": True, "exit_code": 0, "provider_id": "codex", "reason": "codex-astra pool=codex used=10% class=spend"})

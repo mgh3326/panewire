@@ -818,7 +818,8 @@
     "role": "worker",
     "purpose": "architect"
    },
-   "launch_code": 3
+   "launch_code": 3,
+   "intentional_change": "hk 4212: codex-astra holds worker seats like other profiles; the purpose limit is removed, so pacelever's role refusal no longer applies"
   },
   {
    "request": {
@@ -826,7 +827,8 @@
     "role": "tester",
     "purpose": "architect"
    },
-   "launch_code": 3
+   "launch_code": 3,
+   "intentional_change": "hk 4212: codex-astra holds tester seats like other profiles; the purpose limit is removed, so pacelever's role refusal no longer applies"
   },
   {
    "request": {
@@ -834,7 +836,8 @@
     "role": "builder",
     "purpose": "architect"
    },
-   "launch_code": 3
+   "launch_code": 3,
+   "intentional_change": "hk 4212: codex-astra holds builder seats like other profiles; the purpose limit is removed, so pacelever's role refusal no longer applies"
   },
   {
    "request": {

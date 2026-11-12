@@ -395,7 +395,7 @@ own rule refuses first. The rules, each with its test in
 | An unrated or unplaced rung needs the exact `<canon>@<effort>` marker, except for the lead, consult, builder and counsel roles on an unrated rung | `e6_arm_required: exact measurement marker required`, `e6_arm_required: unplaced profile requires exact measurement marker`, `e6_arm_required` |
 | A requested rung that is retired | `rung is retired in the catalog` |
 | A credit or `codex-terra61` request for a rung that is not placed | `e6_arm_required: rung is not placed` |
-| Seat roles: a credit rung seats a worker or tester, or a builder on a placed default rung; `fable` and `codex-astra` never a worker or captain, and a builder, tester or reviewer only for a round extension; `codex-astra` only for a director, architect, operator-request or round-extension purpose; any other `astra` profile is removed | `role_restricted: …` |
+| Seat roles: a credit rung seats a worker or tester, or a builder on a placed default rung; `fable` and `codex-astra` have no role restriction of their own (their rung's gate decides, as for any profile); any other `astra` profile is removed | `role_restricted: …` |
 | An `--operator-request` must be `hk:task/N` or `hk:doc/…` | `operator_request_ref_invalid` |
 | An unsubscribed profile or pool | `profile is unsubscribed` |
 | A `consult_only` rung needs `--operator-request` (not `codex-astra`) | `profile is consult_only; pass --operator-request` |
