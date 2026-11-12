@@ -144,9 +144,13 @@ func TestInboxWakeChatExemptionNeedsHubChatProvenance(t *testing.T) {
 			}
 		}
 	}
-	r.h.relayChatMessage(context.Background(), message.ID, chatPendingMessage{Lane: t3602Design, Body: message.Body})
+	genuine, err := store.CreateChatMessage(context.Background(), hubChatOperatorName, "genuine follow-up turn")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.h.relayChatMessage(context.Background(), genuine.ID, chatPendingMessage{Lane: t3602Design, Body: genuine.Body})
 	got := t3426Injected(r.agent)
-	if len(got) != 1 || got[0].Pane != "w1:design" || got[0].EventID == 0 || !strings.Contains(got[0].Text, message.Body) {
+	if len(got) != 1 || got[0].Pane != "w1:design" || got[0].EventID == 0 || !strings.Contains(got[0].Text, genuine.Body) {
 		t.Fatalf("operator chat injections=%+v, want the turn typed into w1:design", got)
 	}
 }
