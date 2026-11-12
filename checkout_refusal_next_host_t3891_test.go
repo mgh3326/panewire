@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/coder/websocket/wsjson"
 	"github.com/mgh3326/panewire/internal/fleet"
@@ -123,6 +124,24 @@ func TestCheckoutRefusalRetryabilityAndScopeGuards(t *testing.T) {
 	} {
 		if got := spawnRefusalTriesNextHost(reason); got != want {
 			t.Errorf("spawnRefusalTriesNextHost(%q)=%v, want %v", reason, got, want)
+		}
+	}
+}
+
+func TestCheckoutRefusalDetailDoesNotCountTowardLaunchBackoff(t *testing.T) {
+	kind := fleet.ProfileKind("sonnet")
+	if kind == "" {
+		t.Fatal("sonnet profile has no harness kind for backoff accounting")
+	}
+	h := asyncSpawnHub(t)
+	for _, code := range []string{"dirty", "sha-missing", "branch-elsewhere"} {
+		reason := "checkout_refused:" + code + ": local checkout state refused"
+		h.observeLaunchOutcome("machine-a", "sonnet", 81, reason, time.Now().UTC())
+		h.mu.Lock()
+		entry := h.launchBackoffs[launchKey{"machine-a", kind}]
+		h.mu.Unlock()
+		if entry != nil {
+			t.Errorf("%s with detail counted toward launch backoff: %+v", code, entry)
 		}
 	}
 }

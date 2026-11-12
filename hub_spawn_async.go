@@ -424,7 +424,8 @@ var nextHostRefusals = map[string]bool{
 }
 
 func checkoutRefusalMovesNextHost(reason string) bool {
-	return reason == "checkout_refused:dirty" || reason == "checkout_refused:sha-missing" || reason == "checkout_refused:branch-elsewhere"
+	code, _, _ := strings.Cut(reason, ": ")
+	return code == "checkout_refused:dirty" || code == "checkout_refused:sha-missing" || code == "checkout_refused:branch-elsewhere"
 }
 
 // spawnRefusalTriesNextHost names a node refusal that moves an auto placement
