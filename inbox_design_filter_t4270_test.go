@@ -2,8 +2,7 @@ package panewire
 
 // hk 4270 (operator decisions 152 and 153): a design lane's inbox lists what
 // the design session reads. The lifecycle of a reviewer a daemon started, and
-// a completion that repeats a READY, are kept in hk only, as a delivered relay
-// row; a reviewer-spawn failure reaches the requester at once and the design
+// are kept in hk only, as a delivered relay row; a reviewer-spawn failure reaches the requester at once and the design
 // lane once per request. Contract: docs/quiet-delivery.md.
 
 import (
@@ -144,61 +143,6 @@ func TestDesignLaneKeepsReviewerSpawnedInHKOnly_t4270(t *testing.T) {
 	}
 }
 
-// A completion that arrives within the repeat window of the same worker's
-// READY into the same lane is the same news: kept in hk only, however often
-// it is seen. A completion without a READY (or long after it) is delivered as
-// before.
-func TestDesignInboxOmitsCompletionThatRepeatsReady_t4270(t *testing.T) {
-	h, agent, fake := t3434Hub(t, filepath.Join(t.TempDir(), "inbox.sqlite3"))
-	now := time.Now()
-	h.now = func() time.Time { return now }
-
-	ready := t3434Event(t3426Design, t3434WorkerPane, "ready", "READY hk3430 PR #221 head abc1234")
-	if r := h.relayLaneEvent(ready, agent); r.PersistFailed || r.Machine != "inbox" {
-		t.Fatalf("READY relay=%+v, want an inbox item", r)
-	}
-	completion := t3426Completion(t3434WorkerJob, t3426Design, "https://github.com/example/repo/pull/221")
-	now = now.Add(2 * time.Minute)
-	h.relayJobCompletionFrom("host-a", completion)
-
-	for _, item := range t4270Items(t, h, t3426Design) {
-		if item.Kind == "job.completed" {
-			t.Fatalf("the repeat completion is listed: %+v", item)
-		}
-	}
-	rows, deliveredTo := t4270Rows(fake, t3434WorkerJob)
-	if len(rows) != 1 || deliveredTo[0] != "hub/filtered:repeats-ready" {
-		t.Fatalf("hk rows for the repeat completion=%d delivered_to=%q, want one hub/filtered:repeats-ready", len(rows), deliveredTo)
-	}
-
-	// The note is not spent: a retry after a lost acknowledgement, or a second
-	// turn end inside the window, is the same news and is filed again.
-	again := t3426Completion(t3434WorkerJob, t3426Design, "https://github.com/example/repo/pull/221")
-	again.EventID, again.ReportPath = "00002-job.completed.json", "/jobs/second/report.md"
-	h.relayJobCompletionFrom("host-a", again)
-	h.relayJobCompletionFrom("host-a", completion)
-	for _, item := range t4270Items(t, h, t3426Design) {
-		if item.Kind == "job.completed" {
-			t.Fatalf("a completion inside the window was listed: %+v", item)
-		}
-	}
-
-	// A completion long after a READY is not its repeat.
-	now = now.Add(readyRepeatWindow + time.Minute)
-	after := t3426Completion(t3434WorkerJob, t3426Design, "https://github.com/example/repo/pull/221")
-	after.EventID, after.ReportPath = "00003-job.completed.json", "/jobs/third/report.md"
-	h.relayJobCompletionFrom("host-a", after)
-	var completions int
-	for _, item := range t4270Items(t, h, t3426Design) {
-		if item.Kind == "job.completed" {
-			completions++
-		}
-	}
-	if completions != 1 {
-		t.Fatalf("listed completions=%d, want only the one after the window", completions)
-	}
-}
-
 // With no hk client nothing is filtered: a filter without a durable copy would
 // lose the record.
 func TestDesignInboxFilterNeedsHK_t4270(t *testing.T) {
@@ -285,7 +229,7 @@ func TestHeldReviewerSpawnFailureIsDeliveredWhenHoldEnds_t4270(t *testing.T) {
 		t.Fatal(err)
 	}
 	h.flushSpawnNotifications(t.Context())
-	now = now.Add(h.quiet.timings.spawnFailureHold - time.Minute)
+	now = now.Add(h.quietTimings.spawnFailureHold - time.Minute)
 	h.flushSpawnNotifications(t.Context())
 	if items := t4270Items(t, h, "mergewake-design"); len(items) != 0 {
 		t.Fatalf("delivered before the hold ended: %+v", items)
@@ -316,36 +260,6 @@ func TestDesignLaneOwnSpawnFailureIsUnchanged_t4270(t *testing.T) {
 	}
 }
 
-// A completion whose filing failed is sent again by its producer and must be
-// filed again: the READY that made it a repeat is spent only by a successful
-// filing.
-func TestDesignInboxReadyNoteSurvivesFailedFiling_t4270(t *testing.T) {
-	h, agent, fake := t3434Hub(t, filepath.Join(t.TempDir(), "inbox.sqlite3"))
-	ready := t3434Event(t3426Design, t3434WorkerPane, "ready", "READY hk3430 PR #221 head abc1234")
-	h.relayLaneEvent(ready, agent)
-	completion := t3426Completion(t3434WorkerJob, t3426Design, "https://github.com/example/repo/pull/221")
-
-	fake.mu.Lock()
-	fake.status = 500
-	fake.mu.Unlock()
-	h.relayJobCompletionFrom("host-a", completion)
-	fake.mu.Lock()
-	fake.status = 201
-	fake.mu.Unlock()
-	if items := t4270Items(t, h, t3426Design); len(items) != 1 {
-		t.Fatalf("a failed filing listed %d items, want only the READY", len(items))
-	}
-	h.relayJobCompletionFrom("host-a", completion)
-	for _, item := range t4270Items(t, h, t3426Design) {
-		if item.Kind == "job.completed" {
-			t.Fatalf("the retried completion was delivered instead of filed: %+v", item)
-		}
-	}
-	if _, to := t4270Rows(fake, t3434WorkerJob); len(to) != 1 || to[0] != "hub/filtered:repeats-ready" {
-		t.Fatalf("hk rows delivered_to=%q, want one hub/filtered:repeats-ready", to)
-	}
-}
-
 // A design session's own reviewer spawn (the owner is also the requester, so
 // no second copy exists) hears its retryable failure at once: it is the only
 // notice it can act on.
@@ -364,5 +278,99 @@ func TestReviewerSpawnFailureWithoutDistinctRequesterIsNotHeld_t4270(t *testing.
 	h.flushSpawnNotifications(t.Context())
 	if items := t4270Items(t, h, "mergewake-design"); len(items) != 2 {
 		t.Fatalf("design lane items=%d, want both failures at once", len(items))
+	}
+}
+
+// hk's job.* idempotency key excludes the event id: a second completion that
+// reuses the job, epoch, report path and reason gets the first row back. That
+// row does not hold the second event, so it is delivered to the inbox and
+// both payloads are retained.
+func TestDesignInboxKeepsBothCompletionsThatShareAnHKKey_t4270(t *testing.T) {
+	h, _, fake := t3434Hub(t, filepath.Join(t.TempDir(), "inbox.sqlite3"))
+	if _, _, err := h.inbox.store.claimSpawn(t.Context(), t4270Request(t4270Reviewer, t3426Design, "", "reviewer"), t4270Reviewer, t3426Design, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	first := t3426Completion(t4270Reviewer, t3426Design, "")
+	second := t3426Completion(t4270Reviewer, t3426Design, "")
+	second.EventID, second.ReportLastLine = "00002-job.completed.json", "a different result"
+	h.relayJobCompletionFrom("host-a", first)
+	h.relayJobCompletionFrom("host-a", second)
+
+	items := t4270Items(t, h, t3426Design)
+	if len(items) != 1 || items[0].Event.EventID != second.EventID {
+		t.Fatalf("design inbox=%+v, want exactly the second event, whose contents hk does not hold", items)
+	}
+	rows, deliveredTo := t4270Rows(fake, t4270Reviewer)
+	if len(rows) != 1 || rows[0].EventID != first.EventID || deliveredTo[0] != "hub/filtered:reviewer-lifecycle" {
+		t.Fatalf("hk rows=%+v delivered_to=%q, want the first event filed", rows, deliveredTo)
+	}
+	// Retries of either event, as after a lost acknowledgement, decide the same way.
+	h.relayJobCompletionFrom("host-a", first)
+	h.relayJobCompletionFrom("host-a", second)
+	if got := t4270Items(t, h, t3426Design); len(got) != 1 {
+		t.Fatalf("retries changed the inbox: %+v", got)
+	}
+}
+
+// The decision depends only on the record and the saved spawn request, so a
+// producer's retry after a restart, however late, is filed again and never
+// becomes an inbox item.
+func TestDesignInboxFilterSurvivesRestartAndLateRetry_t4270(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "inbox.sqlite3")
+	h, _, fake := t3434Hub(t, path)
+	if _, _, err := h.inbox.store.claimSpawn(t.Context(), t4270Request(t4270Reviewer, t3426Design, "", "reviewer"), t4270Reviewer, t3426Design, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	completion := t3426Completion(t4270Reviewer, t3426Design, "")
+	h.relayJobCompletionFrom("host-a", completion)
+	h.Close()
+
+	h2, _ := t3426Hub(t, path, h.handoffkeep, t3426Records)
+	h2.now = func() time.Time { return time.Now().Add(48 * time.Hour) }
+	h2.relayJobCompletionFrom("host-a", completion)
+	if items := t4270Items(t, h2, t3426Design); len(items) != 0 {
+		t.Fatalf("a late retry after a restart reached the inbox: %+v", items)
+	}
+	if rows, _ := t4270Rows(fake, t4270Reviewer); len(rows) != 1 {
+		t.Fatalf("hk rows=%d, want the one filed row", len(rows))
+	}
+}
+
+// A worker's READY is no longer a reason to hide its completion: a second
+// turn's result is new information the design lane has not been told.
+func TestDesignInboxStillListsCompletionAfterReady_t4270(t *testing.T) {
+	h, agent, _ := t3434Hub(t, filepath.Join(t.TempDir(), "inbox.sqlite3"))
+	h.relayLaneEvent(t3434Event(t3426Design, t3434WorkerPane, "ready", "READY hk3430 PR #221 head abc1234"), agent)
+	h.relayJobCompletionFrom("host-a", t3426Completion(t3434WorkerJob, t3426Design, "https://github.com/example/repo/pull/221"))
+	if item := t3426Item(t, h, t3426Design, "job.completed", t3434WorkerJob); item.Class != "inbox" {
+		t.Fatalf("completion stored as %+v", item)
+	}
+}
+
+// An expiry that loses the claim to a replay publishes nothing: the claim is
+// one statement conditioned on the request still being at the row's attempt.
+func TestHeldSpawnNoticeClaimLosesToReplay_t4270(t *testing.T) {
+	h, _, _ := spawnNotifyHubLanes(t, "", "mergewake-design", "mergewake-daemon")
+	req := t4270Request(t4270Reviewer, "mergewake-design", "mergewake-daemon", "reviewer")
+	task, _, err := h.inbox.store.claimSpawn(t.Context(), req, t4270Reviewer, "mergewake-design", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = h.inbox.store.completeSpawn(t.Context(), task, hubSpawnOutcome{RC: 81, Stage: "checkout", Reason: "checkout_refused:locked", Retryable: true}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	h.flushSpawnNotifications(t.Context())
+	held := h.readSpawnNotifications(t.Context(), spawnNoticeHeld)
+	if len(held) != 1 {
+		t.Fatalf("held rows=%d, want 1", len(held))
+	}
+	if _, err = h.inbox.store.resumeCleanedSpawn(t.Context(), task, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if h.claimHeldSpawnNotification(t.Context(), held[0], spawnNoticeAttempt(held[0].id)) {
+		t.Fatal("the expiry claimed a failure whose request was replayed first")
+	}
+	if items := t4270Items(t, h, "mergewake-design"); len(items) != 0 {
+		t.Fatalf("a superseded failure was published: %+v", items)
 	}
 }

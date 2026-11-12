@@ -107,9 +107,6 @@ func (a *App) SubmitHostRefusal(s Spawn) error {
 	if s.Host != "" && s.Host != "auto" {
 		pinned = s.Host
 	}
-	if len(required) == 0 && pinned == "" && len(excluded) == 0 {
-		return nil
-	}
 	machine := a.machine()
 	if pinned == "local" {
 		pinned = machine

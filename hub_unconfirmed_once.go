@@ -310,11 +310,8 @@ func (h *HubServer) replayMarkedUnconfirmed(ctx context.Context, record handoffk
 	h.registerRelayAckEvent(record.Kind, event, route.Machine, route.Pane, record.ID)
 	directive := h.inboxRelayDirective(record.Kind, event, route, record.ID)
 	label := relayUnconfirmedLabel(record)
-	switch source {
-	case relayReplaySourceIdle:
+	if source == relayReplaySourceIdle {
 		label = relayIdleRedeliveryLabel(record)
-	case relayReplaySourceRetry:
-		label = relayRetryLabel(record)
 	}
 	directive.Text = label + directive.Text
 	if !agent.queueRelay(directive) {

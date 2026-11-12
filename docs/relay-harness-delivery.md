@@ -226,46 +226,6 @@ The internal verdict `maybe_in_pane` is not the terminal inbox reason.
 and no text was sent. `delivery_uncertain_check_pane` means delivery could not
 be proven; inspect the pane before resending. Both appear in inbox status.
 
-hk 4270 (decision 152) changes who hears and when; the rest of this section
-describes the notice itself. A drop is no longer told to the design lane at
-once:
-
-- **Retry.** A row dropped as `pane_read_failed` or `working_wait_expired`
-  typed nothing, so after 2 minutes (`designQuietTimings.unconfirmedRetryAfter`)
-  the hub delivers it again through the row's one labelled replay
-  ([#1002](r27-busy-relay.md)); the text starts `[retry - first sent <KST time>
-  - the first delivery could not be confirmed]`. A row that may already be in
-  the pane (`maybe_in_pane`, `delivery_uncertain_check_pane`,
-  `inject_failed_max_attempts`) is never retyped by the retry.
-- **One notice per host fault.** A pane that stayed busy (`working_wait_expired`)
-  is no fault of its host and sends none. The first other drop for a (node, reason) pair sends
-  `panewire-design` an `automation-failed` event, `[host fault] machine=… reason=…`,
-  with producer id `host-fault-<machine>-<reason>-<unix time>`. Further drops
-  for the pair inside 30 minutes are folded; the window's end sends one
-  summary that names every folded row (up to 40 ids, then a count), and the
-  next drop opens a new fault. Both are ordinary inbox items, unread until
-  `panewire inbox ack`.
-- **The repository's lane only if the row stays unconfirmed.** The notice below
-  goes to the worker's design lane 15 minutes after the first drop
-  (`unconfirmedUnreadAfter`) and only if no `relay.delivered` confirmed the row
-  since, the retry's copy included. A retry that dropped too is still
-  unconfirmed, so it is told. The deadline is kept in hk as a watch row
-  (`hub/unconfirmed-watch`, event id `unconfirmed-watch-<row id>`, delivered as
-  `watch-closed:<why>` when the row is confirmed or told). A restarted hub finds
-  open watch rows in its startup and node-hello walks and re-arms them, at once
-  when the deadline has passed. When hk refuses the watch row, or the hub's
-  in-memory table of 4096 rows is full, the design lane is told at the drop, as
-  before hk 4270. The host fault summary is settled only once stored; a failed
-  write is retried after 10 s, 1 min and 5 min without waiting for another drop.
-
-The durable row stays in hk undelivered until the pane confirms it or its one
-replay (the retry, or the startup replay) retires it. After a retry the open
-watch row is what keeps the unconfirmed state durable until the pane confirms
-the copy or the design lane has been told. A `relay.delivered` is kept as proof
-in memory even if hk refuses the delivery write, so the retry never types a row
-the pane has; the retry reads its row again with backoff (10 s, 1 min, 5 min)
-when hk cannot be read. A delivery write hk refused is retried the same way until durable, and the watch row stays open until then, and until the design lane's notice is durable (or moot). A late `relay.delivered` for a row a replay retired settles its watch. No notice carries information the rows do not.
-
 When a node drops an event as `inject_failed_max_attempts`,
 `maybe_in_pane`, `pane_read_failed`, `delivery_uncertain_check_pane` or `working_wait_expired`, the hub tells the job's design lane once. A handoffkeep outage
 while the hub reads the row or writes the escalation is retried (2 s, 10 s,

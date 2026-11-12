@@ -223,8 +223,6 @@ func t3276Start(t *testing.T) *t3276Rig {
 	}})
 	hub := r20Hub(t, string(lanes), client, nil)
 	hub.relayControl.relayAckTimeout = time.Hour
-	// This file pins the escalation itself; the hk 4270 deferral has its own tests.
-	hub.quiet.timings = designQuietTimings{}
 	rig := &t3276Rig{t: t, hub: hub, fake: fake, events: make(chan hubClientEvent, 64)}
 	rig.dest = &hubAgent{relays: make(chan hubRelayInjectEvent, 64), persisted: make(chan hubRelayPersistedEvent, 64)}
 	rig.src = &hubAgent{relays: make(chan hubRelayInjectEvent, 64), persisted: make(chan hubRelayPersistedEvent, 64)}

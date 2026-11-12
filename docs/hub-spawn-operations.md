@@ -396,10 +396,15 @@ row, so the design lane is told the request's last outcome once (a terminal
 `replay=no` failure, or no event when the replay lands). A request nobody
 replays within 30 minutes (`designQuietTimings.spawnFailureHold`) is delivered
 to the design lane with the failure's own text, so a requester that gave up
-cannot leave it unreported. A held row has `delivered=2` in
-`spawn_notifications` and is closed (`delivered=1`) when delivered or
-superseded; every row stays there, and the requester's copy is an ordinary lane
-event. A design session's own spawns, and every other owner, are unchanged.
+cannot leave it unreported. The 30 minutes is the aggregation boundary: "after
+the last replay" cannot mean a retry that may never come. A held row has
+`delivered=2` in `spawn_notifications`; at expiry it is claimed (`delivered=3`)
+in one statement conditioned on the request still being at the row's attempt
+and `retryable`, so a replay that advances the attempt first wins and only the
+current attempt's notice is published; a crash while publishing leaves `3`, and
+the next flush publishes again (the event id makes that idempotent). A row is
+closed (`delivered=1`) when delivered or superseded; every row stays there, and
+the requester's copy is an ordinary lane event. A design session's own spawns, and every other owner, are unchanged.
 
 `reconciling` (the node's answer is unknown, or the node is disconnected) writes
 no `spawn_notifications` row, so neither lane is notified. The owner keeps

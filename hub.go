@@ -524,16 +524,18 @@ type HubServer struct {
 	// cannot announce the same retire twice (#658).
 	replayRetired      map[int64]struct{}
 	replayRetiredOrder lruIndex[int64]
+	// quietTimings are the time limits of the design-lane filters
+	// (inbox_design_filter.go).
+	quietTimings designQuietTimings
+
 	// unconfirmedNotices spaces delivery-unconfirmed notices (hk 3431).
 	unconfirmedNotices unconfirmedNoticeWindows
-	// quiet is the memory of the design-lane filters (inbox_design_filter.go).
-	quiet        designQuietState
-	handoffkeep  *handoffkeepRelayClient
-	chatStore    ChatStore
-	chatDeskLane string
-	chatKick     chan struct{}
-	chatMu       sync.Mutex
-	chatPending  map[int64]chatPendingMessage
+	handoffkeep        *handoffkeepRelayClient
+	chatStore          ChatStore
+	chatDeskLane       string
+	chatKick           chan struct{}
+	chatMu             sync.Mutex
+	chatPending        map[int64]chatPendingMessage
 	// chatLaneOf preserves a failed message's lane until restart. After
 	// restart, the durable relay event is the route authority.
 	chatLaneOf map[int64]string
@@ -791,7 +793,7 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 	}
 	hub.auth.Store(&authSet)
 	hub.fleetState = newFleetStateStore()
-	hub.quiet.timings = defaultDesignQuietTimings()
+	hub.quietTimings = defaultDesignQuietTimings()
 	hub.prepareInbox()
 	return hub, nil
 }

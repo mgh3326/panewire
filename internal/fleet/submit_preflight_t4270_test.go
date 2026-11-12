@@ -124,6 +124,7 @@ func TestSubmitHostRefusalNamesTheMissingCapability_t4270(t *testing.T) {
 		want string // "" accepts
 	}{
 		{"no constraint", Spawn{}, ""},
+		{"every host excluded", Spawn{ExcludeHosts: "h1,h2,source-a"}, "no host is eligible"},
 		{"a host declares the cap", Spawn{Tags: "unity"}, ""},
 		{"no host declares the cap", Spawn{Tags: "ios"}, "no host declares cap ios"},
 		{"no single host has both", Spawn{Tags: "gpu,unity"}, "no single host declares all caps"},
@@ -203,5 +204,16 @@ func TestSubmitPrepareAcceptsWhatTheNodeExempts_t4270(t *testing.T) {
 				t.Fatalf("refused what the node accepts: %v", err)
 			}
 		})
+	}
+}
+
+// With local spawning off and no remote host configured, even an
+// unconstrained request has no host to run on.
+func TestSubmitHostRefusalWhenNoHostCanSpawn_t4270(t *testing.T) {
+	a, _, _, _, _ := hubFixture(t, gitState{pushed: true}, "wk/feat", map[string]map[string]any{})
+	a.Config.Local["machine_id"] = "source-a"
+	a.Config.Local["spawn"] = false
+	if err := a.SubmitHostRefusal(Spawn{}); err == nil || !strings.Contains(err.Error(), "NO_ELIGIBLE_HOST") {
+		t.Fatalf("err=%v, want NO_ELIGIBLE_HOST", err)
 	}
 }

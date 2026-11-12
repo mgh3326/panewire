@@ -264,28 +264,42 @@ and `job.*` kinds.
 
 ### Records kept in hk only
 
-Some records are not inbox items at all (hk 4270, operator decisions 152 and
-153). The party that acts on them already has them, and 469 of
+The lifecycle of a reviewer a daemon started is not an inbox item at all (hk
+4270, operator decisions 152 and 153). The daemon consumes it, and 469 of
 `mergewake-design`'s 500 listed items on 2026-11-12 were of this kind. For a
-design lane the hub files each in hk as a relay row it marks delivered as
-`hub` / `filtered:<reason>`, writes no inbox item, so the lane's `inbox list`,
-unread count and wake never see it:
+design lane the hub files `job.completed`, `job.revoked` and the SPAWNED notice
+of such a job in hk as a relay row it marks delivered as `hub` /
+`filtered:reviewer-lifecycle`, and writes no inbox item, so the lane's `inbox
+list`, unread count and wake never see it.
 
-| Record | Reason | How it is recognised |
-| --- | --- | --- |
-| `job.completed`, `job.revoked` and the SPAWNED notice of a reviewer a daemon started | `reviewer-lifecycle` | The hub's saved spawn request for the job has `--role reviewer` and a job id that starts `mwr-` (mergewake's reviewer naming, as `nodeReviewerDirPattern` relies on). A job the hub did not place is not one. The submitter's `--requested-by` is not part of the test: the value mergewake sends is not visible to the hub, and a lane name proves nothing about what the job is. |
-| `job.completed` that repeats a READY | `repeats-ready` | A READY (`lane.event --type ready`) from the worker job into the same lane arrived at most 10 minutes earlier (`readyRepeatWindow`). The worker is the live job in the sending pane, as in the worker rules above. Every completion inside the window is filtered, so a producer's retry after a lost acknowledgement is filed again and answered by the same hk row; a completion after the window is delivered. The note is in memory; after a hub restart the completion is delivered. |
+**Recognised as daemon-started** when the hub's own saved spawn request for the
+job has `--role reviewer` and a job id that starts `mwr-` (mergewake's reviewer
+naming, as `nodeReviewerDirPattern` relies on). The prefix is a naming
+convention, not authenticated provenance: a job the hub did not place, or whose
+record cannot be read, is delivered as before. The submitter's `--requested-by`
+is not part of the test (the value mergewake sends is not visible to the hub).
 
-Nothing is dropped. The hk row is the durable copy (`handoffkeep` relay
-events list it with `delivered_to` `hub/filtered:<reason>`); the job's own hk
-record is unchanged; a producer's retry finds the same row and is
-acknowledged. A record is filtered only when hk holds it: a hub with no hk
-client files nothing, and a failed hk write leaves the node's outbox row
-unacknowledged so it is sent again. What still reaches a design lane is
-everything above: READY, BLOCKED, decision, findings, `order`, the
-`job.completed` of a worker with a task or PR that did not repeat a READY, a
-design session's own spawn notices and the failures below. Lanes that are
-not design lanes are unchanged.
+**Filed only against an exact durable receipt.** hk must hold the row: a hub
+with no hk client files nothing, and a failed hk write leaves the node's outbox
+row unacknowledged so it is sent again. The row hk returns must also be this
+event's own. hk's `job.*` idempotency key is (kind, job, epoch, report path,
+reason) and excludes the event id, so a second completion that reuses them gets
+the first row back, which does not hold the second event; that event is
+delivered to the inbox like any other, and both payloads are kept. The decision
+depends only on the record and the saved spawn request, so a producer's retry
+after a lost acknowledgement or a hub restart decides the same way.
+
+Nothing is dropped: hk lists each filed row with `delivered_to`
+`hub/filtered:reviewer-lifecycle`, and the job's own hk record is unchanged.
+What still reaches a design lane is everything else: READY, BLOCKED, decision,
+findings, `order`, every `job.completed` of a worker (including one after its
+READY), a design session's own spawn notices and the failures in
+[hub spawn operations](hub-spawn-operations.md#notifications-and-telemetry).
+Lanes that are not design lanes are unchanged.
+
+**Not done under hk 4270:** hiding a `job.completed` that repeats a READY, and
+the retry/coalescing of unconfirmed deliveries. See the
+[pull request](https://github.com/mgh3326/panewire/pull/448).
 
 ## Inbox-only lanes
 

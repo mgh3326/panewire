@@ -176,7 +176,10 @@ func (h *HubServer) receiveInbox(kind string, event *hubJobEventPayload, sender 
 	}
 	lane := h.receivingLane(kind, *event)
 	if reason := h.designFilterReason(kind, *event, lane); reason != "" {
-		return h.receiveFiltered(kind, event, sender, senderID, reason)
+		if result, handled := h.receiveFiltered(kind, event, sender, senderID, reason); handled {
+			return result, true
+		}
+		// hk's row belongs to another event: this one takes the inbox path.
 	}
 	if event.NotifyType == "" && h.inbox.policy.Lanes[lane].InboxSummary != nil {
 		switch kind {
@@ -263,9 +266,6 @@ func (h *HubServer) receiveInbox(kind string, event *hubJobEventPayload, sender 
 	event.DeliveryClass = item.Class
 	if wake && item.Fresh && item.Class == "inbox" {
 		h.noteInboxWakeArrival(lane, inboxOnly)
-	}
-	if item.Fresh && kind == "lane.event" && event.NotifyType == "ready" && h.inbox.policy.designLane(lane) {
-		h.noteWorkerReady(h.laneEventWorkerJob(senderID, event.PaneID, lane), lane)
 	}
 	if item.SupersededAt > 0 {
 		if sender != nil {

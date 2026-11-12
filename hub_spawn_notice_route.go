@@ -25,7 +25,8 @@ package panewire
 // text is kept in hk by the requester's copy.
 //
 // delivered=0 rows are not yet routed, delivered=2 are held for their
-// requester, delivered=1 are done (delivered, filed in hk, or superseded).
+// requester, delivered=3 are being published at expiry, delivered=1 are done
+// (delivered, filed in hk, or superseded).
 
 import (
 	"context"
@@ -39,6 +40,10 @@ const (
 	spawnNoticePending = 0
 	spawnNoticeDone    = 1
 	spawnNoticeHeld    = 2
+	// spawnNoticePublishing marks a held row whose expiry won the claim against
+	// a replay of its request; a crash before it settles leaves it here and the
+	// next flush publishes it again (the event id makes that idempotent).
+	spawnNoticePublishing = 3
 )
 
 type spawnNotification struct {
@@ -127,7 +132,7 @@ func (h *HubServer) spawnNoticeFor(ctx context.Context, n spawnNotification, res
 		return spawnNoticeFile
 	case n.owner != task.Owner:
 		return spawnNoticeDeliver // the requester's own copy reaches it at once
-	case result.Retryable && h.quiet.timings.spawnFailureHold > 0 && spawnSubmitterLane(task.Request.Args) != "" && spawnSubmitterLane(task.Request.Args) != task.Owner:
+	case result.Retryable && h.quietTimings.spawnFailureHold > 0 && spawnSubmitterLane(task.Request.Args) != "" && spawnSubmitterLane(task.Request.Args) != task.Owner:
 		// Held only for a requester that has its own copy (completeSpawn
 		// writes one when the submitting lane differs from the owner). With
 		// none, the owner row is the only notice the requester can act on.
@@ -144,8 +149,14 @@ func (h *HubServer) routeSpawnNotification(ctx context.Context, n spawnNotificat
 	event := spawnNotificationEvent(n, result)
 	switch h.spawnNoticeFor(ctx, n, result) {
 	case spawnNoticeFile:
-		if _, ok := h.fileFilteredInHK(ctx, "lane.event", event, event.Host, filteredReasonReviewerLifecycle); ok {
+		switch _, filed, ok := h.fileFilteredInHK(ctx, "lane.event", event, event.Host, filteredReasonReviewerLifecycle); {
+		case ok && filed:
 			h.setSpawnNotificationState(ctx, n.id, spawnNoticePending, spawnNoticeDone)
+		case ok:
+			// hk's row is another event's: deliver this one.
+			if h.relayLaneEventContext(ctx, event, nil).ID != 0 {
+				h.setSpawnNotificationState(ctx, n.id, spawnNoticePending, spawnNoticeDone)
+			}
 		}
 	case spawnNoticeHold:
 		h.logger.Info("reviewer spawn failure held for its requester", "request", n.request, "job", n.job, "event_id", n.id)
@@ -162,29 +173,62 @@ func (h *HubServer) routeSpawnNotification(ctx context.Context, n spawnNotificat
 // flushHeldSpawnNotifications settles the held failures, oldest first. A held
 // row whose request has moved on (a later attempt, or no longer retryable) is
 // superseded: the outcome that moved it on is notified on its own. One still
-// unreplayed when its hold ends is delivered. Rows are ordered by creation and
-// share one hold, so the first row still inside it ends the pass.
+// unreplayed when its hold ends is published, but only after claiming it
+// against the request's current state in one statement: a replay that
+// advances the attempt first makes the claim fail, so only the notice of the
+// request's current attempt is ever published at expiry. Rows are ordered by
+// creation and share one hold, so the first row still inside it ends the pass.
+// Rows a crash left publishing are published again.
 func (h *HubServer) flushHeldSpawnNotifications(ctx context.Context) {
 	now := h.now()
+	for _, n := range h.readSpawnNotifications(ctx, spawnNoticePublishing) {
+		h.publishHeldSpawnNotification(ctx, n)
+	}
 	for _, n := range h.readSpawnNotifications(ctx, spawnNoticeHeld) {
 		task, err := h.inbox.store.spawnTask(ctx, n.request)
 		if err != nil {
 			continue
 		}
-		if task.Attempt > spawnNoticeAttempt(n.id) || task.Status != "retryable" {
+		attempt := spawnNoticeAttempt(n.id)
+		if task.Attempt > attempt || task.Status != "retryable" {
 			h.logger.Info("reviewer spawn failure superseded by a later outcome", "request", n.request, "job", n.job, "event_id", n.id, "attempt", task.Attempt, "status", task.Status)
 			h.setSpawnNotificationState(ctx, n.id, spawnNoticeHeld, spawnNoticeDone)
 			continue
 		}
-		if now.Before(time.UnixMilli(n.at).Add(h.quiet.timings.spawnFailureHold)) {
+		if now.Before(time.UnixMilli(n.at).Add(h.quietTimings.spawnFailureHold)) {
 			return
 		}
-		var result hubSpawnOutcome
-		if json.Unmarshal([]byte(n.raw), &result) != nil {
-			continue
-		}
-		if h.relayLaneEventContext(ctx, spawnNotificationEvent(n, result), nil).ID != 0 {
-			h.setSpawnNotificationState(ctx, n.id, spawnNoticeHeld, spawnNoticeDone)
+		if h.claimHeldSpawnNotification(ctx, n, attempt) {
+			h.publishHeldSpawnNotification(ctx, n)
 		}
 	}
+}
+
+// claimHeldSpawnNotification moves a held row to publishing only while its
+// request is still at the row's attempt and retryable, in one statement, so a
+// concurrent replay (resumeCleanedSpawn) and the expiry cannot both win.
+func (h *HubServer) claimHeldSpawnNotification(ctx context.Context, n spawnNotification, attempt int) bool {
+	store := h.inbox.store
+	op, done := store.op(ctx)
+	defer done()
+	res, err := store.db.ExecContext(op, store.q(`UPDATE spawn_notifications SET delivered=? WHERE event_id=? AND delivered=? AND EXISTS (SELECT 1 FROM spawn_operations WHERE request_id=? AND attempt=? AND status='retryable')`), spawnNoticePublishing, n.id, spawnNoticeHeld, n.request, attempt)
+	if err != nil {
+		return false
+	}
+	rows, _ := res.RowsAffected()
+	return rows == 1
+}
+
+// publishHeldSpawnNotification delivers a claimed row. A failure returns it to
+// held, so the next flush tries again.
+func (h *HubServer) publishHeldSpawnNotification(ctx context.Context, n spawnNotification) {
+	var result hubSpawnOutcome
+	if json.Unmarshal([]byte(n.raw), &result) != nil {
+		return
+	}
+	if h.relayLaneEventContext(ctx, spawnNotificationEvent(n, result), nil).ID != 0 {
+		h.setSpawnNotificationState(ctx, n.id, spawnNoticePublishing, spawnNoticeDone)
+		return
+	}
+	h.setSpawnNotificationState(ctx, n.id, spawnNoticePublishing, spawnNoticeHeld)
 }
