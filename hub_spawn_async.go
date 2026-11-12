@@ -206,6 +206,13 @@ func (h *HubServer) handleSpawnOperation(w http.ResponseWriter, r *http.Request)
 	}{task.Job, task.Request.RequestID, task.Status, task.Outcome})
 }
 
+// hubSpawnWorkerCount bounds how many accepted spawns the hub executes at once.
+// Each worker holds its request for the whole remote landing, so a slow or
+// restarting node keeps workers busy; with four, a reviewer burst left requests
+// queued past their 600 s deadline (hk 4348, 4368). Eight is a stopgap until
+// one handler per node replaces the global pool (hk 4358).
+const hubSpawnWorkerCount = 8
+
 func (h *HubServer) runSpawnCoordinator(parent context.Context) {
 	if h.inbox == nil {
 		return
@@ -214,10 +221,10 @@ func (h *HubServer) runSpawnCoordinator(parent context.Context) {
 	defer cancel()
 	stop := context.AfterFunc(h.closeCtx, cancel)
 	defer stop()
-	work := make(chan hubSpawnTask, 4)
+	work := make(chan hubSpawnTask, hubSpawnWorkerCount)
 	var mu sync.Mutex
 	active := map[string]bool{}
-	for range 4 {
+	for range hubSpawnWorkerCount {
 		h.spawnWorkers.Add(1)
 		go func() {
 			defer h.spawnWorkers.Done()

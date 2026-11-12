@@ -166,7 +166,7 @@ request leaves no operation behind.
 
 The hub stores logical operation, attempt, absolute deadline, immutable node
 request/destination, result, task/role reservation and notification outbox.
-Four workers execute accepted work, with a bounded in-memory dispatch queue;
+Eight workers (`hubSpawnWorkerCount`; four until hk 4368) execute accepted work, with a bounded in-memory dispatch queue;
 the durable queue is authoritative. HTTP cancellation does not cancel accepted
 work. Shutdown ends worker contexts and waits for them before closing storage.
 
