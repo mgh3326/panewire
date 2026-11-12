@@ -22,11 +22,27 @@ func (h *HubServer) inboxWakeDesignPaneless(lane string, route reportRelayRoute,
 	routes := loadReportRelayRoutes(h.reportRelayPath)
 	row, hasRow := routes[lane]
 	if !hasRow {
-		return !route.jobRecord && !routed
+		if route.jobRecord && routed {
+			return false
+		}
+		return !routed && !h.hasLiveInboxWakeJobRecord(lane)
 	}
 	if row.Sink || row.Pane == "" {
 		return true
 	}
 	obs, ok := h.observeNodePanes(row.Machine)
 	return ok && h.laneProvablyGone(lane, row, obs)
+}
+
+func (h *HubServer) hasLiveInboxWakeJobRecord(lane string) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	now := h.now()
+	for _, job := range h.jobs {
+		if job.Completed || job.Orphaned || h.jobRecordStaleLocked(job, now) || job.AgentLabel != lane {
+			continue
+		}
+		return true
+	}
+	return false
 }

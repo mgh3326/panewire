@@ -93,6 +93,40 @@ func TestInboxWakeDesignWithoutRowFallsBackToDesk(t *testing.T) {
 	}
 }
 
+func TestInboxWakeDesignWithoutRowKeepsUnroutableLiveJobOwed(t *testing.T) {
+	r := newT3602Rig(t, "default")
+	routes := t4150BaseRoutes()
+	delete(routes, t3602Design)
+	t4150Routes(t, r, routes)
+	r.h.mu.Lock()
+	r.h.jobs["job-4150"] = &hubJobRecord{
+		HubActiveJob: HubActiveJob{JobID: "job-4150", AgentLabel: t3602Design, OwnerLane: t3602Design, Pane: "w1:job", Epoch: 1},
+		Node:         "host-a",
+		LastSeen:     r.clock.Now(),
+	}
+	r.h.nodes["host-a"].agent = nil
+	r.h.mu.Unlock()
+	if got := t4150Event(t, r, t3602Design); len(got) != 0 {
+		t.Fatalf("unroutable live job injections=%+v", got)
+	}
+	if got := r.wakeEvents(); len(got) != 1 || got[0].Outcome != "skipped" || got[0].Reason != "unrouted" {
+		t.Fatalf("unroutable live job events=%+v", got)
+	}
+	r.h.inbox.wakes.mu.Lock()
+	state := r.h.inbox.wakes.lanes[t3602Design]
+	owed := state != nil && state.pending && state.unrouted
+	r.h.inbox.wakes.mu.Unlock()
+	if !owed {
+		t.Fatal("unroutable live job wake was not left owed")
+	}
+	r.h.mu.Lock()
+	r.h.nodes["host-a"].agent = r.agent
+	r.h.mu.Unlock()
+	r.h.retryUnroutedInboxWakes()
+	r.h.flushInboxWakes()
+	t3602OneWake(t, t3426Injected(r.agent), "w1:job", t3602Wake(t3602Design, 1, "decision"))
+}
+
 func TestInboxWakeDesignWithProvenGonePaneFallsBackToDesk(t *testing.T) {
 	r := newT3602Rig(t, "default")
 	routes := t4150BaseRoutes()
