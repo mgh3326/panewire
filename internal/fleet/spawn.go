@@ -879,6 +879,7 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 	if e != nil {
 		return e
 	}
+	argv = withSessionName(seat.Kind, argv, s.Job)
 	if seat.Kind == "omp" && (s.Role == "reviewer" || s.Role == "counsel") {
 		configPath, err := writeOMPExtendedContextOverlay()
 		if err != nil {
