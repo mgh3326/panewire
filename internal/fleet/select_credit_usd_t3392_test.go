@@ -73,7 +73,7 @@ func usdCreditFixture(t *testing.T, entries func(now time.Time) []map[string]any
 	}
 	a.Config.Local["pool_policy"] = policy
 	store, status := usdCreditStore(entries(a.Now())), usdCreditStatus(a.Now(), "anthropic-api", "openai-api")
-	pools, e := CLIQuota{Binary: "pacelever", Runner: &fakeRunner{Do: func(c Command) Result {
+	pools, e := CLIQuota{Binary: "pacelever", Now: a.Now, Runner: &fakeRunner{Do: func(c Command) Result {
 		switch strings.Join(c.Args, " ") {
 		case "manual list":
 			return Result{Out: store}
@@ -262,7 +262,7 @@ func TestCreditUSDBalanceRoseMeansNoBurn(t *testing.T) {
 		usdCreditEntry("o1", "openai-api", 50, ptrF(200), now.Add(-100*time.Hour), expires),
 		usdCreditEntry("o2", "openai-api", 62.5, ptrF(150), now, expires),
 	}
-	q := CLIQuota{Binary: "pacelever", Runner: &fakeRunner{Do: func(Command) Result {
+	q := CLIQuota{Binary: "pacelever", Now: a.Now, Runner: &fakeRunner{Do: func(Command) Result {
 		return Result{Out: usdCreditStore(entries)}
 	}}}
 	balances, err := q.creditBalances(context.Background())

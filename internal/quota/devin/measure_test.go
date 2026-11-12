@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -220,19 +221,83 @@ func TestBinaryResolution(t *testing.T) {
 		want string
 	}{
 		{"override", config(loginFiles(), map[string]string{"PACELEVER_DEVIN_BIN": "/override/devin"}), "/override/devin"},
+		{"panewire override", config(loginFiles(), map[string]string{"PANEWIRE_DEVIN_BIN": "/new/devin", "PACELEVER_DEVIN_BIN": "/old/devin"}), "/new/devin"},
 		{"settings", config(map[string]string{"/home/u/.config/pacelever/config.toml": "[pools.devin]\nbin = '~/bin/devin'\n"}, nil), "/home/u/bin/devin"},
+		{"panewire settings", config(map[string]string{"/home/u/.config/panewire/config.toml": "[pools.devin]\nbin = '~/bin/new-devin'\n"}, nil), "/home/u/bin/new-devin"},
 		{"configured", Config{Binary: "/configured/devin", LookupEnv: config(nil, nil).LookupEnv, ReadFile: config(nil, nil).ReadFile, Home: "/home/u"}, "/configured/devin"},
 		{"path", config(nil, nil), "/on/path/devin"},
 	}
 	for _, test := range cases {
 		cfg := test.cfg
 		cfg.LookPath = look
-		if got := cfg.binary(cfg.settings()); got != test.want {
+		s, err := cfg.settings()
+		if err != nil {
+			t.Fatalf("%s settings: %v", test.name, err)
+		}
+		if got := cfg.binary(s); got != test.want {
 			t.Errorf("%s: binary %q, want %q", test.name, got, test.want)
 		}
 	}
 	none := config(nil, nil)
-	if got := none.binary(none.settings()); got != "devin" {
+	s, err := none.settings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := none.binary(s); got != "devin" {
 		t.Errorf("not found: binary %q", got)
+	}
+}
+
+func TestDevinSettingsMissingExplicitDoesNotFallThroughToLegacy(t *testing.T) {
+	legacy := "/home/u/.config/pacelever/config.toml"
+	missing := filepath.Join(t.TempDir(), "missing.toml")
+	cfg := config(map[string]string{legacy: "[pools.devin]\nbin='/legacy/devin'\n"}, map[string]string{
+		"PANEWIRE_CONFIG": missing,
+	})
+	_, err := cfg.settings()
+	if err == nil || !strings.Contains(err.Error(), "PANEWIRE_CONFIG") || !strings.Contains(err.Error(), missing) {
+		t.Fatalf("missing explicit path error = %v", err)
+	}
+}
+
+func TestDevinSettingsDoesNotReadScopefuelSnapshot(t *testing.T) {
+	scopefuel := "/home/u/.config/scopefuel/config.toml"
+	cfg := config(map[string]string{scopefuel: "[pools.devin]\nbin='/scopefuel/devin'\n"}, nil)
+	s, err := cfg.settings()
+	if err != nil || s.bin != "" || s.orgID != "" {
+		t.Fatalf("scopefuel settings = %+v, err=%v", s, err)
+	}
+}
+
+func TestDevinSettingsDoesNotIgnoreInvalidExplicitConfig(t *testing.T) {
+	path := "/home/u/.config/panewire/config.toml"
+	cfg := config(map[string]string{path: "[pools.devin\nbin = 'broken'"}, map[string]string{"PANEWIRE_CONFIG": path})
+	_, err := cfg.settings()
+	if err == nil || !strings.Contains(err.Error(), "PANEWIRE_CONFIG") || !strings.Contains(err.Error(), path) {
+		t.Fatalf("invalid explicit config error = %v", err)
+	}
+}
+
+func TestDevinSettingsMalformedImplicitConfigFailsInsteadOfUsingEmptySettings(t *testing.T) {
+	path := "/home/u/.config/panewire/config.toml"
+	cfg := config(map[string]string{path: "[pools.devin\nbin = 'broken'"}, nil)
+	_, err := cfg.settings()
+	if err == nil || !strings.Contains(err.Error(), path) {
+		t.Fatalf("invalid implicit config error = %v", err)
+	}
+}
+
+func TestMeasureReportsMissingConfigAsQuotaError(t *testing.T) {
+	missing := "/explicit/missing.toml"
+	cfg := config(loginFiles(), map[string]string{"PANEWIRE_CONFIG": missing})
+	cfg.HTTP = neverCalled(t, "web request should not proceed with missing explicit config")
+	cfg.StartProbe = func(context.Context, string, string, []string) (Terminal, error) {
+		t.Fatal("probe should not proceed with missing explicit config")
+		return nil, errors.New("unexpected")
+	}
+	_, err := Measure(t.Context(), cfg)
+	var quotaErr *quota.Error
+	if !errors.As(err, &quotaErr) || quotaErr.Kind != quota.ErrKindCredentials || !strings.Contains(quotaErr.Message, "PANEWIRE_CONFIG") || !strings.Contains(quotaErr.Message, missing) {
+		t.Fatalf("missing config measurement error = %#v", err)
 	}
 }

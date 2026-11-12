@@ -3,7 +3,6 @@ package fleet
 import (
 	"context"
 	"encoding/json"
-	"path/filepath"
 	"slices"
 	"sort"
 	"strings"
@@ -36,7 +35,8 @@ const gateReasonCatalog = `[{"profile":"sonnet","effort":"high","model_id":"clau
 // An accepted host answers the remote spawn.
 func gateReasonFixture(t *testing.T, weekly float64) (*App, Spawn, *gateCountQuota, *fakeRunner) {
 	t.Helper()
-	t.Setenv("PACELEVER_CONFIG", filepath.Join(t.TempDir(), "absent.toml"))
+	isolateConfigHome(t)
+	t.Setenv("PACELEVER_CONFIG", "")
 	src := &fakePlacementSource{hosts: []HostView{
 		{Name: "first", Connected: true, LoadRatio: ptrF(0.1)},
 		{Name: "second", Connected: true, LoadRatio: ptrF(0.5)},

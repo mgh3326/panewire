@@ -9,6 +9,12 @@ import (
 	"testing"
 )
 
+func TestQuotaE6EnvUsesPanewireName(t *testing.T) {
+	if got := quotaE6Env("omp-dsflash41@high"); !slices.Equal(got, []string{"PANEWIRE_E6_ARM=omp-dsflash41@high"}) {
+		t.Fatalf("quota E6 env = %v", got)
+	}
+}
+
 // prepareE6Submission runs the submitter half over the hub fixture: a linked
 // worktree on a pushed branch, an explicit profile and the marker named by the
 // environment.
@@ -179,7 +185,7 @@ func TestCLIQuotaPassesE6ArmToPacelever(t *testing.T) {
 		t.Fatalf("pacelever calls=%d", len(f.Calls))
 	}
 	for _, call := range f.Calls {
-		if !slices.Contains(call.Env, "PACELEVER_E6_ARM=omp-dsflash41@high") {
+		if !slices.Contains(call.Env, "PANEWIRE_E6_ARM=omp-dsflash41@high") {
 			t.Fatalf("%v did not receive the marker: %v", call.Args, call.Env)
 		}
 	}

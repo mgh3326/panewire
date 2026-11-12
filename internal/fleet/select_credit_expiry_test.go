@@ -127,16 +127,16 @@ func TestCLIQuotaPoolsReadsCreditBalance(t *testing.T) {
 		"schema": "pacelever.manual.v1",
 		"latest": map[string]string{"anthropic-api:credit": "a2", "openai-api:credit": "o1", "claude:7d": "c1"},
 		"history": []map[string]any{
-			{"manual_observation_id": "a1", "event": "set", "pool": "anthropic-api", "window": "credit", "used_pct": 20, "expires_at": "2026-11-16T00:00:00Z"},
-			{"manual_observation_id": "a2", "event": "set", "pool": "anthropic-api", "window": "credit", "used_pct": 25, "expires_at": "2026-11-16T00:00:00Z",
+			{"manual_observation_id": "a1", "event": "set", "pool": "anthropic-api", "window": "credit", "used_pct": 20, "measured_at": now.Add(-2 * time.Hour).Format(time.RFC3339Nano), "expires_at": "2026-11-16T00:00:00Z"},
+			{"manual_observation_id": "a2", "event": "set", "pool": "anthropic-api", "window": "credit", "used_pct": 25, "measured_at": now.Add(-time.Hour).Format(time.RFC3339Nano), "expires_at": "2026-11-16T00:00:00Z",
 				"credit": map[string]any{"remaining_usd": 150, "total_usd": 200, "expires_on": "2026-11-16"}},
 			// A shared entry: no dollars.
-			{"manual_observation_id": "o1", "event": "set", "pool": "openai-api", "window": "credit", "used_pct": 5, "expires_at": "2026-11-18T00:00:00Z"},
+			{"manual_observation_id": "o1", "event": "set", "pool": "openai-api", "window": "credit", "used_pct": 5, "measured_at": now.Add(-time.Hour).Format(time.RFC3339Nano), "expires_at": "2026-11-18T00:00:00Z"},
 			{"manual_observation_id": "c1", "event": "set", "pool": "claude", "window": "7d", "used_pct": 30, "expires_at": now.Add(time.Hour).Format(time.RFC3339Nano)},
 		},
 	})
 	run := func(manualOK bool) map[string]PoolView {
-		q := CLIQuota{Binary: "pacelever", Runner: &fakeRunner{Do: func(c Command) Result {
+		q := CLIQuota{Binary: "pacelever", Now: func() time.Time { return now }, Runner: &fakeRunner{Do: func(c Command) Result {
 			if strings.Join(c.Args, " ") == "manual list" {
 				if !manualOK {
 					return Result{Code: 2, Err: "shared manual observations unavailable"}

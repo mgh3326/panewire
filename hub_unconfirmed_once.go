@@ -92,10 +92,13 @@ func relayUnconfirmedLabel(record handoffkeepRelayEvent) string {
 // then keeps the window so a repeated report — or the ack timeout — decides,
 // like any other live window (#1034).
 func (h *HubServer) markRelayEventUnconfirmed(pending relayPending) bool {
+	return h.markRelayEventUnconfirmedContext(context.Background(), pending)
+}
+
+func (h *HubServer) markRelayEventUnconfirmedContext(ctx context.Context, pending relayPending) bool {
 	if h.handoffkeep == nil {
 		return true
 	}
-	ctx := context.Background()
 	eventID := pending.eventID
 	if eventID == 0 && pending.kind != "" {
 		key := relayEventDedupeKey(pending.kind, pending.event)
@@ -114,7 +117,7 @@ func (h *HubServer) markRelayEventUnconfirmed(pending relayPending) bool {
 		// falls through to the nothing-to-mark outcome (#1034).
 		record, found, err := h.relayEventByTransportID(ctx, pending.event.JobID)
 		if err != nil {
-			h.logger.Warn("relay unconfirmed transport lookup failed", "job", pending.event.JobID)
+			h.logger.Warn("relay unconfirmed transport lookup failed", "job", pending.event.JobID, "error_class", hubHKReadErrorClass(err))
 			return false
 		}
 		if found {
@@ -130,7 +133,7 @@ func (h *HubServer) markRelayEventUnconfirmed(pending relayPending) bool {
 		// The read cannot tell whether a mark is needed, so nothing durable
 		// was written: the window is kept for a repeated report, like a
 		// failed marker POST.
-		h.logger.Warn("relay unconfirmed mark could not be read", "event_id", eventID)
+		h.logger.Warn("relay unconfirmed mark could not be read", "event_id", eventID, "error_class", hubHKReadErrorClass(err))
 		return false
 	}
 	if !found {

@@ -47,6 +47,10 @@ type PoolPolicy struct {
 	WasteBelow  *float64         `json:"waste_below_projected_pct"`
 	ExcludeAt   *float64         `json:"exclude_at_projected_pct"`
 	WasteRisk   *WasteRiskPolicy `json:"waste_risk"`
+	// Burn is the rate a job's expected hours are charged at, in percent of a
+	// window per job-hour (headroomFor, select_headroom.go); absent rates take
+	// their defaults.
+	Burn *BurnPolicy `json:"burn"`
 	// CreditFinalDays is deprecated and has no effect.
 	CreditFinalDays *float64 `json:"credit_final_days"`
 }
@@ -152,6 +156,13 @@ func (p *PoolPolicy) validate() error {
 	if h, m := *p.WasteRisk.HorizonHours, *p.WasteRisk.MinUnusedPct; !finite(h) || !finite(m) || h < 0 || m < 0 || m > 100 {
 		return fail(exitConfig, "invalid waste_risk thresholds")
 	}
+	if p.Burn != nil {
+		for _, x := range []*float64{p.Burn.ShortPctPerH, p.Burn.LongPctPerH} {
+			if x != nil && (!finite(*x) || *x < 0) {
+				return fail(exitConfig, "invalid burn rates")
+			}
+		}
+	}
 	return nil
 }
 
@@ -181,6 +192,8 @@ type selCand struct {
 	// candidate: its catalog pool, or the reserved devin-free key for a
 	// SWE-2 free rung.
 	cap       string
+	capLive   int
+	capLimit  int
 	outcome   string
 	judgments []quotaJudgment
 	// exhausted marks a free rung whose account projection reaches the
@@ -193,12 +206,13 @@ type selCand struct {
 	// creditPool identifies a prepaid pool; credit records its expiry reading.
 	creditPool  bool
 	credit      *creditFinal
+	staleCredit bool
 	creditSince time.Time
 	// usdUrgency is a credit pool's dollars at risk per hour until expiry;
 	// nil for a credit entry without a dollar balance.
 	usdUrgency *float64
-	// creditLeft marks a credit pool with a recorded balance above zero; only
-	// then may a paced pool rank behind credit.
+	// creditLeft marks a fresh credit balance above zero; stale readings do not
+	// push a paced subscription behind credit.
 	creditLeft bool
 	// longProj is the pool's projection at reset over windows of a day or
 	// more; sub-daily windows never rank a pool.
@@ -219,6 +233,9 @@ type selCand struct {
 	holders     []selHost
 	code        string
 	ignoreGrade bool
+	// headroom is the candidate's fit against the job's expected hours (the
+	// headroom key, select_headroom.go); nil when the job has no expected time.
+	headroom *headroomFit
 }
 
 type selPlan struct {
@@ -288,6 +305,10 @@ type selReq struct {
 	gradeSource string
 	usedFloor   string
 	fallback    string
+	// expected is the task's expected duration (headroom key); expectedUnreadable
+	// marks a task value that did not parse, which leaves the key off.
+	expected           time.Duration
+	expectedUnreadable bool
 }
 
 // effortRank orders rung efforts cheap-first; an empty effort is the catalog's
@@ -764,6 +785,7 @@ func (a *App) selectProfile(ctx context.Context, s Spawn) (*selPlan, error) {
 		return nil, fail(exitSeatRefused, "unreadable task grade %q", req.grade)
 	}
 	req.urgency, req.urgencySource = resolveUrgency(s.Urgency, task)
+	req.expected, req.expectedUnreadable = taskExpected(task)
 	return a.selectFor(ctx, s, req)
 }
 
@@ -776,6 +798,9 @@ func (a *App) selectFor(ctx context.Context, s Spawn, req selReq) (*selPlan, err
 		return nil, fail(exitConfig, "POLICY_UNAVAILABLE: %v", e)
 	}
 	p := &selPlan{policy: policy, order: slices.Clone(policy.Order), req: req, at: a.Now()}
+	if req.expectedUnreadable {
+		p.degraded = append(p.degraded, "expected_unreadable")
+	}
 	// Hub-only cooling fails open when the snapshot is unavailable; record the gap.
 	snapshot, coolingState := a.fleetSnapshot(ctx)
 	if snapshot == nil {
@@ -837,6 +862,7 @@ func (a *App) selectFor(ctx context.Context, s Spawn, req selReq) (*selPlan, err
 			// drop keeps its own reason.
 			if capKey := capGate.full(ctx, row); capKey != "" {
 				c.reason, c.cap = reasonPoolAtCap, capKey
+				c.capLive, c.capLimit = capGate.count(capKey), capGate.caps[capKey]
 			}
 		}
 		if c.reason != "" {
@@ -1034,12 +1060,14 @@ func selCandComparator(pending []*selCand) func(*selCand, *selCand) int {
 	// A pool's lowest fitting row supplies its cross-pool key. Grouping all
 	// its rows behind that key makes the comparison transitive.
 	type poolKey struct {
-		pool, name   string
-		tier         int
-		risk, behind bool
+		pool, name         string
+		tier               int
+		risk, behind, fits bool
 	}
 	seats := make(map[poolKey]*selCand)
-	key := func(c *selCand) poolKey { return poolKey{c.row.Pool, c.tierName, c.tier, c.risk, c.behindCredit} }
+	key := func(c *selCand) poolKey {
+		return poolKey{c.row.Pool, c.tierName, c.tier, c.risk, c.behindCredit, c.fits()}
+	}
 	grouped := func(c *selCand) bool {
 		return !c.ignoreGrade && (c.risk || c.tierName == "free" || c.tierName == creditTier)
 	}
@@ -1068,9 +1096,10 @@ func selCandComparator(pending []*selCand) func(*selCand, *selCand) int {
 }
 
 func compareSelCands(x, y *selCand, compareGrade bool) int {
-	// Waste-risk pools rank ahead of every tier, free included, and among
-	// themselves by waste urgency first; everything else keeps the tier
-	// order.
+	// Waste-risk pools rank ahead of every tier, free included. Stale
+	// dollar-bearing credit ranks behind subscriptions because it no longer
+	// has a usable balance. Inside a tier, candidates whose shortest window
+	// fits the job rank first.
 	if x.risk != y.risk {
 		if x.risk {
 			return -1
@@ -1083,12 +1112,13 @@ func compareSelCands(x, y *selCand, compareGrade bool) int {
 		}
 		return 1
 	}
-	if x.risk {
-		// Waste-risk pools rank among themselves by the higher urgency.
-		if c := cmp.Compare(*y.urgency, *x.urgency); c != 0 {
-			return c
+	if x.staleCredit != y.staleCredit {
+		if x.staleCredit {
+			return 1
 		}
-	} else {
+		return -1
+	}
+	if !x.risk {
 		xb, yb := x.tier*2, y.tier*2
 		if x.tierName == creditTier {
 			xb++
@@ -1098,6 +1128,21 @@ func compareSelCands(x, y *selCand, compareGrade bool) int {
 		}
 		if xb != yb {
 			return xb - yb
+		}
+	}
+	// Headroom: a candidate whose shortest window fits the job's expected
+	// hours ranks ahead of one that does not, before waste urgency and grade.
+	// It is a row-level key, so the comparison stays transitive.
+	if x.fits() != y.fits() {
+		if x.fits() {
+			return -1
+		}
+		return 1
+	}
+	if x.risk {
+		// Waste-risk pools rank among themselves by the higher urgency.
+		if c := cmp.Compare(*y.urgency, *x.urgency); c != 0 {
+			return c
 		}
 	}
 	// Grade fit: the lowest grade that satisfies the task.
@@ -1220,6 +1265,7 @@ func (p *selPlan) record() map[string]any {
 		}
 		if c.cap != "" {
 			row["cap"] = c.cap
+			row["cap_live"], row["cap_limit"] = c.capLive, c.capLimit
 		}
 		if c.projected != nil {
 			row["projected_pct"] = *c.projected
@@ -1262,6 +1308,9 @@ func (p *selPlan) record() map[string]any {
 			if c.resetHrs != nil {
 				row["reset_hours"] = *c.resetHrs
 			}
+		}
+		if h := c.headroom; h != nil {
+			row["headroom"] = map[string]any{"fits": h.fits, "remaining_pct": h.remainingPct, "burn_pct_per_h": h.burnPctPerH, "expected_hours": h.expectedHours, "reset_hours": h.resetHours}
 		}
 		if len(c.judgments) > 0 {
 			row["quota_gates"] = c.judgments

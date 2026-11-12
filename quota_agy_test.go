@@ -142,7 +142,6 @@ func TestFleetQuotaAgyNativeNeverRunsPacelever(t *testing.T) {
 	source := agyTestSource(client.spawnConfigPath, agyLoginFiles(agyToken), api, agyFPForTest, true)
 	client.nativeQuota = map[string]*nativeQuotaSource{"agy": source}
 	pacelever := &paceleverRunnerFake{pool: "agy"}
-	client.nodePacelever = pacelever.run
 	warned := newWarnLog(client)
 
 	sent := map[string]fleetQuotaSent{}
@@ -236,7 +235,6 @@ func TestFleetQuotaAgyLinuxSecretServiceLogin(t *testing.T) {
 		return `{"token":{"access_token":"` + secret + `"}}`, nil
 	}
 	client.nativeQuota = map[string]*nativeQuotaSource{"agy": source}
-	client.nodePacelever = (&paceleverRunnerFake{pool: "agy"}).run
 	warned := newWarnLog(client)
 
 	client.refreshFleetQuota(t.Context(), "agy", map[string]fleetQuotaSent{})
@@ -278,7 +276,6 @@ func TestFleetQuotaAgyNativeWithoutAMeasurableAccountDoesNotMeasure(t *testing.T
 			client.spawnConfigPath = claudeStore(t, hk.server.URL)
 			api := newAgyAPI()
 			client.nativeQuota = map[string]*nativeQuotaSource{"agy": agyTestSource(client.spawnConfigPath, agyLoginFiles(agyToken), api, c.fp, c.measurable)}
-			client.nodePacelever = (&paceleverRunnerFake{pool: "agy"}).run
 			warned := newWarnLog(client)
 			client.nativeQuota["agy"].Warn = client.warnMessage
 
@@ -321,7 +318,6 @@ func TestFleetQuotaAgyNativePublishesPresenceWhenMeasurementFails(t *testing.T) 
 	api := newAgyAPI()
 	api.replies["/v1internal:retrieveUserQuotaSummary"] = `{"groups":[]}`
 	client.nativeQuota = map[string]*nativeQuotaSource{"agy": agyTestSource(client.spawnConfigPath, agyLoginFiles(agyToken), api, agyFPForTest, true)}
-	client.nodePacelever = (&paceleverRunnerFake{pool: "agy"}).run
 	warned := newWarnLog(client)
 
 	client.refreshFleetQuota(t.Context(), "agy", map[string]fleetQuotaSent{})
@@ -348,7 +344,6 @@ func TestNodeQuotaRefreshAgyWithoutAnAccountFails(t *testing.T) {
 	api := newAgyAPI()
 	client := &HubClient{spawnConfigPath: "/nonexistent"}
 	client.nativeQuota = map[string]*nativeQuotaSource{"agy": agyTestSource("/nonexistent", agyLoginFiles(agyToken), api, "", false)}
-	client.nodePacelever = (&paceleverRunnerFake{pool: "agy"}).run
 	if _, code := nodeRun(t, client, nodeCommandQuotaRefresh, map[string]any{"pool": "agy"}); code != "refresh_failed" {
 		t.Fatalf("code=%q", code)
 	}

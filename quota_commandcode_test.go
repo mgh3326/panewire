@@ -210,7 +210,6 @@ func TestFleetQuotaCommandcodeNativeNeverRunsPacelever(t *testing.T) {
 	source := commandcodeTestSource(client.spawnConfigPath, commandcodeLoginFiles(commandcodeSecret), api)
 	client.nativeQuota = map[string]*nativeQuotaSource{"commandcode": source}
 	pacelever := &paceleverRunnerFake{}
-	client.nodePacelever = pacelever.run
 	warned := newWarnLog(client)
 
 	sent := map[string]fleetQuotaSent{}
@@ -298,7 +297,6 @@ func TestFleetQuotaCommandcodeNativePublishesPresenceWhenMeasurementFails(t *tes
 		claudeTestNow.Add(-6*time.Hour).UnixMilli(), claudeTestNow.Add(6*24*time.Hour).UnixMilli())
 	source := commandcodeTestSource(client.spawnConfigPath, commandcodeLoginFiles(commandcodeSecret), api)
 	client.nativeQuota = map[string]*nativeQuotaSource{"commandcode": source}
-	client.nodePacelever = (&paceleverRunnerFake{}).run
 	warned := newWarnLog(client)
 
 	client.refreshFleetQuota(t.Context(), "commandcode", map[string]fleetQuotaSent{})
@@ -443,7 +441,6 @@ func TestFleetQuotaCommandcodeNativeFailureKinds(t *testing.T) {
 			})
 			client.nativeQuota = map[string]*nativeQuotaSource{"commandcode": commandcodeTestSource("/nonexistent", test.files, api)}
 			pacelever := &paceleverRunnerFake{}
-			client.nodePacelever = pacelever.run
 			warned := newWarnLog(client)
 			client.refreshFleetQuota(t.Context(), "commandcode", map[string]fleetQuotaSent{})
 			if len(pacelever.called()) != 0 {

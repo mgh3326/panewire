@@ -46,7 +46,7 @@ func switchRows(t *testing.T) []CatalogRow {
 // holds a reading for switchKey.
 func switchApp(t *testing.T, mode string, reading *shared.Observation, paceleverGate Result) (*App, *fakeRunner, *[]fleetevent.Event) {
 	t.Helper()
-	t.Setenv("PACELEVER_CONFIG", filepath.Join(t.TempDir(), "absent.toml"))
+	t.Setenv("PACELEVER_CONFIG", "")
 	runner := &fakeRunner{Do: func(c Command) Result {
 		switch {
 		case c.Name == "pacelever" && len(c.Args) > 0 && c.Args[0] == "gate":
@@ -320,7 +320,7 @@ func TestAdmissionLocalRequestReadsHeldAccount(t *testing.T) {
 	if err != nil || !strings.Contains(out, `"reading_account_key":"`+switchKey+`"`) {
 		t.Fatalf("local request must judge the account pacelever's config pins: %v\n%s", err, out)
 	}
-	t.Setenv("PACELEVER_CONFIG", filepath.Join(t.TempDir(), "absent.toml"))
+	t.Setenv("PACELEVER_CONFIG", "")
 	a.Config.Quota["accounts"] = map[string]any{"claude": "0123456789abcdef"}
 	out, err = a.Quota.Gate(context.Background(), local)
 	if err != nil || !strings.Contains(out, `"reading_account_key":"`+switchKey+`"`) {

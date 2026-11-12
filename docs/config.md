@@ -452,6 +452,19 @@ default.
 
 ## `[quota]`
 
+Panewire's pool and profile settings are read from
+`~/.config/panewire/config.toml` (or `$XDG_CONFIG_HOME/panewire/config.toml`).
+`PANEWIRE_CONFIG` selects an explicit file. During migration, panewire also
+checks `~/.config/pacelever/config.toml` and the older scopefuel path when the
+panewire file is absent; `PACELEVER_CONFIG` remains a fallback override.
+Create the panewire file before removing the legacy file so host behavior
+continues unchanged.
+
+Quota cache records use `<XDG cache>/panewire/` (or `~/.cache/panewire/`).
+`PANEWIRE_CACHE` is a file path override; records are stored beside it.
+`PACELEVER_CACHE` is checked as a legacy fallback. Native writes go to the
+panewire location.
+
 Shared-quota read settings for presence-aware placement. The URL and bearer
 are panewire's svc-panewire credential
 ([handoffkeep service credential](#handoffkeep-service-credential)); `url`
@@ -794,6 +807,23 @@ is passed.
 Both keys live in the pool-order policy under `"waste_risk": {...}`; absent
 keys take the defaults, and `panewire simulate --policy`/`--policy-set` try
 other values before the policy is changed.
+
+**Headroom for a known job length** (`plan --expected DURATION`, or the task's
+`--expected` on spawn, e.g. `6h` or `2d`). After the band order and before
+waste urgency, a subscription candidate whose shortest in-view window fits the
+job ranks ahead of one that does not. Nothing is refused: the key only orders.
+A window fits when its remaining share is at least `burn_pct_per_h × hours`,
+or when its reset comes within half the job, so a window that resets mid-job
+counts as room. Without an expected duration the key is off and the order is
+unchanged. An unreadable task `--expected` value turns the key off on spawn
+(degraded note `expected_unreadable`); `plan` rejects it with a usage error.
+
+Burn rates come from `"burn": {"short_pct_per_h": 15, "long_pct_per_h": 2}` in
+the pool-order policy. Windows of a day or less use the short rate, longer
+windows the long rate, and a window of unknown length uses the short rate.
+These are defaults, not measurements: no burn history is kept yet, so the
+per-pool values in effect are UNVERIFIED until measured burn lands (hk 4327).
+Waste-first and host-first placement are not changed by this key.
 
 Subscription candidates additionally need a readable `ok` nonstale spend
 status. The named credit pools, `anthropic-api` and `openai-api`, remain

@@ -2,7 +2,6 @@ package fleet
 
 import (
 	"os"
-	"os/exec"
 	"os/user"
 	"path/filepath"
 	"syscall"
@@ -36,28 +35,6 @@ func (a *App) trust() error {
 	}
 	if data := os.Getenv("XDG_DATA_HOME"); data != "" && filepath.Clean(data) != filepath.Join(canonical, ".local", "share") {
 		return fail(exitConfig, "XDG_DATA_HOME must select the canonical local ledger state")
-	}
-	for _, bin := range []string{"handoffkeep"} {
-		want := filepath.Join(canonical, ".local", "bin", bin)
-		selected := a.Bins[bin]
-		if selected == "" {
-			selected = bin
-		}
-		path, e := exec.LookPath(selected)
-		if e != nil {
-			return e
-		}
-		real, e := filepath.EvalSymlinks(path)
-		if e != nil {
-			return e
-		}
-		trusted, e := filepath.EvalSymlinks(want)
-		if e != nil || real != trusted {
-			return fail(exitConfig, "%s must select canonical %s", bin, want)
-		}
-		if e = TrustBinary(path, uint32(os.Getuid())); e != nil {
-			return e
-		}
 	}
 	exe, e := os.Executable()
 	if e != nil {

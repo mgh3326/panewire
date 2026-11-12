@@ -693,12 +693,15 @@ func (s *TaskPaneSweeper) notIdleReason(j Job, agents []Agent) string {
 // close is reap's tail for one swept job. It returns a reason when it kept the
 // pane, and "" once the pane is closed and the job reaped.
 func (s *TaskPaneSweeper) close(ctx context.Context, a *App, j Job, task string, end paneSweepEnd, since, now time.Time) string {
-	if s.Exclusive != nil {
-		defer s.Exclusive()()
-	}
 	key := paneSweepKey(j)
 	if err := a.savePaneScreen(ctx, j); err != nil {
 		return "screen-not-saved"
+	}
+	// Reading and uploading the last screen may wait on herdr or handoffkeep.
+	// Keep both outside the node-command lock; the state and pane are re-read
+	// below after taking it, immediately before close.
+	if s.Exclusive != nil {
+		defer s.Exclusive()()
 	}
 	// Re-read both durable history and the live pane immediately before the
 	// irreversible close, as reap does. A revived or kept job always wins.

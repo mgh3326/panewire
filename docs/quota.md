@@ -110,8 +110,8 @@ through the same four paths and the same shared store flow as claude.
   into memory for the one HTTP request; the app-server reads its own login. It
   is never logged, written, put in an error or on a command line. The
   app-server inherits the node's environment with `CODEX_HOME` set.
-- **Binary** resolution: `PACELEVER_CODEX_BIN` (kept so an existing override
-  works), then the configured path, then `codex` on `PATH`, then on macOS
+- **Binary** resolution: `PANEWIRE_CODEX_BIN` (`PACELEVER_CODEX_BIN` fallback),
+  then the configured path, then `codex` on `PATH`, then on macOS
   `/Applications/Codex.app/Contents/Resources/codex` and
   `~/Applications/Codex.app/Contents/Resources/codex`.
 - **Account key** `codex:<fp>`, `fp = hex(sha256("codex-account|" +
@@ -139,7 +139,12 @@ claude, codex와 같은 shared store 흐름을 사용합니다. 모든 호스트
   response: `used / cap`, clamped to 100 when past the cap. A window without a
   positive `cap` or a numeric `used >= 0` is left out; a malformed value never
   reads as an unused window. `resetAt` is epoch seconds, milliseconds or
-  microseconds, RFC 3339 or an HTTP date.
+  microseconds, RFC 3339 or an HTTP date. The vendor's 7d limit is a rolling
+  window whose `resetAt` reads relative to the reading time (exactly 5 days after
+  the reading time), not a fixed calendar reset boundary; it is marked
+  unpaceable (no `ResetsAt`) so `projectAtReset` does not turn a moving reset into
+  an artificial pace (hk 4330). 5h keeps its `resetAt`, and 30d carries the
+  subscription `currentPeriodEnd`.
 - **30d** is the share of this billing period's plan credits already spent:
   `totalMonthlyCredits / (totalMonthlyCredits + credits.monthlyCredits)`, with
   `totalMonthlyCredits` from the usage summary (its `periodBasis` must be
@@ -193,8 +198,9 @@ source, bucket, error kind, account fingerprint 및 shared store 형식을 유�
   request. It has no account key, so it cannot read the shared reading itself;
   placement and the quota gate read it from the store as before.
 - **Web source first.** With `DEVIN_BEARER_TOKEN` in the environment and
-  `[pools.devin] org_id` in pacelever's `config.toml` (`PACELEVER_CONFIG`, else
-  `<XDG config>/pacelever/config.toml`; the id must look like `org-…`),
+  `[pools.devin] org_id` in panewire's `config.toml` (`PANEWIRE_CONFIG`, else
+  `<XDG config>/panewire/config.toml`; legacy pacelever paths are read when
+  the panewire file is absent; the id must look like `org-…`),
   `GET /api/<org>/billing/quota/usage` on devin's web app host with the bearer
   token and `x-cog-org-id`; 20 s timeout, redirects refused, 2 MiB cap, and a
   body that is one JSON object and nothing after it. `1d` (omitted when
@@ -208,15 +214,17 @@ source, bucket, error kind, account fingerprint 및 shared store 형식을 유�
   falls through to the probe without being reported, as pacelever's does.
 - **The `/usage` probe.** `devin --respect-workspace-trust false` runs on a
   200×50 pseudo-terminal in a private empty git repository (`devin` from
-  `PACELEVER_DEVIN_BIN`, `[pools.devin] bin`, or `PATH`), at most 35 s. The
+  `PANEWIRE_DEVIN_BIN` (`PACELEVER_DEVIN_BIN` fallback), `[pools.devin] bin`,
+  or `PATH`), at most 35 s. The
   probe waits for an input prompt, types `/usage`, and, after the input has
   settled (500 ms), Enter in a separate write; it parses the panel once the
   screen has been quiet 250 ms. **The prompt is any of `❯`, `❭` (U+276D, devin's
   own), `›`, `> ` or `Shift+Tab`** — without U+276D the probe never types and ends
   at its timeout (pacelever#57). A line naming weekly/7-day, 5h/5-hour, daily
   or monthly with a percentage is a `7d`/`5h`/`1d`/`30d` bucket (`% used`,
-  `% left` or `% remaining`; a reset of "resets in 6d 2h" is now + that); a panel
-  with none falls back to the plan line's "NN% remaining". A trust prompt, a
+  `% left` or `% remaining`); an absolute reset date (such as `resets Nov 15, 8:00 AM (UTC)`)
+  is parsed directly as a stable UTC timestamp, while a duration like "resets in 6d 2h"
+  is now + that (hk 4330); a panel with none falls back to the plan line's "NN% remaining". A trust prompt, a
   timeout, an early exit or a missing binary is `probe_error` with the stage
   reached; an unreadable panel is `parse_error`. The TUI's whole process group is
   killed and reaped on every exit path. pacelever's `devin models list` Free tags
@@ -276,9 +284,10 @@ source, bucket, error kind, account fingerprint 및 shared store 형식을 유�
   endpoint, then the production one (pacelever's hosts, in that order), with
   the CLI's OAuth token, merged with the per-model list
   (`fetchAvailableModels`, best effort) that supplies a group the summary omits.
-  A refused token is re-armed once with `agy models` under the lock file
-  pacelever uses (`<cache>/pacelever/agy-wake.lock`, so the two never wake the
-  CLI at once) and retried; a token another holder just refreshed is reused. The
+  A refused token is re-armed once with `agy models` under the panewire lock
+  file (`<cache>/panewire/agy-wake.lock`; the legacy cache path is used during
+  migration), so concurrent refreshes never wake the CLI at once. It is
+  retried; a token another holder just refreshed is reused. The
   OS keyring item the CLI keeps is the login when the file has none, and the
   fallback when the file's token stays refused: on macOS the keychain item
   (`security find-generic-password -s gemini -a antigravity`), on Linux the
@@ -289,7 +298,8 @@ source, bucket, error kind, account fingerprint 및 shared store 형식을 유�
   `~/.gemini/antigravity-cli/antigravity-oauth-token`, else of
   `$XDG_CONFIG_HOME/antigravity-cli/antigravity-oauth-token`. It is read into
   memory for one measurement and never logged, written, put in an error or on a
-  command line. `PACELEVER_AGY_BIN` names the agy binary, else `agy` on `PATH`.
+  command line. `PANEWIRE_AGY_BIN` names the agy binary (`PACELEVER_AGY_BIN`
+  fallback), else `agy` on `PATH`.
 - **Error kinds** follow pacelever's: no login `credentials`; a refused login
   `auth_failed`; 429 `rate_limited` (with `Retry-After`); a 5xx a retryable
   `network` failure; any other status `http`; a request that got no answer
@@ -361,22 +371,24 @@ reads:
   cache the selection also reads (see [Shadow and native
   launch](#shadow-and-native-launch)). Without any catalog it judges the
   bundled snapshot as stale, as pacelever does.
-- **pacelever's bundled snapshot** (`internal/fleet/catalog-snapshot.json`,
+- **The embedded catalog snapshot** (`internal/fleet/catalog-snapshot.json`,
   pacelever v0.3.28's `catalog_snapshot.json` byte for byte) for what the
   handoffkeep rows do not carry: each rung's family; a rung the snapshot holds
   unplaced at the same grade stays unplaced (it needs an exact E6 marker); the
   effort a profile defaults to; the alias `codex-max` → `codex-sol`; and the
   rows of a profile handoffkeep does not list.
-- **pacelever's `config.toml`**, loaded with every rule pacelever v0.3.28's
-  `LoadConfig` applies before `policy launch` resolves anything
-  (`internal/fleet/pacelever_config.go`): the TOML types of `[quota]`,
+- **The panewire config file**, loaded with the validation rules ported from
+  pacelever v0.3.28's `LoadConfig` before native launch resolves anything
+  (`internal/fleet/launch_config.go`): the TOML types of `[quota]`,
   `[profiles]`, `[bench]`, `[settings]` and each known pool; the shared quota
   TTL ranges, `host_id`, per-pool fresh TTLs, account fingerprints and
   measurable account keys; and each known pool's class, exploration, cutoff,
   in-flight reserve and `credit_max_age_s`. A file pacelever refuses exits 2.
   The pool policy in it, read as [Admission](#admission) reads it, gives
   subscription. The gate and the credit pool views keep their narrower read.
-- **The E6 marker** from the request, else `PACELEVER_E6_ARM`. For a rung whose catalog effort is empty the marker is `<canon>@`; [config](config.md) lists the forms.
+- **The E6 marker** from the request, else `PANEWIRE_E6_ARM` (with
+  `PACELEVER_E6_ARM` fallback). For a rung whose catalog effort is empty the
+  marker is `<canon>@`; [config](config.md) lists the forms.
 
 It answers as `pacelever policy launch` does through panewire: a refusal exits 3
 with pacelever's reason (`quota catalog: e6_arm_required: …`; the pacelever path
@@ -433,8 +445,9 @@ pacelever retired (hk 3998):
 - `omp` is installed on the host. The node looks on `PATH` and in the fleet's
   install directories, because a daemon's `PATH` can be narrower than an
   operator shell's.
-- The operator's pool class is not `exclude`: `[pools.<pool>]` in pacelever's
-  `config.toml` (`PACELEVER_CONFIG`, else `~/.config/pacelever/config.toml`). An
+- The operator's pool class is not `exclude`: `[pools.<pool>]` in panewire's
+  `config.toml` (`PANEWIRE_CONFIG`, else `~/.config/panewire/config.toml`,
+  with legacy pacelever paths read during migration). An
   `until` date that has passed lifts the exclusion, as it does for the gate.
 - The shared store holds an unexpired manual `window=credit` entry for the
   pool's account (`manual` in `/v1/quota/accounts/<key>/latest`).
@@ -490,8 +503,9 @@ pacelever v0.3.28's gate) from three inputs:
   or stale catalog refuses (exit 2). No pacelever process runs. The launch rung
   the verdict is asked about comes from the launch lookup ([Launch](#launch)),
   which has its own switch.
-- **The pool policy** in pacelever's `config.toml` (`PACELEVER_CONFIG`, else
-  `~/.config/pacelever/config.toml`): class and its `until` date, cutoff,
+- **The pool policy** in panewire's `config.toml` (`PANEWIRE_CONFIG`, else
+  `~/.config/panewire/config.toml`, with legacy pacelever paths read during
+  migration): class and its `until` date, cutoff,
   subscription, `fusion_billing_fp`. A missing file is the default policy; an
   invalid one refuses (exit 2).
 

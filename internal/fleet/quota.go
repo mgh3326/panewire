@@ -117,6 +117,9 @@ type PoolView struct {
 	// the strictest group's name on the account view of a group-only reading.
 	// Empty for an account-scoped reading and for a pool view built elsewhere.
 	Group string
+	// Shortest is the view's shortest window, the one a job's expected hours
+	// must fit inside (headroom key, select.go); nil when no window is known.
+	Shortest *windowRoom
 }
 
 // forRung is the view a catalog rung ranks and is blocked on. A rung that maps
@@ -177,6 +180,7 @@ type requestGate interface {
 type CLIQuota struct {
 	Runner Runner
 	Binary string
+	Now    func() time.Time
 	// CreditTotalUSD is each prepaid credit pool's fixed grant total in
 	// dollars, from `[quota].credit_total_usd`. A shared manual entry records
 	// only its used percentage, so credit_expiry.go derives the dollar balance
@@ -735,7 +739,7 @@ func quotaE6Env(arm string) []string {
 	if arm == "" {
 		return nil
 	}
-	return []string{"PACELEVER_E6_ARM=" + arm}
+	return []string{"PANEWIRE_E6_ARM=" + arm}
 }
 
 // Pools reads the quota CLI's status document and reduces it to

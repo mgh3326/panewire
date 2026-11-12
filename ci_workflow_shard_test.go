@@ -1,6 +1,7 @@
 package panewire
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -160,6 +161,112 @@ func TestCIShardsCoverEveryRootTest(t *testing.T) {
 			t.Errorf("%s runs in no shard (matrix %v)", name, specs)
 		default:
 			t.Errorf("%s runs in several shards: %v", name, ran[name])
+		}
+	}
+}
+
+// TestCIShardsAreBalancedByRecordedDurations pins that the shards are balanced
+// by recorded durations (decision 178) so no shard monopolizes runtime.
+func TestCIShardsAreBalancedByRecordedDurations(t *testing.T) {
+	shard := readCIPRJobs(t)["shard"]
+	specs := shard.Strategy.Matrix["shard"]
+	if len(specs) != 3 {
+		t.Fatalf("expected 3 shards, got %d", len(specs))
+	}
+	durationsRaw, err := os.ReadFile("scripts/ci-test-durations.json")
+	if err != nil {
+		t.Fatalf("reading scripts/ci-test-durations.json: %v", err)
+	}
+	var durations map[string]float64
+	if err := json.Unmarshal(durationsRaw, &durations); err != nil {
+		t.Fatalf("unmarshaling durations: %v", err)
+	}
+	if len(durations) == 0 {
+		t.Fatal("ci-test-durations.json has no entries")
+	}
+
+	shardTotals := make([]float64, len(specs))
+	for i, spec := range specs {
+		cmd := exec.Command("sh", "scripts/ci-test-shard.sh", spec)
+		cmd.Env = append(os.Environ(), "PANEWIRE_SHARD_DRY_RUN=1")
+		out, err := cmd.Output()
+		if err != nil {
+			t.Fatalf("shard %s: %v", spec, err)
+		}
+		pattern := regexp.MustCompile(strings.TrimSpace(string(out)))
+		for name, dur := range durations {
+			if pattern.MatchString(name) {
+				shardTotals[i] += dur
+			}
+		}
+	}
+
+	minTot, maxTot := shardTotals[0], shardTotals[0]
+	for _, tot := range shardTotals {
+		if tot < minTot {
+			minTot = tot
+		}
+		if tot > maxTot {
+			maxTot = tot
+		}
+	}
+	t.Logf("Shard recorded duration totals: %v (min=%.2fs, max=%.2fs)", shardTotals, minTot, maxTot)
+	// Dots observed 237s, 131s, 130s (spread > 100s).
+	// With duration balancing, maxTot - minTot must be within 10 seconds.
+	if maxTot-minTot > 10.0 {
+		t.Errorf("shards are unbalanced: totals=%v max-min=%.2fs (>10s)", shardTotals, maxTot-minTot)
+	}
+}
+
+// TestCIShardsHandleUnrecordedAndEmptyDurations verifies that a new test
+// absent from recorded durations or an empty durations file still assigns
+// every test to exactly one shard without failing.
+func TestCIShardsHandleUnrecordedAndEmptyDurations(t *testing.T) {
+	shard := readCIPRJobs(t)["shard"]
+	specs := shard.Strategy.Matrix["shard"]
+	names := []string{"TestExistingA", "TestExistingB", "TestUnrecordedNew", "TestExistingC"}
+	namesFile := filepath.Join(t.TempDir(), "names")
+	if err := os.WriteFile(namesFile, []byte(strings.Join(names, "\n")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	partialDurations := map[string]float64{
+		"TestExistingA": 10.0,
+		"TestExistingB": 5.0,
+		"TestExistingC": 2.0,
+	}
+	durationsBytes, err := json.Marshal(partialDurations)
+	if err != nil {
+		t.Fatal(err)
+	}
+	durationsFile := filepath.Join(t.TempDir(), "partial-durations.json")
+	if err := os.WriteFile(durationsFile, durationsBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	ran := map[string][]string{}
+	for _, spec := range specs {
+		cmd := exec.Command("sh", "scripts/ci-test-shard.sh", spec)
+		cmd.Env = append(os.Environ(),
+			"PANEWIRE_SHARD_DRY_RUN=1",
+			"PANEWIRE_SHARD_NAMES_FILE="+namesFile,
+			"PANEWIRE_SHARD_DURATIONS_FILE="+durationsFile,
+		)
+		out, err := cmd.Output()
+		if err != nil {
+			t.Fatalf("shard %s: %v", spec, err)
+		}
+		pattern := regexp.MustCompile(strings.TrimSpace(string(out)))
+		for _, name := range names {
+			if pattern.MatchString(name) {
+				ran[name] = append(ran[name], spec)
+			}
+		}
+	}
+
+	for _, name := range names {
+		if len(ran[name]) != 1 {
+			t.Errorf("%s assigned to %d shards: %v", name, len(ran[name]), ran[name])
 		}
 	}
 }

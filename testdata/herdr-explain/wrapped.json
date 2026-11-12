@@ -1,0 +1,6 @@
+{
+  "result": {
+    "agent": "codex",
+    "matched_rule": {"id": "quota_limit"}
+  }
+}

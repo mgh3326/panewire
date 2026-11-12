@@ -32,6 +32,9 @@ import (
 type planOpts struct {
 	grade, t, role, tags, effort, urgency, exclude, excludePool, builderFamily, routingRole, creditAt string
 	allowEscalation, json                                                                             bool
+
+	// expected is the job's expected duration for the headroom key (--expected).
+	expected string
 }
 
 func (a *App) planCmd(ctx context.Context, args []string) (err error) {
@@ -51,11 +54,16 @@ func (a *App) planCmd(ctx context.Context, args []string) (err error) {
 	f.BoolVar(&o.allowEscalation, "allow-escalation", false, "admit escalation and consult-only rungs")
 	f.BoolVar(&o.json, "json", false, "print the full decision as JSON")
 	f.StringVar(&o.creditAt, "credit-at", "", "judge credit expiry as of this RFC3339 time or YYYY-MM-DD (dry run; quota and presence keep the clock)")
+	f.StringVar(&o.expected, "expected", "", "expected job duration (6h, 1d); the headroom key ranks accounts whose shortest window carries it; unset leaves the key off")
 	if e := f.Parse(args); e != nil {
 		return fail(exitUsage, "%v", e)
 	}
 	if f.NArg() > 0 {
 		return fail(exitUsage, "plan takes no positional arguments")
+	}
+	expected, unreadable := parseExpected(o.expected)
+	if unreadable {
+		return fail(exitUsage, "invalid --expected %q: want a duration like 6h or a day count like 2d", o.expected)
 	}
 	o.grade = strings.ToUpper(o.grade)
 	top := topRoutingRole(builtinRoleMap[o.role]) || topRoutingRole(o.routingRole)
@@ -100,6 +108,7 @@ func (a *App) planCmd(ctx context.Context, args []string) (err error) {
 	cwd, _ := os.Getwd()
 	s := Spawn{CWD: cwd, Profile: "auto", Host: "auto", Role: o.role, T: o.t, Tags: o.tags, Effort: o.effort, ExcludeHosts: o.exclude, ExcludePools: o.excludePool, AllowEscalation: o.allowEscalation, ParentFamily: o.builderFamily, Urgency: o.urgency, DryRun: true}
 	req := selReq{grade: o.grade, t: o.t, role: o.role, tags: tags, effort: o.effort, allowEscalation: o.allowEscalation, builderFamily: o.builderFamily, excludePools: excludePools, urgency: urgencyNormal, urgencySource: "default", creditAt: creditAt}
+	req.expected = expected
 	req.gradeSource = "without_task"
 	if flagPassed(f, "grade") {
 		req.gradeSource = "flag"
@@ -290,7 +299,7 @@ func (a *App) printPlan(asJSON bool, out map[string]any, sel *selPlan, pp *place
 		name := firstNonempty(c.seatName, c.row.Profile)
 		capNote := ""
 		if c.cap != "" {
-			capNote = " cap=" + c.cap
+			capNote = fmt.Sprintf(" cap=%s live=%d limit=%d", c.cap, c.capLive, c.capLimit)
 		}
 		if !c.creditSince.IsZero() {
 			capNote += " since=" + c.creditSince.UTC().Format(time.RFC3339Nano)

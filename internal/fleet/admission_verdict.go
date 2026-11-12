@@ -76,7 +76,8 @@ func admissionRows(rows []CatalogRow) []admissionRow {
 }
 
 // admissionRequest is one gate question: the gate profile and the seat it
-// asks for. E6Arm is the exact measurement marker, PACELEVER_E6_ARM.
+// asks for. E6Arm is the exact measurement marker, PANEWIRE_E6_ARM (with the
+// retired PACELEVER_E6_ARM environment name accepted as a fallback).
 type admissionRequest struct {
 	Profile, Effort, Role, Purpose, OperatorRequest, RequestedBy, E6Arm string
 }

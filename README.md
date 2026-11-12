@@ -138,8 +138,14 @@ those authenticated machine IDs; other nodes remain visible as
 
 See [docs/hub-r6.md](docs/hub-r6.md) for token-file formats, CLI examples, the
 closed WebSocket vocabulary, and the NCP/systemd + tunnel deployment runbook.
+How the hub stops on SIGTERM and how a node redials: [docs/hub-drain.md](docs/hub-drain.md).
 [docs/runbooks/hub-log-access.md](docs/runbooks/hub-log-access.md) covers how a
 non-root operator reads hub logs on NCP.
+
+A hub restart does not fail the idempotent calls: inbox commands, the spawn
+submit and the node's repeatable hub calls are sent again through a transport
+error, 502 or 503 for up to a minute. See
+[hub calls that ride through a restart](docs/hub-uninterrupted-calls.md).
 
 Operator tools reach a node's herdr panes and git worktrees through the hub
 instead of ssh: `GET /v1/nodes/agents` lists every node's agents, and

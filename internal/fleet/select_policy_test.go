@@ -134,7 +134,7 @@ func TestSelectionPolicyScenarios(t *testing.T) {
 		t.Run(tt.situation, func(t *testing.T) {
 			present := []string{"devin", "claude", "codex", "anthropic-api"}
 			a, s, q := selFixture(t, tt.grade, policyCatalog, nil, present)
-			pools, e := CLIQuota{Runner: &fakeRunner{Do: func(c Command) Result {
+			pools, e := CLIQuota{Now: a.Now, Runner: &fakeRunner{Do: func(c Command) Result {
 				if strings.Join(c.Args, " ") == "manual list" {
 					if !strings.HasPrefix(tt.situation, "credit balance recorded") {
 						return Result{Code: 2, Err: "no manual store"}
@@ -282,7 +282,7 @@ func creditStore(now time.Time, pool string, used float64) string {
 		"schema": "pacelever.manual.v1",
 		"latest": map[string]string{pool + ":credit": "m1"},
 		"history": []map[string]any{{"manual_observation_id": "m1", "event": "set", "pool": pool, "window": "credit", "used_pct": used,
-			"expires_at": now.Add(30 * 24 * time.Hour).Format(time.RFC3339Nano)}},
+			"measured_at": now.Add(-time.Hour).Format(time.RFC3339Nano), "expires_at": now.Add(30 * 24 * time.Hour).Format(time.RFC3339Nano)}},
 	})
 	return string(b)
 }

@@ -136,7 +136,6 @@ func TestFleetQuotaCodexIsMeasuredNatively(t *testing.T) {
 	}
 	client.nativeQuota = map[string]*nativeQuotaSource{"codex": codexTestSource(client.spawnConfigPath, codexLoginFiles(codexSecret, "fixture-acct"), rpc, api)}
 	var pacelever []string
-	client.nodePacelever = paceleverNeverForNative(t, &pacelever)
 	var warnings []string
 	client.warn = func(m string) { warnings = append(warnings, m) }
 
@@ -216,8 +215,6 @@ func TestFleetQuotaCodexFallsBackToTheAPI(t *testing.T) {
 		return claudeAPIReply(200, codexAPIBody())(r)
 	})}
 	var pacelever []string
-	client.nodePacelever = paceleverNeverForNative(t, &pacelever)
-
 	client.refreshFleetQuota(t.Context(), "codex", map[string]fleetQuotaSent{})
 
 	if len(requests) != 1 || requests[0].Header.Get("Authorization") != "Bearer "+codexSecret || requests[0].Header.Get("ChatGPT-Account-Id") != "fixture-acct" {
@@ -258,7 +255,6 @@ func TestFleetQuotaCodexLoginClassification(t *testing.T) {
 			rpc := &codexRPCFake{startErr: errors.New("no codex binary")}
 			client.nativeQuota = map[string]*nativeQuotaSource{"codex": codexTestSource(client.spawnConfigPath, test.files, rpc, test.api)}
 			var pacelever []string
-			client.nodePacelever = paceleverNeverForNative(t, &pacelever)
 			var warnings []string
 			client.warn = func(m string) { warnings = append(warnings, m) }
 			client.refreshFleetQuota(t.Context(), "codex", map[string]fleetQuotaSent{})
@@ -287,8 +283,6 @@ func TestNodeQuotaRefreshCodexIsNative(t *testing.T) {
 	rpc := &codexRPCFake{lines: codexRPCLines()}
 	client.nativeQuota = map[string]*nativeQuotaSource{"codex": codexTestSource(client.spawnConfigPath, codexLoginFiles(codexSecret, "fixture-acct"), rpc, claudeAPIReply(500, "unused"))}
 	var pacelever []string
-	client.nodePacelever = paceleverNeverForNative(t, &pacelever)
-
 	result, code := nodeRun(t, client, nodeCommandQuotaRefresh, map[string]any{"pool": "codex"})
 	if code != "" || result["outcome"] != nodeQuotaRefreshed {
 		t.Fatalf("codex refresh: result=%v code=%q", result, code)
@@ -301,7 +295,6 @@ func TestNodeQuotaRefreshCodexIsNative(t *testing.T) {
 	}
 
 	failing := &HubClient{nativeQuota: map[string]*nativeQuotaSource{"codex": codexTestSource("/nonexistent", codexLoginFiles("", ""), &codexRPCFake{}, claudeAPIReply(200, codexAPIBody()))}}
-	failing.nodePacelever = paceleverNeverForNative(t, &pacelever)
 	if _, code := nodeRun(t, failing, nodeCommandQuotaRefresh, map[string]any{"pool": "codex"}); code != "refresh_failed" {
 		t.Fatalf("failing codex refresh code=%q", code)
 	}

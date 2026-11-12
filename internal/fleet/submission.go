@@ -53,8 +53,11 @@ type SpawnSubmitter interface {
 	Submit(context.Context, Submission) (Accepted, error)
 }
 
+// Submit sends the request under its own request id. The hub keys the
+// operation by that id and answers a replay with the operation it already
+// holds, so the submit may be sent again (docs/hub-uninterrupted-calls.md).
 func (c *hubHTTP) Submit(ctx context.Context, request Submission) (Accepted, error) {
-	status, raw, err := c.do(ctx, http.MethodPost, "/v1/spawns", request, 15*time.Second)
+	status, raw, err := c.doIdempotent(ctx, http.MethodPost, "/v1/spawns", request, 15*time.Second)
 	if err != nil {
 		return Accepted{}, err
 	}
@@ -110,6 +113,7 @@ func conflictMessage(raw []byte) string {
 }
 
 func (a *App) SubmitSpawn(ctx context.Context, s Spawn) error {
+	defer a.reportHubRetries()
 	wait := s.Wait
 	if wait {
 		if _, err := a.waitDeadline(s); err != nil {
@@ -421,7 +425,7 @@ func (c *hubHTTP) SpawnStatus(ctx context.Context, id string) (string, error) {
 	if !validID(id) {
 		return "", fail(exitUsage, "invalid spawn operation id")
 	}
-	status, raw, err := c.do(ctx, http.MethodGet, "/v1/spawns/"+id, nil, 5*time.Second)
+	status, raw, err := c.doIdempotent(ctx, http.MethodGet, "/v1/spawns/"+id, nil, 5*time.Second)
 	if err != nil {
 		return "", err
 	}
@@ -443,7 +447,7 @@ func (c *hubHTTP) WaitSpawn(ctx context.Context, id string) (SpawnAttempt, error
 	}
 	failures := 0
 	for {
-		status, raw, err := c.do(ctx, http.MethodGet, "/v1/spawns/"+id, nil, 5*time.Second)
+		status, raw, err := c.doIdempotent(ctx, http.MethodGet, "/v1/spawns/"+id, nil, 5*time.Second)
 		if err != nil || status >= http.StatusInternalServerError {
 			if failures++; failures > spawnStatusFailureLimit {
 				return SpawnAttempt{}, fail(exitStateConflict, "spawn status unavailable; inspect operation %s and retry its saved request without choosing a new host", id)

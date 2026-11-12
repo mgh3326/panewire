@@ -738,34 +738,6 @@ func TestNodeWorktreeRemoveNeverForces(t *testing.T) {
 	}
 }
 
-func TestNodeQuotaRefresh(t *testing.T) {
-	var calls [][]string
-	client := &HubClient{nodePacelever: func(_ context.Context, args ...string) ([]byte, error) {
-		calls = append(calls, append([]string(nil), args...))
-		return []byte("refreshed\n"), nil
-	}}
-	result, code := nodeRun(t, client, nodeCommandQuotaRefresh, map[string]any{"pool": "pool-a"})
-	if code != "refresh_failed" || result != nil {
-		t.Fatalf("outcome=%v code=%q", result["outcome"], code)
-	}
-	if len(calls) != 0 {
-		t.Fatalf("unmeasurable refresh ran an external command: %v", calls)
-	}
-
-	for _, pool := range []string{"", "POOL", "pool a", "pool;rm", "-pool", "pool-", "../pool", "pool/x"} {
-		if _, code := nodeRun(t, client, nodeCommandQuotaRefresh, map[string]any{"pool": pool}); code != "invalid_args" {
-			t.Fatalf("pool %q code=%q", pool, code)
-		}
-	}
-
-	failing := &HubClient{nodePacelever: func(context.Context, ...string) ([]byte, error) {
-		return nil, errors.New("pacelever down")
-	}}
-	if _, code := nodeRun(t, failing, nodeCommandQuotaRefresh, map[string]any{"pool": "pool-a"}); code != "refresh_failed" {
-		t.Fatalf("failing refresh code=%q", code)
-	}
-}
-
 func TestNodeWorktreePrepareResultNeedsHead(t *testing.T) {
 	for _, outcome := range []string{nodePreparePrepared, nodePrepareReused} {
 		empty := json.RawMessage(`{"outcome":"` + outcome + `","worktree":{"path":"/w/repo.job","branch":"","head":"","origin_url":"","common":""}}`)

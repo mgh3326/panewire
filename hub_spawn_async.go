@@ -206,6 +206,13 @@ func (h *HubServer) handleSpawnOperation(w http.ResponseWriter, r *http.Request)
 	}{task.Job, task.Request.RequestID, task.Status, task.Outcome})
 }
 
+// hubSpawnWorkerCount bounds how many accepted spawns the hub executes at once.
+// Each worker holds its request for the whole remote landing, so a slow or
+// restarting node keeps workers busy; with four, a reviewer burst left requests
+// queued past their 600 s deadline (hk 4348, 4368). Eight is a stopgap until
+// one handler per node replaces the global pool (hk 4358).
+const hubSpawnWorkerCount = 8
+
 func (h *HubServer) runSpawnCoordinator(parent context.Context) {
 	if h.inbox == nil {
 		return
@@ -214,10 +221,10 @@ func (h *HubServer) runSpawnCoordinator(parent context.Context) {
 	defer cancel()
 	stop := context.AfterFunc(h.closeCtx, cancel)
 	defer stop()
-	work := make(chan hubSpawnTask, 4)
+	work := make(chan hubSpawnTask, hubSpawnWorkerCount)
 	var mu sync.Mutex
 	active := map[string]bool{}
-	for range 4 {
+	for range hubSpawnWorkerCount {
 		h.spawnWorkers.Add(1)
 		go func() {
 			defer h.spawnWorkers.Done()
@@ -226,8 +233,13 @@ func (h *HubServer) runSpawnCoordinator(parent context.Context) {
 				case <-ctx.Done():
 					return
 				case task := <-work:
-					h.inbox.store.touchSpawn(ctx, task.Request.RequestID, h.now().UTC())
-					h.executeSpawnTask(ctx, task)
+					// A draining hub starts nothing new; the durable row stays
+					// pending for the next hub (hub_drain.go).
+					if h.drain.enter() {
+						h.inbox.store.touchSpawn(ctx, task.Request.RequestID, h.now().UTC())
+						h.executeSpawnTask(ctx, task)
+						h.drain.leave()
+					}
 					mu.Lock()
 					delete(active, task.Request.RequestID)
 					mu.Unlock()
@@ -239,7 +251,7 @@ func (h *HubServer) runSpawnCoordinator(parent context.Context) {
 	defer tick.Stop()
 	for {
 		tasks, err := h.inbox.store.pendingSpawns(ctx)
-		if err == nil {
+		if err == nil && h.drain.admit() {
 			for _, task := range tasks {
 				mu.Lock()
 				busy := active[task.Request.RequestID]
@@ -275,7 +287,8 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 		}
 	}()
 	if !h.now().Before(task.Deadline) {
-		h.finishSpawnOutcome(task, hubSpawnOutcome{RC: 124, Stage: "landing", Reason: "timeout", Host: spawnTaskHost(task), Retryable: task.Node == nil})
+		h.logger.Warn("hub spawn starved in the queue", "request_id", task.Request.RequestID, "job", task.Job, "host", firstNonEmptyString(spawnTaskHost(task), "none"), "queue_wait_s", spawnQueueWaitSeconds(task, h.now()))
+		h.finishSpawnOutcome(task, hubSpawnOutcome{RC: 124, Stage: "landing", Reason: "timeout", Host: spawnTaskHost(task), Retryable: task.Node == nil, Fix: spawnQueueWaitFix(task, h.now())})
 		if task.Node == nil {
 			return
 		}
@@ -401,12 +414,43 @@ func (s directSpawnState) Snapshot(ctx context.Context) (fleet.FleetSnapshot, er
 
 type directSpawnWake struct{ h *HubServer }
 
+// Wake waits for the woken host's own heartbeat for at most the caller's
+// wake_wait. requestNodeWake otherwise waits until ctx is done — the whole
+// spawn deadline — and a coordinator worker holding a wake open that long
+// starves the four-worker spawn queue, so unrelated requests expire before a
+// worker starts them.
 func (w directSpawnWake) Wake(ctx context.Context, host string, request fleet.WakeRequest) error {
+	if request.WaitSeconds > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, time.Duration(request.WaitSeconds)*time.Second)
+		defer cancel()
+	}
 	_, code := w.h.requestNodeWake(ctx, host)
 	if code != "" {
 		return errors.New("node wake refused")
 	}
 	return nil
+}
+
+// spawnQueueWaitFix names the step that ran out of time when the coordinator
+// finds a request already past its deadline: the hub's own spawn queue. The
+// stage this branch reports is the last of the closed set, which reads as a
+// node landing that never ran, so the fix text carries the wait instead.
+func spawnQueueWaitFix(task hubSpawnTask, now time.Time) string {
+	return fmt.Sprintf("the hub did not start this request within its %ds deadline (about %ds in the spawn queue, host=%s); no node ran its landing — check hub spawn worker occupancy, then resubmit", task.Request.DeadlineSeconds, spawnQueueWaitSeconds(task, now), firstNonEmptyString(spawnTaskHost(task), "none"))
+}
+
+// spawnQueueWaitSeconds is how long a request waited for a coordinator worker:
+// its whole deadline, plus however far past the deadline the worker picked it.
+func spawnQueueWaitSeconds(task hubSpawnTask, now time.Time) int64 {
+	waited := int64(task.Request.DeadlineSeconds)
+	if !task.Deadline.IsZero() {
+		waited += int64(now.Sub(task.Deadline) / time.Second)
+	}
+	if waited < 0 {
+		waited = 0
+	}
+	return waited
 }
 
 type directSpawnTransport struct {

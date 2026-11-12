@@ -1,7 +1,6 @@
 package panewire
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -13,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/mgh3326/panewire/internal/hubretry"
 )
 
 const inboxUsage = `usage: panewire inbox list [--lane L] [--unread] [--json]
@@ -43,10 +44,6 @@ no visible row.`
 // Each server request is bounded by hubInboxWaitMaxWait; the client re-issues
 // until this deadline, so there is no tight polling.
 const inboxWaitDefaultTimeout = 60 * time.Second
-
-// hubInboxRequestTimeout gives node-daemon requests room for the Cloudflare
-// Access path, which can consume most of the old five-second request budget.
-const hubInboxRequestTimeout = 15 * time.Second
 
 func runInboxCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 	if len(args) == 0 {
@@ -183,17 +180,20 @@ func runInboxCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 	if env.MachineID != hubOperatorMachineID {
 		client.machineID = env.MachineID
 	}
-	return executeInbox(client, stdout, stderr, inboxRequest{Command: command, Lane: lane, ID: id, Unread: unread, All: all, JSON: jsonMode, Timeout: timeout, EventIDs: eventIDs}, env.MachineID == hubOperatorMachineID && !laneExplicit)
+	return executeInbox(client, stdout, stderr, inboxRequest{Command: command, Lane: lane, ID: id, Unread: unread, All: all, JSON: jsonMode, Timeout: timeout, EventIDs: eventIDs}, env.MachineID == hubOperatorMachineID && !laneExplicit, deps.HubRetry)
 }
 
 type inboxHTTPClient interface {
 	do(context.Context, string, string, url.Values, io.Reader) (*http.Response, error)
 }
 
-func executeInbox(client inboxHTTPClient, stdout, stderr io.Writer, req inboxRequest, unscopedOperator bool) int {
+// executeInbox runs one inbox command over client. Every command is idempotent,
+// so each hub call may be sent again under policy (inbox_retry.go); the one
+// stderr line that reports the retries is the command's own.
+func executeInbox(client inboxHTTPClient, stdout, stderr io.Writer, req inboxRequest, unscopedOperator bool, policy hubretry.Policy) int {
 	command, lane, id, unread, all, jsonMode, timeout, eventIDs := req.Command, req.Lane, req.ID, req.Unread, req.All, req.JSON, req.Timeout, req.EventIDs
 	if command == "wait" {
-		return runInboxWait(client, stdout, stderr, lane, timeout, jsonMode)
+		return runInboxWait(client, stdout, stderr, lane, timeout, jsonMode, policy)
 	}
 	// read <id> and ack <id> name one stored item: for an operator token an
 	// ambient PANEWIRE_LANE must not hide it behind a lane-scoped 404. The
@@ -212,7 +212,7 @@ func executeInbox(client inboxHTTPClient, stdout, stderr io.Writer, req inboxReq
 		query.Set("unread", "true")
 	}
 	path, method := "/v1/inbox", http.MethodGet
-	var body io.Reader
+	var payload []byte
 	if command == "count" {
 		path += "/count"
 	}
@@ -232,29 +232,27 @@ func executeInbox(client inboxHTTPClient, stdout, stderr io.Writer, req inboxReq
 	if command == "ack" {
 		path += "/ack"
 		method = http.MethodPost
-		raw, _ := json.Marshal(struct {
+		encoded, _ := json.Marshal(struct {
 			ID   int64  `json:"id"`
 			All  bool   `json:"all"`
 			Lane string `json:"lane"`
 		}{id, all, lane})
-		body = bytes.NewReader(raw)
+		payload = encoded
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), hubInboxRequestTimeout)
-	defer cancel()
-	response, err := client.do(ctx, method, path, query, body)
+	answer, stats, err := inboxCall{method: method, path: path, query: query, body: payload, timeout: inboxAttemptTimeout}.send(context.Background(), client, policy)
+	reportHubRetries(stderr, stats)
 	if err != nil {
 		fmt.Fprintln(stderr, "inbox: hub unavailable")
 		return ExitInternal
 	}
-	defer response.Body.Close()
 	// For status a 404 is an answer, not a failure: it lists the ids with no
 	// visible row.
-	if response.StatusCode != 200 && !(command == "status" && response.StatusCode == http.StatusNotFound) {
-		fmt.Fprintf(stderr, "inbox: hub returned HTTP %d\n", response.StatusCode)
+	if answer.status != 200 && !(command == "status" && answer.status == http.StatusNotFound) {
+		fmt.Fprintf(stderr, "inbox: hub returned HTTP %d\n", answer.status)
 		return ExitDeliveryFailure
 	}
-	raw, err := io.ReadAll(io.LimitReader(response.Body, 8<<20))
-	if err != nil || !json.Valid(raw) {
+	raw := answer.body
+	if !json.Valid(raw) {
 		fmt.Fprintln(stderr, "inbox: invalid hub response")
 		return ExitInternal
 	}
@@ -333,8 +331,10 @@ func executeInbox(client inboxHTTPClient, stdout, stderr io.Writer, req inboxReq
 // or the CLI deadline runs out. Each request asks the hub to hold for at most
 // hubInboxWaitMaxWait, so the loop is a continuation of one long wait rather
 // than polling.
-func runInboxWait(client inboxHTTPClient, stdout, stderr io.Writer, lane string, timeout time.Duration, jsonMode bool) int {
+func runInboxWait(client inboxHTTPClient, stdout, stderr io.Writer, lane string, timeout time.Duration, jsonMode bool, policy hubretry.Policy) int {
 	deadline := time.Now().Add(timeout)
+	var retried hubretry.Stats
+	defer func() { reportHubRetries(stderr, retried) }()
 	for {
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
@@ -345,17 +345,18 @@ func runInboxWait(client inboxHTTPClient, stdout, stderr io.Writer, lane string,
 			waitFor = hubInboxWaitMaxWait
 		}
 		query := url.Values{"lane": {lane}, "timeout": {waitFor.String()}}
-		ctx, cancel := context.WithTimeout(context.Background(), waitFor+10*time.Second)
-		response, err := client.do(ctx, http.MethodGet, "/v1/inbox/wait", query, nil)
+		// A retried long poll stays inside the CLI deadline: a retry that would
+		// run past it is not sent.
+		answer, stats, err := inboxCall{method: http.MethodGet, path: "/v1/inbox/wait", query: query, timeout: waitFor + 10*time.Second}.send(context.Background(), client, policy.Within(remaining))
+		retried.Add(stats)
 		if err != nil {
-			cancel()
+			if time.Until(deadline) <= 0 {
+				return ExitTimeout
+			}
 			fmt.Fprintln(stderr, "inbox: hub unavailable")
 			return ExitInternal
 		}
-		raw, readErr := io.ReadAll(io.LimitReader(response.Body, 8<<20))
-		response.Body.Close()
-		status := response.StatusCode
-		cancel()
+		raw, status := answer.body, answer.status
 		if status != 200 {
 			fmt.Fprintf(stderr, "inbox: hub returned HTTP %d\n", status)
 			return ExitDeliveryFailure
@@ -364,7 +365,7 @@ func runInboxWait(client inboxHTTPClient, stdout, stderr io.Writer, lane string,
 			Item *laneInboxItem `json:"item"`
 		}
 		var fields map[string]json.RawMessage
-		if readErr != nil || !json.Valid(raw) || json.Unmarshal(raw, &body) != nil || json.Unmarshal(raw, &fields) != nil {
+		if !json.Valid(raw) || json.Unmarshal(raw, &body) != nil || json.Unmarshal(raw, &fields) != nil {
 			fmt.Fprintln(stderr, "inbox: invalid hub response")
 			return ExitInternal
 		}

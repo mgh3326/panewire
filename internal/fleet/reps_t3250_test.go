@@ -346,6 +346,7 @@ func TestCreditBalancesReadSharedManualEntries(t *testing.T) {
 	now := time.Date(2026, 11, 7, 9, 0, 0, 0, time.UTC)
 	expires := time.Date(2026, 11, 16, 0, 0, 0, 0, time.UTC)
 	q := CLIQuota{
+		Now:            func() time.Time { return now },
 		Accounts:       map[string]string{"anthropic-api": "0123456789abcdef"},
 		CreditTotalUSD: map[string]float64{"anthropic-api": 200},
 		SharedLatest: func(context.Context, string) (shared.Latest, error) {

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/mgh3326/panewire/internal/fleetevent"
+	"github.com/mgh3326/panewire/internal/hubretry"
 
 	"github.com/mgh3326/panewire/internal/arbiter"
 	"github.com/mgh3326/panewire/internal/quota/shared"
@@ -29,6 +30,9 @@ type App struct {
 	ConfigPath   string
 	Policy       Policy
 	Out, Err     io.Writer
+	// hubRetries tallies the idempotent hub calls this command sent again; it
+	// is printed once when the command ends (reportHubRetries).
+	hubRetries   hubretry.Stats
 	Jobs, Home   string
 	Sleep        func(context.Context, time.Duration) error
 	Now          func() time.Time
@@ -151,7 +155,7 @@ func New(out, errout io.Writer) (*App, error) {
 	if os.Getenv("PANEWIRE_QUOTA_BIN") != "" {
 		fmt.Fprintln(errout, "panewire: 경고: PANEWIRE_QUOTA_BIN 설정은 폐기되어 무시됩니다")
 	}
-	cliQuota := CLIQuota{Runner: a.Runner, CreditTotalUSD: creditTotals(c.Quota), Accounts: quotaAccounts(c.Quota)}
+	cliQuota := CLIQuota{Runner: a.Runner, Now: a.Now, CreditTotalUSD: creditTotals(c.Quota), Accounts: quotaAccounts(c.Quota)}
 	cliQuota.SharedLatest = a.sharedLatest
 	a.Quota = admissionQuota{cliQuota, a}
 	a.Source = stateSource{a: a, inner: fleetSource{a}}
@@ -350,7 +354,7 @@ func (a *App) help(cmd string) error {
 	case "delegate":
 		fmt.Fprintln(a.Out, "Usage: panewire delegate --role reader|verifier|reviewer --prompt FILE [--grade G] [--cwd DIR] [--timeout D] [--headless] [--patch] [--panel 2..4] [--family F] [--workspace W] [--json] (hand one bounded reading, verifying or cross-checking task to a free or spare-quota model; the answer is the last thing printed)")
 	case "plan":
-		fmt.Fprintln(a.Out, "Usage: panewire plan [--grade G] --t T0..T3 [--role R] [--tags a,b] [--effort E] [--urgency normal|urgent] [--exclude-host a,b] [--exclude-pool P,P] [--builder-family F] [--routing-role R] [--allow-escalation] [--credit-at TIME] [--json] (live, read-only: the host and model a spawn would get now; no task, spawn or job write)")
+		fmt.Fprintln(a.Out, "Usage: panewire plan [--grade G] --t T0..T3 [--role R] [--tags a,b] [--effort E] [--urgency normal|urgent] [--exclude-host a,b] [--exclude-pool P,P] [--builder-family F] [--routing-role R] [--allow-escalation] [--credit-at TIME] [--expected DURATION] [--json] (live, read-only: the host and model a spawn would get now; no task, spawn or job write; --expected 6h or 2d keys subscription pools by whether their shortest window fits the job)")
 	case "resolve":
 		fmt.Fprintln(a.Out, "Usage: panewire resolve --role consult|implementer|explorer|verifier|reviewer|judge [--grade G] [--t T0..T3] [--builder-family F] [--lane L (consult asker lane)] [--harness KIND] [--allow-escalation] [--json] (read-only: the profile and effort role routing and quota ordering pick now, for an in-session subagent; no host placement, spawn or job write; the answer is the last thing printed)")
 	case "preflight":

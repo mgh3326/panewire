@@ -109,6 +109,9 @@ func (q admissionQuota) creditPolicyViews(pools []string) (map[string]PoolView, 
 // CLIQuota.Pools does; without a readable store the views keep none.
 func (q admissionQuota) addCreditBalances(ctx context.Context, views map[string]PoolView, pools []string, accounts map[string]string) {
 	reader := q.CLIQuota
+	if reader.Now == nil && q.app != nil {
+		reader.Now = q.app.Now
+	}
 	reader.Accounts = accounts
 	for _, pool := range pools {
 		if !accountFP.MatchString(accounts[pool]) {

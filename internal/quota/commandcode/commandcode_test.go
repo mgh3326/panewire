@@ -135,7 +135,8 @@ func TestMeasureFixtureYieldsThirtyDayWindow(t *testing.T) {
 	if month.ResetsAt != "2026-11-27T07:38:00Z" || month.Scope.Kind != quota.ScopeAccount {
 		t.Fatalf("30d bucket %+v", month)
 	}
-	if week := bucketOf(t, observed, "7d"); math.Round(*week.UsedPct*10)/10 != 1.3 || week.ResetsAt != "2026-11-12T00:00:00Z" {
+	// hk 4330: 7d rolling window carries no ResetsAt (unpaceable).
+	if week := bucketOf(t, observed, "7d"); math.Round(*week.UsedPct*10)/10 != 1.3 || week.ResetsAt != "" {
 		t.Fatalf("7d bucket %+v", week)
 	}
 	if five := bucketOf(t, observed, "5h"); *five.UsedPct != 0 || five.ResetsAt != "2026-11-06T09:00:00Z" {

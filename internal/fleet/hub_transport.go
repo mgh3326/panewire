@@ -20,6 +20,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/mgh3326/handoffkeep/client"
+	"github.com/mgh3326/panewire/internal/hubretry"
 	"github.com/mgh3326/panewire/internal/spawnargs"
 )
 
@@ -104,6 +105,9 @@ type HubError struct {
 	Kind   string
 	Status int
 	Code   string
+	// transport is the connection failure behind a hubDown with no status, so
+	// a retry can tell a dropped connection from a refused request.
+	transport error
 }
 
 func (e *HubError) Error() string {
@@ -113,6 +117,9 @@ func (e *HubError) Error() string {
 	return e.Kind
 }
 
+// Unwrap exposes the transport failure, if there was one.
+func (e *HubError) Unwrap() error { return e.transport }
+
 // hubHTTP is the production HubTransport. Credentials come from the files
 // named in [hub] and never appear in errors; redirects are refused so the
 // bearer never follows another origin.
@@ -120,6 +127,10 @@ type hubHTTP struct {
 	base, token, cfID, cfSecret string
 	client                      *http.Client
 	statusPoll                  time.Duration // 0 means the WaitSpawn default
+	// retry bounds doIdempotent; the zero value is the production policy.
+	retry hubretry.Policy
+	// onRetry hears each idempotent call that was sent again. Nil hears nothing.
+	onRetry func(hubretry.Stats)
 }
 
 var hubPoolRule = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
@@ -132,8 +143,22 @@ func (a *App) hub() (HubTransport, error) {
 	if e != nil {
 		return nil, e
 	}
+	c.onRetry = a.noteHubRetry
 	a.Hub = c
 	return c, nil
+}
+
+// noteHubRetry adds one call's retries to the command's tally.
+func (a *App) noteHubRetry(stats hubretry.Stats) { a.hubRetries.Add(stats) }
+
+// reportHubRetries prints the one line a command owes when a hub call was sent
+// again, on stderr so stdout keeps the command's receipt lines, then clears the
+// tally.
+func (a *App) reportHubRetries() {
+	if a.hubRetries.Retries > 0 && a.Err != nil {
+		fmt.Fprintln(a.Err, a.hubRetries.Line())
+	}
+	a.hubRetries = hubretry.Stats{}
 }
 
 func newHubHTTP(cfg map[string]any) (*hubHTTP, error) {
@@ -220,7 +245,7 @@ func (c *hubHTTP) do(ctx context.Context, method, path string, body any, timeout
 	}
 	resp, e := client.Do(req)
 	if e != nil {
-		return 0, nil, &HubError{Kind: hubDown}
+		return 0, nil, &HubError{Kind: hubDown, transport: e}
 	}
 	defer resp.Body.Close()
 	data, e := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
@@ -228,6 +253,25 @@ func (c *hubHTTP) do(ctx context.Context, method, path string, body any, timeout
 		return resp.StatusCode, nil, &HubError{Kind: hubDown, Status: resp.StatusCode}
 	}
 	return resp.StatusCode, data, nil
+}
+
+// doIdempotent is do for a call that may be sent again: a transport error, a
+// 502 or a 503 is retried within c.retry's budget (docs/hub-uninterrupted-calls.md).
+// Only a GET, or a POST that the hub keys by a request id, may use it. Each
+// retried call is reported through c.onRetry.
+func (c *hubHTTP) doIdempotent(ctx context.Context, method, path string, body any, timeout time.Duration) (int, []byte, error) {
+	type answer struct {
+		status int
+		data   []byte
+	}
+	got, stats, err := hubretry.Do(ctx, c.retry, func(ctx context.Context) (answer, int, error) {
+		status, data, err := c.do(ctx, method, path, body, timeout)
+		return answer{status, data}, status, err
+	}, nil)
+	if stats.Retries > 0 && c.onRetry != nil {
+		c.onRetry(stats)
+	}
+	return got.status, got.data, err
 }
 
 // classify maps a non-answer status to a HubError.

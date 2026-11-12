@@ -14,6 +14,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"os/exec"
@@ -23,6 +24,7 @@ import (
 
 	"github.com/pelletier/go-toml/v2"
 
+	"github.com/mgh3326/panewire/internal/configpath"
 	"github.com/mgh3326/panewire/internal/quota"
 )
 
@@ -52,8 +54,10 @@ type Config struct {
 	LookupEnv func(string) (string, bool)
 	// ReadFile reads the login, identity and settings files; nil is os.ReadFile.
 	ReadFile func(string) ([]byte, error)
+	// ReplaceFile publishes a cache file atomically; nil uses the durable helper.
+	ReplaceFile func(string, string, []byte, os.FileMode) error
 	// Binary is the configured devin executable, tried after the
-	// PACELEVER_DEVIN_BIN override and the settings file's path, before PATH.
+	// PANEWIRE_DEVIN_BIN override and the settings file's path, before PATH.
 	Binary string
 	// LookPath finds devin on PATH; nil is exec.LookPath.
 	LookPath func(string) (string, error)
@@ -177,11 +181,9 @@ func AccountFP(cfg Config) string {
 // settings are the two values pacelever's config.toml sets for the devin pool.
 type settings struct{ orgID, bin string }
 
-func (c Config) settings() settings {
-	path := c.env("PACELEVER_CONFIG")
-	if path == "" {
-		path = filepath.Join(c.configBase(), "pacelever", "config.toml")
-	}
+func (c Config) settings() (settings, error) {
+	paths := configpath.Candidates(c.env, c.home(), "config.toml")
+	_, variable, explicit := configpath.Explicit(c.env)
 	var file struct {
 		Pools struct {
 			Devin struct {
@@ -190,17 +192,40 @@ func (c Config) settings() settings {
 			} `toml:"devin"`
 		} `toml:"pools"`
 	}
-	body := c.readFile(path)
-	if body == nil || toml.Unmarshal(body, &file) != nil {
-		return settings{}
+	for _, path := range paths {
+		body, err := c.readFileErr(path)
+		if errors.Is(err, os.ErrNotExist) {
+			if explicit {
+				return settings{}, fmt.Errorf("%s %q does not exist", variable, path)
+			}
+			continue
+		}
+		if err != nil {
+			return settings{}, fmt.Errorf("cannot read %s %q: %w", configPathLabel(variable, explicit), path, err)
+		}
+		if err := toml.Unmarshal(body, &file); err != nil {
+			return settings{}, fmt.Errorf("invalid %s %q: %w", configPathLabel(variable, explicit), path, err)
+		}
+		return settings{orgID: strings.TrimSpace(file.Pools.Devin.OrgID), bin: strings.TrimSpace(file.Pools.Devin.Bin)}, nil
 	}
-	return settings{orgID: strings.TrimSpace(file.Pools.Devin.OrgID), bin: strings.TrimSpace(file.Pools.Devin.Bin)}
+	return settings{}, nil
 }
 
-// binary is the devin executable: PACELEVER_DEVIN_BIN, the settings file's
+func configPathLabel(variable string, explicit bool) string {
+	if explicit {
+		return variable
+	}
+	return "Devin config"
+}
+
+// binary is the devin executable: PANEWIRE_DEVIN_BIN (PACELEVER_DEVIN_BIN
+// fallback), the settings file's
 // path, the configured one, then devin on PATH.
 func (c Config) binary(s settings) string {
-	explicit := c.env("PACELEVER_DEVIN_BIN")
+	explicit := c.env("PANEWIRE_DEVIN_BIN")
+	if explicit == "" {
+		explicit = c.env("PACELEVER_DEVIN_BIN")
+	}
 	if explicit == "" {
 		explicit = s.bin
 	}
@@ -232,7 +257,10 @@ func Measure(ctx context.Context, cfg Config) (quota.Observation, error) {
 		return quota.Observation{}, quota.Fail(quota.ErrKindCredentials, "credentials unavailable")
 	}
 	login := AccountFP(cfg)
-	s := cfg.settings()
+	s, err := cfg.settings()
+	if err != nil {
+		return quota.Observation{}, quota.Fail(quota.ErrKindCredentials, err.Error())
+	}
 	if observed, err := cfg.fetchWeb(ctx, cfg.env("DEVIN_BEARER_TOKEN"), s.orgID); err == nil {
 		// The web source selects its organization independently of the CLI
 		// login, so its measurement carries the organization it measured; the
