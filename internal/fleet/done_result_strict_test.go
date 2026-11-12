@@ -26,6 +26,10 @@ func strictDoneFixture(t *testing.T, state string) (*App, *fakeRunner, *fakeHK, 
 	h.records["j"]["state"] = state
 	a.JobStore = h.client()
 	seedJob(t, a, "j", "reviewer")
+	job, err := a.job("j")
+	if err != nil || job.Task == "" {
+		t.Fatalf("fixture task unavailable: task=%q err=%v", job.Task, err)
+	}
 	seedLedger(t, a, "j")
 	report := filepath.Join(a.Jobs, "j", "report.md")
 	result := filepath.Join(a.Jobs, "j", "findings.json")
@@ -140,7 +144,8 @@ func TestDoneResultStrictRetriesIdenticalPut(t *testing.T) {
 		}
 	}
 	if emits != 1 || comments != 1 {
-		t.Fatalf("emits=%d comments=%d requests=%+v", emits, comments, docs.Requests())
+		job, _ := a.job("j")
+		t.Fatalf("emits=%d comments=%d task=%q requests=%+v stderr=%q", emits, comments, job.Task, docs.Requests(), a.Err)
 	}
 	if _, pools := ledgerState(t, a, "j"); len(pools) != 0 {
 		t.Fatal("quota was not released")
