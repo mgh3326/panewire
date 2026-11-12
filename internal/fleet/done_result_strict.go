@@ -308,9 +308,10 @@ func (a *App) attachDuplicateResultStrict(ctx context.Context, j Job, id, report
 		return "", &doneResultFailure{code: exitStateConflict, reason: "result_conflict"}
 	}
 	storedReportDoc, storedReportSHA := str(record, "report_doc"), str(record, "report_sha256")
-	reportDoc, reportSHA := storedReportDoc, storedReportSHA
-	if storedReportDoc == "" && eventDoc != "" {
-		reportDoc, reportSHA = eventDoc, eventSHA
+	operationDoc, operationSHA := eventDoc, eventSHA
+	readbackDoc, readbackSHA := storedReportDoc, storedReportSHA
+	if readbackDoc == "" && operationDoc != "" {
+		readbackDoc, readbackSHA = operationDoc, operationSHA
 	}
 	if str(record, "state") == "completed" {
 		stored, hasResult := record["result"]
@@ -319,7 +320,7 @@ func (a *App) attachDuplicateResultStrict(ctx context.Context, j Job, id, report
 			// was written after an earlier failed attempt; strict read-back
 			// will classify the terminal 409 safely.
 		} else {
-			if storedReportDoc != "" && (storedReportDoc != reportDoc || reportSHA != "" && storedReportSHA != reportSHA) {
+			if storedReportDoc != "" && operationDoc != "" && (storedReportDoc != operationDoc || operationSHA != "" && storedReportSHA != operationSHA) {
 				return "", &doneResultFailure{code: exitStateConflict, reason: "report_conflict"}
 			}
 			written, eventErr := a.ensureResultAttachedEvent(ctx, j.Events, id, report, digest)
@@ -337,7 +338,7 @@ func (a *App) attachDuplicateResultStrict(ctx context.Context, j Job, id, report
 		fields["report_doc"] = eventDoc
 		fields["report_sha256"] = eventSHA
 	}
-	attached, e := a.strictCompletedPutUntil(ctx, id, fields, result, reportDoc, reportSHA, spawnReceiptForRepair(j.Events), deadline)
+	attached, e := a.strictCompletedPutUntil(ctx, id, fields, result, readbackDoc, readbackSHA, spawnReceiptForRepair(j.Events), deadline)
 	if e != nil {
 		if isDoneResultFailure(e, "result_conflict") {
 			a.recordDoneResultConflict(id)

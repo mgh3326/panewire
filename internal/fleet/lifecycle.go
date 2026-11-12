@@ -443,6 +443,10 @@ func watcherResultFile(jobs, id, report string) (string, string) {
 func (a *App) attachDuplicateResult(ctx context.Context, id, report, digest string, result json.RawMessage, eventDoc, eventSHA string) (string, error) {
 	store, e := a.jobStore()
 	if e != nil {
+		if result == nil {
+			a.warn("duplicate job record repair unavailable: reason=%s", doneResultReason(e))
+			return "", nil
+		}
 		return "", fail(exitFailure, "job %s completion record unavailable reason=%s", id, doneResultReason(e))
 	}
 	rec, e := store.Get(ctx, id)
@@ -451,6 +455,10 @@ func (a *App) attachDuplicateResult(ctx context.Context, id, report, digest stri
 			if result != nil {
 				return "result=unattached", nil
 			}
+			return "", nil
+		}
+		if result == nil {
+			a.warn("duplicate job record repair unreadable: reason=%s", doneResultReason(e))
 			return "", nil
 		}
 		return "", fail(exitFailure, "job %s completion record unreadable reason=%s", id, doneResultReason(e))
@@ -466,17 +474,15 @@ func (a *App) attachDuplicateResult(ctx context.Context, id, report, digest stri
 		}
 		storedResultSame = true
 	}
-	if str(rec, "state") == "completed" {
-		if storedResultSame {
-			return "result=equal", nil
-		}
-		if result != nil {
-			return "result=unattached", nil
-		}
+	state := str(rec, "state")
+	if state == "completed" && storedResultSame {
+		return "result=equal", nil
+	}
+	if state == "completed" && result == nil {
 		return "", nil
 	}
-	if str(rec, "state") != "spawned" {
-		return "", fail(exitStateConflict, "job %s cannot complete from state=%s", id, str(rec, "state"))
+	if state != "spawned" && state != "completed" {
+		return "", fail(exitStateConflict, "job %s cannot complete from state=%s", id, state)
 	}
 	fields := map[string]any{"state": "completed"}
 	if result != nil && !storedResultSame {
@@ -497,6 +503,10 @@ func (a *App) attachDuplicateResult(ctx context.Context, id, report, digest stri
 			confirmed = str(readback, "report_doc") == wantDoc && str(readback, "report_sha256") == wantSHA
 		}
 		if !confirmed {
+			if result == nil {
+				a.warn("duplicate job record repair unconfirmed: reason=%s", doneResultReason(e))
+				return "", nil
+			}
 			a.jobRecordFailed(ctx, id, "completed", e)
 			return "", fail(exitFailure, "job %s completion record failed reason=%s", id, doneResultReason(e))
 		}

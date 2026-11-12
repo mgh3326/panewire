@@ -57,6 +57,111 @@ func TestDoneArtifactDuplicateSkipsHKUpload(t *testing.T) {
 	}
 }
 
+func TestDoneArtifactDuplicateWithoutResultSurvivesRecordStoreFailure(t *testing.T) {
+	a, _, store, _, report, _ := strictDoneFixture(t, "spawned")
+	body, err := os.ReadFile(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(body)
+	putEvent(t, a, "j", "job.completed", map[string]any{
+		"report": report, "report_sha256": hex.EncodeToString(digest[:]), "question": "",
+		"document": "reports/j/already-published/answer.md",
+	})
+	store.down = true
+
+	if err := a.lifecycle(context.Background(), "done", []string{"j", "--report", report}); err != nil {
+		t.Fatalf("duplicate without --result should remain successful while spawned-record repair is best effort: %v", err)
+	}
+	if !strings.Contains(strings.Join(store.calls, "\n"), "GET /v1/jobs/j") {
+		t.Fatalf("job record reads=%v, want best-effort spawned-record repair attempt", store.calls)
+	}
+	if !strings.Contains(a.Out.(*bytes.Buffer).String(), "duplicate=yes") {
+		t.Fatalf("stdout=%q, want duplicate success", a.Out.(*bytes.Buffer).String())
+	}
+}
+
+func TestDoneArtifactDuplicateAttachesResultToCompletedRecordWithoutResult(t *testing.T) {
+	a, _, _, _, report, result := strictDoneFixture(t, "completed")
+	store := newFakeJobStore()
+	store.records["j"] = map[string]any{"state": "completed"}
+	a.JobStore = &ambiguousCompletedResultStore{fakeJobStore: store}
+	putEvent(t, a, "j", "job.spawned", map[string]any{"headless": true, "role": "delegate"})
+	body, err := os.ReadFile(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(body)
+	const eventDoc = "reports/j/original-answer/answer-original.md"
+	putEvent(t, a, "j", "job.completed", map[string]any{
+		"report": report, "report_sha256": hex.EncodeToString(digest[:]), "question": "", "document": eventDoc,
+	})
+
+	if err := a.lifecycle(context.Background(), "done", []string{"j", "--report", report, "--result", result}); err != nil {
+		t.Fatalf("headless duplicate should attach result to completed record: %v", err)
+	}
+	if !sameJSONValue(store.records["j"]["result"], map[string]any{"findings": []any{map[string]any{"severity": "high"}}}) {
+		t.Fatalf("completed record result=%v, want incoming findings", store.records["j"]["result"])
+	}
+	if strings.Join(store.calls, ",") != "get j,put j,get j" {
+		t.Fatalf("job store calls=%v, want completed+result PUT followed by readback", store.calls)
+	}
+	if countEvents(t, a, "job.result_attached") != 1 {
+		t.Fatal("result attachment event missing")
+	}
+}
+
+type ambiguousCompletedResultStore struct{ *fakeJobStore }
+
+func (s *ambiguousCompletedResultStore) Put(ctx context.Context, id string, fields map[string]any) error {
+	if err := s.fakeJobStore.Put(ctx, id, fields); err != nil {
+		return err
+	}
+	return errHKTransport
+}
+
+func TestDoneArtifactStrictDuplicateRejectsOperationDocumentDifferentFromStoredPin(t *testing.T) {
+	a, _, store, _, report, resultPath := strictDoneFixture(t, "completed")
+	reportBody, err := os.ReadFile(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reportSum := sha256.Sum256(reportBody)
+	operationSHA := hex.EncodeToString(reportSum[:])
+	operationDoc := reportDocumentKey("j", "new-answer", operationSHA, false)
+	store.records["j"]["report_doc"] = "reports/j/old-answer/answer-old.md"
+	store.records["j"]["report_sha256"] = sha256String("old answer\n")
+	resultBody, err := os.ReadFile(resultPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result any
+	if err := json.Unmarshal(resultBody, &result); err != nil {
+		t.Fatal(err)
+	}
+	store.records["j"]["result"] = result
+	putEvent(t, a, "j", "job.completed", map[string]any{
+		"report": report, "report_sha256": operationSHA, "question": "",
+		"completion_id": "new-answer", "document": operationDoc,
+	})
+	completedBefore := countEvents(t, a, "job.completed")
+	attachedBefore := countEvents(t, a, "job.result_attached")
+
+	err = a.lifecycle(context.Background(), "done", []string{"j", "--report", report, "--result", resultPath, "--completion-id", "new-answer"})
+	if code(err) != exitStateConflict || !strings.Contains(err.Error(), "reason=report_conflict") {
+		t.Fatalf("error=%v, want exit %d reason=report_conflict", err, exitStateConflict)
+	}
+	if countEvents(t, a, "job.completed") != completedBefore || countEvents(t, a, "job.result_attached") != attachedBefore {
+		t.Fatal("strict report conflict wrote a success event")
+	}
+	if strings.Contains(a.Out.(*bytes.Buffer).String(), "OK") {
+		t.Fatalf("stdout=%q", a.Out.(*bytes.Buffer).String())
+	}
+	if store.records["j"]["report_doc"] != "reports/j/old-answer/answer-old.md" {
+		t.Fatalf("stored report pin changed: %v", store.records["j"])
+	}
+}
+
 func TestDoneArtifactSameCompletionIDRejectsChangedBytes(t *testing.T) {
 	ctx := context.Background()
 	a := testApp(t)
