@@ -15,6 +15,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/mgh3326/panewire/internal/fleet"
 )
 
 const quietDesignPolicy = `default: interrupt
@@ -77,6 +79,38 @@ func quietDesignPolicyOf(t *testing.T, raw string) *deliveryPolicy {
 		t.Fatal(err)
 	}
 	return p
+}
+
+func TestHubSpawnAppUsesLoadedDesignLanePolicy(t *testing.T) {
+	policy := quietDesignPolicyOf(t, "default: interrupt\nrelay:\n  design_lanes: [\"custom-design\"]\n  desk_lanes: [\"operator-desk\"]\n")
+	h := &HubServer{
+		inbox: &hubInbox{policy: policy},
+		spawnNewApp: func(out, errout io.Writer) (*fleet.App, error) {
+			return &fleet.App{Out: out, Err: errout}, nil
+		},
+	}
+	app, err := h.newSpawnApp(io.Discard, io.Discard)
+	if err != nil {
+		t.Fatalf("new spawn app: %v", err)
+	}
+	if !app.IsDesignLane("custom-design") || app.IsDesignLane("other-design") || app.IsDesignLane("operator-desk") {
+		t.Fatalf("spawn app classifier does not match loaded policy: custom=%t other=%t desk=%t", app.IsDesignLane("custom-design"), app.IsDesignLane("other-design"), app.IsDesignLane("operator-desk"))
+	}
+}
+
+func TestFleetDeliveryPolicyUsesConfiguredDesignLanes(t *testing.T) {
+	policyPath := filepath.Join(t.TempDir(), "delivery-policy.yaml")
+	if err := os.WriteFile(policyPath, []byte("default: interrupt\nrelay:\n  design_lanes: [\"routing-policy\"]\n  desk_lanes: [\"operator-desk\"]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PANEWIRE_DELIVERY_POLICY", policyPath)
+	policy, err := loadFleetDeliveryPolicy()
+	if err != nil {
+		t.Fatalf("load fleet delivery policy: %v", err)
+	}
+	if !policy.designLane("routing-policy") || policy.designLane("panewire-design") || policy.designLane("operator-desk") {
+		t.Fatalf("fleet classifier did not use configured list: routing=%t default=%t desk=%t", policy.designLane("routing-policy"), policy.designLane("panewire-design"), policy.designLane("operator-desk"))
+	}
 }
 
 // (e) design_lanes parses exact names and globs, defaults to *-design, and

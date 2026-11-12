@@ -20,12 +20,20 @@ import (
 )
 
 func (h *HubServer) newSpawnApp(out, errout io.Writer) (*fleet.App, error) {
+	var app *fleet.App
+	var err error
 	if h.spawnNewApp != nil {
-		return h.spawnNewApp(out, errout)
+		app, err = h.spawnNewApp(out, errout)
+	} else {
+		app, err = fleet.New(out, errout)
 	}
-	app, err := fleet.New(out, errout)
 	if app != nil {
-		app.LiveSpawnProfiles = h.liveSpawnProfiles
+		if h.spawnNewApp == nil {
+			app.LiveSpawnProfiles = h.liveSpawnProfiles
+		}
+		if h.inbox != nil && h.inbox.policy != nil {
+			app.IsDesignLane = h.inbox.policy.designLane
+		}
 	}
 	return app, err
 }

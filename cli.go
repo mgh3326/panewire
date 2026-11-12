@@ -26,6 +26,14 @@ func RunCLI(args []string, cfg CLIConfig) int {
 	if len(args) > 0 && fleetCommand(args[0]) {
 		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer cancel()
+		if args[0] == "spawn" || args[0] == "work" || args[0] == "delegate" || args[0] == "resolve" {
+			policy, err := loadFleetDeliveryPolicy()
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "panewire: delivery policy unavailable:", err)
+				return ExitConditionInvalid
+			}
+			return fleet.MainWithDesignLane(ctx, args, os.Stdout, os.Stderr, policy.designLane)
+		}
 		return fleet.Main(ctx, args, os.Stdout, os.Stderr)
 	}
 	if len(args) > 0 && args[0] == "quota" {
@@ -169,6 +177,14 @@ func RunCLI(args []string, cfg CLIConfig) int {
 		}
 	}
 	return ExitOK
+}
+
+func loadFleetDeliveryPolicy() (*deliveryPolicy, error) {
+	path := os.Getenv("PANEWIRE_DELIVERY_POLICY")
+	if path == "" {
+		path = "default"
+	}
+	return loadDeliveryPolicy(path)
 }
 
 func fleetCommand(command string) bool {

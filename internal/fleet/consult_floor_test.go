@@ -61,9 +61,14 @@ func consultFloorSpawnSelect(t *testing.T, rows []CatalogRow, present []string, 
 	pools := map[string]PoolView{"claude": riskPool(30, 8), "codex": {Status: "ok", Class: "spend", Blocking: ptrF(40)}}
 	a, s, q := selFixture(t, grade, rows, pools, present)
 	q.GateDo = gatePools(map[string]string{"opus": "claude", "codex-sol": "codex", "codex-astra": "codex"})
+	a.IsDesignLane = consultTestDesignLane
 	serveRouting(t, routingDoc(routingBlockV1))
 	s.Role, s.RoutingRole, s.Parent, s.ParentFamily = "worker", "consult", parentLane, family
 	return a.selectProfile(context.Background(), s)
+}
+
+func consultTestDesignLane(lane string) bool {
+	return lane == "panewire-design" || lane == "routing-policy" || lane == "fleet-policy"
 }
 
 func TestConsultDesignSessionUsesSSFloor(t *testing.T) {
@@ -296,6 +301,7 @@ func TestConsultResolveLaneUsesDesignFloor(t *testing.T) {
 	pools := map[string]PoolView{"claude": riskPool(30, 8), "codex": {Status: "ok", Class: "spend", Blocking: ptrF(40)}}
 	a, _, q := selFixture(t, "A", rows, pools, consultFloorBothPools)
 	q.GateDo = gatePools(map[string]string{"opus": "claude", "codex-sol": "codex", "codex-astra": "codex"})
+	a.IsDesignLane = consultTestDesignLane
 	serveRouting(t, routingDoc(routingBlockV1))
 	out := captureOut(a)
 	if err := a.Run(context.Background(), []string{"resolve", "--role", "consult", "--t", "T1", "--grade", "A", "--lane", "routing-policy", "--builder-family", "anthropic", "--json"}); err != nil {

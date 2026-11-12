@@ -110,7 +110,8 @@ func (a *App) resolveCmd(ctx context.Context, args []string) error {
 	if flagPassed(f, "grade") {
 		gradeSource = "flag"
 	}
-	req := selReq{grade: grade, lane: lane, gradeSource: gradeSource, t: t, role: seatRole, allowEscalation: allowEscalation, builderFamily: builderFamily, harness: harness, urgency: urgencyNormal, urgencySource: "default", route: route}
+	designSession := topRoutingRole(role) && a.designSessionLane(lane)
+	req := selReq{grade: grade, designSession: designSession, gradeSource: gradeSource, t: t, role: seatRole, allowEscalation: allowEscalation, builderFamily: builderFamily, harness: harness, urgency: urgencyNormal, urgencySource: "default", route: route}
 	sel, selErr := a.selectFor(ctx, s, req)
 	r := resolveResult{RoutingRole: role, SeatRole: seatRole, Grade: grade, T: t, RoutingVersion: route.version, PolicySource: route.source}
 	r.OutcomeCode = outcomeForError(selErr)
@@ -143,7 +144,7 @@ func (a *App) resolveCmd(ctx context.Context, args []string) error {
 	}
 	fmt.Fprintf(a.Out, "resolve role=%s seat_role=%s grade=%s t=%s routing_version=%d policy_source=%s", r.RoutingRole, r.SeatRole, r.Grade, r.T, r.RoutingVersion, r.PolicySource)
 	if topRoutingRole(role) {
-		fmt.Fprintf(a.Out, " floor=%s", consultFloorFor(r.Grade, lane))
+		fmt.Fprintf(a.Out, " floor=%s", consultFloorFor(r.Grade, designSession))
 	}
 	if r.DowngradedFrom != "" {
 		fmt.Fprintf(a.Out, " downgraded_from=%s", r.DowngradedFrom)

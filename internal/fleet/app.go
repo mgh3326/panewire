@@ -83,6 +83,9 @@ type App struct {
 	// SentryWarning sends one warning-level Sentry event. Tests substitute it;
 	// nil uses SENTRY_DSN_PANEWIRE (sentry_warning.go).
 	SentryWarning func(fingerprint []string, message string, tags map[string]string)
+	// IsDesignLane is the loaded hub relay policy's lane classifier. Root CLI
+	// and hub callers inject it so consult selection shares that policy.
+	IsDesignLane func(string) bool
 	// LiveSpawnProfiles counts live hub spawns by placed profile for the
 	// [quota].pool_max_concurrent cap, leaving out the hub request named by
 	// its second argument (the spawn being placed). The hub's own App reads
@@ -109,7 +112,16 @@ type App struct {
 }
 
 func Main(ctx context.Context, args []string, out, errout io.Writer) int {
+	return MainWithDesignLane(ctx, args, out, errout, nil)
+}
+
+// MainWithDesignLane runs the fleet CLI with the delivery policy classifier
+// loaded by the root package. A nil classifier means no lane is design-class.
+func MainWithDesignLane(ctx context.Context, args []string, out, errout io.Writer, isDesignLane func(string) bool) int {
 	a, e := New(out, errout)
+	if a != nil {
+		a.IsDesignLane = isDesignLane
+	}
 	if e == nil {
 		e = a.Run(ctx, args)
 	}
@@ -125,6 +137,10 @@ func Main(ctx context.Context, args []string, out, errout io.Writer) int {
 		return 1
 	}
 	return 0
+}
+
+func (a *App) designSessionLane(lane string) bool {
+	return lane != "" && a.IsDesignLane != nil && a.IsDesignLane(lane)
 }
 func New(out, errout io.Writer) (*App, error) {
 	path := configPath(errout)

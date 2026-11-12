@@ -257,7 +257,7 @@ type selPlan struct {
 }
 type selReq struct {
 	grade           string
-	lane            string
+	designSession   bool
 	t               string
 	role            string
 	tags            []string
@@ -731,7 +731,7 @@ func (a *App) selectProfile(ctx context.Context, s Spawn) (*selPlan, error) {
 	if a.Quota == nil {
 		return nil, fail(exitConfig, "POLICY_UNAVAILABLE: selection needs the quota catalog")
 	}
-	req := selReq{t: s.T, role: s.Role, lane: s.Parent, effort: s.Effort, allowEscalation: s.AllowEscalation, builderFamily: s.ParentFamily, excludeFamilies: s.ExcludeFamilies, onlyFamily: s.OnlyFamily, e6Arm: s.E6Arm}
+	req := selReq{t: s.T, role: s.Role, designSession: a.designSessionLane(s.Parent), effort: s.Effort, allowEscalation: s.AllowEscalation, builderFamily: s.ParentFamily, excludeFamilies: s.ExcludeFamilies, onlyFamily: s.OnlyFamily, e6Arm: s.E6Arm}
 	tags, e := parseTags(s.Tags)
 	if e != nil {
 		return nil, e
@@ -807,7 +807,7 @@ func (a *App) selectFor(ctx context.Context, s Spawn, req selReq) (*selPlan, err
 	if req.route.top() {
 		floor = req.usedFloor
 		if floor == "" {
-			floor = consultFloorFor(req.grade, req.lane)
+			floor = consultFloorFor(req.grade, req.designSession)
 		}
 	}
 	staticPassing, fallbackRungs := 0, 0
