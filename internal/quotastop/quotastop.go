@@ -24,8 +24,9 @@ var (
 	// devin matches the phrase anywhere in the status line: the live screen
 	// prefixes it with "▲ Something went wrong — ".
 	devin           = regexp.MustCompile(`(?i)reached free model rate limit(?:\s|[·.…:]|$)`)
-	anthropicCredit = regexp.MustCompile(`(?i)^api error:.*credit balance is too low to access the anthropic api`)
-	openAICredit    = regexp.MustCompile(`(?i)^api error:.*(insufficient_quota|exceeded your current quota)`)
+	apiErrorStart   = regexp.MustCompile(`(?i)^api error:\s*[0-9]{3}\b`)
+	anthropicCredit = regexp.MustCompile(`(?is)^api error:\s*[0-9]{3}\b.*credit balance is too low to access the anthropic api`)
+	openAICredit    = regexp.MustCompile(`(?is)^api error:\s*[0-9]{3}\b.*(insufficient_quota|exceeded your current quota)`)
 	claude          = regexp.MustCompile(`(?i)^you've hit your (?:(?:weekly|session) )?limit(?:\s|[·.:]|$)`)
 	codexSignal     = regexp.MustCompile(`(?i)^you've hit your usage limit[.·:].*try again at`)
 	codex           = regexp.MustCompile(`(?i)try again at\s+([0-9]{1,2}:[0-9]{2}\s*(?:AM|PM)?)(?:\s+(UTC|GMT|Z))?`)
@@ -142,8 +143,30 @@ func statusBlock(screen string) (string, bool) {
 	lines := strings.Split(strings.ReplaceAll(screen, "\r", ""), "\n")
 	for i := len(lines) - 1; i >= 0; i-- {
 		line := strings.TrimSpace(lines[i])
-		line = strings.TrimLeft(line, "│┃•⚠️ ")
-		if devin.MatchString(line) || claude.MatchString(line) || codexSignal.MatchString(line) || anthropicCredit.MatchString(line) || openAICredit.MatchString(line) {
+		line = trimScreenBorder(line)
+		if apiErrorStart.MatchString(line) {
+			if len(lines)-i > 16 {
+				return "", false
+			}
+			end := len(lines)
+			for j := i + 1; j < len(lines); j++ {
+				if chromeLine(lines[j]) {
+					end = j
+					break
+				}
+			}
+			for _, tail := range lines[end:] {
+				if !chromeLine(tail) {
+					return "", false
+				}
+			}
+			block := strings.Join(lines[i:end], " ")
+			if anthropicCredit.MatchString(block) || openAICredit.MatchString(block) {
+				return block, true
+			}
+			continue
+		}
+		if devin.MatchString(line) || claude.MatchString(line) || codexSignal.MatchString(line) {
 			if len(lines)-i > 16 {
 				return "", false
 			}
@@ -160,6 +183,7 @@ func statusBlock(screen string) (string, bool) {
 
 func chromeLine(line string) bool {
 	line = strings.TrimSpace(line)
+	line = trimScreenBorder(line)
 	if line == "" {
 		return true
 	}
@@ -181,4 +205,8 @@ func chromeLine(line string) bool {
 		}
 	}
 	return false
+}
+
+func trimScreenBorder(line string) string {
+	return strings.TrimLeft(line, "│┃┌┐└┘╭╮╰╯|•⚠️ ")
 }

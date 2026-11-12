@@ -56,6 +56,30 @@ func TestQuotedProviderCreditErrorIsNotExhaustion(t *testing.T) {
 	}
 }
 
+func TestWrappedProviderCreditErrorClassifies(t *testing.T) {
+	for _, tc := range []struct {
+		name, screen, pool string
+	}{
+		{
+			name:   "Anthropic with border prefix",
+			screen: "└ API Error: 400 invalid_request_error {\"type\":\"error\",\n└ \"error\":{\"message\":\"Your credit balance is too low to access\n└ the Anthropic API\"}}\n└ ❯ Ask Claude",
+			pool:   "anthropic-api",
+		},
+		{
+			name:   "OpenAI wrapped body",
+			screen: "| API Error: 429 {\"error\":{\n| \"type\":\"insufficient_quota\"}}\n| › Ask Codex",
+			pool:   "openai-api",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stop, ok := quotastop.Classify(tc.screen, time.Now().UTC(), time.UTC)
+			if !ok || !stop.CreditExhausted || stop.Pool != tc.pool {
+				t.Fatalf("wrapped provider stop = %+v, %t", stop, ok)
+			}
+		})
+	}
+}
+
 func TestManualCreditBalanceStalesAfterFourHours(t *testing.T) {
 	now := time.Now().UTC()
 	measured := now.Add(-4 * time.Hour)

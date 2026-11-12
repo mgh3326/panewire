@@ -57,8 +57,9 @@ free rung.
 A manually recorded dollar balance stays dollar-ranked for four hours after
 `measured_at`; after that it is stale, loses its dollar value, and ranks behind
 subscription quota. Entries with only a percentage never become stale because
-they have no dollar value to age; they continue to rank by remaining percent
-per hour. Plan output records `state=stale` and `stale_since` for aged dollar
+they have no dollar source to age; they continue to rank by remaining percent
+per hour. A configured total supplies a dollar source for an entry with only a
+percentage. Plan output records `state=stale` and `stale_since` for aged dollar
 balances. Provider exhaustion reported by an omp pane
 ends the job with `quota_stop`, and the hub's `/v1/state` exposes
 `pool_credit_exhausted` until a newer manual entry is measured. Plan output
