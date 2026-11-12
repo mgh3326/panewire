@@ -239,10 +239,29 @@ func paneDepartureEnvelope(kind, paneID string) map[string]any {
 	}}
 }
 
+// lockedLogBuffer is an io.Writer for the daemon's slog handler that the test
+// can also read while the daemon goroutine is still logging.
+type lockedLogBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedLogBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedLogBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
 type lifecycleDaemonFixture struct {
 	daemon *Daemon
 	store  *Store
-	logs   *bytes.Buffer
+	logs   *lockedLogBuffer
 }
 
 func lifecycleSchemaCommand(t *testing.T) []string {
@@ -265,8 +284,8 @@ type lifecycleDaemonOptions struct {
 func startLifecycleDaemon(t *testing.T, fake *lifecycleFakeHerdr, opts lifecycleDaemonOptions) *lifecycleDaemonFixture {
 	t.Helper()
 	store := NewMemoryStore(t)
-	var logs bytes.Buffer
-	logger := slog.New(slog.NewTextHandler(&logs, nil))
+	logs := &lockedLogBuffer{}
+	logger := slog.New(slog.NewTextHandler(logs, nil))
 	d := NewDaemon(Config{
 		Store:         store,
 		HerdrSocket:   fake.path,
@@ -306,7 +325,7 @@ func startLifecycleDaemon(t *testing.T, fake *lifecycleFakeHerdr, opts lifecycle
 	ctx, cancel := context.WithCancel(context.Background())
 	go d.eventLoop(ctx)
 	t.Cleanup(cancel)
-	return &lifecycleDaemonFixture{daemon: d, store: store, logs: &logs}
+	return &lifecycleDaemonFixture{daemon: d, store: store, logs: logs}
 }
 
 func lifecycleSubscribed(t *testing.T, d *Daemon) map[string]bool {
@@ -422,9 +441,9 @@ func TestHerdrLifecycleSubscribeFallsBackOnRejection(t *testing.T) {
 	if !hasPerPaneSubscription(second, "p1") {
 		t.Fatalf("fallback subscribe missing per-pane set: %v", second)
 	}
-	if covered := lifecycleSubscribed(t, fix.daemon); !covered["p1"] {
-		t.Fatalf("covered set=%v after fallback", covered)
-	}
+	eventually(t, 2*time.Second, "p1 covered after fallback", func() bool {
+		return lifecycleSubscribed(t, fix.daemon)["p1"]
+	})
 	eventually(t, 2*time.Second, "rejection log", func() bool {
 		return strings.Count(fix.logs.String(), "lifecycle subscriptions rejected") == 1
 	})
@@ -532,9 +551,10 @@ func TestHerdrLifecycleDepartureDropsCoveredPane(t *testing.T) {
 	fake := newLifecycleFakeHerdr(t, []map[string]any{lifecycleAgent("p1"), lifecycleAgent("p2")})
 	fix := startLifecycleDaemon(t, fake, lifecycleDaemonOptions{resubMin: 300 * time.Millisecond})
 	eventually(t, 3*time.Second, "initial subscribe", func() bool { return fake.subscribeCount() == 1 })
-	if covered := lifecycleSubscribed(t, fix.daemon); !covered["p1"] || !covered["p2"] {
-		t.Fatalf("initial covered set=%v", covered)
-	}
+	eventually(t, 2*time.Second, "initial covered set", func() bool {
+		covered := lifecycleSubscribed(t, fix.daemon)
+		return covered["p1"] && covered["p2"]
+	})
 
 	fake.push(paneDepartureEnvelope("pane.closed", "p2"))
 	eventually(t, 2*time.Second, "p2 dropped from covered set", func() bool {
