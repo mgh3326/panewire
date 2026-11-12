@@ -31,9 +31,11 @@ func (h *HubServer) inboxWakeDesignPaneless(lane string, route reportRelayRoute,
 		return true
 	}
 	obs, ok := h.observeNodePanes(row.Machine)
-	return ok && h.laneProvablyGone(lane, row, obs)
+	return ok && h.laneProvablyGone(lane, row, obs) && !h.hasLiveInboxWakeJobRecord(lane)
 }
 
+// hasLiveInboxWakeJobRecord matches the live-job filter used by
+// resolveRelayRoute, including records that cannot currently be routed.
 func (h *HubServer) hasLiveInboxWakeJobRecord(lane string) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
