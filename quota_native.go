@@ -232,6 +232,16 @@ func (s *nativeQuotaSource) agyMeasurement() (shared.Measurer, func(context.Cont
 		}, shared.OtherFreshTTL
 }
 
+// refreshTTL reserves one publisher cycle and one measurement timeout before
+// the reader freshness window ends. The longer reader TTL remains the status
+// contract and the bound for readers that consume the shared store directly.
+func (s *nativeQuotaSource) refreshTTL(readerTTL time.Duration) time.Duration {
+	if s.Pool == "claude" {
+		return readerTTL
+	}
+	return readerTTL - shared.DefaultRefreshMargin
+}
+
 // Refresh answers the pool's current reading: the shared one when fresh, else
 // a measurement published under the shared lease. With no shared store
 // configured it measures directly. The error is a *quota.Error.
@@ -268,7 +278,7 @@ func (s *nativeQuotaSource) RefreshWithMeasurement(ctx context.Context) (shared.
 		return shared.Reading{}, false, quota.Fail(quota.ErrKindAccountUnknown, "no account key")
 	}
 	s.flowOnce.Do(func() {
-		s.flow = &shared.Flow{Now: s.Now, FreshTTL: freshTTL, HostID: s.HostID, Wait: s.Wait}
+		s.flow = &shared.Flow{Now: s.Now, FreshTTL: s.refreshTTL(freshTTL), HostID: s.HostID, Wait: s.Wait}
 		if s.Pool == "devin" {
 			config := s.Devin
 			config.Now = s.Now
