@@ -27,7 +27,7 @@ func TestHKClaimRejectsTerminalStateFromTolerantAnswer(t *testing.T) {
 	}
 	root := t.TempDir()
 	a := &App{Home: root, Jobs: filepath.Join(root, "jobs"), Out: &bytes.Buffer{}, Now: func() time.Time { return time.Now() }}
-	if err := a.taskLink(context.Background(), Spawn{Task: "42", Job: "job-1", Label: "worker"}, task, false); err == nil || !strings.Contains(err.Error(), "task claim did not confirm") {
+	if err := a.taskLink(context.Background(), Spawn{Task: "42", Job: "job-1", Label: "worker"}, task, false); err == nil || !strings.Contains(err.Error(), "task claim answered unavailable state: merged") {
 		t.Fatalf("terminal claim answer accepted: %v", err)
 	}
 }
