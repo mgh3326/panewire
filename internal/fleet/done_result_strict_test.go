@@ -140,7 +140,7 @@ func TestDoneResultStrictRetriesIdenticalPut(t *testing.T) {
 		}
 	}
 	if emits != 1 || comments != 1 {
-		t.Fatalf("emits=%d comments=%d", emits, comments)
+		t.Fatalf("emits=%d comments=%d requests=%+v", emits, comments, docs.Requests())
 	}
 	if _, pools := ledgerState(t, a, "j"); len(pools) != 0 {
 		t.Fatal("quota was not released")
@@ -182,11 +182,11 @@ func TestDoneResultStrictRepairsClaimedFromReceipt(t *testing.T) {
 	if err := strictDone(t, a, report, result); err != nil {
 		t.Fatal(err)
 	}
-	if len(h.putBodies) != 2 || h.putBodies[0]["state"] != "spawned" || h.putBodies[0]["pane_id"] != "w:p1" {
+	if len(h.putBodies) != 3 || h.putBodies[1]["state"] != "spawned" || h.putBodies[1]["pane_id"] != "w:p1" {
 		t.Fatalf("PUT bodies=%v", h.putBodies)
 	}
-	if _, ok := h.putBodies[0]["host"]; ok {
-		t.Fatalf("repair included host: %v", h.putBodies[0])
+	if _, ok := h.putBodies[1]["host"]; ok {
+		t.Fatalf("repair included host: %v", h.putBodies[1])
 	}
 }
 
