@@ -16,7 +16,9 @@
    calls `scripts/build-release.sh dist/release
    <tag>`. The script builds CGO-disabled (`CGO_ENABLED=0`, `-trimpath`) binaries
    named `panewire_<tag>_<os>_<arch>` for linux/amd64, linux/arm64,
-   darwin/amd64 and darwin/arm64, and writes `SHA256SUMS`. The workflow
+   darwin/amd64 and darwin/arm64, and writes `SHA256SUMS`. It then writes
+   `components.json`, which names the daemons (hub, node) the release changed;
+   see [`release-components.md`](release-components.md). The workflow
    checks that `panewire version` prints the tag. It runs the tests. Then it
    publishes the GitHub Release with `GITHUB_TOKEN`.
 
