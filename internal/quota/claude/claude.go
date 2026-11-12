@@ -77,7 +77,9 @@ func (c Config) now() time.Time {
 // Measure reads the claude quota: the usage API, then one CLI fallback. The
 // error is a *quota.Error whose kind names the first (API) failure when both
 // fail, as pacelever reports it. A stored token past its expiry skips the API
-// and goes to the CLI alone; if that fails too the kind is token_expired.
+// and goes to the CLI. If the CLI fails, the login is re-read: a token the CLI
+// refreshed before it failed is measured once through the API, and only a
+// token still expired then is token_expired.
 func Measure(ctx context.Context, cfg Config) (quota.Observation, error) {
 	loc := cfg.locations()
 	oauth := cfg.oauth(ctx, loc)
@@ -90,12 +92,21 @@ func Measure(ctx context.Context, cfg Config) (quota.Observation, error) {
 		// The stored access token is short-lived and only the claude CLI
 		// refreshes it, so an expired one on an idle host is not a lost login.
 		// Skip the API, which would refuse it, and let the CLI refresh and
-		// measure; only if that fails is the login reported expired.
+		// measure.
 		cli, cliErr := cfg.fetchCLI(ctx)
 		if cliErr != nil {
-			return quota.Observation{}, quota.Fail(quota.ErrKindTokenExpired, "token expired")
+			current, live := cfg.currentToken(ctx, loc)
+			if !live {
+				return quota.Observation{}, quota.Fail(quota.ErrKindTokenExpired, "token expired")
+			}
+			var err error
+			observed, err = cfg.fetchAPI(ctx, current)
+			if err != nil {
+				return quota.Observation{}, err
+			}
+		} else {
+			observed = cli
 		}
-		observed = cli
 	} else {
 		var err error
 		observed, err = cfg.fetchAPI(ctx, token)
@@ -111,6 +122,16 @@ func Measure(ctx context.Context, cfg Config) (quota.Observation, error) {
 		observed.AccountFP = cfg.accountFP(loc.identity)
 	}
 	return observed, nil
+}
+
+// currentToken re-reads the login and returns its access token with true when
+// that token has not expired, the same comparison Measure makes before the CLI.
+// A missing token, or one still expired, returns false.
+func (c Config) currentToken(ctx context.Context, loc locations) (string, bool) {
+	oauth := c.oauth(ctx, loc)
+	token := str(oauth["accessToken"])
+	expires, ok := finiteNumber(oauth["expiresAt"])
+	return token, token != "" && ok && expires >= float64(c.now().UnixMilli())
 }
 
 // AccountFP is this host's claude account fingerprint, "" when the login is

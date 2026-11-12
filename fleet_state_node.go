@@ -210,7 +210,10 @@ func (client *HubClient) refreshFleetQuota(ctx context.Context, pool string, sen
 		}
 		previous.failing = true
 		sent[pool] = previous
-		if fleetQuotaLoginMissingKinds[kind] {
+		// An agy host with no measurable account is a configuration gap, not a
+		// login problem (hk 3783): its failure reads unknown, as the login
+		// probe leaves that host alone.
+		if fleetQuotaLoginMissingKinds[kind] && !client.agyUnmeasurableHere(pool) {
 			client.noteQuotaAccount(pool, "")
 		} else {
 			client.noteQuotaUnknown(pool)
@@ -226,6 +229,12 @@ func (client *HubClient) refreshFleetQuota(ctx context.Context, pool string, sen
 	if client.Publish("state", publish) {
 		sent[pool] = fleetQuotaSent{body: string(body), at: now}
 	}
+}
+
+// agyUnmeasurableHere says pool is agy on a host that holds no measurable agy
+// account: the same rule measurableHere applies to the login probe.
+func (client *HubClient) agyUnmeasurableHere(pool string) bool {
+	return pool == "agy" && !client.nativeQuotaSource(pool).agyMeasurable()
 }
 
 // measureFleetQuota takes pool's reading for the fleet-state publish. The

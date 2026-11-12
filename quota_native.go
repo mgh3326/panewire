@@ -189,6 +189,14 @@ func (s *nativeQuotaSource) agyAccount() (string, bool) {
 	return fleet.HostQuotaAccount("agy")
 }
 
+// agyMeasurable says whether this host holds an agy account it may measure:
+// a configured fingerprint that `[quota].measurable_accounts` lists. A host
+// with none has a configuration gap, not a login problem (hk 3783).
+func (s *nativeQuotaSource) agyMeasurable() bool {
+	fp, measurable := s.agyAccount()
+	return fp != "" && measurable
+}
+
 // agyMeasurement is agy's measurement. Its account key is configured, not
 // derived (pacelever's rule): a host with no `[quota.accounts]` agy
 // fingerprint, or one `[quota].measurable_accounts` does not list, does not
