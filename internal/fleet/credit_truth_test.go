@@ -81,9 +81,24 @@ func TestWrappedProviderCreditErrorClassifies(t *testing.T) {
 			pool:   "anthropic-api",
 		},
 		{
+			name:   "Anthropic unbordered message wraps mid-phrase",
+			screen: "API Error: 400 Your credit balance is too low to access the\nAnthropic API\n❯ Ask Claude",
+			pool:   "anthropic-api",
+		},
+		{
 			name:   "Anthropic JSON scalar continuation",
 			screen: "API Error: 400 {\"error\":{\"message\":\"Your credit balance is too low to access the Anthropic API\",\"status\":\n30\n}}\n❯ Ask Claude",
 			pool:   "anthropic-api",
+		},
+		{
+			name:   "OpenAI quota text with billing details",
+			screen: "API Error: 429 You exceeded your current quota, please check your plan and billing details.\n› Ask Codex",
+			pool:   "openai-api",
+		},
+		{
+			name:   "OpenAI JSON message wraps with billing details",
+			screen: "API Error: 429 {\"error\":{\"message\":\"You exceeded your current quota, please check your plan and\nbilling details.\"}}\n› Ask Codex",
+			pool:   "openai-api",
 		},
 		{
 			name:   "Anthropic unbordered JSON wrap",

@@ -172,7 +172,6 @@ func providerErrorBlock(lines []string, start int) (string, bool) {
 	}
 	blockLines := []string{trimScreenBorder(strings.TrimSpace(lines[start]))}
 	jsonBody := hasProviderJSONBody(blockLines[0])
-	plainMessageStarted := providerTextPrefix(plainProviderText(blockLines[0])) || anthropicRequestBracketOpen(blockLines[0])
 	end := len(lines)
 	promptFound := false
 	for i := start + 1; i < len(lines); i++ {
@@ -199,7 +198,7 @@ func providerErrorBlock(lines []string, start int) (string, bool) {
 			continue
 		}
 		plainContinuation := providerTextPrefix(plainProviderText(joined)) || anthropicRequestBracketComplete(joined)
-		if !jsonBody && plainMessageStarted && (border != 0 && screenBorderPrefix(line) == border || anthropicRequestBracketOpen(currentBlock)) && plainContinuation {
+		if !jsonBody && plainContinuation && (border == 0 || screenBorderPrefix(line) == border || anthropicRequestBracketOpen(currentBlock)) {
 			blockLines = append(blockLines, content)
 			continue
 		}
@@ -392,8 +391,10 @@ func providerTextPrefix(message string) bool {
 	for _, expected := range []string{
 		"yourcreditbalanceistoolowtoaccesstheanthropicapipleasegotoplansbillingtoupgradeorpurchasecredits",
 		"insufficientquota",
+		"insufficientquotapleasecheckyourplanandbillingdetails",
 		"youexceededyourcurrentquota",
-		"exceededyourcurrentquota",
+		"youexceededyourcurrentquotapleasecheckyourplanandbillingdetails",
+		"exceededyourcurrentquotapleasecheckyourplanandbillingdetails",
 	} {
 		if strings.HasPrefix(expected, value) {
 			return true
