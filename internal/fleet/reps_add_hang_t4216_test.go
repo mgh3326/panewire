@@ -24,7 +24,7 @@ type stalledRepsHK struct {
 func (s *stalledRepsHK) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case r.Method == http.MethodGet && r.URL.Path == "/v1/bench/reps":
-		writeJSONBody(w, http.StatusOK, map[string]any{"reps": []Rep{}})
+		http.Error(w, `{"error":"unexpected_list_preflight"}`, http.StatusNotImplemented)
 	case r.Method == http.MethodPut && r.URL.Path == "/v1/bench/reps":
 		body, _ := io.ReadAll(r.Body)
 		select {
