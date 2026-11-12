@@ -96,6 +96,9 @@ type PoolView struct {
 	// Credit is a prepaid credit pool's hand-entered balance, nil when the
 	// manual store records none.
 	Credit *CreditBalance
+	// CreditUnavailable marks a pool whose balance could not be read or whose
+	// shared account binding is missing; selection records the gap as degraded.
+	CreditUnavailable bool
 	// Free is a pool's free-tier availability (devin's SWE-2 bucket), nil for
 	// a pool without one. Selection drops a free rung as free_limit while it
 	// reads exhausted with a reset still ahead.
@@ -860,6 +863,13 @@ func (q CLIQuota) Pools(ctx context.Context) (map[string]PoolView, error) {
 			v := pools[pool]
 			v.Credit = c
 			pools[pool] = v
+		}
+	} else {
+		for pool, view := range pools {
+			if slices.Contains(creditAccountPools, pool) {
+				view.CreditUnavailable = true
+				pools[pool] = view
+			}
 		}
 	}
 	return pools, nil

@@ -28,11 +28,18 @@ func (q admissionQuota) Pools(ctx context.Context) (map[string]PoolView, error) 
 	if !served {
 		return nil, fail(exitConfig, "quota status: shared manual store unavailable")
 	}
-	views, err := q.creditStoreViews(ctx, pools)
+	views, policy, err := q.creditStoreViews(ctx, pools)
 	if err != nil {
 		return nil, err
 	}
-	q.addCreditBalances(ctx, views)
+	accounts := make(map[string]string, len(q.Accounts)+len(policy.Accounts))
+	for pool, fp := range policy.Accounts {
+		accounts[pool] = fp
+	}
+	for pool, fp := range q.Accounts {
+		accounts[pool] = fp
+	}
+	q.addCreditBalances(ctx, views, pools, accounts)
 	return views, nil
 }
 
@@ -60,10 +67,10 @@ func (q admissionQuota) nativeCreditPools() ([]string, bool) {
 // current operator credit entry. A store that cannot be read leaves the class
 // alone, as pacelever's status keeps it for an unmeasured pool; an unreadable
 // policy is an error, so a failed read never clears an exclusion.
-func (q admissionQuota) creditStoreViews(ctx context.Context, pools []string) (map[string]PoolView, error) {
+func (q admissionQuota) creditStoreViews(ctx context.Context, pools []string) (map[string]PoolView, admissionPolicy, error) {
 	views, policy, err := q.creditPolicyViews(pools)
 	if err != nil {
-		return nil, err
+		return nil, policy, err
 	}
 	now := q.app.Now()
 	for _, pool := range pools {
@@ -80,7 +87,7 @@ func (q admissionQuota) creditStoreViews(ctx context.Context, pools []string) (m
 		}
 		views[pool] = v
 	}
-	return views, nil
+	return views, policy, nil
 }
 
 // creditPolicyViews is each credit pool's view from pacelever's pool policy
@@ -100,9 +107,23 @@ func (q admissionQuota) creditPolicyViews(pools []string) (map[string]PoolView, 
 
 // addCreditBalances sets each view's balance (credit_expiry.go), as
 // CLIQuota.Pools does; without a readable store the views keep none.
-func (q admissionQuota) addCreditBalances(ctx context.Context, views map[string]PoolView) {
-	credits, err := q.creditBalances(ctx)
+func (q admissionQuota) addCreditBalances(ctx context.Context, views map[string]PoolView, pools []string, accounts map[string]string) {
+	reader := q.CLIQuota
+	reader.Accounts = accounts
+	for _, pool := range pools {
+		if !accountFP.MatchString(accounts[pool]) {
+			v := views[pool]
+			v.CreditUnavailable = true
+			views[pool] = v
+		}
+	}
+	credits, err := reader.creditBalances(ctx)
 	if err != nil {
+		for _, pool := range pools {
+			v := views[pool]
+			v.CreditUnavailable = true
+			views[pool] = v
+		}
 		return
 	}
 	for pool, c := range credits {

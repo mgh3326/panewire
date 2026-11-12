@@ -107,6 +107,9 @@ func (q CLIQuota) manualStore(ctx context.Context) (manualStoreData, error) {
 	out := manualStoreData{Schema: "pacelever.manual.v1", History: []manualEntry{}, Latest: map[string]string{}}
 	if q.SharedLatest != nil {
 		for pool, fp := range q.Accounts {
+			if !slices.Contains(creditAccountPools, pool) {
+				continue
+			}
 			if !accountFP.MatchString(fp) {
 				continue
 			}
