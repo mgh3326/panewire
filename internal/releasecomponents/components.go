@@ -47,16 +47,16 @@ const (
 )
 
 // classify returns the daemon components a changed path can affect. An empty
-// mask means the path runs in no daemon: it is documentation, CI, a script or a
-// test. Every path not named here maps to both components, which is the
-// conservative default: a file this map does not know may run in either
-// daemon, and the rollout must restart both.
+// mask means the path shapes no shipped binary: documentation, tests and
+// testdata only. Every other path maps to both components, the conservative
+// default: CI, scripts and build settings change how the daemon binaries are
+// built (the version stamp, the flags, the toolchain), so they restart both.
 func classify(changed string) mask {
 	p := path.Clean(strings.ReplaceAll(changed, "\\", "/"))
 	switch {
 	case strings.HasSuffix(p, "_test.go"), strings.HasSuffix(p, ".md"):
 		return 0
-	case hasDirPrefix(p, "docs/", ".github/", "scripts/", "testdata/"):
+	case hasDirPrefix(p, "docs/", "testdata/"):
 		return 0
 	case p == "hub_ui.html":
 		// Served by the hub's own HTTP handler (embedded in hub.go).

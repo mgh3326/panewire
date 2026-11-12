@@ -31,8 +31,10 @@ The file has this shape:
   `git diff --name-only <previous> <release commit>`, and `unknown` when there
   is no previous release tag or the diff could not run. `unknown` lists every
   component.
-- `previous` is the newest release tag before this one (`v0.0.0*` test tags
-  are skipped).
+- `previous` is the newest published, non-prerelease GitHub Release that sorts
+  before this tag (`v0.0.0*` test tags are skipped). It is read from published
+  releases, not from `git tag`, so an unpublished or prerelease tag is never a
+  baseline. A rerun of a published release uses the same baseline.
 - `path_map` is the version of the rules below. Bump `PathMapVersion` in
   `internal/releasecomponents` when a rule changes.
 
@@ -43,13 +45,14 @@ The first matching rule wins.
 
 | Paths | Components |
 |---|---|
-| `*_test.go`, `*.md` | none |
-| `docs/`, `.github/`, `scripts/`, `testdata/` | none |
+| `*_test.go`, `*.md`, `docs/`, `testdata/` | none |
 | `hub_ui.html` (embedded by the hub's HTTP handler) | hub |
 | `deploy/dev.panewire.panewired*` (node LaunchAgent template) | node |
 | anything else | hub and node |
 
-The last row is the conservative default. Root-package Go files are one
+CI workflows, actions, build scripts and everything else not listed (for
+instance `go.mod`) map to both components, because they change how the
+daemon binaries are built. The last row is the conservative default. Root-package Go files are one
 package compiled into one binary that runs as the hub, the node daemon or the
 CLI, so the map cannot yet prove that a Go change reaches only one daemon.
 Narrowing that needs the code split into packages per daemon; until then a Go

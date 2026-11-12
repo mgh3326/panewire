@@ -23,6 +23,8 @@ func TestReleaseWorkflowPublishesComponents(t *testing.T) {
 		"test -s dist/release/components.json",
 		"test \"$(wc -l < dist/release/SHA256SUMS)\" -eq 5",
 		"jq -r '.summary' dist/release/components.json",
+		"--exclude-pre-releases",
+		"git diff --no-renames --name-only",
 	} {
 		if !strings.Contains(wf, want) {
 			t.Errorf("release.yml lacks %q", want)

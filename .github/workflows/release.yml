@@ -120,13 +120,16 @@ jobs:
           version=$(sh scripts/build-release.sh dist/release "$RELEASE_TAG")
           test "$version" = "$RELEASE_TAG"
       # Names the daemon components this release changed (docs/release-components.md).
-      # The previous release is the newest tag before this one; with none, or when
+      # The previous release is the published, non-prerelease release that sorts
+      # just before this tag (a rerun excludes this tag itself); with none, or when
       # git cannot diff, every component is listed (the conservative default).
       - name: Name the components this release changed
         if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          prev=$(git tag --merged "$GITHUB_SHA" --sort=-v:refname | grep -v -e "^${RELEASE_TAG}\$" -e '^v0\.0\.0' | head -n 1 || true)
-          if [ -n "$prev" ] && git diff --name-only "$prev" "$GITHUB_SHA" > "$RUNNER_TEMP/changed"; then
+          prev=$({ gh release list --repo "$GITHUB_REPOSITORY" --exclude-drafts --exclude-pre-releases --limit 1000 --json tagName --jq '.[].tagName' | grep -v -e '^v0\.0\.0' -e "^${RELEASE_TAG}\$" || true; echo "$RELEASE_TAG"; } | sort -V | grep -B1 -x "$RELEASE_TAG" | head -n 1 | grep -v -x "$RELEASE_TAG" || true)
+          if [ -n "$prev" ] && git diff --no-renames --name-only "$prev" "$GITHUB_SHA" > "$RUNNER_TEMP/changed"; then
             go run ./cmd/release-components -version "$RELEASE_TAG" -previous "$prev" < "$RUNNER_TEMP/changed" > dist/release/components.json
           else
             go run ./cmd/release-components -version "$RELEASE_TAG" -unknown < /dev/null > dist/release/components.json
