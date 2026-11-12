@@ -93,9 +93,9 @@ type nodeJobLedger struct {
 // job.reap, which must prove the job's own identity before it closes a pane;
 // the mark-lost path ignores them.
 type nodeJobLedgerEvent struct {
-	kind, pane, label, role, task string
-	owner                         string
-	keep                          bool
+	kind, pane, label, role, task, session string
+	owner                                  string
+	keep                                   bool
 }
 
 func nodeJobClaimKind(kind string) bool {
@@ -198,7 +198,8 @@ func readNodeJobLedgerEvents(job *os.Root) ([]nodeJobLedgerEvent, error) {
 				OwnerLane  string `json:"owner_lane"`
 				Keep       bool   `json:"keep"`
 				// TaskID is a string or a number in the ledger.
-				TaskID any `json:"task_id"`
+				TaskID       any    `json:"task_id"`
+				HerdrSession string `json:"herdr_session"`
 			} `json:"payload"`
 		}
 		if json.Unmarshal(data, &event) != nil || event.Kind == "" {
@@ -215,7 +216,7 @@ func readNodeJobLedgerEvents(job *os.Root) ([]nodeJobLedgerEvent, error) {
 		case float64:
 			task = strconv.FormatFloat(id, 'f', -1, 64)
 		}
-		events = append(events, nodeJobLedgerEvent{kind: event.Kind, pane: event.Payload.PaneID, label: label, role: event.Payload.Role, task: task, owner: event.Payload.OwnerLane, keep: event.Payload.Keep})
+		events = append(events, nodeJobLedgerEvent{kind: event.Kind, pane: event.Payload.PaneID, label: label, role: event.Payload.Role, task: task, owner: event.Payload.OwnerLane, keep: event.Payload.Keep, session: event.Payload.HerdrSession})
 	}
 	return events, nil
 }
@@ -334,6 +335,27 @@ func (client *HubClient) nodeJobRole(name string) (string, error) {
 		}
 	}
 	return role, err
+}
+
+// nodeJobHerdrSession is the herdr session recorded in the job's ledger: the
+// newest spawned or claim event that carries one.
+func (client *HubClient) nodeJobHerdrSession(name string) (string, error) {
+	root, _, found, err := client.openNodeJobDir(name)
+	if err != nil || !found {
+		return "", err
+	}
+	defer root.Close()
+	events, err := readNodeJobLedgerEvents(root)
+	if errors.Is(err, os.ErrNotExist) {
+		err = nil
+	}
+	session := ""
+	for _, event := range events {
+		if event.session != "" && (nodeJobClaimKind(event.kind) || event.kind == "job.spawned") {
+			session = event.session
+		}
+	}
+	return session, err
 }
 
 // nodeJobTask is the task the job's ledger names, read as the fleet's job

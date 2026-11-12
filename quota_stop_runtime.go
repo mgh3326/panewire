@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -71,7 +70,7 @@ func newQuotaStopManager(s *Store, root string, act bool, logger *slog.Logger) (
 		return fleet.AnnounceQuotaStop(ctx, filepath.Join(root, "jobs"), job, pane, stop)
 	}
 	q.read = func(ctx context.Context, pane string) (string, error) {
-		b, e := exec.CommandContext(ctx, "herdr", "agent", "read", pane, "--source", "visible", "--lines", "60").Output()
+		b, e := herdrCommandOutput(ctx, pane, "agent", "read", pane, "--source", "visible", "--lines", "60")
 		return string(b), e
 	}
 	q.hk = quotaStopHK{

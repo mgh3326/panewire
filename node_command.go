@@ -448,15 +448,99 @@ func defaultNodeCommandRunner(name string) relayCommandRunner {
 // the panes the node launched. A plain herdr call would read the daemon's own
 // session and report a landed pane in another session as gone (hk 2966).
 func (client *HubClient) nodeHerdrRunner() relayCommandRunner {
-	if client.nodeHerdr != nil {
+	return client.nodeHerdrRunnerFor("", "")
+}
+
+func (client *HubClient) nodeHerdrRunnerForSession(session string) relayCommandRunner {
+	if client != nil && client.nodeHerdr != nil {
 		return client.nodeHerdr
 	}
-	session := client.nodeSpawnSession()
 	return func(ctx context.Context, args ...string) ([]byte, error) {
-		cmd := exec.CommandContext(ctx, nodeHerdrExecutable, args...)
+		cmd := exec.CommandContext(ctx, herdrExecutable(), args...)
 		cmd.Env = hubSpawnEnvironment(os.Environ(), session)
 		return cmd.Output()
 	}
+}
+
+// nodeHerdrRunnerFor returns a herdr runner for the specific job and/or pane,
+// using that job's recorded herdr_session, else the node's configured session.
+func (client *HubClient) nodeHerdrRunnerFor(jobID, pane string) relayCommandRunner {
+	if client != nil && client.nodeHerdr != nil {
+		return client.nodeHerdr
+	}
+	session := client.herdrSessionFor(jobID, pane)
+	return client.nodeHerdrRunnerForSession(session)
+}
+
+// herdrExecutable returns the executable to invoke for herdr.
+func herdrExecutable() string {
+	if nodeHerdrExecutable != "" {
+		return nodeHerdrExecutable
+	}
+	if bin := os.Getenv("HERDR_BIN"); bin != "" {
+		return bin
+	}
+	return "herdr"
+}
+
+// herdrSessionFor returns that job's recorded herdr_session, else the node's
+// configured herdr_session, never silently "default".
+func (client *HubClient) herdrSessionFor(jobID, pane string) string {
+	if client == nil {
+		return firstNonempty(os.Getenv("HERDR_SESSION"), hubSpawnDefaultSession)
+	}
+	if jobID != "" {
+		if session, err := client.nodeJobHerdrSession(jobID); err == nil && session != "" {
+			return session
+		}
+	}
+	if pane != "" {
+		if session := client.nodeJobHerdrSessionByPane(pane); session != "" {
+			return session
+		}
+	}
+	return client.nodeSpawnSession()
+}
+
+// nodeJobHerdrSessionByPane searches this node's jobs for the one bound to
+// pane and returns its recorded herdr_session.
+func (client *HubClient) nodeJobHerdrSessionByPane(pane string) string {
+	if pane == "" || client == nil || client.jobsInboxRoot == "" {
+		return ""
+	}
+	jobsRoot := filepath.Join(client.jobsInboxRoot, "jobs")
+	entries, err := os.ReadDir(jobsRoot)
+	if err != nil {
+		return ""
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() || !hubJobIDPattern.MatchString(entry.Name()) {
+			continue
+		}
+		root, _, found, err := client.openNodeJobDir(entry.Name())
+		if err != nil || !found {
+			continue
+		}
+		events, err := readNodeJobLedgerEvents(root)
+		root.Close()
+		if err != nil {
+			continue
+		}
+		matched := false
+		session := ""
+		for _, event := range events {
+			if event.pane == pane {
+				matched = true
+			}
+			if event.session != "" {
+				session = event.session
+			}
+		}
+		if matched && session != "" {
+			return session
+		}
+	}
+	return ""
 }
 
 // nodeHerdrExecutable is the herdr binary node commands run; tests point it at
@@ -469,6 +553,15 @@ func (client *HubClient) nodeSpawnSession() string {
 		return config.HERDRSession
 	}
 	return hubSpawnDefaultSession
+}
+
+func firstNonempty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func (client *HubClient) nodeGitRunner() relayCommandRunner {
@@ -617,12 +710,16 @@ func nodeAgentRows(rows []nodeHerdrRow) []nodeAgentRow {
 	return out
 }
 
-func (client *HubClient) readNodeAgents(ctx context.Context) ([]nodeHerdrRow, error) {
-	output, err := client.nodeHerdrRunner()(ctx, "agent", "list")
+func (client *HubClient) readNodeAgentsInSession(ctx context.Context, session string) ([]nodeHerdrRow, error) {
+	output, err := client.nodeHerdrRunnerForSession(session)(ctx, "agent", "list")
 	if err != nil {
 		return nil, err
 	}
 	return nodeHerdrRows(output, "agents")
+}
+
+func (client *HubClient) readNodeAgents(ctx context.Context) ([]nodeHerdrRow, error) {
+	return client.readNodeAgentsInSession(ctx, client.nodeSpawnSession())
 }
 
 func (client *HubClient) nodeAgentsList(ctx context.Context) (any, string) {
@@ -647,7 +744,8 @@ func (client *HubClient) nodeAgentsList(ctx context.Context) (any, string) {
 // nodePaneMatch re-reads herdr and classifies the caller's expected pane; on
 // a match it also returns the row, for its state_change_seq.
 func (client *HubClient) nodePaneMatch(ctx context.Context, paneID, name, status, cwd string, checkStatus bool) (string, nodeHerdrRow, error) {
-	agents, err := client.readNodeAgents(ctx)
+	session := client.herdrSessionFor(name, paneID)
+	agents, err := client.readNodeAgentsInSession(ctx, session)
 	if err != nil {
 		return "", nodeHerdrRow{}, err
 	}
@@ -688,7 +786,7 @@ func (client *HubClient) nodePaneClose(ctx context.Context, args nodePaneCloseAr
 		return nodePaneCloseResult{Outcome: outcome}, ""
 	}
 	composerEmpty := func(row nodeHerdrRow) bool {
-		screen, err := client.nodeReadScreen(ctx, args.PaneID)
+		screen, err := client.nodeReadScreen(ctx, args.Name, args.PaneID)
 		return err == nil && nodeComposerState(row.Agent, screen) == nodeComposerEmpty
 	}
 	if !composerEmpty(first) {
@@ -718,7 +816,7 @@ func (client *HubClient) nodePaneClose(ctx context.Context, args nodePaneCloseAr
 	if !composerEmpty(second) {
 		return nodePaneCloseResult{Outcome: nodePaneChanged}, ""
 	}
-	if _, err := client.nodeHerdrRunner()(ctx, "pane", "close", args.PaneID); err != nil {
+	if _, err := client.nodeHerdrRunnerFor(args.Name, args.PaneID)(ctx, "pane", "close", args.PaneID); err != nil {
 		return nil, "close_failed"
 	}
 	return nodePaneCloseResult{Outcome: nodePaneClosed}, ""
@@ -766,7 +864,7 @@ func (client *HubClient) nodePaneCapture(ctx context.Context, args nodePaneCaptu
 	if outcome != "" {
 		return nodePaneCaptureResult{Outcome: outcome}, ""
 	}
-	output, err := client.nodeHerdrRunner()(ctx, "pane", "read", args.PaneID)
+	output, err := client.nodeHerdrRunnerFor(args.Name, args.PaneID)(ctx, "pane", "read", args.PaneID)
 	if err != nil {
 		return nil, "capture_failed"
 	}
