@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"log/slog"
+	"net/http"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -53,5 +54,34 @@ func TestInboxFlushCutByCloseLogsNoError(t *testing.T) {
 	}
 	if n := h.InboxFlushFailureCount(); n != 0 {
 		t.Fatalf("a flush cut by Close counted %d failures, want 0", n)
+	}
+}
+
+// A handoff that is accepted while Close lands is recorded after the store
+// aborts. That recording error is the shutdown, not a flush failure.
+func TestInboxFlushHandoffCutByCloseLogsNoError(t *testing.T) {
+	fake, hk, closeServer := newFakeHandoffkeep(t)
+	defer closeServer()
+	now := time.Now()
+	h, _ := quietHub(t, filepath.Join(t.TempDir(), "inbox.sqlite3"), "default", hk, &now)
+	var logs bytes.Buffer
+	h.logger = slog.New(slog.NewTextHandler(&logs, nil))
+	if _, err := h.inbox.store.db.Exec(`INSERT INTO lane_inbox_batches(id,lane,text) VALUES('b1','lane-a','digest')`); err != nil {
+		t.Fatal(err)
+	}
+	// Close's order, landing between the accepted handoff and markBatchSent:
+	// cancel the close context, then abort the store.
+	fake.observe = func(method, _ string) {
+		if method == http.MethodPost {
+			h.closeCancel()
+			h.inbox.store.abort()
+		}
+	}
+	h.flushInbox()
+	if strings.Contains(logs.String(), "level=ERROR") {
+		t.Fatalf("a handoff cut by Close logged an error:\n%s", logs.String())
+	}
+	if n := h.InboxFlushFailureCount(); n != 0 {
+		t.Fatalf("a handoff cut by Close counted %d failures, want 0", n)
 	}
 }
