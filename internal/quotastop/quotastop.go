@@ -160,7 +160,11 @@ func statusBlock(screen string) (string, bool) {
 					return "", false
 				}
 			}
-			block := strings.Join(lines[i:end], " ")
+			blockLines := make([]string, 0, end-i)
+			for j := i; j < end; j++ {
+				blockLines = append(blockLines, trimScreenBorder(strings.TrimSpace(lines[j])))
+			}
+			block := strings.Join(blockLines, " ")
 			if anthropicCredit.MatchString(block) || openAICredit.MatchString(block) {
 				return block, true
 			}

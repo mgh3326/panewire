@@ -33,14 +33,14 @@ func TestCreditExhaustionScreenStopsWorkerImmediately(t *testing.T) {
 
 func TestProviderCreditExhaustionTexts(t *testing.T) {
 	for _, tc := range []struct {
-		name, text, pool string
+		name, status, text, pool string
 	}{
-		{"Anthropic", "Your credit balance is too low to access the Anthropic API", "anthropic-api"},
-		{"OpenAI insufficient quota", "insufficient_quota", "openai-api"},
-		{"OpenAI current quota", "You exceeded your current quota", "openai-api"},
+		{"Anthropic", "400", "Your credit balance is too low to access the Anthropic API", "anthropic-api"},
+		{"OpenAI insufficient quota", "429", "insufficient_quota", "openai-api"},
+		{"OpenAI current quota", "429", "You exceeded your current quota", "openai-api"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			screen := "API Error: " + tc.text + "\n❯ Ask Claude"
+			screen := "API Error: " + tc.status + " " + tc.text + "\n❯ Ask Claude"
 			stop, ok := quotastop.Classify(screen, time.Now().UTC(), time.UTC)
 			if !ok || !stop.CreditExhausted || stop.Pool != tc.pool {
 				t.Fatalf("classified stop = %+v, %t", stop, ok)
