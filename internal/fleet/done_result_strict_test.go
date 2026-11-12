@@ -227,7 +227,7 @@ func TestDoneResultStrictConflictEmitsJobResultAndSentry(t *testing.T) {
 }
 
 func TestDoneResultStrictDuplicateEqualRepairsMissingAttachEvent(t *testing.T) {
-	a, _, h, _, report, result := strictDoneFixture(t, "completed")
+	a, _, h, _, report, result := strictDoneFixture(t, "spawned")
 	seedDuplicateCompletion(t, a, report)
 	h.records["j"]["result"] = map[string]any{"findings": []any{map[string]any{"severity": "high"}}}
 	if countEvents(t, a, "job.result_attached") != 0 {
@@ -258,6 +258,113 @@ func TestDoneResultStrictDuplicateDroppedCommitWritesAttachEvent(t *testing.T) {
 	}
 	if len(*events) != 1 || (*events)[0].Outcome != "attached" || (*events)[0].Reason != "duplicate_done" {
 		t.Fatalf("job_result events=%+v, want one duplicate attachment", *events)
+	}
+}
+
+func TestDoneResultStrictDuplicateAddsPublishedReportPin(t *testing.T) {
+	a, _, h, _, report, result := strictDoneFixture(t, "spawned")
+	body, err := os.ReadFile(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(body)
+	digest := hex.EncodeToString(sum[:])
+	completionID := "already-published"
+	document := reportDocumentKey("j", completionID, digest, false)
+	putEvent(t, a, "j", "job.completed", map[string]any{
+		"report": report, "report_sha256": digest, "question": "",
+		"completion_id": completionID, "document": document,
+	})
+	h.dropAfterCommit = true
+
+	err = a.lifecycle(context.Background(), "done", []string{"j", "--report", report, "--result", result, "--completion-id", completionID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := h.records["j"]
+	if str(record, "report_doc") != document || str(record, "report_sha256") != digest {
+		t.Fatalf("record report pin=(%q,%q), want event pin=(%q,%q)", str(record, "report_doc"), str(record, "report_sha256"), document, digest)
+	}
+	if _, ok := record["result"]; !ok {
+		t.Fatalf("record=%v, want result stored with the report pin", record)
+	}
+	if len(h.putBodies) != 1 || str(h.putBodies[0], "report_doc") != document || str(h.putBodies[0], "report_sha256") != digest {
+		t.Fatalf("completed PUTs=%v, want one atomic result and event-derived report pin", h.putBodies)
+	}
+}
+
+func TestDoneResultStrictPinReadbackUsesTheStoredResult(t *testing.T) {
+	a, _, h, _, report, resultPath := strictDoneFixture(t, "completed")
+	resultBody, err := os.ReadFile(resultPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result any
+	if err := json.Unmarshal(resultBody, &result); err != nil {
+		t.Fatal(err)
+	}
+	h.records["j"]["result"] = result
+	body, err := os.ReadFile(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(body)
+	reportSHA := hex.EncodeToString(digest[:])
+	reportDoc := reportDocumentKey("j", "new-answer", reportSHA, false)
+	fields := map[string]any{"state": "completed", "report_doc": reportDoc, "report_sha256": reportSHA}
+	_, err = a.strictCompletedPutUntil(context.Background(), "j", fields, result, reportDoc, reportSHA, nil, time.Now().Add(time.Second))
+	if !isDoneResultFailure(err, "report_conflict") || isDoneResultFailure(err, "result_conflict") {
+		t.Fatalf("pin-only readback error=%v, want report_conflict for the immutable terminal record", err)
+	}
+}
+
+func TestDoneResultRetryPublishesMatchingUnpublishedCompletion(t *testing.T) {
+	a, _, h, docs, report, _ := strictDoneFixture(t, "spawned")
+	failedUploads := 0
+	docs.Handle(func(req hkRequest) (int, string, bool) {
+		if strings.HasPrefix(req.Route(), "PUT /v1/documents/") && failedUploads < 3 {
+			failedUploads++
+			return http.StatusServiceUnavailable, `{"error":"unavailable"}`, true
+		}
+		return 0, "", false
+	})
+	args := []string{"j", "--report", report}
+	if err := a.lifecycleWithOptions(context.Background(), "done", args, true, false); err != nil {
+		t.Fatalf("watcher completion should keep warn-and-continue: %v", err)
+	}
+	job, err := a.job("j")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(job.Events) == 0 || str(job.Events[len(job.Events)-1].Payload, "document") != "" {
+		t.Fatalf("initial completion=%+v, want an event without a published document", job.Events)
+	}
+	if str(h.records["j"], "state") != "completed" {
+		t.Fatalf("remote state=%q, want watcher completion retained", str(h.records["j"], "state"))
+	}
+	putsBeforeRetry := len(completionDocumentRequests(docs))
+	if err := a.lifecycle(context.Background(), "done", args); err != nil {
+		t.Fatalf("same-report CLI retry: %v", err)
+	}
+	putsAfterRetry := len(completionDocumentRequests(docs))
+	if putsAfterRetry <= putsBeforeRetry {
+		t.Fatalf("document PUTs before=%d after=%d, want retry to publish the matching report", putsBeforeRetry, putsAfterRetry)
+	}
+	job, err = a.job("j")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var published bool
+	for _, event := range job.Events {
+		if event.Kind == "job.completed" && str(event.Payload, "report") == report && str(event.Payload, "document") != "" {
+			published = true
+		}
+	}
+	if !published {
+		t.Fatalf("completion events=%+v, want a published retry event", job.Events)
+	}
+	if strings.Contains(a.Out.(*bytes.Buffer).String(), "duplicate=yes") {
+		t.Fatalf("stdout=%q, want the unpublished completion not to be reported as a successful duplicate", a.Out.(*bytes.Buffer).String())
 	}
 }
 

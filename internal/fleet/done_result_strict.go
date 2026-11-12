@@ -82,16 +82,16 @@ func doneResultReason(e error) string {
 	return "hk_unconfigured"
 }
 
-func (a *App) strictCompletedPut(ctx context.Context, id string, fields map[string]any, result any, reportDoc string, receipt map[string]any) error {
-	_, e := a.strictCompletedPutStatus(ctx, id, fields, result, reportDoc, receipt)
+func (a *App) strictCompletedPut(ctx context.Context, id string, fields map[string]any, result any, reportDoc, reportSHA string, receipt map[string]any) error {
+	_, e := a.strictCompletedPutStatus(ctx, id, fields, result, reportDoc, reportSHA, receipt)
 	return e
 }
 
-func (a *App) strictCompletedPutStatus(ctx context.Context, id string, fields map[string]any, result any, reportDoc string, receipt map[string]any) (bool, error) {
-	return a.strictCompletedPutUntil(ctx, id, fields, result, reportDoc, receipt, time.Now().Add(doneResultBudget))
+func (a *App) strictCompletedPutStatus(ctx context.Context, id string, fields map[string]any, result any, reportDoc, reportSHA string, receipt map[string]any) (bool, error) {
+	return a.strictCompletedPutUntil(ctx, id, fields, result, reportDoc, reportSHA, receipt, time.Now().Add(doneResultBudget))
 }
 
-func (a *App) strictCompletedPutUntil(ctx context.Context, id string, fields map[string]any, result any, reportDoc string, receipt map[string]any, deadline time.Time) (bool, error) {
+func (a *App) strictCompletedPutUntil(ctx context.Context, id string, fields map[string]any, result any, reportDoc, reportSHA string, receipt map[string]any, deadline time.Time) (bool, error) {
 	store, e := a.jobStore()
 	if e != nil {
 		return false, &doneResultFailure{code: exitFailure, reason: "hk_unconfigured"}
@@ -136,7 +136,7 @@ func (a *App) strictCompletedPutUntil(ctx context.Context, id string, fields map
 		}
 		switch state := str(record, "state"); state {
 		case "completed":
-			if failure := completedResultReadbackFailure(record, result, reportDoc); failure != nil {
+			if failure := completedResultReadbackFailure(record, result, reportDoc, reportSHA); failure != nil {
 				return false, failure
 			}
 			return false, nil
@@ -178,7 +178,7 @@ func (a *App) strictCompletedPutUntil(ctx context.Context, id string, fields map
 				case "spawned":
 					// The single repair PUT committed despite its ambiguous reply.
 				case "completed":
-					if failure := completedResultReadbackFailure(record, result, reportDoc); failure != nil {
+					if failure := completedResultReadbackFailure(record, result, reportDoc, reportSHA); failure != nil {
 						return false, failure
 					}
 					return false, nil
@@ -216,7 +216,7 @@ func (a *App) strictCompletedPutUntil(ctx context.Context, id string, fields map
 	return false, &doneResultFailure{code: exitFailure, reason: doneResultReason(last)}
 }
 
-func completedResultReadbackFailure(record map[string]any, result any, reportDoc string) *doneResultFailure {
+func completedResultReadbackFailure(record map[string]any, result any, reportDoc, reportSHA string) *doneResultFailure {
 	stored, hasResult := record["result"]
 	if !hasResult || stored == nil {
 		return &doneResultFailure{code: exitStateConflict, reason: "terminal_without_result"}
@@ -225,6 +225,9 @@ func completedResultReadbackFailure(record map[string]any, result any, reportDoc
 		return &doneResultFailure{code: exitStateConflict, reason: "result_conflict"}
 	}
 	if reportDoc != "" && str(record, "report_doc") != reportDoc {
+		return &doneResultFailure{code: exitStateConflict, reason: "report_conflict"}
+	}
+	if reportSHA != "" && str(record, "report_sha256") != reportSHA {
 		return &doneResultFailure{code: exitStateConflict, reason: "report_conflict"}
 	}
 	return nil
@@ -281,7 +284,7 @@ func spawnReceiptForRepair(events []Event) map[string]any {
 	return receipt
 }
 
-func (a *App) attachDuplicateResultStrict(ctx context.Context, j Job, id, report, digest string, result json.RawMessage) (string, error) {
+func (a *App) attachDuplicateResultStrict(ctx context.Context, j Job, id, report, digest string, result json.RawMessage, eventDoc, eventSHA string) (string, error) {
 	if result == nil {
 		return "", nil
 	}
@@ -304,6 +307,13 @@ func (a *App) attachDuplicateResultStrict(ctx context.Context, j Job, id, report
 		a.recordDoneResultConflict(id)
 		return "", &doneResultFailure{code: exitStateConflict, reason: "result_conflict"}
 	}
+	reportDoc, reportSHA := str(record, "report_doc"), str(record, "report_sha256")
+	if reportDoc == "" {
+		reportDoc, reportSHA = "", ""
+		if eventDoc != "" {
+			reportDoc, reportSHA = eventDoc, eventSHA
+		}
+	}
 	if str(record, "state") == "completed" {
 		stored, hasResult := record["result"]
 		if !hasResult || stored == nil {
@@ -311,6 +321,9 @@ func (a *App) attachDuplicateResultStrict(ctx context.Context, j Job, id, report
 			// was written after an earlier failed attempt; strict read-back
 			// will classify the terminal 409 safely.
 		} else {
+			if reportDoc != "" && (str(record, "report_doc") != reportDoc || reportSHA != "" && str(record, "report_sha256") != reportSHA) {
+				return "", &doneResultFailure{code: exitStateConflict, reason: "report_conflict"}
+			}
 			written, eventErr := a.ensureResultAttachedEvent(ctx, j.Events, id, report, digest)
 			if eventErr != nil {
 				return "", &doneResultEventWriteFailure{cause: eventErr}
@@ -322,7 +335,11 @@ func (a *App) attachDuplicateResultStrict(ctx context.Context, j Job, id, report
 		}
 	}
 	fields := map[string]any{"state": "completed", "result": result}
-	attached, e := a.strictCompletedPutUntil(ctx, id, fields, result, "", spawnReceiptForRepair(j.Events), deadline)
+	if str(record, "report_doc") == "" && eventDoc != "" {
+		fields["report_doc"] = eventDoc
+		fields["report_sha256"] = eventSHA
+	}
+	attached, e := a.strictCompletedPutUntil(ctx, id, fields, result, reportDoc, reportSHA, spawnReceiptForRepair(j.Events), deadline)
 	if e != nil {
 		if isDoneResultFailure(e, "result_conflict") {
 			a.recordDoneResultConflict(id)

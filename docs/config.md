@@ -686,11 +686,13 @@ or `secret_like_content:<pattern>` (pattern matches `[a-z0-9_]{1,40}`),
 `terminal_without_result`, `result_conflict`, `report_conflict`,
 `job_escalated`, `job_lost`, `no_spawn_evidence`, a validated hk code matching
 `[a-z0-9_]{1,64}`, `http_<status>`, `hk_unreachable`, `hk_unconfigured`, or
-`local_io_error`, `local_state_error`, or `local_event_failed` when the local
-result-attachment event cannot be recorded.
+`local_io_error`, `local_state_error`, `local_event_failed`. The first two
+describe local completion-intent/refusal-file I/O or path-state failures;
+`local_event_failed` means the result-attachment event could not be recorded.
 The watcher and headless delegate keep warn-and-continue on report upload
 failure. A non-headless CLI `done` fails closed even without `--result`;
-completion without `--report` does not publish a report document. `escalate` writes
+without `--report`, `done` publishes the newest `report*.md` in the job
+directory and fails if none exists. `escalate` writes
 `{state:"escalated"}` and the watcher writes `{state:"lost"}` after two
 missing-pane observations, or when a reviewer pane is idle on a quota or
 rate-limit screen with no report (see `docs/quota-stop.md`; a worker or tester is

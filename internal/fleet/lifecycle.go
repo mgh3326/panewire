@@ -147,11 +147,17 @@ func (a *App) lifecycleWithOptions(ctx context.Context, kind string, args []stri
 				}
 			}
 			if matches {
+				if kind == "done" && str(ev.Payload, "document") == "" {
+					// Completion notification can precede report publication for
+					// watcher/headless uploads. Retry the publication before taking
+					// the idempotent duplicate return path.
+					continue
+				}
 				suffix := ""
 				if kind == "done" {
 					var status string
 					if strictResult {
-						status, e = a.attachDuplicateResultStrict(ctx, j, id, *report, digest, result)
+						status, e = a.attachDuplicateResultStrict(ctx, j, id, *report, digest, result, str(ev.Payload, "document"), str(ev.Payload, "report_sha256"))
 						if e != nil {
 							return a.strictDoneFailure(ctx, id, e)
 						}
@@ -245,7 +251,7 @@ func (a *App) lifecycleWithOptions(ctx context.Context, kind string, args []stri
 	}
 	if priorCompletion && result != nil && kind == "done" {
 		if strictResult {
-			_, e = a.attachDuplicateResultStrict(ctx, j, id, *report, digest, result)
+			_, e = a.attachDuplicateResultStrict(ctx, j, id, *report, digest, result, doc, docSHA)
 			if e != nil {
 				return a.strictDoneFailure(ctx, id, e)
 			}
@@ -261,7 +267,7 @@ func (a *App) lifecycleWithOptions(ctx context.Context, kind string, args []stri
 		store, storeErr := a.jobStore()
 		if storeErr == nil {
 			current, getErr := store.Get(ctx, id)
-			if getErr == nil && str(current, "report_doc") == "" {
+			if getErr == nil && str(current, "report_doc") == "" && str(current, "state") == "spawned" {
 				recordWrite = true
 				pinOnlyRecordWrite = true
 			} else if getErr != nil {
@@ -291,10 +297,9 @@ func (a *App) lifecycleWithOptions(ctx context.Context, kind string, args []stri
 	putResult := result
 	if pinOnlyRecordWrite {
 		recordFields = map[string]any{"state": state, "report_doc": doc, "report_sha256": docSHA}
-		putResult = nil
 	}
 	if strictResult && recordWrite {
-		if e = a.strictCompletedPut(ctx, id, recordFields, putResult, doc, spawnReceiptForRepair(j.Events)); e != nil {
+		if e = a.strictCompletedPut(ctx, id, recordFields, putResult, doc, docSHA, spawnReceiptForRepair(j.Events)); e != nil {
 			if isDoneResultFailure(e, "result_conflict") {
 				a.recordDoneResultConflict(id)
 			}

@@ -1,6 +1,7 @@
 package fleet
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -79,40 +80,42 @@ func TestDoneArtifactSameCompletionIDRejectsChangedBytes(t *testing.T) {
 	}
 }
 
-func TestDoneArtifactReentryRepairsMissingTerminalReportPin(t *testing.T) {
-	ctx := context.Background()
-	a := testApp(t)
-	ledgerRunner(t, a)
-	hk := useFakeHK(t)
-	hk.Handle(hkCommentAnswer)
-	seedDoneJob(t, a)
-	first := completionReport(t, a, "first answer\n")
-	if err := a.JobStore.Put(ctx, "j", map[string]any{"state": "completed"}); err != nil {
+func TestDoneArtifactRetryPublishesMatchingUnpinnedTerminalCompletion(t *testing.T) {
+	a, _, store, hk, report, _ := strictDoneFixture(t, "completed")
+	body, err := os.ReadFile(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	completionID, err := completionIdentity("j", "", body)
+	if err != nil {
 		t.Fatal(err)
 	}
 	putEvent(t, a, "j", "job.completed", map[string]any{
-		"report": first, "report_sha256": sha256String("first answer\n"), "document": "",
+		"report": report, "report_sha256": sha256String(string(body)),
+		"completion_id": completionID, "document": "",
 	})
-	second := filepath.Join(a.Jobs, "j", "second.md")
-	if err := os.WriteFile(second, []byte("second answer\n"), 0600); err != nil {
+
+	if err := a.lifecycle(context.Background(), "done", []string{"j", "--report", report}); err != nil {
 		t.Fatal(err)
 	}
-	if err := a.lifecycle(ctx, "done", []string{"j", "--report", second, "--completion-id", "second-answer"}); err != nil {
-		t.Fatal(err)
+	if len(completionDocumentRequests(hk)) == 0 {
+		t.Fatal("same-ID retry did not publish the report from the matching unpublished completion")
 	}
-	record := a.JobStore.(*fakeJobStore).record(t, "j")
 	job, err := a.job("j")
 	if err != nil {
 		t.Fatal(err)
 	}
 	var eventDocument string
 	for _, event := range job.Events {
-		if event.Kind == "job.completed" && str(event.Payload, "report") == second {
+		if event.Kind == "job.completed" && str(event.Payload, "report") == report && str(event.Payload, "document") != "" {
 			eventDocument = str(event.Payload, "document")
 		}
 	}
-	if eventDocument == "" || str(record, "report_doc") != eventDocument || str(record, "report_sha256") != sha256String("second answer\n") {
-		t.Fatalf("record=%v eventDocument=%q, want the newly published report pin", record, eventDocument)
+	if eventDocument == "" || strings.Contains(a.Out.(*bytes.Buffer).String(), "duplicate=yes") {
+		t.Fatalf("stdout=%q events=%+v, want a published completion retry, not a successful duplicate", a.Out.(*bytes.Buffer).String(), job.Events)
+	}
+	if str(store.records["j"], "report_doc") != "" {
+		t.Fatalf("terminal record unexpectedly accepted a late report pin: %v", store.records["j"])
 	}
 }
 
