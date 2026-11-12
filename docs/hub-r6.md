@@ -139,7 +139,8 @@ It can then send `{"type":"ping"}` and events:
 ```
 
 The hub replies to node `ping` with `pong`, sends its own `ping` keepalive,
-and accepts the node's `pong` response. Unknown fields, malformed envelopes,
+and accepts the node's `pong` response. A hub that is stopping sends `{"type":"redial"}` and
+closes the socket; the node dials again at once ([hub-drain.md](hub-drain.md)). Unknown fields, malformed envelopes,
 and unknown event kinds are ignored while an internal counter advances; they
 do not disconnect an authenticated node. Authentication failures are rejected
 before the WebSocket handshake.
@@ -308,7 +309,9 @@ execution facility.
    `ExecStart` is equivalent to `panewire hub --listen 127.0.0.1:9377
    --hub-auth /etc/panewire/hub-auth.env --hub-tg-env
    /etc/panewire/hub-tg.env --hub-grace 2m --alert-nodes machine-a,machine-b`.
-   Run it as a dedicated unprivileged service account with `Restart=always`.
+   Run it as a dedicated unprivileged service account with `Restart=always`
+   and `TimeoutStopSec=45` or more, so the SIGTERM drain can finish
+   ([hub-drain.md](hub-drain.md)).
    Verify locally with `curl http://127.0.0.1:9377/healthz`.
 3. Configure `cloudflared` on that same NCP host to map the hostname
    `hub.example.invalid` to `http://127.0.0.1:9377`. The hub itself remains

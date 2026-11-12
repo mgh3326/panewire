@@ -423,6 +423,8 @@ type HubServer struct {
 	quotaReplaceBudget time.Duration
 	spawnKick          chan struct{}
 	spawnWorkers       sync.WaitGroup
+	// drain is the SIGTERM state (hub_drain.go).
+	drain hubDrain
 	// spawnOrphanProbed is when the hub last probed each stranded request's
 	// node for a labelled pane (hub_spawn_orphan.go); guarded by mu.
 	spawnOrphanProbed map[string]time.Time
@@ -914,7 +916,7 @@ func (h *HubServer) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/spawn/{request_id}", h.handleSpawnGet)
 	mux.HandleFunc("GET /v1/nodes/agents", h.handleNodesAgents)
 	mux.HandleFunc("POST /v1/nodes/{machine}/command", h.handleNodeCommand)
-	return h.countRoutes(mux)
+	return h.drainGuard(h.countRoutes(mux))
 }
 
 //go:embed hub_ui.html
@@ -2396,6 +2398,7 @@ func (h *HubServer) Sweep() {
 	var pings []pendingPing
 	var notifications []hubNotification
 	var failovers []hubFailoverEvent
+	var staleSpawnWaiters []chan hubSpawnResult
 	h.mu.Lock()
 	h.sweepBurstHoldsLocked(now)
 	for _, record := range h.nodes {
@@ -2404,6 +2407,10 @@ func (h *HubServer) Sweep() {
 			record.stateSince = now
 			h.markBurstHoldsLostLocked(record.machineID)
 			h.recordUIEventLocked("presence", "stale", record.machineID, now)
+			// A dispatch bound to this socket would otherwise wait out its
+			// deadline for a node that is not answering; wake it now so the
+			// operation is requeued at once (hub_drain.go).
+			staleSpawnWaiters = append(staleSpawnWaiters, h.loseSpawnsLocked(record.machineID)...)
 		}
 		recordNotifications, recordFailovers := h.observeNodeAlertLocked(now, record)
 		notifications = append(notifications, recordNotifications...)
@@ -2414,6 +2421,7 @@ func (h *HubServer) Sweep() {
 		}
 	}
 	h.mu.Unlock()
+	wakeLostSpawns(staleSpawnWaiters)
 	h.sweepFleetState(now)
 	h.startFleetLoadPublish(now)
 	h.logRouteHits(now)

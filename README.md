@@ -138,6 +138,7 @@ those authenticated machine IDs; other nodes remain visible as
 
 See [docs/hub-r6.md](docs/hub-r6.md) for token-file formats, CLI examples, the
 closed WebSocket vocabulary, and the NCP/systemd + tunnel deployment runbook.
+How the hub stops on SIGTERM and how a node redials: [docs/hub-drain.md](docs/hub-drain.md).
 [docs/runbooks/hub-log-access.md](docs/runbooks/hub-log-access.md) covers how a
 non-root operator reads hub logs on NCP.
 
