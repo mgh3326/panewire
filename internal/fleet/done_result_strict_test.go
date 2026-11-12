@@ -241,6 +241,26 @@ func TestDoneResultStrictDuplicateEqualRepairsMissingAttachEvent(t *testing.T) {
 	}
 }
 
+func TestDoneResultStrictDuplicateDroppedCommitWritesAttachEvent(t *testing.T) {
+	a, _, h, _, report, result := strictDoneFixture(t, "spawned")
+	events := jobResultEvents(a)
+	seedDuplicateCompletion(t, a, report)
+	h.dropAfterCommit = true
+
+	if err := strictDone(t, a, report, result); err != nil {
+		t.Fatal(err)
+	}
+	if len(h.putBodies) != 1 {
+		t.Fatalf("completed PUTs=%d, want one ambiguous commit", len(h.putBodies))
+	}
+	if got := countEvents(t, a, "job.result_attached"); got != 1 {
+		t.Fatalf("job.result_attached events=%d, want one", got)
+	}
+	if len(*events) != 1 || (*events)[0].Outcome != "attached" || (*events)[0].Reason != "duplicate_done" {
+		t.Fatalf("job_result events=%+v, want one duplicate attachment", *events)
+	}
+}
+
 func TestDoneResultEventWriteFailureIsNotReportedAsHKFailure(t *testing.T) {
 	a := testApp(t)
 	putEvent(t, a, "j", "job.claim", map[string]any{"task_id": "42"})
