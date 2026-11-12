@@ -1263,7 +1263,7 @@ func (h *HubServer) handleAgent(writer http.ResponseWriter, request *http.Reques
 			h.countUnknownMessage()
 			continue
 		}
-		h.handleAgentMessage(machineID, request.RemoteAddr, agent, payload)
+		h.handleAgentMessageForNodeLoop(machineID, request.RemoteAddr, agent, payload)
 		if !h.agentCredentialCurrent(machineID, agent) {
 			h.closeRevokedAgent(machineID, agent)
 			return
@@ -1272,6 +1272,14 @@ func (h *HubServer) handleAgent(writer http.ResponseWriter, request *http.Reques
 }
 
 func (h *HubServer) handleAgentMessage(machineID, remoteAddr string, agent *hubAgent, payload []byte) {
+	h.handleAgentMessageImpl(machineID, remoteAddr, agent, payload, false)
+}
+
+func (h *HubServer) handleAgentMessageForNodeLoop(machineID, remoteAddr string, agent *hubAgent, payload []byte) {
+	h.handleAgentMessageImpl(machineID, remoteAddr, agent, payload, true)
+}
+
+func (h *HubServer) handleAgentMessageImpl(machineID, remoteAddr string, agent *hubAgent, payload []byte, nodeReadLoop bool) {
 	if result, ok := parseHubSpawnResult(payload); ok {
 		h.resolveSpawn(machineID, result)
 		return
@@ -1405,7 +1413,14 @@ func (h *HubServer) handleAgentMessage(machineID, remoteAddr string, agent *hubA
 			if completion.Replay {
 				h.logger.Info("relay record replayed after node restart", "job", completion.JobID, "kind", message.Kind, "node", machineID)
 			}
-			h.relayJobCompletionFrom(machineID, completion)
+			if nodeReadLoop {
+				// Inbox classification may read the job record from handoffkeep.
+				// Keep that bounded but potentially slow lookup off this node's
+				// websocket read loop so later heartbeats and commands are handled.
+				go h.relayJobCompletionFrom(machineID, completion)
+			} else {
+				h.relayJobCompletionFrom(machineID, completion)
+			}
 		}
 		if message.Kind == "job.escalate" || message.Kind == "job.joined" || relayTerminalSignalKinds[message.Kind] {
 			event, truncated, valid := decodeHubJobEscalationPayloadDetailed(message.Payload)
@@ -1495,7 +1510,11 @@ func (h *HubServer) handleAgentMessage(machineID, remoteAddr string, agent *hubA
 			}
 			h.recordInboxStageByRelayID(dropped.OriginalEventID, laneInboxStageDropped, dropped.Reason, machineID, dropped.Pane)
 			h.observeRelayDropped(machineID, dropped)
-			h.escalateUnconfirmedRelay(machineID, dropped)
+			if nodeReadLoop {
+				go h.escalateUnconfirmedRelay(machineID, dropped)
+			} else {
+				h.escalateUnconfirmedRelay(machineID, dropped)
+			}
 		}
 		if message.Kind == "job.revocation.ack" {
 			ack, valid := decodeHubJobCompletionPayload(message.Payload)

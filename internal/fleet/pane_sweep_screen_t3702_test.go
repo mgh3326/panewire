@@ -2,12 +2,16 @@ package fleet
 
 import (
 	"bytes"
+	"context"
 	"net/http"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // hk 3702: a swept pane's screen lives in hk. A successful upload writes no
@@ -134,6 +138,55 @@ func TestPaneSweepKeepsThePaneWhenItsReadFailsBeforeUpload(t *testing.T) {
 	}
 	if put := screenDocPut(t, hk, "j"); put != nil {
 		t.Fatalf("an unread screen was uploaded: %v", put)
+	}
+}
+
+// hk 3623: screen upload must not retain the exclusive node-command lock.
+func TestPaneSweepUploadsScreenOutsideExclusiveLock(t *testing.T) {
+	f := newPaneSweepFixture(t)
+	hk := useFakeHK(t)
+	started, release := make(chan struct{}), make(chan struct{})
+	var releaseOnce sync.Once
+	t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
+	hk.Handle(func(req hkRequest) (int, string, bool) {
+		if req.Method != http.MethodPut || !strings.HasPrefix(req.Path, "/v1/documents/") {
+			return 0, "", false
+		}
+		close(started)
+		<-release
+		return http.StatusOK, `{"document":{},"changed":true}`, true
+	})
+	pane := f.job("j", "worker", "42")
+	f.tasks["42"] = "merged"
+	var exclusive atomic.Bool
+	f.sweeper.Exclusive = func() func() {
+		exclusive.Store(true)
+		return func() { exclusive.Store(false) }
+	}
+	f.at(0)
+	f.now = time.Date(2026, 3, 1, 12, 11, 0, 0, time.UTC)
+	done := make(chan error, 1)
+	go func() { done <- f.sweeper.Pass(context.Background(), f.a) }()
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("sweep did not start the screen upload")
+	}
+	lockHeldDuringUpload := exclusive.Load()
+	releaseOnce.Do(func() { close(release) })
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("sweep did not finish after screen upload returned")
+	}
+	if lockHeldDuringUpload {
+		t.Fatal("screen upload held the exclusive node-command lock")
+	}
+	if got := f.closed(); !slices.Equal(got, []string{pane}) {
+		t.Fatalf("closed panes = %v, want [%s]", got, pane)
 	}
 }
 

@@ -331,10 +331,21 @@ func (h *HubServer) jobHasTask(jobID string) bool {
 	defer cancel()
 	task, _, err := h.jobTaskID(ctx, jobID)
 	if err != nil {
-		h.logger.Warn("job record unreadable; design-lane completion delivered", "job", jobID)
+		h.logger.Warn("job record unreadable; design-lane completion delivered", "job", jobID, "error_class", hubHKReadErrorClass(err))
 		return false
 	}
 	return task != ""
+}
+
+func hubHKReadErrorClass(err error) string {
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		return "timeout"
+	case errors.Is(err, context.Canceled):
+		return "canceled"
+	default:
+		return "unavailable"
+	}
 }
 
 // jobTaskID returns the task id the job's hk record names ("" when it names
