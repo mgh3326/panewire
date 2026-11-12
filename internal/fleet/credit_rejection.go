@@ -152,7 +152,7 @@ func ompCreditStop(home string, j Job) (quotastop.Stop, bool) {
 	}
 	switch pool {
 	case "anthropic-api":
-		if m.Provider != "anthropic" || m.ErrorStatus != 400 || response.Error.Type != "invalid_request_error" || !strings.HasPrefix(response.Error.Message, "Your credit balance is too low") {
+		if m.Provider != "anthropic" || m.ErrorStatus != 400 || !strings.HasSuffix(response.Error.Type, "_error") || !strings.HasPrefix(response.Error.Message, "Your credit balance is too low") {
 			return quotastop.Stop{}, false
 		}
 	case "openai-api":

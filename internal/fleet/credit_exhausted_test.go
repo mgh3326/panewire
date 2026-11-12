@@ -37,6 +37,7 @@ func TestOmpCreditRejectionStopsJobButQuotedAnswerDoesNot(t *testing.T) {
 		want          bool
 	}{
 		{"rejection", `{"role":"assistant","stopReason":"error","errorStatus":400,"provider":"anthropic","completedAt":1794461272051,"content":[],"errorMessage":"400 {\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"Your credit balance is too low to access the Anthropic API\"}}"}`, true},
+		{"generic provider error type", `{ "role":"assistant", "stopReason":"error", "errorStatus":400, "provider":"anthropic", "completedAt":1794461272051, "errorMessage":"400 {\"error\":{\"type\":\"billing_error\",\"message\":\"Your credit balance is too low to access the Anthropic API\"}}" }`, true},
 		{"quoted answer", `{"role":"assistant","stopReason":"stop","content":[{"type":"text","text":"API Error: 400 Your credit balance is too low to access the Anthropic API"}]}`, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
