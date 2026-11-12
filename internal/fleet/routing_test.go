@@ -344,7 +344,7 @@ func TestResolveMatchesPlanAndSpawnsNothing(t *testing.T) {
 	}
 
 	a, _, out := setup()
-	if e := a.Run(context.Background(), []string{"plan", "--t", "T1", "--routing-role", "consult", "--json"}); e != nil {
+	if e := a.Run(context.Background(), []string{"plan", "--t", "T1", "--routing-role", "consult", "--grade", "A", "--json"}); e != nil {
 		t.Fatalf("plan: %v\n%s", e, out)
 	}
 	var plan map[string]any
@@ -360,7 +360,7 @@ func TestResolveMatchesPlanAndSpawnsNothing(t *testing.T) {
 	}
 
 	a, fr, out := setup()
-	if e := a.Run(context.Background(), []string{"resolve", "--role", "consult", "--json"}); e != nil {
+	if e := a.Run(context.Background(), []string{"resolve", "--role", "consult", "--grade", "A", "--json"}); e != nil {
 		t.Fatalf("resolve: %v\n%s", e, out)
 	}
 	var r resolveResult
@@ -391,7 +391,7 @@ func TestResolveMatchesPlanAndSpawnsNothing(t *testing.T) {
 	// at each scale both choose the same profile and record the same request.
 	for _, scale := range []string{"T1", "T2"} {
 		a, _, out := setup()
-		if e := a.Run(context.Background(), []string{"plan", "--t", scale, "--routing-role", "consult", "--json"}); e != nil {
+		if e := a.Run(context.Background(), []string{"plan", "--t", scale, "--routing-role", "consult", "--grade", "A", "--json"}); e != nil {
 			t.Fatalf("plan --t %s: %v\n%s", scale, e, out)
 		}
 		var plan map[string]any
@@ -400,7 +400,7 @@ func TestResolveMatchesPlanAndSpawnsNothing(t *testing.T) {
 		}
 		planSel := plan["selection"].(map[string]any)
 		a, _, out = setup()
-		if e := a.Run(context.Background(), []string{"resolve", "--role", "consult", "--t", scale, "--json"}); e != nil {
+		if e := a.Run(context.Background(), []string{"resolve", "--role", "consult", "--t", scale, "--grade", "A", "--json"}); e != nil {
 			t.Fatalf("resolve --t %s: %v\n%s", scale, e, out)
 		}
 		var r resolveResult
@@ -417,7 +417,7 @@ func TestResolveMatchesPlanAndSpawnsNothing(t *testing.T) {
 
 	// Text form: the last line is the answer.
 	a, _, out = setup()
-	if e := a.Run(context.Background(), []string{"resolve", "--role", "consult"}); e != nil {
+	if e := a.Run(context.Background(), []string{"resolve", "--role", "consult", "--grade", "A"}); e != nil {
 		t.Fatal(e)
 	}
 	lines := strings.Split(strings.TrimSpace(out.String()), "\n")

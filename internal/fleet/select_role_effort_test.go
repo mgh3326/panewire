@@ -177,7 +177,7 @@ func TestResolveLeadMatchesSpawnUnderRoleEffortCap(t *testing.T) {
 
 	a, _, _ = roleEffortFixture(t)
 	out := captureOut(a)
-	if e := a.Run(context.Background(), []string{"resolve", "--role", "consult", "--json"}); e != nil {
+	if e := a.Run(context.Background(), []string{"resolve", "--role", "consult", "--grade", "A", "--json"}); e != nil {
 		t.Fatalf("resolve: %v\n%s", e, out)
 	}
 	var r resolveResult
@@ -193,7 +193,7 @@ func TestResolveLeadMatchesSpawnUnderRoleEffortCap(t *testing.T) {
 
 	a, _, _ = roleEffortFixture(t)
 	out = captureOut(a)
-	if e := a.Run(context.Background(), []string{"resolve", "--role", "consult"}); e != nil {
+	if e := a.Run(context.Background(), []string{"resolve", "--role", "consult", "--grade", "A"}); e != nil {
 		t.Fatal(e)
 	}
 	if !strings.Contains(out.String(), "rung_effort=high") || !strings.HasSuffix(strings.TrimSpace(out.String()), "profile=opus effort=high") {
@@ -212,7 +212,7 @@ func TestResolveLeadMatchesSpawnUnderRoleEffortCap(t *testing.T) {
 	a, _, q := roleEffortFixture(t)
 	q.LaunchValue = Launch{Profile: "opus", ModelID: "opus-m", Effort: "high", Grade: "S", Gate: "default", Pool: "claude"}
 	out = captureOut(a)
-	if e := a.Run(context.Background(), []string{"plan", "--t", "T1", "--routing-role", "consult", "--json"}); e != nil {
+	if e := a.Run(context.Background(), []string{"plan", "--t", "T1", "--routing-role", "consult", "--grade", "A", "--json"}); e != nil {
 		t.Fatalf("plan: %v\n%s", e, out)
 	}
 	var plan map[string]any

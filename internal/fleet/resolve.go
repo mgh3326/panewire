@@ -48,9 +48,9 @@ func (a *App) resolveCmd(ctx context.Context, args []string) error {
 	var asJSON, allowEscalation bool
 	f := flags("resolve")
 	f.StringVar(&role, "role", "", "routing role")
-	f.StringVar(&grade, "grade", "", "task grade (C, B, A, A+, S, S+, SS; not for consult)")
+	f.StringVar(&grade, "grade", "", "task grade (C, B, A, A+, S, S+, SS); for consult, the asker's grade, optional")
 	f.StringVar(&t, "t", "T0", "task scale T0..T3")
-	f.StringVar(&builderFamily, "builder-family", "", "author or parent family (reviewer/judge)")
+	f.StringVar(&builderFamily, "builder-family", "", "author or parent family (reviewer/judge/consult)")
 	f.StringVar(&harness, "harness", "", "restrict selection to an agent harness, e.g. omp")
 	f.BoolVar(&allowEscalation, "allow-escalation", false, "admit escalation rungs, and consult rungs above the role effort")
 	f.BoolVar(&asJSON, "json", false, "print the decision as JSON")
@@ -64,14 +64,18 @@ func (a *App) resolveCmd(ctx context.Context, args []string) error {
 		return fail(exitUsage, "resolve needs --role %s", strings.Join(routingRoles, "|"))
 	}
 	grade = strings.ToUpper(grade)
-	if topRoutingRole(role) && flagPassed(f, "grade") {
-		return fail(exitConfig, "%s: --grade is not accepted for %s", noLeadGradeRule, role)
-	}
-	if grade == "" && !topRoutingRole(role) {
-		grade = "C"
-	}
-	if _, ok := gradeOrder[grade]; !ok && !topRoutingRole(role) {
-		return fail(exitUsage, "resolve needs --grade C|B|A|A+|S|S+|SS")
+	if topRoutingRole(role) {
+		// A consult asker's grade is optional; a grade that is passed must be one.
+		if _, ok := gradeOrder[grade]; !ok && flagPassed(f, "grade") {
+			return fail(exitUsage, "resolve needs --grade C|B|A|A+|S|S+|SS")
+		}
+	} else {
+		if grade == "" {
+			grade = "C"
+		}
+		if _, ok := gradeOrder[grade]; !ok {
+			return fail(exitUsage, "resolve needs --grade C|B|A|A+|S|S+|SS")
+		}
 	}
 	t = strings.ToUpper(t)
 	if !slices.Contains([]string{"T0", "T1", "T2", "T3"}, t) {
@@ -83,8 +87,8 @@ func (a *App) resolveCmd(ctx context.Context, args []string) error {
 		if builderFamily == "" {
 			return fail(exitUsage, "--role %s needs --builder-family (its family rule)", role)
 		}
-	} else if builderFamily != "" {
-		return fail(exitUsage, "--builder-family goes with --role reviewer|judge")
+	} else if builderFamily != "" && !topRoutingRole(role) {
+		return fail(exitUsage, "--builder-family goes with --role reviewer|judge|consult")
 	}
 	if a.Quota == nil {
 		return fail(exitConfig, "resolve needs the quota catalog")
@@ -98,7 +102,11 @@ func (a *App) resolveCmd(ctx context.Context, args []string) error {
 	}
 	cwd, _ := os.Getwd()
 	s := Spawn{CWD: cwd, Profile: "auto", Host: "auto", Role: seatRole, T: t, ParentFamily: builderFamily, RoutingRole: role, AllowEscalation: allowEscalation, DryRun: true}
-	req := selReq{grade: grade, t: t, role: seatRole, allowEscalation: allowEscalation, builderFamily: builderFamily, harness: harness, urgency: urgencyNormal, urgencySource: "default", route: route}
+	gradeSource := "without_task"
+	if flagPassed(f, "grade") {
+		gradeSource = "flag"
+	}
+	req := selReq{grade: grade, gradeSource: gradeSource, t: t, role: seatRole, allowEscalation: allowEscalation, builderFamily: builderFamily, harness: harness, urgency: urgencyNormal, urgencySource: "default", route: route}
 	sel, selErr := a.selectFor(ctx, s, req)
 	r := resolveResult{RoutingRole: role, SeatRole: seatRole, Grade: grade, T: t, RoutingVersion: route.version, PolicySource: route.source}
 	r.OutcomeCode = outcomeForError(selErr)
@@ -130,6 +138,9 @@ func (a *App) resolveCmd(ctx context.Context, args []string) error {
 		return selErr
 	}
 	fmt.Fprintf(a.Out, "resolve role=%s seat_role=%s grade=%s t=%s routing_version=%d policy_source=%s", r.RoutingRole, r.SeatRole, r.Grade, r.T, r.RoutingVersion, r.PolicySource)
+	if topRoutingRole(role) {
+		fmt.Fprintf(a.Out, " floor=%s", consultFloorOf(r.Grade))
+	}
 	if r.DowngradedFrom != "" {
 		fmt.Fprintf(a.Out, " downgraded_from=%s", r.DowngradedFrom)
 	}

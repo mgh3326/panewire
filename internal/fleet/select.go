@@ -282,6 +282,12 @@ type selReq struct {
 	// e6Arm is the experiment marker a hub submission carried; empty reads
 	// the environment, as every local selection does.
 	e6Arm string
+	// gradeSource is where a consult asker's grade came from (flag, task or
+	// without_task); usedFloor and fallback are set on a consult fallback retry
+	// (consult_floor.go).
+	gradeSource string
+	usedFloor   string
+	fallback    string
 }
 
 // effortRank orders rung efforts cheap-first; an empty effort is the catalog's
@@ -375,6 +381,9 @@ func (a *App) seatFor(row CatalogRow, req selReq) (string, *Seat, string) {
 		} else {
 			switch {
 			case slices.Contains(req.excludeFamilies, seat.Family):
+				reason = "family_excluded"
+			case req.route.top() && req.builderFamily != "" && seat.Family == req.builderFamily:
+				// A consult rung runs on a family other than its asker's.
 				reason = "family_excluded"
 			case req.onlyFamily != "" && seat.Family != req.onlyFamily:
 				reason = "family_filtered"
@@ -744,17 +753,16 @@ func (a *App) selectProfile(ctx context.Context, s Spawn) (*selPlan, error) {
 		return nil, e
 	}
 	if s.Grade != "" {
-		if req.route.top() {
-			return nil, fail(exitConfig, "%s: --grade is not accepted for routing role %s", noLeadGradeRule, req.route.role)
-		}
-		req.grade = s.Grade
+		req.grade, req.gradeSource = s.Grade, "flag"
 	} else if m := taskMarker.FindStringSubmatch(task.Title); m != nil {
-		req.grade = strings.ToUpper(m[1])
+		req.grade, req.gradeSource = strings.ToUpper(m[1]), "task"
 		if strings.ToUpper(m[2]) != s.T {
 			return nil, fail(exitSeatRefused, "task scale does not match --t")
 		}
 	} else if !req.route.top() {
 		return nil, fail(exitSeatRefused, "auto selection needs a readable task grade")
+	} else {
+		req.gradeSource = "without_task"
 	}
 	if _, ok := gradeOrder[req.grade]; !ok && !req.route.top() {
 		return nil, fail(exitSeatRefused, "unreadable task grade %q", req.grade)
@@ -799,49 +807,34 @@ func (a *App) selectFor(ctx context.Context, s Spawn, req selReq) (*selPlan, err
 	var pending []*selCand
 	capGate := a.newPoolCapGate(rows)
 	p.poolCaps = capGate.caps
+	rungs := indexRungs(rows)
+	floor := ""
+	if req.route.top() {
+		floor = req.usedFloor
+		if floor == "" {
+			floor = consultFloorOf(req.grade)
+		}
+	}
+	staticPassing, fallbackRungs := 0, 0
 	for _, row := range rows {
 		c := &selCand{row: row, tier: -1, ignoreGrade: req.route.top()}
-		roleCap := req.route.roleEffortFor(row)
+		cooling := snapshot != nil && snapshot.poolCooling(row.Pool, p.at)
+		reason, seatName, seat := a.staticDrop(row, req, floor, rungs, cooling)
 		switch {
-		case row.RetiredAt != nil:
-			c.reason = "retired"
-		case row.Profile == "" || row.ModelID == "" || row.Pool == "":
-			c.reason = "catalog_incomplete"
-		case !req.route.admits(row.Profile):
-			c.reason = "role_filtered"
-		case !validCatalogGrade(row.Grade):
-			c.reason = "grade_invalid"
-		case row.Grade == gradeUnrated && !req.route.top():
-			c.reason = "grade_unrated"
-		case !req.route.top() && gradeOrder[row.Grade] < gradeOrder[req.grade]:
-			c.reason = "grade_insufficient"
-		case row.Gate != "default" && row.Gate != "escalation" && row.Gate != "consult_only":
-			c.reason = "gate_unknown"
-		case row.Gate != "default" && !req.allowEscalation && !req.route.familyAdmitsGate(row):
-			c.reason = "gate_class"
-		case aboveEffort(row.Effort, roleCap) && !req.allowEscalation:
-			c.reason = reasonAboveRoleEffort
-		case req.route.minEffort() != "" && rankEffort(a.rowLaunchEffort(row)) < rankEffort(req.route.minEffort()):
-			c.reason = reasonBelowRoleMinEffort
-		case req.effort != "" && row.Effort != req.effort:
-			c.reason = "effort_mismatch"
-		case !validID(row.Pool):
-			c.reason = "pool_invalid"
-		case slices.Contains(req.excludePools, row.Pool):
-			c.reason = "pool_excluded"
-		case snapshot != nil && snapshot.poolCooling(row.Pool, p.at):
-			c.reason = "pool_cooling"
-		default:
-			if name, seat, reason := a.seatFor(row, req); seat == nil {
-				c.reason = reason
-			} else {
-				c.seat = seat
-				c.seatName = name
-				// Checked after the seat rules so a candidate those rules
-				// drop keeps its own reason.
-				if capKey := capGate.full(ctx, row); capKey != "" {
-					c.reason, c.cap = reasonPoolAtCap, capKey
-				}
+		case reason == "" || reason == "pool_cooling":
+			staticPassing++
+		case floor != "" && reason == "grade_insufficient":
+			// The rung passes every other rule with the floor off: a fallback candidate.
+			if off, _, _ := a.staticDrop(row, req, "", rungs, cooling); off == "" || off == "pool_cooling" {
+				fallbackRungs++
+			}
+		}
+		c.reason, c.seatName, c.seat = reason, seatName, seat
+		if reason == "" {
+			// Checked after the seat rules so a candidate those rules
+			// drop keeps its own reason.
+			if capKey := capGate.full(ctx, row); capKey != "" {
+				c.reason, c.cap = reasonPoolAtCap, capKey
 			}
 		}
 		if c.reason != "" {
@@ -907,6 +900,14 @@ func (a *App) selectFor(ctx context.Context, s Spawn, req selReq) (*selPlan, err
 				pending = append(pending, &x)
 			}
 		}
+	}
+	// Fallback (consult_floor.go): no rung passes at the floor, a rung below it
+	// passes every other rule, and the asker's task grade is below SS. Retry once
+	// at the asker's own grade, stamped. Unrated and absent rungs never fall back
+	// (they fail on other rules), and quota or presence holds count as passing.
+	if staticPassing == 0 && fallbackRungs > 0 && req.route.top() && req.grade != "" && req.usedFloor == "" && gradeOrder[floor] > gradeOrder[req.grade] {
+		req.usedFloor, req.fallback = req.grade, "no_rung_at_floor"
+		return a.selectFor(ctx, s, req)
 	}
 	p.degraded = append(p.degraded, capGate.degraded()...)
 	orderSelCands(pending)
@@ -1286,6 +1287,9 @@ func (p *selPlan) record() map[string]any {
 		"tiers":          p.order,
 		"candidates":     cands,
 		"at":             p.at.Format(time.RFC3339Nano),
+	}
+	if p.req.route.top() {
+		rec["consult"] = p.consultStamp()
 	}
 	if c := p.chosen; c != nil {
 		canon := c.row.Profile

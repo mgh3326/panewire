@@ -75,10 +75,6 @@ var builtinRoleMap = map[string]string{"worker": "implementer", "tester": "verif
 // retiredLeadRole is the routing role panewire no longer reads from the table.
 const retiredLeadRole = "lead"
 
-// noLeadGradeRule is a wire reason code callers match on; it keeps its
-// historical spelling although the lead role is gone.
-const noLeadGradeRule = "lead_consult_take_no_grade"
-
 var topProfiles = []string{"opus", "fable", "codex-sol", "codex-astra"}
 
 var ompTopModels = map[string]string{
