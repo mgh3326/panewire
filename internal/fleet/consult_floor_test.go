@@ -312,3 +312,26 @@ func TestConsultFloorCoolingBelowFloorRetries(t *testing.T) {
 		t.Fatalf("cooling codex-sol@high at retry grade S; reason = %v, want pool_cooling", got)
 	}
 }
+
+// TestConsultFloorCoolingUnratedDoesNotSuppressFallback: an unrated rung in a
+// cooling pool is still unrated, so it must not count as a passing floor rung
+// and suppress fallback for a separate below-floor candidate.
+func TestConsultFloorCoolingUnratedDoesNotSuppressFallback(t *testing.T) {
+	rows := []CatalogRow{
+		consultFloorRung("codex-sol", "high", gradeUnrated, "codex"),
+		consultFloorRung("opus", "high", "S+", "claude"),
+	}
+	sel, e := consultFloorSelectWith(t, consultFloorOpts{cooling: []string{"codex"}}, rows, consultFloorBothPools, "S+", "")
+	if e != nil {
+		t.Fatalf("select with fallback: %v", e)
+	}
+	if got := sel.chosen.seat.Canon; got != "opus" {
+		t.Fatalf("fallback must select the healthy S+ rung; got %s", got)
+	}
+	if c := consultFloorStamp(t, sel); c["fallback"] != "no_rung_at_floor" {
+		t.Fatalf("fallback stamp = %v, want no_rung_at_floor", c)
+	}
+	if got := candOutcome(sel.record(), "codex-sol", "high")["reason"]; got != "pool_cooling" {
+		t.Fatalf("cooling unrated codex-sol@high reason = %v, want pool_cooling", got)
+	}
+}

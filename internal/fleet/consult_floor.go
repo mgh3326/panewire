@@ -108,14 +108,6 @@ func (a *App) staticDrop(row CatalogRow, req selReq, floor string, rungs rungInd
 	case slices.Contains(req.excludePools, row.Pool):
 		return "pool_excluded", "", nil
 	case cooling:
-		if floor != "" {
-			// A cooling rung passes only if it would pass the floor once the
-			// pool cools off. A rung below the floor is a floor drop, so the
-			// no_rung_at_floor retry still counts it as a fallback candidate.
-			if r, _, _ := a.staticDrop(row, req, floor, rungs, false); r == "grade_insufficient" {
-				return r, "", nil
-			}
-		}
 		return "pool_cooling", "", nil
 	}
 	name, seat, reason := a.seatFor(row, req)
