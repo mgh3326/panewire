@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/mgh3326/panewire/internal/fleetevent"
+	"github.com/mgh3326/panewire/internal/hubretry"
 
 	"github.com/mgh3326/panewire/internal/arbiter"
 	"github.com/mgh3326/panewire/internal/quota/shared"
@@ -29,6 +30,9 @@ type App struct {
 	ConfigPath   string
 	Policy       Policy
 	Out, Err     io.Writer
+	// hubRetries tallies the idempotent hub calls this command sent again; it
+	// is printed once when the command ends (reportHubRetries).
+	hubRetries   hubretry.Stats
 	Jobs, Home   string
 	Sleep        func(context.Context, time.Duration) error
 	Now          func() time.Time
