@@ -111,6 +111,9 @@ func TestOMPReviewerLaunchUsesExtendedContextOverlay(t *testing.T) {
 		t.Run(role, func(t *testing.T) {
 			a, s, fr := ompSpawnFixture(t)
 			s.Role = role
+			if role == "reviewer" {
+				s.BuilderFamily = "anthropic"
+			}
 			base := fr.Do
 			var configPath string
 			var config string
