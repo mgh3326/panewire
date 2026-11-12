@@ -35,6 +35,23 @@ type t3431FailReadTransport struct {
 	afterID int64
 }
 
+type t3431LoseFirstPostReplyTransport struct {
+	next http.RoundTripper
+	used bool
+}
+
+func (rt *t3431LoseFirstPostReplyTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	resp, err := rt.next.RoundTrip(req)
+	if err == nil && !rt.used && req.Method == http.MethodPost && req.URL.Path == "/v1/relay/events" && resp.StatusCode == http.StatusCreated {
+		rt.used = true
+		_ = resp.Body.Close()
+		resp.StatusCode = http.StatusInternalServerError
+		resp.Status = "500 Internal Server Error"
+		resp.Body = io.NopCloser(strings.NewReader(`{"error":"reply lost"}`))
+	}
+	return resp, err
+}
+
 func (rt t3431FailReadTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	if req.Method == http.MethodGet && req.URL.Query().Get("after_id") == fmt.Sprint(rt.afterID) && req.URL.Query().Get("limit") == "1" {
 		return &http.Response{StatusCode: http.StatusInternalServerError, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"error":"forced"}`)), Request: req}, nil
@@ -719,19 +736,32 @@ func TestUnconfirmedNoticeFoldDuringFailedRetriesIsNamed_t3431(t *testing.T) {
 // A retry whose post was stored uses the first post's text. Folds arriving
 // while it is in flight must remain for the following notice.
 func TestUnconfirmedNoticeDuplicateRetryPreservesLaterFolds_t3431(t *testing.T) {
-	windows := &unconfirmedNoticeWindows{}
-	first := time.Date(2026, 11, 7, 10, 42, 0, 0, time.UTC)
-	windows.fold(t3431Design, t3431Worker, 1, first)
-	note, _, _ := windows.admit(t3431Design, t3431Worker, 2, first.Add(time.Minute))
-	windows.record(t3431Design, t3431Worker, 2, note, first.Add(time.Minute))
-	windows.fold(t3431Design, t3431Worker, 3, first.Add(2*time.Minute))
-	windows.record(t3431Design, t3431Worker, 2, unconfirmedNoticeNote{}, first.Add(3*time.Minute))
-	w := windows.byLanes[[2]string{t3431Design, t3431Worker}]
-	if _, stillFolded := w.folded[1]; stillFolded || note.text == "" {
-		t.Fatal("fixture did not model the first stored notice")
+	t3431FastBackoff(t)
+	rig := t3431LiveRig(t)
+	r0, _ := rig.drop()
+	if len(t3431NoticeFor(rig.notices(), r0)) != 1 {
+		t.Fatal("initial notice missing")
 	}
-	if _, stillFolded := w.folded[3]; !stillFolded {
-		t.Fatal("duplicate retry cleared a later fold absent from the stored notice")
+	rig.clock.advance(time.Minute)
+	r1 := rig.relayRow()
+	t650Send(t, rig.hub, "host-a", rig.dest, "relay.dropped", r1)
+	rig.clock.advance(31 * time.Minute)
+	r2 := rig.relayRow()
+	r3 := rig.relayRow()
+	client := rig.hub.handoffkeep.client
+	previous := client.Transport
+	client.Transport = &t3431LoseFirstPostReplyTransport{next: previous}
+	t.Cleanup(func() { client.Transport = previous })
+	rig.onFirstNoticePost(func() { rig.hub.unconfirmedNotices.fold(t3431Design, t3431Worker, r3.OriginalEventID, rig.clock.Now()) })
+	t650Send(t, rig.hub, "host-a", rig.dest, "relay.dropped", r2)
+	if !waitUntil(5*time.Second, func() bool { return rig.rowReads(r2.OriginalEventID) >= 2 }) {
+		t.Fatalf("duplicate retry did not reread source row; reads=%d logs=%s", rig.rowReads(r2.OriginalEventID), rig.logs.String())
+	}
+	rig.clock.advance(31 * time.Minute)
+	r4, _ := rig.drop()
+	got := t3431NoticeFor(rig.notices(), r4)
+	if len(got) != 1 || t3431FoldCount(got[0].Text) != 1 {
+		t.Fatalf("stored fold and later fold counts are wrong; want only R3 folded: %+v", got)
 	}
 }
 

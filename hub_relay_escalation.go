@@ -95,14 +95,17 @@ func escalatesWhenUnconfirmed(record handoffkeepRelayEvent) bool {
 // the escalation, is retried on unconfirmedEscalationBackoff until the
 // escalation is durable: the durable id keeps the retries to one escalation.
 func (h *HubServer) escalateUnconfirmedRelay(machine string, dropped relayDroppedPayload) {
-	h.escalateUnconfirmedRelayAttempt(machine, dropped, 0)
+	h.escalateUnconfirmedRelayAttempt(machine, dropped, 0, nil)
 }
 
-func (h *HubServer) escalateUnconfirmedRelayAttempt(machine string, dropped relayDroppedPayload, attempt int) {
+func (h *HubServer) escalateUnconfirmedRelayAttempt(machine string, dropped relayDroppedPayload, attempt int, storedNote *unconfirmedNoticeNote) {
 	if !relayDroppedIsUnconfirmed(dropped.Reason) || dropped.OriginalEventID < 1 || dropped.Lane == "" || h.handoffkeep == nil {
 		return
 	}
 	design := h.designLaneFor(dropped.Lane)
+	var note unconfirmedNoticeNote
+	var folded int
+	var send bool
 	retry := func(why string) {
 		if attempt >= len(unconfirmedEscalationBackoff) {
 			if design != "" {
@@ -113,7 +116,12 @@ func (h *HubServer) escalateUnconfirmedRelayAttempt(machine string, dropped rela
 			return
 		}
 		h.logger.Warn("relay unconfirmed escalation will retry", "event_id", dropped.OriginalEventID, "lane", dropped.Lane, "why", why, "attempt", attempt+1)
-		time.AfterFunc(unconfirmedEscalationBackoff[attempt], func() { h.escalateUnconfirmedRelayAttempt(machine, dropped, attempt+1) })
+		retryNote := storedNote
+		if retryNote == nil && note.rows != nil {
+			first := note
+			retryNote = &first
+		}
+		time.AfterFunc(unconfirmedEscalationBackoff[attempt], func() { h.escalateUnconfirmedRelayAttempt(machine, dropped, attempt+1, retryNote) })
 	}
 	ctx := context.Background()
 	record, found, err := h.handoffkeep.relayEvent(ctx, dropped.OriginalEventID)
@@ -132,7 +140,7 @@ func (h *HubServer) escalateUnconfirmedRelayAttempt(machine string, dropped rela
 		h.logger.Info("relay unconfirmed escalation skipped; nobody can act on it", "event_id", record.ID, "lane", dropped.Lane, "design_lane", design, "reason", dropped.Reason, "why", why)
 		return
 	}
-	note, folded, send := h.unconfirmedNotices.admit(design, dropped.Lane, record.ID, h.now())
+	note, folded, send = h.unconfirmedNotices.admit(design, dropped.Lane, record.ID, h.now())
 	if !send {
 		h.logger.Info("relay unconfirmed escalation folded into the next notice", "event_id", record.ID, "lane", dropped.Lane, "design_lane", design, "reason", dropped.Reason, "why", "folded", "folded", folded)
 		return
@@ -154,7 +162,9 @@ func (h *HubServer) escalateUnconfirmedRelayAttempt(machine string, dropped rela
 	case result.ID != 0 && result.Duplicate && attempt > 0:
 		// The first writer's body is authoritative. Clear no folds from this
 		// retry's newly built note; they were not in the stored text.
-		h.unconfirmedNotices.record(design, dropped.Lane, record.ID, unconfirmedNoticeNote{}, h.now())
+		if storedNote != nil {
+			h.unconfirmedNotices.record(design, dropped.Lane, record.ID, *storedNote, h.now())
+		}
 	case result.ID != 0 && !result.Duplicate:
 		// Stored: a new row, or a retry whose earlier post was stored though
 		// its reply was lost.
