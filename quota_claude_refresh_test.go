@@ -34,8 +34,6 @@ func TestFleetQuotaClaudeRefreshedByFailingCLIIsNotLoginMissing(t *testing.T) {
 		return "", errors.New("usage command failed")
 	}
 	client.nativeQuota = map[string]*nativeQuotaSource{"claude": src}
-	var pacelever []string
-	client.nodePacelever = paceleverNeverForClaude(t, &pacelever)
 	var warnings []string
 	client.warn = func(m string) { warnings = append(warnings, m) }
 

@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/mgh3326/panewire/internal/configpath"
 	"github.com/mgh3326/panewire/internal/durable"
 	"github.com/mgh3326/panewire/internal/quota/shared"
 )
@@ -238,13 +239,29 @@ func (c Config) limitIdentities() []string {
 	return ids
 }
 
-// cacheDir is pacelever's cache directory: PACELEVER_CACHE's directory, else
-// <XDG cache>/pacelever.
+// cachePath is panewire's record path, followed by the legacy pacelever path.
+// An explicit cache variable names the record file itself.
+func (c Config) cachePaths() []string {
+	return configpath.CacheCandidates(c.env, c.home(), "devin-free-limit.json")
+}
+
+// cacheDir is panewire's cache directory, used for new records and locks.
 func (c Config) cacheDir() string {
-	if p := c.env("PACELEVER_CACHE"); p != "" {
+	if p := c.env("PANEWIRE_CACHE"); p != "" {
 		return filepath.Dir(p)
 	}
-	return filepath.Join(c.cacheBase(), "pacelever")
+	return filepath.Join(c.cacheBase(), "panewire")
+}
+
+func readLimitFile(c Config) ([]byte, error) {
+	for _, path := range c.cachePaths() {
+		data, err := c.readFileErr(path)
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		return data, err
+	}
+	return nil, fs.ErrNotExist
 }
 
 // LocalFree is this host's own free-tier state at now, read from the record
@@ -261,7 +278,7 @@ func LocalFree(cfg Config) func(now time.Time) *shared.FreeBucket {
 		var store struct {
 			Records *map[string]limitRecord `json:"records"`
 		}
-		data, err := cfg.readFileErr(filepath.Join(cfg.cacheDir(), "devin-free-limit.json"))
+		data, err := readLimitFile(cfg)
 		switch {
 		case errors.Is(err, fs.ErrNotExist):
 			return &shared.FreeBucket{State: shared.FreeAvailable}

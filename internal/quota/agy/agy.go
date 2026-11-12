@@ -90,8 +90,8 @@ type Config struct {
 	// Wake re-arms the login by listing models with the agy binary; nil runs
 	// `agy models` with its output discarded.
 	Wake func(ctx context.Context, binary string) error
-	// WakeLock is the lock file that keeps the wake single-flight with
-	// pacelever's; empty is pacelever's own path. Locked runs fn under it; nil
+	// WakeLock is the lock file that keeps wake single-flight; empty uses the
+	// panewire cache path with a legacy fallback. Locked runs fn under it; nil
 	// takes the real advisory lock.
 	WakeLock string
 	Locked   func(path string, fn func() error) error
@@ -555,14 +555,18 @@ func epochTime(n float64) string {
 }
 
 // binary is the agy executable that can re-arm the login, "" when none is
-// installed: PACELEVER_AGY_BIN (the pacelever override), else agy on PATH.
+// installed: PANEWIRE_AGY_BIN (PACELEVER_AGY_BIN fallback), else agy on PATH.
 func (c Config) binary() string {
 	look := c.LookPath
 	if look == nil {
 		look = exec.LookPath
 	}
 	name := "agy"
-	if explicit := c.env("PACELEVER_AGY_BIN"); explicit != "" {
+	explicit := c.env("PANEWIRE_AGY_BIN")
+	if explicit == "" {
+		explicit = c.env("PACELEVER_AGY_BIN")
+	}
+	if explicit != "" {
 		name = explicit
 		if rest, ok := strings.CutPrefix(explicit, "~/"); ok {
 			name = filepath.Join(c.home(), rest)

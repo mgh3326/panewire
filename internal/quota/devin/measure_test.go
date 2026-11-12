@@ -220,7 +220,9 @@ func TestBinaryResolution(t *testing.T) {
 		want string
 	}{
 		{"override", config(loginFiles(), map[string]string{"PACELEVER_DEVIN_BIN": "/override/devin"}), "/override/devin"},
+		{"panewire override", config(loginFiles(), map[string]string{"PANEWIRE_DEVIN_BIN": "/new/devin", "PACELEVER_DEVIN_BIN": "/old/devin"}), "/new/devin"},
 		{"settings", config(map[string]string{"/home/u/.config/pacelever/config.toml": "[pools.devin]\nbin = '~/bin/devin'\n"}, nil), "/home/u/bin/devin"},
+		{"panewire settings", config(map[string]string{"/home/u/.config/panewire/config.toml": "[pools.devin]\nbin = '~/bin/new-devin'\n"}, nil), "/home/u/bin/new-devin"},
 		{"configured", Config{Binary: "/configured/devin", LookupEnv: config(nil, nil).LookupEnv, ReadFile: config(nil, nil).ReadFile, Home: "/home/u"}, "/configured/devin"},
 		{"path", config(nil, nil), "/on/path/devin"},
 	}

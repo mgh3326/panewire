@@ -92,6 +92,23 @@ func TestPaceleverCacheEnvOverride(t *testing.T) {
 	}
 }
 
+func TestPanewireCacheOverrideWinsAndReadsLegacyFallback(t *testing.T) {
+	files := loginFiles()
+	files["/new/devin-free-limit.json"] = `{"records":{` + record(hostUserID("host-a", 1000), testNow.Add(time.Hour).Format(time.RFC3339), testNow.Format(time.RFC3339)) + `}}`
+	files["/old/devin-free-limit.json"] = `{"records":{}}`
+	got := LocalFree(config(files, map[string]string{
+		"PANEWIRE_CACHE":  "/new/cache.json",
+		"PACELEVER_CACHE": "/old/cache.json",
+	}))(testNow)
+	if got.State != shared.FreeExhausted {
+		t.Fatalf("PANEWIRE_CACHE precedence not followed: %+v", got)
+	}
+	legacy := LocalFree(config(files, map[string]string{"PACELEVER_CACHE": "/old/cache.json"}))(testNow)
+	if legacy.State != shared.FreeAvailable {
+		t.Fatalf("legacy cache fallback not read: %+v", legacy)
+	}
+}
+
 func TestObserveFreeLimitWritesAndClearsPrivateRecord(t *testing.T) {
 	now := testNow.UTC()
 	cache := filepath.Join(t.TempDir(), "cache")
@@ -111,7 +128,7 @@ func TestObserveFreeLimitWritesAndClearsPrivateRecord(t *testing.T) {
 	if err := ObserveFreeLimit(cfg, reset, "", "swe-2-high", "job:test", "", false, false); err != nil {
 		t.Fatal(err)
 	}
-	path := filepath.Join(cache, "pacelever", "devin-free-limit.json")
+	path := filepath.Join(cache, "panewire", "devin-free-limit.json")
 	info, err := os.Stat(path)
 	if err != nil || info.Mode().Perm() != 0o600 {
 		t.Fatalf("record mode/info = %v, %v; want 0600", info, err)
@@ -237,7 +254,7 @@ func TestConcurrentObserveFreeLimitPreservesBothAccounts(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	data, err := os.ReadFile(filepath.Join(cache, "pacelever", "devin-free-limit.json"))
+	data, err := os.ReadFile(filepath.Join(cache, "panewire", "devin-free-limit.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -263,7 +280,7 @@ func TestObserveFreeLimitSerializesReadModifyWrite(t *testing.T) {
 			return "", false
 		},
 	}
-	path := filepath.Join(cache, "pacelever", "devin-free-limit.json.lock")
+	path := filepath.Join(cache, "panewire", "devin-free-limit.json.lock")
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		t.Fatal(err)
 	}

@@ -41,8 +41,8 @@ func (q admissionQuota) Launch(ctx context.Context, r QuotaRequest) (Launch, err
 // stale catalog is refused as CLIQuota.Launch refuses it. No pacelever process
 // runs.
 //
-// pacelever's config.toml is loaded and validated as pacelever loads it
-// (pacelever_config.go), and its [bench] catalog_ttl_s and
+// panewire's config.toml is loaded and validated with the rules ported from
+// pacelever (launch_config.go); [bench] catalog_ttl_s and
 // catalog_stale_max_s set the catalog's freshness, as they do pacelever's.
 // The catalog is panewire's client and cache (catalog.go). A lookup a cached
 // catalog refuses reads handoffkeep once more before it refuses, so a rung
@@ -84,11 +84,14 @@ func (a *App) offlineLaunch(r QuotaRequest) (l Launch, found bool, err error) {
 	return l, true, err
 }
 
-// launchRequest is the request as pacelever's policy launch reads it.
-// pacelever reads the marker from PACELEVER_E6_ARM, which CLIQuota sets from
-// the request and a local spawn otherwise inherits.
+// launchRequest applies the request's marker, then the panewire environment
+// override and its retired pacelever name as fallback.
 func launchRequest(r QuotaRequest) admissionRequest {
-	return admissionRequest{Profile: r.Profile, Effort: r.Effort, Role: r.Role, Purpose: r.Purpose, OperatorRequest: r.OperatorRequest, RequestedBy: r.RequestedBy, E6Arm: strings.TrimSpace(firstNonempty(r.E6Arm, os.Getenv("PACELEVER_E6_ARM")))}
+	e6Arm := strings.TrimSpace(os.Getenv("PANEWIRE_E6_ARM"))
+	if e6Arm == "" {
+		e6Arm = os.Getenv("PACELEVER_E6_ARM")
+	}
+	return admissionRequest{Profile: r.Profile, Effort: r.Effort, Role: r.Role, Purpose: r.Purpose, OperatorRequest: r.OperatorRequest, RequestedBy: r.RequestedBy, E6Arm: strings.TrimSpace(firstNonempty(r.E6Arm, e6Arm))}
 }
 
 // decideLaunch resolves req against catalog. A refusal from a cached catalog

@@ -23,6 +23,7 @@ import (
 
 	"github.com/pelletier/go-toml/v2"
 
+	"github.com/mgh3326/panewire/internal/configpath"
 	"github.com/mgh3326/panewire/internal/quota"
 )
 
@@ -53,7 +54,7 @@ type Config struct {
 	// ReadFile reads the login, identity and settings files; nil is os.ReadFile.
 	ReadFile func(string) ([]byte, error)
 	// Binary is the configured devin executable, tried after the
-	// PACELEVER_DEVIN_BIN override and the settings file's path, before PATH.
+	// PANEWIRE_DEVIN_BIN override and the settings file's path, before PATH.
 	Binary string
 	// LookPath finds devin on PATH; nil is exec.LookPath.
 	LookPath func(string) (string, error)
@@ -178,10 +179,7 @@ func AccountFP(cfg Config) string {
 type settings struct{ orgID, bin string }
 
 func (c Config) settings() settings {
-	path := c.env("PACELEVER_CONFIG")
-	if path == "" {
-		path = filepath.Join(c.configBase(), "pacelever", "config.toml")
-	}
+	paths := configpath.Candidates(c.env, c.home(), "config.toml")
 	var file struct {
 		Pools struct {
 			Devin struct {
@@ -190,17 +188,27 @@ func (c Config) settings() settings {
 			} `toml:"devin"`
 		} `toml:"pools"`
 	}
-	body := c.readFile(path)
-	if body == nil || toml.Unmarshal(body, &file) != nil {
-		return settings{}
+	for _, path := range paths {
+		body, err := c.readFileErr(path)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil || toml.Unmarshal(body, &file) != nil {
+			return settings{}
+		}
+		return settings{orgID: strings.TrimSpace(file.Pools.Devin.OrgID), bin: strings.TrimSpace(file.Pools.Devin.Bin)}
 	}
-	return settings{orgID: strings.TrimSpace(file.Pools.Devin.OrgID), bin: strings.TrimSpace(file.Pools.Devin.Bin)}
+	return settings{}
 }
 
-// binary is the devin executable: PACELEVER_DEVIN_BIN, the settings file's
+// binary is the devin executable: PANEWIRE_DEVIN_BIN (PACELEVER_DEVIN_BIN
+// fallback), the settings file's
 // path, the configured one, then devin on PATH.
 func (c Config) binary(s settings) string {
-	explicit := c.env("PACELEVER_DEVIN_BIN")
+	explicit := c.env("PANEWIRE_DEVIN_BIN")
+	if explicit == "" {
+		explicit = c.env("PACELEVER_DEVIN_BIN")
+	}
 	if explicit == "" {
 		explicit = s.bin
 	}
