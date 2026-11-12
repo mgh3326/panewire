@@ -1330,6 +1330,9 @@ func (a *App) placeAuto(ctx context.Context, s Spawn, brief string) (bool, map[s
 			if res.note != "hub_launch_proof_failed" {
 				return res
 			}
+			if !s.autoSelected || s.Delegated {
+				return res
+			}
 			previous := s.Profile
 			pendingFallback = previous
 			seat, ok := a.Policy.Profiles[previous]
