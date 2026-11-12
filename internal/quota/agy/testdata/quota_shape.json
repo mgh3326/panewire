@@ -1,0 +1,153 @@
+{
+  "models": {
+    "chat_20706": {
+      "displayName": "",
+      "quotaInfo": {
+        "remainingFraction": 1,
+        "resetTime": null,
+        "window": ""
+      }
+    },
+    "chat_23310": {
+      "displayName": "",
+      "quotaInfo": {
+        "remainingFraction": 1,
+        "resetTime": null,
+        "window": ""
+      }
+    },
+    "claude-opus-4-6-thinking": {
+      "displayName": "Claude Opus 4.6 (Thinking)",
+      "quotaInfo": {
+        "remainingFraction": null,
+        "resetTime": "2026-11-12T08:12:53Z",
+        "window": ""
+      }
+    },
+    "claude-sonnet-4-6": {
+      "displayName": "Claude Sonnet 4.6 (Thinking)",
+      "quotaInfo": {
+        "remainingFraction": null,
+        "resetTime": "2026-11-12T08:12:53Z",
+        "window": ""
+      }
+    },
+    "gemini-2.5-flash": {
+      "displayName": "Gemini 3.5 Flash Lite",
+      "quotaInfo": {
+        "remainingFraction": 1,
+        "resetTime": "2026-11-12T08:24:02Z",
+        "window": ""
+      }
+    },
+    "gemini-2.5-flash-lite": {
+      "displayName": "Gemini 3.5 Flash Lite",
+      "quotaInfo": {
+        "remainingFraction": 1,
+        "resetTime": "2026-11-12T08:24:02Z",
+        "window": ""
+      }
+    },
+    "gemini-2.5-flash-thinking": {
+      "displayName": "Gemini 3.5 Flash Lite",
+      "quotaInfo": {
+        "remainingFraction": 1,
+        "resetTime": "2026-11-12T08:24:02Z",
+        "window": ""
+      }
+    },
+    "gemini-2.5-pro": {
+      "displayName": "Gemini 2.5 Pro",
+      "quotaInfo": {
+        "remainingFraction": 1,
+        "resetTime": "2026-11-12T08:24:02Z",
+        "window": ""
+      }
+    },
+    "gemini-3-flash": {
+      "displayName": "Gemini 3 Flash",
+      "quotaInfo": {
+        "remainingFraction": 1,
+        "resetTime": "2026-11-12T08:24:02Z",
+        "window": ""
+      }
+    },
+    "gemini-3.1-flash-image": {
+      "displayName": "Gemini 3.1 Flash Image",
+      "quotaInfo": {
+        "remainingFraction": 1,
+        "resetTime": "2026-11-12T08:24:02Z",
+        "window": ""
+      }
+    },
+    "gemini-3.1-flash-lite": {
+      "displayName": "Gemini 3.1 Flash Lite",
+      "quotaInfo": {
+        "remainingFraction": 1,
+        "resetTime": "2026-11-12T08:24:02Z",
+        "window": ""
+      }
+    },
+    "gemini-3.5-flash-lite": {
+      "displayName": "Gemini 3.5 Flash Lite",
+      "quotaInfo": {
+        "remainingFraction": 1,
+        "resetTime": "2026-11-12T08:24:02Z",
+        "window": ""
+      }
+    },
+    "gemini-3.8-flash-tiered": {
+      "displayName": "",
+      "quotaInfo": {
+        "remainingFraction": 1,
+        "resetTime": "2026-11-12T08:24:02Z",
+        "window": ""
+      }
+    },
+    "gpt-oss-120b-medium": {
+      "displayName": "GPT-OSS 120B (Medium)",
+      "quotaInfo": {
+        "remainingFraction": null,
+        "resetTime": "2026-11-12T08:12:53Z",
+        "window": ""
+      }
+    },
+    "tab_flash_lite_preview": {
+      "displayName": "",
+      "quotaInfo": {
+        "remainingFraction": 1,
+        "resetTime": null,
+        "window": ""
+      }
+    },
+    "tab_jump_flash_lite_preview": {
+      "displayName": "",
+      "quotaInfo": {
+        "remainingFraction": 1,
+        "resetTime": null,
+        "window": ""
+      }
+    }
+  },
+  "summary": {
+    "groups": [
+      {
+        "buckets": [
+          {
+            "bucketId": "3p-weekly",
+            "remainingFraction": 0.4817188,
+            "resetTime": "2026-11-19T03:12:53Z",
+            "window": "weekly"
+          },
+          {
+            "bucketId": "3p-5h",
+            "remainingFraction": 0,
+            "resetTime": "2026-11-12T08:12:53Z",
+            "window": "5h"
+          }
+        ],
+        "displayName": "Claude and GPT models"
+      }
+    ]
+  }
+}
