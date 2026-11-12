@@ -117,6 +117,9 @@ type PoolView struct {
 	// the strictest group's name on the account view of a group-only reading.
 	// Empty for an account-scoped reading and for a pool view built elsewhere.
 	Group string
+	// Shortest is the view's shortest window, the one a job's expected hours
+	// must fit inside (headroom key, select.go); nil when no window is known.
+	Shortest *windowRoom
 }
 
 // forRung is the view a catalog rung ranks and is blocked on. A rung that maps

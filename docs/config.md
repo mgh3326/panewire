@@ -795,6 +795,23 @@ Both keys live in the pool-order policy under `"waste_risk": {...}`; absent
 keys take the defaults, and `panewire simulate --policy`/`--policy-set` try
 other values before the policy is changed.
 
+**Headroom for a known job length** (`plan --expected DURATION`, or the task's
+`--expected` on spawn, e.g. `6h` or `2d`). After the band order and before
+waste urgency, a subscription candidate whose shortest in-view window fits the
+job ranks ahead of one that does not. Nothing is refused: the key only orders.
+A window fits when its remaining share is at least `burn_pct_per_h × hours`,
+or when its reset comes within half the job, so a window that resets mid-job
+counts as room. Without an expected duration the key is off and the order is
+unchanged. An unreadable task `--expected` value turns the key off on spawn
+(degraded note `expected_unreadable`); `plan` rejects it with a usage error.
+
+Burn rates come from `"burn": {"short_pct_per_h": 15, "long_pct_per_h": 2}` in
+the pool-order policy. Windows of a day or less use the short rate, longer
+windows the long rate, and a window of unknown length uses the short rate.
+These are defaults, not measurements: no burn history is kept yet, so the
+per-pool values in effect are UNVERIFIED until measured burn lands (hk 4327).
+Waste-first and host-first placement are not changed by this key.
+
 Subscription candidates additionally need a readable `ok` nonstale spend
 status. The named credit pools, `anthropic-api` and `openai-api`, remain
 admissible without a balance observation. An operator pool class of `exclude`

@@ -535,7 +535,7 @@ spent instead, next to the live choice. Live placement is unchanged.
   account the live run bound to a host. A candidate joins at the first usable
   host whose walk ranks it in pass 1, judged with that host's own credit-pacing
   flag (T2997), not the selection-wide one. They are sorted by the live comparator
-  (`sortSelCands`: waste-risk pools first, then band, grade, urgency and the
+  (`sortSelCands`: waste-risk pools first, then band, the headroom fit for a known job length (`plan --expected`, config.md), grade, urgency and the
   rest), the same comparison the live path uses. **Pass 2 is not modelled.**
   Pass 2 is the paced-pool band the live walk tries only when pass 1 chose
   nothing. A live choice that came from pass 2 is recorded with `pass: 2`.
