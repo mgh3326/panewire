@@ -661,3 +661,23 @@ func TestHerdrLifecycleEventDecode(t *testing.T) {
 		t.Fatal("lifecycle kind classification wrong")
 	}
 }
+
+// The object-valued envelope form carries the whole payload under "event"
+// with no "data" member; lifecycle fields must decode from it exactly as
+// they do from the string form's data object.
+func TestHerdrLifecycleEventDecodeObjectForm(t *testing.T) {
+	ev, ok := decodeHerdrEvent([]byte(`{"event":{"type":"pane_agent_detected","pane_id":"p9","workspace_id":"w9","agent":"claude","released":false}}`))
+	if !ok || ev.Kind != "pane_agent_detected" || ev.PaneID != "p9" || string(ev.Agent) != `"claude"` || ev.Released {
+		t.Fatalf("object-form agent_detected decode=%+v ok=%v", ev, ok)
+	}
+
+	ev, ok = decodeHerdrEvent([]byte(`{"event":{"type":"pane_agent_detected","pane_id":"p9","workspace_id":"w9","agent":"claude","released":true,"final_status":"done"}}`))
+	if !ok || string(ev.Agent) != `"claude"` || !ev.Released {
+		t.Fatalf("object-form released decode=%+v ok=%v", ev, ok)
+	}
+
+	ev, ok = decodeHerdrEvent([]byte(`{"event":{"type":"pane_created","pane":{"pane_id":"p9","workspace_id":"w9","tab_id":"t9"}}}`))
+	if !ok || ev.Kind != "pane_created" || ev.PaneID != "p9" || ev.WorkspaceID != "w9" {
+		t.Fatalf("object-form pane_created decode=%+v ok=%v", ev, ok)
+	}
+}
