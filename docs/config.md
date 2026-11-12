@@ -1070,9 +1070,9 @@ Consult grade is a floor on the rung, not the seat grade. The floor is one grade
 Within the floor:
 
 - A rung graded `unrated` is never chosen and never asks its quota gate (`grade_unrated`).
-- A rung below the floor, or whose launch rung is absent or below it, is dropped (`grade_insufficient`).
+- A row is dropped (`grade_insufficient`) when the rung it launches at is below the floor. That rung is the row's own effort; a rung-less row launches at its profile's default effort.
 - `--builder-family F` on `plan` or `resolve` drops consult rungs of family `F` (`family_excluded`). With no family, nothing is excluded and the stamp records `unknown`.
-- If no rung passes at the floor but a below-floor rung passes every other rule, consult retries once at the asker's own grade and stamps `fallback: no_rung_at_floor`. Unrated, absent-rung, and family-excluded rungs never trigger the retry. A session without a task grade never retries.
+- If no rung passes at the floor but a below-floor rung passes every other rule, consult retries once at the asker's own grade and stamps `fallback: no_rung_at_floor`. A below-floor rung on a cooling pool counts as such a rung. Unrated, absent-rung, and family-excluded rungs never trigger the retry. A session without a task grade never retries.
 
 The selection record carries a `consult` object with `asker_grade`, `asker_family`, `grade_source` (`flag`, `task`, or `without_task`), `floor`, `used_floor`, and `fallback`. `resolve --role consult` prints `floor=<G>` on its text line.
 
