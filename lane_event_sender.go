@@ -48,22 +48,28 @@ func (peer *hubClientConnection) relayWire(event hubClientEvent) any {
 // machine (a hub notice, HTTP ingress, a replay), pane (an older node) or lane
 // is never a worker's.
 func (h *HubServer) laneEventFromWorker(machine, pane, lane string) bool {
+	return h.laneEventWorkerJob(machine, pane, lane) != ""
+}
+
+// laneEventWorkerJob is the id of the live worker job laneEventFromWorker
+// matched, or "" when the event is no worker's of lane.
+func (h *HubServer) laneEventWorkerJob(machine, pane, lane string) string {
 	if machine == "" || pane == "" || lane == "" {
-		return false
+		return ""
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	record := h.nodes[machine]
 	if record == nil {
-		return false
+		return ""
 	}
 	for id, active := range record.activeJobs {
 		if active.Pane != pane {
 			continue
 		}
 		if job := h.jobs[id]; job != nil && !job.Completed && !job.Orphaned && job.Node == machine && job.Pane == pane && job.Role == "worker" && job.OwnerLane == lane {
-			return true
+			return id
 		}
 	}
-	return false
+	return ""
 }

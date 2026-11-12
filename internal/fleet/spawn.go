@@ -263,19 +263,46 @@ func (a *App) taskPrecheck(ctx context.Context, s Spawn) (client.Task, bool, err
 	if !hkTaskIDIs(t, s.Task) {
 		return t, false, fail(exitConfig, "task response ID mismatch")
 	}
+	return t, false, taskTakesSpawn(t, s)
+}
+
+// taskTakesSpawn refuses a spawn the task cannot take: it is in a state that
+// ends or parks the work, or is bound to another job or claimant. An
+// inherited spawn and an unlinked reviewer take any task.
+func taskTakesSpawn(t client.Task, s Spawn) error {
 	if s.Inherited != "" || s.unlinkedReviewer() {
-		return t, false, nil
+		return nil
 	}
 	if slices.Contains([]string{"merged", "dropped", "hold", "needs_decision"}, t.State) {
-		return t, false, fail(exitUsage, "task unavailable: %s", t.State)
+		return fail(exitUsage, "task unavailable: %s", t.State)
 	}
 	if j := t.Refs.JobID; j != "" && j != s.Job {
-		return t, false, fail(exitUsage, "task bound to another job")
+		return fail(exitUsage, "task bound to another job")
 	}
 	if t.Refs.JobID == "" && t.ClaimedBy != "" && t.ClaimedBy != s.Label {
-		return t, false, fail(exitUsage, "task has another claimant without a job binding")
+		return fail(exitUsage, "task has another claimant without a job binding")
 	}
-	return t, false, nil
+	return nil
+}
+
+// taskMarkerGrade is the grade the task title's (grade X, Tn) marker names,
+// or s.Grade when the spawn carries one. A marker whose scale differs from
+// --t, or no marker where one is required, refuses the spawn. A bypassed
+// precheck and a consult need none.
+func taskMarkerGrade(t client.Task, s Spawn, bypassed bool) (string, error) {
+	if s.Grade != "" {
+		return s.Grade, nil
+	}
+	if m := taskMarker.FindStringSubmatch(t.Title); m != nil {
+		if strings.ToUpper(m[2]) != s.T {
+			return "", fail(exitSeatRefused, "task scale does not match --t")
+		}
+		return strings.ToUpper(m[1]), nil
+	}
+	if !bypassed && !topRoutingRole(s.RoutingRole) {
+		return "", fail(exitSeatRefused, "task title lacks (grade X, Tn marker")
+	}
+	return "", nil
 }
 
 // replacesParent reports whether this inherited spawn can take the parent's
@@ -671,16 +698,9 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 	if e != nil {
 		return e
 	}
-	grade := s.Grade
-	if s.Grade == "" {
-		if m := taskMarker.FindStringSubmatch(task.Title); m != nil {
-			grade = strings.ToUpper(m[1])
-			if strings.ToUpper(m[2]) != s.T {
-				return fail(exitSeatRefused, "task scale does not match --t")
-			}
-		} else if !bypassed && !topRoutingRole(s.RoutingRole) {
-			return fail(exitSeatRefused, "task title lacks (grade X, Tn marker")
-		}
+	grade, e := taskMarkerGrade(task, s, bypassed)
+	if e != nil {
+		return e
 	}
 	s.TaskGrade = grade
 	if s.Sel != nil && s.Sel["requested"] == nil {

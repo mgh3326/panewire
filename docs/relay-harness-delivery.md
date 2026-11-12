@@ -226,6 +226,35 @@ The internal verdict `maybe_in_pane` is not the terminal inbox reason.
 and no text was sent. `delivery_uncertain_check_pane` means delivery could not
 be proven; inspect the pane before resending. Both appear in inbox status.
 
+hk 4270 (decision 152) changes who hears and when; the rest of this section
+describes the notice itself. A drop is no longer told to the design lane at
+once:
+
+- **Retry.** A row dropped as `pane_read_failed` or `working_wait_expired`
+  typed nothing, so after 2 minutes (`designQuietTimings.unconfirmedRetryAfter`)
+  the hub delivers it again through the row's one labelled replay
+  ([#1002](r27-busy-relay.md)); the text starts `[retry - first sent <KST time>
+  - the first delivery could not be confirmed]`. A row that may already be in
+  the pane (`maybe_in_pane`, `delivery_uncertain_check_pane`,
+  `inject_failed_max_attempts`) is never retyped by the retry.
+- **One notice per host fault.** A pane that stayed busy (`working_wait_expired`)
+  is no fault of its host and sends none. The first other drop for a (node, reason) pair sends
+  `panewire-design` an `automation-failed` event, `[host fault] machine=… reason=…`,
+  with producer id `host-fault-<machine>-<reason>-<unix time>`. Further drops
+  for the pair inside 30 minutes are folded; the window's end sends one
+  summary that names every folded row (up to 40 ids, then a count), and the
+  next drop opens a new fault. Both are ordinary inbox items, unread until
+  `panewire inbox ack`.
+- **The repository's lane only if the row stays unconfirmed.** The notice below
+  goes to the worker's design lane 15 minutes after the first drop
+  (`unconfirmedUnreadAfter`) and only if no `relay.delivered` confirmed the row
+  since, the retry's copy included. A retry that dropped too is still
+  unconfirmed, so it is told. The wait is memory only: after a hub restart the
+  startup replay gives every marked row its one labelled replay.
+
+The durable row stays in hk undelivered until the pane confirms it, so no
+notice carries information the row does not.
+
 When a node drops an event as `inject_failed_max_attempts`,
 `maybe_in_pane`, `pane_read_failed`, `delivery_uncertain_check_pane` or `working_wait_expired`, the hub tells the job's design lane once. A handoffkeep outage
 while the hub reads the row or writes the escalation is retried (2 s, 10 s,

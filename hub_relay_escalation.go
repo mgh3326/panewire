@@ -3,6 +3,7 @@ package panewire
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -87,18 +88,40 @@ func escalatesWhenUnconfirmed(record handoffkeepRelayEvent) bool {
 		!chatRelayEventPattern.MatchString(record.EventID)
 }
 
-// escalateUnconfirmedRelay sends the one escalation for a relay row the node
-// dropped as unconfirmed. It runs after the drop was consumed, so the held
-// projection and ack window are already clear. A row the pane already confirmed,
-// a row escalatesWhenUnconfirmed refuses, and a lane with no design lane to
-// tell are skipped. A transient handoffkeep failure, reading the row or writing
-// the escalation, is retried on unconfirmedEscalationBackoff until the
-// escalation is durable: the durable id keeps the retries to one escalation.
+// escalateUnconfirmedRelay handles a relay row the node dropped as
+// unconfirmed. It runs after the drop was consumed, so the held projection and
+// ack window are already clear. Three things follow (hk 4270, decision 152;
+// hub_unconfirmed_fault.go): the row is retried where nothing was typed, the
+// host fault lane hears once per (machine, reason) window, and the worker's
+// design lane is told only if the row is still unconfirmed after
+// designQuietTimings.unconfirmedUnreadAfter. A zero unconfirmedUnreadAfter
+// tells the design lane at once, as before.
 func (h *HubServer) escalateUnconfirmedRelay(machine string, dropped relayDroppedPayload) {
-	h.escalateUnconfirmedRelayAttempt(machine, dropped, 0)
+	if !relayDroppedIsUnconfirmed(dropped.Reason) || dropped.OriginalEventID < 1 || dropped.Lane == "" || h.handoffkeep == nil {
+		return
+	}
+	first := h.noteUnconfirmedRow(machine, dropped)
+	h.noteHostFault(machine, dropped)
+	if !first {
+		return // the retried copy dropped too; the unread timer already runs
+	}
+	h.scheduleUnconfirmedRetry(machine, dropped)
+	if h.quiet.timings.unconfirmedUnreadAfter <= 0 {
+		h.escalateUnconfirmedRelayAttempt(machine, dropped, 0, false)
+		return
+	}
+	h.scheduleUnreadEscalation(machine, dropped)
 }
 
-func (h *HubServer) escalateUnconfirmedRelayAttempt(machine string, dropped relayDroppedPayload, attempt int) {
+// escalateUnconfirmedRelayAttempt sends the one escalation to the worker's
+// design lane. A row the pane already confirmed, a row
+// escalatesWhenUnconfirmed refuses, and a lane with no design lane to tell are
+// skipped. A transient handoffkeep failure, reading the row or writing the
+// escalation, is retried on unconfirmedEscalationBackoff until the escalation
+// is durable: the durable id keeps the retries to one escalation. unproven is
+// set for a row a retry already retired: hk then reads it as delivered, and
+// only a confirmation (confirmUnconfirmedRow) clears it.
+func (h *HubServer) escalateUnconfirmedRelayAttempt(machine string, dropped relayDroppedPayload, attempt int, unproven bool) {
 	if !relayDroppedIsUnconfirmed(dropped.Reason) || dropped.OriginalEventID < 1 || dropped.Lane == "" || h.handoffkeep == nil {
 		return
 	}
@@ -113,7 +136,7 @@ func (h *HubServer) escalateUnconfirmedRelayAttempt(machine string, dropped rela
 			return
 		}
 		h.logger.Warn("relay unconfirmed escalation will retry", "event_id", dropped.OriginalEventID, "lane", dropped.Lane, "why", why, "attempt", attempt+1)
-		time.AfterFunc(unconfirmedEscalationBackoff[attempt], func() { h.escalateUnconfirmedRelayAttempt(machine, dropped, attempt+1) })
+		time.AfterFunc(unconfirmedEscalationBackoff[attempt], func() { h.escalateUnconfirmedRelayAttempt(machine, dropped, attempt+1, unproven) })
 	}
 	ctx := context.Background()
 	record, found, err := h.handoffkeep.relayEvent(ctx, dropped.OriginalEventID)
@@ -121,7 +144,7 @@ func (h *HubServer) escalateUnconfirmedRelayAttempt(machine string, dropped rela
 		retry("row_read_failed")
 		return
 	}
-	if !found || record.DeliveredAt != "" || !escalatesWhenUnconfirmed(record) {
+	if !found || (record.DeliveredAt != "" && !unproven) || !escalatesWhenUnconfirmed(record) {
 		return
 	}
 	if design == "" {
@@ -293,10 +316,16 @@ func (n *unconfirmedNoticeWindows) window(design, worker string) *unconfirmedNot
 // folded since, row itself excluded, from the earliest fold time. The row of
 // the stored notice is posted again: the durable idempotency answers it.
 func (n *unconfirmedNoticeWindows) admit(design, worker string, row int64, now time.Time) (note unconfirmedNoticeNote, folded int, send bool) {
+	return n.admitWithin(design, worker, row, now, unconfirmedNoticeSpacing, "for this lane")
+}
+
+// admitWithin is admit with the window's length and the scope its note
+// names ("for this lane", "on this host").
+func (n *unconfirmedNoticeWindows) admitWithin(design, worker string, row int64, now time.Time, spacing time.Duration, scope string) (note unconfirmedNoticeNote, folded int, send bool) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	w := n.window(design, worker)
-	if !w.told.IsZero() && now.Sub(w.told) < unconfirmedNoticeSpacing && row != w.row {
+	if !w.told.IsZero() && now.Sub(w.told) < spacing && row != w.row {
 		w.fold(row, now)
 		return note, len(w.folded) + w.over, false
 	}
@@ -312,9 +341,33 @@ func (n *unconfirmedNoticeWindows) admit(design, worker string, row int64, now t
 		}
 	}
 	if count := len(note.rows) - 1 + note.over; count > 0 {
-		note.text = fmt.Sprintf(" (+%d more unconfirmed for this lane since %s UTC)", count, since.UTC().Format("15:04"))
+		note.text = fmt.Sprintf(" (+%d more unconfirmed %s since %s UTC)", count, scope, since.UTC().Format("15:04"))
 	}
 	return note, 0, true
+}
+
+// closeWindow ends one window: it returns the rows folded and the count past
+// the bound, with the earliest fold time, and forgets the window so the next
+// drop opens a new one.
+func (n *unconfirmedNoticeWindows) closeWindow(design, worker string) (rows []int64, over int, since time.Time) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	key := [2]string{design, worker}
+	w := n.byLanes[key]
+	if w == nil {
+		return nil, 0, time.Time{}
+	}
+	since = w.overAt
+	for id, at := range w.folded {
+		rows = append(rows, id)
+		if since.IsZero() || at.Before(since) {
+			since = at
+		}
+	}
+	slices.Sort(rows)
+	over = w.over
+	delete(n.byLanes, key)
+	return rows, over, since
 }
 
 // record notes that the store accepted row's notice: it holds the window from

@@ -156,6 +156,8 @@ func t3431Start(t *testing.T, jobs fleet.JobStore) *t3431Rig {
 	}
 	t.Cleanup(func() { hub.Close() })
 	hub.relayControl.relayAckTimeout = time.Hour
+	// This file pins the escalation itself; the hk 4270 deferral has its own tests.
+	hub.quiet.timings = designQuietTimings{}
 	hub.spawnNewApp = func(out, errout io.Writer) (*fleet.App, error) {
 		return &fleet.App{JobStore: jobs, Out: out, Err: errout}, nil
 	}

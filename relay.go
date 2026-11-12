@@ -967,6 +967,7 @@ func (h *HubServer) markRelayEventDelivered(pending relayPending) bool {
 		}
 		h.mu.Unlock()
 	}
+	h.confirmUnconfirmedRow(pending.eventID)
 	// Cleanup belongs to the successful relay.delivered acknowledgement, not
 	// to handoffkeep. Pre-R20 deployments still need bounded local state.
 	h.mu.Lock()
