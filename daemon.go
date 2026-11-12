@@ -61,7 +61,12 @@ type Daemon struct {
 	shutdownDone chan struct{}
 	resub        chan struct{}
 	subscribed   map[string]bool
-	mu           sync.Mutex
+	// lifecycleResubMin and lifecycleSnapshotWait are the debounce floors for
+	// lifecycle-triggered stream cycles and idle-wake snapshots. Zero selects
+	// the defaults; tests shrink them.
+	lifecycleResubMin     time.Duration
+	lifecycleSnapshotWait time.Duration
+	mu                    sync.Mutex
 }
 
 func NewDaemon(cfg Config) *Daemon {
@@ -93,7 +98,7 @@ func (d *Daemon) Start(ctx context.Context) error {
 	d.setCapabilities(guard)
 	_ = d.RecordSchemaGuard(ctx, guard, "startup")
 	if guard.Events && d.cfg.HerdrSocket != "" {
-		if c, err := NewHerdrClient(d.cfg.HerdrSocket); err == nil {
+		if c, err := newHerdrClient(d.cfg.HerdrSocket, d.cfg.Logger); err == nil {
 			d.setHerdrClient(c)
 		} else {
 			d.cfg.Logger.Warn("herdr unavailable", "error", err)
@@ -443,7 +448,7 @@ func (d *Daemon) eventLoop(ctx context.Context) {
 		}
 		client := d.herdrClient()
 		if client == nil {
-			connected, err := NewHerdrClient(d.cfg.HerdrSocket)
+			connected, err := newHerdrClient(d.cfg.HerdrSocket, d.cfg.Logger)
 			if err != nil {
 				if !waitDaemonRetry(ctx) {
 					return
@@ -476,6 +481,11 @@ func (d *Daemon) eventLoop(ctx context.Context) {
 			d.idleWake.Tick(ctx, time.Now().UTC())
 		}
 		streamOpen := true
+		streamCycleAt := time.Now()
+		var resubTimer *time.Timer
+		var resubDue <-chan time.Time
+		var snapTimer *time.Timer
+		var snapDue <-chan time.Time
 		for streamOpen {
 			select {
 			case <-ctx.Done():
@@ -500,6 +510,30 @@ func (d *Daemon) eventLoop(ctx context.Context) {
 				if d.stall != nil && (ev.Kind == "pane.output_matched" || ev.Kind == "pane_output_changed") {
 					d.stall.Wake(ev.PaneID)
 				}
+				// Lifecycle events keep the covered set honest and can pull a
+				// stream cycle forward: pane_created is recorded only because
+				// herdr detects the agent a moment later, and only
+				// pane_agent_detected proves one exists to subscribe to.
+				switch {
+				case isPaneDepartureEvent(ev.Kind):
+					d.dropSubscribedPane(ev.PaneID)
+				case isAgentDetectedEvent(ev.Kind) && agentDetectionArrival(ev) && ev.PaneID != "" && !d.subscribedPane(ev.PaneID):
+					// A pane outside the covered set just gained an agent:
+					// cycle the stream so Subscribe's fresh agent.list adds its
+					// per-pane subscriptions. Triggers inside the minimum
+					// interval coalesce into one deferred cycle at the
+					// interval's end — never dropped, never thundering.
+					if wait := streamCycleAt.Add(d.lifecycleResubInterval()).Sub(time.Now()); wait <= 0 {
+						streamOpen = false
+					} else if resubDue == nil {
+						resubTimer = time.NewTimer(wait)
+						resubDue = resubTimer.C
+					}
+				}
+				if isPaneLifecycleEvent(ev.Kind) && d.idleWake != nil && snapDue == nil {
+					snapTimer = time.NewTimer(d.lifecycleSnapshotDelay())
+					snapDue = snapTimer.C
+				}
 			case at := <-settle:
 				d.idleWake.Tick(ctx, at.UTC())
 			case <-poll:
@@ -509,7 +543,20 @@ func (d *Daemon) eventLoop(ctx context.Context) {
 				// Cycling the stream re-runs Subscribe against the fresh
 				// agent.list, which is also the reconnect coverage proof.
 				streamOpen = false
+			case <-resubDue:
+				resubDue = nil
+				streamOpen = false
+			case <-snapDue:
+				snapDue = nil
+				snapTimer.Stop()
+				d.observeIdleWakeSnapshot(ctx, client)
 			}
+		}
+		if resubTimer != nil {
+			resubTimer.Stop()
+		}
+		if snapTimer != nil {
+			snapTimer.Stop()
 		}
 		d.clearHerdrClient(client)
 		if !waitDaemonRetry(ctx) {
@@ -615,6 +662,55 @@ func (d *Daemon) subscribedSet() (map[string]bool, time.Time) {
 	return set, time.Now().UTC()
 }
 
+func (d *Daemon) subscribedPane(paneID string) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.subscribed[paneID]
+}
+
+// dropSubscribedPane removes a pane the stream no longer has reason to watch —
+// herdr reported it closed or exited — without touching the stream itself.
+func (d *Daemon) dropSubscribedPane(paneID string) {
+	if paneID == "" {
+		return
+	}
+	d.mu.Lock()
+	if d.subscribed != nil {
+		delete(d.subscribed, paneID)
+	}
+	d.mu.Unlock()
+}
+
+const (
+	defaultLifecycleResubMinInterval = 2 * time.Second
+	defaultLifecycleSnapshotWait     = 200 * time.Millisecond
+)
+
+func (d *Daemon) lifecycleResubInterval() time.Duration {
+	if d.lifecycleResubMin > 0 {
+		return d.lifecycleResubMin
+	}
+	return defaultLifecycleResubMinInterval
+}
+
+func (d *Daemon) lifecycleSnapshotDelay() time.Duration {
+	if d.lifecycleSnapshotWait > 0 {
+		return d.lifecycleSnapshotWait
+	}
+	return defaultLifecycleSnapshotWait
+}
+
+// agentDetectionArrival reports whether pane_agent_detected names a live,
+// unreleased agent — the only lifecycle event that proves a new pane needs
+// per-pane subscriptions. A null agent or released flag is a departure.
+func agentDetectionArrival(ev HerdrEvent) bool {
+	if ev.Released {
+		return false
+	}
+	agent := bytes.TrimSpace(ev.Agent)
+	return len(agent) > 0 && !bytes.Equal(agent, []byte("null"))
+}
+
 func (d *Daemon) idleWakeRetryLoop(ctx context.Context) {
 	d.idleWake.RetrySettled(ctx, time.Now().UTC())
 	ticker := time.NewTicker(time.Second)
@@ -642,7 +738,8 @@ func (d *Daemon) observeIdleWakeSnapshot(ctx context.Context, client *HerdrClien
 }
 func knownHerdrEvent(kind string) bool {
 	switch kind {
-	case "pane.agent_status_changed", "pane.output_matched", "pane.scroll_changed", "pane_output_changed", "pane_agent_status_changed", "pane_scroll_changed":
+	case "pane.agent_status_changed", "pane.output_matched", "pane.scroll_changed", "pane_output_changed", "pane_agent_status_changed", "pane_scroll_changed",
+		"pane.created", "pane_created", "pane.closed", "pane_closed", "pane.exited", "pane_exited", "pane.agent_detected", "pane_agent_detected":
 		return true
 	}
 	return false
