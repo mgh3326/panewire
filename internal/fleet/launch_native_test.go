@@ -19,6 +19,13 @@ var launchNow = time.Date(2026, 11, 8, 3, 0, 0, 0, time.UTC)
 
 func awaitShadowIdle(t *testing.T) { t.Helper() }
 
+func isolateConfigHome(t *testing.T) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+}
+
 func cacheLaunchRows(t *testing.T, rows []CatalogRow, now time.Time) {
 	t.Helper()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -44,6 +51,7 @@ func cacheLaunchRows(t *testing.T, rows []CatalogRow, now time.Time) {
 // shadow comparison reads, for a handoffkeep that must not be asked.
 func launchApp(t *testing.T, mode string, rows []CatalogRow, paceleverLaunch *Result) (*App, *fakeRunner, *[]fleetevent.Event) {
 	t.Helper()
+	isolateConfigHome(t)
 	t.Setenv("PACELEVER_CONFIG", "")
 	t.Setenv("PACELEVER_E6_ARM", "")
 	runner := &fakeRunner{Do: func(c Command) Result {

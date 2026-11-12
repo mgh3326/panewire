@@ -54,6 +54,8 @@ type Config struct {
 	LookupEnv func(string) (string, bool)
 	// ReadFile reads the login, identity and settings files; nil is os.ReadFile.
 	ReadFile func(string) ([]byte, error)
+	// ReplaceFile publishes a cache file atomically; nil uses the durable helper.
+	ReplaceFile func(string, string, []byte, os.FileMode) error
 	// Binary is the configured devin executable, tried after the
 	// PANEWIRE_DEVIN_BIN override and the settings file's path, before PATH.
 	Binary string

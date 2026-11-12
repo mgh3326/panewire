@@ -35,6 +35,7 @@ const gateReasonCatalog = `[{"profile":"sonnet","effort":"high","model_id":"clau
 // An accepted host answers the remote spawn.
 func gateReasonFixture(t *testing.T, weekly float64) (*App, Spawn, *gateCountQuota, *fakeRunner) {
 	t.Helper()
+	isolateConfigHome(t)
 	t.Setenv("PACELEVER_CONFIG", "")
 	src := &fakePlacementSource{hosts: []HostView{
 		{Name: "first", Connected: true, LoadRatio: ptrF(0.1)},

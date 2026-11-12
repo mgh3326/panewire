@@ -1,6 +1,7 @@
 package devin
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -30,6 +31,7 @@ type limitRecord struct {
 	Rung       string `json:"rung,omitempty"`
 	Source     string `json:"source,omitempty"`
 	Unparsed   bool   `json:"unparsed,omitempty"`
+	Damaged    bool   `json:"damaged,omitempty"`
 }
 
 const limitRecordSchema = "pacelever.devin-free-limit.v1"
@@ -172,8 +174,15 @@ func ObserveFreeLimit(cfg Config, resetAt, observedAt, rung, source, accountKey 
 	if err != nil {
 		return fmt.Errorf("%w: devin 쿼터 캐시를 인코딩할 수 없습니다", ErrFreeLimitStore)
 	}
-	if err := durable.ReplaceFileAtomically(path, ".devin-free-limit-*", append(data, '\n'), 0o600); err != nil {
+	replace := cfg.ReplaceFile
+	if replace == nil {
+		replace = durable.ReplaceFileAtomically
+	}
+	if err := replace(path, ".devin-free-limit-*", append(data, '\n'), 0o600); err != nil {
 		return fmt.Errorf("%w: devin 쿼터 observation을 저장할 수 없습니다", ErrFreeLimitStore)
+	}
+	if err := verifyLimitFile(cfg, path, records); err != nil {
+		return fmt.Errorf("%w: devin 쿼터 observation을 저장 후 확인할 수 없습니다", ErrFreeLimitStore)
 	}
 	for _, candidate := range legacyPaths {
 		if err := removeLimitFile(candidate); err != nil {
@@ -181,6 +190,44 @@ func ObserveFreeLimit(cfg Config, resetAt, observedAt, rung, source, accountKey 
 		}
 	}
 	return nil
+}
+
+func verifyLimitFile(cfg Config, path string, expected map[string]json.RawMessage) error {
+	data, err := cfg.readFileErr(path)
+	if err != nil {
+		return err
+	}
+	if cfg.ReadFile == nil {
+		info, statErr := os.Lstat(path)
+		if statErr != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 {
+			return ErrFreeLimitStore
+		}
+	}
+	var document struct {
+		Schema  string                      `json:"schema"`
+		Records *map[string]json.RawMessage `json:"records"`
+	}
+	if !decodeJSONObject(data, &document) || document.Schema != limitRecordSchema || document.Records == nil || !sameLimitRecords(expected, *document.Records) {
+		return ErrFreeLimitStore
+	}
+	return nil
+}
+
+func sameLimitRecords(left, right map[string]json.RawMessage) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for id, leftRaw := range left {
+		rightRaw, ok := right[id]
+		if !ok {
+			return false
+		}
+		var leftJSON, rightJSON bytes.Buffer
+		if json.Compact(&leftJSON, leftRaw) != nil || json.Compact(&rightJSON, rightRaw) != nil || !bytes.Equal(leftJSON.Bytes(), rightJSON.Bytes()) {
+			return false
+		}
+	}
+	return true
 }
 
 func removeLimitFile(path string) error {
@@ -294,24 +341,29 @@ func readLimitRecords(c Config) (map[string]json.RawMessage, bool, error) {
 
 func conservativeLimitRecord(a, b json.RawMessage) json.RawMessage {
 	var left, right limitRecord
-	if json.Unmarshal(a, &left) != nil {
-		return a
+	leftOKJSON := json.Unmarshal(a, &left) == nil
+	if !leftOKJSON {
+		left = limitRecord{}
 	}
-	if json.Unmarshal(b, &right) != nil {
-		return b
+	rightOKJSON := json.Unmarshal(b, &right) == nil
+	if !rightOKJSON {
+		right = limitRecord{}
 	}
 	leftReset, leftOK := left.effectiveReset()
 	rightReset, rightOK := right.effectiveReset()
-	if !leftOK {
+	merged := left
+	switch {
+	case !leftOK && rightOK:
+		merged = right
+	case leftOK && rightOK && rightReset.After(leftReset):
+		merged = right
+	}
+	merged.Damaged = left.Damaged || right.Damaged || !leftOKJSON || !rightOKJSON || !leftOK || !rightOK
+	encoded, err := json.Marshal(merged)
+	if err != nil {
 		return a
 	}
-	if !rightOK {
-		return b
-	}
-	if rightReset.After(leftReset) {
-		return b
-	}
-	return a
+	return encoded
 }
 
 func readLimitFile(c Config) ([]byte, error) {
@@ -356,6 +408,9 @@ func LocalFree(cfg Config) func(now time.Time) *shared.FreeBucket {
 			record, ok := records[id]
 			if !ok {
 				continue
+			}
+			if record.Damaged {
+				unknown = true
 			}
 			reset, ok := record.effectiveReset()
 			switch {

@@ -1,9 +1,11 @@
 package devin
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -238,6 +240,112 @@ func TestLocalFreeKeepsLongestHoldAcrossBothCacheFiles(t *testing.T) {
 	got := LocalFree(cfg)(now)
 	if got.State != shared.FreeExhausted || got.ResetsAt == nil || !got.ResetsAt.Equal(now.Add(3*time.Hour)) {
 		t.Fatalf("merged cache hold = %+v", got)
+	}
+}
+
+func TestObservePreservesKnownHoldAndDamagedCopyAcrossCacheMigration(t *testing.T) {
+	for _, damaged := range []string{`{}`, `"not a record"`} {
+		t.Run(damaged, func(t *testing.T) {
+			now := testNow.UTC()
+			cache := t.TempDir()
+			cfg := Config{
+				Home:     t.TempDir(),
+				Now:      func() time.Time { return now },
+				Hostname: func() (string, error) { return "host-a", nil },
+				UID:      func() int { return 1000 },
+				LookupEnv: func(name string) (string, bool) {
+					if name == "XDG_CACHE_HOME" {
+						return cache, true
+					}
+					return "", false
+				},
+			}
+			id := hostUserID("host-a", 1000)
+			primaryPath := filepath.Join(cache, "panewire", "devin-free-limit.json")
+			legacyPath := filepath.Join(cache, "pacelever", "devin-free-limit.json")
+			for path, raw := range map[string]string{
+				primaryPath: `{"records":{"` + id + `":` + damaged + `}}`,
+				legacyPath:  `{"records":{` + record(id, now.Add(2*time.Hour).Format(time.RFC3339Nano), now.Format(time.RFC3339Nano)) + `}}`,
+			} {
+				if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			got := LocalFree(cfg)(now)
+			if got.State != shared.FreeExhausted || got.ResetsAt == nil || !got.ResetsAt.Equal(now.Add(2*time.Hour)) {
+				t.Fatalf("known hold hidden by damaged cache copy: %+v", got)
+			}
+			if err := ObserveFreeLimit(cfg, now.Add(time.Hour).Format(time.RFC3339Nano), "", "swe-2-high", "job:new-account", "devin:0123456789abcdef", false, false); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Stat(legacyPath); !errors.Is(err, fs.ErrNotExist) {
+				t.Fatalf("legacy cache still exists after migration: %v", err)
+			}
+			got = LocalFree(cfg)(now)
+			if got.State != shared.FreeExhausted || got.ResetsAt == nil || !got.ResetsAt.Equal(now.Add(2*time.Hour)) {
+				t.Fatalf("known hold lost after migration write: %+v", got)
+			}
+			now = now.Add(3 * time.Hour)
+			if got = LocalFree(cfg)(now); got.State != shared.FreeUnknown {
+				t.Fatalf("damaged copy stopped holding after known reset: %+v", got)
+			}
+		})
+	}
+}
+
+func TestObserveKeepsLegacyWhenPanewireWriteOrReadbackFails(t *testing.T) {
+	for _, failAt := range []string{"write", "readback"} {
+		t.Run(failAt, func(t *testing.T) {
+			now := testNow.UTC()
+			cache := t.TempDir()
+			legacyPath := filepath.Join(cache, "pacelever", "devin-free-limit.json")
+			primaryPath := filepath.Join(cache, "panewire", "devin-free-limit.json")
+			if err := os.MkdirAll(filepath.Dir(legacyPath), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			id := hostUserID("host-a", 1000)
+			legacy := []byte(`{"schema":"pacelever.devin-free-limit.v1","records":{` + record(id, now.Add(2*time.Hour).Format(time.RFC3339Nano), now.Format(time.RFC3339Nano)) + `}}`)
+			if err := os.WriteFile(legacyPath, legacy, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cfg := Config{
+				Home:     t.TempDir(),
+				Now:      func() time.Time { return now },
+				Hostname: func() (string, error) { return "host-a", nil },
+				UID:      func() int { return 1000 },
+				LookupEnv: func(name string) (string, bool) {
+					if name == "XDG_CACHE_HOME" {
+						return cache, true
+					}
+					return "", false
+				},
+			}
+			if failAt == "write" {
+				cfg.ReplaceFile = func(string, string, []byte, os.FileMode) error { return errors.New("injected write failure") }
+			} else {
+				cfg.ReadFile = func(path string) ([]byte, error) {
+					if path == primaryPath {
+						if _, err := os.Stat(path); err == nil {
+							return nil, fs.ErrPermission
+						}
+					}
+					return os.ReadFile(path)
+				}
+			}
+
+			err := ObserveFreeLimit(cfg, now.Add(time.Hour).Format(time.RFC3339Nano), "", "swe-2-high", "job:new-account", "devin:0123456789abcdef", false, false)
+			if err == nil {
+				t.Fatal("observe succeeded despite injected panewire write/readback failure")
+			}
+			got, err := os.ReadFile(legacyPath)
+			if err != nil || !bytes.Equal(got, legacy) {
+				t.Fatalf("legacy file changed or disappeared after %s failure: %s, %v", failAt, got, err)
+			}
+		})
 	}
 }
 
