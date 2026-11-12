@@ -179,3 +179,31 @@ func TestPlanNeverPlacesOnDisabledLocal(t *testing.T) {
 		t.Fatal("placement record lacks the local candidate")
 	}
 }
+
+func TestPlanPoolCapReportsLiveCount(t *testing.T) {
+	a, _, _, _, out := planFixture(t)
+	a.Config.Quota = map[string]any{"pool_max_concurrent": map[string]any{"devin-free": int64(2)}}
+	a.LiveSpawnProfiles = func(context.Context, string) (map[string]int, error) {
+		return map[string]int{"devin-swe2": 2}, nil
+	}
+	if err := a.planCmd(context.Background(), []string{"--grade", "A", "--t", "T1", "--json"}); err != nil {
+		t.Fatalf("plan: %v\n%s", err, out.String())
+	}
+	var doc struct {
+		Selection struct {
+			Candidates []map[string]any `json:"candidates"`
+		} `json:"selection"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &doc); err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range doc.Selection.Candidates {
+		if row["profile"] == "devin-swe2" && row["outcome"] == "dropped:pool_at_cap" {
+			if row["cap"] != "devin-free" || row["cap_live"] != float64(2) || row["cap_limit"] != float64(2) {
+				t.Fatalf("free seat cap evidence = %v, want devin-free with 2 live and limit 2", row)
+			}
+			return
+		}
+	}
+	t.Fatalf("missing dropped free seat: %v", doc.Selection.Candidates)
+}

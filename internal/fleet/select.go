@@ -181,6 +181,8 @@ type selCand struct {
 	// candidate: its catalog pool, or the reserved devin-free key for a
 	// SWE-2 free rung.
 	cap       string
+	capLive   int
+	capLimit  int
 	outcome   string
 	judgments []quotaJudgment
 	// exhausted marks a free rung whose account projection reaches the
@@ -837,6 +839,7 @@ func (a *App) selectFor(ctx context.Context, s Spawn, req selReq) (*selPlan, err
 			// drop keeps its own reason.
 			if capKey := capGate.full(ctx, row); capKey != "" {
 				c.reason, c.cap = reasonPoolAtCap, capKey
+				c.capLive, c.capLimit = capGate.count(capKey), capGate.caps[capKey]
 			}
 		}
 		if c.reason != "" {
@@ -1220,6 +1223,7 @@ func (p *selPlan) record() map[string]any {
 		}
 		if c.cap != "" {
 			row["cap"] = c.cap
+			row["cap_live"], row["cap_limit"] = c.capLive, c.capLimit
 		}
 		if c.projected != nil {
 			row["projected_pct"] = *c.projected
