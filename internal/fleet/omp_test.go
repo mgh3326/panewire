@@ -112,7 +112,7 @@ func TestOMPReviewerLaunchUsesExtendedContextOverlay(t *testing.T) {
 			a, s, fr := ompSpawnFixture(t)
 			s.Role = role
 			if role == "reviewer" {
-				s.BuilderFamily = "anthropic"
+				s.BuilderFamily = "openai"
 			}
 			base := fr.Do
 			var configPath string
