@@ -237,7 +237,7 @@ func TestHKSitesGoOverHTTPWithSvcToken(t *testing.T) {
 		if e := a.lifecycle(ctx, "done", []string{"j", "--report", path}); e != nil {
 			t.Fatal(e)
 		}
-		key := "reports/j/report.md"
+		key := reportDocumentKey("j", reportDigest([]byte(report)))
 		reqs := hkOnly(t, hk, docRoute(http.MethodPut, key), "POST /v1/tasks/42/comments")
 		put := hkJSON(t, reqs[0])
 		if put["key"] != key || put["kind"] != "report" || put["job"] != "j" || put["body"] != report {
@@ -293,7 +293,7 @@ func TestHKSiteFailuresKeepCLIHandling(t *testing.T) {
 		if rec := a.JobStore.(*fakeJobStore).record(t, "j"); rec["report_doc"] != nil {
 			t.Fatalf("record=%v, want no report_doc", rec)
 		}
-		hkOnly(t, hk, docRoute(http.MethodPut, "reports/j/report.md"), "POST /v1/tasks/42/comments")
+		hkOnly(t, hk, docRoute(http.MethodPut, reportDocumentKey("j", reportDigest([]byte("done\n")))), "POST /v1/tasks/42/comments")
 	})
 
 	t.Run("artifact record write refused", func(t *testing.T) {
@@ -670,7 +670,7 @@ func TestHKSiteUploadsUseTheUploadBound(t *testing.T) {
 	if e := a.lifecycle(ctx, "done", []string{"j", "--report", path}); e != nil {
 		t.Fatal(e)
 	}
-	if rec := a.JobStore.(*fakeJobStore).record(t, "j"); str(rec, "report_doc") != "reports/j/report.md" {
+	if rec := a.JobStore.(*fakeJobStore).record(t, "j"); str(rec, "report_doc") != reportDocumentKey("j", reportDigest([]byte("done\n"))) {
 		t.Fatalf("record=%v, want the report uploaded under the upload bound", rec)
 	}
 	if errs := a.Err.(*bytes.Buffer).String(); !strings.Contains(errs, "task comment failed: ") {

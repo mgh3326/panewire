@@ -184,13 +184,31 @@ func (a *App) lifecycleWithOptions(ctx context.Context, kind string, args []stri
 		}
 	}
 	// The report goes to hk over HTTP with the svc-panewire credential (hk
-	// 3607): kind report, the job and the report file's bytes, read when
-	// sent as `handoffkeep doc put --file` read them, under the upload bound.
-	// The document is linked to the job's hk task when the job has a numeric
-	// one, with origin class job (hk 3615); docSHA is the uploaded bytes'
-	// sha256, which the record pins next to report_doc.
+	// 3607): kind report, the job and the report's bytes, under the upload
+	// bound, linked to the job's hk task when it has a numeric one, with
+	// origin class job (hk 3615). docSHA is the sha256 of the uploaded bytes,
+	// which the record pins next to report_doc.
+	//
+	// done publishes to the content-addressed key and writes the
+	// job.report_published receipt (lifecycle_publish.go); escalate keeps the
+	// report file's name as its key.
 	doc, docSHA := "", ""
-	if *report != "" {
+	if kind == "done" {
+		doc = publishedDocument(j.Events, digest)
+		if doc == "" {
+			key, e := a.publishReport(ctx, j, body, digest)
+			if e != nil {
+				a.warn("report upload failed; local report retained")
+			} else if e = a.event(ctx, id, eventReportPublished, map[string]any{"report_sha256": digest, "document": key}); e != nil {
+				return e
+			} else {
+				doc = key
+			}
+		}
+		if doc != "" {
+			docSHA = digest
+		}
+	} else if *report != "" {
 		key := "reports/" + id + "/" + filepath.Base(*report)
 		b, e := os.ReadFile(*report)
 		if e == nil {
