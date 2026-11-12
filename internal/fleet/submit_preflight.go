@@ -114,6 +114,17 @@ func (a *App) SubmitHostRefusal(s Spawn) error {
 	if pinned == "local" {
 		pinned = machine
 	}
+	if pinned != "" {
+		// A pinned host the configuration does not list is still a host the
+		// hub's placement may know through its nodes; its capabilities cannot
+		// be judged here, so the node decides.
+		if _, listed := a.hostConfig(pinned); !listed {
+			if slices.Contains(excluded, pinned) {
+				return fail(exitPlacement, "NO_ELIGIBLE_HOST: host %s is both pinned and excluded; correct --tags, --host or --exclude-host before submitting", pinned)
+			}
+			return nil
+		}
+	}
 	var hosts []selHost
 	add := func(name string, cfg map[string]any, local bool) {
 		h := selHost{name: name, local: local, cfg: cfg}
@@ -136,10 +147,10 @@ func (a *App) SubmitHostRefusal(s Spawn) error {
 	case pinned != "" && slices.Contains(excluded, pinned):
 		reason = "host " + pinned + " is both pinned and excluded"
 	case pinned != "":
-		if cfg, ok := a.hostConfig(pinned); !ok {
-			reason = "host " + pinned + " is not configured"
-		} else if missing := missingCaps(cfg, required); len(missing) > 0 {
-			reason = "host " + pinned + " does not declare cap " + strings.Join(missing, ",")
+		if cfg, ok := a.hostConfig(pinned); ok {
+			if missing := missingCaps(cfg, required); len(missing) > 0 {
+				reason = "host " + pinned + " does not declare cap " + strings.Join(missing, ",")
+			}
 		}
 	default:
 		if gap := capsGap(hosts, required); gap != "" {

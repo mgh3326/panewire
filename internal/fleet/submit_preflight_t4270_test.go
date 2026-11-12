@@ -131,6 +131,8 @@ func TestSubmitHostRefusalNamesTheMissingCapability_t4270(t *testing.T) {
 		{"pinned host lacks the cap", Spawn{Tags: "unity", Host: "h1"}, "host h1 does not declare cap unity"},
 		{"the only cap holder is excluded", Spawn{Tags: "unity", ExcludeHosts: "h2"}, "no host declares cap unity"},
 		{"pinned and excluded", Spawn{Host: "h1", ExcludeHosts: "h1"}, "both pinned and excluded"},
+		{"pinned host the config does not list", Spawn{Tags: "unity", Host: "node-only"}, ""},
+		{"unlisted pinned host that is also excluded", Spawn{Host: "node-only", ExcludeHosts: "node-only"}, "both pinned and excluded"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			err := a.SubmitHostRefusal(tc.s)
