@@ -336,6 +336,27 @@ func TestCreditPublicationFailureIsBoundedAndRearmed(t *testing.T) {
 	}
 }
 
+func TestCreditPermanentPublishFailureDoesNotRearmUntilAccountIsKnown(t *testing.T) {
+	a, _, _, _ := quotaStopFixture(t, "worker", "idle", "")
+	creditWatchSession(t, a, "worker")
+	if err := a.watch(context.Background(), []string{"j"}); err != nil {
+		t.Fatal(err)
+	}
+
+	starts := 0
+	for range 3 {
+		if err := a.rearmWatchers(func(string) error {
+			starts++
+			return nil
+		}, func(string) {}, true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if starts != 0 {
+		t.Fatalf("pending permanent rejection rearmed %d times without an identifiable account", starts)
+	}
+}
+
 func TestCreditCounselPublishesWithoutEndingJob(t *testing.T) {
 	hk := &hkBenchFake{}
 	srv := httptest.NewServer(hk)
