@@ -1793,7 +1793,7 @@ func (a *App) quotaRequest(s Spawn) (QuotaRequest, bool) {
 	if topRoutingRole(s.RoutingRole) {
 		role = s.RoutingRole
 	}
-	return QuotaRequest{Profile: seat.Canon, GateProfile: seat.gateName(), Effort: effort, Role: role, OperatorRequest: s.OperatorRequest, RequestedBy: s.RequestedBy, Purpose: s.Purpose, AccountKey: s.AccountKey, E6Arm: a.e6Arm(s.E6Arm)}, true
+	return QuotaRequest{Profile: seat.Canon, GateProfile: seat.gateName(), Effort: effort, Role: role, OperatorRequest: s.OperatorRequest, RequestedBy: s.RequestedBy, Purpose: s.Purpose, AccountKey: s.AccountKey, E6Arm: a.e6Arm(s.E6Arm, s.e6ArmLocked), E6ArmLocked: s.e6ArmLocked}, true
 }
 
 func (a *App) quotaPool(ctx context.Context, s Spawn) string {

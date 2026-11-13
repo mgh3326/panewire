@@ -24,8 +24,9 @@ const (
 type hkRequest struct {
 	Method, Path, Auth string
 	// Query is the raw query string, for the list routes.
-	Query string
-	Body  []byte
+	Query  string
+	Body   []byte
+	Header http.Header
 }
 
 // Route is "METHOD /escaped/path".
@@ -143,7 +144,7 @@ var hkDocumentKinds = map[string]bool{"brief": true, "report": true, "answer": t
 
 func (hk *spawnHK) serve(w http.ResponseWriter, r *http.Request) {
 	body, _ := io.ReadAll(r.Body)
-	req := hkRequest{Method: r.Method, Path: r.URL.EscapedPath(), Auth: r.Header.Get("Authorization"), Query: r.URL.RawQuery, Body: body}
+	req := hkRequest{Method: r.Method, Path: r.URL.EscapedPath(), Auth: r.Header.Get("Authorization"), Query: r.URL.RawQuery, Body: body, Header: r.Header.Clone()}
 	hk.mu.Lock()
 	hk.reqs = append(hk.reqs, req)
 	handlers := append([]func(hkRequest) (int, string, bool)(nil), hk.handle...)
@@ -202,6 +203,19 @@ func (hk *spawnHK) serve(w http.ResponseWriter, r *http.Request) {
 		hk.docs[key] = string(stored)
 		out, _ := json.Marshal(map[string]any{"document": doc, "changed": true})
 		answer(http.StatusOK, string(out))
+		return
+	case r.Method == http.MethodPut && req.Path == "/v1/attachments":
+		sha := sha256.Sum256(body)
+		refKind, refID, _ := strings.Cut(r.Header.Get("X-HK-Ref"), ":")
+		attachment, _ := json.Marshal(map[string]any{
+			"attachment": map[string]any{
+				"sha256": hex.EncodeToString(sha[:]), "size_bytes": len(body),
+				"mime": r.Header.Get("Content-Type"), "original_name": r.Header.Get("X-HK-Name"),
+				"ref_kind": refKind, "ref_id": refID,
+			},
+			"created": true,
+		})
+		answer(http.StatusCreated, string(attachment))
 		return
 	}
 	answer(http.StatusNotFound, notFound)

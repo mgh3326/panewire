@@ -67,10 +67,12 @@ hub writes itself only when the holder ran on the hub's own host. A present pane
 keeps the slot (fail closed) unless it provably never started work (hk 3179),
 which needs every one of these:
 
-- the operation failed in the `landing` stage (the brief's delivery was never
-  proven);
-- the pane's agent row is `idle` or `done`, and its cwd is the prepared checkout
-  of the request;
+- the operation failed in the `launch` or `landing` stage, before brief delivery
+  was proven;
+- the pane row is `idle` or `done`, and its cwd is the prepared checkout of the
+  request. If the failed launch never assigned an agent label, the hub uses the
+  pane id and checkout cwd, and the node permits that unnamed identity only for
+  this reclaim after re-reading the pane;
 - the spawn's deadline passed more than the grace ago (10 minutes; hub config
   `UnworkedLandingGrace`);
 - the node's `job.result` finds the job, with no `job.completed`, no report and
@@ -80,7 +82,7 @@ which needs every one of these:
   re-reads the pane and refuses one that went to work).
 
 The hub then has the holder's node mark the hk job `lost`, logs
-`landing_failed_unworked`, and the new submission claims the slot. Any failed or
+`failed_spawn_unworked`, and the new submission claims the slot. Any failed or
 unreadable check, an unreachable node, a read error or a missing pane id keeps
 the slot. The 409 body then carries `request_id`, `job`, `host`,
 `pane` and a `fix` (close that pane, then resubmit), and the CLI prints them
