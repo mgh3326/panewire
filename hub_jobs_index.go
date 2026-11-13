@@ -639,7 +639,7 @@ func readLaneEventFile(path string) (hubScannedRelayEvent, bool, int64, bool) {
 		return hubScannedRelayEvent{}, false, hubIndexLaneOverhead, false
 	}
 	lane, eventID, text := event.ownerLane(), event.eventID(), event.text()
-	if !validInboxCause(event.Cause) || !hubAgentLabelPattern.MatchString(lane) || !validLaneEventID(eventID) || !validLaneEventText(text) || len(text) > laneEventTextLimitSink {
+	if !validInboxCause(event.Cause) || !validLaneReference(lane) || !validLaneEventID(eventID) || !validLaneEventText(text) || len(text) > laneEventTextLimitSink {
 		return hubScannedRelayEvent{}, false, hubIndexLaneOverhead, false
 	}
 	epoch := event.Epoch
