@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"slices"
 	"strconv"
+	"strings"
 
 	"github.com/mgh3326/panewire/internal/configkeys"
 )
@@ -162,26 +163,95 @@ func (h *HubServer) acceptingEffectiveLocked(machine string, advertised bool) bo
 	}
 }
 
+// persistAcceptingOverridesLocked rewrites the override file from next. Keys
+// the loader ignores are carried over, so a rewrite does not erase data a
+// newer release wrote. An entry with such keys is written as an object; the
+// others keep the legacy string form that pre-change hubs decode.
 func (h *HubServer) persistAcceptingOverridesLocked(next map[string]acceptingOverride) error {
-	if h.relayControl.acceptingOverridesPath == "" {
+	path := h.relayControl.acceptingOverridesPath
+	if path == "" {
 		return nil
 	}
-	modes := make(map[string]string, len(next))
+	rootExtras, entryExtras := acceptingOverrideExtras(path)
+	overrides := make(map[string]any, len(next))
 	details := make(map[string]acceptingContainment)
 	for machine, override := range next {
-		modes[machine] = override.Mode
+		if extras := entryExtras[machine]; len(extras) > 0 {
+			fields := make(map[string]any, len(extras)+1)
+			for key, value := range extras {
+				fields[key] = value
+			}
+			fields["mode"] = override.Mode
+			overrides[machine] = fields
+		} else {
+			overrides[machine] = override.Mode
+		}
 		if override.Mode == "off" && override.Containment != "" {
 			details[machine] = acceptingContainment{override.Containment, override.ContainmentVerified}
 		}
 	}
-	b, err := json.Marshal(struct {
-		Overrides    map[string]string               `json:"overrides"`
-		Containments map[string]acceptingContainment `json:"containments,omitempty"`
-	}{modes, details})
+	doc := make(map[string]any, len(rootExtras)+2)
+	for key, value := range rootExtras {
+		doc[key] = value
+	}
+	doc["overrides"] = overrides
+	if len(details) > 0 {
+		doc["containments"] = details
+	}
+	b, err := json.Marshal(doc)
 	if err != nil {
 		return err
 	}
-	return replaceFileAtomically(h.relayControl.acceptingOverridesPath, ".accepting-overrides-*", append(b, '\n'), 0600)
+	return replaceFileAtomically(path, ".accepting-overrides-*", append(b, '\n'), 0600)
+}
+
+// acceptingOverrideReadKeys are the entry keys the loader reads. Matching is
+// case-insensitive, as encoding/json and configkeys both match.
+var acceptingOverrideReadKeys = []string{"mode", "containment", "containment_verified"}
+
+// acceptingOverrideExtras returns the keys in the override file that the
+// loader does not read: root-level keys, and per machine the entry keys. A
+// file that cannot be read or decoded yields none.
+func acceptingOverrideExtras(path string) (map[string]json.RawMessage, map[string]map[string]json.RawMessage) {
+	root := make(map[string]json.RawMessage)
+	entries := make(map[string]map[string]json.RawMessage)
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return root, entries
+	}
+	var doc map[string]json.RawMessage
+	if json.Unmarshal(b, &doc) != nil {
+		return root, entries
+	}
+	for key, value := range doc {
+		if !keyNamedIn(key, []string{"overrides", "containments"}) {
+			root[key] = value
+		}
+	}
+	var overrides map[string]json.RawMessage
+	if json.Unmarshal(doc["overrides"], &overrides) != nil {
+		return root, entries
+	}
+	for machine, value := range overrides {
+		var fields map[string]json.RawMessage
+		if json.Unmarshal(value, &fields) != nil {
+			continue // legacy string form: no entry keys
+		}
+		for key, field := range fields {
+			if keyNamedIn(key, acceptingOverrideReadKeys) {
+				continue
+			}
+			if entries[machine] == nil {
+				entries[machine] = make(map[string]json.RawMessage)
+			}
+			entries[machine][key] = field
+		}
+	}
+	return root, entries
+}
+
+func keyNamedIn(key string, names []string) bool {
+	return slices.ContainsFunc(names, func(name string) bool { return strings.EqualFold(name, key) })
 }
 
 func (h *HubServer) handleAcceptingOverride(writer http.ResponseWriter, request *http.Request) {
