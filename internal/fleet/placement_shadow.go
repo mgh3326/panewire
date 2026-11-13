@@ -298,6 +298,11 @@ func hubUsable(h selHost, ignoreMemory bool) bool {
 // viewUsable is hubUsable for the hub's reading of one host.
 func viewUsable(hv HostView, ignoreMemory bool) bool {
 	v := &hv
+	// A host the direct hub path left out for full task slots is carried as a
+	// synthetic view with SlotFull set (hub_spawn_async.go).
+	if v.SlotFull {
+		return false
+	}
 	if v.Extra.Usable != nil && !ignoreMemory {
 		return *v.Extra.Usable
 	}

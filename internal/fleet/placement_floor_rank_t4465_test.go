@@ -1,6 +1,7 @@
 package fleet
 
 import (
+	"context"
 	"strings"
 	"testing"
 )
@@ -140,5 +141,84 @@ func TestRankHostsFloorRespectsTheHubsUsableVerdict(t *testing.T) {
 	good := floorHost("good", true, 0.3, 100, 30)
 	if got := names(rankHosts([]selHost{throttled, capped, usable, good})); !strings.HasPrefix(got, "good,") {
 		t.Fatalf("rank=%s", got)
+	}
+}
+
+// All hosts under the floor: usable hosts rank before the hub's unusable ones
+// (a host at its job cap, with old jobs and so no bridge cost, scores higher),
+// and the score orders each group.
+func TestRankHostsAllBelowFloorKeepsUnusableHostsAsFallbacks(t *testing.T) {
+	usable := floorHost("usable", false, 0.03, 12, -82.9)
+	capped := floorHost("capped", false, 0.04, 100, 4)
+	capped.view.Reason = "active_jobs>=max"
+	if got := names(rankHosts([]selHost{capped, usable})); got != "usable,capped" {
+		t.Fatalf("rank=%s: an unusable host must be a fallback in the all-below case", got)
+	}
+	better := floorHost("better", true, 0.02, 100, 2)
+	if got := names(rankHosts([]selHost{capped, usable, better})); got != "better,usable,capped" {
+		t.Fatalf("rank=%s", got)
+	}
+	mk := func(name string, free, score float64, unusable bool) *placeCandidate {
+		sig := PlacementSignals{Terms: &PlacementTerms{CPU: free, Mem: 1, IO: 1, Load: 1, Jobs: 1}, Power: ptrF(100), BelowFreeFloor: true}
+		return &placeCandidate{name: name, awake: true, load: ptrF(0.1), score: ptrF(score), signals: sig, login: loginUnknown, unusable: unusable}
+	}
+	ordered := []*placeCandidate{mk("capped", 0.04, 4, true), mk("usable", 0.03, -82.9, false)}
+	sortPlaceCandidates(ordered, 0.5, "")
+	if ordered[0].name != "usable" {
+		t.Fatalf("plan order %s first: an unusable host must be a fallback", ordered[0].name)
+	}
+}
+
+// The direct hub path carries a slot-full host as a synthetic view with no
+// terms: it is unusable, so it can never be the eligible host that pushes a
+// usable one back.
+func TestViewUsableCountsASlotFullView(t *testing.T) {
+	if viewUsable(HostView{Name: "full", Connected: true, SlotFull: true}, false) {
+		t.Fatal("a slot-full view is not usable")
+	}
+	if !viewUsable(HostView{Name: "ok", Connected: true}, false) {
+		t.Fatal("a plain connected view is usable")
+	}
+	full := selHost{name: "full", awake: true, view: &HostView{Name: "full", Connected: true, SlotFull: true}}
+	if hubUsable(full, false) {
+		t.Fatal("hubUsable must see the synthetic slot-full view")
+	}
+	below := floorHost("below", false, 0.02, 100, 2)
+	sides := []floorSide{{awake: true, usable: hubUsable(full, false)}, {awake: true, below: true, usable: hubUsable(below, false), value: 2}}
+	if ctx := floorContext(sides); ctx.anyEligible {
+		t.Fatalf("a slot-full host counted as eligible: %+v", ctx)
+	}
+}
+
+// The local candidate takes the hub's usable verdict like a remote one: a
+// local host the hub reports not accepting, with a high free, must not be the
+// only eligible host that moves ahead of the remote the hub decided on.
+func TestPlanLocalCandidateTakesTheHubsUsableVerdict(t *testing.T) {
+	a := placementApp(t, nil)
+	local := a.machine()
+	a.Config.Local = map[string]any{}
+	a.Config.Hosts = map[string]map[string]any{"remote": {}}
+	a.Config.HostOrder = []string{"remote"}
+	view := func(name, reason string, free float64, below, decided bool) HostView {
+		sig := PlacementSignals{Terms: &PlacementTerms{CPU: free, Mem: 1, IO: 1, Load: 1, Jobs: 1}, Power: ptrF(100), BelowFreeFloor: below}
+		score := free * 100
+		return HostView{Name: name, Connected: true, Reason: reason, Signals: sig, Score: &score, Source: "prometheus", Decided: decided, LoadRatio: ptrF(0.1)}
+	}
+	for _, reason := range []string{"not_accepting", "throttled", "active_jobs>=max"} {
+		a.Source = &fakePlacementSource{hosts: []HostView{view(local, reason, 0.5, false, false), view("remote", "available", 0.04, true, true)}}
+		// The remote is under the floor but is the only usable host and the hub's
+		// decision: the local host the hub calls unusable must not displace it.
+		plan, err := a.plan(context.Background(), Spawn{Profile: "claude"}, "", 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := orderNames(plan)
+		if reason == "not_accepting" {
+			// not_accepting local is excluded from the plan altogether.
+			continue
+		}
+		if len(got) == 0 || got[0] != "remote" {
+			t.Fatalf("%s local: order=%v, want the hub's decided remote first", reason, got)
+		}
 	}
 }

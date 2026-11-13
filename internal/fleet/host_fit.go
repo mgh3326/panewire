@@ -177,8 +177,8 @@ func floorContext(sides []floorSide) floorCtx {
 // keep their relative order from the rules that follow, so a throttled host
 // never displaces a usable one. A host under the floor is ranked last, not
 // removed, and is still tried if every other host refuses. When every awake host
-// is under the floor, the higher floorValue ranks first and the bucket does not
-// apply. With no awake host under the floor it does nothing at all. 0 means the
+// is under the floor, usable hosts rank before unusable ones and the higher
+// floorValue ranks first within each group; the bucket does not apply. With no awake host under the floor it does nothing at all. 0 means the
 // floor does not separate the two.
 func floorOrder(x, y floorSide, c floorCtx) int {
 	if !x.awake || !y.awake || !c.anyBelow {
@@ -194,6 +194,14 @@ func floorOrder(x, y floorSide, c floorCtx) int {
 		}
 		return 1
 	case c.allBelow:
+		// Usable hosts first, the hub's unusable ones only as fallbacks; the
+		// score orders hosts within each group.
+		if x.usable != y.usable {
+			if x.usable {
+				return -1
+			}
+			return 1
+		}
 		return cmp.Compare(y.value, x.value)
 	}
 	return 0

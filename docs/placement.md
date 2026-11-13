@@ -481,9 +481,11 @@ at or above the floor), every other awake host (under the floor, or one the hub
 calls unusable: throttled, at its job cap) ranks after it, in the order the
 other rules give them; a throttled host with a high `free` never displaces the
 usable host the hub chose. Bucket, the hub's decision and the score order the
-eligible hosts as before. When every awake host is under the floor, the highest
-score ranks first (as in rule 2, so decided jobs count) and the bucket does not
-apply. With no awake host under the floor the ranking is unchanged. A host under
+eligible hosts as before. When every awake host is under the floor, usable
+hosts rank before the hub's unusable ones and the highest score ranks first
+within each group (as in rule 2, so decided jobs count); the bucket does not
+apply. The hub's verdict covers the local host and a host the direct hub path
+left out for full task slots, like any other. With no awake host under the floor the ranking is unchanged. A host under
 the floor is ranked last, not removed: it is still tried if every other host
 refuses the job.
 

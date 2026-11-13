@@ -521,6 +521,7 @@ func (a *App) plan(ctx context.Context, s Spawn, pool string, waited time.Durati
 		local.score = hv.Score
 		local.signals = hv.Signals
 		local.source = hv.Source
+		local.unusable = !viewUsable(hv, false)
 	}
 	maxRatio, hasGuard := number(a.Config.Local, "max_load_ratio")
 	if local.load != nil && hasGuard && *local.load >= maxRatio {
