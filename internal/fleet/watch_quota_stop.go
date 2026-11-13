@@ -117,12 +117,36 @@ func creditRejectionStateChangeSeq(j Job, stop quotastop.Stop) (*int64, bool) {
 	return seq, found
 }
 
+// safeCreditStopHandoff reports whether a credit-rejected job may be handed off:
+// herdr is reachable, the pane is still idle or done, and it is the state the
+// rejection was read in. A missing state_change_seq on either side cannot prove
+// the pane unchanged, so the idle or done check stands alone then, as
+// quotaHandOff.unchanged does (hk 4505).
 func safeCreditStopHandoff(j Job, stop quotastop.Stop, agent Agent, present, herdrReachable bool) bool {
-	if !herdrReachable || !present || agent.Status != "idle" && agent.Status != "done" || agent.StateChangeSeq == nil {
+	if !herdrReachable || !present || agent.Status != "idle" && agent.Status != "done" {
 		return false
 	}
 	expected, found := creditRejectionStateChangeSeq(j, stop)
-	return found && expected != nil && *agent.StateChangeSeq == *expected
+	if !found {
+		return false
+	}
+	return expected == nil || agent.StateChangeSeq == nil || *agent.StateChangeSeq == *expected
+}
+
+// paneAfterPublication reads the pane's agent row now, for a decision taken
+// after a credit rejection was published. present is false when the pane is
+// gone; reachable is false when herdr could not be read.
+func (a *App) paneAfterPublication(ctx context.Context, pane string) (agent Agent, present, reachable bool) {
+	agents, err := a.agents(ctx)
+	if err != nil {
+		return Agent{}, false, false
+	}
+	for _, ag := range agents {
+		if ag.Pane == pane {
+			return ag, true, true
+		}
+	}
+	return Agent{}, false, true
 }
 
 func creditRejectionPublished(j Job, stop quotastop.Stop) bool {
