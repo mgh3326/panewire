@@ -396,7 +396,7 @@ func TestBoundTimeoutKeepsTheCountUntilAClaim(t *testing.T) {
 	hub := countedHub(t)
 	task := countedTask(t, hub)
 	dispatch := hubSpawnRequest{RequestID: t14RequestID(448), Machine: "machine-a", CWDKey: "project", Brief: hubSpawnBrief{Inline: "task"}, Args: []string{"--job", "test-job"}, WaitSeconds: 600, DeadlineMS: task.Deadline.UnixMilli()}
-	task, err := hub.inbox.store.bindSpawn(t.Context(), task.Request.RequestID, task.Attempt, dispatch)
+	task, err := hub.inbox.store.bindSpawn(t.Context(), task.Request.RequestID, task.Attempt, dispatch, time.Now().UTC())
 	if err != nil {
 		t.Fatal(err)
 	}

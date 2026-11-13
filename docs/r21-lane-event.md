@@ -132,7 +132,7 @@ The stages are:
 | `typed` | the node typed the text; proof is still pending |
 | `delivered` | the pane proved it received the text |
 | `unconfirmed` | the node could not prove reception; `reason` says why (`maybe_in_pane presend:composer_pending`, `ack_timeout`, `working_wait_expired`) |
-| `dropped` | the node gave up; `reason` says why |
+| `dropped` | the node gave up, or the hub found no pane to take the event because every hub-known job in its lane has completed; `reason` says why (`job_ended` for the hub's case) |
 | `inbox_only` | the lane reads this event from its inbox, not from its pane |
 
 `--json` returns each event's `reason`, `machine`, `pane` and `at` as well; `at`

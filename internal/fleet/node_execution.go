@@ -101,7 +101,12 @@ type ExecutionReceipt struct {
 	Role    string `json:"role"`
 	CWD     string `json:"cwd"`
 	Label   string `json:"label"`
-	Kind    string `json:"kind"`
+	// Pool and AccountKey are what the executing host placed the job on
+	// (placementExecution): the hub records them so an exhausted pool can
+	// find its live jobs (docs/quota-stop.md, "An exhausted pool").
+	Pool       string `json:"pool,omitempty"`
+	AccountKey string `json:"account_key,omitempty"`
+	Kind       string `json:"kind"`
 	// LaneUnregistered is true when the pane exists but hub lane registration
 	// failed after its retry (receipt field lane_unregistered).
 	LaneUnregistered bool `json:"lane_unregistered,omitempty"`

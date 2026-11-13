@@ -815,7 +815,7 @@ func TestLaneInboxStoreSpawnDurabilityContract(t *testing.T) {
 			if err != nil || task.Attempt != 2 {
 				t.Fatalf("same-key retry: %+v %v", task, err)
 			}
-			task, err = store.bindSpawn(t.Context(), request.RequestID, task.Attempt, hubSpawnRequest{RequestID: t14RequestID(984), Machine: "machine-a", Args: []string{"--job", "test-job"}, WaitSeconds: 300})
+			task, err = store.bindSpawn(t.Context(), request.RequestID, task.Attempt, hubSpawnRequest{RequestID: t14RequestID(984), Machine: "machine-a", Args: []string{"--job", "test-job"}, WaitSeconds: 300}, time.Now().UTC())
 			if err != nil {
 				t.Fatal(err)
 			}

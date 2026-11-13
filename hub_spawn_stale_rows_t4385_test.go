@@ -153,7 +153,7 @@ func staleSpawnRow(t *testing.T, h *HubServer, n int) {
 		t.Fatal(err)
 	}
 	node := hubSpawnRequest{RequestID: t14RequestID(5000 + n), Machine: "machine-a", CWDKey: "project", Brief: hubSpawnBrief{Inline: "task"}, Args: []string{"--job", job}, WaitSeconds: 600, DeadlineMS: task.Deadline.UnixMilli()}
-	if task, err = h.inbox.store.bindSpawn(t.Context(), request.RequestID, task.Attempt, node); err != nil {
+	if task, err = h.inbox.store.bindSpawn(t.Context(), request.RequestID, task.Attempt, node, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	if _, err = h.inbox.store.completeSpawn(t.Context(), task, hubSpawnOutcome{RC: 124, Stage: "landing", Reason: "timeout", Host: "machine-a"}, time.Now()); err != nil {
