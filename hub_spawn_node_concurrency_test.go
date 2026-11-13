@@ -217,3 +217,48 @@ func TestCheckoutDirKeyStableAcrossCreation(t *testing.T) {
 		t.Fatalf("key before creation %q, after %q", before, after)
 	}
 }
+
+// A symlink whose target does not exist yet keys like its target, before and
+// after the target is created (review r4564003838).
+func TestCheckoutDirKeyResolvesDanglingAlias(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Symlink(filepath.Join(root, "real"), filepath.Join(root, "alias")); err != nil {
+		t.Fatal(err)
+	}
+	config := filepath.Join(t.TempDir(), "spawn.json")
+	if err := os.WriteFile(config, []byte(`{"work_root":"`+root+`"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	client := &HubClient{spawnConfigPath: config}
+	alias, real := client.checkoutDirKey("alias"), client.checkoutDirKey("real")
+	if alias != real {
+		t.Fatalf("dangling alias key %q, target key %q", alias, real)
+	}
+	if err := os.Mkdir(filepath.Join(root, "real"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if after := client.checkoutDirKey("alias"); after != real {
+		t.Fatalf("alias key changed on creation: %q, want %q", after, real)
+	}
+}
+
+// A spawn in a mapped directory inside a worktree takes that worktree's
+// checkout lock (review r4564003850).
+func TestMappedCWDKeysToItsWorktree(t *testing.T) {
+	root := t.TempDir()
+	worktree := filepath.Join(root, "job-dir")
+	if err := os.MkdirAll(filepath.Join(worktree, "sub"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(worktree, ".git"), []byte("gitdir: x\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	config := filepath.Join(t.TempDir(), "spawn.json")
+	if err := os.WriteFile(config, []byte(`{"work_root":"`+root+`"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	client := &HubClient{spawnConfigPath: config}
+	if got, want := mappedCWDKey(filepath.Join(worktree, "sub")), client.checkoutDirKey("job-dir"); got != want {
+		t.Fatalf("mapped cwd key %q, checkout key %q", got, want)
+	}
+}

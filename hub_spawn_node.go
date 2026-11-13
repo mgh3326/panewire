@@ -408,6 +408,10 @@ func (client *HubClient) runHubSpawn(parent context.Context, message hubOutbound
 			return result
 		}
 		cwd = outcome.Worktree.Path
+	} else {
+		// A spawn in a mapped directory holds the same lock as a checkout
+		// spawn into the worktree that contains it, until it returns.
+		defer client.lockSpawnStep("checkout-dir:" + mappedCWDKey(cwd))()
 	}
 
 	temporary, err := os.CreateTemp("", "panewire-spawn-*")
@@ -809,9 +813,8 @@ func (client *HubClient) runClaimedHubSpawn(ctx context.Context, message hubOutb
 }
 
 // checkoutDirKey names a checkout directory by its physical path, so two
-// names for one worktree take one lock, and the key is the same before and
-// after the directory exists: the deepest existing ancestor is resolved
-// (symlinks included) and the missing rest appended.
+// names for one worktree take one lock and the key does not change when the
+// directory is created (nodeStablePath).
 func (client *HubClient) checkoutDirKey(dir string) string {
 	root, err := client.nodeWorkRoot()
 	if err != nil {
@@ -820,18 +823,67 @@ func (client *HubClient) checkoutDirKey(dir string) string {
 	return nodeStablePath(filepath.Join(root, dir))
 }
 
-func nodeStablePath(path string) string {
-	path = filepath.Clean(path)
-	rest := ""
-	for {
-		if resolved, err := filepath.EvalSymlinks(path); err == nil {
-			return filepath.Join(resolved, rest)
+// mappedCWDKey is the checkout lock key of a spawn that runs in a mapped
+// directory: the worktree that holds it (the nearest ancestor with a .git
+// entry), so it shares the lock of a checkout spawn into that worktree.
+func mappedCWDKey(cwd string) string {
+	dir := nodeStablePath(cwd)
+	for at := dir; ; {
+		if _, err := os.Lstat(filepath.Join(at, ".git")); err == nil {
+			return at
 		}
-		parent := filepath.Dir(path)
-		if parent == path {
-			return filepath.Join(path, rest)
+		parent := filepath.Dir(at)
+		if parent == at {
+			return dir
 		}
-		rest = filepath.Join(filepath.Base(path), rest)
-		path = parent
+		at = parent
 	}
+}
+
+// nodeStablePath resolves every symlink in path, including one whose target
+// does not exist yet, and keeps the missing rest as written: two names for
+// one directory get one result before and after the directory is created.
+func nodeStablePath(path string) string {
+	resolved, err := nodeLooseResolve(filepath.Clean(path), 0)
+	if err != nil {
+		return filepath.Clean(path)
+	}
+	return resolved
+}
+
+func nodeLooseResolve(path string, depth int) (string, error) {
+	if depth > 40 {
+		return "", errors.New("too many symlinks")
+	}
+	if !filepath.IsAbs(path) {
+		return filepath.Clean(path), nil
+	}
+	resolved := string(filepath.Separator)
+	parts := strings.Split(strings.TrimPrefix(path, string(filepath.Separator)), string(filepath.Separator))
+	for i, part := range parts {
+		if part == "" {
+			continue
+		}
+		next := filepath.Join(resolved, part)
+		info, err := os.Lstat(next)
+		if err != nil {
+			// Missing: nothing below it can be a symlink yet.
+			return filepath.Join(append([]string{next}, parts[i+1:]...)...), nil
+		}
+		if info.Mode()&os.ModeSymlink == 0 {
+			resolved = next
+			continue
+		}
+		target, err := os.Readlink(next)
+		if err != nil {
+			return "", err
+		}
+		if !filepath.IsAbs(target) {
+			target = filepath.Join(resolved, target)
+		}
+		if resolved, err = nodeLooseResolve(filepath.Clean(target), depth+1); err != nil {
+			return "", err
+		}
+	}
+	return resolved, nil
 }

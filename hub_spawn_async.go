@@ -295,6 +295,7 @@ func (h *HubServer) runSpawnCoordinator(parent context.Context) {
 				}
 			}
 		}
+		h.pumpAllNodeSpawns(ctx)
 		h.flushSpawnNotifications(ctx)
 		select {
 		case <-ctx.Done():
@@ -575,6 +576,8 @@ type directSpawnTransport struct {
 	// bindOnly is the placement stage: Spawn binds the request to the chosen
 	// node and stops the candidate loop; the node's executor sends it.
 	bindOnly bool
+	// refreshWait replaces spawnPlacementRefreshWait in tests.
+	refreshWait time.Duration
 	// replaced: a host refusal or a not-started answer unbound the request
 	// with an exclusion, and it waits for placement again.
 	replaced bool
@@ -833,11 +836,50 @@ func (t *directSpawnTransport) unknown(ctx context.Context, reason string) (flee
 	}
 	return fleet.HubSpawnReply{}, &fleet.HubError{Kind: "hub_spawn_pending"}
 }
+
+// spawnPlacementRefreshWait bounds how long a placement worker waits for a
+// node's quota.refresh. A node that does not answer would otherwise hold one
+// of the few placement workers for the whole measure_timeout_s, and two such
+// nodes would stop placement for every other request. The node keeps
+// measuring; its answer updates the quota store for the next placement.
+const spawnPlacementRefreshWait = 5 * time.Second
+
 func (t *directSpawnTransport) Refresh(ctx context.Context, machine, pool string) error {
 	args, _ := json.Marshal(map[string]string{"pool": pool})
 	pending, id, _, sent := t.h.sendNodeCommand(machine, "quota.refresh", args)
 	if !sent {
 		return errors.New("quota refresh node unavailable")
+	}
+	if t.bindOnly {
+		wait := t.refreshWait
+		if wait <= 0 {
+			wait = spawnPlacementRefreshWait
+		}
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, wait)
+		defer cancel()
+		select {
+		case result := <-pending.done:
+			t.h.forgetNodeCommand(id)
+			if result.Error != "" {
+				return errors.New("quota refresh failed")
+			}
+			return nil
+		case <-ctx.Done():
+			// Not ctx.Err(): the caller's own deadline has not passed, so
+			// fleet treats this as a failed measurement of this account,
+			// not as an unreachable host.
+			go func() {
+				// The node may still answer; drop the waiter when it does or
+				// after the full measurement window.
+				select {
+				case <-pending.done:
+				case <-time.After(time.Minute):
+				}
+				t.h.forgetNodeCommand(id)
+			}()
+			return errors.New("quota refresh still running on the node")
+		}
 	}
 	defer t.h.forgetNodeCommand(id)
 	select {

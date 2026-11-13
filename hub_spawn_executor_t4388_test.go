@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -421,5 +423,53 @@ func TestQueueDepthMovesPlacementDecision_t4388(t *testing.T) {
 		if busy.Decision != "n2" {
 			t.Fatalf("decision stayed on %q with %d spawns on n1: %+v", busy.Decision, depth, busy)
 		}
+	}
+}
+
+// A send that ends without a definitive result (the node disconnected) keeps
+// its node slot: the node may still be running it (review r4564004034).
+func TestUnresolvedSendKeepsItsNodeSlot_t4388(t *testing.T) {
+	f := newExecutorFixture(t, "n1")
+	f.policy(t, func(p *PlacementPolicy) { p.SpawnInFlight = 1 })
+	first := f.bound(t, 0, 0, "n1")
+	f.start(t)
+	f.next(t, "n1")
+	f.nodes["n1"].CloseNow()
+	eventually(t, 3*time.Second, "unresolved send held", func() bool {
+		_, held := f.hub.spawnQueue.heldSpawns()[first.Request.RequestID]
+		return held
+	})
+	if f.hub.spawnQueue.acquireSlot("n1", 1) {
+		t.Fatal("a held request's slot was free for another spawn")
+	}
+}
+
+// The legacy /v1/spawn path counts against the node's spawn_in_flight
+// (review r4564003857).
+func TestLegacySpawnSharesTheNodeBound_t4388(t *testing.T) {
+	hub, server := t14Hub(t)
+	t14Node(t, hub, server, true)
+	for range defaultSpawnInFlight {
+		if !hub.spawnQueue.acquireSlot("machine-a", defaultSpawnInFlight) {
+			t.Fatal("acquire")
+		}
+	}
+	status, _, body := t14HTTP(t, http.MethodPost, server.URL+"/v1/spawn", t14OperatorToken, t14SpawnBody(t14RequestID(4400)))
+	if status != http.StatusServiceUnavailable || !strings.Contains(string(body), "node_spawn_busy") {
+		t.Fatalf("status=%d body=%s", status, body)
+	}
+}
+
+// A placement worker waits a bounded time for a node's quota.refresh
+// (review r4564003869).
+func TestPlacementRefreshIsBounded_t4388(t *testing.T) {
+	f := newExecutorFixture(t, "n1")
+	transport := &directSpawnTransport{h: f.hub, bindOnly: true, refreshWait: 100 * time.Millisecond}
+	started := time.Now()
+	if err := transport.Refresh(t.Context(), "n1", "codex-sol"); err == nil {
+		t.Fatal("an unanswered refresh succeeded")
+	}
+	if waited := time.Since(started); waited > 2*time.Second {
+		t.Fatalf("placement waited %s for a silent node", waited)
 	}
 }

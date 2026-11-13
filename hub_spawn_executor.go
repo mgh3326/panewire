@@ -3,6 +3,8 @@ package panewire
 import (
 	"cmp"
 	"context"
+	"database/sql"
+	"errors"
 	"slices"
 	"sort"
 	"sync"
@@ -42,6 +44,11 @@ type spawnQueueItem struct {
 type nodeSpawnQueue struct {
 	queued   []spawnQueueItem
 	inFlight int
+	// held are requests whose last send ended without a definitive node
+	// result (a disconnect, a reconciling replay): the node may still be
+	// running them, so each keeps its slot until its row settles or its
+	// replay takes the slot over.
+	held map[string]bool
 }
 
 // hubSpawnQueue is the in-memory side of the spawn stages. active holds every
@@ -77,6 +84,48 @@ func (q *hubSpawnQueue) release(id string) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	delete(q.active, id)
+}
+
+// acquireSlot takes one of machine's spawn_in_flight slots for a spawn that
+// does not come through the queue (the legacy /v1/spawn path).
+func (q *hubSpawnQueue) acquireSlot(machine string, limit int) bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	node := q.nodeLocked(machine)
+	if node.inFlight >= limit {
+		return false
+	}
+	node.inFlight++
+	return true
+}
+
+func (q *hubSpawnQueue) releaseSlot(machine string) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.nodeLocked(machine).inFlight--
+}
+
+// heldSpawns lists the held requests on every node.
+func (q *hubSpawnQueue) heldSpawns() map[string]string {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	held := map[string]string{}
+	for machine, node := range q.nodes {
+		for id := range node.held {
+			held[id] = machine
+		}
+	}
+	return held
+}
+
+// releaseHeld frees a held request's slot once its row has settled.
+func (q *hubSpawnQueue) releaseHeld(machine, id string) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if node := q.nodes[machine]; node != nil && node.held[id] {
+		delete(node.held, id)
+		node.inFlight--
+	}
 }
 
 // beginSend marks id as being sent unless an abandon holds it.
@@ -203,15 +252,54 @@ func (h *HubServer) pumpNodeSpawns(ctx context.Context, machine string) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	node := q.nodeLocked(machine)
-	for node.inFlight < limit && len(node.queued) > 0 && ctx.Err() == nil {
-		item := node.queued[0]
-		node.queued = node.queued[1:]
-		node.inFlight++
+	start := func(item spawnQueueItem) {
 		h.spawnWorkers.Add(1)
 		go func() {
 			defer h.spawnWorkers.Done()
 			h.runNodeSpawn(ctx, item)
 		}()
+	}
+	// A held request's replay takes over the slot it already holds.
+	for i := 0; i < len(node.queued) && ctx.Err() == nil; {
+		item := node.queued[i]
+		if !node.held[item.task.Request.RequestID] {
+			i++
+			continue
+		}
+		delete(node.held, item.task.Request.RequestID)
+		node.queued = slices.Delete(node.queued, i, i+1)
+		start(item)
+	}
+	for node.inFlight < limit && len(node.queued) > 0 && ctx.Err() == nil {
+		item := node.queued[0]
+		node.queued = node.queued[1:]
+		node.inFlight++
+		start(item)
+	}
+}
+
+// pumpAllNodeSpawns starts what every node has room for, and frees the slots
+// of held requests whose rows have settled. The coordinator runs it each
+// pass, so a slot freed outside the queue (a legacy spawn) is used.
+func (h *HubServer) pumpAllNodeSpawns(ctx context.Context) {
+	for id, machine := range h.spawnQueue.heldSpawns() {
+		current, err := h.inbox.store.spawnTask(ctx, id)
+		if err == nil && spawnPending(current.Status) && current.Node != nil && current.Node.Machine == machine {
+			continue
+		}
+		if err == nil || errors.Is(err, sql.ErrNoRows) {
+			h.spawnQueue.releaseHeld(machine, id)
+		}
+	}
+	q := &h.spawnQueue
+	q.mu.Lock()
+	machines := make([]string, 0, len(q.nodes))
+	for machine := range q.nodes {
+		machines = append(machines, machine)
+	}
+	q.mu.Unlock()
+	for _, machine := range machines {
+		h.pumpNodeSpawns(ctx, machine)
 	}
 }
 
@@ -222,9 +310,25 @@ func (h *HubServer) runNodeSpawn(ctx context.Context, item spawnQueueItem) {
 	q := &h.spawnQueue
 	machine := item.task.Node.Machine
 	replace := false
+	sent := false
 	defer func() {
+		// A send without a definitive result may still be running on the
+		// node: keep its slot until the row settles or a replay takes it.
+		hold := false
+		if sent && !replace {
+			current, err := h.inbox.store.spawnTask(h.closeCtx, item.task.Request.RequestID)
+			hold = err != nil || (spawnPending(current.Status) && current.Node != nil && current.Node.Machine == machine)
+		}
 		q.mu.Lock()
-		q.nodeLocked(machine).inFlight--
+		node := q.nodeLocked(machine)
+		if hold {
+			if node.held == nil {
+				node.held = map[string]bool{}
+			}
+			node.held[item.task.Request.RequestID] = true
+		} else {
+			node.inFlight--
+		}
 		q.mu.Unlock()
 		q.release(item.task.Request.RequestID)
 		if replace {
@@ -262,6 +366,7 @@ func (h *HubServer) runNodeSpawn(ctx context.Context, item spawnQueueItem) {
 		return
 	}
 	h.inbox.store.touchSpawn(ctx, item.task.Request.RequestID, h.now().UTC())
+	sent = true
 	replace = h.dispatchBoundSpawn(ctx, item.task)
 }
 
