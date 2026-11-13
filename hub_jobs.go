@@ -248,6 +248,7 @@ func (h *HubServer) observeActiveJobs(machineID string, active []HubActiveJob, r
 	}
 	previous := record.activeJobs
 	record.activeJobs = make(map[string]HubActiveJob, len(active))
+	record.activeReported = true
 	for _, job := range active {
 		seen[job.JobID] = struct{}{}
 		record.activeJobs[job.JobID] = job

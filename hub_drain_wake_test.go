@@ -94,6 +94,13 @@ func t4473Rig(t *testing.T, tasks []t4473Task) (*t3602Rig, *t3602Clock) {
 // that behaves unlike the pinned hk.
 func t4473RigWith(t *testing.T, tasks []t4473Task, wrap func(http.Handler) http.Handler) (*t3602Rig, *t3602Clock) {
 	t.Helper()
+	return t4473RigAt(t, filepath.Join(t.TempDir(), "inbox.sqlite3"), tasks, wrap)
+}
+
+// t4473RigAt is t4473RigWith on the inbox store at path, so a test can restart
+// the hub on the same store.
+func t4473RigAt(t *testing.T, path string, tasks []t4473Task, wrap func(http.Handler) http.Handler) (*t3602Rig, *t3602Clock) {
+	t.Helper()
 	fake := &fakeHandoffkeep{nextID: 100, status: http.StatusCreated, rows: map[string]*handoffkeepRelayEvent{}}
 	var hk http.Handler = t4473Handler(fake, tasks)
 	if wrap != nil {
@@ -107,7 +114,7 @@ func t4473RigWith(t *testing.T, tasks []t4473Task, wrap func(http.Handler) http.
 	}
 	start, _ := time.Parse(time.RFC3339, t3602Start)
 	clock := &t3602Clock{now: start}
-	return t3602Hub(t, filepath.Join(t.TempDir(), "inbox.sqlite3"), "default", fake, client, clock), clock
+	return t3602Hub(t, path, "default", fake, client, clock), clock
 }
 
 // t4473OldTaskServer models an hk that predates the task project filter: it
@@ -135,7 +142,8 @@ func t4473Sweep(rig *t3602Rig) {
 }
 
 // t4473SetInFlight replaces the host's active jobs; the node record keeps its
-// agent, so the lane stays routable.
+// agent, so the lane stays routable. The host is marked as having reported, as
+// its heartbeat would have done.
 func t4473SetInFlight(rig *t3602Rig, lane string, count int) {
 	active := map[string]HubActiveJob{}
 	for i := range count {
@@ -144,6 +152,7 @@ func t4473SetInFlight(rig *t3602Rig, lane string, count int) {
 	}
 	rig.h.mu.Lock()
 	rig.h.nodes["host-a"].activeJobs = active
+	rig.h.nodes["host-a"].activeReported = true
 	rig.h.mu.Unlock()
 }
 
@@ -258,6 +267,83 @@ func TestDrainWakeSkipsTasksAwaitingDecision(t *testing.T) {
 	want := "2 backlog, 0 in work: dispatch the next batch"
 	if got := t4473Lines(rig); len(got) != 1 || got[0] != want {
 		t.Fatalf("drain lines=%q, want exactly [%q]", got, want)
+	}
+}
+
+// A host that reconnects has a hello that empties its active jobs until the
+// first heartbeat. The sweep in that gap must not read the empty set as a drain
+// (hk 4567, the medium finding on PR #513); the jobs the heartbeat reports
+// decide the next drain.
+func TestDrainWakeNoLineWhileHostReconnects(t *testing.T) {
+	rig, _ := t4473Rig(t, []t4473Task{
+		{ID: 1, Project: "handoffkeep", State: "backlog"},
+	})
+	t4473SetInFlight(rig, t4473Lane, 3)
+	t4473Sweep(rig)
+	rig.h.connect("host-a", "test", "fixture", rig.agent, true)
+	t4473Sweep(rig)
+	if got := t4473Lines(rig); len(got) != 0 {
+		t.Fatalf("a sweep between the hello and the first heartbeat sent %q", got)
+	}
+	heartbeat := func(count int) {
+		active := make([]HubActiveJob, 0, count)
+		for i := range count {
+			active = append(active, HubActiveJob{JobID: "t4567-job-" + strconv.Itoa(i), OwnerLane: t4473Lane})
+		}
+		rig.h.observeActiveJobs("host-a", active, rig.clock.now)
+	}
+	heartbeat(3)
+	t4473Sweep(rig)
+	if got := t4473Lines(rig); len(got) != 0 {
+		t.Fatalf("a lane with three jobs reported by the heartbeat got a drain line: %q", got)
+	}
+	heartbeat(0)
+	t4473Sweep(rig)
+	if got := t4473Lines(rig); len(got) != 1 || got[0] != "1 backlog, 0 in work: dispatch the next batch" {
+		t.Fatalf("drain lines=%q, want exactly one after the heartbeat reports the drain", got)
+	}
+}
+
+// A drain owed while the interval holds out must survive a hub restart (hk
+// 4567, restart loss): the restarted hub sends it once the interval has passed,
+// and the interval itself survives the restart.
+func TestDrainWakeOwedLineSurvivesRestart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "inbox.sqlite3")
+	tasks := []t4473Task{
+		{ID: 1, Project: "handoffkeep", State: "backlog"},
+		{ID: 2, Project: "handoffkeep", State: "unstarted"},
+	}
+	rig, clock := t4473RigAt(t, path, tasks, nil)
+	t4473SetInFlight(rig, t4473Lane, 1)
+	t4473Sweep(rig)
+	t4473SetInFlight(rig, t4473Lane, 0)
+	t4473Sweep(rig)
+	if got := t4473Lines(rig); len(got) != 1 {
+		t.Fatalf("first drain lines=%q, want one", got)
+	}
+	t4473SetInFlight(rig, t4473Lane, 1)
+	t4473Sweep(rig)
+	clock.advance(10 * time.Minute)
+	t4473SetInFlight(rig, t4473Lane, 0)
+	t4473Sweep(rig)
+	if got := t4473Lines(rig); len(got) != 0 {
+		t.Fatalf("a drain inside the interval sent %q", got)
+	}
+	hk := rig.h.handoffkeep
+	if err := rig.h.Close(); err != nil {
+		t.Fatal(err)
+	}
+	rig = t3602Hub(t, path, "default", rig.fake, hk, clock)
+	t4473SetInFlight(rig, t4473Lane, 0)
+	t4473Sweep(rig)
+	if got := t4473Lines(rig); len(got) != 0 {
+		t.Fatalf("the restarted hub sent %q before the interval passed", got)
+	}
+	clock.advance(time.Hour)
+	t4473SetInFlight(rig, t4473Lane, 0)
+	t4473Sweep(rig)
+	if got := t4473Lines(rig); len(got) != 1 || got[0] != t4473Line {
+		t.Fatalf("the restarted hub's owed drain lines=%q, want exactly [%q]", got, t4473Line)
 	}
 }
 

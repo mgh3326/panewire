@@ -182,8 +182,11 @@ type hubNodeRecord struct {
 	lastHeartbeat time.Time
 	agent         *hubAgent
 	activeJobs    map[string]HubActiveJob
-	hostLoad      *HubHostLoad
-	hostMemory    *HubHostMemory
+	// activeReported is true once a heartbeat has carried activeJobs since the
+	// hello that created this record; the hello empties activeJobs until then.
+	activeReported bool
+	hostLoad       *HubHostLoad
+	hostMemory     *HubHostMemory
 	// hostActivity is the last heartbeat's user-input report, nil when the node
 	// sent none (host_activity.go). It is recorded only.
 	hostActivity *HubHostActivity
