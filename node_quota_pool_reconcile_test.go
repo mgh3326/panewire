@@ -140,3 +140,39 @@ func TestQuotaPoolReconcileLeavesRecordsWhenRecordedSessionIsUnreadable(t *testi
 		t.Fatalf("held job pools=%v err=%v, want retained after failed session read", pools, err)
 	}
 }
+
+func TestQuotaPoolReconcileFailsClosedWhenJobDirectoryIsMissing(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	jobs := filepath.Join(root, "jobs")
+	base := time.Date(2026, 11, 13, 0, 0, 0, 0, time.UTC)
+	now := base
+	store := &arbiter.Store{DB: arbiter.StatePath(filepath.Join(root, "data")), Inbox: jobs, Now: func() time.Time { return now }}
+	if _, err := store.Claim(ctx, arbiter.Claim{Job: "missing-dir-job", Lane: "owner", T: "T2", AgentLabel: "label-missing-dir"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.RecordQuotaPool(ctx, arbiter.QuotaRun{Job: "missing-dir-job", Profile: "fixture", Gate: arbiter.Gate{Pool: "example"}}); err != nil {
+		t.Fatal(err)
+	}
+	writeQuotaPoolReconcileSpawnedEvent(t, jobs, "missing-dir-job", "custom")
+	if err := os.RemoveAll(filepath.Join(jobs, "missing-dir-job")); err != nil {
+		t.Fatal(err)
+	}
+	now = base.Add(20 * time.Minute)
+	client, err := NewHubClient(HubClientConfig{URL: "ws://127.0.0.1", MachineID: "node-a", Token: "fixture", JobsInboxRoot: root, AllowInsecureForTests: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.quotaReconcile.app = func() (*fleet.App, error) {
+		return &fleet.App{Arbiter: store}, nil
+	}
+	client.quotaReconcile.agents = func(context.Context, string) ([]nodeHerdrRow, error) {
+		t.Fatal("read Herdr even though a candidate job's session ledger is missing")
+		return nil, nil
+	}
+	client.reconcileNodeQuotaPools(ctx)
+
+	if pools, err := store.QuotaPools(ctx, "missing-dir-job"); err != nil || len(pools) != 1 || pools[0] != "example" {
+		t.Fatalf("missing-dir job pools=%v err=%v, want retained", pools, err)
+	}
+}

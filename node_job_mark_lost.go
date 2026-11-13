@@ -320,11 +320,8 @@ func (client *HubClient) nodeHandoffkeepEnv() (hubHandoffkeepEnv, error) {
 // no role, so a caller that needs one keeps the pane.
 func (client *HubClient) nodeJobRole(name string) (string, error) {
 	root, _, found, err := client.openNodeJobDir(name)
-	if err != nil {
+	if err != nil || !found {
 		return "", err
-	}
-	if !found {
-		return "", errors.New("job ledger is unavailable")
 	}
 	defer root.Close()
 	events, err := readNodeJobLedgerEvents(root)
@@ -357,8 +354,11 @@ func (client *HubClient) nodeJobHerdrSession(name string) (string, error) {
 	client.sessionCacheMu.RUnlock()
 
 	root, _, found, err := client.openNodeJobDir(name)
-	if err != nil || !found {
+	if err != nil {
 		return "", err
+	}
+	if !found {
+		return "", errors.New("job ledger is unavailable")
 	}
 	defer root.Close()
 	events, err := readNodeJobLedgerEvents(root)
