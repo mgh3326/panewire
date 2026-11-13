@@ -794,7 +794,7 @@ func (h *HubServer) resolveIdleWakeOwner(machineID, pane string) idleWakeOwnerRe
 		if route.Parent == "" {
 			return idleWakeOwnerResolution{Reason: idleWakeReasonParentless}
 		}
-		if _, exists := routes[route.Parent]; !exists || !hubAgentLabelPattern.MatchString(route.Parent) {
+		if _, exists := routes[route.Parent]; !exists || !validLaneReference(route.Parent) {
 			return idleWakeOwnerResolution{Reason: idleWakeReasonInvalid}
 		}
 		return idleWakeOwnerResolution{Lane: route.Parent, Label: direct[0]}
@@ -816,7 +816,7 @@ func (h *HubServer) resolveIdleWakeOwner(machineID, pane string) idleWakeOwnerRe
 		return idleWakeOwnerResolution{Reason: idleWakeReasonAmbiguous}
 	}
 	job := matches[0]
-	if _, exists := routes[job.OwnerLane]; !exists || !hubAgentLabelPattern.MatchString(job.OwnerLane) {
+	if _, exists := routes[job.OwnerLane]; !exists || !validLaneReference(job.OwnerLane) {
 		return idleWakeOwnerResolution{Reason: idleWakeReasonInvalid}
 	}
 	return idleWakeOwnerResolution{Lane: job.OwnerLane, JobID: job.JobID, Label: job.AgentLabel}
@@ -865,7 +865,7 @@ func validHubIdleWakeRouteEvent(event hubIdleWakeRouteEvent) bool {
 		return false
 	}
 	if event.Eligible {
-		return hubAgentLabelPattern.MatchString(event.Lane) && validLaneEventText(event.Text) && len(event.Text) <= laneEventTextLimit && event.Reason == "" && (event.JobID == "" || hubJobIDPattern.MatchString(event.JobID))
+		return validLaneReference(event.Lane) && validLaneEventText(event.Text) && len(event.Text) <= laneEventTextLimit && event.Reason == "" && (event.JobID == "" || hubJobIDPattern.MatchString(event.JobID))
 	}
 	return event.Lane == "" && event.Text == "" && event.JobID == "" && validIdleWakeDecisionReason(event.Reason)
 }

@@ -2943,7 +2943,7 @@ func parseHubOutboundRejection(payload []byte) (hubOutboundMessage, hubOutboundR
 			if json.Unmarshal(fields["kind"], &message.Kind) != nil || (message.Kind != "lane.event" && message.Kind != "job.completed" && message.Kind != "job.escalate" && message.Kind != "job.joined") {
 				return hubOutboundMessage{}, reject
 			}
-			if json.Unmarshal(fields["lane"], &message.Lane) != nil || json.Unmarshal(fields["event_id"], &message.EventID) != nil || json.Unmarshal(fields["deliver"], &message.DeliverPolicy) != nil || !hubAgentLabelPattern.MatchString(message.Lane) || message.EventID < 1 {
+			if json.Unmarshal(fields["lane"], &message.Lane) != nil || json.Unmarshal(fields["event_id"], &message.EventID) != nil || json.Unmarshal(fields["deliver"], &message.DeliverPolicy) != nil || !validLaneReference(message.Lane) || message.EventID < 1 {
 				return hubOutboundMessage{}, reject
 			}
 			if _, valid := parseRelayDeliveryPolicy(message.DeliverPolicy); !valid || !validRelayInjectedText(message.Kind, message.Text) {
@@ -2968,7 +2968,7 @@ func parseHubOutboundRejection(payload []byte) (hubOutboundMessage, hubOutboundR
 			// Older hubs acknowledge lane events with the shared relay
 			// envelope only. The transport job_id still identifies the
 			// producer's outbox row, so it is safe to retire that row below.
-			if len(fields) != 7 && (len(fields) != 9 || json.Unmarshal(fields["lane"], &message.Lane) != nil || json.Unmarshal(fields["producer_event_id"], &message.ProducerEventID) != nil || !hubAgentLabelPattern.MatchString(message.Lane) || !validLaneEventID(message.ProducerEventID)) {
+			if len(fields) != 7 && (len(fields) != 9 || json.Unmarshal(fields["lane"], &message.Lane) != nil || json.Unmarshal(fields["producer_event_id"], &message.ProducerEventID) != nil || !validLaneReference(message.Lane) || !validLaneEventID(message.ProducerEventID)) {
 				return hubOutboundMessage{}, reject
 			}
 		} else if len(fields) == 8 {

@@ -144,7 +144,7 @@ func TestLanesWriteLeadingHyphenRoundTripsThroughHotLoader(t *testing.T) {
 	lanesProjectionWrite(t, path, `{"lanes":{}}`)
 	hub := lanesWriteHub(t, path)
 
-	create := lanesWriteRequest(t, hub, http.MethodPut, "/v1/lanes/-x", "fixture-operator-token", `{"machine":"machine-a","pane":"w1:p1"}`)
+	create := lanesWriteRequest(t, hub, http.MethodPut, "/v1/lanes/-owner", "fixture-operator-token", `{"machine":"machine-a","pane":"w1:p1"}`)
 	if create.Code != http.StatusCreated {
 		t.Fatalf("leading-hyphen create status=%d body=%s", create.Code, create.Body.String())
 	}
@@ -152,7 +152,7 @@ func TestLanesWriteLeadingHyphenRoundTripsThroughHotLoader(t *testing.T) {
 		t.Helper()
 		lanes := lanesProjectionResponse(t, lanesProjectionGet(hub, "fixture-operator-token"))
 		for _, lane := range lanes {
-			if lane["lane"] == "-x" {
+			if lane["lane"] == "-owner" {
 				return
 			}
 		}
@@ -166,23 +166,23 @@ func TestLanesWriteLeadingHyphenRoundTripsThroughHotLoader(t *testing.T) {
 	}
 	assertVisible("after unrelated write")
 
-	remove := lanesWriteRequest(t, hub, http.MethodDelete, "/v1/lanes/-x", "fixture-operator-token", "")
-	if remove.Code != http.StatusOK || remove.Body.String() != `{"lane":"-x","removed":true}`+"\n" {
+	remove := lanesWriteRequest(t, hub, http.MethodDelete, "/v1/lanes/-owner", "fixture-operator-token", "")
+	if remove.Code != http.StatusOK || remove.Body.String() != `{"lane":"-owner","removed":true}`+"\n" {
 		t.Fatalf("leading-hyphen remove status=%d body=%q", remove.Code, remove.Body.String())
 	}
 }
 
-func TestLanesWriteAcceptsLegacyParentName(t *testing.T) {
+func TestLanesWriteAcceptsHistoricalDottedParent(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "lanes.json")
 	lanesProjectionWrite(t, path, `{"lanes":{"legacy.parent":{"machine":"machine-a","pane":"w1:p1"}}}`)
 	hub := lanesWriteHub(t, path)
 
 	writer := lanesWriteRequest(t, hub, http.MethodPut, "/v1/lanes/lane-child", "fixture-operator-token", `{"machine":"machine-a","pane":"w1:p2","parent":"legacy.parent"}`)
 	if writer.Code != http.StatusCreated {
-		t.Fatalf("legacy-parent create status=%d body=%s", writer.Code, writer.Body.String())
+		t.Fatalf("parent create status=%d body=%s", writer.Code, writer.Body.String())
 	}
 	if got := decodeLaneProjection(t, writer.Body.Bytes()); got.Parent != "legacy.parent" {
-		t.Fatalf("legacy-parent projection=%+v", got)
+		t.Fatalf("parent projection=%+v", got)
 	}
 	lanes := lanesProjectionResponse(t, lanesProjectionGet(hub, "fixture-operator-token"))
 	seen := false
