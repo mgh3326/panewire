@@ -805,6 +805,7 @@ func (h *HubServer) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/jobs/close", h.handleJobClose)
 	mux.HandleFunc("GET /v1/jobs/orphaned", h.handleOrphanedJobs)
 	mux.HandleFunc("POST /v1/jobs/reassign", h.handleReassignJob)
+	mux.HandleFunc("POST /v1/jobs/escalate-author", h.handleEscalateAuthor)
 	mux.HandleFunc("GET /v1/agent", h.handleAgent)
 	mux.HandleFunc("GET /v1/events", h.handleEvents)
 	mux.HandleFunc("POST /v1/relay/events", h.handleRelayIngress)

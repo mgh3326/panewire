@@ -273,7 +273,7 @@ func validID(s string) bool { return idPattern.MatchString(s) && s != "." && s !
 func (a *App) Run(ctx context.Context, args []string) error {
 	a.flushPlacements()
 	if len(args) == 0 || args[0] == "help" || args[0] == "--help" || args[0] == "-h" {
-		fmt.Fprintln(a.Out, "Usage: panewire <spawn|delegate|done|escalate|restore|reap|prune|lanes-missing|hosts|profiles|find|name-sync|artifacts|simulate|plan|resolve|preflight> [options]")
+		fmt.Fprintln(a.Out, "Usage: panewire <spawn|delegate|done|escalate|escalate-author|restore|reap|prune|lanes-missing|hosts|profiles|find|name-sync|artifacts|simulate|plan|resolve|preflight> [options]")
 		return nil
 	}
 	if args[0] == "lead" {
@@ -282,7 +282,7 @@ func (a *App) Run(ctx context.Context, args []string) error {
 	if len(args) > 1 && (args[1] == "--help" || args[1] == "-h") {
 		return a.help(args[0])
 	}
-	if a.EnforceTrust && (args[0] == "spawn" || args[0] == "work" || args[0] == "delegate" || args[0] == "plan" || args[0] == "resolve" || args[0] == "preflight" || args[0] == "_spawn-stdin" || args[0] == "done" || args[0] == "escalate" || args[0] == "restore" || args[0] == "reap" || args[0] == "prune" || args[0] == "artifacts" || args[0] == "_watch") {
+	if a.EnforceTrust && (args[0] == "spawn" || args[0] == "work" || args[0] == "delegate" || args[0] == "plan" || args[0] == "resolve" || args[0] == "preflight" || args[0] == "_spawn-stdin" || args[0] == "done" || args[0] == "escalate" || args[0] == "escalate-author" || args[0] == "restore" || args[0] == "reap" || args[0] == "prune" || args[0] == "artifacts" || args[0] == "_watch") {
 		if e := a.trust(); e != nil {
 			return e
 		}
@@ -308,6 +308,8 @@ func (a *App) Run(ctx context.Context, args []string) error {
 		return a.SubmitSpawn(ctx, s)
 	case "done", "escalate", "restore":
 		return a.lifecycle(ctx, args[0], args[1:])
+	case "escalate-author":
+		return a.escalateAuthorCmd(ctx, args[1:])
 	case "reap", "prune":
 		return a.hygiene(ctx, args[0], args[1:])
 	case "hosts", "profiles", "find", "name-sync", "lanes-missing":
@@ -344,6 +346,8 @@ func (a *App) help(cmd string) error {
 		fmt.Fprintln(a.Out, "Usage: panewire done JOB [--report PATH] [--result FILE]")
 	case "escalate":
 		fmt.Fprintln(a.Out, "Usage: panewire escalate JOB --question TEXT [--report PATH]")
+	case "escalate-author":
+		fmt.Fprintln(a.Out, "Usage: panewire escalate-author --task ID --job JOB --pr owner/repo#N --round N --findings-file PATH (round 5 of the review-round rule: start the author again one ladder step up on the same worktree; rc 2 = no_rung|quota_refused)")
 	case "restore":
 		fmt.Fprintln(a.Out, "Usage: panewire restore JOB (rebind a released job to its verified existing pane)")
 	case "reap", "prune":
