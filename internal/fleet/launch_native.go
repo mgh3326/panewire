@@ -190,6 +190,13 @@ func (a *App) launchCatalog(ctx context.Context, freshness CatalogFreshness, fre
 	if err != nil {
 		return stale
 	}
+	if data.Info.Source == catalogSourceServer {
+		for _, warning := range data.Warnings {
+			if strings.HasPrefix(warning, "catalog_row_invalid:") {
+				a.warn("%s", warning)
+			}
+		}
+	}
 	c := overlayLaunchCatalog(catalogDataRows(data), data.Info.Stale)
 	c.cached = data.Info.Source == catalogSourceCache && data.Info.AgeS != nil && client.fresh(*data.Info.AgeS)
 	return c
