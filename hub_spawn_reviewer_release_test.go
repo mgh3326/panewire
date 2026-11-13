@@ -21,7 +21,7 @@ func reviewerReleaseRequest(role string, next bool) fleet.Submission {
 	request.Args = append([]string(nil), request.Args...)
 	for i, arg := range request.Args {
 		switch {
-		case arg == "worker":
+		case arg == "implementer":
 			request.Args[i] = role
 		case next && arg == "test-job":
 			request.Args[i] = "test-job-r2"
@@ -109,9 +109,8 @@ func TestReviewerRelease(t *testing.T) {
 		{name: "a working pane of a failed holder keeps the hold", role: "reviewer", status: "failed", outcome: failedLaunch, pane: row("working"), since: 11 * time.Minute, wantOps: closeOps[:1]},
 		{name: "a pane inside the grace keeps the hold", role: "reviewer", status: "succeeded", outcome: succeeded, pane: row("done"), since: 9 * time.Minute, wantOps: closeOps[:1]},
 		{name: "a blocked pane inside the grace keeps the hold", role: "reviewer", status: "failed", outcome: failedLaunch, pane: row("blocked"), since: 9 * time.Minute, wantOps: closeOps[:1]},
-		{name: "a worker keeps the hold", role: "worker", status: "succeeded", outcome: succeeded, pane: row("done"), since: 11 * time.Minute, wantOps: closeOps[:1]},
-		{name: "a failed worker blocked at a prompt keeps the hold", role: "worker", status: "failed", outcome: failedLaunch, pane: row("blocked"), since: 11 * time.Minute, wantOps: closeOps[:1]},
-		{name: "a tester keeps the hold", role: "tester", status: "succeeded", outcome: succeeded, pane: row("done"), since: 11 * time.Minute, wantOps: closeOps[:1]},
+		{name: "an implementer keeps the hold", role: "implementer", status: "succeeded", outcome: succeeded, pane: row("done"), since: 11 * time.Minute, wantOps: closeOps[:1]},
+		{name: "a failed implementer blocked at a prompt keeps the hold", role: "implementer", status: "failed", outcome: failedLaunch, pane: row("blocked"), since: 11 * time.Minute, wantOps: closeOps[:1]},
 		{name: "a pane under another label keeps the hold", role: "reviewer", status: "succeeded", outcome: succeeded, pane: nodeAgentRow{PaneID: roleHeldPane, Name: "other-label", AgentStatus: "done", Agent: "claude", Cwd: cwd}, since: 11 * time.Minute, wantOps: closeOps[:1]},
 		{name: "a plain shell pane with no status keeps the hold", role: "reviewer", status: "succeeded", outcome: succeeded, pane: nodeAgentRow{PaneID: roleHeldPane, Name: "test-job", Cwd: cwd}, since: 11 * time.Minute, wantOps: closeOps[:1]},
 		{name: "an unreachable node keeps the hold", role: "reviewer", status: "succeeded", outcome: succeeded, pane: row("done"), since: 11 * time.Minute, disconnected: true},

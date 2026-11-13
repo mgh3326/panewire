@@ -60,7 +60,7 @@ func TestRoleReleaseOfEscalatedHolder(t *testing.T) {
 			if result.status != http.StatusAccepted || len(jobs.writes()) != 0 {
 				t.Fatalf("status=%d body=%s writes=%v", result.status, result.body, jobs.writes())
 			}
-			if owner, job, _, err := hub.inbox.store.spawnRoleOwner(t.Context(), "42:worker"); err != nil || job != "test-job-r2" || owner == held.Request.RequestID {
+			if owner, job, _, err := hub.inbox.store.spawnRoleOwner(t.Context(), "42:implementer"); err != nil || job != "test-job-r2" || owner == held.Request.RequestID {
 				t.Fatalf("reservation not moved: %s %s %v", owner, job, err)
 			}
 			if lines := heldRoleLines(t, sink); len(lines) != 0 {
@@ -92,7 +92,7 @@ func TestRoleReleaseOfRecordlessHolder(t *testing.T) {
 		if result.status != http.StatusAccepted || len(jobs.writes()) != 0 {
 			t.Fatalf("status=%d body=%s writes=%v", result.status, result.body, jobs.writes())
 		}
-		if owner, job, _, err := hub.inbox.store.spawnRoleOwner(t.Context(), "42:worker"); err != nil || job != "test-job-r2" || owner == held.Request.RequestID {
+		if owner, job, _, err := hub.inbox.store.spawnRoleOwner(t.Context(), "42:implementer"); err != nil || job != "test-job-r2" || owner == held.Request.RequestID {
 			t.Fatalf("reservation not moved: %s %s %v", owner, job, err)
 		}
 		if lines := heldRoleLines(t, sink); len(lines) != 0 {
@@ -212,7 +212,7 @@ func assertHeldLine(t *testing.T, sink *lockedBuffer, branch, hk, probe, reason 
 		t.Fatalf("held lines=%d log=%s", len(lines), sink.String())
 	}
 	line := lines[0]
-	want := map[string]string{"level": "INFO", "branch": branch, "hk_read": hk, "probe": probe, "probe_reason": reason, "role_key": "42:worker", "holder_job": "test-job", "holder_request": durableSpawnRequest().RequestID, "job": "test-job-r2", "request": roleSecondRequest().RequestID}
+	want := map[string]string{"level": "INFO", "branch": branch, "hk_read": hk, "probe": probe, "probe_reason": reason, "role_key": "42:implementer", "holder_job": "test-job", "holder_request": durableSpawnRequest().RequestID, "job": "test-job-r2", "request": roleSecondRequest().RequestID}
 	for key, value := range want {
 		if line[key] != value {
 			t.Fatalf("%s=%v, want %q; line=%v", key, line[key], value, line)

@@ -22,7 +22,10 @@ type Stop struct {
 var (
 	// devin matches the phrase anywhere in the status line: the live screen
 	// prefixes it with "▲ Something went wrong — ".
-	devin       = regexp.MustCompile(`(?i)reached free model rate limit(?:\s|[·.…:]|$)`)
+	devin = regexp.MustCompile(`(?i)reached free model rate limit(?:\s|[·.…:]|$)`)
+	// devinPaid is the paid Devin weekly window spent (hk 4545). It is the devin
+	// pool, not devin-free: paid devin-ds41 spends the account's paid window.
+	devinPaid   = regexp.MustCompile(`(?i)quota exhausted\s*[—–-]\s*your weekly usage quota has been exhausted(?:\s|[·.…:]|$)`)
 	claude      = regexp.MustCompile(`(?i)^you've hit your (?:(?:weekly|session) )?limit(?:\s|[·.:]|$)`)
 	codexSignal = regexp.MustCompile(`(?i)^you've hit your usage limit[.·:].*try again at`)
 	codex       = regexp.MustCompile(`(?i)try again at\s+([0-9]{1,2}:[0-9]{2}\s*(?:AM|PM)?)(?:\s+(UTC|GMT|Z))?`)
@@ -45,6 +48,8 @@ func Classify(screen string, now time.Time, local *time.Location) (Stop, bool) {
 	switch {
 	case devin.MatchString(screen):
 		out.Pool = "devin-free"
+	case devinPaid.MatchString(screen):
+		out.Pool = "devin"
 	case codexSignal.MatchString(screen) && (strings.Contains(strings.ToLower(screen), "limit") || strings.Contains(strings.ToLower(screen), "quota")):
 		out.Pool = "codex"
 	case claude.MatchString(screen):
@@ -102,7 +107,7 @@ func Classify(screen string, now time.Time, local *time.Location) (Stop, bool) {
 		return out, true
 	}
 	clockMatch := codex.FindStringSubmatch(screen)
-	if len(clockMatch) == 0 && out.Pool == "devin-free" {
+	if len(clockMatch) == 0 && (out.Pool == "devin-free" || out.Pool == "devin") {
 		clockMatch = atClock.FindStringSubmatch(screen)
 	}
 	if m := clockMatch; m != nil {
@@ -215,7 +220,7 @@ func statusBlock(screen string) (string, bool) {
 // limitRow reports a row that is a CLI limit line.
 func limitRow(line string) bool {
 	line = strings.TrimLeft(line, statusPrefixes)
-	return devin.MatchString(line) || claude.MatchString(line) || codexSignal.MatchString(line)
+	return devin.MatchString(line) || devinPaid.MatchString(line) || claude.MatchString(line) || codexSignal.MatchString(line)
 }
 
 // userTurn reports whether line starts a user turn: the prompt mark of devin,

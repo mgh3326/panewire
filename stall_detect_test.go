@@ -129,7 +129,7 @@ func writeJobEvent(t *testing.T, inbox, jobID string, seq int, kind string, payl
 // claimJob writes the standard claim/quota/spawn journal trio for a devin job.
 func claimJob(t *testing.T, fx *stallFixture, jobID, pane string, payloadExtra map[string]any, at time.Time) {
 	t.Helper()
-	claim := map[string]any{"agent_label": "w", "owner_lane": "owner-1", "parent_lane": "director-1", "role": "worker", "t_level": "T2"}
+	claim := map[string]any{"agent_label": "w", "owner_lane": "owner-1", "parent_lane": "director-1", "role": "implementer", "t_level": "T2"}
 	for k, v := range payloadExtra {
 		claim[k] = v
 	}

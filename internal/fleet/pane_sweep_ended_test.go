@@ -61,7 +61,7 @@ func TestEndedSweepKeepsACompletedWorkerWithAnOpenPR(t *testing.T) {
 	f := newPaneSweepFixture(t)
 	f.withGit(g)
 	cwd := g.worktree(t, "w")
-	f.job("w", "worker", "42", map[string]any{"cwd": cwd})
+	f.job("w", "implementer", "42", map[string]any{"cwd": cwd})
 	putEvent(t, f.a, "w", "job.completed", map[string]any{})
 	f.prChanges["42"] = []PRChange{{Number: 9, State: "open", Head: paneSweepTestHead, Repo: "mgh3326/panewire"}}
 	if closes := f.endedSweep(61, time.Hour); len(closes) != 0 || len(f.closed()) != 0 {

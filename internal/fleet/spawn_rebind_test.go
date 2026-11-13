@@ -200,7 +200,7 @@ func TestRespawnRebindsTerminalParent(t *testing.T) {
 // still comes from its hk record.
 func TestRespawnRebindsLocallyResolvedParent(t *testing.T) {
 	fx := newRebindFixture(t, "lost", rebindParent)
-	putEvent(t, fx.a, rebindParent, "job.claim", map[string]any{"owner_lane": "owner", "task_id": "42", "t_level": "T1", "role": "worker"})
+	putEvent(t, fx.a, rebindParent, "job.claim", map[string]any{"owner_lane": "owner", "task_id": "42", "t_level": "T1", "role": "implementer"})
 	if e := fx.a.Spawn(context.Background(), fx.s); e != nil {
 		t.Fatal(e)
 	}
@@ -294,7 +294,7 @@ func TestTakeoverFailureBeforeCommitKeepsParentBinding(t *testing.T) {
 // request is replayed. A parent that ran elsewhere keeps no note here.
 func TestParentJobSuccessorIsNotedOnLocalParent(t *testing.T) {
 	fx := newRebindFixture(t, "spawned", rebindParent)
-	putEvent(t, fx.a, rebindParent, "job.claim", map[string]any{"owner_lane": "owner", "task_id": "42", "t_level": "T1", "role": "worker"})
+	putEvent(t, fx.a, rebindParent, "job.claim", map[string]any{"owner_lane": "owner", "task_id": "42", "t_level": "T1", "role": "implementer"})
 	if e := fx.a.Spawn(context.Background(), fx.s); e != nil {
 		t.Fatal(e)
 	}
@@ -398,7 +398,7 @@ func TestRespawnRebindUnconfirmedAnswerIsRecorded(t *testing.T) {
 // cannot be read is replaced all the same.
 func TestRespawnUnreadableParentStateStillRebinds(t *testing.T) {
 	fx := newRebindFixture(t, "lost", rebindParent)
-	putEvent(t, fx.a, rebindParent, "job.claim", map[string]any{"owner_lane": "owner", "task_id": "42", "t_level": "T1", "role": "worker"})
+	putEvent(t, fx.a, rebindParent, "job.claim", map[string]any{"owner_lane": "owner", "task_id": "42", "t_level": "T1", "role": "implementer"})
 	delete(fx.store.records, rebindParent)
 	if e := fx.a.Spawn(context.Background(), fx.s); e != nil {
 		t.Fatal(e)
@@ -461,11 +461,7 @@ func TestRespawnRetryAfterRebindDoesNotRebindAgain(t *testing.T) {
 func TestRespawnChildBesideParentKeepsTask(t *testing.T) {
 	for _, tc := range []struct{ name, role, routing string }{
 		{"reviewer", "reviewer", ""},
-		{"tester", "tester", ""},
-		{"consult", "counsel", ""},
-		{"delegated reader", "worker", "explorer"},
-		{"delegated verifier", "worker", "verifier"},
-		{"delegated reviewer", "reviewer", "reviewer"},
+		{"consult", "consult", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fx := newRebindFixture(t, "completed", rebindParent)
@@ -493,12 +489,9 @@ func TestRespawnReplacementSeatSurvivesTheEnvelopes(t *testing.T) {
 		name, role, routing string
 		want                bool
 	}{
-		{"worker", "worker", "", true},
-		{"implementer", "worker", "implementer", true},
-		{"reader", "worker", "explorer", false},
-		{"verifier", "worker", "verifier", false},
-		{"reviewer", "reviewer", "reviewer", false},
-		{"consult", "counsel", "consult", false},
+		{"implementer", "implementer", "", true},
+		{"reviewer", "reviewer", "", false},
+		{"consult", "consult", "", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := Spawn{Job: "new-job", Label: "new-job", Profile: "sonnet", T: "T1", Role: tc.role, RoutingRole: tc.routing, ParentJob: rebindParent, Report: "/r/report.md"}
@@ -533,7 +526,7 @@ func TestRespawnReplacementSeatSurvivesTheEnvelopes(t *testing.T) {
 
 // hk refuses from == to; a job that names itself as parent is not a replacement.
 func TestRespawnSameJobIsNotAReplacement(t *testing.T) {
-	if (Spawn{Job: rebindParent, Inherited: rebindParent, Role: "worker"}).replacesParent() {
+	if (Spawn{Job: rebindParent, Inherited: rebindParent, Role: "implementer"}).replacesParent() {
 		t.Fatal("a job cannot replace itself")
 	}
 }
@@ -558,7 +551,7 @@ func (fx *rebindFixture) assertNotice(t *testing.T, want bool) {
 func TestTakeoverRetryAlreadyBoundToSuccessorRecordsRebound(t *testing.T) {
 	fx := newRebindFixture(t, "spawned", "job-a")
 	fx.claimedBy = fx.s.Label
-	putEvent(t, fx.a, rebindParent, "job.claim", map[string]any{"owner_lane": "owner", "task_id": "42", "t_level": "T1", "role": "worker"})
+	putEvent(t, fx.a, rebindParent, "job.claim", map[string]any{"owner_lane": "owner", "task_id": "42", "t_level": "T1", "role": "implementer"})
 	if err := fx.a.Spawn(context.Background(), fx.s); err != nil {
 		t.Fatal(err)
 	}
@@ -580,7 +573,7 @@ func TestTakeoverRetryAlreadyBoundToSuccessorRecordsRebound(t *testing.T) {
 func TestTakeoverRefusedAfterCommitKeepsParentAndNotifies(t *testing.T) {
 	fx := newRebindFixture(t, "spawned", rebindParent)
 	fx.rebindFail = `{"error":"conflict","reason":"cannot rebind"}`
-	putEvent(t, fx.a, rebindParent, "job.claim", map[string]any{"owner_lane": "owner", "task_id": "42", "t_level": "T1", "role": "worker"})
+	putEvent(t, fx.a, rebindParent, "job.claim", map[string]any{"owner_lane": "owner", "task_id": "42", "t_level": "T1", "role": "implementer"})
 	if err := fx.a.Spawn(context.Background(), fx.s); err != nil {
 		t.Fatal(err)
 	}

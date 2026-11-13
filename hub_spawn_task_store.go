@@ -440,6 +440,15 @@ func (s *laneInboxStore) releaseCompletedSpawnRole(parent context.Context, id, r
 	return err
 }
 
+// releaseCompletedSpawnRoleOf frees whatever slot the finished request id
+// holds, whatever its key says.
+func (s *laneInboxStore) releaseCompletedSpawnRoleOf(parent context.Context, id string) error {
+	ctx, done := s.op(parent)
+	defer done()
+	_, err := s.db.ExecContext(ctx, s.q(`UPDATE spawn_reservations SET task_role=NULL WHERE request_id=? AND task_role IS NOT NULL AND EXISTS(SELECT 1 FROM spawn_operations WHERE request_id=? AND status IN ('succeeded','failed'))`), id, id)
+	return err
+}
+
 func spawnOutcomeStatus(outcome hubSpawnOutcome) string {
 	if outcome.RC == 0 {
 		return "succeeded"

@@ -62,7 +62,7 @@ func (f *settleFixture) recordSpawn(t *testing.T, pane string) {
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		t.Fatal(err)
 	}
-	event, _ := json.Marshal(map[string]any{"kind": "job.spawned", "payload": map[string]any{"pane_id": pane, "herdr_session": "worker", "host": "machine-a", "profile": "codex-terra", "model_id": "m", "role": "worker", "cwd": "/work/a"}})
+	event, _ := json.Marshal(map[string]any{"kind": "job.spawned", "payload": map[string]any{"pane_id": pane, "herdr_session": "worker", "host": "machine-a", "profile": "codex-terra", "model_id": "m", "role": "implementer", "cwd": "/work/a"}})
 	if err := os.WriteFile(filepath.Join(dir, "01.json"), event, 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -89,7 +89,7 @@ func TestSpawnSettleLandedPaneKeepsWatchingAndReportsResult(t *testing.T) {
 	if result == nil || result.RC != 0 || result.Error != "" || result.Pane != "w1:p1" || result.JobID != "job-a" {
 		t.Fatalf("landed spawn settled as %+v", result)
 	}
-	want := fleet.ExecutionReceipt{Job: "job-a", Host: "machine-a", Pane: "w1:p1", Profile: "codex-terra", Model: "m", Role: "worker", CWD: "/work/a", Label: "label-a", Kind: firstNonempty(fleet.ProfileKind("codex-terra"), "claude")}
+	want := fleet.ExecutionReceipt{Job: "job-a", Host: "machine-a", Pane: "w1:p1", Profile: "codex-terra", Model: "m", Role: "implementer", CWD: "/work/a", Label: "label-a", Kind: firstNonempty(fleet.ProfileKind("codex-terra"), "claude")}
 	if result.Receipt == nil || *result.Receipt != want {
 		t.Fatalf("receipt %+v, want %+v", result.Receipt, want)
 	}
