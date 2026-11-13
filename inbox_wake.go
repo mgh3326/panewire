@@ -38,7 +38,7 @@ var inboxWakeUrgency = []string{"info", "ready", "findings", "automation-failed"
 // Every type not named here (merged, closed, progress, report, ack, info,
 // idle-wake) is info.
 var inboxWakeTypeKinds = map[string]string{
-	"decision": "decision", "order": "decision", "deploy-approval": "decision",
+	"decision": "decision", "order": "order", "deploy-approval": "decision",
 	"blocked": "blocked", "watch-hold": "blocked", "culprit-hold": "blocked",
 	"automation-failed": "automation-failed",
 	"findings":          "findings",
@@ -88,6 +88,10 @@ func inboxWakeKind(kind string, e hubJobEventPayload) string {
 }
 
 func inboxWakeRank(kind string) int {
+	// Orders keep their declared display kind, but share decision urgency.
+	if kind == "order" {
+		kind = "decision"
+	}
 	for rank, k := range inboxWakeUrgency {
 		if k == kind {
 			return rank
