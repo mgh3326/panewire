@@ -25,7 +25,7 @@ const (
 	relayReplayMaxAttempts = 3
 	// relayUnconfirmedMarkLane is the owner_lane of the durable marker rows
 	// a relay.unconfirmed leaves behind (#1002). The slash is load-bearing:
-	// the value matches neither hubAgentLabelPattern nor laneNamePattern, so
+	// the value matches neither hubAgentLabelPattern nor LaneNamePattern, so
 	// no producer event and no lanes-file entry can ever name it, and no
 	// marker row can ever resolve a route or count as a lane's backlog.
 	relayUnconfirmedMarkLane = "hub/unconfirmed"

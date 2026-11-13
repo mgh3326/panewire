@@ -98,7 +98,6 @@ func TestRequestRefusalCodesCoverEveryReadingIndependentRefusal(t *testing.T) {
 	}{
 		{"operator request on an ordinary rung", "operator_request_not_applicable", func(s *Spawn) { s.OperatorRequest, s.Purpose = "hk:task/3836", "operator-request" }},
 		{"invalid operator request ref", "operator_request_ref_invalid", func(s *Spawn) { s.OperatorRequest, s.Purpose = "task 3836", "operator-request" }},
-		{"requested-by without operator request", "requested_by_requires_operator_request", func(s *Spawn) { s.RequestedBy = "operator" }},
 		{"unknown effort rung", "unknown_effort_rung", func(s *Spawn) { s.Effort = "turbo" }},
 		{"retired or unknown profile", "profile_sonnet_is_unknown_or_retired", func(*Spawn) {}},
 	} {

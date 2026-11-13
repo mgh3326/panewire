@@ -346,6 +346,19 @@ func TestHubAuthConfigRejects(t *testing.T) {
 	}
 }
 
+func TestHubAuthKeepsLegacyDottedInboxScopes(t *testing.T) {
+	grants, err := parseHubScopes("inbox.read:legacy.parent,inbox.ack:legacy.parent,inbox.read:*")
+	if err != nil {
+		t.Fatalf("legacy dotted scopes were rejected: %v", err)
+	}
+	if !hubGrantsAllow(grants, hubScopeInboxRead, "legacy.parent") || !hubGrantsAllow(grants, hubScopeInboxAck, "legacy.parent") {
+		t.Fatalf("legacy dotted inbox resource is no longer authorized: %+v", grants)
+	}
+	if LaneNamePattern.MatchString("legacy.parent") {
+		t.Fatal("fixture must remain outside the new lane-name contract")
+	}
+}
+
 func pw2WriteAuth(t *testing.T, path, body string, mode os.FileMode) {
 	t.Helper()
 	temporary := path + ".next"

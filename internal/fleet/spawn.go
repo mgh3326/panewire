@@ -1113,9 +1113,20 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 	return a.afterSpawn(ctx, s, false)
 }
 
+// gateRequestedBy is the requested-by a spawn's gate requests may carry: the
+// operator request's requester, only beside the operator request itself. A
+// bare --requested-by names the lane a failed spawn notifies and never
+// reaches the gate (hk 3080).
+func gateRequestedBy(s Spawn) string {
+	if s.OperatorRequest == "" {
+		return ""
+	}
+	return s.RequestedBy
+}
+
 // spawnQuotaRequest is the catalog and gate request for a spawn's seat and rung.
 func (a *App) spawnQuotaRequest(s Spawn, seat Seat, effort string) QuotaRequest {
-	return QuotaRequest{Profile: seat.Canon, GateProfile: seat.gateName(), Effort: effort, Role: s.Role, OperatorRequest: s.OperatorRequest, RequestedBy: s.RequestedBy, Purpose: s.Purpose, AccountKey: s.AccountKey, E6Arm: a.e6Arm(s.E6Arm, s.e6ArmLocked), E6ArmLocked: s.e6ArmLocked}
+	return QuotaRequest{Profile: seat.Canon, GateProfile: seat.gateName(), Effort: effort, Role: s.Role, OperatorRequest: s.OperatorRequest, RequestedBy: gateRequestedBy(s), Purpose: s.Purpose, AccountKey: s.AccountKey, E6Arm: a.e6Arm(s.E6Arm, s.e6ArmLocked), E6ArmLocked: s.e6ArmLocked}
 }
 
 // checkLaunchRow is the launch-row half of admitLaunch: the catalog row the

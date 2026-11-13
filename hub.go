@@ -680,7 +680,7 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 	}
 	controlPlaneLanes := make(map[string]struct{}, len(config.ControlPlaneLanes))
 	for _, lane := range config.ControlPlaneLanes {
-		if !laneNamePattern.MatchString(lane) {
+		if !LaneNamePattern.MatchString(lane) {
 			return nil, errors.New("hub control-plane lanes are invalid")
 		}
 		if _, duplicate := controlPlaneLanes[lane]; duplicate {
@@ -975,7 +975,7 @@ func (h *HubServer) handleJobs(writer http.ResponseWriter, request *http.Request
 		hubUnauthorized(writer)
 		return
 	}
-	if lane != "" && !validReportRelayLaneName(lane) {
+	if lane != "" && !validLaneReference(lane) {
 		http.Error(writer, "invalid owner_lane", http.StatusBadRequest)
 		return
 	}
@@ -1295,7 +1295,7 @@ func (h *HubServer) handleAgentMessageContext(ctx context.Context, machineID, re
 					h.lateRegisterJobCompletion(machineID, event, received)
 				}
 			}
-			if message.Kind == "job.lost" && h.observePoolCooling(event.Reason, received) && !validReportRelayLaneName(event.OwnerLane) {
+			if message.Kind == "job.lost" && h.observePoolCooling(event.Reason, received) && !validLaneReference(event.OwnerLane) {
 				// This acknowledges in-memory cooling, not durable relay persistence.
 				agent.queuePersisted(hubRelayPersistedEvent{Type: "pool.cooling.ack", JobID: event.JobID, Kind: message.Kind, Epoch: event.Epoch, ReportPath: event.ReportPath, Reason: event.Reason, EventID: 1, ProducerEventID: event.EventID})
 			}
