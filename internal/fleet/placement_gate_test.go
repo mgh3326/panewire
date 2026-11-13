@@ -155,3 +155,95 @@ func TestPlacementAutoReranksAfterARefusal(t *testing.T) {
 		t.Fatalf("events %v, want %v", log, want)
 	}
 }
+
+// afterARefusal runs an auto placement over hot-a, hot-b and hot-c in which
+// hot-a refuses; change edits the hub's answer between the plan and the
+// fallback. It returns the hosts launched on, in order.
+func afterARefusal(t *testing.T, initial []HostView, change func(hosts []HostView) []HostView) []string {
+	t.Helper()
+	var log []string
+	a, s := gateFixtureSSH(t, &log, func(args string) Result {
+		if !strings.Contains(args, "_spawn-stdin") {
+			return Result{}
+		}
+		for _, host := range []string{"hot-a", "hot-b", "hot-c"} {
+			if strings.Contains(args, host) {
+				log = append(log, "launch:"+host)
+				if host == "hot-a" {
+					return Result{Code: 3, Err: "full"}
+				}
+			}
+		}
+		return Result{Out: "OK pane=w:p2\n"}
+	})
+	a.Config.Placement = map[string]any{"load_threshold": 0.8}
+	src := a.Source.(loggingSource).fakePlacementSource
+	src.hosts = initial
+	a.Config.Hosts = map[string]map[string]any{"hot-a": {}, "hot-b": {}, "hot-c": {}}
+	a.Config.HostOrder = []string{"hot-a", "hot-b", "hot-c"}
+	reads := 0
+	a.Source = hookedSource{loggingSource{src, &log}, func() {
+		if reads++; reads == 2 {
+			src.hosts = change(src.hosts)
+		}
+	}}
+	if handled, _, e := a.placeAuto(context.Background(), s, "brief"); e != nil || !handled {
+		t.Fatalf("%v (log %v)", e, log)
+	}
+	var launched []string
+	for _, event := range log {
+		if host, ok := strings.CutPrefix(event, "launch:"); ok {
+			launched = append(launched, host)
+		}
+	}
+	return launched
+}
+
+func hostView(name string, score, load float64) HostView {
+	return HostView{Name: name, Connected: true, Score: &score, LoadRatio: &load}
+}
+
+// The fallback is chosen from a new plan, so what changed while the first
+// launch was refused counts: a host that filled its task slots, one the
+// operator stopped accepting, or one whose load fell under the threshold.
+func TestPlacementFallbackPlansAgainOnCurrentEligibility(t *testing.T) {
+	initial := func() []HostView {
+		return []HostView{hostView("hot-a", 10, .1), hostView("hot-b", 5, .1), hostView("hot-c", 1, .1)}
+	}
+	cases := []struct {
+		name   string
+		change func(hosts []HostView) []HostView
+		want   []string
+	}{
+		{"nothing changed", func(h []HostView) []HostView { return h }, []string{"hot-a", "hot-b"}},
+		{"the next host filled its task slots", func(h []HostView) []HostView {
+			return []HostView{h[0], {Name: "hot-b", Connected: true, SlotFull: true}, h[2]}
+		}, []string{"hot-a", "hot-c"}},
+		{"the next host is no longer accepting", func(h []HostView) []HostView {
+			h[1].Reason = "not_accepting"
+			return h
+		}, []string{"hot-a", "hot-c"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := afterARefusal(t, initial(), tc.change); !slices.Equal(got, tc.want) {
+				t.Fatalf("launched on %v, want %v", got, tc.want)
+			}
+		})
+	}
+	// A host over the threshold at the plan, under it at the fallback, ranks
+	// by its new reading.
+	t.Run("over then under", func(t *testing.T) {
+		over := []HostView{hostView("hot-a", 10, .1), hostView("hot-b", 5, .95), hostView("hot-c", 1, .5)}
+		got := afterARefusal(t, over, func(h []HostView) []HostView {
+			load := .1
+			h[1].LoadRatio = &load
+			return h
+		})
+		if want := []string{"hot-a", "hot-b"}; !slices.Equal(got, want) {
+			t.Fatalf("launched on %v, want %v: the host that fell under the threshold stayed in the worst bucket", got, want)
+		}
+	})
+}
+
+func ptr[T any](v T) *T { return &v }

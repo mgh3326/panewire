@@ -304,6 +304,11 @@ type PlacementResult struct {
 	Asof         time.Time            `json:"asof"`
 	PolicyStatus string               `json:"policy_status"`
 	Reason       string               `json:"reason,omitempty"`
+	// slotFull names the machines makePlacement dropped from Candidates for a
+	// full task-slot cap. It is not on the wire (the API drops them); the
+	// hub's own spawn engine reads it so an unlisted host is not mistaken for
+	// an unreported one.
+	slotFull []string
 }
 
 // MarshalJSON keeps the internal unavailable sentinel useful to callers while
@@ -798,11 +803,17 @@ func (h *HubServer) makePlacement(policy PlacementPolicy, metrics placementMetri
 	// Only machines with a free task slot are candidates. The caller may pick
 	// any eligible entry when the decision is unavailable, so a slot-full
 	// machine must not remain selectable here.
+	var full []string
+	for _, candidate := range candidates {
+		if candidate.slotFull {
+			full = append(full, candidate.Machine)
+		}
+	}
 	candidates = filterSlotFullCandidates(candidates)
 	if len(candidates) == 0 {
 		decision, reason = "unavailable", "task_slots_exhausted"
 	}
-	return PlacementResult{Decision: decision, Candidates: candidates, Source: source, Asof: now, Reason: reason}
+	return PlacementResult{Decision: decision, Candidates: candidates, Source: source, Asof: now, Reason: reason, slotFull: full}
 }
 
 // decideAmongUsable puts the score rules on top of the policy-order winner:

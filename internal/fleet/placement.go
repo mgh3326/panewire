@@ -46,6 +46,10 @@ type HostView struct {
 	// so a rival has to beat the winner by the hub's margin, not by a point.
 	Decided        bool
 	DecisionReason string
+	// SlotFull marks a host the hub reported slot-full and left out of its
+	// candidates: absent from the list, it is still not a place to spawn, and
+	// is not the same as a host the hub did not report (see plan).
+	SlotFull bool
 	// Extra is what only the shadow comparison reads (placement_shadow.go);
 	// no live decision looks at it.
 	Extra HostExtra
@@ -546,8 +550,15 @@ func (a *App) plan(ctx context.Context, s Spawn, pool string, waited time.Durati
 	for i, name := range a.remoteHostNames() {
 		h := a.Config.Hosts[name]
 		c := placeCandidate{name: name, cfg: h, order: i + 1, tags: hostCaps(h), wakeable: str(h, "wake") == "panewire"}
+		if a.fleetLog != nil && a.fleetLog.slotFull[name] || hub[name].SlotFull {
+			// The hub left the host out because its task slots are full.
+			// Unlisted does not mean unknown here: never fall back to
+			// proving it by spawning.
+			c.excluded = "task_slots_full"
+		}
 		if hv, reported := hub[name]; reported {
 			switch {
+			case c.excluded != "":
 			case strings.Contains(hv.Reason, "not_accepting"):
 				c.excluded = "not_accepting"
 			case !hv.Connected:
@@ -620,28 +631,35 @@ func (a *App) plan(ctx context.Context, s Spawn, pool string, waited time.Durati
 	return p, nil
 }
 
-// rerankRest re-reads the hub's host view and re-sorts the candidates from
-// index from on, so the next one tried reflects the jobs counted since the plan
-// was made. A failed read keeps the plan's order.
-func (a *App) rerankRest(ctx context.Context, p *placePlan, s Spawn, from int) {
+// freshReadGeneration starts a new generation of the hub reads a decision
+// ranks on: the fleet snapshot, success or failure, is read again, so nothing
+// taken before the decision's gate (selection, an earlier decision) stands in
+// for this decision's own read.
+func (a *App) freshReadGeneration() {
 	if a.fleetLog != nil {
-		a.fleetLog.fetchedAt = time.Time{}
+		a.fleetLog.fetchedAt, a.fleetLog.snapshot, a.fleetLog.err = time.Time{}, nil, nil
 	}
-	views, _ := a.hostViews(ctx, s.CWD)
-	if views == nil {
-		return
-	}
-	rest := p.ordered[from:]
-	for _, c := range rest {
-		if hv, ok := views[c.name]; ok {
-			c.load, c.score, c.signals, c.source = hv.LoadRatio, hv.Score, hv.Signals, hv.Source
-			c.decided, c.decision = hv.Decided, hv.DecisionReason
-			if !c.over && c.load != nil && *c.load >= p.threshold {
-				c.over = true
-			}
+}
+
+// carryTried keeps, on the new plan, what the attempts on tried hosts proved
+// about them, as the old plan recorded it: the outcome, the quota judgment,
+// the preflight and the reading the attempt was made on. The rest of the new
+// plan is this decision's own read.
+func (np *placePlan) carryTried(old *placePlan, tried map[string]bool) {
+	for i := range np.candidates {
+		c := &np.candidates[i]
+		if !tried[c.name] {
+			continue
 		}
+		prev := old.candidate(c.name)
+		if prev == nil {
+			continue
+		}
+		c.outcome, c.judgment, c.preflight = prev.outcome, prev.judgment, prev.preflight
+		c.score, c.signals, c.load, c.source = prev.score, prev.signals, prev.load, prev.source
+		c.decided, c.decision, c.over = prev.decided, prev.decision, prev.over
 	}
-	sortPlaceCandidates(rest, p.threshold, s.SelHost)
+	np.repo, np.wake = old.repo, old.wake
 }
 
 // sortPlaceCandidates orders awake candidates: load bucket, the host-first
@@ -1313,12 +1331,37 @@ func (a *App) placeAuto(ctx context.Context, s Spawn, brief string) (bool, map[s
 	if topRoutingRole(s.RoutingRole) {
 		s.TaskGrade = ""
 	}
-	p, e := a.plan(ctx, s, pool, waited)
-	if e != nil {
-		return true, nil, e
+	// Every decision builds its plan from reads taken inside the gate: the
+	// first, each fallback after a refusal, and the one after a wake. The new
+	// plan replaces the old; only what the attempts proved about the hosts
+	// already tried is carried over (carryTried).
+	var p *placePlan
+	tried := map[string]bool{}
+	var preEnv *preflightEnv
+	replan := func() error {
+		a.freshReadGeneration()
+		if a.PlacementGate != nil && !s.DryRun {
+			// Host-first selection named SelHost before the gate, on reads
+			// other decisions have since counted jobs against; the account it
+			// chose still limits the hosts, and the host is ranked on the
+			// scores this decision reads.
+			s.SelHost = ""
+		}
+		np, e := a.plan(ctx, s, pool, waited)
+		if e != nil {
+			return e
+		}
+		if p != nil {
+			np.carryTried(p, tried)
+		}
+		p, preEnv = np, nil
+		if s.placement != nil {
+			s.placement.plan = p
+		}
+		return nil
 	}
-	if s.placement != nil {
-		s.placement.plan = p
+	if e := replan(); e != nil {
+		return true, nil, e
 	}
 	var repo *repoResolution
 	repoDone := false
@@ -1386,7 +1429,6 @@ func (a *App) placeAuto(ctx context.Context, s Spawn, brief string) (bool, map[s
 	// A refused remote candidate gets its preflight, so the placement record
 	// says which of the known remote-spawn conditions the host fails. The
 	// hub and presence reads come from the plan.
-	var preEnv *preflightEnv
 	// A host the quota gate refused was never contacted over SSH, and the
 	// preflight keeps it that way: it reads the hub and hk only.
 	explain := func(c *placeCandidate, res candResult) {
@@ -1413,17 +1455,29 @@ func (a *App) placeAuto(ctx context.Context, s Spawn, brief string) (bool, map[s
 		}
 		return true
 	}
-	for i := 0; i < len(p.ordered); i++ {
-		if i > 0 {
-			// A refusal moves on: rank the candidates left on fresh hub
-			// scores, under the gate, so this fallback sees the jobs other
-			// decisions counted meanwhile.
+	for first := true; ; first = false {
+		if !first {
+			// A refusal moves on. The next candidate comes from a new plan
+			// read under the gate, so the fallback sees the jobs other
+			// decisions counted and every host's current eligibility.
 			if e := takeGate(); e != nil {
 				return true, nil, e
 			}
-			a.rerankRest(ctx, p, s, i)
+			if e := replan(); e != nil {
+				return true, nil, e
+			}
 		}
-		c := p.ordered[i]
+		var c *placeCandidate
+		for _, candidate := range p.ordered {
+			if !tried[candidate.name] {
+				c = candidate
+				break
+			}
+		}
+		if c == nil {
+			break
+		}
+		tried[c.name] = true
 		if c.local {
 			// An over-threshold local is a last resort: when the job has
 			// waited long enough and every awake candidate is saturated the
@@ -1490,6 +1544,28 @@ func (a *App) placeAuto(ctx context.Context, s Spawn, brief string) (bool, map[s
 			continue
 		}
 		p.wake["ok"] = true
+		// The woken host is an input to a new decision, not a foregone one:
+		// read again under the gate and count it only if it is still a place
+		// this job may go.
+		if e := takeGate(); e != nil {
+			return true, nil, e
+		}
+		woke := p.wake
+		delete(tried, w)
+		if e := replan(); e != nil {
+			return true, nil, e
+		}
+		p.wake = woke
+		c = p.candidate(w)
+		if c == nil || !slices.Contains(p.ordered, c) {
+			release()
+			lastNote = "wake target no longer eligible"
+			if c != nil && c.outcome != "" {
+				lastNote = "wake target " + c.outcome
+			}
+			continue
+		}
+		tried[w] = true
 		res := spawn(c)
 		c.outcome = res.note
 		if res.ok {
@@ -1559,8 +1635,19 @@ func (a *App) placeForced(ctx context.Context, s Spawn, brief string) (bool, map
 	}
 	c := placeCandidate{name: s.Host, cfg: h, wakeable: str(h, "wake") == "panewire", awake: true, eligible: true}
 	// A pinned host is decided too; later auto decisions must see its job.
+	// The count goes in through the gate, so it never lands between another
+	// decision's read and its own count.
 	if a.PlacementTry != nil && !s.DryRun {
+		release := func() {}
+		if a.PlacementGate != nil {
+			gateRelease, e := a.PlacementGate(ctx)
+			if e != nil {
+				return true, nil, fail(exitPlacement, "placement decision gate: %v", e)
+			}
+			release = gateRelease
+		}
 		a.PlacementTry(s.Host)
+		release()
 	}
 	qr, ok := a.quotaRequest(s)
 	if !ok {

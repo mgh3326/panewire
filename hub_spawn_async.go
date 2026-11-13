@@ -327,11 +327,16 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 	app.State = directSpawnState{h}
 	app.Wake = directSpawnWake{h}
 	app.PlacementHosts = func(ctx context.Context, cwd string) ([]fleet.HostView, error) {
-		raw, err := json.Marshal(h.placementFresh(ctx, "worker", cwd))
+		result := h.placementFresh(ctx, "worker", cwd)
+		raw, err := json.Marshal(result)
 		if err != nil {
 			return nil, err
 		}
-		return fleet.ParseHubHosts(string(raw))
+		views, err := fleet.ParseHubHosts(string(raw))
+		for _, machine := range result.slotFull {
+			views = append(views, fleet.HostView{Name: machine, Connected: true, SlotFull: true})
+		}
+		return views, err
 	}
 	app.PlacementTry = func(host string) { h.countPlacement(task.Job, host) }
 	app.PlacementGate = h.placementGate.acquire
