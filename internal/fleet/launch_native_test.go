@@ -157,7 +157,7 @@ func TestLaunchNativeRefusalRules(t *testing.T) {
 		{name: "unplaced profile without marker", req: QuotaRequest{Profile: "test-unrated", Role: "worker"}, reason: "e6_arm_required: unplaced profile requires exact measurement marker"},
 		{name: "rung retired", req: QuotaRequest{Profile: "test-retired", Effort: "high", Role: "worker"}, reason: "rung is retired in the catalog"},
 		{name: "credit rung not placed", req: QuotaRequest{Profile: "pi-test", Effort: "medium", Role: "worker"}, reason: "e6_arm_required: rung is not placed"},
-		{name: "fallback effort comes from the marked live row", req: QuotaRequest{Profile: "test-unrated", Effort: "medium", Role: "worker", E6Arm: "test-unrated@high"}, want: Launch{Profile: "test-unrated", ModelID: "model-u", Effort: "high", Grade: "unrated", Gate: "default", Pool: "claude", Family: "claude"}},
+		{name: "fallback effort comes from the marked live row", req: QuotaRequest{Profile: "test-unrated", Role: "worker", E6Arm: "test-unrated@high"}, want: Launch{Profile: "test-unrated", ModelID: "model-u", Effort: "high", Grade: "unrated", Gate: "default", Pool: "claude", Family: "claude"}},
 		{name: "credit role", req: QuotaRequest{Profile: "pi-test", Effort: "low", Role: "reviewer"}, reason: "role_restricted: credit rung requires worker/tester; placed default rungs also allow builder"},
 		{name: "consult model seat refused by its gate", req: QuotaRequest{Profile: "fable", Role: "worker"}, reason: "profile is consult_only; pass --operator-request"},
 		{name: "consult model builder refused by its gate", req: QuotaRequest{Profile: "fable", Role: "builder"}, reason: "profile is consult_only; pass --operator-request"},
@@ -168,7 +168,7 @@ func TestLaunchNativeRefusalRules(t *testing.T) {
 		{name: "placement follows catalog grade", req: QuotaRequest{Profile: "haiku", Effort: "xhigh", Role: "worker"}, want: Launch{Profile: "haiku", ModelID: "claude-haiku-5-5", Effort: "xhigh", Grade: "C", Gate: "default", Pool: "claude", Family: "claude"}},
 
 		{name: "default effort resolves to a live row", req: QuotaRequest{Profile: "opus", Role: "worker"}, want: Launch{Profile: "opus", ModelID: "claude-opus-5-5", Effort: "low", Grade: "S", Gate: "default", Pool: "claude", Family: "claude"}},
-		{name: "missing rung falls back to live effort", req: QuotaRequest{Profile: "opus", Effort: "medium", Role: "worker"}, want: Launch{Profile: "opus", ModelID: "claude-opus-5-5", Effort: "low", Grade: "S", Gate: "default", Pool: "claude", Family: "claude"}},
+		{name: "missing requested rung is refused", req: QuotaRequest{Profile: "opus", Effort: "medium", Role: "worker"}, reason: "rung is not in the catalog"},
 		{name: "legacy alias is not retained", req: QuotaRequest{Profile: "codex-max", Effort: "max", Role: "worker"}, reason: `profile "codex-max" is unknown or retired`},
 		{name: "snapshot-only profile is not retained", req: QuotaRequest{Profile: "kimi-k3-low", Role: "worker"}, reason: `profile "kimi-k3-low" is unknown or retired`},
 		{name: "marker admits an unrated rung", req: QuotaRequest{Profile: "test-unrated", Effort: "high", Role: "worker", E6Arm: "test-unrated@high"}, want: Launch{Profile: "test-unrated", ModelID: "model-u", Effort: "high", Grade: "unrated", Gate: "default", Pool: "claude", Family: "claude"}},
@@ -198,6 +198,21 @@ func TestLaunchNativeRefusalRules(t *testing.T) {
 				t.Fatalf("got %+v, %v; want %+v", got, err, tc.want)
 			}
 		})
+	}
+}
+
+func TestNativeLaunchUsesCatalogFamilyWhenModelPolicyUnavailable(t *testing.T) {
+	rows := []CatalogRow{{Profile: "opus", Effort: "high", ModelID: "opus", Pool: "claude", Family: "catalog-family", Grade: "S", Gate: defaultGate}}
+	a, _, _ := launchApp(t, "native", rows, nil)
+	a.modelFamilies = func(context.Context) (ModelFamiliesPolicy, error) {
+		return ModelFamiliesPolicy{}, context.DeadlineExceeded
+	}
+	got, err := a.Quota.Launch(context.Background(), QuotaRequest{Profile: "opus", Effort: "high", Role: "worker"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Family != "catalog-family" {
+		t.Fatalf("family=%q, want live catalog fallback", got.Family)
 	}
 }
 

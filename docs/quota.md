@@ -369,12 +369,13 @@ two hosts). panewire now resolves launches from the live catalog and
   launch](#shadow-and-native-launch)). Without a usable catalog there are no
   launch rows; panewire supplies no bundled catalog rows.
 - **The model-family policy** (`policy/model-families`) for family identity by
-  quota pool and the family ladder metadata. Placement comes from the live
-  catalog grade (`unrated` means unplaced); an unlisted pool keeps the family
-  field on its live catalog row. `entry_effort` remains the ladder entry and
-  does not set a launch default. Launch effort comes from the selected live
-  catalog row. Per-profile defaults, aliases, and catalog rows absent from
-  handoffkeep are not retained.
+  quota pool and the family ladder metadata. It is a best-effort family
+  override: if the document is unavailable or malformed, launch uses the live
+  catalog row's family and continues. An unlisted pool also keeps the family
+  field on its live catalog row. Placement comes from the live catalog grade
+  (`unrated` means unplaced); `entry_effort` remains the ladder entry and does
+  not set a launch default. Per-profile defaults, aliases, and catalog rows
+  absent from handoffkeep are not retained.
 - **The panewire config file**, loaded with the validation rules ported from
   pacelever v0.3.28's `LoadConfig` before native launch resolves anything
   (`internal/fleet/launch_config.go`): the TOML types of `[quota]`,
@@ -388,9 +389,10 @@ two hosts). panewire now resolves launches from the live catalog and
   `PACELEVER_E6_ARM` fallback). It names the exact live catalog row as
   `<profile>@<effort>`; [config](config.md) lists the forms.
 
-The native lookup refuses invalid or unavailable policy, unknown profiles,
-unplaced rungs without their exact marker and stale catalogs. A stale catalog
-is refused with `quota catalog is stale` (exit 70) unless the rung's own rule
+The native lookup refuses invalid launch config, unknown profiles, unplaced
+rungs without their exact marker and stale catalogs. Model-family policy
+failure uses the live catalog family as described above. A stale catalog is
+refused with `quota catalog is stale` (exit 70) unless the rung's own rule
 refuses first. The rules, each with its test in
 `internal/fleet/launch_native_test.go`:
 
@@ -409,11 +411,13 @@ refuses first. The rules, each with its test in
 | A `consult_only` rung needs `--operator-request` (not `codex-astra`) | `profile is consult_only; pass --operator-request` |
 | On a stale catalog, an escalation rung needs `--operator-request` | `catalog is stale; non-default gate requires --operator-request` |
 
-An effortless request resolves to the best graded ordinary live rung at the
-lowest effort. A requested effort with no eligible rung falls back to an
-eligible live rung for ordinary profiles; the returned effort is that row's
-effort. A row with no effort cannot launch. Credit launches follow the profile
-rule for `pi-` profiles and `cmd-dsflash41`; the gate's stricter rule ([Command Code
+An effortless request resolves to the lowest effort among the best graded
+ordinary live rows; this is the default for every profile and has no
+per-profile override. A requested effort with no eligible live rung is
+refused, so panewire never substitutes a different effort silently. The
+launch effort is always copied from the selected live row, and a row with no
+effort cannot launch. Credit launches follow the profile rule for `pi-`
+profiles and `cmd-dsflash41`; the gate's stricter rule ([Command Code
 seats](#command-code-seats)) still refuses at admission. pacelever's
 exploration does not apply: panewire passes no `--task`, so pacelever keeps
 its baseline answer.

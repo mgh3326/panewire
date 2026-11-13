@@ -100,6 +100,28 @@ func TestLaunchEffortUsesLiveCatalogRow(t *testing.T) {
 	}
 }
 
+func TestEffortlessLaunchUsesBestGradeThenLowestLiveEffort(t *testing.T) {
+	rows := []CatalogRow{
+		{Profile: "opus", Effort: "low", ModelID: "opus", Pool: "claude", Grade: "S", Gate: defaultGate},
+		{Profile: "opus", Effort: "medium", ModelID: "opus", Pool: "claude", Grade: "S+", Gate: defaultGate},
+		{Profile: "opus", Effort: "high", ModelID: "opus", Pool: "claude", Grade: "S+", Gate: defaultGate},
+		{Profile: "codex-sol", Effort: "low", ModelID: "codex-sol", Pool: "codex", Grade: "S", Gate: defaultGate},
+		{Profile: "codex-sol", Effort: "high", ModelID: "codex-sol", Pool: "codex", Grade: "S+", Gate: defaultGate},
+		{Profile: "codex-sol", Effort: "max", ModelID: "codex-sol", Pool: "codex", Grade: "S+", Gate: defaultGate},
+	}
+	for _, profile := range []string{"opus", "codex-sol"} {
+		t.Run(profile, func(t *testing.T) {
+			got, why := overlayLaunchCatalog(rows, false).resolve(admissionPolicy{}, nil, admissionRequest{Profile: profile, Role: "worker"})
+			if why != "" {
+				t.Fatalf("resolve: %s", why)
+			}
+			if got.Effort != map[string]string{"opus": "medium", "codex-sol": "high"}[profile] || got.Grade != "S+" {
+				t.Fatalf("default launch = %+v, want the lowest effort at the best live grade", got)
+			}
+		})
+	}
+}
+
 func liveRowEffort(rows []CatalogRow, launch Launch) string {
 	for _, row := range rows {
 		if row.Profile == launch.Profile && row.ModelID == launch.ModelID && row.Effort == launch.Effort {

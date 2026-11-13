@@ -31,9 +31,10 @@ func (q admissionQuota) Launch(ctx context.Context, r QuotaRequest) (Launch, err
 }
 
 // nativeLaunch resolves a request from the live handoffkeep catalog and
-// policy/model-families. A missing profile or unreadable policy refuses; a
-// stale catalog is refused after its row rules are checked. No pacelever
-// process or bundled catalog is used.
+// policy/model-families. A missing profile refuses; family policy is a
+// best-effort pool-family override and falls back to the live row's family if
+// the document cannot be read. A stale catalog is refused after its row rules
+// are checked. No pacelever process or bundled catalog is used.
 //
 // panewire's config.toml is loaded and validated with the rules ported from
 // pacelever (launch_config.go); [bench] catalog_ttl_s and
@@ -53,7 +54,10 @@ func (a *App) nativeLaunch(ctx context.Context, r QuotaRequest) (Launch, error) 
 	}
 	families, err := a.modelFamiliesPolicy(ctx)
 	if err != nil {
-		return Launch{}, fail(exitConfig, "quota catalog: %v", err)
+		if a.Err != nil {
+			a.warn("quota catalog: model-family policy unavailable; using live catalog family: %v", err)
+		}
+		families = ModelFamiliesPolicy{}
 	}
 	catalog := a.launchCatalog(ctx, policy.Freshness, false, families)
 	return decideLaunch(policy.admissionPolicy, a.Policy.Profiles, launchRequest(r), catalog, func() launchCatalog {
@@ -312,7 +316,7 @@ func (c launchCatalog) resolveRow(req admissionRequest, allowUnrated bool, seats
 		if c.profileCredit(profile) || profile == "codex-terra61" {
 			return launchRow{}, "", "e6_arm_required: rung is not placed"
 		}
-		i = slices.IndexFunc(eligible, func(r launchRow) bool { return r.Effort == fallback })
+		return launchRow{}, "", "rung is not in the catalog"
 	}
 	if i < 0 {
 		return launchRow{}, "", "rung is not in the catalog"
