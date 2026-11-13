@@ -68,7 +68,7 @@ func (d damagedJobDir) seed(t *testing.T, a *App, id string) {
 // path.
 func finalBuildJob(t *testing.T, a *App, id string) (key, body, path string) {
 	t.Helper()
-	seedJob(t, a, id, "worker")
+	seedJob(t, a, id, "implementer")
 	putEvent(t, a, id, "job.completed", map[string]any{})
 	src := filepath.Join(a.Jobs, id, "final")
 	if e := os.MkdirAll(src, 0700); e != nil {
@@ -157,9 +157,9 @@ func TestHygieneSkipsDamagedJobDirAndAuditsTheRest(t *testing.T) {
 				}
 				return Result{}
 			}}
-			seedJob(t, a, "a", "worker")
+			seedJob(t, a, "a", "implementer")
 			tt.seed(t, a, "mid")
-			seedJob(t, a, "z", "worker")
+			seedJob(t, a, "z", "implementer")
 			stderr, stdout := &bytes.Buffer{}, &bytes.Buffer{}
 			a.Err, a.Out = stderr, stdout
 			if e := a.diagnostics(context.Background(), "lanes-missing", nil); e != nil {

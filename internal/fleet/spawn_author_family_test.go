@@ -22,9 +22,9 @@ func claimCalls(t *testing.T) int {
 // A reviewer for a task whose author job is not bound (the author was not
 // launched through panewire) names only the author's family. It spawns, the
 // seat is still checked against that family, and it never claims the task.
-func TestReviewerBuilderFamilyWithoutBuilderJob(t *testing.T) {
+func TestReviewerAuthorFamilyWithoutBuilderJob(t *testing.T) {
 	a, s, _, _ := cmdFixture(t)
-	s.Role, s.BuilderFamily = "reviewer", "anthropic"
+	s.Role, s.AuthorFamily = "reviewer", "anthropic"
 	if e := a.Spawn(context.Background(), s); e != nil {
 		t.Fatal(e)
 	}
@@ -33,7 +33,7 @@ func TestReviewerBuilderFamilyWithoutBuilderJob(t *testing.T) {
 	}
 
 	a, s, _, _ = cmdFixture(t)
-	s.Role, s.BuilderFamily = "reviewer", "deepseek"
+	s.Role, s.AuthorFamily = "reviewer", "deepseek"
 	if e := a.Spawn(context.Background(), s); code(e) != exitSeatRefused {
 		t.Fatalf("a seat of the author's family must still be refused: %v", e)
 	}
@@ -50,7 +50,7 @@ func TestTwoUnlinkedReviewerSpawnsOnOneTask(t *testing.T) {
 	for _, tc := range []struct{ id, refs string }{{"mwr-1-pass1", `{}`}, {"mwr-1-pass2", `{"job_id":"mwr-1-pass1"}`}} {
 		a, s, _, _ := cmdFixture(t)
 		useFakeHK(t).SetTask("42", `{"id":42,"title":"implement (grade B, T1)","state":"ready","refs":`+tc.refs+`}`)
-		s.Role, s.BuilderFamily, s.Label, s.Job = "reviewer", "anthropic", tc.id, tc.id
+		s.Role, s.AuthorFamily, s.Label, s.Job = "reviewer", "anthropic", tc.id, tc.id
 		if e := a.Spawn(context.Background(), s); e != nil {
 			t.Fatalf("%s: %v", tc.id, e)
 		}
@@ -60,10 +60,10 @@ func TestTwoUnlinkedReviewerSpawnsOnOneTask(t *testing.T) {
 	}
 }
 
-func TestBuilderFamilyWithoutBuilderJobOnlyForReviewer(t *testing.T) {
-	for _, role := range []string{"worker", "tester", "builder"} {
+func TestAuthorFamilyWithoutBuilderJobOnlyForReviewer(t *testing.T) {
+	for _, role := range []string{"implementer", "consult", "builder"} {
 		a, s, _, _ := cmdFixture(t)
-		s.Role, s.BuilderFamily = role, "anthropic"
+		s.Role, s.AuthorFamily = role, "anthropic"
 		if e := a.Spawn(context.Background(), s); code(e) != exitUsage {
 			t.Errorf("role %s: want exit 2, got %v", role, e)
 		}
@@ -73,14 +73,14 @@ func TestBuilderFamilyWithoutBuilderJobOnlyForReviewer(t *testing.T) {
 	}
 }
 
-func TestParseSpawnBuilderFamilyAlone(t *testing.T) {
-	s, e := parseSpawn([]string{"--builder-family", "anthropic", "--task", "12", "--role", "reviewer"})
-	if e != nil || s.BuilderFamily != "anthropic" || s.BuilderJob != "" {
+func TestParseSpawnAuthorFamilyAlone(t *testing.T) {
+	s, e := parseSpawn([]string{"--author-family", "anthropic", "--task", "12", "--role", "reviewer"})
+	if e != nil || s.AuthorFamily != "anthropic" || s.BuilderJob != "" {
 		t.Fatalf("%+v %v", s, e)
 	}
 }
 
-// Over ssh the Spawn crosses as JSON and BuilderFamily/BuilderJob are not on
+// Over ssh the Spawn crosses as JSON and AuthorFamily/BuilderJob are not on
 // the wire; the receiving host must still see an unlinked reviewer from the
 // resolved fields, and a reviewer that inherits a builder job must not.
 func TestUnlinkedReviewerSurvivesTheSSHEnvelope(t *testing.T) {
@@ -89,9 +89,9 @@ func TestUnlinkedReviewerSurvivesTheSSHEnvelope(t *testing.T) {
 		s    Spawn
 		want bool
 	}{
-		{"family only", Spawn{Role: "reviewer", Task: "12", BuilderFamily: "anthropic", ParentFamily: "anthropic"}, true},
-		{"with builder job", Spawn{Role: "reviewer", Task: "12", BuilderFamily: "anthropic", BuilderJob: "job-b", ParentFamily: "anthropic", Inherited: "job-b"}, false},
-		{"worker", Spawn{Role: "worker", Task: "12", ParentFamily: "anthropic"}, false},
+		{"family only", Spawn{Role: "reviewer", Task: "12", AuthorFamily: "anthropic", ParentFamily: "anthropic"}, true},
+		{"with builder job", Spawn{Role: "reviewer", Task: "12", AuthorFamily: "anthropic", BuilderJob: "job-b", ParentFamily: "anthropic", Inherited: "job-b"}, false},
+		{"implementer", Spawn{Role: "implementer", Task: "12", ParentFamily: "anthropic"}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			b, e := json.Marshal(tc.s)
@@ -102,7 +102,7 @@ func TestUnlinkedReviewerSurvivesTheSSHEnvelope(t *testing.T) {
 			if e := json.Unmarshal(b, &got); e != nil {
 				t.Fatal(e)
 			}
-			if got.BuilderFamily != "" || got.unlinkedReviewer() != tc.want {
+			if got.AuthorFamily != "" || got.unlinkedReviewer() != tc.want {
 				t.Fatalf("after the envelope: unlinked=%v want %v (%+v)", got.unlinkedReviewer(), tc.want, got)
 			}
 		})

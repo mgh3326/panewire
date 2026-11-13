@@ -19,7 +19,7 @@ import (
 //   - grades: the task grades the host accepts. Unset accepts every grade. A
 //     consult has no grade, so a host with grades set refuses it.
 
-var spawnRoles = []string{"worker", "tester", "reviewer", "counsel"}
+var spawnRoles = []string{"implementer", "reviewer", "consult"}
 var hostCapabilities = []string{"macos", "linux", "unity", "xcode", "gpu", "heavy-go"}
 
 // hostCaps returns the declared capabilities of a host: tags and caps merged.

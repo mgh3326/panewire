@@ -5,9 +5,9 @@ import (
 	"testing"
 )
 
-// A reviewer, a counsel (consult) or a builder pane is judged by its own job
+// A reviewer, a consult or a builder pane is judged by its own job
 // end, not by a task: its spawn role is what decides, since the claim records
-// only worker or builder.
+// only implementer or builder.
 
 func TestPaneSweepKeepsAWorkingReviewerPane(t *testing.T) {
 	f := newPaneSweepFixture(t)
@@ -36,7 +36,7 @@ func TestPaneSweepKeepsAReviewerPaneStoppedByQuota(t *testing.T) {
 
 func TestPaneSweepKeepsALostWorkerPane(t *testing.T) {
 	f := newPaneSweepFixture(t)
-	f.job("w", "worker", "")
+	f.job("w", "implementer", "")
 	putEvent(t, f.a, "w", "job.lost", map[string]any{"reason": "host_gone"})
 	f.at(0)
 	f.at(11)
@@ -67,7 +67,7 @@ func TestPaneSweepKeepsAReviewerWorktree(t *testing.T) {
 	f := newPaneSweepFixture(t)
 	f.withGit(g)
 	cwd := g.worktree(t, "r")
-	f.job("r", "worker", "", map[string]any{"role": "reviewer", "cwd": cwd})
+	f.job("r", "implementer", "", map[string]any{"role": "reviewer", "cwd": cwd})
 	putEvent(t, f.a, "r", "job.revoked", map[string]any{"outcome": "abandoned"})
 	f.at(0)
 	f.at(11)

@@ -12,13 +12,13 @@ import (
 
 // quotaStopRoles are the seats whose idle pane on a quota or rate-limit screen
 // the job watcher ends. Counsel panes are consults, not jobs a retry can
-// replace. A worker or tester is not here: the quota-stop manager decides
+// replace. An implementer is not here: the quota-stop manager decides
 // whether it waits for the reset or is handed over (hk 3334,
 // docs/quota-stop.md), so the watcher leaves its job live.
 var quotaStopRoles = []string{"reviewer"}
 
 // QuotaStopHandOffGrace is how long a watcher leaves the hub to replace a job
-// whose quota stop was announced (a worker or tester the quota-stop manager
+// whose quota stop was announced (an implementer the quota-stop manager
 // handed over, or a credit-stopped job) before it ends the job itself, without
 // a replacement. The hub places the replacement, closes the pane and writes the
 // hk record with replaced_by or handed_over_to (hk never rewrites a lost record,
@@ -35,7 +35,7 @@ const QuotaStopHandOffGrace = 10 * time.Minute
 // "quota_stop pool=<pool> reset_at=<RFC3339 UTC>", reset_at left out when the
 // reset is unknown. A successor, when there is one, is the LAST key=value
 // token: "replaced_by=<job>" for a reviewer or "handed_over_to=<job>" for a
-// worker or tester (mergewake hk 3335 follows replaced_by).
+// implementer (mergewake hk 3335 follows replaced_by).
 func QuotaStopEndReason(pool string, reset time.Time, successorKey, successor string) string {
 	reason := "quota_stop pool=" + pool
 	if !reset.IsZero() {
@@ -148,7 +148,7 @@ func (a *App) creditStopped(j Job, ag Agent) (quotastop.Stop, bool) {
 		receipt["harness_session"] = map[string]any{"kind": live.Kind, "id": live.ID, "source": live.Source}
 		j.Receipt = receipt
 	}
-	if slices.Contains([]string{"worker", "tester", "reviewer", "counsel"}, j.QuotaRole()) {
+	if slices.Contains(spawnRoles, j.QuotaRole()) {
 		if stop, ok := ompCreditStop(a.Home, j); ok {
 			return stop, true
 		}
@@ -208,7 +208,7 @@ func (a *App) quotaStopScreen(ctx context.Context, j Job, ag Agent, seen *quotaS
 }
 
 // QuotaRole is the role a quota stop is handled by: the spawn receipt's
-// (reviewer, tester, worker), else the claim's. The claim always says worker
+// (reviewer, implementer, consult), else the claim's. The claim always says implementer
 // for a spawned job, so reading only it would treat every reviewer as a worker.
 func (j Job) QuotaRole() string {
 	if j.SpawnRole != "" {
@@ -255,7 +255,7 @@ func quotaStopPayload(j Job, stop quotastop.Stop) map[string]any {
 
 // AnnounceQuotaStop records job.lost reason "quota_stop" for job on the node's
 // jobs root without ending its hk record: the quota-stop manager's hand-over of
-// a worker or tester (hk 3334). The hub replaces the job and closes the pane;
+// an implementer (hk 3334). The hub replaces the job and closes the pane;
 // the job's own watcher ends it without a replacement when the hub does not
 // (QuotaStopHandOffGrace).
 func AnnounceQuotaStop(ctx context.Context, jobs, job, pane string, stop quotastop.Stop) error {

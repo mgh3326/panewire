@@ -174,7 +174,7 @@ func TestDoneResultConflictOnDuplicateKeepsStored(t *testing.T) {
 // and does not complete the job.
 func TestDoneResultMissingFileFails(t *testing.T) {
 	a := testApp(t)
-	seedJob(t, a, "j", "worker")
+	seedJob(t, a, "j", "implementer")
 	report := filepath.Join(a.Jobs, "j", "report.md")
 	writeReport(t, report, "done\n")
 	missing := filepath.Join(a.Jobs, "j", "findings.json")
@@ -188,10 +188,9 @@ func TestDoneResultMissingFileFails(t *testing.T) {
 }
 
 // Acceptance (e): the watcher attaches a job-dir result file in its completion
-// write, for both the reviewer (findings.json) and delegate (result.json)
-// conventions.
+// write: the reviewer's findings.json.
 func TestWatcherAttachesJobDirResult(t *testing.T) {
-	for _, name := range []string{"findings.json", "result.json"} {
+	for _, name := range []string{"findings.json"} {
 		t.Run(name, func(t *testing.T) {
 			a, _, report := watchFixture(t)
 			store := seedSpawnedRecord(t, a, "j")

@@ -133,9 +133,8 @@ func TestT2734EnvelopeOnlyRoutesLikeLifecycle(t *testing.T) {
 		name, owner, parent, role, want string
 	}{
 		{"builder goes to parent", "owner-lane", t2734Parent, "builder", t2734Parent},
-		{"captain goes to parent", "owner-lane", t2734Parent, "captain", t2734Parent},
-		{"worker stays on owner", "owner-lane", t2734Parent, "worker", "owner-lane"},
-		{"worker stays on owner even when owner is the job", t2734Job, t2734Parent, "worker", t2734Job},
+		{"implementer stays on owner", "owner-lane", t2734Parent, "implementer", "owner-lane"},
+		{"implementer stays on owner even when owner is the job", t2734Job, t2734Parent, "implementer", t2734Job},
 		{"builder without parent stays on owner", "owner-lane", "", "builder", "owner-lane"},
 		{"no role and owner is the job goes to parent", t2734Job, t2734Parent, "", t2734Parent},
 		{"no role and owner is a lane stays on owner", "owner-lane", t2734Parent, "", "owner-lane"},
