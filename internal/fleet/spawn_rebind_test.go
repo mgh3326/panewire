@@ -2,6 +2,7 @@ package fleet
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"net/http"
 	"os"
@@ -685,4 +686,31 @@ func TestTakeoverReportsFailureAfterSpawnContextCancellation(t *testing.T) {
 	if ev["status"] != "inherited" || ev["rebind_error"] == nil {
 		t.Fatalf("event=%v", ev)
 	}
+}
+
+// A busy ledger must not consume the notice's own deadline.
+func TestTakeoverNotifiesWhenOutcomeLedgerIsLocked(t *testing.T) {
+	fx := newRebindFixture(t, "spawned", rebindParent)
+	fx.s.Inherited, fx.s.Task = rebindParent, "42"
+	fx.rebindFail = `{"error":"conflict","reason":"cannot rebind"}`
+	fx.a.Runner = cancellationAwareRunner{inner: fx.f}
+	if err := fx.a.event(context.Background(), fx.s.Job, "job.spawned", map[string]any{}); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", fx.a.Arbiter.DB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	conn, err := db.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(context.Background(), "BEGIN IMMEDIATE"); err != nil {
+		t.Fatal(err)
+	}
+	defer conn.ExecContext(context.Background(), "ROLLBACK")
+	fx.a.finishTaskTakeover(context.Background(), fx.s, client.Task{Refs: client.TaskRefs{JobID: rebindParent}}, "owner")
+	fx.assertNotice(t, true)
 }

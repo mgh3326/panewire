@@ -437,7 +437,8 @@ func (a *App) finishTaskTakeover(ctx context.Context, s Spawn, task client.Task,
 	takeover, cancelTakeover := context.WithTimeout(context.WithoutCancel(ctx), 20*time.Second)
 	status := a.rebindInherited(takeover, s, task, ev)
 	cancelTakeover()
-	ctx, cancelOutcome := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	uncancelled := context.WithoutCancel(ctx)
+	ctx, cancelOutcome := context.WithTimeout(uncancelled, 10*time.Second)
 	defer cancelOutcome()
 	ev["status"] = status
 	if e := a.event(ctx, s.Job, "job.task_rebind", ev); e != nil {
@@ -450,7 +451,9 @@ func (a *App) finishTaskTakeover(ctx context.Context, s Spawn, task client.Task,
 	reason := str(ev, "rebind_error")
 	id := sha256.Sum256([]byte(s.Job))
 	text := fmt.Sprintf("[panewire] TASK_REBIND_FAILED job=%s task=%s reason=%s; rebind manually", s.Job, s.Task, reason)
-	r := a.call(ctx, "panewire", "emit", "--kind", "lane.event", "--lane", owner, "--type", "automation-failed", "--event-id", fmt.Sprintf("task-rebind-failed-%x", id[:]), "--text", text, "--inbox-root", filepath.Dir(a.Jobs))
+	notice, cancelNotice := context.WithTimeout(uncancelled, 10*time.Second)
+	defer cancelNotice()
+	r := a.call(notice, "panewire", "emit", "--kind", "lane.event", "--lane", owner, "--type", "automation-failed", "--event-id", fmt.Sprintf("task-rebind-failed-%x", id[:]), "--text", text, "--inbox-root", filepath.Dir(a.Jobs))
 	if r.Code != 0 {
 		a.warn("task rebind notice failed (exit %d)", r.Code)
 	}
