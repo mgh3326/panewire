@@ -164,39 +164,42 @@ func (h *HubServer) acceptingEffectiveLocked(machine string, advertised bool) bo
 }
 
 // persistAcceptingOverridesLocked rewrites the override file from next. Keys
-// the loader ignores are carried over, so a rewrite does not erase data a
-// newer release wrote. An entry with such keys is written as an object; the
-// others keep the legacy string form that pre-change hubs decode.
+// the loader ignores are carried over at the root, in each override entry, and
+// in each containment entry, so a rewrite does not erase data a newer release
+// wrote. An entry with such keys is written as an object; the others keep the
+// legacy string form that pre-change hubs decode.
 func (h *HubServer) persistAcceptingOverridesLocked(next map[string]acceptingOverride) error {
 	path := h.relayControl.acceptingOverridesPath
 	if path == "" {
 		return nil
 	}
-	rootExtras, entryExtras := acceptingOverrideExtras(path)
+	left := readAcceptingOverrideLeftovers(path)
 	overrides := make(map[string]any, len(next))
-	details := make(map[string]acceptingContainment)
+	containments := make(map[string]any)
 	for machine, override := range next {
-		if extras := entryExtras[machine]; len(extras) > 0 {
-			fields := make(map[string]any, len(extras)+1)
-			for key, value := range extras {
-				fields[key] = value
-			}
-			fields["mode"] = override.Mode
-			overrides[machine] = fields
+		if extras := left.overrides[machine]; len(extras) > 0 {
+			overrides[machine] = withLeftovers(extras, map[string]any{"mode": override.Mode})
 		} else {
 			overrides[machine] = override.Mode
 		}
-		if override.Mode == "off" && override.Containment != "" {
-			details[machine] = acceptingContainment{override.Containment, override.ContainmentVerified}
+		extras := left.containments[machine]
+		typed := override.Mode == "off" && override.Containment != ""
+		switch {
+		case typed && len(extras) == 0:
+			containments[machine] = acceptingContainment{override.Containment, override.ContainmentVerified}
+		case typed:
+			containments[machine] = withLeftovers(extras, map[string]any{"containment": override.Containment, "containment_verified": override.ContainmentVerified})
+		case len(extras) > 0:
+			containments[machine] = withLeftovers(extras, nil)
 		}
 	}
-	doc := make(map[string]any, len(rootExtras)+2)
-	for key, value := range rootExtras {
+	doc := make(map[string]any, len(left.root)+2)
+	for key, value := range left.root {
 		doc[key] = value
 	}
 	doc["overrides"] = overrides
-	if len(details) > 0 {
-		doc["containments"] = details
+	if len(containments) > 0 {
+		doc["containments"] = containments
 	}
 	b, err := json.Marshal(doc)
 	if err != nil {
@@ -205,49 +208,86 @@ func (h *HubServer) persistAcceptingOverridesLocked(next map[string]acceptingOve
 	return replaceFileAtomically(path, ".accepting-overrides-*", append(b, '\n'), 0600)
 }
 
-// acceptingOverrideReadKeys are the entry keys the loader reads. Matching is
-// case-insensitive, as encoding/json and configkeys both match.
-var acceptingOverrideReadKeys = []string{"mode", "containment", "containment_verified"}
+// acceptingOverrideLeftovers holds the keys of the override file that the
+// loader does not read.
+type acceptingOverrideLeftovers struct {
+	root         map[string]json.RawMessage
+	overrides    map[string]map[string]json.RawMessage
+	containments map[string]map[string]json.RawMessage
+}
 
-// acceptingOverrideExtras returns the keys in the override file that the
-// loader does not read: root-level keys, and per machine the entry keys. A
-// file that cannot be read or decoded yields none.
-func acceptingOverrideExtras(path string) (map[string]json.RawMessage, map[string]map[string]json.RawMessage) {
-	root := make(map[string]json.RawMessage)
-	entries := make(map[string]map[string]json.RawMessage)
+var (
+	acceptingOverrideReadKeys    = []string{"mode", "containment", "containment_verified"}
+	acceptingContainmentReadKeys = []string{"containment", "containment_verified"}
+)
+
+// readAcceptingOverrideLeftovers collects the keys the loader does not read:
+// root-level keys, and per machine the keys of each override and containment
+// entry. Member names match case-insensitively, as the loader's decode does.
+// If two case variants of one member both define a leftover key, either value
+// may be kept. A file that cannot be read or decoded yields none.
+func readAcceptingOverrideLeftovers(path string) acceptingOverrideLeftovers {
+	left := acceptingOverrideLeftovers{
+		root:         make(map[string]json.RawMessage),
+		overrides:    make(map[string]map[string]json.RawMessage),
+		containments: make(map[string]map[string]json.RawMessage),
+	}
 	b, err := os.ReadFile(path)
 	if err != nil {
-		return root, entries
+		return left
 	}
 	var doc map[string]json.RawMessage
 	if json.Unmarshal(b, &doc) != nil {
-		return root, entries
+		return left
 	}
 	for key, value := range doc {
-		if !keyNamedIn(key, []string{"overrides", "containments"}) {
-			root[key] = value
+		switch {
+		case strings.EqualFold(key, "overrides"):
+			collectEntryLeftovers(value, acceptingOverrideReadKeys, left.overrides)
+		case strings.EqualFold(key, "containments"):
+			collectEntryLeftovers(value, acceptingContainmentReadKeys, left.containments)
+		default:
+			left.root[key] = value
 		}
 	}
-	var overrides map[string]json.RawMessage
-	if json.Unmarshal(doc["overrides"], &overrides) != nil {
-		return root, entries
+	return left
+}
+
+// collectEntryLeftovers adds, per machine, the keys of each object in members
+// that are not in read.
+func collectEntryLeftovers(members json.RawMessage, read []string, into map[string]map[string]json.RawMessage) {
+	var entries map[string]json.RawMessage
+	if json.Unmarshal(members, &entries) != nil {
+		return
 	}
-	for machine, value := range overrides {
+	for machine, raw := range entries {
 		var fields map[string]json.RawMessage
-		if json.Unmarshal(value, &fields) != nil {
-			continue // legacy string form: no entry keys
+		if json.Unmarshal(raw, &fields) != nil {
+			continue // legacy string form: no leftover keys
 		}
-		for key, field := range fields {
-			if keyNamedIn(key, acceptingOverrideReadKeys) {
+		for key, value := range fields {
+			if keyNamedIn(key, read) {
 				continue
 			}
-			if entries[machine] == nil {
-				entries[machine] = make(map[string]json.RawMessage)
+			if into[machine] == nil {
+				into[machine] = make(map[string]json.RawMessage)
 			}
-			entries[machine][key] = field
+			into[machine][key] = value
 		}
 	}
-	return root, entries
+}
+
+// withLeftovers returns the leftover keys merged with fields. Typed fields win,
+// so a leftover cannot shadow a field this release writes.
+func withLeftovers(leftovers map[string]json.RawMessage, fields map[string]any) map[string]any {
+	out := make(map[string]any, len(leftovers)+len(fields))
+	for key, value := range leftovers {
+		out[key] = value
+	}
+	for key, value := range fields {
+		out[key] = value
+	}
+	return out
 }
 
 func keyNamedIn(key string, names []string) bool {

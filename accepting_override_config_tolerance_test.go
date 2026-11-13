@@ -1,6 +1,7 @@
 package panewire
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"slices"
@@ -65,5 +66,60 @@ func TestAcceptingOverridesRewriteKeepsIgnoredKeys(t *testing.T) {
 	}
 	if got := overrides["desk"]; got.Mode != "auto" {
 		t.Fatalf("desk=%+v", got)
+	}
+}
+
+// A containment entry's unknown keys survive a rewrite that clears the
+// containment, so a later mode change does not erase data a newer release wrote.
+func TestAcceptingOverridesRewriteKeepsContainmentLeftovers(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "accepting.json")
+	if err := os.WriteFile(path, []byte(`{"overrides":{"mac-work":"off"},"containments":{"mac-work":{"containment":"hk:7","containment_verified":true,"future":2}}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	h := &HubServer{}
+	h.relayControl.acceptingOverridesPath = path
+	if err := h.persistAcceptingOverridesLocked(map[string]acceptingOverride{"mac-work": {Mode: "auto"}}); err != nil {
+		t.Fatal(err)
+	}
+	_, ignored, err := loadAcceptingOverrides(path)
+	if err != nil {
+		t.Fatalf("rewritten override file refused: %v", err)
+	}
+	if !slices.Contains(ignored, "containments.mac-work.future") {
+		t.Fatalf("containment leftover lost: ignored=%v", ignored)
+	}
+}
+
+// Members match case-insensitively, as the loader decodes them: a file with
+// OVERRIDES and Containments keeps its leftovers and is rewritten under the
+// canonical names, with no duplicate member.
+func TestAcceptingOverridesRewriteKeepsCaseVariantMembers(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "accepting.json")
+	if err := os.WriteFile(path, []byte(`{"OVERRIDES":{"mac-work":{"mode":"on","note":"kept"}},"Containments":{"mac-work":{"containment":"hk:7","containment_verified":true,"future":2}}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	h := &HubServer{}
+	h.relayControl.acceptingOverridesPath = path
+	next := map[string]acceptingOverride{"mac-work": {Mode: "off", Containment: "hk:7", ContainmentVerified: true}}
+	if err := h.persistAcceptingOverridesLocked(next); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &doc); err != nil || len(doc) != 2 || doc["overrides"] == nil || doc["containments"] == nil {
+		t.Fatalf("rewritten root members: %s %v", raw, err)
+	}
+	overrides, ignored, err := loadAcceptingOverrides(path)
+	if err != nil {
+		t.Fatalf("rewritten override file refused: %v", err)
+	}
+	if want := []string{"containments.mac-work.future", "overrides.mac-work.note"}; !slices.Equal(ignored, want) {
+		t.Fatalf("ignored=%v, want %v", ignored, want)
+	}
+	if got := overrides["mac-work"]; got.Mode != "off" || got.Containment != "hk:7" || !got.ContainmentVerified {
+		t.Fatalf("mac-work=%+v", got)
 	}
 }
