@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"slices"
+	"sort"
 	"strings"
 	"time"
 
@@ -339,6 +340,11 @@ func gateOutcome(err error) string {
 }
 
 func hostGateFailure(err error) bool {
+	// A refusal the request, the catalog or policy decided reads the same on
+	// every host: it is the candidate's, not the host's.
+	if gateCodeNote(err) != "" {
+		return false
+	}
 	code := gateOutcome(err)
 	return code == outcomeNoEligibleHost || code == outcomePolicyUnavailable
 }
@@ -478,6 +484,9 @@ func (a *App) selectionRefused(ctx context.Context, s Spawn, req selReq, p *selP
 		if code == outcomeNoEligibleHost {
 			gap = p.capsGap + p.hostDropNote()
 		}
+		if code == outcomePolicyUnavailable {
+			gap = gateBlockNote(accounts)
+		}
 		return p, fail(exit, "%s: no account admitted routing role %s%s%s%s", code, routingRole(req), hostScope(s), gap, p.poolAtCapNote())
 	}
 	if slices.ContainsFunc(accounts, func(c *selCand) bool { return c.code == outcomeQuotaExhausted }) {
@@ -492,6 +501,29 @@ func (a *App) selectionRefused(ctx context.Context, s Spawn, req selReq, p *selP
 		return p, fail(exitSeatRefused, "%s: %s: every eligible candidate is in a pool at its concurrency cap%s", reasonRoleNoCandidate, outcomeNoRoleCandidate, note)
 	}
 	return p, fail(exitSeatRefused, "%s: %s: no profile passes role, retirement, grade, gate and seat rules", reasonRoleNoCandidate, outcomeNoRoleCandidate)
+}
+
+// gateBlockNote names the gate refusals that decided candidates without a
+// quota reading — the request, the catalog or policy — so a
+// POLICY_UNAVAILABLE refusal says which gate code refused, not only the
+// outcome.
+func gateBlockNote(cands []*selCand) string {
+	var codes []string
+	for _, c := range cands {
+		code, ok := strings.CutPrefix(c.reason, "gate_blocked:")
+		if !ok || code == "" || slices.Contains(codes, code) {
+			continue
+		}
+		codes = append(codes, code)
+	}
+	if len(codes) == 0 {
+		return ""
+	}
+	sort.Strings(codes)
+	if len(codes) > 3 {
+		codes = append(codes[:3], "…")
+	}
+	return "; gate refused: " + strings.Join(codes, ", ")
 }
 
 func routingRole(req selReq) string {

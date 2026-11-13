@@ -529,7 +529,7 @@ func (a *App) delegateHeadless(ctx context.Context, s Spawn, c delegateCaller, b
 	if e = a.event(ctx, s.Job, "job.spawned", receipt); e != nil {
 		return "", e
 	}
-	spawned := map[string]any{"state": "spawned", "role": s.Role, "label": s.Label, "family": seat.Family, "profile": s.Profile, "model": launch.ModelID, "pool": pool, "owner_lane": owner, "selection": jobSelection(s, "delegate")}
+	spawned := map[string]any{"state": "spawned", "at": a.Now().UTC(), "role": s.Role, "label": s.Label, "family": seat.Family, "profile": s.Profile, "model": launch.ModelID, "pool": pool, "owner_lane": owner, "selection": jobSelection(s, "delegate")}
 	if s.Inherited != "" {
 		spawned["parent_job"] = s.Inherited
 	}
