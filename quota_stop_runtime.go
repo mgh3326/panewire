@@ -379,11 +379,14 @@ const (
 	quotaStopLookupBudget = 5 * time.Second
 )
 
-func (q *quotaStopManager) observeBounded(ctx context.Context, c idleWakeCandidate, now time.Time) {
-	q.observe(ctx, c, now)
+func (q *quotaStopManager) observeBounded(ctx context.Context, c idleWakeCandidate, now time.Time) (noJob bool) {
+	return q.observe(ctx, c, now)
 }
 
-func (q *quotaStopManager) observe(ctx context.Context, c idleWakeCandidate, now time.Time) {
+// observe reads candidate c's screen once and decides a quota stop on it.
+// noJob reports that the pane has no single active local job to read for, so
+// nothing was reserved or read.
+func (q *quotaStopManager) observe(ctx context.Context, c idleWakeCandidate, now time.Time) (noJob bool) {
 	clock := q.clock
 	if clock == nil {
 		clock = time.Now
@@ -393,7 +396,7 @@ func (q *quotaStopManager) observe(ctx context.Context, c idleWakeCandidate, now
 	defer scanCancel()
 	job, ok := q.jobForPane(scanCtx, c.PaneID)
 	if !ok || quotaExcluded(c.Label) {
-		return
+		return true
 	}
 	var inherited string
 	var taskID string
@@ -452,6 +455,7 @@ func (q *quotaStopManager) observe(ctx context.Context, c idleWakeCandidate, now
 	}
 	// recordDecisionFor logs a failed write itself; there is nothing more to do here.
 	_ = q.actOnQuotaStop(ctx, c, job, inherited, taskID, stop, basis, now)
+	return false
 }
 
 // reserveDecision creates the decision row for candidate c if it does not

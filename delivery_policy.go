@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mgh3326/panewire/internal/configkeys"
 	"gopkg.in/yaml.v3"
 )
 
@@ -154,7 +155,10 @@ type deliveryPolicy struct {
 	// unlisted, or unreported harnesses — get no inbox deferral.
 	Agents map[string]string             `yaml:"agents"`
 	Lanes  map[string]deliveryLanePolicy `yaml:"lanes"`
-	legacy bool
+	// ignoredKeys are the keys of the decoded policy that this release does not
+	// read; hub startup logs them.
+	ignoredKeys []string
+	legacy      bool
 }
 
 func validDeliveryClass(class string) bool {
@@ -285,7 +289,6 @@ func parseDeliveryPolicy(raw []byte) (*deliveryPolicy, error) {
 	}
 	var p deliveryPolicy
 	d := yaml.NewDecoder(bytes.NewReader(raw))
-	d.KnownFields(true)
 	if err := d.Decode(&p); err != nil {
 		return nil, err
 	}
@@ -293,6 +296,11 @@ func parseDeliveryPolicy(raw []byte) (*deliveryPolicy, error) {
 	if err := d.Decode(&extra); err != io.EOF {
 		return nil, fmt.Errorf("expected one policy document")
 	}
+	ignored, err := configkeys.YAML(raw, &p)
+	if err != nil {
+		return nil, err
+	}
+	p.ignoredKeys = ignored
 	if p.Retention.Days < 0 || p.Retention.Days > 36500 || p.Retention.PerLane < 0 {
 		return nil, fmt.Errorf("retention needs days in 1..36500 and positive per_lane (zero uses defaults)")
 	}
