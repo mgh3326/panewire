@@ -342,23 +342,26 @@ func (a *App) diagnostics(ctx context.Context, kind string, args []string) error
 		if target == "" {
 			return fail(exitUsage, "find requires a name or label")
 		}
-		var matches []Agent
+		// Canonical identities (agent names here, agent_name/job/lane on the
+		// hub) are name-tier; tab and display labels are the label-tier
+		// fallback, exactly as the local lookup always resolved them.
+		var candidates []findMatch
 		for _, ag := range agents {
 			if ag.Name == target {
-				matches = append(matches, ag)
+				candidates = append(candidates, a.localFindMatch(ag, true))
 			}
 		}
-		if len(matches) == 0 {
-			for _, t := range tabs {
-				if t.Label == target {
-					for _, ag := range agents {
-						if ag.Tab == t.ID {
-							matches = append(matches, ag)
-						}
+		for _, t := range tabs {
+			if t.Label == target {
+				for _, ag := range agents {
+					if ag.Tab == t.ID {
+						candidates = append(candidates, a.localFindMatch(ag, false))
 					}
 				}
 			}
 		}
+		candidates = append(candidates, a.fleetFind(ctx, target)...)
+		matches := mergeFindMatches(candidates)
 		if len(matches) == 0 {
 			return fail(exitFailure, "no exact name or label match")
 		}
@@ -366,12 +369,36 @@ func (a *App) diagnostics(ctx context.Context, kind string, args []string) error
 			if len(matches) != 1 {
 				return fail(exitFailure, "ambiguous pane selection")
 			}
-			fmt.Fprintln(a.Out, matches[0].Pane)
+			// A local pane keeps the bare id panewire prompt resolves; a
+			// remote one is printed machine-qualified so the operator knows
+			// which host to run it on.
+			if matches[0].Local {
+				fmt.Fprintln(a.Out, matches[0].PaneID)
+			} else {
+				fmt.Fprintf(a.Out, "%s:%s\n", matches[0].Machine, matches[0].PaneID)
+			}
 			return nil
 		}
-		for _, ag := range matches {
-			fmt.Fprintf(a.Out, "pane_id=%s name=%s cwd=%s status=%s\n", ag.Pane, ag.Name, ag.CWD, ag.Status)
-			r := a.call(ctx, "herdr", "agent", "read", ag.Pane, "--source", "recent-unwrapped", "--lines", "5")
+		for _, m := range matches {
+			name, cwd, status := m.Name, m.CWD, m.Status
+			if name == "" {
+				name = "-"
+			}
+			if cwd == "" {
+				cwd = "-"
+			}
+			if status == "" {
+				status = "-"
+			}
+			fmt.Fprintf(a.Out, "machine=%s pane_id=%s name=%s cwd=%s status=%s via=%s", m.Machine, m.PaneID, name, cwd, status, findViaString(m.Via))
+			if m.Stale {
+				fmt.Fprint(a.Out, " stale=true")
+			}
+			fmt.Fprintln(a.Out)
+			if !m.Local {
+				continue
+			}
+			r := a.call(ctx, "herdr", "agent", "read", m.PaneID, "--source", "recent-unwrapped", "--lines", "5")
 			if e = check(r, "pane preview"); e != nil {
 				return e
 			}

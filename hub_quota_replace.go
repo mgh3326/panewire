@@ -230,7 +230,7 @@ func (h *HubServer) replaceQuotaStopped(ctx context.Context, machine string, eve
 		return skip("request_id")
 	}
 	next, err := fleet.ValidateSubmission(request)
-	if err != nil || !hubAgentLabelPattern.MatchString(next.Owner) {
+	if err != nil || !validLaneReference(next.Owner) {
 		return skip("invalid_replacement")
 	}
 	// Close the old pane before the successor exists, so a single job holds

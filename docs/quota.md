@@ -2,7 +2,7 @@
 
 `panewire quota`가 쿼터 인터페이스입니다. 판정, launch lookup, 측정은 panewire의 native 구현만 사용합니다.
 
-- `panewire quota status [--json]`은 측정 가능한 native 풀의 저장된 값을 읽습니다. 측정이나 게시를 실행하지 않습니다. 이 host가 presence를 게시하는 credit pool도 각각 한 줄로 보여 줍니다 ([Credit pool presence](#credit-pool-presence)).
+- `panewire quota status [--json]`은 측정 가능한 native 풀의 저장된 값을 읽습니다. 측정이나 게시를 실행하지 않습니다. 이 host가 presence를 게시하는 credit pool도 각각 한 줄로 보여 줍니다 ([Credit pool presence](#credit-pool-presence)). 텍스트 출력은 HOST, POOL, ACCOUNT, WINDOW, USED, RESETS IN, FRESHNESS, BAND 열을 가진 표로, pool과 window마다 한 행입니다. 기계용 출력은 `--json`(Status JSON v2)이며 텍스트 표와 독립입니다.
 - `panewire quota refresh POOL`은 `claude`, `codex`, `commandcode`, `devin`, `agy`만 측정합니다. 다른 풀은 측정 소스가 없다는 이유와 함께 exit 5(`ExitConditionInvalid`)로 거부합니다.
 - `[quota].gate`, `[quota].launch`, `[quota].native_pools`, `PANEWIRE_QUOTA_BIN`은 폐기되었습니다. 설정 파일에 키가 있으면 migration 경고를 출력합니다. `gate`와 `launch`는 지정할 경우 `"native"`만 허용하며, `native_pools`는 무시됩니다. 환경 변수 `PANEWIRE_QUOTA_BIN`도 무시됩니다.
 - operator credit pools (`anthropic-api`, `openai-api`)의 수동 기록은 shared store에서 계속 읽습니다.
@@ -348,16 +348,13 @@ provided by [Artificial Analysis](https://artificialanalysis.ai/); see its
 ## Launch
 
 Before admission, every spawn, delegate, placement and plan resolves the
-launch rung: the profile (its canon), effort, model id, grade, gate, pool and
-family a request runs. Until hk 3548 only `pacelever policy launch PROFILE
+launch rung: its profile, effort, model id, grade, gate, pool and family.
+Until hk 3548 only `pacelever policy launch PROFILE
 --json` answered it, from pacelever's own catalog cache (one-hour TTL), so a
 row added in handoffkeep was refused until that cache expired (2026-11-08:
 `omp-dsflash41@max`, `e6_arm_required: unplaced profile`, expired by hand on
-two hosts). panewire now has its own lookup
-(`internal/fleet/launch_native.go`), a rule-for-rule port of pacelever
-v0.3.28's `policy launch` (catalog.go `resolveLaunch`, `resolveRow`,
-`roleCheck`, `defaultEffort`; bench.go `decodeCatalog`, `ReadCatalog`). It
-reads:
+two hosts). panewire now resolves launches from the live catalog and
+`policy/model-families`. It reads:
 
 - **The bench catalog** through panewire's catalog client and its freshness
   rule ([catalog.md](catalog.md#cache)): a cache entry younger than the TTL,
@@ -369,14 +366,16 @@ reads:
   refuses a request, the lookup reads handoffkeep once more before it
   refuses, so a new row is found by the next lookup; that read replaces the
   cache the selection also reads (see [Shadow and native
-  launch](#shadow-and-native-launch)). Without any catalog it judges the
-  bundled snapshot as stale, as pacelever does.
-- **The embedded catalog snapshot** (`internal/fleet/catalog-snapshot.json`,
-  pacelever v0.3.28's `catalog_snapshot.json` byte for byte) for what the
-  handoffkeep rows do not carry: each rung's family; a rung the snapshot holds
-  unplaced at the same grade stays unplaced (it needs an exact E6 marker); the
-  effort a profile defaults to; the alias `codex-max` → `codex-sol`; and the
-  rows of a profile handoffkeep does not list.
+  launch](#shadow-and-native-launch)). Without a usable catalog there are no
+  launch rows; panewire supplies no bundled catalog rows.
+- **The model-family policy** (`policy/model-families`) for family identity by
+  quota pool and the family ladder metadata. It is a best-effort family
+  override: if the document is unavailable or malformed, launch uses the live
+  catalog row's family and continues. An unlisted pool also keeps the family
+  field on its live catalog row. Placement comes from the live catalog grade
+  (`unrated` means unplaced); `entry_effort` remains the ladder entry and does
+  not set a launch default. Per-profile defaults, aliases, and catalog rows
+  absent from handoffkeep are not retained.
 - **The panewire config file**, loaded with the validation rules ported from
   pacelever v0.3.28's `LoadConfig` before native launch resolves anything
   (`internal/fleet/launch_config.go`): the TOML types of `[quota]`,
@@ -390,14 +389,14 @@ reads:
   `PACELEVER_E6_ARM` fallback) — a request whose marker is already
   authoritative (a hub submission or a node-delivered spawn) reads no
   environment: its empty marker stays empty. For a rung whose catalog effort
-  is empty the marker is `<canon>@`; [config](config.md) lists the forms.
+  is empty the marker is `<canon>@`. A launch still requires a nonempty
+  catalog effort; [config](config.md) lists the forms.
 
-It answers as `pacelever policy launch` does through panewire: a refusal exits 3
-with pacelever's reason (`quota catalog: e6_arm_required: …`; the pacelever path
-reports `quota catalog: dependency failed`, since pacelever prints its reason
-only on stderr), a missing profile or an unreadable pool policy exits 2, and a
-stale catalog is refused `quota catalog is stale` (exit 70) unless the rung's
-own rule refuses first. The rules, each with its test in
+The native lookup refuses invalid launch config, unknown profiles, unplaced
+rungs without their exact marker and stale catalogs. Model-family policy
+failure uses the live catalog family as described above. A stale catalog is
+refused with `quota catalog is stale` (exit 70) unless the rung's own rule
+refuses first. The rules, each with its test in
 `internal/fleet/launch_native_test.go`:
 
 | Rule (pacelever v0.3.28) | Refusal |
@@ -415,11 +414,13 @@ own rule refuses first. The rules, each with its test in
 | A `consult_only` rung needs `--operator-request` (not `codex-astra`) | `profile is consult_only; pass --operator-request` |
 | On a stale catalog, an escalation rung needs `--operator-request` | `catalog is stale; non-default gate requires --operator-request` |
 
-An effortless request resolves to the profile's default effort, else the best
-graded ordinary rung at the lowest effort; a requested effort with no eligible
-rung of its own falls back to that rung and keeps the requested effort, as in
-pacelever. The launch rule for a credit rung is pacelever's (`pi-` profiles
-and `cmd-dsflash41`); the gate's stricter one ([Command Code
+An effortless request resolves to the lowest effort among the best graded
+ordinary live rows; this is the default for every profile and has no
+per-profile override. A requested effort with no eligible live rung is
+refused, so panewire never substitutes a different effort silently. The
+launch effort is always copied from the selected live row, and a row with no
+effort cannot launch. Credit launches follow the profile rule for `pi-`
+profiles and `cmd-dsflash41`; the gate's stricter rule ([Command Code
 seats](#command-code-seats)) still refuses at admission. pacelever's
 exploration does not apply: panewire passes no `--task`, so pacelever keeps
 its baseline answer.
@@ -477,11 +478,16 @@ every host reads the same entry; a pool with no fingerprint there refuses with
 `shared account fingerprint required`. The same command with
 `--pool openai-api` records the other pool.
 
-`panewire quota status` lists a line for each credit pool on a host that
-publishes it (the harness is installed), with the class, the manual entry's
-state (`live`, `expired`, `absent`, or `unknown` when the store could not be
-read) and this host's presence (`present`, `absent` or `unknown`), so an
-operator can see why a credit rung is or is not placeable there. The presence
+`panewire quota status` lists a row for each credit pool on a host that
+publishes it (the harness is installed). The text table's credit row shows the
+used share of the entry the `credit` state reads (the unexpired entry that
+expires last; when none is unexpired, the newest recorded entry) and the time
+until it expires. The band of every row is judged under the pool's admission
+class (`[pools.<pool>] class`), so an excluded pool reads `excluded`. The entry's state
+(`live`, `expired`, `absent`, or `unknown` when the store could not be read) and
+this host's presence (`present`, `absent` or `unknown`) are the `credit` and
+`presence` fields of `--json`, with `class`, so an operator can see why a credit
+rung is or is not placeable there. The presence
 record carries the id placement reads the local host under:
 `[local].presence_id`, else the fleet machine id.
 

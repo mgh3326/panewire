@@ -357,7 +357,7 @@ func (a *App) quotaStopLost(ctx context.Context, j Job, stop quotastop.Stop, emi
 	// After a hand-off grace the hub may already have written the record lost
 	// with the successor pointer; hk would refuse a rewrite, so leave it.
 	if emit || !a.hkJobEnded(ctx, j.ID) {
-		if e := a.putJobRecord(ctx, j.ID, map[string]any{"state": "lost", "end_reason": QuotaStopEndReason(stop.Pool, stop.Reset, "", "")}); e != nil {
+		if e := a.putJobRecord(ctx, j.ID, map[string]any{"state": "lost", "end_reason": QuotaStopEndReason(stop.Pool, stop.Reset, "", ""), "at": a.Now().UTC()}); e != nil {
 			a.jobRecordFailed(ctx, j.ID, "lost", e)
 		}
 	}
@@ -489,7 +489,7 @@ func (a *App) reconcileQuotaIntent(ctx context.Context, j Job, in quotaIntent, h
 	case seen != quotaStopFound || !stop.CreditExhaustedAt.IsZero():
 		return cancel("pane_moved_on")
 	}
-	if e := a.putJobRecord(ctx, j.ID, map[string]any{"state": "lost", "end_reason": in.reason}); e != nil {
+	if e := a.putJobRecord(ctx, j.ID, map[string]any{"state": "lost", "end_reason": in.reason, "at": a.Now().UTC()}); e != nil {
 		a.warn("quota-stop lost record not written, retrying: %v", e)
 		return quotaIntentRetry, nil
 	}

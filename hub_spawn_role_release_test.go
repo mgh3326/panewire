@@ -102,7 +102,7 @@ func roleHolderHub(t *testing.T, outcome hubSpawnOutcome, hkState, wantStatus st
 	t.Cleanup(func() { hub.Close() })
 	jobs := &roleJobs{records: map[string]map[string]any{"test-job": {"state": hkState}}}
 	hub.spawnNewApp = func(out, errout io.Writer) (*fleet.App, error) {
-		return &fleet.App{JobStore: jobs, Out: out, Err: errout}, nil
+		return &fleet.App{JobStore: jobs, Out: out, Err: errout, Now: time.Now}, nil
 	}
 	server := httptest.NewServer(hub.Handler())
 	t.Cleanup(server.Close)
@@ -281,7 +281,7 @@ func TestRoleReleaseAfterPrePaneRefusal(t *testing.T) {
 			jobs.records["test-job"] = map[string]any{"state": "claimed"}
 		}
 		hub.spawnNewApp = func(out, errout io.Writer) (*fleet.App, error) {
-			return &fleet.App{JobStore: jobs, Out: out, Err: errout}, nil
+			return &fleet.App{JobStore: jobs, Out: out, Err: errout, Now: time.Now}, nil
 		}
 		server := httptest.NewServer(hub.Handler())
 		t.Cleanup(server.Close)

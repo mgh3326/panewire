@@ -268,7 +268,7 @@ func (client *HubClient) nodeJobMarkLost(ctx context.Context, args nodeJobMarkLo
 	if err != nil {
 		return nil, "mark_lost_failed"
 	}
-	record := map[string]any{"state": "lost"}
+	record := map[string]any{"state": "lost", "at": client.nowUTC()}
 	if args.EndReason != "" {
 		record["end_reason"] = args.EndReason
 	}
@@ -354,8 +354,11 @@ func (client *HubClient) nodeJobHerdrSession(name string) (string, error) {
 	client.sessionCacheMu.RUnlock()
 
 	root, _, found, err := client.openNodeJobDir(name)
-	if err != nil || !found {
+	if err != nil {
 		return "", err
+	}
+	if !found {
+		return "", errors.New("job ledger is unavailable")
 	}
 	defer root.Close()
 	events, err := readNodeJobLedgerEvents(root)

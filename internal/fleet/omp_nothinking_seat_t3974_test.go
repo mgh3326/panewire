@@ -35,6 +35,7 @@ func noThinkingSpawnApp(t *testing.T, extra ...CatalogRow) *App {
 	t.Helper()
 	rows := append(ompSeedCatalog(t), extra...)
 	a := testApp(t)
+	a.modelFamilies = func(context.Context) (ModelFamiliesPolicy, error) { return launchTestModelFamilies(), nil }
 	a.Config.Local = map[string]any{"omp_commandcode": true}
 	a.Config.Quota = map[string]any{"accounts": map[string]any{"commandcode": noThinkingAccountFP}}
 	a.BenchCatalog = func(context.Context) ([]CatalogRow, error) { return rows, nil }

@@ -16,6 +16,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/mgh3326/panewire/internal/configkeys"
 	"github.com/mgh3326/panewire/internal/fleet"
 )
 
@@ -92,11 +93,20 @@ func loadHubSpawnConfig(path string) (hubSpawnConfig, error) {
 		return spawnConfigRefusal("config_unreadable", "")
 	}
 	decoder := json.NewDecoder(bytes.NewReader(contents))
-	decoder.DisallowUnknownFields()
 	var config hubSpawnConfig
 	if err := decoder.Decode(&config); err != nil {
 		return spawnConfigRefusal("config_json_invalid", err.Error())
 	}
+	ignored, err := configkeys.JSON(contents, &config)
+	if err != nil {
+		return spawnConfigRefusal("config_json_invalid", err.Error())
+	}
+	if slices.Contains(ignored, "runtug_path") {
+		// A retired launcher path: ignoring it would spawn with a different
+		// binary than the operator configured, so this one key still refuses.
+		return spawnConfigRefusal("config_json_invalid", `unknown field "runtug_path"`)
+	}
+	configkeys.Warn(nil, path, ignored)
 	var trailing any
 	switch {
 	case decoder.Decode(&trailing) != io.EOF:
