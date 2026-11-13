@@ -473,7 +473,6 @@ type HubServer struct {
 	placementCache                   placementCache
 	poolCooling                      map[string]time.Time
 	poolSweep                        poolSweepState
-	jobGuard                         jobGuard
 	relayControl                     hubRelayControlState
 	reportRelayPath                  string
 	lanesNodeRowCap                  int

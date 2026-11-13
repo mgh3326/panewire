@@ -60,9 +60,6 @@ const (
 
 var (
 	nodeCommandPaneIDPattern = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,128}$`)
-	// nodePoolActionIDPattern matches a hub action id: a request id, a colon,
-	// and the attempt number.
-	nodePoolActionIDPattern = regexp.MustCompile(`^[A-Za-z0-9.-]{1,64}:[0-9]{1,6}$`)
 	// pane.close never closes a working pane: the expected status must be one
 	// of these, and the node re-reads it before closing. blocked is a pane
 	// stopped at a prompt; the node closes it only for a reviewer job
@@ -79,7 +76,7 @@ func knownNodeCommandOp(op string) bool {
 	case nodeCommandAgentsList, nodeCommandPaneClose, nodeCommandPaneCapture, nodeCommandPaneRead,
 		nodeCommandWorktreeInspect, nodeCommandWorktreeList, nodeCommandWorktreePrepare, nodeCommandWorktreeRemove,
 		nodeCommandQuotaRefresh, nodeCommandJobDone, nodeCommandJobResult, nodeCommandJobMarkLost, nodeCommandPRStatus, nodeCommandJobClose, nodeCommandJobReap,
-		nodeCommandJobPoolAction, nodeCommandCheckoutPull, nodeCommandPaneSweep:
+		nodeCommandCheckoutPull, nodeCommandPaneSweep:
 		return true
 	}
 	return false
@@ -89,7 +86,7 @@ func knownNodeCommandOp(op string) bool {
 // result. node_lost and node_timeout are hub-local and never on the wire.
 func validNodeCommandError(code string) bool {
 	switch code {
-	case "invalid_args", "herdr_failed", "close_failed", "capture_failed", "jobs_root_unset", "work_root_unset", "refresh_failed", "done_failed", "result_failed", "mark_lost_failed", "pool_action_failed", "reap_failed", "result_too_large", "sweep_failed":
+	case "invalid_args", "herdr_failed", "close_failed", "capture_failed", "jobs_root_unset", "work_root_unset", "refresh_failed", "done_failed", "result_failed", "mark_lost_failed", "reap_failed", "result_too_large", "sweep_failed":
 		return true
 	}
 	return false
@@ -210,7 +207,6 @@ var nodeCommandArgFields = map[string][]string{
 	nodeCommandJobDone:         {"job", "report"},
 	nodeCommandJobResult:       {"job"},
 	nodeCommandJobMarkLost:     {"job", "pane_id", "label"},
-	nodeCommandJobPoolAction:   {"job", "pane_id", "label", "action_id", "op", "end_reason"},
 	nodeCommandWorktreeInspect: {"cwd"},
 	nodeCommandWorktreeList:    {"common"},
 	nodeCommandWorktreePrepare: {"origin", "mode", "branch", "sha", "fetch", "dir"},
@@ -291,9 +287,6 @@ func parseNodeCommandArgs(op string, raw json.RawMessage) (any, bool) {
 	case nodeCommandJobMarkLost:
 		var args nodeJobMarkLostArgs
 		return args, decodeNodeCommandStrict(raw, &args) && validNodeJobMarkLostArgs(args)
-	case nodeCommandJobPoolAction:
-		var args nodeJobPoolActionArgs
-		return args, decodeNodeCommandStrict(raw, &args) && validNodeJobPoolActionArgs(args)
 	case nodeCommandJobClose:
 		var args hubJobCloseRequest
 		if !decodeNodeCommandStrict(raw, &args) {
@@ -395,10 +388,6 @@ func canonicalNodeCommandResult(op string, raw json.RawMessage) (json.RawMessage
 	case nodeCommandJobMarkLost:
 		var result nodeJobMarkLostResult
 		valid = decodeNodeCommandStrict(raw, &result) && validNodeJobMarkLostResult(result)
-		target = result
-	case nodeCommandJobPoolAction:
-		var result nodeJobPoolActionResult
-		valid = decodeNodeCommandStrict(raw, &result) && validNodeJobPoolActionResult(result)
 		target = result
 	case nodeCommandJobDone:
 		var result JobDoneResult
@@ -757,12 +746,6 @@ func (client *HubClient) runNodeCommand(ctx context.Context, op string, raw json
 		client.nodeCommandMu.Lock()
 		defer client.nodeCommandMu.Unlock()
 		return client.nodeJobMarkLost(ctx, args)
-	case nodeJobPoolActionArgs:
-		// The marker must not be written while the watcher could be taking its
-		// own terminal decision, so this takes the acting-command lock too.
-		client.nodeCommandMu.Lock()
-		defer client.nodeCommandMu.Unlock()
-		return client.nodeJobPoolAction(args)
 	case hubJobCloseRequest:
 		return client.nodeJobClose(args)
 	case nodeJobReapArgs:

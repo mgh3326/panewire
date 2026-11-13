@@ -282,34 +282,6 @@ it answers `ledger_missing` and the node never writes `lost` over a record it
 cannot check. A failed ledger read or handoffkeep write answers
 `mark_lost_failed`; a node without a jobs root answers `jobs_root_unset`.
 
-### `job.pool_action`
-
-`args: {job, pane_id, label, action_id, op, end_reason}` — at least one of
-`pane_id` and `label` is required; `action_id` identifies the holder attempt.
-`register` records the action and planned end reason, `clear` cancels it, and
-`finish` records that the hub completed it. The marker is written atomically to
-`<inbox>/jobs/<job>/pool-action.json` with mode 0600. A clear or finish applies
-only to the matching action id.
-
-The holder watcher defers its missing-pane and hand-off fallback while the
-marker is unresolved, including past its ordinary deadline. A cancelled action
-clears the marker and allows the fallback; a finished action causes the watcher
-to exit without a duplicate loss notice. Registration and the fallback decision
-share the job's pool-action lock. A marker does not expire while an action may
-still need recovery.
-
-| `outcome` | Meaning |
-| --- | --- |
-| `registered` | the marker was written. |
-| `finished` | the matching marker was recorded as complete. |
-| `cleared` | the marker was removed (or was not there). |
-| `attempt-moved` | the ledger or marker identifies a different or completed attempt. |
-| `ledger-missing` | the job has no local ledger to hold the marker. |
-
-A failed marker write answers `pool_action_failed`; a node without a jobs root
-answers `jobs_root_unset`. The hub issues this op itself, and the HTTP command
-endpoint refuses it for every caller as it does `job.mark_lost`.
-
 ### `job.reap`
 
 `args: {job, lane, force}` — all three required, and `force:false` must be

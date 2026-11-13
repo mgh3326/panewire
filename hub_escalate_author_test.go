@@ -1108,25 +1108,3 @@ func TestEscalateAuthorRefusesLegacyWorkerWithOwnerESC(t *testing.T) {
 		t.Fatalf("owner did not receive a decision event: %+v", items)
 	}
 }
-
-func TestEscalateAuthorWaitsForPendingPoolAction(t *testing.T) {
-	f := newEscalateFixture(t, "pw-task-61")
-	holder, err := f.hub.inbox.store.latestSpawnForJob(t.Context(), f.job)
-	if err != nil {
-		t.Fatal(err)
-	}
-	now := time.Now().UTC()
-	action := poolAction{Request: holder.Request.RequestID, Attempt: holder.Attempt, Job: f.job, Stage: poolActionIntent, Created: now, Updated: now, Reset: now.Add(time.Hour)}
-	if err := f.hub.inbox.store.savePoolAction(t.Context(), action); err != nil {
-		t.Fatal(err)
-	}
-	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
-	defer cancel()
-	result, err := f.hub.escalateAuthor(ctx, f.request())
-	if err != nil || result.Code != "pending" {
-		t.Fatalf("result=%+v err=%v, want pending", result, err)
-	}
-	if commands := f.take(); len(commands) != 0 {
-		t.Fatalf("node touched while action pending: %v", commandOps(commands))
-	}
-}

@@ -130,17 +130,9 @@ func (r hubEscalateAuthorRequest) refusal() string {
 func (h *HubServer) escalateAuthor(ctx context.Context, request hubEscalateAuthorRequest) (hubEscalateAuthorResult, error) {
 	h.ladderMu.Lock()
 	defer h.ladderMu.Unlock()
-	release, held := h.jobGuard.acquire(ctx, request.Job)
-	if !held {
-		return hubEscalateAuthorResult{Code: "pending", Reason: "the author is busy; retry"}, nil
-	}
-	defer release()
 	holder, err := h.inbox.store.latestSpawnForJob(ctx, request.Job)
 	if err != nil {
 		return h.escalateAuthorRefusal(ctx, request, "", "job_unknown", "no spawn operation for "+request.Job, false)
-	}
-	if owned, err := h.poolActionOwnsHolder(ctx, holder); err != nil || owned {
-		return hubEscalateAuthorResult{Code: "pending", Reason: "a pool action owns the author; retry"}, nil
 	}
 	if hubSpawnArg(holder.Request.Args, "--role") == "worker" && hubSpawnArg(holder.Request.Args, "--task") == request.Task {
 		text := fmt.Sprintf("[panewire] ESC | legacy_worker_submission: job %s uses the retired worker role; its ladder successor was not started. Decide how to continue task %s.", request.Job, request.Task)

@@ -80,17 +80,10 @@ func (h *HubServer) closeHeldPaneAndMarkLostBecause(ctx context.Context, app *fl
 // holder's node. pane.close re-reads the pane and refuses one that changed, so
 // a true result means the pane is closed or already gone.
 func (h *HubServer) closeHeldPane(ctx context.Context, holder hubSpawnTask, name string, row nodeAgentRow) bool {
-	return h.closeHeldPaneIf(ctx, holder, name, row, nil)
-}
-
-func (h *HubServer) closeHeldPaneIf(ctx context.Context, holder hubSpawnTask, name string, row nodeAgentRow, beforeClose func() bool) bool {
 	machine := spawnHolderHost(holder)
 	var captured nodePaneCaptureResult
 	capture := nodePaneCaptureArgs{PaneID: row.PaneID, Name: name, Cwd: row.Cwd, AllowUnnamed: row.Name == "", MergedAfter: 0, Write: true}
 	if !h.nodeCall(ctx, machine, nodeCommandPaneCapture, capture, spawnHeldPaneActWait, &captured) || captured.Outcome != nodeCaptureScreen {
-		return false
-	}
-	if beforeClose != nil && !beforeClose() {
 		return false
 	}
 	var closed nodePaneCloseResult

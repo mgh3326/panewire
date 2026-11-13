@@ -157,17 +157,9 @@ func quotaReplacementRequest(old fleet.Submission, oldJob, newJob, pool string, 
 // replaceQuotaStopped answers one job.lost reason "quota_stop" from machine.
 // It reports the successor's job id when one was placed and the old job closed.
 func (h *HubServer) replaceQuotaStopped(ctx context.Context, machine string, event hubJobEventPayload) (string, bool) {
-	job, ok, _ := h.replaceQuotaStoppedWhy(ctx, machine, event)
-	return job, ok
-}
-
-// replaceQuotaStoppedWhy is replaceQuotaStopped that also returns the reason a
-// job was not replaced ("" when it was): the same token its "skipped" log line
-// carries.
-func (h *HubServer) replaceQuotaStoppedWhy(ctx context.Context, machine string, event hubJobEventPayload) (string, bool, string) {
-	skip := func(reason string, kv ...any) (string, bool, string) {
+	skip := func(reason string, kv ...any) (string, bool) {
 		h.logger.Info("quota-stop replacement skipped", append([]any{"job", event.JobID, "node", machine, "reason", reason}, kv...)...)
-		return "", false, reason
+		return "", false
 	}
 	budget := h.quotaReplaceBudget
 	if budget <= 0 {
@@ -175,20 +167,10 @@ func (h *HubServer) replaceQuotaStoppedWhy(ctx context.Context, machine string, 
 	}
 	ctx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
-	// One operation at a time ends a job: the exhausted-pool sweep may be
-	// closing the same pane and writing the same record (hub_job_guard.go).
-	release, held := h.jobGuard.acquire(ctx, event.JobID)
-	if !held {
-		return skip("job_busy")
-	}
-	defer release()
 	store := h.inbox.store
 	holder, err := store.latestSpawnForJob(ctx, event.JobID)
 	if err != nil {
 		return skip("unknown_job")
-	}
-	if owned, err := h.poolActionOwnsHolder(ctx, holder); err != nil || owned {
-		return skip("pool_action_pending")
 	}
 	prior, err := fleet.ValidateSubmission(holder.Request)
 	if err != nil {
@@ -259,7 +241,24 @@ func (h *HubServer) replaceQuotaStoppedWhy(ctx context.Context, machine string, 
 		return skip("pane_not_closed", "pane", holder.Outcome.Pane)
 	}
 	mark := func() bool {
-		lost, reason := h.markHolderLostWithRetry(ctx, app, holder, name, endReason)
+		// The pointer can only be written once and the watcher's fallback
+		// would write a plain record, so a transient failure is retried
+		// inside the grace.
+		backoff := h.quotaMarkBackoff
+		if backoff <= 0 {
+			backoff = quotaMarkBackoff
+		}
+		var lost bool
+		var reason string
+		for attempt := 0; attempt < quotaMarkAttempts && !lost; attempt++ {
+			if attempt > 0 {
+				select {
+				case <-time.After(backoff):
+				case <-ctx.Done():
+				}
+			}
+			lost, reason = h.markHolderJobLostBecause(ctx, app, holder, name, endReason)
+		}
 		if !lost {
 			h.logger.Warn("quota-stop replacement: the stopped job's record was not written", "job", event.JobID, "replacement", newJob, "reason", reason)
 		}
@@ -272,7 +271,7 @@ func (h *HubServer) replaceQuotaStoppedWhy(ctx context.Context, machine string, 
 	// fails the pointer names a job that never ran, and the owner is told by
 	// the spawn failure notice.
 	if role != "reviewer" && !mark() {
-		return "", false, "record_not_written"
+		return "", false
 	}
 	if prior.Task != "" && prior.ParentJob == "" {
 		if priorID, _, _, err := store.spawnRoleOwner(ctx, prior.RoleKey()); err == nil && priorID == holder.Request.RequestID {
@@ -305,17 +304,17 @@ func (h *HubServer) replaceQuotaStoppedWhy(ctx context.Context, machine string, 
 		// did not.
 		if settled && outcome.RC != 0 || !settled && !spawnMayStillRun(task) {
 			h.logger.Info("quota-stop replacement not placed", "job", event.JobID, "replacement", newJob, "pool", pool, "status", task.Status, "rc", outcome.RC, "reason", outcome.Reason)
-			return "", false, "not_placed"
+			return "", false
 		}
 		if !settled {
 			h.logger.Warn("quota-stop replacement undecided; writing its pointer", "job", event.JobID, "replacement", newJob, "status", task.Status)
 		}
 		if !mark() {
-			return "", false, "record_not_written"
+			return "", false
 		}
 	} else if settled && outcome.RC != 0 {
 		h.logger.Warn("quota-stop hand-over not placed; its pointer names a job that never ran", "job", event.JobID, "replacement", newJob, "pool", pool, "rc", outcome.RC, "reason", outcome.Reason)
-		return "", false, quotaHandOverNotPlaced
+		return "", false
 	}
 	h.logger.Info("quota-stop replacement", "job", event.JobID, "replacement", newJob, "role", role, "pool", pool, "host", outcome.Host, "profile", outcome.Profile)
 	to, place := "with", fmt.Sprintf("%s/%s", outcome.Host, outcome.Profile)
@@ -327,14 +326,8 @@ func (h *HubServer) replaceQuotaStoppedWhy(ctx context.Context, machine string, 
 	}
 	text := fmt.Sprintf("%s %s (%s quota) %s %s on %s", verb, event.JobID, pool, to, newJob, place)
 	h.relayLaneEventContext(ctx, hubJobEventPayload{EventID: "quota-replace:" + newJob, JobID: newJob, OwnerLane: next.Owner, NotifyType: "info", Text: utf8PrefixWithin(text, laneEventTextLimit), Host: "hub", Epoch: 1}, nil)
-	return newJob, true, ""
+	return newJob, true
 }
-
-// quotaHandOverNotPlaced is replaceQuotaStoppedWhy's reason for a hand-over
-// whose old record already ends with handed_over_to but whose successor
-// settled as a failure: the old job is over, so a repeated pass has nothing
-// left to hand over.
-const quotaHandOverNotPlaced = "hand_over_not_placed"
 
 // spawnMayStillRun reports whether an operation that has not settled can still
 // place a job: one the node holds (dispatching, reconciling) or whose late
@@ -418,60 +411,50 @@ func (h *HubServer) reconcileQuotaReplacements(ctx context.Context) int {
 	}
 	written := 0
 	for _, successor := range successors {
-		func() {
-			m := quotaSuccessorJob.FindStringSubmatch(successor.Job)
-			if m == nil || !spawnMayStillRun(successor) && successor.Status != "succeeded" {
-				return
+		m := quotaSuccessorJob.FindStringSubmatch(successor.Job)
+		if m == nil || !spawnMayStillRun(successor) && successor.Status != "succeeded" {
+			continue
+		}
+		// A replacement younger than its own budget is still being finished by
+		// replaceQuotaStopped.
+		if h.now().Sub(successor.Created) < quotaReplaceBudget {
+			continue
+		}
+		old := m[1]
+		holder, err := h.inbox.store.latestSpawnForJob(ctx, old)
+		if err != nil || holder.Status != "succeeded" {
+			continue
+		}
+		prior, err := fleet.ValidateSubmission(holder.Request)
+		if err != nil || prior.Role != "reviewer" {
+			continue
+		}
+		readCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		record, exists, err := app.ExistingJob(readCtx, old)
+		cancel()
+		state, _ := record["state"].(string)
+		pool, _ := record["pool"].(string)
+		if err != nil || !exists || (state != "claimed" && state != "spawned") || !spawnargs.ValuePattern.MatchString(pool) {
+			continue
+		}
+		endReason := fleet.QuotaStopEndReason(pool, time.Time{}, "replaced_by", successor.Job)
+		if !validNodeEndReason(endReason) {
+			continue
+		}
+		name := heldAgentName(holder, record)
+		probe := h.probeHeldPane(ctx, spawnHolderHost(holder), holder.Outcome.Pane, name)
+		switch {
+		case probe.state == heldPanePresent && nodePaneIdleStatus[probe.row.AgentStatus] && validNodeCommandPath(probe.row.Cwd):
+			if !h.closeHeldPane(ctx, holder, name, probe.row) {
+				continue
 			}
-			// A replacement younger than its own budget is still being finished by
-			// replaceQuotaStopped.
-			if h.now().Sub(successor.Created) < quotaReplaceBudget {
-				return
-			}
-			old := m[1]
-			release, held := h.jobGuard.acquire(ctx, old)
-			if !held {
-				return
-			}
-			defer release()
-			holder, err := h.inbox.store.latestSpawnForJob(ctx, old)
-			if err != nil || holder.Status != "succeeded" {
-				return
-			}
-			if owned, err := h.poolActionOwnsHolder(ctx, holder); err != nil || owned {
-				return
-			}
-			prior, err := fleet.ValidateSubmission(holder.Request)
-			if err != nil || prior.Role != "reviewer" {
-				return
-			}
-			readCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-			record, exists, err := app.ExistingJob(readCtx, old)
-			cancel()
-			state, _ := record["state"].(string)
-			pool, _ := record["pool"].(string)
-			if err != nil || !exists || (state != "claimed" && state != "spawned") || !spawnargs.ValuePattern.MatchString(pool) {
-				return
-			}
-			endReason := fleet.QuotaStopEndReason(pool, time.Time{}, "replaced_by", successor.Job)
-			if !validNodeEndReason(endReason) {
-				return
-			}
-			name := heldAgentName(holder, record)
-			probe := h.probeHeldPane(ctx, spawnHolderHost(holder), holder.Outcome.Pane, name)
-			switch {
-			case probe.state == heldPanePresent && nodePaneIdleStatus[probe.row.AgentStatus] && validNodeCommandPath(probe.row.Cwd):
-				if !h.closeHeldPane(ctx, holder, name, probe.row) {
-					return
-				}
-			case probe.state != heldPaneAbsent:
-				return
-			}
-			if lost, _ := h.markHolderJobLostBecause(ctx, app, holder, name, endReason); lost {
-				written++
-				h.logger.Info("quota-stop replacement reconciled", "job", old, "replacement", successor.Job)
-			}
-		}()
+		case probe.state != heldPaneAbsent:
+			continue
+		}
+		if lost, _ := h.markHolderJobLostBecause(ctx, app, holder, name, endReason); lost {
+			written++
+			h.logger.Info("quota-stop replacement reconciled", "job", old, "replacement", successor.Job)
+		}
 	}
 	return written
 }
@@ -492,30 +475,6 @@ func (h *HubServer) runQuotaReconcile(parent context.Context) {
 		}
 		h.reconcileQuotaReplacements(ctx)
 		h.expireStagedLadderSteps(ctx)
-		h.reconcilePoolActions(ctx)
 		delay = quotaReconcileEvery
 	}
-}
-
-// markHolderLostWithRetry writes the stopped job's record lost with endReason,
-// up to quotaMarkAttempts tries quotaMarkBackoff apart. The record can only be
-// written once and the node watcher's fallback would write a plain one, so a
-// transient failure is retried inside the grace.
-func (h *HubServer) markHolderLostWithRetry(ctx context.Context, app *fleet.App, holder hubSpawnTask, name, endReason string) (bool, string) {
-	backoff := h.quotaMarkBackoff
-	if backoff <= 0 {
-		backoff = quotaMarkBackoff
-	}
-	var lost bool
-	var reason string
-	for attempt := 0; attempt < quotaMarkAttempts && !lost; attempt++ {
-		if attempt > 0 {
-			select {
-			case <-time.After(backoff):
-			case <-ctx.Done():
-			}
-		}
-		lost, reason = h.markHolderJobLostBecause(ctx, app, holder, name, endReason)
-	}
-	return lost, reason
 }
