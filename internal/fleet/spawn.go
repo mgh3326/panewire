@@ -598,8 +598,18 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 		}
 	}()
 
-	defer func() { a.finishPlacement(ctx, s, err) }()
-	defer func() { a.spawnEvents(s, err) }()
+	defer func() {
+		// A quota wait is not a terminal refusal. Preserve a host attempt if
+		// this pass already contacted one, but do not emit refusal events.
+		if errors.Is(err, ErrQuotaRefreshPending) {
+			if s.placement.contactedHost != "" || s.placement.started {
+				a.finishPlacement(ctx, s, err)
+			}
+			return
+		}
+		a.spawnEvents(s, err)
+		a.finishPlacement(ctx, s, err)
+	}()
 	if s.CWD == "" || s.Prompt == "" || s.Label == "" || !slices.Contains([]string{"T0", "T1", "T2", "T3"}, s.T) {
 		return fail(exitUsage, "spawn requires -c -p -l --t T0..T3; supply the missing flags (workspace defaults to executing local.workspace)")
 	}

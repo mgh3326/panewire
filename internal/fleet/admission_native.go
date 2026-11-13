@@ -272,7 +272,7 @@ func (a *App) loadAccount(ctx context.Context, in *admissionInputs, key string, 
 	reading, why := admissionReadingFrom(latest.Observation, pool, key, a.Now(), a.sharedFreshTTL(pool))
 	// Only panewire's own measurement refreshes here: the gate never runs
 	// pacelever, so a pool panewire does not measure stays unmeasurable.
-	if why == msgAccountStale && refresh && a.nativeQuotaPool(pool) && slices.Contains(a.localAccountKeys(ctx, pool), key) {
+	if why == msgAccountStale && refresh && a.ScheduleQuotaRefresh == nil && a.nativeQuotaPool(pool) && slices.Contains(a.localAccountKeys(ctx, pool), key) {
 		if a.planOnly {
 			// A dry run measures nothing: the refresh writes presence, lease
 			// and observation to the shared quota store. A spawn measures

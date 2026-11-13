@@ -216,7 +216,7 @@ type hubAgent struct {
 	// machineID is the node this socket authenticated as. It is the sender
 	// the lane inbox records for a lane.event the node relays.
 	machineID   string
-	writeMu     sync.Mutex
+	writeMu     hubWriteMutex
 	transient   bool
 	failovers   chan hubFailoverEvent
 	revocations chan hubJobRevokedEvent
@@ -415,6 +415,7 @@ type HubServer struct {
 	quotaReplaceBudget time.Duration
 	spawnKick          chan struct{}
 	spawnWorkers       sync.WaitGroup
+	quotaRefresh       hubQuotaRefreshScheduler
 	spawnActions       hubSpawnActions
 	spawnAdmissions    hubSpawnAdmissions
 	// drain is the SIGTERM state (hub_drain.go).
@@ -800,6 +801,7 @@ func (h *HubServer) Close() error {
 	if h.closeCancel != nil {
 		h.closeCancel()
 	}
+	h.closeQuotaRefreshes()
 	// The mutex is held for a run's whole life, so taking it here waits the
 	// run out; the flag it then leaves set keeps every later TryLock from
 	// counting a fresh run against the WaitGroup after Close has begun.
@@ -2372,7 +2374,7 @@ func (h *HubServer) RunMaintenance(ctx context.Context) {
 func (agent *hubAgent) writeJSON(value any) error {
 	agent.writeMu.Lock()
 	defer agent.writeMu.Unlock()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), hubWriteTimeout)
 	defer cancel()
 	return wsjson.Write(ctx, agent.conn, value)
 }

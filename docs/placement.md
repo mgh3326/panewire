@@ -1025,10 +1025,14 @@ execution identity; this change does not install or alter DAGs.
 
 ## Quota service boundary
 
-The absorbed spawn engine now reads the hub's timestamped fleet-state snapshot
-in-process and dispatches `quota.refresh` directly to the selected node. Existing
-provider adapters and their credentials remain on that node; stale or unknown
-quota remains fail-closed. `GET /v1/state` and node refresh already provide the
+The absorbed spawn engine reads the hub's timestamped fleet-state snapshot
+in-process. A stale account schedules a bounded, deduplicated `quota.refresh`
+on its node outside placement; placement can choose a different confirmed
+account without waiting. If none is eligible, the accepted request remains
+pending until a refresh completes or its deadline expires. Existing provider
+adapters and their credentials remain on the node; stale or unknown quota is
+never treated as confirmed. The queue and its cancellation rules are described
+in [Durable spawn operations](hub-spawn-operations.md). `GET /v1/state` and node refresh provide the
 shared service needed by placement. A second provider-measurement service and a
 `panewire quota` command are not added: they would duplicate those interfaces or
 centralize credentials without a demonstrated caller need. `pacelever` remains

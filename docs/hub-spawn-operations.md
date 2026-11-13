@@ -19,8 +19,8 @@ stale or unobserved shared account on any host, or a stale account this machine
 holds that the admission gate would refresh — is printed as
 `would measure host=… pool=…` and left unmeasured. That rung is dropped, and a
 plan with no other rung refuses and names the measurement. The plan can
-therefore differ from the submission: the submission measures the account first
-and may place there.
+therefore differ from the submission: the hub schedules the measurement and
+may place the submission after a fresh observation arrives.
 
 The CLI prints the hub's host and profile, labelled `hub plan:`. The hub may
 choose a different profile from this machine's local plan. Without a hub the
@@ -36,6 +36,29 @@ That confirms ownership of the operation, not a pane or brief delivery. Wait for
 keeps polling through `reconciling` (which sends no notice), then uses the
 existing job-completion wait and timeout behavior. Delegate panes
 use the same submission path.
+
+For a stale or unobserved native quota account, the hub schedules a node
+refresh independently of placement. If no confirmed eligible account can run
+the request, it stays unbound in `accepted`, keeping its reservation until a
+refresh permits placement or its existing deadline expires. A completed refresh
+wakes another placement pass; a failed or timed-out refresh is retried while
+the request remains pending. An already-confirmed account can be selected
+without waiting for the stale accounts. A pending measurement produces no
+terminal refusal event. If the pass already contacted a host, its failed
+placement attempt remains recorded while the request stays accepted. The hub
+logs a changed refresh failure with its machine, pool and reason; repeated
+identical failures are not logged on every retry.
+
+Refreshes coalesce by machine and pool. At most four run at once, with at most
+one per node; waiting keys are considered in arrival order while busy nodes are
+skipped. The configured `measure_timeout_s` (default 60 seconds, capped at 60)
+starts when a key is queued and covers queueing, writer admission, the socket
+write and the response. After writer admission, the socket write also has the
+same five-second maximum as other hub node writes. An expired queued attempt
+retains its place, but is sent only if a later placement pass requests it with a
+new budget. On shutdown the hub cancels refreshes; accepted requests and their
+reservations survive restart. Local, non-hub spawns keep their synchronous
+refresh behavior. See [Quota service boundary](placement.md#quota-service-boundary).
 
 ## Acceptance and identity
 
