@@ -299,7 +299,7 @@ func (a *App) watch(ctx context.Context, args []string) error {
 			}
 		}
 		if waiting != nil && !(pending && a.workerSignalledEnd(j)) && !a.Now().Before(waiting.at.Add(decisionTimeout)) {
-			if e := a.putJobRecord(ctx, id, map[string]any{"state": "lost"}); e != nil {
+			if e := a.putJobRecord(ctx, id, map[string]any{"state": "lost", "at": a.Now().UTC()}); e != nil {
 				a.jobRecordFailed(ctx, id, "lost", e)
 			}
 			if e := a.event(ctx, id, "job.lost", map[string]any{"pane_id": j.Pane, "reason": "decision_unanswered"}); e != nil {
@@ -362,7 +362,7 @@ func (a *App) watch(ctx context.Context, args []string) error {
 		// (with the successor pointer), and the watcher ends the job after the
 		// grace instead.
 		if missing >= 2 && !handOff.active {
-			if e := a.putJobRecord(ctx, id, map[string]any{"state": "lost"}); e != nil {
+			if e := a.putJobRecord(ctx, id, map[string]any{"state": "lost", "at": a.Now().UTC()}); e != nil {
 				a.jobRecordFailed(ctx, id, "lost", e)
 			}
 			if e = a.event(ctx, id, "job.lost", map[string]any{"pane_id": j.Pane}); e != nil {

@@ -647,9 +647,14 @@ spawns that need hk are refused.
 
 Each spawn writes a record to hk `/v1/jobs` on the executing host (the design
 is `design/2026-10-30/cross-host-jobs`): the claim `POST {job_id, task_id,
-host}` runs before the local claim and a taken id refuses with exit 74, like
+host, at}` runs before the local claim and a taken id refuses with exit 74, like
 the ledger's duplicate. `host` is the node's `HUB_MACHINE_ID`. hk unreachable
 or unconfigured fails the spawn closed. The task precheck also fails closed before launch.
+`task_id` is `null` for a task-less job (a reviewer or consult run); a non-empty
+non-numeric task id still refuses before the POST. `at` is the client clock: the
+claim sets `claimed_at`; the `spawned`, `completed`, `escalated`, and `lost`
+transitions send `at` with `state` and hk stores it as `spawned_at` or `ended_at`
+(set once).
 
 After the brief lands, panewire merges `{state:"spawned", role, label, family,
 profile, model, harness, effort, pool, owner_lane, parent_lane, parent_job,

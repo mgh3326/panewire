@@ -267,7 +267,7 @@ func (a *App) quotaStopLost(ctx context.Context, j Job, stop quotastop.Stop, emi
 	// After a hand-off grace the hub may already have written the record lost
 	// with the successor pointer; hk would refuse a rewrite, so leave it.
 	if emit || !a.hkJobEnded(ctx, j.ID) {
-		if e := a.putJobRecord(ctx, j.ID, map[string]any{"state": "lost", "end_reason": endReason}); e != nil {
+		if e := a.putJobRecord(ctx, j.ID, map[string]any{"state": "lost", "end_reason": endReason, "at": a.Now().UTC()}); e != nil {
 			a.jobRecordFailed(ctx, j.ID, "lost", e)
 		}
 	}
