@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -467,19 +468,34 @@ func TestPoolExhaustedWaitsForTheJobGuard(t *testing.T) {
 	eventually(t, 5*time.Second, "the reviewer to be ended once the guard is free", func() bool { return f.state(reviewer) == "lost" })
 }
 
-// An owner notice that cannot be made durable leaves the job as it was: nothing
-// is closed or written, and the next pass tries again.
-func TestPoolExhaustedKeepsAJobWhoseOwnerCannotBeNotified(t *testing.T) {
+// An owner notice that cannot be made durable leaves the record live (the pane
+// is already closed, so the job is over, but its record is not made terminal
+// without the notice); the next pass, once the owner can be reached, finishes it.
+func TestPoolExhaustedRetriesAJobWhoseOwnerCannotBeNotified(t *testing.T) {
 	f := newSweepFixture(t)
-	f.owner = "nowhere" // no route in the lanes file
+	f.owner = "nowhere" // no route in the lanes file yet
 	reviewer := f.addJob(t, "reviewer", "devin", sweepDevin, "idle")
+	reset := time.Now().Add(3 * time.Hour)
 
-	f.publishFreeLimit(t, sweepDevin, time.Now().Add(3*time.Hour), time.Now())
+	f.publishFreeLimit(t, sweepDevin, reset, time.Now())
 	eventually(t, 5*time.Second, "the pass", func() bool { return f.sweeps() == 1 })
-	if got := f.state(reviewer); got != "spawned" || f.node2.count("pane.close "+reviewer) != 0 {
-		t.Fatalf("a job was closed before its owner could be told: state=%s", got)
+	if got := f.state(reviewer); got != "spawned" {
+		t.Fatalf("a record was made terminal without its owner notice: state=%s", got)
 	}
-	if summary := f.logs.lines("pool exhausted sweep")[0]; !strings.Contains(summary, "owner_not_notified=1") {
+	if summary := f.logs.lines("handed_over=")[0]; !strings.Contains(summary, "owner_not_notified=1") {
 		t.Fatalf("summary %q does not name the skip", summary)
 	}
+	for _, relay := range spawnFailedInjections(f.destination) {
+		if relay.Kind == "job.lost" {
+			t.Fatalf("an unroutable owner was sent %+v", relay)
+		}
+	}
+
+	// The owner becomes reachable; the next look finishes the job.
+	routes := `{"lanes":{"parent":{"machine":"machine-b","pane":"w1:p1"},"nowhere":{"machine":"machine-b","pane":"w1:p2"}}}`
+	if err := os.WriteFile(f.hub.reportRelayPath, []byte(routes), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f.publishFreeLimit(t, sweepDevin, reset, time.Now().Add(2*time.Minute))
+	eventually(t, 5*time.Second, "the retried job to be ended", func() bool { return f.state(reviewer) == "lost" })
 }

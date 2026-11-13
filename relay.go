@@ -457,8 +457,9 @@ func (h *HubServer) relayJobEventFromContext(ctx context.Context, senderMachine,
 	if event.OwnerLane == "" || event.JobID == "" {
 		return false
 	}
-	if _, handled := h.receiveInbox(kind, &event, h.relayPersistedAgent(senderMachine, nil), senderMachine, false, ctx); handled {
-		return true
+	if result, handled := h.receiveInbox(kind, &event, h.relayPersistedAgent(senderMachine, nil), senderMachine, false, ctx); handled {
+		// A handled event whose inbox write failed has no durable record.
+		return !result.PersistFailed
 	}
 	key := relayEventDedupeKey(kind, event)
 	h.mu.Lock()

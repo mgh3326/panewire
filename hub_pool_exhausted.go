@@ -379,18 +379,21 @@ func (h *HubServer) endPoolJob(ctx context.Context, exhaustion poolExhaustion, t
 	if probe.state == heldPaneUnknown || probe.state == heldPanePresent && (!nodePaneIdleStatus[probe.row.AgentStatus] || !validNodeCommandPath(probe.row.Cwd)) {
 		return skip("pane_not_idle", "probe", probe.reason, "status", probe.row.AgentStatus)
 	}
-	// The owner's notice is made durable (persisted by handoffkeep) before
-	// anything is closed or written, so a lost record always has its notice and
-	// a transient relay failure leaves the job for the next look. The notice
-	// carries a fixed event id, so a retry of the same job is the same event.
+	// The order is what keeps a failure at any step recoverable by the next
+	// pass (the job stays live in hk, and listed, until its record is written):
+	// the pane is closed first, so the owner is never told a job is lost while
+	// it still runs (a pane that changed since the probe is refused and nothing
+	// is sent); the owner's notice is made durable (persisted by handoffkeep,
+	// a fixed event id so a retry is the same event) before the record becomes
+	// terminal, so a lost record always has its notice.
+	if probe.state == heldPanePresent && !h.closeHeldPane(ctx, task, name, probe.row) {
+		return skip("pane_not_closed", "pane", task.Outcome.Pane)
+	}
 	if !h.relayJobEventFromContext(ctx, "", "job.lost", hubJobEventPayload{
 		JobID: task.Job, Epoch: h.registeredEpoch(task.Job), OwnerLane: task.Owner, AgentLabel: name, PaneID: task.Outcome.Pane,
 		EventID: "pool-exhausted:" + task.Job, Reason: "quota_stop pool=" + exhaustion.Pool + " reset_at=" + exhaustion.Reset.Format(time.RFC3339),
 	}) {
 		return skip("owner_not_notified", "owner", task.Owner)
-	}
-	if probe.state == heldPanePresent && !h.closeHeldPane(ctx, task, name, probe.row) {
-		return skip("pane_not_closed", "pane", task.Outcome.Pane)
 	}
 	lost, reason := h.markHolderLostWithRetry(ctx, app, task, name, endReason)
 	if !lost {
