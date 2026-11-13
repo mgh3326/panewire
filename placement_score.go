@@ -181,6 +181,17 @@ func positivePower(power float64) float64 {
 	return defaultPlacementPower
 }
 
+// hysteresisBar is the score a challenger must reach to take the decision from
+// a winner scoring w: hysteresis times w, and for a negative w (claims in the
+// bridge can push a usable host under zero) w divided by hysteresis, so the
+// rival is the same factor better and not merely ahead.
+func (k placementScoreK) hysteresisBar(w float64) float64 {
+	if w < 0 {
+		return w / k.hysteresis
+	}
+	return w * k.hysteresis
+}
+
 // decide applies the decision rules that sit on top of the scores, to the
 // usable candidates in policy order (winner is the index of the policy-order
 // winner). It returns the index of the candidate that takes the decision and
@@ -227,7 +238,7 @@ func (k placementScoreK) decide(usable []PlacementCandidate, winner int) (int, s
 			challenger = i
 		}
 	}
-	if challenger >= 0 && usable[challenger].Score > usable[winner].Score && usable[challenger].Score >= k.hysteresis*usable[winner].Score {
+	if challenger >= 0 && usable[challenger].Score > usable[winner].Score && usable[challenger].Score >= k.hysteresisBar(usable[winner].Score) {
 		return challenger, "challenger"
 	}
 	return winner, floorReason

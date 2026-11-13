@@ -460,8 +460,9 @@ unknown `free`, never a low one: the floor does not apply to it.
 3. **Hysteresis.** Among the hosts at or above the floor, the winner (the
    policy-order winner, or the first host at the floor in policy order when the
    floor moved the decision) keeps the decision unless the best other host at
-   the floor scores at least 1.25 times as much. Then `reason` is `challenger`
-   and that host takes it. A rival that is merely ahead does not flip the
+   the floor scores at least 1.25 times as much (for a winner scoring under
+   zero, a rival whose score is the winner's divided by 1.25 or better). Then
+   `reason` is `challenger` and that host takes it. A rival that is merely ahead does not flip the
    decision, so back-to-back spawns do not bounce between hosts.
 
 A decision the rules left alone has no `reason`. Tagged requests (below) have
@@ -492,6 +493,13 @@ default.
 of power `p` pays `bridge_cost * 100 / p`. `free_floor` (0..1) is the free
 fraction under which a host is not chosen while another is at or above it. The
 earlier `claim_cost` and `all_loaded_below` still load and are ignored.
+
+**Rollout and rollback.** The policy decoder refuses unknown keys, so an older
+binary rejects a `placement.json` that sets `bridge_cost` or `free_floor`
+("placement policy is invalid"). Update the config only after the rollback
+window of the release that reads these keys; until then leave the defaults
+(unset) in place. A config that still sets `claim_cost` or `all_loaded_below`
+loads on both sides.
 
 ### Telemetry
 

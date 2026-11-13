@@ -31,6 +31,10 @@ func TestPlacementHysteresisKeepsWinnerUnlessChallengerClearsMargin(t *testing.T
 		{"challenger far ahead", 60, 100, 1, "challenger"},
 		{"challenger behind", 60, 40, 0, ""},
 		{"winner scored zero", 20, 0, 0, ""},
+		{"negative winner, challenger a little ahead", -14, -13, 0, ""},
+		{"negative winner, challenger just under the margin", -14, -11.21, 0, ""},
+		{"negative winner, challenger exactly at the margin", -10, -8, 1, "challenger"},
+		{"negative winner, challenger positive", -14, 3, 1, "challenger"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
