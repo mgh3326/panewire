@@ -131,11 +131,10 @@ func TestRankHostsFloorRespectsTheHubsUsableVerdict(t *testing.T) {
 			t.Fatalf("rank=%s: an unusable host displaced the usable one", got)
 		}
 	}
-	// With no eligible host the floor changes nothing: a host at its job cap
-	// still ranks on score as it did before the floor (the live engine does not
-	// read the hub's usable verdict; shadow arm "fixed" does).
-	if got := names(rankHosts([]selHost{usable, capped})); got != "capped,usable" {
-		t.Fatalf("rank=%s: the floor must not reorder hosts when none is eligible", got)
+	// With no eligible host (every usable host is under the floor) the usable
+	// host still ranks before one at its job cap, whatever the cap host's free.
+	if got := names(rankHosts([]selHost{capped, usable})); got != "usable,capped" {
+		t.Fatalf("rank=%s: a capped host above the floor must not outrank the usable one", got)
 	}
 	// A usable host at the floor still outranks both.
 	good := floorHost("good", true, 0.3, 100, 30)
@@ -220,5 +219,36 @@ func TestPlanLocalCandidateTakesTheHubsUsableVerdict(t *testing.T) {
 		if len(got) == 0 || got[0] != "remote" {
 			t.Fatalf("%s local: order=%v, want the hub's decided remote first", reason, got)
 		}
+	}
+}
+
+// A synthetic slot-full view (no terms, so it reads as above the floor) and a
+// capped awake host above the floor must both rank behind usable hosts that
+// are under the floor, in either bucket order.
+func TestRankHostsFloorKeepsUnusableAboveFloorHostsBehindUsableBelowOnes(t *testing.T) {
+	a := floorHost("a", true, 0.04, 100, 4)
+	b := floorHost("b", true, 0.03, 100, 3)
+	// C: no terms, no load reading (bucket 1, better than A and B at bucket 2).
+	c := selHost{name: "c", awake: true, view: &HostView{Name: "c", Connected: true, SlotFull: true}}
+	for _, hosts := range [][]selHost{{c, a, b}, {a, c, b}, {a, b, c}} {
+		if got := names(rankHosts(hosts)); got != "a,b,c" {
+			t.Fatalf("rank=%s: the slot-full synthetic host must stay behind the usable ones", got)
+		}
+	}
+	capped := floorHost("capped", false, 0.5, 100, 50)
+	capped.view.Reason = "active_jobs>=max"
+	for _, hosts := range [][]selHost{{capped, a}, {a, capped}} {
+		if got := names(rankHosts(hosts)); got != "a,capped" {
+			t.Fatalf("rank=%s: a capped host above the floor outranked the usable one", got)
+		}
+	}
+	mk := func(name string, load float64, free, score float64, unusable bool) *placeCandidate {
+		sig := PlacementSignals{Terms: &PlacementTerms{CPU: free, Mem: 1, IO: 1, Load: 1, Jobs: 1}, Power: ptrF(100), BelowFreeFloor: free < 0.05}
+		return &placeCandidate{name: name, awake: true, load: ptrF(load), score: ptrF(score), signals: sig, login: loginUnknown, unusable: unusable}
+	}
+	ordered := []*placeCandidate{mk("capped", 0.1, 0.5, 50, true), mk("a", 0.9, 0.04, 4, false)}
+	sortPlaceCandidates(ordered, 0.5, "")
+	if ordered[0].name != "a" {
+		t.Fatalf("plan order %s first: a capped host above the floor outranked the usable one", ordered[0].name)
 	}
 }

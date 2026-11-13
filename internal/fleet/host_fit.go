@@ -138,70 +138,64 @@ type floorSide struct {
 	value                float64
 }
 
-// eligible: awake, usable by the hub's verdict and not under the floor.
-func (s floorSide) eligible() bool { return s.awake && s.usable && !s.below }
+// tier is a host's place under the free floor: 0 eligible (usable and at or
+// above the floor), 1 usable but under it, 2 unusable by the hub's verdict
+// (throttled, at its job cap, slot-full, not accepting).
+func (s floorSide) tier() int {
+	switch {
+	case !s.usable:
+		return 2
+	case s.below:
+		return 1
+	}
+	return 0
+}
 
 // floorCtx is what the free floor knows about the whole list.
 type floorCtx struct {
 	// anyBelow: some awake host is under the floor. With none, the floor does
 	// nothing and the ranking is the one it was before the floor existed.
 	anyBelow bool
-	// anyEligible: some awake host is usable and not under the floor.
+	// anyUsable: some awake host is usable by the hub's verdict. With none the
+	// floor has nothing to prefer.
+	anyUsable bool
+	// anyEligible: some awake host is usable and not under the floor. When
+	// some host is usable and none is eligible, every usable host is under it.
 	anyEligible bool
-	// allBelow: every awake host is under the floor.
-	allBelow bool
 }
 
 func floorContext(sides []floorSide) floorCtx {
 	var c floorCtx
-	awake := 0
-	c.allBelow = true
 	for _, s := range sides {
 		if !s.awake {
 			continue
 		}
-		awake++
 		c.anyBelow = c.anyBelow || s.below
-		c.anyEligible = c.anyEligible || s.eligible()
-		c.allBelow = c.allBelow && s.below
+		c.anyUsable = c.anyUsable || s.usable
+		c.anyEligible = c.anyEligible || s.usable && !s.below
 	}
-	c.allBelow = c.allBelow && awake > 0
 	return c
 }
 
 // floorOrder is the free floor as an eligibility rule that runs before the load
 // bucket (decision 231). It looks only at awake hosts: a sleeper stays behind
-// every awake host through the bucket order, and has no metrics to judge. When
-// some awake host is eligible, every other awake host (under the floor, or one
-// the hub calls unusable: throttled, at its job cap) ranks after it; those
-// keep their relative order from the rules that follow, so a throttled host
-// never displaces a usable one. A host under the floor is ranked last, not
-// removed, and is still tried if every other host refuses. When every awake host
-// is under the floor, usable hosts rank before unusable ones and the higher
-// floorValue ranks first within each group; the bucket does not apply. With no awake host under the floor it does nothing at all. 0 means the
-// floor does not separate the two.
+// every awake host through the bucket order, and has no metrics to judge.
+// Awake hosts rank by tier: eligible first, then usable hosts under the floor,
+// then the hub's unusable ones, which stay as fallbacks and never outrank a
+// usable host, whatever their free reading or bucket (a synthetic slot-full view
+// has no terms and reads as above the floor). Within a tier the other rules
+// order the hosts, as they did before the floor, except that when every usable
+// host is under the floor (none is eligible) the higher floorValue, the score,
+// ranks first and the bucket does not apply. With no awake host under the floor
+// or none usable it does nothing. 0 means the floor does not separate the two.
 func floorOrder(x, y floorSide, c floorCtx) int {
-	if !x.awake || !y.awake || !c.anyBelow {
+	if !x.awake || !y.awake || !c.anyBelow || !c.anyUsable {
 		return 0
 	}
-	switch {
-	case c.anyEligible:
-		switch ex, ey := x.eligible(), y.eligible(); {
-		case ex == ey:
-			return 0
-		case ex:
-			return -1
-		}
-		return 1
-	case c.allBelow:
-		// Usable hosts first, the hub's unusable ones only as fallbacks; the
-		// score orders hosts within each group.
-		if x.usable != y.usable {
-			if x.usable {
-				return -1
-			}
-			return 1
-		}
+	if tx, ty := x.tier(), y.tier(); tx != ty {
+		return tx - ty
+	}
+	if !c.anyEligible {
 		return cmp.Compare(y.value, x.value)
 	}
 	return 0
