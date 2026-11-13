@@ -154,8 +154,8 @@ func TestAgyProfilesKeepPoolAndAccountAndMeterOwnGroup(t *testing.T) {
 	}
 }
 
-// (d) agy-flash is gone: the spawn seat is unknown, the catalog verdict refuses
-// it as unknown, and the embedded snapshot has no row for it.
+// (d) agy-flash is retired: the spawn seat is unknown and the live catalog
+// verdict refuses it as unknown.
 func TestAgyFlash37IsUnknown(t *testing.T) {
 	p, err := LoadPolicy("")
 	if err != nil {
@@ -166,10 +166,8 @@ func TestAgyFlash37IsUnknown(t *testing.T) {
 			t.Errorf("%s must not be a policy profile", name)
 		}
 	}
-	for _, row := range catalogSnapshot().Rows {
-		if row.Profile == "agy-flash" || row.ModelID == "gemini-3.7-flash" {
-			t.Errorf("embedded snapshot still carries %+v", row.admissionRow)
-		}
+	if rows := overlayLaunchCatalog(agyOwnGateCatalog(true), false).profileRows("agy-flash"); len(rows) != 0 {
+		t.Errorf("retired live catalog row remained launchable: %+v", rows)
 	}
 	a, s, _, _ := cmdFixture(t)
 	s.Profile = "agy-flash"

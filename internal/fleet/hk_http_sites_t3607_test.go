@@ -238,12 +238,19 @@ func TestHKSitesGoOverHTTPWithSvcToken(t *testing.T) {
 			t.Fatal(e)
 		}
 		key := reportDocumentKey("j", reportDigest([]byte(report)))
-		reqs := hkOnly(t, hk, docRoute(http.MethodPut, key), "POST /v1/tasks/42/comments")
-		put := hkJSON(t, reqs[0])
-		if put["key"] != key || put["kind"] != "report" || put["job"] != "j" || put["body"] != report {
-			t.Fatalf("report put key=%v kind=%v job=%v body bytes=%d, want the CLI's doc put: the key, kind report, the job and the whole file (%d bytes)", put["key"], put["kind"], put["job"], len(put["body"].(string)), len(report))
+		reqs := hkOnly(t, hk, "PUT /v1/attachments", docRoute(http.MethodPut, key), "POST /v1/tasks/42/comments")
+		if string(reqs[0].Body) != report || reqs[0].Header.Get("X-HK-Name") != "report.md" || reqs[0].Header.Get("Content-Type") != reportAttachmentMIME || reqs[0].Header.Get("X-HK-Ref") != "document:"+key {
+			t.Fatalf("report attachment name=%q MIME=%q ref=%q bytes=%d, want report.md, %s, document:%s and the whole file (%d bytes)", reqs[0].Header.Get("X-HK-Name"), reqs[0].Header.Get("Content-Type"), reqs[0].Header.Get("X-HK-Ref"), len(reqs[0].Body), reportAttachmentMIME, key, len(report))
 		}
-		if got := hkJSON(t, reqs[1]); len(got) != 1 || got["body"] != "panewire job.completed job=j report="+path {
+		put := hkJSON(t, reqs[1])
+		if put["key"] != key || put["kind"] != "report" || put["job"] != "j" {
+			t.Fatalf("report manifest put key=%v kind=%v job=%v, want the content-addressed report document", put["key"], put["kind"], put["job"])
+		}
+		var manifest reportManifest
+		if err := json.Unmarshal([]byte(put["body"].(string)), &manifest); err != nil || manifest.Schema != "panewire.report-manifest.v1" || manifest.JobID != "j" || manifest.ReportSHA256 != reportDigest([]byte(report)) || manifest.SizeBytes != int64(len(report)) || manifest.AttachmentSHA256 != reportDigest([]byte(report)) {
+			t.Fatalf("report manifest=%+v err=%v", manifest, err)
+		}
+		if got := hkJSON(t, reqs[2]); len(got) != 1 || got["body"] != "panewire job.completed job=j report="+path {
 			t.Fatalf("comment body=%v", got)
 		}
 		if out := a.Out.(*bytes.Buffer).String(); !strings.Contains(out, "OK job=j report="+path+" kind=job.completed") {

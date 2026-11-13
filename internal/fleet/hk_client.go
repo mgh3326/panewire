@@ -317,6 +317,16 @@ func hkPutDocumentStored(ctx context.Context, doc client.Document) (client.Docum
 	return stored, err
 }
 
+// hkPutAttachment uploads report bytes under hk's upload bound.
+func hkPutAttachment(ctx context.Context, name, mime, ref string, body []byte) (client.Attachment, error) {
+	c, err := newHKClientWithin(hkUploadTimeout)
+	if err != nil {
+		return client.Attachment{}, err
+	}
+	attachment, _, err := c.PutAttachment(ctx, name, mime, ref, body)
+	return attachment, err
+}
+
 // hkAnswerBody runs one hk read and returns hk's 2xx answer as hk sent it,
 // for a site that reads it with the parser it used on the hk CLI's output
 // (the CLI printed hk's answer): an answer that parser read is read as it

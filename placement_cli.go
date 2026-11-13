@@ -22,6 +22,7 @@ func runPlaceCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 	tagsFlag := flags.String("tags", "", "required capability tags, comma-separated")
 	explain := flags.Bool("explain", false, "render candidates as a table")
 	signals := flags.Bool("signals", false, "include score signals in JSON")
+	floor := flags.Bool("floor", false, "with --signals, include the free-floor flag the spawn engine ranks on (a hub older than this flag ignores it)")
 	hubURL := flags.String("hub-url", "", "HTTPS hub base URL")
 	tokenPath := flags.String("hub-token-env", "", "mode-0600 operator HUB_MACHINE_ID/HUB_TOKEN env file")
 	cfPath := flags.String("hub-cf-env", "", "optional mode-0600 CF Access env file")
@@ -63,6 +64,9 @@ func runPlaceCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 		// Only a caller that renders the signals asks for them; the JSON
 		// form keeps the wire older decoders accept.
 		query.Set("signals", "1")
+		if *floor {
+			query.Set("floor", "1")
+		}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()

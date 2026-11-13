@@ -91,6 +91,14 @@ func TestJobsListEstablishedLaneName(t *testing.T) {
 	}
 }
 
+func TestNormalizeHubActiveJobRetainsHistoricalOwnerLane(t *testing.T) {
+	job := HubActiveJob{JobID: "job-a", AgentLabel: "agent-a", OwnerLane: "legacy.parent", Epoch: 1}
+	normalizeHubActiveJobMetadata(&job)
+	if job.OwnerLane != "legacy.parent" {
+		t.Fatalf("historical owner lane was dropped: %+v", job)
+	}
+}
+
 func TestJobsListLateCompletion(t *testing.T) {
 	hub, server := pw2Hub(t, nil, "", nil)
 	agent := &hubAgent{transient: true}

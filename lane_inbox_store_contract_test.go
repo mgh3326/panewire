@@ -309,6 +309,24 @@ func TestLaneInboxStoreContractDigestAndEscalationBatches(t *testing.T) {
 	})
 }
 
+func TestLaneInboxStartupKeepsHistoricalDottedBatchPending(t *testing.T) {
+	store, err := openLaneInboxStore(filepath.Join(t.TempDir(), "inbox.sqlite3"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.close()
+	if _, err := store.db.ExecContext(context.Background(), `INSERT INTO lane_inbox_batches(id,lane,text) VALUES(?,?,?)`, "batch-legacy", "legacy.parent", "1 unread inbox items | lane legacy.parent"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.quarantineInvalidBatches(); err != nil {
+		t.Fatal(err)
+	}
+	batches, err := store.pendingBatches()
+	if err != nil || len(batches) != 1 || batches[0].Lane != "legacy.parent" {
+		t.Fatalf("historical batch was lost: batches=%+v err=%v", batches, err)
+	}
+}
+
 func TestLaneInboxStoreContractQuarantineInvalidAndRecoverMustAct(t *testing.T) {
 	forEachLaneInboxBackend(t, func(t *testing.T, open func() *laneInboxStore) {
 		s := open()

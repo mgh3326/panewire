@@ -2,6 +2,7 @@ package panewire
 
 import (
 	"encoding/json"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -110,7 +111,7 @@ func countedDecision(t *testing.T, hub *HubServer, job string) (string, map[stri
 // The 03:59Z burst. Six jobs are decided within a minute, none claimed yet.
 // Each decision must rank on scores that carry the jobs decided before it, so
 // the burst spreads the way the scores say: the model below is the documented
-// formula (a bridged job costs claim_cost) applied to the first decision's
+// formula (a bridged job costs bridge_cost*100/power) applied to the first decision's
 // scores, and is independent of the hub's counting.
 func TestPlacementBurstSpreadsOnDecidedJobsNotClaims(t *testing.T) {
 	hub, _ := countFixtureHub(t)
@@ -120,6 +121,12 @@ func TestPlacementBurstSpreadsOnDecidedJobsNotClaims(t *testing.T) {
 	var got, want []string
 	var base map[string]float64
 	counted := map[string]int{}
+	// A decided job costs bridge_cost*100/power on its host: power 30 for oci,
+	// 100 for the others in this fixture.
+	power := map[string]float64{"oci": 30, "rpi": 100, "desktop": 100, "mac-dev": 100}
+	cost := func(machine string) float64 {
+		return float64(counted[machine]) * placementDefaultBridgeCost * 100 / power[machine]
+	}
 	for i := range 6 {
 		host, scores := countedDecision(t, hub, "burst-job-"+string(rune('a'+i)))
 		if base == nil {
@@ -132,14 +139,14 @@ func TestPlacementBurstSpreadsOnDecidedJobsNotClaims(t *testing.T) {
 		// the jobs it has decided so far.
 		modelled := ""
 		for _, machine := range []string{"oci", "rpi", "desktop", "mac-dev"} {
-			score := base[machine] - float64(counted[machine])*placementDefaultClaimCost
-			if modelled == "" || score > base[modelled]-float64(counted[modelled])*placementDefaultClaimCost {
+			score := base[machine] - cost(machine)
+			if modelled == "" || score > base[modelled]-cost(modelled) {
 				modelled = machine
 			}
 		}
 		for machine, score := range scores {
-			if diff := score - (base[machine] - float64(counted[machine])*placementDefaultClaimCost); diff > 0.002 || diff < -0.002 {
-				t.Fatalf("decision %d: %s published %v, want %v with %d jobs decided onto it", i+1, machine, score, base[machine]-float64(counted[machine])*placementDefaultClaimCost, counted[machine])
+			if diff := score - (base[machine] - cost(machine)); diff > 0.002 || diff < -0.002 {
+				t.Fatalf("decision %d: %s published %v, want %v with %d jobs decided onto it", i+1, machine, score, base[machine]-cost(machine), counted[machine])
 			}
 		}
 		got, want = append(got, host), append(want, modelled)
@@ -168,9 +175,11 @@ func TestPlacementDecisionReadsHostsFresh(t *testing.T) {
 	prom.set(placementCPUBusy1mQuery, "oci", "0.1")
 	prom.set(placementCPUBusyQuery, "rpi", "0.9999")
 	prom.set(placementCPUBusy1mQuery, "rpi", "0.9999")
-	// oci: 0.9 free * power 30 = 27, less the 10 of the job decided onto it.
+	// oci: 0.9 free * power 30 = 27, less the 100/3 of the job decided onto it
+	// (a bridged job costs bridge_cost*100/power); on the first reading it
+	// would be 0.05 - 33.3.
 	host, scores := countedDecision(t, hub, "fresh-job-b")
-	if host != "oci" || scores["oci"] < 15 || scores["rpi"] > -19.5 {
+	if host != "oci" || math.Abs(scores["oci"]-(27-100.0/3)) > 0.1 || scores["rpi"] > -19.5 {
 		t.Fatalf("second decision = %s on %v: it ranked on the readings of the first", host, scores)
 	}
 }
@@ -350,8 +359,11 @@ func TestSimultaneousDecisionsSpreadThroughTheGate(t *testing.T) {
 	}
 	close(start)
 	wg.Wait()
-	if counts["oci"] != 3 || counts["rpi"] != 2 || counts["desktop"] != 1 {
-		t.Fatalf("simultaneous burst placed %v, the scores say oci 3, rpi 2, desktop 1", counts)
+	// Greedy on the base scores (oci +0.05, rpi -17.4, desktop -19.1, mac-dev
+	// -27.9), a decided job costing 100/3 on oci (power 30) and 10 elsewhere:
+	// oci, rpi, desktop, rpi, mac-dev, desktop.
+	if counts["oci"] != 1 || counts["rpi"] != 2 || counts["desktop"] != 2 || counts["mac-dev"] != 1 {
+		t.Fatalf("simultaneous burst placed %v, the scores say oci 1, rpi 2, desktop 2, mac-dev 1", counts)
 	}
 }
 
