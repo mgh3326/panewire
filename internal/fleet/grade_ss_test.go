@@ -123,7 +123,7 @@ func TestGradeSSSeatGate(t *testing.T) {
 			t.Fatal(err)
 		}
 		seat := p.Profiles["sonnet"]
-		got := code(seat.Check(Launch{ModelID: "m", Effort: "high", Grade: tc.launch, Gate: "default"}, "worker", tc.task, "", "", map[string]any{seat.Capability: true}))
+		got := code(seat.Check(Launch{ModelID: "m", Effort: "high", Grade: tc.launch, Gate: "default"}, "implementer", tc.task, "", "", map[string]any{seat.Capability: true}))
 		if got != tc.want {
 			t.Errorf("seat grade %s covering %s: got %d want %d", tc.launch, tc.task, got, tc.want)
 		}
@@ -170,10 +170,7 @@ func TestGradeSSPlanAndCommandInputs(t *testing.T) {
 	if err := a.resolveCmd(context.Background(), []string{"--role", "implementer", "--grade", "SS", "--t", "T1"}); err != nil {
 		t.Errorf("resolve --grade SS: %v", err)
 	}
-	if err := a.delegate(context.Background(), []string{"--role", "reader", "--grade", "SS"}); err == nil || !strings.Contains(err.Error(), "delegate needs --prompt FILE") {
-		t.Errorf("delegate rejected SS before prompt validation: %v", err)
-	}
-	selection := `{"now":"2026-11-12T00:00:00Z","grade":"SS","role":"worker","pools":[{"id":"claude","status":"ok","class":"spend","used_pct":0}],"candidates":[{"profile":"sonnet","effort":"high","grade":"SS","pool":"claude","gate":"default","model_id":"m"}]}`
+	selection := `{"now":"2026-11-12T00:00:00Z","grade":"SS","role":"implementer","pools":[{"id":"claude","status":"ok","class":"spend","used_pct":0}],"candidates":[{"profile":"sonnet","effort":"high","grade":"SS","pool":"claude","gate":"default","model_id":"m"}]}`
 	path := t.TempDir() + "/selection.json"
 	if err := os.WriteFile(path, []byte(selection), 0600); err != nil {
 		t.Fatal(err)

@@ -55,6 +55,9 @@ func (h *HubServer) decodeSpawnRequest(w http.ResponseWriter, r *http.Request) (
 		return fleet.Submission{}, fleet.Spawn{}, false
 	}
 	spawn, err := fleet.ValidateSubmission(request)
+	if request.LadderStep != nil {
+		err = errors.New("ladder step metadata is hub-internal")
+	}
 	if err == nil {
 		raw, _ := json.Marshal(request.Repository.Checkout)
 		var spec hubSpawnCheckout

@@ -126,7 +126,7 @@ func TestSpawnRecordCarriesRoleMinEffort(t *testing.T) {
 func TestResolveReportsLaunchedRungEffort(t *testing.T) {
 	a, _, _ := reviewerRungFixture(t, reviewerMinEffortBlock("medium"))
 	out := captureOut(a)
-	if e := a.Run(context.Background(), []string{"resolve", "--role", "reviewer", "--grade", "C", "--builder-family", "anthropic", "--json"}); e != nil {
+	if e := a.Run(context.Background(), []string{"resolve", "--role", "reviewer", "--grade", "C", "--author-family", "anthropic", "--json"}); e != nil {
 		t.Fatalf("resolve: %v\n%s", e, out)
 	}
 	var r resolveResult

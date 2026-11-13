@@ -11,7 +11,7 @@ import (
 // keeps the (task, review pass) reservation held, so every later review of the
 // task is refused until the desk closes the pane by hand (hk 3315). A new
 // submission for the same key releases a reviewer holder when its pane is not
-// working and has stayed so past the grace. Workers and testers are never
+// working and has stayed so past the grace. Implementers and consults are never
 // released this way: an idle worker may be waiting on an ESC answer.
 //
 // The node's agent list carries no time of the last state change, so the grace

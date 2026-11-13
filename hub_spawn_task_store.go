@@ -66,6 +66,12 @@ func (s *laneInboxStore) ensureSpawnTasks() error {
 }
 
 func (s *laneInboxStore) claimSpawn(parent context.Context, request fleet.Submission, job, owner string, now time.Time) (hubSpawnTask, bool, error) {
+	return s.claimSpawnReplacing(parent, request, job, owner, now, "", "", "accepted")
+}
+
+// claimSpawnReplacing transfers the task role in the same transaction as the
+// successor claim, so another worker cannot claim the gap between them.
+func (s *laneInboxStore) claimSpawnReplacing(parent context.Context, request fleet.Submission, job, owner string, now time.Time, previousID, roleKey, status string) (hubSpawnTask, bool, error) {
 	ctx, done := s.op(parent)
 	defer done()
 	spawn, err := fleet.ValidateSubmission(request)
@@ -102,6 +108,16 @@ func (s *laneInboxStore) claimSpawn(parent context.Context, request fleet.Submis
 	if spawn.Task != "" && spawn.ParentJob == "" {
 		taskRole = spawn.RoleKey()
 	}
+	if previousID != "" {
+		result, err := tx.ExecContext(ctx, s.q(`UPDATE spawn_reservations SET task_role=NULL WHERE request_id=? AND task_role=?`), previousID, roleKey)
+		if err != nil {
+			return hubSpawnTask{}, false, err
+		}
+		if n, _ := result.RowsAffected(); n != 1 {
+			return hubSpawnTask{}, false, errSpawnClaimed
+		}
+		taskRole = roleKey
+	}
 	claimed, err := tx.ExecContext(ctx, s.q(`INSERT INTO spawn_reservations(job,request_id,task_role) VALUES(?,?,?) ON CONFLICT DO NOTHING`), job, request.RequestID, taskRole)
 	if err != nil {
 		return hubSpawnTask{}, false, err
@@ -119,14 +135,88 @@ func (s *laneInboxStore) claimSpawn(parent context.Context, request fleet.Submis
 		return hubSpawnTask{}, false, errSpawnClaimed
 	}
 	deadline := now.Add(time.Duration(request.DeadlineSeconds) * time.Second)
-	_, err = tx.ExecContext(ctx, s.q(`INSERT INTO spawn_operations(request_id,job,owner,fingerprint,payload,status,created_ms,deadline_ms) VALUES(?,?,?,?,?,'accepted',?,?)`), request.RequestID, job, owner, fingerprint, string(raw), now.UnixMilli(), deadline.UnixMilli())
+	_, err = tx.ExecContext(ctx, s.q(`INSERT INTO spawn_operations(request_id,job,owner,fingerprint,payload,status,created_ms,deadline_ms) VALUES(?,?,?,?,?,?,?,?)`), request.RequestID, job, owner, fingerprint, string(raw), status, now.UnixMilli(), deadline.UnixMilli())
 	if err != nil {
 		return hubSpawnTask{}, false, err
 	}
 	if err = tx.Commit(); err != nil {
 		return hubSpawnTask{}, false, err
 	}
-	return hubSpawnTask{Request: request, Job: job, Owner: owner, Status: "accepted", Created: now, Deadline: deadline, Attempt: 1}, true, nil
+	return hubSpawnTask{Request: request, Job: job, Owner: owner, Status: status, Created: now, Deadline: deadline, Attempt: 1}, true, nil
+}
+
+func (s *laneInboxStore) activateStagedSpawn(parent context.Context, id string, now time.Time, deadlineSeconds int) error {
+	ctx, done := s.op(parent)
+	defer done()
+	result, err := s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET status='accepted', deadline_ms=? WHERE request_id=? AND status='staged'`), now.Add(time.Duration(deadlineSeconds)*time.Second).UnixMilli(), id)
+	if err != nil {
+		return err
+	}
+	if n, _ := result.RowsAffected(); n != 1 {
+		return errSpawnClaimed
+	}
+	return nil
+}
+
+// cancelStagedSpawn restores the old holder only while the staged step has
+// not been activated. Both changes commit together.
+func (s *laneInboxStore) cancelStagedSpawn(parent context.Context, id, previousID, roleKey string) error {
+	ctx, done := s.op(parent)
+	defer done()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, s.q(`DELETE FROM spawn_operations WHERE request_id=? AND status='staged'`), id)
+	if err != nil {
+		return err
+	}
+	if n, _ := result.RowsAffected(); n != 1 {
+		return errSpawnClaimed
+	}
+	result, err = tx.ExecContext(ctx, s.q(`DELETE FROM spawn_reservations WHERE request_id=? AND task_role=?`), id, roleKey)
+	if err != nil {
+		return err
+	}
+	if n, _ := result.RowsAffected(); n != 1 {
+		return errSpawnClaimed
+	}
+	result, err = tx.ExecContext(ctx, s.q(`UPDATE spawn_reservations SET task_role=? WHERE request_id=? AND task_role IS NULL`), roleKey, previousID)
+	if err != nil {
+		return err
+	}
+	if n, _ := result.RowsAffected(); n != 1 {
+		return errSpawnClaimed
+	}
+	return tx.Commit()
+}
+
+// discardStagedSpawn releases a staged role when its predecessor ended for a
+// different reason. It never restores a reservation to a terminal job.
+func (s *laneInboxStore) discardStagedSpawn(parent context.Context, id, roleKey string) error {
+	ctx, done := s.op(parent)
+	defer done()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, s.q(`DELETE FROM spawn_operations WHERE request_id=? AND status='staged'`), id)
+	if err != nil {
+		return err
+	}
+	if n, _ := result.RowsAffected(); n != 1 {
+		return errSpawnClaimed
+	}
+	result, err = tx.ExecContext(ctx, s.q(`DELETE FROM spawn_reservations WHERE request_id=? AND task_role=?`), id, roleKey)
+	if err != nil {
+		return err
+	}
+	if n, _ := result.RowsAffected(); n != 1 {
+		return errSpawnClaimed
+	}
+	return tx.Commit()
 }
 
 // Bind the immutable execution destination before sending any bytes. Concurrent
@@ -413,6 +503,25 @@ func (s *laneInboxStore) spawnRoleOwner(parent context.Context, roleKey string) 
 	return
 }
 
+func (s *laneInboxStore) expiredStagedSpawns(parent context.Context, now time.Time) ([]hubSpawnTask, error) {
+	ctx, done := s.op(parent)
+	defer done()
+	rows, err := s.db.QueryContext(ctx, s.q(`SELECT `+spawnTaskColumns+` FROM spawn_operations WHERE status='staged' AND deadline_ms<?`), now.UnixMilli())
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var tasks []hubSpawnTask
+	for rows.Next() {
+		task, err := scanSpawnTask(rows)
+		if err != nil {
+			return nil, err
+		}
+		tasks = append(tasks, task)
+	}
+	return tasks, rows.Err()
+}
+
 // retryableSpawns lists the operations that ended with verified cleanup and
 // wait for a replay of their own request.
 func (s *laneInboxStore) retryableSpawns(parent context.Context) ([]hubSpawnTask, error) {
@@ -437,6 +546,15 @@ func (s *laneInboxStore) releaseCompletedSpawnRole(parent context.Context, id, r
 	ctx, done := s.op(parent)
 	defer done()
 	_, err := s.db.ExecContext(ctx, s.q(`UPDATE spawn_reservations SET task_role=NULL WHERE request_id=? AND task_role=? AND EXISTS(SELECT 1 FROM spawn_operations WHERE request_id=? AND status IN ('succeeded','failed'))`), id, roleKey, id)
+	return err
+}
+
+// releaseCompletedSpawnRoleOf frees whatever slot the finished request id
+// holds, whatever its key says.
+func (s *laneInboxStore) releaseCompletedSpawnRoleOf(parent context.Context, id string) error {
+	ctx, done := s.op(parent)
+	defer done()
+	_, err := s.db.ExecContext(ctx, s.q(`UPDATE spawn_reservations SET task_role=NULL WHERE request_id=? AND task_role IS NOT NULL AND EXISTS(SELECT 1 FROM spawn_operations WHERE request_id=? AND status IN ('succeeded','failed'))`), id, id)
 	return err
 }
 

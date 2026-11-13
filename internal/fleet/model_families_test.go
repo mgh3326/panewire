@@ -64,7 +64,7 @@ func TestEveryLiveProfileResolvesToItsCatalogEffort(t *testing.T) {
 	}
 	for profile, live := range byProfile {
 		t.Run(profile, func(t *testing.T) {
-			request := QuotaRequest{Profile: profile, Effort: live[0].Effort, Role: "worker"}
+			request := QuotaRequest{Profile: profile, Effort: live[0].Effort, Role: "implementer"}
 			if live[0].Grade == gradeUnrated {
 				request.E6Arm = profile + "@" + live[0].Effort
 			}
@@ -91,7 +91,7 @@ func TestLaunchEffortUsesLiveCatalogRow(t *testing.T) {
 		{Profile: "opus", Effort: "low", ModelID: "opus", Pool: "claude", Grade: "S", Gate: defaultGate},
 		{Profile: "opus", Effort: "high", ModelID: "opus", Pool: "claude", Grade: "S", Gate: defaultGate},
 	}
-	got, why := overlayLaunchCatalog(rows, false).resolve(admissionPolicy{}, nil, admissionRequest{Profile: "opus", Role: "worker"})
+	got, why := overlayLaunchCatalog(rows, false).resolve(admissionPolicy{}, nil, admissionRequest{Profile: "opus", Role: "implementer"})
 	if why != "" {
 		t.Fatalf("resolve: %s", why)
 	}
@@ -111,7 +111,7 @@ func TestEffortlessLaunchUsesBestGradeThenLowestLiveEffort(t *testing.T) {
 	}
 	for _, profile := range []string{"opus", "codex-sol"} {
 		t.Run(profile, func(t *testing.T) {
-			got, why := overlayLaunchCatalog(rows, false).resolve(admissionPolicy{}, nil, admissionRequest{Profile: profile, Role: "worker"})
+			got, why := overlayLaunchCatalog(rows, false).resolve(admissionPolicy{}, nil, admissionRequest{Profile: profile, Role: "implementer"})
 			if why != "" {
 				t.Fatalf("resolve: %s", why)
 			}
@@ -133,7 +133,7 @@ func liveRowEffort(rows []CatalogRow, launch Launch) string {
 
 func TestCatalogRowWithoutEffortCannotLaunch(t *testing.T) {
 	catalog := overlayLaunchCatalog([]CatalogRow{{Profile: "no-effort", Pool: "kiro", Grade: "C", Gate: defaultGate}}, false)
-	if _, why := catalog.resolve(admissionPolicy{}, nil, admissionRequest{Profile: "no-effort", Role: "worker"}); why != "catalog row has no launch effort" {
+	if _, why := catalog.resolve(admissionPolicy{}, nil, admissionRequest{Profile: "no-effort", Role: "implementer"}); why != "catalog row has no launch effort" {
 		t.Fatalf("empty catalog effort refusal = %q", why)
 	}
 }

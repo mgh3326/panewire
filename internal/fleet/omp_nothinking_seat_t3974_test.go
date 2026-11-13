@@ -63,7 +63,7 @@ func noThinkingSpawnApp(t *testing.T, extra ...CatalogRow) *App {
 // pinnedWorkerSpawn is a pinned worker spawn of one seat, with the marker
 // named by PANEWIRE_E6_ARM as the operator passes it.
 func pinnedWorkerSpawn(a *App, profile string) Spawn {
-	return Spawn{Profile: profile, Role: "worker", T: "T1", Task: "3974", Effort: "off", Containment: "hk:3974", CWD: a.Home}
+	return Spawn{Profile: profile, Role: "implementer", T: "T1", Task: "3974", Effort: "off", Containment: "hk:3974", CWD: a.Home}
 }
 
 // (a) With handoffkeep's row carrying no no_thinking field, a pinned worker
@@ -227,7 +227,7 @@ func TestOMPNoThinkingSeatLeavesOtherRungsUnchanged(t *testing.T) {
 			}
 			for _, effort := range tc.efforts {
 				in := admissionInputs{Rows: admissionRows(seed), Seats: a.Policy.Profiles}
-				if _, _, _, err := in.resolveRow(admissionRequest{Profile: tc.profile, Effort: effort, Role: "worker", E6Arm: tc.profile + "@" + effort}, true); err != nil {
+				if _, _, _, err := in.resolveRow(admissionRequest{Profile: tc.profile, Effort: effort, Role: "implementer", E6Arm: tc.profile + "@" + effort}, true); err != nil {
 					t.Fatalf("%s@%s refused: %v", tc.profile, effort, err)
 				}
 			}
@@ -254,7 +254,7 @@ func TestOMPNoThinkingSeatLeavesOtherRungsUnchanged(t *testing.T) {
 		}
 		in := admissionInputs{Rows: rows, Seats: a.Policy.Profiles}
 		for _, effort := range []string{"low", "high", "max"} {
-			if _, _, _, err := in.resolveRow(admissionRequest{Profile: "omp-dsflash41", Effort: effort, Role: "worker", E6Arm: "omp-dsflash41@" + effort}, true); err != nil {
+			if _, _, _, err := in.resolveRow(admissionRequest{Profile: "omp-dsflash41", Effort: effort, Role: "implementer", E6Arm: "omp-dsflash41@" + effort}, true); err != nil {
 				t.Fatalf("omp-dsflash41@%s refused: %v", effort, err)
 			}
 		}

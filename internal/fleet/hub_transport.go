@@ -62,12 +62,13 @@ type HubBrief struct {
 
 // HubCheckout is the worktree.prepare grammar the hub forwards to the node.
 type HubCheckout struct {
-	Origin string `json:"origin"`
-	Mode   string `json:"mode"`
-	Branch string `json:"branch,omitempty"`
-	Sha    string `json:"sha,omitempty"`
-	Fetch  string `json:"fetch,omitempty"`
-	Dir    string `json:"dir"`
+	Origin      string `json:"origin"`
+	Mode        string `json:"mode"`
+	Branch      string `json:"branch,omitempty"`
+	Sha         string `json:"sha,omitempty"`
+	Fetch       string `json:"fetch,omitempty"`
+	Dir         string `json:"dir"`
+	VerifyReuse bool   `json:"verify_reuse,omitempty"`
 }
 
 // HubSpawnReply is a completed node answer (HTTP 200). Status is set instead
@@ -523,10 +524,9 @@ func hubSpawnArgs(jobs string, s Spawn) ([]string, error) {
 	add("--report-relative", report)
 	add("-L", s.ExecutionLane)
 	add("--urgency", s.Urgency)
-	add("--builder-family", s.BuilderFamily)
+	add("--author-family", s.AuthorFamily)
 	add("--builder-job", s.BuilderJob)
 	add("--grade", s.Grade)
-	add("--routing-role", s.RoutingRole)
 	add("--review-pass", s.ReviewPass)
 	add("--override-reason", s.OverrideReason)
 	add("--containment", s.Containment)

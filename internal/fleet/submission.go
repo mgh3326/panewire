@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -36,6 +37,8 @@ type Submission struct {
 	OriginMachine   string           `json:"origin_machine"`
 	DeadlineSeconds int              `json:"deadline_seconds"`
 	StartConditions []StartCondition `json:"start_conditions,omitempty"`
+	// LadderStep identifies a hub-staged author replacement for replay.
+	LadderStep *LadderStepIdentity `json:"ladder_step,omitempty"`
 	// E6Arm is the exact <canon>@<effort> experiment marker the submitter saw
 	// in its environment. Hub admission and the node launch use it exactly as
 	// a local spawn reads the environment; empty means none, and an empty
@@ -48,6 +51,14 @@ type Submission struct {
 	// host as a submitter pin. It never travels on the wire or in the store
 	// (json:"-"), and no flag parses into it.
 	RetryHost string `json:"-"`
+}
+
+type LadderStepIdentity struct {
+	Parent  string `json:"parent"`
+	Round   int    `json:"round"`
+	PR      string `json:"pr"`
+	Profile string `json:"profile"`
+	Effort  string `json:"effort"`
 }
 
 type Accepted struct{ Job, Request string }
@@ -237,7 +248,7 @@ func (a *App) PrepareSubmission(ctx context.Context, s Spawn) (Submission, error
 		s.Host = "auto"
 	}
 	if s.Role == "" {
-		s.Role = "worker"
+		s.Role = "implementer"
 	}
 	if s.Profile != "auto" || s.Host != "auto" {
 		if strings.TrimSpace(s.OverrideReason) == "" {
@@ -275,7 +286,7 @@ func (a *App) PrepareSubmission(ctx context.Context, s Spawn) (Submission, error
 		repo.sourceDir = cwd
 		repo.branch = strings.TrimSpace(a.call(ctx, "git", "-C", cwd, "branch", "--show-current").Out)
 		repo.head = strings.TrimSpace(a.call(ctx, "git", "-C", cwd, "rev-parse", "HEAD").Out)
-		if s.Role != "reviewer" && s.Role != "counsel" && repo.branch != "" {
+		if s.Role != "reviewer" && s.Role != "consult" && repo.branch != "" {
 			defaultRef := a.call(ctx, "git", "-C", cwd, "symbolic-ref", "--short", "refs/remotes/origin/HEAD")
 			if defaultRef.Code == 0 && strings.TrimSpace(defaultRef.Out) == "origin/"+repo.branch {
 				return Submission{}, fail(exitPlacement, "create a worktree on a new branch (git worktree add -b wk/<slug> ...) and pass it as -c")
@@ -291,7 +302,7 @@ func (a *App) PrepareSubmission(ctx context.Context, s Spawn) (Submission, error
 	// A writing role must have its branch on origin before submitting: without
 	// refs/remotes/origin/<branch> the checkout spec falls back to a detached
 	// HEAD at whatever origin ref holds HEAD, which is not the worktree the
-	// caller passed. Reviewer and counsel clear the branch below and keep that
+	// caller passed. Reviewer and consult clear the branch below and keep that
 	// fallback; a pinned checkout already carries its evidence.
 	//
 	// A branch whose origin tip is a descendant of HEAD (HEAD strictly behind)
@@ -300,7 +311,7 @@ func (a *App) PrepareSubmission(ctx context.Context, s Spawn) (Submission, error
 	// today's behaviour. Both checks read only the local remote-tracking ref;
 	// the submitter never fetches, so a stale ref passes (hk 3355).
 	pinned := a.Repository != nil && a.Repository.Checkout != nil
-	if !pinned && repo.branch != "" && s.Role != "reviewer" && s.Role != "counsel" {
+	if !pinned && repo.branch != "" && s.Role != "reviewer" && s.Role != "consult" {
 		originRef := "refs/remotes/origin/" + repo.branch
 		tip := a.call(ctx, "git", "-C", cwd, "rev-parse", "--verify", "--quiet", originRef)
 		if tip.Code != 0 {
@@ -314,7 +325,7 @@ func (a *App) PrepareSubmission(ctx context.Context, s Spawn) (Submission, error
 	if repo.wt != "" {
 		var why string
 		checkoutRepo := *repo
-		if s.Role == "reviewer" || s.Role == "counsel" {
+		if s.Role == "reviewer" || s.Role == "consult" {
 			checkoutRepo.branch = ""
 		}
 		checkout, why = a.hubCheckout(ctx, &checkoutRepo)
@@ -388,7 +399,7 @@ func ValidateSubmission(request Submission) (Spawn, error) {
 	if s.Owner == "" {
 		return s, fail(exitUsage, "supply --owner LANE so completion can be delivered")
 	}
-	if !slices.Contains([]string{"T0", "T1", "T2", "T3"}, s.T) || !slices.Contains([]string{"worker", "reviewer", "tester", "counsel"}, s.Role) {
+	if !slices.Contains([]string{"T0", "T1", "T2", "T3"}, s.T) || !slices.Contains(spawnRoles, s.Role) {
 		return s, fail(exitUsage, "use --t T0..T3 and a supported --role")
 	}
 	repo := request.Repository
@@ -404,7 +415,7 @@ func ValidateSubmission(request Submission) (Spawn, error) {
 func submissionArgs(s Spawn) []string {
 	var args []string
 	for _, field := range []struct{ flag, value string }{
-		{"-c", s.CWD}, {"-p", s.Prompt}, {"-m", s.Profile}, {"-w", s.Workspace}, {"-l", s.Label}, {"--job", s.Job}, {"--t", s.T}, {"--owner", s.Owner}, {"--effort", s.Effort}, {"--role", s.Role}, {"--lane", s.Lane}, {"--parent", s.Parent}, {"--task", s.Task}, {"--parent-job", s.ParentJob}, {"--host", s.Host}, {"--report-relative", s.ReportRelative}, {"-L", s.ExecutionLane}, {"--override-reason", s.OverrideReason}, {"--containment", s.Containment}, {"--tags", s.Tags}, {"--exclude-host", s.ExcludeHosts}, {"--exclude-pool", s.ExcludePools}, {"--urgency", s.Urgency}, {"--builder-family", s.BuilderFamily}, {"--builder-job", s.BuilderJob}, {"--routing-role", s.RoutingRole}, {"--review-pass", s.ReviewPass}, {"--grade", s.Grade}, {"--operator-request", s.OperatorRequest}, {"--requested-by", s.RequestedBy}, {"--purpose", s.Purpose},
+		{"-c", s.CWD}, {"-p", s.Prompt}, {"-m", s.Profile}, {"-w", s.Workspace}, {"-l", s.Label}, {"--job", s.Job}, {"--t", s.T}, {"--owner", s.Owner}, {"--effort", s.Effort}, {"--role", s.Role}, {"--lane", s.Lane}, {"--parent", s.Parent}, {"--task", s.Task}, {"--parent-job", s.ParentJob}, {"--host", s.Host}, {"--report-relative", s.ReportRelative}, {"-L", s.ExecutionLane}, {"--override-reason", s.OverrideReason}, {"--containment", s.Containment}, {"--tags", s.Tags}, {"--exclude-host", s.ExcludeHosts}, {"--exclude-pool", s.ExcludePools}, {"--urgency", s.Urgency}, {"--author-family", s.AuthorFamily}, {"--builder-job", s.BuilderJob}, {"--review-pass", s.ReviewPass}, {"--grade", s.Grade}, {"--operator-request", s.OperatorRequest}, {"--requested-by", s.RequestedBy}, {"--purpose", s.Purpose},
 	} {
 		if field.value != "" {
 			args = append(args, field.flag, field.value)
@@ -517,4 +528,9 @@ func (c *hubHTTP) WaitSpawn(ctx context.Context, id string) (SpawnAttempt, error
 			return attempt, err
 		}
 	}
+}
+
+func isNumeric(s string) bool {
+	_, e := strconv.ParseUint(s, 10, 64)
+	return e == nil
 }

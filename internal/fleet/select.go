@@ -305,21 +305,18 @@ type selPlan struct {
 	creditMissing []string
 }
 type selReq struct {
-	grade           string
-	lane            string
-	t               string
-	role            string
-	tags            []string
-	effort          string
-	allowEscalation bool
-	builderFamily   string
-	urgency         string
-	urgencySource   string
-	// excludeFamilies drops seats of those families; onlyFamily keeps just that
-	// one (delegate --panel picks one seat per distinct family).
+	grade            string
+	lane             string
+	t                string
+	role             string
+	tags             []string
+	effort           string
+	allowEscalation  bool
+	authorFamily     string
 	excludeFamilies  []string
+	urgency          string
+	urgencySource    string
 	excludeHarnesses []string
-	onlyFamily       string
 	// excludePools drops candidates of those quota pools (--exclude-pool).
 	excludePools []string
 	harness      string
@@ -394,7 +391,7 @@ func (s Seat) seatE6(effort string) bool {
 // seatFor picks the seat alias that should launch one catalog rung. Seat
 // candidates share the rung's catalog profile as their canon; an exact
 // name match wins, then the lexically smallest alias. Role, rung, pinned
-// effort, builder-family and E6 rules mirror Seat.Check.
+// effort, author-family and E6 rules mirror Seat.Check.
 func (a *App) seatFor(row CatalogRow, req selReq) (string, *Seat, string) {
 	var names []string
 	for name, seat := range a.Policy.Profiles {
@@ -440,16 +437,14 @@ func (a *App) seatFor(row CatalogRow, req selReq) (string, *Seat, string) {
 			switch {
 			case slices.Contains(req.excludeFamilies, seat.Family):
 				reason = "family_excluded"
-			case req.route.top() && req.builderFamily != "" && seat.Family == req.builderFamily:
+			case req.route.top() && req.authorFamily != "" && seat.Family == req.authorFamily:
 				// A consult rung runs on a family other than its asker's.
 				reason = "family_excluded"
-			case req.onlyFamily != "" && seat.Family != req.onlyFamily:
-				reason = "family_filtered"
 			case !slices.Contains(roles, req.role):
 				reason = "seat_role"
-			case (req.role == "tester" || req.role == "reviewer") && req.builderFamily == "":
-				reason = "builder_family_unreadable"
-			case (req.role == "tester" || req.role == "reviewer") && seat.Family == req.builderFamily:
+			case req.role == "reviewer" && req.authorFamily == "":
+				reason = "author_family_unreadable"
+			case req.role == "reviewer" && seat.Family == req.authorFamily:
 				reason = "family_excluded"
 			case seat.seatE6(row.Effort) && a.e6Arm(req.e6Arm, req.e6ArmLocked) != seat.Canon+"@"+row.Effort:
 				reason = "e6_marker"
@@ -811,7 +806,7 @@ func (a *App) selectProfile(ctx context.Context, s Spawn) (*selPlan, error) {
 	if a.Quota == nil {
 		return nil, fail(exitConfig, "POLICY_UNAVAILABLE: selection needs the quota catalog")
 	}
-	req := selReq{t: s.T, role: s.Role, lane: s.Parent, effort: s.Effort, allowEscalation: s.AllowEscalation, builderFamily: s.ParentFamily, excludeFamilies: s.ExcludeFamilies, excludeHarnesses: s.failedHarnesses, onlyFamily: s.OnlyFamily, e6Arm: s.E6Arm, e6ArmLocked: s.e6ArmLocked}
+	req := selReq{t: s.T, role: s.Role, lane: s.Parent, effort: s.Effort, allowEscalation: s.AllowEscalation, authorFamily: s.ParentFamily, excludeHarnesses: s.failedHarnesses, e6Arm: s.E6Arm, e6ArmLocked: s.e6ArmLocked}
 	tags, e := parseTags(s.Tags)
 	if e != nil {
 		return nil, e
@@ -1522,7 +1517,7 @@ func (p *selPlan) record() map[string]any {
 		}
 		rec["hosts"] = hosts
 		rec["host_order"] = order
-		rec["host_rule"] = "hosts that fit (caps, roles, grades, hub availability) ranked by load bucket, then hub score or load; on each host its present accounts in pool order (waste, then free, credit, then ranked); first admitted pair wins; subscription pools paced behind credit are a last band tried on the hosts again (pass 2) only when no other account was admitted on any host (pass 1)"
+		rec["host_rule"] = "hosts that fit (caps, roles, grades, hub availability) ranked by load bucket, then hub score (including recent placement cost) before the hub decision, or load when no complete score set; on each host its present accounts in pool order (waste, then free, credit, then ranked); first admitted pair wins; subscription pools paced behind credit are a last band tried on the hosts again (pass 2) only when no other account was admitted on any host (pass 1)"
 	}
 	if p.req.route != nil {
 		rt := p.req.route.record(p.routeRefusal)

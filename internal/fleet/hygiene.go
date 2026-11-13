@@ -26,7 +26,6 @@ func (a *App) hygiene(ctx context.Context, kind string, args []string) error {
 	job := f.String("job", "", "")
 	grace := f.String("grace", "10m", "")
 	builders := f.Bool("include-builders", false, "")
-	f.BoolVar(builders, "include-captains", false, "")
 	worktrees := f.Bool("worktrees", false, "")
 	stale := f.String("stale-age", "24h", "")
 	_ = f.String("heavy-age", "24h", "")
@@ -89,7 +88,7 @@ func (a *App) hygiene(ctx context.Context, kind string, args []string) error {
 		reason := ""
 		if j.Keep {
 			reason = "protected"
-		} else if (j.Role == "builder" || j.Role == "captain") && !*builders {
+		} else if j.Role == "builder" && !*builders {
 			reason = "builder"
 		} else if !j.Terminal {
 			reason = "live"

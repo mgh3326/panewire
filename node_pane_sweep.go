@@ -11,7 +11,7 @@ import (
 	"github.com/mgh3326/panewire/internal/fleet"
 )
 
-// The task pane sweep closes the pane of a worker or tester once its bound hk
+// The task pane sweep closes the pane of an implementer once its bound hk
 // task is merged, done or dropped and the pane has stayed not working for a
 // grace (docs/pane-sweep.md). The rules and the close live in
 // fleet.TaskPaneSweeper; this file is the daemon loop around it.
@@ -30,16 +30,7 @@ func (client *HubClient) runTaskPaneSweep(ctx context.Context) {
 	if client.jobsInboxRoot == "" || client.taskPaneSweepInterval <= 0 {
 		return
 	}
-	sweeper := &fleet.TaskPaneSweeper{
-		Grace: client.taskPaneSweepGrace,
-		Info:  slog.Info,
-		Exclusive: func() func() {
-			// One acting command at a time per node, so a sweep close never
-			// interleaves with a pane.close or job.done from the hub.
-			client.nodeCommandMu.Lock()
-			return client.nodeCommandMu.Unlock
-		},
-	}
+	sweeper := client.nodeTaskPaneSweeper()
 	expiry := &fleet.JobDirTTL{Every: jobDirTTLEvery}
 	pass := client.taskPaneSweepPass
 	if pass == nil {
@@ -61,20 +52,53 @@ func (client *HubClient) runTaskPaneSweep(ctx context.Context) {
 	}
 }
 
-// sweepTaskPanes runs one pass over this node's jobs. It builds the fleet app
-// afresh, as the node's job.done does, so a changed config or hk credential is
-// picked up; the sweeper keeps the idle times between passes.
+// nodeTaskPaneSweeper is the node's one TaskPaneSweeper. The local pass and the
+// hub's pane.sweep command share it: its deferred failure reps and idle times
+// live on it, so both must reach this instance under taskPaneSweepMu.
+func (client *HubClient) nodeTaskPaneSweeper() *fleet.TaskPaneSweeper {
+	client.taskPaneSweeperOnce.Do(func() {
+		client.taskPaneSweeper = &fleet.TaskPaneSweeper{
+			Grace: client.taskPaneSweepGrace,
+			Info:  slog.Info,
+		}
+	})
+	return client.taskPaneSweeper
+}
+
+// sweepTaskPanes runs one local pass over this node's jobs. It builds the fleet
+// app afresh, as the node's job.done does, so a changed config or hk credential
+// is picked up; the sweeper keeps the idle times between passes. The pass holds
+// taskPaneSweepMu, which the hub's pane.sweep command also takes.
 func (client *HubClient) sweepTaskPanes(ctx context.Context, sweeper *fleet.TaskPaneSweeper, expiry *fleet.JobDirTTL) {
+	client.taskPaneSweepMu.Lock()
+	app, reason := client.taskPaneSweepApp(sweeper)
+	var err error
+	if reason == "" {
+		err = sweeper.Pass(ctx, app)
+	}
+	client.taskPaneSweepMu.Unlock()
+	if reason != "" {
+		slog.Warn("task pane sweep skipped", "reason", reason)
+		return
+	}
+	if err != nil {
+		slog.Warn("task pane sweep failed", "reason", "jobs-unreadable")
+	}
+	client.expireJobDirs(ctx, app, expiry)
+}
+
+// taskPaneSweepApp builds the fleet app for one sweep and points the sweeper at
+// the hk readers. It returns the reason the sweep cannot run, for its log line.
+// The caller holds taskPaneSweepMu, because this writes the shared sweeper.
+func (client *HubClient) taskPaneSweepApp(sweeper *fleet.TaskPaneSweeper) (*fleet.App, string) {
 	app, err := fleet.New(slogWarnWriter{}, slogWarnWriter{})
 	if err != nil {
-		slog.Warn("task pane sweep skipped", "reason", "app-unavailable")
-		return
+		return nil, "app-unavailable"
 	}
 	app.Jobs = filepath.Join(client.jobsInboxRoot, "jobs")
 	app.HerdrSession = client.nodeSpawnSession()
 	if app.JobStore, err = client.nodeJobStoreForCommand(); err != nil {
-		slog.Warn("task pane sweep skipped", "reason", "hk-unavailable")
-		return
+		return nil, "hk-unavailable"
 	}
 	sweeper.TaskState, sweeper.PR = client.nodeTaskState, client.nodePR
 	if workRoot, err := client.nodeWorkRoot(); err == nil {
@@ -93,8 +117,7 @@ func (client *HubClient) sweepTaskPanes(ctx context.Context, sweeper *fleet.Task
 			}
 		}
 		if err != nil {
-			slog.Warn("task pane sweep skipped", "reason", "hk-unavailable")
-			return
+			return nil, "hk-unavailable"
 		}
 	}
 	if app.BenchStore == nil {
@@ -102,10 +125,7 @@ func (client *HubClient) sweepTaskPanes(ctx context.Context, sweeper *fleet.Task
 			app.BenchStore, _ = fleet.NewBenchStore(env.URL, env.Token, env.CFID, env.CFSecret)
 		}
 	}
-	if err := sweeper.Pass(ctx, app); err != nil {
-		slog.Warn("task pane sweep failed", "reason", "jobs-unreadable")
-	}
-	client.expireJobDirs(ctx, app, expiry)
+	return app, ""
 }
 
 // expireJobDirs runs the job dir TTL (docs/job-dir-ttl.md) after the pane

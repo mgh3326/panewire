@@ -75,7 +75,8 @@ type App struct {
 	JobStore      JobStore
 	// TaskState reads one hk task; nil builds it from [quota] / the
 	// handoffkeep env on first use (TaskStatus).
-	TaskState TaskStateReader
+	TaskState    TaskStateReader
+	LadderRebind func(context.Context, string, string, string, string) error
 	// PR lists the PRs hk links to one task; nil builds it the same way on
 	// first use (PRs). Reap reads it to keep a completed author's pane.
 	PR PRReader
@@ -121,8 +122,6 @@ type App struct {
 	QuotaHandOffGrace time.Duration
 	State             FleetStateReader
 	fleetLog          *fleetStateLog
-	// spawnFn replaces Spawn where delegate starts its pane; tests only.
-	spawnFn func(context.Context, *App, Spawn) error
 	// Version is the build line `panewire --version` prints, compared with the
 	// remote hosts' by the preflight.
 	Version string
@@ -284,7 +283,7 @@ func validID(s string) bool { return idPattern.MatchString(s) && s != "." && s !
 func (a *App) Run(ctx context.Context, args []string) error {
 	a.flushPlacements()
 	if len(args) == 0 || args[0] == "help" || args[0] == "--help" || args[0] == "-h" {
-		fmt.Fprintln(a.Out, "Usage: panewire <spawn|delegate|done|escalate|restore|reap|prune|lanes-missing|hosts|profiles|find|name-sync|artifacts|simulate|plan|resolve|preflight> [options]")
+		fmt.Fprintln(a.Out, "Usage: panewire <spawn|done|escalate|escalate-author|restore|reap|prune|lanes-missing|hosts|profiles|find|name-sync|artifacts|simulate|plan|resolve|preflight> [options]")
 		return nil
 	}
 	if args[0] == "lead" {
@@ -293,7 +292,7 @@ func (a *App) Run(ctx context.Context, args []string) error {
 	if len(args) > 1 && (args[1] == "--help" || args[1] == "-h") {
 		return a.help(args[0])
 	}
-	if a.EnforceTrust && (args[0] == "spawn" || args[0] == "work" || args[0] == "delegate" || args[0] == "plan" || args[0] == "resolve" || args[0] == "preflight" || args[0] == "_spawn-stdin" || args[0] == "done" || args[0] == "escalate" || args[0] == "restore" || args[0] == "reap" || args[0] == "prune" || args[0] == "artifacts" || args[0] == "_watch") {
+	if a.EnforceTrust && (args[0] == "spawn" || args[0] == "work" || args[0] == "plan" || args[0] == "resolve" || args[0] == "preflight" || args[0] == "_spawn-stdin" || args[0] == "done" || args[0] == "escalate" || args[0] == "escalate-author" || args[0] == "restore" || args[0] == "reap" || args[0] == "prune" || args[0] == "artifacts" || args[0] == "_watch") {
 		if e := a.trust(); e != nil {
 			return e
 		}
@@ -319,6 +318,8 @@ func (a *App) Run(ctx context.Context, args []string) error {
 		return a.SubmitSpawn(ctx, s)
 	case "done", "escalate", "restore":
 		return a.lifecycle(ctx, args[0], args[1:])
+	case "escalate-author":
+		return a.escalateAuthorCmd(ctx, args[1:])
 	case "reap", "prune":
 		return a.hygiene(ctx, args[0], args[1:])
 	case "hosts", "profiles", "find", "name-sync", "lanes-missing":
@@ -331,8 +332,6 @@ func (a *App) Run(ctx context.Context, args []string) error {
 		return a.planCmd(ctx, args[1:])
 	case "resolve":
 		return a.resolveCmd(ctx, args[1:])
-	case "delegate":
-		return a.delegate(ctx, args[1:])
 	case "preflight":
 		return a.preflightCmd(ctx, args[1:])
 	case "_artifact-inventory":
@@ -350,11 +349,13 @@ func (a *App) help(cmd string) error {
 	case "work":
 		fmt.Fprintln(a.Out, "Usage: panewire work TASK [spawn flags override task defaults]")
 	case "spawn":
-		fmt.Fprintln(a.Out, "Usage: panewire spawn -c CWD [-m PROFILE|auto] -p BRIEF|hk:doc/KEY -w WORKSPACE -l LABEL --t T0..T3 [--task ID|--parent-job JOB] [--effort E] [--role worker|tester|reviewer|counsel] [--review-pass 1..9 (reviewer only)] [--routing-role consult|implementer|verifier|reviewer|judge] [--lane L] [--parent L] [--owner L] [--job ID] [--host auto|local|NAME] [--tags a,b,c] [--exclude-host a,b] [--exclude-pool P,P] [--report PATH] [-L live|mock] [--keep] [--job-dup-ok] [--task-hk-bypass] [--allow-escalation] [--override-reason TEXT] [--containment hk:ID] [--operator-request REF] [--requested-by NAME] [--purpose PURPOSE] [--report-relative PATH] [--wait] [--wait-timeout DUR] [--dry-run] (pins require --containment hk:ID or --operator-request REF)")
+		fmt.Fprintln(a.Out, "Usage: panewire spawn -c CWD [-m PROFILE|auto] -p BRIEF|hk:doc/KEY -w WORKSPACE -l LABEL --t T0..T3 [--task ID|--parent-job JOB] [--effort E] [--role implementer|reviewer|consult] [--review-pass 1..9 (reviewer only)] [--lane L] [--parent L] [--owner L] [--job ID] [--host auto|local|NAME] [--tags a,b,c] [--exclude-host a,b] [--exclude-pool P,P] [--report PATH] [-L live|mock] [--keep] [--job-dup-ok] [--task-hk-bypass] [--allow-escalation] [--override-reason TEXT] [--containment hk:ID] [--operator-request REF] [--requested-by NAME] [--purpose PURPOSE] [--report-relative PATH] [--wait] [--wait-timeout DUR] [--dry-run] (pins require --containment hk:ID or --operator-request REF)")
 	case "done":
 		fmt.Fprintln(a.Out, "Usage: panewire done JOB [--report PATH] [--result FILE]")
 	case "escalate":
 		fmt.Fprintln(a.Out, "Usage: panewire escalate JOB --question TEXT [--report PATH]")
+	case "escalate-author":
+		fmt.Fprintln(a.Out, "Usage: panewire escalate-author --task ID --job JOB --pr owner/repo#N --round N --findings-file PATH (rc 2: intact refusal; rc 1: ended or unconfirmed; rc 124: pending)")
 	case "restore":
 		fmt.Fprintln(a.Out, "Usage: panewire restore JOB (rebind a released job to its verified existing pane)")
 	case "reap", "prune":
@@ -366,12 +367,10 @@ func (a *App) help(cmd string) error {
 		fmt.Fprintln(a.Out, "Usage: panewire artifacts move SRC --dest DEST [--source-host HOST] [--apply] | sweep [--job JOB] [--age 7d] [--policy FILE] [--apply]")
 	case "simulate":
 		fmt.Fprintln(a.Out, "Usage: panewire simulate --selection FILE [--now RFC3339] [--policy FILE] [--policy-set key=value] ... [--set pool:used=N,reset=RFC3339|+Nh[,window=D][,projected=N]] ... (rank a recorded selection input; no quota reads, no spawn)")
-	case "delegate":
-		fmt.Fprintln(a.Out, "Usage: panewire delegate --role reader|verifier|reviewer --prompt FILE [--grade G] [--cwd DIR] [--timeout D] [--headless] [--patch] [--panel 2..4] [--family F] [--workspace W] [--json] (hand one bounded reading, verifying or cross-checking task to a free or spare-quota model; the answer is the last thing printed)")
 	case "plan":
-		fmt.Fprintln(a.Out, "Usage: panewire plan [--grade G] --t T0..T3 [--role R] [--tags a,b] [--effort E] [--urgency normal|urgent] [--exclude-host a,b] [--exclude-pool P,P] [--builder-family F] [--routing-role R] [--allow-escalation] [--credit-at TIME] [--expected DURATION] [--json] (live, read-only: the host and model a spawn would get now; no task, spawn or job write; --expected 6h or 2d keys subscription pools by whether their shortest window fits the job)")
+		fmt.Fprintln(a.Out, "Usage: panewire plan [--grade G] --t T0..T3 [--role R] [--tags a,b] [--effort E] [--urgency normal|urgent] [--exclude-host a,b] [--exclude-pool P,P] [--author-family F] [--allow-escalation] [--credit-at TIME] [--expected DURATION] [--json] (live, read-only: the host and model a spawn would get now; no task, spawn or job write; --expected 6h or 2d keys subscription pools by whether their shortest window fits the job)")
 	case "resolve":
-		fmt.Fprintln(a.Out, "Usage: panewire resolve --role consult|implementer|verifier|reviewer|judge [--grade G] [--t T0..T3] [--builder-family F] [--lane L (consult asker lane)] [--harness KIND] [--allow-escalation] [--json] (read-only: the profile and effort role routing and quota ordering pick now, for an in-session subagent; no host placement, spawn or job write; the answer is the last thing printed)")
+		fmt.Fprintln(a.Out, "Usage: panewire resolve --role consult|implementer|verifier|reviewer|judge [--grade G] [--t T0..T3] [--author-family F] [--lane L (consult asker lane)] [--harness KIND] [--allow-escalation] [--json] (read-only: the profile and effort role routing and quota ordering pick now, for an in-session subagent; no host placement, spawn or job write; the answer is the last thing printed)")
 	case "preflight":
 		fmt.Fprintln(a.Out, "Usage: panewire preflight [--host NAME] [--pool P] [--json] (read-only: per remote host, hub acceptance, shared quota observation age, quota transport setting, hub load/memory, mergewake review config and panewire/panewire version skew, each with a named reason; exit 0 when all good, 78 otherwise)")
 	default:

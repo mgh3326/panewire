@@ -46,7 +46,7 @@ func TestDevinDS41LowPinnedSpawnResolvesLikeDS41Max(t *testing.T) {
 
 	rows := []CatalogRow{ds41LowRow()}
 	catalog := overlayLaunchCatalog(rows, false)
-	req := admissionRequest{Profile: ds41LowProfile, Effort: "high", Role: "worker", E6Arm: ds41LowProfile + "@high"}
+	req := admissionRequest{Profile: ds41LowProfile, Effort: "high", Role: "implementer", E6Arm: ds41LowProfile + "@high"}
 	resolved, effort, why := catalog.resolveRow(req, true, a.Policy.Profiles)
 	if why != "" || resolved.ModelID != ds41LowModelID || resolved.Pool != "devin" || effort != "high" {
 		t.Fatalf("resolved row=%+v effort=%q why=%q", resolved, effort, why)
@@ -75,13 +75,13 @@ func TestDevinDS41LowRequiresTheArm(t *testing.T) {
 		t.Fatalf("policy seat for %s does not exist", ds41LowProfile)
 	}
 	l := Launch{Profile: ds41LowProfile, ModelID: ds41LowModelID, Pool: "devin", Grade: gradeUnrated, Gate: defaultGate}
-	if err := seat.Check(l, "worker", "A", "", "", nil); err == nil {
+	if err := seat.Check(l, "implementer", "A", "", "", nil); err == nil {
 		t.Fatalf("%s admitted a graded task without PANEWIRE_E6_ARM", ds41LowProfile)
 	}
-	if err := seat.Check(l, "worker", "A", "", "some-other-seat@", nil); err == nil {
+	if err := seat.Check(l, "implementer", "A", "", "some-other-seat@", nil); err == nil {
 		t.Fatalf("%s admitted a graded task on another seat's marker", ds41LowProfile)
 	}
-	if err := seat.Check(l, "worker", "A", "", ds41LowProfile+"@", nil); err != nil {
+	if err := seat.Check(l, "implementer", "A", "", ds41LowProfile+"@", nil); err != nil {
 		t.Fatalf("%s refused its own marker: %v", ds41LowProfile, err)
 	}
 }
@@ -124,7 +124,7 @@ func TestDevinDS41LowExistingDevinSeatsUnchanged(t *testing.T) {
 		{"devin-fusion-opus55", "fusion-claude-opus-5-5-high-sidekick-swe-2-medium", "anthropic"},
 	} {
 		seat, ok := a.Policy.Profiles[tc.profile]
-		if !ok || seat.Kind != "devin" || seat.Family != tc.family || seat.Capability != "standard" || !reflect.DeepEqual(seat.Roles, []string{"worker", "tester", "reviewer", "counsel"}) {
+		if !ok || seat.Kind != "devin" || seat.Family != tc.family || seat.Capability != "standard" || !reflect.DeepEqual(seat.Roles, []string{"implementer", "reviewer", "consult"}) {
 			t.Fatalf("existing devin seat %s changed: %+v", tc.profile, seat)
 		}
 		argv, _, err := a.launchArgs(seat, Launch{ModelID: tc.model})

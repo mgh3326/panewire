@@ -73,7 +73,7 @@ func newStrandedSpawn(t *testing.T) *strandedSpawn {
 		t.Fatal(err)
 	}
 	spec := *request.Repository.Checkout
-	node := hubSpawnRequest{RequestID: t14RequestID(4231), Machine: "machine-a", CWDKey: "project", Brief: hubSpawnBrief{Inline: "task"}, Checkout: &hubSpawnCheckout{Origin: spec.Origin, Mode: spec.Mode, Branch: spec.Branch, Sha: spec.Sha, Dir: spec.Dir}, Args: []string{"--job", "test-job", "-l", "test-job", "-m", "codex-sol", "--t", "T1", "--task", "42", "--owner", "parent", "--role", "worker"}, WaitSeconds: 600, DeadlineMS: task.Deadline.UnixMilli()}
+	node := hubSpawnRequest{RequestID: t14RequestID(4231), Machine: "machine-a", CWDKey: "project", Brief: hubSpawnBrief{Inline: "task"}, Checkout: &hubSpawnCheckout{Origin: spec.Origin, Mode: spec.Mode, Branch: spec.Branch, Sha: spec.Sha, Dir: spec.Dir}, Args: []string{"--job", "test-job", "-l", "test-job", "-m", "codex-sol", "--t", "T1", "--task", "42", "--owner", "parent", "--role", "implementer"}, WaitSeconds: 600, DeadlineMS: task.Deadline.UnixMilli()}
 	if task, err = hub.inbox.store.bindSpawn(t.Context(), request.RequestID, task.Attempt, node); err != nil {
 		t.Fatal(err)
 	}
@@ -163,7 +163,7 @@ func TestStrandedSpawnLateSuccessStillWins(t *testing.T) {
 	node := t14Node(t, s.hub, s.server, true)
 	wait := s.run(t)
 	replay := t14ReadNodeSpawn(t, node)
-	receipt := fleet.ExecutionReceipt{Job: "test-job", Host: "machine-a", Pane: "pane-1", Profile: "codex-sol", Model: "model-fixture", Role: "worker", CWD: "/work/project.test-job", Label: "test-job", Kind: "codex"}
+	receipt := fleet.ExecutionReceipt{Job: "test-job", Host: "machine-a", Pane: "pane-1", Profile: "codex-sol", Model: "model-fixture", Role: "implementer", CWD: "/work/project.test-job", Label: "test-job", Kind: "codex"}
 	if err := wsjson.Write(t.Context(), node, map[string]any{"type": "job.spawn.result", "request_id": replay.RequestID, "rc": 0, "job_id": "test-job", "pane": "pane-1", "stdout_tail": "OK pane=pane-1 job=test-job", "receipt": receipt, "stage": "landing"}); err != nil {
 		t.Fatal(err)
 	}

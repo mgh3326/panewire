@@ -129,11 +129,22 @@ func TestHubDecisionRanksAheadOfHigherScoreWithinBucket(t *testing.T) {
 func TestRankHostsPrefersTheHubDecidedHost(t *testing.T) {
 	hosts := []selHost{{name: "a", awake: true, load: ptrF(.1), score: ptrF(40), decided: true}, {name: "b", awake: true, load: ptrF(.1), score: ptrF(90)}}
 	if got := rankHosts(hosts); got[0].name != "a" {
-		t.Fatalf("decided host must lead: %+v", got)
+		t.Fatalf("hub decided host must lead placement shadow order: %+v", got)
 	}
 	hosts[0].decided = false
 	if got := rankHosts(hosts); got[0].name != "b" {
-		t.Fatalf("without a decision the score leads: %+v", got)
+		t.Fatalf("without a decision the higher score must lead: %+v", got)
+	}
+}
+
+func TestRankSelectionHostsCapacityBeforeHubDecision(t *testing.T) {
+	hosts := []selHost{{name: "a", awake: true, load: ptrF(.1), score: ptrF(40), decided: true}, {name: "b", awake: true, load: ptrF(.1), score: ptrF(90)}}
+	if got := rankSelectionHosts(hosts); got[0].name != "b" {
+		t.Fatalf("higher-capacity host must lead selection: %+v", got)
+	}
+	hosts[1].score = ptrF(40)
+	if got := rankSelectionHosts(hosts); got[0].name != "a" {
+		t.Fatalf("hub decision must break equal-capacity tie: %+v", got)
 	}
 }
 
