@@ -69,7 +69,10 @@ use it, so the p1 and p2 reviewers of one task hold at once while a second p1 is
 refused with the same 409 as any held slot. panewire reads the pass only from
 the flag, never from a label. A reviewer without the flag keeps `<task>:reviewer`,
 and stored keys without a pass need no migration. The held-reservation log line
-prints the key as `role_key`. An implementer holds `<task>:implementer`; a hold written under an older role name is not matched by it.
+prints the key as `role_key`. An implementer holds `<task>:implementer`; a hold written under an older role name is not matched by it. A consult
+seat (`--role consult`) bound by `--task` takes no task/role slot at all
+(`fleet.Spawn.HoldsTaskRole` is false for it), so a consult pair shares one task
+(hk 4568); it works beside the claimant and never takes its exclusive claim.
 
 A prior operation in `failed` whose hk job is still `claimed` (pane cleanup
 unverified) is checked on a colliding submission: the hub asks the operation's
@@ -100,7 +103,9 @@ The hub then has the holder's node mark the hk job `lost`, logs
 unreadable check, an unreachable node, a read error or a missing pane id keeps
 the slot. The 409 body then carries `request_id`, `job`, `host`,
 `pane` and a `fix` (close that pane, then resubmit), and the CLI prints them
-with exit 74.
+with exit 74. A held (task, role) slot answers the error `task_role_claimed`,
+which also names `task` and `role`; a refused job id still answers
+`job_already_claimed` (hk 2944).
 
 A **reviewer** holder whose pane is present is also released when its spawn
 `succeeded` or `failed`, and every one of these holds (hk 3315). Implementers
@@ -124,7 +129,7 @@ The hub then has the holder's node mark the hk job `lost` and logs one INFO line
 unreadable check keeps the hold.
 
 When only that grace keeps a reviewer holder (the pane is present, its status is
-closable and its hk job is `claimed` or `spawned`), the `job_already_claimed` 409
+closable and its hk job is `claimed` or `spawned`), the `task_role_claimed` 409
 also carries `retry_after_s`, an integer of at least 1: the seconds until the
 spawn's deadline plus the grace. The response sets the same value in an HTTP
 `Retry-After` header, and the CLI appends ` retry_after_s=<n>` after the

@@ -24,30 +24,54 @@ const drainWakeTaskLimit = 1000
 type drainWakeLane struct {
 	known    bool      // an observation has been taken
 	drained  bool      // the last observation was at or below the threshold
-	pending  bool      // drained since the last line and still owed one
-	lastSent time.Time // when the last line went out; zero before the first
+	pending  bool      // drained since the last written line and still owed one
+	lastSent time.Time // when the last line was queued; zero before the first
+	unsaved  bool      // the last save of pending or lastSent failed; retried on the next sweep
+	gen      uint64    // generation of the last queued line
+	inflight uint64    // generation of the queued line not yet confirmed written; 0 when none
+}
+
+// drainWakeDelivery is the writer's confirmation that line gen of lane was
+// written to the node.
+type drainWakeDelivery struct {
+	lane string
+	gen  uint64
 }
 
 // sweepDrainWakes runs in the lane-stall sweep goroutine after the stall
 // observation. A lane first seen idle gets no line: the line answers a drain,
-// and a lane only drains after it has had work.
+// and a lane only drains after it has had work. A line stays owed until the
+// writer confirms it was written; a queued line the writer never wrote is sent
+// again once the interval has passed. The owed line and the last queue time are
+// kept in the inbox store (drain_wake_lanes), so a hub restart keeps them.
 func (h *HubServer) sweepDrainWakes(ctx context.Context, now time.Time) {
 	if h.inbox == nil || h.inbox.policy == nil {
 		return
 	}
-	policy := h.inbox.policy
-	threshold := policy.Relay.DrainWakeThreshold
-	interval := policy.Relay.drainWakeInterval
-	routes := loadReportRelayRoutes(h.reportRelayPath)
 	if h.drainWake == nil {
-		h.drainWake = make(map[string]*drainWakeLane)
+		owed, err := h.inbox.store.drainWakeOwed(ctx)
+		if err != nil {
+			h.logger.Warn("drain wake skipped: owed lines unreadable; retrying on the next sweep", "error", err)
+			return
+		}
+		h.drainWake = owed
 	}
+	if h.drainWakeDelivered == nil {
+		h.drainWakeDelivered = make(chan drainWakeDelivery, 64)
+	}
+	h.drainWakeSettle(ctx)
+	if h.drainWakeUnreported() {
+		// A connected host has not heartbeated its active jobs since its hello,
+		// so every lane count is a lower bound. Observe nothing; keep each lane's state.
+		return
+	}
+	routes := loadReportRelayRoutes(h.reportRelayPath)
 	for lane := range routes {
 		if ctx.Err() != nil {
 			// Budget spent: the unobserved lanes keep their state for the next sweep.
 			return
 		}
-		if !policy.designLane(lane) {
+		if !h.inbox.policy.designLane(lane) {
 			continue
 		}
 		state := h.drainWake[lane]
@@ -55,45 +79,177 @@ func (h *HubServer) sweepDrainWakes(ctx context.Context, now time.Time) {
 			state = &drainWakeLane{}
 			h.drainWake[lane] = state
 		}
-		inFlight := h.laneActiveJobCount(lane, routes)
-		if inFlight > threshold {
-			state.known, state.drained, state.pending = true, false, false
+		before := *state
+		h.drainWakeLaneStep(ctx, lane, state, routes, now)
+		if state.pending == before.pending && state.lastSent.Equal(before.lastSent) && !state.unsaved {
 			continue
 		}
-		if state.known && !state.drained {
-			state.pending = true
-		}
-		state.known, state.drained = true, true
-		if !state.pending {
-			continue
-		}
-		if !state.lastSent.IsZero() && now.Sub(state.lastSent) < interval {
-			continue
-		}
-		route, agent, routed := h.resolveRelayRoute("lane.event", hubJobEventPayload{OwnerLane: lane})
-		if !routed || route.Sink || route.Pane == "" || agent == nil {
-			// Unrouted: the line stays owed and the next sweep retries.
-			continue
-		}
-		backlog, err := h.drainWakeBacklog(ctx, drainWakeProject(lane))
-		if err != nil {
-			h.logger.Warn("drain wake skipped: hk backlog unavailable; retrying on the next sweep", "lane", lane, "error", err)
-			continue
-		}
-		if backlog == 0 {
-			// Nothing open for the lane's project: the drain owes no line.
-			state.pending = false
-			continue
-		}
-		text := drainWakeText(backlog, inFlight)
-		if !agent.queueRelay(hubRelayInjectEvent{Type: "relay.inject", JobID: laneEventTransportID(lane, "drain-wake"), Pane: route.Pane, Text: text}) {
-			h.emitFleet(fleetEvent{Kind: "drain_wake", Job: lane, Outcome: "skipped", Reason: "unrouted", Detail: "lane=" + lane})
-			continue
-		}
-		state.pending = false
-		state.lastSent = now
-		h.emitFleet(fleetEvent{Kind: "drain_wake", Job: lane, Outcome: "sent", Reason: "drained", Detail: fmt.Sprintf("lane=%s backlog=%d in_flight=%d pane=%s", lane, backlog, inFlight, route.Pane)})
+		h.persistDrainWake(ctx, lane, state)
 	}
+}
+
+// drainWakeSettle applies the writer's confirmations and retries every save
+// that failed. It reads no active jobs, so it runs even while a host is
+// unreported; a failed save is never left behind for a later sweep to skip.
+func (h *HubServer) drainWakeSettle(ctx context.Context) {
+	for settled := false; !settled; {
+		select {
+		case done := <-h.drainWakeDelivered:
+			state := h.drainWake[done.lane]
+			if state == nil || state.inflight != done.gen {
+				// Superseded: the line was dropped, or a newer one is in flight.
+				continue
+			}
+			state.inflight, state.pending = 0, false
+			h.persistDrainWake(ctx, done.lane, state)
+		default:
+			settled = true
+		}
+	}
+	for lane, state := range h.drainWake {
+		if state.unsaved {
+			h.persistDrainWake(ctx, lane, state)
+		}
+	}
+}
+
+// persistDrainWake writes one lane's state. A failed write stays dirty so the
+// next sweep writes it again.
+func (h *HubServer) persistDrainWake(ctx context.Context, lane string, state *drainWakeLane) {
+	if err := h.inbox.store.saveDrainWake(ctx, lane, state); err != nil {
+		state.unsaved = true
+		h.logger.Warn("drain wake state not saved; retrying on the next sweep", "lane", lane, "error", err)
+		return
+	}
+	state.unsaved = false
+}
+
+// drainWakeLaneStep advances one lane's drain state by one observation.
+func (h *HubServer) drainWakeLaneStep(ctx context.Context, lane string, state *drainWakeLane, routes map[string]reportRelayRoute, now time.Time) {
+	threshold := h.inbox.policy.Relay.DrainWakeThreshold
+	interval := h.inbox.policy.Relay.drainWakeInterval
+	inFlight := h.laneActiveJobCount(lane, routes)
+	if inFlight > threshold {
+		state.known, state.drained, state.pending, state.inflight = true, false, false, 0
+		return
+	}
+	if state.known && !state.drained {
+		state.pending = true
+		// The drain edge is durable before any read or enqueue, so a restart
+		// after this point still owes the line.
+		h.persistDrainWake(ctx, lane, state)
+	}
+	state.known, state.drained = true, true
+	if !state.pending {
+		return
+	}
+	if !state.lastSent.IsZero() && now.Sub(state.lastSent) < interval {
+		return
+	}
+	route, agent, routed := h.resolveRelayRoute("lane.event", hubJobEventPayload{OwnerLane: lane})
+	if !routed || route.Sink || route.Pane == "" || agent == nil {
+		// Unrouted: the line stays owed and the next sweep retries.
+		return
+	}
+	backlog, err := h.drainWakeBacklog(ctx, drainWakeProject(lane))
+	if err != nil {
+		h.logger.Warn("drain wake skipped: hk backlog unavailable; retrying on the next sweep", "lane", lane, "error", err)
+		return
+	}
+	if backlog == 0 {
+		// Nothing open for the lane's project: the drain owes no line.
+		state.pending, state.inflight = false, 0
+		return
+	}
+	// The owed state and the queue time are saved before the line is queued, so
+	// a restart after the writer sends it keeps the interval. A failed save keeps
+	// the line owed and queues nothing; the next sweep tries again.
+	prevSent := state.lastSent
+	state.lastSent = now
+	h.persistDrainWake(ctx, lane, state)
+	if state.unsaved {
+		state.lastSent = prevSent
+		return
+	}
+	state.gen++
+	gen := state.gen
+	delivered := h.drainWakeDelivered
+	text := drainWakeText(backlog, inFlight)
+	event := hubRelayInjectEvent{Type: "relay.inject", JobID: laneEventTransportID(lane, "drain-wake"), Pane: route.Pane, Text: text}
+	event.Delivered = func() {
+		select {
+		case delivered <- drainWakeDelivery{lane: lane, gen: gen}:
+		default:
+			// The sweep is behind: the line stays owed and is sent again after the interval.
+		}
+	}
+	if !agent.queueRelay(event) {
+		// Not queued: the queue time is not a send, so restore it and let the next sweep retry.
+		state.lastSent = prevSent
+		h.persistDrainWake(ctx, lane, state)
+		h.emitFleet(fleetEvent{Kind: "drain_wake", Job: lane, Outcome: "skipped", Reason: "unrouted", Detail: "lane=" + lane})
+		return
+	}
+	// Queued, not written: the line stays owed until the writer confirms it.
+	state.inflight = gen
+	h.emitFleet(fleetEvent{Kind: "drain_wake", Job: lane, Outcome: "sent", Reason: "drained", Detail: fmt.Sprintf("lane=%s backlog=%d in_flight=%d pane=%s", lane, backlog, inFlight, route.Pane)})
+}
+
+// drainWakeUnreported reports whether a connected host has not yet heartbeated
+// its active jobs since its hello. The hello empties activeJobs, so until that
+// heartbeat a drain read is not a drain (hk 4567).
+func (h *HubServer) drainWakeUnreported() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, record := range h.nodes {
+		if record.state == "connected" && !record.activeReported {
+			return true
+		}
+	}
+	return false
+}
+
+// drainWakeOwed reads the owed lines and last sends. A lane's known and drained
+// flags are not stored: a restored lane is treated as drained, so only an owed
+// line carries over, and a lane first seen after the restart still gets no line
+// until it drains.
+func (s *laneInboxStore) drainWakeOwed(ctx context.Context) (map[string]*drainWakeLane, error) {
+	ctx, cancel := s.op(ctx)
+	defer cancel()
+	rows, err := s.db.QueryContext(ctx, `SELECT lane,pending,last_sent FROM drain_wake_lanes`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	owed := make(map[string]*drainWakeLane)
+	for rows.Next() {
+		var lane string
+		var pending, sentMS int64
+		if err := rows.Scan(&lane, &pending, &sentMS); err != nil {
+			return nil, err
+		}
+		state := &drainWakeLane{known: true, drained: true, pending: pending != 0}
+		if sentMS > 0 {
+			state.lastSent = time.UnixMilli(sentMS).UTC()
+		}
+		owed[lane] = state
+	}
+	return owed, rows.Err()
+}
+
+// saveDrainWake writes one lane's owed line and last send.
+func (s *laneInboxStore) saveDrainWake(ctx context.Context, lane string, state *drainWakeLane) error {
+	ctx, cancel := s.op(ctx)
+	defer cancel()
+	var pending, sentMS int64
+	if state.pending {
+		pending = 1
+	}
+	if !state.lastSent.IsZero() {
+		sentMS = state.lastSent.UnixMilli()
+	}
+	_, err := s.db.ExecContext(ctx, s.q(`INSERT INTO drain_wake_lanes(lane,pending,last_sent) VALUES(?,?,?) ON CONFLICT(lane) DO UPDATE SET pending=excluded.pending,last_sent=excluded.last_sent`), lane, pending, sentMS)
+	return err
 }
 
 // drainWakeOpenStates are the hk task states that count as a lane's open

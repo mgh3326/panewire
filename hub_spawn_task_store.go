@@ -111,7 +111,7 @@ func (s *laneInboxStore) claimSpawnReplacing(parent context.Context, request fle
 	}
 
 	var taskRole any
-	if spawn.Task != "" && spawn.ParentJob == "" {
+	if spawn.HoldsTaskRole() {
 		taskRole = spawn.RoleKey()
 	}
 	if previousID != "" {
@@ -472,7 +472,7 @@ func (s *laneInboxStore) resumeCleanedSpawn(parent context.Context, task hubSpaw
 		return task, err
 	}
 	var taskRole any
-	if spawn.Task != "" && spawn.ParentJob == "" {
+	if spawn.HoldsTaskRole() {
 		taskRole = spawn.RoleKey()
 	}
 	result, err := tx.ExecContext(ctx, s.q(`INSERT INTO spawn_reservations(job,request_id,task_role) VALUES(?,?,?) ON CONFLICT DO NOTHING`), task.Job, task.Request.RequestID, taskRole)
@@ -507,6 +507,19 @@ func (s *laneInboxStore) spawnRoleOwner(parent context.Context, roleKey string) 
 	defer done()
 	err = s.db.QueryRowContext(ctx, s.q(`SELECT o.request_id,o.job,o.status FROM spawn_reservations r JOIN spawn_operations o ON r.request_id=o.request_id WHERE r.task_role=?`), roleKey).Scan(&id, &job, &status)
 	return
+}
+
+// spawnJobReserved reports whether a reservation already holds the job id, the
+// collision a duplicate job id makes before any role is considered.
+func (s *laneInboxStore) spawnJobReserved(parent context.Context, job string) (bool, error) {
+	ctx, done := s.op(parent)
+	defer done()
+	var one int
+	err := s.db.QueryRowContext(ctx, s.q(`SELECT 1 FROM spawn_reservations WHERE job=?`), job).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return err == nil, err
 }
 
 func (s *laneInboxStore) expiredStagedSpawns(parent context.Context, now time.Time) ([]hubSpawnTask, error) {
