@@ -76,6 +76,76 @@ func (h *HubServer) releasePlacementCount(job string) {
 	}
 }
 
+// restorePlacementCounts counts again the bound spawns that may still hold an
+// unclaimed launch (docs/placement.md, "Spawn bridge"). The counts are hub
+// memory, so without this a restart blinds placement to those launches until
+// their claims show (hk 4460). A row counts from its placement, the bind that
+// stamps placed_ms, as a live count does, on the host it is bound to. A row
+// whose claim was seen before the restart is left out (markPlacementClaims),
+// and so is one placed before the bridge window. A claim, a definitive failure
+// or the window ends a restored count as it does a live one. Called once, from
+// NewHubServer, before the hub takes any request; a failure stops the start,
+// since the placements it covers would otherwise be decided blind.
+func (h *HubServer) restorePlacementCounts() error {
+	if h.inbox == nil {
+		return nil
+	}
+	bridge := h.placementCountWindowLocked()
+	tasks, err := h.inbox.store.boundSpawnsSince(h.closeCtx, h.now().UTC().Add(-bridge))
+	if err != nil {
+		return h.inbox.store.loggable("restore placement counts", err)
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.placementCounts == nil {
+		h.placementCounts = map[string]placementCount{}
+	}
+	for _, task := range tasks {
+		if task.Node == nil || task.Node.Machine == "" {
+			continue
+		}
+		h.placementCounts[task.Job] = placementCount{machine: task.Node.Machine, at: task.Placed}
+	}
+	return nil
+}
+
+// claimedPlacement is a placement count a claim just ended, with the count it
+// held, so a failed persist can put the count back.
+type claimedPlacement struct {
+	job  string
+	held placementCount
+}
+
+// markPlacementClaims persists the claims that just ended placement counts, so
+// a restart does not restore them (restorePlacementCounts). It runs after the
+// hub lock is released: a store write never waits behind a heartbeat. A claim
+// that fails to persist puts its count back, so the next heartbeat that still
+// lists the job tries again; the count is not dropped until the claim is stored.
+// A count a newer decision has already set for the job is left alone.
+func (h *HubServer) markPlacementClaims(claimed []claimedPlacement, now time.Time) {
+	if h.inbox == nil || len(claimed) == 0 {
+		return
+	}
+	var unsaved []claimedPlacement
+	for _, c := range claimed {
+		if err := h.inbox.store.markSpawnClaimed(h.closeCtx, c.job, now); err != nil {
+			h.logger.Warn("hub could not record a placement claim", "job", c.job, "error", h.inbox.store.loggable("mark placement claim", err))
+			unsaved = append(unsaved, c)
+		}
+	}
+	if len(unsaved) == 0 {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, c := range unsaved {
+		if _, newer := h.placementCounts[c.job]; !newer {
+			h.placementCounts[c.job] = c.held
+		}
+	}
+	h.placementCache = placementCache{}
+}
+
 // placementCountWindowLocked is how long a count lasts without a claim to
 // confirm it: the spawn bridge, so a job whose claim is never seen cannot
 // weigh on its host longer than a claim would.

@@ -30,7 +30,7 @@ func TestBoundSpawnSurvivesStoreRestart_t4577(t *testing.T) {
 		t.Fatal(err)
 	}
 	node := boundTestNode(task)
-	if _, err := store.bindSpawn(t.Context(), request.RequestID, task.Attempt, node); err != nil {
+	if _, err := store.bindSpawn(t.Context(), request.RequestID, task.Attempt, node, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	store.close()
@@ -48,7 +48,7 @@ func TestBoundSpawnExpiresWithoutNodeProof_t4577(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if task, err = h.inbox.store.bindSpawn(t.Context(), request.RequestID, task.Attempt, boundTestNode(task)); err != nil {
+	if task, err = h.inbox.store.bindSpawn(t.Context(), request.RequestID, task.Attempt, boundTestNode(task), time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	h.executeSpawnTask(t.Context(), task)
@@ -74,7 +74,7 @@ func TestAbandonBoundSpawnWithoutNode_t4577(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if task, err = h.inbox.store.bindSpawn(t.Context(), request.RequestID, task.Attempt, boundTestNode(task)); err != nil {
+	if task, err = h.inbox.store.bindSpawn(t.Context(), request.RequestID, task.Attempt, boundTestNode(task), time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	status, _, body := t14HTTP(t, http.MethodPost, server.URL+"/v1/spawns/"+request.RequestID+"/abandon", t14OperatorToken, map[string]string{"reason": "never sent"})
@@ -97,7 +97,7 @@ func TestTerminalSpawnSnapshotCannotSend_t4577(t *testing.T) {
 		t.Fatal(err)
 	}
 	nodeRequest := boundTestNode(task)
-	if task, err = h.inbox.store.bindSpawn(t.Context(), request.RequestID, task.Attempt, nodeRequest); err != nil {
+	if task, err = h.inbox.store.bindSpawn(t.Context(), request.RequestID, task.Attempt, nodeRequest, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	if changed, err := h.inbox.store.completeSpawn(t.Context(), task, hubSpawnOutcome{RC: 1, Stage: "placement", Reason: "refused"}, time.Now()); err != nil || !changed {
@@ -135,7 +135,7 @@ func TestAbandonCannotRaceLiveSend_t4577(t *testing.T) {
 		t.Fatal(err)
 	}
 	nodeRequest := boundTestNode(task)
-	if task, err = h.inbox.store.bindSpawn(t.Context(), request.RequestID, task.Attempt, nodeRequest); err != nil {
+	if task, err = h.inbox.store.bindSpawn(t.Context(), request.RequestID, task.Attempt, nodeRequest, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(t.Context())

@@ -39,3 +39,21 @@ The job watcher ends a reviewer job whose pane is idle on a quota stop screen an
 **Where the limit sits.** The limit line is found anywhere on the visible screen, not only near the prompt, as long as no newer agent output follows it. What may follow is the CLI's chrome (rules, an empty prompt, the option footer) and user turns, where a user turn is exactly one prompt-marked row (`❭`, `❯`, `›` followed by text), which is how a relay directive appears. Until a rule starts the composer, the rows after a user turn are trusted only if blank; any other row there (an answer, an option-like line, a continuation of the message) is agent output or of unknown ownership, so it is neither accepted nor taken for a status. A flush-left limit line after a blank row that follows a user turn is accepted: that is how a new limit follows the user's message. The reset and the choice flag are read from the limit line and the chrome after it, never from the injected text. A relative reset adds its parts: `reset in 13 hours 9 minutes` is 13 h 9 min. A devin free-tier stop writes the host's `devin-free-limit.json` (hk 4507).
 
 *Known residual risk (operator decision, hk 4507): flat screen text cannot prove who wrote a row.* A directive that wraps or spans several rows is not detected (fail closed: no stop). A complete status quoted by a user message after a blank row, or an answer whose own row starts with the prompt mark, looks like the incident screen and can end a live reviewer. The sound fix is structured devin session evidence (hk 4542).
+
+## An exhausted pool
+
+When a node publishes an exhausted free bucket or a 100% account-wide window
+with a future reset, the hub scans live spawned jobs placed on that pool and
+account. Free-bucket exhaustion applies only to free rungs; paid windows apply
+to paid rungs. A newer reading that clears the same bucket supersedes the
+trigger, and the hub checks the reset and freshness again before acting.
+
+For each implementer, reviewer, or consult the hub records one `lane.event`
+asking the owner to hand the job over or end it and respawn it on another pool.
+A job whose id starts `mwr-` is reported to the `mergewake` lane. The event has
+a fixed producer id per job, so repeat observations and hub restarts use the
+same durable relay record. A failed persistence attempt leaves the job eligible
+for a later observed exhaustion. The sweep does not close panes, change job
+records, release roles, or claim successors; the owner decides how to act.
+Automatic action and its recovery are follow-up hk 4594. The existing
+screen-triggered quota-stop handover is unchanged.

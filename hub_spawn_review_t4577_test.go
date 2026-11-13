@@ -34,7 +34,7 @@ func TestBoundDispatchDoesNotBlockHeartbeat_t4577(t *testing.T) {
 		t.Fatal(err)
 	}
 	node := boundaryTestNode(task, 457719, "machine-a")
-	if task, err = h.inbox.store.bindSpawn(t.Context(), request.RequestID, task.Attempt, node); err != nil || task.Status != "bound" {
+	if task, err = h.inbox.store.bindSpawn(t.Context(), request.RequestID, task.Attempt, node, time.Now().UTC()); err != nil || task.Status != "bound" {
 		t.Fatalf("unsent binding status=%q err=%v", task.Status, err)
 	}
 	other, err := sql.Open("sqlite", path)
@@ -110,7 +110,7 @@ func TestBoundAbandonMarksClaimedJobLost_t4577(t *testing.T) {
 		t.Fatal(err)
 	}
 	first := boundaryTestNode(task, 457720, "machine-a")
-	if task, err = h.inbox.store.bindSpawn(t.Context(), request.RequestID, task.Attempt, first); err != nil {
+	if task, err = h.inbox.store.bindSpawn(t.Context(), request.RequestID, task.Attempt, first, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	// Model an earlier sent attempt that the node cleaned up.
@@ -129,7 +129,7 @@ func TestBoundAbandonMarksClaimedJobLost_t4577(t *testing.T) {
 	if task, err = h.inbox.store.resumeCleanedSpawn(t.Context(), task, time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	if task, err = h.inbox.store.bindSpawn(t.Context(), request.RequestID, task.Attempt, boundaryTestNode(task, 457721, "machine-a")); err != nil {
+	if task, err = h.inbox.store.bindSpawn(t.Context(), request.RequestID, task.Attempt, boundaryTestNode(task, 457721, "machine-a"), time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	response := t14HTTPAsync(t, http.MethodPost, server.URL+"/v1/spawns/"+request.RequestID+"/abandon", t14OperatorToken, map[string]string{"reason": "retry cancelled"})

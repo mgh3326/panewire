@@ -100,13 +100,13 @@ func TestSpawnUnknownRetainsOwnershipAndLateResultCommitsOutbox(t *testing.T) {
 				t.Fatal(err)
 			}
 			node := hubSpawnRequest{RequestID: "d676220b-e763-4af1-aefd-000000000003", Machine: "machine-a", Args: []string{"--job", "test-job"}, WaitSeconds: 600}
-			bound, err := s.bindSpawn(ctx, req.RequestID, task.Attempt, node)
+			bound, err := s.bindSpawn(ctx, req.RequestID, task.Attempt, node, time.Now().UTC())
 			if err != nil || bound.Node == nil {
 				t.Fatal(err)
 			}
 			other := node
 			other.Machine = "machine-b"
-			again, err := s.bindSpawn(ctx, req.RequestID, task.Attempt, other)
+			again, err := s.bindSpawn(ctx, req.RequestID, task.Attempt, other, time.Now().UTC())
 			if !errors.Is(err, errSpawnClaimed) || again.Node.Machine != "machine-a" {
 				t.Fatalf("destination changed: %+v %v", again, err)
 			}

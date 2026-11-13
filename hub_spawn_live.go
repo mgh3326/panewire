@@ -29,18 +29,7 @@ func (h *HubServer) liveSpawnProfiles(ctx context.Context, exceptRequest string)
 	if h.inbox == nil {
 		return map[string]int{}, nil
 	}
-	h.mu.Lock()
-	var active []string
-	for _, record := range h.nodes {
-		for id := range record.activeJobs {
-			if !slices.Contains(active, id) {
-				active = append(active, id)
-			}
-		}
-	}
-	h.mu.Unlock()
-	slices.Sort(active)
-	tasks, err := h.inbox.store.liveSpawns(ctx, active, h.now().Add(-spawnLiveSettle))
+	tasks, err := h.liveSpawnTasks(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -54,6 +43,24 @@ func (h *HubServer) liveSpawnProfiles(ctx context.Context, exceptRequest string)
 		}
 	}
 	return counts, nil
+}
+
+// liveSpawnTasks lists the operations that are live by the rule above: every
+// accepted or dispatching one, and each succeeded one that a node still
+// reports active or that started within spawnLiveSettle.
+func (h *HubServer) liveSpawnTasks(ctx context.Context) ([]hubSpawnTask, error) {
+	h.mu.Lock()
+	var active []string
+	for _, record := range h.nodes {
+		for id := range record.activeJobs {
+			if !slices.Contains(active, id) {
+				active = append(active, id)
+			}
+		}
+	}
+	h.mu.Unlock()
+	slices.Sort(active)
+	return h.inbox.store.liveSpawns(ctx, active, h.now().Add(-spawnLiveSettle))
 }
 
 // livePlacedProfile is the profile an operation was placed on: the chosen

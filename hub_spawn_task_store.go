@@ -27,6 +27,11 @@ type hubSpawnOutcome struct {
 	Profile string `json:"profile,omitempty"`
 	Model   string `json:"model,omitempty"`
 	Role    string `json:"role,omitempty"`
+	// Pool and AccountKey are the placement record of the job: what the
+	// executing host launched it on. Empty on an operation placed before they
+	// were recorded, which the exhausted-pool sweep never touches.
+	Pool       string `json:"pool,omitempty"`
+	AccountKey string `json:"account_key,omitempty"`
 	// E6Arm is the experiment marker the submission carried, kept on the
 	// operation record so a run stays visible after the fact.
 	E6Arm string `json:"e6_arm,omitempty"`
@@ -43,6 +48,9 @@ type hubSpawnTask struct {
 	Created, Deadline  time.Time
 	// LastRun is when a coordinator worker last took the request (zero: never).
 	LastRun time.Time
+	// Placed is when the request was bound to its node, the decision the
+	// placement count rests on (zero: never bound).
+	Placed  time.Time
 	Attempt int
 	Node    *hubSpawnRequest
 	Outcome hubSpawnOutcome
@@ -61,6 +69,15 @@ func (s *laneInboxStore) ensureSpawnTasks() error {
 	} {
 		if _, err := s.db.ExecContext(ctx, statement); err != nil {
 			return err
+		}
+	}
+	// Stores from before hk 4460 lack the placement columns (postgres: the
+	// 0008 migration). A restart restores counts from these two columns.
+	for _, column := range []string{`placed_ms BIGINT NOT NULL DEFAULT 0`, `claimed_ms BIGINT NOT NULL DEFAULT 0`} {
+		if _, err := s.db.ExecContext(ctx, `ALTER TABLE spawn_operations ADD COLUMN `+column); err != nil {
+			if err := ignoreDuplicateColumn(err); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -105,6 +122,7 @@ func (s *laneInboxStore) claimSpawnReplacing(parent context.Context, request fle
 	if !errors.Is(err, sql.ErrNoRows) {
 		return hubSpawnTask{}, false, err
 	}
+
 	var taskRole any
 	if spawn.HoldsTaskRole() {
 		taskRole = spawn.RoleKey()
@@ -222,14 +240,18 @@ func (s *laneInboxStore) discardStagedSpawn(parent context.Context, id, roleKey 
 
 // Bind the immutable destination without claiming it was sent. Only the
 // bound-to-dispatching transition permits a first send.
-func (s *laneInboxStore) bindSpawn(parent context.Context, id string, attempt int, node hubSpawnRequest) (hubSpawnTask, error) {
+func (s *laneInboxStore) bindSpawn(parent context.Context, id string, attempt int, node hubSpawnRequest, now time.Time) (hubSpawnTask, error) {
 	ctx, done := s.op(parent)
 	defer done()
 	raw, err := json.Marshal(node)
 	if err != nil {
 		return hubSpawnTask{}, err
 	}
-	_, err = s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET node_id=?,node_payload=?,status='bound' WHERE request_id=? AND attempt=? AND node_id IS NULL AND status='accepted'`), node.RequestID, string(raw), id, attempt)
+	// The placement stamp is written with the binding, so no dispatch can run
+	// on a bound row that a restart would not count (restorePlacementCounts).
+	// A new bound attempt is unclaimed: a claim an earlier attempt left on the
+	// row does not describe this placement.
+	_, err = s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET node_id=?,node_payload=?,status='bound',placed_ms=?,claimed_ms=0 WHERE request_id=? AND attempt=? AND node_id IS NULL AND status='accepted'`), node.RequestID, string(raw), now.UnixMilli(), id, attempt)
 	if err != nil {
 		return hubSpawnTask{}, err
 	}
@@ -339,8 +361,8 @@ func (s *laneInboxStore) completeSpawn(parent context.Context, task hubSpawnTask
 func scanSpawnTask(row interface{ Scan(...any) error }) (hubSpawnTask, error) {
 	var task hubSpawnTask
 	var payload, result, node string
-	var created, deadline, lastRun int64
-	err := row.Scan(&task.Job, &task.Owner, &payload, &task.Status, &created, &deadline, &node, &result, &task.Attempt, &lastRun)
+	var created, deadline, lastRun, placed int64
+	err := row.Scan(&task.Job, &task.Owner, &payload, &task.Status, &created, &deadline, &node, &result, &task.Attempt, &lastRun, &placed)
 	if err != nil {
 		return task, err
 	}
@@ -348,6 +370,9 @@ func scanSpawnTask(row interface{ Scan(...any) error }) (hubSpawnTask, error) {
 	task.Deadline = time.UnixMilli(deadline)
 	if lastRun > 0 {
 		task.LastRun = time.UnixMilli(lastRun)
+	}
+	if placed > 0 {
+		task.Placed = time.UnixMilli(placed)
 	}
 	if err = json.Unmarshal([]byte(payload), &task.Request); err != nil {
 		return task, err
@@ -386,7 +411,7 @@ func (s *laneInboxStore) unbindSpawn(parent context.Context, id string, attempt 
 	return s.spawnTask(parent, id)
 }
 
-const spawnTaskColumns = `job,owner,payload,status,created_ms,deadline_ms,node_payload,result,attempt,last_run_ms`
+const spawnTaskColumns = `job,owner,payload,status,created_ms,deadline_ms,node_payload,result,attempt,last_run_ms,placed_ms`
 
 func (s *laneInboxStore) spawnTask(parent context.Context, id string) (hubSpawnTask, error) {
 	ctx, done := s.op(parent)
@@ -423,6 +448,41 @@ func (s *laneInboxStore) spawnTaskByNode(parent context.Context, id string) (hub
 	ctx, done := s.op(parent)
 	defer done()
 	return scanSpawnTask(s.db.QueryRowContext(ctx, s.q(`SELECT `+spawnTaskColumns+` FROM spawn_operations WHERE node_id=?`), id))
+}
+
+// markSpawnClaimed records that a job's claim reached the hub from the node it
+// was placed on. A restart must not count that job again, even if it finished
+// before the restart and no heartbeat will show it.
+func (s *laneInboxStore) markSpawnClaimed(parent context.Context, job string, now time.Time) error {
+	ctx, done := s.op(parent)
+	defer done()
+	_, err := s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET claimed_ms=? WHERE job=? AND node_id IS NOT NULL AND claimed_ms=0`), now.UnixMilli(), job)
+	return err
+}
+
+// boundSpawnsSince lists the operations placed at or after since that are bound
+// to a node, not yet claimed, and may still hold an unclaimed launch: in flight,
+// reconciling, timed out while bound, or succeeded. Refused, failed and
+// retryable ones released their count and are left out. Oldest placement first,
+// so a job's newest placement is read last (restorePlacementCounts,
+// placement_count.go).
+func (s *laneInboxStore) boundSpawnsSince(parent context.Context, since time.Time) ([]hubSpawnTask, error) {
+	ctx, done := s.op(parent)
+	defer done()
+	rows, err := s.db.QueryContext(ctx, s.q(`SELECT `+spawnTaskColumns+` FROM spawn_operations WHERE node_id IS NOT NULL AND placed_ms>=? AND claimed_ms=0 AND (status IN ('bound','dispatching','reconciling','succeeded') OR status='deadline_exceeded') ORDER BY placed_ms`), since.UnixMilli())
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var tasks []hubSpawnTask
+	for rows.Next() {
+		task, err := scanSpawnTask(rows)
+		if err != nil {
+			return nil, err
+		}
+		tasks = append(tasks, task)
+	}
+	return tasks, rows.Err()
 }
 
 // pendingSpawns returns the fresh runnable page and a bounded number of due

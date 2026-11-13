@@ -633,7 +633,7 @@ func (t *directSpawnTransport) Spawn(ctx context.Context, req fleet.HubSpawnRequ
 	// The bind can commit even when its response is lost. From this point a
 	// placement caller must not release ownership or fall through to a host.
 	t.bound = true
-	task, err := t.h.inbox.store.bindSpawn(ctx, t.task.Request.RequestID, t.task.Attempt, node)
+	task, err := t.h.inbox.store.bindSpawn(ctx, t.task.Request.RequestID, t.task.Attempt, node, t.h.now().UTC())
 	if err != nil {
 		return fleet.HubSpawnReply{}, &fleet.HubError{Kind: "hub_spawn_pending"}
 	}
@@ -843,6 +843,8 @@ func (t *directSpawnTransport) settleNodeResult(ctx context.Context, node hubSpa
 	if result.Receipt != nil {
 		outcome.Profile = result.Receipt.Profile
 		outcome.Model = result.Receipt.Model
+		outcome.Pool = result.Receipt.Pool
+		outcome.AccountKey = result.Receipt.AccountKey
 		outcome.Role = result.Receipt.Role
 		outcome.LaneUnregistered = result.Receipt.LaneUnregistered
 	}

@@ -542,6 +542,13 @@ var devinFreeRungs = map[string]string{
 	"devin-swe2-flash-max":    "swe-2-flash-max",
 }
 
+// IsFreeRung reports whether profile is a free-tier rung (a SWE-2 profile of
+// devinFreeRungs): it draws on the pool's free bucket, not its paid windows.
+func IsFreeRung(profile string) bool {
+	_, free := devinFreeRungs[profile]
+	return free
+}
+
 func (in admissionInputs) judgeWith(req admissionRequest, allowUnrated bool) admissionVerdict {
 	d := admissionVerdict{Profile: req.Profile, Exit: gateBlocked, Missing: []string{}, Alternatives: []string{}, ManualIDs: []string{}}
 	now := in.Now

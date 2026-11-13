@@ -29,7 +29,7 @@ func TestContainedBoundSpawnIsNotSent_t4577(t *testing.T) {
 		t.Fatal(err)
 	}
 	nodeRequest := boundaryTestNode(task, 457710, "machine-a")
-	if _, err = first.inbox.store.bindSpawn(t.Context(), request.RequestID, task.Attempt, nodeRequest); err != nil {
+	if _, err = first.inbox.store.bindSpawn(t.Context(), request.RequestID, task.Attempt, nodeRequest, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	if err := first.Close(); err != nil {
@@ -78,7 +78,7 @@ func TestOldNodeResultCannotFinishReboundRequest_t4577(t *testing.T) {
 		t.Fatal(err)
 	}
 	first := boundaryTestNode(task, 457711, "machine-a")
-	if task, err = h.inbox.store.bindSpawn(t.Context(), request.RequestID, task.Attempt, first); err != nil {
+	if task, err = h.inbox.store.bindSpawn(t.Context(), request.RequestID, task.Attempt, first, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	// Model a committed send and definitive refusal, followed by re-placement.
@@ -89,7 +89,7 @@ func TestOldNodeResultCannotFinishReboundRequest_t4577(t *testing.T) {
 		t.Fatal(err)
 	}
 	second := boundaryTestNode(task, 457712, "machine-b")
-	if _, err = h.inbox.store.bindSpawn(t.Context(), request.RequestID, task.Attempt, second); err != nil {
+	if _, err = h.inbox.store.bindSpawn(t.Context(), request.RequestID, task.Attempt, second, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	changed, err := h.inbox.store.completeSpawn(t.Context(), task, hubSpawnOutcome{RC: 0, Stage: "landing", Host: first.Machine, NodeResult: true}, time.Now())
@@ -113,7 +113,7 @@ func TestReboundRequestRejectsOldDispatch_t4577(t *testing.T) {
 		t.Fatal(err)
 	}
 	first := boundaryTestNode(task, 457715, "machine-a")
-	if task, err = h.inbox.store.bindSpawn(t.Context(), request.RequestID, task.Attempt, first); err != nil {
+	if task, err = h.inbox.store.bindSpawn(t.Context(), request.RequestID, task.Attempt, first, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	if _, err = h.inbox.store.db.Exec(`UPDATE spawn_operations SET status='dispatching' WHERE request_id=?`, request.RequestID); err != nil {
@@ -122,7 +122,7 @@ func TestReboundRequestRejectsOldDispatch_t4577(t *testing.T) {
 	if _, err = h.inbox.store.unbindRefusedSpawn(t.Context(), request.RequestID, task.Attempt, first.RequestID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = h.inbox.store.bindSpawn(t.Context(), request.RequestID, task.Attempt, boundaryTestNode(task, 457716, "machine-b")); err != nil {
+	if _, err = h.inbox.store.bindSpawn(t.Context(), request.RequestID, task.Attempt, boundaryTestNode(task, 457716, "machine-b"), time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(t.Context())
@@ -150,7 +150,7 @@ func TestUnbindFailureKeepsUnsentBinding_t4577(t *testing.T) {
 		t.Fatal(err)
 	}
 	node := boundaryTestNode(task, 457713, "machine-a")
-	if task, err = h.inbox.store.bindSpawn(t.Context(), request.RequestID, task.Attempt, node); err != nil {
+	if task, err = h.inbox.store.bindSpawn(t.Context(), request.RequestID, task.Attempt, node, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := h.inbox.store.db.Exec(`CREATE TRIGGER fail_unsent_unbind BEFORE UPDATE ON spawn_operations WHEN NEW.status='accepted' BEGIN SELECT RAISE(FAIL, 'injected unbind failure'); END`); err != nil {
@@ -171,7 +171,7 @@ func TestStalePlacementCannotFinishBoundRequest_t4577(t *testing.T) {
 		t.Fatal(err)
 	}
 	node := boundaryTestNode(accepted, 457714, "machine-a")
-	if _, err = h.inbox.store.bindSpawn(t.Context(), request.RequestID, accepted.Attempt, node); err != nil {
+	if _, err = h.inbox.store.bindSpawn(t.Context(), request.RequestID, accepted.Attempt, node, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	changed, err := h.inbox.store.completeSpawn(t.Context(), accepted, hubSpawnOutcome{RC: 1, Stage: "placement", Reason: "refused"}, time.Now())
@@ -189,7 +189,7 @@ func TestBoundAbandonRollsBackWithReservationFailure_t4577(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = h.inbox.store.bindSpawn(t.Context(), request.RequestID, task.Attempt, boundaryTestNode(task, 457717, "machine-a")); err != nil {
+	if _, err = h.inbox.store.bindSpawn(t.Context(), request.RequestID, task.Attempt, boundaryTestNode(task, 457717, "machine-a"), time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	// The pre-migration store accepts text statuses too; set up the new state
@@ -223,7 +223,7 @@ func TestSentTimeoutDoesNotClaimNoNodeRan_t4577(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if task, err = h.inbox.store.bindSpawn(t.Context(), request.RequestID, task.Attempt, boundaryTestNode(task, 457718, "machine-a")); err != nil {
+	if task, err = h.inbox.store.bindSpawn(t.Context(), request.RequestID, task.Attempt, boundaryTestNode(task, 457718, "machine-a"), time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	if _, err = h.inbox.store.db.Exec(`UPDATE spawn_operations SET status='dispatching' WHERE request_id=?`, request.RequestID); err != nil {

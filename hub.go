@@ -480,6 +480,7 @@ type HubServer struct {
 	prometheusBasicPass              string
 	placementCache                   placementCache
 	poolCooling                      map[string]time.Time
+	poolSweep                        poolSweepState
 	relayControl                     hubRelayControlState
 	reportRelayPath                  string
 	lanesNodeRowCap                  int
@@ -757,6 +758,11 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 	hub.fleetState = newFleetStateStore()
 	hub.quietTimings = defaultDesignQuietTimings()
 	hub.prepareInbox()
+	if err := hub.restorePlacementCounts(); err != nil {
+		hub.closeCancel()
+		_ = hub.inbox.store.close()
+		return nil, err
+	}
 	return hub, nil
 }
 

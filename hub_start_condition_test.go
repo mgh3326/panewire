@@ -62,7 +62,7 @@ func TestBoundLegacyStartConditionWaitsBeforeReplayUntilMet(t *testing.T) {
 	}
 	task, err = h.inbox.store.bindSpawn(t.Context(), request.RequestID, task.Attempt, hubSpawnRequest{
 		RequestID: t14RequestID(1202), Machine: "machine-a", WaitSeconds: 600,
-	})
+	}, time.Now().UTC())
 	if err != nil {
 		t.Fatal(err)
 	}

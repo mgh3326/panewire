@@ -31,7 +31,7 @@ func bindDispatch(t *testing.T, h *HubServer, req fleet.Submission) (hubSpawnTas
 		t.Fatal(err)
 	}
 	node := hubSpawnRequest{RequestID: t14RequestID(741), Machine: "machine-a", CWDKey: "project", Brief: hubSpawnBrief{Inline: "task"}, Args: []string{"--job", "test-job"}, WaitSeconds: 600, DeadlineMS: task.Deadline.UnixMilli()}
-	if task, err = h.inbox.store.bindSpawn(t.Context(), req.RequestID, task.Attempt, node); err != nil {
+	if task, err = h.inbox.store.bindSpawn(t.Context(), req.RequestID, task.Attempt, node, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	return sentSpawnFixture(t, h.inbox.store, task), node

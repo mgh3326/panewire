@@ -74,7 +74,7 @@ func newStrandedSpawn(t *testing.T) *strandedSpawn {
 	}
 	spec := *request.Repository.Checkout
 	node := hubSpawnRequest{RequestID: t14RequestID(4231), Machine: "machine-a", CWDKey: "project", Brief: hubSpawnBrief{Inline: "task"}, Checkout: &hubSpawnCheckout{Origin: spec.Origin, Mode: spec.Mode, Branch: spec.Branch, Sha: spec.Sha, Dir: spec.Dir}, Args: []string{"--job", "test-job", "-l", "test-job", "-m", "codex-sol", "--t", "T1", "--task", "42", "--owner", "parent", "--role", "implementer"}, WaitSeconds: 600, DeadlineMS: task.Deadline.UnixMilli()}
-	if task, err = hub.inbox.store.bindSpawn(t.Context(), request.RequestID, task.Attempt, node); err != nil {
+	if task, err = hub.inbox.store.bindSpawn(t.Context(), request.RequestID, task.Attempt, node, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	task = sentSpawnFixture(t, hub.inbox.store, task)
@@ -164,7 +164,7 @@ func TestStrandedSpawnLateSuccessStillWins(t *testing.T) {
 	node := t14Node(t, s.hub, s.server, true)
 	wait := s.run(t)
 	replay := t14ReadNodeSpawn(t, node)
-	receipt := fleet.ExecutionReceipt{Job: "test-job", Host: "machine-a", Pane: "pane-1", Profile: "codex-sol", Model: "model-fixture", Role: "implementer", CWD: "/work/project.test-job", Label: "test-job", Kind: "codex"}
+	receipt := fleet.ExecutionReceipt{Job: "test-job", Host: "machine-a", Pane: "pane-1", Profile: "codex-sol", Model: "model-fixture", Pool: "codex", AccountKey: "codex:0123456789abcdef", Role: "implementer", CWD: "/work/project.test-job", Label: "test-job", Kind: "codex"}
 	if err := wsjson.Write(t.Context(), node, map[string]any{"type": "job.spawn.result", "request_id": replay.RequestID, "rc": 0, "job_id": "test-job", "pane": "pane-1", "stdout_tail": "OK pane=pane-1 job=test-job", "receipt": receipt, "stage": "landing"}); err != nil {
 		t.Fatal(err)
 	}
@@ -174,8 +174,8 @@ func TestStrandedSpawnLateSuccessStillWins(t *testing.T) {
 	}
 	nodeCommandReplyTo(t, node, read, map[string]any{"result": PaneReadResult{Outcome: nodePaneReadOK, AgentStatus: "working", Composer: nodeComposerUnknown}})
 	wait()
-	if got := s.status(t); got.Status != "succeeded" || got.Outcome.Pane != "pane-1" {
-		t.Fatalf("late success lost: %+v", got)
+	if got := s.status(t); got.Status != "succeeded" || got.Outcome.Pane != "pane-1" || got.Outcome.Pool != "codex" || got.Outcome.AccountKey != "codex:0123456789abcdef" {
+		t.Fatalf("late success lost or its placement record dropped: %+v", got)
 	}
 	if writes := s.jobs.writes(); len(writes) != 0 {
 		t.Fatalf("hk written on success: %v", writes)
