@@ -24,6 +24,23 @@ const (
 // injected into a lane.
 var legacyChatRelayEventPattern = regexp.MustCompile(`^chat-[0-9]+(-[0-9a-f]{8})?$`)
 
+// retireLegacyChatReplay settles a relay row the removed operator chat wrote.
+// It is retired with the chat-terminal stamp before any inbox migration or lane
+// injection can take it. It reports whether the row was settled here, so every
+// replay path stops at once.
+func (h *HubServer) retireLegacyChatReplay(record handoffkeepRelayEvent) bool {
+	if !legacyChatRelayEventPattern.MatchString(record.EventID) {
+		return false
+	}
+	if record.DeliveredAt != "" || strings.HasPrefix(record.DeliveredTo, relayReplayRetiredMarker) || h.handoffkeep == nil {
+		return true
+	}
+	if err := h.handoffkeep.markDelivered(context.Background(), record.ID, "hub", "chat-terminal"); err != nil {
+		h.logger.Warn("legacy chat relay row was not retired", "event_id", record.ID)
+	}
+	return true
+}
+
 // reportRelayRoutes is intentionally a tiny operator-owned configuration:
 // routes contain identifiers only, never host addresses, tokens, or panes
 // from a particular installation.
@@ -1321,7 +1338,7 @@ func (h *HubServer) replayUndeliveredRelayRows(ctx context.Context, kind, source
 }
 
 func (h *HubServer) replayRelayEvent(record handoffkeepRelayEvent, source string) {
-	if h.replayInbox(record) {
+	if h.retireLegacyChatReplay(record) || h.replayInbox(record) {
 		return
 	}
 	event := relayEventFromRecord(record)
@@ -1335,12 +1352,6 @@ func (h *HubServer) replayRelayEvent(record handoffkeepRelayEvent, source string
 		return
 	}
 	if strings.HasPrefix(record.DeliveredTo, relayReplayRetiredMarker) {
-		return
-	}
-	if legacyChatRelayEventPattern.MatchString(record.EventID) {
-		if err := h.handoffkeep.markDelivered(context.Background(), record.ID, "hub", "chat-terminal"); err != nil {
-			h.logger.Warn("legacy chat relay row was not retired", "event_id", record.ID)
-		}
 		return
 	}
 	if reason := h.relayReplayRetireReason(record); reason != "" {

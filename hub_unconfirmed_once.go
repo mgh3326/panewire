@@ -216,7 +216,7 @@ func (h *HubServer) unconfirmedMarkOrigins(ctx context.Context) (origins, digest
 // rule is: no labelled copy is ever queued unless the durable retire for
 // that row has already succeeded.
 func (h *HubServer) replayMarkedUnconfirmed(ctx context.Context, record handoffkeepRelayEvent, source string, digestMark bool) {
-	if h.retireUnconfirmedSettledInInbox(record) {
+	if h.retireLegacyChatReplay(record) || h.retireUnconfirmedSettledInInbox(record) {
 		return
 	}
 	if h.retireUnconfirmedDigest(record, digestMark) {
@@ -236,12 +236,6 @@ func (h *HubServer) replayMarkedUnconfirmed(ctx context.Context, record handoffk
 		return
 	}
 	if record.DeliveredAt != "" || strings.HasPrefix(record.DeliveredTo, relayReplayRetiredMarker) {
-		return
-	}
-	if legacyChatRelayEventPattern.MatchString(record.EventID) {
-		if err := h.handoffkeep.markDelivered(ctx, record.ID, "hub", "chat-terminal"); err != nil {
-			h.logger.Warn("legacy chat relay row was not retired", "event_id", record.ID)
-		}
 		return
 	}
 	if reason := h.relayReplayRetireReasonAged(record, receiptAge); reason != "" {
