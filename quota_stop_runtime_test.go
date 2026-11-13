@@ -283,8 +283,8 @@ func TestQuotaStopUnknownResetDedupExpires(t *testing.T) {
 	}
 }
 
-func TestQuotaStopAndWakeTargetFlagsRemainHubFlags(t *testing.T) {
-	for _, flag := range []string{"--quota-stop-act", "--wake-targets"} {
+func TestQuotaStopFlagRemainsHubFlag(t *testing.T) {
+	for _, flag := range []string{"--quota-stop-act"} {
 		if !hubFlagsProvided([]string{flag}) {
 			t.Errorf("%s was lost in merge", flag)
 		}

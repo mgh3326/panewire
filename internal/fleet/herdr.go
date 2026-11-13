@@ -498,7 +498,7 @@ func (a *App) start(ctx context.Context, s Spawn, seat Seat, l Launch, pane stri
 			}
 		}
 		if !proven {
-			return fail(exitConfig, "Codex model/effort footer not proven")
+			return &launchProofError{&ExitError{Code: exitConfig, Message: "Codex model/effort footer not proven"}}
 		}
 	}
 	if e := a.waitAgentIdle(ctx, pane, timeout); e != nil {

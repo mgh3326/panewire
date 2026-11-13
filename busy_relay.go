@@ -442,9 +442,8 @@ func (manager *relayBusyManager) offer(parent context.Context, message hubOutbou
 				// another prompt — but a resend disagreeing with
 				// the row's payload is a recorded mismatch, the
 				// same fail-open rule the delivered record
-				// applies. The queued row's text wins: an
-				// operator edit (relay.edit) is never overridden
-				// by a replay carrying the original payload.
+				// applies. The queued row's text wins over a replay
+				// carrying a different payload.
 				if mode != relayDedupeOff && existing.Text != message.Text {
 					manager.dedupeMismatch.Add(1)
 					manager.journalDedupe(parent, "mismatch", message)
@@ -1411,69 +1410,6 @@ func relayRetriesOnce(result relayInjectResult) bool {
 		return strings.HasPrefix(result.Evidence, "postsend:") && strings.HasSuffix(result.Evidence, ":none")
 	}
 	return false
-}
-
-func (manager *relayBusyManager) edit(ctx context.Context, eventID int64, text string) bool {
-	if text == "" || eventID < 1 {
-		return false
-	}
-	store := manager.client.relayStore()
-	if store == nil {
-		return false
-	}
-	manager.mu.Lock()
-	defer manager.mu.Unlock()
-	changed, err := store.UpdateRelayHeldText(ctx, eventID, text)
-	if !changed || err != nil {
-		return false
-	}
-	for pane, items := range manager.held {
-		for i := range items {
-			if items[i].EventID == eventID {
-				items[i].Text, items[i].Edited = text, true
-				manager.held[pane] = items
-			}
-		}
-	}
-	return true
-}
-
-func (manager *relayBusyManager) cancel(ctx context.Context, eventID int64) bool {
-	if eventID < 1 {
-		return false
-	}
-	store := manager.client.relayStore()
-	if store == nil {
-		return false
-	}
-	manager.mu.Lock()
-	deleted, err := store.DeleteRelayHeld(ctx, eventID)
-	if !deleted || err != nil {
-		manager.mu.Unlock()
-		return false
-	}
-	var panes []string
-	for pane, items := range manager.held {
-		removed := false
-		filtered := items[:0]
-		for _, item := range items {
-			if item.EventID != eventID {
-				filtered = append(filtered, item)
-			} else {
-				removed = true
-			}
-		}
-		manager.held[pane] = filtered
-		if removed {
-			panes = append(panes, pane)
-		}
-	}
-	manager.mu.Unlock()
-	for _, pane := range panes {
-		manager.arm(ctx, pane)
-	}
-	manager.emit("relay.cancelled", relayCancelledPayload{OriginalEventID: eventID})
-	return true
 }
 
 func (manager *relayBusyManager) restore(ctx context.Context) {

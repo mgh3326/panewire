@@ -88,8 +88,9 @@ type WakeRequest struct {
 	Reason      string
 }
 
-// Waker wakes an asleep host. The in-flight `panewire node wake` command is
-// the production implementation; tests substitute a fake.
+// Waker wakes an asleep host. No production implementation remains (the
+// `panewire node wake` command was removed); tests substitute a fake, and
+// an unset Wake reports "no waker configured".
 type Waker interface {
 	Wake(ctx context.Context, host string, req WakeRequest) error
 }
@@ -1278,7 +1279,9 @@ func (a *App) placeAuto(ctx context.Context, s Spawn, brief string) (bool, map[s
 		}
 		return repo
 	}
-	spawn := func(c *placeCandidate) (res candResult) {
+	var pendingFallback string
+	var fallbacks []map[string]any
+	spawnOne := func(c *placeCandidate) (res candResult) {
 		defer func() {
 			if res.stop != nil && res.note == "" {
 				res.note = exitReason(exitCode(res.stop))
@@ -1309,11 +1312,57 @@ func (a *App) placeAuto(ctx context.Context, s Spawn, brief string) (bool, map[s
 			}
 			return candResult{rc: exitCode(err), note: hostGateNote(j, err), quotaRefused: true}
 		}
+		if pendingFallback != "" {
+			fallbacks = append(fallbacks, map[string]any{"from_profile": pendingFallback, "reason": "harness_version", "rc": 70, "to_profile": s.Profile, "host": c.name})
+			if s.Sel == nil {
+				s.Sel = map[string]any{}
+			}
+			s.Sel["launch_fallbacks"] = fallbacks
+			if err := hkCommentTask(ctx, s.Task, fmt.Sprintf("Launch fallback: from-profile=%s rc=70 reason=harness_version to-profile=%s host=%s", pendingFallback, s.Profile, c.name)); err != nil {
+				a.warn("launch fallback task comment failed: %v", err)
+			}
+			pendingFallback = ""
+		}
 		return a.spawnRemote(ctx, s, brief, c, resolveRepo(), false)
+	}
+	spawn := func(c *placeCandidate) candResult {
+		for {
+			res := spawnOne(c)
+			if res.note != "hub_launch_proof_failed" {
+				return res
+			}
+			if !s.autoSelected || s.Delegated {
+				return res
+			}
+			previous := s.Profile
+			pendingFallback = previous
+			seat, ok := a.Policy.Profiles[previous]
+			if !ok || slices.Contains(s.failedHarnesses, seat.Kind) {
+				return res
+			}
+			s.failedHarnesses = append(s.failedHarnesses, seat.Kind)
+			candidate := s
+			candidate.Host, candidate.Effort = c.name, s.requestedEffort
+			sel, err := a.selectProfile(ctx, candidate)
+			if err != nil || sel == nil || sel.chosen == nil {
+				return res
+			}
+			s.Profile, s.AccountKey, s.RoutingRole, s.SelHost, s.route = sel.chosen.seatName, sel.chosen.accountKey, sel.req.route.role, sel.chosen.host, sel.req.route
+			s.Effort = firstNonempty(sel.chosen.row.Effort, s.requestedEffort)
+			if s.E6Arm != "" && !ValidE6Arm(s.E6Arm, sel.chosen.seat.Canon) {
+				s.E6Arm = ""
+			}
+			pool = a.quotaPool(ctx, s)
+			s.Sel = sel.record()
+		}
 	}
 	emit := func(chosen string) map[string]any {
 		a.stampSelection(&s, chosen)
 		rec := p.record(chosen)
+		if len(fallbacks) > 0 {
+			rec["profile"] = s.Profile
+			rec["pool"] = pool
+		}
 		a.attachSelection(rec, s)
 		if !s.DryRun {
 			if e := a.event(ctx, s.Job, "job.placement", rec); e != nil {

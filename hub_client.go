@@ -1,14 +1,12 @@
 package panewire
 
 import (
-	"bytes"
 	"context"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"hash/fnv"
-	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -39,23 +37,17 @@ type HubWait func(context.Context, time.Duration) error
 // channel. A zero config is never started by Daemon, preserving stage1/2's
 // historical behavior.
 type HubClientConfig struct {
-	URL                  string
-	URLs                 []string
-	MachineID            string
-	Token                string
-	CFAccessClientID     string
-	CFAccessClientSecret string
-	Accepting            bool
-	RelayInjectTimeout   time.Duration
-	JobsInboxRoot        string
-	FailoverWakeOn       string
-	FailoverWakeMAC      string
-	BurstWakeMAC         string
-	BurstPoweroffAllowed bool
-	// WakeTargetsPath is the waker node's own JSON allowlist: which target
-	// machines a hub wake event may select, and each target's MAC plus UDP
-	// broadcast destination. The wire event carries none of these values.
-	WakeTargetsPath       string
+	URL                   string
+	URLs                  []string
+	MachineID             string
+	Token                 string
+	CFAccessClientID      string
+	CFAccessClientSecret  string
+	Accepting             bool
+	RelayInjectTimeout    time.Duration
+	JobsInboxRoot         string
+	FailoverWakeOn        string
+	FailoverWakeMAC       string
 	Checks                []HubCheck
 	Execute               HubCheckExecutor
 	PingInterval          time.Duration
@@ -80,8 +72,7 @@ type HubClientConfig struct {
 	// failoverWakeDestination is a package-private fixture override. Production
 	// always uses the fixed broadcast destination below.
 	failoverWakeDestination string
-	burstPoweroff           func(context.Context) error // fixture seam; production is fixed sudo -n poweroff.
-	helloAckTimeout         time.Duration               // fixture seam; zero means defaultHubHelloAckTimeout.
+	helloAckTimeout         time.Duration // fixture seam; zero means defaultHubHelloAckTimeout.
 }
 
 // HubDaemonConfig keeps the optional hub process separate from the local
@@ -129,15 +120,7 @@ type HubClient struct {
 	failoverWakeDest      string
 	failoverWakeMu        sync.Mutex
 	failoverWakeArmed     bool
-	burstWakeMAC          net.HardwareAddr
-	burstPoweroffAllowed  bool
-	burstPoweroff         func(context.Context) error
 	helloAckTimeout       time.Duration
-	burstMu               sync.Mutex
-	burstSeen             map[string]time.Time
-	wakeTargets           map[string]NodeWakeTarget
-	wakeMu                sync.Mutex
-	wakeSeen              map[string]time.Time
 	checks                []HubCheck
 	execute               HubCheckExecutor
 	pingInterval          time.Duration
@@ -170,12 +153,11 @@ type HubClient struct {
 	now func() time.Time
 	// fleetEvents writes a fleet event. Tests substitute a recorder; production
 	// leaves it nil and events go to the state directory (emitFleetEvent).
-	fleetEvents      func(time.Time, fleetEvent) bool
-	assignedJobs     map[string]uint64
-	assignmentMu     sync.Mutex
-	burstHoldsActive bool
-	panesAlive       panesAliveFunc
-	panesAliveMu     sync.Mutex
+	fleetEvents  func(time.Time, fleetEvent) bool
+	assignedJobs map[string]uint64
+	assignmentMu sync.Mutex
+	panesAlive   panesAliveFunc
+	panesAliveMu sync.Mutex
 	// paneIdleSince is the first heartbeat at which each pane was idle or
 	// done (hub_jobs_idle.go).
 	paneIdleSince     map[string]time.Time
@@ -308,26 +290,6 @@ func NewHubClient(config HubClientConfig) (*HubClient, error) {
 			return nil, errors.New("hub client configuration is invalid")
 		}
 	}
-	burstMACText := config.BurstWakeMAC
-	if burstMACText == "" && wakeRequested {
-		burstMACText = config.FailoverWakeMAC
-	}
-	var burstMAC net.HardwareAddr
-	if burstMACText != "" {
-		var burstErr error
-		burstMAC, burstErr = parseHubFailoverWakeMAC(burstMACText)
-		if burstErr != nil {
-			return nil, errors.New("hub client configuration is invalid")
-		}
-	}
-	var wakeTargets map[string]NodeWakeTarget
-	if config.WakeTargetsPath != "" {
-		targets, wakeErr := LoadNodeWakeConfig(config.WakeTargetsPath)
-		if wakeErr != nil {
-			return nil, errors.New("hub client configuration is invalid")
-		}
-		wakeTargets = targets
-	}
 	wakeDestination := hubFailoverWakeBroadcastAddress
 	if config.failoverWakeDestination != "" {
 		address, resolveErr := net.ResolveUDPAddr("udp4", config.failoverWakeDestination)
@@ -374,19 +336,15 @@ func NewHubClient(config HubClientConfig) (*HubClient, error) {
 	if config.Execute == nil {
 		config.Execute = executeHubCheck
 	}
-	if config.burstPoweroff == nil {
-		config.burstPoweroff = executeHubBurstPoweroff
-	}
 	if config.helloAckTimeout <= 0 {
 		config.helloAckTimeout = defaultHubHelloAckTimeout
 	}
 	client := &HubClient{
 		endpoint: endpoints[0], endpoints: endpoints, machineID: config.MachineID, token: config.Token, cfAccessClientID: config.CFAccessClientID, cfAccessSecret: config.CFAccessClientSecret, accepting: config.Accepting, jobsInboxRoot: config.JobsInboxRoot, spawnConfigPath: defaultHubSpawnConfigPath(config.SpawnConfigPath), spawnConfigDefault: config.SpawnConfigPath == "", spawnJournalDir: config.SpawnJournalDir, spawnTimeoutExtra: 0,
 		failoverWakeOn: config.FailoverWakeOn, failoverWakeMAC: wakeMAC, failoverWakeDest: wakeDestination, failoverWakeArmed: wakeRequested,
-		burstWakeMAC: burstMAC, burstPoweroffAllowed: config.BurstPoweroffAllowed, burstPoweroff: config.burstPoweroff, helloAckTimeout: config.helloAckTimeout, burstSeen: make(map[string]time.Time),
-		wakeTargets: wakeTargets, wakeSeen: make(map[string]time.Time),
-		relayControl: newClientRelayControlState(config),
-		checks:       cloneHubChecks(config.Checks), execute: config.Execute,
+		helloAckTimeout: config.helloAckTimeout,
+		relayControl:    newClientRelayControlState(config),
+		checks:          cloneHubChecks(config.Checks), execute: config.Execute,
 		pingInterval: config.PingInterval, initialBackoff: config.InitialBackoff, maxBackoff: config.MaxBackoff, preferRetry: config.PreferRetry, version: config.Version,
 		dial: config.Dial, wait: config.Wait, warn: config.Warn, relayInject: config.relayInject, relayCommand: config.relayCommand, hostLoadCollector: config.hostLoadCollector, hostMemoryCollector: config.hostMemoryCollector, sessionCollector: config.sessionCollector, events: make(chan hubClientEvent, 64), completedJobs: make(map[string]uint64), completedReports: make(map[string]struct{}), assignedJobs: make(map[string]uint64),
 		jobSessions: make(map[string]sessionCacheEntry),
@@ -671,6 +629,7 @@ type hubClientConnection struct {
 	// acceptsCheckoutPull is the same for hubFeatureCheckoutPull
 	// (node_checkout_pull.go).
 	acceptsCheckoutPull atomic.Bool
+	acceptsLaunchProof  atomic.Bool
 	connection          *websocket.Conn
 	writeMu             sync.Mutex
 }
@@ -681,10 +640,8 @@ type hubOutboundMessage struct {
 	Machine            string
 	Phase              string
 	EmittedAt          time.Time
-	WakeMAC            string
 	JobID              string
 	Epoch              uint64
-	HoldsActive        bool
 	Pane               string
 	Text               string
 	DeliverPolicy      string
@@ -2062,7 +2019,7 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 						}
 					}
 				}()
-			case "failover", "burst", "wake", "job.revoked", "job.assigned", "relay.persisted", "pool.cooling.ack", "idle-wake.route", "burst.holds", "relay.edit", "relay.cancel":
+			case "failover", "job.revoked", "job.assigned", "relay.persisted", "pool.cooling.ack", "idle-wake.route":
 				select {
 				case inbound <- message:
 				default:
@@ -2079,6 +2036,7 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 				peer.acceptsPaneCaptureDoc.Store(slices.Contains(message.Features, hubFeaturePaneCaptureDoc))
 				peer.acceptsHostActivity.Store(slices.Contains(message.Features, hubFeatureHostActivity))
 				peer.acceptsCheckoutPull.Store(slices.Contains(message.Features, hubFeatureCheckoutPull))
+				peer.acceptsLaunchProof.Store(slices.Contains(message.Features, hubFeatureLaunchProof))
 				continue
 			case "quota.request":
 				go client.handleHubQuota(ctx, peer, message)
@@ -2219,11 +2177,10 @@ const hubInboundQueueDepth = 256
 var errHubInboundQueueFull = errors.New("hub inbound work queue full")
 
 // serveHubInbound runs the ordered half of inbound hub work. Handlers that
-// may block on a lock, the node journal or the network - failover, burst,
-// wake, job.revoked, job.assigned, relay.persisted, pool.cooling.ack,
-// idle-wake.route, burst.holds, relay.edit and relay.cancel - leave the read
-// loop for this one worker, which preserves the wire's receive order between
-// them. A session-fatal error (a job.revocation.ack write failure) returns
+// may block on a lock, the node journal or the network - failover,
+// job.revoked, job.assigned, relay.persisted, pool.cooling.ack and
+// idle-wake.route - leave the read loop for this one worker, which preserves
+// the wire's receive order between them. A session-fatal error (a job.revocation.ack write failure) returns
 // through readErrors, the same channel the reader uses.
 func (client *HubClient) serveHubInbound(ctx context.Context, peer *hubClientConnection, inbound <-chan hubOutboundMessage, readErrors chan<- error, done <-chan struct{}) {
 	for {
@@ -2281,10 +2238,6 @@ func (client *HubClient) handleHubInboundMessage(ctx context.Context, peer *hubC
 		return errHubRedial
 	case "failover":
 		client.handleHubFailover(ctx, message)
-	case "burst":
-		client.handleHubBurst(ctx, message)
-	case "wake":
-		client.handleHubWake(ctx, message)
 	case "job.revoked":
 		if err := writeHubRevocation(client.jobsInboxRoot, hubJobRevokedEvent{Type: message.Type, JobID: message.JobID, Epoch: message.Epoch}); err != nil {
 			client.warn("job revocation local write unavailable")
@@ -2307,14 +2260,6 @@ func (client *HubClient) handleHubInboundMessage(ctx context.Context, peer *hubC
 		if manager := client.idleWakeManager(); manager != nil {
 			manager.ApplyRoute(ctx, hubIdleWakeRouteEvent{Type: message.Type, EventID: message.IdleWakeEventID, Pane: message.Pane, Eligible: message.Eligible, Lane: message.Lane, Text: message.Text, JobID: message.JobID, Reason: message.Reason})
 		}
-	case "burst.holds":
-		client.burstMu.Lock()
-		client.burstHoldsActive = message.HoldsActive
-		client.burstMu.Unlock()
-	case "relay.edit":
-		client.relayBusyManager().edit(ctx, message.EventID, message.Text)
-	case "relay.cancel":
-		client.relayBusyManager().cancel(ctx, message.EventID)
 	}
 	return nil
 }
@@ -2957,22 +2902,6 @@ func parseHubOutboundRejection(payload []byte) (hubOutboundMessage, hubOutboundR
 		if len(fields) != 4 || json.Unmarshal(fields["machine"], &message.Machine) != nil || json.Unmarshal(fields["phase"], &message.Phase) != nil || json.Unmarshal(fields["emitted_at"], &emittedAt) != nil || !parseHubFailoverEmittedAt(emittedAt, &message.EmittedAt) || !machineIDPattern.MatchString(message.Machine) || !validHubFailoverPhase(message.Phase) {
 			return hubOutboundMessage{}, reject
 		}
-	case "burst":
-		var emittedAt string
-		if json.Unmarshal(fields["machine"], &message.Machine) != nil || json.Unmarshal(fields["phase"], &message.Phase) != nil || json.Unmarshal(fields["emitted_at"], &emittedAt) != nil || !parseHubFailoverEmittedAt(emittedAt, &message.EmittedAt) || !machineIDPattern.MatchString(message.Machine) || !validHubBurstPhase(message.Phase) {
-			return hubOutboundMessage{}, reject
-		}
-		if message.Phase == hubFailoverPhaseUp {
-			if len(fields) != 5 || json.Unmarshal(fields["wake_mac"], &message.WakeMAC) != nil {
-				return hubOutboundMessage{}, reject
-			}
-			mac, err := parseHubFailoverWakeMAC(message.WakeMAC)
-			if err != nil || len(mac) != 6 {
-				return hubOutboundMessage{}, reject
-			}
-		} else if len(fields) != 4 {
-			return hubOutboundMessage{}, reject
-		}
 	case "job.revoked":
 		if len(fields) != 3 || json.Unmarshal(fields["job_id"], &message.JobID) != nil || json.Unmarshal(fields["epoch"], &message.Epoch) != nil || !hubJobIDPattern.MatchString(message.JobID) || message.Epoch == 0 {
 			return hubOutboundMessage{}, reject
@@ -2984,15 +2913,6 @@ func parseHubOutboundRejection(payload []byte) (hubOutboundMessage, hubOutboundR
 	case "hub.features":
 		// Extra fields are a newer hub's; features alone is this node's business.
 		if json.Unmarshal(fields["features"], &message.Features) != nil {
-			return hubOutboundMessage{}, reject
-		}
-	case "burst.holds":
-		if len(fields) != 2 || json.Unmarshal(fields["holds_active"], &message.HoldsActive) != nil {
-			return hubOutboundMessage{}, reject
-		}
-	case "wake":
-		var emittedAt string
-		if len(fields) != 3 || json.Unmarshal(fields["machine"], &message.Machine) != nil || json.Unmarshal(fields["emitted_at"], &emittedAt) != nil || !parseHubFailoverEmittedAt(emittedAt, &message.EmittedAt) || !machineIDPattern.MatchString(message.Machine) {
 			return hubOutboundMessage{}, reject
 		}
 	case "relay.inject":
@@ -3034,7 +2954,10 @@ func parseHubOutboundRejection(payload []byte) (hubOutboundMessage, hubOutboundR
 			return hubOutboundMessage{}, reject
 		}
 		if message.Kind == "lane.event" {
-			if len(fields) != 9 || json.Unmarshal(fields["lane"], &message.Lane) != nil || json.Unmarshal(fields["producer_event_id"], &message.ProducerEventID) != nil || !hubAgentLabelPattern.MatchString(message.Lane) || !validLaneEventID(message.ProducerEventID) {
+			// Older hubs acknowledge lane events with the shared relay
+			// envelope only. The transport job_id still identifies the
+			// producer's outbox row, so it is safe to retire that row below.
+			if len(fields) != 7 && (len(fields) != 9 || json.Unmarshal(fields["lane"], &message.Lane) != nil || json.Unmarshal(fields["producer_event_id"], &message.ProducerEventID) != nil || !hubAgentLabelPattern.MatchString(message.Lane) || !validLaneEventID(message.ProducerEventID)) {
 				return hubOutboundMessage{}, reject
 			}
 		} else if len(fields) == 8 {
@@ -3146,54 +3069,6 @@ func validRelayInjectedText(kind, text string) bool {
 	// The hub's normal lane ingress remains bounded by validLaneRelayText;
 	// this receiving-side directive also admits the B3 single-item exception.
 	return validRelayFinalText(text)
-}
-
-func (client *HubClient) handleHubBurst(ctx context.Context, message hubOutboundMessage) {
-	if !validHubBurstPhase(message.Phase) {
-		return
-	}
-	key := message.Phase + ":" + message.EmittedAt.Format(time.RFC3339Nano)
-	client.burstMu.Lock()
-	if _, seen := client.burstSeen[key]; seen {
-		client.burstMu.Unlock()
-		return
-	}
-	client.burstSeen[key] = message.EmittedAt
-	mac := append(net.HardwareAddr(nil), client.burstWakeMAC...)
-	poweroffAllowed, poweroff := client.burstPoweroffAllowed, client.burstPoweroff
-	client.burstMu.Unlock()
-	if message.Phase == hubFailoverPhaseUp {
-		policyMAC, err := parseHubFailoverWakeMAC(message.WakeMAC)
-		if err != nil || len(mac) != 6 || !bytes.Equal(mac, policyMAC) {
-			client.warn("burst wake unavailable")
-			return
-		}
-		if err := sendHubFailoverWakePacket(ctx, hubFailoverWakeBroadcastAddress, policyMAC); err != nil {
-			client.warn("burst wake unavailable")
-		}
-		return
-	}
-	if !poweroffAllowed {
-		return
-	}
-	// The hub is authoritative for idle evaluation, but a target that has
-	// already received a live hold must also reject a delayed down event. This
-	// prevents an in-flight or future emitter from defeating the hold locally.
-	client.burstMu.Lock()
-	holdsActive := client.burstHoldsActive
-	client.burstMu.Unlock()
-	if holdsActive {
-		return
-	}
-	if err := poweroff(ctx); err != nil {
-		client.warn("burst poweroff unavailable")
-	}
-}
-
-func executeHubBurstPoweroff(ctx context.Context) error {
-	command := exec.CommandContext(ctx, "sudo", "-n", "/usr/sbin/poweroff")
-	command.Stdout, command.Stderr = io.Discard, io.Discard
-	return command.Run()
 }
 
 // parseHubFailoverEmittedAt accepts only the canonical RFC3339 UTC rendering
