@@ -817,7 +817,7 @@ func (a *App) markSweptJob(ctx context.Context, j Job, endState string) {
 	if state := str(rec, "state"); state != "claimed" && state != "spawned" {
 		return
 	}
-	if err := a.putJobRecord(ctx, j.ID, map[string]any{"state": endState}); err != nil {
+	if err := a.putJobRecord(ctx, j.ID, map[string]any{"state": endState, "at": a.Now().UTC()}); err != nil {
 		a.jobRecordFailed(ctx, j.ID, endState, err)
 	}
 }

@@ -164,7 +164,7 @@ func (a *App) doneReport(ctx context.Context, j Job, in doneInput) error {
 	if _, ok := receipts.settledWith(resultSHA); !ok {
 		a.recordJobUsage(ctx, j, false)
 		completing := receipts.completing(in.digest)
-		fields := map[string]any{"state": "completed"}
+		fields := map[string]any{"state": "completed", "at": a.Now().UTC()}
 		pin := doc != "" && completing == in.digest
 		if pin {
 			fields["report_doc"] = doc
@@ -350,7 +350,7 @@ func (a *App) escalateReport(ctx context.Context, j Job, report, question string
 		}
 	}
 	a.recordJobUsage(ctx, j, false)
-	rec := map[string]any{"state": "escalated"}
+	rec := map[string]any{"state": "escalated", "at": a.Now().UTC()}
 	if doc != "" {
 		rec["report_doc"] = doc
 		rec["report_sha256"] = docSHA
