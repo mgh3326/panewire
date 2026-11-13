@@ -98,9 +98,10 @@ type hubClientEvent struct {
 }
 
 type quotaPoolReconcileHooks struct {
-	app   func() (*fleet.App, error)
-	ticks <-chan time.Time
-	pass  func(context.Context)
+	app    func() (*fleet.App, error)
+	agents func(context.Context, string) ([]nodeHerdrRow, error)
+	ticks  <-chan time.Time
+	pass   func(context.Context)
 }
 
 // HubClient owns a bounded in-memory event queue. It is intentionally not a

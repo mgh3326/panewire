@@ -30,6 +30,11 @@ var agentStatuses = map[string]bool{"idle": true, "working": true, "blocked": tr
 // external read cannot be released on stale Herdr evidence.
 type AgentSource func(context.Context) ([]Agent, error)
 
+// AgentSourceForJobs reads snapshots for every local job that may be
+// reconciled. The ids are collected after the GC state snapshot, so jobs
+// claimed during the external reads are still fenced by the write pass.
+type AgentSourceForJobs func(context.Context, []string) ([]Agent, error)
+
 type snapshot struct {
 	state string
 	claim sql.NullInt64
@@ -266,12 +271,25 @@ type GCResult struct {
 // job reclaimed after the Herdr snapshot, or still inside the startup grace,
 // is skipped.
 func (s *Store) GC(ctx context.Context, agents AgentSource) (GCResult, error) {
+	return s.GCWithJobs(ctx, func(ctx context.Context, _ []string) ([]Agent, error) {
+		return agents(ctx)
+	})
+}
+
+// GCWithJobs is GC with the set of currently leased or quota-held jobs passed
+// to its external agent source. A source can use each job's recorded Herdr
+// session and must return an error if any required session cannot be read.
+func (s *Store) GCWithJobs(ctx context.Context, agents AgentSourceForJobs) (GCResult, error) {
 	var res GCResult
 	snaps, e := s.snapshots(ctx, "")
 	if e != nil {
 		return res, e
 	}
-	list, e := agents(ctx)
+	jobIDs, e := s.reconciliationJobs(ctx)
+	if e != nil {
+		return res, e
+	}
+	list, e := agents(ctx, jobIDs)
 	if e != nil {
 		return res, e
 	}
@@ -484,6 +502,32 @@ func (s *Store) GC(ctx context.Context, agents AgentSource) (GCResult, error) {
 		return nil
 	})
 	return res, e
+}
+
+func (s *Store) reconciliationJobs(ctx context.Context) ([]string, error) {
+	c, err := s.ro(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer c.Close()
+	rows, err := c.rows(`SELECT job_id FROM jobs WHERE state = 'leased'
+		UNION SELECT job_id FROM quota_pool_records ORDER BY job_id`)
+	if err != nil {
+		return nil, sqlErr(err)
+	}
+	defer rows.Close()
+	var jobs []string
+	for rows.Next() {
+		var job string
+		if err := rows.Scan(&job); err != nil {
+			return nil, sqlErr(err)
+		}
+		jobs = append(jobs, job)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, sqlErr(err)
+	}
+	return jobs, nil
 }
 
 func nonNil(s []string) []string {

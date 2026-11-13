@@ -2,6 +2,9 @@ package panewire
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
+	"os"
 	"path/filepath"
 	"sync/atomic"
 	"testing"
@@ -27,24 +30,53 @@ func TestQuotaPoolReconcileReleasesGoneJobAndKeepsLiveJob(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	writeQuotaPoolReconcileSpawnedEvent(t, jobs, "gone-job", "default")
+	writeQuotaPoolReconcileSpawnedEvent(t, jobs, "live-job", "custom")
 	now = base.Add(20 * time.Minute)
-	client, err := NewHubClient(HubClientConfig{URL: "ws://127.0.0.1", MachineID: "node-a", Token: "fixture", JobsInboxRoot: jobs, AllowInsecureForTests: true})
+	client, err := NewHubClient(HubClientConfig{URL: "ws://127.0.0.1", MachineID: "node-a", Token: "fixture", JobsInboxRoot: root, AllowInsecureForTests: true})
 	if err != nil {
 		t.Fatal(err)
 	}
 	client.quotaReconcile.app = func() (*fleet.App, error) {
 		return &fleet.App{Arbiter: store}, nil
 	}
-	client.nodeHerdr = func(context.Context, ...string) ([]byte, error) {
-		return []byte(nodeAgentList(nodeAgentJSON("w1:p1", "label-live-job", "working", "/work/live"))), nil
+	sessions := map[string]int{}
+	client.quotaReconcile.agents = func(_ context.Context, session string) ([]nodeHerdrRow, error) {
+		sessions[session]++
+		if session == "custom" {
+			return []nodeHerdrRow{{nodeAgentRow: nodeAgentRow{Name: "label-live-job", AgentStatus: "working"}}}, nil
+		}
+		return []nodeHerdrRow{}, nil
 	}
 	client.reconcileNodeQuotaPools(ctx)
+	if sessions["default"] != 1 || sessions["custom"] != 1 || len(sessions) != 2 {
+		t.Fatalf("read Herdr sessions %v, want default and custom exactly once", sessions)
+	}
 
 	if pools, err := store.QuotaPools(ctx, "gone-job"); err != nil || len(pools) != 0 {
 		t.Fatalf("gone job pools=%v err=%v, want released", pools, err)
 	}
 	if pools, err := store.QuotaPools(ctx, "live-job"); err != nil || len(pools) != 1 || pools[0] != "example" {
 		t.Fatalf("live job pools=%v err=%v, want retained", pools, err)
+	}
+}
+
+func writeQuotaPoolReconcileSpawnedEvent(t *testing.T, jobs, job, session string) {
+	t.Helper()
+	dir := filepath.Join(jobs, job, "events")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	event := map[string]any{
+		"kind":    "job.spawned",
+		"payload": map[string]any{"herdr_session": session},
+	}
+	data, err := json.Marshal(event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "00003-job.spawned.json"), data, 0600); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -72,4 +104,39 @@ func TestQuotaPoolReconcileRunsAtStartupAndOnEachTick(t *testing.T) {
 			return false
 		}
 	})
+}
+
+func TestQuotaPoolReconcileLeavesRecordsWhenRecordedSessionIsUnreadable(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	jobs := filepath.Join(root, "jobs")
+	base := time.Date(2026, 11, 13, 0, 0, 0, 0, time.UTC)
+	now := base
+	store := &arbiter.Store{DB: arbiter.StatePath(filepath.Join(root, "data")), Inbox: jobs, Now: func() time.Time { return now }}
+	if _, err := store.Claim(ctx, arbiter.Claim{Job: "held-job", Lane: "owner", T: "T2", AgentLabel: "label-held-job"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.RecordQuotaPool(ctx, arbiter.QuotaRun{Job: "held-job", Profile: "fixture", Gate: arbiter.Gate{Pool: "example"}}); err != nil {
+		t.Fatal(err)
+	}
+	writeQuotaPoolReconcileSpawnedEvent(t, jobs, "held-job", "custom")
+	now = base.Add(20 * time.Minute)
+	client, err := NewHubClient(HubClientConfig{URL: "ws://127.0.0.1", MachineID: "node-a", Token: "fixture", JobsInboxRoot: root, AllowInsecureForTests: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.quotaReconcile.app = func() (*fleet.App, error) {
+		return &fleet.App{Arbiter: store}, nil
+	}
+	client.quotaReconcile.agents = func(_ context.Context, session string) ([]nodeHerdrRow, error) {
+		if session != "custom" {
+			t.Fatalf("read Herdr session %q, want custom", session)
+		}
+		return nil, errors.New("herdr unavailable")
+	}
+	client.reconcileNodeQuotaPools(ctx)
+
+	if pools, err := store.QuotaPools(ctx, "held-job"); err != nil || len(pools) != 1 || pools[0] != "example" {
+		t.Fatalf("held job pools=%v err=%v, want retained after failed session read", pools, err)
+	}
 }

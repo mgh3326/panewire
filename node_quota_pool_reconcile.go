@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"path/filepath"
+	"sort"
 	"time"
 
 	"github.com/mgh3326/panewire/internal/arbiter"
@@ -58,19 +59,41 @@ func (client *HubClient) reconcileNodeQuotaPools(ctx context.Context) {
 	app.HerdrSession = client.nodeSpawnSession()
 	passCtx, cancel := context.WithTimeout(ctx, quotaPoolReconcileTimeout)
 	defer cancel()
-	result, err := app.ReconcileLedger(passCtx, func(ctx context.Context) ([]arbiter.Agent, error) {
+	readAgents := client.quotaReconcile.agents
+	if readAgents == nil {
+		readAgents = client.readNodeAgentsInSession
+	}
+	result, err := app.ReconcileLedgerForJobs(passCtx, func(ctx context.Context, jobs []string) ([]arbiter.Agent, error) {
+		sessions := make(map[string]bool)
+		for _, job := range jobs {
+			session, err := client.nodeJobHerdrSession(job)
+			if err != nil {
+				return nil, err
+			}
+			sessions[firstNonempty(session, app.HerdrSession)] = true
+		}
+		if len(sessions) == 0 {
+			sessions[app.HerdrSession] = true
+		}
+		names := make([]string, 0, len(sessions))
+		for session := range sessions {
+			names = append(names, session)
+		}
+		sort.Strings(names)
 		client.nodeCommandMu.Lock()
 		defer client.nodeCommandMu.Unlock()
-		rows, err := client.readNodeAgents(ctx)
-		if err != nil {
-			return nil, err
-		}
-		agents := make([]arbiter.Agent, 0, len(rows))
-		for _, row := range rows {
-			if row.Name == "" || row.AgentStatus == "" {
-				return nil, errors.New("herdr agent snapshot has incomplete identity")
+		agents := make([]arbiter.Agent, 0)
+		for _, session := range names {
+			rows, err := readAgents(ctx, session)
+			if err != nil {
+				return nil, err
 			}
-			agents = append(agents, arbiter.Agent{Status: row.AgentStatus, Name: row.Name})
+			for _, row := range rows {
+				if row.Name == "" || row.AgentStatus == "" {
+					return nil, errors.New("herdr agent snapshot has incomplete identity")
+				}
+				agents = append(agents, arbiter.Agent{Status: row.AgentStatus, Name: row.Name})
+			}
 		}
 		return agents, nil
 	})
