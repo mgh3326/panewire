@@ -38,9 +38,15 @@ their own optional `score` object, see [Constants](#constants).
 
 For `-m auto`, selection ranks eligible hosts before choosing an account or
 model rung. Host capability tags, accepted roles and grades, accepting state,
-and harness readiness filter the candidates. The existing placement order
-then applies: load bucket, the hub's decided host, score v2 when every host
-has a score, otherwise load, then configuration order.
+and harness readiness filter the candidates. Within each load bucket,
+selection uses score v2 when every eligible host has a score, then the hub's
+decided host as a tie-breaker; if any host lacks a score, the hub decision
+breaks ties before the raw-load fallback. Score v2 includes the free fraction
+weighted by host power and recent-spawn bridge cost. Selection uses that
+capacity signal before choosing a seat because placement cannot change the
+profile after selection pins it to the hosts that hold that seat. This lets an
+auto request choose a seat on a less loaded host even while the hub's
+hysteresis still names another host.
 
 On each host in that order, selection considers only the accounts it holds
 and the rungs its harnesses can launch. Grade, role, routing, effort, and seat
