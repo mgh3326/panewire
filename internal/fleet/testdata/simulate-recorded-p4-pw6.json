@@ -1249,7 +1249,7 @@
     "allow_escalation": false,
     "effort": "",
     "grade": "A",
-    "role": "worker",
+    "role": "implementer",
     "t": "T2",
     "tags": []
    },

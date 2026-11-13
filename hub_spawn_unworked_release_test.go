@@ -202,7 +202,7 @@ func TestRoleReleaseUnworkedLanding(t *testing.T) {
 				if len(jobs.writes()) != 0 || jobs.state("test-job") != "claimed" {
 					t.Fatalf("hub wrote hk: state=%v writes=%v", jobs.state("test-job"), jobs.writes())
 				}
-				owner, job, _, err := hub.inbox.store.spawnRoleOwner(t.Context(), "42:worker")
+				owner, job, _, err := hub.inbox.store.spawnRoleOwner(t.Context(), "42:implementer")
 				if err != nil || job != "test-job-r2" || owner == held.Request.RequestID {
 					t.Fatalf("reservation not moved: %s %s %v", owner, job, err)
 				}
@@ -261,7 +261,7 @@ func TestRoleReleaseFailedLaunchWithUnnamedPane(t *testing.T) {
 	if len(jobs.writes()) != 0 || jobs.state("test-job") != "claimed" {
 		t.Fatalf("hub wrote hk: state=%v writes=%v", jobs.state("test-job"), jobs.writes())
 	}
-	if owner, job, _, err := hub.inbox.store.spawnRoleOwner(t.Context(), "42:worker"); err != nil || job != "test-job-r2" || owner == held.Request.RequestID {
+	if owner, job, _, err := hub.inbox.store.spawnRoleOwner(t.Context(), "42:implementer"); err != nil || job != "test-job-r2" || owner == held.Request.RequestID {
 		t.Fatalf("reservation not moved: %s %s %v", owner, job, err)
 	}
 }

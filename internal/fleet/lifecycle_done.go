@@ -23,10 +23,10 @@ type doneInput struct {
 	// strict: --result on an interactive done, which needs the hk record
 	// confirmed with that result (hk 3402, #426).
 	strict bool
-	// headless and watcher are the callers with no one to read an exit status:
-	// they warn on a step that failed and carry on.
-	headless, watcher bool
-	late              bool
+	// watcher is the caller with no one to read an exit status: it warns on a
+	// step that failed and carries on.
+	watcher bool
+	late    bool
 }
 
 // settledReceipt is a job.record_settled receipt: the hk record is terminal
@@ -200,9 +200,6 @@ func (a *App) doneReport(ctx context.Context, j Job, in doneInput) error {
 			a.recordDoneResultConflict(id)
 			a.warn("job %s completed record failed: reason=result_conflict", id)
 			_ = a.event(ctx, id, "job.record_failed", map[string]any{"op": "completed", "reason": "result_conflict"})
-		case in.headless && in.result != nil:
-			a.warn("job %s completed record failed: reason=%s", id, doneResultReason(e))
-			_ = a.event(ctx, id, "job.record_failed", map[string]any{"op": "completed"})
 		default:
 			a.jobRecordFailed(ctx, id, "completed", e)
 		}
@@ -246,7 +243,7 @@ func (a *App) doneReport(ctx context.Context, j Job, in doneInput) error {
 	} else {
 		fmt.Fprintf(a.Out, "OK job=%s report=%s duplicate=yes%s\n", id, in.report, repaired(ran))
 	}
-	if !in.watcher && !in.headless {
+	if !in.watcher {
 		switch {
 		case doc == "":
 			return fail(exitFailure, "job %s completed; report not in hk; rerun the same command", id)
@@ -289,7 +286,7 @@ func repaired(ran []string) string {
 // event alone carries it.
 func (a *App) relayReport(ctx context.Context, j Job, eventKind, report, question string, body []byte, doc string, late bool) string {
 	owner := j.Owner
-	if j.Parent != "" && (eventKind == "job.escalate" || j.Role == "builder" || j.Role == "captain") {
+	if j.Parent != "" && (eventKind == "job.escalate" || j.Role == "builder") {
 		owner = j.Parent
 	}
 	last := strings.TrimSpace(string(body))

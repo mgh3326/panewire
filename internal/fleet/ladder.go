@@ -285,7 +285,7 @@ func (a *App) pickSeat(ctx context.Context, routingRole, grade, gradeSource, lan
 	if a.Quota == nil {
 		return SeatChoice{}, fail(exitConfig, "POLICY_UNAVAILABLE: seat selection needs the quota catalog")
 	}
-	seatRole := "worker"
+	seatRole := "implementer"
 	if routingRole == "reviewer" || routingRole == "judge" {
 		seatRole = "reviewer"
 	}
@@ -294,8 +294,8 @@ func (a *App) pickSeat(ctx context.Context, routingRole, grade, gradeSource, lan
 		return SeatChoice{}, err
 	}
 	cwd, _ := os.Getwd()
-	s := Spawn{CWD: cwd, Profile: "auto", Host: "auto", Role: seatRole, T: t, ParentFamily: builderFamily, RoutingRole: routingRole, AllowEscalation: true, DryRun: true, ExcludeFamilies: excludeFamilies}
-	req := selReq{grade: grade, lane: lane, gradeSource: gradeSource, t: t, role: seatRole, allowEscalation: true, builderFamily: builderFamily, excludeFamilies: excludeFamilies, urgency: urgencyNormal, urgencySource: "default", route: route}
+	s := Spawn{CWD: cwd, Profile: "auto", Host: "auto", Role: seatRole, T: t, ParentFamily: builderFamily, RoutingRole: routingRole, AllowEscalation: true, DryRun: true}
+	req := selReq{grade: grade, lane: lane, gradeSource: gradeSource, t: t, role: seatRole, allowEscalation: true, authorFamily: builderFamily, excludeFamilies: excludeFamilies, urgency: urgencyNormal, urgencySource: "default", route: route}
 	sel, err := a.selectFor(ctx, s, req)
 	if err != nil {
 		return SeatChoice{}, err

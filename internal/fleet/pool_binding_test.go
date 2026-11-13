@@ -97,31 +97,6 @@ func TestLaunchPoolSources(t *testing.T) {
 	}
 }
 
-func TestHeadlessPoolFromAccount(t *testing.T) {
-	e := newDelegateEnv(t)
-	q := e.a.Quota.(rowQuota).fakeQuota
-	gate := q.GateDo
-	q.GateDo = func(r QuotaRequest) (string, error) {
-		raw, err := gate(r)
-		if err != nil {
-			return raw, err
-		}
-		var receipt map[string]any
-		if err := json.Unmarshal([]byte(raw), &receipt); err != nil {
-			t.Fatal(err)
-		}
-		delete(receipt, "provider_id")
-		body, _ := json.Marshal(receipt)
-		return string(body), nil
-	}
-	if err := e.a.delegate(context.Background(), delegateArgs(e, "--role", "reader", "--headless")); err != nil {
-		t.Fatalf("headless account-only receipt failed: %v", err)
-	}
-	if len(e.runner.named("devin")) != 1 || !strings.Contains(e.out(), "The retry loop is in pkg/util.go.") {
-		t.Fatal("headless execution did not complete with resolved pool")
-	}
-}
-
 func TestAccountReceiptWithoutPool(t *testing.T) {
 	const key = "claude:0000000000000001"
 	for _, status := range []int{0, quotaGateBlocked} {

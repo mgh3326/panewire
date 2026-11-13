@@ -91,7 +91,7 @@ func (q *e6Quota) Launch(ctx context.Context, r QuotaRequest) (Launch, error) {
 
 func e6AdmissionSubmission(t *testing.T, arm string) Submission {
 	t.Helper()
-	s := Spawn{CWD: "/work/project", Profile: "omp-dsflash41", Prompt: "/work/brief.md", Job: "job-a", Label: "job-a", T: "T1", Task: "42", Role: "worker", Owner: "parent", Host: "auto", Effort: "high", Containment: "hk:12"}
+	s := Spawn{CWD: "/work/project", Profile: "omp-dsflash41", Prompt: "/work/brief.md", Job: "job-a", Label: "job-a", T: "T1", Task: "42", Role: "implementer", Owner: "parent", Host: "auto", Effort: "high", Containment: "hk:12"}
 	return Submission{
 		RequestID:       "00000000-0000-4000-8000-000000000001",
 		Args:            submissionArgs(s),

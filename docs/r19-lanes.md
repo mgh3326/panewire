@@ -5,7 +5,7 @@ relay decision. It contains identifiers only; do not put credentials,
 addresses, or installation-specific pane names in a public configuration.
 
 ```json
-{"lanes":{"lane-a":{"machine":"host-a","pane":"w1:p1","parent":"captain"},"captain":{"machine":"host-a","pane":"w1:p2","parent":null}}}
+{"lanes":{"lane-a":{"machine":"host-a","pane":"w1:p1","parent":"parent-lane"},"parent-lane":{"machine":"host-a","pane":"w1:p2","parent":null}}}
 ```
 
 `job.completed` is injected into its `owner_lane` pane. `job.escalate` and

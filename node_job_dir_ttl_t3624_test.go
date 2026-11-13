@@ -69,7 +69,7 @@ func ttlNodeApp(t *testing.T) (*fleet.App, string, string) {
 		kind    string
 		payload map[string]any
 	}{
-		{"job.claim", map[string]any{"owner_lane": "owner", "task_id": "42", "role": "worker"}},
+		{"job.claim", map[string]any{"owner_lane": "owner", "task_id": "42", "role": "implementer"}},
 		{"job.spawned", map[string]any{"pane_id": "w:j1", "label": "j1", "herdr_session": "default"}},
 		{"job.completed", map[string]any{}},
 		{"job.reaped", map[string]any{"pane_id": "w:j1"}},

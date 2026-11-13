@@ -28,7 +28,7 @@ func TestSeatCheckRunglessLaunch(t *testing.T) {
 	} {
 		seat := p.Profiles[tt.seat]
 		l := Launch{Profile: seat.Canon, ModelID: tt.model, Grade: "A", Gate: "default"}
-		if got := code(seat.Check(l, "worker", "B", "", "", host)); got != tt.want {
+		if got := code(seat.Check(l, "implementer", "B", "", "", host)); got != tt.want {
 			t.Errorf("%s: code %d want %d", tt.seat, got, tt.want)
 		}
 	}
@@ -38,7 +38,7 @@ func TestSeatCheckRoutedSeatNeedsCapability(t *testing.T) {
 	p, _ := LoadPolicy("")
 	seat := p.Profiles["cc-glm"]
 	l := Launch{Profile: "cc-glm", ModelID: "glm-5.2", Grade: "B", Gate: "default"}
-	if got := code(seat.Check(l, "worker", "B", "", "", map[string]any{})); got != 70 {
+	if got := code(seat.Check(l, "implementer", "B", "", "", map[string]any{})); got != 70 {
 		t.Fatalf("a routed seat on a host without the route capability must refuse 70, got %d", got)
 	}
 }
@@ -74,7 +74,7 @@ func TestLoadPolicyRejectsBadAliasAndRoute(t *testing.T) {
 		"rung":  `"kind":"claude","route":"clinepass","effort":"high"`,
 	} {
 		path := filepath.Join(dir, name+".json")
-		doc := `{"version":1,"profiles":{"x":{"canon":"x","family":"f","capability":"standard","roles":["worker"],` + seat + `}}}`
+		doc := `{"version":1,"profiles":{"x":{"canon":"x","family":"f","capability":"standard","roles":["implementer"],` + seat + `}}}`
 		if e := os.WriteFile(path, []byte(doc), 0600); e != nil {
 			t.Fatal(e)
 		}
@@ -87,10 +87,10 @@ func TestLoadPolicyRejectsBadAliasAndRoute(t *testing.T) {
 func TestCLIQuotaGateUsesGateName(t *testing.T) {
 	f := &fakeRunner{Do: func(Command) Result { return Result{Out: `{}`} }}
 	q := CLIQuota{Runner: f, Binary: "quota"}
-	if _, e := q.Gate(context.Background(), QuotaRequest{Profile: "agy-sonnet46", GateProfile: "agy-flash38-high", Role: "worker"}); e != nil {
+	if _, e := q.Gate(context.Background(), QuotaRequest{Profile: "agy-sonnet46", GateProfile: "agy-flash38-high", Role: "implementer"}); e != nil {
 		t.Fatal(e)
 	}
-	if got := strings.Join(f.Calls[0].Args, " "); got != "gate -m agy-flash38-high --role worker --json" {
+	if got := strings.Join(f.Calls[0].Args, " "); got != "gate -m agy-flash38-high --role implementer --json" {
 		t.Fatalf("gate must be called by its alias and without --effort: %s", got)
 	}
 	f.Calls = nil
@@ -236,7 +236,7 @@ func TestRoutedSeatTakesNoEffort(t *testing.T) {
 	seat := p.Profiles["cc-glm"]
 	// Check refuses a launch that resolved a rung for a routed seat.
 	l := Launch{Profile: "cc-glm", ModelID: "glm-5.2", Effort: "high", Grade: "B", Gate: "default"}
-	if got := code(seat.Check(l, "worker", "B", "", "", map[string]any{"clinepass": true})); got != 70 {
+	if got := code(seat.Check(l, "implementer", "B", "", "", map[string]any{"clinepass": true})); got != 70 {
 		t.Fatalf("a routed seat with a rung must refuse 70, got %d", got)
 	}
 	// Even if one reached the launcher, no --effort flag is passed.

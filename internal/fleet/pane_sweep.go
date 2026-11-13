@@ -220,12 +220,12 @@ func paneSweepTaskEnd(t TaskStatus) (paneSweepEnd, bool) {
 }
 
 // paneSweepTaskRole reports that the job's pane is judged by its hk task and
-// its open PRs: a worker or a tester. Any other role's pane is judged by the
+// its open PRs: an implementer. Any other role's pane is judged by the
 // job's own end alone. The role is the spawn role when the job has one, since
-// the claim records only worker or builder (arbiter/jobs.go).
+// the claim records only implementer or builder (arbiter/jobs.go).
 func paneSweepTaskRole(j Job) bool {
 	switch j.QuotaRole() {
-	case "worker", "tester":
+	case "implementer":
 		return true
 	}
 	return false
@@ -233,7 +233,7 @@ func paneSweepTaskRole(j Job) bool {
 
 // paneSweepClosed reports that the job's latest record ended it: a job.revoked
 // with any outcome (panewire job close), a job.completed, or a job.lost. A
-// job.lost is not one for a worker or a tester, nor a quota stop: the reviewer
+// job.lost is not one for an implementer, nor a quota stop: the reviewer
 // watcher hands a quota-stopped job to a replacement and keeps the pane until
 // that hand-off ends (watch_quota_stop.go). A job.joined or job.handed_off is
 // not one: the hub or another lane owns it.
@@ -252,19 +252,19 @@ func paneSweepClosed(j Job) bool {
 }
 
 // paneSweepAwaitsPR reports that the job's own record completed it: the
-// worker's job.completed (READY), with no other outcome. Such a worker stays
+// implementer's job.completed (READY), with no other outcome. Such an implementer stays
 // its PR's author until the PR merges or its owner releases it (the wake
 // method), so its pane waits on an open PR from its worktree. A job.revoked of
 // any outcome (panewire job close: abandoned, superseded, or released as
 // completed) is the owner giving the job up or releasing it, and is swept
-// whatever its PRs say (hk 3383). A reviewer, a tester or a counsel never
+// whatever its PRs say (hk 3383). A reviewer or a consult never
 // authors the PR it looked at.
 func paneSweepAwaitsPR(j Job) bool {
 	if !paneSweepClosed(j) || j.Ended != "job.completed" || (j.Outcome != "" && j.Outcome != "completed") {
 		return false
 	}
 	switch firstNonempty(j.SpawnRole, j.Role) {
-	case "reviewer", "tester", "counsel":
+	case "reviewer", "consult":
 		return false
 	}
 	return !strings.HasPrefix(j.Label, "mwr-")
@@ -338,7 +338,7 @@ func (s *TaskPaneSweeper) info(message string, attrs ...any) {
 func paneSweepKey(j Job) string { return j.ID + "\x00" + j.Pane }
 
 // paneSweepCandidate admits a job whose pane the sweep may close: a spawn role
-// from spawnRoles, and either a worker or tester (judged by its task) or a
+// from spawnRoles, and either an implementer (judged by its task) or a
 // job that ended locally. A builder, captain or lead pane is its lane's, not
 // the sweep's.
 func paneSweepCandidate(j Job) bool {

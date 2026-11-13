@@ -62,10 +62,10 @@ rung. The hub owns what only it has: the replaced job's stored submission, its
 checkout and its pane. It:
 
 1. Reads the existing operation and record, and checks that the request is for
-   the same worker, task and review round.
+   the same implementer, task and review round.
 2. Inspects the live pane's actual checkout and pins its HEAD and holder host.
    It validates the successor and stages the complete request and ladder-step
-   identity, transferring the worker reservation in the same transaction.
+   identity, transferring the implementer reservation in the same transaction.
 3. Checks the checkout again using read-only inspection: the branch and HEAD
    must match, the tree must be clean and unlocked, and origin must contain the
    staged commit. A read-only hub placement plan checks admission on the pinned

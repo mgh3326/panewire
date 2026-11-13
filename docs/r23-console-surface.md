@@ -42,7 +42,7 @@ Heartbeat `active_jobs` retains required `job_id`, `agent_label`,
 accepts optional `owner_lane`, `pane`, `tier`, `role`, `started_at`,
 `last_event_kind`, and `last_event_at`. Bad optional values are discarded one
 field at a time: lane labels use the hub label grammar; pane is nonempty and at
-most 128 bytes; tier is T0 through T3; role is worker or captain; timestamps
+most 128 bytes; tier is T0 through T3; role is implementer; timestamps
 are RFC3339; and event kind is lowercase `^[a-z][a-z0-9_.]{0,31}$`.
 
 Node scanning takes owner lane, role, tier, and claim time from a claim; pane

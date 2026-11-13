@@ -60,7 +60,7 @@ func TestHubSubmissionE6ArmIgnoresHubEnv(t *testing.T) {
 // --e6-arm.
 func TestNodeSpawnE6ArmIgnoresNodeEnv(t *testing.T) {
 	setE6HubEnv(t)
-	s := bindNodeSpawn(Spawn{Profile: "omp-dsflash41", Effort: "high", Role: "worker", T: "T1", Task: "42", Owner: "parent"}, "/work/project", "brief", "workspace")
+	s := bindNodeSpawn(Spawn{Profile: "omp-dsflash41", Effort: "high", Role: "implementer", T: "T1", Task: "42", Owner: "parent"}, "/work/project", "brief", "workspace")
 	a, q := e6HubEnvApp(t)
 	seat := a.Policy.Profiles["omp-dsflash41"]
 	if _, _, err := a.admitLaunch(t.Context(), s, seat, "high", "high", "B", "", false); err == nil {
@@ -77,7 +77,7 @@ func TestLocalSpawnE6ArmReadsEnv(t *testing.T) {
 	setE6HubEnv(t)
 	a, q := e6HubEnvApp(t)
 	seat := a.Policy.Profiles["omp-dsflash41"]
-	s := Spawn{CWD: "/work/project", Profile: "omp-dsflash41", Prompt: "/work/brief.md", Job: "job-a", Label: "job-a", T: "T1", Task: "42", Role: "worker", Owner: "parent", Host: "auto", Effort: "high", Containment: "hk:12"}
+	s := Spawn{CWD: "/work/project", Profile: "omp-dsflash41", Prompt: "/work/brief.md", Job: "job-a", Label: "job-a", T: "T1", Task: "42", Role: "implementer", Owner: "parent", Host: "auto", Effort: "high", Containment: "hk:12"}
 	if _, _, err := a.admitLaunch(t.Context(), s, seat, "high", "high", "B", "", false); err != nil {
 		t.Fatalf("local spawn lost the env marker: %v", err)
 	}

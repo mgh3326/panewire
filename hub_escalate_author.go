@@ -138,8 +138,8 @@ func (h *HubServer) escalateAuthor(ctx context.Context, request hubEscalateAutho
 	if err != nil {
 		return h.escalateAuthorRefusal(ctx, request, "", "job_unreadable", err.Error(), false)
 	}
-	if spawn.Job != request.Job || spawn.Task != request.Task || spawn.Role != "worker" || spawn.ParentJob != "" {
-		return h.escalateAuthorRefusal(ctx, request, "", "job_mismatch", "the job is not the task's original worker", false)
+	if spawn.Job != request.Job || spawn.Task != request.Task || spawn.Role != "implementer" || spawn.ParentJob != "" {
+		return h.escalateAuthorRefusal(ctx, request, "", "job_mismatch", "the job is not the task's original implementer", false)
 	}
 	app, err := h.newSpawnApp(io.Discard, io.Discard)
 	if err != nil {

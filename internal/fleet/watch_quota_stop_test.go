@@ -42,7 +42,7 @@ func quotaStopFixture(t *testing.T, role, status, screen string) (*App, *fakeRun
 	report := filepath.Join(a.Jobs, "j", "report.md")
 	// As in production: the claim always says worker; the spawn receipt names
 	// the role.
-	putEvent(t, a, "j", "job.claim", map[string]any{"owner_lane": "owner", "task_id": "42", "t_level": "T1", "role": "worker"})
+	putEvent(t, a, "j", "job.claim", map[string]any{"owner_lane": "owner", "task_id": "42", "t_level": "T1", "role": "implementer"})
 	putEvent(t, a, "j", "job.spawned", map[string]any{"pane_id": "w:p1", "label": "agent-a", "report": report, "role": role})
 	seedLedger(t, a, "j")
 	t.Setenv("PANEWIRE_COMPLETION_TIMEOUT_S", "60")
@@ -83,7 +83,7 @@ func lostPayload(t *testing.T, a *App) map[string]any {
 
 // An idle reviewer pane on devin's rate-limit screen with no report ends the
 // job as lost with a reason, instead of idling to the watch deadline (hk
-// 3302). A worker or tester is left to the quota-stop manager (hk 3334): see
+// 3302). An implementer is left to the quota-stop manager (hk 3334): see
 // TestWatcherQuotaStopLeavesWorkerAndTesterToTheManager.
 func TestWatcherQuotaStopEndsIdleJobAsLost(t *testing.T) {
 	for _, role := range []string{"reviewer"} {
@@ -122,11 +122,11 @@ func TestWatcherQuotaStopEndsIdleJobAsLost(t *testing.T) {
 
 func TestWatcherQuotaStopLeavesOtherPanesLive(t *testing.T) {
 	for name, tc := range map[string]struct{ role, status, screen string }{
-		"counsel role":               {"counsel", "idle", ""},
-		"working pane":               {"worker", "working", ""},
-		"idle, not a quota":          {"worker", "idle", "I finished the task.\n❭ Ask Devin to build features, fix bugs, or work on your code\n"},
-		"stop, then output":          {"worker", "idle", "▲ Something went wrong — Reached free model rate limit … reset in 5 minutes\nresumed and wrote the report\n"},
-		"working pane, claude limit": {"worker", "working", "You've hit your session limit · resets unknown\n"},
+		"consult role":               {"consult", "idle", ""},
+		"working pane":               {"implementer", "working", ""},
+		"idle, not a quota":          {"implementer", "idle", "I finished the task.\n❭ Ask Devin to build features, fix bugs, or work on your code\n"},
+		"stop, then output":          {"implementer", "idle", "▲ Something went wrong — Reached free model rate limit … reset in 5 minutes\nresumed and wrote the report\n"},
+		"working pane, claude limit": {"implementer", "working", "You've hit your session limit · resets unknown\n"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			screen := tc.screen
@@ -185,11 +185,11 @@ func TestWatcherQuotaStopUnknownResetOmitsResetAt(t *testing.T) {
 	}
 }
 
-// hk 3334: the watcher no longer ends a worker or tester on a quota stop; the
+// hk 3334: the watcher no longer ends an implementer on a quota stop; the
 // quota-stop manager waits for the reset or hands it over. Dropping this split
-// (putting worker or tester back into quotaStopRoles) fails here.
+// (putting implementer back into quotaStopRoles) fails here.
 func TestWatcherQuotaStopLeavesWorkerAndTesterToTheManager(t *testing.T) {
-	for _, role := range []string{"worker", "tester"} {
+	for _, role := range []string{"implementer"} {
 		t.Run(role, func(t *testing.T) {
 			a, _, h, _ := quotaStopFixture(t, role, "idle", devinStopScreen(t))
 			t.Setenv("PANEWIRE_COMPLETION_TIMEOUT_S", "1")
@@ -197,10 +197,10 @@ func TestWatcherQuotaStopLeavesWorkerAndTesterToTheManager(t *testing.T) {
 				t.Fatal(e)
 			}
 			if got := str(h.record(t, "j"), "state"); got == "lost" {
-				t.Fatal("the watcher ended a worker or tester on a quota stop")
+				t.Fatal("the watcher ended an implementer on a quota stop")
 			}
 			if slices.Contains(eventKindsOf(t, a, "j"), "job.lost") {
-				t.Fatal("job.lost recorded for a worker or tester")
+				t.Fatal("job.lost recorded for an implementer")
 			}
 			if st, pools := ledgerState(t, a, "j"); st != "leased" || len(pools) != 1 {
 				t.Fatalf("a live worker lost its lease: %s %v", st, pools)
@@ -246,7 +246,7 @@ func TestQuotaStopEndReasonFormatIsPinned(t *testing.T) {
 // leased): when the hub does not replace it, the watcher ends it after the
 // grace, with the announced pool and reset, and releases the quota.
 func TestWatcherEndsAnnouncedHandOverAfterGraceWhenNobodyReplacesIt(t *testing.T) {
-	a, _, h, _ := quotaStopFixture(t, "worker", "idle", "I stopped here.\n")
+	a, _, h, _ := quotaStopFixture(t, "implementer", "idle", "I stopped here.\n")
 	a.QuotaHandOffGrace = 2 * time.Minute
 	t.Setenv("PANEWIRE_COMPLETION_TIMEOUT_S", "600")
 	reset := a.Now().Add(time.Hour).UTC().Format(time.RFC3339)
@@ -273,7 +273,7 @@ func TestWatcherEndsAnnouncedHandOverAfterGraceWhenNobodyReplacesIt(t *testing.T
 // the watcher then sees the pane gone, leaves that record alone and releases
 // the quota.
 func TestWatcherReleasesQuotaWhenTheHubClosedTheHandedOverPane(t *testing.T) {
-	a, f, h, _ := quotaStopFixture(t, "worker", "idle", "I stopped here.\n")
+	a, f, h, _ := quotaStopFixture(t, "implementer", "idle", "I stopped here.\n")
 	a.QuotaHandOffGrace = 10 * time.Minute
 	t.Setenv("PANEWIRE_COMPLETION_TIMEOUT_S", "6000")
 	if e := a.event(context.Background(), "j", "job.lost", map[string]any{"pane_id": "w:p1", "reason": "quota_stop", "pool": "claude"}); e != nil {
@@ -307,7 +307,7 @@ func TestWatcherReleasesQuotaWhenTheHubClosedTheHandedOverPane(t *testing.T) {
 // more: the job is live again (job.reprompted), the announced job.lost is not
 // adopted a second time, the grace does not restart, and the quota stays leased.
 func TestWatcherPaneResumedDuringGraceKeepsTheJobLive(t *testing.T) {
-	a, f, h, _ := quotaStopFixture(t, "worker", "idle", "I stopped here.\n")
+	a, f, h, _ := quotaStopFixture(t, "implementer", "idle", "I stopped here.\n")
 	a.QuotaHandOffGrace = 2 * time.Minute
 	announceQuotaStopEvent(t, a, "devin-free")
 	t.Setenv("PANEWIRE_COMPLETION_TIMEOUT_S", "600")
@@ -351,7 +351,7 @@ func TestWatcherPaneResumedDuringGraceKeepsTheJobLive(t *testing.T) {
 // (the replacement did not happen) is ended after the grace with the plain
 // quota_stop end_reason, not by the generic missing-pane path.
 func TestWatcherVanishedPaneWithoutHubRecordEndsAfterGraceWithQuotaReason(t *testing.T) {
-	a, f, h, _ := quotaStopFixture(t, "worker", "idle", "I stopped here.\n")
+	a, f, h, _ := quotaStopFixture(t, "implementer", "idle", "I stopped here.\n")
 	a.QuotaHandOffGrace = 4 * time.Minute
 	announceQuotaStopEvent(t, a, "devin-free")
 	t.Setenv("PANEWIRE_COMPLETION_TIMEOUT_S", "6000")
@@ -383,7 +383,7 @@ func TestWatcherVanishedPaneWithoutHubRecordEndsAfterGraceWithQuotaReason(t *tes
 // A stop announced close to the ordinary completion deadline is still watched
 // through its grace: the fallback must end the job and release its lease.
 func TestWatcherQuotaHandOffOutlivesTheCompletionDeadline(t *testing.T) {
-	a, _, h, _ := quotaStopFixture(t, "worker", "idle", "I stopped here.\n")
+	a, _, h, _ := quotaStopFixture(t, "implementer", "idle", "I stopped here.\n")
 	a.QuotaHandOffGrace = 2 * time.Minute
 	announceQuotaStopEvent(t, a, "devin-free")
 	t.Setenv("PANEWIRE_COMPLETION_TIMEOUT_S", "30")
@@ -407,7 +407,7 @@ func TestWatcherQuotaHandOffOutlivesTheCompletionDeadline(t *testing.T) {
 // re-arms a watcher that died during the grace: both keep the fallback that
 // ends the job and frees its lease (review finding).
 func TestAnnounceQuotaStopStartsAWatcherAndRearmFindsAnnouncedJobs(t *testing.T) {
-	a, _, _, _ := quotaStopFixture(t, "worker", "idle", "I stopped here.\n")
+	a, _, _, _ := quotaStopFixture(t, "implementer", "idle", "I stopped here.\n")
 	started := []string{}
 	old := announceStartWatch
 	announceStartWatch = func(_ *App, job string) error { started = append(started, job); return nil }

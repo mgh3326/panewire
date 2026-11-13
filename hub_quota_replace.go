@@ -15,7 +15,7 @@ import (
 
 // A quota-stopped job is handled by role (hk 3334, docs/quota-stop.md): a
 // reviewer whose stop is announced on a live job (a credit rejection) is
-// replaced on another pool at once; a worker or tester the quota-stop manager
+// replaced on another pool at once; an implementer the quota-stop manager
 // has handed over is replaced the same way. A reviewer on a visible quota
 // screen is ended by its watcher before any announcement, with no grace (hk
 // 4507), so the record is no longer live here and mergewake respawns it. The node
@@ -23,7 +23,7 @@ import (
 // record alone, because hk never rewrites a lost record and the pointer to the
 // successor can only be written with it. The hub places the successor, then
 // closes the old pane with a screen capture and writes the old hk record lost
-// with end_reason "quota_stop pool=<p> replaced_by=<job>" (a worker or tester:
+// with end_reason "quota_stop pool=<p> replaced_by=<job>" (an implementer:
 // handed_over_to=<job>). When no other pool can take the work the hub does
 // nothing more, and the node ends the job itself without a successor.
 
@@ -89,7 +89,7 @@ func (h *HubServer) startQuotaReplacement(machine string, event hubJobEventPaylo
 // quotaReplacementRequest is the holder's submission for the successor: same
 // task, role, review pass, owner and brief; a new job id, agent label and (for
 // a reviewer) checkout directory; and --exclude-pool for the stopped pool. A
-// worker or tester also gets one line naming the earlier job's report and
+// implementer also gets one line naming the earlier job's report and
 // branch to continue from.
 func quotaReplacementRequest(old fleet.Submission, oldJob, newJob, pool string, role string) (fleet.Submission, error) {
 	id, err := fleet.NewRequestID()
@@ -177,12 +177,12 @@ func (h *HubServer) replaceQuotaStopped(ctx context.Context, machine string, eve
 		return skip("unreadable_request")
 	}
 	role := prior.Role
-	// An announced reviewer stop is replaced at once. A worker or tester only
+	// An announced reviewer stop is replaced at once. An implementer only
 	// announces job.lost when the quota-stop manager handed it over.
-	if role != "reviewer" && role != "worker" && role != "tester" {
+	if role != "reviewer" && role != "implementer" {
 		return skip("role", "role", role)
 	}
-	// A task-bound job, or a tester or reviewer that inherited its builder's
+	// A task-bound job, or a reviewer that inherited its builder's
 	// task (--parent-job), is replaced with the same arguments.
 	if prior.Task == "" && prior.ParentJob == "" || (prior.Profile != "" && prior.Profile != "auto") {
 		return skip("not_replaceable")
@@ -264,7 +264,7 @@ func (h *HubServer) replaceQuotaStopped(ctx context.Context, machine string, eve
 		}
 		return lost
 	}
-	// A worker or tester is handed over in the order the ticket gives: the
+	// An implementer is handed over in the order the ticket gives: the
 	// record ends with handed_over_to first, then the task is spawned. The
 	// spawn refuses a task still bound to a job that is not lost, so the old
 	// record must end before the successor is admitted. When the spawn then
@@ -395,7 +395,7 @@ var quotaSuccessorJob = regexp.MustCompile(`^(.+)-q[0-9]+$`)
 // would write a plain quota_stop. For each successor that placed (or may still
 // place) whose predecessor's hk record is still live, it closes the
 // predecessor's pane if one is left and writes the record with replaced_by. A
-// worker or tester's pointer is written before its successor is claimed, so it
+// implementer's pointer is written before its successor is claimed, so it
 // needs no recovery. It reports how many records it wrote.
 func (h *HubServer) reconcileQuotaReplacements(ctx context.Context) int {
 	if h.inbox == nil {

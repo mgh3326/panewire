@@ -34,7 +34,7 @@ func (f *paneSweepFixture) closeJob(id, outcome string) {
 func (f *paneSweepFixture) fixAuthor(id, parent string, extra ...map[string]any) string {
 	f.t.Helper()
 	pane := "p-" + id
-	putEvent(f.t, f.a, id, "job.claim", map[string]any{"owner_lane": "owner", "parent_lane": "parent", "t_level": "T1", "role": "worker", "task_inherited_from": parent})
+	putEvent(f.t, f.a, id, "job.claim", map[string]any{"owner_lane": "owner", "parent_lane": "parent", "t_level": "T1", "role": "implementer", "task_inherited_from": parent})
 	spawned := map[string]any{"pane_id": pane, "tab_id": "t-" + pane, "label": "agent-" + id, "profile": "cmd-dsflash41", "family": "deepseek"}
 	for _, more := range extra {
 		for key, value := range more {
@@ -50,7 +50,7 @@ func (f *paneSweepFixture) fixAuthor(id, parent string, extra ...map[string]any)
 // ends the job as completed. Without the category read nothing closes it.
 func TestPaneSweepKeepsAPaneWhoseCategoryIsLive(t *testing.T) {
 	f := newPaneSweepFixture(t)
-	f.job("j", "worker", "42")
+	f.job("j", "implementer", "42")
 	f.tasks["42"], f.category["42"] = "merged", "started"
 	f.at(0)
 	f.at(60)
@@ -63,7 +63,7 @@ func TestPaneSweepKeepsAPaneWhoseCategoryIsLive(t *testing.T) {
 // record on this node or, failing that, in hk.
 func TestPaneSweepKeepsAWorkingPaneOfARevokedJob(t *testing.T) {
 	f := newPaneSweepFixture(t)
-	pane := f.job("j", "worker", "42")
+	pane := f.job("j", "implementer", "42")
 	f.tasks["42"], f.category["42"] = "developing", "started"
 	f.closeJob("j", "abandoned")
 	f.status[pane] = "working"
@@ -80,7 +80,7 @@ func TestPaneSweepKeepsAWorkingPaneOfARevokedJob(t *testing.T) {
 // A job revived after its close (a reprompt) is live again and keeps its pane.
 func TestPaneSweepKeepsARevivedJob(t *testing.T) {
 	f := newPaneSweepFixture(t)
-	f.job("j", "worker", "42")
+	f.job("j", "implementer", "42")
 	f.tasks["42"], f.category["42"] = "developing", "started"
 	f.closeJob("j", "abandoned")
 	putEvent(t, f.a, "j", "job.reprompted", map[string]any{})

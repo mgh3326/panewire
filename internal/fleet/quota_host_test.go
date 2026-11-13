@@ -31,11 +31,11 @@ func TestCLIQuotaAccountReceipt(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			f := &fakeRunner{Do: func(Command) Result { return Result{Out: tc.out, Code: tc.status} }}
 			q := CLIQuota{Runner: f, Binary: "pacelever"}
-			_, err := q.Gate(context.Background(), QuotaRequest{Profile: "example-profile", GateProfile: "sonnet", Role: "worker", Effort: "high", AccountKey: key})
+			_, err := q.Gate(context.Background(), QuotaRequest{Profile: "example-profile", GateProfile: "sonnet", Role: "implementer", Effort: "high", AccountKey: key})
 			if code(err) != tc.want {
 				t.Fatalf("code=%d want=%d err=%v", code(err), tc.want, err)
 			}
-			want := []string{"gate", "-m", "sonnet", "--effort", "high", "--role", "worker", "--account-key", key, "--json"}
+			want := []string{"gate", "-m", "sonnet", "--effort", "high", "--role", "implementer", "--account-key", key, "--json"}
 			if len(f.Calls) != 1 || !reflect.DeepEqual(f.Calls[0].Args, want) {
 				t.Fatalf("target gate args: %+v", f.Calls)
 			}
@@ -46,10 +46,10 @@ func TestCLIQuotaAccountReceipt(t *testing.T) {
 func TestCLIQuotaLocalGateUnchanged(t *testing.T) {
 	f := &fakeRunner{Do: func(Command) Result { return Result{Out: `{"pool":"claude"}`} }}
 	q := CLIQuota{Runner: f, Binary: "pacelever"}
-	if _, err := q.Gate(context.Background(), QuotaRequest{Profile: "sonnet", Role: "worker"}); err != nil {
+	if _, err := q.Gate(context.Background(), QuotaRequest{Profile: "sonnet", Role: "implementer"}); err != nil {
 		t.Fatal(err)
 	}
-	if want := []string{"gate", "-m", "sonnet", "--role", "worker", "--json"}; !reflect.DeepEqual(f.Calls[0].Args, want) {
+	if want := []string{"gate", "-m", "sonnet", "--role", "implementer", "--json"}; !reflect.DeepEqual(f.Calls[0].Args, want) {
 		t.Fatalf("local gate args changed: %v", f.Calls[0].Args)
 	}
 }

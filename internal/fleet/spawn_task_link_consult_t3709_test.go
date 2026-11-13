@@ -10,7 +10,7 @@ import (
 func TestSpawnTaskLinkConsultDoesNotClaimT3709(t *testing.T) {
 	ctx := context.Background()
 	consult := func(job, label string) Spawn {
-		return Spawn{Task: "42", Job: job, Label: label, Role: "counsel", RoutingRole: "consult", Owner: "owner"}
+		return Spawn{Task: "42", Job: job, Label: label, Role: "consult", Owner: "owner"}
 	}
 	taskLinkStatus := func(t *testing.T, a *App, job string) string {
 		t.Helper()
@@ -76,21 +76,21 @@ func TestSpawnTaskLinkConsultDoesNotClaimT3709(t *testing.T) {
 		}
 	})
 
-	t.Run("worker still refuses another claimant", func(t *testing.T) {
+	t.Run("implementer still refuses another claimant", func(t *testing.T) {
 		a, hk := hkSiteApp(t)
 		hk.SetTask("42", hkTaskJSON(42, "developing", "implement (grade B, T1)", "fable-label", "panewire", `{}`))
-		s := Spawn{Task: "42", Job: "worker-job", Label: "worker-label", Role: "worker"}
+		s := Spawn{Task: "42", Job: "worker-job", Label: "worker-label", Role: "implementer"}
 		if _, _, e := a.taskPrecheck(ctx, s); exitCode(e) != exitUsage || hkErrOf(e) != "task has another claimant without a job binding" {
-			t.Fatalf("worker precheck=%d %q, want the unchanged claimant refusal", exitCode(e), hkErrOf(e))
+			t.Fatalf("implementer precheck=%d %q, want the unchanged claimant refusal", exitCode(e), hkErrOf(e))
 		}
 	})
 
-	t.Run("worker with a consult routing role still refuses another claimant", func(t *testing.T) {
+	t.Run("implementer with a consult routing role still refuses another claimant", func(t *testing.T) {
 		a, hk := hkSiteApp(t)
 		hk.SetTask("42", hkTaskJSON(42, "developing", "implement (grade B, T1)", "fable-label", "panewire", `{}`))
-		s := Spawn{Task: "42", Job: "worker-job", Label: "worker-label", Role: "worker", RoutingRole: "consult"}
+		s := Spawn{Task: "42", Job: "worker-job", Label: "worker-label", Role: "implementer", RoutingRole: "consult"}
 		if _, _, e := a.taskPrecheck(ctx, s); exitCode(e) != exitUsage || hkErrOf(e) != "task has another claimant without a job binding" {
-			t.Fatalf("worker+consult precheck=%d %q, want the claimant refusal", exitCode(e), hkErrOf(e))
+			t.Fatalf("implementer+consult precheck=%d %q, want the claimant refusal", exitCode(e), hkErrOf(e))
 		}
 	})
 }

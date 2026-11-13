@@ -104,7 +104,7 @@ func gateRuns(r *fakeRunner) int {
 	return n
 }
 
-var opusRequest = QuotaRequest{Profile: "opus", Effort: "high", Role: "worker", AccountKey: switchKey}
+var opusRequest = QuotaRequest{Profile: "opus", Effort: "high", Role: "implementer", AccountKey: switchKey}
 
 func TestAdmissionDefaultsToNativeWithoutExecutingQuotaCLI(t *testing.T) {
 	a, runner, _ := switchApp(t, "", switchReading(20, 40), Result{Code: 99})
@@ -187,7 +187,7 @@ func TestAdmissionNativeStaleUnmeasuredPoolRunsNoPacelever(t *testing.T) {
 	a, runner, _ := switchApp(t, gateModeNative, stale, Result{Code: 99})
 	a.Config.Quota["accounts"] = map[string]any{"kiro": "0123456789abcdef"}
 	for _, key := range []string{"kiro:0123456789abcdef", ""} {
-		_, err := a.Quota.Gate(context.Background(), QuotaRequest{Profile: "kiro-sonnet", Effort: "high", Role: "worker", AccountKey: key})
+		_, err := a.Quota.Gate(context.Background(), QuotaRequest{Profile: "kiro-sonnet", Effort: "high", Role: "implementer", AccountKey: key})
 		if exitCode(err) != gateUnmeasurable || !strings.Contains(err.Error(), msgAccountStale) {
 			t.Fatalf("account %q: stale kiro reading must be unmeasurable: %v", key, err)
 		}
@@ -339,7 +339,7 @@ func TestAdmissionLocalRequestFallsBackToManualWindows(t *testing.T) {
 	a.SharedLatest = func(context.Context, string) (shared.Latest, error) {
 		return shared.Latest{Manual: []shared.Observation{entry}}, nil
 	}
-	local := QuotaRequest{Profile: "cmd-dsflash41", Effort: "high", Role: "worker"}
+	local := QuotaRequest{Profile: "cmd-dsflash41", Effort: "high", Role: "implementer"}
 	x := a.nativeGate(context.Background(), local, true)
 	var receipt gateReceipt
 	if err := json.Unmarshal([]byte(x.Out), &receipt); err != nil || x.Code != 0 || receipt.Source == nil || *receipt.Source != sourceOperator || !slices.Equal(receipt.ManualIDs, []string{"hk-41"}) {
@@ -394,14 +394,14 @@ func TestCommandcodeRequires30dWindow(t *testing.T) {
 	in := admissionInputs{Now: switchNow, Rows: []admissionRow{{Profile: "cmd-dsflash41", Effort: "high", Pool: "commandcode", Grade: "A+", Gate: "default", Placed: true}}, AccountScoped: true}
 	week := func(used float64) *float64 { return &used }
 	in.Readings = map[string]admissionReading{"commandcode": {Buckets: []admissionBucket{{Window: "5h", Used: week(10), ScopeKind: "account"}, {Window: "7d", Used: week(20), ScopeKind: "account"}}}}
-	d := in.admit(admissionRequest{Profile: "cmd-dsflash41", Effort: "high", Role: "worker"})
+	d := in.admit(admissionRequest{Profile: "cmd-dsflash41", Effort: "high", Role: "implementer"})
 	if d.OK || d.Exit != gateUnmeasurable || d.Reason != "commandcode_required_window_missing:30d" {
 		t.Fatalf("commandcode without 30d must be unmeasurable: %+v", d)
 	}
 	r := in.Readings["commandcode"]
 	r.Buckets = append(r.Buckets, admissionBucket{Window: "30d", Used: week(30), ScopeKind: "account"})
 	in.Readings["commandcode"] = r
-	if d = in.admit(admissionRequest{Profile: "cmd-dsflash41", Effort: "high", Role: "worker"}); !d.OK {
+	if d = in.admit(admissionRequest{Profile: "cmd-dsflash41", Effort: "high", Role: "implementer"}); !d.OK {
 		t.Fatalf("commandcode with 30d must admit: %+v", d)
 	}
 }

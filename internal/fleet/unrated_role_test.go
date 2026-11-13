@@ -26,9 +26,9 @@ func TestUnratedTopRoleReachesQuota(t *testing.T) {
 func TestQuotaRequestKeepsTopRoutingRole(t *testing.T) {
 	a := testApp(t)
 	for _, tc := range []struct{ seatRole, routingRole, want string }{
-		{"worker", "consult", "consult"},
-		{"counsel", "consult", "consult"},
-		{"worker", "implementer", "worker"}, {"tester", "verifier", "tester"}, {"worker", "", "worker"},
+		{"implementer", "consult", "consult"},
+		{"consult", "consult", "consult"},
+		{"implementer", "implementer", "implementer"}, {"implementer", "verifier", "implementer"}, {"implementer", "", "implementer"}, {"reviewer", "", "reviewer"},
 	} {
 		qr, ok := a.quotaRequest(Spawn{Profile: "codex-sol", Effort: "high", Role: tc.seatRole, RoutingRole: tc.routingRole})
 		if !ok || qr.Role != tc.want {

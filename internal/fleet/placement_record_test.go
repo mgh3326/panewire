@@ -260,7 +260,7 @@ func TestPlacementReviewUsesOwningTask(t *testing.T) {
 	a, s, _, _ := cmdFixture(t)
 	h := placementServer(t, a)
 	// These are the mergewake review request's task and author metadata.
-	s.Role, s.BuilderFamily, s.BuilderJob = "reviewer", "anthropic", "author-job"
+	s.Role, s.AuthorFamily, s.BuilderJob = "reviewer", "anthropic", "author-job"
 	s.Report = filepath.Join(a.Jobs, s.Job, "report.md")
 	t.Setenv("HK_TASK_ID", "99")
 	if err := a.Spawn(context.Background(), s); err != nil {
@@ -649,21 +649,6 @@ func TestPlacementDeliveryProgressesPastUnresolvablePrefix(t *testing.T) {
 	}
 	if _, rows := h.snapshot(); rows["z-ready/1"] == nil {
 		t.Fatalf("healthy placement is stuck behind unresolved jobs: %d rows", len(rows))
-	}
-}
-
-func TestPlacementHeadlessDelegation(t *testing.T) {
-	e := newDelegateEnv(t)
-	h := placementServer(t, e.a)
-	if err := e.a.delegate(context.Background(), delegateArgs(e, "--role", "reader", "--headless")); err != nil {
-		t.Fatal(err)
-	}
-	r := onePlacement(t, h)
-	if r.Outcome != "placed" || r.Role != "worker" || r.TaskID != 42 || r.Model != "swe-2" || r.PaneID != "" {
-		t.Fatalf("headless execution metadata: %+v", r)
-	}
-	if len(r.Candidates) == 0 || r.Candidates[0].Host != r.Host || r.Candidates[0].Outcome != "chosen" {
-		t.Fatalf("the executing headless host must be the chosen candidate: %+v", r.Candidates)
 	}
 }
 

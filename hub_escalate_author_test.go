@@ -63,7 +63,7 @@ type escalateFixture struct {
 
 func escalateHolderRequest(job string) fleet.Submission {
 	request := durableSpawnRequest()
-	request.Args = []string{"-c", "/work/project", "-p", "/work/brief.md", "-m", "auto", "-l", job, "--job", job, "--t", "T1", "--task", "42", "--owner", "parent", "--role", "worker", "--host", "auto", "--report-relative", job + "/report.md"}
+	request.Args = []string{"-c", "/work/project", "-p", "/work/brief.md", "-m", "auto", "-l", job, "--job", job, "--t", "T1", "--task", "42", "--owner", "parent", "--role", "implementer", "--host", "auto", "--report-relative", job + "/report.md"}
 	request.Brief = "Fix the thing on branch wk/task."
 	request.Repository.Worktree = job + "-checkout"
 	request.Repository.Checkout.Dir = job + "-checkout"
@@ -427,7 +427,7 @@ func TestEscalateAuthorRefusalBeforeTheCloseLeavesTheAuthor(t *testing.T) {
 	if state := f.jobs.records["pw-task-49"]["state"]; state != "spawned" {
 		t.Fatalf("a refused step must not end the job: %v", state)
 	}
-	_, job, _, err := f.hub.inbox.store.spawnRoleOwner(t.Context(), "42:worker")
+	_, job, _, err := f.hub.inbox.store.spawnRoleOwner(t.Context(), "42:implementer")
 	if err != nil || job != f.job {
 		t.Fatalf("reservation not restored: job=%q err=%v", job, err)
 	}
@@ -677,7 +677,7 @@ func TestEscalateAuthorTransfersWorkerReservation(t *testing.T) {
 	if result.Job == "" {
 		t.Fatalf("successor did not place: %+v", result)
 	}
-	_, job, _, err := f.hub.inbox.store.spawnRoleOwner(t.Context(), "42:worker")
+	_, job, _, err := f.hub.inbox.store.spawnRoleOwner(t.Context(), "42:implementer")
 	if err != nil || job != result.Job {
 		t.Fatalf("worker reservation = %q, %v; want %q", job, err, result.Job)
 	}
@@ -838,14 +838,14 @@ func TestEscalateAuthorExpiresStageOnlyWithAuthorPresent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := f.hub.inbox.store.claimSpawnReplacing(t.Context(), next, f.job+"-l1", "parent", time.Now().Add(-10*time.Minute), holder.Request.RequestID, "42:worker", "staged"); err != nil {
+	if _, _, err := f.hub.inbox.store.claimSpawnReplacing(t.Context(), next, f.job+"-l1", "parent", time.Now().Add(-10*time.Minute), holder.Request.RequestID, "42:implementer", "staged"); err != nil {
 		t.Fatal(err)
 	}
 	result, commands := f.escalate(t, nil)
 	if result.Code != "staged_expired" || result.AuthorEnded || slices.Contains(commandOps(commands), "pane.close") {
 		t.Fatalf("result=%+v commands=%v", result, commandOps(commands))
 	}
-	_, job, _, err := f.hub.inbox.store.spawnRoleOwner(t.Context(), "42:worker")
+	_, job, _, err := f.hub.inbox.store.spawnRoleOwner(t.Context(), "42:implementer")
 	if err != nil || job != f.job {
 		t.Fatalf("reservation job=%q err=%v", job, err)
 	}
@@ -864,12 +864,12 @@ func TestExpiredStagedLadderReconcilerPreservesAbsentAuthor(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, _, err := f.hub.inbox.store.claimSpawnReplacing(t.Context(), next, f.job+"-l1", "parent", time.Now().Add(-10*time.Minute), holder.Request.RequestID, "42:worker", "staged"); err != nil {
+			if _, _, err := f.hub.inbox.store.claimSpawnReplacing(t.Context(), next, f.job+"-l1", "parent", time.Now().Add(-10*time.Minute), holder.Request.RequestID, "42:implementer", "staged"); err != nil {
 				t.Fatal(err)
 			}
 			f.paneAbsent = !present
 			f.hub.expireStagedLadderSteps(t.Context())
-			_, job, _, err := f.hub.inbox.store.spawnRoleOwner(t.Context(), "42:worker")
+			_, job, _, err := f.hub.inbox.store.spawnRoleOwner(t.Context(), "42:implementer")
 			want := f.job + "-l1"
 			if present {
 				want = f.job
@@ -888,7 +888,7 @@ func TestEscalateAuthorRefusesUnadmittedSuccessorBeforeClose(t *testing.T) {
 	if result.Code != "quota_refused" || result.AuthorEnded || slices.Contains(commandOps(commands), "pane.close") {
 		t.Fatalf("result=%+v commands=%v", result, commandOps(commands))
 	}
-	_, job, _, err := f.hub.inbox.store.spawnRoleOwner(t.Context(), "42:worker")
+	_, job, _, err := f.hub.inbox.store.spawnRoleOwner(t.Context(), "42:implementer")
 	if err != nil || job != f.job {
 		t.Fatalf("reservation job=%q err=%v", job, err)
 	}
@@ -1002,7 +1002,7 @@ func TestEscalateAuthorDropsStageForIndependentlyTerminalParent(t *testing.T) {
 			if _, err := f.hub.inbox.store.latestSpawnForJob(t.Context(), f.job+"-l1"); err == nil {
 				t.Fatal("staged successor remains")
 			}
-			if _, _, _, err := f.hub.inbox.store.spawnRoleOwner(t.Context(), "42:worker"); err == nil {
+			if _, _, _, err := f.hub.inbox.store.spawnRoleOwner(t.Context(), "42:implementer"); err == nil {
 				t.Fatal("terminal parent's staged role remains reserved")
 			}
 		})
@@ -1061,7 +1061,7 @@ func TestEscalateAuthorDropsStageWhenParentCompletesDuringClose(t *testing.T) {
 	if _, err := f.hub.inbox.store.latestSpawnForJob(t.Context(), f.job+"-l1"); err == nil {
 		t.Fatal("staged successor remains")
 	}
-	if _, _, _, err := f.hub.inbox.store.spawnRoleOwner(t.Context(), "42:worker"); err == nil {
+	if _, _, _, err := f.hub.inbox.store.spawnRoleOwner(t.Context(), "42:implementer"); err == nil {
 		t.Fatal("staged role remains reserved")
 	}
 }

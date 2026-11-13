@@ -17,7 +17,7 @@ func scoredAccountFixture(t *testing.T, rows []CatalogRow, shared bool) (*App, S
 		place["cloud-small"] = testClaudeA
 		place["pi"] = testClaudeB
 	}
-	a, s, q, src := hostFirstFixture(t, "worker", "B", rows, place,
+	a, s, q, src := hostFirstFixture(t, "implementer", "B", rows, place,
 		map[string]float64{"mac-b": 0.1, "cloud-small": 0.2, "cloud-tiny": 0.3, "pi": 0.4})
 	// Both accounts are waste. Account A appears first in configuration and
 	// has greater waste urgency, while B's host has the higher placement score.
