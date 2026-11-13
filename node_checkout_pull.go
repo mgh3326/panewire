@@ -315,9 +315,10 @@ func (client *HubClient) nodeCheckoutPullRun(ctx context.Context, name, dir, rev
 		result.Outcome = nodeCheckoutOutcomeCurrent
 	} else {
 		result.Outcome = nodeCheckoutOutcomePulled
-		// A range whose file list cannot be read gets install, not silence:
-		// a stale install is the worse failure.
-		changed, err := runNodeCheckoutGit(ctx, dir, nodeCheckoutRevTimeout, "diff", "--name-only", result.From, result.To)
+		// Renames are off so a file moved out of install/ or bin/ lists its old
+		// path too. A range whose file list cannot be read gets install, not
+		// silence: a stale install is the worse failure.
+		changed, err := runNodeCheckoutGit(ctx, dir, nodeCheckoutRevTimeout, "diff", "--no-renames", "--name-only", result.From, result.To)
 		if err != nil || installPathsChanged(string(changed)) {
 			result.InstallRan, result.InstallExit, result.Reason = client.nodeCheckoutInstall(ctx, dir)
 		}

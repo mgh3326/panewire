@@ -470,3 +470,26 @@ func TestNodeCheckoutInstallKillsChildren(t *testing.T) {
 		t.Fatalf("install child kept running after the bound (stat err=%v)", err)
 	}
 }
+
+// TestNodeCheckoutPullRenameOutOfInstallRunsInstall: a file moved out of
+// install/ must still trigger install, since its old path changed too.
+func TestNodeCheckoutPullRenameOutOfInstallRunsInstall(t *testing.T) {
+	fixture := newCheckoutPullFixture(t)
+	fixture.pushPeer(t, "add install file", map[string]string{"install/a.txt": "a\n"})
+	if result := checkoutPullRun(t, fixture.client(), "rstack", ""); result["install_ran"] != true {
+		t.Fatalf("setup pull result=%v, want install run", result)
+	}
+	if err := os.Remove(fixture.marker); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(fixture.peer, "docs"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	nodeGit(t, fixture.peer, "mv", "install/a.txt", "docs/a.txt")
+	nodeGit(t, fixture.peer, "commit", "-q", "-m", "move out of install")
+	nodeGit(t, fixture.peer, "push", "-q", "origin", "HEAD:main")
+	result := checkoutPullRun(t, fixture.client(), "rstack", "")
+	if result["outcome"] != "pulled" || result["install_ran"] != true {
+		t.Fatalf("result=%v, want pulled with install run for a rename out of install/", result)
+	}
+}
