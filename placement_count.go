@@ -117,15 +117,16 @@ func (h *HubServer) refreshFleetLoad(ctx context.Context) {
 }
 
 // completeSpawn records a request's outcome and ends its placement count when
-// it says no job was launched: refused, not started, timed out, cancelled. A
-// launched job (succeeded) keeps its count until its claim shows, and a
-// reconciling one, which may have started, keeps it too; the claim, or the
-// bridge window, ends it.
+// it says no job was launched: refused, or never started. A launched job
+// (succeeded) keeps its count until its claim shows. A reconciling one, and a
+// bound one that ran out of time (deadline_exceeded: the store keeps its node
+// binding and accepts a later node result), may have started and keep it too;
+// the claim, a later definitive failure, or the bridge window ends it.
 func (h *HubServer) completeSpawn(ctx context.Context, task hubSpawnTask, outcome hubSpawnOutcome) (bool, error) {
 	changed, err := h.inbox.store.completeSpawn(ctx, task, outcome, h.now().UTC())
 	if changed {
 		switch spawnOutcomeStatus(outcome) {
-		case "failed", "retryable", "deadline_exceeded":
+		case "failed", "retryable":
 			h.releasePlacementCount(task.Job)
 		}
 	}

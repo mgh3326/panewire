@@ -233,7 +233,7 @@ func TestRefusedOrNotStartedRequestReleasesItsCount(t *testing.T) {
 	}{
 		{"refused by the node", hubSpawnOutcome{RC: 85, Stage: "launch", Reason: "spawn_failed:checkout", Host: "machine-a", NodeResult: true}},
 		{"never started by the node", hubSpawnOutcome{RC: 124, Stage: "claim", Reason: "deadline_not_started", Host: "machine-a", Retryable: true, NodeResult: true}},
-		{"out of time", hubSpawnOutcome{RC: 124, Stage: "landing", Reason: "timeout", Host: "machine-a"}},
+		{"out of time before any node was bound", hubSpawnOutcome{RC: 124, Stage: "landing", Reason: "timeout", Host: "machine-a"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -374,5 +374,37 @@ func TestClaimFromAnotherNodeKeepsTheCount(t *testing.T) {
 	hub.mu.Unlock()
 	if still {
 		t.Fatal("the decided host's claim did not confirm the count")
+	}
+}
+
+// A request bound to a node that runs out of time may still be launching: the
+// store keeps the binding and takes a later node result. Its count stays until
+// the claim, a definitive failure or the bridge window.
+func TestBoundTimeoutKeepsTheCountUntilAClaim(t *testing.T) {
+	hub := countedHub(t)
+	task := countedTask(t, hub)
+	dispatch := hubSpawnRequest{RequestID: t14RequestID(448), Machine: "machine-a", CWDKey: "project", Brief: hubSpawnBrief{Inline: "task"}, Args: []string{"--job", "test-job"}, WaitSeconds: 600, DeadlineMS: task.Deadline.UnixMilli()}
+	task, err := hub.inbox.store.bindSpawn(t.Context(), task.Request.RequestID, task.Attempt, dispatch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hub.countPlacement(task.Job, "machine-a")
+	changed, err := hub.completeSpawn(t.Context(), task, hubSpawnOutcome{RC: 124, Stage: "landing", Reason: "timeout", Host: "machine-a"})
+	if err != nil || !changed {
+		t.Fatalf("completeSpawn = %v, %v", changed, err)
+	}
+	saved, err := hub.inbox.store.spawnTask(t.Context(), task.Request.RequestID)
+	if err != nil || saved.Status != "deadline_exceeded" {
+		t.Fatalf("status = %q, %v; the fixture is meant to leave a bound timeout", saved.Status, err)
+	}
+	if got := countedBridged(hub); got != 1 {
+		t.Fatalf("bound timeout counts %d, want 1", got)
+	}
+	// A later definitive refusal from the node ends it.
+	if _, err := hub.completeSpawn(t.Context(), saved, hubSpawnOutcome{RC: 85, Stage: "launch", Reason: "spawn_failed:checkout", Host: "machine-a", NodeResult: true}); err != nil {
+		t.Fatal(err)
+	}
+	if got := countedBridged(hub); got != 0 {
+		t.Fatalf("a definitive failure left %d", got)
 	}
 }
