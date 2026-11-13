@@ -107,7 +107,7 @@ func newQuotaStopManager(s *Store, root string, act bool, logger *slog.Logger) (
 		}
 		sendCtx := withRelaySession(ctx, session)
 		harness := strings.ToLower(relayInjectHarness(sendCtx, pane))
-		if (pool == "devin-free" && harness != "devin") || (pool == "claude" && harness != "claude") || (pool == "codex" && harness != "codex") {
+		if (pool == "devin-free" && harness != "devin") || (pool == "devin" && harness != "devin") || (pool == "claude" && harness != "claude") || (pool == "codex" && harness != "codex") {
 			return relayInjectResult{Outcome: relayInjectMaybeInPane, Evidence: "harness_changed"}
 		}
 		return relayInjectForHarnessGuarded(sendCtx, pane, harness, text, nil, func(screen string) bool {
