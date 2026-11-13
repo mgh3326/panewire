@@ -11,7 +11,10 @@ import (
 	"github.com/mgh3326/panewire/internal/fleet"
 )
 
-const quotaPoolReconcileInterval = 5 * time.Minute
+const (
+	quotaPoolReconcileInterval = 5 * time.Minute
+	quotaPoolReconcileTimeout  = 15 * time.Second
+)
 
 // runQuotaPoolReconcile periodically compares the local arbiter ledger with
 // this node's Herdr agents. The ledger's identity and startup guards decide
@@ -53,7 +56,9 @@ func (client *HubClient) reconcileNodeQuotaPools(ctx context.Context) {
 	}
 	app.Jobs = filepath.Join(client.jobsInboxRoot, "jobs")
 	app.HerdrSession = client.nodeSpawnSession()
-	result, err := app.ReconcileLedger(ctx, func(ctx context.Context) ([]arbiter.Agent, error) {
+	passCtx, cancel := context.WithTimeout(ctx, quotaPoolReconcileTimeout)
+	defer cancel()
+	result, err := app.ReconcileLedger(passCtx, func(ctx context.Context) ([]arbiter.Agent, error) {
 		client.nodeCommandMu.Lock()
 		defer client.nodeCommandMu.Unlock()
 		rows, err := client.readNodeAgents(ctx)
