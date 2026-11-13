@@ -782,7 +782,8 @@ func spawnNotificationText(job, request string, result hubSpawnOutcome) string {
 
 // Node results stay in the node's private journal indefinitely, so ACK loss and
 // prolonged offline periods never erase the only receipt. Automatic journal GC
-// and adoption of a pane after a node process crash are explicit non-goals.
+// is an explicit non-goal. A pane a node crash left behind is settled by the
+// restarted node from herdr (hub_spawn_settle.go), not adopted by the hub.
 
 func (h *HubServer) startSpawnCoordinator(ctx context.Context) {
 	h.closeMu.Lock()

@@ -260,7 +260,7 @@ sent merely because a deadline expired.
 | Duplicate accept / lost HTTP response | Identical key/body replays; changed body conflicts; CLI receipt preserves key. | Reservation test and `TestSubmissionReceiptReusesKeyAfterLostHTTPResponse`. |
 | Timeout followed by late pane | Retain ownership; reconcile receipt with exact node identity; never close working/unknown. | Late-result test and `TestFailedSpawnCleanupRequiresExactIdlePane`. |
 | Timeout, and the node never started the request | Settle `retryable` with `deadline_not_started` (see [A request the node never started](#a-request-the-node-never-started)); an executing, restarted or silent node keeps ownership. | `TestLateNotStartedAnswerSettlesRequest_t4379`, `TestTimeoutWithoutNodeRowSettlesAsNotStarted_t4379`, `TestTimeoutKeepsOwnershipWithoutNotStartedProof_t4379`. |
-| Node restart while executing | Do not rerun or invent success from a pane's presence. Past the deadline, a node answering `unknown` with no pane bearing the job label finishes the request `failed` (`orphaned_after_restart`) and releases its reservation; a labelled pane keeps it for the operator. | `TestNodeSpawnJournalRestartDedupAndLostResultReplay`, `TestNodeSpawnReplayAnswersUnknownAfterRestart`, `TestStrandedSpawnUnknownWithoutPaneFailsAndReleases`, `TestStrandedSpawnStaysPendingWithoutProof`. Adopting a pane after this crash window is a non-goal. |
+| Node restart while executing | Never rerun the spawn. The restarted node settles the executing row from herdr and the job's local spawn record: the recorded pane alive as an agent completes it with the job's receipt (the hub still verifies the pane before accepting it), a pane in neither the agent nor the pane list completes it `lost` with a reason, and anything unproven (a pane only in the pane list, a label match without a record, herdr unreadable) leaves it executing and answers `unknown`. Past the deadline, `unknown` with no pane bearing the job label finishes the request `failed` (`orphaned_after_restart`) and releases its reservation; a labelled pane keeps it for the operator. The node's stop first waits (30 s) for a launch, injection or result upload in flight. See [node restart](runbooks/node-restart.md). | `TestSpawnSettle*`, `TestStopDrain*`, `TestNodeSpawnJournalRestartDedupAndLostResultReplay`, `TestNodeSpawnReplayAnswersUnknownAfterRestart`, `TestStrandedSpawnUnknownWithoutPaneFailsAndReleases`, `TestStrandedSpawnStaysPendingWithoutProof`. |
 | Lost event or lost ACK | Commit state and outbox atomically; retry with a stable event id and actual job id. | `TestSpawnOutboxFailureRollsBackResult`, `TestAsyncSpawnLostEventRetriesWithStableJobIdentity`. |
 | Process pressure / shutdown | Bounded execution and persisted pending work. | `TestAsyncSpawnWorkersBoundedAndIndependentOfHTTP`, `TestAsyncSpawnOutlivesSubmittingHTTPContext`; HTTP-independent execution lifetime is owned by maintenance/shutdown, never the POST context. |
 | Backend migration | Never silently drop reservations or tombstones. | Spawn store contract refuses the inbox-only SQLite-to-Postgres migrator when spawn rows exist. Full backend transfer is a separate migration, not an inbox-only copy. |
@@ -293,9 +293,10 @@ A request bound to a node stays `reconciling` or `deadline_exceeded` until the
 node answers. The coordinator replays the bound request to its node every few
 seconds (the late-result path), so the hub asks about it well inside a minute
 after the deadline. When a node restarted mid-spawn, its journal keeps the
-entry executing for good; the node now answers such a replay `unknown`
-instead of `reconciling` (an older hub ignores that answer and keeps the
-request pending, as before).
+entry executing until the node settles it from the pane (see
+[node restart](runbooks/node-restart.md)); a node that cannot read herdr
+answers such a replay `unknown` instead of `reconciling` (an older hub ignores
+that answer and keeps the request pending, as before).
 
 Past the deadline, an `unknown` answer from the bound, connected node makes the
 hub read that node's panes (`agents.list`, at most once a minute per request):
