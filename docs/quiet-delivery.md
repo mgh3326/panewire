@@ -363,8 +363,11 @@ work, through the lane's node daemon like any relay:
 `N` is the lane's unread count, the same number `panewire inbox count` shows.
 `<kind>` is the most urgent unread item, in this order: `decision` >
 `blocked` > `automation-failed` (SPAWN_FAILED) > `findings` > `ready` >
-`info`. The declared `--type` decides the kind. `order` and `deploy-approval`
-rank as `decision`, and `watch-hold` and `culprit-hold` as `blocked`. An
+`info`. The declared `--type` decides the kind. An `order` keeps its display
+kind, so the line reads `most urgent: order`, but ranks as `decision`;
+`deploy-approval` displays and ranks as `decision`, and `watch-hold` and
+`culprit-hold` as `blocked`. When an `order` and a `decision` are both unread,
+the line shows `order`, whatever their inbox order (hk 4458). An
 untyped item is ranked by its kind (`job.escalate` is a decision, `job.lost`
 and `job.revoked` are blocked, a completion is ready), by a leading
 `[consult-done]` (ready), or by its tags (ESC, URGENT and needs_decision;
