@@ -580,6 +580,12 @@ func TestHubQuotaRefreshPinnedProfileDoesNotWaitForWriter(t *testing.T) {
 	if err != nil || saved.Status != "accepted" || saved.Node != nil {
 		t.Fatalf("pinned-profile stale quota ended the request: status=%s node=%v err=%v", saved.Status, saved.Node, err)
 	}
+	h.mu.Lock()
+	_, counted := h.placementCounts[task.Job]
+	h.mu.Unlock()
+	if counted {
+		t.Fatal("an unbound request awaiting quota still counts against a node")
+	}
 }
 
 func TestHubQuotaRefreshResponseDeadlineKeepsRequestAccepted(t *testing.T) {
