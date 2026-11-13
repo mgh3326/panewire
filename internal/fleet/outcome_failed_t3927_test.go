@@ -280,9 +280,8 @@ func TestMergedRepBodyUnchangedFromBase(t *testing.T) {
 	}
 }
 
-// A reaped job whose joined PR is open writes nothing when its pane closes;
-// once the PR is closed unmerged, a later pass writes its one row. A later pass
-// does not write it again.
+// An open PR prevents a sweep diagnostic. Closing the PR still does not make
+// a retained pane a reaped job or publish its failure rep.
 func TestSweepHoldsReapedFailureRepWhileOpenPRThenWritesOnClose(t *testing.T) {
 	fake := &hkBenchFake{}
 	srv := httptest.NewServer(fake)
@@ -296,26 +295,16 @@ func TestSweepHoldsReapedFailureRepWhileOpenPRThenWritesOnClose(t *testing.T) {
 	f.prChanges["42"] = []PRChange{{Number: 9, State: "open", Head: "head-9"}}
 	f.at(0)
 	f.at(11)
-	if len(f.closed()) != 1 {
-		t.Fatalf("pane not closed: %v", f.closed())
+	if len(f.closed()) != 0 {
+		t.Fatalf("pane closed without ownership-bound authorization: %v", f.closed())
 	}
 	if len(fake.reps) != 0 {
 		t.Fatalf("open PR wrote %d rows at close, want 0", len(fake.reps))
 	}
 	f.prChanges["42"] = []PRChange{{Number: 9, State: "closed", Head: "head-9"}}
 	f.at(12)
-	if len(fake.reps) != 1 {
-		t.Fatalf("rows after PR closed = %d, want 1", len(fake.reps))
-	}
-	if row := fake.reps[0]; row["completed"] != float64(0) || row["task_ref"] != "hk42" {
-		t.Fatalf("row = %v", row)
-	}
-	if notes, _ := fake.reps[0]["notes"].(string); !strings.Contains(notes, `"ended":"reaped"`) {
-		t.Fatalf("notes = %s", notes)
-	}
-	f.at(13)
-	if len(fake.reps) != 1 {
-		t.Fatalf("later pass duplicated the row: %d", len(fake.reps))
+	if len(fake.reps) != 0 {
+		t.Fatalf("retained pane wrote a reaped failure row: %v", fake.reps)
 	}
 }
 
@@ -346,7 +335,7 @@ func TestSweepHoldsEscalatedJobWithOpenPRUntilPRCloses(t *testing.T) {
 	}
 }
 
-// A superseded job gets its row even with no PR of its own.
+// A superseded job's failure row remains pending until the pane can be reaped.
 func TestSweepRecordsSupersededFailureRepWithoutPR(t *testing.T) {
 	fake := &hkBenchFake{}
 	srv := httptest.NewServer(fake)
@@ -358,11 +347,8 @@ func TestSweepRecordsSupersededFailureRepWithoutPR(t *testing.T) {
 	f.tasks["42"] = "in_progress"
 	f.at(0)
 	f.at(11)
-	if len(fake.reps) != 1 {
-		t.Fatalf("rows = %d, want 1", len(fake.reps))
-	}
-	if notes, _ := fake.reps[0]["notes"].(string); !strings.Contains(notes, `"ended":"superseded"`) {
-		t.Fatalf("notes = %s", notes)
+	if len(fake.reps) != 0 || len(f.closed()) != 0 {
+		t.Fatalf("retained pane wrote a reaped failure row or closed: rows=%v closed=%v", fake.reps, f.closed())
 	}
 }
 
@@ -387,23 +373,14 @@ func TestSweepWritesRowsByOutcomeFinality(t *testing.T) {
 		OpenedAt: "2026-03-01T11:00:00Z", MergedAt: "2026-03-01T12:00:00Z"}}
 	f.at(0)
 	f.at(11)
-	if len(f.closed()) != 3 {
-		t.Fatalf("panes closed = %v, want all three", f.closed())
+	if len(f.closed()) != 0 {
+		t.Fatalf("panes closed without ownership-bound authorization: %v", f.closed())
 	}
-	if len(fake.reps) != 2 {
-		t.Fatalf("rows = %d, want the reaped row and the merged row", len(fake.reps))
+	if len(fake.reps) != 1 {
+		t.Fatalf("rows = %d, want only the independently observed merged outcome", len(fake.reps))
 	}
-	byTask := map[string]map[string]any{}
-	for _, row := range fake.reps {
-		byTask[row["task_ref"].(string)] = row
-	}
-	if row := byTask["hk42"]; row == nil || row["completed"] != float64(0) {
-		t.Fatalf("bare job row = %v, want a completed=0 row", row)
-	}
-	if row := byTask["hk43"]; row == nil || row["merged"] != true {
-		t.Fatalf("merged job row = %v, want the merged row", row)
-	}
-	if _, ok := byTask["hk44"]; ok {
-		t.Fatalf("completed job without a PR wrote a failure row")
+	row := fake.reps[0]
+	if row["task_ref"] != "hk43" || row["merged"] != true {
+		t.Fatalf("merged job row = %v", row)
 	}
 }
