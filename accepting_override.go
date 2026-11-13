@@ -1,6 +1,7 @@
 package panewire
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -234,8 +235,10 @@ var (
 // readAcceptingOverrideLeftovers collects the keys the loader does not read:
 // root-level keys, and per machine the keys of each override and containment
 // entry. Member names match case-insensitively, as the loader's decode does.
-// If two case variants of one member both define a leftover key, either value
-// may be kept. A file that cannot be read or decoded yields none.
+// Members are visited in source order, so when two case variants of one member
+// both define a leftover key, the later one is kept, as the loader's decode
+// keeps the later machine entry. A file that cannot be read or decoded yields
+// none.
 func readAcceptingOverrideLeftovers(path string) acceptingOverrideLeftovers {
 	left := acceptingOverrideLeftovers{
 		root:         make(map[string]json.RawMessage),
@@ -246,21 +249,50 @@ func readAcceptingOverrideLeftovers(path string) acceptingOverrideLeftovers {
 	if err != nil {
 		return left
 	}
-	var doc map[string]json.RawMessage
-	if json.Unmarshal(b, &doc) != nil {
+	members, err := topLevelMembers(b)
+	if err != nil {
 		return left
 	}
-	for key, value := range doc {
+	for _, member := range members {
 		switch {
-		case strings.EqualFold(key, "overrides"):
-			collectEntryLeftovers(value, acceptingOverrideReadKeys, left.overrides)
-		case strings.EqualFold(key, "containments"):
-			collectEntryLeftovers(value, acceptingContainmentReadKeys, left.containments)
+		case strings.EqualFold(member.key, "overrides"):
+			collectEntryLeftovers(member.value, acceptingOverrideReadKeys, left.overrides)
+		case strings.EqualFold(member.key, "containments"):
+			collectEntryLeftovers(member.value, acceptingContainmentReadKeys, left.containments)
 		default:
-			left.root[key] = value
+			left.root[member.key] = member.value
 		}
 	}
 	return left
+}
+
+// jsonMember is one member of a JSON object, with its raw value.
+type jsonMember struct {
+	key   string
+	value json.RawMessage
+}
+
+// topLevelMembers returns the members of the JSON object in b in source order.
+// A key repeated in the object appears once per occurrence.
+func topLevelMembers(b []byte) ([]jsonMember, error) {
+	dec := json.NewDecoder(bytes.NewReader(b))
+	if tok, err := dec.Token(); err != nil || tok != json.Delim('{') {
+		return nil, errors.New("not a JSON object")
+	}
+	var members []jsonMember
+	for dec.More() {
+		tok, err := dec.Token()
+		key, ok := tok.(string)
+		if err != nil || !ok {
+			return nil, errors.New("invalid object key")
+		}
+		var value json.RawMessage
+		if err := dec.Decode(&value); err != nil {
+			return nil, err
+		}
+		members = append(members, jsonMember{key, value})
+	}
+	return members, nil
 }
 
 // collectEntryLeftovers adds, per machine, the keys of each object in members
