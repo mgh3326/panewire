@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 // hookedSource runs a hook before each host read answers.
@@ -246,3 +247,64 @@ func TestPlacementFallbackPlansAgainOnCurrentEligibility(t *testing.T) {
 }
 
 func ptr[T any](v T) *T { return &v }
+
+// changingState answers each snapshot read from the next of its snapshots, the
+// last one repeating.
+type changingState struct {
+	snaps []func() FleetSnapshot
+	reads int
+}
+
+func (c *changingState) Snapshot(context.Context) (FleetSnapshot, error) {
+	i := min(c.reads, len(c.snaps)-1)
+	c.reads++
+	return c.snaps[i](), nil
+}
+
+// Through the hub's fleet state, a host reported slot-full is left out of the
+// host list (hubHosts). It must stay out of the fallback too, not come back
+// as a host the hub did not report; and every decision reads the state again.
+func TestPlacementFallbackKeepsSlotFullHostsOutOfTheFleetState(t *testing.T) {
+	var log []string
+	a, s := gateFixtureSSH(t, &log, func(args string) Result {
+		if !strings.Contains(args, "_spawn-stdin") {
+			return Result{}
+		}
+		for _, host := range []string{"hot-a", "hot-b", "hot-c"} {
+			if strings.Contains(args, host) {
+				log = append(log, "launch:"+host)
+				if host == "hot-a" {
+					return Result{Code: 3, Err: "full"}
+				}
+			}
+		}
+		return Result{Out: "OK pane=w:p2\n"}
+	})
+	a.Config.Hub = map[string]any{"hub_url": "https://hub.invalid"}
+	a.Config.Hosts = map[string]map[string]any{"hot-a": {}, "hot-b": {}, "hot-c": {}}
+	a.Config.HostOrder = []string{"hot-a", "hot-b", "hot-c"}
+	snapshot := func(bFull bool) func() FleetSnapshot {
+		return func() FleetSnapshot {
+			now := a.Now()
+			var states []map[string]any
+			for i, host := range []string{"hot-a", "hot-b", "hot-c"} {
+				m := fsLoad(host, true, float64(10-4*i), 0.1, now.Add(-time.Second))
+				m["load"].(map[string]any)["slot_full"] = bFull && host == "hot-b"
+				states = append(states, fsPublisher(host, true, now), m)
+			}
+			return fsSnapshot(t, now, states...)
+		}
+	}
+	reader := &changingState{snaps: []func() FleetSnapshot{snapshot(false), snapshot(true)}}
+	a.State = reader
+	a.Source = stateSource{a: a, inner: a.Source}
+	if handled, _, e := a.placeAuto(context.Background(), s, "brief"); e != nil || !handled {
+		t.Fatalf("%v (log %v)", e, log)
+	}
+	if want := []string{"launch:hot-a", "launch:hot-c"}; !slices.Equal(log, want) {
+		t.Fatalf("events %v, want %v (reads %d)", log, want, reader.reads)
+	}
+	if reader.reads < 2 {
+		t.Fatalf("the fallback did not read the state again: %d reads", reader.reads)
+	}
+}
