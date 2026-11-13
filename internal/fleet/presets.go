@@ -41,7 +41,7 @@ func (a *App) workPreset(ctx context.Context, args []string) (Spawn, error) {
 		cwd = firstNonempty(str(task.Refs, "worktree"), str(task.Refs, "cwd"), cwd)
 	}
 	defaults := []string{"-c", cwd, "-m", "auto", "-p", firstNonempty(str(task.Refs, "brief_path"), filepath.Join(a.Jobs, job, "brief.md")), "-w", "workers", "-l", job, "--job", job, "--t", strings.ToUpper(marker[2]), "--task", id, "--host", "auto", "--report", firstNonempty(str(task.Refs, "report_path"), filepath.Join(a.Jobs, job, "report.md"))}
-	defaults = append(defaults, "--role", "worker")
+	defaults = append(defaults, "--role", "implementer")
 	s, err := parseSpawn(append(defaults, args[1:]...))
 	if err != nil {
 		return s, err

@@ -182,9 +182,9 @@ func (q *quotaStopManager) jobForPane(ctx context.Context, pane string) (HubActi
 
 // jobFacts reads what the job's own events say that the scanned active job
 // does not keep: the role and the task it inherited. The role is the spawn
-// receipt's (reviewer, tester, worker): the claim always says worker, and the
-// scanned job keeps only worker and captain. inherited is the builder job a
-// tester's task is still bound to (the claim's task_inherited_from).
+// receipt's (reviewer, implementer, consult): the claim always says implementer, and the
+// scanned job keeps only implementer. inherited is the job a
+// replacement's task is still bound to (the claim's task_inherited_from).
 func (q *quotaStopManager) jobFacts(jobID, scanned string) (role, inherited, taskID string) {
 	dir := filepath.Join(q.root, "jobs", jobID, "events")
 	entries, err := os.ReadDir(dir)
@@ -277,7 +277,7 @@ func (q *quotaStopManager) loadPolicy(ctx context.Context, now time.Time) (quota
 	return q.policy, false
 }
 
-// task finds the hk task bound to the job, or to the builder job a tester
+// task finds the hk task bound to the job, or to the job a replacement implementer
 // inherited its task from.
 func (q *quotaStopManager) task(ctx context.Context, job HubActiveJob, inherited, taskID string) (int, time.Duration, bool) {
 	if taskID != "" {
@@ -585,7 +585,7 @@ func (q *quotaStopManager) recordDecision(ctx context.Context, c idleWakeCandida
 	return q.recordDecisionFor(ctx, c, "", now, pool, reset, decision, reason, resume, due)
 }
 
-// recordDecisionFor is recordDecision for a job of role: a worker or tester's
+// recordDecisionFor is recordDecision for a job of role: an implementer's
 // decision is left for the manager to act on even in shadow mode.
 func (q *quotaStopManager) recordDecisionFor(ctx context.Context, c idleWakeCandidate, role string, now time.Time, pool, reset, decision, reason, resume string, due int64) error {
 	shadow := !q.act && !quotaActsOn(role, pool)
@@ -649,7 +649,7 @@ func (q *quotaStopManager) tick(ctx context.Context, now time.Time, advanceSettl
 		if r.action != 0 || r.actionRetry > now.UnixMilli() {
 			continue
 		}
-		// A worker or tester is acted on whatever --quota-stop-act says (hk
+		// An implementer is acted on whatever --quota-stop-act says (hk
 		// 3334); every other role is only recorded unless the flag is set.
 		if !q.act && !quotaActsOn(r.role, r.pool) {
 			q.update(ctx, r.id, "action_recorded", 1)
@@ -735,7 +735,7 @@ func (q *quotaStopManager) tick(ctx context.Context, now time.Time, advanceSettl
 	}
 }
 
-// handOver announces job.lost reason quota_stop for a worker or tester the
+// handOver announces job.lost reason quota_stop for an implementer the
 // policy hands over. The hub places the replacement on another pool, closes the
 // pane with a screen capture and writes the hk record lost with
 // handed_over_to=<new job>; it sends the owner the info lane event. When it

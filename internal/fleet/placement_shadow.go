@@ -95,12 +95,12 @@ type HostExtra struct {
 }
 
 // workClassOf is the work class of a spawn role: light for reviewer, consult
-// and design-type seats, heavy for worker, tester and anything else. It is a
+// and design-type seats, heavy for implementer and anything else. It is a
 // recorded guess to be checked by measurement (hk 3650); the role the class
 // came from is recorded beside it.
 func workClassOf(role string) string {
 	switch {
-	case role == "reviewer" || role == "counsel" || role == "consult" || strings.HasPrefix(role, "design"):
+	case role == "reviewer" || role == "consult" || strings.HasPrefix(role, "design"):
 		return workLight
 	}
 	return workHeavy

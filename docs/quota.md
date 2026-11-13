@@ -347,7 +347,7 @@ provided by [Artificial Analysis](https://artificialanalysis.ai/); see its
 
 ## Launch
 
-Before admission, every spawn, delegate, placement and plan resolves the
+Before admission, every spawn, placement and plan resolves the
 launch rung: its profile, effort, model id, grade, gate, pool and family.
 Until hk 3548 only `pacelever policy launch PROFILE
 --json` answered it, from pacelever's own catalog cache (one-hour TTL), so a
@@ -405,10 +405,10 @@ refuses first. The rules, each with its test in
 | An effort outside the effort ladder must be a catalog rung | `unknown effort rung` |
 | `codex-med`, `builder-terra-*` and any profile with a `gpt-5.6-terra` row | `model_refused: retired model identity` |
 | A profile with no live row | `profile "P" is unknown or retired` |
-| An unrated or unplaced rung needs the exact `<canon>@<effort>` marker, except for the lead, consult, builder and counsel roles on an unrated rung | `e6_arm_required: exact measurement marker required`, `e6_arm_required: unplaced profile requires exact measurement marker`, `e6_arm_required` |
+| An unrated or unplaced rung needs the exact `<canon>@<effort>` marker, except for the consult and builder roles on an unrated rung | `e6_arm_required: exact measurement marker required`, `e6_arm_required: unplaced profile requires exact measurement marker`, `e6_arm_required` |
 | A requested rung that is retired | `rung is retired in the catalog` |
 | A credit or `codex-terra61` request for a rung that is not placed | `e6_arm_required: rung is not placed` |
-| Seat roles: a credit rung seats a worker or tester, or a builder on a placed default rung; `fable` and `codex-astra` have no role restriction of their own (their rung's gate decides, as for any profile); any other `astra` profile is removed | `role_restricted: …` |
+| Seat roles: a credit rung seats an implementer, or a builder on a placed default rung; `fable` and `codex-astra` have no role restriction of their own (their rung's gate decides, as for any profile); any other `astra` profile is removed | `role_restricted: …` |
 | An `--operator-request` must be `hk:task/N` or `hk:doc/…` | `operator_request_ref_invalid` |
 | An unsubscribed profile or pool | `profile is unsubscribed` |
 | A `consult_only` rung needs `--operator-request` (not `codex-astra`) | `profile is consult_only; pass --operator-request` |
@@ -488,7 +488,7 @@ record carries the id placement reads the local host under:
 
 ## Admission
 
-Every spawn, delegate, placement and selection asks one admission question per
+Every spawn, placement and selection asks one admission question per
 candidate: may this profile, effort and role run on this account now? Until
 hk 3248 that answer came from `pacelever gate`. panewire now computes the same
 verdict itself (`internal/fleet/admission_verdict.go`, a rule-for-rule port of
@@ -526,7 +526,7 @@ Rules beyond pacelever's: a commandcode reading without its `30d` window is
 unmeasurable (`commandcode_required_window_missing:30d`,
 decision/2026-11-06/commandcode-30d-required-in-panewire-gate). It needs the
 node's native commandcode measurement, the only one that publishes `30d`. And
-a credit rung seats only a worker or tester (operator, 2026-11-07 for
+a credit rung seats only an implementer (operator, 2026-11-07 for
 cmd-dsflash41; hk 3532 extends it to every commandcode-pool rung); pacelever
 also seats a builder on a placed default rung.
 
@@ -535,19 +535,19 @@ also seats a builder on a placed default rung.
 A rung is a credit rung when its catalog row's pool is `commandcode`
 (`admissionCredit` in `internal/fleet/admission_verdict.go`). The pool decides,
 not the profile name: a credit rung needs an explicit effort, ranks as credit
-among alternatives, and seats only a worker or tester. The profiles that draw on
+among alternatives, and seats only an implementer. The profiles that draw on
 the pool:
 
 | Profile | Harness | How it reaches Command Code | Seat roles | Notes |
 |---|---|---|---|---|
-| `cmd-dsflash41` | cmd | the cmd harness's Command Code provider | worker, tester | Operator 2026-11-07 (hk 3248): no builder. |
-| `omp-dsflash41` | omp | omp's `commandcode` provider, gated by the host's `omp_commandcode` capability | worker, tester, reviewer | The policy seat lists reviewer, but admission refuses it on a credit rung (see below). |
-| `omp-musespark13` | omp | `commandcode/meta/muse-spark-1.3`, gated by `omp_commandcode` | worker, tester, reviewer | low, high, max; unrated until routing-policy grades it. |
-| `omp-argon4` | omp | `commandcode/google/gemini-4-argon`, gated by `omp_commandcode` | worker, tester, reviewer | off only; no thinking levels. |
-| `omp-mimo26pro` | omp | `commandcode/xiaomi/mimo-v2.6-pro`, gated by `omp_commandcode` | worker, tester, reviewer | off only; no thinking levels. |
-| `omp-cc-opus55` | omp | `commandcode/claude-opus-5-5`, gated by `omp_commandcode` | worker, tester, reviewer | low, high, max; separate from `omp-opus`. |
-| `omp-cc-sonnet55` | omp | `commandcode/claude-sonnet-5-5`, gated by `omp_commandcode` | worker, tester, reviewer | low, high, max; separate from `omp-sonnet`. |
-| `omp-cc-sol61` | omp | `commandcode/gpt-6.1-sol`, gated by `omp_commandcode` | worker, tester, reviewer | off only; no thinking levels; separate from `omp-sol`. |
+| `cmd-dsflash41` | cmd | the cmd harness's Command Code provider | implementer | Operator 2026-11-07 (hk 3248): no builder. |
+| `omp-dsflash41` | omp | omp's `commandcode` provider, gated by the host's `omp_commandcode` capability | implementer, reviewer | The policy seat lists reviewer, but admission refuses it on a credit rung (see below). |
+| `omp-musespark13` | omp | `commandcode/meta/muse-spark-1.3`, gated by `omp_commandcode` | implementer, reviewer | low, high, max; unrated until routing-policy grades it. |
+| `omp-argon4` | omp | `commandcode/google/gemini-4-argon`, gated by `omp_commandcode` | implementer, reviewer | off only; no thinking levels. |
+| `omp-mimo26pro` | omp | `commandcode/xiaomi/mimo-v2.6-pro`, gated by `omp_commandcode` | implementer, reviewer | off only; no thinking levels. |
+| `omp-cc-opus55` | omp | `commandcode/claude-opus-5-5`, gated by `omp_commandcode` | implementer, reviewer | low, high, max; separate from `omp-opus`. |
+| `omp-cc-sonnet55` | omp | `commandcode/claude-sonnet-5-5`, gated by `omp_commandcode` | implementer, reviewer | low, high, max; separate from `omp-sonnet`. |
+| `omp-cc-sol61` | omp | `commandcode/gpt-6.1-sol`, gated by `omp_commandcode` | implementer, reviewer | off only; no thinking levels; separate from `omp-sol`. |
 
 A seat whose model has no controllable thinking levels carries `no_thinking` in
 the seat policy (`internal/fleet/policy.json`, hk 3974). Admission admits its
@@ -565,7 +565,7 @@ All seven omp profiles and cmd-dsflash41 share one Command Code account, its 30-
 on any of these profiles counts against the same account reading.
 
 Admission refuses the reviewer role for omp-dsflash41 today, because the credit
-rule admits only a worker or tester. The policy seat still lists reviewer, so a
+rule admits only an implementer. The policy seat still lists reviewer, so a
 reviewer launch passes the seat check but is refused at admission. Whether to
 lift that for omp-dsflash41 is the operator's decision; it is not changed here.
 

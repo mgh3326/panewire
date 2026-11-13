@@ -4,7 +4,7 @@ A worker stays in its pane after READY: it is its PR's author and fixes later
 review findings until the PR merges or its owner releases it (the wake
 method). mergewake's reap, which runs once at merge time, skips a worker that
 is busy then and never retries. The node daemon therefore sweeps its own jobs:
-it closes the pane of a worker or tester once the hk task the job is bound to
+it closes the pane of an implementer once the hk task the job is bound to
 has ended, or the job itself was closed, and the pane has stayed not working
 for a grace. A completed author's pane waits while its PR is open; a job its
 owner gave up or released does not.
@@ -14,8 +14,8 @@ owner gave up or released does not.
 A local job is swept when all of these hold:
 
 - it is not reaped, and not `--keep`;
-- its role is `worker` or `tester` (never `builder`, `captain`, `lead` or
-  `reviewer`; the hub's [finished-reviewer release](hub-spawn-operations.md)
+- its role is `implementer` (never `builder`, `lead`, `reviewer` or
+  `consult`; the hub's [finished-reviewer release](hub-spawn-operations.md)
   keeps reviewer panes);
 - and one of these ends it:
   - **its task ended.** The task is the claim's `--task`, or, for a fix author
@@ -41,13 +41,13 @@ Two ends wait while the job's worktree is on an open PR:
   own);
 - a **completed author**: the job's own latest record is the worker's
   `job.completed` (READY), and the job is not a reviewer (spawn role
-  `reviewer`, or a mergewake `mwr-*` label), a tester or a counsel. The task's
+  `reviewer`, or a mergewake `mwr-*` label), or a consult. The task's
   state does not matter: a task still `reviewing` and one already `deployed`
   both wait.
 
 A job its owner closed with `panewire job close` (`job.revoked` with outcome
 `abandoned`, `superseded` or `completed`) was given up or released, and is
-swept whatever its PRs say. So is a completed reviewer, tester or counsel,
+swept whatever its PRs say. So is a completed reviewer or consult,
 whose worktree may sit at the PR head it looked at.
 
 A completed fix author's task is its parent's (see above). Its pane closes

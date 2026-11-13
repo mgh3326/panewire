@@ -535,8 +535,8 @@ signal.
 
 hk 3650. The static `power` is not re-tuned by hand
 (`decision/2026-11-09/placement-measurement-direction` §1, §3). Instead, each
-time the spawn engine has ranked the hosts for a job (spawn, delegate and panel
-selection all rank in `admitHostFirst`), it ranks the same hosts again under two
+time the spawn engine has ranked the hosts for a job (spawn selection
+ranks in `admitHostFirst`), it ranks the same hosts again under two
 alternative rules and writes one fleet event, `kind=placement_shadow`
 ([observability](observability.md#fleet-events)). The arms are pure functions of
 the readings the live ranking already had: no extra call, the App's clock, and
@@ -568,8 +568,8 @@ panic in an arm is caught and recorded as `shadow_error`; the spawn goes on.
 `placement.capability.heavy.<host>`; a host with no entry for the class falls
 back to the hub's `power` (100 when the hub sent none). The map is empty by
 default. The work class comes from the spawn role in one function,
-`workClassOf`: `light` for reviewer, counsel (consult) and design-type seats,
-`heavy` for everything else (worker, tester). It is a recorded guess, to be
+`workClassOf`: `light` for reviewer, consult and design-type seats,
+`heavy` for everything else (implementer). It is a recorded guess, to be
 checked by measurement; the role is recorded with it.
 
 **Reading the event.** `live` is the live host order, each host with its bucket
@@ -661,7 +661,7 @@ One real event (macOS `mac-b` at warn pressure, 60% free, swapping hard; the
 hub scores it 100, so live and `fixed` keep it first and `measured` does not):
 
 ```json
-{"ts":"2026-11-09T00:00:00Z","host":"node","tool":"panewire","kind":"placement_shadow","job":"job-a","outcome":"disagree","reason":"heavy","detail":"work_class=heavy role=worker fixed=agree measured=disagree","request_id":"req-1","shadow":{"role":"worker","work_class":"heavy","live":{"first":"mac-b","order":[{"host":"mac-b","bucket":0,"score":100},{"host":"cloud-small","bucket":0,"score":90},{"host":"cloud-tiny","bucket":1,"score":1},{"host":"pi","bucket":1,"score":1}]},"arms":{"fixed":{"outcome":"agree","first":"mac-b","order":[{"host":"mac-b","bucket":0,"score":100},{"host":"cloud-small","bucket":0,"score":90},{"host":"cloud-tiny","bucket":1,"score":1},{"host":"pi","bucket":1,"score":1}]},"measured":{"outcome":"disagree","first":"cloud-small","order":[{"host":"cloud-small","bucket":0,"score":100},{"host":"mac-b","bucket":0,"score":10},{"host":"cloud-tiny","bucket":1,"score":1},{"host":"pi","bucket":1,"score":1}]}},"load_measure":"cpu_busy","inputs":[{"host":"mac-b","cpu_busy":0.2,"load1_per_core":0.1,"mem_available":0.8,"mem_free_pct":60,"pressure":1,"swap_in_per_s":20000,"jobs":0,"power":100,"memory_source":"pressure"},{"host":"cloud-small","cpu_busy":0.1,"load1_per_core":0.1,"mem_available":0.8,"jobs":0,"power":100,"memory_source":"available"},{"host":"cloud-tiny","memory_source":"none"},{"host":"pi","memory_source":"none"}]}}
+{"ts":"2026-11-09T00:00:00Z","host":"node","tool":"panewire","kind":"placement_shadow","job":"job-a","outcome":"disagree","reason":"heavy","detail":"work_class=heavy role=implementer fixed=agree measured=disagree","request_id":"req-1","shadow":{"role":"implementer","work_class":"heavy","live":{"first":"mac-b","order":[{"host":"mac-b","bucket":0,"score":100},{"host":"cloud-small","bucket":0,"score":90},{"host":"cloud-tiny","bucket":1,"score":1},{"host":"pi","bucket":1,"score":1}]},"arms":{"fixed":{"outcome":"agree","first":"mac-b","order":[{"host":"mac-b","bucket":0,"score":100},{"host":"cloud-small","bucket":0,"score":90},{"host":"cloud-tiny","bucket":1,"score":1},{"host":"pi","bucket":1,"score":1}]},"measured":{"outcome":"disagree","first":"cloud-small","order":[{"host":"cloud-small","bucket":0,"score":100},{"host":"mac-b","bucket":0,"score":10},{"host":"cloud-tiny","bucket":1,"score":1},{"host":"pi","bucket":1,"score":1}]}},"load_measure":"cpu_busy","inputs":[{"host":"mac-b","cpu_busy":0.2,"load1_per_core":0.1,"mem_available":0.8,"mem_free_pct":60,"pressure":1,"swap_in_per_s":20000,"jobs":0,"power":100,"memory_source":"pressure"},{"host":"cloud-small","cpu_busy":0.1,"load1_per_core":0.1,"mem_available":0.8,"jobs":0,"power":100,"memory_source":"available"},{"host":"cloud-tiny","memory_source":"none"},{"host":"pi","memory_source":"none"}]}}
 ```
 
 hk 3649 adds `swap_out_per_s` and `user_idle_s` to the node heartbeat. Until it
@@ -736,7 +736,7 @@ exactly as before.
 
 The hub counts **tasks**, not jobs. A task is the `owner_lane` bundle on that
 machine: a builder job (whose claim `owner_lane` is its own lane) plus every
-tester/worker job that builder spawned with `--owner <builder lane>`. Two jobs
+implementer job that builder spawned with `--owner <builder lane>`. Two jobs
 of the same task consume one slot. A job whose `owner_lane` is empty or the
 legacy `"default"` sentinel cannot be attributed to a task and counts as a
 task of its own — unowned jobs therefore over-count rather than slip through.

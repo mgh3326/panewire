@@ -23,8 +23,8 @@ func t3460Hub(t *testing.T, path string) (*HubServer, *hubAgent, *fakeHandoffkee
 	t.Helper()
 	h, agent, fake := t3434Hub(t, path)
 	h.observeActiveJobs("host-a", []HubActiveJob{
-		{JobID: t3434WorkerJob, AgentLabel: t3434WorkerJob, Epoch: 1, OwnerLane: t3426Design, Pane: t3434WorkerPane, Role: "worker"},
-		{JobID: t3460Job, AgentLabel: t3460Job, Epoch: 1, OwnerLane: t3460OtherDesign, Pane: t3460Pane, Role: "worker"},
+		{JobID: t3434WorkerJob, AgentLabel: t3434WorkerJob, Epoch: 1, OwnerLane: t3426Design, Pane: t3434WorkerPane, Role: "implementer"},
+		{JobID: t3460Job, AgentLabel: t3460Job, Epoch: 1, OwnerLane: t3460OtherDesign, Pane: t3460Pane, Role: "implementer"},
 	}, time.Now())
 	return h, agent, fake
 }

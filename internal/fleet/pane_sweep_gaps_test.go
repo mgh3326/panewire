@@ -37,7 +37,7 @@ func (f *paneSweepFixture) closeJob(id, outcome string) {
 func (f *paneSweepFixture) fixAuthor(id, parent string, extra ...map[string]any) string {
 	f.t.Helper()
 	pane := "p-" + id
-	putEvent(f.t, f.a, id, "job.claim", map[string]any{"owner_lane": "owner", "parent_lane": "parent", "t_level": "T1", "role": "worker", "task_inherited_from": parent})
+	putEvent(f.t, f.a, id, "job.claim", map[string]any{"owner_lane": "owner", "parent_lane": "parent", "t_level": "T1", "role": "implementer", "task_inherited_from": parent})
 	spawned := map[string]any{"pane_id": pane, "tab_id": "t-" + pane, "label": "agent-" + id, "profile": "cmd-dsflash41", "family": "deepseek"}
 	for _, more := range extra {
 		for key, value := range more {
@@ -59,7 +59,7 @@ func TestPaneSweepFollowsTheTaskCategory(t *testing.T) {
 	} {
 		t.Run(tc.state, func(t *testing.T) {
 			f := newPaneSweepFixture(t)
-			pane := f.job("j", "worker", "42")
+			pane := f.job("j", "implementer", "42")
 			f.tasks["42"], f.category["42"] = tc.state, tc.category
 			f.at(0)
 			f.at(11)
@@ -80,7 +80,7 @@ func TestPaneSweepFollowsTheTaskCategory(t *testing.T) {
 // the fallback would end on: the category is the answer when it is present.
 func TestPaneSweepKeepsAPaneWhoseCategoryIsLive(t *testing.T) {
 	f := newPaneSweepFixture(t)
-	f.job("j", "worker", "42")
+	f.job("j", "implementer", "42")
 	f.tasks["42"], f.category["42"] = "merged", "started"
 	f.at(0)
 	f.at(60)
@@ -163,7 +163,7 @@ func TestPaneSweepClosesARevokedJobWhoseTaskIsLive(t *testing.T) {
 		t.Run(outcome, func(t *testing.T) {
 			f := newPaneSweepFixture(t)
 			hk := useFakeHK(t)
-			pane := f.job("j", "worker", "42")
+			pane := f.job("j", "implementer", "42")
 			f.tasks["42"], f.category["42"] = "developing", "started"
 			f.closeJob("j", outcome)
 			f.at(0)
@@ -201,7 +201,7 @@ func TestPaneSweepClosesARevokedJobWhoseTaskIsLive(t *testing.T) {
 
 func TestPaneSweepClosesAJobThatCompleted(t *testing.T) {
 	f := newPaneSweepFixture(t)
-	pane := f.job("j", "tester", "42")
+	pane := f.job("j", "implementer", "42")
 	f.tasks["42"], f.category["42"] = "developing", "started"
 	putEvent(t, f.a, "j", "job.completed", map[string]any{})
 	f.at(0)
@@ -217,7 +217,7 @@ func TestPaneSweepClosesAJobThatCompleted(t *testing.T) {
 // A closed job needs no task and no readable hk: its own record is the reason.
 func TestPaneSweepClosesARevokedJobWithoutAReadableTask(t *testing.T) {
 	f := newPaneSweepFixture(t)
-	pane := f.job("j", "worker", "42")
+	pane := f.job("j", "implementer", "42")
 	f.taskErr = fmt.Errorf("hk down")
 	f.closeJob("j", "abandoned")
 	f.at(0)
@@ -226,7 +226,7 @@ func TestPaneSweepClosesARevokedJobWithoutAReadableTask(t *testing.T) {
 		t.Fatalf("closed %v, want [%s]", f.closed(), pane)
 	}
 	f2 := newPaneSweepFixture(t)
-	pane2 := f2.job("k", "worker", "")
+	pane2 := f2.job("k", "implementer", "")
 	f2.closeJob("k", "abandoned")
 	f2.at(0)
 	f2.at(11)
@@ -238,7 +238,7 @@ func TestPaneSweepClosesARevokedJobWithoutAReadableTask(t *testing.T) {
 // (d) A working pane is never closed, closed job or not.
 func TestPaneSweepKeepsAWorkingPaneOfARevokedJob(t *testing.T) {
 	f := newPaneSweepFixture(t)
-	pane := f.job("j", "worker", "42")
+	pane := f.job("j", "implementer", "42")
 	f.tasks["42"], f.category["42"] = "developing", "started"
 	f.closeJob("j", "abandoned")
 	f.status[pane] = "working"
@@ -255,7 +255,7 @@ func TestPaneSweepKeepsAWorkingPaneOfARevokedJob(t *testing.T) {
 // A job revived after its close (a reprompt) is live again and keeps its pane.
 func TestPaneSweepKeepsARevivedJob(t *testing.T) {
 	f := newPaneSweepFixture(t)
-	f.job("j", "worker", "42")
+	f.job("j", "implementer", "42")
 	f.tasks["42"], f.category["42"] = "developing", "started"
 	f.closeJob("j", "abandoned")
 	putEvent(t, f.a, "j", "job.reprompted", map[string]any{})
@@ -266,7 +266,7 @@ func TestPaneSweepKeepsARevivedJob(t *testing.T) {
 	}
 }
 
-// Only a worker or tester is swept, closed or not.
+// Only an implementer is swept, closed or not.
 func TestPaneSweepNeverClosesAProtectedRoleForItsClosing(t *testing.T) {
 	for _, role := range []string{"builder", "lead", "captain"} {
 		t.Run(role, func(t *testing.T) {

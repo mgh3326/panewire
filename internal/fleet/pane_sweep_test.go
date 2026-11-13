@@ -169,7 +169,7 @@ func TestPaneSweepClosesAMergedTaskPaneAfterTheGrace(t *testing.T) {
 	// hk 3702: the fake hk stores the screen, so the screen lives there and the
 	// job dir gets no local copy; the environment does not decide this.
 	hk := useFakeHK(t)
-	pane := f.job("j", "worker", "42")
+	pane := f.job("j", "implementer", "42")
 	f.tasks["42"] = "merged"
 	f.at(0)
 	f.at(11)
@@ -201,7 +201,7 @@ func TestPaneSweepClosesAMergedTaskPaneAfterTheGrace(t *testing.T) {
 
 func TestPaneSweepKeepsAPaneIdleLessThanTheGrace(t *testing.T) {
 	f := newPaneSweepFixture(t)
-	f.job("j", "worker", "42")
+	f.job("j", "implementer", "42")
 	f.tasks["42"] = "merged"
 	f.at(0)
 	f.at(5)
@@ -218,7 +218,7 @@ func TestPaneSweepKeepsAPaneIdleLessThanTheGrace(t *testing.T) {
 // spawn time, or one that treats a working pane as idle, closes at minute 11.
 func TestPaneSweepResetsTheIdleTimeWhenThePaneWorks(t *testing.T) {
 	f := newPaneSweepFixture(t)
-	pane := f.job("j", "worker", "42")
+	pane := f.job("j", "implementer", "42")
 	f.tasks["42"] = "merged"
 	f.at(0)
 	f.at(5)
@@ -243,7 +243,7 @@ func TestPaneSweepKeepsAPaneWhoseTaskIsStillLive(t *testing.T) {
 	for _, state := range []string{"developing", "backlog", "review", "blocked", ""} {
 		t.Run("state "+state, func(t *testing.T) {
 			f := newPaneSweepFixture(t)
-			f.job("j", "worker", "42")
+			f.job("j", "implementer", "42")
 			f.tasks["42"] = state
 			f.at(0)
 			f.at(60)
@@ -258,7 +258,7 @@ func TestPaneSweepEndStateFollowsTheTaskState(t *testing.T) {
 	for taskState, want := range map[string]string{"merged": "completed", "done": "completed", "dropped": "lost"} {
 		t.Run(taskState, func(t *testing.T) {
 			f := newPaneSweepFixture(t)
-			f.job("j", "worker", "42")
+			f.job("j", "implementer", "42")
 			f.tasks["42"] = taskState
 			f.at(0)
 			f.at(11)
@@ -276,7 +276,7 @@ func TestPaneSweepLeavesAFinishedHKRecordAlone(t *testing.T) {
 	for _, recorded := range []string{"completed", "escalated", "lost"} {
 		t.Run(recorded, func(t *testing.T) {
 			f := newPaneSweepFixture(t)
-			f.job("j", "worker", "42")
+			f.job("j", "implementer", "42")
 			f.store.records["j"]["state"] = recorded
 			f.tasks["42"] = "dropped"
 			f.at(0)
@@ -290,11 +290,11 @@ func TestPaneSweepLeavesAFinishedHKRecordAlone(t *testing.T) {
 
 func TestPaneSweepNeverTouchesProtectedJobs(t *testing.T) {
 	for name, build := range map[string]func(f *paneSweepFixture){
-		"keep":    func(f *paneSweepFixture) { f.job("j", "worker", "42", map[string]any{"keep": true}) },
+		"keep":    func(f *paneSweepFixture) { f.job("j", "implementer", "42", map[string]any{"keep": true}) },
 		"builder": func(f *paneSweepFixture) { f.job("j", "builder", "42") },
 		"lead":    func(f *paneSweepFixture) { f.job("j", "lead", "42") },
 		"captain": func(f *paneSweepFixture) { f.job("j", "captain", "42") },
-		"no task": func(f *paneSweepFixture) { f.job("j", "worker", "") },
+		"no task": func(f *paneSweepFixture) { f.job("j", "implementer", "") },
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := newPaneSweepFixture(t)
@@ -309,20 +309,9 @@ func TestPaneSweepNeverTouchesProtectedJobs(t *testing.T) {
 	}
 }
 
-func TestPaneSweepSweepsATesterToo(t *testing.T) {
-	f := newPaneSweepFixture(t)
-	f.job("j", "tester", "42")
-	f.tasks["42"] = "merged"
-	f.at(0)
-	f.at(11)
-	if len(f.closed()) != 1 {
-		t.Fatalf("tester pane not closed")
-	}
-}
-
 func TestPaneSweepKeepsEveryPaneWhenTheTaskReadFails(t *testing.T) {
 	f := newPaneSweepFixture(t)
-	f.job("j", "worker", "42")
+	f.job("j", "implementer", "42")
 	f.tasks["42"] = "merged"
 	f.taskErr = errors.New("hk down")
 	f.at(0)
@@ -353,7 +342,7 @@ func TestPaneSweepKeepsAPaneWhoseIdentityDoesNotMatchTheJob(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := newPaneSweepFixture(t)
-			pane := f.job("j", "worker", "42")
+			pane := f.job("j", "implementer", "42")
 			f.tasks["42"] = "merged"
 			change(f, pane)
 			f.at(0)
@@ -369,8 +358,8 @@ func TestPaneSweepKeepsAPaneWhoseIdentityDoesNotMatchTheJob(t *testing.T) {
 // does not keep this job's pane open, and this job's close does not touch it.
 func TestPaneSweepJudgesEachJobOnItsOwn(t *testing.T) {
 	f := newPaneSweepFixture(t)
-	first := f.job("a", "worker", "42")
-	second := f.job("b", "worker", "42")
+	first := f.job("a", "implementer", "42")
+	second := f.job("b", "implementer", "42")
 	f.tasks["42"] = "merged"
 	f.at(0)
 	f.status[second] = "working"
@@ -388,7 +377,7 @@ func TestPaneSweepJudgesEachJobOnItsOwn(t *testing.T) {
 
 func TestPaneSweepKeepsThePaneWhenItsScreenCannotBeSaved(t *testing.T) {
 	f := newPaneSweepFixture(t)
-	f.job("j", "worker", "42")
+	f.job("j", "implementer", "42")
 	f.tasks["42"] = "merged"
 	base := f.runner.Do
 	f.runner.Do = func(c Command) Result {
@@ -411,7 +400,7 @@ func TestPaneSweepKeepsThePaneWhenItsScreenCannotBeSaved(t *testing.T) {
 // gathered before it does not count toward the grace.
 func TestPaneSweepRestartsTheGraceAfterHerdrCannotBeRead(t *testing.T) {
 	f := newPaneSweepFixture(t)
-	pane := f.job("j", "worker", "42")
+	pane := f.job("j", "implementer", "42")
 	f.tasks["42"] = "merged"
 	f.at(0)
 	base := f.runner.Do
@@ -440,7 +429,7 @@ func TestPaneSweepRestartsTheGraceAfterHerdrCannotBeRead(t *testing.T) {
 // the record as it was and the job unreaped for the next sweep.
 func TestPaneSweepWritesTheRecordOnlyAfterThePaneCloses(t *testing.T) {
 	f := newPaneSweepFixture(t)
-	f.job("j", "worker", "42")
+	f.job("j", "implementer", "42")
 	f.tasks["42"] = "merged"
 	closeResult := Result{Code: 1}
 	base := f.runner.Do
@@ -476,7 +465,7 @@ func TestPaneSweepWritesTheRecordOnlyAfterThePaneCloses(t *testing.T) {
 func TestPaneSweepReadsUsageBeforeThePaneCloses(t *testing.T) {
 	f := newPaneSweepFixture(t)
 	claudeFixture(t, f.a.Home)
-	pane := f.job("j", "worker", "42", map[string]any{"cwd": testCWD, "harness_session": map[string]any{"kind": "claude", "id": "unknown", "source": "unavailable"}})
+	pane := f.job("j", "implementer", "42", map[string]any{"cwd": testCWD, "harness_session": map[string]any{"kind": "claude", "id": "unknown", "source": "unavailable"}})
 	f.sessions[pane] = `{"agent":"claude","kind":"id","value":"` + testClaudeID + `","source":"herdr:claude"}`
 	f.tasks["42"] = "merged"
 	f.at(0)
@@ -507,7 +496,7 @@ func (s *sweepOrderStore) Put(ctx context.Context, id string, fields map[string]
 
 func TestPaneSweepLogsIdsNeverScreenText(t *testing.T) {
 	f := newPaneSweepFixture(t)
-	f.job("j", "worker", "42")
+	f.job("j", "implementer", "42")
 	f.tasks["42"] = "merged"
 	f.at(0)
 	f.at(11)

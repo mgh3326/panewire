@@ -184,7 +184,7 @@ func TestPaneSweepKeepsADetachedReviewerAtAnOpenPRHead(t *testing.T) {
 	f := newPaneSweepFixture(t)
 	f.withGit(g)
 	cwd := g.worktree(t, "mwr-306")
-	f.job("mwr", "worker", "42", map[string]any{"cwd": cwd, "role": "reviewer"})
+	f.job("mwr", "implementer", "42", map[string]any{"cwd": cwd, "role": "reviewer"})
 	f.tasks["42"], f.category["42"] = "deployed", "completed"
 	g.detached, g.head = true, paneSweepPRHead
 	f.prChanges["42"] = []PRChange{{Number: 306, State: "open", Head: paneSweepPRHead}}
@@ -336,7 +336,7 @@ func TestPaneSweepClosesAGivenUpJobEvenWithAnOpenPR(t *testing.T) {
 	}
 }
 
-// A reviewer (role reviewer, or a mergewake mwr-* label), a tester or a counsel
+// A reviewer (role reviewer, or a mergewake mwr-* label) or a consult
 // never authors the PR it looked at: once its own record completed it is swept even
 // though its detached worktree sits at the open PR's head.
 func TestPaneSweepClosesACompletedReviewerAtAnOpenPRHead(t *testing.T) {
@@ -344,10 +344,9 @@ func TestPaneSweepClosesACompletedReviewerAtAnOpenPRHead(t *testing.T) {
 		name, id, role string
 		extra          map[string]any
 	}{
-		{"reviewer role", "rv", "worker", map[string]any{"role": "reviewer"}},
-		{"mwr label", "mw", "worker", map[string]any{"label": "mwr-306"}},
-		{"tester", "ts", "tester", nil},
-		{"counsel role", "cs", "worker", map[string]any{"role": "counsel"}},
+		{"reviewer role", "rv", "implementer", map[string]any{"role": "reviewer"}},
+		{"mwr label", "mw", "implementer", map[string]any{"label": "mwr-306"}},
+		{"consult role", "cs", "implementer", map[string]any{"role": "consult"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			g := newSweepGitFake(t)

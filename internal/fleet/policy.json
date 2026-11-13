@@ -7,10 +7,9 @@
       "family": "anthropic",
       "capability": "standard",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ]
     },
     "sonnet": {
@@ -19,10 +18,9 @@
       "family": "anthropic",
       "capability": "standard",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ]
     },
     "haiku": {
@@ -31,10 +29,9 @@
       "family": "anthropic",
       "capability": "standard",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ]
     },
     "fable": {
@@ -43,10 +40,9 @@
       "family": "anthropic",
       "capability": "standard",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ]
     },
     "sonnet-med": {
@@ -55,10 +51,9 @@
       "family": "anthropic",
       "capability": "standard",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ]
     },
     "builder-opus": {
@@ -67,24 +62,9 @@
       "family": "anthropic",
       "capability": "standard",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
-      ],
-      "effort": "high",
-      "pin": true
-    },
-    "captain-opus": {
-      "canon": "opus",
-      "kind": "claude",
-      "family": "anthropic",
-      "capability": "standard",
-      "roles": [
-        "worker",
-        "tester",
-        "reviewer",
-        "counsel"
+        "consult"
       ],
       "effort": "high",
       "pin": true
@@ -95,67 +75,59 @@
       "family": "anthropic",
       "capability": "standard",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ],
       "effort": "xhigh",
       "rungs": {
         "none": {
           "roles": [
-            "worker",
-            "tester",
+            "implementer",
             "reviewer",
-            "counsel"
+            "consult"
           ]
         },
         "low": {
           "roles": [
-            "worker",
-            "tester",
+            "implementer",
             "reviewer",
-            "counsel"
+            "consult"
           ]
         },
         "medium": {
           "roles": [
-            "worker",
-            "tester",
+            "implementer",
             "reviewer",
-            "counsel"
+            "consult"
           ]
         },
         "high": {
           "roles": [
-            "worker",
-            "tester",
+            "implementer",
             "reviewer",
-            "counsel"
+            "consult"
           ]
         },
         "xhigh": {
           "roles": [
-            "worker",
-            "tester",
+            "implementer",
             "reviewer",
-            "counsel"
+            "consult"
           ]
         },
         "max": {
           "roles": [
-            "worker",
-            "tester",
+            "implementer",
             "reviewer",
-            "counsel"
+            "consult"
           ]
         },
         "ultra": {
           "roles": [
-            "worker",
-            "tester",
+            "implementer",
             "reviewer",
-            "counsel"
+            "consult"
           ]
         }
       }
@@ -166,10 +138,9 @@
       "family": "anthropic",
       "capability": "standard",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ],
       "effort": "low",
       "pin": true,
@@ -181,10 +152,9 @@
       "family": "anthropic",
       "capability": "standard",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ],
       "effort": "medium",
       "pin": true,
@@ -196,10 +166,9 @@
       "family": "anthropic",
       "capability": "standard",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ],
       "effort": "low",
       "pin": true,
@@ -211,10 +180,9 @@
       "family": "anthropic",
       "capability": "standard",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ],
       "effort": "medium",
       "pin": true,
@@ -226,10 +194,9 @@
       "family": "anthropic",
       "capability": "standard",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ],
       "effort": "xhigh",
       "pin": true,
@@ -241,10 +208,9 @@
       "family": "anthropic",
       "capability": "standard",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ],
       "effort": "max",
       "pin": true,
@@ -256,10 +222,9 @@
       "family": "anthropic",
       "capability": "standard",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ],
       "effort": "low",
       "pin": true,
@@ -271,10 +236,9 @@
       "family": "anthropic",
       "capability": "standard",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ],
       "effort": "medium",
       "pin": true,
@@ -286,10 +250,9 @@
       "family": "anthropic",
       "capability": "standard",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ],
       "effort": "high",
       "pin": true,
@@ -301,10 +264,9 @@
       "family": "anthropic",
       "capability": "standard",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ],
       "effort": "xhigh",
       "pin": true,
@@ -316,10 +278,9 @@
       "family": "anthropic",
       "capability": "standard",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ],
       "effort": "max",
       "pin": true,
@@ -331,10 +292,9 @@
       "family": "openai",
       "capability": "standard",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ],
       "effort": "low",
       "pin": true,
@@ -346,10 +306,9 @@
       "family": "openai",
       "capability": "standard",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ],
       "effort": "medium",
       "pin": true,
@@ -361,10 +320,9 @@
       "family": "openai",
       "capability": "standard",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ],
       "effort": "high",
       "pin": true,
@@ -376,10 +334,9 @@
       "family": "openai",
       "capability": "standard",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ],
       "effort": "xhigh",
       "pin": true
@@ -390,10 +347,9 @@
       "family": "openai",
       "capability": "standard",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ],
       "effort": "max",
       "pin": true
@@ -404,10 +360,9 @@
       "family": "openai",
       "capability": "standard",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ],
       "effort": "low",
       "pin": true,
@@ -419,10 +374,9 @@
       "family": "openai",
       "capability": "standard",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ],
       "effort": "medium",
       "pin": true,
@@ -434,10 +388,9 @@
       "family": "openai",
       "capability": "standard",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ],
       "effort": "high",
       "pin": true,
@@ -449,10 +402,9 @@
       "family": "openai",
       "capability": "standard",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ],
       "effort": "max",
       "pin": true,
@@ -464,10 +416,9 @@
       "family": "openai",
       "capability": "standard",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ],
       "effort": "medium",
       "pin": true,
@@ -480,10 +431,9 @@
       "family": "openai",
       "capability": "standard",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ],
       "effort": "high",
       "pin": true,
@@ -496,10 +446,9 @@
       "family": "openai",
       "capability": "standard",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ],
       "effort": "xhigh",
       "pin": true,
@@ -512,10 +461,9 @@
       "family": "openai",
       "capability": "standard",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ],
       "effort": "max",
       "pin": true,
@@ -528,10 +476,9 @@
       "family": "openai",
       "capability": "standard",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ],
       "effort": "high"
     },
@@ -541,10 +488,9 @@
       "family": "openai",
       "capability": "standard",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ]
     },
     "codex-max": {
@@ -553,10 +499,9 @@
       "family": "openai",
       "capability": "standard",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ]
     },
     "builder-sol": {
@@ -565,10 +510,9 @@
       "family": "openai",
       "capability": "standard",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ],
       "effort": "high",
       "pin": true
@@ -579,10 +523,9 @@
       "family": "openai",
       "capability": "standard",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ],
       "effort": "high",
       "pin": true
@@ -593,10 +536,9 @@
       "family": "openai",
       "capability": "standard",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ],
       "effort": "medium"
     },
@@ -606,10 +548,9 @@
       "family": "openai",
       "capability": "standard",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ],
       "effort": "high"
     },
@@ -619,10 +560,9 @@
       "family": "openai",
       "capability": "standard",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ],
       "effort": "max"
     },
@@ -632,10 +572,9 @@
       "family": "openai",
       "capability": "standard",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ],
       "effort": "xhigh",
       "pin": true
@@ -646,10 +585,9 @@
       "family": "openai",
       "capability": "standard",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ],
       "effort": "low",
       "proof": "codex-footer"
@@ -660,10 +598,9 @@
       "family": "openai",
       "capability": "standard",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ]
     },
     "devin-swe2": {
@@ -673,10 +610,9 @@
       "capability": "standard",
       "effort": "high",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ]
     },
     "devin-swe2-medium": {
@@ -685,10 +621,9 @@
       "family": "cognition",
       "capability": "standard",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ]
     },
     "devin-swe2-max": {
@@ -697,10 +632,9 @@
       "family": "cognition",
       "capability": "standard",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ]
     },
     "devin-swe17": {
@@ -709,10 +643,9 @@
       "family": "cognition",
       "capability": "standard",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ]
     },
     "devin-glm52": {
@@ -721,10 +654,9 @@
       "family": "zhipu",
       "capability": "standard",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ]
     },
     "devin-ds41": {
@@ -733,10 +665,9 @@
       "family": "deepseek",
       "capability": "standard",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ]
     },
     "devin-ds41-max": {
@@ -745,10 +676,9 @@
       "family": "deepseek",
       "capability": "standard",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ]
     },
     "devin-ds41-low": {
@@ -757,10 +687,9 @@
       "family": "deepseek",
       "capability": "standard",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ]
     },
     "devin-argon4-high": {
@@ -769,10 +698,9 @@
       "family": "google",
       "capability": "standard",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ]
     },
     "devin-glm53-high": {
@@ -781,10 +709,9 @@
       "family": "other",
       "capability": "standard",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ]
     },
     "devin-fusion-opus55": {
@@ -793,10 +720,9 @@
       "family": "anthropic",
       "capability": "standard",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ]
     },
     "devin-fusion-sonnet55": {
@@ -805,10 +731,9 @@
       "family": "anthropic",
       "capability": "standard",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ]
     },
     "devin-fusion-sol61": {
@@ -817,10 +742,9 @@
       "family": "openai",
       "capability": "standard",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ]
     },
     "devin-fusion-sol61-xhigh": {
@@ -829,10 +753,9 @@
       "family": "openai",
       "capability": "standard",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ]
     },
     "devin-argon": {
@@ -841,10 +764,9 @@
       "family": "google",
       "capability": "standard",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ]
     },
     "devin-argon-medium": {
@@ -853,10 +775,9 @@
       "family": "google",
       "capability": "standard",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ]
     },
     "devin-argon-low": {
@@ -865,10 +786,9 @@
       "family": "google",
       "capability": "standard",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ]
     },
     "builder-devin": {
@@ -877,10 +797,9 @@
       "family": "cognition",
       "capability": "standard",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ]
     },
     "builder-devin-medium": {
@@ -889,10 +808,9 @@
       "family": "cognition",
       "capability": "standard",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ]
     },
     "builder-devin-max": {
@@ -901,10 +819,9 @@
       "family": "cognition",
       "capability": "standard",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ]
     },
     "builder-ds41": {
@@ -913,10 +830,9 @@
       "family": "deepseek",
       "capability": "standard",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ]
     },
     "builder-ds41-max": {
@@ -925,10 +841,9 @@
       "family": "deepseek",
       "capability": "standard",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ]
     },
     "cmd-dsflash41": {
@@ -938,66 +853,58 @@
       "capability": "cmd_dsflash41",
       "effort": "high",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ],
       "rungs": {
         "none": {
           "roles": [
-            "worker",
-            "tester",
+            "implementer",
             "reviewer",
-            "counsel"
+            "consult"
           ]
         },
         "low": {
           "roles": [
-            "worker",
-            "tester",
+            "implementer",
             "reviewer",
-            "counsel"
+            "consult"
           ]
         },
         "medium": {
           "roles": [
-            "worker",
-            "tester",
+            "implementer",
             "reviewer",
-            "counsel"
+            "consult"
           ]
         },
         "high": {
           "roles": [
-            "worker",
-            "tester",
+            "implementer",
             "reviewer",
-            "counsel"
+            "consult"
           ]
         },
         "xhigh": {
           "roles": [
-            "worker",
-            "tester",
+            "implementer",
             "reviewer",
-            "counsel"
+            "consult"
           ]
         },
         "max": {
           "roles": [
-            "worker",
-            "tester",
+            "implementer",
             "reviewer",
-            "counsel"
+            "consult"
           ]
         },
         "ultra": {
           "roles": [
-            "worker",
-            "tester",
+            "implementer",
             "reviewer",
-            "counsel"
+            "consult"
           ]
         }
       }
@@ -1008,10 +915,9 @@
       "family": "anthropic",
       "capability": "standard",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ]
     },
     "kiro-sonnet": {
@@ -1020,10 +926,9 @@
       "family": "anthropic",
       "capability": "standard",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ]
     },
     "kiro-haiku": {
@@ -1032,10 +937,9 @@
       "family": "anthropic",
       "capability": "standard",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ]
     },
     "kiro-sol": {
@@ -1044,10 +948,9 @@
       "family": "openai",
       "capability": "standard",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ]
     },
     "kiro-luna": {
@@ -1056,10 +959,9 @@
       "family": "openai",
       "capability": "standard",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ]
     },
     "kiro-cheap": {
@@ -1068,10 +970,9 @@
       "family": "qwen",
       "capability": "standard",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ]
     },
     "kiro-glm": {
@@ -1080,10 +981,9 @@
       "family": "zhipu",
       "capability": "standard",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ]
     },
     "kiro-deepseek": {
@@ -1092,10 +992,9 @@
       "family": "deepseek",
       "capability": "standard",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ]
     },
     "kiro-minimax": {
@@ -1104,10 +1003,9 @@
       "family": "minimax",
       "capability": "standard",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ]
     },
     "kiro-minimax21": {
@@ -1116,10 +1014,9 @@
       "family": "minimax",
       "capability": "standard",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ]
     },
     "kiro-opus-xhigh": {
@@ -1128,10 +1025,9 @@
       "family": "anthropic",
       "capability": "standard",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ],
       "effort": "xhigh"
     },
@@ -1141,10 +1037,9 @@
       "family": "anthropic",
       "capability": "standard",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ],
       "effort": "max"
     },
@@ -1154,10 +1049,9 @@
       "family": "openai",
       "capability": "standard",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ],
       "effort": "xhigh"
     },
@@ -1167,10 +1061,9 @@
       "family": "openai",
       "capability": "standard",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ],
       "effort": "max"
     },
@@ -1180,10 +1073,9 @@
       "family": "zhipu",
       "capability": "standard",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ]
     },
     "oc-dsflash": {
@@ -1192,10 +1084,9 @@
       "family": "deepseek",
       "capability": "standard",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ]
     },
     "oc-sonnet46": {
@@ -1204,10 +1095,9 @@
       "family": "anthropic",
       "capability": "standard",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ]
     },
     "oc-oss": {
@@ -1216,10 +1106,9 @@
       "family": "openai",
       "capability": "standard",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ]
     },
     "oc-omni": {
@@ -1228,10 +1117,9 @@
       "family": "mixed",
       "capability": "standard",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ]
     },
     "oc-qwen37-max": {
@@ -1240,10 +1128,9 @@
       "family": "qwen",
       "capability": "standard",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ]
     },
     "oc-minimax-m3": {
@@ -1252,10 +1139,9 @@
       "family": "minimax",
       "capability": "standard",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ]
     },
     "oc-solar4": {
@@ -1264,10 +1150,9 @@
       "family": "upstage",
       "capability": "standard",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ]
     },
     "codex-sol56": {
@@ -1276,10 +1161,9 @@
       "family": "openai",
       "capability": "standard",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ]
     },
     "codex-luna56": {
@@ -1288,10 +1172,9 @@
       "family": "openai",
       "capability": "standard",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ]
     },
     "codex-sol6": {
@@ -1300,10 +1183,9 @@
       "family": "openai",
       "capability": "standard",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ]
     },
     "kiro": {
@@ -1312,10 +1194,9 @@
       "family": "openai",
       "capability": "standard",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ]
     },
     "agy-flash37": {
@@ -1324,10 +1205,9 @@
       "family": "google",
       "capability": "standard",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ]
     },
     "builder-sol6": {
@@ -1336,10 +1216,9 @@
       "family": "openai",
       "capability": "standard",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ],
       "effort": "high",
       "pin": true
@@ -1350,10 +1229,9 @@
       "family": "google",
       "capability": "standard",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ]
     },
     "agy-flash38-medium": {
@@ -1362,10 +1240,9 @@
       "family": "google",
       "capability": "standard",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ]
     },
     "agy-flash38-low": {
@@ -1374,10 +1251,9 @@
       "family": "google",
       "capability": "standard",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ]
     },
     "agy-sonnet46": {
@@ -1386,10 +1262,9 @@
       "family": "anthropic",
       "capability": "standard",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ]
     },
     "agy-opus46": {
@@ -1398,10 +1273,9 @@
       "family": "anthropic",
       "capability": "standard",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ]
     },
     "agy-oss120": {
@@ -1410,10 +1284,9 @@
       "family": "openai",
       "capability": "standard",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ]
     },
     "cc-qwen38": {
@@ -1422,10 +1295,9 @@
       "family": "qwen",
       "capability": "clinepass",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ],
       "route": "clinepass"
     },
@@ -1435,10 +1307,9 @@
       "family": "zhipu",
       "capability": "clinepass",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ],
       "route": "clinepass",
       "context_tokens": 1000000
@@ -1450,10 +1321,9 @@
       "capability": "standard",
       "effort": "high",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ]
     },
     "omp-sonnet": {
@@ -1463,10 +1333,9 @@
       "capability": "standard",
       "effort": "high",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ]
     },
     "omp-sol": {
@@ -1476,10 +1345,9 @@
       "capability": "standard",
       "effort": "high",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ]
     },
     "omp-terra61": {
@@ -1489,10 +1357,9 @@
       "capability": "standard",
       "effort": "high",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ]
     },
     "omp-haiku": {
@@ -1502,10 +1369,9 @@
       "capability": "standard",
       "effort": "high",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ]
     },
     "omp-luna": {
@@ -1515,10 +1381,9 @@
       "capability": "standard",
       "effort": "high",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ]
     },
     "omp-dsflash41": {
@@ -1528,8 +1393,7 @@
       "capability": "omp_commandcode",
       "effort": "high",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer"
       ]
     },
@@ -1539,10 +1403,9 @@
       "family": "cognition",
       "capability": "standard",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ]
     },
     "devin-swe2-flash-medium": {
@@ -1551,10 +1414,9 @@
       "family": "cognition",
       "capability": "standard",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ]
     },
     "devin-swe2-flash-max": {
@@ -1563,10 +1425,9 @@
       "family": "cognition",
       "capability": "standard",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer",
-        "counsel"
+        "consult"
       ]
     },
     "omp-inkling2s": {
@@ -1576,8 +1437,7 @@
       "capability": "omp_commandcode",
       "effort": "high",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer"
       ]
     },
@@ -1588,8 +1448,7 @@
       "capability": "omp_commandcode",
       "effort": "high",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer"
       ]
     },
@@ -1600,8 +1459,7 @@
       "capability": "omp_commandcode",
       "effort": "high",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer"
       ]
     },
@@ -1612,8 +1470,7 @@
       "capability": "omp_commandcode",
       "effort": "high",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer"
       ]
     },
@@ -1625,8 +1482,7 @@
       "effort": "off",
       "no_thinking": true,
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer"
       ]
     },
@@ -1638,8 +1494,7 @@
       "effort": "off",
       "no_thinking": true,
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer"
       ]
     },
@@ -1650,8 +1505,7 @@
       "capability": "omp_commandcode",
       "effort": "high",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer"
       ]
     },
@@ -1662,8 +1516,7 @@
       "capability": "omp_commandcode",
       "effort": "high",
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer"
       ]
     },
@@ -1675,8 +1528,7 @@
       "effort": "off",
       "no_thinking": true,
       "roles": [
-        "worker",
-        "tester",
+        "implementer",
         "reviewer"
       ]
     }

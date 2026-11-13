@@ -31,7 +31,7 @@ func failureApp(t *testing.T, srv *httptest.Server) *App {
 // PR. extra keys go onto the job.spawned receipt.
 func seedBareJob(t *testing.T, a *App, id string, extra map[string]any) {
 	t.Helper()
-	putEvent(t, a, id, "job.claim", map[string]any{"task_id": "3250", "t_level": "T2", "role": "worker"})
+	putEvent(t, a, id, "job.claim", map[string]any{"task_id": "3250", "t_level": "T2", "role": "implementer"})
 	receipt := map[string]any{
 		"profile": "sonnet", "effort": "high", "model_id": "claude-sonnet-5-5",
 		"harness_session": map[string]any{"kind": "claude", "id": "s1"}, "task_id": "3250",
@@ -255,7 +255,7 @@ func TestMergedRepBodyUnchangedFromBase(t *testing.T) {
 	defer srv.Close()
 	a := benchFakeApp(t, srv)
 	a.Now = func() time.Time { return time.Date(2026, 11, 7, 8, 0, 0, 0, time.UTC) }
-	putEvent(t, a, "pw-job", "job.claim", map[string]any{"task_id": "3250", "t_level": "T2", "role": "worker"})
+	putEvent(t, a, "pw-job", "job.claim", map[string]any{"task_id": "3250", "t_level": "T2", "role": "implementer"})
 	putEvent(t, a, "pw-job", "job.spawned", map[string]any{
 		"profile": "sonnet", "effort": "high", "model_id": "claude-sonnet-5-5",
 		"harness_session": map[string]any{"kind": "claude", "id": "s1"}, "task_id": "3250",
@@ -289,7 +289,7 @@ func TestSweepHoldsReapedFailureRepWhileOpenPRThenWritesOnClose(t *testing.T) {
 	defer srv.Close()
 	f := newPaneSweepFixture(t)
 	f.a.BenchStore = &BenchStore{hk: &hkQuota{base: srv.URL, token: "test-token", now: f.a.Now}, now: f.a.Now}
-	f.job("j", "worker", "42")
+	f.job("j", "implementer", "42")
 	putEvent(t, f.a, "j", "job.joined", map[string]any{"pr": "https://github.com/mgh3326/panewire/pull/9", "head": "head-9"})
 	putEvent(t, f.a, "j", "job.revoked", map[string]any{})
 	f.tasks["42"] = "in_progress"
@@ -327,7 +327,7 @@ func TestSweepHoldsEscalatedJobWithOpenPRUntilPRCloses(t *testing.T) {
 	defer srv.Close()
 	f := newPaneSweepFixture(t)
 	f.a.BenchStore = &BenchStore{hk: &hkQuota{base: srv.URL, token: "test-token", now: f.a.Now}, now: f.a.Now}
-	f.job("e", "worker", "44")
+	f.job("e", "implementer", "44")
 	putEvent(t, f.a, "e", "job.joined", map[string]any{"pr": "https://github.com/mgh3326/panewire/pull/10", "head": "head-10"})
 	putEvent(t, f.a, "e", "job.escalate", map[string]any{})
 	f.tasks["44"] = "in_progress"
@@ -353,7 +353,7 @@ func TestSweepRecordsSupersededFailureRepWithoutPR(t *testing.T) {
 	defer srv.Close()
 	f := newPaneSweepFixture(t)
 	f.a.BenchStore = &BenchStore{hk: &hkQuota{base: srv.URL, token: "test-token", now: f.a.Now}, now: f.a.Now}
-	f.job("j", "worker", "42")
+	f.job("j", "implementer", "42")
 	putEvent(t, f.a, "j", "job.revoked", map[string]any{"outcome": "superseded"})
 	f.tasks["42"] = "in_progress"
 	f.at(0)
@@ -375,12 +375,12 @@ func TestSweepWritesRowsByOutcomeFinality(t *testing.T) {
 	defer srv.Close()
 	f := newPaneSweepFixture(t)
 	f.a.BenchStore = &BenchStore{hk: &hkQuota{base: srv.URL, token: "test-token", now: f.a.Now}, now: f.a.Now}
-	f.job("bare", "worker", "42")
+	f.job("bare", "implementer", "42")
 	putEvent(t, f.a, "bare", "job.revoked", map[string]any{})
-	f.job("merged", "worker", "43")
+	f.job("merged", "implementer", "43")
 	putEvent(t, f.a, "merged", "job.joined", map[string]any{"pr": "https://github.com/mgh3326/panewire/pull/9", "head": "head-9"})
 	putEvent(t, f.a, "merged", "job.revoked", map[string]any{})
-	f.job("done", "worker", "44")
+	f.job("done", "implementer", "44")
 	putEvent(t, f.a, "done", "job.completed", map[string]any{})
 	f.tasks["42"], f.tasks["43"], f.tasks["44"] = "in_progress", "in_progress", "in_progress"
 	f.prChanges["43"] = []PRChange{{Number: 9, State: "merged", Head: "head-9",

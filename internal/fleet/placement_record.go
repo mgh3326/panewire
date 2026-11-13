@@ -106,8 +106,10 @@ type pendingPlacement struct {
 	ResolveJob bool            `json:"resolve_job,omitempty"`
 }
 
+// placementRole is the hk placement record's role: review, consult or worker
+// (the work class), not a spawn role.
 func placementRole(s Spawn) string {
-	role := firstNonempty(s.RoutingRole, builtinRoleMap[s.Role])
+	role := firstNonempty(s.RoutingRole, s.Role)
 	switch {
 	case s.Role == "reviewer" || role == "reviewer" || role == "judge":
 		return "review"

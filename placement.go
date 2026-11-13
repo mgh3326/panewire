@@ -79,7 +79,7 @@ type PlacementPolicy struct {
 
 // PlacementMachineSlots caps how many distinct tasks may hold active jobs on
 // one machine. A task is the owner_lane bundle: a builder job plus every
-// tester/worker job that builder spawned with itself as owner.
+// implementer job that builder spawned with itself as owner.
 type PlacementMachineSlots struct {
 	TaskSlots int `json:"task_slots"`
 }
@@ -363,7 +363,7 @@ type placementCache struct {
 }
 
 // placementTaskKey groups the active jobs of one task: a builder's claim
-// records owner_lane as its own lane, and the tester/worker jobs it spawns
+// records owner_lane as its own lane, and the implementer jobs it spawns
 // carry that same lane as --owner. A job without an attributable owner —
 // empty, or the "default" sentinel used before --owner was required —
 // cannot be grouped and conservatively counts as a task of its own.

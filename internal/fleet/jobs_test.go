@@ -652,7 +652,7 @@ func TestDoneResultOnePutThenRelay(t *testing.T) {
 		h.records["j"]["state"] = "spawned"
 		var seq []string
 		a.JobStore = seqStore{JobStore: h.client(), seq: &seq, name: "hk"}
-		seedJob(t, a, "j", "worker")
+		seedJob(t, a, "j", "implementer")
 		origDo := f.Do
 		f.Do = func(c Command) Result {
 			if c.Name == "panewire" {
@@ -712,7 +712,7 @@ func TestDoneResultOnePutThenRelay(t *testing.T) {
 func TestDoneRejectsNonObjectResult(t *testing.T) {
 	a := testApp(t)
 	ledgerRunner(t, a)
-	seedJob(t, a, "j", "worker")
+	seedJob(t, a, "j", "implementer")
 	path := filepath.Join(a.Jobs, "j", "report.md")
 	if e := os.WriteFile(path, []byte("done\n"), 0600); e != nil {
 		t.Fatal(e)
@@ -734,7 +734,7 @@ func TestDoneRecordWriteFailureStillRelays(t *testing.T) {
 	h := newFakeHK(t)
 	h.down = true
 	a.JobStore = h.client()
-	seedJob(t, a, "j", "worker")
+	seedJob(t, a, "j", "implementer")
 	emits := 0
 	origDo := f.Do
 	f.Do = func(c Command) Result {
@@ -772,7 +772,7 @@ func TestWatcherLostWritesJobRecord(t *testing.T) {
 	h.claimJob("j", float64(42), "test-host")
 	h.records["j"]["state"] = "spawned"
 	a.JobStore = h.client()
-	seedJob(t, a, "j", "worker")
+	seedJob(t, a, "j", "implementer")
 	if e := a.watch(context.Background(), []string{"j"}); e != nil {
 		t.Fatal(e)
 	}
@@ -788,7 +788,7 @@ func TestEscalateWritesJobRecord(t *testing.T) {
 	h.claimJob("j", float64(42), "test-host")
 	h.records["j"]["state"] = "spawned"
 	a.JobStore = h.client()
-	seedJob(t, a, "j", "worker")
+	seedJob(t, a, "j", "implementer")
 	if e := a.lifecycle(context.Background(), "escalate", []string{"j", "--question", "which branch?"}); e != nil {
 		t.Fatal(e)
 	}
@@ -803,7 +803,7 @@ func TestParentResolveLocalFirst(t *testing.T) {
 	a := testApp(t)
 	h := newFakeHK(t)
 	a.JobStore = h.client()
-	putEvent(t, a, "pj", "job.claim", map[string]any{"owner_lane": "owner", "task_id": "11", "t_level": "T1", "role": "worker"})
+	putEvent(t, a, "pj", "job.claim", map[string]any{"owner_lane": "owner", "task_id": "11", "t_level": "T1", "role": "implementer"})
 	j, e := a.resolveParent(context.Background(), "pj")
 	if e != nil {
 		t.Fatal(e)
@@ -929,7 +929,7 @@ func TestWaitDelegatedHKRows(t *testing.T) {
 			if tt.name == "completed with result" {
 				h.records["j"]["result"] = map[string]any{"findings": []any{}}
 			}
-			s := Spawn{Job: "j", Role: "worker", WaitTimeout: "5s"}
+			s := Spawn{Job: "j", Role: "implementer", WaitTimeout: "5s"}
 			e := a.waitJob(context.Background(), s, true)
 			if code(e) != tt.want {
 				t.Fatalf("state %q: exit %d want %d (%v)", tt.state, code(e), tt.want, e)
@@ -963,7 +963,7 @@ func TestWaitDelegatedHKWarnSurvivesEarlierWarnings(t *testing.T) {
 	h := newFakeHK(t)
 	h.down = true
 	a.JobStore = h.client()
-	s := Spawn{Job: "j", Role: "worker", WaitTimeout: "5s"}
+	s := Spawn{Job: "j", Role: "implementer", WaitTimeout: "5s"}
 	if code(a.waitJob(context.Background(), s, true)) != 85 {
 		t.Fatal("unreadable hk must bound and fall back")
 	}
@@ -978,7 +978,7 @@ func TestWaitDelegatedHKUnavailableWarnsOnce(t *testing.T) {
 	h := newFakeHK(t)
 	h.down = true
 	a.JobStore = h.client()
-	s := Spawn{Job: "j", Role: "worker", WaitTimeout: "5s"}
+	s := Spawn{Job: "j", Role: "implementer", WaitTimeout: "5s"}
 	if code(a.waitJob(context.Background(), s, true)) != 85 {
 		t.Fatal("unreadable hk must bound and fall back")
 	}

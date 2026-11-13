@@ -234,7 +234,7 @@ func TestJobCloseHubRoleRelease(t *testing.T) {
 	if r := t14Result(t, response); r.status != http.StatusAccepted {
 		t.Fatalf("gone pane: %d %s", r.status, r.body)
 	}
-	owner, job, _, err := hub.inbox.store.spawnRoleOwner(t.Context(), "42:worker")
+	owner, job, _, err := hub.inbox.store.spawnRoleOwner(t.Context(), "42:implementer")
 	if err != nil || owner == held.Request.RequestID || job != "test-job-r2" {
 		t.Fatalf("role owner=%s job=%s err=%v", owner, job, err)
 	}

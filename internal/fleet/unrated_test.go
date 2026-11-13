@@ -56,18 +56,18 @@ func TestUnratedLeadConsultResolve(t *testing.T) {
 }
 
 func TestUnratedSeatCheck(t *testing.T) {
-	s := Seat{Canon: "codex-sol", Kind: "codex", Family: "openai", Capability: "standard", Roles: []string{"counsel", "worker", "tester", "reviewer"}}
+	s := Seat{Canon: "codex-sol", Kind: "codex", Family: "openai", Capability: "standard", Roles: []string{"consult", "implementer", "reviewer"}}
 	l := Launch{Profile: "codex-sol", ModelID: "sol-m", Effort: "high", Grade: "unrated", Gate: "default"}
 	for _, tc := range []struct {
 		role, grade string
 		want        int
-	}{{"counsel", "", 0}, {"worker", "C", exitSeatRefused}, {"tester", "C", exitSeatRefused}, {"reviewer", "C", exitSeatRefused}} {
+	}{{"consult", "", 0}, {"implementer", "C", exitSeatRefused}, {"reviewer", "C", exitSeatRefused}} {
 		if got := code(s.Check(l, tc.role, tc.grade, "anthropic", "", nil)); got != tc.want {
 			t.Errorf("%s grade=%q: exit=%d want=%d", tc.role, tc.grade, got, tc.want)
 		}
 	}
 	l.Grade = "unknown"
-	if got := code(s.Check(l, "counsel", "", "", "", nil)); got != exitConfig {
+	if got := code(s.Check(l, "consult", "", "", "", nil)); got != exitConfig {
 		t.Fatalf("unknown grade accepted for consult: exit=%d", got)
 	}
 }
@@ -82,7 +82,7 @@ func TestUnratedPlanOutput(t *testing.T) {
 				q.CatalogRows = []CatalogRow{{Profile: "opus", Effort: "high", Grade: "S+", Pool: "claude", Gate: "default", ModelID: "opus-m"}, {Profile: "codex-sol", Effort: "high", Grade: "unrated", Pool: "codex", Gate: "default", ModelID: "sol-m"}}
 				q.GateDo = gatePools(map[string]string{"opus": "claude"})
 				serveRouting(t, routingDocV1)
-				args = []string{"--role", "counsel", "--t", "T1"}
+				args = []string{"--role", "consult", "--t", "T1"}
 			}
 			if asJSON {
 				args = append(args, "--json")

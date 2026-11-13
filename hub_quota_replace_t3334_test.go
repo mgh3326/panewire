@@ -181,7 +181,7 @@ func (f *quotaReplaceFixture) run(t *testing.T, placed hubSpawnOutcome, nodeComm
 	serve(nodeCommandRead(t, f.node))
 	served := 3
 	if f.role != "reviewer" && nodeCommands > 3 {
-		// A worker or tester's record ends (handed_over_to) before the
+		// An implementer's record ends (handed_over_to) before the
 		// successor is admitted, because the spawn refuses a task still bound
 		// to a job that is not lost.
 		serve(nodeCommandRead(t, f.node))
@@ -321,7 +321,7 @@ func TestQuotaStopReviewerWithNoOtherPoolIsNotReplaced(t *testing.T) {
 // A worker the manager handed over is replaced with the same task; its brief
 // names the earlier job's report and branch; its record ends handed_over_to.
 func TestQuotaStopHandedOverWorkerIsReplaced(t *testing.T) {
-	f := newQuotaReplaceFixture(t, "worker", "pw-task-42")
+	f := newQuotaReplaceFixture(t, "implementer", "pw-task-42")
 	placed := hubSpawnOutcome{RC: 0, Stage: "done", Host: quotaPlaced, Pane: "w9:p1", Profile: "devin-swe2"}
 	result, commands := f.run(t, placed, 4)
 	if !result.ok || result.job != "pw-task-42-q1" {
@@ -343,7 +343,7 @@ func TestQuotaStopHandedOverWorkerIsReplaced(t *testing.T) {
 }
 
 // A pinned profile cannot move to another pool, and a role other than worker,
-// tester or reviewer has no replacement.
+// reviewer has no replacement.
 func TestQuotaStopRefusesWhatItCannotReplace(t *testing.T) {
 	f := newQuotaReplaceFixture(t, "reviewer", "mwr-3-p1")
 	if job, ok := f.hub.replaceQuotaStopped(t.Context(), "machine-b", quotaStopEvent("mwr-3-p1")); ok || job != "" {
@@ -357,7 +357,7 @@ func TestQuotaStopRefusesWhatItCannotReplace(t *testing.T) {
 // A pane that is working, not idle, is never replaced or closed: nothing is
 // placed while the old pane could still be doing the work.
 func TestQuotaStopBusyPaneIsNotReplaced(t *testing.T) {
-	f := newQuotaReplaceFixture(t, "worker", "pw-task-43")
+	f := newQuotaReplaceFixture(t, "implementer", "pw-task-43")
 	f.paneStatus = "working"
 	result, commands := f.run(t, hubSpawnOutcome{}, 1)
 	if result.ok || len(commands) != 1 {
@@ -628,16 +628,16 @@ func TestQuotaStopAcceptedSuccessorGetsNoPointer(t *testing.T) {
 	}
 }
 
-// A tester that inherited its builder's task (--parent-job, no --task) is
+// A reviewer that inherited its builder's task (--parent-job, no --task) is
 // replaced with the same arguments (review finding).
-func TestQuotaStopReplacesAnInheritedTesterJob(t *testing.T) {
-	f := newQuotaReplaceFixtureWith(t, "tester", "pw-test-1", func(r *fleet.Submission) {
+func TestQuotaStopReplacesAnInheritedReviewerJob(t *testing.T) {
+	f := newQuotaReplaceFixtureWith(t, "reviewer", "pw-test-1", func(r *fleet.Submission) {
 		for i, arg := range r.Args {
 			if arg == "--task" {
 				r.Args[i], r.Args[i+1] = "--parent-job", "builder-1"
 			}
 		}
-		r.Args = append(r.Args, "--builder-family", "anthropic", "--builder-job", "builder-1")
+		r.Args = append(r.Args, "--author-family", "anthropic", "--builder-job", "builder-1")
 	})
 	placed := hubSpawnOutcome{RC: 0, Stage: "done", Host: quotaPlaced, Pane: "w9:p1", Profile: "sonnet"}
 	result, _ := f.run(t, placed, 4)

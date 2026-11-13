@@ -36,7 +36,7 @@ func (f *paneSweepFixture) localScreenFile(job string) bool {
 func TestPaneSweepWritesNoLocalScreenWhenTheUploadIsStored(t *testing.T) {
 	f := newPaneSweepFixture(t)
 	hk := useFakeHK(t)
-	pane := f.job("j", "worker", "42")
+	pane := f.job("j", "implementer", "42")
 	f.tasks["42"] = "merged"
 	f.at(0)
 	f.at(11)
@@ -59,7 +59,7 @@ func TestPaneSweepWritesNoLocalScreenWhenTheUploadIsStored(t *testing.T) {
 func TestPaneSweepLeavesAnEarlierLocalScreenAloneWhenTheUploadIsStored(t *testing.T) {
 	f := newPaneSweepFixture(t)
 	useFakeHK(t)
-	pane := f.job("j", "worker", "42")
+	pane := f.job("j", "implementer", "42")
 	f.tasks["42"] = "merged"
 	if err := os.WriteFile(filepath.Join(f.a.Jobs, "j", PaneScreenFile), []byte("earlier\n"), 0600); err != nil {
 		t.Fatal(err)
@@ -79,7 +79,7 @@ func TestPaneSweepLeavesAnEarlierLocalScreenAloneWhenTheUploadIsStored(t *testin
 func TestPaneSweepWritesTheLocalScreenWhenTheUploadFails(t *testing.T) {
 	f := newPaneSweepFixture(t)
 	useFakeHK(t).Handle(hkFails("PUT /v1/documents/", http.StatusInternalServerError, `{"error":"internal_error"}`))
-	pane := f.job("j", "worker", "42")
+	pane := f.job("j", "implementer", "42")
 	f.tasks["42"] = "merged"
 	f.at(0)
 	f.at(11)
@@ -103,7 +103,7 @@ func TestPaneSweepWritesTheLocalScreenWhenTheUploadFails(t *testing.T) {
 // pane-screen.txt, which the atomic rename cannot replace.
 func TestPaneSweepKeepsThePaneWhenNeitherUploadNorLocalWriteSucceeds(t *testing.T) {
 	f := newPaneSweepFixture(t)
-	f.job("j", "worker", "42")
+	f.job("j", "implementer", "42")
 	f.tasks["42"] = "merged"
 	if err := os.Mkdir(filepath.Join(f.a.Jobs, "j", PaneScreenFile), 0700); err != nil {
 		t.Fatal(err)
@@ -122,7 +122,7 @@ func TestPaneSweepKeepsThePaneWhenNeitherUploadNorLocalWriteSucceeds(t *testing.
 func TestPaneSweepKeepsThePaneWhenItsReadFailsBeforeUpload(t *testing.T) {
 	f := newPaneSweepFixture(t)
 	hk := useFakeHK(t)
-	f.job("j", "worker", "42")
+	f.job("j", "implementer", "42")
 	f.tasks["42"] = "merged"
 	base := f.runner.Do
 	f.runner.Do = func(c Command) Result {
@@ -156,7 +156,7 @@ func TestPaneSweepUploadsScreenOutsideExclusiveLock(t *testing.T) {
 		<-release
 		return http.StatusOK, `{"document":{},"changed":true}`, true
 	})
-	pane := f.job("j", "worker", "42")
+	pane := f.job("j", "implementer", "42")
 	f.tasks["42"] = "merged"
 	var exclusive atomic.Bool
 	f.sweeper.Exclusive = func() func() {
@@ -196,7 +196,7 @@ func TestPaneSweepUploadsScreenOutsideExclusiveLock(t *testing.T) {
 func TestPaneSweepKeepsTheWholeOversizedScreenLocally(t *testing.T) {
 	f := newPaneSweepFixture(t)
 	hk := useFakeHK(t)
-	pane := f.job("j", "worker", "42")
+	pane := f.job("j", "implementer", "42")
 	f.tasks["42"] = "merged"
 	full := "first line\n" + strings.Repeat("x", PaneScreenDocMaxBytes+100) + "\nlast line\n"
 	base := f.runner.Do

@@ -5,7 +5,7 @@ home-desktop (Linux) on 2026-11-12.
 
 ## Session names
 
-`panewire spawn` and `panewire delegate --headless` start every Claude session
+`panewire spawn` starts every Claude session
 with `--name <job id>`, so `ListAgents`, `/list-agents` and `@name` address a
 fleet seat by the id the fleet already uses. Only `claude` takes the flag; every
 other harness argv is unchanged (`withSessionName` in `internal/fleet/herdr.go`).

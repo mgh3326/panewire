@@ -43,7 +43,7 @@ func TestPaneSweepUploadsTheScreenAsEvidence(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			f := newPaneSweepFixture(t)
 			hk := useFakeHK(t)
-			pane := f.job("j", "worker", task)
+			pane := f.job("j", "implementer", task)
 			f.tasks[task] = "merged"
 			f.at(0)
 			f.at(11)
@@ -95,7 +95,7 @@ func TestPaneSweepClosesThePaneWhenTheScreenUploadFails(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			f := newPaneSweepFixture(t)
 			setup(t)
-			pane := f.job("j", "worker", "42")
+			pane := f.job("j", "implementer", "42")
 			f.tasks["42"] = "merged"
 			f.at(0)
 			f.at(11)
@@ -121,7 +121,7 @@ func TestPaneSweepClosesThePaneWhenTheScreenUploadFails(t *testing.T) {
 func TestPaneSweepUploadsTheTailOfAnOversizedScreen(t *testing.T) {
 	f := newPaneSweepFixture(t)
 	hk := useFakeHK(t)
-	pane := f.job("j", "worker", "42")
+	pane := f.job("j", "implementer", "42")
 	f.tasks["42"] = "merged"
 	full := "first line\n" + strings.Repeat("화면 ", 120<<10) + "\nlast line\n"
 	base := f.runner.Do

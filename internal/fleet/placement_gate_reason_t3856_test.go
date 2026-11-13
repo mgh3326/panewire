@@ -144,7 +144,7 @@ func TestHostNoteKeepsGateCodeAndQuotaRefusedStaysForReadings(t *testing.T) {
 // every host and carries no gate code.
 func TestReadingRefusalIsNotACodedGateRefusal(t *testing.T) {
 	a, s, q, _ := gateReasonFixture(t, 99)
-	if refusal := q.RequestRefusal(context.Background(), QuotaRequest{Profile: "sonnet", Effort: "high", Role: "worker"}); refusal != nil {
+	if refusal := q.RequestRefusal(context.Background(), QuotaRequest{Profile: "sonnet", Effort: "high", Role: "implementer"}); refusal != nil {
 		t.Fatalf("a reading's refusal was decided before the hosts: %v", refusal)
 	}
 	_, _, err := a.placeAuto(context.Background(), s, "brief")

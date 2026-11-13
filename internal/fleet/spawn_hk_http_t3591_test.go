@@ -432,12 +432,12 @@ func TestSpawnPathHKCLIHTTPParity(t *testing.T) {
 		name string
 		s    Spawn
 	}{
-		{"fresh", Spawn{Task: "42", Job: "job-a", Label: "worker-a", Role: "worker"}},
-		{"inherited", Spawn{Task: "42", Job: "job-c", Label: "worker-c", Role: "worker", Inherited: "job-b"}},
+		{"fresh", Spawn{Task: "42", Job: "job-a", Label: "worker-a", Role: "implementer"}},
+		{"inherited", Spawn{Task: "42", Job: "job-c", Label: "worker-c", Role: "implementer", Inherited: "job-b"}},
 		// --bypass covers an hk the precheck cannot reach, never an answer
 		// it cannot read: the CLI path reached bypass on a nonzero exit only.
-		{"fresh bypass", Spawn{Task: "42", Job: "job-a", Label: "worker-a", Role: "worker", Bypass: true}},
-		{"inherited bypass", Spawn{Task: "42", Job: "job-c", Label: "worker-c", Role: "worker", Inherited: "job-b", Bypass: true}},
+		{"fresh bypass", Spawn{Task: "42", Job: "job-a", Label: "worker-a", Role: "implementer", Bypass: true}},
+		{"inherited bypass", Spawn{Task: "42", Job: "job-c", Label: "worker-c", Role: "implementer", Inherited: "job-b", Bypass: true}},
 	}
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	for _, tc := range tasks {

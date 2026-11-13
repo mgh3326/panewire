@@ -14,8 +14,8 @@ import (
 	"github.com/mgh3326/panewire/internal/durable"
 )
 
-// The node's task pane sweep (docs/pane-sweep.md) closes the pane of a worker
-// or tester whose bound hk task has ended, or whose job was closed
+// The node's task pane sweep (docs/pane-sweep.md) closes the pane of an
+// implementer whose bound hk task has ended, or whose job was closed
 // (job.revoked, job.completed), once that pane has stayed not working for a
 // grace. It exists because mergewake's one reap at merge time skips a worker
 // that is busy then. A worker stays in its pane after READY as its PR's
@@ -232,14 +232,14 @@ func paneSweepClosed(j Job) bool {
 // method), so its pane waits on an open PR from its worktree. A job.revoked of
 // any outcome (panewire job close: abandoned, superseded, or released as
 // completed) is the owner giving the job up or releasing it, and is swept
-// whatever its PRs say (hk 3383). A reviewer, a tester or a counsel never
+// whatever its PRs say (hk 3383). A reviewer or a consult never
 // authors the PR it looked at.
 func paneSweepAwaitsPR(j Job) bool {
 	if !paneSweepClosed(j) || j.Ended != "job.completed" || (j.Outcome != "" && j.Outcome != "completed") {
 		return false
 	}
 	switch firstNonempty(j.SpawnRole, j.Role) {
-	case "reviewer", "tester", "counsel":
+	case "reviewer", "consult":
 		return false
 	}
 	return !strings.HasPrefix(j.Label, "mwr-")
@@ -313,7 +313,7 @@ func (s *TaskPaneSweeper) info(message string, attrs ...any) {
 func paneSweepKey(j Job) string { return j.ID + "\x00" + j.Pane }
 
 func paneSweepCandidate(j Job) bool {
-	return !j.Reaped && !j.Keep && (j.Role == "worker" || j.Role == "tester") && j.Pane != "" && j.Label != ""
+	return !j.Reaped && !j.Keep && j.Role == "implementer" && j.Pane != "" && j.Label != ""
 }
 
 func paneSweepMatches(j Job, ag Agent) bool {

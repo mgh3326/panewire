@@ -47,13 +47,13 @@ type Spawn struct {
 	// request (--exclude-pool). Like ExcludeHosts it is a standing exclusion,
 	// not a pin: it needs no containment.
 	ExcludePools string `json:"-"`
-	// BuilderFamily and BuilderJob name the author's family and job for a
-	// reviewer or tester whose builder job ran on another host, so its
+	// AuthorFamily and BuilderJob name the author's family and job for a
+	// reviewer whose builder job ran on another host, so its
 	// metadata is not readable here (--parent-job needs local metadata).
-	BuilderFamily string         `json:"-"`
-	BuilderJob    string         `json:"-"`
-	Delegated     bool           `json:"-"`
-	Sel           map[string]any `json:"-"`
+	AuthorFamily string         `json:"-"`
+	BuilderJob   string         `json:"-"`
+	Delegated    bool           `json:"-"`
+	Sel          map[string]any `json:"-"`
 	// route is the routing decision that admitted this spawn (auto
 	// selection or admitPinnedProfile); launch admission reads its
 	// family_effort opt-in. Initiator-local like Sel.
@@ -68,8 +68,8 @@ type Spawn struct {
 	// laneError is the bounded, redacted reason of the last failed lane
 	// registration, kept in the receipt and the LANE_UNREGISTERED notice.
 	laneError string
-	// Grade is the task grade a caller states itself (`panewire delegate`),
-	// used instead of the "(grade X, Tn" marker in the bound task's title.
+	// Grade is the task grade a caller states itself (--grade), used instead
+	// of the "(grade X, Tn" marker in the bound task's title.
 	Grade string `json:"-"`
 	// E6Arm is the resolved experiment marker (<canon>@<effort>): the value a
 	// hub submission carried, else this process's environment. It travels to
@@ -80,10 +80,6 @@ type Spawn struct {
 	// (bindNodeSpawn). Its process environment never fills an empty E6Arm;
 	// only a local panewire spawn resolves PANEWIRE_E6_ARM/SCOPEFUEL_E6_ARM.
 	e6ArmLocked bool
-	// ExcludeFamilies and OnlyFamily narrow automatic selection to seats of
-	// other families, or of one family (`panewire delegate --panel`).
-	ExcludeFamilies []string `json:"-"`
-	OnlyFamily      string   `json:"-"`
 	failedHarnesses []string
 	autoSelected    bool
 	requestedEffort string
@@ -158,16 +154,16 @@ func SpawnRoleKey(task, role, pass string) string {
 }
 
 func parseSpawn(args []string) (Spawn, error) {
-	s := Spawn{Role: "worker", Host: "auto"}
+	s := Spawn{Role: "implementer", Host: "auto"}
 	f := flags("spawn")
 	f.Var((*repeatedStringFlag)(&s.After), "after", "start condition (repeatable)")
 	for _, p := range []struct {
 		k string
 		v *string
-	}{{"c", &s.CWD}, {"m", &s.Profile}, {"profile", &s.Profile}, {"p", &s.Prompt}, {"w", &s.Workspace}, {"l", &s.Label}, {"t", &s.T}, {"job", &s.Job}, {"owner", &s.Owner}, {"effort", &s.Effort}, {"role", &s.Role}, {"lane", &s.Lane}, {"parent", &s.Parent}, {"task", &s.Task}, {"parent-job", &s.ParentJob}, {"host", &s.Host}, {"report", &s.Report}, {"L", &s.ExecutionLane}, {"operator-request", &s.OperatorRequest}, {"requested-by", &s.RequestedBy}, {"purpose", &s.Purpose}, {"report-relative", &s.ReportRelative}, {"tags", &s.Tags}, {"exclude-host", &s.ExcludeHosts}, {"exclude-pool", &s.ExcludePools}, {"override-reason", &s.OverrideReason}, {"containment", &s.Containment}, {"wait-timeout", &s.WaitTimeout}, {"urgency", &s.Urgency}, {"builder-family", &s.BuilderFamily}, {"builder-job", &s.BuilderJob}, {"routing-role", &s.RoutingRole}, {"e6-arm", &s.E6Arm}} {
+	}{{"c", &s.CWD}, {"m", &s.Profile}, {"profile", &s.Profile}, {"p", &s.Prompt}, {"w", &s.Workspace}, {"l", &s.Label}, {"t", &s.T}, {"job", &s.Job}, {"owner", &s.Owner}, {"effort", &s.Effort}, {"role", &s.Role}, {"lane", &s.Lane}, {"parent", &s.Parent}, {"task", &s.Task}, {"parent-job", &s.ParentJob}, {"host", &s.Host}, {"report", &s.Report}, {"L", &s.ExecutionLane}, {"operator-request", &s.OperatorRequest}, {"requested-by", &s.RequestedBy}, {"purpose", &s.Purpose}, {"report-relative", &s.ReportRelative}, {"tags", &s.Tags}, {"exclude-host", &s.ExcludeHosts}, {"exclude-pool", &s.ExcludePools}, {"override-reason", &s.OverrideReason}, {"containment", &s.Containment}, {"wait-timeout", &s.WaitTimeout}, {"urgency", &s.Urgency}, {"author-family", &s.AuthorFamily}, {"builder-job", &s.BuilderJob}, {"e6-arm", &s.E6Arm}} {
 		f.StringVar(p.v, p.k, *p.v, "")
 	}
-	f.StringVar(&s.Grade, "grade", "", "task grade (workers only)")
+	f.StringVar(&s.Grade, "grade", "", "task grade (implementer or consult)")
 	f.StringVar(&s.ReviewPass, "review-pass", "", "review pass 1..9 (reviewer only)")
 	f.StringVar(&s.Workspace, "workspace", "", "local herdr workspace")
 	f.BoolVar(&s.Keep, "keep", false, "")
@@ -195,7 +191,7 @@ func parseSpawn(args []string) (Spawn, error) {
 	if s.Job == "" {
 		s.Job = s.Label
 	}
-	if s.Role == "builder" || s.Role == "captain" {
+	if s.Role == "builder" {
 		return s, fail(exitUsage, "%s", retiredLeadSeatPointer)
 	}
 	// An operator request records the operator-request purpose so receipts and
@@ -203,7 +199,7 @@ func parseSpawn(args []string) (Spawn, error) {
 	if s.OperatorRequest != "" && s.Purpose == "" {
 		s.Purpose = "operator-request"
 	}
-	if flagPassed(f, "grade") && (topRoutingRole(builtinRoleMap[s.Role]) || topRoutingRole(s.RoutingRole)) {
+	if flagPassed(f, "grade") && topRoutingRole(s.Role) {
 		s.Grade = strings.ToUpper(s.Grade)
 		if _, ok := gradeOrder[s.Grade]; !ok {
 			return s, fail(exitUsage, "--grade needs C|B|A|A+|S|S+|SS")
@@ -252,7 +248,7 @@ type Task struct {
 // builder job: it reviews a task it neither inherits nor claims, so several
 // passes can run on the same task.
 // unlinkedReviewer reads the resolved fields that cross the ssh envelope
-// (ParentFamily, Inherited, ParentJob); BuilderFamily/BuilderJob do not, so a
+// (ParentFamily, Inherited, ParentJob); AuthorFamily/BuilderJob do not, so a
 // test of those would read false on the receiving host.
 func (s Spawn) unlinkedReviewer() bool {
 	return s.Role == "reviewer" && s.ParentFamily != "" && s.Inherited == "" && s.ParentJob == ""
@@ -324,15 +320,15 @@ func taskMarkerGrade(t client.Task, s Spawn, bypassed bool) (string, error) {
 }
 
 // replacesParent reports whether this inherited spawn can take the parent's
-// place on its task. Only an implementer seat can: a reviewer, tester,
-// consult or delegated reader or verifier works beside the parent, even one
-// that has completed, and must not take the task and its review routing away.
+// place on its task. Only an implementer seat can: a reviewer or consult
+// works beside the parent, even one that has completed, and must not take the
+// task and its review routing away.
 // It reads the fields that cross the hub and ssh envelopes.
 func (s Spawn) replacesParent() bool {
 	if s.Inherited == "" || s.Inherited == s.Job {
 		return false
 	}
-	role := firstNonempty(s.RoutingRole, builtinRoleMap[s.Role])
+	role := firstNonempty(s.RoutingRole, s.Role)
 	return role == "implementer"
 }
 
@@ -495,7 +491,7 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 	if s.CWD == "" || s.Prompt == "" || s.Label == "" || !slices.Contains([]string{"T0", "T1", "T2", "T3"}, s.T) {
 		return fail(exitUsage, "spawn requires -c -p -l --t T0..T3; supply the missing flags (workspace defaults to executing local.workspace)")
 	}
-	if !validID(s.Job) || !validID(s.Label) || !slices.Contains([]string{"worker", "tester", "reviewer", "counsel"}, s.Role) {
+	if !validID(s.Job) || !validID(s.Label) || !slices.Contains(spawnRoles, s.Role) {
 		return fail(exitUsage, "invalid job, label or role")
 	}
 	if s.Task != "" && s.ParentJob != "" {
@@ -544,17 +540,17 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 			return e
 		}
 	}
-	if s.BuilderFamily != "" || s.BuilderJob != "" {
+	if s.AuthorFamily != "" || s.BuilderJob != "" {
 		// A reviewer may name only the author's family: the author's job is
 		// not bound to the task (not launched through panewire), so there is
 		// nothing to inherit, and the pass runs as a top-level job.
-		if s.BuilderFamily == "" || (s.BuilderJob == "" && s.Role != "reviewer") || (s.BuilderJob != "" && !validID(s.BuilderJob)) || s.ParentJob != "" || s.Task == "" || (s.Role != "reviewer" && s.Role != "tester") {
-			return fail(exitUsage, "--builder-family and --builder-job go together (--builder-family alone only with --role reviewer), with --task and --role reviewer|tester, not --parent-job")
+		if s.AuthorFamily == "" || (s.BuilderJob == "" && s.Role != "reviewer") || (s.BuilderJob != "" && !validID(s.BuilderJob)) || s.ParentJob != "" || s.Task == "" || s.Role != "reviewer" {
+			return fail(exitUsage, "--author-family and --builder-job go together (--author-family alone only with --role reviewer), with --task and --role reviewer, not --parent-job")
 		}
 		if s.BuilderJob != "" && s.Report == "" && s.ReportRelative == "" {
 			return fail(exitUsage, "--builder-job requires --report")
 		}
-		s.ParentFamily = s.BuilderFamily
+		s.ParentFamily = s.AuthorFamily
 		s.Inherited = s.BuilderJob
 	}
 	if s.ParentJob == "" && s.Task == "" {
@@ -563,7 +559,7 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 			s.Task = os.Getenv("HK_TASK_ID")
 		}
 	}
-	builderFamily := s.ParentFamily
+	authorFamily := s.ParentFamily
 	if s.ParentJob != "" {
 		j, e := a.resolveParent(ctx, s.ParentJob)
 		if errors.Is(e, errJobNotFound) {
@@ -575,16 +571,16 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 		s.Task = j.Task
 		s.Inherited = s.ParentJob
 		s.replacedRung = &j
-		builderFamily = j.Family
-		if builderFamily == "" {
+		authorFamily = j.Family
+		if authorFamily == "" {
 			if seat, ok := a.Policy.Profiles[j.Profile]; ok {
-				builderFamily = seat.Family
+				authorFamily = seat.Family
 			}
 		}
 		if s.Owner == "" && !s.ownerOmitted {
 			s.Owner = j.Owner
 		}
-		s.ParentFamily = builderFamily
+		s.ParentFamily = authorFamily
 		if s.Report == "" && s.ReportRelative == "" {
 			return fail(exitUsage, "--parent-job requires --report")
 		}
@@ -737,7 +733,7 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 		// already resolved from the catalog by selectProfile, which this
 		// dry run does not repeat.
 		if !autoSel {
-			if _, e := a.checkSpawnAdmission(ctx, s, seat, a.spawnQuotaRequest(s, seat, effort), effort, selEffort, grade, builderFamily, autoSel, a.Config.Local); e != nil {
+			if _, e := a.checkSpawnAdmission(ctx, s, seat, a.spawnQuotaRequest(s, seat, effort), effort, selEffort, grade, authorFamily, autoSel, a.Config.Local); e != nil {
 				return e
 			}
 		}
@@ -748,7 +744,7 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 		fmt.Fprintf(a.Out, "dry-run host=%s profile=%s role=%s job=%s\n%s\n", a.machine(), s.Profile, s.Role, s.Job, payload)
 		return nil
 	}
-	launch, gate, e := a.admitLaunch(ctx, s, seat, effort, selEffort, grade, builderFamily, autoSel)
+	launch, gate, e := a.admitLaunch(ctx, s, seat, effort, selEffort, grade, authorFamily, autoSel)
 	if e != nil {
 		return e
 	}
@@ -808,7 +804,7 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 	if owner == "" {
 		owner = "default"
 	}
-	claim := arbiter.Claim{Job: s.Job, AgentLabel: s.Label, Lane: owner, T: s.T, Role: "worker", TaskID: s.Task, TaskInheritedFrom: s.Inherited}
+	claim := arbiter.Claim{Job: s.Job, AgentLabel: s.Label, Lane: owner, T: s.T, Role: "implementer", TaskID: s.Task, TaskInheritedFrom: s.Inherited}
 	if s.Bypass {
 		claim.TaskLinkOverride = "declared"
 	}
@@ -930,7 +926,7 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 		return e
 	}
 	argv = withSessionName(seat.Kind, argv, s.Job)
-	if seat.Kind == "omp" && (s.Role == "reviewer" || s.Role == "counsel") {
+	if seat.Kind == "omp" && (s.Role == "reviewer" || s.Role == "consult") {
 		configPath, err := writeOMPExtendedContextOverlay()
 		if err != nil {
 			return fail(exitConfig, "omp extended context settings: %v", err)
@@ -1113,7 +1109,7 @@ func (a *App) spawnQuotaRequest(s Spawn, seat Seat, effort string) QuotaRequest 
 // request resolves to, then the seat's own rules (grade cover, E6 marker). A
 // dry run runs it too, so the preview refuses what a real spawn refuses. It
 // takes no gate receipt, lease or reservation.
-func (a *App) checkLaunchRow(ctx context.Context, s Spawn, seat Seat, qr QuotaRequest, effort, selEffort, grade, builderFamily string, autoSel bool, host map[string]any) (Launch, error) {
+func (a *App) checkLaunchRow(ctx context.Context, s Spawn, seat Seat, qr QuotaRequest, effort, selEffort, grade, authorFamily string, autoSel bool, host map[string]any) (Launch, error) {
 	launch, e := a.Quota.Launch(ctx, qr)
 	if e != nil {
 		// Preserve the gate's role/quota refusal even when the catalog also
@@ -1138,7 +1134,7 @@ func (a *App) checkLaunchRow(ctx context.Context, s Spawn, seat Seat, qr QuotaRe
 			return Launch{}, fail(exitSeatRefused, "NO_ROLE_CANDIDATE: model %s in harness %s cannot consult", launch.ModelID, seat.Kind)
 		}
 	}
-	if e = seat.Check(launch, s.Role, grade, builderFamily, a.e6Arm(s.E6Arm, s.e6ArmLocked), host); e != nil {
+	if e = seat.Check(launch, s.Role, grade, authorFamily, a.e6Arm(s.E6Arm, s.e6ArmLocked), host); e != nil {
 		return Launch{}, e
 	}
 	return launch, nil
@@ -1146,8 +1142,8 @@ func (a *App) checkLaunchRow(ctx context.Context, s Spawn, seat Seat, qr QuotaRe
 
 // checkSpawnAdmission covers the catalog row, seat rules and escalation gate
 // shared by a dry-run and a real spawn. It does not read quota or claim a seat.
-func (a *App) checkSpawnAdmission(ctx context.Context, s Spawn, seat Seat, qr QuotaRequest, effort, selEffort, grade, builderFamily string, autoSel bool, host map[string]any) (Launch, error) {
-	launch, err := a.checkLaunchRow(ctx, s, seat, qr, effort, selEffort, grade, builderFamily, autoSel, host)
+func (a *App) checkSpawnAdmission(ctx context.Context, s Spawn, seat Seat, qr QuotaRequest, effort, selEffort, grade, authorFamily string, autoSel bool, host map[string]any) (Launch, error) {
+	launch, err := a.checkLaunchRow(ctx, s, seat, qr, effort, selEffort, grade, authorFamily, autoSel, host)
 	if err != nil {
 		return Launch{}, err
 	}
@@ -1169,11 +1165,10 @@ func (a *App) checkDryRunAdmission(ctx context.Context, s Spawn, host map[string
 }
 
 // admitLaunch resolves the launch rung for a selected seat and asks the quota
-// gate and the hub for the spawn. It is the admission half shared by spawn and
-// `panewire delegate --headless`; it claims and writes nothing.
-func (a *App) admitLaunch(ctx context.Context, s Spawn, seat Seat, effort, selEffort, grade, builderFamily string, autoSel bool) (Launch, string, error) {
+// gate and the hub for the spawn; it claims and writes nothing.
+func (a *App) admitLaunch(ctx context.Context, s Spawn, seat Seat, effort, selEffort, grade, authorFamily string, autoSel bool) (Launch, string, error) {
 	qr := a.spawnQuotaRequest(s, seat, effort)
-	launch, e := a.checkSpawnAdmission(ctx, s, seat, qr, effort, selEffort, grade, builderFamily, autoSel, a.Config.Local)
+	launch, e := a.checkSpawnAdmission(ctx, s, seat, qr, effort, selEffort, grade, authorFamily, autoSel, a.Config.Local)
 	if e != nil {
 		return Launch{}, "", e
 	}

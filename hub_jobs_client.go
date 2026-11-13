@@ -190,7 +190,7 @@ type hubScannedRelayEvent struct {
 }
 
 // scanHubRelayEvents retains the completion scan and also forwards the two
-// compact escalation records emitted by workers and captains. No event body is
+// compact escalation records emitted by implementers. No event body is
 // executed; this only copies bounded metadata into the hub event envelope.
 func scanHubRelayEvents(inboxRoot string) []hubScannedRelayEvent {
 	return scanHubRelayEventsWithin(inboxRoot, 0)
@@ -508,7 +508,7 @@ func (e hubInboxEvent) isLifecycleEnvelope() bool {
 }
 
 // lifecycleRouteLane is the lane lifecycle.go hands emit: the parent for a
-// builder or captain, otherwise the owner. Envelopes do not record a role today,
+// builder, otherwise the owner. Envelopes do not record a role today,
 // so without one an owner lane naming the job itself marks the job's own lane.
 func (e hubInboxEvent) lifecycleRouteLane(jobID string) string {
 	owner, parent := e.ownerLane(), e.Payload.ParentLane
@@ -516,7 +516,7 @@ func (e hubInboxEvent) lifecycleRouteLane(jobID string) string {
 		return owner
 	}
 	switch e.role() {
-	case "builder", "captain":
+	case "builder":
 		return parent
 	case "":
 		if owner == jobID {

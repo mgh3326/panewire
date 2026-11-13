@@ -232,7 +232,7 @@ func (a *App) watch(ctx context.Context, args []string) error {
 			return e
 		}
 		// The job.lost announced for a quota stop (by this watcher for a
-		// reviewer, by the manager for a handed-over worker or tester) is not
+		// reviewer, by the manager for a handed-over implementer) is not
 		// an end until the grace for the hub's replacement runs out.
 		if !handOff.active {
 			if stop, ok := announcedQuotaStop(j); ok && !j.Reaped {
@@ -290,7 +290,7 @@ func (a *App) watch(ctx context.Context, args []string) error {
 			creditAttempts = 0
 			lastCredit = credit.CreditExhaustedAt
 			published := map[string]any{"pool": credit.Pool, "at": credit.CreditExhaustedAt.UTC().Format(time.RFC3339Nano)}
-			if !j.Terminal && !j.Reaped && !workerEscalated(j) && j.QuotaRole() != "counsel" && !handOff.active && safeCreditStopHandoff(j, credit, paneAgent, present, herdrReachable) {
+			if !j.Terminal && !j.Reaped && !workerEscalated(j) && j.QuotaRole() != "consult" && !handOff.active && safeCreditStopHandoff(j, credit, paneAgent, present, herdrReachable) {
 				if a.QuotaHandOffGrace <= 0 {
 					if err := a.quotaStopLost(ctx, j, credit, true); err != nil {
 						return err
@@ -369,7 +369,7 @@ func (a *App) watch(ctx context.Context, args []string) error {
 		// Not while a hand-off is active: its stop is already announced, and a
 		// pane that reports no state_change_seq would be read and announced on
 		// every poll, moving the grace deadline each time.
-		if present && !pending && !handOff.active && j.QuotaRole() != "counsel" {
+		if present && !pending && !handOff.active && j.QuotaRole() != "consult" {
 			if stop, ok := a.quotaStopped(ctx, j, paneAgent, &screenRead); ok && stop.CreditExhaustedAt.IsZero() {
 				if a.QuotaHandOffGrace <= 0 {
 					return a.quotaStopLost(ctx, j, stop, true)
