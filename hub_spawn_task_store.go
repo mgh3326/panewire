@@ -99,7 +99,7 @@ func (s *laneInboxStore) claimSpawn(parent context.Context, request fleet.Submis
 		return hubSpawnTask{}, false, err
 	}
 	var taskRole any
-	if spawn.Task != "" && spawn.ParentJob == "" {
+	if spawn.HoldsTaskRole() {
 		taskRole = spawn.RoleKey()
 	}
 	claimed, err := tx.ExecContext(ctx, s.q(`INSERT INTO spawn_reservations(job,request_id,task_role) VALUES(?,?,?) ON CONFLICT DO NOTHING`), job, request.RequestID, taskRole)
@@ -376,7 +376,7 @@ func (s *laneInboxStore) resumeCleanedSpawn(parent context.Context, task hubSpaw
 		return task, err
 	}
 	var taskRole any
-	if spawn.Task != "" && spawn.ParentJob == "" {
+	if spawn.HoldsTaskRole() {
 		taskRole = spawn.RoleKey()
 	}
 	result, err := tx.ExecContext(ctx, s.q(`INSERT INTO spawn_reservations(job,request_id,task_role) VALUES(?,?,?) ON CONFLICT DO NOTHING`), task.Job, task.Request.RequestID, taskRole)

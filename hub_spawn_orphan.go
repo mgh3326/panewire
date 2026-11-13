@@ -167,10 +167,10 @@ func (h *HubServer) finishUnownedSpawn(ctx context.Context, task hubSpawnTask, o
 }
 
 // releaseSpawnRole frees the (task, role) slot a finished request holds. A
-// child or task-less request holds none.
+// child, task-less or consult request holds none.
 func (h *HubServer) releaseSpawnRole(ctx context.Context, task hubSpawnTask) error {
 	spawn, err := fleet.ValidateSubmission(task.Request)
-	if err != nil || spawn.Task == "" || spawn.ParentJob != "" {
+	if err != nil || !spawn.HoldsTaskRole() {
 		return err
 	}
 	return h.inbox.store.releaseCompletedSpawnRole(ctx, task.Request.RequestID, spawn.RoleKey())
