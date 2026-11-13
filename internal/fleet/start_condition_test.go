@@ -78,6 +78,34 @@ func TestReadStartConditionTasksDeduplicatesAndLoadsIncomingBlockers(t *testing.
 	}
 }
 
+func TestReadStartConditionTaskBatchKeepsIndependentReadsAndOnlyFollowsBlockers(t *testing.T) {
+	hk := useFakeHK(t)
+	hk.SetTask("42", `{"id":42,"state":"deployed","relations":[{"kind":"blocks","src_id":99,"dst_id":42}]}`)
+	hk.Handle(func(req hkRequest) (int, string, bool) {
+		if req.Path == "/v1/tasks/404" {
+			return 404, `{"error":"not_found"}`, true
+		}
+		return 0, "", false
+	})
+	snapshots, err := ReadStartConditionTaskBatch(context.Background(), [][]StartCondition{
+		{{Kind: "task", TaskID: "42", State: "merged"}},
+		{{Kind: "task", TaskID: "404", State: "merged"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := EvaluateStartConditions([]StartCondition{{Kind: "task", TaskID: "42", State: "merged"}}, snapshots, time.Now()); got.Status != "met" {
+		t.Fatalf("independent successful read = %#v, want met", got)
+	}
+	if got := EvaluateStartConditions([]StartCondition{{Kind: "task", TaskID: "404", State: "merged"}}, snapshots, time.Now()); got.Status != "waiting" || len(got.Reasons) != 1 || got.Reasons[0] != "hk_unavailable" {
+		t.Fatalf("failed dependency = %#v, want waiting/hk_unavailable", got)
+	}
+	routes := hk.Routes()
+	if len(routes) != 2 || routes[0] != "GET /v1/tasks/404" || routes[1] != "GET /v1/tasks/42" {
+		t.Fatalf("task predicates unexpectedly followed relations: %q", routes)
+	}
+}
+
 func TestEvaluateStartConditions(t *testing.T) {
 	now := time.Date(2026, 11, 13, 0, 0, 0, 0, time.UTC)
 	blocker := StartCondition{Kind: "blockers", TargetTaskID: "77", State: "merged"}
@@ -89,6 +117,9 @@ func TestEvaluateStartConditions(t *testing.T) {
 		want       string
 	}{
 		{"met", []StartCondition{{Kind: "task", TaskID: "42", State: "merged"}}, map[string]TaskSnapshot{"42": {ID: "42", State: "merged"}}, "met"},
+		{"deployed satisfies merged", []StartCondition{{Kind: "task", TaskID: "42", State: "merged"}}, map[string]TaskSnapshot{"42": {ID: "42", State: "deployed"}}, "met"},
+		{"completed satisfies deployed", []StartCondition{{Kind: "task", TaskID: "42", State: "deployed"}}, map[string]TaskSnapshot{"42": {ID: "42", State: "completed"}}, "met"},
+		{"done maps to completed", []StartCondition{{Kind: "task", TaskID: "42", State: "done"}}, map[string]TaskSnapshot{"42": {ID: "42", State: "completed"}}, "met"},
 		{"AND met", []StartCondition{{Kind: "task", TaskID: "42", State: "merged"}, {Kind: "time", At: now}}, map[string]TaskSnapshot{"42": {ID: "42", State: "merged"}}, "met"},
 		{"AND waits", []StartCondition{{Kind: "task", TaskID: "42", State: "merged"}, {Kind: "time", At: now.Add(time.Hour)}}, map[string]TaskSnapshot{"42": {ID: "42", State: "merged"}}, "waiting"},
 		{"waiting", []StartCondition{{Kind: "task", TaskID: "42", State: "merged"}}, map[string]TaskSnapshot{"42": {ID: "42", State: "ready"}}, "waiting"},
@@ -96,6 +127,7 @@ func TestEvaluateStartConditions(t *testing.T) {
 		{"cancelled duplicate", []StartCondition{{Kind: "task", TaskID: "42", State: "merged"}}, map[string]TaskSnapshot{"42": {ID: "42", State: "duplicate"}}, "cancelled"},
 		{"hk unavailable", []StartCondition{{Kind: "task", TaskID: "42", State: "merged"}}, nil, "waiting"},
 		{"relation counts", []StartCondition{blocker}, map[string]TaskSnapshot{"77": blockedBy, "42": {ID: "42", State: "merged"}}, "met"},
+		{"completed blocker satisfies deployed", []StartCondition{{Kind: "blockers", TargetTaskID: "77", State: "deployed"}}, map[string]TaskSnapshot{"77": blockedBy, "42": {ID: "42", State: "completed"}}, "met"},
 		{"relation added later counts", []StartCondition{blocker}, map[string]TaskSnapshot{"77": blockedBy, "42": {ID: "42", State: "developing"}}, "waiting"},
 		{"time waiting", []StartCondition{{Kind: "time", At: now.Add(time.Hour)}}, map[string]TaskSnapshot{}, "waiting"},
 		{"time met", []StartCondition{{Kind: "time", At: now}}, map[string]TaskSnapshot{}, "met"},

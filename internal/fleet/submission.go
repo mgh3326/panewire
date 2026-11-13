@@ -60,10 +60,19 @@ type SpawnSubmitter interface {
 func (c *hubHTTP) Submit(ctx context.Context, request Submission) (Accepted, error) {
 	if len(request.StartConditions) != 0 {
 		status, raw, err := c.doIdempotent(ctx, http.MethodGet, "/v1/spawns/features", nil, 5*time.Second)
+		if err != nil {
+			return Accepted{}, fail(exitConfig, "unable to verify hub support for --after start conditions: %v", err)
+		}
+		if status != http.StatusOK {
+			return Accepted{}, fail(exitConfig, "unable to verify hub support for --after start conditions (HTTP %d)", status)
+		}
 		var features struct {
 			Features []string `json:"features"`
 		}
-		if err != nil || status != http.StatusOK || json.Unmarshal(raw, &features) != nil || !slices.Contains(features.Features, "start_conditions_v1") {
+		if json.Unmarshal(raw, &features) != nil {
+			return Accepted{}, fail(exitConfig, "hub returned an unreadable spawn feature response")
+		}
+		if !slices.Contains(features.Features, "start_conditions_v1") {
 			return Accepted{}, fail(exitUsage, "hub does not support --after start conditions; upgrade the hub before submitting")
 		}
 	}

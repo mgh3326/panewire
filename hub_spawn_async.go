@@ -35,7 +35,9 @@ func (h *HubServer) handleSpawnFeatures(w http.ResponseWriter, r *http.Request) 
 		hubUnauthorized(w)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string][]string{"features": {"start_conditions_v1"}})
+	// Start conditions are deliberately not advertised until the queue core
+	// owns their lifecycle and expiry semantics.
+	writeJSON(w, http.StatusOK, map[string][]string{"features": {}})
 }
 
 func (h *HubServer) handleSpawnSubmit(w http.ResponseWriter, r *http.Request) {
@@ -60,6 +62,10 @@ func (h *HubServer) handleSpawnSubmit(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil || !validHubSpawnRequestID(request.RequestID) || !hubSpawnMachinePattern.MatchString(request.OriginMachine) {
 		writeJSON(w, 400, map[string]string{"error": "invalid_request", "fix": "rebuild the request with panewire spawn"})
+		return
+	}
+	if len(request.StartConditions) != 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "start_conditions_unsupported", "reason": "queue_core_required", "fix": "start conditions are not enabled on this hub; upgrade after queue-core support is deployed"})
 		return
 	}
 	// The node applies this same rule to the args it receives; refusing here
@@ -206,7 +212,7 @@ func (h *HubServer) handleSpawnOperation(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	var startCondition *fleet.StartConditionResult
-	if len(task.Request.StartConditions) != 0 {
+	if len(task.Request.StartConditions) != 0 && task.Status == "accepted" && task.Node == nil {
 		result := evaluateHubStartCondition(r.Context(), h, task.Request.StartConditions)
 		startCondition = &result
 	}
@@ -247,10 +253,6 @@ func (h *HubServer) runSpawnCoordinator(parent context.Context) {
 	work := make(chan hubSpawnTask, hubSpawnWorkerCount)
 	var mu sync.Mutex
 	active := map[string]bool{}
-	var conditionSnapshots map[string]fleet.TaskSnapshot
-	var conditionReadErr error
-	var lastConditionRead time.Time
-	conditionRequestSet := ""
 	for range hubSpawnWorkerCount {
 		h.spawnWorkers.Add(1)
 		go func() {
@@ -279,30 +281,7 @@ func (h *HubServer) runSpawnCoordinator(parent context.Context) {
 	for {
 		tasks, err := h.inbox.store.pendingSpawns(ctx)
 		if err == nil && h.drain.admit() {
-			conditioned := make([][]fleet.StartCondition, 0)
-			var currentRequestSet strings.Builder
 			for _, task := range tasks {
-				if len(task.Request.StartConditions) == 0 {
-					continue
-				}
-				conditioned = append(conditioned, task.Request.StartConditions)
-				currentRequestSet.WriteString(task.Request.RequestID)
-				currentRequestSet.WriteByte('\n')
-			}
-			if len(conditioned) == 0 {
-				conditionRequestSet = ""
-				conditionSnapshots = nil
-				conditionReadErr = nil
-			}
-			if len(conditioned) != 0 && (conditionRequestSet != currentRequestSet.String() || lastConditionRead.IsZero() || time.Since(lastConditionRead) >= time.Minute) {
-				conditionSnapshots, conditionReadErr = fleet.ReadStartConditionTaskBatch(ctx, conditioned)
-				conditionRequestSet = currentRequestSet.String()
-				lastConditionRead = time.Now()
-			}
-			for _, task := range tasks {
-				if len(task.Request.StartConditions) != 0 && (conditionReadErr != nil || fleet.EvaluateStartConditions(task.Request.StartConditions, conditionSnapshots, h.now().UTC()).Status != "met") {
-					continue
-				}
 				mu.Lock()
 				busy := active[task.Request.RequestID]
 				if !busy {
@@ -336,7 +315,11 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 			h.finishSpawnOutcome(task, hubSpawnOutcome{RC: 1, Stage: "launch", Reason: "unknown"})
 		}
 	}()
-	if len(task.Request.StartConditions) != 0 && evaluateHubStartCondition(parent, h, task.Request.StartConditions).Status != "met" {
+	if len(task.Request.StartConditions) != 0 && task.Node == nil {
+		h.finishSpawnOutcome(task, hubSpawnOutcome{
+			RC: 78, Stage: "placement", Reason: "start_conditions_unsupported",
+			Fix: "start conditions are disabled until queue-core support is deployed; submit again after the hub advertises start_conditions_v1",
+		})
 		return
 	}
 	if !h.now().Before(task.Deadline) {

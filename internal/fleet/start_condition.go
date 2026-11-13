@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -105,6 +106,26 @@ func validTargetState(state string) bool {
 	return state == "merged" || state == "deployed" || state == "done"
 }
 
+func startConditionStateRank(state string) int {
+	switch state {
+	case "merged":
+		return 1
+	case "deployed":
+		return 2
+	case "completed":
+		return 3
+	default:
+		return 0
+	}
+}
+
+func startConditionTargetRank(state string) int {
+	if state == "done" {
+		return startConditionStateRank("completed")
+	}
+	return startConditionStateRank(state)
+}
+
 func startConditionsEqual(a, b []StartCondition) bool {
 	if len(a) != len(b) {
 		return false
@@ -171,7 +192,7 @@ func EvaluateStartConditions(conditions []StartCondition, tasks map[string]TaskS
 				waiting = append(waiting, "time:"+condition.At.Format(time.RFC3339Nano))
 			}
 		case "task":
-			if tasks[condition.TaskID].State != condition.State {
+			if startConditionStateRank(tasks[condition.TaskID].State) < startConditionTargetRank(condition.State) {
 				waiting = append(waiting, "task:"+condition.TaskID+"="+condition.State)
 			}
 		case "blockers":
@@ -187,7 +208,7 @@ func EvaluateStartConditions(conditions []StartCondition, tasks map[string]TaskS
 				if blocker.State == "dropped" || blocker.State == "duplicate" {
 					return StartConditionResult{Status: "cancelled", Reason: "task:" + blocker.ID + "=" + blocker.State}
 				}
-				if blocker.State != condition.State {
+				if startConditionStateRank(blocker.State) < startConditionTargetRank(condition.State) {
 					waiting = append(waiting, "task:"+blocker.ID+"="+condition.State)
 				}
 			}
@@ -211,6 +232,7 @@ func ReadStartConditionTaskBatch(ctx context.Context, requests [][]StartConditio
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	ids := make(map[string]bool)
+	blockerTargets := make(map[string]bool)
 	for _, conditions := range requests {
 		for _, condition := range conditions {
 			if condition.Kind == "task" {
@@ -218,31 +240,49 @@ func ReadStartConditionTaskBatch(ctx context.Context, requests [][]StartConditio
 			}
 			if condition.Kind == "blockers" {
 				ids[condition.TargetTaskID] = true
+				blockerTargets[condition.TargetTaskID] = true
 			}
 		}
 	}
 	snapshots := make(map[string]TaskSnapshot, len(ids))
+	read := make(map[string]bool, len(ids))
+	orderedIDs := make([]string, 0, len(ids))
 	for id := range ids {
+		orderedIDs = append(orderedIDs, id)
+	}
+	sort.Strings(orderedIDs)
+	for _, id := range orderedIDs {
+		read[id] = true
 		snapshot, err := readStartConditionTask(ctx, id)
 		if err != nil {
-			return nil, err
+			continue
 		}
 		snapshots[id] = snapshot
 	}
-	for _, snapshot := range snapshots {
+	for id := range blockerTargets {
+		snapshot, ok := snapshots[id]
+		if !ok {
+			continue
+		}
 		for _, relation := range snapshot.Relations {
-			if relation.Kind == "blocks" && ids[relation.DstID] {
+			if relation.Kind == "blocks" && relation.DstID == id {
 				ids[relation.SrcID] = true
 			}
 		}
 	}
+	orderedIDs = orderedIDs[:0]
 	for id := range ids {
-		if _, ok := snapshots[id]; ok {
+		orderedIDs = append(orderedIDs, id)
+	}
+	sort.Strings(orderedIDs)
+	for _, id := range orderedIDs {
+		if read[id] {
 			continue
 		}
+		read[id] = true
 		snapshot, err := readStartConditionTask(ctx, id)
 		if err != nil {
-			return nil, err
+			continue
 		}
 		snapshots[id] = snapshot
 	}

@@ -12,9 +12,10 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"slices"
 	"strings"
 	"testing"
+
+	"github.com/mgh3326/panewire/internal/fleet"
 )
 
 func TestSpawnSubmitRefusesInputTheNodeCouldNotLaunch_t4270(t *testing.T) {
@@ -48,7 +49,7 @@ func TestSpawnSubmitRefusesInputTheNodeCouldNotLaunch_t4270(t *testing.T) {
 	}
 }
 
-func TestSpawnFeaturesAdvertiseStartConditions(t *testing.T) {
+func TestSpawnFeaturesDoNotAdvertiseStartConditionsBeforeQueueCore(t *testing.T) {
 	h := asyncSpawnHub(t)
 	r := httptest.NewRequest(http.MethodGet, "/v1/spawns/features", nil)
 	r.Header.Set("Authorization", "Bearer "+t14OperatorToken)
@@ -57,8 +58,30 @@ func TestSpawnFeaturesAdvertiseStartConditions(t *testing.T) {
 	var response struct {
 		Features []string `json:"features"`
 	}
-	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil || w.Code != http.StatusOK || !slices.Contains(response.Features, "start_conditions_v1") {
-		t.Fatalf("features=%d %s, want start_conditions_v1", w.Code, w.Body)
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil || w.Code != http.StatusOK || len(response.Features) != 0 {
+		t.Fatalf("features=%d %s, want no features before queue-core support", w.Code, w.Body)
+	}
+}
+
+func TestSpawnSubmitRefusesStartConditionsBeforeClaim(t *testing.T) {
+	h := asyncSpawnHub(t)
+	req := durableSpawnRequest()
+	req.StartConditions = []fleet.StartCondition{{Kind: "task", TaskID: "42", State: "merged"}}
+	raw, err := json.Marshal(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := httptest.NewRequest(http.MethodPost, "/v1/spawns", bytes.NewReader(raw))
+	r.Header.Set("Authorization", "Bearer "+t14OperatorToken)
+	w := httptest.NewRecorder()
+	h.Handler().ServeHTTP(w, r)
+	var body map[string]string
+	_ = json.Unmarshal(w.Body.Bytes(), &body)
+	if w.Code != http.StatusBadRequest || body["reason"] != "queue_core_required" || body["fix"] == "" {
+		t.Fatalf("submit=%d %s, want clear queue-core refusal", w.Code, w.Body)
+	}
+	if _, err := h.inbox.store.spawnTask(t.Context(), req.RequestID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("refused start condition was durably accepted: %v", err)
 	}
 }
 
