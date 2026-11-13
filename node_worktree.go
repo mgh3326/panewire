@@ -1046,8 +1046,13 @@ func (client *HubClient) nodePrepareBranch(ctx context.Context, git relayCommand
 		}
 		expected = strings.ToLower(originTip)
 	}
-	if args.VerifyReuse && (expected == "" || !strings.EqualFold(originTip, expected)) {
-		return nodePrepareBranchElsewhere
+	if args.VerifyReuse && !strings.EqualFold(originTip, expected) {
+		if originTip == "" || expected == "" {
+			return nodePrepareBranchElsewhere
+		}
+		if _, err := git(ctx, "-C", clone, "merge-base", "--is-ancestor", expected, originTip); err != nil {
+			return nodePrepareBranchElsewhere
+		}
 	}
 	var atDir *nodeWorktreeEntry
 	for i := range entries {

@@ -227,7 +227,7 @@ func testSignaledExit(t *testing.T) error {
 	return nil
 }
 
-func TestNodeWorktreeVerifyReuseRefusesMovedOriginWithoutChangingCheckout(t *testing.T) {
+func TestNodeWorktreeVerifyReuseRefusesRewrittenOriginWithoutChangingCheckout(t *testing.T) {
 	fixture := newNodeWorktreeFixture(t)
 	client := fixture.client()
 	args := nodeWorktreePrepareArgs{Origin: fixture.origin, Mode: "branch", Branch: "feat", Dir: "repo.job"}
@@ -237,8 +237,7 @@ func TestNodeWorktreeVerifyReuseRefusesMovedOriginWithoutChangingCheckout(t *tes
 	}
 	dir := filepath.Join(fixture.workRoot, "repo.job")
 	seed := filepath.Join(fixture.root, "seed")
-	nodeGit(t, seed, "commit", "-q", "--allow-empty", "-m", "advance")
-	nodeGit(t, seed, "push", "-q", "origin", "feat")
+	nodeGit(t, seed, "push", "-q", "--force", "origin", "main:feat")
 	args.Sha, args.VerifyReuse = fixture.feat, true
 	prepared, code = client.nodeWorktreePrepare(t.Context(), args)
 	if code != "" || prepared.(nodeWorktreePrepareResult).Outcome != nodePrepareBranchElsewhere {
@@ -246,5 +245,80 @@ func TestNodeWorktreeVerifyReuseRefusesMovedOriginWithoutChangingCheckout(t *tes
 	}
 	if head := nodeGit(t, dir, "rev-parse", "HEAD"); head != fixture.feat {
 		t.Fatalf("checkout moved to %s, want %s", head, fixture.feat)
+	}
+}
+
+func TestNodeWorktreeInspectReadOnlyVerifiesCheckout(t *testing.T) {
+	fixture := newNodeWorktreeFixture(t)
+	client := fixture.client()
+	args := nodeWorktreePrepareArgs{Origin: fixture.origin, Mode: "branch", Branch: "feat", Dir: "repo.job"}
+	prepared, code := client.nodeWorktreePrepare(t.Context(), args)
+	if code != "" || prepared.(nodeWorktreePrepareResult).Outcome != nodePreparePrepared {
+		t.Fatalf("prepare=%+v code=%q", prepared, code)
+	}
+	dir := filepath.Join(fixture.workRoot, "repo.job")
+	inspect := func() nodeWorktreeInspectResult {
+		result := nodeWorktreeInspect(t.Context(), client.nodeGitRunner(), dir)
+		result.Check = nodeWorktreeVerifyReadOnly(t.Context(), client.nodeGitRunner(), result.Worktree)
+		return result
+	}
+	if result := inspect(); result.Check != "ok" || result.Worktree.Head != fixture.feat {
+		t.Fatalf("inspect=%+v", result)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "dirty"), []byte("work"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if result := inspect(); result.Check != "dirty" {
+		t.Fatalf("dirty inspect=%+v", result)
+	}
+	if err := os.Remove(filepath.Join(dir, "dirty")); err != nil {
+		t.Fatal(err)
+	}
+	nodeGit(t, fixture.clone, "worktree", "lock", dir)
+	if result := inspect(); result.Check != "locked" {
+		t.Fatalf("locked inspect=%+v", result)
+	}
+	if head := nodeGit(t, dir, "rev-parse", "HEAD"); head != fixture.feat {
+		t.Fatalf("inspection moved checkout to %s", head)
+	}
+}
+
+func TestNodeWorktreeInspectRequiresExpectedCheckoutPath(t *testing.T) {
+	fixture := newNodeWorktreeFixture(t)
+	client := fixture.client()
+	args := nodeWorktreePrepareArgs{Origin: fixture.origin, Mode: "branch", Branch: "feat", Dir: "repo.job"}
+	prepared, code := client.nodeWorktreePrepare(t.Context(), args)
+	if code != "" || prepared.(nodeWorktreePrepareResult).Outcome != nodePreparePrepared {
+		t.Fatalf("prepare=%+v code=%q", prepared, code)
+	}
+	dir := filepath.Join(fixture.workRoot, "repo.job")
+	result, code := nodeRun(t, client, nodeCommandWorktreeInspect, map[string]any{"cwd": dir, "expected_dir": "repo.other"})
+	if code != "" || result["worktree"] != nil || result["check"] != "mismatch" {
+		t.Fatalf("inspection=%v code=%q", result, code)
+	}
+	result, code = nodeRun(t, client, nodeCommandWorktreeInspect, map[string]any{"cwd": dir, "expected_dir": "repo.job", "verify_branch": true})
+	if code != "" || result["check"] != "ok" {
+		t.Fatalf("verified inspection=%v code=%q", result, code)
+	}
+}
+
+func TestNodeWorktreeVerifyReuseKeepsPinnedHeadWhenOriginAdvances(t *testing.T) {
+	fixture := newNodeWorktreeFixture(t)
+	client := fixture.client()
+	args := nodeWorktreePrepareArgs{Origin: fixture.origin, Mode: "branch", Branch: "feat", Dir: "repo.job"}
+	prepared, code := client.nodeWorktreePrepare(t.Context(), args)
+	if code != "" || prepared.(nodeWorktreePrepareResult).Outcome != nodePreparePrepared {
+		t.Fatalf("prepare=%+v code=%q", prepared, code)
+	}
+	seed := filepath.Join(fixture.root, "seed")
+	nodeGit(t, seed, "commit", "-q", "--allow-empty", "-m", "advance")
+	nodeGit(t, seed, "push", "-q", "origin", "feat")
+	args.Sha, args.VerifyReuse = fixture.feat, true
+	prepared, code = client.nodeWorktreePrepare(t.Context(), args)
+	if code != "" || prepared.(nodeWorktreePrepareResult).Outcome != nodePrepareReused {
+		t.Fatalf("reuse=%+v code=%q", prepared, code)
+	}
+	if head := nodeGit(t, filepath.Join(fixture.workRoot, "repo.job"), "rev-parse", "HEAD"); head != fixture.feat {
+		t.Fatalf("checkout moved to %s", head)
 	}
 }

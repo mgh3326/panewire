@@ -114,7 +114,9 @@ type nodePaneCaptureArgs struct {
 }
 
 type nodeWorktreeInspectArgs struct {
-	Cwd string `json:"cwd"`
+	Cwd          string `json:"cwd"`
+	VerifyBranch bool   `json:"verify_branch,omitempty"`
+	ExpectedDir  string `json:"expected_dir,omitempty"`
 }
 
 // nodeAgentRow keeps herdr's own field names so a caller that already decodes
@@ -165,6 +167,7 @@ type nodeWorktree struct {
 
 type nodeWorktreeInspectResult struct {
 	Worktree *nodeWorktree `json:"worktree"`
+	Check    string        `json:"check,omitempty"`
 }
 
 func validNodeJobName(name string) bool {
@@ -227,6 +230,19 @@ func nodeCommandHasFields(raw json.RawMessage, names []string) bool {
 	return true
 }
 
+func nodeWorktreeInspectFields(raw json.RawMessage) bool {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(raw, &fields) != nil || fields == nil || fields["cwd"] == nil || isJSONNull(fields["cwd"]) {
+		return false
+	}
+	for key, value := range fields {
+		if (key != "cwd" && key != "expected_dir" && key != "verify_branch") || isJSONNull(value) {
+			return false
+		}
+	}
+	return true
+}
+
 // decodeNodeCommandArgs returns the typed, validated arguments for op, and nil
 // when they are refused: a caller can never hold, or log, unvalidated text.
 func decodeNodeCommandArgs(op string, raw json.RawMessage) (any, bool) {
@@ -243,8 +259,9 @@ func parseNodeCommandArgs(op string, raw json.RawMessage) (any, bool) {
 	optionalDetached := op == nodeCommandWorktreeRemove && nodeCommandHasFields(raw, append(append([]string(nil), names...), "detached"))
 	optionalUnnamed := (op == nodeCommandPaneClose || op == nodeCommandPaneCapture) && nodeCommandHasFields(raw, append(append([]string(nil), names...), "allow_unnamed"))
 	optionalList := op == nodeCommandWorktreeList && nodeWorktreeListFields(raw)
+	optionalInspect := op == nodeCommandWorktreeInspect && nodeWorktreeInspectFields(raw)
 	optionalEndReason := op == nodeCommandJobMarkLost && nodeCommandHasFields(raw, append(append([]string(nil), names...), "end_reason"))
-	if !known || len(raw) == 0 || len(raw) > nodeCommandMaxArgsBytes || (!nodeCommandHasFields(raw, names) && !optionalKind && !optionalDetached && !optionalUnnamed && !optionalList && !optionalEndReason) {
+	if !known || len(raw) == 0 || len(raw) > nodeCommandMaxArgsBytes || (!nodeCommandHasFields(raw, names) && !optionalKind && !optionalDetached && !optionalUnnamed && !optionalList && !optionalInspect && !optionalEndReason) {
 		return nil, false
 	}
 	switch op {
@@ -284,7 +301,7 @@ func parseNodeCommandArgs(op string, raw json.RawMessage) (any, bool) {
 		return args, decodeNodeCommandStrict(raw, &args) && validNodeJobName(args.Job) && validNodeCommandPath(args.Report)
 	case nodeCommandWorktreeInspect:
 		var args nodeWorktreeInspectArgs
-		return args, decodeNodeCommandStrict(raw, &args) && validNodeCommandPath(args.Cwd)
+		return args, decodeNodeCommandStrict(raw, &args) && validNodeCommandPath(args.Cwd) && (args.ExpectedDir == "" || validNodeJobName(args.ExpectedDir))
 	case nodeCommandWorktreeList:
 		var args nodeWorktreeListArgs
 		valid := decodeNodeCommandStrict(raw, &args) && validNodeCommandPath(args.Common) && (args.Limit == nil || (*args.Limit >= 1 && *args.Limit <= 100))
@@ -734,7 +751,17 @@ func (client *HubClient) runNodeCommand(ctx context.Context, op string, raw json
 		defer client.nodeCommandMu.Unlock()
 		return client.nodeJobDone(ctx, args)
 	case nodeWorktreeInspectArgs:
-		return nodeWorktreeInspect(ctx, client.nodeGitRunner(), args.Cwd), ""
+		result := nodeWorktreeInspect(ctx, client.nodeGitRunner(), args.Cwd)
+		if args.ExpectedDir != "" {
+			root, err := client.nodeWorkRoot()
+			if err != nil || result.Worktree == nil || !nodeSamePath(result.Worktree.Path, filepath.Join(root, args.ExpectedDir)) {
+				return nodeWorktreeInspectResult{Check: "mismatch"}, ""
+			}
+		}
+		if args.VerifyBranch {
+			result.Check = nodeWorktreeVerifyReadOnly(ctx, client.nodeGitRunner(), result.Worktree)
+		}
+		return result, ""
 	case nodeWorktreeListArgs:
 		return nodeWorktreeList(ctx, client.nodeGitRunner(), args)
 	case nodeWorktreePrepareArgs:
@@ -1014,6 +1041,50 @@ func nodeWorktreeInspect(ctx context.Context, git relayCommandRunner, cwd string
 		worktree.OriginURL = redactNodeOriginURL(strings.TrimSpace(string(output)))
 	}
 	return nodeWorktreeInspectResult{Worktree: worktree}
+}
+
+// nodeWorktreeVerifyReadOnly checks the checkout without changing it or its refs.
+func nodeWorktreeVerifyReadOnly(ctx context.Context, git relayCommandRunner, tree *nodeWorktree) string {
+	if tree == nil || !validNodeRefName(tree.Branch) || !nodeShaPattern.MatchString(tree.Head) {
+		return "unreadable"
+	}
+	entries, err := nodeListWorktrees(ctx, git, tree.Common)
+	if err != nil {
+		return "unreadable"
+	}
+	found := false
+	for _, entry := range entries {
+		if nodeSamePath(entry.Path, tree.Path) {
+			found = true
+			if entry.Locked {
+				return "locked"
+			}
+		}
+	}
+	if !found {
+		return "unreadable"
+	}
+	status, err := git(ctx, "--no-optional-locks", "-C", tree.Path, "status", "--porcelain")
+	if err != nil {
+		return "unreadable"
+	}
+	if strings.TrimSpace(string(status)) != "" {
+		return "dirty"
+	}
+	out, err := git(ctx, "-C", tree.Path, "ls-remote", "--heads", "origin", "refs/heads/"+tree.Branch)
+	if err != nil {
+		return "unreadable"
+	}
+	fields := strings.Fields(string(out))
+	if len(fields) != 2 || fields[1] != "refs/heads/"+tree.Branch || !nodeShaPattern.MatchString(fields[0]) {
+		return "unpushed"
+	}
+	if !strings.EqualFold(fields[0], tree.Head) {
+		if _, err := git(ctx, "--no-optional-locks", "-C", tree.Path, "merge-base", "--is-ancestor", tree.Head, fields[0]); err != nil {
+			return "unpushed"
+		}
+	}
+	return "ok"
 }
 
 // redactNodeOriginURL drops URL userinfo, query and fragment so a credential

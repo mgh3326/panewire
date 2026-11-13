@@ -26,30 +26,16 @@ mergewake's JSON array of findings (`ref`, `severity`, `path`, `line`, `title`,
 
 | rc | meaning |
 | --- | --- |
-| 0 | the author runs again at a higher rung; stdout is `ESCALATED job=<new> rung=<profile>@<effort>` |
-| 2 | a refusal, in two kinds (below): the author still runs, or the author was ended |
-| other | an error mergewake logs and continues past |
+| 0 | placement succeeded and the task binding names the successor; stdout is `ESCALATED job=<new> rung=<profile>@<effort>` |
+| 2 | refusal before the author was ended |
+| 1 | the old author was ended, or the successor's task rebind is unconfirmed; inspect the named code and design-lane event |
+| 124 | the operation is pending; retry the same request |
+| other | an error |
 
-mergewake reads every rc 2 as "no step happened", so the two kinds differ in
-text only:
-
-- **The author still runs.** The refusal came before the pane was touched:
-  `no_rung`, `job_not_live`, `job_changed`, `job_mismatch`, `pane_busy`,
-  `pane_unavailable`, `pane_not_closed`, `successor_invalid`, `worktree_dirty`,
-  `worktree_locked`, `worktree_unpushed`, `worktree_unreadable`. Nothing about
-  the PR changes; mergewake goes on to round 7.
-- **The author was ended.** The refusal came after the pane was closed:
-  `job_not_marked`, `claim_refused`, `quota_refused`. The old pane is closed
-  and the old record is `lost`; **no author runs on the task**. The CLI's
-  message ends `(the author's pane was closed and its record ended; no author
-  runs on task N)`, the design-lane info says `no author runs on this PR now`,
-  and the hub's answer carries `author_ended: true`. A `job_not_marked` or
-  `claim_refused` step is finished by running the same command again (see
-  Replay); a `quota_refused` one answers the same refusal until a person
-  places an author.
-
-Every refusal writes one `info` event for the design lane, because the
-policy's "say so in the record" applies to the cases where nothing can be done.
+The hub returns `author_ended: true` for a refusal after the pane closes.
+A `rebind_unconfirmed` result means the successor placed but its task ownership
+is not confirmed. Refusal events identify the phase and code, so an ended
+refusal cannot be hidden behind an earlier intact refusal.
 
 ## The CLI's half
 
@@ -75,59 +61,35 @@ the hub owns the design-lane record for that outcome too.
 rung. The hub owns what only it has: the replaced job's stored submission, its
 checkout and its pane. It:
 
-1. reads the replaced job's spawn operation and hk record; refuses a job that
-   is not a live worker on that task, or whose recorded rung no longer matches
-   the request (`job_changed`);
-2. answers a replay (below) before anything else is checked;
-3. checks the named rung is still a live catalog rung with an ordinary or
-   escalation gate that covers the task grade;
-4. builds the successor's submission and validates it the way the claim will
-   (`successor_invalid`), so a submission the store would refuse never costs
-   the author its pane. An experiment arm that no longer names the successor's
-   canon is dropped;
-5. probes the pane and refuses one that is busy or unreadable. A pane that is
-   verifiably gone (an earlier attempt closed it) is not an error;
-6. runs `worktree.prepare` on the successor's checkout through the holder's
-   node **while the author's pane is still open**. It applies the refusals the
-   successor's spawn would meet once the pane is gone, so they are refusals
-   with a live author: `worktree_dirty`, `worktree_locked`,
-   `worktree_unpushed` (commits origin does not have, or the branch checked
-   out elsewhere), `worktree_unreadable`. The live pane is inspected first;
-   its checkout must match the requested branch and the fetched origin tip.
-   Verification refuses a mismatch without moving the worktree and pins the
-   verified HEAD and holder host for the successor;
-7. closes the pane (screen capture first) so one job holds the task;
-8. ends the old record `lost` with
-   `ladder step round=<n> replaced_by=<new job>`;
-9. atomically transfers the `(task, worker)` reservation while claiming the successor as an
-   inherited spawn (`--parent-job <old>`), with the pinned rung, a
-   `ladder step ...` override reason (the ladder-step rep row,
-   [reps](reps.md#ladder-steps)), and the old submission's repository and
-   checkout (same worktree and branch);
-10. composes the successor's brief from the original brief, the findings and the
-    consult seat;
-11. waits for placement. A successor that does not place is `quota_refused`,
-    with the author ended;
-12. writes one `info` event for the design lane:
-    `ladder step <old> -> <new> on <profile>@<effort> (round <n>, <pr>)`.
+1. Reads the existing operation and record, and checks that the request is for
+   the same worker, task and review round.
+2. Inspects the live pane's actual checkout and pins its HEAD and holder host.
+   It validates the successor and stages the complete request and ladder-step
+   identity, transferring the worker reservation in the same transaction.
+3. Checks the checkout again using read-only inspection: the branch and HEAD
+   must match, the tree must be clean and unlocked, and origin must contain the
+   staged commit. A read-only hub placement plan checks admission on the pinned
+   host; it does not reserve capacity or guarantee later placement. A refusal before close cancels the staged row and restores
+   the reservation atomically. An expired stage is cancelled on replay or by the periodic reconciler only
+   after the original pane is confirmed present.
+4. Closes the pane, marks the old job lost, then activates the staged
+   successor. Once the pane is closed, replay moves the step forward.
+5. Waits for placement and confirms the task's job binding; it retries an
+   unconfirmed rebind before reporting `rebind_unconfirmed`.
 
-Whether the account quota admits the successor's rung is known only at
-placement, after the close; steps 4 and 6 and the replay are what keep every
-other refusal on the safe side of it.
+Quota can change after the plan; a refusal during placement after close
+reports the ended author. An unknown pane or placement result is `pending`;
+it is not reported as a successful escalation.
 
 ## Replay
 
-The successor job id is `<old>-l1`. The hub finds a step it already took by
-that id, before it reads the old record's state, and the CLI accepts a `lost`
-record whose `end_reason` is this round's `ladder step round=<n> replaced_by=`:
-
-- a placed successor answers rc 0 with its rung, a failed one answers its
-  refusal (with the author ended), one still running answers the step it will
-  report when it settles;
-- an old record this round's step already ended with no successor claimed (a
-  hub restart between steps 8 and 9) is finished: only the claim is made;
-- a pane closed with the record still live (`job_not_marked`) is finished: the
-  record is written, then the claim is made.
+The successor job id is `<old>-l1`. Replay finds its operation before testing
+whether the old record is live, and uses the frozen identity, rung, host and
+checkout. A staged successor with a present pane repeats preflight; if the pane
+is gone or the job is already lost, replay finishes the mark and activation.
+Active placement returns `pending` until it settles, and a placed successor is
+successful only after the task binding is confirmed. A staged step's identity
+must match the same job, round and PR.
 
 The policy allows one ladder step per job chain; a job whose id already
 carries a ladder step (`-l1`, with or without later quota-stop `-q<n>`

@@ -3,6 +3,7 @@ package panewire
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http/httptest"
@@ -21,6 +22,14 @@ import (
 
 // escalateQuota serves the one catalog read escalate-author makes.
 type escalateQuota struct{ rows []fleet.CatalogRow }
+
+type ladderPlanQuota struct{ retryQuota }
+
+func (ladderPlanQuota) Launch(ctx context.Context, request fleet.QuotaRequest) (fleet.Launch, error) {
+	launch, err := (retryQuota{}).Launch(ctx, request)
+	launch.Pool = "p"
+	return launch, err
+}
 
 func (q escalateQuota) Launch(context.Context, fleet.QuotaRequest) (fleet.Launch, error) {
 	return fleet.Launch{}, nil
@@ -87,7 +96,9 @@ func newEscalateFixture(t *testing.T, job string) *escalateFixture {
 		"family": "anthropic", "model": "sonnet-m", "owner_lane": "parent", "task_id": "42",
 	}}}
 	hub.spawnNewApp = func(out, errout io.Writer) (*fleet.App, error) {
-		return &fleet.App{JobStore: jobs, Out: out, Err: errout, Quota: escalateQuota{rows: []fleet.CatalogRow{
+		return &fleet.App{JobStore: jobs, Out: out, Err: errout, TaskState: func(context.Context, string) (fleet.TaskStatus, error) {
+			return fleet.TaskStatus{JobID: job + "-l1"}, nil
+		}, Quota: escalateQuota{rows: []fleet.CatalogRow{
 			{Profile: "sonnet", Effort: "high", Grade: "A", Pool: "claude", Gate: "default", ModelID: "sonnet-m"},
 			{Profile: "sonnet", Effort: "xhigh", Grade: "A+", Pool: "claude", Gate: "escalation", ModelID: "sonnet-m"},
 		}}}, nil
@@ -103,6 +114,7 @@ func newEscalateFixture(t *testing.T, job string) *escalateFixture {
 		t.Fatal(err)
 	}
 	f := &escalateFixture{hub: hub, server: server, node: node, jobs: jobs, destination: destination, job: job}
+	hub.ladderPlan = func(context.Context, fleet.Submission) error { return nil }
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan struct{})
 	go func() {
@@ -175,7 +187,18 @@ func (f *escalateFixture) reply(op string) map[string]any {
 			return map[string]any{"result": nodeWorktreePrepareResult{Outcome: f.prepareOutcome}}
 		}
 	case "worktree.inspect":
-		return map[string]any{"result": nodeWorktreeInspectResult{Worktree: &nodeWorktree{Path: paneCwd, Branch: "wk/task", Head: strings.Repeat("b", 40)}}}
+		check := "ok"
+		switch f.prepareOutcome {
+		case nodeOutcomeDirty:
+			check = "dirty"
+		case nodeRemoveLocked:
+			check = "locked"
+		case nodePrepareBranchElsewhere:
+			check = "unpushed"
+		case nodeOutcomeGitFailed:
+			check = "unreadable"
+		}
+		return map[string]any{"result": nodeWorktreeInspectResult{Worktree: &nodeWorktree{Path: paneCwd, Branch: "wk/task", Head: strings.Repeat("b", 40), OriginURL: "https://github.com/example/project.git"}, Check: check}}
 	case "pane.capture":
 		return map[string]any{"result": map[string]any{"outcome": nodeCaptureScreen, "saved": "/jobs/" + f.job + "/pane-screen.txt"}}
 	case "pane.close":
@@ -228,7 +251,7 @@ func (f *escalateFixture) escalate(t *testing.T, placed *hubSpawnOutcome) (hubEs
 		eventually(t, 3*time.Second, "the successor to be claimed", func() bool {
 			var err error
 			successor, err = f.hub.inbox.store.latestSpawnForJob(t.Context(), next)
-			return err == nil
+			return err == nil && successor.Status != "staged"
 		})
 		if _, err := f.hub.inbox.store.completeSpawn(t.Context(), successor, *placed, time.Now()); err != nil {
 			t.Fatal(err)
@@ -315,7 +338,7 @@ func TestEscalateAuthorStartsTheNextRungOnTheSameWorktree(t *testing.T) {
 			t.Fatalf("the brief must carry %q:\n%s", want, request.Brief)
 		}
 	}
-	if ops := commandOps(commands); !slices.Equal(ops, []string{"agents.list", "worktree.inspect", "worktree.prepare", "pane.capture", "pane.close", "job.mark_lost"}) {
+	if ops := commandOps(commands); !slices.Equal(ops, []string{"agents.list", "worktree.inspect", "worktree.inspect", "pane.capture", "pane.close", "job.mark_lost"}) {
 		t.Fatalf("node commands %v", ops)
 	}
 	if reason := endReasonOf(t, commands[5]); reason != "ladder step round=5 replaced_by=pw-task-42-l1" {
@@ -348,24 +371,17 @@ func TestEscalateAuthorSuccessorCheckoutPinsTheVerifiedHead(t *testing.T) {
 	}
 }
 
-func TestEscalateAuthorPreparesTheWorktreeBeforeClosingThePane(t *testing.T) {
+func TestEscalateAuthorInspectsWorktreeWithoutPreparingBeforeClose(t *testing.T) {
 	f := newEscalateFixture(t, "pw-task-48")
 	placed := placedAnywhere
 	_, commands := f.escalate(t, &placed)
-	var prepare nodeWorktreePrepareArgs
-	for _, command := range commands {
-		if string(command["op"]) == `"worktree.prepare"` {
-			if err := json.Unmarshal(command["args"], &prepare); err != nil {
-				t.Fatal(err)
-			}
-		}
-	}
-	if prepare.Mode != "branch" || prepare.Branch != "wk/task" || prepare.Dir != "pw-task-48-checkout" || prepare.Sha != strings.Repeat("b", 40) || !prepare.VerifyReuse {
-		t.Fatalf("the preflight must prepare the successor's checkout: %+v", prepare)
-	}
 	ops := commandOps(commands)
-	if slices.Index(ops, "worktree.prepare") > slices.Index(ops, "pane.close") {
-		t.Fatalf("the worktree is prepared before the pane closes: %v", ops)
+	if slices.Contains(ops, "worktree.prepare") || !slices.Equal(ops, []string{"agents.list", "worktree.inspect", "worktree.inspect", "pane.capture", "pane.close", "job.mark_lost"}) {
+		t.Fatalf("unexpected operations: %v", ops)
+	}
+	var inspect nodeWorktreeInspectArgs
+	if err := json.Unmarshal(commands[2]["args"], &inspect); err != nil || !inspect.VerifyBranch {
+		t.Fatalf("preflight=%+v err=%v", inspect, err)
 	}
 }
 
@@ -398,11 +414,18 @@ func TestEscalateAuthorRefusalBeforeTheCloseLeavesTheAuthor(t *testing.T) {
 		t.Fatalf("result=%+v", result)
 	}
 	f.awaitInfo(t, "worktree_dirty", "the PR goes on to the next round")
-	if ops := commandOps(commands); !slices.Equal(ops, []string{"agents.list", "worktree.inspect", "worktree.prepare"}) {
+	if ops := commandOps(commands); !slices.Equal(ops, []string{"agents.list", "worktree.inspect", "worktree.inspect"}) {
 		t.Fatalf("nothing past the worktree preparation may run: %v", ops)
 	}
 	if state := f.jobs.records["pw-task-49"]["state"]; state != "spawned" {
 		t.Fatalf("a refused step must not end the job: %v", state)
+	}
+	_, job, _, err := f.hub.inbox.store.spawnRoleOwner(t.Context(), "42:worker")
+	if err != nil || job != f.job {
+		t.Fatalf("reservation not restored: job=%q err=%v", job, err)
+	}
+	if _, err := f.hub.inbox.store.latestSpawnForJob(t.Context(), f.job+"-l1"); err == nil {
+		t.Fatal("refused staged successor remains")
 	}
 }
 
@@ -421,7 +444,7 @@ func TestEscalateAuthorWorktreeRefusalCodes(t *testing.T) {
 		if result.Code != code || result.AuthorEnded {
 			t.Fatalf("%s: result=%+v", outcome, result)
 		}
-		if ops := commandOps(commands); !slices.Equal(ops, []string{"agents.list", "worktree.inspect", "worktree.prepare"}) {
+		if ops := commandOps(commands); !slices.Equal(ops, []string{"agents.list", "worktree.inspect", "worktree.inspect"}) {
 			t.Fatalf("%s: the pane must stay open: %v", outcome, ops)
 		}
 	}
@@ -443,8 +466,8 @@ func TestEscalateAuthorRefusesAStaleRungWithoutTouchingThePane(t *testing.T) {
 	if state := f.jobs.records["pw-task-44"]["state"]; state != "spawned" {
 		t.Fatalf("a stale request must not touch the job: %v", state)
 	}
-	if commands := f.take(); len(commands) != 0 {
-		t.Fatalf("a stale request must not reach the node: %v", commandOps(commands))
+	if ops := commandOps(f.take()); !slices.Equal(ops, []string{"agents.list"}) {
+		t.Fatalf("a stale request must only probe the pane: %v", ops)
 	}
 }
 
@@ -479,6 +502,11 @@ func TestEscalateAuthorReplayFindsTheSuccessor(t *testing.T) {
 // ended by this step, so only the successor is claimed.
 func TestEscalateAuthorReplayClaimsTheSuccessorOfAnEndedRecord(t *testing.T) {
 	f := newEscalateFixture(t, "pw-task-53")
+	f.markLostFails = true
+	if result, _ := f.escalate(t, nil); result.Code != "job_not_marked" {
+		t.Fatalf("stage: %+v", result)
+	}
+	f.markLostFails = false
 	f.endHolder(fleet.LadderStepEndReason(5, "pw-task-53-l1"))
 	placed := placedAnywhere
 	result, commands := f.escalate(t, &placed)
@@ -519,7 +547,7 @@ func TestEscalateAuthorRetryAfterAFailedRecordWrite(t *testing.T) {
 	if result.Code != "" || result.Job != "pw-task-55-l1" {
 		t.Fatalf("the retry must place the successor: %+v", result)
 	}
-	if ops := commandOps(commands); !slices.Equal(ops, []string{"agents.list", "worktree.prepare", "job.mark_lost"}) {
+	if ops := commandOps(commands); !slices.Equal(ops, []string{"agents.list", "job.mark_lost"}) {
 		t.Fatalf("an absent pane needs no close: %v", ops)
 	}
 }
@@ -622,6 +650,7 @@ func TestEscalateAuthorPendingReplayDoesNotReportSuccess(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	next.LadderStep = &fleet.LadderStepIdentity{Parent: f.job, Round: 5, PR: f.request().PR, Profile: "sonnet", Effort: "xhigh"}
 	if _, _, err := f.hub.inbox.store.claimSpawn(t.Context(), next, f.job+"-l1", "parent", time.Now()); err != nil {
 		t.Fatal(err)
 	}
@@ -629,7 +658,7 @@ func TestEscalateAuthorPendingReplayDoesNotReportSuccess(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Millisecond)
 	defer cancel()
 	result, err := f.hub.escalateAuthor(ctx, f.request())
-	if err == nil && result.Job != "" {
+	if err != nil || result.Code != "pending" || result.Job != "" {
 		t.Fatalf("pending placement reported success: %+v", result)
 	}
 }
@@ -653,7 +682,7 @@ func TestEscalateAuthorEndedReplayWithoutRungReportsEnded(t *testing.T) {
 	request := f.request()
 	request.Profile, request.Step = "", ""
 	result, err := f.hub.escalateAuthor(t.Context(), request)
-	if err != nil || result.Code != "no_rung" || !result.AuthorEnded {
+	if err != nil || result.Code != "job_not_marked" || !result.AuthorEnded {
 		t.Fatalf("ended replay: result=%+v err=%v", result, err)
 	}
 }
@@ -699,5 +728,189 @@ func TestEscalateAuthorRefusesPaneInAnotherWorktree(t *testing.T) {
 	}
 	if slices.Contains(commandOps(commands), "pane.close") {
 		t.Fatalf("closed pane in another worktree: %v", commandOps(commands))
+	}
+}
+
+func TestEscalateAuthorPersistsSuccessorBeforeClosingPane(t *testing.T) {
+	f := newEscalateFixture(t, "author-durable")
+	f.markLostFails = true
+	result, _ := f.escalate(t, nil)
+	if result.Code != "job_not_marked" {
+		t.Fatalf("result=%+v", result)
+	}
+	staged, err := f.hub.inbox.store.latestSpawnForJob(t.Context(), f.job+"-l1")
+	if err != nil {
+		t.Fatalf("successor was not persisted before ending the author: %v", err)
+	}
+	if staged.Status != "staged" || staged.Request.Repository.Checkout.Sha != strings.Repeat("b", 40) {
+		t.Fatalf("staged successor=%+v", staged)
+	}
+}
+
+func TestEscalateAuthorResumesStagedSuccessorWithoutCatalogRung(t *testing.T) {
+	f := newEscalateFixture(t, "author-staged-replay")
+	f.markLostFails = true
+	first, _ := f.escalate(t, nil)
+	if first.Code != "job_not_marked" {
+		t.Fatalf("first=%+v", first)
+	}
+	f.endHolder(fleet.LadderStepEndReason(5, f.job+"-l1"))
+	request := f.request()
+	request.Profile, request.Step = "", ""
+	type answer struct {
+		result hubEscalateAuthorResult
+		err    error
+	}
+	done := make(chan answer, 1)
+	go func() { result, err := f.hub.escalateAuthor(t.Context(), request); done <- answer{result, err} }()
+	var successor hubSpawnTask
+	eventually(t, 3*time.Second, "staged successor activation", func() bool {
+		var err error
+		successor, err = f.hub.inbox.store.latestSpawnForJob(t.Context(), f.job+"-l1")
+		return err == nil && successor.Status == "accepted"
+	})
+	if _, err := f.hub.inbox.store.completeSpawn(t.Context(), successor, placedAnywhere, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case got := <-done:
+		if got.err != nil || got.result.Job != f.job+"-l1" || got.result.Rung != "sonnet@xhigh" {
+			t.Fatalf("replay=%+v err=%v", got.result, got.err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("replay did not finish")
+	}
+}
+
+func TestEscalateAuthorDoesNotReportSuccessWithoutTaskBinding(t *testing.T) {
+	f := newEscalateFixture(t, "author-unbound")
+	original := f.hub.spawnNewApp
+	f.hub.spawnNewApp = func(out, errout io.Writer) (*fleet.App, error) {
+		app, err := original(out, errout)
+		app.TaskState = func(context.Context, string) (fleet.TaskStatus, error) { return fleet.TaskStatus{JobID: f.job}, nil }
+		app.LadderRebind = func(context.Context, string, string, string, string) error { return fmt.Errorf("rebind refused") }
+		return app, err
+	}
+	placed := placedAnywhere
+	type answer struct {
+		result hubEscalateAuthorResult
+		err    error
+	}
+	done := make(chan answer, 1)
+	go func() { result, err := f.hub.escalateAuthor(t.Context(), f.request()); done <- answer{result, err} }()
+	var successor hubSpawnTask
+	eventually(t, 3*time.Second, "successor activation", func() bool {
+		var err error
+		successor, err = f.hub.inbox.store.latestSpawnForJob(t.Context(), f.job+"-l1")
+		return err == nil && successor.Status == "accepted"
+	})
+	if _, err := f.hub.inbox.store.completeSpawn(t.Context(), successor, placed, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case got := <-done:
+		if got.err != nil || got.result.Code != "rebind_unconfirmed" || got.result.Job != "" {
+			t.Fatalf("unbound successor reported success: %+v", got.result)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("escalation did not finish")
+	}
+}
+
+func TestEscalateAuthorExpiresStageOnlyWithAuthorPresent(t *testing.T) {
+	f := newEscalateFixture(t, "author-expired")
+	next, err := escalateAuthorSubmission(escalateHolderRequest(f.job), f.request(), f.job+"-l1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	setEscalateAuthorHost(&next, "machine-a")
+	next.Repository.Checkout.Sha = strings.Repeat("b", 40)
+	next.Repository.Checkout.VerifyReuse = true
+	next.LadderStep = &fleet.LadderStepIdentity{Parent: f.job, Round: 5, PR: f.request().PR, Profile: "sonnet", Effort: "xhigh"}
+	holder, err := f.hub.inbox.store.latestSpawnForJob(t.Context(), f.job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := f.hub.inbox.store.claimSpawnReplacing(t.Context(), next, f.job+"-l1", "parent", time.Now().Add(-10*time.Minute), holder.Request.RequestID, "42:worker", "staged"); err != nil {
+		t.Fatal(err)
+	}
+	result, commands := f.escalate(t, nil)
+	if result.Code != "staged_expired" || result.AuthorEnded || slices.Contains(commandOps(commands), "pane.close") {
+		t.Fatalf("result=%+v commands=%v", result, commandOps(commands))
+	}
+	_, job, _, err := f.hub.inbox.store.spawnRoleOwner(t.Context(), "42:worker")
+	if err != nil || job != f.job {
+		t.Fatalf("reservation job=%q err=%v", job, err)
+	}
+}
+
+func TestExpiredStagedLadderReconcilerPreservesAbsentAuthor(t *testing.T) {
+	for _, present := range []bool{true, false} {
+		t.Run(fmt.Sprint(present), func(t *testing.T) {
+			f := newEscalateFixture(t, "author-expired-reconcile")
+			next, err := escalateAuthorSubmission(escalateHolderRequest(f.job), f.request(), f.job+"-l1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			next.LadderStep = &fleet.LadderStepIdentity{Parent: f.job, Round: 5, PR: f.request().PR, Profile: "sonnet", Effort: "xhigh"}
+			holder, err := f.hub.inbox.store.latestSpawnForJob(t.Context(), f.job)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, _, err := f.hub.inbox.store.claimSpawnReplacing(t.Context(), next, f.job+"-l1", "parent", time.Now().Add(-10*time.Minute), holder.Request.RequestID, "42:worker", "staged"); err != nil {
+				t.Fatal(err)
+			}
+			f.paneAbsent = !present
+			f.hub.expireStagedLadderSteps(t.Context())
+			_, job, _, err := f.hub.inbox.store.spawnRoleOwner(t.Context(), "42:worker")
+			want := f.job + "-l1"
+			if present {
+				want = f.job
+			}
+			if err != nil || job != want {
+				t.Fatalf("reservation job=%q want=%q err=%v", job, want, err)
+			}
+		})
+	}
+}
+
+func TestEscalateAuthorRefusesUnadmittedSuccessorBeforeClose(t *testing.T) {
+	f := newEscalateFixture(t, "author-plan-refused")
+	f.hub.ladderPlan = func(context.Context, fleet.Submission) error { return fmt.Errorf("quota refused") }
+	result, commands := f.escalate(t, nil)
+	if result.Code != "quota_refused" || result.AuthorEnded || slices.Contains(commandOps(commands), "pane.close") {
+		t.Fatalf("result=%+v commands=%v", result, commandOps(commands))
+	}
+	_, job, _, err := f.hub.inbox.store.spawnRoleOwner(t.Context(), "42:worker")
+	if err != nil || job != f.job {
+		t.Fatalf("reservation job=%q err=%v", job, err)
+	}
+}
+
+func TestLadderPlacementPlanAdmitsInheritedSuccessor(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	h, err := NewHubServer(HubServerConfig{Tokens: map[string]string{"operator": t14OperatorToken, "desktop": "node-token"}, InboxStorePath: filepath.Join(t.TempDir(), "inbox.sqlite3")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { h.Close() })
+	server := httptest.NewServer(h.Handler())
+	t.Cleanup(server.Close)
+	t14NamedNode(t, h, server, "desktop", true, true)
+	planHK(t)
+	h.spawnNewApp = func(out, errout io.Writer) (*fleet.App, error) {
+		app := retryDispatchApp(t, out, errout)
+		app.Quota = ladderPlanQuota{}
+		app.JobStore = &quotaJobs{records: map[string]map[string]any{"author-plan": {"state": "spawned", "task_id": "42", "profile": "sonnet", "family": "anthropic", "owner_lane": "parent"}}}
+		return app, nil
+	}
+	request := hubEscalateAuthorRequest{Job: "author-plan", Task: "42", PR: "mgh3326/panewire#77", Round: 5, Profile: "sonnet", Effort: "high", FromProfile: "sonnet", FromEffort: "medium", Findings: "[]"}
+	next, err := escalateAuthorSubmission(escalateHolderRequest("author-plan"), request, "author-plan-l1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	setEscalateAuthorHost(&next, "desktop")
+	if err := h.planLadderSuccessor(t.Context(), next); err != nil {
+		t.Fatalf("inherited successor plan: %v", err)
 	}
 }

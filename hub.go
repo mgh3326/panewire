@@ -424,6 +424,8 @@ type HubServer struct {
 	// heldLoop counts held role reservations per role key; heldLoopMu guards it
 	// separately from mu because a Sentry send must not run under the hub lock.
 	heldLoopMu        sync.Mutex
+	ladderMu          sync.Mutex
+	ladderPlan        func(context.Context, fleet.Submission) error
 	heldLoop          map[string]*spawnHeldLoop
 	heldLoopOrder     lruIndex[string]
 	staleAfter        time.Duration

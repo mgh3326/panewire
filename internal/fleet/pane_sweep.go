@@ -2,6 +2,7 @@ package fleet
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/url"
 	"os"
@@ -31,7 +32,7 @@ const DefaultPaneSweepGrace = 10 * time.Minute
 // TaskStatus is what the sweep reads of one hk task: its state, category and
 // title. The title carries the task's "(grade X, Tn)" marker, which the
 // automatic outcome records.
-type TaskStatus struct{ State, Category, Title string }
+type TaskStatus struct{ State, Category, Title, JobID string }
 
 // TaskStateReader answers the status of one hk task.
 type TaskStateReader func(ctx context.Context, task string) (TaskStatus, error)
@@ -66,10 +67,11 @@ func taskStateReader(client *hkQuota) TaskStateReader {
 			return TaskStatus{}, errors.New("task id is not numeric")
 		}
 		var record struct {
-			ID       int64  `json:"id"`
-			State    string `json:"state"`
-			Category string `json:"category"`
-			Title    string `json:"title"`
+			ID       int64           `json:"id"`
+			State    string          `json:"state"`
+			Category string          `json:"category"`
+			Title    string          `json:"title"`
+			Refs     json.RawMessage `json:"refs"`
 		}
 		if err := client.get(ctx, "/v1/tasks/"+url.PathEscape(task), &record); err != nil {
 			return TaskStatus{}, err
@@ -77,7 +79,11 @@ func taskStateReader(client *hkQuota) TaskStateReader {
 		if record.ID != id || record.State == "" {
 			return TaskStatus{}, errors.New("task record is invalid")
 		}
-		return TaskStatus{State: record.State, Category: record.Category, Title: record.Title}, nil
+		var refs struct {
+			JobID string `json:"job_id"`
+		}
+		_ = json.Unmarshal(record.Refs, &refs)
+		return TaskStatus{State: record.State, Category: record.Category, Title: record.Title, JobID: refs.JobID}, nil
 	}
 }
 

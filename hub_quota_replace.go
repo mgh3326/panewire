@@ -474,6 +474,7 @@ func (h *HubServer) runQuotaReconcile(parent context.Context) {
 			return
 		}
 		h.reconcileQuotaReplacements(ctx)
+		h.expireStagedLadderSteps(ctx)
 		delay = quotaReconcileEvery
 	}
 }

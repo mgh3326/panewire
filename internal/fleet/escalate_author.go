@@ -21,11 +21,9 @@ import (
 //
 //	panewire escalate-author --task ID --job JOB --pr owner/repo#N --round N --findings-file PATH
 //
-// rc 0 prints the new job and rung; rc 2 is a refusal (no_rung, quota_refused,
-// or another named code). A refusal before the hub closes the pane leaves the
-// worker running; one after it (quota_refused, claim_refused, job_not_marked)
-// has ended the author, and its message says so (docs/escalate-author.md). Any
-// other rc is an error mergewake logs and continues past.
+// rc 0 means placement and task binding are confirmed; rc 2 is an intact
+// refusal, rc 1 reports an ended author or unconfirmed rebind, and rc 124
+// reports pending work that the caller must retry (docs/escalate-author.md).
 
 const (
 	// escalateAuthorFindingsMax bounds the findings JSON the CLI reads and the
@@ -156,7 +154,7 @@ func (a *App) escalateAuthorCmd(ctx context.Context, args []string) error {
 	// A replay of a step that already ended the job asks the hub to finish or
 	// re-report it; the hub reads the successor's rung from its own record, so
 	// a ladder that no longer resolves is not a refusal here.
-	if ok && err == nil {
+	if ok && err == nil && !replay {
 		request.Profile, request.Effort, request.Step = step.Pick.Profile, step.Pick.Effort, step.Kind
 	}
 	if consult, err := a.ConsultSeat(ctx, grade, str(record, "owner_lane"), from.Family, scale); err == nil {
@@ -177,8 +175,14 @@ func (a *App) escalateAuthorCmd(ctx context.Context, args []string) error {
 		return err
 	}
 	if result.Code != "" {
+		if result.Code == "pending" {
+			return fail(exitTimeout, "%s: %s", result.Code, result.Reason)
+		}
+		if result.Code == "rebind_unconfirmed" {
+			return fail(exitFailure, "%s: %s", result.Code, result.Reason)
+		}
 		if result.AuthorEnded {
-			return fail(exitUsage, "%s: %s (the author's pane was closed and its record ended; no author runs on task %s)", result.Code, result.Reason, task)
+			return fail(exitFailure, "%s: %s (the author's pane was closed; no confirmed author runs on task %s)", result.Code, result.Reason, task)
 		}
 		return fail(exitUsage, "%s: %s", result.Code, result.Reason)
 	}

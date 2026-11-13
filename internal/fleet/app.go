@@ -75,7 +75,8 @@ type App struct {
 	JobStore      JobStore
 	// TaskState reads one hk task; nil builds it from [quota] / the
 	// handoffkeep env on first use (TaskStatus).
-	TaskState TaskStateReader
+	TaskState    TaskStateReader
+	LadderRebind func(context.Context, string, string, string, string) error
 	// PR lists the PRs hk links to one task; nil builds it the same way on
 	// first use (PRs). Reap reads it to keep a completed author's pane.
 	PR PRReader
@@ -358,7 +359,7 @@ func (a *App) help(cmd string) error {
 	case "escalate":
 		fmt.Fprintln(a.Out, "Usage: panewire escalate JOB --question TEXT [--report PATH]")
 	case "escalate-author":
-		fmt.Fprintln(a.Out, "Usage: panewire escalate-author --task ID --job JOB --pr owner/repo#N --round N --findings-file PATH (round 5 of the review-round rule: start the author again one ladder step up on the same worktree; rc 2 = no_rung|quota_refused)")
+		fmt.Fprintln(a.Out, "Usage: panewire escalate-author --task ID --job JOB --pr owner/repo#N --round N --findings-file PATH (rc 2: intact refusal; rc 1: ended or unconfirmed; rc 124: pending)")
 	case "restore":
 		fmt.Fprintln(a.Out, "Usage: panewire restore JOB (rebind a released job to its verified existing pane)")
 	case "reap", "prune":

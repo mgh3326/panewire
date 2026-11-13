@@ -280,14 +280,46 @@ func TestEscalateAuthorCLIReplaysAStepThatEndedTheJob(t *testing.T) {
 	}
 }
 
-// A refusal that follows the pane close says the author is gone: mergewake
-// reads rc 2 either way, so the message is the only place the consumer learns
-// that no author runs on the task.
+// A refusal after closing the pane has a distinct exit status.
 func TestEscalateAuthorCLIRefusalAfterTheCloseSaysTheAuthorIsGone(t *testing.T) {
 	a, hub := escalateCLIFixture(t, "sonnet", "high", true)
 	hub.result = EscalateAuthorResult{Code: "quota_refused", Reason: "no account admits it", AuthorEnded: true}
 	err := a.escalateAuthorCmd(context.Background(), []string{"--task", "42", "--job", "job-a", "--pr", "mgh3326/panewire#77", "--round", "5", "--findings-file", writeFindings(t, `[]`)})
-	if exitCode(err) != exitUsage || !strings.Contains(err.Error(), "no author runs on task 42") {
-		t.Fatalf("want rc 2 naming the ended author, got %v (rc %d)", err, exitCode(err))
+	if exitCode(err) != exitFailure || !strings.Contains(err.Error(), "no confirmed author runs on task 42") {
+		t.Fatalf("want rc 1 naming the ended author, got %v (rc %d)", err, exitCode(err))
+	}
+}
+
+func TestEscalateAuthorCLIPendingHasDistinctStatus(t *testing.T) {
+	a, hub := escalateCLIFixture(t, "sonnet", "high", true)
+	hub.result = EscalateAuthorResult{Code: "pending", Reason: "retry"}
+	err := a.escalateAuthorCmd(context.Background(), []string{"--task", "42", "--job", "job-a", "--pr", "mgh3326/panewire#77", "--round", "5", "--findings-file", writeFindings(t, `[]`)})
+	if exitCode(err) != exitTimeout {
+		t.Fatalf("pending exit=%d err=%v", exitCode(err), err)
+	}
+}
+
+func TestLadderTaskBindingRetriesAndConfirmsRebind(t *testing.T) {
+	bound := "old-job"
+	calls := 0
+	app := &App{
+		TaskState: func(context.Context, string) (TaskStatus, error) { return TaskStatus{JobID: bound}, nil },
+		LadderRebind: func(_ context.Context, task, parent, job, label string) error {
+			calls++
+			if task != "42" || parent != "old-job" || job != "new-job" || label != "worker" {
+				t.Fatalf("unexpected rebind arguments")
+			}
+			bound = job
+			return nil
+		},
+	}
+	if err := app.ConfirmLadderTaskBinding(t.Context(), "42", "old-job", "new-job", "worker"); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 || bound != "new-job" {
+		t.Fatalf("calls=%d binding=%s", calls, bound)
+	}
+	if err := app.ConfirmLadderTaskBinding(t.Context(), "42", "old-job", "new-job", "worker"); err != nil || calls != 1 {
+		t.Fatalf("replay err=%v calls=%d", err, calls)
 	}
 }
