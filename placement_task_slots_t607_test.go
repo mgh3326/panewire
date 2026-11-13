@@ -272,7 +272,6 @@ func TestParsePlacementPolicyMachines(t *testing.T) {
 		"operator id": `"operator":{"task_slots":1}`,
 		"zero slots":  `"desktop":{"task_slots":0}`,
 		"over cap":    `"desktop":{"task_slots":101}`,
-		"extra field": `"desktop":{"task_slots":1,"extra":1}`,
 	} {
 		if _, err := ParsePlacementPolicy([]byte(fmt.Sprintf(base, `,"machines":{`+machines+`}`))); err == nil {
 			t.Fatalf("%s machines entry accepted", name)

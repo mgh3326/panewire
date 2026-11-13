@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -15,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/mgh3326/panewire/internal/arbiter"
 )
@@ -229,8 +231,9 @@ func (h *fakeHK) serve(w http.ResponseWriter, r *http.Request) {
 			JobID  string `json:"job_id"`
 			TaskID any    `json:"task_id"`
 			Host   string `json:"host"`
+			At     string `json:"at"`
 		}
-		if e := json.NewDecoder(r.Body).Decode(&body); e != nil || body.JobID == "" || body.Host == "" {
+		if e := json.NewDecoder(r.Body).Decode(&body); e != nil || body.JobID == "" || body.Host == "" || body.At == "" {
 			h.fail(w, 400, "invalid_context")
 			return
 		}
@@ -242,7 +245,7 @@ func (h *fakeHK) serve(w http.ResponseWriter, r *http.Request) {
 			h.fail(w, 409, "job_id_taken")
 			return
 		}
-		rec := map[string]any{"job_id": body.JobID, "task_id": body.TaskID, "host": body.Host, "state": "claimed"}
+		rec := map[string]any{"job_id": body.JobID, "task_id": body.TaskID, "host": body.Host, "state": "claimed", "claimed_at": body.At}
 		h.records[body.JobID] = rec
 		h.writeJSON(w, 201, rec)
 		return
@@ -278,7 +281,7 @@ func (h *fakeHK) serve(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 			}
-			h.putBodies = append(h.putBodies, fields)
+			h.putBodies = append(h.putBodies, maps.Clone(fields))
 			if len(h.putStatuses) > 0 {
 				status := h.putStatuses[0]
 				h.putStatuses = h.putStatuses[1:]
@@ -301,7 +304,7 @@ func (h *fakeHK) serve(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			for k := range fields {
-				if !slices.Contains(jobRecordFields, k) {
+				if k != "at" && !slices.Contains(jobRecordFields, k) {
 					h.fail(w, 400, "invalid_context")
 					return
 				}
@@ -309,6 +312,22 @@ func (h *fakeHK) serve(w http.ResponseWriter, r *http.Request) {
 			if st := str(fields, "state"); st != "" && !slices.Contains([]string{"claimed", "spawned", "completed", "escalated", "lost"}, st) {
 				h.fail(w, 400, "invalid_context")
 				return
+			}
+			// hk stores a transition's client time as <state>_at (the "at" key
+			// needs a state); the fake keeps that shape.
+			if at, ok := fields["at"]; ok {
+				key := "ended_at"
+				switch str(fields, "state") {
+				case "":
+					h.fail(w, 400, "invalid_context")
+					return
+				case "spawned":
+					key = "spawned_at"
+				case "claimed":
+					key = "claimed_at"
+				}
+				fields[key] = at
+				delete(fields, "at")
 			}
 			if str(fields, "state") == "completed" && str(rec, "state") != "spawned" {
 				h.fail(w, 409, "job_state_conflict")
@@ -487,7 +506,9 @@ func TestSpawnedSelectionNeverCarriesPromptOrAbsolutePaths(t *testing.T) {
 	}
 }
 
-func (h *fakeHK) client() JobStore { return newHKJobs(&hkQuota{base: h.srv.URL, token: "test-token"}) }
+func (h *fakeHK) client() JobStore {
+	return newHKJobs(&hkQuota{base: h.srv.URL, token: "test-token"}, time.Now)
+}
 
 func (h *fakeHK) record(t *testing.T, id string) map[string]any {
 	t.Helper()
@@ -614,7 +635,7 @@ func TestSpawnedRecordAllowlistOnly(t *testing.T) {
 	if str(rec, "state") != "spawned" {
 		t.Fatalf("state=%v", rec["state"])
 	}
-	allowed := append(append([]string{}, jobRecordFields...), "job_id", "task_id", "host")
+	allowed := append(append([]string{}, jobRecordFields...), "job_id", "task_id", "host", "claimed_at", "spawned_at", "ended_at")
 	for k, v := range rec {
 		if !slices.Contains(allowed, k) {
 			t.Fatalf("non-allowlisted key %q in record", k)

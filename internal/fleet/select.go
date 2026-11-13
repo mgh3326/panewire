@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/mgh3326/handoffkeep/client"
+	"github.com/mgh3326/panewire/internal/configkeys"
 )
 
 //go:embed pool-order.json
@@ -100,9 +101,15 @@ func LoadPoolPolicy(path string) (PoolPolicy, error) {
 		}
 	}
 	var p PoolPolicy
-	if e := decode(b, &p); e != nil {
-		return p, e
+	source := path
+	if source == "" {
+		source = "built-in pool order"
 	}
+	ignored, decErr := decodeConfig(b, &p)
+	if decErr != nil {
+		return p, decErr
+	}
+	configkeys.Warn(nil, source, ignored)
 	// validate fills defaults in place; call it before p is copied out.
 	e := p.validate()
 	return p, e
