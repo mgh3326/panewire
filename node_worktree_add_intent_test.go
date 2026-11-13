@@ -2,6 +2,7 @@ package panewire
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"os/exec"
@@ -174,5 +175,40 @@ func TestDefaultNodeCommandRunnerPinsGitLocale(t *testing.T) {
 	out, err := defaultNodeCommandRunner("git")(t.Context(), "version")
 	if err != nil || string(out) != "C" {
 		t.Fatalf("git LC_ALL=%q err=%v, want C", out, err)
+	}
+}
+
+// Finding (mergewake medium on #535): a node upgraded while a pre-upgrade add
+// was interrupted holds that add's intent in the shared legacy file. Replay
+// must still reclaim the initializing worktree from it, and clear the legacy
+// file once it has used it.
+func TestNodeWorktreePrepareReclaimsLegacySharedIntent(t *testing.T) {
+	fixture := newNodeWorktreeFixture(t)
+	fixture.cloneRepo(t)
+	dir := filepath.Join(fixture.workRoot, "repo.detached")
+	if _, err := exec.Command("git", "-C", fixture.clone, "worktree", "add", "--detach", dir, fixture.main).CombinedOutput(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := exec.Command("git", "-C", fixture.clone, "worktree", "lock", "--reason", "initializing", dir).CombinedOutput(); err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := json.Marshal(nodeWorktreeAddIntent{Path: filepath.Clean(dir), Mode: "detached", Sha: fixture.main})
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyPath := filepath.Join(fixture.clone, ".git", "panewire-worktree-add-intent.json")
+	if err := os.WriteFile(legacyPath, legacy, 0600); err != nil {
+		t.Fatal(err)
+	}
+	prepared, code := fixture.client().nodeWorktreePrepare(t.Context(), nodeWorktreePrepareArgs{
+		Origin: fixture.origin, Mode: "detached", Sha: fixture.main, Fetch: "refs/heads/main", Dir: "repo.detached",
+	})
+	result, ok := prepared.(nodeWorktreePrepareResult)
+	if code != "" || !ok || result.Outcome != nodePreparePrepared {
+		t.Fatalf("replay with legacy intent=%+v code=%q, want prepared", prepared, code)
+	}
+	leftover, err := filepath.Glob(filepath.Join(fixture.clone, ".git", "panewire-worktree-add-intent*"))
+	if err != nil || len(leftover) != 0 {
+		t.Fatalf("intent files left after legacy reclaim: files=%v err=%v", leftover, err)
 	}
 }
