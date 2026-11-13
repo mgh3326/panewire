@@ -15,6 +15,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/mgh3326/panewire/internal/configkeys"
 )
 
 // PlacementPolicy is deliberately small and operator-owned. It selects a
@@ -61,6 +63,9 @@ type PlacementPolicy struct {
 	// strongest host). A machine without an entry weighs defaultPlacementPower.
 	// See docs/placement.md for how the weights are measured.
 	Power map[string]float64 `json:"power,omitempty"`
+	// ignoredKeys are the keys of the decoded file that this release does not
+	// read. LoadPlacementPolicy's callers log them; the policy still loads.
+	ignoredKeys []string
 	// CapacityWeight is retired: power is the only per-host multiplier. It
 	// stays decodable so a stale policy file still loads; reload logs a warning
 	// and strips it, and the score never reads it.
@@ -209,10 +214,14 @@ func (p *PlacementPolicy) applyMemoryDefaults() {
 func ParsePlacementPolicy(data []byte) (PlacementPolicy, error) {
 	var policy PlacementPolicy
 	decoder := json.NewDecoder(bytes.NewReader(data))
-	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&policy); err != nil || decoder.Decode(&struct{}{}) != io.EOF {
 		return PlacementPolicy{}, errors.New("placement policy is invalid")
 	}
+	ignored, err := configkeys.JSON(data, &policy)
+	if err != nil {
+		return PlacementPolicy{}, errors.New("placement policy is invalid")
+	}
+	policy.ignoredKeys = ignored
 	policy.applyMemoryDefaults()
 	if !policy.valid() {
 		return PlacementPolicy{}, errors.New("placement policy is invalid")
@@ -487,6 +496,7 @@ func (h *HubServer) reloadPlacementPolicyLocked() {
 		h.setPlacementPolicyFailureLocked("invalid")
 		return
 	}
+	configkeys.Warn(h.logger, h.placementPolicyPath, policy.ignoredKeys)
 	if len(policy.QuotaExclude)+len(policy.QuotaBoost) > 0 {
 		if h.logger != nil {
 			h.logger.Warn("placement policy quota rules are retired; remove quota_exclude/quota_boost", "quota_exclude", len(policy.QuotaExclude), "quota_boost", len(policy.QuotaBoost))
