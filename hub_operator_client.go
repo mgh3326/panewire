@@ -45,10 +45,6 @@ var hubOperatorAPIPaths = map[string]bool{
 	"/v1/jobs/reassign": true,
 	"/v1/lanes":         true,
 	"/v1/placement":     true,
-	"/v1/burst":         true,
-	"/v1/burst/request": true,
-	"/v1/burst/release": true,
-	"/v1/burst/holds":   true,
 }
 
 func validHubOperatorAPIPath(path string) bool {

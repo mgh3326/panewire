@@ -30,11 +30,7 @@ fail-open으로 즉시 넣는다.
 `relay.released`에는 `final_text`, `edited`, `original_event_id`가 있으므로
 편집되지 않은 경우에도 실제 pane 입력을 기록한다.
 
-`GET /v1/relay/held?lane=<lane>`은 노드 보고의 무상태(in-memory) 투영을
-돌려준다. `PATCH /v1/relay/events/{id}`는 held 중인 텍스트만 소유 노드에
-전달하고, 이미 주입된 이벤트는 409이다. `DELETE /v1/relay/events/{id}`는
-취소를 소유 노드에 전달한다. 셋 모두 operator Bearer 인증을 요구한다.
-허브는 held 본문을 저장하지 않는다.
+held 편집과 취소 API(`GET /v1/relay/held`, `PATCH`/`DELETE /v1/relay/events/{id}`)는 제거되었다. 허브는 held 본문을 저장하지 않는다.
 
 `relay_held`는 `pane, lane, event_id, job_id, text, held_since,
 deliver_policy, max_wait, recv_seq`와 편집 여부를 노드에만 저장한다. 재시작

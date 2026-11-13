@@ -170,9 +170,9 @@ and its error is preserved in the registration warning.
 | `presence_id` | host `NAME` | Identity this host uses in pacelever host-presence records. |
 | `capacity` | legacy | Accepted and ignored; hosts no longer displays this inventory value. |
 | `heavy` | legacy | Accepted and ignored; the `heavy` command and its host lock were removed. |
-| `wake` | off | `"panewire"` marks the host wakeable: the placement policy may request `panewire node wake` when asleep, then waits for the node to connect. |
-| `wake_hold` | `10` | Burst hold in minutes. |
-| `wake_wait` | `90` | Burst command timeout in seconds; wake refusal returns 81. |
+| `wake` | off | Retired with `panewire node wake`: a wake attempt now fails with "no waker configured" and starts nothing. Still accepted. |
+| `wake_hold` | `10` | Retired with `wake`; still accepted. |
+| `wake_wait` | `90` | Retired with `wake`; still accepted. |
 | `brief_policy`, `brief_preamble` | host policy default | Optional initiator-side preview settings for this host; deploy matching policy on the execution host. |
 
 When the job cwd is a linked git worktree and placement picks a remote host,
@@ -602,8 +602,7 @@ the `panewire job` upload had 3 s, and a timed-out upload still warns
 `rc=124`); the other calls get 8 s. hk checks a comment's body as the CLI did
 before sending it.
 
-**Explicit files.** A file the operator names (the hub's `--handoffkeep-env`
-and `--chat-env`, a node's `spawn.json` `handoffkeep_env`) is read as before, and its bearer is `HANDOFFKEEP_TOKEN_SVC_PANEWIRE`
+**Explicit files.** A file the operator names (the hub's `--handoffkeep-env`, and a node's `spawn.json` `handoffkeep_env`) is read as before, and its bearer is `HANDOFFKEEP_TOKEN_SVC_PANEWIRE`
 when present, else `HANDOFFKEEP_TOKEN`, so files written before hk 3570 keep
 working. **Node on defaults.** With no `spawn.json`, the node's hk credential
 is not an explicit file: it resolves through the same loader, in the same

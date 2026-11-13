@@ -22,7 +22,6 @@ panewire's host-first placement — read that score.
   "max_active_jobs": 5,
   "memory_free_pct_min": 30,
   "spawn_bridge_seconds": 300,
-  "wake_on_spill": false,
   "machines": {
     "desktop": {"task_slots": 2}
   }
@@ -332,7 +331,7 @@ CPU busy with load1 at 20–44 on 10 cores and its score stayed near 70.
 free  = cpu * mem * io * load * jobs
 score = free * power - 10 * claims_in_the_bridge_window
         - 1000 if disconnected, - 500 if load_unknown, - 200 if not accepting,
-        - 100 if throttled, + 5 for a placement hold, + 5 if burst-ready
+        - 100 if throttled
 ```
 
 Each term runs from 0 to 1, and is 1 when its signal is absent or harmless.
@@ -382,7 +381,7 @@ Stale or missing data never reads as idle:
   `source=hub-only`: every candidate counts as having known metrics and no
   `load_unknown` penalty applies. The Prometheus terms (`cpu`, `io`, `load`)
   read 1. `mem` still follows the node-reported `memory_free_pct`, and the
-  `jobs` term, the claim bridge and the hold/burst adjustments still apply, so
+  `jobs` term and the claim bridge still apply, so
   hosts can still rank differently. An idle-looking score in that state
   reflects missing data, not a measured idle host; the hub-only fallback is
   unchanged by score v2 and described under Prometheus below.
@@ -630,9 +629,6 @@ slots and `--explain`. A job leaves it when any of these is true:
 - herdr has reported its pane `idle` or `done` for 30 minutes (the clock
   restarts when the pane works again, and when the node restarts).
 
-The idle-shutdown probe keeps its own scan without the 30-minute rule, so a
-lead waiting on its workers still keeps its host awake.
-
 The default is the same local `mac-work` / `desktop` spill shape. Policy files
 must be regular files; unknown fields and duplicate targets are rejected. A
 changed valid file hot-reloads without changing the last known-good policy.
@@ -697,8 +693,7 @@ Counts come from the node heartbeat's active-job list, the same source as
 `active_jobs`.
 
 A machine whose task count reaches `task_slots` is removed from `candidates`
-entirely — it is never the decision, is skipped by the `wake_on_spill`
-shortcut, and is invisible to consumers that walk the candidate list. When
+entirely — it is never the decision, and is invisible to consumers that walk the candidate list. When
 every machine is full the response is explicit: `"decision": null`,
 `"candidates": []`, `"reason": "task_slots_exhausted"`. A narrower form —
 the decision machine is slot-full but other candidates remain — answers
@@ -778,7 +773,6 @@ is:
   "spill_targets": ["desktop", "mac-dev"],
   "max_active_jobs": 5,
   "memory_free_pct_min": 30,
-  "wake_on_spill": false,
   "machines": {
     "mac-personal": {"task_slots": 3},
     "mac-dev": {"task_slots": 3},
@@ -846,16 +840,11 @@ hub-only decision based on connected/accepting state and heartbeat active-job
 counts; it never returns a scheduler 500.
 
 ```json
-{"decision":"mac-work","candidates":[{"machine":"mac-work","score":37,"load_ratio":0.53,"throttled":false,"active_jobs":1,"connected":true,"metrics_known":true,"memory_free_pct":null,"swap_used_mb":null,"memory_known":false,"holds_active":false,"burst_ready":false,"reason":"memory_unknown"}],"source":"prometheus","asof":"2026-09-04T00:20:00Z"}
+{"decision":"mac-work","candidates":[{"machine":"mac-work","score":37,"load_ratio":0.53,"throttled":false,"active_jobs":1,"connected":true,"metrics_known":true,"memory_free_pct":null,"swap_used_mb":null,"memory_known":false,"reason":"memory_unknown"}],"source":"prometheus","asof":"2026-09-04T00:20:00Z"}
 ```
 
 A node that does not send memory telemetry records `memory_unknown` rather
 than `available`; this remains fail-open and does not change its score.
-
-When `wake_on_spill` is true and the selected spill target is disconnected, the
-hub starts the existing R16 on-demand burst request in the background with a
-short placement hold. The returned decision remains advisory: callers must
-wait for the target's normal authenticated heartbeat before assigning work.
 
 `panewire` invokes the stable CLI contract:
 

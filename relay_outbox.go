@@ -206,6 +206,15 @@ func (s *Store) RecordRelayPersisted(ctx context.Context, key relayOutboxKey, at
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if key.Kind == "lane.event" {
+		if key.Lane == "" && key.EventID == "" {
+			// A legacy hub acknowledgement has no producer identity fields.
+			// Its deterministic transport job_id still names the existing row.
+			_, err := s.db.ExecContext(ctx, `UPDATE relay_sent SET persisted_at=? WHERE kind='lane.event' AND job_id=?`, at.UnixMilli(), key.JobID)
+			return err
+		}
+		if key.Lane == "" || key.EventID == "" {
+			return nil
+		}
 		_, err := s.db.ExecContext(ctx, `INSERT INTO relay_sent(kind,job_id,epoch,report_path,reason,lane,event_id,sent_at,persisted_at) VALUES(?,?,?,?,?,?,?,?,?)
  ON CONFLICT(lane,event_id) WHERE kind='lane.event' DO UPDATE SET persisted_at=excluded.persisted_at`, key.Kind, key.JobID, int64(key.Epoch), key.ReportPath, key.Reason, key.Lane, key.EventID, at.UnixMilli(), at.UnixMilli())
 		return err

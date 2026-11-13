@@ -96,7 +96,7 @@ func TestHKSvcNodeDefaultBriefFetchSendsSvcToken(t *testing.T) {
 	}
 }
 
-// An explicit file (hub --handoffkeep-env/--chat-env, spawn.json
+// An explicit file (hub --handoffkeep-env, spawn.json
 // handoffkeep_env) prefers the svc key and still accepts today's files.
 func TestHKSvcExplicitFileAcceptsServiceKeyFirst(t *testing.T) {
 	dir := t.TempDir()

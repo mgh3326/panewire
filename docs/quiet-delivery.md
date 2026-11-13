@@ -36,8 +36,7 @@ replay, and every inbox rule. Otherwise explicit class wins, then the `types:`
 map resolves a declared `--type` (decision/order/ready/blocked/findings → interrupt;
 report/ack/info → inbox, all overridable globally or per lane), then the first
 matching rule, with lane
-rules ahead of global rules. Messages originating in the operator chat UI remain
-interrupts, including declarative instructions. Escalation, joined and revoked job events use the
+rules ahead of global rules. Escalation, joined and revoked job events use the
 **receiving parent lane's** policy and inbox, following existing routing.
 
 Inbox-class events deliver **immediately** instead of waiting for the deadline
@@ -259,8 +258,8 @@ the answerer — is also delivered (hk 3434), from a counsel job's pane too: the
 session that asked waits for it in its pane. `job.escalate`, a worker's
 action events above, and the `decision`, `blocked`, `findings` and
 `automation-failed` types from anyone else still interrupt. Lanes that are not
-design lanes, `operator-desk` included, are unchanged, and so are chat relays
-and `job.*` kinds.
+design lanes, `operator-desk` included, are unchanged, and so are `job.*`
+kinds.
 
 ### Records kept in hk only
 
@@ -327,15 +326,8 @@ default covers `operator-desk` and per-fleet desks such as
 `work-operator-desk`. A desk lane is never a design lane. An explicit empty
 list turns a class off.
 
-Two kinds of traffic keep their existing delivery in every lane:
+One kind of traffic keeps its existing delivery in every lane:
 
-- operator chat turns the hub's own chat creates, which are not lane
-  notifications. The hub marks the turn where it creates it; an event id that
-  merely looks like `chat-N` (a `panewire emit --event-id chat-7`, a job event)
-  is a lane notification. A restart replay of a chat row keeps its delivery
-  only when the chat store holds the operator message whose id and body hash
-  make up the row's event id, and the row's text matches the hub-rendered
-  message and question ids;
 - events the operator posts through the [R24 HTTP ingress](r24-http-ingress.md)
   with the operator token,  This is the explicit operator path into a pane, so it is
   kept. A restart replay of such a row is filed like any other item.
@@ -345,8 +337,8 @@ either. A batch built for one (an item stored before the lane became
 inbox-only, for example) is filed: its items become unread inbox items, the
 batch is quarantined with the reason `inbox-only lane: items filed unread`,
 and the lane gets its wake. The inbox summary pointer (`inbox_summary`) is not
-added to anything typed into an inbox-only lane, so an operator chat turn to
-the desk is typed as sent.
+added to anything typed into an inbox-only lane, so anything typed to the desk
+is typed as sent.
 
 The rule holds where a body would be typed, not only where an event arrives.
 An item stored under another class, by an older hub or before the lane became
@@ -443,7 +435,7 @@ an `inbox_wake` with outcome `sent` and reason `desk_fallback`; a startup line
 also includes `startup=true` in its detail.
 
 Worker lanes are unchanged: a job, reviewer, tester or counsel lane keeps
-body injection for READY, findings, an ESC answer, chat and everything else.
+body injection for READY, findings, an ESC answer and everything else.
 
 ### Worker trial
 
@@ -568,8 +560,7 @@ batches never disable other digests.
 
 When enabled, interrupt batching uses the same transactional outbox: arrivals
 for one receiving lane within the oldest item's window become one turn. A
-single item is also delayed by that window. Must-act tags and chat UI turns
-bypass batching. The flush runs every 100ms; a batch is never sent early.
+single item is also delayed by that window. Must-act tags bypass batching. The flush runs every 100ms; a batch is never sent early.
 
 ## Holding interrupts while a receiver works
 
@@ -600,7 +591,7 @@ Old nodes without working-state reports deliver as before.
 
 READY, FINDINGS, BLOCKED and MERGED interrupt notices can be held. The READY tag
 still selects the interrupt class, but does not bypass this hold. Types `decision`
-and `order`, kinds `job.escalate`, `job.lost`, `job.revoked`, operator chat UI turns,
+and `order`, kinds `job.escalate`, `job.lost`, `job.revoked`,
 and whole-word BLOCKER/URGENT/ESC tags always bypass the queue. BOUNCE and
 needs_decision tags also bypass it. Original IDs and must-ack requirements remain
 available through `inbox list` and `inbox ack`.

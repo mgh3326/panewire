@@ -1,6 +1,7 @@
 package panewire
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -149,5 +150,27 @@ func TestHubAlertStaysPendingUntilTheLogAcceptsIt(t *testing.T) {
 	}
 	if got := strings.Count(string(writer.out), "hub alert"); got != 1 {
 		t.Fatalf("incident logged %d times, want 1: %s", got, writer.out)
+	}
+}
+
+// TestHubAlertDeliveredWhenOnlyTheFileSinkFails pins the --log-file tee rule: a
+// failing file sink does not hold back an alert the primary sink wrote, and the
+// alert is written once, not again on every later pass.
+func TestHubAlertDeliveredWhenOnlyTheFileSinkFails(t *testing.T) {
+	var primary bytes.Buffer
+	file := &toggleWriter{down: true}
+	hub, err := NewHubServer(HubServerConfig{
+		Tokens: map[string]string{"operator": r6OperatorToken},
+		Logger: slog.New(hubLogTeeHandler{primary: slog.NewTextHandler(&primary, nil), file: slog.NewTextHandler(file, nil)}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	alert := HubAlert{MachineID: "node-a", Reason: hubAlertReasonDisconnected, Check: hubAlertNoCheck}
+	if err := hub.logHubAlert(alert); err != nil {
+		t.Fatalf("primary accepted the alert but the handler reported %v", err)
+	}
+	if got := strings.Count(primary.String(), "hub alert"); got != 1 {
+		t.Fatalf("primary sink logged %d copies, want 1: %s", got, primary.String())
 	}
 }
