@@ -79,19 +79,21 @@ func (h *HubServer) releasePlacementCount(job string) {
 // restorePlacementCounts counts again the bound spawns that may still hold an
 // unclaimed launch (docs/placement.md, "Spawn bridge"). The counts are hub
 // memory, so without this a restart blinds placement to those launches until
-// their claims show (hk 4460). Each row counts from its creation, which is no
-// later than its decision, so it ends no later than a live count would. A claim,
-// a definitive failure or the bridge window ends it as before. Called once, from
-// NewHubServer, before the hub takes any request.
-func (h *HubServer) restorePlacementCounts() {
+// their claims show (hk 4460). A row counts from its placement, the bind that
+// stamps placed_ms, as a live count does, on the host it is bound to. A row
+// whose claim was seen before the restart is left out (markPlacementClaims),
+// and so is one placed before the bridge window. A claim, a definitive failure
+// or the window ends a restored count as it does a live one. Called once, from
+// NewHubServer, before the hub takes any request; a failure stops the start,
+// since the placements it covers would otherwise be decided blind.
+func (h *HubServer) restorePlacementCounts() error {
 	if h.inbox == nil {
-		return
+		return nil
 	}
 	bridge := h.placementCountWindowLocked()
 	tasks, err := h.inbox.store.boundSpawnsSince(h.closeCtx, h.now().UTC().Add(-bridge))
 	if err != nil {
-		h.logger.Warn("hub could not restore placement counts", "error", err)
-		return
+		return h.inbox.store.loggable("restore placement counts", err)
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -102,7 +104,23 @@ func (h *HubServer) restorePlacementCounts() {
 		if task.Node == nil || task.Node.Machine == "" {
 			continue
 		}
-		h.placementCounts[task.Job] = placementCount{machine: task.Node.Machine, at: task.Created}
+		h.placementCounts[task.Job] = placementCount{machine: task.Node.Machine, at: task.Placed}
+	}
+	return nil
+}
+
+// markPlacementClaims persists the claims that just ended placement counts, so
+// a restart does not restore them (restorePlacementCounts). It runs after the
+// hub lock is released: a store write never waits behind a heartbeat. A failed
+// write is only logged; the count is already gone from memory.
+func (h *HubServer) markPlacementClaims(jobs []string, now time.Time) {
+	if h.inbox == nil {
+		return
+	}
+	for _, job := range jobs {
+		if err := h.inbox.store.markSpawnClaimed(h.closeCtx, job, now); err != nil {
+			h.logger.Warn("hub could not record a placement claim", "job", job, "error", h.inbox.store.loggable("mark placement claim", err))
+		}
 	}
 }
 

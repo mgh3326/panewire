@@ -7,7 +7,7 @@ import (
 )
 
 // hk 4460: a hub restart restores the placement counts of spawns already bound
-// to a host and not yet settled, so the next decision still sees a job the
+// to a host and not yet claimed, so the next decision still sees a job the
 // previous hub decided onto that host before its claim shows (PR #484 hub.go:609).
 
 // restartHub opens a hub on the inbox at path. Opening it again on the same path
@@ -23,9 +23,9 @@ func restartHub(t *testing.T, path string) *HubServer {
 	return h
 }
 
-// boundSpawn claims a request, decides it onto machine-a and binds it to that
-// node, the state a spawn is in while it is dispatched and its claim is not yet
-// seen. It returns the task as the store holds it after the bind.
+// boundSpawn claims a request, binds it to machine-a and stamps its placement,
+// the state a spawn is in while it is dispatched and its claim is not yet seen.
+// It mirrors the transport: the bind, then the placement stamp.
 func boundSpawn(t *testing.T, hub *HubServer, requestSeq int) hubSpawnTask {
 	t.Helper()
 	request := durableSpawnRequest()
@@ -36,6 +36,9 @@ func boundSpawn(t *testing.T, hub *HubServer, requestSeq int) hubSpawnTask {
 	dispatch := hubSpawnRequest{RequestID: t14RequestID(requestSeq), Machine: "machine-a", CWDKey: "project", Brief: hubSpawnBrief{Inline: "task"}, Args: []string{"--job", task.Job}, WaitSeconds: 600, DeadlineMS: task.Deadline.UnixMilli()}
 	task, err = hub.inbox.store.bindSpawn(t.Context(), task.Request.RequestID, task.Attempt, dispatch)
 	if err != nil {
+		t.Fatal(err)
+	}
+	if err := hub.inbox.store.markSpawnPlaced(t.Context(), task.Request.RequestID, task.Attempt, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	return task
@@ -85,12 +88,13 @@ func TestRestartDoesNotRestoreSettledSpawn_t4460(t *testing.T) {
 	}
 }
 
-// A count older than the bridge window is not restored: it would have ended
-// without a claim had the hub kept running.
-func TestRestartDropsCountsPastTheBridgeWindow_t4460(t *testing.T) {
+// A count is dated from the placement, not the request: a request that waited
+// in the coordinator queue longer than the bridge window and was placed just
+// before the restart still counts, as its live count would.
+func TestRestartCountsPlacementNotRequestAge_t4460(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "inbox.sqlite3")
 	before := restartHub(t, path)
-	task := boundSpawn(t, before, 462)
+	task := boundSpawn(t, before, 463)
 	old := time.Now().Add(-placementDefaultSpawnBridge - time.Minute).UnixMilli()
 	if _, err := before.inbox.store.db.ExecContext(t.Context(), before.inbox.store.q(`UPDATE spawn_operations SET created_ms=? WHERE request_id=?`), old, task.Request.RequestID); err != nil {
 		t.Fatal(err)
@@ -99,7 +103,64 @@ func TestRestartDropsCountsPastTheBridgeWindow_t4460(t *testing.T) {
 
 	after := restartHub(t, path)
 	after.connect("machine-a", "test", "fixture", &hubAgent{}, true)
+	if got := countedBridged(after); got != 1 {
+		t.Fatalf("placed just now but requested long ago: counts %d after restart, want 1", got)
+	}
+}
+
+// A count placed before the bridge window is not restored: it would have ended
+// without a claim had the hub kept running.
+func TestRestartDropsCountsPastTheBridgeWindow_t4460(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "inbox.sqlite3")
+	before := restartHub(t, path)
+	task := boundSpawn(t, before, 462)
+	old := time.Now().Add(-placementDefaultSpawnBridge - time.Minute).UnixMilli()
+	if _, err := before.inbox.store.db.ExecContext(t.Context(), before.inbox.store.q(`UPDATE spawn_operations SET placed_ms=? WHERE request_id=?`), old, task.Request.RequestID); err != nil {
+		t.Fatal(err)
+	}
+	before.Close()
+
+	after := restartHub(t, path)
+	after.connect("machine-a", "test", "fixture", &hubAgent{}, true)
 	if got := countedBridged(after); got != 0 {
 		t.Fatalf("count past the bridge window restored as %d, want 0", got)
+	}
+}
+
+// A launch whose claim was seen before the restart is not counted again, even
+// when its job finished before the restart and no heartbeat shows it after: the
+// claim is stored, not only held in memory.
+func TestRestartDoesNotRestoreClaimedLaunch_t4460(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "inbox.sqlite3")
+	before := restartHub(t, path)
+	task := boundSpawn(t, before, 464)
+	before.countPlacement(task.Job, "machine-a")
+	if changed, err := before.completeSpawn(t.Context(), task, hubSpawnOutcome{RC: 0, Stage: "landing", Host: "machine-a", NodeResult: true}); err != nil || !changed {
+		t.Fatalf("completeSpawn = %v, %v", changed, err)
+	}
+	before.connect("machine-a", "test", "fixture", &hubAgent{}, true)
+	now := time.Now().UTC()
+	before.observeActiveJobs("machine-a", []HubActiveJob{{JobID: task.Job, AgentLabel: "agent", Epoch: 1, StartedAt: now.Format(time.RFC3339)}}, now)
+	// The job finishes; the next heartbeat no longer lists it.
+	before.observeActiveJobs("machine-a", nil, now.Add(time.Second))
+	before.Close()
+
+	after := restartHub(t, path)
+	after.connect("machine-a", "test", "fixture", &hubAgent{}, true)
+	if got := countedBridged(after); got != 0 {
+		t.Fatalf("a finished job whose claim was seen counts %d after restart, want 0", got)
+	}
+}
+
+// A restore that cannot read the store reports it, so the hub does not start
+// placing blind.
+func TestRestorePlacementCountsReportsStoreFailure_t4460(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "inbox.sqlite3")
+	hub := restartHub(t, path)
+	if err := hub.inbox.store.close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := hub.restorePlacementCounts(); err == nil {
+		t.Fatal("restore on a closed store reported no error")
 	}
 }
