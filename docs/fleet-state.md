@@ -64,6 +64,8 @@ Each `(host, kind, key)` triple names one latest value.
 
 ## Freshness rule
 
+*A hub spawn decision does not reuse a snapshot across decisions (hk 4448): the freshness window below is how old a value may be, and a decision that waited at the placement gate reads the state again after it. A host the hub reports slot-full stays excluded, never turned into an unreported host. See docs/placement.md, "Spawn bridge".*
+
 A consumer uses a hub value only when both of these hold:
 
 1. **The publisher is alive.** The latest `publisher` message for the host has
