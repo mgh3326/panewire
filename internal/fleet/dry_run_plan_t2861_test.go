@@ -32,7 +32,7 @@ func planClientFor(t *testing.T, status int, body any) hubHTTP {
 }
 
 func TestHubPlanReturnsTheHubsPlacement_t2861(t *testing.T) {
-	c := planClientFor(t, http.StatusOK, SpawnPlan{Host: "hub-host", Profile: "codex-terra61", Role: "worker", Job: "job-a"})
+	c := planClientFor(t, http.StatusOK, SpawnPlan{Host: "hub-host", Profile: "codex-terra61", Role: "implementer", Job: "job-a"})
 	plan, err := c.Plan(context.Background(), Submission{})
 	if err != nil {
 		t.Fatalf("plan: %v", err)
@@ -83,9 +83,9 @@ func (h planningHub) Plan(_ context.Context, request Submission) (SpawnPlan, err
 func TestDryRunPrintsTheHubPlan_t2861(t *testing.T) {
 	a, s, _, hub, _ := hubFixture(t, gitState{pushed: true}, "wk/feat", hubHosts())
 	a.Config.Hub = map[string]any{"hub_url": "https://hub.test"}
-	hubOutput := "hub plan: the hub's own placement; nothing reserved, claimed or dispatched\ndry-run host=hub-host profile=codex-terra61 role=worker job=job-a\n"
+	hubOutput := "hub plan: the hub's own placement; nothing reserved, claimed or dispatched\ndry-run host=hub-host profile=codex-terra61 role=implementer job=job-a\n"
 	a.Hub = planningHub{hub, func(Submission) (SpawnPlan, error) {
-		return SpawnPlan{Host: "hub-host", Profile: "codex-terra61", Role: "worker", Job: "job-a", Output: hubOutput}, nil
+		return SpawnPlan{Host: "hub-host", Profile: "codex-terra61", Role: "implementer", Job: "job-a", Output: hubOutput}, nil
 	}}
 	s = hubPlanSpawn(t, a, s)
 	if err := a.previewSpawn(context.Background(), s); err != nil {

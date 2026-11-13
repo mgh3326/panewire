@@ -13,7 +13,7 @@ import (
 )
 
 func durableSpawnRequest() fleet.Submission {
-	return fleet.Submission{RequestID: "d676220b-e763-4af1-aefd-000000000001", Args: []string{"-c", "/work/project", "-p", "/work/brief.md", "-m", "auto", "-l", "test-job", "--job", "test-job", "--t", "T1", "--task", "42", "--owner", "parent", "--role", "worker", "--host", "auto"}, Brief: "Implement the task", Repository: fleet.Repository{Name: "project", Origin: "https://github.com/example/project.git", LocalRoot: "/work/project", Worktree: "project.test-job", Checkout: &fleet.HubCheckout{Origin: "https://github.com/example/project.git", Mode: "branch", Branch: "wk/task", Sha: strings.Repeat("a", 40), Dir: "project.test-job"}}, OriginMachine: "machine-a", DeadlineSeconds: 600}
+	return fleet.Submission{RequestID: "d676220b-e763-4af1-aefd-000000000001", Args: []string{"-c", "/work/project", "-p", "/work/brief.md", "-m", "auto", "-l", "test-job", "--job", "test-job", "--t", "T1", "--task", "42", "--owner", "parent", "--role", "implementer", "--host", "auto"}, Brief: "Implement the task", Repository: fleet.Repository{Name: "project", Origin: "https://github.com/example/project.git", LocalRoot: "/work/project", Worktree: "project.test-job", Checkout: &fleet.HubCheckout{Origin: "https://github.com/example/project.git", Mode: "branch", Branch: "wk/task", Sha: strings.Repeat("a", 40), Dir: "project.test-job"}}, OriginMachine: "machine-a", DeadlineSeconds: 600}
 }
 func openSpawnStore(t *testing.T, path string) *laneInboxStore {
 	t.Helper()

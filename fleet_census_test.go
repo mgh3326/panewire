@@ -110,19 +110,19 @@ func t501StandardInbox() map[string][]map[string]any {
 	return map[string][]map[string]any{
 		// Clean terminal job on an idle pane in a single-pane tab.
 		"j-reapable": {
-			t501EnvelopedEvent("job.claim", "", map[string]any{"owner_lane": "lane-a", "role": "worker"}),
+			t501EnvelopedEvent("job.claim", "", map[string]any{"owner_lane": "lane-a", "role": "implementer"}),
 			t501EnvelopedEvent("job.spawned", "", map[string]any{"pane_id": "w1:p1", "tab_id": "w1:t1"}),
 			t501FlatEvent("job.completed", old, nil),
 		},
 		// #603: a protected (`panewire spawn --keep`) finished job is skipped with
 		// reason=protected; only the JSON literal true protects.
 		"j-kept": {
-			t501EnvelopedEvent("job.claim", "", map[string]any{"owner_lane": "lane-a", "role": "worker"}),
+			t501EnvelopedEvent("job.claim", "", map[string]any{"owner_lane": "lane-a", "role": "implementer"}),
 			t501EnvelopedEvent("job.spawned", "", map[string]any{"pane_id": "w1:p60", "tab_id": "w1:t60", "keep": true}),
 			t501FlatEvent("job.completed", old, nil),
 		},
 		"j-kept-string": {
-			t501EnvelopedEvent("job.claim", "", map[string]any{"owner_lane": "lane-a", "role": "worker"}),
+			t501EnvelopedEvent("job.claim", "", map[string]any{"owner_lane": "lane-a", "role": "implementer"}),
 			t501EnvelopedEvent("job.spawned", "", map[string]any{"pane_id": "w1:p61", "tab_id": "w1:t61", "keep": "true"}),
 			t501FlatEvent("job.completed", old, nil),
 		},
@@ -130,7 +130,7 @@ func t501StandardInbox() map[string][]map[string]any {
 		"j-revived": {
 			t501FlatEvent("job.spawned", "", map[string]any{"pane_id": "w1:p2", "tab_id": "w1:t2"}),
 			t501FlatEvent("job.completed", old, nil),
-			t501FlatEvent("job.claim", "", map[string]any{"owner_lane": "lane-b", "role": "worker"}),
+			t501FlatEvent("job.claim", "", map[string]any{"owner_lane": "lane-b", "role": "implementer"}),
 		},
 		// Completed, but the recorded tab holds two panes.
 		"j-shared": {
@@ -163,12 +163,6 @@ func t501StandardInbox() map[string][]map[string]any {
 		"j-builder": {
 			t501FlatEvent("job.claim", "", map[string]any{"owner_lane": "lane-a", "role": "builder"}),
 			t501FlatEvent("job.spawned", "", map[string]any{"pane_id": "w1:p8", "tab_id": "w1:t8"}),
-			t501FlatEvent("job.completed", old, nil),
-		},
-		// Legacy captain role counts as builder too.
-		"j-captain": {
-			t501FlatEvent("job.claim", "", map[string]any{"owner_lane": "lane-a", "role": "captain"}),
-			t501FlatEvent("job.spawned", "", map[string]any{"pane_id": "w1:p8b", "tab_id": "w1:t8b"}),
 			t501FlatEvent("job.completed", old, nil),
 		},
 		// Already reaped once.
@@ -308,7 +302,6 @@ func t501StandardAgents() map[string]map[string]string {
 		"w1:p4":  {"status": "idle", "tab_id": "w1:t4new"},
 		"w1:p7":  {"status": "idle", "tab_id": "w1:t7"},
 		"w1:p8":  {"status": "idle", "tab_id": "w1:t8"},
-		"w1:p8b": {"status": "idle", "tab_id": "w1:t8b"},
 		"w1:p9":  {"status": "idle", "tab_id": "w1:t9"},
 		"w1:p10": {"status": "busy", "tab_id": "w1:t10"},
 		"w1:p11": {"status": "idle", "tab_id": "w1:t11"},
@@ -673,8 +666,8 @@ func TestFleetCensusReapEquivalenceClasses(t *testing.T) {
 			t.Errorf("%s class=%s want reapable", pane, paneClass[pane])
 		}
 	}
-	if paneClass["w1:p8"] != fleetCensusClassBuilder || paneClass["w1:p8b"] != fleetCensusClassBuilder {
-		t.Errorf("builder classes: w1:p8=%s w1:p8b=%s", paneClass["w1:p8"], paneClass["w1:p8b"])
+	if paneClass["w1:p8"] != fleetCensusClassBuilder {
+		t.Errorf("builder class: w1:p8=%s", paneClass["w1:p8"])
 	}
 	if paneClass["w1:p2"] != fleetCensusClassNoTerminalEvent {
 		t.Errorf("w1:p2 class=%s want no-terminal-event (revived)", paneClass["w1:p2"])
@@ -846,7 +839,7 @@ func t501EmptyHerdrResults() map[string]any {
 func TestFleetCensusLocalCLI(t *testing.T) {
 	jobs := map[string][]map[string]any{
 		"j-done": {
-			t501FlatEvent("job.claim", "", map[string]any{"owner_lane": "lane-a", "role": "worker"}),
+			t501FlatEvent("job.claim", "", map[string]any{"owner_lane": "lane-a", "role": "implementer"}),
 			t501FlatEvent("job.spawned", "", map[string]any{"pane_id": "w1:p1", "tab_id": "w1:t1"}),
 			t501FlatEvent("job.completed", t501OldEnough(), nil),
 		},
@@ -872,7 +865,7 @@ func TestFleetCensusLocalCLI(t *testing.T) {
 		byPane[pane.PaneID] = pane
 	}
 	row := byPane["w1:p1"]
-	if row.Class != fleetCensusClassReapable || row.JobID != "j-done" || row.OwnerLane != "lane-a" || row.Role != "worker" {
+	if row.Class != fleetCensusClassReapable || row.JobID != "j-done" || row.OwnerLane != "lane-a" || row.Role != "implementer" {
 		t.Errorf("w1:p1 row=%+v", row)
 	}
 	if row.AgentName != "flag-1" || row.Harness != "claude" || row.Status != "idle" {
@@ -907,7 +900,7 @@ func TestFleetCensusReadOnly(t *testing.T) {
 	recorded := make(chan t441RecordedRequest, 16)
 	snapshot := t501Snapshot(hubSnapshotStatusOK, "["+t501SessionRow("w2:p1", "rem-1", "idle")+"]", t501Now.Add(-10*time.Second), false, false)
 	nodesBody := `{"nodes":[` + t501Node("machine-remote", "connected", snapshot) + `]}`
-	jobsBody := `{"jobs":[{"machine":"machine-remote","job_id":"j-remote","owner_lane":"lane-r","pane":"w2:p1","role":"worker","started_at":"` + t501OldEnough() + `","last_event_kind":"job.completed","last_event_at":"` + t501OldEnough() + `"}]}`
+	jobsBody := `{"jobs":[{"machine":"machine-remote","job_id":"j-remote","owner_lane":"lane-r","pane":"w2:p1","role":"implementer","started_at":"` + t501OldEnough() + `","last_event_kind":"job.completed","last_event_at":"` + t501OldEnough() + `"}]}`
 	lanesBody := `{"lanes":[{"lane":"lane-r","machine":"machine-remote","pane":"w2:p1","parent":"","sink":false}],"control_epoch":1}`
 	hub := t501HubFixture(t, recorded, lanesBody, jobsBody, nodesBody)
 	defer hub.Close()
@@ -1235,7 +1228,7 @@ func TestFleetCensusRemoteTerminalClass(t *testing.T) {
 	nodes := []sessionsFindNodeWire{
 		{MachineID: "machine-remote", State: "connected", SessionSnapshot: json.RawMessage(t501Snapshot(hubSnapshotStatusOK, "["+t501SessionRow("w2:p1", "rem-1", "idle")+"]", fresh, false, false))},
 	}
-	hubJobs := []hubConsoleJob{{Machine: "machine-remote", JobID: "j-remote", OwnerLane: "lane-r", Pane: "w2:p1", Role: "worker", StartedAt: t501OldEnough(), LastEventKind: "job.completed", LastEventAt: t501OldEnough()}}
+	hubJobs := []hubConsoleJob{{Machine: "machine-remote", JobID: "j-remote", OwnerLane: "lane-r", Pane: "w2:p1", Role: "implementer", StartedAt: t501OldEnough(), LastEventKind: "job.completed", LastEventAt: t501OldEnough()}}
 	result := buildFleetCensusResult(fleetCensusOptions{grace: time.Minute, hubURL: "https://h"}, "machine-local", fleetCensusLocalView{}, false, true, nil, nodes, hubJobs, nil, "", false, t501Now)
 	if len(result.Panes) != 1 {
 		t.Fatalf("panes=%v", result.Panes)

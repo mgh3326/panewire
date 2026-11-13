@@ -146,37 +146,37 @@ func TestLaunchNativeRefusalRules(t *testing.T) {
 		want   Launch // an admit's fields (Catalog.Stale false)
 	}{
 		{name: "profile required", req: QuotaRequest{}, reason: "profile required"},
-		{name: "credit profile needs an effort", req: QuotaRequest{Profile: "pi-test", Role: "worker"}, reason: "explicit --effort required for credit profile"},
+		{name: "credit profile needs an effort", req: QuotaRequest{Profile: "pi-test", Role: "implementer"}, reason: "explicit --effort required for credit profile"},
 		{name: "unknown effort rung", req: QuotaRequest{Profile: "opus", Effort: "turbo"}, reason: "unknown effort rung"},
-		{name: "credit effort not placed", req: QuotaRequest{Profile: "pi-test", Effort: "ultra", Role: "worker"}, reason: "credit effort is not placed"},
+		{name: "credit effort not placed", req: QuotaRequest{Profile: "pi-test", Effort: "ultra", Role: "implementer"}, reason: "credit effort is not placed"},
 		{name: "barred profile", req: QuotaRequest{Profile: "codex-med", Effort: "high"}, reason: "model_refused: retired model identity"},
 		{name: "retired model id", req: QuotaRequest{Profile: "test-terra", Effort: "high"}, reason: "model_refused: retired model identity"},
 		{name: "profile unknown", req: QuotaRequest{Profile: "test-nowhere", Effort: "high"}, reason: `profile "test-nowhere" is unknown or retired`},
 		{name: "profile retired", req: QuotaRequest{Profile: "test-gone", Effort: "high"}, reason: `profile "test-gone" is unknown or retired`},
-		{name: "unrated rung without marker", req: QuotaRequest{Profile: "test-mixed", Effort: "max", Role: "worker"}, reason: "e6_arm_required: exact measurement marker required"},
-		{name: "unplaced profile without marker", req: QuotaRequest{Profile: "test-unrated", Role: "worker"}, reason: "e6_arm_required: unplaced profile requires exact measurement marker"},
-		{name: "rung retired", req: QuotaRequest{Profile: "test-retired", Effort: "high", Role: "worker"}, reason: "rung is retired in the catalog"},
-		{name: "credit rung not placed", req: QuotaRequest{Profile: "pi-test", Effort: "medium", Role: "worker"}, reason: "e6_arm_required: rung is not placed"},
-		{name: "fallback effort comes from the marked live row", req: QuotaRequest{Profile: "test-unrated", Role: "worker", E6Arm: "test-unrated@high"}, want: Launch{Profile: "test-unrated", ModelID: "model-u", Effort: "high", Grade: "unrated", Gate: "default", Pool: "claude", Family: "claude"}},
-		{name: "credit role", req: QuotaRequest{Profile: "pi-test", Effort: "low", Role: "reviewer"}, reason: "role_restricted: credit rung requires worker/tester; placed default rungs also allow builder"},
-		{name: "consult model seat refused by its gate", req: QuotaRequest{Profile: "fable", Role: "worker"}, reason: "profile is consult_only; pass --operator-request"},
+		{name: "unrated rung without marker", req: QuotaRequest{Profile: "test-mixed", Effort: "max", Role: "implementer"}, reason: "e6_arm_required: exact measurement marker required"},
+		{name: "unplaced profile without marker", req: QuotaRequest{Profile: "test-unrated", Role: "implementer"}, reason: "e6_arm_required: unplaced profile requires exact measurement marker"},
+		{name: "rung retired", req: QuotaRequest{Profile: "test-retired", Effort: "high", Role: "implementer"}, reason: "rung is retired in the catalog"},
+		{name: "credit rung not placed", req: QuotaRequest{Profile: "pi-test", Effort: "medium", Role: "implementer"}, reason: "e6_arm_required: rung is not placed"},
+		{name: "fallback effort comes from the marked live row", req: QuotaRequest{Profile: "test-unrated", Role: "implementer", E6Arm: "test-unrated@high"}, want: Launch{Profile: "test-unrated", ModelID: "model-u", Effort: "high", Grade: "unrated", Gate: "default", Pool: "claude", Family: "claude"}},
+		{name: "credit role", req: QuotaRequest{Profile: "pi-test", Effort: "low", Role: "reviewer"}, reason: "role_restricted: credit rung requires implementer; placed default rungs also allow builder"},
+		{name: "consult model seat refused by its gate", req: QuotaRequest{Profile: "fable", Role: "implementer"}, reason: "profile is consult_only; pass --operator-request"},
 		{name: "consult model builder refused by its gate", req: QuotaRequest{Profile: "fable", Role: "builder"}, reason: "profile is consult_only; pass --operator-request"},
 		{name: "removed astra alias", req: QuotaRequest{Profile: "test-astra", Effort: "high"}, reason: "role_restricted: removed astra seat alias"},
-		{name: "astra admitted without a purpose", req: QuotaRequest{Profile: "codex-astra", Role: "worker"}, want: Launch{Profile: "codex-astra", ModelID: "gpt-6-astra", Effort: "xhigh", Grade: "S+", Gate: "consult_only", Pool: "codex", Family: "codex"}},
+		{name: "astra admitted without a purpose", req: QuotaRequest{Profile: "codex-astra", Role: "implementer"}, want: Launch{Profile: "codex-astra", ModelID: "gpt-6-astra", Effort: "xhigh", Grade: "S+", Gate: "consult_only", Pool: "codex", Family: "codex"}},
 		{name: "operator request ref", req: QuotaRequest{Profile: "opus", Effort: "high", OperatorRequest: "ticket 12"}, reason: "operator_request_ref_invalid"},
-		{name: "consult only", req: QuotaRequest{Profile: "test-consult", Role: "worker"}, reason: "profile is consult_only; pass --operator-request"},
-		{name: "placement follows catalog grade", req: QuotaRequest{Profile: "haiku", Effort: "xhigh", Role: "worker"}, want: Launch{Profile: "haiku", ModelID: "claude-haiku-5-5", Effort: "xhigh", Grade: "C", Gate: "default", Pool: "claude", Family: "claude"}},
+		{name: "consult only", req: QuotaRequest{Profile: "test-consult", Role: "implementer"}, reason: "profile is consult_only; pass --operator-request"},
+		{name: "placement follows catalog grade", req: QuotaRequest{Profile: "haiku", Effort: "xhigh", Role: "implementer"}, want: Launch{Profile: "haiku", ModelID: "claude-haiku-5-5", Effort: "xhigh", Grade: "C", Gate: "default", Pool: "claude", Family: "claude"}},
 
-		{name: "default effort resolves to a live row", req: QuotaRequest{Profile: "opus", Role: "worker"}, want: Launch{Profile: "opus", ModelID: "claude-opus-5-5", Effort: "low", Grade: "S", Gate: "default", Pool: "claude", Family: "claude"}},
-		{name: "missing requested rung is refused", req: QuotaRequest{Profile: "opus", Effort: "medium", Role: "worker"}, reason: "rung is not in the catalog"},
-		{name: "legacy alias is not retained", req: QuotaRequest{Profile: "codex-max", Effort: "max", Role: "worker"}, reason: `profile "codex-max" is unknown or retired`},
-		{name: "snapshot-only profile is not retained", req: QuotaRequest{Profile: "kimi-k3-low", Role: "worker"}, reason: `profile "kimi-k3-low" is unknown or retired`},
-		{name: "marker admits an unrated rung", req: QuotaRequest{Profile: "test-unrated", Effort: "high", Role: "worker", E6Arm: "test-unrated@high"}, want: Launch{Profile: "test-unrated", ModelID: "model-u", Effort: "high", Grade: "unrated", Gate: "default", Pool: "claude", Family: "claude"}},
-		{name: "marker names the effort", req: QuotaRequest{Profile: "test-unrated", Role: "worker", E6Arm: "test-unrated@high"}, want: Launch{Profile: "test-unrated", ModelID: "model-u", Effort: "high", Grade: "unrated", Gate: "default", Pool: "claude", Family: "claude"}},
+		{name: "default effort resolves to a live row", req: QuotaRequest{Profile: "opus", Role: "implementer"}, want: Launch{Profile: "opus", ModelID: "claude-opus-5-5", Effort: "low", Grade: "S", Gate: "default", Pool: "claude", Family: "claude"}},
+		{name: "missing requested rung is refused", req: QuotaRequest{Profile: "opus", Effort: "medium", Role: "implementer"}, reason: "rung is not in the catalog"},
+		{name: "legacy alias is not retained", req: QuotaRequest{Profile: "codex-max", Effort: "max", Role: "implementer"}, reason: `profile "codex-max" is unknown or retired`},
+		{name: "snapshot-only profile is not retained", req: QuotaRequest{Profile: "kimi-k3-low", Role: "implementer"}, reason: `profile "kimi-k3-low" is unknown or retired`},
+		{name: "marker admits an unrated rung", req: QuotaRequest{Profile: "test-unrated", Effort: "high", Role: "implementer", E6Arm: "test-unrated@high"}, want: Launch{Profile: "test-unrated", ModelID: "model-u", Effort: "high", Grade: "unrated", Gate: "default", Pool: "claude", Family: "claude"}},
+		{name: "marker names the effort", req: QuotaRequest{Profile: "test-unrated", Role: "implementer", E6Arm: "test-unrated@high"}, want: Launch{Profile: "test-unrated", ModelID: "model-u", Effort: "high", Grade: "unrated", Gate: "default", Pool: "claude", Family: "claude"}},
 		{name: "unrated role needs no marker", req: QuotaRequest{Profile: "test-mixed", Effort: "max", Role: "builder"}, want: Launch{Profile: "test-mixed", ModelID: "model-m", Effort: "max", Grade: "unrated", Gate: "default", Pool: "claude", Family: "claude"}},
 		{name: "credit rung seats a builder in pacelever", req: QuotaRequest{Profile: "pi-test", Effort: "low", Role: "builder"}, want: Launch{Profile: "pi-test", ModelID: "anthropic/claude-sonnet-5-5", Effort: "low", Grade: "A", Gate: "default", Pool: "anthropic-api", Family: "anthropic-api"}},
-		{name: "escalation rung", req: QuotaRequest{Profile: "test-esc", Effort: "high", Role: "worker"}, want: Launch{Profile: "test-esc", ModelID: "gpt-e", Effort: "high", Grade: "A", Gate: "escalation", Pool: "codex", Family: "codex"}},
-		{name: "consult only with a request", req: QuotaRequest{Profile: "test-consult", Role: "worker", OperatorRequest: "hk:doc/consult"}, want: Launch{Profile: "test-consult", ModelID: "gpt-c", Effort: "high", Grade: "A", Gate: "consult_only", Pool: "codex", Family: "codex"}},
+		{name: "escalation rung", req: QuotaRequest{Profile: "test-esc", Effort: "high", Role: "implementer"}, want: Launch{Profile: "test-esc", ModelID: "gpt-e", Effort: "high", Grade: "A", Gate: "escalation", Pool: "codex", Family: "codex"}},
+		{name: "consult only with a request", req: QuotaRequest{Profile: "test-consult", Role: "implementer", OperatorRequest: "hk:doc/consult"}, want: Launch{Profile: "test-consult", ModelID: "gpt-c", Effort: "high", Grade: "A", Gate: "consult_only", Pool: "codex", Family: "codex"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			a, runner, _ := launchApp(t, "native", launchRulesCatalog(), nil)
@@ -207,7 +207,7 @@ func TestNativeLaunchUsesCatalogFamilyWhenModelPolicyUnavailable(t *testing.T) {
 	a.modelFamilies = func(context.Context) (ModelFamiliesPolicy, error) {
 		return ModelFamiliesPolicy{}, context.DeadlineExceeded
 	}
-	got, err := a.Quota.Launch(context.Background(), QuotaRequest{Profile: "opus", Effort: "high", Role: "worker"})
+	got, err := a.Quota.Launch(context.Background(), QuotaRequest{Profile: "opus", Effort: "high", Role: "implementer"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -225,13 +225,13 @@ func TestLaunchNativeReadsPoolPolicy(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("PACELEVER_CONFIG", path)
-	if _, err := a.Quota.Launch(context.Background(), QuotaRequest{Profile: "opus", Effort: "high", Role: "worker"}); exitCode(err) != 3 || err.Error() != "quota catalog: profile is unsubscribed" {
+	if _, err := a.Quota.Launch(context.Background(), QuotaRequest{Profile: "opus", Effort: "high", Role: "implementer"}); exitCode(err) != 3 || err.Error() != "quota catalog: profile is unsubscribed" {
 		t.Fatalf("unsubscribed profile: %v", err)
 	}
 	if err := os.WriteFile(path, []byte("[pools.claude]\nclass = \"hoard\"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := a.Quota.Launch(context.Background(), QuotaRequest{Profile: "opus", Effort: "high", Role: "worker"}); exitCode(err) != 2 {
+	if _, err := a.Quota.Launch(context.Background(), QuotaRequest{Profile: "opus", Effort: "high", Role: "implementer"}); exitCode(err) != 2 {
 		t.Fatalf("an invalid pool policy refuses as pacelever's config load does (exit 2): %v", err)
 	}
 }
@@ -263,7 +263,7 @@ func TestLaunchNativeSeesNewCatalogRowWithoutCacheExpiry(t *testing.T) {
 	state := &catalogServer{body: before}
 	catalogEnv(t, state)
 	a, runner, _ := launchApp(t, "native", nil, nil)
-	req := QuotaRequest{Profile: "omp-dsflash41", Effort: "max", Role: "worker"}
+	req := QuotaRequest{Profile: "omp-dsflash41", Effort: "max", Role: "implementer"}
 	if _, err := a.Quota.Launch(context.Background(), req); exitCode(err) != 3 || !strings.Contains(err.Error(), "e6_arm_required: unplaced profile requires exact measurement marker") {
 		t.Fatalf("before the row exists the rung is unplaced: %v", err)
 	}
@@ -277,7 +277,7 @@ func TestLaunchNativeSeesNewCatalogRowWithoutCacheExpiry(t *testing.T) {
 	if state.count() != 2 {
 		t.Fatalf("handoffkeep reads = %d, want 2 (the first read, then one past the cached refusal)", state.count())
 	}
-	if _, err := a.Quota.Launch(context.Background(), QuotaRequest{Profile: "omp-dsflash41", Effort: "max", Role: "worker"}); err != nil || state.count() != 2 {
+	if _, err := a.Quota.Launch(context.Background(), QuotaRequest{Profile: "omp-dsflash41", Effort: "max", Role: "implementer"}); err != nil || state.count() != 2 {
 		t.Fatalf("an admit from a fresh cache reads handoffkeep again: reads=%d err=%v", state.count(), err)
 	}
 	if policyLaunchRuns(runner) != 0 {
@@ -304,11 +304,11 @@ func TestLaunchNativeStaleCatalog(t *testing.T) {
 		t.Fatal(err)
 	}
 	a, _, _ := launchApp(t, "native", nil, nil)
-	got, err := a.Quota.Launch(context.Background(), QuotaRequest{Profile: "opus", Effort: "high", Role: "worker"})
+	got, err := a.Quota.Launch(context.Background(), QuotaRequest{Profile: "opus", Effort: "high", Role: "implementer"})
 	if exitCode(err) != exitConfig || err.Error() != "quota catalog is stale" || !got.Catalog.Stale {
 		t.Fatalf("stale ordinary rung: %+v %v", got, err)
 	}
-	if _, err := a.Quota.Launch(context.Background(), QuotaRequest{Profile: "test-esc", Effort: "high", Role: "worker"}); exitCode(err) != 3 || err.Error() != "quota catalog: catalog is stale; non-default gate requires --operator-request" {
+	if _, err := a.Quota.Launch(context.Background(), QuotaRequest{Profile: "test-esc", Effort: "high", Role: "implementer"}); exitCode(err) != 3 || err.Error() != "quota catalog: catalog is stale; non-default gate requires --operator-request" {
 		t.Fatalf("stale escalation rung: %v", err)
 	}
 }
@@ -321,7 +321,7 @@ func TestLaunchNativeCatalogUnavailable(t *testing.T) {
 	t.Setenv("HANDOFFKEEP_TOKEN_SVC_PANEWIRE", "")
 	t.Setenv("PANEWIRE_HK_ENV", filepath.Join(t.TempDir(), "absent.env"))
 	a, _, _ := launchApp(t, "native", nil, nil)
-	if _, err := a.Quota.Launch(context.Background(), QuotaRequest{Profile: "opus", Effort: "high", Role: "worker"}); exitCode(err) != 3 || err.Error() != `quota catalog: profile "opus" is unknown or retired` {
+	if _, err := a.Quota.Launch(context.Background(), QuotaRequest{Profile: "opus", Effort: "high", Role: "implementer"}); exitCode(err) != 3 || err.Error() != `quota catalog: profile "opus" is unknown or retired` {
 		t.Fatalf("profile without a catalog: %v", err)
 	}
 	if _, err := a.Quota.Launch(context.Background(), QuotaRequest{Profile: "test-nowhere", Effort: "high"}); exitCode(err) != 3 {
@@ -331,7 +331,7 @@ func TestLaunchNativeCatalogUnavailable(t *testing.T) {
 
 func TestLaunchDefaultsToNativeWithoutExecutingQuotaCLI(t *testing.T) {
 	a, runner, events := launchApp(t, "", launchRulesCatalog(), nil)
-	got, err := a.Quota.Launch(context.Background(), QuotaRequest{Profile: "opus", Effort: "high", Role: "worker"})
+	got, err := a.Quota.Launch(context.Background(), QuotaRequest{Profile: "opus", Effort: "high", Role: "implementer"})
 	if err != nil || got != opusLaunch {
 		t.Fatalf("native launch = %+v, %v", got, err)
 	}

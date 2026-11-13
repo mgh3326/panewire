@@ -18,7 +18,7 @@ func selectedAccountApp(t *testing.T) (*App, Spawn) {
 	t.Helper()
 	a, s, q, _ := accountConsultFixture(t)
 	a.Config.Local["spawn"] = true
-	s.Role, s.RoutingRole, s.AccountKey = "worker", "consult", testClaudeB
+	s.Role, s.RoutingRole, s.AccountKey = "implementer", "consult", testClaudeB
 	q.LaunchValue = Launch{Profile: "opus", ModelID: "opus-m", Effort: "high", Grade: "C", Gate: "default", Pool: "claude"}
 	q.GateDo = func(QuotaRequest) (string, error) {
 		return `{"schema":"scopefuel.gate.v1","provider_id":"claude","profile":"opus","account_key":"` + testClaudeB + `","ok":true,"exit_code":0}`, nil

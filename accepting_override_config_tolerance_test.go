@@ -151,3 +151,50 @@ func TestAcceptingOverridesRewriteRefusesOversizedFile(t *testing.T) {
 		t.Fatal("refused rewrite changed the override file")
 	}
 }
+
+// Two case variants of overrides that both define an unknown key for one
+// machine keep the value of the later member in the file, which is the value
+// the loader's decode keeps for the shared machine entry. The rewrite must not
+// depend on map iteration order, so the check repeats the rewrite many times.
+func TestAcceptingOverridesRewriteCaseVariantLeftoverFollowsSourceOrder(t *testing.T) {
+	const original = `{"overrides":{"mac-work":{"mode":"on","note":"first"}},"OVERRIDES":{"mac-work":{"mode":"on","note":"second"}}}`
+	next := map[string]acceptingOverride{"mac-work": {Mode: "on"}}
+	for run := range 50 {
+		path := filepath.Join(t.TempDir(), "accepting.json")
+		if err := os.WriteFile(path, []byte(original), 0600); err != nil {
+			t.Fatal(err)
+		}
+		h := &HubServer{}
+		h.relayControl.acceptingOverridesPath = path
+		if err := h.persistAcceptingOverridesLocked(next); err != nil {
+			t.Fatal(err)
+		}
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var doc struct {
+			Overrides map[string]map[string]string `json:"overrides"`
+		}
+		if err := json.Unmarshal(raw, &doc); err != nil {
+			t.Fatalf("run %d: rewritten file %s: %v", run, raw, err)
+		}
+		if got := doc.Overrides["mac-work"]["note"]; got != "second" {
+			t.Fatalf("run %d: kept note=%q, want %q (later member wins): %s", run, got, "second", raw)
+		}
+	}
+}
+
+// A file with data after its top-level object is undecodable, as it is for
+// json.Unmarshal, so the rewrite never sees its members.
+func TestTopLevelMembersRejectsTrailingData(t *testing.T) {
+	for _, doc := range []string{`{"overrides":{}} {}`, `{"overrides":{}} junk`, `{"overrides":{}`} {
+		if _, err := topLevelMembers([]byte(doc)); err == nil {
+			t.Fatalf("topLevelMembers(%q) accepted the document", doc)
+		}
+	}
+	members, err := topLevelMembers([]byte(`{"overrides":{}}` + "\n"))
+	if err != nil || len(members) != 1 {
+		t.Fatalf("valid document: members=%v err=%v", members, err)
+	}
+}

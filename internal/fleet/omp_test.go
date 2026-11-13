@@ -41,7 +41,7 @@ func ompSpawnFixture(t *testing.T) (*App, Spawn, *fakeRunner) {
 	if err := os.WriteFile(prompt, []byte("Implement the fixture change."), 0600); err != nil {
 		t.Fatal(err)
 	}
-	s := Spawn{CWD: cwd, Profile: "omp-opus", Prompt: prompt, Workspace: "workspace", Label: "worker-a", Job: "job-a", T: "T1", Task: "42", Role: "worker", Host: "local", OverrideReason: "fixture", Containment: "hk:12"}
+	s := Spawn{CWD: cwd, Profile: "omp-opus", Prompt: prompt, Workspace: "workspace", Label: "worker-a", Job: "job-a", T: "T1", Task: "42", Role: "implementer", Host: "local", OverrideReason: "fixture", Containment: "hk:12"}
 	a.Quota = &fakeQuota{LaunchValue: Launch{Profile: "omp-opus", ModelID: "anthropic/claude-opus-5-5", Effort: "high", Grade: "S+", Pool: "anthropic-api", Gate: "default"}, GateDo: gatePools(map[string]string{"omp-opus": "anthropic-api"})}
 	started, submitted := false, false
 	token := ""
@@ -107,12 +107,12 @@ func TestOMPSpawnLaunchAndProof(t *testing.T) {
 }
 
 func TestOMPReviewerLaunchUsesExtendedContextOverlay(t *testing.T) {
-	for _, role := range []string{"reviewer", "counsel"} {
+	for _, role := range []string{"reviewer", "consult"} {
 		t.Run(role, func(t *testing.T) {
 			a, s, fr := ompSpawnFixture(t)
 			s.Role = role
 			if role == "reviewer" {
-				s.BuilderFamily = "openai"
+				s.AuthorFamily = "openai"
 			}
 			base := fr.Do
 			var configPath string
@@ -213,13 +213,13 @@ func TestOMPConsultEligibility(t *testing.T) {
 			t.Run(role+"/"+tc.profile+"/"+tc.model, func(t *testing.T) {
 				a, s, q := selFixture(t, "A", []CatalogRow{ompRow(tc.profile, tc.model, tc.pool)}, nil, []string{tc.pool})
 				if tc.profile == "agy-opus" {
-					a.Policy.Profiles[tc.profile] = Seat{Canon: tc.profile, Kind: "agy", Family: "anthropic", Capability: "standard", Roles: []string{"worker", "counsel"}}
+					a.Policy.Profiles[tc.profile] = Seat{Canon: tc.profile, Kind: "agy", Family: "anthropic", Capability: "standard", Roles: []string{"implementer", "consult"}}
 				}
 				q.GateDo = gatePools(map[string]string{tc.profile: tc.pool})
 				serveOMPRouting(t, a)
 				s.RoutingRole = role
 				if role == "consult" {
-					s.Role = "counsel"
+					s.Role = "consult"
 				}
 				sel, err := a.selectProfile(context.Background(), s)
 				if (err == nil) != tc.want {
@@ -238,7 +238,7 @@ func TestOMPExplicitConsultCannotChangeModel(t *testing.T) {
 	q := a.Quota.(*fakeQuota)
 	q.CatalogRows = []CatalogRow{ompRow("omp-opus", "anthropic/claude-opus-5-5", "anthropic-api")}
 	q.LaunchValue.ModelID = "anthropic/claude-sonnet-5-5"
-	s.Role = "counsel"
+	s.Role = "consult"
 	if err := a.Spawn(context.Background(), s); code(err) != exitSeatRefused {
 		t.Fatalf("launch model must be checked again: %v", err)
 	}
@@ -361,25 +361,6 @@ func TestOMPResolveAgentHint(t *testing.T) {
 				}
 			})
 		}
-	}
-}
-
-func TestOMPDelegateHeadless(t *testing.T) {
-	e := newDelegateEnvWith(t, []CatalogRow{ompRow("omp-opus", "anthropic/claude-opus-5-5", "anthropic-api")}, map[string]string{"omp-opus": "anthropic-api"}, nil)
-	base := e.runner.do
-	e.runner.do = func(c Command) Result {
-		if c.Name == "omp" {
-			return Result{Out: "The fixture answer."}
-		}
-		return base(c)
-	}
-	e.a.spawnFn = func(context.Context, *App, Spawn) error { t.Fatal("headless OMP spawned a pane"); return nil }
-	if err := e.a.delegate(context.Background(), delegateArgs(e, "--role", "reader", "--headless")); err != nil {
-		t.Fatal(err)
-	}
-	calls := e.runner.named("omp")
-	if len(calls) != 1 || !slices.Contains(calls[0].Args, "-p") || !slices.Contains(calls[0].Args, "anthropic/claude-opus-5-5:high") || slices.Contains(calls[0].Args, "--no-mcp") {
-		t.Fatalf("OMP headless argv: %+v", calls)
 	}
 }
 

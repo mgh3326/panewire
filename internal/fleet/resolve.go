@@ -17,8 +17,8 @@ import (
 // nothing and writes no job record. The answer is the last thing printed.
 //
 // --t takes the same values as plan's (T0..T3) and defaults to T0, so the
-// bare `resolve --role R --grade G` form keeps working. The seat role is worker, or reviewer for the reviewer and judge routing
-// roles, whose family rule needs --builder-family (the author's or parent's
+// bare `resolve --role R --grade G` form keeps working. The seat role is implementer, or reviewer for the reviewer and judge routing
+// roles, whose family rule needs --author-family (the author's or parent's
 // family). The effort is the one the chosen rung launches at.
 type resolveResult struct {
 	RoutingRole    string         `json:"routing_role"`
@@ -44,13 +44,13 @@ type resolveResult struct {
 }
 
 func (a *App) resolveCmd(ctx context.Context, args []string) error {
-	var role, grade, t, builderFamily, harness, lane string
+	var role, grade, t, authorFamily, harness, lane string
 	var asJSON, allowEscalation bool
 	f := flags("resolve")
 	f.StringVar(&role, "role", "", "routing role")
 	f.StringVar(&grade, "grade", "", "task grade (C, B, A, A+, S, S+, SS); for consult, the asker's grade, optional")
 	f.StringVar(&t, "t", "T0", "task scale T0..T3")
-	f.StringVar(&builderFamily, "builder-family", "", "author or parent family (reviewer/judge/consult)")
+	f.StringVar(&authorFamily, "author-family", "", "author or parent family (reviewer/judge/consult)")
 	f.StringVar(&lane, "lane", "", "asker's lane (consult)")
 	f.StringVar(&harness, "harness", "", "restrict selection to an agent harness, e.g. omp")
 	f.BoolVar(&allowEscalation, "allow-escalation", false, "admit escalation rungs, and consult rungs above the role effort")
@@ -88,14 +88,14 @@ func (a *App) resolveCmd(ctx context.Context, args []string) error {
 	if !slices.Contains([]string{"T0", "T1", "T2", "T3"}, t) {
 		return fail(exitUsage, "resolve needs --t T0..T3")
 	}
-	seatRole := "worker"
+	seatRole := "implementer"
 	if role == "reviewer" || role == "judge" {
 		seatRole = "reviewer"
-		if builderFamily == "" {
-			return fail(exitUsage, "--role %s needs --builder-family (its family rule)", role)
+		if authorFamily == "" {
+			return fail(exitUsage, "--role %s needs --author-family (its family rule)", role)
 		}
-	} else if builderFamily != "" && !topRoutingRole(role) {
-		return fail(exitUsage, "--builder-family goes with --role reviewer|judge|consult")
+	} else if authorFamily != "" && !topRoutingRole(role) {
+		return fail(exitUsage, "--author-family goes with --role reviewer|judge|consult")
 	}
 	if a.Quota == nil {
 		return fail(exitConfig, "resolve needs the quota catalog")
@@ -108,12 +108,12 @@ func (a *App) resolveCmd(ctx context.Context, args []string) error {
 		return e
 	}
 	cwd, _ := os.Getwd()
-	s := Spawn{CWD: cwd, Profile: "auto", Host: "auto", Role: seatRole, T: t, ParentFamily: builderFamily, RoutingRole: role, AllowEscalation: allowEscalation, DryRun: true}
+	s := Spawn{CWD: cwd, Profile: "auto", Host: "auto", Role: seatRole, T: t, ParentFamily: authorFamily, RoutingRole: role, AllowEscalation: allowEscalation, DryRun: true}
 	gradeSource := "without_task"
 	if flagPassed(f, "grade") {
 		gradeSource = "flag"
 	}
-	req := selReq{grade: grade, lane: lane, gradeSource: gradeSource, t: t, role: seatRole, allowEscalation: allowEscalation, builderFamily: builderFamily, harness: harness, urgency: urgencyNormal, urgencySource: "default", route: route}
+	req := selReq{grade: grade, lane: lane, gradeSource: gradeSource, t: t, role: seatRole, allowEscalation: allowEscalation, authorFamily: authorFamily, harness: harness, urgency: urgencyNormal, urgencySource: "default", route: route}
 	sel, selErr := a.selectFor(ctx, s, req)
 	r := resolveResult{RoutingRole: role, SeatRole: seatRole, Grade: grade, T: t, RoutingVersion: route.version, PolicySource: route.source}
 	r.OutcomeCode = outcomeForError(selErr)

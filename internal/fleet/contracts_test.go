@@ -75,7 +75,7 @@ func TestR07ReapProtectsBuildersKeepAndRevivedJobs(t *testing.T) {
 		name, role            string
 		keep, revive, include bool
 		wantClose             bool
-	}{{"worker", "worker", false, false, false, true}, {"builder default", "builder", false, false, false, false}, {"builder opt in", "builder", false, false, true, true}, {"keep", "worker", true, false, true, false}, {"revived", "worker", false, true, true, false}} {
+	}{{"implementer", "implementer", false, false, false, true}, {"builder default", "builder", false, false, false, false}, {"builder opt in", "builder", false, false, true, true}, {"keep", "implementer", true, false, true, false}, {"revived", "implementer", false, true, true, false}} {
 		t.Run(tt.name, func(t *testing.T) {
 			a := testApp(t)
 			f := ledgerRunner(t, a)
@@ -143,7 +143,7 @@ func TestR07KernelLockAndSecureFile(t *testing.T) {
 func TestR08RestoreVerifiesExistingReleasedPane(t *testing.T) {
 	a := testApp(t)
 	f := ledgerRunner(t, a)
-	seedJob(t, a, "j", "worker")
+	seedJob(t, a, "j", "implementer")
 	seedLedger(t, a, "j")
 	if e := a.releaseQuota(context.Background(), Job{ID: "j"}); e != nil {
 		t.Fatal(e)
@@ -178,7 +178,7 @@ func TestDoneDeduplicatesAndSnapshotsChangedReport(t *testing.T) {
 	a := testApp(t)
 	useFakeHK(t).Handle(hkCommentAnswer)
 	f := ledgerRunner(t, a)
-	seedJob(t, a, "j", "worker")
+	seedJob(t, a, "j", "implementer")
 	path := filepath.Join(a.Jobs, "j", "report.md")
 	if e := os.WriteFile(path, []byte("first\n"), 0600); e != nil {
 		t.Fatal(e)
@@ -294,7 +294,7 @@ func TestR05MergewakePolicyActingAndNoLegacyPins(t *testing.T) {
 func TestR06R13QuotaPoolAndManualFallbackStayInQuotaTool(t *testing.T) {
 	f := &fakeRunner{Do: func(Command) Result { return Result{Out: `{"pool":"operator-manual-provider","source":"manual"}`} }}
 	q := CLIQuota{Runner: f, Binary: "quota"}
-	out, e := q.Gate(context.Background(), QuotaRequest{Profile: "external-profile", Effort: "high", Role: "worker"})
+	out, e := q.Gate(context.Background(), QuotaRequest{Profile: "external-profile", Effort: "high", Role: "implementer"})
 	if e != nil || !strings.Contains(out, "operator-manual-provider") {
 		t.Fatalf("%s %v", out, e)
 	}

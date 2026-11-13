@@ -189,7 +189,7 @@ func TestRoleReleaseAfterFailedSpawn(t *testing.T) {
 		if len(jobs.writes()) != 0 || jobs.state("test-job") != "claimed" {
 			t.Fatalf("hub wrote hk: state=%v writes=%v", jobs.state("test-job"), jobs.writes())
 		}
-		owner, job, _, err := hub.inbox.store.spawnRoleOwner(t.Context(), "42:worker")
+		owner, job, _, err := hub.inbox.store.spawnRoleOwner(t.Context(), "42:implementer")
 		if err != nil || job != "test-job-r2" || owner == held.Request.RequestID {
 			t.Fatalf("reservation not moved: %s %s %v", owner, job, err)
 		}
@@ -256,7 +256,7 @@ func TestRoleReleaseAfterFailedSpawn(t *testing.T) {
 
 func assertRoleHeldBy(t *testing.T, hub *HubServer, request string) {
 	t.Helper()
-	owner, _, _, err := hub.inbox.store.spawnRoleOwner(t.Context(), "42:worker")
+	owner, _, _, err := hub.inbox.store.spawnRoleOwner(t.Context(), "42:implementer")
 	if err != nil || owner != request {
 		t.Fatalf("reservation moved to %s (%v)", owner, err)
 	}
@@ -304,7 +304,7 @@ func TestRoleReleaseAfterPrePaneRefusal(t *testing.T) {
 		if result.status != http.StatusAccepted {
 			t.Fatalf("status=%d body=%s", result.status, result.body)
 		}
-		owner, job, _, err := hub.inbox.store.spawnRoleOwner(t.Context(), "42:worker")
+		owner, job, _, err := hub.inbox.store.spawnRoleOwner(t.Context(), "42:implementer")
 		if err != nil || job != "test-job-r2" || owner == held.Request.RequestID {
 			t.Fatalf("reservation not moved: %s %s %v", owner, job, err)
 		}

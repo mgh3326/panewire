@@ -1,6 +1,6 @@
 # Task pane sweep
 
-A worker stays in its pane after READY while it is the PR author and fixes
+An implementer stays in its pane after READY while it is the PR author and fixes
 later review findings. The node's idle pass and the hub's ended-job pass find
 jobs that appear eligible for cleanup, but herdr's current interface cannot
 bind a pane read or close to an authoritative owner and pane incarnation. Both
@@ -10,18 +10,18 @@ diagnostics until herdr provides an ownership-bound close operation.
 ## Candidate selection
 
 The local pass considers jobs that are not reaped or `--keep` and whose role
-is `worker`, `tester`, `reviewer` or `counsel`. For workers and testers, a
+is `implementer`, `reviewer` or `consult`. For implementers, a
 candidate has either an ended task or its own terminal job record. A task is
 the claim's task id, or, for a fix author whose claim names no task, the
 parent job's task from the node's job record or handoffkeep record. If no task
 resolves, a live job stays with `reason=no_task`. A task ends when its category
 is `completed` or `canceled`; if no category is present, `merged`/`done` and
 `dropped` state names decide. A job's own `job.revoked` or `job.completed`
-record is an end; a reprompted job is live again. Lost reviewers and counsel
-are ends, while lost workers, testers and quota stops are not.
+record is an end; a reprompted job is live again. Lost reviewers and consults
+are ends, while lost implementers and quota stops are not.
 
-A task-derived end, and a completed author (worker READY, excluding reviewer,
-tester and counsel roles), waits while its worktree is on an open PR. The
+A task-derived end, and a completed author (implementer READY, excluding reviewer
+and consult roles), waits while its worktree is on an open PR. The
 sweep reads the worktree HEAD and its branch tip on origin, then the task's
 handoffkeep changes. A matching open PR is logged as `reason=open_pr`; an
 unreadable worktree, origin or change list is `reason=pr_state_unknown`. A
@@ -71,9 +71,9 @@ ordered by the hub.
   `--pane-sweep-age` (default `60m`, at most 365 days). A disconnected node is
   counted as `disconnected`; one that does not answer within five minutes is
   `node_timeout`.
-- The node considers unkept, unreaped jobs in roles `worker`, `tester`,
-  `reviewer` or `counsel` whose own terminal record is at least `age` old.
-  Completed workers and testers still wait while their worktree is on an open
+- The node considers unkept, unreaped jobs in roles `implementer`,
+  `reviewer` or `consult` whose own terminal record is at least `age` old.
+  Completed implementers still wait while their worktree is on an open
   PR, or when PR state cannot be read.
 - Eligible panes are read only for local diagnostics. The node retains every
   pane and replies with an empty `closed` list. A node-side failure (no jobs
