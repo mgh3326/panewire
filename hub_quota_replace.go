@@ -161,10 +161,9 @@ func (h *HubServer) replaceQuotaStopped(ctx context.Context, machine string, eve
 	return job, ok
 }
 
-// replaceQuotaStoppedWhy is replaceQuotaStopped that also names the reason a
-// job was not replaced ("" when it was): the same token its "skipped" log
-// line carries, so a caller that records the outcome (the exhausted-pool
-// sweep) can say why.
+// replaceQuotaStoppedWhy is replaceQuotaStopped that also returns the reason a
+// job was not replaced ("" when it was): the same token its "skipped" log line
+// carries.
 func (h *HubServer) replaceQuotaStoppedWhy(ctx context.Context, machine string, event hubJobEventPayload) (string, bool, string) {
 	skip := func(reason string, kv ...any) (string, bool, string) {
 		h.logger.Info("quota-stop replacement skipped", append([]any{"job", event.JobID, "node", machine, "reason", reason}, kv...)...)
@@ -479,6 +478,7 @@ func (h *HubServer) runQuotaReconcile(parent context.Context) {
 			return
 		}
 		h.reconcileQuotaReplacements(ctx)
+		h.reconcilePoolActions(ctx)
 		delay = quotaReconcileEvery
 	}
 }

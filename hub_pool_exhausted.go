@@ -2,8 +2,8 @@ package panewire
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
-	"io"
 	"slices"
 	"sort"
 	"strings"
@@ -20,17 +20,22 @@ import (
 // published reading already shows used up would sit on dead panes for hours.
 // The trigger is that reading: a node's quota publish (publishFleetStateFromNode)
 // whose free bucket is exhausted, or one of whose account windows is used up,
-// with its reset still ahead. The hub then lists the live jobs whose placement
+// with its reset still ahead. The hub then lists the jobs whose placement
 // record (hubSpawnOutcome.Pool and AccountKey) names that pool and account and
-// acts on each, role by role, with the quota-stop mechanics that already exist:
+// acts on each, role by role, through the quota-stop mechanics:
 //
-//	worker, tester     handed over (replaceQuotaStoppedWhy): the record ends with
-//	                   handed_over_to, the successor takes the same worktree and
-//	                   branch with -m auto and the pool excluded.
-//	reviewer, counsel  ended now: the pane is closed and the record ends with
-//	                   end_reason "quota_stop pool=<p> reset_at=<t>", and the owner
-//	                   gets job.lost reason quota_stop with the pool and reset, so
-//	                   it respawns the review.
+//	worker, tester     handed over: the record ends with handed_over_to, the
+//	                   successor takes the same worktree and branch with -m auto
+//	                   and the pool excluded.
+//	reviewer, counsel  ended: the pane is closed, the record ends with
+//	                   end_reason "quota_stop pool=<p> reset_at=<t>", the role is
+//	                   released, and the owner gets job.lost reason quota_stop
+//	                   with the pool and reset, so it respawns the review.
+//
+// Each job's decision and its progress are a durable row (hub_pool_action.go),
+// written before the pane is touched: an ending interrupted by a failed step, a
+// lost heartbeat or a hub restart is finished from that row rather than from
+// another quota publish.
 
 // poolExhaustion is one reading of a pool used up for an account: what ran out
 // and until when. The free bucket pays only for the free-tier rungs
@@ -139,12 +144,11 @@ func (h *HubServer) exhaustionSuperseded(e poolExhaustion, now time.Time) bool {
 	return found && !holds
 }
 
-// poolSweepState is what makes a pass idempotent. jobs holds each job a pass is
-// acting on or has acted on, so a pass that starts while another is still
-// waiting for a successor, or a later pass, leaves it alone; the job's own
-// record is the durable half (a job already handed over or ended is lost in hk
-// and skipped). events remembers the pool events seen, so a repeat is logged
-// quietly.
+// poolSweepState is what keeps two passes from working the same job at once.
+// jobs holds each job a pass is acting on, so a pass that starts while another
+// still drives it leaves it alone; the action row is the durable half (a job a
+// pass has finished has a done row, and an unfinished one is resumed from it).
+// events remembers the pool events seen, so a repeat is logged quietly.
 type poolSweepState struct {
 	mu     sync.Mutex
 	events map[string]time.Time
@@ -240,18 +244,10 @@ func (h *HubServer) sweepExhaustedPool(ctx context.Context, exhaustion poolExhau
 		return
 	}
 	isNew := h.poolSweep.seen(exhaustion.key(), exhaustion.Reset, h.now())
-	tasks, err := h.liveSpawnTasks(ctx)
+	onPool, err := h.poolExhaustionJobs(ctx, exhaustion)
 	if err != nil {
-		h.logger.Warn("pool exhausted sweep could not list live jobs", "pool", exhaustion.Pool, "account", exhaustion.Account, "error", err)
+		h.logger.Warn("pool exhausted sweep could not list its jobs", "pool", exhaustion.Pool, "account", exhaustion.Account, "error", err)
 		return
-	}
-	var onPool []hubSpawnTask
-	listed := map[string]bool{}
-	for _, task := range tasks {
-		if task.Status == "succeeded" && task.Outcome.Pool == exhaustion.Pool && task.Outcome.AccountKey == exhaustion.Account && exhaustion.covers(task.Outcome.Profile) && !listed[task.Job] {
-			listed[task.Job] = true
-			onPool = append(onPool, task)
-		}
 	}
 	results := make([]poolJobResult, len(onPool))
 	var wg sync.WaitGroup
@@ -317,101 +313,98 @@ func (h *HubServer) sweepPoolJob(ctx context.Context, exhaustion poolExhaustion,
 	if completed {
 		return poolJobSkip(role, "completed")
 	}
-	switch role {
-	case "worker", "tester":
-		successor, replaced, why := h.replaceQuotaStoppedWhy(ctx, spawnHolderHost(task), hubJobEventPayload{JobID: task.Job, Epoch: 1, Reason: "quota_stop", OwnerLane: task.Owner})
-		switch {
-		case replaced:
-			return poolJobResult{action: poolJobHandedOver, role: role, successor: successor}
-		case why == quotaHandOverNotPlaced:
-			// The record already ends with handed_over_to; the owner is told by
-			// the spawn failure notice. The job is over either way.
-			successor, _, _ := quotaReplacementJob(task.Job)
-			return poolJobResult{action: poolJobHandedOver, role: role, successor: successor, why: why}
-		}
-		return poolJobSkip(role, why)
-	case "reviewer", "counsel":
-		return h.endPoolJob(ctx, exhaustion, task, prior)
+	action, exists, err := h.inbox.store.poolAction(ctx, task.Request.RequestID, task.Attempt)
+	if err != nil {
+		return poolJobSkip(role, "action_unreadable")
 	}
-	return poolJobSkip(role, "role")
+	if exists {
+		return h.drivePoolAction(ctx, action)
+	}
+	action, why := h.newPoolAction(exhaustion, task, prior)
+	if why != "" {
+		return poolJobSkip(role, why)
+	}
+	// The intent is written before anything is touched: from here on an
+	// interrupted ending is found by the reconciler, not by another publish.
+	if err := h.inbox.store.savePoolAction(ctx, action); err != nil {
+		h.logger.Warn("pool exhausted action: the intent was not saved", "job", task.Job, "error", err)
+		return poolJobSkip(role, "action_not_saved")
+	}
+	return h.drivePoolAction(ctx, action)
 }
 
-// endPoolJob ends a reviewer or consult job on the exhausted pool: the quota-stop
-// end of a job with no replacement (docs/quota-stop.md, "Job end on a quota
-// stop"), done by the hub because the pane has not been observed. The pane must
-// be idle (nothing is closed under a pane that is working), is saved and
-// closed, the hk record is written lost with end_reason "quota_stop
-// pool=<p> reset_at=<t>", the role is released so the owner can respawn it, and
-// the owner is sent job.lost reason quota_stop with the pool and reset.
-func (h *HubServer) endPoolJob(ctx context.Context, exhaustion poolExhaustion, task hubSpawnTask, prior fleet.Spawn) poolJobResult {
-	role := prior.Role
-	skip := func(why string, kv ...any) poolJobResult {
-		h.logger.Info("pool exhausted end skipped", append([]any{"job", task.Job, "pool", exhaustion.Pool, "reason", why}, kv...)...)
-		return poolJobSkip(role, why)
-	}
-	ctx, cancel := context.WithTimeout(ctx, quotaReplaceBudget)
-	defer cancel()
-	release, held := h.jobGuard.acquire(ctx, task.Job)
-	if !held {
-		return skip("job_busy")
-	}
-	defer release()
-	app, err := h.newSpawnApp(io.Discard, io.Discard)
+// poolExhaustionJobs lists the live jobs placed on the exhausted pool and
+// account, from the durable operation records rather than from the node
+// heartbeats: a heartbeat stops naming a job as soon as its pane is gone, and a
+// half-finished ending must still be found. The lookback only bounds how far
+// back a pass looks for work it has not acted on; an action that exists is
+// durable and is finished whatever its age.
+func (h *HubServer) poolExhaustionJobs(ctx context.Context, exhaustion poolExhaustion) ([]hubSpawnTask, error) {
+	tasks, err := h.inbox.store.succeededSpawnsSince(ctx, h.now().Add(-poolActionLookback))
 	if err != nil {
-		return skip("spawn_config_unavailable")
+		return nil, err
 	}
-	readCtx, cancelRead := context.WithTimeout(ctx, 5*time.Second)
-	record, exists, err := app.ExistingJob(readCtx, task.Job)
-	cancelRead()
-	state, _ := record["state"].(string)
-	if err != nil || !exists || (state != "claimed" && state != "spawned") {
-		return skip("job_record", "state", state)
-	}
-	if pool, _ := record["pool"].(string); pool != "" && pool != exhaustion.Pool {
-		return skip("pool_mismatch", "record_pool", pool)
-	}
-	endReason := fleet.QuotaStopEndReason(exhaustion.Pool, exhaustion.Reset, "", "")
-	if !validNodeEndReason(endReason) {
-		return skip("end_reason_too_long", "length", len(endReason))
-	}
-	machine, name := spawnHolderHost(task), heldAgentName(task, record)
-	probe := h.probeHeldPane(ctx, machine, task.Outcome.Pane, name)
-	if probe.state == heldPaneUnknown || probe.state == heldPanePresent && (!nodePaneIdleStatus[probe.row.AgentStatus] || !validNodeCommandPath(probe.row.Cwd)) {
-		return skip("pane_not_idle", "probe", probe.reason, "status", probe.row.AgentStatus)
-	}
-	// The order is what keeps a failure at any step recoverable by the next
-	// pass (the job stays live in hk, and listed, until its record is written):
-	// the pane is closed first, so the owner is never told a job is lost while
-	// it still runs (a pane that changed since the probe is refused and nothing
-	// is sent); the owner's notice is made durable (persisted by handoffkeep,
-	// a fixed event id so a retry is the same event) before the record becomes
-	// terminal, so a lost record always has its notice.
-	if probe.state == heldPanePresent && !h.closeHeldPane(ctx, task, name, probe.row) {
-		return skip("pane_not_closed", "pane", task.Outcome.Pane)
-	}
-	if !h.relayJobEventFromContext(ctx, "", "job.lost", hubJobEventPayload{
-		JobID: task.Job, Epoch: h.registeredEpoch(task.Job), OwnerLane: task.Owner, AgentLabel: name, PaneID: task.Outcome.Pane,
-		EventID: "pool-exhausted:" + task.Job, Reason: "quota_stop pool=" + exhaustion.Pool + " reset_at=" + exhaustion.Reset.Format(time.RFC3339),
-	}) {
-		return skip("owner_not_notified", "owner", task.Owner)
-	}
-	lost, reason := h.markHolderLostWithRetry(ctx, app, task, name, endReason)
-	if !lost {
-		h.logger.Warn("pool exhausted end: the job's record was not written", "job", task.Job, "reason", reason)
-		return skip("record_not_written", "write", reason)
-	}
-	if reason == nodeJobMarkLostCompleted {
-		// The job completed between the read and the write: hk holds its
-		// completion, which is not a quota stop.
-		h.logger.Warn("pool exhausted end: the job completed meanwhile", "job", task.Job)
-		return skip("completed")
-	}
-	if prior.Task != "" && prior.ParentJob == "" {
-		if priorID, _, _, err := h.inbox.store.spawnRoleOwner(ctx, prior.RoleKey()); err == nil && priorID == task.Request.RequestID {
-			_ = h.inbox.store.releaseCompletedSpawnRole(ctx, priorID, prior.RoleKey())
+	var onPool []hubSpawnTask
+	listed := map[string]bool{}
+	for _, task := range tasks {
+		if task.Outcome.Pool != exhaustion.Pool || task.Outcome.AccountKey != exhaustion.Account || !exhaustion.covers(task.Outcome.Profile) || listed[task.Job] {
+			continue
 		}
+		listed[task.Job] = true
+		onPool = append(onPool, task)
 	}
-	return poolJobResult{action: poolJobEnded, role: role}
+	return onPool, nil
+}
+
+// newPoolAction builds the intent for one job, or names why the job is left
+// alone. A worker or tester is handed over, which reuses the quota-stop
+// hand-over's rules; a reviewer or consult is ended. Every input the ending
+// needs later — the hk end reason, the owner event, and for a hand-over the
+// successor job and its exact submission — is fixed here, so a retry replays
+// the same work instead of generating a new request id.
+func (h *HubServer) newPoolAction(exhaustion poolExhaustion, task hubSpawnTask, prior fleet.Spawn) (poolAction, string) {
+	now := h.now().UTC()
+	action := poolAction{
+		Request: task.Request.RequestID, Attempt: task.Attempt, Job: task.Job, Owner: task.Owner, Role: prior.Role,
+		Pool: exhaustion.Pool, Account: exhaustion.Account, Cause: exhaustion.Cause, Reset: exhaustion.Reset,
+		EventID: "pool-exhausted:" + task.Job, Stage: poolActionIntent, Created: now, Updated: now,
+	}
+	switch prior.Role {
+	case "worker", "tester":
+		// The hand-over's own contract: an explicit profile cannot change pool,
+		// and a submission with neither a task nor a parent job has nothing to
+		// continue.
+		if prior.Task == "" && prior.ParentJob == "" || prior.Profile != "" && prior.Profile != "auto" {
+			return poolAction{}, "not_replaceable"
+		}
+		successor, _, ok := quotaReplacementJob(task.Job)
+		if !ok {
+			return poolAction{}, "replacement_limit"
+		}
+		request, err := quotaReplacementRequest(task.Request, task.Job, successor, exhaustion.Pool, prior.Role)
+		if err != nil {
+			return poolAction{}, "request_id"
+		}
+		next, err := fleet.ValidateSubmission(request)
+		if err != nil || !validLaneReference(next.Owner) {
+			return poolAction{}, "invalid_replacement"
+		}
+		raw, err := json.Marshal(request)
+		if err != nil {
+			return poolAction{}, "successor_unreadable"
+		}
+		action.Kind, action.Successor, action.SuccessorRequest = poolActionHandOver, successor, string(raw)
+		action.EndReason = fleet.QuotaStopEndReason(exhaustion.Pool, time.Time{}, "handed_over_to", successor)
+	case "reviewer", "counsel":
+		action.Kind = poolActionEnd
+		action.EndReason = fleet.QuotaStopEndReason(exhaustion.Pool, exhaustion.Reset, "", "")
+	default:
+		return poolAction{}, "role"
+	}
+	if !validNodeEndReason(action.EndReason) {
+		return poolAction{}, "end_reason_too_long"
+	}
+	return action, ""
 }
 
 // registeredEpoch is the epoch the hub's job registry holds for job, 1 when the

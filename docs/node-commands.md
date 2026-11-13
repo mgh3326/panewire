@@ -279,6 +279,36 @@ it answers `ledger_missing` and the node never writes `lost` over a record it
 cannot check. A failed ledger read or handoffkeep write answers
 `mark_lost_failed`; a node without a jobs root answers `jobs_root_unset`.
 
+### `job.pool_action`
+
+`args: {job, pane_id, label, action_id, op, end_reason}` — at least one of
+`pane_id` and `label` is required; `action_id` is the hub's action (request id,
+a colon, the attempt); `op` is `register` or `clear`; `end_reason` is the
+terminal reason the hub will write (empty on `clear`). This is the node half of
+the exhausted-pool action ([quota-stop.md](quota-stop.md), "An exhausted
+pool"): `register` writes `<inbox>/jobs/<job>/pool-action.json` (mode 0600,
+fsynced, replaced atomically) with the action id, the planned `end_reason` and
+the time; `clear` removes it.
+
+The marker is what the node watcher reads: while it is present and younger than
+its bound (30 minutes), the watcher's missing-pane fallback does not write its
+own plain `lost` record — that record could never carry the hub's quota reason
+or a hand-over's successor pointer. The watcher still releases the job's quota
+lease, because the pane is gone either way. The node refuses the op for a
+ledger that moved on (a `job.completed` after the attempt, or a newer claim)
+exactly as `job.mark_lost` does, so a marker never outlives its attempt.
+
+| `outcome` | Meaning |
+| --- | --- |
+| `registered` | the marker was written. |
+| `cleared` | the marker was removed (or was not there). |
+| `attempt-moved` | the local ledger holds a completion or a newer claim; nothing is written. |
+| `ledger-missing` | the job has no local ledger to hold the marker; nothing is written. |
+
+A failed marker write answers `pool_action_failed`; a node without a jobs root
+answers `jobs_root_unset`. The hub issues this op itself, and the HTTP command
+endpoint refuses it for every caller as it does `job.mark_lost`.
+
 ### `job.reap`
 
 `args: {job, lane, force}` — all three required, and `force:false` must be

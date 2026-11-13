@@ -443,7 +443,15 @@ func (a *App) watch(ctx context.Context, args []string) error {
 		// An unresolved close intent is settled against hk first: the bare lost
 		// write below would end the job without the quota_stop record and close the
 		// intent with its event.
+		// The hub's own quota action owns the terminal record for an attempt it
+		// registered: it writes the quota reason (and a hand-over's successor
+		// pointer), which an hk record made terminal here could never carry.
+		// The pane is gone either way, so free the seat and leave the record
+		// and its notice to the action.
 		if missing >= 2 && !handOff.active && !quotaRetry {
+			if a.poolActionOpen(id) {
+				return a.releaseQuota(ctx, j)
+			}
 			if e := a.putJobRecord(ctx, id, map[string]any{"state": "lost", "at": a.Now().UTC()}); e != nil {
 				a.jobRecordFailed(ctx, id, "lost", e)
 			}
