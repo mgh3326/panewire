@@ -30,7 +30,7 @@ import (
 //	                   revived-job refusal, newest spawn receipt taken as one
 //	                   unit, tab-mismatch, single-pane tab confirmed by a fresh
 //	                   tab list, malformed-record skip)
-//	builder            the job's claim role accumulated builder|captain, which
+//	builder            the job's claim role accumulated as builder, which
 //	                   the reaper excludes unless builders are included
 //	no-terminal-event  a job record exists but has no effective terminal event
 //	                   (detail=reclaimed-after-terminal marks a job that was
@@ -458,7 +458,7 @@ func fleetCensusParseISOOffset(text string) (int, bool) {
 // scanFleetCensusJobs replays the reap candidate scan over the jobs root. Event
 // order is the sorted filename order; payload defaults to the document itself
 // for flat records; the newest job.spawned receipt supplies pane and tab as
-// one unit; claim/reclaim ownership is latest-wins and builder|captain role
+// one unit; claim/reclaim ownership is latest-wins and builder role
 // accumulates; a revive-kind event after a terminal event clears the terminal
 // timestamp (reclaimed-after-terminal). The bool reports whether the root
 // could be listed at all — an unreadable inbox is an observation gap, not an
@@ -526,7 +526,7 @@ func scanFleetCensusJobs(root string) ([]fleetCensusJobScan, bool) {
 				scan.ownerLane = fleetCensusString(payload["owner_lane"])
 				scan.claimRole = fleetCensusString(payload["role"])
 				scan.claimLabel = fleetCensusString(payload["agent_label"])
-				if scan.claimRole == "builder" || scan.claimRole == "captain" {
+				if scan.claimRole == "builder" {
 					scan.role = "builder"
 				}
 			}
@@ -858,7 +858,7 @@ func fleetCensusRemotePaneRow(machine string, session HubSession, fresh bool, sn
 				row.TerminalAgeSeconds = &age
 			}
 		}
-		if job.Role == "builder" || job.Role == "captain" {
+		if job.Role == "builder" {
 			row.Class = fleetCensusClassBuilder
 		} else if row.TerminalKind != "" {
 			// A terminal last event is terminal-but-not-proven-reapable: the

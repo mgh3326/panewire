@@ -17,7 +17,7 @@ import (
 func TestWatcherExpiryKeepsLiveLease(t *testing.T) {
 	a := testApp(t)
 	f := ledgerRunner(t, a)
-	seedJob(t, a, "j", "worker")
+	seedJob(t, a, "j", "implementer")
 	seedLedger(t, a, "j")
 	original := f.Do
 	f.Do = func(c Command) Result {
@@ -41,7 +41,7 @@ func TestWatcherExpiryKeepsLiveLease(t *testing.T) {
 func TestWatcherMissingPaneReleasesThroughLedger(t *testing.T) {
 	a := testApp(t)
 	ledgerRunner(t, a)
-	seedJob(t, a, "j", "worker")
+	seedJob(t, a, "j", "implementer")
 	seedLedger(t, a, "j")
 	if e := a.watch(context.Background(), []string{"j"}); e != nil {
 		t.Fatal(e)
@@ -121,7 +121,7 @@ func watchFixture(t *testing.T) (*App, *fakeRunner, string) {
 		return original(c)
 	}
 	report := filepath.Join(a.Jobs, "j", "report.md")
-	putEvent(t, a, "j", "job.claim", map[string]any{"owner_lane": "owner", "task_id": "42", "t_level": "T1", "role": "worker"})
+	putEvent(t, a, "j", "job.claim", map[string]any{"owner_lane": "owner", "task_id": "42", "t_level": "T1", "role": "implementer"})
 	putEvent(t, a, "j", "job.spawned", map[string]any{"pane_id": "w:p1", "label": "agent-a", "report": report})
 	seedLedger(t, a, "j")
 	t.Setenv("PANEWIRE_COMPLETION_TIMEOUT_S", "60")
@@ -699,7 +699,7 @@ func TestRearmedWatcherWaitsForPaneBeforeDeclaringLoss(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			a := testApp(t)
 			f := ledgerRunner(t, a)
-			seedJob(t, a, "j", "worker")
+			seedJob(t, a, "j", "implementer")
 			seedLedger(t, a, "j")
 			original := f.Do
 			polls := 0

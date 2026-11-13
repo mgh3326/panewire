@@ -209,11 +209,11 @@ func outcomeRounds(j Job) int {
 
 func outcomeRole(j Job) string {
 	switch strings.ToLower(firstNonempty(j.SpawnRole, j.Role)) {
-	case "tester", "reviewer", "verify":
+	case "reviewer", "verify":
 		return "verify"
 	case "fix":
 		return "fix"
-	case "orch", "captain", "lead":
+	case "orch", "lead":
 		return "orch"
 	}
 	return "impl"

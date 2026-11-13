@@ -13,7 +13,7 @@ import (
 
 func TestSubmissionReceiptReusesKeyAfterLostHTTPResponse(t *testing.T) {
 	a := &App{Jobs: t.TempDir()}
-	req := Submission{RequestID: "00000000-0000-4000-8000-000000000001", Args: []string{"-c", "/work/project", "-p", "/work/brief.md", "-m", "auto", "-l", "job", "--job", "job", "--t", "T1", "--task", "42", "--owner", "parent", "--role", "worker"}, Brief: "marker-do-the-task", Repository: Repository{Name: "project", Origin: "https://github.com/example/project.git", LocalRoot: "/work/project"}, OriginMachine: "machine-a", DeadlineSeconds: 600}
+	req := Submission{RequestID: "00000000-0000-4000-8000-000000000001", Args: []string{"-c", "/work/project", "-p", "/work/brief.md", "-m", "auto", "-l", "job", "--job", "job", "--t", "T1", "--task", "42", "--owner", "parent", "--role", "implementer"}, Brief: "marker-do-the-task", Repository: Repository{Name: "project", Origin: "https://github.com/example/project.git", LocalRoot: "/work/project"}, OriginMachine: "machine-a", DeadlineSeconds: 600}
 	saved, err := a.saveSubmission(req)
 	if err != nil {
 		t.Fatal(err)

@@ -183,7 +183,7 @@ func (a *App) staticDrop(row CatalogRow, req selReq, floor string, rungs rungInd
 // grade and family ("unknown" when the spawn named none), where the grade came
 // from, the floor asked and the floor used, and the fallback taken, if any.
 func (p *selPlan) consultStamp() map[string]any {
-	family := p.req.builderFamily
+	family := p.req.authorFamily
 	if family == "" {
 		family = "unknown"
 	}

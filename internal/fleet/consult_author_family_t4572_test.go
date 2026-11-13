@@ -39,7 +39,7 @@ func consultAuthorFixture(t *testing.T, family string) (*App, Spawn, *fakeQuota)
 }
 
 // TestConsultResolveReadsAuthorFamilyFromJob_t4572: resolve run inside an
-// author job (ARBITER_JOB) picks the other family without --builder-family,
+// author job (ARBITER_JOB) picks the other family without --author-family,
 // matching spawn. The anthropic author must not get opus; the openai author
 // must not get codex-sol.
 func TestConsultResolveReadsAuthorFamilyFromJob_t4572(t *testing.T) {
@@ -71,13 +71,13 @@ func TestConsultResolveReadsAuthorFamilyFromJob_t4572(t *testing.T) {
 	}
 }
 
-// TestConsultResolveFlagOverridesAuthorJob_t4572: an explicit --builder-family
+// TestConsultResolveFlagOverridesAuthorJob_t4572: an explicit --author-family
 // still wins over the job the caller runs in, as spawn's explicit parent does.
 func TestConsultResolveFlagOverridesAuthorJob_t4572(t *testing.T) {
 	a, _, _ := consultAuthorFixture(t, "anthropic")
 	t.Setenv("ARBITER_JOB", "author-job")
 	out := captureOut(a)
-	if e := a.Run(context.Background(), []string{"resolve", "--role", "consult", "--t", "T1", "--grade", "A", "--builder-family", "openai", "--json"}); e != nil {
+	if e := a.Run(context.Background(), []string{"resolve", "--role", "consult", "--t", "T1", "--grade", "A", "--author-family", "openai", "--json"}); e != nil {
 		t.Fatalf("resolve: %v", e)
 	}
 	var r map[string]any
@@ -85,7 +85,7 @@ func TestConsultResolveFlagOverridesAuthorJob_t4572(t *testing.T) {
 		t.Fatalf("resolve json: %v\n%s", err, out)
 	}
 	if r["profile"] != "opus" {
-		t.Fatalf("--builder-family openai chose %v, want opus", r["profile"])
+		t.Fatalf("--author-family openai chose %v, want opus", r["profile"])
 	}
 }
 
@@ -116,7 +116,7 @@ func TestConsultSpawnReadsAuthorFamilyFromParentJob_t4572(t *testing.T) {
 				t.Fatal(e)
 			}
 			report := filepath.Join(a.Jobs, "job-b", "report.md")
-			parsed, err := parseSpawn([]string{"-c", a.Home, "-p", prompt, "-w", "workspace", "-l", "counsel-a", "--job", "job-b", "--t", "T1", "--role", "counsel", "--routing-role", "consult", "--grade", "A", "--parent-job", "author-job", "--owner", "consult-owner", "--report", report, "--dry-run"})
+			parsed, err := parseSpawn([]string{"-c", a.Home, "-p", prompt, "-w", "workspace", "-l", "consult-a", "--job", "job-b", "--t", "T1", "--role", "consult", "--grade", "A", "--parent-job", "author-job", "--owner", "consult-owner", "--report", report, "--dry-run"})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -172,7 +172,7 @@ func TestConsultSpawnTaskReadsAuthorJob_t4572(t *testing.T) {
 				t.Fatal(e)
 			}
 			report := filepath.Join(a.Jobs, "job-b", "report.md")
-			parsed, err := parseSpawn([]string{"-c", a.Home, "-p", prompt, "-w", "workspace", "-l", "counsel-a", "--job", "job-b", "--t", "T1", "--task", "42", "--owner", "consult-owner", "--role", "counsel", "--routing-role", "consult", "--grade", "A", "--report", report, "--dry-run"})
+			parsed, err := parseSpawn([]string{"-c", a.Home, "-p", prompt, "-w", "workspace", "-l", "consult-a", "--job", "job-b", "--t", "T1", "--task", "42", "--owner", "consult-owner", "--role", "consult", "--grade", "A", "--report", report, "--dry-run"})
 			if err != nil {
 				t.Fatal(err)
 			}
