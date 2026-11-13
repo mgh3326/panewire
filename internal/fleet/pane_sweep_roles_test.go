@@ -1,7 +1,6 @@
 package fleet
 
 import (
-	"errors"
 	"os"
 	"testing"
 )
@@ -9,51 +8,6 @@ import (
 // A reviewer, a counsel (consult) or a builder pane is judged by its own job
 // end, not by a task: its spawn role is what decides, since the claim records
 // only worker or builder.
-
-func TestPaneSweepClosesARevokedReviewerPaneAfterTheGrace(t *testing.T) {
-	f := newPaneSweepFixture(t)
-	pane := f.job("r", "reviewer", "")
-	putEvent(t, f.a, "r", "job.revoked", map[string]any{})
-	f.at(0)
-	f.at(11)
-	if got := f.closed(); len(got) != 1 || got[0] != pane {
-		t.Fatalf("closed = %v, want [%s]", got, pane)
-	}
-	if payload := f.reaped("r"); payload["reason"] != "job_revoked" {
-		t.Fatalf("reason = %v, want job_revoked", payload["reason"])
-	}
-	if !f.infoHas("task pane closed", "job=r", "role=reviewer") {
-		t.Fatalf("no close line with the role: %v", f.info)
-	}
-}
-
-func TestPaneSweepClosesACompletedCounselPaneAfterTheGrace(t *testing.T) {
-	f := newPaneSweepFixture(t)
-	pane := f.job("c", "counsel", "")
-	putEvent(t, f.a, "c", "job.completed", map[string]any{})
-	f.at(0)
-	f.at(11)
-	if got := f.closed(); len(got) != 1 || got[0] != pane {
-		t.Fatalf("closed = %v, want [%s]", got, pane)
-	}
-	if payload := f.reaped("c"); payload["reason"] != "job_completed" {
-		t.Fatalf("reason = %v, want job_completed", payload["reason"])
-	}
-}
-
-// The task's read does not reach a reviewer: an hk outage keeps a worker's
-// pane, but a revoked reviewer's pane closes on its own record.
-func TestPaneSweepJudgesAReviewerByItsOwnEndNotItsTask(t *testing.T) {
-	f := newPaneSweepFixture(t)
-	f.taskErr = errors.New("hk unreachable")
-	f.job("r", "reviewer", "42")
-	putEvent(t, f.a, "r", "job.revoked", map[string]any{})
-	f.at(0)
-	f.at(11)
-	if len(f.closed()) != 1 {
-		t.Fatalf("revoked reviewer kept while hk is unreachable: %v", f.info)
-	}
-}
 
 func TestPaneSweepKeepsAWorkingReviewerPane(t *testing.T) {
 	f := newPaneSweepFixture(t)
@@ -80,22 +34,6 @@ func TestPaneSweepKeepsAReviewerPaneStoppedByQuota(t *testing.T) {
 	}
 }
 
-func TestPaneSweepClosesALostReviewerPaneAsJobLost(t *testing.T) {
-	f := newPaneSweepFixture(t)
-	f.job("r", "reviewer", "")
-	putEvent(t, f.a, "r", "job.lost", map[string]any{"reason": "host_gone"})
-	f.at(0)
-	f.at(11)
-	if len(f.closed()) != 1 {
-		t.Fatalf("lost reviewer pane kept: %v", f.info)
-	}
-	if payload := f.reaped("r"); payload["reason"] != "job_lost" {
-		t.Fatalf("reason = %v, want job_lost", payload["reason"])
-	}
-}
-
-// A lost job.lost of a worker still waits for its owner: a worker's end is
-// read from its task and PR, as before.
 func TestPaneSweepKeepsALostWorkerPane(t *testing.T) {
 	f := newPaneSweepFixture(t)
 	f.job("w", "worker", "")
@@ -109,20 +47,6 @@ func TestPaneSweepKeepsALostWorkerPane(t *testing.T) {
 
 // A reviewer whose herdr row lost its name is matched by pane id and the job's
 // worktree, never by pane id alone.
-func TestPaneSweepClosesAReviewerPaneWhoseNameWasLostAtItsWorktree(t *testing.T) {
-	worktree := t.TempDir()
-	f := newPaneSweepFixture(t)
-	pane := f.job("r", "reviewer", "", map[string]any{"cwd": worktree})
-	f.names[pane] = ""
-	f.cwds[pane] = worktree
-	putEvent(t, f.a, "r", "job.revoked", map[string]any{})
-	f.at(0)
-	f.at(11)
-	if got := f.closed(); len(got) != 1 || got[0] != pane {
-		t.Fatalf("closed = %v, want [%s]: %v", got, pane, f.info)
-	}
-}
-
 func TestPaneSweepKeepsANamelessPaneInAnotherWorktree(t *testing.T) {
 	f := newPaneSweepFixture(t)
 	pane := f.job("r", "reviewer", "", map[string]any{"cwd": t.TempDir()})
@@ -147,10 +71,13 @@ func TestPaneSweepKeepsAReviewerWorktree(t *testing.T) {
 	putEvent(t, f.a, "r", "job.revoked", map[string]any{"outcome": "abandoned"})
 	f.at(0)
 	f.at(11)
-	if len(f.closed()) != 1 {
-		t.Fatalf("abandoned reviewer pane kept: %v", f.info)
+	if len(f.closed()) != 0 {
+		t.Fatalf("abandoned reviewer pane closed without ownership proof: %v", f.closed())
 	}
 	if _, err := os.Stat(cwd); err != nil {
 		t.Fatalf("reviewer worktree removed: %v", err)
+	}
+	if !f.infoHas("job=r", "reason=ownership-unproven") {
+		t.Fatalf("pane was not retained for unproven ownership: %v", f.info)
 	}
 }

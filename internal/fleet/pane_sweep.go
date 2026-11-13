@@ -5,24 +5,18 @@ import (
 	"errors"
 	"net/url"
 	"os"
-	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/mgh3326/panewire/internal/durable"
 )
 
-// The node's task pane sweep (docs/pane-sweep.md) closes the pane of a worker
-// or tester whose bound hk task has ended, or whose job was closed
-// (job.revoked, job.completed), once that pane has stayed not working for a
-// grace. It exists because mergewake's one reap at merge time skips a worker
-// that is busy then. A worker stays in its pane after READY as its PR's
-// author, so a completed author waits on its open PR (paneSweepAwaitsPR).
+// The node's task pane sweep (docs/pane-sweep.md) observes ended jobs and idle
+// panes. Herdr does not provide an ownership-bound read or close, so a sweep
+// may capture only an unattributed local diagnostic and must keep the pane.
 
-// PaneScreenFile is the job-directory file the sweep saves the pane's last
-// screen to before it closes the pane; mergewake reap used to leave it.
+// PaneScreenFile is the evidence filename used by the explicit pane.capture
+// node command. Sweeps never write it or upload its contents.
 const PaneScreenFile = "pane-screen.txt"
 
 // DefaultPaneSweepGrace is how long a pane must have stayed not working.
@@ -315,13 +309,9 @@ type TaskPaneSweeper struct {
 	// worktrees from. Empty keeps every worktree, since nothing then proves
 	// one was the node's (sweep_worktree.go).
 	WorkRoot string
-	// Info receives one line per closed pane and one per kept candidate. It
-	// gets ids and states only, never screen text.
+	// Info receives one line per kept candidate. It gets ids and states only,
+	// never screen text.
 	Info func(message string, attrs ...any)
-	// Exclusive, when set, is called before each close and the function it
-	// returns after it, so a close never interleaves with another acting node
-	// command (node_command.go nodeCommandMu).
-	Exclusive func() (release func())
 
 	idleSince map[string]time.Time
 	// failures holds the failure reps the sweep still owes (their joined PR is
@@ -508,10 +498,8 @@ func (s *TaskPaneSweeper) Pass(ctx context.Context, a *App) error {
 					continue
 				}
 			}
-			if reason := s.close(ctx, a, j, task, end, since, now, nil); reason != "" {
+			if reason := s.captureDiagnostic(ctx, a, j); reason != "" {
 				s.info("task pane kept", "job", j.ID, "task", task, "task_state", end.taskState, "pane", j.Pane, "reason", reason)
-			} else {
-				s.closedFailure(ctx, a, j, task)
 			}
 		}
 	}
@@ -760,184 +748,29 @@ func (s *TaskPaneSweeper) notIdleReason(j Job, agents []Agent) string {
 	return "pane-gone"
 }
 
-// close is reap's tail for one swept job. It returns a reason when it kept the
-// pane, and "" once the pane is closed and the job reaped.
-func (s *TaskPaneSweeper) close(ctx context.Context, a *App, j Job, task string, end paneSweepEnd, since, now time.Time, ended *paneSweepEndedRule) string {
-	key := paneSweepKey(j)
-	// The pane must still be the job's before its screen is read and uploaded,
-	// so no screen is stored as this job's once herdr has moved the pane
-	// (hk 4562610630). The rows are read again under the lock before the close.
-	before, err := a.agents(ctx)
-	if err != nil {
-		return "herdr-unreadable"
-	}
-	if reason := paneRowReason(j, before); reason != "" {
-		delete(s.idleSince, key)
-		return reason
-	}
+// captureDiagnostic reads a pane as an unattributed local observation. It
+// never writes job state or closes the pane because herdr cannot bind either
+// operation to an authoritative pane owner and incarnation.
+func (s *TaskPaneSweeper) captureDiagnostic(ctx context.Context, a *App, j Job) string {
 	screen, err := a.capturePaneScreen(ctx, j)
 	if err != nil {
-		return "screen-not-saved"
+		return "diagnostic-unavailable"
 	}
-	// The read may have landed on another job's pane if herdr moved the pane
-	// after the listing above. Prove the identity again on a fresh listing
-	// after the read and before the upload; a screen that fails the check is
-	// discarded, never stored (hk 4562780613, 4562780592).
-	after, err := a.agents(ctx)
-	if err != nil {
-		return "herdr-unreadable"
+	if err := a.spoolPaneDiagnostic(j.Pane, screen); err != nil {
+		a.warn("pane diagnostic could not be spooled: %v", err)
+		return "diagnostic-not-saved"
 	}
-	if reason := paneRowReason(j, after); reason != "" {
-		delete(s.idleSince, key)
-		return reason
-	}
-	if err := a.storePaneScreen(ctx, j, screen); err != nil {
-		return "screen-not-saved"
-	}
-	// Reading and uploading the last screen may wait on herdr or handoffkeep.
-	// Keep both outside the node-command lock; the state and pane are re-read
-	// below after taking it, immediately before close.
-	if s.Exclusive != nil {
-		defer s.Exclusive()()
-	}
-	// Re-read both durable history and the live pane immediately before the
-	// irreversible close, as reap does. A revived or kept job always wins.
-	latest, err := a.job(j.ID)
-	if err != nil {
-		return "job-unreadable"
-	}
-	// A job that did not wait on its PR when the pass judged it (one its
-	// owner closed) and does now (revived, or revived and then completed as
-	// an author) is judged again on the next pass, PR read included. A live
-	// job that has since completed is not caught here: it already waited on
-	// its PR, and this pass's PR read applied to it. Neither git nor the
-	// change list is read again, so a PR opened after the task's first PR
-	// read in this pass does not keep the pane (docs/pane-sweep.md).
-	if !paneSweepStillJudged(latest, j, end, now, ended) {
-		delete(s.idleSince, key)
-		return "job-changed"
-	}
-	if end.byJob {
-		// The job may have been closed again, with another outcome, since the
-		// pass judged it: the end that is written and cleaned up is the latest.
-		end = paneSweepJobEnd(latest, end.taskState)
-	}
-	fresh, err := a.agents(ctx)
-	if err != nil {
-		return "herdr-unreadable"
-	}
-	// Both passes need a fresh row that is the job's pane (hk 4562610925). Only
-	// the local sweep also needs that pane idle; the ended-job sweep closes it
-	// whatever herdr shows (hk 4512).
-	if reason := paneRowReason(latest, fresh); reason != "" {
-		delete(s.idleSince, key)
-		return reason
-	}
-	if ended == nil && !s.idle(latest, fresh) {
-		delete(s.idleSince, key)
-		return s.notIdleReason(latest, fresh)
-	}
-	// The usage is read before the close: once herdr stops listing the pane the
-	// live session reference is gone, and a receipt that names no session reads
-	// no figures. The pane closes before hk is told the job ended, so a failed
-	// close never leaves a finished record beside an open pane. A failed record
-	// write after the close is a job.record_failed event plus a warning, as in
-	// reap. The usage is written after the record, as lifecycle done does.
-	usage, haveUsage := a.readJobUsage(ctx, latest, true)
-	if err := a.must(ctx, "herdr", "pane", "close", j.Pane); err != nil {
-		return "close-failed"
-	}
-	delete(s.idleSince, key)
-	a.markSweptJob(ctx, latest, end.state)
-	if haveUsage {
-		a.writeJobUsage(ctx, latest.ID, usage)
-	}
-	if err := a.releaseQuota(ctx, j); err != nil {
-		a.warn("quota retained: %v", err)
-	}
-	if owner, foreign := a.laneOwnedElsewhere(j); foreign {
-		a.warn("lane %s retained: it belongs to machine %s and this host is %s", j.HubLane, j.Machine, owner)
-	} else if err := a.removeLane(ctx, j); err != nil {
-		a.warn("lane retained: %v", err)
-	}
-	if err := a.event(ctx, j.ID, "job.reaped", map[string]any{"pane_id": j.Pane, "reason": end.reason}); err != nil {
-		a.warn("job.reaped not recorded: %v", err)
-	}
-	attrs := []any{"job", j.ID, "task", task, "task_state", end.taskState, "pane", j.Pane, "reason", end.reason, "role", latest.QuotaRole()}
-	if ended != nil {
-		attrs = append(attrs, "ended_seconds", int(now.Sub(latest.At).Seconds()))
-	} else {
-		attrs = append(attrs, "idle_seconds", int(now.Sub(since).Seconds()))
-	}
-	s.info("task pane closed", attrs...)
-	// Only a worker's or a tester's worktree is the sweep's to keep or remove;
-	// any other role's worktree is not, and no task judges it.
-	if paneSweepTaskRole(latest) {
-		s.sweepWorktree(ctx, a, latest, end)
-	}
-	return ""
+	// Pane listings are mutable metadata. They cannot bind the bytes read above
+	// to this job, and herdr exposes no ownership-conditional close operation.
+	return "ownership-unproven"
 }
 
-// capturePaneScreen reads the pane's last screen from herdr. It stores
-// nothing: the caller proves the pane is still the job's, then calls
-// storePaneScreen with these bytes.
+// capturePaneScreen reads the pane's last screen from herdr. The result must
+// remain unattributed because herdr does not bind it to an owner generation.
 func (a *App) capturePaneScreen(ctx context.Context, j Job) ([]byte, error) {
 	r := a.call(ctx, "herdr", "pane", "read", j.Pane)
 	if err := check(r, "pane screen"); err != nil {
 		return nil, err
 	}
 	return []byte(r.Out), nil
-}
-
-// storePaneScreen uploads a captured pane screen to hk as the job's screen
-// document (UploadPaneScreen). A stored screen of at most PaneScreenDocMaxBytes
-// is the whole screen, so no local copy is written. A failed upload is one
-// warning, and a screen hk stored only as a cut tail keeps its whole copy in
-// <job dir>/pane-screen.txt, mode 0600, through an os.Root on the job
-// directory. Nothing uploads a local copy again: the job dir's TTL net removes
-// it with the dir (decision hk 3685 §3). Only a failed local write where a
-// local copy is needed is an error: the pane is kept.
-// See docs/pane-sweep.md.
-func (a *App) storePaneScreen(ctx context.Context, j Job, screen []byte) error {
-	_, err := UploadPaneScreen(ctx, j.ID, j.Task, screen)
-	switch {
-	case err != nil:
-		a.warn("pane screen upload failed for job %s; local screen retained: %v", j.ID, err)
-	case len(screen) <= PaneScreenDocMaxBytes:
-		return nil
-	}
-	root, err := os.OpenRoot(filepath.Join(a.Jobs, j.ID))
-	if err != nil {
-		return err
-	}
-	defer root.Close()
-	return durable.ReplaceFileAtomicallyInRoot(root, PaneScreenFile, screen, 0600)
-}
-
-// markSweptJob writes the end state to the hk record of a job that never
-// reported done: completed for a completed task, lost for a canceled one.
-// It goes through putJobRecord, the writer done and watch use. A record that
-// is already completed, escalated or lost, or that hk does not hold, is left
-// alone; a failed read or write is a warning plus job.record_failed, and the
-// sweep goes on, as reap does.
-func (a *App) markSweptJob(ctx context.Context, j Job, endState string) {
-	store, err := a.jobStore()
-	if err != nil {
-		a.jobRecordFailed(ctx, j.ID, endState, err)
-		return
-	}
-	rec, err := store.Get(ctx, j.ID)
-	if errors.Is(err, errJobNotFound) {
-		return
-	}
-	if err != nil {
-		a.jobRecordFailed(ctx, j.ID, endState, err)
-		return
-	}
-	if state := str(rec, "state"); state != "claimed" && state != "spawned" {
-		return
-	}
-	if err := a.putJobRecord(ctx, j.ID, map[string]any{"state": endState, "at": a.Now().UTC()}); err != nil {
-		a.jobRecordFailed(ctx, j.ID, endState, err)
-	}
 }

@@ -1,7 +1,6 @@
 package fleet
 
 import (
-	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -23,24 +22,28 @@ func (f *paneSweepFixture) endedSweep(minute int, age time.Duration) []SweptPane
 	return closes
 }
 
-func TestEndedSweepClosesAWorkingReviewerPaneOlderThanTheAge(t *testing.T) {
-	f := newPaneSweepFixture(t)
-	pane := f.job("r", "reviewer", "")
-	f.status[pane] = "working"
-	putEvent(t, f.a, "r", "job.revoked", map[string]any{})
-	if closes := f.endedSweep(59, time.Hour); len(closes) != 0 || len(f.closed()) != 0 {
-		t.Fatalf("pane closed before the age: %v", closes)
+func (f *paneSweepFixture) onPaneRead(hook func()) {
+	prev := f.runner.Do
+	f.runner.Do = func(c Command) Result {
+		r := prev(c)
+		if c.Name == "herdr" && strings.HasPrefix(strings.Join(c.Args, " "), "pane read ") {
+			hook()
+		}
+		return r
 	}
-	closes := f.endedSweep(61, time.Hour)
-	want := SweptPane{Job: "r", Pane: pane, Role: "reviewer", Reason: "job_revoked"}
-	if len(closes) != 1 || closes[0] != want {
-		t.Fatalf("closes = %+v, want [%+v]", closes, want)
-	}
-	if got := f.closed(); !slices.Equal(got, []string{pane}) {
-		t.Fatalf("herdr closed %v, want [%s]", got, pane)
-	}
-	if payload := f.reaped("r"); payload["reason"] != "job_revoked" || payload["pane_id"] != pane {
-		t.Fatalf("job.reaped payload = %v", payload)
+}
+
+func (f *paneSweepFixture) onAgentList(n int, hook func()) {
+	prev := f.runner.Do
+	lists := 0
+	f.runner.Do = func(c Command) Result {
+		if c.Name == "herdr" && strings.Join(c.Args, " ") == "agent list" {
+			lists++
+			if lists == n {
+				hook()
+			}
+		}
+		return prev(c)
 	}
 }
 
@@ -69,55 +72,6 @@ func TestEndedSweepKeepsACompletedWorkerWithAnOpenPR(t *testing.T) {
 	}
 }
 
-func TestEndedSweepClosesAPaneWhoseNameWasLostAtItsWorktree(t *testing.T) {
-	g := newSweepGitFake(t)
-	f := newPaneSweepFixture(t)
-	f.withGit(g)
-	cwd := g.worktree(t, "r")
-	pane := f.job("r", "reviewer", "", map[string]any{"cwd": cwd})
-	f.names[pane] = ""
-	f.cwds[pane] = cwd
-	putEvent(t, f.a, "r", "job.revoked", map[string]any{})
-	closes := f.endedSweep(61, time.Hour)
-	if len(closes) != 1 || closes[0].Pane != pane {
-		t.Fatalf("closes = %+v, want the nameless pane %s", closes, pane)
-	}
-}
-
-// onPaneRead runs hook after herdr has answered a pane read, so the pane is
-// reassigned or removed while the sweep holds the screen it read.
-func (f *paneSweepFixture) onPaneRead(hook func()) {
-	prev := f.runner.Do
-	f.runner.Do = func(c Command) Result {
-		r := prev(c)
-		if c.Name == "herdr" && strings.HasPrefix(strings.Join(c.Args, " "), "pane read ") {
-			hook()
-		}
-		return r
-	}
-}
-
-// onAgentList runs hook when herdr is asked for its agent list the nth time,
-// before the list is answered.
-func (f *paneSweepFixture) onAgentList(n int, hook func()) {
-	prev := f.runner.Do
-	lists := 0
-	f.runner.Do = func(c Command) Result {
-		if c.Name == "herdr" && strings.Join(c.Args, " ") == "agent list" {
-			lists++
-			if lists == n {
-				hook()
-			}
-		}
-		return prev(c)
-	}
-}
-
-// Hk 4562610630 and hk 4562610925: the ended-job sweep closes a pane whatever
-// its status, but only while the job's pane is still proven by a fresh row at
-// the moment of the close. A pane reassigned or removed after the sweep read
-// its screen must be kept.
-
 func TestEndedSweepKeepsAPaneReassignedWhileItsScreenIsRead(t *testing.T) {
 	f := newPaneSweepFixture(t)
 	pane := f.job("r", "reviewer", "")
@@ -127,7 +81,7 @@ func TestEndedSweepKeepsAPaneReassignedWhileItsScreenIsRead(t *testing.T) {
 	if closes := f.endedSweep(61, time.Hour); len(closes) != 0 || len(f.closed()) != 0 {
 		t.Fatalf("a reassigned pane was closed: %+v closed=%v", closes, f.closed())
 	}
-	if !f.infoHas("task pane kept", "job=r", "reason=pane-mismatch") {
+	if !f.infoHas("task pane kept", "job=r", "reason=ownership-unproven") {
 		t.Fatalf("info lines = %q", f.info)
 	}
 }
@@ -141,60 +95,7 @@ func TestEndedSweepKeepsAPaneRemovedWhileItsScreenIsRead(t *testing.T) {
 	if closes := f.endedSweep(61, time.Hour); len(closes) != 0 || len(f.closed()) != 0 {
 		t.Fatalf("a removed pane was closed: %+v closed=%v", closes, f.closed())
 	}
-	if !f.infoHas("task pane kept", "job=r", "reason=pane-gone") {
+	if !f.infoHas("task pane kept", "job=r", "reason=ownership-unproven") {
 		t.Fatalf("info lines = %q", f.info)
-	}
-}
-
-func TestEndedSweepReadsNoScreenOfAPaneReassignedAfterItsListing(t *testing.T) {
-	f := newPaneSweepFixture(t)
-	pane := f.job("r", "reviewer", "")
-	f.status[pane] = "working"
-	putEvent(t, f.a, "r", "job.revoked", map[string]any{})
-	f.onAgentList(2, func() { f.names[pane] = "someone-else" })
-	if closes := f.endedSweep(61, time.Hour); len(closes) != 0 || len(f.closed()) != 0 {
-		t.Fatalf("a reassigned pane was closed: %+v closed=%v", closes, f.closed())
-	}
-	for _, c := range f.runner.Calls {
-		if c.Name == "herdr" && len(c.Args) >= 2 && c.Args[0] == "pane" && c.Args[1] == "read" {
-			t.Fatalf("the screen of a reassigned pane was read: %v", c.Args)
-		}
-	}
-}
-
-// Hk 4562780613 and hk 4562780592: a sweep stores the screen it read only when
-// the pane is still the job's after the read. A pane reassigned or removed
-// during the read must have its screen discarded, not uploaded as the job's.
-// The unchanged control proves the screen document check is not vacuous.
-func TestEndedSweepStoresNoScreenOfAPaneChangedDuringTheRead(t *testing.T) {
-	for name, change := range map[string]func(f *paneSweepFixture, pane string){
-		"unchanged":  nil,
-		"reassigned": func(f *paneSweepFixture, pane string) { f.names[pane] = "someone-else" },
-		"removed":    func(f *paneSweepFixture, pane string) { f.shut[pane] = true },
-	} {
-		t.Run(name, func(t *testing.T) {
-			f := newPaneSweepFixture(t)
-			hk := useFakeHK(t)
-			pane := f.job("r", "reviewer", "42")
-			f.status[pane] = "working"
-			putEvent(t, f.a, "r", "job.revoked", map[string]any{})
-			if change != nil {
-				f.onPaneRead(func() { change(f, pane) })
-			}
-			closes := f.endedSweep(61, time.Hour)
-			put := screenDocPut(t, hk, "r")
-			if change == nil {
-				if put == nil || len(closes) != 1 {
-					t.Fatalf("unchanged pane: screen put = %v, closes = %+v; want a stored screen and a close", put, closes)
-				}
-				return
-			}
-			if put != nil {
-				t.Fatalf("a screen of a pane changed during its read was stored as the job's: %v", put)
-			}
-			if len(closes) != 0 || len(f.closed()) != 0 {
-				t.Fatalf("a pane changed during its read was closed: %+v closed=%v", closes, f.closed())
-			}
-		})
 	}
 }
