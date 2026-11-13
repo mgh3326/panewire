@@ -438,6 +438,41 @@ func TestRecoveredCreditPublicationNeverHandsOffResumedPane(t *testing.T) {
 	}
 }
 
+func TestSafeCreditStopHandoffRequiresReachableHerdrAndUnchangedPane(t *testing.T) {
+	at := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	seq := int64(7)
+	job := Job{Events: []Event{{
+		Kind: "job.credit_rejection",
+		Payload: map[string]any{
+			"pool":             "anthropic-api",
+			"at":               at.Format(time.RFC3339Nano),
+			"state_change_seq": float64(seq),
+		},
+	}}}
+	stop := quotastop.Stop{Pool: "anthropic-api", CreditExhaustedAt: at}
+	for _, tc := range []struct {
+		name           string
+		reachable      bool
+		present        bool
+		status         string
+		stateChangeSeq *int64
+		want           bool
+	}{
+		{name: "unchanged idle pane", reachable: true, present: true, status: "idle", stateChangeSeq: &seq, want: true},
+		{name: "Herdr unavailable", reachable: false, present: true, status: "idle", stateChangeSeq: &seq},
+		{name: "pane resumed", reachable: true, present: true, status: "working", stateChangeSeq: &seq},
+		{name: "pane changed", reachable: true, present: true, status: "idle", stateChangeSeq: ptr(int64(8))},
+		{name: "pane absent", reachable: true, status: "idle", stateChangeSeq: &seq},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := safeCreditStopHandoff(job, stop, Agent{Status: tc.status, StateChangeSeq: tc.stateChangeSeq}, tc.present, tc.reachable)
+			if got != tc.want {
+				t.Fatalf("safe handoff = %t, want %t", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestCreditCounselPublishesWithoutEndingJob(t *testing.T) {
 	hk := &hkBenchFake{}
 	srv := httptest.NewServer(hk)
