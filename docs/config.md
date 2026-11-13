@@ -1164,7 +1164,10 @@ that names one is a config error, and `--builder-family` and `--routing-role`
 are unknown flags (`--author-family` replaces the first; a spawn's `--role` is
 its routing role). The hub, every node and every sender move to the new names
 in one rollout: a job claimed or reserved under an old name is not matched by
-new code.
+new code, and a node or hub on the other side of the rename refuses or blanks
+the new or old role. Roll out with no live job, no held reservation and no
+pending spawn: drain first, then upgrade the hub and every node together.
+There is no mixed-version window (decision 208).
 
 ### Consult
 
