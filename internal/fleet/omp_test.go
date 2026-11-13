@@ -49,6 +49,12 @@ func ompSpawnFixture(t *testing.T) (*App, Spawn, *fakeRunner) {
 	fr := &fakeRunner{Do: func(c Command) Result {
 		args := strings.Join(c.Args, " ")
 		switch {
+		case args == "-C "+cwd+" rev-parse --abbrev-ref HEAD":
+			return Result{Out: "wk/fixture\n"}
+		case args == "-C "+cwd+" rev-parse --path-format=absolute --git-dir --git-common-dir":
+			return Result{Out: filepath.Join(cwd, ".git", "worktrees", "tree") + "\n" + filepath.Join(a.Home, "panewire", ".git") + "\n"}
+		case args == "-C "+cwd+" rev-parse --show-toplevel":
+			return Result{Out: cwd + "\n"}
 		case strings.HasPrefix(args, "tab create"):
 			return Result{Out: `{"result":{"root_pane":{"pane_id":"w:p1"},"tab_id":"w:t1"}}`}
 		case strings.HasPrefix(args, "pane process-info"):
@@ -184,6 +190,15 @@ func TestOMPModelProof(t *testing.T) {
 			a := testApp(t)
 			a.Home = "/home/example"
 			a.Runner = &fakeRunner{Do: func(c Command) Result {
+				args := strings.Join(c.Args, " ")
+				switch args {
+				case "-C /home/example/tree rev-parse --abbrev-ref HEAD":
+					return Result{Out: "wk/fixture\n"}
+				case "-C /home/example/tree rev-parse --path-format=absolute --git-dir --git-common-dir":
+					return Result{Out: "/home/example/tree/.git/worktrees/tree\n/home/example/panewire/.git\n"}
+				case "-C /home/example/tree rev-parse --show-toplevel":
+					return Result{Out: "/home/example/tree\n"}
+				}
 				if c.Name == "omp" {
 					return Result{Out: ompCapture(t, "models.json")}
 				}

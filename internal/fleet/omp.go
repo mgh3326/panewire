@@ -54,7 +54,7 @@ func ompFooterLead(segment string) bool {
 //	⠸ 16s > ◉ GPT-6.1 Sol > 🌳 project/tree > ⑂ detached > $0.03 ▶─1%──…─1M─
 //
 // modelName is omp's footer name for the launched model (see ompModelName).
-func OMPFooterProof(screen, modelName, effort, cwd, home, brief string, noThinkingRung ...bool) bool {
+func OMPFooterProof(screen, modelName, effort, cwd, home, brief, worktreeLabel, cwdBranch string, noThinkingRung ...bool) bool {
 	glyph, ok := ompEffortGlyphs[effort]
 	noThinking := effort == "off" && len(noThinkingRung) > 0 && noThinkingRung[0]
 	if !noThinking && !ok || modelName == "" {
@@ -101,7 +101,7 @@ func OMPFooterProof(screen, modelName, effort, cwd, home, brief string, noThinki
 			branch = next[0]
 		}
 		for _, p := range paths {
-			if isWorktree && ompWorktreeShown(worktree, branch, p) || isFolder && ompFolderShown(folder, p, home) {
+			if isWorktree && ompWorktreeShown(worktree, branch, worktreeLabel, cwdBranch) || isFolder && ompFolderShown(folder, p, home) {
 				return true
 			}
 		}
@@ -110,9 +110,8 @@ func OMPFooterProof(screen, modelName, effort, cwd, home, brief string, noThinki
 	return false
 }
 
-// ompPathClampTail is how much of a long path omp keeps behind "…". The cut can
-// fall inside a directory name, so this length, not a path boundary, is what
-// tells a real clamp from a short tail that many directories would end with.
+// ompPathClampTail is the default ASCII suffix length: OMP's segments.ts clamps
+// path text to 40 JavaScript string units, adding "…" before the suffix.
 const ompPathClampTail = 39
 
 func ompClampedTail(tail string) bool {
@@ -134,18 +133,19 @@ func ompFolderShown(shown, cwd, home string) bool {
 	return shown != "" && strings.HasSuffix(cwd, "/"+shown)
 }
 
-// ompWorktreeShown follows omp's linked-worktree label: project/dir, or project
-// alone when the worktree dir equals the branch, so the branch segment names it.
-func ompWorktreeShown(label, branch, cwd string) bool {
-	dir := filepath.Base(cwd)
-	if tail, ok := strings.CutPrefix(label, "…"); ok {
-		return ompClampedTail(tail) && (strings.HasSuffix(tail, "/"+dir) || strings.HasSuffix(dir, tail))
+// ompWorktreeShown follows pi-tui/src/status-line/segments.ts:583-590, which
+// builds the linked-worktree label as projectName/worktreeName before clamping.
+// The shorter labels in hk 4598's captured footers are rune suffixes of that
+// label; the adjacent branch segment binds the visible label to this checkout.
+func ompWorktreeShown(shown, branchSegment, worktreeLabel, cwdBranch string) bool {
+	fields := strings.Fields(branchSegment)
+	if cwdBranch == "" || len(fields) != 2 || fields[0] != "⑂" || fields[1] != cwdBranch {
+		return false
 	}
-	if strings.Contains(label, "/") {
-		return strings.HasSuffix(label, "/"+dir)
+	if tail, ok := strings.CutPrefix(shown, "…"); ok {
+		return utf8.ValidString(tail) && utf8.RuneCountInString(tail) >= 16 && strings.HasSuffix(worktreeLabel, tail)
 	}
-	fields := strings.Fields(branch)
-	return len(fields) >= 2 && fields[0] == "⑂" && fields[1] == dir
+	return shown != "" && shown == worktreeLabel
 }
 
 // ompModelName derives the footer's name for a launched model from omp's own
@@ -198,6 +198,7 @@ func (a *App) ompProof(ctx context.Context, l Launch, noThinking bool, cwd, pane
 	if e != nil {
 		return e
 	}
+	worktreeLabel, cwdBranch := a.ompWorktreeIdentity(ctx, cwd)
 	deadline := a.Now().Add(wait)
 	for {
 		screen, e := a.visible(ctx, pane)
@@ -207,7 +208,7 @@ func (a *App) ompProof(ctx context.Context, l Launch, noThinking bool, cwd, pane
 		if ompSetupWizard(screen) {
 			return fail(exitConfig, "OMP_SETUP_WIZARD: omp is in its setup wizard despite OMP_SKIP_SETUP; seat withheld")
 		}
-		if OMPFooterProof(screen, name, l.Effort, cwd, a.Home, brief, noThinking) {
+		if OMPFooterProof(screen, name, l.Effort, cwd, a.Home, brief, worktreeLabel, cwdBranch, noThinking) {
 			return nil
 		}
 		if !a.Now().Before(deadline) {
@@ -217,6 +218,48 @@ func (a *App) ompProof(ctx context.Context, l Launch, noThinking bool, cwd, pane
 			return e
 		}
 	}
+}
+
+// ompWorktreeIdentity mirrors OMP's linked-worktree context: the primary
+// checkout name comes from git's common directory, and the worktree name from
+// the repository root. OMP's status-line segment then joins those names unless
+// the worktree name already equals the checked-out branch.
+func (a *App) ompWorktreeIdentity(ctx context.Context, cwd string) (label, branch string) {
+	r := a.call(ctx, "git", "-C", cwd, "rev-parse", "--abbrev-ref", "HEAD")
+	if r.Code != 0 {
+		return "", ""
+	}
+	branch = strings.TrimSpace(r.Out)
+	if branch == "" {
+		return "", ""
+	}
+	r = a.call(ctx, "git", "-C", cwd, "rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir")
+	if r.Code != 0 {
+		return "", branch
+	}
+	paths := strings.Split(strings.TrimSpace(r.Out), "\n")
+	if len(paths) != 2 || resolvedPath(paths[0]) == resolvedPath(paths[1]) {
+		return "", branch
+	}
+	r = a.call(ctx, "git", "-C", cwd, "rev-parse", "--show-toplevel")
+	if r.Code != 0 {
+		return "", branch
+	}
+	commonName := filepath.Base(filepath.Clean(paths[1]))
+	projectName := commonName
+	if commonName == ".git" {
+		projectName = filepath.Base(filepath.Dir(filepath.Clean(paths[1])))
+	} else {
+		projectName = strings.TrimSuffix(commonName, ".git")
+	}
+	worktreeName := filepath.Base(strings.TrimSpace(r.Out))
+	if projectName == "" || projectName == "." || worktreeName == "" || worktreeName == "." {
+		return "", branch
+	}
+	if worktreeName == branch {
+		return projectName, branch
+	}
+	return projectName + "/" + worktreeName, branch
 }
 
 // ompProcessCWD binds the exact directory: the footer can abbreviate it, the
