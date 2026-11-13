@@ -29,6 +29,15 @@ func (h *HubServer) newSpawnApp(out, errout io.Writer) (*fleet.App, error) {
 	}
 	return app, err
 }
+
+func (h *HubServer) handleSpawnFeatures(w http.ResponseWriter, r *http.Request) {
+	if h.authenticate(r).kind != hubCallerOperator {
+		hubUnauthorized(w)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string][]string{"features": {"start_conditions_v1"}})
+}
+
 func (h *HubServer) handleSpawnSubmit(w http.ResponseWriter, r *http.Request) {
 	// Placement chooses a resource after acceptance; only the unscoped operator
 	// may grant that authority. Per-host service tokens cannot escape their host.
@@ -196,14 +205,28 @@ func (h *HubServer) handleSpawnOperation(w http.ResponseWriter, r *http.Request)
 		writeJSON(w, 503, map[string]string{"error": "store_unavailable"})
 		return
 	}
+	var startCondition *fleet.StartConditionResult
+	if len(task.Request.StartConditions) != 0 {
+		result := evaluateHubStartCondition(r.Context(), h, task.Request.StartConditions)
+		startCondition = &result
+	}
 	// Never expose the persisted brief, argv or submitting paths through status
 	// reads. A reason's refusal text may name a path on the executing node.
 	writeJSON(w, 200, struct {
-		Job     string          `json:"job_id"`
-		Request string          `json:"request_id"`
-		Status  string          `json:"status"`
-		Result  hubSpawnOutcome `json:"result"`
-	}{task.Job, task.Request.RequestID, task.Status, task.Outcome})
+		Job            string                      `json:"job_id"`
+		Request        string                      `json:"request_id"`
+		Status         string                      `json:"status"`
+		Result         hubSpawnOutcome             `json:"result"`
+		StartCondition *fleet.StartConditionResult `json:"start_condition,omitempty"`
+	}{task.Job, task.Request.RequestID, task.Status, task.Outcome, startCondition})
+}
+
+func evaluateHubStartCondition(ctx context.Context, h *HubServer, conditions []fleet.StartCondition) fleet.StartConditionResult {
+	snapshots, err := fleet.ReadStartConditionTasks(ctx, conditions)
+	if err != nil {
+		return fleet.StartConditionResult{Status: "waiting", Reasons: []string{"hk_unavailable"}}
+	}
+	return fleet.EvaluateStartConditions(conditions, snapshots, h.now().UTC())
 }
 
 // hubSpawnWorkerCount bounds how many accepted spawns the hub executes at once.
@@ -224,6 +247,10 @@ func (h *HubServer) runSpawnCoordinator(parent context.Context) {
 	work := make(chan hubSpawnTask, hubSpawnWorkerCount)
 	var mu sync.Mutex
 	active := map[string]bool{}
+	var conditionSnapshots map[string]fleet.TaskSnapshot
+	var conditionReadErr error
+	var conditionRefreshAt time.Time
+	conditionRequestSet := ""
 	for range hubSpawnWorkerCount {
 		h.spawnWorkers.Add(1)
 		go func() {
@@ -252,7 +279,30 @@ func (h *HubServer) runSpawnCoordinator(parent context.Context) {
 	for {
 		tasks, err := h.inbox.store.pendingSpawns(ctx)
 		if err == nil && h.drain.admit() {
+			conditioned := make([][]fleet.StartCondition, 0)
+			var currentRequestSet strings.Builder
 			for _, task := range tasks {
+				if len(task.Request.StartConditions) == 0 {
+					continue
+				}
+				conditioned = append(conditioned, task.Request.StartConditions)
+				currentRequestSet.WriteString(task.Request.RequestID)
+				currentRequestSet.WriteByte('\n')
+			}
+			if len(conditioned) == 0 {
+				conditionRequestSet = ""
+				conditionSnapshots = nil
+				conditionReadErr = nil
+			}
+			if len(conditioned) != 0 && (conditionRequestSet != currentRequestSet.String() || !h.now().Before(conditionRefreshAt)) {
+				conditionSnapshots, conditionReadErr = fleet.ReadStartConditionTaskBatch(ctx, conditioned)
+				conditionRequestSet = currentRequestSet.String()
+				conditionRefreshAt = h.now().Add(time.Minute)
+			}
+			for _, task := range tasks {
+				if len(task.Request.StartConditions) != 0 && (conditionReadErr != nil || fleet.EvaluateStartConditions(task.Request.StartConditions, conditionSnapshots, h.now().UTC()).Status != "met") {
+					continue
+				}
 				mu.Lock()
 				busy := active[task.Request.RequestID]
 				if !busy {
@@ -317,6 +367,12 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 	if err != nil {
 		h.finishSpawnOutcome(task, hubSpawnOutcome{RC: 78, Stage: "placement", Reason: "configuration", Retryable: true})
 		return
+	}
+	if len(task.Request.StartConditions) != 0 {
+		conditions := task.Request.StartConditions
+		if evaluateHubStartCondition(parent, h, conditions).Status != "met" {
+			return
+		}
 	}
 	if ctx.Err() != nil {
 		h.finishSpawnOutcome(task, hubSpawnOutcome{RC: 124, Stage: "placement", Reason: "timeout", Retryable: true})

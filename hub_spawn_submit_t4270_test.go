@@ -12,6 +12,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -44,6 +45,20 @@ func TestSpawnSubmitRefusesInputTheNodeCouldNotLaunch_t4270(t *testing.T) {
 				t.Fatalf("a refused request left an operation behind: %v", err)
 			}
 		})
+	}
+}
+
+func TestSpawnFeaturesAdvertiseStartConditions(t *testing.T) {
+	h := asyncSpawnHub(t)
+	r := httptest.NewRequest(http.MethodGet, "/v1/spawns/features", nil)
+	r.Header.Set("Authorization", "Bearer "+t14OperatorToken)
+	w := httptest.NewRecorder()
+	h.Handler().ServeHTTP(w, r)
+	var response struct {
+		Features []string `json:"features"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil || w.Code != http.StatusOK || !slices.Contains(response.Features, "start_conditions_v1") {
+		t.Fatalf("features=%d %s, want start_conditions_v1", w.Code, w.Body)
 	}
 }
 

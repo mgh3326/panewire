@@ -909,6 +909,7 @@ func (h *HubServer) Handler() http.Handler {
 	mux.HandleFunc("PATCH /v1/relay/events/{id}", h.handleRelayHeldEdit)
 	mux.HandleFunc("DELETE /v1/relay/events/{id}", h.handleRelayHeldDelete)
 	mux.HandleFunc("POST /v1/spawns", h.handleSpawnSubmit)
+	mux.HandleFunc("GET /v1/spawns/features", h.handleSpawnFeatures)
 	mux.HandleFunc("GET /v1/spawns/live", h.handleSpawnLive)
 	mux.HandleFunc("GET /v1/spawns/{request_id}", h.handleSpawnOperation)
 	mux.HandleFunc("POST /v1/spawns/{request_id}/abandon", h.handleSpawnAbandon)

@@ -33,7 +33,8 @@ type Spawn struct {
 	// ReviewPass is the explicit review pass ("1".."9") of a reviewer spawn. It
 	// only widens the hub reservation key (RoleKey); panewire never parses it out
 	// of a label.
-	ReviewPass                                         string `json:"review_pass,omitempty"`
+	ReviewPass                                         string   `json:"review_pass,omitempty"`
+	After                                              []string `json:"-"`
 	Keep, DupOK, Bypass, DryRun, Wait, AllowEscalation bool
 	Inherited, ParentFamily                            string
 	// Tags lists the capability tags a host must carry and ExcludeHosts the
@@ -151,6 +152,7 @@ func SpawnRoleKey(task, role, pass string) string {
 func parseSpawn(args []string) (Spawn, error) {
 	s := Spawn{Role: "worker", Host: "auto"}
 	f := flags("spawn")
+	f.Var((*repeatedStringFlag)(&s.After), "after", "start condition (repeatable)")
 	for _, p := range []struct {
 		k string
 		v *string
@@ -178,6 +180,9 @@ func parseSpawn(args []string) (Spawn, error) {
 	}
 	if flagPassed(f, "review-pass") && (s.Role != "reviewer" || !reviewPassPattern.MatchString(s.ReviewPass)) {
 		return s, fail(exitUsage, "--review-pass N (1..9) is accepted only with --role reviewer")
+	}
+	if _, err := ParseStartConditions(s.After, s.Task); err != nil {
+		return s, fail(exitUsage, "%v", err)
 	}
 	if s.Job == "" {
 		s.Job = s.Label
