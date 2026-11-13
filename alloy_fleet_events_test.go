@@ -31,40 +31,46 @@ func fleetEventsBlock(t *testing.T, config string) string {
 	return text[begin : end+len(fleetEventsEnd)]
 }
 
-// Both platforms keep Loki's label set to host, os_host, tool, kind and
-// outcome (plus the source and external labels). Linux uses explicit paths;
-// macOS can glob because the user agent owns the tool state directories.
+// The shared label/pipeline contract is checked on both platform blocks.
+// Per-platform file paths are checked in their own tests below.
 func TestAlloyFleetEventsLabelContract(t *testing.T) {
-	linux := fleetEventsBlock(t, "deploy/alloy/config.linux.alloy")
-	mac := fleetEventsBlock(t, "deploy/alloy/config.mac.alloy")
-	for _, required := range []string{
-		`sys.env("FLEET_EVENTS_ROOT")`,
-		"forward_to = [loki.write.cloud.receiver]",
-		`values = ["filename"]`,
-		"stage.limit {",
-		`format = "RFC3339Nano"`,
-		`os_host = "host"`,
-		`coalesce(sys.env("MACHINE_ID"), `,
-	} {
-		if !strings.Contains(linux, required) {
-			t.Fatalf("fleet events block lacks %s", required)
-		}
+	for _, config := range []string{"deploy/alloy/config.linux.alloy", "deploy/alloy/config.mac.alloy"} {
+		t.Run(config, func(t *testing.T) {
+			block := fleetEventsBlock(t, config)
+			for _, required := range []string{
+				`sys.env("FLEET_EVENTS_ROOT")`,
+				"forward_to = [loki.write.cloud.receiver]",
+				`values = ["filename"]`,
+				"stage.limit {",
+				`format = "RFC3339Nano"`,
+				`os_host = "host"`,
+				`coalesce(sys.env("MACHINE_ID"), `,
+			} {
+				if !strings.Contains(block, required) {
+					t.Fatalf("fleet events block lacks %s", required)
+				}
+			}
+			labels := regexp.MustCompile(`(?s)stage\.labels \{\s*values = \{(.*?)\}`).FindStringSubmatch(block)
+			if labels == nil {
+				t.Fatal("no stage.labels")
+			}
+			var names []string
+			for _, line := range strings.Split(labels[1], "\n") {
+				if name, _, ok := strings.Cut(strings.TrimSpace(line), "="); ok {
+					names = append(names, strings.TrimSpace(name))
+				}
+			}
+			if strings.Join(names, ",") != "host,os_host,tool,kind,outcome" {
+				t.Fatalf("labels %v: job, reason and detail must stay in the line", names)
+			}
+		})
 	}
+}
+
+func TestMacAlloyFleetEventsGlobToolDirectories(t *testing.T) {
+	mac := fleetEventsBlock(t, "deploy/alloy/config.mac.alloy")
 	if !strings.Contains(mac, `/*/events/fleet-events.jsonl"`) {
 		t.Fatal("macOS fleet events must keep the user-state directory glob")
-	}
-	labels := regexp.MustCompile(`(?s)stage\.labels \{\s*values = \{(.*?)\}`).FindStringSubmatch(linux)
-	if labels == nil {
-		t.Fatal("no stage.labels")
-	}
-	var names []string
-	for _, line := range strings.Split(labels[1], "\n") {
-		if name, _, ok := strings.Cut(strings.TrimSpace(line), "="); ok {
-			names = append(names, strings.TrimSpace(name))
-		}
-	}
-	if strings.Join(names, ",") != "host,os_host,tool,kind,outcome" {
-		t.Fatalf("labels %v: job, reason and detail must stay in the line", names)
 	}
 }
 

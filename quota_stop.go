@@ -113,6 +113,13 @@ func quotaActsFor(role string) bool { return role == "worker" || role == "tester
 // never acted on in shadow mode, because nothing showed the pane is stopped.
 func quotaActsOn(role, pool string) bool { return quotaActsFor(role) && pool != "unknown" }
 
+// quotaWaits reports whether a wait decision will actually be waited out,
+// which is also whether the pane shows its wait token: tick skips the action
+// of every other role in shadow mode.
+func (q *quotaStopManager) quotaWaits(role, pool string) bool {
+	return q.act || quotaActsOn(role, pool)
+}
+
 // quotaDecisionJob is the decision for a worker or tester (policy/quota-stop,
 // hk 3334): wait only when the reset is at or before the job's start plus the
 // task's expected time, which is the time left on the task. A missing expected
