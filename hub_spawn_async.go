@@ -600,15 +600,9 @@ func (t *directSpawnTransport) Spawn(ctx context.Context, req fleet.HubSpawnRequ
 	// The bind can commit even when its response is lost. From this point a
 	// placement caller must not release ownership or fall through to a host.
 	t.bound = true
-	task, err := t.h.inbox.store.bindSpawn(ctx, t.task.Request.RequestID, t.task.Attempt, node)
+	task, err := t.h.inbox.store.bindSpawn(ctx, t.task.Request.RequestID, t.task.Attempt, node, t.h.now().UTC())
 	if err != nil {
 		return fleet.HubSpawnReply{}, &fleet.HubError{Kind: "hub_spawn_pending"}
-	}
-	// The placement count is decided at this bind. Stamp it so a restart counts
-	// it again (restorePlacementCounts). A crash between the bind and this write
-	// leaves the row unrestored, as it was before the restore existed.
-	if err := t.h.inbox.store.markSpawnPlaced(ctx, t.task.Request.RequestID, t.task.Attempt, t.h.now().UTC()); err != nil {
-		t.h.logger.Warn("hub could not stamp a spawn placement", "request_id", t.task.Request.RequestID, "error", t.h.inbox.store.loggable("mark spawn placed", err))
 	}
 	t.task = task
 	t.placing = true

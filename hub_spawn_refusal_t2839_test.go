@@ -227,7 +227,7 @@ func TestRecoveredDispatchRefusalStaysTerminal(t *testing.T) {
 		t.Fatal(err)
 	}
 	dispatch := hubSpawnRequest{RequestID: t14RequestID(904), Machine: "machine-a", CWDKey: "project", Brief: hubSpawnBrief{Inline: "task"}, Checkout: &checkout, Args: []string{"--job", "test-job", "-m", "sonnet"}, WaitSeconds: 600, DeadlineMS: task.Deadline.UnixMilli()}
-	if task, err = h.inbox.store.bindSpawn(t.Context(), request.RequestID, task.Attempt, dispatch); err != nil {
+	if task, err = h.inbox.store.bindSpawn(t.Context(), request.RequestID, task.Attempt, dispatch, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	transport := &directSpawnTransport{h: h, task: task}

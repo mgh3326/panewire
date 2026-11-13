@@ -143,14 +143,16 @@ func (s *laneInboxStore) claimSpawn(parent context.Context, request fleet.Submis
 
 // Bind the immutable execution destination before sending any bytes. Concurrent
 // coordinators can only replay this same node request, never select a second host.
-func (s *laneInboxStore) bindSpawn(parent context.Context, id string, attempt int, node hubSpawnRequest) (hubSpawnTask, error) {
+func (s *laneInboxStore) bindSpawn(parent context.Context, id string, attempt int, node hubSpawnRequest, now time.Time) (hubSpawnTask, error) {
 	ctx, done := s.op(parent)
 	defer done()
 	raw, err := json.Marshal(node)
 	if err != nil {
 		return hubSpawnTask{}, err
 	}
-	_, err = s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET node_id=?,node_payload=?,status='dispatching' WHERE request_id=? AND attempt=? AND node_id IS NULL AND status='accepted'`), node.RequestID, string(raw), id, attempt)
+	// The placement stamp is written with the binding, so no dispatch can run
+	// on a bound row that a restart would not count (restorePlacementCounts).
+	_, err = s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET node_id=?,node_payload=?,status='dispatching',placed_ms=? WHERE request_id=? AND attempt=? AND node_id IS NULL AND status='accepted'`), node.RequestID, string(raw), now.UnixMilli(), id, attempt)
 	if err != nil {
 		return hubSpawnTask{}, err
 	}
@@ -310,16 +312,6 @@ func (s *laneInboxStore) spawnTaskByNode(parent context.Context, id string) (hub
 	ctx, done := s.op(parent)
 	defer done()
 	return scanSpawnTask(s.db.QueryRowContext(ctx, s.q(`SELECT `+spawnTaskColumns+` FROM spawn_operations WHERE node_id=?`), id))
-}
-
-// markSpawnPlaced stamps the time a spawn was bound to its node: the moment its
-// placement count was decided on the hub (restorePlacementCounts). It writes
-// only the attempt that is bound now, so a replaced attempt keeps its old stamp.
-func (s *laneInboxStore) markSpawnPlaced(parent context.Context, id string, attempt int, now time.Time) error {
-	ctx, done := s.op(parent)
-	defer done()
-	_, err := s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET placed_ms=? WHERE request_id=? AND attempt=? AND node_id IS NOT NULL`), now.UnixMilli(), id, attempt)
-	return err
 }
 
 // markSpawnClaimed records that a job's claim reached the hub from the node it

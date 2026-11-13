@@ -74,7 +74,7 @@ func newStrandedSpawn(t *testing.T) *strandedSpawn {
 	}
 	spec := *request.Repository.Checkout
 	node := hubSpawnRequest{RequestID: t14RequestID(4231), Machine: "machine-a", CWDKey: "project", Brief: hubSpawnBrief{Inline: "task"}, Checkout: &hubSpawnCheckout{Origin: spec.Origin, Mode: spec.Mode, Branch: spec.Branch, Sha: spec.Sha, Dir: spec.Dir}, Args: []string{"--job", "test-job", "-l", "test-job", "-m", "codex-sol", "--t", "T1", "--task", "42", "--owner", "parent", "--role", "worker"}, WaitSeconds: 600, DeadlineMS: task.Deadline.UnixMilli()}
-	if task, err = hub.inbox.store.bindSpawn(t.Context(), request.RequestID, task.Attempt, node); err != nil {
+	if task, err = hub.inbox.store.bindSpawn(t.Context(), request.RequestID, task.Attempt, node, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	if _, err = hub.inbox.store.completeSpawn(t.Context(), task, hubSpawnOutcome{RC: 124, Stage: "landing", Reason: "timeout", Host: "machine-a"}, time.Now()); err != nil {

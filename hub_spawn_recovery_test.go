@@ -41,7 +41,7 @@ func TestAsyncSpawnLateResultReconcilesAgainstSameNode(t *testing.T) {
 			}
 			spec := *req.Repository.Checkout
 			dispatch := hubSpawnRequest{RequestID: t14RequestID(881), Machine: "machine-a", CWDKey: "project", Brief: hubSpawnBrief{Inline: "task"}, Checkout: &hubSpawnCheckout{Origin: spec.Origin, Mode: spec.Mode, Branch: spec.Branch, Sha: spec.Sha, Dir: spec.Dir}, Args: []string{"--job", "test-job", "-l", "test-job", "-m", "codex-sol", "--t", "T1", "--task", "42", "--owner", "parent", "--role", "worker"}, WaitSeconds: 600, DeadlineMS: task.Deadline.UnixMilli()}
-			task, err = h.inbox.store.bindSpawn(t.Context(), req.RequestID, task.Attempt, dispatch)
+			task, err = h.inbox.store.bindSpawn(t.Context(), req.RequestID, task.Attempt, dispatch, time.Now().UTC())
 			if err != nil {
 				t.Fatal(err)
 			}

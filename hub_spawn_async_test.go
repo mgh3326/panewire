@@ -136,7 +136,7 @@ func TestSpawnCleanedRetryPreservesKeyAndFencesOldAttempt(t *testing.T) {
 	if changed, err := s.completeSpawn(ctx, old, hubSpawnOutcome{RC: 0, Stage: "landing"}, time.Now()); err != nil || changed {
 		t.Fatalf("stale attempt replaced new owner: %v %v", changed, err)
 	}
-	if _, err = s.bindSpawn(ctx, req.RequestID, old.Attempt, hubSpawnRequest{RequestID: t14RequestID(999), Machine: "machine-b"}); !errors.Is(err, errSpawnClaimed) {
+	if _, err = s.bindSpawn(ctx, req.RequestID, old.Attempt, hubSpawnRequest{RequestID: t14RequestID(999), Machine: "machine-b"}, time.Now().UTC()); !errors.Is(err, errSpawnClaimed) {
 		t.Fatalf("stale dispatch accepted: %v", err)
 	}
 }
@@ -177,7 +177,7 @@ func TestSpawnSentryOnlySpawnAlwaysSampledAndNormalized(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	task, err = h.inbox.store.bindSpawn(t.Context(), req.RequestID, task.Attempt, hubSpawnRequest{RequestID: t14RequestID(983), Machine: "machine-a", Args: []string{"--job", "test-job"}, WaitSeconds: 300})
+	task, err = h.inbox.store.bindSpawn(t.Context(), req.RequestID, task.Attempt, hubSpawnRequest{RequestID: t14RequestID(983), Machine: "machine-a", Args: []string{"--job", "test-job"}, WaitSeconds: 300}, time.Now().UTC())
 	if err != nil {
 		t.Fatal(err)
 	}

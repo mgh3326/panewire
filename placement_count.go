@@ -109,19 +109,41 @@ func (h *HubServer) restorePlacementCounts() error {
 	return nil
 }
 
+// claimedPlacement is a placement count a claim just ended, with the count it
+// held, so a failed persist can put the count back.
+type claimedPlacement struct {
+	job  string
+	held placementCount
+}
+
 // markPlacementClaims persists the claims that just ended placement counts, so
 // a restart does not restore them (restorePlacementCounts). It runs after the
-// hub lock is released: a store write never waits behind a heartbeat. A failed
-// write is only logged; the count is already gone from memory.
-func (h *HubServer) markPlacementClaims(jobs []string, now time.Time) {
-	if h.inbox == nil {
+// hub lock is released: a store write never waits behind a heartbeat. A claim
+// that fails to persist puts its count back, so the next heartbeat that still
+// lists the job tries again; the count is not dropped until the claim is stored.
+// A count a newer decision has already set for the job is left alone.
+func (h *HubServer) markPlacementClaims(claimed []claimedPlacement, now time.Time) {
+	if h.inbox == nil || len(claimed) == 0 {
 		return
 	}
-	for _, job := range jobs {
-		if err := h.inbox.store.markSpawnClaimed(h.closeCtx, job, now); err != nil {
-			h.logger.Warn("hub could not record a placement claim", "job", job, "error", h.inbox.store.loggable("mark placement claim", err))
+	var unsaved []claimedPlacement
+	for _, c := range claimed {
+		if err := h.inbox.store.markSpawnClaimed(h.closeCtx, c.job, now); err != nil {
+			h.logger.Warn("hub could not record a placement claim", "job", c.job, "error", h.inbox.store.loggable("mark placement claim", err))
+			unsaved = append(unsaved, c)
 		}
 	}
+	if len(unsaved) == 0 {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, c := range unsaved {
+		if _, newer := h.placementCounts[c.job]; !newer {
+			h.placementCounts[c.job] = c.held
+		}
+	}
+	h.placementCache = placementCache{}
 }
 
 // placementCountWindowLocked is how long a count lasts without a claim to

@@ -34,11 +34,8 @@ func boundSpawn(t *testing.T, hub *HubServer, requestSeq int) hubSpawnTask {
 		t.Fatal(err)
 	}
 	dispatch := hubSpawnRequest{RequestID: t14RequestID(requestSeq), Machine: "machine-a", CWDKey: "project", Brief: hubSpawnBrief{Inline: "task"}, Args: []string{"--job", task.Job}, WaitSeconds: 600, DeadlineMS: task.Deadline.UnixMilli()}
-	task, err = hub.inbox.store.bindSpawn(t.Context(), task.Request.RequestID, task.Attempt, dispatch)
+	task, err = hub.inbox.store.bindSpawn(t.Context(), task.Request.RequestID, task.Attempt, dispatch, time.Now().UTC())
 	if err != nil {
-		t.Fatal(err)
-	}
-	if err := hub.inbox.store.markSpawnPlaced(t.Context(), task.Request.RequestID, task.Attempt, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	return task
@@ -162,5 +159,26 @@ func TestRestorePlacementCountsReportsStoreFailure_t4460(t *testing.T) {
 	}
 	if err := hub.restorePlacementCounts(); err == nil {
 		t.Fatal("restore on a closed store reported no error")
+	}
+}
+
+// A claim whose persist fails keeps its count, so the next heartbeat that still
+// lists the job tries the write again. Closing the store makes every write fail.
+func TestFailedClaimPersistKeepsCountForRetry_t4460(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "inbox.sqlite3")
+	hub := restartHub(t, path)
+	task := boundSpawn(t, hub, 465)
+	hub.countPlacement(task.Job, "machine-a")
+	hub.connect("machine-a", "test", "fixture", &hubAgent{}, true)
+	if err := hub.inbox.store.close(); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	hub.observeActiveJobs("machine-a", []HubActiveJob{{JobID: task.Job, AgentLabel: "agent", Epoch: 1, StartedAt: now.Format(time.RFC3339)}}, now)
+	hub.mu.Lock()
+	_, kept := hub.placementCounts[task.Job]
+	hub.mu.Unlock()
+	if !kept {
+		t.Fatal("a claim that failed to persist dropped its count; the next restart would forget it")
 	}
 }
