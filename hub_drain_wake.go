@@ -135,6 +135,9 @@ func (h *HubServer) drainWakeLaneStep(ctx context.Context, lane string, state *d
 	}
 	if state.known && !state.drained {
 		state.pending = true
+		// The drain edge is durable before any read or enqueue, so a restart
+		// after this point still owes the line.
+		h.persistDrainWake(ctx, lane, state)
 	}
 	state.known, state.drained = true, true
 	if !state.pending {
@@ -156,6 +159,12 @@ func (h *HubServer) drainWakeLaneStep(ctx context.Context, lane string, state *d
 	if backlog == 0 {
 		// Nothing open for the lane's project: the drain owes no line.
 		state.pending, state.inflight = false, 0
+		return
+	}
+	// The owed state is saved before the line is queued. A failed save keeps
+	// the line owed and queues nothing; the next sweep tries again.
+	h.persistDrainWake(ctx, lane, state)
+	if state.unsaved {
 		return
 	}
 	state.gen++

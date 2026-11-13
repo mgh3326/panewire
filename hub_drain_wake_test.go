@@ -384,6 +384,43 @@ func TestDrainWakeLineDroppedBeforeWriteIsOwedAfterRestart(t *testing.T) {
 	}
 }
 
+// The owed state is durable before the line is queued: while the store refuses
+// writes, a drain queues nothing; once it recovers, the owed line goes out
+// (PR #524 review, hk 4567).
+func TestDrainWakeNoLineQueuedBeforeOwedIsSaved(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "inbox.sqlite3")
+	tasks := []t4473Task{
+		{ID: 1, Project: "handoffkeep", State: "backlog"},
+		{ID: 2, Project: "handoffkeep", State: "unstarted"},
+	}
+	rig, _ := t4473RigAt(t, path, tasks, nil)
+	db := rig.h.inbox.store.db
+	for _, trigger := range []string{
+		`CREATE TRIGGER t4567_refuse_insert BEFORE INSERT ON drain_wake_lanes BEGIN SELECT RAISE(ABORT, 'refused'); END`,
+		`CREATE TRIGGER t4567_refuse_update BEFORE UPDATE ON drain_wake_lanes BEGIN SELECT RAISE(ABORT, 'refused'); END`,
+	} {
+		if _, err := db.Exec(trigger); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t4473SetInFlight(rig, t4473Lane, 1)
+	t4473Sweep(rig)
+	t4473SetInFlight(rig, t4473Lane, 0)
+	t4473Sweep(rig)
+	if got := t4473Lines(rig); len(got) != 0 {
+		t.Fatalf("a drain queued %q while its owed state could not be saved", got)
+	}
+	for _, name := range []string{"t4567_refuse_insert", "t4567_refuse_update"} {
+		if _, err := db.Exec(`DROP TRIGGER ` + name); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t4473Sweep(rig)
+	if got := t4473Lines(rig); len(got) != 1 || got[0] != t4473Line {
+		t.Fatalf("after the store recovered, drain lines=%q, want exactly [%q]", got, t4473Line)
+	}
+}
+
 // A save that fails must be retried on a later sweep, not forgotten: the drain
 // sets pending while the store refuses the write, the store recovers, and a
 // restart then still owes the line (PR #524 review, hk 4567).
