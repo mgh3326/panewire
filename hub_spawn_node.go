@@ -225,7 +225,15 @@ func (client *HubClient) endHubSpawn(requestID string) {
 }
 
 func (client *HubClient) sendSpawnResult(ctx context.Context, peer *hubClientConnection, result hubSpawnResult, extended bool) {
+	result = spawnResultForHub(result, peer.acceptsLaunchProof.Load())
 	_ = peer.write(ctx, spawnResultWire(result, extended))
+}
+
+func spawnResultForHub(result hubSpawnResult, acceptsLaunchProof bool) hubSpawnResult {
+	if result.Error == "launch_proof_failed" && !acceptsLaunchProof {
+		result.Error = "spawn_failed"
+	}
+	return result
 }
 func spawnResultWire(result hubSpawnResult, extended bool) any {
 	if !extended {
@@ -412,6 +420,9 @@ func (client *HubClient) runHubSpawn(parent context.Context, message hubOutbound
 		result.Error = "timeout"
 	} else if result.RC != 0 {
 		result.Error = "spawn_failed"
+		if execution.FailureClass == "harness_version" && result.RC == 70 {
+			result.Error = "launch_proof_failed"
+		}
 	}
 	if result.RC == 0 {
 		return result

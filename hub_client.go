@@ -666,6 +666,7 @@ type hubClientConnection struct {
 	// acceptsHostActivity is the same for hubFeatureHostActivity
 	// (host_activity.go).
 	acceptsHostActivity atomic.Bool
+	acceptsLaunchProof  atomic.Bool
 	connection          *websocket.Conn
 	writeMu             sync.Mutex
 }
@@ -2073,6 +2074,7 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 				peer.acceptsLaneEventPane.Store(slices.Contains(message.Features, hubFeatureLaneEventPane))
 				peer.acceptsPaneCaptureDoc.Store(slices.Contains(message.Features, hubFeaturePaneCaptureDoc))
 				peer.acceptsHostActivity.Store(slices.Contains(message.Features, hubFeatureHostActivity))
+				peer.acceptsLaunchProof.Store(slices.Contains(message.Features, hubFeatureLaunchProof))
 				continue
 			case "quota.request":
 				go client.handleHubQuota(ctx, peer, message)

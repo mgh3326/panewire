@@ -495,6 +495,7 @@ var nextHostRefusals = map[string]bool{
 	"spawn_failed:trust_prompt":         true,
 	"spawn_failed:omp_setup_wizard":     true,
 	"spawn_failed:auth_unavailable":     true,
+	"launch_proof_failed":               true,
 }
 
 // spawnRefusalTriesNextHost names a node refusal that moves an auto placement
@@ -551,6 +552,9 @@ func (t *directSpawnTransport) nextHostAfterRefusal(ctx context.Context, node hu
 	// deadline still has room for another host.
 	movesOn := spawnRefusalTriesNextHost(spawnResultReason(result)) || spawnNotStarted(result) && t.h.now().Before(t.task.Deadline)
 	if !t.placing || result.RC == 0 || !result.Retryable || !movesOn || firstNonEmptyString(hubSpawnArg(t.task.Request.Args, "--host"), "auto") != "auto" {
+		return false
+	}
+	if result.Error == "launch_proof_failed" && result.RC != 70 {
 		return false
 	}
 	task, err := t.h.inbox.store.unbindRefusedSpawn(ctx, t.task.Request.RequestID, t.task.Attempt, node.RequestID)
