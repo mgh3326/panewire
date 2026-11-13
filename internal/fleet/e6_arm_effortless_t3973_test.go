@@ -65,7 +65,7 @@ func TestEffortlessRungArmedAtSubmitAndSeatGate_t3973(t *testing.T) {
 	a := testApp(t)
 	seat := a.Policy.Profiles[canon]
 	unrated := Launch{ModelID: "provider/example-model", Effort: "", Grade: "unrated", Gate: "default"}
-	if err := seat.Check(unrated, "worker", "B", "", arm, nil); err != nil {
+	if err := seat.Check(unrated, "implementer", "B", "", arm, nil); err != nil {
 		t.Fatalf("seat gate refused the armed effortless rung: %v", err)
 	}
 }
@@ -78,22 +78,22 @@ func TestEffortlessRungRefusesOtherArms_t3973(t *testing.T) {
 	seat := a.Policy.Profiles["devin-ds41-max"]
 	unrated := Launch{ModelID: "provider/example-model", Effort: "", Grade: "unrated", Gate: "default"}
 	for _, arm := range []string{"", "devin-ds41-max@high", "devin-ds41-max@low"} {
-		err := seat.Check(unrated, "worker", "B", "", arm, nil)
+		err := seat.Check(unrated, "implementer", "B", "", arm, nil)
 		if code(err) != exitSeatRefused {
 			t.Errorf("effortless rung with arm %q: code=%d err=%v", arm, code(err), err)
 		}
 	}
-	err := seat.Check(unrated, "worker", "B", "", "", nil)
+	err := seat.Check(unrated, "implementer", "B", "", "", nil)
 	if err == nil || !strings.Contains(err.Error(), "requires PANEWIRE_E6_ARM=devin-ds41-max@") {
 		t.Fatalf("effortless rung without arm did not name its marker: %v", err)
 	}
 
-	effortRung := Seat{Canon: "omp-dsflash41", Kind: "omp", Family: "deepseek", Capability: "standard", Roles: []string{"worker"}, E6: true}
+	effortRung := Seat{Canon: "omp-dsflash41", Kind: "omp", Family: "deepseek", Capability: "standard", Roles: []string{"implementer"}, E6: true}
 	high := Launch{ModelID: "provider/example-model", Effort: "high", Grade: "unrated", Gate: "default"}
-	if err := effortRung.Check(high, "worker", "B", "", "omp-dsflash41@", nil); code(err) != exitSeatRefused {
+	if err := effortRung.Check(high, "implementer", "B", "", "omp-dsflash41@", nil); code(err) != exitSeatRefused {
 		t.Fatalf("effort rung armed by bare canon@: code=%d err=%v", code(err), err)
 	}
-	if err := effortRung.Check(high, "worker", "B", "", "omp-dsflash41@high", nil); err != nil {
+	if err := effortRung.Check(high, "implementer", "B", "", "omp-dsflash41@high", nil); err != nil {
 		t.Fatalf("effort rung with its own arm refused: %v", err)
 	}
 }
@@ -159,7 +159,7 @@ func TestEffortlessRungDryRunAndHubAdmissionAgree_t3973(t *testing.T) {
 
 // effortlessSubmission is the hub request for an effortless pinned worker spawn.
 func effortlessSubmission(arm string) Submission {
-	s := Spawn{CWD: "/work/project", Profile: "devin-ds41-max", Prompt: "/work/brief.md", Job: "job-a", Label: "job-a", T: "T1", Task: "42", Role: "worker", Owner: "parent", Host: "auto", Containment: "hk:12"}
+	s := Spawn{CWD: "/work/project", Profile: "devin-ds41-max", Prompt: "/work/brief.md", Job: "job-a", Label: "job-a", T: "T1", Task: "42", Role: "implementer", Owner: "parent", Host: "auto", Containment: "hk:12"}
 	return Submission{
 		RequestID:       "00000000-0000-4000-8000-000000000002",
 		Args:            submissionArgs(s),

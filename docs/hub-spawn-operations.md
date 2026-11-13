@@ -5,6 +5,30 @@ placement and admission in-process; the selected node prepares the pinned
 checkout and runs launch and landing in-process. No launcher binary or SSH
 launcher is called. `--dry-run` remains the synchronous planning path.
 
+`--dry-run` with a hub configured asks the hub for its own plan: `POST
+/v1/spawns/plan` runs the same placement and selection the submission would and
+gives the refusals a submission gives before placement (an invalid label, a host
+the request cannot use, a job id hk already holds). It writes no operation row,
+no reservation, no hk write and dispatches nothing. A refused plan may still
+write a refusal or quota-observation line to the hub's local fleet event log;
+those records never reach hk.
+
+A dry run measures nothing: a quota refresh writes presence, lease and
+observation to the shared quota store. An account that needs a measurement — a
+stale or unobserved shared account on any host, or a stale account this machine
+holds that the admission gate would refresh — is printed as
+`would measure host=… pool=…` and left unmeasured. That rung is dropped, and a
+plan with no other rung refuses and names the measurement. The plan can
+therefore differ from the submission: the submission measures the account first
+and may place there.
+
+The CLI prints the hub's host and profile, labelled `hub plan:`. The hub may
+choose a different profile from this machine's local plan. Without a hub the
+receipt is labelled `local plan:`. A hub that predates the route (404 or 405)
+gets a warning and the local plan, also labelled `local plan:`. Either local
+plan keeps the same no-measure rule. A hub refusal exits with the hub's `rc` and
+reason; an unreachable or failing hub is an error, not a silent fallback.
+
 The CLI prints `ACCEPTED job=… request=…` after the hub commits a reservation.
 That confirms ownership of the operation, not a pane or brief delivery. Wait for
 `SPAWNED` or `SPAWN_FAILED` and perform the usual read-only landing check.
@@ -45,7 +69,7 @@ use it, so the p1 and p2 reviewers of one task hold at once while a second p1 is
 refused with the same 409 as any held slot. panewire reads the pass only from
 the flag, never from a label. A reviewer without the flag keeps `<task>:reviewer`,
 and stored keys without a pass need no migration. The held-reservation log line
-prints the key as `role_key`. Worker and tester keys are unchanged.
+prints the key as `role_key`. An implementer holds `<task>:implementer`; a hold written under an older role name is not matched by it.
 
 A prior operation in `failed` whose hk job is still `claimed` (pane cleanup
 unverified) is checked on a colliding submission: the hub asks the operation's
@@ -79,8 +103,8 @@ the slot. The 409 body then carries `request_id`, `job`, `host`,
 with exit 74.
 
 A **reviewer** holder whose pane is present is also released when its spawn
-`succeeded` or `failed`, and every one of these holds (hk 3315). Workers and
-testers are never released this way, because an idle worker may be waiting on an
+`succeeded` or `failed`, and every one of these holds (hk 3315). Implementers
+and consults are never released this way, because an idle implementer may be waiting on an
 ESC answer.
 
 - the new submission is for the same (task, role, review pass) key, not a replay
@@ -158,7 +182,7 @@ The task checks read hk from the submitter. When hk cannot answer, the submit
 goes on and the node decides, as before. They are skipped for a job that already
 has a saved `submission.json` (a replay of an accepted request must reach the
 hub's idempotent lookup even if the task has moved on) and for `--parent-job`
-spawns; `--builder-family`/`--builder-job` are translated as the node does, so a
+spawns; `--author-family`/`--builder-job` are translated as the node does, so a
 review pass of a builder-bound task is accepted. Host eligibility reads the hub's own
 fleet configuration (`local` and `hosts`), the same hosts placement ranks, so a
 request no host can take is refused before it reserves a job id. A refused

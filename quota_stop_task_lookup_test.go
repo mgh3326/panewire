@@ -11,7 +11,7 @@ import (
 )
 
 func TestQuotaStopTaskLookupByIDIgnoresFullTaskList(t *testing.T) {
-	rig := newRoleStopRig(t, "worker", time.Hour, roleStopTask)
+	rig := newRoleStopRig(t, "implementer", time.Hour, roleStopTask)
 	// The list is deliberately beyond the old limit. The manager must use the
 	// task id in the job receipt and never inspect this page.
 	rows := make([]string, quotaStopTaskLimit+1)
@@ -35,7 +35,7 @@ func TestQuotaStopTaskLookupByIDIgnoresFullTaskList(t *testing.T) {
 }
 
 func TestQuotaStopTaskLookupFindsTaskPastFirstPage(t *testing.T) {
-	rig := newRoleStopRig(t, "worker", time.Hour, roleStopTask)
+	rig := newRoleStopRig(t, "implementer", time.Hour, roleStopTask)
 	for _, name := range []string{"00001-job.claimed.json", "00002-job.spawned.json"} {
 		path := filepath.Join(rig.manager.inboxRoot, "jobs", "job-active", "events", name)
 		b, err := os.ReadFile(path)
@@ -69,7 +69,7 @@ func TestQuotaStopTaskLookupFindsTaskPastFirstPage(t *testing.T) {
 }
 
 func TestQuotaStopTaskLookupDoesNotReusePageDecodeState(t *testing.T) {
-	rig := newRoleStopRig(t, "worker", time.Hour, roleStopTask)
+	rig := newRoleStopRig(t, "implementer", time.Hour, roleStopTask)
 	rows := make([]string, quotaStopTaskLimit)
 	for i := range rows {
 		job := fmt.Sprintf("other-%d", i)
@@ -91,7 +91,7 @@ func TestQuotaStopTaskLookupDoesNotReusePageDecodeState(t *testing.T) {
 }
 
 func TestQuotaStopTaskLookupCursorUsesExactTaskID(t *testing.T) {
-	rig := newRoleStopRig(t, "worker", time.Hour, roleStopTask)
+	rig := newRoleStopRig(t, "implementer", time.Hour, roleStopTask)
 	rows := make([]string, quotaStopTaskLimit)
 	for i := 0; i < quotaStopTaskLimit-1; i++ {
 		rows[i] = fmt.Sprintf(`{"id":%d,"priority":3,"refs":{"job_id":"other"}}`, i+1)
@@ -110,7 +110,7 @@ func TestQuotaStopTaskLookupCursorUsesExactTaskID(t *testing.T) {
 }
 
 func TestQuotaStopTaskLookupMissingTaskHandsOver(t *testing.T) {
-	rig := newRoleStopRig(t, "worker", time.Hour, roleStopTask)
+	rig := newRoleStopRig(t, "implementer", time.Hour, roleStopTask)
 	rig.q.hk.task = func(context.Context, string) ([]byte, error) { return nil, fmt.Errorf("not_found") }
 	rig.run()
 	if decision, reason := rig.decision(t); decision != "handover" || reason != "task_unavailable" {
@@ -119,7 +119,7 @@ func TestQuotaStopTaskLookupMissingTaskHandsOver(t *testing.T) {
 }
 
 func TestQuotaStopTaskLookupMissingMatchReportsReason(t *testing.T) {
-	rig := newRoleStopRig(t, "worker", time.Hour, roleStopTask)
+	rig := newRoleStopRig(t, "implementer", time.Hour, roleStopTask)
 	for _, name := range []string{"00001-job.claimed.json", "00002-job.spawned.json"} {
 		path := filepath.Join(rig.manager.inboxRoot, "jobs", "job-active", "events", name)
 		b, err := os.ReadFile(path)
@@ -144,7 +144,7 @@ func TestQuotaStopTaskLookupMissingMatchReportsReason(t *testing.T) {
 }
 
 func TestQuotaStopTaskLookupPreservesFoundTaskDecision(t *testing.T) {
-	rig := newRoleStopRig(t, "worker", time.Hour, roleStopTask)
+	rig := newRoleStopRig(t, "implementer", time.Hour, roleStopTask)
 	rig.run()
 	if decision, reason := rig.decision(t); decision != "wait" || reason != "reset_within_expected" {
 		t.Fatalf("decision=%s reason=%s, want base decision wait reset_within_expected", decision, reason)
@@ -155,7 +155,7 @@ func TestQuotaStopTaskLookupPreservesFoundTaskDecision(t *testing.T) {
 }
 
 func TestQuotaStopTaskLookupAcceptsStringPriority(t *testing.T) {
-	rig := newRoleStopRig(t, "worker", time.Hour, roleStopTask)
+	rig := newRoleStopRig(t, "implementer", time.Hour, roleStopTask)
 	rig.q.hk.task = func(context.Context, string) ([]byte, error) {
 		return []byte(`{"priority":"3","expected":"4h","refs":{"job_id":"job-active"}}`), nil
 	}
@@ -171,7 +171,7 @@ func TestQuotaStopTaskLookupRejectsInvalidPriority(t *testing.T) {
 		"non-integer number": `{"priority":1.5,"expected":"4h","refs":{"job_id":"job-active"}}`,
 	} {
 		t.Run(name, func(t *testing.T) {
-			rig := newRoleStopRig(t, "worker", time.Hour, roleStopTask)
+			rig := newRoleStopRig(t, "implementer", time.Hour, roleStopTask)
 			rig.q.hk.task = func(context.Context, string) ([]byte, error) { return []byte(answer), nil }
 			rig.run()
 			if decision, reason := rig.decision(t); decision != "handover" || reason != "task_unavailable" {
@@ -182,7 +182,7 @@ func TestQuotaStopTaskLookupRejectsInvalidPriority(t *testing.T) {
 }
 
 func TestQuotaStopTaskListAcceptsStringPriorityWithoutReceiptID(t *testing.T) {
-	rig := newRoleStopRig(t, "worker", time.Hour, `{"tasks":[{"priority":"3","expected":"4h","refs":{"job_id":"job-active"}}]}`)
+	rig := newRoleStopRig(t, "implementer", time.Hour, `{"tasks":[{"priority":"3","expected":"4h","refs":{"job_id":"job-active"}}]}`)
 	for _, name := range []string{"00001-job.claimed.json", "00002-job.spawned.json"} {
 		path := filepath.Join(rig.manager.inboxRoot, "jobs", "job-active", "events", name)
 		b, err := os.ReadFile(path)
@@ -202,7 +202,7 @@ func TestQuotaStopTaskListAcceptsStringPriorityWithoutReceiptID(t *testing.T) {
 
 func TestQuotaStopTaskListIgnoresUnrelatedInvalidPriority(t *testing.T) {
 	answer := `{"tasks":[{"priority":"urgent","refs":{"job_id":"other-job"}},{"priority":3,"expected":"4h","refs":{"job_id":"job-active"}}]}`
-	rig := newRoleStopRig(t, "worker", time.Hour, answer)
+	rig := newRoleStopRig(t, "implementer", time.Hour, answer)
 	for _, name := range []string{"00001-job.claimed.json", "00002-job.spawned.json"} {
 		path := filepath.Join(rig.manager.inboxRoot, "jobs", "job-active", "events", name)
 		b, err := os.ReadFile(path)

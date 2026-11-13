@@ -36,7 +36,7 @@ func usageJob(t *testing.T, a *App, session map[string]any) *fakeJobStore {
 	if err := store.claimSpawned(t.Context(), "j", "42", "test-host"); err != nil {
 		t.Fatal(err)
 	}
-	seedJob(t, a, "j", "worker")
+	seedJob(t, a, "j", "implementer")
 	putEvent(t, a, "j", "job.spawned", map[string]any{"pane_id": "w:p1", "tab_id": "w:t1", "label": "agent-a", "cwd": testCWD, "harness_session": session})
 	return store
 }
@@ -177,7 +177,7 @@ func TestCompletionWithoutHarnessSessionWritesNoUsage(t *testing.T) {
 	if err := store.claimSpawned(t.Context(), "j", "42", "test-host"); err != nil {
 		t.Fatal(err)
 	}
-	seedJob(t, a, "j", "worker")
+	seedJob(t, a, "j", "implementer")
 	doneJob(t, a)
 	if _, ok := store.record(t, "j")["usage"]; ok {
 		t.Fatal("usage written for a receipt that names no session")

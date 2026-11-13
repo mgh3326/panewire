@@ -74,7 +74,7 @@ func captureDocPut(t *testing.T, hk *hkSitesFake) map[string]any {
 
 func TestNodePaneCaptureUploadsTheScreenDoc(t *testing.T) {
 	claim := func(task any) map[string]any {
-		return map[string]any{"kind": "job.claim", "payload": map[string]any{"task_id": task, "role": "worker"}}
+		return map[string]any{"kind": "job.claim", "payload": map[string]any{"task_id": task, "role": "implementer"}}
 	}
 	spawned := map[string]any{"kind": "job.spawned", "payload": map[string]any{"pane_id": "w1:p1", "label": "job-a"}}
 	for name, test := range map[string]struct {

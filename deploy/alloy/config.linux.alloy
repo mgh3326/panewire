@@ -117,7 +117,8 @@ loki.source.docker "docker" {
 // the fleet user's state home; it defaults to $HOME/.local/state, which is
 // right for a user launchd agent but not for the Linux alloy system user.
 // Keep Linux targets explicit: globbing across tool directories can fail as a
-// whole when the Alloy user cannot traverse one sibling directory.
+// whole when the Alloy user cannot traverse one sibling directory. A tool
+// missing from the list ships nothing here (see deploy/alloy/README.md, "Fleet events").
 // Only host, os_host, tool, kind and outcome become labels; job, reason and
 // detail stay in the line (query them with `| json`). The host label is the
 // fleet machine id (MACHINE_ID), the id hk, Sentry and placement use; the

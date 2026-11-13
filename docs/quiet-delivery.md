@@ -231,10 +231,10 @@ on the node that sent it. The node names the emitting pane in the wire payload's
 `pane_id` (see [R21 direct lane events](r21-lane-event.md)), and the hub looks
 for a job that the sending node's latest heartbeat lists in that pane and that
 the hub holds as not completed and not orphaned on that node, with role
-`worker` and the owner lane equal to the lane the event is for. A worker of
+`implementer` and the owner lane equal to the lane the event is for. A worker of
 another design lane sharing the pane is not this lane's: its progress is not
-quieted for this lane. Every `panewire spawn` job claims as `worker`, whether
-it was spawned as a worker, tester, reviewer or counsel; a builder or captain
+quieted for this lane. Every `panewire spawn` job claims as `implementer`, whether
+it was spawned as an implementer, reviewer or consult; a builder
 is not one. Design sessions, the desk and workers share hosts, so the node
 match alone does not decide. Whatever the hub cannot attribute this way is
 delivered as before:
@@ -254,7 +254,7 @@ A completion of a job with neither a task nor a PR — a consult answer the
 session waits for — is delivered as before, and so is one whose hk job record
 cannot be read. A consult answer — a `lane.event` whose text starts with
 `[consult-done]`, sent `--type ready` as rstack's ops consult reference gives
-the answerer — is also delivered (hk 3434), from a counsel job's pane too: the
+the answerer — is also delivered (hk 3434), from a consult job's pane too: the
 session that asked waits for it in its pane. `job.escalate`, a worker's
 action events above, and the `decision`, `blocked`, `findings` and
 `automation-failed` types from anyone else still interrupt. Lanes that are not
@@ -317,6 +317,8 @@ relay:
   design_lanes: ["*-design"]                         # default
   desk_lanes: ["operator-desk", "*-operator-desk"]   # default
   inbox_wake_window: 5m                              # default; 10s..1h
+  drain_wake_interval: 1h                            # default; 10m..24h
+  drain_wake_threshold: 0                            # default; 0..10
   worker_inbox_trial: []                             # default: no trial
   worker_inbox_trial_until: "2026-11-16T00:00:00Z"   # required with a trial
 ```
@@ -361,8 +363,11 @@ work, through the lane's node daemon like any relay:
 `N` is the lane's unread count, the same number `panewire inbox count` shows.
 `<kind>` is the most urgent unread item, in this order: `decision` >
 `blocked` > `automation-failed` (SPAWN_FAILED) > `findings` > `ready` >
-`info`. The declared `--type` decides the kind. `order` and `deploy-approval`
-rank as `decision`, and `watch-hold` and `culprit-hold` as `blocked`. An
+`info`. The declared `--type` decides the kind. An `order` keeps its display
+kind, so the line reads `most urgent: order`, but ranks as `decision`;
+`deploy-approval` displays and ranks as `decision`, and `watch-hold` and
+`culprit-hold` as `blocked`. When an `order` and a `decision` are both unread,
+the line shows `order`, whatever their inbox order (hk 4458). An
 untyped item is ranked by its kind (`job.escalate` is a decision, `job.lost`
 and `job.revoked` are blocked, a completion is ready), by a leading
 `[consult-done]` (ready), or by its tags (ESC, URGENT and needs_decision;
@@ -386,6 +391,16 @@ When the line is sent:
   sends exactly one more line, and only if the lane still has unread items.
   That line opens the next window. A window end that finds nothing unread
   closes the window instead, so the next item is announced at once.
+- A design lane whose in-flight jobs fall to `relay.drain_wake_threshold`
+  (default 0) while hk lists open backlog for its project gets one line,
+  `N backlog, M in work: dispatch the next batch`. The project is the lane
+  name without `-design`; the backlog is the hk tasks in state `backlog` or
+  `unstarted` that do not await an operator decision, counted per state with
+  hk's project and state filters, page by page; an answer that does not echo
+  the project filter counts as an error, never as backlog. The line goes out
+  on the drain and at most once per `relay.drain_wake_interval` (default 1h).
+  A lane first seen idle gets no line. This is an interim until the
+  hub-owned queue (hk 4376) replaces the hk read.
 - A line still owed to a [trial](#worker-trial) lane when its trial ends is
   dropped: the lane is a worker lane again.
 - When the hub starts, every inbox-only lane with unread items above `info`
@@ -434,7 +449,7 @@ is retried at the window's end or the next node hello. A desk-routed line is
 an `inbox_wake` with outcome `sent` and reason `desk_fallback`; a startup line
 also includes `startup=true` in its detail.
 
-Worker lanes are unchanged: a job, reviewer, tester or counsel lane keeps
+Worker lanes are unchanged: a job, reviewer or consult lane keeps
 body injection for READY, findings, an ESC answer and everything else.
 
 ### Worker trial

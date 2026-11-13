@@ -169,6 +169,8 @@ message contract, the freshness rule, rollout and rollback.
 
 The node closes a worker's pane once its hk task is merged, done or dropped, or the job was closed, and the pane has stayed not working past a grace; a worker that reported READY keeps its pane while its PR is open. See [the task pane sweep](docs/pane-sweep.md). Job directories hk has confirmed can expire after a TTL, off by default; see [the job dir TTL](docs/job-dir-ttl.md).
 
+The daemon's hot paths (heartbeat, relay outbox, quota-stop and pane-to-session lookups) read job and lane events through an in-process index refreshed by directory mtime, so a pass costs a stat per job directory plus the directories that changed; see [the job event index](docs/job-event-index.md).
+
 Harness conversation references in job events are described in the [job record contract](docs/jobs-resilience.md#harness-session-identity).
 
 ## Hub job inbox compatibility
@@ -242,14 +244,6 @@ See [spawn configuration and exit statuses](docs/config.md) and
 [import evidence](docs/spawn-import.md). This replaces runtug; no compatibility
 binary or forwarding shim is installed. The remaining hub orchestration and
 caller changes ship in the coordinated cutover before old binaries are removed.
-
-## Delegation
-
-`panewire delegate --role reader --prompt /brief.md --cwd /work/project`
-assigns a bounded reading task through the same quota and role policy. Use
-`--headless` when the selected harness supports it, `--patch` for an isolated
-scratch checkout, or `--panel` for independent readers. See
-[Delegation configuration](docs/config.md) for roles, results and exit codes.
 
 
 Spawn execution now belongs to the hub. `panewire spawn` and `work TASK` print ACCEPTED after a durable reservation; this is not landing proof. `--dry-run` stays synchronous and `--wait` preserves the job-completion contract. See [durable spawn operations](docs/hub-spawn-operations.md) for replay, timeout, recovery and Sentry behavior, and [observability](docs/observability.md) for the relay, held-reservation and job-result fleet events and their Sentry fingerprints.

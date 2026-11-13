@@ -12,7 +12,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
-	"sort"
 	"strings"
 	"time"
 
@@ -77,7 +76,7 @@ func knownNodeCommandOp(op string) bool {
 	case nodeCommandAgentsList, nodeCommandPaneClose, nodeCommandPaneCapture, nodeCommandPaneRead,
 		nodeCommandWorktreeInspect, nodeCommandWorktreeList, nodeCommandWorktreePrepare, nodeCommandWorktreeRemove,
 		nodeCommandQuotaRefresh, nodeCommandJobDone, nodeCommandJobResult, nodeCommandJobMarkLost, nodeCommandPRStatus, nodeCommandJobClose, nodeCommandJobReap,
-		nodeCommandCheckoutPull:
+		nodeCommandCheckoutPull, nodeCommandPaneSweep:
 		return true
 	}
 	return false
@@ -87,7 +86,7 @@ func knownNodeCommandOp(op string) bool {
 // result. node_lost and node_timeout are hub-local and never on the wire.
 func validNodeCommandError(code string) bool {
 	switch code {
-	case "invalid_args", "herdr_failed", "close_failed", "capture_failed", "jobs_root_unset", "work_root_unset", "refresh_failed", "done_failed", "result_failed", "mark_lost_failed", "reap_failed", "result_too_large":
+	case "invalid_args", "herdr_failed", "close_failed", "capture_failed", "jobs_root_unset", "work_root_unset", "refresh_failed", "done_failed", "result_failed", "mark_lost_failed", "reap_failed", "result_too_large", "sweep_failed":
 		return true
 	}
 	return false
@@ -197,6 +196,7 @@ func decodeNodeCommandStrict(raw []byte, target any) bool {
 var nodeCommandArgFields = map[string][]string{
 	nodeCommandJobClose:        {"job", "lane", "outcome", "reason", "override"},
 	nodeCommandJobReap:         {"job", "lane", "force"},
+	nodeCommandPaneSweep:       {"age_s"},
 	nodeCommandAgentsList:      {},
 	nodeCommandPaneClose:       {"pane_id", "name", "agent_status", "cwd"},
 	nodeCommandPaneCapture:     {"pane_id", "name", "cwd", "merged_after", "write"},
@@ -280,6 +280,9 @@ func parseNodeCommandArgs(op string, raw json.RawMessage) (any, bool) {
 	case nodeCommandJobReap:
 		var args nodeJobReapArgs
 		return args, decodeNodeCommandStrict(raw, &args) && validNodeJobReapArgs(args)
+	case nodeCommandPaneSweep:
+		var args nodePaneSweepArgs
+		return args, decodeNodeCommandStrict(raw, &args) && validNodePaneSweepArgs(args)
 	case nodeCommandJobDone:
 		var args nodeJobDoneArgs
 		return args, decodeNodeCommandStrict(raw, &args) && validNodeJobName(args.Job) && validNodeCommandPath(args.Report)
@@ -430,6 +433,10 @@ func canonicalNodeCommandResult(op string, raw json.RawMessage) (json.RawMessage
 		var result nodeJobReapResult
 		valid = decodeNodeCommandStrict(raw, &result) && validNodeJobReapResult(result)
 		target = result
+	case nodeCommandPaneSweep:
+		var result nodePaneSweepResult
+		valid = decodeNodeCommandStrict(raw, &result) && validNodePaneSweepResult(result)
+		target = result
 	case nodeCommandPRStatus:
 		var result nodePRStatusResult
 		valid = decodeNodeCommandStrict(raw, &result) && validNodePRStatusResult(result)
@@ -536,9 +543,9 @@ type nodePaneBinding struct {
 }
 
 // nodeJobHerdrSessionByPane searches this node's jobs for the one bound to
-// pane and returns its recorded herdr_session. It scans the filesystem directly
-// without caching so that rebound panes across jobs and sessions are immediately
-// observed without stale cache windows.
+// pane and returns its recorded herdr_session. It reads the inbox index, which
+// is refreshed from each job's events directory on every call, so rebound
+// panes across jobs and sessions are observed at once (docs/job-event-index.md).
 func (client *HubClient) nodeJobHerdrSessionByPane(pane string) string {
 	if pane == "" || client == nil || client.jobsInboxRoot == "" {
 		return ""
@@ -550,122 +557,46 @@ func (client *HubClient) nodeJobHerdrSessionByPane(pane string) string {
 	return binding.session
 }
 
-// nodeJobHerdrBindingByPaneFromRoot inspects job directories under inboxRoot to find
+// nodeJobHerdrBindingByPaneFromRoot inspects the jobs under inboxRoot to find
 // the binding event for this pane, preferring live (un-ended) jobs and the newest binding event.
 func nodeJobHerdrBindingByPaneFromRoot(inboxRoot, pane string) (nodePaneBinding, bool) {
 	if pane == "" || inboxRoot == "" {
 		return nodePaneBinding{}, false
 	}
-	jobsRoot := filepath.Join(inboxRoot, "jobs")
-	entries, err := os.ReadDir(jobsRoot)
-	if err != nil {
-		return nodePaneBinding{}, false
-	}
 	type paneCandidate struct {
-		jobID       string
-		session     string
-		eventsMtime time.Time
-		live        bool
-		createdAt   string
-		seq         int64
+		jobID     string
+		session   string
+		live      bool
+		createdAt string
+		seq       int64
 	}
 	var best paneCandidate
 	found := false
-
-	for _, entry := range entries {
-		if !entry.IsDir() || !hubJobIDPattern.MatchString(entry.Name()) {
-			continue
-		}
-		eventsDir := filepath.Join(jobsRoot, entry.Name(), "events")
-		eventEntries, err := os.ReadDir(eventsDir)
-		if err != nil {
-			continue
-		}
-		var eventsMtime time.Time
-		if fi, err := os.Stat(eventsDir); err == nil {
-			eventsMtime = fi.ModTime()
-		}
-		sort.Slice(eventEntries, func(i, j int) bool {
-			return eventEntries[i].Name() < eventEntries[j].Name()
-		})
-
-		jobEnded := false
-		var jobSession string
-		var jobCreatedAt string
-		var jobSeq int64
-		jobMatched := false
-
-		for _, ee := range eventEntries {
-			name := ee.Name()
-			if ee.IsDir() || !strings.HasSuffix(name, ".json") {
-				continue
-			}
-			if strings.HasSuffix(name, "-job.completed.json") ||
-				strings.HasSuffix(name, "-job.lost.json") ||
-				strings.HasSuffix(name, "-job.revoked.json") ||
-				strings.HasSuffix(name, "-job.handed_off.json") ||
-				strings.HasSuffix(name, "-job.joined.json") {
-				jobEnded = true
-			}
-			if strings.HasSuffix(name, "-job.spawned.json") ||
-				strings.HasSuffix(name, "-job.claim.json") ||
-				strings.HasSuffix(name, "-job.claimed.json") ||
-				strings.HasSuffix(name, "-job.reclaim.json") ||
-				strings.HasSuffix(name, "-job.reprompted.json") {
-				jobEnded = false
-			}
-			if strings.HasSuffix(name, "-job.spawned.json") ||
-				strings.HasSuffix(name, "-job.claim.json") ||
-				strings.HasSuffix(name, "-job.claimed.json") ||
-				strings.HasSuffix(name, "-job.reclaim.json") {
-				data, err := os.ReadFile(filepath.Join(eventsDir, name))
-				if err != nil {
-					continue
-				}
-				var ev struct {
-					Seq       int64  `json:"seq"`
-					CreatedAt string `json:"created_at"`
-					Payload   struct {
-						PaneID       string `json:"pane_id"`
-						HerdrSession string `json:"herdr_session"`
-					} `json:"payload"`
-				}
-				if json.Unmarshal(data, &ev) == nil && ev.Payload.PaneID == pane && ev.Payload.HerdrSession != "" {
-					jobMatched = true
-					jobSession = ev.Payload.HerdrSession
-					jobCreatedAt = ev.CreatedAt
-					jobSeq = ev.Seq
-				}
+	err := hubIndexFor(inboxRoot).visitJobs(nil, true, func(job *hubIndexedJob) bool {
+		// The newest binding event of the job that names this pane.
+		var match *hubPaneBindingFact
+		for i := range job.bindings {
+			if job.bindings[i].pane == pane {
+				match = &job.bindings[i]
 			}
 		}
-
-		if jobMatched && jobSession != "" {
-			cand := paneCandidate{
-				jobID:       entry.Name(),
-				session:     jobSession,
-				eventsMtime: eventsMtime,
-				live:        !jobEnded,
-				createdAt:   jobCreatedAt,
-				seq:         jobSeq,
-			}
-			if !found {
-				best = cand
-				found = true
-			} else {
-				if (!best.live && cand.live) ||
-					(best.live == cand.live && (cand.createdAt > best.createdAt || (cand.createdAt == best.createdAt && cand.seq > best.seq))) {
-					best = cand
-				}
-			}
+		if match == nil {
+			return true
 		}
+		cand := paneCandidate{jobID: job.id, session: match.session, live: !job.ended, createdAt: match.createdAt, seq: match.seq}
+		if !found {
+			best = cand
+			found = true
+		} else if (!best.live && cand.live) ||
+			(best.live == cand.live && (cand.createdAt > best.createdAt || (cand.createdAt == best.createdAt && cand.seq > best.seq))) {
+			best = cand
+		}
+		return true
+	})
+	if err != nil || !found {
+		return nodePaneBinding{}, false
 	}
-	if found {
-		return nodePaneBinding{
-			jobID:   best.jobID,
-			session: best.session,
-		}, true
-	}
-	return nodePaneBinding{}, false
+	return nodePaneBinding{jobID: best.jobID, session: best.session}, true
 }
 
 // nodeJobHerdrSessionByPaneFromRoot inspects job directories under inboxRoot to find
@@ -806,6 +737,10 @@ func (client *HubClient) runNodeCommand(ctx context.Context, op string, raw json
 		client.nodeCommandMu.Lock()
 		defer client.nodeCommandMu.Unlock()
 		return client.nodeJobReap(ctx, args)
+	case nodePaneSweepArgs:
+		// No nodeCommandMu here: each close takes it through the sweeper's
+		// Exclusive, as the local pass does (node_pane_sweep.go).
+		return client.nodePaneSweep(ctx, args)
 	case nodeJobDoneArgs:
 		client.nodeCommandMu.Lock()
 		defer client.nodeCommandMu.Unlock()

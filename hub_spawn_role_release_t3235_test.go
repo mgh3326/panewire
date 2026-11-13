@@ -32,7 +32,7 @@ func TestRoleReleaseMarksLostThroughHolderNode(t *testing.T) {
 	if len(jobs.writes()) != 0 || jobs.state("test-job") != "spawned" {
 		t.Fatalf("hub wrote hk: state=%v writes=%v", jobs.state("test-job"), jobs.writes())
 	}
-	owner, job, _, err := hub.inbox.store.spawnRoleOwner(t.Context(), "42:worker")
+	owner, job, _, err := hub.inbox.store.spawnRoleOwner(t.Context(), "42:implementer")
 	if err != nil || job != "test-job-r2" || owner == held.Request.RequestID {
 		t.Fatalf("reservation not moved: %s %s %v", owner, job, err)
 	}
@@ -121,7 +121,7 @@ func TestRoleReleaseWritesHKLostOnHubOwnHost(t *testing.T) {
 	if seen := node.seen(); len(seen) != 1 || seen[0] != nodeCommandAgentsList {
 		t.Fatalf("node saw %v", seen)
 	}
-	owner, job, _, err := hub.inbox.store.spawnRoleOwner(t.Context(), "42:worker")
+	owner, job, _, err := hub.inbox.store.spawnRoleOwner(t.Context(), "42:implementer")
 	if err != nil || job != "test-job-r2" || owner == held.Request.RequestID {
 		t.Fatalf("reservation not moved: %s %s %v", owner, job, err)
 	}

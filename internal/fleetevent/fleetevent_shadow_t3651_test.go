@@ -18,7 +18,7 @@ func TestWasteFirstNonFiniteQuotaKeepsLine_T3651(t *testing.T) {
 	nan := math.NaN()
 	inf := math.Inf(1)
 	ev := Event{Kind: "placement_shadow", Outcome: "agree", Shadow: &PlacementShadow{
-		Role: "worker", WorkClass: "heavy",
+		Role: "implementer", WorkClass: "heavy",
 		WasteFirst: &WasteFirst{
 			Outcome:     "differs",
 			Choice:      &ShadowChoice{Host: "cloud-tiny", AccountKey: "claude:00000000000000a1", UnusedAtResetPct: &nan, ResetHours: &inf},

@@ -76,7 +76,7 @@ func agyOwnGateGateKey(t *testing.T, catalog []CatalogRow, latest shared.Latest,
 	if seat, ok := p.Profiles[profile]; ok {
 		name = seat.gateName()
 	}
-	x := a.nativeGate(context.Background(), QuotaRequest{Profile: profile, GateProfile: name, Role: "worker", AccountKey: accountKey}, true)
+	x := a.nativeGate(context.Background(), QuotaRequest{Profile: profile, GateProfile: name, Role: "implementer", AccountKey: accountKey}, true)
 	var receipt map[string]any
 	if err := json.Unmarshal([]byte(x.Out), &receipt); err != nil {
 		t.Fatalf("%s: receipt is not JSON: %v\n%s", profile, err, x.Out)

@@ -50,14 +50,14 @@ func t3434Hub(t *testing.T, path string) (*HubServer, *hubAgent, *fakeHandoffkee
 	h.mu.Unlock()
 	now := time.Now()
 	h.observeActiveJobs("host-a", []HubActiveJob{
-		{JobID: t3434WorkerJob, AgentLabel: t3434WorkerJob, Epoch: 1, OwnerLane: t3426Design, Pane: t3434WorkerPane, Role: "worker"},
-		{JobID: t3434ConsultJob, AgentLabel: t3434ConsultJob, Epoch: 1, OwnerLane: t3426Design, Pane: t3434ConsultPan, Role: "worker"},
-		{JobID: "hk3434-done", AgentLabel: "hk3434-done", Epoch: 1, OwnerLane: t3426Design, Pane: "w1:finished", Role: "worker"},
+		{JobID: t3434WorkerJob, AgentLabel: t3434WorkerJob, Epoch: 1, OwnerLane: t3426Design, Pane: t3434WorkerPane, Role: "implementer"},
+		{JobID: t3434ConsultJob, AgentLabel: t3434ConsultJob, Epoch: 1, OwnerLane: t3426Design, Pane: t3434ConsultPan, Role: "implementer"},
+		{JobID: "hk3434-done", AgentLabel: "hk3434-done", Epoch: 1, OwnerLane: t3426Design, Pane: "w1:finished", Role: "implementer"},
 		{JobID: "hk3434-captain", AgentLabel: "hk3434-captain", Epoch: 1, OwnerLane: t3426Design, Pane: "w1:captain", Role: "captain"},
 		{JobID: "hk3434-builder", AgentLabel: "hk3434-builder", Epoch: 1, OwnerLane: t3426Design, Pane: "w1:builder"},
 	}, now)
 	h.observeActiveJobs("host-b", []HubActiveJob{
-		{JobID: "hk3434-remote", AgentLabel: "hk3434-remote", Epoch: 1, OwnerLane: t3426Design, Pane: "w1:remote", Role: "worker"},
+		{JobID: "hk3434-remote", AgentLabel: "hk3434-remote", Epoch: 1, OwnerLane: t3426Design, Pane: "w1:remote", Role: "implementer"},
 	}, now)
 	// hk3434-done has ended: the hub marked it completed and the node's next
 	// heartbeat no longer lists it.
@@ -436,7 +436,7 @@ func TestQuietDesignWorkerLaneEventEndToEnd(t *testing.T) {
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
 	for name, record := range map[string]string{
-		"00001-job.claimed.json": `{"type":"job.claimed","job_id":"` + t3434WorkerJob + `","epoch":1,"agent_label":"` + t3434WorkerJob + `","owner_lane":"` + t3426Design + `","role":"worker","created_at":"` + now + `"}`,
+		"00001-job.claimed.json": `{"type":"job.claimed","job_id":"` + t3434WorkerJob + `","epoch":1,"agent_label":"` + t3434WorkerJob + `","owner_lane":"` + t3426Design + `","role":"implementer","created_at":"` + now + `"}`,
 		"00002-job.spawned.json": `{"type":"job.spawned","job_id":"` + t3434WorkerJob + `","pane_id":"` + t3434WorkerPane + `","created_at":"` + now + `"}`,
 	} {
 		if err := os.WriteFile(filepath.Join(events, name), []byte(record), 0o600); err != nil {

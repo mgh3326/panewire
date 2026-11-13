@@ -121,6 +121,12 @@ type HubServerConfig struct {
 	RelayAckTimeout time.Duration
 	// AcceptingOverridesPath optionally makes operator acceptance choices durable.
 	AcceptingOverridesPath string
+	// PaneSweepInterval is how often the hub asks each node to close the panes of
+	// jobs that ended at least PaneSweepAge ago (docs/pane-sweep.md). Zero keeps the
+	// sweep off, so a config built without it never ticks.
+	PaneSweepInterval time.Duration
+	// PaneSweepAge is how long a job must have ended before its pane is closed.
+	PaneSweepAge time.Duration
 	// handoffkeep is the durable relay-event store. It is package-private so the
 	// hub's public configuration keeps no credential-bearing field.
 	handoffkeep *handoffkeepRelayClient
@@ -480,6 +486,11 @@ type HubServer struct {
 	controlPlaneLanesLoaded          bool
 	controlPlaneLanesStatus          string
 	controlPlaneLanesLastFailure     string
+
+	// paneSweepInterval and paneSweepAge drive runPaneSweep (hub_pane_sweep.go); a
+	// zero interval keeps the sweep off.
+	paneSweepInterval time.Duration
+	paneSweepAge      time.Duration
 	// relayDedupe is an active injection claim. lanePersisted keeps the durable
 	// row ID while that claim is deliberately released between lane retries.
 	relayDedupe        map[string]int64
@@ -523,6 +534,9 @@ type HubServer struct {
 	laneStallMu      sync.Mutex
 	laneStallClosing bool
 	laneStallSweeps  sync.WaitGroup
+	// drainWake is each design lane's drain-wake state (hub_drain_wake.go),
+	// owned by the lane-stall sweep goroutine under laneStallMu.
+	drainWake map[string]*drainWakeLane
 	// laneHeldCountProbe is a test hook laneHeldCountLocked fires once per
 	// scan, so a test can tell the count ran only on an activating
 	// observation.
@@ -723,6 +737,7 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 		inbox: inbox, spawnKick: make(chan struct{}, 1),
 		authPath: config.AuthPath, alertNodes: alertNodes, relayControl: newHubRelayControlState(config, overrides), now: config.Now, staleAfter: config.StaleAfter, keepaliveInterval: config.KeepaliveInterval,
 		gracePeriod: config.GracePeriod, orphanGrace: config.OrphanGrace, unworkedLandingGrace: config.UnworkedLandingGrace, alertObservations: defaultHubAlertObservations, logger: config.Logger,
+		paneSweepInterval: config.PaneSweepInterval, paneSweepAge: config.PaneSweepAge,
 		placementPolicyPath: config.PlacementPolicyPath, placementPolicy: placementPolicy, placementPolicyModTime: placementPolicyModTime, placementPolicyObservedModTime: placementPolicyObservedModTime, placementPolicyLoaded: placementPolicyLoaded, placementPolicyStatus: placementPolicyStatus, placementPolicyLastFailure: placementPolicyLastFailure, prometheusURL: config.PrometheusURL, prometheusClient: config.PrometheusClient, prometheusBearer: config.PrometheusBearer, prometheusBasicUser: config.PrometheusBasicUser, prometheusBasicPass: config.PrometheusBasicPass,
 		nodes: make(map[string]*hubNodeRecord), lastNotes: make(map[string]*HubLastNote), subscribers: make(map[*hubEventSubscriber]struct{}), alerts: make(map[string]*hubAlertState), startedAt: config.Now().UTC(), uiAllowCFOnly: config.UIAllowCFOnly, jobs: make(map[string]*hubJobRecord), pendingRevocations: make(map[string]map[string]hubJobRevokedEvent), reportRelayPath: config.ReportRelayPath, lanesNodeRowCap: config.LanesNodeRowCap, prStatusHost: config.PRStatusHost, controlPlaneLanesPath: config.ControlPlaneLanesPath, controlPlaneLanes: controlPlaneLanes, controlPlaneLanesModTime: controlPlaneLanesModTime, controlPlaneLanesObservedModTime: controlPlaneLanesObservedModTime, controlPlaneLanesLoaded: controlPlaneLanesLoaded, controlPlaneLanesStatus: controlPlaneLanesStatus, controlPlaneLanesLastFailure: controlPlaneLanesLastFailure, relayDedupe: make(map[string]int64), relayHeld: make(map[int64]hubRelayHeldProjection), lanePersisted: make(map[string]int64), laneEventSHA: make(map[string]string), replayExhausted: make(map[int64]struct{}), handoffkeep: config.handoffkeep, cfAccess: cfAccess, spawnRecords: make(map[string]*hubSpawnRecord), stallBeats: make(map[string]*hubStallBeatState), closeCtx: closeCtx, closeCancel: closeCancel,
 	}
@@ -822,6 +837,7 @@ func (h *HubServer) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/inbox/{id}/read", h.handleInboxRead)
 	mux.HandleFunc("POST /v1/inbox/ack", h.handleInboxAck)
 	mux.HandleFunc("POST /v1/spawns", h.handleSpawnSubmit)
+	mux.HandleFunc("POST /v1/spawns/plan", h.handleSpawnPlan)
 	mux.HandleFunc("GET /v1/spawns/features", h.handleSpawnFeatures)
 	mux.HandleFunc("GET /v1/spawns/live", h.handleSpawnLive)
 	mux.HandleFunc("GET /v1/spawns/{request_id}", h.handleSpawnOperation)
@@ -2334,6 +2350,7 @@ func (h *HubServer) RunMaintenance(ctx context.Context) {
 	h.mu.Unlock()
 	go h.runInbox(ctx)
 	go h.runLaneRelease(ctx.Done())
+	go h.runPaneSweep(ctx)
 	h.startSpawnCoordinator(ctx)
 	// Startup replay runs once, before the first keepalive tick: whatever
 	// Postgres still holds as undelivered predates this process.

@@ -523,10 +523,9 @@ func hubSpawnArgs(jobs string, s Spawn) ([]string, error) {
 	add("--report-relative", report)
 	add("-L", s.ExecutionLane)
 	add("--urgency", s.Urgency)
-	add("--builder-family", s.BuilderFamily)
+	add("--author-family", s.AuthorFamily)
 	add("--builder-job", s.BuilderJob)
 	add("--grade", s.Grade)
-	add("--routing-role", s.RoutingRole)
 	add("--review-pass", s.ReviewPass)
 	add("--override-reason", s.OverrideReason)
 	add("--containment", s.Containment)
@@ -638,7 +637,7 @@ func (a *App) spawnHub(ctx context.Context, s Spawn, brief string, c *placeCandi
 		if e != nil {
 			return candResult{stop: e}
 		}
-		fmt.Fprintf(a.Out, "dry-run host=%s profile=%s role=%s job=%s\n%s\n", c.name, s.Profile, s.Role, s.Job, payload)
+		a.dryRunLine(c.name, s, payload)
 		return candResult{ok: true}
 	}
 	if !utf8.ValidString(brief) || len([]byte(brief)) > hubMaxBriefBytes {

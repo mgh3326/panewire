@@ -500,5 +500,5 @@ path.
 Example lane file (identifiers only — never real addresses, panes, or tokens):
 
 ```json
-{"lanes":{"lane-a":{"machine":"host-a","pane":"w1:p1","parent":"captain"}}}
+{"lanes":{"lane-a":{"machine":"host-a","pane":"w1:p1","parent":"parent-lane"}}}
 ```

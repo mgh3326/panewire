@@ -11,12 +11,25 @@ import (
 // Only provider/node commands remain external; no launcher subprocess or SSH leg
 // is available. The submitting filesystem is represented by validated evidence.
 func (a *App) ExecuteSubmission(ctx context.Context, request Submission) error {
-	s, err := ValidateSubmission(request)
+	s, cleanup, err := a.hubSpawn(request)
 	if err != nil {
 		return err
 	}
+	defer cleanup()
+	return a.Spawn(ctx, s)
+}
+
+// hubSpawn binds a validated submission to this App as the hub's coordinator
+// and writes its brief to a private file the spawn reads. The returned cleanup
+// removes that file. Execution and dry-run planning both start here, so a plan
+// places with exactly the config a real spawn would.
+func (a *App) hubSpawn(request Submission) (Spawn, func(), error) {
+	s, err := ValidateSubmission(request)
+	if err != nil {
+		return Spawn{}, nil, err
+	}
 	if err = a.CheckTrust(); err != nil {
-		return err
+		return Spawn{}, nil, err
 	}
 	a.Repository = &request.Repository
 	a.RequestID = request.RequestID
@@ -40,18 +53,19 @@ func (a *App) ExecuteSubmission(ctx context.Context, request Submission) error {
 	}
 	f, err := os.CreateTemp("", "panewire-hub-brief-*")
 	if err != nil {
-		return err
+		return Spawn{}, nil, err
 	}
-	defer os.Remove(f.Name())
+	cleanup := func() { _ = os.Remove(f.Name()) }
 	if err = f.Chmod(0600); err == nil {
 		_, err = io.WriteString(f, request.Brief)
 	}
 	err = errors.Join(err, f.Close())
 	if err != nil {
-		return err
+		cleanup()
+		return Spawn{}, nil, err
 	}
 	s.Prompt = f.Name()
-	return a.Spawn(ctx, s)
+	return s, cleanup, nil
 }
 
 func ParseHubHosts(raw string) ([]HostView, error) { return parseHubHosts(raw) }

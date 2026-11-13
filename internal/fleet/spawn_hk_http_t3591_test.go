@@ -129,7 +129,7 @@ func TestSpawnPathHKCallsGoOverHTTPWithSvcToken(t *testing.T) {
 		if got := hkBody(t, rebinds[0]); !maps.Equal(got, want) {
 			t.Fatalf("rebind body=%v want %v", got, want)
 		}
-		if ev := fx.taskLinkEvent(t); ev["status"] != "rebound" {
+		if ev := fx.taskRebindEvent(t); ev["status"] != "rebound" {
 			t.Fatalf("event=%v", ev)
 		}
 	})
@@ -432,12 +432,12 @@ func TestSpawnPathHKCLIHTTPParity(t *testing.T) {
 		name string
 		s    Spawn
 	}{
-		{"fresh", Spawn{Task: "42", Job: "job-a", Label: "worker-a", Role: "worker"}},
-		{"inherited", Spawn{Task: "42", Job: "job-c", Label: "worker-c", Role: "worker", Inherited: "job-b"}},
+		{"fresh", Spawn{Task: "42", Job: "job-a", Label: "worker-a", Role: "implementer"}},
+		{"inherited", Spawn{Task: "42", Job: "job-c", Label: "worker-c", Role: "implementer", Inherited: "job-b"}},
 		// --bypass covers an hk the precheck cannot reach, never an answer
 		// it cannot read: the CLI path reached bypass on a nonzero exit only.
-		{"fresh bypass", Spawn{Task: "42", Job: "job-a", Label: "worker-a", Role: "worker", Bypass: true}},
-		{"inherited bypass", Spawn{Task: "42", Job: "job-c", Label: "worker-c", Role: "worker", Inherited: "job-b", Bypass: true}},
+		{"fresh bypass", Spawn{Task: "42", Job: "job-a", Label: "worker-a", Role: "implementer", Bypass: true}},
+		{"inherited bypass", Spawn{Task: "42", Job: "job-c", Label: "worker-c", Role: "implementer", Inherited: "job-b", Bypass: true}},
 	}
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	for _, tc := range tasks {
@@ -598,7 +598,7 @@ func TestSpawnPathHKRefusalsKeepTheirClassAndText(t *testing.T) {
 		if e := fx.a.Spawn(ctx, fx.s); e != nil {
 			t.Fatalf("a refused rebind failed the landed spawn: %v", e)
 		}
-		ev := fx.taskLinkEvent(t)
+		ev := fx.taskRebindEvent(t)
 		if ev["status"] != "inherited" || ev["rebind_error"] != "task rebind refused: handoffkeep: wrk_receipt_required: the parent has no wrk receipt" {
 			t.Fatalf("event=%v", ev)
 		}
@@ -715,8 +715,8 @@ func TestSpawnPathHKUnreadableAnswerIsNotBypassed(t *testing.T) {
 		if e := fx.a.Spawn(ctx, fx.s); e != nil {
 			t.Fatalf("an unreadable rebind answer failed the landed spawn: %v", e)
 		}
-		ev := fx.taskLinkEvent(t)
-		if ev["status"] != "inherited" || ev["rebind_error"] != "task rebind did not confirm claimed_by and refs.job_id" {
+		ev := fx.taskRebindEvent(t)
+		if ev["status"] != "inherited" || ev["rebind_error"] != "unconfirmed" {
 			t.Fatalf("event=%v", ev)
 		}
 	})
@@ -727,7 +727,7 @@ func TestSpawnPathHKUnreadableAnswerIsNotBypassed(t *testing.T) {
 		if e := fx.a.Spawn(ctx, fx.s); e != nil {
 			t.Fatal(e)
 		}
-		if ev := fx.taskLinkEvent(t); ev["status"] != "rebound" {
+		if ev := fx.taskRebindEvent(t); ev["status"] != "rebound" {
 			t.Fatalf("event=%v", ev)
 		}
 	})
