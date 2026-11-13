@@ -161,10 +161,14 @@ func (h *HubServer) drainWakeLaneStep(ctx context.Context, lane string, state *d
 		state.pending, state.inflight = false, 0
 		return
 	}
-	// The owed state is saved before the line is queued. A failed save keeps
+	// The owed state and the queue time are saved before the line is queued, so
+	// a restart after the writer sends it keeps the interval. A failed save keeps
 	// the line owed and queues nothing; the next sweep tries again.
+	prevSent := state.lastSent
+	state.lastSent = now
 	h.persistDrainWake(ctx, lane, state)
 	if state.unsaved {
+		state.lastSent = prevSent
 		return
 	}
 	state.gen++
@@ -180,12 +184,14 @@ func (h *HubServer) drainWakeLaneStep(ctx context.Context, lane string, state *d
 		}
 	}
 	if !agent.queueRelay(event) {
+		// Not queued: the queue time is not a send, so restore it and let the next sweep retry.
+		state.lastSent = prevSent
+		h.persistDrainWake(ctx, lane, state)
 		h.emitFleet(fleetEvent{Kind: "drain_wake", Job: lane, Outcome: "skipped", Reason: "unrouted", Detail: "lane=" + lane})
 		return
 	}
 	// Queued, not written: the line stays owed until the writer confirms it.
 	state.inflight = gen
-	state.lastSent = now
 	h.emitFleet(fleetEvent{Kind: "drain_wake", Job: lane, Outcome: "sent", Reason: "drained", Detail: fmt.Sprintf("lane=%s backlog=%d in_flight=%d pane=%s", lane, backlog, inFlight, route.Pane)})
 }
 

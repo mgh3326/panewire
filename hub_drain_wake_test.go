@@ -421,6 +421,37 @@ func TestDrainWakeNoLineQueuedBeforeOwedIsSaved(t *testing.T) {
 	}
 }
 
+// A restart after a line was sent keeps the interval: the restarted hub does
+// not send the same line again before relay.drain_wake_interval has passed
+// (PR #524 review, hk 4567). The save that orders the queue time before the
+// queue cannot be split from its sweep in this harness, so the ordering itself
+// is checked by reading the code and by TestDrainWakeNoLineQueuedBeforeOwedIsSaved.
+func TestDrainWakeRestartAfterWriteKeepsInterval(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "inbox.sqlite3")
+	tasks := []t4473Task{
+		{ID: 1, Project: "handoffkeep", State: "backlog"},
+		{ID: 2, Project: "handoffkeep", State: "unstarted"},
+	}
+	rig, clock := t4473RigAt(t, path, tasks, nil)
+	t4473SetInFlight(rig, t4473Lane, 1)
+	t4473Sweep(rig)
+	t4473SetInFlight(rig, t4473Lane, 0)
+	t4473Sweep(rig)
+	if got := t4473Lines(rig); len(got) != 1 {
+		t.Fatalf("first drain lines=%q, want one", got)
+	}
+	hk := rig.h.handoffkeep
+	if err := rig.h.Close(); err != nil {
+		t.Fatal(err)
+	}
+	rig = t3602Hub(t, path, "default", rig.fake, hk, clock)
+	t4473SetInFlight(rig, t4473Lane, 0)
+	t4473Sweep(rig)
+	if got := t4473Lines(rig); len(got) != 0 {
+		t.Fatalf("the restarted hub sent %q inside the interval", got)
+	}
+}
+
 // A save that fails must be retried on a later sweep, not forgotten: the drain
 // sets pending while the store refuses the write, the store recovers, and a
 // restart then still owes the line (PR #524 review, hk 4567).
