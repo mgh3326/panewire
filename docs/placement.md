@@ -389,12 +389,21 @@ host does not release it.
 
 One decision at a time reads the hub's view and counts its job: the engine takes
 the hub's decision gate (`App.PlacementGate`) before it reads hosts and gives it
-up at its first `PlacementTry`, so jobs submitted together see each other. It
-is never held through a wake or a launch; after a refusal the engine takes it
-again and re-ranks the candidates left on fresh scores. A pinned `--host` is
-counted the same way. A request bound to a node that timed out keeps its count
-(the node may still launch it) until a claim, a definitive failure or the
-bridge window. The count is in hub memory, so a hub
+up at its first `PlacementTry`, so jobs submitted together see each other. Each
+decision is a new plan read under the gate: the first, the fallback after a
+refusal (a host that filled its task slots, stopped accepting or fell under the
+load threshold in the meantime is judged as it is now) and the one after a wake
+(the woken host is counted only if it is still a place the job may go). The new
+plan keeps what the attempts proved about the hosts already tried, in the
+placement record. The gate is never held through a wake or a launch. The fleet
+snapshot is read again for every decision, and `SelHost`, the host host-first
+selection named before the gate on reads that did not yet carry other jobs'
+counts, does not outrank the scores this decision reads (the account it chose
+still limits the hosts). A host the hub left out for a full task cap stays out
+of the plan (`task_slots_full`) on both the fleet-state and the direct read. A
+pinned `--host` is counted through the gate too. A request bound to a node that
+timed out keeps its count (the node may still launch it) until a claim, a
+definitive failure or the bridge window. The count is in hub memory, so a hub
 restart forgets the jobs decided and not yet claimed until their claims show.
 
 Every spawn decision also takes the hub's latest view: before the engine reads
