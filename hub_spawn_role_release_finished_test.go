@@ -24,7 +24,7 @@ func TestRoleReleaseAfterSucceededSpawn(t *testing.T) {
 			t.Fatal(err)
 		}
 		// Today's 409 body for a succeeded holder: the generic fix plus the holder's identity.
-		if result.status != http.StatusConflict || body["error"] != "job_already_claimed" || body["request_id"] != held.Request.RequestID || body["job"] != "test-job" || body["host"] != "machine-a" || body["pane"] != roleHeldPane || body["fix"] != "inspect the existing operation; do not submit a new request while ownership is live" {
+		if result.status != http.StatusConflict || body["error"] != "task_role_claimed" || body["request_id"] != held.Request.RequestID || body["job"] != "test-job" || body["host"] != "machine-a" || body["pane"] != roleHeldPane || body["fix"] != "inspect the existing operation; do not submit a new request while ownership is live" {
 			t.Fatalf("status=%d body=%s", result.status, result.body)
 		}
 		if jobs.state("test-job") != hkState || len(jobs.writes()) != 0 {
