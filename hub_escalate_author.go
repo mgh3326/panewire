@@ -294,7 +294,7 @@ func (h *HubServer) escalateAuthorRefusal(ctx context.Context, request hubEscala
 		consequence = "the author's pane is closed and its record ended; no author runs on this PR now"
 	}
 	text := fmt.Sprintf("ladder step %s: %s (%s) (round %d, %s); %s", request.Job, code, reason, request.Round, request.PR, consequence)
-	h.relayLaneEventContext(ctx, hubJobEventPayload{EventID: fmt.Sprintf("ladder-step:%s:%d", request.Job, request.Round), JobID: request.Job, OwnerLane: owner, NotifyType: "info", Text: utf8PrefixWithin(text, laneEventTextLimit), Host: "hub", Epoch: 1}, nil)
+	h.relayLaneEventContext(ctx, hubJobEventPayload{EventID: fmt.Sprintf("ladder-step:%s:%d:%s:%t", request.Job, request.Round, code, ended), JobID: request.Job, OwnerLane: owner, NotifyType: "info", Text: utf8PrefixWithin(text, laneEventTextLimit), Host: "hub", Epoch: 1}, nil)
 	return hubEscalateAuthorResult{Code: code, Reason: reason, AuthorEnded: ended}, nil
 }
 

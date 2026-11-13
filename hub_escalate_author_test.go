@@ -598,3 +598,16 @@ func TestEscalateAuthorRouteAuthorization(t *testing.T) {
 		t.Fatalf("an invalid request must be refused before anything runs: %d %s", status, raw)
 	}
 }
+
+func TestEscalateAuthorDistinctRefusalsReachDesignLane(t *testing.T) {
+	f := newEscalateFixture(t, "author-refusals")
+	request := f.request()
+	if _, err := f.hub.escalateAuthorRefusal(t.Context(), request, "parent", "worktree_dirty", "dirty", false); err != nil {
+		t.Fatal(err)
+	}
+	f.awaitInfo(t, "worktree_dirty")
+	if _, err := f.hub.escalateAuthorRefusal(t.Context(), request, "parent", "quota_refused", "quota", true); err != nil {
+		t.Fatal(err)
+	}
+	f.awaitInfo(t, "quota_refused", "no author runs")
+}
