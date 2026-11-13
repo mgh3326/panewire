@@ -7,7 +7,10 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"slices"
 	"strconv"
+
+	"github.com/mgh3326/panewire/internal/configkeys"
 )
 
 const acceptingOverrideAuto = "auto"
@@ -74,26 +77,32 @@ func validAcceptingOverride(mode string) bool {
 	return mode == "on" || mode == "off" || mode == acceptingOverrideAuto
 }
 
-func loadAcceptingOverrides(path string) (map[string]acceptingOverride, error) {
+func loadAcceptingOverrides(path string) (map[string]acceptingOverride, []string, error) {
 	overrides := make(map[string]acceptingOverride)
 	if path == "" {
-		return overrides, nil
+		return overrides, nil, nil
 	}
 	info, err := os.Lstat(path)
 	if os.IsNotExist(err) {
-		return overrides, nil
+		return overrides, nil, nil
 	}
 	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
-		return nil, errors.New("invalid override file")
+		return nil, nil, errors.New("invalid override file")
 	}
 	b, err := os.ReadFile(path)
 	if err != nil || len(b) > 64<<10 {
-		return nil, errors.New("invalid override file")
+		return nil, nil, errors.New("invalid override file")
 	}
 	var wire acceptingOverrideFile
 	if json.Unmarshal(b, &wire) != nil {
-		return nil, errors.New("invalid override file")
+		return nil, nil, errors.New("invalid override file")
 	}
+	ignored, err := configkeys.JSON(b, &wire)
+	if err != nil {
+		return nil, nil, errors.New("invalid override file")
+	}
+	ignored = append(ignored, unknownOverrideEntryKeys(b)...)
+	slices.Sort(ignored)
 	for machine, override := range wire.Overrides {
 		if details, ok := wire.Containments[machine]; ok {
 			override.Containment, override.ContainmentVerified = details.Containment, details.ContainmentVerified
@@ -102,11 +111,37 @@ func loadAcceptingOverrides(path string) (map[string]acceptingOverride, error) {
 			override.Containment, override.ContainmentVerified = "", false
 		}
 		if !machineIDPattern.MatchString(machine) || machine == hubOperatorMachineID || !validAcceptingOverride(override.Mode) || (override.Containment != "" && !containmentPattern.MatchString(override.Containment)) {
-			return nil, errors.New("invalid override file")
+			return nil, nil, errors.New("invalid override file")
 		}
 		overrides[machine] = override
 	}
-	return overrides, nil
+	return overrides, ignored, nil
+}
+
+// acceptingOverrideShape is acceptingOverride without its legacy-string
+// unmarshaler, so configkeys can walk the keys of each override entry.
+type acceptingOverrideShape acceptingOverride
+
+// unknownOverrideEntryKeys lists the keys inside each override entry that
+// acceptingOverride does not read, as overrides.<machine>.<key>.
+func unknownOverrideEntryKeys(b []byte) []string {
+	var doc struct {
+		Overrides map[string]json.RawMessage `json:"overrides"`
+	}
+	if json.Unmarshal(b, &doc) != nil {
+		return nil
+	}
+	var out []string
+	for machine, raw := range doc.Overrides {
+		var entry any
+		if json.Unmarshal(raw, &entry) != nil {
+			continue
+		}
+		for _, key := range configkeys.Unknown(entry, acceptingOverrideShape{}, "json") {
+			out = append(out, "overrides."+machine+"."+key)
+		}
+	}
+	return out
 }
 
 func (h *HubServer) acceptingOverrideLocked(machine string) string {
