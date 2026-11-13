@@ -261,6 +261,11 @@ func TestSpawnSettleAmbiguousLabelStaysExecuting(t *testing.T) {
 	}
 }
 
+// settleNamedPanes is a pane list whose rows carry the label under "name".
+func settleNamedPanes(idLabel ...string) string {
+	return strings.ReplaceAll(settlePanes(idLabel...), `"label"`, `"name"`)
+}
+
 // settlePanes is a `herdr pane list` answer: pairs of pane id and label.
 func settlePanes(idLabel ...string) string {
 	rows := make([]string, 0, len(idLabel)/2)
@@ -282,6 +287,7 @@ func TestSpawnSettleUnprovenCasesStayExecuting(t *testing.T) {
 		{"recorded pane is only in the pane list", "w1:p1", nodeAgentList(), settlePanes("w1:p1", "label-a")},
 		{"no record, one agent bears the label (a foreign job may own it)", "", nodeAgentList(nodeAgentJSON("w1:p9", "label-a", "idle", "/other")), settlePanes("w1:p9", "label-a")},
 		{"no record, a pane bears the label but no agent registered", "", nodeAgentList(), settlePanes("w1:p9", "label-a")},
+		{"no record, the pane list carries the label as name", "", nodeAgentList(), settleNamedPanes("w1:p9", "label-a")},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -296,12 +302,15 @@ func TestSpawnSettleUnprovenCasesStayExecuting(t *testing.T) {
 	}
 }
 
-// An unreadable pane list is as unproven as an unreadable agent list.
+// An unreadable pane list is as unproven as an unreadable agent list: not
+// JSON, no panes array, a null array, or an error envelope is never "no panes".
 func TestSpawnSettlePaneListFailureStaysExecuting(t *testing.T) {
-	f := newSettleFixture(t, (&nodeFakeHerdr{agents: []string{nodeAgentList()}, panes: `not json`}).run)
-	f.recordSpawn(t, "w1:p1")
-	if settled, left := f.client.settleExecutingSpawns(t.Context(), f.journal); settled != 0 || left != 1 {
-		t.Fatalf("settled=%d left=%d", settled, left)
+	for _, panes := range []string{`not json`, `{"result":{}}`, `{"result":{"panes":null}}`, `{"error":{"code":"x"}}`} {
+		f := newSettleFixture(t, (&nodeFakeHerdr{agents: []string{nodeAgentList()}, panes: panes}).run)
+		f.recordSpawn(t, "w1:p1")
+		if settled, left := f.client.settleExecutingSpawns(t.Context(), f.journal); settled != 0 || left != 1 {
+			t.Fatalf("pane list %s: settled=%d left=%d", panes, settled, left)
+		}
 	}
 }
 

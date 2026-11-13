@@ -146,9 +146,13 @@ func (client *HubClient) settleExecutingSpawn(ctx context.Context, journal *node
 // spawnEvidence is everything herdr shows about a session: the agent list and
 // the pane list, whose rows carry the label and whose pane exists before its
 // agent registers or after it exits.
+// spawnPaneRow is one `herdr pane list` row; its label arrives under `label`
+// or `name` (as fleet.Pane and jobDirPanes read it).
+type spawnPaneRow struct{ PaneID, Label, Name string }
+
 type spawnEvidence struct {
 	agents []nodeAgentRow
-	panes  []struct{ PaneID, Label string }
+	panes  []spawnPaneRow
 }
 
 func (client *HubClient) readSpawnEvidence(ctx context.Context, session string) (spawnEvidence, bool) {
@@ -164,11 +168,16 @@ func (client *HubClient) readSpawnEvidence(ctx context.Context, session string) 
 	if err != nil {
 		return evidence, false
 	}
+	// A reply without a panes array is unreadable, not an empty list.
+	if _, err := nodeHerdrRows(output, "panes"); err != nil {
+		return evidence, false
+	}
 	var envelope struct {
 		Result struct {
 			Panes []struct {
 				PaneID string `json:"pane_id"`
 				Label  string `json:"label"`
+				Name   string `json:"name"`
 			} `json:"panes"`
 		} `json:"result"`
 	}
@@ -176,7 +185,7 @@ func (client *HubClient) readSpawnEvidence(ctx context.Context, session string) 
 		return evidence, false
 	}
 	for _, pane := range envelope.Result.Panes {
-		evidence.panes = append(evidence.panes, struct{ PaneID, Label string }{pane.PaneID, pane.Label})
+		evidence.panes = append(evidence.panes, spawnPaneRow{pane.PaneID, pane.Label, pane.Name})
 	}
 	return evidence, true
 }
@@ -228,7 +237,7 @@ func decideSpawn(evidence spawnEvidence, spawned localSpawnRecord, label string)
 			}
 		}
 		for _, pane := range evidence.panes {
-			if pane.Label == label {
+			if pane.Label == label || pane.Name == label {
 				return spawnDecision{}, false
 			}
 		}
