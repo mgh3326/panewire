@@ -53,6 +53,11 @@ entry without a recorded dollar balance, by the percentage rule (remaining
 percent per hour). On a full tie inside the band a credit rung goes before a
 free rung.
 
+In the ranked band each pool offers one seat for the task's grade (its
+lowest-grade eligible row that fits, or the row the pool-order policy's `seats`
+names), and pools are ordered by their seat's waste urgency: the pool with the
+most room first, ties in lowest-grade order. See `docs/config.md`.
+
 A manually recorded dollar balance stays dollar-ranked for four hours after
 `measured_at`; after that it is stale, loses its dollar value, and ranks behind
 subscription quota. Entries with only a percentage never become stale because
