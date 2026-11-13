@@ -857,7 +857,7 @@ func (h *HubServer) handleInboxWait(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	lane := r.URL.Query().Get("lane")
-	if !LaneNamePattern.MatchString(lane) {
+	if !validHistoricalLaneResource(lane) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "lane_required"})
 		return
 	}

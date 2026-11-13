@@ -254,3 +254,11 @@ func TestR20LegacyLanePersistedAckUsesTransportID(t *testing.T) {
 		t.Fatalf("legacy acknowledgement did not retire lane event: %+v", state)
 	}
 }
+
+func TestR20LanePersistedAckAcceptsHistoricalDottedLane(t *testing.T) {
+	wire := []byte(`{"type":"relay.persisted","job_id":"lane-event-legacy.parent-producer-1","kind":"lane.event","epoch":1,"report_path":"","reason":"","event_id":17,"lane":"legacy.parent","producer_event_id":"producer-1"}`)
+	message, ok := parseHubOutbound(wire)
+	if !ok || message.Lane != "legacy.parent" || message.ProducerEventID != "producer-1" {
+		t.Fatalf("historical acknowledgement was rejected: message=%+v ok=%v", message, ok)
+	}
+}
