@@ -36,6 +36,9 @@ document `pane.capture` uploads. It writes `pane-screen.txt` only when that
 upload fails (see [pane-sweep.md](pane-sweep.md)). It does not run
 `pane.close`'s composer guard.
 
+The hub's `pane.sweep` command runs a second, ended-job sweep on the hub's
+schedule; see [pane-sweep.md](pane-sweep.md#hub-ordered-sweep).
+
 ## Hub endpoints
 
 ### `GET /v1/nodes/agents`
@@ -313,6 +316,24 @@ cannot interleave with `pane.close`, `job.done` or `job.mark_lost`.
 
 A node older than this op refuses it as `invalid_args` without acting; deploy
 the nodes before the hub for `panewire jobs close` to work end to end.
+
+### `pane.sweep`
+
+`args: {age_s}`, an integer from `0` to one year in seconds (`365*24*60*60`).
+The hub's ticker sends it (see [pane-sweep.md](pane-sweep.md#hub-ordered-sweep));
+no `node.command` caller may issue it, and the public endpoint refuses it.
+
+The node closes the pane of every job whose own latest record ended at least
+`age_s` seconds ago, whatever herdr shows the pane doing (no idle, grace or
+composer check). It keeps a worker's or tester's pane while its worktree is on
+an open PR, as the idle sweep does. It replies `{"closed": [...]}`, one
+`{job, pane, role, reason}` per pane closed, with `reason` `job_revoked`,
+`job_completed`, `job_handed_off`, `job_lost`, or the job's outcome.
+
+A node without a jobs root answers `jobs_root_unset`. A failed read of the
+jobs, the agent list, or the hk record answers `sweep_failed`. An out-of-range
+`age_s` answers `invalid_args`. The op does not take the node's acting lock:
+each pane's close takes it, so the op never holds it across the whole pass.
 
 ### `worktree.inspect`
 
