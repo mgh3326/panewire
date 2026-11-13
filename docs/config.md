@@ -1758,6 +1758,9 @@ that evidence or a success receipt marks the host as chosen. A refusal keeps
 the contacted host in the candidate trace. Placement clears launch state when
 it moves to another candidate. Older executors without failure receipts are
 conservatively recorded as refusals when no acceptance evidence is available.
+If another candidate needs a quota refresh after a host has been contacted,
+the failed attempt is recorded with reason `quota_refresh_pending`; the hub
+request itself remains accepted.
 
 Delivery uses the existing hk client and `[quota]` URL and credentials. Each
 delivery pass has a two-second budget and cannot change the spawn result.

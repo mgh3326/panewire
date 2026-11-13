@@ -241,7 +241,11 @@ func (a *App) finishPlacement(ctx context.Context, s Spawn, err error) {
 		stateReason = a.fleetLog.hosts.Reason
 		r.Reason = stateReason
 	}
-	if err != nil {
+	if errors.Is(err, ErrQuotaRefreshPending) {
+		// This describes the failed host attempt, not a terminal refusal of
+		// the accepted request, which remains parked for a quota refresh.
+		r.Outcome, r.Reason = "failed", "quota_refresh_pending"
+	} else if err != nil {
 		r.Reason = exitReason(exitCode(err))
 		if d.started {
 			r.Outcome = "failed"

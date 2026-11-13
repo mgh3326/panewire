@@ -68,6 +68,32 @@ type staleRefreshSource struct {
 	freshKey string
 }
 
+// changingRefreshSource models a shared account becoming stale between the
+// selection snapshot and one host's admission, then fresh at the next host.
+type changingRefreshSource struct {
+	now   time.Time
+	reads atomic.Int64
+}
+
+func (*changingRefreshSource) Hosts(context.Context, string) ([]fleet.HostView, error) {
+	return nil, nil
+}
+
+func (s *changingRefreshSource) Presence(context.Context) ([]fleet.PresenceRecord, error) {
+	return []fleet.PresenceRecord{
+		{HostID: "desktop", AccountKey: "claude:0000000000000001", LastSeen: s.now},
+		{HostID: "machine-b", AccountKey: "claude:0000000000000001", LastSeen: s.now},
+	}, nil
+}
+
+func (s *changingRefreshSource) SharedAccount(_ context.Context, key string) (fleet.SharedAccount, error) {
+	if s.reads.Add(1) == 3 {
+		return fleet.SharedAccount{Key: key, Observed: true, MeasuredAt: s.now.Add(-time.Hour)}, nil
+	}
+	zero := 0.0
+	return fleet.SharedAccount{Key: key, Observed: true, Fresh: true, MeasuredAt: s.now, Quota: &fleet.PoolView{Status: "ok", Class: "spend", Blocking: &zero}}, nil
+}
+
 func (staleRefreshSource) Hosts(context.Context, string) ([]fleet.HostView, error) { return nil, nil }
 func (s staleRefreshSource) Presence(context.Context) ([]fleet.PresenceRecord, error) {
 	hosts := s.hosts
@@ -210,6 +236,111 @@ func TestHubQuotaRefreshPendingDoesNotRecordRefusal(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(stateDir, "placement-attempts", "test-job")); !os.IsNotExist(err) {
 		t.Errorf("pending request recorded a placement attempt: stat error=%v", err)
+	}
+}
+
+func TestHubQuotaRefreshPreservesAttemptBeforePending(t *testing.T) {
+	stateDir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	retryHK(t)
+	h, err := NewHubServer(HubServerConfig{Tokens: map[string]string{"operator": t14OperatorToken, "desktop": "node-token", "machine-b": "node-token"}, InboxStorePath: filepath.Join(t.TempDir(), "inbox.sqlite3")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = h.Close() })
+	server := httptest.NewServer(h.Handler())
+	t.Cleanup(server.Close)
+	t14NamedNode(t, h, server, "desktop", true, true)
+	node := t14NamedNode(t, h, server, "machine-b", true, true)
+	var source *changingRefreshSource
+	var mu sync.Mutex
+	var events []fleetevent.Event
+	h.spawnNewApp = func(out, errout io.Writer) (*fleet.App, error) {
+		app := retryDispatchApp(t, out, errout)
+		app.StateDir = stateDir
+		app.Config.Hosts = map[string]map[string]any{"desktop": {}, "machine-b": {}}
+		app.Config.HostOrder = []string{"desktop", "machine-b"}
+		app.Quota = staleRefreshQuota{}
+		source = &changingRefreshSource{now: app.Now()}
+		app.Source = source
+		app.EventSink = func(event fleetevent.Event) {
+			mu.Lock()
+			defer mu.Unlock()
+			events = append(events, event)
+		}
+		return app, nil
+	}
+	request := durableSpawnRequest()
+	task, _, err := h.inbox.store.claimSpawn(t.Context(), request, "test-job", "parent", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { defer close(done); h.executeSpawnTask(ctx, task) }()
+	readCtx, stopRead := context.WithTimeout(ctx, 2*time.Second)
+	defer stopRead()
+	var message map[string]json.RawMessage
+	if err := wsjson.Read(readCtx, node, &message); err != nil {
+		cancel()
+		<-done
+		t.Fatalf("fresh holder received no spawn after stale holder: reads=%d err=%v", source.reads.Load(), err)
+	}
+	var kind, requestID string
+	_ = json.Unmarshal(message["type"], &kind)
+	_ = json.Unmarshal(message["request_id"], &requestID)
+	if kind != "job.spawn" {
+		t.Fatalf("fresh holder received %q, want job.spawn", kind)
+	}
+	if err := wsjson.Write(ctx, node, nodeRefusal(requestID, "cwd_unmapped", true)); err != nil {
+		t.Fatal(err)
+	}
+	<-done
+	saved, err := h.inbox.store.spawnTask(t.Context(), request.RequestID)
+	if err != nil || saved.Status != "accepted" || saved.Node != nil {
+		t.Fatalf("request must remain accepted after the host refusal: status=%s err=%v", saved.Status, err)
+	}
+	spool, err := os.ReadFile(filepath.Join(stateDir, "placements", "test-job.1.json"))
+	if err != nil {
+		t.Fatalf("contacted host's failed placement attempt was not retained: %v", err)
+	}
+	var attempt struct {
+		Record struct {
+			Outcome    string `json:"outcome"`
+			Reason     string `json:"reason"`
+			Candidates []struct {
+				Host   string `json:"host"`
+				Reason string `json:"reason"`
+			} `json:"candidates"`
+		} `json:"record"`
+	}
+	if err := json.Unmarshal(spool, &attempt); err != nil {
+		t.Fatal(err)
+	}
+	if attempt.Record.Outcome != "failed" {
+		t.Errorf("pending attempt outcome=%q, want failed", attempt.Record.Outcome)
+	}
+	if attempt.Record.Reason != "quota_refresh_pending" {
+		t.Errorf("pending attempt reason=%q, want quota_refresh_pending", attempt.Record.Reason)
+	}
+	foundHost := false
+	for _, candidate := range attempt.Record.Candidates {
+		if candidate.Host == "machine-b" && candidate.Reason != "" {
+			foundHost = true
+		}
+	}
+	if !foundHost {
+		t.Error("failed placement attempt omitted the contacted host")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	for _, event := range events {
+		if (event.Kind == "spawn" || event.Kind == "placement") && event.Outcome == "refused" {
+			t.Errorf("pending request recorded a %s refusal", event.Kind)
+		}
 	}
 }
 

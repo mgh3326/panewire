@@ -599,9 +599,12 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 	}()
 
 	defer func() {
-		// A hub quota refresh parks the request; no placement or refusal has
-		// happened yet, so neither durable record may describe it as refused.
+		// A quota wait is not a terminal refusal. Preserve a host attempt if
+		// this pass already contacted one, but do not emit refusal events.
 		if errors.Is(err, ErrQuotaRefreshPending) {
+			if s.placement.contactedHost != "" || s.placement.started {
+				a.finishPlacement(ctx, s, err)
+			}
 			return
 		}
 		a.spawnEvents(s, err)
