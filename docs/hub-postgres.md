@@ -64,16 +64,19 @@ Node daemons are unaffected: their store (`store.go`) stays a local SQLite file.
 
    Do not add the URL to the unit's `ExecStart`, to shell history or to a
    ticket.
-3. **Drain the SQLite inbox before the cutover.** No command copies the SQLite
-   inbox to Postgres any more: `panewire hub migrate-sqlite` is removed. Stop
-   the hub, then confirm that nothing in the SQLite file still has to survive:
-   every unread item is read, every must-ack item is acknowledged, and no job
-   waits on an item that is still open. Items left in the SQLite file are not
-   carried over. Once the URL is set, the hub reads only the Postgres database
-   (the `--inbox-store` file is used only when the URL is unset). Keep the
-   SQLite file for rollback (see Rollback).
-4. **Start the hub** with the URL set. The Postgres database starts empty, so
-   check it with `panewire inbox list --unread` before you rely on the inbox.
+3. **Drain the SQLite inbox while the hub is still up.** No command copies the
+   SQLite inbox to Postgres any more: `panewire hub migrate-sqlite` is removed.
+   First quiesce the producers (lanes and jobs that send to the hub). Then,
+   with the hub running, check through `panewire inbox` that every unread item
+   is read, every must-ack item is acknowledged, and no job waits on an item
+   that is still open. The `panewire inbox` commands need the running hub, so
+   do not stop it before this check passes.
+4. **Stop the hub, then start it with the URL set.** Items left in the SQLite
+   file are not carried over: once the URL is set, the hub reads only the
+   Postgres database (the `--inbox-store` file is used only when the URL is
+   unset). The Postgres database starts empty, so check it with
+   `panewire inbox list --unread` before you rely on the inbox. Keep the SQLite
+   file for rollback (see Rollback).
 
 ## Rollback
 
