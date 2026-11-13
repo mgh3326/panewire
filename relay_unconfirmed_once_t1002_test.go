@@ -364,8 +364,9 @@ func TestT1002LateDeliveredMarkedRowNeverReplays(t *testing.T) {
 }
 
 // AC4: every other undelivered row class is untouched — never-attempted,
-// exhausted, chat, and sink rows replay exactly as before across two
-// restarts, with no label and no retire, even alongside a marked row.
+// exhausted, and sink rows replay exactly as before across two restarts, with
+// no label and no retire, even alongside a marked row. A legacy chat row
+// retires at replay instead of injecting.
 func TestT1002UnmarkedRowsReplayUnchanged(t *testing.T) {
 	rig := t1002Start(t)
 	ctx := context.Background()
@@ -382,8 +383,7 @@ func TestT1002UnmarkedRowsReplayUnchanged(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	// chat: no chat store is configured, so its own gate answers "inject" —
-	// the disposition replayRelayEvent sees is unchanged.
+	// legacy chat: a chat-N row from before the operator chat was removed.
 	chat := hubJobEventPayload{JobID: laneEventTransportID(t1002Lane, "chat-42"), Epoch: 1, OwnerLane: t1002Lane, EventID: "chat-42", Text: "chat text"}
 	if _, _, err := rig.client.appendEvent(ctx, rig.hub.relayEventRequest("lane.event", chat, reportRelayRoute{})); err != nil {
 		t.Fatal(err)
@@ -409,19 +409,18 @@ func TestT1002UnmarkedRowsReplayUnchanged(t *testing.T) {
 	first := restartTexts()
 	second := restartTexts()
 
-	if len(first) != 3 {
-		t.Fatalf("first restart injected %d rows, want 3 (never+chat+marked): %v", len(first), first)
+	if len(first) != 2 {
+		t.Fatalf("first restart injected %d rows, want 2 (never+marked): %v", len(first), first)
 	}
-	if len(second) != 2 {
-		t.Fatalf("second restart injected %d rows, want 2 (never+chat): %v", len(second), second)
+	if len(second) != 1 {
+		t.Fatalf("second restart injected %d rows, want 1 (never): %v", len(second), second)
 	}
 	neverText := relayTextForKind("lane.event", neverEvent)
-	chatText := relayTextForKind("lane.event", chat)
 	if first[neverEvent.JobID] != neverText || second[neverEvent.JobID] != neverText {
 		t.Fatalf("never-attempted row text changed across restarts: %q / %q, want %q", first[neverEvent.JobID], second[neverEvent.JobID], neverText)
 	}
-	if first[chat.JobID] != chatText || second[chat.JobID] != chatText {
-		t.Fatalf("chat row text changed across restarts: %q / %q, want %q", first[chat.JobID], second[chat.JobID], chatText)
+	if _, injected := first[chat.JobID]; injected {
+		t.Fatal("a legacy chat row was injected")
 	}
 	if !strings.HasPrefix(first[markedDirective.JobID], "[replayed after hub restart - first sent ") {
 		t.Fatalf("marked row replayed without the label: %q", first[markedDirective.JobID])

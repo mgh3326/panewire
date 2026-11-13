@@ -11,6 +11,10 @@ import (
 	"time"
 )
 
+// chatQuestionIDPattern names a hk decision-question id (Q-YYYYMMDD-NN). The
+// assistant reads and resolves these questions; the hub no longer chats.
+var chatQuestionIDPattern = regexp.MustCompile(`^Q-[0-9]{8}-[0-9]{2,}$`)
+
 // assistantToolError is the whole vocabulary a caller can ever see: a named
 // error, and at most a whitelisted identifier detail (a request id, never a
 // secret or an upstream message). Everything upstream is already a named

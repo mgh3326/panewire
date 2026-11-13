@@ -83,8 +83,7 @@ func escalatesWhenUnconfirmed(record handoffkeepRelayEvent) bool {
 	return record.Kind == "lane.event" &&
 		!isUnconfirmedMarkRecord(record) &&
 		!strings.HasPrefix(record.EventID, unconfirmedEscalationPrefix) &&
-		!strings.HasPrefix(record.EventID, "idle-wake:") &&
-		!chatRelayEventPattern.MatchString(record.EventID)
+		!strings.HasPrefix(record.EventID, "idle-wake:")
 }
 
 // escalateUnconfirmedRelay sends the one escalation for a relay row the node

@@ -12,7 +12,7 @@ const hubJobIdleAfter = 30 * time.Minute
 // for at least hubJobIdleAfter while that job was on it. The idle clock is
 // kept in memory across heartbeats: a restarted node starts it again, which
 // only delays the drop. Only the heartbeat's active list is filtered; the
-// idle-shutdown lease scan still counts these jobs, so a lead waiting on its
+// job scan still counts these jobs, so a lead waiting on its
 // workers keeps its host up.
 func (client *HubClient) dropLongIdleJobs(active []HubActiveJob, states []HerdrAgentState, now time.Time) []HubActiveJob {
 	client.paneIdleMu.Lock()

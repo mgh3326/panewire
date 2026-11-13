@@ -975,7 +975,7 @@ func TestAssistantBearerAC2(t *testing.T) {
 // lacks.
 func TestAssistantCFBindingAC2(t *testing.T) {
 	hk := newFakeAssistantHK(t)
-	certs := chatTestCerts(t, chatTestSigningKey())
+	certs := cfAccessTestCerts(t, cfAccessTestSigningKey())
 	srv, logs := assistantTestServer(t, hk, func(cfg *assistantConfig) {
 		cfg.CFTeam = "team"
 		cfg.CFAUD = assistantTestAUD
@@ -996,7 +996,7 @@ func TestAssistantCFBindingAC2(t *testing.T) {
 	}
 	now := time.Now()
 	sign := func(claims map[string]any) string {
-		return chatSignJWTClaims(t, chatTestSigningKey(), "k1", claims)
+		return cfAccessSignJWTClaims(t, cfAccessTestSigningKey(), "k1", claims)
 	}
 	// Bearer alone is not enough once the CF gate is configured.
 	if writer := serve(""); writer.Code != http.StatusUnauthorized {
@@ -2026,7 +2026,7 @@ func TestAssistantAnswerChainR2(t *testing.T) {
 // assertions are all refused at 401 even with a valid bearer.
 func TestAssistantCFClaimsR2(t *testing.T) {
 	hk := newFakeAssistantHK(t)
-	certs := chatTestCerts(t, chatTestSigningKey())
+	certs := cfAccessTestCerts(t, cfAccessTestSigningKey())
 	srv, _ := assistantTestServer(t, hk, func(cfg *assistantConfig) {
 		cfg.CFTeam = "team"
 		cfg.CFAUD = assistantTestAUD
@@ -2044,7 +2044,7 @@ func TestAssistantCFClaimsR2(t *testing.T) {
 	}
 	now := time.Now()
 	sign := func(claims map[string]any) string {
-		return chatSignJWTClaims(t, chatTestSigningKey(), "k1", claims)
+		return cfAccessSignJWTClaims(t, cfAccessTestSigningKey(), "k1", claims)
 	}
 	base := func() map[string]any {
 		return map[string]any{"aud": []string{assistantTestAUD}, "exp": now.Add(time.Hour).Unix(), "iat": now.Unix(), "common_name": "berry.svc"}
@@ -2071,7 +2071,7 @@ func TestAssistantCFClaimsR2(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	forged := chatSignJWTClaims(t, otherKey, "k1", base())
+	forged := cfAccessSignJWTClaims(t, otherKey, "k1", base())
 	if w := serve(forged); w.Code != http.StatusUnauthorized {
 		t.Fatalf("forged-signature JWT status=%d, want 401", w.Code)
 	}

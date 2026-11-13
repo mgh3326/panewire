@@ -103,7 +103,7 @@ func inboxWakeRank(kind string) int {
 // event id that merely looks like chat-N earns nothing. The hub's digest and
 // hold batches are not exempt: flushInbox files them (fileInboxOnlyBatch).
 func inboxOnlyExempt(e hubJobEventPayload) bool {
-	return e.operatorIngress || e.operatorChat
+	return e.operatorIngress
 }
 
 // inboxWakeText is the wake line. N comes from a successful count read only.

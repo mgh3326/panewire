@@ -13,26 +13,21 @@ import (
 
 func TestHubUIAccessAndDataSchema(t *testing.T) {
 	now := time.Date(2026, 9, 2, 5, 0, 0, 0, time.UTC)
-	policyPath := filepath.Join(t.TempDir(), "burst.json")
-	policy := BurstPolicy{SourceMachine: "node-a", SwapGB: 8, Load5: 6, Consecutive: 3, WakeVia: "node-a", WakeMAC: "02:1a:2b:3c:4d:5e", TargetMachine: "node-b", IdleMinutes: 30, CooldownMinutes: 20}
-	if err := os.WriteFile(policyPath, []byte(formatBurstPolicy(policy)), 0600); err != nil {
-		t.Fatal(err)
-	}
 	operatorSecret := "r13-operator-secret-must-never-reach-browser"
 	nodeSecret := "r13-node-secret-must-never-reach-browser"
-	certs := chatTestCerts(t, chatTestSigningKey())
+	certs := cfAccessTestCerts(t, cfAccessTestSigningKey())
 	hub, err := NewHubServer(HubServerConfig{
 		Tokens: map[string]string{"operator": operatorSecret, "node-a": nodeSecret, "node-b": "r13-node-b-secret"},
-		Now:    func() time.Time { return now }, BurstPolicyPath: policyPath, UIAllowCFOnly: true,
-		CFAccessTeam: "chat-test", CFAccessAUD: chatTestAUD,
+		Now:    func() time.Time { return now }, UIAllowCFOnly: true,
+		CFAccessTeam: "chat-test", CFAccessAUD: cfAccessTestAUD,
 		CFAccessCertsURL: certs.URL, CFAccessHTTPClient: certs.Client(),
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	chatWarmAccessKeys(t, hub)
+	cfAccessWarmKeys(t, hub)
 	hub.connect("node-a", "r13-test", "127.0.0.1:4567", nil, true)
-	hub.recordUIEvent("burst", "up", "node-b", now)
+	hub.recordUIEvent("failover", "up", "node-b", now)
 
 	// This is the authorization mutant: removing authorizeUI from either
 	// handler changes this assertion from 404 to 200.
@@ -85,7 +80,7 @@ func TestHubUIAccessAndDataSchema(t *testing.T) {
 	page.RemoteAddr = "198.51.100.25:4444"
 	page.Header.Set("Cf-Ray", "fixture-ray")
 	page.Header.Set("Cf-Access-Authenticated-User-Email", "operator@example.test")
-	page.Header.Set("Cf-Access-Jwt-Assertion", chatTestToken(t))
+	page.Header.Set("Cf-Access-Jwt-Assertion", cfAccessTestToken(t))
 	pageResponse := httptest.NewRecorder()
 	hub.Handler().ServeHTTP(pageResponse, page)
 	if pageResponse.Code != http.StatusOK || !strings.Contains(pageResponse.Body.String(), "<th>Machine</th>") {
@@ -101,7 +96,7 @@ func TestHubUIAccessAndDataSchema(t *testing.T) {
 	dataRequest.RemoteAddr = "198.51.100.25:4444"
 	dataRequest.Header.Set("Cf-Ray", "fixture-ray")
 	dataRequest.Header.Set("Cf-Access-Authenticated-User-Email", "operator@example.test")
-	dataRequest.Header.Set("Cf-Access-Jwt-Assertion", chatTestToken(t))
+	dataRequest.Header.Set("Cf-Access-Jwt-Assertion", cfAccessTestToken(t))
 	dataResponse := httptest.NewRecorder()
 	hub.Handler().ServeHTTP(dataResponse, dataRequest)
 	if dataResponse.Code != http.StatusOK {
@@ -116,17 +111,17 @@ func TestHubUIAccessAndDataSchema(t *testing.T) {
 	if err := json.Unmarshal(dataResponse.Body.Bytes(), &raw); err != nil {
 		t.Fatal(err)
 	}
-	if len(raw) != 5 || raw["schema_version"] == nil || raw["hub"] == nil || raw["nodes"] == nil || raw["burst"] == nil || raw["events"] == nil {
+	if len(raw) != 4 || raw["schema_version"] == nil || raw["hub"] == nil || raw["nodes"] == nil || raw["events"] == nil || raw["burst"] != nil {
 		t.Fatalf("unexpected UI schema keys: %v", raw)
 	}
 	var data hubUIData
 	if err := json.Unmarshal(dataResponse.Body.Bytes(), &data); err != nil {
 		t.Fatal(err)
 	}
-	if data.SchemaVersion != 1 || data.Hub.Version != hubVersion || len(data.Nodes) != 1 || data.Nodes[0].MachineID != "node-a" || data.Nodes[0].Version != "r13-test" || data.Burst.Policy == nil || data.Burst.Policy.TargetMachine != "node-b" {
+	if data.SchemaVersion != 1 || data.Hub.Version != hubVersion || len(data.Nodes) != 1 || data.Nodes[0].MachineID != "node-a" || data.Nodes[0].Version != "r13-test" {
 		t.Fatalf("unexpected UI data: %+v", data)
 	}
-	if len(data.Events) != 2 || data.Events[0].Kind != "presence" || data.Events[1].Kind != "burst" || data.Events[1].Phase != "up" || data.Events[1].MachineID != "node-b" {
+	if len(data.Events) != 2 || data.Events[0].Kind != "presence" || data.Events[1].Kind != "failover" || data.Events[1].Phase != "up" || data.Events[1].MachineID != "node-b" {
 		t.Fatalf("UI events are not closed display records: %+v", data.Events)
 	}
 }
