@@ -12,9 +12,11 @@ import (
 	"github.com/mgh3326/panewire/internal/fleet"
 )
 
+const startConditionTestToken = "start-condition-test"
+
 func TestConditionedRowsDoNotStarveRunnableSpawnPastPendingPage(t *testing.T) {
 	hk := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet || r.URL.Path != "/v1/tasks/9000" || r.Header.Get("Authorization") != "Bearer start-condition-test" {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/tasks/9000" || r.Header.Get("Authorization") != "Bearer "+startConditionTestToken {
 			t.Errorf("unexpected HK request %s %s auth=%q", r.Method, r.URL.Path, r.Header.Get("Authorization"))
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -22,7 +24,7 @@ func TestConditionedRowsDoNotStarveRunnableSpawnPastPendingPage(t *testing.T) {
 	}))
 	defer hk.Close()
 	t.Setenv("HANDOFFKEEP_URL", hk.URL)
-	t.Setenv("HANDOFFKEEP_TOKEN_SVC_PANEWIRE", "start-condition-test")
+	t.Setenv("HANDOFFKEEP_TOKEN_SVC_PANEWIRE", startConditionTestToken)
 	h := asyncSpawnHub(t)
 	now := time.Now()
 	for i := range 33 {
