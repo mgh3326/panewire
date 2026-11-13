@@ -167,6 +167,9 @@ func (p RoutingPolicy) validate() error {
 		}
 	}
 	for seat, role := range p.RoleMap {
+		if role == "explorer" {
+			return fmt.Errorf("panewire_role_map maps %s to removed role explorer; use implementer", seat)
+		}
 		if _, ok := p.Roles[role]; !ok {
 			return fmt.Errorf("panewire_role_map maps %s to unknown role %s", seat, role)
 		}
