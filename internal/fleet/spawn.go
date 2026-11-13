@@ -250,10 +250,13 @@ func (s Spawn) resolvedRoutingRole() string {
 	return firstNonempty(s.RoutingRole, builtinRoleMap[s.Role])
 }
 
-// consultTask reports whether the spawn routes as a consult. A consult works
-// beside the task's claimant and never takes the task's exclusive claim.
+// consultTask reports whether the spawn's seat is a consult seat. Only the seat
+// role decides: a worker seat given --routing-role consult still takes the
+// worker's exclusive claim, because the override is not tied to the seat
+// (hk 3709 review). A consult works beside the task's claimant and never takes
+// the task's exclusive claim.
 func (s Spawn) consultTask() bool {
-	return s.resolvedRoutingRole() == "consult"
+	return builtinRoleMap[s.Role] == "consult"
 }
 
 // taskPrecheck reads the task over hk HTTP (hkGetTask) and refuses a spawn

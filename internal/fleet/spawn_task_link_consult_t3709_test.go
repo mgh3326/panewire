@@ -84,4 +84,13 @@ func TestSpawnTaskLinkConsultDoesNotClaimT3709(t *testing.T) {
 			t.Fatalf("worker precheck=%d %q, want the unchanged claimant refusal", exitCode(e), hkErrOf(e))
 		}
 	})
+
+	t.Run("worker with a consult routing role still refuses another claimant", func(t *testing.T) {
+		a, hk := hkSiteApp(t)
+		hk.SetTask("42", hkTaskJSON(42, "developing", "implement (grade B, T1)", "fable-label", "panewire", `{}`))
+		s := Spawn{Task: "42", Job: "worker-job", Label: "worker-label", Role: "worker", RoutingRole: "consult"}
+		if _, _, e := a.taskPrecheck(ctx, s); exitCode(e) != exitUsage || hkErrOf(e) != "task has another claimant without a job binding" {
+			t.Fatalf("worker+consult precheck=%d %q, want the claimant refusal", exitCode(e), hkErrOf(e))
+		}
+	})
 }

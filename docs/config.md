@@ -757,9 +757,10 @@ record already has `refs.job_id` equal to this job (a design session rebound
 the task before the spawn) records `status: already_linked`, with no warning and
 no notice: there is nothing to link (hk 3426). A spawn that does not claim the
 task — an unlinked reviewer or a consult — records `status: unlinked`; a consult
-may join a task another job or claimant holds, so a consult pair can share it.
-Worker claim rules are unchanged. Other spawn failures retain their normal
-cleanup behavior.
+(a `counsel` seat, which always routes as consult) may join a task another job or
+claimant holds, so a consult pair can share it. The rule follows the seat role: a
+worker seat given `--routing-role consult` still claims the task like any worker.
+Other spawn failures retain their normal cleanup behavior.
 
 An inherited spawn normally leaves the task bound to its parent job. It rebinds
 the task to the new job, through `handoffkeep tasks rebind`, only after the brief
