@@ -3027,7 +3027,10 @@ func parseHubOutboundRejection(payload []byte) (hubOutboundMessage, hubOutboundR
 			return hubOutboundMessage{}, reject
 		}
 		if message.Kind == "lane.event" {
-			if len(fields) != 9 || json.Unmarshal(fields["lane"], &message.Lane) != nil || json.Unmarshal(fields["producer_event_id"], &message.ProducerEventID) != nil || !hubAgentLabelPattern.MatchString(message.Lane) || !validLaneEventID(message.ProducerEventID) {
+			// Older hubs acknowledge lane events with the shared relay
+			// envelope only. The transport job_id still identifies the
+			// producer's outbox row, so it is safe to retire that row below.
+			if len(fields) != 7 && (len(fields) != 9 || json.Unmarshal(fields["lane"], &message.Lane) != nil || json.Unmarshal(fields["producer_event_id"], &message.ProducerEventID) != nil || !hubAgentLabelPattern.MatchString(message.Lane) || !validLaneEventID(message.ProducerEventID)) {
 				return hubOutboundMessage{}, reject
 			}
 		} else if len(fields) == 8 {
