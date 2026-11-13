@@ -60,6 +60,15 @@ func (h *HubServer) scheduleQuotaRefresh(machine, pool string, timeout time.Dura
 	if !q.keys[key] && !now.Before(q.completed[key]) {
 		q.keys[key] = true
 		q.queue = append(q.queue, hubQuotaRefreshWork{key: key, deadline: now.Add(timeout)})
+	} else if q.keys[key] {
+		// An expired queued attempt retains its position, but it cannot send
+		// until placement asks for that key again with a fresh budget.
+		for i := range q.queue {
+			if q.queue[i].key == key && q.queue[i].deadline.IsZero() {
+				q.queue[i].deadline = now.Add(timeout)
+				break
+			}
+		}
 	}
 	q.mu.Unlock()
 	select {
@@ -103,22 +112,17 @@ func (h *HubServer) runQuotaRefreshes(ctx context.Context) {
 		}
 	}()
 	for {
-		// A queued key can expire even when every slot is busy. Remove it and
-		// wake placement now, rather than waiting for an unrelated node.
+		// A queued attempt can expire even when every slot is busy. Retain
+		// its place and wake placement, rather than waiting for another node.
 		q.mu.Lock()
 		now := time.Now()
-		remaining := q.queue[:0]
 		expired := false
-		for _, work := range q.queue {
-			if !now.Before(work.deadline) {
-				delete(q.keys, work.key)
+		for i := range q.queue {
+			if !q.queue[i].deadline.IsZero() && !now.Before(q.queue[i].deadline) {
+				q.queue[i].deadline = time.Time{}
 				expired = true
-			} else {
-				remaining = append(remaining, work)
 			}
 		}
-		clear(q.queue[len(remaining):])
-		q.queue = remaining
 		q.mu.Unlock()
 		if expired {
 			q.completedCount.Add(1)
@@ -128,7 +132,7 @@ func (h *HubServer) runQuotaRefreshes(ctx context.Context) {
 			q.mu.Lock()
 			index := -1
 			for i, work := range q.queue {
-				if !active[work.key.machine] {
+				if !work.deadline.IsZero() && !active[work.key.machine] {
 					index = i
 					break
 				}
@@ -138,14 +142,14 @@ func (h *HubServer) runQuotaRefreshes(ctx context.Context) {
 				break
 			}
 			work := q.queue[index]
-			q.queue = append(q.queue[:index], q.queue[index+1:]...)
 			if !time.Now().Before(work.deadline) {
-				delete(q.keys, work.key)
+				q.queue[index].deadline = time.Time{}
 				q.mu.Unlock()
 				q.completedCount.Add(1)
 				h.kickSpawnPlacement()
 				continue
 			}
+			q.queue = append(q.queue[:index], q.queue[index+1:]...)
 			q.mu.Unlock()
 			active[work.key.machine] = true
 			running++
@@ -159,7 +163,7 @@ func (h *HubServer) runQuotaRefreshes(ctx context.Context) {
 		q.mu.Lock()
 		var nextDeadline time.Time
 		for _, work := range q.queue {
-			if nextDeadline.IsZero() || work.deadline.Before(nextDeadline) {
+			if !work.deadline.IsZero() && (nextDeadline.IsZero() || work.deadline.Before(nextDeadline)) {
 				nextDeadline = work.deadline
 			}
 		}

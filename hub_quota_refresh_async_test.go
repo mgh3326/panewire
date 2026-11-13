@@ -771,7 +771,7 @@ func TestHubQuotaRefreshWhenAdmissionNeedsNewerObservation(t *testing.T) {
 func TestHubQuotaRefreshQueuedDeadlinePreventsLateSend(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	retryHK(t)
-	hosts := []string{"node-a", "node-b", "node-c", "node-d", "node-e"}
+	hosts := []string{"node-a", "node-b", "node-c", "node-d", "node-e", "node-f"}
 	tokens := map[string]string{"operator": t14OperatorToken}
 	for _, host := range hosts {
 		tokens[host] = "node-token"
@@ -802,6 +802,7 @@ func TestHubQuotaRefreshQueuedDeadlinePreventsLateSend(t *testing.T) {
 		}(host, conn)
 	}
 	var shortDeadline atomic.Bool
+	var reverseOrder atomic.Bool
 	h.spawnNewApp = func(out, errout io.Writer) (*fleet.App, error) {
 		app := retryDispatchApp(t, out, errout)
 		app.Config.Hosts = map[string]map[string]any{}
@@ -814,6 +815,9 @@ func TestHubQuotaRefreshQueuedDeadlinePreventsLateSend(t *testing.T) {
 		if shortDeadline.Load() {
 			present = hosts[4:]
 			app.Config.Quota = map[string]any{"measure_timeout_s": int64(1)}
+			if reverseOrder.Load() {
+				app.Config.HostOrder = []string{hosts[0], hosts[1], hosts[2], hosts[3], hosts[5], hosts[4]}
+			}
 		}
 		app.Source = staleRefreshSource{now: app.Now(), hosts: present}
 		return app, nil
@@ -841,6 +845,7 @@ func TestHubQuotaRefreshQueuedDeadlinePreventsLateSend(t *testing.T) {
 	<-done
 	shortDeadline.Store(true)
 	h.executeSpawnTask(ctx, task)
+	reverseOrder.Store(true)
 	coordinatorCtx, stopCoordinator := context.WithCancel(ctx)
 	defer stopCoordinator()
 	h.startSpawnCoordinator(coordinatorCtx)
@@ -859,8 +864,23 @@ func TestHubQuotaRefreshQueuedDeadlinePreventsLateSend(t *testing.T) {
 	}) {
 		t.Fatal("queued deadline did not wake placement while all refresh slots were occupied")
 	}
+	eventually(t, time.Second, "re-placement pass completed", h.drain.idle)
 	stopCoordinator()
 	h.spawnWorkers.Wait()
+	// The re-placement pass offered the two expired keys in reverse order;
+	// the older queued key must still receive the next slot.
+	nodeCommandReplyTo(t, connections[admitted[0].host], admitted[0].message, map[string]any{"result": map[string]any{"outcome": "refreshed"}})
+	var next observed
+	if !waitUntil(time.Second, func() bool {
+		select {
+		case next = <-messages:
+			return true
+		default:
+			return false
+		}
+	}) || next.host != "node-e" {
+		t.Fatalf("queue lost its order across expired attempts: got=%+v want=node-e", next)
+	}
 	// Hold every slot beyond the queued key's one-second budget: no queued
 	// command may run while all slots are occupied.
 	var unexpected observed
@@ -874,7 +894,7 @@ func TestHubQuotaRefreshQueuedDeadlinePreventsLateSend(t *testing.T) {
 	}) {
 		t.Fatalf("queued refresh ran before a slot was free: %+v", unexpected)
 	}
-	nodeCommandReplyTo(t, connections[admitted[0].host], admitted[0].message, map[string]any{"result": map[string]any{"outcome": "refreshed"}})
+	nodeCommandReplyTo(t, connections[admitted[1].host], admitted[1].message, map[string]any{"result": map[string]any{"outcome": "refreshed"}})
 	// This window proves that releasing a slot cannot send an expired key.
 	if waitUntil(200*time.Millisecond, func() bool {
 		select {

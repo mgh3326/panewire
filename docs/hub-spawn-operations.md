@@ -49,8 +49,9 @@ Refreshes coalesce by machine and pool. At most four run at once, with at most
 one per node; waiting keys are considered in arrival order while busy nodes are
 skipped. The configured `measure_timeout_s` (default 60 seconds, capped at 60)
 starts when a key is queued and covers queueing, writer admission, the socket
-write and the response. A key that expires in the queue is reconsidered on a
-later placement pass. On shutdown the hub cancels refreshes; accepted requests
+write and the response. An expired queued attempt retains its place, but is
+sent only if a later placement pass requests it with a new budget. On shutdown
+the hub cancels refreshes; accepted requests
 and their reservations survive restart. Local, non-hub spawns keep their
 synchronous refresh behavior. See [Quota service boundary](placement.md#quota-service-boundary).
 
