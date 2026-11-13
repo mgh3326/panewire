@@ -35,7 +35,7 @@ func decodeHubAppliedReport(raw json.RawMessage) (map[string][]int64, bool) {
 	total := 0
 	for lane, ids := range applied {
 		total += len(ids)
-		if !validReportRelayLaneName(lane) || len(ids) > relayAppliedMaxPerLane || total > relayAppliedMaxIDs {
+		if !validLaneReference(lane) || len(ids) > relayAppliedMaxPerLane || total > relayAppliedMaxIDs {
 			return nil, false
 		}
 		for _, id := range ids {
