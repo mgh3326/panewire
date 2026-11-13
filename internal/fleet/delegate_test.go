@@ -668,7 +668,9 @@ func TestDelegateHeadlessKindWithoutOneShotRefusesBeforeClaiming(t *testing.T) {
 	q := e.a.Quota.(rowQuota).fakeQuota
 	q.CatalogRows = []CatalogRow{{Profile: "kiro-glm", Effort: "high", Grade: "C", Pool: "claude", Gate: "default", ModelID: "glm"}}
 	q.GateDo = gatePools(map[string]string{"kiro-glm": "claude"})
-	e.routingBody = routingDoc(strings.ReplaceAll(routingBlockV1, `"sonnet", "haiku", "codex-luna", "devin-swe2-medium", "agy-flash38-high"`, `"kiro-glm"`))
+	block := strings.ReplaceAll(routingBlockV1, `"sonnet", "haiku", "codex-luna", "devin-swe2-medium", "agy-flash38-high"`, `"kiro-glm"`)
+	block = strings.Replace(block, `"implementer": {"allowed": ["sonnet", "opus", "codex-terra61", "codex-sol", "devin-swe2", "devin-swe2-medium", "devin-swe2-max", "cmd-dsflash41"]`, `"implementer": {"allowed": ["kiro-glm"]`, 1)
+	e.routingBody = routingDoc(block)
 	err := e.a.delegate(context.Background(), delegateArgs(e, "--role", "reader", "--headless"))
 	if code(err) != exitConfig || !strings.Contains(err.Error(), "no headless form") || len(e.a.JobStore.(*fakeJobStore).records) != 0 {
 		t.Fatalf("an unsupported kind must be refused before any record is claimed: %v", err)
