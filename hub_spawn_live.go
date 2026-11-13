@@ -22,8 +22,7 @@ import (
 const spawnLiveSettle = 2 * time.Minute
 
 // liveSpawnProfiles returns the number of live hub spawns for each placed
-// profile, leaving out exceptRequest (the spawn being placed, which is itself
-// an accepted or dispatching operation). An operation that has no placed
+// profile, leaving out exceptRequest (the spawn being placed). An operation that has no placed
 // profile yet (an auto spawn still being placed) cannot be attributed and is
 // not counted.
 func (h *HubServer) liveSpawnProfiles(ctx context.Context, exceptRequest string) (map[string]int, error) {
@@ -65,7 +64,7 @@ func (h *HubServer) liveSpawnTasks(ctx context.Context) ([]hubSpawnTask, error) 
 }
 
 // livePlacedProfile is the profile an operation was placed on: the chosen
-// profile once it ran, the one bound to its node request while dispatching,
+// profile once it ran, the one bound to its node request before or during dispatch,
 // or the one the submitter named.
 func livePlacedProfile(task hubSpawnTask) string {
 	if task.Outcome.Profile != "" {
@@ -82,13 +81,13 @@ func livePlacedProfile(task hubSpawnTask) string {
 	return ""
 }
 
-// liveSpawns lists the operations that count toward a pool cap: accepted and
-// dispatching ones, and succeeded ones whose job is in activeJobs or that
+// liveSpawns lists the operations that count toward a pool cap: accepted,
+// bound and dispatching ones, and succeeded ones whose job is in activeJobs or that
 // started after settled.
 func (s *laneInboxStore) liveSpawns(parent context.Context, activeJobs []string, settled time.Time) ([]hubSpawnTask, error) {
 	ctx, done := s.op(parent)
 	defer done()
-	query := `SELECT ` + spawnTaskColumns + ` FROM spawn_operations WHERE status IN ('accepted','dispatching') OR status='succeeded' AND (created_ms>=? OR last_run_ms>=?`
+	query := `SELECT ` + spawnTaskColumns + ` FROM spawn_operations WHERE status IN ('accepted','bound','dispatching') OR status='succeeded' AND (created_ms>=? OR last_run_ms>=?`
 	args := []any{settled.UnixMilli(), settled.UnixMilli()}
 	if len(activeJobs) > 0 {
 		query += ` OR job IN (` + strings.TrimSuffix(strings.Repeat("?,", len(activeJobs)), ",") + `)`

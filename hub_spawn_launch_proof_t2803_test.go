@@ -29,6 +29,7 @@ func TestLaunchProofCleanupGateT2803(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			task = sentSpawnFixture(t, h.inbox.store, task)
 			transport := &directSpawnTransport{h: h, task: task, placing: true, bound: true}
 			got := transport.nextHostAfterRefusal(t.Context(), node, hubSpawnResult{RC: 70, Error: tc.reason, Retryable: tc.retry})
 			if got != tc.want {

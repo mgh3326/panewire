@@ -32,8 +32,8 @@ func TestOMPMuseSeatsAreNoThinking(t *testing.T) {
 		if !reflect.DeepEqual(argv, []string{"--model", want.model}) {
 			t.Fatalf("%s argv %v", profile, argv)
 		}
-		screen := "π > ⬢ " + want.footer + " > 🌳 project/tree ▶─0.9%──…─1M─"
-		if !OMPFooterProof(screen, want.footer, "off", cwd, "/home/user", "", seat.NoThinking) {
+		screen := "π > ⬢ " + want.footer + " > 🌳 project/tree > ⑂ wk/fixture ▶─0.9%──…─1M─"
+		if !OMPFooterProof(screen, want.footer, "off", cwd, "/home/user", "", "project/tree", "wk/fixture", seat.NoThinking) {
 			t.Fatalf("%s: the ⬢ footer was refused", profile)
 		}
 	}

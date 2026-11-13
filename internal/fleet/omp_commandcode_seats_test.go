@@ -149,42 +149,42 @@ func TestOMPCommandCodeUnratedSeatsNotAutoSelected(t *testing.T) {
 
 func TestOMPCommandCodeFooterWithoutThinking(t *testing.T) {
 	const cwd = "/home/user/work/tree"
-	argonScreen := "π > ⬢ Gemini 4 Argon > 🌳 project/tree ▶─1%──…─1M─"
-	mimoScreen := "π > ⬢ MiMo V2.6 Pro > 🌳 project/tree ▶─1%──…─1M─"
-	bareScreen := "π > Gemini 4 Argon > 🌳 project/tree ▶─1%──…─1M─"
-	glyphScreen := "π > ◒ Gemini 4 Argon > 🌳 project/tree ▶─1%──…─1M─"
+	argonScreen := "π > ⬢ Gemini 4 Argon > 🌳 project/tree > ⑂ wk/fixture ▶─1%──…─1M─"
+	mimoScreen := "π > ⬢ MiMo V2.6 Pro > 🌳 project/tree > ⑂ wk/fixture ▶─1%──…─1M─"
+	bareScreen := "π > Gemini 4 Argon > 🌳 project/tree > ⑂ wk/fixture ▶─1%──…─1M─"
+	glyphScreen := "π > ◒ Gemini 4 Argon > 🌳 project/tree > ⑂ wk/fixture ▶─1%──…─1M─"
 
 	// (a) the argon4 and mimo26pro footers prove an off no-thinking rung
-	if !OMPFooterProof(argonScreen, "Gemini 4 Argon", "off", cwd, "/home/user", "", true) {
+	if !OMPFooterProof(argonScreen, "Gemini 4 Argon", "off", cwd, "/home/user", "", "project/tree", "wk/fixture", true) {
 		t.Fatal("argon4 ⬢ footer not accepted for an off no-thinking rung")
 	}
-	if !OMPFooterProof(mimoScreen, "MiMo V2.6 Pro", "off", cwd, "/home/user", "", true) {
+	if !OMPFooterProof(mimoScreen, "MiMo V2.6 Pro", "off", cwd, "/home/user", "", "project/tree", "wk/fixture", true) {
 		t.Fatal("mimo26pro ⬢ footer not accepted for an off no-thinking rung")
 	}
 
 	// (b) the same footers refuse a high rung of the same model, and a no-thinking off rung refuses
 	// a footer with an effort glyph or with no icon
-	if OMPFooterProof(argonScreen, "Gemini 4 Argon", "high", cwd, "/home/user", "") {
+	if OMPFooterProof(argonScreen, "Gemini 4 Argon", "high", cwd, "/home/user", "", "project/tree", "wk/fixture") {
 		t.Fatal("⬢ footer accepted for a high rung")
 	}
-	if OMPFooterProof(argonScreen, "Gemini 4 Argon", "high", cwd, "/home/user", "", true) {
+	if OMPFooterProof(argonScreen, "Gemini 4 Argon", "high", cwd, "/home/user", "", "project/tree", "wk/fixture", true) {
 		t.Fatal("⬢ footer accepted for a high rung even when no-thinking rung flag is true")
 	}
-	if OMPFooterProof(glyphScreen, "Gemini 4 Argon", "off", cwd, "/home/user", "", true) {
+	if OMPFooterProof(glyphScreen, "Gemini 4 Argon", "off", cwd, "/home/user", "", "project/tree", "wk/fixture", true) {
 		t.Fatal("no-thinking off rung accepted a footer with an effort glyph")
 	}
-	if OMPFooterProof(bareScreen, "Gemini 4 Argon", "off", cwd, "/home/user", "", true) {
+	if OMPFooterProof(bareScreen, "Gemini 4 Argon", "off", cwd, "/home/user", "", "project/tree", "wk/fixture", true) {
 		t.Fatal("no-thinking off rung accepted a bare footer with no icon")
 	}
-	if OMPFooterProof(bareScreen, "Gemini 4 Argon", "off", cwd, "/home/user", "") {
+	if OMPFooterProof(bareScreen, "Gemini 4 Argon", "off", cwd, "/home/user", "", "project/tree", "wk/fixture") {
 		t.Fatal("unmarked off rung accepted a bare footer with no icon")
 	}
 
 	// (c) a ⬢ footer naming another model refuses
-	if OMPFooterProof(mimoScreen, "Gemini 4 Argon", "off", cwd, "/home/user", "", true) {
+	if OMPFooterProof(mimoScreen, "Gemini 4 Argon", "off", cwd, "/home/user", "", "project/tree", "wk/fixture", true) {
 		t.Fatal("⬢ footer with another model name was accepted")
 	}
-	if OMPFooterProof(argonScreen, "Gemini 4 Argon", "off", cwd, "/home/user", "") {
+	if OMPFooterProof(argonScreen, "Gemini 4 Argon", "off", cwd, "/home/user", "", "project/tree", "wk/fixture") {
 		t.Fatal("unmarked off rung accepted a no-thinking ⬢ footer")
 	}
 }

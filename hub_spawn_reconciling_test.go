@@ -34,7 +34,7 @@ func bindDispatch(t *testing.T, h *HubServer, req fleet.Submission) (hubSpawnTas
 	if task, err = h.inbox.store.bindSpawn(t.Context(), req.RequestID, task.Attempt, node, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
-	return task, node
+	return sentSpawnFixture(t, h.inbox.store, task), node
 }
 
 func reconcilingStatus(t *testing.T, h *HubServer, task hubSpawnTask) string {

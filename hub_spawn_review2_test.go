@@ -158,6 +158,7 @@ func TestSpawnBoundTimeoutCleanupAttestationContract(t *testing.T) {
 					if err != nil {
 						t.Fatal(err)
 					}
+					task = sentSpawnFixture(t, s, task)
 					// First a hub deadline passes while the node is still running.
 					if _, err = s.completeSpawn(t.Context(), task, hubSpawnOutcome{RC: 124, Reason: "timeout", Retryable: true}, now); err != nil {
 						t.Fatal(err)

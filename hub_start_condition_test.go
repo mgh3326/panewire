@@ -66,6 +66,7 @@ func TestBoundLegacyStartConditionWaitsBeforeReplayUntilMet(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	task = sentSpawnFixture(t, h.inbox.store, task)
 	h.executeSpawnTask(t.Context(), task)
 	if spawnAppCreated {
 		t.Fatal("bound conditioned request was replayed before its condition was met")

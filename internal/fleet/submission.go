@@ -520,7 +520,7 @@ func (c *hubHTTP) WaitSpawn(ctx context.Context, id string) (SpawnAttempt, error
 			return attempt, fail(result.Result.RC, "spawn refused %s: %s (operation %s)", attempt, result.Result.Reason, id)
 		case "deadline_exceeded":
 			return attempt, fail(exitStateConflict, "spawn ownership is unresolved %s; inspect operation %s and its executing node before any retry", attempt, id)
-		case "accepted", "dispatching", "reconciling":
+		case "accepted", "bound", "dispatching", "reconciling":
 		default:
 			return attempt, fail(exitStateConflict, "unknown spawn state; inspect operation %s", id)
 		}

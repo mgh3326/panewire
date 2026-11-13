@@ -389,7 +389,7 @@ func TestClaimFromAnotherNodeKeepsTheCount(t *testing.T) {
 	}
 }
 
-// A request bound to a node that runs out of time may still be launching: the
+// A request sent to a node that runs out of time may still be launching: the
 // store keeps the binding and takes a later node result. Its count stays until
 // the claim, a definitive failure or the bridge window.
 func TestBoundTimeoutKeepsTheCountUntilAClaim(t *testing.T) {
@@ -400,6 +400,7 @@ func TestBoundTimeoutKeepsTheCountUntilAClaim(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	task = sentSpawnFixture(t, hub.inbox.store, task)
 	hub.countPlacement(task.Job, "machine-a")
 	changed, err := hub.completeSpawn(t.Context(), task, hubSpawnOutcome{RC: 124, Stage: "landing", Reason: "timeout", Host: "machine-a"})
 	if err != nil || !changed {
