@@ -78,10 +78,12 @@ func doneResultReason(e error) string {
 
 // strictCompletedPutUntil is the one writer of a job's terminal record: it
 // PUTs fields (state completed, the result, the report pin) and settles every
-// answer that leaves it unwritten by reading the record back. written is true
-// when this call's PUT committed. A record already terminal is confirmed, not
-// rewritten: completed holding the result the caller carries (a caller with no
-// result takes any completed record), else a failure that names why.
+// answer that leaves it unwritten by reading the record back. holds is true
+// when the record is known to hold the report pin fields carries: this call's
+// PUT committed, or the read-back shows it. A record already terminal is
+// confirmed, not rewritten: completed holding the result the caller carries (a
+// caller with no result takes any completed record), else a failure that names
+// why.
 func (a *App) strictCompletedPutUntil(ctx context.Context, id string, fields map[string]any, result any, receipt map[string]any, deadline time.Time) (bool, error) {
 	store, e := a.jobStore()
 	if e != nil {
@@ -130,7 +132,7 @@ func (a *App) strictCompletedPutUntil(ctx context.Context, id string, fields map
 			if failure := completedResultReadbackFailure(record, result); failure != nil {
 				return false, failure
 			}
-			return false, nil
+			return recordHoldsPin(record, fields), nil
 		case "escalated":
 			return false, &doneResultFailure{code: exitStateConflict, reason: "job_escalated"}
 		case "lost":
@@ -172,7 +174,7 @@ func (a *App) strictCompletedPutUntil(ctx context.Context, id string, fields map
 					if failure := completedResultReadbackFailure(record, result); failure != nil {
 						return false, failure
 					}
-					return false, nil
+					return recordHoldsPin(record, fields), nil
 				case "escalated":
 					return false, &doneResultFailure{code: exitStateConflict, reason: "job_escalated"}
 				case "lost":
@@ -205,6 +207,17 @@ func (a *App) strictCompletedPutUntil(ctx context.Context, id string, fields map
 		}
 	}
 	return false, &doneResultFailure{code: exitFailure, reason: doneResultReason(last)}
+}
+
+// recordHoldsPin reports whether record names the report pin fields carries
+// (true when fields carries none).
+func recordHoldsPin(record, fields map[string]any) bool {
+	for _, k := range []string{"report_doc", "report_sha256"} {
+		if want, ok := fields[k]; ok && str(record, k) != scalar(want) {
+			return false
+		}
+	}
+	return true
 }
 
 func completedResultReadbackFailure(record map[string]any, result any) *doneResultFailure {
