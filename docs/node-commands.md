@@ -337,7 +337,7 @@ each pane's close takes it, so the op never holds it across the whole pass.
 
 ### `worktree.inspect`
 
-`args: {cwd}`. Returns `{"worktree":null}` unless `cwd` is inside a linked git
+`args: {cwd, expected_dir?, verify_branch?}`. Returns `{"worktree":null}` unless `cwd` is inside a linked git
 worktree (an ordinary directory, a bare repository, a clone's canonical
 checkout, or a path git cannot read is null). The node asks git for absolute
 paths (`rev-parse --path-format=absolute`, git 2.31 or later) rather than
@@ -353,6 +353,13 @@ Otherwise:
 fragment, and an scp-style remote (`[user[:secret]@]host:path`) loses
 everything up to its last `@` before the first `/`, so a token embedded in
 either form never leaves it.
+
+When `expected_dir` is present, the resolved checkout must equal
+`<work_root>/<expected_dir>`; a mismatch returns a null worktree and
+`check:"mismatch"`. With `verify_branch:true`, `check` is `ok`, `dirty`,
+`locked`, `unpushed`, or `unreadable`. The node reads Git status and the remote
+branch without fetching or changing the checkout; an origin tip whose ancestry
+cannot be verified locally is refused as `unpushed`.
 
 ### `worktree.list`
 
@@ -462,6 +469,11 @@ closed shape: `refs/heads/<branch>` or `pull/<n>/head`.
   --detach <dir> <sha>`, so the worktree sits at `sha`, never at the fetched
   tip. An existing worktree is reused only when detached at exactly that
   commit and clean.
+
+A hub-staged author replacement sets `verify_reuse` on its spawn checkout.
+The node then requires an existing clean, unlocked checkout at exactly the
+pinned SHA and an origin branch containing it; it never fast-forwards or
+creates that worktree.
 
 A clone that already exists keeps its identity: a `git remote get-url
 origin` that decodes to a different `owner/repo` than the argument — a fork

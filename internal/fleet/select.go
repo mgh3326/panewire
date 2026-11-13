@@ -313,6 +313,7 @@ type selReq struct {
 	effort           string
 	allowEscalation  bool
 	authorFamily     string
+	excludeFamilies  []string
 	urgency          string
 	urgencySource    string
 	excludeHarnesses []string
@@ -434,6 +435,8 @@ func (a *App) seatFor(row CatalogRow, req selReq) (string, *Seat, string) {
 			reason = "seat_rung"
 		} else {
 			switch {
+			case slices.Contains(req.excludeFamilies, seat.Family):
+				reason = "family_excluded"
 			case req.route.top() && req.authorFamily != "" && seat.Family == req.authorFamily:
 				// A consult rung runs on a family other than its asker's.
 				reason = "family_excluded"
