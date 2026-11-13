@@ -224,7 +224,7 @@ func selectionTerms(sel map[string]any) []fleetevent.HostSelection {
 // host's score and the hub's terms behind it (cpu, mem, io, load, jobs, power,
 // bridge), and the reason the chosen host won. The reason is the hub's own
 // when the chosen host is the one the hub named (policy_order, challenger,
-// all_loaded), else the ranking metric. It carries numbers and host ids only;
+// below_free_floor, all_loaded), else the ranking metric. It carries numbers and host ids only;
 // no screen text, brief or argv.
 func placementTerms(p *placePlan, chosen, ranking string) ([]fleetevent.Candidate, string) {
 	reason := ranking
@@ -236,6 +236,8 @@ func placementTerms(p *placePlan, chosen, ranking string) ([]fleetevent.Candidat
 		}
 		if t := c.signals.Terms; t != nil {
 			row.Jobs = &t.Jobs
+			free := t.CPU * t.Mem * t.IO * t.Load * t.Jobs
+			row.Free = &free
 			if c.source != "hub-only" || c.signals.CPUBusyShort != nil || c.signals.CPUBusy5m != nil {
 				row.CPU = &t.CPU
 			}

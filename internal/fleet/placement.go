@@ -42,7 +42,7 @@ type HostView struct {
 	Source  string
 	// Decided marks the host the hub's placement named, after its all_loaded
 	// and hysteresis rules; DecisionReason is why ("" for the policy-order
-	// winner, "challenger", "all_loaded"). Ranking prefers it within a bucket,
+	// winner, "challenger", "below_free_floor", "all_loaded"). Ranking prefers it within a bucket,
 	// so a rival has to beat the winner by the hub's margin, not by a point.
 	Decided        bool
 	DecisionReason string

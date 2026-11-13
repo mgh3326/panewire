@@ -3,6 +3,7 @@ package fleet
 import (
 	"context"
 	"encoding/json"
+	"math"
 	"testing"
 
 	"github.com/mgh3326/panewire/internal/fleetevent"
@@ -42,6 +43,10 @@ func TestPlacementEventCarriesRequestTermsScoreChosenAndReason(t *testing.T) {
 	m1b, desktop, oci := ev.Candidates[0], ev.Candidates[1], ev.Candidates[2]
 	if m1b.Host != "m1b" || *m1b.Score != 61.5 || *m1b.CPU != .9 || *m1b.Mem != 1 || *m1b.IO != .8 || *m1b.Load != .9 || *m1b.Jobs != .95 || *m1b.Power != 100 || *m1b.Bridge != 1 || m1b.Outcome != "chosen" {
 		t.Fatalf("m1b: %+v", m1b)
+	}
+	// free is the product of the terms, for the floor to be replayed from the line.
+	if m1b.Free == nil || math.Abs(*m1b.Free-.9*1*.8*.9*.95) > 1e-12 || desktop.Free == nil || *desktop.Free != .45 || *desktop.Free < 0.05 || oci.Free != nil {
+		t.Fatalf("free: m1b=%v desktop=%v oci=%v", m1b.Free, desktop.Free, oci.Free)
 	}
 	if *desktop.Mem != .5 || *desktop.Power != 39 || *desktop.Bridge != 0 || desktop.Outcome != "not_chosen" {
 		t.Fatalf("desktop: %+v", desktop)

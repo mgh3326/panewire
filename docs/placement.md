@@ -329,7 +329,7 @@ CPU busy with load1 at 20–44 on 10 cores and its score stayed near 70.
 
 ```text
 free  = cpu * mem * io * load * jobs
-score = free * power - 10 * claims_in_the_bridge_window
+score = free * power - bridge_cost * 100 / power * claims_in_the_bridge_window
         - 1000 if disconnected, - 500 if load_unknown, - 200 if not accepting,
         - 100 if throttled
 ```
@@ -362,7 +362,9 @@ as a term but carries no special weight.
 
 **Spawn bridge.** A metric lags a spawn by minutes, so for
 `spawn_bridge_seconds` (default 600; 1–3600) after a job's claim the job
-itself costs 10 points. That keeps the next spawn off the same host until the
+itself costs `bridge_cost * 100 / power` points (`bridge_cost` defaults to 10, so
+10 on a power-100 host, 20 on power 50, 33 on power 30 and 83 on power 12). The
+same job is a larger share of a weak host, so a weak host is held back longer. That keeps the next spawn off the same host until the
 metrics cover the first one. After the window the job costs nothing: its load
 is in the metrics, and the `jobs` term counts it for as long as it lives.
 
@@ -382,7 +384,7 @@ host (`placement_count.go`) until one of these happens:
 
 A request still reconciling, and a launched one whose claim has not shown, keep
 their count. The count adds to the host's `bridged_jobs` and so to the
-`claim_cost` term only. It does not change `active_jobs`, the `jobs` term or
+bridge cost only. It does not change `active_jobs`, the `jobs` term or
 task slots. The count is only that: a claim from a node other than the decided
 host does not release it.
 
@@ -435,19 +437,32 @@ at equal power the less loaded one does.
 ### The decision
 
 `decision` follows policy order (`local_machine`, then `spill_targets`) among
-usable machines, then two rules adjust it. Both look only at usable
+usable machines, then the rules below adjust it. They look only at usable
 candidates (connected, accepting, above the memory floor, not throttled, under
-the job cap, with a free task slot):
+the job cap, with a free task slot). A host with no terms (an old hub) has an
+unknown `free`, never a low one: the floor does not apply to it.
 
-1. **All loaded.** If the best usable score is under 15, no host is a good
-   place. `reason` is `all_loaded` and the decision goes to the host with the
-   highest measured `mem` term (ties: higher score, then policy order). A host
-   that reports no memory never counts as the one with the most; if no usable
-   host reports it, the policy-order winner keeps the decision.
-2. **Hysteresis.** Otherwise the policy-order winner keeps the decision unless
-   the best other usable host scores at least 1.25 times as much. Then `reason`
-   is `challenger` and that host takes it. A rival that is merely ahead does
-   not flip the decision, so back-to-back spawns do not bounce between hosts.
+1. **Free floor.** A host whose `free` (the product of the terms, before
+   `power` and the bridge) is under `free_floor` (default 0.05) is not chosen
+   while another usable host has `free` at or above it. When the policy-order
+   winner is under the floor, the decision moves to the first host at or above
+   it in policy order, and `reason` is `below_free_floor`. A below-floor host
+   never takes the decision from a host at the floor, whatever its score: a
+   score under `free * power - bridge` can be the least negative one on a
+   saturated host (2026-11-13 04:00:57Z, task 4172: oci at 99.8 % CPU busy
+   scored +0.05 because it alone had no claims, while rpi at `free` 0.218 scored
+   -17.4).
+2. **All below the floor.** If every usable host is under it, no host is a good
+   place. `reason` is `all_loaded` and the decision goes to the highest
+   `free * power` (ties: higher score, then policy order), so the stronger of
+   the equally saturated hosts is used first. This replaces the earlier
+   "highest `mem` term when the best score is under 15" rule.
+3. **Hysteresis.** Among the hosts at or above the floor, the winner (the
+   policy-order winner, or the first host at the floor in policy order when the
+   floor moved the decision) keeps the decision unless the best other host at
+   the floor scores at least 1.25 times as much. Then `reason` is `challenger`
+   and that host takes it. A rival that is merely ahead does not flip the
+   decision, so back-to-back spawns do not bounce between hosts.
 
 A decision the rules left alone has no `reason`. Tagged requests (below) have
 no policy-order winner and always take the highest score.
@@ -468,10 +483,15 @@ default.
   "mem_floor": 0.20, "mem_span": 0.20,
   "pagein_half_mbps": 10, "linux_swap_in_half_mbps": 20,
   "load_knee": 0.75, "load_cap": 4,
-  "jobs_half": 8, "claim_cost": 10,
-  "hysteresis": 1.25, "all_loaded_below": 15
+  "jobs_half": 8, "bridge_cost": 10,
+  "hysteresis": 1.25, "free_floor": 0.05
 }}
 ```
+
+`bridge_cost` is the points one claim costs a power-100 host (0..10000); a host
+of power `p` pays `bridge_cost * 100 / p`. `free_floor` (0..1) is the free
+fraction under which a host is not chosen while another is at or above it. The
+earlier `claim_cost` and `all_loaded_below` still load and are ignored.
 
 ### Telemetry
 
@@ -480,8 +500,9 @@ Every decision leaves two kinds of Loki fleet event (`tool=panewire`, see
 
 - `kind=placement`, one per placement decision, with `request_id` (the hub
   spawn request), `job`, `chosen`, `reason` (`policy_order`, `challenger`,
-  `all_loaded`, else the ranking metric) and `candidates`: for every host its
-  `score`, the terms `cpu`, `mem`, `io`, `load`, `jobs`, its `power`, its
+  `below_free_floor`, `all_loaded`, else the ranking metric) and `candidates`:
+  for every host its `score`, the terms `cpu`, `mem`, `io`, `load`, `jobs`,
+  their product `free`, its `power`, its
   `bridge` count (claims inside the bridge window) and `outcome`.
 - `kind=node_spawn`, for failed and refused spawns as before and now for
   **successful** ones: `outcome=ok`, `reason=spawned`, with `request_id`,

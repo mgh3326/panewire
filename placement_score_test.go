@@ -14,12 +14,6 @@ func scoredCandidate(machine string, score, mem float64) PlacementCandidate {
 	return PlacementCandidate{Machine: machine, Score: score, Signals: &PlacementSignals{MemAvailable: &mem, Terms: &PlacementTerms{CPU: 1, Mem: mem, IO: 1, Load: 1, Jobs: 1}}}
 }
 
-// unmeasuredCandidate is a host that reports no memory: its mem term reads 1
-// only because a missing signal is left out of the product.
-func unmeasuredCandidate(machine string, score float64) PlacementCandidate {
-	return PlacementCandidate{Machine: machine, Score: score, Signals: &PlacementSignals{Terms: &PlacementTerms{CPU: 1, Mem: 1, IO: 1, Load: 1, Jobs: 1}}}
-}
-
 // Acceptance 2: the policy-order winner keeps the decision unless a challenger
 // scores at least 1.25 times as much.
 func TestPlacementHysteresisKeepsWinnerUnlessChallengerClearsMargin(t *testing.T) {
@@ -64,33 +58,115 @@ func TestPlacementHysteresisMarginComesFromPolicy(t *testing.T) {
 	}
 }
 
-// Acceptance 2: when the best admitted score is under 15 every host counts as
-// loaded and the decision goes to the host with the most free memory.
-func TestPlacementAllLoadedChoosesHighestMemTerm(t *testing.T) {
+// freeCandidate is a usable host with a given free fraction (carried by the
+// cpu term) and power, for the free-floor rules.
+func freeCandidate(machine string, score, free, power float64) PlacementCandidate {
+	return PlacementCandidate{Machine: machine, Score: score, Signals: &PlacementSignals{Free: free, Power: power, Terms: &PlacementTerms{CPU: free, Mem: 1, IO: 1, Load: 1, Jobs: 1}}}
+}
+
+// Rule 1 (hk 4465): a host under the free floor is not chosen while another
+// usable host is at or above it.
+func TestPlacementFreeFloorSkipsHostsBelowIt(t *testing.T) {
 	k := (PlacementPolicy{}).scoreK()
-	usable := []PlacementCandidate{scoredCandidate("first", 14, .2), scoredCandidate("second", 9, .9), scoredCandidate("third", 12, .5)}
-	if got, reason := k.decide(usable, 0); got != 1 || reason != "all_loaded" {
-		t.Fatalf("decide=%d %q, want the highest mem term (second)", got, reason)
+	// The policy-order winner is under the floor with the best score: it still
+	// loses to the first host at the floor.
+	usable := []PlacementCandidate{freeCandidate("first", 40, .04, 100), freeCandidate("second", 5, .05, 12), freeCandidate("third", 4, .9, 30)}
+	if got, reason := k.decide(usable, 0); got != 1 || reason != "below_free_floor" {
+		t.Fatalf("decide=%d %q, want second (free .05 is at the floor) below_free_floor", got, reason)
 	}
-	// Equal memory: the higher score, then policy order, decides.
-	usable = []PlacementCandidate{scoredCandidate("first", 5, .5), scoredCandidate("second", 9, .5), scoredCandidate("third", 9, .5)}
+	// A winner at the floor keeps the decision; a below-floor rival with a far
+	// higher score cannot take it.
+	usable = []PlacementCandidate{freeCandidate("first", 3, .06, 12), freeCandidate("second", 90, .049, 100)}
+	if got, reason := k.decide(usable, 0); got != 0 || reason != "" {
+		t.Fatalf("decide=%d %q, want the winner kept", got, reason)
+	}
+	// Hysteresis still applies among the hosts above the floor, after the floor
+	// moved the decision: second (the new winner) is kept at 1.2x, taken over
+	// at 1.25x.
+	usable = []PlacementCandidate{freeCandidate("first", 99, .01, 100), freeCandidate("second", 10, .5, 20), freeCandidate("third", 12, .5, 20)}
+	if got, reason := k.decide(usable, 0); got != 1 || reason != "below_free_floor" {
+		t.Fatalf("decide=%d %q", got, reason)
+	}
+	usable[2].Score = 12.5
+	if got, reason := k.decide(usable, 0); got != 2 || reason != "challenger" {
+		t.Fatalf("decide=%d %q", got, reason)
+	}
+	// A host with no terms has an unknown free, never a low one.
+	usable = []PlacementCandidate{freeCandidate("first", 9, .01, 100), {Machine: "second", Score: 1}}
+	if got, reason := k.decide(usable, 0); got != 1 || reason != "below_free_floor" {
+		t.Fatalf("decide=%d %q", got, reason)
+	}
+}
+
+// Rule 2: every usable host under the floor, the highest free*power takes it,
+// whatever the scores and the memory.
+func TestPlacementAllBelowFloorChoosesHighestFreeTimesPower(t *testing.T) {
+	k := (PlacementPolicy{}).scoreK()
+	usable := []PlacementCandidate{freeCandidate("first", 30, .04, 50), freeCandidate("second", -20, .03, 100), freeCandidate("third", 0, .0017, 30)}
+	if got, reason := k.decide(usable, 0); got != 1 || reason != "all_loaded" {
+		t.Fatalf("decide=%d %q, want second (3 beats 2 and 0.05)", got, reason)
+	}
+	// Equal free*power: the higher score, then policy order.
+	usable = []PlacementCandidate{freeCandidate("first", 5, .02, 100), freeCandidate("second", 9, .04, 50), freeCandidate("third", 9, .04, 50)}
 	if got, reason := k.decide(usable, 0); got != 1 || reason != "all_loaded" {
 		t.Fatalf("decide=%d %q", got, reason)
 	}
-	// A host with no memory reading never beats a measured one, however low.
-	usable = []PlacementCandidate{unmeasuredCandidate("first", 14), scoredCandidate("second", 9, .05)}
-	if got, reason := k.decide(usable, 0); got != 1 || reason != "all_loaded" {
-		t.Fatalf("decide=%d %q, want the measured host", got, reason)
+	usable = []PlacementCandidate{freeCandidate("first", 9, .02, 100), freeCandidate("second", 5, .04, 50)}
+	if got, _ := k.decide(usable, 0); got != 0 {
+		t.Fatalf("decide=%d, want the higher score at a tie", got)
 	}
-	// With no measurement anywhere the policy-order winner stays.
-	usable = []PlacementCandidate{unmeasuredCandidate("first", 3), unmeasuredCandidate("second", 9)}
-	if got, reason := k.decide(usable, 0); got != 0 || reason != "all_loaded" {
-		t.Fatalf("decide=%d %q, want policy order", got, reason)
+}
+
+// The constants come from the policy's score object, with the defaults the
+// ticket names.
+func TestPlacementFreeFloorAndBridgeCostFromPolicy(t *testing.T) {
+	k := (PlacementPolicy{}).scoreK()
+	if k.freeFloor != .05 || k.bridgeCost != 10 {
+		t.Fatalf("defaults free_floor=%v bridge_cost=%v", k.freeFloor, k.bridgeCost)
 	}
-	// One host at 15 is enough: the normal rules apply.
-	usable = []PlacementCandidate{scoredCandidate("first", 14, .2), scoredCandidate("second", 15, .9)}
-	if got, reason := k.decide(usable, 0); reason == "all_loaded" || got != 0 {
-		t.Fatalf("decide=%d %q: 15 is not loaded, and 15 < 1.25*14 keeps the winner", got, reason)
+	policy, err := ParsePlacementPolicy([]byte(`{"local_machine":"a","max_active_jobs":5,"score":{"free_floor":0.2,"bridge_cost":20}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	k = policy.scoreK()
+	if k.freeFloor != .2 || k.bridgeCost != 20 {
+		t.Fatalf("free_floor=%v bridge_cost=%v", k.freeFloor, k.bridgeCost)
+	}
+	if got := k.scoreBase(0, 1, 50); got != -40 {
+		t.Fatalf("a claim on power 50 costs %v, want 40", -got)
+	}
+	usable := []PlacementCandidate{freeCandidate("a", 1, .1, 100), freeCandidate("b", 0, .3, 100)}
+	if got, reason := k.decide(usable, 0); got != 1 || reason != "below_free_floor" {
+		t.Fatalf("a floor of .2 left a at .1: decide=%d %q", got, reason)
+	}
+	// The retired keys still load and change nothing.
+	old, err := ParsePlacementPolicy([]byte(`{"local_machine":"a","max_active_jobs":5,"score":{"claim_cost":50,"all_loaded_below":40}}`))
+	if err != nil || old.scoreK() != (PlacementPolicy{}).scoreK() {
+		t.Fatalf("retired score keys: %+v err=%v", old.scoreK(), err)
+	}
+	for _, bad := range []string{`{"free_floor":1.5}`, `{"free_floor":-0.1}`, `{"bridge_cost":-1}`} {
+		if _, err := ParsePlacementPolicy([]byte(`{"local_machine":"a","max_active_jobs":5,"score":` + bad + `}`)); err == nil {
+			t.Fatalf("score %s accepted", bad)
+		}
+	}
+}
+
+// A typical moment: mac-dev is half free with one job decided onto it
+// (0.5*100 - 10 = 40) and an idle oci is 0.9*30 = 27. Neither is under the
+// floor, so the scores decide, whichever is first in policy order: 27 does not
+// reach 1.25*40, and 40 clears 1.25*27 = 33.75.
+func TestPlacementTypicalMomentChoosesMacDev(t *testing.T) {
+	k := (PlacementPolicy{}).scoreK()
+	macDev := freeCandidate("mac-dev", k.scoreBase(.5, 1, 100), .5, 100)
+	oci := freeCandidate("oci", k.scoreBase(.9, 0, 30), .9, 30)
+	if macDev.Score != 40 || oci.Score != 27 {
+		t.Fatalf("scores %v and %v, want 40 and 27", macDev.Score, oci.Score)
+	}
+	if got, reason := k.decide([]PlacementCandidate{macDev, oci}, 0); got != 0 || reason != "" {
+		t.Fatalf("mac-dev first: decide=%d %q", got, reason)
+	}
+	if got, reason := k.decide([]PlacementCandidate{oci, macDev}, 0); got != 1 || reason != "challenger" {
+		t.Fatalf("oci first: decide=%d %q", got, reason)
 	}
 }
 
@@ -114,14 +190,15 @@ func TestPlacementDecisionRulesOnHubPlacement(t *testing.T) {
 	if got := run("0.5", "0.1", "0.9", "0.9"); got.Decision != "desktop" || got.Reason != "challenger" {
 		t.Fatalf("challenger: %+v", got)
 	}
-	// Scores 100*.12*.5 = 6 and 100*.12*1 = 12: all loaded; desktop has the memory.
-	got := run("0.88", "0.88", "0.30", "0.90")
+	// free .03*.5 = .015 and .03*1: both under the .05 floor, so the higher
+	// free*power takes it (all loaded).
+	got := run("0.97", "0.97", "0.30", "0.90")
 	if got.Decision != "desktop" || got.Reason != "all_loaded" {
 		t.Fatalf("all_loaded: %+v", got)
 	}
 	// The wire carries the terms behind the decision for a caller that asks.
 	desktop, _ := t607Candidate(got, "desktop")
-	if desktop.Signals.Terms == nil || desktop.Signals.Terms.Mem != 1 || !closeTerms(*desktop.Signals.Terms, PlacementTerms{.12, 1, 1, 1, 1}) {
+	if desktop.Signals.Terms == nil || desktop.Signals.Terms.Mem != 1 || !closeTerms(*desktop.Signals.Terms, PlacementTerms{.03, 1, 1, 1, 1}) {
 		t.Fatalf("terms=%+v", desktop.Signals.Terms)
 	}
 	// The hub's answer reaches the spawn engine's ranking as the decided host.
