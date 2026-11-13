@@ -37,7 +37,7 @@ func TestLaneEventUsesLaneNameRule(t *testing.T) {
 				t.Fatal(err)
 			}
 			if event, ok := decodeHubLaneEventPayload(payload); !ok || event.OwnerLane != test.lane {
-				t.Fatalf("hub lane event=%+v valid=%t", event, ok)
+				t.Errorf("hub lane event=%+v valid=%t", event, ok)
 			}
 
 			inbox := t.TempDir()
