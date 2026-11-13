@@ -236,7 +236,7 @@ func placementTerms(p *placePlan, chosen, ranking string) ([]fleetevent.Candidat
 		}
 		if t := c.signals.Terms; t != nil {
 			row.Jobs = &t.Jobs
-			free := t.CPU * t.Mem * t.IO * t.Load * t.Jobs
+			free := t.Free()
 			row.Free = &free
 			if c.source != "hub-only" || c.signals.CPUBusyShort != nil || c.signals.CPUBusy5m != nil {
 				row.CPU = &t.CPU

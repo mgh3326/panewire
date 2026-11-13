@@ -469,6 +469,18 @@ unknown `free`, never a low one: the floor does not apply to it.
    `reason` is `challenger` and that host takes it. A rival that is merely ahead does not flip the
    decision, so back-to-back spawns do not bounce between hosts.
 
+**The spawn engine applies the floor before the load bucket.** The floor is an
+eligibility rule (decision 231), so the engine's host ranking
+(`rankHosts` and the `plan` ordering) puts it first: every host the hub marks
+`below_free_floor` (a per-candidate flag in `signals`, set when `free` is under
+`free_floor`) ranks after every host that is not, whatever its load bucket.
+Bucket, the hub's decision and the score then order the hosts at or above the
+floor as before. When every host is under the floor, the highest
+`free * power` ranks first and the bucket does not apply. A below-floor host is
+ranked last, not removed: it is still tried if every other host refuses the
+job. A hub that predates the flag sends none, and no host is then under the
+floor.
+
 A decision the rules left alone has no `reason`. Tagged requests (below) have
 no policy-order winner and always take the highest score.
 

@@ -58,6 +58,11 @@ func TestPlacementFixture0400FloorChoosesTheOnlyHostAboveIt(t *testing.T) {
 		if !ok || math.Abs(c.Signals.Free-h.free) > 5e-4 {
 			t.Fatalf("%s free=%v, want about %v", name, c.Signals.Free, h.free)
 		}
+		// The hub tells the spawn engine which hosts are under the floor, so the
+		// engine can rank them after the others whatever their load bucket.
+		if c.Signals.BelowFreeFloor != (name != "rpi") {
+			t.Errorf("%s below_free_floor=%v", name, c.Signals.BelowFreeFloor)
+		}
 	}
 	// Each claim costs 10*100/power: 30, 40, about 167 and 0.
 	want := map[string]float64{"mac-dev": 2.1 - 30, "desktop": .9 - 40, "rpi": 2.616 - 2*1000.0/12, "oci": .051}

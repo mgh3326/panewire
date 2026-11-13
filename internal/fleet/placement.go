@@ -663,7 +663,7 @@ func (np *placePlan) carryTried(old *placePlan, tried map[string]bool) {
 	np.repo, np.wake = old.repo, old.wake
 }
 
-// sortPlaceCandidates orders awake candidates: load bucket, the host-first
+// sortPlaceCandidates orders awake candidates: the free floor, load bucket, the host-first
 // selection, login evidence, the hub's decision, then score (or load when a
 // candidate has no score). plan sorts with it, and a refusal re-sorts the
 // candidates still to try on fresh hub scores.
@@ -676,7 +676,14 @@ func sortPlaceCandidates(ordered []*placeCandidate, threshold float64, selHost s
 			byScore = false
 		}
 	}
+	anyAbove := slices.ContainsFunc(ordered, func(c *placeCandidate) bool { below, _ := floorKey(c.signals); return !below })
 	slices.SortStableFunc(ordered, func(x, y *placeCandidate) int {
+		// The free floor is eligibility and runs before the load bucket.
+		xBelow, xFreePower := floorKey(x.signals)
+		yBelow, yFreePower := floorKey(y.signals)
+		if c := floorOrder(xBelow, yBelow, xFreePower, yFreePower, anyAbove); c != 0 {
+			return c
+		}
 		if bx, by := placeBucket(*x, threshold), placeBucket(*y, threshold); bx != by {
 			return bx - by
 		}

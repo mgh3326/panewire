@@ -219,6 +219,10 @@ func TestPlacementDecisionRulesOnHubPlacement(t *testing.T) {
 		if view.Decided {
 			decided = view.Name + ":" + view.DecisionReason
 		}
+		// Both hosts are under the floor, and the flag reaches the engine.
+		if !view.Signals.BelowFreeFloor {
+			t.Fatalf("%s: below_free_floor lost on the wire: %+v", view.Name, view.Signals)
+		}
 	}
 	if decided != "desktop:all_loaded" {
 		t.Fatalf("decided=%q views=%+v", decided, views)

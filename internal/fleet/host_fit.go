@@ -112,7 +112,40 @@ func hostBucket(h selHost) int {
 	return 0
 }
 
-// rankHosts orders the fit hosts: bucket, then the host the hub decided on, then the hub score (free capacity
+// floorKey is a host's free-floor ranking key from the hub's signals: whether
+// its free fraction is under the floor (the hub's verdict) and its free times
+// power. A host the hub sent no terms for is never under the floor.
+func floorKey(sig PlacementSignals) (below bool, freePower float64) {
+	if sig.Terms == nil {
+		return false, 0
+	}
+	free := sig.Terms.Free()
+	power := 100.0
+	if sig.Power != nil && *sig.Power > 0 {
+		power = *sig.Power
+	}
+	return sig.BelowFreeFloor, free * power
+}
+
+// floorOrder is the free floor as an eligibility rule that runs before the load
+// bucket: a host under the floor ranks after every host that is not (it stays
+// a last resort if the others all refuse), and when every host is under it the
+// highest free*power ranks first. anyAbove says some host in the list is not
+// under the floor. 0 means the floor does not separate the two.
+func floorOrder(xBelow, yBelow bool, xFreePower, yFreePower float64, anyAbove bool) int {
+	if anyAbove {
+		switch {
+		case xBelow == yBelow:
+			return 0
+		case xBelow:
+			return 1
+		}
+		return -1
+	}
+	return cmp.Compare(yFreePower, xFreePower)
+}
+
+// rankHosts orders the fit hosts: the free floor, then bucket, then the host the hub decided on, then the hub score (free capacity
 // weighted by the host's power) when every ranked host has one, else the raw
 // load, then configuration order (local first).
 func rankHosts(hosts []selHost) []selHost {
@@ -123,7 +156,11 @@ func rankHosts(hosts []selHost) []selHost {
 		}
 	}
 	byScore := !slices.ContainsFunc(out, func(h selHost) bool { return h.score == nil })
+	anyAbove := slices.ContainsFunc(out, func(h selHost) bool { return !h.below })
 	slices.SortStableFunc(out, func(x, y selHost) int {
+		if c := floorOrder(x.below, y.below, x.freePower, y.freePower, anyAbove); c != 0 {
+			return c
+		}
 		if bx, by := hostBucket(x), hostBucket(y); bx != by {
 			return bx - by
 		}

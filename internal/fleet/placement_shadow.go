@@ -525,6 +525,17 @@ func shadowFixed(hosts []selHost, req shadowReq, pol shadowPolicy) ([]selHost, s
 			h.fit = "unusable"
 		}
 	}
+	// The shadow's own floor, so a free_floor set only there ranks the arm the
+	// way the live engine would rank with that floor.
+	for i := range out {
+		h := &out[i]
+		h.below, h.freePower = false, 0
+		if h.view != nil && h.view.Signals.Terms != nil {
+			sig := h.view.Signals
+			sig.BelowFreeFloor = sig.Terms.Free() < pol.freeFloor
+			h.below, h.freePower = floorKey(sig)
+		}
+	}
 	shadowDecide(out, req, pol, func(h selHost) (float64, float64, bool) {
 		if h.view == nil || h.view.Signals.Terms == nil {
 			return 0, 0, false
@@ -560,6 +571,14 @@ func shadowMeasured(hosts []selHost, req shadowReq, pol shadowPolicy) []selHost 
 			h.fit = "memory_refused"
 		}
 		h.score = pol.measuredScore(*h, req, mems[i])
+		h.below, h.freePower = false, 0
+		if f, ok := pol.measuredFree(*h, mems[i]); ok {
+			capability, _ := pol.capabilityOf(req.class, h.name, *h)
+			if capability <= 0 {
+				capability = shadowDefaultPower
+			}
+			h.below, h.freePower = f < pol.freeFloor, f*capability
+		}
 	}
 	byName := map[string]shadowMem{}
 	for i, h := range out {

@@ -292,6 +292,10 @@ type PlacementSignals struct {
 	Free        float64         `json:"free"`
 	Power       float64         `json:"power"`
 	BridgedJobs int             `json:"bridged_jobs"`
+	// BelowFreeFloor says Free is under the policy's free_floor. The spawn
+	// engine ranks such a host after every host at or above the floor, ahead
+	// of the load bucket (docs/placement.md, "The decision").
+	BelowFreeFloor bool `json:"below_free_floor,omitempty"`
 }
 
 type PlacementResult struct {
@@ -694,6 +698,7 @@ func (h *HubServer) placementCandidates(policy PlacementPolicy, metrics placemen
 		terms := k.terms(signals, jobs)
 		signals.Terms, signals.LiveJobs = &terms, jobs
 		signals.Free, signals.Power, signals.BridgedJobs = terms.Free(), policy.power(machine), bridged
+		signals.BelowFreeFloor = signals.Free < k.freeFloor
 		score := k.scoreBase(signals.Free, bridged, signals.Power)
 		if !connected {
 			score -= 1000
