@@ -39,13 +39,9 @@ func RunCLI(args []string, cfg CLIConfig) int {
 	if len(args) > 0 && args[0] == "manual" {
 		return fleet.ManualMain(context.Background(), args[1:], os.Stdout, os.Stderr)
 	}
-	if len(args) > 0 && args[0] == "heavy" {
-		fmt.Fprintln(os.Stderr, "panewire: heavy was removed; use panewire place to select a host by load")
-		return ExitUsage
-	}
 	if len(args) == 1 && (args[0] == "-h" || args[0] == "--help") {
 		fmt.Fprintln(os.Stdout, "Usage: panewire COMMAND [arguments]")
-		fmt.Fprintln(os.Stdout, "Commands: spawn, work, reap, done, escalate, delegate, hosts, profiles, find, plan, resolve, preflight, daemon, hub, hub-status, hub-emit, place, node, prompt, deliveries, jobs, lanes, lanes-audit, fleet-census, session-reap, relay, emit, claude-socket, inbox, job, pr, wait, version, quota, catalog, reps, manual")
+		fmt.Fprintln(os.Stdout, "Commands: spawn, work, reap, done, escalate, delegate, hosts, profiles, find, plan, resolve, preflight, daemon, hub, hub-status, hub-emit, place, node, prompt, deliveries, jobs, lanes, fleet-census, relay, emit, claude-socket, inbox, job, pr, wait, version, quota, catalog, reps, manual")
 		fmt.Fprintln(os.Stdout)
 		fmt.Fprintln(os.Stdout, lanesUsage)
 		return ExitOK
@@ -55,6 +51,9 @@ func RunCLI(args []string, cfg CLIConfig) int {
 	}
 	if args[0] == "hub-status" {
 		return runHubStatusCLI(args[1:], os.Stdout, os.Stderr, hubCLIDeps{})
+	}
+	if args[0] == "fleet" {
+		return runFleetCLI(args[1:], os.Stdout, os.Stderr, hubCLIDeps{})
 	}
 	if args[0] == "hub-emit" {
 		return runHubEmitCLI(args[1:], os.Stdout, os.Stderr, hubCLIDeps{})
@@ -77,14 +76,8 @@ func RunCLI(args []string, cfg CLIConfig) int {
 	if args[0] == "lanes" {
 		return runLanesCLI(args[1:], os.Stdout, os.Stderr, hubCLIDeps{})
 	}
-	if args[0] == "lanes-audit" {
-		return runLanesAuditCLI(args[1:], os.Stdout, os.Stderr, hubCLIDeps{})
-	}
 	if args[0] == "fleet-census" {
 		return runFleetCensusCLI(args[1:], os.Stdout, os.Stderr, hubCLIDeps{})
-	}
-	if args[0] == "session-reap" {
-		return runSessionReapCLI(args[1:], os.Stdout, os.Stderr, hubCLIDeps{})
 	}
 	if args[0] == "relay" {
 		return runRelayCLI(args[1:], os.Stdout, os.Stderr)
@@ -172,7 +165,7 @@ func RunCLI(args []string, cfg CLIConfig) int {
 
 func fleetCommand(command string) bool {
 	switch command {
-	case "spawn", "work", "lead", "reap", "prune", "done", "escalate", "restore", "delegate", "hosts", "profiles", "find", "name-sync", "lanes-missing", "artifacts", "simulate", "plan", "resolve", "preflight", "gc", "_watch", "_spawn-stdin", "_artifact-inventory":
+	case "spawn", "work", "lead", "reap", "prune", "done", "escalate", "restore", "delegate", "hosts", "profiles", "find", "name-sync", "lanes-missing", "artifacts", "simulate", "plan", "resolve", "preflight", "_watch", "_spawn-stdin", "_artifact-inventory":
 		return true
 	}
 	return false

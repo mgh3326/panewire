@@ -28,7 +28,12 @@ type hubSpawnConfig struct {
 	WorkRoot       string `json:"work_root,omitempty"`
 	BriefDocPrefix string `json:"brief_doc_prefix,omitempty"`
 	HandoffkeepEnv string `json:"handoffkeep_env,omitempty"`
-	Enabled        bool   `json:"enabled"`
+	// Checkouts is the checkout.pull allow-list: checkout name to absolute
+	// checkout path (node_checkout_pull.go). Absent means the default rstack
+	// checkout; an entry that is not a valid name and absolute path refuses the
+	// whole file, as cwd_map does.
+	Checkouts map[string]string `json:"checkouts,omitempty"`
+	Enabled   bool              `json:"enabled"`
 	// HandoffkeepEnvDefault is set only by resolveHubSpawnConfig on a node
 	// running on defaults, never from JSON: the credential then resolves as
 	// hkcred.Load does (handoffkeepEnv), without the HANDOFFKEEP_TOKEN
@@ -114,6 +119,20 @@ func loadHubSpawnConfig(path string) (hubSpawnConfig, error) {
 		}
 		if !filepath.IsAbs(config.CWDMap[key]) {
 			return spawnConfigRefusal("cwd_map_dir_absolute", fmt.Sprintf("cwd_map[%q] must be an absolute path", key))
+		}
+	}
+	checkoutNames := make([]string, 0, len(config.Checkouts))
+	for name := range config.Checkouts {
+		checkoutNames = append(checkoutNames, name)
+	}
+	slices.Sort(checkoutNames)
+	for _, name := range checkoutNames {
+		dir := config.Checkouts[name]
+		if !nodeCheckoutNamePattern.MatchString(name) {
+			return spawnConfigRefusal("checkouts_invalid", fmt.Sprintf("checkout name %q must match %s", name, nodeCheckoutNamePattern))
+		}
+		if !filepath.IsAbs(dir) || len(dir) > nodeCommandMaxPathBytes {
+			return spawnConfigRefusal("checkouts_invalid", fmt.Sprintf("checkouts[%q] must be an absolute path", name))
 		}
 	}
 	return config, nil

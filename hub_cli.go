@@ -343,9 +343,6 @@ func parseHubAlertNodes(raw string, tokens map[string]string) (map[string]struct
 }
 
 func runHubCLI(args []string) int {
-	if len(args) > 0 && args[0] == "migrate-sqlite" {
-		return runHubMigrateSQLite(context.Background(), args[1:], os.Getenv(hubDatabaseURLEnv), os.Stdout, os.Stderr)
-	}
 	if len(args) > 0 && args[0] == "spawn" {
 		return runHubSpawnCLI(args[1:], os.Stdout, os.Stderr, hubCLIDeps{})
 	}
@@ -646,11 +643,31 @@ func validHubStatusNodes(nodes []HubNode) bool {
 func renderHubStatus(writer io.Writer, nodes []HubNode) {
 	rows := append([]HubNode(nil), nodes...)
 	sort.Slice(rows, func(i, j int) bool { return rows[i].MachineID < rows[j].MachineID })
-	fmt.Fprintln(writer, "MACHINE\tCLASS\tSTATE\tACCEPTING\tCONTAINMENT\tCONNECTED_SINCE\tLAST_PING_MS\tLAST_NOTE\tREMOTE_META")
+	fmt.Fprintln(writer, "MACHINE\tCLASS\tSTATE\tACCEPTING\tCONTAINMENT\tCONNECTED_SINCE\tLAST_PING_MS\tLAST_NOTE\tREMOTE_META\tCHECKOUTS")
 	for _, node := range rows {
 		meta, _ := json.Marshal(node.RemoteMeta)
-		fmt.Fprintf(writer, "%s\t%s\t%s\t%t\t%s\t%s\t%d\t%s\t%s\n", node.MachineID, node.AlertClass, node.State, node.Accepting, node.Containment, node.ConnectedSince.UTC().Format(time.RFC3339), node.LastPingMS, renderHubLastNote(node.LastNote, time.Now().UTC()), meta)
+		fmt.Fprintf(writer, "%s\t%s\t%s\t%t\t%s\t%s\t%d\t%s\t%s\t%s\n", node.MachineID, node.AlertClass, node.State, node.Accepting, node.Containment, node.ConnectedSince.UTC().Format(time.RFC3339), node.LastPingMS, renderHubLastNote(node.LastNote, time.Now().UTC()), meta, renderHubCheckouts(node.Checkouts))
 	}
+}
+
+// renderHubCheckouts names each checkout's revision as name=sha@branch, in name
+// order; a detached checkout has no @branch. An empty list renders as nothing.
+func renderHubCheckouts(checkouts map[string]HubCheckoutRev) string {
+	names := make([]string, 0, len(checkouts))
+	for name := range checkouts {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	parts := make([]string, 0, len(names))
+	for _, name := range names {
+		rev := checkouts[name]
+		if rev.Branch == "" {
+			parts = append(parts, name+"="+rev.Sha)
+			continue
+		}
+		parts = append(parts, name+"="+rev.Sha+"@"+rev.Branch)
+	}
+	return strings.Join(parts, " ")
 }
 
 func runJobsCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {

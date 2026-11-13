@@ -8,7 +8,7 @@ watch_checks: ['ci-ok']
 # The any-ref CI watch dispatches to bisect a red main (policy/fleet-ci-main-cancel).
 any_ref_workflow: ci-any-ref.yml
 blocking:
-  - paths: ['session_reap.go', 'hub_session_reap.go', 'job.go', 'job_close.go', '*prune*.go', 'internal/fleet/job_dir_ttl.go']
+  - paths: ['job.go', 'job_close.go', '*prune*.go', 'internal/fleet/job_dir_ttl.go']
     reason: Session reaping can destroy live session state before a revert.
   - paths: ['deploy/**', 'provision/**']
     reason: Service installation and database provisioning or teardown change persistent systems before a revert.
@@ -24,5 +24,5 @@ fast_lane:
   max_changed_lines: 50
 
 deploy_approval:
-  - paths: ['deploy/**', 'provision/**', 'hub_*auth*.go', 'hub_*access*.go', 'hub_security*.go', 'hub_operator*.go', 'session_reap.go', 'hub_session_reap.go', 'job_close.go']
+  - paths: ['deploy/**', 'provision/**', 'hub_*auth*.go', 'hub_*access*.go', 'hub_security*.go', 'hub_operator*.go', 'job_close.go']
     reason: Service access authority or destructive session lifecycle changes

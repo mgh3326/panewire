@@ -537,7 +537,6 @@ func TestLanesNodeTokenRouteTable(t *testing.T) {
 		{name: "retired quota list", method: http.MethodGet, path: "/v1/quota", nodeWant: []int{404}, opWant: 404},
 		{name: "jobs", method: http.MethodGet, path: "/v1/jobs", nodeWant: []int{401}, opWant: 200},
 		{name: "orphaned jobs", method: http.MethodGet, path: "/v1/jobs/orphaned", nodeWant: []int{401}, opWant: 200},
-		{name: "session reap", method: http.MethodGet, path: "/v1/session-reap", nodeWant: []int{401}, opWant: 200},
 		{name: "job reassign", method: http.MethodPost, path: "/v1/jobs/reassign", body: `{}`, nodeWant: []int{401}, opWant: 409},
 		{name: "operator events websocket", method: http.MethodGet, path: "/v1/events", nodeWant: []int{401}, opWant: 426},
 		{name: "relay ingress", method: http.MethodPost, path: "/v1/relay/events", body: `{}`, nodeWant: []int{401}, opWant: 400},

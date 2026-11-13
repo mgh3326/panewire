@@ -127,9 +127,7 @@ It attempts URLs in order, backs off only after all fail, and every
 `HUB_PREFER_RETRY` (default `10m`) probes a higher-priority route before
 switching. Cloudflare Access headers apply only to non-tailnet URLs.
 
-Quota collection at the hub is retired: nodes no longer run a quota tool
-and a legacy hub's `quota.request` is answered `unsupported` so a
-mixed-version pair completes the round trip instead of timing out.
+Quota collection at the hub is retired: nodes no longer run a quota tool.
 
 By default every authenticated node is watched for presence and heartbeat-check
 alerts. Pass `--alert-nodes machine-a,machine-b` on the hub to limit alerts to
@@ -155,6 +153,8 @@ instead of ssh: `GET /v1/nodes/agents` lists every node's agents, and
 uses its own scoped token instead of the operator's; see
 [docs/hub-scopes.md](docs/hub-scopes.md). `pane.read` and `job.done` admit only
 such a service; `panewire node pane-read` and `panewire node job-done` call them.
+
+The hub also orders every node to fast-forward its allow-listed git checkouts (`panewire fleet checkout-pull`) and records each order in hk; see [docs/checkout-pull.md](docs/checkout-pull.md).
 
 `panewire pr status` and `panewire pr findings` read a PR's gate state and open
 review findings from handoffkeep's change record (mergewake's last decision when

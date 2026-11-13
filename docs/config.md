@@ -80,7 +80,6 @@ local_delete_at = "drive_confirmed"
 | `max_load_ratio` | unset | Nonnegative load5 / CPU threshold for fallback spillover when hub placement is unavailable. |
 | `max_active` | unset | Nonnegative active-agent threshold for fallback spillover. |
 | `workspace` | unset | Herdr workspace for local spawns, named by label (`workers`), not by id. Herdr deletes a workspace when its last pane closes; spawn recreates a missing label with `herdr workspace create --label` before creating the tab. A configured id is used only while it still exists. |
-| `heavy_max` | legacy | Accepted and ignored; the `heavy` command was removed. |
 | `heavy_load_wait` | legacy | Accepted and ignored; the `heavy` command was removed. |
 | `shell_ready_timeout_ms` | `120000` | Startup readiness window, integer 30000–300000. |
 | `brief_submit_timeout_ms` | `120000` | How long a spawn waits for the brief to start a turn before it refuses with 76, integer 30000–600000. Raise it on a host that runs under sustained load. |
@@ -168,7 +167,6 @@ and its error is preserved in the registration warning.
 | `roles` | unset (all) | Nonempty list of spawn roles (`worker`, `tester`, `reviewer`, `counsel`) this host accepts. Other roles record `role_not_accepted:<role>`. A list that still names the retired `builder` role is a config error (exit 70) that names the key to edit: delete `"builder"` from `<host>.roles`. |
 | `grades` | unset (all) | Nonempty list of task grades (`C`, `B`, `A`, `A+`, `S`, `S+`, `SS`) this host accepts. Other grades record `grade_not_accepted:<grade>`; a consult has no grade and records `grade_not_accepted:none`. |
 | `presence_id` | host `NAME` | Identity this host uses in pacelever host-presence records. |
-| `capacity` | legacy | Accepted and ignored; hosts no longer displays this inventory value. |
 | `heavy` | legacy | Accepted and ignored; the `heavy` command and its host lock were removed. |
 | `wake` | off | Retired with `panewire node wake`: a wake attempt now fails with "no waker configured" and starts nothing. Still accepted. |
 | `wake_hold` | `10` | Retired with `wake`; still accepted. |
@@ -1693,9 +1691,8 @@ do not replace:
 | --- | --- |
 | Jobs | One row per job claimed on this host (`claimed → leased → released`), written with its `job.claim`/`job.reclaim` event. The duplicate arbiter on this host; cross-host duplicates are refused by the hk claim first. |
 | quota_pool records | One execution record per job and pool, written at admission and deleted at `done`, `reap` or a failed spawn. No TTL. |
-| path, linear_permit leases | Exclusive leases with a TTL (90 and 30 minutes by default), a monotonic fencing token, archived history and expiry by `gc`. Library only: panewire itself takes no such lease today. |
+| path, linear_permit leases | Exclusive leases with a TTL (90 and 30 minutes by default), a monotonic fencing token and archived history. Library only: panewire itself takes no such lease today. |
 | Job events | `job.*`, `lease.*` and `quota_pool.*` events, one artifact each. |
-| gc | `panewire gc [--json]`: expires leases, cleans quota_pool records and releases leased jobs whose exact agent label is gone from Herdr. |
 
 State is read and written in place; no migration or import is needed:
 

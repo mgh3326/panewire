@@ -1080,7 +1080,7 @@ func TestFleetCensusLanesIssues(t *testing.T) {
 			t.Errorf("pane lanes=%v", pane.Lanes)
 		}
 	}
-	// The dead verdict comes from lanes-audit.
+	// The dead verdict comes from the lane verdict in lanes_audit.go.
 	dead := 0
 	for _, lane := range result.Lanes {
 		if lane.Verdict == lanesAuditVerdictDead {
