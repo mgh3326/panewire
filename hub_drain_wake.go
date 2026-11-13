@@ -24,16 +24,26 @@ const drainWakeTaskLimit = 1000
 type drainWakeLane struct {
 	known    bool      // an observation has been taken
 	drained  bool      // the last observation was at or below the threshold
-	pending  bool      // drained since the last line and still owed one
-	lastSent time.Time // when the last line went out; zero before the first
+	pending  bool      // drained since the last written line and still owed one
+	lastSent time.Time // when the last line was queued; zero before the first
 	unsaved  bool      // the last save of pending or lastSent failed; retried on the next sweep
+	gen      uint64    // generation of the last queued line
+	inflight uint64    // generation of the queued line not yet confirmed written; 0 when none
+}
+
+// drainWakeDelivery is the writer's confirmation that line gen of lane was
+// written to the node.
+type drainWakeDelivery struct {
+	lane string
+	gen  uint64
 }
 
 // sweepDrainWakes runs in the lane-stall sweep goroutine after the stall
 // observation. A lane first seen idle gets no line: the line answers a drain,
-// and a lane only drains after it has had work. The owed line and the last
-// send are kept in the inbox store (drain_wake_lanes), so a hub restart keeps
-// a line that is still owed.
+// and a lane only drains after it has had work. A line stays owed until the
+// writer confirms it was written; a queued line the writer never wrote is sent
+// again once the interval has passed. The owed line and the last queue time are
+// kept in the inbox store (drain_wake_lanes), so a hub restart keeps them.
 func (h *HubServer) sweepDrainWakes(ctx context.Context, now time.Time) {
 	if h.inbox == nil || h.inbox.policy == nil {
 		return
@@ -46,6 +56,10 @@ func (h *HubServer) sweepDrainWakes(ctx context.Context, now time.Time) {
 		}
 		h.drainWake = owed
 	}
+	if h.drainWakeDelivered == nil {
+		h.drainWakeDelivered = make(chan drainWakeDelivery, 64)
+	}
+	h.drainWakeSettle(ctx)
 	if h.drainWakeUnreported() {
 		// A connected host has not heartbeated its active jobs since its hello,
 		// so every lane count is a lower bound. Observe nothing; keep each lane's state.
@@ -70,25 +84,53 @@ func (h *HubServer) sweepDrainWakes(ctx context.Context, now time.Time) {
 		if state.pending == before.pending && state.lastSent.Equal(before.lastSent) && !state.unsaved {
 			continue
 		}
-		// A failed save stays dirty so the next sweep writes it again, even
-		// when the drain state no longer changes.
-		if err := h.inbox.store.saveDrainWake(ctx, lane, state); err != nil {
-			state.unsaved = true
-			h.logger.Warn("drain wake state not saved; retrying on the next sweep", "lane", lane, "error", err)
-			continue
-		}
-		state.unsaved = false
+		h.persistDrainWake(ctx, lane, state)
 	}
+}
+
+// drainWakeSettle applies the writer's confirmations and retries every save
+// that failed. It reads no active jobs, so it runs even while a host is
+// unreported; a failed save is never left behind for a later sweep to skip.
+func (h *HubServer) drainWakeSettle(ctx context.Context) {
+	for settled := false; !settled; {
+		select {
+		case done := <-h.drainWakeDelivered:
+			state := h.drainWake[done.lane]
+			if state == nil || state.inflight != done.gen {
+				// Superseded: the line was dropped, or a newer one is in flight.
+				continue
+			}
+			state.inflight, state.pending = 0, false
+			h.persistDrainWake(ctx, done.lane, state)
+		default:
+			settled = true
+		}
+	}
+	for lane, state := range h.drainWake {
+		if state.unsaved {
+			h.persistDrainWake(ctx, lane, state)
+		}
+	}
+}
+
+// persistDrainWake writes one lane's state. A failed write stays dirty so the
+// next sweep writes it again.
+func (h *HubServer) persistDrainWake(ctx context.Context, lane string, state *drainWakeLane) {
+	if err := h.inbox.store.saveDrainWake(ctx, lane, state); err != nil {
+		state.unsaved = true
+		h.logger.Warn("drain wake state not saved; retrying on the next sweep", "lane", lane, "error", err)
+		return
+	}
+	state.unsaved = false
 }
 
 // drainWakeLaneStep advances one lane's drain state by one observation.
 func (h *HubServer) drainWakeLaneStep(ctx context.Context, lane string, state *drainWakeLane, routes map[string]reportRelayRoute, now time.Time) {
-	policy := h.inbox.policy
-	threshold := policy.Relay.DrainWakeThreshold
-	interval := policy.Relay.drainWakeInterval
+	threshold := h.inbox.policy.Relay.DrainWakeThreshold
+	interval := h.inbox.policy.Relay.drainWakeInterval
 	inFlight := h.laneActiveJobCount(lane, routes)
 	if inFlight > threshold {
-		state.known, state.drained, state.pending = true, false, false
+		state.known, state.drained, state.pending, state.inflight = true, false, false, 0
 		return
 	}
 	if state.known && !state.drained {
@@ -113,15 +155,27 @@ func (h *HubServer) drainWakeLaneStep(ctx context.Context, lane string, state *d
 	}
 	if backlog == 0 {
 		// Nothing open for the lane's project: the drain owes no line.
-		state.pending = false
+		state.pending, state.inflight = false, 0
 		return
 	}
+	state.gen++
+	gen := state.gen
+	delivered := h.drainWakeDelivered
 	text := drainWakeText(backlog, inFlight)
-	if !agent.queueRelay(hubRelayInjectEvent{Type: "relay.inject", JobID: laneEventTransportID(lane, "drain-wake"), Pane: route.Pane, Text: text}) {
+	event := hubRelayInjectEvent{Type: "relay.inject", JobID: laneEventTransportID(lane, "drain-wake"), Pane: route.Pane, Text: text}
+	event.Delivered = func() {
+		select {
+		case delivered <- drainWakeDelivery{lane: lane, gen: gen}:
+		default:
+			// The sweep is behind: the line stays owed and is sent again after the interval.
+		}
+	}
+	if !agent.queueRelay(event) {
 		h.emitFleet(fleetEvent{Kind: "drain_wake", Job: lane, Outcome: "skipped", Reason: "unrouted", Detail: "lane=" + lane})
 		return
 	}
-	state.pending = false
+	// Queued, not written: the line stays owed until the writer confirms it.
+	state.inflight = gen
 	state.lastSent = now
 	h.emitFleet(fleetEvent{Kind: "drain_wake", Job: lane, Outcome: "sent", Reason: "drained", Detail: fmt.Sprintf("lane=%s backlog=%d in_flight=%d pane=%s", lane, backlog, inFlight, route.Pane)})
 }

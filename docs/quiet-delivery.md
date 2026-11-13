@@ -398,7 +398,8 @@ When the line is sent:
   on the drain and at most once per `relay.drain_wake_interval` (default 1h).
   A lane first seen idle gets no line. The owed line and the last send are
   kept in the inbox store (`drain_wake_lanes`), so a hub restart keeps a line
-  still owed. No drain is read while a connected host has not heartbeated its
+  still owed. A line stays owed until the writer confirms it was written; a
+  queued line never written is sent again after the interval. No drain is read while a connected host has not heartbeated its
   active jobs since its hello: the hello empties them until that heartbeat.
   This is an interim until the hub-owned queue (hk 4376) replaces the hk read.
 - A line still owed to a [trial](#worker-trial) lane when its trial ends is

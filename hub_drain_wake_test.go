@@ -157,7 +157,8 @@ func t4473SetInFlight(rig *t3602Rig, lane string, count int) {
 }
 
 // t4473Lines drains the relay injects queued so far and returns the drain-wake
-// lines among them.
+// lines among them. Reading a line off the channel stands in for the writer:
+// the line counts as written, so its delivery is confirmed.
 func t4473Lines(rig *t3602Rig) []string {
 	var out []string
 	for {
@@ -165,6 +166,9 @@ func t4473Lines(rig *t3602Rig) []string {
 		case ev := <-rig.agent.relays:
 			if ev.Pane == t4473Pane && len(ev.Text) > 0 && ev.Text[0] >= '0' && ev.Text[0] <= '9' {
 				out = append(out, ev.Text)
+				if ev.Delivered != nil {
+					ev.Delivered()
+				}
 			}
 		default:
 			return out
@@ -329,6 +333,39 @@ func TestDrainWakeOwedLineSurvivesRestart(t *testing.T) {
 	if got := t4473Lines(rig); len(got) != 0 {
 		t.Fatalf("a drain inside the interval sent %q", got)
 	}
+	hk := rig.h.handoffkeep
+	if err := rig.h.Close(); err != nil {
+		t.Fatal(err)
+	}
+	rig = t3602Hub(t, path, "default", rig.fake, hk, clock)
+	t4473SetInFlight(rig, t4473Lane, 0)
+	t4473Sweep(rig)
+	if got := t4473Lines(rig); len(got) != 0 {
+		t.Fatalf("the restarted hub sent %q before the interval passed", got)
+	}
+	clock.advance(time.Hour)
+	t4473SetInFlight(rig, t4473Lane, 0)
+	t4473Sweep(rig)
+	if got := t4473Lines(rig); len(got) != 1 || got[0] != t4473Line {
+		t.Fatalf("the restarted hub's owed drain lines=%q, want exactly [%q]", got, t4473Line)
+	}
+}
+
+// A line queued but never written (the writer exits with the line still
+// buffered) stays owed. A restart in that window must still send it once the
+// interval has passed (PR #524 review, hk 4567).
+func TestDrainWakeLineDroppedBeforeWriteIsOwedAfterRestart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "inbox.sqlite3")
+	tasks := []t4473Task{
+		{ID: 1, Project: "handoffkeep", State: "backlog"},
+		{ID: 2, Project: "handoffkeep", State: "unstarted"},
+	}
+	rig, clock := t4473RigAt(t, path, tasks, nil)
+	t4473SetInFlight(rig, t4473Lane, 1)
+	t4473Sweep(rig)
+	t4473SetInFlight(rig, t4473Lane, 0)
+	t4473Sweep(rig)
+	// The line is queued but never read off the channel: the writer never wrote it.
 	hk := rig.h.handoffkeep
 	if err := rig.h.Close(); err != nil {
 		t.Fatal(err)
