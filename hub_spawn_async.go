@@ -250,7 +250,7 @@ func (h *HubServer) runSpawnCoordinator(parent context.Context) {
 	tick := time.NewTicker(2 * time.Second)
 	defer tick.Stop()
 	for {
-		tasks, err := h.inbox.store.pendingSpawns(ctx)
+		tasks, err := h.inbox.store.pendingSpawns(ctx, h.now().UTC())
 		if err == nil && h.drain.admit() {
 			for _, task := range tasks {
 				mu.Lock()
@@ -287,6 +287,10 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 		}
 	}()
 	if !h.now().Before(task.Deadline) {
+		if task.Status == "deadline_exceeded" && task.Node != nil {
+			h.reprobeStaleSpawn(parent, task)
+			return
+		}
 		h.logger.Warn("hub spawn starved in the queue", "request_id", task.Request.RequestID, "job", task.Job, "host", firstNonEmptyString(spawnTaskHost(task), "none"), "queue_wait_s", spawnQueueWaitSeconds(task, h.now()))
 		h.finishSpawnOutcome(task, hubSpawnOutcome{RC: 124, Stage: "landing", Reason: "timeout", Host: spawnTaskHost(task), Retryable: task.Node == nil, Fix: spawnQueueWaitFix(task, h.now())})
 		if task.Node == nil {
