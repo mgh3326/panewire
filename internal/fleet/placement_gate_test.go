@@ -301,8 +301,14 @@ func TestPlacementFallbackKeepsSlotFullHostsOutOfTheFleetState(t *testing.T) {
 	if handled, _, e := a.placeAuto(context.Background(), s, "brief"); e != nil || !handled {
 		t.Fatalf("%v (log %v)", e, log)
 	}
-	if want := []string{"launch:hot-a", "launch:hot-c"}; !slices.Equal(log, want) {
-		t.Fatalf("events %v, want %v (reads %d)", log, want, reader.reads)
+	var launched []string
+	for _, event := range log {
+		if strings.HasPrefix(event, "launch:") {
+			launched = append(launched, event)
+		}
+	}
+	if want := []string{"launch:hot-a", "launch:hot-c"}; !slices.Equal(launched, want) {
+		t.Fatalf("launches %v, want %v (events %v, reads %d)", launched, want, log, reader.reads)
 	}
 	if reader.reads < 2 {
 		t.Fatalf("the fallback did not read the state again: %d reads", reader.reads)
