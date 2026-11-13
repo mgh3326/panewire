@@ -484,9 +484,12 @@ func nodeMigrateLegacyWorktreeAddIntent(ctx context.Context, git relayCommandRun
 		return
 	}
 	var intent nodeWorktreeAddIntent
-	if err := json.Unmarshal(contents, &intent); err != nil || intent.Path != filepath.Clean(dir) {
+	// The legacy record may name the same worktree through another symlink alias
+	// of the work root, so compare resolved paths, then publish the current name.
+	if err := json.Unmarshal(contents, &intent); err != nil || !nodeSamePath(intent.Path, dir) {
 		return
 	}
+	intent.Path = filepath.Clean(dir)
 	name, err := nodeWorktreeAddIntentPath(ctx, git, clone, dir)
 	if err != nil {
 		return

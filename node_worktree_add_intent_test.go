@@ -212,3 +212,54 @@ func TestNodeWorktreePrepareReclaimsLegacySharedIntent(t *testing.T) {
 		t.Fatalf("intent files left after legacy reclaim: files=%v err=%v", leftover, err)
 	}
 }
+
+// Finding (mergewake medium on #535): the work root can move from one symlink
+// alias to another between an interrupted add and the replay after upgrade.
+// The legacy intent then names the old alias while the replay names the new
+// one. Both resolve to the same worktree, so the legacy intent must still be
+// migrated, and the migrated intent must carry the current path.
+func TestNodeWorktreePrepareReclaimsLegacyIntentRecordedThroughOtherAlias(t *testing.T) {
+	fixture := newNodeWorktreeFixture(t)
+	fixture.cloneRepo(t)
+	oldAlias := filepath.Join(fixture.root, "work-old")
+	newAlias := filepath.Join(fixture.root, "work-new")
+	for _, link := range []string{oldAlias, newAlias} {
+		if err := os.Symlink(fixture.workRoot, link); err != nil {
+			t.Fatal(err)
+		}
+	}
+	dir := filepath.Join(fixture.workRoot, "repo.detached")
+	if _, err := exec.Command("git", "-C", fixture.clone, "worktree", "add", "--detach", dir, fixture.main).CombinedOutput(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := exec.Command("git", "-C", fixture.clone, "worktree", "lock", "--reason", "initializing", dir).CombinedOutput(); err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := json.Marshal(nodeWorktreeAddIntent{Path: filepath.Join(oldAlias, "repo.detached"), Mode: "detached", Sha: fixture.main})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(fixture.clone, ".git", "panewire-worktree-add-intent.json"), legacy, 0600); err != nil {
+		t.Fatal(err)
+	}
+	newConfig := filepath.Join(fixture.root, "spawn-new-alias.json")
+	contents, err := json.Marshal(map[string]any{"work_root": newAlias, "enabled": false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(newConfig, contents, 0600); err != nil {
+		t.Fatal(err)
+	}
+	client := &HubClient{spawnConfigPath: newConfig, nodeHerdr: fixture.herdr.run}
+	prepared, code := client.nodeWorktreePrepare(t.Context(), nodeWorktreePrepareArgs{
+		Origin: fixture.origin, Mode: "detached", Sha: fixture.main, Fetch: "refs/heads/main", Dir: "repo.detached",
+	})
+	result, ok := prepared.(nodeWorktreePrepareResult)
+	if code != "" || !ok || result.Outcome != nodePreparePrepared {
+		t.Fatalf("replay through other alias=%+v code=%q, want prepared", prepared, code)
+	}
+	leftover, err := filepath.Glob(filepath.Join(fixture.clone, ".git", "panewire-worktree-add-intent*"))
+	if err != nil || len(leftover) != 0 {
+		t.Fatalf("intent files left after alias replay: files=%v err=%v", leftover, err)
+	}
+}
