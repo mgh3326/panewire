@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"path/filepath"
 
 	"github.com/mgh3326/handoffkeep/client"
 )
@@ -33,6 +34,13 @@ const (
 // sha256 digest.
 func reportDocumentKey(job, digest string) string {
 	return "reports/" + job + "/answer-" + digest + ".md"
+}
+
+// legacyReportDocumentKey is the key `done` used before reports were
+// content-addressed: the report file's name, so a later report at the same
+// path overwrote an earlier one.
+func legacyReportDocumentKey(job, reportPath string) string {
+	return "reports/" + job + "/" + filepath.Base(reportPath)
 }
 
 // publishedDocument is the document the job.report_published receipt names
