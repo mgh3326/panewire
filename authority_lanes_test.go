@@ -519,6 +519,17 @@ func TestControlPlaneLanesPolicyParsing(t *testing.T) {
 	}
 }
 
+func TestControlPlaneConfigLanesKeepTheStrictContract(t *testing.T) {
+	_, err := NewHubServer(HubServerConfig{
+		Tokens:            map[string]string{hubOperatorMachineID: controlPlaneOperatorToken},
+		ReportRelayPath:   filepath.Join(t.TempDir(), "lanes.json"),
+		ControlPlaneLanes: []string{"legacy.parent"},
+	})
+	if err == nil {
+		t.Fatal("non-persisted control-plane configuration accepted a dotted lane")
+	}
+}
+
 // TestControlPlaneControlBlockIsValidatedBeforeAWriteOverwritesIt follows the
 // precedent already set for routes: refusing to write is safer than quietly
 // serializing a normalized version of something an operator hand-edited.

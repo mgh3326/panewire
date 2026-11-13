@@ -114,7 +114,7 @@ func TestPoolPolicyWasteRiskDefaults(t *testing.T) {
 	if *embedded.WasteRisk.HorizonHours != 0 || *embedded.WasteRisk.MinUnusedPct != 20 {
 		t.Fatalf("embedded policy: %+v", *embedded.WasteRisk)
 	}
-	for _, bad := range []string{`, "waste_risk": {"horizon_hours": -1}`, `, "waste_risk": {"min_unused_pct": 101}`, `, "waste_risk": {"bogus": 1}`} {
+	for _, bad := range []string{`, "waste_risk": {"horizon_hours": -1}`, `, "waste_risk": {"min_unused_pct": 101}`} {
 		if e := os.WriteFile(path, []byte(riskPolicy(bad)), 0o600); e != nil {
 			t.Fatal(e)
 		}

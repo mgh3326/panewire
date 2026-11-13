@@ -130,7 +130,7 @@ func TestAcceptingOverrideClearsStaleContainment(t *testing.T) {
 	if err := os.WriteFile(path, []byte(data), 0600); err != nil {
 		t.Fatal(err)
 	}
-	overrides, err := loadAcceptingOverrides(path)
+	overrides, _, err := loadAcceptingOverrides(path)
 	if err != nil {
 		t.Fatal(err)
 	}
