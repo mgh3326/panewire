@@ -45,6 +45,13 @@ func TestLaneEventAcceptsLaneNamesWithUnderscores(t *testing.T) {
 		if code, _ := emitLaneEvent(t, t.TempDir(), name, "producer-invalid", "payload"); code == ExitOK {
 			t.Errorf("emit accepted invalid lane %q", name)
 		}
+		payload, err := json.Marshal(map[string]any{"owner_lane": name, "event_id": "producer-invalid", "text": "payload"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if event, ok := decodeHubLaneEventPayload(payload); ok {
+			t.Errorf("hub accepted invalid lane %q in %+v", name, event)
+		}
 	}
 }
 
