@@ -6,9 +6,13 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
+	"time"
+
+	"github.com/coder/websocket"
 )
 
 // hubAlertLog observes delivered alerts through the hub log, the only sink an
@@ -115,42 +119,86 @@ func (writer *toggleWriter) setDown(down bool) {
 	writer.down = down
 }
 
-// TestHubAlertStaysPendingUntilTheLogAcceptsIt pins the delivery rule: an alert
-// counts as delivered only when the log handler accepted the record. A failed
-// write leaves the incident pending, and the next pass delivers it once.
-func TestHubAlertStaysPendingUntilTheLogAcceptsIt(t *testing.T) {
+func (writer *toggleWriter) text() string {
+	writer.mu.Lock()
+	defer writer.mu.Unlock()
+	return string(writer.out)
+}
+
+// TestHubAlertRetriedBySweepAfterTheLogFails pins the delivery rule through the
+// real path: an alert counts as delivered only when the log handler accepted
+// the record, and a failed write is retried by the next Sweep, not dropped.
+func TestHubAlertRetriedBySweepAfterTheLogFails(t *testing.T) {
+	clock := time.Date(2026, 8, 31, 4, 0, 0, 0, time.UTC)
 	writer := &toggleWriter{down: true}
 	hub, err := NewHubServer(HubServerConfig{
-		Tokens: map[string]string{"operator": r6OperatorToken},
-		Logger: slog.New(slog.NewTextHandler(writer, nil)),
+		Tokens: map[string]string{"operator": r6OperatorToken, "node-a": r6NodeAToken},
+		Now:    func() time.Time { return clock }, StaleAfter: 30 * time.Second, KeepaliveInterval: 10 * time.Second,
+		GracePeriod: defaultHubGracePeriod, Logger: slog.New(slog.NewTextHandler(writer, nil)),
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	hub.mu.Lock()
-	hub.alerts["node:node-a"] = &hubAlertState{active: true, incidentPending: true, incidentGeneration: 1, reason: hubAlertReasonDisconnected}
-	hub.mu.Unlock()
-	incident := hubNotification{key: "node:node-a", incident: true, generation: 1, alert: HubAlert{MachineID: "node-a", Reason: hubAlertReasonDisconnected, Check: hubAlertNoCheck}}
+	hubHTTP := httptest.NewServer(hub.Handler())
+	defer hubHTTP.Close()
 
-	hub.dispatchHubNotifications([]hubNotification{incident})
-	hub.mu.Lock()
-	state := *hub.alerts["node:node-a"]
-	hub.mu.Unlock()
-	if state.incidentDelivered || !state.incidentPending {
-		t.Fatalf("failed write was recorded as delivered: %+v", state)
+	node := r6DialAgent(t, hubHTTP.URL, "node-a", r6NodeAToken)
+	r6Write(t, node, map[string]any{"type": "hello", "machine_id": "node-a", "version": "alert-retry"})
+	eventually(t, time.Second, "node connected", func() bool { return r6NodeState(r6Nodes(t, hubHTTP), "node-a") == "connected" })
+	if err := node.Close(websocket.StatusNormalClosure, "fixture disconnect"); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, time.Second, "node disconnected", func() bool { return r6NodeState(r6Nodes(t, hubHTTP), "node-a") == "disconnected" })
+	delivered := func() bool {
+		hub.mu.Lock()
+		defer hub.mu.Unlock()
+		state := hub.alerts["node:node-a"]
+		return state != nil && state.incidentDelivered
 	}
 
+	// (a) The incident fires while the writer is down: nothing is logged and
+	// nothing is recorded as delivered.
+	clock = clock.Add(defaultHubGracePeriod)
+	hub.Sweep()
+	clock = clock.Add(time.Second)
+	hub.Sweep()
+	clock = clock.Add(time.Second)
+	hub.Sweep()
+	if got := strings.Count(writer.text(), "hub alert"); got != 0 {
+		t.Fatalf("alert logged while the writer was down: %s", writer.text())
+	}
+	if delivered() {
+		t.Fatal("failed write was recorded as delivered")
+	}
+
+	// (b) The writer comes back: the next Sweep writes the incident once.
 	writer.setDown(false)
-	hub.dispatchHubNotifications([]hubNotification{incident})
-	hub.mu.Lock()
-	state = *hub.alerts["node:node-a"]
-	hub.mu.Unlock()
-	if !state.incidentDelivered || state.incidentPending {
-		t.Fatalf("accepted write was not recorded as delivered: %+v", state)
+	clock = clock.Add(time.Second)
+	hub.Sweep()
+	eventually(t, time.Second, "incident logged and recorded", func() bool {
+		return strings.Count(writer.text(), "hub alert") == 1 && delivered()
+	})
+	if !strings.Contains(writer.text(), "reason=disconnected") {
+		t.Fatalf("logged alert is not the incident: %s", writer.text())
 	}
-	if got := strings.Count(string(writer.out), "hub alert"); got != 1 {
-		t.Fatalf("incident logged %d times, want 1: %s", got, writer.out)
+	clock = clock.Add(time.Second)
+	hub.Sweep()
+	if got := strings.Count(writer.text(), "hub alert"); got != 1 {
+		t.Fatalf("incident logged %d times, want 1: %s", got, writer.text())
 	}
+
+	// (c) The node reconnects: the recovery is logged.
+	node = r6DialAgent(t, hubHTTP.URL, "node-a", r6NodeAToken)
+	defer node.Close(websocket.StatusNormalClosure, "")
+	r6Write(t, node, map[string]any{"type": "hello", "machine_id": "node-a", "version": "alert-retry"})
+	eventually(t, time.Second, "node reconnected", func() bool { return r6NodeState(r6Nodes(t, hubHTTP), "node-a") == "connected" })
+	clock = clock.Add(time.Second)
+	hub.Sweep()
+	clock = clock.Add(time.Second)
+	hub.Sweep()
+	eventually(t, time.Second, "recovery logged", func() bool {
+		return strings.Count(writer.text(), "hub alert") == 2 && strings.Contains(writer.text(), "recovery=true")
+	})
 }
 
 // TestHubAlertDeliveredWhenOnlyTheFileSinkFails pins the --log-file tee rule: a
