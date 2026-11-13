@@ -3,6 +3,7 @@ package panewire
 import (
 	"context"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -31,7 +32,7 @@ func TestQuotaPoolReconcileReleasesGoneJobAndKeepsLiveJob(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	client.quotaReconcileApp = func() (*fleet.App, error) {
+	client.quotaReconcile.app = func() (*fleet.App, error) {
 		return &fleet.App{Arbiter: store}, nil
 	}
 	client.nodeHerdr = func(context.Context, ...string) ([]byte, error) {
@@ -47,3 +48,28 @@ func TestQuotaPoolReconcileReleasesGoneJobAndKeepsLiveJob(t *testing.T) {
 	}
 }
 
+func TestQuotaPoolReconcileRunsAtStartupAndOnEachTick(t *testing.T) {
+	client, err := NewHubClient(HubClientConfig{URL: "ws://127.0.0.1", MachineID: "node-a", Token: "fixture", JobsInboxRoot: t.TempDir(), AllowInsecureForTests: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ticks := make(chan time.Time)
+	client.quotaReconcile.ticks = ticks
+	var passes atomic.Int32
+	client.quotaReconcile.pass = func(context.Context) { passes.Add(1) }
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { client.runQuotaPoolReconcile(ctx); close(done) }()
+	eventually(t, time.Second, "startup reconciliation", func() bool { return passes.Load() == 1 })
+	ticks <- time.Now()
+	eventually(t, time.Second, "periodic reconciliation", func() bool { return passes.Load() == 2 })
+	cancel()
+	eventually(t, time.Second, "reconciliation loop shutdown", func() bool {
+		select {
+		case <-done:
+			return true
+		default:
+			return false
+		}
+	})
+}
