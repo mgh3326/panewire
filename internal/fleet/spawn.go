@@ -841,7 +841,7 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 		if e != nil {
 			return e
 		}
-		fmt.Fprintf(a.Out, "dry-run host=%s profile=%s role=%s job=%s\n%s\n", a.machine(), s.Profile, s.Role, s.Job, payload)
+		a.dryRunLine(a.machine(), s, payload)
 		return nil
 	}
 	launch, gate, e := a.admitLaunch(ctx, s, seat, effort, selEffort, grade, builderFamily, autoSel)
