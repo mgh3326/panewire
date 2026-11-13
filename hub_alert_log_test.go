@@ -2,9 +2,12 @@ package panewire
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
+	"strings"
 	"sync"
+	"testing"
 )
 
 // hubAlertLog observes delivered alerts through the hub log, the only sink an
@@ -86,4 +89,65 @@ func (log *hubAlertLog) Texts() []string {
 		texts = append(texts, formatHubAlert(alert))
 	}
 	return texts
+}
+
+// toggleWriter fails every write while down is set, as a full disk would.
+type toggleWriter struct {
+	mu   sync.Mutex
+	down bool
+	out  []byte
+}
+
+func (writer *toggleWriter) Write(p []byte) (int, error) {
+	writer.mu.Lock()
+	defer writer.mu.Unlock()
+	if writer.down {
+		return 0, errors.New("toggle writer is down")
+	}
+	writer.out = append(writer.out, p...)
+	return len(p), nil
+}
+
+func (writer *toggleWriter) setDown(down bool) {
+	writer.mu.Lock()
+	defer writer.mu.Unlock()
+	writer.down = down
+}
+
+// TestHubAlertStaysPendingUntilTheLogAcceptsIt pins the delivery rule: an alert
+// counts as delivered only when the log handler accepted the record. A failed
+// write leaves the incident pending, and the next pass delivers it once.
+func TestHubAlertStaysPendingUntilTheLogAcceptsIt(t *testing.T) {
+	writer := &toggleWriter{down: true}
+	hub, err := NewHubServer(HubServerConfig{
+		Tokens: map[string]string{"operator": r6OperatorToken},
+		Logger: slog.New(slog.NewTextHandler(writer, nil)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hub.mu.Lock()
+	hub.alerts["node:node-a"] = &hubAlertState{active: true, incidentPending: true, incidentGeneration: 1, reason: hubAlertReasonDisconnected}
+	hub.mu.Unlock()
+	incident := hubNotification{key: "node:node-a", incident: true, generation: 1, alert: HubAlert{MachineID: "node-a", Reason: hubAlertReasonDisconnected, Check: hubAlertNoCheck}}
+
+	hub.dispatchHubNotifications([]hubNotification{incident})
+	hub.mu.Lock()
+	state := *hub.alerts["node:node-a"]
+	hub.mu.Unlock()
+	if state.incidentDelivered || !state.incidentPending {
+		t.Fatalf("failed write was recorded as delivered: %+v", state)
+	}
+
+	writer.setDown(false)
+	hub.dispatchHubNotifications([]hubNotification{incident})
+	hub.mu.Lock()
+	state = *hub.alerts["node:node-a"]
+	hub.mu.Unlock()
+	if !state.incidentDelivered || state.incidentPending {
+		t.Fatalf("accepted write was not recorded as delivered: %+v", state)
+	}
+	if got := strings.Count(string(writer.out), "hub alert"); got != 1 {
+		t.Fatalf("incident logged %d times, want 1: %s", got, writer.out)
+	}
 }

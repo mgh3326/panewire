@@ -2,6 +2,7 @@ package panewire
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"sort"
 	"strings"
@@ -313,17 +314,31 @@ func hubAlertMachineID(key string) string {
 	return "unknown"
 }
 
+// errHubAlertNotLogged reports that the log handler did not accept the alert:
+// its level filters it out or its write failed. The alert stays pending.
+var errHubAlertNotLogged = errors.New("hub alert was not accepted by the log")
+
 // logHubAlert is the hub's only alert sink. The three identifiers are logged as
 // attributes so an operator can filter on them; the rendered text carries the
-// same content for a reader of the plain log.
-func (h *HubServer) logHubAlert(alert HubAlert) {
+// same content for a reader of the plain log. It writes through the handler
+// directly, because slog.Logger.Log discards the handler's error: an error
+// return here is the only evidence that the record was written.
+func (h *HubServer) logHubAlert(alert HubAlert) error {
 	level := slog.LevelWarn
 	if alert.Recovery {
 		level = slog.LevelInfo
 	}
-	h.logger.Log(context.Background(), level, "hub alert",
-		"text", formatHubAlert(alert), "machine", alert.MachineID, "reason", alert.Reason,
-		"check", alert.Check, "recovery", alert.Recovery)
+	ctx := context.Background()
+	handler := h.logger.Handler()
+	if !handler.Enabled(ctx, level) {
+		return errHubAlertNotLogged
+	}
+	record := slog.NewRecord(h.now(), level, "hub alert", 0)
+	record.AddAttrs(
+		slog.String("text", formatHubAlert(alert)), slog.String("machine", alert.MachineID),
+		slog.String("reason", alert.Reason), slog.String("check", alert.Check),
+		slog.Bool("recovery", alert.Recovery))
+	return handler.Handle(ctx, record)
 }
 
 // dispatchHubNotifications delivers each due alert to the hub log. The log line
@@ -359,7 +374,10 @@ func (h *HubServer) dispatchHubNotifications(notifications []hubNotification) {
 		if !shouldSend {
 			continue
 		}
-		h.logHubAlert(notification.alert)
+		if err := h.logHubAlert(notification.alert); err != nil {
+			// Not written: leave the pending flag set so the next pass retries.
+			continue
+		}
 		deliveredAt := h.now().UTC()
 		h.mu.Lock()
 		state = h.alerts[notification.key]
