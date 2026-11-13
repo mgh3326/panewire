@@ -503,7 +503,11 @@ binary rejects a `placement.json` that sets `bridge_cost` or `free_floor`
 ("placement policy is invalid"). Update the config only after the rollback
 window of the release that reads these keys; until then leave the defaults
 (unset) in place. A config that still sets `claim_cost` or `all_loaded_below`
-loads on both sides.
+loads on both sides. The fleet's `[placement.shadow]` keys `free_floor` and
+`bridge_cost` in `hosts.toml` are refused the same way by an older binary
+(the fleet commands and the spawn app then fail to start): set them only after
+every reader of that file has this release and delete them before a rollback
+([Fleet config](config.md#placement)).
 
 ### Telemetry
 

@@ -448,6 +448,16 @@ default.
 | `shadow.jobs_half`, `shadow.bridge_cost` | `8`, `10` | Live job count that halves the jobs term; points one claim in the spawn bridge costs a power-100 host (a host of capability `c` pays `bridge_cost * 100 / c`). `shadow.claim_cost` is retired: it still loads and is ignored. |
 | `capability.light.<host>`, `capability.heavy.<host>` | none | The host's capability for light and heavy work, in the unit of the hub's `power`. A host with no entry keeps its `power`. |
 
+**Rollout and rollback of `shadow.free_floor` and `shadow.bridge_cost`.** A
+binary from before hk 4465 validates `[placement.shadow]` strictly and refuses
+these two keys as unknown, and the fleet commands and the spawn app do not
+start on a config it refuses. Set either key in `hosts.toml` only once every
+binary that reads that file has the release that knows them, and delete both
+keys before rolling a host back. The retired `shadow.all_loaded_below` and
+`shadow.claim_cost` load on both sides. The same ordering holds for the hub's
+`placement.json` keys of the same names
+([Constants](placement.md#constants)).
+
 ## `[quota]`
 
 Panewire's pool and profile settings are read from
