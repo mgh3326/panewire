@@ -137,6 +137,12 @@ func (client *HubClient) nodeCheckoutAllowList() map[string]string {
 	}
 	config, defaults, err := client.resolveHubSpawnConfig()
 	if err != nil {
+		// A missing spawn.json is the node on defaults, whether the path was
+		// the default one or named explicitly.
+		var configErr *hubSpawnConfigError
+		if asConfigError(err, &configErr) && configErr.Rule == "config_missing" {
+			return nodeCheckoutDefaults()
+		}
 		return map[string]string{}
 	}
 	if defaults || config.Checkouts == nil {
