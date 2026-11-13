@@ -537,7 +537,7 @@ var t3434WorkerActions = []struct{ notifyType, text, most string }{
 	{"decision", "ESC hk 3430: which migration order do we ship?", "decision"},
 	{"blocked", "BLOCKED hk 3430: CI needs an operator secret", "blocked"},
 	{"findings", "hk 3430: review findings on #221 | /jobs/hk3430/findings.md", "findings"},
-	{"order", "hk 3430: rebase #222 on #221 first", "decision"},
+	{"order", "hk 3430: rebase #222 on #221 first", "order"},
 	{"automation-failed", "hk 3430: mergewake watch failed on #221", "automation-failed"},
 	{"deploy-approval", "hk 3430: #221 needs a deploy approval", "decision"},
 	{"watch-hold", "hk 3430: watch hold on #221", "blocked"},

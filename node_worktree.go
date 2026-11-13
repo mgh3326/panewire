@@ -387,10 +387,11 @@ func nodeGitVersionOK(ctx context.Context, git relayCommandRunner) (bool, error)
 }
 
 type nodeWorktreeEntry struct {
-	Path     string
-	Branch   string
-	Detached bool
-	Locked   bool
+	Path       string
+	Branch     string
+	Detached   bool
+	Locked     bool
+	LockReason string
 }
 
 // nodeListWorktrees parses `git worktree list --porcelain` for the clone.
@@ -419,10 +420,43 @@ func nodeListWorktrees(ctx context.Context, git relayCommandRunner, main string)
 			cur.Detached = true
 		case strings.HasPrefix(line, "locked"):
 			cur.Locked = true
+			cur.LockReason = strings.TrimSpace(strings.TrimPrefix(line, "locked"))
 		}
 	}
 	flush()
 	return entries, nil
+}
+
+// nodeAddWorktree removes only a locked worktree that appeared after this
+// add attempt began. The caller has already checked that dir was not listed.
+// Git marks an interrupted add with the reason "initializing"; that exact
+// state, plus this invocation's failed add, is the ownership evidence for
+// cleanup. A lock with any other reason is left alone.
+func nodeAddWorktree(ctx context.Context, git relayCommandRunner, clone, dir string, args ...string) error {
+	_, addErr := git(ctx, args...)
+	if addErr == nil || ctx.Err() == nil {
+		return addErr
+	}
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	entries, err := nodeListWorktrees(cleanupCtx, git, clone)
+	if err != nil {
+		slog.Warn("node worktree interrupted add cleanup failed", "path", dir, "err", err)
+		return addErr
+	}
+	for _, entry := range entries {
+		if nodeSamePath(entry.Path, dir) && entry.Locked && entry.LockReason == "initializing" {
+			if _, err := git(cleanupCtx, "-C", clone, "worktree", "remove", "--force", "--force", dir); err != nil {
+				slog.Warn("node worktree interrupted add cleanup failed", "path", dir, "err", err)
+				return addErr
+			}
+			if _, err := git(cleanupCtx, "-C", clone, "worktree", "prune"); err != nil {
+				slog.Warn("node worktree interrupted add prune failed", "path", dir, "err", err)
+			}
+			return addErr
+		}
+	}
+	return addErr
 }
 
 // nodeCanonicalClonePath is the one name prepare and remove give a clone:
@@ -987,7 +1021,7 @@ func (client *HubClient) nodePrepareBranch(ctx context.Context, git relayCommand
 			}
 			result.FastForwarded = true
 		}
-		if _, err := git(ctx, "-C", clone, "worktree", "add", dir, args.Branch); err != nil {
+		if err := nodeAddWorktree(ctx, git, clone, dir, "-C", clone, "worktree", "add", dir, args.Branch); err != nil {
 			return nodeOutcomeGitFailed
 		}
 		return nodePreparePrepared
@@ -995,7 +1029,7 @@ func (client *HubClient) nodePrepareBranch(ctx context.Context, git relayCommand
 	if originTip == "" || !strings.EqualFold(originTip, expected) {
 		return nodePrepareBranchElsewhere
 	}
-	if _, err := git(ctx, "-C", clone, "worktree", "add", "-b", args.Branch, dir, "origin/"+args.Branch); err != nil {
+	if err := nodeAddWorktree(ctx, git, clone, dir, "-C", clone, "worktree", "add", "-b", args.Branch, dir, "origin/"+args.Branch); err != nil {
 		return nodeOutcomeGitFailed
 	}
 	if _, err := git(ctx, "-C", dir, "branch", "--set-upstream-to", "origin/"+args.Branch, args.Branch); err != nil {
@@ -1109,7 +1143,7 @@ func (client *HubClient) nodePrepareDetached(ctx context.Context, git relayComma
 		}
 		return nodePrepareReused
 	}
-	if _, err := git(ctx, "-C", clone, "worktree", "add", "--detach", dir, args.Sha); err != nil {
+	if err := nodeAddWorktree(ctx, git, clone, dir, "-C", clone, "worktree", "add", "--detach", dir, args.Sha); err != nil {
 		return nodeOutcomeGitFailed
 	}
 	return nodePreparePrepared
