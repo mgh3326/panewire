@@ -81,7 +81,7 @@ func TestSpawnOperatorFlagsRequireAuthorizedDurableMessage(t *testing.T) {
 	_, server := t14Hub(t)
 	_, scopedServer := pw2Hub(t, map[string]string{"svc-machine": "spawn@node-a"}, "", nil)
 	service := pw2Caller{"svc-machine", "svc-machine", pw2ServiceToken("svc-machine")}
-	flags := [][]string{{"--task-hk-bypass"}, {"--job-dup-ok"}, {"--allow-escalation"}, {"--keep"}, {"--grade", "A"}, {"--routing-role", "consult"}, {"--override-reason", "operator request"}, {"--operator-request", "request-a"}, {"--requested-by", "operator"}, {"--purpose", "inspect launch"}, {"-w", "worker pool"}}
+	flags := [][]string{{"--task-hk-bypass"}, {"--job-dup-ok"}, {"--allow-escalation"}, {"--keep"}, {"--grade", "A"}, {"--role", "consult"}, {"--override-reason", "operator request"}, {"--operator-request", "request-a"}, {"--requested-by", "operator"}, {"--purpose", "inspect launch"}, {"-w", "worker pool"}}
 	for _, args := range flags {
 		body := t14SpawnBody(t14RequestID(985))
 		body["args"] = args
@@ -178,7 +178,7 @@ func TestHubSpawnArgsRefuseBuilderRoleKeepReviewerAuthorFlags(t *testing.T) {
 	if validHubSpawnArgs([]string{"--role", "builder", "--lane", "job", "--parent", "caller"}) {
 		t.Fatal("--role builder must not pass the hub allowlist")
 	}
-	if !validHubSpawnArgs([]string{"--role", "reviewer", "--builder-family", "anthropic", "--builder-job", "author-job"}) {
-		t.Fatal("a reviewer must keep --builder-family and --builder-job")
+	if !validHubSpawnArgs([]string{"--role", "reviewer", "--author-family", "anthropic", "--builder-job", "author-job"}) {
+		t.Fatal("a reviewer must keep --author-family and --builder-job")
 	}
 }

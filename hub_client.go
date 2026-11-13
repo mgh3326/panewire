@@ -198,6 +198,14 @@ type HubClient struct {
 	quotaReconcile        quotaPoolReconcileHooks
 	nodeTaskState         fleet.TaskStateReader // fixture seam; nil reads spawn.json handoffkeep_env.
 	nodePR                fleet.PRReader        // fixture seam; nil reads spawn.json handoffkeep_env.
+
+	// taskPaneSweepMu serializes the node's sweeps over one shared sweeper: the
+	// local pass and the hub's pane.sweep command (node_pane_sweep_ended.go).
+	// Lock order: taskPaneSweepMu, then nodeCommandMu.
+	taskPaneSweepMu     sync.Mutex
+	taskPaneSweeperOnce sync.Once
+	taskPaneSweeper     *fleet.TaskPaneSweeper
+
 	// Fleet state publisher (fleet_state_node.go, docs/fleet-state.md).
 	statePublish       bool
 	stateQuotaPools    []string

@@ -40,7 +40,7 @@ func TestAsyncSpawnLateResultReconcilesAgainstSameNode(t *testing.T) {
 				t.Fatal(err)
 			}
 			spec := *req.Repository.Checkout
-			dispatch := hubSpawnRequest{RequestID: t14RequestID(881), Machine: "machine-a", CWDKey: "project", Brief: hubSpawnBrief{Inline: "task"}, Checkout: &hubSpawnCheckout{Origin: spec.Origin, Mode: spec.Mode, Branch: spec.Branch, Sha: spec.Sha, Dir: spec.Dir}, Args: []string{"--job", "test-job", "-l", "test-job", "-m", "codex-sol", "--t", "T1", "--task", "42", "--owner", "parent", "--role", "worker"}, WaitSeconds: 600, DeadlineMS: task.Deadline.UnixMilli()}
+			dispatch := hubSpawnRequest{RequestID: t14RequestID(881), Machine: "machine-a", CWDKey: "project", Brief: hubSpawnBrief{Inline: "task"}, Checkout: &hubSpawnCheckout{Origin: spec.Origin, Mode: spec.Mode, Branch: spec.Branch, Sha: spec.Sha, Dir: spec.Dir}, Args: []string{"--job", "test-job", "-l", "test-job", "-m", "codex-sol", "--t", "T1", "--task", "42", "--owner", "parent", "--role", "implementer"}, WaitSeconds: 600, DeadlineMS: task.Deadline.UnixMilli()}
 			task, err = h.inbox.store.bindSpawn(t.Context(), req.RequestID, task.Attempt, dispatch, time.Now().UTC())
 			if err != nil {
 				t.Fatal(err)
@@ -71,7 +71,7 @@ func TestAsyncSpawnLateResultReconcilesAgainstSameNode(t *testing.T) {
 			if replay.RequestID != sent.RequestID {
 				t.Fatal("recovery created a new execution request")
 			}
-			receipt := fleet.ExecutionReceipt{Job: "test-job", Host: "machine-a", Pane: "pane-1", Profile: "codex-sol", Model: "model-fixture", Role: "worker", CWD: "/work/" + spec.Dir, Label: "test-job", Kind: "codex"}
+			receipt := fleet.ExecutionReceipt{Job: "test-job", Host: "machine-a", Pane: "pane-1", Profile: "codex-sol", Model: "model-fixture", Role: "implementer", CWD: "/work/" + spec.Dir, Label: "test-job", Kind: "codex"}
 			if err = wsjson.Write(t.Context(), node, map[string]any{"type": "job.spawn.result", "request_id": replay.RequestID, "rc": 0, "job_id": "test-job", "pane": "pane-1", "stdout_tail": "OK pane=pane-1 job=test-job", "receipt": receipt, "stage": "landing", "stage_ms": map[string]int64{"landing": 12}}); err != nil {
 				t.Fatal(err)
 			}

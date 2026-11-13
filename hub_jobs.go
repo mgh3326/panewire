@@ -31,7 +31,7 @@ func normalizeHubActiveJobMetadata(job *HubActiveJob) {
 	if job.Tier != "T0" && job.Tier != "T1" && job.Tier != "T2" && job.Tier != "T3" {
 		job.Tier = ""
 	}
-	if job.Role != "worker" && job.Role != "captain" {
+	if job.Role != "implementer" {
 		job.Role = ""
 	}
 	if job.StartedAt != "" {
@@ -118,8 +118,8 @@ func decodeHubJobCompletionPayload(payload []byte) (hubJobEventPayload, bool) {
 	return event, valid
 }
 
-// decodeHubJobEscalationPayload is the flat record contract written by the retired spawner
-// and captains. It deliberately reuses completion metadata and adds a compact
+// decodeHubJobEscalationPayload is the flat record contract written by the retired spawner.
+// It deliberately reuses completion metadata and adds a compact
 // operator-readable reason; it is not a command channel.
 func decodeHubJobEscalationPayloadDetailed(payload []byte) (hubJobEventPayload, []string, bool) {
 	var fields map[string]json.RawMessage

@@ -22,7 +22,7 @@ import (
 //	{
 //	  "now": "2026-10-31T07:24:00Z",        // optional; --now or the clock wins
 //	  "grade": "A",                          // task grade (required)
-//	  "role": "worker", "effort": "high",    // optional request constraints
+//	  "role": "implementer", "effort": "high",    // optional request constraints
 //	  "allow_escalation": false,
 //	  "credit_pools": ["anthropic-api"],     // optional; policy list is default
 //	  "pools": [
@@ -443,7 +443,7 @@ func (a *App) simulate(ctx context.Context, args []string) error {
 		applySet(pools, windows, resets, set, now)
 	}
 	p := &selPlan{policy: policy, order: slices.Clone(policy.Order), at: now}
-	p.req = selReq{grade: doc.Grade, role: firstNonempty(doc.Role, "worker"), effort: doc.Effort, allowEscalation: doc.AllowEscalation, urgency: urgencyNormal, urgencySource: "simulation"}
+	p.req = selReq{grade: doc.Grade, role: firstNonempty(doc.Role, "implementer"), effort: doc.Effort, allowEscalation: doc.AllowEscalation, urgency: urgencyNormal, urgencySource: "simulation"}
 	var pending []*selCand
 	for _, sc := range doc.Candidates {
 		row := CatalogRow{Profile: sc.Profile, Effort: sc.Effort, Grade: sc.Grade, ModelID: sc.ModelID, Pool: sc.Pool, Gate: sc.Gate, Score: sc.Score, RetiredAt: sc.RetiredAt}

@@ -37,7 +37,7 @@ func TestOperatorSpawnAcceptsCanonicalSubmissionArgs(t *testing.T) {
 				Config:     fleet.Config{Local: map[string]any{"machine_id": "machine-a"}},
 				Repository: &fleet.Repository{Name: "project", Origin: origin, LocalRoot: root, Worktree: "project.job", Checkout: &fleet.HubCheckout{Origin: origin, Mode: "branch", Branch: "wk/task", Sha: strings.Repeat("a", 40), Dir: "project.job"}},
 			}
-			request, err := app.PrepareSubmission(t.Context(), fleet.Spawn{CWD: cwd, Prompt: brief, Profile: "auto", Host: "auto", Label: "job", Job: "job", T: "T1", Task: "42", Owner: "parent", Role: "worker", Grade: "S+", ExcludeHosts: excluded, Containment: "hk:12"})
+			request, err := app.PrepareSubmission(t.Context(), fleet.Spawn{CWD: cwd, Prompt: brief, Profile: "auto", Host: "auto", Label: "job", Job: "job", T: "T1", Task: "42", Owner: "parent", Role: "implementer", Grade: "S+", ExcludeHosts: excluded, Containment: "hk:12"})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -69,7 +69,7 @@ func TestOperatorSpawnAcceptsCanonicalSubmissionArgs(t *testing.T) {
 
 func TestOperatorSpawnGradeAndRoleBoundary(t *testing.T) {
 	for _, grade := range []string{"C", "B", "A", "A+", "S", "S+", "SS"} {
-		args := []string{"--grade", grade, "--role", "counsel"}
+		args := []string{"--grade", grade, "--role", "consult"}
 		if !validHubSpawnArgsForMode(args, true) {
 			t.Fatalf("operator grade rejected: %s", grade)
 		}

@@ -43,7 +43,7 @@ func boundedContext(t *testing.T) context.Context {
 }
 
 func refusalNodeRequest(request fleet.Submission, id int, machine string) fleet.HubSpawnRequest {
-	return fleet.HubSpawnRequest{RequestID: t14RequestID(id), Machine: machine, CWDKey: "project", Brief: fleet.HubBrief{Doc: "briefs/test-job.md"}, Checkout: request.Repository.Checkout, Args: []string{"--job", "test-job", "-m", "sonnet", "-l", "test-job", "--role", "worker"}, WaitSeconds: 60}
+	return fleet.HubSpawnRequest{RequestID: t14RequestID(id), Machine: machine, CWDKey: "project", Brief: fleet.HubBrief{Doc: "briefs/test-job.md"}, Checkout: request.Repository.Checkout, Args: []string{"--job", "test-job", "-m", "sonnet", "-l", "test-job", "--role", "implementer"}, WaitSeconds: 60}
 }
 
 // A refusal the node gives before it touches anything must not end an auto

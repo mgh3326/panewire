@@ -33,7 +33,7 @@ func shadowEvents(a *App) *[]fleetevent.Event {
 // Decided).
 func workerFleet(t *testing.T, scores map[string]float64) (*App, Spawn, *fakePlacementSource) {
 	t.Helper()
-	a, s, _, src := hostFirstFixture(t, "worker", "B", workerRows,
+	a, s, _, src := hostFirstFixture(t, "implementer", "B", workerRows,
 		map[string]string{"mac-b": testClaudeB, "cloud-small": testClaudeB, "cloud-tiny": testClaudeB, "pi": testClaudeB}, nil)
 	for i := range src.hosts {
 		if sc, ok := scores[src.hosts[i].Name]; ok {
@@ -104,20 +104,20 @@ func liveScenarios() []liveScenario {
 		}
 	}
 	return []liveScenario{
-		{name: "account only on a busy host", role: "counsel", grade: "A", rows: consultRows, place: both, load: map[string]float64{"cloud-small": 1.6, "mac-b": 0.2}},
-		{name: "unity lead skips the waste account", role: "counsel", grade: "A", tags: "unity", rows: consultRows, place: both, load: map[string]float64{"cloud-small": 0.1, "mac-b": 0.5}},
-		{name: "refused accounts skip the host", role: "counsel", grade: "A", rows: consultRows, place: map[string]string{"mac-b": testClaudeA, "cloud-small": testClaudeB}, load: map[string]float64{"mac-b": 0.1, "cloud-small": 0.5}, gate: "refuseA"},
-		{name: "all hosts refused", role: "counsel", grade: "A", rows: consultRows, place: both, load: map[string]float64{"cloud-small": 0.1, "mac-b": 0.5}, gate: "refuseAll"},
-		{name: "no host declares the cap", role: "counsel", grade: "A", tags: "gpu", rows: consultRows, place: both},
-		{name: "no single host declares every cap", role: "counsel", grade: "A", tags: "unity,linux", rows: consultRows, place: both},
-		{name: "pi takes a light worker task", role: "worker", grade: "B", rows: workerRows, place: map[string]string{"pi": testClaudeB}},
-		{name: "pi never takes a lead", role: "counsel", grade: "B", rows: consultRows, place: map[string]string{"pi": testClaudeB}},
-		{name: "an idle pi does not draw a lead", role: "counsel", grade: "B", rows: consultRows, place: map[string]string{"pi": testClaudeB, "mac-b": testClaudeB}, load: map[string]float64{"pi": 0.0, "mac-b": 0.8}},
-		{name: "one-core vm never takes a heavy grade", role: "worker", grade: "S", rows: workerRows, place: map[string]string{"cloud-tiny": testClaudeB}},
-		{name: "heavy grade goes to a capable host", role: "worker", grade: "S", rows: workerRows, place: map[string]string{"cloud-tiny": testClaudeB, "mac-b": testClaudeB}, load: map[string]float64{"cloud-tiny": 0.0, "mac-b": 0.9}},
-		{name: "one-core vm takes light work", role: "worker", grade: "B", rows: workerRows, place: map[string]string{"cloud-tiny": testClaudeB, "mac-b": testClaudeB}, load: map[string]float64{"cloud-tiny": 0.1, "mac-b": 0.9}},
-		{name: "heavy-go work needs the cap", role: "worker", grade: "B", tags: "heavy-go", rows: workerRows, place: map[string]string{"cloud-tiny": testClaudeB}},
-		{name: "hub score ranks the local host too", role: "worker", grade: "B", rows: workerRows, place: map[string]string{"pi": testClaudeB, "mac-b": testClaudeB},
+		{name: "account only on a busy host", role: "consult", grade: "A", rows: consultRows, place: both, load: map[string]float64{"cloud-small": 1.6, "mac-b": 0.2}},
+		{name: "unity lead skips the waste account", role: "consult", grade: "A", tags: "unity", rows: consultRows, place: both, load: map[string]float64{"cloud-small": 0.1, "mac-b": 0.5}},
+		{name: "refused accounts skip the host", role: "consult", grade: "A", rows: consultRows, place: map[string]string{"mac-b": testClaudeA, "cloud-small": testClaudeB}, load: map[string]float64{"mac-b": 0.1, "cloud-small": 0.5}, gate: "refuseA"},
+		{name: "all hosts refused", role: "consult", grade: "A", rows: consultRows, place: both, load: map[string]float64{"cloud-small": 0.1, "mac-b": 0.5}, gate: "refuseAll"},
+		{name: "no host declares the cap", role: "consult", grade: "A", tags: "gpu", rows: consultRows, place: both},
+		{name: "no single host declares every cap", role: "consult", grade: "A", tags: "unity,linux", rows: consultRows, place: both},
+		{name: "pi takes a light worker task", role: "implementer", grade: "B", rows: workerRows, place: map[string]string{"pi": testClaudeB}},
+		{name: "pi never takes a lead", role: "consult", grade: "B", rows: consultRows, place: map[string]string{"pi": testClaudeB}},
+		{name: "an idle pi does not draw a lead", role: "consult", grade: "B", rows: consultRows, place: map[string]string{"pi": testClaudeB, "mac-b": testClaudeB}, load: map[string]float64{"pi": 0.0, "mac-b": 0.8}},
+		{name: "one-core vm never takes a heavy grade", role: "implementer", grade: "S", rows: workerRows, place: map[string]string{"cloud-tiny": testClaudeB}},
+		{name: "heavy grade goes to a capable host", role: "implementer", grade: "S", rows: workerRows, place: map[string]string{"cloud-tiny": testClaudeB, "mac-b": testClaudeB}, load: map[string]float64{"cloud-tiny": 0.0, "mac-b": 0.9}},
+		{name: "one-core vm takes light work", role: "implementer", grade: "B", rows: workerRows, place: map[string]string{"cloud-tiny": testClaudeB, "mac-b": testClaudeB}, load: map[string]float64{"cloud-tiny": 0.1, "mac-b": 0.9}},
+		{name: "heavy-go work needs the cap", role: "implementer", grade: "B", tags: "heavy-go", rows: workerRows, place: map[string]string{"cloud-tiny": testClaudeB}},
+		{name: "hub score ranks the local host too", role: "implementer", grade: "B", rows: workerRows, place: map[string]string{"pi": testClaudeB, "mac-b": testClaudeB},
 			tune: func(a *App, src *fakePlacementSource) {
 				a.Config.Local["spawn"] = true
 				a.Config.Local["machine_id"] = "local-box"
@@ -133,7 +133,7 @@ func liveScenarios() []liveScenario {
 				}
 				src.hosts = append(src.hosts, HostView{Name: "local-box", Connected: true, LoadRatio: ptrF(0.1), Score: ptrF(100)})
 			}},
-		{name: "local load5 over threshold, remote busy under it (Defect A)", role: "worker", grade: "B", rows: workerRows, place: allB,
+		{name: "local load5 over threshold, remote busy under it (Defect A)", role: "implementer", grade: "B", rows: workerRows, place: allB,
 			tune: func(a *App, src *fakePlacementSource) {
 				scores(map[string]float64{"mac-b": 100, "cloud-small": 50, "cloud-tiny": 40, "pi": 30})(a, src)
 				a.Config.Local["spawn"] = true
@@ -143,22 +143,22 @@ func liveScenarios() []liveScenario {
 				src.hosts = append(src.hosts, HostView{Name: "local-box", Connected: true, LoadRatio: ptrF(0.3), Score: ptrF(300), Signals: sigs(100)})
 				src.presence = append(src.presence, PresenceRecord{HostID: "local-box", AccountKey: testClaudeB, LastSeen: a.Now()})
 			}},
-		{name: "challenger inside the hysteresis margin (Defect B)", role: "worker", grade: "B", rows: workerRows, place: allB,
+		{name: "challenger inside the hysteresis margin (Defect B)", role: "implementer", grade: "B", rows: workerRows, place: allB,
 			tune: scores(map[string]float64{"mac-b": 100, "cloud-small": 120, "cloud-tiny": 50, "pi": 40})},
-		{name: "challenger clears the hysteresis margin", role: "worker", grade: "B", rows: workerRows, place: allB,
+		{name: "challenger clears the hysteresis margin", role: "implementer", grade: "B", rows: workerRows, place: allB,
 			tune: scores(map[string]float64{"mac-b": 100, "cloud-small": 130, "cloud-tiny": 50, "pi": 40})},
-		{name: "host at its job cap stays a live candidate", role: "worker", grade: "B", rows: workerRows, place: allB,
+		{name: "host at its job cap stays a live candidate", role: "implementer", grade: "B", rows: workerRows, place: allB,
 			tune: func(a *App, src *fakePlacementSource) {
 				scores(map[string]float64{"mac-b": 100, "cloud-small": 50, "cloud-tiny": 40, "pi": 30})(a, src)
 				src.hosts[0].Reason = "active_jobs>=max"
 			}},
-		{name: "hub memory floor drops a host", role: "worker", grade: "B", rows: workerRows, place: allB,
+		{name: "hub memory floor drops a host", role: "implementer", grade: "B", rows: workerRows, place: allB,
 			tune: func(a *App, src *fakePlacementSource) {
 				scores(map[string]float64{"mac-b": 100, "cloud-small": 90, "cloud-tiny": 1, "pi": 1})(a, src)
 				src.hosts[0].Reason = "not_accepting(memory_pressure)"
 				src.hosts[0].Signals = sigs(100)
 			}},
-		{name: "scored hosts with signals", role: "worker", grade: "B", rows: workerRows, place: allB,
+		{name: "scored hosts with signals", role: "implementer", grade: "B", rows: workerRows, place: allB,
 			tune: func(a *App, src *fakePlacementSource) {
 				scores(map[string]float64{"mac-b": 100, "cloud-small": 90, "cloud-tiny": 1, "pi": 1})(a, src)
 				src.hosts[0].Signals, src.hosts[1].Signals = sigs(100), sigs(100)

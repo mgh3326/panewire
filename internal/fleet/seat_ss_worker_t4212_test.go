@@ -121,7 +121,7 @@ func TestSPlusPinOfFableAndAstraIsAdmittedWithContainment(t *testing.T) {
 			if err := a.admitPinnedProfile(context.Background(), &s); err != nil {
 				t.Fatalf("%s@high -m pin on an S+ task refused: %v", profile, err)
 			}
-			got := a.nativeGate(context.Background(), QuotaRequest{Profile: profile, Effort: "high", Role: "worker"}, true)
+			got := a.nativeGate(context.Background(), QuotaRequest{Profile: profile, Effort: "high", Role: "implementer"}, true)
 			if got.Code != 0 || !strings.Contains(got.Out, `"ok":true`) {
 				t.Fatalf("%s@high worker refused by the gate: code=%d out=%s", profile, got.Code, got.Out)
 			}
@@ -137,12 +137,12 @@ func TestRemovedAstraAliasRefusedAndOtherProfilesAdmitted(t *testing.T) {
 	a.BenchCatalog = func(context.Context) ([]CatalogRow, error) { return rows, nil }
 	ctx := context.Background()
 
-	alias := a.nativeGate(ctx, QuotaRequest{Profile: "test-astra", Effort: "high", Role: "worker"}, true)
+	alias := a.nativeGate(ctx, QuotaRequest{Profile: "test-astra", Effort: "high", Role: "implementer"}, true)
 	if alias.Code == 0 || !strings.Contains(alias.Out, "role_restricted: removed astra seat alias") {
 		t.Fatalf("removed astra alias admitted or wrong reason: code=%d out=%s", alias.Code, alias.Out)
 	}
 	for _, profile := range []string{"opus", "sonnet"} {
-		got := a.nativeGate(ctx, QuotaRequest{Profile: profile, Effort: "high", Role: "worker"}, true)
+		got := a.nativeGate(ctx, QuotaRequest{Profile: profile, Effort: "high", Role: "implementer"}, true)
 		if got.Code != 0 || !strings.Contains(got.Out, `"ok":true`) {
 			t.Fatalf("%s worker refused by the gate: code=%d out=%s", profile, got.Code, got.Out)
 		}

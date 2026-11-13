@@ -47,7 +47,7 @@ func TestSpawnParseAcceptsAnyPurposeForAstra(t *testing.T) {
 func TestParseRefusalDoesNotSubmit(t *testing.T) {
 	a, s, runner, _ := cmdFixture(t)
 	before := len(runner.Calls)
-	err := a.Run(context.Background(), []string{"spawn", "-c", s.CWD, "-p", s.Prompt, "-w", s.Workspace, "-l", s.Label, "--job", s.Job, "--t", s.T, "--task", s.Task, "--owner", "parent", "--role", "worker", "-m", "codex-astra", "--host", "local", "--override-reason", "fixture", "--containment", "hk:12", "--review-pass", "2"})
+	err := a.Run(context.Background(), []string{"spawn", "-c", s.CWD, "-p", s.Prompt, "-w", s.Workspace, "-l", s.Label, "--job", s.Job, "--t", s.T, "--task", s.Task, "--owner", "parent", "--role", "implementer", "-m", "codex-astra", "--host", "local", "--override-reason", "fixture", "--containment", "hk:12", "--review-pass", "2"})
 	if exitCode(err) != exitUsage || len(runner.Calls) != before {
 		t.Fatalf("parse refusal submitted work: err=%v calls=%d before=%d", err, len(runner.Calls), before)
 	}
@@ -134,7 +134,7 @@ func cmdFixture(t *testing.T) (*App, Spawn, *fakeRunner, *int) {
 	if e := os.WriteFile(prompt, []byte(strings.Repeat("Please implement and verify the requested change.\n", 200)), 0600); e != nil {
 		t.Fatal(e)
 	}
-	s := Spawn{CWD: cwd, Profile: "cmd-dsflash41", Prompt: prompt, Workspace: "workspace", Label: "worker-a", Job: "job-a", T: "T1", Task: "42", Role: "worker", Host: "local", OverrideReason: "fixture", Containment: "hk:12"}
+	s := Spawn{CWD: cwd, Profile: "cmd-dsflash41", Prompt: prompt, Workspace: "workspace", Label: "worker-a", Job: "job-a", T: "T1", Task: "42", Role: "implementer", Host: "local", OverrideReason: "fixture", Containment: "hk:12"}
 	a.Quota = &fakeQuota{LaunchValue: Launch{Profile: "cmd-dsflash41", ModelID: "provider/example-model", Effort: "high", Grade: "A+", Gate: "default"}}
 	launched, detected := false, false
 	submitted := false

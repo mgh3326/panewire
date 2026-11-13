@@ -180,7 +180,7 @@ func TestNonRoleNoRoleCandidateDoesNotBeatAuthFailure(t *testing.T) {
 		{accountKey: "credit:one", code: outcomeNoRoleCandidate, reason: "pool_excluded"},
 		{accountKey: "claude:two", code: outcomeAuthUnavailable, reason: "auth_unavailable"},
 	}}
-	_, err := a.selectionRefused(context.Background(), Spawn{}, selReq{role: "worker"}, p)
+	_, err := a.selectionRefused(context.Background(), Spawn{}, selReq{role: "implementer"}, p)
 	if exitCode(err) != exitAuthUnavailable || !strings.Contains(err.Error(), "AUTH_UNAVAILABLE") || strings.Contains(err.Error(), "role_restricted") {
 		t.Fatalf("pool exclusion masked sign-in refusal: %v", err)
 	}
@@ -192,8 +192,8 @@ func TestRoleRestrictedRefusalKeepsDiagnosticSuffixAndPoolHints(t *testing.T) {
 		{accountKey: "codex:one", code: outcomeNoRoleCandidate, reason: "role_restricted: removed astra seat alias"},
 		{accountKey: "codex:two", reason: reasonPoolAtCap, cap: "codex"},
 	}}
-	_, err := a.selectionRefused(context.Background(), Spawn{Profile: "codex-astra", Host: "host-a"}, selReq{role: "counsel"}, p)
-	for _, want := range []string{"role_restricted: removed astra seat alias", "routing role counsel", "--host host-a restricts accounts", "pool_at_cap: codex=2"} {
+	_, err := a.selectionRefused(context.Background(), Spawn{Profile: "codex-astra", Host: "host-a"}, selReq{role: "consult"}, p)
+	for _, want := range []string{"role_restricted: removed astra seat alias", "routing role consult", "--host host-a restricts accounts", "pool_at_cap: codex=2"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("refusal lost %q: %v", want, err)
 		}
@@ -289,7 +289,7 @@ func TestPlanKeepsTypedGateRefusalOutcome(t *testing.T) {
 	}
 	out := &bytes.Buffer{}
 	a.Out = out
-	err := a.planCmd(context.Background(), []string{"--role", "counsel", "--t", "T1", "--grade", "A", "--json"})
+	err := a.planCmd(context.Background(), []string{"--role", "consult", "--t", "T1", "--grade", "A", "--json"})
 	var doc map[string]any
 	if parseErr := json.Unmarshal(out.Bytes(), &doc); parseErr != nil {
 		t.Fatalf("plan JSON: %v", parseErr)

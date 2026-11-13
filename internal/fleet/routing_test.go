@@ -22,8 +22,7 @@ const routingBlockV1 = `{
     "reviewer":    {"allowed": ["*"], "effort": "high", "on_exhaustion": "escalate", "family_rule": "not_author"},
     "verifier":    {"allowed": ["opus", "codex-terra61"], "effort": "high", "on_exhaustion": "wait", "fixed": true},
     "judge":       {"allowed": ["*"], "effort": "high", "on_exhaustion": "escalate", "family_rule": "not_parent"}
-  },
-  "panewire_role_map": {"worker": "implementer", "tester": "verifier", "reviewer": "reviewer", "counsel": "consult"}
+  }
 }`
 
 var routingDocV1 = routingDoc(routingBlockV1)
@@ -87,15 +86,15 @@ func TestRoutingLeadNeverDowngradesToSonnet(t *testing.T) {
 
 	// Control: without routing the incident reproduces — sonnet wins.
 	a, s, _ := consultFixture(t)
-	s.Role = "counsel"
+	s.Role = "consult"
 	sel, e := a.selectFor(ctx, s, selReq{grade: "A", t: s.T, role: s.Role, urgency: urgencyNormal, urgencySource: "default"})
 	if e != nil || sel.chosen.seat.Canon != "sonnet" {
 		t.Fatalf("control: unrouted builder must pick the cheapest rung, sonnet: %v %+v", e, sel)
 	}
 
 	for _, tc := range []struct{ name, role, override string }{
-		{"--routing-role consult", "worker", "consult"},
-		{"--role counsel", "counsel", ""},
+		{"resolve --role consult (implementer seat)", "implementer", "consult"},
+		{"--role consult", "consult", ""},
 	} {
 		a, s, _ := consultFixture(t)
 		s.Role, s.RoutingRole = tc.role, tc.override
@@ -110,7 +109,7 @@ func TestRoutingLeadNeverDowngradesToSonnet(t *testing.T) {
 			t.Fatalf("%s: sonnet must be role_filtered, got %v", tc.name, got)
 		}
 		rt := routingStamp(t, sel)
-		if rt["routing_role"] != map[string]string{"worker": "consult", "counsel": "consult"}[tc.role] || rt["routing_version"] != 1 || rt["policy_source"] != "hk" {
+		if rt["routing_role"] != "consult" || rt["routing_version"] != 1 || rt["policy_source"] != "hk" {
 			t.Fatalf("%s: routing stamp: %v", tc.name, rt)
 		}
 	}
@@ -118,7 +117,7 @@ func TestRoutingLeadNeverDowngradesToSonnet(t *testing.T) {
 	// Every lead profile refused at its gate while sonnet would still admit:
 	// refuse role_exhausted_wait with the earliest reset, never sonnet.
 	a, s, q := consultFixture(t)
-	s.Role = "counsel"
+	s.Role = "consult"
 	q.GateDo = exhaustedGatePools(map[string]string{"sonnet": "claude"})
 	sel, e = a.selectProfile(ctx, s)
 	if exitCode(e) != exitRoleWait || !strings.Contains(e.Error(), reasonRoleExhaustWait) {
@@ -145,20 +144,6 @@ func TestExplorerRoleRefusedWithImplementerHint(t *testing.T) {
 	err := a.resolveCmd(context.Background(), []string{"--role", "explorer"})
 	if code(err) != exitUsage || !strings.Contains(err.Error(), "use --role implementer") {
 		t.Fatalf("resolve explorer: got %v, want usage error recommending implementer", err)
-	}
-	if _, err := a.routeFor(context.Background(), "worker", "explorer"); code(err) != exitUsage || !strings.Contains(err.Error(), "use --routing-role implementer") {
-		t.Fatalf("routing explorer: got %v, want usage error recommending implementer", err)
-	}
-}
-
-func TestRoutingPolicyRejectsExplorerSeatMapping(t *testing.T) {
-	policy := strings.Replace(routingBlockV1, `"worker": "implementer"`, `"worker": "explorer"`, 1)
-	parsed, err := parseRoutingJSON([]byte(policy))
-	if err == nil {
-		t.Fatalf("parseRoutingJSON accepted removed explorer mapping: %+v", parsed)
-	}
-	if !strings.Contains(err.Error(), "removed role explorer") || !strings.Contains(err.Error(), "use implementer") {
-		t.Fatalf("mapping refusal lacks replacement hint: %v", err)
 	}
 }
 
@@ -206,7 +191,7 @@ func TestRoutingImplementerKeepsPoolOrder(t *testing.T) {
 		t.Fatalf("haiku is not an implementer profile: %v", got)
 	}
 	if rt := routingStamp(t, routed); rt["routing_role"] != "implementer" {
-		t.Fatalf("worker maps to implementer: %v", rt)
+		t.Fatalf("implementer routes as implementer: %v", rt)
 	}
 }
 
@@ -216,7 +201,7 @@ func TestRoutingImplementerKeepsPoolOrder(t *testing.T) {
 func TestRoutingCacheFallback(t *testing.T) {
 	ctx := context.Background()
 	a, s, _ := consultFixture(t)
-	s.Role = "counsel"
+	s.Role = "consult"
 	if _, e := a.selectProfile(ctx, s); e != nil {
 		t.Fatal(e)
 	}
@@ -244,19 +229,19 @@ func TestRoutingCacheFallback(t *testing.T) {
 		t.Fatalf("an unreadable document uses the cache: %v", e)
 	}
 
-	// No cache: lead (builder, counsel, --routing-role consult) and verifier are
+	// No cache: consult (resolve --role consult) and verifier are
 	// refused; implementer proceeds unfiltered.
 	if e := os.Remove(a.routingCachePath()); e != nil {
 		t.Fatal(e)
 	}
 	serveRouting(t, "")
-	for _, tc := range []struct{ role, override string }{{"counsel", ""}, {"worker", "consult"}, {"tester", ""}} {
+	for _, tc := range []struct{ role, override string }{{"consult", ""}, {"implementer", "consult"}, {"implementer", "verifier"}} {
 		s.Role, s.RoutingRole, s.ParentFamily = tc.role, tc.override, "openai"
 		if _, e := a.selectProfile(ctx, s); exitCode(e) != exitConfig {
 			t.Fatalf("%s/%s without hk or cache must exit %d, got %v", tc.role, tc.override, exitConfig, e)
 		}
 	}
-	s.Role, s.RoutingRole, s.ParentFamily = "worker", "", ""
+	s.Role, s.RoutingRole, s.ParentFamily = "implementer", "", ""
 	sel, e = a.selectProfile(ctx, s)
 	if e != nil {
 		t.Fatal(e)
@@ -366,7 +351,7 @@ func TestResolveMatchesPlanAndSpawnsNothing(t *testing.T) {
 	}
 
 	a, _, out := setup()
-	if e := a.Run(context.Background(), []string{"plan", "--t", "T1", "--routing-role", "consult", "--grade", "A", "--json"}); e != nil {
+	if e := a.Run(context.Background(), []string{"plan", "--t", "T1", "--role", "consult", "--grade", "A", "--json"}); e != nil {
 		t.Fatalf("plan: %v\n%s", e, out)
 	}
 	var plan map[string]any
@@ -413,7 +398,7 @@ func TestResolveMatchesPlanAndSpawnsNothing(t *testing.T) {
 	// at each scale both choose the same profile and record the same request.
 	for _, scale := range []string{"T1", "T2"} {
 		a, _, out := setup()
-		if e := a.Run(context.Background(), []string{"plan", "--t", scale, "--routing-role", "consult", "--grade", "A", "--json"}); e != nil {
+		if e := a.Run(context.Background(), []string{"plan", "--t", scale, "--role", "consult", "--grade", "A", "--json"}); e != nil {
 			t.Fatalf("plan --t %s: %v\n%s", scale, e, out)
 		}
 		var plan map[string]any
@@ -462,7 +447,6 @@ func TestRoutingPolicyValidation(t *testing.T) {
 		"version":    strings.Replace(routingBlockV1, `"version": 1`, `"version": 2`, 1),
 		"exhaust":    strings.Replace(routingBlockV1, `"on_exhaustion": "escalate", "family_rule": "not_author"`, `"on_exhaustion": "panic"`, 1),
 		"downgrade":  strings.Replace(routingBlockV1, `, "downgrade_to": ["haiku", "devin-swe2-medium"]`, ``, 1),
-		"role map":   strings.Replace(routingBlockV1, `"worker": "implementer"`, `"worker": "boss"`, 1),
 		"dup key":    strings.Replace(routingBlockV1, `"version": 1,`, `"version": 1, "version": 1,`, 1),
 		"min_effort": strings.Replace(routingBlockV1, `"effort": "high", "on_exhaustion": "escalate"`, `"effort": "high", "min_effort": "turbo", "on_exhaustion": "escalate"`, 1),
 	} {
@@ -473,8 +457,8 @@ func TestRoutingPolicyValidation(t *testing.T) {
 	a := testApp(t)
 	a.Runner = &fakeRunner{}
 	serveRouting(t, routingDocV1)
-	if _, e := a.routeFor(context.Background(), "worker", "boss"); exitCode(e) != exitUsage {
-		t.Fatalf("an unknown --routing-role is a usage error: %v", e)
+	if _, e := a.routeFor(context.Background(), "implementer", "boss"); exitCode(e) != exitUsage {
+		t.Fatalf("an unknown routing role is a usage error: %v", e)
 	}
 }
 

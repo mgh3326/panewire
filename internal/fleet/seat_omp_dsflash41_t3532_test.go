@@ -16,7 +16,7 @@ func TestOmpDsflash41RegularSeatNeedsNoArm(t *testing.T) {
 	if s.E6 {
 		t.Fatal("omp-dsflash41 still carries the E6 flag")
 	}
-	if want := []string{"worker", "tester", "reviewer"}; !slices.Equal(s.Roles, want) {
+	if want := []string{"implementer", "reviewer"}; !slices.Equal(s.Roles, want) {
 		t.Fatalf("roles %v, want %v", s.Roles, want)
 	}
 
@@ -24,19 +24,19 @@ func TestOmpDsflash41RegularSeatNeedsNoArm(t *testing.T) {
 	host := map[string]any{"omp_commandcode": true}
 	for _, grade := range []string{"A", "B"} {
 		t.Run("worker on grade "+grade+" without an arm", func(t *testing.T) {
-			if err := s.Check(l, "worker", grade, "", "", host); err != nil {
+			if err := s.Check(l, "implementer", grade, "", "", host); err != nil {
 				t.Fatalf("regular seat refused a grade %s worker: %v", grade, err)
 			}
 		})
 	}
 
 	t.Run("host without omp_commandcode is refused", func(t *testing.T) {
-		if got := code(s.Check(l, "worker", "B", "", "", map[string]any{})); got != exitConfig {
+		if got := code(s.Check(l, "implementer", "B", "", "", map[string]any{})); got != exitConfig {
 			t.Fatalf("capability absent: code %d, want %d", got, exitConfig)
 		}
 	})
 
-	t.Run("reviewer needs an independent builder family", func(t *testing.T) {
+	t.Run("reviewer needs an independent author family", func(t *testing.T) {
 		if got := code(s.Check(l, "reviewer", "B", "openai", "", host)); got != 0 {
 			t.Fatalf("independent reviewer: code %d, want 0", got)
 		}
