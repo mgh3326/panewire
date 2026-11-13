@@ -177,27 +177,6 @@ func TestPaneSweepClosesAPaneWhoseTaskEndedAndPRsAreMerged(t *testing.T) {
 	}
 }
 
-// (c) A detached reviewer worktree sits at an open PR's head, the task is
-// deployed and the job has no terminal record: kept.
-func TestPaneSweepKeepsADetachedReviewerAtAnOpenPRHead(t *testing.T) {
-	g := newSweepGitFake(t)
-	f := newPaneSweepFixture(t)
-	f.withGit(g)
-	cwd := g.worktree(t, "mwr-306")
-	f.job("mwr", "worker", "42", map[string]any{"cwd": cwd, "role": "reviewer"})
-	f.tasks["42"], f.category["42"] = "deployed", "completed"
-	g.detached, g.head = true, paneSweepPRHead
-	f.prChanges["42"] = []PRChange{{Number: 306, State: "open", Head: paneSweepPRHead}}
-	f.at(0)
-	f.at(11)
-	if len(f.closed()) != 0 || f.reaped("mwr") != nil {
-		t.Fatalf("a detached reviewer at an open PR head was closed")
-	}
-	if !f.infoHas("task pane kept", "job=mwr", "reason=open_pr", "pr=306") {
-		t.Fatalf("info lines = %q", f.info)
-	}
-}
-
 // (d) The PR lookup fails: the pane is kept and the line says why.
 func TestPaneSweepKeepsAPaneWhenThePRLookupFails(t *testing.T) {
 	g := newSweepGitFake(t)

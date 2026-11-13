@@ -21,6 +21,7 @@ type paneSweepFixture struct {
 	now      time.Time
 	status   map[string]string // pane id → herdr agent_status
 	names    map[string]string // pane id → herdr agent name
+	cwds     map[string]string // pane id → herdr agent cwd; absent reads as no cwd
 	sessions map[string]string // pane id → herdr agent_session JSON; the row also reports agent claude
 	shut     map[string]bool   // panes closed: herdr stops listing them
 	tasks    map[string]string // task id → hk task state
@@ -42,7 +43,7 @@ func newPaneSweepFixture(t *testing.T) *paneSweepFixture {
 	t.Helper()
 	a := testApp(t)
 	f := &paneSweepFixture{t: t, a: a, store: a.JobStore.(*fakeJobStore), now: time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC),
-		status: map[string]string{}, names: map[string]string{}, sessions: map[string]string{}, shut: map[string]bool{}, tasks: map[string]string{}, category: map[string]string{}, prChanges: map[string][]PRChange{}}
+		status: map[string]string{}, names: map[string]string{}, cwds: map[string]string{}, sessions: map[string]string{}, shut: map[string]bool{}, tasks: map[string]string{}, category: map[string]string{}, prChanges: map[string][]PRChange{}}
 	a.Now = func() time.Time { return f.now }
 	f.runner = &fakeRunner{}
 	f.runner.Do = func(c Command) Result {
@@ -58,7 +59,7 @@ func newPaneSweepFixture(t *testing.T) *paneSweepFixture {
 				if session := f.sessions[pane]; session != "" {
 					extra = `,"agent":"claude","agent_session":` + session
 				}
-				rows = append(rows, fmt.Sprintf(`{"pane_id":%q,"tab_id":"t-%s","name":%q,"agent_status":%q%s}`, pane, pane, f.names[pane], status, extra))
+				rows = append(rows, fmt.Sprintf(`{"pane_id":%q,"tab_id":"t-%s","name":%q,"cwd":%q,"agent_status":%q%s}`, pane, pane, f.names[pane], f.cwds[pane], status, extra))
 			}
 			slices.Sort(rows)
 			return Result{Out: `{"result":{"agents":[` + strings.Join(rows, ",") + `]}}`}

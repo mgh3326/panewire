@@ -8,15 +8,16 @@ it closes the pane of a worker or tester once the hk task the job is bound to
 has ended, or the job itself was closed, and the pane has stayed not working
 for a grace. A completed author's pane waits while its PR is open; a job its
 owner gave up or released does not.
+The hub also orders a sweep of every node's ended jobs, whatever their role; see [Hub-ordered sweep](#hub-ordered-sweep).
 
 ## Which jobs
 
 A local job is swept when all of these hold:
 
 - it is not reaped, and not `--keep`;
-- its role is `worker` or `tester` (never `builder`, `captain`, `lead` or
-  `reviewer`; the hub's [finished-reviewer release](hub-spawn-operations.md)
-  keeps reviewer panes);
+- its role is `worker`, `tester`, `reviewer` or `counsel` (never `builder`,
+  `captain` or `lead`). The task rule below applies only to `worker` and
+  `tester`; the hub's [finished-reviewer release](hub-spawn-operations.md) is a separate path.
 - and one of these ends it:
   - **its task ended.** The task is the claim's `--task`, or, for a fix author
     spawned with `--parent-job` whose claim names none, the task of the parent
@@ -27,11 +28,13 @@ A local job is swept when all of these hold:
     job ends `completed`; any state such as `merged`, `done` or `deployed`) or
     `canceled` (the job ends `lost`). Only when the record carries no category
     do the state names `merged`, `done` (completed) and `dropped` (lost) decide;
-  - **the job was closed.** Its latest record is terminal: a `job.revoked`
+  - **the job was closed** (any role). Its latest record is terminal: a `job.revoked`
     with any outcome (`panewire job close`), or a `job.completed`. This holds
     whatever the task's state, and whether or not the task can be read. The
     job ends `completed` for outcome `completed` or a `job.completed`, else
-    `lost`. A job reprompted after its close is live again and is kept.
+    `lost`. A job reprompted after its close is live again and is kept. A lost
+    reviewer or counsel counts as closed; a lost worker or tester does not, and
+    neither does a quota stop.
 
 ### A pane that waits on its open PR
 
@@ -137,17 +140,15 @@ When the pane has been not working for at least the grace, the sweep:
    or lost is left alone), records the usage it read, releases the job's quota,
    removes its lane, and records `job.reaped` with reason `task_<state>` (the
    task's state, such as `task_merged` or `task_deployed`) or, for a closed job
-   whose task has not ended, `job_<outcome>` (`job_abandoned`,
-   `job_superseded`, `job_completed`; `job_revoked` when no outcome is named). If the hk write fails, the pane is
+   whose task has not ended, `job_<outcome>` (`job_abandoned`, `job_superseded`,
+   `job_completed`), `job_lost`, `job_handed_off`, or `job_revoked` when none of these applies. If the hk write fails, the pane is
    already closed: the sweep logs a warning and records `job.record_failed`, as reap
    does, and does not retry the write.
 
 The close runs under the node's acting-command lock, so it never interleaves
 with a `pane.close` or `job.done` from the hub.
 
-Unlike `pane.close`, the sweep does not read the pane's composer, and it does
-not compare the pane's cwd; the task's ended state and the grace stand in for
-them.
+Unlike `pane.close`, the sweep does not read the pane's composer; the task's ended state and the grace stand in for it. The pane must match its job by id and name, or by id and worktree path when the name is gone.
 
 ## The worktree
 
@@ -202,7 +203,7 @@ a git call that cannot be read keeps the worktree.
 ## Log lines
 
 One INFO line per closed pane (`task pane closed`: job, task, task_state, pane,
-idle_seconds) and one per kept candidate (`task pane kept`, with a `reason`).
+idle_seconds, or `ended_seconds` for the ordered pass) and one per kept candidate (`task pane kept`, with a `reason`).
 A candidate is a job whose task is in an ending state, whose task could not be
 read, whose task did not resolve (`no_task`), or that was closed. A completed
 author kept for its PR logs `reason=open_pr` (with `pr`) or
@@ -211,6 +212,28 @@ task is still live logs nothing. A `task pane closed` and a `task worktree
 removed` line carry the `reason` (`task_<state>` or `job_<outcome>`); a kept
 line whose worktree is on an open PR also carries its `pr` number. Lines carry ids only: no
 screen text, no task body, no credentials.
+
+## Hub-ordered sweep
+
+The idle sweep above waits for a grace after a pane stops working. The hub also orders a sweep of ended jobs, so a pane that never went idle, or whose job ended without the idle sweep reaching it, still closes (hk 4512). The two sweeps are separate: the idle sweep is the node's own daemon pass (`--task-pane-sweep-interval`); this one is the hub's.
+
+- The hub's maintenance ticker runs every `--pane-sweep-interval` (default `10m`; `0` turns it off; otherwise at least `10s`). Each tick sends `pane.sweep` with `{"age_s": N}` to every node it knows, where `N` is `--pane-sweep-age` (default `60m`, at most 365 days). A node that is not connected is counted as `disconnected`; one that does not answer within five minutes is `node_timeout`.
+- A node closes the pane of a job when all of these hold:
+  - its role is `worker`, `tester`, `reviewer` or `counsel`, it is not `--keep`, and it is not reaped;
+  - it has a pane id and a name;
+  - its own latest record is terminal (`job.revoked`, `job.completed`, `job.handed_off`, or a `job.lost` that was not a quota stop), and that record is at least `age` old.
+- Nothing else decides the close: no idle time, no grace, no herdr status. A worker or tester whose worktree is on an open PR is kept (`reason=open_pr`, or `reason=pr_state_unknown` when the PR state cannot be read), the same PR rule as the idle sweep. Otherwise the close runs as in [The close](#the-close), without its idle gate. Only a worker's or tester's worktree is removed ([The worktree](#the-worktree)).
+- The pane must be listed by herdr with the job's id and name. If the name is gone, the pane id and the job's worktree path must match instead. A job whose pane is not listed is kept (`reason=pane_not_listed`).
+- Each closed pane gets `job.reaped` with reason `job_revoked`, `job_completed`, `job_handed_off`, `job_lost`, or the job's outcome.
+- The node replies `{"closed": [...]}`, one `{job, pane, role, reason}` per pane closed. A node-side failure (no jobs root, or an hk or herdr read that fails) replies `sweep_failed`.
+- The hub logs one line per tick, `ended pane sweep`, with `nodes`, `closed` (`machine:job:pane:reason`) and `failed` (`machine=code`). Lines carry ids and codes only. Each node also logs `task pane closed` and `task pane kept` as above, with `ended_seconds`.
+- Only the hub's ticker may issue `pane.sweep`; a `node.command` caller cannot.
+- The ordered pass and the idle pass share one mutex on the node, so they never judge a pane at the same time.
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--pane-sweep-interval` | `10m` | How often the hub asks each node to sweep ended jobs. `0` turns it off. |
+| `--pane-sweep-age` | `60m` | How long a job must have been ended before its pane is closed. At most 365 days. |
 
 ## Configuration
 
