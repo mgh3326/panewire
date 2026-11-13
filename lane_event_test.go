@@ -57,7 +57,7 @@ func TestLaneEventUsesLaneNameRule(t *testing.T) {
 		})
 	}
 
-	invalid := []string{"Auto_trader-design", "auto trader", "auto_trader-design-too-long-name-123"}
+	invalid := []string{"auto trader", "bad/name", ""}
 	for _, name := range invalid {
 		if code, _ := emitLaneEvent(t, t.TempDir(), name, "producer-invalid", "payload"); code == ExitOK {
 			t.Errorf("emit accepted invalid lane %q", name)
@@ -89,7 +89,7 @@ func TestHubReceivesHistoricalDottedLaneEvent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wire, err := json.Marshal(map[string]any{"type": "event", "kind": "lane.event", "payload": payload})
+	wire, err := json.Marshal(map[string]any{"type": "event", "kind": "lane.event", "payload": json.RawMessage(payload)})
 	if err != nil {
 		t.Fatal(err)
 	}
