@@ -431,6 +431,8 @@ type HubServer struct {
 	// heldLoop counts held role reservations per role key; heldLoopMu guards it
 	// separately from mu because a Sentry send must not run under the hub lock.
 	heldLoopMu        sync.Mutex
+	ladderMu          sync.Mutex
+	ladderPlan        func(context.Context, fleet.Submission) error
 	heldLoop          map[string]*spawnHeldLoop
 	heldLoopOrder     lruIndex[string]
 	staleAfter        time.Duration
@@ -827,6 +829,7 @@ func (h *HubServer) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/jobs/close", h.handleJobClose)
 	mux.HandleFunc("GET /v1/jobs/orphaned", h.handleOrphanedJobs)
 	mux.HandleFunc("POST /v1/jobs/reassign", h.handleReassignJob)
+	mux.HandleFunc("POST /v1/jobs/escalate-author", h.handleEscalateAuthor)
 	mux.HandleFunc("GET /v1/agent", h.handleAgent)
 	mux.HandleFunc("GET /v1/events", h.handleEvents)
 	mux.HandleFunc("POST /v1/relay/events", h.handleRelayIngress)

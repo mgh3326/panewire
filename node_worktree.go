@@ -75,12 +75,13 @@ var (
 )
 
 type nodeWorktreePrepareArgs struct {
-	Origin string `json:"origin"`
-	Mode   string `json:"mode"`
-	Branch string `json:"branch"`
-	Sha    string `json:"sha"`
-	Fetch  string `json:"fetch"`
-	Dir    string `json:"dir"`
+	Origin      string `json:"origin"`
+	Mode        string `json:"mode"`
+	Branch      string `json:"branch"`
+	Sha         string `json:"sha"`
+	Fetch       string `json:"fetch"`
+	Dir         string `json:"dir"`
+	VerifyReuse bool   `json:"verify_reuse,omitempty"`
 }
 
 type nodeWorktreeRemoveArgs struct {
@@ -1045,6 +1046,14 @@ func (client *HubClient) nodePrepareBranch(ctx context.Context, git relayCommand
 		}
 		expected = strings.ToLower(originTip)
 	}
+	if args.VerifyReuse && !strings.EqualFold(originTip, expected) {
+		if originTip == "" || expected == "" {
+			return nodePrepareBranchElsewhere
+		}
+		if _, err := git(ctx, "-C", clone, "merge-base", "--is-ancestor", expected, originTip); err != nil {
+			return nodePrepareBranchElsewhere
+		}
+	}
 	var atDir *nodeWorktreeEntry
 	for i := range entries {
 		if nodeSamePath(entries[i].Path, dir) {
@@ -1055,6 +1064,9 @@ func (client *HubClient) nodePrepareBranch(ctx context.Context, git relayCommand
 	}
 	intent := nodeWorktreeAddIntent{Mode: "branch", Branch: args.Branch, Sha: args.Sha}
 	if atDir != nil && atDir.Locked {
+		if args.VerifyReuse {
+			return nodeRemoveLocked
+		}
 		if !nodeReclaimInterruptedAdd(ctx, git, clone, dir, entries, intent) {
 			return nodeRemoveLocked
 		}
@@ -1078,6 +1090,9 @@ func (client *HubClient) nodePrepareBranch(ctx context.Context, git relayCommand
 			return nodeOutcomeGitFailed
 		}
 		if !strings.EqualFold(head, expected) {
+			if args.VerifyReuse {
+				return nodePrepareBranchElsewhere
+			}
 			relation, err := nodeCommitRelation(ctx, git, clone, head, expected)
 			if err != nil {
 				return nodeOutcomeGitFailed
@@ -1099,6 +1114,9 @@ func (client *HubClient) nodePrepareBranch(ctx context.Context, git relayCommand
 			result.FastForwarded = true
 		}
 		return nodePrepareReused
+	}
+	if args.VerifyReuse {
+		return nodePrepareBranchElsewhere
 	}
 	if _, err := git(ctx, "-C", clone, "show-ref", "--verify", "--quiet", "refs/heads/"+args.Branch); err == nil {
 		out, err := git(ctx, "-C", clone, "rev-parse", "--verify", "refs/heads/"+args.Branch+"^{commit}")

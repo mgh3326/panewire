@@ -390,7 +390,7 @@ func (client *HubClient) runHubSpawn(parent context.Context, message hubOutbound
 		if prepare == nil {
 			prepare = client.nodeWorktreePrepare
 		}
-		prepared, code := prepare(runContext, nodeWorktreePrepareArgs{Origin: message.Checkout.Origin, Mode: message.Checkout.Mode, Branch: message.Checkout.Branch, Sha: message.Checkout.Sha, Fetch: message.Checkout.Fetch, Dir: message.Checkout.Dir})
+		prepared, code := prepare(runContext, nodeWorktreePrepareArgs{Origin: message.Checkout.Origin, Mode: message.Checkout.Mode, Branch: message.Checkout.Branch, Sha: message.Checkout.Sha, Fetch: message.Checkout.Fetch, Dir: message.Checkout.Dir, VerifyReuse: message.Checkout.VerifyReuse})
 		ms := time.Since(started).Milliseconds()
 		checkoutMS = &ms
 		if code != "" {
