@@ -146,7 +146,7 @@ func (agent *hubAgent) queueFeatures() {
 		return
 	}
 	select {
-	case agent.features <- hubFeaturesEvent{Type: "hub.features", Features: []string{hubFeatureHostSignals, hubFeatureReadiness, hubFeatureLaneEventPane, hubFeaturePaneCaptureDoc, hubFeatureHostActivity, hubFeatureLaunchProof}}:
+	case agent.features <- hubFeaturesEvent{Type: "hub.features", Features: []string{hubFeatureHostSignals, hubFeatureReadiness, hubFeatureLaneEventPane, hubFeaturePaneCaptureDoc, hubFeatureHostActivity, hubFeatureCheckoutPull, hubFeatureLaunchProof}}:
 		agent.featuresSent.Store(true)
 	default:
 	}

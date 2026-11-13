@@ -154,6 +154,8 @@ uses its own scoped token instead of the operator's; see
 [docs/hub-scopes.md](docs/hub-scopes.md). `pane.read` and `job.done` admit only
 such a service; `panewire node pane-read` and `panewire node job-done` call them.
 
+The hub also orders every node to fast-forward its allow-listed git checkouts (`panewire fleet checkout-pull`) and records each order in hk; see [docs/checkout-pull.md](docs/checkout-pull.md).
+
 `panewire pr status` and `panewire pr findings` read a PR's gate state and open
 review findings from handoffkeep's change record (mergewake's last decision when
 hk has none it can trust, or with `--fresh`) through the `pr.status` node op, so a worker needs no GitHub request or token

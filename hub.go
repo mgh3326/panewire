@@ -143,6 +143,9 @@ type HubNode struct {
 	RemoteMeta          map[string]string   `json:"remote_meta"`
 	State               string              `json:"state"`
 	SessionSnapshot     *HubSessionSnapshot `json:"session_snapshot,omitempty"`
+	// Checkouts is each allow-listed git checkout's revision from the last
+	// heartbeat (node_checkout_pull.go); nil when the node reported none.
+	Checkouts map[string]HubCheckoutRev `json:"checkouts,omitempty"`
 }
 
 // HubNodeLoad is the CPU-only console projection of a heartbeat host_load.
@@ -183,7 +186,9 @@ type hubNodeRecord struct {
 	hostMemory    *HubHostMemory
 	// hostActivity is the last heartbeat's user-input report, nil when the node
 	// sent none (host_activity.go). It is recorded only.
-	hostActivity    *HubHostActivity
+	hostActivity *HubHostActivity
+	// checkouts is the last heartbeat's checkout revisions (node_checkout_pull.go).
+	checkouts       map[string]HubCheckoutRev
 	sessionSnapshot *hubSessionSnapshotRecord
 	// powerSource and powerAt are the last power report (host_signals.go).
 	powerSource string
@@ -509,6 +514,7 @@ type HubServer struct {
 	nodeCommands                map[string]*hubNodeCommandPending
 	unworkedLandingGrace        time.Duration
 	nodeCommandWait             time.Duration // fixture seam; zero is hubNodeCommandWait.
+	checkoutPullWait            time.Duration // fixture seam; zero is hubCheckoutPullWait.
 	nodeAgentsWait              time.Duration // fixture seam; zero is hubNodeAgentsWait.
 	// laneStallMu is TryLock'd so at most one lane-stall observation runs and
 	// is held for the run's whole life: once Close has taken it and set
@@ -814,6 +820,7 @@ func (h *HubServer) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/spawn", h.handleSpawn)
 	mux.HandleFunc("GET /v1/spawn/{request_id}", h.handleSpawnGet)
 	mux.HandleFunc("GET /v1/nodes/agents", h.handleNodesAgents)
+	mux.HandleFunc("POST /v1/fleet/checkout-pull", h.handleCheckoutPull)
 	mux.HandleFunc("POST /v1/nodes/{machine}/command", h.handleNodeCommand)
 	return h.drainGuard(h.countRoutes(mux))
 }
@@ -1218,6 +1225,7 @@ func (h *HubServer) handleAgentMessageContext(ctx context.Context, machineID, re
 				record.lastHeartbeat = received
 				record.hostLoad = cloneHubHostLoad(heartbeat.HostLoad)
 				record.hostActivity = heartbeat.HostActivity
+				record.checkouts = heartbeat.Checkouts
 				h.observeHostSignalsLocked(record, heartbeat.HostSignals, received)
 				h.observeReadinessLocked(record, heartbeat.Readiness, received)
 				if !equalHubHostMemory(record.hostMemory, heartbeat.HostMemory) {
@@ -1456,6 +1464,8 @@ type hubHeartbeatPayload struct {
 	SnapshotStatus  string                    `json:"snapshot_status,omitempty"`
 	Truncated       bool                      `json:"truncated,omitempty"`
 	StallDetect     *hubStallBeatPayload      `json:"stall_detect,omitempty"`
+	// Checkouts is the node's allow-listed checkout revisions (node_checkout_pull.go).
+	Checkouts map[string]HubCheckoutRev `json:"checkouts,omitempty"`
 }
 
 // hubStallBeatPayload is the node detector's no-data contract. beat_ms is the
@@ -1500,7 +1510,7 @@ func decodeHubHeartbeatPayload(payload []byte) (hubHeartbeatPayload, bool) {
 		return hubHeartbeatPayload{}, false
 	}
 	for name := range fields {
-		if name != "status" && name != "checks" && name != "host_load" && name != "load_error" && name != "host_memory" && name != "quota" && name != "active_jobs" && name != "holds_active" && name != "host_signals" && name != "host_activity" && name != "readiness" && name != "sessions" && name != "snapshot_status" && name != "truncated" && name != "stall_detect" && name != "pane_ids" && name != "pane_ids_complete" {
+		if name != "status" && name != "checks" && name != "host_load" && name != "load_error" && name != "host_memory" && name != "quota" && name != "active_jobs" && name != "holds_active" && name != "host_signals" && name != "host_activity" && name != "readiness" && name != "sessions" && name != "snapshot_status" && name != "truncated" && name != "stall_detect" && name != "pane_ids" && name != "pane_ids_complete" && name != "checkouts" {
 			return hubHeartbeatPayload{}, false
 		}
 	}
@@ -1608,6 +1618,13 @@ func decodeHubHeartbeatPayload(payload []byte) (hubHeartbeatPayload, bool) {
 			}
 		}
 		heartbeat.PaneIDs, heartbeat.PaneIDsComplete = &ids, &complete
+	}
+	if rawCheckouts, exists := fields["checkouts"]; exists {
+		checkouts, valid := decodeHubCheckoutRevs(rawCheckouts)
+		if !valid {
+			return hubHeartbeatPayload{}, false
+		}
+		heartbeat.Checkouts = checkouts
 	}
 	rawSnapshotStatus, hasSnapshotStatus := fields["snapshot_status"]
 	if hasSnapshotStatus {
@@ -2196,6 +2213,7 @@ func (h *HubServer) Nodes() []HubNode {
 		nodes = append(nodes, HubNode{
 			MachineID: record.machineID, AlertClass: h.alertClass(record.machineID), Accepting: effective, AcceptingEffective: effective, AcceptingOverride: h.acceptingOverrideLocked(record.machineID), Containment: h.relayControl.acceptingOverride[record.machineID].Containment, ContainmentVerified: h.relayControl.acceptingOverride[record.machineID].ContainmentVerified, ConnectedSince: record.connectedSince, LastPingMS: age.Milliseconds(), LastNote: lastNote, Load: hubNodeLoadFromHostLoad(record.hostLoad), Memory: cloneHubHostMemory(record.hostMemory), RemoteMeta: remoteMeta, State: record.state,
 			SessionSnapshot: hubSessionSnapshotView(record.sessionSnapshot, record.state == "stale" || record.state == "disconnected"),
+			Checkouts:       cloneHubCheckoutRevs(record.checkouts),
 		})
 	}
 	sort.Slice(nodes, func(i, j int) bool { return nodes[i].MachineID < nodes[j].MachineID })

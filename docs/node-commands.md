@@ -83,6 +83,14 @@ one whose heartbeat is late, still takes commands — reaping a draining node
 is the common case — and the `state` the hub reports is that presence label.
 A connection that has died unnoticed answers `node_lost` or `node_timeout`.
 
+## Checkout pull
+
+`checkout.pull` fast-forwards an allow-listed git checkout on a node and runs
+its `install.sh` when `install/` or `bin/` changed. It is ordered through
+`POST /v1/fleet/checkout-pull`, not this endpoint, which refuses it. See
+[checkout-pull.md](checkout-pull.md) for the allow-list, refusal reasons, the
+heartbeat revision and the deploy record.
+
 ## Ops
 
 All validation is shared by hub and node. Except for the optional `worktree.list` cursor and limit, every listed argument is required
