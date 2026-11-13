@@ -40,7 +40,7 @@ Node daemons are unaffected: their store (`store.go`) stays a local SQLite file.
 - **Kill switch.** `--delivery-policy off` still opens no database, whichever
   backend is set.
 
-## Rollout (desk)
+## Setup (new database)
 
 1. **Create a dedicated database and role.** The role owns the database and
    needs no other privileges. In `psql` as an administrator:
@@ -64,31 +64,25 @@ Node daemons are unaffected: their store (`store.go`) stays a local SQLite file.
 
    Do not add the URL to the unit's `ExecStart`, to shell history or to a
    ticket.
-3. **Drain the SQLite inbox while the hub is still up.** No command copies the
-   SQLite inbox to Postgres any more: `panewire hub migrate-sqlite` is removed.
-   First quiesce the producers (lanes and jobs that send to the hub). Then,
-   with the hub running, check through `panewire inbox` that every unread item
-   is read, every must-ack item is acknowledged, and no job waits on an item
-   that is still open. The `panewire inbox` commands need the running hub, so
-   do not stop it before this check passes.
-4. **Stop the hub, then start it with the URL set.** Items left in the SQLite
-   file are not carried over: once the URL is set, the hub reads only the
-   Postgres database (the `--inbox-store` file is used only when the URL is
-   unset). The Postgres database starts empty, so check it with
-   `panewire inbox list --unread` before you rely on the inbox. Keep the SQLite
-   file for rollback (see Rollback).
+## Live state
 
-## Rollback
+The live hub runs on Postgres. Host check on ncp, 2026-11-13 about 12:00 KST:
 
-1. Stop the hub.
-2. Remove `PANEWIRE_HUB_DATABASE_URL` from the `EnvironmentFile`.
-3. Start the hub.
+- The hub unit loads `EnvironmentFile=/etc/panewire/hub-db.env`, which sets
+  `PANEWIRE_HUB_DATABASE_URL`. The hub process holds established connections to
+  the Postgres port.
+- `newHubInbox` opens Postgres whenever the URL is set, so the
+  `--inbox-store` SQLite file is inert on the live hub.
+- That file was last written 2026-11-01 15:29. It holds only the lane inbox
+  tables (`lane_inbox`, `lane_inbox_batches`, `lane_inbox_batch_quarantine`)
+  and has no spawn tables (`spawn_operations`, `spawn_reservations`,
+  `spawn_notifications`). Its rows are history: no compatibility rule keeps
+  them (operator decision 208).
 
-The hub opens the SQLite file at `--inbox-store` again. Migration never
-changed that file, so the inbox is back where it was before the move. Items
-accepted while the hub ran on Postgres stay in Postgres. They are not copied
-back. Keep the SQLite file until the hub has run on Postgres long enough that
-you no longer need a rollback.
+There is no copy command. `panewire hub migrate-sqlite` is removed, so the
+SQLite file is not a cutover source. Do not unset the URL to roll back: the hub
+would open the SQLite file as it stood on 2026-11-01 and miss every item written
+since. Any move between backends needs a new migration decision first.
 
 ## Backup
 
