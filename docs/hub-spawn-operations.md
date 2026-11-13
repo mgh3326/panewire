@@ -255,6 +255,10 @@ The submitter applies the same rule before sending: `panewire spawn` (including
 | Node upgraded first (old hub) | The old hub's result parser does not know the new error codes, so it ignores the answer and the operation waits for its deadline as before. Nothing else changes. |
 | Hub rolled back after nodes upgraded | Same as an old hub: refusals are ignored and operations wait out their deadline. |
 
+The following are durable store states. For compatibility with older
+submitters, operation and replayed-acceptance HTTP responses present `bound`
+as the conservative pending status `dispatching`.
+
 | Status | Meaning |
 | --- | --- |
 | `accepted` | Reservation durable; no node binding yet. |
@@ -265,6 +269,21 @@ The submitter applies the same rule before sending: `panewire spawn` (including
 | `succeeded` | Node landing receipt and fresh exact-pane identity verified. |
 | `failed` | Definite refusal, including an existing job claim; never permission to reuse a live job. |
 | `retryable` | Node attested cleanup, or admission stopped before dispatch, and a replay can succeed once the operator's fix is done; reservations released. |
+
+Before downgrading the hub to a version that does not understand `bound`, stop
+the hub and ensure it cannot send or modify operations. Back up the durable
+store, then use the store's normal SQL administration tool to return only
+unsent bindings to placement:
+
+```sql
+UPDATE spawn_operations
+SET node_id = NULL, node_payload = '', status = 'accepted'
+WHERE status = 'bound';
+```
+
+Restart the older hub afterward. Do not rewrite `dispatching`, `reconciling`
+or `deadline_exceeded`: those requests may already have reached a node and
+must retain their UUID and destination.
 
 A deliberate repeat of an identical cleanup-confirmed submission creates a new
 attempt under the same logical key. Its node UUID changes, and a prior executing
@@ -351,10 +370,11 @@ hub read that node's panes (`agents.list`, at most once a minute per request):
 `PANEWIRE_HUB_URL`, `PANEWIRE_HUB_TOKEN_ENV`, `PANEWIRE_HUB_CF_ENV`) calls
 `POST /v1/spawns/<request_id>/abandon` with `{"reason": TEXT}` (operator
 credential). It applies to a pending request bound to a node. A `bound` request
-has not crossed the send boundary, so the hub can finish it without contacting
-the node. For a possibly sent request it runs the same check: only when that
-node lists no pane bearing the job label does the hub mark the hk job lost
-(`end_reason` `operator_abandoned`), finish the request
+has not crossed the send boundary, so the hub skips the pane probe. It still
+checks for a non-terminal hk job from a prior attempt and, if one exists, marks
+it lost through its owning node before releasing the reservation. For a possibly
+sent request, only when that node lists no pane bearing the job label does the
+hub mark the hk job lost (`end_reason` `operator_abandoned`), finish the request
 `failed` with reason `operator_abandoned: <TEXT>` and release the reservation
 (200, the CLI prints `ABANDONED request=… job=… status=failed`). The reason
 travels in the `SPAWN_FAILED` event and the status API, and the hub logs one

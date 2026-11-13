@@ -71,6 +71,24 @@ func TestAsyncSpawnAcceptedOnlyAfterDurableReservation(t *testing.T) {
 	if w := submit(raw, "node-token"); w.Code != 401 {
 		t.Fatalf("node accepted=%d", w.Code)
 	}
+	if _, err := h.inbox.store.bindSpawn(t.Context(), req.RequestID, task.Attempt, hubSpawnRequest{RequestID: t14RequestID(457722), Machine: "machine-a"}); err != nil {
+		t.Fatal(err)
+	}
+	for name, w := range map[string]*httptest.ResponseRecorder{
+		"replayed acceptance": submit(raw, t14OperatorToken),
+		"status read": func() *httptest.ResponseRecorder {
+			r := httptest.NewRequest("GET", "/v1/spawns/"+req.RequestID, nil)
+			r.Header.Set("Authorization", "Bearer "+t14OperatorToken)
+			w := httptest.NewRecorder()
+			h.Handler().ServeHTTP(w, r)
+			return w
+		}(),
+	} {
+		var response map[string]any
+		if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil || response["status"] != "dispatching" {
+			t.Errorf("%s exposed incompatible status: code=%d body=%s err=%v", name, w.Code, w.Body, err)
+		}
+	}
 	h.inbox.store.abort()
 	if w := submit(raw, t14OperatorToken); w.Code != 503 {
 		t.Fatalf("broken durable store ACKed=%d", w.Code)

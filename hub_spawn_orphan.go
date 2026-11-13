@@ -116,12 +116,12 @@ func (h *HubServer) resolveOrphanedSpawn(task hubSpawnTask) bool {
 	return released
 }
 
-// finishUnownedSpawn finishes a bound pending request as failed with outcome
-// once the node lists no pane bearing its job label: it marks a live hk job
-// lost through that node, completes the request and releases its (task, role)
-// reservation. Anything it cannot prove keeps the request pending; why names
-// the check that held it. A crash after the lost write converges: a failed
-// holder whose hk job is lost releases on the next claim.
+// finishUnownedSpawn finishes a pending request as failed with outcome. A
+// possibly sent request must first have no pane bearing its job label; an
+// unsent binding needs no pane probe. It marks a live hk job lost, completes
+// the request and releases its (task, role) reservation. Anything it cannot
+// prove keeps the request pending; why names the check that held it. A crash
+// after the lost write converges on the next claim.
 func (h *HubServer) finishUnownedSpawn(ctx context.Context, task hubSpawnTask, outcome hubSpawnOutcome) (released bool, why string) {
 	if task.Node == nil {
 		return false, "not_bound"
@@ -137,18 +137,23 @@ func (h *HubServer) finishUnownedSpawn(ctx context.Context, task hubSpawnTask, o
 		return false, "hk_read_error"
 	}
 	label := heldAgentName(task, record)
-	if label == "" {
-		return false, "no_label"
-	}
-	probe := h.probeLabelledPane(ctx, task.Node.Machine, label)
-	switch probe.state {
-	case heldPanePresent:
-		return false, "pane_present:" + probe.row.PaneID
-	case heldPaneUnknown:
-		return false, probe.reason
+	if task.Status != "bound" {
+		if label == "" {
+			return false, "no_label"
+		}
+		probe := h.probeLabelledPane(ctx, task.Node.Machine, label)
+		switch probe.state {
+		case heldPanePresent:
+			return false, "pane_present:" + probe.row.PaneID
+		case heldPaneUnknown:
+			return false, probe.reason
+		}
 	}
 	code, _, _ := strings.Cut(outcome.Reason, ": ")
 	if state, _ := record["state"].(string); exists && !hkTerminalState(state) {
+		if label == "" {
+			return false, "no_label"
+		}
 		if lost, reason := h.markHolderJobLostBecause(ctx, app, task, label, code); !lost {
 			return false, "mark_lost:" + reason
 		}
@@ -164,8 +169,10 @@ func (h *HubServer) finishUnownedSpawn(ctx context.Context, task hubSpawnTask, o
 	h.mu.Lock()
 	delete(h.spawnOrphanProbed, task.Request.RequestID)
 	h.mu.Unlock()
-	if err = h.releaseSpawnRole(ctx, task); err != nil {
-		return false, "release_write_failed"
+	if task.Status != "bound" {
+		if err = h.releaseSpawnRole(ctx, task); err != nil {
+			return false, "release_write_failed"
+		}
 	}
 	return true, ""
 }
@@ -239,24 +246,7 @@ func (h *HubServer) handleSpawnAbandon(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	outcome := hubSpawnOutcome{RC: 75, Stage: "landing", Reason: spawnOutcomeReason(spawnAbandonedReason, spawnRefusalLine(body.Reason)), Host: task.Node.Machine, Fix: "the operator abandoned this request; submit the work again under a new job id"}
-	var released bool
-	var why string
-	if task.Status == "bound" {
-		// No send transition occurred. Completion compares the binding and
-		// bound state, so a concurrent send cannot be abandoned as unsent.
-		changed, err := h.completeSpawn(r.Context(), task, outcome)
-		switch {
-		case err != nil:
-			why = "store_unavailable"
-		case !changed:
-			why = "not_pending"
-		default:
-			h.recordSpawnTrace(task, outcome)
-			released = true
-		}
-	} else {
-		released, why = h.finishUnownedSpawn(r.Context(), task, outcome)
-	}
+	released, why := h.finishUnownedSpawn(r.Context(), task, outcome)
 	h.logger.Warn("hub spawn abandon", "request_id", id, "job", task.Job, "host", task.Node.Machine, "status", task.Status, "released", released, "held_by", why, "reason", spawnRefusalLine(body.Reason))
 	if !released {
 		writeJSON(w, 409, map[string]string{"error": "spawn_abandon_refused", "reason": why, "request_id": id, "job": task.Job, "host": task.Node.Machine})

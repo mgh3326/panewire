@@ -224,8 +224,18 @@ func writeSpawnHeld(w http.ResponseWriter, held map[string]string, retryAfterS i
 }
 
 func (h *HubServer) acceptSpawnResponse(w http.ResponseWriter, task hubSpawnTask) {
-	writeJSON(w, 202, map[string]string{"job_id": task.Job, "request_id": task.Request.RequestID, "status": task.Status, "operation_url": "/v1/spawns/" + task.Request.RequestID, "claim": "durable_hub_reservation"})
+	writeJSON(w, 202, map[string]string{"job_id": task.Job, "request_id": task.Request.RequestID, "status": spawnPublicStatus(task.Status), "operation_url": "/v1/spawns/" + task.Request.RequestID, "claim": "durable_hub_reservation"})
 }
+
+// Older submitters understand dispatching as pending but not the new bound
+// state. Its conservative wire projection does not alter the durable proof.
+func spawnPublicStatus(status string) string {
+	if status == "bound" {
+		return "dispatching"
+	}
+	return status
+}
+
 func (h *HubServer) handleSpawnOperation(w http.ResponseWriter, r *http.Request) {
 	if h.authenticate(r).kind != hubCallerOperator {
 		hubUnauthorized(w)
@@ -257,7 +267,7 @@ func (h *HubServer) handleSpawnOperation(w http.ResponseWriter, r *http.Request)
 		Status         string                      `json:"status"`
 		Result         hubSpawnOutcome             `json:"result"`
 		StartCondition *fleet.StartConditionResult `json:"start_condition,omitempty"`
-	}{task.Job, task.Request.RequestID, task.Status, task.Outcome, startCondition})
+	}{task.Job, task.Request.RequestID, spawnPublicStatus(task.Status), task.Outcome, startCondition})
 }
 
 func evaluateHubStartCondition(ctx context.Context, h *HubServer, conditions []fleet.StartCondition) fleet.StartConditionResult {
@@ -379,6 +389,12 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 			return
 		}
 		unsent := task.Node == nil || task.Status == "bound"
+		if task.Status == "bound" {
+			if !h.spawnActions.begin(task.Request.RequestID) {
+				return
+			}
+			defer h.spawnActions.end(task.Request.RequestID)
+		}
 		if unsent {
 			h.logger.Warn("hub spawn starved in the queue", "request_id", task.Request.RequestID, "job", task.Job, "host", firstNonEmptyString(spawnTaskHost(task), "none"), "queue_wait_s", spawnQueueWaitSeconds(task, h.now()))
 		} else {
@@ -660,11 +676,28 @@ func (t *directSpawnTransport) dispatch(ctx context.Context, node hubSpawnReques
 		h.finishSpawnOutcome(current, hubSpawnOutcome{RC: 124, Stage: "landing", Reason: "timeout", Host: node.Machine, Retryable: true, Fix: spawnQueueWaitFix(current, h.now())})
 		return fleet.HubSpawnReply{}, &fleet.HubError{Kind: "hub_spawn_pending"}
 	}
+	releaseAdmission := func() {}
+	if current.Status == "bound" {
+		releaseAdmission, err = h.spawnAdmissions.lock(ctx, node.Machine)
+		if err != nil {
+			return fleet.HubSpawnReply{}, &fleet.HubError{Kind: "hub_spawn_pending"}
+		}
+		if ctx.Err() != nil {
+			releaseAdmission()
+			return fleet.HubSpawnReply{}, &fleet.HubError{Kind: "hub_spawn_pending"}
+		}
+		if !h.now().Before(current.Deadline) {
+			releaseAdmission()
+			h.finishSpawnOutcome(current, hubSpawnOutcome{RC: 124, Stage: "landing", Reason: "timeout", Host: node.Machine, Retryable: true, Fix: spawnQueueWaitFix(current, h.now())})
+			return fleet.HubSpawnReply{}, &fleet.HubError{Kind: "hub_spawn_pending"}
+		}
+	}
 	h.mu.Lock()
 	record := h.nodes[node.Machine]
 	connected := record != nil && record.agent != nil && record.state == "connected" && record.capabilities["spawn_ops_v1"]
 	if current.Status == "bound" && (!connected || !h.acceptingEffectiveLocked(node.Machine, record.accepting)) {
 		h.mu.Unlock()
+		releaseAdmission()
 		if _, err := h.inbox.store.unbindUnsentSpawn(ctx, id, current.Attempt, node.RequestID); err == nil {
 			h.releasePlacementCount(current.Job)
 			select {
@@ -676,23 +709,33 @@ func (t *directSpawnTransport) dispatch(ctx context.Context, node hubSpawnReques
 	}
 	if !connected {
 		h.mu.Unlock()
+		releaseAdmission()
 		return t.unknown(ctx, "disconnected")
 	}
-	// The effective accepting check and the durable first-send CAS serialize
-	// with an operator containment change under h.mu. Replays of possibly sent
-	// work remain allowed even when the node no longer accepts new work.
+	agent := record.agent
+	h.mu.Unlock()
+	// Fresh sends serialize with that node's accepting override without
+	// holding h.mu across the durable CAS. Replays remain allowed when the
+	// node no longer accepts new work.
 	started, err := h.inbox.store.beginSpawnSend(ctx, current)
 	if err != nil || !started {
-		h.mu.Unlock()
+		releaseAdmission()
 		return fleet.HubSpawnReply{}, &fleet.HubError{Kind: "hub_spawn_pending"}
 	}
 	if current.Status == "bound" {
 		t.task.Status = "dispatching"
 	}
-	agent := record.agent
+	h.mu.Lock()
+	record = h.nodes[node.Machine]
+	if record == nil || record.agent != agent || record.state != "connected" || !record.capabilities["spawn_ops_v1"] || current.Status == "bound" && !h.acceptingEffectiveLocked(node.Machine, record.accepting) {
+		h.mu.Unlock()
+		releaseAdmission()
+		return t.unknown(ctx, "disconnected")
+	}
 	entry := &hubSpawnRecord{request: node, status: "pending", created: h.now(), waiter: make(chan hubSpawnResult, 1)}
 	h.spawnRecords[node.RequestID] = entry
 	h.mu.Unlock()
+	releaseAdmission()
 	message := struct {
 		OperatorAuthorized bool              `json:"operator_authorized"`
 		Type               string            `json:"type"`

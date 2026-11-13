@@ -381,6 +381,11 @@ func (h *HubServer) handleAcceptingOverride(writer http.ResponseWriter, request 
 	} else {
 		body.Containment = ""
 	}
+	releaseAdmission, err := h.spawnAdmissions.lock(request.Context(), machine)
+	if err != nil {
+		return
+	}
+	defer releaseAdmission()
 	h.mu.Lock()
 	if _, known := h.auth.Load().tokens[machine]; !known {
 		h.mu.Unlock()
