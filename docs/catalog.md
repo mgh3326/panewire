@@ -1,8 +1,8 @@
 # Catalog commands
 
-`panewire catalog` owns the bench catalog, its grades and Artificial Analysis
-annotations. The catalog lives in handoffkeep (`GET`/`PUT /v1/bench/catalog`)
-and its grades in `/v1/bench/grades`; no subcommand runs pacelever.
+`panewire catalog` owns the bench catalog and Artificial Analysis annotations.
+The catalog lives in handoffkeep (`GET`/`PUT /v1/bench/catalog`); no subcommand
+runs pacelever.
 
 - `panewire catalog list [--json]` reads the catalog and prints one line per
   rung, then `catalog=<source> stale=<bool>`. `--json` prints the same rows as
@@ -11,9 +11,8 @@ and its grades in `/v1/bench/grades`; no subcommand runs pacelever.
   writes it. `--dry-run` prints the payload without a request. A row in a pool
   panewire does not serve is ignored with `warning: unknown pool [NAME]
   ignored`.
-- `panewire catalog grade set --profile P --grade G --deviation-ref REF
-  [--boundary-version V] [--dry-run]` writes one grade projection. `G` is one
-  of `C`, `B`, `A`, `A+`, `S`, `S+`, `SS` or `unrated`.
+- Grades change only through `panewire catalog push FILE`, which writes full
+  catalog rows.
 - `panewire catalog aa-sync [--out FILE] [--dry-run]` fetches the free
   Artificial Analysis Data API and annotates the explicit model mappings.
   Annotations are written to `FILE` for review; sync itself never pushes.
@@ -45,16 +44,21 @@ through the durable file helper.
 
 ## Validation
 
-The decoder applies pacelever's rules: a row must name a profile, model, known
-grade and known gate; rows are unique by `profile@effort`; grades must not
-improve as effort rises for one profile (unrated and retired rungs are
-excluded); and only pools panewire serves are kept. A push additionally
+The decoder skips rows without a profile, model, known grade or known gate and
+reports each skipped row as `catalog_row_invalid:<profile>@<effort>`. A catalog
+with no supported rows remains unreadable. Valid rows are unique by
+`profile@effort`; grades must not improve as effort rises for one profile
+(unrated and retired rungs are excluded); and only pools panewire serves are
+kept. A push additionally
 requires a non-empty catalog, `decided_by`, `deviation_ref` and an RFC 3339
 `decided_at` with a timezone. The wire payload carries `profile`, `effort`,
 `model_id`, `pool`, `grade`, `score`, `gate`, `gate_reason`,
 `boundary_version`, `deviation_ref`, `decided_at`, `decided_by`, `retired_at`
 and, when present, `benchmark_source` and `benchmark_annotation`; local
 placement fields never leave the caller.
+
+`catalog grade set` was removed because its grade-only endpoint can create an
+incomplete catalog row. Use `catalog push` with complete rows instead.
 
 ## Artificial Analysis
 

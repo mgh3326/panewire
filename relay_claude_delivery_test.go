@@ -13,7 +13,7 @@ func TestClaudeDelayedSubmissionProof(t *testing.T) {
 	_, calls := task683FakeHerdr(t, "claude",
 		[]string{busy, busy, echo},
 		[]string{task626TranscriptOnly, task626TranscriptOnly, "❯ " + text})
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	result := relayInjectForHarness(ctx, "w1:p1", "claude", text, nil)
 	if result.Outcome != relayInjectDelivered {

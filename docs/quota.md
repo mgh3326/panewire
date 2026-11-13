@@ -387,8 +387,10 @@ reads:
   The pool policy in it, read as [Admission](#admission) reads it, gives
   subscription. The gate and the credit pool views keep their narrower read.
 - **The E6 marker** from the request, else `PANEWIRE_E6_ARM` (with
-  `PACELEVER_E6_ARM` fallback). For a rung whose catalog effort is empty the
-  marker is `<canon>@`; [config](config.md) lists the forms.
+  `PACELEVER_E6_ARM` fallback) — a request whose marker is already
+  authoritative (a hub submission or a node-delivered spawn) reads no
+  environment: its empty marker stays empty. For a rung whose catalog effort
+  is empty the marker is `<canon>@`; [config](config.md) lists the forms.
 
 It answers as `pacelever policy launch` does through panewire: a refusal exits 3
 with pacelever's reason (`quota catalog: e6_arm_required: …`; the pacelever path

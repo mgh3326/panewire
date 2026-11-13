@@ -184,13 +184,16 @@ Writing an event never changes a command's result. Per-tool tables are in
 panewire `docs/config.md` ("Fleet events"), mergewake `docs/config.md`
 ("Fleet events and crash reports"), and panewire `hub_spawn_node.go`.
 
-Both Alloy configs carry the same pipeline between `// BEGIN fleet events` and
-`// END fleet events`:
+Both Alloy configs carry the same processing pipeline between `// BEGIN fleet
+events` and `// END fleet events`, with platform-specific file paths:
 
-- `local.file_match` reads `$FLEET_EVENTS_ROOT/*/events/fleet-events.jsonl`.
-  The root defaults to `$HOME/.local/state`, which is right for the macOS user
-  agent. On Linux, set `FLEET_EVENTS_ROOT` to the fleet user's state home,
-  because the alloy system user's `$HOME` is not that user's.
+- On Linux, `local.file_match` names the `panewire` and `mergewake` event files
+  separately. A wildcard across tool directories can fail as a whole if Alloy
+  cannot traverse one sibling directory. On macOS it reads
+  `$FLEET_EVENTS_ROOT/*/events/fleet-events.jsonl`; the root defaults to
+  `$HOME/.local/state`, which is right for the user agent. On Linux, set
+  `FLEET_EVENTS_ROOT` to the fleet user's state home, because the Alloy system
+  user's `$HOME` is not that user's.
 - `loki.process "fleet_events"` turns `host`, `tool`, `kind` and `outcome` into
   labels and sets the timestamp from `ts`. It drops the `filename` label and
   rate-limits each host to 0.5 lines/s with a burst of 200.
@@ -259,6 +262,9 @@ following steps, in this order:
       ```
    2. Let the alloy user traverse to them and read them. Run this as root,
       with `U` set to the fleet user's home:
+
+      On the RPi, install the `acl` package first so `setfacl` is available:
+      `sudo apt-get install acl`.
 
       ```sh
       setfacl -m u:alloy:x "$U" "$U/.local" "$U/.local/state"

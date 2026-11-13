@@ -106,13 +106,13 @@ func (h *HubServer) probeNodePanes(ctx context.Context, machine, pane, agent str
 
 // releaseFailedSpawnRole frees the role held by a failed operation when its
 // pane is verifiably gone, or present but proven never to have worked
-// (releaseUnworkedLanding): it marks the still-claimed hk job lost, then drops
+// (releaseUnworkedSpawn): it marks the still-claimed hk job lost, then drops
 // the reservation. A crash between the two repeats harmlessly, because a lost
 // job already releases through the completed-or-lost path.
 func (h *HubServer) releaseFailedSpawnRole(ctx context.Context, app *fleet.App, holder hubSpawnTask, record map[string]any, roleKey string) (released bool, probe heldProbe) {
 	probe = h.probeHeldPane(ctx, spawnHolderHost(holder), holder.Outcome.Pane, "")
 	if probe.state == heldPanePresent {
-		released, markReason := h.releaseUnworkedLanding(ctx, app, holder, record, probe.row)
+		released, markReason := h.releaseUnworkedSpawn(ctx, app, holder, record, probe.row)
 		if markReason != "" {
 			probe.write, probe.reason = true, markReason
 		}
