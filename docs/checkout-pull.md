@@ -43,7 +43,13 @@ pull reports the state it found: unchanged for `not-fast-forward`, and
    `no-upstream`.
 5. `git status --porcelain --untracked-files=normal` is not empty: refused
    `dirty`.
-6. `git fetch --quiet`, then `git pull --ff-only --quiet`. A failed pull is
+6. `git fetch --quiet`. If an incoming path matches a local ignored path, the
+   op refuses `ignored-collision` before anything changes: a fast-forward would
+   overwrite node-local data. Otherwise it runs
+   `git merge --ff-only --no-overwrite-ignore @{u}`, which is a fast-forward
+   that never overwrites an ignored file. `git pull` is not used because it
+   rejects `--no-overwrite-ignore`, and a plain fast-forward overwrites ignored
+   files. A failed fast-forward is
    read back before it is named: if HEAD moved or the worktree is dirty, the
    pull was interrupted mid-apply and is refused `pull-interrupted`, with `to`
    set to the HEAD found; the operator must inspect it. If HEAD cannot be read

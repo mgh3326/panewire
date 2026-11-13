@@ -62,12 +62,15 @@ const (
 	// nodeCheckoutReasonPullInterrupted: a pull failed after it may have moved
 	// HEAD or the worktree. The result carries the HEAD it found in to.
 	nodeCheckoutReasonPullInterrupted = "pull-interrupted"
-	nodeCheckoutReasonInstallGone     = "install-missing"
-	nodeCheckoutReasonInstallLong     = "install-timeout"
-	nodeCheckoutInstallExitKilled     = -1
-	nodeCheckoutInstallPathFile       = "install.sh"
-	nodeCheckoutGitTerminalPrompt     = "GIT_TERMINAL_PROMPT=0"
-	nodeCheckoutDetachedBranchName    = "HEAD"
+	// nodeCheckoutReasonIgnoredCollision: an incoming path matches a local
+	// ignored path, so the fast-forward would overwrite node-local data.
+	nodeCheckoutReasonIgnoredCollision = "ignored-collision"
+	nodeCheckoutReasonInstallGone      = "install-missing"
+	nodeCheckoutReasonInstallLong      = "install-timeout"
+	nodeCheckoutInstallExitKilled      = -1
+	nodeCheckoutInstallPathFile        = "install.sh"
+	nodeCheckoutGitTerminalPrompt      = "GIT_TERMINAL_PROMPT=0"
+	nodeCheckoutDetachedBranchName     = "HEAD"
 )
 
 var (
@@ -82,6 +85,7 @@ var (
 		nodeCheckoutReasonLockFailed: true, nodeCheckoutReasonDetached: true, nodeCheckoutReasonNoUpstream: true,
 		nodeCheckoutReasonDirty: true, nodeCheckoutReasonGitFailed: true, nodeCheckoutReasonFetchFailed: true,
 		nodeCheckoutReasonNotFF: true, nodeCheckoutReasonPullFailed: true, nodeCheckoutReasonPullInterrupted: true,
+		nodeCheckoutReasonIgnoredCollision: true,
 	}
 )
 
@@ -156,6 +160,14 @@ func (client *HubClient) nodeCheckoutAllowList() map[string]string {
 func (client *HubClient) checkoutPeerAccepted() bool {
 	peer := client.signalsPeer.Load()
 	return peer != nil && peer.acceptsCheckoutPull.Load()
+}
+
+// nodeCheckoutGitRunner adapts runNodeCheckoutGit to the runner the shared
+// ignored-path check takes. Its args carry their own -C dir.
+func nodeCheckoutGitRunner(dir string) relayCommandRunner {
+	return func(ctx context.Context, args ...string) ([]byte, error) {
+		return runNodeCheckoutGit(ctx, dir, nodeCheckoutPullStepTimeout, args...)
+	}
 }
 
 // runNodeCheckoutGit runs git in dir under its own timeout, with no terminal
@@ -283,9 +295,23 @@ func (client *HubClient) nodeCheckoutPullRun(ctx context.Context, name, dir, rev
 	if _, err := runNodeCheckoutGit(ctx, dir, nodeCheckoutFetchTimeout, "fetch", "--quiet"); err != nil {
 		return refuse(nodeCheckoutReasonFetchFailed)
 	}
-	if _, err := runNodeCheckoutGit(ctx, dir, nodeCheckoutPullStepTimeout, "pull", "--ff-only", "--quiet"); err != nil {
-		// A failed pull may have moved HEAD or the worktree before it died, so
-		// the state is read back and reported, not assumed clean.
+	// The fast-forward is `merge --ff-only --no-overwrite-ignore` against the
+	// fetched upstream, not `pull`: pull rejects --no-overwrite-ignore, and a plain
+	// fast-forward overwrites an ignored file that the incoming commit tracks.
+	expected, err := runNodeCheckoutGit(ctx, dir, nodeCheckoutRevTimeout, "rev-parse", "--verify", "@{u}")
+	if err != nil {
+		return refuse(nodeCheckoutReasonGitFailed)
+	}
+	collision, err := nodeIgnoredCheckoutCollision(ctx, nodeCheckoutGitRunner(dir), dir, strings.TrimSpace(string(from)), strings.TrimSpace(string(expected)))
+	if err != nil {
+		return refuse(nodeCheckoutReasonGitFailed)
+	}
+	if collision {
+		return refuse(nodeCheckoutReasonIgnoredCollision)
+	}
+	if _, err := runNodeCheckoutGit(ctx, dir, nodeCheckoutPullStepTimeout, "merge", "--ff-only", "--no-overwrite-ignore", "@{u}"); err != nil {
+		// A failed fast-forward may have moved HEAD or the worktree before it
+		// died, so the state is read back and reported, not assumed clean.
 		reason, head := nodeCheckoutFailedPull(ctx, dir, strings.TrimSpace(string(from)))
 		if reason == nodeCheckoutReasonPullInterrupted {
 			// Only an interrupted pull names the HEAD it left; an unchanged

@@ -554,3 +554,30 @@ func TestInstallPathsChangedReadsNULList(t *testing.T) {
 		}
 	}
 }
+
+// TestNodeCheckoutPullKeepsIgnoredFiles: an incoming commit that tracks a path
+// the checkout holds as an ignored local file must not overwrite it. The op
+// refuses ignored-collision and leaves the local file and HEAD unchanged.
+func TestNodeCheckoutPullKeepsIgnoredFiles(t *testing.T) {
+	fixture := newCheckoutPullFixture(t)
+	before := nodeGit(t, fixture.checkout, "rev-parse", "HEAD")
+	fixture.pushPeer(t, "tracks a path the checkout ignores", map[string]string{"local.cfg": "tracked\n"})
+	local := filepath.Join(fixture.checkout, "local.cfg")
+	if err := os.WriteFile(local, []byte("node-local secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	excludeFile := filepath.Join(fixture.checkout, ".git", "info", "exclude")
+	if err := os.WriteFile(excludeFile, []byte("local.cfg\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result := checkoutPullRun(t, fixture.client(), "rstack", "")
+	if result["outcome"] != "refused" || result["reason"] != nodeCheckoutReasonIgnoredCollision {
+		t.Fatalf("result=%v, want refused ignored-collision", result)
+	}
+	if contents, err := os.ReadFile(local); err != nil || string(contents) != "node-local secret\n" {
+		t.Fatalf("ignored file overwritten: %q err=%v", contents, err)
+	}
+	if head := nodeGit(t, fixture.checkout, "rev-parse", "HEAD"); head != before {
+		t.Fatalf("refused pull moved HEAD from %s to %s", before, head)
+	}
+}
