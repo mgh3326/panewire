@@ -188,8 +188,11 @@ type hubNodeRecord struct {
 	lastHeartbeat time.Time
 	agent         *hubAgent
 	activeJobs    map[string]HubActiveJob
-	hostLoad      *HubHostLoad
-	hostMemory    *HubHostMemory
+	// activeReported is true once a heartbeat has carried activeJobs since the
+	// hello that created this record; the hello empties activeJobs until then.
+	activeReported bool
+	hostLoad       *HubHostLoad
+	hostMemory     *HubHostMemory
 	// hostActivity is the last heartbeat's user-input report, nil when the node
 	// sent none (host_activity.go). It is recorded only.
 	hostActivity *HubHostActivity
@@ -323,6 +326,9 @@ type hubRelayInjectEvent struct {
 	Lane    string `json:"lane,omitempty"`
 	EventID int64  `json:"event_id,omitempty"`
 	Deliver string `json:"deliver,omitempty"`
+	// Delivered, when set, runs once the writer has written the event to the
+	// node. It is never sent on the wire (hub_drain_wake.go).
+	Delivered func() `json:"-"`
 }
 
 type hubJobRevokedEvent struct {
@@ -540,6 +546,9 @@ type HubServer struct {
 	// drainWake is each design lane's drain-wake state (hub_drain_wake.go),
 	// owned by the lane-stall sweep goroutine under laneStallMu.
 	drainWake map[string]*drainWakeLane
+	// drainWakeDelivered carries the writer's confirmation of a drain line back
+	// to the sweep goroutine. Created by the first sweep.
+	drainWakeDelivered chan drainWakeDelivery
 	// laneHeldCountProbe is a test hook laneHeldCountLocked fires once per
 	// scan, so a test can tell the count ran only on an activating
 	// observation.
@@ -2517,6 +2526,9 @@ func (agent *hubAgent) writeRelays(ctx context.Context) {
 		case event := <-agent.relays:
 			if err := agent.writeJSON(event); err != nil {
 				return
+			}
+			if event.Delivered != nil {
+				event.Delivered()
 			}
 		}
 	}

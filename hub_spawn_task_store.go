@@ -541,6 +541,19 @@ func (s *laneInboxStore) spawnRoleOwner(parent context.Context, roleKey string) 
 	return
 }
 
+// spawnJobReserved reports whether a reservation already holds the job id, the
+// collision a duplicate job id makes before any role is considered.
+func (s *laneInboxStore) spawnJobReserved(parent context.Context, job string) (bool, error) {
+	ctx, done := s.op(parent)
+	defer done()
+	var one int
+	err := s.db.QueryRowContext(ctx, s.q(`SELECT 1 FROM spawn_reservations WHERE job=?`), job).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return err == nil, err
+}
+
 func (s *laneInboxStore) expiredStagedSpawns(parent context.Context, now time.Time) ([]hubSpawnTask, error) {
 	ctx, done := s.op(parent)
 	defer done()
