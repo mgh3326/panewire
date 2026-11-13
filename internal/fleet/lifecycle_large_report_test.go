@@ -178,3 +178,41 @@ func TestDoneUsesAttachmentWhenJSONEnvelopeExceedsHKLimit(t *testing.T) {
 		t.Fatalf("manifest=%+v err=%v, want report sha %s and size %d", fields, err, digest, len(body))
 	}
 }
+
+func TestDonePublishesDeduplicatedAttachmentWithStoredMetadata(t *testing.T) {
+	r := newDoneRig(t)
+	body := strings.Repeat("x", reportDocumentMaxBytes+1)
+	digest := reportDigest([]byte(body))
+	key := reportDocumentKey("j", digest)
+	r.hk.Handle(func(req hkRequest) (int, string, bool) {
+		if req.Method != http.MethodPut || req.Path != "/v1/attachments" {
+			return 0, "", false
+		}
+		sha := reportDigest(req.Body)
+		return http.StatusOK, fmt.Sprintf(`{"attachment":{"sha256":%q,"size_bytes":%d,"mime":"text/plain","original_name":"first-upload.txt"},"created":false}`, sha, len(req.Body)), true
+	})
+	r.write(body)
+	if err := r.done(); err != nil {
+		t.Fatalf("done report whose attachment already exists with different metadata: %v", err)
+	}
+
+	var manifestBody string
+	for _, req := range r.hk.Requests() {
+		if req.Method == http.MethodPut && req.Path == "/v1/documents/"+url.PathEscape(key) {
+			var doc struct {
+				Body string `json:"body"`
+			}
+			if err := json.Unmarshal(req.Body, &doc); err != nil {
+				t.Fatalf("decode report manifest: %v", err)
+			}
+			manifestBody = doc.Body
+		}
+	}
+	var manifest reportManifest
+	if err := json.Unmarshal([]byte(manifestBody), &manifest); err != nil {
+		t.Fatalf("decode report manifest body %q: %v", manifestBody, err)
+	}
+	if manifest.ReportSHA256 != digest || manifest.SizeBytes != int64(len(body)) || manifest.MIME != reportAttachmentMIME || manifest.OriginalName != "report.md" {
+		t.Fatalf("manifest=%+v, want current report identity and metadata", manifest)
+	}
+}

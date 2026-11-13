@@ -104,17 +104,19 @@ func (a *App) publishReport(ctx context.Context, j Job, report string, body []by
 		if err != nil {
 			return "", err
 		}
-		if attachment.SHA256 != digest || attachment.SizeBytes != int64(len(body)) || attachment.MIME != reportAttachmentMIME || attachment.OriginalName != name {
+		if attachment.SHA256 != digest || attachment.SizeBytes != int64(len(body)) {
 			return "", errReportAttachmentMismatch
 		}
+		// HK deduplicates attachments by content and may return the first upload's
+		// metadata; the manifest describes this report's name and MIME instead.
 		manifest, err := json.Marshal(reportManifest{
 			Schema:           "panewire.report-manifest.v1",
 			JobID:            j.ID,
 			ReportSHA256:     digest,
 			SizeBytes:        int64(len(body)),
 			AttachmentSHA256: attachment.SHA256,
-			MIME:             attachment.MIME,
-			OriginalName:     attachment.OriginalName,
+			MIME:             reportAttachmentMIME,
+			OriginalName:     name,
 		})
 		if err != nil {
 			return "", err
