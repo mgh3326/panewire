@@ -257,6 +257,12 @@ func gateResult(x Result, r QuotaRequest) (string, error) {
 			if outcome == outcomeNoRoleCandidate {
 				return "", &gateRefusal{cause: fail(exitSeatRefused, "%s", roleRestrictedReason(reason)), outcome: outcome, code: code}
 			}
+			if outcome == outcomeQuotaUnknown && code != "" && code != escalationGate {
+				// The request, the catalog or policy decided this refusal;
+				// no reading did, so it is not unknown quota. The escalation
+				// redirect is the one coded refusal a reading decided.
+				outcome = outcomePolicyUnavailable
+			}
 			return "", &gateRefusal{cause: fail(x.Code, "quota gate: %s", reason), outcome: outcome, code: code}
 		}
 		if err != nil {

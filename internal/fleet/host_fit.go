@@ -431,7 +431,7 @@ func (sp *selPresence) admitPass(ctx context.Context, s Spawn, p *selPlan, pendi
 			if p.req.route.top() {
 				role = p.req.route.role
 			}
-			qr := QuotaRequest{Profile: c.seat.Canon, GateProfile: c.seat.gateName(), Effort: c.row.Effort, Role: role, OperatorRequest: s.OperatorRequest, RequestedBy: s.RequestedBy, Purpose: s.Purpose, AccountKey: c.accountKey}
+			qr := QuotaRequest{Profile: c.seat.Canon, GateProfile: c.seat.gateName(), Effort: c.row.Effort, Role: role, OperatorRequest: s.OperatorRequest, RequestedBy: gateRequestedBy(s), Purpose: s.Purpose, AccountKey: c.accountKey}
 			judgments, err := sp.admitAccount(ctx, qr, c, p, []selHost{h})
 			c.judgments = append(c.judgments, judgments...)
 			if err == nil {

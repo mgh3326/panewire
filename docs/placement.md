@@ -961,7 +961,8 @@ the gate once for the chosen rung before it judges any host
 (`requestGate.RequestRefusal`, admission_native.go); a refusal ends the spawn
 with the gate's reason verbatim and the exit status the gate maps it to, and no
 host is judged or contacted. `-m auto` keeps skipping such a rung in selection
-and trying the next.
+and trying the next; a selection such refusals decide fails
+`POLICY_UNAVAILABLE` and names the codes (`; gate refused: <code>, …`).
 
 The refusals decided without a reading are the first judgment of
 `admissionInputs.judgeWith` (admission_verdict.go) with no reading: the role
