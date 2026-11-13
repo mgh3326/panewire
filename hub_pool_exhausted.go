@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -62,9 +63,9 @@ const poolCauseFreeLimit = "free_limit"
 // at now: at most one free-limit exhaustion (the free bucket exhausted until a
 // reset ahead) and at most one paid-window exhaustion (an account window, a
 // bucket of scope account or none and no model, at 100 % with its reset ahead;
-// with several, the one that clears last). A window of one model group leaves
-// the account's other models usable, and one with no readable reset cannot be
-// said to hold.
+// with several, the one that clears last). A bucket of any other scope (a model
+// group, a model) leaves the account's other models usable, and one with no
+// readable reset cannot be said to hold.
 func poolExhaustionsOf(quota *FleetStateQuota, now time.Time) []poolExhaustion {
 	if quota == nil {
 		return nil
@@ -75,7 +76,7 @@ func poolExhaustionsOf(quota *FleetStateQuota, now time.Time) []poolExhaustion {
 	}
 	var window poolExhaustion
 	for _, bucket := range quota.Buckets {
-		if bucket.UsedPct == nil || *bucket.UsedPct < 100 || bucket.Model != "" || bucket.Scope == "group" {
+		if bucket.UsedPct == nil || *bucket.UsedPct < 100 || !accountWideBucket(bucket) {
 			continue
 		}
 		if reset, err := time.Parse(time.RFC3339, bucket.ResetsAt); err == nil && reset.After(now) && reset.After(window.Reset) {
@@ -86,6 +87,56 @@ func poolExhaustionsOf(quota *FleetStateQuota, now time.Time) []poolExhaustion {
 		found = append(found, window)
 	}
 	return found
+}
+
+// accountWideBucket reports whether a window speaks for the whole account: scope
+// account or none, and no model.
+func accountWideBucket(bucket FleetStateBucket) bool {
+	return bucket.Model == "" && (bucket.Scope == "" || bucket.Scope == "account")
+}
+
+// speaksTo reports whether a reading says anything about what e is about: a free
+// bucket for a free limit, the account window of that name for a window. A
+// free-only reading carries no paid bucket and a paid one no free bucket, so a
+// reading that does not speak to the cause neither confirms nor clears it.
+func (e poolExhaustion) speaksTo(quota *FleetStateQuota) bool {
+	if e.Cause == poolCauseFreeLimit {
+		return quota.Free != nil
+	}
+	for _, bucket := range quota.Buckets {
+		if "window:"+bucket.Window == e.Cause && accountWideBucket(bucket) {
+			return true
+		}
+	}
+	return false
+}
+
+// exhaustionSuperseded reports whether the freshest reading of the account that
+// speaks to e's cause, across every publishing host, no longer shows it. The
+// state store keeps one value per host, so a delayed or cached exhausted value
+// can be recorded after another host has published the account as available
+// while its old reset is still ahead; that is not an exhaustion to act on. A
+// tie in time goes to the exhausted reading.
+func (h *HubServer) exhaustionSuperseded(e poolExhaustion, now time.Time) bool {
+	store := h.stateStore()
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	var freshest time.Time
+	var holds, found bool
+	for key, message := range store.latest {
+		if key.kind != fleetStateKindQuota || key.key != e.Account || message.Quota == nil || !e.speaksTo(message.Quota) {
+			continue
+		}
+		at := message.MeasuredAt
+		if message.ConfirmedAt != nil && message.ConfirmedAt.After(at) {
+			at = *message.ConfirmedAt
+		}
+		still := slices.ContainsFunc(poolExhaustionsOf(message.Quota, now), func(current poolExhaustion) bool { return current.Cause == e.Cause })
+		if !found || at.After(freshest) || at.Equal(freshest) && still {
+			freshest, holds, found = at, still, true
+		}
+	}
+	return found && !holds
 }
 
 // poolSweepState is what makes a pass idempotent. jobs holds each job a pass is
@@ -184,6 +235,10 @@ func (h *HubServer) observePoolExhaustion(quota *FleetStateQuota, now time.Time)
 // account, all at once: each job's action runs on its own goroutine, because a
 // hand-over waits for its successor to be placed.
 func (h *HubServer) sweepExhaustedPool(ctx context.Context, exhaustion poolExhaustion) {
+	if h.exhaustionSuperseded(exhaustion, h.now()) {
+		h.logger.Debug("pool exhausted sweep superseded by a newer reading", "pool", exhaustion.Pool, "account", exhaustion.Account, "cause", exhaustion.Cause)
+		return
+	}
 	isNew := h.poolSweep.seen(exhaustion.key(), exhaustion.Reset, h.now())
 	tasks, err := h.liveSpawnTasks(ctx)
 	if err != nil {
@@ -296,6 +351,11 @@ func (h *HubServer) endPoolJob(ctx context.Context, exhaustion poolExhaustion, t
 	}
 	ctx, cancel := context.WithTimeout(ctx, quotaReplaceBudget)
 	defer cancel()
+	release, held := h.jobGuard.acquire(ctx, task.Job)
+	if !held {
+		return skip("job_busy")
+	}
+	defer release()
 	app, err := h.newSpawnApp(io.Discard, io.Discard)
 	if err != nil {
 		return skip("spawn_config_unavailable")
@@ -319,22 +379,35 @@ func (h *HubServer) endPoolJob(ctx context.Context, exhaustion poolExhaustion, t
 	if probe.state == heldPaneUnknown || probe.state == heldPanePresent && (!nodePaneIdleStatus[probe.row.AgentStatus] || !validNodeCommandPath(probe.row.Cwd)) {
 		return skip("pane_not_idle", "probe", probe.reason, "status", probe.row.AgentStatus)
 	}
+	// The owner's notice is made durable (persisted by handoffkeep) before
+	// anything is closed or written, so a lost record always has its notice and
+	// a transient relay failure leaves the job for the next look. The notice
+	// carries a fixed event id, so a retry of the same job is the same event.
+	if !h.relayJobEventFromContext(ctx, "", "job.lost", hubJobEventPayload{
+		JobID: task.Job, Epoch: h.registeredEpoch(task.Job), OwnerLane: task.Owner, AgentLabel: name, PaneID: task.Outcome.Pane,
+		EventID: "pool-exhausted:" + task.Job, Reason: "quota_stop pool=" + exhaustion.Pool + " reset_at=" + exhaustion.Reset.Format(time.RFC3339),
+	}) {
+		return skip("owner_not_notified", "owner", task.Owner)
+	}
 	if probe.state == heldPanePresent && !h.closeHeldPane(ctx, task, name, probe.row) {
 		return skip("pane_not_closed", "pane", task.Outcome.Pane)
 	}
-	if lost, reason := h.markHolderLostWithRetry(ctx, app, task, name, endReason); !lost {
+	lost, reason := h.markHolderLostWithRetry(ctx, app, task, name, endReason)
+	if !lost {
 		h.logger.Warn("pool exhausted end: the job's record was not written", "job", task.Job, "reason", reason)
 		return skip("record_not_written", "write", reason)
+	}
+	if reason == nodeJobMarkLostCompleted {
+		// The job completed between the read and the write: hk holds its
+		// completion, which is not a quota stop.
+		h.logger.Warn("pool exhausted end: the job completed meanwhile", "job", task.Job)
+		return skip("completed")
 	}
 	if prior.Task != "" && prior.ParentJob == "" {
 		if priorID, _, _, err := h.inbox.store.spawnRoleOwner(ctx, prior.RoleKey()); err == nil && priorID == task.Request.RequestID {
 			_ = h.inbox.store.releaseCompletedSpawnRole(ctx, priorID, prior.RoleKey())
 		}
 	}
-	h.relayJobEventFromContext(ctx, "", "job.lost", hubJobEventPayload{
-		JobID: task.Job, Epoch: h.registeredEpoch(task.Job), OwnerLane: task.Owner, AgentLabel: name, PaneID: task.Outcome.Pane,
-		EventID: "pool-exhausted:" + task.Job, Reason: "quota_stop pool=" + exhaustion.Pool + " reset_at=" + exhaustion.Reset.Format(time.RFC3339),
-	})
 	return poolJobResult{action: poolJobEnded, role: role}
 }
 

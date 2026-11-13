@@ -449,12 +449,16 @@ func (h *HubServer) relayJobEventFrom(senderMachine, kind string, event hubJobEv
 	h.relayJobEventFromContext(context.Background(), senderMachine, kind, event)
 }
 
-func (h *HubServer) relayJobEventFromContext(ctx context.Context, senderMachine, kind string, event hubJobEventPayload) {
+// relayJobEventFromContext relays a job event to its owner lane. It reports
+// whether the hub took the event: persisted (or already held) and on its way,
+// or handed to the lane inbox. False means nothing durable exists yet, so a
+// caller that must not lose the notice (the exhausted-pool sweep) tries again.
+func (h *HubServer) relayJobEventFromContext(ctx context.Context, senderMachine, kind string, event hubJobEventPayload) bool {
 	if event.OwnerLane == "" || event.JobID == "" {
-		return
+		return false
 	}
 	if _, handled := h.receiveInbox(kind, &event, h.relayPersistedAgent(senderMachine, nil), senderMachine, false, ctx); handled {
-		return
+		return true
 	}
 	key := relayEventDedupeKey(kind, event)
 	h.mu.Lock()
@@ -467,7 +471,7 @@ func (h *HubServer) relayJobEventFromContext(ctx context.Context, senderMachine,
 		// A node only resends what its outbox still owes it. Returning here
 		// without an answer is what leaves persisted_at NULL for good.
 		h.reacknowledgeRelayEventFrom(senderMachine, kind, event, key, knownID)
-		return
+		return true
 	}
 	route, destinationAgent, routed := h.resolveRelayRoute(kind, event)
 	if !routed {
@@ -476,7 +480,7 @@ func (h *HubServer) relayJobEventFromContext(ctx context.Context, senderMachine,
 		// look like a duplicate of a row that does not exist.
 		h.forgetRelayEvent(key)
 		h.broadcastRelayUnrouted(event)
-		return
+		return false
 	}
 	stored, status, persisted := h.persistRelayEventRecord(ctx, kind, event, route)
 	if !persisted {
@@ -484,7 +488,7 @@ func (h *HubServer) relayJobEventFromContext(ctx context.Context, senderMachine,
 		// next attempt has to survive this hub's in-memory dedupe.
 		h.forgetRelayEvent(key)
 		h.broadcastRelayUnpersisted(kind, event)
-		return
+		return false
 	}
 	h.rememberRelayEvent(key, stored.ID)
 	h.linkInboxRelayID(key, stored.ID)
@@ -495,9 +499,10 @@ func (h *HubServer) relayJobEventFromContext(ctx context.Context, senderMachine,
 		h.queueRelayPersisted(kind, event, h.relayPersistedAgent(senderMachine, destinationAgent), stored.ID)
 		h.broadcastRelayAlreadyDelivered(kind, event, stored)
 		h.recordInboxDelivered(key, "", "")
-		return
+		return true
 	}
 	h.injectRelayEvent(kind, event, route, destinationAgent, h.relayPersistedAgent(senderMachine, destinationAgent), stored.ID, key)
+	return true
 }
 
 // relayEventAlreadyDelivered is the hub's inject gate. Its authority is

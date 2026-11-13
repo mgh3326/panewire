@@ -173,6 +173,13 @@ func (h *HubServer) replaceQuotaStoppedWhy(ctx context.Context, machine string, 
 	}
 	ctx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
+	// One operation at a time ends a job: the exhausted-pool sweep may be
+	// closing the same pane and writing the same record (hub_job_guard.go).
+	release, held := h.jobGuard.acquire(ctx, event.JobID)
+	if !held {
+		return skip("job_busy")
+	}
+	defer release()
 	store := h.inbox.store
 	holder, err := store.latestSpawnForJob(ctx, event.JobID)
 	if err != nil {

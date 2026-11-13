@@ -146,6 +146,8 @@ type sweepFixture struct {
 	*quotaReplaceFixture
 	node2 *sweepNode
 	logs  *syncBuffer
+	// owner is the lane that owns the jobs addJobOn adds; "parent" routes.
+	owner string
 	next  atomic.Int32
 }
 
@@ -164,7 +166,7 @@ func newSweepFixture(t *testing.T) *sweepFixture {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	go node.serve(ctx)
-	f := &sweepFixture{quotaReplaceFixture: base, node2: node, logs: logs}
+	f := &sweepFixture{quotaReplaceFixture: base, node2: node, logs: logs, owner: "parent"}
 	// The hub places a successor as soon as the sweep claims it; the test is
 	// the placement.
 	go func() {
@@ -201,11 +203,14 @@ func (f *sweepFixture) addJobOn(t *testing.T, profile, role, pool, account, stat
 	}
 	request.RequestID = id
 	for i := 0; i+1 < len(request.Args); i++ {
-		if request.Args[i] == "--task" {
+		switch request.Args[i] {
+		case "--task":
 			request.Args[i+1] = strconv.Itoa(100 + n)
+		case "--owner":
+			request.Args[i+1] = f.owner
 		}
 	}
-	held, _, err := f.hub.inbox.store.claimSpawn(t.Context(), request, job, "parent", time.Now())
+	held, _, err := f.hub.inbox.store.claimSpawn(t.Context(), request, job, f.owner, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -248,7 +253,8 @@ func (f *sweepFixture) publishFreeLimit(t *testing.T, account string, reset, mea
 	}
 }
 
-func (f *sweepFixture) sweeps() int { return len(f.logs.lines("pool exhausted sweep")) }
+// sweeps counts the passes that listed jobs (their summary lines).
+func (f *sweepFixture) sweeps() int { return len(f.logs.lines("handed_over=")) }
 
 // hk 4550: a published free limit for devin hands over its live workers and
 // ends its reviewer, in one pass, and leaves every job that is not on that
@@ -383,6 +389,7 @@ func TestPoolExhaustedByAnAccountWindow(t *testing.T) {
 	}
 	publish(time.Now(), []map[string]any{
 		{"window": "weekly", "used_pct": 100, "resets_at": reset.Format(time.RFC3339), "scope": "group", "model": "opus"},
+		{"window": "daily", "used_pct": 100, "resets_at": reset.Format(time.RFC3339), "scope": "model"},
 		{"window": "5h", "used_pct": 99.5, "resets_at": reset.Format(time.RFC3339), "scope": "account"},
 	})
 	publish(time.Now().Add(time.Minute), []map[string]any{{"window": "weekly", "used_pct": 100, "resets_at": reset.Format(time.RFC3339), "scope": "account"}})
@@ -422,5 +429,57 @@ func TestPoolExhaustedFreeLimitLeavesPaidRungsAlone(t *testing.T) {
 	}
 	if summary := f.logs.lines("pool exhausted sweep")[0]; !strings.Contains(summary, "jobs=1 ") || !strings.Contains(summary, "handed_over=1") {
 		t.Fatalf("summary %q", summary)
+	}
+}
+
+// A delayed exhausted reading from one host, recorded after another host has
+// published the account as available with a newer measurement, starts nothing.
+func TestPoolExhaustedIgnoresAReadingAnotherHostSupersedes(t *testing.T) {
+	f := newSweepFixture(t)
+	worker := f.addJob(t, "worker", "devin", sweepDevin, "idle")
+	now := time.Now()
+	f.hub.stateStore().publish(FleetStateMessage{Host: "machine-b", Kind: fleetStateKindQuota, Key: sweepDevin, MeasuredAt: now.Add(time.Minute), ReceivedAt: now,
+		Quota: &FleetStateQuota{AccountKey: sweepDevin, Pool: "devin", Free: &FleetStateFree{State: "available"}}}, 0)
+
+	f.publishFreeLimit(t, sweepDevin, now.Add(3*time.Hour), now)
+	eventually(t, 5*time.Second, "the superseded pass", func() bool { return len(f.logs.lines("pool exhausted sweep superseded")) == 1 })
+	if got := f.state(worker); got != "spawned" || f.sweeps() != 0 {
+		t.Fatalf("a superseded exhaustion acted: state=%s sweeps=%d", got, f.sweeps())
+	}
+}
+
+// A screen-triggered replacement and the sweep end a job one at a time: while
+// another operation holds the job, the sweep leaves it alone and acts once the
+// guard is released.
+func TestPoolExhaustedWaitsForTheJobGuard(t *testing.T) {
+	f := newSweepFixture(t)
+	reviewer := f.addJob(t, "reviewer", "devin", sweepDevin, "idle")
+	release, ok := f.hub.jobGuard.acquire(t.Context(), reviewer)
+	if !ok {
+		t.Fatal("guard not acquired")
+	}
+	f.publishFreeLimit(t, sweepDevin, time.Now().Add(3*time.Hour), time.Now())
+	time.Sleep(300 * time.Millisecond) // a window that proves nothing happens while the guard is held
+	if got := f.state(reviewer); got != "spawned" || f.node2.count("pane.close "+reviewer) != 0 {
+		t.Fatalf("the sweep acted under a held guard: state=%s", got)
+	}
+	release()
+	eventually(t, 5*time.Second, "the reviewer to be ended once the guard is free", func() bool { return f.state(reviewer) == "lost" })
+}
+
+// An owner notice that cannot be made durable leaves the job as it was: nothing
+// is closed or written, and the next pass tries again.
+func TestPoolExhaustedKeepsAJobWhoseOwnerCannotBeNotified(t *testing.T) {
+	f := newSweepFixture(t)
+	f.owner = "nowhere" // no route in the lanes file
+	reviewer := f.addJob(t, "reviewer", "devin", sweepDevin, "idle")
+
+	f.publishFreeLimit(t, sweepDevin, time.Now().Add(3*time.Hour), time.Now())
+	eventually(t, 5*time.Second, "the pass", func() bool { return f.sweeps() == 1 })
+	if got := f.state(reviewer); got != "spawned" || f.node2.count("pane.close "+reviewer) != 0 {
+		t.Fatalf("a job was closed before its owner could be told: state=%s", got)
+	}
+	if summary := f.logs.lines("pool exhausted sweep")[0]; !strings.Contains(summary, "owner_not_notified=1") {
+		t.Fatalf("summary %q does not name the skip", summary)
 	}
 }
