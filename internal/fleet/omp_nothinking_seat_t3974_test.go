@@ -183,7 +183,8 @@ func TestOMPNoThinkingSeatLeavesOtherRungsUnchanged(t *testing.T) {
 	a := testApp(t)
 	for profile, seat := range a.Policy.Profiles {
 		if seat.Kind == "omp" && seat.NoThinking {
-			if _, ok := ompNoThinkingSeats[profile]; !ok {
+			_, seeded := ompNoThinkingSeats[profile]
+			if _, muse := ompMuseNoThinkingSeats[profile]; !seeded && !muse {
 				t.Fatalf("seat %s gained no_thinking", profile)
 			}
 		}

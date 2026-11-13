@@ -273,7 +273,7 @@ func (h *HubServer) replaceQuotaStopped(ctx context.Context, machine string, eve
 	if role != "reviewer" && !mark() {
 		return "", false
 	}
-	if prior.Task != "" && prior.ParentJob == "" {
+	if prior.HoldsTaskRole() {
 		if priorID, _, _, err := store.spawnRoleOwner(ctx, prior.RoleKey()); err == nil && priorID == holder.Request.RequestID {
 			// The stopped job still holds the role; its pane is closed.
 			_ = store.releaseCompletedSpawnRole(ctx, priorID, prior.RoleKey())

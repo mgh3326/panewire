@@ -1433,7 +1433,8 @@
       "kind": "omp",
       "family": "meta",
       "capability": "omp_commandcode",
-      "effort": "high",
+      "effort": "off",
+      "no_thinking": true,
       "roles": [
         "implementer",
         "reviewer"
@@ -1444,7 +1445,8 @@
       "kind": "omp",
       "family": "meta",
       "capability": "omp_commandcode",
-      "effort": "high",
+      "effort": "off",
+      "no_thinking": true,
       "roles": [
         "implementer",
         "reviewer"
