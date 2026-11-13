@@ -357,7 +357,32 @@ func (c launchCatalog) resolveRow(req admissionRequest, allowUnrated bool, seats
 		return launchRow{}, "", "e6_arm_required: unplaced profile requires exact measurement marker"
 	}
 	fallback, resolved := launchDefaultEffort(profile, eligible, c.Defaults)
-	if requested != "" {
+	if requested == "" {
+		preferred := c.Defaults[profile]
+		if preferred != "" && slices.ContainsFunc(eligible, func(r launchRow) bool { return r.Effort == preferred }) {
+			fallback, resolved = preferred, preferred
+		} else if slices.ContainsFunc(eligible, func(r launchRow) bool { return r.Effort == "" }) {
+			fallback = ""
+			if preferred != "" {
+				resolved = preferred
+			}
+		} else if len(eligible) == 1 {
+			fallback, resolved = eligible[0].Effort, eligible[0].Effort
+		} else {
+			var efforts []string
+			for _, row := range eligible {
+				effort := row.Effort
+				if effort == "" {
+					effort = "default"
+				}
+				if !slices.Contains(efforts, effort) {
+					efforts = append(efforts, effort)
+				}
+			}
+			slices.Sort(efforts)
+			return launchRow{}, "", fmt.Sprintf("profile %q has multiple live efforts (%s); pass --effort", profile, strings.Join(efforts, ", "))
+		}
+	} else {
 		resolved = requested
 	}
 	if slices.ContainsFunc(c.Rows, func(r launchRow) bool { return r.Profile == profile && r.Effort == resolved && r.Retired }) {
@@ -380,10 +405,9 @@ func (c launchCatalog) resolveRow(req admissionRequest, allowUnrated bool, seats
 	return chosen, resolved, ""
 }
 
-// launchDefaultEffort is pacelever's defaultEffort: the effort an effortless
-// request resolves to — the profile's default from the snapshot when it is an
-// ordinary rung, else the best graded ordinary rung at the lowest effort. A
-// rungless best rung resolves to the default effort but falls back to itself.
+// launchDefaultEffort is pacelever's fallback when a caller explicitly asks
+// for a rung absent from the live catalog; the requested effort stays on the
+// launch even when the catalog row falls back.
 func launchDefaultEffort(profile string, rows []launchRow, defaults map[string]string) (fallback, resolved string) {
 	preferred := defaults[profile]
 	var ordinary []launchRow

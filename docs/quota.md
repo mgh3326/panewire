@@ -413,10 +413,12 @@ own rule refuses first. The rules, each with its test in
 | A `consult_only` rung needs `--operator-request` (not `codex-astra`) | `profile is consult_only; pass --operator-request` |
 | On a stale catalog, an escalation rung needs `--operator-request` | `catalog is stale; non-default gate requires --operator-request` |
 
-An effortless request resolves to the profile's default effort, else the best
-graded ordinary rung at the lowest effort; a requested effort with no eligible
-rung of its own falls back to that rung and keeps the requested effort, as in
-pacelever. The launch rule for a credit rung is pacelever's (`pi-` profiles
+An effortless request resolves to the profile's declared default when that row
+is live, or to its sole live row when only one remains. If multiple live rows
+remain and none is the declared default, launch refuses and names their efforts
+so the caller can pass `--effort`. A requested effort with no eligible rung of
+its own falls back to that rung and keeps the requested effort, as in pacelever.
+The launch rule for a credit rung is pacelever's (`pi-` profiles
 and `cmd-dsflash41`); the gate's stricter one ([Command Code
 seats](#command-code-seats)) still refuses at admission. pacelever's
 exploration does not apply: panewire passes no `--task`, so pacelever keeps
