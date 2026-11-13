@@ -2,14 +2,11 @@ package fleet
 
 import (
 	"context"
-	_ "embed"
-	"encoding/json"
 	"fmt"
 	"os"
 	"slices"
 	"sort"
 	"strings"
-	"sync"
 )
 
 const launchModeNative = "native"
@@ -33,13 +30,11 @@ func (q admissionQuota) Launch(ctx context.Context, r QuotaRequest) (Launch, err
 	return q.app.nativeLaunch(ctx, r)
 }
 
-// nativeLaunch is `pacelever policy launch PROFILE --json` as CLIQuota.Launch
-// reads it, answered from panewire's catalog: pacelever v0.3.28's
-// resolveLaunch (catalog.go) over the catalog its policy launch reads
-// (bench.go). A refusal exits 3 with pacelever's reason, as pacelever exits 3
-// with that error; a missing profile or an unreadable pool policy exits 2; a
-// stale catalog is refused as CLIQuota.Launch refuses it. No pacelever process
-// runs.
+// nativeLaunch resolves a request from the live handoffkeep catalog and
+// policy/model-families. A missing profile refuses; family policy is a
+// best-effort pool-family override and falls back to the live row's family if
+// the document cannot be read. A stale catalog is refused after its row rules
+// are checked. No pacelever process or bundled catalog is used.
 //
 // panewire's config.toml is loaded and validated with the rules ported from
 // pacelever (launch_config.go); [bench] catalog_ttl_s and
@@ -57,9 +52,16 @@ func (a *App) nativeLaunch(ctx context.Context, r QuotaRequest) (Launch, error) 
 	if err != nil {
 		return Launch{}, fail(gateInvalid, "quota catalog: %v", err)
 	}
-	catalog := a.launchCatalog(ctx, policy.Freshness, false)
+	families, err := a.modelFamiliesPolicy(ctx)
+	if err != nil {
+		if a.Err != nil {
+			a.warn("quota catalog: model-family policy unavailable; using live catalog family: %v", err)
+		}
+		families = ModelFamiliesPolicy{}
+	}
+	catalog := a.launchCatalog(ctx, policy.Freshness, false, families)
 	return decideLaunch(policy.admissionPolicy, a.Policy.Profiles, launchRequest(r), catalog, func() launchCatalog {
-		return a.launchCatalog(ctx, policy.Freshness, true)
+		return a.launchCatalog(ctx, policy.Freshness, true, families)
 	})
 }
 
@@ -85,11 +87,16 @@ func (a *App) offlineLaunch(r QuotaRequest) (l Launch, found bool, err error) {
 }
 
 // launchRequest applies the request's marker, then the panewire environment
-// override and its retired pacelever name as fallback.
+// override and its retired pacelever name as fallback. A locked request (a
+// hub submission or a node-delivered spawn) reads no environment: its marker
+// is already authoritative.
 func launchRequest(r QuotaRequest) admissionRequest {
-	e6Arm := strings.TrimSpace(os.Getenv("PANEWIRE_E6_ARM"))
-	if e6Arm == "" {
-		e6Arm = os.Getenv("PACELEVER_E6_ARM")
+	e6Arm := ""
+	if !r.E6ArmLocked {
+		e6Arm = strings.TrimSpace(os.Getenv("PANEWIRE_E6_ARM"))
+		if e6Arm == "" {
+			e6Arm = os.Getenv("PACELEVER_E6_ARM")
+		}
 	}
 	return admissionRequest{Profile: r.Profile, Effort: r.Effort, Role: r.Role, Purpose: r.Purpose, OperatorRequest: r.OperatorRequest, RequestedBy: r.RequestedBy, E6Arm: strings.TrimSpace(firstNonempty(r.E6Arm, e6Arm))}
 }
@@ -112,58 +119,21 @@ func decideLaunch(policy admissionPolicy, seats map[string]Seat, req admissionRe
 	return l, nil
 }
 
-// launchCatalog is the catalog pacelever's policy launch resolves against:
-// handoffkeep's rows with the local fields pacelever's bundled snapshot adds
-// (bench.go decodeCatalog), the snapshot's rows for profiles handoffkeep does
-// not list (bench.go ReadCatalog), and the snapshot's effort defaults and
-// aliases (catalog.go). Without a readable catalog it is the snapshot alone,
-// stale, as in pacelever.
+// launchCatalog is the live handoffkeep catalog with placement derived from
+// grade and family identity read from policy/model-families.
 type launchCatalog struct {
-	Rows     []launchRow
-	Defaults map[string]string
-	Aliases  map[string]string
-	Stale    bool
+	Rows  []launchRow
+	Stale bool
 	// cached marks rows served from a cache entry younger than the TTL,
 	// without asking handoffkeep.
 	cached bool
 }
 
-// launchRow is one rung as the lookup reads it: the gate's row plus the
-// family pacelever's snapshot names for it.
+// launchRow is one live bench-catalog rung as launch reads it.
 type launchRow struct {
 	admissionRow
 	Family string
 }
-
-// catalogSnapshotJSON is pacelever v0.3.28's catalog_snapshot.json, byte for
-// byte: the local fields (placement, family), effort defaults and aliases that
-// pacelever's own catalog adds to handoffkeep's rows. Its agy-flash row
-// (Gemini 3.7) is dropped: that rung is retired (hk 3859).
-//
-//go:embed catalog-snapshot.json
-var catalogSnapshotJSON []byte
-
-var catalogSnapshot = sync.OnceValue(func() launchCatalog {
-	var doc struct {
-		Rows []struct {
-			CatalogRow
-			Placed bool   `json:"placed"`
-			Family string `json:"family"`
-		} `json:"rows"`
-		Defaults map[string]string `json:"defaults"`
-		Aliases  map[string]string `json:"aliases"`
-	}
-	if err := json.Unmarshal(catalogSnapshotJSON, &doc); err != nil {
-		panic(err)
-	}
-	c := launchCatalog{Defaults: doc.Defaults, Aliases: doc.Aliases}
-	for _, r := range doc.Rows {
-		row := launchRowFrom(r.CatalogRow)
-		row.Placed, row.Family = r.Placed, r.Family
-		c.Rows = append(c.Rows, row)
-	}
-	return c
-})
 
 func launchRowFrom(r CatalogRow) launchRow {
 	return launchRow{admissionRow: admissionRow{Profile: r.Profile, Effort: r.Effort, ModelID: r.ModelID, Pool: r.Pool, Grade: r.Grade, Gate: r.Gate, Placed: r.Grade != gradeUnrated, Retired: r.RetiredAt != nil}, Family: r.Family}
@@ -172,15 +142,14 @@ func launchRowFrom(r CatalogRow) launchRow {
 // launchCatalog reads the catalog: a.BenchCatalog when set (a fixture), else
 // handoffkeep through the catalog client and its cache, with freshness's
 // limits. fresh skips the cache.
-func (a *App) launchCatalog(ctx context.Context, freshness CatalogFreshness, fresh bool) launchCatalog {
-	stale := catalogSnapshot()
-	stale.Stale = true
+func (a *App) launchCatalog(ctx context.Context, freshness CatalogFreshness, fresh bool, families ModelFamiliesPolicy) launchCatalog {
+	stale := launchCatalog{Stale: true}
 	if a.BenchCatalog != nil {
 		rows, err := a.BenchCatalog(ctx)
 		if err != nil {
 			return stale
 		}
-		return overlayLaunchCatalog(rows, false)
+		return overlayLaunchCatalog(rows, false, families)
 	}
 	client, err := NewCatalogClient(CatalogClientConfig{Now: a.Now, Freshness: freshness})
 	if err != nil {
@@ -190,7 +159,14 @@ func (a *App) launchCatalog(ctx context.Context, freshness CatalogFreshness, fre
 	if err != nil {
 		return stale
 	}
-	c := overlayLaunchCatalog(catalogDataRows(data), data.Info.Stale)
+	if data.Info.Source == catalogSourceServer {
+		for _, warning := range data.Warnings {
+			if strings.HasPrefix(warning, "catalog_row_invalid:") {
+				a.warn("%s", warning)
+			}
+		}
+	}
+	c := overlayLaunchCatalog(catalogDataRows(data), data.Info.Stale, families)
 	c.cached = data.Info.Source == catalogSourceCache && data.Info.AgeS != nil && client.fresh(*data.Info.AgeS)
 	return c
 }
@@ -208,7 +184,7 @@ func (a *App) cachedLaunchCatalog(freshness CatalogFreshness) (launchCatalog, bo
 	if !ok {
 		return launchCatalog{}, false
 	}
-	c := overlayLaunchCatalog(catalogDataRows(data), false)
+	c := overlayLaunchCatalog(catalogDataRows(data), false, ModelFamiliesPolicy{})
 	c.cached = true
 	return c, true
 }
@@ -221,39 +197,20 @@ func catalogDataRows(data CatalogData) []CatalogRow {
 	return rows
 }
 
-// overlayLaunchCatalog is handoffkeep's rows with the bundled snapshot's
-// local fields and the snapshot's rows for profiles the rows do not list.
-func overlayLaunchCatalog(rows []CatalogRow, stale bool) launchCatalog {
-	snapshot := catalogSnapshot()
-	c := launchCatalog{Defaults: snapshot.Defaults, Aliases: snapshot.Aliases, Stale: stale}
-	listed := map[string]bool{}
+// overlayLaunchCatalog projects live catalog rows into launch rows. Placement
+// is derived from grade; the family policy names families by quota pool.
+func overlayLaunchCatalog(rows []CatalogRow, stale bool, familyPolicies ...ModelFamiliesPolicy) launchCatalog {
+	c := launchCatalog{Stale: stale}
+	var families ModelFamiliesPolicy
+	if len(familyPolicies) > 0 {
+		families = familyPolicies[0]
+	}
 	for _, r := range rows {
 		row := launchRowFrom(r)
-		// A rung the snapshot knows takes its family, and stays unplaced
-		// when the snapshot holds it unplaced at the same grade.
-		if i := slices.IndexFunc(snapshot.Rows, func(old launchRow) bool { return old.Profile == r.Profile && old.Effort == r.Effort }); i >= 0 {
-			old := snapshot.Rows[i]
-			row.Family = old.Family
-			if !old.Placed && r.Grade == old.Grade {
-				row.Placed = false
-			}
-		}
-		listed[r.Profile] = true
+		row.Family = families.familyForPool(r.Pool, row.Family)
 		c.Rows = append(c.Rows, row)
 	}
-	for _, old := range snapshot.Rows {
-		if !listed[old.Profile] {
-			c.Rows = append(c.Rows, old)
-		}
-	}
 	return c
-}
-
-func (c launchCatalog) canonical(profile string) string {
-	if v := c.Aliases[profile]; v != "" {
-		return v
-	}
-	return profile
 }
 
 func (c launchCatalog) profileRows(profile string) []launchRow {
@@ -277,15 +234,14 @@ func (c launchCatalog) profileCredit(profile string) bool {
 	})
 }
 
-// resolve is pacelever's resolveLaunch: the launch a request resolves to, or
-// the reason it is refused. seats is the embedded seat policy: a profile's
+// resolve returns the launch a request resolves to, or the reason it is
+// refused. seats is the embedded seat policy: a profile's
 // no-thinking property is read there, never from a catalog row.
 func (c launchCatalog) resolve(policy admissionPolicy, seats map[string]Seat, req admissionRequest) (Launch, string) {
 	row, resolved, why := c.resolveRow(req, admissionUnratedRole(req), seats)
 	if why != "" {
 		return Launch{}, why
 	}
-	req.Profile = c.canonical(req.Profile)
 	if why := launchRoleCheck(req, row); why != "" {
 		return Launch{}, why
 	}
@@ -309,7 +265,7 @@ func (c launchCatalog) resolve(policy admissionPolicy, seats map[string]Seat, re
 // resolveRow is pacelever's resolveRow: the rung a request names and the
 // effort it resolves to.
 func (c launchCatalog) resolveRow(req admissionRequest, allowUnrated bool, seats map[string]Seat) (launchRow, string, string) {
-	profile := c.canonical(req.Profile)
+	profile := req.Profile
 	requested := admissionNormalize(req.Effort)
 	if c.profileCredit(profile) && requested == "" {
 		return launchRow{}, "", "explicit --effort required for credit profile"
@@ -356,34 +312,13 @@ func (c launchCatalog) resolveRow(req admissionRequest, allowUnrated bool, seats
 	if len(eligible) == 0 {
 		return launchRow{}, "", "e6_arm_required: unplaced profile requires exact measurement marker"
 	}
-	fallback, resolved := launchDefaultEffort(profile, eligible, c.Defaults)
-	if requested == "" {
-		preferred := c.Defaults[profile]
-		if preferred != "" && slices.ContainsFunc(eligible, func(r launchRow) bool { return r.Effort == preferred }) {
-			fallback, resolved = preferred, preferred
-		} else if slices.ContainsFunc(eligible, func(r launchRow) bool { return r.Effort == "" }) {
-			fallback = ""
-			if preferred != "" {
-				resolved = preferred
-			}
-		} else if len(eligible) == 1 {
-			fallback, resolved = eligible[0].Effort, eligible[0].Effort
-		} else {
-			var efforts []string
-			for _, row := range eligible {
-				effort := row.Effort
-				if effort == "" {
-					effort = "default"
-				}
-				if !slices.Contains(efforts, effort) {
-					efforts = append(efforts, effort)
-				}
-			}
-			slices.Sort(efforts)
-			return launchRow{}, "", fmt.Sprintf("profile %q has multiple live efforts (%s); pass --effort", profile, strings.Join(efforts, ", "))
-		}
-	} else {
-		resolved = requested
+	fallback := launchDefaultEffort(eligible)
+	if fallback == "" {
+		return launchRow{}, "", "catalog row has no launch effort"
+	}
+	resolved := requested
+	if resolved == "" {
+		resolved = fallback
 	}
 	if slices.ContainsFunc(c.Rows, func(r launchRow) bool { return r.Profile == profile && r.Effort == resolved && r.Retired }) {
 		return launchRow{}, "", "rung is retired in the catalog"
@@ -393,34 +328,33 @@ func (c launchCatalog) resolveRow(req admissionRequest, allowUnrated bool, seats
 		if c.profileCredit(profile) || profile == "codex-terra61" {
 			return launchRow{}, "", "e6_arm_required: rung is not placed"
 		}
-		i = slices.IndexFunc(eligible, func(r launchRow) bool { return r.Effort == fallback })
-	}
-	if i < 0 {
 		return launchRow{}, "", "rung is not in the catalog"
 	}
 	chosen := eligible[i]
-	if admissionMarkerRequired(chosen.admissionRow, allowUnrated) && req.E6Arm != profile+"@"+resolved {
+	if admissionMarkerRequired(chosen.admissionRow, allowUnrated) && req.E6Arm != profile+"@"+chosen.Effort {
 		return launchRow{}, "", "e6_arm_required"
 	}
-	return chosen, resolved, ""
+	if chosen.Effort == "" {
+		return launchRow{}, "", "catalog row has no launch effort"
+	}
+	return chosen, chosen.Effort, ""
 }
 
-// launchDefaultEffort is pacelever's fallback when a caller explicitly asks
-// for a rung absent from the live catalog; the requested effort stays on the
-// launch even when the catalog row falls back.
-func launchDefaultEffort(profile string, rows []launchRow, defaults map[string]string) (fallback, resolved string) {
-	preferred := defaults[profile]
+// launchDefaultEffort selects the best graded ordinary rung at the lowest
+// effort. If no ordinary rung exists, it selects the best available live row.
+func launchDefaultEffort(rows []launchRow) (fallback string) {
 	var ordinary []launchRow
 	for _, r := range rows {
-		if r.Gate == defaultGate && (r.Placed || r.Grade == gradeUnrated) {
+		if r.Effort != "" && r.Gate == defaultGate && (r.Placed || r.Grade == gradeUnrated) {
 			ordinary = append(ordinary, r)
-			if preferred != "" && r.Effort == preferred {
-				return preferred, preferred
-			}
 		}
 	}
 	if len(ordinary) == 0 {
-		ordinary = append(ordinary, rows...)
+		for _, r := range rows {
+			if r.Effort != "" {
+				ordinary = append(ordinary, r)
+			}
+		}
 	}
 	sort.SliceStable(ordinary, func(i, j int) bool {
 		a, b := ordinary[i], ordinary[j]
@@ -430,12 +364,9 @@ func launchDefaultEffort(profile string, rows []launchRow, defaults map[string]s
 		return admissionEffortRank(a.Effort) < admissionEffortRank(b.Effort)
 	})
 	if len(ordinary) == 0 {
-		return "", ""
+		return ""
 	}
-	if ordinary[0].Effort == "" {
-		return "", preferred
-	}
-	return ordinary[0].Effort, ordinary[0].Effort
+	return ordinary[0].Effort
 }
 
 // launchRoleCheck is pacelever's roleCheck with its credit() rule.

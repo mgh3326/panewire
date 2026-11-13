@@ -300,6 +300,9 @@ type selReq struct {
 	// e6Arm is the experiment marker a hub submission carried; empty reads
 	// the environment, as every local selection does.
 	e6Arm string
+	// e6ArmLocked marks a spawn whose marker is already authoritative (a hub
+	// submission or a node-delivered spawn): empty stays empty.
+	e6ArmLocked bool
 	// gradeSource is where a consult asker's grade came from (flag, task or
 	// without_task); usedFloor and fallback are set on a consult fallback retry
 	// (consult_floor.go).
@@ -417,7 +420,7 @@ func (a *App) seatFor(row CatalogRow, req selReq) (string, *Seat, string) {
 				reason = "builder_family_unreadable"
 			case (req.role == "tester" || req.role == "reviewer") && seat.Family == req.builderFamily:
 				reason = "family_excluded"
-			case seat.seatE6(row.Effort) && a.e6Arm(req.e6Arm) != seat.Canon+"@"+row.Effort:
+			case seat.seatE6(row.Effort) && a.e6Arm(req.e6Arm, req.e6ArmLocked) != seat.Canon+"@"+row.Effort:
 				reason = "e6_marker"
 			}
 		}
@@ -756,7 +759,7 @@ func (a *App) selectProfile(ctx context.Context, s Spawn) (*selPlan, error) {
 	if a.Quota == nil {
 		return nil, fail(exitConfig, "POLICY_UNAVAILABLE: selection needs the quota catalog")
 	}
-	req := selReq{t: s.T, role: s.Role, lane: s.Parent, effort: s.Effort, allowEscalation: s.AllowEscalation, builderFamily: s.ParentFamily, excludeFamilies: s.ExcludeFamilies, excludeHarnesses: s.failedHarnesses, onlyFamily: s.OnlyFamily, e6Arm: s.E6Arm}
+	req := selReq{t: s.T, role: s.Role, lane: s.Parent, effort: s.Effort, allowEscalation: s.AllowEscalation, builderFamily: s.ParentFamily, excludeFamilies: s.ExcludeFamilies, excludeHarnesses: s.failedHarnesses, onlyFamily: s.OnlyFamily, e6Arm: s.E6Arm, e6ArmLocked: s.e6ArmLocked}
 	tags, e := parseTags(s.Tags)
 	if e != nil {
 		return nil, e
@@ -809,7 +812,27 @@ func (a *App) selectFor(ctx context.Context, s Spawn, req selReq) (*selPlan, err
 	if snapshot == nil {
 		p.degraded = append(p.degraded, "pool_cooling_"+coolingState)
 	}
-	rows, e := a.Quota.Catalog(ctx)
+	var rows []CatalogRow
+	if detailed, ok := a.Quota.(interface {
+		CatalogDetails(context.Context) (CatalogData, error)
+	}); ok {
+		data, err := detailed.CatalogDetails(ctx)
+		e = err
+		if err == nil {
+			rows = catalogDataRows(data)
+			for _, warning := range data.Warnings {
+				if !strings.HasPrefix(warning, "catalog_row_invalid:") {
+					continue
+				}
+				p.degraded = append(p.degraded, warning)
+				if data.Info.Source == catalogSourceServer {
+					a.warn("%s", warning)
+				}
+			}
+		}
+	} else {
+		rows, e = a.Quota.Catalog(ctx)
+	}
 	if e != nil {
 		return nil, fail(exitConfig, "POLICY_UNAVAILABLE: bench catalog unreadable: %v", e)
 	}

@@ -1,6 +1,7 @@
 package fleet
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -157,6 +158,59 @@ func TestCatalogDecodeDropsUnknownPool(t *testing.T) {
 	}
 	if _, _, _, err := decodeCatalogRows(raw[1:]); err == nil || !strings.Contains(err.Error(), "no supported pool rows") {
 		t.Fatalf("all-unknown catalog: %v", err)
+	}
+}
+
+func TestCatalogDecodeSkipsMalformedRows(t *testing.T) {
+	raw := []json.RawMessage{
+		json.RawMessage(`{"profile":"opus","effort":"high","model_id":"m","pool":"claude","grade":"A","gate":"default"}`),
+		json.RawMessage(`{"profile":"p","effort":"","model_id":"","pool":"","grade":"","gate":""}`),
+	}
+	rows, warnings, keep, err := decodeCatalogRows(raw)
+	if err != nil || len(rows) != 1 || rows[0].Profile != "opus" || len(keep) != 1 || keep[0] != 0 {
+		t.Fatalf("malformed row affected valid rung: rows=%+v keep=%v err=%v", rows, keep, err)
+	}
+	if len(warnings) != 1 || warnings[0] != "catalog_row_invalid:p@" {
+		t.Fatalf("warnings = %v", warnings)
+	}
+	if _, _, _, err := decodeCatalogRows(raw[1:]); err == nil || !strings.Contains(err.Error(), "no supported pool rows") {
+		t.Fatalf("all-invalid catalog: %v", err)
+	}
+}
+
+type catalogDetailsQuota struct {
+	*fakeQuota
+	data CatalogData
+}
+
+func (q catalogDetailsQuota) CatalogDetails(context.Context) (CatalogData, error) {
+	return q.data, nil
+}
+
+func TestCatalogSelectionKeepsValidRowAndReportsMalformedRow(t *testing.T) {
+	rows := []CatalogRow{{Profile: "sonnet", Effort: "high", Grade: "A", Pool: "claude", Gate: "default", ModelID: "sonnet-m"}}
+	a, s, q := selFixture(t, "A", rows, map[string]PoolView{"claude": riskPool(30, 8)}, []string{"claude"})
+	q.GateDo = gatePools(map[string]string{"sonnet": "claude"})
+	serveRouting(t, routingDocV1)
+	route, err := a.routeFor(context.Background(), "worker", "")
+	if err != nil {
+		t.Fatalf("route: %v", err)
+	}
+	warning := "catalog_row_invalid:p@"
+	a.Quota = catalogDetailsQuota{fakeQuota: q, data: CatalogData{
+		Rows: []CatalogEntry{{Profile: "sonnet", Effort: "high", Grade: "A", Pool: "claude", Gate: "default", ModelID: "sonnet-m"}},
+		Info: CatalogInfo{Source: catalogSourceServer}, Warnings: []string{warning},
+	}}
+	s.Role = "worker"
+	sel, err := a.selectFor(context.Background(), s, selReq{grade: "A", t: "T1", role: "worker", route: route, urgency: urgencyNormal, urgencySource: "default"})
+	if err != nil || sel == nil || sel.chosen.seat.Canon != "sonnet" {
+		t.Fatalf("selection should use the valid row: selection=%+v err=%v", sel, err)
+	}
+	if !strings.Contains(strings.Join(sel.degraded, ","), warning) {
+		t.Fatalf("degraded warnings = %v", sel.degraded)
+	}
+	if got := strings.Count(a.Err.(*bytes.Buffer).String(), "panewire: warning: "+warning); got != 1 {
+		t.Fatalf("warning log count=%d output=%q", got, a.Err.(*bytes.Buffer).String())
 	}
 }
 
