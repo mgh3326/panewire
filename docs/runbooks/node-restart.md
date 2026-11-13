@@ -22,14 +22,19 @@ see the next section.
 
 - **Settles `executing` spawn journal rows** (`hub_spawn_settle.go`). A row is
   `executing` while a node process runs the spawn; a restart leaves it behind.
-  The new process reads the job's local `job.spawned` record and asks herdr:
-  - the recorded pane, or the one agent bearing the spawn's label, is alive:
-    the spawn **landed**; the row completes with a success result and the job's
-    receipt, and the hub's replay is answered at once;
-  - no such pane: the row completes **lost** (`error: "lost"`, tail
-    `lost: pane_gone` or `lost: no_pane_launched` (never retryable; several agents with the label and no record leave the row executing));
-  - herdr unreachable: the row stays `executing` and the pass repeats every 30
-    seconds, and on every replay of that request.
+  The new process reads the job's local `job.spawned` record and asks herdr
+  for both the agent list and the pane list:
+  - the recorded pane is an agent of the spawn's name: the spawn **landed**; the
+    row completes with a success result and the job's receipt (including
+    `lane_unregistered`), and the hub's replay is answered at once;
+  - the recorded pane is in neither list, or its id now names another agent:
+    the row completes **lost** (`error: "lost"`, tail `lost: pane_gone`);
+  - no record and no agent or pane bearing the spawn's label: `lost:
+    no_pane_launched`. Neither lost answer is retryable;
+  - anything unproven stays `executing`, the replay answers `unknown`, and the
+    hub's own pane read and orphan rule decide: a pane only in the pane list, a
+    label match without a record (labels are not job-unique), herdr or the pane
+    list unreadable. The pass repeats every 30 seconds.
 - **Re-arms completion watchers** for live jobs, as before.
 
 ## The watcher must survive the stop

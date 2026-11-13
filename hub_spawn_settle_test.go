@@ -81,7 +81,7 @@ func (f *settleFixture) stored(t *testing.T) *hubSpawnResult {
 // the job's real result, and the watcher that records the job's outcome is
 // armed again (the watcher itself is TestWatcherRearmCatchUp's subject).
 func TestSpawnSettleLandedPaneKeepsWatchingAndReportsResult(t *testing.T) {
-	herdr := &nodeFakeHerdr{agents: []string{nodeAgentList(nodeAgentJSON("w1:p1", "label-a", "working", "/work/a"))}}
+	herdr := &nodeFakeHerdr{agents: []string{nodeAgentList(nodeAgentJSON("w1:p1", "label-a", "working", "/work/a"))}, panes: settlePanes("w1:p1", "label-a")}
 	f := newSettleFixture(t, herdr.run)
 	f.recordSpawn(t, "w1:p1")
 	f.client.runSpawnSettle(t.Context())
@@ -101,7 +101,7 @@ func TestSpawnSettleLandedPaneKeepsWatchingAndReportsResult(t *testing.T) {
 // The replay the hub sends after the restart gets the settled result at once,
 // not "unknown" until the request deadline.
 func TestSpawnSettleAnswersReplayFromPane(t *testing.T) {
-	herdr := &nodeFakeHerdr{agents: []string{nodeAgentList(nodeAgentJSON("w1:p1", "label-a", "working", "/work/a"))}}
+	herdr := &nodeFakeHerdr{agents: []string{nodeAgentList(nodeAgentJSON("w1:p1", "label-a", "working", "/work/a"))}, panes: settlePanes("w1:p1", "label-a")}
 	f := newSettleFixture(t, herdr.run)
 	f.recordSpawn(t, "w1:p1")
 	peer, next := settlePeer(t)
@@ -126,7 +126,7 @@ func TestSpawnSettleGonePaneEndsLostWithReason(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			herdr := &nodeFakeHerdr{agents: []string{tc.agents}}
+			herdr := &nodeFakeHerdr{agents: []string{tc.agents}, panes: settlePanes()}
 			f := newSettleFixture(t, herdr.run)
 			if tc.recordPane != "" {
 				f.recordSpawn(t, tc.recordPane)
@@ -149,7 +149,7 @@ func TestSpawnSettleGonePaneEndsLostWithReason(t *testing.T) {
 // A row written before the journal named its job cannot be matched to a pane;
 // it ends lost rather than staying executing for good.
 func TestSpawnSettleRowWithoutJobEndsLost(t *testing.T) {
-	f := newSettleFixture(t, (&nodeFakeHerdr{agents: []string{nodeAgentList()}}).run)
+	f := newSettleFixture(t, (&nodeFakeHerdr{agents: []string{nodeAgentList()}, panes: settlePanes()}).run)
 	if _, err := f.journal.db.ExecContext(t.Context(), `UPDATE spawn_inbox SET job_id='',label=''`); err != nil {
 		t.Fatal(err)
 	}
@@ -164,7 +164,7 @@ func TestSpawnSettleRowWithoutJobEndsLost(t *testing.T) {
 func TestSpawnSettleRetriesWhileHerdrIsDown(t *testing.T) {
 	var down atomic.Bool
 	down.Store(true)
-	herdr := &nodeFakeHerdr{agents: []string{nodeAgentList(nodeAgentJSON("w1:p1", "label-a", "idle", "/work/a"))}}
+	herdr := &nodeFakeHerdr{agents: []string{nodeAgentList(nodeAgentJSON("w1:p1", "label-a", "idle", "/work/a"))}, panes: settlePanes("w1:p1", "label-a")}
 	f := newSettleFixture(t, func(ctx context.Context, args ...string) ([]byte, error) {
 		if down.Load() {
 			return nil, errors.New("herdr down")
@@ -183,7 +183,7 @@ func TestSpawnSettleRetriesWhileHerdrIsDown(t *testing.T) {
 
 // A request this process is running is never settled from under it.
 func TestSpawnSettleLeavesRunningRequestAlone(t *testing.T) {
-	f := newSettleFixture(t, (&nodeFakeHerdr{agents: []string{nodeAgentList()}}).run)
+	f := newSettleFixture(t, (&nodeFakeHerdr{agents: []string{nodeAgentList()}, panes: settlePanes()}).run)
 	f.client.spawnActive = map[string]bool{f.orphan.RequestID: true}
 	if settled, left := f.client.settleExecutingSpawns(t.Context(), f.journal); settled != 0 || left != 0 || f.stored(t) != nil {
 		t.Fatalf("settled=%d left=%d stored=%+v", settled, left, f.stored(t))
@@ -254,9 +254,72 @@ func settlePeer(t *testing.T) (*hubClientConnection, func() hubSpawnResult) {
 // Two agents bear the label and no record names the pane: absence is not
 // proven, so the row stays executing instead of ending lost and retryable.
 func TestSpawnSettleAmbiguousLabelStaysExecuting(t *testing.T) {
-	herdr := &nodeFakeHerdr{agents: []string{nodeAgentList(nodeAgentJSON("w1:p1", "label-a", "idle", "/a"), nodeAgentJSON("w1:p2", "label-a", "idle", "/b"))}}
+	herdr := &nodeFakeHerdr{agents: []string{nodeAgentList(nodeAgentJSON("w1:p1", "label-a", "idle", "/a"), nodeAgentJSON("w1:p2", "label-a", "idle", "/b"))}, panes: settlePanes("w1:p1", "label-a", "w1:p2", "label-a")}
 	f := newSettleFixture(t, herdr.run)
 	if settled, left := f.client.settleExecutingSpawns(t.Context(), f.journal); settled != 0 || left != 1 || f.stored(t) != nil {
 		t.Fatalf("settled=%d left=%d stored=%+v", settled, left, f.stored(t))
+	}
+}
+
+// settlePanes is a `herdr pane list` answer: pairs of pane id and label.
+func settlePanes(idLabel ...string) string {
+	rows := make([]string, 0, len(idLabel)/2)
+	for i := 0; i+1 < len(idLabel); i += 2 {
+		rows = append(rows, `{"pane_id":"`+idLabel[i]+`","label":"`+idLabel[i+1]+`","agent_status":"","cwd":"/x"}`)
+	}
+	return `{"result":{"panes":[` + strings.Join(rows, ",") + `]}}`
+}
+
+// What herdr shows can fail to prove anything, and then the row stays
+// executing for the hub's own pane read instead of ending in a terminal answer.
+func TestSpawnSettleUnprovenCasesStayExecuting(t *testing.T) {
+	cases := []struct {
+		name       string
+		recordPane string
+		agents     string
+		panes      string
+	}{
+		{"recorded pane is only in the pane list", "w1:p1", nodeAgentList(), settlePanes("w1:p1", "label-a")},
+		{"no record, one agent bears the label (a foreign job may own it)", "", nodeAgentList(nodeAgentJSON("w1:p9", "label-a", "idle", "/other")), settlePanes("w1:p9", "label-a")},
+		{"no record, a pane bears the label but no agent registered", "", nodeAgentList(), settlePanes("w1:p9", "label-a")},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newSettleFixture(t, (&nodeFakeHerdr{agents: []string{tc.agents}, panes: tc.panes}).run)
+			if tc.recordPane != "" {
+				f.recordSpawn(t, tc.recordPane)
+			}
+			if settled, left := f.client.settleExecutingSpawns(t.Context(), f.journal); settled != 0 || left != 1 || f.stored(t) != nil {
+				t.Fatalf("settled=%d left=%d stored=%+v", settled, left, f.stored(t))
+			}
+		})
+	}
+}
+
+// An unreadable pane list is as unproven as an unreadable agent list.
+func TestSpawnSettlePaneListFailureStaysExecuting(t *testing.T) {
+	f := newSettleFixture(t, (&nodeFakeHerdr{agents: []string{nodeAgentList()}, panes: `not json`}).run)
+	f.recordSpawn(t, "w1:p1")
+	if settled, left := f.client.settleExecutingSpawns(t.Context(), f.journal); settled != 0 || left != 1 {
+		t.Fatalf("settled=%d left=%d", settled, left)
+	}
+}
+
+// A landing whose lane registration failed is still reported as one, so the
+// owner is told the pane's findings are not routed.
+func TestSpawnSettleKeepsLaneUnregistered(t *testing.T) {
+	herdr := &nodeFakeHerdr{agents: []string{nodeAgentList(nodeAgentJSON("w1:p1", "label-a", "working", "/work/a"))}, panes: settlePanes("w1:p1", "label-a")}
+	f := newSettleFixture(t, herdr.run)
+	dir := filepath.Join(f.jobs, "jobs", "job-a", "events")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	event, _ := json.Marshal(map[string]any{"kind": "job.spawned", "payload": map[string]any{"pane_id": "w1:p1", "herdr_session": "worker", "host": "machine-a", "profile": "codex-terra", "cwd": "/work/a", "lane_unregistered": true}})
+	if err := os.WriteFile(filepath.Join(dir, "01.json"), event, 0600); err != nil {
+		t.Fatal(err)
+	}
+	f.client.runSpawnSettle(t.Context())
+	if result := f.stored(t); result == nil || result.Receipt == nil || !result.Receipt.LaneUnregistered {
+		t.Fatalf("settled as %+v", result)
 	}
 }

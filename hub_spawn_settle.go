@@ -20,14 +20,18 @@ import (
 // replay was `unknown` until the request deadline. The panes live in herdr, a
 // separate process, so the new process asks herdr instead:
 //
-//   - the job's pane (or an agent bearing the spawn's label) is alive: the
-//     spawn landed. The row completes with a success result built from the
-//     job's own spawn record, so the replay is answered at once, and the
-//     detached watcher (re-armed at start, started by the dead process)
-//     keeps recording the job.
-//   - no such pane: the row completes as lost, with a reason.
+//   - the job's recorded pane (from its job.spawned event) is an agent of the
+//     spawn's name: the spawn landed. The row completes with a success result
+//     built from that record, so the replay is answered at once, and the
+//     detached watcher (re-armed at start) keeps recording the job.
+//   - that pane is in neither herdr list, or its id now names another agent:
+//     the row completes as lost, with a reason.
+//   - anything herdr cannot prove stays executing: a pane only in the pane
+//     list (the agent list alone never proves a pane gone), and a spawn with no
+//     job.spawned record while a label match exists (labels are not
+//     job-unique, so a match is neither this job's pane nor proof of absence).
 //
-// herdr unreachable leaves the row executing; the next pass retries. A pass
+// herdr unreachable leaves the row executing too; the next pass retries. A pass
 // runs at start, on a replay of the request, and every settleRetry until no
 // row is left. See docs/hub-spawn-operations.md ("Node restart").
 
@@ -102,21 +106,21 @@ func (client *HubClient) settleExecutingSpawn(ctx context.Context, journal *node
 	} else {
 		spawned := client.readLocalSpawnRecord(row.Job)
 		session := firstNonempty(spawned.HerdrSession, client.nodeSpawnSession())
-		agents, err := client.readNodeAgentsInSession(ctx, session)
-		if err != nil {
+		evidence, ok := client.readSpawnEvidence(ctx, session)
+		if !ok {
 			return nil, false // herdr unreachable: the row stays executing.
 		}
-		pane, found, ambiguous := findSpawnPane(agents, spawned.PaneID, row.Label)
-		if ambiguous {
-			// Several agents bear the label and no record names the pane: absence
-			// is not proven, so the row stays executing and the replay answers
-			// unknown, leaving the decision to the hub's own pane read.
+		decided, proven := decideSpawn(evidence, spawned, row.Label)
+		if !proven {
+			// The agent list alone never proves a pane gone, and a label is not
+			// job-unique: an unprovable case leaves the row executing, and the
+			// replay answers unknown for the hub's own pane read to decide.
 			return nil, false
 		}
-		switch {
-		case found:
-			result = landedSpawnResult(result, row, spawned, pane)
-		case spawned.PaneID != "":
+		switch decided.state {
+		case spawnLanded:
+			result = landedSpawnResult(result, row, spawned, decided.pane)
+		case spawnPaneGone:
 			result = lostSpawnResult(result, spawnLostPaneGone, false)
 			result.Pane = spawned.PaneID
 		default:
@@ -139,22 +143,97 @@ func (client *HubClient) settleExecutingSpawn(ctx context.Context, journal *node
 	return stored, true
 }
 
-// findSpawnPane matches the job's recorded pane, else the one agent bearing
-// the spawn's label (a pane herdr created before the record was written).
-func findSpawnPane(agents []nodeHerdrRow, paneID, label string) (pane nodeAgentRow, found, ambiguous bool) {
-	var byLabel []nodeAgentRow
+// spawnEvidence is everything herdr shows about a session: the agent list and
+// the pane list, whose rows carry the label and whose pane exists before its
+// agent registers or after it exits.
+type spawnEvidence struct {
+	agents []nodeAgentRow
+	panes  []struct{ PaneID, Label string }
+}
+
+func (client *HubClient) readSpawnEvidence(ctx context.Context, session string) (spawnEvidence, bool) {
+	var evidence spawnEvidence
+	agents, err := client.readNodeAgentsInSession(ctx, session)
+	if err != nil {
+		return evidence, false
+	}
 	for _, agent := range agents {
-		if paneID != "" && agent.PaneID == paneID && (label == "" || agent.Name == "" || agent.Name == label) {
-			return agent.nodeAgentRow, true, false
+		evidence.agents = append(evidence.agents, agent.nodeAgentRow)
+	}
+	output, err := client.nodeHerdrRunnerForSession(session)(ctx, "pane", "list")
+	if err != nil {
+		return evidence, false
+	}
+	var envelope struct {
+		Result struct {
+			Panes []struct {
+				PaneID string `json:"pane_id"`
+				Label  string `json:"label"`
+			} `json:"panes"`
+		} `json:"result"`
+	}
+	if json.Unmarshal(output, &envelope) != nil {
+		return evidence, false
+	}
+	for _, pane := range envelope.Result.Panes {
+		evidence.panes = append(evidence.panes, struct{ PaneID, Label string }{pane.PaneID, pane.Label})
+	}
+	return evidence, true
+}
+
+type spawnState int
+
+const (
+	spawnLanded spawnState = iota
+	spawnPaneGone
+	spawnNeverLaunched
+)
+
+type spawnDecision struct {
+	state spawnState
+	pane  nodeAgentRow
+}
+
+// decideSpawn judges a restarted spawn. proven is false whenever herdr's
+// evidence cannot settle it:
+//   - With the job's recorded pane: an agent on that pane with the spawn's
+//     name landed it; a pane that is only in the pane list is not proven gone;
+//     a pane in neither list, or held by another-named agent, is gone.
+//   - Without a record (the crash fell between pane create and the record), a
+//     label match is never taken as this job's pane, since labels are not
+//     job-unique, and is never proof of absence either: it stays unproven. No
+//     match in either list is a spawn that never launched.
+func decideSpawn(evidence spawnEvidence, spawned localSpawnRecord, label string) (decision spawnDecision, proven bool) {
+	if spawned.PaneID != "" {
+		for _, agent := range evidence.agents {
+			if agent.PaneID != spawned.PaneID {
+				continue
+			}
+			if label == "" || agent.Name == "" || agent.Name == label {
+				return spawnDecision{state: spawnLanded, pane: agent}, true
+			}
+			return spawnDecision{state: spawnPaneGone}, true // the id now names another agent
 		}
-		if label != "" && agent.Name == label {
-			byLabel = append(byLabel, agent.nodeAgentRow)
+		for _, pane := range evidence.panes {
+			if pane.PaneID == spawned.PaneID {
+				return spawnDecision{}, false
+			}
+		}
+		return spawnDecision{state: spawnPaneGone}, true
+	}
+	if label != "" {
+		for _, agent := range evidence.agents {
+			if agent.Name == label {
+				return spawnDecision{}, false
+			}
+		}
+		for _, pane := range evidence.panes {
+			if pane.Label == label {
+				return spawnDecision{}, false
+			}
 		}
 	}
-	if paneID == "" && len(byLabel) == 1 {
-		return byLabel[0], true, false
-	}
-	return nodeAgentRow{}, false, paneID == "" && len(byLabel) > 1
+	return spawnDecision{state: spawnNeverLaunched}, true
 }
 
 func landedSpawnResult(result hubSpawnResult, row executingSpawn, spawned localSpawnRecord, pane nodeAgentRow) hubSpawnResult {
@@ -163,7 +242,7 @@ func landedSpawnResult(result hubSpawnResult, row executingSpawn, spawned localS
 	result.Receipt = &fleet.ExecutionReceipt{
 		Job: row.Job, Host: spawned.Host, Pane: pane.PaneID, Profile: spawned.Profile, Model: spawned.Model,
 		Role: spawned.Role, CWD: firstNonempty(spawned.CWD, pane.Cwd), Label: firstNonempty(row.Label, pane.Name),
-		Kind: firstNonempty(fleet.ProfileKind(spawned.Profile), pane.Agent),
+		Kind: firstNonempty(fleet.ProfileKind(spawned.Profile), pane.Agent), LaneUnregistered: spawned.LaneUnregistered,
 	}
 	return result
 }
@@ -178,6 +257,7 @@ func lostSpawnResult(result hubSpawnResult, reason string, retryable bool) hubSp
 // reads: where the pane is and what the hub's pane check compares.
 type localSpawnRecord struct {
 	PaneID, HerdrSession, Host, Profile, Model, Role, CWD string
+	LaneUnregistered                                      bool
 }
 
 func (client *HubClient) readLocalSpawnRecord(job string) localSpawnRecord {
@@ -205,20 +285,21 @@ func (client *HubClient) readLocalSpawnRecord(job string) localSpawnRecord {
 		var event struct {
 			Type, Kind, Event string
 			Payload           struct {
-				PaneID       string `json:"pane_id"`
-				HerdrSession string `json:"herdr_session"`
-				Host         string `json:"host"`
-				Profile      string `json:"profile"`
-				Model        string `json:"model_id"`
-				Role         string `json:"role"`
-				CWD          string `json:"cwd"`
+				PaneID           string `json:"pane_id"`
+				HerdrSession     string `json:"herdr_session"`
+				Host             string `json:"host"`
+				Profile          string `json:"profile"`
+				Model            string `json:"model_id"`
+				Role             string `json:"role"`
+				CWD              string `json:"cwd"`
+				LaneUnregistered bool   `json:"lane_unregistered"`
 			} `json:"payload"`
 		}
 		if json.Unmarshal(data, &event) != nil || firstNonempty(event.Type, event.Kind, event.Event) != "job.spawned" {
 			continue
 		}
 		p := event.Payload
-		found = localSpawnRecord{PaneID: p.PaneID, HerdrSession: p.HerdrSession, Host: p.Host, Profile: p.Profile, Model: p.Model, Role: p.Role, CWD: p.CWD}
+		found = localSpawnRecord{PaneID: p.PaneID, HerdrSession: p.HerdrSession, Host: p.Host, Profile: p.Profile, Model: p.Model, Role: p.Role, CWD: p.CWD, LaneUnregistered: p.LaneUnregistered}
 	}
 	return found
 }
