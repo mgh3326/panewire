@@ -841,6 +841,26 @@ func TestHubQuotaRefreshQueuedDeadlinePreventsLateSend(t *testing.T) {
 	<-done
 	shortDeadline.Store(true)
 	h.executeSpawnTask(ctx, task)
+	coordinatorCtx, stopCoordinator := context.WithCancel(ctx)
+	defer stopCoordinator()
+	h.startSpawnCoordinator(coordinatorCtx)
+	var firstPass time.Time
+	eventually(t, time.Second, "initial pending placement pass", func() bool {
+		saved, err := h.inbox.store.spawnTask(ctx, request.RequestID)
+		if err != nil || saved.LastRun.IsZero() {
+			return false
+		}
+		firstPass = saved.LastRun
+		return true
+	})
+	if !waitUntil(1500*time.Millisecond, func() bool {
+		saved, err := h.inbox.store.spawnTask(ctx, request.RequestID)
+		return err == nil && saved.LastRun.After(firstPass)
+	}) {
+		t.Fatal("queued deadline did not wake placement while all refresh slots were occupied")
+	}
+	stopCoordinator()
+	h.spawnWorkers.Wait()
 	// Hold every slot beyond the queued key's one-second budget: no queued
 	// command may run while all slots are occupied.
 	var unexpected observed

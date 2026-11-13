@@ -103,6 +103,27 @@ func (h *HubServer) runQuotaRefreshes(ctx context.Context) {
 		}
 	}()
 	for {
+		// A queued key can expire even when every slot is busy. Remove it and
+		// wake placement now, rather than waiting for an unrelated node.
+		q.mu.Lock()
+		now := time.Now()
+		remaining := q.queue[:0]
+		expired := false
+		for _, work := range q.queue {
+			if !now.Before(work.deadline) {
+				delete(q.keys, work.key)
+				expired = true
+			} else {
+				remaining = append(remaining, work)
+			}
+		}
+		clear(q.queue[len(remaining):])
+		q.queue = remaining
+		q.mu.Unlock()
+		if expired {
+			q.completedCount.Add(1)
+			h.kickSpawnPlacement()
+		}
 		for running < hubQuotaRefreshConcurrency && ctx.Err() == nil {
 			q.mu.Lock()
 			index := -1
@@ -135,8 +156,25 @@ func (h *HubServer) runQuotaRefreshes(ctx context.Context) {
 				done <- work.key
 			}()
 		}
+		q.mu.Lock()
+		var nextDeadline time.Time
+		for _, work := range q.queue {
+			if nextDeadline.IsZero() || work.deadline.Before(nextDeadline) {
+				nextDeadline = work.deadline
+			}
+		}
+		q.mu.Unlock()
+		var timer *time.Timer
+		var deadline <-chan time.Time
+		if !nextDeadline.IsZero() {
+			timer = time.NewTimer(time.Until(nextDeadline))
+			deadline = timer.C
+		}
 		select {
 		case <-ctx.Done():
+			if timer != nil {
+				timer.Stop()
+			}
 			return
 		case key := <-done:
 			running--
@@ -148,6 +186,10 @@ func (h *HubServer) runQuotaRefreshes(ctx context.Context) {
 			q.completedCount.Add(1)
 			h.kickSpawnPlacement()
 		case <-q.wake:
+		case <-deadline:
+		}
+		if timer != nil {
+			timer.Stop()
 		}
 	}
 }
