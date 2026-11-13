@@ -460,10 +460,6 @@ func (p *deliveryPolicy) classify(lane, kind string, e hubJobEventPayload, repla
 	if class := p.typeClass(lane, e.NotifyType); class != "" {
 		return class
 	}
-	// Operator chat is an intentional turn, including declarative instructions.
-	if chatRelayEventPattern.MatchString(e.EventID) {
-		return "interrupt"
-	}
 	local := p.Lanes[lane]
 	text := deliveryEventText(e)
 	for _, rules := range [][]deliveryRule{local.Rules, p.Rules} {
@@ -622,5 +618,5 @@ var neverHoldTags = regexp.MustCompile(`(?i)\b(?:BLOCKER|URGENT|ESC|BOUNCE|needs
 func holdableEvent(kind string, e hubJobEventPayload) bool {
 	return !e.noDigest && e.NotifyType != "decision" && e.NotifyType != "order" &&
 		kind != "job.escalate" && kind != "job.lost" && kind != "job.revoked" &&
-		!chatRelayEventPattern.MatchString(e.EventID) && !neverHoldTags.MatchString(deliveryEventText(e))
+		!neverHoldTags.MatchString(deliveryEventText(e))
 }

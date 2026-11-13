@@ -1,7 +1,6 @@
 package panewire
 
 import (
-	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -13,39 +12,9 @@ import (
 
 // Idle shutdown: a job dir with no events/ contributes no lease, so the node
 // can idle out.
-func TestIdleShutdownJobDirWithoutEventsHoldsNoLease(t *testing.T) {
-	root := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(root, "jobs", "job-noevents"), 0700); err != nil {
-		t.Fatal(err)
-	}
-	leases, err := idleShutdownJobLeases(root, nil, context.Background())
-	if err != nil || len(leases) != 0 {
-		t.Fatalf("job dir without events/: leases=%v err=%v", leases, err)
-	}
-}
-
 // Idle shutdown: an events/ that exists but cannot be read keeps the lease
 // (the conservative answer). Root reads a mode-000 directory, so the case is
 // skipped there; the reason is the environment, not the code.
-func TestIdleShutdownJobDirUnreadableEventsStillHoldsLease(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("root reads a mode-000 events/ directory; the unreadable case cannot arise")
-	}
-	root := t.TempDir()
-	sealed := filepath.Join(root, "jobs", "job-sealed", "events")
-	if err := os.MkdirAll(sealed, 0700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chmod(sealed, 0000); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(sealed, 0700) })
-	leases, err := idleShutdownJobLeases(root, nil, context.Background())
-	if err != nil || len(leases) != 1 || leases[0].JobID != "job-sealed" {
-		t.Fatalf("unreadable events/: leases=%v err=%v", leases, err)
-	}
-}
-
 // job.mark_lost: when the job dir or its events/ is missing the ledger is
 // unknown, so the command refuses with ledger_missing and writes nothing,
 // even though herdr lists no pane for the job.

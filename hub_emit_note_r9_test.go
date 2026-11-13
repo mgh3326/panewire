@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -18,7 +17,7 @@ import (
 
 func TestR9HubEmitIsTransientAndRetainsNoteAcrossReconnect(t *testing.T) {
 	clock := time.Date(2026, 9, 1, 3, 40, 0, 0, time.UTC)
-	notifier := &r9Notifier{}
+	notifier := newHubAlertLog(nil)
 	hub, err := NewHubServer(HubServerConfig{
 		Tokens: map[string]string{
 			"operator": r6OperatorToken,
@@ -27,7 +26,7 @@ func TestR9HubEmitIsTransientAndRetainsNoteAcrossReconnect(t *testing.T) {
 		},
 		AlertNodes: map[string]struct{}{"node-a": {}},
 		Now:        func() time.Time { return clock },
-		Notifier:   notifier,
+		Logger:     notifier.Logger(),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -151,22 +150,4 @@ func TestR9HubNoteSummaryUsesAtMost60Characters(t *testing.T) {
 	if got := len([]rune(summary)); got != 60 {
 		t.Fatalf("summary length=%d, want 60", got)
 	}
-}
-
-type r9Notifier struct {
-	mu     sync.Mutex
-	alerts []HubAlert
-}
-
-func (notifier *r9Notifier) Send(_ context.Context, alert HubAlert) error {
-	notifier.mu.Lock()
-	defer notifier.mu.Unlock()
-	notifier.alerts = append(notifier.alerts, alert)
-	return nil
-}
-
-func (notifier *r9Notifier) Alerts() []HubAlert {
-	notifier.mu.Lock()
-	defer notifier.mu.Unlock()
-	return append([]HubAlert(nil), notifier.alerts...)
 }

@@ -28,7 +28,12 @@ type hubSpawnConfig struct {
 	WorkRoot       string `json:"work_root,omitempty"`
 	BriefDocPrefix string `json:"brief_doc_prefix,omitempty"`
 	HandoffkeepEnv string `json:"handoffkeep_env,omitempty"`
-	Enabled        bool   `json:"enabled"`
+	// Checkouts is the checkout.pull allow-list: checkout name to absolute
+	// checkout path (node_checkout_pull.go). Absent means the default rstack
+	// checkout; an entry that is not a valid name and absolute path refuses the
+	// whole file, as cwd_map does.
+	Checkouts map[string]string `json:"checkouts,omitempty"`
+	Enabled   bool              `json:"enabled"`
 	// HandoffkeepEnvDefault is set only by resolveHubSpawnConfig on a node
 	// running on defaults, never from JSON: the credential then resolves as
 	// hkcred.Load does (handoffkeepEnv), without the HANDOFFKEEP_TOKEN
@@ -116,6 +121,20 @@ func loadHubSpawnConfig(path string) (hubSpawnConfig, error) {
 			return spawnConfigRefusal("cwd_map_dir_absolute", fmt.Sprintf("cwd_map[%q] must be an absolute path", key))
 		}
 	}
+	checkoutNames := make([]string, 0, len(config.Checkouts))
+	for name := range config.Checkouts {
+		checkoutNames = append(checkoutNames, name)
+	}
+	slices.Sort(checkoutNames)
+	for _, name := range checkoutNames {
+		dir := config.Checkouts[name]
+		if !nodeCheckoutNamePattern.MatchString(name) {
+			return spawnConfigRefusal("checkouts_invalid", fmt.Sprintf("checkout name %q must match %s", name, nodeCheckoutNamePattern))
+		}
+		if !filepath.IsAbs(dir) || len(dir) > nodeCommandMaxPathBytes {
+			return spawnConfigRefusal("checkouts_invalid", fmt.Sprintf("checkouts[%q] must be an absolute path", name))
+		}
+	}
 	return config, nil
 }
 
@@ -135,6 +154,14 @@ func (client *HubClient) spawnStartupError() error {
 }
 
 func (client *HubClient) handleHubSpawn(ctx context.Context, peer *hubClientConnection, message hubOutboundMessage) {
+	// A stop in progress refuses a spawn before it claims the journal row: the
+	// hub replays the request to the restarted node, which then runs it whole.
+	endWork, accepted := client.beginWork(true)
+	if !accepted {
+		client.warnMessage("node is stopping; spawn left for replay after restart")
+		return
+	}
+	defer endWork()
 	journal, err := client.acquireSpawnJournal()
 	if err != nil {
 		client.sendSpawnResult(ctx, peer, hubSpawnResult{RequestID: message.RequestID, RC: 75, Error: "journal_unavailable"}, message.OperatorAuthorized)
@@ -152,11 +179,17 @@ func (client *HubClient) handleHubSpawn(ctx context.Context, peer *hubClientConn
 	}
 	if !claimed {
 		// An executing entry this process is not running was left by a node
-		// restart: nothing will ever complete it, so the answer is unknown, and
-		// the hub decides from the panes whether the request is orphaned.
+		// restart: nothing will ever complete it, so it is settled from the pane
+		// (hub_spawn_settle.go); only a pane that cannot be read answers unknown,
+		// and the hub then decides from the panes whether the request is orphaned.
 		reply := "unknown"
 		if active {
 			reply = "reconciling"
+		} else if settled, ok := client.settleRequest(ctx, journal, message.RequestID); ok {
+			// The pane tells what the dead process could not: the replay gets
+			// the real result instead of waiting for the request deadline.
+			client.sendSpawnResult(ctx, peer, *settled, message.OperatorAuthorized)
+			return
 		}
 		client.sendSpawnResult(ctx, peer, hubSpawnResult{RequestID: message.RequestID, RC: 75, Error: reply}, message.OperatorAuthorized)
 		return
@@ -173,6 +206,12 @@ func (client *HubClient) handleHubSpawn(ctx context.Context, peer *hubClientConn
 	client.spawnMu.Unlock()
 	// Disconnect is not cancellation of this daemon-owned execution. Its result
 	// remains available to the next authenticated replay even if this socket died.
+	if ctx.Err() != nil && result.RC != 0 {
+		// The node is stopping and the drain bound passed: this failure is the
+		// abort, not the spawn's outcome (a pane may exist). The row stays
+		// executing for the restart settle (hub_spawn_settle.go).
+		return
+	}
 	persistCtx, persistCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer persistCancel()
 	if journal.complete(persistCtx, result) != nil {
@@ -205,7 +244,15 @@ func (client *HubClient) endHubSpawn(requestID string) {
 }
 
 func (client *HubClient) sendSpawnResult(ctx context.Context, peer *hubClientConnection, result hubSpawnResult, extended bool) {
+	result = spawnResultForHub(result, peer.acceptsLaunchProof.Load())
 	_ = peer.write(ctx, spawnResultWire(result, extended))
+}
+
+func spawnResultForHub(result hubSpawnResult, acceptsLaunchProof bool) hubSpawnResult {
+	if result.Error == "launch_proof_failed" && !acceptsLaunchProof {
+		result.Error = "spawn_failed"
+	}
+	return result
 }
 func spawnResultWire(result hubSpawnResult, extended bool) any {
 	if !extended {
@@ -392,6 +439,9 @@ func (client *HubClient) runHubSpawn(parent context.Context, message hubOutbound
 		result.Error = "timeout"
 	} else if result.RC != 0 {
 		result.Error = "spawn_failed"
+		if execution.FailureClass == "harness_version" && result.RC == 70 {
+			result.Error = "launch_proof_failed"
+		}
 	}
 	if result.RC == 0 {
 		return result

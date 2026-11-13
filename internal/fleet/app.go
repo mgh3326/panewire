@@ -44,6 +44,15 @@ type App struct {
 	warned         map[string]bool
 	ompModelNames  map[string]string // omp's footer names, read once per spawn
 	PlacementHosts func(context.Context, string) ([]HostView, error)
+	// PlacementTry is called with the host the moment placement decides to
+	// try it for a spawn, before any gate or upload that takes time, so the
+	// owner of the host view can count the job at once. A later call for the
+	// same spawn names the next candidate. Nil does nothing.
+	PlacementTry func(host string)
+	// PlacementGate admits one placement decision at a time: it returns when
+	// this decision may read the host view, and its release is called once the
+	// decision has told PlacementTry its host (or ended). Nil does not gate.
+	PlacementGate func(context.Context) (release func(), err error)
 	// SharedLatest reads one account's latest stored quota reading for the
 	// admission gate; nil reads handoffkeep (admission_native.go).
 	SharedLatest func(context.Context, string) (shared.Latest, error)
@@ -159,7 +168,6 @@ func New(out, errout io.Writer) (*App, error) {
 	cliQuota.SharedLatest = a.sharedLatest
 	a.Quota = admissionQuota{cliQuota, a}
 	a.Source = stateSource{a: a, inner: fleetSource{a}}
-	a.Wake = cliWaker{a}
 	a.LoadRatio = a.loadRatio
 	a.Version = BuildVersion
 	a.EnforceTrust = true
@@ -274,7 +282,7 @@ func (a *App) Run(ctx context.Context, args []string) error {
 	if len(args) > 1 && (args[1] == "--help" || args[1] == "-h") {
 		return a.help(args[0])
 	}
-	if a.EnforceTrust && (args[0] == "spawn" || args[0] == "work" || args[0] == "delegate" || args[0] == "plan" || args[0] == "resolve" || args[0] == "preflight" || args[0] == "_spawn-stdin" || args[0] == "done" || args[0] == "escalate" || args[0] == "restore" || args[0] == "reap" || args[0] == "prune" || args[0] == "gc" || args[0] == "artifacts" || args[0] == "_watch") {
+	if a.EnforceTrust && (args[0] == "spawn" || args[0] == "work" || args[0] == "delegate" || args[0] == "plan" || args[0] == "resolve" || args[0] == "preflight" || args[0] == "_spawn-stdin" || args[0] == "done" || args[0] == "escalate" || args[0] == "restore" || args[0] == "reap" || args[0] == "prune" || args[0] == "artifacts" || args[0] == "_watch") {
 		if e := a.trust(); e != nil {
 			return e
 		}
@@ -302,8 +310,6 @@ func (a *App) Run(ctx context.Context, args []string) error {
 		return a.lifecycle(ctx, args[0], args[1:])
 	case "reap", "prune":
 		return a.hygiene(ctx, args[0], args[1:])
-	case "gc":
-		return a.gc(ctx, args[1:])
 	case "hosts", "profiles", "find", "name-sync", "lanes-missing":
 		return a.diagnostics(ctx, args[0], args[1:])
 	case "artifacts":
@@ -333,7 +339,7 @@ func (a *App) help(cmd string) error {
 	case "work":
 		fmt.Fprintln(a.Out, "Usage: panewire work TASK [spawn flags override task defaults]")
 	case "spawn":
-		fmt.Fprintln(a.Out, "Usage: panewire spawn -c CWD [-m PROFILE|auto] -p BRIEF|hk:doc/KEY -w WORKSPACE -l LABEL --t T0..T3 [--task ID|--parent-job JOB] [--effort E] [--role worker|tester|reviewer|counsel] [--review-pass 1..9 (reviewer only)] [--routing-role consult|implementer|explorer|verifier|reviewer|judge] [--lane L] [--parent L] [--owner L] [--job ID] [--host auto|local|NAME] [--tags a,b,c] [--exclude-host a,b] [--exclude-pool P,P] [--report PATH] [-L live|mock] [--keep] [--job-dup-ok] [--task-hk-bypass] [--allow-escalation] [--override-reason TEXT] [--containment hk:ID] [--operator-request REF] [--requested-by NAME] [--purpose PURPOSE] [--report-relative PATH] [--wait] [--wait-timeout DUR] [--dry-run] (pins require --containment hk:ID or --operator-request REF)")
+		fmt.Fprintln(a.Out, "Usage: panewire spawn -c CWD [-m PROFILE|auto] -p BRIEF|hk:doc/KEY -w WORKSPACE -l LABEL --t T0..T3 [--task ID|--parent-job JOB] [--effort E] [--role worker|tester|reviewer|counsel] [--review-pass 1..9 (reviewer only)] [--routing-role consult|implementer|verifier|reviewer|judge] [--lane L] [--parent L] [--owner L] [--job ID] [--host auto|local|NAME] [--tags a,b,c] [--exclude-host a,b] [--exclude-pool P,P] [--report PATH] [-L live|mock] [--keep] [--job-dup-ok] [--task-hk-bypass] [--allow-escalation] [--override-reason TEXT] [--containment hk:ID] [--operator-request REF] [--requested-by NAME] [--purpose PURPOSE] [--report-relative PATH] [--wait] [--wait-timeout DUR] [--dry-run] (pins require --containment hk:ID or --operator-request REF)")
 	case "done":
 		fmt.Fprintln(a.Out, "Usage: panewire done JOB [--report PATH] [--result FILE]")
 	case "escalate":
@@ -345,8 +351,6 @@ func (a *App) help(cmd string) error {
 		if cmd == "reap" {
 			fmt.Fprintln(a.Out, "       panewire reap --expire-job-dirs [--job ID[,ID]] [--apply] (job dir TTL; a dry run without --apply; docs/job-dir-ttl.md)")
 		}
-	case "gc":
-		fmt.Fprintln(a.Out, "Usage: panewire gc [--json] (expire path/linear_permit leases, clean quota_pool records and release leased jobs whose agent left Herdr)")
 	case "artifacts":
 		fmt.Fprintln(a.Out, "Usage: panewire artifacts move SRC --dest DEST [--source-host HOST] [--apply] | sweep [--job JOB] [--age 7d] [--policy FILE] [--apply]")
 	case "simulate":
@@ -356,7 +360,7 @@ func (a *App) help(cmd string) error {
 	case "plan":
 		fmt.Fprintln(a.Out, "Usage: panewire plan [--grade G] --t T0..T3 [--role R] [--tags a,b] [--effort E] [--urgency normal|urgent] [--exclude-host a,b] [--exclude-pool P,P] [--builder-family F] [--routing-role R] [--allow-escalation] [--credit-at TIME] [--expected DURATION] [--json] (live, read-only: the host and model a spawn would get now; no task, spawn or job write; --expected 6h or 2d keys subscription pools by whether their shortest window fits the job)")
 	case "resolve":
-		fmt.Fprintln(a.Out, "Usage: panewire resolve --role consult|implementer|explorer|verifier|reviewer|judge [--grade G] [--t T0..T3] [--builder-family F] [--lane L (consult asker lane)] [--harness KIND] [--allow-escalation] [--json] (read-only: the profile and effort role routing and quota ordering pick now, for an in-session subagent; no host placement, spawn or job write; the answer is the last thing printed)")
+		fmt.Fprintln(a.Out, "Usage: panewire resolve --role consult|implementer|verifier|reviewer|judge [--grade G] [--t T0..T3] [--builder-family F] [--lane L (consult asker lane)] [--harness KIND] [--allow-escalation] [--json] (read-only: the profile and effort role routing and quota ordering pick now, for an in-session subagent; no host placement, spawn or job write; the answer is the last thing printed)")
 	case "preflight":
 		fmt.Fprintln(a.Out, "Usage: panewire preflight [--host NAME] [--pool P] [--json] (read-only: per remote host, hub acceptance, shared quota observation age, quota transport setting, hub load/memory, mergewake review config and panewire/panewire version skew, each with a named reason; exit 0 when all good, 78 otherwise)")
 	default:

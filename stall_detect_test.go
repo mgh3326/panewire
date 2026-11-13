@@ -1416,14 +1416,11 @@ func TestStallUnreadablePaneSurfaces(t *testing.T) {
 // hub no-data alert.
 func TestStallHubNoDataAlert(t *testing.T) {
 	now := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
-	var alerts []HubAlert
+	observed := newHubAlertLog(nil)
 	hub, err := NewHubServer(HubServerConfig{
 		Tokens: map[string]string{hubOperatorMachineID: "op", "node-a": "node"},
 		Now:    func() time.Time { return now },
-		Notifier: hubNotifierFunc(func(_ context.Context, alert HubAlert) error {
-			alerts = append(alerts, alert)
-			return nil
-		}),
+		Logger: observed.Logger(),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1436,16 +1433,16 @@ func TestStallHubNoDataAlert(t *testing.T) {
 	send(&hubStallBeatPayload{BeatMS: now.Add(-time.Minute).UnixMilli(), IntervalMS: 60000, Panes: stallInt(2)})
 	now = now.Add(30 * time.Second)
 	send(&hubStallBeatPayload{BeatMS: now.Add(-10 * time.Second).UnixMilli(), IntervalMS: 60000, Panes: stallInt(2)})
-	if len(alerts) != 0 {
-		t.Fatalf("advancing beat alerted: %+v", alerts)
+	if len(observed.Alerts()) != 0 {
+		t.Fatalf("advancing beat alerted: %+v", observed.Alerts())
 	}
 	// Beat frozen past the threshold.
 	now = now.Add(4 * time.Minute)
 	send(&hubStallBeatPayload{BeatMS: now.Add(-5 * time.Minute).UnixMilli(), IntervalMS: 60000, Panes: stallInt(2)})
 	now = now.Add(10 * time.Second)
 	send(&hubStallBeatPayload{BeatMS: now.Add(-5 * time.Minute).UnixMilli(), IntervalMS: 60000, Panes: stallInt(2)})
-	if len(alerts) != 1 || alerts[0].Reason != hubAlertReasonNoData || alerts[0].MachineID != "node-a" {
-		t.Fatalf("no-data alert missing: %+v", alerts)
+	if len(observed.Alerts()) != 1 || observed.Alerts()[0].Reason != hubAlertReasonNoData || observed.Alerts()[0].MachineID != "node-a" {
+		t.Fatalf("no-data alert missing: %+v", observed.Alerts())
 	}
 	// Recovery once the beat advances again.
 	now = now.Add(time.Minute)
@@ -1453,18 +1450,17 @@ func TestStallHubNoDataAlert(t *testing.T) {
 	now = now.Add(10 * time.Second)
 	send(&hubStallBeatPayload{BeatMS: now.UnixMilli(), IntervalMS: 60000, Panes: stallInt(2)})
 	var recovered bool
-	for _, alert := range alerts {
+	for _, alert := range observed.Alerts() {
 		if alert.Recovery && alert.Reason == hubAlertReasonNoData {
 			recovered = true
 		}
 	}
 	if !recovered {
-		t.Fatalf("no-data recovery missing: %+v", alerts)
+		t.Fatalf("no-data recovery missing: %+v", observed.Alerts())
 	}
-	// A node that never reported never alerts.
+	// A node that never reported never observed.Alerts().
 	hub.connect("node-b", "test", "fixture", &hubAgent{}, true)
 	task268SendHeartbeat(t, hub, "node-b", &hubAgent{}, hubHeartbeatPayload{Status: "alive", Checks: map[string]HubCheckStatus{}})
-	_ = alerts
 }
 
 // AC10 — the detector source contains no write path to panes, batch values,
@@ -1502,14 +1498,11 @@ func TestStallNoMutationPaths(t *testing.T) {
 // alert while a genuinely-observed panes=0 stays quiet.
 func TestStallHubDegradedAlert(t *testing.T) {
 	now := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
-	var alerts []HubAlert
+	observed := newHubAlertLog(nil)
 	hub, err := NewHubServer(HubServerConfig{
 		Tokens: map[string]string{hubOperatorMachineID: "op", "node-a": "node"},
 		Now:    func() time.Time { return now },
-		Notifier: hubNotifierFunc(func(_ context.Context, alert HubAlert) error {
-			alerts = append(alerts, alert)
-			return nil
-		}),
+		Logger: observed.Logger(),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1523,9 +1516,9 @@ func TestStallHubDegradedAlert(t *testing.T) {
 	send(&hubStallBeatPayload{BeatMS: now.UnixMilli(), IntervalMS: 60000, Panes: stallInt(0)})
 	now = now.Add(30 * time.Second)
 	send(&hubStallBeatPayload{BeatMS: now.UnixMilli(), IntervalMS: 60000, Panes: stallInt(0)})
-	for _, alert := range alerts {
+	for _, alert := range observed.Alerts() {
 		if !alert.Recovery {
-			t.Fatalf("panes=0 alerted — valid observation was read as degraded: %+v", alerts)
+			t.Fatalf("panes=0 alerted — valid observation was read as degraded: %+v", observed.Alerts())
 		}
 	}
 	// The listing fails: the beat still advances but the observation is nil.
@@ -1534,13 +1527,13 @@ func TestStallHubDegradedAlert(t *testing.T) {
 	now = now.Add(30 * time.Second)
 	send(&hubStallBeatPayload{BeatMS: now.UnixMilli(), IntervalMS: 60000, Panes: nil, Degraded: true})
 	var degraded bool
-	for _, alert := range alerts {
+	for _, alert := range observed.Alerts() {
 		if !alert.Recovery && alert.Reason == hubAlertReasonStallDegraded {
 			degraded = true
 		}
 	}
 	if !degraded {
-		t.Fatalf("degraded observation did not alert: %+v", alerts)
+		t.Fatalf("degraded observation did not alert: %+v", observed.Alerts())
 	}
 	// Nil panes without the flag is still an unobserved cycle.
 	now = now.Add(time.Minute)
@@ -1554,13 +1547,13 @@ func TestStallHubDegradedAlert(t *testing.T) {
 	now = now.Add(30 * time.Second)
 	send(&hubStallBeatPayload{BeatMS: now.UnixMilli(), IntervalMS: 60000, Panes: stallInt(3)})
 	var recovered bool
-	for _, alert := range alerts {
+	for _, alert := range observed.Alerts() {
 		if alert.Recovery && alert.Reason == hubAlertReasonStallDegraded {
 			recovered = true
 		}
 	}
 	if !recovered {
-		t.Fatalf("degraded recovery missing: %+v", alerts)
+		t.Fatalf("degraded recovery missing: %+v", observed.Alerts())
 	}
 }
 

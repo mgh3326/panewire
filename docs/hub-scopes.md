@@ -37,10 +37,10 @@ lane with `{"all":true}`, including items intended for other agents.
 
 | Scope | Grants |
 | --- | --- |
-| `nodes.agents.read` | `GET /v1/nodes`, `GET /v1/nodes/agents`, `GET /v1/session-reap` |
+| `nodes.agents.read` | `GET /v1/nodes`, `GET /v1/nodes/agents` |
 | `node.command:<op>@<machine>` or `@*` | `POST /v1/nodes/{machine}/command` with that op (`agents.list`, `pane.capture`, `pane.close`, `pane.read`, `job.done`, `worktree.inspect` (also authorizes `worktree.list`), `worktree.prepare`, `worktree.remove`, `quota.refresh`, `pr.status` (only on the hub's `--pr-status-host`; see [pr-status.md](pr-status.md))). `pane.read` and `job.done` admit a service holding that scope and no other caller, not even the operator. `job.mark_lost` is issued by the hub itself when it releases a spawn reservation; the endpoint refuses it for every caller, so no scope grants it. A node credential is admitted for `pr.status` alone, with no scope, on the PR-status host. |
 | `spawn@<machine>` or `@*` | `POST /v1/spawn` for that machine, and `GET /v1/spawn/{id}` for a request on it. A spawn request with `checkout` also authorizes the node's internal `worktree.prepare` preflight; no separate `node.command` grant is needed. Requests with `checkout` or `brief.doc` require the connected node to advertise `spawn_v2` in its hello; otherwise the hub returns `503 spawn_capability_required` immediately. |
-| `wake@<machine>` or `@*` | `POST /v1/nodes/wake` for that machine |
+| `wake@<machine>` or `@*` | Retired: the route is gone. An auth file may still list it; it grants nothing. |
 | `jobs.close:<lane>` | `POST /v1/jobs/close` for the calling lane, without operator override; see [job-close.md](job-close.md) |
 | `inbox.read:<lane>` or `inbox.read:*` | `GET /v1/inbox`, `/v1/inbox/count`, `/v1/inbox/wait` and `POST /v1/inbox/{id}/read` with `?lane=<lane>` |
 | `inbox.ack:<lane>` or `inbox.ack:*` | `POST /v1/inbox/ack` with `?lane=<lane>` |
@@ -53,7 +53,7 @@ accept it, and none for `GET /healthz`. A service credential satisfies none
 of them. A service whose scopes do not cover a request gets
 `403 {"error":"scope_forbidden"}`, so its client can report a scope error
 rather than an empty result. An unknown or wrong credential still gets `401`.
-On the routes whose resource is in the body (node command, spawn, wake) the
+On the routes whose resource is in the body (node command, spawn) the
 body is validated before the scope check, so a malformed request answers `400`.
 `GET /v1/spawn/{id}` answers `404` for an unknown id before the scope check.
 

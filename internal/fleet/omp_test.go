@@ -325,7 +325,7 @@ func TestOMPCreditRetainsGateAndPresenceChecks(t *testing.T) {
 }
 
 func TestOMPResolveAgentHint(t *testing.T) {
-	for _, role := range []string{"implementer", "explorer"} {
+	for _, role := range []string{"implementer"} {
 		for _, tc := range []struct{ name, frontmatter, want string }{
 			{"exact", "---\nname: fixture-opus\nmodel: anthropic/claude-opus-5-5\n---\nAgent body", "fixture-opus"},
 			{"quoted", "---\nname: 'fixture-opus'\nmodel: \"anthropic/claude-opus-5-5\"\n---\n", "fixture-opus"},

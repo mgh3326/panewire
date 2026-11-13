@@ -18,7 +18,4 @@ func TestFleetCommandRouting(t *testing.T) {
 			t.Errorf("retired %v exit=%d", args, code)
 		}
 	}
-	if code := RunCLI([]string{"heavy"}, CLIConfig{}); code != ExitUsage {
-		t.Errorf("removed heavy exit=%d", code)
-	}
 }

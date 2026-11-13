@@ -12,7 +12,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -40,13 +39,9 @@ func RunCLI(args []string, cfg CLIConfig) int {
 	if len(args) > 0 && args[0] == "manual" {
 		return fleet.ManualMain(context.Background(), args[1:], os.Stdout, os.Stderr)
 	}
-	if len(args) > 0 && args[0] == "heavy" {
-		fmt.Fprintln(os.Stderr, "panewire: heavy was removed; use panewire place to select a host by load")
-		return ExitUsage
-	}
 	if len(args) == 1 && (args[0] == "-h" || args[0] == "--help") {
 		fmt.Fprintln(os.Stdout, "Usage: panewire COMMAND [arguments]")
-		fmt.Fprintln(os.Stdout, "Commands: spawn, work, reap, done, escalate, delegate, hosts, profiles, find, plan, resolve, preflight, daemon, hub, hub-status, hub-emit, burst, place, node, prompt, deliveries, jobs, lanes, lanes-audit, fleet-census, session-reap, relay, emit, claude-socket, inbox, job, pr, wait, version, quota, catalog, reps, manual")
+		fmt.Fprintln(os.Stdout, "Commands: spawn, work, reap, done, escalate, delegate, hosts, profiles, find, plan, resolve, preflight, daemon, hub, hub-status, hub-emit, place, node, prompt, deliveries, jobs, lanes, fleet-census, relay, emit, claude-socket, inbox, job, pr, wait, version, quota, catalog, reps, manual")
 		fmt.Fprintln(os.Stdout)
 		fmt.Fprintln(os.Stdout, lanesUsage)
 		return ExitOK
@@ -57,11 +52,11 @@ func RunCLI(args []string, cfg CLIConfig) int {
 	if args[0] == "hub-status" {
 		return runHubStatusCLI(args[1:], os.Stdout, os.Stderr, hubCLIDeps{})
 	}
+	if args[0] == "fleet" {
+		return runFleetCLI(args[1:], os.Stdout, os.Stderr, hubCLIDeps{})
+	}
 	if args[0] == "hub-emit" {
 		return runHubEmitCLI(args[1:], os.Stdout, os.Stderr, hubCLIDeps{})
-	}
-	if args[0] == "burst" {
-		return runBurstCLI(args[1:], os.Stdout, os.Stderr)
 	}
 	if args[0] == "place" {
 		return runPlaceCLI(args[1:], os.Stdout, os.Stderr, hubCLIDeps{})
@@ -81,14 +76,8 @@ func RunCLI(args []string, cfg CLIConfig) int {
 	if args[0] == "lanes" {
 		return runLanesCLI(args[1:], os.Stdout, os.Stderr, hubCLIDeps{})
 	}
-	if args[0] == "lanes-audit" {
-		return runLanesAuditCLI(args[1:], os.Stdout, os.Stderr, hubCLIDeps{})
-	}
 	if args[0] == "fleet-census" {
 		return runFleetCensusCLI(args[1:], os.Stdout, os.Stderr, hubCLIDeps{})
-	}
-	if args[0] == "session-reap" {
-		return runSessionReapCLI(args[1:], os.Stdout, os.Stderr, hubCLIDeps{})
 	}
 	if args[0] == "relay" {
 		return runRelayCLI(args[1:], os.Stdout, os.Stderr)
@@ -176,7 +165,7 @@ func RunCLI(args []string, cfg CLIConfig) int {
 
 func fleetCommand(command string) bool {
 	switch command {
-	case "spawn", "work", "lead", "reap", "prune", "done", "escalate", "restore", "delegate", "hosts", "profiles", "find", "name-sync", "lanes-missing", "artifacts", "simulate", "plan", "resolve", "preflight", "gc", "_watch", "_spawn-stdin", "_artifact-inventory":
+	case "spawn", "work", "lead", "reap", "prune", "done", "escalate", "restore", "delegate", "hosts", "profiles", "find", "name-sync", "lanes-missing", "artifacts", "simulate", "plan", "resolve", "preflight", "_watch", "_spawn-stdin", "_artifact-inventory":
 		return true
 	}
 	return false
@@ -303,7 +292,6 @@ func MainWithVersion(args []string, version string) int {
 type daemonCLIDeps struct {
 	HTTPClient            *http.Client
 	AllowInsecureForTests bool
-	TelegramBaseURL       string
 	SchemaCommand         []string
 	Logger                *slog.Logger
 	Version               string
@@ -354,19 +342,11 @@ func newDaemonForCLI(args []string, deps daemonCLIDeps) (*Daemon, int, error) {
 	idleWakeSettle := fs.Duration("idle-wake-settle", defaultIdleWakeSettle, "stable idle/done interval before owner notification")
 	failoverWakeOn := fs.String("failover-wake-on", "", "fixed failover machine ID that may receive one Wake-on-LAN packet")
 	failoverWakeMAC := fs.String("failover-wake-mac", "", "fixed Wake-on-LAN MAC address for --failover-wake-on")
-	burstWakeMAC := fs.String("burst-wake-mac", "", "Wake-on-LAN MAC for hub burst events (defaults to failover MAC when configured)")
-	burstPoweroffAllowed := fs.Bool("burst-poweroff-allowed", false, "allow authenticated hub burst down events to run sudo -n /usr/sbin/poweroff")
-	wakeTargets := fs.String("wake-targets", "", "waker node's JSON allowlist: target machine → MAC and UDP broadcast for hub wake events")
 	statePublish := fs.Bool("state-publish", false, "publish this host's fleet state (quota for --state-quota-pools) to the hub; see docs/fleet-state.md")
 	stateQuotaPools := fs.String("state-quota-pools", "", "comma-separated native quota pools this host measures; requires --state-publish")
 	stateQuotaInterval := fs.Duration("state-quota-interval", defaultFleetQuotaInterval, "how often to refresh and publish --state-quota-pools")
 	taskPaneSweepInterval := fs.Duration("task-pane-sweep-interval", defaultTaskPaneSweepInterval, "how often the node closes worker panes whose hk task is merged, done or dropped (0 = off); see docs/pane-sweep.md")
 	taskPaneSweepGrace := fs.Duration("task-pane-sweep-grace", fleet.DefaultPaneSweepGrace, "how long a pane must have stayed not working before the sweep closes it")
-	idleShutdown := fs.Duration("idle-shutdown", 0, "power this machine off after being fully idle this long (0 = off)")
-	idleShutdownCommand := fs.String("idle-shutdown-command", "", "idle shutdown argv, e.g. 'sudo -n /usr/sbin/poweroff' (required when --idle-shutdown > 0)")
-	idleShutdownPoll := fs.Duration("idle-shutdown-poll", time.Minute, "idle condition probe interval")
-	idleShutdownKeepAwake := fs.String("idle-shutdown-keep-awake", "", "keep-awake marker path (default ~/.config/panewire/keep-awake)")
-	idleShutdownLane := fs.String("idle-shutdown-lane", "operator-desk", "lane notified once before idle shutdown")
 	checksConfig := fs.String("checks-config", "", "explicit local hub check JSON configuration")
 	stallDetect := fs.Bool("stall-detect", false, "observe worker panes for stalls; records only")
 	stallNotify := fs.Bool("stall-detect-notify", false, "emit lane notifications for stall incidents (default off: shadow)")
@@ -427,7 +407,7 @@ func newDaemonForCLI(args []string, deps daemonCLIDeps) (*Daemon, int, error) {
 			}
 			checks = loadedChecks
 		}
-		configuredHub, err := buildHubDaemonClientWithBurst(strings.Join(hubURLs, ","), *hubTokenEnv, *hubCFEnv, checks, *hubAccepting, *failoverWakeOn, *failoverWakeMAC, *burstWakeMAC, *burstPoweroffAllowed, *wakeTargets, deps)
+		configuredHub, err := buildHubDaemonClient(strings.Join(hubURLs, ","), *hubTokenEnv, *hubCFEnv, checks, *hubAccepting, *failoverWakeOn, *failoverWakeMAC, deps)
 		if err != nil {
 			return nil, ExitConditionInvalid, err
 		}
@@ -443,41 +423,6 @@ func newDaemonForCLI(args []string, deps daemonCLIDeps) (*Daemon, int, error) {
 		configuredHub.taskPaneSweepInterval, configuredHub.taskPaneSweepGrace = *taskPaneSweepInterval, *taskPaneSweepGrace
 		hubClient = configuredHub
 		cfg.Hub = HubDaemonConfig{Enabled: true, Client: hubClient}
-	}
-	if *idleShutdown < 0 {
-		return nil, ExitConditionInvalid, fmt.Errorf("idle shutdown duration must not be negative")
-	}
-	if *idleShutdown > 0 {
-		// The shutdown decision must be able to reach operator-desk, so the
-		// feature only runs on a hub-connected node, and the pane probes it
-		// gates on need herdr.
-		if !hubFlagsProvided(args) {
-			return nil, ExitConditionInvalid, fmt.Errorf("idle shutdown requires --hub-url and --hub-token-env")
-		}
-		if *herdr == "" {
-			return nil, ExitConditionInvalid, fmt.Errorf("idle shutdown requires --herdr-socket")
-		}
-		command := strings.Fields(*idleShutdownCommand)
-		if len(command) == 0 {
-			return nil, ExitConditionInvalid, fmt.Errorf("idle shutdown requires --idle-shutdown-command")
-		}
-		if *idleShutdownPoll <= 0 {
-			return nil, ExitConditionInvalid, fmt.Errorf("idle shutdown poll must be positive")
-		}
-		if !validReportRelayLaneName(*idleShutdownLane) {
-			return nil, ExitConditionInvalid, fmt.Errorf("idle shutdown lane is invalid")
-		}
-		keepAwake := *idleShutdownKeepAwake
-		if keepAwake == "" {
-			home, err := os.UserHomeDir()
-			if err != nil {
-				return nil, ExitConditionInvalid, fmt.Errorf("idle shutdown keep-awake path is unavailable")
-			}
-			keepAwake = filepath.Join(home, ".config", "panewire", "keep-awake")
-		}
-		cfg.IdleShutdown = IdleShutdownConfig{Enabled: true, After: *idleShutdown, PollInterval: *idleShutdownPoll, Command: command, KeepAwakePath: keepAwake, Lane: *idleShutdownLane}
-	} else if *idleShutdownCommand != "" || *idleShutdownKeepAwake != "" {
-		return nil, ExitConditionInvalid, fmt.Errorf("idle shutdown options require --idle-shutdown")
 	}
 	if hubClient != nil && hubClient.jobsInboxRoot == "" {
 		// Reuse the daemon's already-authorized local inbox when available; the
@@ -502,7 +447,7 @@ func (values *hubURLValues) Set(raw string) error {
 }
 
 func hubFlagsProvided(args []string) bool {
-	for _, name := range []string{"hub-url", "hub-token-env", "hub-cf-env", "hub-accepting", "hub-jobs-root", "idle-wake-settle", "quota-stop-act", "failover-wake-on", "failover-wake-mac", "burst-wake-mac", "burst-poweroff-allowed", "wake-targets", "checks-config", "state-publish", "state-quota-pools", "state-quota-interval", "task-pane-sweep-interval", "task-pane-sweep-grace"} {
+	for _, name := range []string{"hub-url", "hub-token-env", "hub-cf-env", "hub-accepting", "hub-jobs-root", "idle-wake-settle", "quota-stop-act", "failover-wake-on", "failover-wake-mac", "checks-config", "state-publish", "state-quota-pools", "state-quota-interval", "task-pane-sweep-interval", "task-pane-sweep-grace"} {
 		flagName := "--" + name
 		for _, arg := range args {
 			if arg == flagName || strings.HasPrefix(arg, flagName+"=") {

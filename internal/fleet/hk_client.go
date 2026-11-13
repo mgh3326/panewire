@@ -119,6 +119,24 @@ type answerCapture struct {
 	answered bool
 }
 
+// hkAfterIDTransport adds the stable ID cursor to a task list call. The
+// public hk client version used here exposes the capped list endpoint but not
+// its paging method; keep its auth, transport and response checks intact.
+type hkAfterIDTransport struct {
+	next    http.RoundTripper
+	afterID int64
+}
+
+func (t hkAfterIDTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	clone := req.Clone(req.Context())
+	u := *req.URL
+	q := u.Query()
+	q.Set("after_id", strconv.FormatInt(t.afterID, 10))
+	u.RawQuery = q.Encode()
+	clone.URL = &u
+	return t.next.RoundTrip(clone)
+}
+
 func (c *answerCapture) RoundTrip(r *http.Request) (*http.Response, error) {
 	c.body, c.answered = nil, false
 	resp, err := c.next.RoundTrip(r)
@@ -252,7 +270,13 @@ func hkTaskProject(t client.Task) string {
 
 // hkGetDocument reads one document; a key hk does not have is errHKNotFound.
 func hkGetDocument(ctx context.Context, key string) (client.Document, error) {
-	c, err := newHKClient()
+	return hkGetDocumentWithin(ctx, key, hkCallTimeout)
+}
+
+// hkGetDocumentWithin is hkGetDocument under timeout, for a read that belongs
+// to an upload and so gets the upload bound.
+func hkGetDocumentWithin(ctx context.Context, key string, timeout time.Duration) (client.Document, error) {
+	c, err := newHKClientWithin(timeout)
 	if err != nil {
 		return client.Document{}, err
 	}
@@ -274,16 +298,23 @@ var hkUploadKinds = map[string]bool{"brief": true, "report": true, "evidence": t
 // client cannot decode is an error: hk's outcome is unknown, and the CLI
 // failed on it too.
 func hkPutDocument(ctx context.Context, doc client.Document) error {
+	_, err := hkPutDocumentStored(ctx, doc)
+	return err
+}
+
+// hkPutDocumentStored is hkPutDocument returning the document hk stored, for
+// a caller that checks the sha256 hk holds against the bytes it sent.
+func hkPutDocumentStored(ctx context.Context, doc client.Document) (client.Document, error) {
 	timeout := hkCallTimeout
 	if hkUploadKinds[doc.Kind] {
 		timeout = hkUploadTimeout
 	}
 	c, err := newHKClientWithin(timeout)
 	if err != nil {
-		return err
+		return client.Document{}, err
 	}
-	_, _, err = c.PutDocument(ctx, doc)
-	return err
+	stored, _, err := c.PutDocument(ctx, doc)
+	return stored, err
 }
 
 // hkAnswerBody runs one hk read and returns hk's 2xx answer as hk sent it,
@@ -383,12 +414,18 @@ func HKDocumentAnswer(ctx context.Context, key string) ([]byte, error) {
 	return hkDocumentBody(ctx, key)
 }
 
-// HKTaskListAnswer is hk's 2xx answer to GET /v1/tasks with no filter and
-// limit tasks, the read behind `handoffkeep tasks list --limit N`, for the
-// quota stop manager's task lookup, which parses it as it parsed that
-// output.
-func HKTaskListAnswer(ctx context.Context, limit int) ([]byte, error) {
+// HKTaskListPageAnswer is hk's 2xx answer to GET /v1/tasks with an exclusive
+// after_id cursor and limit tasks. It uses the stable ID order for quota-stop
+// task lookup, which must reach matches after the first 1,000 tasks.
+func HKTaskListPageAnswer(ctx context.Context, afterID int64, limit int) ([]byte, error) {
 	return hkAnswerBody(func(c client.Client) error {
+		h := *c.HTTP
+		next := h.Transport
+		if next == nil {
+			next = http.DefaultTransport
+		}
+		h.Transport = hkAfterIDTransport{next: next, afterID: afterID}
+		c.HTTP = &h
 		_, e := c.ListTasks(ctx, client.ListTasksInput{Limit: limit})
 		return e
 	})

@@ -180,34 +180,6 @@ func TestPlacementTaskSlotsDefaultSentinelCountsIndividually(t *testing.T) {
 	}
 }
 
-// wake_on_spill may pick a disconnected spill to wake, but never a slot-full
-// one: it must skip a full spill and wake the next candidate. Mutant check:
-// reverting to `decision = candidates[1].Machine` returns the full machine.
-func TestPlacementTaskSlotsWakeSkipsFullSpill(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "placement.json")
-	policy := PlacementPolicy{LocalMachine: "mac-work", SpillTargets: []string{"desktop", "mac-dev"}, MaxActiveJobs: 5, LoadRatio: .5, WakeOnSpill: true, Machines: map[string]PlacementMachineSlots{"desktop": {TaskSlots: 1}}}
-	data, err := json.Marshal(policy)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, data, 0600); err != nil {
-		t.Fatal(err)
-	}
-	hub, err := NewHubServer(HubServerConfig{Tokens: map[string]string{"operator": r6OperatorToken, "mac-work": r6NodeAToken, "desktop": r6NodeBToken}, PlacementPolicyPath: path})
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Local absent (disconnected → unusable, no not_accepting so the local
-	// fallback survives to the wake branch); desktop connected but slot-full;
-	// mac-dev absent (disconnected → the wake candidate).
-	hub.connect("desktop", "test", "fixture", &hubAgent{}, true)
-	t607Task(hub, "desktop", 1, 1)
-	result := hub.placement(t.Context(), "worker", "repo-slots")
-	if result.Decision != "mac-dev" {
-		t.Fatalf("wake should skip slot-full desktop and pick mac-dev, got %q: %+v", result.Decision, result)
-	}
-}
-
 // The capacity-pressure fallback can keep the local machine as decision even
 // when it is slot-full; the final guard must turn that into unavailable and
 // drop the machine from candidates. Mutant check: deleting the

@@ -603,7 +603,7 @@ func (a *App) jobDirArtifacts(ctx context.Context, root, dir string, j Job, rec 
 	if reason != "" {
 		return reason
 	}
-	if reason = jobDirReports(ctx, reports, j.ID, rec); reason != "" {
+	if reason = jobDirReports(ctx, reports, j.ID); reason != "" {
 		return reason
 	}
 	for _, name := range []string{"findings.json", "result.json"} {
@@ -692,33 +692,25 @@ func resolveExisting(path string) (string, error) {
 	}
 }
 
-// jobDirReports confirms each local report file: the record names a
-// report_doc, and the local bytes' sha256 equals the record's report_sha256
-// pin for that doc, else the sha256 hk holds for reports/<job>/<basename>,
-// the key `panewire done` uploads a report under.
-func jobDirReports(ctx context.Context, reports []string, id string, rec map[string]any) string {
-	if len(reports) == 0 {
-		return ""
-	}
-	pinned := str(rec, "report_doc")
-	if pinned == "" {
-		return "report-unconfirmed"
-	}
+// jobDirReports confirms each local report file by its own bytes: the key
+// `panewire done` publishes them to is content-addressed
+// (reportDocumentKey), so hk confirms a report when it holds a document at
+// that key with the file's sha256. A report published before keys were
+// content-addressed is confirmed at the legacy key reports/<job>/<basename>
+// instead. The job record's pin and the job's events play no part: a report
+// published but never pinned is still in hk.
+func jobDirReports(ctx context.Context, reports []string, id string) string {
 	for _, path := range reports {
 		_, local, err := hashFile(path)
 		if err != nil {
 			return "report-unconfirmed"
 		}
-		key := "reports/" + id + "/" + filepath.Base(path)
-		want := ""
-		if key == pinned {
-			want = str(rec, "report_sha256")
+		want, reason := hkDocumentSHA(ctx, reportDocumentKey(id, local), "report-unconfirmed")
+		if reason == "report-unconfirmed" {
+			want, reason = hkDocumentSHA(ctx, legacyReportDocumentKey(id, path), "report-unconfirmed")
 		}
-		if want == "" {
-			var reason string
-			if want, reason = hkDocumentSHA(ctx, key, "report-unconfirmed"); reason != "" {
-				return reason
-			}
+		if reason != "" {
+			return reason
 		}
 		if !strings.EqualFold(want, local) {
 			return "report-sha-mismatch"

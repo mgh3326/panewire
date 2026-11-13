@@ -329,14 +329,20 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 	outcome := hubSpawnOutcome{Stage: "placement", StageMS: map[string]int64{}}
 	app.Hub = transport
 	app.State = directSpawnState{h}
-	app.Wake = directSpawnWake{h}
 	app.PlacementHosts = func(ctx context.Context, cwd string) ([]fleet.HostView, error) {
-		raw, err := json.Marshal(h.placement(ctx, "worker", cwd))
+		result := h.placementFresh(ctx, "worker", cwd)
+		raw, err := json.Marshal(result)
 		if err != nil {
 			return nil, err
 		}
-		return fleet.ParseHubHosts(string(raw))
+		views, err := fleet.ParseHubHosts(string(raw))
+		for _, machine := range result.slotFull {
+			views = append(views, fleet.HostView{Name: machine, Connected: true, SlotFull: true})
+		}
+		return views, err
 	}
+	app.PlacementTry = func(host string) { h.countPlacement(task.Job, host) }
+	app.PlacementGate = h.placementGate.acquire
 	app.ObserveStage = func(stage string, d time.Duration) { outcome.Stage = stage; outcome.StageMS[stage] += d.Milliseconds() }
 	app.ObserveReceipt = func(r fleet.ExecutionReceipt) {
 		outcome.Host = r.Host
@@ -388,7 +394,7 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 		outcome.RC = 124
 		outcome.Reason = "timeout"
 	}
-	if changed, _ := h.inbox.store.completeSpawn(parent, task, outcome, h.now().UTC()); changed {
+	if changed, _ := h.completeSpawn(parent, task, outcome); changed {
 		h.recordSpawnTrace(task, outcome)
 	}
 }
@@ -407,33 +413,18 @@ func spawnTaskHost(task hubSpawnTask) string {
 
 type directSpawnState struct{ h *HubServer }
 
+// Snapshot is the hub's fleet state as a spawn decision reads it. The load
+// values in it are recomputed first, so a decision never ranks hosts on a
+// value published up to the freshness window ago, and so it sees every job
+// already counted onto a host (placement_count.go).
 func (s directSpawnState) Snapshot(ctx context.Context) (fleet.FleetSnapshot, error) {
+	s.h.refreshFleetLoad(ctx)
 	raw, err := json.Marshal(s.h.fleetSnapshot(s.h.now()))
 	var snap fleet.FleetSnapshot
 	if err == nil {
 		err = json.Unmarshal(raw, &snap)
 	}
 	return snap, err
-}
-
-type directSpawnWake struct{ h *HubServer }
-
-// Wake waits for the woken host's own heartbeat for at most the caller's
-// wake_wait. requestNodeWake otherwise waits until ctx is done — the whole
-// spawn deadline — and a coordinator worker holding a wake open that long
-// starves the four-worker spawn queue, so unrelated requests expire before a
-// worker starts them.
-func (w directSpawnWake) Wake(ctx context.Context, host string, request fleet.WakeRequest) error {
-	if request.WaitSeconds > 0 {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, time.Duration(request.WaitSeconds)*time.Second)
-		defer cancel()
-	}
-	_, code := w.h.requestNodeWake(ctx, host)
-	if code != "" {
-		return errors.New("node wake refused")
-	}
-	return nil
 }
 
 // spawnQueueWaitFix names the step that ran out of time when the coordinator
@@ -499,11 +490,7 @@ var nextHostRefusals = map[string]bool{
 	"spawn_failed:trust_prompt":         true,
 	"spawn_failed:omp_setup_wizard":     true,
 	"spawn_failed:auth_unavailable":     true,
-}
-
-func checkoutRefusalMovesNextHost(reason string) bool {
-	code, _, _ := strings.Cut(reason, ": ")
-	return code == "checkout_refused:dirty" || code == "checkout_refused:sha-missing" || code == "checkout_refused:branch-elsewhere"
+	"launch_proof_failed":               true,
 }
 
 // spawnRefusalTriesNextHost names a node refusal that moves an auto placement
@@ -562,11 +549,16 @@ func (t *directSpawnTransport) nextHostAfterRefusal(ctx context.Context, node hu
 	if !t.placing || result.RC == 0 || !result.Retryable || !movesOn || firstNonEmptyString(hubSpawnArg(t.task.Request.Args, "--host"), "auto") != "auto" {
 		return false
 	}
+	if result.Error == "launch_proof_failed" && result.RC != 70 {
+		return false
+	}
 	task, err := t.h.inbox.store.unbindRefusedSpawn(ctx, t.task.Request.RequestID, t.task.Attempt, node.RequestID)
 	if err != nil {
 		return false
 	}
 	t.task, t.bound = task, false
+	// The refused host no longer holds this job; the next candidate counts it.
+	t.h.releasePlacementCount(task.Job)
 	reason := spawnResultReason(result)
 	t.h.observeLaunchOutcome(node.Machine, hubSpawnArg(node.Args, "-m"), result.RC, reason, t.h.now().UTC())
 	t.h.logger.Warn("hub spawn refused by node; trying next candidate", "request_id", task.Request.RequestID, "node_request_id", node.RequestID, "job", task.Job, "host", node.Machine, "profile", hubSpawnArg(node.Args, "-m"), "rc", result.RC, "reason", reason)
@@ -681,7 +673,7 @@ func (t *directSpawnTransport) settleNodeResult(ctx context.Context, node hubSpa
 	if outcome.RC != 0 {
 		outcome.Reason = spawnOutcomeReason(spawnResultReason(result), spawnResultRefusal(result.StdoutTail))
 	}
-	changed, err := h.inbox.store.completeSpawn(h.closeCtx, t.task, outcome, h.now().UTC())
+	changed, err := h.completeSpawn(h.closeCtx, t.task, outcome)
 	if err != nil {
 		return fleet.HubSpawnReply{}, &fleet.HubError{Kind: "hub_spawn_pending"}
 	}
@@ -698,7 +690,7 @@ func (t *directSpawnTransport) unknown(ctx context.Context, reason string) (flee
 	if reason == "timeout" {
 		outcome.RC = 124
 	}
-	if changed, _ := t.h.inbox.store.completeSpawn(ctx, t.task, outcome, t.h.now().UTC()); changed {
+	if changed, _ := t.h.completeSpawn(ctx, t.task, outcome); changed {
 		t.h.recordSpawnTrace(t.task, outcome)
 	}
 	return fleet.HubSpawnReply{}, &fleet.HubError{Kind: "hub_spawn_pending"}
@@ -791,7 +783,8 @@ func spawnNotificationText(job, request string, result hubSpawnOutcome) string {
 
 // Node results stay in the node's private journal indefinitely, so ACK loss and
 // prolonged offline periods never erase the only receipt. Automatic journal GC
-// and adoption of a pane after a node process crash are explicit non-goals.
+// is an explicit non-goal. A pane a node crash left behind is settled by the
+// restarted node from herdr (hub_spawn_settle.go), not adopted by the hub.
 
 func (h *HubServer) startSpawnCoordinator(ctx context.Context) {
 	h.closeMu.Lock()
@@ -808,7 +801,7 @@ func (h *HubServer) startSpawnCoordinator(ctx context.Context) {
 
 func (h *HubServer) finishSpawnOutcome(task hubSpawnTask, outcome hubSpawnOutcome) {
 	outcome.E6Arm = task.Request.E6Arm
-	if changed, _ := h.inbox.store.completeSpawn(h.closeCtx, task, outcome, h.now().UTC()); changed {
+	if changed, _ := h.completeSpawn(h.closeCtx, task, outcome); changed {
 		h.recordSpawnTrace(task, outcome)
 	}
 }

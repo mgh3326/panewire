@@ -76,7 +76,8 @@ func knownNodeCommandOp(op string) bool {
 	switch op {
 	case nodeCommandAgentsList, nodeCommandPaneClose, nodeCommandPaneCapture, nodeCommandPaneRead,
 		nodeCommandWorktreeInspect, nodeCommandWorktreeList, nodeCommandWorktreePrepare, nodeCommandWorktreeRemove,
-		nodeCommandQuotaRefresh, nodeCommandJobDone, nodeCommandJobResult, nodeCommandJobMarkLost, nodeCommandPRStatus, nodeCommandJobClose, nodeCommandJobReap:
+		nodeCommandQuotaRefresh, nodeCommandJobDone, nodeCommandJobResult, nodeCommandJobMarkLost, nodeCommandPRStatus, nodeCommandJobClose, nodeCommandJobReap,
+		nodeCommandCheckoutPull:
 		return true
 	}
 	return false
@@ -207,6 +208,7 @@ var nodeCommandArgFields = map[string][]string{
 	nodeCommandWorktreeRemove:  {"cwd", "expect_head", "base", "regenerable"},
 	nodeCommandQuotaRefresh:    {"pool"},
 	nodeCommandPRStatus:        {"repo", "pr", "fresh"},
+	nodeCommandCheckoutPull:    {"checkout", "rev"},
 }
 
 // nodeCommandHasFields reports whether raw is an object holding exactly the
@@ -319,6 +321,11 @@ func parseNodeCommandArgs(op string, raw json.RawMessage) (any, bool) {
 	case nodeCommandPRStatus:
 		var args nodePRStatusArgs
 		return args, decodeNodeCommandStrict(raw, &args) && validNodePRStatusArgs(args)
+	case nodeCommandCheckoutPull:
+		var args nodeCheckoutPullArgs
+		valid := decodeNodeCommandStrict(raw, &args) && nodeCheckoutNamePattern.MatchString(args.Checkout) &&
+			(args.Rev == "" || nodeCheckoutRevPattern.MatchString(args.Rev))
+		return args, valid
 	}
 	return nil, false
 }
@@ -423,6 +430,10 @@ func canonicalNodeCommandResult(op string, raw json.RawMessage) (json.RawMessage
 	case nodeCommandPRStatus:
 		var result nodePRStatusResult
 		valid = decodeNodeCommandStrict(raw, &result) && validNodePRStatusResult(result)
+		target = result
+	case nodeCommandCheckoutPull:
+		var result nodeCheckoutPullResult
+		valid = decodeNodeCommandStrict(raw, &result) && validNodeCheckoutPullResult(result)
 		target = result
 	}
 	if !valid {
@@ -693,8 +704,20 @@ type nodeCommandReply struct {
 	Detail    string          `json:"detail,omitempty"`
 }
 
+// nodeCommandRunBudget is the run deadline for op: a checkout pull fetches and
+// may run an install, so it gets nodeCheckoutPullRunTimeout.
+func nodeCommandRunBudget(op string) time.Duration {
+	if op == nodeCommandCheckoutPull {
+		return nodeCheckoutPullRunTimeout
+	}
+	return nodeCommandRunTimeout
+}
+
 func (client *HubClient) handleNodeCommand(ctx context.Context, peer *hubClientConnection, message hubOutboundMessage) {
-	runContext, cancel := context.WithTimeout(ctx, nodeCommandRunTimeout)
+	// A command such as job.done uploads a result; a stop waits for it.
+	endWork, _ := client.beginWork(false)
+	defer endWork()
+	runContext, cancel := context.WithTimeout(ctx, nodeCommandRunBudget(message.CommandOp))
 	defer cancel()
 	reply := nodeCommandReply{Type: "node.command.result", RequestID: message.RequestID, Op: message.CommandOp}
 	result, code := client.runNodeCommand(runContext, message.CommandOp, message.CommandArgs)
@@ -789,6 +812,10 @@ func (client *HubClient) runNodeCommand(ctx context.Context, op string, raw json
 		// Read-only: no acting-command lock, so a status read never queues
 		// behind a pane close.
 		return client.nodePRStatus(ctx, args)
+	case nodeCheckoutPullArgs:
+		// Serialized by the per-clone git-op lock, not nodeCommandMu, so a
+		// slow install never queues a pane close behind it.
+		return client.nodeCheckoutPull(ctx, args)
 	}
 	return client.nodeAgentsList(ctx)
 }

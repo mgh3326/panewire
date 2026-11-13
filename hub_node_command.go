@@ -300,6 +300,11 @@ func (h *HubServer) authorizeNodeCommand(request *http.Request, op, machine stri
 		// available through the public node-command endpoint.
 		return hubAccessForbidden
 	}
+	if op == nodeCommandCheckoutPull {
+		// checkout.pull runs only through POST /v1/fleet/checkout-pull, which
+		// writes the order's deploy record; this endpoint would skip it.
+		return hubAccessForbidden
+	}
 	if h.authenticate(request).kind == hubCallerNode {
 		// The local node daemon asks for PR state on a worker's behalf, so a
 		// node may run the read-only pr.status op and nothing else here.

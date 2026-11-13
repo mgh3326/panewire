@@ -43,8 +43,7 @@ terminal files from being resent after node restart.
 
 The hub waits `--hub-grace` after a disconnected/stale presence transition
 before emitting one `job.orphaned` event. It appears in the authenticated
-`/v1/events` stream, UI Recent events, and (when Telegram is configured) as
-one metadata-only line.
+`/v1/events` stream and UI Recent events.
 
 ## Operator flow
 

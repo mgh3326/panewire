@@ -150,11 +150,9 @@ func TestHubAuthScopesPerRoute(t *testing.T) {
 	routes := []route{
 		{"nodes", "GET", "/v1/nodes", ""},
 		{"nodes-agents", "GET", "/v1/nodes/agents", ""},
-		{"session-reap", "GET", "/v1/session-reap", ""},
 		{"node-command", "POST", "/v1/nodes/node-a/command", `{"op":"agents.list","args":{}}`},
 		{"spawn", "POST", "/v1/spawn", `{"request_id":"7b1e2c3d-4a5b-4c6d-8e7f-9a0b1c2d3e4f","machine":"node-a","cwd_key":"repo","brief":{"inline":"brief"},"args":[],"wait_seconds":1}`},
 		{"spawn-get", "GET", "/v1/spawn/" + pw2SpawnID, ""},
-		{"wake", "POST", "/v1/nodes/wake", `{"machine":"node-a"}`},
 		{"inbox-list", "GET", "/v1/inbox?lane=lane-a", ""},
 		{"inbox-count", "GET", "/v1/inbox/count?lane=lane-a", ""},
 		{"inbox-wait", "GET", "/v1/inbox/wait?lane=lane-a&timeout=1ms", ""},
@@ -177,18 +175,18 @@ func TestHubAuthScopesPerRoute(t *testing.T) {
 
 	// G granted, D 401, F 403 — in routes order.
 	want := map[string]string{
-		"operator":           "GGGGGGGGGGGGGGG",
-		"node-a":             "DDDDDDDGGGGGGGG",
-		"node-b":             "DDDDDDDDDDDDGFF",
-		"anonymous":          "DDDDDDDDDDDDDDD",
-		"svc-ok":             "GGGGGGGGGGGGFFF",
-		"svc-none":           "FFFFFFFFFFFFFFF",
-		"svc-other":          "FFFFFFFFFFFFFFF",
-		"svc-wild":           "GGGGGGGFFFFFFFF",
-		"svc-readonly":       "FFFFFFFGGGGFFFF",
-		"svc-mergewake":      "GGGGFFFFFFFFFFF",
-		"svc-ok-wrong-token": "DDDDDDDDDDDDDDD",
-		"svc-ackstate":       "FFFFFFFFFFFFGFF",
+		"operator":           "GGGGGGGGGGGGG",
+		"node-a":             "DDDDDGGGGGGGG",
+		"node-b":             "DDDDDDDDDDGFF",
+		"anonymous":          "DDDDDDDDDDDDD",
+		"svc-ok":             "GGGGGGGGGGFFF",
+		"svc-none":           "FFFFFFFFFFFFF",
+		"svc-other":          "FFFFFFFFFFFFF",
+		"svc-wild":           "GGGGGFFFFFFFF",
+		"svc-readonly":       "FFFFFGGGGFFFF",
+		"svc-mergewake":      "GGGFFFFFFFFFF",
+		"svc-ok-wrong-token": "DDDDDDDDDDDDD",
+		"svc-ackstate":       "FFFFFFFFFFGFF",
 	}
 	for _, caller := range callers {
 		for index, route := range routes {
@@ -269,7 +267,7 @@ func TestHubAuthServiceIsNeverANode(t *testing.T) {
 		t.Fatalf("node lanes status %d", status)
 	}
 	// Operator-only routes stay operator-only.
-	for _, path := range []string{"/v1/jobs", "/v1/placement", "/v1/events", "/v1/relay/held"} {
+	for _, path := range []string{"/v1/jobs", "/v1/placement", "/v1/events"} {
 		if status, _ := service.do(t, server, "GET", path, ""); status != http.StatusUnauthorized {
 			t.Fatalf("service %s status %d", path, status)
 		}
@@ -589,16 +587,6 @@ func TestHubAuthReloadKeepsAlertNodesNodes(t *testing.T) {
 	pw2WriteAuth(t, path, "HUB_TOKEN_operator="+pw2OperatorToken+"\n", 0600)
 	if status, _ := node.do(t, server, "GET", "/v1/lanes", ""); status != http.StatusUnauthorized {
 		t.Fatalf("revoked watched node: %d", status)
-	}
-}
-
-// TestHubAuthWakeTimeoutBeforeScope: a malformed wake body answers 400 to any
-// authenticated caller, before the scope check.
-func TestHubAuthWakeTimeoutBeforeScope(t *testing.T) {
-	_, server := pw2Hub(t, map[string]string{"svc-none": "inbox.read:lane-z"}, "", nil)
-	status, _ := (pw2Caller{"svc-none", "svc-none", pw2ServiceToken("svc-none")}).do(t, server, "POST", "/v1/nodes/wake", `{"machine":"node-a","timeout":"bogus"}`)
-	if status != http.StatusBadRequest {
-		t.Fatalf("invalid wake timeout: status %d, want 400", status)
 	}
 }
 

@@ -27,8 +27,7 @@ type PlacementPolicy struct {
 	// LoadRatio is retired: placement no longer filters on load, the measured
 	// load only ranks candidates (docs/placement.md). It stays decodable, and
 	// optional, so an existing policy file still loads.
-	LoadRatio   float64 `json:"load_ratio,omitempty"`
-	WakeOnSpill bool    `json:"wake_on_spill"`
+	LoadRatio float64 `json:"load_ratio,omitempty"`
 	// MemoryFreePctMin is the only admission threshold left: a crash guard
 	// against starting a session on a host about to run out of memory.
 	MemoryFreePctMin *float64 `json:"memory_free_pct_min,omitempty"`
@@ -249,8 +248,6 @@ type PlacementCandidate struct {
 	Pressure       *float64 `json:"pressure,omitempty"`
 	CapacityWeight float64  `json:"capacity_weight,omitempty"`
 	MemoryKnown    bool     `json:"memory_known"`
-	HoldsActive    bool     `json:"holds_active"`
-	BurstReady     bool     `json:"burst_ready"`
 	Reason         string   `json:"reason"`
 	// Signals are the measurements behind Score. They serialize only when the
 	// caller asks with signals=1 (place --explain): a pre-change CLI decodes
@@ -304,6 +301,11 @@ type PlacementResult struct {
 	Asof         time.Time            `json:"asof"`
 	PolicyStatus string               `json:"policy_status"`
 	Reason       string               `json:"reason,omitempty"`
+	// slotFull names the machines makePlacement dropped from Candidates for a
+	// full task-slot cap. It is not on the wire (the API drops them); the
+	// hub's own spawn engine reads it so an unlisted host is not mistaken for
+	// an unreported one.
+	slotFull []string
 }
 
 // MarshalJSON keeps the internal unavailable sentinel useful to callers while
@@ -535,6 +537,17 @@ func placementWire(result PlacementResult, withSignals bool) PlacementResult {
 }
 
 func (h *HubServer) placement(ctx context.Context, class, cwd string, tags ...string) PlacementResult {
+	return h.placementCached(ctx, true, class, cwd, tags...)
+}
+
+// placementFresh is a placement that never reads the 30 s cache. A spawn's
+// decision takes the hub's latest view; it still refreshes the cache for the
+// readers that may share one.
+func (h *HubServer) placementFresh(ctx context.Context, class, cwd string, tags ...string) PlacementResult {
+	return h.placementCached(ctx, false, class, cwd, tags...)
+}
+
+func (h *HubServer) placementCached(ctx context.Context, useCache bool, class, cwd string, tags ...string) PlacementResult {
 	now := h.now().UTC()
 	key := class + "\x00" + cwd
 	if len(tags) > 0 {
@@ -542,7 +555,7 @@ func (h *HubServer) placement(ctx context.Context, class, cwd string, tags ...st
 	}
 	h.mu.Lock()
 	h.reloadPlacementPolicyLocked()
-	if h.placementCache.key == key && now.Sub(h.placementCache.at) < 30*time.Second {
+	if useCache && h.placementCache.key == key && now.Sub(h.placementCache.at) < 30*time.Second {
 		cached := h.placementCache.result
 		cached.Candidates = append([]PlacementCandidate(nil), cached.Candidates...)
 		h.mu.Unlock()
@@ -572,13 +585,6 @@ func (h *HubServer) placement(ctx context.Context, class, cwd string, tags ...st
 	h.placementCache = placementCache{key: key, at: now, result: result}
 	h.mu.Unlock()
 	h.logger.Info("placement decision", "machine", result.Decision, "score", placementDecisionScore(result), "reason", placementDecisionReason(result))
-	if policy.WakeOnSpill && result.Decision != "unavailable" && result.Decision != policy.LocalMachine && !placementConnected(result, result.Decision) {
-		go func(target string) {
-			wakeCtx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
-			defer cancel()
-			_, _ = h.requestBurst(wakeCtx, target, "placement-spill", 5*time.Minute)
-		}(result.Decision)
-	}
 	return result
 }
 
@@ -623,10 +629,11 @@ func (h *HubServer) placementCandidates(policy PlacementPolicy, metrics placemen
 			bridged = countBridgedJobs(record.activeJobs, now, policy.spawnBridge())
 			memory = cloneHubHostMemory(record.hostMemory)
 		}
+		// A job decided onto this host whose claim has not arrived costs what
+		// a claim does (placement_count.go).
+		bridged += h.countedPlacementsLocked(machine, record, now, policy.spawnBridge())
 		taskSlots, slotCapped := policy.machineTaskSlots(machine)
 		slotFull := slotCapped && tasks >= taskSlots
-		holdsActive := h.holdsActiveLocked(machine, now)
-		burstReady := h.burstPolicyPath != "" && h.burstPolicy.TargetMachine == machine && h.burstState.UpCompleted
 		load, metricsKnown := metrics.load[machine]
 		// Freshness gate: the last-minute reading exists only while the host
 		// sent a sample in the last ~3 minutes, whereas the 5m one survives
@@ -654,12 +661,6 @@ func (h *HubServer) placementCandidates(policy PlacementPolicy, metrics placemen
 		}
 		if slotFull {
 			reasons = append(reasons, "task_slots_full")
-		}
-		if holdsActive {
-			reasons = append(reasons, "hold_active")
-		}
-		if burstReady {
-			reasons = append(reasons, "burst_ready")
 		}
 		memoryKnown := memory != nil && memory.FreePct != nil
 		// The memory floor is the one admission refusal left, a crash guard.
@@ -706,12 +707,6 @@ func (h *HubServer) placementCandidates(policy PlacementPolicy, metrics placemen
 		if throttled {
 			score -= 100
 		}
-		if holdsActive {
-			score += 5
-		}
-		if burstReady {
-			score += 5
-		}
 		var freePct, swapUsedMB, swapInPerS, pressure *float64
 		if memory != nil {
 			freePct, swapUsedMB = cloneMemoryFloat(memory.FreePct), cloneMemoryFloat(memory.SwapUsedMB)
@@ -722,7 +717,7 @@ func (h *HubServer) placementCandidates(policy PlacementPolicy, metrics placemen
 			tasksField = new(int)
 			*tasksField = tasks
 		}
-		candidates = append(candidates, PlacementCandidate{Machine: machine, Score: score, LoadRatio: load, Throttled: throttled, ActiveJobs: jobs, Tasks: tasksField, TaskSlots: taskSlots, Connected: connected, MetricsKnown: metricsKnown || source == "hub-only", MemoryFreePct: freePct, SwapUsedMB: swapUsedMB, SwapInPerS: swapInPerS, Pressure: pressure, MemoryKnown: memoryKnown, HoldsActive: holdsActive, BurstReady: burstReady, Reason: strings.Join(reasons, ","), Signals: &signals, slotFull: slotFull, accepting: connected && accepting && !memoryPressure && powerRefusal == ""})
+		candidates = append(candidates, PlacementCandidate{Machine: machine, Score: score, LoadRatio: load, Throttled: throttled, ActiveJobs: jobs, Tasks: tasksField, TaskSlots: taskSlots, Connected: connected, MetricsKnown: metricsKnown || source == "hub-only", MemoryFreePct: freePct, SwapUsedMB: swapUsedMB, SwapInPerS: swapInPerS, Pressure: pressure, MemoryKnown: memoryKnown, Reason: strings.Join(reasons, ","), Signals: &signals, slotFull: slotFull, accepting: connected && accepting && !memoryPressure && powerRefusal == ""})
 	}
 	h.mu.Unlock()
 	return candidates
@@ -743,17 +738,6 @@ func (h *HubServer) makePlacement(policy PlacementPolicy, metrics placementMetri
 		// is an operator prohibition and must never be returned as a placement.
 		if decision == policy.LocalMachine && strings.Contains(candidates[0].Reason, "not_accepting") {
 			decision = "unavailable"
-		}
-	}
-	// A disconnected spill target is still the actionable answer when wake is
-	// enabled; callers can observe that fact in its reason. A slot-full target
-	// is not actionable: waking it cannot admit the task.
-	if decision == policy.LocalMachine && !placementUsable(candidates[0], policy, source) && policy.WakeOnSpill && len(candidates) > 1 {
-		for _, candidate := range candidates[1:] {
-			if !candidate.slotFull {
-				decision = candidate.Machine
-				break
-			}
 		}
 	}
 	// Prometheus responding without a local load sample is not the same as a
@@ -784,11 +768,17 @@ func (h *HubServer) makePlacement(policy PlacementPolicy, metrics placementMetri
 	// Only machines with a free task slot are candidates. The caller may pick
 	// any eligible entry when the decision is unavailable, so a slot-full
 	// machine must not remain selectable here.
+	var full []string
+	for _, candidate := range candidates {
+		if candidate.slotFull {
+			full = append(full, candidate.Machine)
+		}
+	}
 	candidates = filterSlotFullCandidates(candidates)
 	if len(candidates) == 0 {
 		decision, reason = "unavailable", "task_slots_exhausted"
 	}
-	return PlacementResult{Decision: decision, Candidates: candidates, Source: source, Asof: now, Reason: reason}
+	return PlacementResult{Decision: decision, Candidates: candidates, Source: source, Asof: now, Reason: reason, slotFull: full}
 }
 
 // decideAmongUsable puts the score rules on top of the policy-order winner:

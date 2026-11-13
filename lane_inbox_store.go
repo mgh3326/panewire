@@ -942,7 +942,11 @@ func (s *laneInboxStore) makeBatches(now time.Time) error {
 }
 
 func (s *laneInboxStore) pendingBatches() ([]laneInboxBatch, error) {
-	ctx, done := s.op(s.life)
+	return s.pendingBatchesForContext(s.life)
+}
+
+func (s *laneInboxStore) pendingBatchesForContext(parent context.Context) ([]laneInboxBatch, error) {
+	ctx, done := s.op(parent)
 	defer done()
 	rows, err := s.db.QueryContext(ctx, `SELECT id,lane,text,
  (SELECT count(*) FROM lane_inbox i WHERE i.digest_batch=b.id OR i.escalation_batch=b.id),

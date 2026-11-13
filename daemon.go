@@ -12,7 +12,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 
@@ -32,7 +31,6 @@ type Config struct {
 	QuotaStopAct                               bool
 	Logging                                    LoggingConfig
 	Hub                                        HubDaemonConfig
-	IdleShutdown                               IdleShutdownConfig
 	StallDetect                                StallDetectConfig
 	Store                                      *Store
 	SchemaCommand                              []string
@@ -51,14 +49,12 @@ type Daemon struct {
 	idleWake     *idleWakeManager
 	stall        *stallDetectManager
 	paneMeta     *paneMetadataPublisher
-	idleShutdown *idleShutdownManager
 	caps         GuardResult
 	eventDone    chan struct{}
 	idleDone     chan struct{}
 	hubDone      chan struct{}
 	stallDone    chan struct{}
 	paneMetaDone chan struct{}
-	shutdownDone chan struct{}
 	resub        chan struct{}
 	subscribed   map[string]bool
 	// lifecycleResubMin and lifecycleSnapshotWait are the debounce floors for
@@ -230,14 +226,6 @@ func (d *Daemon) Start(ctx context.Context) error {
 			defer close(d.hubDone)
 			d.cfg.Hub.Client.Run(runCtx)
 		}()
-		// Report-only and off unless PANEWIRE_SESSION_REAP_REPORT_INTERVAL
-		// is set: starting it is a new schedule that needs operator approval.
-		// It runs on runCtx so Stop ends it with the other loops.
-		reapRoot := d.cfg.Hub.Client.jobsInboxRoot
-		if reapRoot == "" {
-			reapRoot = d.cfg.InboxRoot
-		}
-		startSessionReapReporter(runCtx, d.cfg.Hub.Client, d.cfg.HerdrSocket, reapRoot, d.cfg.Logger)
 	}
 	if d.stall != nil {
 		d.stallDone = make(chan struct{})
@@ -253,95 +241,7 @@ func (d *Daemon) Start(ctx context.Context) error {
 			d.paneMeta.Run(runCtx)
 		}()
 	}
-	if d.cfg.IdleShutdown.Enabled && d.cfg.Hub.Client != nil {
-		shutdownRoot := d.cfg.Hub.Client.jobsInboxRoot
-		if shutdownRoot == "" {
-			shutdownRoot = d.cfg.InboxRoot
-		}
-		if shutdownRoot == "" {
-			shutdownRoot = emitInboxRoot("")
-		}
-		panesAlive := hubPanesAliveHook(d.cfg.HerdrSocket)
-		manager := newIdleShutdownManager(d.cfg.IdleShutdown, shutdownRoot, idleShutdownDeps{
-			machineID: d.cfg.Hub.Client.machineID,
-			sessions:  hubSessionSnapshotAllHook(d.cfg.HerdrSocket),
-			jobLeases: func(ctx context.Context) ([]HubActiveJob, error) {
-				return idleShutdownJobLeases(shutdownRoot, panesAlive, ctx)
-			},
-			enqueue: d.cfg.Hub.Client.EnqueueRelayEvent,
-		}, d.cfg.Logger)
-		d.idleShutdown = manager
-		d.shutdownDone = make(chan struct{})
-		go func() {
-			defer close(d.shutdownDone)
-			manager.Run(runCtx)
-		}()
-	}
 	return nil
-}
-
-// idleShutdownJobLeases treats the node's jobs/<id>/events tree as the
-// Job lease record: claim and spawn events are written under
-// the shared inbox root by the emit path, which is exactly the tree
-// scanHubActiveJobsWithPanes reads. A jobs tree that exists but cannot be
-// listed is a blocker, never a clearance; a tree that does not exist simply
-// holds no leases. The same rule is applied one level deeper: a job directory
-// whose events cannot be listed, read, or parsed has unknown lease state and
-// counts as an active lease rather than powering off under work that cannot
-// be seen.
-func idleShutdownJobLeases(root string, panesAlive panesAliveFunc, ctx context.Context) ([]HubActiveJob, error) {
-	if root == "" {
-		return nil, errors.New("inbox root unset")
-	}
-	jobsDir := filepath.Join(root, "jobs")
-	if _, err := os.Stat(jobsDir); err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, err
-	}
-	entries, err := os.ReadDir(jobsDir)
-	if err != nil {
-		return nil, err
-	}
-	for _, entry := range entries {
-		if !entry.IsDir() || !hubJobIDPattern.MatchString(entry.Name()) {
-			continue
-		}
-		if !idleShutdownJobEventsLegible(filepath.Join(jobsDir, entry.Name(), "events")) {
-			return []HubActiveJob{{JobID: entry.Name()}}, nil
-		}
-	}
-	return scanHubActiveJobsWithPanes(ctx, root, panesAlive), nil
-}
-
-// idleShutdownJobEventsLegible applies the readability rules
-// scanHubJobEventDetails uses, but returns a verdict instead of silently
-// dropping the job: an unreadable directory or file, an oversized record, or
-// unparseable JSON all mean the lease state is unknown. A missing events
-// directory (or job directory) holds no lease at all (hk 3685).
-func idleShutdownJobEventsLegible(eventsDir string) bool {
-	entries, err := os.ReadDir(eventsDir)
-	if errors.Is(err, os.ErrNotExist) {
-		return true
-	}
-	if err != nil {
-		return false
-	}
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
-			continue
-		}
-		contents, err := os.ReadFile(filepath.Join(eventsDir, entry.Name()))
-		if err != nil || len(contents) > 16<<10 {
-			return false
-		}
-		var event hubInboxEvent
-		if json.Unmarshal(contents, &event) != nil {
-			return false
-		}
-	}
-	return true
 }
 
 // hubPanesAliveHook dials herdr per scan the way wait.agent and prompt do: the
@@ -376,23 +276,6 @@ func hubSessionSnapshotHook(socket string) func(context.Context) ([]HerdrAgentSt
 		}
 		defer client.Close()
 		return client.AgentStates(ctx)
-	}
-}
-
-// hubSessionSnapshotAllHook is the same short-lived client shape wired to
-// AgentStatesAll: the idle-shutdown probe must see panes herdr lists even
-// when this build cannot classify their status, so nothing is dropped.
-func hubSessionSnapshotAllHook(socket string) func(context.Context) ([]HerdrAgentState, error) {
-	if socket == "" {
-		return nil
-	}
-	return func(ctx context.Context) ([]HerdrAgentState, error) {
-		client, err := NewHerdrClient(socket)
-		if err != nil {
-			return nil, err
-		}
-		defer client.Close()
-		return client.AgentStatesAll(ctx)
 	}
 }
 
@@ -898,6 +781,12 @@ func errorString(err error) string {
 	return err.Error()
 }
 func (d *Daemon) Stop() error {
+	// The node finishes what is in flight, for a bounded time, before its
+	// loops are cancelled: a launch, an injection and a result upload cut off
+	// here would otherwise wait for the hub's deadline.
+	if d.cfg.Hub.Client != nil {
+		d.cfg.Hub.Client.Drain(context.Background())
+	}
 	if d.cancel != nil {
 		d.cancel()
 	}
@@ -927,10 +816,6 @@ func (d *Daemon) Stop() error {
 	if d.paneMetaDone != nil {
 		<-d.paneMetaDone
 		d.paneMetaDone = nil
-	}
-	if d.shutdownDone != nil {
-		<-d.shutdownDone
-		d.shutdownDone = nil
 	}
 	if d.listener != nil {
 		_ = d.listener.Close()

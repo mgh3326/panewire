@@ -354,8 +354,7 @@ type fleetCensusJobScan struct {
 	hasFirst     bool
 	pane         string
 	tab          string
-	// The fields below feed the #603 session-reap judgment (session_reap.go)
-	// and the protected skip. spawnLabel travels with spawnPane as part of the
+	// The fields below feed the reap judgment and the protected skip. spawnLabel travels with spawnPane as part of the
 	// newest spawn receipt; claimLabel is the latest claim/reclaim agent_label;
 	// keep is sticky: a JSON true "keep" on any claim, reclaim, or spawn
 	// receipt marks the job protected for good.
@@ -364,7 +363,7 @@ type fleetCensusJobScan struct {
 	keep       bool
 	// unreadable marks a job with an event file the reaper would skip (read error,
 	// invalid UTF-8, or not a JSON object). The reference-equivalent verdict skips
-	// it exactly like the reference; the session-reap judgment holds the job instead,
+	// it exactly like the reference; the reap judgment holds the job instead,
 	// since the skipped event may have been a revive.
 	unreadable bool
 }
@@ -667,8 +666,8 @@ func fleetCensusJobVerdict(scan fleetCensusJobScan, view fleetCensusLocalView, g
 
 // fleetCensusPaneGates is the herdr half of the reap pipeline: record
 // integrity, pane resolution, status, tab resolution, tab match, and the
-// single-pane tab. The #603 session-reap judgment reuses it unchanged so the
-// two can never disagree about a pane.
+// single-pane tab. The reap judgment reuses it unchanged so the two can never
+// disagree about a pane.
 func fleetCensusPaneGates(scan fleetCensusJobScan, view fleetCensusLocalView) (string, string) {
 	// the reaper prints "-" for empty fields in its candidate line and reap_cmd reads
 	// a literal "-" pane back as the malformed-record marker.
@@ -787,7 +786,7 @@ type fleetCensusCoverage struct {
 
 // fleetCensusLaneIssue flags one (machine, pane) target claimed by more than
 // one non-sink lane, or a lane whose pane the latest usable snapshot does not
-// contain (the lanes-audit dead verdict).
+// contain (the dead lane verdict).
 type fleetCensusLaneIssue struct {
 	Kind    string   `json:"kind"`
 	Machine string   `json:"machine"`
@@ -1133,7 +1132,7 @@ func buildFleetCensusResult(options fleetCensusOptions, machineID string, view f
 		result.Coverage.Reasons = append(result.Coverage.Reasons, "duplicate-node-entries")
 	}
 
-	// Lane verdicts reuse the lanes-audit judgement whole: dead only on a
+	// Lane verdicts reuse the lane judgement whole: dead only on a
 	// fresh, complete, decodable snapshot of the lane's machine. The local
 	// node's hub snapshot stays in the audit input — it is the only
 	// observation of this machine when herdr is down — but a complete direct

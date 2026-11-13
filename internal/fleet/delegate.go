@@ -240,7 +240,7 @@ func (d delegateReq) routingRole() string {
 	if d.o.patch {
 		return "implementer"
 	}
-	return map[string]string{"reader": "explorer", "verifier": "verifier", "reviewer": "reviewer"}[d.o.role]
+	return map[string]string{"reader": "implementer", "verifier": "verifier", "reviewer": "reviewer"}[d.o.role]
 }
 
 func isNumeric(s string) bool {
