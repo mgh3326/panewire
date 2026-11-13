@@ -181,10 +181,16 @@ func newSweepFixture(t *testing.T) *sweepFixture {
 	return f
 }
 
-// addJob records a live job of role on pool/account as a node placed it
+// addJob is addJobOn a free-tier rung, devin-swe2.
+func (f *sweepFixture) addJob(t *testing.T, role, pool, account, status string) string {
+	t.Helper()
+	return f.addJobOn(t, "devin-swe2", role, pool, account, status)
+}
+
+// addJobOn records a live job of role on profile, pool/account as a node placed it
 // (account "" is an operation with no placement record), with its hk record
 // and its pane in status. It returns the job id.
-func (f *sweepFixture) addJob(t *testing.T, role, pool, account, status string) string {
+func (f *sweepFixture) addJobOn(t *testing.T, profile, role, pool, account, status string) string {
 	t.Helper()
 	n := int(f.next.Add(1))
 	job := "sweep-" + strconv.Itoa(n)
@@ -204,7 +210,7 @@ func (f *sweepFixture) addJob(t *testing.T, role, pool, account, status string) 
 		t.Fatal(err)
 	}
 	pane := "w" + strconv.Itoa(10+n) + ":p1"
-	outcome := hubSpawnOutcome{RC: 0, Stage: "done", Host: "machine-a", Pane: pane, Role: role, Profile: "devin-swe2"}
+	outcome := hubSpawnOutcome{RC: 0, Stage: "done", Host: "machine-a", Pane: pane, Role: role, Profile: profile}
 	if account != "" {
 		outcome.Pool, outcome.AccountKey = pool, account
 	}
@@ -363,7 +369,8 @@ func TestPoolExhaustedLeavesAWorkingPaneForTheNextPass(t *testing.T) {
 // window scoped to one model group is not.
 func TestPoolExhaustedByAnAccountWindow(t *testing.T) {
 	f := newSweepFixture(t)
-	reviewer := f.addJob(t, "reviewer", "devin", sweepDevin, "idle")
+	reviewer := f.addJobOn(t, "devin-ds41", "reviewer", "devin", sweepDevin, "idle")
+	freeWorker := f.addJob(t, "worker", "devin", sweepDevin, "idle")
 	reset := time.Now().Add(2 * time.Hour).UTC().Truncate(time.Second)
 	publish := func(measured time.Time, buckets []map[string]any) {
 		payload := map[string]any{
@@ -385,4 +392,35 @@ func TestPoolExhaustedByAnAccountWindow(t *testing.T) {
 	}
 	// The model group's window started no pass: only the account window did.
 	eventually(t, 5*time.Second, "the sweep's summary line", func() bool { return f.sweeps() == 1 })
+	// A paid window pays for the paid rungs only: the free-tier worker stays.
+	if got := f.state(freeWorker); got != "spawned" {
+		t.Fatalf("a paid window reached a free-rung job: state=%s", got)
+	}
+}
+
+// A free limit exhausts the free rungs only: a devin-swe2 worker is handed over
+// and a devin-ds41 worker on the same account is left untouched, as is a
+// reviewer on a paid rung.
+func TestPoolExhaustedFreeLimitLeavesPaidRungsAlone(t *testing.T) {
+	f := newSweepFixture(t)
+	free := f.addJobOn(t, "devin-swe2", "worker", "devin", sweepDevin, "idle")
+	paid := f.addJobOn(t, "devin-ds41", "worker", "devin", sweepDevin, "idle")
+	paidReviewer := f.addJobOn(t, "devin-ds41", "reviewer", "devin", sweepDevin, "idle")
+
+	f.publishFreeLimit(t, sweepDevin, time.Now().Add(3*time.Hour), time.Now())
+	eventually(t, 5*time.Second, "the sweep's summary line", func() bool { return f.sweeps() == 1 })
+	if got := f.state(free); got != "lost" {
+		t.Fatalf("the free-rung worker state=%s, want handed over", got)
+	}
+	for _, job := range []string{paid, paidReviewer} {
+		if got := f.state(job); got != "spawned" {
+			t.Fatalf("paid-rung job %s was touched by a free limit: state=%s", job, got)
+		}
+		if got := f.node2.count("pane.close " + job); got != 0 {
+			t.Fatalf("paid-rung job %s had its pane closed", job)
+		}
+	}
+	if summary := f.logs.lines("pool exhausted sweep")[0]; !strings.Contains(summary, "jobs=1 ") || !strings.Contains(summary, "handed_over=1") {
+		t.Fatalf("summary %q", summary)
+	}
 }

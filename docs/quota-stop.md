@@ -38,7 +38,7 @@ hk 4550, operator decision 248. A pane's quota screen is observed only once the 
 
 **Trigger.** A node's quota value that the hub records (`publishFleetStateFromNode`, fleet state kind `quota`) and that shows the account used up with its reset still ahead: the free bucket `exhausted` (a devin free-limit record that reached the shared store), or a window of scope `account` (or no scope, and no `model`) at 100 % with a readable `resets_at`. A window of one model group does not count, since the account's other models stay usable. An identical value repeated within a minute is not recorded and does not start a pass.
 
-**Which jobs.** The live hub spawn operations (`liveSpawnTasks`, the rule of `[quota].pool_max_concurrent`) that succeeded and whose placement record, `pool` and `account_key` in the operation outcome (written from the executing host's receipt), names that pool and account. An operation with no placement record, another pool, or another account is never touched.
+**Which jobs.** The live hub spawn operations (`liveSpawnTasks`, the rule of `[quota].pool_max_concurrent`) that succeeded and whose placement record, `pool`, `account_key` and `profile` in the operation outcome (written from the executing host's receipt), names that pool and account, and a rung the exhausted bucket pays for. The free bucket pays only for the free-tier rungs (`fleet.IsFreeRung`: the `devin-swe2*` profiles), so a free-limit trigger acts only on those; a used-up paid window acts on the other rungs of the account, not the free ones. An operation with no placement record or profile, another pool, another account, or a rung the bucket does not pay for is never touched.
 
 | Role | Action |
 |---|---|
@@ -50,5 +50,3 @@ Each job's action runs on its own goroutine, all at once. A pane that is not idl
 **Records.** One `pool exhausted job` log line per job acted on (`job`, `role`, `pool`, `account`, `cause`, `action`, `successor`), and the job's hk record (`handed_over_to` or the `quota_stop` end reason). One `pool exhausted sweep` line per pool event (`pool`, `account`, `cause`, `reset`, `jobs`, `handed_over`, `ended`, and `skipped` as `reason=count`); a repeat of the same event is logged at debug level unless it acted.
 
 **Idempotent.** A job a pass is acting on or has acted on is held in memory, and its hk record ends, so the same exhaustion seen again, from any host, acts once. A skipped job is released for the next look.
-
-Known limit: the free limit and the paid windows are not told apart, so a free-limit exhaustion also reaches an idle job placed on a paid rung of the same pool and account.

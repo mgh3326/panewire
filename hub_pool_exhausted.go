@@ -32,8 +32,9 @@ import (
 //	                   it respawns the review.
 
 // poolExhaustion is one reading of a pool used up for an account: what ran out
-// and until when. A reading with several used-up parts is the one that clears
-// last.
+// and until when. The free bucket pays only for the free-tier rungs
+// (fleet.IsFreeRung, the devin-swe2* profiles), an account window only for the
+// paid rungs, so each exhaustion reaches only the jobs its bucket pays for.
 type poolExhaustion struct {
 	Pool, Account string
 	// Cause is "free_limit" for the free bucket, "window:<name>" for an account window.
@@ -46,34 +47,45 @@ func (e poolExhaustion) key() string {
 	return e.Account + "|" + e.Cause + "|" + e.Reset.UTC().Format(time.RFC3339)
 }
 
-// poolExhaustionOf reads a quota publish for an exhaustion still holding at
-// now. A free bucket exhausted until a reset ahead counts. So does an account
-// window (a bucket of scope account, or with no scope, and no model) at 100 %
-// with its reset ahead: a window of one model group leaves the account's other
-// models usable, and one with no readable reset cannot be said to hold.
-func poolExhaustionOf(quota *FleetStateQuota, now time.Time) (poolExhaustion, bool) {
+// covers reports whether a job placed on profile draws on what ran out. A job
+// with no recorded profile cannot be told apart, so it is left alone.
+func (e poolExhaustion) covers(profile string) bool {
+	if profile == "" {
+		return false
+	}
+	return fleet.IsFreeRung(profile) == (e.Cause == poolCauseFreeLimit)
+}
+
+const poolCauseFreeLimit = "free_limit"
+
+// poolExhaustionsOf reads a quota publish for what is used up and still holding
+// at now: at most one free-limit exhaustion (the free bucket exhausted until a
+// reset ahead) and at most one paid-window exhaustion (an account window, a
+// bucket of scope account or none and no model, at 100 % with its reset ahead;
+// with several, the one that clears last). A window of one model group leaves
+// the account's other models usable, and one with no readable reset cannot be
+// said to hold.
+func poolExhaustionsOf(quota *FleetStateQuota, now time.Time) []poolExhaustion {
 	if quota == nil {
-		return poolExhaustion{}, false
+		return nil
 	}
-	var found poolExhaustion
-	ok := false
-	consider := func(cause string, reset time.Time) {
-		if reset.After(now) && (!ok || reset.After(found.Reset)) {
-			found, ok = poolExhaustion{Pool: quota.Pool, Account: quota.AccountKey, Cause: cause, Reset: reset.UTC()}, true
-		}
+	var found []poolExhaustion
+	if quota.Free != nil && quota.Free.State == shared.FreeExhausted && quota.Free.ResetsAt != nil && quota.Free.ResetsAt.After(now) {
+		found = append(found, poolExhaustion{Pool: quota.Pool, Account: quota.AccountKey, Cause: poolCauseFreeLimit, Reset: quota.Free.ResetsAt.UTC()})
 	}
-	if quota.Free != nil && quota.Free.State == shared.FreeExhausted && quota.Free.ResetsAt != nil {
-		consider("free_limit", *quota.Free.ResetsAt)
-	}
+	var window poolExhaustion
 	for _, bucket := range quota.Buckets {
 		if bucket.UsedPct == nil || *bucket.UsedPct < 100 || bucket.Model != "" || bucket.Scope == "group" {
 			continue
 		}
-		if reset, err := time.Parse(time.RFC3339, bucket.ResetsAt); err == nil {
-			consider("window:"+bucket.Window, reset)
+		if reset, err := time.Parse(time.RFC3339, bucket.ResetsAt); err == nil && reset.After(now) && reset.After(window.Reset) {
+			window = poolExhaustion{Pool: quota.Pool, Account: quota.AccountKey, Cause: "window:" + bucket.Window, Reset: reset.UTC()}
 		}
 	}
-	return found, ok
+	if window.Cause != "" {
+		found = append(found, window)
+	}
+	return found
 }
 
 // poolSweepState is what makes a pass idempotent. jobs holds each job a pass is
@@ -150,21 +162,22 @@ func poolJobSkip(role, why string) poolJobResult {
 // observePoolExhaustion is the trigger: a node published a quota value the hub
 // recorded. It never blocks the publish; the pass runs on its own goroutine.
 func (h *HubServer) observePoolExhaustion(quota *FleetStateQuota, now time.Time) {
-	exhaustion, exhausted := poolExhaustionOf(quota, now)
-	if !exhausted || h.inbox == nil {
+	if h.inbox == nil {
 		return
 	}
-	h.closeMu.Lock()
-	if h.closed {
+	for _, exhaustion := range poolExhaustionsOf(quota, now) {
+		h.closeMu.Lock()
+		if h.closed {
+			h.closeMu.Unlock()
+			return
+		}
+		h.spawnWorkers.Add(1)
 		h.closeMu.Unlock()
-		return
+		go func() {
+			defer h.spawnWorkers.Done()
+			h.sweepExhaustedPool(h.closeCtx, exhaustion)
+		}()
 	}
-	h.spawnWorkers.Add(1)
-	h.closeMu.Unlock()
-	go func() {
-		defer h.spawnWorkers.Done()
-		h.sweepExhaustedPool(h.closeCtx, exhaustion)
-	}()
 }
 
 // sweepExhaustedPool acts on every live job placed on the exhausted pool and
@@ -180,7 +193,7 @@ func (h *HubServer) sweepExhaustedPool(ctx context.Context, exhaustion poolExhau
 	var onPool []hubSpawnTask
 	listed := map[string]bool{}
 	for _, task := range tasks {
-		if task.Status == "succeeded" && task.Outcome.Pool == exhaustion.Pool && task.Outcome.AccountKey == exhaustion.Account && !listed[task.Job] {
+		if task.Status == "succeeded" && task.Outcome.Pool == exhaustion.Pool && task.Outcome.AccountKey == exhaustion.Account && exhaustion.covers(task.Outcome.Profile) && !listed[task.Job] {
 			listed[task.Job] = true
 			onPool = append(onPool, task)
 		}
