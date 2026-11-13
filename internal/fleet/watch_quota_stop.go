@@ -17,15 +17,18 @@ import (
 // docs/quota-stop.md), so the watcher leaves its job live.
 var quotaStopRoles = []string{"reviewer"}
 
-// QuotaStopHandOffGrace is how long a reviewer's watcher leaves the hub to
-// replace a quota-stopped job before it ends the job itself, without a
-// replacement. The hub places the replacement, closes the pane and writes the
-// hk record with replaced_by (hk never rewrites a lost record, so the pointer
-// can only be written once). Zero ends the job at once. It must outlast the
-// hub's whole replacement (hub_quota_replace.go quotaReplaceBudget, a hard
-// deadline) plus the relay to the hub, or the
-// watcher writes a terminal record without the successor pointer while the hub
-// is still placing it.
+// QuotaStopHandOffGrace is how long a watcher leaves the hub to replace a job
+// whose quota stop was announced (an implementer the quota-stop manager
+// handed over, or a credit-stopped job) before it ends the job itself, without
+// a replacement. The hub places the replacement, closes the pane and writes the
+// hk record with replaced_by or handed_over_to (hk never rewrites a lost record,
+// so the pointer can only be written once). Zero ends the job at once. It must
+// outlast the hub's whole replacement (hub_quota_replace.go quotaReplaceBudget,
+// a hard deadline) plus the relay to the hub, or the watcher writes a terminal
+// record without the successor pointer while the hub is still placing it.
+//
+// A reviewer on a visible quota screen has no grace: its watcher ends the job
+// at once (hk 4507) and mergewake respawns the review.
 const QuotaStopHandOffGrace = 10 * time.Minute
 
 // QuotaStopEndReason is the hk end_reason of a quota-stopped job:
@@ -153,32 +156,55 @@ func (a *App) creditStopped(j Job, ag Agent) (quotastop.Stop, bool) {
 	return quotastop.Stop{}, false
 }
 
+// quotaSeen is what one look at a pane found.
+type quotaSeen int
+
+const (
+	// quotaNotStopped: the look succeeded and the pane is not on a quota stop
+	// (or is not a pane this path watches).
+	quotaNotStopped quotaSeen = iota
+	// quotaStopFound: the pane shows a quota stop.
+	quotaStopFound
+	// quotaScreenUnavailable: the screen could not be read. It proves nothing
+	// either way, so a pending close keeps waiting instead of dropping.
+	quotaScreenUnavailable
+)
+
 // quotaStopped also recognizes the existing visible quota status lines. A
 // failed read is not a stop; neither path sends input to the pane.
 func (a *App) quotaStopped(ctx context.Context, j Job, ag Agent, seen *quotaStopWatch) (quotastop.Stop, bool) {
+	stop, found := a.quotaStopScreen(ctx, j, ag, seen)
+	return stop, found == quotaStopFound
+}
+
+// quotaStopScreen looks at the pane once. seen, when not nil, skips a pane
+// whose state_change_seq was already read successfully; a failed read is not
+// remembered, so it is tried again.
+func (a *App) quotaStopScreen(ctx context.Context, j Job, ag Agent, seen *quotaStopWatch) (quotastop.Stop, quotaSeen) {
 	if stop, ok := a.creditStopped(j, ag); ok {
-		return stop, true
+		return stop, quotaStopFound
 	}
 	if ag.Status != "idle" && ag.Status != "done" {
-		return quotastop.Stop{}, false
+		return quotastop.Stop{}, quotaNotStopped
 	}
 	if !slices.Contains(quotaStopRoles, j.QuotaRole()) {
-		return quotastop.Stop{}, false
+		return quotastop.Stop{}, quotaNotStopped
 	}
-	if ag.StateChangeSeq != nil {
-		if seen.read && seen.seq == *ag.StateChangeSeq {
-			return quotastop.Stop{}, false
-		}
-		seen.read, seen.seq = true, *ag.StateChangeSeq
+	if seen != nil && ag.StateChangeSeq != nil && seen.read && seen.seq == *ag.StateChangeSeq {
+		return quotastop.Stop{}, quotaNotStopped
 	}
 	r := a.call(ctx, "herdr", "agent", "read", ag.Pane, "--source", "visible", "--lines", "60")
 	if e := check(r, "pane screen"); e != nil {
-		if ag.StateChangeSeq != nil {
-			a.warn("quota-stop screen read unavailable: %v", e)
-		}
-		return quotastop.Stop{}, false
+		a.warn("quota-stop screen read unavailable: %v", e)
+		return quotastop.Stop{}, quotaScreenUnavailable
 	}
-	return quotastop.Classify(r.Out, a.Now(), time.Local)
+	if seen != nil && ag.StateChangeSeq != nil {
+		seen.read, seen.seq = true, *ag.StateChangeSeq
+	}
+	if stop, ok := quotastop.Classify(r.Out, a.Now(), time.Local); ok {
+		return stop, quotaStopFound
+	}
+	return quotastop.Stop{}, quotaNotStopped
 }
 
 // QuotaRole is the role a quota stop is handled by: the spawn receipt's
@@ -263,7 +289,9 @@ func announcedQuotaStop(j Job) (quotastop.Stop, bool) {
 		if ev.Kind != "job.lost" {
 			continue
 		}
-		if str(ev.Payload, "reason") != "quota_stop" {
+		if str(ev.Payload, "reason") != "quota_stop" || boolean(ev.Payload, "final", false) {
+			// A final stop is a reviewer whose hk record the watcher already
+			// wrote lost: there is nothing left to hand over or to re-arm.
 			return quotastop.Stop{}, false
 		}
 		stop := quotastop.Stop{Pool: str(ev.Payload, "pool")}
@@ -282,12 +310,24 @@ func announcedQuotaStop(j Job) (quotastop.Stop, bool) {
 // the next devin measurement publishes it and later selections skip the free
 // rung until its reset (RecordFreeLimit).
 func (a *App) quotaStopAnnounce(ctx context.Context, j Job, stop quotastop.Stop) error {
+	return a.quotaStopEvent(ctx, j, stop, false)
+}
+
+// quotaStopEvent records job.lost for a quota stop. final marks a stop whose hk
+// lost record is already written (a reviewer ended by its watcher): unlike an
+// announcement it hands nothing over, so it is never adopted as a hand-off
+// grace by a watcher or a re-arm, which would reprompt a resumed pane.
+func (a *App) quotaStopEvent(ctx context.Context, j Job, stop quotastop.Stop, final bool) error {
 	if stop.Pool == "devin-free" {
 		if e := RecordFreeLimit(devin.Config{Home: a.Home, Now: a.Now}, j.ID, stop); e != nil {
 			a.warn("free-limit observation failed: %v", e)
 		}
 	}
-	return a.event(ctx, j.ID, "job.lost", quotaStopPayload(j, stop))
+	payload := quotaStopPayload(j, stop)
+	if final {
+		payload["final"] = true
+	}
+	return a.event(ctx, j.ID, "job.lost", payload)
 }
 
 // RecordFreeLimit writes a devin free-tier limit a quota-stopped pane reported
@@ -314,14 +354,18 @@ func RecordFreeLimit(cfg devin.Config, job string, stop quotastop.Stop) error {
 // pool and reset_at. No result is written; hk takes one only with completed.
 // emit is false when quotaStopAnnounce already recorded job.lost.
 func (a *App) quotaStopLost(ctx context.Context, j Job, stop quotastop.Stop, emit bool) error {
-	endReason := QuotaStopEndReason(stop.Pool, stop.Reset, "", "")
 	// After a hand-off grace the hub may already have written the record lost
 	// with the successor pointer; hk would refuse a rewrite, so leave it.
 	if emit || !a.hkJobEnded(ctx, j.ID) {
-		if e := a.putJobRecord(ctx, j.ID, map[string]any{"state": "lost", "end_reason": endReason, "at": a.Now().UTC()}); e != nil {
+		if e := a.putJobRecord(ctx, j.ID, map[string]any{"state": "lost", "end_reason": QuotaStopEndReason(stop.Pool, stop.Reset, "", ""), "at": a.Now().UTC()}); e != nil {
 			a.jobRecordFailed(ctx, j.ID, "lost", e)
 		}
 	}
+	return a.quotaStopFinish(ctx, j, stop, emit)
+}
+
+// quotaStopFinish announces job.lost (when emit) and releases the quota lease.
+func (a *App) quotaStopFinish(ctx context.Context, j Job, stop quotastop.Stop, emit bool) error {
 	if emit {
 		if e := a.quotaStopAnnounce(ctx, j, stop); e != nil {
 			return e
@@ -330,17 +374,147 @@ func (a *App) quotaStopLost(ctx context.Context, j Job, stop quotastop.Stop, emi
 	return a.releaseQuota(ctx, j)
 }
 
-// hkJobEnded reports whether hk already holds a terminal record for the job. An
-// unreadable record is not an end.
-func (a *App) hkJobEnded(ctx context.Context, id string) bool {
+// A reviewer's quota stop is ended through a durable close intent. The intent
+// is recorded before the first hk write, with the stop and the exact end_reason
+// of that attempt, and is reconciled until the job is finished: the end_reason
+// is frozen because a fresh parse of a relative reset ("reset in 5 minutes")
+// differs on every poll, and a restart between the hk write and the local
+// finish finds the intent and finishes the job instead of losing the lease.
+const (
+	quotaIntentKind       = "job.quota_stop_intent"
+	quotaIntentCancelKind = "job.quota_stop_cancelled"
+)
+
+// quotaIntent is a recorded close intent.
+type quotaIntent struct {
+	stop   quotastop.Stop
+	reason string
+	pane   string
+}
+
+// pendingQuotaIntent returns the job's open close intent: the newest intent not
+// followed by a cancellation, an end, a re-prompt or a new claim or spawn.
+func pendingQuotaIntent(j Job) (quotaIntent, bool) {
+	var cur quotaIntent
+	open := false
+	for _, ev := range j.Events {
+		switch ev.Kind {
+		case quotaIntentKind:
+			cur = quotaIntent{stop: quotastop.Stop{Pool: str(ev.Payload, "pool")}, reason: str(ev.Payload, "end_reason"), pane: str(ev.Payload, "pane_id")}
+			if reset, err := time.Parse(time.RFC3339, str(ev.Payload, "reset_at")); err == nil {
+				cur.stop.Reset = reset
+			}
+			open = cur.stop.Pool != "" && cur.reason != ""
+		case quotaIntentCancelKind, "job.reprompted", "job.spawned", "job.claim", "job.claimed", "job.reclaim",
+			"job.completed", "job.joined", "job.revoked", "job.handed_off", "job.lost":
+			open = false
+		}
+	}
+	return cur, open
+}
+
+func (a *App) recordQuotaIntent(ctx context.Context, j Job, stop quotastop.Stop) error {
+	payload := map[string]any{"pane_id": j.Pane, "pool": stop.Pool, "end_reason": QuotaStopEndReason(stop.Pool, stop.Reset, "", "")}
+	if !stop.Reset.IsZero() {
+		payload["reset_at"] = stop.Reset.UTC().Format(time.RFC3339)
+	}
+	return a.event(ctx, j.ID, quotaIntentKind, payload)
+}
+
+// quotaIntentOutcome is what one reconciliation of a close intent did.
+type quotaIntentOutcome int
+
+const (
+	// quotaIntentRetry: nothing was proven; the intent stays open.
+	quotaIntentRetry quotaIntentOutcome = iota
+	// quotaIntentEnded: the job was finished, or another terminal outcome owns it.
+	quotaIntentEnded
+	// quotaIntentCancelled: fresh evidence shows the pane moved on.
+	quotaIntentCancelled
+)
+
+// finishQuotaIntent finishes a job whose hk lost record is known to be written:
+// the lease is released first, then the final job.lost closes the intent. The
+// order is the recovery: a crash or a failure between the two leaves the intent
+// open, so the next poll (or a re-armed watcher) repeats both idempotent steps,
+// and the closing event is only written once the lease is free.
+func (a *App) finishQuotaIntent(ctx context.Context, j Job, stop quotastop.Stop) quotaIntentOutcome {
+	if e := a.releaseQuota(ctx, j); e != nil {
+		a.warn("quota-stop lease release failed, retrying: %v", e)
+		return quotaIntentRetry
+	}
+	if e := a.quotaStopEvent(ctx, j, stop, true); e != nil {
+		a.warn("quota-stop job.lost not recorded, retrying: %v", e)
+		return quotaIntentRetry
+	}
+	return quotaIntentEnded
+}
+
+// reconcileQuotaIntent drives an open close intent one step. hk decides first:
+// exactly the intended lost record finishes the job even if the screen can no
+// longer be read (the write already happened); another terminal record ends the
+// watch without announcing or releasing anything; an unreadable record keeps
+// the intent. Only a live hk record needs another write, and that needs fresh
+// positive evidence: a readable screen that still shows a stop. An unreadable
+// screen or herdr never cancels the intent.
+func (a *App) reconcileQuotaIntent(ctx context.Context, j Job, in quotaIntent, herdrOK, present, reportPending bool, ag Agent) (quotaIntentOutcome, error) {
+	cancel := func(reason string) (quotaIntentOutcome, error) {
+		return quotaIntentCancelled, a.event(ctx, j.ID, quotaIntentCancelKind, map[string]any{"reason": reason})
+	}
+	state, reason, ok := a.hkJobState(ctx, j.ID)
+	if !ok {
+		return quotaIntentRetry, nil
+	}
+	switch {
+	case state == "lost" && reason == in.reason:
+		return a.finishQuotaIntent(ctx, j, in.stop), nil
+	case state == "completed" || state == "lost" || state == "escalated":
+		a.warn("quota-stop lost record not written: hk holds another terminal record (%s)", state)
+		_, e := cancel("superseded")
+		return quotaIntentEnded, e
+	}
+	if reportPending {
+		return cancel("report_written")
+	}
+	if !herdrOK {
+		return quotaIntentRetry, nil
+	}
+	if !present {
+		return cancel("pane_gone")
+	}
+	stop, seen := a.quotaStopScreen(ctx, j, ag, nil)
+	switch {
+	case seen == quotaScreenUnavailable:
+		return quotaIntentRetry, nil
+	case seen != quotaStopFound || !stop.CreditExhaustedAt.IsZero():
+		return cancel("pane_moved_on")
+	}
+	if e := a.putJobRecord(ctx, j.ID, map[string]any{"state": "lost", "end_reason": in.reason, "at": a.Now().UTC()}); e != nil {
+		a.warn("quota-stop lost record not written, retrying: %v", e)
+		return quotaIntentRetry, nil
+	}
+	return a.finishQuotaIntent(ctx, j, in.stop), nil
+}
+
+// hkJobState reads the job's hk record state and end_reason. ok is false when
+// the record cannot be read.
+func (a *App) hkJobState(ctx context.Context, id string) (state, endReason string, ok bool) {
 	store, e := a.jobStore()
 	if e != nil {
-		return false
+		return "", "", false
 	}
 	rec, e := store.Get(ctx, id)
 	if e != nil {
-		return false
+		return "", "", false
 	}
-	state, _ := rec["state"].(string)
-	return state == "completed" || state == "lost" || state == "escalated"
+	state, _ = rec["state"].(string)
+	endReason, _ = rec["end_reason"].(string)
+	return state, endReason, true
+}
+
+// hkJobEnded reports whether hk already holds a terminal record for the job. An
+// unreadable record is not an end.
+func (a *App) hkJobEnded(ctx context.Context, id string) bool {
+	state, _, ok := a.hkJobState(ctx, id)
+	return ok && (state == "completed" || state == "lost" || state == "escalated")
 }
