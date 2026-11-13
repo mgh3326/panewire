@@ -87,7 +87,10 @@ use it, so the p1 and p2 reviewers of one task hold at once while a second p1 is
 refused with the same 409 as any held slot. panewire reads the pass only from
 the flag, never from a label. A reviewer without the flag keeps `<task>:reviewer`,
 and stored keys without a pass need no migration. The held-reservation log line
-prints the key as `role_key`. An implementer holds `<task>:implementer`; a hold written under an older role name is not matched by it.
+prints the key as `role_key`. An implementer holds `<task>:implementer`; a hold written under an older role name is not matched by it. A consult
+seat (`--role consult`) bound by `--task` takes no task/role slot at all
+(`fleet.Spawn.HoldsTaskRole` is false for it), so a consult pair shares one task
+(hk 4568); it works beside the claimant and never takes its exclusive claim.
 
 A prior operation in `failed` whose hk job is still `claimed` (pane cleanup
 unverified) is checked on a colliding submission: the hub asks the operation's
