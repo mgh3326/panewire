@@ -378,19 +378,42 @@ func (s *laneInboxStore) spawnTaskByNode(parent context.Context, id string) (hub
 }
 
 // pendingSpawns lists what the coordinator should run now: every fresh
-// request (accepted, dispatching, reconciling), task priority first, then age,
-// and at most spawnStaleBatch deadline_exceeded rows whose back-off has run
-// out. The fresh query has no row limit: rows a worker already owns (skipped
-// in memory) must not hide later ones. The stale rows come from their own
-// query and follow the fresh rows into the work queue.
+// runnable request (accepted, dispatching, reconciling), task priority first,
+// then age, and at most spawnStaleBatch due deadline_exceeded rows. The fresh
+// query has no row limit: rows a worker already owns (skipped in memory) must
+// not hide later ones. Conditioned rows use a separate page
+// (pendingStartConditionSpawns).
 func (s *laneInboxStore) pendingSpawns(parent context.Context, now time.Time) ([]hubSpawnTask, error) {
 	ctx, done := s.op(parent)
 	defer done()
-	tasks, err := s.queryPendingSpawns(ctx, `status IN ('accepted','dispatching','reconciling') ORDER BY priority_rank,created_ms,request_id`)
+	tasks, err := s.queryPendingSpawns(ctx, `status IN ('accepted','dispatching','reconciling') AND payload NOT LIKE '%"start_conditions":%' ORDER BY priority_rank,created_ms,request_id`)
 	if err != nil {
 		return nil, err
 	}
-	stale, err := s.queryPendingSpawns(ctx, `status='deadline_exceeded' ORDER BY last_run_ms,created_ms LIMIT 256`)
+	stale, err := s.queryPendingSpawns(ctx, `status='deadline_exceeded' AND payload NOT LIKE '%"start_conditions":%' ORDER BY last_run_ms,created_ms LIMIT 256`)
+	if err != nil {
+		return nil, err
+	}
+	due := 0
+	for _, task := range stale {
+		if due < spawnStaleBatch && spawnStaleProbeDue(task, now) {
+			tasks = append(tasks, task)
+			due++
+		}
+	}
+	return tasks, nil
+}
+
+// pendingStartConditionSpawns gives legacy conditioned rows their own bounded
+// fresh page and due-stale pass, separate from ordinary runnable spawns.
+func (s *laneInboxStore) pendingStartConditionSpawns(parent context.Context, now time.Time) ([]hubSpawnTask, error) {
+	ctx, done := s.op(parent)
+	defer done()
+	tasks, err := s.queryPendingSpawns(ctx, `status IN ('accepted','dispatching','reconciling') AND payload LIKE '%"start_conditions":%' ORDER BY last_run_ms,created_ms LIMIT 32`)
+	if err != nil {
+		return nil, err
+	}
+	stale, err := s.queryPendingSpawns(ctx, `status='deadline_exceeded' AND payload LIKE '%"start_conditions":%' ORDER BY last_run_ms,created_ms LIMIT 256`)
 	if err != nil {
 		return nil, err
 	}

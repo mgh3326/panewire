@@ -235,7 +235,7 @@ credential in `hub.session_lanes_token_envs` also keeps the command route,
 because that session's hub identity is not the daemon's.
 
 ```sh
-panewire lanes add <lane> --machine <machine> --pane <wN:pN> [--parent <lane>] [--sink] \
+panewire lanes add <lane> (--machine <machine> --pane <wN:pN> | --sink) [--parent <lane>] \
   --hub-url <https-hub-url> --hub-token-env <token-env> [--hub-cf-env <access-env>]
 panewire lanes rm <lane> \
   --hub-url <https-hub-url> --hub-token-env <token-env> [--hub-cf-env <access-env>]

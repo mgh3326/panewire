@@ -28,6 +28,17 @@ func (h *HubServer) newSpawnApp(out, errout io.Writer) (*fleet.App, error) {
 	}
 	return app, err
 }
+
+func (h *HubServer) handleSpawnFeatures(w http.ResponseWriter, r *http.Request) {
+	if h.authenticate(r).kind != hubCallerOperator {
+		hubUnauthorized(w)
+		return
+	}
+	// Start conditions are deliberately not advertised until the queue core
+	// owns their lifecycle and expiry semantics.
+	writeJSON(w, http.StatusOK, map[string][]string{"features": {}})
+}
+
 func (h *HubServer) handleSpawnSubmit(w http.ResponseWriter, r *http.Request) {
 	// Placement chooses a resource after acceptance; only the unscoped operator
 	// may grant that authority. Per-host service tokens cannot escape their host.
@@ -50,6 +61,10 @@ func (h *HubServer) handleSpawnSubmit(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil || !validHubSpawnRequestID(request.RequestID) || !hubSpawnMachinePattern.MatchString(request.OriginMachine) {
 		writeJSON(w, 400, map[string]string{"error": "invalid_request", "fix": "rebuild the request with panewire spawn"})
+		return
+	}
+	if len(request.StartConditions) != 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "start_conditions_unsupported", "reason": "queue_core_required", "fix": "start conditions are not enabled on this hub; upgrade after queue-core support is deployed"})
 		return
 	}
 	// The node applies this same rule to the args it receives; refusing here
@@ -200,14 +215,28 @@ func (h *HubServer) handleSpawnOperation(w http.ResponseWriter, r *http.Request)
 		writeJSON(w, 503, map[string]string{"error": "store_unavailable"})
 		return
 	}
+	var startCondition *fleet.StartConditionResult
+	if len(task.Request.StartConditions) != 0 && spawnPending(task.Status) {
+		result := evaluateHubStartCondition(r.Context(), h, task.Request.StartConditions)
+		startCondition = &result
+	}
 	// Never expose the persisted brief, argv or submitting paths through status
 	// reads. A reason's refusal text may name a path on the executing node.
 	writeJSON(w, 200, struct {
-		Job     string          `json:"job_id"`
-		Request string          `json:"request_id"`
-		Status  string          `json:"status"`
-		Result  hubSpawnOutcome `json:"result"`
-	}{task.Job, task.Request.RequestID, task.Status, task.Outcome})
+		Job            string                      `json:"job_id"`
+		Request        string                      `json:"request_id"`
+		Status         string                      `json:"status"`
+		Result         hubSpawnOutcome             `json:"result"`
+		StartCondition *fleet.StartConditionResult `json:"start_condition,omitempty"`
+	}{task.Job, task.Request.RequestID, task.Status, task.Outcome, startCondition})
+}
+
+func evaluateHubStartCondition(ctx context.Context, h *HubServer, conditions []fleet.StartCondition) fleet.StartConditionResult {
+	snapshots, err := fleet.ReadStartConditionTasks(ctx, conditions)
+	if err != nil {
+		return fleet.StartConditionResult{Status: "waiting", Reasons: []string{"hk_unavailable"}}
+	}
+	return fleet.EvaluateStartConditions(conditions, snapshots, h.now().UTC())
 }
 
 func (h *HubServer) runSpawnCoordinator(parent context.Context) {
@@ -238,8 +267,16 @@ func (h *HubServer) runSpawnCoordinator(parent context.Context) {
 	tick := time.NewTicker(2 * time.Second)
 	defer tick.Stop()
 	for {
-		tasks, err := h.inbox.store.pendingSpawns(ctx, h.now().UTC())
-		if err == nil && h.drain.admit() {
+		now := h.now().UTC()
+		tasks, err := h.inbox.store.pendingSpawns(ctx, now)
+		if err != nil {
+			tasks = nil
+		}
+		conditioned, conditionErr := h.inbox.store.pendingStartConditionSpawns(ctx, now)
+		if conditionErr == nil {
+			tasks = append(tasks, conditioned...)
+		}
+		if len(tasks) != 0 && h.drain.admit() {
 			// pendingSpawns is ordered by task priority, then age.
 			for _, task := range tasks {
 				if !q.claim(task.Request.RequestID) {
@@ -274,6 +311,11 @@ func (h *HubServer) runSpawnPlacement(ctx context.Context, task hubSpawnTask) {
 	// A draining hub starts nothing new; the durable row stays pending for
 	// the next hub (hub_drain.go).
 	if h.drain.enter() {
+		if h.holdStartCondition(ctx, task) {
+			h.drain.leave()
+			h.spawnQueue.release(task.Request.RequestID)
+			return
+		}
 		h.inbox.store.touchSpawn(ctx, task.Request.RequestID, h.now().UTC())
 		bound, ok := h.placeSpawn(ctx, task)
 		h.drain.leave()
@@ -290,6 +332,9 @@ func (h *HubServer) runSpawnPlacement(ctx context.Context, task hubSpawnTask) {
 // refusal. The coordinator runs the stages on separate workers instead.
 func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) {
 	for {
+		if h.holdStartCondition(parent, task) {
+			return
+		}
 		if task.Node == nil {
 			bound, ok := h.placeSpawn(parent, task)
 			if !ok {
@@ -308,6 +353,27 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 	}
 }
 
+// holdStartCondition reports whether a legacy conditioned request must not
+// run now. An unbound one is settled as unsupported until queue-core support
+// is deployed. A bound one may already have reached its node: while its
+// deadline is live and its condition is unmet it is not replayed, because the
+// node treats an unknown request id as a new spawn; at the deadline the
+// replay carries an expired deadline, which lets the node return a journal
+// result or refuse an unstarted request.
+func (h *HubServer) holdStartCondition(ctx context.Context, task hubSpawnTask) bool {
+	if len(task.Request.StartConditions) == 0 {
+		return false
+	}
+	if task.Node == nil {
+		h.finishSpawnOutcome(task, hubSpawnOutcome{
+			RC: 78, Stage: "placement", Reason: "start_conditions_unsupported",
+			Fix: "start conditions are disabled until queue-core support is deployed; submit again after the hub advertises start_conditions_v1",
+		})
+		return true
+	}
+	return h.now().Before(task.Deadline) && evaluateHubStartCondition(ctx, h, task.Request.StartConditions).Status != "met"
+}
+
 // dispatchBoundSpawn sends a bound request to its node and settles the
 // answer. It reports true when a host refusal or a not-started answer
 // returned the request to placement.
@@ -317,6 +383,9 @@ func (h *HubServer) dispatchBoundSpawn(parent context.Context, task hubSpawnTask
 			h.finishSpawnOutcome(task, hubSpawnOutcome{RC: 1, Stage: "launch", Reason: "unknown"})
 		}
 	}()
+	if h.holdStartCondition(parent, task) {
+		return false
+	}
 	if !h.now().Before(task.Deadline) {
 		if task.Status == "deadline_exceeded" && task.Node != nil {
 			h.reprobeStaleSpawn(parent, task)

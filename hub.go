@@ -820,6 +820,7 @@ func (h *HubServer) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/inbox/{id}/read", h.handleInboxRead)
 	mux.HandleFunc("POST /v1/inbox/ack", h.handleInboxAck)
 	mux.HandleFunc("POST /v1/spawns", h.handleSpawnSubmit)
+	mux.HandleFunc("GET /v1/spawns/features", h.handleSpawnFeatures)
 	mux.HandleFunc("GET /v1/spawns/live", h.handleSpawnLive)
 	mux.HandleFunc("GET /v1/spawns/{request_id}", h.handleSpawnOperation)
 	mux.HandleFunc("POST /v1/spawns/{request_id}/abandon", h.handleSpawnAbandon)

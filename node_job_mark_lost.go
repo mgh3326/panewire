@@ -354,8 +354,11 @@ func (client *HubClient) nodeJobHerdrSession(name string) (string, error) {
 	client.sessionCacheMu.RUnlock()
 
 	root, _, found, err := client.openNodeJobDir(name)
-	if err != nil || !found {
+	if err != nil {
 		return "", err
+	}
+	if !found {
+		return "", errors.New("job ledger is unavailable")
 	}
 	defer root.Close()
 	events, err := readNodeJobLedgerEvents(root)

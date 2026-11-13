@@ -111,11 +111,13 @@ loki.source.docker "docker" {
 // END docker containers
 
 // BEGIN fleet events
-// Fleet events (fleet-event v1): runtug, panewire and mergewake each append
+// Fleet events (fleet-event v1): panewire and mergewake each append
 // one JSON object per line to <state home>/<tool>/events/fleet-events.jsonl
 // (ts, host, tool, kind, job, outcome, reason, detail). FLEET_EVENTS_ROOT is
 // the fleet user's state home; it defaults to $HOME/.local/state, which is
 // right for a user launchd agent but not for the Linux alloy system user.
+// Keep Linux targets explicit: globbing across tool directories can fail as a
+// whole when the Alloy user cannot traverse one sibling directory.
 // Only host, os_host, tool, kind and outcome become labels; job, reason and
 // detail stay in the line (query them with `| json`). The host label is the
 // fleet machine id (MACHINE_ID), the id hk, Sentry and placement use; the
@@ -125,7 +127,8 @@ loki.source.docker "docker" {
 // at 0.5 lines/s per host (see README "Fleet events" for the volume budget).
 local.file_match "fleet_events" {
 	path_targets = [
-		{__path__ = coalesce(sys.env("FLEET_EVENTS_ROOT"), sys.env("HOME") + "/.local/state") + "/*/events/fleet-events.jsonl", source = "fleet_events"},
+		{__path__ = coalesce(sys.env("FLEET_EVENTS_ROOT"), sys.env("HOME") + "/.local/state") + "/panewire/events/fleet-events.jsonl", source = "fleet_events"},
+		{__path__ = coalesce(sys.env("FLEET_EVENTS_ROOT"), sys.env("HOME") + "/.local/state") + "/mergewake/events/fleet-events.jsonl", source = "fleet_events"},
 	]
 	sync_period = "30s"
 }

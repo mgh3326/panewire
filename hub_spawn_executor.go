@@ -250,6 +250,9 @@ func (h *HubServer) runNodeSpawn(ctx context.Context, item spawnQueueItem) {
 		return
 	}
 	item.task = current
+	if h.holdStartCondition(ctx, current) {
+		return
+	}
 	if item.fresh && (!h.nodeAcceptsSpawn(machine) || !h.now().Before(item.task.Deadline)) {
 		// Never sent, so the node cannot have it: place it again. Past its
 		// deadline, placement settles it as a retryable queue timeout.

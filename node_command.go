@@ -23,8 +23,8 @@ import (
 // requests that read or act on this node's herdr panes and git worktrees for a
 // fleet tool such as mergewake reap, so no tool needs ssh to a session host.
 // The op set is closed. pane.close never trusts the caller's snapshot: the
-// node re-reads herdr and closes only a pane whose id, name, status and cwd
-// still match exactly.
+// node re-reads herdr and closes only a pane whose id, name (or explicitly
+// permitted unnamed identity), status and cwd still match.
 const (
 	nodeCommandAgentsList      = "agents.list"
 	nodeCommandPaneClose       = "pane.close"
@@ -94,16 +94,18 @@ func validNodeCommandError(code string) bool {
 }
 
 type nodePaneCloseArgs struct {
-	PaneID      string `json:"pane_id"`
-	Name        string `json:"name"`
-	AgentStatus string `json:"agent_status"`
-	Cwd         string `json:"cwd"`
+	PaneID       string `json:"pane_id"`
+	Name         string `json:"name"`
+	AgentStatus  string `json:"agent_status"`
+	Cwd          string `json:"cwd"`
+	AllowUnnamed bool   `json:"allow_unnamed,omitempty"`
 }
 
 type nodePaneCaptureArgs struct {
-	PaneID string `json:"pane_id"`
-	Name   string `json:"name"`
-	Cwd    string `json:"cwd"`
+	PaneID       string `json:"pane_id"`
+	Name         string `json:"name"`
+	Cwd          string `json:"cwd"`
+	AllowUnnamed bool   `json:"allow_unnamed,omitempty"`
 	// MergedAfter is a unix second: report.md counts only when its mtime is
 	// strictly later. Zero means no report is fresh enough.
 	MergedAfter int64 `json:"merged_after"`
@@ -240,9 +242,10 @@ func parseNodeCommandArgs(op string, raw json.RawMessage) (any, bool) {
 	names, known := nodeCommandArgFields[op]
 	optionalKind := op == nodeCommandPaneRead && nodeCommandHasFields(raw, append(append([]string(nil), names...), "kind"))
 	optionalDetached := op == nodeCommandWorktreeRemove && nodeCommandHasFields(raw, append(append([]string(nil), names...), "detached"))
+	optionalUnnamed := (op == nodeCommandPaneClose || op == nodeCommandPaneCapture) && nodeCommandHasFields(raw, append(append([]string(nil), names...), "allow_unnamed"))
 	optionalList := op == nodeCommandWorktreeList && nodeWorktreeListFields(raw)
 	optionalEndReason := op == nodeCommandJobMarkLost && nodeCommandHasFields(raw, append(append([]string(nil), names...), "end_reason"))
-	if !known || len(raw) == 0 || len(raw) > nodeCommandMaxArgsBytes || (!nodeCommandHasFields(raw, names) && !optionalKind && !optionalDetached && !optionalList && !optionalEndReason) {
+	if !known || len(raw) == 0 || len(raw) > nodeCommandMaxArgsBytes || (!nodeCommandHasFields(raw, names) && !optionalKind && !optionalDetached && !optionalUnnamed && !optionalList && !optionalEndReason) {
 		return nil, false
 	}
 	switch op {
@@ -446,6 +449,15 @@ func canonicalNodeCommandResult(op string, raw json.RawMessage) (json.RawMessage
 func defaultNodeCommandRunner(name string) relayCommandRunner {
 	return func(ctx context.Context, args ...string) ([]byte, error) {
 		cmd := exec.CommandContext(ctx, name, args...)
+		if name == "git" {
+			env := make([]string, 0, len(os.Environ())+1)
+			for _, value := range os.Environ() {
+				if !strings.HasPrefix(value, "LC_ALL=") {
+					env = append(env, value)
+				}
+			}
+			cmd.Env = append(env, "LC_ALL=C")
+		}
 		cmd.WaitDelay = 100 * time.Millisecond
 		out, err := cmd.Output()
 		if errors.Is(err, exec.ErrWaitDelay) && cmd.ProcessState != nil && cmd.ProcessState.Success() {
@@ -886,8 +898,17 @@ func (client *HubClient) nodeAgentsList(ctx context.Context) (any, string) {
 }
 
 // nodePaneMatch re-reads herdr and classifies the caller's expected pane; on
-// a match it also returns the row, for its state_change_seq.
+// a match it also returns the row, for its state_change_seq. Names must match
+// unless the caller explicitly opts into the unnamed-pane reclaim path.
 func (client *HubClient) nodePaneMatch(ctx context.Context, paneID, name, status, cwd string, checkStatus bool) (string, nodeHerdrRow, error) {
+	return client.nodePaneMatchWithUnnamed(ctx, paneID, name, status, cwd, checkStatus, false)
+}
+
+// nodePaneMatchWithUnnamed optionally permits an unlabelled row only when its
+// pane id and cwd still match. The hub uses this for a failed launch whose
+// created pane never acquired the agent label; every other caller remains
+// label-strict through nodePaneMatch.
+func (client *HubClient) nodePaneMatchWithUnnamed(ctx context.Context, paneID, name, status, cwd string, checkStatus, allowUnnamed bool) (string, nodeHerdrRow, error) {
 	session := client.herdrSessionFor(name, paneID)
 	agents, err := client.readNodeAgentsInSession(ctx, session)
 	if err != nil {
@@ -897,7 +918,7 @@ func (client *HubClient) nodePaneMatch(ctx context.Context, paneID, name, status
 		if agent.PaneID != paneID {
 			continue
 		}
-		if agent.Name != name || agent.Cwd != cwd || (checkStatus && agent.AgentStatus != status) {
+		if (agent.Name != name && !(allowUnnamed && agent.Name == "")) || agent.Cwd != cwd || (checkStatus && agent.AgentStatus != status) {
 			return nodePaneChanged, nodeHerdrRow{}, nil
 		}
 		return "", agent, nil
@@ -922,7 +943,7 @@ func (client *HubClient) nodePaneClose(ctx context.Context, args nodePaneCloseAr
 			return nodePaneCloseResult{Outcome: nodePaneChanged}, ""
 		}
 	}
-	outcome, first, err := client.nodePaneMatch(ctx, args.PaneID, args.Name, args.AgentStatus, args.Cwd, true)
+	outcome, first, err := client.nodePaneMatchWithUnnamed(ctx, args.PaneID, args.Name, args.AgentStatus, args.Cwd, true, args.AllowUnnamed)
 	if err != nil {
 		return nil, "herdr_failed"
 	}
@@ -947,7 +968,7 @@ func (client *HubClient) nodePaneClose(ctx context.Context, args nodePaneCloseAr
 		timer.Stop()
 		return nil, "herdr_failed"
 	}
-	outcome, second, err := client.nodePaneMatch(ctx, args.PaneID, args.Name, args.AgentStatus, args.Cwd, true)
+	outcome, second, err := client.nodePaneMatchWithUnnamed(ctx, args.PaneID, args.Name, args.AgentStatus, args.Cwd, true, args.AllowUnnamed)
 	if err != nil {
 		return nil, "herdr_failed"
 	}
@@ -1001,7 +1022,7 @@ func (client *HubClient) nodePaneCapture(ctx context.Context, args nodePaneCaptu
 	}
 	// Status is not compared: an idle pane may report done by now, and the
 	// close that follows re-checks it anyway.
-	outcome, _, err := client.nodePaneMatch(ctx, args.PaneID, args.Name, "", args.Cwd, false)
+	outcome, _, err := client.nodePaneMatchWithUnnamed(ctx, args.PaneID, args.Name, "", args.Cwd, false, args.AllowUnnamed)
 	if err != nil {
 		return nil, "herdr_failed"
 	}

@@ -253,6 +253,17 @@ func Prompt(ctx context.Context, store *Store, client *HerdrClient, req PromptRe
 	return finishPrompt(ctx, store, d, nil)
 }
 
+// expectFileContract is the prompt file's required first line. `panewire
+// prompt --help` prints it and parsePromptFile repeats it in the missing
+// header error, so a rejected file teaches the format it violated (hk 3708).
+const expectFileContract = `The file must begin with an expect: header naming the recipient, then a
+blank line and the body:
+
+    expect: name=orch cwd=/work/repo
+
+Fields are space-separated key=value tokens: name=, label=, cwd=, title~=,
+recent~=; name= or cwd= is required.`
+
 func parsePromptFile(raw string) (expectFields, string, error) {
 	s := strings.ReplaceAll(raw, "\r\n", "\n")
 	scanner := bufio.NewScanner(strings.NewReader(s))
@@ -264,7 +275,7 @@ func parsePromptFile(raw string) (expectFields, string, error) {
 		}
 	}
 	if !strings.HasPrefix(line, "expect:") {
-		return expectFields{}, "", fmt.Errorf("prompt file must begin with expect metadata")
+		return expectFields{}, "", fmt.Errorf("prompt file must begin with expect metadata\n\n%s", expectFileContract)
 	}
 	e := expectFields{}
 	for _, token := range strings.Fields(strings.TrimSpace(strings.TrimPrefix(line, "expect:"))) {

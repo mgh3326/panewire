@@ -90,6 +90,14 @@ func (h hostPreflight) record() map[string]any {
 	return map[string]any{"ok": h.OK, "reasons": h.reasons(), "failed": failed}
 }
 
+// preflightBudget bounds the whole command. The hub and hk reads and one SSH
+// probe per host run in sequence, and a probe whose connection stalls after
+// connecting would otherwise hold the runner's per-call limit once per
+// remaining host — the intermittent >120s stall seen on mbp (hk 3598). The
+// command is a diagnostic; it must answer inside the wait its callers give
+// it. A var only so a test can shrink it.
+var preflightBudget = 90 * time.Second
+
 func pass(name, detail string) preflightCheck {
 	return preflightCheck{Name: name, OK: true, Detail: detail}
 }
@@ -441,6 +449,8 @@ func (a *App) printPreflightChecks(h hostPreflight) {
 // remote-spawn preflight alone. Read-only; exit 0 when every checked host is
 // good, exitPreflight (with the reasons on stdout and in the error) otherwise.
 func (a *App) preflightCmd(ctx context.Context, args []string) error {
+	ctx, cancel := context.WithTimeout(ctx, preflightBudget)
+	defer cancel()
 	var host, pool string
 	var asJSON bool
 	f := flags("preflight")

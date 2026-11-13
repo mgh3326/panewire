@@ -133,9 +133,12 @@ func invalidVerdict(req admissionRequest) admissionVerdict {
 // GateCode. invalid is true when d is the final verdict because a gate input
 // (the pool policy or the catalog) is unusable.
 func (a *App) requestVerdict(ctx context.Context, r QuotaRequest) (req admissionRequest, in admissionInputs, d admissionVerdict, invalid bool) {
-	e6Arm := strings.TrimSpace(os.Getenv("PANEWIRE_E6_ARM"))
-	if e6Arm == "" {
-		e6Arm = strings.TrimSpace(os.Getenv("PACELEVER_E6_ARM"))
+	e6Arm := ""
+	if !r.E6ArmLocked {
+		e6Arm = strings.TrimSpace(os.Getenv("PANEWIRE_E6_ARM"))
+		if e6Arm == "" {
+			e6Arm = strings.TrimSpace(os.Getenv("PACELEVER_E6_ARM"))
+		}
 	}
 	req = admissionRequest{Profile: firstNonempty(r.GateProfile, r.Profile), Effort: r.Effort, Role: r.Role, Purpose: r.Purpose, OperatorRequest: r.OperatorRequest, RequestedBy: r.RequestedBy, E6Arm: firstNonempty(r.E6Arm, e6Arm)}
 	policy, err := loadAdmissionPolicy(os.Getenv, a.Home)

@@ -53,6 +53,11 @@ entry without a recorded dollar balance, by the percentage rule (remaining
 percent per hour). On a full tie inside the band a credit rung goes before a
 free rung.
 
+In the ranked band each pool offers one seat for the task's grade (its
+lowest-grade eligible row that fits, or the row the pool-order policy's `seats`
+names), and pools are ordered by their seat's waste urgency: the pool with the
+most room first, ties in lowest-grade order. See `docs/config.md`.
+
 A manually recorded dollar balance stays dollar-ranked for four hours after
 `measured_at`; after that it is stale, loses its dollar value, and ranks behind
 subscription quota. Entries with only a percentage never become stale because
@@ -103,16 +108,20 @@ provider credit rejection. The watcher reads the final structured assistant
 error, not pane text, and uses omp's completion timestamp (or the session entry
 timestamp when completion time is absent). This is the harness host's time;
 the provider response does not include a recorded rejection timestamp. The
-watcher writes a zero balance to the shared manual credit store before it
-announces the quota stop. It records a pending publication locally first. After
-three failed attempts it ends the job as quota-stopped; the node retries the
-pending publication on restart and periodically thereafter, retaining the job
-directory until publication succeeds. The stored observation has no billing expiry; a later
-manual credit measurement reopens the account. Replaying an older rejection
-cannot replace a newer entry. Selection and `plan` show `credit_exhausted` and
-its `since` time. The shared store keeps the close across a hub restart and
-when `/v1/state` is unavailable. If the shared store cannot be read, admission
-fails closed.
+watcher records a pending publication locally first, then writes a zero balance
+to the shared manual credit store before it announces the quota stop. It makes
+at most three attempts in one watcher run. If the account cannot be identified,
+or those attempts fail, it sends one owner notice and pauses while keeping the
+pending rejection and job directory. The node retries a paused publication
+when the account can be identified. Before a recovered publication hands off a
+job, the watcher requires Herdr to be reachable and the pane to remain idle at
+the state-change sequence recorded with the rejection; it still publishes the
+account closure if the pane has resumed, but does not end that job. The stored
+observation has no billing expiry; a later manual credit measurement reopens
+the account. Replaying an older rejection cannot replace a newer entry.
+Selection and `plan` show `credit_exhausted` and its `since` time. The shared
+store keeps the close across a hub restart and when `/v1/state` is unavailable.
+If the shared store cannot be read, admission fails closed.
 
 ### Pool concurrency cap
 
