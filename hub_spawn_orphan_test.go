@@ -77,6 +77,7 @@ func newStrandedSpawn(t *testing.T) *strandedSpawn {
 	if task, err = hub.inbox.store.bindSpawn(t.Context(), request.RequestID, task.Attempt, node, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
+	task = sentSpawnFixture(t, hub.inbox.store, task)
 	if _, err = hub.inbox.store.completeSpawn(t.Context(), task, hubSpawnOutcome{RC: 124, Stage: "landing", Reason: "timeout", Host: "machine-a"}, time.Now()); err != nil {
 		t.Fatal(err)
 	}
