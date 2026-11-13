@@ -323,7 +323,14 @@ func TestNodeSpawnAdmissionSurvivesHubReconnect_t4579(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(t.Context())
 	var sessions sync.WaitGroup
-	t.Cleanup(func() { cancel(); releaseOnce.Do(func() { close(release) }); sessions.Wait() })
+	t.Cleanup(func() {
+		cancel()
+		releaseOnce.Do(func() { close(release) })
+		sessions.Wait()
+		if !waitUntil(5*time.Second, func() bool { return admissionInflight(client) == 0 }) {
+			t.Error("node spawn handlers did not finish during cleanup")
+		}
+	})
 	connect := func() (*websocket.Conn, <-chan error) {
 		node, _, err := websocket.Dial(ctx, t14WSURL(server.URL, ""), nil)
 		if err != nil {
@@ -385,6 +392,7 @@ func TestNodeSpawnAdmissionSurvivesHubReconnect_t4579(t *testing.T) {
 			t.Fatalf("replayed waiter answered %+v", got)
 		}
 	}
+	eventually(t, 2*time.Second, "final replay handler to finish", func() bool { return admissionInflight(client) == 0 })
 	if runs.Load() != 2 {
 		t.Fatalf("reconnect ran %d engines; want one per UUID", runs.Load())
 	}
