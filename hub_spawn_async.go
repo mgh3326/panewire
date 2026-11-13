@@ -497,11 +497,6 @@ var nextHostRefusals = map[string]bool{
 	"spawn_failed:auth_unavailable":     true,
 }
 
-func checkoutRefusalMovesNextHost(reason string) bool {
-	code, _, _ := strings.Cut(reason, ": ")
-	return code == "checkout_refused:dirty" || code == "checkout_refused:sha-missing" || code == "checkout_refused:branch-elsewhere"
-}
-
 // spawnRefusalTriesNextHost names a node refusal that moves an auto placement
 // to the next candidate instead of ending the request.
 func spawnRefusalTriesNextHost(reason string) bool {
