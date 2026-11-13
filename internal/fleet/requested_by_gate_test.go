@@ -8,14 +8,16 @@ import (
 )
 
 // catalogGateQuota is the production gate answering selection's catalog read
-// from the fixture rows instead of handoffkeep's HTTP catalog.
+// from the fixture rows instead of handoffkeep's HTTP catalog. Selection and
+// CLIQuota.Catalog both read CatalogDetails, which the embedded CLIQuota would
+// otherwise serve over HTTP.
 type catalogGateQuota struct {
 	admissionQuota
-	rows []CatalogRow
+	rows []CatalogEntry
 }
 
-func (q *catalogGateQuota) Catalog(context.Context) ([]CatalogRow, error) {
-	return q.rows, nil
+func (q *catalogGateQuota) CatalogDetails(context.Context) (CatalogData, error) {
+	return CatalogData{Rows: q.rows}, nil
 }
 
 // --requested-by names the lane a failed spawn notifies; it reaches the quota
@@ -58,7 +60,7 @@ func TestRequestedByAlonePlacesThroughTheGate(t *testing.T) {
 // admits there too, and an operator request on an ordinary rung reports the
 // gate's refusal instead of QUOTA_UNKNOWN (hk 3080).
 func TestAutoSelectionRequestedByAndGateReason(t *testing.T) {
-	var rows []CatalogRow
+	var rows []CatalogEntry
 	if err := json.Unmarshal([]byte(gateReasonCatalog), &rows); err != nil {
 		t.Fatal(err)
 	}
