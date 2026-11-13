@@ -34,21 +34,49 @@ func TestPoolActionOpenFollowsTheMarker(t *testing.T) {
 	if !a.poolActionOpen("j") {
 		t.Fatal("a fresh marker did not read as registered")
 	}
-	writePoolActionMarker(t, a, "j", a.Now().Add(-poolActionMarkerTTL-time.Minute))
-	if a.poolActionOpen("j") {
-		t.Fatal("a marker older than its bound still held the watcher")
+	writePoolActionMarker(t, a, "j", a.Now().Add(-24*time.Hour))
+	if !a.poolActionOpen("j") {
+		t.Fatal("an unresolved marker must continue to hold the watcher")
 	}
 	if err := os.WriteFile(filepath.Join(a.Jobs, "j", PoolActionFile), []byte("{not json"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if a.poolActionOpen("j") {
-		t.Fatal("an unreadable marker read as registered")
+	if !a.poolActionOpen("j") {
+		t.Fatal("an unreadable marker must not release the watcher")
+	}
+}
+
+// A completed action is owned by the hub and must not emit the missing-pane fallback.
+func TestWatcherDoesNotEmitLossAfterPoolActionCompletes(t *testing.T) {
+	a := testApp(t)
+	ledgerRunner(t, a)
+	seedJob(t, a, "j", "worker")
+	seedLedger(t, a, "j")
+	writePoolActionMarker(t, a, "j", a.Now().Add(-time.Hour))
+	body, err := json.Marshal(map[string]any{"action_id": "0b3f4b1e-0000-4000-8000-000000000001:1", "end_reason": "quota_stop pool=devin", "at": a.Now().Add(-time.Hour), "done": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(a.Jobs, "j", PoolActionFile), body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sleeps := 0
+	a.Sleep = func(ctx context.Context, _ time.Duration) error {
+		sleeps++
+		if sleeps >= 4 {
+			return context.Canceled
+		}
+		return nil
+	}
+	_ = a.watch(context.Background(), []string{"j"})
+	if kinds := eventKindsOf(t, a, "j"); slices.Contains(kinds, "job.lost") {
+		t.Fatalf("completed action emitted duplicate loss: %v", kinds)
 	}
 }
 
 // A marker cannot silence the fallback for good: while it is open the watcher
 // keeps watching (and frees the seat), and once the action cancels or its
-// marker expires the ordinary missing-pane end runs.
+// marker clears the ordinary missing-pane end runs.
 func TestWatcherFallsBackWhenThePoolActionMarkerClears(t *testing.T) {
 	a := testApp(t)
 	ledgerRunner(t, a)
@@ -107,5 +135,33 @@ func TestWatcherLeavesTheTerminalRecordToARegisteredPoolAction(t *testing.T) {
 				t.Fatalf("job.lost recorded=%v, want %v", lost, test.wantLost)
 			}
 		})
+	}
+}
+
+func TestWatcherWaitsPastDeadlineForPoolActionCancellation(t *testing.T) {
+	a := testApp(t)
+	ledgerRunner(t, a)
+	seedJob(t, a, "j", "worker")
+	seedLedger(t, a, "j")
+	now := a.Now()
+	a.Now = func() time.Time { return now }
+	writePoolActionMarker(t, a, "j", now)
+	sleeps := 0
+	a.Sleep = func(ctx context.Context, _ time.Duration) error {
+		sleeps++
+		now = now.Add(2 * time.Hour)
+		if sleeps == 2 {
+			if err := os.Remove(filepath.Join(a.Jobs, "j", PoolActionFile)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if sleeps >= 6 {
+			return context.Canceled
+		}
+		return nil
+	}
+	_ = a.watch(context.Background(), []string{"j"})
+	if kinds := eventKindsOf(t, a, "j"); !slices.Contains(kinds, "job.lost") {
+		t.Fatalf("no fallback after cancellation past deadline: %v", kinds)
 	}
 }

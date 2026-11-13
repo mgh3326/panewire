@@ -363,6 +363,16 @@ func (h *HubServer) reclaimSpawnRole(ctx context.Context, app *fleet.App, reques
 	if holderErr != nil {
 		holder = hubSpawnTask{}
 	}
+	if holderErr == nil {
+		release, held := h.jobGuard.acquire(ctx, holder.Job)
+		if !held {
+			return task, spawnRoleHeldBody(holder, heldPaneUnknown, false), 0, errSpawnClaimed
+		}
+		defer release()
+		if owned, err := h.poolActionOwnsHolder(ctx, holder); err != nil || owned {
+			return task, spawnRoleHeldBody(holder, heldPaneUnknown, false), 0, errSpawnClaimed
+		}
+	}
 	probe := heldProbe{reason: "not_probed"}
 	if holderErr == nil {
 		trace.branch = "holder_not_finished"

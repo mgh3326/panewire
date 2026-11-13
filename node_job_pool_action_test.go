@@ -107,3 +107,32 @@ func TestNodeJobPoolActionValidatesItsArguments(t *testing.T) {
 		}
 	}
 }
+
+func TestNodeJobPoolActionFinishesTheMarker(t *testing.T) {
+	inbox := t.TempDir()
+	markLostJobDir(t, inbox, "job-a", "job.claim", "job.spawned")
+	client, _, _ := markLostClient(t, inbox, []string{nodeAgentList()}, markLostEmptyPanes)
+	args := nodeJobPoolActionArgs{Job: "job-a", PaneID: "w2:p3", Label: "job-a", ActionID: "0b3f4b1e-0000-4000-8000-000000000001:1", Op: "register", EndReason: "quota_stop pool=devin"}
+	if _, code := nodeRun(t, client, nodeCommandJobPoolAction, args); code != "" {
+		t.Fatal(code)
+	}
+	args.Op = "finish"
+	result, code := nodeRun(t, client, nodeCommandJobPoolAction, args)
+	if code != "" || result["outcome"] != "finished" {
+		t.Fatalf("code=%q result=%v", code, result)
+	}
+	marker, found := readPoolActionMarker(t, inbox, "job-a")
+	if !found || marker["done"] != true {
+		t.Fatalf("marker=%v found=%v", marker, found)
+	}
+}
+
+func TestNodeJobPoolActionRefusesAfterWatcherLoss(t *testing.T) {
+	inbox := t.TempDir()
+	markLostJobDir(t, inbox, "job-a", "job.claim", "job.spawned", "job.lost")
+	client, _, _ := markLostClient(t, inbox, []string{nodeAgentList()}, markLostEmptyPanes)
+	result, code := nodeRun(t, client, nodeCommandJobPoolAction, nodeJobPoolActionArgs{Job: "job-a", PaneID: "w2:p3", Label: "job-a", ActionID: "0b3f4b1e-0000-4000-8000-000000000001:1", Op: nodePoolActionRegister, EndReason: "quota_stop pool=devin"})
+	if code != "" || result["outcome"] != nodePoolActionMoved {
+		t.Fatalf("code=%q result=%v", code, result)
+	}
+}

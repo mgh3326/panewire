@@ -6,6 +6,7 @@ import (
 	"os"
 
 	"github.com/mgh3326/panewire/internal/durable"
+	"github.com/mgh3326/panewire/internal/fleet"
 )
 
 // job.pool_action registers, in the holder node's own job directory, that the
@@ -19,6 +20,7 @@ const nodeCommandJobPoolAction = "job.pool_action"
 const (
 	nodePoolActionRegister = "register"
 	nodePoolActionClear    = "clear"
+	nodePoolActionFinish   = "finish"
 
 	// nodePoolActionFile is the marker, beside the job's events/ ledger.
 	nodePoolActionFile = "pool-action.json"
@@ -43,6 +45,7 @@ type nodeJobPoolActionResult struct {
 const (
 	nodePoolActionRegistered = "registered"
 	nodePoolActionCleared    = "cleared"
+	nodePoolActionFinished   = "finished"
 	// nodePoolActionMoved: the attempt is over or has a newer claim, so the
 	// marker would speak about another attempt.
 	nodePoolActionMoved = "attempt-moved"
@@ -64,7 +67,7 @@ func validNodeJobPoolActionArgs(args nodeJobPoolActionArgs) bool {
 		return false
 	}
 	switch args.Op {
-	case nodePoolActionRegister:
+	case nodePoolActionRegister, nodePoolActionFinish:
 		return validNodeEndReason(args.EndReason)
 	case nodePoolActionClear:
 		return args.EndReason == ""
@@ -74,7 +77,7 @@ func validNodeJobPoolActionArgs(args nodeJobPoolActionArgs) bool {
 
 func validNodeJobPoolActionResult(result nodeJobPoolActionResult) bool {
 	switch result.Outcome {
-	case nodePoolActionRegistered, nodePoolActionCleared, nodePoolActionMoved, nodePoolActionNoLedger:
+	case nodePoolActionRegistered, nodePoolActionCleared, nodePoolActionFinished, nodePoolActionMoved, nodePoolActionNoLedger:
 		return true
 	}
 	return false
@@ -95,12 +98,47 @@ func (client *HubClient) nodeJobPoolAction(args nodeJobPoolActionArgs) (any, str
 		return nodeJobPoolActionResult{Outcome: nodePoolActionNoLedger}, ""
 	}
 	defer job.Close()
+	unlock, err := fleet.LockPoolAction(job)
+	if err != nil {
+		return nil, "pool_action_failed"
+	}
+	defer unlock()
 	ledger, err := readNodeJobLedger(job, args.PaneID, args.Label)
 	if err != nil {
 		return nil, "pool_action_failed"
 	}
-	if ledger.completed || ledger.newerClaim {
+	if args.Op != nodePoolActionClear && (ledger.completed || ledger.newerClaim || ledger.lost) {
 		return nodeJobPoolActionResult{Outcome: nodePoolActionMoved}, ""
+	}
+	if args.Op == nodePoolActionRegister {
+		raw, err := job.ReadFile(nodePoolActionFile)
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return nil, "pool_action_failed"
+		}
+		if err == nil {
+			var marker struct {
+				ActionID string `json:"action_id"`
+				Done     bool   `json:"done"`
+			}
+			if json.Unmarshal(raw, &marker) != nil || marker.ActionID == "" {
+				return nil, "pool_action_failed"
+			}
+			if marker.ActionID != args.ActionID && !marker.Done {
+				return nodeJobPoolActionResult{Outcome: nodePoolActionMoved}, ""
+			}
+		}
+	}
+	if args.Op == nodePoolActionFinish || args.Op == nodePoolActionClear {
+		raw, err := job.ReadFile(nodePoolActionFile)
+		if errors.Is(err, os.ErrNotExist) && args.Op == nodePoolActionClear {
+			return nodeJobPoolActionResult{Outcome: nodePoolActionCleared}, ""
+		}
+		var marker struct {
+			ActionID string `json:"action_id"`
+		}
+		if err != nil || json.Unmarshal(raw, &marker) != nil || marker.ActionID != args.ActionID {
+			return nodeJobPoolActionResult{Outcome: nodePoolActionMoved}, ""
+		}
 	}
 	if args.Op == nodePoolActionClear {
 		if err := job.Remove(nodePoolActionFile); err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -108,12 +146,15 @@ func (client *HubClient) nodeJobPoolAction(args nodeJobPoolActionArgs) (any, str
 		}
 		return nodeJobPoolActionResult{Outcome: nodePoolActionCleared}, ""
 	}
-	body, err := json.Marshal(map[string]any{"action_id": args.ActionID, "end_reason": args.EndReason, "at": client.nowUTC()})
+	body, err := json.Marshal(map[string]any{"action_id": args.ActionID, "end_reason": args.EndReason, "at": client.nowUTC(), "done": args.Op == nodePoolActionFinish})
 	if err != nil {
 		return nil, "pool_action_failed"
 	}
 	if err := durable.ReplaceFileAtomicallyInRoot(job, nodePoolActionFile, body, 0o600); err != nil {
 		return nil, "pool_action_failed"
+	}
+	if args.Op == nodePoolActionFinish {
+		return nodeJobPoolActionResult{Outcome: nodePoolActionFinished}, ""
 	}
 	return nodeJobPoolActionResult{Outcome: nodePoolActionRegistered}, ""
 }

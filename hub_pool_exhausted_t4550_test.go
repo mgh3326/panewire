@@ -56,13 +56,15 @@ func (b *syncBuffer) lines(contains string) []string {
 // the panes it still has, saves and closes a pane, and ends an hk record the
 // way the real node does (after its pane is gone), recording each command.
 type sweepNode struct {
-	mu       sync.Mutex
-	conn     *websocket.Conn
-	jobs     *quotaJobs
-	panes    map[string]nodeAgentRow // by pane id
-	commands []string                // "<op> <job or pane>"
-	reasons  map[string]string       // job -> end_reason written
-	markers  map[string]string       // job -> registered pool action id
+	mu                sync.Mutex
+	conn              *websocket.Conn
+	jobs              *quotaJobs
+	panes             map[string]nodeAgentRow // by pane id
+	commands          []string                // "<op> <job or pane>"
+	reasons           map[string]string       // job -> end_reason written
+	markers           map[string]string       // job -> registered pool action id
+	failReadAfterMark bool
+	afterCapture      func()
 }
 
 func (n *sweepNode) serve(ctx context.Context) {
@@ -97,6 +99,9 @@ func (n *sweepNode) answer(op string, raw json.RawMessage) map[string]any {
 		var args nodePaneCaptureArgs
 		_ = json.Unmarshal(raw, &args)
 		n.commands = append(n.commands, op+" "+args.Name)
+		if n.afterCapture != nil {
+			n.afterCapture()
+		}
 		return map[string]any{"outcome": nodeCaptureScreen, "saved": "/jobs/" + args.Name + "/pane-screen.txt"}
 	case "pane.close":
 		var args nodePaneCloseArgs
@@ -112,6 +117,9 @@ func (n *sweepNode) answer(op string, raw json.RawMessage) map[string]any {
 		n.jobs.mu.Lock()
 		n.jobs.records[args.Job]["state"] = "lost"
 		n.jobs.records[args.Job]["end_reason"] = args.EndReason
+		if n.failReadAfterMark {
+			n.jobs.failGets = 1
+		}
 		n.jobs.mu.Unlock()
 		return map[string]any{"outcome": nodeJobMarkLostLost}
 	case "job.pool_action":
@@ -120,10 +128,10 @@ func (n *sweepNode) answer(op string, raw json.RawMessage) map[string]any {
 		n.commands = append(n.commands, op+" "+args.Job+" "+args.Op)
 		if args.Op == nodePoolActionRegister {
 			n.markers[args.Job] = args.ActionID
-		} else {
+		} else if args.Op == nodePoolActionClear {
 			delete(n.markers, args.Job)
 		}
-		return map[string]any{"outcome": map[string]string{nodePoolActionRegister: nodePoolActionRegistered, nodePoolActionClear: nodePoolActionCleared}[args.Op]}
+		return map[string]any{"outcome": map[string]string{nodePoolActionRegister: nodePoolActionRegistered, nodePoolActionClear: nodePoolActionCleared, nodePoolActionFinish: nodePoolActionFinished}[args.Op]}
 	}
 	return map[string]any{}
 }
@@ -610,6 +618,24 @@ func TestPoolExhaustedCancelsAnIntentWhoseResetPassed(t *testing.T) {
 	}
 }
 
+func TestPoolExhaustedRechecksResetAfterCapture(t *testing.T) {
+	f := newSweepFixture(t)
+	start := time.Now().UTC()
+	var clock atomic.Int64
+	clock.Store(start.UnixNano())
+	f.hub.now = func() time.Time { return time.Unix(0, clock.Load()).UTC() }
+	f.node2.afterCapture = func() { clock.Store(start.Add(2 * time.Hour).UnixNano()) }
+	reviewer := f.addJob(t, "reviewer", "devin", sweepDevin, "idle")
+	f.publishFreeLimit(t, sweepDevin, start.Add(time.Hour), start)
+	eventually(t, 5*time.Second, "the pass", func() bool { return f.sweeps() == 1 })
+	if got := f.node2.count("pane.close " + reviewer); got != 0 {
+		t.Fatalf("pane closed %d times after reset", got)
+	}
+	if got := f.state(reviewer); got != "spawned" {
+		t.Fatalf("state=%s, want spawned", got)
+	}
+}
+
 // A job that completed on its own is never told it was lost to a quota stop,
 // even when the sweep listed it: the record's terminal state wins over the
 // notice.
@@ -698,6 +724,79 @@ func TestPoolExhaustedResumesAHandOverAfterTheRecordEnded(t *testing.T) {
 	}
 }
 
+// A failed successor claim must retain the old role reservation for retry.
+func TestPoolExhaustedKeepsRoleWhenSuccessorClaimFails(t *testing.T) {
+	f := newSweepFixture(t)
+	worker := f.addJob(t, "worker", "devin", sweepDevin, "idle")
+	holder, err := f.hub.inbox.store.latestSpawnForJob(t.Context(), worker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prior, err := fleet.ValidateSubmission(holder.Request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	successor, _, _ := quotaReplacementJob(worker)
+	request, err := quotaReplacementRequest(holder.Request, worker, successor, "devin", prior.Role)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reason := fleet.QuotaStopEndReason("devin", time.Time{}, "handed_over_to", successor)
+	f.jobs.mu.Lock()
+	f.jobs.records[worker]["state"] = "lost"
+	f.jobs.records[worker]["end_reason"] = reason
+	f.jobs.mu.Unlock()
+	f.dropJobPane(worker)
+	now := time.Now().UTC()
+	action := poolAction{Request: holder.Request.RequestID, Attempt: holder.Attempt, Job: worker, Owner: f.owner, Role: prior.Role, Kind: poolActionHandOver, Pool: "devin", Account: sweepDevin, Cause: poolCauseFreeLimit, Reset: now.Add(time.Hour), EndReason: reason, Successor: successor, SuccessorRequest: string(raw), Stage: poolActionTerminal, Created: now, Updated: now}
+	if err := f.hub.inbox.store.savePoolAction(t.Context(), action); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.hub.inbox.store.db.Exec(`CREATE TRIGGER fail_successor BEFORE INSERT ON spawn_operations WHEN NEW.job LIKE '%-q1' BEGIN SELECT RAISE(FAIL, 'claim unavailable'); END`); err != nil {
+		t.Fatal(err)
+	}
+	f.hub.reconcilePoolActions(t.Context())
+	owner, _, _, err := f.hub.inbox.store.spawnRoleOwner(t.Context(), prior.RoleKey())
+	if err != nil || owner != holder.Request.RequestID {
+		t.Fatalf("role owner=%q error=%v, want holder %q", owner, err, holder.Request.RequestID)
+	}
+}
+
+func TestPoolExhaustedReconcileDoesNotStarveLaterActions(t *testing.T) {
+	f := newSweepFixture(t)
+	f.owner = "nowhere"
+	reviewer := f.addJob(t, "reviewer", "devin", sweepDevin, "idle")
+	f.publishFreeLimit(t, sweepDevin, time.Now().Add(time.Hour), time.Now())
+	eventually(t, 5*time.Second, "the pass", func() bool { return f.sweeps() == 1 })
+	old := time.Now().Add(-time.Hour)
+	for i := 0; i < 257; i++ {
+		action := poolAction{Request: "blocked-" + strconv.Itoa(i), Attempt: 1, Job: "blocked-" + strconv.Itoa(i), Stage: poolActionIntent, Reset: old, Created: old, Updated: old}
+		if err := f.hub.inbox.store.savePoolAction(t.Context(), action); err != nil {
+			t.Fatal(err)
+		}
+	}
+	routes := `{"lanes":{"nowhere":{"machine":"machine-b","pane":"w1:p2"}}}`
+	if err := os.WriteFile(f.hub.reportRelayPath, []byte(routes), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.hub.reconcilePoolActions(t.Context()); got != 1 {
+		t.Fatalf("finished=%d, want the later action", got)
+	}
+	var notices int
+	for _, relay := range spawnFailedInjections(f.destination) {
+		if relay.Kind == "job.lost" && relay.JobID == reviewer {
+			notices++
+		}
+	}
+	if notices != 1 {
+		t.Fatalf("notices=%d, want 1", notices)
+	}
+}
+
 // pendingActions lists the actions that still owe a step.
 func (f *sweepFixture) pendingActions(t *testing.T) []poolAction {
 	t.Helper()
@@ -774,6 +873,84 @@ func TestPoolExhaustedLeavesAJobLostForAnotherReasonAlone(t *testing.T) {
 	}
 }
 
+// A failed terminal readback cannot authorize a notice or successor.
+func TestPoolExhaustedWaitsForTerminalReadback(t *testing.T) {
+	f := newSweepFixture(t)
+	f.node2.failReadAfterMark = true
+	reviewer := f.addJob(t, "reviewer", "devin", sweepDevin, "idle")
+	f.publishFreeLimit(t, sweepDevin, time.Now().Add(time.Hour), time.Now())
+	eventually(t, 5*time.Second, "the pass", func() bool { return f.sweeps() == 1 })
+	for _, relay := range spawnFailedInjections(f.destination) {
+		if relay.Kind == "job.lost" && relay.JobID == reviewer {
+			t.Fatalf("notice before terminal readback: %+v", relay)
+		}
+	}
+	if got := len(f.pendingActions(t)); got != 1 {
+		t.Fatalf("pending actions=%d, want retry", got)
+	}
+}
+
+// An unregistered intent must not claim a pane that disappeared independently.
+func TestPoolExhaustedDoesNotClaimAnUnregisteredAbsentPane(t *testing.T) {
+	f := newSweepFixture(t)
+	reviewer := f.addJob(t, "reviewer", "devin", sweepDevin, "idle")
+	holder, err := f.hub.inbox.store.latestSpawnForJob(t.Context(), reviewer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.dropJobPane(reviewer)
+	now := time.Now().UTC()
+	action := poolAction{Request: holder.Request.RequestID, Attempt: holder.Attempt, Job: reviewer, Owner: f.owner, Role: "reviewer", Kind: poolActionEnd, Pool: "devin", Account: sweepDevin, Cause: poolCauseFreeLimit, Reset: now.Add(-time.Hour), EndReason: "quota_stop pool=devin", EventID: "pool-exhausted:" + reviewer, Stage: poolActionIntent, Created: now, Updated: now}
+	if err := f.hub.inbox.store.savePoolAction(t.Context(), action); err != nil {
+		t.Fatal(err)
+	}
+	f.hub.reconcilePoolActions(t.Context())
+	if got := f.state(reviewer); got != "spawned" {
+		t.Fatalf("state=%s, want spawned for independently absent pane", got)
+	}
+}
+
+// A failed closed-stage write must not allow the terminal record to advance.
+func TestPoolExhaustedWaitsForClosedStagePersistence(t *testing.T) {
+	f := newSweepFixture(t)
+	reviewer := f.addJob(t, "reviewer", "devin", sweepDevin, "idle")
+	_, err := f.hub.inbox.store.db.Exec(`CREATE TRIGGER fail_pool_closed BEFORE UPDATE ON pool_exhausted_actions WHEN NEW.stage = 'closed' BEGIN SELECT RAISE(FAIL, 'closed unavailable'); END`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.publishFreeLimit(t, sweepDevin, time.Now().Add(time.Hour), time.Now())
+	eventually(t, 5*time.Second, "the pass", func() bool { return f.sweeps() == 1 })
+	if got := f.state(reviewer); got != "spawned" {
+		t.Fatalf("state=%s, want spawned until closed stage persists", got)
+	}
+}
+
+// An unrelated terminal write after closure cannot satisfy this action's quota ending.
+func TestPoolExhaustedDoesNotAnnounceAnUnrelatedLossAfterClose(t *testing.T) {
+	f := newSweepFixture(t)
+	reviewer := f.addJob(t, "reviewer", "devin", sweepDevin, "idle")
+	holder, err := f.hub.inbox.store.latestSpawnForJob(t.Context(), reviewer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.jobs.mu.Lock()
+	f.jobs.records[reviewer]["state"] = "lost"
+	f.jobs.records[reviewer]["end_reason"] = "reaped"
+	f.jobs.mu.Unlock()
+	f.dropJobPane(reviewer)
+	now := time.Now().UTC()
+	action := poolAction{Request: holder.Request.RequestID, Attempt: holder.Attempt, Job: reviewer, Owner: f.owner, Role: "reviewer", Kind: poolActionEnd, Pool: "devin", Account: sweepDevin, Cause: poolCauseFreeLimit, Reset: now.Add(time.Hour), EndReason: "quota_stop pool=devin", EventID: "pool-exhausted:" + reviewer, Stage: poolActionClosed, Created: now, Updated: now}
+	if err := f.hub.inbox.store.savePoolAction(t.Context(), action); err != nil {
+		t.Fatal(err)
+	}
+	f.hub.reconcilePoolActions(t.Context())
+	for _, relay := range spawnFailedInjections(f.destination) {
+		if relay.Kind == "job.lost" && relay.JobID == reviewer {
+			t.Fatalf("unrelated loss announced as quota stop: %+v", relay)
+		}
+	}
+}
+
 // A close whose stage write was lost is not reconsidered against an expired
 // exhaustion: the pane is gone, so the ending is finished (record and notice)
 // even though the reset has passed.
@@ -794,7 +971,7 @@ func TestPoolExhaustedFinishesACloseWhoseStageWasLost(t *testing.T) {
 		Request: holder.Request.RequestID, Attempt: holder.Attempt, Job: reviewer, Owner: f.owner, Role: prior.Role,
 		Kind: poolActionEnd, Pool: "devin", Account: sweepDevin, Cause: poolCauseFreeLimit, Reset: reset,
 		EndReason: fleet.QuotaStopEndReason("devin", reset, "", ""), EventID: "pool-exhausted:" + reviewer,
-		Stage: poolActionIntent, Registered: time.Now().UTC(), Created: time.Now().UTC(), Updated: time.Now().UTC(),
+		Stage: poolActionClosing, Registered: time.Now().UTC(), Created: time.Now().UTC(), Updated: time.Now().UTC(),
 	}
 	if err := f.hub.inbox.store.savePoolAction(t.Context(), action); err != nil {
 		t.Fatal(err)

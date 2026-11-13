@@ -62,7 +62,7 @@ func (s *laneInboxStore) ensureSpawnTasks() error {
 		`CREATE TABLE IF NOT EXISTS spawn_operations (request_id TEXT PRIMARY KEY,job TEXT NOT NULL,owner TEXT NOT NULL,fingerprint TEXT NOT NULL,payload TEXT NOT NULL,status TEXT NOT NULL,created_ms BIGINT NOT NULL,deadline_ms BIGINT NOT NULL,node_id TEXT UNIQUE,node_payload TEXT NOT NULL DEFAULT '',result TEXT NOT NULL DEFAULT '{}',trace_recorded INTEGER NOT NULL DEFAULT 0,last_run_ms BIGINT NOT NULL DEFAULT 0,attempt INTEGER NOT NULL DEFAULT 1)`,
 		`CREATE TABLE IF NOT EXISTS spawn_reservations (job TEXT PRIMARY KEY,request_id TEXT NOT NULL UNIQUE,task_role TEXT UNIQUE)`,
 		`CREATE TABLE IF NOT EXISTS spawn_notifications (event_id TEXT PRIMARY KEY,request_id TEXT NOT NULL,job TEXT NOT NULL,owner TEXT NOT NULL,result TEXT NOT NULL,created_ms BIGINT NOT NULL,delivered INTEGER NOT NULL DEFAULT 0,telemetry_recorded INTEGER NOT NULL DEFAULT 0)`,
-		`CREATE TABLE IF NOT EXISTS pool_exhausted_actions (request_id TEXT NOT NULL,attempt INTEGER NOT NULL,job TEXT NOT NULL,owner TEXT NOT NULL,role TEXT NOT NULL,kind TEXT NOT NULL,pool TEXT NOT NULL,account TEXT NOT NULL,cause TEXT NOT NULL,reset_ms BIGINT NOT NULL,end_reason TEXT NOT NULL,event_id TEXT NOT NULL,successor TEXT NOT NULL DEFAULT '',successor_request TEXT NOT NULL DEFAULT '',stage TEXT NOT NULL,registered_ms BIGINT NOT NULL DEFAULT 0,created_ms BIGINT NOT NULL,updated_ms BIGINT NOT NULL,PRIMARY KEY(request_id,attempt))`,
+		`CREATE TABLE IF NOT EXISTS pool_exhausted_actions (request_id TEXT NOT NULL,attempt INTEGER NOT NULL,job TEXT NOT NULL,owner TEXT NOT NULL,role TEXT NOT NULL,kind TEXT NOT NULL,pool TEXT NOT NULL,account TEXT NOT NULL,cause TEXT NOT NULL,reset_ms BIGINT NOT NULL,end_reason TEXT NOT NULL,event_id TEXT NOT NULL,epoch BIGINT NOT NULL DEFAULT 1,successor TEXT NOT NULL DEFAULT '',successor_request TEXT NOT NULL DEFAULT '',stage TEXT NOT NULL,registered_ms BIGINT NOT NULL DEFAULT 0,created_ms BIGINT NOT NULL,updated_ms BIGINT NOT NULL,PRIMARY KEY(request_id,attempt))`,
 		`CREATE INDEX IF NOT EXISTS pool_exhausted_actions_pending ON pool_exhausted_actions(stage,created_ms)`,
 	} {
 		if _, err := s.db.ExecContext(ctx, statement); err != nil {
@@ -73,6 +73,11 @@ func (s *laneInboxStore) ensureSpawnTasks() error {
 }
 
 func (s *laneInboxStore) claimSpawn(parent context.Context, request fleet.Submission, job, owner string, now time.Time) (hubSpawnTask, bool, error) {
+	return s.claimSpawnReplacing(parent, request, job, owner, now, "", "")
+}
+
+// claimSpawnReplacing transfers the role and claims its successor in one transaction.
+func (s *laneInboxStore) claimSpawnReplacing(parent context.Context, request fleet.Submission, job, owner string, now time.Time, previousID, roleKey string) (hubSpawnTask, bool, error) {
 	ctx, done := s.op(parent)
 	defer done()
 	spawn, err := fleet.ValidateSubmission(request)
@@ -104,6 +109,18 @@ func (s *laneInboxStore) claimSpawn(parent context.Context, request fleet.Submis
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
 		return hubSpawnTask{}, false, err
+	}
+	if previousID != "" && roleKey != "" {
+		if spawn.RoleKey() != roleKey {
+			return hubSpawnTask{}, false, errSpawnClaimed
+		}
+		result, err := tx.ExecContext(ctx, s.q(`UPDATE spawn_reservations SET task_role=NULL WHERE request_id=? AND task_role=?`), previousID, roleKey)
+		if err != nil {
+			return hubSpawnTask{}, false, err
+		}
+		if n, _ := result.RowsAffected(); n != 1 {
+			return hubSpawnTask{}, false, errSpawnClaimed
+		}
 	}
 	var taskRole any
 	if spawn.Task != "" && spawn.ParentJob == "" {

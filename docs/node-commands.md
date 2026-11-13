@@ -285,30 +285,26 @@ cannot check. A failed ledger read or handoffkeep write answers
 ### `job.pool_action`
 
 `args: {job, pane_id, label, action_id, op, end_reason}` — at least one of
-`pane_id` and `label` is required; `action_id` is the hub's action (request id,
-a colon, the attempt); `op` is `register` or `clear`; `end_reason` is the
-terminal reason the hub will write (empty on `clear`). This is the node half of
-the exhausted-pool action ([quota-stop.md](quota-stop.md), "An exhausted
-pool"): `register` writes `<inbox>/jobs/<job>/pool-action.json` (mode 0600,
-fsynced, replaced atomically) with the action id, the planned `end_reason` and
-the time; `clear` removes it.
+`pane_id` and `label` is required; `action_id` identifies the holder attempt.
+`register` records the action and planned end reason, `clear` cancels it, and
+`finish` records that the hub completed it. The marker is written atomically to
+`<inbox>/jobs/<job>/pool-action.json` with mode 0600. A clear or finish applies
+only to the matching action id.
 
-The marker is what the node watcher reads: while it is present and younger than
-its bound (30 minutes), the watcher's missing-pane fallback does not write its
-own plain `lost` record — that record could never carry the hub's quota reason
-or a hand-over's successor pointer. The watcher keeps watching meanwhile and
-releases the job's quota lease, because the pane is gone either way; it runs the
-ordinary fallback once the action cancels its marker or the marker expires. The
-node refuses the op for a ledger that moved on (a `job.completed` after the
-attempt, or a newer claim) exactly as `job.mark_lost` does, so a marker never
-outlives its attempt.
+The holder watcher defers its missing-pane and hand-off fallback while the
+marker is unresolved, including past its ordinary deadline. A cancelled action
+clears the marker and allows the fallback; a finished action causes the watcher
+to exit without a duplicate loss notice. Registration and the fallback decision
+share the job's pool-action lock. A marker does not expire while an action may
+still need recovery.
 
 | `outcome` | Meaning |
 | --- | --- |
 | `registered` | the marker was written. |
+| `finished` | the matching marker was recorded as complete. |
 | `cleared` | the marker was removed (or was not there). |
-| `attempt-moved` | the local ledger holds a completion or a newer claim; nothing is written. |
-| `ledger-missing` | the job has no local ledger to hold the marker; nothing is written. |
+| `attempt-moved` | the ledger or marker identifies a different or completed attempt. |
+| `ledger-missing` | the job has no local ledger to hold the marker. |
 
 A failed marker write answers `pool_action_failed`; a node without a jobs root
 answers `jobs_root_unset`. The hub issues this op itself, and the HTTP command

@@ -88,15 +88,16 @@ func validNodeJobMarkLostResult(result nodeJobMarkLostResult) bool {
 type nodeJobLedger struct {
 	completed  bool
 	newerClaim bool
+	lost       bool
 }
 
 // nodeJobLedgerEvent is one parsed ledger event. owner and keep are read for
 // job.reap, which must prove the job's own identity before it closes a pane;
 // the mark-lost path ignores them.
 type nodeJobLedgerEvent struct {
-	kind, pane, label, role, task, session string
-	owner                                  string
-	keep                                   bool
+	kind, pane, label, role, task, session, reason string
+	owner                                          string
+	keep                                           bool
 }
 
 func nodeJobClaimKind(kind string) bool {
@@ -143,6 +144,8 @@ func readNodeJobLedger(job *os.Root, pane, label string) (nodeJobLedger, error) 
 		switch {
 		case event.kind == "job.completed":
 			ledger.completed = true
+		case event.kind == "job.lost" && event.reason != "quota_stop":
+			ledger.lost = true
 		case nodeJobClaimKind(event.kind):
 			ledger.newerClaim = true
 		}
@@ -192,6 +195,7 @@ func readNodeJobLedgerEvents(job *os.Root) ([]nodeJobLedgerEvent, error) {
 		var event struct {
 			Kind    string `json:"kind"`
 			Payload struct {
+				Reason     string `json:"reason"`
 				PaneID     string `json:"pane_id"`
 				Label      string `json:"label"`
 				AgentLabel string `json:"agent_label"`
@@ -217,7 +221,7 @@ func readNodeJobLedgerEvents(job *os.Root) ([]nodeJobLedgerEvent, error) {
 		case float64:
 			task = strconv.FormatFloat(id, 'f', -1, 64)
 		}
-		events = append(events, nodeJobLedgerEvent{kind: event.Kind, pane: event.Payload.PaneID, label: label, role: event.Payload.Role, task: task, owner: event.Payload.OwnerLane, keep: event.Payload.Keep, session: event.Payload.HerdrSession})
+		events = append(events, nodeJobLedgerEvent{kind: event.Kind, reason: event.Payload.Reason, pane: event.Payload.PaneID, label: label, role: event.Payload.Role, task: task, owner: event.Payload.OwnerLane, keep: event.Payload.Keep, session: event.Payload.HerdrSession})
 	}
 	return events, nil
 }

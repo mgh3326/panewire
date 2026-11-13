@@ -310,23 +310,29 @@ func (h *HubServer) sweepPoolJob(ctx context.Context, exhaustion poolExhaustion,
 	if completed {
 		return poolJobSkip(role, "completed")
 	}
+	release, held := h.jobGuard.acquire(ctx, task.Job)
+	if !held {
+		return poolJobSkip(role, "job_busy")
+	}
 	action, exists, err := h.inbox.store.poolAction(ctx, task.Request.RequestID, task.Attempt)
 	if err != nil {
+		release()
 		return poolJobSkip(role, "action_unreadable")
 	}
-	if exists {
-		return h.drivePoolAction(ctx, action)
+	if !exists {
+		var why string
+		action, why = h.newPoolAction(exhaustion, task, prior)
+		if why != "" {
+			release()
+			return poolJobSkip(role, why)
+		}
+		if err := h.inbox.store.savePoolAction(ctx, action); err != nil {
+			release()
+			h.logger.Warn("pool exhausted action: the intent was not saved", "job", task.Job, "error", err)
+			return poolJobSkip(role, "action_not_saved")
+		}
 	}
-	action, why := h.newPoolAction(exhaustion, task, prior)
-	if why != "" {
-		return poolJobSkip(role, why)
-	}
-	// The intent is written before anything is touched: from here on an
-	// interrupted ending is found by the reconciler, not by another publish.
-	if err := h.inbox.store.savePoolAction(ctx, action); err != nil {
-		h.logger.Warn("pool exhausted action: the intent was not saved", "job", task.Job, "error", err)
-		return poolJobSkip(role, "action_not_saved")
-	}
+	release()
 	return h.drivePoolAction(ctx, action)
 }
 
@@ -371,7 +377,7 @@ func (h *HubServer) newPoolAction(exhaustion poolExhaustion, task hubSpawnTask, 
 	action := poolAction{
 		Request: task.Request.RequestID, Attempt: task.Attempt, Job: task.Job, Owner: task.Owner, Role: prior.Role,
 		Pool: exhaustion.Pool, Account: exhaustion.Account, Cause: exhaustion.Cause, Reset: exhaustion.Reset,
-		EventID: "pool-exhausted:" + task.Job, Stage: poolActionIntent, Created: now, Updated: now,
+		EventID: "pool-exhausted:" + task.Job, Epoch: h.registeredEpoch(task.Job), Stage: poolActionIntent, Created: now, Updated: now,
 	}
 	switch prior.Role {
 	case "worker", "tester":

@@ -226,6 +226,7 @@ func (a *App) watch(ctx context.Context, args []string) error {
 	var handOff quotaHandOff
 	var creditAttempts int
 	quotaRetry := false
+	poolActionWaited := false
 	var lastCredit time.Time
 	for {
 		j, e := a.job(id)
@@ -248,7 +249,7 @@ func (a *App) watch(ctx context.Context, args []string) error {
 		if e != nil && hasIntent && !creditPending && !j.Reaped {
 			// An open close intent outlives a herdr outage: hk alone can
 			// finish it, and anything else waits for herdr.
-			out, err := a.reconcileQuotaIntent(ctx, j, intent, false, false, false, Agent{})
+			out, err := a.reconcilePoolGuardedQuotaIntent(ctx, j, intent, false, false, false, Agent{})
 			if err != nil {
 				return err
 			}
@@ -311,15 +312,31 @@ func (a *App) watch(ctx context.Context, args []string) error {
 			published := map[string]any{"pool": credit.Pool, "at": credit.CreditExhaustedAt.UTC().Format(time.RFC3339Nano)}
 			if !j.Terminal && !j.Reaped && !workerEscalated(j) && j.QuotaRole() != "counsel" && !handOff.active && safeCreditStopHandoff(j, credit, paneAgent, present, herdrReachable) {
 				if a.QuotaHandOffGrace <= 0 {
-					if err := a.quotaStopLost(ctx, j, credit, true); err != nil {
+					finished, err := a.poolActionFallback(id, func() error {
+						if err := a.quotaStopLost(ctx, j, credit, true); err != nil {
+							return err
+						}
+						return a.event(ctx, id, "job.credit_published", published)
+					})
+					if err != nil || finished {
 						return err
 					}
-					return a.event(ctx, id, "job.credit_published", published)
+				} else {
+					announced := false
+					finished, err := a.poolActionFallback(id, func() error {
+						announced = true
+						return a.quotaStopAnnounce(ctx, j, credit)
+					})
+					if err != nil {
+						return err
+					}
+					if finished && !announced {
+						return a.releaseQuota(ctx, j)
+					}
+					if announced {
+						handOff = quotaHandOff{stop: credit, until: a.Now().Add(a.QuotaHandOffGrace), seq: paneAgent.StateChangeSeq, active: true}
+					}
 				}
-				if err := a.quotaStopAnnounce(ctx, j, credit); err != nil {
-					return err
-				}
-				handOff = quotaHandOff{stop: credit, until: a.Now().Add(a.QuotaHandOffGrace), seq: paneAgent.StateChangeSeq, active: true}
 			}
 			if err := a.event(ctx, id, "job.credit_published", published); err != nil {
 				return err
@@ -360,19 +377,29 @@ func (a *App) watch(ctx context.Context, args []string) error {
 			}
 		}
 		if waiting != nil && !hasIntent && !(pending && a.workerSignalledEnd(j)) && !a.Now().Before(waiting.at.Add(decisionTimeout)) {
-			if e := a.putJobRecord(ctx, id, map[string]any{"state": "lost", "at": a.Now().UTC()}); e != nil {
-				a.jobRecordFailed(ctx, id, "lost", e)
+			finished, err := a.poolActionFallback(id, func() error {
+				if e := a.putJobRecord(ctx, id, map[string]any{"state": "lost", "at": a.Now().UTC()}); e != nil {
+					a.jobRecordFailed(ctx, id, "lost", e)
+				}
+				if e := a.event(ctx, id, "job.lost", map[string]any{"pane_id": j.Pane, "reason": "decision_unanswered"}); e != nil {
+					return e
+				}
+				a.recordLostFailure(ctx, j)
+				return a.releaseQuota(ctx, j)
+			})
+			if err != nil || finished {
+				return err
 			}
-			if e := a.event(ctx, id, "job.lost", map[string]any{"pane_id": j.Pane, "reason": "decision_unanswered"}); e != nil {
-				return e
-			}
-			a.recordLostFailure(ctx, j)
-			return a.releaseQuota(ctx, j)
 		}
 		// An announced quota stop is watched through its hand-off grace, past
 		// the ordinary completion deadline: its fallback ends the job and
 		// releases the lease, which nothing else would.
-		if waiting == nil && !handOff.active && !quotaRetry && a.Now().After(deadline) && (!pending || latePoll) {
+		poolActionPending, poolActionDone := a.poolActionStatus(id)
+		poolActionWaited = poolActionWaited || poolActionPending
+		if poolActionDone {
+			return a.releaseQuota(ctx, j)
+		}
+		if waiting == nil && !handOff.active && !quotaRetry && !poolActionPending && !(poolActionWaited && !present) && a.Now().After(deadline) && (!pending || latePoll) {
 			fmt.Fprintln(a.Err, "watch-expired: job stays live; quota retained")
 			return nil
 		}
@@ -400,7 +427,7 @@ func (a *App) watch(ctx context.Context, args []string) error {
 		// Not while a hand-off is active: its stop is already announced.
 		if !handOff.active && j.QuotaRole() != "counsel" {
 			if hasIntent {
-				out, err := a.reconcileQuotaIntent(ctx, j, intent, true, present, pending, paneAgent)
+				out, err := a.reconcilePoolGuardedQuotaIntent(ctx, j, intent, true, present, pending, paneAgent)
 				if err != nil {
 					return err
 				}
@@ -427,13 +454,15 @@ func (a *App) watch(ctx context.Context, args []string) error {
 					// A registered exhausted-pool action owns this attempt's
 					// record (and may carry a successor pointer this fallback
 					// cannot): free the seat and keep watching until the action
-					// finishes, clears its marker after cancelling, or the
-					// marker expires.
+					// finishes or clears its marker after cancelling.
 					if e := a.releaseQuota(ctx, j); e != nil {
 						a.warn("quota-stop lease release failed, retrying: %v", e)
 					}
 				} else {
-					return a.quotaStopLost(ctx, j, handOff.stop, false)
+					finished, err := a.poolActionFallback(id, func() error { return a.quotaStopLost(ctx, j, handOff.stop, false) })
+					if err != nil || finished {
+						return err
+					}
 				}
 			}
 			if present && !handOff.unchanged(paneAgent) {
@@ -458,21 +487,26 @@ func (a *App) watch(ctx context.Context, args []string) error {
 		// registered: it writes the quota reason (and a hand-over's successor
 		// pointer), which an hk record made terminal here could never carry.
 		// The pane is gone either way, so free the seat; keep watching so the
-		// ordinary fallback runs if the action cancels or its marker expires.
+		// ordinary fallback runs if the action cancels its marker.
 		if missing >= 2 && !handOff.active && !quotaRetry {
 			if a.poolActionOpen(id) {
 				if e := a.releaseQuota(ctx, j); e != nil {
 					a.warn("pool action: quota lease release failed, retrying: %v", e)
 				}
 			} else {
-				if e := a.putJobRecord(ctx, id, map[string]any{"state": "lost", "at": a.Now().UTC()}); e != nil {
-					a.jobRecordFailed(ctx, id, "lost", e)
+				finished, err := a.poolActionFallback(id, func() error {
+					if e := a.putJobRecord(ctx, id, map[string]any{"state": "lost", "at": a.Now().UTC()}); e != nil {
+						a.jobRecordFailed(ctx, id, "lost", e)
+					}
+					if e := a.event(ctx, id, "job.lost", map[string]any{"pane_id": j.Pane}); e != nil {
+						return e
+					}
+					a.recordLostFailure(ctx, j)
+					return a.releaseQuota(ctx, j)
+				})
+				if err != nil || finished {
+					return err
 				}
-				if e = a.event(ctx, id, "job.lost", map[string]any{"pane_id": j.Pane}); e != nil {
-					return e
-				}
-				a.recordLostFailure(ctx, j)
-				return a.releaseQuota(ctx, j)
 			}
 		}
 		if e = a.Sleep(ctx, 5*time.Second); e != nil {

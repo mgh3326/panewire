@@ -187,6 +187,9 @@ func (h *HubServer) replaceQuotaStoppedWhy(ctx context.Context, machine string, 
 	if err != nil {
 		return skip("unknown_job")
 	}
+	if owned, err := h.poolActionOwnsHolder(ctx, holder); err != nil || owned {
+		return skip("pool_action_pending")
+	}
 	prior, err := fleet.ValidateSubmission(holder.Request)
 	if err != nil {
 		return skip("unreadable_request")
@@ -415,50 +418,60 @@ func (h *HubServer) reconcileQuotaReplacements(ctx context.Context) int {
 	}
 	written := 0
 	for _, successor := range successors {
-		m := quotaSuccessorJob.FindStringSubmatch(successor.Job)
-		if m == nil || !spawnMayStillRun(successor) && successor.Status != "succeeded" {
-			continue
-		}
-		// A replacement younger than its own budget is still being finished by
-		// replaceQuotaStopped.
-		if h.now().Sub(successor.Created) < quotaReplaceBudget {
-			continue
-		}
-		old := m[1]
-		holder, err := h.inbox.store.latestSpawnForJob(ctx, old)
-		if err != nil || holder.Status != "succeeded" {
-			continue
-		}
-		prior, err := fleet.ValidateSubmission(holder.Request)
-		if err != nil || prior.Role != "reviewer" {
-			continue
-		}
-		readCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		record, exists, err := app.ExistingJob(readCtx, old)
-		cancel()
-		state, _ := record["state"].(string)
-		pool, _ := record["pool"].(string)
-		if err != nil || !exists || (state != "claimed" && state != "spawned") || !spawnargs.ValuePattern.MatchString(pool) {
-			continue
-		}
-		endReason := fleet.QuotaStopEndReason(pool, time.Time{}, "replaced_by", successor.Job)
-		if !validNodeEndReason(endReason) {
-			continue
-		}
-		name := heldAgentName(holder, record)
-		probe := h.probeHeldPane(ctx, spawnHolderHost(holder), holder.Outcome.Pane, name)
-		switch {
-		case probe.state == heldPanePresent && nodePaneIdleStatus[probe.row.AgentStatus] && validNodeCommandPath(probe.row.Cwd):
-			if !h.closeHeldPane(ctx, holder, name, probe.row) {
-				continue
+		func() {
+			m := quotaSuccessorJob.FindStringSubmatch(successor.Job)
+			if m == nil || !spawnMayStillRun(successor) && successor.Status != "succeeded" {
+				return
 			}
-		case probe.state != heldPaneAbsent:
-			continue
-		}
-		if lost, _ := h.markHolderJobLostBecause(ctx, app, holder, name, endReason); lost {
-			written++
-			h.logger.Info("quota-stop replacement reconciled", "job", old, "replacement", successor.Job)
-		}
+			// A replacement younger than its own budget is still being finished by
+			// replaceQuotaStopped.
+			if h.now().Sub(successor.Created) < quotaReplaceBudget {
+				return
+			}
+			old := m[1]
+			release, held := h.jobGuard.acquire(ctx, old)
+			if !held {
+				return
+			}
+			defer release()
+			holder, err := h.inbox.store.latestSpawnForJob(ctx, old)
+			if err != nil || holder.Status != "succeeded" {
+				return
+			}
+			if owned, err := h.poolActionOwnsHolder(ctx, holder); err != nil || owned {
+				return
+			}
+			prior, err := fleet.ValidateSubmission(holder.Request)
+			if err != nil || prior.Role != "reviewer" {
+				return
+			}
+			readCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			record, exists, err := app.ExistingJob(readCtx, old)
+			cancel()
+			state, _ := record["state"].(string)
+			pool, _ := record["pool"].(string)
+			if err != nil || !exists || (state != "claimed" && state != "spawned") || !spawnargs.ValuePattern.MatchString(pool) {
+				return
+			}
+			endReason := fleet.QuotaStopEndReason(pool, time.Time{}, "replaced_by", successor.Job)
+			if !validNodeEndReason(endReason) {
+				return
+			}
+			name := heldAgentName(holder, record)
+			probe := h.probeHeldPane(ctx, spawnHolderHost(holder), holder.Outcome.Pane, name)
+			switch {
+			case probe.state == heldPanePresent && nodePaneIdleStatus[probe.row.AgentStatus] && validNodeCommandPath(probe.row.Cwd):
+				if !h.closeHeldPane(ctx, holder, name, probe.row) {
+					return
+				}
+			case probe.state != heldPaneAbsent:
+				return
+			}
+			if lost, _ := h.markHolderJobLostBecause(ctx, app, holder, name, endReason); lost {
+				written++
+				h.logger.Info("quota-stop replacement reconciled", "job", old, "replacement", successor.Job)
+			}
+		}()
 	}
 	return written
 }

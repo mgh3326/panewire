@@ -26,7 +26,8 @@ import (
 //	intent    the decision and every input needed to finish it (hk end reason,
 //	          owner notice identity, and for a hand-over the successor's job and
 //	          exact submission) are persisted; nothing has been touched.
-//	closed    the job's pane was closed, or proven absent.
+//	closing   eligibility was rechecked and a close was durably authorized.
+//	closed    the job's pane was closed, or proven absent after authorization.
 //	terminal  hk holds the job's terminal record.
 //	released  the role reservation, when the job held one, is dropped.
 //	claimed   (hand-over only) the successor operation exists.
@@ -41,6 +42,7 @@ const (
 	poolActionHandOver = "hand_over"
 
 	poolActionIntent   = "intent"
+	poolActionClosing  = "closing"
 	poolActionClosed   = "closed"
 	poolActionTerminal = "terminal"
 	poolActionReleased = "released"
@@ -54,7 +56,7 @@ const (
 // hand-over actions skip notified, so "at least" only ever compares against a
 // stage the action kind passes through.
 var poolActionStages = []string{
-	poolActionIntent, poolActionClosed, poolActionTerminal, poolActionReleased, poolActionClaimed, poolActionNotified, poolActionDone,
+	poolActionIntent, poolActionClosing, poolActionClosed, poolActionTerminal, poolActionReleased, poolActionClaimed, poolActionNotified, poolActionDone,
 }
 
 // poolActionStageAtLeast reports whether stage has reached want.
@@ -75,6 +77,7 @@ func poolActionStageIndex(stage string) int {
 type poolAction struct {
 	Request, Job, Owner, Role, Kind string
 	Attempt                         int
+	Epoch                           uint64
 	Pool, Account, Cause            string
 	Reset                           time.Time
 	EndReason, EventID              string
@@ -105,15 +108,18 @@ var errPoolActionBusy = errors.New("job busy")
 func (s *laneInboxStore) savePoolAction(parent context.Context, action poolAction) error {
 	ctx, done := s.op(parent)
 	defer done()
+	if action.Epoch == 0 {
+		action.Epoch = 1
+	}
 	now := action.Updated
 	if now.IsZero() {
 		now = time.Now()
 	}
-	_, err := s.db.ExecContext(ctx, s.q(`INSERT INTO pool_exhausted_actions(request_id,attempt,job,owner,role,kind,pool,account,cause,reset_ms,end_reason,event_id,successor,successor_request,stage,registered_ms,created_ms,updated_ms)
-VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+	_, err := s.db.ExecContext(ctx, s.q(`INSERT INTO pool_exhausted_actions(request_id,attempt,job,owner,role,kind,pool,account,cause,reset_ms,end_reason,event_id,epoch,successor,successor_request,stage,registered_ms,created_ms,updated_ms)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(request_id,attempt) DO UPDATE SET stage=excluded.stage,updated_ms=excluded.updated_ms,end_reason=excluded.end_reason,successor=excluded.successor,successor_request=excluded.successor_request,registered_ms=excluded.registered_ms`),
 		action.Request, action.Attempt, action.Job, action.Owner, action.Role, action.Kind, action.Pool, action.Account, action.Cause,
-		action.Reset.UTC().UnixMilli(), action.EndReason, action.EventID, action.Successor, action.SuccessorRequest, action.Stage,
+		action.Reset.UTC().UnixMilli(), action.EndReason, action.EventID, action.Epoch, action.Successor, action.SuccessorRequest, action.Stage,
 		action.Registered.UTC().UnixMilli(), action.Created.UTC().UnixMilli(), now.UTC().UnixMilli())
 	return err
 }
@@ -147,13 +153,25 @@ func (s *laneInboxStore) pendingPoolActions(parent context.Context, limit int) (
 	return actions, rows.Err()
 }
 
-// touchPoolAction moves an action to the back of the reconciler's queue by
-// recording an attempt that changed no stage.
-func (s *laneInboxStore) touchPoolAction(parent context.Context, requestID string, attempt int, now time.Time) error {
+// poolActionPage scans all pending actions using an immutable cursor so an
+// indefinitely blocked action cannot starve later work.
+func (s *laneInboxStore) poolActionPage(parent context.Context, after poolAction, limit int) ([]poolAction, error) {
 	ctx, done := s.op(parent)
 	defer done()
-	_, err := s.db.ExecContext(ctx, s.q(`UPDATE pool_exhausted_actions SET updated_ms=? WHERE request_id=? AND attempt=?`), now.UTC().UnixMilli(), requestID, attempt)
-	return err
+	rows, err := s.db.QueryContext(ctx, s.q(`SELECT `+poolActionColumns+` FROM pool_exhausted_actions WHERE stage NOT IN (?,?) AND (created_ms>? OR (created_ms=? AND request_id>?) OR (created_ms=? AND request_id=? AND attempt>?)) ORDER BY created_ms,request_id,attempt LIMIT ?`), poolActionDone, poolActionCanceled, after.Created.UnixMilli(), after.Created.UnixMilli(), after.Request, after.Created.UnixMilli(), after.Request, after.Attempt, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var actions []poolAction
+	for rows.Next() {
+		action, _, err := scanPoolAction(rows)
+		if err != nil {
+			return nil, err
+		}
+		actions = append(actions, action)
+	}
+	return actions, rows.Err()
 }
 
 // deletePoolAction removes an action that never became an effect.
@@ -187,13 +205,13 @@ func (s *laneInboxStore) succeededSpawnsSince(parent context.Context, since time
 	return tasks, rows.Err()
 }
 
-const poolActionColumns = `request_id,attempt,job,owner,role,kind,pool,account,cause,reset_ms,end_reason,event_id,successor,successor_request,stage,registered_ms,created_ms,updated_ms`
+const poolActionColumns = `request_id,attempt,job,owner,role,kind,pool,account,cause,reset_ms,end_reason,event_id,epoch,successor,successor_request,stage,registered_ms,created_ms,updated_ms`
 
 func scanPoolAction(row interface{ Scan(...any) error }) (poolAction, bool, error) {
 	var action poolAction
 	var resetMS, registeredMS, createdMS, updatedMS int64
 	err := row.Scan(&action.Request, &action.Attempt, &action.Job, &action.Owner, &action.Role, &action.Kind, &action.Pool, &action.Account, &action.Cause,
-		&resetMS, &action.EndReason, &action.EventID, &action.Successor, &action.SuccessorRequest, &action.Stage, &registeredMS, &createdMS, &updatedMS)
+		&resetMS, &action.EndReason, &action.EventID, &action.Epoch, &action.Successor, &action.SuccessorRequest, &action.Stage, &registeredMS, &createdMS, &updatedMS)
 	if errors.Is(err, sql.ErrNoRows) {
 		return poolAction{}, false, nil
 	}
@@ -268,23 +286,48 @@ func (h *HubServer) drivePoolAction(ctx context.Context, action poolAction) pool
 	if err != nil || !exists {
 		return skip("job_record", "state", state)
 	}
+	name := heldAgentName(holder, record)
 	if pool, _ := record["pool"].(string); pool != "" && pool != action.Pool {
+		if poolActionStageAtLeast(action.Stage, poolActionClosing) {
+			if !h.finishPoolActionMarker(ctx, holder, name, action) {
+				return skip("marker_not_finished")
+			}
+		} else if !h.clearPoolActionMarker(ctx, holder, name, action) {
+			return skip("marker_not_cleared")
+		}
 		h.cancelPoolAction(ctx, action, "pool_mismatch")
 		return poolJobSkip(role, "pool_mismatch")
+	}
+	cancelTerminal := func(reason string) bool {
+		if !h.finishPoolActionMarker(ctx, holder, name, action) {
+			return false
+		}
+		h.cancelPoolAction(ctx, action, reason)
+		return true
 	}
 	switch state {
 	case "completed", "escalated":
 		// The job ended on its own. hk's record is the truth, and an owner
 		// notice for a quota stop would be false, so the action ends here.
-		h.cancelPoolAction(ctx, action, "hk_"+state)
+		if !cancelTerminal("hk_" + state) {
+			return skip("marker_not_finished")
+		}
 		h.logger.Info("pool exhausted action cancelled: the job ended on its own", "job", action.Job, "state", state)
 		return poolJobSkip(role, "completed")
 	case "lost":
+		if reason, _ := record["end_reason"].(string); reason != action.EndReason {
+			if !cancelTerminal("unrelated_loss") {
+				return skip("marker_not_finished")
+			}
+			return poolJobSkip(role, "unrelated_loss")
+		}
 		// A record that is already terminal is not progress unless this action
 		// made an effect: an old loss for an unrelated reason is not a quota
 		// stop, and reviving it would hand over or notify again.
 		if !poolActionStageAtLeast(action.Stage, poolActionClosed) {
-			h.cancelPoolAction(ctx, action, "already_lost")
+			if !cancelTerminal("already_lost") {
+				return skip("marker_not_finished")
+			}
 			return poolJobSkip(role, "already_lost")
 		}
 		// The holder's watcher (or a retry of this action) wrote it. hk never
@@ -295,16 +338,24 @@ func (h *HubServer) drivePoolAction(ctx context.Context, action poolAction) pool
 			h.savePoolActionStage(ctx, action)
 		}
 	}
-	name := heldAgentName(holder, record)
 	if !poolActionStageAtLeast(action.Stage, poolActionClosed) {
 		probe := h.probeHeldPane(ctx, spawnHolderHost(holder), holder.Outcome.Pane, name)
 		if probe.state == heldPaneAbsent {
+			if !poolActionStageAtLeast(action.Stage, poolActionClosing) {
+				if !h.clearPoolActionMarker(ctx, holder, name, action) {
+					return skip("marker_not_cleared")
+				}
+				h.cancelPoolAction(ctx, action, "pane_disappeared_before_close")
+				return poolJobSkip(role, "pane_disappeared_before_close")
+			}
 			// The pane is already gone: an earlier attempt closed it (or the
 			// node lost it) after registering its marker, and only the stage
 			// write was lost. That is an effect, so the intent may no longer be
 			// cancelled for an expired reading; finish the ending.
 			action.Stage = poolActionClosed
-			h.savePoolActionStage(ctx, action)
+			if err := h.savePoolActionStage(ctx, action); err != nil {
+				return skip("closed_stage_not_saved")
+			}
 		} else {
 			if probe.state != heldPanePresent || !nodePaneIdleStatus[probe.row.AgentStatus] || !validNodeCommandPath(probe.row.Cwd) {
 				return skip("pane_not_idle", "probe", probe.reason, "status", probe.row.AgentStatus)
@@ -316,35 +367,60 @@ func (h *HubServer) drivePoolAction(ctx context.Context, action poolAction) pool
 			if action.Registered.IsZero() {
 				registered, why := h.setPoolActionOnHolder(ctx, holder, name, action, true)
 				switch {
-				case registered, why == nodePoolActionNoLedger:
-					// A node with no local ledger for the job cannot hold the
-					// marker, and nothing there watches the job either.
+				case registered:
 					action.Registered = h.now()
-					h.savePoolActionStage(ctx, action)
+					if err := h.savePoolActionStage(ctx, action); err != nil {
+						return skip("registration_not_saved")
+					}
 				case why == nodePoolActionMoved:
 					return skip("attempt_moved", "action", action.Request)
 				default:
 					return skip("action_not_registered", "reason", why)
 				}
 			}
+			// A watcher may have won its terminal decision just before it
+			// acknowledged the marker. Confirm hk again after registration.
+			fresh, found, err := h.readPoolJobRecord(ctx, app, action.Job)
+			if err != nil || !found {
+				return skip("job_record")
+			}
+			if freshState, _ := fresh["state"].(string); freshState == "completed" || freshState == "escalated" || freshState == "lost" {
+				if !cancelTerminal("hk_" + freshState) {
+					return skip("marker_not_finished")
+				}
+				return poolJobSkip(role, "already_terminal")
+			}
 			// An intent is only allowed to become an effect while the
 			// exhaustion still holds; this is the last check before the close.
 			if !h.now().Before(action.Reset) {
-				h.clearPoolActionMarker(ctx, holder, name, action)
+				if !h.clearPoolActionMarker(ctx, holder, name, action) {
+					return skip("marker_not_cleared")
+				}
 				h.cancelPoolAction(ctx, action, "reset_passed")
 				return poolJobSkip(role, "reset_passed")
 			}
 			exhaustion := poolExhaustion{Pool: action.Pool, Account: action.Account, Cause: action.Cause, Reset: action.Reset}
 			if h.exhaustionSuperseded(exhaustion, h.now()) {
-				h.clearPoolActionMarker(ctx, holder, name, action)
+				if !h.clearPoolActionMarker(ctx, holder, name, action) {
+					return skip("marker_not_cleared")
+				}
 				h.cancelPoolAction(ctx, action, "superseded")
 				return poolJobSkip(role, "superseded")
 			}
-			if !h.closeHeldPane(ctx, holder, name, probe.row) {
+			if !h.closeHeldPaneIf(ctx, holder, name, probe.row, func() bool {
+				now := h.now()
+				if !now.Before(action.Reset) || h.exhaustionSuperseded(exhaustion, now) {
+					return false
+				}
+				action.Stage = poolActionClosing
+				return h.savePoolActionStage(ctx, action) == nil
+			}) {
 				return skip("pane_not_closed", "pane", holder.Outcome.Pane)
 			}
 			action.Stage = poolActionClosed
-			h.savePoolActionStage(ctx, action)
+			if err := h.savePoolActionStage(ctx, action); err != nil {
+				return skip("closed_stage_not_saved")
+			}
 		}
 	}
 	if !poolActionStageAtLeast(action.Stage, poolActionTerminal) {
@@ -359,10 +435,21 @@ func (h *HubServer) drivePoolAction(ctx context.Context, action poolAction) pool
 		afterState, _ := after["state"].(string)
 		switch {
 		case readErr == nil && afterExists && (afterState == "completed" || afterState == "escalated"):
-			h.cancelPoolAction(ctx, action, "hk_"+afterState)
+			if !cancelTerminal("hk_" + afterState) {
+				return skip("marker_not_finished")
+			}
 			return poolJobSkip(role, "completed")
 		case readErr == nil && afterExists && afterState == "lost":
+			endReason, _ := after["end_reason"].(string)
+			if endReason != action.EndReason {
+				if !cancelTerminal("unrelated_loss") {
+					return skip("marker_not_finished")
+				}
+				return poolJobSkip(role, "unrelated_loss")
+			}
 			lost = true
+		default:
+			lost = false
 		}
 		if !lost {
 			return skip("record_not_written", "write", reason)
@@ -370,7 +457,7 @@ func (h *HubServer) drivePoolAction(ctx context.Context, action poolAction) pool
 		action.Stage = poolActionTerminal
 		h.savePoolActionStage(ctx, action)
 	}
-	if !poolActionStageAtLeast(action.Stage, poolActionReleased) {
+	if action.Kind != poolActionHandOver && !poolActionStageAtLeast(action.Stage, poolActionReleased) {
 		if err := h.releasePoolActionRole(ctx, holder, prior); err != nil {
 			h.logger.Warn("pool exhausted action: the role reservation was not released", "job", action.Job, "reason", err.Error())
 			return skip("role_release_failed")
@@ -390,7 +477,11 @@ func (h *HubServer) drivePoolAction(ctx context.Context, action poolAction) pool
 				h.cancelPoolAction(ctx, action, "invalid_replacement")
 				return poolJobSkip(role, "invalid_replacement")
 			}
-			if _, _, err := h.inbox.store.claimSpawn(ctx, request, action.Successor, next.Owner, h.now().UTC()); err != nil {
+			previousID, roleKey := "", ""
+			if prior.Task != "" && prior.ParentJob == "" {
+				previousID, roleKey = holder.Request.RequestID, prior.RoleKey()
+			}
+			if _, _, err := h.inbox.store.claimSpawnReplacing(ctx, request, action.Successor, next.Owner, h.now().UTC(), previousID, roleKey); err != nil {
 				return skip("claim_refused", "error", err.Error())
 			}
 			h.kickSpawn()
@@ -398,6 +489,9 @@ func (h *HubServer) drivePoolAction(ctx context.Context, action poolAction) pool
 			h.savePoolActionStage(ctx, action)
 			text := fmt.Sprintf("handed over %s (%s quota) to %s on the successor's placement", action.Job, action.Pool, action.Successor)
 			h.relayLaneEventContext(ctx, hubJobEventPayload{EventID: "quota-replace:" + action.Successor, JobID: action.Successor, OwnerLane: next.Owner, NotifyType: "info", Text: utf8PrefixWithin(text, laneEventTextLimit), Host: "hub", Epoch: 1}, nil)
+		}
+		if !h.finishPoolActionMarker(ctx, holder, name, action) {
+			return skip("marker_not_finished")
 		}
 		action.Stage = poolActionDone
 		h.savePoolActionStage(ctx, action)
@@ -407,13 +501,16 @@ func (h *HubServer) drivePoolAction(ctx context.Context, action poolAction) pool
 		// The owner is told only once the record is terminal: a notice sent
 		// before it could tell the owner a job is lost while it still runs.
 		if !h.relayJobEventFromContext(ctx, "", "job.lost", hubJobEventPayload{
-			JobID: action.Job, Epoch: h.registeredEpoch(action.Job), OwnerLane: action.Owner, AgentLabel: name, PaneID: holder.Outcome.Pane,
+			JobID: action.Job, Epoch: action.Epoch, OwnerLane: action.Owner, AgentLabel: name, PaneID: holder.Outcome.Pane,
 			EventID: action.EventID, Reason: action.EndReason,
 		}) {
 			return skip("owner_not_notified", "owner", action.Owner)
 		}
 		action.Stage = poolActionNotified
 		h.savePoolActionStage(ctx, action)
+	}
+	if !h.finishPoolActionMarker(ctx, holder, name, action) {
+		return skip("marker_not_finished")
 	}
 	action.Stage = poolActionDone
 	h.savePoolActionStage(ctx, action)
@@ -446,16 +543,27 @@ func (h *HubServer) setPoolActionOnHolder(ctx context.Context, holder hubSpawnTa
 	return false, result.Outcome
 }
 
-// clearPoolActionMarker removes the holder's marker after the action decided
-// not to close anything, so the watcher's ordinary fallback applies again. A
-// failed clear is not fatal: the marker is bounded by its age on the watcher.
-func (h *HubServer) clearPoolActionMarker(ctx context.Context, holder hubSpawnTask, name string, action poolAction) {
-	if action.Registered.IsZero() {
-		return
+// finishPoolActionMarker tells the holder watcher that the hub owns the
+// completed ending, so it exits without emitting a second loss event.
+func (h *HubServer) finishPoolActionMarker(ctx context.Context, holder hubSpawnTask, name string, action poolAction) bool {
+	args := nodeJobPoolActionArgs{Job: action.Job, PaneID: holder.Outcome.Pane, Label: name,
+		ActionID: fmt.Sprintf("%s:%d", action.Request, action.Attempt), Op: nodePoolActionFinish, EndReason: action.EndReason}
+	var result nodeJobPoolActionResult
+	if !h.nodeCall(ctx, spawnHolderHost(holder), nodeCommandJobPoolAction, args, spawnHeldPaneActWait, &result) {
+		return false
 	}
+	return result.Outcome == nodePoolActionFinished || result.Outcome == nodePoolActionNoLedger || result.Outcome == nodePoolActionMoved
+}
+
+// clearPoolActionMarker must be acknowledged before a pre-close cancellation.
+// Registration may have succeeded even when saving that acknowledgement failed,
+// so cancellation sends the clear even when Registered is zero.
+func (h *HubServer) clearPoolActionMarker(ctx context.Context, holder hubSpawnTask, name string, action poolAction) bool {
 	if ok, why := h.setPoolActionOnHolder(ctx, holder, name, action, false); !ok {
 		h.logger.Warn("pool exhausted action: the holder's marker was not cleared", "job", action.Job, "reason", why)
+		return why == nodePoolActionNoLedger
 	}
+	return true
 }
 
 // readPoolJobRecord reads the hk record of a job.
@@ -485,13 +593,15 @@ func (h *HubServer) releasePoolActionRole(ctx context.Context, holder hubSpawnTa
 	return h.inbox.store.releaseCompletedSpawnRole(ctx, priorID, prior.RoleKey())
 }
 
-// savePoolActionStage persists progress. A failed write is logged and otherwise
-// ignored: every step can be repeated, so the row stays behind and is redone.
-func (h *HubServer) savePoolActionStage(ctx context.Context, action poolAction) {
+// savePoolActionStage persists progress and reports failed writes so a caller
+// can stop before a dependent irreversible effect.
+func (h *HubServer) savePoolActionStage(ctx context.Context, action poolAction) error {
 	action.Updated = h.now()
 	if err := h.inbox.store.savePoolAction(ctx, action); err != nil {
 		h.logger.Warn("pool exhausted action: progress was not saved", "job", action.Job, "stage", action.Stage, "error", err)
+		return err
 	}
+	return nil
 }
 
 // cancelPoolAction records that nothing more is owed for the job. An intent
@@ -521,7 +631,7 @@ func (h *HubServer) kickSpawn() {
 	}
 }
 
-// reconcilePoolActions drives every action that still owes a step. It runs on
+// reconcilePoolActions pages through every action that still owes a step. It runs on
 // the quota replacement's schedule, so a hub restarted between a close and its
 // record, or between a record and its notice, finishes the work without another
 // quota publish; it also delivers a notice whose relay failed earlier.
@@ -529,18 +639,33 @@ func (h *HubServer) reconcilePoolActions(ctx context.Context) int {
 	if h.inbox == nil {
 		return 0
 	}
-	actions, err := h.inbox.store.pendingPoolActions(ctx, 256)
-	if err != nil {
-		return 0
-	}
 	finished := 0
-	for _, action := range actions {
-		if result := h.drivePoolAction(ctx, action); result.acted() {
-			finished++
-			h.logger.Info("pool exhausted action reconciled", "job", action.Job, "role", result.role, "pool", action.Pool, "account", action.Account, "action", result.action, "successor", result.successor)
-		} else if err := h.inbox.store.touchPoolAction(ctx, action.Request, action.Attempt, h.now()); err != nil {
-			h.logger.Warn("pool exhausted action: retry order was not updated", "job", action.Job, "error", err)
+	cursor := poolAction{Created: time.UnixMilli(0)}
+	for {
+		actions, err := h.inbox.store.poolActionPage(ctx, cursor, 256)
+		if err != nil {
+			return finished
+		}
+		if len(actions) == 0 {
+			break
+		}
+		for _, action := range actions {
+			cursor = action
+			if result := h.drivePoolAction(ctx, action); result.acted() {
+				finished++
+				h.logger.Info("pool exhausted action reconciled", "job", action.Job, "role", result.role, "pool", action.Pool, "account", action.Account, "action", result.action, "successor", result.successor)
+			}
 		}
 	}
+
 	return finished
+}
+
+// poolActionOwnsHolder fences competing terminal writers and role admissions.
+func (h *HubServer) poolActionOwnsHolder(ctx context.Context, holder hubSpawnTask) (bool, error) {
+	action, exists, err := h.inbox.store.poolAction(ctx, holder.Request.RequestID, holder.Attempt)
+	if err != nil {
+		return false, err
+	}
+	return exists && action.Stage != poolActionDone && action.Stage != poolActionCanceled, nil
 }

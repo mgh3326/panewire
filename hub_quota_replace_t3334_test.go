@@ -22,8 +22,9 @@ import (
 // quotaJobs is an hk fake that keeps each record whole and refuses to rewrite a
 // terminal one, as hk does.
 type quotaJobs struct {
-	mu      sync.Mutex
-	records map[string]map[string]any
+	mu       sync.Mutex
+	records  map[string]map[string]any
+	failGets int
 }
 
 func (q *quotaJobs) Claim(context.Context, string, string, string) error { return nil }
@@ -41,6 +42,10 @@ func (q *quotaJobs) Put(_ context.Context, id string, fields map[string]any) err
 func (q *quotaJobs) Get(_ context.Context, id string) (map[string]any, error) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
+	if q.failGets > 0 {
+		q.failGets--
+		return nil, errors.New("injected read failure")
+	}
 	record, ok := q.records[id]
 	if !ok {
 		return nil, fleet.ErrJobNotFound
