@@ -492,7 +492,7 @@ func decodeLanesJSON(reader io.Reader, target any) error {
 }
 
 func validHubLaneProjection(lane hubLaneProjection) bool {
-	if !validLaneReference(lane.Lane) || lane.Parent != "" && !validLaneReference(lane.Parent) {
+	if !LaneNamePattern.MatchString(lane.Lane) || lane.Parent != "" && !LaneNamePattern.MatchString(lane.Parent) {
 		return false
 	}
 	if lane.Sink {
