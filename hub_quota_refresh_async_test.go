@@ -787,3 +787,54 @@ func TestHubQuotaRefreshQueuedDeadlinePreventsLateSend(t *testing.T) {
 		t.Fatalf("expired queued refresh was sent after a slot opened: %+v", unexpected)
 	}
 }
+
+func TestHubQuotaRefreshLargeTimeoutDoesNotOverflow(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	retryHK(t)
+	h, err := NewHubServer(HubServerConfig{Tokens: map[string]string{"operator": t14OperatorToken, "desktop": "node-token"}, InboxStorePath: filepath.Join(t.TempDir(), "inbox.sqlite3")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = h.Close() })
+	server := httptest.NewServer(h.Handler())
+	t.Cleanup(server.Close)
+	t14NamedNode(t, h, server, "desktop", true, true)
+	h.spawnNewApp = func(out, errout io.Writer) (*fleet.App, error) {
+		app := retryDispatchApp(t, out, errout)
+		app.Config.Quota = map[string]any{"measure_timeout_s": int64(9223372036854775807)}
+		app.Quota = staleRefreshQuota{}
+		app.Source = staleRefreshSource{now: app.Now()}
+		return app, nil
+	}
+	request := durableSpawnRequest()
+	task, _, err := h.inbox.store.claimSpawn(t.Context(), request, "test-job", "parent", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.mu.Lock()
+	agent := h.nodes["desktop"].agent
+	h.mu.Unlock()
+	agent.writeMu.Lock()
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	go func() { defer close(done); h.executeSpawnTask(ctx, task) }()
+	registered := waitUntil(time.Second, func() bool {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		return len(h.nodeCommands) != 0
+	})
+	finished := waitUntil(time.Second, func() bool {
+		select {
+		case <-done:
+			return true
+		default:
+			return false
+		}
+	})
+	cancel()
+	agent.writeMu.Unlock()
+	<-done
+	if !registered || !finished {
+		t.Fatalf("large timeout must not expire immediately or block placement: registered=%v placement_returned=%v", registered, finished)
+	}
+}

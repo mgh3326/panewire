@@ -587,8 +587,11 @@ func (a *App) measureTarget(ctx context.Context, host, pool string) error {
 }
 
 func (a *App) scheduleQuotaRefresh(host, pool string) {
-	timeout := min(a.placementTTL("measure_timeout_s", 60), time.Minute)
-	a.ScheduleQuotaRefresh(host, pool, timeout)
+	seconds := integer(a.Config.Quota, "measure_timeout_s", 60)
+	if seconds <= 0 || seconds > 60 {
+		seconds = 60
+	}
+	a.ScheduleQuotaRefresh(host, pool, time.Duration(seconds)*time.Second)
 }
 
 func (a *App) judgeHost(ctx context.Context, r QuotaRequest, pool, host string, local bool, key string, acc SharedAccount) (quotaJudgment, error) {
