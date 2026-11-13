@@ -85,7 +85,7 @@ func (env hubHandoffkeepEnv) setAuth(request *http.Request) {
 }
 
 // loadHubHandoffkeepEnv requires an explicit mode-0600 file and never includes
-// a credential value in an error, matching loadHubTelegramEnv. It reads only
+// a credential value in an error, like loadMode0600Env. It reads only
 // files the operator named: the hub's --handoffkeep-env and a
 // node's spawn.json handoffkeep_env. The bearer is
 // HANDOFFKEEP_TOKEN_SVC_PANEWIRE, else the file's legacy key

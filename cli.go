@@ -292,7 +292,6 @@ func MainWithVersion(args []string, version string) int {
 type daemonCLIDeps struct {
 	HTTPClient            *http.Client
 	AllowInsecureForTests bool
-	TelegramBaseURL       string
 	SchemaCommand         []string
 	Logger                *slog.Logger
 	Version               string

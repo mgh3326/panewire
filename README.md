@@ -97,8 +97,8 @@ R2: prompt target safety, verified submission/uptake, privacy-preserving deliver
 `panewire hub` is the optional, always-on live channel for presence and
 operator event push.
 
-- The hub evaluates node presence and local heartbeat checks, and can send
-  optional Telegram incident/recovery notification.
+- The hub evaluates node presence and local heartbeat checks, and logs each incident and
+  recovery as a `hub alert` line.
 - The hub is useful only while both sides are connected. `panewired` retries
   the connection as a non-blocking side channel.
 

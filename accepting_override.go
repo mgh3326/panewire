@@ -52,7 +52,7 @@ func (h *HubServer) verifyContainment(ctx context.Context, containment string) (
 	if status == http.StatusNotFound {
 		return false, http.StatusNotFound
 	}
-	var task assistantTask
+	var task acceptingTask
 	if status != http.StatusOK || json.Unmarshal(payload, &task) != nil || task.ID != id || task.State == "" {
 		return false, 0
 	}
@@ -61,6 +61,13 @@ func (h *HubServer) verifyContainment(ctx context.Context, containment string) (
 		return false, http.StatusConflict
 	}
 	return true, 0
+}
+
+// acceptingTask is the part of an hk task the accepting override reads: its id
+// and its state.
+type acceptingTask struct {
+	ID    int64  `json:"id"`
+	State string `json:"state"`
 }
 
 func validAcceptingOverride(mode string) bool {

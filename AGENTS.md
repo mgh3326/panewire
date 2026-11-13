@@ -6,8 +6,8 @@ leave the old code for a cleanup PR rather than copying its pattern.
 
 ## Layout
 
-- The `panewire` package lives at the repository root; `cmd/panewire` and
-  `cmd/panewire-assistant` stay thin `main` wrappers.
+- The `panewire` package lives at the repository root; `cmd/panewire` stays a
+  thin `main` wrapper.
 - `internal/` holds packages the root imports (`fleet`, `arbiter`,
   `fleetevent`) and the shared helper packages (`durable`, `textbound`) that
   both the root and those packages use. An internal package never imports the
@@ -44,13 +44,12 @@ leave the old code for a cleanup PR rather than copying its pattern.
   fsynced before they become visible.
 - Log with `log/slog` in the root package (`internal/fleet` reports through
   its `App`'s `warn`); never print credentials, tokens, or request bodies.
-- Some HTTP bodies are pinned byte for byte (`/healthz`, the assistant's
-  error bodies); check the tests before changing how a handler writes.
+- Some HTTP bodies are pinned byte for byte (`/healthz` and the lanes
+  refusal bodies); check the tests before changing how a handler writes.
 - Code that needs the current time and must be testable takes a
   `now func() time.Time` dependency instead of calling `time.Now()` inline.
   When a type already carries one, every recorded timestamp and time-based
-  rule goes through it (`HubServer.now`, `HubClient.nowUTC()`,
-  `assistantCFVerifier.nowUnix()`); never add a second accessor. Elapsed
+  rule goes through it (`HubServer.now`, `HubClient.nowUTC()`); never add a second accessor. Elapsed
   time for timeouts and deadlines stays on the wall clock, because a frozen
   test clock would never expire it.
 

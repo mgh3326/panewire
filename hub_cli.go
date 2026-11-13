@@ -71,8 +71,6 @@ func (values *hubListenValues) Set(raw string) error {
 }
 
 type hubServerCLIDeps struct {
-	TelegramHTTPClient    *http.Client
-	TelegramBaseURL       string
 	AllowInsecureForTests bool
 	HandoffkeepHTTPClient *http.Client
 	ChatHTTPClient        *http.Client
@@ -89,7 +87,6 @@ func newHubServerForCLIWithDeps(args []string, logger *slog.Logger, deps hubServ
 	var listens hubListenValues
 	flags.Var(&listens, "listen", "repeatable loopback or tailnet listen address")
 	authPath := flags.String("hub-auth", "", "mode-0600 HUB_TOKEN_<machine_id> file")
-	tgEnvPath := flags.String("hub-tg-env", "", "optional mode-0600 TG_BOT_TOKEN/TG_CHAT_ID env file")
 	gracePeriod := flags.Duration("hub-grace", defaultHubGracePeriod, "continuous disconnected/stale grace period")
 	alertNodesCSV := flags.String("alert-nodes", "", "comma-separated authenticated machine IDs to alert on")
 	placementPolicyPath := flags.String("placement-policy", "/etc/panewire/placement.json", "operator-owned JSON placement policy (hot-reloaded)")
@@ -187,19 +184,6 @@ func newHubServerForCLIWithDeps(args []string, logger *slog.Logger, deps hubServ
 			return nil, "", ExitConditionInvalid, errors.New("hub alert nodes are invalid")
 		}
 	}
-	var notifier HubNotifier
-	if *tgEnvPath != "" {
-		env, err := loadHubTelegramEnv(*tgEnvPath)
-		if err != nil {
-			return nil, "", ExitConditionInvalid, errors.New("hub Telegram env is invalid")
-		}
-		notifier, err = newHubTelegramNotifier(env, hubNotifierDeps{
-			HTTPClient: deps.TelegramHTTPClient, BaseURL: deps.TelegramBaseURL, AllowInsecureForTests: deps.AllowInsecureForTests,
-		})
-		if err != nil {
-			return nil, "", ExitConditionInvalid, errors.New("hub Telegram configuration is invalid")
-		}
-	}
 	placementPath := *placementPolicyPath
 	if _, err := os.Stat(placementPath); !placementPolicySet && os.IsNotExist(err) {
 		placementPath = ""
@@ -219,7 +203,7 @@ func newHubServerForCLIWithDeps(args []string, logger *slog.Logger, deps hubServ
 			return nil, "", ExitConditionInvalid, errors.New("hub handoffkeep configuration is invalid")
 		}
 	}
-	hub, err := NewHubServer(HubServerConfig{DeliveryPolicyPath: *deliveryPolicyPath, InboxStorePath: *inboxStorePath, InboxDatabaseURL: os.Getenv(hubDatabaseURLEnv), Tokens: tokens, Scopes: scopes, AuthPath: *authPath, AlertNodes: alertNodes, Now: deps.Now, GracePeriod: *gracePeriod, Notifier: notifier, Logger: logger, PlacementPolicyPath: placementPath, PrometheusURL: os.Getenv("PANEWIRE_PROM_URL"), PrometheusBearer: os.Getenv("PANEWIRE_PROM_BEARER"), PrometheusBasicUser: os.Getenv("PANEWIRE_PROM_BASIC_USER"), PrometheusBasicPass: os.Getenv("PANEWIRE_PROM_BASIC_PASS"), UIAllowCFOnly: *uiAllowCFOnly, CFAccessTeam: *cfAccessTeam, CFAccessAUD: *cfAccessAUD, CFAccessCertsURL: *cfAccessCertsURL, CFAccessHTTPClient: deps.ChatHTTPClient, ReportRelayPath: routePath, LanesNodeRowCap: *lanesNodeRowCap, PRStatusHost: *prStatusHost, ControlPlaneLanesPath: *controlPlaneLanesPath, AcceptingOverridesPath: *acceptingOverridesPath, handoffkeep: handoffkeep})
+	hub, err := NewHubServer(HubServerConfig{DeliveryPolicyPath: *deliveryPolicyPath, InboxStorePath: *inboxStorePath, InboxDatabaseURL: os.Getenv(hubDatabaseURLEnv), Tokens: tokens, Scopes: scopes, AuthPath: *authPath, AlertNodes: alertNodes, Now: deps.Now, GracePeriod: *gracePeriod, Logger: logger, PlacementPolicyPath: placementPath, PrometheusURL: os.Getenv("PANEWIRE_PROM_URL"), PrometheusBearer: os.Getenv("PANEWIRE_PROM_BEARER"), PrometheusBasicUser: os.Getenv("PANEWIRE_PROM_BASIC_USER"), PrometheusBasicPass: os.Getenv("PANEWIRE_PROM_BASIC_PASS"), UIAllowCFOnly: *uiAllowCFOnly, CFAccessTeam: *cfAccessTeam, CFAccessAUD: *cfAccessAUD, CFAccessCertsURL: *cfAccessCertsURL, CFAccessHTTPClient: deps.ChatHTTPClient, ReportRelayPath: routePath, LanesNodeRowCap: *lanesNodeRowCap, PRStatusHost: *prStatusHost, ControlPlaneLanesPath: *controlPlaneLanesPath, AcceptingOverridesPath: *acceptingOverridesPath, handoffkeep: handoffkeep})
 	if err != nil {
 		return nil, "", ExitConditionInvalid, fmt.Errorf("hub configuration is invalid: %w", err)
 	}
@@ -305,15 +289,26 @@ func (t hubLogTeeHandler) Enabled(ctx context.Context, level slog.Level) bool {
 	return t.primary.Enabled(ctx, level) || t.file.Enabled(ctx, level)
 }
 
+// Handle writes the record to every sink that takes it and fails only when no
+// enabled sink accepted it. A record that reached one sink is not lost, so a
+// broken sink must not make a caller retry and duplicate it on the other one.
 func (t hubLogTeeHandler) Handle(ctx context.Context, record slog.Record) error {
+	var accepted bool
 	var err error
 	if t.primary.Enabled(ctx, record.Level) {
-		err = t.primary.Handle(ctx, record)
+		if err = t.primary.Handle(ctx, record); err == nil {
+			accepted = true
+		}
 	}
 	if t.file.Enabled(ctx, record.Level) {
-		if fileErr := t.file.Handle(ctx, record); err == nil {
+		if fileErr := t.file.Handle(ctx, record); fileErr == nil {
+			accepted = true
+		} else if err == nil {
 			err = fileErr
 		}
+	}
+	if accepted {
+		return nil
 	}
 	return err
 }

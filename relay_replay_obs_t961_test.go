@@ -258,13 +258,12 @@ func TestT961HubLogFileRejectsUnwritablePath(t *testing.T) {
 
 // t961StallHub builds a hub with a notifier and durable store for lane-stall
 // tests. node records are installed directly, as the heartbeat fixtures do.
-func t961StallHub(t *testing.T, lanes string, client *handoffkeepRelayClient, notifier HubNotifier) *HubServer {
+func t961StallHub(t *testing.T, lanes string, client *handoffkeepRelayClient, notifier *hubAlertLog) *HubServer {
 	t.Helper()
 	hub, err := NewHubServer(HubServerConfig{
 		Tokens:          map[string]string{"operator": "op", "host-a": "node-a", "host-b": "node-b"},
 		ReportRelayPath: r20LanesFile(t, lanes),
-		Notifier:        notifier,
-		Logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Logger:          notifier.Logger(),
 		handoffkeep:     client,
 	})
 	if err != nil {
@@ -311,7 +310,7 @@ func t961StallBroadcasts(events func(string) []json.RawMessage) []map[string]any
 func TestT961LaneStallAlertsAndRecovers(t *testing.T) {
 	fake, client, closeServer := newFakeHandoffkeep(t)
 	defer closeServer()
-	notifier := &task198Notifier{}
+	notifier := newHubAlertLog(nil)
 	hub := t961StallHub(t, `{"lanes":{"lane-a":{"machine":"host-a","pane":"w1:p1"},"offload":{"sink":true}}}`, client, notifier)
 	t961ActiveNode(hub, "host-a", HubActiveJob{JobID: "t961-job-1", OwnerLane: "lane-a"})
 	received := time.Now().UTC().Add(-(relayLaneStallAge + time.Minute)).Format(time.RFC3339Nano)
@@ -358,7 +357,7 @@ func TestT961LaneStallAlertsAndRecovers(t *testing.T) {
 func TestT961LaneStallCountsChildLaneWork(t *testing.T) {
 	fake, client, closeServer := newFakeHandoffkeep(t)
 	defer closeServer()
-	notifier := &task198Notifier{}
+	notifier := newHubAlertLog(nil)
 	hub := t961StallHub(t, `{"lanes":{"director-1":{"machine":"host-a","pane":"w1:p1"},"worker-lane":{"machine":"host-b","pane":"w1:p2","parent":"director-1"}}}`, client, notifier)
 	t961ActiveNode(hub, "host-b", HubActiveJob{JobID: "t961-job-2", OwnerLane: "worker-lane"})
 	fake.seedUndelivered(t961LaneRow(51, "director-1", "t961-stall-parent", time.Now().UTC().Add(-(relayLaneStallAge + time.Minute)).Format(time.RFC3339Nano), 1))
@@ -375,7 +374,7 @@ func TestT961LaneStallCountsChildLaneWork(t *testing.T) {
 func TestT961LaneStallTwoLanesAlertSeparately(t *testing.T) {
 	fake, client, closeServer := newFakeHandoffkeep(t)
 	defer closeServer()
-	notifier := &task198Notifier{}
+	notifier := newHubAlertLog(nil)
 	hub := t961StallHub(t, `{"lanes":{"lane-a":{"machine":"host-a","pane":"w1:p1"},"lane-b":{"machine":"host-b","pane":"w1:p2"}}}`, client, notifier)
 	t961ActiveNode(hub, "host-a", HubActiveJob{JobID: "t961-job-a", OwnerLane: "lane-a"})
 	t961ActiveNode(hub, "host-b", HubActiveJob{JobID: "t961-job-b", OwnerLane: "lane-b"})
@@ -431,7 +430,7 @@ func TestT961LaneStallNegativeCases(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			fake, client, closeServer := newFakeHandoffkeep(t)
 			defer closeServer()
-			notifier := &task198Notifier{}
+			notifier := newHubAlertLog(nil)
 			hub := t961StallHub(t, lanes, client, notifier)
 			if tc.active {
 				t961ActiveNode(hub, "host-a", HubActiveJob{JobID: "t961-job", OwnerLane: "lane-a"})
@@ -575,7 +574,7 @@ func t961tFlakyHandoffkeep(t *testing.T) (*t961tFlakyHK, *handoffkeepRelayClient
 
 func TestT961TesterStallReadErrorNeitherOpensNorCloses(t *testing.T) {
 	flaky, client := t961tFlakyHandoffkeep(t)
-	notifier := &task198Notifier{}
+	notifier := newHubAlertLog(nil)
 	hub := t961StallHub(t, `{"lanes":{"lane-a":{"machine":"host-a","pane":"w1:p1"},"offload":{"sink":true}}}`, client, notifier)
 	t961ActiveNode(hub, "host-a", HubActiveJob{JobID: "t961t-j1", OwnerLane: "lane-a"}, HubActiveJob{JobID: "t961t-j2", OwnerLane: "offload"})
 	agent := &hubAgent{relays: make(chan hubRelayInjectEvent, 8), persisted: make(chan hubRelayPersistedEvent, 8)}
@@ -655,7 +654,7 @@ func TestT961TesterStallReadErrorNeitherOpensNorCloses(t *testing.T) {
 func TestT961TesterStallOnePerEpisodeManySweeps(t *testing.T) {
 	fake, client, closeServer := newFakeHandoffkeep(t)
 	defer closeServer()
-	notifier := &task198Notifier{}
+	notifier := newHubAlertLog(nil)
 	hub := t961StallHub(t, `{"lanes":{"director-1":{"machine":"host-a","pane":"w1:p1"}}}`, client, notifier)
 	t961ActiveNode(hub, "host-a", HubActiveJob{JobID: "t961t-j", OwnerLane: "director-1"})
 	old := time.Now().UTC().Add(-(relayLaneStallAge + time.Minute)).Format(time.RFC3339Nano)
@@ -932,7 +931,7 @@ func TestT961TesterAlertTextNamesRealLanes(t *testing.T) {
 func TestT961TesterStallSweepConcurrentRace(t *testing.T) {
 	fake, client, closeServer := newFakeHandoffkeep(t)
 	defer closeServer()
-	notifier := &task198Notifier{}
+	notifier := newHubAlertLog(nil)
 	hub := t961StallHub(t, `{"lanes":{"lane-a":{"machine":"host-a","pane":"w1:p1"},"lane-b":{"machine":"host-b","pane":"w1:p2","parent":"lane-a"}}}`, client, notifier)
 	t961ActiveNode(hub, "host-b", HubActiveJob{JobID: "t961t-r", OwnerLane: "lane-b"})
 	old := time.Now().UTC().Add(-(relayLaneStallAge + time.Minute)).Format(time.RFC3339Nano)
@@ -999,7 +998,7 @@ func t961tBlockedHandoffkeep(t *testing.T) (*fakeHandoffkeep, *handoffkeepRelayC
 func TestT961TesterStallSweepDoesNotDelayNodeAlert(t *testing.T) {
 	fake, client, unblock, started := t961tBlockedHandoffkeep(t)
 	defer unblock()
-	notifier := &task198Notifier{}
+	notifier := newHubAlertLog(nil)
 	hub := t961StallHub(t, `{"lanes":{"l1":{"machine":"host-a","pane":"w1:p1"},"l2":{"machine":"host-a","pane":"w1:p2"}}}`, client, notifier)
 	t961ActiveNode(hub, "host-a", HubActiveJob{JobID: "j1", OwnerLane: "l1"}, HubActiveJob{JobID: "j2", OwnerLane: "l2"})
 	agent := &hubAgent{relays: make(chan hubRelayInjectEvent, 8), persisted: make(chan hubRelayPersistedEvent, 8), failovers: make(chan hubFailoverEvent, 8)}
@@ -1055,7 +1054,7 @@ func TestT961TesterStallSweepDoesNotDelayNodeAlert(t *testing.T) {
 func TestT961LaneStallSweepSingleFlight(t *testing.T) {
 	fake, client, unblock, started := t961tBlockedHandoffkeep(t)
 	defer unblock()
-	notifier := &task198Notifier{}
+	notifier := newHubAlertLog(nil)
 	hub := t961StallHub(t, `{"lanes":{"l1":{"machine":"host-a","pane":"w1:p1"},"l2":{"machine":"host-a","pane":"w1:p2"}}}`, client, notifier)
 	t961ActiveNode(hub, "host-a", HubActiveJob{JobID: "j1", OwnerLane: "l1"})
 	hub.Sweep() // starts the one run; it blocks on its first undelivered GET
@@ -1079,7 +1078,7 @@ func TestT961LaneStallSweepSingleFlight(t *testing.T) {
 func TestT961LaneStallCloseWaitsForRun(t *testing.T) {
 	_, client, unblock, started := t961tBlockedHandoffkeep(t)
 	defer unblock()
-	notifier := &task198Notifier{}
+	notifier := newHubAlertLog(nil)
 	hub := t961StallHub(t, `{"lanes":{"l1":{"machine":"host-a","pane":"w1:p1"}}}`, client, notifier)
 	t961ActiveNode(hub, "host-a", HubActiveJob{JobID: "j1", OwnerLane: "l1"})
 	hub.Sweep() // launches the run; it blocks on the undelivered GET
@@ -1111,7 +1110,7 @@ func TestT961LaneStallCloseWaitsForRun(t *testing.T) {
 func TestT961LaneStallBudgetLeavesEpisodesNeutral(t *testing.T) {
 	fake, client, closeServer := newFakeHandoffkeep(t)
 	defer closeServer()
-	notifier := &task198Notifier{}
+	notifier := newHubAlertLog(nil)
 	hub := t961StallHub(t, `{"lanes":{"lane-a":{"machine":"host-a","pane":"w1:p1"}}}`, client, notifier)
 	t961ActiveNode(hub, "host-a", HubActiveJob{JobID: "t961-budget", OwnerLane: "lane-a"})
 	old := time.Now().UTC().Add(-(relayLaneStallAge + time.Minute)).Format(time.RFC3339Nano)

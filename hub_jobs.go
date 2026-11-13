@@ -1,7 +1,6 @@
 package panewire
 
 import (
-	"context"
 	"encoding/json"
 	"maps"
 	"regexp"
@@ -601,16 +600,4 @@ func (h *HubServer) queueJobEventLocked(kind string, payload hubJobEventPayload)
 	}
 	h.recordUIEventWithJobLocked("job", strings.TrimPrefix(kind, "job."), node, payload.JobID, h.now().UTC())
 	go h.broadcast(hubEvent{MachineID: node, Kind: kind, Payload: encoded, Received: h.now().UTC()})
-	if kind != "job.orphaned" {
-		return
-	}
-	if notifier, ok := h.notifier.(interface {
-		SendJob(context.Context, string) error
-	}); ok {
-		text := "job " + strings.TrimPrefix(kind, "job.") + " id=" + payload.JobID
-		if node != "" {
-			text += " node=" + node
-		}
-		go func() { _ = notifier.SendJob(context.Background(), text) }()
-	}
 }
