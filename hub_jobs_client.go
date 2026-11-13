@@ -111,18 +111,17 @@ func scanHubActiveJobsForLimit(ctx context.Context, inboxRoot string, panesAlive
 	if inboxRoot == "" {
 		return nil
 	}
-	entries, err := os.ReadDir(filepath.Join(inboxRoot, "jobs"))
-	if err != nil {
-		return nil
-	}
-	jobs := make([]hubScannedJob, 0, len(entries))
-	for _, entry := range entries {
-		if !entry.IsDir() || !hubJobIDPattern.MatchString(entry.Name()) {
-			continue
-		}
-		if scanned, ok := scanHubJobEventDetails(filepath.Join(inboxRoot, "jobs", entry.Name(), "events"), entry.Name()); ok {
+	now := time.Now()
+	activeCutoff, staleCutoff := now.Add(-hubJobActiveMaxAge()), now.Add(-hubJobStaleAge())
+	jobs := make([]hubScannedJob, 0, 32)
+	err := hubIndexFor(inboxRoot).visitJobs(nil, false, func(job *hubIndexedJob) bool {
+		if scanned, ok := job.reduction.scanned(activeCutoff, staleCutoff); ok {
 			jobs = append(jobs, scanned)
 		}
+		return true
+	})
+	if err != nil {
+		return nil
 	}
 	// Filtering precedes the cap: stale entries must not consume the 32 slots
 	// that the still-live jobs need.
@@ -199,129 +198,26 @@ func scanHubRelayEvents(inboxRoot string) []hubScannedRelayEvent {
 // scanHubRelayEventsWithin additionally bounds the scan by event-file mtime.
 // The node outbox passes relayOutboxMaxAge so a restart cannot resurrect days
 // of retained files; a zero maxAge keeps the historical unbounded behavior.
+// It reads through the inbox index (docs/job-event-index.md): only job
+// directories that changed since the last pass are read from disk.
 func scanHubRelayEventsWithin(inboxRoot string, maxAge time.Duration) []hubScannedRelayEvent {
 	if inboxRoot == "" {
 		return nil
 	}
+	now := time.Now()
 	var mtimeCutoff time.Time
 	if maxAge > 0 {
-		mtimeCutoff = time.Now().Add(-maxAge)
+		mtimeCutoff = now.Add(-maxAge)
 	}
-	entries, err := os.ReadDir(filepath.Join(inboxRoot, "jobs"))
+	activeCutoff := now.Add(-hubJobActiveMaxAge())
+	ix := hubIndexFor(inboxRoot)
+	var events []hubScannedRelayEvent
+	err := ix.visitJobs(nil, false, func(job *hubIndexedJob) bool {
+		events = appendHubJobRelayEvents(events, ix.jobsDir, job, now, mtimeCutoff, activeCutoff)
+		return true
+	})
 	if err != nil {
 		return scanHubLaneEventsWithin(inboxRoot, maxAge)
-	}
-	var events []hubScannedRelayEvent
-	for _, entry := range entries {
-		if !entry.IsDir() || !hubJobIDPattern.MatchString(entry.Name()) {
-			continue
-		}
-		dir := filepath.Join(inboxRoot, "jobs", entry.Name(), "events")
-		files, err := os.ReadDir(dir)
-		if err != nil {
-			continue
-		}
-		sort.Slice(files, func(i, j int) bool { return files[i].Name() < files[j].Name() })
-		// The claim record is the node-local source of a job's agent label. It
-		// is carried onto the terminal record so the hub can late-register a job
-		// that finished before any heartbeat advertised it (R19e). Files are in
-		// sequence order, so the claim is seen before its own completion.
-		var claimLabel string
-		for _, file := range files {
-			if file.IsDir() || !strings.HasSuffix(file.Name(), ".json") {
-				continue
-			}
-			if !mtimeCutoff.IsZero() {
-				info, statErr := file.Info()
-				if statErr != nil || info.ModTime().Before(mtimeCutoff) {
-					continue
-				}
-			}
-			contents, err := os.ReadFile(filepath.Join(dir, file.Name()))
-			if err != nil || len(contents) > 16<<10 {
-				continue
-			}
-			var event hubInboxEvent
-			if json.Unmarshal(contents, &event) != nil {
-				continue
-			}
-			eventTime := event.eventTime(file, dir)
-			if eventTime.Before(time.Now().Add(-hubJobActiveMaxAge())) {
-				continue
-			}
-			kind := event.eventKind()
-			if kind == "job.claimed" || kind == "job.claim" {
-				if label := event.agentLabel(); hubAgentLabelPattern.MatchString(label) {
-					claimLabel = label
-				}
-				continue
-			}
-			if kind == "job.completion" {
-				kind = "job.completed"
-			}
-			// The relay kind set is emitRelayKinds — one closed set read by the
-			// producer and the scanner alike. lane.event lives in the
-			// events-lane namespace and is scanned by its own reader below.
-			if !emitRelayKinds[kind] || kind == "lane.event" {
-				continue
-			}
-			agentLabel := event.agentLabel()
-			if !hubAgentLabelPattern.MatchString(agentLabel) {
-				agentLabel = claimLabel
-			}
-			epoch := event.Epoch
-			if epoch == 0 {
-				epoch = 1
-			}
-			// Every relayed job.* kind except a completion states why. This is
-			// also the echo guard: the hub's own revocation marker carries no
-			// reason, so a hub→node job.revoked is never relayed back.
-			if kind != "job.completed" && event.reason() == "" {
-				continue
-			}
-			// A terminal signal without a routable owner lane can never be
-			// delivered — emitting it would only stamp an outbox row the hub's
-			// relayJobEventFrom drops unanswered.
-			if relayTerminalSignalKinds[kind] && !validLaneReference(event.ownerLane()) && !(kind == "job.lost" && event.reason() == "quota_stop" && event.Payload.Pool != "") {
-				continue
-			}
-			reportPath := relaySignalReportPath(kind, event.reportPath())
-			ownerLane := event.ownerLane()
-			if kind == "job.completed" && event.isLifecycleEnvelope() {
-				// hub.go's R18 contract: "R14 fencing answers \"may this job be
-				// redispatched\"; R18 relay answers \"must this report reach its
-				// lane\"." The envelope's owner_lane is the job's own lane, which
-				// has no route once the job ends, so sending it answers neither
-				// and stays unacknowledged until relayOutboxMaxAge drops the file.
-				// The flat record is the delivery; the envelope only stands in
-				// for it once emit has had time to write one and has not. The
-				// claim label above still rides on it, per the R19e comment:
-				// "carried onto the terminal record so the hub can late-register
-				// a job that finished before any heartbeat advertised it".
-				if jobHasFlatCompletion(dir, files, epoch) || time.Since(eventTime) < lifecycleEnvelopeSettle {
-					continue
-				}
-				ownerLane, reportPath = event.lifecycleRouteLane(entry.Name()), event.Payload.Report
-			}
-			if relayEventPathFallbackKinds[kind] && reportPath == "" {
-				// The event is the durable full-question record when no separate
-				// report exists. The hub payload must point operators back to it,
-				// and `panewire emit` substitutes the very same path.
-				reportPath = filepath.Join(dir, file.Name())
-			}
-			reason := event.reason()
-			if kind == "job.lost" && reason == "quota_stop" && event.Payload.Pool != "" {
-				reset := event.Payload.ResetAt
-				if reset == "" {
-					reset = eventTime.Add(5 * time.Minute).UTC().Format(time.RFC3339Nano)
-				}
-				reason += " pool=" + event.Payload.Pool + " reset_at=" + reset
-			}
-			// The event file name is the job event's durable identity: it is
-			// unique per emission, stable across node restarts, and shared by
-			// `panewire emit`, which derives the same value for its file.
-			events = append(events, hubScannedRelayEvent{DeliveryClass: event.DeliveryClass, Late: event.Late || event.Payload.Late, NotifyType: event.notifyType(), Cause: event.Cause, Kind: kind, HubActiveJob: HubActiveJob{JobID: entry.Name(), Epoch: epoch, AgentLabel: agentLabel, OwnerLane: ownerLane, Label: event.label(), Host: event.host(), ReportPath: reportPath, ReportLastLine: event.reportLastLine()}, Reason: reason, Question: event.question(), PR: event.pr(), Head: event.head(), PaneID: event.paneID(), EventID: file.Name(), EventTime: eventTime})
-		}
 	}
 	sort.Slice(events, func(i, j int) bool {
 		if events[i].JobID == events[j].JobID {
@@ -332,74 +228,116 @@ func scanHubRelayEventsWithin(inboxRoot string, maxAge time.Duration) []hubScann
 	return append(events, scanHubLaneEventsWithin(inboxRoot, maxAge)...)
 }
 
-// scanHubLaneEventsWithin reads the isolated lane-event namespace. It never
-// traverses jobs/, which keeps direct lane notifications out of active job
-// registration, late registration, and orphan sweeping.
-func scanHubLaneEventsWithin(inboxRoot string, maxAge time.Duration) []hubScannedRelayEvent {
-	dir := filepath.Join(inboxRoot, "events-lane")
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return nil
-	}
-	var cutoff time.Time
-	if maxAge > 0 {
-		cutoff = time.Now().Add(-maxAge)
-	}
-	out := make([]hubScannedRelayEvent, 0, len(entries))
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+// appendHubJobRelayEvents appends the relay events one job's records yield.
+func appendHubJobRelayEvents(events []hubScannedRelayEvent, jobsDir string, job *hubIndexedJob, now, mtimeCutoff, activeCutoff time.Time) []hubScannedRelayEvent {
+	// The claim record is the node-local source of a job's agent label. It
+	// is carried onto the terminal record so the hub can late-register a job
+	// that finished before any heartbeat advertised it (R19e). Files are in
+	// sequence order, so the claim is seen before its own completion.
+	var claimLabel string
+	for i := range job.events {
+		indexed := &job.events[i]
+		if !mtimeCutoff.IsZero() && (!indexed.infoOK || indexed.modTime.Before(mtimeCutoff)) {
 			continue
 		}
-		if !cutoff.IsZero() {
-			info, statErr := entry.Info()
-			if statErr != nil || info.ModTime().Before(cutoff) {
-				continue
+		event := &indexed.event
+		eventTime := indexed.eventTime
+		if eventTime.Before(activeCutoff) {
+			continue
+		}
+		kind := indexed.kind
+		if kind == "job.claimed" || kind == "job.claim" {
+			if label := event.agentLabel(); hubAgentLabelPattern.MatchString(label) {
+				claimLabel = label
 			}
-		}
-		contents, err := os.ReadFile(filepath.Join(dir, entry.Name()))
-		if err != nil || len(contents) > 16<<10 {
 			continue
 		}
-		var event hubInboxEvent
-		if json.Unmarshal(contents, &event) != nil || event.eventKind() != "lane.event" {
+		if kind == "job.completion" {
+			kind = "job.completed"
+		}
+		// The relay kind set is emitRelayKinds — one closed set read by the
+		// producer and the scanner alike. lane.event lives in the
+		// events-lane namespace and is scanned by its own reader below.
+		if !emitRelayKinds[kind] || kind == "lane.event" {
 			continue
 		}
-		lane, eventID, text := event.ownerLane(), event.eventID(), event.text()
-		if !validInboxCause(event.Cause) || !validLaneReference(lane) || !validLaneEventID(eventID) || !validLaneEventText(text) || len(text) > laneEventTextLimitSink {
-			continue
+		agentLabel := event.agentLabel()
+		if !hubAgentLabelPattern.MatchString(agentLabel) {
+			agentLabel = claimLabel
 		}
 		epoch := event.Epoch
 		if epoch == 0 {
 			epoch = 1
 		}
-		out = append(out, hubScannedRelayEvent{DeliveryClass: event.DeliveryClass, NotifyType: event.notifyType(), Cause: event.Cause, Head: event.head(), PR: event.pr(), Kind: "lane.event", HubActiveJob: HubActiveJob{JobID: laneEventTransportID(lane, eventID), Epoch: epoch, OwnerLane: lane, Label: event.label(), Host: event.host()}, PaneID: event.paneID(), EventID: eventID, Text: text, Truncated: event.truncated()})
-	}
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].OwnerLane == out[j].OwnerLane {
-			return out[i].EventID < out[j].EventID
+		// Every relayed job.* kind except a completion states why. This is
+		// also the echo guard: the hub's own revocation marker carries no
+		// reason, so a hub→node job.revoked is never relayed back.
+		if kind != "job.completed" && event.reason() == "" {
+			continue
 		}
-		return out[i].OwnerLane < out[j].OwnerLane
-	})
-	return out
+		// A terminal signal without a routable owner lane can never be
+		// delivered — emitting it would only stamp an outbox row the hub's
+		// relayJobEventFrom drops unanswered.
+		if relayTerminalSignalKinds[kind] && !validLaneReference(event.ownerLane()) && !(kind == "job.lost" && event.reason() == "quota_stop" && event.Payload.Pool != "") {
+			continue
+		}
+		reportPath := relaySignalReportPath(kind, event.reportPath())
+		ownerLane := event.ownerLane()
+		if kind == "job.completed" && event.isLifecycleEnvelope() {
+			// hub.go's R18 contract: "R14 fencing answers \"may this job be
+			// redispatched\"; R18 relay answers \"must this report reach its
+			// lane\"." The envelope's owner_lane is the job's own lane, which
+			// has no route once the job ends, so sending it answers neither
+			// and stays unacknowledged until relayOutboxMaxAge drops the file.
+			// The flat record is the delivery; the envelope only stands in
+			// for it once emit has had time to write one and has not. The
+			// claim label above still rides on it, per the R19e comment:
+			// "carried onto the terminal record so the hub can late-register
+			// a job that finished before any heartbeat advertised it".
+			if hubJobHasFlatCompletion(job.events, epoch) || now.Sub(eventTime) < lifecycleEnvelopeSettle {
+				continue
+			}
+			ownerLane, reportPath = event.lifecycleRouteLane(job.id), event.Payload.Report
+		}
+		if relayEventPathFallbackKinds[kind] && reportPath == "" {
+			// The event is the durable full-question record when no separate
+			// report exists. The hub payload must point operators back to it,
+			// and `panewire emit` substitutes the very same path.
+			reportPath = filepath.Join(jobsDir, job.id, "events", indexed.name)
+		}
+		reason := event.reason()
+		if kind == "job.lost" && reason == "quota_stop" && event.Payload.Pool != "" {
+			reset := event.Payload.ResetAt
+			if reset == "" {
+				reset = eventTime.Add(5 * time.Minute).UTC().Format(time.RFC3339Nano)
+			}
+			reason += " pool=" + event.Payload.Pool + " reset_at=" + reset
+		}
+		// The event file name is the job event's durable identity: it is
+		// unique per emission, stable across node restarts, and shared by
+		// `panewire emit`, which derives the same value for its file.
+		events = append(events, hubScannedRelayEvent{DeliveryClass: event.DeliveryClass, Late: event.Late || event.Payload.Late, NotifyType: event.notifyType(), Cause: event.Cause, Kind: kind, HubActiveJob: HubActiveJob{JobID: job.id, Epoch: epoch, AgentLabel: agentLabel, OwnerLane: ownerLane, Label: event.label(), Host: event.host(), ReportPath: reportPath, ReportLastLine: event.reportLastLine()}, Reason: reason, Question: event.question(), PR: event.pr(), Head: event.head(), PaneID: event.paneID(), EventID: indexed.name, EventTime: eventTime})
+	}
+	return events
 }
 
-// jobHasFlatCompletion reports whether a job's event files hold a flat
-// job.completed record for this epoch. It reads every file rather than only the
-// ones the scan kept: an age cut on the record must not revive its envelope.
-func jobHasFlatCompletion(dir string, files []os.DirEntry, epoch uint64) bool {
-	for _, file := range files {
-		if file.IsDir() || !strings.HasSuffix(file.Name(), ".json") {
+// scanHubLaneEventsWithin reads the isolated lane-event namespace. It never
+// traverses jobs/, which keeps direct lane notifications out of active job
+// registration, late registration, and orphan sweeping.
+func scanHubLaneEventsWithin(inboxRoot string, maxAge time.Duration) []hubScannedRelayEvent {
+	return hubIndexFor(inboxRoot).laneEvents(maxAge)
+}
+
+// hubJobHasFlatCompletion reports whether a job's event files hold a flat
+// job.completed record for this epoch. It reads every event rather than only
+// the ones the scan kept: an age cut on the record must not revive its envelope.
+func hubJobHasFlatCompletion(events []hubIndexedEvent, epoch uint64) bool {
+	for i := range events {
+		event := &events[i].event
+		if event.OwnerLane == "" {
 			continue
 		}
-		contents, err := os.ReadFile(filepath.Join(dir, file.Name()))
-		if err != nil || len(contents) > 16<<10 {
-			continue
-		}
-		var event hubInboxEvent
-		if json.Unmarshal(contents, &event) != nil || event.OwnerLane == "" {
-			continue
-		}
-		kind, recordEpoch := event.eventKind(), event.Epoch
+		kind, recordEpoch := events[i].kind, event.Epoch
 		if recordEpoch == 0 {
 			recordEpoch = 1
 		}
@@ -566,11 +504,21 @@ func (e hubInboxEvent) eventID() string { return e.EventID }
 func (e hubInboxEvent) text() string    { return e.Text }
 func (e hubInboxEvent) truncated() bool { return e.Truncated }
 func (e hubInboxEvent) eventTime(entry os.DirEntry, eventsDir string) time.Time {
+	info, err := entry.Info()
+	if err != nil {
+		return e.eventTimeAt(time.Time{}, false)
+	}
+	return e.eventTimeAt(info.ModTime(), true)
+}
+
+// eventTimeAt is the event's time: its created_at when that parses, else the
+// file's mtime when it is known.
+func (e hubInboxEvent) eventTimeAt(modTime time.Time, modTimeOK bool) time.Time {
 	if parsed, err := time.Parse(time.RFC3339, e.CreatedAt); err == nil {
 		return parsed
 	}
-	if info, err := entry.Info(); err == nil {
-		return info.ModTime()
+	if modTimeOK {
+		return modTime
 	}
 	return time.Time{}
 }
@@ -587,74 +535,16 @@ func hubJobEndKind(kind string) bool {
 	return false
 }
 
+// scanHubJobEventDetails reads one job's events directory afresh, without the
+// index. The daemon's scans go through hubInboxIndex; this stays the
+// single-directory reader.
 func scanHubJobEventDetails(eventsDir, jobID string) (hubScannedJob, bool) {
-	entries, err := os.ReadDir(eventsDir)
-	if err != nil {
+	load, ok := loadHubJobEvents(eventsDir)
+	if !ok {
 		return hubScannedJob{}, false
 	}
-	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
-	var active HubActiveJob
-	var claimTime, lastEvent time.Time
-	var lastEventKind string
-	var paneID string
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
-			continue
-		}
-		contents, err := os.ReadFile(filepath.Join(eventsDir, entry.Name()))
-		if err != nil || len(contents) > 16<<10 {
-			continue
-		}
-		var event hubInboxEvent
-		if json.Unmarshal(contents, &event) != nil {
-			continue
-		}
-		eventTime := event.eventTime(entry, eventsDir)
-		if !eventTime.Before(lastEvent) {
-			lastEvent = eventTime
-			lastEventKind = event.eventKind()
-		}
-		seq, seqOK := hubEventSequence(entry.Name())
-		switch event.eventKind() {
-		case "job.claimed", "job.claim":
-			epoch := event.Epoch
-			if epoch == 0 {
-				epoch = 1
-			}
-			candidate := HubActiveJob{JobID: jobID, AgentLabel: event.agentLabel(), LastEventSeq: seq, Epoch: epoch, OwnerLane: event.ownerLane(), Tier: event.tLevel(), Role: event.role()}
-			if !eventTime.IsZero() {
-				candidate.StartedAt = eventTime.UTC().Format(time.RFC3339)
-			}
-			normalizeHubActiveJobMetadata(&candidate)
-			if seqOK && validHubActiveJob(candidate) {
-				active, claimTime = candidate, eventTime
-			}
-		case "job.spawned":
-			// The spawn record is the only place the worker pane is named.
-			paneID = event.paneID()
-		default:
-			if hubJobEndKind(event.eventKind()) {
-				active, claimTime, paneID = HubActiveJob{}, time.Time{}, ""
-			}
-		}
-	}
-	if !validHubActiveJob(active) || claimTime.Before(time.Now().Add(-hubJobActiveMaxAge())) {
-		return hubScannedJob{}, false
-	}
-	// #770: a job that never recorded a pane has no liveness cross-check at
-	// all — a pane-named job is dropped by filterActiveJobsByPane the moment
-	// its pane dies, but a paneless claim only has event freshness. Past the
-	// stale age it leaves the active set; the local records are untouched.
-	if paneID == "" && !lastEvent.IsZero() && lastEvent.Before(time.Now().Add(-hubJobStaleAge())) {
-		return hubScannedJob{}, false
-	}
-	active.Pane = paneID
-	active.LastEventKind = lastEventKind
-	if !lastEvent.IsZero() {
-		active.LastEventAt = lastEvent.UTC().Format(time.RFC3339)
-	}
-	normalizeHubActiveJobMetadata(&active)
-	return hubScannedJob{job: active, lastEvent: lastEvent, paneID: paneID}, true
+	now := time.Now()
+	return reduceHubJobEvents(jobID, load.events).scanned(now.Add(-hubJobActiveMaxAge()), now.Add(-hubJobStaleAge()))
 }
 
 func scanHubJobEvents(eventsDir, jobID string) (HubActiveJob, bool) {
