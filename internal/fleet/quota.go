@@ -44,6 +44,10 @@ type QuotaRequest struct {
 	// requires one. pacelever reads it from its own environment, so Launch and
 	// Gate pass it explicitly instead of relying on this process having it.
 	E6Arm string
+	// E6ArmLocked marks a request whose marker is already authoritative (a
+	// hub submission or a node-delivered spawn): the process environment
+	// never fills an empty E6Arm.
+	E6ArmLocked bool
 }
 
 // CatalogRow is one bench catalog rung: profile@effort with its operator-set

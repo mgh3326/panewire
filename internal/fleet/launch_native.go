@@ -85,11 +85,16 @@ func (a *App) offlineLaunch(r QuotaRequest) (l Launch, found bool, err error) {
 }
 
 // launchRequest applies the request's marker, then the panewire environment
-// override and its retired pacelever name as fallback.
+// override and its retired pacelever name as fallback. A locked request (a
+// hub submission or a node-delivered spawn) reads no environment: its marker
+// is already authoritative.
 func launchRequest(r QuotaRequest) admissionRequest {
-	e6Arm := strings.TrimSpace(os.Getenv("PANEWIRE_E6_ARM"))
-	if e6Arm == "" {
-		e6Arm = os.Getenv("PACELEVER_E6_ARM")
+	e6Arm := ""
+	if !r.E6ArmLocked {
+		e6Arm = strings.TrimSpace(os.Getenv("PANEWIRE_E6_ARM"))
+		if e6Arm == "" {
+			e6Arm = os.Getenv("PACELEVER_E6_ARM")
+		}
 	}
 	return admissionRequest{Profile: r.Profile, Effort: r.Effort, Role: r.Role, Purpose: r.Purpose, OperatorRequest: r.OperatorRequest, RequestedBy: r.RequestedBy, E6Arm: strings.TrimSpace(firstNonempty(r.E6Arm, e6Arm))}
 }
