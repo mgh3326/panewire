@@ -21,6 +21,27 @@ import (
 
 type staleRefreshQuota struct{ retryQuota }
 
+type secondPoolRefreshQuota struct{ retryQuota }
+
+func (secondPoolRefreshQuota) Catalog(context.Context) ([]fleet.CatalogRow, error) {
+	return []fleet.CatalogRow{{Profile: "codex-sol", Effort: "high", Grade: "B", ModelID: "m", Pool: "codex", Gate: "default"}}, nil
+}
+
+type secondPoolRefreshSource struct {
+	now  time.Time
+	host string
+}
+
+func (secondPoolRefreshSource) Hosts(context.Context, string) ([]fleet.HostView, error) {
+	return nil, nil
+}
+func (s secondPoolRefreshSource) Presence(context.Context) ([]fleet.PresenceRecord, error) {
+	return []fleet.PresenceRecord{{HostID: s.host, AccountKey: "codex:0000000000000001", LastSeen: s.now}}, nil
+}
+func (s secondPoolRefreshSource) SharedAccount(_ context.Context, key string) (fleet.SharedAccount, error) {
+	return fleet.SharedAccount{Key: key, Observed: true, MeasuredAt: s.now.Add(-time.Hour)}, nil
+}
+
 func (staleRefreshQuota) Launch(ctx context.Context, request fleet.QuotaRequest) (fleet.Launch, error) {
 	launch, err := (retryQuota{}).Launch(ctx, request)
 	launch.Pool = "claude"
@@ -364,6 +385,65 @@ func TestHubQuotaRefreshFairAdmissionAndDeduplication(t *testing.T) {
 		}
 	}) || seen[next.host] {
 		t.Fatalf("queued node did not receive the freed slot: next=%+v admitted=%v", next, seen)
+	}
+
+	// Queue a different pool on a still-busy node. Once all other nodes have
+	// finished, spare global slots must not admit a second refresh there.
+	busy := first[1]
+	h.spawnNewApp = func(out, errout io.Writer) (*fleet.App, error) {
+		app := retryDispatchApp(t, out, errout)
+		app.Config.Hosts = map[string]map[string]any{}
+		for _, host := range hosts {
+			app.Config.Hosts[host] = map[string]any{}
+		}
+		app.Config.HostOrder = hosts
+		app.Quota = secondPoolRefreshQuota{}
+		app.Source = secondPoolRefreshSource{now: app.Now(), host: busy.host}
+		return app, nil
+	}
+	h.executeSpawnTask(ctx, task)
+	nodeCommandReplyTo(t, connections[first[2].host], first[2].message, map[string]any{"result": map[string]any{"outcome": "refreshed"}})
+	var last observed
+	if !waitUntil(time.Second, func() bool {
+		select {
+		case last = <-observedCommands:
+			return true
+		default:
+			return false
+		}
+	}) || seen[last.host] || last.host == next.host {
+		t.Fatalf("the final queued node did not progress: next=%+v", last)
+	}
+	for _, item := range []observed{first[3], next, last} {
+		nodeCommandReplyTo(t, connections[item.host], item.message, map[string]any{"result": map[string]any{"outcome": "refreshed"}})
+	}
+	eventually(t, time.Second, "other nodes finished their refreshes", func() bool {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		return len(h.nodeCommands) == 1
+	})
+	// This quiet window proves that a free global slot cannot bypass the
+	// still-busy node's per-node admission limit.
+	if waitUntil(150*time.Millisecond, func() bool {
+		select {
+		case extra = <-observedCommands:
+			return true
+		default:
+			return false
+		}
+	}) {
+		t.Fatalf("a second pool ran while its node was busy: %+v", extra)
+	}
+	nodeCommandReplyTo(t, connections[busy.host], busy.message, map[string]any{"result": map[string]any{"outcome": "refreshed"}})
+	if !waitUntil(time.Second, func() bool {
+		select {
+		case extra = <-observedCommands:
+			return true
+		default:
+			return false
+		}
+	}) || extra.host != busy.host || string(extra.message["args"]) != `{"pool":"codex"}` {
+		t.Fatalf("the second pool did not run after its node became free: %+v", extra)
 	}
 }
 
