@@ -17,7 +17,12 @@ object from name to absolute path:
 
 Without a `checkouts` key the list is `rstack` → `~/.agents/rstack`. A name must
 match `^[a-z0-9][a-z0-9._-]{0,63}$` and a path must be absolute; an entry that
-fails either is dropped. An order's `checkout` is only ever a name: no path, no
+fails either refuses the whole spawn.json (`checkouts_invalid`), as an invalid
+`cwd_map` does, so the mistake is visible. The key is part of the one strict
+spawn.json schema (`hubSpawnConfig`), so a key the schema does not declare still
+fails `config_json_invalid`. When spawn.json does not load, checkout.pull has
+no allow-list and refuses every name (fail closed); a spawn.json that is absent
+gives the default. An order's `checkout` is only ever a name: no path, no
 command, and nothing outside this list is reachable.
 
 ## Node op: `checkout.pull`
@@ -41,7 +46,9 @@ pull reports the state it found: unchanged for `not-fast-forward`, and
 6. `git fetch --quiet`, then `git pull --ff-only --quiet`. A failed pull is
    read back before it is named: if HEAD moved or the worktree is dirty, the
    pull was interrupted mid-apply and is refused `pull-interrupted`, with `to`
-   set to the HEAD found; the operator must inspect it. An unchanged pull that
+   set to the HEAD found; the operator must inspect it. If HEAD cannot be read
+   back after a pull that succeeded, the result is also `pull-interrupted`, with
+   no `to`. No other refusal carries `to`. An unchanged pull that
    cannot fast-forward is refused `not-fast-forward`; any other unchanged pull
    failure is `pull-failed`. A failed fetch is `fetch-failed`.
 7. If HEAD moved and the pulled range changed a file under `install/` or

@@ -238,10 +238,15 @@ func firstCheckoutPullTarget(rows []hubCheckoutPullHost) string {
 	sorted := append([]hubCheckoutPullHost(nil), rows...)
 	sort.SliceStable(sorted, func(i, j int) bool { return sorted[i].Machine < sorted[j].Machine })
 	for _, row := range sorted {
+		// Only a host that pulled or was current reached a revision; a refusal's
+		// to, when it names one, is not a deployed revision.
 		var result struct {
-			To string `json:"to"`
+			Outcome string `json:"outcome"`
+			To      string `json:"to"`
 		}
-		if len(row.Result) > 0 && json.Unmarshal(row.Result, &result) == nil && nodeShaPattern.MatchString(result.To) {
+		if len(row.Result) > 0 && json.Unmarshal(row.Result, &result) == nil &&
+			(result.Outcome == nodeCheckoutOutcomePulled || result.Outcome == nodeCheckoutOutcomeCurrent) &&
+			nodeShaPattern.MatchString(result.To) {
 			return result.To
 		}
 	}

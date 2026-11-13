@@ -342,3 +342,20 @@ func TestNodeAdvertisesCheckoutPullOnlyToAcceptingHub(t *testing.T) {
 		t.Fatal("a hub that listed checkout_pull did not receive checkouts")
 	}
 }
+
+// TestHubDeployKeyIgnoresRefusedRevisions: a refused host's to is never the
+// deployed revision, so it cannot name the record.
+func TestHubDeployKeyIgnoresRefusedRevisions(t *testing.T) {
+	stale := strings.Repeat("1", 40)
+	reached := strings.Repeat("2", 40)
+	rows := []hubCheckoutPullHost{
+		{Machine: "machine-a", Result: json.RawMessage(`{"outcome":"refused","reason":"not-fast-forward","to":"` + stale + `"}`)},
+		{Machine: "machine-b", Result: json.RawMessage(`{"outcome":"pulled","to":"` + reached + `"}`)},
+	}
+	if got := firstCheckoutPullTarget(rows); got != reached {
+		t.Fatalf("target=%q, want the pulled host's %s", got, reached)
+	}
+	if got := firstCheckoutPullTarget(rows[:1]); got != "" {
+		t.Fatalf("target=%q from refusals only, want none", got)
+	}
+}

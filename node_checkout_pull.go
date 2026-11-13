@@ -2,7 +2,6 @@ package panewire
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
@@ -125,45 +124,25 @@ func nodeCheckoutDefaults() map[string]string {
 	return map[string]string{nodeCheckoutDefaultName: filepath.Join(home, nodeCheckoutDefaultDir)}
 }
 
-// nodeCheckoutConfigured reads the optional `checkouts` object (name to
-// absolute path) from spawn.json. A missing or unreadable file, or no
-// `checkouts` key, keeps the defaults. Entries that are not a valid name and
-// absolute path are dropped, so the list never names more than was written.
-func nodeCheckoutConfigured(path string) map[string]string {
-	info, err := os.Lstat(path)
-	if err != nil || !info.Mode().IsRegular() || info.Size() > 64<<10 {
-		return nodeCheckoutDefaults()
-	}
-	contents, err := os.ReadFile(path)
-	if err != nil {
-		return nodeCheckoutDefaults()
-	}
-	var config struct {
-		Checkouts map[string]string `json:"checkouts"`
-	}
-	if json.Unmarshal(contents, &config) != nil || config.Checkouts == nil {
-		return nodeCheckoutDefaults()
-	}
-	allow := make(map[string]string, len(config.Checkouts))
-	for name, dir := range config.Checkouts {
-		if !nodeCheckoutNamePattern.MatchString(name) || !filepath.IsAbs(dir) || len(dir) > nodeCommandMaxPathBytes {
-			continue
-		}
-		allow[name] = filepath.Clean(dir)
-	}
-	return allow
-}
-
 // nodeCheckoutAllowList returns name to directory for every checkout the node
-// may act on. Nothing outside it is reachable through checkout.pull.
+// may act on, read from the loaded spawn.json (hubSpawnConfig.Checkouts, the one
+// parser). No config, or no checkouts key, gives the default rstack checkout. A
+// config that does not load gives an empty list: checkout.pull fails closed.
 func (client *HubClient) nodeCheckoutAllowList() map[string]string {
 	if client != nil && client.nodeCheckouts != nil {
 		return client.nodeCheckouts
 	}
-	if client == nil || client.spawnConfigPath == "" {
+	if client == nil {
+		return map[string]string{}
+	}
+	config, defaults, err := client.resolveHubSpawnConfig()
+	if err != nil {
+		return map[string]string{}
+	}
+	if defaults || config.Checkouts == nil {
 		return nodeCheckoutDefaults()
 	}
-	return nodeCheckoutConfigured(client.spawnConfigPath)
+	return config.Checkouts
 }
 
 // checkoutPeerAccepted reports whether the current hub listed
@@ -302,12 +281,18 @@ func (client *HubClient) nodeCheckoutPullRun(ctx context.Context, name, dir, rev
 		// A failed pull may have moved HEAD or the worktree before it died, so
 		// the state is read back and reported, not assumed clean.
 		reason, head := nodeCheckoutFailedPull(ctx, dir, strings.TrimSpace(string(from)))
-		result.To = head
+		if reason == nodeCheckoutReasonPullInterrupted {
+			// Only an interrupted pull names the HEAD it left; an unchanged
+			// refusal reports no revision, so none can reach a deploy record.
+			result.To = head
+		}
 		return refuse(reason)
 	}
 	to, err := runNodeCheckoutGit(ctx, dir, nodeCheckoutRevTimeout, "rev-parse", "--verify", "HEAD")
 	if err != nil {
-		return refuse(nodeCheckoutReasonGitFailed)
+		// The pull succeeded, so HEAD may have moved; without a readable HEAD the
+		// state cannot be confirmed, and that is reported as interrupted.
+		return refuse(nodeCheckoutReasonPullInterrupted)
 	}
 	result.From = strings.TrimSpace(string(from))
 	result.To = strings.TrimSpace(string(to))
@@ -318,7 +303,7 @@ func (client *HubClient) nodeCheckoutPullRun(ctx context.Context, name, dir, rev
 		// Renames are off so a file moved out of install/ or bin/ lists its old
 		// path too. A range whose file list cannot be read gets install, not
 		// silence: a stale install is the worse failure.
-		changed, err := runNodeCheckoutGit(ctx, dir, nodeCheckoutRevTimeout, "diff", "--no-renames", "--name-only", result.From, result.To)
+		changed, err := runNodeCheckoutGit(ctx, dir, nodeCheckoutRevTimeout, "diff", "-z", "--no-renames", "--name-only", result.From, result.To)
 		if err != nil || installPathsChanged(string(changed)) {
 			result.InstallRan, result.InstallExit, result.Reason = client.nodeCheckoutInstall(ctx, dir)
 		}
@@ -354,10 +339,12 @@ func nodeCheckoutFailedPull(ctx context.Context, dir, from string) (string, stri
 	return nodeCheckoutReasonPullFailed, head
 }
 
-// installPathsChanged reports whether a `git diff --name-only` list touches
-// install/ or bin/, the two places install.sh depends on.
+// installPathsChanged reports whether a `git diff -z --name-only` list touches
+// install/ or bin/, the two places install.sh depends on. The -z list is NUL
+// separated and unquoted, so a name with a quote, a backslash or a non-ASCII
+// byte still matches its prefix.
 func installPathsChanged(names string) bool {
-	for _, line := range strings.Split(names, "\n") {
+	for _, line := range strings.Split(names, "\x00") {
 		if strings.HasPrefix(line, "install/") || strings.HasPrefix(line, "bin/") {
 			return true
 		}
@@ -429,6 +416,10 @@ func validNodeCheckoutPullResult(result nodeCheckoutPullResult) bool {
 	case nodeCheckoutOutcomeCurrent:
 		return nodeShaPattern.MatchString(result.To) && result.Reason == "" && !result.InstallRan
 	case nodeCheckoutOutcomeRefused:
+		// A refusal names no revision, except an interrupted pull's HEAD.
+		if result.Reason != nodeCheckoutReasonPullInterrupted && result.To != "" {
+			return false
+		}
 		return nodeCheckoutRefusals[result.Reason]
 	}
 	return false

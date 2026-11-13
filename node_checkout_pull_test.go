@@ -2,6 +2,7 @@ package panewire
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -227,6 +228,10 @@ func TestNodeCheckoutPullRefusals(t *testing.T) {
 			if runs := checkoutPullMarkerRuns(t, fixture); runs != 0 {
 				t.Fatalf("refused pull ran install %d times", runs)
 			}
+			// Only an interrupted pull names a revision in a refusal.
+			if _, hasTo := result["to"]; hasTo && tc.reason != "pull-interrupted" {
+				t.Fatalf("refusal %s carries to=%v; only pull-interrupted may", tc.reason, result["to"])
+			}
 		})
 	}
 }
@@ -319,6 +324,16 @@ func TestNodeCheckoutPullArgsAreValidated(t *testing.T) {
 	}
 }
 
+// checkoutSpawnJSON is a spawn.json that loads (enabled, workspace and session
+// set) with the given extra members spliced in.
+func checkoutSpawnJSON(extra string) string {
+	base := `"enabled":true,"workspace":"w","herdr_session":"s"`
+	if extra == "" {
+		return "{" + base + "}"
+	}
+	return "{" + base + "," + extra + "}"
+}
+
 func TestNodeCheckoutAllowListFromSpawnConfig(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -336,10 +351,12 @@ func TestNodeCheckoutAllowListFromSpawnConfig(t *testing.T) {
 		body string
 		want map[string]string
 	}{
-		{"no checkouts key keeps the default", `{"work_root":"/x"}`, defaults},
-		{"invalid entries are dropped", `{"checkouts":{"rstack":"/srv/rstack","Bad Name":"/a","rel":"relative/path"}}`, map[string]string{"rstack": "/srv/rstack"}},
-		{"explicit empty list allows nothing", `{"checkouts":{}}`, map[string]string{}},
-		{"unreadable json keeps the default", `{"checkouts":`, defaults},
+		{"checkouts key is the allow-list", checkoutSpawnJSON(`"checkouts":{"rstack":"/srv/rstack","docs":"/srv/docs"}`), map[string]string{"rstack": "/srv/rstack", "docs": "/srv/docs"}},
+		{"no checkouts key gives the default", checkoutSpawnJSON(""), defaults},
+		{"explicit empty list allows nothing", checkoutSpawnJSON(`"checkouts":{}`), map[string]string{}},
+		{"config that does not load allows nothing", checkoutSpawnJSON(`"checkouts":{"rstack":"/srv/rstack"},"bogus":1`), map[string]string{}},
+		{"invalid name refuses the file", checkoutSpawnJSON(`"checkouts":{"Bad Name":"/srv/x"}`), map[string]string{}},
+		{"relative path refuses the file", checkoutSpawnJSON(`"checkouts":{"rstack":"relative/path"}`), map[string]string{}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -354,6 +371,22 @@ func TestNodeCheckoutAllowListFromSpawnConfig(t *testing.T) {
 				}
 			}
 		})
+	}
+
+	// A checkouts key must not disable hub spawns: the file still loads.
+	if _, err := loadHubSpawnConfig(write(checkoutSpawnJSON(`"checkouts":{"rstack":"/srv/rstack"}`))); err != nil {
+		t.Fatalf("spawn.json with checkouts refused: %v", err)
+	}
+	// An unknown key elsewhere still fails the strict decode.
+	_, err := loadHubSpawnConfig(write(checkoutSpawnJSON(`"checkouts":{"rstack":"/srv/rstack"},"bogus":1`)))
+	var configErr *hubSpawnConfigError
+	if !errors.As(err, &configErr) || configErr.Rule != "config_json_invalid" {
+		t.Fatalf("unknown key: err=%v, want config_json_invalid", err)
+	}
+	// An invalid checkouts entry refuses the file under its own rule.
+	_, err = loadHubSpawnConfig(write(checkoutSpawnJSON(`"checkouts":{"rstack":"relative"}`)))
+	if !errors.As(err, &configErr) || configErr.Rule != "checkouts_invalid" {
+		t.Fatalf("relative checkout path: err=%v, want checkouts_invalid", err)
 	}
 	if got := (&HubClient{spawnConfigPath: filepath.Join(dir, "missing.json")}).nodeCheckoutAllowList(); got["rstack"] != defaults["rstack"] {
 		t.Fatalf("missing spawn.json allow-list=%v", got)
@@ -491,5 +524,33 @@ func TestNodeCheckoutPullRenameOutOfInstallRunsInstall(t *testing.T) {
 	result := checkoutPullRun(t, fixture.client(), "rstack", "")
 	if result["outcome"] != "pulled" || result["install_ran"] != true {
 		t.Fatalf("result=%v, want pulled with install run for a rename out of install/", result)
+	}
+}
+
+// TestNodeCheckoutPullInstallSeesQuotedPaths: git quotes unusual names unless
+// the diff is -z, so a file under install/ with a non-ASCII name must still
+// trigger install.
+func TestNodeCheckoutPullInstallSeesQuotedPaths(t *testing.T) {
+	fixture := newCheckoutPullFixture(t)
+	fixture.pushPeer(t, "install with a non-ASCII name", map[string]string{"install/caf\u00e9.txt": "x\n"})
+	result := checkoutPullRun(t, fixture.client(), "rstack", "")
+	if result["install_ran"] != true {
+		t.Fatalf("result=%v, want install run for install/café.txt", result)
+	}
+}
+
+func TestInstallPathsChangedReadsNULList(t *testing.T) {
+	cases := map[string]bool{
+		"":                              false,
+		"docs/a.md\x00":                 false,
+		"docs/a.md\x00install/b\x00":    true,
+		"bin/tool\x00":                  true,
+		"installer/x\x00":               false,
+		"\"install/caf\\303\\251\"\x00": false,
+	}
+	for names, want := range cases {
+		if got := installPathsChanged(names); got != want {
+			t.Fatalf("installPathsChanged(%q)=%v, want %v", names, got, want)
+		}
 	}
 }
