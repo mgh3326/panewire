@@ -309,8 +309,8 @@ func TestCreditPublicationFailureIsBoundedAndRearmed(t *testing.T) {
 	if attempts.Load() != 3 {
 		t.Fatalf("publication attempts = %d, want 3", attempts.Load())
 	}
-	if got := str(jobs.record(t, "j"), "end_reason"); got != "quota_stop pool=anthropic-api" {
-		t.Fatalf("end reason = %q", got)
+	if got := str(jobs.record(t, "j"), "state"); got != "spawned" {
+		t.Fatalf("job state after failed publication = %q, want spawned until closure is published", got)
 	}
 	job, err := a.job("j")
 	if err != nil {
@@ -319,6 +319,10 @@ func TestCreditPublicationFailureIsBoundedAndRearmed(t *testing.T) {
 	if _, ok := pendingCreditRejection(job); !ok {
 		t.Fatal("failed publication was not recorded for recovery")
 	}
+	stop, ok := pendingCreditRejection(job)
+	if !ok || !creditPublicationPaused(job, stop) {
+		t.Fatal("failed publication was not durably paused")
+	}
 	fail.Store(false)
 	started := 0
 	if err := a.rearmWatchers(func(id string) error { started++; return a.watch(context.Background(), []string{id, "--rearmed"}) }, func(string) {}, true); err != nil {
@@ -326,6 +330,9 @@ func TestCreditPublicationFailureIsBoundedAndRearmed(t *testing.T) {
 	}
 	if started != 1 || len(hk.manual) != 1 {
 		t.Fatalf("rearm started=%d, published=%d", started, len(hk.manual))
+	}
+	if got := str(jobs.record(t, "j"), "end_reason"); got != "quota_stop pool=anthropic-api" {
+		t.Fatalf("end reason after recovered publication = %q", got)
 	}
 	job, err = a.job("j")
 	if err != nil {
@@ -337,7 +344,7 @@ func TestCreditPublicationFailureIsBoundedAndRearmed(t *testing.T) {
 }
 
 func TestCreditPermanentPublishFailureDoesNotRearmUntilAccountIsKnown(t *testing.T) {
-	a, _, _, _ := quotaStopFixture(t, "worker", "idle", "")
+	a, runner, _, _ := quotaStopFixture(t, "worker", "idle", "")
 	creditWatchSession(t, a, "worker")
 	if err := a.watch(context.Background(), []string{"j"}); err != nil {
 		t.Fatal(err)
@@ -354,6 +361,80 @@ func TestCreditPermanentPublishFailureDoesNotRearmUntilAccountIsKnown(t *testing
 	}
 	if starts != 0 {
 		t.Fatalf("pending permanent rejection rearmed %d times without an identifiable account", starts)
+	}
+	job, err := a.job("j")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stop, ok := pendingCreditRejection(job)
+	if !ok || !creditPublicationPaused(job, stop) {
+		t.Fatal("permanent rejection did not enter durable paused state")
+	}
+	notices := 0
+	for _, call := range runner.Calls {
+		if call.Name == "panewire" && slices.Contains(call.Args, "emit") && slices.Contains(call.Args, "CREDIT_CLOSE_PAUSED") {
+			notices++
+		}
+	}
+	if notices != 1 {
+		t.Fatalf("operator notices = %d, want one", notices)
+	}
+}
+
+func TestRecoveredCreditPublicationNeverHandsOffResumedPane(t *testing.T) {
+	hk := &hkBenchFake{}
+	var fail atomic.Bool
+	fail.Store(true)
+	var attempts atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPut && strings.HasSuffix(r.URL.Path, "/observation") {
+			attempts.Add(1)
+			if fail.Load() {
+				http.Error(w, "unavailable", 503)
+				return
+			}
+		}
+		hk.ServeHTTP(w, r)
+	}))
+	defer srv.Close()
+	a, runner, jobs, _ := quotaStopFixture(t, "worker", "idle", "")
+	t.Setenv("HANDOFFKEEP_URL", "https://hk.test.invalid")
+	t.Setenv("HANDOFFKEEP_TOKEN_SVC_PANEWIRE", "test-token")
+	a.Config.Quota = map[string]any{"url": srv.URL, "accounts": map[string]any{"anthropic-api": "0123456789abcdef"}}
+	creditWatchSession(t, a, "worker")
+	if err := a.watch(context.Background(), []string{"j"}); err != nil {
+		t.Fatal(err)
+	}
+	if attempts.Load() != 3 {
+		t.Fatalf("initial publication attempts = %d, want 3", attempts.Load())
+	}
+	fail.Store(false)
+	original := runner.Do
+	runner.Do = func(c Command) Result {
+		if c.Name == "herdr" && strings.Join(c.Args, " ") == "agent list" {
+			return Result{Out: `{"result":{"agents":[{"pane_id":"w:p1","agent_status":"working","state_change_seq":8}]}}`}
+		}
+		return original(c)
+	}
+	started := 0
+	if err := a.rearmWatchers(func(id string) error {
+		started++
+		return a.watch(context.Background(), []string{id, "--rearmed"})
+	}, func(string) {}, true); err != nil {
+		t.Fatal(err)
+	}
+	if started != 1 || len(hk.manual) != 1 {
+		t.Fatalf("recovery started=%d, published=%d", started, len(hk.manual))
+	}
+	if slices.Contains(eventKindsOf(t, a, "j"), "job.lost") || str(jobs.record(t, "j"), "state") != "spawned" {
+		t.Fatal("recovery handed off a pane that had resumed")
+	}
+	job, err := a.job("j")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, pending := pendingCreditRejection(job); pending {
+		t.Fatal("recovered publication remained pending")
 	}
 }
 
