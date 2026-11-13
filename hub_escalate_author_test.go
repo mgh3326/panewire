@@ -45,6 +45,7 @@ type escalateFixture struct {
 	paneAbsent bool
 	// markLostFails makes the holder's node refuse the lost-record write.
 	markLostFails bool
+	paneCwd       string
 
 	mu       sync.Mutex
 	commands []map[string]json.RawMessage
@@ -155,9 +156,13 @@ func (f *escalateFixture) serveNode(ctx context.Context, t *testing.T) {
 
 func (f *escalateFixture) reply(op string) map[string]any {
 	cwd := "/work/" + f.job + "-checkout"
+	paneCwd := cwd
+	if f.paneCwd != "" {
+		paneCwd = f.paneCwd
+	}
 	switch op {
 	case "agents.list":
-		panes := []nodeAgentRow{{PaneID: roleHeldPane, Name: f.job, AgentStatus: "idle", Cwd: cwd}}
+		panes := []nodeAgentRow{{PaneID: roleHeldPane, Name: f.job, AgentStatus: "idle", Cwd: paneCwd}}
 		if f.paneAbsent {
 			panes = []nodeAgentRow{}
 		}
@@ -170,7 +175,7 @@ func (f *escalateFixture) reply(op string) map[string]any {
 			return map[string]any{"result": nodeWorktreePrepareResult{Outcome: f.prepareOutcome}}
 		}
 	case "worktree.inspect":
-		return map[string]any{"result": nodeWorktreeInspectResult{Worktree: &nodeWorktree{Path: cwd, Branch: "wk/task", Head: strings.Repeat("b", 40)}}}
+		return map[string]any{"result": nodeWorktreeInspectResult{Worktree: &nodeWorktree{Path: paneCwd, Branch: "wk/task", Head: strings.Repeat("b", 40)}}}
 	case "pane.capture":
 		return map[string]any{"result": map[string]any{"outcome": nodeCaptureScreen, "saved": "/jobs/" + f.job + "/pane-screen.txt"}}
 	case "pane.close":
@@ -682,5 +687,17 @@ func TestEscalateAuthorPinsVerifiedCheckoutHead(t *testing.T) {
 	}
 	if got := successor.Request.Repository.Checkout.Sha; got != strings.Repeat("b", 40) {
 		t.Fatalf("successor checkout head=%q", got)
+	}
+}
+
+func TestEscalateAuthorRefusesPaneInAnotherWorktree(t *testing.T) {
+	f := newEscalateFixture(t, "author-other-cwd")
+	f.paneCwd = "/work/another-worktree"
+	result, commands := f.escalate(t, nil)
+	if result.Code != "worktree_unreadable" || result.AuthorEnded {
+		t.Fatalf("result=%+v commands=%v", result, commandOps(commands))
+	}
+	if slices.Contains(commandOps(commands), "pane.close") {
+		t.Fatalf("closed pane in another worktree: %v", commandOps(commands))
 	}
 }
