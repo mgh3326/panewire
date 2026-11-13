@@ -243,6 +243,19 @@ func (s Spawn) unlinkedReviewer() bool {
 	return s.Role == "reviewer" && s.ParentFamily != "" && s.Inherited == "" && s.ParentJob == ""
 }
 
+// resolvedRoutingRole is the routing role the spawn's resolved fields name:
+// an explicit --routing-role, else the seat role's builtin routing role. It
+// reads the fields that cross the hub and ssh envelopes.
+func (s Spawn) resolvedRoutingRole() string {
+	return firstNonempty(s.RoutingRole, builtinRoleMap[s.Role])
+}
+
+// consultTask reports whether the spawn routes as a consult. A consult works
+// beside the task's claimant and never takes the task's exclusive claim.
+func (s Spawn) consultTask() bool {
+	return s.resolvedRoutingRole() == "consult"
+}
+
 // taskPrecheck reads the task over hk HTTP (hkGetTask) and refuses a spawn
 // the task cannot take. --bypass covers an hk the precheck cannot reach or
 // that errs, never an answer it cannot read (errHKUnreadable).
@@ -271,13 +284,17 @@ func (a *App) taskPrecheck(ctx context.Context, s Spawn) (client.Task, bool, err
 
 // taskTakesSpawn refuses a spawn the task cannot take: it is in a state that
 // ends or parks the work, or is bound to another job or claimant. An
-// inherited spawn and an unlinked reviewer take any task.
+// inherited spawn and an unlinked reviewer take any task; a consult takes a
+// live task without its exclusive claim.
 func taskTakesSpawn(t client.Task, s Spawn) error {
 	if s.Inherited != "" || s.unlinkedReviewer() {
 		return nil
 	}
 	if slices.Contains([]string{"merged", "dropped", "hold", "needs_decision"}, t.State) {
 		return fail(exitUsage, "task unavailable: %s", t.State)
+	}
+	if s.consultTask() {
+		return nil
 	}
 	if j := t.Refs.JobID; j != "" && j != s.Job {
 		return fail(exitUsage, "task bound to another job")
@@ -317,8 +334,7 @@ func (s Spawn) replacesParent() bool {
 	if s.Inherited == "" || s.Inherited == s.Job {
 		return false
 	}
-	role := firstNonempty(s.RoutingRole, builtinRoleMap[s.Role])
-	return role == "implementer"
+	return s.resolvedRoutingRole() == "implementer"
 }
 
 // rebindInherited moves the task to this job when its parent is terminal and
@@ -408,7 +424,7 @@ func (a *App) taskLink(ctx context.Context, s Spawn, task client.Task, bypassed 
 	var claimFailure *taskClaimFailure
 	if s.replacesParent() {
 		status = a.rebindInherited(ctx, s, task, ev)
-	} else if s.unlinkedReviewer() {
+	} else if s.unlinkedReviewer() || (s.Inherited == "" && s.consultTask()) {
 		// No claim: the task stays bound to whatever it was bound to.
 		status = "unlinked"
 	} else if s.Inherited == "" {
