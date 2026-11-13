@@ -51,11 +51,11 @@ func TestConditionedRowsDoNotStarveRunnableSpawnPastPendingPage(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	page, err := h.inbox.store.pendingSpawns(t.Context())
+	page, err := h.inbox.store.pendingSpawns(t.Context(), now.Add(time.Second))
 	if err != nil || len(page) != 1 || page[0].Request.RequestID != runnable.RequestID {
 		t.Fatalf("runnable page has %d rows, %v; waiting rows must not consume its slots", len(page), err)
 	}
-	conditioned, err := h.inbox.store.pendingStartConditionSpawns(t.Context())
+	conditioned, err := h.inbox.store.pendingStartConditionSpawns(t.Context(), now.Add(time.Second))
 	if err != nil || len(conditioned) != 32 {
 		t.Fatalf("bounded conditioned pass has %d rows, %v; want 32", len(conditioned), err)
 	}

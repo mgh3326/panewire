@@ -809,7 +809,27 @@ func (a *App) selectFor(ctx context.Context, s Spawn, req selReq) (*selPlan, err
 	if snapshot == nil {
 		p.degraded = append(p.degraded, "pool_cooling_"+coolingState)
 	}
-	rows, e := a.Quota.Catalog(ctx)
+	var rows []CatalogRow
+	if detailed, ok := a.Quota.(interface {
+		CatalogDetails(context.Context) (CatalogData, error)
+	}); ok {
+		data, err := detailed.CatalogDetails(ctx)
+		e = err
+		if err == nil {
+			rows = catalogDataRows(data)
+			for _, warning := range data.Warnings {
+				if !strings.HasPrefix(warning, "catalog_row_invalid:") {
+					continue
+				}
+				p.degraded = append(p.degraded, warning)
+				if data.Info.Source == catalogSourceServer {
+					a.warn("%s", warning)
+				}
+			}
+		}
+	} else {
+		rows, e = a.Quota.Catalog(ctx)
+	}
 	if e != nil {
 		return nil, fail(exitConfig, "POLICY_UNAVAILABLE: bench catalog unreadable: %v", e)
 	}

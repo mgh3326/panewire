@@ -40,9 +40,11 @@ type hubSpawnTask struct {
 	Request            fleet.Submission
 	Job, Owner, Status string
 	Created, Deadline  time.Time
-	Attempt            int
-	Node               *hubSpawnRequest
-	Outcome            hubSpawnOutcome
+	// LastRun is when a coordinator worker last took the request (zero: never).
+	LastRun time.Time
+	Attempt int
+	Node    *hubSpawnRequest
+	Outcome hubSpawnOutcome
 }
 
 func (s *laneInboxStore) ensureSpawnTasks() error {
@@ -218,13 +220,16 @@ func (s *laneInboxStore) completeSpawn(parent context.Context, task hubSpawnTask
 func scanSpawnTask(row interface{ Scan(...any) error }) (hubSpawnTask, error) {
 	var task hubSpawnTask
 	var payload, result, node string
-	var created, deadline int64
-	err := row.Scan(&task.Job, &task.Owner, &payload, &task.Status, &created, &deadline, &node, &result, &task.Attempt)
+	var created, deadline, lastRun int64
+	err := row.Scan(&task.Job, &task.Owner, &payload, &task.Status, &created, &deadline, &node, &result, &task.Attempt, &lastRun)
 	if err != nil {
 		return task, err
 	}
 	task.Created = time.UnixMilli(created)
 	task.Deadline = time.UnixMilli(deadline)
+	if lastRun > 0 {
+		task.LastRun = time.UnixMilli(lastRun)
+	}
 	if err = json.Unmarshal([]byte(payload), &task.Request); err != nil {
 		return task, err
 	}
@@ -253,7 +258,7 @@ func (s *laneInboxStore) unbindRefusedSpawn(parent context.Context, id string, a
 	return s.spawnTask(parent, id)
 }
 
-const spawnTaskColumns = `job,owner,payload,status,created_ms,deadline_ms,node_payload,result,attempt`
+const spawnTaskColumns = `job,owner,payload,status,created_ms,deadline_ms,node_payload,result,attempt,last_run_ms`
 
 func (s *laneInboxStore) spawnTask(parent context.Context, id string) (hubSpawnTask, error) {
 	ctx, done := s.op(parent)
@@ -291,31 +296,56 @@ func (s *laneInboxStore) spawnTaskByNode(parent context.Context, id string) (hub
 	defer done()
 	return scanSpawnTask(s.db.QueryRowContext(ctx, s.q(`SELECT `+spawnTaskColumns+` FROM spawn_operations WHERE node_id=?`), id))
 }
-func (s *laneInboxStore) pendingSpawns(parent context.Context) ([]hubSpawnTask, error) {
+
+// pendingSpawns returns the fresh runnable page and a bounded number of due
+// stale rows. Conditioned rows use a separate page so they cannot displace fresh
+// runnable work.
+func (s *laneInboxStore) pendingSpawns(parent context.Context, now time.Time) ([]hubSpawnTask, error) {
 	ctx, done := s.op(parent)
 	defer done()
-	rows, err := s.db.QueryContext(ctx, `SELECT `+spawnTaskColumns+` FROM spawn_operations WHERE status IN ('accepted','dispatching','reconciling','deadline_exceeded') AND payload NOT LIKE '%"start_conditions":%' ORDER BY last_run_ms,created_ms LIMIT 32`)
+	tasks, err := s.queryPendingSpawns(ctx, `status IN ('accepted','dispatching','reconciling') AND payload NOT LIKE '%"start_conditions":%' ORDER BY last_run_ms,created_ms LIMIT 32`)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var tasks []hubSpawnTask
-	for rows.Next() {
-		task, err := scanSpawnTask(rows)
-		if err != nil {
-			return nil, err
-		}
-		tasks = append(tasks, task)
+	stale, err := s.queryPendingSpawns(ctx, `status='deadline_exceeded' AND payload NOT LIKE '%"start_conditions":%' ORDER BY last_run_ms,created_ms LIMIT 256`)
+	if err != nil {
+		return nil, err
 	}
-	return tasks, rows.Err()
+	due := 0
+	for _, task := range stale {
+		if due < spawnStaleBatch && spawnStaleProbeDue(task, now) {
+			tasks = append(tasks, task)
+			due++
+		}
+	}
+	return tasks, nil
 }
 
 // pendingStartConditionSpawns gives legacy conditioned rows their own bounded
-// pass so they cannot consume slots ahead of ordinary pending spawns.
-func (s *laneInboxStore) pendingStartConditionSpawns(parent context.Context) ([]hubSpawnTask, error) {
+// fresh page and due-stale pass, separate from ordinary runnable spawns.
+func (s *laneInboxStore) pendingStartConditionSpawns(parent context.Context, now time.Time) ([]hubSpawnTask, error) {
 	ctx, done := s.op(parent)
 	defer done()
-	rows, err := s.db.QueryContext(ctx, `SELECT `+spawnTaskColumns+` FROM spawn_operations WHERE status IN ('accepted','dispatching','reconciling','deadline_exceeded') AND payload LIKE '%"start_conditions":%' ORDER BY last_run_ms,created_ms LIMIT 32`)
+	tasks, err := s.queryPendingSpawns(ctx, `status IN ('accepted','dispatching','reconciling') AND payload LIKE '%"start_conditions":%' ORDER BY last_run_ms,created_ms LIMIT 32`)
+	if err != nil {
+		return nil, err
+	}
+	stale, err := s.queryPendingSpawns(ctx, `status='deadline_exceeded' AND payload LIKE '%"start_conditions":%' ORDER BY last_run_ms,created_ms LIMIT 256`)
+	if err != nil {
+		return nil, err
+	}
+	due := 0
+	for _, task := range stale {
+		if due < spawnStaleBatch && spawnStaleProbeDue(task, now) {
+			tasks = append(tasks, task)
+			due++
+		}
+	}
+	return tasks, nil
+}
+
+func (s *laneInboxStore) queryPendingSpawns(ctx context.Context, where string) ([]hubSpawnTask, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT `+spawnTaskColumns+` FROM spawn_operations WHERE `+where)
 	if err != nil {
 		return nil, err
 	}
