@@ -256,7 +256,7 @@ func TestStaleNodeSocketWakesSpawnWaitersAtOnce(t *testing.T) {
 	}
 	spec := *request.Repository.Checkout
 	dispatch := hubSpawnRequest{RequestID: t14RequestID(881), Machine: "machine-a", CWDKey: "project", Brief: hubSpawnBrief{Inline: "task"}, Checkout: &hubSpawnCheckout{Origin: spec.Origin, Mode: spec.Mode, Branch: spec.Branch, Sha: spec.Sha, Dir: spec.Dir}, Args: []string{"--job", "test-job", "-l", "test-job", "-m", "codex-sol", "--t", "T1", "--task", "42", "--owner", "parent", "--role", "implementer"}, WaitSeconds: 600, DeadlineMS: task.Deadline.UnixMilli()}
-	if task, err = h.inbox.store.bindSpawn(t.Context(), request.RequestID, task.Attempt, dispatch); err != nil {
+	if task, err = h.inbox.store.bindSpawn(t.Context(), request.RequestID, task.Attempt, dispatch, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	transport := &directSpawnTransport{h: h, task: task}
