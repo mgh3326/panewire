@@ -57,7 +57,7 @@ func reapPRJob(t *testing.T, rc reapPRCase) (*App, string, []string) {
 	useFakeHK(t).Handle(func(r hkRequest) (int, string, bool) {
 		return rc.status, rc.changes, r.Route() == "GET /v1/changes" && r.Query == "task=42"
 	})
-	claim := map[string]any{"owner_lane": "owner", "parent_lane": "parent", "task_id": "42", "t_level": "T1", "role": "worker"}
+	claim := map[string]any{"owner_lane": "owner", "parent_lane": "parent", "task_id": "42", "t_level": "T1", "role": "implementer"}
 	if rc.claim != nil {
 		delete(claim, "task_id")
 		for key, value := range rc.claim {

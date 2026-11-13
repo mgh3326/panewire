@@ -114,7 +114,7 @@ func TestReviewPassLeavesWorkerKeyUnchanged(t *testing.T) {
 	if result := reviewPassSubmit(t, server, durableSpawnRequest()); result.status != http.StatusAccepted {
 		t.Fatalf("worker status=%d body=%s", result.status, result.body)
 	}
-	if _, job, _, err := hub.inbox.store.spawnRoleOwner(t.Context(), "42:worker"); err != nil || job != "test-job" {
+	if _, job, _, err := hub.inbox.store.spawnRoleOwner(t.Context(), "42:implementer"); err != nil || job != "test-job" {
 		t.Fatalf("worker key held by %q (%v)", job, err)
 	}
 }

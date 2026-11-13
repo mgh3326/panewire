@@ -34,7 +34,7 @@ func TestReviewerHoldRetryAfter(t *testing.T) {
 		{name: "a fraction of a second rounds up", role: "reviewer", status: "succeeded", outcome: succeeded, pane: "done", since: 10*time.Minute - 400*time.Millisecond, wantRetry: 1},
 		{name: "a blocked failed reviewer inside the grace", role: "reviewer", status: "failed", outcome: failedLaunch, pane: "blocked", since: 9 * time.Minute, wantRetry: 60},
 		{name: "past the grace releases", role: "reviewer", status: "succeeded", outcome: succeeded, pane: "done", since: 11 * time.Minute, wantReleased: true},
-		{name: "a worker holder", role: "worker", status: "succeeded", outcome: succeeded, pane: "done", since: 9 * time.Minute},
+		{name: "a worker holder", role: "implementer", status: "succeeded", outcome: succeeded, pane: "done", since: 9 * time.Minute},
 		{name: "a working reviewer pane", role: "reviewer", status: "succeeded", outcome: succeeded, pane: "working", since: 9 * time.Minute},
 	}
 	for _, tc := range cases {

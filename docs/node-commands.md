@@ -36,6 +36,9 @@ document `pane.capture` uploads. It writes `pane-screen.txt` only when that
 upload fails (see [pane-sweep.md](pane-sweep.md)). It does not run
 `pane.close`'s composer guard.
 
+The hub's `pane.sweep` command runs a second, ended-job sweep on the hub's
+schedule; see [pane-sweep.md](pane-sweep.md#hub-ordered-sweep).
+
 ## Hub endpoints
 
 ### `GET /v1/nodes/agents`
@@ -314,9 +317,27 @@ cannot interleave with `pane.close`, `job.done` or `job.mark_lost`.
 A node older than this op refuses it as `invalid_args` without acting; deploy
 the nodes before the hub for `panewire jobs close` to work end to end.
 
+### `pane.sweep`
+
+`args: {age_s}`, an integer from `0` to one year in seconds (`365*24*60*60`).
+The hub's ticker sends it (see [pane-sweep.md](pane-sweep.md#hub-ordered-sweep));
+no `node.command` caller may issue it, and the public endpoint refuses it.
+
+The node closes the pane of every job whose own latest record ended at least
+`age_s` seconds ago, whatever herdr shows the pane doing (no idle, grace or
+composer check). It keeps an implementer's pane while its worktree is on
+an open PR, as the idle sweep does. It replies `{"closed": [...]}`, one
+`{job, pane, role, reason}` per pane closed, with `reason` `job_revoked`,
+`job_completed`, `job_handed_off`, `job_lost`, or the job's outcome.
+
+A node without a jobs root answers `jobs_root_unset`. A failed read of the
+jobs, the agent list, or the hk record answers `sweep_failed`. An out-of-range
+`age_s` answers `invalid_args`. The op does not take the node's acting lock:
+each pane's close takes it, so the op never holds it across the whole pass.
+
 ### `worktree.inspect`
 
-`args: {cwd}`. Returns `{"worktree":null}` unless `cwd` is inside a linked git
+`args: {cwd, expected_dir?, verify_branch?}`. Returns `{"worktree":null}` unless `cwd` is inside a linked git
 worktree (an ordinary directory, a bare repository, a clone's canonical
 checkout, or a path git cannot read is null). The node asks git for absolute
 paths (`rev-parse --path-format=absolute`, git 2.31 or later) rather than
@@ -332,6 +353,13 @@ Otherwise:
 fragment, and an scp-style remote (`[user[:secret]@]host:path`) loses
 everything up to its last `@` before the first `/`, so a token embedded in
 either form never leaves it.
+
+When `expected_dir` is present, the resolved checkout must equal
+`<work_root>/<expected_dir>`; a mismatch returns a null worktree and
+`check:"mismatch"`. With `verify_branch:true`, `check` is `ok`, `dirty`,
+`locked`, `unpushed`, or `unreadable`. The node reads Git status and the remote
+branch without fetching or changing the checkout; an origin tip whose ancestry
+cannot be verified locally is refused as `unpushed`.
 
 ### `worktree.list`
 
@@ -441,6 +469,11 @@ closed shape: `refs/heads/<branch>` or `pull/<n>/head`.
   --detach <dir> <sha>`, so the worktree sits at `sha`, never at the fetched
   tip. An existing worktree is reused only when detached at exactly that
   commit and clean.
+
+A hub-staged author replacement sets `verify_reuse` on its spawn checkout.
+The node then requires an existing clean, unlocked checkout at exactly the
+pinned SHA and an origin branch containing it; it never fast-forwards or
+creates that worktree.
 
 A clone that already exists keeps its identity: a `git remote get-url
 origin` that decodes to a different `owner/repo` than the argument — a fork

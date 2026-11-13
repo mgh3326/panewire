@@ -21,7 +21,7 @@ func (s reviewAccountSource) SharedAccount(ctx context.Context, key string) (Sha
 func reviewSpawnFixture(t *testing.T, sharedClaude, explicit bool) (*App, Spawn, *fakeQuota, *[]Spawn) {
 	t.Helper()
 	a, s, fr, _ := cmdFixture(t)
-	s.Profile, s.Host, s.Role = "auto", "auto", "counsel"
+	s.Profile, s.Host, s.Role = "auto", "auto", "consult"
 	if explicit {
 		s.Profile, s.Host = "builder-opus", "host-b"
 	}
@@ -150,7 +150,7 @@ func TestReviewPinnedRemoteDoesNotInheritInitiatorAccount(t *testing.T) {
 
 func TestReviewLocalAccountJudgmentIsLocalAndBound(t *testing.T) {
 	a, s, q := consultFixture(t)
-	s.Role, s.Host = "counsel", "local"
+	s.Role, s.Host = "consult", "local"
 	q.GateDo = gatePools(map[string]string{"opus": "claude"})
 	sel, err := a.selectProfile(context.Background(), s)
 	if err != nil {

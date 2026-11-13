@@ -430,11 +430,11 @@ func TestPW6InlineSpawnWireGolden(t *testing.T) {
 }
 
 func TestPW6SpawnArgsValidation(t *testing.T) {
-	valid := []string{"-m", "omp-dsflash41", "--role", "reviewer", "--builder-family", "openai", "--parent-job", "parent-1", "--builder-job", "builder-1", "--e6-arm", "omp-dsflash41@high"}
+	valid := []string{"-m", "omp-dsflash41", "--role", "reviewer", "--author-family", "openai", "--parent-job", "parent-1", "--builder-job", "builder-1", "--e6-arm", "omp-dsflash41@high"}
 	if !validHubSpawnArgs(valid) {
 		t.Fatal("valid new spawn args rejected")
 	}
-	for _, args := range [][]string{{"--role", "root"}, {"--builder-family", "made-up"}, {"--parent-job", "../secret"}, {"--builder-job", "two words"}, {"--e6-arm", "two words"}, {"--unknown", "value"}, {"--e6-arm", "omp-dsflash41@high"}, {"-m", "omp-dsflash41", "--e6-arm", "other@"}} {
+	for _, args := range [][]string{{"--role", "root"}, {"--author-family", "made-up"}, {"--parent-job", "../secret"}, {"--builder-job", "two words"}, {"--e6-arm", "two words"}, {"--unknown", "value"}, {"--e6-arm", "omp-dsflash41@high"}, {"-m", "omp-dsflash41", "--e6-arm", "other@"}} {
 		if validHubSpawnArgs(args) {
 			t.Errorf("invalid args accepted: %q", args)
 		}

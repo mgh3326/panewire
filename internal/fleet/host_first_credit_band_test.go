@@ -16,7 +16,7 @@ const testCreditA = "anthropic-api:00000000000000d4"
 func creditBandFixture(t *testing.T, rows []CatalogRow, place map[string]string, credit func(time.Time) *CreditBalance) (*App, Spawn, *fakeQuota, *fakePlacementSource) {
 	t.Helper()
 	rows = append([]CatalogRow{}, rows...)
-	a, s, q, src := hostFirstFixture(t, "worker", "A", rows, place, map[string]float64{"mac-b": 0.1, "cloud-small": 0.5})
+	a, s, q, src := hostFirstFixture(t, "implementer", "A", rows, place, map[string]float64{"mac-b": 0.1, "cloud-small": 0.5})
 	serveOMPRouting(t, a)
 	path := filepath.Join(t.TempDir(), "pool-order.json")
 	if err := os.WriteFile(path, []byte(riskPolicy("")), 0o600); err != nil {
