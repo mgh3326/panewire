@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/mgh3326/panewire/internal/fleet"
@@ -129,8 +130,8 @@ func (s *laneInboxStore) claimSpawn(parent context.Context, request fleet.Submis
 	return hubSpawnTask{Request: request, Job: job, Owner: owner, Status: "accepted", Created: now, Deadline: deadline, Attempt: 1}, true, nil
 }
 
-// Bind the immutable execution destination before sending any bytes. Concurrent
-// coordinators can only replay this same node request, never select a second host.
+// Bind the immutable destination without claiming it was sent. Only the
+// bound-to-dispatching transition permits a first send.
 func (s *laneInboxStore) bindSpawn(parent context.Context, id string, attempt int, node hubSpawnRequest) (hubSpawnTask, error) {
 	ctx, done := s.op(parent)
 	defer done()
@@ -138,7 +139,7 @@ func (s *laneInboxStore) bindSpawn(parent context.Context, id string, attempt in
 	if err != nil {
 		return hubSpawnTask{}, err
 	}
-	_, err = s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET node_id=?,node_payload=?,status='dispatching' WHERE request_id=? AND attempt=? AND node_id IS NULL AND status='accepted'`), node.RequestID, string(raw), id, attempt)
+	_, err = s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET node_id=?,node_payload=?,status='bound' WHERE request_id=? AND attempt=? AND node_id IS NULL AND status='accepted'`), node.RequestID, string(raw), id, attempt)
 	if err != nil {
 		return hubSpawnTask{}, err
 	}
@@ -155,6 +156,23 @@ func (s *laneInboxStore) bindSpawn(parent context.Context, id string, attempt in
 	return task, err
 }
 
+// beginSpawnSend commits the send boundary, or revalidates a replay, using the
+// complete durable identity and the state the caller actually read. Old
+// dispatching rows remain uncertain; a restart never makes them bound again.
+func (s *laneInboxStore) beginSpawnSend(parent context.Context, task hubSpawnTask) (bool, error) {
+	if task.Node == nil {
+		return false, nil
+	}
+	ctx, done := s.op(parent)
+	defer done()
+	result, err := s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET status=CASE WHEN status='bound' THEN 'dispatching' ELSE status END WHERE request_id=? AND attempt=? AND node_id=? AND status=? AND status IN ('bound','dispatching','reconciling','deadline_exceeded')`), task.Request.RequestID, task.Attempt, task.Node.RequestID, task.Status)
+	if err != nil {
+		return false, err
+	}
+	n, err := result.RowsAffected()
+	return n == 1, err
+}
+
 // Unknown observations retain the reservation. Only a definitive result may
 // release it, and only when the executing node has attested complete cleanup.
 func (s *laneInboxStore) completeSpawn(parent context.Context, task hubSpawnTask, outcome hubSpawnOutcome, now time.Time) (bool, error) {
@@ -167,10 +185,11 @@ func (s *laneInboxStore) completeSpawn(parent context.Context, task hubSpawnTask
 	defer tx.Rollback()
 	if outcome.Reason == "timeout" {
 		var node sql.NullString
-		if err = tx.QueryRowContext(ctx, s.q(`SELECT node_id FROM spawn_operations WHERE request_id=? AND attempt=?`), task.Request.RequestID, task.Attempt).Scan(&node); err != nil {
+		var currentStatus string
+		if err = tx.QueryRowContext(ctx, s.q(`SELECT node_id,status FROM spawn_operations WHERE request_id=? AND attempt=?`), task.Request.RequestID, task.Attempt).Scan(&node, &currentStatus); err != nil {
 			return false, err
 		}
-		outcome.Retryable = !node.Valid || outcome.NodeResult && outcome.Retryable
+		outcome.Retryable = !node.Valid || currentStatus == "bound" || outcome.NodeResult && outcome.Retryable
 	}
 	outcome.Retryable = outcome.Retryable && spawnRefusalReplayable(outcome.Reason)
 	status := spawnOutcomeStatus(outcome)
@@ -181,7 +200,11 @@ func (s *laneInboxStore) completeSpawn(parent context.Context, task hubSpawnTask
 	if err != nil {
 		return false, err
 	}
-	result, err := tx.ExecContext(ctx, s.q(`UPDATE spawn_operations SET status=?,result=? WHERE request_id=? AND attempt=? AND status IN ('accepted','dispatching','reconciling','deadline_exceeded') AND status<>? AND NOT (status='deadline_exceeded' AND ?='reconciling') AND (node_id IS NULL OR ?<>'timeout' OR ?<>'retryable' OR ?)`), status, string(raw), task.Request.RequestID, task.Attempt, status, status, outcome.Reason, status, outcome.NodeResult)
+	nodeID := ""
+	if task.Node != nil {
+		nodeID = task.Node.RequestID
+	}
+	result, err := tx.ExecContext(ctx, s.q(`UPDATE spawn_operations SET status=?,result=? WHERE request_id=? AND attempt=? AND status IN ('accepted','bound','dispatching','reconciling','deadline_exceeded') AND status<>? AND NOT (status='deadline_exceeded' AND ?='reconciling') AND ((?='' AND node_id IS NULL) OR node_id=?) AND (? NOT IN ('accepted','bound') OR status=?) AND (node_id IS NULL OR status='bound' OR ?<>'timeout' OR ?<>'retryable' OR ?)`), status, string(raw), task.Request.RequestID, task.Attempt, status, status, nodeID, nodeID, task.Status, task.Status, outcome.Reason, status, outcome.NodeResult)
 	if err != nil {
 		return false, err
 	}
@@ -191,6 +214,12 @@ func (s *laneInboxStore) completeSpawn(parent context.Context, task hubSpawnTask
 	}
 	if status == "retryable" {
 		if _, err = tx.ExecContext(ctx, s.q(`DELETE FROM spawn_reservations WHERE job=? AND request_id=?`), task.Job, task.Request.RequestID); err != nil {
+			return false, err
+		}
+	} else if code, _, _ := strings.Cut(outcome.Reason, ": "); status == "failed" && task.Status == "bound" && code == spawnAbandonedReason {
+		// An unsent abandonment has no node or hk side effects. Release its
+		// role in the same transaction as its outcome and outbox notification.
+		if _, err = tx.ExecContext(ctx, s.q(`UPDATE spawn_reservations SET task_role=NULL WHERE request_id=?`), task.Request.RequestID); err != nil {
 			return false, err
 		}
 	}
@@ -246,9 +275,18 @@ func scanSpawnTask(row interface{ Scan(...any) error }) (hubSpawnTask, error) {
 // unbindRefusedSpawn returns a bound operation to placement after its node
 // refused it without side effects. A crash after this only places it again.
 func (s *laneInboxStore) unbindRefusedSpawn(parent context.Context, id string, attempt int, nodeID string) (hubSpawnTask, error) {
+	return s.unbindSpawn(parent, id, attempt, nodeID, "dispatching")
+}
+
+// An unsent binding can be returned to placement without a node result.
+func (s *laneInboxStore) unbindUnsentSpawn(parent context.Context, id string, attempt int, nodeID string) (hubSpawnTask, error) {
+	return s.unbindSpawn(parent, id, attempt, nodeID, "bound")
+}
+
+func (s *laneInboxStore) unbindSpawn(parent context.Context, id string, attempt int, nodeID, status string) (hubSpawnTask, error) {
 	ctx, done := s.op(parent)
 	defer done()
-	result, err := s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET node_id=NULL,node_payload='',status='accepted' WHERE request_id=? AND attempt=? AND node_id=? AND status='dispatching'`), id, attempt, nodeID)
+	result, err := s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET node_id=NULL,node_payload='',status='accepted' WHERE request_id=? AND attempt=? AND node_id=? AND status=?`), id, attempt, nodeID, status)
 	if err != nil {
 		return hubSpawnTask{}, err
 	}
@@ -303,7 +341,7 @@ func (s *laneInboxStore) spawnTaskByNode(parent context.Context, id string) (hub
 func (s *laneInboxStore) pendingSpawns(parent context.Context, now time.Time) ([]hubSpawnTask, error) {
 	ctx, done := s.op(parent)
 	defer done()
-	tasks, err := s.queryPendingSpawns(ctx, `status IN ('accepted','dispatching','reconciling') AND payload NOT LIKE '%"start_conditions":%' ORDER BY last_run_ms,created_ms LIMIT 32`)
+	tasks, err := s.queryPendingSpawns(ctx, `status IN ('accepted','bound','dispatching','reconciling') AND payload NOT LIKE '%"start_conditions":%' ORDER BY last_run_ms,created_ms LIMIT 32`)
 	if err != nil {
 		return nil, err
 	}
@@ -326,7 +364,7 @@ func (s *laneInboxStore) pendingSpawns(parent context.Context, now time.Time) ([
 func (s *laneInboxStore) pendingStartConditionSpawns(parent context.Context, now time.Time) ([]hubSpawnTask, error) {
 	ctx, done := s.op(parent)
 	defer done()
-	tasks, err := s.queryPendingSpawns(ctx, `status IN ('accepted','dispatching','reconciling') AND payload LIKE '%"start_conditions":%' ORDER BY last_run_ms,created_ms LIMIT 32`)
+	tasks, err := s.queryPendingSpawns(ctx, `status IN ('accepted','bound','dispatching','reconciling') AND payload LIKE '%"start_conditions":%' ORDER BY last_run_ms,created_ms LIMIT 32`)
 	if err != nil {
 		return nil, err
 	}

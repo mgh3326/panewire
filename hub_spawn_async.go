@@ -375,9 +375,14 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 			h.reprobeStaleSpawn(parent, task)
 			return
 		}
-		h.logger.Warn("hub spawn starved in the queue", "request_id", task.Request.RequestID, "job", task.Job, "host", firstNonEmptyString(spawnTaskHost(task), "none"), "queue_wait_s", spawnQueueWaitSeconds(task, h.now()))
-		h.finishSpawnOutcome(task, hubSpawnOutcome{RC: 124, Stage: "landing", Reason: "timeout", Host: spawnTaskHost(task), Retryable: task.Node == nil, Fix: spawnQueueWaitFix(task, h.now())})
-		if task.Node == nil {
+		unsent := task.Node == nil || task.Status == "bound"
+		if unsent {
+			h.logger.Warn("hub spawn starved in the queue", "request_id", task.Request.RequestID, "job", task.Job, "host", firstNonEmptyString(spawnTaskHost(task), "none"), "queue_wait_s", spawnQueueWaitSeconds(task, h.now()))
+		} else {
+			h.logger.Warn("hub spawn deadline elapsed with ownership unresolved", "request_id", task.Request.RequestID, "job", task.Job, "host", spawnTaskHost(task))
+		}
+		h.finishSpawnOutcome(task, hubSpawnOutcome{RC: 124, Stage: "landing", Reason: "timeout", Host: spawnTaskHost(task), Retryable: unsent, Fix: spawnQueueWaitFix(task, h.now())})
+		if unsent {
 			return
 		}
 		ctx, cancel := context.WithTimeout(parent, 5*time.Second)
@@ -498,11 +503,12 @@ func (s directSpawnState) Snapshot(ctx context.Context) (fleet.FleetSnapshot, er
 	return snap, err
 }
 
-// spawnQueueWaitFix names the step that ran out of time when the coordinator
-// finds a request already past its deadline: the hub's own spawn queue. The
-// stage this branch reports is the last of the closed set, which reads as a
-// node landing that never ran, so the fix text carries the wait instead.
+// spawnQueueWaitFix distinguishes a never-sent queue timeout from a request
+// whose committed send may have reached its node.
 func spawnQueueWaitFix(task hubSpawnTask, now time.Time) string {
+	if task.Node != nil && task.Status != "bound" {
+		return fmt.Sprintf("the node %s may have started this request; inspect its saved operation and executing node before retrying", task.Node.Machine)
+	}
 	return fmt.Sprintf("the hub did not start this request within its %ds deadline (about %ds in the spawn queue, host=%s); no node ran its landing — check hub spawn worker occupancy, then resubmit", task.Request.DeadlineSeconds, spawnQueueWaitSeconds(task, now), firstNonEmptyString(spawnTaskHost(task), "none"))
 }
 
@@ -637,11 +643,48 @@ func (t *directSpawnTransport) nextHostAfterRefusal(ctx context.Context, node hu
 }
 func (t *directSpawnTransport) dispatch(ctx context.Context, node hubSpawnRequest) (fleet.HubSpawnReply, error) {
 	h := t.h
+	id := t.task.Request.RequestID
+	if !h.spawnActions.begin(id) {
+		return fleet.HubSpawnReply{}, &fleet.HubError{Kind: "hub_spawn_pending"}
+	}
+	defer h.spawnActions.end(id)
+	current, err := h.inbox.store.spawnTask(ctx, id)
+	if err != nil || current.Attempt != t.task.Attempt || current.Node == nil || current.Node.RequestID != node.RequestID || current.Node.Machine != node.Machine || !spawnPending(current.Status) {
+		return fleet.HubSpawnReply{}, &fleet.HubError{Kind: "hub_spawn_pending"}
+	}
+	t.task, node = current, *current.Node
+	if current.Status == "bound" && !h.now().Before(current.Deadline) {
+		h.finishSpawnOutcome(current, hubSpawnOutcome{RC: 124, Stage: "landing", Reason: "timeout", Host: node.Machine, Retryable: true, Fix: spawnQueueWaitFix(current, h.now())})
+		return fleet.HubSpawnReply{}, &fleet.HubError{Kind: "hub_spawn_pending"}
+	}
 	h.mu.Lock()
 	record := h.nodes[node.Machine]
-	if record == nil || record.agent == nil || record.state != "connected" || !record.capabilities["spawn_ops_v1"] {
+	connected := record != nil && record.agent != nil && record.state == "connected" && record.capabilities["spawn_ops_v1"]
+	if current.Status == "bound" && (!connected || !h.acceptingEffectiveLocked(node.Machine, record.accepting)) {
+		h.mu.Unlock()
+		if _, err := h.inbox.store.unbindUnsentSpawn(ctx, id, current.Attempt, node.RequestID); err == nil {
+			h.releasePlacementCount(current.Job)
+			select {
+			case h.spawnKick <- struct{}{}:
+			default:
+			}
+		}
+		return fleet.HubSpawnReply{}, &fleet.HubError{Kind: "hub_spawn_pending"}
+	}
+	if !connected {
 		h.mu.Unlock()
 		return t.unknown(ctx, "disconnected")
+	}
+	// The effective accepting check and the durable first-send CAS serialize
+	// with an operator containment change under h.mu. Replays of possibly sent
+	// work remain allowed even when the node no longer accepts new work.
+	started, err := h.inbox.store.beginSpawnSend(ctx, current)
+	if err != nil || !started {
+		h.mu.Unlock()
+		return fleet.HubSpawnReply{}, &fleet.HubError{Kind: "hub_spawn_pending"}
+	}
+	if current.Status == "bound" {
+		t.task.Status = "dispatching"
 	}
 	agent := record.agent
 	entry := &hubSpawnRecord{request: node, status: "pending", created: h.now(), waiter: make(chan hubSpawnResult, 1)}

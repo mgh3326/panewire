@@ -156,6 +156,7 @@ func staleSpawnRow(t *testing.T, h *HubServer, n int) {
 	if task, err = h.inbox.store.bindSpawn(t.Context(), request.RequestID, task.Attempt, node); err != nil {
 		t.Fatal(err)
 	}
+	task = sentSpawnFixture(t, h.inbox.store, task)
 	if _, err = h.inbox.store.completeSpawn(t.Context(), task, hubSpawnOutcome{RC: 124, Stage: "landing", Reason: "timeout", Host: "machine-a"}, time.Now()); err != nil {
 		t.Fatal(err)
 	}

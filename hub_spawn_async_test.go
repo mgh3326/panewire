@@ -181,6 +181,7 @@ func TestSpawnSentryOnlySpawnAlwaysSampledAndNormalized(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	task = sentSpawnFixture(t, h.inbox.store, task)
 	// A reconciling outcome sends no Sentry traffic (hk 3676): only the timeout's
 	// transaction and error event remain below.
 	result := hubSpawnOutcome{RC: 75, Stage: "landing", Reason: "unknown", Host: "machine-a", Profile: "model-a", Role: "worker", StageMS: map[string]int64{"claim": 5, "placement": 20, "checkout": 30, "launch": 40, "landing": 50}}

@@ -819,6 +819,7 @@ func TestLaneInboxStoreSpawnDurabilityContract(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			task = sentSpawnFixture(t, store, task)
 			if _, err = store.completeSpawn(t.Context(), task, hubSpawnOutcome{RC: 124, Stage: "landing", Reason: "timeout", Retryable: true}, time.Now()); err != nil {
 				t.Fatal(err)
 			}

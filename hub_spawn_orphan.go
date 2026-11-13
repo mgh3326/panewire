@@ -49,7 +49,7 @@ const (
 // spawnPending reports whether status still holds ownership unresolved.
 func spawnPending(status string) bool {
 	switch status {
-	case "accepted", "dispatching", "reconciling", "deadline_exceeded":
+	case "accepted", "bound", "dispatching", "reconciling", "deadline_exceeded":
 		return true
 	}
 	return false
@@ -81,6 +81,10 @@ func (h *HubServer) reprobeStaleSpawn(parent context.Context, task hubSpawnTask)
 	if h.now().Sub(task.Deadline) < spawnStuckAfter {
 		return
 	}
+	if !h.spawnActions.begin(task.Request.RequestID) {
+		return
+	}
+	defer h.spawnActions.end(task.Request.RequestID)
 	current, err := h.inbox.store.spawnTask(parent, task.Request.RequestID)
 	if err != nil || current.Status != "deadline_exceeded" || current.Attempt != task.Attempt {
 		return
@@ -206,6 +210,11 @@ func (h *HubServer) handleSpawnAbandon(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, map[string]string{"error": "invalid_request", "fix": "name a request id and a one-line --reason"})
 		return
 	}
+	if !h.spawnActions.begin(id) {
+		writeJSON(w, 409, map[string]string{"error": "spawn_abandon_refused", "reason": "sending_or_abandoning", "request_id": id})
+		return
+	}
+	defer h.spawnActions.end(id)
 	task, err := h.inbox.store.spawnTask(r.Context(), id)
 	if errors.Is(err, sql.ErrNoRows) {
 		writeJSON(w, 404, map[string]string{"error": "not_found"})
@@ -224,7 +233,24 @@ func (h *HubServer) handleSpawnAbandon(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	outcome := hubSpawnOutcome{RC: 75, Stage: "landing", Reason: spawnOutcomeReason(spawnAbandonedReason, spawnRefusalLine(body.Reason)), Host: task.Node.Machine, Fix: "the operator abandoned this request; submit the work again under a new job id"}
-	released, why := h.finishUnownedSpawn(r.Context(), task, outcome)
+	var released bool
+	var why string
+	if task.Status == "bound" {
+		// No send transition occurred. Completion compares the binding and
+		// bound state, so a concurrent send cannot be abandoned as unsent.
+		changed, err := h.completeSpawn(r.Context(), task, outcome)
+		switch {
+		case err != nil:
+			why = "store_unavailable"
+		case !changed:
+			why = "not_pending"
+		default:
+			h.recordSpawnTrace(task, outcome)
+			released = true
+		}
+	} else {
+		released, why = h.finishUnownedSpawn(r.Context(), task, outcome)
+	}
 	h.logger.Warn("hub spawn abandon", "request_id", id, "job", task.Job, "host", task.Node.Machine, "status", task.Status, "released", released, "held_by", why, "reason", spawnRefusalLine(body.Reason))
 	if !released {
 		writeJSON(w, 409, map[string]string{"error": "spawn_abandon_refused", "reason": why, "request_id": id, "job": task.Job, "host": task.Node.Machine})

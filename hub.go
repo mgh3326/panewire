@@ -409,6 +409,7 @@ type HubServer struct {
 	quotaReplaceBudget time.Duration
 	spawnKick          chan struct{}
 	spawnWorkers       sync.WaitGroup
+	spawnActions       hubSpawnActions
 	// drain is the SIGTERM state (hub_drain.go).
 	drain hubDrain
 	// spawnOrphanProbed is when the hub last probed each stranded request's

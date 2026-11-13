@@ -330,13 +330,13 @@ func (h *HubServer) replaceQuotaStopped(ctx context.Context, machine string, eve
 }
 
 // spawnMayStillRun reports whether an operation that has not settled can still
-// place a job: one the node holds (dispatching, reconciling) or whose late
-// result can still arrive (deadline_exceeded with a node binding). An accepted
-// operation has no node, and past its deadline is completed retryable without
-// being dispatched.
+// place a job: one with a destination that may still be sent (bound), one the
+// node may hold (dispatching, reconciling), or one whose late result can still
+// arrive (deadline_exceeded with a node binding). An accepted operation has no
+// node, and past its deadline is completed retryable without being dispatched.
 func spawnMayStillRun(task hubSpawnTask) bool {
 	switch task.Status {
-	case "dispatching", "reconciling":
+	case "bound", "dispatching", "reconciling":
 		return true
 	case "deadline_exceeded":
 		return task.Node != nil
@@ -348,7 +348,7 @@ func spawnMayStillRun(task hubSpawnTask) bool {
 // (laneInboxStore.pendingSpawns).
 func spawnStatusActive(status string) bool {
 	switch status {
-	case "accepted", "dispatching", "reconciling", "deadline_exceeded":
+	case "accepted", "bound", "dispatching", "reconciling", "deadline_exceeded":
 		return true
 	}
 	return false

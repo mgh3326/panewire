@@ -14,6 +14,23 @@ import (
 
 const statusTestOperation = "00000000-0000-4000-8000-000000000001"
 
+func TestWaitSpawnContinuesThroughBound_t4577(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) == 1 {
+			json.NewEncoder(w).Encode(map[string]any{"status": "bound"})
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]any{"status": "succeeded", "result": map[string]any{"host": "node-b"}})
+	}))
+	defer server.Close()
+	c := hubHTTP{base: server.URL, token: "fixture", client: server.Client(), statusPoll: 1}
+	attempt, err := c.WaitSpawn(t.Context(), statusTestOperation)
+	if err != nil || attempt.Host != "node-b" {
+		t.Fatalf("bound operation stopped the wait: attempt=%+v err=%v", attempt, err)
+	}
+}
+
 func TestWaitSpawnRefusalNamesHostAndProfile(t *testing.T) {
 	for name, test := range map[string]struct {
 		result map[string]any

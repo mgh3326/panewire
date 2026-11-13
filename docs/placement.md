@@ -147,7 +147,7 @@ whole-pool cap, so a free rung must pass both keys when both are set.
 
 The hub counts, because it places every hub spawn
 ([durable spawn operations](hub-spawn-operations.md)). A live spawn on a pool
-is a hub spawn operation that is accepted or dispatching, or succeeded with a
+is a hub spawn operation that is accepted, bound or dispatching, or succeeded with a
 job that a node still lists as active, whose placed profile is in that pool.
 A spawn that succeeded less than two minutes ago counts before its first
 heartbeat. An auto spawn that is still being placed has no profile yet and
