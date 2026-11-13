@@ -388,6 +388,7 @@ func TestNodeCheckoutPullResultValidation(t *testing.T) {
 		{Outcome: "pulled", Checkout: "rstack", From: sha, To: other, InstallRan: true, InstallExit: -1, Reason: "install-timeout"},
 		{Outcome: "current", Checkout: "rstack", To: sha},
 		{Outcome: "refused", Checkout: "rstack", Reason: "dirty"},
+		{Outcome: "refused", Checkout: "rstack", Reason: "pull-interrupted", To: other},
 	}
 	for _, result := range valid {
 		if !validNodeCheckoutPullResult(result) {
@@ -405,5 +406,67 @@ func TestNodeCheckoutPullResultValidation(t *testing.T) {
 		if validNodeCheckoutPullResult(result) {
 			t.Fatalf("accepted invalid result %+v", result)
 		}
+	}
+}
+
+// TestNodeCheckoutFailedPullNamesTheState: a failed pull is named from what it
+// left in the checkout. Interrupted when HEAD moved or the worktree is dirty;
+// not-fast-forward when nothing moved and the branch diverged.
+func TestNodeCheckoutFailedPullNamesTheState(t *testing.T) {
+	ctx := t.Context()
+	t.Run("diverged and unchanged", func(t *testing.T) {
+		fixture := newCheckoutPullFixture(t)
+		nodeGit(t, fixture.checkout, "commit", "-q", "--allow-empty", "-m", "local")
+		fixture.pushPeer(t, "remote", map[string]string{"remote.txt": "remote\n"})
+		from := nodeGit(t, fixture.checkout, "rev-parse", "HEAD")
+		reason, head := nodeCheckoutFailedPull(ctx, fixture.checkout, from)
+		if reason != nodeCheckoutReasonNotFF || head != from {
+			t.Fatalf("reason=%s head=%s, want not-fast-forward at %s", reason, head, from)
+		}
+	})
+	t.Run("worktree dirty", func(t *testing.T) {
+		fixture := newCheckoutPullFixture(t)
+		from := nodeGit(t, fixture.checkout, "rev-parse", "HEAD")
+		if err := os.WriteFile(filepath.Join(fixture.checkout, "README.md"), []byte("half applied\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		reason, head := nodeCheckoutFailedPull(ctx, fixture.checkout, from)
+		if reason != nodeCheckoutReasonPullInterrupted || head != from {
+			t.Fatalf("reason=%s head=%s, want pull-interrupted at %s", reason, head, from)
+		}
+	})
+	t.Run("HEAD moved", func(t *testing.T) {
+		fixture := newCheckoutPullFixture(t)
+		from := nodeGit(t, fixture.checkout, "rev-parse", "HEAD")
+		target := fixture.pushPeer(t, "next", map[string]string{"app.txt": "next\n"})
+		nodeGit(t, fixture.checkout, "fetch", "-q")
+		nodeGit(t, fixture.checkout, "reset", "-q", "--hard", target)
+		reason, head := nodeCheckoutFailedPull(ctx, fixture.checkout, from)
+		if reason != nodeCheckoutReasonPullInterrupted || head != target {
+			t.Fatalf("reason=%s head=%s, want pull-interrupted at %s", reason, head, target)
+		}
+	})
+}
+
+// TestNodeCheckoutInstallKillsChildren: a child that install.sh starts must
+// die with the script when the bound ends, not keep running after the result.
+func TestNodeCheckoutInstallKillsChildren(t *testing.T) {
+	fixture := newCheckoutPullFixture(t)
+	late := fixture.marker + ".late"
+	fixture.pushPeer(t, "install with a child", map[string]string{
+		"install.sh":    "#!/bin/sh\n(sleep 2; echo late > \"$PANEWIRE_TEST_INSTALL_MARKER.late\") &\nsleep 30\n",
+		"install/x.txt": "x\n",
+	})
+	client := fixture.client()
+	client.nodeInstallWait = 300 * time.Millisecond
+	result := checkoutPullRun(t, client, "rstack", "")
+	if result["reason"] != nodeCheckoutReasonInstallLong {
+		t.Fatalf("result=%v, want install-timeout", result)
+	}
+	// Proof that nothing happens later: the child would write after 2s, and
+	// this wait is longer than that. It is a fixed window, not a poll.
+	time.Sleep(2500 * time.Millisecond)
+	if _, err := os.Stat(late); !os.IsNotExist(err) {
+		t.Fatalf("install child kept running after the bound (stat err=%v)", err)
 	}
 }

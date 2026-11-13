@@ -123,7 +123,9 @@ func TestHubCheckoutPullWritesOneDeployRecordPerOrder(t *testing.T) {
 
 	from := strings.Repeat("a", 40)
 	to := strings.Repeat("c", 40)
-	for _, rev := range []string{"ccccccc", ""} {
+	// Two orders for the same revision on the same day must still get two
+	// documents: each key ends in its own order id.
+	for _, rev := range []string{"ccccccc", "ccccccc", ""} {
 		results := checkoutPullOrder(t, server, map[string]any{"checkout": "rstack", "rev": rev})
 		command := nodeCommandRead(t, connection)
 		checkoutPullReplyPulled(t, connection, command, from, to)
@@ -138,15 +140,15 @@ func TestHubCheckoutPullWritesOneDeployRecordPerOrder(t *testing.T) {
 	}
 
 	keys, bodies := fake.written()
-	if len(keys) != 2 {
-		t.Fatalf("hk documents=%v, want exactly one per order", keys)
+	if len(keys) != 3 || keys[0] == keys[1] {
+		t.Fatalf("hk documents=%v, want exactly one distinct document per order", keys)
 	}
-	if !strings.HasPrefix(keys[0], "deploy/rstack/") || !strings.HasSuffix(keys[0], "-ccccccc") {
-		t.Fatalf("key=%q, want deploy/rstack/<date>-<rev>", keys[0])
+	if !strings.HasPrefix(keys[0], "deploy/rstack/") || !strings.Contains(keys[0], "-ccccccc-cmd-") {
+		t.Fatalf("key=%q, want deploy/rstack/<date>-<rev>-<order id>", keys[0])
 	}
-	if !strings.HasSuffix(keys[1], "-"+to) {
+	if !strings.Contains(keys[2], "-"+to+"-cmd-") {
 		// With no target rev the record is named by the revision a host reached.
-		t.Fatalf("key=%q, want the reached revision when no target is given", keys[1])
+		t.Fatalf("key=%q, want the reached revision when no target is given", keys[2])
 	}
 	var document struct {
 		Kind string `json:"kind"`

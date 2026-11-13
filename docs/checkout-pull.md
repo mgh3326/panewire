@@ -12,7 +12,7 @@ A node acts only on checkouts its own `spawn.json` names under `checkouts`, an
 object from name to absolute path:
 
 ```json
-{"checkouts": {"rstack": "~/.agents/rstack"}}
+{"checkouts": {"rstack": "/srv/checkouts/rstack"}}
 ```
 
 Without a `checkouts` key the list is `rstack` → `~/.agents/rstack`. A name must
@@ -25,8 +25,9 @@ command, and nothing outside this list is reachable.
 `args: {checkout, rev}`. `rev` is a hex revision (7 to 40 characters) or `""`
 for no target. Both fields are required.
 
-Steps, in order. Any refusal happens before the pull, or is a pull that could
-not fast-forward, so nothing in the checkout's branch or worktree changes:
+Steps, in order. A refusal before the pull changes nothing. A refusal at the
+pull reports the state it found: unchanged for `not-fast-forward`, and
+`pull-interrupted` when the pull may have moved HEAD or the worktree:
 
 1. `checkout` is not on the allow-list: refused `not-allow-listed`.
 2. The path is missing, a symlink, or not the top of a git worktree: refused
@@ -37,9 +38,12 @@ not fast-forward, so nothing in the checkout's branch or worktree changes:
    `no-upstream`.
 5. `git status --porcelain --untracked-files=normal` is not empty: refused
    `dirty`.
-6. `git fetch --quiet`, then `git pull --ff-only --quiet`. A pull that does not
-   fast-forward is refused `not-fast-forward`; any other pull failure is
-   `pull-failed`, and a failed fetch is `fetch-failed`.
+6. `git fetch --quiet`, then `git pull --ff-only --quiet`. A failed pull is
+   read back before it is named: if HEAD moved or the worktree is dirty, the
+   pull was interrupted mid-apply and is refused `pull-interrupted`, with `to`
+   set to the HEAD found; the operator must inspect it. An unchanged pull that
+   cannot fast-forward is refused `not-fast-forward`; any other unchanged pull
+   failure is `pull-failed`. A failed fetch is `fetch-failed`.
 7. If HEAD moved and the pulled range changed a file under `install/` or
    `bin/`, the checkout's `install.sh` runs with no arguments, no shell, the
    node user's environment, and a 2-minute bound. A missing or non-executable
@@ -48,7 +52,9 @@ not fast-forward, so nothing in the checkout's branch or worktree changes:
 8. With a `rev`, the result says whether HEAD contains it (`target_reached`).
 
 Every git call is bounded (fetch 90 s, pull and other steps 60 s or less) and
-runs with `GIT_TERMINAL_PROMPT=0`. The whole op is bounded by 4 minutes.
+runs with `GIT_TERMINAL_PROMPT=0`. Each git call and `install.sh` runs in its
+own process group, which is killed whole when its bound ends, so no child
+outlives the bound. The whole op is bounded by 4 minutes.
 
 Result:
 
@@ -105,10 +111,12 @@ endpoint, which would skip the record. A malformed body or unknown field is 400.
 Each order writes exactly one hk document through the hub's handoffkeep client
 (`PUT /v1/documents/<key>`, kind `deploy`). Key:
 
-    deploy/<checkout>/<YYYY-MM-DD>-<rev>
+    deploy/<checkout>/<YYYY-MM-DD>[-<rev>]-<order id>
 
 `<rev>` is the order's `rev`. With no `rev` it is the first host's reached
-revision (machine order), else the order's request id. The body is JSON:
+revision (machine order) and is left out when no host reached one. `<order id>`
+is the order's `request_id`, so every order has its own document, even when
+two orders share a checkout, a revision and a day. The body is JSON:
 
 ```json
 {"kind":"checkout-pull","checkout":"rstack","rev":"","request_id":"cmd-…",

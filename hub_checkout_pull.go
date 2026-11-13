@@ -171,9 +171,9 @@ func (h *HubServer) handleCheckoutPull(writer http.ResponseWriter, request *http
 }
 
 // writeCheckoutPullRecord writes the order's one deploy record to hk, through
-// the hub's handoffkeep client, under deploy/<checkout>/<date>-<rev>. A
-// deployment with no target rev is named by the first revision a host reached,
-// then by the order id.
+// the hub's handoffkeep client, under deploy/<checkout>/<date>-<rev>-<order id>.
+// With no target rev the rev part is the first revision a host reached, and it
+// is left out when no host reached one.
 func (h *HubServer) writeCheckoutPullRecord(ctx context.Context, body hubCheckoutPullRequest, orderID string, rows []hubCheckoutPullHost, now time.Time) hubCheckoutPullRecord {
 	key := hubCheckoutDeployKey(body.Checkout, body.Rev, orderID, rows, now)
 	if h.handoffkeep == nil {
@@ -219,14 +219,17 @@ func handoffkeepDocumentEndpoint(client *handoffkeepRelayClient, key string) (st
 // hubCheckoutDeployKey names an order's record. rows are in machine order, so
 // the fallback is the same on every retry of the same answers.
 func hubCheckoutDeployKey(checkout, rev, orderID string, rows []hubCheckoutPullHost, now time.Time) string {
-	suffix := rev
-	if suffix == "" {
-		suffix = firstCheckoutPullTarget(rows)
+	name := now.Format("2006-01-02")
+	target := rev
+	if target == "" {
+		target = firstCheckoutPullTarget(rows)
 	}
-	if suffix == "" {
-		suffix = orderID
+	if target != "" {
+		name += "-" + target
 	}
-	return "deploy/" + checkout + "/" + now.Format("2006-01-02") + "-" + suffix
+	// The order id makes the key unique per order: two orders for the same
+	// checkout, revision and day must not share, or overwrite, one document.
+	return "deploy/" + checkout + "/" + name + "-" + orderID
 }
 
 // firstCheckoutPullTarget is the revision the first host that reported one

@@ -46,24 +46,29 @@ const (
 	nodeCheckoutOutcomeCurrent = "current"
 	nodeCheckoutOutcomeRefused = "refused"
 
-	// Refusal reasons: nothing in the checkout's branch or worktree changed.
-	nodeCheckoutReasonNotAllowed   = "not-allow-listed"
-	nodeCheckoutReasonNotCheckout  = "not-a-checkout"
-	nodeCheckoutReasonBusy         = "busy"
-	nodeCheckoutReasonLockFailed   = "lock-failed"
-	nodeCheckoutReasonDetached     = "detached"
-	nodeCheckoutReasonNoUpstream   = "no-upstream"
-	nodeCheckoutReasonDirty        = "dirty"
-	nodeCheckoutReasonGitFailed    = "git-failed"
-	nodeCheckoutReasonFetchFailed  = "fetch-failed"
-	nodeCheckoutReasonNotFF        = "not-fast-forward"
-	nodeCheckoutReasonPullFailed   = "pull-failed"
-	nodeCheckoutReasonInstallGone  = "install-missing"
-	nodeCheckoutReasonInstallLong  = "install-timeout"
-	nodeCheckoutInstallExitKilled  = -1
-	nodeCheckoutInstallPathFile    = "install.sh"
-	nodeCheckoutGitTerminalPrompt  = "GIT_TERMINAL_PROMPT=0"
-	nodeCheckoutDetachedBranchName = "HEAD"
+	// Refusal reasons. Every reason but pull-interrupted leaves the checkout's
+	// branch and worktree as they were; pull-interrupted reports what the pull
+	// left behind (see nodeCheckoutFailedPull).
+	nodeCheckoutReasonNotAllowed  = "not-allow-listed"
+	nodeCheckoutReasonNotCheckout = "not-a-checkout"
+	nodeCheckoutReasonBusy        = "busy"
+	nodeCheckoutReasonLockFailed  = "lock-failed"
+	nodeCheckoutReasonDetached    = "detached"
+	nodeCheckoutReasonNoUpstream  = "no-upstream"
+	nodeCheckoutReasonDirty       = "dirty"
+	nodeCheckoutReasonGitFailed   = "git-failed"
+	nodeCheckoutReasonFetchFailed = "fetch-failed"
+	nodeCheckoutReasonNotFF       = "not-fast-forward"
+	nodeCheckoutReasonPullFailed  = "pull-failed"
+	// nodeCheckoutReasonPullInterrupted: a pull failed after it may have moved
+	// HEAD or the worktree. The result carries the HEAD it found in to.
+	nodeCheckoutReasonPullInterrupted = "pull-interrupted"
+	nodeCheckoutReasonInstallGone     = "install-missing"
+	nodeCheckoutReasonInstallLong     = "install-timeout"
+	nodeCheckoutInstallExitKilled     = -1
+	nodeCheckoutInstallPathFile       = "install.sh"
+	nodeCheckoutGitTerminalPrompt     = "GIT_TERMINAL_PROMPT=0"
+	nodeCheckoutDetachedBranchName    = "HEAD"
 )
 
 var (
@@ -77,7 +82,7 @@ var (
 		nodeCheckoutReasonNotAllowed: true, nodeCheckoutReasonNotCheckout: true, nodeCheckoutReasonBusy: true,
 		nodeCheckoutReasonLockFailed: true, nodeCheckoutReasonDetached: true, nodeCheckoutReasonNoUpstream: true,
 		nodeCheckoutReasonDirty: true, nodeCheckoutReasonGitFailed: true, nodeCheckoutReasonFetchFailed: true,
-		nodeCheckoutReasonNotFF: true, nodeCheckoutReasonPullFailed: true,
+		nodeCheckoutReasonNotFF: true, nodeCheckoutReasonPullFailed: true, nodeCheckoutReasonPullInterrupted: true,
 	}
 )
 
@@ -177,6 +182,7 @@ func runNodeCheckoutGit(ctx context.Context, dir string, timeout time.Duration, 
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), nodeCheckoutGitTerminalPrompt)
 	cmd.WaitDelay = 100 * time.Millisecond
+	nodeCheckoutSetGroup(cmd)
 	return cmd.Output()
 }
 
@@ -293,12 +299,11 @@ func (client *HubClient) nodeCheckoutPullRun(ctx context.Context, name, dir, rev
 		return refuse(nodeCheckoutReasonFetchFailed)
 	}
 	if _, err := runNodeCheckoutGit(ctx, dir, nodeCheckoutPullStepTimeout, "pull", "--ff-only", "--quiet"); err != nil {
-		// A pull that cannot fast-forward says so from the ancestry, not from
-		// git's wording, which varies with locale.
-		if _, ancestry := runNodeCheckoutGit(ctx, dir, nodeCheckoutRevTimeout, "merge-base", "--is-ancestor", "HEAD", "@{u}"); isExitStatus(ancestry, 1) {
-			return refuse(nodeCheckoutReasonNotFF)
-		}
-		return refuse(nodeCheckoutReasonPullFailed)
+		// A failed pull may have moved HEAD or the worktree before it died, so
+		// the state is read back and reported, not assumed clean.
+		reason, head := nodeCheckoutFailedPull(ctx, dir, strings.TrimSpace(string(from)))
+		result.To = head
+		return refuse(reason)
 	}
 	to, err := runNodeCheckoutGit(ctx, dir, nodeCheckoutRevTimeout, "rev-parse", "--verify", "HEAD")
 	if err != nil {
@@ -323,6 +328,29 @@ func (client *HubClient) nodeCheckoutPullRun(ctx context.Context, name, dir, rev
 		result.TargetReached = &reached
 	}
 	return result
+}
+
+// nodeCheckoutFailedPull names why a `git pull --ff-only` failed, from the
+// checkout's state rather than the error. If HEAD moved or the worktree is
+// dirty, the pull was interrupted mid-apply: the reason is pull-interrupted and
+// head is the HEAD found (empty when it cannot be read). Otherwise the state is
+// unchanged, and ancestry tells a non-fast-forward from another failure.
+func nodeCheckoutFailedPull(ctx context.Context, dir, from string) (string, string) {
+	headOut, headErr := runNodeCheckoutGit(ctx, dir, nodeCheckoutRevTimeout, "rev-parse", "--verify", "HEAD")
+	statusOut, statusErr := runNodeCheckoutGit(ctx, dir, nodeCheckoutRevTimeout, "status", "--porcelain", "--untracked-files=normal")
+	if headErr != nil || statusErr != nil {
+		return nodeCheckoutReasonPullInterrupted, ""
+	}
+	head := strings.TrimSpace(string(headOut))
+	if head != from || len(strings.TrimSpace(string(statusOut))) > 0 {
+		return nodeCheckoutReasonPullInterrupted, head
+	}
+	// A pull that cannot fast-forward says so from the ancestry, not from
+	// git's wording, which varies with locale.
+	if _, ancestry := runNodeCheckoutGit(ctx, dir, nodeCheckoutRevTimeout, "merge-base", "--is-ancestor", "HEAD", "@{u}"); isExitStatus(ancestry, 1) {
+		return nodeCheckoutReasonNotFF, head
+	}
+	return nodeCheckoutReasonPullFailed, head
 }
 
 // installPathsChanged reports whether a `git diff --name-only` list touches
@@ -351,6 +379,9 @@ func (client *HubClient) nodeCheckoutInstall(ctx context.Context, dir string) (b
 	cmd.Dir = dir
 	cmd.Stdout, cmd.Stderr = io.Discard, io.Discard
 	cmd.WaitDelay = 100 * time.Millisecond
+	// The script's own children must not outlive the bound: the whole process
+	// group is killed when the budget ends.
+	nodeCheckoutSetGroup(cmd)
 	err = cmd.Run()
 	if cmd.ProcessState == nil {
 		// The script never started (not executable, or no interpreter).
