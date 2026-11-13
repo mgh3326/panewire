@@ -392,11 +392,11 @@ When the line is sent:
   (default 0) while hk lists open backlog for its project gets one line,
   `N backlog, M in work: dispatch the next batch`. The project is the lane
   name without `-design`; the backlog is the hk tasks in state `backlog` or
-  `unstarted`, counted per state with hk's project and state filters, page by
-  page. The line goes out on the drain and at most once
-  per `relay.drain_wake_interval` (default 1h). A lane first seen idle gets no
-  line. This is an interim until the hub-owned queue (hk 4376) replaces the
-  hk read.
+  `unstarted` that do not await an operator decision, counted per state with
+  hk's project and state filters, page by page. The line goes out on the drain
+  and at most once per `relay.drain_wake_interval` (default 1h). A lane first
+  seen idle gets no line. This is an interim until the hub-owned queue (hk
+  4376) replaces the hk read.
 - A line still owed to a [trial](#worker-trial) lane when its trial ends is
   dropped: the lane is a worker lane again.
 - When the hub starts, every inbox-only lane with unread items above `info`

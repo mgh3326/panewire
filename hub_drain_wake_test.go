@@ -25,9 +25,10 @@ const (
 )
 
 type t4473Task struct {
-	ID      int64
-	Project string
-	State   string
+	ID               int64
+	Project          string
+	State            string
+	AwaitingDecision bool
 }
 
 // t4473Handler serves GET /v1/tasks from tasks the way hk does: a project and
@@ -53,7 +54,7 @@ func t4473Handler(relay http.Handler, tasks []t4473Task) http.Handler {
 			if query.Has("state") && task.State != query.Get("state") {
 				continue
 			}
-			page = append(page, map[string]any{"id": task.ID, "project": task.Project, "state": task.State})
+			page = append(page, map[string]any{"id": task.ID, "project": task.Project, "state": task.State, "awaiting_decision": task.AwaitingDecision})
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"tasks": page})
 	})
@@ -162,6 +163,25 @@ func TestDrainWakeReadsBacklogPastFirstPage(t *testing.T) {
 	t4473SetInFlight(rig, t4473Lane, 0)
 	t4473Sweep(rig)
 	want := "1001 backlog, 0 in work: dispatch the next batch"
+	if got := t4473Lines(rig); len(got) != 1 || got[0] != want {
+		t.Fatalf("drain lines=%q, want exactly [%q]", got, want)
+	}
+}
+
+// A task waiting on the operator (decision 233) is not open backlog: the drain
+// counts only the pre-start tasks nobody is blocked on.
+func TestDrainWakeSkipsTasksAwaitingDecision(t *testing.T) {
+	rig, _ := t4473Rig(t, []t4473Task{
+		{ID: 1, Project: "handoffkeep", State: "backlog", AwaitingDecision: true},
+		{ID: 2, Project: "handoffkeep", State: "unstarted", AwaitingDecision: true},
+		{ID: 3, Project: "handoffkeep", State: "backlog"},
+		{ID: 4, Project: "handoffkeep", State: "unstarted"},
+	})
+	t4473SetInFlight(rig, t4473Lane, 1)
+	t4473Sweep(rig)
+	t4473SetInFlight(rig, t4473Lane, 0)
+	t4473Sweep(rig)
+	want := "2 backlog, 0 in work: dispatch the next batch"
 	if got := t4473Lines(rig); len(got) != 1 || got[0] != want {
 		t.Fatalf("drain lines=%q, want exactly [%q]", got, want)
 	}

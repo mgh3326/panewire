@@ -101,8 +101,9 @@ func (h *HubServer) sweepDrainWakes(ctx context.Context, now time.Time) {
 // the queued work; unstarted is hk's open pre-start state. hk has no "ready".
 var drainWakeOpenStates = []string{"backlog", "unstarted"}
 
-// drainWakeBacklog counts hk tasks for project in each open state. hk filters
-// by project and state server side, so each page is already the answer.
+// drainWakeBacklog counts hk tasks for project in each open state, leaving out
+// the ones awaiting an operator decision. hk filters project and state server
+// side; the awaiting check happens here.
 func (h *HubServer) drainWakeBacklog(ctx context.Context, project string) (int, error) {
 	total := 0
 	for _, state := range drainWakeOpenStates {
@@ -115,8 +116,9 @@ func (h *HubServer) drainWakeBacklog(ctx context.Context, project string) (int, 
 	return total, nil
 }
 
-// drainWakeStateCount reads every page of one project and state in ID order.
-// An unadvancing cursor is an error, not a partial count.
+// drainWakeStateCount reads every page of one project and state in ID order and
+// counts the tasks not awaiting an operator decision (decision 233). An
+// unadvancing cursor is an error, not a partial count.
 func (h *HubServer) drainWakeStateCount(ctx context.Context, project, state string) (int, error) {
 	count := 0
 	var afterID int64
@@ -125,7 +127,11 @@ func (h *HubServer) drainWakeStateCount(ctx context.Context, project, state stri
 		if err != nil {
 			return 0, err
 		}
-		count += len(tasks)
+		for _, task := range tasks {
+			if !task.AwaitingDecision {
+				count++
+			}
+		}
 		if len(tasks) < drainWakeTaskLimit {
 			return count, nil
 		}

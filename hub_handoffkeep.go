@@ -363,10 +363,11 @@ func (c *handoffkeepRelayClient) listUndelivered(ctx context.Context, lane, kind
 	return result.Events, nil
 }
 
-// handoffkeepTask is the hk task field the drain-wake count reads: the ID
-// that pages the list.
+// handoffkeepTask is the hk task fields the drain-wake count reads: the ID
+// that pages the list, and whether the task waits on the operator.
 type handoffkeepTask struct {
-	ID int64 `json:"id"`
+	ID               int64 `json:"id"`
+	AwaitingDecision bool  `json:"awaiting_decision"`
 }
 
 // listTasks reads one page of hk tasks for project in state, in ID order after
