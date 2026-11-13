@@ -140,6 +140,17 @@ func TestRoutingLeadNeverDowngradesToSonnet(t *testing.T) {
 	}
 }
 
+func TestExplorerRoleRefusedWithImplementerHint(t *testing.T) {
+	a := &App{Out: &bytes.Buffer{}}
+	err := a.resolveCmd(context.Background(), []string{"--role", "explorer"})
+	if code(err) != exitUsage || !strings.Contains(err.Error(), "use --role implementer") {
+		t.Fatalf("resolve explorer: got %v, want usage error recommending implementer", err)
+	}
+	if _, err := a.routeFor(context.Background(), "worker", "explorer"); code(err) != exitUsage || !strings.Contains(err.Error(), "use --routing-role implementer") {
+		t.Fatalf("routing explorer: got %v, want usage error recommending implementer", err)
+	}
+}
+
 // Acceptance 2: the implementer role keeps today's ordering among its allowed
 // profiles — quota that would be wasted precedes free SWE-2.
 func TestRoutingImplementerKeepsPoolOrder(t *testing.T) {

@@ -17,6 +17,15 @@ import (
 	"time"
 )
 
+func TestDelegateRoutingRole(t *testing.T) {
+	for role, want := range map[string]string{"reader": "implementer", "verifier": "verifier", "reviewer": "reviewer"} {
+		d := delegateReq{o: delegateOpts{role: role}}
+		if got := d.routingRole(); got != want {
+			t.Errorf("%s routes to %q, want %q", role, got, want)
+		}
+	}
+}
+
 // delegateRows is a free SWE-2 rung and a paid Sonnet rung, both able to take a
 // grade C task.
 func delegateRows() []CatalogRow {
@@ -120,7 +129,7 @@ func newDelegateEnvWith(t *testing.T, rows []CatalogRow, gates map[string]string
 	for _, row := range rows {
 		qualified = append(qualified, row.Profile)
 	}
-	for _, role := range []string{"explorer", "implementer", "verifier"} {
+	for _, role := range []string{"implementer", "verifier"} {
 		rule := policy.Roles[role]
 		rule.Allowed = qualified
 		policy.Roles[role] = rule

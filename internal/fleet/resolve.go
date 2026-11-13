@@ -62,6 +62,9 @@ func (a *App) resolveCmd(ctx context.Context, args []string) error {
 		return fail(exitUsage, "resolve takes no positional arguments")
 	}
 	if !slices.Contains(routingRoles, role) {
+		if role == "explorer" {
+			return fail(exitUsage, "explorer role was removed; use --role implementer")
+		}
 		return fail(exitUsage, "resolve needs --role %s", strings.Join(routingRoles, "|"))
 	}
 	grade = strings.ToUpper(grade)
@@ -132,7 +135,7 @@ func (a *App) resolveCmd(ctx context.Context, args []string) error {
 			r.Effort = c.seat.Effort
 		}
 		r.AccountKey, r.Host = c.accountKey, c.host
-		if c.seat.Kind == "omp" && (role == "implementer" || role == "explorer") {
+		if c.seat.Kind == "omp" && role == "implementer" {
 			r.OMPAgent = a.ompAgent(c.row.ModelID)
 		}
 	}

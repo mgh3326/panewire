@@ -62,7 +62,7 @@ type RoutingRule struct {
 }
 
 // routingRoles are the values --routing-role accepts.
-var routingRoles = []string{"consult", "implementer", "explorer", "verifier", "reviewer", "judge"}
+var routingRoles = []string{"consult", "implementer", "verifier", "reviewer", "judge"}
 
 // routingStrictRoles are refused when neither hk nor a cached copy can say
 // which profiles they may run on.
@@ -347,6 +347,9 @@ func (r *routing) admits(profile string) bool {
 // override) against the policy table.
 func (a *App) routeFor(ctx context.Context, seatRole, override string) (*routing, error) {
 	if override != "" && !slices.Contains(routingRoles, override) {
+		if override == "explorer" {
+			return nil, fail(exitUsage, "explorer role was removed; use --routing-role implementer")
+		}
 		return nil, fail(exitUsage, "--routing-role must be one of %s", strings.Join(routingRoles, "|"))
 	}
 	// Execution authority cannot be relabelled to escape consult admission.
