@@ -330,9 +330,6 @@ func (c launchCatalog) resolveRow(req admissionRequest, allowUnrated bool, seats
 		}
 		return launchRow{}, "", "rung is not in the catalog"
 	}
-	if i < 0 {
-		return launchRow{}, "", "rung is not in the catalog"
-	}
 	chosen := eligible[i]
 	if admissionMarkerRequired(chosen.admissionRow, allowUnrated) && req.E6Arm != profile+"@"+chosen.Effort {
 		return launchRow{}, "", "e6_arm_required"
