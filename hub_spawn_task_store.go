@@ -307,8 +307,8 @@ func (s *laneInboxStore) completeSpawn(parent context.Context, task hubSpawnTask
 			return false, err
 		}
 	} else if code, _, _ := strings.Cut(outcome.Reason, ": "); status == "failed" && task.Status == "bound" && code == spawnAbandonedReason {
-		// An unsent abandonment has no node or hk side effects. Release its
-		// role in the same transaction as its outcome and outbox notification.
+		// Release the unsent role in the same transaction as its outcome and
+		// outbox notification. Any prior hk claim was handled before completion.
 		if _, err = tx.ExecContext(ctx, s.q(`UPDATE spawn_reservations SET task_role=NULL WHERE request_id=?`), task.Request.RequestID); err != nil {
 			return false, err
 		}
