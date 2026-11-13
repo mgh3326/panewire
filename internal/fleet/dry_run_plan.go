@@ -121,6 +121,8 @@ func (c *hubHTTP) Plan(ctx context.Context, request Submission) (SpawnPlan, erro
 	}
 	var refusal struct {
 		Reason string `json:"reason"`
+		Error  string `json:"error"`
+		Fix    string `json:"fix"`
 		RC     int    `json:"rc"`
 	}
 	_ = json.Unmarshal(raw, &refusal)
@@ -128,5 +130,9 @@ func (c *hubHTTP) Plan(ctx context.Context, request Submission) (SpawnPlan, erro
 	if code == 0 {
 		code = exitConfig
 	}
-	return SpawnPlan{}, fail(code, "hub plan refused (HTTP %d): %s", status, refusal.Reason)
+	reason := firstNonempty(refusal.Reason, refusal.Error, "no reason in the hub's reply")
+	if refusal.Fix != "" {
+		reason += "; fix: " + refusal.Fix
+	}
+	return SpawnPlan{}, fail(code, "hub plan refused (HTTP %d): %s", status, reason)
 }

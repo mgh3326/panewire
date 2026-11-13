@@ -12,17 +12,16 @@ import (
 
 // planOnlyTransport is the transport a dry-run plan places with. It refuses
 // every spawn, so a plan that reaches dispatch fails instead of dispatching.
-// Refresh is the node measurement a real spawn runs: the quota judgment reaches
-// it for a stale via=hub account, so the plan places as the spawn would. That
-// refresh writes the node's quota observation and no spawn, reservation or hk row.
-type planOnlyTransport struct{ h *HubServer }
+// A plan never measures an account: the quota judgment refuses a stale one
+// before it calls Refresh, so Refresh refuses too.
+type planOnlyTransport struct{}
 
 func (planOnlyTransport) Spawn(context.Context, fleet.HubSpawnRequest) (fleet.HubSpawnReply, error) {
 	return fleet.HubSpawnReply{}, errors.New("spawn plan must not dispatch")
 }
 
-func (p planOnlyTransport) Refresh(ctx context.Context, machine, pool string) error {
-	return (&directSpawnTransport{h: p.h}).Refresh(ctx, machine, pool)
+func (planOnlyTransport) Refresh(context.Context, string, string) error {
+	return errors.New("spawn plan must not measure pools")
 }
 
 // handleSpawnPlan answers a dry run with the hub's own placement of the request
@@ -40,7 +39,7 @@ func (h *HubServer) handleSpawnPlan(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 503, map[string]string{"error": "spawn_config_unavailable", "fix": "configure hub fleet policy and trust before retrying this request"})
 		return
 	}
-	h.bindPlacement(app, planOnlyTransport{h: h})
+	h.bindPlacement(app, planOnlyTransport{})
 	plan, err := app.PlanSubmission(r.Context(), request)
 	if err != nil {
 		writeJSON(w, 409, map[string]any{"error": "plan_refused", "reason": err.Error(), "rc": fleet.ErrorCode(err)})

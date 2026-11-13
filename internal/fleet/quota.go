@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math"
 	"slices"
 	"strconv"
@@ -622,6 +623,14 @@ func (a *App) judgeHost(ctx context.Context, r QuotaRequest, pool, host string, 
 		// A stale or missing observation of an account this host does not hold
 		// is never refreshed by the gate, so measure it on the target first.
 		if (j.Reason == "stale" || j.Reason == "not_observed") && a.Source != nil && !slices.Contains(a.localAccountKeys(ctx, pool), key) {
+			if a.hubPlan {
+				// A dry run measures nothing: a refresh writes presence, lease and
+				// observation to the shared quota store. The spawn measures this
+				// account, so the plan may differ from it for this host.
+				fmt.Fprintf(a.Out, "would measure host=%s pool=%s before a spawn; the dry run did not refresh it\n", host, pool)
+				j.Reason = "would_measure"
+				return j, &quotaHostRefusal{fail(exitEvictionUnconfirmed, "would measure target account (host %s, pool %s) before a spawn", host, pool), j.Reason}
+			}
 			if err := a.measureTarget(ctx, host, pool); err != nil {
 				j.Measured, j.Reason = "failed", "measure_failed"
 				if exitCode(err) == exitPlacement && str(a.Config.Hosts[host], "via") == "hub" {

@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func planClientFor(t *testing.T, status int, body any) hubHTTP {
@@ -117,5 +118,44 @@ func TestDryRunFromOldHubShowsTheLocalPlan_t2861(t *testing.T) {
 	}
 	if len(hub.spawns) != 0 {
 		t.Fatalf("dry run must not spawn: %v", hub.spawns)
+	}
+}
+
+// A plan refuses a stale account of a host it does not hold without measuring
+// it: no refresh reaches the hub or an ssh target, and the plan says so.
+func TestDryRunPlanDoesNotMeasureAStaleAccount_t2861(t *testing.T) {
+	key := "claude:0123456789abcdef"
+	a := placementApp(t, &fakePlacementSource{})
+	a.Config.Hosts = map[string]map[string]any{"host-b": {"via": "hub"}}
+	hub := &fakeHub{t: t, events: &[]string{}}
+	a.Hub = hub
+	sshMeasures := 0
+	a.Runner = &fakeRunner{Do: func(c Command) Result {
+		if c.Name == "ssh" && isQuotaRefresh(strings.Join(c.Args, " ")) {
+			sshMeasures++
+		}
+		return Result{}
+	}}
+	a.hubPlan = true
+	acc := SharedAccount{Key: key, Observed: true, Fresh: false, MeasuredAt: a.Now().Add(-75 * time.Minute)}
+	_, err := a.judgeHost(context.Background(), QuotaRequest{}, "claude", "host-b", false, key, acc)
+	var refusal *quotaHostRefusal
+	if !errors.As(err, &refusal) || refusal.reason != "would_measure" {
+		t.Fatalf("plan judged the stale account: %v", err)
+	}
+	if len(hub.refreshes) != 0 || sshMeasures != 0 {
+		t.Fatalf("a plan measured the account: hub=%v ssh=%d", hub.refreshes, sshMeasures)
+	}
+	if out := a.Out.(interface{ String() string }).String(); !strings.Contains(out, "would measure host=host-b") {
+		t.Fatalf("plan did not say the host would be measured: %q", out)
+	}
+}
+
+// A hub refusal without a reason still names the hub's error and fix.
+func TestHubPlanRefusalKeepsTheHubsFix_t2861(t *testing.T) {
+	c := planClientFor(t, http.StatusServiceUnavailable, map[string]string{"error": "spawn_config_unavailable", "fix": "configure hub fleet policy and trust before retrying this request"})
+	_, err := c.Plan(context.Background(), Submission{})
+	if err == nil || !strings.Contains(err.Error(), "spawn_config_unavailable") || !strings.Contains(err.Error(), "configure hub fleet policy") {
+		t.Fatalf("refusal dropped the hub's error or fix: %v", err)
 	}
 }

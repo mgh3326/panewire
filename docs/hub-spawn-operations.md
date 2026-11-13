@@ -8,8 +8,9 @@ launcher is called. `--dry-run` remains the synchronous planning path.
 `--dry-run` with a hub configured asks the hub for its own plan: `POST
 /v1/spawns/plan` runs the same placement and selection the submission would,
 and records nothing: no operation row, no reservation, no hk write, no dispatch.
-A stale account on a hub host is measured on its node first, as a submission
-measures it; that refresh writes the node's quota observation and nothing else.
+A plan measures nothing. A stale or unobserved account of a host this machine
+does not hold is printed as `would measure` and skipped, so the plan can differ
+from the submission for that host: the submission measures the account first.
 The CLI prints the hub's host and profile, labelled `hub plan:`. The hub may
 choose a different profile from this machine's local plan. Without a hub the
 receipt is labelled `local plan:`. A hub that predates the route (404 or 405)

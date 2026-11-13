@@ -17,7 +17,6 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/mgh3326/panewire/internal/fleet"
 )
@@ -111,27 +110,5 @@ func TestSpawnPlanRouteLeavesNoOperation_t2861(t *testing.T) {
 	}
 	if hkWrites.Load() != 0 || jobs.writes.Load() != 0 {
 		t.Fatalf("a plan wrote to hk: http=%d job-records=%d", hkWrites.Load(), jobs.writes.Load())
-	}
-}
-
-// The plan's refresh is the node measurement a submission runs for a stale
-// via=hub account. It reaches the node rather than being refused, so the plan
-// judges that host the way the spawn does.
-func TestSpawnPlanRefreshReachesTheNode_t2861(t *testing.T) {
-	h := asyncSpawnHub(t)
-	server := httptest.NewServer(h.Handler())
-	t.Cleanup(server.Close)
-	node := t14NamedNode(t, h, server, "machine-a", true, true)
-	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
-	defer cancel()
-	done := make(chan error, 1)
-	go func() { done <- planOnlyTransport{h: h}.Refresh(ctx, "machine-a", "claude") }()
-	command := nodeCommandRead(t, node)
-	if string(command["op"]) != `"quota.refresh"` || !strings.Contains(string(command["args"]), `"claude"`) {
-		t.Fatalf("plan refresh sent op=%s args=%s", command["op"], command["args"])
-	}
-	nodeCommandReplyTo(t, node, command, map[string]any{"result": map[string]string{"outcome": "refreshed"}})
-	if err := <-done; err != nil {
-		t.Fatalf("plan refresh: %v", err)
 	}
 }
