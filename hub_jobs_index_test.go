@@ -277,3 +277,48 @@ func TestHubInboxIndexConcurrentUse(t *testing.T) {
 	wg.Wait()
 	f.assertIndexEquivalent(t, "after concurrent use", true)
 }
+
+// TestHubInboxIndexRetriesFailedReads: a read that fails says nothing about the
+// file, so it must not be kept under an unchanged directory mtime. A dangling
+// link stands in for a transient open failure (permission checks do not bind
+// root); making its target appear changes no directory mtime.
+func TestHubInboxIndexRetriesFailedReads(t *testing.T) {
+	f := newIndexFixture(t, 0)
+	target := filepath.Join(f.root, "target.json")
+
+	id := "job-retry"
+	f.put(id, 1, "job.claimed", f.claim(1, 1, time.Hour, ""), time.Hour)
+	link := filepath.Join(f.root, "jobs", id, "events", "00002-job.completed.json")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	laneLink := filepath.Join(f.root, "events-lane", "00001-lane.event.json")
+	if err := os.Symlink(target, laneLink); err != nil {
+		t.Fatal(err)
+	}
+	f.settle()
+	scanJobs := func() []HubActiveJob { return scanHubActiveJobsForLimit(context.Background(), f.root, nil, 0) }
+	if got := scanJobs(); len(got) != 1 {
+		t.Fatalf("before the completion is readable, active=%+v", got)
+	}
+	if got := scanHubLaneEventsWithin(f.root, 0); len(got) != 0 {
+		t.Fatalf("lane events=%+v", got)
+	}
+
+	// Both files become readable; neither directory's mtime moves.
+	f.now = time.Now()
+	completion := f.completed(1, 0)
+	if err := os.WriteFile(target, []byte(completion), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := scanJobs(); len(got) != 0 {
+		t.Fatalf("a completion that became readable under a settled directory was not seen: %+v", got)
+	}
+	lane := `{"type":"lane.event","owner_lane":"lane-a","event_id":"ev-1","text":"hello","epoch":1}`
+	if err := os.WriteFile(target, []byte(lane), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := scanHubLaneEventsWithin(f.root, 0); len(got) != 1 || got[0].EventID != "ev-1" {
+		t.Fatalf("a lane event that became readable under a settled directory was not seen: %+v", got)
+	}
+}

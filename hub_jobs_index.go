@@ -186,6 +186,9 @@ type hubJobEventsLoad struct {
 	ended    bool
 	bindings []hubPaneBindingFact
 	bytes    int64
+	// incomplete marks a read that failed on an event file or its stat, so the
+	// directory is read again next pass whatever its mtime says.
+	incomplete bool
 }
 
 func hubBindingEventName(name string) bool {
@@ -227,6 +230,9 @@ func loadHubJobEvents(eventsDir string) (hubJobEventsLoad, bool) {
 		}
 		contents, err := os.ReadFile(filepath.Join(eventsDir, name))
 		if err != nil {
+			// Unlike a bad record, a failed read says nothing about the file:
+			// the load is not final, so the next pass reads the directory again.
+			load.incomplete = true
 			continue
 		}
 		if hubBindingEventName(name) {
@@ -254,6 +260,8 @@ func loadHubJobEvents(eventsDir string) (hubJobEventsLoad, bool) {
 		info, infoErr := entry.Info()
 		if infoErr == nil {
 			modTime = info.ModTime()
+		} else {
+			load.incomplete = true
 		}
 		load.events = append(load.events, hubIndexedEvent{name: name, modTime: modTime, infoOK: infoErr == nil, eventTime: event.eventTimeAt(modTime, infoErr == nil), kind: event.eventKind(), event: event})
 		load.bytes += int64(len(contents)) + hubIndexEventOverhead
@@ -414,7 +422,7 @@ func (ix *hubInboxIndex) refreshJobLocked(id string, needEvents bool) *hubIndexe
 		ix.dropJobLocked(id)
 		return nil
 	}
-	job := newHubIndexedJob(id, info, hubDirSettled(started, info), load)
+	job := newHubIndexedJob(id, info, hubDirSettled(started, info) && !load.incomplete, load)
 	ix.storeJobLocked(job)
 	return job
 }
@@ -508,8 +516,9 @@ func (ix *hubInboxIndex) laneEvents(maxAge time.Duration) []hubScannedRelayEvent
 		event, ok := file.event, file.ok
 		if !file.parsed {
 			var cost int64
-			event, ok, cost = readLaneEventFile(filepath.Join(ix.laneDir, file.name))
-			if ix.laneInfo != nil && ix.jobBytes+ix.laneBytes+cost <= ix.budget {
+			var ioErr bool
+			event, ok, cost, ioErr = readLaneEventFile(filepath.Join(ix.laneDir, file.name))
+			if !ioErr && ix.laneInfo != nil && ix.jobBytes+ix.laneBytes+cost <= ix.budget {
 				file.parsed, file.ok, file.event, file.cost = true, ok, event, cost
 				ix.laneBytes += cost
 			}
@@ -548,6 +557,7 @@ func (ix *hubInboxIndex) laneFilesLocked() ([]hubLaneFile, bool) {
 	prev := ix.lane
 	files := make([]hubLaneFile, 0, len(entries))
 	var bytes int64
+	statFailed := false
 	p := 0
 	for _, entry := range entries {
 		name := entry.Name()
@@ -557,6 +567,9 @@ func (ix *hubInboxIndex) laneFilesLocked() ([]hubLaneFile, bool) {
 		file := hubLaneFile{name: name}
 		if fi, err := entry.Info(); err == nil {
 			file.modTime, file.size, file.infoOK = fi.ModTime(), fi.Size(), true
+		} else {
+			// A failed stat is retried: the listing is read again next pass.
+			statFailed = true
 		}
 		for p < len(prev) && prev[p].name < name {
 			p++
@@ -583,7 +596,7 @@ func (ix *hubInboxIndex) laneFilesLocked() ([]hubLaneFile, bool) {
 			return files, true
 		}
 	}
-	ix.laneInfo, ix.laneSettled, ix.lane, ix.laneBytes = info, hubDirSettled(started, info), files, bytes
+	ix.laneInfo, ix.laneSettled, ix.lane, ix.laneBytes = info, hubDirSettled(started, info) && !statFailed, files, bytes
 	return files, true
 }
 
@@ -591,24 +604,30 @@ func (ix *hubInboxIndex) resetLaneLocked() {
 	ix.laneInfo, ix.laneSettled, ix.lane, ix.laneBytes = nil, false, nil, 0
 }
 
-// readLaneEventFile parses one lane-event file; the bool is false for a file
-// the scan skips. The cost is what keeping the result retains.
-func readLaneEventFile(path string) (hubScannedRelayEvent, bool, int64) {
+// readLaneEventFile parses one lane-event file; ok is false for a file the scan
+// skips. cost is what keeping the result retains. ioErr reports that the file
+// could not be read at all, which is not a result.
+func readLaneEventFile(path string) (hubScannedRelayEvent, bool, int64, bool) {
 	contents, err := os.ReadFile(path)
-	if err != nil || len(contents) > hubIndexMaxEventBytes {
-		return hubScannedRelayEvent{}, false, hubIndexLaneOverhead
+	if err != nil {
+		// An I/O failure says nothing about the record, so it is not kept: the
+		// next pass reads the file again.
+		return hubScannedRelayEvent{}, false, 0, true
+	}
+	if len(contents) > hubIndexMaxEventBytes {
+		return hubScannedRelayEvent{}, false, hubIndexLaneOverhead, false
 	}
 	var event hubInboxEvent
 	if json.Unmarshal(contents, &event) != nil || event.eventKind() != "lane.event" {
-		return hubScannedRelayEvent{}, false, hubIndexLaneOverhead
+		return hubScannedRelayEvent{}, false, hubIndexLaneOverhead, false
 	}
 	lane, eventID, text := event.ownerLane(), event.eventID(), event.text()
 	if !validInboxCause(event.Cause) || !hubAgentLabelPattern.MatchString(lane) || !validLaneEventID(eventID) || !validLaneEventText(text) || len(text) > laneEventTextLimitSink {
-		return hubScannedRelayEvent{}, false, hubIndexLaneOverhead
+		return hubScannedRelayEvent{}, false, hubIndexLaneOverhead, false
 	}
 	epoch := event.Epoch
 	if epoch == 0 {
 		epoch = 1
 	}
-	return hubScannedRelayEvent{DeliveryClass: event.DeliveryClass, NotifyType: event.notifyType(), Cause: event.Cause, Head: event.head(), PR: event.pr(), Kind: "lane.event", HubActiveJob: HubActiveJob{JobID: laneEventTransportID(lane, eventID), Epoch: epoch, OwnerLane: lane, Label: event.label(), Host: event.host()}, PaneID: event.paneID(), EventID: eventID, Text: text, Truncated: event.truncated()}, true, hubIndexLaneOverhead + int64(len(contents)) + hubIndexEventOverhead
+	return hubScannedRelayEvent{DeliveryClass: event.DeliveryClass, NotifyType: event.notifyType(), Cause: event.Cause, Head: event.head(), PR: event.pr(), Kind: "lane.event", HubActiveJob: HubActiveJob{JobID: laneEventTransportID(lane, eventID), Epoch: epoch, OwnerLane: lane, Label: event.label(), Host: event.host()}, PaneID: event.paneID(), EventID: eventID, Text: text, Truncated: event.truncated()}, true, hubIndexLaneOverhead + int64(len(contents)) + hubIndexEventOverhead, false
 }

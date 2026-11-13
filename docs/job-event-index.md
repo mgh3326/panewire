@@ -53,6 +53,11 @@ and `job_close.go`, and `writeHubRevocation` publish by link or rename, and a
 create-then-write publish finishes inside the racy window above, which keeps
 the directory being read again meanwhile.
 
+A read that fails (an event file that cannot be opened, or whose stat fails) says
+nothing about the file, unlike a record that is present but invalid. Such a
+directory is never treated as final and is read again on the next pass; a lane
+event whose read failed is not kept and is read again on the next pass.
+
 Time-dependent decisions are never cached. What the index keeps is the parsed
 events and their time-independent reduction; the active-window, stale-age,
 relay-mtime and lifecycle-settle checks use the clock of each pass, so changing
