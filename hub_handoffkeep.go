@@ -372,14 +372,17 @@ type handoffkeepTask struct {
 
 // listTasks reads one page of hk tasks for project in state, in ID order after
 // afterID. Drain wake pages until a short page (hub_drain_wake.go).
+//
+// after_id goes out on every page, including the first (afterID 0): hk sends a
+// request without it to its no-cursor queue read, which orders by priority and
+// then ID, so a first page taken that way makes the cursor skip every lower-ID
+// row outside it.
 func (c *handoffkeepRelayClient) listTasks(ctx context.Context, project, state string, afterID int64, limit int) ([]handoffkeepTask, error) {
 	query := url.Values{}
 	query.Set("project", project)
 	query.Set("state", state)
 	query.Set("limit", strconv.Itoa(limit))
-	if afterID > 0 {
-		query.Set("after_id", strconv.FormatInt(afterID, 10))
-	}
+	query.Set("after_id", strconv.FormatInt(afterID, 10))
 	status, payload, err := c.do(ctx, http.MethodGet, c.endpoint("/v1/tasks")+"?"+query.Encode(), nil)
 	if err != nil {
 		return nil, err

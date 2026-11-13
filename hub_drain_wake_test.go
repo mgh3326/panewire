@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"testing"
 	"time"
@@ -29,11 +30,13 @@ type t4473Task struct {
 	Project          string
 	State            string
 	AwaitingDecision bool
+	Priority         int
 }
 
-// t4473Handler serves GET /v1/tasks from tasks the way hk does: a project and
-// a state filter when given, hk's exclusive after_id cursor, and limit. Every
-// other route goes to the relay fake.
+// t4473Handler serves GET /v1/tasks from tasks the way hk does, including both
+// of hk's list branches: with after_id (even 0) it pages by ID after that
+// cursor; without it, it falls back to the queue read, ordered by priority and
+// then ID, and takes no cursor. Every other route goes to the relay fake.
 func t4473Handler(relay http.Handler, tasks []t4473Task) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet || r.URL.Path != "/v1/tasks" {
@@ -43,20 +46,35 @@ func t4473Handler(relay http.Handler, tasks []t4473Task) http.Handler {
 		query := r.URL.Query()
 		after, _ := strconv.ParseInt(query.Get("after_id"), 10, 64)
 		limit, _ := strconv.Atoi(query.Get("limit"))
-		page := []map[string]any{}
+		page := make([]t4473Task, 0, len(tasks))
 		for _, task := range tasks {
-			if task.ID <= after || len(page) >= limit {
-				continue
-			}
 			if query.Has("project") && task.Project != query.Get("project") {
 				continue
 			}
 			if query.Has("state") && task.State != query.Get("state") {
 				continue
 			}
-			page = append(page, map[string]any{"id": task.ID, "project": task.Project, "state": task.State, "awaiting_decision": task.AwaitingDecision})
+			if query.Has("after_id") && task.ID <= after {
+				continue
+			}
+			page = append(page, task)
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"tasks": page})
+		if !query.Has("after_id") {
+			sort.SliceStable(page, func(i, j int) bool {
+				if page[i].Priority != page[j].Priority {
+					return page[i].Priority > page[j].Priority
+				}
+				return page[i].ID < page[j].ID
+			})
+		}
+		if len(page) > limit {
+			page = page[:limit]
+		}
+		out := make([]map[string]any, 0, len(page))
+		for _, task := range page {
+			out = append(out, map[string]any{"id": task.ID, "project": task.Project, "state": task.State, "awaiting_decision": task.AwaitingDecision})
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"tasks": out})
 	})
 }
 
@@ -146,23 +164,28 @@ func TestDrainWakeOneLinePerIntervalAfterDrain(t *testing.T) {
 	}
 }
 
-// The backlog is read page by page: the project's backlog runs past hk's first
-// full page of stable ID order, and an unstarted task after it is counted too.
+// The backlog is read page by page in ID order: the project's backlog runs past
+// hk's first full page, with the priority order of hk's no-cursor read running
+// opposite to ID order, so a first page taken without after_id loses the rows
+// below its cursor (hk 4473 review).
 func TestDrainWakeReadsBacklogPastFirstPage(t *testing.T) {
-	tasks := make([]t4473Task, 0, t4473PageLimit+2)
+	tasks := make([]t4473Task, 0, t4473PageLimit*2+2)
 	for id := int64(1); id <= t4473PageLimit; id++ {
 		tasks = append(tasks, t4473Task{ID: id, Project: "handoffkeep", State: "backlog"})
 	}
+	for id := int64(t4473PageLimit + 1); id <= t4473PageLimit*2; id++ {
+		tasks = append(tasks, t4473Task{ID: id, Project: "handoffkeep", State: "backlog", Priority: 1})
+	}
 	tasks = append(tasks,
-		t4473Task{ID: t4473PageLimit + 1, Project: "handoffkeep", State: "unstarted"},
-		t4473Task{ID: t4473PageLimit + 2, Project: "other", State: "backlog"},
+		t4473Task{ID: t4473PageLimit*2 + 1, Project: "handoffkeep", State: "unstarted"},
+		t4473Task{ID: t4473PageLimit*2 + 2, Project: "other", State: "backlog"},
 	)
 	rig, _ := t4473Rig(t, tasks)
 	t4473SetInFlight(rig, t4473Lane, 1)
 	t4473Sweep(rig)
 	t4473SetInFlight(rig, t4473Lane, 0)
 	t4473Sweep(rig)
-	want := "1001 backlog, 0 in work: dispatch the next batch"
+	want := "2001 backlog, 0 in work: dispatch the next batch"
 	if got := t4473Lines(rig); len(got) != 1 || got[0] != want {
 		t.Fatalf("drain lines=%q, want exactly [%q]", got, want)
 	}
