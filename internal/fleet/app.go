@@ -61,6 +61,10 @@ type App struct {
 	// this decision may read the host view, and its release is called once the
 	// decision has told PlacementTry its host (or ended). Nil does not gate.
 	PlacementGate func(context.Context) (release func(), err error)
+	// ScheduleQuotaRefresh is set by the hub coordinator. It queues a node
+	// measurement without waiting; ordinary CLI spawns keep their synchronous
+	// refresh path.
+	ScheduleQuotaRefresh func(machine, pool string, timeout time.Duration)
 	// SharedLatest reads one account's latest stored quota reading for the
 	// admission gate; nil reads handoffkeep (admission_native.go).
 	SharedLatest func(context.Context, string) (shared.Latest, error)

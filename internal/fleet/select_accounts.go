@@ -147,6 +147,16 @@ func (sp *selPresence) account(ctx context.Context, key, pool string, hosts []se
 		sp.refreshed[key] = accountRefresh{measured: measureWould, host: host, err: fail(exitEvictionUnconfirmed, "would measure account %s on %s before a spawn", key, host)}
 		return acc
 	}
+	if sp.a.ScheduleQuotaRefresh != nil && sp.a.nativeQuotaPool(pool) {
+		for _, host := range ordered {
+			sp.a.scheduleQuotaRefresh(host.name, pool)
+		}
+		sp.refreshPending = true
+		sp.refreshed[key] = accountRefresh{measured: "pending", err: ErrQuotaRefreshPending}
+		acc = SharedAccount{Key: key, Degraded: true}
+		sp.accounts[key] = acc
+		return acc
+	}
 	refresh, cancel := context.WithTimeout(ctx, sp.a.placementTTL("measure_timeout_s", 60))
 	defer cancel()
 	result := accountRefresh{measured: "failed"}
@@ -415,6 +425,14 @@ func (sp *selPresence) admitAccount(ctx context.Context, qr QuotaRequest, c *sel
 			j, err = sp.a.judgeGate(ctx, qr, c.row.Pool, quotaJudgment{Host: h.name, AccountKey: c.accountKey, Source: source})
 		} else {
 			j, err = sp.a.judgeHost(ctx, qr, c.row.Pool, h.name, h.local, c.accountKey, acc)
+		}
+		if errors.Is(err, ErrQuotaRefreshPending) {
+			// The final gate can require a newer observation than the one
+			// selection read. Queue all holders just as for an initially
+			// stale account, and keep the selection pending.
+			sp.account(ctx, c.accountKey, c.row.Pool, c.holders, true)
+			sp.refreshPending = true
+			return append(judgments, j), err
 		}
 		if err != nil && !c.creditPool && gateOutcome(err) == outcomeQuotaUnknown {
 			if _, refreshed := sp.refreshed[c.accountKey]; !refreshed {

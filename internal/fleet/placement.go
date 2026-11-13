@@ -1397,6 +1397,7 @@ func (a *App) placeAuto(ctx context.Context, s Spawn, brief string) (bool, map[s
 	}
 	var pendingFallback string
 	var fallbacks []map[string]any
+	refreshPending := false
 	spawnOne := func(c *placeCandidate) (res candResult) {
 		defer func() {
 			if res.stop != nil && res.note == "" {
@@ -1427,6 +1428,9 @@ func (a *App) placeAuto(ctx context.Context, s Spawn, brief string) (bool, map[s
 		j, err := a.judgeHost(ctx, qr, pool, c.name, false, key, acc)
 		c.judgment = &j
 		if err != nil {
+			if errors.Is(err, ErrQuotaRefreshPending) {
+				refreshPending = true
+			}
 			if j.Reason == hubDown {
 				return candResult{rc: exitCode(err), note: hubDown}
 			}
@@ -1577,6 +1581,9 @@ func (a *App) placeAuto(ctx context.Context, s Spawn, brief string) (bool, map[s
 		if res.unreachable && c.wakeable {
 			unreachable = append(unreachable, c.name)
 		}
+	}
+	if refreshPending {
+		return true, nil, ErrQuotaRefreshPending
 	}
 	targets, reasons := a.wakeTargets(s, p, unreachable)
 	lastNote := ""

@@ -213,7 +213,7 @@ type hubAgent struct {
 	// machineID is the node this socket authenticated as. It is the sender
 	// the lane inbox records for a lane.event the node relays.
 	machineID   string
-	writeMu     sync.Mutex
+	writeMu     hubWriteMutex
 	transient   bool
 	failovers   chan hubFailoverEvent
 	revocations chan hubJobRevokedEvent
@@ -409,6 +409,7 @@ type HubServer struct {
 	quotaReplaceBudget time.Duration
 	spawnKick          chan struct{}
 	spawnWorkers       sync.WaitGroup
+	quotaRefresh       hubQuotaRefreshScheduler
 	// drain is the SIGTERM state (hub_drain.go).
 	drain hubDrain
 	// spawnOrphanProbed is when the hub last probed each stranded request's
@@ -781,6 +782,7 @@ func (h *HubServer) Close() error {
 	if h.closeCancel != nil {
 		h.closeCancel()
 	}
+	h.closeQuotaRefreshes()
 	// The mutex is held for a run's whole life, so taking it here waits the
 	// run out; the flag it then leaves set keeps every later TryLock from
 	// counting a fresh run against the WaitGroup after Close has begun.

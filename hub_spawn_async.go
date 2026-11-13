@@ -292,6 +292,7 @@ func (h *HubServer) runSpawnCoordinator(parent context.Context) {
 				case <-ctx.Done():
 					return
 				case task := <-work:
+					refreshCount := h.quotaRefresh.completedCount.Load()
 					// A draining hub starts nothing new; the durable row stays
 					// pending for the next hub (hub_drain.go).
 					if h.drain.enter() {
@@ -302,6 +303,11 @@ func (h *HubServer) runSpawnCoordinator(parent context.Context) {
 					mu.Lock()
 					delete(active, task.Request.RequestID)
 					mu.Unlock()
+					// A refresh may finish while this task is still marked active;
+					// its wake can then be consumed before the task is eligible.
+					if h.quotaRefresh.completedCount.Load() != refreshCount {
+						h.kickSpawnPlacement()
+					}
 				}
 			}
 		}()
@@ -412,6 +418,7 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 	}
 	outcome := hubSpawnOutcome{Stage: "placement", StageMS: map[string]int64{}}
 	h.bindPlacement(app, transport)
+	app.ScheduleQuotaRefresh = h.scheduleQuotaRefresh
 	app.PlacementTry = func(host string) { h.countPlacement(task.Job, host) }
 	app.PlacementGate = h.placementGate.acquire
 	app.ObserveStage = func(stage string, d time.Duration) { outcome.Stage = stage; outcome.StageMS[stage] += d.Milliseconds() }
@@ -449,6 +456,10 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 	if parent.Err() != nil {
 		return
 	} // Restart resumes durable accepted ownership.
+	if errors.Is(err, fleet.ErrQuotaRefreshPending) && ctx.Err() == nil {
+		h.releasePlacementCount(task.Job)
+		return
+	}
 	outcome.RC = fleet.ErrorCode(err)
 	outcome.Reason = fleet.AdmissionRefusalReason(err)
 	if err != nil {

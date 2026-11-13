@@ -1,6 +1,7 @@
 package panewire
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -133,6 +134,12 @@ func (h *HubServer) nodeCommandTargetLocked(machine string) (*hubAgent, string) 
 // state. sent is false when the node had no live connection and nothing was
 // sent.
 func (h *HubServer) sendNodeCommand(machine, op string, args json.RawMessage) (pending *hubNodeCommandPending, requestID, state string, sent bool) {
+	return h.sendNodeCommandWithContext(nil, machine, op, args)
+}
+
+// sendNodeCommandWithContext includes writer admission and the socket write in
+// ctx. A nil context retains the existing node-command writer behavior.
+func (h *HubServer) sendNodeCommandWithContext(ctx context.Context, machine, op string, args json.RawMessage) (pending *hubNodeCommandPending, requestID, state string, sent bool) {
 	h.mu.Lock()
 	agent, state := h.nodeCommandTargetLocked(machine)
 	if agent == nil {
@@ -152,7 +159,13 @@ func (h *HubServer) sendNodeCommand(machine, op string, args json.RawMessage) (p
 		Op        string          `json:"op"`
 		Args      json.RawMessage `json:"args"`
 	}{Type: "node.command", RequestID: requestID, Op: op, Args: args}
-	if err := agent.writeJSON(message); err != nil {
+	var err error
+	if ctx == nil {
+		err = agent.writeJSON(message)
+	} else {
+		err = agent.writeJSONContext(ctx, message)
+	}
+	if err != nil {
 		h.forgetNodeCommand(requestID)
 		// A write that failed may still have delivered a command that acts, so
 		// the two acting job commands report an unknown outcome rather than
