@@ -62,6 +62,20 @@ func TestLadderStepSkipsRungsBelowTheTaskGrade(t *testing.T) {
 	}
 }
 
+// A job that already runs above its family's cap (an operator-pinned rung)
+// has no same-model step: the ladder goes on to the next model rather than
+// slicing past the cap.
+func TestLadderStepAboveTheCapGoesToTheNextModel(t *testing.T) {
+	a, _, _ := selFixture(t, "A", ladderRows(), map[string]PoolView{"claude": {Status: "ok", Class: "spend", Blocking: ptrF(10)}}, []string{"claude"})
+	step, ok, err := a.NextLadderRung(context.Background(), LadderPick{Profile: "opus", Effort: "xhigh", Pool: "claude", Family: "anthropic"}, "A", "T1")
+	if err != nil || !ok {
+		t.Fatalf("step=%v ok=%v err=%v", step, ok, err)
+	}
+	if step.Kind != ladderNextModelAtEntry || step.Pick.Profile != "fable" || step.Pick.Effort != "medium" {
+		t.Fatalf("opus@xhigh is above the claude cap (high): want fable@medium by %s, got %+v", ladderNextModelAtEntry, step)
+	}
+}
+
 // The top of the last family with no other family's seat is the policy's
 // "no step left".
 func TestLadderStepNoRungAtTheTop(t *testing.T) {

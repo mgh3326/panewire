@@ -151,6 +151,11 @@ func ladderNextEffort(rows []CatalogRow, from LadderPick, fam LadderFamily, grad
 			limit = at + 1
 		}
 	}
+	// A job already at or above the cap has no step here; the ladder goes on
+	// to the next model.
+	if start+1 >= min(limit, len(efforts)) {
+		return LadderPick{}, false
+	}
 	for _, effort := range efforts[start+1 : min(limit, len(efforts))] {
 		if row, ok := ladderRow(rows, from.Profile, effort, grade); ok {
 			return ladderPick(row, from.Family), true
