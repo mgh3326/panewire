@@ -157,6 +157,13 @@ func (h *HubServer) escalateAuthor(ctx context.Context, request hubEscalateAutho
 	// one is its refusal, and one still running is the step it will report
 	// when it settles.
 	if prior, err := h.inbox.store.latestSpawnForJob(ctx, newJob); err == nil {
+		if spawnStatusActive(prior.Status) {
+			var settled bool
+			prior, settled = h.awaitSpawnOutcome(ctx, prior.Request.RequestID, escalateAuthorWait)
+			if !settled {
+				return hubEscalateAuthorResult{}, fmt.Errorf("successor placement is pending; retry the same request")
+			}
+		}
 		rung := firstNonempty(stepValue(prior.Request.Args, "-m"), request.Profile) + "@" + firstNonempty(stepValue(prior.Request.Args, "--effort"), "default")
 		if prior.Status == "failed" || prior.Status == "retryable" {
 			return h.escalateAuthorRefusal(ctx, request, ownerLane, "quota_refused", firstNonempty(prior.Outcome.Reason, "the successor did not place"), true)
@@ -248,6 +255,7 @@ func (h *HubServer) escalateAuthor(ctx context.Context, request hubEscalateAutho
 	}
 	if !settled {
 		h.logger.Warn("ladder step undecided; its successor may still place", "job", request.Job, "successor", newJob, "status", task.Status)
+		return hubEscalateAuthorResult{}, fmt.Errorf("successor placement is pending; retry the same request")
 	}
 	rung := request.Profile + "@" + firstNonempty(request.Effort, "default")
 	text := fmt.Sprintf("ladder step %s -> %s on %s (round %d, %s)", request.Job, newJob, rung, request.Round, request.PR)

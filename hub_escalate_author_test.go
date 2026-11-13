@@ -611,3 +611,21 @@ func TestEscalateAuthorDistinctRefusalsReachDesignLane(t *testing.T) {
 	}
 	f.awaitInfo(t, "quota_refused", "no author runs")
 }
+
+func TestEscalateAuthorPendingReplayDoesNotReportSuccess(t *testing.T) {
+	f := newEscalateFixture(t, "author-pending")
+	next, err := escalateAuthorSubmission(escalateHolderRequest(f.job), f.request(), f.job+"-l1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := f.hub.inbox.store.claimSpawn(t.Context(), next, f.job+"-l1", "parent", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	f.endHolder(fleet.LadderStepEndReason(5, f.job+"-l1"))
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Millisecond)
+	defer cancel()
+	result, err := f.hub.escalateAuthor(ctx, f.request())
+	if err == nil && result.Job != "" {
+		t.Fatalf("pending placement reported success: %+v", result)
+	}
+}
