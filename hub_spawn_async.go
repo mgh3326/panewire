@@ -29,17 +29,20 @@ func (h *HubServer) newSpawnApp(out, errout io.Writer) (*fleet.App, error) {
 	}
 	return app, err
 }
-func (h *HubServer) handleSpawnSubmit(w http.ResponseWriter, r *http.Request) {
+
+// decodeSpawnRequest authenticates and validates a spawn request for the submit
+// and plan routes. When it returns false it has already written the refusal.
+func (h *HubServer) decodeSpawnRequest(w http.ResponseWriter, r *http.Request) (fleet.Submission, fleet.Spawn, bool) {
 	// Placement chooses a resource after acceptance; only the unscoped operator
 	// may grant that authority. Per-host service tokens cannot escape their host.
 	if h.authenticate(r).kind != hubCallerOperator {
 		hubUnauthorized(w)
-		return
+		return fleet.Submission{}, fleet.Spawn{}, false
 	}
 	var request fleet.Submission
 	if !decodeHubJSON(w, r, hubSpawnMaxBodyBytes, &request) {
 		writeJSON(w, 400, map[string]string{"error": "invalid_request"})
-		return
+		return fleet.Submission{}, fleet.Spawn{}, false
 	}
 	spawn, err := fleet.ValidateSubmission(request)
 	if err == nil {
@@ -51,13 +54,41 @@ func (h *HubServer) handleSpawnSubmit(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil || !validHubSpawnRequestID(request.RequestID) || !hubSpawnMachinePattern.MatchString(request.OriginMachine) {
 		writeJSON(w, 400, map[string]string{"error": "invalid_request", "fix": "rebuild the request with panewire spawn"})
-		return
+		return fleet.Submission{}, fleet.Spawn{}, false
 	}
 	// The node applies this same rule to the args it receives; refusing here
 	// keeps a submitter whose own check is older from binding an operation the
 	// node would drop.
 	if reason := spawnargs.Refusal(request.Args, true); reason != "" {
 		writeJSON(w, 400, map[string]string{"error": "invalid_request", "reason": reason, "fix": "correct the named flag; the node would refuse this request"})
+		return fleet.Submission{}, fleet.Spawn{}, false
+	}
+	return request, spawn, true
+}
+
+// bindPlacement gives a placement app the hub's view of the fleet: the host list
+// and the hub state it reads. The spawn executor and the dry-run plan both place
+// through it, so a plan sees the hosts a real spawn would.
+func (h *HubServer) bindPlacement(app *fleet.App, transport fleet.HubTransport) {
+	app.Hub = transport
+	app.State = directSpawnState{h}
+	app.PlacementHosts = func(ctx context.Context, cwd string) ([]fleet.HostView, error) {
+		result := h.placementFresh(ctx, "worker", cwd)
+		raw, err := json.Marshal(result)
+		if err != nil {
+			return nil, err
+		}
+		views, err := fleet.ParseHubHosts(string(raw))
+		for _, machine := range result.slotFull {
+			views = append(views, fleet.HostView{Name: machine, Connected: true, SlotFull: true})
+		}
+		return views, err
+	}
+}
+
+func (h *HubServer) handleSpawnSubmit(w http.ResponseWriter, r *http.Request) {
+	request, spawn, ok := h.decodeSpawnRequest(w, r)
+	if !ok {
 		return
 	}
 	if h.inbox == nil {
@@ -323,20 +354,7 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 		return
 	}
 	outcome := hubSpawnOutcome{Stage: "placement", StageMS: map[string]int64{}}
-	app.Hub = transport
-	app.State = directSpawnState{h}
-	app.PlacementHosts = func(ctx context.Context, cwd string) ([]fleet.HostView, error) {
-		result := h.placementFresh(ctx, "worker", cwd)
-		raw, err := json.Marshal(result)
-		if err != nil {
-			return nil, err
-		}
-		views, err := fleet.ParseHubHosts(string(raw))
-		for _, machine := range result.slotFull {
-			views = append(views, fleet.HostView{Name: machine, Connected: true, SlotFull: true})
-		}
-		return views, err
-	}
+	h.bindPlacement(app, transport)
 	app.PlacementTry = func(host string) { h.countPlacement(task.Job, host) }
 	app.PlacementGate = h.placementGate.acquire
 	app.ObserveStage = func(stage string, d time.Duration) { outcome.Stage = stage; outcome.StageMS[stage] += d.Milliseconds() }

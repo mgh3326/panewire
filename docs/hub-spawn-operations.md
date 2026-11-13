@@ -5,6 +5,16 @@ placement and admission in-process; the selected node prepares the pinned
 checkout and runs launch and landing in-process. No launcher binary or SSH
 launcher is called. `--dry-run` remains the synchronous planning path.
 
+`--dry-run` with a hub configured asks the hub for its own plan: `POST
+/v1/spawns/plan` runs the same placement and selection the submission would,
+and records nothing: no operation row, no reservation, no hk write, no dispatch.
+The CLI prints the hub's host and profile, labelled `hub plan:`. The hub may
+choose a different profile from this machine's local plan. Without a hub the
+receipt is labelled `local plan:`. A hub that predates the route (404 or 405)
+gets a warning and the local plan, also labelled `local plan:`. A hub refusal
+exits with the hub's `rc` and reason; an unreachable or failing hub is an error,
+not a silent fallback.
+
 The CLI prints `ACCEPTED job=… request=…` after the hub commits a reservation.
 That confirms ownership of the operation, not a pane or brief delivery. Wait for
 `SPAWNED` or `SPAWN_FAILED` and perform the usual read-only landing check.
