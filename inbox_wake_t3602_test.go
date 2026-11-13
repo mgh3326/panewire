@@ -35,6 +35,23 @@ const (
 	t3602Until  = "2026-11-15T12:00:00Z"
 )
 
+func TestInboxWakeOrderKeepsDisplayKindAndDecisionUrgency(t *testing.T) {
+	e := hubJobEventPayload{NotifyType: "order"}
+	if got := inboxWakeKind("", e); got != "order" {
+		t.Fatalf("inboxWakeKind(order) = %q, want order", got)
+	}
+	if got, want := inboxWakeRank("order"), inboxWakeRank("decision"); got != want {
+		t.Fatalf("order rank = %d, decision rank = %d", got, want)
+	}
+	items := []laneInboxItem{{Kind: "notify", Event: e}}
+	if got := inboxWakeMostUrgent(items); got != "order" {
+		t.Fatalf("most urgent = %q, want order", got)
+	}
+	if got, want := inboxWakeText("panewire-design", 1, inboxWakeMostUrgent(items)), "[inbox] panewire-design: 1 unread (most urgent: order) | panewire inbox list --lane panewire-design"; got != want {
+		t.Fatalf("wake line = %q, want %q", got, want)
+	}
+}
+
 type t3602Clock struct {
 	mu  sync.Mutex
 	now time.Time

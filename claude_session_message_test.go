@@ -144,8 +144,9 @@ func TestClaudeWakePostsToRegisteredSocket(t *testing.T) {
 	if err := json.Unmarshal(bytes.TrimSpace(raw), &line); err != nil {
 		t.Fatalf("socket got %q: %v", raw, err)
 	}
-	if line.Type != "user" || line.Message.Role != "user" || line.Message.Content != message.Text {
-		t.Fatalf("socket got %+v, want the wake line %q as a user message", line, message.Text)
+	wantMessage := "panewire-hub: " + message.Text
+	if line.Type != "user" || line.Message.Role != "user" || line.Message.Content != wantMessage {
+		t.Fatalf("socket got %+v, want the wake line %q as a user message", line, wantMessage)
 	}
 	if bytes.Count(raw, []byte("\n")) != 1 || strings.Contains(string(raw), `"auth"`) || strings.Contains(string(raw), claudeTestTokenCanary) {
 		t.Fatalf("the post must be one line with no auth frame and no token: %q", raw)

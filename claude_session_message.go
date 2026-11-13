@@ -90,7 +90,7 @@ func (client *HubClient) deliverWakeAsSessionMessage(ctx context.Context, messag
 	// daemon started without --inbox-root or --hub-jobs-root reads it there.
 	socket, err := readClaudeSocketRegistration(emitInboxRoot(client.jobsInboxRoot), lane, message.Pane)
 	if err == nil {
-		err = postClaudeSessionMessage(ctx, socket, message.Text)
+		err = postClaudeSessionMessage(ctx, socket, "panewire-hub: "+message.Text)
 	}
 	if err != nil {
 		// The socket path and the text stay out of the log.
