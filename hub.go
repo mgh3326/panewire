@@ -524,6 +524,9 @@ type HubServer struct {
 	laneStallMu      sync.Mutex
 	laneStallClosing bool
 	laneStallSweeps  sync.WaitGroup
+	// drainWake is each design lane's drain-wake state (hub_drain_wake.go),
+	// owned by the lane-stall sweep goroutine under laneStallMu.
+	drainWake map[string]*drainWakeLane
 	// laneHeldCountProbe is a test hook laneHeldCountLocked fires once per
 	// scan, so a test can tell the count ran only on an activating
 	// observation.

@@ -1724,6 +1724,8 @@ embedded `delivery-policy.yaml`) carries the lane classes under `relay:`. See
 | `relay.inbox_wake_window` | `5m` | Coalescing window of the one-line wake, `10s` to `1h`. |
 | `relay.worker_inbox_trial` | `[]` | Worker lane patterns that are inbox-only with the wake during the trial. |
 | `relay.worker_inbox_trial_until` | none | RFC3339 end of the trial. It is required with a trial list, and the trial is off from this instant. |
+| `relay.drain_wake_interval` | `1h` | Least gap between two drain lines for one design lane, `10m` to `24h`. |
+| `relay.drain_wake_threshold` | `0` | A design lane counts as drained at or below this many in-flight jobs, `0` to `10`. |
 
 The wake line is
 `[inbox] <lane>: N unread (most urgent: <kind>) | panewire inbox list --lane <lane>`.

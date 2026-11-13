@@ -115,6 +115,10 @@ var defaultDeskLanePatterns = []string{deskPolicyLane, "*-" + deskPolicyLane}
 // coalesces later arrivals (relay.inbox_wake_window).
 const defaultInboxWakeWindow = 5 * time.Minute
 
+// defaultDrainWakeInterval is the least gap between two drain lines for one
+// design lane (relay.drain_wake_interval).
+const defaultDrainWakeInterval = time.Hour
+
 // consultDoneMarker opens the text of a consult answer's notice, as rstack
 // skills/ops/references/consult.md §2 has the answerer send it:
 // `--type ready --text '[consult-done] <gist> | <answer path>'`.
@@ -133,6 +137,9 @@ type deliveryRelayPolicy struct {
 	DesignLanes           []string `yaml:"design_lanes"`
 	DeskLanes             []string `yaml:"desk_lanes"`
 	InboxWakeWindow       string   `yaml:"inbox_wake_window"`
+	DrainWakeInterval     string   `yaml:"drain_wake_interval"`
+	DrainWakeThreshold    int      `yaml:"drain_wake_threshold"`
+	drainWakeInterval     time.Duration
 	WorkerInboxTrial      []string `yaml:"worker_inbox_trial"`
 	WorkerInboxTrialUntil string   `yaml:"worker_inbox_trial_until"`
 	wakeWindow            time.Duration
@@ -329,6 +336,17 @@ func parseDeliveryPolicy(raw []byte) (*deliveryPolicy, error) {
 			return nil, fmt.Errorf("relay.inbox_wake_window must be 10s..1h")
 		}
 		p.Relay.wakeWindow = window
+	}
+	p.Relay.drainWakeInterval = defaultDrainWakeInterval
+	if p.Relay.DrainWakeInterval != "" {
+		interval, err := time.ParseDuration(p.Relay.DrainWakeInterval)
+		if err != nil || interval < 10*time.Minute || interval > 24*time.Hour {
+			return nil, fmt.Errorf("relay.drain_wake_interval must be 10m..24h")
+		}
+		p.Relay.drainWakeInterval = interval
+	}
+	if p.Relay.DrainWakeThreshold < 0 || p.Relay.DrainWakeThreshold > 10 {
+		return nil, fmt.Errorf("relay.drain_wake_threshold must be 0..10")
 	}
 	for _, pattern := range p.Relay.WorkerInboxTrial {
 		if !validDesignLanePattern(pattern) {
