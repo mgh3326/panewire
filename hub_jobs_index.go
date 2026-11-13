@@ -48,7 +48,7 @@ const (
 
 	hubIndexJobOverhead   = 512
 	hubIndexEventOverhead = 1024
-	hubIndexLaneOverhead  = 192
+	hubIndexLaneOverhead  = 320
 )
 
 // hubIndexedEvent is one parsed event file of a job: the record plus the two
@@ -109,6 +109,18 @@ type hubLaneFile struct {
 	ok      bool
 	event   hubScannedRelayEvent
 	cost    int64
+	// info identifies the file the parsed event came from.
+	info os.FileInfo
+}
+
+// hubBindingBytes is what retaining pane-binding facts costs: the facts and
+// the strings they hold.
+func hubBindingBytes(facts []hubPaneBindingFact) int64 {
+	var bytes int64
+	for i := range facts {
+		bytes += 64 + int64(len(facts[i].pane)+len(facts[i].session)+len(facts[i].createdAt))
+	}
+	return bytes
 }
 
 // hubInboxIndex indexes one inbox root. All state is guarded by mu; the scans
@@ -333,7 +345,7 @@ func newHubIndexedJob(id string, dir os.FileInfo, settled bool, load hubJobEvent
 			job.newest = load.events[i].eventTime
 		}
 	}
-	job.cost = hubIndexJobOverhead + load.bytes + int64(len(load.bindings))*128
+	job.cost = hubIndexJobOverhead + load.bytes + hubBindingBytes(load.bindings)
 	return job
 }
 
@@ -434,7 +446,7 @@ func (ix *hubInboxIndex) compactJobLocked(job *hubIndexedJob) *hubIndexedJob {
 		return job
 	}
 	compact := &hubIndexedJob{id: job.id, dir: job.dir, settled: job.settled, compact: true, newest: job.newest, ended: job.ended, bindings: job.bindings}
-	compact.cost = hubIndexJobOverhead + int64(len(job.bindings))*128
+	compact.cost = hubIndexJobOverhead + hubBindingBytes(job.bindings)
 	ix.jobBytes += compact.cost - job.cost
 	compact.gen = job.gen
 	ix.jobs[job.id] = compact
@@ -554,7 +566,12 @@ func (ix *hubInboxIndex) laneFilesLocked() ([]hubLaneFile, bool) {
 		ix.resetLaneLocked()
 		return nil, false
 	}
-	prev := ix.lane
+	// A listing is carried over only from the same directory: a restored or
+	// replaced events-lane may hold other files under the same names.
+	var prev []hubLaneFile
+	if ix.laneInfo != nil && os.SameFile(ix.laneInfo, info) {
+		prev = ix.lane
+	}
 	files := make([]hubLaneFile, 0, len(entries))
 	var bytes int64
 	statFailed := false
@@ -566,7 +583,7 @@ func (ix *hubInboxIndex) laneFilesLocked() ([]hubLaneFile, bool) {
 		}
 		file := hubLaneFile{name: name}
 		if fi, err := entry.Info(); err == nil {
-			file.modTime, file.size, file.infoOK = fi.ModTime(), fi.Size(), true
+			file.modTime, file.size, file.infoOK, file.info = fi.ModTime(), fi.Size(), true, fi
 		} else {
 			// A failed stat is retried: the listing is read again next pass.
 			statFailed = true
@@ -574,7 +591,7 @@ func (ix *hubInboxIndex) laneFilesLocked() ([]hubLaneFile, bool) {
 		for p < len(prev) && prev[p].name < name {
 			p++
 		}
-		if p < len(prev) && prev[p].name == name && prev[p].parsed && file.infoOK && prev[p].infoOK && prev[p].modTime.Equal(file.modTime) && prev[p].size == file.size {
+		if p < len(prev) && prev[p].name == name && prev[p].parsed && file.infoOK && prev[p].infoOK && prev[p].modTime.Equal(file.modTime) && prev[p].size == file.size && os.SameFile(prev[p].info, file.info) {
 			file = prev[p]
 		}
 		bytes += hubIndexLaneOverhead + file.cost
@@ -589,7 +606,7 @@ func (ix *hubInboxIndex) laneFilesLocked() ([]hubLaneFile, bool) {
 		// Over budget: drop the parsed events, which are read again on demand.
 		for i := range files {
 			bytes -= files[i].cost
-			files[i] = hubLaneFile{name: files[i].name, modTime: files[i].modTime, size: files[i].size, infoOK: files[i].infoOK}
+			files[i] = hubLaneFile{name: files[i].name, modTime: files[i].modTime, size: files[i].size, infoOK: files[i].infoOK, info: files[i].info}
 		}
 		if ix.jobBytes+bytes > ix.budget {
 			ix.resetLaneLocked()

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -320,5 +321,100 @@ func TestHubInboxIndexRetriesFailedReads(t *testing.T) {
 	}
 	if got := scanHubLaneEventsWithin(f.root, 0); len(got) != 1 || got[0].EventID != "ev-1" {
 		t.Fatalf("a lane event that became readable under a settled directory was not seen: %+v", got)
+	}
+}
+
+// TestHubInboxIndexDoesNotReuseAReplacedLaneFile: a restored or replaced
+// events-lane can hold other content under the same name, mtime and size; a
+// parsed event is reused only for the same file in the same directory.
+func TestHubInboxIndexDoesNotReuseAReplacedLaneFile(t *testing.T) {
+	f := newIndexFixture(t, 0)
+	laneDir := filepath.Join(f.root, "events-lane")
+	name := "00001-lane.event.json"
+	at := f.now.Add(-3 * time.Hour)
+	write := func(dir, id string) {
+		t.Helper()
+		body := `{"type":"lane.event","owner_lane":"lane-a","event_id":"` + id + `","text":"hello","epoch":1}`
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(path, at, at); err != nil {
+			t.Fatal(err)
+		}
+	}
+	eventID := func() string {
+		t.Helper()
+		got := scanHubLaneEventsWithin(f.root, 0)
+		if len(got) != 1 {
+			t.Fatalf("lane events=%+v", got)
+		}
+		return got[0].EventID
+	}
+	write(laneDir, "ev-1")
+	f.settle()
+	if got := eventID(); got != "ev-1" {
+		t.Fatalf("first read=%s", got)
+	}
+
+	// The same name replaced inside the directory by rename: same mtime, same length.
+	replacement := t.TempDir()
+	write(replacement, "ev-2")
+	if err := os.Rename(filepath.Join(replacement, name), filepath.Join(laneDir, name)); err != nil {
+		t.Fatal(err)
+	}
+	if got := eventID(); got != "ev-2" {
+		t.Fatalf("a replaced file was reported as the old event: %s", got)
+	}
+
+	// The whole directory replaced, as a restore does.
+	f.settle()
+	if got := eventID(); got != "ev-2" {
+		t.Fatalf("settled read=%s", got)
+	}
+	restored := filepath.Join(f.root, "events-lane.restored")
+	if err := os.Mkdir(restored, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	write(restored, "ev-3")
+	if err := os.Chtimes(restored, f.now.Add(-indexFixtureSettle), f.now.Add(-indexFixtureSettle)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(laneDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(restored, laneDir); err != nil {
+		t.Fatal(err)
+	}
+	if got := eventID(); got != "ev-3" {
+		t.Fatalf("a restored directory was reported as the old events: %s", got)
+	}
+}
+
+// TestHubInboxIndexChargesBindingStrings: the budget counts what a retained
+// pane binding holds, not a fixed size, so a large binding cannot slip past it.
+func TestHubInboxIndexChargesBindingStrings(t *testing.T) {
+	f := newIndexFixture(t, 0)
+	id := "job-bigbinding"
+	big := strings.Repeat("s", 200<<10)
+	f.put(id, 1, "job.claimed", fmt.Sprintf(`{"type":"job.claimed","created_at":%q,"agent_label":"agent-1","epoch":1,"payload":{"pane_id":"w1:p1","herdr_session":%q}}`, f.stamp(time.Hour), big), time.Hour)
+	f.settle()
+	ix := hubIndexFor(f.root)
+	scanHubActiveJobsForLimit(context.Background(), f.root, nil, 0)
+	ix.mu.Lock()
+	job := ix.jobs[id]
+	ix.mu.Unlock()
+	if job == nil || job.cost < int64(len(big)) {
+		t.Fatalf("a %d byte binding string was charged %v", len(big), job)
+	}
+	ix.mu.Lock()
+	ix.budget = int64(len(big)) / 2
+	ix.mu.Unlock()
+	f.put(id, 2, "job.progress", `{"type":"job.progress"}`, time.Hour)
+	scanHubActiveJobsForLimit(context.Background(), f.root, nil, 0)
+	ix.mu.Lock()
+	defer ix.mu.Unlock()
+	if ix.jobs[id] != nil || ix.jobBytes != 0 {
+		t.Fatalf("a record over the budget was retained: %+v bytes=%d", ix.jobs[id], ix.jobBytes)
 	}
 }
