@@ -180,7 +180,7 @@ func TestHubSpawnConfigRulesAreNamed(t *testing.T) {
 		`{"cwd_map":{},"workspace":"w","herdr_session":"s","enabled":false}`:              "enabled_false",
 		`{"cwd_map":{},"workspace":"","herdr_session":"s","enabled":true}`:                "workspace_required",
 		`{"cwd_map":{"a":"relative"},"workspace":"w","herdr_session":"s","enabled":true}`: "cwd_map_dir_absolute",
-		`{"cwd":{},"workspace":"w","herdr_session":"s","enabled":true}`:                   "config_json_invalid",
+		`{"cwd_map":"x","workspace":"w","herdr_session":"s","enabled":true}`:              "config_json_invalid",
 		`{"cwd_map":{},"workspace":"w","herdr_session":"s","enabled":true} {}`:            "config_trailing_data",
 	}
 	for contents, rule := range cases {

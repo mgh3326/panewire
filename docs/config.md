@@ -657,9 +657,14 @@ spawns that need hk are refused.
 
 Each spawn writes a record to hk `/v1/jobs` on the executing host (the design
 is `design/2026-10-30/cross-host-jobs`): the claim `POST {job_id, task_id,
-host}` runs before the local claim and a taken id refuses with exit 74, like
+host, at}` runs before the local claim and a taken id refuses with exit 74, like
 the ledger's duplicate. `host` is the node's `HUB_MACHINE_ID`. hk unreachable
 or unconfigured fails the spawn closed. The task precheck also fails closed before launch.
+`task_id` is `null` for a task-less job (a reviewer or consult run); a non-empty
+non-numeric task id still refuses before the POST. `at` is the client clock: the
+claim sets `claimed_at`; the `spawned`, `completed`, `escalated`, and `lost`
+transitions send `at` with `state` and hk stores it as `spawned_at` or `ended_at`
+(set once).
 
 After the brief lands, panewire merges `{state:"spawned", role, label, family,
 profile, model, harness, effort, pool, owner_lane, parent_lane, parent_job,
@@ -765,8 +770,12 @@ panewire warns and sends an owner-lane notice so the task can be linked manually
 A successful claim records `status: linked`. A claim that fails while hk's task
 record already has `refs.job_id` equal to this job (a design session rebound
 the task before the spawn) records `status: already_linked`, with no warning and
-no notice: there is nothing to link (hk 3426). Other spawn failures retain their
-normal cleanup behavior.
+no notice: there is nothing to link (hk 3426). A spawn that does not claim the
+task — an unlinked reviewer or a consult — records `status: unlinked`; a consult
+(a `counsel` seat, which always routes as consult) may join a task another job or
+claimant holds, so a consult pair can share it. The rule follows the seat role: a
+worker seat given `--routing-role consult` still claims the task like any worker.
+Other spawn failures retain their normal cleanup behavior.
 
 An implementer spawn with `--parent-job` replaces its parent job. After the brief
 lands it moves the task's claim and `refs.job_id` to the new job through
