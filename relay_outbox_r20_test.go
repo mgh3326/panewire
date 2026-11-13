@@ -262,3 +262,15 @@ func TestR20LanePersistedAckAcceptsHistoricalDottedLane(t *testing.T) {
 		t.Fatalf("historical acknowledgement was rejected: message=%+v ok=%v", message, ok)
 	}
 }
+
+func TestR20LaneEventInjectAcceptsHistoricalDottedLane(t *testing.T) {
+	wire := []byte(`{"type":"relay.inject","kind":"lane.event","job_id":"relay-job-7","pane":"w1:p1","text":"legacy notice","lane":"legacy.parent","event_id":7,"deliver":"now"}`)
+	message, ok := parseHubOutbound(wire)
+	if !ok || message.Lane != "legacy.parent" || message.Kind != "lane.event" {
+		t.Fatalf("historical lane event inject was rejected: message=%+v ok=%v", message, ok)
+	}
+	bad := []byte(`{"type":"relay.inject","kind":"lane.event","job_id":"relay-job-7","pane":"w1:p1","text":"legacy notice","lane":"bad/name","event_id":7,"deliver":"now"}`)
+	if _, ok := parseHubOutbound(bad); ok {
+		t.Fatalf("invalid lane event inject was accepted: %s", bad)
+	}
+}

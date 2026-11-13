@@ -170,7 +170,7 @@ func parseHubScopes(raw string) ([]hubScopeGrant, error) {
 			grants = append(grants, hubScopeGrant{name: scope})
 		case strings.HasPrefix(scope, hubScopeInboxRead+":"), strings.HasPrefix(scope, hubScopeInboxAck+":"), strings.HasPrefix(scope, hubScopeJobsClose+":"):
 			name, lane, _ := strings.Cut(scope, ":")
-			if !(lane == "*" && name != hubScopeJobsClose) && !validHistoricalLaneResource(lane) {
+			if !(lane == "*" && name != hubScopeJobsClose) && !validLaneReference(lane) {
 				return nil, invalid
 			}
 			grants = append(grants, hubScopeGrant{name: name, resource: lane})
@@ -202,19 +202,11 @@ func hubGrantsAllow(grants []hubScopeGrant, scope, resource string) bool {
 			return true
 		}
 		// Inbox wildcards require an explicit valid lane; jobs.close stays lane-specific.
-		if grant.resource == hubScopeAnyMachine && scope != hubScopeJobsClose && ((scope != hubScopeInboxRead && scope != hubScopeInboxAck) || validHistoricalLaneResource(resource)) {
+		if grant.resource == hubScopeAnyMachine && scope != hubScopeJobsClose && ((scope != hubScopeInboxRead && scope != hubScopeInboxAck) || validLaneReference(resource)) {
 			return true
 		}
 	}
 	return false
-}
-
-// validHistoricalLaneResource keeps pre-LaneNamePattern persisted inbox rows
-// and their explicit auth scopes reachable while all newly written lane names
-// use LaneNamePattern. The broader agent-label form is compatibility-only;
-// lane creation, event ingress, and new inbox writes remain strict.
-func validHistoricalLaneResource(lane string) bool {
-	return LaneNamePattern.MatchString(lane) || hubAgentLabelPattern.MatchString(lane)
 }
 
 // currentAuth answers the auth set to check a request against, reloading the

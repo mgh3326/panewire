@@ -31,7 +31,7 @@ func spawnRefusalReplayable(reason string) bool {
 // the spawned pane's own lane, so it never names the submitter.
 func spawnSubmitterLane(args []string) string {
 	for _, flag := range []string{"--requested-by", "--parent"} {
-		if lane := hubSpawnArg(args, flag); LaneNamePattern.MatchString(lane) {
+		if lane := hubSpawnArg(args, flag); validLaneReference(lane) {
 			return lane
 		}
 	}

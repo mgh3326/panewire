@@ -52,7 +52,7 @@ func runLanesCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 		}
 		return writeHubCLIUsage(stderr, "lanes: --hub-url and --hub-token-env are required", lanesUsage)
 	}
-	if !LaneNamePattern.MatchString(options.Lane) && options.Command != "ls" {
+	if !validLaneReference(options.Lane) && options.Command != "ls" {
 		fmt.Fprintln(stderr, "lanes rejected: invalid lane")
 		return ExitConditionInvalid
 	}
@@ -243,7 +243,7 @@ func validateLaneAdd(lane, machine, pane, parent string, sink bool) (string, int
 	if !sink && (machine == hubOperatorMachineID || !machineIDPattern.MatchString(machine) || !validLanePane(pane)) {
 		return "lanes rejected: invalid route", ExitConditionInvalid
 	}
-	if parent != "" && (!LaneNamePattern.MatchString(parent) || parent == lane) {
+	if parent != "" && (!validLaneReference(parent) || parent == lane) {
 		return "lanes rejected: invalid parent", ExitConditionInvalid
 	}
 	return "", ExitOK
@@ -492,7 +492,7 @@ func decodeLanesJSON(reader io.Reader, target any) error {
 }
 
 func validHubLaneProjection(lane hubLaneProjection) bool {
-	if !LaneNamePattern.MatchString(lane.Lane) || lane.Parent != "" && !LaneNamePattern.MatchString(lane.Parent) {
+	if !validLaneReference(lane.Lane) || lane.Parent != "" && !validLaneReference(lane.Parent) {
 		return false
 	}
 	if lane.Sink {

@@ -49,6 +49,13 @@ var (
 	errLaneMachineMismatch    = errors.New("lane machine does not match the authenticated node")
 )
 
+// validLaneReference accepts current lane names and labels used by older
+// versions for existing lanes. Apply LaneNamePattern when creating names;
+// references to persisted lanes must stay readable during upgrades.
+func validLaneReference(lane string) bool {
+	return LaneNamePattern.MatchString(lane) || hubAgentLabelPattern.MatchString(lane)
+}
+
 type hubLaneWriteRequest struct {
 	Machine        string              `json:"machine"`
 	Pane           string              `json:"pane"`
@@ -213,7 +220,7 @@ func (h *HubServer) handleDeleteLane(writer http.ResponseWriter, request *http.R
 		return
 	}
 	lane := request.PathValue("lane")
-	if !LaneNamePattern.MatchString(lane) {
+	if !validLaneReference(lane) {
 		writeLaneJSONError(writer, http.StatusBadRequest, "invalid_lane")
 		return
 	}
@@ -266,7 +273,7 @@ func nodeLaneFieldScope(nodeMachine, lane string, body hubLaneWriteRequest, rout
 		return errLaneMachineMismatch
 	}
 	if body.Parent != "" {
-		if !validHistoricalLaneResource(body.Parent) || body.Parent == lane {
+		if !validLaneReference(body.Parent) || body.Parent == lane {
 			return errLaneRequestInvalid
 		}
 		if parent, found := routes[body.Parent]; !found || parent.Sink {
@@ -531,7 +538,7 @@ func validateLaneWriteRequest(h *HubServer, lane string, body hubLaneWriteReques
 		return errLaneRequestInvalid
 	}
 	if body.Parent != "" {
-		if !validHistoricalLaneResource(body.Parent) || body.Parent == lane {
+		if !validLaneReference(body.Parent) || body.Parent == lane {
 			return errLaneRequestInvalid
 		}
 		if _, exists := routes[body.Parent]; !exists {

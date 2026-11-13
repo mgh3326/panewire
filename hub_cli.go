@@ -708,7 +708,7 @@ func runJobsCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 	if args[0] == "jobs" && *machine != "" && !machineIDPattern.MatchString(*machine) {
 		return writeHubCLIUsage(stderr, "jobs: invalid --machine", jobsUsage)
 	}
-	if args[0] == "list" && !validHistoricalLaneResource(*lane) {
+	if args[0] == "list" && !validLaneReference(*lane) {
 		return writeHubCLIUsage(stderr, "jobs list: valid --lane is required", jobsUsage)
 	}
 	env, err := loadHubTokenEnv(*tokenEnvPath)

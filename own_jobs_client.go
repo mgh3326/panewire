@@ -51,9 +51,9 @@ type ownJobsRequest struct {
 func validOwnJobsRequest(req ownJobsRequest) bool {
 	switch req.Command {
 	case "mine":
-		return validHistoricalLaneResource(req.Lane) && req.Job == "" && !req.Force
+		return validLaneReference(req.Lane) && req.Job == "" && !req.Force
 	case "close":
-		return validHistoricalLaneResource(req.Lane) && hubJobIDPattern.MatchString(req.Job)
+		return validLaneReference(req.Lane) && hubJobIDPattern.MatchString(req.Job)
 	}
 	return false
 }
@@ -75,7 +75,7 @@ func runOwnJobsCLI(command string, args []string, stdout, stderr io.Writer, deps
 	if flags.NArg() != 0 {
 		return writeHubCLIUsage(stderr, "jobs: unexpected positional argument", jobsUsage)
 	}
-	if !validHistoricalLaneResource(*lane) {
+	if !validLaneReference(*lane) {
 		return writeHubCLIUsage(stderr, "jobs "+command+": valid --lane is required", jobsUsage)
 	}
 	if command == "mine" && *force {

@@ -255,7 +255,7 @@ func emitJobRecord(record emitRecord, root, socket string, timeout time.Duration
 	// decode rejects a missing reason, and a missing lane can never resolve a
 	// route — producing either record would only stamp an outbox row no
 	// acknowledgement can ever retire.
-	if relayTerminalSignalKinds[record.Type] && (record.Reason == "" || !LaneNamePattern.MatchString(record.OwnerLane)) {
+	if relayTerminalSignalKinds[record.Type] && (record.Reason == "" || !validLaneReference(record.OwnerLane)) {
 		fmt.Fprintln(stderr, "emit: terminal kind requires --reason and a routable --owner-lane")
 		return ExitUsage
 	}
@@ -460,7 +460,7 @@ func readEmitLaneEventDedupeKey(eventsDir, name string) (string, bool) {
 		return "", false
 	}
 	var event emitRecord
-	if json.Unmarshal(contents, &event) != nil || event.Type != "lane.event" || !validLaneEventID(event.EventID) || !LaneNamePattern.MatchString(event.OwnerLane) {
+	if json.Unmarshal(contents, &event) != nil || event.Type != "lane.event" || !validLaneEventID(event.EventID) || !validLaneReference(event.OwnerLane) {
 		return "", false
 	}
 	return relayLaneEventOutboxKey(event.OwnerLane, event.EventID), true

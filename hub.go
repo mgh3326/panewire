@@ -969,7 +969,7 @@ func (h *HubServer) handleJobs(writer http.ResponseWriter, request *http.Request
 		hubUnauthorized(writer)
 		return
 	}
-	if lane != "" && !validHistoricalLaneResource(lane) {
+	if lane != "" && !validLaneReference(lane) {
 		http.Error(writer, "invalid owner_lane", http.StatusBadRequest)
 		return
 	}
@@ -1289,7 +1289,7 @@ func (h *HubServer) handleAgentMessageContext(ctx context.Context, machineID, re
 					h.lateRegisterJobCompletion(machineID, event, received)
 				}
 			}
-			if message.Kind == "job.lost" && h.observePoolCooling(event.Reason, received) && !validHistoricalLaneResource(event.OwnerLane) {
+			if message.Kind == "job.lost" && h.observePoolCooling(event.Reason, received) && !validLaneReference(event.OwnerLane) {
 				// This acknowledges in-memory cooling, not durable relay persistence.
 				agent.queuePersisted(hubRelayPersistedEvent{Type: "pool.cooling.ack", JobID: event.JobID, Kind: message.Kind, Epoch: event.Epoch, ReportPath: event.ReportPath, Reason: event.Reason, EventID: 1, ProducerEventID: event.EventID})
 			}
