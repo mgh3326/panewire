@@ -68,6 +68,47 @@ func TestQuotaStopTaskLookupFindsTaskPastFirstPage(t *testing.T) {
 	}
 }
 
+func TestQuotaStopTaskLookupDoesNotReusePageDecodeState(t *testing.T) {
+	rig := newRoleStopRig(t, "worker", time.Hour, roleStopTask)
+	rows := make([]string, quotaStopTaskLimit)
+	for i := range rows {
+		job := fmt.Sprintf("other-%d", i)
+		if i == 0 {
+			job = "job-active"
+		}
+		rows[i] = fmt.Sprintf(`{"id":%d,"priority":3,"expected":"4h","refs":{"job_id":%q}}`, i+1, job)
+	}
+	rig.q.hk.tasks = func(_ context.Context, afterID int64) ([]byte, error) {
+		if afterID == 0 {
+			return []byte(`{"tasks":[` + strings.Join(rows, ",") + `]}`), nil
+		}
+		return []byte(`{"tasks":[{"id":1001,"priority":3}]}`), nil
+	}
+	priority, expected, ok := rig.q.task(context.Background(), HubActiveJob{JobID: "job-active"}, "", "")
+	if !ok || priority != 3 || expected != 4*time.Hour {
+		t.Fatalf("task priority=%d expected=%v ok=%t, want the unique match from page one", priority, expected, ok)
+	}
+}
+
+func TestQuotaStopTaskLookupCursorUsesExactTaskID(t *testing.T) {
+	rig := newRoleStopRig(t, "worker", time.Hour, roleStopTask)
+	rows := make([]string, quotaStopTaskLimit)
+	for i := 0; i < quotaStopTaskLimit-1; i++ {
+		rows[i] = fmt.Sprintf(`{"id":%d,"priority":3,"refs":{"job_id":"other"}}`, i+1)
+	}
+	rows[quotaStopTaskLimit-1] = `{"id":1000000,"priority":3,"refs":{"job_id":"other"}}`
+	rig.q.hk.tasks = func(_ context.Context, afterID int64) ([]byte, error) {
+		if afterID == 0 {
+			return []byte(`{"tasks":[` + strings.Join(rows, ",") + `]}`), nil
+		}
+		return []byte(`{"tasks":[{"id":1000001,"priority":3,"expected":"4h","refs":{"job_id":"job-active"}}]}`), nil
+	}
+	priority, expected, ok := rig.q.task(context.Background(), HubActiveJob{JobID: "job-active"}, "", "")
+	if !ok || priority != 3 || expected != 4*time.Hour {
+		t.Fatalf("task priority=%d expected=%v ok=%t, want the unique match after task id 1,000,000", priority, expected, ok)
+	}
+}
+
 func TestQuotaStopTaskLookupMissingTaskHandsOver(t *testing.T) {
 	rig := newRoleStopRig(t, "worker", time.Hour, roleStopTask)
 	rig.q.hk.task = func(context.Context, string) ([]byte, error) { return nil, fmt.Errorf("not_found") }

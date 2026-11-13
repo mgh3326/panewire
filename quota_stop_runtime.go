@@ -308,21 +308,21 @@ func (q *quotaStopManager) task(ctx context.Context, job HubActiveJob, inherited
 		}
 		return priority, duration, true
 	}
-	var v struct {
-		Tasks []struct {
-			ID       any     `json:"id"`
-			Priority any     `json:"priority"`
-			Expected *string `json:"expected"`
-			Refs     struct {
-				Job string `json:"job_id"`
-			} `json:"refs"`
-		} `json:"tasks"`
-	}
 	n := 0
 	priority := 0
 	var duration time.Duration
 	var afterID int64
 	for {
+		var v struct {
+			Tasks []struct {
+				ID       json.Number `json:"id"`
+				Priority any         `json:"priority"`
+				Expected *string     `json:"expected"`
+				Refs     struct {
+					Job string `json:"job_id"`
+				} `json:"refs"`
+			} `json:"tasks"`
+		}
 		b, err := q.hk.tasks(ctx, afterID)
 		if err != nil {
 			q.logger.Warn("quota-stop task lookup failed", "job", job.JobID, "after_id", afterID, "error", err)
@@ -349,7 +349,7 @@ func (q *quotaStopManager) task(ctx context.Context, job HubActiveJob, inherited
 		if len(v.Tasks) < quotaStopTaskLimit {
 			break
 		}
-		lastID, err := strconv.ParseInt(quotaTaskID(v.Tasks[len(v.Tasks)-1].ID), 10, 64)
+		lastID, err := strconv.ParseInt(string(v.Tasks[len(v.Tasks)-1].ID), 10, 64)
 		if err != nil || lastID <= afterID {
 			q.logger.Warn("quota-stop task lookup failed", "job", job.JobID, "after_id", afterID, "error", "invalid_task_page_cursor")
 			return 0, 0, false
