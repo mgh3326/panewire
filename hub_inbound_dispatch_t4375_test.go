@@ -4,11 +4,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/coder/websocket/wsjson"
 )
 
 // t4375: a hub frame whose handler blocks on the node journal must not delay
@@ -194,5 +199,93 @@ func TestHubInboundRedialAppliesQueuedFramesFirst(t *testing.T) {
 	}
 	if epoch := client.assignedJobs["job-c"]; epoch != 4 {
 		t.Fatalf("job.assigned was dropped at session end: epoch=%d", epoch)
+	}
+}
+
+// closingHub answers the registration ping, sends every queued frame, then
+// drops the connection: the reader ends on a read error with the frames still
+// owed to the inbound worker.
+type closingHub struct{ frames [][]byte }
+
+func (hub *closingHub) serve(t *testing.T) *httptest.Server {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		connection, err := websocket.Accept(writer, request, nil)
+		if err != nil {
+			return
+		}
+		defer connection.CloseNow()
+		sent := false
+		for {
+			var message map[string]any
+			if wsjson.Read(request.Context(), connection, &message) != nil {
+				return
+			}
+			if message["type"] != "ping" || sent {
+				continue
+			}
+			_ = wsjson.Write(request.Context(), connection, map[string]any{"type": "pong"})
+			sent = true
+			for _, frame := range hub.frames {
+				if connection.Write(request.Context(), websocket.MessageText, frame) != nil {
+					return
+				}
+			}
+			return
+		}
+	}))
+	t.Cleanup(server.Close)
+	return server
+}
+
+// A read error ends the session with queued frames still owed to the
+// dispatcher. The drain must apply all of them: a job.revoked whose ack
+// write fails on the dead connection must not drop the frames behind it.
+func TestHubInboundDrainAppliesQueuePastFailedAck(t *testing.T) {
+	var warnings warningLog
+	hub := &closingHub{frames: [][]byte{
+		[]byte(`{"type":"job.revoked","job_id":"job-r","epoch":2}`),
+		[]byte(`{"type":"job.assigned","job_id":"job-d","epoch":6}`),
+	}}
+	server := hub.serve(t)
+	jobsRoot := t.TempDir()
+	client, err := NewHubClient(HubClientConfig{URL: t14WSURL(server.URL, ""), MachineID: "machine-a", Token: "node-token", AllowInsecureForTests: true, PingInterval: 20 * time.Millisecond,
+		JobsInboxRoot:       jobsRoot,
+		SpawnJournalDir:     t.TempDir(),
+		Warn:                warnings.add,
+		sessionCollector:    func(context.Context) ([]HerdrAgentState, error) { return nil, nil },
+		hostLoadCollector:   func(context.Context) (HubHostLoad, error) { return HubHostLoad{}, nil },
+		hostMemoryCollector: func(context.Context) (*HubHostMemory, error) { return nil, nil },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	connection, _, err := websocket.Dial(t.Context(), client.endpoint, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() {
+		_, err := client.serveConnection(ctx, connection)
+		done <- err
+	}()
+	t.Cleanup(cancel)
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("session did not end when the hub dropped the connection")
+	}
+
+	eventually(t, 5*time.Second, "drained frames applied after the session ended", func() bool {
+		client.assignmentMu.Lock()
+		defer client.assignmentMu.Unlock()
+		return client.assignedJobs["job-d"] == 6
+	})
+	eventsDir := filepath.Join(jobsRoot, "jobs", "job-r", "events")
+	entries, err := os.ReadDir(eventsDir)
+	if err != nil || len(entries) == 0 {
+		t.Fatalf("job.revoked local write missing after drain: entries=%v err=%v", entries, err)
 	}
 }

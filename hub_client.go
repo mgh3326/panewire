@@ -2215,20 +2215,8 @@ func (client *HubClient) serveHubInbound(ctx context.Context, peer *hubClientCon
 		case <-ctx.Done():
 			return
 		case <-done:
-			// The session is ending on a read error or an endpoint switch
-			// (a redial already reached the worker in order). Apply what the
-			// reader managed to queue before leaving, so a received
-			// job.revoked or relay.persisted is never silently dropped.
-			for {
-				select {
-				case message := <-inbound:
-					if client.handleHubInboundMessage(ctx, peer, message) != nil {
-						return
-					}
-				default:
-					return
-				}
-			}
+			client.drainHubInbound(ctx, peer, inbound)
+			return
 		case message := <-inbound:
 			if err := client.handleHubInboundMessage(ctx, peer, message); err != nil {
 				select {
@@ -2236,11 +2224,34 @@ func (client *HubClient) serveHubInbound(ctx context.Context, peer *hubClientCon
 				case <-ctx.Done():
 				case <-done:
 				}
+				// The error ends the session, but the frames already read are
+				// still this node's to apply: drain them like any other end.
+				client.drainHubInbound(ctx, peer, inbound)
 				return
 			}
 			if client.inboundHandled != nil {
 				client.inboundHandled(message)
 			}
+		}
+	}
+}
+
+// drainHubInbound applies what the reader already queued as the session ends
+// - a read error, an endpoint switch, or a handler that failed against the
+// dead connection - so a received job.revoked or relay.persisted is never
+// silently dropped. A failed ack write is not a reason to drop the rest of
+// the queue: the hub replays unacked work on reconnect.
+func (client *HubClient) drainHubInbound(ctx context.Context, peer *hubClientConnection, inbound <-chan hubOutboundMessage) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case message := <-inbound:
+			if err := client.handleHubInboundMessage(ctx, peer, message); errors.Is(err, errHubRedial) {
+				return
+			}
+		default:
+			return
 		}
 	}
 }
@@ -2265,8 +2276,14 @@ func (client *HubClient) handleHubInboundMessage(ctx context.Context, peer *hubC
 			return err
 		}
 	case "job.assigned":
+		// Monotonic: a superseded session's drain can still run while a newer
+		// session already recorded a later epoch for the same job, and the
+		// read side only ever raises a scanned epoch (heartbeatEvent,
+		// jobCompletionEvents), never lowers it.
 		client.assignmentMu.Lock()
-		client.assignedJobs[message.JobID] = message.Epoch
+		if message.Epoch > client.assignedJobs[message.JobID] {
+			client.assignedJobs[message.JobID] = message.Epoch
+		}
 		client.assignmentMu.Unlock()
 	case "relay.persisted", "pool.cooling.ack":
 		client.recordRelayPersisted(message)
