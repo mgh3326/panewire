@@ -15,7 +15,6 @@ import (
 const catalogUsage = `usage:
   panewire catalog list [--json]
   panewire catalog push FILE [--dry-run]
-  panewire catalog grade set --profile P --grade G --deviation-ref REF [--boundary-version V] [--dry-run]
   panewire catalog aa-sync [--out FILE] [--dry-run]`
 
 // runCatalogCLI is the catalog entry point. The catalog, its grades and
@@ -31,8 +30,6 @@ func runCatalogCLI(args []string, stdout, stderr io.Writer) int {
 		return runCatalogList(args[1:], stdout, stderr)
 	case "push":
 		return runCatalogPush(args[1:], stdout, stderr)
-	case "grade":
-		return runCatalogGrade(args[1:], stdout, stderr)
 	case "aa-sync":
 		return runAASync(args[1:], stdout, stderr)
 	}
@@ -137,41 +134,6 @@ func runCatalogPush(args []string, stdout, stderr io.Writer) int {
 	}
 	if err := client.PushCatalog(context.Background(), rows); err != nil {
 		fmt.Fprintf(stderr, "catalog push: %v\n", err)
-		return ExitConditionInvalid
-	}
-	return ExitOK
-}
-
-func runCatalogGrade(args []string, stdout, stderr io.Writer) int {
-	if len(args) == 0 || args[0] != "set" {
-		fmt.Fprintln(stderr, catalogUsage)
-		return ExitUsage
-	}
-	flags := flag.NewFlagSet("panewire catalog grade set", flag.ContinueOnError)
-	flags.SetOutput(io.Discard)
-	profile := flags.String("profile", "", "profile")
-	grade := flags.String("grade", "", "grade")
-	deviationRef := flags.String("deviation-ref", "", "deviation reference")
-	boundaryVersion := flags.String("boundary-version", "", "boundary version")
-	dryRun := flags.Bool("dry-run", false, "validate and print without writing")
-	if flags.Parse(args[1:]) != nil || flags.NArg() != 0 || *profile == "" || *grade == "" || *deviationRef == "" {
-		fmt.Fprintln(stderr, catalogUsage)
-		return ExitUsage
-	}
-	if !fleet.ValidCatalogGrade(*grade) {
-		fmt.Fprintf(stderr, "invalid grade %q\n", *grade)
-		return ExitConditionInvalid
-	}
-	entry := map[string]any{"profile": *profile, "grade": *grade, "deviation_ref": *deviationRef, "boundary_version": *boundaryVersion}
-	if *dryRun {
-		return writeCatalogJSON(stdout, entry)
-	}
-	client, code := newCatalogClient(stderr)
-	if client == nil {
-		return code
-	}
-	if err := client.PushGrade(context.Background(), *profile, *grade, *deviationRef, *boundaryVersion); err != nil {
-		fmt.Fprintf(stderr, "catalog grade set: %v\n", err)
 		return ExitConditionInvalid
 	}
 	return ExitOK

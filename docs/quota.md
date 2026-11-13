@@ -386,8 +386,11 @@ two hosts). panewire now resolves launches from the live catalog and
   The pool policy in it, read as [Admission](#admission) reads it, gives
   subscription. The gate and the credit pool views keep their narrower read.
 - **The E6 marker** from the request, else `PANEWIRE_E6_ARM` (with
-  `PACELEVER_E6_ARM` fallback). It names the exact live catalog row as
-  `<profile>@<effort>`; [config](config.md) lists the forms.
+  `PACELEVER_E6_ARM` fallback) — a request whose marker is already
+  authoritative (a hub submission or a node-delivered spawn) reads no
+  environment: its empty marker stays empty. For a rung whose catalog effort
+  is empty the marker is `<canon>@`. A launch still requires a nonempty
+  catalog effort; [config](config.md) lists the forms.
 
 The native lookup refuses invalid launch config, unknown profiles, unplaced
 rungs without their exact marker and stale catalogs. Model-family policy
