@@ -362,6 +362,13 @@ func (client *HubClient) runHubSpawn(parent context.Context, message hubOutbound
 		if prepare == nil {
 			prepare = client.nodeWorktreePrepare
 		}
+		// One spawn owns a named checkout directory from its prepare until it
+		// returns: another request for the same directory at a different
+		// revision must not move it under a spawn that has not launched yet.
+		// Different directories still overlap.
+		if dir := message.Checkout.Dir; dir != "" {
+			defer client.lockSpawnStep("checkout-dir:" + filepath.Clean(dir))()
+		}
 		release := fleet.ExclusiveStep(runContext, fleet.StepWorktreePrepare)
 		prepared, code := prepare(runContext, nodeWorktreePrepareArgs{Origin: message.Checkout.Origin, Mode: message.Checkout.Mode, Branch: message.Checkout.Branch, Sha: message.Checkout.Sha, Fetch: message.Checkout.Fetch, Dir: message.Checkout.Dir})
 		release()

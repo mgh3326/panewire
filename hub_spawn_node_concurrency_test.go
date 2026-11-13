@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -82,8 +83,8 @@ func TestNodeSpawnsOverlapOutsideExclusiveSteps(t *testing.T) {
 			return t14EngineOK()
 		},
 	}
-	checkout := &hubSpawnCheckout{Origin: "https://github.com/acme/repo.git", Mode: "branch", Branch: "feature/a", Dir: "repo-job"}
 	for i := range 2 {
+		checkout := &hubSpawnCheckout{Origin: "https://github.com/acme/repo.git", Mode: "branch", Branch: "feature/a", Dir: "repo-job-" + strconv.Itoa(i)}
 		message := hubOutboundMessage{OperatorAuthorized: true, RequestID: t14RequestID(4388 + i), CWDKey: "repo-a", BriefInline: "brief", Checkout: checkout, Args: []string{"--job", "job-a"}, WaitSeconds: 60}
 		go client.handleHubSpawn(t.Context(), peer, message)
 	}
@@ -102,5 +103,70 @@ func TestNodeSpawnsOverlapOutsideExclusiveSteps(t *testing.T) {
 	}
 	if maxPrepare.Load() != 1 || maxPane.Load() != 1 {
 		t.Fatalf("exclusive steps overlapped: prepare=%d pane=%d", maxPrepare.Load(), maxPane.Load())
+	}
+}
+
+// Two spawns for the same checkout directory never overlap: the first owns
+// the directory until it returns, so the second cannot move it to another
+// revision before the first has launched (hk 4388 review).
+func TestNodeSpawnsShareNoCheckoutDirBeforeLaunch(t *testing.T) {
+	results := make(chan hubSpawnResult, 4)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.CloseNow()
+		for {
+			var result hubSpawnResult
+			if wsjson.Read(r.Context(), conn, &result) != nil {
+				return
+			}
+			results <- result
+		}
+	}))
+	defer server.Close()
+	conn, _, err := websocket.Dial(t.Context(), r6WSURL(server.URL, ""), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.CloseNow()
+	peer := &hubClientConnection{connection: conn}
+	var inSpawn, peak atomic.Int32
+	client := &HubClient{
+		spawnConfigPath: t14SpawnConfig(t, t.TempDir()),
+		spawnJournalDir: t.TempDir(),
+		fleetEvents:     (&fleetEventRecorder{}).write,
+		spawnPrepare: func(context.Context, nodeWorktreePrepareArgs) (any, string) {
+			n := inSpawn.Add(1)
+			for old := peak.Load(); n > old && !peak.CompareAndSwap(old, n); old = peak.Load() {
+			}
+			return nodeWorktreePrepareResult{Outcome: nodePreparePrepared, Worktree: &nodeWorktree{Path: t.TempDir()}}, ""
+		},
+		spawnEngine: func(context.Context, string, string, string, string, []string) (*hubSpawnOutput, fleet.Execution) {
+			// Simulated launch latency: a second spawn on the same directory
+			// would enter prepare inside this window.
+			time.Sleep(50 * time.Millisecond)
+			inSpawn.Add(-1)
+			return t14EngineOK()
+		},
+	}
+	for i := range 2 {
+		checkout := &hubSpawnCheckout{Origin: "https://github.com/acme/repo.git", Mode: "branch", Branch: "feature/a", Sha: strconv.Itoa(i), Dir: "repo-job"}
+		message := hubOutboundMessage{OperatorAuthorized: true, RequestID: t14RequestID(4390 + i), CWDKey: "repo-a", BriefInline: "brief", Checkout: checkout, Args: []string{"--job", "job-" + strconv.Itoa(i)}, WaitSeconds: 60}
+		go client.handleHubSpawn(t.Context(), peer, message)
+	}
+	for range 2 {
+		select {
+		case result := <-results:
+			if result.RC != 0 {
+				t.Fatalf("spawn result %+v", result)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatal("node sent no job.spawn.result")
+		}
+	}
+	if peak.Load() != 1 {
+		t.Fatalf("two spawns held one checkout directory at once: %d", peak.Load())
 	}
 }
