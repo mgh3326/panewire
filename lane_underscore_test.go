@@ -25,7 +25,7 @@ func TestLaneUnderscoreValidators(t *testing.T) {
 		for _, c := range []struct {
 			name string
 			want bool
-		}{{"auto_trader-design", true}, {"a_b", true}, {"A_B", v.upper}, {"a.b", false}, {"a b", false}, {"a/b", false}} {
+		}{{"auto_trader-design", true}, {"a_b", true}, {"A_B", v.upper}, {"a.b", v.upper}, {"a:b", v.upper}, {"a b", false}, {"a/b", false}} {
 			t.Run(v.name+"/"+c.name, func(t *testing.T) {
 				if got := v.valid(c.name); got != c.want {
 					t.Errorf("valid(%q)=%v want %v", c.name, got, c.want)
