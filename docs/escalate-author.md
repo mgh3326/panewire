@@ -64,20 +64,24 @@ checkout and its pane. It:
 2. checks the named rung is still a live catalog rung with an ordinary or
    escalation gate that covers the task grade;
 3. probes the pane, and refuses one that is busy or unreadable;
-4. closes the pane (screen capture first) so one job holds the task;
-5. ends the old record `lost` with
+4. lists the worktree through the holder's node and refuses one with
+   uncommitted changes (`worktree_dirty`): `worktree.prepare` would refuse it
+   after the pane was closed, and an author with uncommitted work must keep its
+   pane;
+5. closes the pane (screen capture first) so one job holds the task;
+6. ends the old record `lost` with
    `ladder step round=<n> replaced_by=<new job>`;
-6. releases the old `(task, worker)` reservation and claims the successor as an
+7. releases the old `(task, worker)` reservation and claims the successor as an
    inherited spawn (`--parent-job <old>`), with the pinned rung, a
    `ladder step ...` override reason (the ladder-step rep row,
    [reps](reps.md#ladder-steps)), and the old submission's repository and
    checkout **unchanged** — that is what puts it on the same worktree and
    branch;
-7. composes the successor's brief from the original brief, the findings and the
+8. composes the successor's brief from the original brief, the findings and the
    consult seat;
-8. waits for placement. A successor that does not place is `quota_refused`;
-9. writes one `info` event for the design lane:
-   `ladder step <old> -> <new> on <profile>@<effort> (round <n>, <pr>)`.
+9. waits for placement. A successor that does not place is `quota_refused`;
+10. writes one `info` event for the design lane:
+    `ladder step <old> -> <new> on <profile>@<effort> (round <n>, <pr>)`.
 
 The successor job id is `<old>-l1`. A replay after a lost answer finds that
 operation: a placed one answers rc 0 with its rung, a failed one answers its
