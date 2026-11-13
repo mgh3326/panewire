@@ -133,8 +133,14 @@ func TestSpawnSettleGonePaneEndsLostWithReason(t *testing.T) {
 			}
 			f.client.runSpawnSettle(t.Context())
 			result := f.stored(t)
-			if result == nil || result.RC == 0 || result.Error != "lost" || result.Retryable != tc.retryable || !strings.Contains(result.StdoutTail, "lost: "+tc.reason) {
+			if result == nil || result.RC == 0 || result.Error != "spawn_failed" || result.Retryable != tc.retryable || !strings.Contains(result.StdoutTail, "lost: "+tc.reason) {
 				t.Fatalf("settled as %+v", result)
+			}
+			// The hub drops a job.spawn.result whose error it does not know, so the
+			// settled answer must parse on the hub's side too.
+			wire, _ := json.Marshal(spawnResultWire(*result, true))
+			if parsed, ok := parseHubSpawnResult(wire); !ok || parsed.RequestID != f.orphan.RequestID || parsed.RC == 0 {
+				t.Fatalf("hub rejects the settled result %s", wire)
 			}
 			if len(*f.started) != tc.wantStarted {
 				t.Fatalf("watchers armed for a lost spawn: %v", *f.started)
@@ -154,7 +160,7 @@ func TestSpawnSettleRowWithoutJobEndsLost(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.client.runSpawnSettle(t.Context())
-	if result := f.stored(t); result == nil || result.Error != "lost" || !strings.Contains(result.StdoutTail, spawnLostNoJobRecorded) {
+	if result := f.stored(t); result == nil || result.Error != "spawn_failed" || !strings.Contains(result.StdoutTail, spawnLostNoJobRecorded) {
 		t.Fatalf("settled as %+v", result)
 	}
 }

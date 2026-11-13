@@ -155,3 +155,33 @@ func TestDaemonStopDrainsBeforeCancelling(t *testing.T) {
 		t.Fatal("Stop did not cancel the node after the drain")
 	}
 }
+
+// When the drain bound passes, the stop cancels the node and the spawn in
+// flight returns an abort. That is not the spawn's outcome (a pane may exist),
+// so the row stays executing for the restart settle instead of completing as a
+// timeout the settle would never revisit.
+func TestStopAbortLeavesSpawnRowExecuting(t *testing.T) {
+	started := make(chan struct{}, 1)
+	client := drainClient(t, started, closedChannel())
+	client.spawnEngine = func(ctx context.Context, _, _, _, _ string, _ []string) (*hubSpawnOutput, fleet.Execution) {
+		started <- struct{}{}
+		<-ctx.Done()
+		return &hubSpawnOutput{}, fleet.Execution{RC: 124}
+	}
+	peer, _ := settlePeer(t)
+	ctx, cancel := context.WithCancel(t.Context())
+	message := hubOutboundMessage{OperatorAuthorized: true, RequestID: t14RequestID(7104), CWDKey: "repo-a", BriefInline: "brief", Args: []string{"--job", "job-a"}, WaitSeconds: 60}
+	done := make(chan struct{})
+	go func() { client.handleHubSpawn(ctx, peer, message); close(done) }()
+	<-started
+	cancel() // the daemon's stop, past the drain bound
+	<-done
+	journal, err := client.acquireSpawnJournal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.releaseSpawnJournal()
+	if rows, err := journal.executing(t.Context()); err != nil || len(rows) != 1 {
+		t.Fatalf("row after an aborted spawn: executing=%v err=%v", rows, err)
+	}
+}

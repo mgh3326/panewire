@@ -187,6 +187,12 @@ func (client *HubClient) handleHubSpawn(ctx context.Context, peer *hubClientConn
 	client.spawnMu.Unlock()
 	// Disconnect is not cancellation of this daemon-owned execution. Its result
 	// remains available to the next authenticated replay even if this socket died.
+	if ctx.Err() != nil && result.RC != 0 {
+		// The node is stopping and the drain bound passed: this failure is the
+		// abort, not the spawn's outcome (a pane may exist). The row stays
+		// executing for the restart settle (hub_spawn_settle.go).
+		return
+	}
 	persistCtx, persistCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer persistCancel()
 	if journal.complete(persistCtx, result) != nil {

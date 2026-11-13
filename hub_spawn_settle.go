@@ -257,7 +257,7 @@ func landedSpawnResult(result hubSpawnResult, row executingSpawn, spawned localS
 }
 
 func lostSpawnResult(result hubSpawnResult, reason string, retryable bool) hubSpawnResult {
-	result.RC, result.Error, result.Retryable = 1, "lost", retryable
+	result.RC, result.Error, result.Retryable = 1, "spawn_failed", retryable // the hub accepts only its known error codes (validHubSpawnResultError); the tail names the loss
 	result.StdoutTail = "lost: " + reason + " (the node restarted before this spawn finished)"
 	return result
 }

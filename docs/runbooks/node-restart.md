@@ -28,7 +28,7 @@ see the next section.
     row completes with a success result and the job's receipt (including
     `lane_unregistered`), and the hub's replay is answered at once;
   - the recorded pane is in neither list, or its id now names another agent:
-    the row completes **lost** (`error: "lost"`, tail `lost: pane_gone`);
+    the row completes **lost** (`error: "spawn_failed"`, tail `lost: pane_gone`);
   - no record and no agent or pane bearing the spawn's label: `lost:
     no_pane_launched`. Neither lost answer is retryable;
   - anything unproven stays `executing`, the replay answers `unknown`, and the
