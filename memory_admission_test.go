@@ -601,7 +601,7 @@ type legacyPlacementCandidate struct {
 func TestPlacementWireGatesLiveMemoryFields(t *testing.T) {
 	hub := memoryPlacementHub(t, "host-a")
 	hub.nodes["host-a"].hostMemory = &HubHostMemory{FreePct: memoryFloat(50), SwapUsedMB: memoryFloat(0), Source: "proc_meminfo"}
-	raw, err := json.Marshal(placementWire(hub.makePlacement(memoryPlacementPolicy("host-a"), placementMetrics{}, "hub-only", time.Now()), false))
+	raw, err := json.Marshal(placementWire(hub.makePlacement(memoryPlacementPolicy("host-a"), placementMetrics{}, "hub-only", time.Now()), false, false))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -632,7 +632,7 @@ func TestPlacementWireGatesLiveMemoryFields(t *testing.T) {
 
 	hub.nodes["host-a"].hostMemory = &HubHostMemory{FreePct: memoryFloat(85), SwapUsedMB: memoryFloat(0), SwapInPerS: memoryFloat(0), Pressure: memoryFloat(.1), Source: "proc_meminfo"}
 	policy := memoryPlacementPolicy("host-a")
-	raw, err = json.Marshal(placementWire(hub.makePlacement(policy, placementMetrics{}, "hub-only", time.Now()), false))
+	raw, err = json.Marshal(placementWire(hub.makePlacement(policy, placementMetrics{}, "hub-only", time.Now()), false, false))
 	if err != nil {
 		t.Fatal(err)
 	}

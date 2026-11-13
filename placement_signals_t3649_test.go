@@ -46,7 +46,7 @@ func TestPlacementCandidateRecordsNodeLiveSignals(t *testing.T) {
 		t.Fatalf("candidate signals=%+v", signals)
 	}
 
-	wire := placementWire(result, true)
+	wire := placementWire(result, true, true)
 	encoded, err := json.Marshal(wire.Candidates[0].Signals)
 	if err != nil {
 		t.Fatal(err)
@@ -56,7 +56,7 @@ func TestPlacementCandidateRecordsNodeLiveSignals(t *testing.T) {
 			t.Fatalf("signals object omitted %s: %s", name, encoded)
 		}
 	}
-	if without, _ := json.Marshal(placementWire(result, false).Candidates[0]); strings.Contains(string(without), "cpu_busy_short") {
+	if without, _ := json.Marshal(placementWire(result, false, false).Candidates[0]); strings.Contains(string(without), "cpu_busy_short") {
 		t.Fatalf("a caller that did not ask for signals=1 got them: %s", without)
 	}
 }

@@ -254,3 +254,23 @@ func TestR20LegacyLanePersistedAckUsesTransportID(t *testing.T) {
 		t.Fatalf("legacy acknowledgement did not retire lane event: %+v", state)
 	}
 }
+
+func TestR20LanePersistedAckAcceptsHistoricalDottedLane(t *testing.T) {
+	wire := []byte(`{"type":"relay.persisted","job_id":"lane-event-legacy.parent-producer-1","kind":"lane.event","epoch":1,"report_path":"","reason":"","event_id":17,"lane":"legacy.parent","producer_event_id":"producer-1"}`)
+	message, ok := parseHubOutbound(wire)
+	if !ok || message.Lane != "legacy.parent" || message.ProducerEventID != "producer-1" {
+		t.Fatalf("historical acknowledgement was rejected: message=%+v ok=%v", message, ok)
+	}
+}
+
+func TestR20LaneEventInjectAcceptsHistoricalDottedLane(t *testing.T) {
+	wire := []byte(`{"type":"relay.inject","kind":"lane.event","job_id":"relay-job-7","pane":"w1:p1","text":"legacy notice","lane":"legacy.parent","event_id":7,"deliver":"now"}`)
+	message, ok := parseHubOutbound(wire)
+	if !ok || message.Lane != "legacy.parent" || message.Kind != "lane.event" {
+		t.Fatalf("historical lane event inject was rejected: message=%+v ok=%v", message, ok)
+	}
+	bad := []byte(`{"type":"relay.inject","kind":"lane.event","job_id":"relay-job-7","pane":"w1:p1","text":"legacy notice","lane":"bad/name","event_id":7,"deliver":"now"}`)
+	if _, ok := parseHubOutbound(bad); ok {
+		t.Fatalf("invalid lane event inject was accepted: %s", bad)
+	}
+}

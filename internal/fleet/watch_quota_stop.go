@@ -71,6 +71,57 @@ func pendingCreditRejection(j Job) (quotastop.Stop, bool) {
 	return pending, pending.Pool != "" && !pending.CreditExhaustedAt.IsZero()
 }
 
+func creditPublicationPaused(j Job, stop quotastop.Stop) bool {
+	paused := false
+	for _, ev := range j.Events {
+		if str(ev.Payload, "pool") != stop.Pool || str(ev.Payload, "at") != stop.CreditExhaustedAt.UTC().Format(time.RFC3339Nano) {
+			continue
+		}
+		switch ev.Kind {
+		case "job.credit_publication_paused":
+			paused = true
+		case "job.credit_published":
+			paused = false
+		}
+	}
+	return paused
+}
+
+func creditPublicationAccountReady(a *App, j Job, stop quotastop.Stop) bool {
+	key := str(j.Receipt, "account_key")
+	if key != "" {
+		return validAccountKey(key) && accountPool(key) == stop.Pool
+	}
+	_, err := manualAccountKey(a, stop.Pool)
+	return err == nil
+}
+
+func creditRejectionStateChangeSeq(j Job, stop quotastop.Stop) (*int64, bool) {
+	want := stop.CreditExhaustedAt.UTC().Format(time.RFC3339Nano)
+	var seq *int64
+	found := false
+	for _, ev := range j.Events {
+		if ev.Kind != "job.credit_rejection" || str(ev.Payload, "pool") != stop.Pool || str(ev.Payload, "at") != want {
+			continue
+		}
+		found = true
+		seq = nil
+		if value, ok := ev.Payload["state_change_seq"].(float64); ok {
+			parsed := int64(value)
+			seq = &parsed
+		}
+	}
+	return seq, found
+}
+
+func safeCreditStopHandoff(j Job, stop quotastop.Stop, agent Agent, present, herdrReachable bool) bool {
+	if !herdrReachable || !present || agent.Status != "idle" && agent.Status != "done" || agent.StateChangeSeq == nil {
+		return false
+	}
+	expected, found := creditRejectionStateChangeSeq(j, stop)
+	return found && expected != nil && *agent.StateChangeSeq == *expected
+}
+
 func creditRejectionPublished(j Job, stop quotastop.Stop) bool {
 	for i := len(j.Events) - 1; i >= 0; i-- {
 		ev := j.Events[i]
@@ -267,7 +318,7 @@ func (a *App) quotaStopLost(ctx context.Context, j Job, stop quotastop.Stop, emi
 	// After a hand-off grace the hub may already have written the record lost
 	// with the successor pointer; hk would refuse a rewrite, so leave it.
 	if emit || !a.hkJobEnded(ctx, j.ID) {
-		if e := a.putJobRecord(ctx, j.ID, map[string]any{"state": "lost", "end_reason": endReason}); e != nil {
+		if e := a.putJobRecord(ctx, j.ID, map[string]any{"state": "lost", "end_reason": endReason, "at": a.Now().UTC()}); e != nil {
 			a.jobRecordFailed(ctx, j.ID, "lost", e)
 		}
 	}

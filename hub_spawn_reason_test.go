@@ -105,6 +105,21 @@ func TestSpawnReasonUnclassifiedKeepsTheBareForm(t *testing.T) {
 	}
 }
 
+// hk 3301: a brief upload refused by hk's secret guard reaches the
+// SPAWN_FAILED reason with the guard's pattern name, never the matched text.
+func TestSpawnReasonNamesHKGuardPattern(t *testing.T) {
+	const tail = "stdout\nstderr: panewire: brief upload to briefs/job-a.md failed: handoffkeep: secret_like_content:private_key\nFix: hk's secret guard refused the write as secret-like content and named the pattern in the reason; remove the secret-shaped text from the brief or task field and retry."
+	result := hubSpawnResult{RC: 81, Error: "spawn_failed", StdoutTail: tail}
+	reason := spawnOutcomeReason(spawnResultReason(result), spawnResultRefusal(result.StdoutTail))
+	if !strings.HasPrefix(reason, "spawn_failed:hk_guard_refused: ") || !strings.Contains(reason, "secret_like_content:private_key") {
+		t.Fatalf("reason=%q", reason)
+	}
+	notice := spawnNotificationText("job-a", "req-1", hubSpawnOutcome{RC: 81, Stage: "launch", Reason: reason, Fix: spawnResultFix(result.StdoutTail)})
+	if !strings.Contains(notice, "reason=spawn_failed:hk_guard_refused") || !strings.Contains(notice, "secret_like_content:private_key") {
+		t.Fatalf("notice=%q", notice)
+	}
+}
+
 // Every status branch reads a bare code, so the family lands where bare
 // spawn_failed always did, and the bare codes keep their own branches.
 func TestSpawnReasonFamilyDecidesNoStatus(t *testing.T) {

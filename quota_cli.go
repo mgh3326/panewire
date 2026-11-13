@@ -70,27 +70,15 @@ type quotaStatusHost struct {
 	Readings []quotaReading `json:"readings"`
 }
 
-func writeQuotaStatus(out io.Writer, jsonOutput bool, generatedAt string, host quotaStatusHost) {
-	if jsonOutput {
-		_ = json.NewEncoder(out).Encode(struct {
-			Schema      string            `json:"schema"`
-			GeneratedAt string            `json:"generated_at"`
-			Hosts       []quotaStatusHost `json:"hosts"`
-		}{"panewire.quota.status.v2", generatedAt, []quotaStatusHost{host}})
-		return
-	}
-	for _, v := range host.Readings {
-		age := "unknown"
-		if v.AgeSeconds != nil {
-			age = fmt.Sprint(*v.AgeSeconds)
-		}
-		buckets, _ := json.Marshal(v.Buckets)
-		extra := ""
-		if v.Class != "" || v.Credit != "" || v.Presence != "" {
-			extra = fmt.Sprintf(" class=%s credit=%s presence=%s", v.Class, v.Credit, v.Presence)
-		}
-		fmt.Fprintf(out, "%s %s account=%s source=%s age_seconds=%s stale=%t buckets=%s%s\n", host.Host, v.Pool, v.Account, v.Source, age, v.Stale, buckets, extra)
-	}
+// writeQuotaStatusJSON prints the status document (docs/quota.md §Status JSON
+// v1). It is the machine contract `--json` callers read; its bytes do not
+// change with the text table.
+func writeQuotaStatusJSON(out io.Writer, generatedAt string, host quotaStatusHost) {
+	_ = json.NewEncoder(out).Encode(struct {
+		Schema      string            `json:"schema"`
+		GeneratedAt string            `json:"generated_at"`
+		Hosts       []quotaStatusHost `json:"hosts"`
+	}{"panewire.quota.status.v2", generatedAt, []quotaStatusHost{host}})
 }
 
 // runNativeQuotaStatus reads this host's stored native measurements.
@@ -121,8 +109,9 @@ func runNativeQuotaStatus(ctx context.Context, jsonOutput bool, out, errOut io.W
 	// class, the manual credit entry and this host's presence, on a host that
 	// publishes it (quota_credit_presence.go).
 	credit := quotaCLICreditSource()
+	creditWindows := map[string]fleet.CreditWindow{}
 	for _, pool := range fleet.CreditAccountPools() {
-		reading, ok := credit.Status(ctx, pool)
+		reading, window, ok := credit.statusWindow(ctx, pool)
 		if !ok {
 			continue
 		}
@@ -130,9 +119,33 @@ func runNativeQuotaStatus(ctx context.Context, jsonOutput bool, out, errOut io.W
 			generatedAt = credit.now()
 		}
 		readings = append(readings, reading)
+		creditWindows[pool] = window
 	}
-	writeQuotaStatus(out, jsonOutput, generatedAt.Format(time.RFC3339Nano), quotaStatusHost{Host: host, Readings: readings})
-	return 0
+	statusHost := quotaStatusHost{Host: host, Readings: readings}
+	if jsonOutput {
+		writeQuotaStatusJSON(out, generatedAt.Format(time.RFC3339Nano), statusHost)
+		return ExitOK
+	}
+	// The band reads the pool policy the same way selection does: the default
+	// order, or PANEWIRE_POOL_POLICY, and each pool's admission class. A policy
+	// that does not load is a refusal, not a table with guessed bands. Only the
+	// text table reads them; `--json` is the machine contract and needs neither.
+	policy, err := fleet.LoadPoolPolicy("")
+	if err != nil {
+		fmt.Fprintf(errOut, "quota status: pool policy: %v\n", err)
+		return ExitInternal
+	}
+	classes := make(map[string]string, len(readings))
+	for _, r := range readings {
+		class, err := fleet.StatusPoolClass(r.Pool, generatedAt)
+		if err != nil {
+			fmt.Fprintf(errOut, "quota status: admission policy: %v\n", err)
+			return ExitInternal
+		}
+		classes[r.Pool] = class
+	}
+	writeQuotaStatusTable(out, generatedAt, statusHost, creditWindows, classes, policy)
+	return ExitOK
 }
 
 func runQuotaCLI(args []string, out, errOut io.Writer) int {

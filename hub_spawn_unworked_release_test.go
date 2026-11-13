@@ -99,7 +99,7 @@ func unworkedLedger(activity any) map[string]any {
 	return ledger
 }
 
-// TestRoleReleaseUnworkedLanding: a failed-at-landing holder whose pane is
+// TestRoleReleaseUnworkedLanding: a failed-before-brief holder whose pane is
 // still there is released only when every proof of "never worked" holds
 // (hk 3179). Each case breaks exactly one proof.
 func TestRoleReleaseUnworkedLanding(t *testing.T) {
@@ -159,9 +159,9 @@ func TestRoleReleaseUnworkedLanding(t *testing.T) {
 		{name: "a pane in another checkout keeps the reservation", since: 11 * time.Minute, replies: func() map[string]map[string]any {
 			return unworkedReplies(unworkedRow("idle", "/work/other"), unworkedLedger(0))
 		}, wantOps: allOps[:1]},
-		{name: "a holder that failed before landing keeps the reservation", since: 11 * time.Minute, outcome: &hubSpawnOutcome{RC: 70, Stage: "launch", Reason: "spawn_failed", Host: "machine-a", Pane: roleHeldPane}, replies: func() map[string]map[string]any {
+		{name: "a launch failure with unworked proof releases", since: 11 * time.Minute, outcome: &hubSpawnOutcome{RC: 70, Stage: "launch", Reason: "spawn_failed", Host: "machine-a", Pane: roleHeldPane}, replies: func() map[string]map[string]any {
 			return unworkedReplies(unworkedRow("idle", checkoutCwd), unworkedLedger(0))
-		}, wantOps: allOps[:1]},
+		}, wantOps: releasedOps, released: true},
 		{name: "an unreachable node keeps the reservation", since: 11 * time.Minute, disconnected: true, replies: func() map[string]map[string]any { return nil }},
 		{name: "a capture that is not the screen keeps the reservation", since: 11 * time.Minute, replies: func() map[string]map[string]any {
 			replies := unworkedReplies(unworkedRow("idle", checkoutCwd), unworkedLedger(0))
@@ -231,6 +231,38 @@ func TestRoleReleaseUnworkedLanding(t *testing.T) {
 			}
 			assertRoleHeldBy(t, hub, held.Request.RequestID)
 		})
+	}
+}
+
+func TestRoleReleaseFailedLaunchWithUnnamedPane(t *testing.T) {
+	const checkoutCwd = "/work/project.test-job"
+	hub, server, jobs, held := roleHolderHub(t,
+		hubSpawnOutcome{RC: 70, Stage: "launch", Reason: "spawn_failed", Host: "machine-a", Pane: roleHeldPane},
+		"claimed", "failed")
+	hub.now = func() time.Time { return held.Deadline.Add(11 * time.Minute) }
+	node := t14Node(t, hub, server, true)
+	unworked := startUnworkedNode(t, node, unworkedReplies(
+		nodeAgentRow{PaneID: roleHeldPane, AgentStatus: "idle", Cwd: checkoutCwd},
+		unworkedLedger(0),
+	))
+	response := t14Result(t, t14HTTPAsync(t, http.MethodPost, server.URL+"/v1/spawns", t14OperatorToken, roleSecondRequest()))
+	if response.status != http.StatusAccepted {
+		t.Fatalf("status=%d body=%s", response.status, response.body)
+	}
+	if got, want := unworked.seen(), []string{"agents.list", "job.result", "pane.capture", "pane.close", "job.mark_lost"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("node commands=%v, want %v", got, want)
+	}
+	if got := unworked.args["pane.capture"]; !strings.Contains(string(got), `"allow_unnamed":true`) {
+		t.Fatalf("unnamed pane capture args=%s", got)
+	}
+	if got := unworked.args["pane.close"]; !strings.Contains(string(got), `"allow_unnamed":true`) {
+		t.Fatalf("unnamed pane close args=%s", got)
+	}
+	if len(jobs.writes()) != 0 || jobs.state("test-job") != "claimed" {
+		t.Fatalf("hub wrote hk: state=%v writes=%v", jobs.state("test-job"), jobs.writes())
+	}
+	if owner, job, _, err := hub.inbox.store.spawnRoleOwner(t.Context(), "42:worker"); err != nil || job != "test-job-r2" || owner == held.Request.RequestID {
+		t.Fatalf("reservation not moved: %s %s %v", owner, job, err)
 	}
 }
 

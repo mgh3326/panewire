@@ -5,6 +5,15 @@ import (
 	"time"
 )
 
+func TestNodeJobReapArgsAcceptHistoricalDottedLane(t *testing.T) {
+	if !validNodeJobReapArgs(nodeJobReapArgs{Job: "job-a", Lane: "legacy.parent"}) {
+		t.Fatal("node rejected a historical lane reference")
+	}
+	if validNodeJobReapArgs(nodeJobReapArgs{Job: "job-a", Lane: "bad/name"}) {
+		t.Fatal("node accepted an invalid lane reference")
+	}
+}
+
 // nodeJobReapClaim and nodeJobReapSpawn are the ledger records a spawned job
 // leaves on its node: the claim names the owner lane, the receipt the pane and
 // label the pane must still carry.

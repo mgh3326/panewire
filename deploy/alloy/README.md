@@ -161,13 +161,13 @@ present except `request_id`; a panewire `placement` line adds `chosen` and
 | `job` | Job id, or `<repo>#<pr>` for reviews |
 | `request_id` | Hub spawn request id, on panewire `node_spawn`, `placement` and hub `spawn` `stuck` lines only; omitted when empty. It joins the line to the hub's spawn operation and the `request` tag of its Sentry event |
 | `chosen` | Panewire `placement` lines only: the host placement chose |
-| `candidates` | Panewire `placement` lines only: an array with one object per candidate host: `host`, `score`, the terms `cpu`, `mem`, `io`, `load`, `jobs` (each 0..1), `power`, `bridge` (claims inside the spawn bridge) and `outcome`. A host the hub reported nothing for has only `host` and `outcome`. At most 16 hosts. See panewire `docs/placement.md` |
+| `candidates` | Panewire `placement` lines only: an array with one object per candidate host: `host`, `score`, the terms `cpu`, `mem`, `io`, `load`, `jobs` (each 0..1), `free` (their product), `power`, `bridge` (claims inside the spawn bridge) and `outcome`. A host the hub reported nothing for has only `host` and `outcome`. At most 16 hosts. See panewire `docs/placement.md` |
 | `selection` | Automatic panewire `placement` lines only, including refusals: hosts in admission rank order with `host`, `rank`, `outcome`, and `tried` rungs. Each rung has `profile`, `effort`, `pool`, and `outcome`. Outcomes are `admitted`, `quota_exhausted`, `quota_unknown`, `no_rung`, or `not_tried`. At most 16 hosts and 32 rungs per host. Account identities and gate output are omitted. See panewire `docs/placement.md` |
 | `shadow` | Panewire `placement_shadow` lines only: `role`, `work_class`, `live`, `arms` (name to `outcome`, `first`, `order`, `shadow_error`), `inputs` per host, `load_measure`, and `waste_first` (hk 3651: `outcome`, the `live` and `waste_first` account choices, `left_unspent`, `unknown`; account keys, no hostnames beyond fleet ids). At most 16 hosts. See panewire `docs/placement.md` ("Shadow comparison") |
 | `profile` | Panewire `node_spawn` lines of a successful spawn only: the launch profile |
 | `duration_ms` | Panewire `node_spawn` lines of a successful spawn only: milliseconds the node took, as a number |
 | `outcome` | `refused`, `failed`, `skipped`, `missing`, `placed`, `stale`, `unusable`, `ok`, `stuck` (a hub spawn request still pending 30 minutes past its deadline), `delivered`, `dropped:<reason>`, `unconfirmed:<reason>`, `attached`, `conflict` (label). The relay, held-reservation and job-result outcomes are described in panewire `docs/observability.md` |
-| `reason` | Short code: exit status class, spawn.json rule, ranking metric, skip reason. On `placement` it is the decision rule (`policy_order`, `challenger`, `all_loaded`) when the chosen host is the hub's pick, else the ranking metric. On `node_spawn` it can be a spawn-refusal code from panewire `internal/fleet/refusal.go`, such as `foreground_missing`, or `spawned` with outcome `ok` |
+| `reason` | Short code: exit status class, spawn.json rule, ranking metric, skip reason. On `placement` it is the decision rule (`policy_order`, `challenger`, `below_free_floor`, `all_loaded`) when the chosen host is the hub's pick, else the ranking metric. On `node_spawn` it can be a spawn-refusal code from panewire `internal/fleet/refusal.go`, such as `foreground_missing`, or `spawned` with outcome `ok` |
 | `detail` | At most 1 KiB of `key=value` facts and a stderr tail |
 
 Every tool writes to `<state home>/<tool>/events/fleet-events.jsonl`, where the
@@ -184,13 +184,16 @@ Writing an event never changes a command's result. Per-tool tables are in
 panewire `docs/config.md` ("Fleet events"), mergewake `docs/config.md`
 ("Fleet events and crash reports"), and panewire `hub_spawn_node.go`.
 
-Both Alloy configs carry the same pipeline between `// BEGIN fleet events` and
-`// END fleet events`:
+Both Alloy configs carry the same processing pipeline between `// BEGIN fleet
+events` and `// END fleet events`, with platform-specific file paths:
 
-- `local.file_match` reads `$FLEET_EVENTS_ROOT/*/events/fleet-events.jsonl`.
-  The root defaults to `$HOME/.local/state`, which is right for the macOS user
-  agent. On Linux, set `FLEET_EVENTS_ROOT` to the fleet user's state home,
-  because the alloy system user's `$HOME` is not that user's.
+- On Linux, `local.file_match` names the `panewire` and `mergewake` event files
+  separately. A wildcard across tool directories can fail as a whole if Alloy
+  cannot traverse one sibling directory. On macOS it reads
+  `$FLEET_EVENTS_ROOT/*/events/fleet-events.jsonl`; the root defaults to
+  `$HOME/.local/state`, which is right for the user agent. On Linux, set
+  `FLEET_EVENTS_ROOT` to the fleet user's state home, because the Alloy system
+  user's `$HOME` is not that user's.
 - `loki.process "fleet_events"` turns `host`, `tool`, `kind` and `outcome` into
   labels and sets the timestamp from `ts`. It drops the `filename` label and
   rate-limits each host to 0.5 lines/s with a burst of 200.
@@ -259,6 +262,9 @@ following steps, in this order:
       ```
    2. Let the alloy user traverse to them and read them. Run this as root,
       with `U` set to the fleet user's home:
+
+      On the RPi, install the `acl` package first so `setfacl` is available:
+      `sudo apt-get install acl`.
 
       ```sh
       setfacl -m u:alloy:x "$U" "$U/.local" "$U/.local/state"

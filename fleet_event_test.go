@@ -180,7 +180,7 @@ func TestHubSpawnConfigRulesAreNamed(t *testing.T) {
 		`{"cwd_map":{},"workspace":"w","herdr_session":"s","enabled":false}`:              "enabled_false",
 		`{"cwd_map":{},"workspace":"","herdr_session":"s","enabled":true}`:                "workspace_required",
 		`{"cwd_map":{"a":"relative"},"workspace":"w","herdr_session":"s","enabled":true}`: "cwd_map_dir_absolute",
-		`{"cwd":{},"workspace":"w","herdr_session":"s","enabled":true}`:                   "config_json_invalid",
+		`{"cwd_map":"x","workspace":"w","herdr_session":"s","enabled":true}`:              "config_json_invalid",
 		`{"cwd_map":{},"workspace":"w","herdr_session":"s","enabled":true} {}`:            "config_trailing_data",
 	}
 	for contents, rule := range cases {
@@ -305,6 +305,31 @@ func TestFleetEventRedactCoversKeyAssignmentsPEMBlobsAndEmails(t *testing.T) {
 	sha := "2cdf695b2e8f19ce4fda2f7fad4236125453c22c"
 	if got := fleetEventRedact("head " + sha + " exit=3"); got != "head "+sha+" exit=3" {
 		t.Fatalf("a commit SHA and plain fields must survive: %q", got)
+	}
+}
+
+// hk's secret_like_content refusal names the guard pattern, never the matched
+// text; the spawn outcome reason carries it, so redaction keeps exactly the
+// code:pattern form. hk's free-form "code: reason" and out-of-charset patterns
+// still meet the credential rules.
+func TestFleetEventRedactKeepsHKGuardPatternOnly(t *testing.T) {
+	for _, input := range []string{
+		"brief upload to briefs/job-a.md failed: handoffkeep: secret_like_content:private_key",
+		"handoffkeep: secret_like_content:github_token and handoffkeep: secret_like_content:aws_key",
+	} {
+		got := fleetEventRedact(input)
+		if !strings.Contains(got, "secret_like_content:") || strings.Contains(got, "[redacted]") {
+			t.Fatalf("%q lost the guard pattern: %q", input, got)
+		}
+	}
+	for input, secret := range map[string]string{
+		"handoffkeep: secret_like_content: hunter2 real reason":       "hunter2",
+		"handoffkeep: secret_like_content:../x":                       "../x",
+		"handoffkeep: secret_like_content:" + strings.Repeat("a", 41): strings.Repeat("a", 41),
+	} {
+		if got := fleetEventRedact(input); strings.Contains(got, secret) {
+			t.Fatalf("%q kept %q: %q", input, secret, got)
+		}
 	}
 }
 

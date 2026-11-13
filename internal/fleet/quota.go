@@ -44,6 +44,10 @@ type QuotaRequest struct {
 	// requires one. pacelever reads it from its own environment, so Launch and
 	// Gate pass it explicitly instead of relying on this process having it.
 	E6Arm string
+	// E6ArmLocked marks a request whose marker is already authoritative (a
+	// hub submission or a node-delivered spawn): the process environment
+	// never fills an empty E6Arm.
+	E6ArmLocked bool
 }
 
 // CatalogRow is one bench catalog rung: profile@effort with its operator-set
@@ -256,6 +260,12 @@ func gateResult(x Result, r QuotaRequest) (string, error) {
 			}
 			if outcome == outcomeNoRoleCandidate {
 				return "", &gateRefusal{cause: fail(exitSeatRefused, "%s", roleRestrictedReason(reason)), outcome: outcome, code: code}
+			}
+			if outcome == outcomeQuotaUnknown && code != "" && code != escalationGate {
+				// The request, the catalog or policy decided this refusal;
+				// no reading did, so it is not unknown quota. The escalation
+				// redirect is the one coded refusal a reading decided.
+				outcome = outcomePolicyUnavailable
 			}
 			return "", &gateRefusal{cause: fail(x.Code, "quota gate: %s", reason), outcome: outcome, code: code}
 		}
@@ -695,22 +705,27 @@ func (a *App) judgeGate(ctx context.Context, r QuotaRequest, pool string, j quot
 // rules (one-hour TTL, one-day stale maximum). A stale catalog is refused:
 // grades and models must come from fresh evidence. No pacelever process runs.
 func (q CLIQuota) Catalog(ctx context.Context) ([]CatalogRow, error) {
+	data, e := q.CatalogDetails(ctx)
+	if e != nil {
+		return nil, e
+	}
+	return catalogDataRows(data), nil
+}
+
+// CatalogDetails returns the rows and decode warnings used by planning.
+func (q CLIQuota) CatalogDetails(ctx context.Context) (CatalogData, error) {
 	client, e := NewCatalogClient(CatalogClientConfig{})
 	if e != nil {
-		return nil, fail(exitConfig, "%v", e)
+		return CatalogData{}, fail(exitConfig, "%v", e)
 	}
 	data, e := client.Read(ctx, false)
 	if e != nil {
-		return nil, fail(exitConfig, "%v", e)
+		return CatalogData{}, fail(exitConfig, "%v", e)
 	}
 	if data.Info.Stale {
-		return nil, fail(exitConfig, "bench catalog is stale")
+		return CatalogData{}, fail(exitConfig, "bench catalog is stale")
 	}
-	rows := make([]CatalogRow, len(data.Rows))
-	for i, entry := range data.Rows {
-		rows[i] = entry.row()
-	}
-	return rows, nil
+	return data, nil
 }
 
 func (q CLIQuota) Launch(ctx context.Context, r QuotaRequest) (Launch, error) {

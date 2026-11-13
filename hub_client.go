@@ -97,6 +97,13 @@ type hubClientEvent struct {
 	senderPane string
 }
 
+type quotaPoolReconcileHooks struct {
+	app    func() (*fleet.App, error)
+	agents func(context.Context, string) ([]nodeHerdrRow, error)
+	ticks  <-chan time.Time
+	pass   func(context.Context)
+}
+
 // HubClient owns a bounded in-memory event queue. It is intentionally not a
 // durable relay: the handoffkeep relay store owns offline delivery.
 type HubClient struct {
@@ -188,6 +195,7 @@ type HubClient struct {
 	taskPaneSweepGrace    time.Duration
 	taskPaneSweepTicks    <-chan time.Time      // fixture seam; nil uses a ticker.
 	taskPaneSweepPass     func(context.Context) // fixture seam; nil runs the real pass.
+	quotaReconcile        quotaPoolReconcileHooks
 	nodeTaskState         fleet.TaskStateReader // fixture seam; nil reads spawn.json handoffkeep_env.
 	nodePR                fleet.PRReader        // fixture seam; nil reads spawn.json handoffkeep_env.
 	// Fleet state publisher (fleet_state_node.go, docs/fleet-state.md).
@@ -487,6 +495,7 @@ func (client *HubClient) Run(ctx context.Context) {
 	go client.runCreditRejectionRecovery(ctx)
 	go client.runLaneReconcile(ctx)
 	go client.runTaskPaneSweep(ctx)
+	go client.runQuotaPoolReconcile(ctx)
 	if client.statePublish {
 		go client.runFleetQuota(ctx)
 	}
@@ -2992,7 +3001,7 @@ func parseHubOutboundRejection(payload []byte) (hubOutboundMessage, hubOutboundR
 			if json.Unmarshal(fields["kind"], &message.Kind) != nil || (message.Kind != "lane.event" && message.Kind != "job.completed" && message.Kind != "job.escalate" && message.Kind != "job.joined") {
 				return hubOutboundMessage{}, reject
 			}
-			if json.Unmarshal(fields["lane"], &message.Lane) != nil || json.Unmarshal(fields["event_id"], &message.EventID) != nil || json.Unmarshal(fields["deliver"], &message.DeliverPolicy) != nil || !hubAgentLabelPattern.MatchString(message.Lane) || message.EventID < 1 {
+			if json.Unmarshal(fields["lane"], &message.Lane) != nil || json.Unmarshal(fields["event_id"], &message.EventID) != nil || json.Unmarshal(fields["deliver"], &message.DeliverPolicy) != nil || !validLaneReference(message.Lane) || message.EventID < 1 {
 				return hubOutboundMessage{}, reject
 			}
 			if _, valid := parseRelayDeliveryPolicy(message.DeliverPolicy); !valid || !validRelayInjectedText(message.Kind, message.Text) {
@@ -3017,7 +3026,7 @@ func parseHubOutboundRejection(payload []byte) (hubOutboundMessage, hubOutboundR
 			// Older hubs acknowledge lane events with the shared relay
 			// envelope only. The transport job_id still identifies the
 			// producer's outbox row, so it is safe to retire that row below.
-			if len(fields) != 7 && (len(fields) != 9 || json.Unmarshal(fields["lane"], &message.Lane) != nil || json.Unmarshal(fields["producer_event_id"], &message.ProducerEventID) != nil || !hubAgentLabelPattern.MatchString(message.Lane) || !validLaneEventID(message.ProducerEventID)) {
+			if len(fields) != 7 && (len(fields) != 9 || json.Unmarshal(fields["lane"], &message.Lane) != nil || json.Unmarshal(fields["producer_event_id"], &message.ProducerEventID) != nil || !validLaneReference(message.Lane) || !validLaneEventID(message.ProducerEventID)) {
 				return hubOutboundMessage{}, reject
 			}
 		} else if len(fields) == 8 {

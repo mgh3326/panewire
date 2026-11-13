@@ -438,15 +438,25 @@ default.
 | `shadow.enabled` | `true` | `false` stops recording the `placement_shadow` event. |
 | `shadow.cpu_busy_over` | `load_threshold` | CPU-busy fraction at or above which a host counts as loaded in the shadow arms. |
 | `shadow.hysteresis` | `1.25` | Factor a rival's hub score must reach over the policy-order host's to take the decision. |
-| `shadow.all_loaded_below` | `15` | Best score under which every host counts as loaded. |
+| `shadow.free_floor` | `0.05` | Free fraction (0..1) under which a host is not chosen while another is at or above it. `shadow.all_loaded_below` is retired: it still loads and is ignored. |
 | `shadow.mem_refuse_below_pct` | `30` | The measured arm refuses a host whose available memory is below this percentage. |
 | `shadow.pressure_refuse_level` | `2` | The measured arm refuses a macOS host at or above this pressure level (0 normal, 1 warn, 2 critical). |
 | `shadow.pressure_warn_mem` | `0.5` | The memory term of a macOS host at warn pressure. |
 | `shadow.mem_floor`, `shadow.mem_span` | `0.20`, `0.20` | The memory term is 0 at `mem_floor` available and 1 at `mem_floor + mem_span`. |
 | `shadow.swap_in_half_per_s` | `5000` | Swap-ins per second (pages) that halve the swap term. |
 | `shadow.load_knee`, `shadow.load_cap` | `0.75`, `4` | Load per core below the knee costs nothing; a higher reading stops costing more at the cap. |
-| `shadow.jobs_half`, `shadow.claim_cost` | `8`, `10` | Live job count that halves the jobs term; points one claim in the spawn bridge costs. |
+| `shadow.jobs_half`, `shadow.bridge_cost` | `8`, `10` | Live job count that halves the jobs term; points one claim in the spawn bridge costs a power-100 host (a host of capability `c` pays `bridge_cost * 100 / c`). `shadow.claim_cost` is retired: it still loads and is ignored. |
 | `capability.light.<host>`, `capability.heavy.<host>` | none | The host's capability for light and heavy work, in the unit of the hub's `power`. A host with no entry keeps its `power`. |
+
+**Rollout and rollback of `shadow.free_floor` and `shadow.bridge_cost`.** A
+binary from before hk 4465 validates `[placement.shadow]` strictly and refuses
+these two keys as unknown, and the fleet commands and the spawn app do not
+start on a config it refuses. Set either key in `hosts.toml` only once every
+binary that reads that file has the release that knows them, and delete both
+keys before rolling a host back. The retired `shadow.all_loaded_below` and
+`shadow.claim_cost` load on both sides. The same ordering holds for the hub's
+`placement.json` keys of the same names
+([Constants](placement.md#constants)).
 
 ## `[quota]`
 
@@ -647,9 +657,14 @@ spawns that need hk are refused.
 
 Each spawn writes a record to hk `/v1/jobs` on the executing host (the design
 is `design/2026-10-30/cross-host-jobs`): the claim `POST {job_id, task_id,
-host}` runs before the local claim and a taken id refuses with exit 74, like
+host, at}` runs before the local claim and a taken id refuses with exit 74, like
 the ledger's duplicate. `host` is the node's `HUB_MACHINE_ID`. hk unreachable
 or unconfigured fails the spawn closed. The task precheck also fails closed before launch.
+`task_id` is `null` for a task-less job (a reviewer or consult run); a non-empty
+non-numeric task id still refuses before the POST. `at` is the client clock: the
+claim sets `claimed_at`; the `spawned`, `completed`, `escalated`, and `lost`
+transitions send `at` with `state` and hk stores it as `spawned_at` or `ended_at`
+(set once).
 
 After the brief lands, panewire merges `{state:"spawned", role, label, family,
 profile, model, harness, effort, pool, owner_lane, parent_lane, parent_job,
@@ -755,8 +770,12 @@ panewire warns and sends an owner-lane notice so the task can be linked manually
 A successful claim records `status: linked`. A claim that fails while hk's task
 record already has `refs.job_id` equal to this job (a design session rebound
 the task before the spawn) records `status: already_linked`, with no warning and
-no notice: there is nothing to link (hk 3426). Other spawn failures retain their
-normal cleanup behavior.
+no notice: there is nothing to link (hk 3426). A spawn that does not claim the
+task — an unlinked reviewer or a consult — records `status: unlinked`; a consult
+(a `counsel` seat, which always routes as consult) may join a task another job or
+claimant holds, so a consult pair can share it. The rule follows the seat role: a
+worker seat given `--routing-role consult` still claims the task like any worker.
+Other spawn failures retain their normal cleanup behavior.
 
 An inherited spawn normally leaves the task bound to its parent job. It rebinds
 the task to the new job, through `handoffkeep tasks rebind`, only after the brief
@@ -852,6 +871,33 @@ is passed.
 Both keys live in the pool-order policy under `"waste_risk": {...}`; absent
 keys take the defaults, and `panewire simulate --policy`/`--policy-set` try
 other values before the policy is changed.
+
+**Ranked band: pools compete by their seat.** In the ranked band each pool
+offers one seat for the task's grade: its lowest-grade eligible row that fits
+(the lowest grade at or above the task's), unless the policy's `seats` names a
+row for that pool and grade. Pools are then ordered by their seat's waste
+urgency, the measure the waste, free and credit bands use, so the pool with the
+most room goes first. A pool whose reset can be paced ranks ahead of one whose
+cannot; ties keep the previous order (lowest grade, then effort and score). A
+row above the task's grade is eligible, so a pool's higher-grade row can serve a
+lower-grade task. The pool's other rows follow its seat.
+
+`seats` is `{pool: {grade: "profile@effort"}}` (`"profile"` for a rung-less
+row); `profile@effort` is the catalog row's profile and effort, the grade is
+the task's. It is read only in the ranked band. A named row that is not a
+candidate (dropped, wrong pool, grade below the task's) leaves the pool on its
+lowest-fit seat. The embedded default sends Command Code's B and C tasks to
+`omp-dsflash41@high`:
+
+```json
+"seats": {"commandcode": {"B": "omp-dsflash41@high", "C": "omp-dsflash41@high"}}
+```
+
+Command Code therefore takes a B or C task when its room beats the other ranked
+pools', not unconditionally first. A pool whose lowest-fit row already is the
+intended one (devin's `devin-ds41`) needs no entry. The `seats` map is edited in
+`/etc/panewire/pool-order.json` on the hub like the other keys; a file that
+omits it has no policy seats.
 
 **Headroom for a known job length** (`plan --expected DURATION`, or the task's
 `--expected` on spawn, e.g. `6h` or `2d`). After the band order and before
@@ -987,7 +1033,8 @@ per candidate, `waste_risk` (`true`/`false`) on every candidate and
 `unused_at_reset_pct` (its input) whenever the longest window could be
 paced,
 `waste_urgency`, `reset_hours` and `waste_order` (`usd`, `reset` or
-`projected_fallback`) per ranked candidate,
+`projected_fallback`) per ranked candidate, `pool_waste_urgency` and, on a ranked
+pool's seat, `seat_source` (`lowest_fit` or `policy`),
 `waste_group` (`gemini` or `3p`) on a candidate of a pool that publishes only
 group windows,
 `tier: credit` and the `credit` object (`balance_usd`, `burn_usd_per_h`,
@@ -1548,7 +1595,9 @@ named reason. It is read-only: it reads the hub host list, hk presence and the
 shared observation, and makes one SSH probe per host that tests two paths,
 reads one boolean from the remote `hosts.toml` and asks `panewire` and `panewire`
 for their versions. It never prints a URL or a file's contents, and writes no
-task, job or event.
+task, job or event. The whole run is bounded by a 90-second budget; a probe
+that does not answer in time reports its checks failed (`probe_failed_rcN`)
+rather than holding the command.
 
 | Check | Fails with | Meaning |
 | --- | --- | --- |
@@ -1630,8 +1679,8 @@ are read from the quota tool, never this file.
 ```
 
 Use the complete shipped block when creating a custom policy; a custom file
-does not pick up later bullets, such as the test-host rule that names
-`mbp-server` by `hostname -s` (hk 3733). Selection order
+does not pick up later bullets, such as the test-host rule (one rule on
+every host since hk 4496). Selection order
 is default → host → profile → local.brief_preamble. Missing block names refuse.
 The policy version and selected block appear in every brief and dry-run output.
 See [DESIGN.md](../DESIGN.md#standard-brief-preamble-the-single-source-of-fleet-rules)
