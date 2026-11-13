@@ -262,3 +262,108 @@ func TestMappedCWDKeysToItsWorktree(t *testing.T) {
 		t.Fatalf("mapped cwd key %q, checkout key %q", got, want)
 	}
 }
+
+// The node enforces its own spawn_in_flight, whatever the hub sends: a hub
+// restart or reconnect cannot run more (review r4565217696, r4565161138).
+// A spawn that cannot start before its deadline answers not started.
+func TestNodeEnforcesItsSpawnInFlight(t *testing.T) {
+	a, b := t.TempDir(), t.TempDir()
+	config := filepath.Join(t.TempDir(), "spawn.json")
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	if err := os.WriteFile(config, []byte(`{"cwd_map":{"repo-a":"`+a+`","repo-b":"`+b+`"},"workspace":"worker","herdr_session":"worker","enabled":true,"spawn_in_flight":1}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	var running, peak atomic.Int32
+	release := make(chan struct{})
+	client := &HubClient{
+		spawnConfigPath: config,
+		spawnJournalDir: t.TempDir(),
+		fleetEvents:     (&fleetEventRecorder{}).write,
+		spawnEngine: func(context.Context, string, string, string, string, []string) (*hubSpawnOutput, fleet.Execution) {
+			n := running.Add(1)
+			for old := peak.Load(); n > old && !peak.CompareAndSwap(old, n); old = peak.Load() {
+			}
+			<-release
+			running.Add(-1)
+			return t14EngineOK()
+		},
+	}
+	first := make(chan hubSpawnResult, 1)
+	go func() {
+		first <- client.runClaimedHubSpawn(t.Context(), hubOutboundMessage{RequestID: t14RequestID(4410), CWDKey: "repo-a", BriefInline: "brief", Args: []string{"--job", "job-a"}, WaitSeconds: 60})
+	}()
+	eventually(t, 3*time.Second, "first spawn running", func() bool { return running.Load() == 1 })
+	ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
+	defer cancel()
+	second := client.runClaimedHubSpawn(ctx, hubOutboundMessage{RequestID: t14RequestID(4411), CWDKey: "repo-b", BriefInline: "brief", Args: []string{"--job", "job-b"}, WaitSeconds: 60})
+	if second.Error != "deadline_not_started" || !second.Retryable {
+		t.Fatalf("second spawn past the node limit: %+v", second)
+	}
+	close(release)
+	if result := <-first; result.RC != 0 {
+		t.Fatalf("first spawn %+v", result)
+	}
+	if peak.Load() != 1 {
+		t.Fatalf("node ran %d spawns with spawn_in_flight 1", peak.Load())
+	}
+}
+
+// A spawn waiting for a checkout lock gives up at its deadline instead of
+// holding its slot until the owner returns (review r4565217739).
+func TestCheckoutLockWaitEndsAtDeadline(t *testing.T) {
+	client := &HubClient{}
+	unlock, err := client.lockSpawnStepContext(t.Context(), "checkout-dir:/w/x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+	defer cancel()
+	if _, err := client.lockSpawnStepContext(ctx, "checkout-dir:/w/x"); err == nil {
+		t.Fatal("a held checkout lock was taken twice")
+	}
+}
+
+// A mapped spawn with an execution lane keys the lane directory the launcher
+// runs in (review r4565161185).
+func TestMappedCWDKeyFollowsExecutionLane(t *testing.T) {
+	root := t.TempDir()
+	lane := filepath.Join(root, "live")
+	if err := os.MkdirAll(lane, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(lane, ".git"), []byte("gitdir: x\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := mappedCWDKey(fleet.ExecutionLaneDir(root, "live")), nodeStablePath(lane); got != want {
+		t.Fatalf("lane key %q, want %q", got, want)
+	}
+}
+
+// ".." in a symlink target applies after the symlinks before it resolve, as
+// the filesystem does (review r4565161207, r4565217718).
+func TestStablePathResolvesLinksBeforeDotDot(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "real", "sub"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(root, "real", "job"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("real/sub", filepath.Join(root, "jump")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("jump/../job", filepath.Join(root, "a")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("real/job", filepath.Join(root, "b")); err != nil {
+		t.Fatal(err)
+	}
+	physical, err := filepath.EvalSymlinks(filepath.Join(root, "a"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a, b := nodeStablePath(filepath.Join(root, "a")), nodeStablePath(filepath.Join(root, "b")); a != b || a != physical {
+		t.Fatalf("a=%q b=%q physical=%q", a, b, physical)
+	}
+}

@@ -106,9 +106,6 @@ type hubSpawnRecord struct {
 	status  string
 	created time.Time
 	waiter  chan hubSpawnResult
-	// slot is true while the record holds one of its node's spawn_in_flight
-	// slots: from the send until a result or the record's retention ends.
-	slot bool
 }
 
 func validHubSpawnRequestID(value string) bool { return hubSpawnRequestIDPattern.MatchString(value) }
@@ -239,16 +236,7 @@ func (h *HubServer) pruneSpawnRecordsLocked(now time.Time) {
 	for requestID, record := range h.spawnRecords {
 		if now.Sub(record.created) >= hubSpawnRetention {
 			delete(h.spawnRecords, requestID)
-			h.releaseSpawnRecordSlotLocked(record)
 		}
-	}
-}
-
-// releaseSpawnRecordSlotLocked frees a legacy record's node slot once.
-func (h *HubServer) releaseSpawnRecordSlotLocked(record *hubSpawnRecord) {
-	if record.slot {
-		record.slot = false
-		h.spawnQueue.releaseSlot(record.request.Machine)
 	}
 }
 
@@ -293,7 +281,6 @@ func (h *HubServer) handleSpawn(writer http.ResponseWriter, request *http.Reques
 		return
 	}
 
-	limit := h.spawnPolicy().spawnInFlight(body.Machine)
 	now := h.now().UTC()
 	h.mu.Lock()
 	h.pruneSpawnRecordsLocked(now)
@@ -314,14 +301,7 @@ func (h *HubServer) handleSpawn(writer http.ResponseWriter, request *http.Reques
 		writeJSON(writer, http.StatusServiceUnavailable, h.spawnUnavailableResponse(body.Machine))
 		return
 	}
-	// This path bypasses the durable queue but shares the node's
-	// spawn_in_flight bound with it.
-	if !h.spawnQueue.acquireSlot(body.Machine, limit) {
-		h.mu.Unlock()
-		writeJSON(writer, http.StatusServiceUnavailable, map[string]string{"error": "node_spawn_busy", "fix": "the node runs its spawn_in_flight limit of spawns; retry later"})
-		return
-	}
-	entry := &hubSpawnRecord{request: body, status: "pending", created: now, waiter: make(chan hubSpawnResult, 1), slot: true}
+	entry := &hubSpawnRecord{request: body, status: "pending", created: now, waiter: make(chan hubSpawnResult, 1)}
 	h.spawnRecords[body.RequestID] = entry
 	agent := record.agent
 	h.mu.Unlock()
@@ -338,7 +318,6 @@ func (h *HubServer) handleSpawn(writer http.ResponseWriter, request *http.Reques
 	if err := agent.writeJSON(message); err != nil {
 		h.mu.Lock()
 		delete(h.spawnRecords, body.RequestID)
-		h.releaseSpawnRecordSlotLocked(entry)
 		h.mu.Unlock()
 		writeJSON(writer, http.StatusServiceUnavailable, h.spawnUnavailableResponse(body.Machine))
 		return
@@ -407,7 +386,6 @@ func (h *HubServer) resolveSpawn(machine string, result hubSpawnResult) {
 	result.CompletedAt = &completed
 	record.result = result
 	record.status = "completed"
-	h.releaseSpawnRecordSlotLocked(record)
 	waiter := record.waiter
 	h.mu.Unlock()
 	h.broadcastSpawnResult(result)

@@ -576,8 +576,10 @@ type directSpawnTransport struct {
 	// bindOnly is the placement stage: Spawn binds the request to the chosen
 	// node and stops the candidate loop; the node's executor sends it.
 	bindOnly bool
-	// refreshWait replaces spawnPlacementRefreshWait in tests.
+	// refreshWait replaces spawnPlacementRefreshWait in tests; refreshBy is
+	// when this placement's refresh budget ends (zero: not started).
 	refreshWait time.Duration
+	refreshBy   time.Time
 	// replaced: a host refusal or a not-started answer unbound the request
 	// with an exclusion, and it waits for placement again.
 	replaced bool
@@ -837,26 +839,34 @@ func (t *directSpawnTransport) unknown(ctx context.Context, reason string) (flee
 	return fleet.HubSpawnReply{}, &fleet.HubError{Kind: "hub_spawn_pending"}
 }
 
-// spawnPlacementRefreshWait bounds how long a placement worker waits for a
-// node's quota.refresh. A node that does not answer would otherwise hold one
+// spawnPlacementRefreshWait bounds how long one placement waits for node
+// quota.refresh answers in total. A node that does not answer would otherwise hold one
 // of the few placement workers for the whole measure_timeout_s, and two such
 // nodes would stop placement for every other request. The node keeps
 // measuring; its answer updates the quota store for the next placement.
 const spawnPlacementRefreshWait = 5 * time.Second
 
 func (t *directSpawnTransport) Refresh(ctx context.Context, machine, pool string) error {
+	if t.bindOnly && !t.refreshBy.IsZero() && !time.Now().Before(t.refreshBy) {
+		return errors.New("placement refresh budget spent")
+	}
 	args, _ := json.Marshal(map[string]string{"pool": pool})
 	pending, id, _, sent := t.h.sendNodeCommand(machine, "quota.refresh", args)
 	if !sent {
 		return errors.New("quota refresh node unavailable")
 	}
 	if t.bindOnly {
-		wait := t.refreshWait
-		if wait <= 0 {
-			wait = spawnPlacementRefreshWait
+		// One budget for the whole placement, however many stale accounts
+		// it measures: the first refresh starts it, later ones share it.
+		if t.refreshBy.IsZero() {
+			wait := t.refreshWait
+			if wait <= 0 {
+				wait = spawnPlacementRefreshWait
+			}
+			t.refreshBy = time.Now().Add(wait)
 		}
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, wait)
+		ctx, cancel = context.WithDeadline(ctx, t.refreshBy)
 		defer cancel()
 		select {
 		case result := <-pending.done:

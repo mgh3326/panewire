@@ -178,7 +178,13 @@ priority 2), then age. A host refusal that only rules out this host, or a not-st
 answer, unbinds the operation, records the host+account in its `excluded` list and
 returns it to placement at once; placement skips excluded pairs. A node disconnect
 returns its queued, never-sent operations to placement. The keys live in the
-placement policy file (docs/placement.md, "Spawn queue"). The durable queue is
+placement policy file (docs/placement.md, "Spawn queue"). The hub's count only
+spreads work: the node enforces its own bound, `spawn_in_flight` in its
+spawn.json (1-32, default 3), over every spawn it runs (durable, legacy
+`/v1/spawn`, and replays after a hub restart or reconnect). A spawn that cannot
+start before its deadline, waiting for a node slot or for the checkout lock of
+its worktree, answers not started (`deadline_not_started`), so the hub may place
+it elsewhere. The durable queue is
 authoritative. HTTP cancellation does not cancel accepted
 work. Shutdown ends worker contexts and waits for them before closing storage.
 

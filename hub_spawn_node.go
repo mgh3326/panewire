@@ -13,7 +13,6 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
-	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -34,7 +33,11 @@ type hubSpawnConfig struct {
 	// checkout; an entry that is not a valid name and absolute path refuses the
 	// whole file, as cwd_map does.
 	Checkouts map[string]string `json:"checkouts,omitempty"`
-	Enabled   bool              `json:"enabled"`
+	// SpawnInFlight is how many spawns this node executes at once (1-32,
+	// unset: 3). The node enforces it whatever the hub sends, so a hub
+	// restart, a reconnect or the legacy /v1/spawn path cannot exceed it.
+	SpawnInFlight int  `json:"spawn_in_flight,omitempty"`
+	Enabled       bool `json:"enabled"`
 	// HandoffkeepEnvDefault is set only by resolveHubSpawnConfig on a node
 	// running on defaults, never from JSON: the credential then resolves as
 	// hkcred.Load does (handoffkeepEnv), without the HANDOFFKEEP_TOKEN
@@ -108,6 +111,8 @@ func loadHubSpawnConfig(path string) (hubSpawnConfig, error) {
 		return spawnConfigRefusal("workspace_required", "")
 	case config.HERDRSession == "":
 		return spawnConfigRefusal("herdr_session_required", "")
+	case config.SpawnInFlight < 0 || config.SpawnInFlight > maxSpawnConcurrency:
+		return spawnConfigRefusal("spawn_in_flight_invalid", fmt.Sprintf("spawn_in_flight must be 1-%d", maxSpawnConcurrency))
 	}
 	keys := make([]string, 0, len(config.CWDMap))
 	for key := range config.CWDMap {
@@ -386,7 +391,11 @@ func (client *HubClient) runHubSpawn(parent context.Context, message hubOutbound
 		// revision must not move it under a spawn that has not launched yet.
 		// Different directories still overlap.
 		if dir := message.Checkout.Dir; dir != "" {
-			defer client.lockSpawnStep("checkout-dir:" + client.checkoutDirKey(dir))()
+			unlock, err := client.lockSpawnStepContext(runContext, "checkout-dir:"+client.checkoutDirKey(dir))
+			if err != nil {
+				return notStartedResult(message)
+			}
+			defer unlock()
 		}
 		release := fleet.ExclusiveStep(runContext, fleet.StepWorktreePrepare)
 		prepared, code := prepare(runContext, nodeWorktreePrepareArgs{Origin: message.Checkout.Origin, Mode: message.Checkout.Mode, Branch: message.Checkout.Branch, Sha: message.Checkout.Sha, Fetch: message.Checkout.Fetch, Dir: message.Checkout.Dir})
@@ -410,8 +419,13 @@ func (client *HubClient) runHubSpawn(parent context.Context, message hubOutbound
 		cwd = outcome.Worktree.Path
 	} else {
 		// A spawn in a mapped directory holds the same lock as a checkout
-		// spawn into the worktree that contains it, until it returns.
-		defer client.lockSpawnStep("checkout-dir:" + mappedCWDKey(cwd))()
+		// spawn into the worktree that contains the directory it will run in
+		// (its execution lane resolved as the launcher resolves it).
+		unlock, err := client.lockSpawnStepContext(runContext, "checkout-dir:"+mappedCWDKey(fleet.ExecutionLaneDir(cwd, hubSpawnArg(message.Args, "-L"))))
+		if err != nil {
+			return notStartedResult(message)
+		}
+		defer unlock()
 	}
 
 	temporary, err := os.CreateTemp("", "panewire-spawn-*")
@@ -791,24 +805,85 @@ func (client *HubClient) releaseSpawnJournal() {
 // returns its release. Each step has its own lock, so one spawn preparing a
 // worktree does not hold up another creating its pane.
 func (client *HubClient) lockSpawnStep(step string) func() {
+	release, _ := client.lockSpawnStepContext(context.Background(), step)
+	return release
+}
+
+// lockSpawnStepContext is lockSpawnStep that gives up when ctx ends.
+func (client *HubClient) lockSpawnStepContext(ctx context.Context, step string) (func(), error) {
 	client.spawnStepMu.Lock()
 	if client.spawnStepLocks == nil {
-		client.spawnStepLocks = map[string]*sync.Mutex{}
+		client.spawnStepLocks = map[string]chan struct{}{}
 	}
 	lock := client.spawnStepLocks[step]
 	if lock == nil {
-		lock = &sync.Mutex{}
+		lock = make(chan struct{}, 1)
 		client.spawnStepLocks[step] = lock
 	}
 	client.spawnStepMu.Unlock()
-	lock.Lock()
-	return lock.Unlock
+	select {
+	case lock <- struct{}{}:
+		return func() { <-lock }, nil
+	case <-ctx.Done():
+		return func() {}, ctx.Err()
+	}
+}
+
+// acquireSpawnSlot waits for one of the node's spawn_in_flight slots, or
+// gives up when ctx ends.
+func (client *HubClient) acquireSpawnSlot(ctx context.Context, limit int) (func(), error) {
+	if limit <= 0 {
+		limit = defaultSpawnInFlight
+	}
+	for {
+		client.spawnSlotMu.Lock()
+		if client.spawnRunning < limit {
+			client.spawnRunning++
+			client.spawnSlotMu.Unlock()
+			return func() {
+				client.spawnSlotMu.Lock()
+				client.spawnRunning--
+				if client.spawnFreed != nil {
+					close(client.spawnFreed)
+					client.spawnFreed = nil
+				}
+				client.spawnSlotMu.Unlock()
+			}, nil
+		}
+		if client.spawnFreed == nil {
+			client.spawnFreed = make(chan struct{})
+		}
+		freed := client.spawnFreed
+		client.spawnSlotMu.Unlock()
+		select {
+		case <-freed:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+}
+
+// notStartedResult answers a spawn that ran out of time before it started:
+// the hub may place it on another host (hub_spawn_async.go).
+func notStartedResult(message hubOutboundMessage) hubSpawnResult {
+	return hubSpawnResult{RequestID: message.RequestID, JobID: hubSpawnArg(message.Args, "--job"), RC: 124, Stage: "claim", Error: "deadline_not_started", Retryable: true}
 }
 
 func (client *HubClient) runClaimedHubSpawn(ctx context.Context, message hubOutboundMessage) hubSpawnResult {
 	if message.DeadlineMS != 0 && time.Now().UnixMilli() >= message.DeadlineMS {
-		return hubSpawnResult{RequestID: message.RequestID, JobID: hubSpawnArg(message.Args, "--job"), RC: 124, Stage: "claim", Error: "deadline_not_started", Retryable: true}
+		return notStartedResult(message)
 	}
+	// The node's own bound: a spawn that cannot start before its deadline
+	// never started, so the hub may place it elsewhere.
+	limit := defaultSpawnInFlight
+	if config, _, err := client.resolveHubSpawnConfig(); err == nil && config.SpawnInFlight > 0 {
+		limit = config.SpawnInFlight
+	}
+	release, err := client.acquireSpawnSlot(ctx, limit)
+	if err != nil {
+		return notStartedResult(message)
+	}
+	defer release()
 	return client.runHubSpawn(ctx, message)
 }
 
@@ -851,39 +926,49 @@ func nodeStablePath(path string) string {
 	return resolved
 }
 
-func nodeLooseResolve(path string, depth int) (string, error) {
-	if depth > 40 {
-		return "", errors.New("too many symlinks")
-	}
+func nodeLooseResolve(path string, _ int) (string, error) {
 	if !filepath.IsAbs(path) {
 		return filepath.Clean(path), nil
 	}
-	resolved := string(filepath.Separator)
-	parts := strings.Split(strings.TrimPrefix(path, string(filepath.Separator)), string(filepath.Separator))
-	for i, part := range parts {
-		if part == "" {
+	sep := string(filepath.Separator)
+	// pending holds the components still to walk, in filesystem order: a
+	// symlink's target is spliced in front of them unresolved, so ".." in a
+	// target applies to the directory its preceding components resolve to.
+	pending := strings.Split(strings.Trim(path, sep), sep)
+	resolved := sep
+	links := 0
+	for len(pending) > 0 {
+		part := pending[0]
+		pending = pending[1:]
+		switch part {
+		case "", ".":
+			continue
+		case "..":
+			resolved = filepath.Dir(resolved)
 			continue
 		}
 		next := filepath.Join(resolved, part)
 		info, err := os.Lstat(next)
 		if err != nil {
-			// Missing: nothing below it can be a symlink yet.
-			return filepath.Join(append([]string{next}, parts[i+1:]...)...), nil
+			// Missing: nothing below it can be a symlink yet; ".." in the
+			// rest still applies lexically.
+			return filepath.Join(append([]string{next}, pending...)...), nil
 		}
 		if info.Mode()&os.ModeSymlink == 0 {
 			resolved = next
 			continue
 		}
+		if links++; links > 40 {
+			return "", errors.New("too many symlinks")
+		}
 		target, err := os.Readlink(next)
 		if err != nil {
 			return "", err
 		}
-		if !filepath.IsAbs(target) {
-			target = filepath.Join(resolved, target)
+		if filepath.IsAbs(target) {
+			resolved = sep
 		}
-		if resolved, err = nodeLooseResolve(filepath.Clean(target), depth+1); err != nil {
-			return "", err
-		}
+		pending = append(strings.Split(strings.Trim(target, sep), sep), pending...)
 	}
 	return resolved, nil
 }

@@ -174,8 +174,13 @@ type HubClient struct {
 	spawnJournalDir string
 	// spawnStepLocks serialize the exclusive steps of concurrent hub spawns
 	// (lockSpawnStep); spawnStepMu guards the map.
-	spawnStepMu       sync.Mutex
-	spawnStepLocks    map[string]*sync.Mutex
+	spawnStepMu    sync.Mutex
+	spawnStepLocks map[string]chan struct{}
+	// spawnRunning counts the spawns this node is executing; spawnFreed is
+	// closed and replaced each time one ends (acquireSpawnSlot).
+	spawnSlotMu       sync.Mutex
+	spawnRunning      int
+	spawnFreed        chan struct{}
 	spawnEngine       hubSpawnEngine
 	spawnPrepare      func(context.Context, nodeWorktreePrepareArgs) (any, string) // fixture seam
 	spawnJournalMu    sync.Mutex

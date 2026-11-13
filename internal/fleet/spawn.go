@@ -685,9 +685,7 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 		if s.ExecutionLane != "live" && s.ExecutionLane != "mock" {
 			return fail(exitUsage, "-L must be live or mock")
 		}
-		if info, e := os.Stat(filepath.Join(cwd, s.ExecutionLane)); e == nil && info.IsDir() {
-			s.CWD = filepath.Join(cwd, s.ExecutionLane)
-		}
+		s.CWD = ExecutionLaneDir(cwd, s.ExecutionLane)
 	}
 	if info, e := os.Stat(s.CWD); e != nil || !info.IsDir() {
 		return fail(exitUsage, "cwd is not a directory")
@@ -1344,4 +1342,17 @@ func (a *App) writeDeliveredBrief(job, payload string) (string, error) {
 	}
 	sum := sha256.Sum256([]byte(payload))
 	return fmt.Sprintf("Your brief is the file %s (%d bytes, sha256 %x). Read the whole file now, then follow it exactly; it is your only instruction.", path, len(payload), sum[:6]), nil
+}
+
+// ExecutionLaneDir is the directory a spawn runs in for execution lane lane
+// (-L live|mock): <cwd>/<lane> when that directory exists, else cwd. The node
+// resolves the same directory to choose its worktree lock.
+func ExecutionLaneDir(cwd, lane string) string {
+	if lane != "live" && lane != "mock" {
+		return cwd
+	}
+	if info, e := os.Stat(filepath.Join(cwd, lane)); e == nil && info.IsDir() {
+		return filepath.Join(cwd, lane)
+	}
+	return cwd
 }
