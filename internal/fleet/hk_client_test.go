@@ -1,8 +1,11 @@
 package fleet
 
 import (
+	"context"
 	"errors"
 	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -70,5 +73,33 @@ func TestNewHKClientUsesSvcCredentialOnly(t *testing.T) {
 		if _, err := newHKClient(); err == nil || strings.Contains(err.Error(), bad) {
 			t.Fatalf("endpoint %q: err=%v", bad, err)
 		}
+	}
+}
+
+func TestHKTaskListPageAnswerUsesAfterID(t *testing.T) {
+	const answer = `{"tasks":[{"id":1002,"priority":3,"refs":{"job_id":"job-active"}}]}`
+	var query string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		query = r.URL.RawQuery
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(answer))
+	}))
+	defer server.Close()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("HANDOFFKEEP_URL", server.URL)
+	t.Setenv("HANDOFFKEEP_TOKEN_SVC_PANEWIRE", "test-token")
+	t.Setenv("HANDOFFKEEP_CF_ACCESS_CLIENT_ID", "")
+	t.Setenv("HANDOFFKEEP_CF_ACCESS_CLIENT_SECRET", "")
+
+	body, err := HKTaskListPageAnswer(context.Background(), 1000, 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(body) != answer {
+		t.Fatalf("page answer=%q, want %q", body, answer)
+	}
+	values, err := url.ParseQuery(query)
+	if err != nil || values.Get("after_id") != "1000" || values.Get("limit") != "1000" {
+		t.Fatalf("query=%q err=%v, want after_id=1000 and limit=1000", query, err)
 	}
 }

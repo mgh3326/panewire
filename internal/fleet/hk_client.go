@@ -119,6 +119,24 @@ type answerCapture struct {
 	answered bool
 }
 
+// hkAfterIDTransport adds the stable ID cursor to a task list call. The
+// public hk client version used here exposes the capped list endpoint but not
+// its paging method; keep its auth, transport and response checks intact.
+type hkAfterIDTransport struct {
+	next    http.RoundTripper
+	afterID int64
+}
+
+func (t hkAfterIDTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	clone := req.Clone(req.Context())
+	u := *req.URL
+	q := u.Query()
+	q.Set("after_id", strconv.FormatInt(t.afterID, 10))
+	u.RawQuery = q.Encode()
+	clone.URL = &u
+	return t.next.RoundTrip(clone)
+}
+
 func (c *answerCapture) RoundTrip(r *http.Request) (*http.Response, error) {
 	c.body, c.answered = nil, false
 	resp, err := c.next.RoundTrip(r)
@@ -396,12 +414,18 @@ func HKDocumentAnswer(ctx context.Context, key string) ([]byte, error) {
 	return hkDocumentBody(ctx, key)
 }
 
-// HKTaskListAnswer is hk's 2xx answer to GET /v1/tasks with no filter and
-// limit tasks, the read behind `handoffkeep tasks list --limit N`, for the
-// quota stop manager's task lookup, which parses it as it parsed that
-// output.
-func HKTaskListAnswer(ctx context.Context, limit int) ([]byte, error) {
+// HKTaskListPageAnswer is hk's 2xx answer to GET /v1/tasks with an exclusive
+// after_id cursor and limit tasks. It uses the stable ID order for quota-stop
+// task lookup, which must reach matches after the first 1,000 tasks.
+func HKTaskListPageAnswer(ctx context.Context, afterID int64, limit int) ([]byte, error) {
 	return hkAnswerBody(func(c client.Client) error {
+		h := *c.HTTP
+		next := h.Transport
+		if next == nil {
+			next = http.DefaultTransport
+		}
+		h.Transport = hkAfterIDTransport{next: next, afterID: afterID}
+		c.HTTP = &h
 		_, e := c.ListTasks(ctx, client.ListTasksInput{Limit: limit})
 		return e
 	})
