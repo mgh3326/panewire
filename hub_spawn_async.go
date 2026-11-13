@@ -334,6 +334,7 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 		return fleet.ParseHubHosts(string(raw))
 	}
 	app.PlacementTry = func(host string) { h.countPlacement(task.Job, host) }
+	app.PlacementGate = h.placementGate.acquire
 	app.ObserveStage = func(stage string, d time.Duration) { outcome.Stage = stage; outcome.StageMS[stage] += d.Milliseconds() }
 	app.ObserveReceipt = func(r fleet.ExecutionReceipt) {
 		outcome.Host = r.Host

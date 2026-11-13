@@ -2,6 +2,7 @@ package panewire
 
 import (
 	"context"
+	"sync"
 	"time"
 )
 
@@ -19,6 +20,26 @@ import (
 type placementCount struct {
 	machine string
 	at      time.Time
+}
+
+// decisionGate lets one spawn decision at a time read the hub's view and
+// count its job. Without it, jobs submitted together all read before any has
+// counted, and pile onto the best host as in the 2026-11-13 burst. The zero
+// value is ready.
+type decisionGate struct {
+	once sync.Once
+	slot chan struct{}
+}
+
+// acquire waits for the gate, or for ctx, and returns the release.
+func (g *decisionGate) acquire(ctx context.Context) (func(), error) {
+	g.once.Do(func() { g.slot = make(chan struct{}, 1) })
+	select {
+	case g.slot <- struct{}{}:
+		return func() { <-g.slot }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 }
 
 // countPlacement counts job against machine from now. A job counts on one

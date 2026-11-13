@@ -384,8 +384,14 @@ host (`placement_count.go`) until one of these happens:
 A request still reconciling, and a launched one whose claim has not shown, keep
 their count. The count adds to the host's `bridged_jobs` and so to the
 `claim_cost` term only. It does not change `active_jobs`, the `jobs` term or
-task slots. Two decisions read at the very same instant, before either has told
-the hub its host, can still pick one host; the next one sees both.
+task slots. The count is only that: a claim from a node other than the decided
+host does not release it.
+
+One decision at a time reads the hub's view and counts its job: the engine takes
+the hub's decision gate (`App.PlacementGate`) before it reads hosts and gives it
+up at its first `PlacementTry`, so jobs submitted together see each other. A
+pinned `--host` is counted the same way. The count is in hub memory, so a hub
+restart forgets the jobs decided and not yet claimed until their claims show.
 
 Every spawn decision also takes the hub's latest view: before the engine reads
 the hub's fleet state the hub recomputes the hosts' `load` values, and the

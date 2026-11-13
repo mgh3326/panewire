@@ -17,6 +17,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/mgh3326/handoffkeep/client"
@@ -1250,6 +1251,18 @@ func (a *App) placeAuto(ctx context.Context, s Spawn, brief string) (bool, map[s
 	if e := a.requestRefusal(ctx, s); e != nil {
 		return true, nil, e
 	}
+	// One decision at a time through read-rank-count: the next decision must
+	// see the job this one counts (hk 4448). The gate is released at the first
+	// PlacementTry, or when this call ends.
+	release := func() {}
+	if a.PlacementGate != nil && !s.DryRun {
+		gateRelease, e := a.PlacementGate(ctx)
+		if e != nil {
+			return true, nil, fail(exitPlacement, "placement decision gate: %v", e)
+		}
+		release = sync.OnceFunc(gateRelease)
+	}
+	defer release()
 	waited := taskWaited(task, a.Now())
 	pool := a.quotaPool(ctx, s)
 	s.TaskGrade = s.Grade
@@ -1294,6 +1307,7 @@ func (a *App) placeAuto(ctx context.Context, s Spawn, brief string) (bool, map[s
 		if a.PlacementTry != nil && !s.DryRun {
 			a.PlacementTry(c.name)
 		}
+		release()
 		qr, ok := a.quotaRequest(s)
 		if !ok {
 			return candResult{rc: exitConfig, note: "quota_request_unavailable"}
@@ -1490,6 +1504,10 @@ func (a *App) placeForced(ctx context.Context, s Spawn, brief string) (bool, map
 		}
 	}
 	c := placeCandidate{name: s.Host, cfg: h, wakeable: str(h, "wake") == "panewire", awake: true, eligible: true}
+	// A pinned host is decided too; later auto decisions must see its job.
+	if a.PlacementTry != nil && !s.DryRun {
+		a.PlacementTry(s.Host)
+	}
 	qr, ok := a.quotaRequest(s)
 	if !ok {
 		return true, nil, fail(exitConfig, "quota_request_unavailable")

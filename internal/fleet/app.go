@@ -49,6 +49,10 @@ type App struct {
 	// owner of the host view can count the job at once. A later call for the
 	// same spawn names the next candidate. Nil does nothing.
 	PlacementTry func(host string)
+	// PlacementGate admits one placement decision at a time: it returns when
+	// this decision may read the host view, and its release is called once the
+	// decision has told PlacementTry its host (or ended). Nil does not gate.
+	PlacementGate func(context.Context) (release func(), err error)
 	// SharedLatest reads one account's latest stored quota reading for the
 	// admission gate; nil reads handoffkeep (admission_native.go).
 	SharedLatest func(context.Context, string) (shared.Latest, error)

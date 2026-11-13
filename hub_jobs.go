@@ -252,8 +252,12 @@ func (h *HubServer) observeActiveJobs(machineID string, active []HubActiveJob, r
 	for _, job := range active {
 		seen[job.JobID] = struct{}{}
 		record.activeJobs[job.JobID] = job
-		// The claim confirms the placement count; it does not add to it.
-		delete(h.placementCounts, job.JobID)
+		// The claim confirms the placement count; it does not add to it. Only
+		// the decided host's claim does: a presence-only report from another
+		// node must not un-weigh the host the job is bound for.
+		if held, counted := h.placementCounts[job.JobID]; counted && held.machine == machineID {
+			delete(h.placementCounts, job.JobID)
+		}
 		current := h.jobs[job.JobID]
 		if current == nil {
 			// Epoch 1 is issued by the hub for a first-seen job. A node cannot

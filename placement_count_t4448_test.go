@@ -84,7 +84,8 @@ func maps2(m map[string]string) map[string]string {
 func countedDecision(t *testing.T, hub *HubServer, job string) (string, map[string]float64) {
 	t.Helper()
 	if _, err := (directSpawnState{hub}).Snapshot(t.Context()); err != nil {
-		t.Fatal(err)
+		t.Error(err)
+		return "", nil
 	}
 	snap := hub.fleetSnapshot(time.Now().UTC())
 	scores := map[string]float64{}
@@ -99,7 +100,8 @@ func countedDecision(t *testing.T, hub *HubServer, job string) (string, map[stri
 		}
 	}
 	if best == "" {
-		t.Fatal("no usable host in the fleet state")
+		t.Error("no usable host in the fleet state")
+		return "", nil
 	}
 	hub.countPlacement(job, best)
 	return best, scores
@@ -316,5 +318,61 @@ func TestNextCandidateMovesTheCount(t *testing.T) {
 	hub.mu.Unlock()
 	if held.machine != "rpi" || n != 1 {
 		t.Fatalf("job counts on %q, %d entries; want one entry on rpi", held.machine, n)
+	}
+}
+
+// Jobs submitted together, each taking the gate the way the engine does: one
+// decision at a time reads, ranks and counts, so the burst spreads as the
+// sequential one does whatever order the workers arrive in.
+func TestSimultaneousDecisionsSpreadThroughTheGate(t *testing.T) {
+	hub, _ := countFixtureHub(t)
+	hub.publishFleetLoad(t.Context(), time.Now().UTC())
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	counts := map[string]int{}
+	for i := range 6 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			release, err := hub.placementGate.acquire(t.Context())
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			defer release()
+			host, _ := countedDecision(t, hub, "together-job-"+string(rune('a'+i)))
+			mu.Lock()
+			counts[host]++
+			mu.Unlock()
+		}()
+	}
+	close(start)
+	wg.Wait()
+	if counts["oci"] != 3 || counts["rpi"] != 2 || counts["desktop"] != 1 {
+		t.Fatalf("simultaneous burst placed %v, the scores say oci 3, rpi 2, desktop 1", counts)
+	}
+}
+
+// A report from a node the job is not decided onto is presence only: it must
+// not un-weigh the host the job is bound for.
+func TestClaimFromAnotherNodeKeepsTheCount(t *testing.T) {
+	hub, _ := countFixtureHub(t)
+	hub.countPlacement("bound-job", "oci")
+	now := time.Now().UTC()
+	hub.observeActiveJobs("rpi", []HubActiveJob{{JobID: "bound-job", AgentLabel: "agent", Epoch: 1, StartedAt: now.Format(time.RFC3339)}}, now)
+	hub.mu.Lock()
+	held, still := hub.placementCounts["bound-job"]
+	hub.mu.Unlock()
+	if !still || held.machine != "oci" {
+		t.Fatalf("a report from rpi erased the count for oci: %v %v", held, still)
+	}
+	hub.observeActiveJobs("oci", []HubActiveJob{{JobID: "bound-job", AgentLabel: "agent", Epoch: 1, StartedAt: now.Format(time.RFC3339)}}, now)
+	hub.mu.Lock()
+	_, still = hub.placementCounts["bound-job"]
+	hub.mu.Unlock()
+	if still {
+		t.Fatal("the decided host's claim did not confirm the count")
 	}
 }
