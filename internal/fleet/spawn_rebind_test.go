@@ -1,9 +1,11 @@
 package fleet
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -30,6 +32,10 @@ type rebindFixture struct {
 	claimedBy    string
 	rebindFail   string
 	rebindAnswer string
+	// afterRebind runs once the hub's rebind to the successor has been applied.
+	afterRebind func()
+	// restoreFail makes the rebind back to the parent answer 409.
+	restoreFail bool
 }
 
 func newRebindFixture(t *testing.T, parentState, bound string) *rebindFixture {
@@ -53,18 +59,41 @@ func newRebindFixture(t *testing.T, parentState, bound string) *rebindFixture {
 		case "GET /v1/tasks/42":
 			return http.StatusOK, task("claimed", fx.claimedBy, fx.bound), true
 		case "POST /v1/tasks/42/rebind":
+			var body map[string]string
+			_ = json.Unmarshal(r.Body, &body)
 			if fx.rebindFail != "" {
 				return http.StatusConflict, fx.rebindFail, true
 			}
 			if fx.rebindAnswer != "" {
 				return http.StatusOK, fx.rebindAnswer, true
 			}
-			fx.bound, fx.claimedBy = s.Job, s.Label
-			return http.StatusOK, task("claimed", s.Label, s.Job), true
+			if fx.restoreFail && body["to_job"] == rebindParent {
+				return http.StatusConflict, `{"error":"conflict","reason":"cannot rebind"}`, true
+			}
+			by := body["by"]
+			fx.bound, fx.claimedBy = body["to_job"], by
+			if fx.afterRebind != nil && body["to_job"] == s.Job {
+				fx.afterRebind()
+			}
+			return http.StatusOK, task("claimed", by, fx.bound), true
 		}
 		return 0, "", false
 	})
 	return fx
+}
+
+// breakEventLog returns a hook that makes the job's next event unwritable: its
+// events directory becomes a file. A chmod would not hold for root.
+func (fx *rebindFixture) breakEventLog(t *testing.T) func() {
+	return func() {
+		dir := filepath.Join(fx.a.Jobs, fx.s.Job, "events")
+		if e := os.RemoveAll(dir); e != nil {
+			t.Error(e)
+		}
+		if e := os.WriteFile(dir, nil, 0o600); e != nil {
+			t.Error(e)
+		}
+	}
 }
 
 // rebinds returns the body of every rebind hk received.
@@ -171,6 +200,56 @@ func TestParentJobSuccessorTakesOverTaskBinding(t *testing.T) {
 	}
 }
 
+// A takeover whose spawn fails after the rebind must not leave the task bound to
+// the failed job: its pane is closed, and a parent that is still working would
+// lose the task's lane events and FINDINGS to it. The hook breaks the job's
+// event log once the rebind lands, so the job.task_link event cannot be recorded.
+func TestFailedTakeoverHandsTheTaskBackToTheParent(t *testing.T) {
+	fx := newRebindFixture(t, "spawned", rebindParent)
+	fx.claimedBy = "parent-label"
+	putEvent(t, fx.a, rebindParent, "job.claim", map[string]any{"owner_lane": "owner", "task_id": "42", "t_level": "T1", "role": "worker"})
+	fx.afterRebind = fx.breakEventLog(t)
+	if e := fx.a.Spawn(context.Background(), fx.s); e == nil {
+		t.Fatal("the spawn did not fail after the rebind")
+	}
+	calls := fx.rebinds()
+	if len(calls) != 2 {
+		t.Fatalf("rebind calls=%v want the takeover and the hand back", calls)
+	}
+	if back := calls[1]; back["from_job"] != fx.s.Job || back["to_job"] != rebindParent || back["by"] != "parent-label" || !strings.Contains(back["reason"], rebindParent) {
+		t.Fatalf("hand back=%v", back)
+	}
+	if fx.bound != rebindParent || fx.claimedBy != "parent-label" {
+		t.Fatalf("task bound to job %q claimed by %q, want the parent's %q and %q", fx.bound, fx.claimedBy, rebindParent, "parent-label")
+	}
+	events, e := fx.a.ledger().Events(context.Background(), rebindParent)
+	if e != nil {
+		t.Fatal(e)
+	}
+	for _, ev := range events {
+		if ev.Kind == "job.replaced" {
+			t.Fatalf("the parent's ledger says it was replaced by a spawn that failed: %v", ev.Payload)
+		}
+	}
+}
+
+// A hand back hk refuses is a warning: the spawn is failing already, and the
+// failure it returns is the original one.
+func TestFailedTakeoverWarnsWhenTheHandBackFails(t *testing.T) {
+	fx := newRebindFixture(t, "spawned", rebindParent)
+	fx.restoreFail = true
+	fx.afterRebind = fx.breakEventLog(t)
+	if e := fx.a.Spawn(context.Background(), fx.s); e == nil {
+		t.Fatal("the spawn did not fail after the rebind")
+	}
+	if len(fx.rebinds()) != 2 || fx.bound != fx.s.Job {
+		t.Fatalf("rebind calls=%v bound=%q", fx.rebinds(), fx.bound)
+	}
+	if warned := fx.a.Err.(*bytes.Buffer).String(); !strings.Contains(warned, "restoring it to job "+rebindParent+" did not complete") {
+		t.Fatalf("warnings=%q", warned)
+	}
+}
+
 // The parent's own ledger notes who replaced it, once, however often the same
 // request is replayed. A parent that ran elsewhere keeps no note here.
 func TestParentJobSuccessorIsNotedOnLocalParent(t *testing.T) {
@@ -181,10 +260,7 @@ func TestParentJobSuccessorIsNotedOnLocalParent(t *testing.T) {
 	}
 	retry := fx.s
 	retry.Inherited = rebindParent
-	task := client.Task{Refs: client.TaskRefs{JobID: fx.bound}}
-	if got := fx.a.rebindInherited(context.Background(), retry, task, map[string]any{}); got != "rebound" {
-		t.Fatalf("retry status=%q", got)
-	}
+	fx.a.noteReplaced(context.Background(), retry)
 	events, e := fx.a.ledger().Events(context.Background(), rebindParent)
 	if e != nil {
 		t.Fatal(e)

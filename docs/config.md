@@ -781,9 +781,15 @@ seat (routing role `implementer`), not a reviewer, tester, consult or
 `panewire delegate` child. A spawn with `--task`, or with neither flag and no
 `ARBITER_JOB`, claims as before. The `job.task_link` event then says
 `status: rebound`, with `parent_state` when the parent's hk record was readable,
-and the parent's own job ledger, when it is on the executing host, gets a
-`job.replaced` event naming `replaced_by` (hk's job record has no successor
-field and never rewrites a terminal record). Otherwise the event says
+and, once the new job has landed, the parent's own job ledger, when it is on the
+executing host, gets a `job.replaced` event naming `replaced_by` (hk's job
+record has no successor field and never rewrites a terminal record). A spawn
+that fails after the rebind (for example when its `job.task_link` or
+`job.spawned` event cannot be recorded) hands the task back before its pane is
+closed: a second rebind from the new job to the parent, claimed by the parent's
+former claimant, and no `job.replaced` event. If hk refuses that hand back, the
+spawn's own error is still returned and a warning says to rebind the task by
+hand. Otherwise the event says
 `inherited`, adding `bound_job` when the task is bound to a third job and
 `rebind_error` when hk refused the rebind; neither fails the landed spawn.
 

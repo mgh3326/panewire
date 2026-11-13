@@ -356,7 +356,6 @@ func (a *App) rebindInherited(ctx context.Context, s Spawn, task client.Task, ev
 		return "inherited"
 	case s.Job:
 		// An earlier attempt of this request rebound the task and then failed.
-		a.noteReplaced(ctx, s)
 		return "rebound"
 	case s.Inherited:
 	default:
@@ -385,12 +384,35 @@ func (a *App) rebindInherited(ctx context.Context, s Spawn, task client.Task, ev
 	if e != nil || t.ClaimedBy != s.Label || t.Refs.JobID != s.Job {
 		return refused("task rebind did not confirm claimed_by and refs.job_id")
 	}
-	a.noteReplaced(ctx, s)
 	return "rebound"
 }
 
+// restoreParentBinding hands the task back to the parent job when this spawn
+// rebound it and then failed before it landed. The failed spawn's pane is
+// closed, so a task left bound to it would route lane events and mergewake
+// FINDINGS to a dead pane while the parent may still be working. before is the
+// task as the spawn first read it: its claimant is the parent's, and the
+// binding is restored only when this job holds it now (hk's own record is the
+// judge, so a task that was never rebound, or has since moved on, is left
+// alone). A failure to restore is a warning: the spawn is already failing, and
+// a retry of the same request finds the task bound to its job and carries on.
+func (a *App) restoreParentBinding(ctx context.Context, s Spawn, before client.Task) {
+	if !s.replacesParent() || before.Refs.JobID != s.Inherited || !a.taskLinkedTo(ctx, s.Task, s.Job) {
+		return
+	}
+	by := firstNonempty(before.ClaimedBy, s.Inherited)
+	reason := "respawn of parent job " + s.Inherited + " failed before it landed"
+	t, e := hkRebindTask(ctx, s.Task, s.Job, s.Inherited, by, reason)
+	if e == nil && t.Refs.JobID == s.Inherited {
+		return
+	}
+	a.warn("task %s stays bound to failed job %s: restoring it to job %s did not complete (%v); rebind it manually", s.Task, s.Job, s.Inherited, e)
+}
+
 // noteReplaced records on the parent's job ledger that this job took its task,
-// when the parent's ledger is on this host. hk's job record has no successor
+// when the parent's ledger is on this host. It runs once the successor has
+// landed, never before: a failed spawn hands the task back, and the parent's
+// ledger must not say it was replaced. hk's job record has no successor
 // field, and it never rewrites a terminal record, so the ledger is the parent's
 // own record of the takeover. A parent on another host keeps no note here: the
 // event would create a ledger for a job this host never ran. Writing it once is
@@ -1061,6 +1083,15 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 			return e
 		}
 	}
+	// A takeover that fails before the spawn lands hands the task back to the
+	// parent before the deferred cleanup closes this job's pane.
+	defer func() {
+		if !committed {
+			restore, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+			defer cancel()
+			a.restoreParentBinding(restore, s, task)
+		}
+	}()
 	if e = a.taskLink(ctx, s, task, bypassed); e != nil {
 		var claimFailure *taskClaimFailure
 		if !errors.As(e, &claimFailure) {
@@ -1110,6 +1141,9 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 		return e
 	}
 	committed = true
+	if s.replacesParent() && a.taskLinkedTo(ctx, s.Task, s.Job) {
+		a.noteReplaced(ctx, s)
+	}
 	s.placement.placed = true
 	if rerr := a.recordLadderStep(ctx, s, launch, seat); rerr != nil {
 		a.warn("ladder step not recorded: %v", rerr)
