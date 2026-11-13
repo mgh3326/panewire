@@ -36,6 +36,8 @@ type escalateFixture struct {
 	jobs        *quotaJobs
 	destination *hubAgent
 	job         string
+	// worktreeDirty makes the holder's worktree list report uncommitted work.
+	worktreeDirty bool
 }
 
 func escalateHolderRequest(job string) fleet.Submission {
@@ -122,6 +124,8 @@ func (f *escalateFixture) run(t *testing.T, placed hubSpawnOutcome) (hubEscalate
 		switch string(command["op"]) {
 		case `"agents.list"`:
 			roleReplyPanes(t, f.node, command, []nodeAgentRow{{PaneID: roleHeldPane, Name: f.job, AgentStatus: "idle", Cwd: "/work/" + f.job + "-checkout"}}, true)
+		case `"worktree.list"`:
+			nodeCommandReplyTo(t, f.node, command, map[string]any{"result": nodeWorktreeListResult{Total: 1, Worktrees: []nodeListedWorktree{{Path: "/work/" + f.job + "-checkout", Branch: "wk/task", Status: nodeWorktreeStatus{Dirty: f.worktreeDirty}}}}})
 		case `"pane.capture"`:
 			nodeCommandReplyTo(t, f.node, command, map[string]any{"result": map[string]any{"outcome": nodeCaptureScreen, "saved": "/jobs/" + f.job + "/pane-screen.txt"}})
 		case `"pane.close"`:
@@ -133,6 +137,15 @@ func (f *escalateFixture) run(t *testing.T, placed hubSpawnOutcome) (hubEscalate
 		}
 	}
 	serve(nodeCommandRead(t, f.node))
+	serve(nodeCommandRead(t, f.node))
+	if f.worktreeDirty {
+		select {
+		case answer := <-done:
+			return answer.result, commands
+		case <-time.After(3 * time.Second):
+			t.Fatal("escalate-author did not refuse a dirty worktree")
+		}
+	}
 	serve(nodeCommandRead(t, f.node))
 	serve(nodeCommandRead(t, f.node))
 	serve(nodeCommandRead(t, f.node))
@@ -195,10 +208,10 @@ func TestEscalateAuthorStartsTheNextRungOnTheSameWorktree(t *testing.T) {
 	for _, command := range commands {
 		ops = append(ops, strings.Trim(string(command["op"]), `"`))
 	}
-	if !slices.Equal(ops, []string{"agents.list", "pane.capture", "pane.close", "job.mark_lost"}) {
+	if !slices.Equal(ops, []string{"agents.list", "worktree.list", "pane.capture", "pane.close", "job.mark_lost"}) {
 		t.Fatalf("node commands %v", ops)
 	}
-	if reason := endReasonOf(t, commands[3]); reason != "ladder step round=5 replaced_by=pw-task-42-l1" {
+	if reason := endReasonOf(t, commands[4]); reason != "ladder step round=5 replaced_by=pw-task-42-l1" {
 		t.Fatalf("end_reason=%q", reason)
 	}
 	eventually(t, 2*time.Second, "the design lane's info event", func() bool {
@@ -220,10 +233,10 @@ func TestEscalateAuthorRefusesWhenTheRungIsNotAdmitted(t *testing.T) {
 	if result.Code != "quota_refused" {
 		t.Fatalf("result=%+v", result)
 	}
-	if len(commands) != 4 {
+	if len(commands) != 5 {
 		t.Fatalf("the pane is closed and the record marked lost: %v", commands)
 	}
-	if reason := endReasonOf(t, commands[3]); reason != "ladder step round=5 replaced_by=pw-task-43-l1" {
+	if reason := endReasonOf(t, commands[4]); reason != "ladder step round=5 replaced_by=pw-task-43-l1" {
 		t.Fatalf("end_reason=%q", reason)
 	}
 	eventually(t, 2*time.Second, "the refusal's info event", func() bool {
@@ -298,5 +311,22 @@ func TestEscalateAuthorRouteAuthorization(t *testing.T) {
 	status, _, raw := t14HTTP(t, "POST", f.server.URL+"/v1/jobs/escalate-author", t14OperatorToken, bad)
 	if status != 400 || !strings.Contains(string(raw), "invalid_request") {
 		t.Fatalf("an invalid request must be refused before anything runs: %d %s", status, raw)
+	}
+}
+
+// A dirty worktree is refused before the pane is closed: the author keeps its
+// work and the PR goes on to its next round.
+func TestEscalateAuthorKeepsADirtyWorktree(t *testing.T) {
+	f := newEscalateFixture(t, "pw-task-46")
+	f.worktreeDirty = true
+	result, commands := f.run(t, hubSpawnOutcome{})
+	if result.Code != "worktree_dirty" {
+		t.Fatalf("result=%+v", result)
+	}
+	if len(commands) != 2 {
+		t.Fatalf("nothing past the worktree read may run: %v", commands)
+	}
+	if state := f.jobs.records["pw-task-46"]["state"]; state != "spawned" {
+		t.Fatalf("a dirty worktree must not end the job: %v", state)
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
@@ -187,6 +188,12 @@ func (h *HubServer) escalateAuthor(ctx context.Context, request hubEscalateAutho
 	if !nodePaneIdleStatus[probe.row.AgentStatus] || !validNodeCommandPath(probe.row.Cwd) {
 		return h.escalateAuthorRefusal(ctx, request, ownerLane, "pane_busy", "the job's pane is "+probe.row.AgentStatus)
 	}
+	// The successor reuses the worktree, and worktree.prepare refuses a dirty
+	// one. Refuse before the pane is closed: an author with uncommitted work
+	// keeps its pane instead of being replaced by a spawn that cannot start.
+	if clean, why := h.escalateAuthorWorktreeClean(ctx, holder, probe.row.Cwd); !clean {
+		return h.escalateAuthorRefusal(ctx, request, ownerLane, why, "the job's worktree cannot be reused")
+	}
 	next, err := escalateAuthorSubmission(holder.Request, request, newJob)
 	if err != nil {
 		return hubEscalateAuthorResult{}, err
@@ -225,6 +232,37 @@ func (h *HubServer) escalateAuthor(ctx context.Context, request hubEscalateAutho
 	text := fmt.Sprintf("ladder step %s -> %s on %s (round %d, %s)", request.Job, newJob, rung, request.Round, request.PR)
 	h.relayLaneEventContext(ctx, hubJobEventPayload{EventID: "ladder-step:" + newJob, JobID: newJob, OwnerLane: ownerLane, NotifyType: "info", Text: utf8PrefixWithin(text, laneEventTextLimit), Host: "hub", Epoch: 1}, nil)
 	return hubEscalateAuthorResult{Job: newJob, Rung: rung}, nil
+}
+
+// escalateAuthorWorktreeClean reports whether the replaced job's worktree can
+// be reused by the successor. A job that ran in a canonical checkout has no
+// worktree spec and is not checked; a linked worktree is listed through the
+// holder's node and refused when it has uncommitted changes.
+func (h *HubServer) escalateAuthorWorktreeClean(ctx context.Context, holder hubSpawnTask, cwd string) (bool, string) {
+	if holder.Request.Repository.Checkout == nil {
+		return true, ""
+	}
+	if !validNodeCommandPath(cwd) {
+		return false, "worktree_unreadable"
+	}
+	common := filepath.Join(filepath.Dir(cwd), holder.Request.Repository.Name)
+	var list nodeWorktreeListResult
+	if !h.nodeCall(ctx, spawnHolderHost(holder), nodeCommandWorktreeList, nodeWorktreeListArgs{Common: common}, spawnHeldPaneActWait, &list) {
+		return false, "worktree_unreadable"
+	}
+	for _, worktree := range list.Worktrees {
+		if !nodeSamePath(worktree.Path, cwd) {
+			continue
+		}
+		if worktree.Status.Error != "" {
+			return false, "worktree_unreadable"
+		}
+		if worktree.Status.Dirty {
+			return false, "worktree_dirty"
+		}
+		return true, ""
+	}
+	return false, "worktree_unreadable"
 }
 
 // escalateAuthorRefusal records the refusal as one info event for the design
