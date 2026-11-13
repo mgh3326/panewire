@@ -486,10 +486,9 @@ func TestLaneInboxStorePostgresConcurrentStartsMigrateOnce(t *testing.T) {
 	}
 }
 
-// Every database call in the store, the Postgres backend and migrate-sqlite
-// passes a context (the CodeRabbit Major on #126). The store's contexts come
-// from s.op/s.opWithin and carry a deadline; migrate-sqlite's copy is bounded
-// by lock_timeout (TestHubMigrateSQLiteApplyFailsFastOnAHeldLock).
+// Every database call in the store and the Postgres backend passes a context
+// (the CodeRabbit Major on #126). The store's contexts come from
+// s.op/s.opWithin and carry a deadline.
 func TestLaneInboxStoreCallsTakeAContext(t *testing.T) {
 	bare := map[string]bool{"Exec": true, "Query": true, "QueryRow": true, "Begin": true, "Ping": true, "Prepare": true}
 	for _, file := range []string{"lane_inbox_store.go", "lane_inbox_store_postgres.go"} {

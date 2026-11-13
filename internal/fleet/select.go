@@ -286,8 +286,9 @@ type selReq struct {
 	urgencySource   string
 	// excludeFamilies drops seats of those families; onlyFamily keeps just that
 	// one (delegate --panel picks one seat per distinct family).
-	excludeFamilies []string
-	onlyFamily      string
+	excludeFamilies  []string
+	excludeHarnesses []string
+	onlyFamily       string
 	// excludePools drops candidates of those quota pools (--exclude-pool).
 	excludePools []string
 	harness      string
@@ -385,6 +386,8 @@ func (a *App) seatFor(row CatalogRow, req selReq) (string, *Seat, string) {
 		reason := ""
 		if !req.route.admitsSeat(seat, row.ModelID) {
 			reason = "role_filtered"
+		} else if slices.Contains(req.excludeHarnesses, seat.Kind) {
+			reason = "harness_launch_proof_failed"
 		} else if req.harness != "" && seat.Kind != req.harness {
 			reason = "harness_filtered"
 		} else if row.Effort != "" && seat.Route != "" {
@@ -753,7 +756,7 @@ func (a *App) selectProfile(ctx context.Context, s Spawn) (*selPlan, error) {
 	if a.Quota == nil {
 		return nil, fail(exitConfig, "POLICY_UNAVAILABLE: selection needs the quota catalog")
 	}
-	req := selReq{t: s.T, role: s.Role, lane: s.Parent, effort: s.Effort, allowEscalation: s.AllowEscalation, builderFamily: s.ParentFamily, excludeFamilies: s.ExcludeFamilies, onlyFamily: s.OnlyFamily, e6Arm: s.E6Arm}
+	req := selReq{t: s.T, role: s.Role, lane: s.Parent, effort: s.Effort, allowEscalation: s.AllowEscalation, builderFamily: s.ParentFamily, excludeFamilies: s.ExcludeFamilies, excludeHarnesses: s.failedHarnesses, onlyFamily: s.OnlyFamily, e6Arm: s.E6Arm}
 	tags, e := parseTags(s.Tags)
 	if e != nil {
 		return nil, e

@@ -429,10 +429,12 @@ func TestQuietInboxCLIAndNodeScope(t *testing.T) {
 	}
 }
 
-func TestQuietLegacyWireAndChat(t *testing.T) {
+func TestQuietLegacyWire(t *testing.T) {
 	p, _ := loadDeliveryPolicy("default")
-	if p.classify("lane-a", "lane.event", hubJobEventPayload{EventID: "chat-1", Text: "FYI"}, false) != "interrupt" {
-		t.Fatal("empty class")
+	// A chat-N event id is an ordinary lane notification now: the operator chat
+	// that exempted it from quiet delivery was removed.
+	if p.classify("lane-a", "lane.event", hubJobEventPayload{EventID: "chat-1", Text: "FYI"}, false) != p.classify("lane-a", "lane.event", hubJobEventPayload{EventID: "ev-1", Text: "FYI"}, false) {
+		t.Fatal("chat-N event id has its own delivery class")
 	}
 	raw := []byte(`{"job_id":"j1","epoch":1}`)
 	if !bytes.Equal(raw, relayPayloadDeliveryClass(raw, "")) {

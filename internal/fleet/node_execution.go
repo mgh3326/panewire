@@ -10,11 +10,12 @@ import (
 )
 
 type Execution struct {
-	Receipt   ExecutionReceipt `json:"receipt"`
-	RC        int              `json:"rc"`
-	Stage     string           `json:"stage"`
-	StageMS   map[string]int64 `json:"stage_ms"`
-	Retryable bool             `json:"retryable"`
+	Receipt      ExecutionReceipt `json:"receipt"`
+	RC           int              `json:"rc"`
+	Stage        string           `json:"stage"`
+	StageMS      map[string]int64 `json:"stage_ms"`
+	Retryable    bool             `json:"retryable"`
+	FailureClass string           `json:"failure_class,omitempty"`
 }
 
 func ErrorCode(err error) int {
@@ -62,6 +63,10 @@ func ExecuteNode(ctx context.Context, cwd, brief, workspace, session string, arg
 	a.ObserveRetryable = func(safe bool) { result.Retryable = safe }
 	err = a.Spawn(ctx, s)
 	result.RC = ErrorCode(err)
+	var proof interface{ LaunchFailureClass() string }
+	if errors.As(err, &proof) {
+		result.FailureClass = proof.LaunchFailureClass()
+	}
 	if err != nil {
 		fmt.Fprintln(errout, err)
 		fmt.Fprintln(errout, "Fix:", spawnRefusalFix(err))

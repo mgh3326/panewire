@@ -98,7 +98,7 @@ func TestHubInboundDispatchPreservesReceiveOrder(t *testing.T) {
 	hub := &spawnDropHub{frames: [][]byte{
 		relayPersistedFrame("job-first", 21),
 		[]byte(`{"type":"job.assigned","job_id":"job-b","epoch":3}`),
-		[]byte(`{"type":"burst.holds","holds_active":true}`),
+		[]byte(`{"type":"failover","machine":"node-b","phase":"up","emitted_at":"2026-11-13T00:00:00Z"}`),
 		relayPersistedFrame("job-last", 22),
 	}}
 	server := hub.serve(t)
@@ -147,7 +147,7 @@ func TestHubInboundDispatchPreservesReceiveOrder(t *testing.T) {
 	})
 	handledMu.Lock()
 	defer handledMu.Unlock()
-	want := []string{"relay.persisted", "job.assigned", "burst.holds", "relay.persisted"}
+	want := []string{"relay.persisted", "job.assigned", "failover", "relay.persisted"}
 	if fmt.Sprint(handled[:4]) != fmt.Sprint(want) {
 		t.Fatalf("dispatch order %v, want wire order %v", handled[:4], want)
 	}

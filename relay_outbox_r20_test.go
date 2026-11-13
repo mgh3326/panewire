@@ -227,3 +227,30 @@ func TestR20RelayPersistedMessageIsAClosedShape(t *testing.T) {
 		}
 	}
 }
+
+func TestR20LegacyLanePersistedAckUsesTransportID(t *testing.T) {
+	store := NewMemoryStore(t)
+	defer store.Close()
+	key := relayOutboxKey{Kind: "lane.event", JobID: laneEventTransportID("lane-a", "producer-1"), Epoch: 1, Lane: "lane-a", EventID: "producer-1"}
+	if err := store.RecordRelaySent(context.Background(), key, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+
+	// A hub that predates the lane and producer identity fields still returns
+	// the common seven-field persisted envelope. Its transport job_id uniquely
+	// names the lane-event outbox row.
+	wire := `{"type":"relay.persisted","job_id":"` + key.JobID + `","kind":"lane.event","epoch":1,"report_path":"","reason":"","event_id":17}`
+	message, ok := parseHubOutbound([]byte(wire))
+	if !ok {
+		t.Fatalf("legacy persisted acknowledgement was rejected: %s", wire)
+	}
+	node := r20Node(t.TempDir(), store)
+	node.recordRelayPersisted(message)
+	state, err := store.RelayOutboxState(context.Background(), key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !state.Persisted {
+		t.Fatalf("legacy acknowledgement did not retire lane event: %+v", state)
+	}
+}
