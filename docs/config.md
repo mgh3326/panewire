@@ -367,7 +367,7 @@ restated here. `docs/quota-stop.md` has the mechanics.
 
 | Role | What happens |
 | --- | --- |
-| reviewer | The hub submits a replacement at once: same task, role, review pass, owner and brief, job id `<old>-q<n>` and `--exclude-pool <pool>`. The old hk record ends `quota_stop pool=<pool> replaced_by=<new job>`; `replaced_by` is the last `key=value` token (mergewake follows it). At most 2 replacements per review pass (`<old>-q1`, then `<old>-q1-q2`). When no other pool can take it, there is no replacement and the watcher ends the job as before. |
+| reviewer | On a quota screen the watcher ends the job at once, with no grace (hk 4507): the hk record ends `quota_stop pool=<pool> reset_at=<RFC3339 UTC>` and `job.lost` carries `reason: "quota_stop"`; mergewake respawns the review on another model. A reviewer stopped on a credit rejection is still replaced by the hub: same task, role, review pass, owner and brief, job id `<old>-q<n>` and `--exclude-pool <pool>`; the old hk record ends `quota_stop pool=<pool> replaced_by=<new job>` (`replaced_by` is the last `key=value` token, mergewake follows it), at most 2 replacements per review pass (`<old>-q1`, then `<old>-q1-q2`), and when no other pool can take it the watcher ends the job after its grace. |
 | worker, tester | The quota-stop manager acts even with `--quota-stop-act` off. It waits and resumes the same pane once at the reset when the reset is at or before the job's start plus the task's expected time; otherwise (reset later, no expected time, an urgent task, or a second stop after one resume) the job is handed over like a reviewer, with `end_reason` `quota_stop pool=<pool> handed_over_to=<new job>`, the same worktree and branch, and one brief line naming the earlier job's report and branch. |
 
 The owner gets one info lane event for either action. `--quota-stop-act` still
@@ -657,9 +657,14 @@ spawns that need hk are refused.
 
 Each spawn writes a record to hk `/v1/jobs` on the executing host (the design
 is `design/2026-10-30/cross-host-jobs`): the claim `POST {job_id, task_id,
-host}` runs before the local claim and a taken id refuses with exit 74, like
+host, at}` runs before the local claim and a taken id refuses with exit 74, like
 the ledger's duplicate. `host` is the node's `HUB_MACHINE_ID`. hk unreachable
 or unconfigured fails the spawn closed. The task precheck also fails closed before launch.
+`task_id` is `null` for a task-less job (a reviewer or consult run); a non-empty
+non-numeric task id still refuses before the POST. `at` is the client clock: the
+claim sets `claimed_at`; the `spawned`, `completed`, `escalated`, and `lost`
+transitions send `at` with `state` and hk stores it as `spawned_at` or `ended_at`
+(set once).
 
 After the brief lands, panewire merges `{state:"spawned", role, label, family,
 profile, model, harness, effort, pool, owner_lane, parent_lane, parent_job,
@@ -765,8 +770,12 @@ panewire warns and sends an owner-lane notice so the task can be linked manually
 A successful claim records `status: linked`. A claim that fails while hk's task
 record already has `refs.job_id` equal to this job (a design session rebound
 the task before the spawn) records `status: already_linked`, with no warning and
-no notice: there is nothing to link (hk 3426). Other spawn failures retain their
-normal cleanup behavior.
+no notice: there is nothing to link (hk 3426). A spawn that does not claim the
+task — an unlinked reviewer or a consult — records `status: unlinked`; a consult
+(a `counsel` seat, which always routes as consult) may join a task another job or
+claimant holds, so a consult pair can share it. The rule follows the seat role: a
+worker seat given `--routing-role consult` still claims the task like any worker.
+Other spawn failures retain their normal cleanup behavior.
 
 An inherited spawn normally leaves the task bound to its parent job. It rebinds
 the task to the new job, through `handoffkeep tasks rebind`, only after the brief
