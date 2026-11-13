@@ -161,3 +161,40 @@ func TestEndedSweepReadsNoScreenOfAPaneReassignedAfterItsListing(t *testing.T) {
 		}
 	}
 }
+
+// Hk 4562780613 and hk 4562780592: a sweep stores the screen it read only when
+// the pane is still the job's after the read. A pane reassigned or removed
+// during the read must have its screen discarded, not uploaded as the job's.
+// The unchanged control proves the screen document check is not vacuous.
+func TestEndedSweepStoresNoScreenOfAPaneChangedDuringTheRead(t *testing.T) {
+	for name, change := range map[string]func(f *paneSweepFixture, pane string){
+		"unchanged":  nil,
+		"reassigned": func(f *paneSweepFixture, pane string) { f.names[pane] = "someone-else" },
+		"removed":    func(f *paneSweepFixture, pane string) { f.shut[pane] = true },
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newPaneSweepFixture(t)
+			hk := useFakeHK(t)
+			pane := f.job("r", "reviewer", "42")
+			f.status[pane] = "working"
+			putEvent(t, f.a, "r", "job.revoked", map[string]any{})
+			if change != nil {
+				f.onPaneRead(func() { change(f, pane) })
+			}
+			closes := f.endedSweep(61, time.Hour)
+			put := screenDocPut(t, hk, "r")
+			if change == nil {
+				if put == nil || len(closes) != 1 {
+					t.Fatalf("unchanged pane: screen put = %v, closes = %+v; want a stored screen and a close", put, closes)
+				}
+				return
+			}
+			if put != nil {
+				t.Fatalf("a screen of a pane changed during its read was stored as the job's: %v", put)
+			}
+			if len(closes) != 0 || len(f.closed()) != 0 {
+				t.Fatalf("a pane changed during its read was closed: %+v closed=%v", closes, f.closed())
+			}
+		})
+	}
+}

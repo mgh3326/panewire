@@ -775,7 +775,23 @@ func (s *TaskPaneSweeper) close(ctx context.Context, a *App, j Job, task string,
 		delete(s.idleSince, key)
 		return reason
 	}
-	if err := a.savePaneScreen(ctx, j); err != nil {
+	screen, err := a.capturePaneScreen(ctx, j)
+	if err != nil {
+		return "screen-not-saved"
+	}
+	// The read may have landed on another job's pane if herdr moved the pane
+	// after the listing above. Prove the identity again on a fresh listing
+	// after the read and before the upload; a screen that fails the check is
+	// discarded, never stored (hk 4562780613, 4562780592).
+	after, err := a.agents(ctx)
+	if err != nil {
+		return "herdr-unreadable"
+	}
+	if reason := paneRowReason(j, after); reason != "" {
+		delete(s.idleSince, key)
+		return reason
+	}
+	if err := a.storePaneScreen(ctx, j, screen); err != nil {
 		return "screen-not-saved"
 	}
 	// Reading and uploading the last screen may wait on herdr or handoffkeep.
@@ -862,25 +878,32 @@ func (s *TaskPaneSweeper) close(ctx context.Context, a *App, j Job, task string,
 	return ""
 }
 
-// savePaneScreen uploads the pane's last screen to hk as the job's screen
+// capturePaneScreen reads the pane's last screen from herdr. It stores
+// nothing: the caller proves the pane is still the job's, then calls
+// storePaneScreen with these bytes.
+func (a *App) capturePaneScreen(ctx context.Context, j Job) ([]byte, error) {
+	r := a.call(ctx, "herdr", "pane", "read", j.Pane)
+	if err := check(r, "pane screen"); err != nil {
+		return nil, err
+	}
+	return []byte(r.Out), nil
+}
+
+// storePaneScreen uploads a captured pane screen to hk as the job's screen
 // document (UploadPaneScreen). A stored screen of at most PaneScreenDocMaxBytes
 // is the whole screen, so no local copy is written. A failed upload is one
 // warning, and a screen hk stored only as a cut tail keeps its whole copy in
 // <job dir>/pane-screen.txt, mode 0600, through an os.Root on the job
 // directory. Nothing uploads a local copy again: the job dir's TTL net removes
-// it with the dir (decision hk 3685 §3). Only a failed pane read, or a failed
-// local write where a local copy is needed, is an error: the pane is kept.
+// it with the dir (decision hk 3685 §3). Only a failed local write where a
+// local copy is needed is an error: the pane is kept.
 // See docs/pane-sweep.md.
-func (a *App) savePaneScreen(ctx context.Context, j Job) error {
-	r := a.call(ctx, "herdr", "pane", "read", j.Pane)
-	if err := check(r, "pane screen"); err != nil {
-		return err
-	}
-	_, err := UploadPaneScreen(ctx, j.ID, j.Task, []byte(r.Out))
+func (a *App) storePaneScreen(ctx context.Context, j Job, screen []byte) error {
+	_, err := UploadPaneScreen(ctx, j.ID, j.Task, screen)
 	switch {
 	case err != nil:
 		a.warn("pane screen upload failed for job %s; local screen retained: %v", j.ID, err)
-	case len(r.Out) <= PaneScreenDocMaxBytes:
+	case len(screen) <= PaneScreenDocMaxBytes:
 		return nil
 	}
 	root, err := os.OpenRoot(filepath.Join(a.Jobs, j.ID))
@@ -888,7 +911,7 @@ func (a *App) savePaneScreen(ctx context.Context, j Job) error {
 		return err
 	}
 	defer root.Close()
-	return durable.ReplaceFileAtomicallyInRoot(root, PaneScreenFile, []byte(r.Out), 0600)
+	return durable.ReplaceFileAtomicallyInRoot(root, PaneScreenFile, screen, 0600)
 }
 
 // markSweptJob writes the end state to the hk record of a job that never

@@ -13,7 +13,7 @@ import (
 
 // A job's saved pane screen also goes to hk (hk 3617), so the evidence a
 // close leaves behind outlives the node's job directory: the task pane sweep
-// (savePaneScreen) and the pane.capture node command upload it after the
+// (capturePaneScreen, then storePaneScreen) and the pane.capture node command upload it after the
 // local file is written. See docs/pane-sweep.md and docs/node-commands.md.
 
 // PaneScreenDocMaxBytes is hk's document body cap (handoffkeep
