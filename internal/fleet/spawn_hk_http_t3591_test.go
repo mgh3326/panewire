@@ -129,7 +129,7 @@ func TestSpawnPathHKCallsGoOverHTTPWithSvcToken(t *testing.T) {
 		if got := hkBody(t, rebinds[0]); !maps.Equal(got, want) {
 			t.Fatalf("rebind body=%v want %v", got, want)
 		}
-		if ev := fx.taskLinkEvent(t); ev["status"] != "rebound" {
+		if ev := fx.taskRebindEvent(t); ev["status"] != "rebound" {
 			t.Fatalf("event=%v", ev)
 		}
 	})
@@ -598,7 +598,7 @@ func TestSpawnPathHKRefusalsKeepTheirClassAndText(t *testing.T) {
 		if e := fx.a.Spawn(ctx, fx.s); e != nil {
 			t.Fatalf("a refused rebind failed the landed spawn: %v", e)
 		}
-		ev := fx.taskLinkEvent(t)
+		ev := fx.taskRebindEvent(t)
 		if ev["status"] != "inherited" || ev["rebind_error"] != "task rebind refused: handoffkeep: wrk_receipt_required: the parent has no wrk receipt" {
 			t.Fatalf("event=%v", ev)
 		}
@@ -715,8 +715,8 @@ func TestSpawnPathHKUnreadableAnswerIsNotBypassed(t *testing.T) {
 		if e := fx.a.Spawn(ctx, fx.s); e != nil {
 			t.Fatalf("an unreadable rebind answer failed the landed spawn: %v", e)
 		}
-		ev := fx.taskLinkEvent(t)
-		if ev["status"] != "inherited" || ev["rebind_error"] != "task rebind did not confirm claimed_by and refs.job_id" {
+		ev := fx.taskRebindEvent(t)
+		if ev["status"] != "inherited" || ev["rebind_error"] != "unconfirmed" {
 			t.Fatalf("event=%v", ev)
 		}
 	})
@@ -727,7 +727,7 @@ func TestSpawnPathHKUnreadableAnswerIsNotBypassed(t *testing.T) {
 		if e := fx.a.Spawn(ctx, fx.s); e != nil {
 			t.Fatal(e)
 		}
-		if ev := fx.taskLinkEvent(t); ev["status"] != "rebound" {
+		if ev := fx.taskRebindEvent(t); ev["status"] != "rebound" {
 			t.Fatalf("event=%v", ev)
 		}
 	})

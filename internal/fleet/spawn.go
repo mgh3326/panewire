@@ -372,14 +372,14 @@ func (a *App) rebindInherited(ctx context.Context, s Spawn, task client.Task, ev
 	}
 	switch bound := task.Refs.JobID; bound {
 	case "":
-		return "inherited"
+		return refused("task has no job binding")
 	case s.Job:
 		// An earlier attempt of this request rebound the task and then failed.
 		return "rebound"
 	case s.Inherited:
 	default:
 		ev["bound_job"] = bound
-		return "inherited"
+		return refused("task bound to another job")
 	}
 	// The parent's state names the rebind in hk's audit trail and on the link
 	// event. It does not decide it: hk's own rule (an active task bound to the
@@ -397,40 +397,64 @@ func (a *App) rebindInherited(ctx context.Context, s Spawn, task client.Task, ev
 		reason = "respawn continues " + state + " parent job " + s.Inherited
 	}
 	t, e := hkRebindTask(ctx, s.Task, s.Inherited, s.Job, s.Label, reason)
-	if e != nil && !errors.Is(e, errHKUnreadable) {
+	if e == nil && t.ClaimedBy == s.Label && t.Refs.JobID == s.Job {
+		return "rebound"
+	}
+	var httpErr *client.HTTPError
+	if e != nil && errors.As(e, &httpErr) && httpErr.Status >= 400 && httpErr.Status < 500 {
+		lookup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		current, lookupErr := hkGetTask(lookup, s.Task)
+		cancel()
+		if lookupErr == nil && current.Refs.JobID != "" && current.Refs.JobID != s.Inherited {
+			ev["bound_job"] = current.Refs.JobID
+		}
 		return refused("task rebind refused: " + hkErrText(e))
 	}
-	if e != nil || t.ClaimedBy != s.Label || t.Refs.JobID != s.Job {
-		return refused("task rebind did not confirm claimed_by and refs.job_id")
+	// An unreadable or lost response may have committed the write. Check hk
+	// under a fresh bounded context before attempting the conditional write once more.
+	confirm, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
+	current, err := hkGetTask(confirm, s.Task)
+	if err == nil && current.Refs.JobID == s.Job && current.ClaimedBy == s.Label {
+		return "rebound"
 	}
-	return "rebound"
+	if err == nil && current.Refs.JobID == s.Inherited {
+		t, e = hkRebindTask(confirm, s.Task, s.Inherited, s.Job, s.Label, reason)
+		if e == nil && t.ClaimedBy == s.Label && t.Refs.JobID == s.Job {
+			return "rebound"
+		}
+	}
+	if err == nil && current.Refs.JobID != s.Inherited && current.Refs.JobID != s.Job {
+		ev["bound_job"] = current.Refs.JobID
+	}
+	return refused("unconfirmed")
 }
 
-// restoreParentBinding hands the task back to the parent job when this spawn
-// rebound it and then failed before it landed. The failed spawn's pane is
-// closed, so a task left bound to it would route lane events and mergewake
-// FINDINGS to a dead pane while the parent may still be working. before is the
-// task as the spawn first read it: its claimant is the parent's, and the
-// binding is restored only when this job holds it now (hk's own record is the
-// judge, so a task that was never rebound, or has since moved on, is left
-// alone). A failure to restore is a warning: the spawn is already failing, and
-// a retry of the same request finds the task bound to its job and carries on.
-func (a *App) restoreParentBinding(ctx context.Context, s Spawn, before client.Task) {
-	if !s.replacesParent() || before.Refs.JobID != s.Inherited {
+// finishTaskTakeover runs only after the successor is committed, so a failed
+// spawn never needs a compensating remote write. See docs/config.md.
+func (a *App) finishTaskTakeover(ctx context.Context, s Spawn, task client.Task, owner string) {
+	ev := map[string]any{"task_id": s.Task, "job_id": s.Job, "inherited_from": s.Inherited}
+	status := a.rebindInherited(ctx, s, task, ev)
+	ev["status"] = status
+	if e := a.event(ctx, s.Job, "job.task_rebind", ev); e != nil {
+		a.warn("job %s: task rebind event not recorded: %v", s.Job, e)
+	}
+	if status == "rebound" {
+		a.noteReplaced(ctx, s)
 		return
 	}
-	by := firstNonempty(before.ClaimedBy, s.Inherited)
-	reason := "respawn of parent job " + s.Inherited + " failed before it landed"
-	t, e := hkRebindTask(ctx, s.Task, s.Job, s.Inherited, by, reason)
-	if e == nil && t.Refs.JobID == s.Inherited {
-		return
+	reason := str(ev, "rebind_error")
+	id := sha256.Sum256([]byte(s.Job))
+	text := fmt.Sprintf("[panewire] TASK_REBIND_FAILED job=%s task=%s reason=%s; rebind manually", s.Job, s.Task, reason)
+	r := a.call(ctx, "panewire", "emit", "--kind", "lane.event", "--lane", owner, "--type", "automation-failed", "--event-id", fmt.Sprintf("task-rebind-failed-%x", id[:]), "--text", text, "--inbox-root", filepath.Dir(a.Jobs))
+	if r.Code != 0 {
+		a.warn("task rebind notice failed (exit %d)", r.Code)
 	}
-	a.warn("task %s may be bound to failed job %s: restoring it to job %s did not complete (%v); check and rebind it manually", s.Task, s.Job, s.Inherited, e)
 }
 
 // noteReplaced records on the parent's job ledger that this job took its task,
 // when the parent's ledger is on this host. It runs once the successor has
-// landed, never before: a failed spawn hands the task back, and the parent's
+// landed, never before: a failed spawn never takes the task, and the parent's
 // ledger must not say it was replaced. hk's job record has no successor
 // field, and it never rewrites a terminal record, so the ledger is the parent's
 // own record of the takeover. A parent on another host keeps no note here: the
@@ -494,7 +518,7 @@ func (a *App) taskLink(ctx context.Context, s Spawn, task client.Task, bypassed 
 	status := "inherited"
 	var claimFailure *taskClaimFailure
 	if s.replacesParent() {
-		status = a.rebindInherited(ctx, s, task, ev)
+		ev["takeover"] = "pending"
 	} else if s.unlinkedReviewer() || (s.Inherited == "" && s.consultTask()) {
 		// No claim: the task stays bound to whatever it was bound to.
 		status = "unlinked"
@@ -1102,15 +1126,6 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 			return e
 		}
 	}
-	// A takeover that fails before the spawn lands hands the task back to the
-	// parent before the deferred cleanup closes this job's pane.
-	defer func() {
-		if !committed {
-			restore, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
-			defer cancel()
-			a.restoreParentBinding(restore, s, task)
-		}
-	}()
 	if e = a.taskLink(ctx, s, task, bypassed); e != nil {
 		var claimFailure *taskClaimFailure
 		if !errors.As(e, &claimFailure) {
@@ -1160,8 +1175,8 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 		return e
 	}
 	committed = true
-	if s.replacesParent() && a.taskLinkedTo(ctx, s.Task, s.Job) {
-		a.noteReplaced(ctx, s)
+	if s.replacesParent() {
+		a.finishTaskTakeover(ctx, s, task, owner)
 	}
 	s.placement.placed = true
 	if rerr := a.recordLadderStep(ctx, s, launch, seat); rerr != nil {

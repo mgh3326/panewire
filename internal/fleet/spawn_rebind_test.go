@@ -1,12 +1,12 @@
 package fleet
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -23,15 +23,16 @@ const (
 // rebindFail, when set, is the hk error body a rebind answers with 409;
 // rebindAnswer, when set, replaces the rebind's success answer.
 type rebindFixture struct {
-	a            *App
-	s            Spawn
-	f            *fakeRunner
-	hk           *spawnHK
-	store        *fakeJobStore
-	bound        string
-	claimedBy    string
-	rebindFail   string
-	rebindAnswer string
+	a              *App
+	s              Spawn
+	f              *fakeRunner
+	hk             *spawnHK
+	store          *fakeJobStore
+	bound          string
+	claimedBy      string
+	rebindFail     string
+	rebindAnswer   string
+	rebindOverride func(map[string]string) (int, string, bool)
 	// afterRebind runs once the hub's rebind to the successor has been applied.
 	afterRebind func()
 	// restoreFail makes the rebind back to the parent answer 409.
@@ -65,6 +66,11 @@ func newRebindFixture(t *testing.T, parentState, bound string) *rebindFixture {
 		case "POST /v1/tasks/42/rebind":
 			var body map[string]string
 			_ = json.Unmarshal(r.Body, &body)
+			if fx.rebindOverride != nil {
+				if status, answer, handled := fx.rebindOverride(body); handled {
+					return status, answer, true
+				}
+			}
 			if fx.rebindFail != "" {
 				return http.StatusConflict, fx.rebindFail, true
 			}
@@ -137,6 +143,28 @@ func (fx *rebindFixture) taskLinkEvent(t *testing.T) map[string]any {
 	return found[0]
 }
 
+func (fx *rebindFixture) taskRebindEvent(t *testing.T) map[string]any {
+	t.Helper()
+	events, err := fx.a.ledger().Events(context.Background(), fx.s.Job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spawned := false
+	for _, ev := range events {
+		if ev.Kind == "job.spawned" {
+			spawned = true
+		}
+		if ev.Kind == "job.task_rebind" {
+			if !spawned {
+				t.Fatal("task rebind event precedes job.spawned")
+			}
+			return ev.Payload
+		}
+	}
+	t.Fatal("missing job.task_rebind")
+	return nil
+}
+
 func (fx *rebindFixture) wantRebind(t *testing.T) {
 	t.Helper()
 	calls := fx.rebinds()
@@ -160,7 +188,7 @@ func TestRespawnRebindsTerminalParent(t *testing.T) {
 				t.Fatal(e)
 			}
 			fx.wantRebind(t)
-			if ev := fx.taskLinkEvent(t); ev["status"] != "rebound" || ev["inherited_from"] != rebindParent || ev["job_id"] != fx.s.Job {
+			if ev := fx.taskRebindEvent(t); ev["status"] != "rebound" || ev["inherited_from"] != rebindParent || ev["job_id"] != fx.s.Job {
 				t.Fatalf("event=%v", ev)
 			}
 		})
@@ -176,7 +204,7 @@ func TestRespawnRebindsLocallyResolvedParent(t *testing.T) {
 		t.Fatal(e)
 	}
 	fx.wantRebind(t)
-	if ev := fx.taskLinkEvent(t); ev["status"] != "rebound" {
+	if ev := fx.taskRebindEvent(t); ev["status"] != "rebound" {
 		t.Fatalf("event=%v", ev)
 	}
 }
@@ -196,7 +224,7 @@ func TestParentJobSuccessorTakesOverTaskBinding(t *testing.T) {
 				t.Fatalf("task bound to job %q claimed by %q, want %q and %q", fx.bound, fx.claimedBy, fx.s.Job, fx.s.Label)
 			}
 			fx.wantRebind(t)
-			ev := fx.taskLinkEvent(t)
+			ev := fx.taskRebindEvent(t)
 			if ev["status"] != "rebound" || ev["parent_state"] != state || ev["rebind_error"] != nil {
 				t.Fatalf("event=%v", ev)
 			}
@@ -204,70 +232,61 @@ func TestParentJobSuccessorTakesOverTaskBinding(t *testing.T) {
 	}
 }
 
-// A takeover whose spawn fails after the rebind must not leave the task bound to
-// the failed job: its pane is closed, and a parent that is still working would
-// lose the task's lane events and FINDINGS to it. The hook breaks the job's
-// event log once the rebind lands, so the job.task_link event cannot be recorded.
-func TestFailedTakeoverHandsTheTaskBackToTheParent(t *testing.T) {
+func TestTakeoverRebindsOnlyAfterSpawnCommits(t *testing.T) {
+	fx := newRebindFixture(t, "spawned", rebindParent)
+	fx.afterRebind = func() {
+		events, err := fx.a.ledger().Events(context.Background(), fx.s.Job)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		for _, ev := range events {
+			if ev.Kind == "job.spawned" {
+				return
+			}
+		}
+		t.Error("takeover rebind happened before job.spawned")
+	}
+	if err := fx.a.Spawn(context.Background(), fx.s); err != nil {
+		t.Fatal(err)
+	}
+	link := fx.taskLinkEvent(t)
+	if link["status"] != "inherited" || link["takeover"] != "pending" {
+		t.Fatalf("task link=%v", link)
+	}
+	if fx.taskRebindEvent(t)["status"] != "rebound" {
+		t.Fatal("takeover did not record rebound")
+	}
+}
+
+// Failure to record job.spawned must leave the parent's binding untouched.
+func TestTakeoverFailureBeforeCommitKeepsParentBinding(t *testing.T) {
 	fx := newRebindFixture(t, "spawned", rebindParent)
 	fx.claimedBy = "parent-label"
-	putEvent(t, fx.a, rebindParent, "job.claim", map[string]any{"owner_lane": "owner", "task_id": "42", "t_level": "T1", "role": "worker"})
-	fx.afterRebind = fx.breakEventLog(t)
-	if e := fx.a.Spawn(context.Background(), fx.s); e == nil {
-		t.Fatal("the spawn did not fail after the rebind")
+	original := fx.f.Do
+	failed := false
+	fx.f.Do = func(c Command) Result {
+		if c.Name == "git" && strings.Contains(strings.Join(c.Args, " "), "remote get-url") {
+			fx.breakEventLog(t)()
+			failed = true
+		}
+		if failed && c.Name == "herdr" && strings.Join(c.Args, " ") == "agent list" {
+			return Result{Out: `{"result":{"agents":[{"pane_id":"w:p1","name":"worker-a","agent":"cmd","agent_status":"idle","cwd":` + strconv.Quote(fx.s.CWD) + `,"state_change_seq":1}]}}`}
+		}
+		return original(c)
 	}
-	calls := fx.rebinds()
-	if len(calls) != 2 {
-		t.Fatalf("rebind calls=%v want the takeover and the hand back", calls)
+	if err := fx.a.Spawn(context.Background(), fx.s); err == nil {
+		t.Fatal("expected failed spawn")
 	}
-	if back := calls[1]; back["from_job"] != fx.s.Job || back["to_job"] != rebindParent || back["by"] != "parent-label" || !strings.Contains(back["reason"], rebindParent) {
-		t.Fatalf("hand back=%v", back)
+	if calls := fx.rebinds(); len(calls) != 0 || fx.bound != rebindParent || fx.claimedBy != "parent-label" {
+		t.Fatalf("rebind calls=%v binding=%s claimant=%s", calls, fx.bound, fx.claimedBy)
 	}
-	if fx.bound != rebindParent || fx.claimedBy != "parent-label" {
-		t.Fatalf("task bound to job %q claimed by %q, want the parent's %q and %q", fx.bound, fx.claimedBy, rebindParent, "parent-label")
-	}
-	events, e := fx.a.ledger().Events(context.Background(), rebindParent)
-	if e != nil {
-		t.Fatal(e)
-	}
-	for _, ev := range events {
-		if ev.Kind == "job.replaced" {
-			t.Fatalf("the parent's ledger says it was replaced by a spawn that failed: %v", ev.Payload)
+	for _, c := range fx.f.Calls {
+		if c.Name == "herdr" && strings.HasPrefix(strings.Join(c.Args, " "), "pane close") {
+			return
 		}
 	}
-}
-
-// A lookup outage after takeover must not prevent the conditional hand back.
-func TestFailedTakeoverRestoresDuringTaskLookupOutage(t *testing.T) {
-	fx := newRebindFixture(t, "spawned", rebindParent)
-	fx.claimedBy = "parent-label"
-	fx.afterRebind = func() {
-		fx.getFail = true
-		fx.breakEventLog(t)()
-	}
-	if e := fx.a.Spawn(context.Background(), fx.s); e == nil {
-		t.Fatal("the spawn did not fail after the rebind")
-	}
-	if fx.bound != rebindParent || fx.claimedBy != "parent-label" {
-		t.Fatalf("task bound to job %q claimed by %q, want parent binding", fx.bound, fx.claimedBy)
-	}
-}
-
-// A hand back hk refuses is a warning: the spawn is failing already, and the
-// failure it returns is the original one.
-func TestFailedTakeoverWarnsWhenTheHandBackFails(t *testing.T) {
-	fx := newRebindFixture(t, "spawned", rebindParent)
-	fx.restoreFail = true
-	fx.afterRebind = fx.breakEventLog(t)
-	if e := fx.a.Spawn(context.Background(), fx.s); e == nil {
-		t.Fatal("the spawn did not fail after the rebind")
-	}
-	if len(fx.rebinds()) != 2 || fx.bound != fx.s.Job {
-		t.Fatalf("rebind calls=%v bound=%q", fx.rebinds(), fx.bound)
-	}
-	if warned := fx.a.Err.(*bytes.Buffer).String(); !strings.Contains(warned, "restoring it to job "+rebindParent+" did not complete") {
-		t.Fatalf("warnings=%q", warned)
-	}
+	t.Fatal("failed successor pane was not closed")
 }
 
 // The parent's own ledger notes who replaced it, once, however often the same
@@ -313,7 +332,7 @@ func TestParentJobSuccessorLeavesUnboundTaskAlone(t *testing.T) {
 	if calls := fx.rebinds(); len(calls) != 0 {
 		t.Fatalf("an unbound task was rebound: %v", calls)
 	}
-	if ev := fx.taskLinkEvent(t); ev["status"] != "inherited" {
+	if ev := fx.taskRebindEvent(t); ev["status"] != "inherited" {
 		t.Fatalf("event=%v", ev)
 	}
 }
@@ -328,7 +347,7 @@ func TestRespawnTakesTaskFromEnvironmentParent(t *testing.T) {
 		t.Fatal(e)
 	}
 	fx.wantRebind(t)
-	if ev := fx.taskLinkEvent(t); ev["status"] != "rebound" || ev["inherited_from"] != rebindParent {
+	if ev := fx.taskRebindEvent(t); ev["status"] != "rebound" || ev["inherited_from"] != rebindParent {
 		t.Fatalf("event=%v", ev)
 	}
 }
@@ -341,7 +360,7 @@ func TestRespawnLeavesTaskBoundToThirdJob(t *testing.T) {
 	if calls := fx.rebinds(); len(calls) != 0 {
 		t.Fatalf("a task bound to another job was moved: %v", calls)
 	}
-	if ev := fx.taskLinkEvent(t); ev["status"] != "inherited" || ev["bound_job"] != rebindOther {
+	if ev := fx.taskRebindEvent(t); ev["status"] != "inherited" || ev["bound_job"] != rebindOther {
 		t.Fatalf("event=%v", ev)
 	}
 }
@@ -353,7 +372,7 @@ func TestRespawnRebindFailureKeepsLandedSpawn(t *testing.T) {
 		t.Fatalf("a failed rebind failed the landed spawn: %v", e)
 	}
 	fx.wantRebind(t)
-	ev := fx.taskLinkEvent(t)
+	ev := fx.taskRebindEvent(t)
 	if ev["status"] != "inherited" || !strings.Contains(str(ev, "rebind_error"), "conflict: cannot rebind") {
 		t.Fatalf("event=%v", ev)
 	}
@@ -369,7 +388,7 @@ func TestRespawnRebindUnconfirmedAnswerIsRecorded(t *testing.T) {
 	if e := fx.a.Spawn(context.Background(), fx.s); e != nil {
 		t.Fatal(e)
 	}
-	if ev := fx.taskLinkEvent(t); ev["status"] != "inherited" || str(ev, "rebind_error") == "" {
+	if ev := fx.taskRebindEvent(t); ev["status"] != "inherited" || str(ev, "rebind_error") == "" {
 		t.Fatalf("event=%v", ev)
 	}
 }
@@ -384,7 +403,7 @@ func TestRespawnUnreadableParentStateStillRebinds(t *testing.T) {
 		t.Fatal(e)
 	}
 	fx.wantRebind(t)
-	if ev := fx.taskLinkEvent(t); ev["status"] != "rebound" || ev["parent_state"] != nil {
+	if ev := fx.taskRebindEvent(t); ev["status"] != "rebound" || ev["parent_state"] != nil {
 		t.Fatalf("event=%v", ev)
 	}
 }
@@ -411,7 +430,7 @@ func TestRespawnSavedRequestReplayRebindsOnce(t *testing.T) {
 		t.Fatalf("replay: %v", e)
 	}
 	fx.wantRebind(t)
-	if ev := fx.taskLinkEvent(t); ev["status"] != "rebound" {
+	if ev := fx.taskRebindEvent(t); ev["status"] != "rebound" {
 		t.Fatalf("event=%v", ev)
 	}
 }
@@ -516,4 +535,127 @@ func TestRespawnSameJobIsNotAReplacement(t *testing.T) {
 	if (Spawn{Job: rebindParent, Inherited: rebindParent, Role: "worker"}).replacesParent() {
 		t.Fatal("a job cannot replace itself")
 	}
+}
+
+func (fx *rebindFixture) assertNotice(t *testing.T, want bool) {
+	t.Helper()
+	n := 0
+	for _, c := range fx.f.Calls {
+		args := strings.Join(c.Args, " ")
+		if c.Name == "panewire" && strings.Contains(args, "--event-id task-rebind-failed-") {
+			n++
+			if !strings.Contains(args, "--type automation-failed") || !strings.Contains(args, "TASK_REBIND_FAILED") {
+				t.Fatalf("notice=%s", args)
+			}
+		}
+	}
+	if (n == 1) != want {
+		t.Fatalf("notices=%d want one=%v", n, want)
+	}
+}
+
+func TestTakeoverRetryAlreadyBoundToSuccessorRecordsRebound(t *testing.T) {
+	fx := newRebindFixture(t, "spawned", "job-a")
+	fx.claimedBy = fx.s.Label
+	putEvent(t, fx.a, rebindParent, "job.claim", map[string]any{"owner_lane": "owner", "task_id": "42", "t_level": "T1", "role": "worker"})
+	if err := fx.a.Spawn(context.Background(), fx.s); err != nil {
+		t.Fatal(err)
+	}
+	if len(fx.rebinds()) != 0 || fx.taskRebindEvent(t)["status"] != "rebound" {
+		t.Fatal("retry did not confirm existing binding")
+	}
+	events, err := fx.a.ledger().Events(context.Background(), rebindParent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ev := range events {
+		if ev.Kind == "job.replaced" {
+			return
+		}
+	}
+	t.Fatal("missing parent replacement event")
+}
+
+func TestTakeoverRefusedAfterCommitKeepsParentAndNotifies(t *testing.T) {
+	fx := newRebindFixture(t, "spawned", rebindParent)
+	fx.rebindFail = `{"error":"conflict","reason":"cannot rebind"}`
+	putEvent(t, fx.a, rebindParent, "job.claim", map[string]any{"owner_lane": "owner", "task_id": "42", "t_level": "T1", "role": "worker"})
+	if err := fx.a.Spawn(context.Background(), fx.s); err != nil {
+		t.Fatal(err)
+	}
+	ev := fx.taskRebindEvent(t)
+	if fx.bound != rebindParent || ev["status"] != "inherited" || ev["rebind_error"] == nil {
+		t.Fatalf("binding=%s event=%v", fx.bound, ev)
+	}
+	fx.assertNotice(t, true)
+	for _, c := range fx.f.Calls {
+		if c.Name == "herdr" && strings.HasPrefix(strings.Join(c.Args, " "), "pane close") {
+			t.Fatal("closed landed pane")
+		}
+	}
+	events, err := fx.a.ledger().Events(context.Background(), rebindParent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ev := range events {
+		if ev.Kind == "job.replaced" {
+			t.Fatal("recorded replacement after refusal")
+		}
+	}
+}
+
+func TestTakeoverUnreadableResponseConfirmsByLookup(t *testing.T) {
+	for _, tc := range []struct {
+		name                 string
+		applied, lookupFails bool
+		want                 string
+		calls                int
+	}{
+		{"already applied", true, false, "rebound", 1},
+		{"retry parent", false, false, "rebound", 2},
+		{"lookup fails", false, true, "inherited", 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fx := newRebindFixture(t, "spawned", rebindParent)
+			first := true
+			fx.rebindOverride = func(body map[string]string) (int, string, bool) {
+				if !first {
+					return 0, "", false
+				}
+				first = false
+				if tc.applied {
+					fx.bound, fx.claimedBy = fx.s.Job, fx.s.Label
+				}
+				fx.getFail = tc.lookupFails
+				return http.StatusOK, `{`, true
+			}
+			if err := fx.a.Spawn(context.Background(), fx.s); err != nil {
+				t.Fatal(err)
+			}
+			ev := fx.taskRebindEvent(t)
+			if ev["status"] != tc.want || len(fx.rebinds()) != tc.calls {
+				t.Fatalf("event=%v calls=%v", ev, fx.rebinds())
+			}
+			if tc.want == "inherited" && ev["rebind_error"] != "unconfirmed" {
+				t.Fatalf("event=%v", ev)
+			}
+			fx.assertNotice(t, tc.want == "inherited")
+		})
+	}
+}
+
+func TestTakeoverConcurrentRebindLeavesForeignBinding(t *testing.T) {
+	fx := newRebindFixture(t, "spawned", rebindParent)
+	fx.rebindOverride = func(body map[string]string) (int, string, bool) {
+		fx.bound, fx.claimedBy = rebindOther, "other"
+		return http.StatusConflict, `{"error":"conflict"}`, true
+	}
+	if err := fx.a.Spawn(context.Background(), fx.s); err != nil {
+		t.Fatal(err)
+	}
+	ev := fx.taskRebindEvent(t)
+	if fx.bound != rebindOther || ev["status"] != "inherited" || ev["bound_job"] != rebindOther {
+		t.Fatalf("binding=%s event=%v", fx.bound, ev)
+	}
+	fx.assertNotice(t, true)
 }

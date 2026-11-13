@@ -777,30 +777,22 @@ claimant holds, so a consult pair can share it. The rule follows the seat role: 
 worker seat given `--routing-role consult` still claims the task like any worker.
 Other spawn failures retain their normal cleanup behavior.
 
-An implementer spawn with `--parent-job` replaces its parent job. After the brief
-lands it moves the task's claim and `refs.job_id` to the new job through
-`handoffkeep tasks rebind` (`claimed_by` becomes the new job's label), whatever
-state the parent is in: a parent that is `completed`, `escalated` or `lost` is
-replaced, and so is one still `claimed` or `spawned`, which loses its claim on
-the task (its pane is left running). Mergewake and lane events that route by the
-task binding then reach the new job. The rebind needs only what hk's own rule
-needs: the task's `refs.job_id` is the parent and the new job id differs; hk
-refuses a task in a state it does not rebind. The seat must be a replacement
-seat (routing role `implementer`), not a reviewer, tester, consult or
-`panewire delegate` child. A spawn with `--task`, or with neither flag and no
-`ARBITER_JOB`, claims as before. The `job.task_link` event then says
-`status: rebound`, with `parent_state` when the parent's hk record was readable,
-and, once the new job has landed, the parent's own job ledger, when it is on the
-executing host, gets a `job.replaced` event naming `replaced_by` (hk's job
-record has no successor field and never rewrites a terminal record). A spawn
-that fails after the rebind (for example when its `job.task_link` or
-`job.spawned` event cannot be recorded) hands the task back before its pane is
-closed: a second rebind from the new job to the parent, claimed by the parent's
-former claimant, and no `job.replaced` event. If hk refuses that hand back, the
-spawn's own error is still returned and a warning says to rebind the task by
-hand. Otherwise the event says
-`inherited`, adding `bound_job` when the task is bound to a third job and
-`rebind_error` when hk refused the rebind; neither fails the landed spawn.
+An implementer spawn with `--parent-job` replaces its parent job. After the
+successor's `job.spawned` event commits, it attempts to move the task's claim
+and `refs.job_id` from the parent to the new job through `handoffkeep tasks
+rebind`, regardless of the parent's state. The parent pane is left running.
+Only replacement seats (routing role `implementer`) take over; reviewer, tester,
+consult and delegate children do not. Spawns with `--task`, or neither flag and
+no `ARBITER_JOB`, claim as before.
+
+The earlier `job.task_link` event records `status: inherited` and
+`takeover: pending`. After landing, `job.task_rebind` records the outcome:
+`rebound` on confirmation, otherwise `inherited` with a reason and, when known,
+`bound_job`. A confirmed takeover also writes `job.replaced` on the parent's
+local ledger, when present. A refused or unconfirmed takeover leaves the spawn
+landed and emits an `automation-failed` notice asking for a manual rebind check.
+If the process stops after landing but before the takeover, the pending link
+has no `job.task_rebind` event and the parent retains the task.
 
 Automatic model selection (`spawn` with `-m` omitted or `-m auto`) reads the
 live bench catalog from handoffkeep and pool status from the quota CLI, then
