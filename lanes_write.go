@@ -35,7 +35,8 @@ const (
 )
 
 var (
-	laneNamePattern = regexp.MustCompile(`^[a-z0-9_-]{1,32}$`)
+	// LaneNamePattern is the shared contract for a configured panewire lane.
+	LaneNamePattern = regexp.MustCompile(`^[a-z0-9_-]{1,32}$`)
 	lanePanePattern = regexp.MustCompile(`^w[A-Za-z0-9]+:p[A-Za-z0-9]+$`)
 
 	errLanesWriteUnconfigured = errors.New("lanes path is not configured")
@@ -152,7 +153,7 @@ func (h *HubServer) handlePutLane(writer http.ResponseWriter, request *http.Requ
 		return
 	}
 	lane := request.PathValue("lane")
-	if !laneNamePattern.MatchString(lane) {
+	if !LaneNamePattern.MatchString(lane) {
 		writeLaneJSONError(writer, http.StatusBadRequest, "invalid_lane")
 		return
 	}
@@ -212,7 +213,7 @@ func (h *HubServer) handleDeleteLane(writer http.ResponseWriter, request *http.R
 		return
 	}
 	lane := request.PathValue("lane")
-	if !laneNamePattern.MatchString(lane) {
+	if !LaneNamePattern.MatchString(lane) {
 		writeLaneJSONError(writer, http.StatusBadRequest, "invalid_lane")
 		return
 	}
@@ -265,7 +266,7 @@ func nodeLaneFieldScope(nodeMachine, lane string, body hubLaneWriteRequest, rout
 		return errLaneMachineMismatch
 	}
 	if body.Parent != "" {
-		if !validReportRelayLaneName(body.Parent) || body.Parent == lane {
+		if !LaneNamePattern.MatchString(body.Parent) || body.Parent == lane {
 			return errLaneRequestInvalid
 		}
 		if parent, found := routes[body.Parent]; !found || parent.Sink {
@@ -526,11 +527,11 @@ func (h *HubServer) deleteLane(lane, nodeMachine string, expect laneRouteExpecta
 }
 
 func validateLaneWriteRequest(h *HubServer, lane string, body hubLaneWriteRequest, routes map[string]reportRelayRoute) error {
-	if !laneNamePattern.MatchString(lane) {
+	if !LaneNamePattern.MatchString(lane) {
 		return errLaneRequestInvalid
 	}
 	if body.Parent != "" {
-		if !validReportRelayLaneName(body.Parent) || body.Parent == lane {
+		if !LaneNamePattern.MatchString(body.Parent) || body.Parent == lane {
 			return errLaneRequestInvalid
 		}
 		if _, exists := routes[body.Parent]; !exists {

@@ -166,7 +166,7 @@ func validateLanesFileControl(control lanesFileControl) error {
 			return errors.New("invalid control history fingerprint")
 		}
 		for _, route := range record.Routes {
-			if !laneNamePattern.MatchString(route.Lane) || route.Machine == hubOperatorMachineID || !machineIDPattern.MatchString(route.Machine) || !validLanePane(route.Pane) {
+			if !LaneNamePattern.MatchString(route.Lane) || route.Machine == hubOperatorMachineID || !machineIDPattern.MatchString(route.Machine) || !validLanePane(route.Pane) {
 				return errors.New("invalid control history route")
 			}
 		}
@@ -271,7 +271,7 @@ func ParseControlPlaneLanes(data []byte) (map[string]struct{}, error) {
 	}
 	lanes := make(map[string]struct{}, len(file.AuthorityLanes))
 	for _, lane := range file.AuthorityLanes {
-		if !laneNamePattern.MatchString(lane) {
+		if !LaneNamePattern.MatchString(lane) {
 			return nil, errors.New("control-plane lanes file has an invalid lane")
 		}
 		if _, duplicate := lanes[lane]; duplicate {

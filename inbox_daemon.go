@@ -108,7 +108,7 @@ func (d *Daemon) handleInbox(ctx context.Context, req *inboxRequest) (any, error
 	if d.cfg.Hub.Client == nil {
 		return nil, &codedError{ExitDaemonUnavailable, errors.New("inbox: daemon has no hub client")}
 	}
-	if req == nil || req.Timeout <= 0 || (req.Lane != "" && !validReportRelayLaneName(req.Lane)) ||
+	if req == nil || req.Timeout <= 0 || (req.Lane != "" && !LaneNamePattern.MatchString(req.Lane)) ||
 		(req.Command != "list" && req.Command != "read" && req.Command != "ack" && req.Command != "count" && req.Command != "wait" && req.Command != "status") ||
 		!validInboxStatusEventIDs(req.Command, req.EventIDs) ||
 		(req.Unread && req.Command != "list") || (req.All && req.Command != "ack") ||

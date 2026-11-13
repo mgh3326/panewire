@@ -899,12 +899,12 @@ func (d *Daemon) emitRelayEvent(req localRequest) error {
 		return &codedError{ExitUsage, fmt.Errorf("invalid emit request")}
 	}
 	if req.Kind == "lane.event" {
-		if !hubAgentLabelPattern.MatchString(req.OwnerLane) || !validLaneEventID(req.EventID) || !validLaneEventText(req.Text) || len(req.Text) > laneEventTextLimitSink {
+		if !LaneNamePattern.MatchString(req.OwnerLane) || !validLaneEventID(req.EventID) || !validLaneEventText(req.Text) || len(req.Text) > laneEventTextLimitSink {
 			return &codedError{ExitUsage, fmt.Errorf("invalid emit request")}
 		}
 	} else if !hubJobIDPattern.MatchString(req.JobID) || req.ReportPath == "" {
 		return &codedError{ExitUsage, fmt.Errorf("invalid emit request")}
-	} else if relayTerminalSignalKinds[req.Kind] && (req.Reason == "" || !validReportRelayLaneName(req.OwnerLane)) {
+	} else if relayTerminalSignalKinds[req.Kind] && (req.Reason == "" || !LaneNamePattern.MatchString(req.OwnerLane)) {
 		// Same rule as emitJobRecord: a terminal signal that cannot state why
 		// or name its owner lane is refused before it enters the outbox.
 		return &codedError{ExitUsage, fmt.Errorf("invalid emit request")}

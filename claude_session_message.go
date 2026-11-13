@@ -40,7 +40,7 @@ const claudeSessionPostTimeout = 5 * time.Second
 func claudeSessionMessageLanesFromEnv() []string {
 	var lanes []string
 	for _, lane := range strings.Split(os.Getenv(claudeSessionMessageLanesEnv), ",") {
-		if lane = strings.TrimSpace(lane); hubAgentLabelPattern.MatchString(lane) {
+		if lane = strings.TrimSpace(lane); LaneNamePattern.MatchString(lane) {
 			lanes = append(lanes, lane)
 		}
 	}

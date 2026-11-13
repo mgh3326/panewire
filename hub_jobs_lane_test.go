@@ -72,20 +72,20 @@ func TestJobsListCLI(t *testing.T) {
 
 func TestJobsListEstablishedLaneName(t *testing.T) {
 	hub, server := pw2Hub(t, nil, "", nil)
-	if err := os.WriteFile(hub.reportRelayPath, []byte(`{"lanes":{"legacy.parent":{"machine":"node-a","pane":"pane-a"}}}`), 0600); err != nil {
+	if err := os.WriteFile(hub.reportRelayPath, []byte(`{"lanes":{"legacy_parent":{"machine":"node-a","pane":"pane-a"}}}`), 0600); err != nil {
 		t.Fatal(err)
 	}
-	hub.jobs["job-a"] = &hubJobRecord{HubActiveJob: HubActiveJob{JobID: "job-a", OwnerLane: "legacy.parent"}, Node: "node-b"}
+	hub.jobs["job-a"] = &hubJobRecord{HubActiveJob: HubActiveJob{JobID: "job-a", OwnerLane: "legacy_parent"}, Node: "node-b"}
 	token := filepath.Join(t.TempDir(), "node.env")
 	if err := os.WriteFile(token, []byte("HUB_MACHINE_ID=node-a\nHUB_TOKEN="+pw2NodeAToken+"\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	status, body := (pw2Caller{"node", "node-a", pw2NodeAToken}).do(t, server, http.MethodGet, "/v1/jobs?owner_lane=legacy.parent", "")
+	status, body := (pw2Caller{"node", "node-a", pw2NodeAToken}).do(t, server, http.MethodGet, "/v1/jobs?owner_lane=legacy_parent", "")
 	if status != http.StatusOK || !strings.Contains(body, `"job_id":"job-a"`) {
 		t.Errorf("status=%d body=%s", status, body)
 	}
 	var out, errs bytes.Buffer
-	code := runJobsCLI([]string{"list", "--lane", "legacy.parent", "--hub-url", server.URL, "--hub-token-env", token, "--json"}, &out, &errs, t441Deps(server))
+	code := runJobsCLI([]string{"list", "--lane", "legacy_parent", "--hub-url", server.URL, "--hub-token-env", token, "--json"}, &out, &errs, t441Deps(server))
 	if code != ExitOK || !strings.Contains(out.String(), `"job_id":"job-a"`) {
 		t.Errorf("code=%d out=%q err=%q", code, out.String(), errs.String())
 	}

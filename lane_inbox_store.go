@@ -80,7 +80,7 @@ func (b laneInboxBatch) invalidReason() string {
 	if !validLaneEventText(b.Text) {
 		return "lane.event text is empty, invalid UTF-8, or contains control characters"
 	}
-	if !validLaneEventID(b.ID) || !hubAgentLabelPattern.MatchString(b.Lane) {
+	if !validLaneEventID(b.ID) || !LaneNamePattern.MatchString(b.Lane) {
 		return "invalid lane.event batch identity or lane"
 	}
 	return ""

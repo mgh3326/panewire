@@ -65,7 +65,7 @@ func (h *HubServer) handleSpawnSubmit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	owner := spawn.Owner
-	if !hubAgentLabelPattern.MatchString(owner) {
+	if !LaneNamePattern.MatchString(owner) {
 		writeJSON(w, 400, map[string]string{"error": "invalid_owner", "fix": "supply an existing lane name"})
 		return
 	}

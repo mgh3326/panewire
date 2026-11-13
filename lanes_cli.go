@@ -52,7 +52,7 @@ func runLanesCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 		}
 		return writeHubCLIUsage(stderr, "lanes: --hub-url and --hub-token-env are required", lanesUsage)
 	}
-	if !laneNamePattern.MatchString(options.Lane) && options.Command != "ls" {
+	if !LaneNamePattern.MatchString(options.Lane) && options.Command != "ls" {
 		fmt.Fprintln(stderr, "lanes rejected: invalid lane")
 		return ExitConditionInvalid
 	}
@@ -235,13 +235,13 @@ func runLanesCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 // The order and wording are the `lanes add` contract; the daemon's lanes.put
 // op reports the same line so a spawn receipt records it unchanged.
 func validateLaneAdd(lane, machine, pane, parent string) (string, int) {
-	if !laneNamePattern.MatchString(lane) {
+	if !LaneNamePattern.MatchString(lane) {
 		return "lanes rejected: invalid lane", ExitConditionInvalid
 	}
 	if machine == hubOperatorMachineID || !machineIDPattern.MatchString(machine) || !validLanePane(pane) {
 		return "lanes rejected: invalid route", ExitConditionInvalid
 	}
-	if parent != "" && (!laneNamePattern.MatchString(parent) || parent == lane) {
+	if parent != "" && (!LaneNamePattern.MatchString(parent) || parent == lane) {
 		return "lanes rejected: invalid parent", ExitConditionInvalid
 	}
 	return "", ExitOK
@@ -490,7 +490,7 @@ func decodeLanesJSON(reader io.Reader, target any) error {
 }
 
 func validHubLaneProjection(lane hubLaneProjection) bool {
-	if !laneNamePattern.MatchString(lane.Lane) || lane.Parent != "" && !laneNamePattern.MatchString(lane.Parent) {
+	if !LaneNamePattern.MatchString(lane.Lane) || lane.Parent != "" && !LaneNamePattern.MatchString(lane.Parent) {
 		return false
 	}
 	if lane.Sink {

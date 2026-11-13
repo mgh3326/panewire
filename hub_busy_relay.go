@@ -24,7 +24,7 @@ func decodeRelayHeldPayload(raw []byte) (relayHeldPayload, bool) {
 	// that held it (working/blocked), a restored row after a node restart,
 	// and retryOrDropWithin's retry re-arm (#683: that one used to be
 	// rejected, so retries were invisible in the held projection).
-	if json.Unmarshal(raw, &value) != nil || value.EventID < 1 || !hubJobIDPattern.MatchString(value.JobID) || value.Pane == "" || value.Pane == relayCancelledPane || len(value.Pane) > 128 || !hubAgentLabelPattern.MatchString(value.Lane) || (value.Reason != "working" && value.Reason != "blocked" && value.Reason != "restored" && value.Reason != "retry") || len(value.Preview) > 240 || !validRelayDeliver(value.DeliverPolicy) {
+	if json.Unmarshal(raw, &value) != nil || value.EventID < 1 || !hubJobIDPattern.MatchString(value.JobID) || value.Pane == "" || value.Pane == relayCancelledPane || len(value.Pane) > 128 || !LaneNamePattern.MatchString(value.Lane) || (value.Reason != "working" && value.Reason != "blocked" && value.Reason != "restored" && value.Reason != "retry") || len(value.Preview) > 240 || !validRelayDeliver(value.DeliverPolicy) {
 		return relayHeldPayload{}, false
 	}
 	if _, err := time.Parse(time.RFC3339Nano, value.HeldSince); err != nil {
@@ -35,7 +35,7 @@ func decodeRelayHeldPayload(raw []byte) (relayHeldPayload, bool) {
 
 func decodeRelayReleasedPayload(raw []byte) (relayReleasedPayload, bool) {
 	var value relayReleasedPayload
-	if json.Unmarshal(raw, &value) != nil || !hubJobIDPattern.MatchString(value.JobID) || value.Pane == "" || value.Pane == relayCancelledPane || len(value.Pane) > 128 || !hubAgentLabelPattern.MatchString(value.Lane) || value.OriginalEventID < 1 || !validRelayFinalText(value.FinalText) {
+	if json.Unmarshal(raw, &value) != nil || !hubJobIDPattern.MatchString(value.JobID) || value.Pane == "" || value.Pane == relayCancelledPane || len(value.Pane) > 128 || !LaneNamePattern.MatchString(value.Lane) || value.OriginalEventID < 1 || !validRelayFinalText(value.FinalText) {
 		return relayReleasedPayload{}, false
 	}
 	return value, true
@@ -51,7 +51,7 @@ func decodeRelayCancelledPayload(raw []byte) (relayCancelledPayload, bool) {
 // that by dropping the held projection in consumeRelayDropped below.
 func decodeRelayDroppedPayload(raw []byte) (relayDroppedPayload, bool) {
 	var value relayDroppedPayload
-	if json.Unmarshal(raw, &value) != nil || !hubJobIDPattern.MatchString(value.JobID) || value.Pane == "" || value.Pane == relayCancelledPane || len(value.Pane) > 128 || !hubAgentLabelPattern.MatchString(value.Lane) || value.OriginalEventID < 1 || value.Reason == "" || len(value.Reason) > 64 {
+	if json.Unmarshal(raw, &value) != nil || !hubJobIDPattern.MatchString(value.JobID) || value.Pane == "" || value.Pane == relayCancelledPane || len(value.Pane) > 128 || !LaneNamePattern.MatchString(value.Lane) || value.OriginalEventID < 1 || value.Reason == "" || len(value.Reason) > 64 {
 		return relayDroppedPayload{}, false
 	}
 	return value, true
@@ -59,7 +59,7 @@ func decodeRelayDroppedPayload(raw []byte) (relayDroppedPayload, bool) {
 
 func decodeRelayBatchedPayload(raw []byte) (relayBatchedPayload, bool) {
 	var value relayBatchedPayload
-	if json.Unmarshal(raw, &value) != nil || value.Pane == "" || value.Pane == relayCancelledPane || !hubAgentLabelPattern.MatchString(value.Lane) || len(value.EventIDs) < 2 {
+	if json.Unmarshal(raw, &value) != nil || value.Pane == "" || value.Pane == relayCancelledPane || !LaneNamePattern.MatchString(value.Lane) || len(value.EventIDs) < 2 {
 		return relayBatchedPayload{}, false
 	}
 	for _, id := range value.EventIDs {

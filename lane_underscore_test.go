@@ -14,9 +14,9 @@ func TestLaneUnderscoreValidators(t *testing.T) {
 		valid func(string) bool
 		upper bool
 	}{
-		{"hub lane, control plane and lanes CLI", laneNamePattern.MatchString, false},
-		{"relay owner and inbox", validReportRelayLaneName, true},
-		{"event and spawn owner label", hubAgentLabelPattern.MatchString, true},
+		{"hub lane, control plane and lanes CLI", LaneNamePattern.MatchString, false},
+		{"relay owner and inbox", LaneNamePattern.MatchString, false},
+		{"agent label", hubAgentLabelPattern.MatchString, true},
 		{"node registration projection", func(s string) bool {
 			return validHubLaneProjection(hubLaneProjection{Lane: s, Machine: "host-a", Pane: "w1:p1"})
 		}, false},
@@ -25,7 +25,7 @@ func TestLaneUnderscoreValidators(t *testing.T) {
 		for _, c := range []struct {
 			name string
 			want bool
-		}{{"auto_trader-design", true}, {"a_b", true}, {"A_B", v.upper}, {"a b", false}, {"a/b", false}} {
+		}{{"auto_trader-design", true}, {"a_b", true}, {"A_B", v.upper}, {"a.b", false}, {"a b", false}, {"a/b", false}} {
 			t.Run(v.name+"/"+c.name, func(t *testing.T) {
 				if got := v.valid(c.name); got != c.want {
 					t.Errorf("valid(%q)=%v want %v", c.name, got, c.want)

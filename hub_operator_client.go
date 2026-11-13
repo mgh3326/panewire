@@ -59,7 +59,7 @@ func validHubOperatorAPIPath(path string) bool {
 		}
 	}
 	if lane, found := strings.CutPrefix(path, "/v1/lanes/"); found {
-		return laneNamePattern.MatchString(lane)
+		return LaneNamePattern.MatchString(lane)
 	}
 	if id, found := strings.CutPrefix(path, "/v1/spawns/"); found {
 		if id, ok := strings.CutSuffix(id, "/abandon"); ok {

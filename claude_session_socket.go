@@ -80,7 +80,7 @@ func validClaudeSocketPath(path string) error {
 }
 
 func writeClaudeSocketRegistration(inboxRoot, lane, pane, socket string, now time.Time) error {
-	if inboxRoot == "" || !hubAgentLabelPattern.MatchString(lane) || pane == "" || len(pane) > 128 {
+	if inboxRoot == "" || !LaneNamePattern.MatchString(lane) || pane == "" || len(pane) > 128 {
 		return errClaudeSocketInvalid
 	}
 	if err := validClaudeSocketPath(socket); err != nil {
@@ -100,7 +100,7 @@ func writeClaudeSocketRegistration(inboxRoot, lane, pane, socket string, now tim
 // readClaudeSocketRegistration returns the lane's registered socket path when
 // the registration was made from pane.
 func readClaudeSocketRegistration(inboxRoot, lane, pane string) (string, error) {
-	if inboxRoot == "" || !hubAgentLabelPattern.MatchString(lane) {
+	if inboxRoot == "" || !LaneNamePattern.MatchString(lane) {
 		return "", errClaudeSocketMissing
 	}
 	raw, err := os.ReadFile(claudeSocketRegistryPath(inboxRoot, lane))
@@ -154,7 +154,7 @@ func runClaudeSocketCLI(args []string, stdout, stderr io.Writer, now func() time
 		}
 		rest = rest[2:]
 	}
-	if !hubAgentLabelPattern.MatchString(lane) {
+	if !LaneNamePattern.MatchString(lane) {
 		fmt.Fprintln(stderr, "panewire claude-socket: a valid --lane (or PANEWIRE_LANE) is required")
 		return ExitUsage
 	}

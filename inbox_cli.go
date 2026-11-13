@@ -123,7 +123,7 @@ func runInboxCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 			return ExitUsage
 		}
 	}
-	if (lane != "" && !validReportRelayLaneName(lane)) || (unread && command != "list") || (all && command != "ack") {
+	if (lane != "" && !LaneNamePattern.MatchString(lane)) || (unread && command != "list") || (all && command != "ack") {
 		fmt.Fprintln(stderr, inboxUsage)
 		return ExitUsage
 	}
