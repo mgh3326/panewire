@@ -143,6 +143,7 @@ func TestPlacementBurstSpreadsOnDecidedJobsNotClaims(t *testing.T) {
 		got, want = append(got, host), append(want, modelled)
 		counted[host]++
 	}
+	t.Logf("burst placed %v", got)
 	if !slices.Equal(got, want) {
 		t.Fatalf("burst went %v, the scores say %v", got, want)
 	}

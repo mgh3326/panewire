@@ -365,9 +365,32 @@ as a term but carries no special weight.
 `spawn_bridge_seconds` (default 600; 1–3600) after a job's claim the job
 itself costs 10 points. That keeps the next spawn off the same host until the
 metrics cover the first one. After the window the job costs nothing: its load
-is in the metrics, and the `jobs` term counts it for as long as it lives. The
-hub learns about a claim at the node's next heartbeat (every 10 s); two spawns
-placed before that heartbeat can still pick the same host.
+is in the metrics, and the `jobs` term counts it for as long as it lives.
+
+A job counts from the placement decision, not from the claim (hk 4448). The
+claim reaches the hub only after the node has checked out, started and landed
+the job, which took over a minute in the 2026-11-13 burst that sent six jobs to
+one host. The hub's spawn engine tells the hub which host it is trying at the
+moment it decides (`App.PlacementTry`), and the hub holds that job against the
+host (`placement_count.go`) until one of these happens:
+
+- the node's heartbeat lists the job: the claim is the count from then on, so
+  the job is never counted twice and the count never exceeds one claim;
+- the request ends without a launch (refused, never started, timed out): the
+  count is released, and a refusal that moves on to the next candidate moves it
+  to that host;
+- `spawn_bridge_seconds` pass without a claim, as for any claim.
+
+A request still reconciling, and a launched one whose claim has not shown, keep
+their count. The count adds to the host's `bridged_jobs` and so to the
+`claim_cost` term only. It does not change `active_jobs`, the `jobs` term or
+task slots. Two decisions read at the very same instant, before either has told
+the hub its host, can still pick one host; the next one sees both.
+
+Every spawn decision also takes the hub's latest view: before the engine reads
+the hub's fleet state the hub recomputes the hosts' `load` values, and the
+fallback read (`panewire place`'s endpoint) skips the 30 s cache. No decision
+ranks on a value published for an earlier one.
 
 Stale or missing data never reads as idle:
 
@@ -840,7 +863,8 @@ node-exporter collectors must stay enabled on every host (see
 `PANEWIRE_PROM_BASIC_USER`/`PANEWIRE_PROM_BASIC_PASS` outside the repository.
 Prometheus samples must have `machine_id`. A missing load sample is explicitly
 `load_unknown`: it cannot select the local machine; if no safe spill candidate
-exists the decision is `unavailable`. Results are cached for 30 seconds.
+exists the decision is `unavailable`. The operator read (`panewire place`) is
+cached for 30 seconds; a spawn's own placement never reads that cache.
 If Prometheus is unavailable or malformed, the endpoint always returns a 200
 hub-only decision based on connected/accepting state and heartbeat active-job
 counts; it never returns a scheduler 500.
