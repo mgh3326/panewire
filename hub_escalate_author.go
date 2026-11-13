@@ -26,7 +26,7 @@ import (
 //
 // The hub validates the successor and prepares its worktree first, then closes
 // the old pane, marks the old record lost with the successor's pointer,
-// releases the old role, claims the successor as an inherited (--parent-job)
+// transfers the old role while claiming the successor as an inherited (--parent-job)
 // spawn and waits for its placement. A successor that does not place is a
 // quota_refused refusal that says the author is gone. The design lane gets one
 // info event for every outcome, never an interrupt.
@@ -207,6 +207,11 @@ func (h *HubServer) escalateAuthor(ctx context.Context, request hubEscalateAutho
 	if err != nil {
 		return hubEscalateAuthorResult{}, err
 	}
+	host := spawnHolderHost(holder)
+	if host == "" {
+		return h.escalateAuthorRefusal(ctx, request, ownerLane, "pane_unavailable", "the holder host is unknown", resume)
+	}
+	setEscalateAuthorHost(&next, host)
 	if _, err := fleet.ValidateSubmission(next); err != nil {
 		return h.escalateAuthorRefusal(ctx, request, ownerLane, "successor_invalid", err.Error(), resume)
 	}
@@ -221,7 +226,7 @@ func (h *HubServer) escalateAuthor(ctx context.Context, request hubEscalateAutho
 		}
 		// The successor reuses the worktree: refuse here, with the author's
 		// pane open, anything its spawn would refuse once the pane is gone.
-		if code, why := h.escalateAuthorWorktreeUsable(ctx, holder, next.Repository.Checkout); code != "" {
+		if code, why := h.escalateAuthorWorktreeUsable(ctx, holder, next.Repository.Checkout, probe.row.Cwd); code != "" {
 			return h.escalateAuthorRefusal(ctx, request, ownerLane, code, why, false)
 		}
 		endReason := fleet.LadderStepEndReason(request.Round, newJob)
@@ -260,6 +265,16 @@ func (h *HubServer) escalateAuthor(ctx context.Context, request hubEscalateAutho
 	return hubEscalateAuthorResult{Job: newJob, Rung: rung}, nil
 }
 
+func setEscalateAuthorHost(next *fleet.Submission, host string) {
+	for i := 0; i+1 < len(next.Args); i++ {
+		if next.Args[i] == "--host" {
+			next.Args[i+1] = host
+			return
+		}
+	}
+	next.Args = append(next.Args, "--host", host)
+}
+
 // escalateAuthorWorktreeUsable asks the holder's node to prepare the
 // successor's checkout while the author's pane is still open. worktree.prepare
 // applies the very refusals the successor's spawn would meet after the pane is
@@ -267,17 +282,28 @@ func (h *HubServer) escalateAuthor(ctx context.Context, request hubEscalateAutho
 // commits origin does not have), and reusing an idle, clean worktree changes
 // nothing the successor's spawn would not change. A job with no checkout spec
 // ran in a canonical checkout and is not checked.
-func (h *HubServer) escalateAuthorWorktreeUsable(ctx context.Context, holder hubSpawnTask, checkout *fleet.HubCheckout) (code, reason string) {
+func (h *HubServer) escalateAuthorWorktreeUsable(ctx context.Context, holder hubSpawnTask, checkout *fleet.HubCheckout, cwd string) (code, reason string) {
 	if checkout == nil {
 		return "", ""
 	}
+	if cwd != "" {
+		var inspected nodeWorktreeInspectResult
+		if !h.nodeCall(ctx, spawnHolderHost(holder), nodeCommandWorktreeInspect, nodeWorktreeInspectArgs{Cwd: cwd}, spawnHeldPaneActWait, &inspected) || inspected.Worktree == nil || !spawnReceiptCheckoutPath(inspected.Worktree.Path, checkout.Dir, "") || inspected.Worktree.Branch != checkout.Branch || !nodeShaPattern.MatchString(inspected.Worktree.Head) {
+			return "worktree_unreadable", "the pane is not in the expected branch checkout"
+		}
+		checkout.Sha = inspected.Worktree.Head
+	}
 	var prepared nodeWorktreePrepareResult
-	args := nodeWorktreePrepareArgs{Origin: checkout.Origin, Mode: checkout.Mode, Branch: checkout.Branch, Sha: checkout.Sha, Fetch: checkout.Fetch, Dir: checkout.Dir}
+	args := nodeWorktreePrepareArgs{Origin: checkout.Origin, Mode: checkout.Mode, Branch: checkout.Branch, Sha: checkout.Sha, Fetch: checkout.Fetch, Dir: checkout.Dir, VerifyReuse: cwd != ""}
 	if !h.nodeCall(ctx, spawnHolderHost(holder), nodeCommandWorktreePrepare, args, spawnHeldPaneActWait, &prepared) {
 		return "worktree_unreadable", "the holder's node did not answer worktree.prepare"
 	}
 	switch prepared.Outcome {
 	case nodePreparePrepared, nodePrepareReused:
+		if prepared.Worktree == nil || !nodeShaPattern.MatchString(prepared.Worktree.Head) || (checkout.Sha != "" && !strings.EqualFold(checkout.Sha, prepared.Worktree.Head)) {
+			return "worktree_unreadable", "the prepared checkout did not retain its verified head"
+		}
+		checkout.Sha = prepared.Worktree.Head
 		return "", ""
 	case nodeOutcomeDirty:
 		return "worktree_dirty", "the job's worktree has uncommitted changes"

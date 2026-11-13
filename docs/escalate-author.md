@@ -83,12 +83,8 @@ checkout and its pane. It:
    escalation gate that covers the task grade;
 4. builds the successor's submission and validates it the way the claim will
    (`successor_invalid`), so a submission the store would refuse never costs
-   the author its pane. The successor's branch checkout drops the sha the
-   original submission pinned: the author has committed since, and
-   `worktree.prepare` refuses a HEAD ahead of a pinned sha, so the node
-   prepares against the fetched origin tip instead (a pushed author's HEAD
-   equals it). An experiment arm that no longer names the successor's canon is
-   dropped;
+   the author its pane. An experiment arm that no longer names the successor's
+   canon is dropped;
 5. probes the pane and refuses one that is busy or unreadable. A pane that is
    verifiably gone (an earlier attempt closed it) is not an error;
 6. runs `worktree.prepare` on the successor's checkout through the holder's
@@ -96,12 +92,14 @@ checkout and its pane. It:
    successor's spawn would meet once the pane is gone, so they are refusals
    with a live author: `worktree_dirty`, `worktree_locked`,
    `worktree_unpushed` (commits origin does not have, or the branch checked
-   out elsewhere), `worktree_unreadable`. Reusing a clean worktree changes
-   nothing the successor's spawn would not change;
+   out elsewhere), `worktree_unreadable`. The live pane is inspected first;
+   its checkout must match the requested branch and the fetched origin tip.
+   Verification refuses a mismatch without moving the worktree and pins the
+   verified HEAD and holder host for the successor;
 7. closes the pane (screen capture first) so one job holds the task;
 8. ends the old record `lost` with
    `ladder step round=<n> replaced_by=<new job>`;
-9. releases the old `(task, worker)` reservation and claims the successor as an
+9. atomically transfers the `(task, worker)` reservation while claiming the successor as an
    inherited spawn (`--parent-job <old>`), with the pinned rung, a
    `ladder step ...` override reason (the ladder-step rep row,
    [reps](reps.md#ladder-steps)), and the old submission's repository and

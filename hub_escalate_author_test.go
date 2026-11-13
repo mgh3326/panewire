@@ -169,6 +169,8 @@ func (f *escalateFixture) reply(op string) map[string]any {
 		default:
 			return map[string]any{"result": nodeWorktreePrepareResult{Outcome: f.prepareOutcome}}
 		}
+	case "worktree.inspect":
+		return map[string]any{"result": nodeWorktreeInspectResult{Worktree: &nodeWorktree{Path: cwd, Branch: "wk/task", Head: strings.Repeat("b", 40)}}}
 	case "pane.capture":
 		return map[string]any{"result": map[string]any{"outcome": nodeCaptureScreen, "saved": "/jobs/" + f.job + "/pane-screen.txt"}}
 	case "pane.close":
@@ -308,20 +310,17 @@ func TestEscalateAuthorStartsTheNextRungOnTheSameWorktree(t *testing.T) {
 			t.Fatalf("the brief must carry %q:\n%s", want, request.Brief)
 		}
 	}
-	if ops := commandOps(commands); !slices.Equal(ops, []string{"agents.list", "worktree.prepare", "pane.capture", "pane.close", "job.mark_lost"}) {
+	if ops := commandOps(commands); !slices.Equal(ops, []string{"agents.list", "worktree.inspect", "worktree.prepare", "pane.capture", "pane.close", "job.mark_lost"}) {
 		t.Fatalf("node commands %v", ops)
 	}
-	if reason := endReasonOf(t, commands[4]); reason != "ladder step round=5 replaced_by=pw-task-42-l1" {
+	if reason := endReasonOf(t, commands[5]); reason != "ladder step round=5 replaced_by=pw-task-42-l1" {
 		t.Fatalf("end_reason=%q", reason)
 	}
 	f.awaitInfo(t, "ladder step pw-task-42 -> pw-task-42-l1 on sonnet@xhigh")
 }
 
-// The author has committed since the submission pinned its sha, so the
-// successor's checkout must not pin it: worktree.prepare refuses a HEAD ahead
-// of the sha it is given, after the pane is gone. The same preparation runs
-// first, with the pane open, on the very checkout the successor will use.
-func TestEscalateAuthorSuccessorCheckoutFollowsTheOriginTip(t *testing.T) {
+// The successor pins the live checkout rather than the older submission SHA.
+func TestEscalateAuthorSuccessorCheckoutPinsTheVerifiedHead(t *testing.T) {
 	f := newEscalateFixture(t, "pw-task-47")
 	placed := placedAnywhere
 	if result, _ := f.escalate(t, &placed); result.Code != "" {
@@ -339,8 +338,8 @@ func TestEscalateAuthorSuccessorCheckoutFollowsTheOriginTip(t *testing.T) {
 		t.Fatal(err)
 	}
 	checkout := successor.Request.Repository.Checkout
-	if checkout == nil || checkout.Mode != "branch" || checkout.Branch != "wk/task" || checkout.Sha != "" {
-		t.Fatalf("the successor tracks the branch with no pinned sha: %+v", checkout)
+	if checkout == nil || checkout.Mode != "branch" || checkout.Branch != "wk/task" || checkout.Sha != strings.Repeat("b", 40) {
+		t.Fatalf("the successor pins the verified branch head: %+v", checkout)
 	}
 }
 
@@ -356,7 +355,7 @@ func TestEscalateAuthorPreparesTheWorktreeBeforeClosingThePane(t *testing.T) {
 			}
 		}
 	}
-	if prepare.Mode != "branch" || prepare.Branch != "wk/task" || prepare.Dir != "pw-task-48-checkout" || prepare.Sha != "" {
+	if prepare.Mode != "branch" || prepare.Branch != "wk/task" || prepare.Dir != "pw-task-48-checkout" || prepare.Sha != strings.Repeat("b", 40) || !prepare.VerifyReuse {
 		t.Fatalf("the preflight must prepare the successor's checkout: %+v", prepare)
 	}
 	ops := commandOps(commands)
@@ -375,10 +374,10 @@ func TestEscalateAuthorRefusesWhenTheRungIsNotAdmitted(t *testing.T) {
 	if result.Code != "quota_refused" || !result.AuthorEnded {
 		t.Fatalf("result=%+v", result)
 	}
-	if len(commands) != 5 {
+	if len(commands) != 6 {
 		t.Fatalf("the pane is closed and the record marked lost: %v", commandOps(commands))
 	}
-	if reason := endReasonOf(t, commands[4]); reason != "ladder step round=5 replaced_by=pw-task-43-l1" {
+	if reason := endReasonOf(t, commands[5]); reason != "ladder step round=5 replaced_by=pw-task-43-l1" {
 		t.Fatalf("end_reason=%q", reason)
 	}
 	f.awaitInfo(t, "quota_refused", "no author runs on this PR now")
@@ -394,7 +393,7 @@ func TestEscalateAuthorRefusalBeforeTheCloseLeavesTheAuthor(t *testing.T) {
 		t.Fatalf("result=%+v", result)
 	}
 	f.awaitInfo(t, "worktree_dirty", "the PR goes on to the next round")
-	if ops := commandOps(commands); !slices.Equal(ops, []string{"agents.list", "worktree.prepare"}) {
+	if ops := commandOps(commands); !slices.Equal(ops, []string{"agents.list", "worktree.inspect", "worktree.prepare"}) {
 		t.Fatalf("nothing past the worktree preparation may run: %v", ops)
 	}
 	if state := f.jobs.records["pw-task-49"]["state"]; state != "spawned" {
@@ -417,7 +416,7 @@ func TestEscalateAuthorWorktreeRefusalCodes(t *testing.T) {
 		if result.Code != code || result.AuthorEnded {
 			t.Fatalf("%s: result=%+v", outcome, result)
 		}
-		if ops := commandOps(commands); !slices.Equal(ops, []string{"agents.list", "worktree.prepare"}) {
+		if ops := commandOps(commands); !slices.Equal(ops, []string{"agents.list", "worktree.inspect", "worktree.prepare"}) {
 			t.Fatalf("%s: the pane must stay open: %v", outcome, ops)
 		}
 	}
@@ -651,5 +650,37 @@ func TestEscalateAuthorEndedReplayWithoutRungReportsEnded(t *testing.T) {
 	result, err := f.hub.escalateAuthor(t.Context(), request)
 	if err != nil || result.Code != "no_rung" || !result.AuthorEnded {
 		t.Fatalf("ended replay: result=%+v err=%v", result, err)
+	}
+}
+
+func TestEscalateAuthorPinsHolderHost(t *testing.T) {
+	f := newEscalateFixture(t, "author-host")
+	placed := placedAnywhere
+	result, _ := f.escalate(t, &placed)
+	if result.Job == "" {
+		t.Fatalf("result=%+v", result)
+	}
+	successor, err := f.hub.inbox.store.latestSpawnForJob(t.Context(), result.Job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if host := hubSpawnArg(successor.Request.Args, "--host"); host != "machine-a" {
+		t.Fatalf("successor host=%q; want holder machine-a", host)
+	}
+}
+
+func TestEscalateAuthorPinsVerifiedCheckoutHead(t *testing.T) {
+	f := newEscalateFixture(t, "author-head")
+	placed := placedAnywhere
+	result, _ := f.escalate(t, &placed)
+	if result.Job == "" {
+		t.Fatalf("result=%+v", result)
+	}
+	successor, err := f.hub.inbox.store.latestSpawnForJob(t.Context(), result.Job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := successor.Request.Repository.Checkout.Sha; got != strings.Repeat("b", 40) {
+		t.Fatalf("successor checkout head=%q", got)
 	}
 }

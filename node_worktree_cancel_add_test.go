@@ -226,3 +226,25 @@ func testSignaledExit(t *testing.T) error {
 	}
 	return nil
 }
+
+func TestNodeWorktreeVerifyReuseRefusesMovedOriginWithoutChangingCheckout(t *testing.T) {
+	fixture := newNodeWorktreeFixture(t)
+	client := fixture.client()
+	args := nodeWorktreePrepareArgs{Origin: fixture.origin, Mode: "branch", Branch: "feat", Dir: "repo.job"}
+	prepared, code := client.nodeWorktreePrepare(t.Context(), args)
+	if code != "" || prepared.(nodeWorktreePrepareResult).Outcome != nodePreparePrepared {
+		t.Fatalf("prepare=%+v code=%q", prepared, code)
+	}
+	dir := filepath.Join(fixture.workRoot, "repo.job")
+	seed := filepath.Join(fixture.root, "seed")
+	nodeGit(t, seed, "commit", "-q", "--allow-empty", "-m", "advance")
+	nodeGit(t, seed, "push", "-q", "origin", "feat")
+	args.Sha, args.VerifyReuse = fixture.feat, true
+	prepared, code = client.nodeWorktreePrepare(t.Context(), args)
+	if code != "" || prepared.(nodeWorktreePrepareResult).Outcome != nodePrepareBranchElsewhere {
+		t.Fatalf("verification=%+v code=%q", prepared, code)
+	}
+	if head := nodeGit(t, dir, "rev-parse", "HEAD"); head != fixture.feat {
+		t.Fatalf("checkout moved to %s, want %s", head, fixture.feat)
+	}
+}
