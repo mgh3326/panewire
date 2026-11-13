@@ -46,7 +46,7 @@ func TestR15GateRoleDenialRemaps77(t *testing.T) {
 		t.Run("gate_exit_"+strconv.Itoa(n), func(t *testing.T) {
 			f := &fakeRunner{Do: func(Command) Result { return Result{Code: n, Out: `{}`} }}
 			q := CLIQuota{Runner: f, Binary: "quota"}
-			_, e := q.Gate(context.Background(), QuotaRequest{Profile: "profile", Role: "tester", Effort: "high"})
+			_, e := q.Gate(context.Background(), QuotaRequest{Profile: "profile", Role: "implementer", Effort: "high"})
 			want := n
 			if n == 5 {
 				want = 77
@@ -67,14 +67,14 @@ func TestSeatPolicy(t *testing.T) {
 		host                                           bool
 		want                                           int
 	}{
-		{"cmd worker default", "cmd-dsflash41", "worker", "default", "B", "", "", true, 0},
-		{"cmd shares ds41", "cmd-dsflash41", "tester", "default", "B", "deepseek", "", true, 77},
-		{"independent tester", "cmd-dsflash41", "tester", "default", "B", "anthropic", "", true, 0},
-		{"missing builder family", "cmd-dsflash41", "tester", "default", "B", "", "", true, 77},
-		{"grade too low", "cmd-dsflash41", "worker", "default", "S+", "", "", true, 77},
-		{"capability absent", "cmd-dsflash41", "worker", "default", "B", "", "", false, 70},
-		{"E6 marker absent", "builder-haiku-high", "worker", "default", "B", "", "", true, 77},
-		{"E6 marker exact", "builder-haiku-high", "worker", "default", "B", "", "haiku@high", true, 0},
+		{"cmd implementer default", "cmd-dsflash41", "implementer", "default", "B", "", "", true, 0},
+		{"cmd shares ds41", "cmd-dsflash41", "reviewer", "default", "B", "deepseek", "", true, 77},
+		{"independent reviewer", "cmd-dsflash41", "reviewer", "default", "B", "anthropic", "", true, 0},
+		{"missing author family", "cmd-dsflash41", "reviewer", "default", "B", "", "", true, 77},
+		{"grade too low", "cmd-dsflash41", "implementer", "default", "S+", "", "", true, 77},
+		{"capability absent", "cmd-dsflash41", "implementer", "default", "B", "", "", false, 70},
+		{"E6 marker absent", "builder-haiku-high", "implementer", "default", "B", "", "", true, 77},
+		{"E6 marker exact", "builder-haiku-high", "implementer", "default", "B", "", "haiku@high", true, 0},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			s := p.Profiles[tt.profile]
@@ -117,11 +117,11 @@ func TestR02InstalledCatalogOwnsModelsEffortsAndGrades(t *testing.T) {
 		return Result{Out: `{"profile":"p","model_id":"new-model-from-installed-tool","effort":"high","grade":"A+","gate":"default"}`}
 	}}
 	q := CLIQuota{Runner: f, Binary: "pacelever"}
-	l, e := q.Launch(context.Background(), QuotaRequest{Profile: "p", Effort: "high", Role: "worker"})
+	l, e := q.Launch(context.Background(), QuotaRequest{Profile: "p", Effort: "high", Role: "implementer"})
 	if e != nil || l.ModelID != "new-model-from-installed-tool" {
 		t.Fatalf("%+v %v", l, e)
 	}
-	if !strings.Contains(strings.Join(f.Calls[0].Args, " "), "--role worker") {
+	if !strings.Contains(strings.Join(f.Calls[0].Args, " "), "--role implementer") {
 		t.Fatal("role not forwarded")
 	}
 }

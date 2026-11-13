@@ -192,7 +192,7 @@ func TestCatalogSelectionKeepsValidRowAndReportsMalformedRow(t *testing.T) {
 	a, s, q := selFixture(t, "A", rows, map[string]PoolView{"claude": riskPool(30, 8)}, []string{"claude"})
 	q.GateDo = gatePools(map[string]string{"sonnet": "claude"})
 	serveRouting(t, routingDocV1)
-	route, err := a.routeFor(context.Background(), "worker", "")
+	route, err := a.routeFor(context.Background(), "implementer", "")
 	if err != nil {
 		t.Fatalf("route: %v", err)
 	}
@@ -201,8 +201,8 @@ func TestCatalogSelectionKeepsValidRowAndReportsMalformedRow(t *testing.T) {
 		Rows: []CatalogEntry{{Profile: "sonnet", Effort: "high", Grade: "A", Pool: "claude", Gate: "default", ModelID: "sonnet-m"}},
 		Info: CatalogInfo{Source: catalogSourceServer}, Warnings: []string{warning},
 	}}
-	s.Role = "worker"
-	sel, err := a.selectFor(context.Background(), s, selReq{grade: "A", t: "T1", role: "worker", route: route, urgency: urgencyNormal, urgencySource: "default"})
+	s.Role = "implementer"
+	sel, err := a.selectFor(context.Background(), s, selReq{grade: "A", t: "T1", role: "implementer", route: route, urgency: urgencyNormal, urgencySource: "default"})
 	if err != nil || sel == nil || sel.chosen.seat.Canon != "sonnet" {
 		t.Fatalf("selection should use the valid row: selection=%+v err=%v", sel, err)
 	}

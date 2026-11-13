@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -33,11 +32,6 @@ const routingDocKey = "policy/model-routing"
 type RoutingPolicy struct {
 	Version int                    `json:"version"`
 	Roles   map[string]RoutingRule `json:"roles"`
-	RoleMap map[string]string      `json:"panewire_role_map"`
-	// LegacyRoleMap is the map's name before the runtug absorption (#155).
-	// hk policy/model-routing still publishes it, so parseRoutingJSON reads it
-	// into RoleMap; it is never kept or cached under this name.
-	LegacyRoleMap map[string]string `json:"runtug_role_map,omitempty"`
 }
 
 // RoutingRule is one routing role's entry. Allowed names catalog profiles
@@ -61,16 +55,14 @@ type RoutingRule struct {
 	FamilyEffort map[string]string `json:"family_effort,omitempty"`
 }
 
-// routingRoles are the values --routing-role accepts.
+// routingRoles are the roles the table routes and `panewire resolve --role`
+// accepts. A spawn's --role is one of them (implementer, reviewer, consult);
+// verifier and judge are resolve-only.
 var routingRoles = []string{"consult", "implementer", "verifier", "reviewer", "judge"}
 
 // routingStrictRoles are refused when neither hk nor a cached copy can say
 // which profiles they may run on.
 var routingStrictRoles = []string{"consult", "verifier"}
-
-// builtinRoleMap maps seat roles to routing roles when no table is readable,
-// so a counsel is still known to be a consult (and refused) without one.
-var builtinRoleMap = map[string]string{"worker": "implementer", "tester": "verifier", "reviewer": "reviewer", "counsel": "consult"}
 
 // retiredLeadRole is the routing role panewire no longer reads from the table.
 const retiredLeadRole = "lead"
@@ -166,14 +158,6 @@ func (p RoutingPolicy) validate() error {
 			return e
 		}
 	}
-	for seat, role := range p.RoleMap {
-		if role == "explorer" {
-			return fmt.Errorf("panewire_role_map maps %s to removed role explorer; use implementer", seat)
-		}
-		if _, ok := p.Roles[role]; !ok {
-			return fmt.Errorf("panewire_role_map maps %s to unknown role %s", seat, role)
-		}
-	}
 	return nil
 }
 
@@ -224,16 +208,8 @@ func parseRoutingJSON(b []byte) (RoutingPolicy, error) {
 	if e := json.Unmarshal(b, &p); e != nil {
 		return p, e
 	}
-	if len(p.LegacyRoleMap) > 0 {
-		if len(p.RoleMap) > 0 && !maps.Equal(p.RoleMap, p.LegacyRoleMap) {
-			return p, fmt.Errorf("panewire_role_map and runtug_role_map disagree; publish one map")
-		}
-		p.RoleMap = p.LegacyRoleMap
-	}
-	p.LegacyRoleMap = nil
 	// The retired lead entry is never read, so it is never validated: a table
-	// that still carries one (with or without family_effort) stays usable, and
-	// a role map that names lead is refused as an unknown role.
+	// that still carries one (with or without family_effort) stays usable.
 	delete(p.Roles, retiredLeadRole)
 	return p, p.validate()
 }
@@ -346,34 +322,30 @@ func (r *routing) admits(profile string) bool {
 	return r == nil || r.allowed == nil || slices.Contains(r.allowed, profile)
 }
 
-// routeFor resolves the routing role for a seat role (or the explicit
-// override) against the policy table.
+// routeFor resolves the routing role for a seat role against the policy
+// table. A seat role routes as itself; only `panewire resolve` passes an
+// override (verifier, judge), on the implementer or reviewer seat.
 func (a *App) routeFor(ctx context.Context, seatRole, override string) (*routing, error) {
 	if override != "" && !slices.Contains(routingRoles, override) {
-		if override == "explorer" {
-			return nil, fail(exitUsage, "explorer role was removed; use --routing-role implementer")
-		}
-		return nil, fail(exitUsage, "--routing-role must be one of %s", strings.Join(routingRoles, "|"))
+		return nil, fail(exitUsage, "routing role must be one of %s", strings.Join(routingRoles, "|"))
 	}
 	// Execution authority cannot be relabelled to escape consult admission.
-	if required := builtinRoleMap[seatRole]; topRoutingRole(required) {
-		if override != "" && override != required {
-			return nil, fail(exitSeatRefused, "NO_ROLE_CANDIDATE: --role %s requires routing role %s", seatRole, required)
+	if topRoutingRole(seatRole) {
+		if override != "" && override != seatRole {
+			return nil, fail(exitSeatRefused, "NO_ROLE_CANDIDATE: --role %s requires routing role %s", seatRole, seatRole)
 		}
-		override = required
+		override = seatRole
 	}
 	p, source, e := a.routingPolicy(ctx)
 	if e != nil {
-		role := firstNonempty(override, builtinRoleMap[seatRole])
+		role := firstNonempty(override, seatRole)
 		if slices.Contains(routingStrictRoles, role) {
 			return nil, fail(exitConfig, "POLICY_UNAVAILABLE: routing role %s refused: %s unavailable (%v)", role, routingDocKey, e)
 		}
 		a.warn("%s unavailable (%v); %s proceeds unfiltered (builtin_default)", routingDocKey, e, firstNonempty(role, seatRole))
 		return &routing{role: role, source: routingSourceBuiltin}, nil
 	}
-	// A seat role the table does not map takes the builtin routing role: a
-	// missing or renamed map must not leave the role unfiltered (hk 2837).
-	role := firstNonempty(override, p.RoleMap[seatRole], builtinRoleMap[seatRole])
+	role := firstNonempty(override, seatRole)
 	r := &routing{role: role, version: p.Version, source: source}
 	if role == "" {
 		return r, nil

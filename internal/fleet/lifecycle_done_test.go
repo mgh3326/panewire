@@ -94,40 +94,24 @@ func TestDoneLaterReportGetsOwnDocumentAndNeverWritesRecord(t *testing.T) {
 }
 
 // hk takes a result only in the spawned→completed write. A `--result` on a
-// record that is already completed without one is terminal_without_result on
-// both paths: the interactive done fails closed, a headless done warns and goes
-// on, and neither pretends to attach it.
-func TestDoneResultOnTerminalWithoutResultOnBothPaths(t *testing.T) {
-	for _, headless := range []bool{false, true} {
-		name := "interactive"
-		if headless {
-			name = "headless"
-		}
-		t.Run(name, func(t *testing.T) {
-			r := newDoneRig(t)
-			if headless {
-				putEvent(t, r.a, "j", "job.spawned", map[string]any{"headless": true, "role": "delegate", "pane_id": "w:p1", "tab_id": "w:t1", "label": "agent-a"})
-			}
-			r.write("answer\n")
-			if e := r.done(); e != nil {
-				t.Fatal(e)
-			}
-			findings := filepath.Join(r.a.Jobs, "j", "findings.json")
-			if e := os.WriteFile(findings, []byte(`{"findings":[]}`), 0600); e != nil {
-				t.Fatal(e)
-			}
-			e := r.done("--result", findings)
-			if headless {
-				if e != nil || !strings.Contains(r.stderr(), "reason=terminal_without_result") {
-					t.Fatalf("error=%v warnings=%q, want a warning with reason=terminal_without_result", e, r.stderr())
-				}
-			} else if code(e) != exitStateConflict || !strings.Contains(e.Error(), "reason=terminal_without_result") {
-				t.Fatalf("error=%v, want terminal_without_result", e)
-			}
-			if rec := r.store.record(t, "j"); rec["result"] != nil {
-				t.Fatalf("record=%v, want no result", rec)
-			}
-		})
+// record that is already completed without one is terminal_without_result: the
+// interactive done fails closed and does not pretend to attach it.
+func TestDoneResultOnTerminalWithoutResult(t *testing.T) {
+	r := newDoneRig(t)
+	r.write("answer\n")
+	if e := r.done(); e != nil {
+		t.Fatal(e)
+	}
+	findings := filepath.Join(r.a.Jobs, "j", "findings.json")
+	if e := os.WriteFile(findings, []byte(`{"findings":[]}`), 0600); e != nil {
+		t.Fatal(e)
+	}
+	e := r.done("--result", findings)
+	if code(e) != exitStateConflict || !strings.Contains(e.Error(), "reason=terminal_without_result") {
+		t.Fatalf("error=%v, want terminal_without_result", e)
+	}
+	if rec := r.store.record(t, "j"); rec["result"] != nil {
+		t.Fatalf("record=%v, want no result", rec)
 	}
 }
 
@@ -280,34 +264,24 @@ func TestDonePinFailureIsRetriedByTheRerun(t *testing.T) {
 	}
 }
 
-// The watcher and a headless delegate have no one to read an exit status: a
-// failed upload warns, the job completes and the command exits 0.
-func TestDoneUploadFailureStillCompletesForWatcherAndHeadless(t *testing.T) {
-	for _, name := range []string{"watcher", "headless"} {
-		t.Run(name, func(t *testing.T) {
-			r := newDoneRig(t)
-			r.hk.Handle(hkFails("PUT /v1/documents/", http.StatusInternalServerError, `{"error":"internal_error"}`))
-			r.write("answer\n")
-			var e error
-			if name == "watcher" {
-				e = r.a.lifecycleWithOptions(t.Context(), "done", []string{"j", "--report", r.path}, true, false)
-			} else {
-				putEvent(t, r.a, "j", "job.spawned", map[string]any{"headless": true, "role": "delegate", "pane_id": "w:p1", "tab_id": "w:t1", "label": "agent-a"})
-				e = r.done()
-			}
-			if e != nil {
-				t.Fatalf("done error=%v, want a warning only", e)
-			}
-			if !strings.Contains(r.stderr(), "report upload failed; local report retained") {
-				t.Fatalf("warnings=%q", r.stderr())
-			}
-			if rec := r.store.record(t, "j"); str(rec, "state") != "completed" || rec["report_doc"] != nil {
-				t.Fatalf("record=%v, want completed with no pin", rec)
-			}
-			if got := len(r.events("job.completed")); got != 1 {
-				t.Fatalf("job.completed events=%d", got)
-			}
-		})
+// The watcher has no one to read an exit status: a failed upload warns, the
+// job completes and the command exits 0.
+func TestDoneUploadFailureStillCompletesForWatcher(t *testing.T) {
+	r := newDoneRig(t)
+	r.hk.Handle(hkFails("PUT /v1/documents/", http.StatusInternalServerError, `{"error":"internal_error"}`))
+	r.write("answer\n")
+	e := r.a.lifecycleWithOptions(t.Context(), "done", []string{"j", "--report", r.path}, true, false)
+	if e != nil {
+		t.Fatalf("done error=%v, want a warning only", e)
+	}
+	if !strings.Contains(r.stderr(), "report upload failed; local report retained") {
+		t.Fatalf("warnings=%q", r.stderr())
+	}
+	if rec := r.store.record(t, "j"); str(rec, "state") != "completed" || rec["report_doc"] != nil {
+		t.Fatalf("record=%v, want completed with no pin", rec)
+	}
+	if got := len(r.events("job.completed")); got != 1 {
+		t.Fatalf("job.completed events=%d", got)
 	}
 }
 
@@ -390,12 +364,11 @@ func TestDoneSecretRefusalRepeatsByItself(t *testing.T) {
 	}
 }
 
-// An unattended `done --result` (headless delegate, watcher) that meets a
-// different stored result raises the same fleet signal the interactive one
+// The watcher's completion, which files the job dir's findings.json, meets a
+// different stored result and raises the same fleet signal the interactive one
 // does: a job_result conflict event and the Sentry warning.
 func TestDoneResultConflictOnUnattendedPathRaisesTheSignal(t *testing.T) {
 	r := newDoneRig(t)
-	putEvent(t, r.a, "j", "job.spawned", map[string]any{"headless": true, "role": "delegate", "pane_id": "w:p1", "tab_id": "w:t1", "label": "agent-a"})
 	r.store.mu.Lock()
 	r.store.records["j"]["state"] = "completed"
 	r.store.records["j"]["result"] = map[string]any{"source": "stored"}
@@ -410,8 +383,8 @@ func TestDoneResultConflictOnUnattendedPathRaisesTheSignal(t *testing.T) {
 		t.Fatal(e)
 	}
 	r.write("answer\n")
-	if e := r.done("--result", findings); e != nil {
-		t.Fatalf("headless done failed: %v", e)
+	if e := r.a.lifecycleWithOptions(t.Context(), "done", []string{"j", "--report", r.path}, true, false); e != nil {
+		t.Fatalf("watcher done failed: %v", e)
 	}
 	if len(*events) != 1 || (*events)[0].Outcome != "conflict" {
 		t.Fatalf("job_result events=%+v", *events)

@@ -71,7 +71,7 @@ func (f *indexFixture) claim(i int, epoch uint64, age time.Duration, pane string
 	if pane != "" {
 		payload = fmt.Sprintf(`,"payload":{"pane_id":%q,"herdr_session":"sess-%d"}`, pane, i%7)
 	}
-	return fmt.Sprintf(`{"type":"job.claimed","created_at":%q,"agent_label":"agent-%d","owner_lane":"lane-%d","epoch":%d,"t_level":"T2","role":"worker","seq":1%s}`, f.stamp(age), i, i%9, epoch, payload)
+	return fmt.Sprintf(`{"type":"job.claimed","created_at":%q,"agent_label":"agent-%d","owner_lane":"lane-%d","epoch":%d,"t_level":"T2","role":"implementer","seq":1%s}`, f.stamp(age), i, i%9, epoch, payload)
 }
 
 func (f *indexFixture) spawned(i int, pane string, age time.Duration) string {

@@ -364,18 +364,3 @@ func TestDoneResultStrictDiagnosticDoesNotLeakBody(t *testing.T) {
 		}
 	}
 }
-
-func TestDoneResultHeadlessDelegateKeepsWarnAndContinue(t *testing.T) {
-	a, _, h, _, report, result := strictDoneFixture(t, "spawned")
-	putEvent(t, a, "j", "job.spawned", map[string]any{"headless": true, "role": "delegate"})
-	h.putStatuses = []int{http.StatusBadRequest}
-	if err := strictDone(t, a, report, result); err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(a.Err.(*bytes.Buffer).String(), "reason=http_400") {
-		t.Fatalf("safe refusal token absent: %q", a.Err)
-	}
-	if _, pools := ledgerState(t, a, "j"); len(pools) != 0 {
-		t.Fatal("delegate quota was not released")
-	}
-}

@@ -218,7 +218,7 @@ func TestPoolCapDropsCappedCreditPool(t *testing.T) {
 		ompRow("omp-sol", "openai/gpt-6.1-sol", "openai-api"),
 		ompRow("omp-opus", "anthropic/claude-opus-5-5", "anthropic-api"),
 	}
-	a, s, q, src := hostFirstFixture(t, "worker", "A", rows,
+	a, s, q, src := hostFirstFixture(t, "implementer", "A", rows,
 		map[string]string{"mac-b": openaiKey, "cloud-small": testCreditA},
 		map[string]float64{"mac-b": 0.1, "cloud-small": 0.5})
 	serveOMPRouting(t, a)

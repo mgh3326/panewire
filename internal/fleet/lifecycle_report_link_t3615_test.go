@@ -29,7 +29,7 @@ func doneReportLink(t *testing.T, task string) (put, rec map[string]any, eventSH
 	hk := useFakeHK(t)
 	noHKCLI(t, f)
 	hk.Handle(hkCommentAnswer)
-	claim := map[string]any{"owner_lane": "owner", "parent_lane": "parent", "t_level": "T1", "role": "worker"}
+	claim := map[string]any{"owner_lane": "owner", "parent_lane": "parent", "t_level": "T1", "role": "implementer"}
 	if task != "" {
 		claim["task_id"] = task
 	}

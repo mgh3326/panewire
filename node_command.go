@@ -76,7 +76,7 @@ func knownNodeCommandOp(op string) bool {
 	case nodeCommandAgentsList, nodeCommandPaneClose, nodeCommandPaneCapture, nodeCommandPaneRead,
 		nodeCommandWorktreeInspect, nodeCommandWorktreeList, nodeCommandWorktreePrepare, nodeCommandWorktreeRemove,
 		nodeCommandQuotaRefresh, nodeCommandJobDone, nodeCommandJobResult, nodeCommandJobMarkLost, nodeCommandPRStatus, nodeCommandJobClose, nodeCommandJobReap,
-		nodeCommandCheckoutPull:
+		nodeCommandCheckoutPull, nodeCommandPaneSweep:
 		return true
 	}
 	return false
@@ -86,7 +86,7 @@ func knownNodeCommandOp(op string) bool {
 // result. node_lost and node_timeout are hub-local and never on the wire.
 func validNodeCommandError(code string) bool {
 	switch code {
-	case "invalid_args", "herdr_failed", "close_failed", "capture_failed", "jobs_root_unset", "work_root_unset", "refresh_failed", "done_failed", "result_failed", "mark_lost_failed", "reap_failed", "result_too_large":
+	case "invalid_args", "herdr_failed", "close_failed", "capture_failed", "jobs_root_unset", "work_root_unset", "refresh_failed", "done_failed", "result_failed", "mark_lost_failed", "reap_failed", "result_too_large", "sweep_failed":
 		return true
 	}
 	return false
@@ -196,6 +196,7 @@ func decodeNodeCommandStrict(raw []byte, target any) bool {
 var nodeCommandArgFields = map[string][]string{
 	nodeCommandJobClose:        {"job", "lane", "outcome", "reason", "override"},
 	nodeCommandJobReap:         {"job", "lane", "force"},
+	nodeCommandPaneSweep:       {"age_s"},
 	nodeCommandAgentsList:      {},
 	nodeCommandPaneClose:       {"pane_id", "name", "agent_status", "cwd"},
 	nodeCommandPaneCapture:     {"pane_id", "name", "cwd", "merged_after", "write"},
@@ -279,6 +280,9 @@ func parseNodeCommandArgs(op string, raw json.RawMessage) (any, bool) {
 	case nodeCommandJobReap:
 		var args nodeJobReapArgs
 		return args, decodeNodeCommandStrict(raw, &args) && validNodeJobReapArgs(args)
+	case nodeCommandPaneSweep:
+		var args nodePaneSweepArgs
+		return args, decodeNodeCommandStrict(raw, &args) && validNodePaneSweepArgs(args)
 	case nodeCommandJobDone:
 		var args nodeJobDoneArgs
 		return args, decodeNodeCommandStrict(raw, &args) && validNodeJobName(args.Job) && validNodeCommandPath(args.Report)
@@ -428,6 +432,10 @@ func canonicalNodeCommandResult(op string, raw json.RawMessage) (json.RawMessage
 	case nodeCommandJobReap:
 		var result nodeJobReapResult
 		valid = decodeNodeCommandStrict(raw, &result) && validNodeJobReapResult(result)
+		target = result
+	case nodeCommandPaneSweep:
+		var result nodePaneSweepResult
+		valid = decodeNodeCommandStrict(raw, &result) && validNodePaneSweepResult(result)
 		target = result
 	case nodeCommandPRStatus:
 		var result nodePRStatusResult
@@ -729,6 +737,10 @@ func (client *HubClient) runNodeCommand(ctx context.Context, op string, raw json
 		client.nodeCommandMu.Lock()
 		defer client.nodeCommandMu.Unlock()
 		return client.nodeJobReap(ctx, args)
+	case nodePaneSweepArgs:
+		// No nodeCommandMu here: each close takes it through the sweeper's
+		// Exclusive, as the local pass does (node_pane_sweep.go).
+		return client.nodePaneSweep(ctx, args)
 	case nodeJobDoneArgs:
 		client.nodeCommandMu.Lock()
 		defer client.nodeCommandMu.Unlock()

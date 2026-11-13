@@ -111,8 +111,7 @@ The embedded OMP profiles use the `omp` binary with standard host admission:
 | `omp-haiku` | `omp` | `anthropic/claude-haiku-5-5` | `credit` | `anthropic-api` |
 | `omp-luna` | `omp` | `openai/gpt-6-luna` | `credit` | `openai-api` |
 
-OMP launches with `--model <provider/model>:<effort>` and uses `-p` for a
-headless delegate. Startup and brief delivery require a visible footer that
+OMP launches with `--model <provider/model>:<effort>`. Startup and brief delivery require a visible footer that
 matches the model, effort, and working directory. The catalog seed at
 [`catalog/omp-credit-seed.json`](catalog/omp-credit-seed.json) mirrors native
 grades and gates for each effort. The `omp-haiku` and `omp-luna` rungs are
@@ -164,7 +163,7 @@ and its error is preserved in the registration warning.
 | `hub_wait` | `240` | `via = "hub"` only: seconds (1..300) the hub waits for the node to answer a spawn. It bounds the whole node run, so it must exceed the node's `brief_submit_timeout_ms` plus launch time; a shorter budget cuts the submit window. A first spawn that clones a large repo may need more. |
 | `brief_doc_prefix` | `briefs/` | `via = "hub"` only: handoffkeep key prefix the brief is uploaded under; it must match the node's own `brief_doc_prefix` (ends in `/`). |
 | `tags` | unset | Capability tags offered by this host (`caps` is an alias; both lists merge). A job's required `--tags` must be a subset for the host to be a placement candidate. A capability the host does not declare is unknown and fails closed for this host only: the host is excluded for jobs that need it and stays eligible for every other job. See [Host capabilities and light hosts](#host-capabilities-and-light-hosts). |
-| `roles` | unset (all) | Nonempty list of spawn roles (`worker`, `tester`, `reviewer`, `counsel`) this host accepts. Other roles record `role_not_accepted:<role>`. A list that still names the retired `builder` role is a config error (exit 70) that names the key to edit: delete `"builder"` from `<host>.roles`. |
+| `roles` | unset (all) | Nonempty list of spawn roles (`implementer`, `reviewer`, `consult`) this host accepts. Other roles record `role_not_accepted:<role>`. A list that still names the retired `builder` role is a config error (exit 70) that names the key to edit: delete `"builder"` from `<host>.roles`. |
 | `grades` | unset (all) | Nonempty list of task grades (`C`, `B`, `A`, `A+`, `S`, `S+`, `SS`) this host accepts. Other grades record `grade_not_accepted:<grade>`; a consult has no grade and records `grade_not_accepted:none`. |
 | `presence_id` | host `NAME` | Identity this host uses in pacelever host-presence records. |
 | `heavy` | legacy | Accepted and ignored; the `heavy` command and its host lock were removed. |
@@ -205,8 +204,8 @@ Recommended declarations by machine class:
 | macOS development machines | `["macos", "unity", "xcode"]` | none |
 | Linux desktop | `["linux", "unity", "gpu"]` | none |
 | Small cloud VM | `["linux"]` | none; no `unity` |
-| One-core cloud VM | `["linux"]` | `roles = ["worker", "tester", "reviewer"]`, `grades = ["C", "B", "A"]` (no consult, no heavy grade) |
-| Raspberry Pi | `["linux"]` | `roles = ["worker", "tester"]`, `grades = ["C", "B"]` (Python and docs work) |
+| One-core cloud VM | `["linux"]` | `roles = ["implementer", "reviewer"]`, `grades = ["C", "B", "A"]` (no consult, no heavy grade) |
+| Raspberry Pi | `["linux"]` | `roles = ["implementer"]`, `grades = ["C", "B"]` (Python and docs work) |
 
 ```toml
 [hosts.mac-b]
@@ -220,12 +219,12 @@ tags = ["linux"]
 
 [hosts.cloud-tiny]
 tags = ["linux"]
-roles = ["worker", "tester", "reviewer"]
+roles = ["implementer", "reviewer"]
 grades = ["C", "B", "A"]
 
 [hosts.pi]
 tags = ["linux"]
-roles = ["worker", "tester"]
+roles = ["implementer"]
 grades = ["C", "B"]
 ```
 
@@ -264,7 +263,7 @@ panewire:
    with `fetch: pull/<n>/head` when a local `origin/pull/<n>/head` ref points
    at HEAD, or `fetch: refs/heads/<branch>` of an origin branch containing it
    (a detached HEAD, or a branch whose commits sit on another origin ref).
-   A writing role (any role but `reviewer` and `counsel`) whose `branch` has no
+   A writing role (any role but `reviewer` and `consult`) whose `branch` has no
    local `refs/remotes/origin/<branch>` is refused (exit 81) before anything is
    uploaded, naming the `git -C <cwd> push -u origin <branch>` command to run.
    The same roles are refused (exit 81) when HEAD is a strict ancestor of that
@@ -281,7 +280,7 @@ panewire:
    node's `cwd_map[<repo name>]`.
 3. sends the flags the hub's allowlist carries (`-m -l --t --job --owner
    --effort --role --lane --parent --task|--parent-job --report-relative -L --urgency
-   --builder-family --builder-job --review-pass`). The node supplies workspace, host and the
+   --author-family --builder-job --review-pass`). The node supplies workspace, host and the
    override reason. A flag the allowlist cannot carry (`--keep`, `--job-dup-ok`,
    `--task-hk-bypass`, `--allow-escalation`, `--operator-request`,
    `--requested-by`, `--purpose`) refuses the spawn (exit 2)
@@ -296,7 +295,7 @@ panewire:
    message naming the missing capability instead of retrying with an absolute
    path. Upgrade panewire on the hub to a version whose spawn allowlist carries the
    flag.
-   `--builder-family` may be sent without `--builder-job` for `--role reviewer`
+   `--author-family` may be sent without `--builder-job` for `--role reviewer`
    only (the author's job is not bound to the task): the reviewer then runs as
    a top-level job, still excludes that family, and neither claims nor links
    the task, so several passes on one task all spawn. Any other role keeps the
@@ -368,7 +367,7 @@ restated here. `docs/quota-stop.md` has the mechanics.
 | Role | What happens |
 | --- | --- |
 | reviewer | On a quota screen the watcher ends the job at once, with no grace (hk 4507): the hk record ends `quota_stop pool=<pool> reset_at=<RFC3339 UTC>` and `job.lost` carries `reason: "quota_stop"`; mergewake respawns the review on another model. A reviewer stopped on a credit rejection is still replaced by the hub: same task, role, review pass, owner and brief, job id `<old>-q<n>` and `--exclude-pool <pool>`; the old hk record ends `quota_stop pool=<pool> replaced_by=<new job>` (`replaced_by` is the last `key=value` token, mergewake follows it), at most 2 replacements per review pass (`<old>-q1`, then `<old>-q1-q2`), and when no other pool can take it the watcher ends the job after its grace. |
-| worker, tester | The quota-stop manager acts even with `--quota-stop-act` off. It waits and resumes the same pane once at the reset when the reset is at or before the job's start plus the task's expected time; otherwise (reset later, no expected time, an urgent task, or a second stop after one resume) the job is handed over like a reviewer, with `end_reason` `quota_stop pool=<pool> handed_over_to=<new job>`, the same worktree and branch, and one brief line naming the earlier job's report and branch. |
+| implementer | The quota-stop manager acts even with `--quota-stop-act` off. It waits and resumes the same pane once at the reset when the reset is at or before the job's start plus the task's expected time; otherwise (reset later, no expected time, an urgent task, or a second stop after one resume) the job is handed over like a reviewer, with `end_reason` `quota_stop pool=<pool> handed_over_to=<new job>`, the same worktree and branch, and one brief line naming the earlier job's report and branch. |
 
 The owner gets one info lane event for either action. `--quota-stop-act` still
 gates every other role.
@@ -411,7 +410,7 @@ unpublished measurement keeps the refusal; `quota_gates` records
 `gate_basis` is also recorded as `basis`.
 
 실행 호스트는 native gate receipt에서 요청한 `account_key`와 pool을 확인합니다.
-선택 계정은 JSON receipt가 필요하며, pane 및 headless launch는 quota lease를
+선택 계정은 JSON receipt가 필요하며, pane launch는 quota lease를
 기록하기 전에 계정 연결을 다시 검사합니다. 대상 호스트도 spawn 전에 마지막
 local gate를 수행합니다. 원격 checkout provisioning은 변경하지 않습니다.
 
@@ -736,7 +735,7 @@ or unresolved state exits non-zero, emits no completion event or relay and
 records `job.record_failed` with `op` and a safe `reason` token. Conflicts use
 exit 75. A `--result` on a record that is completed without one is
 `terminal_without_result` on both paths: the interactive `done` fails, the
-headless delegate warns and continues. Safe reasons are `secret_like_content`
+watcher warns and continues. Safe reasons are `secret_like_content`
 or `secret_like_content:<pattern>` (pattern matches `[a-z0-9_]{1,40}`),
 `terminal_without_result`, `result_conflict`, `job_escalated`, `job_lost`,
 `no_spawn_evidence`, a validated hk code matching `[a-z0-9_]{1,64}`,
@@ -746,12 +745,12 @@ An interactive `done` that completed but left the report out of hk, or its pin
 unwritten, prints its `OK` line and exits 1 with `completed; report not in hk;
 rerun the same command` (or `report not pinned in hk`). That is reporting only:
 the job completed, and the same command run again finishes the missing step.
-The watcher and the headless delegate warn and carry on. `escalate` is not part
+The watcher warns and carries on. `escalate` is not part
 of this: it uploads under `reports/<job>/<file name>` and writes
 `{state:"escalated", report_doc, report_sha256}`; the watcher writes
 `{state:"lost"}` after two missing-pane observations, or when a reviewer pane is
 idle on a quota or rate-limit screen with no report (see
-`docs/quota-stop.md`; a worker or tester is the quota-stop manager's). Their
+`docs/quota-stop.md`; an implementer is the quota-stop manager's). Their
 failed record writes remain best effort. The artifact sweep confirms a local
 report by hashing it and reading the content-addressed key, then the legacy key
 `reports/<job>/<file name>` ([job-dir-ttl.md](job-dir-ttl.md)).
@@ -772,17 +771,16 @@ record already has `refs.job_id` equal to this job (a design session rebound
 the task before the spawn) records `status: already_linked`, with no warning and
 no notice: there is nothing to link (hk 3426). A spawn that does not claim the
 task — an unlinked reviewer or a consult — records `status: unlinked`; a consult
-(a `counsel` seat, which always routes as consult) may join a task another job or
-claimant holds, so a consult pair can share it. The rule follows the seat role: a
-worker seat given `--routing-role consult` still claims the task like any worker.
+(`--role consult`) may join a task another job or claimant holds, so a consult
+pair can share it. The rule follows the spawn role: an implementer claims the
+task even when `panewire resolve` routed it as consult.
 Other spawn failures retain their normal cleanup behavior.
 
 An implementer spawn with `--parent-job` replaces its parent job. After the
 successor's `job.spawned` event commits, it attempts to move the task's claim
 and `refs.job_id` from the parent to the new job through `handoffkeep tasks
 rebind`, regardless of the parent's state. The parent pane is left running.
-Only replacement seats (routing role `implementer`) take over; reviewer, tester,
-consult and delegate children do not. Spawns with `--task`, or neither flag and
+Only implementer spawns take over; reviewer and consult children do not. Spawns with `--task`, or neither flag and
 no `ARBITER_JOB`, claim as before.
 
 The earlier `job.task_link` event records `status: inherited` and
@@ -1067,7 +1065,7 @@ spawn, no job writes. The input file is a minimal JSON document — or a
 {
   "now": "2026-10-31T07:24:00Z",
   "grade": "A",
-  "role": "worker",
+  "role": "implementer",
   "effort": "",
   "allow_escalation": false,
   "credit_pools": ["anthropic-api"],
@@ -1125,8 +1123,8 @@ carries `policy_file` and `policy_overrides`.
 ### `panewire plan`
 
 `panewire plan [--grade G] --t T0..T3 [--role R] [--tags a,b] [--effort E]
-[--urgency normal|urgent] [--exclude-host a,b] [--exclude-pool P,P] [--builder-family F]
-[--routing-role R] [--allow-escalation] [--json]` answers "right now, which host and which
+[--urgency normal|urgent] [--exclude-host a,b] [--exclude-pool P,P] [--author-family F]
+[--allow-escalation] [--json]` answers "right now, which host and which
 model would a spawn get" without a task or brief. It is live and read-only:
 it runs the spawn's selection core with catalog, account observations,
 presence, and account-bound gates. Worker roles use `--grade` instead of a
@@ -1155,7 +1153,7 @@ placement record.
 | Exit | Meaning |
 | --- | --- |
 | 0 | A host and model were found. |
-| 2 | Usage: missing or invalid `--grade`/`--t`/`--role`/`--urgency`/tags, or `--builder-family` without tester/reviewer (or the reverse). |
+| 2 | Usage: missing or invalid `--grade`/`--t`/`--role`/`--urgency`/tags, or `--author-family` without `--role reviewer` (or the reverse; consult takes it optionally). |
 | 70 | Configuration, unreadable catalog or policy. |
 | 77 | No catalog rung was admitted. |
 | 80 | Local spawning is disabled and no remote host admitted the seat. |
@@ -1172,14 +1170,32 @@ version=… policy_source=…` line.
 
 `policy/model-routing` supplies the v1 role allowlists. Selection filters
 profiles by role, retirement, gate, seat, and family before applying the
-`policy/quota-stop` order. `spawn`, `plan`, `resolve`, and `delegate` enforce
+`policy/quota-stop` order. `spawn`, `plan`, and `resolve` enforce
 this boundary. An explicit `-m PROFILE` requires `--override-reason`, but
 that reason overrides placement only. A retired or role-ineligible profile
 is refused before placement.
 
+### Role names
+
+A role has one name on every surface — `spawn --role`, the routing table, the
+host `roles` list, the job claim, the `job.spawned` receipt and the reservation
+key `<task>:<role>`: `implementer`, `reviewer` and `consult` (consult is
+operator-only through the hub). `builder` stays the claim role of a job that
+reports to a parent lane. `verifier` and `judge` are resolve-only roles.
+`worker`, `tester`, `counsel` and `captain` are not roles, and no flag, config
+value or record maps them: `spawn --role worker` exits 2, a host `roles` list
+that names one is a config error, and `--builder-family` and `--routing-role`
+are unknown flags (`--author-family` replaces the first; a spawn's `--role` is
+its routing role). The hub, every node and every sender move to the new names
+in one rollout: a job claimed or reserved under an old name is not matched by
+new code, and a node or hub on the other side of the rename refuses or blanks
+the new or old role. Roll out with no live job, no held reservation and no
+pending spawn: drain first, then upgrade the hub and every node together.
+There is no mixed-version window (decision 208).
+
 ### Consult
 
-`--role counsel` maps to routing role `consult`. It admits only `opus` and `fable` through `claude`, or
+`--role consult` routes as routing role `consult`. It admits only `opus` and `fable` through `claude`, or
 `codex-sol` and `codex-astra` through `codex`. OMP also admits the exact model
 selectors `anthropic/claude-opus-5-5`, `anthropic/claude-fable-5-2`,
 `openai/gpt-6.1-sol`, and `openai/gpt-6-astra`. The Fable 5.1 selector
@@ -1193,13 +1209,13 @@ The routing table's profile allowlist still applies. OMP profiles must be
 listed by name or covered by `"*"`. Catalog and launch model IDs are checked,
 so a top-profile name cannot admit a non-top OMP model.
 
-Consult grade is a floor on the rung, not the seat grade. The floor is one grade above the asker's task grade, capped at `SS`. A consult without a task grade takes `S+`. `plan --role counsel`, `resolve --role consult`, and `spawn --role counsel` accept `--grade C|B|A|A+|S|S+|SS` as the asker grade; an empty or unknown value exits 2 and names the accepted grades.
+Consult grade is a floor on the rung, not the seat grade. The floor is one grade above the asker's task grade, capped at `SS`. A consult without a task grade takes `S+`. `plan --role consult`, `resolve --role consult`, and `spawn --role consult` accept `--grade C|B|A|A+|S|S+|SS` as the asker grade; an empty or unknown value exits 2 and names the accepted grades.
 
 Within the floor:
 
 - A rung graded `unrated` is never chosen and never asks its quota gate (`grade_unrated`).
 - A row is dropped (`grade_insufficient`) when the rung it launches at is below the floor. That rung is the row's own effort; a rung-less row launches at its profile's default effort.
-- `--builder-family F` on `plan` or `resolve` drops consult rungs of family `F` (`family_excluded`). With no family, nothing is excluded and the stamp records `unknown`.
+- `--author-family F` on `plan` or `resolve` drops consult rungs of family `F` (`family_excluded`). With no family, nothing is excluded and the stamp records `unknown`.
 - If no rung passes at the floor but a below-floor rung passes every other rule, consult retries once at the asker's own grade and stamps `fallback: no_rung_at_floor`. A below-floor rung on a cooling pool counts as such a rung. Unrated, absent-rung, and family-excluded rungs never trigger the retry. A session without a task grade never retries.
 
 The selection record carries a `consult` object with `asker_grade`, `asker_family`, `grade_source` (`flag`, `task`, or `without_task`), `floor`, `used_floor`, and `fallback`. `resolve --role consult` prints `floor=<G>` on its text line.
@@ -1210,9 +1226,7 @@ The selection record carries a `consult` object with `asker_grade`, `asker_famil
 
 A consult never runs above its role's `effort` (`high` in the
 current table) unless the request passes `--allow-escalation`. This rule
-applies the same way to `spawn -m auto`, `plan`, and `resolve`. `delegate`
-routes only as implementer, verifier, or reviewer, so the cap does
-not apply to it.
+applies the same way to `spawn -m auto`, `plan`, and `resolve`.
 It does not use task grade. Other roles keep grade-driven selection and
 today's ordering.
 
@@ -1295,17 +1309,12 @@ allows (any profile ID when the role allows `"*"`), or its effort is not
 one of `low`, `medium`, `high`, `xhigh`, `max`, or `ultra`.
 This PR does not parse the proposed v2 schema.
 
-The seat-role map is read from `panewire_role_map` or its pre-#155 name
-`runtug_role_map` (the name hk publishes today); two maps that differ are
-refused, and the cache stores the map as `panewire_role_map`. A seat role
-the map does not name takes its builtin routing role (`worker` implementer, `tester` verifier, `reviewer` reviewer, `counsel`
-consult) instead of running unfiltered.
-
-`--routing-role consult|implementer|verifier|reviewer|judge`
-on `spawn` or `plan` selects the routing role. Seat admission still uses
-`--role`. Counsel retains its required routing role.
-Delegate maps `reader` to `implementer`, `verifier` to `verifier`, and
-`reviewer` to `reviewer`. `--patch` uses `implementer` eligibility.
+A spawn role is its routing role: `--role implementer`, `reviewer` and
+`consult` route as `implementer`, `reviewer` and `consult`. The table's
+`panewire_role_map` (and its pre-#155 name `runtug_role_map`) is not read, so
+a table that still publishes one parses and the map changes nothing.
+`verifier` and `judge` are resolve-only: `panewire resolve --role verifier|judge`
+selects them, and no spawn takes them. A spawn takes no `--routing-role`.
 
 A valid document is cached atomically at
 `$XDG_STATE_HOME/panewire/model-routing.json`, or
@@ -1458,9 +1467,9 @@ the allowlist, and the exhaustion rule. The hk job metadata schema is
 unchanged.
 
 `panewire resolve --role consult|implementer|verifier|reviewer|judge
-[--grade G] [--t T0..T3] [--builder-family F] [--harness KIND] [--allow-escalation] [--json]` runs the same
+[--grade G] [--t T0..T3] [--author-family F] [--harness KIND] [--allow-escalation] [--json]` runs the same
 selection core without a launch or job write. `--t` defaults to `T0`.
-Reviewer and judge require `--builder-family` to exclude that family.
+Reviewer and judge require `--author-family` to exclude that family.
 The result names the account and host selected now; it is not a reservation.
 The text answer ends with `profile=<profile> effort=<effort>`.
 `effort` is the role's starting effort, or the selected rung's when absent.
@@ -1474,119 +1483,6 @@ selected `model_id`. Panewire reads only the frontmatter of regular Markdown
 files in `~/.omp/agent/agents/`, in filename order. The first matching agent's
 `name:` supplies the hint. Missing or malformed frontmatter leaves the JSON
 field absent. Text output appends `omp_agent=<name>` when available.
-
-## Delegation
-
-`panewire delegate` is the one-call form of "ask another model": a lead session
-(Claude Code, Codex) hands over reading, verification or a cross-check and gets
-one answer back. In-session subagents run only on their own vendor's models;
-`delegate` reaches any seat in the policy, so the work can run on free or
-spare-quota models. It reuses the spawn, wait and job-result machinery and
-writes nothing in the caller's tree.
-
-```sh
-panewire delegate --role reader|verifier|reviewer --prompt FILE [--grade G] [--cwd DIR]
-  [--timeout D] [--headless] [--patch] [--panel 2..4] [--family F] [--workspace W] [--json]
-```
-
-| Flag | Meaning |
-| --- | --- |
-| `--role` | `reader` reads and answers, `verifier` runs only the acceptance commands in the prompt, `reviewer` reviews. Reader and verifier use `worker` seats; `reviewer` uses `reviewer` seats and excludes the caller's model family. |
-| `--prompt FILE` | The task. The role preamble and the steps for filing the answer are put in front of it. |
-| `--grade G` | The catalog grade the seat must cover (`C`, `B`, `A`, `A+`, `S`, `S+`, `SS`; default `C`). The task title is not read. |
-| `--cwd DIR` | The tree the delegate reads (default: the current directory). |
-| `--timeout D` | A duration or seconds, default 15m: the pane wait, or the headless CLI call. |
-| `--headless` | Run the selected seat's CLI once on this host with the brief, instead of a pane. |
-| `--patch` | The delegate works in a temporary detached worktree and the result carries a patch path (below). |
-| `--panel N` | N from 2 to 4: see Panel. |
-| `--family F` | The caller's model family, for a reviewer outside a panewire job. Inside a job the job's own family is used. |
-| `--workspace W` | The herdr workspace for the pane, by label (`workers`), or `[local] workspace`. Not needed with `--headless`. |
-| `--json` | Print one JSON document instead of text. |
-
-**Selection.** The seat is chosen by the same code as `spawn` auto-selection
-and `panewire plan`: catalog rungs that cover the grade and the role, ordered by
-the pool policy (waste-risk pools first, then the band order), admitted through
-presence and the quota gate. Free models are one band of that policy, not a
-default target. A reviewer drops every seat of the caller's family.
-
-**Job record.** Each delegation is a job: `delegate-<parent>-<n>`, where
-`<parent>` is the enclosing job (`ARBITER_JOB`), and `<n>` the next free number
-in the local jobs dir. Outside a job the id is `delegate_<host>_<n>`, where
-`<host>` is `HUB_MACHINE_ID`, so two hosts never hand out the same id to hk;
-without a node id the delegation refuses. It is claimed in hk and the local ledger,
-holds a quota lease, carries the parent job, task and owner lane, and ends with
-`done`, so placement, quota and hk records match any other job. A task is
-required: run inside a panewire job or set `HK_TASK_ID`. The job directory holds
-`brief.md`, `result.json`, `report.md` and, with `--patch`, `changes.patch`.
-
-**Pane mode (default).** `delegate` runs `spawn --wait` with automatic
-selection (the pane may be placed on another host), reads the `result` of the
-hk job record, which the delegate files with `panewire done JOB --result`
-(`{"answer": TEXT}`), then closes the pane after checking it is still the one
-the job spawned. If only the report exists because the completion watcher
-finished the job on the delegate's terminal signal, the report text is the
-answer. A delegate placed on
-another host is answered the same way; its pane is left for that host's `reap`.
-When the wait fails (escalated, lost, timeout), the pane stays for
-`panewire reap` and nothing is printed on stdout.
-
-**Headless mode.** The seat's CLI runs once, in `--cwd`, with the brief and a
-deadline of `--timeout`; its output is the answer. The job is claimed, leased
-and completed with the same `done` call. Kinds with a one-shot form: `claude`,
-`codex`, `devin`, `cmd`, `omp`, `opencode`; any other kind is refused
-with exit 70 before anything is claimed. The one-shot flags are fixed in code
-and have been exercised only against a fake runner.
-
-**No writes.** The role preambles forbid editing: `reader` and `reviewer` run
-read-only commands, `verifier` runs only the acceptance commands it was given.
-A role that must try a change uses `--patch`: delegate adds a detached worktree
-of `--cwd` in a temporary directory (at `HEAD` plus the caller's uncommitted
-tracked changes), runs the delegate there, writes `git diff` against that base
-to `changes.patch` in the job directory and removes the worktree. The result
-carries `patch` (omitted when nothing changed). The caller decides whether to
-apply it (`git apply`). The worktree registration in `--cwd`'s `.git` is added
-and removed; no file in the tree changes.
-
-**Panel.** `--panel N` picks N seats of N distinct model families, then runs
-all N at once, each as its own delegate job (pane or `--headless`, and its own
-scratch tree with `--patch`). Families are chosen one selection at a time with
-the families already chosen excluded, so the panel is the N best admitted
-families under the normal policy. When fewer than N are admitted, the panel
-runs with those and says why (`reason`, and a warning on stderr). A member that
-fails, is lost or times out does not stop the others; it is listed as `failed`
-with its exit status. The panel tells each model to file `verdict` (one word)
-and `points` (short claims, `file:line` where they have one) next to its
-`answer`; without points, lines of the answer are compared. The table lists:
-
-- **agreements** — points two or more members made (word overlap of at least
-  half);
-- **disagreements** — differing verdicts, and `file:line` locations that members
-  cite with different claims;
-- **unique** — points only one member made.
-
-**Output.** The answer is the last thing printed. Text: a header line
-`delegate job=… role=… mode=… profile=…`, `patch=PATH` when there is one, then
-the answer. Spawn and wait chatter goes to stderr. `--json` prints one object:
-`job`, `role`, `mode` (`pane` or `headless`), `profile`, `family`, `patch`,
-`result` (the filed object) and `answer`. A panel prints a header line, each
-member (`== A job=… profile=… family=… status=answered ==` and its answer),
-then `== side by side ==` with verdicts, agreements, disagreements and unique
-points last. Its `--json` object has `requested`, `answered`, `reason`,
-`members` (each the single-call object plus `label`, `status`, `exit`, `error`)
-and `table`.
-
-**Exit statuses.** 0 the answer was printed (a panel: at least one member
-answered; check `answered` and `reason` for a short panel). 2 usage. 70
-configuration, or a seat kind with no headless form. 75 the parent job is
-unreadable. 77 or 81 no seat or host was admitted (a panel with no admitted
-family at all). 83, 84, 85 the pane job escalated, was lost or timed out. 124
-the headless CLI hit `--timeout`. 1 the job finished without an answer, or
-the headless CLI failed. Spawn and quota refusals keep their own statuses. A
-panel with no answered member returns the first failed member's status.
-
-**When to delegate.** Delegate reading, verification and cross-family review.
-Keep tight design loops, where the next step depends on the last answer, in
-the session's own subagents.
 
 `plan` also prints the remote-spawn preflight (below) of every remote host it
 evaluated, as `preflight host=NAME ok=… reasons=…` lines and, with `--json`, a
@@ -1669,7 +1565,7 @@ job's own inbox subtree even if a wider root is configured.
 `kind`, `family`, `capability` and nonempty `roles`. Optional `effort` and `pin`
 fix an alias to a rung; `e6` requires an exact marker. A nonempty `rungs` map is
 closed: unlisted efforts are refused. A rung has `roles` and optional `e6`.
-Roles are worker, tester, reviewer and counsel. Model IDs and grades
+Roles are implementer, reviewer and consult. Model IDs and grades
 are read from the quota tool, never this file.
 
 `PANEWIRE_BRIEF_POLICY` overrides `[local].brief_policy`. Brief policy schema:
@@ -1831,7 +1727,7 @@ trace described in [Automatic selection](placement.md#automatic-selection).
 
 Every real spawn decision produces one immutable handoffkeep record through
 `POST /v1/placements`. This includes automatic and forced placement, local and
-remote sessions, headless delegation, and refusals or failures before launch.
+remote sessions, and refusals or failures before launch.
 Dry runs produce no record. See handoffkeep's
 [Linear work board contract](https://github.com/mgh3326/handoffkeep/blob/main/docs/linear-work-board.md).
 
@@ -1894,7 +1790,7 @@ HTTP 409 warns and drops the conflicting file. Local attempt markers under
 | 80 | Local spawning disabled/unavailable without a remote fallback. |
 | 81 | `NO_ELIGIBLE_HOST`, wake/capacity placement failure, the remote worktree for a linked-worktree job could not be prepared (also a `via = "hub"` checkout refusal), or the hub is unavailable for a forced `via = "hub"` host. |
 | 82 | Pane committed but lane unregistered under strict lane reporting (`PANEWIRE_LANE_STRICT=1`). |
-| 83 | `spawn --wait` (and `delegate`): the job escalated. |
+| 83 | `spawn --wait`: the job escalated. |
 | 84 | `spawn --wait`: the job was lost or revoked. |
 | 85 | `spawn --wait`: the wait deadline expired; the job is retained. |
 | 86 | `QUOTA_EXHAUSTED`: every eligible account is measured exhausted and the role waits, including an exhausted downgrade retry. |
@@ -1953,8 +1849,7 @@ below.
 `-p` starts with `hk:doc/`: the rest of the value is the document key, for
 example `-p hk:doc/brief/2026-11-09/my-job`, the key a design session stores
 its briefs under. Every other `-p` value is a file path and reads exactly as
-before. `panewire delegate --prompt FILE` has its own reader and takes only a
-file.
+before.
 
 The key must be nonempty, at most 512 bytes of UTF-8, and must not start with
 `/` or contain a control character or `..`; any other key is refused with
@@ -2045,7 +1940,7 @@ state, so a retained completed record can still appear after reap.
 
 ## Task pane sweep
 
-`panewire daemon` closes the pane of a worker or tester whose bound hk task is
+`panewire daemon` closes the pane of an implementer whose bound hk task is
 merged, done or dropped, or whose job was closed, once the pane has stayed not
 working for a grace; a completed author's pane waits while its PR is open. The
 rules are in [pane-sweep.md](pane-sweep.md). Two daemon flags configure it:
