@@ -446,6 +446,15 @@ func canonicalNodeCommandResult(op string, raw json.RawMessage) (json.RawMessage
 func defaultNodeCommandRunner(name string) relayCommandRunner {
 	return func(ctx context.Context, args ...string) ([]byte, error) {
 		cmd := exec.CommandContext(ctx, name, args...)
+		if name == "git" {
+			env := make([]string, 0, len(os.Environ())+1)
+			for _, value := range os.Environ() {
+				if !strings.HasPrefix(value, "LC_ALL=") {
+					env = append(env, value)
+				}
+			}
+			cmd.Env = append(env, "LC_ALL=C")
+		}
 		cmd.WaitDelay = 100 * time.Millisecond
 		out, err := cmd.Output()
 		if errors.Is(err, exec.ErrWaitDelay) && cmd.ProcessState != nil && cmd.ProcessState.Success() {
