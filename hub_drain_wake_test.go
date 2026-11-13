@@ -74,15 +74,32 @@ func t4473Handler(relay http.Handler, tasks []t4473Task) http.Handler {
 		for _, task := range page {
 			out = append(out, map[string]any{"id": task.ID, "project": task.Project, "state": task.State, "awaiting_decision": task.AwaitingDecision})
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"tasks": out})
+		body := map[string]any{"tasks": out}
+		if query.Has("project") {
+			// hk echoes the requested filter, which is how a client tells a
+			// filtered answer from a server that dropped the parameter.
+			body["project"] = query.Get("project")
+		}
+		_ = json.NewEncoder(w).Encode(body)
 	})
 }
 
 // t4473Rig is the inbox-wake rig with an hk whose task list is tasks.
 func t4473Rig(t *testing.T, tasks []t4473Task) (*t3602Rig, *t3602Clock) {
 	t.Helper()
+	return t4473RigWith(t, tasks, nil)
+}
+
+// t4473RigWith is t4473Rig with wrap applied to the hk handler, for a server
+// that behaves unlike the pinned hk.
+func t4473RigWith(t *testing.T, tasks []t4473Task, wrap func(http.Handler) http.Handler) (*t3602Rig, *t3602Clock) {
+	t.Helper()
 	fake := &fakeHandoffkeep{nextID: 100, status: http.StatusCreated, rows: map[string]*handoffkeepRelayEvent{}}
-	server := httptest.NewServer(t4473Handler(fake, tasks))
+	var hk http.Handler = t4473Handler(fake, tasks)
+	if wrap != nil {
+		hk = wrap(hk)
+	}
+	server := httptest.NewServer(hk)
 	t.Cleanup(server.Close)
 	client, err := newHandoffkeepRelayClient(hubHandoffkeepEnv{URL: server.URL, Token: "test-token"}, server.Client())
 	if err != nil {
@@ -91,6 +108,22 @@ func t4473Rig(t *testing.T, tasks []t4473Task) (*t3602Rig, *t3602Clock) {
 	start, _ := time.Parse(time.RFC3339, t3602Start)
 	clock := &t3602Clock{now: start}
 	return t3602Hub(t, filepath.Join(t.TempDir(), "inbox.sqlite3"), "default", fake, client, clock), clock
+}
+
+// t4473OldTaskServer models an hk that predates the task project filter: it
+// drops the parameter, so it neither filters by project nor echoes it.
+func t4473OldTaskServer(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/tasks" && r.URL.Query().Has("project") {
+			u := *r.URL
+			query := u.Query()
+			query.Del("project")
+			u.RawQuery = query.Encode()
+			r = r.Clone(r.Context())
+			r.URL = &u
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // t4473Sweep runs one lane-stall sweep and waits for it, which is where the
@@ -188,6 +221,24 @@ func TestDrainWakeReadsBacklogPastFirstPage(t *testing.T) {
 	want := "2001 backlog, 0 in work: dispatch the next batch"
 	if got := t4473Lines(rig); len(got) != 1 || got[0] != want {
 		t.Fatalf("drain lines=%q, want exactly [%q]", got, want)
+	}
+}
+
+// An hk that predates the project filter ignores it and cannot echo it. Its
+// page does not say whose tasks those are, so counting them would wake this
+// lane for another project's backlog: the read fails and sends no line.
+func TestDrainWakeRefusesUnfilteredTaskList(t *testing.T) {
+	rig, _ := t4473RigWith(t, []t4473Task{
+		{ID: 1, Project: "other", State: "backlog"},
+		{ID: 2, Project: "other", State: "backlog"},
+		{ID: 3, Project: "other", State: "unstarted"},
+	}, t4473OldTaskServer)
+	t4473SetInFlight(rig, t4473Lane, 1)
+	t4473Sweep(rig)
+	t4473SetInFlight(rig, t4473Lane, 0)
+	t4473Sweep(rig)
+	if got := t4473Lines(rig); len(got) != 0 {
+		t.Fatalf("an unfiltered task list sent %q", got)
 	}
 }
 

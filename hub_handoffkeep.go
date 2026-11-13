@@ -391,10 +391,17 @@ func (c *handoffkeepRelayClient) listTasks(ctx context.Context, project, state s
 		return nil, errors.New("handoffkeep rejected the task query")
 	}
 	var result struct {
-		Tasks []handoffkeepTask `json:"tasks"`
+		// Project is hk's echo of the requested filter. A server that predates
+		// the filter ignores it and cannot echo it, so a silent zero-discard
+		// would otherwise count another project's tasks (or none).
+		Project string            `json:"project"`
+		Tasks   []handoffkeepTask `json:"tasks"`
 	}
 	if json.Unmarshal(payload, &result) != nil {
 		return nil, errors.New("handoffkeep returned an unusable task list")
+	}
+	if result.Project != project {
+		return nil, errors.New("handoffkeep did not apply the task project filter")
 	}
 	return result.Tasks, nil
 }
