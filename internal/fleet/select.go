@@ -1518,7 +1518,7 @@ func (p *selPlan) record() map[string]any {
 		}
 		rec["hosts"] = hosts
 		rec["host_order"] = order
-		rec["host_rule"] = "hosts that fit (caps, roles, grades, hub availability) ranked by load bucket, then hub score or load; on each host its present accounts in pool order (waste, then free, credit, then ranked); first admitted pair wins; subscription pools paced behind credit are a last band tried on the hosts again (pass 2) only when no other account was admitted on any host (pass 1)"
+		rec["host_rule"] = "hosts that fit (caps, roles, grades, hub availability) ranked by load bucket, then hub score (including recent placement cost) before the hub decision, or load when no complete score set; on each host its present accounts in pool order (waste, then free, credit, then ranked); first admitted pair wins; subscription pools paced behind credit are a last band tried on the hosts again (pass 2) only when no other account was admitted on any host (pass 1)"
 	}
 	if p.req.route != nil {
 		rt := p.req.route.record(p.routeRefusal)
