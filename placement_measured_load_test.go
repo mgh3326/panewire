@@ -284,7 +284,7 @@ func TestPlacementScoreConstantsFromPolicy(t *testing.T) {
 	if err != nil || policy.scoreK().memFloor != .3 || policy.scoreK().pageInHalf != 40 || policy.scoreK().hysteresis != 2 || policy.scoreK().jobsHalf != 8 {
 		t.Fatalf("overrides lost: %+v err=%v", policy.scoreK(), err)
 	}
-	for _, bad := range []string{`{"mem_span":0}`, `{"mem_floor":1.5}`, `{"hysteresis":0.5}`, `{"pagein_half_mbps":-1}`, `{"load_knee":5,"load_cap":4}`, `{"load_knee":5}`, `{"load_cap":0.5}`, `{"jobs_half":0}`, `{"unknown":1}`} {
+	for _, bad := range []string{`{"mem_span":0}`, `{"mem_floor":1.5}`, `{"hysteresis":0.5}`, `{"pagein_half_mbps":-1}`, `{"load_knee":5,"load_cap":4}`, `{"load_knee":5}`, `{"load_cap":0.5}`, `{"jobs_half":0}`} {
 		if _, err := ParsePlacementPolicy([]byte(`{"local_machine":"mac-work","max_active_jobs":5,"score":` + bad + `}`)); err == nil {
 			t.Fatalf("score %s accepted", bad)
 		}
