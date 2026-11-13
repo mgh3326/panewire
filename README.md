@@ -247,3 +247,5 @@ caller changes ship in the coordinated cutover before old binaries are removed.
 
 
 Spawn execution now belongs to the hub. `panewire spawn` and `work TASK` print ACCEPTED after a durable reservation; this is not landing proof. `--dry-run` stays synchronous and `--wait` preserves the job-completion contract. See [durable spawn operations](docs/hub-spawn-operations.md) for replay, timeout, recovery and Sentry behavior, and [observability](docs/observability.md) for the relay, held-reservation and job-result fleet events and their Sentry fingerprints.
+
+`panewire escalate-author` is the hub's half of the review-round rule: at round 5 without a pass it starts the author again one ladder step up on the same worktree, with the findings and the consult seat, and records one info for the design lane. See [escalate author](docs/escalate-author.md).
