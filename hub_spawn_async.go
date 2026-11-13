@@ -249,7 +249,7 @@ func (h *HubServer) runSpawnCoordinator(parent context.Context) {
 	active := map[string]bool{}
 	var conditionSnapshots map[string]fleet.TaskSnapshot
 	var conditionReadErr error
-	var conditionRefreshAt time.Time
+	var lastConditionRead time.Time
 	conditionRequestSet := ""
 	for range hubSpawnWorkerCount {
 		h.spawnWorkers.Add(1)
@@ -294,10 +294,10 @@ func (h *HubServer) runSpawnCoordinator(parent context.Context) {
 				conditionSnapshots = nil
 				conditionReadErr = nil
 			}
-			if len(conditioned) != 0 && (conditionRequestSet != currentRequestSet.String() || !h.now().Before(conditionRefreshAt)) {
+			if len(conditioned) != 0 && (conditionRequestSet != currentRequestSet.String() || lastConditionRead.IsZero() || time.Since(lastConditionRead) >= time.Minute) {
 				conditionSnapshots, conditionReadErr = fleet.ReadStartConditionTaskBatch(ctx, conditioned)
 				conditionRequestSet = currentRequestSet.String()
-				conditionRefreshAt = h.now().Add(time.Minute)
+				lastConditionRead = time.Now()
 			}
 			for _, task := range tasks {
 				if len(task.Request.StartConditions) != 0 && (conditionReadErr != nil || fleet.EvaluateStartConditions(task.Request.StartConditions, conditionSnapshots, h.now().UTC()).Status != "met") {
