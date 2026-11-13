@@ -178,16 +178,16 @@ func (h *HubServer) finishUnownedSpawn(ctx context.Context, task hubSpawnTask, o
 }
 
 // releaseSpawnRole frees the (task, role) slot a finished request holds. A
-// child or task-less request holds none. A stored request this build cannot
-// parse (one written under a role name the rename retired) still holds at most
-// the one slot its request id reserved, so it is freed by that id alone and
-// never stays stuck behind a role it no longer names.
+// child, task-less or consult request holds none. A stored request this build
+// cannot parse (one written under a role name the rename retired) still holds
+// at most the one slot its request id reserved, so it is freed by that id alone
+// and never stays stuck behind a role it no longer names.
 func (h *HubServer) releaseSpawnRole(ctx context.Context, task hubSpawnTask) error {
 	spawn, err := fleet.ValidateSubmission(task.Request)
 	if err != nil {
 		return h.inbox.store.releaseCompletedSpawnRoleOf(ctx, task.Request.RequestID)
 	}
-	if spawn.Task == "" || spawn.ParentJob != "" {
+	if !spawn.HoldsTaskRole() {
 		return nil
 	}
 	return h.inbox.store.releaseCompletedSpawnRole(ctx, task.Request.RequestID, spawn.RoleKey())
