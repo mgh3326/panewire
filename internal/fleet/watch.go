@@ -244,7 +244,6 @@ func (a *App) watch(ctx context.Context, args []string) error {
 		intent, hasIntent := pendingQuotaIntent(j)
 		quotaRetry = hasIntent
 		agents, e := a.agents(ctx)
-		herdrReachable := e == nil
 		if e != nil && hasIntent && !creditPending && !j.Reaped {
 			// An open close intent outlives a herdr outage: hk alone can
 			// finish it, and anything else waits for herdr.
@@ -309,17 +308,23 @@ func (a *App) watch(ctx context.Context, args []string) error {
 			creditAttempts = 0
 			lastCredit = credit.CreditExhaustedAt
 			published := map[string]any{"pool": credit.Pool, "at": credit.CreditExhaustedAt.UTC().Format(time.RFC3339Nano)}
-			if !j.Terminal && !j.Reaped && !workerEscalated(j) && j.QuotaRole() != "counsel" && !handOff.active && safeCreditStopHandoff(j, credit, paneAgent, present, herdrReachable) {
-				if a.QuotaHandOffGrace <= 0 {
-					if err := a.quotaStopLost(ctx, j, credit, true); err != nil {
+			if !j.Terminal && !j.Reaped && !workerEscalated(j) && j.QuotaRole() != "counsel" && !handOff.active {
+				// The pane may have resumed while the rejection was being
+				// written, so the hand-off is decided on a fresh row, not on
+				// the snapshot read before the write (hk 4505).
+				current, currentPresent, currentReachable := a.paneAfterPublication(ctx, j.Pane)
+				if safeCreditStopHandoff(j, credit, current, currentPresent, currentReachable) {
+					if a.QuotaHandOffGrace <= 0 {
+						if err := a.quotaStopLost(ctx, j, credit, true); err != nil {
+							return err
+						}
+						return a.event(ctx, id, "job.credit_published", published)
+					}
+					if err := a.quotaStopAnnounce(ctx, j, credit); err != nil {
 						return err
 					}
-					return a.event(ctx, id, "job.credit_published", published)
+					handOff = quotaHandOff{stop: credit, until: a.Now().Add(a.QuotaHandOffGrace), seq: current.StateChangeSeq, active: true}
 				}
-				if err := a.quotaStopAnnounce(ctx, j, credit); err != nil {
-					return err
-				}
-				handOff = quotaHandOff{stop: credit, until: a.Now().Add(a.QuotaHandOffGrace), seq: paneAgent.StateChangeSeq, active: true}
 			}
 			if err := a.event(ctx, id, "job.credit_published", published); err != nil {
 				return err
