@@ -179,13 +179,13 @@ func (h *HubServer) escalateAuthor(ctx context.Context, request hubEscalateAutho
 		return h.escalateAuthorRefusal(ctx, request, ownerLane, "job_not_live", "the job's record is "+state, false)
 	}
 	if profile := escalateAuthorStr(record, "profile"); profile != "" && profile != request.FromProfile {
-		return h.escalateAuthorRefusal(ctx, request, ownerLane, "job_changed", fmt.Sprintf("the job now runs %s, not %s", profile, request.FromProfile), false)
+		return h.escalateAuthorRefusal(ctx, request, ownerLane, "job_changed", fmt.Sprintf("the job now runs %s, not %s", profile, request.FromProfile), resume)
 	}
 	if effort := escalateAuthorStr(record, "effort"); effort != "" && request.FromEffort != "" && effort != request.FromEffort {
-		return h.escalateAuthorRefusal(ctx, request, ownerLane, "job_changed", fmt.Sprintf("the job now runs at %s, not %s", effort, request.FromEffort), false)
+		return h.escalateAuthorRefusal(ctx, request, ownerLane, "job_changed", fmt.Sprintf("the job now runs at %s, not %s", effort, request.FromEffort), resume)
 	}
 	if request.Profile == "" || request.Step == "" {
-		return h.escalateAuthorRefusal(ctx, request, ownerLane, "no_rung", "the policy has no step left for this seat", false)
+		return h.escalateAuthorRefusal(ctx, request, ownerLane, "no_rung", "the policy has no step left for this seat", resume)
 	}
 	// The rung the CLI named must still be a live, ordinary or escalation rung
 	// that covers the task grade. The CLI resolved it from the same catalog,
@@ -198,7 +198,7 @@ func (h *HubServer) escalateAuthor(ctx context.Context, request hubEscalateAutho
 		return hubEscalateAuthorResult{}, err
 	}
 	if !escalateAuthorRung(rows, request) {
-		return h.escalateAuthorRefusal(ctx, request, ownerLane, "no_rung", fmt.Sprintf("%s@%s is not a live rung covering grade %s", request.Profile, request.Effort, request.Grade), false)
+		return h.escalateAuthorRefusal(ctx, request, ownerLane, "no_rung", fmt.Sprintf("%s@%s is not a live rung covering grade %s", request.Profile, request.Effort, request.Grade), resume)
 	}
 	// The successor is built and validated the way the claim will validate it,
 	// before anything is closed: a submission the store would refuse must not
@@ -208,7 +208,7 @@ func (h *HubServer) escalateAuthor(ctx context.Context, request hubEscalateAutho
 		return hubEscalateAuthorResult{}, err
 	}
 	if _, err := fleet.ValidateSubmission(next); err != nil {
-		return h.escalateAuthorRefusal(ctx, request, ownerLane, "successor_invalid", err.Error(), false)
+		return h.escalateAuthorRefusal(ctx, request, ownerLane, "successor_invalid", err.Error(), resume)
 	}
 	name := heldAgentName(holder, record)
 	if !resume {

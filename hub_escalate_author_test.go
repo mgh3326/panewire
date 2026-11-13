@@ -642,3 +642,14 @@ func TestEscalateAuthorTransfersWorkerReservation(t *testing.T) {
 		t.Fatalf("worker reservation = %q, %v; want %q", job, err, result.Job)
 	}
 }
+
+func TestEscalateAuthorEndedReplayWithoutRungReportsEnded(t *testing.T) {
+	f := newEscalateFixture(t, "author-ended-no-rung")
+	f.endHolder(fleet.LadderStepEndReason(5, f.job+"-l1"))
+	request := f.request()
+	request.Profile, request.Step = "", ""
+	result, err := f.hub.escalateAuthor(t.Context(), request)
+	if err != nil || result.Code != "no_rung" || !result.AuthorEnded {
+		t.Fatalf("ended replay: result=%+v err=%v", result, err)
+	}
+}
