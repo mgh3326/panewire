@@ -68,6 +68,19 @@ func TestAlloyFleetEventsLabelContract(t *testing.T) {
 	}
 }
 
+func TestLinuxAlloyFleetEventsUseExplicitToolPaths(t *testing.T) {
+	linux := fleetEventsBlock(t, "deploy/alloy/config.linux.alloy")
+	for _, tool := range []string{"panewire", "mergewake"} {
+		path := `+ "/` + tool + `/events/fleet-events.jsonl"`
+		if !strings.Contains(linux, path) {
+			t.Errorf("Linux fleet events must match the explicit %s path", tool)
+		}
+	}
+	if strings.Contains(linux, `/*/events/fleet-events.jsonl`) {
+		t.Fatal("Linux fleet events must not glob across tool state directories")
+	}
+}
+
 // lockedBuffer collects a child process's output across goroutines.
 type lockedBuffer struct {
 	mu  sync.Mutex
