@@ -2,6 +2,7 @@ package fleet
 
 import (
 	"slices"
+	"strings"
 	"testing"
 	"time"
 )
@@ -80,5 +81,83 @@ func TestEndedSweepClosesAPaneWhoseNameWasLostAtItsWorktree(t *testing.T) {
 	closes := f.endedSweep(61, time.Hour)
 	if len(closes) != 1 || closes[0].Pane != pane {
 		t.Fatalf("closes = %+v, want the nameless pane %s", closes, pane)
+	}
+}
+
+// onPaneRead runs hook after herdr has answered a pane read, so the pane is
+// reassigned or removed while the sweep holds the screen it read.
+func (f *paneSweepFixture) onPaneRead(hook func()) {
+	prev := f.runner.Do
+	f.runner.Do = func(c Command) Result {
+		r := prev(c)
+		if c.Name == "herdr" && strings.HasPrefix(strings.Join(c.Args, " "), "pane read ") {
+			hook()
+		}
+		return r
+	}
+}
+
+// onAgentList runs hook when herdr is asked for its agent list the nth time,
+// before the list is answered.
+func (f *paneSweepFixture) onAgentList(n int, hook func()) {
+	prev := f.runner.Do
+	lists := 0
+	f.runner.Do = func(c Command) Result {
+		if c.Name == "herdr" && strings.Join(c.Args, " ") == "agent list" {
+			lists++
+			if lists == n {
+				hook()
+			}
+		}
+		return prev(c)
+	}
+}
+
+// Hk 4562610630 and hk 4562610925: the ended-job sweep closes a pane whatever
+// its status, but only while the job's pane is still proven by a fresh row at
+// the moment of the close. A pane reassigned or removed after the sweep read
+// its screen must be kept.
+
+func TestEndedSweepKeepsAPaneReassignedWhileItsScreenIsRead(t *testing.T) {
+	f := newPaneSweepFixture(t)
+	pane := f.job("r", "reviewer", "")
+	f.status[pane] = "working"
+	putEvent(t, f.a, "r", "job.revoked", map[string]any{})
+	f.onPaneRead(func() { f.names[pane] = "someone-else" })
+	if closes := f.endedSweep(61, time.Hour); len(closes) != 0 || len(f.closed()) != 0 {
+		t.Fatalf("a reassigned pane was closed: %+v closed=%v", closes, f.closed())
+	}
+	if !f.infoHas("task pane kept", "job=r", "reason=pane-mismatch") {
+		t.Fatalf("info lines = %q", f.info)
+	}
+}
+
+func TestEndedSweepKeepsAPaneRemovedWhileItsScreenIsRead(t *testing.T) {
+	f := newPaneSweepFixture(t)
+	pane := f.job("r", "reviewer", "")
+	f.status[pane] = "working"
+	putEvent(t, f.a, "r", "job.revoked", map[string]any{})
+	f.onPaneRead(func() { f.shut[pane] = true })
+	if closes := f.endedSweep(61, time.Hour); len(closes) != 0 || len(f.closed()) != 0 {
+		t.Fatalf("a removed pane was closed: %+v closed=%v", closes, f.closed())
+	}
+	if !f.infoHas("task pane kept", "job=r", "reason=pane-gone") {
+		t.Fatalf("info lines = %q", f.info)
+	}
+}
+
+func TestEndedSweepReadsNoScreenOfAPaneReassignedAfterItsListing(t *testing.T) {
+	f := newPaneSweepFixture(t)
+	pane := f.job("r", "reviewer", "")
+	f.status[pane] = "working"
+	putEvent(t, f.a, "r", "job.revoked", map[string]any{})
+	f.onAgentList(2, func() { f.names[pane] = "someone-else" })
+	if closes := f.endedSweep(61, time.Hour); len(closes) != 0 || len(f.closed()) != 0 {
+		t.Fatalf("a reassigned pane was closed: %+v closed=%v", closes, f.closed())
+	}
+	for _, c := range f.runner.Calls {
+		if c.Name == "herdr" && len(c.Args) >= 2 && c.Args[0] == "pane" && c.Args[1] == "read" {
+			t.Fatalf("the screen of a reassigned pane was read: %v", c.Args)
+		}
 	}
 }

@@ -363,6 +363,21 @@ func paneSweepMatches(j Job, ag Agent) bool {
 	return ag.Name == "" && sweepSamePath(ag.CWD, str(j.Receipt, "cwd"))
 }
 
+// paneRowReason is why herdr's rows do not prove j's pane: "pane-gone" when no
+// row has the job's pane id, "pane-mismatch" when the row with that id is not
+// the job's (paneSweepMatches), and "" when it is.
+func paneRowReason(j Job, agents []Agent) string {
+	for _, ag := range agents {
+		if ag.Pane == j.Pane {
+			if !paneSweepMatches(j, ag) {
+				return "pane-mismatch"
+			}
+			return ""
+		}
+	}
+	return "pane-gone"
+}
+
 // Pass runs one sweep over the jobs under a.Jobs. A pass that cannot read
 // herdr changes nothing; one that cannot read a task keeps that job's pane.
 func (s *TaskPaneSweeper) Pass(ctx context.Context, a *App) error {
@@ -749,6 +764,17 @@ func (s *TaskPaneSweeper) notIdleReason(j Job, agents []Agent) string {
 // pane, and "" once the pane is closed and the job reaped.
 func (s *TaskPaneSweeper) close(ctx context.Context, a *App, j Job, task string, end paneSweepEnd, since, now time.Time, ended *paneSweepEndedRule) string {
 	key := paneSweepKey(j)
+	// The pane must still be the job's before its screen is read and uploaded,
+	// so no screen is stored as this job's once herdr has moved the pane
+	// (hk 4562610630). The rows are read again under the lock before the close.
+	before, err := a.agents(ctx)
+	if err != nil {
+		return "herdr-unreadable"
+	}
+	if reason := paneRowReason(j, before); reason != "" {
+		delete(s.idleSince, key)
+		return reason
+	}
 	if err := a.savePaneScreen(ctx, j); err != nil {
 		return "screen-not-saved"
 	}
@@ -784,7 +810,13 @@ func (s *TaskPaneSweeper) close(ctx context.Context, a *App, j Job, task string,
 	if err != nil {
 		return "herdr-unreadable"
 	}
-	// The ended-job sweep closes a pane whatever herdr shows it doing (hk 4512).
+	// Both passes need a fresh row that is the job's pane (hk 4562610925). Only
+	// the local sweep also needs that pane idle; the ended-job sweep closes it
+	// whatever herdr shows (hk 4512).
+	if reason := paneRowReason(latest, fresh); reason != "" {
+		delete(s.idleSince, key)
+		return reason
+	}
 	if ended == nil && !s.idle(latest, fresh) {
 		delete(s.idleSince, key)
 		return s.notIdleReason(latest, fresh)
