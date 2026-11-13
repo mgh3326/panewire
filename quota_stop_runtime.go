@@ -41,6 +41,14 @@ type quotaStopManager struct {
 	policyOK   bool
 	// clock times the observation phases; nil is time.Now.
 	clock func() time.Time
+	// show reports a pane's quota wait token, or clears it with an empty
+	// value and zero ttl; nil leaves panes unmarked (herdr without
+	// pane.report_metadata, or a test).
+	show func(ctx context.Context, pane, value string, ttl time.Duration) error
+	// showMu guards shown: the panes this manager reported and when each
+	// needs its next report. tick and observe both publish.
+	showMu sync.Mutex
+	shown  map[string]time.Time
 }
 
 func newQuotaStopManager(s *Store, root string, act bool, logger *slog.Logger) (*quotaStopManager, error) {
@@ -66,7 +74,7 @@ func newQuotaStopManager(s *Store, root string, act bool, logger *slog.Logger) (
 			}
 		}
 	}
-	q := &quotaStopManager{store: s, root: root, act: act, logger: logger}
+	q := &quotaStopManager{store: s, root: root, act: act, logger: logger, shown: map[string]time.Time{}}
 	q.session = func(job, pane string) string {
 		return nodeJobHerdrSessionByPaneFromRoot(root, pane)
 	}
@@ -578,30 +586,44 @@ func (q *quotaStopManager) actOnQuotaStop(ctx context.Context, c idleWakeCandida
 		due = stop.Reset.Add(time.Duration(1+int(sum[0])%5) * time.Second).UnixMilli()
 	}
 	q.logger.Info("quota-stop action", "pane", c.PaneID, "basis", basis, "pool", stop.Pool, "decision", decision, "reason", reason)
-	return q.recordDecisionFor(dbCtx, c, job.Role, now, stop.Pool, reset, decision, reason, policy.ResumeText, due)
+	recorded, err := q.recordDecisionFor(dbCtx, c, job.Role, now, stop.Pool, reset, decision, reason, policy.ResumeText, due)
+	if err != nil || !recorded || decision != "wait" {
+		return err
+	}
+	// The wait is visible on the pane from the moment it is decided; tick
+	// refreshes a token that outlives one report and the resume or hand-over
+	// clears it.
+	if q.quotaWaits(job.Role, stop.Pool) {
+		q.showQuotaWait(ctx, c.PaneID, stop.Pool, reset, now)
+	}
+	return nil
 }
 
 // recordDecision deduplicates known resets exactly; unknown resets are scoped
 // to an hour so a later independent stop on a reused pane is still reported.
 func (q *quotaStopManager) recordDecision(ctx context.Context, c idleWakeCandidate, now time.Time, pool, reset, decision, reason, resume string, due int64) error {
-	return q.recordDecisionFor(ctx, c, "", now, pool, reset, decision, reason, resume, due)
+	_, err := q.recordDecisionFor(ctx, c, "", now, pool, reset, decision, reason, resume, due)
+	return err
 }
 
 // recordDecisionFor is recordDecision for a job of role: a worker or tester's
-// decision is left for the manager to act on even in shadow mode.
-func (q *quotaStopManager) recordDecisionFor(ctx context.Context, c idleWakeCandidate, role string, now time.Time, pool, reset, decision, reason, resume string, due int64) error {
+// decision is left for the manager to act on even in shadow mode. recorded is
+// false when a duplicate decision or an existing pane+reset left the row as it
+// was, so a caller can tell that this call decided nothing.
+func (q *quotaStopManager) recordDecisionFor(ctx context.Context, c idleWakeCandidate, role string, now time.Time, pool, reset, decision, reason, resume string, due int64) (recorded bool, err error) {
 	shadow := !q.act && !quotaActsOn(role, pool)
 	q.store.mu.Lock()
 	result, err := q.store.db.ExecContext(ctx, `UPDATE quota_stop_decisions SET pool=?,reset=?,decision=?,reason=?,resume_text=?,due=?,action_recorded=? WHERE event_id=? AND decision='' AND NOT EXISTS (SELECT 1 FROM quota_stop_decisions d WHERE d.pane=? AND d.reset=? AND d.decision<>'' AND d.event_id<>? AND (? <> 'unknown' OR d.created / 3600000 = ?))`, pool, reset, decision, reason, resume, due, boolInt(shadow), c.EventID, c.PaneID, reset, c.EventID, reset, now.UnixMilli()/3600000)
 	q.store.mu.Unlock()
 	if err != nil {
 		q.logger.Warn("quota-stop decision was not recorded", "error", err)
-		return err
+		return false, err
 	}
-	if n, _ := result.RowsAffected(); n != 0 {
+	n, _ := result.RowsAffected()
+	if n != 0 {
 		q.logger.Info("quota-stop decision", "pane", c.PaneID, "pool", pool, "reset", reset, "decision", decision, "reason", reason, "shadow", shadow)
 	}
-	return nil
+	return n != 0, nil
 }
 func (q *quotaStopManager) tick(ctx context.Context, now time.Time, advanceSettle bool) {
 	q.mu.Lock()
@@ -609,6 +631,8 @@ func (q *quotaStopManager) tick(ctx context.Context, now time.Time, advanceSettl
 	if advanceSettle {
 		q.drainBlocked(ctx, now)
 	}
+	// A pending wait keeps its pane token before the outbox can clear it.
+	q.refreshQuotaWaits(ctx, now)
 	// The outbox is drained separately from the one-per-wake screen read.
 	q.store.mu.Lock()
 	rows, err := q.store.db.QueryContext(ctx, `SELECT event_id,job,pane,label,pool,reset,decision,reason,resume_text,due,attempted,hk_recorded,action_recorded,created,action_retry,role,owner FROM quota_stop_decisions WHERE decision<>'' AND ((hk_recorded=0 AND hk_retry<=?) OR (action_recorded=0 AND action_retry<=? AND (decision='handover' OR due<=?))) ORDER BY action_recorded, event_id LIMIT 1`, now.UnixMilli(), now.UnixMilli(), now.UnixMilli())
@@ -668,6 +692,7 @@ func (q *quotaStopManager) tick(ctx context.Context, now time.Time, advanceSettl
 					q.enqueue(hubScannedRelayEvent{Kind: "lane.event", HubActiveJob: HubActiveJob{JobID: laneEventTransportID("operator-desk", event.EventID), Epoch: 1, OwnerLane: "operator-desk"}, EventID: event.EventID, Text: msg})
 				}
 				q.update(ctx, r.id, "action_recorded", 1)
+				q.clearQuotaWait(ctx, r.pane)
 			} else {
 				q.backoffAction(ctx, r.id, now)
 			}
@@ -680,11 +705,11 @@ func (q *quotaStopManager) tick(ctx context.Context, now time.Time, advanceSettl
 		// An unproven target is left untouched and handed over instead.
 		job, ok := q.jobForPane(ctx, r.pane)
 		if !ok || job.JobID != r.job || job.AgentLabel != r.label {
-			q.failResume(ctx, r.id, "target_changed")
+			q.failResume(ctx, r.id, r.pane, "target_changed")
 			continue
 		}
 		if r.attempted != 0 {
-			q.failResume(ctx, r.id, "submission_unproven")
+			q.failResume(ctx, r.id, r.pane, "submission_unproven")
 			continue
 		}
 		// A pane that is blocked now is never resumed, and its screen is not read: herdr would refuse the
@@ -695,19 +720,19 @@ func (q *quotaStopManager) tick(ctx context.Context, now time.Time, advanceSettl
 		_ = q.store.db.QueryRowContext(ctx, `SELECT agent_status FROM idle_wake_panes WHERE pane_id=?`, r.pane).Scan(&status)
 		q.store.mu.Unlock()
 		if status == "blocked" {
-			q.failResume(ctx, r.id, "blocked_dialog")
+			q.failResume(ctx, r.id, r.pane, "blocked_dialog")
 			continue
 		}
 		readCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		screen, e := q.read(readCtx, r.pane)
 		cancel()
 		if e != nil {
-			q.failResume(ctx, r.id, "screen_unavailable")
+			q.failResume(ctx, r.id, r.pane, "screen_unavailable")
 			continue
 		}
 		stop, classified := classifyQuotaStop(screen, now, time.Local)
 		if !classified || stop.Pool != r.pool || stop.Choice {
-			q.failResume(ctx, r.id, "screen_changed_or_dialog")
+			q.failResume(ctx, r.id, r.pane, "screen_changed_or_dialog")
 			continue
 		}
 		q.store.mu.Lock()
@@ -719,7 +744,7 @@ func (q *quotaStopManager) tick(ctx context.Context, now time.Time, advanceSettl
 		}
 		n, _ := result.RowsAffected()
 		if n != 1 {
-			q.failResume(ctx, r.id, "resume_limit_or_state_changed")
+			q.failResume(ctx, r.id, r.pane, "resume_limit_or_state_changed")
 			continue
 		}
 		marker := relayNonce(relayHeld{Lane: "operator-desk", JobID: r.id, Text: r.text})
@@ -728,11 +753,12 @@ func (q *quotaStopManager) tick(ctx context.Context, now time.Time, advanceSettl
 		cancel()
 		if sent.Outcome == relayInjectDelivered && sent.Evidence != "" && slices.Contains(sent.Proven, marker) {
 			q.update(ctx, r.id, "action_recorded", 1)
+			q.clearQuotaWait(ctx, r.pane)
 			if quotaActsOn(r.role, r.pool) {
 				q.infoToOwner(r.owner, "quota-stop-resumed:"+r.id, fmt.Sprintf("resumed %s (%s quota reset) in pane %s", r.job, r.pool, r.pane), now)
 			}
 		} else {
-			q.failResume(ctx, r.id, "submission_unproven")
+			q.failResume(ctx, r.id, r.pane, "submission_unproven")
 		}
 	}
 }
@@ -753,6 +779,7 @@ func (q *quotaStopManager) handOver(ctx context.Context, id, job, pane, pool, re
 		return
 	}
 	q.update(ctx, id, "action_recorded", 1)
+	q.clearQuotaWait(ctx, pane)
 }
 
 // infoToOwner sends the owner one info lane event; a lane event that cannot be
@@ -777,10 +804,12 @@ func (q *quotaStopManager) update(ctx context.Context, id, col string, value int
 	defer q.store.mu.Unlock()
 	_, _ = q.store.db.ExecContext(ctx, `UPDATE quota_stop_decisions SET `+col+`=? WHERE event_id=?`, value, id)
 }
-func (q *quotaStopManager) failResume(ctx context.Context, id, reason string) {
+func (q *quotaStopManager) failResume(ctx context.Context, id, pane, reason string) {
 	q.store.mu.Lock()
-	defer q.store.mu.Unlock()
 	_, _ = q.store.db.ExecContext(ctx, `UPDATE quota_stop_decisions SET decision='handover',reason=?,hk_recorded=0 WHERE event_id=?`, reason, id)
+	q.store.mu.Unlock()
+	// The wait ended in a hand-over, so the pane stops advertising it.
+	q.clearQuotaWait(ctx, pane)
 }
 
 func (q *quotaStopManager) backoffAction(ctx context.Context, id string, now time.Time) {

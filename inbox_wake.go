@@ -275,10 +275,14 @@ func (h *HubServer) retryUnroutedInboxWakes() {
 	}
 }
 
+// inboxWakeMostUrgent is the highest-ranked unread kind. order shares decision's
+// rank, so on that tie order wins: the line must not depend on inbox order (hk 4458).
 func inboxWakeMostUrgent(items []laneInboxItem) string {
 	most := "info"
 	for _, item := range items {
-		if k := inboxWakeKind(item.Kind, item.Event); inboxWakeRank(k) > inboxWakeRank(most) {
+		k := inboxWakeKind(item.Kind, item.Event)
+		rank, mostRank := inboxWakeRank(k), inboxWakeRank(most)
+		if rank > mostRank || (rank == mostRank && k == "order") {
 			most = k
 		}
 	}
