@@ -189,7 +189,13 @@ events` and `// END fleet events`, with platform-specific file paths:
 
 - On Linux, `local.file_match` names the `panewire` and `mergewake` event files
   separately. A wildcard across tool directories can fail as a whole if Alloy
-  cannot traverse one sibling directory. On macOS it reads
+  cannot traverse one sibling directory. A literal path that is absent yields no
+  target and leaves the others intact. The explicit list is the whole Linux
+  scope: a tool missing from it ships nothing from a Linux host. The macOS
+  config still lists legacy `runtug`; a Linux host that still runs `runtug`
+  (or any new fleet tool) needs its `__path__` added to this list on that host;
+  until then its events are not shipped. `TestLinuxAlloyFleetEventsUseExplicitToolPaths`
+  pins this list. On macOS it reads
   `$FLEET_EVENTS_ROOT/*/events/fleet-events.jsonl`; the root defaults to
   `$HOME/.local/state`, which is right for the user agent. On Linux, set
   `FLEET_EVENTS_ROOT` to the fleet user's state home, because the Alloy system
@@ -367,7 +373,7 @@ Labels not applicable to a source are absent. Queries should therefore scope by
 
 Run `sh -n install-linux.sh run-alloy.sh proc-metrics.sh ../grafana/apply.sh`, `gitleaks git --no-banner`, and `go test ./...`.
 When the `alloy` binary is available, the Go tests do three things: run
-`alloy fmt` and `alloy validate` on both configurations, check that the
-fleet events block is identical in both, and run that block end to end.
+`alloy fmt` and `alloy validate` on both configurations, check the shared
+label/pipeline contract on both fleet events blocks, and run the Linux block end to end.
 Without the binary, they report an explicit skip. The Grafana files are
 covered by `grafana_provisioning_test.go`.

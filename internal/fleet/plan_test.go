@@ -142,7 +142,7 @@ func TestPlanJSONAndExitCodes(t *testing.T) {
 		t.Fatalf("want exit %d, got %v", exitSeatRefused, e)
 	}
 
-	for _, args := range [][]string{{"--t", "T1"}, {"--grade", "A"}, {"--grade", "Z", "--t", "T1"}, {"--grade", "A", "--t", "T1", "--role", "tester"}} {
+	for _, args := range [][]string{{"--t", "T1"}, {"--grade", "A"}, {"--grade", "Z", "--t", "T1"}, {"--grade", "A", "--t", "T1", "--role", "reviewer"}} {
 		if e := a.planCmd(context.Background(), args); exitCode(e) != exitUsage {
 			t.Fatalf("%v: want usage exit, got %v", args, e)
 		}

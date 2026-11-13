@@ -103,10 +103,10 @@ func parseQuotaPolicy(body string) (quotaPolicy, bool) {
 }
 
 // quotaActsFor reports the roles whose quota stop the manager acts on even in
-// shadow mode (hk 3334): a worker or tester either waits for the reset and is
+// shadow mode (hk 3334): an implementer either waits for the reset and is
 // resumed once, or is handed over to another pool. Every other role stays
 // observe-only unless --quota-stop-act is set.
-func quotaActsFor(role string) bool { return role == "worker" || role == "tester" }
+func quotaActsFor(role string) bool { return role == "implementer" }
 
 // quotaActsOn is quotaActsFor for a recorded decision: a decision with no
 // proven quota screen (pool "unknown": a failed or timed-out screen read) is
@@ -120,7 +120,7 @@ func (q *quotaStopManager) quotaWaits(role, pool string) bool {
 	return q.act || quotaActsOn(role, pool)
 }
 
-// quotaDecisionJob is the decision for a worker or tester (policy/quota-stop,
+// quotaDecisionJob is the decision for an implementer (policy/quota-stop,
 // hk 3334): wait only when the reset is at or before the job's start plus the
 // task's expected time, which is the time left on the task. A missing expected
 // time, an unknown start, an urgent task, a second stop after one resume, a

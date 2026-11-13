@@ -24,7 +24,7 @@ func reapLaneJob(t *testing.T, hostMachine, laneMachine string) (laneRM, stderr,
 	if err := store.Claim(t.Context(), "j", "42", "test-host"); err != nil {
 		t.Fatal(err)
 	}
-	putEvent(t, a, "j", "job.claim", map[string]any{"owner_lane": "owner", "parent_lane": "parent", "task_id": "42", "t_level": "T1", "role": "worker"})
+	putEvent(t, a, "j", "job.claim", map[string]any{"owner_lane": "owner", "parent_lane": "parent", "task_id": "42", "t_level": "T1", "role": "implementer"})
 	putEvent(t, a, "j", "job.spawned", map[string]any{"pane_id": "w:p1", "tab_id": "w:t1", "label": "agent-a", "profile": "cmd-dsflash41", "family": "deepseek", "hub_lane": "lane-j", "hub_lane_machine": laneMachine})
 	doneJob(t, a)
 	reapJob(t, a)

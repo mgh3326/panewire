@@ -218,6 +218,24 @@ func TestClaimRegistersAndRefusesDuplicates(t *testing.T) {
 	wantCode(t, e, ExitUsage)
 }
 
+// A claim role is implementer (the default) or builder; the retired names are
+// refused, not mapped (operator decision 208: no aliases).
+func TestClaimRoleVocabulary(t *testing.T) {
+	s, _ := newStore(t)
+	r, e := s.Claim(ctx, Claim{Job: "j1", Lane: "lane", T: "T2"})
+	if e != nil || r.Role != "implementer" {
+		t.Fatalf("default role %+v %v", r, e)
+	}
+	for _, role := range []string{"worker", "captain", "tester", "counsel"} {
+		_, e = s.Claim(ctx, Claim{Job: "j-" + role, Lane: "lane", T: "T2", Role: role, ParentLane: "boss"})
+		wantCode(t, e, ExitUsage)
+	}
+	r, e = s.Claim(ctx, Claim{Job: "jb", Lane: "lane", T: "T2", Role: "builder", ParentLane: "boss"})
+	if e != nil || r.Role != "builder" {
+		t.Fatalf("builder claim %+v %v", r, e)
+	}
+}
+
 // ---- events
 
 func TestEventAppendAndRead(t *testing.T) {

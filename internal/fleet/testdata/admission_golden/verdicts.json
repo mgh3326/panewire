@@ -273,7 +273,7 @@
    "request": {
     "profile": "opus",
     "effort": "high",
-    "role": "worker",
+    "role": "implementer",
     "account_key": "claude:0123456789abcdef"
    }
   },
@@ -315,7 +315,7 @@
    "request": {
     "profile": "opus",
     "effort": "high",
-    "role": "worker",
+    "role": "implementer",
     "account_key": "claude:0123456789abcdef"
    }
   },
@@ -357,7 +357,7 @@
    "request": {
     "profile": "opus",
     "effort": "high",
-    "role": "worker",
+    "role": "implementer",
     "account_key": "claude:0123456789abcdef"
    }
   },
@@ -399,7 +399,7 @@
    "request": {
     "profile": "opus",
     "effort": "high",
-    "role": "worker",
+    "role": "implementer",
     "account_key": "claude:0123456789abcdef"
    }
   },
@@ -441,7 +441,7 @@
    "request": {
     "profile": "sonnet",
     "effort": "high",
-    "role": "worker",
+    "role": "implementer",
     "account_key": "claude:0123456789abcdef"
    }
   },
@@ -481,7 +481,7 @@
    "request": {
     "profile": "opus",
     "effort": "high",
-    "role": "worker",
+    "role": "implementer",
     "account_key": "claude:0123456789abcdef"
    }
   },
@@ -523,7 +523,7 @@
    "request": {
     "profile": "opus",
     "effort": "high",
-    "role": "worker",
+    "role": "implementer",
     "account_key": "claude:0123456789abcdef"
    }
   },
@@ -566,7 +566,7 @@
    "request": {
     "profile": "opus",
     "effort": "high",
-    "role": "worker",
+    "role": "implementer",
     "account_key": "claude:0123456789abcdef"
    }
   },
@@ -600,7 +600,7 @@
    "request": {
     "profile": "opus",
     "effort": "high",
-    "role": "worker",
+    "role": "implementer",
     "account_key": "claude:0123456789abcdef"
    }
   },
@@ -622,7 +622,7 @@
    "request": {
     "profile": "opus",
     "effort": "high",
-    "role": "worker",
+    "role": "implementer",
     "account_key": "claude:0123456789abcdef"
    }
   },
@@ -662,7 +662,7 @@
    "request": {
     "profile": "opus",
     "effort": "high",
-    "role": "worker",
+    "role": "implementer",
     "account_key": "claude:0123456789abcdef"
    }
   },
@@ -700,7 +700,7 @@
    "request": {
     "profile": "opus",
     "effort": "high",
-    "role": "worker",
+    "role": "implementer",
     "account_key": "claude:0123456789abcdef"
    }
   },
@@ -737,7 +737,7 @@
    "request": {
     "profile": "opus",
     "effort": "high",
-    "role": "worker",
+    "role": "implementer",
     "account_key": "claude:0123456789abcdef"
    }
   },
@@ -779,7 +779,7 @@
    "request": {
     "profile": "opus",
     "effort": "high",
-    "role": "worker",
+    "role": "implementer",
     "account_key": "claude:0123456789abcdef"
    }
   },
@@ -821,7 +821,7 @@
    "request": {
     "profile": "opus",
     "effort": "high",
-    "role": "worker",
+    "role": "implementer",
     "account_key": "claude:0123456789abcdef"
    }
   },
@@ -863,7 +863,7 @@
    "request": {
     "profile": "opus",
     "effort": "high",
-    "role": "worker",
+    "role": "implementer",
     "account_key": "claude:0123456789abcdef"
    }
   },
@@ -905,7 +905,7 @@
    "request": {
     "profile": "opus",
     "effort": "high",
-    "role": "worker",
+    "role": "implementer",
     "account_key": "claude:0123456789abcdef"
    }
   },
@@ -949,7 +949,7 @@
     "effort": "xhigh",
     "operator_request": "hk:task/3248",
     "requested_by": "desk",
-    "role": "worker",
+    "role": "implementer",
     "account_key": "claude:0123456789abcdef"
    }
   },
@@ -992,7 +992,7 @@
     "profile": "opus",
     "effort": "high",
     "operator_request": "hk:task/3248",
-    "role": "worker",
+    "role": "implementer",
     "account_key": "claude:0123456789abcdef"
    }
   },
@@ -1035,7 +1035,7 @@
     "profile": "opus",
     "effort": "high",
     "requested_by": "desk",
-    "role": "worker",
+    "role": "implementer",
     "account_key": "claude:0123456789abcdef"
    }
   },
@@ -1078,13 +1078,13 @@
     "profile": "sonnet",
     "effort": "xhigh",
     "operator_request": "task 12",
-    "role": "worker",
+    "role": "implementer",
     "account_key": "claude:0123456789abcdef"
    }
   },
   {
    "config": "[pools.grok]\nclass = \"exclude\"\n",
-   "disagreement": "Operator decision (hk 4212): fable holds worker seats like other profiles; panewire no longer refuses the role. The recorded catalog row is consult_only, so the gate refuses on that row's rule (no --operator-request). pacelever v0.3.28 still refuses the role.",
+   "disagreement": "Operator decision (hk 4212): fable holds implementer seats like other profiles; panewire no longer refuses the role. The recorded catalog row is consult_only, so the gate refuses on that row's rule (no --operator-request). pacelever v0.3.28 still refuses the role.",
    "latest": {
     "observation": {
      "id": 7,
@@ -1106,7 +1106,7 @@
      ]
     }
    },
-   "name": "fable-worker-consult-gate",
+   "name": "fable-implementer-consult-gate",
    "native": {
     "ok": false,
     "exit_code": 3,
@@ -1126,7 +1126,7 @@
    },
    "request": {
     "profile": "fable",
-    "role": "worker",
+    "role": "implementer",
     "account_key": "claude:0123456789abcdef"
    }
   },
@@ -1353,7 +1353,7 @@
    "request": {
     "profile": "codex-sol",
     "effort": "max",
-    "role": "worker",
+    "role": "implementer",
     "account_key": "codex:0123456789abcdef"
    }
   },
@@ -1390,7 +1390,7 @@
    "request": {
     "profile": "codex-sol",
     "effort": "max",
-    "role": "worker",
+    "role": "implementer",
     "account_key": "codex:0123456789abcdef"
    }
   },
@@ -1429,7 +1429,7 @@
    "request": {
     "profile": "codex-luna",
     "effort": "low",
-    "role": "worker",
+    "role": "implementer",
     "account_key": "codex:0123456789abcdef"
    }
   },
@@ -1468,7 +1468,7 @@
    "request": {
     "profile": "codex-sol",
     "effort": "max",
-    "role": "worker",
+    "role": "implementer",
     "account_key": "codex:0123456789abcdef"
    }
   },
@@ -1511,7 +1511,7 @@
    "request": {
     "profile": "codex-luna",
     "effort": "xhigh",
-    "role": "worker",
+    "role": "implementer",
     "account_key": "codex:0123456789abcdef"
    }
   },
@@ -1553,7 +1553,7 @@
    },
    "request": {
     "profile": "devin-fusion-sol61",
-    "role": "worker",
+    "role": "implementer",
     "account_key": "codex:0123456789abcdef"
    }
   },
@@ -1597,7 +1597,7 @@
    },
    "request": {
     "profile": "devin-fusion-sol61",
-    "role": "worker",
+    "role": "implementer",
     "account_key": "codex:0123456789abcdef"
    }
   },
@@ -1647,7 +1647,7 @@
    "request": {
     "profile": "codex-terra61",
     "effort": "max",
-    "role": "worker",
+    "role": "implementer",
     "account_key": "codex:0123456789abcdef"
    }
   },
@@ -1695,7 +1695,7 @@
    "request": {
     "profile": "cmd-dsflash41",
     "effort": "high",
-    "role": "worker",
+    "role": "implementer",
     "account_key": "commandcode:0123456789abcdef"
    }
   },
@@ -1747,7 +1747,7 @@
    "request": {
     "profile": "cmd-dsflash41",
     "effort": "high",
-    "role": "worker",
+    "role": "implementer",
     "account_key": "commandcode:0123456789abcdef"
    }
   },
@@ -1795,7 +1795,7 @@
    "request": {
     "profile": "cmd-dsflash41",
     "effort": "high",
-    "role": "worker",
+    "role": "implementer",
     "account_key": "commandcode:0123456789abcdef"
    }
   },
@@ -1833,7 +1833,7 @@
    "pacelever": {
     "ok": false,
     "exit_code": 5,
-    "reason": "role_restricted: credit rung requires worker/tester; placed default rungs also allow builder",
+    "reason": "role_restricted: credit rung requires implementer; placed default rungs also allow builder",
     "provider_id": "commandcode",
     "gate_basis": "",
     "missing_windows": [],
@@ -1849,55 +1849,7 @@
   },
   {
    "config": "[pools.grok]\nclass = \"exclude\"\n",
-   "latest": {
-    "observation": {
-     "id": 7,
-     "kind": "auto",
-     "measured_at": "2026-11-07T02:59:00Z",
-     "buckets": [
-      {
-       "window": "5h",
-       "used_pct": 10,
-       "scope": "account",
-       "resets_at": "2026-11-07T05:00:00Z"
-      },
-      {
-       "window": "7d",
-       "used_pct": 20,
-       "scope": "account",
-       "resets_at": "2026-11-12T03:00:00Z"
-      },
-      {
-       "window": "30d",
-       "used_pct": 30,
-       "scope": "account",
-       "resets_at": "2026-11-27T03:00:00Z"
-      }
-     ]
-    }
-   },
-   "name": "cmd-dsflash41-tester-admit",
-   "now": "2026-11-07T03:00:00Z",
-   "pacelever": {
-    "ok": true,
-    "exit_code": 0,
-    "reason": "cmd-dsflash41 pool=commandcode used=30% class=spend [rung cmd-dsflash41@high]",
-    "provider_id": "commandcode",
-    "gate_basis": "",
-    "missing_windows": [],
-    "alternatives": [],
-    "receipt": true
-   },
-   "request": {
-    "profile": "cmd-dsflash41",
-    "effort": "high",
-    "role": "tester",
-    "account_key": "commandcode:0123456789abcdef"
-   }
-  },
-  {
-   "config": "[pools.grok]\nclass = \"exclude\"\n",
-   "disagreement": "Operator decision 2026-11-07 (hk 3248 comment 11914): cmd-dsflash41 seats only a worker or tester. pacelever v0.3.28 also seats a builder on a placed default rung.",
+   "disagreement": "Operator decision 2026-11-07 (hk 3248 comment 11914): cmd-dsflash41 seats only an implementer. pacelever v0.3.28 also seats a builder on a placed default rung.",
    "latest": {
     "observation": {
      "id": 7,
@@ -1930,7 +1882,7 @@
     "ok": false,
     "exit_code": 5,
     "provider_id": "commandcode",
-    "reason": "role_restricted: cmd-dsflash41 seats only a worker or tester"
+    "reason": "role_restricted: cmd-dsflash41 seats only an implementer"
    },
    "now": "2026-11-07T03:00:00Z",
    "pacelever": {
@@ -1994,7 +1946,7 @@
    "request": {
     "profile": "cmd-dsflash41",
     "effort": "",
-    "role": "worker",
+    "role": "implementer",
     "account_key": "commandcode:0123456789abcdef"
    }
   },
@@ -2042,7 +1994,7 @@
    "request": {
     "profile": "cmd-dsflash41",
     "effort": "medium",
-    "role": "worker",
+    "role": "implementer",
     "account_key": "commandcode:0123456789abcdef"
    }
   },
@@ -2072,7 +2024,7 @@
    "pacelever": {
     "ok": false,
     "exit_code": 5,
-    "reason": "role_restricted: credit rung requires worker/tester; placed default rungs also allow builder",
+    "reason": "role_restricted: credit rung requires implementer; placed default rungs also allow builder",
     "provider_id": "anthropic-api",
     "gate_basis": "",
     "missing_windows": [],
@@ -2107,7 +2059,7 @@
      }
     ]
    },
-   "name": "pi-worker-manual-credit-admit",
+   "name": "pi-implementer-manual-credit-admit",
    "now": "2026-11-07T03:00:00Z",
    "pacelever": {
     "ok": true,
@@ -2122,7 +2074,7 @@
    "request": {
     "profile": "pi-sonnet55",
     "effort": "high",
-    "role": "worker",
+    "role": "implementer",
     "account_key": "anthropic-api:0123456789abcdef"
    }
   },
@@ -2132,7 +2084,7 @@
     "observation": null,
     "manual": []
    },
-   "name": "pi-worker-no-credit-entry",
+   "name": "pi-implementer-no-credit-entry",
    "now": "2026-11-07T03:00:00Z",
    "pacelever": {
     "ok": false,
@@ -2147,7 +2099,7 @@
    "request": {
     "profile": "pi-sonnet55",
     "effort": "high",
-    "role": "worker",
+    "role": "implementer",
     "account_key": "anthropic-api:0123456789abcdef"
    }
   },
@@ -2172,7 +2124,7 @@
      }
     ]
    },
-   "name": "pi-worker-credit-expired-entry",
+   "name": "pi-implementer-credit-expired-entry",
    "now": "2026-11-07T03:00:00Z",
    "pacelever": {
     "ok": false,
@@ -2187,7 +2139,7 @@
    "request": {
     "profile": "pi-sonnet55",
     "effort": "high",
-    "role": "worker",
+    "role": "implementer",
     "account_key": "anthropic-api:0123456789abcdef"
    }
   },
@@ -2212,7 +2164,7 @@
      }
     ]
    },
-   "name": "pi-worker-credit-exhausted",
+   "name": "pi-implementer-credit-exhausted",
    "now": "2026-11-07T03:00:00Z",
    "pacelever": {
     "ok": false,
@@ -2227,7 +2179,7 @@
    "request": {
     "profile": "pi-sonnet55",
     "effort": "high",
-    "role": "worker",
+    "role": "implementer",
     "account_key": "anthropic-api:0123456789abcdef"
    }
   },
@@ -2281,7 +2233,7 @@
    "request": {
     "profile": "pi-sonnet55",
     "effort": "high",
-    "role": "worker",
+    "role": "implementer",
     "account_key": "anthropic-api:0123456789abcdef"
    }
   },
@@ -2324,7 +2276,7 @@
    "request": {
     "profile": "pi-sonnet55",
     "effort": "max",
-    "role": "worker",
+    "role": "implementer",
     "account_key": "anthropic-api:0123456789abcdef"
    }
   },
@@ -2366,7 +2318,7 @@
     "effort": "max",
     "operator_request": "hk:doc/decision/x",
     "requested_by": "desk",
-    "role": "worker",
+    "role": "implementer",
     "account_key": "anthropic-api:0123456789abcdef"
    }
   },
@@ -2445,7 +2397,7 @@
    "request": {
     "profile": "devin-swe2",
     "effort": "high",
-    "role": "worker",
+    "role": "implementer",
     "account_key": "devin:0123456789abcdef"
    }
   },
@@ -2487,7 +2439,7 @@
    "request": {
     "profile": "devin-swe2",
     "effort": "high",
-    "role": "worker",
+    "role": "implementer",
     "account_key": "devin:0123456789abcdef"
    }
   },
@@ -2527,7 +2479,7 @@
    "request": {
     "profile": "devin-swe2",
     "effort": "high",
-    "role": "worker",
+    "role": "implementer",
     "account_key": "devin:0123456789abcdef"
    }
   },
@@ -2568,7 +2520,7 @@
    "request": {
     "profile": "devin-swe2",
     "effort": "high",
-    "role": "worker",
+    "role": "implementer",
     "account_key": "devin:0123456789abcdef"
    }
   },
@@ -2602,7 +2554,7 @@
    "request": {
     "profile": "devin-swe2",
     "effort": "high",
-    "role": "worker",
+    "role": "implementer",
     "account_key": "devin:0123456789abcdef"
    }
   },
@@ -2640,7 +2592,7 @@
    },
    "request": {
     "profile": "devin-ds41",
-    "role": "worker",
+    "role": "implementer",
     "account_key": "devin:0123456789abcdef"
    }
   },
@@ -2681,7 +2633,7 @@
    },
    "request": {
     "profile": "devin-ds41",
-    "role": "worker",
+    "role": "implementer",
     "account_key": "devin:0123456789abcdef"
    }
   },
@@ -2731,7 +2683,7 @@
    },
    "request": {
     "profile": "agy-flash",
-    "role": "worker",
+    "role": "implementer",
     "account_key": "agy:0123456789abcdef"
    }
   },
@@ -2770,7 +2722,7 @@
    "request": {
     "profile": "grok",
     "effort": "medium",
-    "role": "worker",
+    "role": "implementer",
     "account_key": "grok:0123456789abcdef"
    }
   },
@@ -2811,7 +2763,7 @@
     "profile": "opus",
     "effort": "high",
     "account_key": "codex:0123456789abcdef",
-    "role": "worker"
+    "role": "implementer"
    }
   },
   {
@@ -2832,7 +2784,7 @@
    "request": {
     "profile": "opus-legacy",
     "effort": "high",
-    "role": "worker",
+    "role": "implementer",
     "account_key": "claude:0123456789abcdef"
    }
   }

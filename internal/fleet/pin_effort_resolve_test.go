@@ -6,7 +6,7 @@ func TestPinnedProfileWithoutEffortResolvesSingleLiveRow(t *testing.T) {
 	a := testApp(t)
 	seat := a.Policy.Profiles["opus"]
 	rows := []launchRow{{admissionRow: admissionRow{Profile: "opus", Effort: "high", Grade: "S", Placed: true, Pool: "claude", Gate: "default", ModelID: "claude-opus-5-5"}}}
-	launch, resolved, why := (launchCatalog{Rows: rows}).resolveRow(admissionRequest{Profile: "opus", Role: "worker"}, false, a.Policy.Profiles)
+	launch, resolved, why := (launchCatalog{Rows: rows}).resolveRow(admissionRequest{Profile: "opus", Role: "implementer"}, false, a.Policy.Profiles)
 	if why != "" {
 		t.Fatalf("single live row was refused: %s", why)
 	}
@@ -18,7 +18,7 @@ func TestPinnedProfileWithoutEffortResolvesSingleLiveRow(t *testing.T) {
 func TestPinnedProfileWithoutEffortRefusesRunglessSingleRow(t *testing.T) {
 	a := testApp(t)
 	rows := []launchRow{{admissionRow: admissionRow{Profile: "opus", Effort: "", Grade: "S", Placed: true, Pool: "claude", Gate: "default", ModelID: "claude-opus-5-5"}}}
-	_, _, why := (launchCatalog{Rows: rows}).resolveRow(admissionRequest{Profile: "opus", Role: "worker"}, false, a.Policy.Profiles)
+	_, _, why := (launchCatalog{Rows: rows}).resolveRow(admissionRequest{Profile: "opus", Role: "implementer"}, false, a.Policy.Profiles)
 	if why != "catalog row has no launch effort" {
 		t.Fatalf("rungless row refusal = %q; want %q", why, "catalog row has no launch effort")
 	}
@@ -30,7 +30,7 @@ func TestPinnedProfileWithoutEffortLaunchesLowestOrdinaryEffort(t *testing.T) {
 		{admissionRow: admissionRow{Profile: "fable", Effort: "max", Grade: "S", Placed: true, Pool: "claude", Gate: "default", ModelID: "claude-fable-5-1"}},
 		{admissionRow: admissionRow{Profile: "fable", Effort: "high", Grade: "S", Placed: true, Pool: "claude", Gate: "default", ModelID: "claude-fable-5-1"}},
 	}
-	launch, resolved, why := (launchCatalog{Rows: rows}).resolveRow(admissionRequest{Profile: "fable", Role: "worker"}, false, a.Policy.Profiles)
+	launch, resolved, why := (launchCatalog{Rows: rows}).resolveRow(admissionRequest{Profile: "fable", Role: "implementer"}, false, a.Policy.Profiles)
 	if why != "" {
 		t.Fatalf("effortless multi-row profile was refused: %s", why)
 	}

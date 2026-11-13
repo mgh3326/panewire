@@ -34,7 +34,7 @@ func TestQuotaStopActionReservesDecisionForDirectCaller(t *testing.T) {
 		JobID:      "job-direct",
 		AgentLabel: "worker-direct",
 		OwnerLane:  "owner",
-		Role:       "worker",
+		Role:       "implementer",
 		StartedAt:  now.Add(-time.Hour).UTC().Format(time.RFC3339),
 	}
 	first := quotastop.Stop{Pool: "codex", Reset: now.Add(2 * time.Hour)}

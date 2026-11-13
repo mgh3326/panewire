@@ -128,8 +128,8 @@ does not know are not written. A failed hk read or write is a warning plus a
 
 When the node completes a job (`panewire done`, `escalate`, and the completion
 watcher) it reads that job's token usage and writes it with a second
-`PUT /v1/jobs/{job}`, after the terminal record. `panewire reap` and the
-delegate close read again and write again, before the pane closes. The `usage`
+`PUT /v1/jobs/{job}`, after the terminal record. `panewire reap` reads
+again and writes again, before the pane closes. The `usage`
 object replaces the stored one as a whole, so the later read wins; a reap read
 with no figures is not written, so it cannot erase the completion read. A job
 whose `job.spawned` carries no `harness_session` gets no usage write. A failed

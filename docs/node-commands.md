@@ -325,7 +325,7 @@ no `node.command` caller may issue it, and the public endpoint refuses it.
 
 The node closes the pane of every job whose own latest record ended at least
 `age_s` seconds ago, whatever herdr shows the pane doing (no idle, grace or
-composer check). It keeps a worker's or tester's pane while its worktree is on
+composer check). It keeps an implementer's pane while its worktree is on
 an open PR, as the idle sweep does. It replies `{"closed": [...]}`, one
 `{job, pane, role, reason}` per pane closed, with `reason` `job_revoked`,
 `job_completed`, `job_handed_off`, `job_lost`, or the job's outcome.

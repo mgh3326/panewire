@@ -10,7 +10,7 @@ import (
 
 // hostFirstFixture is a four-machine fleet with local spawning disabled:
 // a macOS machine with unity, a small Linux VM, a one-core VM limited to
-// light roles and grades up to A, and a Pi limited to worker/tester at C/B.
+// light roles and grades up to A, and a Pi limited to the implementer role at C/B.
 // Account A (claude, waste risk) ranks ahead of account B (claude, spend) in
 // pool order. place maps host → account key; load maps host → load ratio.
 func hostFirstFixture(t *testing.T, role, grade string, rows []CatalogRow, place map[string]string, load map[string]float64) (*App, Spawn, *fakeQuota, *fakePlacementSource) {
@@ -24,8 +24,8 @@ func hostFirstFixture(t *testing.T, role, grade string, rows []CatalogRow, place
 	a.Config.Hosts = map[string]map[string]any{
 		"mac-b":       {"tags": []any{"macos", "unity", "xcode"}},
 		"cloud-small": {"tags": []any{"linux"}},
-		"cloud-tiny":  {"caps": []any{"linux"}, "roles": []any{"worker", "tester", "reviewer"}, "grades": []any{"C", "B", "A"}},
-		"pi":          {"tags": []any{"linux"}, "roles": []any{"worker", "tester"}, "grades": []any{"C", "B"}},
+		"cloud-tiny":  {"caps": []any{"linux"}, "roles": []any{"implementer", "reviewer"}, "grades": []any{"C", "B", "A"}},
+		"pi":          {"tags": []any{"linux"}, "roles": []any{"implementer"}, "grades": []any{"C", "B"}},
 	}
 	a.Config.HostOrder = []string{"mac-b", "cloud-small", "cloud-tiny", "pi"}
 	src := &fakePlacementSource{accounts: map[string]SharedAccount{}}
@@ -63,57 +63,57 @@ func TestHostFitPlacement(t *testing.T) {
 		wantErr                 string
 	}{
 		{
-			name: "unity lead skips the waste account on a non-unity host", role: "counsel", grade: "A", tags: "unity", rows: consultRows,
+			name: "unity lead skips the waste account on a non-unity host", role: "consult", grade: "A", tags: "unity", rows: consultRows,
 			place:    map[string]string{"cloud-small": testClaudeA, "mac-b": testClaudeB},
 			load:     map[string]float64{"cloud-small": 0.1, "mac-b": 0.5},
 			wantHost: "mac-b", wantKey: testClaudeB,
 		},
 		{
-			name: "no host declares the cap", role: "counsel", grade: "A", tags: "gpu", rows: consultRows,
+			name: "no host declares the cap", role: "consult", grade: "A", tags: "gpu", rows: consultRows,
 			place:    map[string]string{"cloud-small": testClaudeA, "mac-b": testClaudeB},
 			wantCode: exitPlacement, wantErr: "NO_ELIGIBLE_HOST: no account admitted routing role consult; no host declares cap gpu",
 		},
 		{
-			name: "no single host declares every cap", role: "counsel", grade: "A", tags: "unity,linux", rows: consultRows,
+			name: "no single host declares every cap", role: "consult", grade: "A", tags: "unity,linux", rows: consultRows,
 			place:    map[string]string{"cloud-small": testClaudeA, "mac-b": testClaudeB},
 			wantCode: exitPlacement, wantErr: "no single host declares all caps unity,linux",
 		},
 		{
-			name: "pi takes a light worker task", role: "worker", grade: "B", rows: workerRows,
+			name: "pi takes a light worker task", role: "implementer", grade: "B", rows: workerRows,
 			place:    map[string]string{"pi": testClaudeB},
 			wantHost: "pi", wantKey: testClaudeB,
 		},
 		{
 			// Fitting hosts exist but none holds a login: AUTH_UNAVAILABLE.
-			name: "pi never takes a lead", role: "counsel", grade: "B", rows: consultRows,
+			name: "pi never takes a lead", role: "consult", grade: "B", rows: consultRows,
 			place:    map[string]string{"pi": testClaudeB},
 			wantCode: exitAuthUnavailable, wantErr: "AUTH_UNAVAILABLE",
 		},
 		{
-			name: "an idle pi does not draw a lead from a busier host", role: "counsel", grade: "B", rows: consultRows,
+			name: "an idle pi does not draw a lead from a busier host", role: "consult", grade: "B", rows: consultRows,
 			place:    map[string]string{"pi": testClaudeB, "mac-b": testClaudeB},
 			load:     map[string]float64{"pi": 0.0, "mac-b": 0.8},
 			wantHost: "mac-b", wantKey: testClaudeB,
 		},
 		{
-			name: "one-core vm never takes a heavy grade", role: "worker", grade: "S", rows: workerRows,
+			name: "one-core vm never takes a heavy grade", role: "implementer", grade: "S", rows: workerRows,
 			place:    map[string]string{"cloud-tiny": testClaudeB},
 			wantCode: exitAuthUnavailable, wantErr: "AUTH_UNAVAILABLE",
 		},
 		{
-			name: "heavy grade goes to a capable host", role: "worker", grade: "S", rows: workerRows,
+			name: "heavy grade goes to a capable host", role: "implementer", grade: "S", rows: workerRows,
 			place:    map[string]string{"cloud-tiny": testClaudeB, "mac-b": testClaudeB},
 			load:     map[string]float64{"cloud-tiny": 0.0, "mac-b": 0.9},
 			wantHost: "mac-b", wantKey: testClaudeB,
 		},
 		{
-			name: "one-core vm takes light work", role: "worker", grade: "B", rows: workerRows,
+			name: "one-core vm takes light work", role: "implementer", grade: "B", rows: workerRows,
 			place:    map[string]string{"cloud-tiny": testClaudeB, "mac-b": testClaudeB},
 			load:     map[string]float64{"cloud-tiny": 0.1, "mac-b": 0.9},
 			wantHost: "cloud-tiny", wantKey: testClaudeB,
 		},
 		{
-			name: "heavy-go work needs the cap", role: "worker", grade: "B", tags: "heavy-go", rows: workerRows,
+			name: "heavy-go work needs the cap", role: "implementer", grade: "B", tags: "heavy-go", rows: workerRows,
 			place:    map[string]string{"cloud-tiny": testClaudeB},
 			wantCode: exitPlacement, wantErr: "no host declares cap heavy-go",
 		},
@@ -157,7 +157,7 @@ caps = ["macos", "unity"]
 [hosts.pi]
 tags = ["linux"]
 caps = ["heavy-go"]
-roles = ["worker", "tester"]
+roles = ["implementer"]
 grades = ["C", "B"]
 
 [hosts.cloud-small]
@@ -172,16 +172,16 @@ tags = ["linux"]
 	if got := hostCaps(c.Local); strings.Join(got, ",") != "macos,unity" {
 		t.Fatalf("local caps %v", got)
 	}
-	if r := roleRefusal(c.Hosts["pi"], "counsel", ""); r != "role_not_accepted:counsel" {
+	if r := roleRefusal(c.Hosts["pi"], "consult", ""); r != "role_not_accepted:consult" {
 		t.Fatalf("pi lead: %q", r)
 	}
-	if r := roleRefusal(c.Hosts["pi"], "worker", "A"); r != "grade_not_accepted:A" {
+	if r := roleRefusal(c.Hosts["pi"], "implementer", "A"); r != "grade_not_accepted:A" {
 		t.Fatalf("pi grade A: %q", r)
 	}
-	if r := roleRefusal(c.Hosts["pi"], "tester", "B"); r != "" {
-		t.Fatalf("pi tester B: %q", r)
+	if r := roleRefusal(c.Hosts["pi"], "implementer", "B"); r != "" {
+		t.Fatalf("pi implementer B: %q", r)
 	}
-	if r := roleRefusal(c.Hosts["cloud-small"], "counsel", ""); r != "" {
+	if r := roleRefusal(c.Hosts["cloud-small"], "consult", ""); r != "" {
 		t.Fatalf("unlimited host refused: %q", r)
 	}
 	for name, body := range map[string]string{
@@ -199,7 +199,7 @@ tags = ["linux"]
 
 	place := map[string]string{"cloud-small": testClaudeB}
 	load := map[string]float64{"cloud-small": 0.1}
-	a, s, _, _ := hostFirstFixture(t, "worker", "B", workerRows, place, load)
+	a, s, _, _ := hostFirstFixture(t, "implementer", "B", workerRows, place, load)
 	s.Tags = "unity"
 	sel, err := a.selectProfile(context.Background(), s)
 	if err == nil {
@@ -210,7 +210,7 @@ tags = ["linux"]
 	if sel.chosen != nil || exitCode(err) != exitAuthUnavailable {
 		t.Fatalf("want AUTH_UNAVAILABLE: %v", err)
 	}
-	a, s, _, _ = hostFirstFixture(t, "worker", "B", workerRows, place, load)
+	a, s, _, _ = hostFirstFixture(t, "implementer", "B", workerRows, place, load)
 	if sel, err = a.selectProfile(context.Background(), s); err != nil || sel.chosen.host != "cloud-small" {
 		t.Fatalf("cloud-small refused work it can do: %v", err)
 	}
@@ -218,12 +218,12 @@ tags = ["linux"]
 
 // The placement plan applies the same limits.
 func TestPlacementPlanHostFit(t *testing.T) {
-	a, _, _, _ := hostFirstFixture(t, "worker", "B", workerRows, nil, map[string]float64{"mac-b": 0.5, "cloud-small": 0.2, "cloud-tiny": 0.1, "pi": 0.1})
-	p, err := a.plan(context.Background(), Spawn{Role: "counsel"}, "", 0)
+	a, _, _, _ := hostFirstFixture(t, "implementer", "B", workerRows, nil, map[string]float64{"mac-b": 0.5, "cloud-small": 0.2, "cloud-tiny": 0.1, "pi": 0.1})
+	p, err := a.plan(context.Background(), Spawn{Role: "consult"}, "", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for host, want := range map[string]string{"pi": "role_not_accepted:counsel", "cloud-tiny": "role_not_accepted:counsel"} {
+	for host, want := range map[string]string{"pi": "role_not_accepted:consult", "cloud-tiny": "role_not_accepted:consult"} {
 		if c := p.candidate(host); c.eligible || c.outcome != want {
 			t.Fatalf("%s: eligible=%t outcome=%q", host, c.eligible, c.outcome)
 		}
@@ -231,11 +231,11 @@ func TestPlacementPlanHostFit(t *testing.T) {
 	if c := p.candidate("mac-b"); !c.eligible {
 		t.Fatalf("mac-b refused a lead: %q", c.outcome)
 	}
-	p, _ = a.plan(context.Background(), Spawn{Role: "worker", TaskGrade: "S"}, "", 0)
+	p, _ = a.plan(context.Background(), Spawn{Role: "implementer", TaskGrade: "S"}, "", 0)
 	if c := p.candidate("cloud-tiny"); c.outcome != "grade_not_accepted:S" {
 		t.Fatalf("cloud-tiny outcome %q", c.outcome)
 	}
-	p, _ = a.plan(context.Background(), Spawn{Role: "worker", TaskGrade: "B", Tags: "unity"}, "", 0)
+	p, _ = a.plan(context.Background(), Spawn{Role: "implementer", TaskGrade: "B", Tags: "unity"}, "", 0)
 	if c := p.candidate("cloud-small"); c.eligible || c.outcome != "missing_tags:unity" {
 		t.Fatalf("cloud-small outcome %q", c.outcome)
 	}
@@ -255,7 +255,7 @@ func TestHostFitLeadIgnoresStaleTaskGrade(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			// Task title "(grade A, T1)": A is in cloud-tiny's grades list.
-			a, s, _, _ := hostFirstFixture(t, "counsel", "A", consultRows, tc.place, tc.load)
+			a, s, _, _ := hostFirstFixture(t, "consult", "A", consultRows, tc.place, tc.load)
 			delete(a.Config.Hosts["cloud-tiny"], "roles")
 			sel, err := a.selectProfile(context.Background(), s)
 			if tc.wantHost == "" {

@@ -41,7 +41,7 @@ func newPaneTokenManager(t *testing.T, act bool) *quotaStopManager {
 // A worker wait publishes panewire_quota on the pane with the pool and the
 // reset, and the resume at that reset clears it (hk 2851).
 func TestQuotaStopPaneTokenShowsWaitAndClearsOnResume(t *testing.T) {
-	rig := newRoleStopRig(t, "worker", time.Hour, roleStopTask)
+	rig := newRoleStopRig(t, "implementer", time.Hour, roleStopTask)
 	reports := recordPaneQuotaReports(rig.q)
 	rig.run()
 	var reset string
@@ -70,7 +70,7 @@ func TestQuotaStopPaneTokenShowsWaitAndClearsOnResume(t *testing.T) {
 
 // A failed resume hands the job over, so the pane stops advertising the wait.
 func TestQuotaStopPaneTokenClearsOnHandover(t *testing.T) {
-	rig := newRoleStopRig(t, "worker", time.Hour, roleStopTask)
+	rig := newRoleStopRig(t, "implementer", time.Hour, roleStopTask)
 	reports := recordPaneQuotaReports(rig.q)
 	rig.q.send = func(context.Context, string, string, string) relayInjectResult {
 		return relayInjectResult{Outcome: relayInjectMaybeInPane}
@@ -96,7 +96,7 @@ func TestQuotaStopPaneTokenRefreshesCappedWait(t *testing.T) {
 		waits  int
 		report bool
 	}{
-		{"worker wait inside the maximum TTL", false, "worker", 5 * time.Minute, 1, true},
+		{"implementer wait inside the maximum TTL", false, "implementer", 5 * time.Minute, 1, true},
 		{"reviewer wait in shadow mode", false, "reviewer", 5 * time.Minute, 0, false},
 		{"act flag waits for every role", true, "reviewer", 5 * time.Minute, 1, true},
 	} {
@@ -122,7 +122,7 @@ func TestQuotaStopPaneTokenRefreshSchedule(t *testing.T) {
 	reports := recordPaneQuotaReports(q)
 	now := time.Date(2026, 11, 14, 0, 0, 0, 0, time.UTC)
 	reset := now.Add(48 * time.Hour).Format(time.RFC3339)
-	if _, err := q.store.db.Exec(`INSERT INTO quota_stop_decisions(event_id,job,pane,label,pool,reset,decision,role) VALUES('evt','job-active','workspace:pane-1','worker-synthetic','claude',?,'wait','worker')`, reset); err != nil {
+	if _, err := q.store.db.Exec(`INSERT INTO quota_stop_decisions(event_id,job,pane,label,pool,reset,decision,role) VALUES('evt','job-active','workspace:pane-1','worker-synthetic','claude',?,'wait','implementer')`, reset); err != nil {
 		t.Fatal(err)
 	}
 	q.refreshQuotaWaits(context.Background(), now)

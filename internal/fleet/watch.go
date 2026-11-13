@@ -233,7 +233,7 @@ func (a *App) watch(ctx context.Context, args []string) error {
 			return e
 		}
 		// The job.lost announced for a quota stop (by this watcher for a
-		// reviewer, by the manager for a handed-over worker or tester) is not
+		// reviewer, by the manager for a handed-over implementer) is not
 		// an end until the grace for the hub's replacement runs out.
 		if !handOff.active {
 			if stop, ok := announcedQuotaStop(j); ok && !j.Reaped {
@@ -308,11 +308,20 @@ func (a *App) watch(ctx context.Context, args []string) error {
 			creditAttempts = 0
 			lastCredit = credit.CreditExhaustedAt
 			published := map[string]any{"pool": credit.Pool, "at": credit.CreditExhaustedAt.UTC().Format(time.RFC3339Nano)}
-			if !j.Terminal && !j.Reaped && !workerEscalated(j) && j.QuotaRole() != "counsel" && !handOff.active {
+			if !j.Terminal && !j.Reaped && !workerEscalated(j) && j.QuotaRole() != "consult" && !handOff.active {
 				// The pane may have resumed while the rejection was being
 				// written, so the hand-off is decided on a fresh row, not on
 				// the snapshot read before the write (hk 4505).
 				current, currentPresent, currentReachable := a.paneAfterPublication(ctx, j.Pane)
+				for !currentReachable {
+					// The rejection stays pending until the pane is read: writing
+					// job.credit_published now would end the retry for good (hk 4505).
+					a.warn("credit hand-off waits for herdr: agent list unavailable")
+					if err := a.Sleep(ctx, 5*time.Second); err != nil {
+						return err
+					}
+					current, currentPresent, currentReachable = a.paneAfterPublication(ctx, j.Pane)
+				}
 				if safeCreditStopHandoff(j, credit, current, currentPresent, currentReachable) {
 					if a.QuotaHandOffGrace <= 0 {
 						if err := a.quotaStopLost(ctx, j, credit, true); err != nil {
@@ -323,7 +332,13 @@ func (a *App) watch(ctx context.Context, args []string) error {
 					if err := a.quotaStopAnnounce(ctx, j, credit); err != nil {
 						return err
 					}
-					handOff = quotaHandOff{stop: credit, until: a.Now().Add(a.QuotaHandOffGrace), seq: current.StateChangeSeq, active: true}
+					// A fresh row without a seq keeps the seq the rejection was read
+					// in, so a later changed seq still shows the pane moved on (hk 4505).
+					seq := current.StateChangeSeq
+					if seq == nil {
+						seq, _ = creditRejectionStateChangeSeq(j, credit)
+					}
+					handOff = quotaHandOff{stop: credit, until: a.Now().Add(a.QuotaHandOffGrace), seq: seq, active: true}
 				}
 			}
 			if err := a.event(ctx, id, "job.credit_published", published); err != nil {
@@ -394,8 +409,8 @@ func (a *App) watch(ctx context.Context, args []string) error {
 		// not finish: end the job at once with the reason, so mergewake
 		// respawns the review on another model instead of waiting out a
 		// grace (hk 4507). The hub's replacement needs a live hk record, so a
-		// reviewer stopped on its screen is not replaced there; only a worker
-		// or tester the manager announced, and a credit stop, get the grace.
+		// reviewer stopped on its screen is not replaced there; only an implementer
+		// the manager announced, and a credit stop, get the grace.
 		// The lost record is what mergewake acts on, so job.lost and the lease
 		// release wait for it. The close is a durable intent (watch_quota_stop.go
 		// quotaIntent): recorded before the first hk write with the exact
@@ -403,7 +418,7 @@ func (a *App) watch(ctx context.Context, args []string) error {
 		// across read errors, herdr outages and restarts. Only a successful
 		// contradictory look at the pane cancels it.
 		// Not while a hand-off is active: its stop is already announced.
-		if !handOff.active && j.QuotaRole() != "counsel" {
+		if !handOff.active && j.QuotaRole() != "consult" {
 			if hasIntent {
 				out, err := a.reconcileQuotaIntent(ctx, j, intent, true, present, pending, paneAgent)
 				if err != nil {

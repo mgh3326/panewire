@@ -31,8 +31,8 @@ func excludedDevinInputs(free *admissionFree) admissionInputs {
 func TestExcludedDevinPoolAdmitsFreeRungs(t *testing.T) {
 	in := excludedDevinInputs(&admissionFree{State: "available"})
 	for _, req := range []admissionRequest{
-		{Profile: "devin-swe2-medium", Effort: "medium", Role: "worker"},
-		{Profile: "devin-swe2-flash", Effort: "high", Role: "worker"},
+		{Profile: "devin-swe2-medium", Effort: "medium", Role: "implementer"},
+		{Profile: "devin-swe2-flash", Effort: "high", Role: "implementer"},
 	} {
 		d := in.admit(req)
 		if !d.OK || d.Exit != gateAdmitted || !strings.HasPrefix(d.Basis, freeBasisPrefix) {
@@ -59,7 +59,7 @@ func TestExcludedDevinPoolFreeRungJudgedOnFreeBucket(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			in := excludedDevinInputs(tc.free)
-			d := in.admit(admissionRequest{Profile: "devin-swe2-medium", Effort: "medium", Role: "worker"})
+			d := in.admit(admissionRequest{Profile: "devin-swe2-medium", Effort: "medium", Role: "implementer"})
 			if d.OK {
 				t.Fatalf("free rung admitted with %s bucket: %+v", tc.name, d)
 			}
@@ -76,7 +76,7 @@ func TestExcludedDevinPoolFreeRungJudgedOnFreeBucket(t *testing.T) {
 // (c) A paid devin rung under exclude stays refused on the pool class.
 func TestExcludedDevinPoolKeepsPaidRungsRefused(t *testing.T) {
 	in := excludedDevinInputs(&admissionFree{State: "available"})
-	d := in.admit(admissionRequest{Profile: "devin-ds41", Effort: "high", Role: "worker"})
+	d := in.admit(admissionRequest{Profile: "devin-ds41", Effort: "high", Role: "implementer"})
 	if d.OK || d.Reason != "pool excluded by policy" {
 		t.Fatalf("devin-ds41 under exclude: want refused with \"pool excluded by policy\", got %+v", d)
 	}
@@ -85,7 +85,7 @@ func TestExcludedDevinPoolKeepsPaidRungsRefused(t *testing.T) {
 // (d) A non-devin excluded pool is refused exactly as before.
 func TestExcludedNonDevinPoolUnchanged(t *testing.T) {
 	in := excludedDevinInputs(&admissionFree{State: "available"})
-	d := in.admit(admissionRequest{Profile: "sonnet", Effort: "high", Role: "worker"})
+	d := in.admit(admissionRequest{Profile: "sonnet", Effort: "high", Role: "implementer"})
 	if d.OK || d.Reason != "pool excluded by policy" {
 		t.Fatalf("sonnet on an excluded claude pool: want refused with \"pool excluded by policy\", got %+v", d)
 	}

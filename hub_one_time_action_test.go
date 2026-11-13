@@ -27,7 +27,7 @@ func firstRunRefusal(requestID, tail string, rc int) map[string]any {
 
 func firstRunNodeRequest(request fleet.Submission, id int, profile string) fleet.HubSpawnRequest {
 	node := refusalNodeRequest(request, id, "machine-a")
-	node.Args = []string{"--job", "test-job", "-m", profile, "-l", "test-job", "--role", "worker"}
+	node.Args = []string{"--job", "test-job", "-m", profile, "-l", "test-job", "--role", "implementer"}
 	return node
 }
 

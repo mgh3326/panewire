@@ -20,13 +20,12 @@ func TestSubmissionRequiresBranchOnOrigin(t *testing.T) {
 		refused bool
 		want    HubCheckout
 	}{
-		{"worker must push", unpushed, "worker", true, HubCheckout{}},
-		{"tester must push", unpushed, "tester", true, HubCheckout{}},
+		{"implementer must push", unpushed, "implementer", true, HubCheckout{}},
 		{"reviewer keeps the detached spec", unpushed, "reviewer", false,
 			HubCheckout{Origin: origin, Mode: "detached", Sha: hubHead, Fetch: "refs/heads/main", Dir: "repo-a.wk"}},
-		{"counsel keeps the detached spec", unpushed, "counsel", false,
+		{"counsel keeps the detached spec", unpushed, "consult", false,
 			HubCheckout{Origin: origin, Mode: "detached", Sha: hubHead, Fetch: "refs/heads/main", Dir: "repo-a.wk"}},
-		{"pushed branch stays in branch mode", gitState{pushed: true}, "worker", false,
+		{"pushed branch stays in branch mode", gitState{pushed: true}, "implementer", false,
 			HubCheckout{Origin: origin, Mode: "branch", Branch: "wk/x", Sha: hubHead, Dir: "repo-a.wk"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -88,7 +87,7 @@ func TestSubmissionAheadBranchIsNotThePushRefusal(t *testing.T) {
 	if err := os.WriteFile(s.Prompt, []byte("brief"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	s.Label, s.T, s.Owner, s.Host, s.OverrideReason, s.Containment, s.Role = "job-a", "T1", "parent", "h1", "fixture", "hk:12", "worker"
+	s.Label, s.T, s.Owner, s.Host, s.OverrideReason, s.Containment, s.Role = "job-a", "T1", "parent", "h1", "fixture", "hk:12", "implementer"
 	request, err := a.PrepareSubmission(t.Context(), s)
 	if err != nil {
 		t.Fatal(err)
