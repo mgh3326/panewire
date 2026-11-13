@@ -71,6 +71,24 @@ func TestAsyncSpawnAcceptedOnlyAfterDurableReservation(t *testing.T) {
 	if w := submit(raw, "node-token"); w.Code != 401 {
 		t.Fatalf("node accepted=%d", w.Code)
 	}
+	if _, err := h.inbox.store.bindSpawn(t.Context(), req.RequestID, task.Attempt, hubSpawnRequest{RequestID: t14RequestID(457722), Machine: "machine-a"}, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	for name, w := range map[string]*httptest.ResponseRecorder{
+		"replayed acceptance": submit(raw, t14OperatorToken),
+		"status read": func() *httptest.ResponseRecorder {
+			r := httptest.NewRequest("GET", "/v1/spawns/"+req.RequestID, nil)
+			r.Header.Set("Authorization", "Bearer "+t14OperatorToken)
+			w := httptest.NewRecorder()
+			h.Handler().ServeHTTP(w, r)
+			return w
+		}(),
+	} {
+		var response map[string]any
+		if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil || response["status"] != "dispatching" {
+			t.Errorf("%s exposed incompatible status: code=%d body=%s err=%v", name, w.Code, w.Body, err)
+		}
+	}
 	h.inbox.store.abort()
 	if w := submit(raw, t14OperatorToken); w.Code != 503 {
 		t.Fatalf("broken durable store ACKed=%d", w.Code)
@@ -136,7 +154,7 @@ func TestSpawnCleanedRetryPreservesKeyAndFencesOldAttempt(t *testing.T) {
 	if changed, err := s.completeSpawn(ctx, old, hubSpawnOutcome{RC: 0, Stage: "landing"}, time.Now()); err != nil || changed {
 		t.Fatalf("stale attempt replaced new owner: %v %v", changed, err)
 	}
-	if _, err = s.bindSpawn(ctx, req.RequestID, old.Attempt, hubSpawnRequest{RequestID: t14RequestID(999), Machine: "machine-b"}); !errors.Is(err, errSpawnClaimed) {
+	if _, err = s.bindSpawn(ctx, req.RequestID, old.Attempt, hubSpawnRequest{RequestID: t14RequestID(999), Machine: "machine-b"}, time.Now().UTC()); !errors.Is(err, errSpawnClaimed) {
 		t.Fatalf("stale dispatch accepted: %v", err)
 	}
 }
@@ -177,10 +195,11 @@ func TestSpawnSentryOnlySpawnAlwaysSampledAndNormalized(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	task, err = h.inbox.store.bindSpawn(t.Context(), req.RequestID, task.Attempt, hubSpawnRequest{RequestID: t14RequestID(983), Machine: "machine-a", Args: []string{"--job", "test-job"}, WaitSeconds: 300})
+	task, err = h.inbox.store.bindSpawn(t.Context(), req.RequestID, task.Attempt, hubSpawnRequest{RequestID: t14RequestID(983), Machine: "machine-a", Args: []string{"--job", "test-job"}, WaitSeconds: 300}, time.Now().UTC())
 	if err != nil {
 		t.Fatal(err)
 	}
+	task = sentSpawnFixture(t, h.inbox.store, task)
 	// A reconciling outcome sends no Sentry traffic (hk 3676): only the timeout's
 	// transaction and error event remain below.
 	result := hubSpawnOutcome{RC: 75, Stage: "landing", Reason: "unknown", Host: "machine-a", Profile: "model-a", Role: "implementer", StageMS: map[string]int64{"claim": 5, "placement": 20, "checkout": 30, "launch": 40, "landing": 50}}

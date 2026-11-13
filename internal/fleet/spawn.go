@@ -144,6 +144,14 @@ func (s Spawn) RoleKey() string {
 	return SpawnRoleKey(s.Task, s.Role, s.ReviewPass)
 }
 
+// HoldsTaskRole reports whether the hub reserves a task:role key for the
+// spawn. Every writer and reader of spawn_reservations.task_role asks here. A
+// consult seat works beside the task's claimant and never takes the one-holder
+// slot, so a consult pair can share one task (hk 4568).
+func (s Spawn) HoldsTaskRole() bool {
+	return s.Task != "" && s.ParentJob == "" && !s.consultTask()
+}
+
 // SpawnRoleKey is RoleKey for a caller that holds the parts, not a Spawn.
 func SpawnRoleKey(task, role, pass string) string {
 	key := task + ":" + role
@@ -586,7 +594,7 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 	defer func() {
 		if a.ObserveReceipt != nil {
 			x := s.placement.execution
-			a.ObserveReceipt(ExecutionReceipt{CWD: s.CWD, Label: s.Label, Job: s.Job, Host: x.Host, Pane: x.PaneID, Profile: firstNonempty(x.Profile, s.Profile), Model: x.Model, Kind: x.Kind, Role: firstNonempty(x.Role, s.Role), LaneUnregistered: s.laneUnregistered})
+			a.ObserveReceipt(ExecutionReceipt{CWD: s.CWD, Label: s.Label, Job: s.Job, Host: x.Host, Pane: x.PaneID, Profile: firstNonempty(x.Profile, s.Profile), Model: x.Model, Pool: x.Pool, AccountKey: x.AccountKey, Kind: x.Kind, Role: firstNonempty(x.Role, s.Role), LaneUnregistered: s.laneUnregistered})
 		}
 	}()
 

@@ -408,6 +408,11 @@ func (h *HubServer) relayLaneEventContext(ctx context.Context, event hubJobEvent
 		// are acknowledged without re-POSTing.
 		h.forgetRelayEvent(key)
 		h.broadcastRelayUnrouted(event)
+		if h.laneJobEnded(event.OwnerLane) {
+			// No pane will ever take this text, so the sender's row says
+			// undeliverable now instead of queued (hk 4534).
+			h.recordInboxStage(key, laneInboxStageDropped, relayDroppedJobEnded, "", "")
+		}
 		return relayLaneEventResult{ID: stored.ID}
 	}
 	if !h.injectLaneRelayEvent(event, route, target, stored.ID, key) {
@@ -724,6 +729,26 @@ func (h *HubServer) resolveRelayRoute(kind string, event hubJobEventPayload) (re
 		return reportRelayRoute{}, nil, false
 	}
 	return route, agent, exists && agent != nil
+}
+
+// laneJobEnded reports a lane whose every hub-known job has completed, so a
+// lane event to it can never reach a pane. A lane with no known job, or with a
+// live or orphaned one, is not proven ended: a hub restart forgets ended jobs,
+// and an orphaned job may be recovered.
+func (h *HubServer) laneJobEnded(lane string) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	known := false
+	for _, job := range h.jobs {
+		if job.AgentLabel != lane {
+			continue
+		}
+		known = true
+		if !job.Completed {
+			return false
+		}
+	}
+	return known
 }
 
 // injectRelayEvent reports whether the injection was queued.

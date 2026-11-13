@@ -153,7 +153,7 @@ whole-pool cap, so a free rung must pass both keys when both are set.
 
 The hub counts, because it places every hub spawn
 ([durable spawn operations](hub-spawn-operations.md)). A live spawn on a pool
-is a hub spawn operation that is accepted or dispatching, or succeeded with a
+is a hub spawn operation that is accepted, bound or dispatching, or succeeded with a
 job that a node still lists as active, whose placed profile is in that pool.
 A spawn that succeeded less than two minutes ago counts before its first
 heartbeat. An auto spawn that is still being placed has no profile yet and
@@ -419,8 +419,16 @@ still limits the hosts). A host the hub left out for a full task cap stays out
 of the plan (`task_slots_full`) on both the fleet-state and the direct read. A
 pinned `--host` is counted through the gate too. A request bound to a node that
 timed out keeps its count (the node may still launch it) until a claim, a
-definitive failure or the bridge window. The count is in hub memory, so a hub
-restart forgets the jobs decided and not yet claimed until their claims show.
+definitive failure or the bridge window. The count is in hub memory, but a hub
+restart counts again, on the host each one is bound to, every spawn that is still
+bound and unsettled (`dispatching`, `reconciling`, `succeeded`, or `deadline_exceeded`
+with a bound node), placed (bound) within the bridge window, and not yet claimed
+(`restorePlacementCounts`, hk 4460). The bind stamps `placed_ms` and the claim that ends
+the count stamps `claimed_ms` on the job's bound rows, so a job claimed before the restart
+is not counted again, even if it finished. A restored count ends with the claim, a definitive
+failure or the window, as a live one does. A refused, failed or retryable request is not
+restored, and a request not yet bound places again and counts then. A hub whose restore
+fails does not start.
 
 Every spawn decision also takes the hub's latest view: before the engine reads
 the hub's fleet state the hub recomputes the hosts' `load` values, and the

@@ -27,6 +27,21 @@ func openSpawnStore(t *testing.T, path string) *laneInboxStore {
 	}
 	return s
 }
+
+// sentSpawnFixture marks a binding as possibly sent for tests of interrupted
+// execution. Binding alone is now proof that no send transition occurred.
+func sentSpawnFixture(t *testing.T, s *laneInboxStore, task hubSpawnTask) hubSpawnTask {
+	t.Helper()
+	if changed, err := s.beginSpawnSend(t.Context(), task); err != nil || !changed {
+		t.Fatalf("commit send boundary: changed=%v err=%v", changed, err)
+	}
+	current, err := s.spawnTask(t.Context(), task.Request.RequestID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return current
+}
+
 func TestSpawnReservationSurvivesRestartAndReplaysLostResponse(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "inbox.sqlite3")
@@ -85,16 +100,17 @@ func TestSpawnUnknownRetainsOwnershipAndLateResultCommitsOutbox(t *testing.T) {
 				t.Fatal(err)
 			}
 			node := hubSpawnRequest{RequestID: "d676220b-e763-4af1-aefd-000000000003", Machine: "machine-a", Args: []string{"--job", "test-job"}, WaitSeconds: 600}
-			bound, err := s.bindSpawn(ctx, req.RequestID, task.Attempt, node)
+			bound, err := s.bindSpawn(ctx, req.RequestID, task.Attempt, node, time.Now().UTC())
 			if err != nil || bound.Node == nil {
 				t.Fatal(err)
 			}
 			other := node
 			other.Machine = "machine-b"
-			again, err := s.bindSpawn(ctx, req.RequestID, task.Attempt, other)
+			again, err := s.bindSpawn(ctx, req.RequestID, task.Attempt, other, time.Now().UTC())
 			if !errors.Is(err, errSpawnClaimed) || again.Node.Machine != "machine-a" {
 				t.Fatalf("destination changed: %+v %v", again, err)
 			}
+			task = sentSpawnFixture(t, s, bound)
 			if changed, err := s.completeSpawn(ctx, task, hubSpawnOutcome{RC: 124, Stage: "landing", Reason: reason, Retryable: true}, now); err != nil || !changed {
 				t.Fatal(err)
 			}

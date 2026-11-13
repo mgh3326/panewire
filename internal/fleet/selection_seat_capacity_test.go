@@ -14,7 +14,7 @@ func TestAutoSelectionMovesToSeatOnHostWithMoreFreeCapacity(t *testing.T) {
 		{Profile: "sonnet", Effort: "high", Grade: "B", Pool: "claude", Gate: "default", ModelID: "sonnet-m"},
 		{Profile: "codex-sol", Effort: "high", Grade: "B", Pool: "codex", Gate: "default", ModelID: "sol-m"},
 	}
-	a, s, q, src := hostFirstFixture(t, "worker", "B", rows,
+	a, s, q, src := hostFirstFixture(t, "implementer", "B", rows,
 		map[string]string{"mac-b": testClaudeB, "cloud-small": testCodexA}, nil)
 	src.accounts[testCodexA] = SharedAccount{Key: testCodexA, Observed: true, Fresh: true, MeasuredAt: a.Now(), Quota: &PoolView{Status: "ok", Class: "spend", Blocking: ptrF(40)}}
 	q.GateDo = gatePools(map[string]string{"sonnet": "claude", "codex-sol": "codex"})

@@ -69,7 +69,10 @@ use it, so the p1 and p2 reviewers of one task hold at once while a second p1 is
 refused with the same 409 as any held slot. panewire reads the pass only from
 the flag, never from a label. A reviewer without the flag keeps `<task>:reviewer`,
 and stored keys without a pass need no migration. The held-reservation log line
-prints the key as `role_key`. An implementer holds `<task>:implementer`; a hold written under an older role name is not matched by it.
+prints the key as `role_key`. An implementer holds `<task>:implementer`; a hold written under an older role name is not matched by it. A consult
+seat (`--role consult`) bound by `--task` takes no task/role slot at all
+(`fleet.Spawn.HoldsTaskRole` is false for it), so a consult pair shares one task
+(hk 4568); it works beside the claimant and never takes its exclusive claim.
 
 A prior operation in `failed` whose hk job is still `claimed` (pane cleanup
 unverified) is checked on a colliding submission: the hub asks the operation's
@@ -100,7 +103,9 @@ The hub then has the holder's node mark the hk job `lost`, logs
 unreadable check, an unreachable node, a read error or a missing pane id keeps
 the slot. The 409 body then carries `request_id`, `job`, `host`,
 `pane` and a `fix` (close that pane, then resubmit), and the CLI prints them
-with exit 74.
+with exit 74. A held (task, role) slot answers the error `task_role_claimed`,
+which also names `task` and `role`; a refused job id still answers
+`job_already_claimed` (hk 2944).
 
 A **reviewer** holder whose pane is present is also released when its spawn
 `succeeded` or `failed`, and every one of these holds (hk 3315). Implementers
@@ -124,7 +129,7 @@ The hub then has the holder's node mark the hk job `lost` and logs one INFO line
 unreadable check keeps the hold.
 
 When only that grace keeps a reviewer holder (the pane is present, its status is
-closable and its hk job is `claimed` or `spawned`), the `job_already_claimed` 409
+closable and its hk job is `claimed` or `spawned`), the `task_role_claimed` 409
 also carries `retry_after_s`, an integer of at least 1: the seconds until the
 spawn's deadline plus the grace. The response sets the same value in an HTTP
 `Retry-After` header, and the CLI appends ` retry_after_s=<n>` after the
@@ -196,7 +201,7 @@ Eight workers (`hubSpawnWorkerCount`; four until hk 4368) execute accepted work,
 the durable queue is authoritative. HTTP cancellation does not cancel accepted
 work. Shutdown ends worker contexts and waits for them before closing storage.
 
-Only nodes advertising `spawn_ops_v1` can execute durable operations. Older nodes are refused with an upgrade fix, without a launcher fallback. Before sending node RPC, the hub commits the destination, node UUID and payload.
+Only nodes advertising `spawn_ops_v1` can execute durable operations. Older nodes are refused with an upgrade fix, without a launcher fallback. The hub first commits the destination, node UUID and payload as `bound`; before sending node RPC it atomically changes the matching request, attempt and node UUID to `dispatching`. A recovered `bound` row is proof no send transition occurred. A recovered `dispatching` row may have reached the node, even if the hub crashed before the actual write.
 Durable node messages carry an operator-authorization marker and absolute deadline.
 The legacy `/v1/spawn` endpoint rejects that marker, retains its original restricted
 flag list and 300-second maximum, and cannot grant operator-only spawn overrides.
@@ -255,20 +260,41 @@ The submitter applies the same rule before sending: `panewire spawn` (including
 | Node upgraded first (old hub) | The old hub's result parser does not know the new error codes, so it ignores the answer and the operation waits for its deadline as before. Nothing else changes. |
 | Hub rolled back after nodes upgraded | Same as an old hub: refusals are ignored and operations wait out their deadline. |
 
+The following are durable store states. For compatibility with older
+submitters, operation and replayed-acceptance HTTP responses present `bound`
+as the conservative pending status `dispatching`.
+
 | Status | Meaning |
 | --- | --- |
 | `accepted` | Reservation durable; no node binding yet. |
-| `dispatching` | Node UUID, payload and destination durable. |
+| `bound` | Node UUID, payload and destination durable; no send transition has occurred. |
+| `dispatching` | Send transition committed; the node may have received the request. |
 | `reconciling` | Transport or execution observation unknown; ownership retained. |
 | `deadline_exceeded` | Deadline observed; ownership retained, not terminal failure. |
-| `succeeded` | Node landing receipt and fresh exact-pane identity verified. |
+| `succeeded` | Node landing receipt and fresh exact-pane identity verified. A landing the node refused rc 70 as "pane identity or status is unconfirmed" also settles here when a pane with the job's name and cwd is still present; the hub re-checks it once and launches nothing (hk 4534). |
 | `failed` | Definite refusal, including an existing job claim; never permission to reuse a live job. |
 | `retryable` | Node attested cleanup, or admission stopped before dispatch, and a replay can succeed once the operator's fix is done; reservations released. |
 
+Before downgrading the hub to a version that does not understand `bound`, stop
+the hub and ensure it cannot send or modify operations. Back up the durable
+store, then use the store's normal SQL administration tool to return only
+unsent bindings to placement:
+
+```sql
+UPDATE spawn_operations
+SET node_id = NULL, node_payload = '', status = 'accepted'
+WHERE status = 'bound';
+```
+
+Restart the older hub afterward. Do not rewrite `dispatching`, `reconciling`
+or `deadline_exceeded`: those requests may already have reached a node and
+must retain their UUID and destination.
+
 A deliberate repeat of an identical cleanup-confirmed submission creates a new
 attempt under the same logical key. Its node UUID changes, and a prior executing
-host is pinned: handoffkeep host/task claims cannot move. Attempt CAS prevents
-an old result or dispatcher from overwriting the new attempt. Prior notifications
+host is pinned: handoffkeep host/task claims cannot move. Request, attempt, node
+UUID and state checks prevent an old result or dispatcher from overwriting a
+rebound request or a new attempt. Prior notifications
 remain available under distinct attempt/transition event IDs.
 
 A late success is accepted only after replaying the node receipt and a fresh
@@ -315,8 +341,9 @@ replay cannot start a second one. The wire and journal formats are unchanged.
 
 ### Stranded requests
 
-A request bound to a node stays `reconciling` or `deadline_exceeded` until the
-node answers. The coordinator replays the bound request to its node every few
+A request whose send transition committed stays `reconciling` or
+`deadline_exceeded` until the node answers. The coordinator replays that
+request to its node every few
 seconds (the late-result path), so the hub asks about it well inside a minute
 after the deadline. When a node restarted mid-spawn, its journal keeps the
 entry executing until the node settles it from the pane (see
@@ -347,14 +374,18 @@ hub read that node's panes (`agents.list`, at most once a minute per request):
 `--hub-url`, `--hub-token-env`, `--hub-cf-env`, defaulting to
 `PANEWIRE_HUB_URL`, `PANEWIRE_HUB_TOKEN_ENV`, `PANEWIRE_HUB_CF_ENV`) calls
 `POST /v1/spawns/<request_id>/abandon` with `{"reason": TEXT}` (operator
-credential). It applies to a pending request bound to a node, and runs the same
-check: only when that node lists no pane bearing the job label does the hub
-mark the hk job lost (`end_reason` `operator_abandoned`), finish the request
+credential). It applies to a pending request bound to a node. A `bound` request
+has not crossed the send boundary, so the hub skips the pane probe. It still
+checks for a non-terminal hk job from a prior attempt and, if one exists, marks
+it lost through its owning node before releasing the reservation. For a possibly
+sent request, only when that node lists no pane bearing the job label does the
+hub mark the hk job lost (`end_reason` `operator_abandoned`), finish the request
 `failed` with reason `operator_abandoned: <TEXT>` and release the reservation
 (200, the CLI prints `ABANDONED request=… job=… status=failed`). The reason
 travels in the `SPAWN_FAILED` event and the status API, and the hub logs one
 WARN line `hub spawn abandon` with the request, job, host, verdict and reason.
-A live labelled pane, an unreachable node or a refused lost write answers 409
+A send or another abandonment in progress, a live labelled pane, an unreachable
+node or a refused lost write answers 409
 `spawn_abandon_refused` with the check that held it; a finished request answers
 409 `spawn_not_pending`, an unbound one 409 `spawn_not_bound` (it releases
 itself at its deadline). The CLI exits 5 on a refusal. Abandon does not stop a

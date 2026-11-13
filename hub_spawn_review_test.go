@@ -60,7 +60,7 @@ func TestSpawnBindingRefusesDifferentNodeRequest(t *testing.T) {
 		t.Fatal(err)
 	}
 	node := hubSpawnRequest{RequestID: t14RequestID(988), Machine: "machine-a", Args: []string{"--job", "test-job"}, WaitSeconds: 300}
-	task, err = h.inbox.store.bindSpawn(t.Context(), request.RequestID, task.Attempt, node)
+	task, err = h.inbox.store.bindSpawn(t.Context(), request.RequestID, task.Attempt, node, time.Now().UTC())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -68,7 +68,7 @@ func TestSpawnBindingRefusesDifferentNodeRequest(t *testing.T) {
 		t.Fatal(err)
 	}
 	node.RequestID = t14RequestID(989)
-	if _, err = h.inbox.store.bindSpawn(t.Context(), request.RequestID, task.Attempt, node); !errors.Is(err, errSpawnClaimed) {
+	if _, err = h.inbox.store.bindSpawn(t.Context(), request.RequestID, task.Attempt, node, time.Now().UTC()); !errors.Is(err, errSpawnClaimed) {
 		t.Fatalf("new request silently reused old binding: %v", err)
 	}
 	transport := directSpawnTransport{h: h, task: task, bound: true}

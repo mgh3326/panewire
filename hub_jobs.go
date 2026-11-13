@@ -240,6 +240,7 @@ func validRelayFinalText(value string) bool {
 
 func (h *HubServer) observeActiveJobs(machineID string, active []HubActiveJob, received time.Time) {
 	seen := make(map[string]struct{}, len(active))
+	var claimed []claimedPlacement
 	h.mu.Lock()
 	record := h.nodes[machineID]
 	if record == nil {
@@ -248,6 +249,7 @@ func (h *HubServer) observeActiveJobs(machineID string, active []HubActiveJob, r
 	}
 	previous := record.activeJobs
 	record.activeJobs = make(map[string]HubActiveJob, len(active))
+	record.activeReported = true
 	for _, job := range active {
 		seen[job.JobID] = struct{}{}
 		record.activeJobs[job.JobID] = job
@@ -256,6 +258,7 @@ func (h *HubServer) observeActiveJobs(machineID string, active []HubActiveJob, r
 		// node must not un-weigh the host the job is bound for.
 		if held, counted := h.placementCounts[job.JobID]; counted && held.machine == machineID {
 			delete(h.placementCounts, job.JobID)
+			claimed = append(claimed, claimedPlacement{job: job.JobID, held: held})
 		}
 		current := h.jobs[job.JobID]
 		if current == nil {
@@ -300,6 +303,7 @@ func (h *HubServer) observeActiveJobs(machineID string, active []HubActiveJob, r
 		}
 	}
 	h.mu.Unlock()
+	h.markPlacementClaims(claimed, h.now().UTC())
 	h.tryPendingRevocations(machineID)
 }
 

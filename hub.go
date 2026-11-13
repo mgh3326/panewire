@@ -188,8 +188,11 @@ type hubNodeRecord struct {
 	lastHeartbeat time.Time
 	agent         *hubAgent
 	activeJobs    map[string]HubActiveJob
-	hostLoad      *HubHostLoad
-	hostMemory    *HubHostMemory
+	// activeReported is true once a heartbeat has carried activeJobs since the
+	// hello that created this record; the hello empties activeJobs until then.
+	activeReported bool
+	hostLoad       *HubHostLoad
+	hostMemory     *HubHostMemory
 	// hostActivity is the last heartbeat's user-input report, nil when the node
 	// sent none (host_activity.go). It is recorded only.
 	hostActivity *HubHostActivity
@@ -323,6 +326,9 @@ type hubRelayInjectEvent struct {
 	Lane    string `json:"lane,omitempty"`
 	EventID int64  `json:"event_id,omitempty"`
 	Deliver string `json:"deliver,omitempty"`
+	// Delivered, when set, runs once the writer has written the event to the
+	// node. It is never sent on the wire (hub_drain_wake.go).
+	Delivered func() `json:"-"`
 }
 
 type hubJobRevokedEvent struct {
@@ -409,6 +415,8 @@ type HubServer struct {
 	quotaReplaceBudget time.Duration
 	spawnKick          chan struct{}
 	spawnWorkers       sync.WaitGroup
+	spawnActions       hubSpawnActions
+	spawnAdmissions    hubSpawnAdmissions
 	// drain is the SIGTERM state (hub_drain.go).
 	drain hubDrain
 	// spawnOrphanProbed is when the hub last probed each stranded request's
@@ -430,6 +438,8 @@ type HubServer struct {
 	// heldLoop counts held role reservations per role key; heldLoopMu guards it
 	// separately from mu because a Sentry send must not run under the hub lock.
 	heldLoopMu        sync.Mutex
+	ladderMu          sync.Mutex
+	ladderPlan        func(context.Context, fleet.Submission) error
 	heldLoop          map[string]*spawnHeldLoop
 	heldLoopOrder     lruIndex[string]
 	staleAfter        time.Duration
@@ -470,6 +480,7 @@ type HubServer struct {
 	prometheusBasicPass              string
 	placementCache                   placementCache
 	poolCooling                      map[string]time.Time
+	poolSweep                        poolSweepState
 	relayControl                     hubRelayControlState
 	reportRelayPath                  string
 	lanesNodeRowCap                  int
@@ -536,6 +547,9 @@ type HubServer struct {
 	// drainWake is each design lane's drain-wake state (hub_drain_wake.go),
 	// owned by the lane-stall sweep goroutine under laneStallMu.
 	drainWake map[string]*drainWakeLane
+	// drainWakeDelivered carries the writer's confirmation of a drain line back
+	// to the sweep goroutine. Created by the first sweep.
+	drainWakeDelivered chan drainWakeDelivery
 	// laneHeldCountProbe is a test hook laneHeldCountLocked fires once per
 	// scan, so a test can tell the count ran only on an activating
 	// observation.
@@ -744,6 +758,11 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 	hub.fleetState = newFleetStateStore()
 	hub.quietTimings = defaultDesignQuietTimings()
 	hub.prepareInbox()
+	if err := hub.restorePlacementCounts(); err != nil {
+		hub.closeCancel()
+		_ = hub.inbox.store.close()
+		return nil, err
+	}
 	return hub, nil
 }
 
@@ -826,6 +845,7 @@ func (h *HubServer) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/jobs/close", h.handleJobClose)
 	mux.HandleFunc("GET /v1/jobs/orphaned", h.handleOrphanedJobs)
 	mux.HandleFunc("POST /v1/jobs/reassign", h.handleReassignJob)
+	mux.HandleFunc("POST /v1/jobs/escalate-author", h.handleEscalateAuthor)
 	mux.HandleFunc("GET /v1/agent", h.handleAgent)
 	mux.HandleFunc("GET /v1/events", h.handleEvents)
 	mux.HandleFunc("POST /v1/relay/events", h.handleRelayIngress)
@@ -2512,6 +2532,9 @@ func (agent *hubAgent) writeRelays(ctx context.Context) {
 		case event := <-agent.relays:
 			if err := agent.writeJSON(event); err != nil {
 				return
+			}
+			if event.Delivered != nil {
+				event.Delivered()
 			}
 		}
 	}
