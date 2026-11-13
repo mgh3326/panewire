@@ -127,16 +127,20 @@ func (h *fakeEscalateHub) EscalateAuthor(_ context.Context, request EscalateAuth
 	return h.result, h.err
 }
 
-func escalateCLIFixture(t *testing.T, fromProfile, fromEffort string) (*App, *fakeEscalateHub) {
+func escalateCLIFixture(t *testing.T, fromProfile, fromEffort string, withOtherFamily bool) (*App, *fakeEscalateHub) {
 	t.Helper()
 	rows := ladderRows()
-	rows = append(rows,
-		CatalogRow{Profile: "codex-sol", Effort: "high", Grade: "A+", Pool: "codex", Gate: "default", ModelID: "sol-m"},
-	)
-	a, _, _ := selFixture(t, "A", rows, map[string]PoolView{
+	if withOtherFamily {
+		rows = append(rows,
+			CatalogRow{Profile: "codex-sol", Effort: "high", Grade: "A+", Pool: "codex", Gate: "default", ModelID: "sol-m"},
+		)
+	}
+	a, _, q := selFixture(t, "A", rows, map[string]PoolView{
 		"claude": {Status: "ok", Class: "spend", Blocking: ptrF(10)},
 		"codex":  {Status: "ok", Class: "spend", Blocking: ptrF(10)},
 	}, []string{"claude", "codex"})
+	q.GateDo = gatePools(map[string]string{"sonnet": "claude", "opus": "claude", "fable": "claude", "codex-sol": "codex"})
+	serveRouting(t, routingDoc(routingBlockV1))
 	a.JobStore.(*fakeJobStore).records["job-a"] = map[string]any{
 		"job_id": "job-a", "task_id": "42", "state": "spawned", "profile": fromProfile, "effort": fromEffort,
 		"pool": "claude", "family": "anthropic", "model": "sonnet-m", "owner_lane": "parent",
@@ -159,7 +163,7 @@ func writeFindings(t *testing.T, body string) string {
 // The CLI resolves the next rung and the consult seat, and sends both with the
 // replaced job's rung so the hub can refuse a stale request.
 func TestEscalateAuthorCLIResolvesRungAndConsult(t *testing.T) {
-	a, hub := escalateCLIFixture(t, "sonnet", "high")
+	a, hub := escalateCLIFixture(t, "sonnet", "high", true)
 	hub.result = EscalateAuthorResult{Job: "job-a-l1", Rung: "sonnet@xhigh"}
 	findings := writeFindings(t, `[{"ref":"r1","severity":"high","path":"x.go","line":3,"title":"t","body":"b"}]`)
 	if err := a.escalateAuthorCmd(context.Background(), []string{"--task", "42", "--job", "job-a", "--pr", "mgh3326/panewire#77", "--round", "5", "--findings-file", findings}); err != nil {
@@ -190,7 +194,7 @@ func TestEscalateAuthorCLIResolvesRungAndConsult(t *testing.T) {
 // A hub refusal is rc 2: mergewake logs it and the PR goes on to its next
 // round.
 func TestEscalateAuthorCLIRefusalIsExitTwo(t *testing.T) {
-	a, hub := escalateCLIFixture(t, "sonnet", "high")
+	a, hub := escalateCLIFixture(t, "sonnet", "high", true)
 	hub.result = EscalateAuthorResult{Code: "quota_refused", Reason: "every eligible account is measured exhausted"}
 	err := a.escalateAuthorCmd(context.Background(), []string{"--task", "42", "--job", "job-a", "--pr", "mgh3326/panewire#77", "--round", "5", "--findings-file", writeFindings(t, `[]`)})
 	if exitCode(err) != exitUsage || !strings.Contains(err.Error(), "quota_refused") {
@@ -201,7 +205,7 @@ func TestEscalateAuthorCLIRefusalIsExitTwo(t *testing.T) {
 // No rung left is still sent to the hub, which owns the design-lane record:
 // the CLI asks for no rung and the hub answers no_rung.
 func TestEscalateAuthorCLINoRungIsSentForTheRecord(t *testing.T) {
-	a, hub := escalateCLIFixture(t, "fable", "high")
+	a, hub := escalateCLIFixture(t, "fable", "high", false)
 	hub.result = EscalateAuthorResult{Code: "no_rung", Reason: "the policy has no step left for this seat"}
 	err := a.escalateAuthorCmd(context.Background(), []string{"--task", "42", "--job", "job-a", "--pr", "mgh3326/panewire#77", "--round", "5", "--findings-file", writeFindings(t, `[]`)})
 	if exitCode(err) != exitUsage || !strings.Contains(err.Error(), "no_rung") {
@@ -214,7 +218,7 @@ func TestEscalateAuthorCLINoRungIsSentForTheRecord(t *testing.T) {
 
 // A findings file that is not a JSON array refuses before anything is sent.
 func TestEscalateAuthorCLIRejectsMalformedFindings(t *testing.T) {
-	a, hub := escalateCLIFixture(t, "sonnet", "high")
+	a, hub := escalateCLIFixture(t, "sonnet", "high", true)
 	err := a.escalateAuthorCmd(context.Background(), []string{"--task", "42", "--job", "job-a", "--pr", "mgh3326/panewire#77", "--round", "5", "--findings-file", writeFindings(t, `{"not":"an array"}`)})
 	if exitCode(err) != exitUsage || !strings.Contains(err.Error(), "JSON array") {
 		t.Fatalf("want a usage refusal, got %v", err)
@@ -226,7 +230,7 @@ func TestEscalateAuthorCLIRejectsMalformedFindings(t *testing.T) {
 
 // A job whose record is not live cannot be escalated.
 func TestEscalateAuthorCLIRejectsADeadJob(t *testing.T) {
-	a, hub := escalateCLIFixture(t, "sonnet", "high")
+	a, hub := escalateCLIFixture(t, "sonnet", "high", true)
 	a.JobStore.(*fakeJobStore).records["job-a"]["state"] = "completed"
 	err := a.escalateAuthorCmd(context.Background(), []string{"--task", "42", "--job", "job-a", "--pr", "mgh3326/panewire#77", "--round", "5", "--findings-file", writeFindings(t, `[]`)})
 	if exitCode(err) != exitUsage || !strings.Contains(err.Error(), "not live") {
