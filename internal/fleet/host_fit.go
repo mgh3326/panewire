@@ -112,7 +112,96 @@ func hostBucket(h selHost) int {
 	return 0
 }
 
-// rankHosts orders the fit hosts: bucket, then the host the hub decided on, then the hub score (free capacity
+// floorKey is a host's free-floor ranking key from the hub's signals: whether
+// its free fraction is under the floor (the hub's verdict) and the value that
+// orders hosts when every host is under it: the host's score, which is free
+// times power less the bridge cost of the jobs already decided onto it (so a
+// burst spreads), or free times power when the host has no score. A host the
+// hub sent no terms for is never under the floor.
+func floorKey(sig PlacementSignals, score *float64) (below bool, value float64) {
+	if sig.Terms == nil {
+		return false, 0
+	}
+	if score != nil {
+		return sig.BelowFreeFloor, *score
+	}
+	power := 100.0
+	if sig.Power != nil && *sig.Power > 0 {
+		power = *sig.Power
+	}
+	return sig.BelowFreeFloor, sig.Terms.Free() * power
+}
+
+// floorSide is one host as the free floor sees it.
+type floorSide struct {
+	awake, below, usable bool
+	value                float64
+}
+
+// tier is a host's place under the free floor: 0 eligible (usable and at or
+// above the floor), 1 usable but under it, 2 unusable by the hub's verdict
+// (throttled, at its job cap, slot-full, not accepting).
+func (s floorSide) tier() int {
+	switch {
+	case !s.usable:
+		return 2
+	case s.below:
+		return 1
+	}
+	return 0
+}
+
+// floorCtx is what the free floor knows about the whole list.
+type floorCtx struct {
+	// anyBelow: some awake host is under the floor. With none, the floor does
+	// nothing and the ranking is the one it was before the floor existed.
+	anyBelow bool
+	// anyUsable: some awake host is usable by the hub's verdict. With none the
+	// floor has nothing to prefer.
+	anyUsable bool
+	// anyEligible: some awake host is usable and not under the floor. When
+	// some host is usable and none is eligible, every usable host is under it.
+	anyEligible bool
+}
+
+func floorContext(sides []floorSide) floorCtx {
+	var c floorCtx
+	for _, s := range sides {
+		if !s.awake {
+			continue
+		}
+		c.anyBelow = c.anyBelow || s.below
+		c.anyUsable = c.anyUsable || s.usable
+		c.anyEligible = c.anyEligible || s.usable && !s.below
+	}
+	return c
+}
+
+// floorOrder is the free floor as an eligibility rule that runs before the load
+// bucket (decision 231). It looks only at awake hosts: a sleeper stays behind
+// every awake host through the bucket order, and has no metrics to judge.
+// Awake hosts rank by tier: eligible first, then usable hosts under the floor,
+// then the hub's unusable ones, which stay as fallbacks and never outrank a
+// usable host, whatever their free reading or bucket (a synthetic slot-full view
+// has no terms and reads as above the floor). Within a tier the other rules
+// order the hosts, as they did before the floor, except that when every usable
+// host is under the floor (none is eligible) the higher floorValue, the score,
+// ranks first and the bucket does not apply. With no awake host under the floor
+// or none usable it does nothing. 0 means the floor does not separate the two.
+func floorOrder(x, y floorSide, c floorCtx) int {
+	if !x.awake || !y.awake || !c.anyBelow || !c.anyUsable {
+		return 0
+	}
+	if tx, ty := x.tier(), y.tier(); tx != ty {
+		return tx - ty
+	}
+	if !c.anyEligible {
+		return cmp.Compare(y.value, x.value)
+	}
+	return 0
+}
+
+// rankHosts orders the fit hosts: the free floor, then bucket, then the host the hub decided on, then the hub score (free capacity
 // weighted by the host's power) when every ranked host has one, else the raw
 // load, then configuration order (local first).
 func rankHosts(hosts []selHost) []selHost {
@@ -123,7 +212,18 @@ func rankHosts(hosts []selHost) []selHost {
 		}
 	}
 	byScore := !slices.ContainsFunc(out, func(h selHost) bool { return h.score == nil })
+	side := func(h selHost) floorSide {
+		return floorSide{awake: h.awake, below: h.below, usable: hubUsable(h, h.memExcluded), value: h.floorValue}
+	}
+	sides := make([]floorSide, len(out))
+	for i, h := range out {
+		sides[i] = side(h)
+	}
+	floor := floorContext(sides)
 	slices.SortStableFunc(out, func(x, y selHost) int {
+		if c := floorOrder(side(x), side(y), floor); c != 0 {
+			return c
+		}
 		if bx, by := hostBucket(x), hostBucket(y); bx != by {
 			return bx - by
 		}

@@ -39,6 +39,10 @@ type PlacementSignals struct {
 	LiveJobs     *int            `json:"live_jobs,omitempty"`
 	Load1PerCore *float64        `json:"load1_per_core,omitempty"`
 	Terms        *PlacementTerms `json:"terms,omitempty"`
+	// BelowFreeFloor is the hub's verdict that the host's free fraction is
+	// under its free floor; ranking puts such a host after every host that is
+	// not (host_fit.go, floorOrder).
+	BelowFreeFloor bool `json:"below_free_floor,omitempty"`
 }
 
 // PlacementTerms are the hub's five score factors for one candidate, each 0..1.
@@ -49,6 +53,9 @@ type PlacementTerms struct {
 	Load float64 `json:"load"`
 	Jobs float64 `json:"jobs"`
 }
+
+// Free is the product of the terms: the free fraction the hub's floor compares.
+func (t PlacementTerms) Free() float64 { return t.CPU * t.Mem * t.IO * t.Load * t.Jobs }
 
 type placementCandidateRecord struct {
 	Host    string   `json:"host"`

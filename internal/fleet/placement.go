@@ -42,7 +42,7 @@ type HostView struct {
 	Source  string
 	// Decided marks the host the hub's placement named, after its all_loaded
 	// and hysteresis rules; DecisionReason is why ("" for the policy-order
-	// winner, "challenger", "all_loaded"). Ranking prefers it within a bucket,
+	// winner, "challenger", "below_free_floor", "all_loaded"). Ranking prefers it within a bucket,
 	// so a rival has to beat the winner by the hub's margin, not by a point.
 	Decided        bool
 	DecisionReason string
@@ -229,6 +229,10 @@ type placeCandidate struct {
 	decided  bool
 	decision string
 	over     bool
+	// unusable is the hub's verdict that the host is not a place to spawn
+	// (throttled, at its job cap, unknown metrics): the free floor does not let
+	// it displace a usable host.
+	unusable bool
 	outcome  string
 	// preflight is the remote-spawn preflight of a candidate the placement
 	// refused; it names why the host was not usable.
@@ -517,6 +521,7 @@ func (a *App) plan(ctx context.Context, s Spawn, pool string, waited time.Durati
 		local.score = hv.Score
 		local.signals = hv.Signals
 		local.source = hv.Source
+		local.unusable = !viewUsable(hv, false)
 	}
 	maxRatio, hasGuard := number(a.Config.Local, "max_load_ratio")
 	if local.load != nil && hasGuard && *local.load >= maxRatio {
@@ -571,6 +576,7 @@ func (a *App) plan(ctx context.Context, s Spawn, pool string, waited time.Durati
 			c.signals = hv.Signals
 			c.source = hv.Source
 			c.decided, c.decision = hv.Decided, hv.DecisionReason
+			c.unusable = !viewUsable(hv, false)
 		} else {
 			c.awake = !c.wakeable || hub == nil
 		}
@@ -658,12 +664,12 @@ func (np *placePlan) carryTried(old *placePlan, tried map[string]bool) {
 		}
 		c.outcome, c.judgment, c.preflight = prev.outcome, prev.judgment, prev.preflight
 		c.score, c.signals, c.load, c.source = prev.score, prev.signals, prev.load, prev.source
-		c.decided, c.decision, c.over = prev.decided, prev.decision, prev.over
+		c.decided, c.decision, c.over, c.unusable = prev.decided, prev.decision, prev.over, prev.unusable
 	}
 	np.repo, np.wake = old.repo, old.wake
 }
 
-// sortPlaceCandidates orders awake candidates: load bucket, the host-first
+// sortPlaceCandidates orders awake candidates: the free floor, load bucket, the host-first
 // selection, login evidence, the hub's decision, then score (or load when a
 // candidate has no score). plan sorts with it, and a refusal re-sorts the
 // candidates still to try on fresh hub scores.
@@ -676,7 +682,20 @@ func sortPlaceCandidates(ordered []*placeCandidate, threshold float64, selHost s
 			byScore = false
 		}
 	}
+	side := func(c *placeCandidate) floorSide {
+		below, value := floorKey(c.signals, c.score)
+		return floorSide{awake: true, below: below, usable: !c.unusable, value: value}
+	}
+	sides := make([]floorSide, len(ordered))
+	for i, c := range ordered {
+		sides[i] = side(c)
+	}
+	floor := floorContext(sides)
 	slices.SortStableFunc(ordered, func(x, y *placeCandidate) int {
+		// The free floor is eligibility and runs before the load bucket.
+		if c := floorOrder(side(x), side(y), floor); c != 0 {
+			return c
+		}
 		if bx, by := placeBucket(*x, threshold), placeBucket(*y, threshold); bx != by {
 			return bx - by
 		}
