@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -15,17 +16,34 @@ func boundaryTestNode(task hubSpawnTask, id int, machine string) hubSpawnRequest
 }
 
 func TestContainedBoundSpawnIsNotSent_t4577(t *testing.T) {
-	h := asyncSpawnHub(t)
-	server := httptest.NewServer(h.Handler())
-	t.Cleanup(server.Close)
-	node := t14Node(t, h, server, true)
+	t.Setenv(crashReportDSNEnv, "")
+	config := HubServerConfig{Tokens: map[string]string{"operator": t14OperatorToken, "machine-a": "node-token"}, InboxStorePath: filepath.Join(t.TempDir(), "inbox.sqlite3")}
+	first, err := NewHubServer(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { first.Close() })
 	request := durableSpawnRequest()
-	task, _, err := h.inbox.store.claimSpawn(t.Context(), request, "test-job", "parent", time.Now())
+	task, _, err := first.inbox.store.claimSpawn(t.Context(), request, "test-job", "parent", time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
 	nodeRequest := boundaryTestNode(task, 457710, "machine-a")
-	if task, err = h.inbox.store.bindSpawn(t.Context(), request.RequestID, task.Attempt, nodeRequest); err != nil {
+	if _, err = first.inbox.store.bindSpawn(t.Context(), request.RequestID, task.Attempt, nodeRequest); err != nil {
+		t.Fatal(err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+	h, err := NewHubServer(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { h.Close() })
+	server := httptest.NewServer(h.Handler())
+	t.Cleanup(server.Close)
+	node := t14Node(t, h, server, true)
+	if task, err = h.inbox.store.spawnTask(t.Context(), request.RequestID); err != nil {
 		t.Fatal(err)
 	}
 	h.mu.Lock()
