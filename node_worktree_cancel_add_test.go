@@ -2,7 +2,6 @@ package panewire
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"os"
 	"os/exec"
@@ -200,11 +199,8 @@ func TestNodeWorktreePrepareDetachedReclaimsOwnedInterruptedAdd(t *testing.T) {
 	if _, err := exec.Command("git", "-C", fixture.clone, "worktree", "lock", "--reason", "initializing", dir).CombinedOutput(); err != nil {
 		t.Fatal(err)
 	}
-	intent, err := json.Marshal(map[string]string{"path": filepath.Clean(dir), "mode": "detached", "sha": fixture.main})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(fixture.clone, ".git", "panewire-worktree-add-intent.json"), intent, 0600); err != nil {
+	intent := nodeWorktreeAddIntent{Path: filepath.Clean(dir), Mode: "detached", Sha: fixture.main}
+	if _, err := nodeWriteWorktreeAddIntent(t.Context(), fixture.client().nodeGitRunner(), fixture.clone, dir, intent); err != nil {
 		t.Fatal(err)
 	}
 	prepared, code := fixture.client().nodeWorktreePrepare(t.Context(), nodeWorktreePrepareArgs{
