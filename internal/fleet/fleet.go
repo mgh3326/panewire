@@ -56,32 +56,6 @@ func (s fleetSource) SharedAccount(ctx context.Context, key string) (SharedAccou
 	return c.sharedAccount(ctx, key)
 }
 
-// cliWaker drives the in-flight `panewire node wake` contract: request the
-// node, hold it awake for a bounded window and let the caller wait for the
-// connect.
-type cliWaker struct{ a *App }
-
-func (w cliWaker) Wake(ctx context.Context, host string, req WakeRequest) error {
-	hold := req.HoldMinutes
-	if hold <= 0 {
-		hold = 10
-	}
-	wait := req.WaitSeconds
-	if wait <= 0 {
-		wait = 90
-	}
-	args := []string{"node", "wake", "--target", host,
-		"--hold", fmt.Sprintf("%dm", hold),
-		"--timeout", fmt.Sprintf("%ds", wait),
-		"--reason", req.Reason}
-	args = append(args, w.a.controlHubArgs(true)...)
-	r := w.a.call(ctx, "panewire", args...)
-	if e := check(r, "node wake"); e != nil {
-		return e
-	}
-	return nil
-}
-
 // quotaURL is the configured shared-quota endpoint: hosts.toml [quota] url,
 // else the svc-panewire credential's HANDOFFKEEP_URL (hkcred.URL), even when
 // that credential lacks its token.

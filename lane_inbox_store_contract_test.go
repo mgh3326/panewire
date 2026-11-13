@@ -486,13 +486,12 @@ func TestLaneInboxStorePostgresConcurrentStartsMigrateOnce(t *testing.T) {
 	}
 }
 
-// Every database call in the store, the Postgres backend and migrate-sqlite
-// passes a context (the CodeRabbit Major on #126). The store's contexts come
-// from s.op/s.opWithin and carry a deadline; migrate-sqlite's copy is bounded
-// by lock_timeout (TestHubMigrateSQLiteApplyFailsFastOnAHeldLock).
+// Every database call in the store and the Postgres backend passes a context
+// (the CodeRabbit Major on #126). The store's contexts come from
+// s.op/s.opWithin and carry a deadline.
 func TestLaneInboxStoreCallsTakeAContext(t *testing.T) {
 	bare := map[string]bool{"Exec": true, "Query": true, "QueryRow": true, "Begin": true, "Ping": true, "Prepare": true}
-	for _, file := range []string{"lane_inbox_store.go", "lane_inbox_store_postgres.go", "hub_migrate_sqlite.go"} {
+	for _, file := range []string{"lane_inbox_store.go", "lane_inbox_store_postgres.go"} {
 		parsed, err := parser.ParseFile(token.NewFileSet(), file, nil, 0)
 		if err != nil {
 			t.Fatal(err)
@@ -814,15 +813,6 @@ func TestLaneInboxStoreSpawnDurabilityContract(t *testing.T) {
 			}
 			if _, err = store.db.Exec(`UPDATE spawn_notifications SET delivered=1`); err != nil {
 				t.Fatal(err)
-			}
-			// The snapshot migrator must refuse rather than silently drop spawn ownership.
-			tx, err := store.db.BeginTx(t.Context(), nil)
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer tx.Rollback()
-			if _, err = readHubInboxSnapshotTx(t.Context(), tx, store.dialect); err == nil || !strings.Contains(err.Error(), "spawn ownership exists") {
-				t.Fatalf("inbox-only migration dropped spawn state: %v", err)
 			}
 		})
 	}

@@ -242,7 +242,7 @@ func (h *HubServer) receiveInbox(kind string, event *hubJobEventPayload, sender 
 	}
 	// Ordinary deadline digests still exclude must-ack types. Working holds
 	// retain each original ID so the receiver can acknowledge its items.
-	if event.Late || event.noDigest || h.inbox.policy.mustAct(lane, *event) || mustAckNotifyTypes[event.NotifyType] || chatRelayEventPattern.MatchString(event.EventID) {
+	if event.Late || event.noDigest || h.inbox.policy.mustAct(lane, *event) || mustAckNotifyTypes[event.NotifyType] {
 		window = 0
 	}
 	if directive {
@@ -421,9 +421,8 @@ func (h *HubServer) replayInboxAged(record handoffkeepRelayEvent, receiptAge boo
 	// A stale row is retired before it can be migrated: the inbox evidence
 	// that would suppress it is pruned after the same replay window, so a row
 	// whose handoffkeep mark once failed would otherwise come back as a new
-	// item on every restart (hk 2976). Chat rows keep the chat store as their
-	// only authority.
-	if h.handoffkeep != nil && !strings.HasPrefix(record.DeliveredTo, relayReplayRetiredMarker) && chatRelayEventPattern.FindStringSubmatch(record.EventID) == nil {
+	// item on every restart (hk 2976).
+	if h.handoffkeep != nil && !strings.HasPrefix(record.DeliveredTo, relayReplayRetiredMarker) {
 		if reason := h.relayReplayRetireReasonAged(record, receiptAge); reason != "" {
 			h.retireRelayReplay(record, reason)
 			return true
@@ -432,7 +431,7 @@ func (h *HubServer) replayInboxAged(record handoffkeepRelayEvent, receiptAge boo
 	if h.inbox == nil {
 		return false
 	}
-	event := h.replayedRelayEvent(record)
+	event := relayEventFromRecord(record)
 	// settled is strictly broader than the old injected-only check: a receiver
 	// read — including a must-ack item read before its ack — is evidence the
 	// lane already has the event, so a restart must not inject it again (hk
@@ -569,9 +568,9 @@ func (h *HubServer) flushInbox() {
 		failed = true
 		return
 	}
-	batches, err := h.inbox.store.pendingBatches()
+	batches, err := h.inbox.store.pendingBatchesForContext(h.closeCtx)
 	if err != nil {
-		if h.closeCtx.Err() != nil {
+		if h.closeCtx.Err() != nil && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
 			return
 		}
 		h.logger.Error("inbox batch listing failed")

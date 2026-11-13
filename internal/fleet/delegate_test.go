@@ -17,6 +17,15 @@ import (
 	"time"
 )
 
+func TestDelegateRoutingRole(t *testing.T) {
+	for role, want := range map[string]string{"reader": "implementer", "verifier": "verifier", "reviewer": "reviewer"} {
+		d := delegateReq{o: delegateOpts{role: role}}
+		if got := d.routingRole(); got != want {
+			t.Errorf("%s routes to %q, want %q", role, got, want)
+		}
+	}
+}
+
 // delegateRows is a free SWE-2 rung and a paid Sonnet rung, both able to take a
 // grade C task.
 func delegateRows() []CatalogRow {
@@ -120,7 +129,7 @@ func newDelegateEnvWith(t *testing.T, rows []CatalogRow, gates map[string]string
 	for _, row := range rows {
 		qualified = append(qualified, row.Profile)
 	}
-	for _, role := range []string{"explorer", "implementer", "verifier"} {
+	for _, role := range []string{"implementer", "verifier"} {
 		rule := policy.Roles[role]
 		rule.Allowed = qualified
 		policy.Roles[role] = rule
@@ -192,7 +201,7 @@ func (e *delegateEnv) worker(t *testing.T, answer string, seen *[]Spawn, chosen 
 		}
 		res, _ := json.Marshal(body)
 		store := a.JobStore.(*fakeJobStore)
-		if err := store.Claim(ctx, s.Job, "42", "test-host"); err != nil {
+		if err := store.claimSpawned(ctx, s.Job, "42", "test-host"); err != nil {
 			return err
 		}
 		_ = store.Put(ctx, s.Job, map[string]any{"state": "completed", "result": json.RawMessage(res)})
@@ -659,7 +668,9 @@ func TestDelegateHeadlessKindWithoutOneShotRefusesBeforeClaiming(t *testing.T) {
 	q := e.a.Quota.(rowQuota).fakeQuota
 	q.CatalogRows = []CatalogRow{{Profile: "kiro-glm", Effort: "high", Grade: "C", Pool: "claude", Gate: "default", ModelID: "glm"}}
 	q.GateDo = gatePools(map[string]string{"kiro-glm": "claude"})
-	e.routingBody = routingDoc(strings.ReplaceAll(routingBlockV1, `"sonnet", "haiku", "codex-luna", "devin-swe2-medium", "agy-flash38-high"`, `"kiro-glm"`))
+	block := strings.ReplaceAll(routingBlockV1, `"sonnet", "haiku", "codex-luna", "devin-swe2-medium", "agy-flash38-high"`, `"kiro-glm"`)
+	block = strings.Replace(block, `"implementer": {"allowed": ["sonnet", "opus", "codex-terra61", "codex-sol", "devin-swe2", "devin-swe2-medium", "devin-swe2-max", "cmd-dsflash41"]`, `"implementer": {"allowed": ["kiro-glm"]`, 1)
+	e.routingBody = routingDoc(block)
 	err := e.a.delegate(context.Background(), delegateArgs(e, "--role", "reader", "--headless"))
 	if code(err) != exitConfig || !strings.Contains(err.Error(), "no headless form") || len(e.a.JobStore.(*fakeJobStore).records) != 0 {
 		t.Fatalf("an unsupported kind must be refused before any record is claimed: %v", err)

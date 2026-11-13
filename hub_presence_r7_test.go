@@ -4,12 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -18,16 +16,8 @@ import (
 
 func TestR7PresenceGraceMustElapseBeforeIncidentAndRecovers(t *testing.T) {
 	clock := time.Date(2026, 8, 31, 4, 0, 0, 0, time.UTC)
-	capture := &r7TelegramCapture{token: "r7-bot-token-not-for-message"}
-	server := httptest.NewServer(capture)
-	defer server.Close()
-	notifier, err := newHubTelegramNotifier(hubTelegramEnv{BotToken: capture.token, ChatID: "r7-chat-id-not-for-message"}, hubNotifierDeps{
-		HTTPClient: server.Client(), BaseURL: server.URL, AllowInsecureForTests: true,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	hub, hubHTTP := r7HubServer(t, func() time.Time { return clock }, notifier)
+	capture := newHubAlertLog(nil)
+	hub, hubHTTP := r7HubServer(t, func() time.Time { return clock }, capture)
 	defer hubHTTP.Close()
 
 	node := r6DialAgent(t, hubHTTP.URL, "node-a", r6NodeAToken)
@@ -42,35 +32,35 @@ func TestR7PresenceGraceMustElapseBeforeIncidentAndRecovers(t *testing.T) {
 	// that sends immediately on disconnect makes this test fail.
 	clock = clock.Add(defaultHubGracePeriod - time.Millisecond)
 	hub.Sweep()
-	if got := len(capture.Messages()); got != 0 {
-		t.Fatalf("incident before grace: messages=%v", capture.Messages())
+	if got := len(capture.Texts()); got != 0 {
+		t.Fatalf("incident before grace: messages=%v", capture.Texts())
 	}
 	clock = clock.Add(time.Millisecond)
 	hub.Sweep() // first post-grace observation
-	if got := len(capture.Messages()); got != 0 {
-		t.Fatalf("incident before debounce: messages=%v", capture.Messages())
+	if got := len(capture.Texts()); got != 0 {
+		t.Fatalf("incident before debounce: messages=%v", capture.Texts())
 	}
 	clock = clock.Add(time.Second)
 	hub.Sweep() // second post-grace observation
-	eventually(t, time.Second, "presence incident", func() bool { return len(capture.Messages()) == 1 })
+	eventually(t, time.Second, "presence incident", func() bool { return len(capture.Texts()) == 1 })
 	const incidentText = "machine: node-a\nreason: disconnected\ncheck: none\nREBOOT/UNLOCK NEEDED — fleet on node-a is dead until a human acts"
-	if got := capture.Messages()[0].Text; got != incidentText {
+	if got := capture.Texts()[0]; got != incidentText {
 		t.Fatalf("incident text=%q", got)
 	}
 	clock = clock.Add(30*time.Minute - time.Second)
 	hub.Sweep() // reminder is not due before 30 minutes
-	if got := len(capture.Messages()); got != 1 {
-		t.Fatalf("presence reminder fired before boundary: %v", capture.Messages())
+	if got := len(capture.Texts()); got != 1 {
+		t.Fatalf("presence reminder fired before boundary: %v", capture.Texts())
 	}
 	clock = clock.Add(time.Second)
 	hub.Sweep() // successful initial delivery is the reminder clock
-	eventually(t, time.Second, "presence reminder", func() bool { return len(capture.Messages()) == 2 })
-	if got := capture.Messages()[1].Text; got != incidentText {
+	eventually(t, time.Second, "presence reminder", func() bool { return len(capture.Texts()) == 2 })
+	if got := capture.Texts()[1]; got != incidentText {
 		t.Fatalf("reminder text=%q", got)
 	}
 	hub.Sweep()
-	if got := len(capture.Messages()); got != 2 {
-		t.Fatalf("presence incident repeated: %v", capture.Messages())
+	if got := len(capture.Texts()); got != 2 {
+		t.Fatalf("presence incident repeated: %v", capture.Texts())
 	}
 
 	node = r6DialAgent(t, hubHTTP.URL, "node-a", r6NodeAToken)
@@ -79,27 +69,27 @@ func TestR7PresenceGraceMustElapseBeforeIncidentAndRecovers(t *testing.T) {
 	eventually(t, time.Second, "node reconnected", func() bool { return r6NodeState(r6Nodes(t, hubHTTP), "node-a") == "connected" })
 	clock = clock.Add(time.Second)
 	hub.Sweep()
-	if got := len(capture.Messages()); got != 2 {
-		t.Fatalf("recovery fired before debounce: %v", capture.Messages())
+	if got := len(capture.Texts()); got != 2 {
+		t.Fatalf("recovery fired before debounce: %v", capture.Texts())
 	}
-	for i, message := range capture.Messages() {
-		if message.Text != incidentText {
-			t.Fatalf("message[%d] after first connected observation=%q, want incident (recovery debounce must still hold)", i, message.Text)
+	for i, message := range capture.Texts() {
+		if message != incidentText {
+			t.Fatalf("message[%d] after first connected observation=%q, want incident (recovery debounce must still hold)", i, message)
 		}
 	}
 	clock = clock.Add(time.Second)
 	hub.Sweep()
-	eventually(t, time.Second, "presence recovery", func() bool { return len(capture.Messages()) == 3 })
-	if got := capture.Messages()[2].Text; got != "machine: node-a\nreason: recovered_disconnected\ncheck: none" {
+	eventually(t, time.Second, "presence recovery", func() bool { return len(capture.Texts()) == 3 })
+	if got := capture.Texts()[2]; got != "machine: node-a\nreason: recovered_disconnected\ncheck: none" {
 		t.Fatalf("recovery text=%q", got)
 	}
-	if strings.Contains(capture.Messages()[2].Text, "REBOOT/UNLOCK NEEDED") {
-		t.Fatalf("recovery contained presence-down line: %q", capture.Messages()[2].Text)
+	if strings.Contains(capture.Texts()[2], "REBOOT/UNLOCK NEEDED") {
+		t.Fatalf("recovery contained presence-down line: %q", capture.Texts()[2])
 	}
 	clock = clock.Add(30*time.Minute + time.Minute)
 	hub.Sweep()
-	if got := len(capture.Messages()); got != 3 {
-		t.Fatalf("recovered incident produced a reminder: %v", capture.Messages())
+	if got := len(capture.Texts()); got != 3 {
+		t.Fatalf("recovered incident produced a reminder: %v", capture.Texts())
 	}
 	hub.mu.Lock()
 	var failoverPhases []string
@@ -114,12 +104,12 @@ func TestR7PresenceGraceMustElapseBeforeIncidentAndRecovers(t *testing.T) {
 	}
 }
 
-func TestTask198PresenceReminderUsesSuccessfulDeliveryClock(t *testing.T) {
+func TestTask198PresenceReminderUsesDeliveryClock(t *testing.T) {
 	clock := time.Date(2026, 8, 31, 6, 0, 0, 0, time.UTC)
-	notifier := &task198Notifier{failures: 1}
+	capture := newHubAlertLog(nil)
 	hub, err := NewHubServer(HubServerConfig{
 		Tokens: map[string]string{"operator": r6OperatorToken, "node-a": r6NodeAToken},
-		Now:    func() time.Time { return clock }, GracePeriod: defaultHubGracePeriod, Notifier: notifier,
+		Now:    func() time.Time { return clock }, GracePeriod: defaultHubGracePeriod, Logger: capture.Logger(),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -131,78 +121,38 @@ func TestTask198PresenceReminderUsesSuccessfulDeliveryClock(t *testing.T) {
 	clock = clock.Add(defaultHubGracePeriod)
 	hub.Sweep() // first post-grace observation
 	clock = clock.Add(time.Second)
-	hub.Sweep() // first delivery fails
-	hub.mu.Lock()
-	state := *hub.alerts["node:node-a"]
-	hub.mu.Unlock()
-	if state.incidentDelivered || state.incidentPending || !state.lastIncidentDelivery.IsZero() {
-		t.Fatalf("failed delivery advanced alert state: %+v", state)
-	}
-	if got := notifier.Accepted(); got != 0 {
-		t.Fatalf("failed delivery was recorded as successful: %d", got)
-	}
-
-	hub.Sweep() // retry succeeds at the same injected time
+	hub.Sweep() // the incident is due and logged
 	hub.mu.Lock()
 	deliveredAt := hub.alerts["node:node-a"].lastIncidentDelivery
 	hub.mu.Unlock()
 	if !deliveredAt.Equal(clock) {
-		t.Fatalf("successful delivery timestamp=%s, want %s", deliveredAt, clock)
+		t.Fatalf("logged delivery timestamp=%s, want %s", deliveredAt, clock)
 	}
-	if got := notifier.Accepted(); got != 1 {
-		t.Fatalf("successful retry count=%d, want 1", got)
+	if got := capture.Accepted(); got != 1 {
+		t.Fatalf("incident count=%d, want 1", got)
 	}
 	clock = clock.Add(30*time.Minute - time.Second)
 	hub.Sweep()
-	if got := notifier.Accepted(); got != 1 {
+	if got := capture.Accepted(); got != 1 {
 		t.Fatalf("reminder fired before boundary: %d", got)
 	}
 	clock = clock.Add(time.Second)
 	hub.Sweep()
-	if got := notifier.Accepted(); got != 2 {
+	if got := capture.Accepted(); got != 2 {
 		t.Fatalf("reminder count at boundary=%d, want 2", got)
 	}
 	hub.Sweep()
-	if got := notifier.Accepted(); got != 2 {
+	if got := capture.Accepted(); got != 2 {
 		t.Fatalf("repeated sweep double-sent reminder: %d", got)
 	}
 }
 
-type task198Notifier struct {
-	mu       sync.Mutex
-	failures int
-	alerts   []HubAlert
-}
-
-func (notifier *task198Notifier) Send(_ context.Context, alert HubAlert) error {
-	notifier.mu.Lock()
-	defer notifier.mu.Unlock()
-	if notifier.failures > 0 {
-		notifier.failures--
-		return errors.New("fixture notifier failure")
-	}
-	notifier.alerts = append(notifier.alerts, alert)
-	return nil
-}
-
-func (notifier *task198Notifier) Accepted() int {
-	notifier.mu.Lock()
-	defer notifier.mu.Unlock()
-	return len(notifier.alerts)
-}
-
-func (notifier *task198Notifier) Alerts() []HubAlert {
-	notifier.mu.Lock()
-	defer notifier.mu.Unlock()
-	return append([]HubAlert(nil), notifier.alerts...)
-}
-
 func TestTask198StalePresenceReminderThenRecovers(t *testing.T) {
 	clock := time.Date(2026, 8, 31, 7, 0, 0, 0, time.UTC)
-	notifier := &task198Notifier{}
+	capture := newHubAlertLog(nil)
 	hub, err := NewHubServer(HubServerConfig{
 		Tokens: map[string]string{"operator": r6OperatorToken, "node-a": r6NodeAToken},
-		Now:    func() time.Time { return clock }, GracePeriod: defaultHubGracePeriod, Notifier: notifier,
+		Now:    func() time.Time { return clock }, GracePeriod: defaultHubGracePeriod, Logger: capture.Logger(),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -213,30 +163,30 @@ func TestTask198StalePresenceReminderThenRecovers(t *testing.T) {
 
 	clock = clock.Add(defaultHubGracePeriod)
 	hub.Sweep() // first post-grace observation
-	if got := notifier.Accepted(); got != 0 {
+	if got := capture.Accepted(); got != 0 {
 		t.Fatalf("stale incident before debounce: %d", got)
 	}
 	clock = clock.Add(time.Second)
 	hub.Sweep() // second post-grace observation
-	if got := notifier.Accepted(); got != 1 {
+	if got := capture.Accepted(); got != 1 {
 		t.Fatalf("stale incident count=%d, want 1", got)
 	}
 	const incidentText = "machine: node-a\nreason: stale\ncheck: none\nREBOOT/UNLOCK NEEDED — fleet on node-a is dead until a human acts"
-	if got := formatHubAlert(notifier.Alerts()[0]); got != incidentText {
+	if got := formatHubAlert(capture.Alerts()[0]); got != incidentText {
 		t.Fatalf("stale incident text=%q", got)
 	}
 
 	clock = clock.Add(30*time.Minute - time.Second)
 	hub.Sweep()
-	if got := notifier.Accepted(); got != 1 {
+	if got := capture.Accepted(); got != 1 {
 		t.Fatalf("stale reminder fired before boundary: %d", got)
 	}
 	clock = clock.Add(time.Second)
 	hub.Sweep()
-	if got := notifier.Accepted(); got != 2 {
+	if got := capture.Accepted(); got != 2 {
 		t.Fatalf("stale reminder count at boundary=%d, want 2", got)
 	}
-	if got := formatHubAlert(notifier.Alerts()[1]); got != incidentText {
+	if got := formatHubAlert(capture.Alerts()[1]); got != incidentText {
 		t.Fatalf("stale reminder text=%q", got)
 	}
 
@@ -245,8 +195,8 @@ func TestTask198StalePresenceReminderThenRecovers(t *testing.T) {
 	hub.mu.Unlock()
 	clock = clock.Add(time.Second)
 	hub.Sweep() // first connected observation must not recover
-	if got := notifier.Accepted(); got != 2 {
-		t.Fatalf("recovery fired before debounce: count=%d alerts=%v", got, notifier.Alerts())
+	if got := capture.Accepted(); got != 2 {
+		t.Fatalf("recovery fired before debounce: count=%d alerts=%v", got, capture.Alerts())
 	}
 	hub.mu.Lock()
 	state := *hub.alerts["node:node-a"]
@@ -254,7 +204,7 @@ func TestTask198StalePresenceReminderThenRecovers(t *testing.T) {
 	if !state.active || state.clearRuns != 1 || !state.remindersStopped || state.recoveryNeeded {
 		t.Fatalf("first connected observation skipped recovery debounce: %+v", state)
 	}
-	for i, alert := range notifier.Alerts() {
+	for i, alert := range capture.Alerts() {
 		if alert.Recovery {
 			t.Fatalf("recovery notification before second observation: i=%d alert=%+v", i, alert)
 		}
@@ -262,10 +212,10 @@ func TestTask198StalePresenceReminderThenRecovers(t *testing.T) {
 
 	clock = clock.Add(time.Second)
 	hub.Sweep() // second connected observation
-	if got := notifier.Accepted(); got != 3 {
+	if got := capture.Accepted(); got != 3 {
 		t.Fatalf("stale recovery count=%d, want 3", got)
 	}
-	recovery := notifier.Alerts()[2]
+	recovery := capture.Alerts()[2]
 	if !recovery.Recovery {
 		t.Fatalf("third notification was not recovery: %+v", recovery)
 	}
@@ -276,7 +226,7 @@ func TestTask198StalePresenceReminderThenRecovers(t *testing.T) {
 
 	clock = clock.Add(30*time.Minute + time.Minute)
 	hub.Sweep()
-	if got := notifier.Accepted(); got != 3 {
+	if got := capture.Accepted(); got != 3 {
 		t.Fatalf("recovered stale incident produced a reminder: %d", got)
 	}
 	hub.mu.Lock()
@@ -315,19 +265,11 @@ func TestTask198PresenceDownLineIsExcludedFromRecoveryAndChecks(t *testing.T) {
 }
 
 func TestR7HubCheckAlertsArePerCheckAndFlapSuppressed(t *testing.T) {
-	capture := &r7TelegramCapture{token: "r7-check-bot-token"}
-	server := httptest.NewServer(capture)
-	defer server.Close()
-	notifier, err := newHubTelegramNotifier(hubTelegramEnv{BotToken: capture.token, ChatID: "r7-check-chat"}, hubNotifierDeps{
-		HTTPClient: server.Client(), BaseURL: server.URL, AllowInsecureForTests: true,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	capture := newHubAlertLog(nil)
 	hub, err := NewHubServer(HubServerConfig{
-		Tokens:   map[string]string{"operator": r6OperatorToken, "node-a": r6NodeAToken},
-		Now:      func() time.Time { return time.Date(2026, 8, 31, 4, 0, 0, 0, time.UTC) },
-		Notifier: notifier,
+		Tokens: map[string]string{"operator": r6OperatorToken, "node-a": r6NodeAToken},
+		Now:    func() time.Time { return time.Date(2026, 8, 31, 4, 0, 0, 0, time.UTC) },
+		Logger: capture.Logger(),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -337,48 +279,40 @@ func TestR7HubCheckAlertsArePerCheckAndFlapSuppressed(t *testing.T) {
 
 	r7Heartbeat(t, hub, agent, HubCheckFail)
 	r7Heartbeat(t, hub, agent, HubCheckOK) // one failed observation must not alert
-	if got := len(capture.Messages()); got != 0 {
-		t.Fatalf("check flap alerted: %v", capture.Messages())
+	if got := len(capture.Texts()); got != 0 {
+		t.Fatalf("check flap alerted: %v", capture.Texts())
 	}
 	r7Heartbeat(t, hub, agent, HubCheckFail)
 	r7Heartbeat(t, hub, agent, HubCheckFail)
-	eventually(t, time.Second, "check incident", func() bool { return len(capture.Messages()) == 1 })
-	if got := capture.Messages()[0].Text; got != "machine: node-a\nreason: check_failed\ncheck: service" {
+	eventually(t, time.Second, "check incident", func() bool { return len(capture.Texts()) == 1 })
+	if got := capture.Texts()[0]; got != "machine: node-a\nreason: check_failed\ncheck: service" {
 		t.Fatalf("check incident text=%q", got)
 	}
 	r7Heartbeat(t, hub, agent, HubCheckFail)
-	if got := len(capture.Messages()); got != 1 {
-		t.Fatalf("check incident repeated: %v", capture.Messages())
+	if got := len(capture.Texts()); got != 1 {
+		t.Fatalf("check incident repeated: %v", capture.Texts())
 	}
 	r7Heartbeat(t, hub, agent, HubCheckOK)
 	r7Heartbeat(t, hub, agent, HubCheckFail) // recovery flap must not notify
-	if got := len(capture.Messages()); got != 1 {
-		t.Fatalf("check recovery flap notified: %v", capture.Messages())
+	if got := len(capture.Texts()); got != 1 {
+		t.Fatalf("check recovery flap notified: %v", capture.Texts())
 	}
 	r7Heartbeat(t, hub, agent, HubCheckOK)
 	r7Heartbeat(t, hub, agent, HubCheckOK)
-	eventually(t, time.Second, "check recovery", func() bool { return len(capture.Messages()) == 2 })
-	if got := capture.Messages()[1].Text; got != "machine: node-a\nreason: recovered_check_failed\ncheck: service" {
+	eventually(t, time.Second, "check recovery", func() bool { return len(capture.Texts()) == 2 })
+	if got := capture.Texts()[1]; got != "machine: node-a\nreason: recovered_check_failed\ncheck: service" {
 		t.Fatalf("check recovery text=%q", got)
 	}
 }
 
 func TestR7HubNodeFlapNeedsTwoConsecutiveObservations(t *testing.T) {
 	clock := time.Date(2026, 8, 31, 4, 0, 0, 0, time.UTC)
-	capture := &r7TelegramCapture{token: "r7-flap-bot-token"}
-	server := httptest.NewServer(capture)
-	defer server.Close()
-	notifier, err := newHubTelegramNotifier(hubTelegramEnv{BotToken: capture.token, ChatID: "r7-flap-chat"}, hubNotifierDeps{
-		HTTPClient: server.Client(), BaseURL: server.URL, AllowInsecureForTests: true,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	capture := newHubAlertLog(nil)
 	hub, err := NewHubServer(HubServerConfig{
 		Tokens:      map[string]string{"operator": r6OperatorToken, "node-a": r6NodeAToken},
 		Now:         func() time.Time { return clock },
 		GracePeriod: defaultHubGracePeriod,
-		Notifier:    notifier,
+		Logger:      capture.Logger(),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -393,23 +327,23 @@ func TestR7HubNodeFlapNeedsTwoConsecutiveObservations(t *testing.T) {
 	hub.Sweep() // one bad observation
 	setState("connected")
 	hub.Sweep() // clears the first candidate
-	if got := len(capture.Messages()); got != 0 {
-		t.Fatalf("first presence flap alerted: %v", capture.Messages())
+	if got := len(capture.Texts()); got != 0 {
+		t.Fatalf("first presence flap alerted: %v", capture.Texts())
 	}
 	setState("disconnected")
 	clock = clock.Add(defaultHubGracePeriod)
 	hub.Sweep() // another one-observation flap
 	setState("connected")
 	hub.Sweep()
-	if got := len(capture.Messages()); got != 0 {
-		t.Fatalf("second presence flap alerted: %v", capture.Messages())
+	if got := len(capture.Texts()); got != 0 {
+		t.Fatalf("second presence flap alerted: %v", capture.Texts())
 	}
 	setState("disconnected")
 	clock = clock.Add(defaultHubGracePeriod)
 	hub.Sweep()
 	clock = clock.Add(time.Second)
 	hub.Sweep()
-	eventually(t, time.Second, "stable presence incident", func() bool { return len(capture.Messages()) == 1 })
+	eventually(t, time.Second, "stable presence incident", func() bool { return len(capture.Texts()) == 1 })
 }
 
 func TestR7HubClientChecksConfigOnlyPublishesClosedResults(t *testing.T) {
@@ -470,19 +404,9 @@ func TestR7HubClientChecksConfigOnlyPublishesClosedResults(t *testing.T) {
 func TestR7HubCLIAndDaemonUseNewConfigOnly(t *testing.T) {
 	root := t.TempDir()
 	authPath := filepath.Join(root, "hub-auth.env")
-	tgPath := filepath.Join(root, "hub-tg.env")
 	nodePath := filepath.Join(root, "hub-node.env")
 	checksPath := filepath.Join(root, "checks.json")
 	if err := os.WriteFile(authPath, []byte("HUB_TOKEN_operator="+r6OperatorToken+"\nHUB_TOKEN_node-a="+r6NodeAToken+"\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(tgPath, []byte("TG_BOT_TOKEN=r7-cli-bot\nTG_CHAT_ID=r7-cli-chat\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := loadHubTelegramEnv(tgPath); err == nil {
-		t.Fatal("non-0600 hub Telegram env was accepted")
-	}
-	if err := os.Chmod(tgPath, 0600); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(nodePath, []byte("HUB_MACHINE_ID=node-a\nHUB_TOKEN="+r6NodeAToken+"\n"), 0600); err != nil {
@@ -491,13 +415,18 @@ func TestR7HubCLIAndDaemonUseNewConfigOnly(t *testing.T) {
 	if err := os.WriteFile(checksPath, []byte(`{"checks":[{"name":"service","argv":["true"],"timeout":"1s"}]}`), 0600); err != nil {
 		t.Fatal(err)
 	}
-	hub, _, code, err := newHubServerForCLIWithDeps([]string{"--hub-auth", authPath, "--hub-tg-env", tgPath, "--hub-grace", "3m"}, nil, hubServerCLIDeps{AllowInsecureForTests: true})
-	if hub == nil || code != ExitOK || err != nil || hub.notifier == nil || hub.gracePeriod != 3*time.Minute {
+	hub, _, code, err := newHubServerForCLIWithDeps([]string{"--hub-auth", authPath, "--hub-grace", "3m"}, nil, hubServerCLIDeps{AllowInsecureForTests: true})
+	if hub == nil || code != ExitOK || err != nil || hub.gracePeriod != 3*time.Minute {
 		t.Fatalf("hub CLI configuration: hub=%v code=%d err=%v", hub, code, err)
 	}
 	daemon, code, err := newDaemonForCLI([]string{"--hub-url", "ws://fixture.invalid", "--hub-token-env", nodePath, "--checks-config", checksPath}, daemonCLIDeps{AllowInsecureForTests: true})
 	if daemon == nil || code != ExitOK || err != nil || daemon.cfg.Hub.Client == nil || len(daemon.cfg.Hub.Client.checks) != 1 {
 		t.Fatalf("daemon checks configuration: daemon=%v code=%d err=%v", daemon, code, err)
+	}
+	// The Telegram notifier is removed: a host that still passes its flag fails
+	// to start the hub, so the flag is listed for removal before deploy.
+	if hub, _, code, err := newHubServerForCLIWithDeps([]string{"--hub-auth", authPath, "--hub-tg-env", "/etc/panewire/hub-tg.env"}, nil, hubServerCLIDeps{AllowInsecureForTests: true}); hub != nil || code == ExitOK || err == nil {
+		t.Fatalf("removed --hub-tg-env was accepted: hub=%v code=%d err=%v", hub, code, err)
 	}
 	legacyFlag := "--" + strings.Join([]string{"sen", "tinel"}, "")
 	if daemon, code, err := newDaemonForCLI([]string{legacyFlag}, daemonCLIDeps{}); daemon != nil || code != ExitUsage || err == nil {
@@ -516,41 +445,7 @@ func r7Heartbeat(t *testing.T, hub *HubServer, agent *hubAgent, status HubCheckS
 	hub.handleAgentMessage("node-a", "fixture", agent, payload)
 }
 
-type r7TelegramMessage struct {
-	ChatID string `json:"chat_id"`
-	Text   string `json:"text"`
-}
-
-type r7TelegramCapture struct {
-	mu       sync.Mutex
-	token    string
-	messages []r7TelegramMessage
-}
-
-func (capture *r7TelegramCapture) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
-	if request.Method != http.MethodPost || request.URL.Path != "/bot"+capture.token+"/sendMessage" {
-		http.NotFound(writer, request)
-		return
-	}
-	var message r7TelegramMessage
-	if err := json.NewDecoder(request.Body).Decode(&message); err != nil {
-		http.Error(writer, "invalid body", http.StatusBadRequest)
-		return
-	}
-	capture.mu.Lock()
-	capture.messages = append(capture.messages, message)
-	capture.mu.Unlock()
-	writer.Header().Set("Content-Type", "application/json")
-	_, _ = writer.Write([]byte(`{"ok":true}`))
-}
-
-func (capture *r7TelegramCapture) Messages() []r7TelegramMessage {
-	capture.mu.Lock()
-	defer capture.mu.Unlock()
-	return append([]r7TelegramMessage(nil), capture.messages...)
-}
-
-func r7HubServer(t *testing.T, now func() time.Time, notifier HubNotifier) (*HubServer, *httptest.Server) {
+func r7HubServer(t *testing.T, now func() time.Time, capture *hubAlertLog) (*HubServer, *httptest.Server) {
 	t.Helper()
 	hub, err := NewHubServer(HubServerConfig{
 		Tokens: map[string]string{
@@ -559,7 +454,7 @@ func r7HubServer(t *testing.T, now func() time.Time, notifier HubNotifier) (*Hub
 			"node-b":   r6NodeBToken,
 		},
 		Now: now, StaleAfter: 30 * time.Second, KeepaliveInterval: 10 * time.Second,
-		GracePeriod: defaultHubGracePeriod, Notifier: notifier,
+		GracePeriod: defaultHubGracePeriod, Logger: capture.Logger(),
 	})
 	if err != nil {
 		t.Fatal(err)

@@ -22,7 +22,6 @@ panewire's host-first placement — read that score.
   "max_active_jobs": 5,
   "memory_free_pct_min": 30,
   "spawn_bridge_seconds": 300,
-  "wake_on_spill": false,
   "machines": {
     "desktop": {"task_slots": 2}
   }
@@ -332,7 +331,7 @@ CPU busy with load1 at 20–44 on 10 cores and its score stayed near 70.
 free  = cpu * mem * io * load * jobs
 score = free * power - 10 * claims_in_the_bridge_window
         - 1000 if disconnected, - 500 if load_unknown, - 200 if not accepting,
-        - 100 if throttled, + 5 for a placement hold, + 5 if burst-ready
+        - 100 if throttled
 ```
 
 Each term runs from 0 to 1, and is 1 when its signal is absent or harmless.
@@ -365,9 +364,51 @@ as a term but carries no special weight.
 `spawn_bridge_seconds` (default 600; 1–3600) after a job's claim the job
 itself costs 10 points. That keeps the next spawn off the same host until the
 metrics cover the first one. After the window the job costs nothing: its load
-is in the metrics, and the `jobs` term counts it for as long as it lives. The
-hub learns about a claim at the node's next heartbeat (every 10 s); two spawns
-placed before that heartbeat can still pick the same host.
+is in the metrics, and the `jobs` term counts it for as long as it lives.
+
+A job counts from the placement decision, not from the claim (hk 4448). The
+claim reaches the hub only after the node has checked out, started and landed
+the job, which took over a minute in the 2026-11-13 burst that sent six jobs to
+one host. The hub's spawn engine tells the hub which host it is trying at the
+moment it decides (`App.PlacementTry`), and the hub holds that job against the
+host (`placement_count.go`) until one of these happens:
+
+- the node's heartbeat lists the job: the claim is the count from then on, so
+  the job is never counted twice and the count never exceeds one claim;
+- the request ends without a launch (refused, never started, timed out): the
+  count is released, and a refusal that moves on to the next candidate moves it
+  to that host;
+- `spawn_bridge_seconds` pass without a claim, as for any claim.
+
+A request still reconciling, and a launched one whose claim has not shown, keep
+their count. The count adds to the host's `bridged_jobs` and so to the
+`claim_cost` term only. It does not change `active_jobs`, the `jobs` term or
+task slots. The count is only that: a claim from a node other than the decided
+host does not release it.
+
+One decision at a time reads the hub's view and counts its job: the engine takes
+the hub's decision gate (`App.PlacementGate`) before it reads hosts and gives it
+up at its first `PlacementTry`, so jobs submitted together see each other. Each
+decision is a new plan read under the gate: the first, the fallback after a
+refusal (a host that filled its task slots, stopped accepting or fell under the
+load threshold in the meantime is judged as it is now) and the one after a wake
+(the woken host is counted only if it is still a place the job may go). The new
+plan keeps what the attempts proved about the hosts already tried, in the
+placement record. The gate is never held through a wake or a launch. The fleet
+snapshot is read again for every decision, and `SelHost`, the host host-first
+selection named before the gate on reads that did not yet carry other jobs'
+counts, does not outrank the scores this decision reads (the account it chose
+still limits the hosts). A host the hub left out for a full task cap stays out
+of the plan (`task_slots_full`) on both the fleet-state and the direct read. A
+pinned `--host` is counted through the gate too. A request bound to a node that
+timed out keeps its count (the node may still launch it) until a claim, a
+definitive failure or the bridge window. The count is in hub memory, so a hub
+restart forgets the jobs decided and not yet claimed until their claims show.
+
+Every spawn decision also takes the hub's latest view: before the engine reads
+the hub's fleet state the hub recomputes the hosts' `load` values, and the
+fallback read (`panewire place`'s endpoint) skips the 30 s cache. No decision
+ranks on a value published for an earlier one.
 
 Stale or missing data never reads as idle:
 
@@ -382,7 +423,7 @@ Stale or missing data never reads as idle:
   `source=hub-only`: every candidate counts as having known metrics and no
   `load_unknown` penalty applies. The Prometheus terms (`cpu`, `io`, `load`)
   read 1. `mem` still follows the node-reported `memory_free_pct`, and the
-  `jobs` term, the claim bridge and the hold/burst adjustments still apply, so
+  `jobs` term and the claim bridge still apply, so
   hosts can still rank differently. An idle-looking score in that state
   reflects missing data, not a measured idle host; the hub-only fallback is
   unchanged by score v2 and described under Prometheus below.
@@ -630,9 +671,6 @@ slots and `--explain`. A job leaves it when any of these is true:
 - herdr has reported its pane `idle` or `done` for 30 minutes (the clock
   restarts when the pane works again, and when the node restarts).
 
-The idle-shutdown probe keeps its own scan without the 30-minute rule, so a
-lead waiting on its workers still keeps its host awake.
-
 The default is the same local `mac-work` / `desktop` spill shape. Policy files
 must be regular files; unknown fields and duplicate targets are rejected. A
 changed valid file hot-reloads without changing the last known-good policy.
@@ -697,8 +735,7 @@ Counts come from the node heartbeat's active-job list, the same source as
 `active_jobs`.
 
 A machine whose task count reaches `task_slots` is removed from `candidates`
-entirely — it is never the decision, is skipped by the `wake_on_spill`
-shortcut, and is invisible to consumers that walk the candidate list. When
+entirely — it is never the decision, and is invisible to consumers that walk the candidate list. When
 every machine is full the response is explicit: `"decision": null`,
 `"candidates": []`, `"reason": "task_slots_exhausted"`. A narrower form —
 the decision machine is slot-full but other candidates remain — answers
@@ -778,7 +815,6 @@ is:
   "spill_targets": ["desktop", "mac-dev"],
   "max_active_jobs": 5,
   "memory_free_pct_min": 30,
-  "wake_on_spill": false,
   "machines": {
     "mac-personal": {"task_slots": 3},
     "mac-dev": {"task_slots": 3},
@@ -840,22 +876,18 @@ node-exporter collectors must stay enabled on every host (see
 `PANEWIRE_PROM_BASIC_USER`/`PANEWIRE_PROM_BASIC_PASS` outside the repository.
 Prometheus samples must have `machine_id`. A missing load sample is explicitly
 `load_unknown`: it cannot select the local machine; if no safe spill candidate
-exists the decision is `unavailable`. Results are cached for 30 seconds.
+exists the decision is `unavailable`. The operator read (`panewire place`) is
+cached for 30 seconds; a spawn's own placement never reads that cache.
 If Prometheus is unavailable or malformed, the endpoint always returns a 200
 hub-only decision based on connected/accepting state and heartbeat active-job
 counts; it never returns a scheduler 500.
 
 ```json
-{"decision":"mac-work","candidates":[{"machine":"mac-work","score":37,"load_ratio":0.53,"throttled":false,"active_jobs":1,"connected":true,"metrics_known":true,"memory_free_pct":null,"swap_used_mb":null,"memory_known":false,"holds_active":false,"burst_ready":false,"reason":"memory_unknown"}],"source":"prometheus","asof":"2026-09-04T00:20:00Z"}
+{"decision":"mac-work","candidates":[{"machine":"mac-work","score":37,"load_ratio":0.53,"throttled":false,"active_jobs":1,"connected":true,"metrics_known":true,"memory_free_pct":null,"swap_used_mb":null,"memory_known":false,"reason":"memory_unknown"}],"source":"prometheus","asof":"2026-09-04T00:20:00Z"}
 ```
 
 A node that does not send memory telemetry records `memory_unknown` rather
 than `available`; this remains fail-open and does not change its score.
-
-When `wake_on_spill` is true and the selected spill target is disconnected, the
-hub starts the existing R16 on-demand burst request in the background with a
-short placement hold. The returned decision remains advisory: callers must
-wait for the target's normal authenticated heartbeat before assigning work.
 
 `panewire` invokes the stable CLI contract:
 

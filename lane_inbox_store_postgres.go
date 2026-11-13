@@ -133,8 +133,7 @@ func migrateHubPostgres(ctx context.Context, db *sql.DB) error {
 }
 
 // migrateHubPostgresTx applies the embedded migrations not yet recorded, on
-// the caller's transaction: the hub commits them alone, migrate-sqlite with
-// its copy.
+// the caller's transaction: the hub commits them alone.
 func migrateHubPostgresTx(ctx context.Context, tx *sql.Tx) error {
 	names, err := fs.Glob(hubPostgresMigrations, "hub_postgres_migrations/*.sql")
 	if err != nil {

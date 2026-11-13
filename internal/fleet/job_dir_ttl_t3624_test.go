@@ -122,8 +122,15 @@ func (r *ttlRig) doc(key string, body []byte, want string) {
 	r.hk.docs[key] = string(b)
 }
 
+// undoc removes a document from the fake hk.
+func (r *ttlRig) undoc(key string) {
+	r.hk.mu.Lock()
+	defer r.hk.mu.Unlock()
+	delete(r.hk.docs, key)
+}
+
 // seedJob builds a job dir every gate condition passes for: claimed,
-// spawned, completed and reaped, its report pinned in a completed hk record,
+// spawned, completed and reaped, its report published to hk in a completed hk record,
 // its pane gone and every file at the base time.
 func (r *ttlRig) seedJob(id string) {
 	r.t.Helper()
@@ -134,7 +141,8 @@ func (r *ttlRig) seedJob(id string) {
 	report := []byte("work done\nREADY: done\n")
 	r.write(id, "report.md", report)
 	r.write(id, "brief.md", []byte("the brief\n"))
-	r.store.records[id] = map[string]any{"job_id": id, "task_id": "42", "state": "completed", "report_doc": "reports/" + id + "/report.md", "report_sha256": sha(report)}
+	r.store.records[id] = map[string]any{"job_id": id, "task_id": "42", "state": "completed"}
+	r.pin(id, "report.md", report)
 	r.age(id)
 }
 
@@ -266,17 +274,17 @@ func TestJobDirTTLEachGateConditionAloneKeeps(t *testing.T) {
 			r.write("j1", "late.txt", []byte("x"))
 			_ = os.Chtimes(filepath.Join(r.dir("j1"), "late.txt"), r.base.Add(2*time.Hour), r.base.Add(2*time.Hour))
 		}},
-		{"report sha mismatch", "report-sha-mismatch", func(r *ttlRig) {
+		{"report edited after done", "report-unconfirmed", func(r *ttlRig) {
 			r.write("j1", "report.md", []byte("edited after done\n"))
 			r.age("j1")
 		}},
-		{"report doc unset", "report-unconfirmed", func(r *ttlRig) { delete(r.store.records["j1"], "report_doc") }},
+		{"report not in hk", "report-unconfirmed", func(r *ttlRig) { r.undoc(reportDocumentKey("j1", sha([]byte("work done\nREADY: done\n")))) }},
 		{"rotated report without a doc", "report-unconfirmed", func(r *ttlRig) {
 			r.write("j1", "report-r2.md", []byte("second round\n"))
 			r.age("j1")
 		}},
-		{"unpinned report doc sha differs", "report-sha-mismatch", func(r *ttlRig) {
-			delete(r.store.records["j1"], "report_sha256")
+		{"legacy report doc sha differs", "report-sha-mismatch", func(r *ttlRig) {
+			r.undoc(reportDocumentKey("j1", sha([]byte("work done\nREADY: done\n"))))
 			r.doc("reports/j1/report.md", []byte("work done\nREADY: done\n"), sha([]byte("other bytes")))
 		}},
 		{"findings without a result", "result-unconfirmed", func(r *ttlRig) {

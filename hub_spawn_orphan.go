@@ -104,7 +104,7 @@ func (h *HubServer) finishUnownedSpawn(ctx context.Context, task hubSpawnTask, o
 			return false, "mark_lost:" + reason
 		}
 	}
-	changed, err := h.inbox.store.completeSpawn(ctx, task, outcome, h.now().UTC())
+	changed, err := h.completeSpawn(ctx, task, outcome)
 	if err != nil {
 		return false, "store_unavailable"
 	}

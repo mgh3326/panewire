@@ -190,7 +190,7 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          go test -count=1 -v -run 'TestLaneInboxStorePostgresMigrationsTwiceChangeNothing|TestLaneInboxStorePostgresConcurrentStartsMigrateOnce|TestHubMigrateSQLiteCopiesToPostgres|TestHubMigrateSQLitePreservesPrunedIDFloor|TestHubServerOpensPostgresInbox|TestHubDatabaseURLNeverEchoed' . 2>&1 | tee "$RUNNER_TEMP/deploy-postgres.log"
+          go test -count=1 -v -run 'TestLaneInboxStorePostgresMigrationsTwiceChangeNothing|TestLaneInboxStorePostgresConcurrentStartsMigrateOnce|TestHubServerOpensPostgresInbox|TestHubDatabaseURLNeverEchoed' . 2>&1 | tee "$RUNNER_TEMP/deploy-postgres.log"
           if grep -q -- '--- SKIP' "$RUNNER_TEMP/deploy-postgres.log"; then
             echo "a Postgres test skipped"; exit 1
           fi

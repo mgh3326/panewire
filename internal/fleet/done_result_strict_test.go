@@ -6,7 +6,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -226,24 +225,11 @@ func TestDoneResultStrictConflictEmitsJobResultAndSentry(t *testing.T) {
 	}
 }
 
-func TestDoneResultStrictDuplicateEqualRepairsMissingAttachEvent(t *testing.T) {
-	a, _, h, _, report, result := strictDoneFixture(t, "completed")
-	seedDuplicateCompletion(t, a, report)
-	h.records["j"]["result"] = map[string]any{"findings": []any{map[string]any{"severity": "high"}}}
-	if countEvents(t, a, "job.result_attached") != 0 {
-		t.Fatal("fixture unexpectedly has a result attach event")
-	}
-	if err := strictDone(t, a, report, result); err != nil {
-		t.Fatal(err)
-	}
-	if countEvents(t, a, "job.result_attached") != 1 {
-		t.Fatal("equal stored result did not repair the missing attach event")
-	}
-}
-
-func TestDoneResultStrictDuplicateDroppedCommitWritesAttachEvent(t *testing.T) {
+// A completed write whose answer is lost is confirmed by reading the record
+// back; the retried `done` for a report that already announced settles the
+// record once and records the receipt.
+func TestDoneResultStrictLostAnswerIsConfirmedByReadBack(t *testing.T) {
 	a, _, h, _, report, result := strictDoneFixture(t, "spawned")
-	events := jobResultEvents(a)
 	seedDuplicateCompletion(t, a, report)
 	h.dropAfterCommit = true
 
@@ -253,26 +239,8 @@ func TestDoneResultStrictDuplicateDroppedCommitWritesAttachEvent(t *testing.T) {
 	if len(h.putBodies) != 1 {
 		t.Fatalf("completed PUTs=%d, want one ambiguous commit", len(h.putBodies))
 	}
-	if got := countEvents(t, a, "job.result_attached"); got != 1 {
-		t.Fatalf("job.result_attached events=%d, want one", got)
-	}
-	if len(*events) != 1 || (*events)[0].Outcome != "attached" || (*events)[0].Reason != "duplicate_done" {
-		t.Fatalf("job_result events=%+v, want one duplicate attachment", *events)
-	}
-}
-
-func TestDoneResultEventWriteFailureIsNotReportedAsHKFailure(t *testing.T) {
-	a := testApp(t)
-	putEvent(t, a, "j", "job.claim", map[string]any{"task_id": "42"})
-	err := a.strictDoneFailure(context.Background(), "j", &doneResultEventWriteFailure{cause: errors.New("local ledger /private/path unavailable")})
-	if code(err) != exitFailure || !strings.Contains(err.Error(), "reason=local_event_failed") || strings.Contains(err.Error(), "hk_unconfigured") {
-		t.Fatalf("error=%v", err)
-	}
-	if strings.Contains(err.Error(), "/private/path") || strings.Contains(err.Error(), "unavailable") {
-		t.Fatalf("local event error details escaped: %v", err)
-	}
-	if kinds := eventKindsOf(t, a, "j"); slices.Contains(kinds, "job.record_failed") {
-		t.Fatalf("local event failure was misrecorded as an hk write failure: %v", kinds)
+	if got := countEvents(t, a, eventRecordSettled); got != 1 {
+		t.Fatalf("%s events=%d, want one", eventRecordSettled, got)
 	}
 }
 
@@ -364,11 +332,9 @@ func TestDoneResultStrictRejectsTerminalReadbackStates(t *testing.T) {
 	for _, tc := range []struct {
 		name, state, reason string
 		result              any
-		reportDoc           string
 	}{
 		{name: "terminal without result", state: "completed", reason: "terminal_without_result"},
 		{name: "different result", state: "completed", result: map[string]any{"different": true}, reason: "result_conflict"},
-		{name: "different report", state: "completed", result: map[string]any{"findings": []any{map[string]any{"severity": "high"}}}, reportDoc: "reports/j/other.md", reason: "report_conflict"},
 		{name: "escalated", state: "escalated", reason: "job_escalated"},
 		{name: "lost", state: "lost", reason: "job_lost"},
 	} {
@@ -377,7 +343,6 @@ func TestDoneResultStrictRejectsTerminalReadbackStates(t *testing.T) {
 			if tc.result != nil {
 				h.records["j"]["result"] = tc.result
 			}
-			h.records["j"]["report_doc"] = tc.reportDoc
 			err := strictDone(t, a, report, result)
 			assertStrictFailure(t, a, err, exitStateConflict, tc.reason)
 		})

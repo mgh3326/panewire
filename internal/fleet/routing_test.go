@@ -140,6 +140,28 @@ func TestRoutingLeadNeverDowngradesToSonnet(t *testing.T) {
 	}
 }
 
+func TestExplorerRoleRefusedWithImplementerHint(t *testing.T) {
+	a := &App{Out: &bytes.Buffer{}}
+	err := a.resolveCmd(context.Background(), []string{"--role", "explorer"})
+	if code(err) != exitUsage || !strings.Contains(err.Error(), "use --role implementer") {
+		t.Fatalf("resolve explorer: got %v, want usage error recommending implementer", err)
+	}
+	if _, err := a.routeFor(context.Background(), "worker", "explorer"); code(err) != exitUsage || !strings.Contains(err.Error(), "use --routing-role implementer") {
+		t.Fatalf("routing explorer: got %v, want usage error recommending implementer", err)
+	}
+}
+
+func TestRoutingPolicyRejectsExplorerSeatMapping(t *testing.T) {
+	policy := strings.Replace(routingBlockV1, `"worker": "implementer"`, `"worker": "explorer"`, 1)
+	parsed, err := parseRoutingJSON([]byte(policy))
+	if err == nil {
+		t.Fatalf("parseRoutingJSON accepted removed explorer mapping: %+v", parsed)
+	}
+	if !strings.Contains(err.Error(), "removed role explorer") || !strings.Contains(err.Error(), "use implementer") {
+		t.Fatalf("mapping refusal lacks replacement hint: %v", err)
+	}
+}
+
 // Acceptance 2: the implementer role keeps today's ordering among its allowed
 // profiles — quota that would be wasted precedes free SWE-2.
 func TestRoutingImplementerKeepsPoolOrder(t *testing.T) {
@@ -246,9 +268,9 @@ func TestRoutingCacheFallback(t *testing.T) {
 	if sel.chosen.seat.Canon != "sonnet" {
 		t.Fatalf("builtin_default filters nothing: %s", sel.chosen.seat.Canon)
 	}
-	s.RoutingRole = "explorer"
+	s.RoutingRole = "implementer"
 	if sel, e = a.selectProfile(ctx, s); e != nil || routingStamp(t, sel)["policy_source"] != routingSourceBuiltin {
-		t.Fatalf("explorer proceeds with builtin_default: %v", e)
+		t.Fatalf("implementer proceeds with builtin_default: %v", e)
 	}
 }
 
@@ -262,16 +284,16 @@ func TestRoutingOnExhaustion(t *testing.T) {
 		{Profile: "codex-luna", Effort: "high", Grade: "A", Pool: "codex", Gate: "default", ModelID: "luna-m"},
 	}
 	pools := map[string]PoolView{"claude": {Status: "ok", Class: "spend", Blocking: ptrF(10)}, "codex": riskPool(120, 30)}
-	block := strings.Replace(routingBlockV1, `"explorer":    {"allowed": ["sonnet", "haiku", "codex-luna", "devin-swe2-medium", "agy-flash38-high"]`, `"explorer":    {"allowed": ["sonnet", "codex-luna"]`, 1)
+	block := strings.Replace(routingBlockV1, `"implementer": {"allowed": ["sonnet", "opus", "codex-terra61", "codex-sol", "devin-swe2", "devin-swe2-medium", "devin-swe2-max", "cmd-dsflash41"], "effort": "high", "on_exhaustion": "wait"}`, `"implementer": {"allowed": ["sonnet", "codex-luna"], "effort": "high", "on_exhaustion": "downgrade_to", "downgrade_to": ["haiku", "devin-swe2-medium"]}`, 1)
 	fixture := func(gates map[string]string) (*App, Spawn) {
 		a, s, q := selFixture(t, "A", rows, pools, []string{"claude", "codex"})
 		q.GateDo = exhaustedGatePools(gates)
 		serveRouting(t, routingDoc(block))
-		s.RoutingRole = "explorer"
+		s.RoutingRole = "implementer"
 		return a, s
 	}
 
-	// Explorer: sonnet refused at its gate, codex-luna's pool exhausted →
+	// Implementer: sonnet refused at its gate, codex-luna's pool exhausted →
 	// downgrade to haiku.
 	a, s := fixture(map[string]string{"haiku": "claude"})
 	sel, e := a.selectProfile(ctx, s)
@@ -279,7 +301,7 @@ func TestRoutingOnExhaustion(t *testing.T) {
 		t.Fatalf("downgrade_to must choose haiku: %v", e)
 	}
 	rt := routingStamp(t, sel)
-	if rt["downgraded_from"] != "explorer" || !slices.Equal(rt["allowed"].([]string), []string{"haiku", "devin-swe2-medium"}) {
+	if rt["downgraded_from"] != "implementer" || !slices.Equal(rt["allowed"].([]string), []string{"haiku", "devin-swe2-medium"}) {
 		t.Fatalf("downgrade stamp: %v", rt)
 	}
 	if before, _ := rt["before_downgrade"].([]any); len(before) != len(rows) {

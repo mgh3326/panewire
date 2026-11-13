@@ -1,12 +1,9 @@
 package panewire
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -31,72 +28,6 @@ type r27FakeHerdr struct {
 	started         chan struct{}
 	mu              sync.Mutex
 	calls           [][]string
-}
-
-func TestR27HeldProjectionEditCancelAPIs(t *testing.T) {
-	hub, err := NewHubServer(HubServerConfig{Tokens: map[string]string{"operator": "op", "host-a": "node"}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	agent := &hubAgent{relays: make(chan hubRelayInjectEvent, 4)}
-	hub.nodes["host-a"] = &hubNodeRecord{agent: agent}
-	hub.relayHeld[301] = hubRelayHeldProjection{ID: 301, Lane: "lane-a", Pane: "fixture-pane", Machine: "host-a", Preview: "before", HeldSince: "2026-01-01T00:00:00Z", DeliverPolicy: "idle", JobID: "relay-job-301"}
-	request := httptest.NewRequest(http.MethodGet, "/v1/relay/held?lane=lane-a", nil)
-	request.Header.Set("Authorization", "Bearer op")
-	writer := httptest.NewRecorder()
-	hub.Handler().ServeHTTP(writer, request)
-	var listed struct {
-		Held []hubRelayHeldProjection `json:"held"`
-	}
-	if writer.Code != http.StatusOK || json.Unmarshal(writer.Body.Bytes(), &listed) != nil || len(listed.Held) != 1 || listed.Held[0].Preview != "before" {
-		t.Fatalf("list status=%d body=%s held=%+v", writer.Code, writer.Body.String(), listed.Held)
-	}
-	patchRequest := httptest.NewRequest(http.MethodPatch, "/v1/relay/events/301", bytes.NewBufferString(`{"text":"after"}`))
-	patchRequest.Header.Set("Authorization", "Bearer op")
-	patchWriter := httptest.NewRecorder()
-	hub.Handler().ServeHTTP(patchWriter, patchRequest)
-	select {
-	case control := <-agent.relays:
-		if patchWriter.Code != http.StatusOK || control.Type != "relay.edit" || control.EventID != 301 || control.Text != "after" {
-			t.Fatalf("patch=%d control=%+v", patchWriter.Code, control)
-		}
-	default:
-		t.Fatal("PATCH did not relay edit to owning node")
-	}
-	if held := hub.relayHeld[301]; held.Preview != "after" {
-		t.Fatalf("PATCH preview=%q, want edited text", held.Preview)
-	}
-	deleteRequest := httptest.NewRequest(http.MethodDelete, "/v1/relay/events/301", nil)
-	deleteRequest.Header.Set("Authorization", "Bearer op")
-	deleteWriter := httptest.NewRecorder()
-	hub.Handler().ServeHTTP(deleteWriter, deleteRequest)
-	select {
-	case control := <-agent.relays:
-		if deleteWriter.Code != http.StatusNoContent || control.Type != "relay.cancel" || control.EventID != 301 {
-			t.Fatalf("delete=%d control=%+v", deleteWriter.Code, control)
-		}
-	default:
-		t.Fatal("DELETE did not relay cancellation to owning node")
-	}
-	alreadyDelivered := httptest.NewRequest(http.MethodPatch, "/v1/relay/events/301", bytes.NewBufferString(`{"text":"too late"}`))
-	alreadyDelivered.Header.Set("Authorization", "Bearer op")
-	alreadyDeliveredWriter := httptest.NewRecorder()
-	hub.Handler().ServeHTTP(alreadyDeliveredWriter, alreadyDelivered)
-	if alreadyDeliveredWriter.Code != http.StatusConflict {
-		t.Fatalf("PATCH after delivery status=%d, want 409", alreadyDeliveredWriter.Code)
-	}
-	for _, method := range []string{http.MethodGet, http.MethodPatch, http.MethodDelete} {
-		path := "/v1/relay/held"
-		if method != http.MethodGet {
-			path = "/v1/relay/events/301"
-		}
-		req := httptest.NewRequest(method, path, nil)
-		res := httptest.NewRecorder()
-		hub.Handler().ServeHTTP(res, req)
-		if res.Code != http.StatusUnauthorized {
-			t.Fatalf("method=%s unauthenticated status=%d", method, res.Code)
-		}
-	}
 }
 
 func (fake *r27FakeHerdr) run(ctx context.Context, args ...string) ([]byte, error) {
@@ -299,46 +230,6 @@ func TestR27BusyRelaySixPathsUseFixtureHerdr(t *testing.T) {
 		}
 	})
 
-	t.Run("cancelled held never prompts", func(t *testing.T) {
-		gate := make(chan struct{})
-		fake := &r27FakeHerdr{t: t, getStatus: "working", waitStatus: "idle", waitGate: gate, started: make(chan struct{}, 3)}
-		store := NewMemoryStore(t)
-		defer store.Close()
-		client, prompts, events := r27Node(t, store, fake)
-		client.relayBusyManager().offer(t.Context(), r27Directive(104, "discard", "idle"))
-		awaitClientEvent(t, time.Second, events, "relay.held")
-		r27WaitStarted(t, fake)
-		if !client.relayBusyManager().cancel(t.Context(), 104) {
-			t.Fatal("cancel did not remove held relay")
-		}
-		awaitClientEvent(t, time.Second, events, "relay.cancelled")
-		if len(*prompts) != 0 {
-			t.Fatalf("cancelled relay prompted=%q", *prompts)
-		}
-	})
-
-	t.Run("edited held releases edited text", func(t *testing.T) {
-		gate := make(chan struct{})
-		fake := &r27FakeHerdr{t: t, getStatus: "working", waitStatus: "done", waitGate: gate, started: make(chan struct{}, 3)}
-		store := NewMemoryStore(t)
-		defer store.Close()
-		client, prompts, events := r27Node(t, store, fake)
-		client.relayBusyManager().offer(t.Context(), r27Directive(105, "before", "idle"))
-		awaitClientEvent(t, time.Second, events, "relay.held")
-		r27WaitStarted(t, fake)
-		if !client.relayBusyManager().edit(t.Context(), 105, "after") {
-			t.Fatal("edit rejected held relay")
-		}
-		close(gate)
-		released := awaitClientEvent(t, time.Second, events, "relay.released")
-		if !strings.Contains(string(released.Payload), `"final_text":"after"`) || !strings.Contains(string(released.Payload), `"edited":true`) {
-			t.Fatalf("released=%s", released.Payload)
-		}
-		if got := *prompts; len(got) != 1 || !strings.Contains(got[0], "after") {
-			t.Fatalf("prompts=%q", got)
-		}
-	})
-
 	t.Run("batch preserves receive order", func(t *testing.T) {
 		gate := make(chan struct{})
 		fake := &r27FakeHerdr{t: t, getStatus: "working", waitStatus: "idle", waitGate: gate, started: make(chan struct{}, 4)}
@@ -504,24 +395,6 @@ func TestR27ExplicitReceiveSequenceOrdersHeldRows(t *testing.T) {
 		t.Fatalf("held=%+v err=%v", items, err)
 	}
 	close(gate)
-}
-
-func TestR27CancelledConfirmationBounded(t *testing.T) {
-	hub, err := NewHubServer(HubServerConfig{Tokens: map[string]string{"operator": "op"}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	hub.mu.Lock()
-	for id := int64(1); id <= relayCancelledMaxEntries+1; id++ {
-		hub.rememberRelayCancelledLocked(id)
-	}
-	length := len(hub.relayCancelled)
-	_, oldestPresent := hub.relayCancelled[1]
-	_, newestPresent := hub.relayCancelled[relayCancelledMaxEntries+1]
-	hub.mu.Unlock()
-	if length != relayCancelledMaxEntries || oldestPresent || !newestPresent {
-		t.Fatalf("cancelled length=%d oldest=%t newest=%t", length, oldestPresent, newestPresent)
-	}
 }
 
 func TestR27HubIngestsBusyRelayNodeEvents(t *testing.T) {
