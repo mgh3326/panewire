@@ -79,7 +79,7 @@ type Spawn struct {
 	// submission (ValidateSubmission) or a node-delivered spawn
 	// (bindNodeSpawn). Its process environment never fills an empty E6Arm;
 	// only a local panewire spawn resolves PANEWIRE_E6_ARM/SCOPEFUEL_E6_ARM.
-	e6ArmLocked bool
+	e6ArmLocked     bool
 	failedHarnesses []string
 	autoSelected    bool
 	requestedEffort string

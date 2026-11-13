@@ -517,19 +517,6 @@
       "effort": "high",
       "pin": true
     },
-    "captain-sol": {
-      "canon": "codex-sol",
-      "kind": "codex",
-      "family": "openai",
-      "capability": "standard",
-      "roles": [
-        "implementer",
-        "reviewer",
-        "consult"
-      ],
-      "effort": "high",
-      "pin": true
-    },
     "codex-luna": {
       "canon": "codex-luna",
       "kind": "codex",
