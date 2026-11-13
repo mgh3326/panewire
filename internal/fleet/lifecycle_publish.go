@@ -30,7 +30,9 @@ const (
 	eventRecordSettled     = "job.record_settled"
 	eventReportPinned      = "job.report_pinned"
 	reportDocumentMaxBytes = 512 << 10
-	reportAttachmentMIME   = "text/markdown"
+	// hk caps the JSON request body at DocumentMaxBytes plus 4 KiB for its envelope.
+	reportDocumentRequestMaxBytes = reportDocumentMaxBytes + 4096
+	reportAttachmentMIME          = "text/markdown"
 )
 
 type reportManifest struct {
@@ -81,8 +83,19 @@ var errReportAttachmentMismatch = errors.New("report attachment metadata mismatc
 // the document back. It returns the key. Publication never blocks completion.
 func (a *App) publishReport(ctx context.Context, j Job, report string, body []byte, digest string) (string, error) {
 	key := reportDocumentKey(j.ID, digest)
-	documentBody := string(body)
-	if len(body) > reportDocumentMaxBytes {
+	upload := client.Document{Key: key, Kind: "report", Job: j.ID, Body: string(body), OriginClass: "job"}
+	if task, err := hkTaskID(j.Task); err == nil {
+		upload.TaskID = &task
+	}
+	useAttachment := len(body) > reportDocumentMaxBytes
+	if !useAttachment {
+		wire, err := json.Marshal(upload)
+		if err != nil {
+			return "", err
+		}
+		useAttachment = len(wire) > reportDocumentRequestMaxBytes
+	}
+	if useAttachment {
 		name := filepath.Base(report)
 		if name == "." || name == "" {
 			name = "report.md"
@@ -106,17 +119,13 @@ func (a *App) publishReport(ctx context.Context, j Job, report string, body []by
 		if err != nil {
 			return "", err
 		}
-		documentBody = string(manifest)
-	}
-	upload := client.Document{Key: key, Kind: "report", Job: j.ID, Body: documentBody, OriginClass: "job"}
-	if task, err := hkTaskID(j.Task); err == nil {
-		upload.TaskID = &task
+		upload.Body = string(manifest)
 	}
 	stored, err := hkPutDocumentStored(ctx, upload)
 	if err != nil {
 		return "", err
 	}
-	documentDigest := reportDigest([]byte(documentBody))
+	documentDigest := reportDigest([]byte(upload.Body))
 	if stored.Key == key && stored.SHA256 == documentDigest {
 		return key, nil
 	}

@@ -126,3 +126,55 @@ func TestDonePublishesLargeReportAsAttachmentAndManifest(t *testing.T) {
 		t.Fatalf("repeat done wrote %d attachments and %d report manifests, want one each", attachments, documents)
 	}
 }
+
+func TestDoneUsesAttachmentWhenJSONEnvelopeExceedsHKLimit(t *testing.T) {
+	const requestLimit = (512 << 10) + 4096
+	r := newDoneRig(t)
+	body := strings.Repeat("<>&\n", 30_000)
+	if len(body) >= reportDocumentMaxBytes {
+		t.Fatalf("fixture has %d raw bytes, want less than %d", len(body), reportDocumentMaxBytes)
+	}
+	digest := reportDigest([]byte(body))
+	key := reportDocumentKey("j", digest)
+	r.hk.Handle(func(req hkRequest) (int, string, bool) {
+		switch {
+		case req.Method == http.MethodPut && req.Path == "/v1/attachments":
+			sha := reportDigest(req.Body)
+			return http.StatusCreated, fmt.Sprintf(`{"attachment":{"sha256":%q,"size_bytes":%d,"mime":"text/markdown","original_name":%q},"created":true}`, sha, len(req.Body), req.Header.Get("X-HK-Name")), true
+		case req.Method == http.MethodPut && req.Path == "/v1/documents/"+url.PathEscape(key) && len(req.Body) > requestLimit:
+			return http.StatusRequestEntityTooLarge, `{"error":"invalid_document"}`, true
+		}
+		return 0, "", false
+	})
+	r.write(body)
+	if err := r.done(); err != nil {
+		t.Fatalf("done report whose JSON envelope exceeds HK's limit: %v", err)
+	}
+
+	var attachment hkRequest
+	var manifest struct {
+		Body string `json:"body"`
+	}
+	var documentRequestBytes int
+	for _, req := range r.hk.Requests() {
+		switch {
+		case req.Method == http.MethodPut && req.Path == "/v1/attachments":
+			attachment = req
+		case req.Method == http.MethodPut && req.Path == "/v1/documents/"+url.PathEscape(key):
+			documentRequestBytes = len(req.Body)
+			if err := json.Unmarshal(req.Body, &manifest); err != nil {
+				t.Fatalf("decode report manifest: %v", err)
+			}
+		}
+	}
+	if string(attachment.Body) != body {
+		t.Fatalf("attachment has %d bytes, want the original %d-byte report", len(attachment.Body), len(body))
+	}
+	if documentRequestBytes == 0 || documentRequestBytes > requestLimit {
+		t.Fatalf("manifest request has %d bytes, want 1..%d", documentRequestBytes, requestLimit)
+	}
+	var fields reportManifest
+	if err := json.Unmarshal([]byte(manifest.Body), &fields); err != nil || fields.ReportSHA256 != digest || fields.SizeBytes != int64(len(body)) {
+		t.Fatalf("manifest=%+v err=%v, want report sha %s and size %d", fields, err, digest, len(body))
+	}
+}
