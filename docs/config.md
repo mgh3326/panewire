@@ -863,6 +863,33 @@ Both keys live in the pool-order policy under `"waste_risk": {...}`; absent
 keys take the defaults, and `panewire simulate --policy`/`--policy-set` try
 other values before the policy is changed.
 
+**Ranked band: pools compete by their seat.** In the ranked band each pool
+offers one seat for the task's grade: its lowest-grade eligible row that fits
+(the lowest grade at or above the task's), unless the policy's `seats` names a
+row for that pool and grade. Pools are then ordered by their seat's waste
+urgency, the measure the waste, free and credit bands use, so the pool with the
+most room goes first. A pool whose reset can be paced ranks ahead of one whose
+cannot; ties keep the previous order (lowest grade, then effort and score). A
+row above the task's grade is eligible, so a pool's higher-grade row can serve a
+lower-grade task. The pool's other rows follow its seat.
+
+`seats` is `{pool: {grade: "profile@effort"}}` (`"profile"` for a rung-less
+row); `profile@effort` is the catalog row's profile and effort, the grade is
+the task's. It is read only in the ranked band. A named row that is not a
+candidate (dropped, wrong pool, grade below the task's) leaves the pool on its
+lowest-fit seat. The embedded default sends Command Code's B and C tasks to
+`omp-dsflash41@high`:
+
+```json
+"seats": {"commandcode": {"B": "omp-dsflash41@high", "C": "omp-dsflash41@high"}}
+```
+
+Command Code therefore takes a B or C task when its room beats the other ranked
+pools', not unconditionally first. A pool whose lowest-fit row already is the
+intended one (devin's `devin-ds41`) needs no entry. The `seats` map is edited in
+`/etc/panewire/pool-order.json` on the hub like the other keys; a file that
+omits it has no policy seats.
+
 **Headroom for a known job length** (`plan --expected DURATION`, or the task's
 `--expected` on spawn, e.g. `6h` or `2d`). After the band order and before
 waste urgency, a subscription candidate whose shortest in-view window fits the
@@ -997,7 +1024,8 @@ per candidate, `waste_risk` (`true`/`false`) on every candidate and
 `unused_at_reset_pct` (its input) whenever the longest window could be
 paced,
 `waste_urgency`, `reset_hours` and `waste_order` (`usd`, `reset` or
-`projected_fallback`) per ranked candidate,
+`projected_fallback`) per ranked candidate, `pool_waste_urgency` and, on a ranked
+pool's seat, `seat_source` (`lowest_fit` or `policy`),
 `waste_group` (`gemini` or `3p`) on a candidate of a pool that publishes only
 group windows,
 `tier: credit` and the `credit` object (`balance_usd`, `burn_usd_per_h`,
