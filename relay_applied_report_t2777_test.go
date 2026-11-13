@@ -385,3 +385,31 @@ func TestRegistrationWithoutReportCapabilityReplaysAtOnce(t *testing.T) {
 	rig.helloFrom("host-a", rig.dest, []string{"spawn_v2", "spawn_ops_v1"})
 	eventually(t, 5*time.Second, "rows replayed", func() bool { return len(rig.dest.relays) == len(ids) })
 }
+
+// The hub stayed up and only the node's socket died: the row the report closes
+// has a live ack window and a lane inbox item. Closing it takes the ordinary
+// path, so the item is delivered and no ack timeout fires on the closed row.
+func TestAppliedReportClosureSettlesInboxItemAndAckWindow(t *testing.T) {
+	rig := t989StartWithInbox(t)
+	rig.hub.relayControl.relayAckTimeout = 300 * time.Millisecond
+	events := r20t5Subscribe(t, rig.hub)
+	ids, _ := rig.deliverAndLoseAcks([]string{"one"}, 1)
+	rig.helloFrom("host-a", rig.dest, hubSpawnCapabilities)
+	eventually(t, 5*time.Second, "the report closes the row", func() bool { return rig.row(ids[0]).DeliveredAt != "" })
+	eventually(t, 5*time.Second, "the lane inbox item is delivered", func() bool {
+		items, err := rig.hub.inbox.store.list(t989Lane, false)
+		return err == nil && len(items) == 1 && items[0].DeliveredAt > 0
+	})
+	rig.hub.mu.Lock()
+	pending := len(rig.hub.relayControl.relayPending)
+	rig.hub.mu.Unlock()
+	if pending != 0 {
+		t.Fatalf("%d ack windows left open for a closed row", pending)
+	}
+	// The window would have expired by now (a fixed wait proves nothing more
+	// happens: the timer was armed at injection).
+	time.Sleep(2 * rig.hub.relayControl.relayAckTimeout)
+	if unconfirmed := events("relay.unconfirmed"); len(unconfirmed) != 0 {
+		t.Fatalf("closed row broadcast relay.unconfirmed: %s", unconfirmed[0])
+	}
+}

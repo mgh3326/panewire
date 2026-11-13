@@ -100,10 +100,16 @@ func (h *HubServer) settleNodeApplied(ctx context.Context, machine string, appli
 						continue
 					}
 				}
-				if err := h.handoffkeep.markDelivered(ctx, record.ID, machine, relayAppliedReportPane); err != nil {
+				// The ordinary close, as a late ack takes it: it also records the
+				// delivery on the lane inbox item, and the ack window the hub may
+				// still hold for this row is dropped after it, so no
+				// relay.unconfirmed follows a row the report closed.
+				pending := relayPending{machine: machine, pane: relayAppliedReportPane, eventID: record.ID, kind: record.Kind, event: relayEventFromRecord(record)}
+				if !h.markRelayEventDeliveredContext(ctx, pending) {
 					h.logger.Warn("applied report row was not closed", "machine", machine, "lane", lane, "event_id", record.ID)
 					continue
 				}
+				h.forgetRelayAckEvent(record.ID, pending.event.JobID)
 				closed++
 			}
 			if len(records) < handoffkeepReplayLimit || afterID <= pageStart {
