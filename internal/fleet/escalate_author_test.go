@@ -323,3 +323,37 @@ func TestLadderTaskBindingRetriesAndConfirmsRebind(t *testing.T) {
 		t.Fatalf("replay err=%v calls=%d", err, calls)
 	}
 }
+
+func TestLadderEffortlessFamilyUsesEmptyEntryEffort(t *testing.T) {
+	rows := []CatalogRow{{Profile: "next", Effort: "", Grade: "A", Gate: "default"}}
+	pick, ok := ladderNextModel(rows, LadderPick{Profile: "first", Family: "example"}, LadderFamily{Models: []string{"first", "next"}}, "A")
+	if !ok || pick.Profile != "next" || pick.Effort != "" {
+		t.Fatalf("pick=%+v ok=%v", pick, ok)
+	}
+}
+
+func TestEscalateAuthorConsultExcludesSuccessorFamily(t *testing.T) {
+	a, hub := escalateCLIFixture(t, "fable", "high", true)
+	hub.result = EscalateAuthorResult{Job: "job-a-l1", Rung: "codex-sol@high"}
+	err := a.escalateAuthorCmd(t.Context(), []string{"--task", "42", "--job", "job-a", "--pr", "mgh3326/panewire#77", "--round", "5", "--findings-file", writeFindings(t, `[]`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hub.request.Profile != "codex-sol" {
+		t.Fatalf("successor=%+v", hub.request)
+	}
+	consult, _, _ := strings.Cut(hub.request.ConsultSeat, "@")
+	if consult == "" || a.Policy.Profiles[consult].Family == a.Policy.Profiles[hub.request.Profile].Family {
+		t.Fatalf("consult=%q successor=%q", hub.request.ConsultSeat, hub.request.Profile)
+	}
+}
+
+func TestEscalateAuthorReportsSelectionQuotaRefusalToHub(t *testing.T) {
+	a, hub := escalateCLIFixture(t, "fable", "high", true)
+	a.Quota.(*fakeQuota).GateDo = func(QuotaRequest) (string, error) { return "", fail(exitSeatRefused, "quota exhausted") }
+	hub.result = EscalateAuthorResult{Code: "quota_refused", Reason: "selection refused"}
+	err := a.escalateAuthorCmd(t.Context(), []string{"--task", "42", "--job", "job-a", "--pr", "mgh3326/panewire#77", "--round", "5", "--findings-file", writeFindings(t, `[]`)})
+	if exitCode(err) != exitUsage || hub.calls != 1 || !hub.request.SelectionRefused {
+		t.Fatalf("err=%v calls=%d request=%+v", err, hub.calls, hub.request)
+	}
+}

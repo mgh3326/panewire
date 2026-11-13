@@ -187,7 +187,7 @@ func ladderNextEffort(rows []CatalogRow, from LadderPick, fam LadderFamily, grad
 // its entry effort.
 func ladderNextModel(rows []CatalogRow, from LadderPick, fam LadderFamily, grade string) (LadderPick, bool) {
 	entry := fam.Entry
-	if entry == "" {
+	if entry == "" && len(fam.Efforts) > 0 {
 		entry = "medium"
 	}
 	at := slices.Index(fam.Models, from.Profile)

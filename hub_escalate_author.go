@@ -48,18 +48,19 @@ const (
 var escalateAuthorPRPattern = regexp.MustCompile(`^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+#[1-9][0-9]*$`)
 
 type hubEscalateAuthorRequest struct {
-	Task        string `json:"task"`
-	Job         string `json:"job"`
-	PR          string `json:"pr"`
-	Round       int    `json:"round"`
-	Findings    string `json:"findings"`
-	Grade       string `json:"grade"`
-	FromProfile string `json:"from_profile"`
-	FromEffort  string `json:"from_effort"`
-	Profile     string `json:"profile"`
-	Effort      string `json:"effort"`
-	Step        string `json:"step"`
-	ConsultSeat string `json:"consult_seat"`
+	Task             string `json:"task"`
+	Job              string `json:"job"`
+	PR               string `json:"pr"`
+	Round            int    `json:"round"`
+	Findings         string `json:"findings"`
+	Grade            string `json:"grade"`
+	FromProfile      string `json:"from_profile"`
+	FromEffort       string `json:"from_effort"`
+	Profile          string `json:"profile"`
+	Effort           string `json:"effort"`
+	Step             string `json:"step"`
+	ConsultSeat      string `json:"consult_seat"`
+	SelectionRefused bool   `json:"selection_refused,omitempty"`
 }
 
 type hubEscalateAuthorResult struct {
@@ -79,6 +80,7 @@ func (h *HubServer) handleEscalateAuthor(w http.ResponseWriter, r *http.Request)
 	}
 	var request hubEscalateAuthorRequest
 	if !decodeHubJSON(w, r, hubSpawnMaxBodyBytes, &request) {
+		writeJSON(w, http.StatusBadRequest, hubEscalateAuthorResult{Code: "invalid_request", Reason: "request body is invalid"})
 		return
 	}
 	if reason := request.refusal(); reason != "" {
@@ -210,6 +212,9 @@ func (h *HubServer) escalateAuthor(ctx context.Context, request hubEscalateAutho
 			return h.escalateAuthorRefusal(ctx, request, owner, "pane_busy", "the author pane is busy", false)
 		}
 		if request.Profile == "" || request.Step == "" {
+			if request.SelectionRefused {
+				return h.escalateAuthorRefusal(ctx, request, owner, "quota_refused", "the selection quota gate refused the successor", false)
+			}
 			return h.escalateAuthorRefusal(ctx, request, owner, "no_rung", "the policy has no step left for this seat", false)
 		}
 		if app.Quota == nil {

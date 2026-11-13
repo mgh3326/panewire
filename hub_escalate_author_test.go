@@ -914,3 +914,30 @@ func TestLadderPlacementPlanAdmitsInheritedSuccessor(t *testing.T) {
 		t.Fatalf("inherited successor plan: %v", err)
 	}
 }
+
+func TestEscalateAuthorRejectsMalformedJSON(t *testing.T) {
+	f := newEscalateFixture(t, "author-malformed")
+	for _, body := range []string{`{`, `{"unknown":1}`} {
+		req := httptest.NewRequest("POST", "/v1/jobs/escalate-author", strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+t14OperatorToken)
+		response := httptest.NewRecorder()
+		f.hub.Handler().ServeHTTP(response, req)
+		if response.Code != 400 || !strings.Contains(response.Body.String(), "invalid_request") {
+			t.Fatalf("body=%q status=%d response=%q", body, response.Code, response.Body.String())
+		}
+	}
+}
+
+func TestEscalateAuthorRecordsSelectionQuotaRefusal(t *testing.T) {
+	f := newEscalateFixture(t, "author-selection-refused")
+	request := f.request()
+	request.Profile, request.Step, request.SelectionRefused = "", "", true
+	result, err := f.hub.escalateAuthor(t.Context(), request)
+	if err != nil || result.Code != "quota_refused" || result.AuthorEnded {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	f.awaitInfo(t, "quota_refused")
+	if slices.Contains(commandOps(f.take()), "pane.close") {
+		t.Fatal("closed author pane")
+	}
+}

@@ -40,18 +40,19 @@ var escalateAuthorPRPattern = regexp.MustCompile(`^[A-Za-z0-9._-]+/[A-Za-z0-9._-
 // the job record showed, so the hub can refuse a stale request; Profile and
 // Effort are the rung to start the author at (empty with Step "" for no_rung).
 type EscalateAuthorRequest struct {
-	Task        string `json:"task"`
-	Job         string `json:"job"`
-	PR          string `json:"pr"`
-	Round       int    `json:"round"`
-	Findings    string `json:"findings"`
-	Grade       string `json:"grade"`
-	FromProfile string `json:"from_profile"`
-	FromEffort  string `json:"from_effort"`
-	Profile     string `json:"profile,omitempty"`
-	Effort      string `json:"effort,omitempty"`
-	Step        string `json:"step,omitempty"`
-	ConsultSeat string `json:"consult_seat,omitempty"`
+	Task             string `json:"task"`
+	Job              string `json:"job"`
+	PR               string `json:"pr"`
+	Round            int    `json:"round"`
+	Findings         string `json:"findings"`
+	Grade            string `json:"grade"`
+	FromProfile      string `json:"from_profile"`
+	FromEffort       string `json:"from_effort"`
+	Profile          string `json:"profile,omitempty"`
+	Effort           string `json:"effort,omitempty"`
+	Step             string `json:"step,omitempty"`
+	ConsultSeat      string `json:"consult_seat,omitempty"`
+	SelectionRefused bool   `json:"selection_refused,omitempty"`
 }
 
 // EscalateAuthorResult is the hub's answer: a successor job and rung, or a
@@ -149,15 +150,17 @@ func (a *App) escalateAuthorCmd(ctx context.Context, args []string) error {
 		if exitCode(err) == exitConfig {
 			return err
 		}
-		return fail(exitUsage, "quota_refused: %v", err)
+		request.SelectionRefused = true
 	}
 	// A replay of a step that already ended the job asks the hub to finish or
 	// re-report it; the hub reads the successor's rung from its own record, so
 	// a ladder that no longer resolves is not a refusal here.
+	consultFamily := from.Family
 	if ok && err == nil && !replay {
 		request.Profile, request.Effort, request.Step = step.Pick.Profile, step.Pick.Effort, step.Kind
+		consultFamily = step.Pick.Family
 	}
-	if consult, err := a.ConsultSeat(ctx, grade, str(record, "owner_lane"), from.Family, scale); err == nil {
+	if consult, err := a.ConsultSeat(ctx, grade, str(record, "owner_lane"), consultFamily, scale); err == nil {
 		request.ConsultSeat = consult.Profile + "@" + firstNonempty(consult.Effort, "default")
 	} else {
 		a.warn("consult seat not resolved: %v", err)
