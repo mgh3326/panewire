@@ -616,6 +616,7 @@ func TestWatcherLeavesDirectDoneResultUntouched(t *testing.T) {
 	h.claimJob("j", float64(42), "test-host")
 	h.records["j"]["state"] = "spawned"
 	a.JobStore = h.client()
+	useFakeHK(t).Handle(hkCommentAnswer)
 	writeReport(t, report, "final\n")
 	direct := filepath.Join(filepath.Dir(report), "direct.json")
 	writeReport(t, direct, `{"source":"direct"}`)

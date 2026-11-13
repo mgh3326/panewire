@@ -1,6 +1,8 @@
 package fleet
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -190,6 +192,14 @@ func (hk *spawnHK) serve(w http.ResponseWriter, r *http.Request) {
 			answer(http.StatusBadRequest, `{"error":"invalid_context","reason":"invalid kind"}`)
 			return
 		}
+		// hk stores the document under the key in the path with the sha256 of
+		// its body, and GET answers with it.
+		key := strings.TrimPrefix(r.URL.Path, "/v1/documents/")
+		content, _ := doc["body"].(string)
+		sum := sha256.Sum256([]byte(content))
+		doc["key"], doc["sha256"] = key, hex.EncodeToString(sum[:])
+		stored, _ := json.Marshal(doc)
+		hk.docs[key] = string(stored)
 		out, _ := json.Marshal(map[string]any{"document": doc, "changed": true})
 		answer(http.StatusOK, string(out))
 		return

@@ -176,6 +176,7 @@ func TestR08RestoreVerifiesExistingReleasedPane(t *testing.T) {
 }
 func TestDoneDeduplicatesAndSnapshotsChangedReport(t *testing.T) {
 	a := testApp(t)
+	useFakeHK(t).Handle(hkCommentAnswer)
 	f := ledgerRunner(t, a)
 	seedJob(t, a, "j", "worker")
 	path := filepath.Join(a.Jobs, "j", "report.md")

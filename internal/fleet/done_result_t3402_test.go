@@ -34,6 +34,7 @@ func seedSpawnedRecord(t *testing.T, a *App, id string) *fakeJobStore {
 func watcherCompletes(t *testing.T) (*App, string, *fakeJobStore) {
 	t.Helper()
 	a, _, report := watchFixture(t)
+	useFakeHK(t).Handle(hkCommentAnswer)
 	store := seedSpawnedRecord(t, a, "j")
 	writeReport(t, report, "final report\n")
 	putLaneEvent(t, a, "w:p1", "READY", a.Now().Add(time.Minute))
@@ -86,9 +87,11 @@ func countEvents(t *testing.T, a *App, kind string) int {
 	return n
 }
 
-// Acceptance (a): the watcher completes first, then an explicit done --result
-// with the same report keeps the result and records job.result_attached.
-func TestDoneResultAttachesOnDuplicateCompletion(t *testing.T) {
+// hk writes `result` only in the spawned→completed PUT and refuses every other
+// terminal rewrite, so a done --result that finds a record the watcher already
+// completed without a result cannot attach it: it is refused as
+// terminal_without_result and the record is left as it is.
+func TestDoneResultOnTerminalWithoutResultIsRefused(t *testing.T) {
 	a, report, store := watcherCompletes(t)
 	if got := recordResult(t, store.record(t, "j")); got != nil {
 		t.Fatalf("watcher completed with an unexpected result: %v", got)
@@ -97,49 +100,50 @@ func TestDoneResultAttachesOnDuplicateCompletion(t *testing.T) {
 	writeReport(t, findings, `{"findings":[{"severity":"high","path":"internal/fleet/spawn.go:576"}]}`)
 	out := a.Out.(*bytes.Buffer)
 	out.Reset()
-	if e := a.lifecycle(context.Background(), "done", []string{"j", "--report", report, "--result", findings}); e != nil {
-		t.Fatal(e)
+	e := a.lifecycle(context.Background(), "done", []string{"j", "--report", report, "--result", findings})
+	if code(e) != exitStateConflict || !strings.Contains(e.Error(), "reason=terminal_without_result") {
+		t.Fatalf("error=%v, want terminal_without_result", e)
 	}
-	if got := out.String(); !strings.Contains(got, "duplicate=yes result=attached") {
+	if got := out.String(); strings.Contains(got, "OK") {
 		t.Fatalf("output=%q", got)
 	}
-	res, ok := recordResult(t, store.record(t, "j")).(map[string]any)
-	if !ok {
-		t.Fatalf("result not attached: %v", store.record(t, "j")["result"])
+	if got := recordResult(t, store.record(t, "j")); got != nil {
+		t.Fatalf("a result reached a terminal record: %v", got)
 	}
-	found, _ := res["findings"].([]any)
-	if len(found) != 1 || found[0].(map[string]any)["severity"] != "high" {
-		t.Fatalf("attached result=%v", res)
-	}
-	if n := countEvents(t, a, "job.result_attached"); n != 1 {
+	if n := countEvents(t, a, "job.result_attached"); n != 0 {
 		t.Fatalf("job.result_attached events=%d", n)
 	}
 }
 
-// Acceptance (b): an equal result already stored is left alone, with no write.
+// Acceptance (b): an equal result already stored is confirmed once, by a
+// read-back, and a repeat then writes nothing: its receipt proves the record.
 func TestDoneResultEqualOnDuplicateDoesNotWrite(t *testing.T) {
 	a, report, store := watcherCompletes(t)
 	findings := filepath.Join(a.Jobs, "j", "findings.json")
-	body := `{"findings":[{"severity":"high"}]}`
-	writeReport(t, findings, body)
+	writeReport(t, findings, `{"findings":[{"severity":"high"}]}`)
+	store.mu.Lock()
+	store.records["j"]["result"] = map[string]any{"findings": []any{map[string]any{"severity": "high"}}}
+	store.mu.Unlock()
 	out := a.Out.(*bytes.Buffer)
-	out.Reset()
-	if e := a.lifecycle(context.Background(), "done", []string{"j", "--report", report, "--result", findings}); e != nil {
-		t.Fatal(e)
+	run := func() {
+		t.Helper()
+		out.Reset()
+		if e := a.lifecycle(context.Background(), "done", []string{"j", "--report", report, "--result", findings}); e != nil {
+			t.Fatal(e)
+		}
+		if got := out.String(); !strings.Contains(got, "duplicate=yes") {
+			t.Fatalf("output=%q", got)
+		}
 	}
-	puts, attached := countStorePuts(store), countEvents(t, a, "job.result_attached")
-	out.Reset()
-	if e := a.lifecycle(context.Background(), "done", []string{"j", "--report", report, "--result", findings}); e != nil {
-		t.Fatal(e)
-	}
-	if got := out.String(); !strings.Contains(got, "duplicate=yes result=equal") {
-		t.Fatalf("output=%q", got)
-	}
-	if got := countStorePuts(store); got != puts {
-		t.Fatalf("equal result wrote the record: %d -> %d", puts, got)
-	}
-	if got := countEvents(t, a, "job.result_attached"); got != attached {
-		t.Fatalf("equal result recorded another attach: %d -> %d", attached, got)
+	run()
+	store.mu.Lock()
+	calls := len(store.calls)
+	store.mu.Unlock()
+	run()
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if len(store.calls) != calls {
+		t.Fatalf("the repeat called the job store: %v", store.calls[calls:])
 	}
 }
 
