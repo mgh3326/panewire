@@ -26,6 +26,11 @@ type hubSpawnOutcome struct {
 	Profile string `json:"profile,omitempty"`
 	Model   string `json:"model,omitempty"`
 	Role    string `json:"role,omitempty"`
+	// Pool and AccountKey are the placement record of the job: what the
+	// executing host launched it on. Empty on an operation placed before they
+	// were recorded, which the exhausted-pool sweep never touches.
+	Pool       string `json:"pool,omitempty"`
+	AccountKey string `json:"account_key,omitempty"`
 	// E6Arm is the experiment marker the submission carried, kept on the
 	// operation record so a run stays visible after the fact.
 	E6Arm string `json:"e6_arm,omitempty"`
@@ -104,6 +109,7 @@ func (s *laneInboxStore) claimSpawnReplacing(parent context.Context, request fle
 	if !errors.Is(err, sql.ErrNoRows) {
 		return hubSpawnTask{}, false, err
 	}
+
 	var taskRole any
 	if spawn.HoldsTaskRole() {
 		taskRole = spawn.RoleKey()
