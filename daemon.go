@@ -125,6 +125,11 @@ func (d *Daemon) Start(ctx context.Context) error {
 				}
 				return d.cfg.Hub.Client.herdrSessionFor(job, pane)
 			}
+			// A wait decision shows on the pane as panewire_quota; a herdr that
+			// cannot report metadata leaves panes unmarked (quota_stop_pane_token.go).
+			if d.capabilities().PaneMetadata {
+				manager.quota.show = manager.quota.reportQuotaWait
+			}
 			manager.quota.enqueue = manager.enqueue
 			d.idleWake = manager
 			d.cfg.Hub.Client.SetIdleWakeManager(manager)
