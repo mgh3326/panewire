@@ -389,3 +389,47 @@ func TestDoneSecretRefusalRepeatsByItself(t *testing.T) {
 		t.Fatalf("job.completed events=%d, want one", got)
 	}
 }
+
+// An unattended `done --result` (headless delegate, watcher) that meets a
+// different stored result raises the same fleet signal the interactive one
+// does: a job_result conflict event and the Sentry warning.
+func TestDoneResultConflictOnUnattendedPathRaisesTheSignal(t *testing.T) {
+	r := newDoneRig(t)
+	putEvent(t, r.a, "j", "job.spawned", map[string]any{"headless": true, "role": "delegate", "pane_id": "w:p1", "tab_id": "w:t1", "label": "agent-a"})
+	r.store.mu.Lock()
+	r.store.records["j"]["state"] = "completed"
+	r.store.records["j"]["result"] = map[string]any{"source": "stored"}
+	r.store.mu.Unlock()
+	events := jobResultEvents(r.a)
+	var warnings []string
+	r.a.SentryWarning = func(fingerprint []string, _ string, _ map[string]string) {
+		warnings = append(warnings, strings.Join(fingerprint, "|"))
+	}
+	findings := filepath.Join(r.a.Jobs, "j", "findings.json")
+	if e := os.WriteFile(findings, []byte(`{"source":"later"}`), 0600); e != nil {
+		t.Fatal(e)
+	}
+	r.write("answer\n")
+	if e := r.done("--result", findings); e != nil {
+		t.Fatalf("headless done failed: %v", e)
+	}
+	if len(*events) != 1 || (*events)[0].Outcome != "conflict" {
+		t.Fatalf("job_result events=%+v", *events)
+	}
+	if len(warnings) != 1 || warnings[0] != "job-result-conflict" {
+		t.Fatalf("Sentry fingerprints=%v", warnings)
+	}
+}
+
+// A file named like a content-addressed key never lands on one: the two key
+// schemes stay disjoint.
+func TestBasenameReportKeyNeverNamesAContentAddressedKey(t *testing.T) {
+	digest := reportDigest([]byte("x"))
+	got := BasenameReportKey("j", "/jobs/j/answer-"+digest+".md")
+	if got == reportDocumentKey("j", digest) || !strings.HasPrefix(got, "reports/j/") {
+		t.Fatalf("key=%q collides with %q", got, reportDocumentKey("j", digest))
+	}
+	if got := BasenameReportKey("j", "/jobs/j/report.md"); got != "reports/j/report.md" {
+		t.Fatalf("key=%q", got)
+	}
+}

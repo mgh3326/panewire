@@ -504,7 +504,7 @@ func jobFindLatestReport(directory string) string {
 // the upload bound; rc is the status the CLI exited with: 124 when the upload
 // timed out, else 1.
 func (c *jobCLI) uploadReportDocument(job, report string) string {
-	key := "reports/" + job + "/" + strings.TrimRight(filepath.Base(report), "\n")
+	key := fleet.BasenameReportKey(job, report)
 	body, err := os.ReadFile(report)
 	if err == nil {
 		err = fleet.PutHKDocument(context.Background(), key, "report", job, string(body))

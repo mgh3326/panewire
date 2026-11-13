@@ -6,6 +6,8 @@ import (
 	"encoding/hex"
 	"errors"
 	"path/filepath"
+	"regexp"
+	"strings"
 
 	"github.com/mgh3326/handoffkeep/client"
 )
@@ -40,7 +42,21 @@ func reportDocumentKey(job, digest string) string {
 // content-addressed: the report file's name, so a later report at the same
 // path overwrote an earlier one.
 func legacyReportDocumentKey(job, reportPath string) string {
-	return "reports/" + job + "/" + filepath.Base(reportPath)
+	return BasenameReportKey(job, reportPath)
+}
+
+var contentAddressedBase = regexp.MustCompile(`^answer-[0-9a-f]{64}\.md$`)
+
+// BasenameReportKey is the hk key of a report uploaded under its file's name
+// (escalate, the legacy job CLI). A file named like a content-addressed key
+// gets a "file-" prefix, so the two schemes stay disjoint and a key named
+// answer-<sha256>.md only ever holds the bytes with that sha256.
+func BasenameReportKey(job, reportPath string) string {
+	base := strings.TrimRight(filepath.Base(reportPath), "\n")
+	if contentAddressedBase.MatchString(base) {
+		base = "file-" + base
+	}
+	return "reports/" + job + "/" + base
 }
 
 // publishedDocument is the document the job.report_published receipt names

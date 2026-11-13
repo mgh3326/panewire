@@ -194,6 +194,12 @@ func (a *App) doneReport(ctx context.Context, j Job, in doneInput) error {
 				a.recordDoneResultConflict(id)
 			}
 			return a.strictDoneFailure(ctx, id, e)
+		case isDoneResultFailure(e, "result_conflict"):
+			// An unattended caller still raises the fleet-level conflict
+			// signal: nobody reads its stderr.
+			a.recordDoneResultConflict(id)
+			a.warn("job %s completed record failed: reason=result_conflict", id)
+			_ = a.event(ctx, id, "job.record_failed", map[string]any{"op": "completed", "reason": "result_conflict"})
 		case in.headless && in.result != nil:
 			a.warn("job %s completed record failed: reason=%s", id, doneResultReason(e))
 			_ = a.event(ctx, id, "job.record_failed", map[string]any{"op": "completed"})
@@ -331,7 +337,7 @@ func (a *App) escalateReport(ctx context.Context, j Job, report, question string
 	id := j.ID
 	doc, docSHA := "", ""
 	if report != "" {
-		key := "reports/" + id + "/" + filepath.Base(report)
+		key := BasenameReportKey(id, report)
 		b, e := os.ReadFile(report)
 		if e == nil {
 			upload := client.Document{Key: key, Kind: "report", Job: id, Body: string(b), OriginClass: "job"}
