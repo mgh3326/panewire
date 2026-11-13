@@ -355,8 +355,11 @@ func TestQuotaStatusShowsCreditPools(t *testing.T) {
 	}
 	out.Reset()
 	errOut.Reset()
-	if code := runQuotaCLI([]string{"status"}, &out, &errOut); code != 0 || !strings.Contains(out.String(), "anthropic-api account="+creditFPForTest+" source=manual") || !strings.Contains(out.String(), "class=spend credit=live presence=present") {
-		t.Fatalf("text status %d: %q %q", code, out.String(), errOut.String())
+	if code := runQuotaCLI([]string{"status"}, &out, &errOut); code != 0 {
+		t.Fatalf("text status %d: %q", code, errOut.String())
+	}
+	if row := statusLineWith(out.String(), "anthropic-api"); !strings.Contains(row, creditFPForTest) || !strings.HasSuffix(strings.Join(strings.Fields(row), " "), "fresh credit") {
+		t.Fatalf("anthropic-api table row = %q", row)
 	}
 }
 
@@ -378,8 +381,8 @@ func TestQuotaStatusShowsAnUnreadableCreditStore(t *testing.T) {
 	if code := runQuotaCLI([]string{"status"}, &out, &errOut); code != 0 {
 		t.Fatalf("exit %d: %s", code, errOut.String())
 	}
-	if !strings.Contains(out.String(), "anthropic-api account="+creditFPForTest+" source=unavailable") || !strings.Contains(out.String(), "class=spend credit=unknown presence=unknown") {
-		t.Fatalf("text status: %q", out.String())
+	if row := statusLineWith(out.String(), "anthropic-api"); !strings.Contains(row, creditFPForTest) || !strings.HasSuffix(strings.Join(strings.Fields(row), " "), "stale credit") {
+		t.Fatalf("unreadable anthropic-api table row = %q", row)
 	}
 }
 
@@ -391,4 +394,15 @@ func TestQuotaStatusOmitsCreditPoolsWithoutTheHarness(t *testing.T) {
 	if _, ok := source.Status(context.Background(), "anthropic-api"); ok {
 		t.Fatal("a host without the harness must not list a credit pool")
 	}
+}
+
+// statusLineWith is the first `quota status` table line naming pool, so a test
+// asserts one row's columns without pinning the whole table.
+func statusLineWith(table, pool string) string {
+	for _, line := range strings.Split(table, "\n") {
+		if strings.Contains(line, pool) {
+			return line
+		}
+	}
+	return ""
 }
