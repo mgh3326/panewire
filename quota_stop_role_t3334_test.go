@@ -1,8 +1,8 @@
 package panewire
 
 import (
+	"bytes"
 	"context"
-	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -19,6 +19,7 @@ import (
 type roleStopRig struct {
 	*idleWakeTestRig
 	q         *quotaStopManager
+	logs      bytes.Buffer
 	sends     int
 	announce  []quotastop.Stop
 	announced []string
@@ -44,7 +45,7 @@ func newRoleStopRig(t *testing.T, role string, startedAgo time.Duration, task st
 			t.Fatal(err)
 		}
 	}
-	q, err := newQuotaStopManager(rig.store, root, false, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	q, err := newQuotaStopManager(rig.store, root, false, slog.New(slog.NewTextHandler(&rig.logs, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
