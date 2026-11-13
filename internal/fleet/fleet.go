@@ -32,7 +32,7 @@ func (s fleetSource) Hosts(ctx context.Context, cwd string) ([]HostView, error) 
 	if str(s.a.Config.Hub, "hub_url") == "" || firstNonempty(str(s.a.Config.Hub, "operator_token_env"), str(s.a.Config.Hub, "hub_token_env")) == "" {
 		return nil, fail(exitConfig, "hub placement unavailable")
 	}
-	args := append([]string{"place", "--class", "worker", "--signals", "--cwd", cwd}, s.a.controlHubArgs(true)...)
+	args := append([]string{"place", "--class", "worker", "--signals", "--floor", "--cwd", cwd}, s.a.controlHubArgs(true)...)
 	r := s.a.call(ctx, "panewire", args...)
 	if e := check(r, "hub placement"); e != nil {
 		return nil, e
