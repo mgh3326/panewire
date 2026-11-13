@@ -8,16 +8,15 @@ import (
 	"testing"
 )
 
-// hookedSource runs a hook after each host read.
+// hookedSource runs a hook before each host read answers.
 type hookedSource struct {
 	loggingSource
-	after func()
+	before func()
 }
 
 func (s hookedSource) Hosts(ctx context.Context, cwd string) ([]HostView, error) {
-	views, err := s.loggingSource.Hosts(ctx, cwd)
-	s.after()
-	return views, err
+	s.before()
+	return s.loggingSource.Hosts(ctx, cwd)
 }
 
 // loggingSource records the host read in an event log.
