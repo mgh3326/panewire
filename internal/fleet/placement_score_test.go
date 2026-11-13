@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"math"
+	"slices"
 	"testing"
 
 	"github.com/mgh3326/panewire/internal/fleetevent"
@@ -181,6 +182,9 @@ func TestFleetSourceRequestsScoreSignals(t *testing.T) {
 	a.Runner = &fakeRunner{Do: func(c Command) Result {
 		if c.Name != "panewire" {
 			return Result{}
+		}
+		if !slices.Contains(c.Args, "--floor") {
+			t.Errorf("the host list must ask for the free-floor flag: %v", c.Args)
 		}
 		for _, arg := range c.Args {
 			if arg == "--signals" {

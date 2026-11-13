@@ -201,7 +201,10 @@ func (k placementScoreK) hysteresisBar(w float64) float64 {
 //     while another usable host did not; the decision moved to the first host
 //     at or above the floor (hysteresis then applies among those).
 //   - "all_loaded": every usable host is under freeFloor; the decision goes to
-//     the highest free*power (ties: higher score, then policy order).
+//     the highest free*power less the bridge cost of the jobs already decided
+//     onto it, which is the score (ties: higher free*power, then policy order).
+//     The bridge term is what spreads a burst: free and power do not move until
+//     the claims and the metrics catch up.
 //   - "challenger": a rival at or above the floor scored hysteresis times the
 //     winner.
 //   - "": the winner keeps the decision.
@@ -219,11 +222,11 @@ func (k placementScoreK) decide(usable []PlacementCandidate, winner int) (int, s
 		}
 	}
 	if len(above) == 0 {
-		pick, pickValue := 0, math.Inf(-1)
+		pick := 0
 		for i, c := range usable {
-			v := c.Signals.Terms.Free() * c.Signals.Power
-			if v > pickValue || (v == pickValue && c.Score > usable[pick].Score) {
-				pick, pickValue = i, v
+			p := usable[pick]
+			if c.Score > p.Score || (c.Score == p.Score && c.Signals.Terms.Free()*c.Signals.Power > p.Signals.Terms.Free()*p.Signals.Power) {
+				pick = i
 			}
 		}
 		return pick, "all_loaded"

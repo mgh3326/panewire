@@ -458,8 +458,11 @@ unknown `free`, never a low one: the floor does not apply to it.
    -17.4).
 2. **All below the floor.** If every usable host is under it, no host is a good
    place. `reason` is `all_loaded` and the decision goes to the highest
-   `free * power` (ties: higher score, then policy order), so the stronger of
-   the equally saturated hosts is used first. This replaces the earlier
+   `free * power` less the bridge cost of the jobs already decided onto the
+   host, which is the score (ties: higher `free * power`, then policy order). The
+   stronger of equally saturated hosts is used first, and a burst spreads: the
+   bridge term moves with each decided job, while `free` and `power` do not move
+   until the claims and the metrics catch up. This replaces the earlier
    "highest `mem` term when the best score is under 15" rule.
 3. **Hysteresis.** Among the hosts at or above the floor, the winner (the
    policy-order winner, or the first host at the floor in policy order when the
@@ -471,15 +474,27 @@ unknown `free`, never a low one: the floor does not apply to it.
 
 **The spawn engine applies the floor before the load bucket.** The floor is an
 eligibility rule (decision 231), so the engine's host ranking
-(`rankHosts` and the `plan` ordering) puts it first: every host the hub marks
-`below_free_floor` (a per-candidate flag in `signals`, set when `free` is under
-`free_floor`) ranks after every host that is not, whatever its load bucket.
-Bucket, the hub's decision and the score then order the hosts at or above the
-floor as before. When every host is under the floor, the highest
-`free * power` ranks first and the bucket does not apply. A below-floor host is
-ranked last, not removed: it is still tried if every other host refuses the
-job. A hub that predates the flag sends none, and no host is then under the
-floor.
+(`rankHosts` and the `plan` ordering) puts it first. It looks only at awake
+hosts: a sleeper has no metrics and stays behind every awake host through the
+bucket order. When some awake host is eligible (usable by the hub's verdict and
+at or above the floor), every other awake host (under the floor, or one the hub
+calls unusable: throttled, at its job cap) ranks after it, in the order the
+other rules give them; a throttled host with a high `free` never displaces the
+usable host the hub chose. Bucket, the hub's decision and the score order the
+eligible hosts as before. When every awake host is under the floor, the highest
+score ranks first (as in rule 2, so decided jobs count) and the bucket does not
+apply. With no awake host under the floor the ranking is unchanged. A host under
+the floor is ranked last, not removed: it is still tried if every other host
+refuses the job.
+
+The hub marks each candidate `below_free_floor` in `signals`. The flag is
+offered only to a caller that asks for it: `GET /v1/placement?signals=1&floor=1`
+(`panewire place --signals --floor`, which the spawn engine's host list uses).
+A caller that asks for `signals=1` alone, such as the previous release's
+`place --signals`, decodes strictly and would reject a field it does not know, so
+it gets the signals without the flag. The fleet-state `load` values carry the
+flag; their readers do not decode strictly. A hub that predates the flag sends
+none, and no host is then under the floor.
 
 A decision the rules left alone has no `reason`. Tagged requests (below) have
 no policy-order winner and always take the highest score.

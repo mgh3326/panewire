@@ -102,22 +102,49 @@ func TestPlacementFreeFloorSkipsHostsBelowIt(t *testing.T) {
 	}
 }
 
-// Rule 2: every usable host under the floor, the highest free*power takes it,
-// whatever the scores and the memory.
-func TestPlacementAllBelowFloorChoosesHighestFreeTimesPower(t *testing.T) {
+// Rule 2: every usable host under the floor, the highest free*power less the
+// bridge cost of the jobs already decided onto it (the score) takes it, so a
+// burst spreads instead of piling onto the host with the best free*power.
+func TestPlacementAllBelowFloorChoosesHighestFreeTimesPowerNetOfBridge(t *testing.T) {
 	k := (PlacementPolicy{}).scoreK()
-	usable := []PlacementCandidate{freeCandidate("first", 30, .04, 50), freeCandidate("second", -20, .03, 100), freeCandidate("third", 0, .0017, 30)}
+	host := func(name string, free, power float64, bridged int) PlacementCandidate {
+		return freeCandidate(name, k.scoreBase(free, bridged, power), free, power)
+	}
+	usable := []PlacementCandidate{host("first", .04, 50, 0), host("second", .03, 100, 0), host("third", .0017, 30, 0)}
 	if got, reason := k.decide(usable, 0); got != 1 || reason != "all_loaded" {
 		t.Fatalf("decide=%d %q, want second (3 beats 2 and 0.05)", got, reason)
 	}
-	// Equal free*power: the higher score, then policy order.
-	usable = []PlacementCandidate{freeCandidate("first", 5, .02, 100), freeCandidate("second", 9, .04, 50), freeCandidate("third", 9, .04, 50)}
-	if got, reason := k.decide(usable, 0); got != 1 || reason != "all_loaded" {
-		t.Fatalf("decide=%d %q", got, reason)
+	// Three jobs decided onto second (each costs 10 on power 100): first wins
+	// though its free*power is lower.
+	usable = []PlacementCandidate{host("first", .04, 50, 0), host("second", .03, 100, 3), host("third", .0017, 30, 0)}
+	if got, reason := k.decide(usable, 0); got != 0 || reason != "all_loaded" {
+		t.Fatalf("decide=%d %q, want first: second carries 3 decided jobs", got, reason)
+	}
+	// A burst of eight decisions onto equally saturated hosts spreads: none
+	// takes more than ceil(8/3) of them.
+	counts := map[string]int{}
+	free := map[string]float64{"a": .04, "b": .03, "c": .02}
+	for range 8 {
+		usable = usable[:0]
+		for _, n := range []string{"a", "b", "c"} {
+			usable = append(usable, host(n, free[n], 100, counts[n]))
+		}
+		got, _ := k.decide(usable, 0)
+		counts[usable[got].Machine]++
+	}
+	for n, c := range counts {
+		if c > 4 {
+			t.Fatalf("burst piled onto %s: %v", n, counts)
+		}
+	}
+	// Equal scores: the higher free*power, then policy order.
+	usable = []PlacementCandidate{freeCandidate("first", 5, .01, 100), freeCandidate("second", 5, .04, 50), freeCandidate("third", 5, .04, 50)}
+	if got, _ := k.decide(usable, 0); got != 1 {
+		t.Fatalf("decide=%d", got)
 	}
 	usable = []PlacementCandidate{freeCandidate("first", 9, .02, 100), freeCandidate("second", 5, .04, 50)}
 	if got, _ := k.decide(usable, 0); got != 0 {
-		t.Fatalf("decide=%d, want the higher score at a tie", got)
+		t.Fatalf("decide=%d, want the higher score", got)
 	}
 }
 

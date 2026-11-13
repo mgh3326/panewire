@@ -1,8 +1,10 @@
 package panewire
 
 import (
+	"encoding/json"
 	"fmt"
 	"math"
+	"strings"
 	"testing"
 	"time"
 )
@@ -73,5 +75,69 @@ func TestPlacementFixture0400FloorChoosesTheOnlyHostAboveIt(t *testing.T) {
 	}
 	if got.Decision != "rpi" || got.Reason != "below_free_floor" {
 		t.Fatalf("decision=%s reason=%q, want rpi below_free_floor (the base chose oci)", got.Decision, got.Reason)
+	}
+}
+
+// Every host is under the floor and a burst of jobs is decided one after the
+// other through the hub's own placement path (countPlacement charges each job to
+// the host it was decided onto): the all-below pick must spread them, not send
+// every job to the host with the best free*power.
+func TestPlacementAllBelowFloorBurstSpreadsThroughThePlacementPath(t *testing.T) {
+	free := map[string]float64{"mac-dev": 0.04, "rpi": 0.03, "desktop": 0.02}
+	cpu, mem, zero, one := map[string]string{}, map[string]string{}, map[string]string{}, map[string]string{}
+	for name, f := range free {
+		cpu[name], mem[name], zero[name], one[name] = fmt.Sprintf("%.4f", 1-f), "0.9", "0", "1"
+	}
+	prom := newCountFixtureProm(t, map[string]map[string]string{
+		placementCPUBusyQuery: cpu, placementCPUBusy1mQuery: maps2(cpu), placementMemAvailableQuery: mem,
+		placementSwapInQuery: zero, placementThermalQuery: one,
+	})
+	policy := PlacementPolicy{LocalMachine: "mac-dev", SpillTargets: []string{"rpi", "desktop"}, MaxActiveJobs: 50}
+	hub := placementPowerHub(t, prom.server.URL, policy)
+	for name := range free {
+		hub.connect(name, "test", "fixture", &hubAgent{}, true)
+	}
+	counts := map[string]int{}
+	for i := range 9 {
+		got := hub.placementFresh(t.Context(), "worker", "repo")
+		if got.Reason != "all_loaded" {
+			t.Fatalf("decision %d: reason %q, want all_loaded", i+1, got.Reason)
+		}
+		counts[got.Decision]++
+		hub.countPlacement(fmt.Sprintf("burst-%d", i), got.Decision)
+	}
+	for name, n := range counts {
+		if n < 2 || n > 4 {
+			t.Fatalf("the burst of 9 went %v: %s took %d", counts, name, n)
+		}
+	}
+}
+
+// The free-floor flag rides in signals only for a caller that asks for it with
+// floor=1: the previous release's `place --signals` decodes strictly and would
+// reject a field it does not know.
+func TestPlacementWireOffersTheFloorFlagOnlyOnRequest(t *testing.T) {
+	result := PlacementResult{Decision: "a", Candidates: []PlacementCandidate{
+		{Machine: "a", Signals: &PlacementSignals{Free: 0.01, BelowFreeFloor: true}},
+		{Machine: "b", Signals: &PlacementSignals{Free: 0.5}},
+	}}
+	marshal := func(r PlacementResult) string {
+		raw, err := json.Marshal(r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(raw)
+	}
+	if got := marshal(placementWire(result, true, false)); strings.Contains(got, "below_free_floor") || !strings.Contains(got, `"free":0.01`) {
+		t.Fatalf("signals=1 alone must not carry the flag: %s", got)
+	}
+	if got := marshal(placementWire(result, true, true)); !strings.Contains(got, `"below_free_floor":true`) {
+		t.Fatalf("floor=1 must carry it: %s", got)
+	}
+	if got := marshal(placementWire(result, false, true)); strings.Contains(got, "below_free_floor") || strings.Contains(got, "signals") {
+		t.Fatalf("no signals, no flag: %s", got)
+	}
+	if !result.Candidates[0].Signals.BelowFreeFloor {
+		t.Fatal("placementWire changed the cached result")
 	}
 }

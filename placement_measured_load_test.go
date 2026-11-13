@@ -464,3 +464,29 @@ func TestPlaceCLIRequestsSignalsOnlyForExplain(t *testing.T) {
 		t.Fatalf("signals asked=%q", asked)
 	}
 }
+
+// --floor asks the hub for the free-floor flag, and only together with
+// --signals (a hub older than the flag ignores the parameter).
+func TestPlaceCLIAsksForTheFloorFlagOnlyWithSignals(t *testing.T) {
+	var asked []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		asked = append(asked, r.URL.Query().Get("signals")+"/"+r.URL.Query().Get("floor"))
+		_ = json.NewEncoder(w).Encode(PlacementResult{Decision: "desktop", Source: "prometheus", Asof: time.Date(2026, 11, 2, 0, 0, 0, 0, time.UTC), Candidates: []PlacementCandidate{{Machine: "desktop", Score: 90, Connected: true, Reason: "available"}}})
+	}))
+	defer server.Close()
+	tokenPath := filepath.Join(t.TempDir(), "operator.env")
+	if err := os.WriteFile(tokenPath, []byte("HUB_MACHINE_ID=operator\nHUB_TOKEN="+r6OperatorToken+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	deps := hubCLIDeps{HTTPClient: server.Client(), AllowInsecureForTests: true}
+	args := []string{"--class", "worker", "--hub-url", server.URL, "--hub-token-env", tokenPath}
+	var out, stderr bytes.Buffer
+	for _, extra := range [][]string{{"--floor"}, {"--signals"}, {"--signals", "--floor"}} {
+		if runPlaceCLI(append(append([]string(nil), args...), extra...), &out, &stderr, deps) != ExitOK {
+			t.Fatalf("%v: stderr=%q", extra, stderr.String())
+		}
+	}
+	if want := []string{"/", "1/", "1/1"}; len(asked) != 3 || asked[0] != want[0] || asked[1] != want[1] || asked[2] != want[2] {
+		t.Fatalf("signals/floor asked=%q, want %q", asked, want)
+	}
+}

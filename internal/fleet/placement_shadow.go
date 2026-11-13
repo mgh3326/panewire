@@ -289,10 +289,15 @@ func hubUsable(h selHost, ignoreMemory bool) bool {
 	if h.slotFull {
 		return false
 	}
-	v := h.view
-	if v == nil {
+	if h.view == nil {
 		return true
 	}
+	return viewUsable(*h.view, ignoreMemory)
+}
+
+// viewUsable is hubUsable for the hub's reading of one host.
+func viewUsable(hv HostView, ignoreMemory bool) bool {
+	v := &hv
 	if v.Extra.Usable != nil && !ignoreMemory {
 		return *v.Extra.Usable
 	}
@@ -529,11 +534,11 @@ func shadowFixed(hosts []selHost, req shadowReq, pol shadowPolicy) ([]selHost, s
 	// way the live engine would rank with that floor.
 	for i := range out {
 		h := &out[i]
-		h.below, h.freePower = false, 0
+		h.below, h.floorValue = false, 0
 		if h.view != nil && h.view.Signals.Terms != nil {
 			sig := h.view.Signals
 			sig.BelowFreeFloor = sig.Terms.Free() < pol.freeFloor
-			h.below, h.freePower = floorKey(sig)
+			h.below, h.floorValue = floorKey(sig, h.score)
 		}
 	}
 	shadowDecide(out, req, pol, func(h selHost) (float64, float64, bool) {
@@ -571,13 +576,16 @@ func shadowMeasured(hosts []selHost, req shadowReq, pol shadowPolicy) []selHost 
 			h.fit = "memory_refused"
 		}
 		h.score = pol.measuredScore(*h, req, mems[i])
-		h.below, h.freePower = false, 0
+		h.below, h.floorValue = false, 0
 		if f, ok := pol.measuredFree(*h, mems[i]); ok {
 			capability, _ := pol.capabilityOf(req.class, h.name, *h)
 			if capability <= 0 {
 				capability = shadowDefaultPower
 			}
-			h.below, h.freePower = f < pol.freeFloor, f*capability
+			h.below, h.floorValue = f < pol.freeFloor, f*capability
+			if h.score != nil {
+				h.floorValue = *h.score
+			}
 		}
 	}
 	byName := map[string]shadowMem{}

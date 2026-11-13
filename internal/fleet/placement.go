@@ -229,6 +229,10 @@ type placeCandidate struct {
 	decided  bool
 	decision string
 	over     bool
+	// unusable is the hub's verdict that the host is not a place to spawn
+	// (throttled, at its job cap, unknown metrics): the free floor does not let
+	// it displace a usable host.
+	unusable bool
 	outcome  string
 	// preflight is the remote-spawn preflight of a candidate the placement
 	// refused; it names why the host was not usable.
@@ -571,6 +575,7 @@ func (a *App) plan(ctx context.Context, s Spawn, pool string, waited time.Durati
 			c.signals = hv.Signals
 			c.source = hv.Source
 			c.decided, c.decision = hv.Decided, hv.DecisionReason
+			c.unusable = !viewUsable(hv, false)
 		} else {
 			c.awake = !c.wakeable || hub == nil
 		}
@@ -658,7 +663,7 @@ func (np *placePlan) carryTried(old *placePlan, tried map[string]bool) {
 		}
 		c.outcome, c.judgment, c.preflight = prev.outcome, prev.judgment, prev.preflight
 		c.score, c.signals, c.load, c.source = prev.score, prev.signals, prev.load, prev.source
-		c.decided, c.decision, c.over = prev.decided, prev.decision, prev.over
+		c.decided, c.decision, c.over, c.unusable = prev.decided, prev.decision, prev.over, prev.unusable
 	}
 	np.repo, np.wake = old.repo, old.wake
 }
@@ -676,12 +681,18 @@ func sortPlaceCandidates(ordered []*placeCandidate, threshold float64, selHost s
 			byScore = false
 		}
 	}
-	anyAbove := slices.ContainsFunc(ordered, func(c *placeCandidate) bool { below, _ := floorKey(c.signals); return !below })
+	side := func(c *placeCandidate) floorSide {
+		below, value := floorKey(c.signals, c.score)
+		return floorSide{awake: true, below: below, usable: !c.unusable, value: value}
+	}
+	sides := make([]floorSide, len(ordered))
+	for i, c := range ordered {
+		sides[i] = side(c)
+	}
+	floor := floorContext(sides)
 	slices.SortStableFunc(ordered, func(x, y *placeCandidate) int {
 		// The free floor is eligibility and runs before the load bucket.
-		xBelow, xFreePower := floorKey(x.signals)
-		yBelow, yFreePower := floorKey(y.signals)
-		if c := floorOrder(xBelow, yBelow, xFreePower, yFreePower, anyAbove); c != 0 {
+		if c := floorOrder(side(x), side(y), floor); c != 0 {
 			return c
 		}
 		if bx, by := placeBucket(*x, threshold), placeBucket(*y, threshold); bx != by {

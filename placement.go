@@ -520,20 +520,31 @@ func (h *HubServer) handlePlacement(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	result := h.placement(r.Context(), class, r.URL.Query().Get("cwd"), tags...)
-	writeJSON(w, http.StatusOK, placementWire(result, r.URL.Query().Get("signals") == "1"))
+	query := r.URL.Query()
+	writeJSON(w, http.StatusOK, placementWire(result, query.Get("signals") == "1", query.Get("floor") == "1"))
 }
 
 // placementWire is the response as a caller sees it. Signals ride along only
 // when asked for: pre-change CLIs decode candidates with
-// DisallowUnknownFields and never ask. The candidates are copied before they
-// are cleared because a fresh result shares its array with the cache.
-func placementWire(result PlacementResult, withSignals bool) PlacementResult {
-	if withSignals {
+// DisallowUnknownFields and never ask. The free-floor flag inside them rides
+// along only when withFloor (floor=1) is also asked for: the previous release's
+// `place --signals` asks for signals and decodes strictly, so a field it does
+// not know must be opted into. The candidates are copied before they are
+// changed because a fresh result shares its array with the cache.
+func placementWire(result PlacementResult, withSignals, withFloor bool) PlacementResult {
+	if withSignals && withFloor {
 		return result
 	}
 	candidates := make([]PlacementCandidate, len(result.Candidates))
 	for i, candidate := range result.Candidates {
-		candidate.Signals = nil
+		switch {
+		case !withSignals:
+			candidate.Signals = nil
+		case candidate.Signals != nil && candidate.Signals.BelowFreeFloor:
+			signals := *candidate.Signals
+			signals.BelowFreeFloor = false
+			candidate.Signals = &signals
+		}
 		candidates[i] = candidate
 	}
 	result.Candidates = candidates
