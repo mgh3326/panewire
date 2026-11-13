@@ -218,6 +218,8 @@ type HubClient struct {
 	nodeCommandMu      sync.Mutex
 	nodeHerdr          relayCommandRunner // fixture seam for node commands; nil runs herdr.
 	nodeGit            relayCommandRunner // fixture seam for node commands; nil runs git.
+	nodeCheckouts      map[string]string  // fixture seam for the checkout.pull allow-list; nil reads spawn.json checkouts.
+	nodeInstallWait    time.Duration      // fixture seam for install.sh's bound; zero is nodeCheckoutInstallTimeout.
 	nodeLifecycle      relayCommandRunner // fixture seam for job.done; nil runs runtug.
 	nodeJobs           fleet.JobStore     // fixture seam for job.mark_lost; nil reads spawn.json handoffkeep_env.
 	nativeQuotaMu      sync.Mutex
@@ -666,6 +668,9 @@ type hubClientConnection struct {
 	// acceptsHostActivity is the same for hubFeatureHostActivity
 	// (host_activity.go).
 	acceptsHostActivity atomic.Bool
+	// acceptsCheckoutPull is the same for hubFeatureCheckoutPull
+	// (node_checkout_pull.go).
+	acceptsCheckoutPull atomic.Bool
 	connection          *websocket.Conn
 	writeMu             sync.Mutex
 }
@@ -2073,6 +2078,7 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 				peer.acceptsLaneEventPane.Store(slices.Contains(message.Features, hubFeatureLaneEventPane))
 				peer.acceptsPaneCaptureDoc.Store(slices.Contains(message.Features, hubFeaturePaneCaptureDoc))
 				peer.acceptsHostActivity.Store(slices.Contains(message.Features, hubFeatureHostActivity))
+				peer.acceptsCheckoutPull.Store(slices.Contains(message.Features, hubFeatureCheckoutPull))
 				continue
 			case "quota.request":
 				go client.handleHubQuota(ctx, peer, message)
@@ -2405,6 +2411,9 @@ func (client *HubClient) heartbeatEvent(ctx context.Context) hubClientEvent {
 		client.resetIdleClock()
 	}
 	heartbeat := hubHeartbeatPayload{Status: "alive", Checks: runHubChecks(ctx, client.checks, client.execute), ActiveJobs: active, HostSignals: client.hostSignalsForHeartbeat(ctx), HostActivity: client.hostActivityForHeartbeat(ctx), Readiness: client.readinessForHeartbeat(ctx)}
+	if client.checkoutPeerAccepted() {
+		heartbeat.Checkouts = client.checkoutRevisionsForHeartbeat(ctx)
+	}
 	if provider := client.stallBeatProvider(); provider != nil {
 		if beat := provider(); beat != nil {
 			heartbeat.StallDetect = beat
