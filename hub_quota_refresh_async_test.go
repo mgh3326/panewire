@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -17,6 +19,7 @@ import (
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
 	"github.com/mgh3326/panewire/internal/fleet"
+	"github.com/mgh3326/panewire/internal/fleetevent"
 )
 
 type staleRefreshQuota struct{ retryQuota }
@@ -137,6 +140,76 @@ func TestHubQuotaRefreshHeldWriterLeavesPlacementPending(t *testing.T) {
 	saved, err := h.inbox.store.spawnTask(t.Context(), request.RequestID)
 	if err != nil || saved.Status != "accepted" || saved.Node != nil {
 		t.Fatalf("stale quota should leave an unbound accepted request: status=%s node=%v err=%v", saved.Status, saved.Node, err)
+	}
+}
+
+func TestHubQuotaRefreshPendingDoesNotRecordRefusal(t *testing.T) {
+	stateDir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	retryHK(t)
+	h, err := NewHubServer(HubServerConfig{Tokens: map[string]string{"operator": t14OperatorToken, "desktop": "node-token"}, InboxStorePath: filepath.Join(t.TempDir(), "inbox.sqlite3")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = h.Close() })
+	server := httptest.NewServer(h.Handler())
+	t.Cleanup(server.Close)
+	t14NamedNode(t, h, server, "desktop", true, true)
+	var mu sync.Mutex
+	var events []fleetevent.Event
+	h.spawnNewApp = func(out, errout io.Writer) (*fleet.App, error) {
+		app := retryDispatchApp(t, out, errout)
+		app.StateDir = stateDir
+		app.Quota = staleRefreshQuota{}
+		app.Source = staleRefreshSource{now: app.Now()}
+		app.EventSink = func(event fleetevent.Event) {
+			mu.Lock()
+			defer mu.Unlock()
+			events = append(events, event)
+		}
+		return app, nil
+	}
+	request := durableSpawnRequest()
+	task, _, err := h.inbox.store.claimSpawn(t.Context(), request, "test-job", "parent", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.mu.Lock()
+	agent := h.nodes["desktop"].agent
+	h.mu.Unlock()
+	agent.writeMu.Lock()
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	go func() { defer close(done); h.executeSpawnTask(ctx, task) }()
+	finished := waitUntil(time.Second, func() bool {
+		select {
+		case <-done:
+			return true
+		default:
+			return false
+		}
+	})
+	cancel()
+	agent.writeMu.Unlock()
+	<-done
+	if !finished {
+		t.Fatal("placement waited for the node writer instead of remaining pending")
+	}
+	saved, err := h.inbox.store.spawnTask(t.Context(), request.RequestID)
+	if err != nil || saved.Status != "accepted" || saved.Node != nil {
+		t.Fatalf("request did not remain accepted and unbound: status=%s err=%v", saved.Status, err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	for _, event := range events {
+		if (event.Kind == "spawn" || event.Kind == "placement") && event.Outcome == "refused" {
+			t.Errorf("pending request recorded a %s refusal", event.Kind)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(stateDir, "placement-attempts", "test-job")); !os.IsNotExist(err) {
+		t.Errorf("pending request recorded a placement attempt: stat error=%v", err)
 	}
 }
 
@@ -276,6 +349,77 @@ func TestHubQuotaRefreshWriteFailureLeavesRequestPending(t *testing.T) {
 	saved, err := h.inbox.store.spawnTask(t.Context(), request.RequestID)
 	if err != nil || saved.Status != "accepted" || saved.Node != nil {
 		t.Fatalf("failed refresh write ended the accepted request: status=%s node=%v err=%v", saved.Status, saved.Node, err)
+	}
+}
+
+func TestHubQuotaRefreshReportsFailureWhilePending(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	retryHK(t)
+	logs := &controlPlaneLogCapture{}
+	h, err := NewHubServer(HubServerConfig{Tokens: map[string]string{"operator": t14OperatorToken, "desktop": "node-token"}, InboxStorePath: filepath.Join(t.TempDir(), "inbox.sqlite3"), Logger: slog.New(logs)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = h.Close() })
+	server := httptest.NewServer(h.Handler())
+	t.Cleanup(server.Close)
+	node := t14NamedNode(t, h, server, "desktop", true, true)
+	h.spawnNewApp = func(out, errout io.Writer) (*fleet.App, error) {
+		app := retryDispatchApp(t, out, errout)
+		app.Quota = staleRefreshQuota{}
+		app.Source = staleRefreshSource{now: app.Now()}
+		return app, nil
+	}
+	request := durableSpawnRequest()
+	task, _, err := h.inbox.store.claimSpawn(t.Context(), request, "test-job", "parent", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() { defer close(done); h.executeSpawnTask(t.Context(), task) }()
+	command := nodeCommandRead(t, node)
+	nodeCommandReplyTo(t, node, command, map[string]any{"error": "refresh_failed"})
+	<-done
+	var record slog.Record
+	if !waitUntil(time.Second, func() bool {
+		var found bool
+		record, found = logs.find("hub quota refresh failed")
+		return found
+	}) {
+		t.Fatal("failed quota refresh did not report its cause")
+	}
+	attrs := controlPlaneRecordAttrs(record)
+	if attrs["machine"] != "desktop" || attrs["pool"] != "claude" || attrs["reason"] != "refresh_failed" {
+		t.Fatalf("quota refresh failure lacked its machine, pool or reason: %v", attrs)
+	}
+	saved, err := h.inbox.store.spawnTask(t.Context(), request.RequestID)
+	if err != nil || saved.Status != "accepted" || saved.Node != nil {
+		t.Fatalf("failed refresh must leave the request pending: status=%s err=%v", saved.Status, err)
+	}
+	// A later placement pass retries the same failing key. Wait for a third
+	// command to prove the second result was processed before checking logs.
+	h.startSpawnCoordinator(t.Context())
+	readCtx, cancel := context.WithTimeout(t.Context(), 8*time.Second)
+	defer cancel()
+	var retry map[string]json.RawMessage
+	if err := wsjson.Read(readCtx, node, &retry); err != nil {
+		t.Fatalf("retry was not sent: %v", err)
+	}
+	nodeCommandReplyTo(t, node, retry, map[string]any{"error": "refresh_failed"})
+	var next map[string]json.RawMessage
+	if err := wsjson.Read(readCtx, node, &next); err != nil {
+		t.Fatalf("next retry was not sent: %v", err)
+	}
+	logs.mu.Lock()
+	count := 0
+	for _, event := range logs.records {
+		if event.Message == "hub quota refresh failed" {
+			count++
+		}
+	}
+	logs.mu.Unlock()
+	if count != 1 {
+		t.Fatalf("identical refresh failures wrote %d warnings, want one", count)
 	}
 }
 

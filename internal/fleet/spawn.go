@@ -598,8 +598,15 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 		}
 	}()
 
-	defer func() { a.finishPlacement(ctx, s, err) }()
-	defer func() { a.spawnEvents(s, err) }()
+	defer func() {
+		// A hub quota refresh parks the request; no placement or refusal has
+		// happened yet, so neither durable record may describe it as refused.
+		if errors.Is(err, ErrQuotaRefreshPending) {
+			return
+		}
+		a.spawnEvents(s, err)
+		a.finishPlacement(ctx, s, err)
+	}()
 	if s.CWD == "" || s.Prompt == "" || s.Label == "" || !slices.Contains([]string{"T0", "T1", "T2", "T3"}, s.T) {
 		return fail(exitUsage, "spawn requires -c -p -l --t T0..T3; supply the missing flags (workspace defaults to executing local.workspace)")
 	}

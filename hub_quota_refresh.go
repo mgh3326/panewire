@@ -11,12 +11,21 @@ import (
 const (
 	hubQuotaRefreshConcurrency = 4
 	hubQuotaRefreshRetryDelay  = 2 * time.Second
+	hubQuotaFailureLogTTL      = time.Minute
 )
 
 type hubQuotaRefreshKey struct{ machine, pool string }
 type hubQuotaRefreshWork struct {
 	key      hubQuotaRefreshKey
 	deadline time.Time
+}
+type hubQuotaRefreshResult struct {
+	key     hubQuotaRefreshKey
+	failure string
+}
+type hubQuotaRefreshFailure struct {
+	reason string
+	seen   time.Time
 }
 
 // hubQuotaRefreshScheduler owns one queue entry or in-flight operation per
@@ -27,6 +36,7 @@ type hubQuotaRefreshScheduler struct {
 	queue          []hubQuotaRefreshWork
 	keys           map[hubQuotaRefreshKey]bool
 	completed      map[hubQuotaRefreshKey]time.Time
+	failures       map[hubQuotaRefreshKey]hubQuotaRefreshFailure
 	wake           chan struct{}
 	done           chan struct{}
 	closed         bool
@@ -45,6 +55,7 @@ func (h *HubServer) scheduleQuotaRefresh(machine, pool string, timeout time.Dura
 	if q.wake == nil {
 		q.keys = make(map[hubQuotaRefreshKey]bool)
 		q.completed = make(map[hubQuotaRefreshKey]time.Time)
+		q.failures = make(map[hubQuotaRefreshKey]hubQuotaRefreshFailure)
 		q.wake = make(chan struct{}, 1)
 		q.done = make(chan struct{})
 		go func() {
@@ -55,6 +66,11 @@ func (h *HubServer) scheduleQuotaRefresh(machine, pool string, timeout time.Dura
 	for old, until := range q.completed {
 		if !now.Before(until) {
 			delete(q.completed, old)
+		}
+	}
+	for old, failure := range q.failures {
+		if now.Sub(failure.seen) >= hubQuotaFailureLogTTL {
+			delete(q.failures, old)
 		}
 	}
 	if !q.keys[key] && !now.Before(q.completed[key]) {
@@ -102,7 +118,7 @@ func (h *HubServer) kickSpawnPlacement() {
 // start; the accepted request supplies the key again on a later placement pass.
 func (h *HubServer) runQuotaRefreshes(ctx context.Context) {
 	q := &h.quotaRefresh
-	done := make(chan hubQuotaRefreshKey, hubQuotaRefreshConcurrency)
+	done := make(chan hubQuotaRefreshResult, hubQuotaRefreshConcurrency)
 	active := make(map[string]bool)
 	running := 0
 	defer func() {
@@ -156,8 +172,8 @@ func (h *HubServer) runQuotaRefreshes(ctx context.Context) {
 			go func() {
 				refreshCtx, cancel := context.WithDeadline(ctx, work.deadline)
 				defer cancel()
-				h.refreshQuotaFromNode(refreshCtx, work.key)
-				done <- work.key
+				failure := h.refreshQuotaFromNode(refreshCtx, work.key)
+				done <- hubQuotaRefreshResult{key: work.key, failure: failure}
 			}()
 		}
 		q.mu.Lock()
@@ -180,13 +196,23 @@ func (h *HubServer) runQuotaRefreshes(ctx context.Context) {
 				timer.Stop()
 			}
 			return
-		case key := <-done:
+		case result := <-done:
 			running--
-			delete(active, key.machine)
+			delete(active, result.key.machine)
 			q.mu.Lock()
-			delete(q.keys, key)
-			q.completed[key] = time.Now().Add(hubQuotaRefreshRetryDelay)
+			delete(q.keys, result.key)
+			now := time.Now()
+			q.completed[result.key] = now.Add(hubQuotaRefreshRetryDelay)
+			previous := q.failures[result.key]
+			if result.failure == "" {
+				delete(q.failures, result.key)
+			} else {
+				q.failures[result.key] = hubQuotaRefreshFailure{reason: result.failure, seen: now}
+			}
 			q.mu.Unlock()
+			if result.failure != "" && result.failure != previous.reason {
+				h.logger.Warn("hub quota refresh failed", "machine", result.key.machine, "pool", result.key.pool, "reason", result.failure)
+			}
 			q.completedCount.Add(1)
 			h.kickSpawnPlacement()
 		case <-q.wake:
@@ -198,15 +224,31 @@ func (h *HubServer) runQuotaRefreshes(ctx context.Context) {
 	}
 }
 
-func (h *HubServer) refreshQuotaFromNode(ctx context.Context, key hubQuotaRefreshKey) {
+func (h *HubServer) refreshQuotaFromNode(ctx context.Context, key hubQuotaRefreshKey) string {
 	args, _ := json.Marshal(map[string]string{"pool": key.pool})
 	pending, id, _, sent := h.sendNodeCommandWithContext(ctx, key.machine, nodeCommandQuotaRefresh, args)
 	if !sent {
-		return
+		if ctx.Err() == context.DeadlineExceeded {
+			return "node_timeout"
+		}
+		if ctx.Err() != nil {
+			return ""
+		}
+		return "node_unavailable"
 	}
 	defer h.forgetNodeCommand(id)
 	select {
-	case <-pending.done:
+	case result := <-pending.done:
+		if result.Error == "node_lost" {
+			return "node_lost"
+		}
+		if result.Error != "" {
+			return "refresh_failed"
+		}
 	case <-ctx.Done():
+		if ctx.Err() == context.DeadlineExceeded {
+			return "node_timeout"
+		}
 	}
+	return ""
 }

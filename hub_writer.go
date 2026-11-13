@@ -3,9 +3,12 @@ package panewire
 import (
 	"context"
 	"sync"
+	"time"
 
 	"github.com/coder/websocket/wsjson"
 )
+
+const hubWriteTimeout = 5 * time.Second
 
 // hubWriteMutex retains the node's single-writer invariant while allowing an
 // independently timed command to abandon admission without a stray writer.
@@ -40,5 +43,7 @@ func (agent *hubAgent) writeJSONContext(ctx context.Context, value any) error {
 		return err
 	}
 	defer agent.writeMu.Unlock()
-	return wsjson.Write(ctx, agent.conn, value)
+	writeCtx, cancel := context.WithTimeout(ctx, hubWriteTimeout)
+	defer cancel()
+	return wsjson.Write(writeCtx, agent.conn, value)
 }

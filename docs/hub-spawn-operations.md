@@ -43,13 +43,18 @@ the request, it stays unbound in `accepted`, keeping its reservation until a
 refresh permits placement or its existing deadline expires. A completed refresh
 wakes another placement pass; a failed or timed-out refresh is retried while
 the request remains pending. An already-confirmed account can be selected
-without waiting for the stale accounts.
+without waiting for the stale accounts. A pending measurement produces no
+spawn or placement refusal record. The hub logs a changed refresh failure with
+its machine, pool and reason; repeated identical failures are not logged on
+every retry.
 
 Refreshes coalesce by machine and pool. At most four run at once, with at most
 one per node; waiting keys are considered in arrival order while busy nodes are
 skipped. The configured `measure_timeout_s` (default 60 seconds, capped at 60)
 starts when a key is queued and covers queueing, writer admission, the socket
-write and the response. An expired queued attempt retains its place, but is
+write and the response. After writer admission, the socket write also has the
+same five-second maximum as other hub node writes. An expired queued attempt
+retains its place, but is
 sent only if a later placement pass requests it with a new budget. On shutdown
 the hub cancels refreshes; accepted requests
 and their reservations survive restart. Local, non-hub spawns keep their

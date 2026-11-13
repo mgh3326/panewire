@@ -2366,7 +2366,7 @@ func (h *HubServer) RunMaintenance(ctx context.Context) {
 func (agent *hubAgent) writeJSON(value any) error {
 	agent.writeMu.Lock()
 	defer agent.writeMu.Unlock()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), hubWriteTimeout)
 	defer cancel()
 	return wsjson.Write(ctx, agent.conn, value)
 }
