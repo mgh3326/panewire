@@ -616,21 +616,54 @@ func (a *App) plan(ctx context.Context, s Spawn, pool string, waited time.Durati
 		}
 	}
 	p.candidates = enum
+	sortPlaceCandidates(p.ordered, threshold, s.SelHost)
+	return p, nil
+}
+
+// rerankRest re-reads the hub's host view and re-sorts the candidates from
+// index from on, so the next one tried reflects the jobs counted since the plan
+// was made. A failed read keeps the plan's order.
+func (a *App) rerankRest(ctx context.Context, p *placePlan, s Spawn, from int) {
+	if a.fleetLog != nil {
+		a.fleetLog.fetchedAt = time.Time{}
+	}
+	views, _ := a.hostViews(ctx, s.CWD)
+	if views == nil {
+		return
+	}
+	rest := p.ordered[from:]
+	for _, c := range rest {
+		if hv, ok := views[c.name]; ok {
+			c.load, c.score, c.signals, c.source = hv.LoadRatio, hv.Score, hv.Signals, hv.Source
+			c.decided, c.decision = hv.Decided, hv.DecisionReason
+			if !c.over && c.load != nil && *c.load >= p.threshold {
+				c.over = true
+			}
+		}
+	}
+	sortPlaceCandidates(rest, p.threshold, s.SelHost)
+}
+
+// sortPlaceCandidates orders awake candidates: load bucket, the host-first
+// selection, login evidence, the hub's decision, then score (or load when a
+// candidate has no score). plan sorts with it, and a refusal re-sorts the
+// candidates still to try on fresh hub scores.
+func sortPlaceCandidates(ordered []*placeCandidate, threshold float64, selHost string) {
 	// One metric for the whole list: mixing score and load per pair would make
 	// the comparator intransitive when only some hosts carry a hub score.
-	byScore := len(p.ordered) > 0
-	for _, c := range p.ordered {
+	byScore := len(ordered) > 0
+	for _, c := range ordered {
 		if c.score == nil {
 			byScore = false
 		}
 	}
-	slices.SortStableFunc(p.ordered, func(x, y *placeCandidate) int {
+	slices.SortStableFunc(ordered, func(x, y *placeCandidate) int {
 		if bx, by := placeBucket(*x, threshold), placeBucket(*y, threshold); bx != by {
 			return bx - by
 		}
 		// Host-first selection already chose this machine for the account;
 		// the load bucket still wins so a pressured host stays a last resort.
-		if px, py := x.name == s.SelHost, y.name == s.SelHost; px != py {
+		if px, py := x.name == selHost, y.name == selHost; px != py {
 			if px {
 				return -1
 			}
@@ -660,7 +693,6 @@ func (a *App) plan(ctx context.Context, s Spawn, pool string, waited time.Durati
 		}
 		return x.order - y.order
 	})
-	return p, nil
 }
 
 // loginRank orders login evidence: positive evidence and "no account needed"
@@ -1252,17 +1284,26 @@ func (a *App) placeAuto(ctx context.Context, s Spawn, brief string) (bool, map[s
 		return true, nil, e
 	}
 	// One decision at a time through read-rank-count: the next decision must
-	// see the job this one counts (hk 4448). The gate is released at the first
-	// PlacementTry, or when this call ends.
+	// see the job this one counts (hk 4448). The gate is held from the host
+	// read to PlacementTry, never through a wake or a launch, and taken again
+	// before each later candidate is ranked. release is safe to call twice.
 	release := func() {}
-	if a.PlacementGate != nil && !s.DryRun {
+	takeGate := func() error {
+		release()
+		if a.PlacementGate == nil || s.DryRun {
+			return nil
+		}
 		gateRelease, e := a.PlacementGate(ctx)
 		if e != nil {
-			return true, nil, fail(exitPlacement, "placement decision gate: %v", e)
+			return fail(exitPlacement, "placement decision gate: %v", e)
 		}
 		release = sync.OnceFunc(gateRelease)
+		return nil
 	}
-	defer release()
+	if e := takeGate(); e != nil {
+		return true, nil, e
+	}
+	defer func() { release() }()
 	waited := taskWaited(task, a.Now())
 	pool := a.quotaPool(ctx, s)
 	s.TaskGrade = s.Grade
@@ -1372,7 +1413,17 @@ func (a *App) placeAuto(ctx context.Context, s Spawn, brief string) (bool, map[s
 		}
 		return true
 	}
-	for _, c := range p.ordered {
+	for i := 0; i < len(p.ordered); i++ {
+		if i > 0 {
+			// A refusal moves on: rank the candidates left on fresh hub
+			// scores, under the gate, so this fallback sees the jobs other
+			// decisions counted meanwhile.
+			if e := takeGate(); e != nil {
+				return true, nil, e
+			}
+			a.rerankRest(ctx, p, s, i)
+		}
+		c := p.ordered[i]
 		if c.local {
 			// An over-threshold local is a last resort: when the job has
 			// waited long enough and every awake candidate is saturated the
@@ -1407,6 +1458,9 @@ func (a *App) placeAuto(ctx context.Context, s Spawn, brief string) (bool, map[s
 	}
 	targets, reasons := a.wakeTargets(s, p, unreachable)
 	lastNote := ""
+	// A wake waits for a node for up to wake_wait; no other decision waits
+	// behind it.
+	release()
 	for _, w := range targets {
 		c := p.candidate(w)
 		if c == nil {
