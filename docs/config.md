@@ -1558,7 +1558,9 @@ named reason. It is read-only: it reads the hub host list, hk presence and the
 shared observation, and makes one SSH probe per host that tests two paths,
 reads one boolean from the remote `hosts.toml` and asks `panewire` and `panewire`
 for their versions. It never prints a URL or a file's contents, and writes no
-task, job or event.
+task, job or event. The whole run is bounded by a 90-second budget; a probe
+that does not answer in time reports its checks failed (`probe_failed_rcN`)
+rather than holding the command.
 
 | Check | Fails with | Meaning |
 | --- | --- | --- |
