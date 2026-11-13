@@ -1158,7 +1158,7 @@ The selection record carries a `consult` object with `asker_grade`, `asker_famil
 A consult never runs above its role's `effort` (`high` in the
 current table) unless the request passes `--allow-escalation`. This rule
 applies the same way to `spawn -m auto`, `plan`, and `resolve`. `delegate`
-routes only as implementer, explorer, verifier, or reviewer, so the cap does
+routes only as implementer, verifier, or reviewer, so the cap does
 not apply to it.
 It does not use task grade. Other roles keep grade-driven selection and
 today's ordering.
@@ -1248,10 +1248,10 @@ refused, and the cache stores the map as `panewire_role_map`. A seat role
 the map does not name takes its builtin routing role (`worker` implementer, `tester` verifier, `reviewer` reviewer, `counsel`
 consult) instead of running unfiltered.
 
-`--routing-role consult|implementer|explorer|verifier|reviewer|judge`
+`--routing-role consult|implementer|verifier|reviewer|judge`
 on `spawn` or `plan` selects the routing role. Seat admission still uses
 `--role`. Counsel retains its required routing role.
-Delegate maps `reader` to `explorer`, `verifier` to `verifier`, and
+Delegate maps `reader` to `implementer`, `verifier` to `verifier`, and
 `reviewer` to `reviewer`. `--patch` uses `implementer` eligibility.
 
 A valid document is cached atomically at
@@ -1404,7 +1404,7 @@ The nested `routing` object carries `routing_version`, `policy_source`,
 the allowlist, and the exhaustion rule. The hk job metadata schema is
 unchanged.
 
-`panewire resolve --role consult|implementer|explorer|verifier|reviewer|judge
+`panewire resolve --role consult|implementer|verifier|reviewer|judge
 [--grade G] [--t T0..T3] [--builder-family F] [--harness KIND] [--allow-escalation] [--json]` runs the same
 selection core without a launch or job write. `--t` defaults to `T0`.
 Reviewer and judge require `--builder-family` to exclude that family.
@@ -1415,7 +1415,7 @@ For a consult rung chosen above the role effort with
 `--allow-escalation`, `effort` is the chosen rung's.
 
 `--harness omp` restricts selection to OMP seats before quota ordering. For
-`--role implementer` or `--role explorer`, an OMP choice also returns
+`--role implementer`, an OMP choice also returns
 `omp_agent` when a user agent's frontmatter `model:` exactly matches the
 selected `model_id`. Panewire reads only the frontmatter of regular Markdown
 files in `~/.omp/agent/agents/`, in filename order. The first matching agent's
