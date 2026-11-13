@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"slices"
+	"sort"
 	"strings"
 	"time"
 
@@ -133,6 +134,19 @@ func (sp *selPresence) account(ctx context.Context, key, pool string, hosts []se
 		copy(ordered[1:i+1], ordered[:i])
 		ordered[0] = local
 	}
+	if sp.a.planOnly {
+		// A plan measures nothing: a refresh writes presence, lease and
+		// observation to the shared quota store. Name the measurement the
+		// spawn would run and judge the stored reading as it is, so the rung
+		// drops as would_measure instead of measure_failed.
+		host := ""
+		if len(ordered) > 0 {
+			host = ordered[0].name
+		}
+		sp.a.wouldMeasureLine(host, pool)
+		sp.refreshed[key] = accountRefresh{measured: measureWould, host: host, err: fail(exitEvictionUnconfirmed, "would measure account %s on %s before a spawn", key, host)}
+		return acc
+	}
 	refresh, cancel := context.WithTimeout(ctx, sp.a.placementTTL("measure_timeout_s", 60))
 	defer cancel()
 	result := accountRefresh{measured: "failed"}
@@ -195,7 +209,11 @@ func (sp *selPresence) unknownJudgment(b accountBinding, why string) quotaJudgme
 	}
 	host, status := b.hosts[0], exitEvictionUnconfirmed
 	r := sp.refreshed[b.key]
-	if r.measured != "" {
+	if r.measured == measureWould {
+		// A plan skipped the measurement; name what the spawn would run
+		// instead of reporting a measurement that never ran.
+		why = "would_measure"
+	} else if r.measured != "" {
 		why = "measure_" + why
 		if r.measured == "failed" {
 			why = "measure_failed"
@@ -339,6 +357,11 @@ func gateOutcome(err error) string {
 }
 
 func hostGateFailure(err error) bool {
+	// A refusal the request, the catalog or policy decided reads the same on
+	// every host: it is the candidate's, not the host's.
+	if gateCodeNote(err) != "" {
+		return false
+	}
 	code := gateOutcome(err)
 	return code == outcomeNoEligibleHost || code == outcomePolicyUnavailable
 }
@@ -478,6 +501,12 @@ func (a *App) selectionRefused(ctx context.Context, s Spawn, req selReq, p *selP
 		if code == outcomeNoEligibleHost {
 			gap = p.capsGap + p.hostDropNote()
 		}
+		if code == outcomePolicyUnavailable {
+			gap = gateBlockNote(accounts)
+		}
+		if code == outcomeQuotaUnknown {
+			gap = wouldMeasureNote(accounts)
+		}
 		return p, fail(exit, "%s: no account admitted routing role %s%s%s%s", code, routingRole(req), hostScope(s), gap, p.poolAtCapNote())
 	}
 	if slices.ContainsFunc(accounts, func(c *selCand) bool { return c.code == outcomeQuotaExhausted }) {
@@ -492,6 +521,51 @@ func (a *App) selectionRefused(ctx context.Context, s Spawn, req selReq, p *selP
 		return p, fail(exitSeatRefused, "%s: %s: every eligible candidate is in a pool at its concurrency cap%s", reasonRoleNoCandidate, outcomeNoRoleCandidate, note)
 	}
 	return p, fail(exitSeatRefused, "%s: %s: no profile passes role, retirement, grade, gate and seat rules", reasonRoleNoCandidate, outcomeNoRoleCandidate)
+}
+
+// gateBlockNote names the gate refusals that decided candidates without a
+// quota reading — the request, the catalog or policy — so a
+// POLICY_UNAVAILABLE refusal says which gate code refused, not only the
+// outcome.
+func gateBlockNote(cands []*selCand) string {
+	var codes []string
+	for _, c := range cands {
+		code, ok := strings.CutPrefix(c.reason, "gate_blocked:")
+		if !ok || code == "" || slices.Contains(codes, code) {
+			continue
+		}
+		codes = append(codes, code)
+	}
+	if len(codes) == 0 {
+		return ""
+	}
+	sort.Strings(codes)
+	if len(codes) > 3 {
+		codes = append(codes[:3], "…")
+	}
+	return "; gate refused: " + strings.Join(codes, ", ")
+}
+
+// wouldMeasureNote names the measurements a dry run skipped, so its refusal
+// says the plan stopped at a measurement it must not run, not at an unknown
+// quota.
+func wouldMeasureNote(cands []*selCand) string {
+	var seen []string
+	for _, c := range cands {
+		for _, j := range c.judgments {
+			if j.Measured != measureWould {
+				continue
+			}
+			name := fmt.Sprintf("host=%s pool=%s", j.Host, c.row.Pool)
+			if !slices.Contains(seen, name) {
+				seen = append(seen, name)
+			}
+		}
+	}
+	if len(seen) == 0 {
+		return ""
+	}
+	return "; a spawn would measure " + strings.Join(seen, ", ") + " first, and a dry run measures nothing"
 }
 
 func routingRole(req selReq) string {

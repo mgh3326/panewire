@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/mgh3326/handoffkeep/client"
+	"github.com/mgh3326/panewire/internal/configkeys"
 )
 
 //go:embed pool-order.json
@@ -38,15 +39,22 @@ var defaultPoolOrder []byte
 // horizon_hours (default 0 = no limit) additionally requires the reset to
 // fall within that many hours. Such a pool ranks ahead of the free seats by
 // waste urgency, and its sub-daily windows refuse only when exhausted.
+//
+// "seats" names, per pool and task grade, the catalog row ("profile@effort",
+// or "profile" for a rung-less row) that offers the pool's seat in the ranked
+// band. Without an entry (or when the named row is not a candidate) the
+// pool's seat is its lowest-grade eligible row that fits. The ranked band
+// orders pools by their seat's waste urgency (selCandComparator).
 type PoolPolicy struct {
-	Version     int              `json:"version"`
-	SourceDoc   string           `json:"source_doc"`
-	Order       []string         `json:"order"`
-	Free        []FreeSet        `json:"free"`
-	CreditPools []string         `json:"credit_pools"`
-	WasteBelow  *float64         `json:"waste_below_projected_pct"`
-	ExcludeAt   *float64         `json:"exclude_at_projected_pct"`
-	WasteRisk   *WasteRiskPolicy `json:"waste_risk"`
+	Version     int                          `json:"version"`
+	SourceDoc   string                       `json:"source_doc"`
+	Order       []string                     `json:"order"`
+	Free        []FreeSet                    `json:"free"`
+	CreditPools []string                     `json:"credit_pools"`
+	WasteBelow  *float64                     `json:"waste_below_projected_pct"`
+	ExcludeAt   *float64                     `json:"exclude_at_projected_pct"`
+	WasteRisk   *WasteRiskPolicy             `json:"waste_risk"`
+	Seats       map[string]map[string]string `json:"seats"`
 	// Burn is the rate a job's expected hours are charged at, in percent of a
 	// window per job-hour (headroomFor, select_headroom.go); absent rates take
 	// their defaults.
@@ -93,9 +101,15 @@ func LoadPoolPolicy(path string) (PoolPolicy, error) {
 		}
 	}
 	var p PoolPolicy
-	if e := decode(b, &p); e != nil {
-		return p, e
+	source := path
+	if source == "" {
+		source = "built-in pool order"
 	}
+	ignored, decErr := decodeConfig(b, &p)
+	if decErr != nil {
+		return p, decErr
+	}
+	configkeys.Warn(nil, source, ignored)
 	// validate fills defaults in place; call it before p is copied out.
 	e := p.validate()
 	return p, e
@@ -141,6 +155,20 @@ func (p *PoolPolicy) validate() error {
 	}
 	if p.CreditFinalDays != nil && (!finite(*p.CreditFinalDays) || *p.CreditFinalDays < 0) {
 		return fail(exitConfig, "invalid credit_final_days")
+	}
+	for pool, bySeat := range p.Seats {
+		if !validID(pool) {
+			return fail(exitConfig, "invalid seats pool name %q", pool)
+		}
+		for g, seat := range bySeat {
+			if _, ok := gradeOrder[g]; !ok {
+				return fail(exitConfig, "seats for pool %q name unknown grade %q", pool, g)
+			}
+			profile, effort, hasEffort := strings.Cut(seat, "@")
+			if !validID(profile) || hasEffort && (effort == "" || rankEffort(effort) == len(effortRank)) {
+				return fail(exitConfig, "seats for pool %q grade %s: %q is not profile or profile@effort with a known effort", pool, g, seat)
+			}
+		}
 	}
 	if p.WasteRisk == nil {
 		p.WasteRisk = &WasteRiskPolicy{}
@@ -188,6 +216,9 @@ type selCand struct {
 	urgency   *float64
 	resetHrs  *float64
 	reason    string
+	// policySeat marks the row the pool policy names as its ranked-band seat
+	// for the task's grade (PoolPolicy.isSeat).
+	policySeat bool
 	// cap names the [quota].pool_max_concurrent key that dropped the
 	// candidate: its catalog pool, or the reserved devin-free key for a
 	// SWE-2 free rung.
@@ -300,6 +331,9 @@ type selReq struct {
 	// e6Arm is the experiment marker a hub submission carried; empty reads
 	// the environment, as every local selection does.
 	e6Arm string
+	// e6ArmLocked marks a spawn whose marker is already authoritative (a hub
+	// submission or a node-delivered spawn): empty stays empty.
+	e6ArmLocked bool
 	// gradeSource is where a consult asker's grade came from (flag, task or
 	// without_task); usedFloor and fallback are set on a consult fallback retry
 	// (consult_floor.go).
@@ -417,7 +451,7 @@ func (a *App) seatFor(row CatalogRow, req selReq) (string, *Seat, string) {
 				reason = "builder_family_unreadable"
 			case (req.role == "tester" || req.role == "reviewer") && seat.Family == req.builderFamily:
 				reason = "family_excluded"
-			case seat.seatE6(row.Effort) && a.e6Arm(req.e6Arm) != seat.Canon+"@"+row.Effort:
+			case seat.seatE6(row.Effort) && a.e6Arm(req.e6Arm, req.e6ArmLocked) != seat.Canon+"@"+row.Effort:
 				reason = "e6_marker"
 			}
 		}
@@ -438,6 +472,19 @@ func (p PoolPolicy) isFree(row CatalogRow) bool {
 		}
 	}
 	return false
+}
+
+// isSeat reports that the policy names row as its pool's ranked-band seat for
+// a task of the given grade.
+func (p PoolPolicy) isSeat(row CatalogRow, grade string) bool {
+	want := p.Seats[row.Pool][grade]
+	if want == "" {
+		return false
+	}
+	if row.Effort != "" {
+		return want == row.Profile+"@"+row.Effort
+	}
+	return want == row.Profile
 }
 
 func (p PoolPolicy) isCredit(pool string) bool {
@@ -581,6 +628,12 @@ type selHost struct {
 	score      *float64
 	// decided marks the host the hub's placement named (HostView.Decided).
 	decided bool
+	// below and floorValue are the free-floor ranking key (host_fit.go,
+	// floorOrder): below is the hub's verdict that the host's free fraction is
+	// under the floor, floorValue the host's score (free times power less the
+	// jobs decided onto it), or free times power when it has no score.
+	below      bool
+	floorValue float64
 	// over marks a host at or above its load threshold (local
 	// max_load_ratio, else placement.load_threshold); it ranks last among
 	// awake hosts. fit names why the host cannot take this work at all
@@ -661,6 +714,7 @@ func (a *App) newSelPresence(ctx context.Context, s Spawn, req selReq) *selPrese
 			if hv, reported := sp.hub[name]; reported {
 				h.score, h.decided = hv.Score, hv.Decided
 				h.view = &hv
+				h.below, h.floorValue = floorKey(hv.Signals, hv.Score)
 			}
 			if !boolean(cfg, "spawn", true) {
 				h.excluded = true
@@ -671,6 +725,7 @@ func (a *App) newSelPresence(ctx context.Context, s Spawn, req selReq) *selPrese
 				h.awake = hv.Connected
 				h.load, h.score, h.decided = hv.LoadRatio, hv.Score, hv.Decided
 				h.view = &hv
+				h.below, h.floorValue = floorKey(hv.Signals, hv.Score)
 				if strings.Contains(hv.Reason, "not_accepting") {
 					h.excluded = true
 					h.memExcluded = onlyMemoryNotAccepting(hv.Reason)
@@ -756,7 +811,7 @@ func (a *App) selectProfile(ctx context.Context, s Spawn) (*selPlan, error) {
 	if a.Quota == nil {
 		return nil, fail(exitConfig, "POLICY_UNAVAILABLE: selection needs the quota catalog")
 	}
-	req := selReq{t: s.T, role: s.Role, lane: s.Parent, effort: s.Effort, allowEscalation: s.AllowEscalation, builderFamily: s.ParentFamily, excludeFamilies: s.ExcludeFamilies, excludeHarnesses: s.failedHarnesses, onlyFamily: s.OnlyFamily, e6Arm: s.E6Arm}
+	req := selReq{t: s.T, role: s.Role, lane: s.Parent, effort: s.Effort, allowEscalation: s.AllowEscalation, builderFamily: s.ParentFamily, excludeFamilies: s.ExcludeFamilies, excludeHarnesses: s.failedHarnesses, onlyFamily: s.OnlyFamily, e6Arm: s.E6Arm, e6ArmLocked: s.e6ArmLocked}
 	tags, e := parseTags(s.Tags)
 	if e != nil {
 		return nil, e
@@ -809,7 +864,27 @@ func (a *App) selectFor(ctx context.Context, s Spawn, req selReq) (*selPlan, err
 	if snapshot == nil {
 		p.degraded = append(p.degraded, "pool_cooling_"+coolingState)
 	}
-	rows, e := a.Quota.Catalog(ctx)
+	var rows []CatalogRow
+	if detailed, ok := a.Quota.(interface {
+		CatalogDetails(context.Context) (CatalogData, error)
+	}); ok {
+		data, err := detailed.CatalogDetails(ctx)
+		e = err
+		if err == nil {
+			rows = catalogDataRows(data)
+			for _, warning := range data.Warnings {
+				if !strings.HasPrefix(warning, "catalog_row_invalid:") {
+					continue
+				}
+				p.degraded = append(p.degraded, warning)
+				if data.Info.Source == catalogSourceServer {
+					a.warn("%s", warning)
+				}
+			}
+		}
+	} else {
+		rows, e = a.Quota.Catalog(ctx)
+	}
 	if e != nil {
 		return nil, fail(exitConfig, "POLICY_UNAVAILABLE: bench catalog unreadable: %v", e)
 	}
@@ -841,7 +916,7 @@ func (a *App) selectFor(ctx context.Context, s Spawn, req selReq) (*selPlan, err
 	}
 	staticPassing, fallbackRungs := 0, 0
 	for _, row := range rows {
-		c := &selCand{row: row, tier: -1, ignoreGrade: req.route.top()}
+		c := &selCand{row: row, tier: -1, ignoreGrade: req.route.top(), policySeat: policy.isSeat(row, req.grade)}
 		cooling := snapshot != nil && snapshot.poolCooling(row.Pool, p.at)
 		reason, seatName, seat := a.staticDrop(row, req, floor, rungs, cooling)
 		probeReason := reason
@@ -1059,9 +1134,15 @@ func sortSelCands(pending []*selCand) {
 	slices.SortStableFunc(pending, selCandComparator(pending))
 }
 
+// selCandComparator orders candidates. Waste-risk, free, credit and ranked
+// candidates are grouped by pool: the pool's seat supplies its cross-pool key
+// and the pool's other rows follow it. Free and credit seats are their pool's
+// lowest fitting row. A ranked seat is the pool policy's named row for the
+// task's grade when it is a candidate, else the lowest fitting row, and ranked
+// pools are ordered by their seat's room (roomOrder) before grade.
 func selCandComparator(pending []*selCand) func(*selCand, *selCand) int {
-	// A pool's lowest fitting row supplies its cross-pool key. Grouping all
-	// its rows behind that key makes the comparison transitive.
+	// A pool's seat supplies its cross-pool key. Grouping all its rows behind
+	// that key makes the comparison transitive.
 	type poolKey struct {
 		pool, name         string
 		tier               int
@@ -1071,15 +1152,26 @@ func selCandComparator(pending []*selCand) func(*selCand, *selCand) int {
 	key := func(c *selCand) poolKey {
 		return poolKey{c.row.Pool, c.tierName, c.tier, c.risk, c.behindCredit, c.fits()}
 	}
+	rankedKey := func(k poolKey) bool { return k.name == "ranked" && !k.risk }
 	grouped := func(c *selCand) bool {
-		return !c.ignoreGrade && (c.risk || c.tierName == "free" || c.tierName == creditTier)
+		return !c.ignoreGrade && (c.risk || c.tierName == "free" || c.tierName == creditTier || c.tierName == "ranked")
+	}
+	// inGroup orders one pool group's rows: a ranked pool's policy seat first.
+	inGroup := func(x, y *selCand) int {
+		if rankedKey(key(x)) && x.policySeat != y.policySeat {
+			if x.policySeat {
+				return -1
+			}
+			return 1
+		}
+		return compareSelCands(x, y, true)
 	}
 	for _, c := range pending {
 		if !grouped(c) {
 			continue
 		}
 		k := key(c)
-		if seat := seats[k]; seat == nil || compareSelCands(c, seat, true) < 0 {
+		if seat := seats[k]; seat == nil || inGroup(c, seat) < 0 {
 			seats[k] = c
 		}
 	}
@@ -1087,9 +1179,12 @@ func selCandComparator(pending []*selCand) func(*selCand, *selCand) int {
 		if grouped(x) && grouped(y) {
 			kx, ky := key(x), key(y)
 			if kx == ky {
-				return compareSelCands(x, y, true)
+				return inGroup(x, y)
 			}
-			if c := compareSelCands(seats[kx], seats[ky], false); c != 0 {
+			// Ranked pools compare by room, then by today's grade-first order;
+			// the other groups never compare grade across pools.
+			room := rankedKey(kx) && rankedKey(ky)
+			if c := compareCands(seats[kx], seats[ky], room, room); c != 0 {
 				return c
 			}
 			return cmp.Compare(kx.pool, ky.pool)
@@ -1099,6 +1194,44 @@ func selCandComparator(pending []*selCand) func(*selCand, *selCand) int {
 }
 
 func compareSelCands(x, y *selCand, compareGrade bool) int {
+	return compareCands(x, y, compareGrade, false)
+}
+
+// roomOrder is a non-risk candidate's projected room, the measure the waste,
+// free and credit bands use: one group key, then that group's own key: a
+// dollar credit first by dollars at risk, then a candidate whose reset can be
+// paced by urgency, then an unpaceable one. Comparing the group before its
+// key keeps credit candidates in one strict weak ordering; mixing the USD
+// pairwise rule with the nil-urgency rule produced a cycle (A before B, B
+// before C, C before A).
+func roomOrder(x, y *selCand) int {
+	if xg, yg := candGroup(x), candGroup(y); xg != yg {
+		return xg - yg
+	}
+	if x.usdUrgency != nil && y.usdUrgency != nil {
+		if c := cmp.Compare(*y.usdUrgency, *x.usdUrgency); c != 0 {
+			return c
+		}
+	}
+	// A paceable reset ranks ahead of an unpaceable one at this position, as it
+	// did before the group key. Without the presence rule a USD-credit tie with
+	// one urgency set fell through to the profile key, which closed a cycle
+	// with the urgency key.
+	if (x.urgency != nil) != (y.urgency != nil) {
+		if x.urgency != nil {
+			return -1
+		}
+		return 1
+	}
+	if x.urgency != nil {
+		return cmp.Compare(*y.urgency, *x.urgency)
+	}
+	return 0
+}
+
+// compareCands is compareSelCands with roomFirst: a non-risk pair is ordered
+// by roomOrder before grade fit instead of after it.
+func compareCands(x, y *selCand, compareGrade, roomFirst bool) int {
 	// Waste-risk pools rank ahead of every tier, free included. Stale
 	// dollar-bearing credit ranks behind subscriptions because it no longer
 	// has a usable balance. Inside a tier, candidates whose shortest window
@@ -1148,38 +1281,18 @@ func compareSelCands(x, y *selCand, compareGrade bool) int {
 			return c
 		}
 	}
+	if roomFirst && !x.risk {
+		if c := roomOrder(x, y); c != 0 {
+			return c
+		}
+	}
 	// Grade fit: the lowest grade that satisfies the task.
 	if gx, gy := gradeOrder[x.row.Grade], gradeOrder[y.row.Grade]; compareGrade && !x.ignoreGrade && gx != gy {
 		return gx - gy
 	}
 	if !x.risk {
-		// One group key, then that group's own key: a dollar credit first
-		// by dollars at risk, then a candidate whose reset can be paced by
-		// urgency, then an unpaceable one. Comparing the group before its
-		// key keeps credit candidates in one strict weak ordering; mixing the USD pairwise rule with the nil-urgency rule
-		// produced a cycle (A before B, B before C, C before A).
-		if xg, yg := candGroup(x), candGroup(y); xg != yg {
-			return xg - yg
-		}
-		if x.usdUrgency != nil && y.usdUrgency != nil {
-			if c := cmp.Compare(*y.usdUrgency, *x.usdUrgency); c != 0 {
-				return c
-			}
-		}
-		// A paceable reset ranks ahead of an unpaceable one at this
-		// position, as it did before the group key. Without the presence
-		// rule a USD-credit tie with one urgency set fell through to the
-		// profile key, which closed a cycle with the urgency key.
-		if (x.urgency != nil) != (y.urgency != nil) {
-			if x.urgency != nil {
-				return -1
-			}
-			return 1
-		}
-		if x.urgency != nil {
-			if c := cmp.Compare(*y.urgency, *x.urgency); c != 0 {
-				return c
-			}
+		if c := roomOrder(x, y); c != 0 {
+			return c
 		}
 	}
 	if c := cmp.Compare(rankBlocking(firstPct(x.longProj, x.blocking)), rankBlocking(firstPct(y.longProj, y.blocking))); c != 0 {
@@ -1251,6 +1364,14 @@ func gatePool(gate string) string {
 // chosen seat.
 func (p *selPlan) record() map[string]any {
 	cands := []any{}
+	// A ranked pool's seat is its first candidate in rank order; the pool is
+	// ordered by that seat's waste urgency.
+	seats := map[string]*selCand{}
+	for _, c := range p.ranked {
+		if _, ok := seats[c.row.Pool]; !ok && c.tierName == "ranked" && !c.risk && !c.ignoreGrade {
+			seats[c.row.Pool] = c
+		}
+	}
 	for _, c := range p.cands {
 		row := map[string]any{"profile": c.row.Profile, "effort": c.row.Effort, "grade": c.row.Grade, "pool": c.row.Pool, "gate": c.row.Gate, "model_id": c.row.ModelID, "outcome": c.outcome}
 		row["account_key"], row["host"], row["outcome_code"] = c.accountKey, c.host, c.code
@@ -1312,6 +1433,17 @@ func (p *selPlan) record() map[string]any {
 				row["reset_hours"] = *c.resetHrs
 			}
 		}
+		if seat := seats[c.row.Pool]; seat != nil && c.tierName == "ranked" && !c.risk && !c.ignoreGrade {
+			if seat.urgency != nil {
+				row["pool_waste_urgency"] = *seat.urgency
+			}
+			if seat == c {
+				row["seat_source"] = "lowest_fit"
+				if c.policySeat {
+					row["seat_source"] = "policy"
+				}
+			}
+		}
 		if h := c.headroom; h != nil {
 			row["headroom"] = map[string]any{"fits": h.fits, "remaining_pct": h.remainingPct, "burn_pct_per_h": h.burnPctPerH, "expected_hours": h.expectedHours, "reset_hours": h.resetHours}
 		}
@@ -1329,7 +1461,7 @@ func (p *selPlan) record() map[string]any {
 		"outcome_code":   p.outcome,
 		"mode":           "auto",
 		"decision":       fmt.Sprintf("urgency=%s source=%s tiers=%s", p.req.urgency, p.req.urgencySource, strings.Join(p.order, ">")),
-		"rule":           fmt.Sprintf("hosts first; within each host, waste-risk subscription pools rank by waste urgency (unused share per hour until reset), then band (waste, free, credit, then ranked); within risk, free and credit bands pools compete by their lowest fitting seat, with higher rows after that seat; ranked uses lowest grade >= %s across pools; credit expiry (dollars at risk per hour, else remaining percent per hour), waste urgency and smaller effort; waste < %g%%, excluded >= %g%% projected", p.req.grade, *p.policy.WasteBelow, *p.policy.ExcludeAt),
+		"rule":           fmt.Sprintf("hosts first; within each host, waste-risk subscription pools rank by waste urgency (unused share per hour until reset), then band (waste, free, credit, then ranked); within risk, free and credit bands pools compete by their lowest fitting seat, with higher rows after that seat; ranked pools compete by their seat (the pool policy's named row for the grade, else the lowest grade >= %s that fits), the pool with the most room (waste urgency) first and ties by lowest grade; credit expiry (dollars at risk per hour, else remaining percent per hour), waste urgency and smaller effort; waste < %g%%, excluded >= %g%% projected", p.req.grade, *p.policy.WasteBelow, *p.policy.ExcludeAt),
 		"waste_risk":     map[string]any{"horizon_hours": *p.policy.WasteRisk.HorizonHours, "min_unused_pct": *p.policy.WasteRisk.MinUnusedPct},
 		"policy_version": p.policy.Version,
 		"policy_source":  p.policy.SourceDoc,

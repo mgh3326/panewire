@@ -29,15 +29,18 @@ type Repository struct {
 }
 
 type Submission struct {
-	RequestID       string     `json:"request_id"`
-	Args            []string   `json:"args"`
-	Brief           string     `json:"brief"`
-	Repository      Repository `json:"repository"`
-	OriginMachine   string     `json:"origin_machine"`
-	DeadlineSeconds int        `json:"deadline_seconds"`
+	RequestID       string           `json:"request_id"`
+	Args            []string         `json:"args"`
+	Brief           string           `json:"brief"`
+	Repository      Repository       `json:"repository"`
+	OriginMachine   string           `json:"origin_machine"`
+	DeadlineSeconds int              `json:"deadline_seconds"`
+	StartConditions []StartCondition `json:"start_conditions,omitempty"`
 	// E6Arm is the exact <canon>@<effort> experiment marker the submitter saw
 	// in its environment. Hub admission and the node launch use it exactly as
-	// a local spawn reads the environment; empty means none.
+	// a local spawn reads the environment; empty means none, and an empty
+	// marker stays empty — the hub's and the node's process environments
+	// never fill it (hk 3518).
 	E6Arm string `json:"e6_arm,omitempty"`
 	// RetryHost is the hub-internal marker of a verified-cleanup retry: the
 	// hub sets it, in memory, on the one request it rewrites to `--host <the
@@ -57,6 +60,24 @@ type SpawnSubmitter interface {
 // operation by that id and answers a replay with the operation it already
 // holds, so the submit may be sent again (docs/hub-uninterrupted-calls.md).
 func (c *hubHTTP) Submit(ctx context.Context, request Submission) (Accepted, error) {
+	if len(request.StartConditions) != 0 {
+		status, raw, err := c.doIdempotent(ctx, http.MethodGet, "/v1/spawns/features", nil, 5*time.Second)
+		if err != nil {
+			return Accepted{}, fail(exitConfig, "unable to verify hub support for --after start conditions: %v", err)
+		}
+		if status != http.StatusOK {
+			return Accepted{}, fail(exitConfig, "unable to verify hub support for --after start conditions (HTTP %d)", status)
+		}
+		var features struct {
+			Features []string `json:"features"`
+		}
+		if json.Unmarshal(raw, &features) != nil {
+			return Accepted{}, fail(exitConfig, "hub returned an unreadable spawn feature response")
+		}
+		if !slices.Contains(features.Features, "start_conditions_v1") {
+			return Accepted{}, fail(exitUsage, "hub does not support --after start conditions; upgrade the hub before submitting")
+		}
+	}
 	status, raw, err := c.doIdempotent(ctx, http.MethodPost, "/v1/spawns", request, 15*time.Second)
 	if err != nil {
 		return Accepted{}, err
@@ -223,7 +244,7 @@ func (a *App) PrepareSubmission(ctx context.Context, s Spawn) (Submission, error
 			return Submission{}, fail(exitUsage, "explicit -m or --host requires --override-reason")
 		}
 	}
-	s.E6Arm = a.e6Arm("")
+	s.E6Arm = a.e6Arm("", false)
 	if s.E6Arm != "" && !ValidE6Arm(s.E6Arm, s.Profile) {
 		return Submission{}, fail(exitUsage, "PANEWIRE_E6_ARM must be <canon>@ or <canon>@<effort> with canon %s, got %q", s.Profile, s.E6Arm)
 	}
@@ -317,7 +338,11 @@ func (a *App) PrepareSubmission(ctx context.Context, s Spawn) (Submission, error
 	if originalHost == "local" {
 		submissionSpawn.Host = "local"
 	}
-	request := Submission{RequestID: id, Brief: string(brief), Repository: Repository{Name: repo.name, Origin: checkout.Origin, Relative: repo.rel, Worktree: repo.wt, LocalRoot: repo.localRoot, Checkout: checkout}, OriginMachine: a.machine(), DeadlineSeconds: 600, E6Arm: s.E6Arm, Args: submissionArgs(submissionSpawn)}
+	conditions, err := ParseStartConditions(s.After, s.Task)
+	if err != nil {
+		return Submission{}, fail(exitUsage, "%v", err)
+	}
+	request := Submission{RequestID: id, Brief: string(brief), Repository: Repository{Name: repo.name, Origin: checkout.Origin, Relative: repo.rel, Worktree: repo.wt, LocalRoot: repo.localRoot, Checkout: checkout}, OriginMachine: a.machine(), DeadlineSeconds: 600, E6Arm: s.E6Arm, Args: submissionArgs(submissionSpawn), StartConditions: conditions}
 	if _, err = ValidateSubmission(request); err != nil {
 		return Submission{}, err
 	}
@@ -329,10 +354,17 @@ func ValidateSubmission(request Submission) (Spawn, error) {
 	if err != nil {
 		return s, err
 	}
+	if !ValidateStartConditions(request.StartConditions, s.Task) {
+		return s, fail(exitUsage, "invalid start conditions; rebuild the request with panewire spawn")
+	}
 	if request.E6Arm != "" && !ValidE6Arm(request.E6Arm, s.Profile) {
 		return s, fail(exitUsage, "e6_arm %q must be <canon>@ or <canon>@<effort> with canon %q", request.E6Arm, s.Profile)
 	}
 	s.E6Arm = request.E6Arm
+	// The request's marker is authoritative from here on: an empty e6_arm
+	// stays empty through admission and the node argv; the hub process
+	// environment never fills it (hk 3518, panewire#307 follow-up).
+	s.e6ArmLocked = true
 	s.hubRetryHost = request.RetryHost
 	if err := validateContainment(s); err != nil {
 		return s, err

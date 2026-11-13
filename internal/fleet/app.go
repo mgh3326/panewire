@@ -32,7 +32,15 @@ type App struct {
 	Out, Err     io.Writer
 	// hubRetries tallies the idempotent hub calls this command sent again; it
 	// is printed once when the command ends (reportHubRetries).
-	hubRetries   hubretry.Stats
+	hubRetries hubretry.Stats
+
+	// planOnly marks a dry run that measures nothing: a quota refresh writes
+	// presence, lease and observation to the shared quota store. planFromHub
+	// marks a receipt the hub planned; dryRunLine labels its receipt with it.
+	// lastPlan is the placement the dry run chose.
+	planOnly, planFromHub bool
+	lastPlan              *SpawnPlan
+
 	Jobs, Home   string
 	Sleep        func(context.Context, time.Duration) error
 	Now          func() time.Time
@@ -59,10 +67,12 @@ type App struct {
 	// BenchCatalog reads the bench catalog for the admission gate; nil reads
 	// handoffkeep through catalog.go.
 	BenchCatalog func(context.Context) ([]CatalogRow, error)
-	Source       PlacementSource
-	Wake         Waker
-	LoadRatio    func(context.Context) (float64, error)
-	JobStore     JobStore
+	// modelFamilies substitutes the HK policy reader in tests.
+	modelFamilies func(context.Context) (ModelFamiliesPolicy, error)
+	Source        PlacementSource
+	Wake          Waker
+	LoadRatio     func(context.Context) (float64, error)
+	JobStore      JobStore
 	// TaskState reads one hk task; nil builds it from [quota] / the
 	// handoffkeep env on first use (TaskStatus).
 	TaskState TaskStateReader
@@ -146,6 +156,7 @@ func New(out, errout io.Writer) (*App, error) {
 		return nil, e
 	}
 	warnRetiredQuotaKeys(c, errout)
+	warnIgnoredHostsTables(c, path, errout)
 	p, e := LoadPolicy(os.Getenv("PANEWIRE_POLICY"))
 	if e != nil {
 		return nil, e
@@ -294,7 +305,7 @@ func (a *App) Run(ctx context.Context, args []string) error {
 			return e
 		}
 		if s.DryRun {
-			return a.Spawn(ctx, s)
+			return a.previewSpawn(ctx, s)
 		}
 		return a.SubmitSpawn(ctx, s)
 	case "spawn":
@@ -303,7 +314,7 @@ func (a *App) Run(ctx context.Context, args []string) error {
 			return e
 		}
 		if s.DryRun {
-			return a.Spawn(ctx, s)
+			return a.previewSpawn(ctx, s)
 		}
 		return a.SubmitSpawn(ctx, s)
 	case "done", "escalate", "restore":

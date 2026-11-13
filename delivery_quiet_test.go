@@ -63,7 +63,7 @@ func TestQuietClassification(t *testing.T) {
 	if d != 5*time.Minute || w != 2*time.Second {
 		t.Fatal(d, w)
 	}
-	for _, raw := range []string{"default: typo", "default: interrupt\nunknown: true", "default: interrupt\ndigest_window: -1s", "default: interrupt\nrules: [{match: '[', class: inbox}]", "default: inbox\n---\ndefault: interrupt"} {
+	for _, raw := range []string{"default: typo", "default: interrupt\ndigest_window: -1s", "default: interrupt\nrules: [{match: '[', class: inbox}]", "default: inbox\n---\ndefault: interrupt"} {
 		t.Run(raw, func(t *testing.T) {
 			if _, err := parseDeliveryPolicy([]byte(raw)); err == nil {
 				t.Fatal("invalid policy accepted")

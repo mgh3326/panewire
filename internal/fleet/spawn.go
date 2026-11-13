@@ -33,7 +33,8 @@ type Spawn struct {
 	// ReviewPass is the explicit review pass ("1".."9") of a reviewer spawn. It
 	// only widens the hub reservation key (RoleKey); panewire never parses it out
 	// of a label.
-	ReviewPass                                         string `json:"review_pass,omitempty"`
+	ReviewPass                                         string   `json:"review_pass,omitempty"`
+	After                                              []string `json:"-"`
 	Keep, DupOK, Bypass, DryRun, Wait, AllowEscalation bool
 	Inherited, ParentFamily                            string
 	// Tags lists the capability tags a host must carry and ExcludeHosts the
@@ -74,6 +75,11 @@ type Spawn struct {
 	// hub submission carried, else this process's environment. It travels to
 	// the node as --e6-arm and is recorded on the job.
 	E6Arm string `json:"-"`
+	// e6ArmLocked marks a spawn whose marker is already authoritative — a hub
+	// submission (ValidateSubmission) or a node-delivered spawn
+	// (bindNodeSpawn). Its process environment never fills an empty E6Arm;
+	// only a local panewire spawn resolves PANEWIRE_E6_ARM/SCOPEFUEL_E6_ARM.
+	e6ArmLocked bool
 	// ExcludeFamilies and OnlyFamily narrow automatic selection to seats of
 	// other families, or of one family (`panewire delegate --panel`).
 	ExcludeFamilies []string `json:"-"`
@@ -154,6 +160,7 @@ func SpawnRoleKey(task, role, pass string) string {
 func parseSpawn(args []string) (Spawn, error) {
 	s := Spawn{Role: "worker", Host: "auto"}
 	f := flags("spawn")
+	f.Var((*repeatedStringFlag)(&s.After), "after", "start condition (repeatable)")
 	for _, p := range []struct {
 		k string
 		v *string
@@ -182,6 +189,9 @@ func parseSpawn(args []string) (Spawn, error) {
 	if flagPassed(f, "review-pass") && (s.Role != "reviewer" || !reviewPassPattern.MatchString(s.ReviewPass)) {
 		return s, fail(exitUsage, "--review-pass N (1..9) is accepted only with --role reviewer")
 	}
+	if _, err := ParseStartConditions(s.After, s.Task); err != nil {
+		return s, fail(exitUsage, "%v", err)
+	}
 	if s.Job == "" {
 		s.Job = s.Label
 	}
@@ -202,10 +212,15 @@ func parseSpawn(args []string) (Spawn, error) {
 	return s, nil
 }
 
-// e6Arm resolves the experiment marker for a spawn. A value a hub submission
-// carried wins; a spawn without one reads the environment exactly as a local
-// spawn always has. It never invents a marker.
-func (a *App) e6Arm(carried string) string {
+// e6Arm resolves the experiment marker for a spawn. A value the spawn
+// carries wins; a locked spawn (a hub submission or a node-delivered spawn,
+// whose marker is already authoritative) keeps an empty marker empty; every
+// other spawn reads the environment exactly as a local spawn always has. It
+// never invents a marker.
+func (a *App) e6Arm(carried string, locked bool) string {
+	if locked {
+		return carried
+	}
 	return firstNonempty(carried, a.envOr("PANEWIRE_E6_ARM", "SCOPEFUEL_E6_ARM"))
 }
 
@@ -243,6 +258,22 @@ func (s Spawn) unlinkedReviewer() bool {
 	return s.Role == "reviewer" && s.ParentFamily != "" && s.Inherited == "" && s.ParentJob == ""
 }
 
+// resolvedRoutingRole is the routing role the spawn's resolved fields name:
+// an explicit --routing-role, else the seat role's builtin routing role. It
+// reads the fields that cross the hub and ssh envelopes.
+func (s Spawn) resolvedRoutingRole() string {
+	return firstNonempty(s.RoutingRole, builtinRoleMap[s.Role])
+}
+
+// consultTask reports whether the spawn's seat is a consult seat. Only the seat
+// role decides: a worker seat given --routing-role consult still takes the
+// worker's exclusive claim, because the override is not tied to the seat
+// (hk 3709 review). A consult works beside the task's claimant and never takes
+// the task's exclusive claim.
+func (s Spawn) consultTask() bool {
+	return builtinRoleMap[s.Role] == "consult"
+}
+
 // taskPrecheck reads the task over hk HTTP (hkGetTask) and refuses a spawn
 // the task cannot take. --bypass covers an hk the precheck cannot reach or
 // that errs, never an answer it cannot read (errHKUnreadable).
@@ -271,13 +302,17 @@ func (a *App) taskPrecheck(ctx context.Context, s Spawn) (client.Task, bool, err
 
 // taskTakesSpawn refuses a spawn the task cannot take: it is in a state that
 // ends or parks the work, or is bound to another job or claimant. An
-// inherited spawn and an unlinked reviewer take any task.
+// inherited spawn and an unlinked reviewer take any task; a consult takes a
+// live task without its exclusive claim.
 func taskTakesSpawn(t client.Task, s Spawn) error {
 	if s.Inherited != "" || s.unlinkedReviewer() {
 		return nil
 	}
 	if slices.Contains([]string{"merged", "dropped", "hold", "needs_decision"}, t.State) {
 		return fail(exitUsage, "task unavailable: %s", t.State)
+	}
+	if s.consultTask() {
+		return nil
 	}
 	if j := t.Refs.JobID; j != "" && j != s.Job {
 		return fail(exitUsage, "task bound to another job")
@@ -317,8 +352,7 @@ func (s Spawn) replacesParent() bool {
 	if s.Inherited == "" || s.Inherited == s.Job {
 		return false
 	}
-	role := firstNonempty(s.RoutingRole, builtinRoleMap[s.Role])
-	return role == "implementer"
+	return s.resolvedRoutingRole() == "implementer"
 }
 
 // rebindInherited moves the task to this job when its parent is terminal and
@@ -408,7 +442,7 @@ func (a *App) taskLink(ctx context.Context, s Spawn, task client.Task, bypassed 
 	var claimFailure *taskClaimFailure
 	if s.replacesParent() {
 		status = a.rebindInherited(ctx, s, task, ev)
-	} else if s.unlinkedReviewer() {
+	} else if s.unlinkedReviewer() || (s.Inherited == "" && s.consultTask()) {
 		// No claim: the task stays bound to whatever it was bound to.
 		status = "unlinked"
 	} else if s.Inherited == "" {
@@ -487,7 +521,7 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 		return fail(exitUsage, "--task and --parent-job are exclusive")
 	}
 	if s.E6Arm == "" {
-		s.E6Arm = a.e6Arm("")
+		s.E6Arm = a.e6Arm("", s.e6ArmLocked)
 	}
 	if err := validateContainment(s); err != nil {
 		return err
@@ -730,7 +764,7 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 		if e != nil {
 			return e
 		}
-		fmt.Fprintf(a.Out, "dry-run host=%s profile=%s role=%s job=%s\n%s\n", a.machine(), s.Profile, s.Role, s.Job, payload)
+		a.dryRunLine(a.machine(), s, payload)
 		return nil
 	}
 	launch, gate, e := a.admitLaunch(ctx, s, seat, effort, selEffort, grade, builderFamily, autoSel)
@@ -1089,9 +1123,20 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 	return a.afterSpawn(ctx, s, false)
 }
 
+// gateRequestedBy is the requested-by a spawn's gate requests may carry: the
+// operator request's requester, only beside the operator request itself. A
+// bare --requested-by names the lane a failed spawn notifies and never
+// reaches the gate (hk 3080).
+func gateRequestedBy(s Spawn) string {
+	if s.OperatorRequest == "" {
+		return ""
+	}
+	return s.RequestedBy
+}
+
 // spawnQuotaRequest is the catalog and gate request for a spawn's seat and rung.
 func (a *App) spawnQuotaRequest(s Spawn, seat Seat, effort string) QuotaRequest {
-	return QuotaRequest{Profile: seat.Canon, GateProfile: seat.gateName(), Effort: effort, Role: s.Role, OperatorRequest: s.OperatorRequest, RequestedBy: s.RequestedBy, Purpose: s.Purpose, AccountKey: s.AccountKey, E6Arm: a.e6Arm(s.E6Arm)}
+	return QuotaRequest{Profile: seat.Canon, GateProfile: seat.gateName(), Effort: effort, Role: s.Role, OperatorRequest: s.OperatorRequest, RequestedBy: gateRequestedBy(s), Purpose: s.Purpose, AccountKey: s.AccountKey, E6Arm: a.e6Arm(s.E6Arm, s.e6ArmLocked), E6ArmLocked: s.e6ArmLocked}
 }
 
 // checkLaunchRow is the launch-row half of admitLaunch: the catalog row the
@@ -1123,7 +1168,7 @@ func (a *App) checkLaunchRow(ctx context.Context, s Spawn, seat Seat, qr QuotaRe
 			return Launch{}, fail(exitSeatRefused, "NO_ROLE_CANDIDATE: model %s in harness %s cannot consult", launch.ModelID, seat.Kind)
 		}
 	}
-	if e = seat.Check(launch, s.Role, grade, builderFamily, a.e6Arm(s.E6Arm), host); e != nil {
+	if e = seat.Check(launch, s.Role, grade, builderFamily, a.e6Arm(s.E6Arm, s.e6ArmLocked), host); e != nil {
 		return Launch{}, e
 	}
 	return launch, nil
