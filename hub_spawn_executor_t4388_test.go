@@ -386,7 +386,7 @@ func TestPendingScanReachesEveryRow_t4388(t *testing.T) {
 	for i := range 300 {
 		f.claim(t, i, 0)
 	}
-	pending, err := f.hub.inbox.store.pendingSpawns(t.Context())
+	pending, err := f.hub.inbox.store.pendingSpawns(t.Context(), time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}

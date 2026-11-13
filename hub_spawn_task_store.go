@@ -42,9 +42,11 @@ type hubSpawnTask struct {
 	Request            fleet.Submission
 	Job, Owner, Status string
 	Created, Deadline  time.Time
-	Attempt            int
-	Node               *hubSpawnRequest
-	Outcome            hubSpawnOutcome
+	// LastRun is when a coordinator worker last took the request (zero: never).
+	LastRun time.Time
+	Attempt int
+	Node    *hubSpawnRequest
+	Outcome hubSpawnOutcome
 	// Excluded lists the host+account pairs that refused this request; placement
 	// skips them (hk 4388). Rank orders the queue: spawnPriorityRank.
 	Excluded []spawnExclusion
@@ -260,8 +262,8 @@ func (s *laneInboxStore) completeSpawn(parent context.Context, task hubSpawnTask
 func scanSpawnTask(row interface{ Scan(...any) error }) (hubSpawnTask, error) {
 	var task hubSpawnTask
 	var payload, result, node, excluded string
-	var created, deadline int64
-	err := row.Scan(&task.Job, &task.Owner, &payload, &task.Status, &created, &deadline, &node, &result, &task.Attempt, &excluded, &task.Rank)
+	var created, deadline, lastRun int64
+	err := row.Scan(&task.Job, &task.Owner, &payload, &task.Status, &created, &deadline, &node, &result, &task.Attempt, &lastRun, &excluded, &task.Rank)
 	if err != nil {
 		return task, err
 	}
@@ -272,6 +274,9 @@ func scanSpawnTask(row interface{ Scan(...any) error }) (hubSpawnTask, error) {
 	}
 	task.Created = time.UnixMilli(created)
 	task.Deadline = time.UnixMilli(deadline)
+	if lastRun > 0 {
+		task.LastRun = time.UnixMilli(lastRun)
+	}
 	if err = json.Unmarshal([]byte(payload), &task.Request); err != nil {
 		return task, err
 	}
@@ -333,7 +338,7 @@ func (s *laneInboxStore) unbindRefusedSpawn(parent context.Context, id string, a
 	return s.spawnTask(parent, id)
 }
 
-const spawnTaskColumns = `job,owner,payload,status,created_ms,deadline_ms,node_payload,result,attempt,excluded,priority_rank`
+const spawnTaskColumns = `job,owner,payload,status,created_ms,deadline_ms,node_payload,result,attempt,last_run_ms,excluded,priority_rank`
 
 func (s *laneInboxStore) spawnTask(parent context.Context, id string) (hubSpawnTask, error) {
 	ctx, done := s.op(parent)
@@ -372,13 +377,35 @@ func (s *laneInboxStore) spawnTaskByNode(parent context.Context, id string) (hub
 	return scanSpawnTask(s.db.QueryRowContext(ctx, s.q(`SELECT `+spawnTaskColumns+` FROM spawn_operations WHERE node_id=?`), id))
 }
 
-// pendingSpawns lists every pending operation, task priority first, then
-// age. It has no row limit: rows a worker already owns must not hide later
-// ones (the coordinator skips owned rows in memory).
-func (s *laneInboxStore) pendingSpawns(parent context.Context) ([]hubSpawnTask, error) {
+// pendingSpawns lists what the coordinator should run now: every fresh
+// request (accepted, dispatching, reconciling), task priority first, then age,
+// and at most spawnStaleBatch deadline_exceeded rows whose back-off has run
+// out. The fresh query has no row limit: rows a worker already owns (skipped
+// in memory) must not hide later ones. The stale rows come from their own
+// query and follow the fresh rows into the work queue.
+func (s *laneInboxStore) pendingSpawns(parent context.Context, now time.Time) ([]hubSpawnTask, error) {
 	ctx, done := s.op(parent)
 	defer done()
-	rows, err := s.db.QueryContext(ctx, `SELECT `+spawnTaskColumns+` FROM spawn_operations WHERE status IN ('accepted','dispatching','reconciling','deadline_exceeded') ORDER BY priority_rank,created_ms,request_id`)
+	tasks, err := s.queryPendingSpawns(ctx, `status IN ('accepted','dispatching','reconciling') ORDER BY priority_rank,created_ms,request_id`)
+	if err != nil {
+		return nil, err
+	}
+	stale, err := s.queryPendingSpawns(ctx, `status='deadline_exceeded' ORDER BY last_run_ms,created_ms LIMIT 256`)
+	if err != nil {
+		return nil, err
+	}
+	due := 0
+	for _, task := range stale {
+		if due < spawnStaleBatch && spawnStaleProbeDue(task, now) {
+			tasks = append(tasks, task)
+			due++
+		}
+	}
+	return tasks, nil
+}
+
+func (s *laneInboxStore) queryPendingSpawns(ctx context.Context, where string) ([]hubSpawnTask, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT `+spawnTaskColumns+` FROM spawn_operations WHERE `+where)
 	if err != nil {
 		return nil, err
 	}
