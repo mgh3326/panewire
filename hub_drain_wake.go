@@ -26,6 +26,7 @@ type drainWakeLane struct {
 	drained  bool      // the last observation was at or below the threshold
 	pending  bool      // drained since the last line and still owed one
 	lastSent time.Time // when the last line went out; zero before the first
+	unsaved  bool      // the last save of pending or lastSent failed; retried on the next sweep
 }
 
 // sweepDrainWakes runs in the lane-stall sweep goroutine after the stall
@@ -66,11 +67,17 @@ func (h *HubServer) sweepDrainWakes(ctx context.Context, now time.Time) {
 		}
 		before := *state
 		h.drainWakeLaneStep(ctx, lane, state, routes, now)
-		if state.pending != before.pending || !state.lastSent.Equal(before.lastSent) {
-			if err := h.inbox.store.saveDrainWake(ctx, lane, state); err != nil {
-				h.logger.Warn("drain wake state not saved; a restart may lose the owed line", "lane", lane, "error", err)
-			}
+		if state.pending == before.pending && state.lastSent.Equal(before.lastSent) && !state.unsaved {
+			continue
 		}
+		// A failed save stays dirty so the next sweep writes it again, even
+		// when the drain state no longer changes.
+		if err := h.inbox.store.saveDrainWake(ctx, lane, state); err != nil {
+			state.unsaved = true
+			h.logger.Warn("drain wake state not saved; retrying on the next sweep", "lane", lane, "error", err)
+			continue
+		}
+		state.unsaved = false
 	}
 }
 

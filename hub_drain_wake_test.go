@@ -347,6 +347,57 @@ func TestDrainWakeOwedLineSurvivesRestart(t *testing.T) {
 	}
 }
 
+// A save that fails must be retried on a later sweep, not forgotten: the drain
+// sets pending while the store refuses the write, the store recovers, and a
+// restart then still owes the line (PR #524 review, hk 4567).
+func TestDrainWakeFailedSaveIsRetried(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "inbox.sqlite3")
+	tasks := []t4473Task{
+		{ID: 1, Project: "handoffkeep", State: "backlog"},
+		{ID: 2, Project: "handoffkeep", State: "unstarted"},
+	}
+	rig, clock := t4473RigAt(t, path, tasks, nil)
+	t4473SetInFlight(rig, t4473Lane, 1)
+	t4473Sweep(rig)
+	t4473SetInFlight(rig, t4473Lane, 0)
+	t4473Sweep(rig)
+	if got := t4473Lines(rig); len(got) != 1 {
+		t.Fatalf("first drain lines=%q, want one", got)
+	}
+	// Busy again, then the store refuses writes while the next drain marks its line owed.
+	t4473SetInFlight(rig, t4473Lane, 1)
+	t4473Sweep(rig)
+	db := rig.h.inbox.store.db
+	if _, err := db.Exec(`CREATE TRIGGER t4567_refuse BEFORE INSERT ON drain_wake_lanes BEGIN SELECT RAISE(ABORT, 'refused'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TRIGGER t4567_refuse_update BEFORE UPDATE ON drain_wake_lanes BEGIN SELECT RAISE(ABORT, 'refused'); END`); err != nil {
+		t.Fatal(err)
+	}
+	clock.advance(10 * time.Minute)
+	t4473SetInFlight(rig, t4473Lane, 0)
+	t4473Sweep(rig)
+	// The store recovers; a sweep with no drain change must still write the owed line.
+	if _, err := db.Exec(`DROP TRIGGER t4567_refuse`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`DROP TRIGGER t4567_refuse_update`); err != nil {
+		t.Fatal(err)
+	}
+	t4473Sweep(rig)
+	hk := rig.h.handoffkeep
+	if err := rig.h.Close(); err != nil {
+		t.Fatal(err)
+	}
+	rig = t3602Hub(t, path, "default", rig.fake, hk, clock)
+	t4473SetInFlight(rig, t4473Lane, 0)
+	clock.advance(time.Hour)
+	t4473Sweep(rig)
+	if got := t4473Lines(rig); len(got) != 1 || got[0] != t4473Line {
+		t.Fatalf("after a failed save and a restart, drain lines=%q, want exactly [%q]", got, t4473Line)
+	}
+}
+
 // Nothing open for the project: a drain sends nothing.
 func TestDrainWakeSilentWithoutOpenBacklog(t *testing.T) {
 	rig, _ := t4473Rig(t, []t4473Task{
