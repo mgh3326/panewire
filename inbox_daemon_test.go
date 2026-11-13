@@ -113,7 +113,7 @@ func TestInboxDaemonParity(t *testing.T) {
 	daemon := NewDaemon(Config{Hub: HubDaemonConfig{Client: client}, Logger: slog.New(slog.NewTextHandler(&logs, nil))})
 	socket := inboxDaemonSocket(t, daemon)
 	deps := hubCLIDeps{AllowInsecureForTests: true, SocketPath: socket}
-	cases := [][]string{{"list", "--lane", "lane-a", "--unread"}, {"read", "1", "--lane", "lane-a"}, {"ack", "1", "--lane", "lane-a"}, {"count", "--lane", "lane-a"}, {"wait", "--lane", "lane-a", "--timeout", "1s"}, {"wait", "--lane", "lane-empty", "--timeout", "25ms"}, {"list", "--lane", "lane-denied"}, {"status", "--event-id", "evt-1"}, {"status", "--event-id", "evt-missing"}}
+	cases := [][]string{{"list", "--lane", "lane-a", "--unread"}, {"list", "--lane", "legacy.parent"}, {"read", "1", "--lane", "lane-a"}, {"ack", "1", "--lane", "lane-a"}, {"count", "--lane", "lane-a"}, {"wait", "--lane", "lane-a", "--timeout", "1s"}, {"wait", "--lane", "legacy.parent", "--timeout", "1s"}, {"wait", "--lane", "lane-empty", "--timeout", "25ms"}, {"list", "--lane", "lane-denied"}, {"status", "--event-id", "evt-1"}, {"status", "--event-id", "evt-missing"}}
 	for _, args := range cases {
 		for _, jsonMode := range []bool{false, true} {
 			args := append([]string(nil), args...)

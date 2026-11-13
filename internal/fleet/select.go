@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/mgh3326/handoffkeep/client"
+	"github.com/mgh3326/panewire/internal/configkeys"
 )
 
 //go:embed pool-order.json
@@ -100,9 +101,15 @@ func LoadPoolPolicy(path string) (PoolPolicy, error) {
 		}
 	}
 	var p PoolPolicy
-	if e := decode(b, &p); e != nil {
-		return p, e
+	source := path
+	if source == "" {
+		source = "built-in pool order"
 	}
+	ignored, decErr := decodeConfig(b, &p)
+	if decErr != nil {
+		return p, decErr
+	}
+	configkeys.Warn(nil, source, ignored)
 	// validate fills defaults in place; call it before p is copied out.
 	e := p.validate()
 	return p, e
@@ -621,6 +628,12 @@ type selHost struct {
 	score      *float64
 	// decided marks the host the hub's placement named (HostView.Decided).
 	decided bool
+	// below and floorValue are the free-floor ranking key (host_fit.go,
+	// floorOrder): below is the hub's verdict that the host's free fraction is
+	// under the floor, floorValue the host's score (free times power less the
+	// jobs decided onto it), or free times power when it has no score.
+	below      bool
+	floorValue float64
 	// over marks a host at or above its load threshold (local
 	// max_load_ratio, else placement.load_threshold); it ranks last among
 	// awake hosts. fit names why the host cannot take this work at all
@@ -701,6 +714,7 @@ func (a *App) newSelPresence(ctx context.Context, s Spawn, req selReq) *selPrese
 			if hv, reported := sp.hub[name]; reported {
 				h.score, h.decided = hv.Score, hv.Decided
 				h.view = &hv
+				h.below, h.floorValue = floorKey(hv.Signals, hv.Score)
 			}
 			if !boolean(cfg, "spawn", true) {
 				h.excluded = true
@@ -711,6 +725,7 @@ func (a *App) newSelPresence(ctx context.Context, s Spawn, req selReq) *selPrese
 				h.awake = hv.Connected
 				h.load, h.score, h.decided = hv.LoadRatio, hv.Score, hv.Decided
 				h.view = &hv
+				h.below, h.floorValue = floorKey(hv.Signals, hv.Score)
 				if strings.Contains(hv.Reason, "not_accepting") {
 					h.excluded = true
 					h.memExcluded = onlyMemoryNotAccepting(hv.Reason)
