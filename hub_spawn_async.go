@@ -212,7 +212,7 @@ func (h *HubServer) handleSpawnOperation(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	var startCondition *fleet.StartConditionResult
-	if len(task.Request.StartConditions) != 0 && task.Status == "accepted" && task.Node == nil {
+	if len(task.Request.StartConditions) != 0 && spawnPending(task.Status) {
 		result := evaluateHubStartCondition(r.Context(), h, task.Request.StartConditions)
 		startCondition = &result
 	}
@@ -315,12 +315,22 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 			h.finishSpawnOutcome(task, hubSpawnOutcome{RC: 1, Stage: "launch", Reason: "unknown"})
 		}
 	}()
-	if len(task.Request.StartConditions) != 0 && task.Node == nil {
-		h.finishSpawnOutcome(task, hubSpawnOutcome{
-			RC: 78, Stage: "placement", Reason: "start_conditions_unsupported",
-			Fix: "start conditions are disabled until queue-core support is deployed; submit again after the hub advertises start_conditions_v1",
-		})
-		return
+	if len(task.Request.StartConditions) != 0 {
+		if task.Node == nil {
+			h.finishSpawnOutcome(task, hubSpawnOutcome{
+				RC: 78, Stage: "placement", Reason: "start_conditions_unsupported",
+				Fix: "start conditions are disabled until queue-core support is deployed; submit again after the hub advertises start_conditions_v1",
+			})
+			return
+		}
+		if h.now().Before(task.Deadline) && evaluateHubStartCondition(parent, h, task.Request.StartConditions).Status != "met" {
+			// A bound legacy row may already have reached the node. While the
+			// original deadline is live, do not replay an unmet condition because
+			// the node treats an unknown request id as a new spawn. At the
+			// deadline, the normal replay carries an expired deadline, which lets
+			// the node return a journal result or refuse an unstarted request.
+			return
+		}
 	}
 	if !h.now().Before(task.Deadline) {
 		h.logger.Warn("hub spawn starved in the queue", "request_id", task.Request.RequestID, "job", task.Job, "host", firstNonEmptyString(spawnTaskHost(task), "none"), "queue_wait_s", spawnQueueWaitSeconds(task, h.now()))
