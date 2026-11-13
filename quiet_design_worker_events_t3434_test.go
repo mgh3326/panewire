@@ -496,7 +496,7 @@ func TestQuietDesignWorkerLaneEventEndToEnd(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 	// Since hk 3602 the decision is filed and the node types the wake line.
-	if len(injected) != 1 || !strings.HasPrefix(injected[0], t3434DesignPane+" ") || !strings.Contains(injected[0], "[inbox] "+t3426Design+": 2 unread (most urgent: order) | panewire inbox list --lane "+t3426Design) || strings.Contains(injected[0], "which order do we ship") {
+	if len(injected) != 1 || !strings.HasPrefix(injected[0], t3434DesignPane+" ") || !strings.Contains(injected[0], "[inbox] "+t3426Design+": 2 unread (most urgent: decision) | panewire inbox list --lane "+t3426Design) || strings.Contains(injected[0], "which order do we ship") {
 		t.Fatalf("injections=%q, want only the decision's wake in %s", injected, t3434DesignPane)
 	}
 }
