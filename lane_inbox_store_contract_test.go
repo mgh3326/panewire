@@ -815,15 +815,6 @@ func TestLaneInboxStoreSpawnDurabilityContract(t *testing.T) {
 			if _, err = store.db.Exec(`UPDATE spawn_notifications SET delivered=1`); err != nil {
 				t.Fatal(err)
 			}
-			// The snapshot migrator must refuse rather than silently drop spawn ownership.
-			tx, err := store.db.BeginTx(t.Context(), nil)
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer tx.Rollback()
-			if _, err = readHubInboxSnapshotTx(t.Context(), tx, store.dialect); err == nil || !strings.Contains(err.Error(), "spawn ownership exists") {
-				t.Fatalf("inbox-only migration dropped spawn state: %v", err)
-			}
 		})
 	}
 }

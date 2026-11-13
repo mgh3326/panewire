@@ -28,8 +28,7 @@ Node daemons are unaffected: their store (`store.go`) stays a local SQLite file.
   SQLite's FULL mode.
 - **Bounded calls.** Every store call runs with a 10 s deadline; the startup
   scans get 2 min. Hub shutdown cancels calls in flight, so a stalled
-  database cannot hold the hub open. `migrate-sqlite --apply` waits at most
-  10 s for a lock (`lock_timeout`).
+  database cannot hold the hub open.
 - **Event keys.** The hub joins key parts with NUL, which Postgres `text`
   cannot hold, so the Postgres store keeps `event_key` hex-encoded. SQLite
   keeps the raw key.
@@ -65,40 +64,8 @@ Node daemons are unaffected: their store (`store.go`) stays a local SQLite file.
 
    Do not add the URL to the unit's `ExecStart`, to shell history or to a
    ticket.
-3. **Stop the hub and copy the inbox.**
-
-   ```sh
-   systemctl stop <hub unit>
-   # With the same environment as the hub:
-   panewire hub migrate-sqlite --from <inbox-store path>           # dry run: counts and target state
-   panewire hub migrate-sqlite --from <inbox-store path> --apply   # copy
-   ```
-
-   - The dry run prints the source row counts and the target state: `schema
-     not created yet`, `empty`, `already holds this source`, or the counts of
-     a target that differs.
-   - `--apply` creates the schema, copies every row and checks the copy row
-     for row. It does all three in one transaction, so a failure leaves the
-     target unchanged. The copy keeps item ids, batch order, read and ack
-     state, and must-ack rows.
-   - The source is read from a private copy of the database file and its
-     `-wal`. Rows that a killed hub left uncheckpointed in the `-wal` are
-     included. The SQLite file itself is never opened for writing.
-   - **Rerun.** If the target already holds exactly this source, `--apply`
-     reports `unchanged` and exits 0. If the target holds other rows, for
-     example after the hub has run on Postgres, `--apply` refuses.
-4. **Start the hub** with the new environment: `systemctl start <hub unit>`.
-   Then check the inbox: `panewire inbox list --unread` shows the same unread
-   items as before the move.
-
-Exit codes for `migrate-sqlite`:
-
-| Code | Meaning |
-|---|---|
-| 0 | done, or unchanged |
-| 2 | usage error |
-| 5 | refused: unreadable source, not an inbox store, `--apply` without the URL, a target with other rows, or a copy mismatch |
-| 70 | database failure |
+3. **Start the hub** with the URL set. The SQLite-to-Postgres copy command
+   (`panewire hub migrate-sqlite`) is removed, so a new database starts empty.
 
 ## Rollback
 
@@ -125,8 +92,6 @@ SQLite backend.
   must-ack, against both backends.
 - `inbox_must_ack_test.go` runs the hub-level must-ack tests on both
   backends.
-- `hub_migrate_sqlite_test.go` covers the copy, a source with a pending
-  `-wal`, and reruns.
 
 The Postgres half needs `PANEWIRE_TEST_HUB_DATABASE_URL`. CI's `postgres` job
 sets it from a service container, and fails if any test in that job skips.

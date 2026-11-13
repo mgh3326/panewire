@@ -274,7 +274,7 @@ func (a *App) Run(ctx context.Context, args []string) error {
 	if len(args) > 1 && (args[1] == "--help" || args[1] == "-h") {
 		return a.help(args[0])
 	}
-	if a.EnforceTrust && (args[0] == "spawn" || args[0] == "work" || args[0] == "delegate" || args[0] == "plan" || args[0] == "resolve" || args[0] == "preflight" || args[0] == "_spawn-stdin" || args[0] == "done" || args[0] == "escalate" || args[0] == "restore" || args[0] == "reap" || args[0] == "prune" || args[0] == "gc" || args[0] == "artifacts" || args[0] == "_watch") {
+	if a.EnforceTrust && (args[0] == "spawn" || args[0] == "work" || args[0] == "delegate" || args[0] == "plan" || args[0] == "resolve" || args[0] == "preflight" || args[0] == "_spawn-stdin" || args[0] == "done" || args[0] == "escalate" || args[0] == "restore" || args[0] == "reap" || args[0] == "prune" || args[0] == "artifacts" || args[0] == "_watch") {
 		if e := a.trust(); e != nil {
 			return e
 		}
@@ -302,8 +302,6 @@ func (a *App) Run(ctx context.Context, args []string) error {
 		return a.lifecycle(ctx, args[0], args[1:])
 	case "reap", "prune":
 		return a.hygiene(ctx, args[0], args[1:])
-	case "gc":
-		return a.gc(ctx, args[1:])
 	case "hosts", "profiles", "find", "name-sync", "lanes-missing":
 		return a.diagnostics(ctx, args[0], args[1:])
 	case "artifacts":
@@ -345,8 +343,6 @@ func (a *App) help(cmd string) error {
 		if cmd == "reap" {
 			fmt.Fprintln(a.Out, "       panewire reap --expire-job-dirs [--job ID[,ID]] [--apply] (job dir TTL; a dry run without --apply; docs/job-dir-ttl.md)")
 		}
-	case "gc":
-		fmt.Fprintln(a.Out, "Usage: panewire gc [--json] (expire path/linear_permit leases, clean quota_pool records and release leased jobs whose agent left Herdr)")
 	case "artifacts":
 		fmt.Fprintln(a.Out, "Usage: panewire artifacts move SRC --dest DEST [--source-host HOST] [--apply] | sweep [--job JOB] [--age 7d] [--policy FILE] [--apply]")
 	case "simulate":

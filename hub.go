@@ -614,8 +614,6 @@ type HubServer struct {
 	closeMu    sync.Mutex
 	closed     bool
 	stallBeats map[string]*hubStallBeatState
-	// sessionReap keeps the latest session-reap (#603) report per machine.
-	sessionReap map[string]*hubSessionReapRecord
 }
 
 // hubStallBeatState is the hub's half of the detector no-data contract. It
@@ -894,7 +892,6 @@ func (h *HubServer) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/jobs/reap", h.handleJobReap)
 	mux.HandleFunc("POST /v1/jobs/close", h.handleJobClose)
 	mux.HandleFunc("GET /v1/jobs/orphaned", h.handleOrphanedJobs)
-	mux.HandleFunc("GET /v1/session-reap", h.handleSessionReap)
 	mux.HandleFunc("POST /v1/jobs/reassign", h.handleReassignJob)
 	mux.HandleFunc("GET /v1/agent", h.handleAgent)
 	mux.HandleFunc("GET /v1/events", h.handleEvents)
@@ -1289,9 +1286,6 @@ func (h *HubServer) handleAgentMessageContext(ctx context.Context, machineID, re
 	}
 	if result, ok := parseHubNodeCommandResult(payload); ok {
 		h.resolveNodeCommand(machineID, agent, result)
-		return
-	}
-	if h.handleSessionReapMessage(machineID, agent, payload) {
 		return
 	}
 	message, ok := parseHubInbound(payload)

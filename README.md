@@ -127,9 +127,7 @@ It attempts URLs in order, backs off only after all fail, and every
 `HUB_PREFER_RETRY` (default `10m`) probes a higher-priority route before
 switching. Cloudflare Access headers apply only to non-tailnet URLs.
 
-Quota collection at the hub is retired: nodes no longer run a quota tool
-and a legacy hub's `quota.request` is answered `unsupported` so a
-mixed-version pair completes the round trip instead of timing out.
+Quota collection at the hub is retired: nodes no longer run a quota tool.
 
 By default every authenticated node is watched for presence and heartbeat-check
 alerts. Pass `--alert-nodes machine-a,machine-b` on the hub to limit alerts to
