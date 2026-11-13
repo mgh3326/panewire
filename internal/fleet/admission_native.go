@@ -247,7 +247,9 @@ func validAccountKey(key string) bool {
 // operator entries, any other pool's automatic reading. It returns why the
 // account cannot be judged, or "". With refresh set, a stale reading of an
 // account this host holds in a pool panewire measures is measured once
-// (`panewire quota refresh <pool>`) and read again. A local request
+// (`panewire quota refresh <pool>`) and read again; a dry run (planOnly)
+// prints `would measure` instead and judges the stored reading as it is. A
+// local request
 // (the host's own account, no --account-key) also carries the account's
 // operator entries, so like pacelever's local gate it falls back to them when
 // the automatic reading is unusable; a named account stays strict.
@@ -271,7 +273,12 @@ func (a *App) loadAccount(ctx context.Context, in *admissionInputs, key string, 
 	// Only panewire's own measurement refreshes here: the gate never runs
 	// pacelever, so a pool panewire does not measure stays unmeasurable.
 	if why == msgAccountStale && refresh && a.nativeQuotaPool(pool) && slices.Contains(a.localAccountKeys(ctx, pool), key) {
-		if checkQuotaPlain(runQuotaCommand(ctx, a.Runner, refreshCommand(pool, "", true), "quota refresh", 60*time.Second), "quota refresh") != nil {
+		if a.planOnly {
+			// A dry run measures nothing: the refresh writes presence, lease
+			// and observation to the shared quota store. A spawn measures
+			// this account, so the plan may differ from it here.
+			a.wouldMeasureLine("", pool)
+		} else if checkQuotaPlain(runQuotaCommand(ctx, a.Runner, refreshCommand(pool, "", true), "quota refresh", 60*time.Second), "quota refresh") != nil {
 			why = msgAccountStale + "; local refresh failed"
 		} else if latest, err = a.sharedLatest(ctx, key); err != nil {
 			return msgSharedQuotaDown
