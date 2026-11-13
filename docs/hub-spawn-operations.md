@@ -271,7 +271,7 @@ as the conservative pending status `dispatching`.
 | `dispatching` | Send transition committed; the node may have received the request. |
 | `reconciling` | Transport or execution observation unknown; ownership retained. |
 | `deadline_exceeded` | Deadline observed; ownership retained, not terminal failure. |
-| `succeeded` | Node landing receipt and fresh exact-pane identity verified. |
+| `succeeded` | Node landing receipt and fresh exact-pane identity verified. A landing the node refused rc 70 as "pane identity or status is unconfirmed" also settles here when a pane with the job's name and cwd is still present; the hub re-checks it once and launches nothing (hk 4534). |
 | `failed` | Definite refusal, including an existing job claim; never permission to reuse a live job. |
 | `retryable` | Node attested cleanup, or admission stopped before dispatch, and a replay can succeed once the operator's fix is done; reservations released. |
 
