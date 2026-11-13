@@ -23,6 +23,31 @@ func emitLaneEvent(t *testing.T, inbox, lane, eventID, text string) (int, string
 	return code, stderr.String()
 }
 
+func TestLaneEventAcceptsLaneNamesWithUnderscores(t *testing.T) {
+	inbox := t.TempDir()
+	const lane = "auto_trader-design"
+	if code, stderr := emitLaneEvent(t, inbox, lane, "producer-underscore", "payload"); code != ExitOK {
+		t.Fatalf("emit code=%d stderr=%q", code, stderr)
+	}
+	store := NewMemoryStore(t)
+	defer store.Close()
+	events := r20Node(inbox, store).jobCompletionEvents()
+	if len(events) != 1 || events[0].Kind != "lane.event" {
+		t.Fatalf("scanned events=%+v", events)
+	}
+	decoded, ok := decodeHubLaneEventPayload(events[0].Payload)
+	if !ok || decoded.OwnerLane != lane {
+		t.Fatalf("hub lane event=%+v valid=%t", decoded, ok)
+	}
+
+	invalid := []string{"Auto_trader-design", "auto trader", "auto_trader-design-too-long-name-123"}
+	for _, name := range invalid {
+		if code, _ := emitLaneEvent(t, t.TempDir(), name, "producer-invalid", "payload"); code == ExitOK {
+			t.Errorf("emit accepted invalid lane %q", name)
+		}
+	}
+}
+
 func scannedLaneEvent(t *testing.T, inbox string, store *Store) hubScannedRelayEvent {
 	t.Helper()
 	events := r20Node(inbox, store).jobCompletionEvents()
