@@ -40,7 +40,7 @@ func TestAsyncSpawnUndispatchedTimeoutReleasesReservation(t *testing.T) {
 			if err != nil || saved.Status != "retryable" || !saved.Outcome.Retryable || saved.Outcome.Reason != "timeout" || saved.Node != nil {
 				t.Fatalf("undispatched timeout retained ownership: %+v %v", saved, err)
 			}
-			pending, err := h.inbox.store.pendingSpawns(t.Context())
+			pending, err := h.inbox.store.pendingSpawns(t.Context(), time.Now())
 			if err != nil || len(pending) != 0 {
 				t.Fatalf("reselected: %+v %v", pending, err)
 			}

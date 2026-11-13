@@ -1632,8 +1632,8 @@ are read from the quota tool, never this file.
 ```
 
 Use the complete shipped block when creating a custom policy; a custom file
-does not pick up later bullets, such as the test-host rule that names
-`mbp-server` by `hostname -s` (hk 3733). Selection order
+does not pick up later bullets, such as the test-host rule (one rule on
+every host since hk 4496). Selection order
 is default → host → profile → local.brief_preamble. Missing block names refuse.
 The policy version and selected block appear in every brief and dry-run output.
 See [DESIGN.md](../DESIGN.md#standard-brief-preamble-the-single-source-of-fleet-rules)

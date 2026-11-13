@@ -223,6 +223,18 @@ only as headers on the HTTPS request.
 
 ### Operator session find
 
+`panewire find` is the everyday locator: it resolves a pane on this host
+through herdr and, when the fleet hosts config carries a `[hub]` operator
+credential (`operator_token_env` or `hub_token_env`), also asks the hub where
+the same name lives on every other host — matching session `agent_name`,
+`label` and `display_label` from `/v1/nodes`, `job_id` from `/v1/jobs`, and
+lane names from `/v1/lanes`. Every match line prints `machine=` next to
+`pane_id=` so the operator knows which host to point `panewire prompt` at;
+`--pane-only` prints the bare pane id for a local match and
+`machine:pane_id` for a remote one. Node hosts without an operator credential
+keep the local-only lookup, and each hub projection that fails is a stderr
+warning rather than a silent gap.
+
 `panewire fleet-census find` locates sessions by canonical agent name across the
 session snapshots that nodes already publish through `/v1/nodes`. It issues
 exactly one authenticated `GET /v1/nodes` through the same credentialled
