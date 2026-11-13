@@ -24,7 +24,7 @@ func TestQuotaStopTaskLookupByIDIgnoresFullTaskList(t *testing.T) {
 		lookedUp = id
 		return []byte(`{"priority":3,"expected":"4h","refs":{"job_id":"job-active"}}`), nil
 	}
-	rig.q.hk.tasks = func(context.Context) ([]byte, error) { return []byte(list), nil }
+	rig.q.hk.tasks = func(context.Context, int64) ([]byte, error) { return []byte(list), nil }
 	rig.run()
 	if lookedUp != "42" {
 		t.Fatalf("task lookup id=%q, want 42", lookedUp)
@@ -34,12 +34,71 @@ func TestQuotaStopTaskLookupByIDIgnoresFullTaskList(t *testing.T) {
 	}
 }
 
+func TestQuotaStopTaskLookupFindsTaskPastFirstPage(t *testing.T) {
+	rig := newRoleStopRig(t, "worker", time.Hour, roleStopTask)
+	for _, name := range []string{"00001-job.claimed.json", "00002-job.spawned.json"} {
+		path := filepath.Join(rig.manager.inboxRoot, "jobs", "job-active", "events", name)
+		b, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		updated := strings.ReplaceAll(string(b), `,"task_id":"42"`, "")
+		if err := os.WriteFile(path, []byte(updated), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	rows := make([]string, quotaStopTaskLimit+1)
+	for i := range rows {
+		job := fmt.Sprintf("other-%d", i)
+		if i == quotaStopTaskLimit {
+			job = "job-active"
+		}
+		rows[i] = fmt.Sprintf(`{"id":%d,"priority":3,"expected":"4h","refs":{"job_id":%q}}`, i+1, job)
+	}
+	rig.q.hk.tasks = func(_ context.Context, afterID int64) ([]byte, error) {
+		start := int(afterID)
+		end := min(start+quotaStopTaskLimit, len(rows))
+		return []byte(`{"tasks":[` + strings.Join(rows[start:end], ",") + `]}`), nil
+	}
+
+	rig.run()
+	if decision, reason := rig.decision(t); decision != "wait" || reason != "reset_within_expected" {
+		t.Fatalf("decision=%s reason=%s, want wait reset_within_expected for task after the first page", decision, reason)
+	}
+}
+
 func TestQuotaStopTaskLookupMissingTaskHandsOver(t *testing.T) {
 	rig := newRoleStopRig(t, "worker", time.Hour, roleStopTask)
 	rig.q.hk.task = func(context.Context, string) ([]byte, error) { return nil, fmt.Errorf("not_found") }
 	rig.run()
 	if decision, reason := rig.decision(t); decision != "handover" || reason != "task_unavailable" {
 		t.Fatalf("decision=%s reason=%s, want handover task_unavailable", decision, reason)
+	}
+}
+
+func TestQuotaStopTaskLookupMissingMatchReportsReason(t *testing.T) {
+	rig := newRoleStopRig(t, "worker", time.Hour, roleStopTask)
+	for _, name := range []string{"00001-job.claimed.json", "00002-job.spawned.json"} {
+		path := filepath.Join(rig.manager.inboxRoot, "jobs", "job-active", "events", name)
+		b, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		updated := strings.ReplaceAll(string(b), `,"task_id":"42"`, "")
+		if err := os.WriteFile(path, []byte(updated), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rig.q.hk.tasks = func(context.Context, int64) ([]byte, error) {
+		return []byte(`{"tasks":[]}`), nil
+	}
+	rig.run()
+	if decision, reason := rig.decision(t); decision != "handover" || reason != "task_unavailable" {
+		t.Fatalf("decision=%s reason=%s, want handover task_unavailable", decision, reason)
+	}
+	if !strings.Contains(rig.logs.String(), "error=no_matching_task") {
+		t.Fatalf("lookup warnings=%q, want the no_matching_task reason", rig.logs.String())
 	}
 }
 

@@ -85,7 +85,9 @@ func newQuotaStopManager(s *Store, root string, act bool, logger *slog.Logger) (
 	q.hk = quotaStopHK{
 		policy: func(ctx context.Context) ([]byte, error) { return fleet.HKDocumentAnswer(ctx, quotaStopPolicyKey) },
 		task:   func(ctx context.Context, id string) ([]byte, error) { return fleet.HKTaskAnswer(ctx, id) },
-		tasks:  func(ctx context.Context) ([]byte, error) { return fleet.HKTaskListAnswer(ctx, quotaStopTaskLimit) },
+		tasks: func(ctx context.Context, afterID int64) ([]byte, error) {
+			return fleet.HKTaskListPageAnswer(ctx, afterID, quotaStopTaskLimit)
+		},
 		note: func(ctx context.Context, key, job, body string) error {
 			return fleet.PutHKDocument(ctx, key, "note", job, body)
 		},
@@ -117,14 +119,14 @@ func newQuotaStopManager(s *Store, root string, act bool, logger *slog.Logger) (
 type quotaStopHK struct {
 	policy func(context.Context) ([]byte, error)
 	task   func(context.Context, string) ([]byte, error)
-	tasks  func(context.Context) ([]byte, error)
+	tasks  func(context.Context, int64) ([]byte, error)
 	note   func(ctx context.Context, key, job, body string) error
 }
 
 const (
 	quotaStopPolicyKey = "policy/quota-stop"
-	// quotaStopTaskLimit is the task lookup's page; a full page may be a cut
-	// one, so the lookup refuses it.
+	// quotaStopTaskLimit is the task lookup page size. Full pages are followed
+	// by stable ID cursors until hk returns a short page.
 	quotaStopTaskLimit = 1000
 )
 
@@ -306,12 +308,9 @@ func (q *quotaStopManager) task(ctx context.Context, job HubActiveJob, inherited
 		}
 		return priority, duration, true
 	}
-	b, err := q.hk.tasks(ctx)
-	if err != nil {
-		return 0, 0, false
-	}
 	var v struct {
 		Tasks []struct {
+			ID       any     `json:"id"`
 			Priority any     `json:"priority"`
 			Expected *string `json:"expected"`
 			Refs     struct {
@@ -319,27 +318,53 @@ func (q *quotaStopManager) task(ctx context.Context, job HubActiveJob, inherited
 			} `json:"refs"`
 		} `json:"tasks"`
 	}
-	if json.Unmarshal(b, &v) != nil || len(v.Tasks) >= quotaStopTaskLimit {
-		return 0, 0, false
-	}
 	n := 0
 	priority := 0
 	var duration time.Duration
-	for _, t := range v.Tasks {
-		if t.Refs.Job == job.JobID || inherited != "" && t.Refs.Job == inherited {
-			n++
-			parsedPriority, valid := quotaTaskPriority(t.Priority)
-			if !valid {
-				q.logger.Warn("quota-stop task lookup failed", "job", job.JobID, "error", "invalid_priority")
-				return 0, 0, false
-			}
-			priority = parsedPriority
-			if t.Expected != nil {
-				duration, _ = quotaDuration(*t.Expected)
+	var afterID int64
+	for {
+		b, err := q.hk.tasks(ctx, afterID)
+		if err != nil {
+			q.logger.Warn("quota-stop task lookup failed", "job", job.JobID, "after_id", afterID, "error", err)
+			return 0, 0, false
+		}
+		if json.Unmarshal(b, &v) != nil {
+			q.logger.Warn("quota-stop task lookup failed", "job", job.JobID, "after_id", afterID, "error", "unreadable_task_page")
+			return 0, 0, false
+		}
+		for _, t := range v.Tasks {
+			if t.Refs.Job == job.JobID || inherited != "" && t.Refs.Job == inherited {
+				n++
+				parsedPriority, valid := quotaTaskPriority(t.Priority)
+				if !valid {
+					q.logger.Warn("quota-stop task lookup failed", "job", job.JobID, "task", quotaTaskID(t.ID), "error", "invalid_priority")
+					return 0, 0, false
+				}
+				priority = parsedPriority
+				if t.Expected != nil {
+					duration, _ = quotaDuration(*t.Expected)
+				}
 			}
 		}
+		if len(v.Tasks) < quotaStopTaskLimit {
+			break
+		}
+		lastID, err := strconv.ParseInt(quotaTaskID(v.Tasks[len(v.Tasks)-1].ID), 10, 64)
+		if err != nil || lastID <= afterID {
+			q.logger.Warn("quota-stop task lookup failed", "job", job.JobID, "after_id", afterID, "error", "invalid_task_page_cursor")
+			return 0, 0, false
+		}
+		afterID = lastID
 	}
-	return priority, duration, n == 1
+	if n != 1 {
+		reason := "no_matching_task"
+		if n > 1 {
+			reason = "ambiguous_matching_tasks"
+		}
+		q.logger.Warn("quota-stop task lookup failed", "job", job.JobID, "error", reason)
+		return priority, duration, false
+	}
+	return priority, duration, true
 }
 
 // Observation budgets. Each phase has its own bound, so a slow job scan or a
