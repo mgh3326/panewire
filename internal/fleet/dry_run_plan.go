@@ -38,11 +38,28 @@ type SpawnPlanner interface {
 	Plan(ctx context.Context, request Submission) (SpawnPlan, error)
 }
 
+// measureWould is the Measured value a plan records for an account a spawn
+// would measure and the plan did not.
+const measureWould = "would"
+
+// wouldMeasureLine says what a dry run did not do, so a receipt or refusal
+// never claims a measurement the plan skipped. host "" is this machine.
+func (a *App) wouldMeasureLine(host, pool string) {
+	if host == "" {
+		host = a.machine()
+	}
+	where := ""
+	if host != "" {
+		where = "host=" + host + " "
+	}
+	fmt.Fprintf(a.Out, "would measure %spool=%s before a spawn; the dry run did not refresh it\n", where, pool)
+}
+
 // dryRunLine prints one placement's dry-run receipt, labelled with the source
 // that planned it, and records the plan for PlanSubmission.
 func (a *App) dryRunLine(host string, s Spawn, payload string) {
 	label := localPlanLabel
-	if a.hubPlan {
+	if a.planFromHub {
 		label = hubPlanLabel
 	}
 	fmt.Fprintf(a.Out, "%s\ndry-run host=%s profile=%s role=%s job=%s\n%s\n", label, host, s.Profile, s.Role, s.Job, payload)
@@ -59,7 +76,7 @@ func (a *App) PlanSubmission(ctx context.Context, request Submission) (SpawnPlan
 	}
 	defer cleanup()
 	s.DryRun = true
-	a.hubPlan = true
+	a.planOnly, a.planFromHub = true, true
 	a.lastPlan = nil
 	if err := a.Spawn(ctx, s); err != nil {
 		return SpawnPlan{}, err
@@ -73,7 +90,9 @@ func (a *App) PlanSubmission(ctx context.Context, request Submission) (SpawnPlan
 // previewSpawn answers `--dry-run` for the CLI. With a hub configured, the hub
 // plans the spawn with its own placement and state. Without one, or against a
 // hub that predates plan requests, this machine plans and its receipt says so.
+// Either way the receipt is a plan: it measures nothing.
 func (a *App) previewSpawn(ctx context.Context, s Spawn) error {
+	a.planOnly = true
 	if str(a.Config.Hub, "hub_url") == "" {
 		return a.Spawn(ctx, s)
 	}

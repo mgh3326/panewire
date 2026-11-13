@@ -34,10 +34,12 @@ type App struct {
 	// is printed once when the command ends (reportHubRetries).
 	hubRetries hubretry.Stats
 
-	// hubPlan marks a dry run planned for the hub's plan request; dryRunLine
-	// labels its receipt with it. lastPlan is the placement the dry run chose.
-	hubPlan  bool
-	lastPlan *SpawnPlan
+	// planOnly marks a dry run that measures nothing: a quota refresh writes
+	// presence, lease and observation to the shared quota store. planFromHub
+	// marks a receipt the hub planned; dryRunLine labels its receipt with it.
+	// lastPlan is the placement the dry run chose.
+	planOnly, planFromHub bool
+	lastPlan              *SpawnPlan
 
 	Jobs, Home   string
 	Sleep        func(context.Context, time.Duration) error

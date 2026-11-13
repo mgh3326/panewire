@@ -6,17 +6,28 @@ checkout and runs launch and landing in-process. No launcher binary or SSH
 launcher is called. `--dry-run` remains the synchronous planning path.
 
 `--dry-run` with a hub configured asks the hub for its own plan: `POST
-/v1/spawns/plan` runs the same placement and selection the submission would,
-and records nothing: no operation row, no reservation, no hk write, no dispatch.
-A plan measures nothing. A stale or unobserved account of a host this machine
-does not hold is printed as `would measure` and skipped, so the plan can differ
-from the submission for that host: the submission measures the account first.
+/v1/spawns/plan` runs the same placement and selection the submission would and
+gives the refusals a submission gives before placement (an invalid label, a host
+the request cannot use, a job id hk already holds). It writes no operation row,
+no reservation, no hk write and dispatches nothing. A refused plan may still
+write a refusal or quota-observation line to the hub's local fleet event log;
+those records never reach hk.
+
+A dry run measures nothing: a quota refresh writes presence, lease and
+observation to the shared quota store. An account that needs a measurement — a
+stale or unobserved shared account on any host, or a stale account this machine
+holds that the admission gate would refresh — is printed as
+`would measure host=… pool=…` and left unmeasured. That rung is dropped, and a
+plan with no other rung refuses and names the measurement. The plan can
+therefore differ from the submission: the submission measures the account first
+and may place there.
+
 The CLI prints the hub's host and profile, labelled `hub plan:`. The hub may
 choose a different profile from this machine's local plan. Without a hub the
 receipt is labelled `local plan:`. A hub that predates the route (404 or 405)
-gets a warning and the local plan, also labelled `local plan:`. A hub refusal
-exits with the hub's `rc` and reason; an unreachable or failing hub is an error,
-not a silent fallback.
+gets a warning and the local plan, also labelled `local plan:`. Either local
+plan keeps the same no-measure rule. A hub refusal exits with the hub's `rc` and
+reason; an unreachable or failing hub is an error, not a silent fallback.
 
 The CLI prints `ACCEPTED job=… request=…` after the hub commits a reservation.
 That confirms ownership of the operation, not a pane or brief delivery. Wait for

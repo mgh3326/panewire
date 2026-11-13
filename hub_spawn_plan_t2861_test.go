@@ -22,7 +22,10 @@ import (
 )
 
 // planJobs is the hk job-record fixture: a plan must not claim or write a record.
-type planJobs struct{ writes atomic.Int32 }
+type planJobs struct {
+	writes   atomic.Int32
+	existing map[string]any
+}
 
 func (j *planJobs) Claim(context.Context, string, string, string) error {
 	j.writes.Add(1)
@@ -33,6 +36,9 @@ func (j *planJobs) Put(context.Context, string, map[string]any) error {
 	return nil
 }
 func (j *planJobs) Get(context.Context, string) (map[string]any, error) {
+	if j.existing != nil {
+		return j.existing, nil
+	}
 	return nil, fleet.ErrJobNotFound
 }
 
@@ -110,5 +116,52 @@ func TestSpawnPlanRouteLeavesNoOperation_t2861(t *testing.T) {
 	}
 	if hkWrites.Load() != 0 || jobs.writes.Load() != 0 {
 		t.Fatalf("a plan wrote to hk: http=%d job-records=%d", hkWrites.Load(), jobs.writes.Load())
+	}
+}
+
+// A plan gives the refusals a submission gives before placement: an invalid
+// label and a job id hk already holds. Neither reaches placement or writes.
+func TestSpawnPlanRefusesWhatSubmitRefuses_t2861(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	h, err := NewHubServer(HubServerConfig{Tokens: map[string]string{"operator": t14OperatorToken}, InboxStorePath: filepath.Join(t.TempDir(), "inbox.sqlite3")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { h.Close() })
+	hkWrites := planHK(t)
+	jobs := &planJobs{existing: map[string]any{"state": "completed", "host": "machine-a"}}
+	h.spawnNewApp = func(out, errout io.Writer) (*fleet.App, error) {
+		app := retryDispatchApp(t, out, errout)
+		app.JobStore = jobs
+		return app, nil
+	}
+	plan := func(mutate func(*fleet.Submission)) *httptest.ResponseRecorder {
+		request := durableSpawnRequest()
+		if mutate != nil {
+			mutate(&request)
+		}
+		raw, _ := json.Marshal(request)
+		r := httptest.NewRequest("POST", "/v1/spawns/plan", bytes.NewReader(raw))
+		r.Header.Set("Authorization", "Bearer "+t14OperatorToken)
+		w := httptest.NewRecorder()
+		h.Handler().ServeHTTP(w, r)
+		return w
+	}
+	w := plan(nil)
+	if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "job_already_claimed") {
+		t.Fatalf("a plan for a claimed job must refuse like submit: %d %s", w.Code, w.Body)
+	}
+	w = plan(func(request *fleet.Submission) {
+		for i, arg := range request.Args {
+			if arg == "-l" && i+1 < len(request.Args) {
+				request.Args[i+1] = "job.a"
+			}
+		}
+	})
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "label_invalid") {
+		t.Fatalf("a plan for an invalid label must refuse like submit: %d %s", w.Code, w.Body)
+	}
+	if hkWrites.Load() != 0 || jobs.writes.Load() != 0 {
+		t.Fatalf("a refusing plan wrote: hk=%d job-records=%d", hkWrites.Load(), jobs.writes.Load())
 	}
 }

@@ -4,6 +4,7 @@ package fleet
 // 405 means the hub predates the route; a refusal keeps the hub's reason.
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -11,6 +12,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -119,6 +121,9 @@ func TestDryRunFromOldHubShowsTheLocalPlan_t2861(t *testing.T) {
 	if len(hub.spawns) != 0 {
 		t.Fatalf("dry run must not spawn: %v", hub.spawns)
 	}
+	if !a.planOnly || len(hub.refreshes) != 0 {
+		t.Fatalf("the local fallback must keep the plan's no-measure rule: planOnly=%v refreshes=%v", a.planOnly, hub.refreshes)
+	}
 }
 
 // A plan refuses a stale account of a host it does not hold without measuring
@@ -136,7 +141,7 @@ func TestDryRunPlanDoesNotMeasureAStaleAccount_t2861(t *testing.T) {
 		}
 		return Result{}
 	}}
-	a.hubPlan = true
+	a.planOnly = true
 	acc := SharedAccount{Key: key, Observed: true, Fresh: false, MeasuredAt: a.Now().Add(-75 * time.Minute)}
 	_, err := a.judgeHost(context.Background(), QuotaRequest{}, "claude", "host-b", false, key, acc)
 	var refusal *quotaHostRefusal
@@ -148,6 +153,66 @@ func TestDryRunPlanDoesNotMeasureAStaleAccount_t2861(t *testing.T) {
 	}
 	if out := a.Out.(interface{ String() string }).String(); !strings.Contains(out, "would measure host=host-b") {
 		t.Fatalf("plan did not say the host would be measured: %q", out)
+	}
+}
+
+// A plan's profile selection measures nothing: a stale via=hub account is
+// dropped as would_measure, no refresh reaches the hub or an ssh target, and
+// the refusal names the measurement the spawn would run.
+func TestSelectInAPlanDoesNotMeasure_t2861(t *testing.T) {
+	a, s, q, src := remoteFreeFixture(t, freeReceipt)
+	const key = "devin:fedcba9876543210"
+	src.accounts[key] = SharedAccount{Key: key, Observed: true}
+	a.Config.Hosts["host-b"]["via"] = "hub"
+	events := &[]string{}
+	hub := &fakeHub{t: t, events: events}
+	a.Hub = hub
+	var ssh []string
+	a.Runner = wrapRunner(a.Runner, func(c Command) (Result, bool) {
+		if c.Name == "ssh" {
+			ssh = append(ssh, strings.Join(c.Args, " "))
+		}
+		return Result{}, c.Name == "ssh"
+	})
+	a.planOnly = true
+	sel, err := a.selectProfile(context.Background(), s)
+	if err == nil || sel.chosen != nil {
+		t.Fatalf("a plan must not place on an unmeasured account: %v", err)
+	}
+	if !strings.Contains(err.Error(), "would measure") {
+		t.Fatalf("the refusal must name the skipped measurement: %v", err)
+	}
+	if len(hub.refreshes) != 0 || len(ssh) != 0 {
+		t.Fatalf("a plan measured the account: hub=%v ssh=%v", hub.refreshes, ssh)
+	}
+	if len(q.Calls) != 0 {
+		t.Fatalf("the plan judged without fresh evidence: %+v", q.Calls)
+	}
+	if out := a.Out.(interface{ String() string }).String(); !strings.Contains(out, "would measure host=host-b pool=devin") {
+		t.Fatalf("the plan did not say what it would measure: %q", out)
+	}
+}
+
+// A plan's admission gate measures nothing either: a stale reading of an
+// account this machine holds is refused unmeasured, with no quota refresh.
+func TestPlanGateDoesNotRefreshAStaleLocalAccount_t2861(t *testing.T) {
+	stale := switchReading(20, 40)
+	stale.MeasuredAt = switchNow.Add(-time.Hour)
+	a, runner, _ := switchApp(t, gateModeNative, stale, Result{Code: 99})
+	a.Out = &bytes.Buffer{}
+	a.Config.Quota["accounts"] = map[string]any{"claude": "0123456789abcdef"}
+	a.planOnly = true
+	_, err := a.Quota.Gate(context.Background(), opusRequest)
+	if exitCode(err) != gateUnmeasurable || !strings.Contains(err.Error(), msgAccountStale) {
+		t.Fatalf("a plan must refuse the stale account unmeasured: %v", err)
+	}
+	for _, c := range runner.Calls {
+		if c.Name == "panewire" && slices.Contains(c.Args, "refresh") {
+			t.Fatalf("a plan ran a quota refresh: %v", c.Args)
+		}
+	}
+	if out := a.Out.(interface{ String() string }).String(); !strings.Contains(out, "would measure") || !strings.Contains(out, "pool=claude") {
+		t.Fatalf("the plan did not say it would measure the account: %q", out)
 	}
 }
 
