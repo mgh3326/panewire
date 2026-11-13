@@ -293,10 +293,12 @@ the time; `clear` removes it.
 The marker is what the node watcher reads: while it is present and younger than
 its bound (30 minutes), the watcher's missing-pane fallback does not write its
 own plain `lost` record — that record could never carry the hub's quota reason
-or a hand-over's successor pointer. The watcher still releases the job's quota
-lease, because the pane is gone either way. The node refuses the op for a
-ledger that moved on (a `job.completed` after the attempt, or a newer claim)
-exactly as `job.mark_lost` does, so a marker never outlives its attempt.
+or a hand-over's successor pointer. The watcher keeps watching meanwhile and
+releases the job's quota lease, because the pane is gone either way; it runs the
+ordinary fallback once the action cancels its marker or the marker expires. The
+node refuses the op for a ledger that moved on (a `job.completed` after the
+attempt, or a newer claim) exactly as `job.mark_lost` does, so a marker never
+outlives its attempt.
 
 | `outcome` | Meaning |
 | --- | --- |

@@ -326,14 +326,33 @@ func (s *fleetStateStore) publish(message FleetStateMessage, repeat time.Duratio
 	key := fleetStateKey{message.Host, message.Kind, message.Key}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if previous, exists := s.latest[key]; exists && fleetStateBody(previous) == fleetStateBody(message) && message.ReceivedAt.Sub(previous.ReceivedAt) < repeat {
-		return false
+	if previous, exists := s.latest[key]; exists {
+		if fleetStateBody(previous) == fleetStateBody(message) && message.ReceivedAt.Sub(previous.ReceivedAt) < repeat {
+			return false
+		}
+		// The store keeps one value per host and account, so a delayed reading
+		// must not replace a newer one: the supersession check reads exactly
+		// this value, and an old exhausted publish arriving after a newer
+		// available one would otherwise be the only thing it sees.
+		if fleetStateObservedAt(message).Before(fleetStateObservedAt(previous)) {
+			return false
+		}
 	}
 	s.seq++
 	message.V, message.Seq = fleetStateVersion, s.seq
 	s.latest[key] = message
 	s.boundHostLocked(message.Host, message.Kind)
 	return true
+}
+
+// fleetStateObservedAt is when a reading was taken: its measurement, or a later
+// confirmation of it.
+func fleetStateObservedAt(message FleetStateMessage) time.Time {
+	at := message.MeasuredAt
+	if message.ConfirmedAt != nil && message.ConfirmedAt.After(at) {
+		at = *message.ConfirmedAt
+	}
+	return at
 }
 
 // boundHostLocked keeps one host's quota keys within their cap, dropping the

@@ -741,3 +741,137 @@ func (f *sweepFixture) setJobPaneStatus(job, status string) {
 		}
 	}
 }
+
+// A record that ended for another reason is not this action's ending: it is
+// neither handed over again nor announced as a quota stop, and the action leaves
+// nothing behind.
+func TestPoolExhaustedLeavesAJobLostForAnotherReasonAlone(t *testing.T) {
+	f := newSweepFixture(t)
+	reviewer := f.addJob(t, "reviewer", "devin", sweepDevin, "idle")
+	f.jobs.mu.Lock()
+	f.jobs.records[reviewer]["state"] = "lost"
+	f.jobs.records[reviewer]["end_reason"] = "reaped"
+	f.jobs.mu.Unlock()
+
+	f.publishFreeLimit(t, sweepDevin, time.Now().Add(3*time.Hour), time.Now())
+	eventually(t, 5*time.Second, "the pass", func() bool { return f.sweeps() == 1 })
+	if got := f.node2.count("pane.close " + reviewer); got != 0 {
+		t.Fatalf("the pane of an already lost job was closed %d times", got)
+	}
+	for _, relay := range spawnFailedInjections(f.destination) {
+		if relay.Kind == "job.lost" && relay.JobID == reviewer {
+			t.Fatalf("an unrelated loss was announced as a quota stop: %+v", relay)
+		}
+	}
+	if _, err := f.hub.inbox.store.latestSpawnForJob(t.Context(), reviewer+"-q1"); err == nil {
+		t.Fatal("an already lost job was handed over")
+	}
+	if got := len(f.pendingActions(t)); got != 0 {
+		t.Fatalf("%d actions left behind for an unrelated loss", got)
+	}
+	if got := f.state(reviewer); got != "lost" {
+		t.Fatalf("state=%s, want the original loss kept", got)
+	}
+}
+
+// A close whose stage write was lost is not reconsidered against an expired
+// exhaustion: the pane is gone, so the ending is finished (record and notice)
+// even though the reset has passed.
+func TestPoolExhaustedFinishesACloseWhoseStageWasLost(t *testing.T) {
+	f := newSweepFixture(t)
+	reviewer := f.addJob(t, "reviewer", "devin", sweepDevin, "idle")
+	f.ageJob(t, reviewer)
+	holder, err := f.hub.inbox.store.latestSpawnForJob(t.Context(), reviewer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prior, err := fleet.ValidateSubmission(holder.Request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reset := time.Now().Add(-time.Hour).UTC().Truncate(time.Second)
+	action := poolAction{
+		Request: holder.Request.RequestID, Attempt: holder.Attempt, Job: reviewer, Owner: f.owner, Role: prior.Role,
+		Kind: poolActionEnd, Pool: "devin", Account: sweepDevin, Cause: poolCauseFreeLimit, Reset: reset,
+		EndReason: fleet.QuotaStopEndReason("devin", reset, "", ""), EventID: "pool-exhausted:" + reviewer,
+		Stage: poolActionIntent, Registered: time.Now().UTC(), Created: time.Now().UTC(), Updated: time.Now().UTC(),
+	}
+	if err := f.hub.inbox.store.savePoolAction(t.Context(), action); err != nil {
+		t.Fatal(err)
+	}
+	if finished := f.hub.reconcilePoolActions(t.Context()); finished != 1 {
+		t.Fatalf("reconciled %d actions, want the interrupted ending finished:\n%s", finished, f.logs.String())
+	}
+	if got := f.state(reviewer); got != "lost" {
+		t.Fatalf("state=%s, want the terminal record", got)
+	}
+	if want := "quota_stop pool=devin reset_at=" + reset.Format(time.RFC3339); f.node2.reason(reviewer) != want {
+		t.Fatalf("end_reason=%q, want %q", f.node2.reason(reviewer), want)
+	}
+	var lost int
+	for _, relay := range spawnFailedInjections(f.destination) {
+		if relay.Kind == "job.lost" && relay.JobID == reviewer {
+			lost++
+		}
+	}
+	if lost != 1 {
+		t.Fatalf("%d owner notices, want one", lost)
+	}
+}
+
+// An intent cancelled before it touched anything does not block a later
+// exhaustion of the same live attempt.
+func TestPoolExhaustedActsOnANewExhaustionAfterACancelledIntent(t *testing.T) {
+	f := newSweepFixture(t)
+	busy := f.addJob(t, "reviewer", "devin", sweepDevin, "working")
+	reset := time.Now().Add(time.Hour)
+
+	f.publishFreeLimit(t, sweepDevin, reset, time.Now())
+	eventually(t, 5*time.Second, "the first pass", func() bool { return f.sweeps() == 1 })
+	// The reset passes while the pane is still working; when it goes idle the
+	// intent is cancelled before any effect, and the row goes with it.
+	if _, err := f.hub.inbox.store.db.Exec(`UPDATE pool_exhausted_actions SET reset_ms=?`, time.Now().Add(-time.Minute).UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	f.setJobPaneStatus(busy, "idle")
+	if finished := f.hub.reconcilePoolActions(t.Context()); finished != 0 {
+		t.Fatalf("an expired intent finished %d actions", finished)
+	}
+	if got := len(f.pendingActions(t)); got != 0 {
+		t.Fatalf("%d cancelled intents left, want the row gone", got)
+	}
+	if got := f.node2.count("pane.close " + busy); got != 0 {
+		t.Fatal("a pane was closed under an expired exhaustion")
+	}
+
+	// A new exhaustion of the same account decides again.
+	f.publishFreeLimit(t, sweepDevin, time.Now().Add(2*time.Hour), time.Now().Add(time.Minute))
+	eventually(t, 5*time.Second, "the job to be ended by the new exhaustion", func() bool { return f.state(busy) == "lost" })
+	eventually(t, 5*time.Second, "the new action to finish", func() bool { return len(f.pendingActions(t)) == 0 })
+}
+
+// The store lookback bounds history, not liveness: a job started longer ago is
+// still a candidate while a node reports it active.
+func TestPoolExhaustedIncludesAnOldJobAHeartbeatReports(t *testing.T) {
+	f := newSweepFixture(t)
+	worker := f.addJob(t, "worker", "devin", sweepDevin, "idle")
+	old := time.Now().Add(-8 * 24 * time.Hour).UnixMilli()
+	if _, err := f.hub.inbox.store.db.Exec(`UPDATE spawn_operations SET created_ms=?,last_run_ms=? WHERE job=?`, old, old, worker); err != nil {
+		t.Fatal(err)
+	}
+	f.hub.mu.Lock()
+	if record := f.hub.nodes["machine-a"]; record != nil {
+		record.activeJobs[worker] = HubActiveJob{JobID: worker, Epoch: 1}
+	} else {
+		f.hub.mu.Unlock()
+		t.Fatal("the fixture node is not connected")
+	}
+	f.hub.mu.Unlock()
+
+	f.publishFreeLimit(t, sweepDevin, time.Now().Add(3*time.Hour), time.Now())
+	eventually(t, 5*time.Second, "the old live job to be handed over", func() bool { return f.state(worker) == "lost" })
+	eventually(t, 5*time.Second, "the successor to be claimed", func() bool {
+		_, err := f.hub.inbox.store.latestSpawnForJob(t.Context(), worker+"-q1")
+		return err == nil
+	})
+}

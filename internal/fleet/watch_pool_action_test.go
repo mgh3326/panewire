@@ -46,7 +46,34 @@ func TestPoolActionOpenFollowsTheMarker(t *testing.T) {
 	}
 }
 
-// While the hub owns an action for a job, the watcher does not write the plain
+// A marker cannot silence the fallback for good: while it is open the watcher
+// keeps watching (and frees the seat), and once the action cancels or its
+// marker expires the ordinary missing-pane end runs.
+func TestWatcherFallsBackWhenThePoolActionMarkerClears(t *testing.T) {
+	a := testApp(t)
+	ledgerRunner(t, a)
+	seedJob(t, a, "j", "worker")
+	seedLedger(t, a, "j")
+	writePoolActionMarker(t, a, "j", a.Now())
+	sleeps := 0
+	a.Sleep = func(ctx context.Context, _ time.Duration) error {
+		sleeps++
+		if sleeps == 2 {
+			if err := os.Remove(filepath.Join(a.Jobs, "j", PoolActionFile)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if sleeps >= 6 {
+			return context.Canceled
+		}
+		return nil
+	}
+	_ = a.watch(context.Background(), []string{"j"})
+	if kinds := eventKindsOf(t, a, "j"); !slices.Contains(kinds, "job.lost") {
+		t.Fatalf("the fallback never ran after the marker cleared: %v", kinds)
+	}
+}
+
 // lost record its missing-pane fallback would: that record could never carry the
 // quota reason or a hand-over's successor pointer.
 func TestWatcherLeavesTheTerminalRecordToARegisteredPoolAction(t *testing.T) {

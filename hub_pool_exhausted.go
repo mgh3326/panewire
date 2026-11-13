@@ -132,10 +132,7 @@ func (h *HubServer) exhaustionSuperseded(e poolExhaustion, now time.Time) bool {
 		if key.kind != fleetStateKindQuota || key.key != e.Account || message.Quota == nil || !e.speaksTo(message.Quota) {
 			continue
 		}
-		at := message.MeasuredAt
-		if message.ConfirmedAt != nil && message.ConfirmedAt.After(at) {
-			at = *message.ConfirmedAt
-		}
+		at := fleetStateObservedAt(message)
 		still := slices.ContainsFunc(poolExhaustionsOf(message.Quota, now), func(current poolExhaustion) bool { return current.Cause == e.Cause })
 		if !found || at.After(freshest) || at.Equal(freshest) && still {
 			freshest, holds, found = at, still, true
@@ -343,6 +340,13 @@ func (h *HubServer) poolExhaustionJobs(ctx context.Context, exhaustion poolExhau
 	tasks, err := h.inbox.store.succeededSpawnsSince(ctx, h.now().Add(-poolActionLookback))
 	if err != nil {
 		return nil, err
+	}
+	// The lookback bounds history, not liveness: a job started longer ago is
+	// still a candidate while a node reports it active.
+	if live, liveErr := h.liveSpawnTasks(ctx); liveErr == nil {
+		tasks = append(tasks, live...)
+	} else {
+		h.logger.Warn("pool exhausted sweep could not list active jobs", "pool", exhaustion.Pool, "account", exhaustion.Account, "error", liveErr)
 	}
 	var onPool []hubSpawnTask
 	listed := map[string]bool{}

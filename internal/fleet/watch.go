@@ -423,7 +423,18 @@ func (a *App) watch(ctx context.Context, args []string) error {
 
 		if handOff.active {
 			if handOff.expired(a.Now(), paneAgent, present) {
-				return a.quotaStopLost(ctx, j, handOff.stop, false)
+				if a.poolActionOpen(id) {
+					// A registered exhausted-pool action owns this attempt's
+					// record (and may carry a successor pointer this fallback
+					// cannot): free the seat and keep watching until the action
+					// finishes, clears its marker after cancelling, or the
+					// marker expires.
+					if e := a.releaseQuota(ctx, j); e != nil {
+						a.warn("quota-stop lease release failed, retrying: %v", e)
+					}
+				} else {
+					return a.quotaStopLost(ctx, j, handOff.stop, false)
+				}
 			}
 			if present && !handOff.unchanged(paneAgent) {
 				// The pane moved on during the grace (someone resumed it): the
@@ -446,20 +457,23 @@ func (a *App) watch(ctx context.Context, args []string) error {
 		// The hub's own quota action owns the terminal record for an attempt it
 		// registered: it writes the quota reason (and a hand-over's successor
 		// pointer), which an hk record made terminal here could never carry.
-		// The pane is gone either way, so free the seat and leave the record
-		// and its notice to the action.
+		// The pane is gone either way, so free the seat; keep watching so the
+		// ordinary fallback runs if the action cancels or its marker expires.
 		if missing >= 2 && !handOff.active && !quotaRetry {
 			if a.poolActionOpen(id) {
+				if e := a.releaseQuota(ctx, j); e != nil {
+					a.warn("pool action: quota lease release failed, retrying: %v", e)
+				}
+			} else {
+				if e := a.putJobRecord(ctx, id, map[string]any{"state": "lost", "at": a.Now().UTC()}); e != nil {
+					a.jobRecordFailed(ctx, id, "lost", e)
+				}
+				if e = a.event(ctx, id, "job.lost", map[string]any{"pane_id": j.Pane}); e != nil {
+					return e
+				}
+				a.recordLostFailure(ctx, j)
 				return a.releaseQuota(ctx, j)
 			}
-			if e := a.putJobRecord(ctx, id, map[string]any{"state": "lost", "at": a.Now().UTC()}); e != nil {
-				a.jobRecordFailed(ctx, id, "lost", e)
-			}
-			if e = a.event(ctx, id, "job.lost", map[string]any{"pane_id": j.Pane}); e != nil {
-				return e
-			}
-			a.recordLostFailure(ctx, j)
-			return a.releaseQuota(ctx, j)
 		}
 		if e = a.Sleep(ctx, 5*time.Second); e != nil {
 			return e
