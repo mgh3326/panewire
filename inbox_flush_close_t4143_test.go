@@ -24,6 +24,27 @@ type closeAfterChecks struct {
 	calls int
 }
 
+// cancelOnDoneContext is live at flushInbox's entry check and canceled when
+// pendingBatches derives its store operation context.
+type cancelOnDoneContext struct {
+	context.Context
+	calls int
+}
+
+func (c *cancelOnDoneContext) Err() error {
+	c.calls++
+	if c.calls > 1 {
+		return context.Canceled
+	}
+	return nil
+}
+
+func (c *cancelOnDoneContext) Done() <-chan struct{} {
+	ch := make(chan struct{})
+	close(ch)
+	return ch
+}
+
 func (c *closeAfterChecks) Err() error {
 	c.calls++
 	if c.calls > c.after {
@@ -55,6 +76,47 @@ func TestInboxFlushCutByCloseLogsNoError(t *testing.T) {
 	if n := h.InboxFlushFailureCount(); n != 0 {
 		t.Fatalf("a flush cut by Close counted %d failures, want 0", n)
 	}
+}
+
+func TestInboxFlushListingErrorDistinguishesClose(t *testing.T) {
+	setup := func(t *testing.T, failListing bool) (*HubServer, *bytes.Buffer, func()) {
+		_, hk, closeServer := newFakeHandoffkeep(t)
+		now := time.Now()
+		h, _ := quietHub(t, filepath.Join(t.TempDir(), "inbox.sqlite3"), "default", hk, &now)
+		var logs bytes.Buffer
+		h.logger = slog.New(slog.NewTextHandler(&logs, nil))
+		if failListing {
+			// With no source items, makeBatches completes without reading the
+			// batch table; pendingBatches then fails deterministically on SELECT.
+			if _, err := h.inbox.store.db.Exec(`DROP TABLE lane_inbox_batches`); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return h, &logs, closeServer
+	}
+	t.Run("close cancellation", func(t *testing.T) {
+		h, logs, closeServer := setup(t, false)
+		defer closeServer()
+		h.closeCtx = &cancelOnDoneContext{Context: context.Background()}
+		h.flushInbox()
+		if strings.Contains(logs.String(), "level=ERROR") {
+			t.Fatalf("listing cut by Close logged an error:\n%s", logs.String())
+		}
+		if n := h.InboxFlushFailureCount(); n != 0 {
+			t.Fatalf("listing cut by Close counted %d failures, want 0", n)
+		}
+	})
+	t.Run("real store error", func(t *testing.T) {
+		h, logs, closeServer := setup(t, true)
+		defer closeServer()
+		h.flushInbox()
+		if !strings.Contains(logs.String(), "level=ERROR") || !strings.Contains(logs.String(), "inbox batch listing failed") {
+			t.Fatalf("real listing failure did not log an error:\n%s", logs.String())
+		}
+		if n := h.InboxFlushFailureCount(); n != 1 {
+			t.Fatalf("real listing failure counted %d failures, want 1", n)
+		}
+	})
 }
 
 // A handoff that is accepted while Close lands is recorded after the store
