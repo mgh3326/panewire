@@ -916,6 +916,12 @@ func (h *HubServer) handleInboxWait(w http.ResponseWriter, r *http.Request) {
 		case <-wake:
 		case <-r.Context().Done():
 		case <-h.closeCtx.Done():
+		case <-h.drain.Started():
+			// SIGTERM: end the poll with the retryable answer rather than
+			// holding the caller until this process exits (hub_drain.go).
+			timer.Stop()
+			writeHubDraining(w)
+			return
 		case <-timer.C:
 		}
 		timer.Stop()

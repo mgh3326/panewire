@@ -106,7 +106,13 @@ func (client *HubClient) settleExecutingSpawn(ctx context.Context, journal *node
 		if err != nil {
 			return nil, false // herdr unreachable: the row stays executing.
 		}
-		pane, found := findSpawnPane(agents, spawned.PaneID, row.Label)
+		pane, found, ambiguous := findSpawnPane(agents, spawned.PaneID, row.Label)
+		if ambiguous {
+			// Several agents bear the label and no record names the pane: absence
+			// is not proven, so the row stays executing and the replay answers
+			// unknown, leaving the decision to the hub's own pane read.
+			return nil, false
+		}
 		switch {
 		case found:
 			result = landedSpawnResult(result, row, spawned, pane)
@@ -114,7 +120,7 @@ func (client *HubClient) settleExecutingSpawn(ctx context.Context, journal *node
 			result = lostSpawnResult(result, spawnLostPaneGone, false)
 			result.Pane = spawned.PaneID
 		default:
-			result = lostSpawnResult(result, spawnLostNoPane, true)
+			result = lostSpawnResult(result, spawnLostNoPane, false)
 		}
 	}
 	now := client.nowUTC()
@@ -135,20 +141,20 @@ func (client *HubClient) settleExecutingSpawn(ctx context.Context, journal *node
 
 // findSpawnPane matches the job's recorded pane, else the one agent bearing
 // the spawn's label (a pane herdr created before the record was written).
-func findSpawnPane(agents []nodeHerdrRow, paneID, label string) (nodeAgentRow, bool) {
+func findSpawnPane(agents []nodeHerdrRow, paneID, label string) (pane nodeAgentRow, found, ambiguous bool) {
 	var byLabel []nodeAgentRow
 	for _, agent := range agents {
 		if paneID != "" && agent.PaneID == paneID && (label == "" || agent.Name == "" || agent.Name == label) {
-			return agent.nodeAgentRow, true
+			return agent.nodeAgentRow, true, false
 		}
 		if label != "" && agent.Name == label {
 			byLabel = append(byLabel, agent.nodeAgentRow)
 		}
 	}
 	if paneID == "" && len(byLabel) == 1 {
-		return byLabel[0], true
+		return byLabel[0], true, false
 	}
-	return nodeAgentRow{}, false
+	return nodeAgentRow{}, false, paneID == "" && len(byLabel) > 1
 }
 
 func landedSpawnResult(result hubSpawnResult, row executingSpawn, spawned localSpawnRecord, pane nodeAgentRow) hubSpawnResult {

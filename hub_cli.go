@@ -23,6 +23,8 @@ import (
 
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
+
+	"github.com/mgh3326/panewire/internal/hubretry"
 )
 
 // loadHubAuthFile accepts the intentionally small server-side token format:
@@ -406,27 +408,47 @@ func runHubCLI(args []string) int {
 			_ = listener.Close()
 		}
 	}()
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	// The first signal starts the drain; a second one then ends the process at
+	// once, the way an operator expects of ^C twice.
+	go func() { <-ctx.Done(); stop() }()
+	return serveHub(ctx, hub, listeners, hubDrainTimeout)
+}
+
+// serveHub serves until ctx ends, then drains (hub_drain.go): new work is
+// refused with a retryable answer, work in flight gets up to drainTimeout, each
+// node is told to redial, and only then do the listeners close. The
+// maintenance loops and spawn workers run on their own context that ends after
+// the drain, so a dispatch in flight is not cancelled by the signal itself.
+func serveHub(ctx context.Context, hub *HubServer, listeners []net.Listener, drainTimeout time.Duration) int {
 	server := &http.Server{
 		Handler:           hub.Handler(),
 		ReadHeaderTimeout: 5 * time.Second,
 		IdleTimeout:       2 * time.Minute,
 	}
-	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer cancel()
-	go hub.RunMaintenance(ctx)
-	go func() {
-		<-ctx.Done()
-		shutdownContext, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer shutdownCancel()
-		_ = server.Shutdown(shutdownContext)
-	}()
+	runCtx, runCancel := context.WithCancel(context.Background())
+	defer runCancel()
+	go hub.RunMaintenance(runCtx)
 	errs := make(chan error, len(listeners))
 	for _, listener := range listeners {
 		go func(listener net.Listener) { errs <- server.Serve(listener) }(listener)
 	}
-	if serveErr := <-errs; serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
-		fmt.Fprintln(os.Stderr, "hub unavailable")
-		return ExitInternal
+	select {
+	case serveErr := <-errs:
+		if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
+			fmt.Fprintln(os.Stderr, "hub unavailable")
+			return ExitInternal
+		}
+		return ExitOK
+	case <-ctx.Done():
+	}
+	hub.Drain(drainTimeout)
+	runCancel()
+	shutdownContext, shutdownCancel := context.WithTimeout(context.Background(), hubDrainShutdownBudget)
+	defer shutdownCancel()
+	if server.Shutdown(shutdownContext) != nil {
+		_ = server.Close()
 	}
 	return ExitOK
 }
@@ -470,6 +492,9 @@ type hubCLIDeps struct {
 	HTTPClient            *http.Client
 	AllowInsecureForTests bool
 	Now                   func() time.Time
+	// HubRetry bounds how an idempotent hub call is sent again; the zero value
+	// is the production policy (hubretry.Budget).
+	HubRetry hubretry.Policy
 }
 
 // runHubEmitCLI sends one display-only note as an authenticated node and

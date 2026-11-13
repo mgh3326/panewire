@@ -524,6 +524,8 @@ func (client *HubClient) Run(ctx context.Context) {
 		go client.runFleetQuota(ctx)
 	}
 	backoff := client.initialBackoff
+	var redialUntil time.Time
+	firstRedial := false
 	for {
 		if ctx.Err() != nil {
 			return
@@ -534,6 +536,9 @@ func (client *HubClient) Run(ctx context.Context) {
 			client.endpoint = endpoint
 			err = client.serve(ctx, connection)
 			_ = connection.CloseNow()
+			// A session that was up has just ended: the hub most likely
+			// restarted, so come back on the fast schedule (hub_redial.go).
+			redialUntil, firstRedial = time.Now().Add(hubRedialFastWindow), true
 		}
 		if ctx.Err() != nil {
 			return
@@ -541,7 +546,12 @@ func (client *HubClient) Run(ctx context.Context) {
 		// Neither error nor endpoint data is included: a transport response can
 		// reflect a credential or bearer value through an intermediary.
 		client.warn("hub unavailable; retrying")
-		if client.wait(ctx, backoff) != nil {
+		delay := backoff
+		if time.Now().Before(redialUntil) {
+			delay = hubRedialDelay(backoff, firstRedial)
+			firstRedial = false
+		}
+		if client.wait(ctx, delay) != nil {
 			return
 		}
 		backoff = nextHubBackoff(backoff, client.maxBackoff)
@@ -1999,6 +2009,14 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 				continue
 			}
 			switch message.Type {
+			case "redial":
+				// The hub is restarting and has finished what it owed this
+				// node. End the session so Run dials again at once.
+				select {
+				case readErrors <- errHubRedial:
+				case <-ctx.Done():
+				}
+				return
 			case "pong":
 				select {
 				case registered <- struct{}{}:
@@ -2807,7 +2825,7 @@ func parseHubOutboundRejection(payload []byte) (hubOutboundMessage, hubOutboundR
 	}
 	reject := hubOutboundRejection{Class: hubUnparsedInvalidRequest, Type: message.Type}
 	switch message.Type {
-	case "ping", "pong":
+	case "ping", "pong", "redial":
 		if len(fields) != 1 {
 			return hubOutboundMessage{}, reject
 		}

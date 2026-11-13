@@ -206,6 +206,13 @@ func (h *HubServer) handleSpawnOperation(w http.ResponseWriter, r *http.Request)
 	}{task.Job, task.Request.RequestID, task.Status, task.Outcome})
 }
 
+// hubSpawnWorkerCount bounds how many accepted spawns the hub executes at once.
+// Each worker holds its request for the whole remote landing, so a slow or
+// restarting node keeps workers busy; with four, a reviewer burst left requests
+// queued past their 600 s deadline (hk 4348, 4368). Eight is a stopgap until
+// one handler per node replaces the global pool (hk 4358).
+const hubSpawnWorkerCount = 8
+
 func (h *HubServer) runSpawnCoordinator(parent context.Context) {
 	if h.inbox == nil {
 		return
@@ -214,10 +221,10 @@ func (h *HubServer) runSpawnCoordinator(parent context.Context) {
 	defer cancel()
 	stop := context.AfterFunc(h.closeCtx, cancel)
 	defer stop()
-	work := make(chan hubSpawnTask, 4)
+	work := make(chan hubSpawnTask, hubSpawnWorkerCount)
 	var mu sync.Mutex
 	active := map[string]bool{}
-	for range 4 {
+	for range hubSpawnWorkerCount {
 		h.spawnWorkers.Add(1)
 		go func() {
 			defer h.spawnWorkers.Done()
@@ -226,8 +233,13 @@ func (h *HubServer) runSpawnCoordinator(parent context.Context) {
 				case <-ctx.Done():
 					return
 				case task := <-work:
-					h.inbox.store.touchSpawn(ctx, task.Request.RequestID, h.now().UTC())
-					h.executeSpawnTask(ctx, task)
+					// A draining hub starts nothing new; the durable row stays
+					// pending for the next hub (hub_drain.go).
+					if h.drain.enter() {
+						h.inbox.store.touchSpawn(ctx, task.Request.RequestID, h.now().UTC())
+						h.executeSpawnTask(ctx, task)
+						h.drain.leave()
+					}
 					mu.Lock()
 					delete(active, task.Request.RequestID)
 					mu.Unlock()
@@ -239,7 +251,7 @@ func (h *HubServer) runSpawnCoordinator(parent context.Context) {
 	defer tick.Stop()
 	for {
 		tasks, err := h.inbox.store.pendingSpawns(ctx)
-		if err == nil {
+		if err == nil && h.drain.admit() {
 			for _, task := range tasks {
 				mu.Lock()
 				busy := active[task.Request.RequestID]
@@ -296,7 +308,7 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 	}
 	ctx, cancel := context.WithDeadline(parent, task.Deadline)
 	defer cancel()
-	transport := &directSpawnTransport{h: h, task: task, started: time.Now()}
+	transport := &directSpawnTransport{h: h, task: task, started: time.Now(), probeWait: spawnNotStartedProbe}
 	if task.Node != nil {
 		_, _ = transport.dispatch(ctx, *task.Node)
 		return
@@ -447,7 +459,26 @@ type directSpawnTransport struct {
 	bound   bool
 	placing bool // inside the candidate loop, which can try another host
 	started time.Time
+	// probeWait is how long dispatch keeps asking its node after the landing
+	// wait ran out, before it settles the request as a timeout. Zero skips the
+	// probe (the coordinator's replay pass, whose own 5 s window is the probe).
+	probeWait time.Duration
 }
+
+// spawnNotStartedProbe bounds the question dispatch puts to a node once the
+// request's deadline has passed: did you ever start this? Past the deadline a
+// node never launches a request, so asking again cannot start a second one.
+const spawnNotStartedProbe = 5 * time.Second
+
+// spawnNotStarted reports a node answer that proves the request never began:
+// the node claimed it only after its deadline, so it holds no executing or
+// completed journal row and ran nothing (runClaimedHubSpawn).
+func spawnNotStarted(result hubSpawnResult) bool {
+	return result.RC == 124 && result.Stage == "claim" && result.Error == "deadline_not_started" && result.Retryable
+}
+
+// spawnNotStartedFix tells the caller what a not-started refusal means.
+const spawnNotStartedFix = "the node never started this request: it reached the node after its deadline. Replay the same command; the replay starts a new attempt and placement can pick another host."
 
 // nextHostRefusals are the refusals that say only that this host cannot run the
 // request now. cwd_unmapped is answered before any checkout or engine call, and
@@ -464,11 +495,6 @@ var nextHostRefusals = map[string]bool{
 	"spawn_failed:trust_prompt":         true,
 	"spawn_failed:omp_setup_wizard":     true,
 	"spawn_failed:auth_unavailable":     true,
-}
-
-func checkoutRefusalMovesNextHost(reason string) bool {
-	code, _, _ := strings.Cut(reason, ": ")
-	return code == "checkout_refused:dirty" || code == "checkout_refused:sha-missing" || code == "checkout_refused:branch-elsewhere"
 }
 
 // spawnRefusalTriesNextHost names a node refusal that moves an auto placement
@@ -521,7 +547,10 @@ func (t *directSpawnTransport) Spawn(ctx context.Context, req fleet.HubSpawnRequ
 func (t *directSpawnTransport) nextHostAfterRefusal(ctx context.Context, node hubSpawnRequest, result hubSpawnResult) bool {
 	// A dialog refusal comes after the engine launched a pane, so only a
 	// verified cleanup (Retryable) lets another host take the job id.
-	if !t.placing || result.RC == 0 || !result.Retryable || !spawnRefusalTriesNextHost(spawnResultReason(result)) || firstNonEmptyString(hubSpawnArg(t.task.Request.Args, "--host"), "auto") != "auto" {
+	// A request the node never started also moves on, while the request's own
+	// deadline still has room for another host.
+	movesOn := spawnRefusalTriesNextHost(spawnResultReason(result)) || spawnNotStarted(result) && t.h.now().Before(t.task.Deadline)
+	if !t.placing || result.RC == 0 || !result.Retryable || !movesOn || firstNonEmptyString(hubSpawnArg(t.task.Request.Args, "--host"), "auto") != "auto" {
 		return false
 	}
 	task, err := t.h.inbox.store.unbindRefusedSpawn(ctx, t.task.Request.RequestID, t.task.Attempt, node.RequestID)
@@ -562,60 +591,98 @@ func (t *directSpawnTransport) dispatch(ctx context.Context, node hubSpawnReques
 	}
 	select {
 	case result := <-entry.waiter:
-		// unknown: the node holds no live execution of this request. Past the
-		// deadline nothing will finish it, so a node without a labelled pane
-		// makes it orphaned (hub_spawn_orphan.go).
-		if result.CompletedAt != nil && result.Error == "unknown" && !h.now().Before(t.task.Deadline) && h.resolveOrphanedSpawn(t.task) {
-			return fleet.HubSpawnReply{}, &fleet.HubError{Kind: "hub_spawn_pending"}
-		}
-		if result.CompletedAt == nil || result.Error == "reconciling" || result.Error == "unknown" || result.Error == "journal_unavailable" || result.Error == "journal_conflict" {
-			return t.unknown(ctx, "unknown")
-		}
-		// The authenticated node's completed journal is necessary, and a current
-		// exact pane read is additionally required before accepting late success.
-		if result.RC == 0 && (node.Checkout != nil && (result.Receipt == nil || !spawnReceiptCheckoutPath(result.Receipt.CWD, node.Checkout.Dir, hubSpawnArg(node.Args, "-L"))) || !h.verifySpawnPane(ctx, node.Machine, result, node.Args)) {
-			return t.unknown(ctx, "unknown")
-		}
-		h.noteOneTimeActionRefusal(node.Machine, hubSpawnArg(node.Args, "-m"), result)
-		if t.nextHostAfterRefusal(ctx, node, result) {
-			return fleet.HubSpawnReply{RequestID: result.RequestID, RC: result.RC, JobID: result.JobID, StdoutTail: result.StdoutTail, Error: spawnResultReason(result), NextHost: true}, nil
-		}
-		stage := result.Stage
-		if stage == "" {
-			stage = "placement"
-		}
-		outcome := hubSpawnOutcome{RC: result.RC, Stage: stage, Reason: result.Error, Host: node.Machine, Pane: result.Pane, Retryable: result.Retryable, NodeResult: true, StageMS: result.StageMS, Role: hubSpawnArg(node.Args, "--role"), Profile: hubSpawnArg(node.Args, "-m"), E6Arm: t.task.Request.E6Arm}
-		if outcome.StageMS == nil {
-			outcome.StageMS = map[string]int64{}
-		}
-		outcome.StageMS["placement"] = min(int64(3600000), outcome.StageMS["placement"]+node.PlacementMS)
-		outcome.Fix = spawnResultFix(result.StdoutTail)
-		if result.Receipt != nil {
-			outcome.Profile = result.Receipt.Profile
-			outcome.Model = result.Receipt.Model
-			outcome.Role = result.Receipt.Role
-			outcome.LaneUnregistered = result.Receipt.LaneUnregistered
-		}
-		if outcome.RC != 0 {
-			outcome.Reason = spawnOutcomeReason(spawnResultReason(result), spawnResultRefusal(result.StdoutTail))
-		}
-		changed, err := h.inbox.store.completeSpawn(h.closeCtx, t.task, outcome, h.now().UTC())
-		if err != nil {
-			return fleet.HubSpawnReply{}, &fleet.HubError{Kind: "hub_spawn_pending"}
-		}
-		if changed {
-			h.recordSpawnTrace(t.task, outcome)
-			// The first completion of a request is the launch outcome; a
-			// replayed completion must not count twice.
-			h.observeLaunchOutcome(node.Machine, firstNonEmptyString(hubSpawnArg(node.Args, "-m"), outcome.Profile), result.RC, outcome.Reason, h.now().UTC())
-		}
-		return fleet.HubSpawnReply{RequestID: result.RequestID, RC: result.RC, JobID: result.JobID, Pane: result.Pane, StdoutTail: result.StdoutTail, Error: result.Error}, nil
+		return t.settleNodeResult(ctx, node, result)
 	case <-ctx.Done():
 		if errors.Is(ctx.Err(), context.Canceled) {
 			return fleet.HubSpawnReply{}, &fleet.HubError{Kind: "hub_spawn_pending"}
 		}
+		if t.probeWait > 0 {
+			if result, answered := t.probeNode(agent, entry, message); answered {
+				probeCtx, cancel := context.WithTimeout(h.closeCtx, t.probeWait)
+				defer cancel()
+				return t.settleNodeResult(probeCtx, node, result)
+			}
+		}
 		return t.unknown(h.closeCtx, "timeout")
 	}
+}
+
+// probeNode asks the node once more after the landing wait ran out, by
+// replaying the same request id, and waits at most probeWait for a definite
+// answer. Silence or an uncertain answer (still executing, restarted, journal
+// trouble) returns false: the caller keeps ownership as a timeout, never
+// guessing from silence. An answer to the original frame counts too.
+func (t *directSpawnTransport) probeNode(agent *hubAgent, entry *hubSpawnRecord, message any) (hubSpawnResult, bool) {
+	if agent.writeJSON(message) != nil {
+		return hubSpawnResult{}, false
+	}
+	timer := time.NewTimer(t.probeWait)
+	defer timer.Stop()
+	select {
+	case result := <-entry.waiter:
+		uncertain := result.CompletedAt == nil || result.Error == "reconciling" || result.Error == "unknown" || result.Error == "journal_unavailable" || result.Error == "journal_conflict"
+		return result, !uncertain
+	case <-timer.C:
+		return hubSpawnResult{}, false
+	case <-t.h.closeCtx.Done():
+		return hubSpawnResult{}, false
+	}
+}
+
+// settleNodeResult applies one answer from the bound node.
+func (t *directSpawnTransport) settleNodeResult(ctx context.Context, node hubSpawnRequest, result hubSpawnResult) (fleet.HubSpawnReply, error) {
+	h := t.h
+	// unknown: the node holds no live execution of this request. Past the
+	// deadline nothing will finish it, so a node without a labelled pane
+	// makes it orphaned (hub_spawn_orphan.go).
+	if result.CompletedAt != nil && result.Error == "unknown" && !h.now().Before(t.task.Deadline) && h.resolveOrphanedSpawn(t.task) {
+		return fleet.HubSpawnReply{}, &fleet.HubError{Kind: "hub_spawn_pending"}
+	}
+	if result.CompletedAt == nil || result.Error == "reconciling" || result.Error == "unknown" || result.Error == "journal_unavailable" || result.Error == "journal_conflict" {
+		return t.unknown(ctx, "unknown")
+	}
+	// The authenticated node's completed journal is necessary, and a current
+	// exact pane read is additionally required before accepting late success.
+	if result.RC == 0 && (node.Checkout != nil && (result.Receipt == nil || !spawnReceiptCheckoutPath(result.Receipt.CWD, node.Checkout.Dir, hubSpawnArg(node.Args, "-L"))) || !h.verifySpawnPane(ctx, node.Machine, result, node.Args)) {
+		return t.unknown(ctx, "unknown")
+	}
+	h.noteOneTimeActionRefusal(node.Machine, hubSpawnArg(node.Args, "-m"), result)
+	if t.nextHostAfterRefusal(ctx, node, result) {
+		return fleet.HubSpawnReply{RequestID: result.RequestID, RC: result.RC, JobID: result.JobID, StdoutTail: result.StdoutTail, Error: spawnResultReason(result), NextHost: true}, nil
+	}
+	stage := result.Stage
+	if stage == "" {
+		stage = "placement"
+	}
+	outcome := hubSpawnOutcome{RC: result.RC, Stage: stage, Reason: result.Error, Host: node.Machine, Pane: result.Pane, Retryable: result.Retryable, NodeResult: true, StageMS: result.StageMS, Role: hubSpawnArg(node.Args, "--role"), Profile: hubSpawnArg(node.Args, "-m"), E6Arm: t.task.Request.E6Arm}
+	if outcome.StageMS == nil {
+		outcome.StageMS = map[string]int64{}
+	}
+	outcome.StageMS["placement"] = min(int64(3600000), outcome.StageMS["placement"]+node.PlacementMS)
+	outcome.Fix = spawnResultFix(result.StdoutTail)
+	if outcome.Fix == "" && spawnNotStarted(result) {
+		outcome.Fix = spawnNotStartedFix
+	}
+	if result.Receipt != nil {
+		outcome.Profile = result.Receipt.Profile
+		outcome.Model = result.Receipt.Model
+		outcome.Role = result.Receipt.Role
+		outcome.LaneUnregistered = result.Receipt.LaneUnregistered
+	}
+	if outcome.RC != 0 {
+		outcome.Reason = spawnOutcomeReason(spawnResultReason(result), spawnResultRefusal(result.StdoutTail))
+	}
+	changed, err := h.inbox.store.completeSpawn(h.closeCtx, t.task, outcome, h.now().UTC())
+	if err != nil {
+		return fleet.HubSpawnReply{}, &fleet.HubError{Kind: "hub_spawn_pending"}
+	}
+	if changed {
+		h.recordSpawnTrace(t.task, outcome)
+		// The first completion of a request is the launch outcome; a
+		// replayed completion must not count twice.
+		h.observeLaunchOutcome(node.Machine, firstNonEmptyString(hubSpawnArg(node.Args, "-m"), outcome.Profile), result.RC, outcome.Reason, h.now().UTC())
+	}
+	return fleet.HubSpawnReply{RequestID: result.RequestID, RC: result.RC, JobID: result.JobID, Pane: result.Pane, StdoutTail: result.StdoutTail, Error: result.Error}, nil
 }
 func (t *directSpawnTransport) unknown(ctx context.Context, reason string) (fleet.HubSpawnReply, error) {
 	outcome := hubSpawnOutcome{RC: 75, Stage: "landing", Reason: reason, Host: spawnTaskHost(t.task), E6Arm: t.task.Request.E6Arm}

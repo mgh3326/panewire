@@ -122,7 +122,7 @@ func TestSpawnSettleGonePaneEndsLostWithReason(t *testing.T) {
 	}{
 		{"pane recorded then gone", "w1:p1", nodeAgentList(), spawnLostPaneGone, false, 0},
 		{"another agent now holds the pane id", "w1:p1", nodeAgentList(nodeAgentJSON("w1:p1", "other", "idle", "/x")), spawnLostPaneGone, false, 0},
-		{"nothing was launched", "", nodeAgentList(), spawnLostNoPane, true, 0},
+		{"nothing was launched", "", nodeAgentList(), spawnLostNoPane, false, 0},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -248,5 +248,15 @@ func settlePeer(t *testing.T) (*hubClientConnection, func() hubSpawnResult) {
 			t.Fatal("node sent no job.spawn.result")
 		}
 		return hubSpawnResult{}
+	}
+}
+
+// Two agents bear the label and no record names the pane: absence is not
+// proven, so the row stays executing instead of ending lost and retryable.
+func TestSpawnSettleAmbiguousLabelStaysExecuting(t *testing.T) {
+	herdr := &nodeFakeHerdr{agents: []string{nodeAgentList(nodeAgentJSON("w1:p1", "label-a", "idle", "/a"), nodeAgentJSON("w1:p2", "label-a", "idle", "/b"))}}
+	f := newSettleFixture(t, herdr.run)
+	if settled, left := f.client.settleExecutingSpawns(t.Context(), f.journal); settled != 0 || left != 1 || f.stored(t) != nil {
+		t.Fatalf("settled=%d left=%d stored=%+v", settled, left, f.stored(t))
 	}
 }

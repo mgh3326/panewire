@@ -27,7 +27,7 @@ see the next section.
     the spawn **landed**; the row completes with a success result and the job's
     receipt, and the hub's replay is answered at once;
   - no such pane: the row completes **lost** (`error: "lost"`, tail
-    `lost: pane_gone` or `lost: no_pane_launched`);
+    `lost: pane_gone` or `lost: no_pane_launched` (never retryable; several agents with the label and no record leave the row executing));
   - herdr unreachable: the row stays `executing` and the pass repeats every 30
     seconds, and on every replay of that request.
 - **Re-arms completion watchers** for live jobs, as before.
