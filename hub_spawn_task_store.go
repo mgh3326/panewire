@@ -297,19 +297,40 @@ func (s *laneInboxStore) spawnTaskByNode(parent context.Context, id string) (hub
 	return scanSpawnTask(s.db.QueryRowContext(ctx, s.q(`SELECT `+spawnTaskColumns+` FROM spawn_operations WHERE node_id=?`), id))
 }
 
-// pendingSpawns lists what the coordinator should run now: up to 32 fresh
-// requests (accepted, dispatching, reconciling), least recently run first, and
-// at most spawnStaleBatch deadline_exceeded rows whose back-off has run out.
-// The stale rows come from their own query, so no number of them can fill the
-// fresh page, and they follow the fresh rows into the work queue.
+// pendingSpawns returns the fresh runnable page and a bounded number of due
+// stale rows. Conditioned rows use a separate page so they cannot displace fresh
+// runnable work.
 func (s *laneInboxStore) pendingSpawns(parent context.Context, now time.Time) ([]hubSpawnTask, error) {
 	ctx, done := s.op(parent)
 	defer done()
-	tasks, err := s.queryPendingSpawns(ctx, `status IN ('accepted','dispatching','reconciling') ORDER BY last_run_ms,created_ms LIMIT 32`)
+	tasks, err := s.queryPendingSpawns(ctx, `status IN ('accepted','dispatching','reconciling') AND payload NOT LIKE '%"start_conditions":%' ORDER BY last_run_ms,created_ms LIMIT 32`)
 	if err != nil {
 		return nil, err
 	}
-	stale, err := s.queryPendingSpawns(ctx, `status='deadline_exceeded' ORDER BY last_run_ms,created_ms LIMIT 256`)
+	stale, err := s.queryPendingSpawns(ctx, `status='deadline_exceeded' AND payload NOT LIKE '%"start_conditions":%' ORDER BY last_run_ms,created_ms LIMIT 256`)
+	if err != nil {
+		return nil, err
+	}
+	due := 0
+	for _, task := range stale {
+		if due < spawnStaleBatch && spawnStaleProbeDue(task, now) {
+			tasks = append(tasks, task)
+			due++
+		}
+	}
+	return tasks, nil
+}
+
+// pendingStartConditionSpawns gives legacy conditioned rows their own bounded
+// fresh page and due-stale pass, separate from ordinary runnable spawns.
+func (s *laneInboxStore) pendingStartConditionSpawns(parent context.Context, now time.Time) ([]hubSpawnTask, error) {
+	ctx, done := s.op(parent)
+	defer done()
+	tasks, err := s.queryPendingSpawns(ctx, `status IN ('accepted','dispatching','reconciling') AND payload LIKE '%"start_conditions":%' ORDER BY last_run_ms,created_ms LIMIT 32`)
+	if err != nil {
+		return nil, err
+	}
+	stale, err := s.queryPendingSpawns(ctx, `status='deadline_exceeded' AND payload LIKE '%"start_conditions":%' ORDER BY last_run_ms,created_ms LIMIT 256`)
 	if err != nil {
 		return nil, err
 	}
