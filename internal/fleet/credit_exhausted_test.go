@@ -372,7 +372,7 @@ func TestCreditPermanentPublishFailureDoesNotRearmUntilAccountIsKnown(t *testing
 	}
 	notices := 0
 	for _, call := range runner.Calls {
-		if call.Name == "panewire" && slices.Contains(call.Args, "emit") && slices.Contains(call.Args, "CREDIT_CLOSE_PAUSED") {
+		if call.Name == "panewire" && slices.Contains(call.Args, "emit") && strings.Contains(strings.Join(call.Args, " "), "CREDIT_CLOSE_PAUSED") {
 			notices++
 		}
 	}
