@@ -165,8 +165,9 @@ func TestPlacementDecisionReadsHostsFresh(t *testing.T) {
 	prom.set(placementCPUBusy1mQuery, "oci", "0.1")
 	prom.set(placementCPUBusyQuery, "rpi", "0.9999")
 	prom.set(placementCPUBusy1mQuery, "rpi", "0.9999")
+	// oci: 0.9 free * power 30 = 27, less the 10 of the job decided onto it.
 	host, scores := countedDecision(t, hub, "fresh-job-b")
-	if host != "oci" || scores["oci"] < 20 || scores["rpi"] > -20 {
+	if host != "oci" || scores["oci"] < 15 || scores["rpi"] > -19.5 {
 		t.Fatalf("second decision = %s on %v: it ranked on the readings of the first", host, scores)
 	}
 }
