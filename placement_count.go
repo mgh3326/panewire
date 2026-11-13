@@ -128,6 +128,11 @@ func (h *HubServer) completeSpawn(ctx context.Context, task hubSpawnTask, outcom
 		switch spawnOutcomeStatus(outcome) {
 		case "failed", "retryable":
 			h.releasePlacementCount(task.Job)
+		case "deadline_exceeded":
+			// Never bound: no node was asked, so nothing launched.
+			if task.Node == nil {
+				h.releasePlacementCount(task.Job)
+			}
 		}
 	}
 	return changed, err
