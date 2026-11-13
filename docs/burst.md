@@ -48,5 +48,5 @@ policy, or its existing paired `--failover-wake-on` and
 `--failover-wake-mac` flags; the latter MAC is shared for burst wake. Existing
 failover's paired-flag rejection remains in force. Run the `machine-b` node with `--burst-poweroff-allowed` only after
 passwordless `sudo -n /usr/sbin/poweroff` has been deliberately configured.
-It is off by default. Hub Telegram notifications are one line per up/down
-event and contain only phase and measurements.
+It is off by default. The hub sends no burst notification; burst events appear in the UI Recent
+events list only.

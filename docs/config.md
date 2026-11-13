@@ -603,8 +603,7 @@ the `panewire job` upload had 3 s, and a timed-out upload still warns
 before sending it.
 
 **Explicit files.** A file the operator names (the hub's `--handoffkeep-env`
-and `--chat-env`, a node's `spawn.json` `handoffkeep_env`, and the assistant's
-`-config`) is read as before, and its bearer is `HANDOFFKEEP_TOKEN_SVC_PANEWIRE`
+and `--chat-env`, a node's `spawn.json` `handoffkeep_env`) is read as before, and its bearer is `HANDOFFKEEP_TOKEN_SVC_PANEWIRE`
 when present, else `HANDOFFKEEP_TOKEN`, so files written before hk 3570 keep
 working. **Node on defaults.** With no `spawn.json`, the node's hk credential
 is not an explicit file: it resolves through the same loader, in the same

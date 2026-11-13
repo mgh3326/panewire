@@ -337,8 +337,7 @@ Two kinds of traffic keep their existing delivery in every lane:
   make up the row's event id, and the row's text matches the hub-rendered
   message and question ids;
 - events the operator posts through the [R24 HTTP ingress](r24-http-ingress.md)
-  with the operator token, including the assistant's `deliver` tool and its
-  outbox notices. This is the explicit operator path into a pane, so it is
+  with the operator token,  This is the explicit operator path into a pane, so it is
   kept. A restart replay of such a row is filed like any other item.
 
 The hub's digest and hold batches are not typed into an inbox-only lane

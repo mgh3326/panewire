@@ -374,16 +374,8 @@ func (h *HubServer) dispatchBurst(event hubBurstEvent) {
 	if event.Phase == hubFailoverPhaseDown {
 		record = h.nodes[event.Machine]
 	}
-	load := h.burstState.LastLoad
 	h.mu.Unlock()
 	if record != nil && record.agent != nil {
 		record.agent.queueBurst(event)
-	}
-	if notifier, ok := h.notifier.(interface {
-		SendBurst(context.Context, string) error
-	}); ok {
-		go func() {
-			_ = notifier.SendBurst(context.Background(), fmt.Sprintf("burst %s target=%s load5=%.2f swap_gb=%.2f workers=%d", event.Phase, event.Machine, load.Load5, load.SwapUsedGB, load.WorkerProcs))
-		}()
 	}
 }

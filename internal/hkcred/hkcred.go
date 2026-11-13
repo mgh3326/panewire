@@ -163,7 +163,7 @@ func (c Credentials) missing() []string {
 }
 
 // ExplicitFileToken is the bearer of a file the operator named explicitly
-// (a hub flag, spawn.json handoffkeep_env, the assistant's -config):
+// (a hub flag, spawn.json handoffkeep_env):
 // HANDOFFKEEP_TOKEN_SVC_PANEWIRE first, else the file's HANDOFFKEEP_TOKEN so
 // files written before hk 3570 keep working.
 func ExplicitFileToken(values map[string]string) string {

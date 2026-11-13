@@ -2,6 +2,7 @@ package panewire
 
 import (
 	"context"
+	"log/slog"
 	"sort"
 	"strings"
 	"time"
@@ -44,11 +45,6 @@ type HubAlert struct {
 	MachineID string
 	Reason    string
 	Check     string
-}
-
-// HubNotifier is the optional server-side notification boundary.
-type HubNotifier interface {
-	Send(context.Context, HubAlert) error
 }
 
 type hubAlertState struct {
@@ -272,9 +268,6 @@ func (h *HubServer) pendingHubNotificationLocked(key string, state *hubAlertStat
 }
 
 func (h *HubServer) pendingHubNotificationAtLocked(now time.Time, key string, state *hubAlertState) []hubNotification {
-	if h.notifier == nil {
-		return nil
-	}
 	if state.active && !state.incidentDelivered && !state.incidentPending {
 		state.incidentPending = true
 		return []hubNotification{{
@@ -320,12 +313,24 @@ func hubAlertMachineID(key string) string {
 	return "unknown"
 }
 
+// logHubAlert is the hub's only alert sink. The three identifiers are logged as
+// attributes so an operator can filter on them; the rendered text carries the
+// same content for a reader of the plain log.
+func (h *HubServer) logHubAlert(alert HubAlert) {
+	level := slog.LevelWarn
+	if alert.Recovery {
+		level = slog.LevelInfo
+	}
+	h.logger.Log(context.Background(), level, "hub alert",
+		"text", formatHubAlert(alert), "machine", alert.MachineID, "reason", alert.Reason,
+		"check", alert.Check, "recovery", alert.Recovery)
+}
+
+// dispatchHubNotifications delivers each due alert to the hub log. The log line
+// is the delivery: it either happens or the process is gone, so a delivered
+// alert is recorded in the same pass that decides it is due.
 func (h *HubServer) dispatchHubNotifications(notifications []hubNotification) {
 	for _, notification := range notifications {
-		notifier := h.notifier
-		if notifier == nil {
-			continue
-		}
 		h.mu.Lock()
 		state := h.alerts[notification.key]
 		shouldSend := state != nil && state.incidentGeneration == notification.generation
@@ -354,16 +359,8 @@ func (h *HubServer) dispatchHubNotifications(notifications []hubNotification) {
 		if !shouldSend {
 			continue
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		err := notifier.Send(ctx, notification.alert)
-		cancel()
-		if err != nil {
-			h.logger.Warn("hub Telegram notification failed")
-		}
-		var deliveredAt time.Time
-		if err == nil {
-			deliveredAt = h.now().UTC()
-		}
+		h.logHubAlert(notification.alert)
+		deliveredAt := h.now().UTC()
 		h.mu.Lock()
 		state = h.alerts[notification.key]
 		if state != nil && state.incidentGeneration == notification.generation {
@@ -373,13 +370,13 @@ func (h *HubServer) dispatchHubNotifications(notifications []hubNotification) {
 				} else {
 					state.incidentPending = false
 				}
-				if err == nil && state.active && (!notification.reminder || !state.remindersStopped) {
+				if state.active && (!notification.reminder || !state.remindersStopped) {
 					state.incidentDelivered = true
 					state.lastIncidentDelivery = deliveredAt
 				}
 			} else {
 				state.recoveryPending = false
-				if err == nil && !state.active && state.recoveryNeeded {
+				if !state.active && state.recoveryNeeded {
 					state.recoveryNeeded = false
 					state.incidentDelivered = false
 					state.lastIncidentDelivery = time.Time{}

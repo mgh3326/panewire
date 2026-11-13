@@ -615,16 +615,12 @@ func writeLaneJSONError(writer http.ResponseWriter, status int, code string) {
 	}{Error: code})
 }
 
-// Guidance for each authority refusal. A refusal that does not say where to go
-// instead pushes an operator toward editing the lanes file by hand, which is
-// the one path this API cannot reach — so each code names the next step rather
-// than a generic destination.
+// Guidance for each authority refusal. The lanes API does not write an
+// authority lane, so the only next step is the operator's own edit of the
+// lanes file on the hub host; each code names what to do about its refusal.
 var authorityLaneErrorGuidance = map[string]string{
-	"authority_lane_direct_write": "POST /v1/control-plane/transfer",
-	// Transfer is refused in this state too, so pointing at it would send the
-	// operator somewhere that is also closed.
+	"authority_lane_direct_write":       "edit the lanes file on the hub host",
 	"authority_lane_policy_unavailable": "restore the --control-plane-lanes policy file",
-	"authority_bundle_mismatch":         "transfer every configured authority lane in one request",
 }
 
 // writeAuthorityLaneError adds a "use" field beside the unchanged "error" key.

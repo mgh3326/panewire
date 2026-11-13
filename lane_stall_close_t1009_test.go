@@ -53,7 +53,7 @@ func TestT1009CloseNeverCancelsOrdinaryRelay(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	hub := t987StallHub(t, `{"lanes":{"lane-a":{"machine":"host-a","pane":"w1:p1"}}}`, client, &task198Notifier{}, io.Discard)
+	hub := t987StallHub(t, `{"lanes":{"lane-a":{"machine":"host-a","pane":"w1:p1"}}}`, client, newHubAlertLog(io.Discard))
 	ingress := func(eventID string) hubJobEventPayload {
 		return hubJobEventPayload{JobID: laneEventTransportID("lane-a", eventID), Epoch: 1, OwnerLane: "lane-a", EventID: eventID, Text: "ordinary lane event", Host: "hub", Label: "t1009"}
 	}
@@ -97,7 +97,7 @@ func TestT1009LaneStallHeldCountSkipsHeldRowsFromOtherLanes(t *testing.T) {
 	fake, client, closeServer := newFakeHandoffkeep(t)
 	defer closeServer()
 	var logBuf bytes.Buffer
-	hub := t987StallHub(t, `{"lanes":{"lane-a":{"machine":"host-a","pane":"w1:p1"}}}`, client, &task198Notifier{}, &logBuf)
+	hub := t987StallHub(t, `{"lanes":{"lane-a":{"machine":"host-a","pane":"w1:p1"}}}`, client, newHubAlertLog(&logBuf))
 	t961ActiveNode(hub, "host-a", HubActiveJob{JobID: "t1009-held", OwnerLane: "lane-a"})
 	old := time.Now().UTC().Add(-(relayLaneStallAge + time.Minute)).Format(time.RFC3339Nano)
 	fake.seedUndelivered(t961LaneRow(61, "lane-a", "t1009-held", old, 1))

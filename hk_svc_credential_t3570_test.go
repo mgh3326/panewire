@@ -13,7 +13,7 @@ import (
 
 // hk 3570: the node's default hk credential is panewire's own svc-panewire
 // file, never the hk CLI's config.env; an explicit file (hub flag, spawn.json
-// handoffkeep_env, assistant -config) accepts HANDOFFKEEP_TOKEN_SVC_PANEWIRE
+// handoffkeep_env) accepts HANDOFFKEEP_TOKEN_SVC_PANEWIRE
 // first and keeps HANDOFFKEEP_TOKEN as its fallback.
 
 const (
@@ -118,31 +118,6 @@ func TestHKSvcExplicitFileAcceptsServiceKeyFirst(t *testing.T) {
 			env.setAuth(request)
 			if got := request.Header.Get("Authorization"); got != "Bearer "+tc.want {
 				t.Fatalf("Authorization=%q, want Bearer %s", got, tc.want)
-			}
-		})
-	}
-}
-
-// The assistant's -config file is an explicit file too.
-func TestHKSvcAssistantConfigAcceptsServiceKeyFirst(t *testing.T) {
-	dir := t.TempDir()
-	tokenFile := writeMode0600(t, dir, "berry.token", assistantTestBerryToken)
-	targetsFile := writeMode0600(t, dir, "targets.json", assistantTestTargets)
-	rest := "PANEWIRE_ASSISTANT_TOKEN_FILE=" + tokenFile + "\nPANEWIRE_ASSISTANT_TARGETS_FILE=" + targetsFile + "\n"
-	for _, tc := range []struct {
-		name, body, want string
-	}{
-		{"svc-only", "HANDOFFKEEP_TOKEN_SVC_PANEWIRE=" + svcCredRootToken + "\n", svcCredRootToken},
-		{"svc-wins", "HANDOFFKEEP_TOKEN=" + svcCredRootLegacy + "\nHANDOFFKEEP_TOKEN_SVC_PANEWIRE=" + svcCredRootToken + "\n", svcCredRootToken},
-		{"legacy", "HANDOFFKEEP_TOKEN=" + svcCredRootLegacy + "\n", svcCredRootLegacy},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			cfg, err := loadAssistantConfig(writeMode0600(t, dir, tc.name+".env", "HANDOFFKEEP_URL=http://127.0.0.1:8080\n"+tc.body+rest))
-			if err != nil {
-				t.Fatalf("config refused: %v", err)
-			}
-			if cfg.HKToken != tc.want {
-				t.Fatalf("assistant hk token=%q, want %q", cfg.HKToken, tc.want)
 			}
 		})
 	}
