@@ -14,8 +14,11 @@ import (
 )
 
 // A quota-stopped job is handled by role (hk 3334, docs/quota-stop.md): a
-// reviewer is replaced on another pool at once; a worker or tester the
-// quota-stop manager has handed over is replaced the same way. The node
+// reviewer whose stop is announced on a live job (a credit rejection) is
+// replaced on another pool at once; a worker or tester the quota-stop manager
+// has handed over is replaced the same way. A reviewer on a visible quota
+// screen is ended by its watcher before any announcement, with no grace (hk
+// 4507), so the record is no longer live here and mergewake respawns it. The node
 // announces the stop with job.lost reason "quota_stop" and leaves the hk
 // record alone, because hk never rewrites a lost record and the pointer to the
 // successor can only be written with it. The hub places the successor, then
@@ -174,7 +177,7 @@ func (h *HubServer) replaceQuotaStopped(ctx context.Context, machine string, eve
 		return skip("unreadable_request")
 	}
 	role := prior.Role
-	// A reviewer's quota stop is replaced at once. A worker or tester only
+	// An announced reviewer stop is replaced at once. A worker or tester only
 	// announces job.lost when the quota-stop manager handed it over.
 	if role != "reviewer" && role != "worker" && role != "tester" {
 		return skip("role", "role", role)

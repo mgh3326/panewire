@@ -17,15 +17,18 @@ import (
 // docs/quota-stop.md), so the watcher leaves its job live.
 var quotaStopRoles = []string{"reviewer"}
 
-// QuotaStopHandOffGrace is how long a reviewer's watcher leaves the hub to
-// replace a quota-stopped job before it ends the job itself, without a
-// replacement. The hub places the replacement, closes the pane and writes the
-// hk record with replaced_by (hk never rewrites a lost record, so the pointer
-// can only be written once). Zero ends the job at once. It must outlast the
-// hub's whole replacement (hub_quota_replace.go quotaReplaceBudget, a hard
-// deadline) plus the relay to the hub, or the
-// watcher writes a terminal record without the successor pointer while the hub
-// is still placing it.
+// QuotaStopHandOffGrace is how long a watcher leaves the hub to replace a job
+// whose quota stop was announced (a worker or tester the quota-stop manager
+// handed over, or a credit-stopped job) before it ends the job itself, without
+// a replacement. The hub places the replacement, closes the pane and writes the
+// hk record with replaced_by or handed_over_to (hk never rewrites a lost record,
+// so the pointer can only be written once). Zero ends the job at once. It must
+// outlast the hub's whole replacement (hub_quota_replace.go quotaReplaceBudget,
+// a hard deadline) plus the relay to the hub, or the watcher writes a terminal
+// record without the successor pointer while the hub is still placing it.
+//
+// A reviewer on a visible quota screen has no grace: its watcher ends the job
+// at once (hk 4507) and mergewake respawns the review.
 const QuotaStopHandOffGrace = 10 * time.Minute
 
 // QuotaStopEndReason is the hk end_reason of a quota-stopped job:

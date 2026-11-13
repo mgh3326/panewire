@@ -27,7 +27,7 @@ var (
 	codexSignal = regexp.MustCompile(`(?i)^you've hit your usage limit[.·:].*try again at`)
 	codex       = regexp.MustCompile(`(?i)try again at\s+([0-9]{1,2}:[0-9]{2}\s*(?:AM|PM)?)(?:\s+(UTC|GMT|Z))?`)
 	atClock     = regexp.MustCompile(`(?i)\bat\s+([0-9]{1,2}:[0-9]{2}\s*(?:AM|PM)?)(?:\s+(UTC|GMT|Z))?`)
-	relative    = regexp.MustCompile(`(?i)reset(?:s)? in\s+(\d+)\s*(seconds?|minutes?|hours?)`)
+	relative    = regexp.MustCompile(`(?i)reset(?:s)? in\s+(\d+)\s*(seconds?|minutes?|hours?)(?:\s*(?:and\s+|,\s*)?(\d+)\s*(seconds?|minutes?))?`)
 	dateReset   = regexp.MustCompile(`(?i)resets?\s+([A-Za-z]{3,9})\s+(\d{1,2}),?\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm))(?:\s+(UTC|GMT|Z)|\s*\(([A-Za-z_]+/[A-Za-z_]+)\))?`)
 )
 
@@ -55,17 +55,16 @@ func Classify(screen string, now time.Time, local *time.Location) (Stop, bool) {
 	lower := strings.ToLower(screen)
 	out.Choice = strings.Contains(lower, "upgrade") || strings.Contains(lower, "credits") || strings.Contains(lower, "choose an option") || strings.Contains(lower, "wait until reset") || strings.Contains(lower, "wait for limit") || strings.Contains(lower, "use extra usage")
 	if m := relative.FindStringSubmatch(screen); m != nil {
-		n, err := strconv.ParseInt(m[1], 10, 32)
-		if err == nil && n > 0 {
-			unit := time.Second
-			if strings.HasPrefix(strings.ToLower(m[2]), "minute") {
-				unit = time.Minute
+		d, ok := relativeSpan(m[1], m[2])
+		if ok && m[3] != "" {
+			// "13 hours 9 minutes": the second span adds to the first.
+			if extra, extraOK := relativeSpan(m[3], m[4]); extraOK && d <= time.Duration(1<<63-1)-extra {
+				d += extra
 			}
-			if strings.HasPrefix(strings.ToLower(m[2]), "hour") {
-				unit = time.Hour
-			}
-			if n <= int64((1<<63-1)/unit) {
-				out.Reset = now.Add(time.Duration(n) * unit).UTC()
+		}
+		if ok {
+			if d < maxSpan {
+				out.Reset = now.Add(d).UTC()
 			}
 			return out, true
 		}
@@ -129,32 +128,86 @@ func Classify(screen string, now time.Time, local *time.Location) (Stop, bool) {
 	return out, true
 }
 
+// maxSpan marks a relative span too long for a time.Duration: the stop is
+// real, its reset unreadable.
+const maxSpan = time.Duration(1<<63 - 1)
+
+// relativeSpan reads "<n> <unit>" as a duration. ok is false for a zero or
+// unparsable count; a span past time.Duration is maxSpan.
+func relativeSpan(count, unit string) (d time.Duration, ok bool) {
+	n, err := strconv.ParseInt(count, 10, 32)
+	if err != nil || n <= 0 {
+		return 0, false
+	}
+	step := time.Second
+	switch strings.ToLower(unit)[0] {
+	case 'm':
+		step = time.Minute
+	case 'h':
+		step = time.Hour
+	}
+	if n > int64(maxSpan/step) {
+		return maxSpan, true
+	}
+	return time.Duration(n) * step, true
+}
+
 // statusPrefixes are the TUI marks a limit line can carry before its text: the
 // bullet and warning marks, the square (■) and the tool-output corner (⎿).
 // The square and corner were seen in a probe of the status line, not in a
 // captured stop screen; no captured footer is accepted by chromeLine yet.
 const statusPrefixes = "│┃•⚠️■⎿ "
 
-// statusBlock accepts only an exact CLI status line as the last
-// activity; later ordinary output, source code, or a completed answer invalidates it.
+// statusBlock accepts a CLI limit line as the last agent activity, wherever it
+// sits on the visible screen. Only the CLI's own chrome (rules, an empty
+// prompt, the option footer) and typed or injected user text may follow it:
+// the relay's directive lands below the limit line, and neither it nor an empty
+// prompt is agent output. Any other later line (ordinary output, source code,
+// a completed answer) invalidates the stop.
+//
+// The returned block is the limit line and the chrome after it, never the
+// injected text, so a reset time or an "upgrade" mentioned in a directive
+// cannot change the stop.
 func statusBlock(screen string) (string, bool) {
-	lines := strings.Split(strings.ReplaceAll(screen, "\r", ""), "\n")
-	for i := len(lines) - 1; i >= 0; i-- {
-		line := strings.TrimSpace(lines[i])
-		line = strings.TrimLeft(line, statusPrefixes)
-		if devin.MatchString(line) || claude.MatchString(line) || codexSignal.MatchString(line) {
-			if len(lines)-i > 16 {
-				return "", false
+	var limit string
+	var tail []string
+	found, later, injected := false, false, false
+	for _, raw := range strings.Split(strings.ReplaceAll(screen, "\r", ""), "\n") {
+		line := strings.TrimSpace(raw)
+		switch {
+		case chromeLine(line):
+			// A rule or blank line ends a user message.
+			injected = false
+			tail = append(tail, line)
+		case userTurn(line) || injected:
+			// Typed or injected user text: a marked line and the lines that
+			// continue it up to the next blank or rule.
+			injected = true
+		default:
+			line = strings.TrimLeft(line, statusPrefixes)
+			if devin.MatchString(line) || claude.MatchString(line) || codexSignal.MatchString(line) {
+				limit, tail, found, later = line, nil, true, false
+			} else {
+				later = true
 			}
-			for _, tail := range lines[i+1:] {
-				if !chromeLine(tail) {
-					return "", false
-				}
-			}
-			return line + "\n" + strings.Join(lines[i+1:], "\n"), true
 		}
 	}
-	return "", false
+	if !found || later {
+		return "", false
+	}
+	return limit + "\n" + strings.Join(tail, "\n"), true
+}
+
+// userTurn reports whether line starts a user turn: the prompt mark of devin,
+// claude or codex followed by text. An empty prompt and the placeholders are
+// chrome (chromeLine) and never reach here.
+func userTurn(line string) bool {
+	for _, mark := range []string{"❭", "❯", "›"} {
+		if strings.HasPrefix(line, mark) {
+			return true
+		}
+	}
+	return false
 }
 
 func chromeLine(line string) bool {

@@ -363,21 +363,16 @@ func (a *App) watch(ctx context.Context, args []string) error {
 		} else if seen {
 			missing++
 		}
-		// An idle pane stopped by a quota screen with no report will not
-		// finish: end the job with the reason, so it is retried, not lost
-		// silently at the watch deadline.
-		// Not while a hand-off is active: its stop is already announced, and a
-		// pane that reports no state_change_seq would be read and announced on
-		// every poll, moving the grace deadline each time.
+		// An idle reviewer pane stopped by a quota screen with no report will
+		// not finish: end the job at once with the reason, so mergewake
+		// respawns the review on another model instead of waiting out a
+		// grace (hk 4507). The hub's replacement needs a live hk record, so a
+		// reviewer stopped on its screen is not replaced there; only a worker
+		// or tester the manager announced, and a credit stop, get the grace.
+		// Not while a hand-off is active: its stop is already announced.
 		if present && !pending && !handOff.active && j.QuotaRole() != "counsel" {
 			if stop, ok := a.quotaStopped(ctx, j, paneAgent, &screenRead); ok && stop.CreditExhaustedAt.IsZero() {
-				if a.QuotaHandOffGrace <= 0 {
-					return a.quotaStopLost(ctx, j, stop, true)
-				}
-				if err := a.quotaStopAnnounce(ctx, j, stop); err != nil {
-					return err
-				}
-				handOff = quotaHandOff{stop: stop, until: a.Now().Add(a.QuotaHandOffGrace), seq: paneAgent.StateChangeSeq, active: true}
+				return a.quotaStopLost(ctx, j, stop, true)
 			}
 		}
 
