@@ -84,14 +84,12 @@ func TestNodeHubClientResendsRepeatableCalls(t *testing.T) {
 }
 
 // A call that is not repeatable is sent once: the 503 it gets back is the
-// answer, so a job close, reap, wake or node command never acts twice.
+// answer, so a job close, reap or node command never acts twice.
 func TestNodeHubClientSendsNonIdempotentCallsOnce(t *testing.T) {
 	for _, tc := range []struct{ method, path string }{
 		{http.MethodPost, "/v1/jobs/close"},
 		{http.MethodPost, "/v1/jobs/reap"},
-		{http.MethodPost, "/v1/nodes/wake"},
 		{http.MethodPost, "/v1/nodes/host-b/command"},
-		{http.MethodPost, "/v1/burst/request"},
 	} {
 		t.Run(tc.method+" "+tc.path, func(t *testing.T) {
 			var calls atomic.Int32
@@ -170,9 +168,7 @@ func TestNodeHubIdempotentClassifiesCalls(t *testing.T) {
 		{http.MethodPost, "/v1/inbox/x/read", false},
 		{http.MethodPost, "/v1/jobs/close", false},
 		{http.MethodPost, "/v1/jobs/reap", false},
-		{http.MethodPost, "/v1/nodes/wake", false},
 		{http.MethodPost, "/v1/nodes/host-b/command", false},
-		{http.MethodPost, "/v1/burst/request", false},
 	} {
 		if got := nodeHubIdempotent(tc.method, tc.path); got != tc.want {
 			t.Errorf("nodeHubIdempotent(%s %s)=%v want %v", tc.method, tc.path, got, tc.want)

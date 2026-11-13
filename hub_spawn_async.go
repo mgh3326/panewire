@@ -325,7 +325,6 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 	outcome := hubSpawnOutcome{Stage: "placement", StageMS: map[string]int64{}}
 	app.Hub = transport
 	app.State = directSpawnState{h}
-	app.Wake = directSpawnWake{h}
 	app.PlacementHosts = func(ctx context.Context, cwd string) ([]fleet.HostView, error) {
 		raw, err := json.Marshal(h.placement(ctx, "worker", cwd))
 		if err != nil {
@@ -412,26 +411,6 @@ func (s directSpawnState) Snapshot(ctx context.Context) (fleet.FleetSnapshot, er
 	return snap, err
 }
 
-type directSpawnWake struct{ h *HubServer }
-
-// Wake waits for the woken host's own heartbeat for at most the caller's
-// wake_wait. requestNodeWake otherwise waits until ctx is done — the whole
-// spawn deadline — and a coordinator worker holding a wake open that long
-// starves the four-worker spawn queue, so unrelated requests expire before a
-// worker starts them.
-func (w directSpawnWake) Wake(ctx context.Context, host string, request fleet.WakeRequest) error {
-	if request.WaitSeconds > 0 {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, time.Duration(request.WaitSeconds)*time.Second)
-		defer cancel()
-	}
-	_, code := w.h.requestNodeWake(ctx, host)
-	if code != "" {
-		return errors.New("node wake refused")
-	}
-	return nil
-}
-
 // spawnQueueWaitFix names the step that ran out of time when the coordinator
 // finds a request already past its deadline: the hub's own spawn queue. The
 // stage this branch reports is the last of the closed set, which reads as a
@@ -495,6 +474,7 @@ var nextHostRefusals = map[string]bool{
 	"spawn_failed:trust_prompt":         true,
 	"spawn_failed:omp_setup_wizard":     true,
 	"spawn_failed:auth_unavailable":     true,
+	"launch_proof_failed":               true,
 }
 
 // spawnRefusalTriesNextHost names a node refusal that moves an auto placement
@@ -551,6 +531,9 @@ func (t *directSpawnTransport) nextHostAfterRefusal(ctx context.Context, node hu
 	// deadline still has room for another host.
 	movesOn := spawnRefusalTriesNextHost(spawnResultReason(result)) || spawnNotStarted(result) && t.h.now().Before(t.task.Deadline)
 	if !t.placing || result.RC == 0 || !result.Retryable || !movesOn || firstNonEmptyString(hubSpawnArg(t.task.Request.Args, "--host"), "auto") != "auto" {
+		return false
+	}
+	if result.Error == "launch_proof_failed" && result.RC != 70 {
 		return false
 	}
 	task, err := t.h.inbox.store.unbindRefusedSpawn(ctx, t.task.Request.RequestID, t.task.Attempt, node.RequestID)

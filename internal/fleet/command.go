@@ -101,6 +101,11 @@ type ExitError struct {
 }
 
 func (e *ExitError) Error() string { return e.Message }
+
+type launchProofError struct{ *ExitError }
+
+func (*launchProofError) LaunchFailureClass() string { return "harness_version" }
+func (e *launchProofError) Unwrap() error            { return e.ExitError }
 func fail(code int, format string, args ...any) error {
 	return &ExitError{code, fmt.Sprintf(format, args...)}
 }

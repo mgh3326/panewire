@@ -225,7 +225,7 @@ func parseHubSpawnResult(raw []byte) (hubSpawnResult, bool) {
 
 func validHubSpawnResultError(value string) bool {
 	switch value {
-	case "spawn_disabled", "cwd_unmapped", "spawn_failed", "timeout", "brief_doc_unavailable", "journal_unavailable", "journal_conflict", "reconciling", "unknown", "deadline_not_started", "invalid_args", "invalid_request":
+	case "spawn_disabled", "cwd_unmapped", "spawn_failed", "launch_proof_failed", "timeout", "brief_doc_unavailable", "journal_unavailable", "journal_conflict", "reconciling", "unknown", "deadline_not_started", "invalid_args", "invalid_request":
 		return true
 	default:
 		return strings.HasPrefix(value, "checkout_refused:") && len(value) <= 80 && regexp.MustCompile(`^checkout_refused:[a-z0-9_.-]+$`).MatchString(value)
