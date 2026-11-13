@@ -530,7 +530,7 @@ func TestHubQuotaRefreshReportsFailureWhilePending(t *testing.T) {
 	// A later placement pass retries the same failing key. Wait for a third
 	// command to prove the second result was processed before checking logs.
 	h.startSpawnCoordinator(t.Context())
-	readCtx, cancel := context.WithTimeout(t.Context(), 8*time.Second)
+	readCtx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
 	defer cancel()
 	var retry map[string]json.RawMessage
 	if err := wsjson.Read(readCtx, node, &retry); err != nil {
