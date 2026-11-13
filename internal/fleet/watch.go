@@ -21,6 +21,10 @@ const laneEventMaxBytes = 16 << 10
 // as "READY withheld" inside a progress note, does not count.
 var laneTerminalMarker = regexp.MustCompile(`^(\[[^\]]*\]\s*)?(READY|DONE)\b`)
 
+// watchExecutable names the binary a detached watcher runs; tests point it at
+// a stand-in.
+var watchExecutable = os.Executable
+
 func (a *App) startWatch(job string) error {
 	return a.startWatchMode(job, false)
 }
@@ -30,7 +34,7 @@ func (a *App) startWatchMode(job string, rearmed bool) error {
 	if _, ok := a.Runner.(ExecRunner); !ok {
 		return nil
 	}
-	exe, e := os.Executable()
+	exe, e := watchExecutable()
 	if e != nil {
 		return e
 	}
@@ -53,6 +57,17 @@ func (a *App) startWatchMode(job string, rearmed bool) error {
 	}
 	return cmd.Process.Release()
 }
+
+// watchCommand builds the watcher's command. The watcher must outlive the
+// daemon that starts it, because a rollout restarts the daemon while a job
+// runs and the watcher is what records that job's result (hk 4345):
+//
+//   - Setsid gives it its own session and process group, so a signal to the
+//     daemon's group, and launchd's group kill, miss it.
+//   - The service manager must also leave it alone: systemd KillMode=process
+//     (KillMode=mixed still SIGKILLs the cgroup's remaining processes once the
+//     main process exits) and AbandonProcessGroup in the launchd plist. Both
+//     are in deploy/; TestDeployUnitsLetWatchersOutliveDaemon pins them.
 func watchCommand(exe, job string, rearmed bool) *exec.Cmd {
 	args := []string{"_watch", job}
 	if rearmed {

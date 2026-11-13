@@ -551,11 +551,7 @@ var nextHostRefusals = map[string]bool{
 	"spawn_failed:trust_prompt":         true,
 	"spawn_failed:omp_setup_wizard":     true,
 	"spawn_failed:auth_unavailable":     true,
-}
-
-func checkoutRefusalMovesNextHost(reason string) bool {
-	code, _, _ := strings.Cut(reason, ": ")
-	return code == "checkout_refused:dirty" || code == "checkout_refused:sha-missing" || code == "checkout_refused:branch-elsewhere"
+	"launch_proof_failed":               true,
 }
 
 // spawnRefusalTriesNextHost names a node refusal that moves an auto placement
@@ -622,6 +618,9 @@ func (t *directSpawnTransport) nextHostAfterRefusal(ctx context.Context, node hu
 	// deadline still has room for another host.
 	movesOn := spawnRefusalTriesNextHost(spawnResultReason(result)) || spawnNotStarted(result) && t.h.now().Before(t.task.Deadline)
 	if !t.placing || result.RC == 0 || !result.Retryable || !movesOn || firstNonEmptyString(hubSpawnArg(t.task.Request.Args, "--host"), "auto") != "auto" {
+		return false
+	}
+	if result.Error == "launch_proof_failed" && result.RC != 70 {
 		return false
 	}
 	reason := spawnResultReason(result)
@@ -856,7 +855,8 @@ func spawnNotificationText(job, request string, result hubSpawnOutcome) string {
 
 // Node results stay in the node's private journal indefinitely, so ACK loss and
 // prolonged offline periods never erase the only receipt. Automatic journal GC
-// and adoption of a pane after a node process crash are explicit non-goals.
+// is an explicit non-goal. A pane a node crash left behind is settled by the
+// restarted node from herdr (hub_spawn_settle.go), not adopted by the hub.
 
 func (h *HubServer) startSpawnCoordinator(ctx context.Context) {
 	h.closeMu.Lock()

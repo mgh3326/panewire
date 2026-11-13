@@ -569,9 +569,9 @@ func (h *HubServer) flushInbox() {
 		failed = true
 		return
 	}
-	batches, err := h.inbox.store.pendingBatches()
+	batches, err := h.inbox.store.pendingBatchesForContext(h.closeCtx)
 	if err != nil {
-		if h.closeCtx.Err() != nil {
+		if h.closeCtx.Err() != nil && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
 			return
 		}
 		h.logger.Error("inbox batch listing failed")

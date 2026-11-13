@@ -196,6 +196,13 @@ type HubClient struct {
 	// executing entry missing from it was left by a restart.
 	spawnActiveMu sync.Mutex
 	spawnActive   map[string]bool
+	// work counts the operations a stop waits for (hub_client_drain.go);
+	// stopDrain is that wait's bound, zero meaning defaultStopDrain; serving
+	// counts live hub connections, so a stop with no hub does not wait for an
+	// event queue nothing is writing.
+	work      workDrain
+	stopDrain time.Duration
+	serving   atomic.Int32
 	// Task pane sweep (node_pane_sweep.go, docs/pane-sweep.md). An interval of
 	// zero leaves the sweep off, as in every fixture.
 	taskPaneSweepInterval time.Duration
@@ -228,8 +235,11 @@ type HubClient struct {
 	relayEmitter       func(hubClientEvent) // fixture/connection-owned writer.
 	relayRecvSeqMu     sync.Mutex
 	relayRecvSeq       int64 // assigned synchronously by the hub read loop.
-	idleWakeMu         sync.Mutex
-	idleWake           *idleWakeManager
+	// inboundHandled is a fixture seam the inbound dispatcher calls after
+	// each queued frame it ran; production leaves it nil.
+	inboundHandled func(hubOutboundMessage)
+	idleWakeMu     sync.Mutex
+	idleWake       *idleWakeManager
 	// signalsPeer is the current connection, whose hub decides on host_signals.
 	signalsPeer          atomic.Pointer[hubClientConnection]
 	hostSignalsCollector func(context.Context) *HubHostSignals // fixture seam; nil collects
@@ -512,6 +522,7 @@ func (client *HubClient) Run(ctx context.Context) {
 		return
 	}
 	client.rearmWatchers()
+	go client.runSpawnSettle(ctx)
 	go client.runCreditRejectionRecovery(ctx)
 	go client.runLaneReconcile(ctx)
 	go client.runTaskPaneSweep(ctx)
@@ -658,6 +669,7 @@ type hubClientConnection struct {
 	// acceptsHostActivity is the same for hubFeatureHostActivity
 	// (host_activity.go).
 	acceptsHostActivity atomic.Bool
+	acceptsLaunchProof  atomic.Bool
 	connection          *websocket.Conn
 	writeMu             sync.Mutex
 }
@@ -1954,6 +1966,8 @@ func (client *HubClient) writeHello(ctx context.Context, peer *hubClientConnecti
 // connection has been closed by then.
 func (client *HubClient) serveConnection(ctx context.Context, connection *websocket.Conn) (*websocket.Conn, error) {
 	connection.SetReadLimit(hubSpawnMaxBodyBytes)
+	client.serving.Add(1)
+	defer client.serving.Add(-1)
 	peer := &hubClientConnection{connection: connection}
 	// Each connection may reach a different hub build (failover, redeploy).
 	client.signalsPeer.Store(peer)
@@ -1976,6 +1990,17 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 	}
 	readErrors := make(chan error, 1)
 	registered := make(chan struct{}, 1)
+	// Every inbound handler that can block on a lock, the node journal or the
+	// network runs on one ordered worker so the reader below keeps reading:
+	// a stalled recordRelayPersisted once kept job.spawn, pongs and every
+	// frame behind it waiting past their deadlines (hk 4375). One worker
+	// preserves the wire's receive order between the queued frames; the queue
+	// is bounded, and a session whose backlog fills it ends and resyncs on
+	// reconnect rather than letting the queue grow without bound.
+	inbound := make(chan hubOutboundMessage, hubInboundQueueDepth)
+	inboundDone := make(chan struct{})
+	defer close(inboundDone)
+	go client.serveHubInbound(ctx, peer, inbound, readErrors, inboundDone)
 	go func() {
 		for {
 			messageType, payload, err := connection.Read(ctx)
@@ -1991,7 +2016,9 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 			}
 			message, rejection := parseHubOutboundRejection(payload)
 			if rejection.Class != "" {
-				client.handleUnparsedHubMessage(ctx, peer, payload, rejection)
+				// The refusal answers with a peer write; it cannot sit in the
+				// read loop behind writeMu while a resync batch holds it.
+				go client.handleUnparsedHubMessage(ctx, peer, payload, rejection)
 				continue
 			}
 			if message.Type == "relay.inject" {
@@ -2004,10 +2031,16 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 			switch message.Type {
 			case "redial":
 				// The hub is restarting and has finished what it owed this
-				// node. End the session so Run dials again at once.
+				// node. The session ends through the inbound queue, so every
+				// frame the hub sent ahead of the redial is applied before the
+				// dispatcher reports it.
 				select {
-				case readErrors <- errHubRedial:
-				case <-ctx.Done():
+				case inbound <- message:
+				default:
+					select {
+					case readErrors <- errHubInboundQueueFull:
+					case <-ctx.Done():
+					}
 				}
 				return
 			case "pong":
@@ -2016,38 +2049,27 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 				default:
 				}
 			case "ping":
-				if err := peer.write(ctx, hubOutbound{Type: "pong"}); err != nil {
+				// The pong write contends on writeMu, which a long
+				// writeRelayEvents resync batch can hold for minutes; it goes
+				// to its own goroutine so the loop keeps reading. A failed
+				// write still ends the session.
+				go func() {
+					if err := peer.write(ctx, hubOutbound{Type: "pong"}); err != nil {
+						select {
+						case readErrors <- err:
+						case <-ctx.Done():
+						}
+					}
+				}()
+			case "failover", "burst", "wake", "job.revoked", "job.assigned", "relay.persisted", "pool.cooling.ack", "idle-wake.route", "burst.holds", "relay.edit", "relay.cancel":
+				select {
+				case inbound <- message:
+				default:
 					select {
-					case readErrors <- err:
+					case readErrors <- errHubInboundQueueFull:
 					case <-ctx.Done():
 					}
 					return
-				}
-			case "failover":
-				client.handleHubFailover(ctx, message)
-			case "burst":
-				client.handleHubBurst(ctx, message)
-			case "wake":
-				client.handleHubWake(ctx, message)
-			case "job.revoked":
-				if err := writeHubRevocation(client.jobsInboxRoot, hubJobRevokedEvent{Type: message.Type, JobID: message.JobID, Epoch: message.Epoch}); err != nil {
-					client.warn("job revocation local write unavailable")
-				} else if err := peer.write(ctx, hubClientWireEvent(hubClientEvent{Kind: "job.revocation.ack", Payload: hubJobCompletionPayload(message.JobID, message.Epoch)})); err != nil {
-					select {
-					case readErrors <- err:
-					case <-ctx.Done():
-					}
-					return
-				}
-			case "job.assigned":
-				client.assignmentMu.Lock()
-				client.assignedJobs[message.JobID] = message.Epoch
-				client.assignmentMu.Unlock()
-			case "relay.persisted", "pool.cooling.ack":
-				client.recordRelayPersisted(message)
-			case "idle-wake.route":
-				if manager := client.idleWakeManager(); manager != nil {
-					manager.ApplyRoute(ctx, hubIdleWakeRouteEvent{Type: message.Type, EventID: message.IdleWakeEventID, Pane: message.Pane, Eligible: message.Eligible, Lane: message.Lane, Text: message.Text, JobID: message.JobID, Reason: message.Reason})
 				}
 			case "hub.features":
 				peer.acceptsSignals.Store(slices.Contains(message.Features, hubFeatureHostSignals))
@@ -2055,15 +2077,8 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 				peer.acceptsLaneEventPane.Store(slices.Contains(message.Features, hubFeatureLaneEventPane))
 				peer.acceptsPaneCaptureDoc.Store(slices.Contains(message.Features, hubFeaturePaneCaptureDoc))
 				peer.acceptsHostActivity.Store(slices.Contains(message.Features, hubFeatureHostActivity))
+				peer.acceptsLaunchProof.Store(slices.Contains(message.Features, hubFeatureLaunchProof))
 				continue
-			case "burst.holds":
-				client.burstMu.Lock()
-				client.burstHoldsActive = message.HoldsActive
-				client.burstMu.Unlock()
-			case "relay.edit":
-				client.relayBusyManager().edit(ctx, message.EventID, message.Text)
-			case "relay.cancel":
-				client.relayBusyManager().cancel(ctx, message.EventID)
 			case "quota.request":
 				go client.handleHubQuota(ctx, peer, message)
 			case "job.spawn":
@@ -2190,6 +2205,117 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 			}()
 		}
 	}
+}
+
+// hubInboundQueueDepth bounds the ordered work one session may owe its inbound
+// dispatcher. A node that cannot keep up ends the session instead of dropping
+// single frames silently; the resync on reconnect replays what the hub is owed.
+const hubInboundQueueDepth = 256
+
+// errHubInboundQueueFull ends a session whose inbound backlog overran the
+// queue: losing a job.revoked or relay.persisted silently is worse than a
+// reconnect, which resyncs node state and lets the hub replay what it is owed.
+var errHubInboundQueueFull = errors.New("hub inbound work queue full")
+
+// serveHubInbound runs the ordered half of inbound hub work. Handlers that
+// may block on a lock, the node journal or the network - failover, burst,
+// wake, job.revoked, job.assigned, relay.persisted, pool.cooling.ack,
+// idle-wake.route, burst.holds, relay.edit and relay.cancel - leave the read
+// loop for this one worker, which preserves the wire's receive order between
+// them. A session-fatal error (a job.revocation.ack write failure) returns
+// through readErrors, the same channel the reader uses.
+func (client *HubClient) serveHubInbound(ctx context.Context, peer *hubClientConnection, inbound <-chan hubOutboundMessage, readErrors chan<- error, done <-chan struct{}) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-done:
+			client.drainHubInbound(ctx, peer, inbound)
+			return
+		case message := <-inbound:
+			if err := client.handleHubInboundMessage(ctx, peer, message); err != nil {
+				select {
+				case readErrors <- err:
+				case <-ctx.Done():
+				case <-done:
+				}
+				// The error ends the session, but the frames already read are
+				// still this node's to apply: drain them like any other end.
+				client.drainHubInbound(ctx, peer, inbound)
+				return
+			}
+			if client.inboundHandled != nil {
+				client.inboundHandled(message)
+			}
+		}
+	}
+}
+
+// drainHubInbound applies what the reader already queued as the session ends
+// - a read error, an endpoint switch, or a handler that failed against the
+// dead connection - so a received job.revoked or relay.persisted is never
+// silently dropped. A failed ack write is not a reason to drop the rest of
+// the queue: the hub replays unacked work on reconnect.
+func (client *HubClient) drainHubInbound(ctx context.Context, peer *hubClientConnection, inbound <-chan hubOutboundMessage) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case message := <-inbound:
+			if err := client.handleHubInboundMessage(ctx, peer, message); errors.Is(err, errHubRedial) {
+				return
+			}
+		default:
+			return
+		}
+	}
+}
+
+// handleHubInboundMessage is the ordered dispatcher's per-frame switch. It
+// returns the error that must end the session; local warnings are handled
+// inside each case.
+func (client *HubClient) handleHubInboundMessage(ctx context.Context, peer *hubClientConnection, message hubOutboundMessage) error {
+	switch message.Type {
+	case "redial":
+		return errHubRedial
+	case "failover":
+		client.handleHubFailover(ctx, message)
+	case "burst":
+		client.handleHubBurst(ctx, message)
+	case "wake":
+		client.handleHubWake(ctx, message)
+	case "job.revoked":
+		if err := writeHubRevocation(client.jobsInboxRoot, hubJobRevokedEvent{Type: message.Type, JobID: message.JobID, Epoch: message.Epoch}); err != nil {
+			client.warn("job revocation local write unavailable")
+		} else if err := peer.write(ctx, hubClientWireEvent(hubClientEvent{Kind: "job.revocation.ack", Payload: hubJobCompletionPayload(message.JobID, message.Epoch)})); err != nil {
+			return err
+		}
+	case "job.assigned":
+		// Monotonic: a superseded session's drain can still run while a newer
+		// session already recorded a later epoch for the same job, and the
+		// read side only ever raises a scanned epoch (heartbeatEvent,
+		// jobCompletionEvents), never lowers it.
+		client.assignmentMu.Lock()
+		if message.Epoch > client.assignedJobs[message.JobID] {
+			client.assignedJobs[message.JobID] = message.Epoch
+		}
+		client.assignmentMu.Unlock()
+	case "relay.persisted", "pool.cooling.ack":
+		client.recordRelayPersisted(message)
+	case "idle-wake.route":
+		if manager := client.idleWakeManager(); manager != nil {
+			manager.ApplyRoute(ctx, hubIdleWakeRouteEvent{Type: message.Type, EventID: message.IdleWakeEventID, Pane: message.Pane, Eligible: message.Eligible, Lane: message.Lane, Text: message.Text, JobID: message.JobID, Reason: message.Reason})
+		}
+	case "burst.holds":
+		client.burstMu.Lock()
+		client.burstHoldsActive = message.HoldsActive
+		client.burstMu.Unlock()
+	case "relay.edit":
+		client.relayBusyManager().edit(ctx, message.EventID, message.Text)
+	case "relay.cancel":
+		client.relayBusyManager().cancel(ctx, message.EventID)
+	}
+	return nil
 }
 
 // relayWriter is the one-event write this connection performs. Taking it as a
@@ -2904,7 +3030,10 @@ func parseHubOutboundRejection(payload []byte) (hubOutboundMessage, hubOutboundR
 			return hubOutboundMessage{}, reject
 		}
 		if message.Kind == "lane.event" {
-			if len(fields) != 9 || json.Unmarshal(fields["lane"], &message.Lane) != nil || json.Unmarshal(fields["producer_event_id"], &message.ProducerEventID) != nil || !hubAgentLabelPattern.MatchString(message.Lane) || !validLaneEventID(message.ProducerEventID) {
+			// Older hubs acknowledge lane events with the shared relay
+			// envelope only. The transport job_id still identifies the
+			// producer's outbox row, so it is safe to retire that row below.
+			if len(fields) != 7 && (len(fields) != 9 || json.Unmarshal(fields["lane"], &message.Lane) != nil || json.Unmarshal(fields["producer_event_id"], &message.ProducerEventID) != nil || !hubAgentLabelPattern.MatchString(message.Lane) || !validLaneEventID(message.ProducerEventID)) {
 				return hubOutboundMessage{}, reject
 			}
 		} else if len(fields) == 8 {

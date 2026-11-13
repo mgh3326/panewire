@@ -67,7 +67,7 @@ panewire daemon --herdr-socket "$HOME/.config/herdr/herdr.sock" \
   --inbox-root "$HOME/work/herdr-inbox"
 ```
 
-Install [deploy/dev.panewire.panewired.plist](deploy/dev.panewire.panewired.plist) as `~/Library/LaunchAgents/dev.panewire.panewired.plist` after replacing its user-specific paths. It uses the same `panewire` executable and restarts on exit.
+Install [deploy/dev.panewire.panewired.plist](deploy/dev.panewire.panewired.plist) as `~/Library/LaunchAgents/dev.panewire.panewired.plist` after replacing its user-specific paths. It uses the same `panewire` executable and restarts on exit. On Linux, [deploy/panewired.service](deploy/panewired.service) is the counterpart; both keep the detached job watchers alive across a restart ([node restart runbook](docs/runbooks/node-restart.md)).
 
 Release installs should pin a tag and stamp the same version the hub sees, e.g.
 `go install -ldflags "-X main.version=<tag>" github.com/mgh3326/panewire/cmd/panewire@<tag>`.

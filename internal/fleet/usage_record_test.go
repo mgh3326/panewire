@@ -33,7 +33,7 @@ func (s *usageFailStore) Put(ctx context.Context, id string, fields map[string]a
 func usageJob(t *testing.T, a *App, session map[string]any) *fakeJobStore {
 	t.Helper()
 	store := a.JobStore.(*fakeJobStore)
-	if err := store.Claim(t.Context(), "j", "42", "test-host"); err != nil {
+	if err := store.claimSpawned(t.Context(), "j", "42", "test-host"); err != nil {
 		t.Fatal(err)
 	}
 	seedJob(t, a, "j", "worker")
@@ -47,6 +47,7 @@ func claudeSession() map[string]any {
 
 func doneJob(t *testing.T, a *App) {
 	t.Helper()
+	useFakeHK(t).Handle(hkCommentAnswer)
 	path := filepath.Join(a.Jobs, "j", "report.md")
 	if err := os.WriteFile(path, []byte("done\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -173,7 +174,7 @@ func TestCompletionWithoutHarnessSessionWritesNoUsage(t *testing.T) {
 	a := testApp(t)
 	ledgerRunner(t, a)
 	store := a.JobStore.(*fakeJobStore)
-	if err := store.Claim(t.Context(), "j", "42", "test-host"); err != nil {
+	if err := store.claimSpawned(t.Context(), "j", "42", "test-host"); err != nil {
 		t.Fatal(err)
 	}
 	seedJob(t, a, "j", "worker")
