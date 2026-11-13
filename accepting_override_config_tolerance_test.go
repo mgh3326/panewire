@@ -2,9 +2,11 @@ package panewire
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -121,5 +123,31 @@ func TestAcceptingOverridesRewriteKeepsCaseVariantMembers(t *testing.T) {
 	}
 	if got := overrides["mac-work"]; got.Mode != "off" || got.Containment != "hk:7" || !got.ContainmentVerified {
 		t.Fatalf("mac-work=%+v", got)
+	}
+}
+
+// A rewrite whose encoded file would exceed the loader limit is refused, and
+// the existing file is left as it was. Marshaling escapes each '<' to six
+// bytes, so a file under the limit can grow past it.
+func TestAcceptingOverridesRewriteRefusesOversizedFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "accepting.json")
+	original := []byte(`{"overrides":{"mac-work":"auto"},"future":"` + strings.Repeat("<", 20000) + `"}`)
+	if err := os.WriteFile(path, original, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := loadAcceptingOverrides(path); err != nil {
+		t.Fatalf("fixture refused: %v", err)
+	}
+	h := &HubServer{}
+	h.relayControl.acceptingOverridesPath = path
+	if err := h.persistAcceptingOverridesLocked(map[string]acceptingOverride{"mac-work": {Mode: "on"}}); !errors.Is(err, errAcceptingOverrideTooLarge) {
+		t.Fatalf("persist err = %v, want errAcceptingOverrideTooLarge", err)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(after, original) {
+		t.Fatal("refused rewrite changed the override file")
 	}
 }

@@ -91,7 +91,7 @@ func loadAcceptingOverrides(path string) (map[string]acceptingOverride, []string
 		return nil, nil, errors.New("invalid override file")
 	}
 	b, err := os.ReadFile(path)
-	if err != nil || len(b) > 64<<10 {
+	if err != nil || len(b) > acceptingOverrideMaxBytes {
 		return nil, nil, errors.New("invalid override file")
 	}
 	var wire acceptingOverrideFile
@@ -163,6 +163,12 @@ func (h *HubServer) acceptingEffectiveLocked(machine string, advertised bool) bo
 	}
 }
 
+// acceptingOverrideMaxBytes is the largest override file the loader reads. A
+// rewrite that would exceed it is refused, so a later restart can still load it.
+const acceptingOverrideMaxBytes = 64 << 10
+
+var errAcceptingOverrideTooLarge = errors.New("accepting override file would exceed the loader limit")
+
 // persistAcceptingOverridesLocked rewrites the override file from next. Keys
 // the loader ignores are carried over at the root, in each override entry, and
 // in each containment entry, so a rewrite does not erase data a newer release
@@ -205,7 +211,11 @@ func (h *HubServer) persistAcceptingOverridesLocked(next map[string]acceptingOve
 	if err != nil {
 		return err
 	}
-	return replaceFileAtomically(path, ".accepting-overrides-*", append(b, '\n'), 0600)
+	out := append(b, '\n')
+	if len(out) > acceptingOverrideMaxBytes {
+		return errAcceptingOverrideTooLarge
+	}
+	return replaceFileAtomically(path, ".accepting-overrides-*", out, 0600)
 }
 
 // acceptingOverrideLeftovers holds the keys of the override file that the
