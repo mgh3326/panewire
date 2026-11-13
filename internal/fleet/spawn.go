@@ -434,7 +434,11 @@ func (a *App) rebindInherited(ctx context.Context, s Spawn, task client.Task, ev
 // spawn never needs a compensating remote write. See docs/config.md.
 func (a *App) finishTaskTakeover(ctx context.Context, s Spawn, task client.Task, owner string) {
 	ev := map[string]any{"task_id": s.Task, "job_id": s.Job, "inherited_from": s.Inherited}
-	status := a.rebindInherited(ctx, s, task, ev)
+	takeover, cancelTakeover := context.WithTimeout(context.WithoutCancel(ctx), 20*time.Second)
+	status := a.rebindInherited(takeover, s, task, ev)
+	cancelTakeover()
+	ctx, cancelOutcome := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancelOutcome()
 	ev["status"] = status
 	if e := a.event(ctx, s.Job, "job.task_rebind", ev); e != nil {
 		a.warn("job %s: task rebind event not recorded: %v", s.Job, e)

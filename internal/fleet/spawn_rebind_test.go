@@ -659,3 +659,30 @@ func TestTakeoverConcurrentRebindLeavesForeignBinding(t *testing.T) {
 	}
 	fx.assertNotice(t, true)
 }
+
+type cancellationAwareRunner struct{ inner Runner }
+
+func (r cancellationAwareRunner) Run(ctx context.Context, c Command) Result {
+	if ctx.Err() != nil {
+		return Result{Code: 1, Err: ctx.Err().Error()}
+	}
+	return r.inner.Run(ctx, c)
+}
+
+func TestTakeoverReportsFailureAfterSpawnContextCancellation(t *testing.T) {
+	fx := newRebindFixture(t, "spawned", rebindParent)
+	fx.s.Inherited, fx.s.Task = rebindParent, "42"
+	fx.rebindFail = `{"error":"conflict","reason":"cannot rebind"}`
+	fx.a.Runner = cancellationAwareRunner{inner: fx.f}
+	if err := fx.a.event(context.Background(), fx.s.Job, "job.spawned", map[string]any{}); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	fx.a.finishTaskTakeover(ctx, fx.s, client.Task{Refs: client.TaskRefs{JobID: rebindParent}}, "owner")
+	fx.assertNotice(t, true)
+	ev := fx.taskRebindEvent(t)
+	if ev["status"] != "inherited" || ev["rebind_error"] == nil {
+		t.Fatalf("event=%v", ev)
+	}
+}
