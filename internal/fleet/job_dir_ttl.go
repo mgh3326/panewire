@@ -841,13 +841,23 @@ func (a *App) jobDirEvidence(ctx context.Context, dir string, j Job) string {
 		if !ok || rec.Archive.SourceHost != "" && rec.Archive.SourceHost != a.machine() {
 			continue
 		}
+		// The walk names real paths, so the record's paths are resolved
+		// before the join: a ./ or .. after a symlink, a symlinked
+		// component, or an alias of the jobs root names the file the walk
+		// sees, which a lexical filepath.Join would not (hk 3643).
 		src := rec.Archive.Source
-		if !filepath.IsAbs(src) || !within(dir, src) {
+		if !filepath.IsAbs(src) {
+			continue
+		}
+		if src, err = resolveExisting(src); err != nil || !within(dir, src) {
 			continue
 		}
 		for _, row := range rec.Archive.Contents {
-			path := filepath.Join(src, row.Path)
-			if filepath.IsAbs(row.Path) || !within(src, path) || !pending[path] {
+			if filepath.IsAbs(row.Path) {
+				continue
+			}
+			path, err := resolveExisting(src + string(filepath.Separator) + row.Path)
+			if err != nil || !within(src, path) || !pending[path] {
 				continue
 			}
 			class, mirror, err := a.artifactClass(pol, j.ID, path)
