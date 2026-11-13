@@ -84,14 +84,8 @@ type HubServerConfig struct {
 	UnworkedLandingGrace time.Duration
 	Notifier             HubNotifier
 	Logger               *slog.Logger
-	BurstPolicyPath      string
-	// WakeConfigPath is the optional operator-owned JSON routing table for
-	// `panewire node wake` (hot-reloaded like the burst policy). Empty leaves
-	// the wake endpoint answering unknown_target for every machine.
-	WakeConfigPath string
-	// PlacementPolicyPath is an optional operator-owned JSON policy. It is
-	// deliberately separate from the R12 burst policy because placement never
-	// changes pressure thresholds or dispatches work.
+	// PlacementPolicyPath is an optional operator-owned JSON policy. Placement
+	// never changes pressure thresholds or dispatches work.
 	PlacementPolicyPath string
 	PrometheusURL       string
 	PrometheusClient    *http.Client
@@ -129,12 +123,6 @@ type HubServerConfig struct {
 	// handoffkeep is the durable relay-event store. It is package-private so the
 	// hub's public configuration keeps no credential-bearing field.
 	handoffkeep *handoffkeepRelayClient
-	// ChatStore is the durable operator-chat store. It is package-private for
-	// the same reason as handoffkeep. A nil store disables the chat endpoints
-	// (503); the hub and the relay paths run regardless.
-	ChatStore ChatStore
-	// ChatDeskLane is the fixed server-owned destination for operator chat.
-	ChatDeskLane string
 }
 
 // HubNode is the deliberately small presence view returned to authenticated
@@ -217,11 +205,8 @@ type hubAgent struct {
 	writeMu     sync.Mutex
 	transient   bool
 	failovers   chan hubFailoverEvent
-	bursts      chan hubBurstEvent
-	wakes       chan hubWakeRequestEvent
 	revocations chan hubJobRevokedEvent
 	assignments chan hubJobAssignedEvent
-	holds       chan hubBurstHoldsEvent
 	// features carries hub.features; featuresSent stops it after the first.
 	features     chan hubFeaturesEvent
 	featuresSent atomic.Bool
@@ -307,11 +292,6 @@ type hubJobEventPayload struct {
 	// operatorIngress marks an event the operator posted through the R24
 	// HTTP ingress; the inbox-only rule leaves it as before (hk 3602).
 	operatorIngress bool
-	// operatorChat marks an operator chat turn the hub's own chat created
-	// (relayChatMessage), or a replay of one the chat store vouches for
-	// (hubChatTurn). The inbox-only rule leaves it as before; an event id
-	// that merely looks like chat-N earns nothing (hk 3602).
-	operatorChat bool
 }
 
 type relayAckPayload struct {
@@ -361,11 +341,6 @@ type hubJobAssignedEvent struct {
 	Type  string `json:"type"`
 	JobID string `json:"job_id"`
 	Epoch uint64 `json:"epoch"`
-}
-
-type hubBurstHoldsEvent struct {
-	Type        string `json:"type"`
-	HoldsActive bool   `json:"holds_active"`
 }
 
 type hubEvent struct {
@@ -467,13 +442,6 @@ type HubServer struct {
 	lastNotes                        map[string]*HubLastNote
 	subscribers                      map[*hubEventSubscriber]struct{}
 	alerts                           map[string]*hubAlertState
-	burstPolicyPath                  string
-	burstPolicy                      BurstPolicy
-	burstPolicyModTime               time.Time
-	wakeConfigPath                   string
-	wakeTargets                      map[string]HubWakeTarget
-	wakeConfigModTime                time.Time
-	burstState                       *hubBurstState
 	unknownMessages                  uint64
 	unfencedCompletions              uint64
 	startedAt                        time.Time
@@ -482,7 +450,6 @@ type HubServer struct {
 	uiEvents                         []hubUIEvent
 	jobs                             map[string]*hubJobRecord
 	pendingRevocations               map[string]map[string]hubJobRevokedEvent
-	holds                            map[string]*hubBurstHold
 	placementPolicyPath              string
 	placementPolicy                  PlacementPolicy
 	placementPolicyModTime           time.Time
@@ -516,12 +483,10 @@ type HubServer struct {
 	controlPlaneLanesLastFailure     string
 	// relayDedupe is an active injection claim. lanePersisted keeps the durable
 	// row ID while that claim is deliberately released between lane retries.
-	relayDedupe         map[string]int64
-	relayHeld           map[int64]hubRelayHeldProjection
-	relayCancelled      map[int64]struct{}
-	relayCancelledOrder lruIndex[int64]
-	lanePersisted       map[string]int64
-	lanePersistedOrder  lruIndex[string]
+	relayDedupe        map[string]int64
+	relayHeld          map[int64]hubRelayHeldProjection
+	lanePersisted      map[string]int64
+	lanePersistedOrder lruIndex[string]
 	// laneEventSHA remembers the durable payload fingerprint behind each
 	// lane.event dedupe key, so a resend under a different body is recorded
 	// as a mismatch even on paths that never reach a second POST (#725).
@@ -539,35 +504,8 @@ type HubServer struct {
 	quietTimings designQuietTimings
 
 	// unconfirmedNotices spaces delivery-unconfirmed notices (hk 3431).
-	unconfirmedNotices unconfirmedNoticeWindows
-	handoffkeep        *handoffkeepRelayClient
-	chatStore          ChatStore
-	chatDeskLane       string
-	chatKick           chan struct{}
-	chatMu             sync.Mutex
-	chatPending        map[int64]chatPendingMessage
-	// chatLaneOf preserves a failed message's lane until restart. After
-	// restart, the durable relay event is the route authority.
-	chatLaneOf map[int64]string
-	// chatCancelled marks rows closed by cancel. The store's only terminal
-	// state is delivered, so without this flag a cancelled row displays as a
-	// real delivery; the flag is hub-memory and lasts until restart.
-	chatCancelled map[int64]struct{}
-	// chatRetryMu serializes one full retry decision — link recovery, live
-	// relay check, new row — so two concurrent retries of the same failed
-	// row cannot both mint a directive. chatRetriedFrom maps a failed source
-	// id to the retry row it produced; after a restart the same information
-	// is recovered from the durable retry marker on the retry's relay row.
-	chatRetryMu     sync.Mutex
-	chatRetriedFrom map[int64]int64
-	// chatSweepCursor is the settled-prefix watermark the orphan sweep has
-	// consumed: the highest message id below which every stored row was
-	// permanently settled (assistant, not_sent, failed, or failed during
-	// the pass), so a growing backlog cannot pin the sweep on the oldest
-	// rows. chatMsgHighWater positions the /chat/data tail window.
-	chatSweepCursor             int64
-	chatMsgHighWater            int64
-	chatSweepWarned             bool
+	unconfirmedNotices          unconfirmedNoticeWindows
+	handoffkeep                 *handoffkeepRelayClient
 	unpersistedRelayEvents      uint64
 	replayExhaustedEvents       uint64
 	alreadyDeliveredRelayEvents uint64
@@ -637,9 +575,6 @@ type hubStallBeatState struct {
 // NewHubServer validates a complete static-token configuration. Tokens remain
 // private to the server and are never included in errors or logs.
 func NewHubServer(config HubServerConfig) (*HubServer, error) {
-	if config.ChatStore != nil && !validReportRelayLaneName(config.ChatDeskLane) {
-		return nil, errors.New("hub chat desk lane is required and must be valid")
-	}
 	if len(config.Tokens) == 0 {
 		return nil, errors.New("hub token configuration is required")
 	}
@@ -690,24 +625,6 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 	}
 	if config.OrphanGrace <= 0 {
 		config.OrphanGrace = config.GracePeriod
-	}
-	var burstPolicy BurstPolicy
-	var burstPolicyModTime time.Time
-	if config.BurstPolicyPath != "" {
-		policy, modTime, err := LoadBurstPolicy(config.BurstPolicyPath)
-		if err != nil {
-			return nil, errors.New("hub burst policy is invalid")
-		}
-		burstPolicy, burstPolicyModTime = policy, modTime
-	}
-	var wakeTargets map[string]HubWakeTarget
-	var wakeConfigModTime time.Time
-	if config.WakeConfigPath != "" {
-		targets, modTime, err := LoadHubWakeConfig(config.WakeConfigPath)
-		if err != nil {
-			return nil, errors.New("hub wake config is invalid")
-		}
-		wakeTargets, wakeConfigModTime = targets, modTime
 	}
 	placementPolicy := DefaultPlacementPolicy()
 	var placementPolicyModTime time.Time
@@ -797,9 +714,9 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 	hub := &HubServer{
 		inbox: inbox, spawnKick: make(chan struct{}, 1),
 		authPath: config.AuthPath, alertNodes: alertNodes, relayControl: newHubRelayControlState(config, overrides), now: config.Now, staleAfter: config.StaleAfter, keepaliveInterval: config.KeepaliveInterval,
-		gracePeriod: config.GracePeriod, orphanGrace: config.OrphanGrace, unworkedLandingGrace: config.UnworkedLandingGrace, alertObservations: defaultHubAlertObservations, notifier: config.Notifier, logger: config.Logger, burstPolicyPath: config.BurstPolicyPath,
+		gracePeriod: config.GracePeriod, orphanGrace: config.OrphanGrace, unworkedLandingGrace: config.UnworkedLandingGrace, alertObservations: defaultHubAlertObservations, notifier: config.Notifier, logger: config.Logger,
 		placementPolicyPath: config.PlacementPolicyPath, placementPolicy: placementPolicy, placementPolicyModTime: placementPolicyModTime, placementPolicyObservedModTime: placementPolicyObservedModTime, placementPolicyLoaded: placementPolicyLoaded, placementPolicyStatus: placementPolicyStatus, placementPolicyLastFailure: placementPolicyLastFailure, prometheusURL: config.PrometheusURL, prometheusClient: config.PrometheusClient, prometheusBearer: config.PrometheusBearer, prometheusBasicUser: config.PrometheusBasicUser, prometheusBasicPass: config.PrometheusBasicPass,
-		nodes: make(map[string]*hubNodeRecord), lastNotes: make(map[string]*HubLastNote), subscribers: make(map[*hubEventSubscriber]struct{}), alerts: make(map[string]*hubAlertState), burstPolicy: burstPolicy, burstPolicyModTime: burstPolicyModTime, wakeConfigPath: config.WakeConfigPath, wakeTargets: wakeTargets, wakeConfigModTime: wakeConfigModTime, burstState: &hubBurstState{}, startedAt: config.Now().UTC(), uiAllowCFOnly: config.UIAllowCFOnly, jobs: make(map[string]*hubJobRecord), pendingRevocations: make(map[string]map[string]hubJobRevokedEvent), holds: make(map[string]*hubBurstHold), reportRelayPath: config.ReportRelayPath, lanesNodeRowCap: config.LanesNodeRowCap, prStatusHost: config.PRStatusHost, controlPlaneLanesPath: config.ControlPlaneLanesPath, controlPlaneLanes: controlPlaneLanes, controlPlaneLanesModTime: controlPlaneLanesModTime, controlPlaneLanesObservedModTime: controlPlaneLanesObservedModTime, controlPlaneLanesLoaded: controlPlaneLanesLoaded, controlPlaneLanesStatus: controlPlaneLanesStatus, controlPlaneLanesLastFailure: controlPlaneLanesLastFailure, relayDedupe: make(map[string]int64), relayHeld: make(map[int64]hubRelayHeldProjection), relayCancelled: make(map[int64]struct{}), lanePersisted: make(map[string]int64), laneEventSHA: make(map[string]string), replayExhausted: make(map[int64]struct{}), handoffkeep: config.handoffkeep, chatStore: config.ChatStore, chatDeskLane: config.ChatDeskLane, chatKick: make(chan struct{}, 1), chatPending: make(map[int64]chatPendingMessage), chatLaneOf: make(map[int64]string), chatCancelled: make(map[int64]struct{}), chatRetriedFrom: make(map[int64]int64), cfAccess: cfAccess, spawnRecords: make(map[string]*hubSpawnRecord), stallBeats: make(map[string]*hubStallBeatState), closeCtx: closeCtx, closeCancel: closeCancel,
+		nodes: make(map[string]*hubNodeRecord), lastNotes: make(map[string]*HubLastNote), subscribers: make(map[*hubEventSubscriber]struct{}), alerts: make(map[string]*hubAlertState), startedAt: config.Now().UTC(), uiAllowCFOnly: config.UIAllowCFOnly, jobs: make(map[string]*hubJobRecord), pendingRevocations: make(map[string]map[string]hubJobRevokedEvent), reportRelayPath: config.ReportRelayPath, lanesNodeRowCap: config.LanesNodeRowCap, prStatusHost: config.PRStatusHost, controlPlaneLanesPath: config.ControlPlaneLanesPath, controlPlaneLanes: controlPlaneLanes, controlPlaneLanesModTime: controlPlaneLanesModTime, controlPlaneLanesObservedModTime: controlPlaneLanesObservedModTime, controlPlaneLanesLoaded: controlPlaneLanesLoaded, controlPlaneLanesStatus: controlPlaneLanesStatus, controlPlaneLanesLastFailure: controlPlaneLanesLastFailure, relayDedupe: make(map[string]int64), relayHeld: make(map[int64]hubRelayHeldProjection), lanePersisted: make(map[string]int64), laneEventSHA: make(map[string]string), replayExhausted: make(map[int64]struct{}), handoffkeep: config.handoffkeep, cfAccess: cfAccess, spawnRecords: make(map[string]*hubSpawnRecord), stallBeats: make(map[string]*hubStallBeatState), closeCtx: closeCtx, closeCancel: closeCancel,
 	}
 	hub.auth.Store(&authSet)
 	hub.fleetState = newFleetStateStore()
@@ -874,24 +791,12 @@ func (h *HubServer) Handler() http.Handler {
 	mux.HandleFunc("GET /healthz", h.handleHealthz)
 	mux.HandleFunc("GET /ui", h.handleUI)
 	mux.HandleFunc("GET /ui/data.json", h.handleUIData)
-	mux.HandleFunc("GET /chat", h.handleChat)
-	mux.HandleFunc("GET /chat/data", h.handleChatData)
-	mux.HandleFunc("POST /chat/messages", h.handleChatMessageCreate)
-	mux.HandleFunc("POST /chat/messages/{id}/retry", h.handleChatMessageRetry)
-	mux.HandleFunc("POST /chat/messages/{id}/cancel", h.handleChatMessageCancel)
-	mux.HandleFunc("POST /chat/questions/{id}/transition", h.handleChatQuestionTransition)
-	mux.HandleFunc("POST /v1/chat/questions", h.handleChatQuestionUpsert)
 	mux.HandleFunc("GET /v1/nodes", h.handleNodes)
 	mux.HandleFunc("GET /v1/lanes", h.handleLanes)
 	mux.HandleFunc("PUT /v1/lanes/{lane}", h.handlePutLane)
 	mux.HandleFunc("DELETE /v1/lanes/{lane}", h.handleDeleteLane)
 	mux.HandleFunc("POST /v1/control-plane/transfer", h.handleControlPlaneTransfer)
 	mux.HandleFunc("POST /v1/nodes/{machine}/accepting", h.handleAcceptingOverride)
-	mux.HandleFunc("POST /v1/nodes/wake", h.handleNodeWake)
-	mux.HandleFunc("GET /v1/burst", h.handleBurst)
-	mux.HandleFunc("POST /v1/burst/request", h.handleBurstRequest)
-	mux.HandleFunc("POST /v1/burst/release", h.handleBurstRelease)
-	mux.HandleFunc("GET /v1/burst/holds", h.handleBurstHolds)
 	mux.HandleFunc("GET /v1/placement", h.handlePlacement)
 	mux.HandleFunc("GET /v1/state", h.handleFleetStateSnapshot)
 	mux.HandleFunc("GET /v1/jobs", h.handleJobs)
@@ -910,9 +815,6 @@ func (h *HubServer) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/inbox/ack-state", h.handleInboxAckState)
 	mux.HandleFunc("POST /v1/inbox/{id}/read", h.handleInboxRead)
 	mux.HandleFunc("POST /v1/inbox/ack", h.handleInboxAck)
-	mux.HandleFunc("GET /v1/relay/held", h.handleRelayHeld)
-	mux.HandleFunc("PATCH /v1/relay/events/{id}", h.handleRelayHeldEdit)
-	mux.HandleFunc("DELETE /v1/relay/events/{id}", h.handleRelayHeldDelete)
 	mux.HandleFunc("POST /v1/spawns", h.handleSpawnSubmit)
 	mux.HandleFunc("GET /v1/spawns/live", h.handleSpawnLive)
 	mux.HandleFunc("GET /v1/spawns/{request_id}", h.handleSpawnOperation)
@@ -933,7 +835,6 @@ type hubUIData struct {
 	SchemaVersion int          `json:"schema_version"`
 	Hub           hubUIHub     `json:"hub"`
 	Nodes         []hubUINode  `json:"nodes"`
-	Burst         hubUIBurst   `json:"burst"`
 	Events        []hubUIEvent `json:"events"`
 }
 
@@ -955,27 +856,6 @@ type hubUINode struct {
 	AcceptingOverride  string    `json:"accepting_override"`
 	LastPingMS         int64     `json:"last_ping_ms"`
 	Version            string    `json:"version"`
-}
-
-type hubUIBurstPolicy struct {
-	SourceMachine   string  `json:"source_machine"`
-	TargetMachine   string  `json:"target_machine"`
-	SwapGB          float64 `json:"swap_gb"`
-	Load5           float64 `json:"load5"`
-	Consecutive     int     `json:"consecutive"`
-	IdleMinutes     int     `json:"idle_minutes"`
-	CooldownMinutes int     `json:"cooldown_minutes"`
-}
-
-type hubUIBurst struct {
-	Configured  bool              `json:"configured"`
-	Policy      *hubUIBurstPolicy `json:"policy"`
-	SourceRuns  int               `json:"source_runs"`
-	LastLoad    HubHostLoad       `json:"last_load"`
-	LastUp      time.Time         `json:"last_up"`
-	LastDown    time.Time         `json:"last_down"`
-	UpCompleted bool              `json:"up_completed"`
-	IdleSince   time.Time         `json:"idle_since"`
 }
 
 func (h *HubServer) handleUI(writer http.ResponseWriter, request *http.Request) {
@@ -1060,36 +940,12 @@ func (h *HubServer) uiData() hubUIData {
 		nodes = append(nodes, hubUINode{MachineID: record.machineID, State: record.state, StateSince: record.stateSince, AlertClass: alertClass, Accepting: effective, AcceptingEffective: effective, AcceptingOverride: h.acceptingOverrideLocked(record.machineID), LastPingMS: age.Milliseconds(), Version: record.remoteMeta["version"]})
 	}
 	sort.Slice(nodes, func(i, j int) bool { return nodes[i].MachineID < nodes[j].MachineID })
-	var policy *hubUIBurstPolicy
-	if h.burstPolicyPath != "" {
-		h.reloadBurstPolicyLocked()
-		policy = &hubUIBurstPolicy{SourceMachine: h.burstPolicy.SourceMachine, TargetMachine: h.burstPolicy.TargetMachine, SwapGB: h.burstPolicy.SwapGB, Load5: h.burstPolicy.Load5, Consecutive: h.burstPolicy.Consecutive, IdleMinutes: h.burstPolicy.IdleMinutes, CooldownMinutes: h.burstPolicy.CooldownMinutes}
-	}
 	events := append([]hubUIEvent(nil), h.uiEvents...)
 	uptime := now.Sub(h.startedAt)
 	if uptime < 0 {
 		uptime = 0
 	}
-	state := *h.burstState
-	return hubUIData{SchemaVersion: 1, Hub: hubUIHub{Version: hubVersion, UptimeMS: uptime.Milliseconds(), UnknownMessages: h.unknownMessages, UnfencedCompletions: h.unfencedCompletions, RelayPayloadMismatches: h.relayPayloadMismatches}, Nodes: nodes, Burst: hubUIBurst{Configured: h.burstPolicyPath != "", Policy: policy, SourceRuns: state.SourceRuns, LastLoad: state.LastLoad, LastUp: state.LastUp, LastDown: state.LastDown, UpCompleted: state.UpCompleted, IdleSince: state.IdleSince}, Events: events}
-}
-
-func (h *HubServer) handleBurst(writer http.ResponseWriter, request *http.Request) {
-	if !h.authorizeOperator(request) {
-		hubUnauthorized(writer)
-		return
-	}
-	policy, state, configured := h.burstStatus()
-	writeJSON(writer, http.StatusOK, struct {
-		Configured  bool        `json:"configured"`
-		Policy      BurstPolicy `json:"policy,omitempty"`
-		SourceRuns  int         `json:"source_runs"`
-		IdleSince   time.Time   `json:"idle_since,omitempty"`
-		LastUp      time.Time   `json:"last_up,omitempty"`
-		LastDown    time.Time   `json:"last_down,omitempty"`
-		UpCompleted bool        `json:"up_completed"`
-		LastLoad    HubHostLoad `json:"last_load"`
-	}{configured, policy, state.SourceRuns, state.IdleSince, state.LastUp, state.LastDown, state.UpCompleted, state.LastLoad})
+	return hubUIData{SchemaVersion: 1, Hub: hubUIHub{Version: hubVersion, UptimeMS: uptime.Milliseconds(), UnknownMessages: h.unknownMessages, UnfencedCompletions: h.unfencedCompletions, RelayPayloadMismatches: h.relayPayloadMismatches}, Nodes: nodes, Events: events}
 }
 
 func (h *HubServer) handleOrphanedJobs(writer http.ResponseWriter, request *http.Request) {
@@ -1243,16 +1099,14 @@ func (h *HubServer) handleAgent(writer http.ResponseWriter, request *http.Reques
 		return
 	}
 	connection.SetReadLimit(hubMaxMessageBytes)
-	agent := &hubAgent{conn: connection, machineID: machineID, credential: hubRequestBearerToken(request), failovers: make(chan hubFailoverEvent, 64), bursts: make(chan hubBurstEvent, 64), wakes: make(chan hubWakeRequestEvent, 64), revocations: make(chan hubJobRevokedEvent, 64), assignments: make(chan hubJobAssignedEvent, 64), holds: make(chan hubBurstHoldsEvent, 4), features: make(chan hubFeaturesEvent, 1), relays: make(chan hubRelayInjectEvent, 64), persisted: make(chan hubRelayPersistedEvent, 64), idleRoutes: make(chan hubIdleWakeRouteEvent, 64)}
+	agent := &hubAgent{conn: connection, machineID: machineID, credential: hubRequestBearerToken(request), failovers: make(chan hubFailoverEvent, 64), revocations: make(chan hubJobRevokedEvent, 64), assignments: make(chan hubJobAssignedEvent, 64), features: make(chan hubFeaturesEvent, 1), relays: make(chan hubRelayInjectEvent, 64), persisted: make(chan hubRelayPersistedEvent, 64), idleRoutes: make(chan hubIdleWakeRouteEvent, 64)}
 	defer connection.CloseNow()
 	agentContext, agentCancel := context.WithCancel(request.Context())
 	defer agentCancel()
 	go agent.writeFailovers(agentContext)
-	go agent.writeBursts(agentContext)
-	go agent.writeWakes(agentContext)
+	go agent.writeFeatures(agentContext)
 	go agent.writeRevocations(agentContext)
 	go agent.writeAssignments(agentContext)
-	go agent.writeHolds(agentContext)
 	go agent.writeRelays(agentContext)
 	go agent.writePersisted(agentContext)
 	go agent.writeIdleWakeRoutes(agentContext)
@@ -1391,14 +1245,6 @@ func (h *HubServer) handleAgentMessageContext(ctx context.Context, machineID, re
 			h.publishFleetReadiness(machineID, received)
 			h.observeHeartbeatAlerts(machineID, heartbeat)
 			h.observeActiveJobs(machineID, heartbeat.ActiveJobs, received)
-			if heartbeat.HostLoad != nil {
-				h.mu.Lock()
-				bursts := h.observeBurstLocked(received, machineID, *heartbeat.HostLoad)
-				h.mu.Unlock()
-				for _, burst := range bursts {
-					h.dispatchBurst(burst)
-				}
-			}
 			h.sendHeartbeatDirectives(machineID, agent)
 		}
 		if message.Kind == "job.completed" {
@@ -1493,9 +1339,7 @@ func (h *HubServer) handleAgentMessageContext(ctx context.Context, machineID, re
 				h.countUnknownMessage()
 				return
 			}
-			if h.consumeRelayCancelled(cancelled.OriginalEventID) {
-				return
-			}
+			h.forgetRelayHeld(cancelled.OriginalEventID)
 		}
 		if message.Kind == "relay.batched" {
 			if _, valid := decodeRelayBatchedPayload(message.Payload); !valid {
@@ -2038,9 +1882,6 @@ func (h *HubServer) connect(machineID, version, remoteAddr string, agent *hubAge
 	}
 	h.placementCache = placementCache{}
 	h.recordUIEventLocked("presence", "connected", machineID, now)
-	if h.burstPolicyPath != "" && machineID == h.burstPolicy.TargetMachine && accepting && !h.burstState.LastUp.IsZero() {
-		h.burstState.UpCompleted = true
-	}
 	h.mu.Unlock()
 	h.tryPendingRevocations(machineID)
 	if previous != nil && previous != agent {
@@ -2099,7 +1940,6 @@ func (h *HubServer) disconnectLocked(machineID string, agent *hubAgent) ([]chan 
 			record.stateSince = now
 		}
 		record.state = "disconnected"
-		h.markBurstHoldsLostLocked(machineID)
 		h.recordUIEventLocked("presence", "disconnected", machineID, now)
 	}
 	return spawnWaiters, lost
@@ -2406,12 +2246,10 @@ func (h *HubServer) Sweep() {
 	var failovers []hubFailoverEvent
 	var staleSpawnWaiters []chan hubSpawnResult
 	h.mu.Lock()
-	h.sweepBurstHoldsLocked(now)
 	for _, record := range h.nodes {
 		if record.agent != nil && now.Sub(record.lastPing) >= h.staleAfter && record.state != "stale" {
 			record.state = "stale"
 			record.stateSince = now
-			h.markBurstHoldsLostLocked(record.machineID)
 			h.recordUIEventLocked("presence", "stale", record.machineID, now)
 			// A dispatch bound to this socket would otherwise wait out its
 			// deadline for a node that is not answering; wake it now so the
@@ -2451,10 +2289,6 @@ func (h *HubServer) RunMaintenance(ctx context.Context) {
 	h.mu.Lock()
 	h.maintenanceCtx = ctx
 	h.mu.Unlock()
-	// The chat outbox worker runs beside the relay maintenance loop. It is
-	// inert without a configured chat store and never shares h.mu across a
-	// network call.
-	go h.runChatDispatcher(ctx)
 	go h.runInbox(ctx)
 	go h.runLaneRelease(ctx.Done())
 	h.startSpawnCoordinator(ctx)
@@ -2518,59 +2352,6 @@ func (agent *hubAgent) writeFailovers(ctx context.Context) {
 	}
 }
 
-func (agent *hubAgent) queueBurst(event hubBurstEvent) {
-	if agent == nil || agent.bursts == nil {
-		return
-	}
-	select {
-	case agent.bursts <- event:
-	default:
-		if agent.conn != nil {
-			_ = agent.conn.Close(websocket.StatusPolicyViolation, "slow")
-		}
-	}
-}
-
-func (agent *hubAgent) writeBursts(ctx context.Context) {
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case event := <-agent.bursts:
-			if err := agent.writeJSON(event); err != nil {
-				return
-			}
-		}
-	}
-}
-
-// queueWake drops the event rather than blocking the request path or closing
-// the shared agent connection when a waker node is slow; requestNodeWake
-// redispatches on its slow cadence, so a dropped event is recovered without
-// disturbing the failover/burst/relay streams on the same connection.
-func (agent *hubAgent) queueWake(event hubWakeRequestEvent) {
-	if agent == nil || agent.wakes == nil {
-		return
-	}
-	select {
-	case agent.wakes <- event:
-	default:
-	}
-}
-
-func (agent *hubAgent) writeWakes(ctx context.Context) {
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case event := <-agent.wakes:
-			if err := agent.writeJSON(event); err != nil {
-				return
-			}
-		}
-	}
-}
-
 func (agent *hubAgent) writeRevocations(ctx context.Context) {
 	for {
 		select {
@@ -2617,33 +2398,11 @@ func (agent *hubAgent) writeAssignments(ctx context.Context) {
 	}
 }
 
-func (agent *hubAgent) queueHolds(event hubBurstHoldsEvent) {
-	if agent == nil || agent.holds == nil {
-		return
-	}
-	select {
-	case agent.holds <- event:
-	default:
-		select {
-		case <-agent.holds:
-		default:
-		}
-		select {
-		case agent.holds <- event:
-		default:
-		}
-	}
-}
-
-func (agent *hubAgent) writeHolds(ctx context.Context) {
+func (agent *hubAgent) writeFeatures(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case event := <-agent.holds:
-			if err := agent.writeJSON(event); err != nil {
-				return
-			}
 		case event := <-agent.features:
 			if err := agent.writeJSON(event); err != nil {
 				return

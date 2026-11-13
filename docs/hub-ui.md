@@ -1,9 +1,8 @@
 # Hub UI behind Cloudflare Access
 
 `/ui` is read-only. It does not use an operator token, does not expose a
-write endpoint, and its browser data contains only sanitized node, burst, and
-event status. The operator chat screen `/chat` is a separate surface with
-browser write paths and a stricter gate; see `docs/hub-chat.md`.
+write endpoint, and its browser data contains only sanitized node and event
+status.
 
 Substitute your hub's public hostname for `hub.example.invalid` wherever it
 appears below.
