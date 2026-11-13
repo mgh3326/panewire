@@ -78,7 +78,7 @@ func TestPublishReportConfirmsByReadBack(t *testing.T) {
 				}
 				return 0, "", false
 			})
-			got, err := r.a.publishReport(t.Context(), Job{ID: "j", Task: "42"}, body, digest)
+			got, err := r.a.publishReport(t.Context(), Job{ID: "j", Task: "42"}, "report.md", body, digest)
 			if tc.want && (err != nil || got != key) {
 				t.Fatalf("key=%q err=%v, want %q", got, err, key)
 			}

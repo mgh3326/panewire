@@ -224,8 +224,10 @@ func TestPlacementShadowLiveMatchesBase_T3650(t *testing.T) {
 }
 
 // liveBaseKey is a live record without the policy text a pool-order version
-// change rewrites, and without the consult stamp the consult grade floor
-// added (pinned by consult_floor_test.go). The decisions, candidate rows, host
+// change rewrites, without the consult stamp the consult grade floor
+// added (pinned by consult_floor_test.go) and without the ranked pool seat
+// fields (seat_source, pool_waste_urgency; hk 4529, pinned by
+// select_ranked_seat_t4529_test.go). The decisions, candidate rows, host
 // traces and events are what the base pins; the version, bands, rule sentence
 // and host rule are the policy's own words and change with the policy.
 func liveBaseKey(t *testing.T, raw string) string {
@@ -237,6 +239,13 @@ func liveBaseKey(t *testing.T, raw string) string {
 	if rec, ok := out["record"].(map[string]any); ok {
 		for _, k := range []string{"policy_version", "tiers", "rule", "decision", "host_rule", "consult"} {
 			delete(rec, k)
+		}
+		cands, _ := rec["candidates"].([]any)
+		for _, c := range cands {
+			if row, ok := c.(map[string]any); ok {
+				delete(row, "seat_source")
+				delete(row, "pool_waste_urgency")
+			}
 		}
 	}
 	b, err := json.Marshal(out)

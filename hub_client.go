@@ -97,6 +97,13 @@ type hubClientEvent struct {
 	senderPane string
 }
 
+type quotaPoolReconcileHooks struct {
+	app    func() (*fleet.App, error)
+	agents func(context.Context, string) ([]nodeHerdrRow, error)
+	ticks  <-chan time.Time
+	pass   func(context.Context)
+}
+
 // HubClient owns a bounded in-memory event queue. It is intentionally not a
 // durable relay: the handoffkeep relay store owns offline delivery.
 type HubClient struct {
@@ -188,6 +195,7 @@ type HubClient struct {
 	taskPaneSweepGrace    time.Duration
 	taskPaneSweepTicks    <-chan time.Time      // fixture seam; nil uses a ticker.
 	taskPaneSweepPass     func(context.Context) // fixture seam; nil runs the real pass.
+	quotaReconcile        quotaPoolReconcileHooks
 	nodeTaskState         fleet.TaskStateReader // fixture seam; nil reads spawn.json handoffkeep_env.
 	nodePR                fleet.PRReader        // fixture seam; nil reads spawn.json handoffkeep_env.
 	// Fleet state publisher (fleet_state_node.go, docs/fleet-state.md).
@@ -487,6 +495,7 @@ func (client *HubClient) Run(ctx context.Context) {
 	go client.runCreditRejectionRecovery(ctx)
 	go client.runLaneReconcile(ctx)
 	go client.runTaskPaneSweep(ctx)
+	go client.runQuotaPoolReconcile(ctx)
 	if client.statePublish {
 		go client.runFleetQuota(ctx)
 	}

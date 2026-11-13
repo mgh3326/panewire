@@ -33,7 +33,8 @@ type Spawn struct {
 	// ReviewPass is the explicit review pass ("1".."9") of a reviewer spawn. It
 	// only widens the hub reservation key (RoleKey); panewire never parses it out
 	// of a label.
-	ReviewPass                                         string `json:"review_pass,omitempty"`
+	ReviewPass                                         string   `json:"review_pass,omitempty"`
+	After                                              []string `json:"-"`
 	Keep, DupOK, Bypass, DryRun, Wait, AllowEscalation bool
 	Inherited, ParentFamily                            string
 	// Tags lists the capability tags a host must carry and ExcludeHosts the
@@ -74,6 +75,11 @@ type Spawn struct {
 	// hub submission carried, else this process's environment. It travels to
 	// the node as --e6-arm and is recorded on the job.
 	E6Arm string `json:"-"`
+	// e6ArmLocked marks a spawn whose marker is already authoritative — a hub
+	// submission (ValidateSubmission) or a node-delivered spawn
+	// (bindNodeSpawn). Its process environment never fills an empty E6Arm;
+	// only a local panewire spawn resolves PANEWIRE_E6_ARM/SCOPEFUEL_E6_ARM.
+	e6ArmLocked bool
 	// ExcludeFamilies and OnlyFamily narrow automatic selection to seats of
 	// other families, or of one family (`panewire delegate --panel`).
 	ExcludeFamilies []string `json:"-"`
@@ -154,6 +160,7 @@ func SpawnRoleKey(task, role, pass string) string {
 func parseSpawn(args []string) (Spawn, error) {
 	s := Spawn{Role: "worker", Host: "auto"}
 	f := flags("spawn")
+	f.Var((*repeatedStringFlag)(&s.After), "after", "start condition (repeatable)")
 	for _, p := range []struct {
 		k string
 		v *string
@@ -182,6 +189,9 @@ func parseSpawn(args []string) (Spawn, error) {
 	if flagPassed(f, "review-pass") && (s.Role != "reviewer" || !reviewPassPattern.MatchString(s.ReviewPass)) {
 		return s, fail(exitUsage, "--review-pass N (1..9) is accepted only with --role reviewer")
 	}
+	if _, err := ParseStartConditions(s.After, s.Task); err != nil {
+		return s, fail(exitUsage, "%v", err)
+	}
 	if s.Job == "" {
 		s.Job = s.Label
 	}
@@ -202,10 +212,15 @@ func parseSpawn(args []string) (Spawn, error) {
 	return s, nil
 }
 
-// e6Arm resolves the experiment marker for a spawn. A value a hub submission
-// carried wins; a spawn without one reads the environment exactly as a local
-// spawn always has. It never invents a marker.
-func (a *App) e6Arm(carried string) string {
+// e6Arm resolves the experiment marker for a spawn. A value the spawn
+// carries wins; a locked spawn (a hub submission or a node-delivered spawn,
+// whose marker is already authoritative) keeps an empty marker empty; every
+// other spawn reads the environment exactly as a local spawn always has. It
+// never invents a marker.
+func (a *App) e6Arm(carried string, locked bool) string {
+	if locked {
+		return carried
+	}
 	return firstNonempty(carried, a.envOr("PANEWIRE_E6_ARM", "SCOPEFUEL_E6_ARM"))
 }
 
@@ -487,7 +502,7 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 		return fail(exitUsage, "--task and --parent-job are exclusive")
 	}
 	if s.E6Arm == "" {
-		s.E6Arm = a.e6Arm("")
+		s.E6Arm = a.e6Arm("", s.e6ArmLocked)
 	}
 	if err := validateContainment(s); err != nil {
 		return err
@@ -1102,7 +1117,7 @@ func gateRequestedBy(s Spawn) string {
 
 // spawnQuotaRequest is the catalog and gate request for a spawn's seat and rung.
 func (a *App) spawnQuotaRequest(s Spawn, seat Seat, effort string) QuotaRequest {
-	return QuotaRequest{Profile: seat.Canon, GateProfile: seat.gateName(), Effort: effort, Role: s.Role, OperatorRequest: s.OperatorRequest, RequestedBy: gateRequestedBy(s), Purpose: s.Purpose, AccountKey: s.AccountKey, E6Arm: a.e6Arm(s.E6Arm)}
+	return QuotaRequest{Profile: seat.Canon, GateProfile: seat.gateName(), Effort: effort, Role: s.Role, OperatorRequest: s.OperatorRequest, RequestedBy: gateRequestedBy(s), Purpose: s.Purpose, AccountKey: s.AccountKey, E6Arm: a.e6Arm(s.E6Arm, s.e6ArmLocked), E6ArmLocked: s.e6ArmLocked}
 }
 
 // checkLaunchRow is the launch-row half of admitLaunch: the catalog row the
@@ -1134,7 +1149,7 @@ func (a *App) checkLaunchRow(ctx context.Context, s Spawn, seat Seat, qr QuotaRe
 			return Launch{}, fail(exitSeatRefused, "NO_ROLE_CANDIDATE: model %s in harness %s cannot consult", launch.ModelID, seat.Kind)
 		}
 	}
-	if e = seat.Check(launch, s.Role, grade, builderFamily, a.e6Arm(s.E6Arm), host); e != nil {
+	if e = seat.Check(launch, s.Role, grade, builderFamily, a.e6Arm(s.E6Arm, s.e6ArmLocked), host); e != nil {
 		return Launch{}, e
 	}
 	return launch, nil

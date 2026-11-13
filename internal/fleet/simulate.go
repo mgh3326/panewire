@@ -447,7 +447,7 @@ func (a *App) simulate(ctx context.Context, args []string) error {
 	var pending []*selCand
 	for _, sc := range doc.Candidates {
 		row := CatalogRow{Profile: sc.Profile, Effort: sc.Effort, Grade: sc.Grade, ModelID: sc.ModelID, Pool: sc.Pool, Gate: sc.Gate, Score: sc.Score, RetiredAt: sc.RetiredAt}
-		c := &selCand{row: row, seatName: firstNonempty(sc.Seat, sc.Profile), tier: -1}
+		c := &selCand{row: row, seatName: firstNonempty(sc.Seat, sc.Profile), tier: -1, policySeat: policy.isSeat(row, p.req.grade)}
 		p.cands = append(p.cands, c)
 		_, validGrade := gradeOrder[row.Grade]
 		free := sc.Free || policy.isFree(row)
