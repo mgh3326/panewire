@@ -37,6 +37,11 @@ A `rebind_unconfirmed` result means the successor placed but its task ownership
 is not confirmed. Refusal events identify the phase and code, so an ended
 refusal cannot be hidden behind an earlier intact refusal.
 
+A stored submission with the retired `worker` role is refused as
+`legacy_worker_submission` before any successor is staged. The owner lane
+receives a decision event; the existing author's reservation remains until the
+job ends and the ordinary cleanup releases it.
+
 ## The CLI's half
 
 The CLI reads the author's hk job record (`profile`, `effort`, `pool`,

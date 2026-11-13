@@ -134,6 +134,11 @@ func (h *HubServer) escalateAuthor(ctx context.Context, request hubEscalateAutho
 	if err != nil {
 		return h.escalateAuthorRefusal(ctx, request, "", "job_unknown", "no spawn operation for "+request.Job, false)
 	}
+	if hubSpawnArg(holder.Request.Args, "--role") == "worker" && hubSpawnArg(holder.Request.Args, "--task") == request.Task {
+		text := fmt.Sprintf("[panewire] ESC | legacy_worker_submission: job %s uses the retired worker role; its ladder successor was not started. Decide how to continue task %s.", request.Job, request.Task)
+		h.relayLaneEventContext(ctx, hubJobEventPayload{EventID: fmt.Sprintf("ladder-step:%s:%d:legacy_worker_submission", request.Job, request.Round), JobID: request.Job, OwnerLane: holder.Owner, NotifyType: "decision", Text: utf8PrefixWithin(text, laneEventTextLimit), Host: "hub", Epoch: 1}, nil)
+		return hubEscalateAuthorResult{Code: "legacy_worker_submission", Reason: "the stored worker role is retired; the owner lane was notified"}, nil
+	}
 	spawn, err := fleet.ValidateSubmission(holder.Request)
 	if err != nil {
 		return h.escalateAuthorRefusal(ctx, request, "", "job_unreadable", err.Error(), false)

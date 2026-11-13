@@ -1065,3 +1065,46 @@ func TestEscalateAuthorDropsStageWhenParentCompletesDuringClose(t *testing.T) {
 		t.Fatal("staged role remains reserved")
 	}
 }
+
+func TestEscalateAuthorRefusesLegacyWorkerWithOwnerESC(t *testing.T) {
+	f := newEscalateFixture(t, "legacy-author")
+	holder, err := f.hub.inbox.store.latestSpawnForJob(t.Context(), f.job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i+1 < len(holder.Request.Args); i++ {
+		if holder.Request.Args[i] == "--role" {
+			holder.Request.Args[i+1] = "worker"
+		}
+	}
+	raw, err := json.Marshal(holder.Request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = f.hub.inbox.store.db.ExecContext(t.Context(), f.hub.inbox.store.q(`UPDATE spawn_operations SET payload=? WHERE request_id=?`), string(raw), holder.Request.RequestID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = f.hub.inbox.store.db.ExecContext(t.Context(), f.hub.inbox.store.q(`UPDATE spawn_reservations SET task_role=? WHERE request_id=?`), "42:worker", holder.Request.RequestID); err != nil {
+		t.Fatal(err)
+	}
+	result, commands := f.escalate(t, nil)
+	if result.Code != "legacy_worker_submission" || result.AuthorEnded || len(commands) != 0 {
+		t.Fatalf("result=%+v commands=%v", result, commandOps(commands))
+	}
+	if _, err := f.hub.inbox.store.latestSpawnForJob(t.Context(), f.job+"-l1"); err == nil {
+		t.Fatal("legacy refusal created a successor")
+	}
+	if _, _, _, err := f.hub.inbox.store.spawnRoleOwner(t.Context(), "42:implementer"); err == nil {
+		t.Fatal("legacy refusal created an implementer reservation")
+	}
+	f.awaitInfo(t, "ESC", "legacy_worker_submission")
+	items, err := f.hub.inbox.store.list("parent", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.ContainsFunc(items, func(item laneInboxItem) bool {
+		return item.Event.NotifyType == "decision" && strings.Contains(item.Event.Text, "legacy_worker_submission")
+	}) {
+		t.Fatalf("owner did not receive a decision event: %+v", items)
+	}
+}
