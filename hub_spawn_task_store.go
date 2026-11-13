@@ -152,7 +152,9 @@ func (s *laneInboxStore) bindSpawn(parent context.Context, id string, attempt in
 	}
 	// The placement stamp is written with the binding, so no dispatch can run
 	// on a bound row that a restart would not count (restorePlacementCounts).
-	_, err = s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET node_id=?,node_payload=?,status='dispatching',placed_ms=? WHERE request_id=? AND attempt=? AND node_id IS NULL AND status='accepted'`), node.RequestID, string(raw), now.UnixMilli(), id, attempt)
+	// A new bound attempt is unclaimed: a claim an earlier attempt left on the
+	// row does not describe this placement.
+	_, err = s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET node_id=?,node_payload=?,status='dispatching',placed_ms=?,claimed_ms=0 WHERE request_id=? AND attempt=? AND node_id IS NULL AND status='accepted'`), node.RequestID, string(raw), now.UnixMilli(), id, attempt)
 	if err != nil {
 		return hubSpawnTask{}, err
 	}

@@ -182,3 +182,39 @@ func TestFailedClaimPersistKeepsCountForRetry_t4460(t *testing.T) {
 		t.Fatal("a claim that failed to persist dropped its count; the next restart would forget it")
 	}
 }
+
+// A retry is a new placement. A claim the earlier attempt left on the row must
+// not keep a restart from counting the retry's bound launch.
+func TestRestartCountsRetriedPlacementAfterEarlierClaim_t4460(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "inbox.sqlite3")
+	before := restartHub(t, path)
+	before.connect("machine-a", "test", "fixture", &hubAgent{}, true)
+	task := boundSpawn(t, before, 466)
+	before.countPlacement(task.Job, "machine-a")
+	now := time.Now().UTC()
+	before.observeActiveJobs("machine-a", []HubActiveJob{{JobID: task.Job, AgentLabel: "agent", Epoch: 1, StartedAt: now.Format(time.RFC3339)}}, now)
+	// The node never started the first attempt: a retryable, cleanly refused end.
+	refused := hubSpawnOutcome{RC: 124, Stage: "claim", Reason: "deadline_not_started", Host: "machine-a", Retryable: true, NodeResult: true}
+	if changed, err := before.completeSpawn(t.Context(), task, refused); err != nil || !changed {
+		t.Fatalf("completeSpawn = %v, %v", changed, err)
+	}
+	saved, err := before.inbox.store.spawnTask(t.Context(), task.Request.RequestID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	retried, err := before.inbox.store.resumeCleanedSpawn(t.Context(), saved, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	dispatch := hubSpawnRequest{RequestID: t14RequestID(467), Machine: "machine-a", CWDKey: "project", Brief: hubSpawnBrief{Inline: "task"}, Args: []string{"--job", task.Job}, WaitSeconds: 600, DeadlineMS: retried.Deadline.UnixMilli()}
+	if _, err := before.inbox.store.bindSpawn(t.Context(), retried.Request.RequestID, retried.Attempt, dispatch, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	before.Close()
+
+	after := restartHub(t, path)
+	after.connect("machine-a", "test", "fixture", &hubAgent{}, true)
+	if got := countedBridged(after); got != 1 {
+		t.Fatalf("retried, bound launch counts %d after restart, want 1 (the earlier attempt's claim hid it)", got)
+	}
+}
