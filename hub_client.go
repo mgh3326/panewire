@@ -1906,18 +1906,65 @@ func (client *HubClient) helloAckTimeoutOrDefault() time.Duration {
 	return defaultHubHelloAckTimeout
 }
 
+// hubHelloMessage is the node hello on the wire. Applied is the node's
+// delivery report (Store.RelayAppliedIDs): the hub closes those durable rows
+// before it replays on this registration.
+type hubHelloMessage struct {
+	Type         string             `json:"type"`
+	MachineID    string             `json:"machine_id"`
+	Version      string             `json:"version"`
+	Accepting    bool               `json:"accepting,omitempty"`
+	Capabilities []string           `json:"capabilities,omitempty"`
+	Applied      map[string][]int64 `json:"applied,omitempty"`
+}
+
+// relayAppliedReadBudget bounds how long a hello waits for the store: a node
+// whose journal lock is held (hk 4375) must still register, so the report is
+// then left out and the hub falls back to the node's own dedupe.
+const relayAppliedReadBudget = time.Second
+
+// helloMessage builds the hello. The applied report rides only with the
+// capability list: a hub that predates a field drops the whole hello, and the
+// capability-free retry is what lets such a node still register.
+func (client *HubClient) helloMessage(ctx context.Context, capabilities []string) hubHelloMessage {
+	message := hubHelloMessage{Type: "hello", MachineID: client.machineID, Version: client.version, Accepting: client.accepting, Capabilities: capabilities}
+	if len(capabilities) == 0 {
+		return message
+	}
+	store := client.relayStore()
+	if store == nil {
+		return message
+	}
+	type report struct {
+		applied map[string][]int64
+		err     error
+	}
+	done := make(chan report, 1)
+	go func() {
+		applied, err := store.RelayAppliedIDs(ctx)
+		done <- report{applied, err}
+	}()
+	timer := time.NewTimer(relayAppliedReadBudget)
+	defer timer.Stop()
+	select {
+	case got := <-done:
+		if got.err == nil {
+			message.Applied = got.applied
+			return message
+		}
+	case <-timer.C:
+	case <-ctx.Done():
+	}
+	client.warnMessage("relay applied report could not be read; the hub may replay rows this node already delivered")
+	return message
+}
+
 // writeHello sends the node hello followed by a ping. The ping is the
 // registration probe: the hub answers it only for a node whose hello it
 // accepted, so the pong is the hello's acknowledgement and an accepting hub
 // costs no extra wait. Capabilities are omitted from the wire when empty.
 func (client *HubClient) writeHello(ctx context.Context, peer *hubClientConnection, capabilities []string) error {
-	if err := peer.write(ctx, struct {
-		Type         string   `json:"type"`
-		MachineID    string   `json:"machine_id"`
-		Version      string   `json:"version"`
-		Accepting    bool     `json:"accepting,omitempty"`
-		Capabilities []string `json:"capabilities,omitempty"`
-	}{Type: "hello", MachineID: client.machineID, Version: client.version, Accepting: client.accepting, Capabilities: capabilities}); err != nil {
+	if err := peer.write(ctx, client.helloMessage(ctx, capabilities)); err != nil {
 		return err
 	}
 	return peer.write(ctx, hubOutbound{Type: "ping"})

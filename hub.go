@@ -217,6 +217,9 @@ type hubAgent struct {
 	relays       chan hubRelayInjectEvent
 	persisted    chan hubRelayPersistedEvent
 	idleRoutes   chan hubIdleWakeRouteEvent
+	// applied is the delivery report of the last hello this socket sent; the
+	// registration that follows reads it before it replays (hk 3435).
+	applied map[string][]int64
 }
 
 // HubActiveJob is deliberately metadata-only. It is copied from a node's
@@ -1179,6 +1182,7 @@ func (h *HubServer) handleAgentMessageContext(ctx context.Context, machineID, re
 			agent.transient = true
 			return
 		}
+		agent.applied = message.Applied
 		h.connect(machineID, message.Version, remoteAddr, agent, message.Accepting, message.Capabilities)
 	case "ping", "pong":
 		if agent.transient {
@@ -1446,8 +1450,10 @@ type hubInbound struct {
 	Transient    bool
 	Accepting    bool
 	Capabilities []string
-	Kind         string
-	Payload      json.RawMessage
+	// Applied is the node's delivery report from its hello (hk 3435).
+	Applied map[string][]int64
+	Kind    string
+	Payload json.RawMessage
 }
 
 type hubHeartbeatPayload struct {
@@ -1743,7 +1749,7 @@ func parseHubInbound(payload []byte) (hubInbound, bool) {
 	}
 	switch message.Type {
 	case "hello":
-		if !allowed("type", "machine_id", "version", "transient", "accepting", "capabilities") || json.Unmarshal(fields["machine_id"], &message.MachineID) != nil || json.Unmarshal(fields["version"], &message.Version) != nil || message.MachineID == "" || message.Version == "" {
+		if !allowed("type", "machine_id", "version", "transient", "accepting", "capabilities", "applied") || json.Unmarshal(fields["machine_id"], &message.MachineID) != nil || json.Unmarshal(fields["version"], &message.Version) != nil || message.MachineID == "" || message.Version == "" {
 			return hubInbound{}, false
 		}
 		if rawTransient, exists := fields["transient"]; exists && json.Unmarshal(rawTransient, &message.Transient) != nil {
@@ -1754,6 +1760,13 @@ func parseHubInbound(payload []byte) (hubInbound, bool) {
 		}
 		if rawCapabilities, exists := fields["capabilities"]; exists && json.Unmarshal(rawCapabilities, &message.Capabilities) != nil {
 			return hubInbound{}, false
+		}
+		if rawApplied, exists := fields["applied"]; exists {
+			applied, valid := decodeHubHelloApplied(rawApplied)
+			if !valid {
+				return hubInbound{}, false
+			}
+			message.Applied = applied
 		}
 	case "ping", "pong":
 		if !allowed("type") {
@@ -1852,11 +1865,18 @@ func knownHubEventKind(kind string) bool {
 func (h *HubServer) connect(machineID, version, remoteAddr string, agent *hubAgent, accepting bool, capabilityLists ...[]string) {
 	// A node registration is the safe no-restart retry trigger for durable
 	// lane.event rows whose route was absent or disconnected when produced.
+	var applied map[string][]int64
+	if agent != nil {
+		applied = agent.applied
+	}
 	defer func() {
 		go func() {
 			// A wake an inbox-only lane is owed because its pane was not
 			// reachable is retried at once, not at its window's end (hk 3602).
 			h.retryUnroutedInboxWakes()
+			// What the node already delivered closes first, so the replay
+			// and its gap summary count only rows the node has not shown.
+			h.settleNodeApplied(context.Background(), machineID, applied)
 			h.replayUndeliveredLaneEvents(context.Background())
 		}()
 	}()

@@ -62,6 +62,37 @@ fallback: they let `panewire emit` succeed with no daemon running, and they let
 a node that was offline hand its backlog to the hub on reconnect. The answer to
 "was this report delivered" lives only in Postgres.
 
+## What a node already delivered, and a gap after a restart
+
+The node's `relay_delivered` table (`relay_delivered_store.go`) is the durable
+fact that a pane received a row. The `relay.delivered` ack that carries it to
+the hub is a socket event: a socket that dies between the delivery and the ack
+left the hub row open, and the next restart replayed a batch the pane had
+already read (hk 3435).
+
+- **Applied report.** Every hello that carries `capabilities` also carries
+  `applied`: lane → durable row ids the node delivered, newest first, at most
+  256 per lane, 64 lanes and 1500 ids in all (`relayApplied*` constants; the
+  hub reads a hello under 32 KiB and refuses a report outside the bounds). The
+  node's capability-free retry carries none, so a hub that predates the field
+  still registers it. Ship the hub before the nodes.
+- **Registration closes first.** On a hello the hub closes each undelivered row
+  of a reported lane whose id is in the report (`delivered_to` =
+  `<machine>/applied-report`), then replays. The report is a set of exact ids,
+  not a high-water mark: hub row ids are not commit-ordered per lane, and a
+  row the node never saw may sit below one it did, so a max-id cursor would
+  drop it silently.
+- **A gap is one line.** The hello replay and the startup replay hold every
+  `lane.event` row that passed the replay gates until the walk has counted its
+  lane. A lane owed more than `relayReplayGapThreshold` (20) rows gets one
+  summary line — `[panewire] gap: N events for <lane> were not replayed after
+  the restart (first …, last …) | panewire inbox list --lane <lane>` — filed as
+  an interrupt lane.event with id `replay-gap-<last row id>`, and its rows retire
+  with `hub/replay-retired:gap`. The summary is filed first, so a failure
+  replays the rows and a repeated walk reuses the same summary. A lane within
+  the threshold replays row by row as before. Rows held for their one labelled
+  `[replayed after hub restart]` replay (#1002) are outside the count.
+
 ## `--handoffkeep-env`
 
 `panewire hub --handoffkeep-env <path>` enables persistence. The file must be a

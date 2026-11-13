@@ -257,12 +257,18 @@ func TestLaneEventReplayFiltersKindAndAdvancesCursor(t *testing.T) {
 	for id := 1; id <= 200; id++ {
 		seed = append(seed, handoffkeepRelayEvent{ID: int64(id), Kind: "job.completed", JobID: fmt.Sprintf("old-job-%d", id), Epoch: 1, OwnerLane: "lane-a", ReportPath: "report.md"})
 	}
+	// Eleven lanes keep each backlog under relayReplayGapThreshold, so every
+	// row replays and the page cursor, not the gap summary, is what is read.
+	lanes := make([]string, 0, 11)
+	for i := 0; i < 11; i++ {
+		lanes = append(lanes, fmt.Sprintf(`"lane-%c":{"machine":"host-a","pane":"w1:p%d"}`, 'a'+i, i))
+	}
 	for id := 201; id <= 401; id++ {
 		producerID := fmt.Sprintf("producer-page-%d", id)
-		seed = append(seed, handoffkeepRelayEvent{ID: int64(id), Kind: "lane.event", OwnerLane: "lane-a", EventID: producerID, Text: "payload"})
+		seed = append(seed, handoffkeepRelayEvent{ID: int64(id), Kind: "lane.event", OwnerLane: fmt.Sprintf("lane-%c", 'a'+id%11), EventID: producerID, Text: "payload"})
 	}
 	fake.seedUndelivered(seed...)
-	hub := r20Hub(t, `{"lanes":{"lane-a":{"machine":"host-a","pane":"w1:p1"}}}`, client, nil)
+	hub := r20Hub(t, `{"lanes":{`+strings.Join(lanes, ",")+`}}`, client, nil)
 	hub.relayControl.relayAckTimeout = time.Hour
 	destination := &hubAgent{relays: make(chan hubRelayInjectEvent, 402)}
 	hub.nodes["host-a"] = &hubNodeRecord{agent: destination}
