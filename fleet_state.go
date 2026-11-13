@@ -408,7 +408,13 @@ func (h *HubServer) publishFleetStateFromNode(machineID string, publish FleetSta
 		}
 		return true
 	}
-	h.stateStore().publish(FleetStateMessage{Host: machineID, Kind: publish.Kind, Key: publish.Key, MeasuredAt: publish.MeasuredAt.UTC(), ConfirmedAt: utcPtr(publish.ConfirmedAt), ReceivedAt: received, Quota: publish.Quota}, fleetStateNodeRepeat)
+	recorded := h.stateStore().publish(FleetStateMessage{Host: machineID, Kind: publish.Kind, Key: publish.Key, MeasuredAt: publish.MeasuredAt.UTC(), ConfirmedAt: utcPtr(publish.ConfirmedAt), ReceivedAt: received, Quota: publish.Quota}, fleetStateNodeRepeat)
+	// A quota value that shows a pool used up is the trigger of the
+	// exhausted-pool sweep (hub_pool_exhausted.go); an identical value
+	// repeated within fleetStateNodeRepeat is not recorded and not a new look.
+	if recorded && publish.Kind == fleetStateKindQuota {
+		h.observePoolExhaustion(publish.Quota, received)
+	}
 	return true
 }
 

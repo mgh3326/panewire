@@ -154,9 +154,18 @@ func quotaReplacementRequest(old fleet.Submission, oldJob, newJob, pool string, 
 // replaceQuotaStopped answers one job.lost reason "quota_stop" from machine.
 // It reports the successor's job id when one was placed and the old job closed.
 func (h *HubServer) replaceQuotaStopped(ctx context.Context, machine string, event hubJobEventPayload) (string, bool) {
-	skip := func(reason string, kv ...any) (string, bool) {
+	job, ok, _ := h.replaceQuotaStoppedWhy(ctx, machine, event)
+	return job, ok
+}
+
+// replaceQuotaStoppedWhy is replaceQuotaStopped that also names the reason a
+// job was not replaced ("" when it was): the same token its "skipped" log
+// line carries, so a caller that records the outcome (the exhausted-pool
+// sweep) can say why.
+func (h *HubServer) replaceQuotaStoppedWhy(ctx context.Context, machine string, event hubJobEventPayload) (string, bool, string) {
+	skip := func(reason string, kv ...any) (string, bool, string) {
 		h.logger.Info("quota-stop replacement skipped", append([]any{"job", event.JobID, "node", machine, "reason", reason}, kv...)...)
-		return "", false
+		return "", false, reason
 	}
 	budget := h.quotaReplaceBudget
 	if budget <= 0 {
@@ -238,24 +247,7 @@ func (h *HubServer) replaceQuotaStopped(ctx context.Context, machine string, eve
 		return skip("pane_not_closed", "pane", holder.Outcome.Pane)
 	}
 	mark := func() bool {
-		// The pointer can only be written once and the watcher's fallback
-		// would write a plain record, so a transient failure is retried
-		// inside the grace.
-		backoff := h.quotaMarkBackoff
-		if backoff <= 0 {
-			backoff = quotaMarkBackoff
-		}
-		var lost bool
-		var reason string
-		for attempt := 0; attempt < quotaMarkAttempts && !lost; attempt++ {
-			if attempt > 0 {
-				select {
-				case <-time.After(backoff):
-				case <-ctx.Done():
-				}
-			}
-			lost, reason = h.markHolderJobLostBecause(ctx, app, holder, name, endReason)
-		}
+		lost, reason := h.markHolderLostWithRetry(ctx, app, holder, name, endReason)
 		if !lost {
 			h.logger.Warn("quota-stop replacement: the stopped job's record was not written", "job", event.JobID, "replacement", newJob, "reason", reason)
 		}
@@ -268,7 +260,7 @@ func (h *HubServer) replaceQuotaStopped(ctx context.Context, machine string, eve
 	// fails the pointer names a job that never ran, and the owner is told by
 	// the spawn failure notice.
 	if role != "reviewer" && !mark() {
-		return "", false
+		return "", false, "record_not_written"
 	}
 	if prior.Task != "" && prior.ParentJob == "" {
 		if priorID, _, _, err := store.spawnRoleOwner(ctx, prior.RoleKey()); err == nil && priorID == holder.Request.RequestID {
@@ -301,17 +293,17 @@ func (h *HubServer) replaceQuotaStopped(ctx context.Context, machine string, eve
 		// did not.
 		if settled && outcome.RC != 0 || !settled && !spawnMayStillRun(task) {
 			h.logger.Info("quota-stop replacement not placed", "job", event.JobID, "replacement", newJob, "pool", pool, "status", task.Status, "rc", outcome.RC, "reason", outcome.Reason)
-			return "", false
+			return "", false, "not_placed"
 		}
 		if !settled {
 			h.logger.Warn("quota-stop replacement undecided; writing its pointer", "job", event.JobID, "replacement", newJob, "status", task.Status)
 		}
 		if !mark() {
-			return "", false
+			return "", false, "record_not_written"
 		}
 	} else if settled && outcome.RC != 0 {
 		h.logger.Warn("quota-stop hand-over not placed; its pointer names a job that never ran", "job", event.JobID, "replacement", newJob, "pool", pool, "rc", outcome.RC, "reason", outcome.Reason)
-		return "", false
+		return "", false, quotaHandOverNotPlaced
 	}
 	h.logger.Info("quota-stop replacement", "job", event.JobID, "replacement", newJob, "role", role, "pool", pool, "host", outcome.Host, "profile", outcome.Profile)
 	to, place := "with", fmt.Sprintf("%s/%s", outcome.Host, outcome.Profile)
@@ -323,8 +315,14 @@ func (h *HubServer) replaceQuotaStopped(ctx context.Context, machine string, eve
 	}
 	text := fmt.Sprintf("%s %s (%s quota) %s %s on %s", verb, event.JobID, pool, to, newJob, place)
 	h.relayLaneEventContext(ctx, hubJobEventPayload{EventID: "quota-replace:" + newJob, JobID: newJob, OwnerLane: next.Owner, NotifyType: "info", Text: utf8PrefixWithin(text, laneEventTextLimit), Host: "hub", Epoch: 1}, nil)
-	return newJob, true
+	return newJob, true, ""
 }
+
+// quotaHandOverNotPlaced is replaceQuotaStoppedWhy's reason for a hand-over
+// whose old record already ends with handed_over_to but whose successor
+// settled as a failure: the old job is over, so a repeated pass has nothing
+// left to hand over.
+const quotaHandOverNotPlaced = "hand_over_not_placed"
 
 // spawnMayStillRun reports whether an operation that has not settled can still
 // place a job: one the node holds (dispatching, reconciling) or whose late
@@ -473,4 +471,27 @@ func (h *HubServer) runQuotaReconcile(parent context.Context) {
 		h.reconcileQuotaReplacements(ctx)
 		delay = quotaReconcileEvery
 	}
+}
+
+// markHolderLostWithRetry writes the stopped job's record lost with endReason,
+// up to quotaMarkAttempts tries quotaMarkBackoff apart. The record can only be
+// written once and the node watcher's fallback would write a plain one, so a
+// transient failure is retried inside the grace.
+func (h *HubServer) markHolderLostWithRetry(ctx context.Context, app *fleet.App, holder hubSpawnTask, name, endReason string) (bool, string) {
+	backoff := h.quotaMarkBackoff
+	if backoff <= 0 {
+		backoff = quotaMarkBackoff
+	}
+	var lost bool
+	var reason string
+	for attempt := 0; attempt < quotaMarkAttempts && !lost; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-time.After(backoff):
+			case <-ctx.Done():
+			}
+		}
+		lost, reason = h.markHolderJobLostBecause(ctx, app, holder, name, endReason)
+	}
+	return lost, reason
 }

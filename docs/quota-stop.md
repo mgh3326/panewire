@@ -31,3 +31,24 @@ Known limits: a worker or tester on another host does not carry uncommitted chan
 ## Job end on a quota stop (no replacement)
 
 When no replacement is made, the job watcher ends a reviewer job whose pane is idle on a quota stop screen and has no report. It writes the hk record `state=lost` with `end_reason="quota_stop pool=<pool> reset_at=<RFC3339 UTC>"` (`reset_at` left out when unknown, at most 128 characters, no `result`), emits `job.lost` with `reason: "quota_stop"`, `pool` and `reset_at`, and releases the quota reservation. It only reads the screen and never sends input to the pane. The classifier is `internal/quotastop`; the devin line is matched anywhere in the status line, including the `▲ Something went wrong — ` prefix. A report with the end signal still takes the done path.
+
+## An exhausted pool
+
+hk 4550, operator decision 248. A pane's quota screen is observed only once the pane is idle, so the jobs on a pool that is already known to be used up would sit on dead panes for hours. The hub therefore acts on the pool's live jobs at once, without a screen observation (`hub_pool_exhausted.go`).
+
+**Trigger.** A node's quota value that the hub records (`publishFleetStateFromNode`, fleet state kind `quota`) and that shows the account used up with its reset still ahead: the free bucket `exhausted` (a devin free-limit record that reached the shared store), or a window of scope `account` (or no scope, and no `model`) at 100 % with a readable `resets_at`. A window of one model group does not count, since the account's other models stay usable. An identical value repeated within a minute is not recorded and does not start a pass.
+
+**Which jobs.** The live hub spawn operations (`liveSpawnTasks`, the rule of `[quota].pool_max_concurrent`) that succeeded and whose placement record, `pool` and `account_key` in the operation outcome (written from the executing host's receipt), names that pool and account. An operation with no placement record, another pool, or another account is never touched.
+
+| Role | Action |
+|---|---|
+| worker, tester | Handed over through the hand-over above (`replaceQuotaStoppedWhy`): the record ends `handed_over_to`, the successor takes the same worktree and branch with `-m auto`, the exhausted pool excluded |
+| reviewer, consult (`counsel`) | Ended now: the pane is saved and closed, the record ends `quota_stop pool=<pool> reset_at=<RFC3339 UTC>`, the role is released, and the owner gets `job.lost` reason `quota_stop` with the pool and reset, so it respawns the job. The hub does not replace it |
+
+Each job's action runs on its own goroutine, all at once. A pane that is not idle, or that the node cannot list, is skipped and tried again the next time the exhaustion is seen; nothing is closed under a working pane. A job whose `hk` record is no longer `claimed` or `spawned` is skipped.
+
+**Records.** One `pool exhausted job` log line per job acted on (`job`, `role`, `pool`, `account`, `cause`, `action`, `successor`), and the job's hk record (`handed_over_to` or the `quota_stop` end reason). One `pool exhausted sweep` line per pool event (`pool`, `account`, `cause`, `reset`, `jobs`, `handed_over`, `ended`, and `skipped` as `reason=count`); a repeat of the same event is logged at debug level unless it acted.
+
+**Idempotent.** A job a pass is acting on or has acted on is held in memory, and its hk record ends, so the same exhaustion seen again, from any host, acts once. A skipped job is released for the next look.
+
+Known limit: the free limit and the paid windows are not told apart, so a free-limit exhaustion also reaches an idle job placed on a paid rung of the same pool and account.

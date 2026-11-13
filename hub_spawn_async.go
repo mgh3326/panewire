@@ -721,6 +721,8 @@ func (t *directSpawnTransport) settleNodeResult(ctx context.Context, node hubSpa
 	if result.Receipt != nil {
 		outcome.Profile = result.Receipt.Profile
 		outcome.Model = result.Receipt.Model
+		outcome.Pool = result.Receipt.Pool
+		outcome.AccountKey = result.Receipt.AccountKey
 		outcome.Role = result.Receipt.Role
 		outcome.LaneUnregistered = result.Receipt.LaneUnregistered
 	}
