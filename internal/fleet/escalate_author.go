@@ -22,8 +22,10 @@ import (
 //	panewire escalate-author --task ID --job JOB --pr owner/repo#N --round N --findings-file PATH
 //
 // rc 0 prints the new job and rung; rc 2 is a refusal (no_rung, quota_refused,
-// or another named code) and does nothing to the worker; any other rc is an
-// error mergewake logs and continues past.
+// or another named code). A refusal before the hub closes the pane leaves the
+// worker running; one after it (quota_refused, claim_refused, job_not_marked)
+// has ended the author, and its message says so (docs/escalate-author.md). Any
+// other rc is an error mergewake logs and continues past.
 
 const (
 	// escalateAuthorFindingsMax bounds the findings JSON the CLI reads and the
@@ -61,6 +63,9 @@ type EscalateAuthorResult struct {
 	Rung   string `json:"rung,omitempty"`
 	Code   string `json:"code,omitempty"`
 	Reason string `json:"reason,omitempty"`
+	// AuthorEnded is true for a refusal that came after the hub closed the
+	// author's pane: no author runs on the task, whatever the code says.
+	AuthorEnded bool `json:"author_ended,omitempty"`
 }
 
 // EscalateAuthorer is the hub transport surface the command needs.
@@ -118,7 +123,7 @@ func (a *App) escalateAuthorCmd(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	record, err := a.escalateAuthorJobRecord(ctx, task, job)
+	record, err := a.escalateAuthorJobRecord(ctx, task, job, round)
 	if err != nil {
 		return err
 	}
@@ -140,14 +145,18 @@ func (a *App) escalateAuthorCmd(ctx context.Context, args []string) error {
 		Task: task, Job: job, PR: pr, Round: round, Findings: findings, Grade: grade,
 		FromProfile: from.Profile, FromEffort: from.Effort,
 	}
+	replay := ladderStepReplayed(record, round)
 	step, ok, err := a.NextLadderRung(ctx, from, grade, scale)
-	if err != nil {
+	if err != nil && !replay {
 		if exitCode(err) == exitConfig {
 			return err
 		}
 		return fail(exitUsage, "quota_refused: %v", err)
 	}
-	if ok {
+	// A replay of a step that already ended the job asks the hub to finish or
+	// re-report it; the hub reads the successor's rung from its own record, so
+	// a ladder that no longer resolves is not a refusal here.
+	if ok && err == nil {
 		request.Profile, request.Effort, request.Step = step.Pick.Profile, step.Pick.Effort, step.Kind
 	}
 	if consult, err := a.ConsultSeat(ctx, grade, str(record, "owner_lane"), from.Family, scale); err == nil {
@@ -168,6 +177,9 @@ func (a *App) escalateAuthorCmd(ctx context.Context, args []string) error {
 		return err
 	}
 	if result.Code != "" {
+		if result.AuthorEnded {
+			return fail(exitUsage, "%s: %s (the author's pane was closed and its record ended; no author runs on task %s)", result.Code, result.Reason, task)
+		}
 		return fail(exitUsage, "%s: %s", result.Code, result.Reason)
 	}
 	if !validID(result.Job) {
@@ -177,9 +189,11 @@ func (a *App) escalateAuthorCmd(ctx context.Context, args []string) error {
 	return nil
 }
 
-// escalateAuthorJobRecord reads the author's live job record and refuses a job
-// that is not the task's, not running, or bound to a different task.
-func (a *App) escalateAuthorJobRecord(ctx context.Context, task, job string) (map[string]any, error) {
+// escalateAuthorJobRecord reads the author's job record and refuses a job that
+// is not the task's, not running, or bound to a different task. A record that
+// an earlier ladder step of this round ended is accepted: the hub finishes or
+// re-reports that step.
+func (a *App) escalateAuthorJobRecord(ctx context.Context, task, job string, round int) (map[string]any, error) {
 	store, err := a.jobStore()
 	if err != nil {
 		return nil, err
@@ -188,8 +202,8 @@ func (a *App) escalateAuthorJobRecord(ctx context.Context, task, job string) (ma
 	if err != nil {
 		return nil, fail(exitUsage, "job %s has no readable record: %v", job, err)
 	}
-	switch state, _ := record["state"].(string); state {
-	case "claimed", "spawned":
+	switch state, _ := record["state"].(string); {
+	case state == "claimed" || state == "spawned" || ladderStepReplayed(record, round):
 	default:
 		return nil, fail(exitUsage, "job %s is not live (state %q); nothing to escalate", job, state)
 	}

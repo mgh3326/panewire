@@ -254,3 +254,40 @@ func TestEscalateAuthorCLIRejectsADeadJob(t *testing.T) {
 		t.Fatal("nothing must reach the hub")
 	}
 }
+
+// A record that this round's ladder step already ended is not a dead job: the
+// hub finishes or re-reports that step, so the replay reaches it. A job lost
+// for another reason, or by another round's step, still does not.
+func TestEscalateAuthorCLIReplaysAStepThatEndedTheJob(t *testing.T) {
+	args := []string{"--task", "42", "--job", "job-a", "--pr", "mgh3326/panewire#77", "--round", "5", "--findings-file", writeFindings(t, `[]`)}
+	a, hub := escalateCLIFixture(t, "sonnet", "high", true)
+	a.JobStore.(*fakeJobStore).records["job-a"]["state"] = "lost"
+	a.JobStore.(*fakeJobStore).records["job-a"]["end_reason"] = LadderStepEndReason(5, "job-a-l1")
+	hub.result = EscalateAuthorResult{Job: "job-a-l1", Rung: "sonnet@xhigh"}
+	if err := a.escalateAuthorCmd(context.Background(), args); err != nil {
+		t.Fatalf("the replay of its own step must reach the hub: %v", err)
+	}
+	if hub.calls != 1 {
+		t.Fatalf("hub calls=%d", hub.calls)
+	}
+	for name, reason := range map[string]string{"another round": LadderStepEndReason(3, "job-a-l1"), "not a ladder step": "quota_stop pool=claude replaced_by=job-a-q1"} {
+		a, hub := escalateCLIFixture(t, "sonnet", "high", true)
+		a.JobStore.(*fakeJobStore).records["job-a"]["state"] = "lost"
+		a.JobStore.(*fakeJobStore).records["job-a"]["end_reason"] = reason
+		if err := a.escalateAuthorCmd(context.Background(), args); exitCode(err) != exitUsage || !strings.Contains(err.Error(), "not live") || hub.calls != 0 {
+			t.Fatalf("%s: want a usage refusal before the hub, got %v (calls %d)", name, err, hub.calls)
+		}
+	}
+}
+
+// A refusal that follows the pane close says the author is gone: mergewake
+// reads rc 2 either way, so the message is the only place the consumer learns
+// that no author runs on the task.
+func TestEscalateAuthorCLIRefusalAfterTheCloseSaysTheAuthorIsGone(t *testing.T) {
+	a, hub := escalateCLIFixture(t, "sonnet", "high", true)
+	hub.result = EscalateAuthorResult{Code: "quota_refused", Reason: "no account admits it", AuthorEnded: true}
+	err := a.escalateAuthorCmd(context.Background(), []string{"--task", "42", "--job", "job-a", "--pr", "mgh3326/panewire#77", "--round", "5", "--findings-file", writeFindings(t, `[]`)})
+	if exitCode(err) != exitUsage || !strings.Contains(err.Error(), "no author runs on task 42") {
+		t.Fatalf("want rc 2 naming the ended author, got %v (rc %d)", err, exitCode(err))
+	}
+}

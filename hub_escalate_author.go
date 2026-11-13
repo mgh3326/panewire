@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
@@ -25,11 +24,12 @@ import (
 // checkout and its pane — so the successor runs on the same worktree and
 // branch and one job holds the task.
 //
-// The hub closes the old pane, marks the old record lost with the successor's
-// pointer, releases the old role, claims the successor as an inherited
-// (--parent-job) spawn and waits for its placement. A successor that does not
-// place is a quota_refused refusal; nothing is left running. The design lane
-// gets one info event for every outcome, never an interrupt.
+// The hub validates the successor and prepares its worktree first, then closes
+// the old pane, marks the old record lost with the successor's pointer,
+// releases the old role, claims the successor as an inherited (--parent-job)
+// spawn and waits for its placement. A successor that does not place is a
+// quota_refused refusal that says the author is gone. The design lane gets one
+// info event for every outcome, never an interrupt.
 
 const (
 	// escalateAuthorWait is how long the hub waits for the successor's
@@ -67,6 +67,9 @@ type hubEscalateAuthorResult struct {
 	Rung   string `json:"rung,omitempty"`
 	Code   string `json:"code,omitempty"`
 	Reason string `json:"reason,omitempty"`
+	// AuthorEnded marks a refusal after the old pane was closed: no author
+	// runs on the task, whatever the code says.
+	AuthorEnded bool `json:"author_ended,omitempty"`
 }
 
 func (h *HubServer) handleEscalateAuthor(w http.ResponseWriter, r *http.Request) {
@@ -114,21 +117,24 @@ func (r hubEscalateAuthorRequest) refusal() string {
 	return ""
 }
 
-// escalateAuthor starts the successor or returns a refusal. A refusal before
-// the pane probe touches nothing; a refusal after it has closed the old pane
-// and ended the old record lost (a quota_refused successor), so the PR goes on
-// to its next round with one job still holding the task.
+// escalateAuthor starts the successor or returns a refusal. Everything that
+// can be checked is checked before the old pane is touched: the successor's
+// submission, the rung, the pane and the worktree. A refusal before the pane
+// close changes nothing and the PR goes on to its next round. A refusal after
+// it (a successor that does not place, a claim the store refuses, a record
+// that cannot be written) has ended the author; it carries AuthorEnded, and a
+// replay of the same (job, round) finishes a step that stopped half way.
 func (h *HubServer) escalateAuthor(ctx context.Context, request hubEscalateAuthorRequest) (hubEscalateAuthorResult, error) {
 	holder, err := h.inbox.store.latestSpawnForJob(ctx, request.Job)
 	if err != nil {
-		return h.escalateAuthorRefusal(ctx, request, "", "job_unknown", "no spawn operation for "+request.Job)
+		return h.escalateAuthorRefusal(ctx, request, "", "job_unknown", "no spawn operation for "+request.Job, false)
 	}
 	spawn, err := fleet.ValidateSubmission(holder.Request)
 	if err != nil {
-		return h.escalateAuthorRefusal(ctx, request, "", "job_unreadable", err.Error())
+		return h.escalateAuthorRefusal(ctx, request, "", "job_unreadable", err.Error(), false)
 	}
 	if spawn.Job != request.Job || spawn.Task != request.Task || spawn.Role != "worker" || spawn.ParentJob != "" {
-		return h.escalateAuthorRefusal(ctx, request, "", "job_mismatch", fmt.Sprintf("job %s is %s for task %s, not a live worker on task %s", request.Job, spawn.Role, spawn.Task, request.Task))
+		return h.escalateAuthorRefusal(ctx, request, "", "job_mismatch", fmt.Sprintf("job %s is %s for task %s, not a live worker on task %s", request.Job, spawn.Role, spawn.Task, request.Task), false)
 	}
 	app, err := h.newSpawnApp(io.Discard, io.Discard)
 	if err != nil {
@@ -138,34 +144,41 @@ func (h *HubServer) escalateAuthor(ctx context.Context, request hubEscalateAutho
 	record, exists, readErr := app.ExistingJob(readCtx, request.Job)
 	cancel()
 	if readErr != nil || !exists {
-		return h.escalateAuthorRefusal(ctx, request, "", "job_unreadable", "the job's hk record is unreadable")
+		return h.escalateAuthorRefusal(ctx, request, "", "job_unreadable", "the job's hk record is unreadable", false)
 	}
 	ownerLane := firstNonempty(escalateAuthorStr(record, "owner_lane"), holder.Owner)
-	if state, _ := record["state"].(string); state != "claimed" && state != "spawned" {
-		return h.escalateAuthorRefusal(ctx, request, ownerLane, "job_not_live", "the job's record is "+state)
-	}
-	if profile := escalateAuthorStr(record, "profile"); profile != "" && profile != request.FromProfile {
-		return h.escalateAuthorRefusal(ctx, request, ownerLane, "job_changed", fmt.Sprintf("the job now runs %s, not %s", profile, request.FromProfile))
-	}
-	if effort := escalateAuthorStr(record, "effort"); effort != "" && request.FromEffort != "" && effort != request.FromEffort {
-		return h.escalateAuthorRefusal(ctx, request, ownerLane, "job_changed", fmt.Sprintf("the job now runs at %s, not %s", effort, request.FromEffort))
-	}
 	newJob, _, ok := escalateAuthorJob(request.Job)
 	if !ok {
-		return h.escalateAuthorRefusal(ctx, request, ownerLane, "no_rung", "the ladder step limit is reached")
+		return h.escalateAuthorRefusal(ctx, request, ownerLane, "no_rung", "the ladder step limit is reached", false)
 	}
-	// A replay after a lost answer finds its own successor: a placed one is the
-	// step, a failed one is its refusal, and one still running is the step it
-	// will report when it settles.
+	// A replay after a lost answer finds its own successor, before the old
+	// record's state is read: a step that got as far as the successor has
+	// already ended the old record. A placed successor is the step, a failed
+	// one is its refusal, and one still running is the step it will report
+	// when it settles.
 	if prior, err := h.inbox.store.latestSpawnForJob(ctx, newJob); err == nil {
 		rung := firstNonempty(stepValue(prior.Request.Args, "-m"), request.Profile) + "@" + firstNonempty(stepValue(prior.Request.Args, "--effort"), "default")
 		if prior.Status == "failed" || prior.Status == "retryable" {
-			return h.escalateAuthorRefusal(ctx, request, ownerLane, "quota_refused", firstNonempty(prior.Outcome.Reason, "the successor did not place"))
+			return h.escalateAuthorRefusal(ctx, request, ownerLane, "quota_refused", firstNonempty(prior.Outcome.Reason, "the successor did not place"), true)
 		}
 		return hubEscalateAuthorResult{Job: newJob, Rung: rung}, nil
 	}
+	state, _ := record["state"].(string)
+	// A record this step already ended, with no successor claimed, is a step
+	// the hub stopped in the middle (a restart between the record write and
+	// the claim): the pane is closed and only the claim is left.
+	resume := state == "lost" && escalateAuthorStr(record, "end_reason") == fleet.LadderStepEndReason(request.Round, newJob)
+	if state != "claimed" && state != "spawned" && !resume {
+		return h.escalateAuthorRefusal(ctx, request, ownerLane, "job_not_live", "the job's record is "+state, false)
+	}
+	if profile := escalateAuthorStr(record, "profile"); profile != "" && profile != request.FromProfile {
+		return h.escalateAuthorRefusal(ctx, request, ownerLane, "job_changed", fmt.Sprintf("the job now runs %s, not %s", profile, request.FromProfile), false)
+	}
+	if effort := escalateAuthorStr(record, "effort"); effort != "" && request.FromEffort != "" && effort != request.FromEffort {
+		return h.escalateAuthorRefusal(ctx, request, ownerLane, "job_changed", fmt.Sprintf("the job now runs at %s, not %s", effort, request.FromEffort), false)
+	}
 	if request.Profile == "" || request.Step == "" {
-		return h.escalateAuthorRefusal(ctx, request, ownerLane, "no_rung", "the policy has no step left for this seat")
+		return h.escalateAuthorRefusal(ctx, request, ownerLane, "no_rung", "the policy has no step left for this seat", false)
 	}
 	// The rung the CLI named must still be a live, ordinary or escalation rung
 	// that covers the task grade. The CLI resolved it from the same catalog,
@@ -178,44 +191,52 @@ func (h *HubServer) escalateAuthor(ctx context.Context, request hubEscalateAutho
 		return hubEscalateAuthorResult{}, err
 	}
 	if !escalateAuthorRung(rows, request) {
-		return h.escalateAuthorRefusal(ctx, request, ownerLane, "no_rung", fmt.Sprintf("%s@%s is not a live rung covering grade %s", request.Profile, request.Effort, request.Grade))
+		return h.escalateAuthorRefusal(ctx, request, ownerLane, "no_rung", fmt.Sprintf("%s@%s is not a live rung covering grade %s", request.Profile, request.Effort, request.Grade), false)
 	}
-	name := heldAgentName(holder, record)
-	probe := h.probeHeldPane(ctx, spawnHolderHost(holder), holder.Outcome.Pane, name)
-	if probe.state != heldPanePresent {
-		return h.escalateAuthorRefusal(ctx, request, ownerLane, "pane_unavailable", "the job's pane is "+probe.state.String()+" ("+probe.reason+")")
-	}
-	if !nodePaneIdleStatus[probe.row.AgentStatus] || !validNodeCommandPath(probe.row.Cwd) {
-		return h.escalateAuthorRefusal(ctx, request, ownerLane, "pane_busy", "the job's pane is "+probe.row.AgentStatus)
-	}
-	// The successor reuses the worktree, and worktree.prepare refuses a dirty
-	// one. Refuse before the pane is closed: an author with uncommitted work
-	// keeps its pane instead of being replaced by a spawn that cannot start.
-	if clean, why := h.escalateAuthorWorktreeClean(ctx, holder, probe.row.Cwd); !clean {
-		return h.escalateAuthorRefusal(ctx, request, ownerLane, why, "the job's worktree cannot be reused")
-	}
+	// The successor is built and validated the way the claim will validate it,
+	// before anything is closed: a submission the store would refuse must not
+	// cost the author its pane.
 	next, err := escalateAuthorSubmission(holder.Request, request, newJob)
 	if err != nil {
 		return hubEscalateAuthorResult{}, err
 	}
-	// Close the old pane before the successor exists, so one job holds the
-	// task. A pane that changed since the probe is refused by pane.close and
-	// nothing is placed.
-	if !h.closeHeldPane(ctx, holder, name, probe.row) {
-		return h.escalateAuthorRefusal(ctx, request, ownerLane, "pane_not_closed", "the job's pane could not be closed")
+	if _, err := fleet.ValidateSubmission(next); err != nil {
+		return h.escalateAuthorRefusal(ctx, request, ownerLane, "successor_invalid", err.Error(), false)
 	}
-	endReason := escalateAuthorEndReason(request, newJob)
-	if len(endReason) > 128 || !validNodeEndReason(endReason) {
-		return hubEscalateAuthorResult{}, fmt.Errorf("ladder-step end reason is invalid")
-	}
-	if lost, why := h.markHolderJobLostBecause(ctx, app, holder, name, endReason); !lost {
-		return h.escalateAuthorRefusal(ctx, request, ownerLane, "job_not_marked", "the old record was not written lost: "+why)
+	name := heldAgentName(holder, record)
+	if !resume {
+		probe := h.probeHeldPane(ctx, spawnHolderHost(holder), holder.Outcome.Pane, name)
+		if probe.state == heldPaneUnknown {
+			return h.escalateAuthorRefusal(ctx, request, ownerLane, "pane_unavailable", "the job's pane is "+probe.state.String()+" ("+probe.reason+")", false)
+		}
+		if probe.state == heldPanePresent && (!nodePaneIdleStatus[probe.row.AgentStatus] || !validNodeCommandPath(probe.row.Cwd)) {
+			return h.escalateAuthorRefusal(ctx, request, ownerLane, "pane_busy", "the job's pane is "+probe.row.AgentStatus, false)
+		}
+		// The successor reuses the worktree: refuse here, with the author's
+		// pane open, anything its spawn would refuse once the pane is gone.
+		if code, why := h.escalateAuthorWorktreeUsable(ctx, holder, next.Repository.Checkout); code != "" {
+			return h.escalateAuthorRefusal(ctx, request, ownerLane, code, why, false)
+		}
+		endReason := fleet.LadderStepEndReason(request.Round, newJob)
+		if len(endReason) > 128 || !validNodeEndReason(endReason) {
+			return hubEscalateAuthorResult{}, fmt.Errorf("ladder-step end reason is invalid")
+		}
+		// Close the old pane before the successor exists, so one job holds the
+		// task. A pane that changed since the probe is refused by pane.close
+		// and nothing is placed. A pane already absent (an earlier attempt
+		// closed it and stopped before the record write) needs no close.
+		if probe.state == heldPanePresent && !h.closeHeldPane(ctx, holder, name, probe.row) {
+			return h.escalateAuthorRefusal(ctx, request, ownerLane, "pane_not_closed", "the job's pane could not be closed", false)
+		}
+		if lost, why := h.markHolderJobLostBecause(ctx, app, holder, name, endReason); !lost {
+			return h.escalateAuthorRefusal(ctx, request, ownerLane, "job_not_marked", "the old record was not written lost: "+why, true)
+		}
 	}
 	if requestID, _, _, err := h.inbox.store.spawnRoleOwner(ctx, spawn.RoleKey()); err == nil && requestID == holder.Request.RequestID {
 		_ = h.inbox.store.releaseCompletedSpawnRole(ctx, requestID, spawn.RoleKey())
 	}
 	if _, _, err := h.inbox.store.claimSpawn(ctx, next, newJob, ownerLane, h.now().UTC()); err != nil {
-		return h.escalateAuthorRefusal(ctx, request, ownerLane, "claim_refused", err.Error())
+		return h.escalateAuthorRefusal(ctx, request, ownerLane, "claim_refused", err.Error(), true)
 	}
 	select {
 	case h.spawnKick <- struct{}{}:
@@ -223,7 +244,7 @@ func (h *HubServer) escalateAuthor(ctx context.Context, request hubEscalateAutho
 	}
 	task, settled := h.awaitSpawnOutcome(ctx, next.RequestID, escalateAuthorWait)
 	if settled && task.Outcome.RC != 0 {
-		return h.escalateAuthorRefusal(ctx, request, ownerLane, "quota_refused", firstNonempty(task.Outcome.Reason, fmt.Sprintf("placement exited %d", task.Outcome.RC)))
+		return h.escalateAuthorRefusal(ctx, request, ownerLane, "quota_refused", firstNonempty(task.Outcome.Reason, fmt.Sprintf("placement exited %d", task.Outcome.RC)), true)
 	}
 	if !settled {
 		h.logger.Warn("ladder step undecided; its successor may still place", "job", request.Job, "successor", newJob, "status", task.Status)
@@ -234,51 +255,59 @@ func (h *HubServer) escalateAuthor(ctx context.Context, request hubEscalateAutho
 	return hubEscalateAuthorResult{Job: newJob, Rung: rung}, nil
 }
 
-// escalateAuthorWorktreeClean reports whether the replaced job's worktree can
-// be reused by the successor. A job that ran in a canonical checkout has no
-// worktree spec and is not checked; a linked worktree is listed through the
-// holder's node and refused when it has uncommitted changes.
-func (h *HubServer) escalateAuthorWorktreeClean(ctx context.Context, holder hubSpawnTask, cwd string) (bool, string) {
-	if holder.Request.Repository.Checkout == nil {
-		return true, ""
+// escalateAuthorWorktreeUsable asks the holder's node to prepare the
+// successor's checkout while the author's pane is still open. worktree.prepare
+// applies the very refusals the successor's spawn would meet after the pane is
+// gone (a dirty or locked worktree, a branch checked out elsewhere, a HEAD with
+// commits origin does not have), and reusing an idle, clean worktree changes
+// nothing the successor's spawn would not change. A job with no checkout spec
+// ran in a canonical checkout and is not checked.
+func (h *HubServer) escalateAuthorWorktreeUsable(ctx context.Context, holder hubSpawnTask, checkout *fleet.HubCheckout) (code, reason string) {
+	if checkout == nil {
+		return "", ""
 	}
-	if !validNodeCommandPath(cwd) {
-		return false, "worktree_unreadable"
+	var prepared nodeWorktreePrepareResult
+	args := nodeWorktreePrepareArgs{Origin: checkout.Origin, Mode: checkout.Mode, Branch: checkout.Branch, Sha: checkout.Sha, Fetch: checkout.Fetch, Dir: checkout.Dir}
+	if !h.nodeCall(ctx, spawnHolderHost(holder), nodeCommandWorktreePrepare, args, spawnHeldPaneActWait, &prepared) {
+		return "worktree_unreadable", "the holder's node did not answer worktree.prepare"
 	}
-	common := filepath.Join(filepath.Dir(cwd), holder.Request.Repository.Name)
-	var list nodeWorktreeListResult
-	if !h.nodeCall(ctx, spawnHolderHost(holder), nodeCommandWorktreeList, nodeWorktreeListArgs{Common: common}, spawnHeldPaneActWait, &list) {
-		return false, "worktree_unreadable"
+	switch prepared.Outcome {
+	case nodePreparePrepared, nodePrepareReused:
+		return "", ""
+	case nodeOutcomeDirty:
+		return "worktree_dirty", "the job's worktree has uncommitted changes"
+	case nodeRemoveLocked:
+		return "worktree_locked", "the job's worktree is locked"
+	case nodePrepareBranchElsewhere:
+		return "worktree_unpushed", firstNonempty(prepared.Reason, "the job's branch has commits origin does not have, or is checked out elsewhere")
 	}
-	for _, worktree := range list.Worktrees {
-		if !nodeSamePath(worktree.Path, cwd) {
-			continue
-		}
-		if worktree.Status.Error != "" {
-			return false, "worktree_unreadable"
-		}
-		if worktree.Status.Dirty {
-			return false, "worktree_dirty"
-		}
-		return true, ""
-	}
-	return false, "worktree_unreadable"
+	return "worktree_unreadable", "worktree.prepare answered " + prepared.Outcome
 }
 
 // escalateAuthorRefusal records the refusal as one info event for the design
-// lane and answers the CLI with its code. A refusal that follows the pane
-// close has already ended the old job; one before it changed nothing.
-func (h *HubServer) escalateAuthorRefusal(ctx context.Context, request hubEscalateAuthorRequest, owner, code, reason string) (hubEscalateAuthorResult, error) {
-	text := fmt.Sprintf("ladder step %s: %s (%s) (round %d, %s); the PR goes on to the next round", request.Job, code, reason, request.Round, request.PR)
+// lane and answers the CLI with its code. ended marks a refusal that follows
+// the pane close: the old author is gone and the PR has none, which the info
+// and the CLI say, because mergewake reads rc 2 either way.
+func (h *HubServer) escalateAuthorRefusal(ctx context.Context, request hubEscalateAuthorRequest, owner, code, reason string, ended bool) (hubEscalateAuthorResult, error) {
+	consequence := "the PR goes on to the next round"
+	if ended {
+		consequence = "the author's pane is closed and its record ended; no author runs on this PR now"
+	}
+	text := fmt.Sprintf("ladder step %s: %s (%s) (round %d, %s); %s", request.Job, code, reason, request.Round, request.PR, consequence)
 	h.relayLaneEventContext(ctx, hubJobEventPayload{EventID: fmt.Sprintf("ladder-step:%s:%d", request.Job, request.Round), JobID: request.Job, OwnerLane: owner, NotifyType: "info", Text: utf8PrefixWithin(text, laneEventTextLimit), Host: "hub", Epoch: 1}, nil)
-	return hubEscalateAuthorResult{Code: code, Reason: reason}, nil
+	return hubEscalateAuthorResult{Code: code, Reason: reason, AuthorEnded: ended}, nil
 }
 
-// escalateAuthorJob names the successor of old: "<old>-l<n>", where n counts
-// the ladder steps already in old's id. One step is the policy's limit.
+// escalateAuthorChain is the ladder-step and quota-stop suffix of a job id: the
+// ladder step is one `-l<n>` followed by any quota-stop replacements `-q<n>`.
+var escalateAuthorChain = regexp.MustCompile(`-l[0-9]+(-q[0-9]+)*$`)
+
+// escalateAuthorJob names the successor of old: "<old>-l1". One ladder step per
+// job chain is the policy's limit, so a job whose id already carries a ladder
+// step (with or without later quota-stop replacements) has none left.
 func escalateAuthorJob(old string) (job string, step int, ok bool) {
 	step = 1
-	if strings.HasSuffix(old, "-l1") {
+	if escalateAuthorChain.MatchString(old) {
 		step = 2
 	}
 	if step > escalateAuthorMaxStep {
@@ -342,8 +371,11 @@ func escalateAuthorNumeric(value string) bool {
 // escalateAuthorSubmission rewrites the replaced job's submission for its
 // successor: the new job, label, pinned rung, ladder-step reason and report
 // path, the parent job in place of the task, and a brief that carries the old
-// brief, the findings and the consult seat. The repository and checkout are
-// kept exactly, which is what puts the successor on the same worktree.
+// brief, the findings and the consult seat. The repository and checkout stay
+// the same worktree and branch; a branch checkout drops its pinned sha, because
+// the author has committed since that sha was taken and worktree.prepare would
+// refuse a HEAD ahead of it: with no sha the node prepares against the fetched
+// origin tip, which a pushed author's HEAD equals.
 func escalateAuthorSubmission(old fleet.Submission, request hubEscalateAuthorRequest, newJob string) (fleet.Submission, error) {
 	id, err := fleet.NewRequestID()
 	if err != nil {
@@ -357,6 +389,14 @@ func escalateAuthorSubmission(old fleet.Submission, request hubEscalateAuthorReq
 	}
 	next.Args = escalateAuthorArgs(old.Args, request, newJob)
 	next.Brief = escalateAuthorBrief(old.Brief, request)
+	if old.Repository.Checkout != nil && old.Repository.Checkout.Mode == "branch" {
+		checkout := *old.Repository.Checkout
+		checkout.Sha = ""
+		next.Repository.Checkout = &checkout
+	}
+	if arm := old.E6Arm; arm != "" && arm != request.Profile+"@" && arm != request.Profile+"@"+request.Effort {
+		next.E6Arm = ""
+	}
 	if !validHubSpawnRequestID(next.RequestID) {
 		return fleet.Submission{}, fmt.Errorf("invalid successor request id")
 	}
@@ -408,10 +448,7 @@ func escalateAuthorArgs(old []string, request hubEscalateAuthorRequest, newJob s
 	if !has("--containment") && !has("--operator-request") {
 		set("--containment", "hk:"+request.Task)
 	}
-	// An experiment arm names one canon@effort; it does not follow a rung.
-	if arm := hubSpawnArg(old, "--e6-arm"); arm != "" && arm != request.Profile+"@" && arm != request.Profile+"@"+request.Effort {
-		remove("--e6-arm")
-	}
+	// An experiment arm is not an arg; escalateAuthorSubmission settles it.
 	return args
 }
 
@@ -429,12 +466,6 @@ func escalateAuthorBrief(old string, request hubEscalateAuthorRequest) string {
 	}
 	room := hubSpawnMaxBriefBytes - len(tail)
 	return utf8PrefixWithin(old, room) + tail
-}
-
-// escalateAuthorEndReason is the old record's end_reason: the successor's
-// pointer is the last key=value token, as mergewake reads it.
-func escalateAuthorEndReason(request hubEscalateAuthorRequest, newJob string) string {
-	return fmt.Sprintf("ladder step round=%d replaced_by=%s", request.Round, newJob)
 }
 
 // stepValue reads a flag's value from a spawn argument list, in either form.

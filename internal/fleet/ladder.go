@@ -4,6 +4,7 @@ import (
 	"context"
 	_ "embed"
 	"encoding/json"
+	"fmt"
 	"os"
 	"slices"
 	"strings"
@@ -27,6 +28,24 @@ import (
 //
 //go:embed families.json
 var defaultFamilies []byte
+
+// LadderStepEndReason is the end_reason a replaced author's hk record takes:
+// the successor's pointer is the last key=value token, as mergewake reads it.
+// The record that carries it is the proof that the step reached its pane
+// close, so a replay recognises its own half-done step by it.
+func LadderStepEndReason(round int, successor string) string {
+	return fmt.Sprintf("%s%d replaced_by=%s", ladderStepEndReasonPrefix, round, successor)
+}
+
+const ladderStepEndReasonPrefix = "ladder step round="
+
+// ladderStepReplayed reports whether record is a job a ladder step of this
+// round already ended.
+func ladderStepReplayed(record map[string]any, round int) bool {
+	state, _ := record["state"].(string)
+	reason, _ := record["end_reason"].(string)
+	return state == "lost" && strings.HasPrefix(reason, fmt.Sprintf("%s%d replaced_by=", ladderStepEndReasonPrefix, round))
+}
 
 // LadderFamily is one pool family in the policy block.
 type LadderFamily struct {
