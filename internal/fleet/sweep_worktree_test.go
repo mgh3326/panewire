@@ -194,5 +194,5 @@ func (f *paneSweepFixture) withGit(g *sweepGitFake) {
 
 // sweptJob seeds a job bound to task whose receipt cwd is cwd.
 func (f *paneSweepFixture) sweptJob(id, task, cwd string) string {
-	return f.job(id, "worker", task, map[string]any{"cwd": cwd})
+	return f.job(id, "implementer", task, map[string]any{"cwd": cwd})
 }

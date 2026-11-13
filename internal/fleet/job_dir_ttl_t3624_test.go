@@ -134,7 +134,7 @@ func (r *ttlRig) undoc(key string) {
 // its pane gone and every file at the base time.
 func (r *ttlRig) seedJob(id string) {
 	r.t.Helper()
-	putEvent(r.t, r.a, id, "job.claim", map[string]any{"owner_lane": "owner", "parent_lane": "parent", "task_id": "42", "t_level": "T1", "role": "worker"})
+	putEvent(r.t, r.a, id, "job.claim", map[string]any{"owner_lane": "owner", "parent_lane": "parent", "task_id": "42", "t_level": "T1", "role": "implementer"})
 	putEvent(r.t, r.a, id, "job.spawned", map[string]any{"pane_id": "w:" + id, "tab_id": "w:t1", "herdr_session": "default", "label": id, "profile": "cmd-dsflash41", "family": "deepseek", "keep": false})
 	putEvent(r.t, r.a, id, "job.completed", map[string]any{"report": filepath.Join(r.dir(id), "report.md")})
 	putEvent(r.t, r.a, id, "job.reaped", map[string]any{"pane_id": "w:" + id})

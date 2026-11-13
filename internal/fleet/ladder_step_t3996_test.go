@@ -18,7 +18,7 @@ func ladderFixture(t *testing.T) (*rebindFixture, *hkBenchFake) {
 	t.Helper()
 	fx := newRebindFixture(t, "spawned", rebindParent)
 	fx.s.OverrideReason = "ladder step sonnet high → cmd-dsflash41 high, PR 77"
-	putEvent(t, fx.a, rebindParent, "job.claim", map[string]any{"task_id": "42", "t_level": "T1", "role": "worker"})
+	putEvent(t, fx.a, rebindParent, "job.claim", map[string]any{"task_id": "42", "t_level": "T1", "role": "implementer"})
 	putEvent(t, fx.a, rebindParent, "job.spawned", map[string]any{
 		"profile": "sonnet", "effort": "high", "model_id": "claude-sonnet-5-5",
 		"harness_session": map[string]any{"kind": "claude", "id": "s1"}, "task_id": "42",

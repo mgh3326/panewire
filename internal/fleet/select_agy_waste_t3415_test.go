@@ -83,7 +83,7 @@ func TestSelectAgyUnmappedRungUsesMostRestrictiveGroupForWaste(t *testing.T) {
 	a, s, q := agyReadingFixture(t, buckets, rows, []string{"agy", "codex"})
 	// The default policy has no seat for the unmapped rung; one alias is
 	// enough for it to reach classification.
-	a.Policy.Profiles["agy-mystery"] = Seat{Canon: "agy-mystery", Kind: "agy", Family: "google", Capability: "standard", Roles: []string{"worker", "tester", "reviewer", "counsel"}}
+	a.Policy.Profiles["agy-mystery"] = Seat{Canon: "agy-mystery", Kind: "agy", Family: "google", Capability: "standard", Roles: []string{"implementer", "reviewer", "consult"}}
 	q.GateDo = gatePools(withAgyGates(map[string]string{"codex-luna": "codex"}))
 	sel, e := a.selectProfile(context.Background(), s)
 	if e != nil {

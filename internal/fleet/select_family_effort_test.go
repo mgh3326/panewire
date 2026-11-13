@@ -71,8 +71,8 @@ func familyEffortFixture(t *testing.T, familyEffort string) (*App, Spawn, *fakeQ
 // codex-sol@xhigh through its escalation gate and still drops codex-sol@max.
 func TestLeadFamilyEffortAdmitsEscalationRung(t *testing.T) {
 	for _, tc := range []struct{ name, role, override string }{
-		{"--routing-role consult", "worker", "consult"},
-		{"--role counsel (consult)", "counsel", ""},
+		{"resolve --role consult (implementer seat)", "implementer", "consult"},
+		{"--role consult", "consult", ""},
 	} {
 		a, s, q := familyEffortFixture(t, `{"codex-sol": "xhigh"}`)
 		s.Role, s.RoutingRole = tc.role, tc.override
@@ -175,7 +175,7 @@ func TestPlanLeadFamilyEffort(t *testing.T) {
 	a, _, q := familyEffortFixture(t, `{"codex-sol": "xhigh"}`)
 	q.LaunchValue = Launch{Profile: "codex-sol", ModelID: "sol-m", Effort: "xhigh", Grade: "S+", Gate: "escalation", Pool: "codex"}
 	out := captureOut(a)
-	if e := a.Run(context.Background(), []string{"plan", "--t", "T1", "--routing-role", "consult", "--json"}); e != nil {
+	if e := a.Run(context.Background(), []string{"plan", "--t", "T1", "--role", "consult", "--json"}); e != nil {
 		t.Fatalf("plan: %v\n%s", e, out)
 	}
 	var plan map[string]any
@@ -197,7 +197,7 @@ func TestPlanLeadFamilyEffort(t *testing.T) {
 	a, _, q = familyEffortFixture(t, `{"codex-sol": "xhigh"}`)
 	q.LaunchValue = Launch{Profile: "codex-sol", ModelID: "sol-m", Effort: "xhigh", Grade: "S+", Gate: "escalation", Pool: "codex"}
 	out = captureOut(a)
-	if e := a.Run(context.Background(), []string{"plan", "--t", "T1", "--routing-role", "consult"}); e != nil {
+	if e := a.Run(context.Background(), []string{"plan", "--t", "T1", "--role", "consult"}); e != nil {
 		t.Fatalf("plan: %v\n%s", e, out)
 	}
 	if !strings.Contains(out.String(), "family_effort codex-sol=xhigh chosen=codex-sol@xhigh gate=escalation\n") {

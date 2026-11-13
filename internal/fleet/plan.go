@@ -30,8 +30,8 @@ import (
 // seat (hosts a spawn would wake are listed); a local launch or gate refusal
 // keeps its own code.
 type planOpts struct {
-	grade, t, role, tags, effort, urgency, exclude, excludePool, builderFamily, routingRole, creditAt string
-	allowEscalation, json                                                                             bool
+	grade, t, role, tags, effort, urgency, exclude, excludePool, authorFamily, creditAt string
+	allowEscalation, json                                                               bool
 
 	// expected is the job's expected duration for the headroom key (--expected).
 	expected string
@@ -43,14 +43,13 @@ func (a *App) planCmd(ctx context.Context, args []string) (err error) {
 	f := flags("plan")
 	f.StringVar(&o.grade, "grade", "", "task grade (C, B, A, A+, S, S+, SS); for consult, the asker's grade, optional")
 	f.StringVar(&o.t, "t", "", "task scale T0..T3")
-	f.StringVar(&o.role, "role", "worker", "seat role")
+	f.StringVar(&o.role, "role", "implementer", "seat role")
 	f.StringVar(&o.tags, "tags", "", "required host capability tags")
 	f.StringVar(&o.effort, "effort", "", "pin a catalog effort rung")
 	f.StringVar(&o.urgency, "urgency", "", "normal or urgent")
 	f.StringVar(&o.exclude, "exclude-host", "", "hosts placement must not pick")
 	f.StringVar(&o.excludePool, "exclude-pool", "", "quota pools placement must not pick")
-	f.StringVar(&o.builderFamily, "builder-family", "", "builder model family (tester/reviewer)")
-	f.StringVar(&o.routingRole, "routing-role", "", "override the policy/model-routing role")
+	f.StringVar(&o.authorFamily, "author-family", "", "author model family (reviewer)")
 	f.BoolVar(&o.allowEscalation, "allow-escalation", false, "admit escalation and consult-only rungs")
 	f.BoolVar(&o.json, "json", false, "print the full decision as JSON")
 	f.StringVar(&o.creditAt, "credit-at", "", "judge credit expiry as of this RFC3339 time or YYYY-MM-DD (dry run; quota and presence keep the clock)")
@@ -66,7 +65,7 @@ func (a *App) planCmd(ctx context.Context, args []string) (err error) {
 		return fail(exitUsage, "invalid --expected %q: want a duration like 6h or a day count like 2d", o.expected)
 	}
 	o.grade = strings.ToUpper(o.grade)
-	top := topRoutingRole(builtinRoleMap[o.role]) || topRoutingRole(o.routingRole)
+	top := topRoutingRole(o.role)
 	if _, ok := gradeOrder[o.grade]; !ok && (!top || flagPassed(f, "grade")) {
 		return fail(exitUsage, "plan needs --grade C|B|A|A+|S|S+|SS")
 	}
@@ -74,11 +73,11 @@ func (a *App) planCmd(ctx context.Context, args []string) (err error) {
 	if !slices.Contains([]string{"T0", "T1", "T2", "T3"}, o.t) {
 		return fail(exitUsage, "plan needs --t T0..T3")
 	}
-	if !slices.Contains([]string{"worker", "tester", "reviewer", "counsel"}, o.role) {
+	if !slices.Contains(spawnRoles, o.role) {
 		return fail(exitUsage, "invalid role %q", o.role)
 	}
-	if (o.role == "tester" || o.role == "reviewer") != (o.builderFamily != "") && !(top && o.builderFamily != "") {
-		return fail(exitUsage, "--builder-family goes with --role tester|reviewer, and they need it; consult takes it optionally")
+	if (o.role == "reviewer") != (o.authorFamily != "") && !(top && o.authorFamily != "") {
+		return fail(exitUsage, "--author-family goes with --role reviewer, and it needs it; consult takes it optionally")
 	}
 	if o.urgency != "" && o.urgency != urgencyNormal && o.urgency != urgencyUrgent {
 		return fail(exitUsage, "--urgency must be normal or urgent")
@@ -106,8 +105,8 @@ func (a *App) planCmd(ctx context.Context, args []string) (err error) {
 		return fail(exitConfig, "plan needs the quota catalog")
 	}
 	cwd, _ := os.Getwd()
-	s := Spawn{CWD: cwd, Profile: "auto", Host: "auto", Role: o.role, T: o.t, Tags: o.tags, Effort: o.effort, ExcludeHosts: o.exclude, ExcludePools: o.excludePool, AllowEscalation: o.allowEscalation, ParentFamily: o.builderFamily, Urgency: o.urgency, DryRun: true}
-	req := selReq{grade: o.grade, t: o.t, role: o.role, tags: tags, effort: o.effort, allowEscalation: o.allowEscalation, builderFamily: o.builderFamily, excludePools: excludePools, urgency: urgencyNormal, urgencySource: "default", creditAt: creditAt}
+	s := Spawn{CWD: cwd, Profile: "auto", Host: "auto", Role: o.role, T: o.t, Tags: o.tags, Effort: o.effort, ExcludeHosts: o.exclude, ExcludePools: o.excludePool, AllowEscalation: o.allowEscalation, ParentFamily: o.authorFamily, Urgency: o.urgency, DryRun: true}
+	req := selReq{grade: o.grade, t: o.t, role: o.role, tags: tags, effort: o.effort, allowEscalation: o.allowEscalation, authorFamily: o.authorFamily, excludePools: excludePools, urgency: urgencyNormal, urgencySource: "default", creditAt: creditAt}
 	req.expected = expected
 	req.gradeSource = "without_task"
 	if flagPassed(f, "grade") {
@@ -116,8 +115,8 @@ func (a *App) planCmd(ctx context.Context, args []string) (err error) {
 	if o.urgency != "" {
 		req.urgency, req.urgencySource = o.urgency, "flag"
 	}
-	if req.route, e = a.routeFor(ctx, o.role, o.routingRole); e != nil {
-		a.printPlan(o.json, map[string]any{"mode": "plan", "routing_role": firstNonempty(o.routingRole, builtinRoleMap[o.role]), "outcome_code": outcomeForError(e)}, nil, nil, nil, "", e)
+	if req.route, e = a.routeFor(ctx, o.role, ""); e != nil {
+		a.printPlan(o.json, map[string]any{"mode": "plan", "routing_role": o.role, "outcome_code": outcomeForError(e)}, nil, nil, nil, "", e)
 		return e
 	}
 	sel, selErr := a.selectFor(ctx, s, req)

@@ -372,8 +372,8 @@ func launchDefaultEffort(rows []launchRow) (fallback string) {
 // launchRoleCheck is pacelever's roleCheck with its credit() rule.
 func launchRoleCheck(req admissionRequest, row launchRow) string {
 	role := admissionNormalize(req.Role)
-	if admissionCredit(req.Profile, row.Pool) && role != "worker" && role != "tester" && (role != "builder" || !row.Placed || row.Gate != defaultGate) {
-		return "role_restricted: credit rung requires worker/tester; placed default rungs also allow builder"
+	if admissionCredit(req.Profile, row.Pool) && role != "implementer" && (role != "builder" || !row.Placed || row.Gate != defaultGate) {
+		return "role_restricted: credit rung requires implementer; placed default rungs also allow builder"
 	}
 	if strings.Contains(req.Profile, "astra") && req.Profile != "codex-astra" {
 		return "role_restricted: removed astra seat alias"
