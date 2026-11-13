@@ -857,6 +857,33 @@ Both keys live in the pool-order policy under `"waste_risk": {...}`; absent
 keys take the defaults, and `panewire simulate --policy`/`--policy-set` try
 other values before the policy is changed.
 
+**Ranked band: pools compete by their seat.** In the ranked band each pool
+offers one seat for the task's grade: its lowest-grade eligible row that fits
+(the lowest grade at or above the task's), unless the policy's `seats` names a
+row for that pool and grade. Pools are then ordered by their seat's waste
+urgency, the measure the waste, free and credit bands use, so the pool with the
+most room goes first. A pool whose reset can be paced ranks ahead of one whose
+cannot; ties keep the previous order (lowest grade, then effort and score). A
+row above the task's grade is eligible, so a pool's higher-grade row can serve a
+lower-grade task. The pool's other rows follow its seat.
+
+`seats` is `{pool: {grade: "profile@effort"}}` (`"profile"` for a rung-less
+row); `profile@effort` is the catalog row's profile and effort, the grade is
+the task's. It is read only in the ranked band. A named row that is not a
+candidate (dropped, wrong pool, grade below the task's) leaves the pool on its
+lowest-fit seat. The embedded default sends Command Code's B and C tasks to
+`omp-dsflash41@high`:
+
+```json
+"seats": {"commandcode": {"B": "omp-dsflash41@high", "C": "omp-dsflash41@high"}}
+```
+
+Command Code therefore takes a B or C task when its room beats the other ranked
+pools', not unconditionally first. A pool whose lowest-fit row already is the
+intended one (devin's `devin-ds41`) needs no entry. The `seats` map is edited in
+`/etc/panewire/pool-order.json` on the hub like the other keys; a file that
+omits it has no policy seats.
+
 **Headroom for a known job length** (`plan --expected DURATION`, or the task's
 `--expected` on spawn, e.g. `6h` or `2d`). After the band order and before
 waste urgency, a subscription candidate whose shortest in-view window fits the
@@ -991,7 +1018,8 @@ per candidate, `waste_risk` (`true`/`false`) on every candidate and
 `unused_at_reset_pct` (its input) whenever the longest window could be
 paced,
 `waste_urgency`, `reset_hours` and `waste_order` (`usd`, `reset` or
-`projected_fallback`) per ranked candidate,
+`projected_fallback`) per ranked candidate, `pool_waste_urgency` and, on a ranked
+pool's seat, `seat_source` (`lowest_fit` or `policy`),
 `waste_group` (`gemini` or `3p`) on a candidate of a pool that publishes only
 group windows,
 `tier: credit` and the `credit` object (`balance_usd`, `burn_usd_per_h`,
@@ -1552,7 +1580,9 @@ named reason. It is read-only: it reads the hub host list, hk presence and the
 shared observation, and makes one SSH probe per host that tests two paths,
 reads one boolean from the remote `hosts.toml` and asks `panewire` and `panewire`
 for their versions. It never prints a URL or a file's contents, and writes no
-task, job or event.
+task, job or event. The whole run is bounded by a 90-second budget; a probe
+that does not answer in time reports its checks failed (`probe_failed_rcN`)
+rather than holding the command.
 
 | Check | Fails with | Meaning |
 | --- | --- | --- |
@@ -1634,8 +1664,8 @@ are read from the quota tool, never this file.
 ```
 
 Use the complete shipped block when creating a custom policy; a custom file
-does not pick up later bullets, such as the test-host rule that names
-`mbp-server` by `hostname -s` (hk 3733). Selection order
+does not pick up later bullets, such as the test-host rule (one rule on
+every host since hk 4496). Selection order
 is default → host → profile → local.brief_preamble. Missing block names refuse.
 The policy version and selected block appear in every brief and dry-run output.
 See [DESIGN.md](../DESIGN.md#standard-brief-preamble-the-single-source-of-fleet-rules)
