@@ -330,11 +330,11 @@ func (s *fleetStateStore) publish(message FleetStateMessage, repeat time.Duratio
 		if fleetStateBody(previous) == fleetStateBody(message) && message.ReceivedAt.Sub(previous.ReceivedAt) < repeat {
 			return false
 		}
-		// The store keeps one value per host and account, so a delayed reading
-		// must not replace a newer one: the supersession check reads exactly
-		// this value, and an old exhausted publish arriving after a newer
-		// available one would otherwise be the only thing it sees.
-		if fleetStateObservedAt(message).Before(fleetStateObservedAt(previous)) {
+		// The store keeps one value per host and account, so a delayed quota
+		// reading must not replace a newer one: the supersession check reads
+		// exactly this value, and an old exhausted publish arriving after a
+		// newer available one would otherwise be the only thing it sees.
+		if message.Kind == fleetStateKindQuota && fleetStateObservedAt(message).Before(fleetStateObservedAt(previous)) {
 			return false
 		}
 	}
