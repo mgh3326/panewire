@@ -429,12 +429,13 @@ func (h *HubServer) spawnPlacementView(ctx context.Context, cwd string) Placemen
 // on the charged scores: the first decision was made before the queue cost,
 // and a busy winner must give way to an idle host.
 func chargeSpawnQueue(policy PlacementPolicy, result PlacementResult, depth func(string) int) PlacementResult {
-	claimCost := policy.scoreK().claimCost
+	k := policy.scoreK()
 	candidates := make([]PlacementCandidate, len(result.Candidates))
 	for i, candidate := range result.Candidates {
 		if n := depth(candidate.Machine); n > 0 {
 			candidate.ActiveJobs += n
-			candidate.Score -= float64(n) * claimCost
+			// The same cost a bridged job pays (scoreBase), scaled by power.
+			candidate.Score -= float64(n) * k.bridgeCost * 100 / positivePower(policy.power(candidate.Machine))
 		}
 		candidates[i] = candidate
 	}

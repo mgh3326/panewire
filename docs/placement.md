@@ -835,7 +835,7 @@ The hub runs accepted spawns in two stages (docs/hub-spawn-operations.md,
 | `spawn_in_flight_hosts` | none | per-machine override, e.g. `{"rpi": 2, "oci": 2}` |
 
 Each value is 1–32. A node's queued and in-flight spawns count as live jobs in
-the placement the spawn coordinator uses, and each costs `claim_cost`, so a
+the placement the spawn coordinator uses, and each costs what a bridged claim costs (`bridge_cost`, scaled by power), so a
 burst spreads across nodes before it queues behind one. All three defaults are
 unmeasured initial values (design/2026-11-13/hub-owned-spawn-queue §9a).
 
