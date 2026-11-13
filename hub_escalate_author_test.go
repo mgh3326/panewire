@@ -219,11 +219,11 @@ func TestEscalateAuthorRefusesWhenTheRungIsNotAdmitted(t *testing.T) {
 	if result.Code != "quota_refused" {
 		t.Fatalf("result=%+v", result)
 	}
-	if state := f.jobs.records["pw-task-43"]["state"]; state != "lost" {
-		t.Fatalf("the replaced job must end lost: %v", state)
-	}
 	if len(commands) != 4 {
 		t.Fatalf("the pane is closed and the record marked lost: %v", commands)
+	}
+	if reason := endReasonOf(t, commands[3]); reason != "ladder step round=5 replaced_by=pw-task-43-l1" {
+		t.Fatalf("end_reason=%q", reason)
 	}
 	eventually(t, 2*time.Second, "the refusal's info event", func() bool {
 		for _, relay := range spawnFailedInjections(f.destination) {
