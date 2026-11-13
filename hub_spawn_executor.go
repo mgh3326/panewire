@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"slices"
+	"sort"
 	"sync"
 
 	"github.com/mgh3326/panewire/internal/fleet"
@@ -312,15 +313,32 @@ func (h *HubServer) unbindQueuedSpawns(machine string) {
 // cost what a bridged claim costs, so a burst spreads across nodes instead of
 // queueing behind one.
 func (h *HubServer) spawnPlacementView(ctx context.Context, cwd string) PlacementResult {
-	result := h.placementFresh(ctx, "worker", cwd)
-	claimCost := h.spawnPolicy().scoreK().claimCost
+	return chargeSpawnQueue(h.spawnPolicy(), h.placementFresh(ctx, "worker", cwd), h.spawnQueue.depth)
+}
+
+// chargeSpawnQueue charges each candidate its queue depth and decides again
+// on the charged scores: the first decision was made before the queue cost,
+// and a busy winner must give way to an idle host.
+func chargeSpawnQueue(policy PlacementPolicy, result PlacementResult, depth func(string) int) PlacementResult {
+	claimCost := policy.scoreK().claimCost
 	candidates := make([]PlacementCandidate, len(result.Candidates))
 	for i, candidate := range result.Candidates {
-		if depth := h.spawnQueue.depth(candidate.Machine); depth > 0 {
-			candidate.ActiveJobs += depth
-			candidate.Score -= float64(depth) * claimCost
+		if n := depth(candidate.Machine); n > 0 {
+			candidate.ActiveJobs += n
+			candidate.Score -= float64(n) * claimCost
 		}
 		candidates[i] = candidate
+	}
+	sort.SliceStable(candidates, func(i, j int) bool { return candidates[i].Score > candidates[j].Score })
+	if result.Decision != "unavailable" {
+		// Queued spawns count as active jobs, so they can make the winner
+		// unusable: the best usable host takes its place.
+		if at := slices.IndexFunc(candidates, func(c PlacementCandidate) bool { return c.Machine == result.Decision }); at >= 0 && !placementUsable(candidates[at], policy, result.Source) {
+			if next := slices.IndexFunc(candidates, func(c PlacementCandidate) bool { return placementUsable(c, policy, result.Source) }); next >= 0 {
+				result.Decision = candidates[next].Machine
+			}
+		}
+		result.Decision, result.Reason = decideAmongUsable(policy, result.Source, candidates, result.Decision)
 	}
 	result.Candidates = candidates
 	return result

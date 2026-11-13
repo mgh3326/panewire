@@ -394,3 +394,29 @@ func TestPendingScanReachesEveryRow_t4388(t *testing.T) {
 		t.Fatalf("scan returned %d of 300 pending rows", len(pending))
 	}
 }
+
+// Queue load changes the decision, not only the scores: a winner with a deep
+// queue gives way to an idle host (review r4559870175).
+func TestQueueDepthMovesPlacementDecision_t4388(t *testing.T) {
+	policy := DefaultPlacementPolicy()
+	policy.LocalMachine = "n1"
+	host := func(machine string, score float64) PlacementCandidate {
+		return PlacementCandidate{Machine: machine, Score: score, Connected: true, MetricsKnown: true, MemoryKnown: true, accepting: true}
+	}
+	result := PlacementResult{Decision: "n1", Source: "hub-only", Candidates: []PlacementCandidate{host("n1", 100), host("n2", 95)}}
+	idle := chargeSpawnQueue(policy, result, func(string) int { return 0 })
+	if idle.Decision != "n1" {
+		t.Fatalf("idle decision %q, want n1", idle.Decision)
+	}
+	for _, depth := range []int{3, policy.MaxActiveJobs} {
+		busy := chargeSpawnQueue(policy, result, func(machine string) int {
+			if machine == "n1" {
+				return depth
+			}
+			return 0
+		})
+		if busy.Decision != "n2" {
+			t.Fatalf("decision stayed on %q with %d spawns on n1: %+v", busy.Decision, depth, busy)
+		}
+	}
+}
