@@ -329,8 +329,8 @@ list turns a class off.
 One kind of traffic keeps its existing delivery in every lane:
 
 - events the operator posts through the [R24 HTTP ingress](r24-http-ingress.md)
-  with the operator token,  This is the explicit operator path into a pane, so it is
-  kept. A restart replay of such a row is filed like any other item.
+  with the operator token. This is the explicit operator path into a pane, so it
+  is kept. A restart replay of such a row is filed like any other item.
 
 The hub's digest and hold batches are not typed into an inbox-only lane
 either. A batch built for one (an item stored before the lane became

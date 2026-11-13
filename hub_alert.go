@@ -375,7 +375,21 @@ func (h *HubServer) dispatchHubNotifications(notifications []hubNotification) {
 			continue
 		}
 		if err := h.logHubAlert(notification.alert); err != nil {
-			// Not written: leave the pending flag set so the next pass retries.
+			// Not written: clear the pending flag without marking the alert
+			// delivered, so the next sweep emits it again. A level-filtered
+			// record writes nothing, so retrying it each sweep cannot flood.
+			h.mu.Lock()
+			if state := h.alerts[notification.key]; state != nil && state.incidentGeneration == notification.generation {
+				switch {
+				case notification.reminder:
+					state.reminderPending = false
+				case notification.incident:
+					state.incidentPending = false
+				default:
+					state.recoveryPending = false
+				}
+			}
+			h.mu.Unlock()
 			continue
 		}
 		deliveredAt := h.now().UTC()
