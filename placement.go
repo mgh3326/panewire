@@ -535,6 +535,17 @@ func placementWire(result PlacementResult, withSignals bool) PlacementResult {
 }
 
 func (h *HubServer) placement(ctx context.Context, class, cwd string, tags ...string) PlacementResult {
+	return h.placementCached(ctx, true, class, cwd, tags...)
+}
+
+// placementFresh is a placement that never reads the 30 s cache. A spawn's
+// decision takes the hub's latest view; it still refreshes the cache for the
+// readers that may share one.
+func (h *HubServer) placementFresh(ctx context.Context, class, cwd string, tags ...string) PlacementResult {
+	return h.placementCached(ctx, false, class, cwd, tags...)
+}
+
+func (h *HubServer) placementCached(ctx context.Context, useCache bool, class, cwd string, tags ...string) PlacementResult {
 	now := h.now().UTC()
 	key := class + "\x00" + cwd
 	if len(tags) > 0 {
@@ -542,7 +553,7 @@ func (h *HubServer) placement(ctx context.Context, class, cwd string, tags ...st
 	}
 	h.mu.Lock()
 	h.reloadPlacementPolicyLocked()
-	if h.placementCache.key == key && now.Sub(h.placementCache.at) < 30*time.Second {
+	if useCache && h.placementCache.key == key && now.Sub(h.placementCache.at) < 30*time.Second {
 		cached := h.placementCache.result
 		cached.Candidates = append([]PlacementCandidate(nil), cached.Candidates...)
 		h.mu.Unlock()
@@ -623,6 +634,9 @@ func (h *HubServer) placementCandidates(policy PlacementPolicy, metrics placemen
 			bridged = countBridgedJobs(record.activeJobs, now, policy.spawnBridge())
 			memory = cloneHubHostMemory(record.hostMemory)
 		}
+		// A job decided onto this host whose claim has not arrived costs what
+		// a claim does (placement_count.go).
+		bridged += h.countedPlacementsLocked(machine, record, now, policy.spawnBridge())
 		taskSlots, slotCapped := policy.machineTaskSlots(machine)
 		slotFull := slotCapped && tasks >= taskSlots
 		holdsActive := h.holdsActiveLocked(machine, now)

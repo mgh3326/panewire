@@ -44,6 +44,11 @@ type App struct {
 	warned         map[string]bool
 	ompModelNames  map[string]string // omp's footer names, read once per spawn
 	PlacementHosts func(context.Context, string) ([]HostView, error)
+	// PlacementTry is called with the host the moment placement decides to
+	// try it for a spawn, before any gate or upload that takes time, so the
+	// owner of the host view can count the job at once. A later call for the
+	// same spawn names the next candidate. Nil does nothing.
+	PlacementTry func(host string)
 	// SharedLatest reads one account's latest stored quota reading for the
 	// admission gate; nil reads handoffkeep (admission_native.go).
 	SharedLatest func(context.Context, string) (shared.Latest, error)

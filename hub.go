@@ -604,6 +604,9 @@ type HubServer struct {
 	// launchBackoffs counts consecutive launch failures per (machine, kind),
 	// guarded by mu (hub_readiness.go).
 	launchBackoffs map[launchKey]*launchBackoff
+	// placementCounts are the jobs decided onto a host and not yet claimed by
+	// it, guarded by mu (placement_count.go).
+	placementCounts map[string]placementCount
 	// oneTimeActions is the first-run needs already told to the desk, guarded
 	// by mu (hub_one_time_action.go).
 	oneTimeActions map[oneTimeActionKey]time.Time

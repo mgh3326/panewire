@@ -1291,6 +1291,9 @@ func (a *App) placeAuto(ctx context.Context, s Spawn, brief string) (bool, map[s
 				s.placement.execution = placementExecution{}
 			}
 		}()
+		if a.PlacementTry != nil && !s.DryRun {
+			a.PlacementTry(c.name)
+		}
 		qr, ok := a.quotaRequest(s)
 		if !ok {
 			return candResult{rc: exitConfig, note: "quota_request_unavailable"}
