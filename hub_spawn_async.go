@@ -336,6 +336,9 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 			h.finishSpawnOutcome(task, hubSpawnOutcome{RC: 1, Stage: "launch", Reason: "unknown"})
 		}
 	}()
+	if len(task.Request.StartConditions) != 0 && evaluateHubStartCondition(parent, h, task.Request.StartConditions).Status != "met" {
+		return
+	}
 	if !h.now().Before(task.Deadline) {
 		h.logger.Warn("hub spawn starved in the queue", "request_id", task.Request.RequestID, "job", task.Job, "host", firstNonEmptyString(spawnTaskHost(task), "none"), "queue_wait_s", spawnQueueWaitSeconds(task, h.now()))
 		h.finishSpawnOutcome(task, hubSpawnOutcome{RC: 124, Stage: "landing", Reason: "timeout", Host: spawnTaskHost(task), Retryable: task.Node == nil, Fix: spawnQueueWaitFix(task, h.now())})
@@ -367,12 +370,6 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 	if err != nil {
 		h.finishSpawnOutcome(task, hubSpawnOutcome{RC: 78, Stage: "placement", Reason: "configuration", Retryable: true})
 		return
-	}
-	if len(task.Request.StartConditions) != 0 {
-		conditions := task.Request.StartConditions
-		if evaluateHubStartCondition(parent, h, conditions).Status != "met" {
-			return
-		}
 	}
 	if ctx.Err() != nil {
 		h.finishSpawnOutcome(task, hubSpawnOutcome{RC: 124, Stage: "placement", Reason: "timeout", Retryable: true})

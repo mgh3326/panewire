@@ -265,6 +265,7 @@ func readStartConditionTask(ctx context.Context, taskID string) (TaskSnapshot, e
 		return TaskSnapshot{}, fmt.Errorf("handoffkeep task read unavailable")
 	}
 	var task struct {
+		ID        int64  `json:"id"`
 		State     string `json:"state"`
 		Relations []struct {
 			Kind  string `json:"kind"`
@@ -272,7 +273,7 @@ func readStartConditionTask(ctx context.Context, taskID string) (TaskSnapshot, e
 			DstID int64  `json:"dst_id"`
 		} `json:"relations"`
 	}
-	if json.Unmarshal(body, &task) != nil || task.State == "" {
+	if json.Unmarshal(body, &task) != nil || task.State == "" || task.ID != id {
 		return TaskSnapshot{}, fmt.Errorf("handoffkeep task response unreadable")
 	}
 	relations := make([]TaskRelation, 0, len(task.Relations))
