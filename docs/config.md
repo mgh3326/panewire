@@ -367,7 +367,7 @@ restated here. `docs/quota-stop.md` has the mechanics.
 
 | Role | What happens |
 | --- | --- |
-| reviewer | The hub submits a replacement at once: same task, role, review pass, owner and brief, job id `<old>-q<n>` and `--exclude-pool <pool>`. The old hk record ends `quota_stop pool=<pool> replaced_by=<new job>`; `replaced_by` is the last `key=value` token (mergewake follows it). At most 2 replacements per review pass (`<old>-q1`, then `<old>-q1-q2`). When no other pool can take it, there is no replacement and the watcher ends the job as before. |
+| reviewer | On a quota screen the watcher ends the job at once, with no grace (hk 4507): the hk record ends `quota_stop pool=<pool> reset_at=<RFC3339 UTC>` and `job.lost` carries `reason: "quota_stop"`; mergewake respawns the review on another model. A reviewer stopped on a credit rejection is still replaced by the hub: same task, role, review pass, owner and brief, job id `<old>-q<n>` and `--exclude-pool <pool>`; the old hk record ends `quota_stop pool=<pool> replaced_by=<new job>` (`replaced_by` is the last `key=value` token, mergewake follows it), at most 2 replacements per review pass (`<old>-q1`, then `<old>-q1-q2`), and when no other pool can take it the watcher ends the job after its grace. |
 | worker, tester | The quota-stop manager acts even with `--quota-stop-act` off. It waits and resumes the same pane once at the reset when the reset is at or before the job's start plus the task's expected time; otherwise (reset later, no expected time, an urgent task, or a second stop after one resume) the job is handed over like a reviewer, with `end_reason` `quota_stop pool=<pool> handed_over_to=<new job>`, the same worktree and branch, and one brief line naming the earlier job's report and branch. |
 
 The owner gets one info lane event for either action. `--quota-stop-act` still
@@ -438,15 +438,25 @@ default.
 | `shadow.enabled` | `true` | `false` stops recording the `placement_shadow` event. |
 | `shadow.cpu_busy_over` | `load_threshold` | CPU-busy fraction at or above which a host counts as loaded in the shadow arms. |
 | `shadow.hysteresis` | `1.25` | Factor a rival's hub score must reach over the policy-order host's to take the decision. |
-| `shadow.all_loaded_below` | `15` | Best score under which every host counts as loaded. |
+| `shadow.free_floor` | `0.05` | Free fraction (0..1) under which a host is not chosen while another is at or above it. `shadow.all_loaded_below` is retired: it still loads and is ignored. |
 | `shadow.mem_refuse_below_pct` | `30` | The measured arm refuses a host whose available memory is below this percentage. |
 | `shadow.pressure_refuse_level` | `2` | The measured arm refuses a macOS host at or above this pressure level (0 normal, 1 warn, 2 critical). |
 | `shadow.pressure_warn_mem` | `0.5` | The memory term of a macOS host at warn pressure. |
 | `shadow.mem_floor`, `shadow.mem_span` | `0.20`, `0.20` | The memory term is 0 at `mem_floor` available and 1 at `mem_floor + mem_span`. |
 | `shadow.swap_in_half_per_s` | `5000` | Swap-ins per second (pages) that halve the swap term. |
 | `shadow.load_knee`, `shadow.load_cap` | `0.75`, `4` | Load per core below the knee costs nothing; a higher reading stops costing more at the cap. |
-| `shadow.jobs_half`, `shadow.claim_cost` | `8`, `10` | Live job count that halves the jobs term; points one claim in the spawn bridge costs. |
+| `shadow.jobs_half`, `shadow.bridge_cost` | `8`, `10` | Live job count that halves the jobs term; points one claim in the spawn bridge costs a power-100 host (a host of capability `c` pays `bridge_cost * 100 / c`). `shadow.claim_cost` is retired: it still loads and is ignored. |
 | `capability.light.<host>`, `capability.heavy.<host>` | none | The host's capability for light and heavy work, in the unit of the hub's `power`. A host with no entry keeps its `power`. |
+
+**Rollout and rollback of `shadow.free_floor` and `shadow.bridge_cost`.** A
+binary from before hk 4465 validates `[placement.shadow]` strictly and refuses
+these two keys as unknown, and the fleet commands and the spawn app do not
+start on a config it refuses. Set either key in `hosts.toml` only once every
+binary that reads that file has the release that knows them, and delete both
+keys before rolling a host back. The retired `shadow.all_loaded_below` and
+`shadow.claim_cost` load on both sides. The same ordering holds for the hub's
+`placement.json` keys of the same names
+([Constants](placement.md#constants)).
 
 ## `[quota]`
 
@@ -647,9 +657,14 @@ spawns that need hk are refused.
 
 Each spawn writes a record to hk `/v1/jobs` on the executing host (the design
 is `design/2026-10-30/cross-host-jobs`): the claim `POST {job_id, task_id,
-host}` runs before the local claim and a taken id refuses with exit 74, like
+host, at}` runs before the local claim and a taken id refuses with exit 74, like
 the ledger's duplicate. `host` is the node's `HUB_MACHINE_ID`. hk unreachable
 or unconfigured fails the spawn closed. The task precheck also fails closed before launch.
+`task_id` is `null` for a task-less job (a reviewer or consult run); a non-empty
+non-numeric task id still refuses before the POST. `at` is the client clock: the
+claim sets `claimed_at`; the `spawned`, `completed`, `escalated`, and `lost`
+transitions send `at` with `state` and hk stores it as `spawned_at` or `ended_at`
+(set once).
 
 After the brief lands, panewire merges `{state:"spawned", role, label, family,
 profile, model, harness, effort, pool, owner_lane, parent_lane, parent_job,
@@ -755,8 +770,12 @@ panewire warns and sends an owner-lane notice so the task can be linked manually
 A successful claim records `status: linked`. A claim that fails while hk's task
 record already has `refs.job_id` equal to this job (a design session rebound
 the task before the spawn) records `status: already_linked`, with no warning and
-no notice: there is nothing to link (hk 3426). Other spawn failures retain their
-normal cleanup behavior.
+no notice: there is nothing to link (hk 3426). A spawn that does not claim the
+task — an unlinked reviewer or a consult — records `status: unlinked`; a consult
+(a `counsel` seat, which always routes as consult) may join a task another job or
+claimant holds, so a consult pair can share it. The rule follows the seat role: a
+worker seat given `--routing-role consult` still claims the task like any worker.
+Other spawn failures retain their normal cleanup behavior.
 
 An inherited spawn normally leaves the task bound to its parent job. It rebinds
 the task to the new job, through `handoffkeep tasks rebind`, only after the brief

@@ -40,7 +40,7 @@ func reviewPassHub(t *testing.T, hk map[string]string) (*HubServer, *httptest.Se
 		jobs.records[job] = map[string]any{"state": state}
 	}
 	hub.spawnNewApp = func(out, errout io.Writer) (*fleet.App, error) {
-		return &fleet.App{JobStore: jobs, Out: out, Err: errout}, nil
+		return &fleet.App{JobStore: jobs, Out: out, Err: errout, Now: time.Now}, nil
 	}
 	server := httptest.NewServer(hub.Handler())
 	t.Cleanup(server.Close)

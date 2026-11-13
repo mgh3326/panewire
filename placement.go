@@ -15,6 +15,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/mgh3326/panewire/internal/configkeys"
 )
 
 // PlacementPolicy is deliberately small and operator-owned. It selects a
@@ -61,6 +63,9 @@ type PlacementPolicy struct {
 	// strongest host). A machine without an entry weighs defaultPlacementPower.
 	// See docs/placement.md for how the weights are measured.
 	Power map[string]float64 `json:"power,omitempty"`
+	// ignoredKeys are the keys of the decoded file that this release does not
+	// read. LoadPlacementPolicy's callers log them; the policy still loads.
+	ignoredKeys []string
 	// CapacityWeight is retired: power is the only per-host multiplier. It
 	// stays decodable so a stale policy file still loads; reload logs a warning
 	// and strips it, and the score never reads it.
@@ -193,10 +198,14 @@ func (p *PlacementPolicy) applyMemoryDefaults() {
 func ParsePlacementPolicy(data []byte) (PlacementPolicy, error) {
 	var policy PlacementPolicy
 	decoder := json.NewDecoder(bytes.NewReader(data))
-	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&policy); err != nil || decoder.Decode(&struct{}{}) != io.EOF {
 		return PlacementPolicy{}, errors.New("placement policy is invalid")
 	}
+	ignored, err := configkeys.JSON(data, &policy)
+	if err != nil {
+		return PlacementPolicy{}, errors.New("placement policy is invalid")
+	}
+	policy.ignoredKeys = ignored
 	policy.applyMemoryDefaults()
 	if !policy.valid() {
 		return PlacementPolicy{}, errors.New("placement policy is invalid")
@@ -292,6 +301,10 @@ type PlacementSignals struct {
 	Free        float64         `json:"free"`
 	Power       float64         `json:"power"`
 	BridgedJobs int             `json:"bridged_jobs"`
+	// BelowFreeFloor says Free is under the policy's free_floor. The spawn
+	// engine ranks such a host after every host at or above the floor, ahead
+	// of the load bucket (docs/placement.md, "The decision").
+	BelowFreeFloor bool `json:"below_free_floor,omitempty"`
 }
 
 type PlacementResult struct {
@@ -467,6 +480,7 @@ func (h *HubServer) reloadPlacementPolicyLocked() {
 		h.setPlacementPolicyFailureLocked("invalid")
 		return
 	}
+	configkeys.Warn(h.logger, h.placementPolicyPath, policy.ignoredKeys)
 	if len(policy.QuotaExclude)+len(policy.QuotaBoost) > 0 {
 		if h.logger != nil {
 			h.logger.Warn("placement policy quota rules are retired; remove quota_exclude/quota_boost", "quota_exclude", len(policy.QuotaExclude), "quota_boost", len(policy.QuotaBoost))
@@ -516,20 +530,31 @@ func (h *HubServer) handlePlacement(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	result := h.placement(r.Context(), class, r.URL.Query().Get("cwd"), tags...)
-	writeJSON(w, http.StatusOK, placementWire(result, r.URL.Query().Get("signals") == "1"))
+	query := r.URL.Query()
+	writeJSON(w, http.StatusOK, placementWire(result, query.Get("signals") == "1", query.Get("floor") == "1"))
 }
 
 // placementWire is the response as a caller sees it. Signals ride along only
 // when asked for: pre-change CLIs decode candidates with
-// DisallowUnknownFields and never ask. The candidates are copied before they
-// are cleared because a fresh result shares its array with the cache.
-func placementWire(result PlacementResult, withSignals bool) PlacementResult {
-	if withSignals {
+// DisallowUnknownFields and never ask. The free-floor flag inside them rides
+// along only when withFloor (floor=1) is also asked for: the previous release's
+// `place --signals` asks for signals and decodes strictly, so a field it does
+// not know must be opted into. The candidates are copied before they are
+// changed because a fresh result shares its array with the cache.
+func placementWire(result PlacementResult, withSignals, withFloor bool) PlacementResult {
+	if withSignals && withFloor {
 		return result
 	}
 	candidates := make([]PlacementCandidate, len(result.Candidates))
 	for i, candidate := range result.Candidates {
-		candidate.Signals = nil
+		switch {
+		case !withSignals:
+			candidate.Signals = nil
+		case candidate.Signals != nil && candidate.Signals.BelowFreeFloor:
+			signals := *candidate.Signals
+			signals.BelowFreeFloor = false
+			candidate.Signals = &signals
+		}
 		candidates[i] = candidate
 	}
 	result.Candidates = candidates
@@ -694,6 +719,7 @@ func (h *HubServer) placementCandidates(policy PlacementPolicy, metrics placemen
 		terms := k.terms(signals, jobs)
 		signals.Terms, signals.LiveJobs = &terms, jobs
 		signals.Free, signals.Power, signals.BridgedJobs = terms.Free(), policy.power(machine), bridged
+		signals.BelowFreeFloor = signals.Free < k.freeFloor
 		score := k.scoreBase(signals.Free, bridged, signals.Power)
 		if !connected {
 			score -= 1000
