@@ -413,8 +413,13 @@ still limits the hosts). A host the hub left out for a full task cap stays out
 of the plan (`task_slots_full`) on both the fleet-state and the direct read. A
 pinned `--host` is counted through the gate too. A request bound to a node that
 timed out keeps its count (the node may still launch it) until a claim, a
-definitive failure or the bridge window. The count is in hub memory, so a hub
-restart forgets the jobs decided and not yet claimed until their claims show.
+definitive failure or the bridge window. The count is in hub memory, but a hub
+restart counts again, on the host each one is bound to, every spawn that is still
+bound and unsettled (`dispatching`, `reconciling`, `succeeded`, or `deadline_exceeded`
+with a bound node) and was created within the bridge window (`restorePlacementCounts`,
+hk 4460). A restored count ends with the claim, a definitive failure or the window, as a
+live one does. A refused, failed or retryable request is not restored, and a request not
+yet bound places again and counts then.
 
 Every spawn decision also takes the hub's latest view: before the engine reads
 the hub's fleet state the hub recomputes the hosts' `load` values, and the

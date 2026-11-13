@@ -297,6 +297,30 @@ func (s *laneInboxStore) spawnTaskByNode(parent context.Context, id string) (hub
 	return scanSpawnTask(s.db.QueryRowContext(ctx, s.q(`SELECT `+spawnTaskColumns+` FROM spawn_operations WHERE node_id=?`), id))
 }
 
+// boundSpawnsSince lists the operations created at or after since that are
+// bound to a node and may still hold an unclaimed launch: in flight,
+// reconciling, timed out while bound, or succeeded. Refused, failed and
+// retryable ones released their count and are left out. Oldest first, so a
+// job's newest request is read last (restorePlacementCounts, placement_count.go).
+func (s *laneInboxStore) boundSpawnsSince(parent context.Context, since time.Time) ([]hubSpawnTask, error) {
+	ctx, done := s.op(parent)
+	defer done()
+	rows, err := s.db.QueryContext(ctx, s.q(`SELECT `+spawnTaskColumns+` FROM spawn_operations WHERE node_id IS NOT NULL AND created_ms>=? AND (status IN ('dispatching','reconciling','succeeded') OR status='deadline_exceeded') ORDER BY created_ms`), since.UnixMilli())
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var tasks []hubSpawnTask
+	for rows.Next() {
+		task, err := scanSpawnTask(rows)
+		if err != nil {
+			return nil, err
+		}
+		tasks = append(tasks, task)
+	}
+	return tasks, rows.Err()
+}
+
 // pendingSpawns returns the fresh runnable page and a bounded number of due
 // stale rows. Conditioned rows use a separate page so they cannot displace fresh
 // runnable work.

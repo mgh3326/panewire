@@ -76,6 +76,36 @@ func (h *HubServer) releasePlacementCount(job string) {
 	}
 }
 
+// restorePlacementCounts counts again the bound spawns that may still hold an
+// unclaimed launch (docs/placement.md, "Spawn bridge"). The counts are hub
+// memory, so without this a restart blinds placement to those launches until
+// their claims show (hk 4460). Each row counts from its creation, which is no
+// later than its decision, so it ends no later than a live count would. A claim,
+// a definitive failure or the bridge window ends it as before. Called once, from
+// NewHubServer, before the hub takes any request.
+func (h *HubServer) restorePlacementCounts() {
+	if h.inbox == nil {
+		return
+	}
+	bridge := h.placementCountWindowLocked()
+	tasks, err := h.inbox.store.boundSpawnsSince(h.closeCtx, h.now().UTC().Add(-bridge))
+	if err != nil {
+		h.logger.Warn("hub could not restore placement counts", "error", err)
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.placementCounts == nil {
+		h.placementCounts = map[string]placementCount{}
+	}
+	for _, task := range tasks {
+		if task.Node == nil || task.Node.Machine == "" {
+			continue
+		}
+		h.placementCounts[task.Job] = placementCount{machine: task.Node.Machine, at: task.Created}
+	}
+}
+
 // placementCountWindowLocked is how long a count lasts without a claim to
 // confirm it: the spawn bridge, so a job whose claim is never seen cannot
 // weigh on its host longer than a claim would.

@@ -732,6 +732,7 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 	hub.fleetState = newFleetStateStore()
 	hub.quietTimings = defaultDesignQuietTimings()
 	hub.prepareInbox()
+	hub.restorePlacementCounts()
 	return hub, nil
 }
 
