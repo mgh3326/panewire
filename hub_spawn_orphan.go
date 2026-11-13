@@ -178,6 +178,14 @@ func (h *HubServer) handleSpawnAbandon(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 409, map[string]string{"error": "spawn_not_bound", "status": task.Status, "fix": "an unbound request releases itself at its deadline"})
 		return
 	}
+	// Hold the request off its node queue while it is settled: a request
+	// being sent right now cannot be abandoned.
+	if !h.spawnQueue.fence(id) {
+		writeJSON(w, 409, map[string]string{"error": "spawn_abandon_refused", "reason": "sending", "request_id": id, "job": task.Job, "host": task.Node.Machine})
+		return
+	}
+	defer h.kickSpawns()
+	defer h.spawnQueue.unfence(id)
 	outcome := hubSpawnOutcome{RC: 75, Stage: "landing", Reason: spawnOutcomeReason(spawnAbandonedReason, spawnRefusalLine(body.Reason)), Host: task.Node.Machine, Fix: "the operator abandoned this request; submit the work again under a new job id"}
 	released, why := h.finishUnownedSpawn(r.Context(), task, outcome)
 	h.logger.Warn("hub spawn abandon", "request_id", id, "job", task.Job, "host", task.Node.Machine, "status", task.Status, "released", released, "held_by", why, "reason", spawnRefusalLine(body.Reason))

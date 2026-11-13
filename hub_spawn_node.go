@@ -386,7 +386,7 @@ func (client *HubClient) runHubSpawn(parent context.Context, message hubOutbound
 		// revision must not move it under a spawn that has not launched yet.
 		// Different directories still overlap.
 		if dir := message.Checkout.Dir; dir != "" {
-			defer client.lockSpawnStep("checkout-dir:" + filepath.Clean(dir))()
+			defer client.lockSpawnStep("checkout-dir:" + client.checkoutDirKey(dir))()
 		}
 		release := fleet.ExclusiveStep(runContext, fleet.StepWorktreePrepare)
 		prepared, code := prepare(runContext, nodeWorktreePrepareArgs{Origin: message.Checkout.Origin, Mode: message.Checkout.Mode, Branch: message.Checkout.Branch, Sha: message.Checkout.Sha, Fetch: message.Checkout.Fetch, Dir: message.Checkout.Dir})
@@ -806,4 +806,14 @@ func (client *HubClient) runClaimedHubSpawn(ctx context.Context, message hubOutb
 		return hubSpawnResult{RequestID: message.RequestID, JobID: hubSpawnArg(message.Args, "--job"), RC: 124, Stage: "claim", Error: "deadline_not_started", Retryable: true}
 	}
 	return client.runHubSpawn(ctx, message)
+}
+
+// checkoutDirKey names a checkout directory by its physical path, symlinks
+// resolved the way nodeSamePath compares worktrees, so two names for one
+// worktree take the same lock.
+func (client *HubClient) checkoutDirKey(dir string) string {
+	if root, err := client.nodeWorkRoot(); err == nil {
+		return nodeResolvedPath(filepath.Join(root, dir))
+	}
+	return filepath.Clean(dir)
 }

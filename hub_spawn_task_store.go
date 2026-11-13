@@ -371,10 +371,14 @@ func (s *laneInboxStore) spawnTaskByNode(parent context.Context, id string) (hub
 	defer done()
 	return scanSpawnTask(s.db.QueryRowContext(ctx, s.q(`SELECT `+spawnTaskColumns+` FROM spawn_operations WHERE node_id=?`), id))
 }
+
+// pendingSpawns lists every pending operation, task priority first, then
+// age. It has no row limit: rows a worker already owns must not hide later
+// ones (the coordinator skips owned rows in memory).
 func (s *laneInboxStore) pendingSpawns(parent context.Context) ([]hubSpawnTask, error) {
 	ctx, done := s.op(parent)
 	defer done()
-	rows, err := s.db.QueryContext(ctx, `SELECT `+spawnTaskColumns+` FROM spawn_operations WHERE status IN ('accepted','dispatching','reconciling','deadline_exceeded') ORDER BY priority_rank,created_ms,request_id LIMIT 256`)
+	rows, err := s.db.QueryContext(ctx, `SELECT `+spawnTaskColumns+` FROM spawn_operations WHERE status IN ('accepted','dispatching','reconciling','deadline_exceeded') ORDER BY priority_rank,created_ms,request_id`)
 	if err != nil {
 		return nil, err
 	}

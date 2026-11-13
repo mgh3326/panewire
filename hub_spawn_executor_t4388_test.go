@@ -336,3 +336,61 @@ func TestNodeDisconnectUnbindsQueuedRequests_t4388(t *testing.T) {
 		t.Fatal("the unbound request is still held by the executor")
 	}
 }
+
+// An operator "off" override taken while a fresh request waits in its node's
+// queue returns it to placement instead of sending it (review r4560281308).
+func TestQueuedSpawnHonorsAcceptingOff_t4388(t *testing.T) {
+	f := newExecutorFixture(t, "n1")
+	task := f.bound(t, 0, 0, "n1")
+	f.hub.mu.Lock()
+	f.hub.relayControl.acceptingOverride = map[string]acceptingOverride{"n1": {Mode: "off"}}
+	f.hub.mu.Unlock()
+	if !f.hub.spawnQueue.claim(task.Request.RequestID) {
+		t.Fatal("claim")
+	}
+	f.hub.enqueueBoundSpawn(t.Context(), task, true)
+	eventually(t, 3*time.Second, "request unbound", func() bool {
+		current, err := f.hub.inbox.store.spawnTask(t.Context(), task.Request.RequestID)
+		return err == nil && current.Node == nil
+	})
+	f.none(t, "n1", 200*time.Millisecond)
+}
+
+// A request an abandon has fenced is never sent, even when a slot on its
+// node opens (review r4560281313).
+func TestFencedSpawnIsNeverSent_t4388(t *testing.T) {
+	f := newExecutorFixture(t, "n1")
+	f.policy(t, func(p *PlacementPolicy) { p.SpawnInFlight = 1 })
+	first := f.bound(t, 0, 0, "n1")
+	second := f.bound(t, 1, 0, "n1")
+	f.start(t)
+	frame := f.next(t, "n1")
+	if frame.RequestID != first.Node.RequestID {
+		t.Fatalf("first frame %s", frame.RequestID)
+	}
+	if !f.hub.spawnQueue.fence(second.Request.RequestID) {
+		t.Fatal("fence refused a queued request")
+	}
+	if f.hub.spawnQueue.beginSend(second.Request.RequestID) {
+		t.Fatal("a fenced request may be sent")
+	}
+	f.refuse(t, "n1", frame.RequestID)
+	// Window: proves the open slot does not send the fenced request.
+	f.none(t, "n1", 300*time.Millisecond)
+}
+
+// Rows already owned by a worker cannot hide later pending rows from the
+// coordinator's scan (review r4560282735).
+func TestPendingScanReachesEveryRow_t4388(t *testing.T) {
+	f := newExecutorFixture(t)
+	for i := range 300 {
+		f.claim(t, i, 0)
+	}
+	pending, err := f.hub.inbox.store.pendingSpawns(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 300 {
+		t.Fatalf("scan returned %d of 300 pending rows", len(pending))
+	}
+}

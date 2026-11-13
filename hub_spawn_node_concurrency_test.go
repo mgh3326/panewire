@@ -4,6 +4,8 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -168,5 +170,28 @@ func TestNodeSpawnsShareNoCheckoutDirBeforeLaunch(t *testing.T) {
 	}
 	if peak.Load() != 1 {
 		t.Fatalf("two spawns held one checkout directory at once: %d", peak.Load())
+	}
+}
+
+// Two names for one worktree, a directory and a symlink to it, take one
+// checkout lock (review r4560281302).
+func TestCheckoutDirKeyResolvesAliases(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, "real"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(root, "real"), filepath.Join(root, "alias")); err != nil {
+		t.Fatal(err)
+	}
+	config := filepath.Join(t.TempDir(), "spawn.json")
+	if err := os.WriteFile(config, []byte(`{"work_root":"`+root+`"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	client := &HubClient{spawnConfigPath: config}
+	if a, b := client.checkoutDirKey("alias"), client.checkoutDirKey("real"); a != b {
+		t.Fatalf("alias key %q, real key %q", a, b)
+	}
+	if client.checkoutDirKey("other") == client.checkoutDirKey("real") {
+		t.Fatal("distinct directories share a key")
 	}
 }

@@ -49,8 +49,13 @@ type nodeSpawnQueue struct {
 type hubSpawnQueue struct {
 	mu     sync.Mutex
 	active map[string]bool
-	nodes  map[string]*nodeSpawnQueue
-	place  chan hubSpawnTask
+	// sending holds the requests a node executor is sending; fenced holds
+	// the ones an operator abandon is settling. Each excludes the other, so
+	// an abandoned request is never sent afterward.
+	sending map[string]bool
+	fenced  map[string]bool
+	nodes   map[string]*nodeSpawnQueue
+	place   chan hubSpawnTask
 }
 
 // claim marks id active and reports whether it was free.
@@ -71,6 +76,53 @@ func (q *hubSpawnQueue) release(id string) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	delete(q.active, id)
+}
+
+// beginSend marks id as being sent unless an abandon holds it.
+func (q *hubSpawnQueue) beginSend(id string) bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if q.fenced[id] {
+		return false
+	}
+	if q.sending == nil {
+		q.sending = map[string]bool{}
+	}
+	q.sending[id] = true
+	return true
+}
+
+func (q *hubSpawnQueue) endSend(id string) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	delete(q.sending, id)
+}
+
+// fence keeps id from being sent while an abandon settles it, and takes it
+// off its node queue. It fails while id is being sent.
+func (q *hubSpawnQueue) fence(id string) bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if q.sending[id] {
+		return false
+	}
+	if q.fenced == nil {
+		q.fenced = map[string]bool{}
+	}
+	q.fenced[id] = true
+	for _, node := range q.nodes {
+		if at := slices.IndexFunc(node.queued, func(item spawnQueueItem) bool { return item.task.Request.RequestID == id }); at >= 0 {
+			node.queued = slices.Delete(node.queued, at, at+1)
+			delete(q.active, id)
+		}
+	}
+	return true
+}
+
+func (q *hubSpawnQueue) unfence(id string) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	delete(q.fenced, id)
 }
 
 // depth is a node's queued plus in-flight spawns, its load in placement.
@@ -184,6 +236,19 @@ func (h *HubServer) runNodeSpawn(ctx context.Context, item spawnQueueItem) {
 		return
 	}
 	defer h.drain.leave()
+	id := item.task.Request.RequestID
+	if !q.beginSend(id) {
+		return
+	}
+	defer q.endSend(id)
+	// The queued copy may be stale: a refusal may have unbound it, or an
+	// abandon settled it, since it was read. Send only the current binding.
+	current, err := h.inbox.store.spawnTask(ctx, id)
+	if err != nil || !spawnPending(current.Status) || current.Attempt != item.task.Attempt || current.Node == nil || current.Node.RequestID != item.task.Node.RequestID {
+		replace = err == nil
+		return
+	}
+	item.task = current
 	if item.fresh && (!h.nodeAcceptsSpawn(machine) || !h.now().Before(item.task.Deadline)) {
 		// Never sent, so the node cannot have it: place it again. Past its
 		// deadline, placement settles it as a retryable queue timeout.
@@ -195,12 +260,14 @@ func (h *HubServer) runNodeSpawn(ctx context.Context, item spawnQueueItem) {
 	replace = h.dispatchBoundSpawn(ctx, item.task)
 }
 
-// nodeAcceptsSpawn reports whether machine is connected with spawn_ops_v1.
+// nodeAcceptsSpawn reports whether machine is connected with spawn_ops_v1
+// and effectively accepting work, so an operator's "off" override returns
+// queued fresh requests to placement.
 func (h *HubServer) nodeAcceptsSpawn(machine string) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	record := h.nodes[machine]
-	return record != nil && record.agent != nil && record.state == "connected" && record.capabilities["spawn_ops_v1"]
+	return record != nil && record.agent != nil && record.state == "connected" && record.capabilities["spawn_ops_v1"] && h.acceptingEffectiveLocked(machine, record.accepting)
 }
 
 func (h *HubServer) kickSpawns() {
