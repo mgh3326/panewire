@@ -314,3 +314,31 @@ func TestPlacementFallbackKeepsSlotFullHostsOutOfTheFleetState(t *testing.T) {
 		t.Fatalf("the fallback did not read the state again: %d reads", reader.reads)
 	}
 }
+
+// A woken host is an input to a new decision. If it stopped accepting while it
+// woke, the job is not sent to it.
+func TestPlacementWakeRechecksTheTargetUnderTheGate(t *testing.T) {
+	var log []string
+	a, s := gateFixture(t, &log)
+	src := a.Source.(loggingSource).fakePlacementSource
+	src.hosts = []HostView{{Name: "desk-1", Connected: false}}
+	a.Config.Hosts = map[string]map[string]any{"desk-1": {"wake": "panewire"}}
+	a.Wake = &fakeWaker{onWake: func(host string) {
+		src.hosts = []HostView{{Name: host, Connected: true, Reason: "not_accepting"}}
+	}}
+	if _, _, e := a.placeAuto(context.Background(), s, "brief"); e == nil {
+		t.Fatalf("the job was sent to a host that stopped accepting while it woke: %v", log)
+	}
+	if slices.Contains(log, "launch") || slices.Contains(log, "try:desk-1") {
+		t.Fatalf("woken host counted or launched: %v", log)
+	}
+	gates := 0
+	for _, event := range log {
+		if event == "gate" {
+			gates++
+		}
+	}
+	if gates != 2 {
+		t.Fatalf("gate taken %d times, want 2 (before the wake's reads and again after it): %v", gates, log)
+	}
+}

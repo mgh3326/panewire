@@ -408,3 +408,20 @@ func TestBoundTimeoutKeepsTheCountUntilAClaim(t *testing.T) {
 		t.Fatalf("a definitive failure left %d", got)
 	}
 }
+
+// The hub's own engine is told which machines were left out for a full task
+// cap, so an unlisted host is not read as an unreported one.
+func TestPlacementResultNamesTheSlotFullMachines(t *testing.T) {
+	hub, _ := t607PolicyHub(t, map[string]PlacementMachineSlots{"desktop": {TaskSlots: 1}})
+	hub.connect("mac-work", "test", "fixture", &hubAgent{}, true)
+	hub.connect("desktop", "test", "fixture", &hubAgent{}, true)
+	now := time.Now().UTC()
+	hub.observeActiveJobs("desktop", []HubActiveJob{{JobID: "held-job", AgentLabel: "agent", Epoch: 1, OwnerLane: "task-a", StartedAt: now.Format(time.RFC3339)}}, now)
+	result := hub.placementFresh(t.Context(), "worker", "repo")
+	if !slices.Equal(result.slotFull, []string{"desktop"}) {
+		t.Fatalf("slot-full machines = %v, want [desktop]", result.slotFull)
+	}
+	if _, listed := t607Candidate(result, "desktop"); listed {
+		t.Fatal("the API still lists a slot-full machine")
+	}
+}
