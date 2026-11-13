@@ -437,7 +437,7 @@ func parseDeliveryPolicy(raw []byte) (*deliveryPolicy, error) {
 	}
 	p.Agents = agents
 	for lane, l := range p.Lanes {
-		if !LaneNamePattern.MatchString(lane) {
+		if !validHistoricalLaneResource(lane) {
 			return nil, fmt.Errorf("invalid policy lane")
 		}
 		if err := validate(&l); err != nil {

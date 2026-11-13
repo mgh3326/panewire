@@ -22,7 +22,7 @@ func validHubActiveJob(job HubActiveJob) bool {
 // normalizeHubActiveJobMetadata rejects invalid optional console metadata
 // without discarding an otherwise valid active job heartbeat.
 func normalizeHubActiveJobMetadata(job *HubActiveJob) {
-	if !LaneNamePattern.MatchString(job.OwnerLane) {
+	if !validHistoricalLaneResource(job.OwnerLane) {
 		job.OwnerLane = ""
 	}
 	if job.Pane == "" || len(job.Pane) > 128 {
@@ -411,7 +411,7 @@ func (h *HubServer) lateRegisterJobCompletion(machineID string, completion hubJo
 		return false
 	}
 	ownerLane := completion.OwnerLane
-	if !LaneNamePattern.MatchString(ownerLane) {
+	if !validHistoricalLaneResource(ownerLane) {
 		ownerLane = ""
 	}
 	h.jobs[completion.JobID] = &hubJobRecord{

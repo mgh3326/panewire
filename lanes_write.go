@@ -266,7 +266,7 @@ func nodeLaneFieldScope(nodeMachine, lane string, body hubLaneWriteRequest, rout
 		return errLaneMachineMismatch
 	}
 	if body.Parent != "" {
-		if !LaneNamePattern.MatchString(body.Parent) || body.Parent == lane {
+		if !validHistoricalLaneResource(body.Parent) || body.Parent == lane {
 			return errLaneRequestInvalid
 		}
 		if parent, found := routes[body.Parent]; !found || parent.Sink {
@@ -531,7 +531,7 @@ func validateLaneWriteRequest(h *HubServer, lane string, body hubLaneWriteReques
 		return errLaneRequestInvalid
 	}
 	if body.Parent != "" {
-		if !LaneNamePattern.MatchString(body.Parent) || body.Parent == lane {
+		if !validHistoricalLaneResource(body.Parent) || body.Parent == lane {
 			return errLaneRequestInvalid
 		}
 		if _, exists := routes[body.Parent]; !exists {

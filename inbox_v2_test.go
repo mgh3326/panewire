@@ -87,6 +87,16 @@ lanes:
 	}
 }
 
+func TestDeliveryPolicyRetainsHistoricalDottedLane(t *testing.T) {
+	p, err := parseDeliveryPolicy([]byte("default: interrupt\nrules: []\nlanes:\n  legacy.parent:\n    types: {report: inbox}\n"))
+	if err != nil {
+		t.Fatalf("historical policy lane rejected: %v", err)
+	}
+	if got := p.classify("legacy.parent", "lane.event", hubJobEventPayload{NotifyType: "report", Text: "note"}, false); got != "inbox" {
+		t.Fatalf("historical policy not applied: %s", got)
+	}
+}
+
 func TestNotifyTypeEmitScanAndWire(t *testing.T) {
 	for _, kind := range []string{"lane.event", "job.completed", "job.escalate"} {
 		t.Run(kind, func(t *testing.T) {

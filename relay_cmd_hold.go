@@ -89,7 +89,7 @@ func (manager *relayBusyManager) keepWorkingCmdHold(parent context.Context, item
 // record, an unreadable one, a lane that is not a job id, or a job that was
 // never claimed proves nothing, and the row keeps its hold up to the ceiling.
 func relayLaneJobEnded(inboxRoot, lane string) bool {
-	if inboxRoot == "" || !LaneNamePattern.MatchString(lane) {
+	if inboxRoot == "" || !hubJobIDPattern.MatchString(lane) {
 		return false
 	}
 	eventsDir := filepath.Join(inboxRoot, "jobs", lane, "events")

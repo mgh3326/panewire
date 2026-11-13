@@ -108,11 +108,11 @@ func parseReportRelayRoutes(b []byte) (map[string]reportRelayRoute, error) {
 		routes.Routes = routes.Lanes
 	}
 	for lane, route := range routes.Routes {
-		if !LaneNamePattern.MatchString(lane) {
+		if !validHistoricalLaneResource(lane) {
 			delete(routes.Routes, lane)
 			continue
 		}
-		if route.Parent != "" && !LaneNamePattern.MatchString(route.Parent) {
+		if route.Parent != "" && !validHistoricalLaneResource(route.Parent) {
 			delete(routes.Routes, lane)
 			continue
 		}

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -147,6 +148,25 @@ func TestInboxCauseEmitWire(t *testing.T) {
 		if code := runEmitCLI(args, &bytes.Buffer{}, &errout, CLIConfig{}); code != ExitUsage || !strings.Contains(errout.String(), "--cause") {
 			t.Fatalf("invalid cause: %d %s", code, errout.String())
 		}
+	}
+}
+
+func TestInboxLaneEventScanRetainsHistoricalDottedLane(t *testing.T) {
+	root := t.TempDir()
+	event, err := json.Marshal(hubInboxEvent{Type: "lane.event", OwnerLane: "legacy.parent", EventID: "old-event", Text: "old notification"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(root, "events-lane", "legacy.parent")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "old-event.json"), event, 0600); err != nil {
+		t.Fatal(err)
+	}
+	scanned := scanHubLaneEventsWithin(root, 0)
+	if len(scanned) != 1 || scanned[0].OwnerLane != "legacy.parent" {
+		t.Fatalf("historical lane event was skipped: %+v", scanned)
 	}
 }
 

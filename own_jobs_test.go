@@ -364,11 +364,13 @@ func TestOwnJobsRequestIsClosed(t *testing.T) {
 		valid bool
 	}{
 		{ownJobsRequest{Command: "mine", Lane: "lane-a"}, true},
+		{ownJobsRequest{Command: "mine", Lane: "legacy.parent"}, true},
 		{ownJobsRequest{Command: "mine", Lane: "lane-a", JSON: true}, true},
 		{ownJobsRequest{Command: "mine", Lane: "lane-a", Job: "job-a"}, false},
 		{ownJobsRequest{Command: "mine", Lane: "lane-a", Force: true}, false},
 		{ownJobsRequest{Command: "mine"}, false},
 		{ownJobsRequest{Command: "close", Lane: "lane-a", Job: "job-a"}, true},
+		{ownJobsRequest{Command: "close", Lane: "legacy.parent", Job: "job-a"}, true},
 		{ownJobsRequest{Command: "close", Lane: "lane-a", Job: "job-a", Force: true}, true},
 		{ownJobsRequest{Command: "close", Lane: "lane-a"}, false},
 		{ownJobsRequest{Command: "close", Lane: "bad/name", Job: "job-a"}, false},

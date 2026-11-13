@@ -112,7 +112,7 @@ func (h *HubServer) handleMyJobs(writer http.ResponseWriter, request *http.Reque
 		hubUnauthorized(writer)
 		return
 	}
-	if !LaneNamePattern.MatchString(lane) {
+	if !validHistoricalLaneResource(lane) {
 		writeJSON(writer, http.StatusBadRequest, map[string]string{"error": "invalid_lane"})
 		return
 	}
@@ -164,7 +164,7 @@ func (h *HubServer) handleJobReap(writer http.ResponseWriter, request *http.Requ
 		writeJSON(writer, http.StatusBadRequest, hubJobReapResult{Refusal: "invalid_request"})
 		return
 	}
-	if !LaneNamePattern.MatchString(body.Lane) || !hubJobIDPattern.MatchString(body.Job) {
+	if !validHistoricalLaneResource(body.Lane) || !hubJobIDPattern.MatchString(body.Job) {
 		writeJSON(writer, http.StatusBadRequest, hubJobReapResult{Refusal: "invalid_request"})
 		return
 	}
