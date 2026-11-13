@@ -38,7 +38,9 @@ type Submission struct {
 	StartConditions []StartCondition `json:"start_conditions,omitempty"`
 	// E6Arm is the exact <canon>@<effort> experiment marker the submitter saw
 	// in its environment. Hub admission and the node launch use it exactly as
-	// a local spawn reads the environment; empty means none.
+	// a local spawn reads the environment; empty means none, and an empty
+	// marker stays empty — the hub's and the node's process environments
+	// never fill it (hk 3518).
 	E6Arm string `json:"e6_arm,omitempty"`
 	// RetryHost is the hub-internal marker of a verified-cleanup retry: the
 	// hub sets it, in memory, on the one request it rewrites to `--host <the
@@ -242,7 +244,7 @@ func (a *App) PrepareSubmission(ctx context.Context, s Spawn) (Submission, error
 			return Submission{}, fail(exitUsage, "explicit -m or --host requires --override-reason")
 		}
 	}
-	s.E6Arm = a.e6Arm("")
+	s.E6Arm = a.e6Arm("", false)
 	if s.E6Arm != "" && !ValidE6Arm(s.E6Arm, s.Profile) {
 		return Submission{}, fail(exitUsage, "PANEWIRE_E6_ARM must be <canon>@ or <canon>@<effort> with canon %s, got %q", s.Profile, s.E6Arm)
 	}
@@ -359,6 +361,10 @@ func ValidateSubmission(request Submission) (Spawn, error) {
 		return s, fail(exitUsage, "e6_arm %q must be <canon>@ or <canon>@<effort> with canon %q", request.E6Arm, s.Profile)
 	}
 	s.E6Arm = request.E6Arm
+	// The request's marker is authoritative from here on: an empty e6_arm
+	// stays empty through admission and the node argv; the hub process
+	// environment never fills it (hk 3518, panewire#307 follow-up).
+	s.e6ArmLocked = true
 	s.hubRetryHost = request.RetryHost
 	if err := validateContainment(s); err != nil {
 		return s, err
