@@ -157,7 +157,7 @@ func TestInboxLaneEventScanRetainsHistoricalDottedLane(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	dir := filepath.Join(root, "events-lane", "legacy.parent")
+	dir := filepath.Join(root, "events-lane")
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		t.Fatal(err)
 	}
