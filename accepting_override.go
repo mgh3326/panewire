@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"os"
 	"regexp"
@@ -291,6 +292,14 @@ func topLevelMembers(b []byte) ([]jsonMember, error) {
 			return nil, err
 		}
 		members = append(members, jsonMember{key, value})
+	}
+	// Consume the closing brace and require EOF, as json.Unmarshal does for the
+	// whole document: trailing data makes the file undecodable.
+	if tok, err := dec.Token(); err != nil || tok != json.Delim('}') {
+		return nil, errors.New("not a JSON object")
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		return nil, errors.New("trailing data after JSON object")
 	}
 	return members, nil
 }

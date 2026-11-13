@@ -184,3 +184,17 @@ func TestAcceptingOverridesRewriteCaseVariantLeftoverFollowsSourceOrder(t *testi
 		}
 	}
 }
+
+// A file with data after its top-level object is undecodable, as it is for
+// json.Unmarshal, so the rewrite never sees its members.
+func TestTopLevelMembersRejectsTrailingData(t *testing.T) {
+	for _, doc := range []string{`{"overrides":{}} {}`, `{"overrides":{}} junk`, `{"overrides":{}`} {
+		if _, err := topLevelMembers([]byte(doc)); err == nil {
+			t.Fatalf("topLevelMembers(%q) accepted the document", doc)
+		}
+	}
+	members, err := topLevelMembers([]byte(`{"overrides":{}}` + "\n"))
+	if err != nil || len(members) != 1 {
+		t.Fatalf("valid document: members=%v err=%v", members, err)
+	}
+}
