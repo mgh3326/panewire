@@ -60,12 +60,6 @@ func (client *HubClient) nodeTaskPaneSweeper() *fleet.TaskPaneSweeper {
 		client.taskPaneSweeper = &fleet.TaskPaneSweeper{
 			Grace: client.taskPaneSweepGrace,
 			Info:  slog.Info,
-			Exclusive: func() func() {
-				// One acting command at a time per node, so a sweep close never
-				// interleaves with a pane.close or job.done from the hub.
-				client.nodeCommandMu.Lock()
-				return client.nodeCommandMu.Unlock
-			},
 		}
 	})
 	return client.taskPaneSweeper
