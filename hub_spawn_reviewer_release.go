@@ -15,7 +15,7 @@ import (
 // released this way: an idle worker may be waiting on an ESC answer.
 //
 // The node's agent list carries no time of the last state change, so the grace
-// runs from the holder's spawn deadline, as releaseUnworkedLanding's does. Any
+// runs from the holder's spawn deadline, as releaseUnworkedSpawn's does. Any
 // check that fails or cannot be read keeps the reservation.
 
 const (

@@ -17,7 +17,7 @@ var devinE6Seats = map[string]struct{ model, family string }{
 func devinE6Rows() []CatalogRow {
 	var rows []CatalogRow
 	for profile, want := range devinE6Seats {
-		rows = append(rows, CatalogRow{Profile: profile, Effort: "", ModelID: want.model, Pool: "devin", Grade: gradeUnrated, Gate: defaultGate})
+		rows = append(rows, CatalogRow{Profile: profile, Effort: "high", ModelID: want.model, Pool: "devin", Grade: gradeUnrated, Gate: defaultGate})
 	}
 	return rows
 }
@@ -50,9 +50,9 @@ func TestDevinE6SeatsPinnedSpawnResolvesLikeDS41Max(t *testing.T) {
 				t.Fatalf("catalog rows for %s: %+v", profile, found)
 			}
 			catalog := overlayLaunchCatalog(found, false)
-			req := admissionRequest{Profile: profile, Effort: "", Role: "worker", E6Arm: profile + "@"}
+			req := admissionRequest{Profile: profile, Effort: "high", Role: "worker", E6Arm: profile + "@high"}
 			resolved, effort, why := catalog.resolveRow(req, true, a.Policy.Profiles)
-			if why != "" || resolved.ModelID != want.model || resolved.Pool != "devin" || effort != "" {
+			if why != "" || resolved.ModelID != want.model || resolved.Pool != "devin" || effort != "high" {
 				t.Fatalf("resolved row=%+v effort=%q why=%q", resolved, effort, why)
 			}
 			in := admissionInputs{Rows: admissionRows(found), Seats: a.Policy.Profiles}

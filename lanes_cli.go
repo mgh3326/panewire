@@ -57,7 +57,7 @@ func runLanesCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 		return ExitConditionInvalid
 	}
 	if options.Command == "add" {
-		if detail, code := validateLaneAdd(options.Lane, options.Machine, options.Pane, options.Parent); code != ExitOK {
+		if detail, code := validateLaneAdd(options.Lane, options.Machine, options.Pane, options.Parent, options.Sink); code != ExitOK {
 			fmt.Fprintln(stderr, detail)
 			return code
 		}
@@ -234,11 +234,13 @@ func runLanesCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 // validateLaneAdd answers the refusal line and exit status for a lane write.
 // The order and wording are the `lanes add` contract; the daemon's lanes.put
 // op reports the same line so a spawn receipt records it unchanged.
-func validateLaneAdd(lane, machine, pane, parent string) (string, int) {
+func validateLaneAdd(lane, machine, pane, parent string, sink bool) (string, int) {
 	if !laneNamePattern.MatchString(lane) {
 		return "lanes rejected: invalid lane", ExitConditionInvalid
 	}
-	if machine == hubOperatorMachineID || !machineIDPattern.MatchString(machine) || !validLanePane(pane) {
+	// A sink lane has no route: the hub discards machine and pane for it, so
+	// demanding them here would refuse a write the hub accepts (hk 3729).
+	if !sink && (machine == hubOperatorMachineID || !machineIDPattern.MatchString(machine) || !validLanePane(pane)) {
 		return "lanes rejected: invalid route", ExitConditionInvalid
 	}
 	if parent != "" && (!laneNamePattern.MatchString(parent) || parent == lane) {
@@ -376,7 +378,7 @@ func parseLanesCLI(args []string) (lanesCLIOptions, error) {
 	}
 	switch options.Command {
 	case "add":
-		if len(positionals) != 1 || !options.seen["--machine"] || !options.seen["--pane"] {
+		if len(positionals) != 1 || (!options.Sink && (!options.seen["--machine"] || !options.seen["--pane"])) {
 			return lanesCLIOptions{}, errors.New("lane and route flags are required")
 		}
 		options.Lane = positionals[0]

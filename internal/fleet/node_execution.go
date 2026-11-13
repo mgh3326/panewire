@@ -129,6 +129,9 @@ func (a *App) CheckTrust() error {
 
 func bindNodeSpawn(s Spawn, cwd, brief, workspace string) Spawn {
 	s.CWD, s.Prompt, s.Host, s.Delegated = cwd, brief, "local", true
+	// A node-delivered spawn's marker is the --e6-arm the hub sent; the node
+	// process environment never fills an empty one (hk 3518).
+	s.e6ArmLocked = true
 	if s.Workspace == "" {
 		s.Workspace = workspace
 	}

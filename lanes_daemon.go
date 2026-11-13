@@ -13,7 +13,7 @@ import (
 // a spawned lane without a fleet-config token file, and any refusal keeps the
 // CLI's text and exit status so the spawn receipt records it unchanged.
 func (d *Daemon) handleLanesPut(ctx context.Context, req daemonop.LanesPut) (any, error) {
-	if detail, code := validateLaneAdd(req.Lane, req.Machine, req.Pane, req.Parent); code != ExitOK {
+	if detail, code := validateLaneAdd(req.Lane, req.Machine, req.Pane, req.Parent, false); code != ExitOK {
 		return nil, &codedError{code, errors.New(detail)}
 	}
 	if d.cfg.Hub.Client == nil {
