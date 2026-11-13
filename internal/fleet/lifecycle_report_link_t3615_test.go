@@ -35,7 +35,7 @@ func doneReportLink(t *testing.T, task string) (put, rec map[string]any, eventSH
 	}
 	putEvent(t, a, "j", "job.claim", claim)
 	putEvent(t, a, "j", "job.spawned", map[string]any{"pane_id": "w:p1", "tab_id": "w:t1", "label": "agent-a", "profile": "cmd-dsflash41", "family": "deepseek", "keep": false})
-	if e := a.JobStore.Claim(ctx, "j", task, a.machine()); e != nil {
+	if e := a.JobStore.(*fakeJobStore).claimSpawned(ctx, "j", task, a.machine()); e != nil {
 		t.Fatal(e)
 	}
 	path := filepath.Join(a.Jobs, "j", "report.md")
@@ -47,7 +47,7 @@ func doneReportLink(t *testing.T, task string) (put, rec map[string]any, eventSH
 		t.Fatal(e)
 	}
 	for _, r := range hk.Requests() {
-		if r.Route() == docRoute(http.MethodPut, "reports/j/report.md") {
+		if r.Route() == docRoute(http.MethodPut, reportDocumentKey("j", reportDigest(report))) {
 			put = hkJSON(t, r)
 		}
 	}
@@ -78,7 +78,7 @@ func TestDoneReportDocLinksTaskAndPinsSHA(t *testing.T) {
 		}
 		body, _ := put["body"].(string)
 		sum := sha256.Sum256([]byte(body))
-		if str(rec, "report_doc") != "reports/j/report.md" || str(rec, "report_sha256") != hex.EncodeToString(sum[:]) {
+		if str(rec, "report_doc") != reportDocumentKey("j", reportDigest([]byte(body))) || str(rec, "report_sha256") != hex.EncodeToString(sum[:]) {
 			t.Errorf("record=%v, want report_doc and report_sha256 of the uploaded body", rec)
 		}
 		if str(rec, "report_sha256") != reportSHA || eventSHA != reportSHA {
@@ -118,9 +118,7 @@ func TestDoneReportUploadFailureWritesNoPin(t *testing.T) {
 	if e := os.WriteFile(path, report, 0600); e != nil {
 		t.Fatal(e)
 	}
-	if e := a.lifecycle(ctx, "done", []string{"j", "--report", path}); e != nil {
-		t.Fatal(e)
-	}
+	wantNotInHK(t, a.lifecycle(ctx, "done", []string{"j", "--report", path}))
 	if errs := a.Err.(*bytes.Buffer).String(); !strings.Contains(errs, "panewire: warning: report upload failed; local report retained\n") {
 		t.Fatalf("warnings=%q", errs)
 	}

@@ -227,7 +227,7 @@ path is accepted.
 | `report-invalid` | — | `report` is not one of the two paths, is missing, or is not a regular file. panewire does not run. |
 
 A failed or timed-out panewire answers `done_failed` with optional `detail`: the last stderr line, redacted and bounded to 240 UTF-8 bytes. The command can be re-issued; a node
-without a jobs root answers `jobs_root_unset`. The node records the report's
+without a jobs root answers `jobs_root_unset`. A `done` that completed the job but left its report out of hk exits non-zero (`completed; report not in hk; rerun the same command`), so it answers `done_failed` too, and the re-issued command finishes the report ([completion receipts](config.md#completion-receipts)). The node records the report's
 digest in `<inbox>/jobs/<job>/.node-job-done` after panewire succeeds. The digest
 is the key because a released job id can be claimed again: a new report for that
 id runs panewire, the same rule panewire's own duplicate check applies.

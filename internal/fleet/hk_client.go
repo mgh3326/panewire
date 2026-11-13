@@ -252,7 +252,13 @@ func hkTaskProject(t client.Task) string {
 
 // hkGetDocument reads one document; a key hk does not have is errHKNotFound.
 func hkGetDocument(ctx context.Context, key string) (client.Document, error) {
-	c, err := newHKClient()
+	return hkGetDocumentWithin(ctx, key, hkCallTimeout)
+}
+
+// hkGetDocumentWithin is hkGetDocument under timeout, for a read that belongs
+// to an upload and so gets the upload bound.
+func hkGetDocumentWithin(ctx context.Context, key string, timeout time.Duration) (client.Document, error) {
+	c, err := newHKClientWithin(timeout)
 	if err != nil {
 		return client.Document{}, err
 	}
@@ -274,16 +280,23 @@ var hkUploadKinds = map[string]bool{"brief": true, "report": true, "evidence": t
 // client cannot decode is an error: hk's outcome is unknown, and the CLI
 // failed on it too.
 func hkPutDocument(ctx context.Context, doc client.Document) error {
+	_, err := hkPutDocumentStored(ctx, doc)
+	return err
+}
+
+// hkPutDocumentStored is hkPutDocument returning the document hk stored, for
+// a caller that checks the sha256 hk holds against the bytes it sent.
+func hkPutDocumentStored(ctx context.Context, doc client.Document) (client.Document, error) {
 	timeout := hkCallTimeout
 	if hkUploadKinds[doc.Kind] {
 		timeout = hkUploadTimeout
 	}
 	c, err := newHKClientWithin(timeout)
 	if err != nil {
-		return err
+		return client.Document{}, err
 	}
-	_, _, err = c.PutDocument(ctx, doc)
-	return err
+	stored, _, err := c.PutDocument(ctx, doc)
+	return stored, err
 }
 
 // hkAnswerBody runs one hk read and returns hk's 2xx answer as hk sent it,

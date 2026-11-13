@@ -1,0 +1,26 @@
+# Template for the node daemon on a Linux host (the counterpart of
+# dev.panewire.panewired.plist). Copy it, replace the REPLACE_ME values and the
+# hub flags a fleet node needs (docs/hub-r6.md), then `systemctl [--user] restart`.
+#
+# KillMode=process is what lets a restart keep a running job's result: the
+# detached `panewire _watch` children live in this unit's cgroup, and
+# systemd's default (control-group) kills them with the daemon. KillMode=mixed
+# does not help: it SIGKILLs whatever is left in the cgroup once the main
+# process exits. See docs/runbooks/node-restart.md.
+#
+# TimeoutStopSec must exceed the daemon's stop drain (30 s: a spawn launch, a
+# brief injection or a result upload in flight finishes before it exits).
+[Unit]
+Description=panewire node daemon
+After=network-online.target
+
+[Service]
+ExecStart=/home/REPLACE_ME/go/bin/panewire daemon --herdr-socket /home/REPLACE_ME/.config/herdr/herdr.sock --db /home/REPLACE_ME/.local/state/panewire/panewire.sqlite3 --inbox-root /home/REPLACE_ME/work/herdr-inbox
+Restart=always
+RestartSec=2
+KillMode=process
+KillSignal=SIGTERM
+TimeoutStopSec=60
+
+[Install]
+WantedBy=default.target

@@ -639,7 +639,7 @@ HANDOFFKEEP_TOKEN_SVC_PANEWIRE, or create ~/.config/panewire/hk-svc.env`):
 | via=hub brief upload | The hub candidate is refused, `brief upload to <key> failed: …`. |
 | `panewire work TASK_ID` | Refused, `cannot read task <id>; run handoffkeep tasks show <id> and restore task access` (exit 70). |
 | Artifact sweep | Every job's task is unreadable, so nothing is swept; an artifact record write fails with exit 1. |
-| `done` / `escalate` report upload and task comment | Warnings (`report upload failed; local report retained`, `task comment failed: … unconfigured …`); the job completes without a report document. |
+| `done` / `escalate` report upload and task comment | Warnings (`report upload failed; local report retained`, `task comment failed: … unconfigured …`); the job completes without a report document. An interactive `done` then exits non-zero (`completed; report not in hk; rerun the same command`); the rerun publishes the report ([Completion receipts](#completion-receipts)). |
 | `panewire job` done, escalate and joined report upload | Warning `<unconfigured error>; report document not uploaded (job=<job>)`; no document link. |
 | Quota stop manager | No policy (the last good copy, else hand over), no task, and the note is retried each minute. |
 
@@ -674,27 +674,76 @@ including `local` when an automatic request falls back to local execution; an
 invalid host id is stored as `unknown` rather than being cut into another id.
 Candidate lists are trimmed in rank order to keep `selection` below hk's 32 KiB
 limit.
-`panewire done` writes `{state:"completed", report_doc}` plus `result` when
-`--result FILE` (a JSON object of at most 64 KiB) is given, in the same PUT.
-For CLI `done --result`, success requires hk to confirm that record or a read
-back to show the same completed result and report pin. An ambiguous
-completed-record PUT is read back and retried at most twice more with the same
-payload, within a 30 s completion budget. The single spawned repair PUT is also
-read back after an ambiguous reply but is never repeated. A refusal or
-unresolved state exits non-zero, emits no completion event or relay, and records
-`job.record_failed` with `op` and a safe
-`reason` token. Conflicts use exit 75. Safe reasons are `secret_like_content`
+### Completion receipts
+
+A report's identity is `(job, S)`, `S` the sha256 of its bytes. `panewire done`
+publishes it to the content-addressed hk document `reports/<job>/sha256/<S>.md`
+(kind `report`, linked to the job's task), so one key names one byte string and
+a retry PUTs the same key. `done` then runs four steps in order. Each step has
+one authority and one local receipt (an event in the job's ledger), and a step
+whose receipt exists is skipped:
+
+| Step | Fact | Authority | Receipt |
+| --- | --- | --- | --- |
+| 1 publish | hk holds the bytes of `S` | the hk document | `job.report_published {report_sha256, document}` |
+| 2 settle | the hk record is terminal, holding the caller's `result` | the hk job record | `job.record_settled {report_sha256, pinned, result_sha256}` |
+| 3 pin | the record's `report_doc` and `report_sha256` name the completing report | the hk job record | `job.report_pinned {report_sha256, document, outcome}` |
+| 4 notify | the parent was told about `S` | the local ledger, then the relay | `job.completed {report_sha256, document}` |
+
+Step 1 confirms hk holds exactly these bytes, by the sha256 in hk's answer or a
+read-back. The key lies under `reports/<job>/sha256/`, which a basename key can
+never reach (a file name holds no slash), so a key there only ever holds the
+bytes with that sha256; `escalate` and the legacy `panewire job` keep
+uploading under the literal file name `reports/<job>/<file name>`.
+
+Step 2 is the only writer of the record, `strictCompletedPutUntil`:
+one PUT of `{state:"completed", result?, report_doc?, report_sha256?}` (the pin
+only when the report is published and is the completing one), read back when
+the answer is ambiguous or the record is already terminal, retried at most twice
+more with the same payload within a 30 s budget. The single spawned repair PUT is
+also read back after an ambiguous reply but never repeated. Step 3 is the late
+write hk accepts once on a terminal record (hk 4354): `200` is pinned, `409`
+means the record already names another report. A `409` is an outcome, logged
+(`report pin kept`) and receipted as `held`, never an error. Step 4 writes
+`job.completed` and the relay once per `S`, carrying the exact document key when
+step 1 had succeeded by then, and comments on the job's hk task.
+
+The completing report is the one the record's pin belongs to: the sha256 of the
+settling receipt (for a job that completed before settlements were receipted,
+the first `job.completed`). A later report, other bytes, gets its own document
+and its own `job.completed` and relay, and never writes the record.
+
+"Duplicate" is not a branch: it is the case where every step has its receipt,
+and it makes no hk call and writes no event (`OK … duplicate=yes`). A repeat that
+finishes a step prints the steps it ran (`published=yes pinned=yes`).
+
+Publication and the pin never block completion. The only blocker is the rule
+for a strict `--result`: hk takes a `result` only in the spawned-to-completed
+write, never later, so the record must be confirmed holding it. For CLI `done
+--result` that is a completed record read back with the same result; a refusal
+or unresolved state exits non-zero, emits no completion event or relay and
+records `job.record_failed` with `op` and a safe `reason` token. Conflicts use
+exit 75. A `--result` on a record that is completed without one is
+`terminal_without_result` on both paths: the interactive `done` fails, the
+headless delegate warns and continues. Safe reasons are `secret_like_content`
 or `secret_like_content:<pattern>` (pattern matches `[a-z0-9_]{1,40}`),
-`terminal_without_result`, `result_conflict`, `report_conflict`,
-`job_escalated`, `job_lost`, `no_spawn_evidence`, a validated hk code matching
-`[a-z0-9_]{1,64}`, `http_<status>`, `hk_unreachable`, `hk_unconfigured`, or
-`local_event_failed` when the local result-attachment event cannot be recorded.
-The headless delegate keeps warn-and-continue; so does `done` without
-`--result`. Watcher completion is unchanged. `escalate` writes
-`{state:"escalated"}` and the watcher writes `{state:"lost"}` after two
-missing-pane observations, or when a reviewer pane is idle on a quota or
-rate-limit screen with no report (see `docs/quota-stop.md`; a worker or tester is
-the quota-stop manager's). Their failed record writes remain best effort.
+`terminal_without_result`, `result_conflict`, `job_escalated`, `job_lost`,
+`no_spawn_evidence`, a validated hk code matching `[a-z0-9_]{1,64}`,
+`http_<status>`, `hk_unreachable` or `hk_unconfigured`.
+
+An interactive `done` that completed but left the report out of hk, or its pin
+unwritten, prints its `OK` line and exits 1 with `completed; report not in hk;
+rerun the same command` (or `report not pinned in hk`). That is reporting only:
+the job completed, and the same command run again finishes the missing step.
+The watcher and the headless delegate warn and carry on. `escalate` is not part
+of this: it uploads under `reports/<job>/<file name>` and writes
+`{state:"escalated", report_doc, report_sha256}`; the watcher writes
+`{state:"lost"}` after two missing-pane observations, or when a reviewer pane is
+idle on a quota or rate-limit screen with no report (see
+`docs/quota-stop.md`; a worker or tester is the quota-stop manager's). Their
+failed record writes remain best effort. The artifact sweep confirms a local
+report by hashing it and reading the content-addressed key, then the legacy key
+`reports/<job>/<file name>` ([job-dir-ttl.md](job-dir-ttl.md)).
 
 `--parent-job` resolves the local job directory first, then `GET
 /v1/jobs/<job>` on any host — waiting up to 30 s for a lagging record before
@@ -1712,7 +1761,7 @@ outcome, reason, detail`) to `$XDG_STATE_HOME/panewire/events/fleet-events.jsonl
 | `quota_observation` | `stale` or `unusable` | the shared-observation reason (`stale`, `not_observed`, `measure_failed`, ...) | a target account's quota observation refused a host; `detail` carries `target=`, `pool=` and `age_min=` |
 | `relay` | `delivered`, `dropped:<reason>` or `unconfirmed:<reason>` | the drop code, or the first token of the report | the hub saw one worker or design lane row's outcome |
 | `spawn_held` | the held branch (`succeeded_pane_held`, `failed_pane_held`, ...) | the pane-probe reason | a refused reclaim kept a role reservation |
-| `job_result` | `attached`, `conflict` or `missing` | `duplicate_done`, `different_result` or `no_result` | a `done` attached, conflicted with, or lacked a result |
+| `job_result` | `conflict` or `missing` | `different_result` or `no_result` | a `done` conflicted with, or lacked, a result |
 | `inbox_wake` | `sent` or `skipped` | the lane class (`design`, `desk`, `trial`), or `startup` for the line a hub start owes, when sent; `count_failed` or `unrouted` when skipped | the hub typed, or could not type, an inbox-only lane's one-line wake; `job` is the lane and `detail` names `unread=`, `most_urgent=`, `machine=` and `pane=`. See [inbox-only lanes](quiet-delivery.md#inbox-only-lanes) |
 
 The relay, held-reservation and job-result kinds and their Sentry fingerprints

@@ -135,6 +135,14 @@ func (client *HubClient) spawnStartupError() error {
 }
 
 func (client *HubClient) handleHubSpawn(ctx context.Context, peer *hubClientConnection, message hubOutboundMessage) {
+	// A stop in progress refuses a spawn before it claims the journal row: the
+	// hub replays the request to the restarted node, which then runs it whole.
+	endWork, accepted := client.beginWork(true)
+	if !accepted {
+		client.warnMessage("node is stopping; spawn left for replay after restart")
+		return
+	}
+	defer endWork()
 	journal, err := client.acquireSpawnJournal()
 	if err != nil {
 		client.sendSpawnResult(ctx, peer, hubSpawnResult{RequestID: message.RequestID, RC: 75, Error: "journal_unavailable"}, message.OperatorAuthorized)
@@ -152,11 +160,17 @@ func (client *HubClient) handleHubSpawn(ctx context.Context, peer *hubClientConn
 	}
 	if !claimed {
 		// An executing entry this process is not running was left by a node
-		// restart: nothing will ever complete it, so the answer is unknown, and
-		// the hub decides from the panes whether the request is orphaned.
+		// restart: nothing will ever complete it, so it is settled from the pane
+		// (hub_spawn_settle.go); only a pane that cannot be read answers unknown,
+		// and the hub then decides from the panes whether the request is orphaned.
 		reply := "unknown"
 		if active {
 			reply = "reconciling"
+		} else if settled, ok := client.settleRequest(ctx, journal, message.RequestID); ok {
+			// The pane tells what the dead process could not: the replay gets
+			// the real result instead of waiting for the request deadline.
+			client.sendSpawnResult(ctx, peer, *settled, message.OperatorAuthorized)
+			return
 		}
 		client.sendSpawnResult(ctx, peer, hubSpawnResult{RequestID: message.RequestID, RC: 75, Error: reply}, message.OperatorAuthorized)
 		return
@@ -173,6 +187,12 @@ func (client *HubClient) handleHubSpawn(ctx context.Context, peer *hubClientConn
 	client.spawnMu.Unlock()
 	// Disconnect is not cancellation of this daemon-owned execution. Its result
 	// remains available to the next authenticated replay even if this socket died.
+	if ctx.Err() != nil && result.RC != 0 {
+		// The node is stopping and the drain bound passed: this failure is the
+		// abort, not the spawn's outcome (a pane may exist). The row stays
+		// executing for the restart settle (hub_spawn_settle.go).
+		return
+	}
 	persistCtx, persistCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer persistCancel()
 	if journal.complete(persistCtx, result) != nil {

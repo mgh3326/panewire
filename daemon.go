@@ -898,6 +898,12 @@ func errorString(err error) string {
 	return err.Error()
 }
 func (d *Daemon) Stop() error {
+	// The node finishes what is in flight, for a bounded time, before its
+	// loops are cancelled: a launch, an injection and a result upload cut off
+	// here would otherwise wait for the hub's deadline.
+	if d.cfg.Hub.Client != nil {
+		d.cfg.Hub.Client.Drain(context.Background())
+	}
 	if d.cancel != nil {
 		d.cancel()
 	}

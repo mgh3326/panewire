@@ -184,14 +184,28 @@ func (h *HubServer) publishFleetReadiness(machine string, now time.Time) {
 	h.stateStore().publish(FleetStateMessage{Host: machine, Kind: fleetStateKindReadiness, MeasuredAt: now, ReceivedAt: now, Readiness: &state}, fleetStateLoadRepublish)
 }
 
+// launchFailureReason reports whether a failed node answer shows that the host
+// failed to launch the harness. Only these reasons count toward launch_backoff.
+// A timeout, a late claim, the hub's own unknown or reconciling outcomes,
+// request faults and checkout state do not, so they never bench a host. The
+// table is in docs/placement.md, "Launch-failure backoff". A reason may carry
+// the engine's code after a colon, as spawn_failed:<code>.
+func launchFailureReason(reason string) bool {
+	switch code, _, _ := strings.Cut(reason, ":"); code {
+	case "spawn_failed", "spawn_disabled", "cwd_unmapped", "brief_doc_unavailable":
+		return true
+	default:
+		return false
+	}
+}
+
 // observeLaunchOutcome counts one node answer to a spawn against its
-// (machine, kind). The threshold-th consecutive failure excludes the pair for
-// the policy's backoff; a success clears it. Busy and moved-on checkout
-// refusals are not launch failures: they describe checkout state, not the
-// harness's ability to launch.
+// (machine, kind). The threshold-th consecutive launch failure excludes the
+// pair for the policy's backoff; a success clears it. A failed answer that is
+// not a launch failure (launchFailureReason) changes nothing.
 func (h *HubServer) observeLaunchOutcome(machine, profile string, rc int, reason string, now time.Time) {
 	kind := fleet.ProfileKind(profile)
-	if kind == "" || machine == "" || reason == "checkout_refused:busy" || checkoutRefusalMovesNextHost(reason) {
+	if kind == "" || machine == "" || rc != 0 && !launchFailureReason(reason) {
 		return
 	}
 	h.mu.Lock()

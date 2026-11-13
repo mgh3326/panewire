@@ -55,6 +55,19 @@ func openNodeSpawnJournal(root string) (*nodeSpawnJournal, error) {
 			return nil, err
 		}
 	}
+	// job_id and label name what an executing row launched, so a restart can
+	// settle it from the pane (hub_spawn_settle.go). Rows written before the
+	// columns existed keep an empty value and settle as lost.
+	for _, column := range []string{"job_id", "label"} {
+		var present int
+		if err = db.QueryRowContext(ctx, `SELECT count(*) FROM pragma_table_info('spawn_inbox') WHERE name=?`, column).Scan(&present); err == nil && present == 0 {
+			_, err = db.ExecContext(ctx, `ALTER TABLE spawn_inbox ADD COLUMN `+column+` TEXT NOT NULL DEFAULT ''`)
+		}
+		if err != nil {
+			db.Close()
+			return nil, err
+		}
+	}
 	return &nodeSpawnJournal{db}, nil
 }
 func (j *nodeSpawnJournal) claim(ctx context.Context, message hubOutboundMessage) (bool, *hubSpawnResult, error) {
@@ -68,7 +81,7 @@ func (j *nodeSpawnJournal) claim(ctx context.Context, message hubOutboundMessage
 	}{message.RequestID, message.CWDKey, message.BriefInline, message.BriefDoc, message.Args, message.Checkout, message.WaitSeconds, message.DeadlineMS})
 	sum := sha256.Sum256(raw)
 	hash := hex.EncodeToString(sum[:])
-	result, err := j.db.ExecContext(ctx, `INSERT INTO spawn_inbox(request_id,fingerprint,status) VALUES(?,?,'executing') ON CONFLICT DO NOTHING`, message.RequestID, hash)
+	result, err := j.db.ExecContext(ctx, `INSERT INTO spawn_inbox(request_id,fingerprint,status,job_id,label) VALUES(?,?,'executing',?,?) ON CONFLICT DO NOTHING`, message.RequestID, hash, hubSpawnArg(message.Args, "--job"), hubSpawnArg(message.Args, "-l"))
 	if err != nil {
 		return false, nil, err
 	}
@@ -99,4 +112,37 @@ func (j *nodeSpawnJournal) complete(ctx context.Context, result hubSpawnResult) 
 	}
 	_, err = j.db.ExecContext(ctx, `UPDATE spawn_inbox SET status='completed',result=? WHERE request_id=? AND status='executing'`, string(raw), result.RequestID)
 	return err
+}
+
+// executingSpawn is a journal row no completion has been written for.
+type executingSpawn struct{ RequestID, Job, Label string }
+
+func (j *nodeSpawnJournal) executing(ctx context.Context) ([]executingSpawn, error) {
+	rows, err := j.db.QueryContext(ctx, `SELECT request_id,job_id,label FROM spawn_inbox WHERE status='executing' ORDER BY rowid`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []executingSpawn
+	for rows.Next() {
+		var row executingSpawn
+		if err = rows.Scan(&row.RequestID, &row.Job, &row.Label); err != nil {
+			return nil, err
+		}
+		out = append(out, row)
+	}
+	return out, rows.Err()
+}
+
+// resultOf returns the stored completion of a request, if it has one.
+func (j *nodeSpawnJournal) resultOf(ctx context.Context, requestID string) (*hubSpawnResult, error) {
+	var status, stored string
+	if err := j.db.QueryRowContext(ctx, `SELECT status,result FROM spawn_inbox WHERE request_id=?`, requestID).Scan(&status, &stored); err != nil || status != "completed" {
+		return nil, err
+	}
+	var result hubSpawnResult
+	if err := json.Unmarshal([]byte(stored), &result); err != nil {
+		return nil, err
+	}
+	return &result, nil
 }

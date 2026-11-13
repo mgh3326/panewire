@@ -56,7 +56,7 @@ What the node relay does per harness when it types a lane event into a worker pa
 
 ## Installation and use
 
-R1 ships one executable, `panewire`, with a `daemon` subcommand. This avoids two separately versioned Go artifacts while keeping the launchd entry point explicit (`panewire daemon`).
+R1 ships one executable, `panewire`, with a `daemon` subcommand. This avoids two separately versioned Go artifacts while keeping the launchd entry point explicit (`panewire daemon`). Each GitHub Release names the daemons it changed in `components.json`; see [`docs/release-components.md`](docs/release-components.md).
 
 The daemon uses `modernc.org/sqlite` to keep the build cgo-free and `log/slog` for structured startup/reconnect diagnostics. Inbox watching uses fsnotify with one registration per directory: macOS kqueue is not recursive, so the watcher walks the root and adds newly created directories immediately. This is simpler to operate and test on the required macOS runner than relying on a separate FSEvents backend.
 
@@ -67,7 +67,7 @@ panewire daemon --herdr-socket "$HOME/.config/herdr/herdr.sock" \
   --inbox-root "$HOME/work/herdr-inbox"
 ```
 
-Install [deploy/dev.panewire.panewired.plist](deploy/dev.panewire.panewired.plist) as `~/Library/LaunchAgents/dev.panewire.panewired.plist` after replacing its user-specific paths. It uses the same `panewire` executable and restarts on exit.
+Install [deploy/dev.panewire.panewired.plist](deploy/dev.panewire.panewired.plist) as `~/Library/LaunchAgents/dev.panewire.panewired.plist` after replacing its user-specific paths. It uses the same `panewire` executable and restarts on exit. On Linux, [deploy/panewired.service](deploy/panewired.service) is the counterpart; both keep the detached job watchers alive across a restart ([node restart runbook](docs/runbooks/node-restart.md)).
 
 Release installs should pin a tag and stamp the same version the hub sees, e.g.
 `go install -ldflags "-X main.version=<tag>" github.com/mgh3326/panewire/cmd/panewire@<tag>`.

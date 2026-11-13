@@ -259,10 +259,33 @@ sent merely because a deadline expired.
 | Node disconnect or uncertain send | Retain node UUID/host; replay its journal on reconnect. | `TestSpawnUnknownRetainsOwnershipAndLateResultCommitsOutbox`, `TestAsyncSpawnLateResultReconcilesAgainstSameNode`. |
 | Duplicate accept / lost HTTP response | Identical key/body replays; changed body conflicts; CLI receipt preserves key. | Reservation test and `TestSubmissionReceiptReusesKeyAfterLostHTTPResponse`. |
 | Timeout followed by late pane | Retain ownership; reconcile receipt with exact node identity; never close working/unknown. | Late-result test and `TestFailedSpawnCleanupRequiresExactIdlePane`. |
-| Node restart while executing | Do not rerun or invent success from a pane's presence. Past the deadline, a node answering `unknown` with no pane bearing the job label finishes the request `failed` (`orphaned_after_restart`) and releases its reservation; a labelled pane keeps it for the operator. | `TestNodeSpawnJournalRestartDedupAndLostResultReplay`, `TestNodeSpawnReplayAnswersUnknownAfterRestart`, `TestStrandedSpawnUnknownWithoutPaneFailsAndReleases`, `TestStrandedSpawnStaysPendingWithoutProof`. Adopting a pane after this crash window is a non-goal. |
+| Timeout, and the node never started the request | Settle `retryable` with `deadline_not_started` (see [A request the node never started](#a-request-the-node-never-started)); an executing, restarted or silent node keeps ownership. | `TestLateNotStartedAnswerSettlesRequest_t4379`, `TestTimeoutWithoutNodeRowSettlesAsNotStarted_t4379`, `TestTimeoutKeepsOwnershipWithoutNotStartedProof_t4379`. |
+| Node restart while executing | Never rerun the spawn. The restarted node settles the executing row from herdr and the job's local spawn record: the recorded pane alive as an agent completes it with the job's receipt (the hub still verifies the pane before accepting it), a pane in neither the agent nor the pane list completes it `lost` with a reason, and anything unproven (a pane only in the pane list, a label match without a record, herdr unreadable) leaves it executing and answers `unknown`. Past the deadline, `unknown` with no pane bearing the job label finishes the request `failed` (`orphaned_after_restart`) and releases its reservation; a labelled pane keeps it for the operator. The node's stop first waits (30 s) for a launch, injection or result upload in flight. See [node restart](runbooks/node-restart.md). | `TestSpawnSettle*`, `TestStopDrain*`, `TestNodeSpawnJournalRestartDedupAndLostResultReplay`, `TestNodeSpawnReplayAnswersUnknownAfterRestart`, `TestStrandedSpawnUnknownWithoutPaneFailsAndReleases`, `TestStrandedSpawnStaysPendingWithoutProof`. |
 | Lost event or lost ACK | Commit state and outbox atomically; retry with a stable event id and actual job id. | `TestSpawnOutboxFailureRollsBackResult`, `TestAsyncSpawnLostEventRetriesWithStableJobIdentity`. |
 | Process pressure / shutdown | Bounded execution and persisted pending work. | `TestAsyncSpawnWorkersBoundedAndIndependentOfHTTP`, `TestAsyncSpawnOutlivesSubmittingHTTPContext`; HTTP-independent execution lifetime is owned by maintenance/shutdown, never the POST context. |
 | Backend migration | Never silently drop reservations or tombstones. | Spawn store contract refuses the inbox-only SQLite-to-Postgres migrator when spawn rows exist. Full backend transfer is a separate migration, not an inbox-only copy. |
+
+### A request the node never started
+
+A node that first sees a `job.spawn` after its deadline answers `rc=124
+stage=claim reason=deadline_not_started retryable=true` without calling the
+engine (a stalled read loop delivers frames minutes late, hk 4375). Because it
+claims the request only then, that answer also means the node holds no journal
+row for it. The hub settles on it:
+
+| Node evidence | Hub outcome |
+|---|---|
+| `deadline_not_started`, while the request's own deadline still has room (the hub clock is behind the node's), auto placement | Unbind and try the next eligible host. |
+| `deadline_not_started`, any other case (a pinned host, or the deadline passed) | `retryable`, reason `deadline_not_started`, stage `claim`, rc 124, with a fix text; the (task, role) slot is released, so the caller's replay starts a new attempt. The caller sees this refusal, not rc 75. |
+| Landing wait ran out; the node answers the original frame or a replay with `deadline_not_started` within 5 s | Same `retryable` outcome. |
+| Landing wait ran out; the node answers `reconciling` (row executing), `unknown` (stale executing row), `journal_unavailable` or `journal_conflict` | `deadline_exceeded`, ownership kept, as before. |
+| Landing wait ran out; no answer within 5 s (disconnected node, stalled read loop) | `deadline_exceeded`, ownership kept. Silence is never read as not started; a later `deadline_not_started` from the coordinator's replay still settles it. |
+| Completed row | Replayed result, judged as a late result (receipt plus exact pane read). |
+
+When the landing wait ends, the dispatching worker replays the same request id
+once and waits up to 5 s (`spawnNotStartedProbe`) before writing
+`deadline_exceeded`. Past the deadline a node never launches a request, so the
+replay cannot start a second one. The wire and journal formats are unchanged.
 
 ### Stranded requests
 
@@ -270,9 +293,10 @@ A request bound to a node stays `reconciling` or `deadline_exceeded` until the
 node answers. The coordinator replays the bound request to its node every few
 seconds (the late-result path), so the hub asks about it well inside a minute
 after the deadline. When a node restarted mid-spawn, its journal keeps the
-entry executing for good; the node now answers such a replay `unknown`
-instead of `reconciling` (an older hub ignores that answer and keeps the
-request pending, as before).
+entry executing until the node settles it from the pane (see
+[node restart](runbooks/node-restart.md)); a node that cannot read herdr
+answers such a replay `unknown` instead of `reconciling` (an older hub ignores
+that answer and keeps the request pending, as before).
 
 Past the deadline, an `unknown` answer from the bound, connected node makes the
 hub read that node's panes (`agents.list`, at most once a minute per request):
