@@ -36,6 +36,7 @@ type rebindFixture struct {
 	afterRebind func()
 	// restoreFail makes the rebind back to the parent answer 409.
 	restoreFail bool
+	getFail     bool
 }
 
 func newRebindFixture(t *testing.T, parentState, bound string) *rebindFixture {
@@ -57,6 +58,9 @@ func newRebindFixture(t *testing.T, parentState, bound string) *rebindFixture {
 	fx.hk.Handle(func(r hkRequest) (int, string, bool) {
 		switch r.Route() {
 		case "GET /v1/tasks/42":
+			if fx.getFail {
+				return http.StatusServiceUnavailable, `{"error":"unavailable"}`, true
+			}
 			return http.StatusOK, task("claimed", fx.claimedBy, fx.bound), true
 		case "POST /v1/tasks/42/rebind":
 			var body map[string]string
@@ -230,6 +234,22 @@ func TestFailedTakeoverHandsTheTaskBackToTheParent(t *testing.T) {
 		if ev.Kind == "job.replaced" {
 			t.Fatalf("the parent's ledger says it was replaced by a spawn that failed: %v", ev.Payload)
 		}
+	}
+}
+
+// A lookup outage after takeover must not prevent the conditional hand back.
+func TestFailedTakeoverRestoresDuringTaskLookupOutage(t *testing.T) {
+	fx := newRebindFixture(t, "spawned", rebindParent)
+	fx.claimedBy = "parent-label"
+	fx.afterRebind = func() {
+		fx.getFail = true
+		fx.breakEventLog(t)()
+	}
+	if e := fx.a.Spawn(context.Background(), fx.s); e == nil {
+		t.Fatal("the spawn did not fail after the rebind")
+	}
+	if fx.bound != rebindParent || fx.claimedBy != "parent-label" {
+		t.Fatalf("task bound to job %q claimed by %q, want parent binding", fx.bound, fx.claimedBy)
 	}
 }
 

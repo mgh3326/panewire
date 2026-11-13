@@ -416,7 +416,7 @@ func (a *App) rebindInherited(ctx context.Context, s Spawn, task client.Task, ev
 // alone). A failure to restore is a warning: the spawn is already failing, and
 // a retry of the same request finds the task bound to its job and carries on.
 func (a *App) restoreParentBinding(ctx context.Context, s Spawn, before client.Task) {
-	if !s.replacesParent() || before.Refs.JobID != s.Inherited || !a.taskLinkedTo(ctx, s.Task, s.Job) {
+	if !s.replacesParent() || before.Refs.JobID != s.Inherited {
 		return
 	}
 	by := firstNonempty(before.ClaimedBy, s.Inherited)
@@ -425,7 +425,7 @@ func (a *App) restoreParentBinding(ctx context.Context, s Spawn, before client.T
 	if e == nil && t.Refs.JobID == s.Inherited {
 		return
 	}
-	a.warn("task %s stays bound to failed job %s: restoring it to job %s did not complete (%v); rebind it manually", s.Task, s.Job, s.Inherited, e)
+	a.warn("task %s may be bound to failed job %s: restoring it to job %s did not complete (%v); check and rebind it manually", s.Task, s.Job, s.Inherited, e)
 }
 
 // noteReplaced records on the parent's job ledger that this job took its task,
