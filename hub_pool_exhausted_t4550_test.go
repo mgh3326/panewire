@@ -388,6 +388,9 @@ func TestPoolExhaustedPublishedQuotaNotifiesOnlyMatchingLiveJobs(t *testing.T) {
 		if got := f.node2.count("pane.close " + job); got != 0 {
 			t.Fatalf("job %s closed %d times", job, got)
 		}
+		if _, err := f.hub.inbox.store.latestSpawnForJob(t.Context(), job+"-q1"); err == nil {
+			t.Fatalf("job %s unexpectedly received a successor", job)
+		}
 	}
 	for _, event := range events {
 		if event.Kind != "lane.event" || strings.Contains(event.Text, other) {
@@ -444,5 +447,13 @@ func TestPoolExhaustedOnlyAccountWideWindowsTrigger(t *testing.T) {
 	quota.Buckets = append(quota.Buckets, FleetStateBucket{Window: "weekly", Scope: "account", UsedPct: &used, ResetsAt: reset})
 	if got := poolExhaustionsOf(quota, now); len(got) != 1 || got[0].Cause != "window:weekly" {
 		t.Fatalf("account window result=%+v", got)
+	}
+}
+
+func TestPoolExhaustionCoversOnlyBucketProfiles(t *testing.T) {
+	free := poolExhaustion{Cause: poolCauseFreeLimit}
+	paid := poolExhaustion{Cause: "window:weekly"}
+	if !free.covers("devin-swe2") || free.covers("devin-ds41") || paid.covers("devin-swe2") || !paid.covers("devin-ds41") || free.covers("") || paid.covers("") {
+		t.Fatal("free and paid quota buckets matched the wrong profiles")
 	}
 }

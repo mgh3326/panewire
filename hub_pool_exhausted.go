@@ -176,10 +176,9 @@ const (
 
 // poolJobResult is what a pass did for one job.
 type poolJobResult struct {
-	action    string
-	role      string
-	successor string
-	why       string
+	action string
+	role   string
+	why    string
 }
 
 func (r poolJobResult) acted() bool {
@@ -237,7 +236,7 @@ func (h *HubServer) sweepExhaustedPool(ctx context.Context, exhaustion poolExhau
 			results[i] = h.sweepPoolJob(ctx, exhaustion, task)
 			if results[i].acted() {
 				h.logger.Info("pool exhausted job", "job", task.Job, "role", results[i].role, "pool", exhaustion.Pool, "account", exhaustion.Account, "cause", exhaustion.Cause,
-					"action", results[i].action, "successor", results[i].successor, "reason", results[i].why)
+					"action", results[i].action, "reason", results[i].why)
 			} else {
 				h.poolSweep.release(task.Job)
 			}
