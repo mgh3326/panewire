@@ -363,6 +363,37 @@ func (c *handoffkeepRelayClient) listUndelivered(ctx context.Context, lane, kind
 	return result.Events, nil
 }
 
+// handoffkeepTask is the hk task fields the drain-wake check reads.
+type handoffkeepTask struct {
+	ID      int64  `json:"id"`
+	Project string `json:"project"`
+	State   string `json:"state"`
+}
+
+// listTasks reads one page of hk tasks in ID order after afterID. Drain wake
+// pages until a short page (hub_drain_wake.go).
+func (c *handoffkeepRelayClient) listTasks(ctx context.Context, afterID int64, limit int) ([]handoffkeepTask, error) {
+	query := url.Values{}
+	query.Set("limit", strconv.Itoa(limit))
+	if afterID > 0 {
+		query.Set("after_id", strconv.FormatInt(afterID, 10))
+	}
+	status, payload, err := c.do(ctx, http.MethodGet, c.endpoint("/v1/tasks")+"?"+query.Encode(), nil)
+	if err != nil {
+		return nil, err
+	}
+	if status != http.StatusOK {
+		return nil, errors.New("handoffkeep rejected the task query")
+	}
+	var result struct {
+		Tasks []handoffkeepTask `json:"tasks"`
+	}
+	if json.Unmarshal(payload, &result) != nil {
+		return nil, errors.New("handoffkeep returned an unusable task list")
+	}
+	return result.Tasks, nil
+}
+
 // relayEvent reads the one row with this id, in any delivery state. The
 // listing cursor is exclusive and ordered by id, so a one-row page after
 // id-1 is exactly that row or proof it does not exist.
