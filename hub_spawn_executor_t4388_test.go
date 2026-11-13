@@ -473,3 +473,32 @@ func TestPlacementRefreshIsBounded_t4388(t *testing.T) {
 		t.Fatalf("placement waited %s for a silent node", waited)
 	}
 }
+
+// A new retry attempt starts with no host exclusions: they belong to the
+// attempt whose candidates refused (review od-120ba5ee00).
+func TestRetryAttemptClearsExclusions_t4388(t *testing.T) {
+	ctx := t.Context()
+	s := openSpawnStore(t, filepath.Join(t.TempDir(), "inbox.sqlite3"))
+	req := durableSpawnRequest()
+	task, _, err := s.claimSpawn(ctx, req, "test-job", "parent", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	node := hubSpawnRequest{RequestID: t14RequestID(4401), Machine: "machine-a", Args: []string{"-m", "codex-sol"}}
+	if task, err = s.bindSpawn(ctx, req.RequestID, task.Attempt, node); err != nil {
+		t.Fatal(err)
+	}
+	if task, err = s.unbindRefusedSpawn(ctx, req.RequestID, task.Attempt, node.RequestID, &spawnExclusion{Host: "machine-a", Profile: "codex-sol", Reason: "refused"}); err != nil || len(task.Excluded) != 1 {
+		t.Fatalf("unbind %+v %v", task.Excluded, err)
+	}
+	if _, err = s.completeSpawn(ctx, task, hubSpawnOutcome{RC: 70, Stage: "launch", Reason: "spawn_failed", Retryable: true}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if task, err = s.spawnTask(ctx, req.RequestID); err != nil {
+		t.Fatal(err)
+	}
+	retry, err := s.resumeCleanedSpawn(ctx, task, time.Now())
+	if err != nil || retry.Attempt != 2 || len(retry.Excluded) != 0 {
+		t.Fatalf("retry attempt %d keeps exclusions %+v (%v)", retry.Attempt, retry.Excluded, err)
+	}
+}
