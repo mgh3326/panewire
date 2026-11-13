@@ -202,11 +202,16 @@ The legacy `/v1/spawn` endpoint rejects that marker, retains its original restri
 flag list and 300-second maximum, and cannot grant operator-only spawn overrides.
 Unmarked node requests retain the legacy result shape, including on result replay.
 Recovery replays that exact UUID on that exact node. An uncertain send never
-falls through to another host. The node commits an executing journal entry
-before launch and commits its completed result before replying. Duplicate
-completed requests replay that result; a request this node process is still
+falls through to another host. The node checks its journal before admission:
+completed requests replay their result, a request this node process is still
 running answers `reconciling`, and an executing entry no live execution owns
-(the node restarted mid-spawn) answers `unknown`. Neither runs it twice. See
+(the node restarted mid-spawn) is settled or answers `unknown`. A new UUID
+waits for the node's single whole-spawn gate until its execution deadline,
+without an executing journal entry. Once admitted, the node rechecks the
+journal and deadline, commits the executing entry and keeps the gate through
+checkout, launch, brief delivery and cleanup. It commits the result before
+replying. A node stop discards unclaimed waiters for replay after restart;
+claimed executions retain the restart-settlement rules. See
 [Stranded requests](#stranded-requests).
 
 Node RPC includes the absolute deadline (`TestNodeSpawnExpiredAbsoluteDeadlineSkipsEngine`). A request first received after it
@@ -293,11 +298,15 @@ sent merely because a deadline expired.
 
 ### A request the node never started
 
-A node that first sees a `job.spawn` after its deadline answers `rc=124
-stage=claim reason=deadline_not_started retryable=true` without calling the
-engine (a stalled read loop delivers frames minutes late, hk 4375). Because it
-claims the request only then, that answer also means the node holds no journal
-row for it. The hub settles on it:
+A node that first sees a `job.spawn` after its absolute deadline, or whose
+admission wait reaches that deadline, answers `rc=124 stage=claim
+reason=deadline_not_started retryable=true` without calling the engine. It
+first checks for an existing journal entry, and a new request that expires
+while waiting leaves no journal row. A legacy request has only a relative
+wait and answers `timeout` when that wait expires: a later replay could still
+start. A node shutdown before the absolute deadline leaves the waiter for
+replay and is not a not-started attestation. The hub settles on the durable
+answer:
 
 | Node evidence | Hub outcome |
 |---|---|
