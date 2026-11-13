@@ -214,21 +214,21 @@ func admissionPct(v float64) *float64 {
 }
 
 // admissionRoleCheck is pacelever's roleCheck as of v0.3.28: a credit rung
-// (pi- profiles and commandcode-pool rungs) seats only a worker or tester, or a
+// (pi- profiles and commandcode-pool rungs) seats only an implementer, or a
 // builder on a placed default rung, and the consult models keep their seat
-// restrictions. cmd-dsflash41 is narrower still: worker or tester only.
+// restrictions. cmd-dsflash41 is narrower still: implementer only.
 func admissionRoleCheck(req admissionRequest, row admissionRow) *gateDenial {
 	role := admissionNormalize(req.Role)
 	if admissionCredit(req.Profile, row.Pool) {
-		allowed := role == "worker" || role == "tester" || (role == "builder" && row.Placed && row.Gate == defaultGate)
+		allowed := role == "implementer" || (role == "builder" && row.Placed && row.Gate == defaultGate)
 		if !allowed {
-			return &gateDenial{gateRoleDenied, "role_restricted: credit rung requires worker/tester; placed default rungs also allow builder"}
+			return &gateDenial{gateRoleDenied, "role_restricted: credit rung requires implementer; placed default rungs also allow builder"}
 		}
 	}
-	// Operator 2026-11-07 (hk 3248): cmd-dsflash41 seats only a worker or
-	// tester — stricter than pacelever, which also seats a builder.
-	if req.Profile == "cmd-dsflash41" && role != "worker" && role != "tester" {
-		return &gateDenial{gateRoleDenied, "role_restricted: cmd-dsflash41 seats only a worker or tester"}
+	// Operator 2026-11-07 (hk 3248): cmd-dsflash41 seats only an implementer
+	// — stricter than pacelever, which also seats a builder.
+	if req.Profile == "cmd-dsflash41" && role != "implementer" {
+		return &gateDenial{gateRoleDenied, "role_restricted: cmd-dsflash41 seats only an implementer"}
 	}
 	if strings.Contains(req.Profile, "astra") && req.Profile != "codex-astra" {
 		return &gateDenial{gateRoleDenied, "role_restricted: removed astra seat alias"}
@@ -259,7 +259,7 @@ func admissionValidRef(s string) bool {
 // measurement marker.
 func admissionUnratedRole(req admissionRequest) bool {
 	switch admissionNormalize(req.Role) {
-	case "lead", "consult", "builder", "counsel":
+	case "consult", "builder":
 		return true
 	}
 	return false
@@ -776,7 +776,7 @@ func (in admissionInputs) recommend(grade, role string) []admissionAlternative {
 		seen[key] = true
 		req := admissionRequest{Profile: row.Profile, Effort: row.Effort, Role: role}
 		if req.Role == "" && admissionCredit(row.Profile, row.Pool) {
-			req.Role = "worker"
+			req.Role = "implementer"
 		}
 		d := in.judge(req)
 		r := admissionAlternative{Profile: row.Profile, Effort: row.Effort, candidate: d.OK, priority: 2}

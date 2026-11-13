@@ -50,7 +50,7 @@ func TestPoolActionOpenFollowsTheMarker(t *testing.T) {
 func TestWatcherDoesNotEmitLossAfterPoolActionCompletes(t *testing.T) {
 	a := testApp(t)
 	ledgerRunner(t, a)
-	seedJob(t, a, "j", "worker")
+	seedJob(t, a, "j", "implementer")
 	seedLedger(t, a, "j")
 	writePoolActionMarker(t, a, "j", a.Now().Add(-time.Hour))
 	body, err := json.Marshal(map[string]any{"action_id": "0b3f4b1e-0000-4000-8000-000000000001:1", "end_reason": "quota_stop pool=devin", "at": a.Now().Add(-time.Hour), "done": true})
@@ -80,7 +80,7 @@ func TestWatcherDoesNotEmitLossAfterPoolActionCompletes(t *testing.T) {
 func TestWatcherFallsBackWhenThePoolActionMarkerClears(t *testing.T) {
 	a := testApp(t)
 	ledgerRunner(t, a)
-	seedJob(t, a, "j", "worker")
+	seedJob(t, a, "j", "implementer")
 	seedLedger(t, a, "j")
 	writePoolActionMarker(t, a, "j", a.Now())
 	sleeps := 0
@@ -116,7 +116,7 @@ func TestWatcherLeavesTheTerminalRecordToARegisteredPoolAction(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			a := testApp(t)
 			ledgerRunner(t, a) // herdr lists no panes, so the job's pane is missing
-			seedJob(t, a, "j", "worker")
+			seedJob(t, a, "j", "implementer")
 			seedLedger(t, a, "j")
 			if test.marker {
 				writePoolActionMarker(t, a, "j", a.Now())
@@ -141,7 +141,7 @@ func TestWatcherLeavesTheTerminalRecordToARegisteredPoolAction(t *testing.T) {
 func TestWatcherWaitsPastDeadlineForPoolActionCancellation(t *testing.T) {
 	a := testApp(t)
 	ledgerRunner(t, a)
-	seedJob(t, a, "j", "worker")
+	seedJob(t, a, "j", "implementer")
 	seedLedger(t, a, "j")
 	now := a.Now()
 	a.Now = func() time.Time { return now }

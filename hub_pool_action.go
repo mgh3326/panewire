@@ -481,7 +481,7 @@ func (h *HubServer) drivePoolAction(ctx context.Context, action poolAction) pool
 			if prior.Task != "" && prior.ParentJob == "" {
 				previousID, roleKey = holder.Request.RequestID, prior.RoleKey()
 			}
-			if _, _, err := h.inbox.store.claimSpawnReplacing(ctx, request, action.Successor, next.Owner, h.now().UTC(), previousID, roleKey); err != nil {
+			if _, _, err := h.inbox.store.claimSpawnReplacing(ctx, request, action.Successor, next.Owner, h.now().UTC(), previousID, roleKey, "accepted"); err != nil {
 				return skip("claim_refused", "error", err.Error())
 			}
 			h.kickSpawn()

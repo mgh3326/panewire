@@ -74,7 +74,7 @@ func TestTopLevelHelpListsCommandsAndLanesSyntax(t *testing.T) {
 		if readErr != nil {
 			t.Fatal(readErr)
 		}
-		if rc != ExitOK || !bytes.Contains(output, []byte("Commands: spawn, work, reap, done, escalate, delegate, hosts, profiles, find, plan, resolve, preflight, daemon, hub")) || !bytes.Contains(output, []byte("panewire lanes self-check")) {
+		if rc != ExitOK || !bytes.Contains(output, []byte("Commands: spawn, work, reap, done, escalate, escalate-author, hosts, profiles, find, plan, resolve, preflight, daemon, hub")) || !bytes.Contains(output, []byte("panewire lanes self-check")) {
 			t.Fatalf("flag=%q rc=%d output=%q", flag, rc, output)
 		}
 	}

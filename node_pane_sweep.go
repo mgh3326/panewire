@@ -11,7 +11,7 @@ import (
 	"github.com/mgh3326/panewire/internal/fleet"
 )
 
-// The task pane sweep closes the pane of a worker or tester once its bound hk
+// The task pane sweep closes the pane of an implementer once its bound hk
 // task is merged, done or dropped and the pane has stayed not working for a
 // grace (docs/pane-sweep.md). The rules and the close live in
 // fleet.TaskPaneSweeper; this file is the daemon loop around it.

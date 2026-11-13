@@ -231,10 +231,10 @@ on the node that sent it. The node names the emitting pane in the wire payload's
 `pane_id` (see [R21 direct lane events](r21-lane-event.md)), and the hub looks
 for a job that the sending node's latest heartbeat lists in that pane and that
 the hub holds as not completed and not orphaned on that node, with role
-`worker` and the owner lane equal to the lane the event is for. A worker of
+`implementer` and the owner lane equal to the lane the event is for. A worker of
 another design lane sharing the pane is not this lane's: its progress is not
-quieted for this lane. Every `panewire spawn` job claims as `worker`, whether
-it was spawned as a worker, tester, reviewer or counsel; a builder or captain
+quieted for this lane. Every `panewire spawn` job claims as `implementer`, whether
+it was spawned as an implementer, reviewer or consult; a builder
 is not one. Design sessions, the desk and workers share hosts, so the node
 match alone does not decide. Whatever the hub cannot attribute this way is
 delivered as before:
@@ -254,7 +254,7 @@ A completion of a job with neither a task nor a PR — a consult answer the
 session waits for — is delivered as before, and so is one whose hk job record
 cannot be read. A consult answer — a `lane.event` whose text starts with
 `[consult-done]`, sent `--type ready` as rstack's ops consult reference gives
-the answerer — is also delivered (hk 3434), from a counsel job's pane too: the
+the answerer — is also delivered (hk 3434), from a consult job's pane too: the
 session that asked waits for it in its pane. `job.escalate`, a worker's
 action events above, and the `decision`, `blocked`, `findings` and
 `automation-failed` types from anyone else still interrupt. Lanes that are not
@@ -449,7 +449,7 @@ is retried at the window's end or the next node hello. A desk-routed line is
 an `inbox_wake` with outcome `sent` and reason `desk_fallback`; a startup line
 also includes `startup=true` in its detail.
 
-Worker lanes are unchanged: a job, reviewer, tester or counsel lane keeps
+Worker lanes are unchanged: a job, reviewer or consult lane keeps
 body injection for READY, findings, an ESC answer and everything else.
 
 ### Worker trial

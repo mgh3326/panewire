@@ -180,7 +180,7 @@ func TestCreditFinalWindowHostFirst(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rows := []CatalogRow{ompRow("sonnet", "claude-sonnet-5-5", "claude"), ompRow("omp-opus", "anthropic/claude-opus-5-5", "anthropic-api")}
-			a, s, q, _ := hostFirstFixture(t, "worker", "A", rows, map[string]string{"mac-b": testClaudeA, "cloud-small": creditKey}, map[string]float64{"mac-b": 0.1, "cloud-small": 0.5})
+			a, s, q, _ := hostFirstFixture(t, "implementer", "A", rows, map[string]string{"mac-b": testClaudeA, "cloud-small": creditKey}, map[string]float64{"mac-b": 0.1, "cloud-small": 0.5})
 			serveOMPRouting(t, a)
 			q.PoolViews = map[string]PoolView{"anthropic-api": {Status: "ok", Class: "spend", Credit: balance(80, tc.in)(a.Now())}}
 			q.GateDo = gatePools(map[string]string{"sonnet": "claude", "omp-opus": "anthropic-api"})

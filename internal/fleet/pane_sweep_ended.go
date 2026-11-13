@@ -48,7 +48,7 @@ func paneSweepEndedCandidate(j Job, now time.Time, age time.Duration) bool {
 
 // SweepEnded runs one ended-job pass (hk 4512). It observes jobs whose own
 // record ended at least age ago. It keeps their panes because herdr provides no
-// ownership-bound close operation. A completed worker keeps its pane while
+// ownership-bound close operation. A completed implementer keeps its pane while
 // its PR is open, as the local sweep judges it. Pass applies the same
 // ownership rule to idle panes.
 func (s *TaskPaneSweeper) SweepEnded(ctx context.Context, a *App, age time.Duration) ([]SweptPane, error) {

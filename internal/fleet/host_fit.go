@@ -19,7 +19,7 @@ import (
 //   - grades: the task grades the host accepts. Unset accepts every grade. A
 //     consult has no grade, so a host with grades set refuses it.
 
-var spawnRoles = []string{"worker", "tester", "reviewer", "counsel"}
+var spawnRoles = []string{"implementer", "reviewer", "consult"}
 var hostCapabilities = []string{"macos", "linux", "unity", "xcode", "gpu", "heavy-go"}
 
 // hostCaps returns the declared capabilities of a host: tags and caps merged.
@@ -201,10 +201,21 @@ func floorOrder(x, y floorSide, c floorCtx) int {
 	return 0
 }
 
-// rankHosts orders the fit hosts: the free floor, then bucket, then the host the hub decided on, then the hub score (free capacity
-// weighted by the host's power) when every ranked host has one, else the raw
-// load, then configuration order (local first).
+// rankHosts is the placement-aligned host order used by the shadow arms: the
+// free floor, then bucket, the hub's decided host, score when every ranked
+// host has one, else raw load and configuration order (local first).
 func rankHosts(hosts []selHost) []selHost {
+	return rankHostsWithCapacity(hosts, false)
+}
+
+// rankSelectionHosts compares current capacity before the hub's decided host.
+// Selection must choose a seat before placement can see its hosts, so the
+// bridge cost in the hub score can move auto selection off a saturated seat.
+func rankSelectionHosts(hosts []selHost) []selHost {
+	return rankHostsWithCapacity(hosts, true)
+}
+
+func rankHostsWithCapacity(hosts []selHost, capacityFirst bool) []selHost {
 	var out []selHost
 	for _, h := range hosts {
 		if h.fit == "" {
@@ -227,17 +238,28 @@ func rankHosts(hosts []selHost) []selHost {
 		if bx, by := hostBucket(x), hostBucket(y); bx != by {
 			return bx - by
 		}
-		// The hub's decision carries its hysteresis margin and all-loaded rule.
+		if capacityFirst && byScore {
+			if c := cmp.Compare(*y.score, *x.score); c != 0 {
+				return c
+			}
+		}
+		// The hub's decision carries its hysteresis margin and all-loaded rule;
+		// it breaks a tie after selection has compared current host capacity.
 		if x.decided != y.decided {
 			if x.decided {
 				return -1
 			}
 			return 1
 		}
-		if byScore {
-			return cmp.Compare(*y.score, *x.score)
+		if !capacityFirst && byScore {
+			if c := cmp.Compare(*y.score, *x.score); c != 0 {
+				return c
+			}
 		}
-		return cmp.Compare(loadOrInf(x.load), loadOrInf(y.load))
+		if !byScore {
+			return cmp.Compare(loadOrInf(x.load), loadOrInf(y.load))
+		}
+		return 0
 	})
 	return out
 }
@@ -382,7 +404,7 @@ func capsGap(hosts []selHost, required []string) string {
 // credit on another host is only the pass 2 last band and never demotes it.
 // See docs/placement.md for the selection order and trace fields.
 func (sp *selPresence) admitHostFirst(ctx context.Context, s Spawn, p *selPlan, pending []*selCand) {
-	ranked := rankHosts(sp.hosts)
+	ranked := rankSelectionHosts(sp.hosts)
 	role := s.Role
 	if p.req.route.top() {
 		role = p.req.route.role

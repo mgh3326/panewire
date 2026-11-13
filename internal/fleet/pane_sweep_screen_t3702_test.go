@@ -28,7 +28,7 @@ func (f *paneSweepFixture) localScreenFile(job string) bool {
 func TestPaneSweepKeepsThePaneWhenItsReadFailsBeforeUpload(t *testing.T) {
 	f := newPaneSweepFixture(t)
 	hk := useFakeHK(t)
-	f.job("j", "worker", "42")
+	f.job("j", "implementer", "42")
 	f.tasks["42"] = "merged"
 	base := f.runner.Do
 	f.runner.Do = func(c Command) Result {

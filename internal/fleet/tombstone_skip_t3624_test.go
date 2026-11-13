@@ -20,7 +20,7 @@ import (
 // tombstone leaves a renamed job dir, as an interrupted TTL pass would.
 func tombstone(t *testing.T, a *App) {
 	t.Helper()
-	seedJob(t, a, "x", "worker")
+	seedJob(t, a, "x", "implementer")
 	if err := os.Rename(filepath.Join(a.Jobs, "x"), filepath.Join(a.Jobs, jobDirTombstone+"x-1")); err != nil {
 		t.Fatal(err)
 	}
@@ -30,7 +30,7 @@ func TestArtifactSweepSkipsTombstone(t *testing.T) {
 	a := testApp(t)
 	f := ledgerRunner(t, a)
 	tombstone(t, a)
-	seedJob(t, a, "j", "worker")
+	seedJob(t, a, "j", "implementer")
 	putEvent(t, a, "j", "job.completed", map[string]any{})
 	src := filepath.Join(a.Jobs, "j", "final")
 	if e := os.MkdirAll(src, 0700); e != nil {
@@ -81,7 +81,7 @@ func TestLanesMissingSkipsTombstone(t *testing.T) {
 		return Result{}
 	}}
 	tombstone(t, a)
-	seedJob(t, a, "j", "worker")
+	seedJob(t, a, "j", "implementer")
 	out := &bytes.Buffer{}
 	a.Out = out
 	if e := a.diagnostics(context.Background(), "lanes-missing", nil); e != nil {

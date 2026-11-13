@@ -109,7 +109,7 @@ func asCLI(a hkAnswerFixture) cliOut {
 // claimed.
 func seedDoneJob(t *testing.T, a *App) {
 	t.Helper()
-	seedJob(t, a, "j", "worker")
+	seedJob(t, a, "j", "implementer")
 	if e := a.JobStore.(*fakeJobStore).claimSpawned(context.Background(), "j", "42", a.machine()); e != nil {
 		t.Fatal(e)
 	}
@@ -131,7 +131,7 @@ func newSweepFixture(t *testing.T) sweepFixture {
 	f := ledgerRunner(t, a)
 	hk := useFakeHK(t)
 	noHKCLI(t, f)
-	seedJob(t, a, "j", "worker")
+	seedJob(t, a, "j", "implementer")
 	putEvent(t, a, "j", "job.completed", map[string]any{})
 	src := filepath.Join(a.Jobs, "j", "final")
 	if e := os.MkdirAll(src, 0700); e != nil {

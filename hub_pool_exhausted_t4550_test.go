@@ -176,7 +176,7 @@ type sweepFixture struct {
 // w2:p3, idle: the sweep must never touch it.
 func newSweepFixture(t *testing.T) *sweepFixture {
 	t.Helper()
-	base := newQuotaReplaceFixture(t, "worker", "seed")
+	base := newQuotaReplaceFixture(t, "implementer", "seed")
 	logs := &syncBuffer{}
 	base.hub.logger = slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	base.jobs.records["seed"]["pool"] = "devin"
@@ -281,12 +281,12 @@ func (f *sweepFixture) sweeps() int { return len(f.logs.lines("handed_over=")) }
 // pool and account alone; seeing the same exhaustion again acts on nothing.
 func TestPoolExhaustedFreeLimitHandsOverWorkersAndEndsReviewer(t *testing.T) {
 	f := newSweepFixture(t)
-	workerA := f.addJob(t, "worker", "devin", sweepDevin, "idle")
-	workerB := f.addJob(t, "worker", "devin", sweepDevin, "idle")
+	workerA := f.addJob(t, "implementer", "devin", sweepDevin, "idle")
+	workerB := f.addJob(t, "implementer", "devin", sweepDevin, "idle")
 	reviewer := f.addJob(t, "reviewer", "devin", sweepDevin, "idle")
-	codex := f.addJob(t, "worker", "codex", sweepCodex, "idle")
-	otherAccount := f.addJob(t, "worker", "devin", "devin:1111111111111111", "idle")
-	unplaced := f.addJob(t, "worker", "devin", "", "idle")
+	codex := f.addJob(t, "implementer", "codex", sweepCodex, "idle")
+	otherAccount := f.addJob(t, "implementer", "devin", "devin:1111111111111111", "idle")
+	unplaced := f.addJob(t, "implementer", "devin", "", "idle")
 	reset := time.Now().Add(3 * time.Hour).UTC().Truncate(time.Second)
 
 	f.publishFreeLimit(t, sweepDevin, reset, time.Now())
@@ -374,7 +374,7 @@ func TestPoolExhaustedFreeLimitHandsOverWorkersAndEndsReviewer(t *testing.T) {
 // seen exhausted and the pane has gone idle, it is handed over.
 func TestPoolExhaustedLeavesAWorkingPaneForTheNextPass(t *testing.T) {
 	f := newSweepFixture(t)
-	busy := f.addJob(t, "worker", "devin", sweepDevin, "working")
+	busy := f.addJob(t, "implementer", "devin", sweepDevin, "working")
 	reset := time.Now().Add(3 * time.Hour)
 
 	f.publishFreeLimit(t, sweepDevin, reset, time.Now())
@@ -396,7 +396,7 @@ func TestPoolExhaustedLeavesAWorkingPaneForTheNextPass(t *testing.T) {
 func TestPoolExhaustedByAnAccountWindow(t *testing.T) {
 	f := newSweepFixture(t)
 	reviewer := f.addJobOn(t, "devin-ds41", "reviewer", "devin", sweepDevin, "idle")
-	freeWorker := f.addJob(t, "worker", "devin", sweepDevin, "idle")
+	freeWorker := f.addJob(t, "implementer", "devin", sweepDevin, "idle")
 	reset := time.Now().Add(2 * time.Hour).UTC().Truncate(time.Second)
 	publish := func(measured time.Time, buckets []map[string]any) {
 		payload := map[string]any{
@@ -430,8 +430,8 @@ func TestPoolExhaustedByAnAccountWindow(t *testing.T) {
 // reviewer on a paid rung.
 func TestPoolExhaustedFreeLimitLeavesPaidRungsAlone(t *testing.T) {
 	f := newSweepFixture(t)
-	free := f.addJobOn(t, "devin-swe2", "worker", "devin", sweepDevin, "idle")
-	paid := f.addJobOn(t, "devin-ds41", "worker", "devin", sweepDevin, "idle")
+	free := f.addJobOn(t, "devin-swe2", "implementer", "devin", sweepDevin, "idle")
+	paid := f.addJobOn(t, "devin-ds41", "implementer", "devin", sweepDevin, "idle")
 	paidReviewer := f.addJobOn(t, "devin-ds41", "reviewer", "devin", sweepDevin, "idle")
 
 	f.publishFreeLimit(t, sweepDevin, time.Now().Add(3*time.Hour), time.Now())
@@ -456,7 +456,7 @@ func TestPoolExhaustedFreeLimitLeavesPaidRungsAlone(t *testing.T) {
 // published the account as available with a newer measurement, starts nothing.
 func TestPoolExhaustedIgnoresAReadingAnotherHostSupersedes(t *testing.T) {
 	f := newSweepFixture(t)
-	worker := f.addJob(t, "worker", "devin", sweepDevin, "idle")
+	worker := f.addJob(t, "implementer", "devin", sweepDevin, "idle")
 	now := time.Now()
 	f.hub.stateStore().publish(FleetStateMessage{Host: "machine-b", Kind: fleetStateKindQuota, Key: sweepDevin, MeasuredAt: now.Add(time.Minute), ReceivedAt: now,
 		Quota: &FleetStateQuota{AccountKey: sweepDevin, Pool: "devin", Free: &FleetStateFree{State: "available"}}}, 0)
@@ -669,7 +669,7 @@ func TestPoolExhaustedLeavesACompletedJobAlone(t *testing.T) {
 // without generating a new request id; a second drive claims nothing more.
 func TestPoolExhaustedResumesAHandOverAfterTheRecordEnded(t *testing.T) {
 	f := newSweepFixture(t)
-	worker := f.addJob(t, "worker", "devin", sweepDevin, "idle")
+	worker := f.addJob(t, "implementer", "devin", sweepDevin, "idle")
 	holder, err := f.hub.inbox.store.latestSpawnForJob(t.Context(), worker)
 	if err != nil {
 		t.Fatal(err)
@@ -727,7 +727,7 @@ func TestPoolExhaustedResumesAHandOverAfterTheRecordEnded(t *testing.T) {
 // A failed successor claim must retain the old role reservation for retry.
 func TestPoolExhaustedKeepsRoleWhenSuccessorClaimFails(t *testing.T) {
 	f := newSweepFixture(t)
-	worker := f.addJob(t, "worker", "devin", sweepDevin, "idle")
+	worker := f.addJob(t, "implementer", "devin", sweepDevin, "idle")
 	holder, err := f.hub.inbox.store.latestSpawnForJob(t.Context(), worker)
 	if err != nil {
 		t.Fatal(err)
@@ -1031,7 +1031,7 @@ func TestPoolExhaustedActsOnANewExhaustionAfterACancelledIntent(t *testing.T) {
 // still a candidate while a node reports it active.
 func TestPoolExhaustedIncludesAnOldJobAHeartbeatReports(t *testing.T) {
 	f := newSweepFixture(t)
-	worker := f.addJob(t, "worker", "devin", sweepDevin, "idle")
+	worker := f.addJob(t, "implementer", "devin", sweepDevin, "idle")
 	old := time.Now().Add(-8 * 24 * time.Hour).UnixMilli()
 	if _, err := f.hub.inbox.store.db.Exec(`UPDATE spawn_operations SET created_ms=?,last_run_ms=? WHERE job=?`, old, old, worker); err != nil {
 		t.Fatal(err)

@@ -367,7 +367,7 @@ func (h *HubServer) poolExhaustionJobs(ctx context.Context, exhaustion poolExhau
 }
 
 // newPoolAction builds the intent for one job, or names why the job is left
-// alone. A worker or tester is handed over, which reuses the quota-stop
+// alone. An implementer is handed over, which reuses the quota-stop
 // hand-over's rules; a reviewer or consult is ended. Every input the ending
 // needs later — the hk end reason, the owner event, and for a hand-over the
 // successor job and its exact submission — is fixed here, so a retry replays
@@ -380,7 +380,7 @@ func (h *HubServer) newPoolAction(exhaustion poolExhaustion, task hubSpawnTask, 
 		EventID: "pool-exhausted:" + task.Job, Epoch: h.registeredEpoch(task.Job), Stage: poolActionIntent, Created: now, Updated: now,
 	}
 	switch prior.Role {
-	case "worker", "tester":
+	case "implementer":
 		// The hand-over's own contract: an explicit profile cannot change pool,
 		// and a submission with neither a task nor a parent job has nothing to
 		// continue.
@@ -405,7 +405,7 @@ func (h *HubServer) newPoolAction(exhaustion poolExhaustion, task hubSpawnTask, 
 		}
 		action.Kind, action.Successor, action.SuccessorRequest = poolActionHandOver, successor, string(raw)
 		action.EndReason = fleet.QuotaStopEndReason(exhaustion.Pool, time.Time{}, "handed_over_to", successor)
-	case "reviewer", "counsel":
+	case "reviewer", "consult":
 		action.Kind = poolActionEnd
 		action.EndReason = fleet.QuotaStopEndReason(exhaustion.Pool, exhaustion.Reset, "", "")
 	default:
