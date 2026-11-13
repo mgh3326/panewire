@@ -202,9 +202,9 @@ func TestHubInboundRedialAppliesQueuedFramesFirst(t *testing.T) {
 	}
 }
 
-// closingHub answers the registration ping, sends every queued frame, then
-// drops the connection: the reader ends on a read error with the frames still
-// owed to the inbound worker.
+// closingHub finishes the registration exchange before sending frames and
+// dropping the connection, so the test exercises the inbound reader rather
+// than racing the node's initial writes against the close.
 type closingHub struct{ frames [][]byte }
 
 func (hub *closingHub) serve(t *testing.T) *httptest.Server {
@@ -220,11 +220,17 @@ func (hub *closingHub) serve(t *testing.T) *httptest.Server {
 			if wsjson.Read(request.Context(), connection, &message) != nil {
 				return
 			}
-			if message["type"] != "ping" || sent {
+			if message["type"] == "ping" && !sent {
+				_ = wsjson.Write(request.Context(), connection, map[string]any{"type": "pong"})
+				sent = true
 				continue
 			}
-			_ = wsjson.Write(request.Context(), connection, map[string]any{"type": "pong"})
-			sent = true
+			// The heartbeat follows the applied report and completes the node's
+			// initial writes. Closing before then can abort those writes before
+			// serveConnection starts its reader.
+			if !sent || message["kind"] != "heartbeat" {
+				continue
+			}
 			for _, frame := range hub.frames {
 				if connection.Write(request.Context(), websocket.MessageText, frame) != nil {
 					return
@@ -248,7 +254,7 @@ func TestHubInboundDrainAppliesQueuePastFailedAck(t *testing.T) {
 	}}
 	server := hub.serve(t)
 	jobsRoot := t.TempDir()
-	client, err := NewHubClient(HubClientConfig{URL: t14WSURL(server.URL, ""), MachineID: "machine-a", Token: "node-token", AllowInsecureForTests: true, PingInterval: 20 * time.Millisecond,
+	client, err := NewHubClient(HubClientConfig{URL: t14WSURL(server.URL, ""), MachineID: "machine-a", Token: "node-token", AllowInsecureForTests: true, PingInterval: time.Hour,
 		JobsInboxRoot:       jobsRoot,
 		SpawnJournalDir:     t.TempDir(),
 		Warn:                warnings.add,
