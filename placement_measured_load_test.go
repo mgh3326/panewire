@@ -277,7 +277,7 @@ func TestPlacementRetiredKeysLoadButAreIgnored(t *testing.T) {
 // the ticket; a bad value refuses the file, a missing one keeps its default.
 func TestPlacementScoreConstantsFromPolicy(t *testing.T) {
 	k := (PlacementPolicy{}).scoreK()
-	if k != (placementScoreK{memFloor: .20, memSpan: .20, pageInHalf: 10, swapInHalf: 20, loadKnee: .75, loadCap: 4, jobsHalf: 8, claimCost: 10, hysteresis: 1.25, allLoadedBelow: 15}) {
+	if k != (placementScoreK{memFloor: .20, memSpan: .20, pageInHalf: 10, swapInHalf: 20, loadKnee: .75, loadCap: 4, jobsHalf: 8, bridgeCost: 10, hysteresis: 1.25, freeFloor: .05}) {
 		t.Fatalf("defaults=%+v", k)
 	}
 	policy, err := ParsePlacementPolicy([]byte(`{"local_machine":"mac-work","max_active_jobs":5,"score":{"mem_floor":0.3,"pagein_half_mbps":40,"hysteresis":2}}`))
@@ -319,7 +319,7 @@ func TestPlacementSpawnBridgeCountsOnlyFreshJobs(t *testing.T) {
 			other, _ := t607Candidate(got, "desktop")
 			// The job is live either way (jobs term, 1 of 8) and costs a claim
 			// only inside the bridge.
-			want := other.Score/(1+1.0/8) - float64(tc.bridged)*placementDefaultClaimCost
+			want := other.Score/(1+1.0/8) - float64(tc.bridged)*placementDefaultBridgeCost
 			if diff := host.Score - want; host.Signals.BridgedJobs != tc.bridged || diff > 1e-9 || diff < -1e-9 {
 				t.Fatalf("bridged=%d host=%v other=%v", host.Signals.BridgedJobs, host.Score, other.Score)
 			}
@@ -462,5 +462,31 @@ func TestPlaceCLIRequestsSignalsOnlyForExplain(t *testing.T) {
 	}
 	if len(asked) != 3 || asked[0] != "" || asked[1] != "1" || asked[2] != "1" {
 		t.Fatalf("signals asked=%q", asked)
+	}
+}
+
+// --floor asks the hub for the free-floor flag, and only together with
+// --signals (a hub older than the flag ignores the parameter).
+func TestPlaceCLIAsksForTheFloorFlagOnlyWithSignals(t *testing.T) {
+	var asked []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		asked = append(asked, r.URL.Query().Get("signals")+"/"+r.URL.Query().Get("floor"))
+		_ = json.NewEncoder(w).Encode(PlacementResult{Decision: "desktop", Source: "prometheus", Asof: time.Date(2026, 11, 2, 0, 0, 0, 0, time.UTC), Candidates: []PlacementCandidate{{Machine: "desktop", Score: 90, Connected: true, Reason: "available"}}})
+	}))
+	defer server.Close()
+	tokenPath := filepath.Join(t.TempDir(), "operator.env")
+	if err := os.WriteFile(tokenPath, []byte("HUB_MACHINE_ID=operator\nHUB_TOKEN="+r6OperatorToken+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	deps := hubCLIDeps{HTTPClient: server.Client(), AllowInsecureForTests: true}
+	args := []string{"--class", "worker", "--hub-url", server.URL, "--hub-token-env", tokenPath}
+	var out, stderr bytes.Buffer
+	for _, extra := range [][]string{{"--floor"}, {"--signals"}, {"--signals", "--floor"}} {
+		if runPlaceCLI(append(append([]string(nil), args...), extra...), &out, &stderr, deps) != ExitOK {
+			t.Fatalf("%v: stderr=%q", extra, stderr.String())
+		}
+	}
+	if want := []string{"/", "1/", "1/1"}; len(asked) != 3 || asked[0] != want[0] || asked[1] != want[1] || asked[2] != want[2] {
+		t.Fatalf("signals/floor asked=%q, want %q", asked, want)
 	}
 }
