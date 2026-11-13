@@ -701,6 +701,22 @@ builder bundles. And the node heartbeat truncates its active-job list at 32
 entries, so `task_slots` values above 32 can never bind; keep configured caps
 at or below that.
 
+## Spawn queue
+
+The hub runs accepted spawns in two stages (docs/hub-spawn-operations.md,
+"State and recovery"). Three optional keys size them:
+
+| Key | Default | Meaning |
+|---|---|---|
+| `spawn_placement_workers` | 2 | requests placed at once; read when the hub starts |
+| `spawn_in_flight` | 3 | spawns one node runs at once |
+| `spawn_in_flight_hosts` | none | per-machine override, e.g. `{"rpi": 2, "oci": 2}` |
+
+Each value is 1–32. A node's queued and in-flight spawns count as live jobs in
+the placement the spawn coordinator uses, and each costs `claim_cost`, so a
+burst spreads across nodes before it queues behind one. All three defaults are
+unmeasured initial values (design/2026-11-13/hub-owned-spawn-queue §9a).
+
 ## Machine power weights
 
 `power` is optional and maps a machine id to a relative speed weight, greater

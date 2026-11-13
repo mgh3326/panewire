@@ -12,7 +12,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/mgh3326/panewire/internal/fleet"
@@ -135,7 +134,7 @@ func (h *HubServer) handleSpawnSubmit(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	task, _, err := h.inbox.store.claimSpawn(r.Context(), request, spawn.Job, owner, h.now().UTC())
+	task, created, err := h.inbox.store.claimSpawn(r.Context(), request, spawn.Job, owner, h.now().UTC())
 	held := map[string]string{"error": "job_already_claimed", "fix": "inspect the existing operation; do not submit a new request while ownership is live"}
 	retryAfterS := 0
 	if errors.Is(err, errSpawnClaimed) && spawn.ParentJob == "" {
@@ -148,6 +147,11 @@ func (h *HubServer) handleSpawnSubmit(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeJSON(w, 503, map[string]string{"error": "store_unavailable", "fix": "restore the durable store and retry this same request"})
 		return
+	}
+	if created && spawn.Task != "" {
+		// The queue runs task priority first, then age (hk 4388). A task hk
+		// cannot answer for ranks as no task.
+		_ = h.inbox.store.setSpawnRank(r.Context(), request.RequestID, spawnPriorityRank(h.spawnTaskPriority(ctx, spawn.Task)))
 	}
 	h.supersedeRetryableHolders(r.Context(), app, request, spawn)
 	h.acceptSpawnResponse(w, task)
@@ -206,13 +210,6 @@ func (h *HubServer) handleSpawnOperation(w http.ResponseWriter, r *http.Request)
 	}{task.Job, task.Request.RequestID, task.Status, task.Outcome})
 }
 
-// hubSpawnWorkerCount bounds how many accepted spawns the hub executes at once.
-// Each worker holds its request for the whole remote landing, so a slow or
-// restarting node keeps workers busy; with four, a reviewer burst left requests
-// queued past their 600 s deadline (hk 4348, 4368). Eight is a stopgap until
-// one handler per node replaces the global pool (hk 4358).
-const hubSpawnWorkerCount = 8
-
 func (h *HubServer) runSpawnCoordinator(parent context.Context) {
 	if h.inbox == nil {
 		return
@@ -221,10 +218,10 @@ func (h *HubServer) runSpawnCoordinator(parent context.Context) {
 	defer cancel()
 	stop := context.AfterFunc(h.closeCtx, cancel)
 	defer stop()
-	work := make(chan hubSpawnTask, hubSpawnWorkerCount)
-	var mu sync.Mutex
-	active := map[string]bool{}
-	for range hubSpawnWorkerCount {
+	q := &h.spawnQueue
+	workers := h.spawnPolicy().spawnPlacementWorkers()
+	place := make(chan hubSpawnTask, workers)
+	for range workers {
 		h.spawnWorkers.Add(1)
 		go func() {
 			defer h.spawnWorkers.Done()
@@ -232,17 +229,8 @@ func (h *HubServer) runSpawnCoordinator(parent context.Context) {
 				select {
 				case <-ctx.Done():
 					return
-				case task := <-work:
-					// A draining hub starts nothing new; the durable row stays
-					// pending for the next hub (hub_drain.go).
-					if h.drain.enter() {
-						h.inbox.store.touchSpawn(ctx, task.Request.RequestID, h.now().UTC())
-						h.executeSpawnTask(ctx, task)
-						h.drain.leave()
-					}
-					mu.Lock()
-					delete(active, task.Request.RequestID)
-					mu.Unlock()
+				case task := <-place:
+					h.runSpawnPlacement(ctx, task)
 				}
 			}
 		}()
@@ -252,22 +240,21 @@ func (h *HubServer) runSpawnCoordinator(parent context.Context) {
 	for {
 		tasks, err := h.inbox.store.pendingSpawns(ctx)
 		if err == nil && h.drain.admit() {
+			// pendingSpawns is ordered by task priority, then age.
 			for _, task := range tasks {
-				mu.Lock()
-				busy := active[task.Request.RequestID]
-				if !busy {
-					active[task.Request.RequestID] = true
+				if !q.claim(task.Request.RequestID) {
+					continue
 				}
-				mu.Unlock()
-				if busy {
+				if task.Node != nil {
+					// Bound before a restart, or still waiting on its node:
+					// it can only be replayed there.
+					h.enqueueBoundSpawn(ctx, task, false)
 					continue
 				}
 				select {
-				case work <- task:
+				case place <- task:
 				default:
-					mu.Lock()
-					delete(active, task.Request.RequestID)
-					mu.Unlock()
+					q.release(task.Request.RequestID)
 				}
 			}
 		}
@@ -280,7 +267,51 @@ func (h *HubServer) runSpawnCoordinator(parent context.Context) {
 		}
 	}
 }
+
+// runSpawnPlacement places one claimed request and hands a bound one to its
+// node's executor.
+func (h *HubServer) runSpawnPlacement(ctx context.Context, task hubSpawnTask) {
+	// A draining hub starts nothing new; the durable row stays pending for
+	// the next hub (hub_drain.go).
+	if h.drain.enter() {
+		h.inbox.store.touchSpawn(ctx, task.Request.RequestID, h.now().UTC())
+		bound, ok := h.placeSpawn(ctx, task)
+		h.drain.leave()
+		if ok {
+			h.enqueueBoundSpawn(ctx, bound, true)
+			return
+		}
+	}
+	h.spawnQueue.release(task.Request.RequestID)
+}
+
+// executeSpawnTask runs one request through both stages in the caller's
+// goroutine: placement, then dispatch, and placement again after a host
+// refusal. The coordinator runs the stages on separate workers instead.
 func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) {
+	for {
+		if task.Node == nil {
+			bound, ok := h.placeSpawn(parent, task)
+			if !ok {
+				return
+			}
+			task = bound
+		}
+		if !h.dispatchBoundSpawn(parent, task) {
+			return
+		}
+		next, err := h.inbox.store.spawnTask(parent, task.Request.RequestID)
+		if err != nil || next.Node != nil {
+			return
+		}
+		task = next
+	}
+}
+
+// dispatchBoundSpawn sends a bound request to its node and settles the
+// answer. It reports true when a host refusal or a not-started answer
+// returned the request to placement.
+func (h *HubServer) dispatchBoundSpawn(parent context.Context, task hubSpawnTask) (replace bool) {
 	defer func() {
 		if recover() != nil {
 			h.finishSpawnOutcome(task, hubSpawnOutcome{RC: 1, Stage: "launch", Reason: "unknown"})
@@ -288,46 +319,62 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 	}()
 	if !h.now().Before(task.Deadline) {
 		h.logger.Warn("hub spawn starved in the queue", "request_id", task.Request.RequestID, "job", task.Job, "host", firstNonEmptyString(spawnTaskHost(task), "none"), "queue_wait_s", spawnQueueWaitSeconds(task, h.now()))
-		h.finishSpawnOutcome(task, hubSpawnOutcome{RC: 124, Stage: "landing", Reason: "timeout", Host: spawnTaskHost(task), Retryable: task.Node == nil, Fix: spawnQueueWaitFix(task, h.now())})
-		if task.Node == nil {
-			return
-		}
+		h.finishSpawnOutcome(task, hubSpawnOutcome{RC: 124, Stage: "landing", Reason: "timeout", Host: spawnTaskHost(task), Fix: spawnQueueWaitFix(task, h.now())})
 		ctx, cancel := context.WithTimeout(parent, 5*time.Second)
 		defer cancel()
 		transport := directSpawnTransport{h: h, task: task}
 		_, _ = transport.dispatch(ctx, *task.Node)
 		h.noteStuckSpawn(task)
-		return
+		return false
 	}
-	if task.Node == nil && task.Status == "reconciling" {
+	ctx, cancel := context.WithDeadline(parent, task.Deadline)
+	defer cancel()
+	transport := &directSpawnTransport{h: h, task: task, bound: true, placing: true, probeWait: spawnNotStartedProbe}
+	_, _ = transport.dispatch(ctx, *task.Node)
+	return transport.replaced
+}
+
+// placeSpawn runs placement for an unbound request: it selects host and
+// account and binds the request to that node, and never waits on a node. It
+// returns the bound request, or false when placement settled the request or
+// left it for a later scan.
+func (h *HubServer) placeSpawn(parent context.Context, task hubSpawnTask) (bound hubSpawnTask, ok bool) {
+	defer func() {
+		if recover() != nil {
+			h.finishSpawnOutcome(task, hubSpawnOutcome{RC: 1, Stage: "launch", Reason: "unknown"})
+			bound, ok = hubSpawnTask{}, false
+		}
+	}()
+	if !h.now().Before(task.Deadline) {
+		h.logger.Warn("hub spawn starved in the queue", "request_id", task.Request.RequestID, "job", task.Job, "host", "none", "queue_wait_s", spawnQueueWaitSeconds(task, h.now()))
+		h.finishSpawnOutcome(task, hubSpawnOutcome{RC: 124, Stage: "landing", Reason: "timeout", Retryable: true, Fix: spawnQueueWaitFix(task, h.now())})
+		return hubSpawnTask{}, false
+	}
+	if task.Status == "reconciling" {
 		var err error
 		task, err = h.inbox.store.resumeUndispatchedSpawn(parent, task)
 		if err != nil {
-			return
+			return hubSpawnTask{}, false
 		}
 	}
 	ctx, cancel := context.WithDeadline(parent, task.Deadline)
 	defer cancel()
-	transport := &directSpawnTransport{h: h, task: task, started: time.Now(), probeWait: spawnNotStartedProbe}
-	if task.Node != nil {
-		_, _ = transport.dispatch(ctx, *task.Node)
-		return
-	}
+	transport := &directSpawnTransport{h: h, task: task, started: time.Now(), bindOnly: true}
 	app, err := h.newSpawnApp(io.Discard, io.Discard)
 	if err != nil {
 		h.finishSpawnOutcome(task, hubSpawnOutcome{RC: 78, Stage: "placement", Reason: "configuration", Retryable: true})
-		return
+		return hubSpawnTask{}, false
 	}
 	if ctx.Err() != nil {
 		h.finishSpawnOutcome(task, hubSpawnOutcome{RC: 124, Stage: "placement", Reason: "timeout", Retryable: true})
-		return
+		return hubSpawnTask{}, false
 	}
 	outcome := hubSpawnOutcome{Stage: "placement", StageMS: map[string]int64{}}
 	app.Hub = transport
 	app.State = directSpawnState{h}
 	app.Wake = directSpawnWake{h}
 	app.PlacementHosts = func(ctx context.Context, cwd string) ([]fleet.HostView, error) {
-		raw, err := json.Marshal(h.placement(ctx, "worker", cwd))
+		raw, err := h.spawnPlacementView(ctx, cwd)
 		if err != nil {
 			return nil, err
 		}
@@ -363,10 +410,12 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 	}
 	err = app.ExecuteSubmission(ctx, request)
 	if transport.bound {
-		return
-	} // The node result owns completion and cleanup facts.
+		// The bind can commit even when its answer is lost; a request whose
+		// binding was not read back stays for the next scan.
+		return transport.task, transport.task.Node != nil
+	}
 	if parent.Err() != nil {
-		return
+		return hubSpawnTask{}, false
 	} // Restart resumes durable accepted ownership.
 	outcome.RC = fleet.ErrorCode(err)
 	outcome.Reason = fleet.AdmissionRefusalReason(err)
@@ -387,6 +436,7 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 	if changed, _ := h.inbox.store.completeSpawn(parent, task, outcome, h.now().UTC()); changed {
 		h.recordSpawnTrace(task, outcome)
 	}
+	return hubSpawnTask{}, false
 }
 func firstNonEmptyString(value, fallback string) string {
 	if value != "" {
@@ -417,7 +467,7 @@ type directSpawnWake struct{ h *HubServer }
 // Wake waits for the woken host's own heartbeat for at most the caller's
 // wake_wait. requestNodeWake otherwise waits until ctx is done — the whole
 // spawn deadline — and a coordinator worker holding a wake open that long
-// starves the four-worker spawn queue, so unrelated requests expire before a
+// starves the placement pool, so unrelated requests expire before a
 // worker starts them.
 func (w directSpawnWake) Wake(ctx context.Context, host string, request fleet.WakeRequest) error {
 	if request.WaitSeconds > 0 {
@@ -457,8 +507,14 @@ type directSpawnTransport struct {
 	h       *HubServer
 	task    hubSpawnTask
 	bound   bool
-	placing bool // inside the candidate loop, which can try another host
-	started time.Time
+	placing bool // an auto placement: a host refusal returns it to placement
+	// bindOnly is the placement stage: Spawn binds the request to the chosen
+	// node and stops the candidate loop; the node's executor sends it.
+	bindOnly bool
+	// replaced: a host refusal or a not-started answer unbound the request
+	// with an exclusion, and it waits for placement again.
+	replaced bool
+	started  time.Time
 	// probeWait is how long dispatch keeps asking its node after the landing
 	// wait ran out, before it settles the request as a timeout. Zero skips the
 	// probe (the coordinator's replay pass, whose own 5 s window is the probe).
@@ -522,6 +578,10 @@ func (t *directSpawnTransport) Spawn(ctx context.Context, req fleet.HubSpawnRequ
 		// busy retry must not bind a second request or replay the old journal id.
 		return fleet.HubSpawnReply{}, &fleet.HubError{Kind: "hub_spawn_pending"}
 	}
+	if spawnExcluded(t.task, req.Machine, hubSpawnArg(req.Args, "-m")) {
+		// This host+account already refused the request: the next candidate.
+		return fleet.HubSpawnReply{RequestID: req.RequestID, Error: "excluded", NextHost: true}, nil
+	}
 	raw, err := json.Marshal(req)
 	if err != nil {
 		return fleet.HubSpawnReply{}, err
@@ -544,11 +604,17 @@ func (t *directSpawnTransport) Spawn(ctx context.Context, req fleet.HubSpawnRequ
 	}
 	t.task = task
 	t.placing = true
+	if t.bindOnly {
+		// Bound: the node's executor sends it. Stopping the candidate loop
+		// here frees the placement worker.
+		return fleet.HubSpawnReply{}, &fleet.HubError{Kind: "hub_spawn_pending"}
+	}
 	return t.dispatch(ctx, *task.Node)
 }
 
-// nextHostAfterRefusal hands an auto placement back to its candidate loop. A
-// pinned host is the operator's choice, so its refusal stays the answer.
+// nextHostAfterRefusal hands an auto placement back to placement, excluding
+// the refused host+account. A pinned host is the operator's choice, so its
+// refusal stays the answer.
 func (t *directSpawnTransport) nextHostAfterRefusal(ctx context.Context, node hubSpawnRequest, result hubSpawnResult) bool {
 	// A dialog refusal comes after the engine launched a pane, so only a
 	// verified cleanup (Retryable) lets another host take the job id.
@@ -558,12 +624,15 @@ func (t *directSpawnTransport) nextHostAfterRefusal(ctx context.Context, node hu
 	if !t.placing || result.RC == 0 || !result.Retryable || !movesOn || firstNonEmptyString(hubSpawnArg(t.task.Request.Args, "--host"), "auto") != "auto" {
 		return false
 	}
-	task, err := t.h.inbox.store.unbindRefusedSpawn(ctx, t.task.Request.RequestID, t.task.Attempt, node.RequestID)
+	reason := spawnResultReason(result)
+	// The exclusion is persisted with the unbind: placement skips this
+	// host+account for this request from now on.
+	exclusion := &spawnExclusion{Host: node.Machine, Profile: hubSpawnArg(node.Args, "-m"), Reason: reason}
+	task, err := t.h.inbox.store.unbindRefusedSpawn(ctx, t.task.Request.RequestID, t.task.Attempt, node.RequestID, exclusion)
 	if err != nil {
 		return false
 	}
-	t.task, t.bound = task, false
-	reason := spawnResultReason(result)
+	t.task, t.bound, t.replaced = task, false, true
 	t.h.observeLaunchOutcome(node.Machine, hubSpawnArg(node.Args, "-m"), result.RC, reason, t.h.now().UTC())
 	t.h.logger.Warn("hub spawn refused by node; trying next candidate", "request_id", task.Request.RequestID, "node_request_id", node.RequestID, "job", task.Job, "host", node.Machine, "profile", hubSpawnArg(node.Args, "-m"), "rc", result.RC, "reason", reason)
 	return true

@@ -423,6 +423,11 @@ type HubServer struct {
 	quotaReplaceBudget time.Duration
 	spawnKick          chan struct{}
 	spawnWorkers       sync.WaitGroup
+	// spawnQueue holds the placement and per-node execution stages of
+	// accepted spawns (hub_spawn_executor.go).
+	spawnQueue hubSpawnQueue
+	// spawnPriority reads an hk task's priority; nil reads hk (tests only).
+	spawnPriority func(context.Context, string) (int, bool)
 	// drain is the SIGTERM state (hub_drain.go).
 	drain hubDrain
 	// spawnOrphanProbed is when the hub last probed each stranded request's
@@ -2076,6 +2081,7 @@ func (h *HubServer) disconnect(machineID string, agent *hubAgent) {
 	h.publishFleetPublisher(machineID, h.now().UTC())
 	wakeLostSpawns(spawnWaiters)
 	wakeLostNodeCommands(lost)
+	h.unbindQueuedSpawns(machineID)
 }
 
 // disconnectLocked is disconnect's critical section; the caller wakes the

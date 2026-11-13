@@ -783,7 +783,7 @@ func TestT14NodeSpawnConfigRejections(t *testing.T) {
 	}
 }
 
-func TestT14NodeAC12SerialAndIdempotent(t *testing.T) {
+func TestT14NodeAC12Idempotent(t *testing.T) {
 	root := t.TempDir()
 	ledger := filepath.Join(root, "ledger")
 	t.Setenv("T14_LEDGER", ledger)
@@ -865,8 +865,9 @@ func TestT14NodeAC12SerialAndIdempotent(t *testing.T) {
 	if len(got) != 3 || counts[t14RequestID(40)] != 2 || counts[t14RequestID(41)] != 1 || !completed[t14RequestID(40)] || !completed[t14RequestID(41)] {
 		t.Fatalf("results=%v", got)
 	}
-	if entries := strings.Fields(string(t14WaitFile(t, ledger))); strings.Join(entries, ",") != "begin,end,begin,end" {
-		t.Fatalf("spawns overlapped or duplicate ran: %v", entries)
+	// Spawns on one node may overlap (hk 4388); a duplicate never runs twice.
+	if entries := strings.Fields(string(t14WaitFile(t, ledger))); len(entries) != 4 || strings.Count(strings.Join(entries, ","), "begin") != 2 {
+		t.Fatalf("a duplicate ran or a spawn did not finish: %v", entries)
 	}
 }
 

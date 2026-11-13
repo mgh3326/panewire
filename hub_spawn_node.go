@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -168,9 +169,9 @@ func (client *HubClient) handleHubSpawn(ctx context.Context, peer *hubClientConn
 	}
 	executionContext, cancel := context.WithDeadline(ctx, deadline)
 	defer cancel()
-	client.spawnMu.Lock()
-	result := client.runClaimedHubSpawn(executionContext, message)
-	client.spawnMu.Unlock()
+	// Spawns on this node run concurrently; only their exclusive steps
+	// (fleet.StepWorktreePrepare, fleet.StepPaneCreate) take a lock.
+	result := client.runClaimedHubSpawn(fleet.WithExclusiveSteps(executionContext, client.lockSpawnStep), message)
 	// Disconnect is not cancellation of this daemon-owned execution. Its result
 	// remains available to the next authenticated replay even if this socket died.
 	persistCtx, persistCancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -333,7 +334,9 @@ func (client *HubClient) runHubSpawn(parent context.Context, message hubOutbound
 		if prepare == nil {
 			prepare = client.nodeWorktreePrepare
 		}
+		release := fleet.ExclusiveStep(runContext, fleet.StepWorktreePrepare)
 		prepared, code := prepare(runContext, nodeWorktreePrepareArgs{Origin: message.Checkout.Origin, Mode: message.Checkout.Mode, Branch: message.Checkout.Branch, Sha: message.Checkout.Sha, Fetch: message.Checkout.Fetch, Dir: message.Checkout.Dir})
+		release()
 		ms := time.Since(started).Milliseconds()
 		checkoutMS = &ms
 		if code != "" {
@@ -721,6 +724,24 @@ func (client *HubClient) releaseSpawnJournal() {
 		client.spawnJournal.db.Close()
 		client.spawnJournal = nil
 	}
+}
+
+// lockSpawnStep takes the node-wide lock of one exclusive spawn step and
+// returns its release. Each step has its own lock, so one spawn preparing a
+// worktree does not hold up another creating its pane.
+func (client *HubClient) lockSpawnStep(step string) func() {
+	client.spawnStepMu.Lock()
+	if client.spawnStepLocks == nil {
+		client.spawnStepLocks = map[string]*sync.Mutex{}
+	}
+	lock := client.spawnStepLocks[step]
+	if lock == nil {
+		lock = &sync.Mutex{}
+		client.spawnStepLocks[step] = lock
+	}
+	client.spawnStepMu.Unlock()
+	lock.Lock()
+	return lock.Unlock
 }
 
 func (client *HubClient) runClaimedHubSpawn(ctx context.Context, message hubOutboundMessage) hubSpawnResult {

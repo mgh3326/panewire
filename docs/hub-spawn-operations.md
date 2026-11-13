@@ -166,8 +166,18 @@ request leaves no operation behind.
 
 The hub stores logical operation, attempt, absolute deadline, immutable node
 request/destination, result, task/role reservation and notification outbox.
-Eight workers (`hubSpawnWorkerCount`; four until hk 4368) execute accepted work, with a bounded in-memory dispatch queue;
-the durable queue is authoritative. HTTP cancellation does not cancel accepted
+Accepted work runs in two stages (hk 4388; `hub_spawn_executor.go`). A placement
+pool (`spawn_placement_workers`, default 2) selects host and account and binds the
+operation to that node; it never waits on a node. One executor per node sends bound
+operations to that node, at most `spawn_in_flight` at once (default 3, per host
+`spawn_in_flight_hosts`), and the rest wait in that node's queue. Both the pending
+scan and each node queue run task priority first (hk priority 1 highest, no task after
+priority 2), then age. A host refusal that only rules out this host, or a not-started
+answer, unbinds the operation, records the host+account in its `excluded` list and
+returns it to placement at once; placement skips excluded pairs. A node disconnect
+returns its queued, never-sent operations to placement. The keys live in the
+placement policy file (docs/placement.md, "Spawn queue"). The durable queue is
+authoritative. HTTP cancellation does not cancel accepted
 work. Shutdown ends worker contexts and waits for them before closing storage.
 
 Only nodes advertising `spawn_ops_v1` can execute durable operations. Older nodes are refused with an upgrade fix, without a launcher fallback. Before sending node RPC, the hub commits the destination, node UUID and payload.

@@ -76,6 +76,14 @@ type PlacementPolicy struct {
 	// (hub_readiness.go).
 	LaunchFailureThreshold int `json:"launch_failure_threshold,omitempty"`
 	LaunchBackoffMinutes   int `json:"launch_backoff_minutes,omitempty"`
+	// SpawnPlacementWorkers is how many hub spawn requests are placed at once
+	// (0 means 2); it is read when the spawn coordinator starts. SpawnInFlight
+	// is how many spawns each node runs at once (0 means 3), and
+	// SpawnInFlightHosts overrides it per machine. hub_spawn_executor.go,
+	// docs/placement.md "Spawn queue".
+	SpawnPlacementWorkers int            `json:"spawn_placement_workers,omitempty"`
+	SpawnInFlight         int            `json:"spawn_in_flight,omitempty"`
+	SpawnInFlightHosts    map[string]int `json:"spawn_in_flight_hosts,omitempty"`
 }
 
 // PlacementMachineSlots caps how many distinct tasks may hold active jobs on
@@ -132,6 +140,14 @@ func (p PlacementPolicy) valid() bool {
 	}
 	for machine, slots := range p.Machines {
 		if !machineIDPattern.MatchString(machine) || machine == hubOperatorMachineID || slots.TaskSlots < 1 || slots.TaskSlots > 100 {
+			return false
+		}
+	}
+	if p.SpawnPlacementWorkers < 0 || p.SpawnPlacementWorkers > maxSpawnConcurrency || p.SpawnInFlight < 0 || p.SpawnInFlight > maxSpawnConcurrency {
+		return false
+	}
+	for machine, n := range p.SpawnInFlightHosts {
+		if !machineIDPattern.MatchString(machine) || machine == hubOperatorMachineID || n < 1 || n > maxSpawnConcurrency {
 			return false
 		}
 	}

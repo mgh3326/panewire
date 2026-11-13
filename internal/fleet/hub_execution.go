@@ -55,3 +55,13 @@ func (a *App) ExecuteSubmission(ctx context.Context, request Submission) error {
 }
 
 func ParseHubHosts(raw string) ([]HostView, error) { return parseHubHosts(raw) }
+
+// TaskPriority reads an hk task's priority (1 is highest). ok is false when hk
+// cannot be read or the task has no valid priority.
+func TaskPriority(ctx context.Context, task string) (priority int, ok bool) {
+	t, err := hkGetTask(ctx, task)
+	if err != nil || t.Priority < 1 {
+		return 0, false
+	}
+	return t.Priority, true
+}

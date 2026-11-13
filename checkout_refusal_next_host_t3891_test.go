@@ -90,7 +90,7 @@ func TestCheckoutRefusalMovesToNextHost(t *testing.T) {
 
 			second := make(chan answer, 1)
 			go func() {
-				reply, err := transport.Spawn(boundedContext(t), refusalNodeRequest(request, 941, "machine-a"))
+				reply, err := transport.Spawn(boundedContext(t), withOtherAccount(refusalNodeRequest(request, 941, "machine-a")))
 				second <- answer{reply, err}
 			}()
 			sent = t14ReadNodeSpawn(t, node)

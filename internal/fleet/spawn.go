@@ -744,7 +744,9 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 	configuredWorkspace := s.Workspace
 	var createdWorkspaces []*createdWorkspace
 	if !s.DryRun {
+		release := ExclusiveStep(ctx, StepPaneCreate)
 		resolved, made, resolveErr := a.resolveWorkspace(ctx, s.Workspace)
+		release()
 		if resolveErr != nil {
 			return resolveErr
 		}
@@ -953,25 +955,32 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 		return a.call(ctx, "herdr", args...)
 	}
 	s.placement.started = true
-	r := createTab(s.Workspace)
-	if e = check(r, "herdr tab create"); e != nil {
-		// Another spawn's failed cleanup may close a workspace this spawn
-		// adopted before the tab exists. A label can be recreated; an id cannot.
-		if !workspaceGone(r) || herdrWorkspaceID.MatchString(configuredWorkspace) {
-			return e
+	r, e := func() (Result, error) {
+		defer ExclusiveStep(ctx, StepPaneCreate)()
+		r := createTab(s.Workspace)
+		if e := check(r, "herdr tab create"); e != nil {
+			// Another spawn's failed cleanup may close a workspace this spawn
+			// adopted before the tab exists. A label can be recreated; an id cannot.
+			if !workspaceGone(r) || herdrWorkspaceID.MatchString(configuredWorkspace) {
+				return r, e
+			}
+			retryWorkspace, retryCreated, retryErr := a.resolveWorkspace(ctx, configuredWorkspace)
+			if retryErr != nil {
+				return r, retryErr
+			}
+			if retryCreated != nil {
+				createdWorkspaces = append(createdWorkspaces, retryCreated)
+			}
+			s.Workspace = retryWorkspace
+			r = createTab(s.Workspace)
+			if e = check(r, "herdr tab create"); e != nil {
+				return r, e
+			}
 		}
-		retryWorkspace, retryCreated, retryErr := a.resolveWorkspace(ctx, configuredWorkspace)
-		if retryErr != nil {
-			return retryErr
-		}
-		if retryCreated != nil {
-			createdWorkspaces = append(createdWorkspaces, retryCreated)
-		}
-		s.Workspace = retryWorkspace
-		r = createTab(s.Workspace)
-		if e = check(r, "herdr tab create"); e != nil {
-			return e
-		}
+		return r, nil
+	}()
+	if e != nil {
+		return e
 	}
 	var created map[string]any
 	if e = json.Unmarshal([]byte(r.Out), &created); e != nil {

@@ -42,6 +42,19 @@ func boundedContext(t *testing.T) context.Context {
 	return ctx
 }
 
+// withOtherAccount is req on another account of the same host. A refused
+// host+account is excluded for the rest of the request (hk 4388); another
+// account on that host is still a candidate.
+func withOtherAccount(req fleet.HubSpawnRequest) fleet.HubSpawnRequest {
+	req.Args = append([]string(nil), req.Args...)
+	for i := 0; i+1 < len(req.Args); i++ {
+		if req.Args[i] == "-m" {
+			req.Args[i+1] += "-other"
+		}
+	}
+	return req
+}
+
 func refusalNodeRequest(request fleet.Submission, id int, machine string) fleet.HubSpawnRequest {
 	return fleet.HubSpawnRequest{RequestID: t14RequestID(id), Machine: machine, CWDKey: "project", Brief: fleet.HubBrief{Doc: "briefs/test-job.md"}, Checkout: request.Repository.Checkout, Args: []string{"--job", "test-job", "-m", "sonnet", "-l", "test-job", "--role", "worker"}, WaitSeconds: 60}
 }
@@ -94,7 +107,7 @@ func TestAutoPlacementFallsThroughUnmappedNode(t *testing.T) {
 			// The next candidate binds and runs under the same operation.
 			second := make(chan answer, 1)
 			go func() {
-				reply, err := transport.Spawn(boundedContext(t), refusalNodeRequest(request, 902, "machine-a"))
+				reply, err := transport.Spawn(boundedContext(t), withOtherAccount(refusalNodeRequest(request, 902, "machine-a")))
 				second <- answer{reply, err}
 			}()
 			sent = t14ReadNodeSpawn(t, node)

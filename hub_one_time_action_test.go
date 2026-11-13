@@ -124,7 +124,7 @@ func TestFirstRunRefusalMovesToNextHost(t *testing.T) {
 			// The next candidate binds under the same operation.
 			second := make(chan answer, 1)
 			go func() {
-				reply, err := transport.Spawn(boundedContext(t), firstRunNodeRequest(request, 912, test.profile))
+				reply, err := transport.Spawn(boundedContext(t), withOtherAccount(firstRunNodeRequest(request, 912, test.profile)))
 				second <- answer{reply, err}
 			}()
 			sent = t14ReadNodeSpawn(t, node)

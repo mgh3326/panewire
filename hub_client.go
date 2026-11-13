@@ -178,12 +178,15 @@ type HubClient struct {
 	panesAliveMu     sync.Mutex
 	// paneIdleSince is the first heartbeat at which each pane was idle or
 	// done (hub_jobs_idle.go).
-	paneIdleSince     map[string]time.Time
-	paneIdleMu        sync.Mutex
-	sessionMu         sync.Mutex
-	spawnConfigPath   string
-	spawnJournalDir   string
-	spawnMu           sync.Mutex
+	paneIdleSince   map[string]time.Time
+	paneIdleMu      sync.Mutex
+	sessionMu       sync.Mutex
+	spawnConfigPath string
+	spawnJournalDir string
+	// spawnStepLocks serialize the exclusive steps of concurrent hub spawns
+	// (lockSpawnStep); spawnStepMu guards the map.
+	spawnStepMu       sync.Mutex
+	spawnStepLocks    map[string]*sync.Mutex
 	spawnEngine       hubSpawnEngine
 	spawnPrepare      func(context.Context, nodeWorktreePrepareArgs) (any, string) // fixture seam
 	spawnJournalMu    sync.Mutex

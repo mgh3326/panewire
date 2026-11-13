@@ -9,6 +9,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/mgh3326/panewire/internal/fleet"
@@ -43,6 +45,31 @@ type hubSpawnTask struct {
 	Attempt            int
 	Node               *hubSpawnRequest
 	Outcome            hubSpawnOutcome
+	// Excluded lists the host+account pairs that refused this request; placement
+	// skips them (hk 4388). Rank orders the queue: spawnPriorityRank.
+	Excluded []spawnExclusion
+	Rank     int
+}
+
+// spawnExclusion is one host+account a request must not be placed on again,
+// with the refusal that ruled it out.
+type spawnExclusion struct {
+	Host    string `json:"host"`
+	Profile string `json:"profile,omitempty"`
+	Reason  string `json:"reason"`
+}
+
+// spawnNoTaskRank is the queue rank of a request without an hk task: after
+// priority 2 and before priority 3 (hk 4388, operator decision 192).
+const spawnNoTaskRank = 5
+
+// spawnPriorityRank turns an hk task priority (1 highest) into the queue
+// rank: lower runs first. A missing or invalid priority ranks as no task.
+func spawnPriorityRank(priority int, known bool) int {
+	if !known || priority < 1 {
+		return spawnNoTaskRank
+	}
+	return min(priority, 1000) * 2
 }
 
 func (s *laneInboxStore) ensureSpawnTasks() error {
@@ -52,7 +79,7 @@ func (s *laneInboxStore) ensureSpawnTasks() error {
 	ctx, done := s.op(s.life)
 	defer done()
 	for _, statement := range []string{
-		`CREATE TABLE IF NOT EXISTS spawn_operations (request_id TEXT PRIMARY KEY,job TEXT NOT NULL,owner TEXT NOT NULL,fingerprint TEXT NOT NULL,payload TEXT NOT NULL,status TEXT NOT NULL,created_ms BIGINT NOT NULL,deadline_ms BIGINT NOT NULL,node_id TEXT UNIQUE,node_payload TEXT NOT NULL DEFAULT '',result TEXT NOT NULL DEFAULT '{}',trace_recorded INTEGER NOT NULL DEFAULT 0,last_run_ms BIGINT NOT NULL DEFAULT 0,attempt INTEGER NOT NULL DEFAULT 1)`,
+		`CREATE TABLE IF NOT EXISTS spawn_operations (request_id TEXT PRIMARY KEY,job TEXT NOT NULL,owner TEXT NOT NULL,fingerprint TEXT NOT NULL,payload TEXT NOT NULL,status TEXT NOT NULL,created_ms BIGINT NOT NULL,deadline_ms BIGINT NOT NULL,node_id TEXT UNIQUE,node_payload TEXT NOT NULL DEFAULT '',result TEXT NOT NULL DEFAULT '{}',trace_recorded INTEGER NOT NULL DEFAULT 0,last_run_ms BIGINT NOT NULL DEFAULT 0,attempt INTEGER NOT NULL DEFAULT 1,excluded TEXT NOT NULL DEFAULT '[]',priority_rank INTEGER NOT NULL DEFAULT 5)`,
 		`CREATE TABLE IF NOT EXISTS spawn_reservations (job TEXT PRIMARY KEY,request_id TEXT NOT NULL UNIQUE,task_role TEXT UNIQUE)`,
 		`CREATE TABLE IF NOT EXISTS spawn_notifications (event_id TEXT PRIMARY KEY,request_id TEXT NOT NULL,job TEXT NOT NULL,owner TEXT NOT NULL,result TEXT NOT NULL,created_ms BIGINT NOT NULL,delivered INTEGER NOT NULL DEFAULT 0,telemetry_recorded INTEGER NOT NULL DEFAULT 0)`,
 	} {
@@ -60,7 +87,22 @@ func (s *laneInboxStore) ensureSpawnTasks() error {
 			return err
 		}
 	}
+	// A store created before the queue columns (hk 4388) gains them here;
+	// Postgres adds them in migration 0008.
+	for _, column := range []string{`excluded TEXT NOT NULL DEFAULT '[]'`, `priority_rank INTEGER NOT NULL DEFAULT 5`} {
+		if _, err := s.db.ExecContext(ctx, `ALTER TABLE spawn_operations ADD COLUMN `+column); err != nil && !strings.Contains(err.Error(), "duplicate column") {
+			return err
+		}
+	}
 	return nil
+}
+
+// setSpawnRank records the queue rank of a newly accepted request.
+func (s *laneInboxStore) setSpawnRank(parent context.Context, id string, rank int) error {
+	ctx, done := s.op(parent)
+	defer done()
+	_, err := s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET priority_rank=? WHERE request_id=?`), rank, id)
+	return err
 }
 
 func (s *laneInboxStore) claimSpawn(parent context.Context, request fleet.Submission, job, owner string, now time.Time) (hubSpawnTask, bool, error) {
@@ -217,11 +259,16 @@ func (s *laneInboxStore) completeSpawn(parent context.Context, task hubSpawnTask
 
 func scanSpawnTask(row interface{ Scan(...any) error }) (hubSpawnTask, error) {
 	var task hubSpawnTask
-	var payload, result, node string
+	var payload, result, node, excluded string
 	var created, deadline int64
-	err := row.Scan(&task.Job, &task.Owner, &payload, &task.Status, &created, &deadline, &node, &result, &task.Attempt)
+	err := row.Scan(&task.Job, &task.Owner, &payload, &task.Status, &created, &deadline, &node, &result, &task.Attempt, &excluded, &task.Rank)
 	if err != nil {
 		return task, err
+	}
+	if excluded != "" && excluded != "[]" {
+		if err = json.Unmarshal([]byte(excluded), &task.Excluded); err != nil {
+			return task, err
+		}
 	}
 	task.Created = time.UnixMilli(created)
 	task.Deadline = time.UnixMilli(deadline)
@@ -239,21 +286,54 @@ func scanSpawnTask(row interface{ Scan(...any) error }) (hubSpawnTask, error) {
 }
 
 // unbindRefusedSpawn returns a bound operation to placement after its node
-// refused it without side effects. A crash after this only places it again.
-func (s *laneInboxStore) unbindRefusedSpawn(parent context.Context, id string, attempt int, nodeID string) (hubSpawnTask, error) {
+// refused it without side effects, or before it was ever sent. A non-nil
+// exclusion is added to the request's excluded list in the same write, so the
+// next placement skips that host+account. A crash after this only places it
+// again.
+func (s *laneInboxStore) unbindRefusedSpawn(parent context.Context, id string, attempt int, nodeID string, exclusion *spawnExclusion) (hubSpawnTask, error) {
 	ctx, done := s.op(parent)
 	defer done()
-	result, err := s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET node_id=NULL,node_payload='',status='accepted' WHERE request_id=? AND attempt=? AND node_id=? AND status='dispatching'`), id, attempt, nodeID)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return hubSpawnTask{}, err
+	}
+	defer tx.Rollback()
+	var raw string
+	if err = tx.QueryRowContext(ctx, s.q(`SELECT excluded FROM spawn_operations WHERE request_id=? AND attempt=? AND node_id=? AND status='dispatching'`), id, attempt, nodeID).Scan(&raw); errors.Is(err, sql.ErrNoRows) {
+		return hubSpawnTask{}, errSpawnClaimed
+	} else if err != nil {
+		return hubSpawnTask{}, err
+	}
+	var excluded []spawnExclusion
+	if raw != "" {
+		if err = json.Unmarshal([]byte(raw), &excluded); err != nil {
+			return hubSpawnTask{}, err
+		}
+	}
+	if exclusion != nil && !slices.ContainsFunc(excluded, func(e spawnExclusion) bool { return e.Host == exclusion.Host && e.Profile == exclusion.Profile }) {
+		excluded = append(excluded, *exclusion)
+	}
+	encoded, err := json.Marshal(excluded)
+	if err != nil {
+		return hubSpawnTask{}, err
+	}
+	if excluded == nil {
+		encoded = []byte("[]")
+	}
+	result, err := tx.ExecContext(ctx, s.q(`UPDATE spawn_operations SET node_id=NULL,node_payload='',status='accepted',excluded=? WHERE request_id=? AND attempt=? AND node_id=? AND status='dispatching'`), string(encoded), id, attempt, nodeID)
 	if err != nil {
 		return hubSpawnTask{}, err
 	}
 	if n, _ := result.RowsAffected(); n != 1 {
 		return hubSpawnTask{}, errSpawnClaimed
 	}
+	if err = tx.Commit(); err != nil {
+		return hubSpawnTask{}, err
+	}
 	return s.spawnTask(parent, id)
 }
 
-const spawnTaskColumns = `job,owner,payload,status,created_ms,deadline_ms,node_payload,result,attempt`
+const spawnTaskColumns = `job,owner,payload,status,created_ms,deadline_ms,node_payload,result,attempt,excluded,priority_rank`
 
 func (s *laneInboxStore) spawnTask(parent context.Context, id string) (hubSpawnTask, error) {
 	ctx, done := s.op(parent)
@@ -294,7 +374,7 @@ func (s *laneInboxStore) spawnTaskByNode(parent context.Context, id string) (hub
 func (s *laneInboxStore) pendingSpawns(parent context.Context) ([]hubSpawnTask, error) {
 	ctx, done := s.op(parent)
 	defer done()
-	rows, err := s.db.QueryContext(ctx, `SELECT `+spawnTaskColumns+` FROM spawn_operations WHERE status IN ('accepted','dispatching','reconciling','deadline_exceeded') ORDER BY last_run_ms,created_ms LIMIT 32`)
+	rows, err := s.db.QueryContext(ctx, `SELECT `+spawnTaskColumns+` FROM spawn_operations WHERE status IN ('accepted','dispatching','reconciling','deadline_exceeded') ORDER BY priority_rank,created_ms,request_id LIMIT 256`)
 	if err != nil {
 		return nil, err
 	}
