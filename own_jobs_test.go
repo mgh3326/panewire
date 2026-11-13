@@ -97,6 +97,18 @@ func TestJobsMineListsOneLaneAcrossMachines(t *testing.T) {
 	}
 }
 
+func TestJobsMineRetainsHistoricalDottedLane(t *testing.T) {
+	hub, server := ownJobsHub(t)
+	if err := os.WriteFile(hub.reportRelayPath, []byte(`{"lanes":{"legacy.parent":{"machine":"node-a","pane":"w1:p1"}}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	hub.jobs["job-legacy"] = &hubJobRecord{HubActiveJob: HubActiveJob{JobID: "job-legacy", OwnerLane: "legacy.parent", Pane: "w1:p1"}, Node: "node-a"}
+	status, body := ownJobsCaller.do(t, server, http.MethodGet, "/v1/jobs/mine?lane=legacy.parent", "")
+	if status != http.StatusOK || !strings.Contains(body, `"job_id":"job-legacy"`) {
+		t.Fatalf("historical own-jobs query status=%d body=%s", status, body)
+	}
+}
+
 // TestJobsMineNamesTheTaskFromTheSpawnOperation: the task column is the task
 // the hub's own spawn operation named, and a job this hub did not spawn through
 // its store lists none.
