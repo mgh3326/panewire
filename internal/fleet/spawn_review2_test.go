@@ -96,6 +96,7 @@ func TestLifecycleUsesExplicitNodeRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 	a.Jobs = filepath.Join(a.Home, "wrong-root")
+	useFakeHK(t).Handle(hkCommentAnswer)
 	if err := a.executeLifecycleAt(t.Context(), root, []string{"done", "j", "--report", path}); err != nil {
 		t.Fatal(err)
 	}

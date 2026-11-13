@@ -747,9 +747,7 @@ func TestDoneRecordWriteFailureStillRelays(t *testing.T) {
 	if e := os.WriteFile(path, []byte("done\n"), 0600); e != nil {
 		t.Fatal(e)
 	}
-	if e := a.lifecycle(context.Background(), "done", []string{"j", "--report", path}); e != nil {
-		t.Fatal(e)
-	}
+	wantNotInHK(t, a.lifecycle(context.Background(), "done", []string{"j", "--report", path}))
 	if emits != 1 {
 		t.Fatalf("emits=%d", emits)
 	}

@@ -2,8 +2,6 @@ package fleet
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -13,8 +11,6 @@ import (
 	"strings"
 	"syscall"
 	"time"
-
-	"github.com/mgh3326/handoffkeep/client"
 
 	"github.com/mgh3326/panewire/internal/arbiter"
 )
@@ -113,53 +109,31 @@ func (a *App) lifecycleWithOptions(ctx context.Context, kind string, args []stri
 		}
 		a.warn("watcher result rejected: %s", rejected)
 	}
-	hash := sha256.Sum256(body)
-	digest := hex.EncodeToString(hash[:])
+	digest := reportDigest(body)
 	eventKind := "job.completed"
 	if kind == "escalate" {
 		eventKind = "job.escalate"
 	}
-	rounds := 0
-	usedPath := false
+	// A report already announced (same bytes, same question) is the case where
+	// every receipt exists; it is not a branch of its own. rounds and usedPath
+	// pick the -rN snapshot name for a later answer at the same path.
+	rounds, usedPath, announced := 0, false, false
 	for _, ev := range j.Events {
 		if ev.Kind == eventKind {
 			rounds++
 			if str(ev.Payload, "report_sha256") == digest && str(ev.Payload, "question") == *question {
-				suffix := ""
-				if kind == "done" {
-					var status string
-					if strictResult {
-						status, e = a.attachDuplicateResultStrict(ctx, j, id, *report, digest, result, str(ev.Payload, "document"), str(ev.Payload, "report_sha256"))
-						if e != nil {
-							return a.strictDoneFailure(ctx, id, e)
-						}
-					} else {
-						if e = a.releaseQuota(ctx, j); e != nil {
-							return e
-						}
-						status, e = a.attachDuplicateResult(ctx, id, *report, digest, result)
-						if e != nil {
-							return e
-						}
-					}
-					if strictResult {
-						if e = a.releaseQuota(ctx, j); e != nil {
-							return e
-						}
-					}
-					if status != "" {
-						suffix = " " + status
-					}
-				}
-				fmt.Fprintf(a.Out, "OK job=%s report=%s duplicate=yes%s\n", id, *report, suffix)
-				return nil
+				announced = true
 			}
 			if str(ev.Payload, "report") == *report {
 				usedPath = true
 			}
 		}
 	}
-	if usedPath && *report != "" {
+	if kind == "escalate" && announced {
+		fmt.Fprintf(a.Out, "OK job=%s report=%s duplicate=yes\n", id, *report)
+		return nil
+	}
+	if usedPath && !announced && *report != "" {
 		ext := filepath.Ext(*report)
 		stem := strings.TrimSuffix(*report, ext)
 		for n := rounds + 1; ; n++ {
@@ -183,138 +157,15 @@ func (a *App) lifecycleWithOptions(ctx context.Context, kind string, args []stri
 			break
 		}
 	}
-	// The report goes to hk over HTTP with the svc-panewire credential (hk
-	// 3607): kind report, the job and the report's bytes, under the upload
-	// bound, linked to the job's hk task when it has a numeric one, with
-	// origin class job (hk 3615). docSHA is the sha256 of the uploaded bytes,
-	// which the record pins next to report_doc.
-	//
-	// done publishes to the content-addressed key and writes the
-	// job.report_published receipt (lifecycle_publish.go); escalate keeps the
-	// report file's name as its key.
-	doc, docSHA := "", ""
 	if kind == "done" {
-		doc = publishedDocument(j.Events, digest)
-		if doc == "" {
-			key, e := a.publishReport(ctx, j, body, digest)
-			if e != nil {
-				a.warn("report upload failed; local report retained")
-			} else if e = a.event(ctx, id, eventReportPublished, map[string]any{"report_sha256": digest, "document": key}); e != nil {
-				return e
-			} else {
-				doc = key
-			}
-		}
-		if doc != "" {
-			docSHA = digest
-		}
-	} else if *report != "" {
-		key := "reports/" + id + "/" + filepath.Base(*report)
-		b, e := os.ReadFile(*report)
-		if e == nil {
-			upload := client.Document{Key: key, Kind: "report", Job: id, Body: string(b), OriginClass: "job"}
-			if task, err := hkTaskID(j.Task); err == nil {
-				upload.TaskID = &task
-			}
-			e = hkPutDocument(ctx, upload)
-		}
-		if e == nil {
-			doc = key
-			sum := sha256.Sum256(b)
-			docSHA = hex.EncodeToString(sum[:])
-		} else {
-			a.warn("report upload failed; local report retained")
-		}
+		return a.doneReport(ctx, j, doneInput{
+			report: *report, body: body, digest: digest, question: *question, result: result,
+			strict: strictResult, headless: boolean(j.Receipt, "headless", false), watcher: watchResult, late: late,
+		})
 	}
-	a.recordJobUsage(ctx, j, false)
-	// The hk record state is written before the relay: one PUT carries the
-	// terminal state, the report doc with its sha256 pin and — for done
-	// --result — the findings.
-	state := "completed"
-	if kind == "escalate" {
-		state = "escalated"
-	}
-	rec := map[string]any{"state": state}
-	if doc != "" {
-		rec["report_doc"] = doc
-		rec["report_sha256"] = docSHA
-	}
-	if result != nil {
-		rec["result"] = result
-	}
-	if strictResult {
-		if e = a.strictCompletedPut(ctx, id, rec, result, doc, spawnReceiptForRepair(j.Events)); e != nil {
-			if isDoneResultFailure(e, "result_conflict") {
-				a.recordDoneResultConflict(id)
-			}
-			return a.strictDoneFailure(ctx, id, e)
-		}
-	} else if e := a.putJobRecord(ctx, id, rec); e != nil {
-		if kind == "done" && result != nil && boolean(j.Receipt, "headless", false) {
-			a.warn("job %s completed record failed: reason=%s", id, doneResultReason(e))
-			_ = a.event(ctx, id, "job.record_failed", map[string]any{"op": state})
-		} else {
-			a.jobRecordFailed(ctx, id, state, e)
-		}
-	}
-	p := map[string]any{"report": *report, "report_sha256": digest, "question": *question, "owner_lane": j.Owner, "parent_lane": j.Parent, "label": j.Label, "pane_id": j.Pane, "document": doc}
-	if late {
-		p["late"] = true
-	}
-	if e = a.event(ctx, id, eventKind, p); e != nil {
-		return e
-	}
-	if kind == "escalate" {
-		if _, rerr := a.recordFailedOutcome(ctx, j, j.Task, "escalated", a.PRs); rerr != nil {
-			a.warn("failure rep not recorded: %v", rerr)
-		}
-	}
-	if kind == "done" && result == nil && j.SpawnRole == "reviewer" {
-		a.jobResultEvent(id, "missing", "no_result", "")
-		a.warn("reviewer done carried no result: %s", id)
-	}
-	owner := j.Owner
-	if j.Parent != "" && (kind == "escalate" || j.Role == "builder" || j.Role == "captain") {
-		owner = j.Parent
-	}
-	last := strings.TrimSpace(string(body))
-	if lines := strings.Split(last, "\n"); len(lines) > 0 {
-		last = lines[len(lines)-1]
-	}
-	if doc != "" {
-		last += " doc:" + doc
-	}
-	argsEmit := []string{"emit", "--kind", eventKind, "--job", id, "--owner-lane", owner, "--epoch", "1", "--label", j.Label, "--host", a.machine(), "--pane", j.Pane, "--inbox-root", filepath.Dir(a.Jobs)}
-	if late {
-		argsEmit = append(argsEmit, "--late", "--deliver", "inbox")
-	}
-	if *report != "" {
-		argsEmit = append(argsEmit, "--report", *report, "--report-last-line", last)
-	}
-	if *question != "" {
-		argsEmit = append(argsEmit, "--question", *question)
-	}
-	r := a.call(ctx, "panewire", argsEmit...)
-	relay := ""
-	if r.Code != 0 {
-		relay = " relay=file-only"
-		a.warn("relay failed; durable arbiter event retained")
-		_ = a.event(ctx, id, "job.relay_failed", map[string]any{"kind": eventKind, "exit": r.Code})
-	}
-	if j.Task != "" {
-		comment := "panewire " + eventKind + " job=" + id + " report=" + *report
-		if e = hkCheck(hkCommentTask(ctx, j.Task, comment), "handoffkeep"); e != nil {
-			a.warn("task comment failed: %v", e)
-		}
-	}
-	if kind == "done" {
-		if e = a.releaseQuota(ctx, j); e != nil {
-			return e
-		}
-	}
-	fmt.Fprintf(a.Out, "OK job=%s report=%s kind=%s%s\n", id, *report, eventKind, relay)
-	return nil
+	return a.escalateReport(ctx, j, *report, *question, body, digest, late)
 }
+
 func readResult(path string) (json.RawMessage, error) {
 	if e := noSymlinks(path); e != nil {
 		return nil, e
@@ -369,46 +220,6 @@ func watcherResultFile(jobs, id, report string) (string, string) {
 		return path, ""
 	}
 	return "", ""
-}
-
-// attachDuplicateResult stores the result a later `done --result` carries when
-// a completion for the same report already exists and this call returned
-// duplicate. The record may still have no result (the watcher or an earlier
-// done completed without one); a stored result is never overwritten.
-func (a *App) attachDuplicateResult(ctx context.Context, id, report, digest string, result json.RawMessage) (string, error) {
-	if result == nil {
-		return "", nil
-	}
-	store, e := a.jobStore()
-	if e != nil {
-		a.warn("result attach failed: %v", e)
-		return "result=unattached", nil
-	}
-	rec, e := store.Get(ctx, id)
-	if e != nil {
-		a.warn("result attach: job record unreadable: %v", e)
-		return "result=unattached", nil
-	}
-	if stored := rec["result"]; stored != nil {
-		if sameJSONValue(stored, result) {
-			return "result=equal", nil
-		}
-		a.warn("result conflict: job %s already has a different result; keeping it", id)
-		a.jobResultEvent(id, "conflict", "different_result", "stored result kept")
-		a.captureSentryWarning([]string{"job-result-conflict"}, "JOB_RESULT_CONFLICT "+id, map[string]string{"job": id})
-		return "result=conflict", nil
-	}
-	// hk accepts a result only in a write that also names completed; the job is
-	// already completed locally, so this re-states the same state.
-	if e := store.Put(ctx, id, map[string]any{"state": "completed", "result": result}); e != nil {
-		a.warn("result attach failed: %v", e)
-		return "result=unattached", nil
-	}
-	if e := a.event(ctx, id, "job.result_attached", map[string]any{"report": report, "report_sha256": digest}); e != nil {
-		return "", e
-	}
-	a.jobResultEvent(id, "attached", "duplicate_done", "duplicate completion")
-	return "result=attached", nil
 }
 
 // sameJSONValue compares two decoded JSON values: key order, whitespace and

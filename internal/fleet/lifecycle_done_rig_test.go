@@ -5,6 +5,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -94,4 +95,13 @@ func (r *doneRig) stdout() string { return r.a.Out.(*bytes.Buffer).String() }
 
 func (r *doneRig) key(body string) string {
 	return reportDocumentKey("j", reportDigest([]byte(body)))
+}
+
+// wantNotInHK is the interactive `done` that completed but left its report
+// out of hk: it exits non-zero so the caller reruns it.
+func wantNotInHK(t *testing.T, e error) {
+	t.Helper()
+	if code(e) != exitFailure || e == nil || !strings.Contains(e.Error(), "completed; report not in hk; rerun the same command") {
+		t.Fatalf("done error=%v, want exit %d: completed; report not in hk; rerun the same command", e, exitFailure)
+	}
 }

@@ -277,9 +277,7 @@ func TestHKSiteFailuresKeepCLIHandling(t *testing.T) {
 		if e := os.WriteFile(path, []byte("done\n"), 0600); e != nil {
 			t.Fatal(e)
 		}
-		if e := a.lifecycle(ctx, "done", []string{"j", "--report", path}); e != nil {
-			t.Fatal(e)
-		}
+		wantNotInHK(t, a.lifecycle(ctx, "done", []string{"j", "--report", path}))
 		errs := a.Err.(*bytes.Buffer).String()
 		if !strings.Contains(errs, "panewire: warning: report upload failed; local report retained\n") {
 			t.Fatalf("warnings=%q", errs)
@@ -367,9 +365,7 @@ func TestHKSitesUnconfigured(t *testing.T) {
 		if e := os.WriteFile(path, []byte("done\n"), 0600); e != nil {
 			t.Fatal(e)
 		}
-		if e := a.lifecycle(ctx, "done", []string{"j", "--report", path}); e != nil {
-			t.Fatal(e)
-		}
+		wantNotInHK(t, a.lifecycle(ctx, "done", []string{"j", "--report", path}))
 		errs := a.Err.(*bytes.Buffer).String()
 		if !strings.Contains(errs, "report upload failed; local report retained") || !strings.Contains(errs, "task comment failed: handoffkeep: handoffkeep: "+unconfigured) {
 			t.Fatalf("warnings=%q", errs)

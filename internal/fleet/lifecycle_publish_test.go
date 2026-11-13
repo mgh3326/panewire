@@ -45,9 +45,7 @@ func TestDoneUploadFailureWritesNoReceipt(t *testing.T) {
 	r := newDoneRig(t)
 	r.hk.Handle(hkFails("PUT /v1/documents/", http.StatusInternalServerError, `{"error":"internal_error"}`))
 	r.write("done\n")
-	if e := r.done(); e != nil {
-		t.Fatal(e)
-	}
+	wantNotInHK(t, r.done())
 	if got := r.events(eventReportPublished); len(got) != 0 {
 		t.Fatalf("receipts=%v, want none", got)
 	}

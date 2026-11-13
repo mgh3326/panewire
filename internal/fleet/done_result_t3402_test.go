@@ -34,6 +34,7 @@ func seedSpawnedRecord(t *testing.T, a *App, id string) *fakeJobStore {
 func watcherCompletes(t *testing.T) (*App, string, *fakeJobStore) {
 	t.Helper()
 	a, _, report := watchFixture(t)
+	useFakeHK(t).Handle(hkCommentAnswer)
 	store := seedSpawnedRecord(t, a, "j")
 	writeReport(t, report, "final report\n")
 	putLaneEvent(t, a, "w:p1", "READY", a.Now().Add(time.Minute))
@@ -114,28 +115,35 @@ func TestDoneResultOnTerminalWithoutResultIsRefused(t *testing.T) {
 	}
 }
 
-// Acceptance (b): an equal result already stored is left alone, with no write.
+// Acceptance (b): an equal result already stored is confirmed once, by a
+// read-back, and a repeat then writes nothing: its receipt proves the record.
 func TestDoneResultEqualOnDuplicateDoesNotWrite(t *testing.T) {
 	a, report, store := watcherCompletes(t)
 	findings := filepath.Join(a.Jobs, "j", "findings.json")
-	body := `{"findings":[{"severity":"high"}]}`
-	writeReport(t, findings, body)
+	writeReport(t, findings, `{"findings":[{"severity":"high"}]}`)
 	store.mu.Lock()
 	store.records["j"]["result"] = map[string]any{"findings": []any{map[string]any{"severity": "high"}}}
 	store.mu.Unlock()
 	out := a.Out.(*bytes.Buffer)
-	puts := countStorePuts(store)
-	for range 2 {
+	run := func() {
+		t.Helper()
 		out.Reset()
 		if e := a.lifecycle(context.Background(), "done", []string{"j", "--report", report, "--result", findings}); e != nil {
 			t.Fatal(e)
 		}
-		if got := out.String(); !strings.Contains(got, "duplicate=yes result=equal") {
+		if got := out.String(); !strings.Contains(got, "duplicate=yes") {
 			t.Fatalf("output=%q", got)
 		}
 	}
-	if got := countStorePuts(store); got != puts {
-		t.Fatalf("equal result wrote the record: %d -> %d", puts, got)
+	run()
+	store.mu.Lock()
+	calls := len(store.calls)
+	store.mu.Unlock()
+	run()
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if len(store.calls) != calls {
+		t.Fatalf("the repeat called the job store: %v", store.calls[calls:])
 	}
 }
 

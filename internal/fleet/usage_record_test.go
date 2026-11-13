@@ -47,6 +47,7 @@ func claudeSession() map[string]any {
 
 func doneJob(t *testing.T, a *App) {
 	t.Helper()
+	useFakeHK(t).Handle(hkCommentAnswer)
 	path := filepath.Join(a.Jobs, "j", "report.md")
 	if err := os.WriteFile(path, []byte("done\n"), 0o600); err != nil {
 		t.Fatal(err)

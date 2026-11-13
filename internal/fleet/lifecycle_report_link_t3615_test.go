@@ -118,9 +118,7 @@ func TestDoneReportUploadFailureWritesNoPin(t *testing.T) {
 	if e := os.WriteFile(path, report, 0600); e != nil {
 		t.Fatal(e)
 	}
-	if e := a.lifecycle(ctx, "done", []string{"j", "--report", path}); e != nil {
-		t.Fatal(e)
-	}
+	wantNotInHK(t, a.lifecycle(ctx, "done", []string{"j", "--report", path}))
 	if errs := a.Err.(*bytes.Buffer).String(); !strings.Contains(errs, "panewire: warning: report upload failed; local report retained\n") {
 		t.Fatalf("warnings=%q", errs)
 	}
