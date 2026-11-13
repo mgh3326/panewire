@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -21,16 +22,21 @@ import (
 // The sentinel is not a billing expiry.
 var creditRejectionExpiry = time.Date(9999, 12, 31, 23, 59, 59, 0, time.UTC)
 
+var (
+	errCreditAccountMismatch       = errors.New("credit rejection account does not match pool")
+	errCreditAccountUnidentifiable = errors.New("shared account fingerprint required")
+)
+
 func (a *App) publishCreditRejection(ctx context.Context, j Job, stop quotastop.Stop) error {
 	key := str(j.Receipt, "account_key")
 	if key != "" && (!validAccountKey(key) || accountPool(key) != stop.Pool) {
-		return fmt.Errorf("credit rejection account does not match pool")
+		return errCreditAccountMismatch
 	}
 	if key == "" {
 		var err error
 		key, err = manualAccountKey(a, stop.Pool)
 		if err != nil {
-			return err
+			return fmt.Errorf("%w: %s", errCreditAccountUnidentifiable, err)
 		}
 	}
 	observation := shared.Observation{

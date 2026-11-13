@@ -1548,7 +1548,9 @@ named reason. It is read-only: it reads the hub host list, hk presence and the
 shared observation, and makes one SSH probe per host that tests two paths,
 reads one boolean from the remote `hosts.toml` and asks `panewire` and `panewire`
 for their versions. It never prints a URL or a file's contents, and writes no
-task, job or event.
+task, job or event. The whole run is bounded by a 90-second budget; a probe
+that does not answer in time reports its checks failed (`probe_failed_rcN`)
+rather than holding the command.
 
 | Check | Fails with | Meaning |
 | --- | --- | --- |
@@ -1630,8 +1632,8 @@ are read from the quota tool, never this file.
 ```
 
 Use the complete shipped block when creating a custom policy; a custom file
-does not pick up later bullets, such as the test-host rule that names
-`mbp-server` by `hostname -s` (hk 3733). Selection order
+does not pick up later bullets, such as the test-host rule (one rule on
+every host since hk 4496). Selection order
 is default → host → profile → local.brief_preamble. Missing block names refuse.
 The policy version and selected block appear in every brief and dry-run output.
 See [DESIGN.md](../DESIGN.md#standard-brief-preamble-the-single-source-of-fleet-rules)
