@@ -717,3 +717,120 @@ func TestWatcherQuotaIntentCancelledWhenThePaneMovedOn(t *testing.T) {
 		t.Fatalf("quota %s, want leased", st)
 	}
 }
+
+// hk unreadable, the pane gone from two agent lists: the generic missing-pane
+// path must not end the job (a bare lost write, a job.lost without quota_stop,
+// the intent closed by that event). The intent settles against hk first.
+func TestWatcherQuotaIntentBlocksTheMissingPaneFallback(t *testing.T) {
+	a, f, h, _ := quotaStopFixture(t, "reviewer", "idle", devinStopScreen(t))
+	t.Setenv("PANEWIRE_COMPLETION_TIMEOUT_S", "6000")
+	h.mu.Lock()
+	h.down = true
+	h.mu.Unlock()
+	lists := 0
+	do := f.Do
+	f.Do = func(c Command) Result {
+		if c.Name == "herdr" && strings.Join(c.Args, " ") == "agent list" {
+			lists++
+			if lists == 30 {
+				if p := lostPayload(t, a); p != nil {
+					t.Errorf("job.lost announced with hk unreadable and the pane missing: %v", p)
+				}
+				if st, _ := ledgerState(t, a, "j"); st != "leased" {
+					t.Errorf("quota %s while the intent was unresolved, want leased", st)
+				}
+				h.mu.Lock()
+				h.down = false
+				h.mu.Unlock()
+			}
+			if lists >= 3 {
+				return Result{Out: `{"result":{"agents":[]}}`}
+			}
+		}
+		return do(c)
+	}
+	if e := a.watch(context.Background(), []string{"j"}); e != nil {
+		t.Fatal(e)
+	}
+	if lists < 30 {
+		t.Fatalf("the watcher ended after %d polls, before hk recovered", lists)
+	}
+	if str(h.record(t, "j"), "state") != "lost" {
+		t.Fatalf("hk record %v, want lost once hk is reachable", h.record(t, "j"))
+	}
+}
+
+// The reviewer resumed and wrote a stable report plus READY while the intent
+// could not be settled (hk unreadable): the report must not complete the job
+// locally; the intent is settled against hk first.
+func TestWatcherQuotaIntentBlocksReportCompletion(t *testing.T) {
+	a, f, h, report := quotaStopFixture(t, "reviewer", "idle", devinStopScreen(t))
+	t.Setenv("PANEWIRE_COMPLETION_TIMEOUT_S", "6000")
+	h.mu.Lock()
+	h.down = true
+	h.mu.Unlock()
+	lists := 0
+	do := f.Do
+	f.Do = func(c Command) Result {
+		if c.Name == "herdr" && strings.Join(c.Args, " ") == "agent list" {
+			lists++
+			switch lists {
+			case 3:
+				writeReport(t, report, "# review\n")
+				putLaneEvent(t, a, "w:p1", "READY", a.Now().Add(time.Minute))
+			case 20:
+				for _, kind := range eventKindsOf(t, a, "j") {
+					if kind == "job.completed" {
+						t.Errorf("the report completed the job while the quota-stop intent was unsettled")
+					}
+				}
+				h.mu.Lock()
+				h.down = false
+				h.mu.Unlock()
+			}
+		}
+		return do(c)
+	}
+	if e := a.watch(context.Background(), []string{"j"}); e != nil {
+		t.Fatal(e)
+	}
+	if lists < 20 {
+		t.Fatalf("the watcher ended after %d polls, before hk recovered", lists)
+	}
+}
+
+// A reviewer ended by its watcher has a lost hk record. Its job.lost is final,
+// so a watcher started later (a node restart) with the old pane busy again
+// does not take it for a live hand-off and reprompt the job.
+func TestWatcherFinalReviewerStopIsNotRearmedAsAHandOff(t *testing.T) {
+	a, f, h, _ := quotaStopFixture(t, "reviewer", "idle", devinStopScreen(t))
+	t.Setenv("PANEWIRE_COMPLETION_TIMEOUT_S", "600")
+	if e := a.watch(context.Background(), []string{"j"}); e != nil {
+		t.Fatal(e)
+	}
+	if str(h.record(t, "j"), "state") != "lost" {
+		t.Fatalf("hk record %v", h.record(t, "j"))
+	}
+	j, e := a.job("j")
+	if e != nil {
+		t.Fatal(e)
+	}
+	if _, announced := announcedQuotaStop(j); announced {
+		t.Fatal("a finalized reviewer stop is announced as a live hand-off")
+	}
+	do := f.Do
+	f.Do = func(c Command) Result {
+		if c.Name == "herdr" && strings.Join(c.Args, " ") == "agent list" {
+			return Result{Out: `{"result":{"agents":[{"pane_id":"w:p1","agent_status":"working","state_change_seq":9}]}}`}
+		}
+		return do(c)
+	}
+	if e := a.watch(context.Background(), []string{"j", "--rearmed"}); e != nil {
+		t.Fatal(e)
+	}
+	for _, kind := range eventKindsOf(t, a, "j") {
+		if kind == "job.reprompted" {
+			t.Fatal("a re-armed watcher revived a job whose hk record is lost")
+		}
+	}
+}

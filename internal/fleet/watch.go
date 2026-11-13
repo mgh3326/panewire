@@ -346,7 +346,10 @@ func (a *App) watch(ctx context.Context, args []string) error {
 
 		if j.Report != "" {
 			if info, e := os.Stat(j.Report); e == nil && info.Mode().IsRegular() {
-				if !handOff.active && pending && size == info.Size() && modified.Equal(info.ModTime()) && a.workerSignalledEnd(j) {
+				// An open close intent is settled against hk first (below): completing
+				// the report here could close it locally while hk holds, or may hold,
+				// the lost record.
+				if !handOff.active && !hasIntent && pending && size == info.Size() && modified.Equal(info.ModTime()) && a.workerSignalledEnd(j) {
 					return a.lifecycleWithOptions(ctx, "done", []string{id, "--report", j.Report}, true, len(args) == 2)
 				}
 				pending = true
@@ -356,7 +359,7 @@ func (a *App) watch(ctx context.Context, args []string) error {
 				pending = false
 			}
 		}
-		if waiting != nil && !(pending && a.workerSignalledEnd(j)) && !a.Now().Before(waiting.at.Add(decisionTimeout)) {
+		if waiting != nil && !hasIntent && !(pending && a.workerSignalledEnd(j)) && !a.Now().Before(waiting.at.Add(decisionTimeout)) {
 			if e := a.putJobRecord(ctx, id, map[string]any{"state": "lost"}); e != nil {
 				a.jobRecordFailed(ctx, id, "lost", e)
 			}
@@ -437,7 +440,10 @@ func (a *App) watch(ctx context.Context, args []string) error {
 		// after placing the successor: the hk record is the hub's to write
 		// (with the successor pointer), and the watcher ends the job after the
 		// grace instead.
-		if missing >= 2 && !handOff.active {
+		// An unresolved close intent is settled against hk first: the bare lost
+		// write below would end the job without the quota_stop record and close the
+		// intent with its event.
+		if missing >= 2 && !handOff.active && !quotaRetry {
 			if e := a.putJobRecord(ctx, id, map[string]any{"state": "lost"}); e != nil {
 				a.jobRecordFailed(ctx, id, "lost", e)
 			}
