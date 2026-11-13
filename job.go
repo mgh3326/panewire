@@ -504,11 +504,7 @@ func jobFindLatestReport(directory string) string {
 // the upload bound; rc is the status the CLI exited with: 124 when the upload
 // timed out, else 1.
 func (c *jobCLI) uploadReportDocument(job, report string) string {
-	if fleet.ReservedReportName(report) {
-		c.warn("report file name is reserved for content-addressed documents; report document not uploaded (job=%s)", job)
-		return ""
-	}
-	key := fleet.BasenameReportKey(job, report)
+	key := "reports/" + job + "/" + strings.TrimRight(filepath.Base(report), "\n")
 	body, err := os.ReadFile(report)
 	if err == nil {
 		err = fleet.PutHKDocument(context.Background(), key, "report", job, string(body))

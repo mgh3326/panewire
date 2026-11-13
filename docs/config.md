@@ -677,7 +677,7 @@ limit.
 ### Completion receipts
 
 A report's identity is `(job, S)`, `S` the sha256 of its bytes. `panewire done`
-publishes it to the content-addressed hk document `reports/<job>/answer-<S>.md`
+publishes it to the content-addressed hk document `reports/<job>/sha256/<S>.md`
 (kind `report`, linked to the job's task), so one key names one byte string and
 a retry PUTs the same key. `done` then runs four steps in order. Each step has
 one authority and one local receipt (an event in the job's ledger), and a step
@@ -690,12 +690,13 @@ whose receipt exists is skipped:
 | 3 pin | the record's `report_doc` and `report_sha256` name the completing report | the hk job record | `job.report_pinned {report_sha256, document, outcome}` |
 | 4 notify | the parent was told about `S` | the local ledger, then the relay | `job.completed {report_sha256, document}` |
 
-Step 1 reads the key first and never overwrites a document that holds other
-bytes (a report uploaded under its file name before keys were content-addressed
-may sit at an `answer-<S>.md` key); it then confirms hk holds exactly these
-bytes, by the sha256 in hk's answer or a read-back. `escalate` and the legacy
-`panewire job` upload under the literal file name and refuse a file named
-`answer-<64 hex>.md`, so such a key only ever holds the bytes with that sha256. Step 2 is the only writer of the record, `strictCompletedPutUntil`:
+Step 1 confirms hk holds exactly these bytes, by the sha256 in hk's answer or a
+read-back. The key lies under `reports/<job>/sha256/`, which a basename key can
+never reach (a file name holds no slash), so a key there only ever holds the
+bytes with that sha256; `escalate` and the legacy `panewire job` keep
+uploading under the literal file name `reports/<job>/<file name>`.
+
+Step 2 is the only writer of the record, `strictCompletedPutUntil`:
 one PUT of `{state:"completed", result?, report_doc?, report_sha256?}` (the pin
 only when the report is published and is the completing one), read back when
 the answer is ambiguous or the record is already terminal, retried at most twice

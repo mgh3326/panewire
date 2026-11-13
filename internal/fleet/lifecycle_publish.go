@@ -6,8 +6,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"path/filepath"
-	"regexp"
-	"strings"
 
 	"github.com/mgh3326/handoffkeep/client"
 )
@@ -33,32 +31,18 @@ const (
 )
 
 // reportDocumentKey is the hk document key of the report whose bytes have
-// sha256 digest.
+// sha256 digest. It lies under reports/<job>/sha256/, which a basename key
+// (reports/<job>/<file name>) can never reach: a file name holds no slash, so
+// the two schemes are disjoint by construction.
 func reportDocumentKey(job, digest string) string {
-	return "reports/" + job + "/answer-" + digest + ".md"
+	return "reports/" + job + "/sha256/" + digest + ".md"
 }
 
 // legacyReportDocumentKey is the key `done` used before reports were
 // content-addressed: the report file's name, so a later report at the same
 // path overwrote an earlier one.
 func legacyReportDocumentKey(job, reportPath string) string {
-	return BasenameReportKey(job, reportPath)
-}
-
-var contentAddressedBase = regexp.MustCompile(`^answer-[0-9a-f]{64}\.md$`)
-
-// BasenameReportKey is the hk key of a report uploaded under its file's name
-// (escalate, the legacy job CLI), the literal basename as before.
-func BasenameReportKey(job, reportPath string) string {
-	return "reports/" + job + "/" + strings.TrimRight(filepath.Base(reportPath), "\n")
-}
-
-// ReservedReportName reports whether a report file's name is one only a
-// content-addressed key may carry. A basename-keyed upload of such a file is
-// refused, so a key named answer-<sha256>.md only ever holds the bytes with
-// that sha256.
-func ReservedReportName(reportPath string) bool {
-	return contentAddressedBase.MatchString(strings.TrimRight(filepath.Base(reportPath), "\n"))
+	return "reports/" + job + "/" + filepath.Base(reportPath)
 }
 
 // publishedDocument is the document the job.report_published receipt names
@@ -85,15 +69,6 @@ func (a *App) publishReport(ctx context.Context, j Job, body []byte, digest stri
 	upload := client.Document{Key: key, Kind: "report", Job: j.ID, Body: string(body), OriginClass: "job"}
 	if task, err := hkTaskID(j.Task); err == nil {
 		upload.TaskID = &task
-	}
-	// Documents written before keys were content-addressed were keyed by file
-	// name, so an answer-<sha256>.md may already hold other bytes: never
-	// overwrite it.
-	switch held, err := hkGetDocumentWithin(ctx, key, hkUploadTimeout); {
-	case err == nil && (held.Key != key || held.SHA256 != digest):
-		return "", errReportKeyHoldsOtherBytes
-	case err != nil && !errors.Is(err, errHKNotFound):
-		return "", err
 	}
 	stored, err := hkPutDocumentStored(ctx, upload)
 	if err != nil {

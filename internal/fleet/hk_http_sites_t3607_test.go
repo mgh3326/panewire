@@ -238,12 +238,12 @@ func TestHKSitesGoOverHTTPWithSvcToken(t *testing.T) {
 			t.Fatal(e)
 		}
 		key := reportDocumentKey("j", reportDigest([]byte(report)))
-		reqs := hkOnly(t, hk, docRoute(http.MethodGet, key), docRoute(http.MethodPut, key), "POST /v1/tasks/42/comments")
-		put := hkJSON(t, reqs[1])
+		reqs := hkOnly(t, hk, docRoute(http.MethodPut, key), "POST /v1/tasks/42/comments")
+		put := hkJSON(t, reqs[0])
 		if put["key"] != key || put["kind"] != "report" || put["job"] != "j" || put["body"] != report {
 			t.Fatalf("report put key=%v kind=%v job=%v body bytes=%d, want the CLI's doc put: the key, kind report, the job and the whole file (%d bytes)", put["key"], put["kind"], put["job"], len(put["body"].(string)), len(report))
 		}
-		if got := hkJSON(t, reqs[2]); len(got) != 1 || got["body"] != "panewire job.completed job=j report="+path {
+		if got := hkJSON(t, reqs[1]); len(got) != 1 || got["body"] != "panewire job.completed job=j report="+path {
 			t.Fatalf("comment body=%v", got)
 		}
 		if out := a.Out.(*bytes.Buffer).String(); !strings.Contains(out, "OK job=j report="+path+" kind=job.completed") {
@@ -291,7 +291,7 @@ func TestHKSiteFailuresKeepCLIHandling(t *testing.T) {
 		if rec := a.JobStore.(*fakeJobStore).record(t, "j"); rec["report_doc"] != nil {
 			t.Fatalf("record=%v, want no report_doc", rec)
 		}
-		hkOnly(t, hk, docRoute(http.MethodGet, reportDocumentKey("j", reportDigest([]byte("done\n")))), docRoute(http.MethodPut, reportDocumentKey("j", reportDigest([]byte("done\n")))), "POST /v1/tasks/42/comments")
+		hkOnly(t, hk, docRoute(http.MethodPut, reportDocumentKey("j", reportDigest([]byte("done\n")))), "POST /v1/tasks/42/comments")
 	})
 
 	t.Run("artifact record write refused", func(t *testing.T) {
