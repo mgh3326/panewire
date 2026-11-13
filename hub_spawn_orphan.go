@@ -33,6 +33,15 @@ const (
 	// spawnStuckAfter is how long past its deadline a pending request runs
 	// before the hub warns once that its ownership is stuck.
 	spawnStuckAfter = 30 * time.Minute
+	// spawnStaleProbeMin and spawnStaleProbeMax bound the back-off between
+	// replays of a deadline_exceeded row: a quarter of its age past the
+	// deadline, so a row that stays silent costs fewer probes the longer it
+	// waits.
+	spawnStaleProbeMin = 30 * time.Second
+	spawnStaleProbeMax = time.Hour
+	// spawnStaleBatch caps the stale rows one coordinator pass hands to the
+	// workers, so they never take every worker from fresh requests.
+	spawnStaleBatch = 2
 	// spawnAbandonReasonLimit bounds the operator's --reason text.
 	spawnAbandonReasonLimit = 256
 )
@@ -44,6 +53,42 @@ func spawnPending(status string) bool {
 		return true
 	}
 	return false
+}
+
+// spawnStaleProbeDue reports whether a deadline_exceeded row is due for its
+// next replay at now. The back-off lives in the row's last_run_ms, so it
+// survives a hub restart.
+func spawnStaleProbeDue(task hubSpawnTask, now time.Time) bool {
+	every := min(max(now.Sub(task.Deadline)/4, spawnStaleProbeMin), spawnStaleProbeMax)
+	return !now.Before(task.LastRun.Add(every))
+}
+
+// reprobeStaleSpawn runs one back-off probe of a bound request that is past
+// its deadline. It replays the request so a completed node journal settles it
+// as usual (settleNodeResult). A node that stays silent, restarted without
+// answering unknown, or still reports reconciling never reaches the orphan
+// rule through that replay, so a request stuck spawnStuckAfter past its
+// deadline also gets the pane check directly: no pane bearing the job label on
+// its node finishes it as orphaned and frees its reservation. A past-deadline
+// node never launches a request, so asking again cannot start a second one,
+// and any pane or unreadable node keeps ownership.
+func (h *HubServer) reprobeStaleSpawn(parent context.Context, task hubSpawnTask) {
+	ctx, cancel := context.WithTimeout(parent, 5*time.Second)
+	defer cancel()
+	transport := directSpawnTransport{h: h, task: task}
+	_, _ = transport.dispatch(ctx, *task.Node)
+	h.noteStuckSpawn(task)
+	if h.now().Sub(task.Deadline) < spawnStuckAfter {
+		return
+	}
+	current, err := h.inbox.store.spawnTask(parent, task.Request.RequestID)
+	if err != nil || current.Status != "deadline_exceeded" || current.Attempt != task.Attempt {
+		return
+	}
+	outcome := hubSpawnOutcome{RC: 75, Stage: "landing", Reason: spawnOrphanedReason, Host: spawnTaskHost(task), NodeResult: true}
+	if released, why := h.finishUnownedSpawn(parent, current, outcome); !released {
+		h.logger.Info("hub kept a stale spawn", "request_id", task.Request.RequestID, "job", task.Job, "host", spawnTaskHost(task), "reason", why)
+	}
 }
 
 // resolveOrphanedSpawn runs when task's node answered unknown after the
