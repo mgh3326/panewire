@@ -23,18 +23,17 @@ const (
 	// an idle pane may still be waiting for a late brief.
 	defaultUnworkedLandingGrace = 10 * time.Minute
 
-	unworkedLandingReason = "landing_failed_unworked"
+	unworkedSpawnReason = "failed_spawn_unworked"
 	// spawnHeldPaneActWait bounds one acting node command; pane.close alone
 	// spends nodePaneCloseSettle on its two re-reads.
 	spawnHeldPaneActWait = hubNodeCommandWait
 )
 
-// failedAtLanding reports a holder whose brief delivery was never proven. The
-// hub records the landing stage for rc 75 (its unknown-outcome refusal) and for
-// the node's own landing failures; an rc 75 outside that stage is stored as
-// reconciling, which never reaches a reclaim.
-func failedAtLanding(holder hubSpawnTask) bool {
-	return holder.Status == "failed" && holder.Outcome.Stage == "landing"
+// failedBeforeBrief reports a failed launch or landing where brief delivery
+// was never proven. An rc 75 outside those stages is stored as reconciling,
+// which never reaches a reclaim.
+func failedBeforeBrief(holder hubSpawnTask) bool {
+	return holder.Status == "failed" && (holder.Outcome.Stage == "launch" || holder.Outcome.Stage == "landing")
 }
 
 // nodeCall sends one node command and decodes its result into out. It reports
@@ -83,24 +82,24 @@ func (h *HubServer) closeHeldPaneAndMarkLostBecause(ctx context.Context, app *fl
 func (h *HubServer) closeHeldPane(ctx context.Context, holder hubSpawnTask, name string, row nodeAgentRow) bool {
 	machine := spawnHolderHost(holder)
 	var captured nodePaneCaptureResult
-	capture := nodePaneCaptureArgs{PaneID: row.PaneID, Name: name, Cwd: row.Cwd, MergedAfter: 0, Write: true}
+	capture := nodePaneCaptureArgs{PaneID: row.PaneID, Name: name, Cwd: row.Cwd, AllowUnnamed: row.Name == "", MergedAfter: 0, Write: true}
 	if !h.nodeCall(ctx, machine, nodeCommandPaneCapture, capture, spawnHeldPaneActWait, &captured) || captured.Outcome != nodeCaptureScreen {
 		return false
 	}
 	var closed nodePaneCloseResult
-	closeArgs := nodePaneCloseArgs{PaneID: row.PaneID, Name: name, AgentStatus: row.AgentStatus, Cwd: row.Cwd}
+	closeArgs := nodePaneCloseArgs{PaneID: row.PaneID, Name: name, AgentStatus: row.AgentStatus, Cwd: row.Cwd, AllowUnnamed: row.Name == ""}
 	return h.nodeCall(ctx, machine, nodeCommandPaneClose, closeArgs, spawnHeldPaneActWait, &closed) && (closed.Outcome == nodePaneClosed || closed.Outcome == nodePaneGone)
 }
 
-// releaseUnworkedLanding closes the empty pane of a failed-at-landing holder
+// releaseUnworkedSpawn closes the empty pane of a failed-before-brief holder
 // and marks its hk job lost, so the caller can release the reservation. Nothing
 // is closed or written unless every proof holds. pane.close re-reads the pane
 // itself and refuses a pane that went to work in the meantime, so it runs
 // before the irreversible hk write.
-func (h *HubServer) releaseUnworkedLanding(ctx context.Context, app *fleet.App, holder hubSpawnTask, record map[string]any, row nodeAgentRow) (released bool, markReason string) {
+func (h *HubServer) releaseUnworkedSpawn(ctx context.Context, app *fleet.App, holder hubSpawnTask, record map[string]any, row nodeAgentRow) (released bool, markReason string) {
 	machine, checkout := spawnHolderHost(holder), holder.Request.Repository.Checkout
 	name := hubSpawnArg(holder.Request.Args, "-l")
-	if state, _ := record["state"].(string); state != "claimed" || !failedAtLanding(holder) || checkout == nil || machine == "" || !validNodeJobName(name) || !validNodeJobName(holder.Job) {
+	if state, _ := record["state"].(string); state != "claimed" || !failedBeforeBrief(holder) || checkout == nil || machine == "" || !validNodeJobName(name) || !validNodeJobName(holder.Job) {
 		return false, ""
 	}
 	if !nodePaneIdleStatus[row.AgentStatus] || !spawnReceiptCheckoutPath(row.Cwd, checkout.Dir, hubSpawnArg(holder.Request.Args, "-L")) || !validNodeCommandPath(row.Cwd) {
@@ -120,6 +119,6 @@ func (h *HubServer) releaseUnworkedLanding(ctx context.Context, app *fleet.App, 
 	if marked, reason := h.closeHeldPaneAndMarkLost(ctx, app, holder, name, row); !marked {
 		return false, reason
 	}
-	slog.Info("released an unworked landing failure", "job", holder.Job, "request", holder.Request.RequestID, "machine", machine, "pane", row.PaneID, "reason", unworkedLandingReason)
+	slog.Info("released an unworked spawn failure", "job", holder.Job, "request", holder.Request.RequestID, "machine", machine, "pane", row.PaneID, "reason", unworkedSpawnReason)
 	return true, ""
 }
