@@ -31,6 +31,7 @@ func (q escalateQuota) Pools(context.Context) (map[string]fleet.PoolView, error)
 
 type escalateFixture struct {
 	hub         *HubServer
+	server      *httptest.Server
 	node        *websocket.Conn
 	jobs        *quotaJobs
 	destination *hubAgent
@@ -88,7 +89,7 @@ func newEscalateFixture(t *testing.T, job string) *escalateFixture {
 	if _, err = hub.inbox.store.completeSpawn(t.Context(), held, hubSpawnOutcome{RC: 0, Stage: "done", Host: "machine-a", Pane: roleHeldPane}, time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	return &escalateFixture{hub: hub, node: node, jobs: jobs, destination: destination, job: job}
+	return &escalateFixture{hub: hub, server: server, node: node, jobs: jobs, destination: destination, job: job}
 }
 
 func (f *escalateFixture) request() hubEscalateAuthorRequest {
@@ -281,5 +282,21 @@ func TestEscalateAuthorRequestRefusal(t *testing.T) {
 		if reason := request.refusal(); reason == "" {
 			t.Fatalf("%s: invalid request accepted", name)
 		}
+	}
+}
+
+// The route takes the operator credential only, and validates before it
+// touches anything.
+func TestEscalateAuthorRouteAuthorization(t *testing.T) {
+	f := newEscalateFixture(t, "pw-task-45")
+	body := map[string]any{"task": "42", "job": "pw-task-45", "pr": "o/r#1", "round": 5, "findings": "[]", "grade": "A", "from_profile": "sonnet", "profile": "sonnet", "effort": "xhigh", "step": "same_model_next_effort"}
+	status, _, _ := t14HTTP(t, "POST", f.server.URL+"/v1/jobs/escalate-author", "node-token", body)
+	if status != 401 {
+		t.Fatalf("a node credential must not escalate: %d", status)
+	}
+	bad := map[string]any{"task": "x"}
+	status, _, raw := t14HTTP(t, "POST", f.server.URL+"/v1/jobs/escalate-author", t14OperatorToken, bad)
+	if status != 400 || !strings.Contains(string(raw), "invalid_request") {
+		t.Fatalf("an invalid request must be refused before anything runs: %d %s", status, raw)
 	}
 }
