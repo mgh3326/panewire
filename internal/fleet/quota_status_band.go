@@ -1,6 +1,7 @@
 package fleet
 
 import (
+	"os"
 	"time"
 
 	"github.com/mgh3326/panewire/internal/quota/shared"
@@ -16,11 +17,25 @@ type StatusWindow struct {
 	Model    string
 }
 
+// StatusPoolClass is pool's operator class at now from the admission policy:
+// the class the admission verdict refuses an excluded pool on, and the class
+// selection ranks it under. An unreadable policy is an error, never a guessed
+// class; a missing policy is the default, where every pool is spend.
+func StatusPoolClass(pool string, now time.Time) (string, error) {
+	home, _ := os.UserHomeDir()
+	policy, err := loadAdmissionPolicy(os.Getenv, home)
+	if err != nil {
+		return "", err
+	}
+	return policy.pool(pool, now).Class, nil
+}
+
 // StatusBand names the band `quota status` prints for a pool. It applies the
-// same rules as selection (PoolPolicy.tierOf) to the reading's own windows, so
-// the table cannot disagree with placement on the same reading. free, excluded
-// and credit come before the windows, as tierOf orders them; unknown is a stale
-// reading or one that gives no tier.
+// same rules as selection (PoolPolicy.tierOf) to the reading's own windows, with
+// class as the operator's admission class for the pool, so the table cannot
+// disagree with placement on the same reading. free, excluded and credit come
+// before the windows, as tierOf orders them; unknown is a stale reading or one
+// that gives no tier.
 func StatusBand(policy PoolPolicy, pool, class string, stale bool, windows []StatusWindow, now time.Time) string {
 	row := CatalogRow{Pool: pool}
 	switch {
@@ -41,6 +56,9 @@ func StatusBand(policy PoolPolicy, pool, class string, stale bool, windows []Sta
 	if v == nil {
 		return "unknown"
 	}
+	// accountPoolView reports the spend class for every reading; the operator's
+	// class replaces it so tierOf ranks an admission-preserved pool as placement does.
+	v.Class = class
 	tier, _ := policy.tierOf(row, policy.Order, *v)
 	if tier == "" {
 		return "unknown"
@@ -48,23 +66,27 @@ func StatusBand(policy PoolPolicy, pool, class string, stale bool, windows []Sta
 	return tier
 }
 
-// CreditWindow is a prepaid credit pool's newest manual credit entry: the used
-// share the operator recorded and when that entry expires.
+// CreditWindow is a prepaid credit pool's credit entry: the used share the
+// operator recorded, if any, and when the entry expires.
 type CreditWindow struct {
-	UsedPct   float64
+	UsedPct   *float64
 	ExpiresAt time.Time
 }
 
-// CreditWindowOf is the newest manual credit entry of an account, by measured
-// time. ok is false when the store holds no well-formed credit entry.
-func CreditWindowOf(latest shared.Latest) (CreditWindow, bool) {
+// CreditWindowOf is the credit entry CreditEntryOf reads as the account's
+// state: the unexpired entry that expires last, so the row agrees with a live
+// credit state; when no entry is unexpired, the newest recorded entry, as the
+// expired state reports. ok is false when the store holds no well-formed
+// credit entry.
+func CreditWindowOf(latest shared.Latest, now time.Time) (CreditWindow, bool) {
 	var (
 		best         CreditWindow
 		bestMeasured time.Time
+		bestLive     bool
 		found        bool
 	)
 	for _, m := range admissionManualFrom(latest.Manual) {
-		if m.Window != "credit" || m.Used == nil {
+		if m.Window != "credit" {
 			continue
 		}
 		expiry, err := time.Parse(time.RFC3339Nano, m.ExpiresAt)
@@ -75,10 +97,25 @@ func CreditWindowOf(latest shared.Latest) (CreditWindow, bool) {
 		if err != nil {
 			continue
 		}
-		if !found || measured.After(bestMeasured) {
-			best = CreditWindow{UsedPct: *m.Used, ExpiresAt: expiry}
-			bestMeasured = measured
-			found = true
+		live := expiry.After(now)
+		var better bool
+		switch {
+		case !found:
+			better = true
+		case live != bestLive:
+			better = live
+		case live:
+			better = expiry.After(best.ExpiresAt)
+		default:
+			better = measured.After(bestMeasured)
+		}
+		if better {
+			best = CreditWindow{ExpiresAt: expiry}
+			if m.Used != nil {
+				used := *m.Used
+				best.UsedPct = &used
+			}
+			bestMeasured, bestLive, found = measured, live, true
 		}
 	}
 	return best, found

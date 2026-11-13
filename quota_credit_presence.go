@@ -191,7 +191,7 @@ func (s *creditPresenceSource) statusWindow(ctx context.Context, pool string) (q
 			}
 		}
 	}
-	window, _ := fleet.CreditWindowOf(latest)
+	window, _ := fleet.CreditWindowOf(latest, now)
 	return reading, window, true
 }
 

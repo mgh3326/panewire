@@ -88,14 +88,6 @@ func runNativeQuotaStatus(ctx context.Context, jsonOutput bool, out, errOut io.W
 		fmt.Fprintln(errOut, "quota status: hostname unavailable")
 		return ExitInternal
 	}
-	// The band reads the pool policy the same way selection does: the default
-	// order, or PANEWIRE_POOL_POLICY. A policy file that does not load is a
-	// refusal, not a table with guessed bands.
-	policy, err := fleet.LoadPoolPolicy("")
-	if err != nil {
-		fmt.Fprintf(errOut, "quota status: pool policy: %v\n", err)
-		return ExitInternal
-	}
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	readings := []quotaReading{}
@@ -134,7 +126,25 @@ func runNativeQuotaStatus(ctx context.Context, jsonOutput bool, out, errOut io.W
 		writeQuotaStatusJSON(out, generatedAt.Format(time.RFC3339Nano), statusHost)
 		return ExitOK
 	}
-	writeQuotaStatusTable(out, generatedAt, statusHost, creditWindows, policy)
+	// The band reads the pool policy the same way selection does: the default
+	// order, or PANEWIRE_POOL_POLICY, and each pool's admission class. A policy
+	// that does not load is a refusal, not a table with guessed bands. Only the
+	// text table reads them; `--json` is the machine contract and needs neither.
+	policy, err := fleet.LoadPoolPolicy("")
+	if err != nil {
+		fmt.Fprintf(errOut, "quota status: pool policy: %v\n", err)
+		return ExitInternal
+	}
+	classes := make(map[string]string, len(readings))
+	for _, r := range readings {
+		class, err := fleet.StatusPoolClass(r.Pool, generatedAt)
+		if err != nil {
+			fmt.Fprintf(errOut, "quota status: admission policy: %v\n", err)
+			return ExitInternal
+		}
+		classes[r.Pool] = class
+	}
+	writeQuotaStatusTable(out, generatedAt, statusHost, creditWindows, classes, policy)
 	return ExitOK
 }
 

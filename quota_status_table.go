@@ -16,12 +16,12 @@ type quotaStatusRow struct {
 
 // writeQuotaStatusTable prints `quota status` for people: one row per pool and
 // window, with the account id as the status JSON carries it. `--json` is the
-// machine contract (writeQuotaStatusJSON); this text may change freely. The
-// band is the tier selection assigns the pool on the same reading
-// (fleet.StatusBand), so the table cannot disagree with placement. A credit
-// pool's row carries its manual entry's used share and expiry, not a reading's
-// windows.
-func writeQuotaStatusTable(out io.Writer, now time.Time, host quotaStatusHost, credit map[string]fleet.CreditWindow, policy fleet.PoolPolicy) {
+// machine contract (writeQuotaStatusJSON); this text may change freely. classes
+// is each pool's admission class (fleet.StatusPoolClass), the class the band
+// is judged under, so the table cannot disagree with placement
+// (fleet.StatusBand). A credit pool's row carries its credit entry's used share
+// (when recorded) and expiry, not a reading's windows.
+func writeQuotaStatusTable(out io.Writer, now time.Time, host quotaStatusHost, credit map[string]fleet.CreditWindow, classes map[string]string, policy fleet.PoolPolicy) {
 	tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "HOST\tPOOL\tACCOUNT\tWINDOW\tUSED\tRESETS IN\tFRESHNESS\tBAND")
 	for _, r := range host.Readings {
@@ -36,10 +36,12 @@ func writeQuotaStatusTable(out io.Writer, now time.Time, host quotaStatusHost, c
 		var rows []quotaStatusRow
 		var band string
 		if r.Credit != "" {
-			band = fleet.StatusBand(policy, r.Pool, r.Class, r.Stale, nil, now)
+			band = fleet.StatusBand(policy, r.Pool, classes[r.Pool], r.Stale, nil, now)
 			row := quotaStatusRow{window: "credit", used: "-", resets: "-"}
 			if w := credit[r.Pool]; !w.ExpiresAt.IsZero() {
-				row.used = fmt.Sprintf("%.1f%%", w.UsedPct)
+				if w.UsedPct != nil {
+					row.used = fmt.Sprintf("%.1f%%", *w.UsedPct)
+				}
 				row.resets = quotaResetsIn(w.ExpiresAt.Sub(now))
 			}
 			rows = append(rows, row)
@@ -48,7 +50,7 @@ func writeQuotaStatusTable(out io.Writer, now time.Time, host quotaStatusHost, c
 			for _, b := range r.Buckets {
 				windows = append(windows, fleet.StatusWindow{Window: b.Window, UsedPct: b.UsedPct, ResetsAt: b.ResetsAt, Scope: b.Scope.Kind, Model: b.Scope.Name})
 			}
-			band = fleet.StatusBand(policy, r.Pool, r.Class, r.Stale, windows, now)
+			band = fleet.StatusBand(policy, r.Pool, classes[r.Pool], r.Stale, windows, now)
 			for _, b := range r.Buckets {
 				row := quotaStatusRow{window: b.Window, used: "-", resets: "-"}
 				if b.UsedPct != nil {

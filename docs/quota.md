@@ -480,7 +480,10 @@ every host reads the same entry; a pool with no fingerprint there refuses with
 
 `panewire quota status` lists a row for each credit pool on a host that
 publishes it (the harness is installed). The text table's credit row shows the
-manual entry's used share and the time until it expires. The entry's state
+used share of the entry the `credit` state reads (the unexpired entry that
+expires last; when none is unexpired, the newest recorded entry) and the time
+until it expires. The band of every row is judged under the pool's admission
+class (`[pools.<pool>] class`), so an excluded pool reads `excluded`. The entry's state
 (`live`, `expired`, `absent`, or `unknown` when the store could not be read) and
 this host's presence (`present`, `absent` or `unknown`) are the `credit` and
 `presence` fields of `--json`, with `class`, so an operator can see why a credit
