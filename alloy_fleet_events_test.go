@@ -31,17 +31,14 @@ func fleetEventsBlock(t *testing.T, config string) string {
 	return text[begin : end+len(fleetEventsEnd)]
 }
 
-// The pipeline is identical on both platforms and keeps Loki's label set to
-// host, os_host, tool, kind and outcome (plus the source and external labels).
-// host is the fleet machine id when MACHINE_ID is set.
+// Both platforms keep Loki's label set to host, os_host, tool, kind and
+// outcome (plus the source and external labels). Linux uses explicit paths;
+// macOS can glob because the user agent owns the tool state directories.
 func TestAlloyFleetEventsLabelContract(t *testing.T) {
 	linux := fleetEventsBlock(t, "deploy/alloy/config.linux.alloy")
-	if mac := fleetEventsBlock(t, "deploy/alloy/config.mac.alloy"); mac != linux {
-		t.Fatal("the fleet events block must be the same in both configs")
-	}
+	mac := fleetEventsBlock(t, "deploy/alloy/config.mac.alloy")
 	for _, required := range []string{
 		`sys.env("FLEET_EVENTS_ROOT")`,
-		`/*/events/fleet-events.jsonl"`,
 		"forward_to = [loki.write.cloud.receiver]",
 		`values = ["filename"]`,
 		"stage.limit {",
@@ -52,6 +49,9 @@ func TestAlloyFleetEventsLabelContract(t *testing.T) {
 		if !strings.Contains(linux, required) {
 			t.Fatalf("fleet events block lacks %s", required)
 		}
+	}
+	if !strings.Contains(mac, `/*/events/fleet-events.jsonl"`) {
+		t.Fatal("macOS fleet events must keep the user-state directory glob")
 	}
 	labels := regexp.MustCompile(`(?s)stage\.labels \{\s*values = \{(.*?)\}`).FindStringSubmatch(linux)
 	if labels == nil {
@@ -146,8 +146,8 @@ func (run *alloyFleetRun) echoed(job string) []string {
 	return lines
 }
 
-func fleetEventLine(job, ts string) string {
-	return `{"ts":"` + ts + `","host":"node-a","tool":"runtug","kind":"spawn","job":"` + job + `","outcome":"refused","reason":"config","detail":"exit=70 quota gate refused"}` + "\n"
+func fleetEventLine(tool, job, ts string) string {
+	return `{"ts":"` + ts + `","host":"node-a","tool":"` + tool + `","kind":"spawn","job":"` + job + `","outcome":"refused","reason":"config","detail":"exit=70 quota gate refused"}` + "\n"
 }
 
 func appendLine(t *testing.T, path, line string) {
@@ -186,17 +186,27 @@ func TestAlloyFleetEventsPipelineShipsLabelledLines(t *testing.T) {
 	}
 	root := filepath.Join(work, "state")
 	storage := filepath.Join(work, "data")
-	events := filepath.Join(root, "runtug", "events", "fleet-events.jsonl")
-	if err := os.MkdirAll(filepath.Dir(events), 0o750); err != nil {
-		t.Fatal(err)
+	var eventFiles []string
+	for _, tool := range []string{"panewire", "mergewake"} {
+		events := filepath.Join(root, tool, "events", "fleet-events.jsonl")
+		if err := os.MkdirAll(filepath.Dir(events), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		eventFiles = append(eventFiles, events)
+		appendLine(t, events+".1", fleetEventLine(tool, "job-rotated-"+tool, "2026-11-01T00:00:00Z"))
+		appendLine(t, events, fleetEventLine(tool, "job-before-"+tool, "2026-11-01T12:34:56.789Z"))
 	}
-	appendLine(t, events+".1", fleetEventLine("job-rotated", "2026-11-01T00:00:00Z"))
-	appendLine(t, events, fleetEventLine("job-before", "2026-11-01T12:34:56.789Z"))
 
 	first := startAlloyFleetRun(t, alloy, configPath, storage, root, "")
-	eventually(t, 60*time.Second, "the line written before start", func() bool { return len(first.echoed("job-before")) == 1 })
-	echoed := first.echoed("job-before")[0]
-	for _, want := range []string{`{host=\"node-a\"`, `os_host=\"node-a\"`, `tool=\"runtug\"`, `kind=\"spawn\"`, `outcome=\"refused\"`, `source=\"fleet_events\"`, "entry_timestamp=2026-11-01T12:34:56.789Z"} {
+	for _, tool := range []string{"panewire", "mergewake"} {
+		job := "job-before-" + tool
+		eventually(t, 60*time.Second, "the "+tool+" line written before start", func() bool { return len(first.echoed(job)) == 1 })
+		if echoed := first.echoed(job)[0]; !strings.Contains(echoed, `tool="`+tool+`"`) {
+			t.Fatalf("%s path emitted the wrong tool label: %s", tool, echoed)
+		}
+	}
+	echoed := first.echoed("job-before-panewire")[0]
+	for _, want := range []string{`{host=\"node-a\"`, `os_host=\"node-a\"`, `tool=\"panewire\"`, `kind=\"spawn\"`, `outcome=\"refused\"`, `source=\"fleet_events\"`, "entry_timestamp=2026-11-01T12:34:56.789Z"} {
 		if !strings.Contains(echoed, want) {
 			t.Fatalf("echoed entry lacks %s:\n%s", want, echoed)
 		}
@@ -212,7 +222,7 @@ func TestAlloyFleetEventsPipelineShipsLabelledLines(t *testing.T) {
 	_ = first.command.Process.Signal(os.Interrupt)
 	_ = first.command.Wait()
 
-	appendLine(t, events, fleetEventLine("job-while-down", "2026-11-01T12:35:00Z"))
+	appendLine(t, eventFiles[0], fleetEventLine("panewire", "job-while-down", "2026-11-01T12:35:00Z"))
 	second := startAlloyFleetRun(t, alloy, configPath, storage, root, "fleet-a")
 	eventually(t, 60*time.Second, "the line written while alloy was down", func() bool { return len(second.echoed("job-while-down")) == 1 })
 	for _, want := range []string{`{host=\"fleet-a\"`, `os_host=\"node-a\"`} {
@@ -222,10 +232,13 @@ func TestAlloyFleetEventsPipelineShipsLabelledLines(t *testing.T) {
 	}
 	time.Sleep(time.Second)
 	second.stop()
-	if n := len(second.echoed("job-before")); n != 0 {
+	if n := len(second.echoed("job-before-panewire")) + len(second.echoed("job-before-mergewake")); n != 0 {
 		t.Fatalf("the restart re-shipped %d already shipped line(s)", n)
 	}
-	if len(first.echoed("job-rotated"))+len(second.echoed("job-rotated")) != 0 {
-		t.Fatal("the rotated generation was shipped")
+	for _, tool := range []string{"panewire", "mergewake"} {
+		job := "job-rotated-" + tool
+		if len(first.echoed(job))+len(second.echoed(job)) != 0 {
+			t.Fatalf("the rotated %s generation was shipped", tool)
+		}
 	}
 }
