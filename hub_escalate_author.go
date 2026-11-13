@@ -239,10 +239,7 @@ func (h *HubServer) escalateAuthor(ctx context.Context, request hubEscalateAutho
 			return h.escalateAuthorRefusal(ctx, request, ownerLane, "job_not_marked", "the old record was not written lost: "+why, true)
 		}
 	}
-	if requestID, _, _, err := h.inbox.store.spawnRoleOwner(ctx, spawn.RoleKey()); err == nil && requestID == holder.Request.RequestID {
-		_ = h.inbox.store.releaseCompletedSpawnRole(ctx, requestID, spawn.RoleKey())
-	}
-	if _, _, err := h.inbox.store.claimSpawn(ctx, next, newJob, ownerLane, h.now().UTC()); err != nil {
+	if _, _, err := h.inbox.store.claimSpawnReplacing(ctx, next, newJob, ownerLane, h.now().UTC(), holder.Request.RequestID, spawn.RoleKey()); err != nil {
 		return h.escalateAuthorRefusal(ctx, request, ownerLane, "claim_refused", err.Error(), true)
 	}
 	select {

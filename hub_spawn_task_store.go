@@ -66,6 +66,12 @@ func (s *laneInboxStore) ensureSpawnTasks() error {
 }
 
 func (s *laneInboxStore) claimSpawn(parent context.Context, request fleet.Submission, job, owner string, now time.Time) (hubSpawnTask, bool, error) {
+	return s.claimSpawnReplacing(parent, request, job, owner, now, "", "")
+}
+
+// claimSpawnReplacing transfers the task role in the same transaction as the
+// successor claim, so another worker cannot claim the gap between them.
+func (s *laneInboxStore) claimSpawnReplacing(parent context.Context, request fleet.Submission, job, owner string, now time.Time, previousID, roleKey string) (hubSpawnTask, bool, error) {
 	ctx, done := s.op(parent)
 	defer done()
 	spawn, err := fleet.ValidateSubmission(request)
@@ -101,6 +107,16 @@ func (s *laneInboxStore) claimSpawn(parent context.Context, request fleet.Submis
 	var taskRole any
 	if spawn.Task != "" && spawn.ParentJob == "" {
 		taskRole = spawn.RoleKey()
+	}
+	if previousID != "" {
+		result, err := tx.ExecContext(ctx, s.q(`UPDATE spawn_reservations SET task_role=NULL WHERE request_id=? AND task_role=?`), previousID, roleKey)
+		if err != nil {
+			return hubSpawnTask{}, false, err
+		}
+		if n, _ := result.RowsAffected(); n != 1 {
+			return hubSpawnTask{}, false, errSpawnClaimed
+		}
+		taskRole = roleKey
 	}
 	claimed, err := tx.ExecContext(ctx, s.q(`INSERT INTO spawn_reservations(job,request_id,task_role) VALUES(?,?,?) ON CONFLICT DO NOTHING`), job, request.RequestID, taskRole)
 	if err != nil {

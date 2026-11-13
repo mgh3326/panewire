@@ -629,3 +629,16 @@ func TestEscalateAuthorPendingReplayDoesNotReportSuccess(t *testing.T) {
 		t.Fatalf("pending placement reported success: %+v", result)
 	}
 }
+
+func TestEscalateAuthorTransfersWorkerReservation(t *testing.T) {
+	f := newEscalateFixture(t, "author-reservation")
+	placed := placedAnywhere
+	result, _ := f.escalate(t, &placed)
+	if result.Job == "" {
+		t.Fatalf("successor did not place: %+v", result)
+	}
+	_, job, _, err := f.hub.inbox.store.spawnRoleOwner(t.Context(), "42:worker")
+	if err != nil || job != result.Job {
+		t.Fatalf("worker reservation = %q, %v; want %q", job, err, result.Job)
+	}
+}
