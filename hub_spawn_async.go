@@ -325,7 +325,6 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 	outcome := hubSpawnOutcome{Stage: "placement", StageMS: map[string]int64{}}
 	app.Hub = transport
 	app.State = directSpawnState{h}
-	app.Wake = directSpawnWake{h}
 	app.PlacementHosts = func(ctx context.Context, cwd string) ([]fleet.HostView, error) {
 		raw, err := json.Marshal(h.placement(ctx, "worker", cwd))
 		if err != nil {
@@ -410,26 +409,6 @@ func (s directSpawnState) Snapshot(ctx context.Context) (fleet.FleetSnapshot, er
 		err = json.Unmarshal(raw, &snap)
 	}
 	return snap, err
-}
-
-type directSpawnWake struct{ h *HubServer }
-
-// Wake waits for the woken host's own heartbeat for at most the caller's
-// wake_wait. requestNodeWake otherwise waits until ctx is done — the whole
-// spawn deadline — and a coordinator worker holding a wake open that long
-// starves the four-worker spawn queue, so unrelated requests expire before a
-// worker starts them.
-func (w directSpawnWake) Wake(ctx context.Context, host string, request fleet.WakeRequest) error {
-	if request.WaitSeconds > 0 {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, time.Duration(request.WaitSeconds)*time.Second)
-		defer cancel()
-	}
-	_, code := w.h.requestNodeWake(ctx, host)
-	if code != "" {
-		return errors.New("node wake refused")
-	}
-	return nil
 }
 
 // spawnQueueWaitFix names the step that ran out of time when the coordinator

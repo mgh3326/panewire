@@ -80,8 +80,8 @@ A file written before hk 3570 may carry `HANDOFFKEEP_TOKEN` instead of
 ([config.md](config.md#handoffkeep-service-credential)).
 
 The same file format is the node's `spawn.json` `handoffkeep_env` (brief
-fetch) and the hub's `--chat-env`. When the CF Access pair is present, every
-handoffkeep request (relay, chat, node brief fetch) sends it with the bearer; a
+fetch) and the hub's relay store. When the CF Access pair is present, every
+handoffkeep request (relay, node brief fetch) sends it with the bearer; a
 file with only one of the two is refused.
 
 Values never appear in a log line or an error message. A plaintext `http://`
@@ -150,7 +150,8 @@ spends an attempt, the hub closes these rows. Each gets a `delivered_to` of
   which is the node outbox's own default bound (`stale`). A row with no
   `received_at` is never aged out.
 
-Chat rows keep the chat store as their only authority and skip this gate.
+Legacy `chat-N` rows, written before the operator chat was removed, retire
+at replay (`chat-terminal`) and are never injected.
 
 **An unproven pane submission is replayed at most once (#1002, #1034).** A
 `relay.unconfirmed` report that matches a live window still retires the
@@ -176,7 +177,7 @@ before. A marked row gets **at most one** replay whose pane text is prefixed
 duplicate, do not re-run]` — the original send named by the row's `event_time`
 (`received_at` for older rows) — and no labelled copy is ever queued until
 the durable retire for that row has already succeeded. Once the listed row
-clears the pre-queue gates (chat store, age, attempts, dedupe, route) the
+clears the pre-queue gates (age, attempts, dedupe, route) the
 walk re-reads it — a listing page is stale the moment it is taken — and a
 row that is delivered, retired, or gone is left to its marker rather than
 injected. Only then is the retire written, `delivered_to`
@@ -189,7 +190,7 @@ broadcasts `relay.unrouted` and logs one warning naming the row, and never
 re-marks it. The spent marker then retires with
 `hub/replay-retired:unconfirmed-mark`; a marker whose original is already
 delivered, exhausted, or gone retires on sight. Every other row class —
-never-attempted, held, exhausted, chat, sink — replays exactly as before.
+never-attempted, held, exhausted, sink — replays exactly as before.
 
 The lane-stall observation counts a marked row as ordinary backlog until its
 one replay retires it — bounded by the next trigger that can route the row,
@@ -197,7 +198,7 @@ never forever. The marker row itself is on an unroutable lane and never
 counts.
 
 **A successful replay is announced too (#961).** Once a re-injection has
-cleared every gate — the delivered and retired rows, the chat gate, the age
+cleared every gate — the delivered and retired rows, the age
 gates, `attempts < 3`, dedupe, route resolution, and the sink rejection —
 and the directive is queued and the attempt recorded, the hub logs one Info
 line and broadcasts `relay.replay_injected` with

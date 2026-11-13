@@ -159,7 +159,6 @@ func New(out, errout io.Writer) (*App, error) {
 	cliQuota.SharedLatest = a.sharedLatest
 	a.Quota = admissionQuota{cliQuota, a}
 	a.Source = stateSource{a: a, inner: fleetSource{a}}
-	a.Wake = cliWaker{a}
 	a.LoadRatio = a.loadRatio
 	a.Version = BuildVersion
 	a.EnforceTrust = true

@@ -22,7 +22,7 @@ the client refused, a rejected request.
 |---|---|---|
 | `panewire inbox` (CLI, direct or through the node daemon) | list, read, ack, count, status, and the wait's long poll | none: every inbox command is idempotent |
 | `panewire spawn` | the submit (`POST /v1/spawns`, keyed by its request id), the spawn-status reads that `--wait` follows | `POST /v1/spawn`, which is not keyed |
-| node daemon → hub (`nodeHubClient`) | every GET, PUT and DELETE; `POST /v1/inbox/ack` and `POST /v1/inbox/{id}/read` | any other POST: job close and reap, node command, wake, burst request |
+| node daemon → hub (`nodeHubClient`) | every GET, PUT and DELETE; `POST /v1/inbox/ack` and `POST /v1/inbox/{id}/read` | any other POST: job close and reap, node command |
 
 The daemon's inbox path turns its node-level retry off and lets the inbox
 command retry, so one command makes one budget, not two.

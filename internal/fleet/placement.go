@@ -88,8 +88,9 @@ type WakeRequest struct {
 	Reason      string
 }
 
-// Waker wakes an asleep host. The in-flight `panewire node wake` command is
-// the production implementation; tests substitute a fake.
+// Waker wakes an asleep host. No production implementation remains (the
+// `panewire node wake` command was removed); tests substitute a fake, and
+// an unset Wake reports "no waker configured".
 type Waker interface {
 	Wake(ctx context.Context, host string, req WakeRequest) error
 }

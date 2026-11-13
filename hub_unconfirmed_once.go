@@ -146,7 +146,7 @@ func (h *HubServer) markRelayEventUnconfirmedContext(ctx context.Context, pendin
 		return true
 	}
 	markID := unconfirmedMarkEventID(record.ID)
-	if h.inbox != nil && record.Kind == "lane.event" && !chatRelayEventPattern.MatchString(record.EventID) {
+	if h.inbox != nil && record.Kind == "lane.event" {
 		// An unreadable batch table cannot prove the mark unneeded or ordinary,
 		// so the window is kept like a failed marker POST.
 		isBatch, err := h.inbox.store.isDigestBatch(record.OwnerLane, record.EventID)
@@ -231,36 +231,25 @@ func (h *HubServer) replayMarkedUnconfirmed(ctx context.Context, record handoffk
 	if h.handoffkeep == nil {
 		return
 	}
-	event := h.replayedRelayEvent(record)
+	event := relayEventFromRecord(record)
 	if event.OwnerLane == "" || event.JobID == "" {
 		return
 	}
 	if record.DeliveredAt != "" || strings.HasPrefix(record.DeliveredTo, relayReplayRetiredMarker) {
 		return
 	}
-	if match := chatRelayEventPattern.FindStringSubmatch(record.EventID); match != nil {
-		if chatID, err := strconv.ParseInt(match[1], 10, 64); err == nil {
-			switch h.chatReplayDisposition(chatID) {
-			case "retire":
-				if err := h.handoffkeep.markDelivered(ctx, record.ID, "hub", "chat-terminal"); err != nil {
-					h.logger.Warn("terminal chat relay row was not retired", "event_id", record.ID)
-				}
-				return
-			case "defer":
-				return
-			}
+	if legacyChatRelayEventPattern.MatchString(record.EventID) {
+		if err := h.handoffkeep.markDelivered(ctx, record.ID, "hub", "chat-terminal"); err != nil {
+			h.logger.Warn("legacy chat relay row was not retired", "event_id", record.ID)
 		}
-	} else if reason := h.relayReplayRetireReasonAged(record, receiptAge); reason != "" {
+		return
+	}
+	if reason := h.relayReplayRetireReasonAged(record, receiptAge); reason != "" {
 		h.retireRelayReplay(record, reason)
 		return
 	}
 	if record.Attempts >= relayReplayMaxAttempts {
 		h.broadcastRelayReplayExhausted(record)
-		if match := chatRelayEventPattern.FindStringSubmatch(record.EventID); match != nil {
-			if chatID, err := strconv.ParseInt(match[1], 10, 64); err == nil {
-				h.noteChatRelayExhausted(chatID)
-			}
-		}
 		return
 	}
 	key := relayEventDedupeKey(record.Kind, event)
@@ -327,13 +316,6 @@ func (h *HubServer) replayMarkedUnconfirmed(ctx context.Context, record handoffk
 		return
 	}
 	h.armRelayAckEvent(record.ID, event.JobID)
-	if record.Kind == "lane.event" {
-		if match := chatRelayEventPattern.FindStringSubmatch(record.EventID); match != nil {
-			if chatID, err := strconv.ParseInt(match[1], 10, 64); err == nil {
-				h.noteChatRelayDelivered(chatID, record.Question)
-			}
-		}
-	}
 	firstSent := "unknown"
 	if stamp, ok := unconfirmedMarkFirstSent(record); ok {
 		firstSent = stamp.Format(time.RFC3339)
@@ -363,7 +345,7 @@ func (h *HubServer) retireUnconfirmedDigest(record handoffkeepRelayEvent, digest
 		// no copy is injected. A later run with the store retires and releases.
 		return digestMark && h.handoffkeep != nil && record.DeliveredAt == "" && !strings.HasPrefix(record.DeliveredTo, relayReplayRetiredMarker)
 	}
-	if h.handoffkeep == nil || record.Kind != "lane.event" || record.DeliveredAt != "" || strings.HasPrefix(record.DeliveredTo, relayReplayRetiredMarker) || chatRelayEventPattern.MatchString(record.EventID) {
+	if h.handoffkeep == nil || record.Kind != "lane.event" || record.DeliveredAt != "" || strings.HasPrefix(record.DeliveredTo, relayReplayRetiredMarker) {
 		return false
 	}
 	isBatch, err := h.inbox.store.isDigestBatch(record.OwnerLane, record.EventID)
@@ -390,7 +372,7 @@ func (h *HubServer) retireUnconfirmedDigest(record handoffkeepRelayEvent, digest
 // one labelled replay. A failed lookup or retire replays nothing; the next
 // trigger tries again. Chat rows keep the chat store as their authority.
 func (h *HubServer) retireUnconfirmedSettledInInbox(record handoffkeepRelayEvent) bool {
-	if h.inbox == nil || h.handoffkeep == nil || record.DeliveredAt != "" || strings.HasPrefix(record.DeliveredTo, relayReplayRetiredMarker) || chatRelayEventPattern.MatchString(record.EventID) {
+	if h.inbox == nil || h.handoffkeep == nil || record.DeliveredAt != "" || strings.HasPrefix(record.DeliveredTo, relayReplayRetiredMarker) {
 		return false
 	}
 	settled, err := h.inbox.store.settled(relayEventDedupeKey(record.Kind, relayEventFromRecord(record)))

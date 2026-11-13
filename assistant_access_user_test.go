@@ -37,7 +37,7 @@ func accessUserBaseClaims(now time.Time) map[string]any {
 
 func accessUserServer(t *testing.T, hk *fakeAssistantHK, subjects []string, mutate func(*assistantConfig)) (*assistantServer, *bytes.Buffer) {
 	t.Helper()
-	certs := chatTestCerts(t, chatTestSigningKey())
+	certs := cfAccessTestCerts(t, cfAccessTestSigningKey())
 	return accessUserServerWithCerts(t, hk, certs.URL, subjects, mutate)
 }
 
@@ -198,9 +198,9 @@ func TestAccessUserAssertionOutcomes(t *testing.T) {
 			srv, logs := accessUserServer(t, hk, []string{accessUserSub}, nil)
 			key := spec.key
 			if key == nil {
-				key = chatTestSigningKey()
+				key = cfAccessTestSigningKey()
 			}
-			jwt := chatSignJWTClaims(t, key, spec.kid, spec.claims)
+			jwt := cfAccessSignJWTClaims(t, key, spec.kid, spec.claims)
 			writer := accessUserPost(srv, http.MethodPost, "/mcp", jwt, "", nil)
 			if spec.reason == "" {
 				if writer.Code != http.StatusOK {
@@ -269,7 +269,7 @@ func TestAccessUserExpNbfBoundary(t *testing.T) {
 			if tc.setNbf {
 				claims["nbf"] = tc.nbf
 			}
-			jwt := chatSignJWTClaims(t, chatTestSigningKey(), "k1", claims)
+			jwt := cfAccessSignJWTClaims(t, cfAccessTestSigningKey(), "k1", claims)
 			writer := accessUserPost(srv, http.MethodPost, "/mcp", jwt, "", nil)
 			if tc.reason == "" {
 				if writer.Code != http.StatusOK {
@@ -301,7 +301,7 @@ func TestMutantAccessUserEmptyIssRejected(t *testing.T) {
 			} else {
 				claims["iss"] = ""
 			}
-			jwt := chatSignJWTClaims(t, chatTestSigningKey(), "k1", claims)
+			jwt := cfAccessSignJWTClaims(t, cfAccessTestSigningKey(), "k1", claims)
 			writer := accessUserPost(srv, http.MethodPost, "/mcp", jwt, "", nil)
 			assertGenericUnauthorized(t, writer)
 			line := auditWithResult(t, logs, "iss_missing")
@@ -318,7 +318,7 @@ func TestMutantAccessUserNoBearerFallback(t *testing.T) {
 	now := time.Now()
 	hk := newFakeAssistantHK(t)
 	srv, logs := accessUserServer(t, hk, []string{accessUserSub}, nil)
-	valid := chatSignJWTClaims(t, chatTestSigningKey(), "k1", accessUserBaseClaims(now))
+	valid := cfAccessSignJWTClaims(t, cfAccessTestSigningKey(), "k1", accessUserBaseClaims(now))
 
 	missing := accessUserPost(srv, http.MethodPost, "/mcp", "", assistantTestBerryToken, nil)
 	assertGenericUnauthorized(t, missing)
@@ -354,7 +354,7 @@ func TestMutantAccessUserEmailIsNotPrincipal(t *testing.T) {
 	srv, logs := accessUserServer(t, hk, []string{accessUserSub}, nil)
 	claims := accessUserBaseClaims(now)
 	claims["email"] = "not-on-the-list@example.test"
-	jwt := chatSignJWTClaims(t, chatTestSigningKey(), "k1", claims)
+	jwt := cfAccessSignJWTClaims(t, cfAccessTestSigningKey(), "k1", claims)
 	writer := accessUserPost(srv, http.MethodPost, "/mcp", jwt, "", nil)
 	if writer.Code != http.StatusOK {
 		t.Fatalf("sub allowlisted, foreign email status=%d body=%s", writer.Code, writer.Body.String())
@@ -371,7 +371,7 @@ func TestMutantAccessUserEmailIsNotPrincipal(t *testing.T) {
 	emailKey := accessUserBaseClaims(now)
 	emailKey["sub"] = "some-other-sub"
 	emailKey["email"] = accessUserEmail
-	writer = accessUserPost(srv2, http.MethodPost, "/mcp", chatSignJWTClaims(t, chatTestSigningKey(), "k1", emailKey), "", nil)
+	writer = accessUserPost(srv2, http.MethodPost, "/mcp", cfAccessSignJWTClaims(t, cfAccessTestSigningKey(), "k1", emailKey), "", nil)
 	assertGenericUnauthorized(t, writer)
 	auditWithResult(t, logs2, "subject_not_allowlisted")
 	assertNoHK(t, hk2)
@@ -382,10 +382,10 @@ func TestMutantAccessUserEmailIsNotPrincipal(t *testing.T) {
 	shared := accessUserBaseClaims(now)
 	shared["email"] = "shared@example.test"
 	shared["sub"] = "sub-b"
-	denied := accessUserPost(srv3, http.MethodPost, "/mcp", chatSignJWTClaims(t, chatTestSigningKey(), "k1", shared), "", nil)
+	denied := accessUserPost(srv3, http.MethodPost, "/mcp", cfAccessSignJWTClaims(t, cfAccessTestSigningKey(), "k1", shared), "", nil)
 	assertGenericUnauthorized(t, denied)
 	shared["sub"] = "sub-a"
-	allowed := accessUserPost(srv3, http.MethodPost, "/mcp", chatSignJWTClaims(t, chatTestSigningKey(), "k1", shared), "", nil)
+	allowed := accessUserPost(srv3, http.MethodPost, "/mcp", cfAccessSignJWTClaims(t, cfAccessTestSigningKey(), "k1", shared), "", nil)
 	if allowed.Code != http.StatusOK {
 		t.Fatalf("allowlisted sub with a shared email status=%d", allowed.Code)
 	}
@@ -403,7 +403,7 @@ func TestMutantAccessUserServiceTokenRejected(t *testing.T) {
 	claims["sub"] = ""
 	claims["common_name"] = "berry.svc"
 	claims["email"] = "berry.svc"
-	writer := accessUserPost(srv, http.MethodPost, "/mcp", chatSignJWTClaims(t, chatTestSigningKey(), "k1", claims), "", nil)
+	writer := accessUserPost(srv, http.MethodPost, "/mcp", cfAccessSignJWTClaims(t, cfAccessTestSigningKey(), "k1", claims), "", nil)
 	assertGenericUnauthorized(t, writer)
 	auditWithResult(t, logs, "service_token")
 	assertNoHK(t, hk)
@@ -412,7 +412,7 @@ func TestMutantAccessUserServiceTokenRejected(t *testing.T) {
 	logs.Reset()
 	user := accessUserBaseClaims(now)
 	user["common_name"] = "berry.svc"
-	ok := accessUserPost(srv, http.MethodPost, "/mcp", chatSignJWTClaims(t, chatTestSigningKey(), "k1", user), "", nil)
+	ok := accessUserPost(srv, http.MethodPost, "/mcp", cfAccessSignJWTClaims(t, cfAccessTestSigningKey(), "k1", user), "", nil)
 	if ok.Code != http.StatusOK {
 		t.Fatalf("user sub with an extra common_name status=%d body=%s", ok.Code, ok.Body.String())
 	}
@@ -429,14 +429,14 @@ func TestMutantAccessUserAUDRequired(t *testing.T) {
 	srv, logs := accessUserServer(t, hk, []string{accessUserSub}, nil)
 	claims := accessUserBaseClaims(now)
 	claims["aud"] = assistantTestAUD + "-other"
-	writer := accessUserPost(srv, http.MethodPost, "/mcp", chatSignJWTClaims(t, chatTestSigningKey(), "k1", claims), "", nil)
+	writer := accessUserPost(srv, http.MethodPost, "/mcp", cfAccessSignJWTClaims(t, cfAccessTestSigningKey(), "k1", claims), "", nil)
 	assertGenericUnauthorized(t, writer)
 	auditWithResult(t, logs, "aud_mismatch")
 	assertNoHK(t, hk)
 
 	logs.Reset()
 	claims["aud"] = []string{"nope", assistantTestAUD}
-	listed := accessUserPost(srv, http.MethodPost, "/mcp", chatSignJWTClaims(t, chatTestSigningKey(), "k1", claims), "", nil)
+	listed := accessUserPost(srv, http.MethodPost, "/mcp", cfAccessSignJWTClaims(t, cfAccessTestSigningKey(), "k1", claims), "", nil)
 	if listed.Code != http.StatusOK {
 		t.Fatalf("aud list containing the assistant aud status=%d", listed.Code)
 	}
@@ -461,7 +461,7 @@ func TestBearerModeStillRequiresBearer(t *testing.T) {
 
 func TestServiceModeStillRequiresBearer(t *testing.T) {
 	hk := newFakeAssistantHK(t)
-	certs := chatTestCerts(t, chatTestSigningKey())
+	certs := cfAccessTestCerts(t, cfAccessTestSigningKey())
 	srv, logs := assistantTestServer(t, hk, func(cfg *assistantConfig) {
 		cfg.AuthMode = assistantAuthModeService
 		cfg.CFTeam = "team"
@@ -475,7 +475,7 @@ func TestServiceModeStillRequiresBearer(t *testing.T) {
 		"aud": []string{assistantTestAUD}, "exp": now.Add(time.Hour).Unix(), "iat": now.Unix(),
 		"common_name": "berry.svc",
 	}
-	jwt := chatSignJWTClaims(t, chatTestSigningKey(), "k1", claims)
+	jwt := cfAccessSignJWTClaims(t, cfAccessTestSigningKey(), "k1", claims)
 	noBearer := accessUserPost(srv, http.MethodPost, "/mcp", jwt, "", nil)
 	assertGenericUnauthorized(t, noBearer)
 	assertNoHK(t, hk)
@@ -545,7 +545,7 @@ func TestAccessUserPlantedValuesNeverSurface(t *testing.T) {
 		plantJWKS   = "PLANT-JWKS-1470-9f3c"
 		plantNonce  = "PLANT-NONCE-1470-9f3c"
 	)
-	key := chatTestSigningKey()
+	key := cfAccessTestSigningKey()
 	certs := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		jwk := map[string]any{
 			"kty": "RSA", "kid": "k1", "alg": "RS256", "use": "sig",
@@ -580,7 +580,7 @@ func TestAccessUserCallerHeadersDoNotSetPrincipal(t *testing.T) {
 	)
 	hk := newFakeAssistantHK(t)
 	srv, logs := accessUserServer(t, hk, []string{accessUserSub}, nil)
-	jwt := chatSignJWTClaims(t, chatTestSigningKey(), "k1", accessUserBaseClaims(time.Now()))
+	jwt := cfAccessSignJWTClaims(t, cfAccessTestSigningKey(), "k1", accessUserBaseClaims(time.Now()))
 	extra := http.Header{}
 	extra.Set("Cf-Access-Authenticated-User-Email", headerEmail)
 	extra.Set("Cf-Access-Authenticated-User-Id", headerSub)
@@ -609,7 +609,7 @@ func TestAccessUserJWKSFailureDenies(t *testing.T) {
 	t.Cleanup(certs.Close)
 	hk := newFakeAssistantHK(t)
 	srv, logs := accessUserServerWithCerts(t, hk, certs.URL, []string{accessUserSub}, nil)
-	jwt := chatSignJWTClaims(t, chatTestSigningKey(), "k1", accessUserBaseClaims(time.Now()))
+	jwt := cfAccessSignJWTClaims(t, cfAccessTestSigningKey(), "k1", accessUserBaseClaims(time.Now()))
 	writer := accessUserPost(srv, http.MethodPost, "/mcp", jwt, "", nil)
 	assertGenericUnauthorized(t, writer)
 	auditWithResult(t, logs, "jwks_unavailable")
@@ -637,7 +637,7 @@ func TestAccessUserNoPathBypasses(t *testing.T) {
 		assertGenericUnauthorized(t, writer)
 	}
 	assertNoHK(t, hk)
-	jwt := chatSignJWTClaims(t, chatTestSigningKey(), "k1", accessUserBaseClaims(time.Now()))
+	jwt := cfAccessSignJWTClaims(t, cfAccessTestSigningKey(), "k1", accessUserBaseClaims(time.Now()))
 	authedWrongPath := accessUserPost(srv, http.MethodGet, "/healthz", jwt, "", nil)
 	if authedWrongPath.Code != http.StatusNotFound {
 		t.Fatalf("authed healthz status=%d, want 404", authedWrongPath.Code)
@@ -650,7 +650,7 @@ func TestAccessUserNoPathBypasses(t *testing.T) {
 func TestAccessUserWellKnownPathDoesNotShadow(t *testing.T) {
 	const planted = "PLANT-WELLKNOWN-ASSERTION-1470"
 	wellKnown := "/.well-known/cloudflare-access-protected-resource/mcp"
-	jwt := chatSignJWTClaims(t, chatTestSigningKey(), "k1", accessUserBaseClaims(time.Now()))
+	jwt := cfAccessSignJWTClaims(t, cfAccessTestSigningKey(), "k1", accessUserBaseClaims(time.Now()))
 	assertNotShadowed := func(writer *httptest.ResponseRecorder) {
 		t.Helper()
 		if writer.Code != http.StatusNotFound {
@@ -749,7 +749,7 @@ func TestAccessUserPrincipalAuditedNotSentToHK(t *testing.T) {
 	hk := newFakeAssistantHK(t)
 	hk.failNonGET = true
 	hub := newFakeAssistantHub(t)
-	certs := chatTestCerts(t, chatTestSigningKey())
+	certs := cfAccessTestCerts(t, cfAccessTestSigningKey())
 	srv, logs := assistantWriteServer(t, hk, hub, assistantWritesAll, func(cfg *assistantConfig) {
 		cfg.AuthMode = assistantAuthModeAccessUser
 		cfg.CFTeam = "team"
@@ -757,7 +757,7 @@ func TestAccessUserPrincipalAuditedNotSentToHK(t *testing.T) {
 		cfg.CFCertsURL = certs.URL
 		cfg.CFSubjects = []string{accessUserSub}
 	})
-	jwt := chatSignJWTClaims(t, chatTestSigningKey(), "k1", accessUserBaseClaims(time.Now()))
+	jwt := cfAccessSignJWTClaims(t, cfAccessTestSigningKey(), "k1", accessUserBaseClaims(time.Now()))
 	read := accessUserTool(t, srv, jwt, "pending_list", map[string]any{})
 	if read.isError || read.httpCode != http.StatusOK {
 		t.Fatalf("pending_list: code=%d err=%v text=%s", read.httpCode, read.isError, read.text)
@@ -860,7 +860,7 @@ func TestAccessUserAudiencesKeepEveryValue(t *testing.T) {
 	srv, logs := accessUserServer(t, hk, []string{accessUserSub}, nil)
 	claims := accessUserBaseClaims(now)
 	claims["aud"] = []string{"extra-aud-value", assistantTestAUD}
-	jwt := chatSignJWTClaims(t, chatTestSigningKey(), "k1", claims)
+	jwt := cfAccessSignJWTClaims(t, cfAccessTestSigningKey(), "k1", claims)
 	writer := accessUserPost(srv, http.MethodPost, "/mcp", jwt, "", nil)
 	if writer.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", writer.Code, writer.Body.String())
@@ -874,7 +874,7 @@ func TestAccessUserAudiencesKeepEveryValue(t *testing.T) {
 
 	logs.Reset()
 	claims["aud"] = assistantTestAUD
-	jwt = chatSignJWTClaims(t, chatTestSigningKey(), "k1", claims)
+	jwt = cfAccessSignJWTClaims(t, cfAccessTestSigningKey(), "k1", claims)
 	writer = accessUserPost(srv, http.MethodPost, "/mcp", jwt, "", nil)
 	if writer.Code != http.StatusOK {
 		t.Fatalf("string aud status=%d body=%s", writer.Code, writer.Body.String())
@@ -885,7 +885,7 @@ func TestAccessUserAudiencesKeepEveryValue(t *testing.T) {
 
 	logs.Reset()
 	claims["aud"] = []string{"other-a", "other-b"}
-	jwt = chatSignJWTClaims(t, chatTestSigningKey(), "k1", claims)
+	jwt = cfAccessSignJWTClaims(t, cfAccessTestSigningKey(), "k1", claims)
 	writer = accessUserPost(srv, http.MethodPost, "/mcp", jwt, "", nil)
 	assertGenericUnauthorized(t, writer)
 	mismatch := auditWithResult(t, logs, "aud_mismatch")
@@ -898,7 +898,7 @@ func TestAccessUserAudiencesKeepEveryValue(t *testing.T) {
 func TestAccessUserMCPHandshake(t *testing.T) {
 	hk := newFakeAssistantHK(t)
 	hub := newFakeAssistantHub(t)
-	certs := chatTestCerts(t, chatTestSigningKey())
+	certs := cfAccessTestCerts(t, cfAccessTestSigningKey())
 	srv, _ := assistantWriteServer(t, hk, hub, assistantWritesAll, func(cfg *assistantConfig) {
 		cfg.AuthMode = assistantAuthModeAccessUser
 		cfg.CFTeam = "team"
@@ -906,7 +906,7 @@ func TestAccessUserMCPHandshake(t *testing.T) {
 		cfg.CFCertsURL = certs.URL
 		cfg.CFSubjects = []string{accessUserSub}
 	})
-	jwt := chatSignJWTClaims(t, chatTestSigningKey(), "k1", accessUserBaseClaims(time.Now()))
+	jwt := cfAccessSignJWTClaims(t, cfAccessTestSigningKey(), "k1", accessUserBaseClaims(time.Now()))
 	init := accessUserRPC(srv, jwt, `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}`)
 	if init.Code != http.StatusOK {
 		t.Fatalf("initialize status=%d body=%s", init.Code, init.Body.String())
@@ -951,7 +951,7 @@ func TestMutantAccessUserWriteBlockRemoved(t *testing.T) {
 	t.Cleanup(hubBomb.Close)
 	hk := newFakeAssistantHK(t)
 	hub := newFakeAssistantHub(t)
-	certs := chatTestCerts(t, chatTestSigningKey())
+	certs := cfAccessTestCerts(t, cfAccessTestSigningKey())
 	srv, _ := assistantWriteServer(t, hk, hub, assistantWritesAll, func(cfg *assistantConfig) {
 		cfg.AuthMode = assistantAuthModeAccessUser
 		cfg.CFTeam = "team"
@@ -967,7 +967,7 @@ func TestMutantAccessUserWriteBlockRemoved(t *testing.T) {
 	if srv.hub != nil || srv.drainKick != nil || srv.limiter != nil {
 		t.Fatal("access-user wired the hub drainer")
 	}
-	jwt := chatSignJWTClaims(t, chatTestSigningKey(), "k1", accessUserBaseClaims(time.Now()))
+	jwt := cfAccessSignJWTClaims(t, cfAccessTestSigningKey(), "k1", accessUserBaseClaims(time.Now()))
 	got := accessUserListedTools(t, srv, jwt)
 	for _, name := range got {
 		if name == "answer_decision" || name == "answer_question" || name == "deliver" {
