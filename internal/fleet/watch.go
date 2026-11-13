@@ -225,6 +225,7 @@ func (a *App) watch(ctx context.Context, args []string) error {
 	var screenRead quotaStopWatch
 	var handOff quotaHandOff
 	var creditAttempts int
+	quotaRetry := false
 	var lastCredit time.Time
 	for {
 		j, e := a.job(id)
@@ -350,7 +351,7 @@ func (a *App) watch(ctx context.Context, args []string) error {
 		// An announced quota stop is watched through its hand-off grace, past
 		// the ordinary completion deadline: its fallback ends the job and
 		// releases the lease, which nothing else would.
-		if waiting == nil && !handOff.active && a.Now().After(deadline) && (!pending || latePoll) {
+		if waiting == nil && !handOff.active && !quotaRetry && a.Now().After(deadline) && (!pending || latePoll) {
 			fmt.Fprintln(a.Err, "watch-expired: job stays live; quota retained")
 			return nil
 		}
@@ -370,17 +371,26 @@ func (a *App) watch(ctx context.Context, args []string) error {
 		// reviewer stopped on its screen is not replaced there; only a worker
 		// or tester the manager announced, and a credit stop, get the grace.
 		// The lost record is what mergewake acts on, so job.lost and the lease
-		// release wait for it: while the write fails the stop is read again on
-		// the next poll and the job stays live and leased, never announced
-		// with a record the hub would take for a live job to replace.
+		// release wait for it. While the write fails the stop is read again on
+		// every poll, past the ordinary completion deadline (quotaRetry), and
+		// the pane is rechecked each time, so a pane that moved on drops the
+		// retry. A record that hk holds terminal for another outcome (the
+		// reviewer completed meanwhile) is not this stop's: nothing is
+		// announced or released here.
 		// Not while a hand-off is active: its stop is already announced.
+		quotaRetry = false
 		if present && !pending && !handOff.active && j.QuotaRole() != "counsel" {
 			if stop, ok := a.quotaStopped(ctx, j, paneAgent, &screenRead); ok && stop.CreditExhaustedAt.IsZero() {
-				if e := a.quotaStopRecord(ctx, id, stop); e != nil {
+				switch outcome, e := a.quotaStopRecord(ctx, id, stop); outcome {
+				case quotaRecordWritten:
+					return a.quotaStopFinish(ctx, j, stop, true)
+				case quotaRecordSuperseded:
+					a.warn("quota-stop lost record not written: hk holds another terminal record: %v", e)
+					return nil
+				default:
 					a.warn("quota-stop lost record not written, retrying: %v", e)
 					screenRead = quotaStopWatch{}
-				} else {
-					return a.quotaStopFinish(ctx, j, stop, true)
+					quotaRetry = true
 				}
 			}
 		}

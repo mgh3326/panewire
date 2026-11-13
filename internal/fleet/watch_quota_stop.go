@@ -320,22 +320,48 @@ func (a *App) quotaStopLost(ctx context.Context, j Job, stop quotastop.Stop, emi
 	// After a hand-off grace the hub may already have written the record lost
 	// with the successor pointer; hk would refuse a rewrite, so leave it.
 	if emit || !a.hkJobEnded(ctx, j.ID) {
-		if e := a.quotaStopRecord(ctx, j.ID, stop); e != nil {
+		if _, e := a.quotaStopRecord(ctx, j.ID, stop); e != nil {
 			a.jobRecordFailed(ctx, j.ID, "lost", e)
 		}
 	}
 	return a.quotaStopFinish(ctx, j, stop, emit)
 }
 
+// quotaRecord is what became of the write of a quota-stop lost record.
+type quotaRecord int
+
+const (
+	// quotaRecordPending: hk holds no terminal record for the job yet; the
+	// write failed and may be retried.
+	quotaRecordPending quotaRecord = iota
+	// quotaRecordWritten: hk holds the intended lost record.
+	quotaRecordWritten
+	// quotaRecordSuperseded: hk holds another terminal record (completed,
+	// escalated, or lost for another reason), so this stop is not the job's
+	// outcome and must not be announced.
+	quotaRecordSuperseded
+)
+
 // quotaStopRecord writes the job's hk record lost with the quota_stop
-// end_reason. A write that failed after hk applied it counts as written: the
-// record is then already terminal and hk refuses a rewrite.
-func (a *App) quotaStopRecord(ctx context.Context, id string, stop quotastop.Stop) error {
-	e := a.putJobRecord(ctx, id, map[string]any{"state": "lost", "end_reason": QuotaStopEndReason(stop.Pool, stop.Reset, "", "")})
-	if e != nil && a.hkJobEnded(ctx, id) {
-		return nil
+// end_reason. A failed write is judged by reading the record back: only the
+// intended lost record counts as written, any other terminal record is
+// superseded, and an unreadable or live record is pending.
+func (a *App) quotaStopRecord(ctx context.Context, id string, stop quotastop.Stop) (quotaRecord, error) {
+	want := QuotaStopEndReason(stop.Pool, stop.Reset, "", "")
+	e := a.putJobRecord(ctx, id, map[string]any{"state": "lost", "end_reason": want})
+	if e == nil {
+		return quotaRecordWritten, nil
 	}
-	return e
+	state, reason, ok := a.hkJobState(ctx, id)
+	switch {
+	case !ok:
+		return quotaRecordPending, e
+	case state == "lost" && reason == want:
+		return quotaRecordWritten, nil
+	case state == "completed" || state == "lost" || state == "escalated":
+		return quotaRecordSuperseded, e
+	}
+	return quotaRecordPending, e
 }
 
 // quotaStopFinish announces job.lost (when emit) and releases the quota lease.
@@ -348,17 +374,25 @@ func (a *App) quotaStopFinish(ctx context.Context, j Job, stop quotastop.Stop, e
 	return a.releaseQuota(ctx, j)
 }
 
-// hkJobEnded reports whether hk already holds a terminal record for the job. An
-// unreadable record is not an end.
-func (a *App) hkJobEnded(ctx context.Context, id string) bool {
+// hkJobState reads the job's hk record state and end_reason. ok is false when
+// the record cannot be read.
+func (a *App) hkJobState(ctx context.Context, id string) (state, endReason string, ok bool) {
 	store, e := a.jobStore()
 	if e != nil {
-		return false
+		return "", "", false
 	}
 	rec, e := store.Get(ctx, id)
 	if e != nil {
-		return false
+		return "", "", false
 	}
-	state, _ := rec["state"].(string)
-	return state == "completed" || state == "lost" || state == "escalated"
+	state, _ = rec["state"].(string)
+	endReason, _ = rec["end_reason"].(string)
+	return state, endReason, true
+}
+
+// hkJobEnded reports whether hk already holds a terminal record for the job. An
+// unreadable record is not an end.
+func (a *App) hkJobEnded(ctx context.Context, id string) bool {
+	state, _, ok := a.hkJobState(ctx, id)
+	return ok && (state == "completed" || state == "lost" || state == "escalated")
 }

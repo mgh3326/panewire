@@ -3,6 +3,7 @@ package fleet
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -498,21 +499,83 @@ func TestWatcherReviewerQuotaStopWaitsForTheLostRecord(t *testing.T) {
 	}
 }
 
-// While the lost record cannot be written the reviewer is neither announced
-// nor released.
-func TestWatcherReviewerQuotaStopNotAnnouncedWhileRecordFails(t *testing.T) {
-	a, _, h, _ := quotaStopFixture(t, "reviewer", "idle", devinStopScreen(t))
+// The retry for a lost record that cannot be written outlives the ordinary
+// completion deadline: hk down past it must not leave the reviewer spawned and
+// leased for good. When hk recovers the job ends once, with record, event and
+// release. Until then it is neither announced nor released.
+func TestWatcherReviewerQuotaStopRetriesPastTheCompletionDeadline(t *testing.T) {
+	a, f, h, _ := quotaStopFixture(t, "reviewer", "idle", devinStopScreen(t))
 	t.Setenv("PANEWIRE_COMPLETION_TIMEOUT_S", "60")
 	h.mu.Lock()
 	h.down = true
 	h.mu.Unlock()
+	lists := 0
+	do := f.Do
+	f.Do = func(c Command) Result {
+		if c.Name == "herdr" && strings.Join(c.Args, " ") == "agent list" {
+			lists++
+			if lists == 40 { // well past the 60 s deadline at 5 s a poll
+				if p := lostPayload(t, a); p != nil {
+					t.Errorf("job.lost announced with the hk record unwritten: %v", p)
+				}
+				if st, _ := ledgerState(t, a, "j"); st != "leased" {
+					t.Errorf("quota %s while the record could not be written, want leased", st)
+				}
+				h.mu.Lock()
+				h.down = false
+				h.mu.Unlock()
+			}
+		}
+		return do(c)
+	}
 	if e := a.watch(context.Background(), []string{"j"}); e != nil {
 		t.Fatal(e)
 	}
-	if p := lostPayload(t, a); p != nil {
-		t.Fatalf("job.lost announced with the hk record unwritten: %v", p)
+	if lists < 40 {
+		t.Fatalf("the watcher gave up after %d polls, before hk recovered", lists)
 	}
-	if st, _ := ledgerState(t, a, "j"); st != "leased" {
-		t.Fatalf("quota %s while the record could not be written, want leased", st)
+	if rec := h.record(t, "j"); str(rec, "state") != "lost" || !strings.HasPrefix(str(rec, "end_reason"), "quota_stop pool=devin-free") {
+		t.Fatalf("hk record %v, want lost with the quota_stop end_reason", rec)
+	}
+	if p := lostPayload(t, a); p == nil || str(p, "reason") != "quota_stop" {
+		t.Fatalf("job.lost payload=%v", p)
+	}
+	if st, _ := ledgerState(t, a, "j"); st != "released" {
+		t.Fatalf("quota %s after the record landed, want released", st)
+	}
+}
+
+// A reviewer that completed while the watcher read its screen has a terminal
+// hk record of its own. A rejected lost write must not be taken for this stop's
+// record: nothing is announced and the lease is left to the completion's path.
+func TestWatcherReviewerQuotaStopYieldsToAnotherTerminalRecord(t *testing.T) {
+	for name, tc := range map[string]struct{ state, reason string }{
+		"completed":               {"completed", ""},
+		"escalated":               {"escalated", ""},
+		"lost for another reason": {"lost", "quota_stop pool=claude replaced_by=j-q1"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			a, _, h, _ := quotaStopFixture(t, "reviewer", "idle", devinStopScreen(t))
+			t.Setenv("PANEWIRE_COMPLETION_TIMEOUT_S", "600")
+			h.mu.Lock()
+			h.records["j"]["state"] = tc.state
+			if tc.reason != "" {
+				h.records["j"]["end_reason"] = tc.reason
+			}
+			h.putStatuses = []int{http.StatusConflict, http.StatusConflict, http.StatusConflict, http.StatusConflict}
+			h.mu.Unlock()
+			if e := a.watch(context.Background(), []string{"j"}); e != nil {
+				t.Fatal(e)
+			}
+			if p := lostPayload(t, a); p != nil {
+				t.Fatalf("job.lost announced over a %s record: %v", tc.state, p)
+			}
+			if st, _ := ledgerState(t, a, "j"); st != "leased" {
+				t.Fatalf("quota %s, want left as it was", st)
+			}
+			if got := str(h.record(t, "j"), "end_reason"); got != tc.reason {
+				t.Fatalf("end_reason rewritten: %q", got)
+			}
+		})
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // Stop is evidence from a single visible screen, not proof that sending
@@ -165,11 +166,16 @@ const statusPrefixes = "│┃•⚠️■⎿ "
 // prompt is agent output. Any other later line (ordinary output, source code,
 // a completed answer) invalidates the stop.
 //
-// A user turn is its marked line plus the indented lines wrapped under it. A
-// later flush-left line is read as agent output: the screen shows no other
-// boundary between a message and an answer, and a wrongly accepted stop ends a
-// live job, so an ambiguous screen fails closed (a directive wrapped flush-left
-// is not accepted).
+// A user turn is its marked line plus the lines that provably wrap under it: a
+// line continues the turn only when the previous line of the turn is so full
+// that the continuation's first word could not have fitted, measured against
+// the screen width (the widest rule line); a row under two thirds full is
+// never wrapped. Position and indentation prove
+// nothing, since an answer can be indented and follow with no blank line, so
+// anything else after the marked line is agent output. A screen with no rule
+// line to measure, or a wrap this arithmetic cannot prove (wide characters),
+// fails closed: it is not accepted as a stop. A wrongly accepted stop ends a
+// live job.
 //
 // The returned block is the limit line and the chrome after it, never the
 // injected text, so a reset time or an "upgrade" mentioned in a directive
@@ -178,18 +184,21 @@ func statusBlock(screen string) (string, bool) {
 	var limit string
 	var tail []string
 	found, later, injected := false, false, false
-	for _, raw := range strings.Split(strings.ReplaceAll(screen, "\r", ""), "\n") {
+	rows := strings.Split(strings.ReplaceAll(screen, "\r", ""), "\n")
+	width := ruleWidth(rows)
+	turnWidth := 0 // display width of the user turn's last line
+	for _, raw := range rows {
 		line := strings.TrimSpace(raw)
-		indented := strings.HasPrefix(raw, "  ") || strings.HasPrefix(raw, "\t")
 		switch {
 		case chromeLine(line):
 			// A rule or blank line ends a user message.
 			injected = false
 			tail = append(tail, line)
-		case userTurn(line) || injected && indented:
-			// Typed or injected user text: a marked line and the indented
-			// lines that wrap under it.
+		case userTurn(line) || injected && wraps(turnWidth, line, width):
+			// Typed or injected user text: a marked line and the lines that
+			// provably wrap under it.
 			injected = true
+			turnWidth = textWidth(raw)
 		default:
 			injected = false
 			line = strings.TrimLeft(line, statusPrefixes)
@@ -204,6 +213,36 @@ func statusBlock(screen string) (string, bool) {
 		return "", false
 	}
 	return limit + "\n" + strings.Join(tail, "\n"), true
+}
+
+// ruleWidth is the screen width as the widest horizontal rule shows it, or 0
+// when the screen has none.
+func ruleWidth(rows []string) int {
+	width := 0
+	for _, row := range rows {
+		row = strings.TrimSpace(row)
+		if n := utf8.RuneCountInString(row); n >= 10 && strings.Trim(row, "─━═") == "" && n > width {
+			width = n
+		}
+	}
+	return width
+}
+
+// textWidth is the number of characters on a row, trailing space excluded.
+func textWidth(row string) int {
+	return utf8.RuneCountInString(strings.TrimRight(row, " \t"))
+}
+
+// wraps reports whether line, the next row of a user turn whose last row was
+// prev characters wide, can only be a wrap of it: the turn's row is within the
+// screen width, at least two thirds full (a short row is never wrapped, however
+// long the next word), and the continuation's first word would not have fitted.
+func wraps(prev int, line string, width int) bool {
+	if width == 0 || prev > width || prev*3 < width*2 {
+		return false
+	}
+	word, _, _ := strings.Cut(line, " ")
+	return prev+1+utf8.RuneCountInString(word) > width
 }
 
 // userTurn reports whether line starts a user turn: the prompt mark of devin,
