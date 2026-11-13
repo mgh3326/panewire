@@ -148,23 +148,31 @@ func (s *creditPresenceSource) Publish(ctx context.Context) {
 // does not publish the pool (the harness is absent), so status lists a credit
 // pool only where the node would announce it.
 func (s *creditPresenceSource) Status(ctx context.Context, pool string) (quotaReading, bool) {
+	reading, _, ok := s.statusWindow(ctx, pool)
+	return reading, ok
+}
+
+// statusWindow is Status plus the newest manual credit entry of the account,
+// which the text table prints as the pool's credit row. The window is zero
+// when the store holds no well-formed credit entry.
+func (s *creditPresenceSource) statusWindow(ctx context.Context, pool string) (quotaReading, fleet.CreditWindow, bool) {
 	now := s.now()
 	if !s.installed() {
-		return quotaReading{}, false
+		return quotaReading{}, fleet.CreditWindow{}, false
 	}
 	reading := quotaReading{Pool: pool, Source: "unavailable", Stale: true, Buckets: []quotaBucket{}, Class: s.class(pool, now), Credit: "unknown", Presence: "unknown"}
 	key, ok := s.account(pool)
 	if !ok {
-		return reading, true
+		return reading, fleet.CreditWindow{}, true
 	}
 	_, reading.Account, _ = strings.Cut(key, ":")
 	store, err := quotaStoreClient(s.SpawnConfigPath, s.StoreTransport)
 	if err != nil {
-		return reading, true
+		return reading, fleet.CreditWindow{}, true
 	}
 	latest, err := store.Latest(ctx, key)
 	if err != nil {
-		return reading, true
+		return reading, fleet.CreditWindow{}, true
 	}
 	state, recorded := fleet.CreditEntryOf(latest, now)
 	reading.Credit, reading.Source = string(state), "manual"
@@ -183,7 +191,8 @@ func (s *creditPresenceSource) Status(ctx context.Context, pool string) (quotaRe
 			}
 		}
 	}
-	return reading, true
+	window, _ := fleet.CreditWindowOf(latest)
+	return reading, window, true
 }
 
 // creditPresenceHostID is the id a credit presence record carries: the id
