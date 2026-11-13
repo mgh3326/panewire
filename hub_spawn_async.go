@@ -543,6 +543,14 @@ func spawnNotStarted(result hubSpawnResult) bool {
 	return result.RC == 124 && result.Stage == "claim" && result.Error == "deadline_not_started" && result.Retryable
 }
 
+// spawnLandingPaneUnconfirmed reports a landing refusal whose cleanup could
+// not prove the pane the node launched (fleet.FailedSpawnUnconfirmed,
+// internal/fleet/spawn_cleanup.go). The pane is named, so the hub can ask the
+// node whether a pane with the job's name and cwd is still there.
+func spawnLandingPaneUnconfirmed(result hubSpawnResult) bool {
+	return result.RC == 70 && result.Stage == "landing" && result.Pane != "" && strings.Contains(result.StdoutTail, fleet.FailedSpawnUnconfirmed)
+}
+
 // spawnNotStartedFix tells the caller what a not-started refusal means.
 const spawnNotStartedFix = "the node never started this request: it reached the node after its deadline. Replay the same command; the replay starts a new attempt and placement can pick another host."
 
@@ -713,9 +721,17 @@ func (t *directSpawnTransport) settleNodeResult(ctx context.Context, node hubSpa
 	if result.CompletedAt == nil || result.Error == "reconciling" || result.Error == "unknown" || result.Error == "journal_unavailable" || result.Error == "journal_conflict" {
 		return t.unknown(ctx, "unknown")
 	}
+	// A landing refused only because the node could not confirm its pane may
+	// still have the job's pane running the brief. The same exact pane read
+	// that gates late success re-checks it: a pane found there settles the
+	// request as landed, and nothing is launched again.
+	rechecked := spawnLandingPaneUnconfirmed(result) && h.verifySpawnPane(ctx, node.Machine, result, node.Args)
+	if rechecked {
+		result.RC, result.Error, result.Retryable = 0, "", false
+	}
 	// The authenticated node's completed journal is necessary, and a current
 	// exact pane read is additionally required before accepting late success.
-	if result.RC == 0 && (node.Checkout != nil && (result.Receipt == nil || !spawnReceiptCheckoutPath(result.Receipt.CWD, node.Checkout.Dir, hubSpawnArg(node.Args, "-L"))) || !h.verifySpawnPane(ctx, node.Machine, result, node.Args)) {
+	if result.RC == 0 && (node.Checkout != nil && (result.Receipt == nil || !spawnReceiptCheckoutPath(result.Receipt.CWD, node.Checkout.Dir, hubSpawnArg(node.Args, "-L"))) || !rechecked && !h.verifySpawnPane(ctx, node.Machine, result, node.Args)) {
 		return t.unknown(ctx, "unknown")
 	}
 	h.noteOneTimeActionRefusal(node.Machine, hubSpawnArg(node.Args, "-m"), result)
