@@ -9,25 +9,36 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
 
-// hello sends the node's real hello over the hub's inbound path, as its
-// socket would, and returns the wire bytes.
-func (rig *t989Rig) hello() []byte {
+// hello registers host-a as its node does: the hello advertising the
+// capabilities, then the applied report right behind it. Both go over the
+// hub's inbound path and must parse.
+func (rig *t989Rig) hello() { rig.helloFrom("host-a", rig.dest, hubSpawnCapabilities) }
+
+func (rig *t989Rig) helloFrom(machine string, agent *hubAgent, capabilities []string) {
 	rig.t.Helper()
-	rig.node.machineID, rig.node.version = "host-a", "panewire-t2777"
-	wire, err := json.Marshal(rig.node.helloMessage(context.Background(), hubSpawnCapabilities))
-	if err != nil {
-		rig.t.Fatal(err)
+	capabilityJSON, _ := json.Marshal(capabilities)
+	rig.send(machine, agent, fmt.Sprintf(`{"type":"hello","machine_id":%q,"version":"panewire-t2777","capabilities":%s}`, machine, capabilityJSON))
+	if message, ok := rig.node.appliedMessage(context.Background(), capabilities); ok {
+		wire, err := json.Marshal(message)
+		if err != nil {
+			rig.t.Fatal(err)
+		}
+		rig.send(machine, agent, string(wire))
 	}
-	if _, valid := parseHubInbound(wire); !valid {
-		rig.t.Fatalf("hub refused the hello: %s", wire)
+}
+
+func (rig *t989Rig) send(machine string, agent *hubAgent, wire string) {
+	rig.t.Helper()
+	if _, valid := parseHubInbound([]byte(wire)); !valid {
+		rig.t.Fatalf("hub refused %s", wire)
 	}
-	rig.hub.handleAgentMessage("host-a", "fixture", rig.dest, wire)
-	return wire
+	rig.hub.handleAgentMessage(machine, "fixture", agent, []byte(wire))
 }
 
 // deliverAndLoseAcks sends one lane.event per text, offers the first n
@@ -135,20 +146,21 @@ func TestHelloAppliedReportLeavesUnreportedRowsToReplay(t *testing.T) {
 	}
 }
 
-func TestHelloWithoutCapabilitiesCarriesNoAppliedReport(t *testing.T) {
+func TestAppliedReportOnlyWithItsCapability(t *testing.T) {
 	rig := t989Start(t, "w1:pA")
 	rig.deliverAndLoseAcks([]string{"one"}, 1)
-	if got := rig.node.helloMessage(context.Background(), nil); got.Applied != nil {
-		t.Fatalf("capability-free hello carries applied report %v; a hub that rejects the field would drop it", got.Applied)
+	if _, ok := rig.node.appliedMessage(context.Background(), nil); ok {
+		t.Fatal("the capability-free fallback hello is followed by an applied report; a hub that predates it counts it as unknown")
 	}
-	if got := rig.node.helloMessage(context.Background(), hubSpawnCapabilities); len(got.Applied[t989Lane]) != 1 {
-		t.Fatalf("full hello applied=%v, want the delivered row", got.Applied)
+	got, ok := rig.node.appliedMessage(context.Background(), hubSpawnCapabilities)
+	if !ok || len(got.Applied[t989Lane]) != 1 {
+		t.Fatalf("report=%+v ok=%v, want the delivered row", got, ok)
 	}
 }
 
 func TestHelloAppliedReportBounds(t *testing.T) {
 	hello := func(applied string) []byte {
-		return []byte(`{"type":"hello","machine_id":"host-a","version":"panewire-t2777","applied":` + applied + `}`)
+		return []byte(`{"type":"applied","applied":` + applied + `}`)
 	}
 	ids := func(n int) string {
 		parts := make([]string, n)
@@ -230,8 +242,18 @@ func (rig *t989Rig) gapRows(n int) []int64 {
 	return ids
 }
 
-func TestRegistrationOverThresholdSendsOneSummaryLine(t *testing.T) {
+// t989StartWithInbox is t989Start with the hub's lane inbox open, which the
+// gap summary points the pane at.
+func t989StartWithInbox(t *testing.T) *t989Rig {
+	t.Helper()
 	rig := t989Start(t, "w1:pA")
+	rig.inboxPath = filepath.Join(t.TempDir(), "inbox.sqlite3")
+	rig.startHub()
+	return rig
+}
+
+func TestRegistrationOverThresholdSendsOneSummaryLine(t *testing.T) {
+	rig := t989StartWithInbox(t)
 	ids := rig.gapRows(relayReplayGapThreshold + 1)
 	rig.startHub()
 	rig.hello()
@@ -255,7 +277,7 @@ func TestRegistrationOverThresholdSendsOneSummaryLine(t *testing.T) {
 }
 
 func TestRegistrationAtThresholdReplaysEveryRow(t *testing.T) {
-	rig := t989Start(t, "w1:pA")
+	rig := t989StartWithInbox(t)
 	ids := rig.gapRows(relayReplayGapThreshold)
 	rig.startHub()
 	rig.hello()
@@ -276,7 +298,7 @@ func TestRegistrationAtThresholdReplaysEveryRow(t *testing.T) {
 }
 
 func TestSummaryLineBacklogCountsOnlyRowsTheNodeHasNotApplied(t *testing.T) {
-	rig := t989Start(t, "w1:pA")
+	rig := t989StartWithInbox(t)
 	texts := make([]string, relayReplayGapThreshold+5)
 	for i := range texts {
 		texts[i] = fmt.Sprintf("note %d", i)
@@ -294,9 +316,9 @@ func TestSummaryLineBacklogCountsOnlyRowsTheNodeHasNotApplied(t *testing.T) {
 	}
 }
 
-// A held journal lock must not keep the node off the fleet: the hello leaves
-// the report out after relayAppliedReadBudget instead of waiting for it.
-func TestHelloRegistersWithoutAppliedReportWhileStoreLockIsHeld(t *testing.T) {
+// A held journal lock must not stall the registration: the report is sent
+// empty after relayAppliedReadBudget instead of waiting for the store.
+func TestAppliedReportDoesNotWaitOnAHeldStoreLock(t *testing.T) {
 	rig := t989Start(t, "w1:pA")
 	rig.deliverAndLoseAcks([]string{"one"}, 1)
 	rig.store.mu.Lock()
@@ -307,13 +329,59 @@ func TestHelloRegistersWithoutAppliedReportWhileStoreLockIsHeld(t *testing.T) {
 		}
 	}()
 	started := time.Now()
-	got := rig.node.helloMessage(context.Background(), hubSpawnCapabilities)
+	got, ok := rig.node.appliedMessage(context.Background(), hubSpawnCapabilities)
 	if waited := time.Since(started); waited > 3*relayAppliedReadBudget {
-		t.Fatalf("hello waited %v on the held store lock", waited)
+		t.Fatalf("report waited %v on the held store lock", waited)
 	}
-	if got.Applied != nil || got.Type != "hello" {
-		t.Fatalf("hello=%+v, want a registrable hello without the report", got)
+	if !ok || len(got.Applied) != 0 {
+		t.Fatalf("report=%+v ok=%v, want an empty report", got, ok)
 	}
 	rig.store.mu.Unlock()
 	released = true
+}
+
+// Without a lane inbox the summary's "panewire inbox list" points nowhere, so
+// the rows replay one by one and none retires.
+func TestRegistrationWithoutInboxReplaysAnOverThresholdBacklog(t *testing.T) {
+	rig := t989Start(t, "w1:pA")
+	ids := rig.gapRows(relayReplayGapThreshold + 1)
+	rig.startHub()
+	rig.hello()
+	eventually(t, 5*time.Second, "every row replayed", func() bool { return len(rig.dest.relays) >= len(ids) })
+	for len(rig.dest.relays) > 0 {
+		if directive := <-rig.dest.relays; strings.Contains(directive.Text, "gap:") {
+			t.Fatalf("summary line sent without a lane inbox: %q", directive.Text)
+		}
+	}
+	for _, id := range ids {
+		if strings.HasPrefix(rig.row(id).DeliveredTo, relayReplayRetiredMarker) {
+			t.Fatalf("row %d retired without an inbox copy", id)
+		}
+	}
+}
+
+// A node is entitled to close only rows routed to it: another machine naming
+// the ids closes nothing, and the rows replay to their own node.
+func TestAppliedReportFromAnotherMachineClosesNothing(t *testing.T) {
+	rig := t989Start(t, "w1:pA")
+	ids, _ := rig.deliverAndLoseAcks([]string{"one", "two"}, 2)
+	rig.startHub()
+	report, _ := json.Marshal(hubAppliedMessage{Type: "applied", Applied: map[string][]int64{t989Lane: ids}})
+	rig.send("host-b", rig.src, string(report))
+	eventually(t, 5*time.Second, "the rows replay to their own node", func() bool { return len(rig.dest.relays) == len(ids) })
+	for _, id := range ids {
+		if rig.row(id).DeliveredAt != "" {
+			t.Fatalf("row %d closed by a machine it was not routed to: %q", id, rig.row(id).DeliveredTo)
+		}
+	}
+}
+
+// A node whose hello does not advertise the report (an older node) replays at
+// registration, as before: nothing waits for a report that will not come.
+func TestRegistrationWithoutReportCapabilityReplaysAtOnce(t *testing.T) {
+	rig := t989Start(t, "w1:pA")
+	ids := rig.gapRows(2)
+	rig.startHub()
+	rig.helloFrom("host-a", rig.dest, []string{"spawn_v2", "spawn_ops_v1"})
+	eventually(t, 5*time.Second, "rows replayed", func() bool { return len(rig.dest.relays) == len(ids) })
 }

@@ -70,26 +70,38 @@ the hub is a socket event: a socket that dies between the delivery and the ack
 left the hub row open, and the next restart replayed a batch the pane had
 already read (hk 3435).
 
-- **Applied report.** Every hello that carries `capabilities` also carries
-  `applied`: lane → durable row ids the node delivered, newest first, at most
-  256 per lane, 64 lanes and 1500 ids in all (`relayApplied*` constants; the
-  hub reads a hello under 32 KiB and refuses a report outside the bounds). The
-  node's capability-free retry carries none, so a hub that predates the field
-  still registers it. Ship the hub before the nodes.
-- **Registration closes first.** On a hello the hub closes each undelivered row
-  of a reported lane whose id is in the report (`delivered_to` =
-  `<machine>/applied-report`), then replays. The report is a set of exact ids,
-  not a high-water mark: hub row ids are not commit-ordered per lane, and a
-  row the node never saw may sit below one it did, so a max-id cursor would
-  drop it silently.
+- **Applied report.** A node that advertises the capability `applied_v1` sends
+  an `{"type":"applied","applied":{lane:[row ids]}}` message right behind its
+  hello and ping: the row ids it delivered, newest first, at most 256 per lane,
+  64 lanes and 1500 ids in all (`relayApplied*` constants; the hub reads a
+  frame under 32 KiB and refuses a report outside the bounds). The hello itself
+  is unchanged, so a hub that predates the report still registers the node
+  (it ignores the capability name and replays at registration; the report is
+  dropped as an unknown message type) and the capability-free fallback hello is
+  followed by no report. The store read waits at most 1 s; past that the report
+  goes out empty.
+- **The report closes first, then the replay runs.** For a node advertising
+  `applied_v1` the hub holds the registration replay until the report arrives.
+  It then closes each undelivered row of a reported lane whose id is listed
+  (`delivered_to` = `<machine>/applied-report`), and only if the row was routed
+  to the reporting machine (the row's own machine, or the lane's current
+  route — the entitlement a late `relay.delivered` ack needs); another
+  machine's report closes nothing. The report is a set of exact ids, not a
+  high-water mark: hub row ids are not commit-ordered per lane, and a row the
+  node never saw may sit below one it did, so a max-id cursor would drop it
+  silently. A node that dies before it sends the report replays at its next hello;
+  a node without the capability replays at registration as before.
 - **A gap is one line.** The hello replay and the startup replay hold every
   `lane.event` row that passed the replay gates until the walk has counted its
   lane. A lane owed more than `relayReplayGapThreshold` (20) rows gets one
   summary line — `[panewire] gap: N events for <lane> were not replayed after
   the restart (first …, last …) | panewire inbox list --lane <lane>` — filed as
-  an interrupt lane.event with id `replay-gap-<last row id>`, and its rows retire
-  with `hub/replay-retired:gap`. The summary is filed first, so a failure
-  replays the rows and a repeated walk reuses the same summary. A lane within
+  an interrupt lane.event with id `replay-gap-<last row id>`, and the rows the
+  lane inbox holds retire with `hub/replay-retired:gap`. The summary is filed
+  first, so a failure replays the rows and a repeated walk reuses the same
+  summary. A hub with no lane inbox (`--delivery-policy off`, no store) never
+  summarizes, since the line points at `panewire inbox list`; a row the inbox
+  lacks replays. A lane within
   the threshold replays row by row as before. Rows held for their one labelled
   `[replayed after hub restart]` replay (#1002) are outside the count.
 

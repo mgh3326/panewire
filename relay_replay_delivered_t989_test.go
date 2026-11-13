@@ -49,6 +49,8 @@ type t989Rig struct {
 	prompts  *[]string
 	herdr    *r27FakeHerdr
 	store    *Store
+	// inboxPath, when set before startHub, opens the hub's lane inbox there.
+	inboxPath string
 }
 
 func t989Start(t *testing.T, pane string) *t989Rig {
@@ -67,12 +69,16 @@ func t989Start(t *testing.T, pane string) *t989Rig {
 func (rig *t989Rig) startHub() {
 	rig.t.Helper()
 	logger := slog.New(slog.NewTextHandler(rig.logs, nil))
-	hub, err := NewHubServer(HubServerConfig{
+	config := HubServerConfig{
 		Tokens:          map[string]string{"operator": "op", "host-a": "node", "host-b": "node-b"},
 		ReportRelayPath: rig.lanePath,
 		Logger:          logger,
 		handoffkeep:     rig.client,
-	})
+	}
+	if rig.inboxPath != "" {
+		config.DeliveryPolicyPath, config.InboxStorePath = "default", rig.inboxPath
+	}
+	hub, err := NewHubServer(config)
 	if err != nil {
 		rig.t.Fatal(err)
 	}

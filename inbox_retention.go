@@ -127,3 +127,15 @@ func (s *laneInboxStore) linkRelayID(key string, relayID int64) error {
 	_, err := s.db.ExecContext(ctx, s.q(`UPDATE lane_inbox SET relay_id=? WHERE event_key=? AND relay_id=0`), relayID, s.storedKey(key))
 	return err
 }
+
+// holds reports whether the inbox stores an item under the event key, whatever
+// its state.
+func (s *laneInboxStore) holds(key string) (bool, error) {
+	ctx, done := s.op(s.life)
+	defer done()
+	var n int
+	if err := s.db.QueryRowContext(ctx, s.q(`SELECT count(*) FROM lane_inbox WHERE event_key=?`), s.storedKey(key)).Scan(&n); err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
