@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mgh3326/panewire/internal/durable"
 	"github.com/mgh3326/panewire/internal/harnessstate"
 )
 
@@ -427,14 +428,110 @@ func nodeListWorktrees(ctx context.Context, git relayCommandRunner, main string)
 	return entries, nil
 }
 
-// nodeAddWorktree removes only a locked worktree that appeared after this
-// add attempt began. The caller has already checked that dir was not listed.
-// Git marks an interrupted add with the reason "initializing"; that exact
-// state, plus this invocation's failed add, is the ownership evidence for
-// cleanup. A lock with any other reason is left alone.
-func nodeAddWorktree(ctx context.Context, git relayCommandRunner, clone, dir string, args ...string) error {
+type nodeWorktreeAddIntent struct {
+	Path   string `json:"path"`
+	Mode   string `json:"mode"`
+	Branch string `json:"branch"`
+	Sha    string `json:"sha"`
+}
+
+func nodeWorktreeAddIntentPath(ctx context.Context, git relayCommandRunner, clone string) (string, error) {
+	out, err := git(ctx, "-C", clone, "rev-parse", "--git-common-dir")
+	if err != nil {
+		return "", err
+	}
+	common := strings.TrimSpace(string(out))
+	if common == "" {
+		return "", errors.New("git common dir is empty")
+	}
+	if !filepath.IsAbs(common) {
+		common = filepath.Join(clone, common)
+	}
+	return filepath.Join(common, "panewire-worktree-add-intent.json"), nil
+}
+
+func nodeWriteWorktreeAddIntent(ctx context.Context, git relayCommandRunner, clone string, intent nodeWorktreeAddIntent) (string, error) {
+	name, err := nodeWorktreeAddIntentPath(ctx, git, clone)
+	if err != nil {
+		return "", err
+	}
+	contents, err := json.Marshal(intent)
+	if err != nil {
+		return "", err
+	}
+	if err := durable.ReplaceFileAtomically(name, ".panewire-worktree-add-intent-*", contents, 0o600); err != nil {
+		return "", err
+	}
+	return name, nil
+}
+
+func nodeReadWorktreeAddIntent(ctx context.Context, git relayCommandRunner, clone string) (nodeWorktreeAddIntent, error) {
+	name, err := nodeWorktreeAddIntentPath(ctx, git, clone)
+	if err != nil {
+		return nodeWorktreeAddIntent{}, err
+	}
+	contents, err := os.ReadFile(name)
+	if err != nil {
+		return nodeWorktreeAddIntent{}, err
+	}
+	var intent nodeWorktreeAddIntent
+	if err := json.Unmarshal(contents, &intent); err != nil {
+		return nodeWorktreeAddIntent{}, err
+	}
+	return intent, nil
+}
+
+func nodeClearWorktreeAddIntent(name string) {
+	if err := os.Remove(name); err != nil && !errors.Is(err, os.ErrNotExist) {
+		slog.Warn("node worktree add intent cleanup failed", "err", err)
+	}
+}
+
+func nodeGitProcessWasSignaled(err error) bool {
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ProcessState == nil {
+		return false
+	}
+	status, ok := exitErr.ProcessState.Sys().(interface{ Signaled() bool })
+	return ok && status.Signaled()
+}
+
+func nodeReclaimInterruptedAdd(ctx context.Context, git relayCommandRunner, clone, dir string, entries []nodeWorktreeEntry, expected nodeWorktreeAddIntent) bool {
+	intent, err := nodeReadWorktreeAddIntent(ctx, git, clone)
+	if err != nil || intent != (nodeWorktreeAddIntent{Path: filepath.Clean(dir), Mode: expected.Mode, Branch: expected.Branch, Sha: expected.Sha}) {
+		return false
+	}
+	for _, entry := range entries {
+		if !nodeSamePath(entry.Path, dir) || !entry.Locked || entry.LockReason != "initializing" {
+			continue
+		}
+		if _, err := git(ctx, "-C", clone, "worktree", "remove", "--force", "--force", dir); err != nil {
+			slog.Warn("node worktree interrupted add reclaim failed", "path", dir, "err", err)
+			return false
+		}
+		if path, err := nodeWorktreeAddIntentPath(ctx, git, clone); err == nil {
+			nodeClearWorktreeAddIntent(path)
+		}
+		return true
+	}
+	return false
+}
+
+// nodeAddWorktree records the intended path before invoking Git so a later
+// prepare can reclaim this exact interrupted add after a node restart.
+func nodeAddWorktree(ctx context.Context, git relayCommandRunner, clone, dir string, intent nodeWorktreeAddIntent, args ...string) error {
+	intent.Path = filepath.Clean(dir)
+	intentPath, err := nodeWriteWorktreeAddIntent(ctx, git, clone, intent)
+	if err != nil {
+		return err
+	}
 	_, addErr := git(ctx, args...)
-	if addErr == nil || ctx.Err() == nil {
+	if addErr == nil {
+		nodeClearWorktreeAddIntent(intentPath)
+		return nil
+	}
+	if !nodeGitProcessWasSignaled(addErr) {
+		nodeClearWorktreeAddIntent(intentPath)
 		return addErr
 	}
 	cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -450,9 +547,7 @@ func nodeAddWorktree(ctx context.Context, git relayCommandRunner, clone, dir str
 				slog.Warn("node worktree interrupted add cleanup failed", "path", dir, "err", err)
 				return addErr
 			}
-			if _, err := git(cleanupCtx, "-C", clone, "worktree", "prune"); err != nil {
-				slog.Warn("node worktree interrupted add prune failed", "path", dir, "err", err)
-			}
+			nodeClearWorktreeAddIntent(intentPath)
 			return addErr
 		}
 	}
@@ -958,10 +1053,14 @@ func (client *HubClient) nodePrepareBranch(ctx context.Context, git relayCommand
 			return nodePrepareBranchElsewhere
 		}
 	}
-	if atDir != nil {
-		if atDir.Locked {
+	intent := nodeWorktreeAddIntent{Mode: "branch", Branch: args.Branch, Sha: args.Sha}
+	if atDir != nil && atDir.Locked {
+		if !nodeReclaimInterruptedAdd(ctx, git, clone, dir, entries, intent) {
 			return nodeRemoveLocked
 		}
+		atDir = nil
+	}
+	if atDir != nil {
 		if atDir.Branch != args.Branch {
 			return nodePrepareBranchElsewhere
 		}
@@ -1021,7 +1120,7 @@ func (client *HubClient) nodePrepareBranch(ctx context.Context, git relayCommand
 			}
 			result.FastForwarded = true
 		}
-		if err := nodeAddWorktree(ctx, git, clone, dir, "-C", clone, "worktree", "add", dir, args.Branch); err != nil {
+		if err := nodeAddWorktree(ctx, git, clone, dir, nodeWorktreeAddIntent{Mode: "branch", Branch: args.Branch, Sha: args.Sha}, "-C", clone, "worktree", "add", dir, args.Branch); err != nil {
 			return nodeOutcomeGitFailed
 		}
 		return nodePreparePrepared
@@ -1029,7 +1128,7 @@ func (client *HubClient) nodePrepareBranch(ctx context.Context, git relayCommand
 	if originTip == "" || !strings.EqualFold(originTip, expected) {
 		return nodePrepareBranchElsewhere
 	}
-	if err := nodeAddWorktree(ctx, git, clone, dir, "-C", clone, "worktree", "add", "-b", args.Branch, dir, "origin/"+args.Branch); err != nil {
+	if err := nodeAddWorktree(ctx, git, clone, dir, nodeWorktreeAddIntent{Mode: "branch", Branch: args.Branch, Sha: args.Sha}, "-C", clone, "worktree", "add", "-b", args.Branch, dir, "origin/"+args.Branch); err != nil {
 		return nodeOutcomeGitFailed
 	}
 	if _, err := git(ctx, "-C", dir, "branch", "--set-upstream-to", "origin/"+args.Branch, args.Branch); err != nil {
@@ -1123,10 +1222,14 @@ func (client *HubClient) nodePrepareDetached(ctx context.Context, git relayComma
 			atDir = &entries[i]
 		}
 	}
-	if atDir != nil {
-		if atDir.Locked {
+	intent := nodeWorktreeAddIntent{Mode: "detached", Sha: args.Sha}
+	if atDir != nil && atDir.Locked {
+		if !nodeReclaimInterruptedAdd(ctx, git, clone, dir, entries, intent) {
 			return nodeRemoveLocked
 		}
+		atDir = nil
+	}
+	if atDir != nil {
 		head, err := nodeGitHead(ctx, git, dir)
 		if err != nil {
 			return nodeOutcomeGitFailed
@@ -1143,7 +1246,7 @@ func (client *HubClient) nodePrepareDetached(ctx context.Context, git relayComma
 		}
 		return nodePrepareReused
 	}
-	if err := nodeAddWorktree(ctx, git, clone, dir, "-C", clone, "worktree", "add", "--detach", dir, args.Sha); err != nil {
+	if err := nodeAddWorktree(ctx, git, clone, dir, intent, "-C", clone, "worktree", "add", "--detach", dir, args.Sha); err != nil {
 		return nodeOutcomeGitFailed
 	}
 	return nodePreparePrepared

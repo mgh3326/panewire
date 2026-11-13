@@ -149,7 +149,7 @@ func (a *App) doneReport(ctx context.Context, j Job, in doneInput) error {
 
 	doc := receipts.published[in.digest]
 	if doc == "" {
-		key, e := a.publishReport(ctx, j, in.body, in.digest)
+		key, e := a.publishReport(ctx, j, in.report, in.body, in.digest)
 		if e != nil {
 			a.warn("report upload failed; local report retained")
 		} else if e = a.event(ctx, id, eventReportPublished, map[string]any{"report_sha256": in.digest, "document": key}); e != nil {

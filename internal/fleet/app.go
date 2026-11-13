@@ -59,10 +59,12 @@ type App struct {
 	// BenchCatalog reads the bench catalog for the admission gate; nil reads
 	// handoffkeep through catalog.go.
 	BenchCatalog func(context.Context) ([]CatalogRow, error)
-	Source       PlacementSource
-	Wake         Waker
-	LoadRatio    func(context.Context) (float64, error)
-	JobStore     JobStore
+	// modelFamilies substitutes the HK policy reader in tests.
+	modelFamilies func(context.Context) (ModelFamiliesPolicy, error)
+	Source        PlacementSource
+	Wake          Waker
+	LoadRatio     func(context.Context) (float64, error)
+	JobStore      JobStore
 	// TaskState reads one hk task; nil builds it from [quota] / the
 	// handoffkeep env on first use (TaskStatus).
 	TaskState TaskStateReader

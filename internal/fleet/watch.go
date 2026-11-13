@@ -11,6 +11,8 @@ import (
 	"regexp"
 	"syscall"
 	"time"
+
+	"github.com/mgh3326/panewire/internal/quotastop"
 )
 
 // laneEventMaxBytes bounds one events-lane record, as the relay scanner does.
@@ -101,8 +103,11 @@ func (a *App) rearmWatchers(start func(string) error, log func(string), pendingO
 		if err != nil {
 			continue
 		}
-		_, pendingCredit := pendingCreditRejection(j)
+		credit, pendingCredit := pendingCreditRejection(j)
 		if pendingOnly && !pendingCredit {
+			continue
+		}
+		if pendingOnly && creditPublicationPaused(j, credit) && !creditPublicationAccountReady(a, j, credit) {
 			continue
 		}
 		if (j.Reaped || j.Pane == "") && !pendingCredit || a.watchActive(id) {
@@ -120,6 +125,38 @@ func (a *App) rearmWatchers(start func(string) error, log func(string), pendingO
 		log(id)
 	}
 	return errors.Join(failures...)
+}
+
+func (a *App) pauseCreditPublication(ctx context.Context, j Job, stop quotastop.Stop, cause error) error {
+	latest, err := a.job(j.ID)
+	if err != nil {
+		return err
+	}
+	if creditPublicationPaused(latest, stop) {
+		return nil
+	}
+	reason := "publication_unavailable"
+	if errors.Is(cause, errCreditAccountMismatch) {
+		reason = "receipt_account_mismatch"
+	} else if errors.Is(cause, errCreditAccountUnidentifiable) {
+		reason = "account_not_identifiable"
+	}
+	if latest.Owner != "" {
+		at := stop.CreditExhaustedAt.UTC().Format(time.RFC3339Nano)
+		text := fmt.Sprintf("[%s] CREDIT_CLOSE_PAUSED | pool=%s at=%s | 공유 exhausted-credit 게시가 일시 중단됐습니다(reason=%s). 계정 fingerprint를 확인하면 다음 안전 재시도에서 복구합니다.", j.ID, stop.Pool, at, reason)
+		eventID := fmt.Sprintf("credit-close-paused-%s-%d", j.ID, stop.CreditExhaustedAt.Unix())
+		r := a.call(ctx, "panewire", "emit", "--kind", "lane.event", "--lane", latest.Owner, "--type", "info", "--event-id", eventID, "--inbox-root", filepath.Dir(a.Jobs), "--text", text)
+		if err := check(r, "credit publication notice"); err != nil {
+			return err
+		}
+	} else {
+		a.warn("credit rejection publication paused without an owner lane (job %s, pool %s)", j.ID, stop.Pool)
+	}
+	return a.event(ctx, j.ID, "job.credit_publication_paused", map[string]any{
+		"pool":   stop.Pool,
+		"at":     stop.CreditExhaustedAt.UTC().Format(time.RFC3339Nano),
+		"reason": reason,
+	})
 }
 
 // RearmPendingCreditWatchers retries durable credit publications without
@@ -204,6 +241,7 @@ func (a *App) watch(ctx context.Context, args []string) error {
 		}
 		credit, creditPending := pendingCreditRejection(j)
 		agents, e := a.agents(ctx)
+		herdrReachable := e == nil
 		if e != nil && !creditPending {
 			if workerEscalated(j) {
 				return a.releaseQuota(ctx, j)
@@ -224,24 +262,25 @@ func (a *App) watch(ctx context.Context, args []string) error {
 			if stop, ok := a.creditStopped(j, paneAgent); ok && !stop.CreditExhaustedAt.Equal(lastCredit) && !creditRejectionPublished(j, stop) {
 				credit = stop
 				payload := map[string]any{"pool": stop.Pool, "at": stop.CreditExhaustedAt.UTC().Format(time.RFC3339Nano)}
+				if paneAgent.StateChangeSeq != nil {
+					payload["state_change_seq"] = *paneAgent.StateChangeSeq
+				}
 				if err := a.event(ctx, id, "job.credit_rejection", payload); err != nil {
 					return err
 				}
-				creditPending = true
+				j, e = a.job(id)
+				if e != nil {
+					return e
+				}
+				credit, creditPending = pendingCreditRejection(j)
 			}
 		}
 		if creditPending {
 			if err := a.publishCreditRejection(ctx, j, credit); err != nil {
 				creditAttempts++
 				a.warn("credit rejection publication failed (attempt %d): %v", creditAttempts, err)
-				if creditAttempts >= 3 {
-					if j.Terminal || j.Reaped || j.QuotaRole() == "counsel" {
-						return nil
-					}
-					if workerEscalated(j) {
-						return a.releaseQuota(ctx, j)
-					}
-					return a.quotaStopLost(ctx, j, credit, true)
+				if errors.Is(err, errCreditAccountMismatch) || errors.Is(err, errCreditAccountUnidentifiable) || creditAttempts >= 3 {
+					return a.pauseCreditPublication(ctx, j, credit, err)
 				}
 				if err := a.Sleep(ctx, 5*time.Second); err != nil {
 					return err
@@ -251,7 +290,7 @@ func (a *App) watch(ctx context.Context, args []string) error {
 			creditAttempts = 0
 			lastCredit = credit.CreditExhaustedAt
 			published := map[string]any{"pool": credit.Pool, "at": credit.CreditExhaustedAt.UTC().Format(time.RFC3339Nano)}
-			if !j.Terminal && !j.Reaped && !workerEscalated(j) && j.QuotaRole() != "counsel" && !handOff.active {
+			if !j.Terminal && !j.Reaped && !workerEscalated(j) && j.QuotaRole() != "counsel" && !handOff.active && safeCreditStopHandoff(j, credit, paneAgent, present, herdrReachable) {
 				if a.QuotaHandOffGrace <= 0 {
 					if err := a.quotaStopLost(ctx, j, credit, true); err != nil {
 						return err

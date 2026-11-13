@@ -140,6 +140,12 @@ var spawnRefusals = []spawnRefusal{
 	// An unconfirmed submission is not a bad brief: point at the pane capture.
 	{match: "BRIEF_SUBMISSION_UNCONFIRMED", code: "submit_unconfirmed", hint: "Read the saved jobs/JOB/spawn-failure-*.txt capture. If the brief sat in the composer on a loaded host, raise local.brief_submit_timeout_ms there; retry the same command after verified cleanup."},
 	{match: "agent must be idle before initial brief", code: "submit_unconfirmed", hint: spawnBriefHint},
+	// hk's secret guard names the pattern, never the matched text; the row
+	// must win over the broad "brief" match below so the SPAWN_FAILED reason
+	// keeps the guard's code and this hint. The code itself cannot be
+	// secret_like_content: the reason's ": " separator would read as hk's
+	// free-form "code: reason" and the redactor would eat it.
+	{match: "secret_like_content", code: "hk_guard_refused", hint: "hk's secret guard refused the write as secret-like content and named the pattern in the reason; remove the secret-shaped text from the brief or task field and retry."},
 	{match: "brief", code: "brief_invalid", hint: spawnBriefHint},
 	{match: "task title", code: "task_title", hint: "Set the task title marker to (grade X, Tn), matching --t, then retry."},
 	{match: "task scale", code: "task_scale", hint: "Make --t match the task title's T level, then retry."},

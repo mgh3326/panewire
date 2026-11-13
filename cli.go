@@ -171,7 +171,16 @@ func fleetCommand(command string) bool {
 	return false
 }
 
+const promptUsage = `Usage: panewire prompt --from SENDER --to TARGET --file PATH [--uptake tool|status-transition] [--timeout DURATION] [--store-prompt-body] [--directive]
+
+` + expectFileContract + `
+`
+
 func runPromptCLI(args []string, cfg CLIConfig) int {
+	if len(args) == 1 && (args[0] == "-h" || args[0] == "--help") {
+		fmt.Fprint(os.Stdout, promptUsage)
+		return ExitOK
+	}
 	fs := flag.NewFlagSet("panewire prompt", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	sender := fs.String("from", "", "sender provenance")

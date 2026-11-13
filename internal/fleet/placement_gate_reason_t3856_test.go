@@ -47,6 +47,7 @@ func gateReasonFixture(t *testing.T, weekly float64) (*App, Spawn, *gateCountQuo
 		}
 		return Result{}
 	})
+	a.modelFamilies = func(context.Context) (ModelFamiliesPolicy, error) { return launchTestModelFamilies(), nil }
 	a.Config.Hosts = map[string]map[string]any{"first": {}, "second": {}}
 	a.Config.HostOrder = []string{"first", "second"}
 	q := &gateCountQuota{admissionQuota: admissionQuota{CLIQuota{Runner: f, Binary: "pacelever"}, a}}
