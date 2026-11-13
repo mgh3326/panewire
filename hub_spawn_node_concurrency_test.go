@@ -195,3 +195,25 @@ func TestCheckoutDirKeyResolvesAliases(t *testing.T) {
 		t.Fatal("distinct directories share a key")
 	}
 }
+
+// The key of a checkout under a symlinked work root is the same before the
+// directory exists and after (review r4561554283).
+func TestCheckoutDirKeyStableAcrossCreation(t *testing.T) {
+	real := t.TempDir()
+	link := filepath.Join(t.TempDir(), "work-link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	config := filepath.Join(t.TempDir(), "spawn.json")
+	if err := os.WriteFile(config, []byte(`{"work_root":"`+link+`"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	client := &HubClient{spawnConfigPath: config}
+	before := client.checkoutDirKey("job-dir")
+	if err := os.Mkdir(filepath.Join(real, "job-dir"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if after := client.checkoutDirKey("job-dir"); before != after {
+		t.Fatalf("key before creation %q, after %q", before, after)
+	}
+}

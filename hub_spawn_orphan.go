@@ -224,9 +224,9 @@ func (h *HubServer) handleSpawnAbandon(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Hold the request off its node queue while it is settled: a request
-	// being sent right now cannot be abandoned.
+	// being sent, or one another abandon is settling, cannot be abandoned now.
 	if !h.spawnQueue.fence(id) {
-		writeJSON(w, 409, map[string]string{"error": "spawn_abandon_refused", "reason": "sending", "request_id": id, "job": task.Job, "host": task.Node.Machine})
+		writeJSON(w, 409, map[string]string{"error": "spawn_abandon_refused", "reason": "sending_or_abandoning", "request_id": id, "job": task.Job, "host": task.Node.Machine})
 		return
 	}
 	defer h.kickSpawns()

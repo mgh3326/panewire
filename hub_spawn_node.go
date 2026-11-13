@@ -808,12 +808,30 @@ func (client *HubClient) runClaimedHubSpawn(ctx context.Context, message hubOutb
 	return client.runHubSpawn(ctx, message)
 }
 
-// checkoutDirKey names a checkout directory by its physical path, symlinks
-// resolved the way nodeSamePath compares worktrees, so two names for one
-// worktree take the same lock.
+// checkoutDirKey names a checkout directory by its physical path, so two
+// names for one worktree take one lock, and the key is the same before and
+// after the directory exists: the deepest existing ancestor is resolved
+// (symlinks included) and the missing rest appended.
 func (client *HubClient) checkoutDirKey(dir string) string {
-	if root, err := client.nodeWorkRoot(); err == nil {
-		return nodeResolvedPath(filepath.Join(root, dir))
+	root, err := client.nodeWorkRoot()
+	if err != nil {
+		return filepath.Clean(dir)
 	}
-	return filepath.Clean(dir)
+	return nodeStablePath(filepath.Join(root, dir))
+}
+
+func nodeStablePath(path string) string {
+	path = filepath.Clean(path)
+	rest := ""
+	for {
+		if resolved, err := filepath.EvalSymlinks(path); err == nil {
+			return filepath.Join(resolved, rest)
+		}
+		parent := filepath.Dir(path)
+		if parent == path {
+			return filepath.Join(path, rest)
+		}
+		rest = filepath.Join(filepath.Base(path), rest)
+		path = parent
+	}
 }

@@ -371,6 +371,9 @@ func TestFencedSpawnIsNeverSent_t4388(t *testing.T) {
 	if !f.hub.spawnQueue.fence(second.Request.RequestID) {
 		t.Fatal("fence refused a queued request")
 	}
+	if f.hub.spawnQueue.fence(second.Request.RequestID) {
+		t.Fatal("a second abandon took an already-held fence")
+	}
 	if f.hub.spawnQueue.beginSend(second.Request.RequestID) {
 		t.Fatal("a fenced request may be sent")
 	}

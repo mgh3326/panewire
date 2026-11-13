@@ -100,11 +100,12 @@ func (q *hubSpawnQueue) endSend(id string) {
 }
 
 // fence keeps id from being sent while an abandon settles it, and takes it
-// off its node queue. It fails while id is being sent.
+// off its node queue. It fails while id is being sent or another abandon
+// holds it, so one handler never releases another's fence.
 func (q *hubSpawnQueue) fence(id string) bool {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	if q.sending[id] {
+	if q.sending[id] || q.fenced[id] {
 		return false
 	}
 	if q.fenced == nil {
