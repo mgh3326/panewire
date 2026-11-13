@@ -678,12 +678,7 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 		s.Task = j.Task
 		s.Inherited = s.ParentJob
 		s.replacedRung = &j
-		builderFamily = j.Family
-		if builderFamily == "" {
-			if seat, ok := a.Policy.Profiles[j.Profile]; ok {
-				builderFamily = seat.Family
-			}
-		}
+		builderFamily = a.jobBuilderFamily(j)
 		if s.Owner == "" && !s.ownerOmitted {
 			s.Owner = j.Owner
 		}
@@ -691,6 +686,15 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 		if s.Report == "" && s.ReportRelative == "" {
 			return fail(exitUsage, "--parent-job requires --report")
 		}
+	}
+	if s.ParentJob == "" && builderFamily == "" && topRoutingRole(s.resolvedRoutingRole()) {
+		// A consult's author is the job it runs in even when --task names the
+		// task; resolve reads the same job (hk 4572).
+		family, e := a.askerBuilderFamily(ctx)
+		if e != nil {
+			return e
+		}
+		builderFamily, s.ParentFamily = family, family
 	}
 	if s.ownerOmitted {
 		if e := a.resolveOwner(ctx, &s); e != nil {
