@@ -51,7 +51,7 @@ func TestReviewerHoldRetryAfter(t *testing.T) {
 				return
 			}
 			var body map[string]any
-			if err := json.Unmarshal(result.body, &body); err != nil || result.status != http.StatusConflict || body["error"] != "job_already_claimed" {
+			if err := json.Unmarshal(result.body, &body); err != nil || result.status != http.StatusConflict || body["error"] != "task_role_claimed" {
 				t.Fatalf("status=%d body=%s err=%v", result.status, result.body, err)
 			}
 			retry, present := body["retry_after_s"]
