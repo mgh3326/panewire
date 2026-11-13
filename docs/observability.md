@@ -18,22 +18,20 @@ and are read with `| json`.
 | `relay` | `dropped:<reason>` | the drop code (`working_wait_expired`, `inject_failed_max_attempts`, `maybe_in_pane`, `lane_rerouted`, `job_ended`, a stale-lease code) | hub | a node gave up on a held row |
 | `relay` | `unconfirmed:<reason>` | the first token of the report (`maybe_in_pane`, `ack_timeout`, ...) | hub | a node reported it could not prove delivery, or its ack window expired |
 | `spawn_held` | the held branch (`succeeded_pane_held`, `failed_pane_held`, `recordless_pane_held`, `failed_record_missing`, `hk_read_error`, ...) | the pane-probe reason (`pane_listed`, `node_unreachable`, `not_probed`, ...) | hub | a reclaim refused to release a role reservation |
-| `job_result` | `attached` | `duplicate_done` | node | the duplicate `done --result` attached a result (the duplicate-completion fix) |
 | `job_result` | `conflict` | `different_result` | node | a later `done --result` met a different stored result; strict CLI completion exits 75 and keeps the stored result |
 | `job_result` | `missing` | `no_result` | node | a reviewer's completed `done` carried no result |
 | `placement_shadow` | `agree`, `order_differs`, `disagree` or `shadow_error` (the worst of the arms) | the work class (`light`, `heavy`) | node | the spawn engine ranked the hosts for a job; the line compares the live order with the shadow arms and changes nothing live. See [Shadow comparison](placement.md#shadow-comparison) |
 
 Strict CLI `done --result` completion write refusals write one
 `job.record_failed` event with `{op:"completed", reason:<token>}` and print the
-same safe token to stderr. A local result-attachment event failure prints
-`reason=local_event_failed`; it does not append `job.record_failed`. Tokens are
+same safe token to stderr. Tokens are
 `secret_like_content[:<pattern>]`, `terminal_without_result`,
-`result_conflict`, `report_conflict`, `job_escalated`, `job_lost`,
+`result_conflict`, `job_escalated`, `job_lost`,
 `no_spawn_evidence`, a validated hk code (`[a-z0-9_]{1,64}`), `http_<status>`,
-`hk_unreachable`, `hk_unconfigured`, or `local_event_failed` when the local
-result-attachment event cannot be recorded. A secret pattern is included only
-when it matches `[a-z0-9_]{1,40}`. The response body, hk refusal reason and
-local event error details are never logged.
+`hk_unreachable` or `hk_unconfigured`. A secret pattern is included only
+when it matches `[a-z0-9_]{1,40}`. The response body and hk refusal reason are
+never logged. The completion receipts `done` writes are in
+[config.md](config.md#completion-receipts).
 
 A `placement_shadow` line carries `job`, `request_id` when known, and a `shadow`
 object: `role`, `work_class`, `live` (the live order), `arms` (a map of arm name

@@ -69,11 +69,13 @@ hk confirms an artifact when:
 
 - **a report** — every top-level `report*.md` (the `-rN` rounds included),
   and every report path the spawn receipt (`--report`), a completion
-  (`done`/`escalate`, `job.result_attached`) or the submission recorded,
-  when it lies in the directory and exists: the record names a
-  `report_doc`, and the sha256 of the local bytes equals the record's
-  `report_sha256` for that document, else the `sha256` hk holds for
-  `reports/<job>/<basename>`. A recorded path outside the directory (a
+  (`done`/`escalate`) or the submission recorded, when it lies in the
+  directory and exists: hk holds a document at the key `done` publishes the
+  local bytes to, `reports/<job>/answer-<sha256>.md`, whose `sha256` equals
+  the local bytes', else at the legacy key `reports/<job>/<basename>` (a
+  report published before keys were content-addressed). The job record's pin
+  and the job's events play no part, so a report published but never pinned
+  is confirmed. A recorded path outside the directory (a
   parent job's) is not this pass's to delete and is skipped. A recorded
   path is judged by the file it really names: one that is not a string,
   not absolute, or not clean (`filepath.Clean` would change it: `..`, `.`,
