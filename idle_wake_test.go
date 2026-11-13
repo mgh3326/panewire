@@ -669,7 +669,7 @@ func TestIdleWakeOwnerResolutionFailsClosedOnAmbiguity(t *testing.T) {
 	if got := hub.resolveIdleWakeOwner("host-a", "workspace:shared"); got.Reason != idleWakeReasonAmbiguous || got.Lane != "" {
 		t.Fatalf("ambiguous active jobs=%+v", got)
 	}
-	hub = r20Hub(t, `{"lanes":{"worker":{"machine":"host-a","pane":"workspace:pane-1","parent":"-owner"},"-owner":{"machine":"host-a","pane":"workspace:owner"}}}`, nil, nil)
+	hub = r20Hub(t, `{"lanes":{"worker":{"machine":"host-a","pane":"workspace:pane-1","parent":"Owner"},"Owner":{"machine":"host-a","pane":"workspace:owner"}}}`, nil, nil)
 	if got := hub.resolveIdleWakeOwner("host-a", "workspace:pane-1"); got.Reason != idleWakeReasonInvalid || got.Lane != "" {
 		t.Fatalf("lane outside direct-event vocabulary=%+v", got)
 	}
