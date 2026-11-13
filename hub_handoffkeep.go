@@ -363,17 +363,18 @@ func (c *handoffkeepRelayClient) listUndelivered(ctx context.Context, lane, kind
 	return result.Events, nil
 }
 
-// handoffkeepTask is the hk task fields the drain-wake check reads.
+// handoffkeepTask is the hk task field the drain-wake count reads: the ID
+// that pages the list.
 type handoffkeepTask struct {
-	ID      int64  `json:"id"`
-	Project string `json:"project"`
-	State   string `json:"state"`
+	ID int64 `json:"id"`
 }
 
-// listTasks reads one page of hk tasks in ID order after afterID. Drain wake
-// pages until a short page (hub_drain_wake.go).
-func (c *handoffkeepRelayClient) listTasks(ctx context.Context, afterID int64, limit int) ([]handoffkeepTask, error) {
+// listTasks reads one page of hk tasks for project in state, in ID order after
+// afterID. Drain wake pages until a short page (hub_drain_wake.go).
+func (c *handoffkeepRelayClient) listTasks(ctx context.Context, project, state string, afterID int64, limit int) ([]handoffkeepTask, error) {
 	query := url.Values{}
+	query.Set("project", project)
+	query.Set("state", state)
 	query.Set("limit", strconv.Itoa(limit))
 	if afterID > 0 {
 		query.Set("after_id", strconv.FormatInt(afterID, 10))

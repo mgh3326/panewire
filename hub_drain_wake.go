@@ -96,22 +96,36 @@ func (h *HubServer) sweepDrainWakes(ctx context.Context, now time.Time) {
 	}
 }
 
-// drainWakeBacklog counts hk tasks for project in an open state (backlog or
-// ready), reading every page in ID order. An unadvancing cursor is an error,
-// not a partial count.
+// drainWakeOpenStates are the hk task states that count as a lane's open
+// backlog: the two pre-start states (hk internal/store/states.go). backlog is
+// the queued work; unstarted is hk's open pre-start state. hk has no "ready".
+var drainWakeOpenStates = []string{"backlog", "unstarted"}
+
+// drainWakeBacklog counts hk tasks for project in each open state. hk filters
+// by project and state server side, so each page is already the answer.
 func (h *HubServer) drainWakeBacklog(ctx context.Context, project string) (int, error) {
-	count := 0
-	var afterID int64
-	for {
-		tasks, err := h.handoffkeep.listTasks(ctx, afterID, drainWakeTaskLimit)
+	total := 0
+	for _, state := range drainWakeOpenStates {
+		count, err := h.drainWakeStateCount(ctx, project, state)
 		if err != nil {
 			return 0, err
 		}
-		for _, task := range tasks {
-			if task.Project == project && (task.State == "backlog" || task.State == "ready") {
-				count++
-			}
+		total += count
+	}
+	return total, nil
+}
+
+// drainWakeStateCount reads every page of one project and state in ID order.
+// An unadvancing cursor is an error, not a partial count.
+func (h *HubServer) drainWakeStateCount(ctx context.Context, project, state string) (int, error) {
+	count := 0
+	var afterID int64
+	for {
+		tasks, err := h.handoffkeep.listTasks(ctx, project, state, afterID, drainWakeTaskLimit)
+		if err != nil {
+			return 0, err
 		}
+		count += len(tasks)
 		if len(tasks) < drainWakeTaskLimit {
 			return count, nil
 		}

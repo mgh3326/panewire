@@ -392,7 +392,8 @@ When the line is sent:
   (default 0) while hk lists open backlog for its project gets one line,
   `N backlog, M in work: dispatch the next batch`. The project is the lane
   name without `-design`; the backlog is the hk tasks in state `backlog` or
-  `ready`, read page by page. The line goes out on the drain and at most once
+  `unstarted`, counted per state with hk's project and state filters, page by
+  page. The line goes out on the drain and at most once
   per `relay.drain_wake_interval` (default 1h). A lane first seen idle gets no
   line. This is an interim until the hub-owned queue (hk 4376) replaces the
   hk read.

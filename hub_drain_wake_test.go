@@ -30,21 +30,30 @@ type t4473Task struct {
 	State   string
 }
 
-// t4473Handler serves GET /v1/tasks from tasks with hk's exclusive after_id
-// cursor and limit, and hands every other route to the relay fake.
+// t4473Handler serves GET /v1/tasks from tasks the way hk does: a project and
+// a state filter when given, hk's exclusive after_id cursor, and limit. Every
+// other route goes to the relay fake.
 func t4473Handler(relay http.Handler, tasks []t4473Task) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet || r.URL.Path != "/v1/tasks" {
 			relay.ServeHTTP(w, r)
 			return
 		}
-		after, _ := strconv.ParseInt(r.URL.Query().Get("after_id"), 10, 64)
-		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+		query := r.URL.Query()
+		after, _ := strconv.ParseInt(query.Get("after_id"), 10, 64)
+		limit, _ := strconv.Atoi(query.Get("limit"))
 		page := []map[string]any{}
 		for _, task := range tasks {
-			if task.ID > after && len(page) < limit {
-				page = append(page, map[string]any{"id": task.ID, "project": task.Project, "state": task.State})
+			if task.ID <= after || len(page) >= limit {
+				continue
 			}
+			if query.Has("project") && task.Project != query.Get("project") {
+				continue
+			}
+			if query.Has("state") && task.State != query.Get("state") {
+				continue
+			}
+			page = append(page, map[string]any{"id": task.ID, "project": task.Project, "state": task.State})
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"tasks": page})
 	})
@@ -107,7 +116,7 @@ func t4473Lines(rig *t3602Rig) []string {
 func TestDrainWakeOneLinePerIntervalAfterDrain(t *testing.T) {
 	rig, clock := t4473Rig(t, []t4473Task{
 		{ID: 1, Project: "handoffkeep", State: "backlog"},
-		{ID: 2, Project: "handoffkeep", State: "ready"},
+		{ID: 2, Project: "handoffkeep", State: "unstarted"},
 		{ID: 3, Project: "other", State: "backlog"},
 		{ID: 4, Project: "handoffkeep", State: "developing"},
 	})
@@ -136,21 +145,25 @@ func TestDrainWakeOneLinePerIntervalAfterDrain(t *testing.T) {
 	}
 }
 
-// The backlog is read page by page: the open task sits past the first full
-// page of hk's stable ID order.
+// The backlog is read page by page: the project's backlog runs past hk's first
+// full page of stable ID order, and an unstarted task after it is counted too.
 func TestDrainWakeReadsBacklogPastFirstPage(t *testing.T) {
-	tasks := make([]t4473Task, 0, t4473PageLimit+1)
+	tasks := make([]t4473Task, 0, t4473PageLimit+2)
 	for id := int64(1); id <= t4473PageLimit; id++ {
-		tasks = append(tasks, t4473Task{ID: id, Project: "other", State: "backlog"})
+		tasks = append(tasks, t4473Task{ID: id, Project: "handoffkeep", State: "backlog"})
 	}
-	tasks = append(tasks, t4473Task{ID: t4473PageLimit + 1, Project: "handoffkeep", State: "backlog"})
+	tasks = append(tasks,
+		t4473Task{ID: t4473PageLimit + 1, Project: "handoffkeep", State: "unstarted"},
+		t4473Task{ID: t4473PageLimit + 2, Project: "other", State: "backlog"},
+	)
 	rig, _ := t4473Rig(t, tasks)
 	t4473SetInFlight(rig, t4473Lane, 1)
 	t4473Sweep(rig)
 	t4473SetInFlight(rig, t4473Lane, 0)
 	t4473Sweep(rig)
-	if got := t4473Lines(rig); len(got) != 1 || got[0] != "1 backlog, 0 in work: dispatch the next batch" {
-		t.Fatalf("drain lines=%q, want the one backlog task found past the first page", got)
+	want := "1001 backlog, 0 in work: dispatch the next batch"
+	if got := t4473Lines(rig); len(got) != 1 || got[0] != want {
+		t.Fatalf("drain lines=%q, want exactly [%q]", got, want)
 	}
 }
 
