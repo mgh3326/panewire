@@ -157,25 +157,23 @@ func quotaTaskPriority(value any) (int, bool) {
 	return 0, false
 }
 
+// jobForPane finds the one active job bound to pane. It reads through the
+// inbox index (docs/job-event-index.md), so a lookup costs a stat per job
+// directory and re-reads only the directories that changed.
 func (q *quotaStopManager) jobForPane(ctx context.Context, pane string) (HubActiveJob, bool) {
 	var found HubActiveJob
 	count := 0
-	entries, err := os.ReadDir(filepath.Join(q.root, "jobs"))
-	if err != nil {
-		return found, false
-	}
-	for _, entry := range entries {
-		if ctx.Err() != nil {
-			return HubActiveJob{}, false
-		}
-		if !entry.IsDir() || !hubJobIDPattern.MatchString(entry.Name()) {
-			continue
-		}
-		scanned, ok := scanHubJobEventDetails(filepath.Join(q.root, "jobs", entry.Name(), "events"), entry.Name())
-		if ok && scanned.job.Pane == pane {
+	now := time.Now()
+	activeCutoff, staleCutoff := now.Add(-hubJobActiveMaxAge()), now.Add(-hubJobStaleAge())
+	err := hubIndexFor(q.root).visitJobs(ctx, false, func(job *hubIndexedJob) bool {
+		if scanned, ok := job.reduction.scanned(activeCutoff, staleCutoff); ok && scanned.job.Pane == pane {
 			found = scanned.job
 			count++
 		}
+		return true
+	})
+	if err != nil {
+		return HubActiveJob{}, false
 	}
 	return found, count == 1 && found.JobID != "" && !quotaExcluded(found.AgentLabel)
 }
