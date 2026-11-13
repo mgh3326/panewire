@@ -320,6 +320,15 @@ func (h *HubServer) sweepPoolJob(ctx context.Context, exhaustion poolExhaustion,
 		return poolJobSkip(role, "action_unreadable")
 	}
 	if !exists {
+		// Another operation may already own this role (for example a staged
+		// author escalation). Do not start a competing ending in that gap.
+		if prior.Task != "" && prior.ParentJob == "" {
+			owner, _, _, err := h.inbox.store.spawnRoleOwner(ctx, prior.RoleKey())
+			if err != nil || owner != task.Request.RequestID {
+				release()
+				return poolJobSkip(role, "role_not_owned")
+			}
+		}
 		var why string
 		action, why = h.newPoolAction(exhaustion, task, prior)
 		if why != "" {

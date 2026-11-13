@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"log/slog"
+	"net/http/httptest"
 	"os"
 	"strconv"
 	"strings"
@@ -64,6 +66,8 @@ type sweepNode struct {
 	reasons           map[string]string       // job -> end_reason written
 	markers           map[string]string       // job -> registered pool action id
 	failReadAfterMark bool
+	completeOnMark    bool
+	failMark          bool
 	afterCapture      func()
 }
 
@@ -113,8 +117,19 @@ func (n *sweepNode) answer(op string, raw json.RawMessage) map[string]any {
 		var args nodeJobMarkLostArgs
 		_ = json.Unmarshal(raw, &args)
 		n.commands = append(n.commands, op+" "+args.Job)
+		if n.failMark {
+			return map[string]any{"outcome": nodeJobMarkLostPanesUnknown}
+		}
 		n.reasons[args.Job] = args.EndReason
 		n.jobs.mu.Lock()
+		if n.completeOnMark {
+			n.jobs.records[args.Job]["state"] = "completed"
+			if n.failReadAfterMark {
+				n.jobs.failAfterGets = 2
+			}
+			n.jobs.mu.Unlock()
+			return map[string]any{"outcome": nodeJobMarkLostCompleted}
+		}
 		n.jobs.records[args.Job]["state"] = "lost"
 		n.jobs.records[args.Job]["end_reason"] = args.EndReason
 		if n.failReadAfterMark {
@@ -584,6 +599,74 @@ func TestPoolExhaustedRetriesAnOldJobWhosePaneIsGone(t *testing.T) {
 	}
 }
 
+// A fresh hub reads the action from the same store and sends the owed notice.
+func TestPoolExhaustedReconcilesAfterHubRestart(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		failMark bool
+	}{{"before terminal write", true}, {"before notice", false}} {
+		t.Run(test.name, func(t *testing.T) {
+			f := newSweepFixture(t)
+			f.owner = "nowhere"
+			f.node2.failMark = test.failMark
+			job := f.addJob(t, "reviewer", "devin", sweepDevin, "idle")
+			f.publishFreeLimit(t, sweepDevin, time.Now().Add(time.Hour), time.Now())
+			eventually(t, 5*time.Second, "the pass", func() bool { return f.sweeps() == 1 })
+			if got := f.state(job); test.failMark && got != "spawned" {
+				t.Fatalf("state=%s, want spawned before restart", got)
+			}
+			if got := len(f.pendingActions(t)); got != 1 {
+				t.Fatalf("pending=%d, want 1", got)
+			}
+			var seq int
+			var name, path string
+			if err := f.hub.inbox.store.db.QueryRow(`PRAGMA database_list`).Scan(&seq, &name, &path); err != nil {
+				t.Fatal(err)
+			}
+			relayPath, hk := f.hub.reportRelayPath, f.hub.handoffkeep
+			if err := f.hub.Close(); err != nil {
+				t.Fatal(err)
+			}
+			routes := `{"lanes":{"nowhere":{"machine":"machine-b","pane":"w1:p2"}}}`
+			if err := os.WriteFile(relayPath, []byte(routes), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			hub, err := NewHubServer(HubServerConfig{Tokens: map[string]string{"operator": t14OperatorToken, "machine-a": "node-token", "machine-b": "desk-token"}, InboxStorePath: path, ReportRelayPath: relayPath, Logger: slog.New(slog.NewTextHandler(io.Discard, nil)), handoffkeep: hk})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { hub.Close() })
+			hub.now = func() time.Time { return time.Now().Add(2 * time.Hour) }
+			hub.spawnNewApp = func(out, errout io.Writer) (*fleet.App, error) {
+				return &fleet.App{JobStore: f.jobs, Out: out, Err: errout}, nil
+			}
+			destination := &hubAgent{relays: make(chan hubRelayInjectEvent, 8), persisted: make(chan hubRelayPersistedEvent, 8)}
+			hub.mu.Lock()
+			hub.nodes["machine-b"] = &hubNodeRecord{agent: destination}
+			hub.mu.Unlock()
+			server := httptest.NewServer(hub.Handler())
+			t.Cleanup(server.Close)
+			node := t14Node(t, hub, server, true)
+			player := &sweepNode{conn: node, jobs: f.jobs, panes: map[string]nodeAgentRow{}, reasons: map[string]string{}, markers: map[string]string{}}
+			ctx, cancel := context.WithCancel(context.Background())
+			t.Cleanup(cancel)
+			go player.serve(ctx)
+			if finished := hub.reconcilePoolActions(t.Context()); finished != 1 {
+				t.Fatalf("reconciled=%d, want 1", finished)
+			}
+			var notices int
+			for _, relay := range spawnFailedInjections(destination) {
+				if relay.Kind == "job.lost" && relay.JobID == job {
+					notices++
+				}
+			}
+			if notices != 1 {
+				t.Fatalf("notices=%d, want 1", notices)
+			}
+		})
+	}
+}
+
 // An intent whose exhaustion no longer holds before anything was touched is
 // cancelled: a reset that passed during a wait must not close a working pane.
 func TestPoolExhaustedCancelsAnIntentWhoseResetPassed(t *testing.T) {
@@ -661,6 +744,39 @@ func TestPoolExhaustedLeavesACompletedJobAlone(t *testing.T) {
 	}
 	if got := f.state(reviewer); got != "completed" {
 		t.Fatalf("state=%s, want the completion kept", got)
+	}
+}
+
+func TestPoolExhaustedWaitsForCompletionReadback(t *testing.T) {
+	f := newSweepFixture(t)
+	f.node2.completeOnMark, f.node2.failReadAfterMark = true, true
+	job := f.addJob(t, "implementer", "devin", sweepDevin, "idle")
+	f.publishFreeLimit(t, sweepDevin, time.Now().Add(time.Hour), time.Now())
+	eventually(t, 5*time.Second, "the pass", func() bool { return f.sweeps() == 1 })
+	if _, err := f.hub.inbox.store.latestSpawnForJob(t.Context(), job+"-q1"); err == nil {
+		t.Fatal("claimed successor without readable terminal state")
+	}
+	if got := len(f.pendingActions(t)); got != 1 {
+		t.Fatalf("pending actions=%d, want retry", got)
+	}
+}
+
+func TestPoolExhaustedDoesNotHandOverAConcurrentCompletion(t *testing.T) {
+	f := newSweepFixture(t)
+	f.node2.completeOnMark = true
+	job := f.addJob(t, "implementer", "devin", sweepDevin, "idle")
+	f.publishFreeLimit(t, sweepDevin, time.Now().Add(time.Hour), time.Now())
+	eventually(t, 5*time.Second, "the pass", func() bool { return f.sweeps() == 1 })
+	if got := f.state(job); got != "completed" {
+		t.Fatalf("state=%s, want completed", got)
+	}
+	if _, err := f.hub.inbox.store.latestSpawnForJob(t.Context(), job+"-q1"); err == nil {
+		t.Fatal("completed job received a successor")
+	}
+	for _, relay := range spawnFailedInjections(f.destination) {
+		if relay.Kind == "job.lost" && relay.JobID == job {
+			t.Fatalf("completed job announced lost: %+v", relay)
+		}
 	}
 }
 
@@ -1051,4 +1167,24 @@ func TestPoolExhaustedIncludesAnOldJobAHeartbeatReports(t *testing.T) {
 		_, err := f.hub.inbox.store.latestSpawnForJob(t.Context(), worker+"-q1")
 		return err == nil
 	})
+}
+
+func TestPoolExhaustedLeavesAnAttemptWhoseRoleMovedAlone(t *testing.T) {
+	f := newSweepFixture(t)
+	job := f.addJob(t, "implementer", "devin", sweepDevin, "idle")
+	holder, err := f.hub.inbox.store.latestSpawnForJob(t.Context(), job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.hub.inbox.store.db.Exec(`UPDATE spawn_reservations SET task_role=NULL WHERE request_id=?`, holder.Request.RequestID); err != nil {
+		t.Fatal(err)
+	}
+	f.publishFreeLimit(t, sweepDevin, time.Now().Add(time.Hour), time.Now())
+	eventually(t, 5*time.Second, "the pass", func() bool { return f.sweeps() == 1 })
+	if got := f.node2.count("pane.close " + job); got != 0 {
+		t.Fatalf("closed pane %d times after role moved", got)
+	}
+	if got := f.state(job); got != "spawned" {
+		t.Fatalf("state=%s, want spawned", got)
+	}
 }

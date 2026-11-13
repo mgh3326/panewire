@@ -107,7 +107,7 @@ func (client *HubClient) nodeJobPoolAction(args nodeJobPoolActionArgs) (any, str
 	if err != nil {
 		return nil, "pool_action_failed"
 	}
-	if args.Op != nodePoolActionClear && (ledger.completed || ledger.newerClaim || ledger.lost) {
+	if args.Op != nodePoolActionClear && (ledger.newerClaim || args.Op == nodePoolActionRegister && (ledger.completed || ledger.lost)) {
 		return nodeJobPoolActionResult{Outcome: nodePoolActionMoved}, ""
 	}
 	if args.Op == nodePoolActionRegister {

@@ -233,6 +233,9 @@ func (a *App) watch(ctx context.Context, args []string) error {
 		if e != nil {
 			return e
 		}
+		if _, done := a.poolActionStatus(id); done {
+			return a.releaseQuota(ctx, j)
+		}
 		// The job.lost announced for a quota stop (by this watcher for a
 		// reviewer, by the manager for a handed-over implementer) is not
 		// an end until the grace for the hub's replacement runs out.

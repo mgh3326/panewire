@@ -552,7 +552,10 @@ func (h *HubServer) finishPoolActionMarker(ctx context.Context, holder hubSpawnT
 	if !h.nodeCall(ctx, spawnHolderHost(holder), nodeCommandJobPoolAction, args, spawnHeldPaneActWait, &result) {
 		return false
 	}
-	return result.Outcome == nodePoolActionFinished || result.Outcome == nodePoolActionNoLedger || result.Outcome == nodePoolActionMoved
+	if result.Outcome == nodePoolActionMoved {
+		return h.clearPoolActionMarker(ctx, holder, name, action)
+	}
+	return result.Outcome == nodePoolActionFinished || result.Outcome == nodePoolActionNoLedger
 }
 
 // clearPoolActionMarker must be acknowledged before a pre-close cancellation.
