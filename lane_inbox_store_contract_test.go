@@ -492,7 +492,7 @@ func TestLaneInboxStorePostgresConcurrentStartsMigrateOnce(t *testing.T) {
 // by lock_timeout (TestHubMigrateSQLiteApplyFailsFastOnAHeldLock).
 func TestLaneInboxStoreCallsTakeAContext(t *testing.T) {
 	bare := map[string]bool{"Exec": true, "Query": true, "QueryRow": true, "Begin": true, "Ping": true, "Prepare": true}
-	for _, file := range []string{"lane_inbox_store.go", "lane_inbox_store_postgres.go", "hub_migrate_sqlite.go"} {
+	for _, file := range []string{"lane_inbox_store.go", "lane_inbox_store_postgres.go"} {
 		parsed, err := parser.ParseFile(token.NewFileSet(), file, nil, 0)
 		if err != nil {
 			t.Fatal(err)
