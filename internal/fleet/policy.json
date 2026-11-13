@@ -1569,6 +1569,18 @@
         "counsel"
       ]
     },
+    "omp-inkling2s": {
+      "canon": "omp-inkling2s",
+      "kind": "omp",
+      "family": "other",
+      "capability": "omp_commandcode",
+      "effort": "high",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer"
+      ]
+    },
     "omp-museember": {
       "canon": "omp-museember",
       "kind": "omp",
