@@ -3000,7 +3000,7 @@ func parseHubOutboundRejection(payload []byte) (hubOutboundMessage, hubOutboundR
 				return hubOutboundMessage{}, reject
 			}
 		} else if len(fields) == 8 {
-			if json.Unmarshal(fields["kind"], &message.Kind) != nil || (message.Kind != "lane.event" && message.Kind != "job.completed" && message.Kind != "job.escalate" && message.Kind != "job.joined") {
+			if json.Unmarshal(fields["kind"], &message.Kind) != nil || (message.Kind != "lane.event" && message.Kind != "job.completed" && message.Kind != "job.escalate" && message.Kind != "job.joined" && message.Kind != "job.revoked") {
 				return hubOutboundMessage{}, reject
 			}
 			if json.Unmarshal(fields["lane"], &message.Lane) != nil || json.Unmarshal(fields["event_id"], &message.EventID) != nil || json.Unmarshal(fields["deliver"], &message.DeliverPolicy) != nil || !hubAgentLabelPattern.MatchString(message.Lane) || message.EventID < 1 {
@@ -3235,4 +3235,4 @@ func (peer *hubClientConnection) write(ctx context.Context, value any) error {
 
 // relayPersistedKinds bounds the hub-originated acknowledgement to the
 // relay record kinds. It is a closed set, not a passthrough.
-var relayPersistedKinds = map[string]bool{"job.completed": true, "job.escalate": true, "job.joined": true, "job.lost": true, "lane.event": true}
+var relayPersistedKinds = map[string]bool{"job.completed": true, "job.escalate": true, "job.joined": true, "job.lost": true, "job.revoked": true, "lane.event": true}
