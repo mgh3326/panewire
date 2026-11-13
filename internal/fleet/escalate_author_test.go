@@ -3,6 +3,7 @@ package fleet
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -355,5 +356,15 @@ func TestEscalateAuthorReportsSelectionQuotaRefusalToHub(t *testing.T) {
 	err := a.escalateAuthorCmd(t.Context(), []string{"--task", "42", "--job", "job-a", "--pr", "mgh3326/panewire#77", "--round", "5", "--findings-file", writeFindings(t, `[]`)})
 	if exitCode(err) != exitUsage || hub.calls != 1 || !hub.request.SelectionRefused {
 		t.Fatalf("err=%v calls=%d request=%+v", err, hub.calls, hub.request)
+	}
+}
+
+func TestEscalateAuthorLiveRecordCatalogOutageStillReachesHub(t *testing.T) {
+	a, hub := escalateCLIFixture(t, "sonnet", "high", true)
+	a.Quota.(*fakeQuota).CatalogErr = errors.New("catalog unavailable")
+	hub.result = EscalateAuthorResult{Job: "job-a-l1", Rung: "sonnet@xhigh"}
+	err := a.escalateAuthorCmd(t.Context(), []string{"--task", "42", "--job", "job-a", "--pr", "mgh3326/panewire#77", "--round", "5", "--findings-file", writeFindings(t, `[]`)})
+	if err != nil || hub.calls != 1 {
+		t.Fatalf("err=%v calls=%d", err, hub.calls)
 	}
 }

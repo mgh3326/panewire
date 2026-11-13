@@ -192,6 +192,33 @@ func (s *laneInboxStore) cancelStagedSpawn(parent context.Context, id, previousI
 	return tx.Commit()
 }
 
+// discardStagedSpawn releases a staged role when its predecessor ended for a
+// different reason. It never restores a reservation to a terminal job.
+func (s *laneInboxStore) discardStagedSpawn(parent context.Context, id, roleKey string) error {
+	ctx, done := s.op(parent)
+	defer done()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, s.q(`DELETE FROM spawn_operations WHERE request_id=? AND status='staged'`), id)
+	if err != nil {
+		return err
+	}
+	if n, _ := result.RowsAffected(); n != 1 {
+		return errSpawnClaimed
+	}
+	result, err = tx.ExecContext(ctx, s.q(`DELETE FROM spawn_reservations WHERE request_id=? AND task_role=?`), id, roleKey)
+	if err != nil {
+		return err
+	}
+	if n, _ := result.RowsAffected(); n != 1 {
+		return errSpawnClaimed
+	}
+	return tx.Commit()
+}
+
 // Bind the immutable execution destination before sending any bytes. Concurrent
 // coordinators can only replay this same node request, never select a second host.
 func (s *laneInboxStore) bindSpawn(parent context.Context, id string, attempt int, node hubSpawnRequest) (hubSpawnTask, error) {

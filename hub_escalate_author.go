@@ -48,19 +48,20 @@ const (
 var escalateAuthorPRPattern = regexp.MustCompile(`^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+#[1-9][0-9]*$`)
 
 type hubEscalateAuthorRequest struct {
-	Task             string `json:"task"`
-	Job              string `json:"job"`
-	PR               string `json:"pr"`
-	Round            int    `json:"round"`
-	Findings         string `json:"findings"`
-	Grade            string `json:"grade"`
-	FromProfile      string `json:"from_profile"`
-	FromEffort       string `json:"from_effort"`
-	Profile          string `json:"profile"`
-	Effort           string `json:"effort"`
-	Step             string `json:"step"`
-	ConsultSeat      string `json:"consult_seat"`
-	SelectionRefused bool   `json:"selection_refused,omitempty"`
+	Task                 string `json:"task"`
+	Job                  string `json:"job"`
+	PR                   string `json:"pr"`
+	Round                int    `json:"round"`
+	Findings             string `json:"findings"`
+	Grade                string `json:"grade"`
+	FromProfile          string `json:"from_profile"`
+	FromEffort           string `json:"from_effort"`
+	Profile              string `json:"profile"`
+	Effort               string `json:"effort"`
+	Step                 string `json:"step"`
+	ConsultSeat          string `json:"consult_seat"`
+	SelectionRefused     bool   `json:"selection_refused,omitempty"`
+	SelectionUnavailable bool   `json:"selection_unavailable,omitempty"`
 }
 
 type hubEscalateAuthorResult struct {
@@ -168,7 +169,7 @@ func (h *HubServer) escalateAuthor(ctx context.Context, request hubEscalateAutho
 	owner = firstNonempty(escalateAuthorStr(record, "owner_lane"), owner)
 	if staged {
 		identity := prior.Request.LadderStep
-		if identity == nil || identity.Parent != request.Job || identity.Round != request.Round || identity.PR != request.PR || (request.Profile != "" && (identity.Profile != request.Profile || identity.Effort != request.Effort)) {
+		if identity == nil || identity.Parent != request.Job || identity.Round != request.Round || identity.PR != request.PR {
 			if escalateAuthorStr(record, "state") == "lost" {
 				return h.escalateAuthorRefusal(ctx, request, owner, "job_changed", "a different ladder step already owns the successor", true)
 			}
@@ -188,6 +189,12 @@ func (h *HubServer) escalateAuthor(ctx context.Context, request hubEscalateAutho
 	state := escalateAuthorStr(record, "state")
 	resume := state == "lost" && escalateAuthorStr(record, "end_reason") == endReason
 	if state != "claimed" && state != "spawned" && !resume {
+		if staged && hkTerminalState(state) {
+			if err := h.inbox.store.discardStagedSpawn(ctx, prior.Request.RequestID, spawn.RoleKey()); err != nil {
+				return hubEscalateAuthorResult{}, err
+			}
+			return h.escalateAuthorParentEnded(ctx, request, owner), nil
+		}
 		return h.escalateAuthorRefusal(ctx, request, owner, "job_not_live", "the job's record is "+state, false)
 	}
 	if !resume && (escalateAuthorStr(record, "profile") != "" && escalateAuthorStr(record, "profile") != request.FromProfile || escalateAuthorStr(record, "effort") != "" && request.FromEffort != "" && escalateAuthorStr(record, "effort") != request.FromEffort) {
@@ -212,6 +219,9 @@ func (h *HubServer) escalateAuthor(ctx context.Context, request hubEscalateAutho
 			return h.escalateAuthorRefusal(ctx, request, owner, "pane_busy", "the author pane is busy", false)
 		}
 		if request.Profile == "" || request.Step == "" {
+			if request.SelectionUnavailable {
+				return hubEscalateAuthorResult{}, fmt.Errorf("the successor selection is unavailable; retry")
+			}
 			if request.SelectionRefused {
 				return h.escalateAuthorRefusal(ctx, request, owner, "quota_refused", "the selection quota gate refused the successor", false)
 			}
@@ -283,8 +293,24 @@ func (h *HubServer) escalateAuthor(ctx context.Context, request hubEscalateAutho
 		}
 	}
 	if !resume {
-		if lost, why := h.markHolderJobLostBecause(ctx, app, holder, name, endReason); !lost {
+		lost, why := h.markHolderJobLostBecause(ctx, app, holder, name, endReason)
+		if !lost {
 			return h.escalateAuthorRefusal(ctx, request, owner, "job_not_marked", why, true)
+		}
+		if why == nodeJobMarkLostCompleted || why == "hk_lost" {
+			current, exists, readErr := app.ExistingJob(ctx, request.Job)
+			if readErr != nil || !exists {
+				return hubEscalateAuthorResult{Code: "pending", Reason: "the predecessor's end reason is unconfirmed; retry"}, nil
+			}
+			if hkTerminalState(escalateAuthorStr(current, "state")) && !(escalateAuthorStr(current, "state") == "lost" && escalateAuthorStr(current, "end_reason") == endReason) {
+				if err := h.inbox.store.discardStagedSpawn(ctx, prior.Request.RequestID, spawn.RoleKey()); err != nil {
+					return hubEscalateAuthorResult{}, err
+				}
+				return h.escalateAuthorParentEnded(ctx, request, owner), nil
+			}
+			if escalateAuthorStr(current, "state") != "lost" || escalateAuthorStr(current, "end_reason") != endReason {
+				return hubEscalateAuthorResult{Code: "pending", Reason: "the predecessor's end reason is unconfirmed; retry"}, nil
+			}
 		}
 	}
 	if err := h.inbox.store.activateStagedSpawn(ctx, next.RequestID, h.now().UTC(), next.DeadlineSeconds); err != nil {
@@ -388,6 +414,22 @@ func (h *HubServer) expireStagedLadderSteps(ctx context.Context) {
 			continue
 		}
 		state := escalateAuthorStr(record, "state")
+		if state == "lost" && escalateAuthorStr(record, "end_reason") == fleet.LadderStepEndReason(id.Round, task.Job) {
+			if h.inbox.store.activateStagedSpawn(ctx, task.Request.RequestID, h.now().UTC(), task.Request.DeadlineSeconds) == nil {
+				select {
+				case h.spawnKick <- struct{}{}:
+				default:
+				}
+			}
+			continue
+		}
+		if hkTerminalState(state) {
+			if h.inbox.store.discardStagedSpawn(ctx, task.Request.RequestID, spawn.RoleKey()) == nil {
+				request := hubEscalateAuthorRequest{Job: id.Parent, Round: id.Round, PR: id.PR}
+				h.escalateAuthorParentEnded(ctx, request, task.Owner)
+			}
+			continue
+		}
 		if state != "claimed" && state != "spawned" {
 			continue
 		}
@@ -400,6 +442,12 @@ func (h *HubServer) expireStagedLadderSteps(ctx context.Context) {
 		request := hubEscalateAuthorRequest{Job: id.Parent, Round: id.Round, PR: id.PR}
 		_, _ = h.escalateAuthorRefusal(ctx, request, task.Owner, "staged_expired", "the staged step expired while the author remained present", false)
 	}
+}
+
+func (h *HubServer) escalateAuthorParentEnded(ctx context.Context, request hubEscalateAuthorRequest, owner string) hubEscalateAuthorResult {
+	text := fmt.Sprintf("ladder step %s: the predecessor ended independently; the staged successor and its reservation were released (round %d, %s)", request.Job, request.Round, request.PR)
+	h.relayLaneEventContext(ctx, hubJobEventPayload{EventID: fmt.Sprintf("ladder-step:%s:%d:ended:parent_ended", request.Job, request.Round), JobID: request.Job, OwnerLane: owner, NotifyType: "info", Text: utf8PrefixWithin(text, laneEventTextLimit), Host: "hub", Epoch: 1}, nil)
+	return hubEscalateAuthorResult{Code: "parent_ended", Reason: "the predecessor ended independently; its staged successor was released"}
 }
 
 func escalateCheckoutMatches(tree *nodeWorktree, checkout *fleet.HubCheckout) bool {

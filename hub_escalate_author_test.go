@@ -53,8 +53,9 @@ type escalateFixture struct {
 	// paneAbsent makes the holder's node list no pane for the job.
 	paneAbsent bool
 	// markLostFails makes the holder's node refuse the lost-record write.
-	markLostFails bool
-	paneCwd       string
+	markLostFails     bool
+	markLostCompleted bool
+	paneCwd           string
 
 	mu       sync.Mutex
 	commands []map[string]json.RawMessage
@@ -206,6 +207,12 @@ func (f *escalateFixture) reply(op string) map[string]any {
 	case "job.mark_lost":
 		if f.markLostFails {
 			return map[string]any{"error": "mark_lost_failed"}
+		}
+		if f.markLostCompleted {
+			f.jobs.mu.Lock()
+			f.jobs.records[f.job]["state"] = "completed"
+			f.jobs.mu.Unlock()
+			return map[string]any{"result": map[string]any{"outcome": nodeJobMarkLostCompleted}}
 		}
 		return map[string]any{"result": map[string]any{"outcome": nodeJobMarkLostLost}}
 	}
@@ -939,5 +946,122 @@ func TestEscalateAuthorRecordsSelectionQuotaRefusal(t *testing.T) {
 	f.awaitInfo(t, "quota_refused")
 	if slices.Contains(commandOps(f.take()), "pane.close") {
 		t.Fatal("closed author pane")
+	}
+}
+
+func TestEscalateAuthorStagedReplayIgnoresChangedCatalogRung(t *testing.T) {
+	f := newEscalateFixture(t, "author-rung-changed")
+	f.markLostFails = true
+	if result, _ := f.escalate(t, nil); result.Code != "job_not_marked" {
+		t.Fatalf("stage=%+v", result)
+	}
+	f.markLostFails, f.paneAbsent = false, true
+	request := f.request()
+	request.Profile, request.Effort = "opus", "high"
+	type answer struct {
+		result hubEscalateAuthorResult
+		err    error
+	}
+	done := make(chan answer, 1)
+	go func() { result, err := f.hub.escalateAuthor(t.Context(), request); done <- answer{result, err} }()
+	var successor hubSpawnTask
+	eventually(t, 3*time.Second, "successor activation", func() bool {
+		var err error
+		successor, err = f.hub.inbox.store.latestSpawnForJob(t.Context(), f.job+"-l1")
+		return err == nil && successor.Status == "accepted"
+	})
+	if _, err := f.hub.inbox.store.completeSpawn(t.Context(), successor, placedAnywhere, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case got := <-done:
+		if got.err != nil || got.result.Rung != "sonnet@xhigh" {
+			t.Fatalf("replay=%+v err=%v", got.result, got.err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("replay timed out")
+	}
+}
+
+func TestEscalateAuthorDropsStageForIndependentlyTerminalParent(t *testing.T) {
+	for _, state := range []string{"lost", "completed", "escalated"} {
+		t.Run(state, func(t *testing.T) {
+			f := newEscalateFixture(t, "author-independent-end")
+			f.markLostFails = true
+			if result, _ := f.escalate(t, nil); result.Code != "job_not_marked" {
+				t.Fatalf("stage=%+v", result)
+			}
+			f.jobs.mu.Lock()
+			f.jobs.records[f.job]["state"] = state
+			f.jobs.records[f.job]["end_reason"] = "quota_stop replaced_by=other"
+			f.jobs.mu.Unlock()
+			result, _ := f.escalate(t, nil)
+			if result.Code != "parent_ended" {
+				t.Fatalf("result=%+v", result)
+			}
+			if _, err := f.hub.inbox.store.latestSpawnForJob(t.Context(), f.job+"-l1"); err == nil {
+				t.Fatal("staged successor remains")
+			}
+			if _, _, _, err := f.hub.inbox.store.spawnRoleOwner(t.Context(), "42:worker"); err == nil {
+				t.Fatal("terminal parent's staged role remains reserved")
+			}
+		})
+	}
+}
+
+func TestExpiredLadderStageRecoversTerminalPredecessor(t *testing.T) {
+	for _, ownStep := range []bool{false, true} {
+		t.Run(fmt.Sprint(ownStep), func(t *testing.T) {
+			f := newEscalateFixture(t, "author-expired-terminal")
+			f.markLostFails = true
+			if result, _ := f.escalate(t, nil); result.Code != "job_not_marked" {
+				t.Fatalf("stage=%+v", result)
+			}
+			reason := "quota_stop replaced_by=other"
+			if ownStep {
+				reason = fleet.LadderStepEndReason(5, f.job+"-l1")
+			}
+			f.endHolder(reason)
+			f.hub.now = func() time.Time { return time.Now().Add(10 * time.Minute) }
+			f.hub.expireStagedLadderSteps(t.Context())
+			successor, err := f.hub.inbox.store.latestSpawnForJob(t.Context(), f.job+"-l1")
+			if ownStep {
+				if err != nil || successor.Status != "accepted" {
+					t.Fatalf("successor=%+v err=%v", successor, err)
+				}
+			} else if err == nil {
+				t.Fatalf("independent terminal stage remains: %+v", successor)
+			}
+		})
+	}
+}
+
+func TestEscalateAuthorUnavailableSelectionWithoutStageDoesNotClose(t *testing.T) {
+	f := newEscalateFixture(t, "author-no-catalog")
+	request := f.request()
+	request.Profile = ""
+	request.Step = ""
+	request.SelectionUnavailable = true
+	_, err := f.hub.escalateAuthor(t.Context(), request)
+	if err == nil || slices.Contains(commandOps(f.take()), "pane.close") {
+		t.Fatalf("err=%v", err)
+	}
+	if _, err := f.hub.inbox.store.latestSpawnForJob(t.Context(), f.job+"-l1"); err == nil {
+		t.Fatal("unexpected stage")
+	}
+}
+
+func TestEscalateAuthorDropsStageWhenParentCompletesDuringClose(t *testing.T) {
+	f := newEscalateFixture(t, "author-completes-during-close")
+	f.markLostCompleted = true
+	result, _ := f.escalate(t, nil)
+	if result.Code != "parent_ended" {
+		t.Fatalf("result=%+v", result)
+	}
+	if _, err := f.hub.inbox.store.latestSpawnForJob(t.Context(), f.job+"-l1"); err == nil {
+		t.Fatal("staged successor remains")
+	}
+	if _, _, _, err := f.hub.inbox.store.spawnRoleOwner(t.Context(), "42:worker"); err == nil {
+		t.Fatal("staged role remains reserved")
 	}
 }

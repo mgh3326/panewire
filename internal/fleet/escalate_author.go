@@ -40,19 +40,20 @@ var escalateAuthorPRPattern = regexp.MustCompile(`^[A-Za-z0-9._-]+/[A-Za-z0-9._-
 // the job record showed, so the hub can refuse a stale request; Profile and
 // Effort are the rung to start the author at (empty with Step "" for no_rung).
 type EscalateAuthorRequest struct {
-	Task             string `json:"task"`
-	Job              string `json:"job"`
-	PR               string `json:"pr"`
-	Round            int    `json:"round"`
-	Findings         string `json:"findings"`
-	Grade            string `json:"grade"`
-	FromProfile      string `json:"from_profile"`
-	FromEffort       string `json:"from_effort"`
-	Profile          string `json:"profile,omitempty"`
-	Effort           string `json:"effort,omitempty"`
-	Step             string `json:"step,omitempty"`
-	ConsultSeat      string `json:"consult_seat,omitempty"`
-	SelectionRefused bool   `json:"selection_refused,omitempty"`
+	Task                 string `json:"task"`
+	Job                  string `json:"job"`
+	PR                   string `json:"pr"`
+	Round                int    `json:"round"`
+	Findings             string `json:"findings"`
+	Grade                string `json:"grade"`
+	FromProfile          string `json:"from_profile"`
+	FromEffort           string `json:"from_effort"`
+	Profile              string `json:"profile,omitempty"`
+	Effort               string `json:"effort,omitempty"`
+	Step                 string `json:"step,omitempty"`
+	ConsultSeat          string `json:"consult_seat,omitempty"`
+	SelectionRefused     bool   `json:"selection_refused,omitempty"`
+	SelectionUnavailable bool   `json:"selection_unavailable,omitempty"`
 }
 
 // EscalateAuthorResult is the hub's answer: a successor job and rung, or a
@@ -148,9 +149,10 @@ func (a *App) escalateAuthorCmd(ctx context.Context, args []string) error {
 	step, ok, err := a.NextLadderRung(ctx, from, grade, scale)
 	if err != nil && !replay {
 		if exitCode(err) == exitConfig {
-			return err
+			request.SelectionUnavailable = true
+		} else {
+			request.SelectionRefused = true
 		}
-		request.SelectionRefused = true
 	}
 	// A replay of a step that already ended the job asks the hub to finish or
 	// re-report it; the hub reads the successor's rung from its own record, so
@@ -181,7 +183,7 @@ func (a *App) escalateAuthorCmd(ctx context.Context, args []string) error {
 		if result.Code == "pending" {
 			return fail(exitTimeout, "%s: %s", result.Code, result.Reason)
 		}
-		if result.Code == "rebind_unconfirmed" {
+		if result.Code == "rebind_unconfirmed" || result.Code == "parent_ended" {
 			return fail(exitFailure, "%s: %s", result.Code, result.Reason)
 		}
 		if result.AuthorEnded {

@@ -28,7 +28,7 @@ mergewake's JSON array of findings (`ref`, `severity`, `path`, `line`, `title`,
 | --- | --- |
 | 0 | placement succeeded and the task binding names the successor; stdout is `ESCALATED job=<new> rung=<profile>@<effort>` |
 | 2 | refusal before the author was ended |
-| 1 | the old author was ended, or the successor's task rebind is unconfirmed; inspect the named code and design-lane event |
+| 1 | the old author was ended, the predecessor ended independently, or the successor's task rebind is unconfirmed; inspect the named code and design-lane event |
 | 124 | the operation is pending; retry the same request |
 | other | an error |
 
@@ -85,11 +85,11 @@ it is not reported as a successful escalation.
 
 The successor job id is `<old>-l1`. Replay finds its operation before testing
 whether the old record is live, and uses the frozen identity, rung, host and
-checkout. A staged successor with a present pane repeats preflight; if the pane
+checkout. A newly resolved rung is ignored for the same staged job, round and PR, and a selection outage still reaches the hub. A staged successor with a present pane repeats preflight; if the pane
 is gone or the job is already lost, replay finishes the mark and activation.
 Active placement returns `pending` until it settles, and a placed successor is
 successful only after the task binding is confirmed. A staged step's identity
-must match the same job, round and PR.
+must match the same job, round and PR. If the predecessor ended for a different reason, the hub discards the stage and releases its reservation; if it ended for this step, reconciliation activates the staged successor.
 
 The policy allows one ladder step per job chain; a job whose id already
 carries a ladder step (`-l1`, with or without later quota-stop `-q<n>`
