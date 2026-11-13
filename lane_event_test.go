@@ -70,6 +70,37 @@ func TestLaneEventUsesLaneNameRule(t *testing.T) {
 			t.Errorf("hub accepted invalid lane %q in %+v", name, event)
 		}
 	}
+	if code, stderr := emitLaneEvent(t, t.TempDir(), "legacy.parent", "producer-legacy", "payload"); code == ExitOK {
+		t.Fatalf("new lane.event emit accepted historical lane, stderr=%q", stderr)
+	}
+}
+
+func TestHubReceivesHistoricalDottedLaneEvent(t *testing.T) {
+	fake, client, closeServer := newFakeHandoffkeep(t)
+	defer closeServer()
+	routes := r20LanesFile(t, `{"lanes":{}}`)
+	hub, err := NewHubServer(HubServerConfig{Tokens: map[string]string{"operator": "op", "host-a": "source"}, ReportRelayPath: routes, handoffkeep: client})
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := &hubAgent{persisted: make(chan hubRelayPersistedEvent, 2)}
+	hub.nodes["host-a"] = &hubNodeRecord{agent: source}
+	payload, err := json.Marshal(map[string]any{"owner_lane": "legacy.parent", "event_id": "producer-old", "text": "old notification", "replay": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wire, err := json.Marshal(map[string]any{"type": "event", "kind": "lane.event", "payload": payload})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hub.handleAgentMessage("host-a", "fixture", source, wire)
+	if got := fake.rowCount(); got != 1 {
+		t.Fatalf("historical event persisted %d rows, want 1", got)
+	}
+	acks := drainPersisted(source)
+	if len(acks) != 1 || acks[0].Lane != "legacy.parent" || acks[0].ProducerEventID != "producer-old" {
+		t.Fatalf("historical event acknowledgement=%+v", acks)
+	}
 }
 
 func scannedLaneEvent(t *testing.T, inbox string, store *Store) hubScannedRelayEvent {

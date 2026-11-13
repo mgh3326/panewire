@@ -675,7 +675,7 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 	}
 	controlPlaneLanes := make(map[string]struct{}, len(config.ControlPlaneLanes))
 	for _, lane := range config.ControlPlaneLanes {
-		if !validHistoricalLaneResource(lane) {
+		if !LaneNamePattern.MatchString(lane) {
 			return nil, errors.New("hub control-plane lanes are invalid")
 		}
 		if _, duplicate := controlPlaneLanes[lane]; duplicate {
