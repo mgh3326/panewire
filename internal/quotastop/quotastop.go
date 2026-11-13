@@ -8,7 +8,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode/utf8"
 )
 
 // Stop is evidence from a single visible screen, not proof that sending
@@ -160,22 +159,20 @@ func relativeSpan(count, unit string) (d time.Duration, ok bool) {
 const statusPrefixes = "│┃•⚠️■⎿ "
 
 // statusBlock accepts a CLI limit line as the last agent activity, wherever it
-// sits on the visible screen. Only the CLI's own chrome (rules, an empty
-// prompt, the option footer) and typed or injected user text may follow it:
-// the relay's directive lands below the limit line, and neither it nor an empty
-// prompt is agent output. Any other later line (ordinary output, source code,
-// a completed answer) invalidates the stop.
+// sits on the visible screen. After it may come the CLI's own chrome (rules, an
+// empty prompt, the option footer) and typed or injected user turns: the relay's
+// directive lands below the limit line, and neither it nor an empty prompt is
+// agent output. Any other later row (ordinary output, source code, a completed
+// answer) invalidates the stop.
 //
-// A user turn is its marked line plus the lines that provably wrap under it: a
-// line continues the turn only when the previous line of the turn is so full
-// that the continuation's first word could not have fitted, measured against
-// the screen width (the widest rule line); a row under two thirds full is
-// never wrapped. Position and indentation prove
-// nothing, since an answer can be indented and follow with no blank line, so
-// anything else after the marked line is agent output. A screen with no rule
-// line to measure, or a wrap this arithmetic cannot prove (wide characters),
-// fails closed: it is not accepted as a stop. A wrongly accepted stop ends a
-// live job.
+// A user turn is exactly one prompt-marked row. Flat screen text cannot tell a
+// wrapped or multi-line message from an answer typed under it, so the rows
+// after a turn are trusted only once a rule starts the composer: until then
+// any non-blank row is agent output (so it is also never taken for a status,
+// which keeps a limit quoted in a multi-line message from becoming one). A
+// directive that spans several rows therefore fails closed: no stop. The one
+// residual risk is an answer whose own row starts with the prompt mark; the
+// screen alone cannot rule it out (docs/quota-stop.md).
 //
 // The returned block is the limit line and the chrome after it, never the
 // injected text, so a reset time or an "upgrade" mentioned in a directive
@@ -183,27 +180,27 @@ const statusPrefixes = "│┃•⚠️■⎿ "
 func statusBlock(screen string) (string, bool) {
 	var limit string
 	var tail []string
-	found, later, injected := false, false, false
-	rows := strings.Split(strings.ReplaceAll(screen, "\r", ""), "\n")
-	width := ruleWidth(rows)
-	turnWidth := 0 // display width of the user turn's last line
-	for _, raw := range rows {
+	found, later, open, gap := false, false, false, false
+	for _, raw := range strings.Split(strings.ReplaceAll(screen, "\r", ""), "\n") {
 		line := strings.TrimSpace(raw)
 		switch {
-		case chromeLine(line):
-			// A rule or blank line ends a user message.
-			injected = false
+		case line == "" || ruleLine(line):
+			open = open && line == ""
+			gap = gap || line == ""
 			tail = append(tail, line)
-		case userTurn(line) || injected && wraps(turnWidth, line, width):
-			// Typed or injected user text: a marked line and the lines that
-			// provably wrap under it.
-			injected = true
-			turnWidth = textWidth(raw)
+		case open && !promptChrome(line) && !userTurn(line) && !(gap && !strings.HasPrefix(raw, " ") && !strings.HasPrefix(raw, "\t") && limitRow(line)):
+			// Under a user turn with no rule yet: agent output or a message
+			// row of unknown ownership. A flush-left status after a blank row
+			// is the exception: it is how a new limit follows a user turn.
+			later = true
+		case promptChrome(line) || !open && footerLine(line):
+			tail = append(tail, line)
+		case userTurn(line):
+			open, gap = true, false
 		default:
-			injected = false
 			line = strings.TrimLeft(line, statusPrefixes)
-			if devin.MatchString(line) || claude.MatchString(line) || codexSignal.MatchString(line) {
-				limit, tail, found, later = line, nil, true, false
+			if limitRow(line) {
+				limit, tail, found, later, open = line, nil, true, false, false
 			} else {
 				later = true
 			}
@@ -215,39 +212,15 @@ func statusBlock(screen string) (string, bool) {
 	return limit + "\n" + strings.Join(tail, "\n"), true
 }
 
-// ruleWidth is the screen width as the widest horizontal rule shows it, or 0
-// when the screen has none.
-func ruleWidth(rows []string) int {
-	width := 0
-	for _, row := range rows {
-		row = strings.TrimSpace(row)
-		if n := utf8.RuneCountInString(row); n >= 10 && strings.Trim(row, "─━═") == "" && n > width {
-			width = n
-		}
-	}
-	return width
-}
-
-// textWidth is the number of characters on a row, trailing space excluded.
-func textWidth(row string) int {
-	return utf8.RuneCountInString(strings.TrimRight(row, " \t"))
-}
-
-// wraps reports whether line, the next row of a user turn whose last row was
-// prev characters wide, can only be a wrap of it: the turn's row is within the
-// screen width, at least two thirds full (a short row is never wrapped, however
-// long the next word), and the continuation's first word would not have fitted.
-func wraps(prev int, line string, width int) bool {
-	if width == 0 || prev > width || prev*3 < width*2 {
-		return false
-	}
-	word, _, _ := strings.Cut(line, " ")
-	return prev+1+utf8.RuneCountInString(word) > width
+// limitRow reports a row that is a CLI limit line.
+func limitRow(line string) bool {
+	line = strings.TrimLeft(line, statusPrefixes)
+	return devin.MatchString(line) || claude.MatchString(line) || codexSignal.MatchString(line)
 }
 
 // userTurn reports whether line starts a user turn: the prompt mark of devin,
 // claude or codex followed by text. An empty prompt and the placeholders are
-// chrome (chromeLine) and never reach here.
+// promptChrome and checked first.
 func userTurn(line string) bool {
 	for _, mark := range []string{"❭", "❯", "›"} {
 		if strings.HasPrefix(line, mark) {
@@ -257,23 +230,28 @@ func userTurn(line string) bool {
 	return false
 }
 
-func chromeLine(line string) bool {
-	line = strings.TrimSpace(line)
-	if line == "" {
-		return true
-	}
-	if strings.Trim(line, "─━═│┃┌┐└┘╭╮╰╯- ") == "" {
-		return true
-	}
-	lower := strings.ToLower(line)
+// ruleLine reports a horizontal rule or box edge.
+func ruleLine(line string) bool {
+	return line != "" && strings.Trim(line, "─━═│┃┌┐└┘╭╮╰╯- ") == ""
+}
+
+// promptChrome reports an empty prompt or its placeholder.
+func promptChrome(line string) bool {
 	if line == "❯" || line == "❭" || line == "›" {
 		return true
 	}
+	lower := strings.ToLower(line)
 	for _, placeholder := range []string{"❯ ask claude", "❭ ask devin", "› ask codex"} {
 		if strings.HasPrefix(lower, placeholder) {
 			return true
 		}
 	}
+	return false
+}
+
+// footerLine reports the option menu and status footer a limit screen draws.
+func footerLine(line string) bool {
+	lower := strings.ToLower(line)
 	for _, prefix := range []string{"choose an option:", "1. wait", "2. upgrade", "1. stop", "2. use", "swe-2", "esc to", "press enter", "select an option"} {
 		if strings.HasPrefix(lower, prefix) {
 			return true

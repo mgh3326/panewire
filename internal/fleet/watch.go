@@ -241,8 +241,26 @@ func (a *App) watch(ctx context.Context, args []string) error {
 			}
 		}
 		credit, creditPending := pendingCreditRejection(j)
+		intent, hasIntent := pendingQuotaIntent(j)
+		quotaRetry = hasIntent
 		agents, e := a.agents(ctx)
 		herdrReachable := e == nil
+		if e != nil && hasIntent && !creditPending && !j.Reaped {
+			// An open close intent outlives a herdr outage: hk alone can
+			// finish it, and anything else waits for herdr.
+			out, err := a.reconcileQuotaIntent(ctx, j, intent, false, false, false, Agent{})
+			if err != nil {
+				return err
+			}
+			if out == quotaIntentEnded {
+				return nil
+			}
+			a.warn("quota-stop close intent waits for herdr: %v", e)
+			if err := a.Sleep(ctx, 5*time.Second); err != nil {
+				return err
+			}
+			continue
+		}
 		if e != nil && !creditPending {
 			if workerEscalated(j) {
 				return a.releaseQuota(ctx, j)
@@ -371,25 +389,30 @@ func (a *App) watch(ctx context.Context, args []string) error {
 		// reviewer stopped on its screen is not replaced there; only a worker
 		// or tester the manager announced, and a credit stop, get the grace.
 		// The lost record is what mergewake acts on, so job.lost and the lease
-		// release wait for it. While the write fails the stop is read again on
-		// every poll, past the ordinary completion deadline (quotaRetry), and
-		// the pane is rechecked each time, so a pane that moved on drops the
-		// retry. A record that hk holds terminal for another outcome (the
-		// reviewer completed meanwhile) is not this stop's: nothing is
-		// announced or released here.
+		// release wait for it. The close is a durable intent (watch_quota_stop.go
+		// quotaIntent): recorded before the first hk write with the exact
+		// end_reason, reconciled on every poll past the completion deadline,
+		// across read errors, herdr outages and restarts. Only a successful
+		// contradictory look at the pane cancels it.
 		// Not while a hand-off is active: its stop is already announced.
-		quotaRetry = false
-		if present && !pending && !handOff.active && j.QuotaRole() != "counsel" {
-			if stop, ok := a.quotaStopped(ctx, j, paneAgent, &screenRead); ok && stop.CreditExhaustedAt.IsZero() {
-				switch outcome, e := a.quotaStopRecord(ctx, id, stop); outcome {
-				case quotaRecordWritten:
-					return a.quotaStopFinish(ctx, j, stop, true)
-				case quotaRecordSuperseded:
-					a.warn("quota-stop lost record not written: hk holds another terminal record: %v", e)
+		if !handOff.active && j.QuotaRole() != "counsel" {
+			if hasIntent {
+				out, err := a.reconcileQuotaIntent(ctx, j, intent, true, present, pending, paneAgent)
+				if err != nil {
+					return err
+				}
+				switch out {
+				case quotaIntentEnded:
 					return nil
-				default:
-					a.warn("quota-stop lost record not written, retrying: %v", e)
-					screenRead = quotaStopWatch{}
+				case quotaIntentCancelled:
+					quotaRetry = false
+				}
+			} else if present && !pending {
+				if stop, seen := a.quotaStopScreen(ctx, j, paneAgent, &screenRead); seen == quotaStopFound && stop.CreditExhaustedAt.IsZero() {
+					if err := a.recordQuotaIntent(ctx, j, stop); err != nil {
+						return err
+					}
+					// The next poll reconciles it with a fresh look.
 					quotaRetry = true
 				}
 			}

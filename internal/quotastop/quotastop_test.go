@@ -77,12 +77,8 @@ func TestClassifyFindsFreeLimitAboveInjectedDirective(t *testing.T) {
 	const limit = "▲ Something went wrong — Reached free model rate limit … Your limit will reset in 13 hours 9 minutes (at 22:01 UTC). Send a message to retry\n"
 	const prompt = "──────────\n❭ Ask Devin to build features, fix bugs, or work on your code\n──────────\n  SWE-2 max\n"
 	reset := time.Date(2026, 11, 13, 22, 1, 0, 0, time.UTC)
-	const wide = "────────────────────────────────────────\n❭ Ask Devin to build features\n────────────────────────────────────────\n"
 	for name, screen := range map[string]string{
-		"directive": "❭ [pw-x] Read the brief and review the PR\n\n" + limit + "\n❭ [relay] reviewer asks: reset in 2 hours, upgrade at 03:00 UTC\n\n" + prompt,
-		// The directive's first row fills the 40-wide screen, so "tail" could not
-		// have fitted on it: the second row is a wrap, not an answer.
-		"wrapped directive":              limit + "\n❭ " + strings.Repeat("x", 38) + "\ntail of the directive, upgrade at 03:00 UTC\n\n" + wide,
+		"directive":                      "❭ [pw-x] Read the brief and review the PR\n\n" + limit + "\n❭ [relay] reviewer asks: reset in 2 hours, upgrade at 03:00 UTC\n\n" + prompt,
 		"directive far above the prompt": limit + "\n❭ [relay] one\n\n❭ [relay] two\n" + strings.Repeat("\n", 40) + prompt,
 		"limit alone":                    limit + "\n" + prompt,
 	} {
@@ -111,7 +107,11 @@ func TestClassifyRejectsLimitFollowedByAgentOutput(t *testing.T) {
 		"answer right under a user turn":          limit + "\n❭ retry\nI completed the review.\n\n" + prompt,
 		"indented answer under a short user turn": limit + "\n❭ retry\n  Completed the review.\n\n" + prompt,
 		"short turn, long answer":                 limit + "\n❭ " + strings.Repeat("x", 10) + "\n" + strings.Repeat("y", 60) + "\n\n" + prompt,
-		"no rule to measure the width":            limit + "\n❭ " + strings.Repeat("x", 38) + "\ntail\n",
+		"wrapped directive is not detected":       limit + "\n❭ " + strings.Repeat("x", 38) + "\ntail of the directive\n\n" + prompt,
+		"wrapped answer under a full-width turn":  limit + "\n❭ " + strings.Repeat("x", 38) + "\nCompleted the review.\n\n" + prompt,
+		"limit quoted in a multi-line message":    "❭ [relay] Please inspect:\n  Reached free model rate limit\n\n" + prompt,
+		"footer-like answer under a user turn":    limit + "\n❭ [relay] go on\n1. Wait for CI to pass.\n\n" + prompt,
+		"quoted status right under a user turn":   "❭ [relay] see:\n▲ Something went wrong — Reached free model rate limit\n\n" + prompt,
 		"directive quotes limit":                  "I completed the task.\n\n❭ [relay] the pane said: Reached free model rate limit\n\n" + prompt,
 	} {
 		if got, ok := Classify(screen, now, time.UTC); ok {
