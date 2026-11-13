@@ -834,3 +834,33 @@ func TestWatcherFinalReviewerStopIsNotRearmedAsAHandOff(t *testing.T) {
 		}
 	}
 }
+
+// The finish releases the lease before it writes the closing job.lost, so a
+// crash between the two leaves the intent open and the job is finished again on
+// restart instead of staying terminal with a lease nobody retries. Here the
+// lease is already free and only the closing event is missing.
+func TestWatcherQuotaIntentFinishesWhenTheLeaseWasAlreadyReleased(t *testing.T) {
+	a, _, h, _ := quotaStopFixture(t, "reviewer", "idle", "The pane is quiet.\n")
+	t.Setenv("PANEWIRE_COMPLETION_TIMEOUT_S", "600")
+	const reason = "quota_stop pool=devin-free reset_at=2026-01-01T00:05:00Z"
+	if e := a.event(context.Background(), "j", quotaIntentKind, map[string]any{"pane_id": "w:p1", "pool": "devin-free", "reset_at": "2026-01-01T00:05:00Z", "end_reason": reason}); e != nil {
+		t.Fatal(e)
+	}
+	h.mu.Lock()
+	h.records["j"]["state"] = "lost"
+	h.records["j"]["end_reason"] = reason
+	h.mu.Unlock()
+	if e := a.releaseQuota(context.Background(), Job{ID: "j"}); e != nil {
+		t.Fatal(e)
+	}
+	if e := a.watch(context.Background(), []string{"j"}); e != nil {
+		t.Fatal(e)
+	}
+	p := lostPayload(t, a)
+	if p == nil || str(p, "reason") != "quota_stop" || !boolean(p, "final", false) {
+		t.Fatalf("job.lost payload=%v, want the final stop closing the intent", p)
+	}
+	if st, _ := ledgerState(t, a, "j"); st != "released" {
+		t.Fatalf("quota %s, want released", st)
+	}
+}

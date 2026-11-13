@@ -361,14 +361,13 @@ func (a *App) quotaStopLost(ctx context.Context, j Job, stop quotastop.Stop, emi
 			a.jobRecordFailed(ctx, j.ID, "lost", e)
 		}
 	}
-	return a.quotaStopFinish(ctx, j, stop, emit, false)
+	return a.quotaStopFinish(ctx, j, stop, emit)
 }
 
 // quotaStopFinish announces job.lost (when emit) and releases the quota lease.
-// final is set when the hk lost record is known to be written.
-func (a *App) quotaStopFinish(ctx context.Context, j Job, stop quotastop.Stop, emit, final bool) error {
+func (a *App) quotaStopFinish(ctx context.Context, j Job, stop quotastop.Stop, emit bool) error {
 	if emit {
-		if e := a.quotaStopEvent(ctx, j, stop, final); e != nil {
+		if e := a.quotaStopAnnounce(ctx, j, stop); e != nil {
 			return e
 		}
 	}
@@ -434,6 +433,23 @@ const (
 	quotaIntentCancelled
 )
 
+// finishQuotaIntent finishes a job whose hk lost record is known to be written:
+// the lease is released first, then the final job.lost closes the intent. The
+// order is the recovery: a crash or a failure between the two leaves the intent
+// open, so the next poll (or a re-armed watcher) repeats both idempotent steps,
+// and the closing event is only written once the lease is free.
+func (a *App) finishQuotaIntent(ctx context.Context, j Job, stop quotastop.Stop) quotaIntentOutcome {
+	if e := a.releaseQuota(ctx, j); e != nil {
+		a.warn("quota-stop lease release failed, retrying: %v", e)
+		return quotaIntentRetry
+	}
+	if e := a.quotaStopEvent(ctx, j, stop, true); e != nil {
+		a.warn("quota-stop job.lost not recorded, retrying: %v", e)
+		return quotaIntentRetry
+	}
+	return quotaIntentEnded
+}
+
 // reconcileQuotaIntent drives an open close intent one step. hk decides first:
 // exactly the intended lost record finishes the job even if the screen can no
 // longer be read (the write already happened); another terminal record ends the
@@ -451,7 +467,7 @@ func (a *App) reconcileQuotaIntent(ctx context.Context, j Job, in quotaIntent, h
 	}
 	switch {
 	case state == "lost" && reason == in.reason:
-		return quotaIntentEnded, a.quotaStopFinish(ctx, j, in.stop, true, true)
+		return a.finishQuotaIntent(ctx, j, in.stop), nil
 	case state == "completed" || state == "lost" || state == "escalated":
 		a.warn("quota-stop lost record not written: hk holds another terminal record (%s)", state)
 		_, e := cancel("superseded")
@@ -477,7 +493,7 @@ func (a *App) reconcileQuotaIntent(ctx context.Context, j Job, in quotaIntent, h
 		a.warn("quota-stop lost record not written, retrying: %v", e)
 		return quotaIntentRetry, nil
 	}
-	return quotaIntentEnded, a.quotaStopFinish(ctx, j, in.stop, true, true)
+	return a.finishQuotaIntent(ctx, j, in.stop), nil
 }
 
 // hkJobState reads the job's hk record state and end_reason. ok is false when
