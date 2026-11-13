@@ -638,7 +638,7 @@ func (a *App) spawnHub(ctx context.Context, s Spawn, brief string, c *placeCandi
 		if e != nil {
 			return candResult{stop: e}
 		}
-		fmt.Fprintf(a.Out, "dry-run host=%s profile=%s role=%s job=%s\n%s\n", c.name, s.Profile, s.Role, s.Job, payload)
+		a.dryRunLine(c.name, s, payload)
 		return candResult{ok: true}
 	}
 	if !utf8.ValidString(brief) || len([]byte(brief)) > hubMaxBriefBytes {

@@ -32,7 +32,15 @@ type App struct {
 	Out, Err     io.Writer
 	// hubRetries tallies the idempotent hub calls this command sent again; it
 	// is printed once when the command ends (reportHubRetries).
-	hubRetries   hubretry.Stats
+	hubRetries hubretry.Stats
+
+	// planOnly marks a dry run that measures nothing: a quota refresh writes
+	// presence, lease and observation to the shared quota store. planFromHub
+	// marks a receipt the hub planned; dryRunLine labels its receipt with it.
+	// lastPlan is the placement the dry run chose.
+	planOnly, planFromHub bool
+	lastPlan              *SpawnPlan
+
 	Jobs, Home   string
 	Sleep        func(context.Context, time.Duration) error
 	Now          func() time.Time
@@ -297,7 +305,7 @@ func (a *App) Run(ctx context.Context, args []string) error {
 			return e
 		}
 		if s.DryRun {
-			return a.Spawn(ctx, s)
+			return a.previewSpawn(ctx, s)
 		}
 		return a.SubmitSpawn(ctx, s)
 	case "spawn":
@@ -306,7 +314,7 @@ func (a *App) Run(ctx context.Context, args []string) error {
 			return e
 		}
 		if s.DryRun {
-			return a.Spawn(ctx, s)
+			return a.previewSpawn(ctx, s)
 		}
 		return a.SubmitSpawn(ctx, s)
 	case "done", "escalate", "restore":
