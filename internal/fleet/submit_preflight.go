@@ -12,8 +12,9 @@ package fleet
 //   - the agent name (the label): herdr takes a lowercase start, then
 //     [a-z0-9_-], 1 to 32 characters (hk 4142);
 //   - the task title's (grade X, Tn) marker and its scale against --t;
-//   - the task claim: the task exists, is not parked or ended, and is not bound
-//     to another job or claimant;
+//   - the task claim: the task exists, is not parked or ended, and is not
+//     bound to another job or claimant unless the spawn does not claim it
+//     (inherited, an unlinked reviewer, or a consult);
 //   - host eligibility: a host that is not excluded, is the pinned host when
 //     one is pinned, and declares every --tags capability.
 //

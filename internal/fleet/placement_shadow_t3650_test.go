@@ -267,8 +267,8 @@ func TestPlacementShadowMemorySignal_T3650(t *testing.T) {
 }
 
 func TestPlacementShadowMemoryAdmission_T3650(t *testing.T) {
-	pol := shadowPolicy{threshold: 1, cpuBusyOver: 1, hysteresis: 1.25, allLoadedBelow: 15, memRefuseBelowPct: 30, pressureRefuseLevel: 2, pressureWarnMem: 0.5,
-		memFloor: 0.2, memSpan: 0.2, swapInHalf: 5000, loadKnee: 0.75, loadCap: 4, jobsHalf: 8, claimCost: 10}
+	pol := shadowPolicy{threshold: 1, cpuBusyOver: 1, hysteresis: 1.25, freeFloor: 0.05, memRefuseBelowPct: 30, pressureRefuseLevel: 2, pressureWarnMem: 0.5,
+		memFloor: 0.2, memSpan: 0.2, swapInHalf: 5000, loadKnee: 0.75, loadCap: 4, jobsHalf: 8, bridgeCost: 10}
 	mk := func(name, reason string, pressure, free *float64) selHost {
 		hv := &HostView{Name: name, Connected: true, Reason: reason, Signals: sigs(100), Extra: HostExtra{Pressure: pressure, MemFreePct: free}}
 		return selHost{name: name, awake: true, view: hv, score: ptrF(50), cfg: map[string]any{"tags": []any{"macos"}}}
@@ -433,9 +433,16 @@ func TestPlacementShadowPolicyConfig_T3650(t *testing.T) {
 	if err := validShadowPolicy(map[string]any{"shadow": map[string]any{"hysteresis": 1.5, "swap_in_half_per_s": int64(100)}, "capability": map[string]any{"heavy": map[string]any{"mac-b": int64(150)}}}); err != nil {
 		t.Fatal(err)
 	}
+	// The retired keys still load; the new ones are range checked.
+	if err := validShadowPolicy(map[string]any{"shadow": map[string]any{"all_loaded_below": 15.0, "claim_cost": 10.0, "free_floor": 0.1, "bridge_cost": 20.0}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := validShadowPolicy(map[string]any{"shadow": map[string]any{"free_floor": 1.5}}); err == nil {
+		t.Error("accepted free_floor 1.5")
+	}
 	a := testApp(t)
 	pol := a.shadowPolicy()
-	if !pol.enabled || pol.hysteresis != 1.25 || pol.allLoadedBelow != 15 || pol.memRefuseBelowPct != 30 || pol.cpuBusyOver != pol.threshold || len(pol.capability) != 0 {
+	if !pol.enabled || pol.hysteresis != 1.25 || pol.freeFloor != 0.05 || pol.bridgeCost != 10 || pol.memRefuseBelowPct != 30 || pol.cpuBusyOver != pol.threshold || len(pol.capability) != 0 {
 		t.Fatalf("defaults %+v", pol)
 	}
 }

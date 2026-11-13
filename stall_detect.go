@@ -1665,7 +1665,7 @@ func (m *stallDetectManager) armNotification(ctx context.Context, incident stall
 		IncidentKey: incident.incidentKey(), Lane: lane, Level: 0,
 		GraceDeadlineAt: at.Add(m.cfg.NotifyGrace),
 	}
-	if lane == "" || !hubAgentLabelPattern.MatchString(lane) {
+	if lane == "" || !validLaneReference(lane) {
 		row.SuppressedReason = stallNotifyNoLane
 		row.Lane = ""
 	} else if !m.cfg.Notify {
@@ -1731,7 +1731,7 @@ func (m *stallDetectManager) escalateNotification(ctx context.Context, row stall
 			parent = job.ParentLane
 		}
 	}
-	if parent == "" || !hubAgentLabelPattern.MatchString(parent) {
+	if parent == "" || !validLaneReference(parent) {
 		row.SuppressedReason = stallNotifyNoLane
 		_ = m.store.upsertStallNotification(ctx, row)
 		return

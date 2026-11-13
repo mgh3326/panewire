@@ -114,8 +114,8 @@ type shadowPolicy struct {
 	// threshold is the live placement.load_threshold, applied to load5 per
 	// core; cpuBusyOver applies to a CPU-busy fraction (default: threshold).
 	threshold, cpuBusyOver float64
-	// hysteresis and allLoadedBelow are the hub's decision constants.
-	hysteresis, allLoadedBelow float64
+	// hysteresis and freeFloor are the hub's decision constants.
+	hysteresis, freeFloor float64
 	// memRefuseBelowPct refuses a host whose available memory is below it
 	// (the hub's memory_free_pct_min, 30); pressureRefuseLevel refuses a macOS
 	// host at or above that pressure level (2 = critical); pressureWarnMem is
@@ -123,14 +123,14 @@ type shadowPolicy struct {
 	memRefuseBelowPct, pressureRefuseLevel, pressureWarnMem float64
 	// The mem, swap, load and jobs terms: the hub's score constants, with the
 	// swap half point in pages per second.
-	memFloor, memSpan, swapInHalf, loadKnee, loadCap, jobsHalf, claimCost float64
+	memFloor, memSpan, swapInHalf, loadKnee, loadCap, jobsHalf, bridgeCost float64
 	// capability maps work class -> host -> capability.
 	capability map[string]map[string]float64
 }
 
 const (
 	shadowDefaultHysteresis     = 1.25
-	shadowDefaultAllLoaded      = 15.0
+	shadowDefaultFreeFloor      = 0.05
 	shadowDefaultMemRefusePct   = 30.0
 	shadowDefaultPressureRefuse = 2.0
 	shadowDefaultPressureWarn   = 0.5
@@ -140,7 +140,7 @@ const (
 	shadowDefaultLoadKnee       = 0.75
 	shadowDefaultLoadCap        = 4.0
 	shadowDefaultJobsHalf       = 8.0
-	shadowDefaultClaimCost      = 10.0
+	shadowDefaultBridgeCost     = 10.0
 	shadowDefaultPower          = 100.0
 )
 
@@ -158,7 +158,7 @@ func (a *App) shadowPolicy() shadowPolicy {
 		threshold:           threshold,
 		cpuBusyOver:         num("cpu_busy_over", threshold),
 		hysteresis:          num("hysteresis", shadowDefaultHysteresis),
-		allLoadedBelow:      num("all_loaded_below", shadowDefaultAllLoaded),
+		freeFloor:           num("free_floor", shadowDefaultFreeFloor),
 		memRefuseBelowPct:   num("mem_refuse_below_pct", shadowDefaultMemRefusePct),
 		pressureRefuseLevel: num("pressure_refuse_level", shadowDefaultPressureRefuse),
 		pressureWarnMem:     num("pressure_warn_mem", shadowDefaultPressureWarn),
@@ -168,7 +168,7 @@ func (a *App) shadowPolicy() shadowPolicy {
 		loadKnee:            num("load_knee", shadowDefaultLoadKnee),
 		loadCap:             num("load_cap", shadowDefaultLoadCap),
 		jobsHalf:            num("jobs_half", shadowDefaultJobsHalf),
-		claimCost:           num("claim_cost", shadowDefaultClaimCost),
+		bridgeCost:          num("bridge_cost", shadowDefaultBridgeCost),
 		capability:          map[string]map[string]float64{},
 	}
 	caps, _ := a.Config.Placement["capability"].(map[string]any)
@@ -205,7 +205,15 @@ func validShadowPolicy(placement map[string]any) error {
 				return fail(exitConfig, "placement.shadow.%s must be a nonnegative number", key)
 			}
 			switch key {
-			case "cpu_busy_over", "all_loaded_below", "mem_refuse_below_pct", "pressure_refuse_level", "pressure_warn_mem", "mem_floor", "load_knee", "claim_cost":
+			case "cpu_busy_over", "mem_refuse_below_pct", "pressure_refuse_level", "pressure_warn_mem", "mem_floor", "load_knee", "bridge_cost":
+			case "all_loaded_below", "claim_cost":
+				// Retired with the live rules they mirrored (free_floor and
+				// bridge_cost replace them): accepted and ignored, so an
+				// existing config still loads.
+			case "free_floor":
+				if n > 1 {
+					return fail(exitConfig, "placement.shadow.free_floor must be at most 1")
+				}
 			case "hysteresis":
 				if n < 1 {
 					return fail(exitConfig, "placement.shadow.hysteresis must be at least 1")
@@ -281,9 +289,19 @@ func hubUsable(h selHost, ignoreMemory bool) bool {
 	if h.slotFull {
 		return false
 	}
-	v := h.view
-	if v == nil {
+	if h.view == nil {
 		return true
+	}
+	return viewUsable(*h.view, ignoreMemory)
+}
+
+// viewUsable is hubUsable for the hub's reading of one host.
+func viewUsable(hv HostView, ignoreMemory bool) bool {
+	v := &hv
+	// A host the direct hub path left out for full task slots is carried as a
+	// synthetic view with SlotFull set (hub_spawn_async.go).
+	if v.SlotFull {
+		return false
 	}
 	if v.Extra.Usable != nil && !ignoreMemory {
 		return *v.Extra.Usable
@@ -376,42 +394,60 @@ func (pol shadowPolicy) capabilityOf(class, host string, h selHost) (float64, bo
 	return shadowDefaultPower, false
 }
 
-// measuredScore rebuilds the host's score from its signals: the free fraction
-// from the one memory signal, the swap-in rate, load per core and the live job
-// count (the cpu term is left out, CPU busy being the bucket measure), times
-// the capability, less the bridge claims. A host that sent no score signals
-// keeps the score the hub sent. The hub's hold and burst bonuses are not
-// replicated.
-func (pol shadowPolicy) measuredScore(h selHost, req shadowReq, m shadowMem) *float64 {
+// measuredFree is the measured arm's free fraction for a host: the memory,
+// swap-in, load and jobs terms (the cpu term is left out, CPU busy being the
+// bucket measure). ok is false for a host that sent no score signals.
+func (pol shadowPolicy) measuredFree(h selHost, m shadowMem) (free float64, ok bool) {
 	v := h.view
 	if v == nil || v.Signals.Terms == nil && v.Signals.Power == nil {
-		return h.score
+		return 0, false
 	}
 	sig := v.Signals
 	load := 1.0
 	if sig.Load1PerCore != nil {
 		load = 1 / (1 + math.Max(0, math.Min(math.Max(*sig.Load1PerCore, 0), pol.loadCap)-pol.loadKnee))
 	}
-	jobs, bridged := 0, 0
+	jobs := 0
 	if sig.LiveJobs != nil {
 		jobs = *sig.LiveJobs
 	}
-	if sig.BridgedJobs != nil {
-		bridged = *sig.BridgedJobs
-	}
 	jobsTerm := 1 / (1 + float64(max(jobs, 0))/pol.jobsHalf)
+	return m.term * m.io * load * jobsTerm, true
+}
+
+// measuredScore rebuilds the host's score from its signals: measuredFree times
+// the capability, less the bridge claims, each costing bridge_cost*100/capability
+// as the live score charges them by power. A host that sent no score signals
+// keeps the score the hub sent. The hub's hold and burst bonuses are not
+// replicated.
+func (pol shadowPolicy) measuredScore(h selHost, req shadowReq, m shadowMem) *float64 {
+	free, ok := pol.measuredFree(h, m)
+	if !ok {
+		return h.score
+	}
+	bridged := 0
+	if h.view.Signals.BridgedJobs != nil {
+		bridged = *h.view.Signals.BridgedJobs
+	}
 	capability, _ := pol.capabilityOf(req.class, h.name, h)
-	score := m.term*m.io*load*jobsTerm*capability - float64(bridged)*pol.claimCost
+	if capability <= 0 {
+		capability = shadowDefaultPower
+	}
+	score := free*capability - float64(bridged)*pol.bridgeCost*100/capability
 	return &score
 }
 
 // shadowDecide marks the host the hub's decision rules would name, on the
 // hosts that fit, are awake and have a score, in configuration order (the
 // policy order the hub uses is local machine, then spill targets). It mirrors
-// placementScoreK.decide in the root package. A request with tags takes the
+// placementScoreK.decide in the root package: the free floor, the all-below
+// pick by free*power, and the hysteresis margin (a negative winner needs a
+// rival whose score is its own divided by hysteresis). free reports a host's
+// free fraction and the power that scales it; known is false when the host has
+// none, and such a host is never under the floor. A request with tags takes the
 // highest score, as the hub does, so none is marked. The /v1/placement path
 // already carries the hub's decision; it is kept.
-func shadowDecide(hosts []selHost, req shadowReq, pol shadowPolicy, mem func(selHost) (float64, bool), clear bool) {
+func shadowDecide(hosts []selHost, req shadowReq, pol shadowPolicy, free func(selHost) (free, power float64, known bool), clear bool) {
 	if clear {
 		for i := range hosts {
 			hosts[i].decided = false
@@ -430,37 +466,40 @@ func shadowDecide(hosts []selHost, req shadowReq, pol shadowPolicy, mem func(sel
 		return
 	}
 	score := func(i int) float64 { return *hosts[cands[i]].score }
-	best := math.Inf(-1)
+	below := func(i int) bool {
+		f, _, known := free(hosts[cands[i]])
+		return known && f < pol.freeFloor
+	}
+	var above []int
 	for i := range cands {
-		best = math.Max(best, score(i))
+		if !below(i) {
+			above = append(above, i)
+		}
 	}
 	pick := 0
-	if best < pol.allLoadedBelow {
-		pick = -1
+	if len(above) == 0 {
+		best := math.Inf(-1)
 		for i := range cands {
-			m, known := mem(hosts[cands[i]])
-			if !known {
-				continue
+			f, p, _ := free(hosts[cands[i]])
+			if v := f * p; v > best || (v == best && score(i) > score(pick)) {
+				pick, best = i, v
 			}
-			if pick < 0 {
-				pick = i
-				continue
-			}
-			if pm, _ := mem(hosts[cands[pick]]); m > pm || (m == pm && score(i) > score(pick)) {
-				pick = i
-			}
-		}
-		if pick < 0 {
-			pick = 0
 		}
 	} else {
+		if below(0) {
+			pick = above[0]
+		}
 		challenger := -1
-		for i := 1; i < len(cands); i++ {
-			if challenger < 0 || score(i) > score(challenger) {
+		for _, i := range above {
+			if i != pick && (challenger < 0 || score(i) > score(challenger)) {
 				challenger = i
 			}
 		}
-		if challenger >= 0 && score(challenger) > score(0) && score(challenger) >= pol.hysteresis*score(0) {
+		bar := score(pick) * pol.hysteresis
+		if score(pick) < 0 {
+			bar = score(pick) / pol.hysteresis
+		}
+		if challenger >= 0 && score(challenger) > score(pick) && score(challenger) >= bar {
 			pick = challenger
 		}
 	}
@@ -496,11 +535,27 @@ func shadowFixed(hosts []selHost, req shadowReq, pol shadowPolicy) ([]selHost, s
 			h.fit = "unusable"
 		}
 	}
-	shadowDecide(out, req, pol, func(h selHost) (float64, bool) {
-		if h.view != nil && h.view.Signals.Terms != nil && h.view.Signals.MemAvailable != nil {
-			return h.view.Signals.Terms.Mem, true
+	// The shadow's own floor, so a free_floor set only there ranks the arm the
+	// way the live engine would rank with that floor.
+	for i := range out {
+		h := &out[i]
+		h.below, h.floorValue = false, 0
+		if h.view != nil && h.view.Signals.Terms != nil {
+			sig := h.view.Signals
+			sig.BelowFreeFloor = sig.Terms.Free() < pol.freeFloor
+			h.below, h.floorValue = floorKey(sig, h.score)
 		}
-		return 0, false
+	}
+	shadowDecide(out, req, pol, func(h selHost) (float64, float64, bool) {
+		if h.view == nil || h.view.Signals.Terms == nil {
+			return 0, 0, false
+		}
+		t := h.view.Signals.Terms
+		power := shadowDefaultPower
+		if h.view.Signals.Power != nil && *h.view.Signals.Power > 0 {
+			power = *h.view.Signals.Power
+		}
+		return t.CPU * t.Mem * t.IO * t.Load * t.Jobs, power, true
 	}, false)
 	return out, measure
 }
@@ -526,14 +581,29 @@ func shadowMeasured(hosts []selHost, req shadowReq, pol shadowPolicy) []selHost 
 			h.fit = "memory_refused"
 		}
 		h.score = pol.measuredScore(*h, req, mems[i])
+		h.below, h.floorValue = false, 0
+		if f, ok := pol.measuredFree(*h, mems[i]); ok {
+			capability, _ := pol.capabilityOf(req.class, h.name, *h)
+			if capability <= 0 {
+				capability = shadowDefaultPower
+			}
+			h.below, h.floorValue = f < pol.freeFloor, f*capability
+			if h.score != nil {
+				h.floorValue = *h.score
+			}
+		}
 	}
 	byName := map[string]shadowMem{}
 	for i, h := range out {
 		byName[h.name] = mems[i]
 	}
-	shadowDecide(out, req, pol, func(h selHost) (float64, bool) {
-		m := byName[h.name]
-		return m.term, m.src != "none"
+	shadowDecide(out, req, pol, func(h selHost) (float64, float64, bool) {
+		f, known := pol.measuredFree(h, byName[h.name])
+		capability, _ := pol.capabilityOf(req.class, h.name, h)
+		if capability <= 0 {
+			capability = shadowDefaultPower
+		}
+		return f, capability, known
 	}, true)
 	return out
 }

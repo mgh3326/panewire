@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/mgh3326/panewire/internal/configkeys"
 	"github.com/mgh3326/panewire/internal/grade"
 )
 
@@ -200,6 +201,20 @@ func decode(b []byte, v any) error {
 	d := json.NewDecoder(strings.NewReader(string(b)))
 	d.DisallowUnknownFields()
 	return d.Decode(v)
+}
+
+// decodeConfig is decode for a config document that may carry keys this
+// release does not read: they come back for the caller to warn about instead
+// of refusing the file. A malformed value for a key the struct reads still
+// fails.
+func decodeConfig(b []byte, v any) ([]string, error) {
+	if e := uniqueJSON(b); e != nil {
+		return nil, e
+	}
+	if e := json.NewDecoder(strings.NewReader(string(b))).Decode(v); e != nil {
+		return nil, e
+	}
+	return configkeys.JSON(b, v)
 }
 func uniqueJSON(b []byte) error {
 	d := json.NewDecoder(strings.NewReader(string(b)))

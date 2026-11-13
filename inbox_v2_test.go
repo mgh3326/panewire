@@ -87,6 +87,16 @@ lanes:
 	}
 }
 
+func TestDeliveryPolicyRetainsHistoricalDottedLane(t *testing.T) {
+	p, err := parseDeliveryPolicy([]byte("default: interrupt\nrules: []\nlanes:\n  legacy.parent:\n    types: {report: inbox}\n"))
+	if err != nil {
+		t.Fatalf("historical policy lane rejected: %v", err)
+	}
+	if got := p.classify("legacy.parent", "lane.event", hubJobEventPayload{NotifyType: "report", Text: "note"}, false); got != "inbox" {
+		t.Fatalf("historical policy not applied: %s", got)
+	}
+}
+
 func TestNotifyTypeEmitScanAndWire(t *testing.T) {
 	for _, kind := range []string{"lane.event", "job.completed", "job.escalate"} {
 		t.Run(kind, func(t *testing.T) {
@@ -281,6 +291,7 @@ func TestInboxWaitEndpoint(t *testing.T) {
 		{"unauthenticated", "/v1/inbox/wait?lane=lane-a", "", "", 401},
 		{"node unowned lane", "/v1/inbox/wait?lane=lane-b&timeout=10ms", "node", "host-a", 401},
 		{"node owned lane", "/v1/inbox/wait?lane=lane-a&timeout=10ms", "node", "host-a", 200},
+		{"legacy dotted lane remains readable", "/v1/inbox/wait?lane=legacy.parent&timeout=1ms", "op", "", 200},
 		{"invalid timeout", "/v1/inbox/wait?lane=lane-a&timeout=bogus", "op", "", 400},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -327,6 +338,12 @@ func TestInboxWaitCLI(t *testing.T) {
 	code, out, errOut := run("wait", "--lane", "lane-b", "--timeout", "120ms")
 	if code != ExitTimeout || out != "" {
 		t.Fatalf("code=%d out=%q err=%q", code, out, errOut)
+	}
+	// Dotted lanes from pre-contract inbox rows remain addressable during
+	// migration, even though newly written lane names reject dots.
+	code, out, errOut = run("wait", "--lane", "legacy.parent", "--timeout", "1ms")
+	if code != ExitTimeout || out != "" {
+		t.Fatalf("legacy lane code=%d out=%q err=%q", code, out, errOut)
 	}
 	// An unread item prints like read and exits 0.
 	item := h.relayLaneEvent(quietEvent("one", "FYI one"), nil)

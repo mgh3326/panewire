@@ -254,6 +254,23 @@ func (s Spawn) unlinkedReviewer() bool {
 	return s.Role == "reviewer" && s.ParentFamily != "" && s.Inherited == "" && s.ParentJob == ""
 }
 
+// resolvedRoutingRole is the routing role the spawn's resolved fields name:
+// the selection's RoutingRole (resolve only), else the spawn role, which is
+// its own routing role. It reads the fields that cross the hub and ssh
+// envelopes.
+func (s Spawn) resolvedRoutingRole() string {
+	return firstNonempty(s.RoutingRole, s.Role)
+}
+
+// consultTask reports whether the spawn's seat is a consult seat. Only the seat
+// role decides: an implementer seat that resolve routes as consult still takes
+// the implementer's exclusive claim, because the override is not tied to the
+// seat (hk 3709 review). A consult works beside the task's claimant and never
+// takes the task's exclusive claim.
+func (s Spawn) consultTask() bool {
+	return s.Role == "consult"
+}
+
 // taskPrecheck reads the task over hk HTTP (hkGetTask) and refuses a spawn
 // the task cannot take. --bypass covers an hk the precheck cannot reach or
 // that errs, never an answer it cannot read (errHKUnreadable).
@@ -282,13 +299,17 @@ func (a *App) taskPrecheck(ctx context.Context, s Spawn) (client.Task, bool, err
 
 // taskTakesSpawn refuses a spawn the task cannot take: it is in a state that
 // ends or parks the work, or is bound to another job or claimant. An
-// inherited spawn and an unlinked reviewer take any task.
+// inherited spawn and an unlinked reviewer take any task; a consult takes a
+// live task without its exclusive claim.
 func taskTakesSpawn(t client.Task, s Spawn) error {
 	if s.Inherited != "" || s.unlinkedReviewer() {
 		return nil
 	}
 	if slices.Contains([]string{"merged", "dropped", "hold", "needs_decision"}, t.State) {
 		return fail(exitUsage, "task unavailable: %s", t.State)
+	}
+	if s.consultTask() {
+		return nil
 	}
 	if j := t.Refs.JobID; j != "" && j != s.Job {
 		return fail(exitUsage, "task bound to another job")
@@ -328,8 +349,7 @@ func (s Spawn) replacesParent() bool {
 	if s.Inherited == "" || s.Inherited == s.Job {
 		return false
 	}
-	role := firstNonempty(s.RoutingRole, s.Role)
-	return role == "implementer"
+	return s.resolvedRoutingRole() == "implementer"
 }
 
 // rebindInherited moves the task to this job when its parent is terminal and
@@ -419,7 +439,7 @@ func (a *App) taskLink(ctx context.Context, s Spawn, task client.Task, bypassed 
 	var claimFailure *taskClaimFailure
 	if s.replacesParent() {
 		status = a.rebindInherited(ctx, s, task, ev)
-	} else if s.unlinkedReviewer() {
+	} else if s.unlinkedReviewer() || (s.Inherited == "" && s.consultTask()) {
 		// No claim: the task stays bound to whatever it was bound to.
 		status = "unlinked"
 	} else if s.Inherited == "" {
@@ -1100,9 +1120,20 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 	return a.afterSpawn(ctx, s, false)
 }
 
+// gateRequestedBy is the requested-by a spawn's gate requests may carry: the
+// operator request's requester, only beside the operator request itself. A
+// bare --requested-by names the lane a failed spawn notifies and never
+// reaches the gate (hk 3080).
+func gateRequestedBy(s Spawn) string {
+	if s.OperatorRequest == "" {
+		return ""
+	}
+	return s.RequestedBy
+}
+
 // spawnQuotaRequest is the catalog and gate request for a spawn's seat and rung.
 func (a *App) spawnQuotaRequest(s Spawn, seat Seat, effort string) QuotaRequest {
-	return QuotaRequest{Profile: seat.Canon, GateProfile: seat.gateName(), Effort: effort, Role: s.Role, OperatorRequest: s.OperatorRequest, RequestedBy: s.RequestedBy, Purpose: s.Purpose, AccountKey: s.AccountKey, E6Arm: a.e6Arm(s.E6Arm, s.e6ArmLocked), E6ArmLocked: s.e6ArmLocked}
+	return QuotaRequest{Profile: seat.Canon, GateProfile: seat.gateName(), Effort: effort, Role: s.Role, OperatorRequest: s.OperatorRequest, RequestedBy: gateRequestedBy(s), Purpose: s.Purpose, AccountKey: s.AccountKey, E6Arm: a.e6Arm(s.E6Arm, s.e6ArmLocked), E6ArmLocked: s.e6ArmLocked}
 }
 
 // checkLaunchRow is the launch-row half of admitLaunch: the catalog row the

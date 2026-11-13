@@ -354,7 +354,8 @@ func TestNodeCheckoutAllowListFromSpawnConfig(t *testing.T) {
 		{"checkouts key is the allow-list", checkoutSpawnJSON(`"checkouts":{"rstack":"/srv/rstack","docs":"/srv/docs"}`), map[string]string{"rstack": "/srv/rstack", "docs": "/srv/docs"}},
 		{"no checkouts key gives the default", checkoutSpawnJSON(""), defaults},
 		{"explicit empty list allows nothing", checkoutSpawnJSON(`"checkouts":{}`), map[string]string{}},
-		{"config that does not load allows nothing", checkoutSpawnJSON(`"checkouts":{"rstack":"/srv/rstack"},"bogus":1`), map[string]string{}},
+		{"unknown key ignored, allow-list still loads", checkoutSpawnJSON(`"checkouts":{"rstack":"/srv/rstack"},"bogus":1`), map[string]string{"rstack": "/srv/rstack"}},
+		{"malformed known key allows nothing", checkoutSpawnJSON(`"checkouts":{"rstack":123}`), map[string]string{}},
 		{"invalid name refuses the file", checkoutSpawnJSON(`"checkouts":{"Bad Name":"/srv/x"}`), map[string]string{}},
 		{"relative path refuses the file", checkoutSpawnJSON(`"checkouts":{"rstack":"relative/path"}`), map[string]string{}},
 	}
@@ -377,11 +378,15 @@ func TestNodeCheckoutAllowListFromSpawnConfig(t *testing.T) {
 	if _, err := loadHubSpawnConfig(write(checkoutSpawnJSON(`"checkouts":{"rstack":"/srv/rstack"}`))); err != nil {
 		t.Fatalf("spawn.json with checkouts refused: %v", err)
 	}
-	// An unknown key elsewhere still fails the strict decode.
-	_, err := loadHubSpawnConfig(write(checkoutSpawnJSON(`"checkouts":{"rstack":"/srv/rstack"},"bogus":1`)))
+	// An unknown key elsewhere is ignored with a warning: the file still loads.
+	if _, err := loadHubSpawnConfig(write(checkoutSpawnJSON(`"checkouts":{"rstack":"/srv/rstack"},"bogus":1`))); err != nil {
+		t.Fatalf("unknown key refused: %v", err)
+	}
+	// A malformed value for a known key still refuses.
+	_, err := loadHubSpawnConfig(write(checkoutSpawnJSON(`"checkouts":{"rstack":123}`)))
 	var configErr *hubSpawnConfigError
 	if !errors.As(err, &configErr) || configErr.Rule != "config_json_invalid" {
-		t.Fatalf("unknown key: err=%v, want config_json_invalid", err)
+		t.Fatalf("malformed known key: err=%v, want config_json_invalid", err)
 	}
 	// An invalid checkouts entry refuses the file under its own rule.
 	_, err = loadHubSpawnConfig(write(checkoutSpawnJSON(`"checkouts":{"rstack":"relative"}`)))

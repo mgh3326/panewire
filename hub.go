@@ -22,6 +22,7 @@ import (
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
 	"github.com/getsentry/sentry-go"
+	"github.com/mgh3326/panewire/internal/configkeys"
 	"github.com/mgh3326/panewire/internal/fleet"
 )
 
@@ -638,6 +639,7 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 		if err != nil {
 			return nil, errors.New("hub placement policy is invalid")
 		} else {
+			configkeys.Warn(config.Logger, config.PlacementPolicyPath, policy.ignoredKeys)
 			placementPolicy, placementPolicyModTime = policy, modTime
 			placementPolicyObservedModTime = modTime
 			placementPolicyStatus = "current"
@@ -646,10 +648,11 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 	if config.RelayAckTimeout <= 0 {
 		config.RelayAckTimeout = relayAckTimeoutFromEnv()
 	}
-	overrides, err := loadAcceptingOverrides(config.AcceptingOverridesPath)
+	overrides, ignoredOverrideKeys, err := loadAcceptingOverrides(config.AcceptingOverridesPath)
 	if err != nil {
 		return nil, errors.New("hub accepting overrides are invalid")
 	}
+	configkeys.Warn(config.Logger, config.AcceptingOverridesPath, ignoredOverrideKeys)
 	if config.LanesNodeRowCap < 0 {
 		return nil, errors.New("hub lanes node row cap is invalid")
 	}
@@ -675,7 +678,7 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 	}
 	controlPlaneLanes := make(map[string]struct{}, len(config.ControlPlaneLanes))
 	for _, lane := range config.ControlPlaneLanes {
-		if !laneNamePattern.MatchString(lane) {
+		if !LaneNamePattern.MatchString(lane) {
 			return nil, errors.New("hub control-plane lanes are invalid")
 		}
 		if _, duplicate := controlPlaneLanes[lane]; duplicate {
@@ -710,6 +713,9 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 	inbox, err := newHubInbox(config.DeliveryPolicyPath, config.InboxStorePath, config.InboxDatabaseURL)
 	if err != nil {
 		return nil, err
+	}
+	if inbox != nil {
+		configkeys.Warn(config.Logger, config.DeliveryPolicyPath, inbox.policy.ignoredKeys)
 	}
 	closeCtx, closeCancel := context.WithCancel(context.Background())
 	hub := &HubServer{
@@ -970,7 +976,7 @@ func (h *HubServer) handleJobs(writer http.ResponseWriter, request *http.Request
 		hubUnauthorized(writer)
 		return
 	}
-	if lane != "" && !validReportRelayLaneName(lane) {
+	if lane != "" && !validLaneReference(lane) {
 		http.Error(writer, "invalid owner_lane", http.StatusBadRequest)
 		return
 	}
@@ -1290,7 +1296,7 @@ func (h *HubServer) handleAgentMessageContext(ctx context.Context, machineID, re
 					h.lateRegisterJobCompletion(machineID, event, received)
 				}
 			}
-			if message.Kind == "job.lost" && h.observePoolCooling(event.Reason, received) && !validReportRelayLaneName(event.OwnerLane) {
+			if message.Kind == "job.lost" && h.observePoolCooling(event.Reason, received) && !validLaneReference(event.OwnerLane) {
 				// This acknowledges in-memory cooling, not durable relay persistence.
 				agent.queuePersisted(hubRelayPersistedEvent{Type: "pool.cooling.ack", JobID: event.JobID, Kind: message.Kind, Epoch: event.Epoch, ReportPath: event.ReportPath, Reason: event.Reason, EventID: 1, ProducerEventID: event.EventID})
 			}

@@ -22,7 +22,7 @@ func validHubActiveJob(job HubActiveJob) bool {
 // normalizeHubActiveJobMetadata rejects invalid optional console metadata
 // without discarding an otherwise valid active job heartbeat.
 func normalizeHubActiveJobMetadata(job *HubActiveJob) {
-	if !hubAgentLabelPattern.MatchString(job.OwnerLane) {
+	if !validLaneReference(job.OwnerLane) {
 		job.OwnerLane = ""
 	}
 	if job.Pane == "" || len(job.Pane) > 128 {
@@ -170,7 +170,7 @@ func decodeHubLaneEventPayload(payload []byte) (hubJobEventPayload, bool) {
 	if !decodeDeliveryClass(fields, &event) || !decodeNotifyType(fields, &event) {
 		return hubJobEventPayload{}, false
 	}
-	if json.Unmarshal(fields["owner_lane"], &event.OwnerLane) != nil || json.Unmarshal(fields["event_id"], &event.EventID) != nil || json.Unmarshal(fields["text"], &event.Text) != nil || !hubAgentLabelPattern.MatchString(event.OwnerLane) || !validLaneEventID(event.EventID) || !validLaneEventText(event.Text) || len(event.Text) > laneEventTextLimitSink {
+	if json.Unmarshal(fields["owner_lane"], &event.OwnerLane) != nil || json.Unmarshal(fields["event_id"], &event.EventID) != nil || json.Unmarshal(fields["text"], &event.Text) != nil || !validLaneReference(event.OwnerLane) || !validLaneEventID(event.EventID) || !validLaneEventText(event.Text) || len(event.Text) > laneEventTextLimitSink {
 		return hubJobEventPayload{}, false
 	}
 	if raw, present := fields["epoch"]; present && (json.Unmarshal(raw, &event.Epoch) != nil || event.Epoch == 0) {
@@ -411,7 +411,7 @@ func (h *HubServer) lateRegisterJobCompletion(machineID string, completion hubJo
 		return false
 	}
 	ownerLane := completion.OwnerLane
-	if !validReportRelayLaneName(ownerLane) {
+	if !validLaneReference(ownerLane) {
 		ownerLane = ""
 	}
 	h.jobs[completion.JobID] = &hubJobRecord{
