@@ -471,6 +471,10 @@ func (client *HubClient) Publish(kind string, payload any) bool {
 
 // Run reconnects until its context is canceled. Any hub error is isolated to
 // this goroutine: it never propagates into local daemon loops.
+var hubRequestIDPattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,96}$`)
+
+func validHubRequestID(value string) bool { return hubRequestIDPattern.MatchString(value) }
+
 func (client *HubClient) Run(ctx context.Context) {
 	if err := client.spawnStartupError(); err != nil {
 		client.warn(err.Error())
@@ -2032,8 +2036,6 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 				peer.acceptsHostActivity.Store(slices.Contains(message.Features, hubFeatureHostActivity))
 				peer.acceptsLaunchProof.Store(slices.Contains(message.Features, hubFeatureLaunchProof))
 				continue
-			case "quota.request":
-				go client.handleHubQuota(ctx, peer, message)
 			case "job.spawn":
 				go client.handleHubSpawn(ctx, peer, message)
 			case "node.command":
@@ -2984,13 +2986,6 @@ func parseHubOutboundRejection(payload []byte) (hubOutboundMessage, hubOutboundR
 			return hubOutboundMessage{}, reject
 		}
 		if !validHubIdleWakeRouteEvent(hubIdleWakeRouteEvent{Type: message.Type, EventID: message.IdleWakeEventID, Pane: message.Pane, Eligible: message.Eligible, Lane: message.Lane, Text: message.Text, JobID: message.JobID, Reason: message.Reason}) {
-			return hubOutboundMessage{}, reject
-		}
-	case "quota.request":
-		// "scopefuel" is the retired quota tool's wire spelling; a legacy hub
-		// still sends it, so the name stays admitted for one release.
-		var tool string
-		if len(fields) != 3 || json.Unmarshal(fields["request_id"], &message.RequestID) != nil || json.Unmarshal(fields["tool"], &tool) != nil || !validHubRequestID(message.RequestID) || tool != "scopefuel" {
 			return hubOutboundMessage{}, reject
 		}
 	case "job.spawn":

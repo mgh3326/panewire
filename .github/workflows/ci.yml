@@ -153,7 +153,7 @@ jobs:
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
-          if git diff --name-only "$BASE_SHA"...HEAD | grep -Eq '^(lane_inbox|inbox_|hub_inbox|hub_postgres|hub_migrate|hub_unconfirmed|hub_spawn_task_store|hub_store|store)[^/]*\.go$|^hub\.go$|^hub_postgres_migrations/'; then
+          if git diff --name-only "$BASE_SHA"...HEAD | grep -Eq '^(lane_inbox|inbox_|hub_inbox|hub_postgres|hub_unconfirmed|hub_spawn_task_store|hub_store|store)[^/]*\.go$|^hub\.go$|^hub_postgres_migrations/'; then
             echo "store=true" >> "$GITHUB_OUTPUT"
           else
             echo "store=false" >> "$GITHUB_OUTPUT"
@@ -184,7 +184,7 @@ jobs:
         with:
           ref: ${{ inputs.ref }}
       - uses: ./.github/actions/setup-go-cached
-      - name: store contract, must-ack and migrate-sqlite on Postgres
+      - name: store contract and must-ack on Postgres
         if: ${{ github.event_name == 'pull_request' }}
         env:
           PANEWIRE_TEST_HUB_DATABASE_URL: postgres://postgres@localhost:55432/panewire?sslmode=disable
@@ -192,7 +192,7 @@ jobs:
         # A skip here would mean the Postgres half silently did not run.
         run: |
           set -o pipefail
-          go test -race -count=2 -v -run 'LaneInboxStore|MustAck|IdleWakeKeepsRead|HubServerOpensPostgresInbox|HubMigrateSQLite|HubDatabaseURL' . 2>&1 | tee "$RUNNER_TEMP/postgres-test.log"
+          go test -race -count=2 -v -run 'LaneInboxStore|MustAck|IdleWakeKeepsRead|HubServerOpensPostgresInbox|HubDatabaseURL' . 2>&1 | tee "$RUNNER_TEMP/postgres-test.log"
           if grep -q -- '--- SKIP' "$RUNNER_TEMP/postgres-test.log"; then
             echo "a Postgres test skipped"; exit 1
           fi
@@ -216,7 +216,7 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          go test -count=1 -v -run 'HubServerOpensPostgresInbox|HubMigrateSQLite|HubDatabaseURL' . 2>&1 | tee "$RUNNER_TEMP/postgres-migrate.log"
+          go test -count=1 -v -run 'HubServerOpensPostgresInbox|HubDatabaseURL' . 2>&1 | tee "$RUNNER_TEMP/postgres-migrate.log"
           if grep -q -- '--- SKIP' "$RUNNER_TEMP/postgres-migrate.log"; then
             echo "a Postgres test skipped"; exit 1
           fi

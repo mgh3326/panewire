@@ -93,14 +93,6 @@ func TestHubCLISeparatedDoubleDashValuesStayAccepted(t *testing.T) {
 	if err != nil || fleet.jobsRoot != "--json" {
 		t.Fatalf("fleet jobsRoot=%q err=%v", fleet.jobsRoot, err)
 	}
-	reap, err := parseSessionReapCLIArgs([]string{"--jobs-root", "--dir"})
-	if err != nil || reap.jobsRoot != "--dir" {
-		t.Fatalf("reap jobsRoot=%q err=%v", reap.jobsRoot, err)
-	}
-	audit, err := parseLanesAuditArgs([]string{"--hub-url", "https://hub.invalid", "--hub-token-env", "--x"})
-	if err != nil || audit.tokenEnv != "--x" {
-		t.Fatalf("audit tokenEnv=%q err=%v", audit.tokenEnv, err)
-	}
 }
 
 func TestLanesInvalidTokenFileDoesNotExposeContents(t *testing.T) {
@@ -136,11 +128,6 @@ func TestOtherHubCLIUsageErrorsExplainSyntax(t *testing.T) {
 		{"fleet unknown flag", func(a []string, o, e *bytes.Buffer, d hubCLIDeps) int { return runFleetCensusCLI(a, o, e, d) }, []string{"--wrong"}, "panewire fleet-census"},
 		{"fleet missing value", func(a []string, o, e *bytes.Buffer, d hubCLIDeps) int { return runFleetCensusCLI(a, o, e, d) }, []string{"--grace"}, "panewire fleet-census"},
 		{"fleet missing value before flag", func(a []string, o, e *bytes.Buffer, d hubCLIDeps) int { return runFleetCensusCLI(a, o, e, d) }, []string{"--grace", "--json"}, "panewire fleet-census"},
-		{"reap duplicate flag", func(a []string, o, e *bytes.Buffer, d hubCLIDeps) int { return runSessionReapCLI(a, o, e, d) }, []string{"--json", "--json"}, "panewire session-reap"},
-		{"reap missing value", func(a []string, o, e *bytes.Buffer, d hubCLIDeps) int { return runSessionReapCLI(a, o, e, d) }, []string{"--grace", "--json"}, "panewire session-reap"},
-		{"audit missing credentials", func(a []string, o, e *bytes.Buffer, d hubCLIDeps) int { return runLanesAuditCLI(a, o, e, d) }, nil, "panewire lanes-audit"},
-		{"audit unknown flag", func(a []string, o, e *bytes.Buffer, d hubCLIDeps) int { return runLanesAuditCLI(a, o, e, d) }, []string{"--wrong"}, "panewire lanes-audit"},
-		{"audit missing value before flag", func(a []string, o, e *bytes.Buffer, d hubCLIDeps) int { return runLanesAuditCLI(a, o, e, d) }, []string{"--hub-url", "--hub-token-env", "/tmp/token"}, "panewire lanes-audit"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -164,8 +151,6 @@ func TestHubCLIMissingValueBeforeFlagDiagnostic(t *testing.T) {
 	}{
 		{"sessions", func(a []string, o, e *bytes.Buffer, d hubCLIDeps) int { return runFleetCensusFindCLI(a, o, e, d) }, []string{"find", "label", "--hub-url", "--hub-token-env", "/tmp/token"}},
 		{"fleet-census", func(a []string, o, e *bytes.Buffer, d hubCLIDeps) int { return runFleetCensusCLI(a, o, e, d) }, []string{"--grace", "--json"}},
-		{"session-reap", func(a []string, o, e *bytes.Buffer, d hubCLIDeps) int { return runSessionReapCLI(a, o, e, d) }, []string{"--grace", "--json"}},
-		{"lanes-audit", func(a []string, o, e *bytes.Buffer, d hubCLIDeps) int { return runLanesAuditCLI(a, o, e, d) }, []string{"--hub-url", "--hub-token-env", "/tmp/token"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
