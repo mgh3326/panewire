@@ -363,6 +363,49 @@ func (c *handoffkeepRelayClient) listUndelivered(ctx context.Context, lane, kind
 	return result.Events, nil
 }
 
+// handoffkeepTask is the hk task fields the drain-wake count reads: the ID
+// that pages the list, and whether the task waits on the operator.
+type handoffkeepTask struct {
+	ID               int64 `json:"id"`
+	AwaitingDecision bool  `json:"awaiting_decision"`
+}
+
+// listTasks reads one page of hk tasks for project in state, in ID order after
+// afterID. Drain wake pages until a short page (hub_drain_wake.go).
+//
+// after_id goes out on every page, including the first (afterID 0): hk sends a
+// request without it to its no-cursor queue read, which orders by priority and
+// then ID, so a first page taken that way makes the cursor skip every lower-ID
+// row outside it.
+func (c *handoffkeepRelayClient) listTasks(ctx context.Context, project, state string, afterID int64, limit int) ([]handoffkeepTask, error) {
+	query := url.Values{}
+	query.Set("project", project)
+	query.Set("state", state)
+	query.Set("limit", strconv.Itoa(limit))
+	query.Set("after_id", strconv.FormatInt(afterID, 10))
+	status, payload, err := c.do(ctx, http.MethodGet, c.endpoint("/v1/tasks")+"?"+query.Encode(), nil)
+	if err != nil {
+		return nil, err
+	}
+	if status != http.StatusOK {
+		return nil, errors.New("handoffkeep rejected the task query")
+	}
+	var result struct {
+		// Project is hk's echo of the requested filter. A server that predates
+		// the filter ignores it and cannot echo it, so a silent zero-discard
+		// would otherwise count another project's tasks (or none).
+		Project string            `json:"project"`
+		Tasks   []handoffkeepTask `json:"tasks"`
+	}
+	if json.Unmarshal(payload, &result) != nil {
+		return nil, errors.New("handoffkeep returned an unusable task list")
+	}
+	if result.Project != project {
+		return nil, errors.New("handoffkeep did not apply the task project filter")
+	}
+	return result.Tasks, nil
+}
+
 // relayEvent reads the one row with this id, in any delivery state. The
 // listing cursor is exclusive and ordered by id, so a one-row page after
 // id-1 is exactly that row or proof it does not exist.

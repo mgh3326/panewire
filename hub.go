@@ -524,6 +524,9 @@ type HubServer struct {
 	laneStallMu      sync.Mutex
 	laneStallClosing bool
 	laneStallSweeps  sync.WaitGroup
+	// drainWake is each design lane's drain-wake state (hub_drain_wake.go),
+	// owned by the lane-stall sweep goroutine under laneStallMu.
+	drainWake map[string]*drainWakeLane
 	// laneHeldCountProbe is a test hook laneHeldCountLocked fires once per
 	// scan, so a test can tell the count ran only on an activating
 	// observation.
@@ -823,6 +826,7 @@ func (h *HubServer) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/inbox/{id}/read", h.handleInboxRead)
 	mux.HandleFunc("POST /v1/inbox/ack", h.handleInboxAck)
 	mux.HandleFunc("POST /v1/spawns", h.handleSpawnSubmit)
+	mux.HandleFunc("POST /v1/spawns/plan", h.handleSpawnPlan)
 	mux.HandleFunc("GET /v1/spawns/features", h.handleSpawnFeatures)
 	mux.HandleFunc("GET /v1/spawns/live", h.handleSpawnLive)
 	mux.HandleFunc("GET /v1/spawns/{request_id}", h.handleSpawnOperation)
