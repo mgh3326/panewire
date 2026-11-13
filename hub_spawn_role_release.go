@@ -321,11 +321,12 @@ func jobHeldBody() map[string]string {
 	return map[string]string{"error": "job_already_claimed", "fix": heldFix}
 }
 
-// spawnRoleHeldBody answers a (task, role) reservation held by another
-// operation: task_role_claimed names the task and role, so the submitter is not
-// told that a job id is claimed. The holder's identity follows when readable.
-func spawnRoleHeldBody(task, role string, holder hubSpawnTask, pane heldPane, found bool) map[string]string {
-	body := map[string]string{"error": "task_role_claimed", "task": task, "role": role, "fix": heldFix}
+// spawnRoleHeldBody answers a refused claim whose reservation is held by another
+// operation. code is task_role_claimed when the (task, role) is the collision,
+// and job_already_claimed when the job id is: the body names the task and role
+// either way, and the holder's identity follows when readable.
+func spawnRoleHeldBody(code, task, role string, holder hubSpawnTask, pane heldPane, found bool) map[string]string {
+	body := map[string]string{"error": code, "task": task, "role": role, "fix": heldFix}
 	if !found {
 		return body
 	}
@@ -440,7 +441,17 @@ func (h *HubServer) reclaimSpawnRole(ctx context.Context, app *fleet.App, reques
 		}
 	}
 	trace.probe = probe
-	return task, spawnRoleHeldBody(spawn.Task, spawn.Role, holder, probe.state, holderErr == nil), retryAfterS, errSpawnClaimed
+	// The job id and the role can both collide. The job-id duplicate keeps its
+	// own code; only a collision on the role alone is task_role_claimed.
+	jobHeld, jobErr := h.inbox.store.spawnJobReserved(ctx, spawn.Job)
+	if jobErr != nil {
+		return task, nil, 0, jobErr
+	}
+	code := "task_role_claimed"
+	if jobHeld {
+		code = "job_already_claimed"
+	}
+	return task, spawnRoleHeldBody(code, spawn.Task, spawn.Role, holder, probe.state, holderErr == nil), retryAfterS, errSpawnClaimed
 }
 
 // heldTrace is what a refused reclaim saw: the branch that held, the hk read
