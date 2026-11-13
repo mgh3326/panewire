@@ -317,6 +317,8 @@ relay:
   design_lanes: ["*-design"]                         # default
   desk_lanes: ["operator-desk", "*-operator-desk"]   # default
   inbox_wake_window: 5m                              # default; 10s..1h
+  drain_wake_interval: 1h                            # default; 10m..24h
+  drain_wake_threshold: 0                            # default; 0..10
   worker_inbox_trial: []                             # default: no trial
   worker_inbox_trial_until: "2026-11-16T00:00:00Z"   # required with a trial
 ```
@@ -386,6 +388,16 @@ When the line is sent:
   sends exactly one more line, and only if the lane still has unread items.
   That line opens the next window. A window end that finds nothing unread
   closes the window instead, so the next item is announced at once.
+- A design lane whose in-flight jobs fall to `relay.drain_wake_threshold`
+  (default 0) while hk lists open backlog for its project gets one line,
+  `N backlog, M in work: dispatch the next batch`. The project is the lane
+  name without `-design`; the backlog is the hk tasks in state `backlog` or
+  `unstarted` that do not await an operator decision, counted per state with
+  hk's project and state filters, page by page; an answer that does not echo
+  the project filter counts as an error, never as backlog. The line goes out
+  on the drain and at most once per `relay.drain_wake_interval` (default 1h).
+  A lane first seen idle gets no line. This is an interim until the
+  hub-owned queue (hk 4376) replaces the hk read.
 - A line still owed to a [trial](#worker-trial) lane when its trial ends is
   dropped: the lane is a worker lane again.
 - When the hub starts, every inbox-only lane with unread items above `info`

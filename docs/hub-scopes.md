@@ -47,6 +47,8 @@ lane with `{"all":true}`, including items intended for other agents.
 | `inbox.ack_state` | `GET /v1/inbox/ack-state?event_id=…` (see [Ack state](#ack-state)); no lane, no resource |
 | `state.read` | `GET /v1/state` ([fleet-state.md](fleet-state.md)) |
 
+The hub's ticker issues `pane.sweep` (see [pane-sweep.md](pane-sweep.md#hub-ordered-sweep)) the same way: the endpoint refuses it for every caller, so no scope grants it.
+
 Every other route keeps the authentication it had: operator-only, node-only
 for the websocket and a node's own lanes, CF Access where the UI and chat
 accept it, and none for `GET /healthz`. A service credential satisfies none

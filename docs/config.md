@@ -776,16 +776,21 @@ pair can share it. The rule follows the spawn role: an implementer claims the
 task even when `panewire resolve` routed it as consult.
 Other spawn failures retain their normal cleanup behavior.
 
-An inherited spawn normally leaves the task bound to its parent job. It rebinds
-the task to the new job, through `handoffkeep tasks rebind`, only after the brief
-lands and only when all of these hold: the parent's hk record state is `lost`,
-`failed` or `completed`; the task's `refs.job_id` is the parent; the new job id
-differs; and the spawn is a replacement seat (routing role `implementer`),
-not a reviewer or consult. The
-`job.task_link` event then says `status: rebound`. Otherwise it says `inherited`,
-adding `bound_job` when the task is bound to a third job and `rebind_error` when
-the rebind failed or the parent's state was unreadable; neither fails the landed
-spawn.
+An implementer spawn with `--parent-job` replaces its parent job. After the
+successor's `job.spawned` event commits, it attempts to move the task's claim
+and `refs.job_id` from the parent to the new job through `handoffkeep tasks
+rebind`, regardless of the parent's state. The parent pane is left running.
+Only implementer spawns take over; reviewer and consult children do not. Spawns with `--task`, or neither flag and
+no `ARBITER_JOB`, claim as before.
+
+The earlier `job.task_link` event records `status: inherited` and
+`takeover: pending`. After landing, `job.task_rebind` records the outcome:
+`rebound` on confirmation, otherwise `inherited` with a reason and, when known,
+`bound_job`. A confirmed takeover also writes `job.replaced` on the parent's
+local ledger, when present. A refused or unconfirmed takeover leaves the spawn
+landed and emits an `automation-failed` notice asking for a manual rebind check.
+If the process stops after landing but before the takeover, the pending link
+has no `job.task_rebind` event and the parent retains the task.
 
 Automatic model selection (`spawn` with `-m` omitted or `-m auto`) reads the
 live bench catalog from handoffkeep and pool status from the quota CLI, then
@@ -1621,6 +1626,8 @@ embedded `delivery-policy.yaml`) carries the lane classes under `relay:`. See
 | `relay.inbox_wake_window` | `5m` | Coalescing window of the one-line wake, `10s` to `1h`. |
 | `relay.worker_inbox_trial` | `[]` | Worker lane patterns that are inbox-only with the wake during the trial. |
 | `relay.worker_inbox_trial_until` | none | RFC3339 end of the trial. It is required with a trial list, and the trial is off from this instant. |
+| `relay.drain_wake_interval` | `1h` | Least gap between two drain lines for one design lane, `10m` to `24h`. |
+| `relay.drain_wake_threshold` | `0` | A design lane counts as drained at or below this many in-flight jobs, `0` to `10`. |
 
 The wake line is
 `[inbox] <lane>: N unread (most urgent: <kind>) | panewire inbox list --lane <lane>`.

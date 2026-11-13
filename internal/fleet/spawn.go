@@ -352,9 +352,14 @@ func (s Spawn) replacesParent() bool {
 	return s.resolvedRoutingRole() == "implementer"
 }
 
-// rebindInherited moves the task to this job when its parent is terminal and
-// the task is still bound to that parent, and returns the job.task_link status.
-// The spawn has landed by now, so a failure is recorded on ev and never returned.
+// rebindInherited moves the task to this job when the task is still bound to
+// its parent job, whatever state the parent is in, and returns the
+// job.task_link status. A spawn that inherits its parent's task as an
+// implementer seat replaces the parent: the task's claim and refs.job_id move
+// to the successor, so everything that routes by the task binding (lane events,
+// mergewake FINDINGS) reaches the job that is working. A parent that is still
+// live loses its claim the same way; its pane is left alone. The spawn has
+// landed by now, so a failure is recorded on ev and never returned.
 // Rule: docs/config.md, "--parent-job".
 func (a *App) rebindInherited(ctx context.Context, s Spawn, task client.Task, ev map[string]any) string {
 	refused := func(why string) string {
@@ -364,35 +369,114 @@ func (a *App) rebindInherited(ctx context.Context, s Spawn, task client.Task, ev
 	}
 	switch bound := task.Refs.JobID; bound {
 	case "":
-		return "inherited"
+		return refused("task has no job binding")
 	case s.Job:
 		// An earlier attempt of this request rebound the task and then failed.
 		return "rebound"
 	case s.Inherited:
 	default:
 		ev["bound_job"] = bound
-		return "inherited"
+		return refused("task bound to another job")
 	}
-	store, e := a.jobStore()
-	if e != nil {
-		return refused("parent job record unavailable")
+	// The parent's state names the rebind in hk's audit trail and on the link
+	// event. It does not decide it: hk's own rule (an active task bound to the
+	// parent) is the gate, so a parent that escalated or is still live is
+	// replaced like a completed one.
+	state := ""
+	if store, e := a.jobStore(); e == nil {
+		if parent, e := store.Get(ctx, s.Inherited); e == nil {
+			state = str(parent, "state")
+		}
 	}
-	parent, e := store.Get(ctx, s.Inherited)
-	if e != nil {
-		return refused("parent job record unreadable")
+	reason := "respawn continues parent job " + s.Inherited
+	if state != "" {
+		ev["parent_state"] = state
+		reason = "respawn continues " + state + " parent job " + s.Inherited
 	}
-	state := str(parent, "state")
-	if !slices.Contains([]string{"lost", "failed", "completed"}, state) {
-		return "inherited"
+	t, e := hkRebindTask(ctx, s.Task, s.Inherited, s.Job, s.Label, reason)
+	if e == nil && t.ClaimedBy == s.Label && t.Refs.JobID == s.Job {
+		return "rebound"
 	}
-	t, e := hkRebindTask(ctx, s.Task, s.Inherited, s.Job, s.Label, "respawn continues "+state+" parent job "+s.Inherited)
-	if e != nil && !errors.Is(e, errHKUnreadable) {
+	var httpErr *client.HTTPError
+	if e != nil && errors.As(e, &httpErr) && httpErr.Status >= 400 && httpErr.Status < 500 {
+		lookup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		current, lookupErr := hkGetTask(lookup, s.Task)
+		cancel()
+		if lookupErr == nil && current.Refs.JobID != "" && current.Refs.JobID != s.Inherited {
+			ev["bound_job"] = current.Refs.JobID
+		}
 		return refused("task rebind refused: " + hkErrText(e))
 	}
-	if e != nil || t.ClaimedBy != s.Label || t.Refs.JobID != s.Job {
-		return refused("task rebind did not confirm claimed_by and refs.job_id")
+	// An unreadable or lost response may have committed the write. Check hk
+	// under a fresh bounded context before attempting the conditional write once more.
+	confirm, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
+	current, err := hkGetTask(confirm, s.Task)
+	if err == nil && current.Refs.JobID == s.Job && current.ClaimedBy == s.Label {
+		return "rebound"
 	}
-	return "rebound"
+	if err == nil && current.Refs.JobID == s.Inherited {
+		t, e = hkRebindTask(confirm, s.Task, s.Inherited, s.Job, s.Label, reason)
+		if e == nil && t.ClaimedBy == s.Label && t.Refs.JobID == s.Job {
+			return "rebound"
+		}
+	}
+	if err == nil && current.Refs.JobID != s.Inherited && current.Refs.JobID != s.Job {
+		ev["bound_job"] = current.Refs.JobID
+	}
+	return refused("unconfirmed")
+}
+
+// finishTaskTakeover runs only after the successor is committed, so a failed
+// spawn never needs a compensating remote write. See docs/config.md.
+func (a *App) finishTaskTakeover(ctx context.Context, s Spawn, task client.Task, owner string) {
+	ev := map[string]any{"task_id": s.Task, "job_id": s.Job, "inherited_from": s.Inherited}
+	takeover, cancelTakeover := context.WithTimeout(context.WithoutCancel(ctx), 20*time.Second)
+	status := a.rebindInherited(takeover, s, task, ev)
+	cancelTakeover()
+	uncancelled := context.WithoutCancel(ctx)
+	ctx, cancelOutcome := context.WithTimeout(uncancelled, 10*time.Second)
+	defer cancelOutcome()
+	ev["status"] = status
+	if e := a.event(ctx, s.Job, "job.task_rebind", ev); e != nil {
+		a.warn("job %s: task rebind event not recorded: %v", s.Job, e)
+	}
+	if status == "rebound" {
+		a.noteReplaced(ctx, s)
+		return
+	}
+	reason := str(ev, "rebind_error")
+	id := sha256.Sum256([]byte(s.Job))
+	text := fmt.Sprintf("[panewire] TASK_REBIND_FAILED job=%s task=%s reason=%s; rebind manually", s.Job, s.Task, reason)
+	notice, cancelNotice := context.WithTimeout(uncancelled, 10*time.Second)
+	defer cancelNotice()
+	r := a.call(notice, "panewire", "emit", "--kind", "lane.event", "--lane", owner, "--type", "automation-failed", "--event-id", fmt.Sprintf("task-rebind-failed-%x", id[:]), "--text", text, "--inbox-root", filepath.Dir(a.Jobs))
+	if r.Code != 0 {
+		a.warn("task rebind notice failed (exit %d)", r.Code)
+	}
+}
+
+// noteReplaced records on the parent's job ledger that this job took its task,
+// when the parent's ledger is on this host. It runs once the successor has
+// landed, never before: a failed spawn never takes the task, and the parent's
+// ledger must not say it was replaced. hk's job record has no successor
+// field, and it never rewrites a terminal record, so the ledger is the parent's
+// own record of the takeover. A parent on another host keeps no note here: the
+// event would create a ledger for a job this host never ran. Writing it once is
+// enough, so a replay of the same spawn finds it and stops.
+func (a *App) noteReplaced(ctx context.Context, s Spawn) {
+	events, e := a.events(s.Inherited)
+	if e != nil {
+		return
+	}
+	for _, ev := range events {
+		if ev.Kind == "job.replaced" && str(ev.Payload, "replaced_by") == s.Job {
+			return
+		}
+	}
+	if e := a.event(ctx, s.Inherited, "job.replaced", map[string]any{"replaced_by": s.Job, "task_id": s.Task}); e != nil {
+		a.warn("job %s: replaced_by note not recorded: %v", s.Inherited, e)
+	}
 }
 
 // hkRebindTask moves the task's job link from fromJob to toJob over hk HTTP.
@@ -438,7 +522,7 @@ func (a *App) taskLink(ctx context.Context, s Spawn, task client.Task, bypassed 
 	status := "inherited"
 	var claimFailure *taskClaimFailure
 	if s.replacesParent() {
-		status = a.rebindInherited(ctx, s, task, ev)
+		ev["takeover"] = "pending"
 	} else if s.unlinkedReviewer() || (s.Inherited == "" && s.consultTask()) {
 		// No claim: the task stays bound to whatever it was bound to.
 		status = "unlinked"
@@ -1095,6 +1179,9 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 		return e
 	}
 	committed = true
+	if s.replacesParent() {
+		a.finishTaskTakeover(ctx, s, task, owner)
+	}
 	s.placement.placed = true
 	if rerr := a.recordLadderStep(ctx, s, launch, seat); rerr != nil {
 		a.warn("ladder step not recorded: %v", rerr)
