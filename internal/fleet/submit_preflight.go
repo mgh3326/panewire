@@ -56,8 +56,8 @@ func (a *App) submitPreflight(ctx context.Context, s Spawn) error {
 	// Spawn translates the builder flags into the inherited-parent fields
 	// taskTakesSpawn reads; do the same here so a review pass of a claimed
 	// task is judged as the node judges it. Spawn validates the flags.
-	if (s.Role == "reviewer" || s.Role == "tester") && (s.BuilderFamily != "" || s.BuilderJob != "") {
-		s.ParentFamily = s.BuilderFamily
+	if s.Role == "reviewer" && (s.AuthorFamily != "" || s.BuilderJob != "") {
+		s.ParentFamily = s.AuthorFamily
 		s.Inherited = s.BuilderJob
 	}
 	t, err := hkGetTask(ctx, s.Task)
@@ -74,12 +74,11 @@ func (a *App) submitPreflight(ctx context.Context, s Spawn) error {
 	if e := taskTakesSpawn(t, s); e != nil {
 		return e
 	}
-	// A counsel is a consult, which needs no marker; the engine resolves it
-	// before the marker check (routeFor). The policy table is not read here (a
-	// submit reads no hk document of its own); a role the table maps to consult
-	// beyond the built-in counsel is judged by the engine.
+	// A consult needs no marker; the engine resolves it before the marker
+	// check (routeFor). The policy table is not read here (a submit reads no hk
+	// document of its own).
 	if s.RoutingRole == "" {
-		s.RoutingRole = builtinRoleMap[s.Role]
+		s.RoutingRole = s.Role
 	}
 	_, e := taskMarkerGrade(t, s, s.Bypass)
 	return e

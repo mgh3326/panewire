@@ -15,7 +15,7 @@ import (
 // on this host and carries the state the leases and gc read.
 type Claim struct {
 	Job, Lane, T      string
-	Role              string // "worker" (default) or "builder"; "captain" is a legacy alias for builder
+	Role              string // "implementer" (default) or "builder"
 	ParentLane        string // required for, and only for, a builder
 	AgentLabel        string // exact Herdr name/label; defaults to Job
 	TaskID            string
@@ -111,13 +111,10 @@ func (s *Store) Claim(ctx context.Context, cl Claim) (ClaimResult, error) {
 		return res, e
 	}
 	if cl.Role == "" {
-		cl.Role = "worker"
-	}
-	if cl.Role == "captain" {
-		cl.Role = "builder"
+		cl.Role = "implementer"
 	}
 	switch {
-	case cl.Role != "worker" && cl.Role != "builder":
+	case cl.Role != "implementer" && cl.Role != "builder":
 		return res, errf(ExitUsage, "unknown role %q", cl.Role)
 	case cl.Role == "builder" && cl.ParentLane == "":
 		return res, errf(ExitUsage, "a builder claim needs a parent lane")

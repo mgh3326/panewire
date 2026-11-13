@@ -197,7 +197,7 @@ func TestNodeCommandPaneCloseBlocked(t *testing.T) {
 	}{
 		{name: "reviewer job closes", listed: "blocked", events: []map[string]any{claim("reviewer")}, outcome: nodePaneClosed},
 		{name: "role from the spawned receipt closes", listed: "blocked", events: []map[string]any{{"kind": "job.spawned", "payload": map[string]any{"role": "reviewer", "pane_id": "w1:p1"}}}, outcome: nodePaneClosed},
-		{name: "worker job is refused", listed: "blocked", events: []map[string]any{claim("worker")}, outcome: nodePaneChanged},
+		{name: "implementer job is refused", listed: "blocked", events: []map[string]any{claim("implementer")}, outcome: nodePaneChanged},
 		{name: "ledger with no role is refused", listed: "blocked", events: []map[string]any{{"kind": "job.claimed"}}, outcome: nodePaneChanged},
 		{name: "unknown job is refused", listed: "blocked", outcome: nodePaneChanged},
 		{name: "unset jobs root is refused", listed: "blocked", noJobs: true, events: []map[string]any{claim("reviewer")}, outcome: nodePaneChanged},

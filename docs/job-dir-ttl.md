@@ -145,8 +145,8 @@ receipt again through the same code.
 Some directories fail the gate on every pass, so the TTL never deletes
 them; the operator decides:
 
-- A receipt that records a label but no `herdr_session` (a headless
-  receipt, or one from before the session was recorded): `pane-session-unknown`.
+- A receipt that records a label but no `herdr_session` (one from before the
+  session was recorded): `pane-session-unknown`.
 - A receipt that records neither a pane nor a label: `pane-unknown`.
 - A recorded report path that goes through a symlink other than the jobs
   root's own alias: `report-path-unreadable`. On macOS, for one, a path

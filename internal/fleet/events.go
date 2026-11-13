@@ -25,8 +25,8 @@ type Job struct {
 	ID                                                                                                string
 	Owner, Parent, Role, Label, Pane, Tab, Task, Family, Profile, Effort, Report, HubLane, Machine, T string
 	Keep, Terminal, Reaped                                                                            bool
-	// SpawnRole is the role the job.spawned receipt names (reviewer, tester, ...).
-	// The claim records only worker or builder, so the role a quota stop is
+	// SpawnRole is the role the job.spawned receipt names (reviewer, consult, ...).
+	// The claim records only implementer or builder, so the role a quota stop is
 	// handled by comes from here (QuotaRole).
 	SpawnRole string
 	// Ended is the kind of the newest terminal event since the last claim,
@@ -111,7 +111,7 @@ func (a *App) job(id string) (Job, error) {
 			j.Owner = str(p, "owner_lane")
 			j.Parent = str(p, "parent_lane")
 			if r := str(p, "role"); r != "" {
-				if r == "builder" || r == "captain" || j.Role == "" {
+				if r == "builder" || j.Role == "" {
 					j.Role = r
 				}
 			}

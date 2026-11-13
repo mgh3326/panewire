@@ -245,13 +245,5 @@ See [spawn configuration and exit statuses](docs/config.md) and
 binary or forwarding shim is installed. The remaining hub orchestration and
 caller changes ship in the coordinated cutover before old binaries are removed.
 
-## Delegation
-
-`panewire delegate --role reader --prompt /brief.md --cwd /work/project`
-assigns a bounded reading task through the same quota and role policy. Use
-`--headless` when the selected harness supports it, `--patch` for an isolated
-scratch checkout, or `--panel` for independent readers. See
-[Delegation configuration](docs/config.md) for roles, results and exit codes.
-
 
 Spawn execution now belongs to the hub. `panewire spawn` and `work TASK` print ACCEPTED after a durable reservation; this is not landing proof. `--dry-run` stays synchronous and `--wait` preserves the job-completion contract. See [durable spawn operations](docs/hub-spawn-operations.md) for replay, timeout, recovery and Sentry behavior, and [observability](docs/observability.md) for the relay, held-reservation and job-result fleet events and their Sentry fingerprints.

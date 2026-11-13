@@ -76,7 +76,7 @@ func (a *App) lifecycleWithOptions(ctx context.Context, kind string, args []stri
 			}
 		}
 	}
-	strictResult := kind == "done" && !watchResult && result != nil && !boolean(j.Receipt, "headless", false)
+	strictResult := kind == "done" && !watchResult && result != nil
 	body := []byte{}
 	if *report != "" {
 		if e = noSymlinks(*report); e != nil {
@@ -160,7 +160,7 @@ func (a *App) lifecycleWithOptions(ctx context.Context, kind string, args []stri
 	if kind == "done" {
 		return a.doneReport(ctx, j, doneInput{
 			report: *report, body: body, digest: digest, question: *question, result: result,
-			strict: strictResult, headless: boolean(j.Receipt, "headless", false), watcher: watchResult, late: late,
+			strict: strictResult, watcher: watchResult, late: late,
 		})
 	}
 	return a.escalateReport(ctx, j, *report, *question, body, digest, late)
@@ -195,15 +195,14 @@ func readResult(path string) (json.RawMessage, error) {
 }
 
 // watcherResultFile finds the result a finished pane filed in its job dir:
-// findings.json (a reviewer's convention), then result.json (`panewire
-// delegate`, delegatePaths.result). The report's directory is checked first,
-// where a worker writes both files.
+// findings.json, a reviewer's convention. The report's directory is checked
+// first, where a reviewer writes it.
 func watcherResultFile(jobs, id, report string) (string, string) {
 	var candidates []string
 	if report != "" {
 		candidates = append(candidates, filepath.Join(filepath.Dir(report), "findings.json"))
 	}
-	candidates = append(candidates, filepath.Join(jobs, id, "findings.json"), filepath.Join(jobs, id, "result.json"))
+	candidates = append(candidates, filepath.Join(jobs, id, "findings.json"))
 	seen := map[string]bool{}
 	for _, path := range candidates {
 		if seen[path] {
@@ -288,8 +287,8 @@ func (a *App) restore(ctx context.Context, j Job) error {
 	if found != 1 || j.Pane == "" || j.Tab == "" {
 		return fail(exitUsage, "restore requires one verified existing pane")
 	}
-	role := "worker"
-	if j.Role == "builder" || j.Role == "captain" {
+	role := "implementer"
+	if j.Role == "builder" {
 		role = "builder"
 	}
 	claim := arbiter.Claim{ReclaimReleased: true, Job: j.ID, Lane: j.Owner, AgentLabel: j.Label, T: j.T, Role: role, TaskID: j.Task}
