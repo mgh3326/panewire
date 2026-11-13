@@ -421,15 +421,55 @@ func TestDoneResultConflictOnUnattendedPathRaisesTheSignal(t *testing.T) {
 	}
 }
 
-// A file named like a content-addressed key never lands on one: the two key
-// schemes stay disjoint.
-func TestBasenameReportKeyNeverNamesAContentAddressedKey(t *testing.T) {
+// Basename-keyed uploads keep the literal file name. A file named like a
+// content-addressed key is refused there, so such a key only ever holds the
+// bytes with its sha256.
+func TestBasenameReportKeysStayLiteralAndReservedNamesAreRefused(t *testing.T) {
 	digest := reportDigest([]byte("x"))
-	got := BasenameReportKey("j", "/jobs/j/answer-"+digest+".md")
-	if got == reportDocumentKey("j", digest) || !strings.HasPrefix(got, "reports/j/") {
-		t.Fatalf("key=%q collides with %q", got, reportDocumentKey("j", digest))
+	reserved := "/jobs/j/answer-" + digest + ".md"
+	if !ReservedReportName(reserved) || ReservedReportName("/jobs/j/report.md") || ReservedReportName("/jobs/j/file-answer-"+digest+".md") {
+		t.Fatal("reserved-name check")
 	}
-	if got := BasenameReportKey("j", "/jobs/j/report.md"); got != "reports/j/report.md" {
-		t.Fatalf("key=%q", got)
+	if got := BasenameReportKey("j", reserved); got != reportDocumentKey("j", digest) {
+		t.Fatalf("key=%q, want the literal basename", got)
+	}
+}
+
+// escalate does not upload a report whose file name only a content-addressed
+// key may carry.
+func TestEscalateRefusesAReservedReportName(t *testing.T) {
+	r := newDoneRig(t)
+	r.path = filepath.Join(r.a.Jobs, "j", "answer-"+reportDigest([]byte("x"))+".md")
+	r.write("blocked\n")
+	if e := r.a.lifecycle(t.Context(), "escalate", []string{"j", "--report", r.path, "--question", "q?"}); e != nil {
+		t.Fatal(e)
+	}
+	for _, req := range r.hk.Requests() {
+		if strings.HasPrefix(req.Route(), "PUT /v1/documents/") {
+			t.Fatalf("escalate uploaded %s", req.Path)
+		}
+	}
+	if !strings.Contains(r.stderr(), "report upload skipped") {
+		t.Fatalf("warnings=%q", r.stderr())
+	}
+}
+
+// A document already at the content-addressed key with other bytes (a
+// basename-keyed upload from before keys were content-addressed) is never
+// overwritten: the publish fails and the report stays out of hk.
+func TestDoneNeverOverwritesAnExistingDocumentAtItsKey(t *testing.T) {
+	r := newDoneRig(t)
+	body := "answer\n"
+	key := r.key(body)
+	r.hk.SetDoc(key, "an older report")
+	r.write(body)
+	wantNotInHK(t, r.done())
+	for _, req := range r.hk.Requests() {
+		if req.Method == http.MethodPut && strings.HasPrefix(req.Path, "/v1/documents/") {
+			t.Fatalf("done overwrote %s", req.Path)
+		}
+	}
+	if got := len(r.events(eventReportPublished)); got != 0 {
+		t.Fatalf("publish receipts=%d", got)
 	}
 }

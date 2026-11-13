@@ -48,15 +48,17 @@ func legacyReportDocumentKey(job, reportPath string) string {
 var contentAddressedBase = regexp.MustCompile(`^answer-[0-9a-f]{64}\.md$`)
 
 // BasenameReportKey is the hk key of a report uploaded under its file's name
-// (escalate, the legacy job CLI). A file named like a content-addressed key
-// gets a "file-" prefix, so the two schemes stay disjoint and a key named
-// answer-<sha256>.md only ever holds the bytes with that sha256.
+// (escalate, the legacy job CLI), the literal basename as before.
 func BasenameReportKey(job, reportPath string) string {
-	base := strings.TrimRight(filepath.Base(reportPath), "\n")
-	if contentAddressedBase.MatchString(base) {
-		base = "file-" + base
-	}
-	return "reports/" + job + "/" + base
+	return "reports/" + job + "/" + strings.TrimRight(filepath.Base(reportPath), "\n")
+}
+
+// ReservedReportName reports whether a report file's name is one only a
+// content-addressed key may carry. A basename-keyed upload of such a file is
+// refused, so a key named answer-<sha256>.md only ever holds the bytes with
+// that sha256.
+func ReservedReportName(reportPath string) bool {
+	return contentAddressedBase.MatchString(strings.TrimRight(filepath.Base(reportPath), "\n"))
 }
 
 // publishedDocument is the document the job.report_published receipt names
@@ -84,6 +86,15 @@ func (a *App) publishReport(ctx context.Context, j Job, body []byte, digest stri
 	if task, err := hkTaskID(j.Task); err == nil {
 		upload.TaskID = &task
 	}
+	// Documents written before keys were content-addressed were keyed by file
+	// name, so an answer-<sha256>.md may already hold other bytes: never
+	// overwrite it.
+	switch held, err := hkGetDocumentWithin(ctx, key, hkUploadTimeout); {
+	case err == nil && (held.Key != key || held.SHA256 != digest):
+		return "", errReportKeyHoldsOtherBytes
+	case err != nil && !errors.Is(err, errHKNotFound):
+		return "", err
+	}
 	stored, err := hkPutDocumentStored(ctx, upload)
 	if err != nil {
 		return "", err
@@ -91,7 +102,7 @@ func (a *App) publishReport(ctx context.Context, j Job, body []byte, digest stri
 	if stored.Key == key && stored.SHA256 == digest {
 		return key, nil
 	}
-	read, err := hkGetDocument(ctx, key)
+	read, err := hkGetDocumentWithin(ctx, key, hkUploadTimeout)
 	if err != nil {
 		return "", err
 	}

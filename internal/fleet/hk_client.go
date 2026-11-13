@@ -252,7 +252,13 @@ func hkTaskProject(t client.Task) string {
 
 // hkGetDocument reads one document; a key hk does not have is errHKNotFound.
 func hkGetDocument(ctx context.Context, key string) (client.Document, error) {
-	c, err := newHKClient()
+	return hkGetDocumentWithin(ctx, key, hkCallTimeout)
+}
+
+// hkGetDocumentWithin is hkGetDocument under timeout, for a read that belongs
+// to an upload and so gets the upload bound.
+func hkGetDocumentWithin(ctx context.Context, key string, timeout time.Duration) (client.Document, error) {
+	c, err := newHKClientWithin(timeout)
 	if err != nil {
 		return client.Document{}, err
 	}

@@ -336,7 +336,9 @@ func (a *App) commentOnTask(ctx context.Context, j Job, eventKind, report string
 func (a *App) escalateReport(ctx context.Context, j Job, report, question string, body []byte, digest string, late bool) error {
 	id := j.ID
 	doc, docSHA := "", ""
-	if report != "" {
+	if ReservedReportName(report) {
+		a.warn("report upload skipped: the file name is reserved for content-addressed documents; local report retained")
+	} else if report != "" {
 		key := BasenameReportKey(id, report)
 		b, e := os.ReadFile(report)
 		if e == nil {
