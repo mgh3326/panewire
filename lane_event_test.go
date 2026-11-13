@@ -23,21 +23,38 @@ func emitLaneEvent(t *testing.T, inbox, lane, eventID, text string) (int, string
 	return code, stderr.String()
 }
 
-func TestLaneEventAcceptsLaneNamesWithUnderscores(t *testing.T) {
-	inbox := t.TempDir()
-	const lane = "auto_trader-design"
-	if code, stderr := emitLaneEvent(t, inbox, lane, "producer-underscore", "payload"); code != ExitOK {
-		t.Fatalf("emit code=%d stderr=%q", code, stderr)
-	}
-	store := NewMemoryStore(t)
-	defer store.Close()
-	events := r20Node(inbox, store).jobCompletionEvents()
-	if len(events) != 1 || events[0].Kind != "lane.event" {
-		t.Fatalf("scanned events=%+v", events)
-	}
-	decoded, ok := decodeHubLaneEventPayload(events[0].Payload)
-	if !ok || decoded.OwnerLane != lane {
-		t.Fatalf("hub lane event=%+v valid=%t", decoded, ok)
+func TestLaneEventUsesLaneNameRule(t *testing.T) {
+	for _, test := range []struct {
+		lane    string
+		eventID string
+	}{
+		{lane: "auto_trader-design", eventID: "producer-underscore"},
+		{lane: "-owner", eventID: "producer-leading-hyphen"},
+	} {
+		t.Run(test.lane, func(t *testing.T) {
+			payload, err := json.Marshal(map[string]any{"owner_lane": test.lane, "event_id": test.eventID, "text": "payload"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if event, ok := decodeHubLaneEventPayload(payload); !ok || event.OwnerLane != test.lane {
+				t.Fatalf("hub lane event=%+v valid=%t", event, ok)
+			}
+
+			inbox := t.TempDir()
+			if code, stderr := emitLaneEvent(t, inbox, test.lane, test.eventID, "payload"); code != ExitOK {
+				t.Fatalf("emit code=%d stderr=%q", code, stderr)
+			}
+			store := NewMemoryStore(t)
+			defer store.Close()
+			events := r20Node(inbox, store).jobCompletionEvents()
+			if len(events) != 1 || events[0].Kind != "lane.event" {
+				t.Fatalf("scanned events=%+v", events)
+			}
+			decoded, ok := decodeHubLaneEventPayload(events[0].Payload)
+			if !ok || decoded.OwnerLane != test.lane {
+				t.Fatalf("hub received lane event=%+v valid=%t", decoded, ok)
+			}
+		})
 	}
 
 	invalid := []string{"Auto_trader-design", "auto trader", "auto_trader-design-too-long-name-123"}
