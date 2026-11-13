@@ -201,7 +201,7 @@ func TestAlloyFleetEventsPipelineShipsLabelledLines(t *testing.T) {
 	for _, tool := range []string{"panewire", "mergewake"} {
 		job := "job-before-" + tool
 		eventually(t, 60*time.Second, "the "+tool+" line written before start", func() bool { return len(first.echoed(job)) == 1 })
-		if echoed := first.echoed(job)[0]; !strings.Contains(echoed, `tool="`+tool+`"`) {
+		if echoed := first.echoed(job)[0]; !strings.Contains(echoed, `tool=\"`+tool+`\"`) {
 			t.Fatalf("%s path emitted the wrong tool label: %s", tool, echoed)
 		}
 	}
