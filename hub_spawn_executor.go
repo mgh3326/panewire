@@ -3,7 +3,6 @@ package panewire
 import (
 	"cmp"
 	"context"
-	"encoding/json"
 	"slices"
 	"sync"
 
@@ -245,8 +244,8 @@ func (h *HubServer) unbindQueuedSpawns(machine string) {
 // places with: each node's queued and in-flight spawns count as live jobs and
 // cost what a bridged claim costs, so a burst spreads across nodes instead of
 // queueing behind one.
-func (h *HubServer) spawnPlacementView(ctx context.Context, cwd string) ([]byte, error) {
-	result := h.placement(ctx, "worker", cwd)
+func (h *HubServer) spawnPlacementView(ctx context.Context, cwd string) PlacementResult {
+	result := h.placementFresh(ctx, "worker", cwd)
 	claimCost := h.spawnPolicy().scoreK().claimCost
 	candidates := make([]PlacementCandidate, len(result.Candidates))
 	for i, candidate := range result.Candidates {
@@ -257,7 +256,7 @@ func (h *HubServer) spawnPlacementView(ctx context.Context, cwd string) ([]byte,
 		candidates[i] = candidate
 	}
 	result.Candidates = candidates
-	return json.Marshal(result)
+	return result
 }
 
 // spawnTaskPriority reads an hk task's priority for the queue rank; the

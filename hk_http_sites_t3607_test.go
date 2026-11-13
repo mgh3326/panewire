@@ -199,7 +199,7 @@ func quotaStopHKFixture(policyAnswer, taskAnswer string, notes *int) quotaStopHK
 			}
 			return answer.Tasks[0], nil
 		},
-		tasks: func(context.Context) ([]byte, error) { return []byte(taskAnswer), nil },
+		tasks: func(context.Context, int64) ([]byte, error) { return []byte(taskAnswer), nil },
 		note: func(context.Context, string, string, string) error {
 			if notes != nil {
 				*notes++
@@ -220,7 +220,7 @@ func quotaStopHKDown(calls *int) quotaStopHK {
 	return quotaStopHK{
 		policy: func(context.Context) ([]byte, error) { return nil, down() },
 		task:   func(context.Context, string) ([]byte, error) { return nil, down() },
-		tasks:  func(context.Context) ([]byte, error) { return nil, down() },
+		tasks:  func(context.Context, int64) ([]byte, error) { return nil, down() },
 		note:   func(context.Context, string, string, string) error { return down() },
 	}
 }
@@ -245,7 +245,7 @@ func quotaSitesManager(t *testing.T) *quotaStopManager {
 }
 
 // The quota stop manager's three hk calls: the policy read, the task lookup
-// (GET /v1/tasks with the CLI's limit 1000 and no filter) and the note write.
+// (GET /v1/tasks with limit 1000 and stable ID paging) and the note write.
 func TestQuotaStopHKCallsGoOverHTTP(t *testing.T) {
 	ran := noHKBinary(t)
 	policyDoc, _ := json.Marshal(map[string]any{"id": 3, "key": "policy/quota-stop", "kind": "policy", "body": quotaSitesPolicy, "sha256": "ab", "created_by": "operator", "created_at": "2026-11-08T08:00:00Z", "updated_at": "2026-11-08T08:00:00Z"})
@@ -287,8 +287,8 @@ func TestQuotaStopHKCallsGoOverHTTP(t *testing.T) {
 	if got := hk.routes(); strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("hk routes=%q want %q", got, want)
 	}
-	if q, _ := url.ParseQuery(reqs[1].Query); q.Get("limit") != "1000" || q.Get("lane") != "" || q.Get("state") != "" || q.Get("parent_lane") != "" || !q.Has("lane") {
-		t.Fatalf("task list query=%q, want the CLI's tasks list --limit 1000", reqs[1].Query)
+	if q, _ := url.ParseQuery(reqs[1].Query); q.Get("limit") != "1000" || q.Get("after_id") != "0" || q.Get("lane") != "" || q.Get("state") != "" || q.Get("parent_lane") != "" || !q.Has("lane") {
+		t.Fatalf("task list query=%q, want the first stable ID page at after_id=0 with limit 1000", reqs[1].Query)
 	}
 	put := hkSitesJSON(t, reqs[2])
 	body := "[quota-stop] job-active w:p1 codex reset=12:00 decision=wait reason=reset_known\n"

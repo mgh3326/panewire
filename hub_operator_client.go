@@ -29,14 +29,15 @@ var (
 // operator request may target. Anything else — including a mutated request
 // URL reaching the transport — fails closed.
 var hubOperatorAPIPaths = map[string]bool{
-	"/v1/inbox":           true,
-	"/v1/inbox/count":     true,
-	"/v1/inbox/wait":      true,
-	"/v1/inbox/ack":       true,
-	"/v1/inbox/ack-state": true,
-	"/v1/nodes":           true,
-	"/v1/nodes/wake":      true,
-	"/v1/jobs":            true,
+	"/v1/inbox":               true,
+	"/v1/inbox/count":         true,
+	"/v1/inbox/wait":          true,
+	"/v1/inbox/ack":           true,
+	"/v1/inbox/ack-state":     true,
+	"/v1/nodes":               true,
+	"/v1/nodes/wake":          true,
+	"/v1/fleet/checkout-pull": true,
+	"/v1/jobs":                true,
 	// Shared with nodeHubClient, which uses this boundary for daemon requests.
 	"/v1/jobs/close":    true,
 	"/v1/jobs/mine":     true,

@@ -203,6 +203,8 @@ type HubClient struct {
 	nodeCommandMu      sync.Mutex
 	nodeHerdr          relayCommandRunner // fixture seam for node commands; nil runs herdr.
 	nodeGit            relayCommandRunner // fixture seam for node commands; nil runs git.
+	nodeCheckouts      map[string]string  // fixture seam for the checkout.pull allow-list; nil reads spawn.json checkouts.
+	nodeInstallWait    time.Duration      // fixture seam for install.sh's bound; zero is nodeCheckoutInstallTimeout.
 	nodeLifecycle      relayCommandRunner // fixture seam for job.done; nil runs runtug.
 	nodeJobs           fleet.JobStore     // fixture seam for job.mark_lost; nil reads spawn.json handoffkeep_env.
 	nativeQuotaMu      sync.Mutex
@@ -474,6 +476,10 @@ func (client *HubClient) Publish(kind string, payload any) bool {
 
 // Run reconnects until its context is canceled. Any hub error is isolated to
 // this goroutine: it never propagates into local daemon loops.
+var hubRequestIDPattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,96}$`)
+
+func validHubRequestID(value string) bool { return hubRequestIDPattern.MatchString(value) }
+
 func (client *HubClient) Run(ctx context.Context) {
 	if err := client.spawnStartupError(); err != nil {
 		client.warn(err.Error())
@@ -627,6 +633,9 @@ type hubClientConnection struct {
 	// acceptsHostActivity is the same for hubFeatureHostActivity
 	// (host_activity.go).
 	acceptsHostActivity atomic.Bool
+	// acceptsCheckoutPull is the same for hubFeatureCheckoutPull
+	// (node_checkout_pull.go).
+	acceptsCheckoutPull atomic.Bool
 	acceptsLaunchProof  atomic.Bool
 	connection          *websocket.Conn
 	writeMu             sync.Mutex
@@ -2033,10 +2042,9 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 				peer.acceptsLaneEventPane.Store(slices.Contains(message.Features, hubFeatureLaneEventPane))
 				peer.acceptsPaneCaptureDoc.Store(slices.Contains(message.Features, hubFeaturePaneCaptureDoc))
 				peer.acceptsHostActivity.Store(slices.Contains(message.Features, hubFeatureHostActivity))
+				peer.acceptsCheckoutPull.Store(slices.Contains(message.Features, hubFeatureCheckoutPull))
 				peer.acceptsLaunchProof.Store(slices.Contains(message.Features, hubFeatureLaunchProof))
 				continue
-			case "quota.request":
-				go client.handleHubQuota(ctx, peer, message)
 			case "job.spawn":
 				go client.handleHubSpawn(ctx, peer, message)
 			case "node.command":
@@ -2353,6 +2361,9 @@ func (client *HubClient) heartbeatEvent(ctx context.Context) hubClientEvent {
 		client.resetIdleClock()
 	}
 	heartbeat := hubHeartbeatPayload{Status: "alive", Checks: runHubChecks(ctx, client.checks, client.execute), ActiveJobs: active, HostSignals: client.hostSignalsForHeartbeat(ctx), HostActivity: client.hostActivityForHeartbeat(ctx), Readiness: client.readinessForHeartbeat(ctx)}
+	if client.checkoutPeerAccepted() {
+		heartbeat.Checkouts = client.checkoutRevisionsForHeartbeat(ctx)
+	}
 	if provider := client.stallBeatProvider(); provider != nil {
 		if beat := provider(); beat != nil {
 			heartbeat.StallDetect = beat
@@ -2987,13 +2998,6 @@ func parseHubOutboundRejection(payload []byte) (hubOutboundMessage, hubOutboundR
 			return hubOutboundMessage{}, reject
 		}
 		if !validHubIdleWakeRouteEvent(hubIdleWakeRouteEvent{Type: message.Type, EventID: message.IdleWakeEventID, Pane: message.Pane, Eligible: message.Eligible, Lane: message.Lane, Text: message.Text, JobID: message.JobID, Reason: message.Reason}) {
-			return hubOutboundMessage{}, reject
-		}
-	case "quota.request":
-		// "scopefuel" is the retired quota tool's wire spelling; a legacy hub
-		// still sends it, so the name stays admitted for one release.
-		var tool string
-		if len(fields) != 3 || json.Unmarshal(fields["request_id"], &message.RequestID) != nil || json.Unmarshal(fields["tool"], &tool) != nil || !validHubRequestID(message.RequestID) || tool != "scopefuel" {
 			return hubOutboundMessage{}, reject
 		}
 	case "job.spawn":

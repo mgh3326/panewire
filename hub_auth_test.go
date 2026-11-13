@@ -150,7 +150,6 @@ func TestHubAuthScopesPerRoute(t *testing.T) {
 	routes := []route{
 		{"nodes", "GET", "/v1/nodes", ""},
 		{"nodes-agents", "GET", "/v1/nodes/agents", ""},
-		{"session-reap", "GET", "/v1/session-reap", ""},
 		{"node-command", "POST", "/v1/nodes/node-a/command", `{"op":"agents.list","args":{}}`},
 		{"spawn", "POST", "/v1/spawn", `{"request_id":"7b1e2c3d-4a5b-4c6d-8e7f-9a0b1c2d3e4f","machine":"node-a","cwd_key":"repo","brief":{"inline":"brief"},"args":[],"wait_seconds":1}`},
 		{"spawn-get", "GET", "/v1/spawn/" + pw2SpawnID, ""},
@@ -176,18 +175,18 @@ func TestHubAuthScopesPerRoute(t *testing.T) {
 
 	// G granted, D 401, F 403 — in routes order.
 	want := map[string]string{
-		"operator":           "GGGGGGGGGGGGGG",
-		"node-a":             "DDDDDDGGGGGGGG",
-		"node-b":             "DDDDDDDDDDDGFF",
-		"anonymous":          "DDDDDDDDDDDDDD",
-		"svc-ok":             "GGGGGGGGGGGFFF",
-		"svc-none":           "FFFFFFFFFFFFFF",
-		"svc-other":          "FFFFFFFFFFFFFF",
-		"svc-wild":           "GGGGGGFFFFFFFF",
-		"svc-readonly":       "FFFFFFGGGGFFFF",
-		"svc-mergewake":      "GGGGFFFFFFFFFF",
-		"svc-ok-wrong-token": "DDDDDDDDDDDDDD",
-		"svc-ackstate":       "FFFFFFFFFFFGFF",
+		"operator":           "GGGGGGGGGGGGG",
+		"node-a":             "DDDDDGGGGGGGG",
+		"node-b":             "DDDDDDDDDDGFF",
+		"anonymous":          "DDDDDDDDDDDDD",
+		"svc-ok":             "GGGGGGGGGGFFF",
+		"svc-none":           "FFFFFFFFFFFFF",
+		"svc-other":          "FFFFFFFFFFFFF",
+		"svc-wild":           "GGGGGFFFFFFFF",
+		"svc-readonly":       "FFFFFGGGGFFFF",
+		"svc-mergewake":      "GGGFFFFFFFFFF",
+		"svc-ok-wrong-token": "DDDDDDDDDDDDD",
+		"svc-ackstate":       "FFFFFFFFFFGFF",
 	}
 	for _, caller := range callers {
 		for index, route := range routes {

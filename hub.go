@@ -82,7 +82,6 @@ type HubServerConfig struct {
 	// takes the task reservation (docs/hub-spawn-operations.md). Zero is
 	// defaultUnworkedLandingGrace.
 	UnworkedLandingGrace time.Duration
-	Notifier             HubNotifier
 	Logger               *slog.Logger
 	// PlacementPolicyPath is an optional operator-owned JSON policy. Placement
 	// never changes pressure thresholds or dispatches work.
@@ -143,6 +142,9 @@ type HubNode struct {
 	RemoteMeta          map[string]string   `json:"remote_meta"`
 	State               string              `json:"state"`
 	SessionSnapshot     *HubSessionSnapshot `json:"session_snapshot,omitempty"`
+	// Checkouts is each allow-listed git checkout's revision from the last
+	// heartbeat (node_checkout_pull.go); nil when the node reported none.
+	Checkouts map[string]HubCheckoutRev `json:"checkouts,omitempty"`
 }
 
 // HubNodeLoad is the CPU-only console projection of a heartbeat host_load.
@@ -183,7 +185,9 @@ type hubNodeRecord struct {
 	hostMemory    *HubHostMemory
 	// hostActivity is the last heartbeat's user-input report, nil when the node
 	// sent none (host_activity.go). It is recorded only.
-	hostActivity    *HubHostActivity
+	hostActivity *HubHostActivity
+	// checkouts is the last heartbeat's checkout revisions (node_checkout_pull.go).
+	checkouts       map[string]HubCheckoutRev
 	sessionSnapshot *hubSessionSnapshotRecord
 	// powerSource and powerAt are the last power report (host_signals.go).
 	powerSource string
@@ -431,7 +435,6 @@ type HubServer struct {
 	gracePeriod       time.Duration
 	orphanGrace       time.Duration
 	alertObservations int
-	notifier          HubNotifier
 	logger            *slog.Logger
 	// logFile is the optional --log-file sink; the hub owns it once the CLI
 	// constructor succeeds and Close releases it.
@@ -473,7 +476,6 @@ type HubServer struct {
 	laneReleaseGrace                 time.Duration
 	laneReleaseInterval              time.Duration
 	lanesWriteOps                    lanesWriteOps
-	controlReadiness                 func(controlPlaneTransferRequest, map[string]reportRelayRoute) []controlPlaneReadinessCheck
 	controlPlaneLanesPath            string
 	controlPlaneLanes                map[string]struct{}
 	controlPlaneLanesModTime         time.Time
@@ -514,6 +516,7 @@ type HubServer struct {
 	nodeCommands                map[string]*hubNodeCommandPending
 	unworkedLandingGrace        time.Duration
 	nodeCommandWait             time.Duration // fixture seam; zero is hubNodeCommandWait.
+	checkoutPullWait            time.Duration // fixture seam; zero is hubCheckoutPullWait.
 	nodeAgentsWait              time.Duration // fixture seam; zero is hubNodeAgentsWait.
 	// laneStallMu is TryLock'd so at most one lane-stall observation runs and
 	// is held for the run's whole life: once Close has taken it and set
@@ -547,6 +550,11 @@ type HubServer struct {
 	// launchBackoffs counts consecutive launch failures per (machine, kind),
 	// guarded by mu (hub_readiness.go).
 	launchBackoffs map[launchKey]*launchBackoff
+	// placementCounts are the jobs decided onto a host and not yet claimed by
+	// it, guarded by mu (placement_count.go).
+	placementCounts map[string]placementCount
+	// placementGate admits one spawn decision at a time (placement_count.go).
+	placementGate decisionGate
 	// oneTimeActions is the first-run needs already told to the desk, guarded
 	// by mu (hub_one_time_action.go).
 	oneTimeActions map[oneTimeActionKey]time.Time
@@ -557,8 +565,6 @@ type HubServer struct {
 	closeMu    sync.Mutex
 	closed     bool
 	stallBeats map[string]*hubStallBeatState
-	// sessionReap keeps the latest session-reap (#603) report per machine.
-	sessionReap map[string]*hubSessionReapRecord
 }
 
 // hubStallBeatState is the hub's half of the detector no-data contract. It
@@ -714,7 +720,7 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 	hub := &HubServer{
 		inbox: inbox, spawnKick: make(chan struct{}, 1),
 		authPath: config.AuthPath, alertNodes: alertNodes, relayControl: newHubRelayControlState(config, overrides), now: config.Now, staleAfter: config.StaleAfter, keepaliveInterval: config.KeepaliveInterval,
-		gracePeriod: config.GracePeriod, orphanGrace: config.OrphanGrace, unworkedLandingGrace: config.UnworkedLandingGrace, alertObservations: defaultHubAlertObservations, notifier: config.Notifier, logger: config.Logger,
+		gracePeriod: config.GracePeriod, orphanGrace: config.OrphanGrace, unworkedLandingGrace: config.UnworkedLandingGrace, alertObservations: defaultHubAlertObservations, logger: config.Logger,
 		placementPolicyPath: config.PlacementPolicyPath, placementPolicy: placementPolicy, placementPolicyModTime: placementPolicyModTime, placementPolicyObservedModTime: placementPolicyObservedModTime, placementPolicyLoaded: placementPolicyLoaded, placementPolicyStatus: placementPolicyStatus, placementPolicyLastFailure: placementPolicyLastFailure, prometheusURL: config.PrometheusURL, prometheusClient: config.PrometheusClient, prometheusBearer: config.PrometheusBearer, prometheusBasicUser: config.PrometheusBasicUser, prometheusBasicPass: config.PrometheusBasicPass,
 		nodes: make(map[string]*hubNodeRecord), lastNotes: make(map[string]*HubLastNote), subscribers: make(map[*hubEventSubscriber]struct{}), alerts: make(map[string]*hubAlertState), startedAt: config.Now().UTC(), uiAllowCFOnly: config.UIAllowCFOnly, jobs: make(map[string]*hubJobRecord), pendingRevocations: make(map[string]map[string]hubJobRevokedEvent), reportRelayPath: config.ReportRelayPath, lanesNodeRowCap: config.LanesNodeRowCap, prStatusHost: config.PRStatusHost, controlPlaneLanesPath: config.ControlPlaneLanesPath, controlPlaneLanes: controlPlaneLanes, controlPlaneLanesModTime: controlPlaneLanesModTime, controlPlaneLanesObservedModTime: controlPlaneLanesObservedModTime, controlPlaneLanesLoaded: controlPlaneLanesLoaded, controlPlaneLanesStatus: controlPlaneLanesStatus, controlPlaneLanesLastFailure: controlPlaneLanesLastFailure, relayDedupe: make(map[string]int64), relayHeld: make(map[int64]hubRelayHeldProjection), lanePersisted: make(map[string]int64), laneEventSHA: make(map[string]string), replayExhausted: make(map[int64]struct{}), handoffkeep: config.handoffkeep, cfAccess: cfAccess, spawnRecords: make(map[string]*hubSpawnRecord), stallBeats: make(map[string]*hubStallBeatState), closeCtx: closeCtx, closeCancel: closeCancel,
 	}
@@ -795,7 +801,6 @@ func (h *HubServer) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/lanes", h.handleLanes)
 	mux.HandleFunc("PUT /v1/lanes/{lane}", h.handlePutLane)
 	mux.HandleFunc("DELETE /v1/lanes/{lane}", h.handleDeleteLane)
-	mux.HandleFunc("POST /v1/control-plane/transfer", h.handleControlPlaneTransfer)
 	mux.HandleFunc("POST /v1/nodes/{machine}/accepting", h.handleAcceptingOverride)
 	mux.HandleFunc("GET /v1/placement", h.handlePlacement)
 	mux.HandleFunc("GET /v1/state", h.handleFleetStateSnapshot)
@@ -804,7 +809,6 @@ func (h *HubServer) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/jobs/reap", h.handleJobReap)
 	mux.HandleFunc("POST /v1/jobs/close", h.handleJobClose)
 	mux.HandleFunc("GET /v1/jobs/orphaned", h.handleOrphanedJobs)
-	mux.HandleFunc("GET /v1/session-reap", h.handleSessionReap)
 	mux.HandleFunc("POST /v1/jobs/reassign", h.handleReassignJob)
 	mux.HandleFunc("GET /v1/agent", h.handleAgent)
 	mux.HandleFunc("GET /v1/events", h.handleEvents)
@@ -822,6 +826,7 @@ func (h *HubServer) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/spawn", h.handleSpawn)
 	mux.HandleFunc("GET /v1/spawn/{request_id}", h.handleSpawnGet)
 	mux.HandleFunc("GET /v1/nodes/agents", h.handleNodesAgents)
+	mux.HandleFunc("POST /v1/fleet/checkout-pull", h.handleCheckoutPull)
 	mux.HandleFunc("POST /v1/nodes/{machine}/command", h.handleNodeCommand)
 	return h.drainGuard(h.countRoutes(mux))
 }
@@ -1068,7 +1073,7 @@ func (h *HubServer) handleLanes(writer http.ResponseWriter, request *http.Reques
 	})
 	if nodeMachine != "" {
 		// A node's envelope carries only its own machine's lanes and none of
-		// the control-plane transfer fields the operator envelope has.
+		// the control-plane fields the operator envelope has.
 		writeJSON(writer, http.StatusOK, struct {
 			Lanes []hubLaneProjection `json:"lanes"`
 		}{Lanes: lanes})
@@ -1150,9 +1155,6 @@ func (h *HubServer) handleAgentMessageContext(ctx context.Context, machineID, re
 		h.resolveNodeCommand(machineID, agent, result)
 		return
 	}
-	if h.handleSessionReapMessage(machineID, agent, payload) {
-		return
-	}
 	message, ok := parseHubInbound(payload)
 	if !ok {
 		// An undecodable relay ack would otherwise be counted like any other
@@ -1229,6 +1231,7 @@ func (h *HubServer) handleAgentMessageContext(ctx context.Context, machineID, re
 				record.lastHeartbeat = received
 				record.hostLoad = cloneHubHostLoad(heartbeat.HostLoad)
 				record.hostActivity = heartbeat.HostActivity
+				record.checkouts = heartbeat.Checkouts
 				h.observeHostSignalsLocked(record, heartbeat.HostSignals, received)
 				h.observeReadinessLocked(record, heartbeat.Readiness, received)
 				if !equalHubHostMemory(record.hostMemory, heartbeat.HostMemory) {
@@ -1467,6 +1470,8 @@ type hubHeartbeatPayload struct {
 	SnapshotStatus  string                    `json:"snapshot_status,omitempty"`
 	Truncated       bool                      `json:"truncated,omitempty"`
 	StallDetect     *hubStallBeatPayload      `json:"stall_detect,omitempty"`
+	// Checkouts is the node's allow-listed checkout revisions (node_checkout_pull.go).
+	Checkouts map[string]HubCheckoutRev `json:"checkouts,omitempty"`
 }
 
 // hubStallBeatPayload is the node detector's no-data contract. beat_ms is the
@@ -1511,7 +1516,7 @@ func decodeHubHeartbeatPayload(payload []byte) (hubHeartbeatPayload, bool) {
 		return hubHeartbeatPayload{}, false
 	}
 	for name := range fields {
-		if name != "status" && name != "checks" && name != "host_load" && name != "load_error" && name != "host_memory" && name != "quota" && name != "active_jobs" && name != "holds_active" && name != "host_signals" && name != "host_activity" && name != "readiness" && name != "sessions" && name != "snapshot_status" && name != "truncated" && name != "stall_detect" && name != "pane_ids" && name != "pane_ids_complete" {
+		if name != "status" && name != "checks" && name != "host_load" && name != "load_error" && name != "host_memory" && name != "quota" && name != "active_jobs" && name != "holds_active" && name != "host_signals" && name != "host_activity" && name != "readiness" && name != "sessions" && name != "snapshot_status" && name != "truncated" && name != "stall_detect" && name != "pane_ids" && name != "pane_ids_complete" && name != "checkouts" {
 			return hubHeartbeatPayload{}, false
 		}
 	}
@@ -1619,6 +1624,13 @@ func decodeHubHeartbeatPayload(payload []byte) (hubHeartbeatPayload, bool) {
 			}
 		}
 		heartbeat.PaneIDs, heartbeat.PaneIDsComplete = &ids, &complete
+	}
+	if rawCheckouts, exists := fields["checkouts"]; exists {
+		checkouts, valid := decodeHubCheckoutRevs(rawCheckouts)
+		if !valid {
+			return hubHeartbeatPayload{}, false
+		}
+		heartbeat.Checkouts = checkouts
 	}
 	rawSnapshotStatus, hasSnapshotStatus := fields["snapshot_status"]
 	if hasSnapshotStatus {
@@ -2208,6 +2220,7 @@ func (h *HubServer) Nodes() []HubNode {
 		nodes = append(nodes, HubNode{
 			MachineID: record.machineID, AlertClass: h.alertClass(record.machineID), Accepting: effective, AcceptingEffective: effective, AcceptingOverride: h.acceptingOverrideLocked(record.machineID), Containment: h.relayControl.acceptingOverride[record.machineID].Containment, ContainmentVerified: h.relayControl.acceptingOverride[record.machineID].ContainmentVerified, ConnectedSince: record.connectedSince, LastPingMS: age.Milliseconds(), LastNote: lastNote, Load: hubNodeLoadFromHostLoad(record.hostLoad), Memory: cloneHubHostMemory(record.hostMemory), RemoteMeta: remoteMeta, State: record.state,
 			SessionSnapshot: hubSessionSnapshotView(record.sessionSnapshot, record.state == "stale" || record.state == "disconnected"),
+			Checkouts:       cloneHubCheckoutRevs(record.checkouts),
 		})
 	}
 	sort.Slice(nodes, func(i, j int) bool { return nodes[i].MachineID < nodes[j].MachineID })

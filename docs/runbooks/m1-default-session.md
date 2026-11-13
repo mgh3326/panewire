@@ -80,43 +80,11 @@ failure: the pane is alive on M1 but the lane reads `dead` everywhere. See
    The last recorded check of this path delivered the event to `w3:p1G` on
    2026-09-29 13:57 KST.
 
-2. Audit the lanes from any host:
-
-   ```sh
-   panewire lanes-audit --hub-url <hub HTTPS URL> --hub-token-env <operator token env path> \
-     --sibling mac-work=mac-work-default
-   ```
-
-   Expect `verdict=alive` for `work-kairos` and `work-builder-2` (both read
-   `alive` at 2026-09-29 05:04Z).
-
-### Session mismatch
-
-Because the two daemons report sibling machine ids for one physical host,
-a lane whose `--machine` names the wrong daemon is `dead` on its own
-machine while the pane is demonstrably alive on the sibling. With
-`--sibling mac-work=mac-work-default` the audit marks such a lane
-`verdict=dead reason=session_mismatch sibling=<other id>` instead of a
-bare `dead`. The verdict stays `dead` on purpose — the lane genuinely does
-not route to a pane in the machine id it names — and the fix is to
-re-register the lane against the sibling id (or move the pane), not to
-treat it as healthy. See [r30-lanes-audit](../r30-lanes-audit.md).
-
-The sibling match itself is on **pane id only**: `auditLaneSiblingHit`
-compares `session.PaneID` to the lane's pane and never checks the sibling
-session's label or agent. An unrelated pane in the sibling daemon's
-snapshot can share the same `w*:p*` id — herdr reassigns ids freely — so
-before re-registering against the sibling id the desk must confirm the
-sibling pane is the intended session, not a same-id stranger. Confirm the
-sibling pane's label/agent in that daemon's own snapshot with
-`panewire fleet-census find <label> --machine <sibling-machine-id>`, or compare the
-audit row's pane against `hub-status` output for the sibling machine id.
-
 ## What breaks when the M1 orchestrator (herdr) restarts
 
 - **Pane ids are reassigned.** herdr does not preserve `w*:p*` ids across a
   restart, so every lane still pointing at the old pane id becomes `dead`
-  on its next audit: the daemon's snapshot is fresh and complete, and the
+  in `fleet-census`: the daemon's snapshot is fresh and complete, and the
   pane is simply not in it.
 - **Routed traffic is stored, not delivered.** `lane.event`s, escalations
   and idle-wakes addressed to those lanes are recorded by the hub as
@@ -135,8 +103,7 @@ audit row's pane against `hub-status` output for the sibling machine id.
     --hub-url <hub HTTPS URL> --hub-token-env <operator token env path>
   ```
 
-  Until then the lanes are honestly `dead`; `session_mismatch` will appear
-  only if the pane was recreated in the *other* session.
+  Until then the lanes stay `dead`.
 
 ## Desk verification checklist
 
@@ -160,8 +127,4 @@ panewire hub-status --hub-url <hub HTTPS URL> --hub-token-env <operator token en
 # expect rows mac-work (ACCEPTING=true) and mac-work-default (ACCEPTING=false),
 # both STATE=connected, same version string
 
-panewire lanes-audit --hub-url <hub HTTPS URL> --hub-token-env <operator token env path> \
-  --sibling mac-work=mac-work-default
-# expect work-kairos and work-builder-2 verdict=alive; a dead lane with
-# reason=session_mismatch means it is registered on the wrong of the two ids
 ```

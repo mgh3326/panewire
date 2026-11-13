@@ -175,11 +175,11 @@ func TestLanesNodeWriteParentStandbyAndAuthority(t *testing.T) {
 
 	// An authority lane on the node's own machine stays operator-managed.
 	writer := lanesNodePut(t, hub, "lane-authority", `{"machine":"machine-a","pane":"w1:p9"}`)
-	if writer.Code != http.StatusConflict || writer.Body.String() != `{"error":"authority_lane_direct_write","use":"POST /v1/control-plane/transfer"}`+"\n" {
+	if writer.Code != http.StatusConflict || writer.Body.String() != `{"error":"authority_lane_direct_write","use":"edit the lanes file on the hub host"}`+"\n" {
 		t.Fatalf("own authority lane status=%d body=%s", writer.Code, writer.Body.String())
 	}
 	writer = lanesNodeDelete(t, hub, "lane-authority")
-	if writer.Code != http.StatusConflict || writer.Body.String() != `{"error":"authority_lane_direct_write","use":"POST /v1/control-plane/transfer"}`+"\n" {
+	if writer.Code != http.StatusConflict || writer.Body.String() != `{"error":"authority_lane_direct_write","use":"edit the lanes file on the hub host"}`+"\n" {
 		t.Fatalf("own authority delete status=%d body=%s", writer.Code, writer.Body.String())
 	}
 	// A foreign or missing authority name reports only the scope refusal —
@@ -530,14 +530,13 @@ func TestLanesNodeTokenRouteTable(t *testing.T) {
 		{name: "node delete of missing lane is 403", method: http.MethodDelete, path: "/v1/lanes/rt-missing", nodeWant: []int{403}, opWant: 404},
 
 		{name: "nodes", method: http.MethodGet, path: "/v1/nodes", nodeWant: []int{401}, opWant: 200},
-		{name: "control-plane transfer", method: http.MethodPost, path: "/v1/control-plane/transfer", body: `{}`, nodeWant: []int{401}, opWant: 400},
+		{name: "control-plane transfer retired", method: http.MethodPost, path: "/v1/control-plane/transfer", body: `{}`, nodeWant: []int{404}, opWant: 404},
 		{name: "accepting override", method: http.MethodPost, path: "/v1/nodes/machine-a/accepting", body: `{"mode":"off","containment":"hk:12"}`, nodeWant: []int{401}, opWant: 200},
 		{name: "placement", method: http.MethodGet, path: "/v1/placement", nodeWant: []int{401}, opWant: 400},
 		{name: "placement slots retired", method: http.MethodGet, path: "/v1/placement/slots", nodeWant: []int{404}, opWant: 404},
 		{name: "retired quota list", method: http.MethodGet, path: "/v1/quota", nodeWant: []int{404}, opWant: 404},
 		{name: "jobs", method: http.MethodGet, path: "/v1/jobs", nodeWant: []int{401}, opWant: 200},
 		{name: "orphaned jobs", method: http.MethodGet, path: "/v1/jobs/orphaned", nodeWant: []int{401}, opWant: 200},
-		{name: "session reap", method: http.MethodGet, path: "/v1/session-reap", nodeWant: []int{401}, opWant: 200},
 		{name: "job reassign", method: http.MethodPost, path: "/v1/jobs/reassign", body: `{}`, nodeWant: []int{401}, opWant: 409},
 		{name: "operator events websocket", method: http.MethodGet, path: "/v1/events", nodeWant: []int{401}, opWant: 426},
 		{name: "relay ingress", method: http.MethodPost, path: "/v1/relay/events", body: `{}`, nodeWant: []int{401}, opWant: 400},
