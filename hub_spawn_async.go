@@ -280,7 +280,14 @@ func (h *HubServer) runSpawnCoordinator(parent context.Context) {
 	defer tick.Stop()
 	for {
 		tasks, err := h.inbox.store.pendingSpawns(ctx)
-		if err == nil && h.drain.admit() {
+		if err != nil {
+			tasks = nil
+		}
+		conditioned, conditionErr := h.inbox.store.pendingStartConditionSpawns(ctx)
+		if conditionErr == nil {
+			tasks = append(tasks, conditioned...)
+		}
+		if len(tasks) != 0 && h.drain.admit() {
 			for _, task := range tasks {
 				mu.Lock()
 				busy := active[task.Request.RequestID]

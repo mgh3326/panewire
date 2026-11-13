@@ -294,7 +294,28 @@ func (s *laneInboxStore) spawnTaskByNode(parent context.Context, id string) (hub
 func (s *laneInboxStore) pendingSpawns(parent context.Context) ([]hubSpawnTask, error) {
 	ctx, done := s.op(parent)
 	defer done()
-	rows, err := s.db.QueryContext(ctx, `SELECT `+spawnTaskColumns+` FROM spawn_operations WHERE status IN ('accepted','dispatching','reconciling','deadline_exceeded') ORDER BY last_run_ms,created_ms LIMIT 32`)
+	rows, err := s.db.QueryContext(ctx, `SELECT `+spawnTaskColumns+` FROM spawn_operations WHERE status IN ('accepted','dispatching','reconciling','deadline_exceeded') AND payload NOT LIKE '%"start_conditions":%' ORDER BY last_run_ms,created_ms LIMIT 32`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var tasks []hubSpawnTask
+	for rows.Next() {
+		task, err := scanSpawnTask(rows)
+		if err != nil {
+			return nil, err
+		}
+		tasks = append(tasks, task)
+	}
+	return tasks, rows.Err()
+}
+
+// pendingStartConditionSpawns gives legacy conditioned rows their own bounded
+// pass so they cannot consume slots ahead of ordinary pending spawns.
+func (s *laneInboxStore) pendingStartConditionSpawns(parent context.Context) ([]hubSpawnTask, error) {
+	ctx, done := s.op(parent)
+	defer done()
+	rows, err := s.db.QueryContext(ctx, `SELECT `+spawnTaskColumns+` FROM spawn_operations WHERE status IN ('accepted','dispatching','reconciling','deadline_exceeded') AND payload LIKE '%"start_conditions":%' ORDER BY last_run_ms,created_ms LIMIT 32`)
 	if err != nil {
 		return nil, err
 	}
