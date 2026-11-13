@@ -317,14 +317,29 @@ func RecordFreeLimit(cfg devin.Config, job string, stop quotastop.Stop) error {
 // pool and reset_at. No result is written; hk takes one only with completed.
 // emit is false when quotaStopAnnounce already recorded job.lost.
 func (a *App) quotaStopLost(ctx context.Context, j Job, stop quotastop.Stop, emit bool) error {
-	endReason := QuotaStopEndReason(stop.Pool, stop.Reset, "", "")
 	// After a hand-off grace the hub may already have written the record lost
 	// with the successor pointer; hk would refuse a rewrite, so leave it.
 	if emit || !a.hkJobEnded(ctx, j.ID) {
-		if e := a.putJobRecord(ctx, j.ID, map[string]any{"state": "lost", "end_reason": endReason}); e != nil {
+		if e := a.quotaStopRecord(ctx, j.ID, stop); e != nil {
 			a.jobRecordFailed(ctx, j.ID, "lost", e)
 		}
 	}
+	return a.quotaStopFinish(ctx, j, stop, emit)
+}
+
+// quotaStopRecord writes the job's hk record lost with the quota_stop
+// end_reason. A write that failed after hk applied it counts as written: the
+// record is then already terminal and hk refuses a rewrite.
+func (a *App) quotaStopRecord(ctx context.Context, id string, stop quotastop.Stop) error {
+	e := a.putJobRecord(ctx, id, map[string]any{"state": "lost", "end_reason": QuotaStopEndReason(stop.Pool, stop.Reset, "", "")})
+	if e != nil && a.hkJobEnded(ctx, id) {
+		return nil
+	}
+	return e
+}
+
+// quotaStopFinish announces job.lost (when emit) and releases the quota lease.
+func (a *App) quotaStopFinish(ctx context.Context, j Job, stop quotastop.Stop, emit bool) error {
 	if emit {
 		if e := a.quotaStopAnnounce(ctx, j, stop); e != nil {
 			return e

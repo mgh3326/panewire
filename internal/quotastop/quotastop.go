@@ -165,6 +165,12 @@ const statusPrefixes = "│┃•⚠️■⎿ "
 // prompt is agent output. Any other later line (ordinary output, source code,
 // a completed answer) invalidates the stop.
 //
+// A user turn is its marked line plus the indented lines wrapped under it. A
+// later flush-left line is read as agent output: the screen shows no other
+// boundary between a message and an answer, and a wrongly accepted stop ends a
+// live job, so an ambiguous screen fails closed (a directive wrapped flush-left
+// is not accepted).
+//
 // The returned block is the limit line and the chrome after it, never the
 // injected text, so a reset time or an "upgrade" mentioned in a directive
 // cannot change the stop.
@@ -174,16 +180,18 @@ func statusBlock(screen string) (string, bool) {
 	found, later, injected := false, false, false
 	for _, raw := range strings.Split(strings.ReplaceAll(screen, "\r", ""), "\n") {
 		line := strings.TrimSpace(raw)
+		indented := strings.HasPrefix(raw, "  ") || strings.HasPrefix(raw, "\t")
 		switch {
 		case chromeLine(line):
 			// A rule or blank line ends a user message.
 			injected = false
 			tail = append(tail, line)
-		case userTurn(line) || injected:
-			// Typed or injected user text: a marked line and the lines that
-			// continue it up to the next blank or rule.
+		case userTurn(line) || injected && indented:
+			// Typed or injected user text: a marked line and the indented
+			// lines that wrap under it.
 			injected = true
 		default:
+			injected = false
 			line = strings.TrimLeft(line, statusPrefixes)
 			if devin.MatchString(line) || claude.MatchString(line) || codexSignal.MatchString(line) {
 				limit, tail, found, later = line, nil, true, false

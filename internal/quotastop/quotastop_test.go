@@ -102,9 +102,11 @@ func TestClassifyRejectsLimitFollowedByAgentOutput(t *testing.T) {
 	const limit = "▲ Something went wrong — Reached free model rate limit … reset in 5 minutes (at 08:57 UTC)\n"
 	const prompt = "──────────\n❭ Ask Devin to build features, fix bugs, or work on your code\n──────────\n"
 	for name, screen := range map[string]string{
-		"answer after directive": limit + "\n❭ [relay] go on\n\nI picked the review up and pushed the fix.\n\n" + prompt,
-		"answer after limit":     limit + "\nI completed the task.\n" + prompt,
-		"directive quotes limit": "I completed the task.\n\n❭ [relay] the pane said: Reached free model rate limit\n\n" + prompt,
+		"answer after directive":          limit + "\n❭ [relay] go on\n\nI picked the review up and pushed the fix.\n\n" + prompt,
+		"answer after limit":              limit + "\nI completed the task.\n" + prompt,
+		"answer right under a user turn":  limit + "\n❭ retry\nI completed the review.\n\n" + prompt,
+		"flush-left wrap under directive": limit + "\n❭ [relay] a long directive that the terminal\nwrapped flush left\n\n" + prompt,
+		"directive quotes limit":          "I completed the task.\n\n❭ [relay] the pane said: Reached free model rate limit\n\n" + prompt,
 	} {
 		if got, ok := Classify(screen, now, time.UTC); ok {
 			t.Fatalf("%s: Classify = %+v, want no stop", name, got)

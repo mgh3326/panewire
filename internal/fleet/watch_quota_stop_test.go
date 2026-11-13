@@ -462,3 +462,57 @@ func TestWatcherReviewerOnQuotaScreenEndsAtOnceWithoutGrace(t *testing.T) {
 		t.Fatalf("quota not released: %s %v", st, pools)
 	}
 }
+
+// hk 4507 review: job.lost and the lease release wait for the lost hk record.
+// While the write fails the reviewer stays live and leased with no job.lost (a
+// hub would take the still-spawned record for a live job to replace); when the
+// write lands the job ends once, with the record, the event and the release.
+func TestWatcherReviewerQuotaStopWaitsForTheLostRecord(t *testing.T) {
+	a, _, h, _ := quotaStopFixture(t, "reviewer", "idle", devinStopScreen(t))
+	t.Setenv("PANEWIRE_COMPLETION_TIMEOUT_S", "6000")
+	statuses := make([]int, 0, 40)
+	for range 40 {
+		statuses = append(statuses, 503)
+	}
+	h.mu.Lock()
+	h.putStatuses = statuses
+	h.mu.Unlock()
+	if e := a.watch(context.Background(), []string{"j"}); e != nil {
+		t.Fatal(e)
+	}
+	rec := h.record(t, "j")
+	if str(rec, "state") != "lost" || !strings.HasPrefix(str(rec, "end_reason"), "quota_stop pool=devin-free") {
+		t.Fatalf("hk record %v, want lost with the quota_stop end_reason", rec)
+	}
+	lost := 0
+	for _, kind := range eventKindsOf(t, a, "j") {
+		if kind == "job.lost" {
+			lost++
+		}
+	}
+	if lost != 1 {
+		t.Fatalf("job.lost recorded %d times, want exactly 1 after the record landed", lost)
+	}
+	if st, pools := ledgerState(t, a, "j"); st != "released" || len(pools) != 0 {
+		t.Fatalf("quota not released: %s %v", st, pools)
+	}
+}
+
+// While the lost record cannot be written the reviewer is neither announced
+// nor released.
+func TestWatcherReviewerQuotaStopNotAnnouncedWhileRecordFails(t *testing.T) {
+	a, _, h, _ := quotaStopFixture(t, "reviewer", "idle", devinStopScreen(t))
+	t.Setenv("PANEWIRE_COMPLETION_TIMEOUT_S", "60")
+	h.mu.Lock()
+	h.down = true
+	h.mu.Unlock()
+	if e := a.watch(context.Background(), []string{"j"}); e != nil {
+		t.Fatal(e)
+	}
+	if p := lostPayload(t, a); p != nil {
+		t.Fatalf("job.lost announced with the hk record unwritten: %v", p)
+	}
+	if st, _ := ledgerState(t, a, "j"); st != "leased" {
+		t.Fatalf("quota %s while the record could not be written, want leased", st)
+	}
+}

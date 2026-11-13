@@ -369,10 +369,19 @@ func (a *App) watch(ctx context.Context, args []string) error {
 		// grace (hk 4507). The hub's replacement needs a live hk record, so a
 		// reviewer stopped on its screen is not replaced there; only a worker
 		// or tester the manager announced, and a credit stop, get the grace.
+		// The lost record is what mergewake acts on, so job.lost and the lease
+		// release wait for it: while the write fails the stop is read again on
+		// the next poll and the job stays live and leased, never announced
+		// with a record the hub would take for a live job to replace.
 		// Not while a hand-off is active: its stop is already announced.
 		if present && !pending && !handOff.active && j.QuotaRole() != "counsel" {
 			if stop, ok := a.quotaStopped(ctx, j, paneAgent, &screenRead); ok && stop.CreditExhaustedAt.IsZero() {
-				return a.quotaStopLost(ctx, j, stop, true)
+				if e := a.quotaStopRecord(ctx, id, stop); e != nil {
+					a.warn("quota-stop lost record not written, retrying: %v", e)
+					screenRead = quotaStopWatch{}
+				} else {
+					return a.quotaStopFinish(ctx, j, stop, true)
+				}
 			}
 		}
 
