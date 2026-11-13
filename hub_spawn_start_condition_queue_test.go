@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -11,6 +13,16 @@ import (
 )
 
 func TestConditionedRowsDoNotStarveRunnableSpawnPastPendingPage(t *testing.T) {
+	hk := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/tasks/9000" || r.Header.Get("Authorization") != "Bearer start-condition-test" {
+			t.Errorf("unexpected HK request %s %s auth=%q", r.Method, r.URL.Path, r.Header.Get("Authorization"))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":9000,"state":"ready","relations":[]}`))
+	}))
+	defer hk.Close()
+	t.Setenv("HANDOFFKEEP_URL", hk.URL)
+	t.Setenv("HANDOFFKEEP_TOKEN_SVC_PANEWIRE", "start-condition-test")
 	h := asyncSpawnHub(t)
 	now := time.Now()
 	for i := range 33 {
@@ -20,8 +32,14 @@ func TestConditionedRowsDoNotStarveRunnableSpawnPastPendingPage(t *testing.T) {
 		request.Args = replaceSpawnArg(request.Args, "--job", job)
 		request.Args = replaceSpawnArg(request.Args, "--task", fmt.Sprintf("%d", 5000+i))
 		request.StartConditions = []fleet.StartCondition{{Kind: "task", TaskID: "9000", State: "merged"}}
-		if _, _, err := h.inbox.store.claimSpawn(t.Context(), request, job, "parent", now.Add(time.Duration(i)*time.Millisecond)); err != nil {
+		conditioned, _, err := h.inbox.store.claimSpawn(t.Context(), request, job, "parent", now.Add(time.Duration(i)*time.Millisecond))
+		if err != nil {
 			t.Fatalf("claim conditioned row %d: %v", i, err)
+		}
+		if _, err := h.inbox.store.bindSpawn(t.Context(), request.RequestID, conditioned.Attempt, hubSpawnRequest{
+			RequestID: t14RequestID(3200 + i), Machine: "machine-a", WaitSeconds: 600,
+		}); err != nil {
+			t.Fatalf("bind waiting row %d: %v", i, err)
 		}
 	}
 	runnable := durableSpawnRequest()
