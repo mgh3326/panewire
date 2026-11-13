@@ -1569,6 +1569,30 @@
         "counsel"
       ]
     },
+    "omp-museember": {
+      "canon": "omp-museember",
+      "kind": "omp",
+      "family": "meta",
+      "capability": "omp_commandcode",
+      "effort": "high",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer"
+      ]
+    },
+    "omp-musespark13c": {
+      "canon": "omp-musespark13c",
+      "kind": "omp",
+      "family": "meta",
+      "capability": "omp_commandcode",
+      "effort": "high",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer"
+      ]
+    },
     "omp-musespark13": {
       "canon": "omp-musespark13",
       "kind": "omp",
