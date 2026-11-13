@@ -27,6 +27,7 @@ type rebindFixture struct {
 	hk           *spawnHK
 	store        *fakeJobStore
 	bound        string
+	claimedBy    string
 	rebindFail   string
 	rebindAnswer string
 }
@@ -39,7 +40,7 @@ func newRebindFixture(t *testing.T, parentState, bound string) *rebindFixture {
 	a.JobStore = store
 	s.ParentJob, s.Task = rebindParent, ""
 	s.Report = filepath.Join(a.Jobs, s.Job, "report.md")
-	fx := &rebindFixture{a: a, s: s, f: f, hk: useFakeHK(t), store: store, bound: bound}
+	fx := &rebindFixture{a: a, s: s, f: f, hk: useFakeHK(t), store: store, bound: bound, claimedBy: bound}
 	task := func(state, claimedBy, job string) string {
 		out, e := json.Marshal(map[string]any{"id": 42, "title": "implement (grade B, T1)", "state": state, "claimed_by": claimedBy, "refs": map[string]any{"job_id": job}})
 		if e != nil {
@@ -50,7 +51,7 @@ func newRebindFixture(t *testing.T, parentState, bound string) *rebindFixture {
 	fx.hk.Handle(func(r hkRequest) (int, string, bool) {
 		switch r.Route() {
 		case "GET /v1/tasks/42":
-			return http.StatusOK, task("claimed", "", fx.bound), true
+			return http.StatusOK, task("claimed", fx.claimedBy, fx.bound), true
 		case "POST /v1/tasks/42/rebind":
 			if fx.rebindFail != "" {
 				return http.StatusConflict, fx.rebindFail, true
@@ -58,7 +59,7 @@ func newRebindFixture(t *testing.T, parentState, bound string) *rebindFixture {
 			if fx.rebindAnswer != "" {
 				return http.StatusOK, fx.rebindAnswer, true
 			}
-			fx.bound = s.Job
+			fx.bound, fx.claimedBy = s.Job, s.Label
 			return http.StatusOK, task("claimed", s.Label, s.Job), true
 		}
 		return 0, "", false
@@ -147,37 +148,91 @@ func TestRespawnRebindsLocallyResolvedParent(t *testing.T) {
 	}
 }
 
-func TestRespawnKeepsTaskOnLiveParent(t *testing.T) {
-	for _, state := range []string{"claimed", "spawned", "escalated"} {
+// 2026-11-13: successors spawned with --parent-job landed and worked while the
+// task kept naming the first job, so mergewake sent FINDINGS to a pane that was
+// gone. Whatever state the parent is in, hk's task ends up claimed by the
+// successor and bound to its job.
+func TestParentJobSuccessorTakesOverTaskBinding(t *testing.T) {
+	for _, state := range []string{"completed", "lost", "escalated", "spawned", "claimed"} {
 		t.Run(state, func(t *testing.T) {
 			fx := newRebindFixture(t, state, rebindParent)
 			if e := fx.a.Spawn(context.Background(), fx.s); e != nil {
 				t.Fatal(e)
 			}
-			if calls := fx.rebinds(); len(calls) != 0 {
-				t.Fatalf("a live parent lost its task: %v", calls)
+			if fx.bound != fx.s.Job || fx.claimedBy != fx.s.Label {
+				t.Fatalf("task bound to job %q claimed by %q, want %q and %q", fx.bound, fx.claimedBy, fx.s.Job, fx.s.Label)
 			}
+			fx.wantRebind(t)
 			ev := fx.taskLinkEvent(t)
-			if ev["status"] != "inherited" || ev["bound_job"] != nil || ev["rebind_error"] != nil {
+			if ev["status"] != "rebound" || ev["parent_state"] != state || ev["rebind_error"] != nil {
 				t.Fatalf("event=%v", ev)
 			}
 		})
 	}
 }
 
+// The parent's own ledger notes who replaced it, once, however often the same
+// request is replayed. A parent that ran elsewhere keeps no note here.
+func TestParentJobSuccessorIsNotedOnLocalParent(t *testing.T) {
+	fx := newRebindFixture(t, "spawned", rebindParent)
+	putEvent(t, fx.a, rebindParent, "job.claim", map[string]any{"owner_lane": "owner", "task_id": "42", "t_level": "T1", "role": "worker"})
+	if e := fx.a.Spawn(context.Background(), fx.s); e != nil {
+		t.Fatal(e)
+	}
+	retry := fx.s
+	retry.Inherited = rebindParent
+	task := client.Task{Refs: client.TaskRefs{JobID: fx.bound}}
+	if got := fx.a.rebindInherited(context.Background(), retry, task, map[string]any{}); got != "rebound" {
+		t.Fatalf("retry status=%q", got)
+	}
+	events, e := fx.a.ledger().Events(context.Background(), rebindParent)
+	if e != nil {
+		t.Fatal(e)
+	}
+	var notes []map[string]any
+	for _, ev := range events {
+		if ev.Kind == "job.replaced" {
+			notes = append(notes, ev.Payload)
+		}
+	}
+	if len(notes) != 1 || notes[0]["replaced_by"] != fx.s.Job || notes[0]["task_id"] != "42" {
+		t.Fatalf("parent replaced notes=%v", notes)
+	}
+
+	remote := newRebindFixture(t, "spawned", rebindParent)
+	if e := remote.a.Spawn(context.Background(), remote.s); e != nil {
+		t.Fatal(e)
+	}
+	if _, e := remote.a.events(rebindParent); e == nil {
+		t.Fatal("a parent with no ledger on this host gained one")
+	}
+}
+
+// A task that names no job binding has nothing to move.
+func TestParentJobSuccessorLeavesUnboundTaskAlone(t *testing.T) {
+	fx := newRebindFixture(t, "spawned", "")
+	if e := fx.a.Spawn(context.Background(), fx.s); e != nil {
+		t.Fatal(e)
+	}
+	if calls := fx.rebinds(); len(calls) != 0 {
+		t.Fatalf("an unbound task was rebound: %v", calls)
+	}
+	if ev := fx.taskLinkEvent(t); ev["status"] != "inherited" {
+		t.Fatalf("event=%v", ev)
+	}
+}
+
 // The pane's ARBITER_JOB names the parent when the spawn names neither a task
 // nor a parent job.
-func TestRespawnKeepsTaskOnLiveParentFromEnvironment(t *testing.T) {
+func TestRespawnTakesTaskFromEnvironmentParent(t *testing.T) {
 	fx := newRebindFixture(t, "spawned", rebindParent)
 	t.Setenv("ARBITER_JOB", rebindParent)
 	fx.s.ParentJob = ""
 	if e := fx.a.Spawn(context.Background(), fx.s); e != nil {
 		t.Fatal(e)
 	}
-	if calls := fx.rebinds(); len(calls) != 0 {
-		t.Fatalf("the calling job lost its task: %v", calls)
-	}
-	if ev := fx.taskLinkEvent(t); ev["status"] != "inherited" || ev["inherited_from"] != rebindParent {
+	fx.wantRebind(t)
+	if ev := fx.taskLinkEvent(t); ev["status"] != "rebound" || ev["inherited_from"] != rebindParent {
 		t.Fatalf("event=%v", ev)
 	}
 }
@@ -223,18 +278,17 @@ func TestRespawnRebindUnconfirmedAnswerIsRecorded(t *testing.T) {
 	}
 }
 
-// Without the parent's state the condition is unproven, so the task stays.
-func TestRespawnUnreadableParentStateKeepsTask(t *testing.T) {
+// The parent's state only words the audit trail: a parent whose hk record
+// cannot be read is replaced all the same.
+func TestRespawnUnreadableParentStateStillRebinds(t *testing.T) {
 	fx := newRebindFixture(t, "lost", rebindParent)
 	putEvent(t, fx.a, rebindParent, "job.claim", map[string]any{"owner_lane": "owner", "task_id": "42", "t_level": "T1", "role": "worker"})
 	delete(fx.store.records, rebindParent)
 	if e := fx.a.Spawn(context.Background(), fx.s); e != nil {
 		t.Fatal(e)
 	}
-	if calls := fx.rebinds(); len(calls) != 0 {
-		t.Fatalf("rebound without a parent state: %v", calls)
-	}
-	if ev := fx.taskLinkEvent(t); ev["status"] != "inherited" || str(ev, "rebind_error") == "" {
+	fx.wantRebind(t)
+	if ev := fx.taskLinkEvent(t); ev["status"] != "rebound" || ev["parent_state"] != nil {
 		t.Fatalf("event=%v", ev)
 	}
 }

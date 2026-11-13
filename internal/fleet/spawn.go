@@ -336,9 +336,14 @@ func (s Spawn) replacesParent() bool {
 	return role == "implementer"
 }
 
-// rebindInherited moves the task to this job when its parent is terminal and
-// the task is still bound to that parent, and returns the job.task_link status.
-// The spawn has landed by now, so a failure is recorded on ev and never returned.
+// rebindInherited moves the task to this job when the task is still bound to
+// its parent job, whatever state the parent is in, and returns the
+// job.task_link status. A spawn that inherits its parent's task as an
+// implementer seat replaces the parent: the task's claim and refs.job_id move
+// to the successor, so everything that routes by the task binding (lane events,
+// mergewake FINDINGS) reaches the job that is working. A parent that is still
+// live loses its claim the same way; its pane is left alone. The spawn has
+// landed by now, so a failure is recorded on ev and never returned.
 // Rule: docs/config.md, "--parent-job".
 func (a *App) rebindInherited(ctx context.Context, s Spawn, task client.Task, ev map[string]any) string {
 	refused := func(why string) string {
@@ -351,32 +356,58 @@ func (a *App) rebindInherited(ctx context.Context, s Spawn, task client.Task, ev
 		return "inherited"
 	case s.Job:
 		// An earlier attempt of this request rebound the task and then failed.
+		a.noteReplaced(ctx, s)
 		return "rebound"
 	case s.Inherited:
 	default:
 		ev["bound_job"] = bound
 		return "inherited"
 	}
-	store, e := a.jobStore()
-	if e != nil {
-		return refused("parent job record unavailable")
+	// The parent's state names the rebind in hk's audit trail and on the link
+	// event. It does not decide it: hk's own rule (an active task bound to the
+	// parent) is the gate, so a parent that escalated or is still live is
+	// replaced like a completed one.
+	state := ""
+	if store, e := a.jobStore(); e == nil {
+		if parent, e := store.Get(ctx, s.Inherited); e == nil {
+			state = str(parent, "state")
+		}
 	}
-	parent, e := store.Get(ctx, s.Inherited)
-	if e != nil {
-		return refused("parent job record unreadable")
+	reason := "respawn continues parent job " + s.Inherited
+	if state != "" {
+		ev["parent_state"] = state
+		reason = "respawn continues " + state + " parent job " + s.Inherited
 	}
-	state := str(parent, "state")
-	if !slices.Contains([]string{"lost", "failed", "completed"}, state) {
-		return "inherited"
-	}
-	t, e := hkRebindTask(ctx, s.Task, s.Inherited, s.Job, s.Label, "respawn continues "+state+" parent job "+s.Inherited)
+	t, e := hkRebindTask(ctx, s.Task, s.Inherited, s.Job, s.Label, reason)
 	if e != nil && !errors.Is(e, errHKUnreadable) {
 		return refused("task rebind refused: " + hkErrText(e))
 	}
 	if e != nil || t.ClaimedBy != s.Label || t.Refs.JobID != s.Job {
 		return refused("task rebind did not confirm claimed_by and refs.job_id")
 	}
+	a.noteReplaced(ctx, s)
 	return "rebound"
+}
+
+// noteReplaced records on the parent's job ledger that this job took its task,
+// when the parent's ledger is on this host. hk's job record has no successor
+// field, and it never rewrites a terminal record, so the ledger is the parent's
+// own record of the takeover. A parent on another host keeps no note here: the
+// event would create a ledger for a job this host never ran. Writing it once is
+// enough, so a replay of the same spawn finds it and stops.
+func (a *App) noteReplaced(ctx context.Context, s Spawn) {
+	events, e := a.events(s.Inherited)
+	if e != nil {
+		return
+	}
+	for _, ev := range events {
+		if ev.Kind == "job.replaced" && str(ev.Payload, "replaced_by") == s.Job {
+			return
+		}
+	}
+	if e := a.event(ctx, s.Inherited, "job.replaced", map[string]any{"replaced_by": s.Job, "task_id": s.Task}); e != nil {
+		a.warn("job %s: replaced_by note not recorded: %v", s.Inherited, e)
+	}
 }
 
 // hkRebindTask moves the task's job link from fromJob to toJob over hk HTTP.
