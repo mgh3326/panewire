@@ -856,8 +856,8 @@ lanes file (default 64), and a lane create past that cap is refused
 so a machine at its row cap cannot host a new job: the spawn comes up
 `LANE_UNREGISTERED` after the work started.
 
-The hub therefore reports such a machine with the reason token `lanes_full` and
-`usable: false` in the fleet-state load value and the `/v1/placement`
+The hub therefore reports such a machine with the reason token `lanes_full` in
+the fleet-state load value (with `usable: false`) and in the `/v1/placement`
 candidates, and host-first selection drops it as ineligible rather than ranking
 it as a last-resort fallback. When every candidate is at its cap the decision is
 `"decision": null` with `"reason": "lanes_full"`. Host preflight refuses the
