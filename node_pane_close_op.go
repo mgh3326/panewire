@@ -3,10 +3,19 @@ package panewire
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"os"
+	"path/filepath"
 
+	"github.com/mgh3326/panewire/internal/envfile"
 	"github.com/mgh3326/panewire/internal/fleet"
+	"github.com/mgh3326/panewire/internal/hkcred"
 )
+
+// hubCapabilityCloseOps is advertised in hello once a node both runs the close
+// operations and records the hub-close intent its job watchers defer to (hk
+// 4652): a hub issues pane.close_op only to a node that advertises it.
+const hubCapabilityCloseOps = "close_ops_v1"
 
 // Close operations (hk 4594; docs/node-commands.md, "Close operations") are
 // pane.close with a hub-chosen request id and a durable journal in the job's
@@ -47,6 +56,11 @@ type nodePaneCloseOpArgs struct {
 	AgentStatus  string `json:"agent_status"`
 	Cwd          string `json:"cwd"`
 	AllowUnnamed bool   `json:"allow_unnamed"`
+	// EndReason is the hk end_reason of the lost record that ends the job
+	// once the close is final (hk 4652): recorded in the job's ledger as a
+	// hub-close intent before the operation is registered, so the job's
+	// watcher writes no competing record and finishes with exactly this one.
+	EndReason string `json:"end_reason"`
 }
 
 // nodePaneCloseOpResult.Outcome is a final fleet.CloseOp state, or
@@ -75,7 +89,7 @@ type nodeCloseOpStatusResult struct {
 }
 
 func validNodePaneCloseOpArgs(args nodePaneCloseOpArgs) bool {
-	return fleet.ValidCloseOpID(args.RequestID) && fleet.ValidJobID(args.Job) && validNodeAttemptToken(args.Attempt) && nodeCommandPaneIDPattern.MatchString(args.PaneID) && validNodeJobName(args.Name) && nodePaneClosableStatus[args.AgentStatus] && validNodeCommandPath(args.Cwd)
+	return fleet.ValidCloseOpID(args.RequestID) && fleet.ValidJobID(args.Job) && validNodeAttemptToken(args.Attempt) && nodeCommandPaneIDPattern.MatchString(args.PaneID) && validNodeJobName(args.Name) && nodePaneClosableStatus[args.AgentStatus] && validNodeCommandPath(args.Cwd) && validNodeEndReason(args.EndReason) && args.EndReason != ""
 }
 
 // validNodeAttemptToken bounds an attempt token: a ledger event file name.
@@ -113,14 +127,19 @@ func validNodeCloseOpStatusResult(result nodeCloseOpStatusResult) bool {
 
 // openCloseOpJob opens the job directory a close operation is journalled in.
 func (client *HubClient) openCloseOpJob(job string) (*os.Root, bool, string) {
-	root, _, found, err := client.openNodeJobDir(job)
+	root, _, found, code := client.openCloseOpJobDir(job)
+	return root, found, code
+}
+
+func (client *HubClient) openCloseOpJobDir(job string) (*os.Root, string, bool, string) {
+	root, dir, found, err := client.openNodeJobDir(job)
 	switch {
 	case errors.Is(err, errNodeJobsRootUnset):
-		return nil, false, "jobs_root_unset"
+		return nil, "", false, "jobs_root_unset"
 	case err != nil:
-		return nil, false, "journal_failed"
+		return nil, "", false, "journal_failed"
 	}
-	return root, found, ""
+	return root, dir, found, ""
 }
 
 // nodePaneCloseOp runs one close operation. The caller holds nodeCommandMu.
@@ -133,7 +152,7 @@ func (client *HubClient) openCloseOpJob(job string) (*os.Root, bool, string) {
 // touching herdr: its close may have run, and a pane under the same id now may
 // be another one.
 func (client *HubClient) nodePaneCloseOp(ctx context.Context, args nodePaneCloseOpArgs) (any, string) {
-	job, found, code := client.openCloseOpJob(args.Job)
+	job, jobDir, found, code := client.openCloseOpJobDir(args.Job)
 	if code != "" {
 		return nil, code
 	}
@@ -157,7 +176,7 @@ func (client *HubClient) nodePaneCloseOp(ctx context.Context, args nodePaneClose
 	}
 	// Registering, or resuming one left registered: bind the request to the
 	// job's current attempt before any herdr call.
-	op, target, outcome, code := client.bindCloseOp(ctx, job, op, found, args)
+	op, target, outcome, code := client.bindCloseOp(ctx, job, jobDir, op, found, args)
 	if code != "" {
 		return nil, code
 	}
@@ -224,6 +243,9 @@ type nodeCloseTarget struct {
 	// announced for the hub's hand-over, or a reviewer's quota-stop intent
 	// is still open; whether the job already ended is in hk, not the ledger.
 	announced, intent bool
+	// hubClose: a hub-close intent was recorded on this attempt; it keeps
+	// intent set for the rest of the attempt.
+	hubClose bool
 }
 
 func readNodeCloseTarget(job *os.Root) (nodeCloseTarget, error) {
@@ -237,13 +259,18 @@ func readNodeCloseTarget(job *os.Root) (nodeCloseTarget, error) {
 		case nodeJobClaimKind(event.kind):
 			target = nodeCloseTarget{attempt: event.name, role: event.role}
 		case event.kind == "job.spawned":
-			target.attempt, target.receipt, target.ended, target.announced, target.intent = event.name, true, false, false, false
+			target.attempt, target.receipt, target.ended, target.announced, target.intent, target.hubClose = event.name, true, false, false, false, false
 			target.pane, target.label, target.session = event.pane, event.label, event.session
 			if event.role != "" {
 				target.role = event.role
 			}
 		case event.kind == "job.reprompted":
-			target.attempt, target.ended, target.announced, target.intent = event.name, false, false, false
+			target.attempt, target.ended, target.announced, target.intent, target.hubClose = event.name, false, false, false, false
+		case event.kind == "job.hub_close_intent":
+			// A hub close was opened on this attempt: whether something else
+			// already ended the job in hk (the watcher then keeps that record)
+			// is in hk, not the ledger, so every later close asks hk.
+			target.intent, target.hubClose = true, true
 		case event.kind == "job.quota_stop_intent":
 			// The watcher writes hk lost before its final job.lost: a crash
 			// between the two leaves the intent open over an ended job.
@@ -254,7 +281,7 @@ func readNodeCloseTarget(job *os.Root) (nodeCloseTarget, error) {
 			if event.reason == "superseded" {
 				target.ended = true
 			}
-			target.intent = false
+			target.intent = target.hubClose
 		case event.kind == "job.lost":
 			if event.reason == "quota_stop" && !event.final {
 				target.announced = true
@@ -305,7 +332,19 @@ func (client *HubClient) closeTargetBound(ctx context.Context, args nodePaneClos
 // preempted without touching herdr. Otherwise the operation is (still)
 // registered and the proof is returned for the guarded close. The caller
 // holds nodeCommandMu.
-func (client *HubClient) bindCloseOp(ctx context.Context, job *os.Root, op fleet.CloseOp, resuming bool, args nodePaneCloseOpArgs) (fleet.CloseOp, *nodeCloseTarget, string, string) {
+func (client *HubClient) bindCloseOp(ctx context.Context, job *os.Root, jobDir string, op fleet.CloseOp, resuming bool, args nodePaneCloseOpArgs) (fleet.CloseOp, *nodeCloseTarget, string, string) {
+	// The job's end lock, which its watcher takes around every terminal
+	// decision, spans the binding check and the intent: no watcher end can
+	// land between them (hk 4652).
+	unlock, err := client.hubCloseLedger().LockEnd(jobDir)
+	if err != nil {
+		return op, nil, "", "journal_failed"
+	}
+	defer unlock()
+	return client.bindCloseOpLocked(ctx, job, jobDir, op, resuming, args)
+}
+
+func (client *HubClient) bindCloseOpLocked(ctx context.Context, job *os.Root, jobDir string, op fleet.CloseOp, resuming bool, args nodePaneCloseOpArgs) (fleet.CloseOp, *nodeCloseTarget, string, string) {
 	target, err := readNodeCloseTarget(job)
 	if err != nil {
 		return op, nil, "", "journal_failed"
@@ -329,15 +368,114 @@ func (client *HubClient) bindCloseOp(ctx context.Context, job *os.Root, op fleet
 		}
 		return op, nil, op.State, ""
 	case resuming:
+		// A resumed operation still needs a watcher to finish it.
+		ledger := client.hubCloseLedger()
+		watcher, err := ledger.Watcher(jobDir)
+		switch {
+		case err != nil:
+			return op, nil, "", "journal_failed"
+		case watcher == fleet.HubCloseWatcherIncompatible:
+			return op, nil, "", "watcher_incompatible"
+		case watcher == fleet.HubCloseWatcherNone && ledger.StartWatcher(args.Job, target.session) != nil:
+			return op, nil, "", "watcher_unavailable"
+		}
 		return op, &target, "", ""
 	case !bound:
 		return op, nil, nodeCloseOpMismatch, ""
+	}
+	// One open operation per attempt: a second request id while another is
+	// registered or closing would leave two intents the watcher must settle.
+	if open, err := fleet.OpenCloseOps(job, attempt); err != nil {
+		return op, nil, "", "journal_failed"
+	} else if len(open) > 0 {
+		return op, nil, "", "close_in_progress"
+	}
+	// A watcher of an older binary would not defer to the intent; none at all
+	// would leave the final operation unfinished, so one is started.
+	ledger := client.hubCloseLedger()
+	watcher, err := ledger.Watcher(jobDir)
+	switch {
+	case err != nil:
+		return op, nil, "", "journal_failed"
+	case watcher == fleet.HubCloseWatcherIncompatible:
+		return op, nil, "", "watcher_incompatible"
+	}
+	// The intent precedes the registration: a crash between the two leaves
+	// an intent with no operation, which the watcher waits on until the
+	// hub's repeat of this request registers and settles it.
+	if ledger.RecordIntent(ctx, args.Job, fleet.HubCloseIntent{RequestID: args.RequestID, Attempt: attempt, Pane: args.PaneID, Label: args.Name, EndReason: args.EndReason}) != nil {
+		return op, nil, "", "journal_failed"
+	}
+	if watcher == fleet.HubCloseWatcherNone {
+		if err := ledger.StartWatcher(args.Job, target.session); err != nil {
+			// Nothing is registered or closed; a repeat of the request
+			// records the intent again and retries the start.
+			slog.Warn("hub close watcher start failed", "job", args.Job, "error", err)
+			return op, nil, "", "watcher_unavailable"
+		}
 	}
 	op = fleet.CloseOp{RequestID: args.RequestID, PaneID: args.PaneID, Attempt: attempt, State: fleet.CloseOpRegistered, Created: now, Updated: now}
 	if fleet.WriteCloseOp(job, op) != nil {
 		return op, nil, "", "journal_failed"
 	}
 	return op, &target, "", ""
+}
+
+// nodeHubCloseLedger is what a hub close needs from the job's ledger and
+// watcher (internal/fleet/watch_hub_close.go).
+type nodeHubCloseLedger interface {
+	// LockEnd takes the job's end lock, shared with its watcher's terminal
+	// decisions.
+	LockEnd(jobDir string) (func(), error)
+	Watcher(jobDir string) (fleet.HubCloseWatcher, error)
+	RecordIntent(ctx context.Context, job string, in fleet.HubCloseIntent) error
+	// StartWatcher starts the job's watcher in session, the herdr session
+	// of the job's receipt.
+	StartWatcher(job, session string) error
+	// CancelIntent closes the intent of a request the hub released before
+	// the node registered it.
+	CancelIntent(ctx context.Context, job, requestID string) error
+}
+
+type nodeFleetHubClose struct{ jobs, hkEnv string }
+
+func (l nodeFleetHubClose) LockEnd(jobDir string) (func(), error) { return fleet.LockJobEnd(jobDir) }
+func (l nodeFleetHubClose) Watcher(jobDir string) (fleet.HubCloseWatcher, error) {
+	return fleet.ProbeHubCloseWatcher(jobDir)
+}
+func (l nodeFleetHubClose) RecordIntent(ctx context.Context, job string, in fleet.HubCloseIntent) error {
+	return fleet.RecordHubCloseIntent(ctx, l.jobs, job, in)
+}
+
+// StartWatcher passes the node's own hk credential file (spawn.json
+// handoffkeep_env) to the watcher, so it reads the hk record the node does.
+// The watcher reads it as hkcred does, which needs the svc-panewire token
+// key: a file with only the legacy token key is refused here, before any
+// close, rather than leaving a watcher that can never read hk.
+func (l nodeFleetHubClose) StartWatcher(job, session string) error {
+	hkEnv := ""
+	if l.hkEnv != "" {
+		values, err := envfile.Load(l.hkEnv)
+		if err != nil || values[hkcred.TokenKey] == "" {
+			return errors.New("handoffkeep_env has no svc-panewire token the watcher can read")
+		}
+		hkEnv = l.hkEnv
+	}
+	return fleet.StartHubCloseWatcher(l.jobs, session, job, hkEnv)
+}
+func (l nodeFleetHubClose) CancelIntent(ctx context.Context, job, requestID string) error {
+	return fleet.RecordHubCloseCancel(ctx, l.jobs, job, requestID, "released")
+}
+
+func (client *HubClient) hubCloseLedger() nodeHubCloseLedger {
+	if client.nodeHubClose != nil {
+		return client.nodeHubClose
+	}
+	ledger := nodeFleetHubClose{jobs: filepath.Join(client.jobsInboxRoot, "jobs")}
+	if config, _, err := client.resolveHubSpawnConfig(); err == nil && !config.HandoffkeepEnvDefault {
+		ledger.hkEnv = config.HandoffkeepEnv
+	}
+	return ledger
 }
 
 func (client *HubClient) finishCloseOp(job *os.Root, op fleet.CloseOp, state string) (any, string) {
@@ -363,7 +501,7 @@ func (client *HubClient) nodePaneCloseRelease(args nodeCloseOpRefArgs) (any, str
 }
 
 func (client *HubClient) nodeCloseOpRef(args nodeCloseOpRefArgs, release bool) (any, string) {
-	job, found, code := client.openCloseOpJob(args.Job)
+	job, jobDir, found, code := client.openCloseOpJobDir(args.Job)
 	if code != "" {
 		return nil, code
 	}
@@ -376,6 +514,15 @@ func (client *HubClient) nodeCloseOpRef(args nodeCloseOpRefArgs, release bool) (
 		return nil, "journal_failed"
 	}
 	if !found {
+		if release {
+			// A released request the node never registered (its intent was
+			// recorded, then journal_failed or watcher_unavailable) will not
+			// run: its intent is closed, under the end lock, so the watcher
+			// stops waiting on it.
+			if code := client.cancelUnregisteredIntent(job, jobDir, args); code != "" {
+				return nil, code
+			}
+		}
 		return nodeCloseOpStatusResult{State: nodeCloseOpNone, Attempt: currentAttempt(job)}, ""
 	}
 	if release && (op.Final() || op.State == fleet.CloseOpRegistered) && op.Released == nil {
@@ -389,6 +536,35 @@ func (client *HubClient) nodeCloseOpRef(args nodeCloseOpRefArgs, release bool) (
 		}
 	}
 	return nodeCloseOpStatusResult{State: op.State, Released: op.Released != nil, Attempt: currentAttempt(job)}, ""
+}
+
+// cancelUnregisteredIntent records the cancellation of an open intent for
+// args' request id, under the job's end lock, re-checking the journal there.
+func (client *HubClient) cancelUnregisteredIntent(job *os.Root, jobDir string, args nodeCloseOpRefArgs) string {
+	ledger := client.hubCloseLedger()
+	unlock, err := ledger.LockEnd(jobDir)
+	if err != nil {
+		return "journal_failed"
+	}
+	defer unlock()
+	if _, found, err := fleet.ReadCloseOp(job, args.RequestID); err != nil {
+		return "journal_failed"
+	} else if found {
+		return ""
+	}
+	events, err := readNodeJobLedgerEvents(job)
+	if err != nil {
+		return "journal_failed"
+	}
+	for _, event := range events {
+		if event.kind == "job.hub_close_intent" && event.request == args.RequestID {
+			if ledger.CancelIntent(context.Background(), args.Job, args.RequestID) != nil {
+				return "journal_failed"
+			}
+			return ""
+		}
+	}
+	return ""
 }
 
 // currentAttempt is the job's current attempt token, or empty when its

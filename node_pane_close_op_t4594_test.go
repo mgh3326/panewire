@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -46,11 +47,48 @@ func seedCloseOpJob(t *testing.T, inbox string) string {
 func closeOpNode(t *testing.T, inbox string, fake *nodeFakeHerdr) *HubClient {
 	t.Helper()
 	seedCloseOpJob(t, inbox)
-	return &HubClient{nodeHerdr: fake.run, nodeCloseSettle: time.Millisecond, jobsInboxRoot: inbox}
+	return &HubClient{nodeHerdr: fake.run, nodeCloseSettle: time.Millisecond, jobsInboxRoot: inbox,
+		nodeHubClose: &fakeHubClose{watcher: fleet.HubCloseWatcherAware}}
 }
 
+// fakeHubClose stands in for the job ledger and watcher, so a fixture never
+// reaches the developer's arbiter state or starts a process. The end lock is
+// the real one.
+type fakeHubClose struct {
+	watcher  fleet.HubCloseWatcher
+	intents  []fleet.HubCloseIntent
+	started  []string // "<job> <session>"
+	cancels  []string
+	record   func(job string, in fleet.HubCloseIntent) error
+	startErr error
+}
+
+func (f *fakeHubClose) LockEnd(dir string) (func(), error) { return fleet.LockJobEnd(dir) }
+func (f *fakeHubClose) Watcher(string) (fleet.HubCloseWatcher, error) {
+	return f.watcher, nil
+}
+func (f *fakeHubClose) RecordIntent(_ context.Context, job string, in fleet.HubCloseIntent) error {
+	if f.record != nil {
+		if err := f.record(job, in); err != nil {
+			return err
+		}
+	}
+	f.intents = append(f.intents, in)
+	return nil
+}
+func (f *fakeHubClose) StartWatcher(job, session string) error {
+	f.started = append(f.started, job+" "+session)
+	return f.startErr
+}
+func (f *fakeHubClose) CancelIntent(_ context.Context, job, id string) error {
+	f.cancels = append(f.cancels, job+" "+id)
+	return nil
+}
+
+var noHubCloseIntent = &fakeHubClose{watcher: fleet.HubCloseWatcherAware}
+
 func closeOpArgs(id string) map[string]any {
-	return map[string]any{"request_id": id, "job": closeOpJob, "attempt": closeOpAttempt, "pane_id": "w1:p1", "name": "job-a", "agent_status": "idle", "cwd": "/work/a", "allow_unnamed": false}
+	return map[string]any{"request_id": id, "job": closeOpJob, "attempt": closeOpAttempt, "pane_id": "w1:p1", "name": "job-a", "agent_status": "idle", "cwd": "/work/a", "allow_unnamed": false, "end_reason": "quota_stop pool=devin-free replaced_by=job-c"}
 }
 
 func closeOpRef(id string) map[string]any { return map[string]any{"request_id": id, "job": closeOpJob} }
@@ -212,7 +250,7 @@ func TestCloseOpRechecksThePaneAfterRecordingClosing_t4594(t *testing.T) {
 func TestCloseOpBoundaries_t4594(t *testing.T) {
 	inbox := t.TempDir()
 	fake := idlePaneHerdr()
-	client := &HubClient{nodeHerdr: fake.run, nodeCloseSettle: time.Millisecond, jobsInboxRoot: inbox}
+	client := &HubClient{nodeHerdr: fake.run, nodeCloseSettle: time.Millisecond, jobsInboxRoot: inbox, nodeHubClose: &fakeHubClose{watcher: fleet.HubCloseWatcherAware}}
 	// A directory named after the pane label is not the job's.
 	if err := os.MkdirAll(filepath.Join(inbox, "jobs", "job-a"), 0o700); err != nil {
 		t.Fatal(err)
@@ -229,9 +267,9 @@ func TestCloseOpBoundaries_t4594(t *testing.T) {
 		t.Fatalf("reused id for another pane code=%q", code)
 	}
 	for _, bad := range []map[string]any{
-		{"request_id": ".op", "job": closeOpJob, "pane_id": "w1:p1", "name": "job-a", "agent_status": "idle", "cwd": "/work/a", "allow_unnamed": false},
-		{"request_id": "op-1", "job": "../x", "pane_id": "w1:p1", "name": "job-a", "agent_status": "idle", "cwd": "/work/a", "allow_unnamed": false},
-		{"request_id": "../x", "job": closeOpJob, "pane_id": "w1:p1", "name": "job-a", "agent_status": "idle", "cwd": "/work/a", "allow_unnamed": false},
+		{"request_id": ".op", "job": closeOpJob, "pane_id": "w1:p1", "name": "job-a", "agent_status": "idle", "cwd": "/work/a", "allow_unnamed": false, "end_reason": "quota_stop pool=devin-free replaced_by=job-c"},
+		{"request_id": "op-1", "job": "../x", "pane_id": "w1:p1", "name": "job-a", "agent_status": "idle", "cwd": "/work/a", "allow_unnamed": false, "end_reason": "quota_stop pool=devin-free replaced_by=job-c"},
+		{"request_id": "../x", "job": closeOpJob, "pane_id": "w1:p1", "name": "job-a", "agent_status": "idle", "cwd": "/work/a", "allow_unnamed": false, "end_reason": "quota_stop pool=devin-free replaced_by=job-c"},
 		{"request_id": "op-1", "pane_id": "w1:p1", "name": "job-a", "agent_status": "idle", "cwd": "/work/a"},
 	} {
 		if _, code := nodeRun(t, client, nodeCommandPaneCloseOp, bad); code != "invalid_args" {
@@ -282,6 +320,7 @@ func TestCloseOpOverHubConnection_t4594(t *testing.T) {
 	client.nodeHerdr = fake.run
 	client.nodeCloseSettle = time.Millisecond
 	client.jobsInboxRoot = inbox
+	client.nodeHubClose = &fakeHubClose{watcher: fleet.HubCloseWatcherAware}
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan struct{})
 	go func() {
@@ -298,7 +337,7 @@ func TestCloseOpOverHubConnection_t4594(t *testing.T) {
 		record := hub.nodes["machine-a"]
 		return record != nil && record.agent != nil && record.state == "connected"
 	})
-	args := nodePaneCloseOpArgs{RequestID: "op-1", Job: closeOpJob, Attempt: closeOpAttempt, PaneID: "w1:p1", Name: "job-a", AgentStatus: "idle", Cwd: "/work/a"}
+	args := nodePaneCloseOpArgs{RequestID: "op-1", Job: closeOpJob, Attempt: closeOpAttempt, PaneID: "w1:p1", Name: "job-a", AgentStatus: "idle", Cwd: "/work/a", EndReason: "quota_stop pool=devin-free"}
 	var closed nodePaneCloseOpResult
 	if !hub.nodeCall(t.Context(), "machine-a", nodeCommandPaneCloseOp, args, 5*time.Second, &closed) || closed.Outcome != fleet.CloseOpClosed || closed.Replayed {
 		t.Fatalf("close_op=%+v", closed)
@@ -536,8 +575,8 @@ func TestCloseOpUsesItsJobsSession_t4594(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	client := &HubClient{nodeCloseSettle: time.Millisecond, jobsInboxRoot: inbox}
-	args := map[string]any{"request_id": "op-1", "job": closeOpJob, "attempt": closeOpAttempt, "pane_id": "w1:pW", "name": t3276Worker, "agent_status": "idle", "cwd": "/work/a", "allow_unnamed": false}
+	client := &HubClient{nodeCloseSettle: time.Millisecond, jobsInboxRoot: inbox, nodeHubClose: &fakeHubClose{watcher: fleet.HubCloseWatcherAware}}
+	args := map[string]any{"request_id": "op-1", "job": closeOpJob, "attempt": closeOpAttempt, "pane_id": "w1:pW", "name": t3276Worker, "agent_status": "idle", "cwd": "/work/a", "allow_unnamed": false, "end_reason": "quota_stop pool=devin-free replaced_by=job-c"}
 	result, code := nodeRun(t, client, nodeCommandPaneCloseOp, args)
 	if errs, _ := os.ReadFile(filepath.Join(fakeDir, "errors")); len(errs) != 0 {
 		t.Fatalf("herdr called in another job's session: %s", errs)
@@ -569,7 +608,7 @@ func TestCloseOpUnknownRoleRefusesBlocked_t4594(t *testing.T) {
 	fake := &nodeFakeHerdr{agents: []string{nodeAgentList(nodeAgentJSON("w1:p1", "job-a", "blocked", "/work/a"))}, read: nodeReapScreen("❯ ")}
 	args := closeOpArgs("op-1")
 	args["agent_status"] = "blocked"
-	result, code := nodeRun(t, &HubClient{nodeHerdr: fake.run, nodeCloseSettle: time.Millisecond, jobsInboxRoot: inbox}, nodeCommandPaneCloseOp, args)
+	result, code := nodeRun(t, &HubClient{nodeHerdr: fake.run, nodeCloseSettle: time.Millisecond, jobsInboxRoot: inbox, nodeHubClose: &fakeHubClose{watcher: fleet.HubCloseWatcherAware}}, nodeCommandPaneCloseOp, args)
 	if code != "" || result["outcome"] != fleet.CloseOpRefused || fake.called("pane", "close") != 0 {
 		t.Fatalf("result=%v code=%q calls=%v", result, code, fake.calls)
 	}
@@ -663,7 +702,7 @@ func TestCloseOpRefusesAReceiptWithoutSession_t4594(t *testing.T) {
 	addCloseOpEvent(t, inbox, "00001-job.claim.json", `{"kind":"job.claim","created_at":"2026-11-14T00:00:00Z","payload":{}}`)
 	addCloseOpEvent(t, inbox, "00002-job.spawned.json", `{"kind":"job.spawned","created_at":"2026-11-14T00:00:01Z","payload":{"pane_id":"w1:p1","label":"job-a","role":"reviewer"}}`)
 	fake := idlePaneHerdr()
-	wantCloseOp(t, &HubClient{nodeHerdr: fake.run, nodeCloseSettle: time.Millisecond, jobsInboxRoot: inbox}, "op-1", nodeCloseOpMismatch, false)
+	wantCloseOp(t, &HubClient{nodeHerdr: fake.run, nodeCloseSettle: time.Millisecond, jobsInboxRoot: inbox, nodeHubClose: &fakeHubClose{watcher: fleet.HubCloseWatcherAware}}, "op-1", nodeCloseOpMismatch, false)
 	if len(fake.calls) != 0 {
 		t.Fatalf("acted in a guessed session: %v", fake.calls)
 	}
@@ -720,5 +759,135 @@ func TestCloseOpSupersededQuotaIntentIsAnEnd_t4594(t *testing.T) {
 		if test.outcome != fleet.CloseOpClosed && len(fake.calls) != 0 {
 			t.Fatalf("%s: closed an ended attempt: %v", test.reason, fake.calls)
 		}
+	}
+}
+
+// A registration records the hub-close intent, bound to the decided attempt,
+// pane and label with the planned end_reason, before the journal entry; a
+// replay records nothing more, a mismatch nothing at all, and a failed intent
+// write registers no operation (hk 4652).
+func TestCloseOpRecordsTheHubCloseIntentFirst_t4652(t *testing.T) {
+	inbox := t.TempDir()
+	client := closeOpNode(t, inbox, idlePaneHerdr())
+	ledger := &fakeHubClose{watcher: fleet.HubCloseWatcherAware}
+	ledger.record = func(job string, in fleet.HubCloseIntent) error {
+		if job != closeOpJob {
+			t.Errorf("intent for job %q", job)
+		}
+		if _, err := os.Stat(filepath.Join(inbox, "jobs", closeOpJob, fleet.CloseOpDir, in.RequestID+".json")); err == nil {
+			t.Error("operation registered before its intent")
+		}
+		return nil
+	}
+	client.nodeHubClose = ledger
+	wantCloseOp(t, client, "op-1", fleet.CloseOpClosed, false)
+	wantCloseOp(t, client, "op-1", fleet.CloseOpClosed, true)
+	want := fleet.HubCloseIntent{RequestID: "op-1", Attempt: closeOpAttempt, Pane: "w1:p1", Label: "job-a", EndReason: "quota_stop pool=devin-free replaced_by=job-c"}
+	if len(ledger.intents) != 1 || ledger.intents[0] != want {
+		t.Fatalf("intents %+v, want exactly %+v", ledger.intents, want)
+	}
+	args := closeOpArgs("op-2")
+	args["name"] = "job-b"
+	if result, code := nodeRun(t, client, nodeCommandPaneCloseOp, args); code != "" || result["outcome"] != nodeCloseOpMismatch || len(ledger.intents) != 1 {
+		t.Fatalf("mismatch: result=%v code=%q intents=%d", result, code, len(ledger.intents))
+	}
+	ledger.record = func(string, fleet.HubCloseIntent) error { return errors.New("ledger down") }
+	if _, code := nodeRun(t, client, nodeCommandPaneCloseOp, closeOpArgs("op-3")); code != "journal_failed" {
+		t.Fatalf("failed intent write: code=%q, want journal_failed", code)
+	}
+	wantCloseStatus(t, client, nodeCommandPaneCloseStatus, "op-3", "none", false)
+}
+
+// A watcher of an older binary would not defer to the intent: the node
+// refuses before recording anything. With no watcher running the node starts
+// one before it registers; a failed start registers nothing.
+func TestCloseOpFencesTheWatcher_t4652(t *testing.T) {
+	inbox := t.TempDir()
+	fake := idlePaneHerdr()
+	client := closeOpNode(t, inbox, fake)
+	ledger := &fakeHubClose{watcher: fleet.HubCloseWatcherIncompatible}
+	client.nodeHubClose = ledger
+	if _, code := nodeRun(t, client, nodeCommandPaneCloseOp, closeOpArgs("op-1")); code != "watcher_incompatible" || len(ledger.intents) != 0 {
+		t.Fatalf("old watcher: code=%q intents=%d", code, len(ledger.intents))
+	}
+	ledger.watcher, ledger.startErr = fleet.HubCloseWatcherNone, errors.New("no exe")
+	if _, code := nodeRun(t, client, nodeCommandPaneCloseOp, closeOpArgs("op-1")); code != "watcher_unavailable" {
+		t.Fatalf("failed start: code=%q", code)
+	}
+	wantCloseStatus(t, client, nodeCommandPaneCloseStatus, "op-1", "none", false)
+	ledger.startErr = nil
+	wantCloseOp(t, client, "op-1", fleet.CloseOpClosed, false)
+	if len(ledger.started) != 2 || ledger.started[1] != closeOpJob+" fleet" {
+		t.Fatalf("watcher starts %v", ledger.started)
+	}
+	if fake.called("pane", "close") != 1 {
+		t.Fatalf("calls=%v", fake.calls)
+	}
+}
+
+// A second request id while one is still registered for the attempt is
+// refused: one open close per attempt.
+func TestCloseOpRefusesAnOverlappingRequest_t4652(t *testing.T) {
+	inbox := t.TempDir()
+	client := closeOpNode(t, inbox, idlePaneHerdr())
+	seedNodeCloseOp(t, inbox, "op-1", fleet.CloseOpRegistered)
+	if _, code := nodeRun(t, client, nodeCommandPaneCloseOp, closeOpArgs("op-2")); code != "close_in_progress" {
+		t.Fatalf("overlap: code=%q, want close_in_progress", code)
+	}
+}
+
+// end_reason is required: without a planned record the watcher could not
+// finish the job.
+func TestCloseOpRequiresAnEndReason_t4652(t *testing.T) {
+	client := closeOpNode(t, t.TempDir(), idlePaneHerdr())
+	for _, reason := range []any{"", "two\nlines", nil} {
+		args := closeOpArgs("op-1")
+		if reason == nil {
+			delete(args, "end_reason")
+		} else {
+			args["end_reason"] = reason
+		}
+		if _, code := nodeRun(t, client, nodeCommandPaneCloseOp, args); code != "invalid_args" {
+			t.Fatalf("end_reason %q: code=%q, want invalid_args", reason, code)
+		}
+	}
+}
+
+func TestHelloAdvertisesCloseOps_t4652(t *testing.T) {
+	if !slices.Contains(hubSpawnCapabilities, "close_ops_v1") {
+		t.Fatalf("hello capabilities %v lack close_ops_v1", hubSpawnCapabilities)
+	}
+}
+
+// Once a hub close was opened on the attempt, a later close asks hk even after
+// the watcher cancelled that intent: a job another writer already ended in hk
+// is not closed again (hk 4652 review).
+func TestCloseOpAfterAHubCloseIntentAsksHK_t4652(t *testing.T) {
+	for _, test := range []struct {
+		state, outcome string
+	}{{"completed", nodeCloseOpMismatch}, {"spawned", fleet.CloseOpClosed}} {
+		inbox := t.TempDir()
+		seedCloseOpJob(t, inbox)
+		addCloseOpEvent(t, inbox, "00003-job.hub_close_intent.json", `{"kind":"job.hub_close_intent","created_at":"2026-11-14T00:00:02Z","payload":{"request_id":"op-0","attempt":"`+closeOpAttempt+`","pane_id":"w1:p1","label":"job-a","end_reason":"quota_stop pool=devin-free"}}`)
+		addCloseOpEvent(t, inbox, "00004-job.hub_close_cancelled.json", `{"kind":"job.hub_close_cancelled","created_at":"2026-11-14T00:00:03Z","payload":{"request_id":"op-0","reason":"not_closed"}}`)
+		addCloseOpEvent(t, inbox, ".tmp-123.json", `{"kind":`)
+		client := closeOpNode(t, inbox, idlePaneHerdr())
+		client.nodeJobs = &roleJobs{records: map[string]map[string]any{closeOpJob: {"state": test.state}}}
+		wantCloseOp(t, client, "op-1", test.outcome, false)
+	}
+}
+
+// A release of a request whose intent was recorded but never registered
+// cancels that intent, so the watcher stops waiting on it.
+func TestCloseOpReleaseCancelsAnUnregisteredIntent_t4652(t *testing.T) {
+	inbox := t.TempDir()
+	client := closeOpNode(t, inbox, idlePaneHerdr())
+	ledger := &fakeHubClose{watcher: fleet.HubCloseWatcherAware}
+	client.nodeHubClose = ledger
+	addCloseOpEvent(t, inbox, "00003-job.hub_close_intent.json", `{"kind":"job.hub_close_intent","created_at":"2026-11-14T00:00:02Z","payload":{"request_id":"op-9","attempt":"`+closeOpAttempt+`","pane_id":"w1:p1","label":"job-a","end_reason":"r"}}`)
+	wantCloseStatus(t, client, nodeCommandPaneCloseRelease, "op-9", "none", false)
+	wantCloseStatus(t, client, nodeCommandPaneCloseRelease, "op-8", "none", false)
+	if len(ledger.cancels) != 1 || ledger.cancels[0] != closeOpJob+" op-9" {
+		t.Fatalf("cancels %v, want only op-9", ledger.cancels)
 	}
 }

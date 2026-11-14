@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -58,7 +59,10 @@ func (a *App) events(id string) ([]Event, error) {
 		if ent.Type()&os.ModeSymlink != 0 {
 			return nil, fail(exitStateConflict, "symlink event refused")
 		}
-		if ent.IsDir() || filepath.Ext(ent.Name()) != ".json" {
+		// A dot name is the ledger writer's unpublished temporary file
+		// (arbiter writeArtifact ".tmp-*.json"), which another process (the
+		// node recording a hub-close intent) may be writing or removing.
+		if ent.IsDir() || filepath.Ext(ent.Name()) != ".json" || strings.HasPrefix(ent.Name(), ".") {
 			continue
 		}
 		info, e := ent.Info()

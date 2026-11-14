@@ -101,6 +101,8 @@ type nodeJobLedgerEvent struct {
 	// final are a job.lost payload's.
 	name, reason string
 	final        bool
+	// request is a hub-close intent's request id.
+	request string
 }
 
 func nodeJobClaimKind(kind string) bool {
@@ -178,7 +180,9 @@ func readNodeJobLedgerEvents(job *os.Root) ([]nodeJobLedgerEvent, error) {
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
 	events := make([]nodeJobLedgerEvent, 0, len(entries))
 	for _, entry := range entries {
-		if entry.IsDir() {
+		// A dot name is an unpublished temporary event the ledger writer
+		// may be writing or removing.
+		if entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
 			continue
 		}
 		if !entry.Type().IsRegular() || !strings.HasSuffix(entry.Name(), ".json") {
@@ -207,6 +211,7 @@ func readNodeJobLedgerEvents(job *os.Root) ([]nodeJobLedgerEvent, error) {
 				HerdrSession string `json:"herdr_session"`
 				Reason       string `json:"reason"`
 				Final        bool   `json:"final"`
+				RequestID    string `json:"request_id"`
 			} `json:"payload"`
 		}
 		if json.Unmarshal(data, &event) != nil || event.Kind == "" {
@@ -224,7 +229,7 @@ func readNodeJobLedgerEvents(job *os.Root) ([]nodeJobLedgerEvent, error) {
 			task = strconv.FormatFloat(id, 'f', -1, 64)
 		}
 		events = append(events, nodeJobLedgerEvent{kind: event.Kind, pane: event.Payload.PaneID, label: label, role: event.Payload.Role, task: task, owner: event.Payload.OwnerLane, keep: event.Payload.Keep, session: event.Payload.HerdrSession,
-			name: entry.Name(), reason: event.Payload.Reason, final: event.Payload.Final})
+			name: entry.Name(), reason: event.Payload.Reason, final: event.Payload.Final, request: event.Payload.RequestID})
 	}
 	return events, nil
 }
