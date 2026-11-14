@@ -111,8 +111,7 @@ func classifyStatus(screen string, now time.Time, local *time.Location) (Stop, b
 	default:
 		return out, false
 	}
-	lower := strings.ToLower(screen)
-	out.Choice = strings.Contains(lower, "upgrade") || strings.Contains(lower, "credits") || strings.Contains(lower, "choose an option") || strings.Contains(lower, "wait until reset") || strings.Contains(lower, "wait for limit") || strings.Contains(lower, "use extra usage")
+	out.Choice = isChoiceScreen(out.Pool, strings.ToLower(screen))
 	if m := relative.FindStringSubmatch(screen); m != nil {
 		d, ok := relativeSpan(m[1], m[2])
 		if ok && m[3] != "" {
@@ -185,6 +184,18 @@ func classifyStatus(screen string, now time.Time, local *time.Location) (Stop, b
 		}
 	}
 	return out, true
+}
+
+// isChoiceScreen reports whether a lower-cased limit screen is a choice dialog
+// that waits for someone to pick an option. Claude's options menu and the credit
+// wording are such dialogs. Devin's limit banners only advertise an upgrade or
+// credits in their text ("Upgrade to Max for higher limits", hk 4680), so for a
+// devin pool only the dialog's own menu header makes a choice (hk 4683).
+func isChoiceScreen(pool, lower string) bool {
+	if strings.HasPrefix(pool, "devin") {
+		return strings.Contains(lower, "choose an option")
+	}
+	return strings.Contains(lower, "upgrade") || strings.Contains(lower, "credits") || strings.Contains(lower, "choose an option") || strings.Contains(lower, "wait until reset") || strings.Contains(lower, "wait for limit") || strings.Contains(lower, "use extra usage")
 }
 
 // maxSpan marks a relative span too long for a time.Duration: the stop is
