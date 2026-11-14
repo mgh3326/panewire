@@ -49,10 +49,31 @@ func admissionResult(t *testing.T, results <-chan hubSpawnResult, timeout time.D
 	}
 }
 
+func admissionWaitSignal(t *testing.T, signal <-chan struct{}, label string) {
+	t.Helper()
+	eventually(t, 3*time.Second, label, func() bool {
+		select {
+		case <-signal:
+			return true
+		default:
+			return false
+		}
+	})
+}
+
 func admissionInflight(client *HubClient) int {
 	client.work.mu.Lock()
 	defer client.work.mu.Unlock()
 	return client.work.inflight
+}
+
+func admissionWaiters(client *HubClient, requestID string) int {
+	client.spawnActiveMu.Lock()
+	defer client.spawnActiveMu.Unlock()
+	if waiter := client.spawnWaiting[requestID]; waiter != nil {
+		return waiter.users
+	}
+	return 0
 }
 
 func admissionJournalStatus(t *testing.T, client *HubClient, requestID string) string {
@@ -108,7 +129,7 @@ func TestNodeSpawnAdmissionDeadlineLeavesNoRow_t4579(t *testing.T) {
 				waiter.WaitSeconds = 1
 			}
 			start(first)
-			<-started
+			admissionWaitSignal(t, started, "first spawn to start")
 			start(waiter)
 			got := admissionResult(t, results, 2500*time.Millisecond)
 			if got.RequestID != waiter.RequestID || got.RC != 124 {
@@ -182,10 +203,10 @@ func TestNodeSpawnAdmissionRestartReplaysWaiter_t4579(t *testing.T) {
 		workers.Add(1)
 		go func() { defer workers.Done(); old.handleHubSpawn(ctx, peer, message) }()
 		if message.RequestID == first.RequestID {
-			<-started
+			admissionWaitSignal(t, started, "first spawn to start")
 		}
 	}
-	eventually(t, time.Second, "both requests to enter the node", func() bool { return admissionInflight(old) == 2 })
+	eventually(t, time.Second, "waiter to enter admission", func() bool { return admissionWaiters(old, waiter.RequestID) == 1 })
 	// Give a wrongly claimed waiter a window to appear in the durable journal.
 	waitUntil(200*time.Millisecond, func() bool { return admissionJournalStatus(t, old, waiter.RequestID) != "" })
 	cancel()
@@ -231,13 +252,9 @@ func TestNodeSpawnAdmissionDrainLeavesWaiterReplayable_t4579(t *testing.T) {
 	}
 	first, waiter := admissionMessage(4579013, true), admissionMessage(4579014, true)
 	start(first)
-	<-started
+	admissionWaitSignal(t, started, "first spawn to start")
 	start(waiter)
-	eventually(t, time.Second, "waiter to enter admission", func() bool {
-		client.spawnActiveMu.Lock()
-		defer client.spawnActiveMu.Unlock()
-		return client.spawnWaiting[waiter.RequestID] != nil
-	})
+	eventually(t, time.Second, "waiter to enter admission", func() bool { return admissionWaiters(client, waiter.RequestID) == 1 })
 	drained := make(chan int, 1)
 	go func() { drained <- client.Drain(ctx) }()
 	eventually(t, time.Second, "drain to start", func() bool {
@@ -248,7 +265,16 @@ func TestNodeSpawnAdmissionDrainLeavesWaiterReplayable_t4579(t *testing.T) {
 	eventually(t, time.Second, "unclaimed waiter to leave during drain", func() bool { return admissionInflight(client) == 1 })
 	releaseOnce.Do(func() { close(release) })
 	eventually(t, 2*time.Second, "both spawn handlers to finish", func() bool { return admissionInflight(client) == 0 })
-	if left := <-drained; left != 0 {
+	var left int
+	eventually(t, time.Second, "drain to finish", func() bool {
+		select {
+		case left = <-drained:
+			return true
+		default:
+			return false
+		}
+	})
+	if left != 0 {
 		t.Fatalf("drain left %d operations", left)
 	}
 	if status := admissionJournalStatus(t, client, waiter.RequestID); status != "" || runs.Load() != 1 {
@@ -315,11 +341,11 @@ func TestNodeSpawnAdmissionWakesQueuedDuplicates_t4579(t *testing.T) {
 	first, second := admissionMessage(4579021, true), admissionMessage(4579022, true)
 	second.Checkout = t3482Checkout()
 	start(first)
-	<-firstStarted
+	admissionWaitSignal(t, firstStarted, "first spawn to start")
 	start(second)
 	start(second)
 	eventually(t, time.Second, "both duplicate waiters or an early result", func() bool {
-		return admissionInflight(client) == 3 || len(results) != 0
+		return admissionWaiters(client, second.RequestID) == 2 || len(results) != 0
 	})
 	select {
 	case result := <-results:
@@ -338,8 +364,8 @@ func TestNodeSpawnAdmissionWakesQueuedDuplicates_t4579(t *testing.T) {
 		t.Fatalf("changed-payload waiting duplicate answered %+v", got)
 	}
 	firstOnce.Do(func() { close(firstRelease) })
-	<-prepared
-	<-secondStarted
+	admissionWaitSignal(t, prepared, "second checkout to start")
+	admissionWaitSignal(t, secondStarted, "second spawn to start")
 	var sawFirst, sawDuplicate bool
 	for !sawFirst || !sawDuplicate {
 		got := admissionResult(t, results, time.Second)
@@ -427,7 +453,16 @@ func TestNodeSpawnAdmissionSurvivesHubReconnect_t4579(t *testing.T) {
 		done := make(chan error, 1)
 		sessions.Add(1)
 		go func() { defer sessions.Done(); done <- client.serve(ctx, node); _ = node.CloseNow() }()
-		return <-connections, done
+		var hub *websocket.Conn
+		eventually(t, time.Second, "hub websocket to connect", func() bool {
+			select {
+			case hub = <-connections:
+				return true
+			default:
+				return false
+			}
+		})
+		return hub, done
 	}
 	send := func(conn *websocket.Conn, message hubOutboundMessage) {
 		t.Helper()
@@ -441,9 +476,9 @@ func TestNodeSpawnAdmissionSurvivesHubReconnect_t4579(t *testing.T) {
 	first, waiter := admissionMessage(4579031, true), admissionMessage(4579032, true)
 	oldHub, oldSession := connect()
 	send(oldHub, first)
-	<-started
+	admissionWaitSignal(t, started, "first spawn to start")
 	send(oldHub, waiter)
-	eventually(t, time.Second, "original waiter to reach the node", func() bool { return admissionInflight(client) == 2 })
+	eventually(t, time.Second, "original waiter to reach admission", func() bool { return admissionWaiters(client, waiter.RequestID) == 1 })
 	// Give an incorrectly claimed waiter time to appear before the disconnect.
 	waitUntil(200*time.Millisecond, func() bool { return admissionJournalStatus(t, client, waiter.RequestID) != "" })
 	_ = oldHub.CloseNow()
@@ -455,7 +490,7 @@ func TestNodeSpawnAdmissionSurvivesHubReconnect_t4579(t *testing.T) {
 	newHub, _ := connect()
 	send(newHub, waiter)
 	eventually(t, time.Second, "replayed waiter or an early result", func() bool {
-		return admissionInflight(client) == 3 || len(results) != 0
+		return admissionWaiters(client, waiter.RequestID) == 2 || len(results) != 0
 	})
 	select {
 	case result := <-results:
