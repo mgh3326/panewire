@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 )
@@ -78,6 +79,8 @@ func TestCloseOpOwnsEnding(t *testing.T) {
 		{"refused", &CloseOp{State: CloseOpRefused, Updated: now}, false},
 		{"released", &CloseOp{State: CloseOpClosed, Updated: now, Released: &released}, false},
 		{"past backstop", &CloseOp{State: CloseOpClosed, Updated: now.Add(-CloseOpOwnershipTTL)}, false},
+		{"cancelled", &CloseOp{State: CloseOpCancelled, Updated: now, Released: &released}, false},
+		{"another attempt's pane", &CloseOp{PaneID: "w:p0", State: CloseOpClosed, Updated: now}, false},
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
@@ -88,7 +91,10 @@ func TestCloseOpOwnsEnding(t *testing.T) {
 					t.Fatal(err)
 				}
 				op := *test.op
-				op.RequestID, op.PaneID, op.Created = "r1", "w:p1", now
+				op.RequestID, op.Created = "r1", now
+				if op.PaneID == "" {
+					op.PaneID = "w:p1"
+				}
 				if err := WriteCloseOp(root, op); err != nil {
 					t.Fatal(err)
 				}
@@ -98,7 +104,7 @@ func TestCloseOpOwnsEnding(t *testing.T) {
 					t.Fatalf("journal file mode: %v %v", info, err)
 				}
 			}
-			if got := CloseOpOwnsEnding(dir, now); got != test.want {
+			if got := CloseOpOwnsEnding(dir, "w:p1", now); got != test.want {
 				t.Fatalf("owns=%v want %v", got, test.want)
 			}
 		})
@@ -110,7 +116,7 @@ func TestCloseOpOwnsEnding(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, CloseOpDir, "r1.json"), []byte("{"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if !CloseOpOwnsEnding(dir, now) {
+	if !CloseOpOwnsEnding(dir, "w:p1", now) {
 		t.Fatal("an unreadable journal must hold the watcher back")
 	}
 }
@@ -140,5 +146,62 @@ func TestWatcherHandOffGraceDefersToOpenCloseOp(t *testing.T) {
 	}
 	if rec := h.record(t, "j"); str(rec, "state") != "lost" {
 		t.Fatalf("backstop did not end the job: %v", rec)
+	}
+}
+
+// The deadline does not end the watch while a close operation owns the
+// ending: a hub outage across the completion deadline would otherwise leave
+// the lease held with no watcher to act once the hub releases.
+func TestWatcherOutlivesDeadlineUnderOpenCloseOp(t *testing.T) {
+	previous := closeOpOwnershipTTL
+	closeOpOwnershipTTL = 30 * time.Minute
+	t.Cleanup(func() { closeOpOwnershipTTL = previous })
+	t.Setenv("PANEWIRE_COMPLETION_TIMEOUT_S", "1")
+	a := testApp(t)
+	ledgerRunner(t, a)
+	seedJob(t, a, "j", "implementer")
+	seedLedger(t, a, "j")
+	now := a.Now().UTC()
+	seedCloseOp(t, a, "j", CloseOp{RequestID: "hub-close-1", PaneID: "w:p1", State: CloseOpClosed, Created: now, Updated: now})
+	started := a.Now()
+	if e := a.watch(context.Background(), []string{"j"}); e != nil {
+		t.Fatal(e)
+	}
+	if waited := a.Now().Sub(started); waited < closeOpOwnershipTTL {
+		t.Fatalf("watcher left after %v under an open close operation", waited)
+	}
+}
+
+// Once the hub released its close after writing the record itself, the
+// vanished pane costs only the lease: no plain lost write, no second job.lost.
+func TestWatcherAfterReleasedCloseOnlyReleasesTheLease(t *testing.T) {
+	a, f, h, _ := quotaStopFixture(t, "reviewer", "idle", "done\n")
+	t.Setenv("PANEWIRE_COMPLETION_TIMEOUT_S", "6000")
+	h.records["j"]["state"] = "lost"
+	h.records["j"]["end_reason"] = "quota_stop pool=claude"
+	now := a.Now().UTC()
+	seedCloseOp(t, a, "j", CloseOp{RequestID: "hub-close-1", PaneID: "w:p1", State: CloseOpClosed, Created: now, Updated: now, Released: &now})
+	do := f.Do
+	reads := 0
+	f.Do = func(c Command) Result {
+		if c.Name == "herdr" && strings.Join(c.Args, " ") == "agent list" {
+			reads++
+			if reads > 1 {
+				return Result{Out: `{"result":{"agents":[]}}`}
+			}
+		}
+		return do(c)
+	}
+	if e := a.watch(context.Background(), []string{"j"}); e != nil {
+		t.Fatal(e)
+	}
+	if kinds := eventKindsOf(t, a, "j"); slices.Contains(kinds, "job.lost") {
+		t.Fatalf("a second loss after the hub ended the job: %v", kinds)
+	}
+	if got := str(h.record(t, "j"), "end_reason"); got != "quota_stop pool=claude" {
+		t.Fatalf("hub's record rewritten: %q", got)
+	}
+	if st, pools := ledgerState(t, a, "j"); st != "released" || len(pools) != 0 {
+		t.Fatalf("lease not released: %s %v", st, pools)
 	}
 }

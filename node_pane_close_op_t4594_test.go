@@ -1,6 +1,7 @@
 package panewire
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -166,5 +167,80 @@ func TestCloseOpBoundaries_t4594(t *testing.T) {
 		if access := h.authorizeNodeCommand(nil, op, "m1"); access != hubAccessForbidden {
 			t.Fatalf("%s public access=%v", op, access)
 		}
+	}
+}
+
+// Release cancels an operation that never started its close; one left
+// closing stays unreleased until a repeated close_op resolves it.
+func TestCloseOpReleaseCancelsOnlyBeforeClosing_t4594(t *testing.T) {
+	inbox := t.TempDir()
+	seedNodeCloseOp(t, inbox, "op-1", fleet.CloseOpRegistered)
+	fake := idlePaneHerdr()
+	client := closeOpNode(t, inbox, fake)
+	wantCloseStatus(t, client, nodeCommandPaneCloseRelease, "op-1", fleet.CloseOpCancelled, true)
+	wantCloseOp(t, client, "op-1", fleet.CloseOpCancelled, true)
+	if fake.called("pane", "close") != 0 {
+		t.Fatalf("a cancelled operation closed the pane: %v", fake.calls)
+	}
+	seedNodeCloseOp(t, inbox, "op-2", fleet.CloseOpClosing)
+	wantCloseStatus(t, client, nodeCommandPaneCloseRelease, "op-2", fleet.CloseOpClosing, false)
+}
+
+// The three ops cross a real hub connection from a node that advertises
+// close_ops_v1, and the hub accepts their results.
+func TestCloseOpOverHubConnection_t4594(t *testing.T) {
+	hub, server := t14Hub(t)
+	fake := idlePaneHerdr()
+	client, err := NewHubClient(HubClientConfig{
+		URL: t14WSURL(server.URL, ""), MachineID: "machine-a", Token: "node-token", AllowInsecureForTests: true, PingInterval: time.Hour,
+		SpawnConfigPath:     filepath.Join(t.TempDir(), "missing-spawn.json"),
+		hostLoadCollector:   func(context.Context) (HubHostLoad, error) { return HubHostLoad{}, errors.New("fixture") },
+		hostMemoryCollector: func(context.Context) (*HubHostMemory, error) { return nil, errors.New("fixture") },
+		sessionCollector:    func(context.Context) ([]HerdrAgentState, error) { return nil, errors.New("fixture") },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	inbox := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(inbox, "jobs", "job-a"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	client.nodeHerdr = fake.run
+	client.nodeCloseSettle = time.Millisecond
+	client.jobsInboxRoot = inbox
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		client.Run(ctx)
+	}()
+	defer func() {
+		cancel()
+		<-done
+	}()
+	eventually(t, 2*time.Second, "node connected with close_ops_v1", func() bool {
+		hub.mu.Lock()
+		defer hub.mu.Unlock()
+		record := hub.nodes["machine-a"]
+		return record != nil && record.agent != nil && record.state == "connected" && record.capabilities[hubCapabilityCloseOps]
+	})
+	args := nodePaneCloseOpArgs{RequestID: "op-1", PaneID: "w1:p1", Name: "job-a", AgentStatus: "idle", Cwd: "/work/a"}
+	var closed nodePaneCloseOpResult
+	if !hub.nodeCall(t.Context(), "machine-a", nodeCommandPaneCloseOp, args, 5*time.Second, &closed) || closed.Outcome != fleet.CloseOpClosed || closed.Replayed {
+		t.Fatalf("close_op=%+v", closed)
+	}
+	if !hub.nodeCall(t.Context(), "machine-a", nodeCommandPaneCloseOp, args, 5*time.Second, &closed) || closed.Outcome != fleet.CloseOpClosed || !closed.Replayed {
+		t.Fatalf("replayed close_op=%+v", closed)
+	}
+	ref := nodeCloseOpRefArgs{RequestID: "op-1", Name: "job-a"}
+	var status nodeCloseOpStatusResult
+	if !hub.nodeCall(t.Context(), "machine-a", nodeCommandPaneCloseRelease, ref, 5*time.Second, &status) || status.State != fleet.CloseOpClosed || !status.Released {
+		t.Fatalf("release=%+v", status)
+	}
+	if !hub.nodeCall(t.Context(), "machine-a", nodeCommandPaneCloseStatus, ref, 5*time.Second, &status) || !status.Released {
+		t.Fatalf("status=%+v", status)
+	}
+	if fake.called("pane", "close") != 1 {
+		t.Fatalf("calls=%v", fake.calls)
 	}
 }

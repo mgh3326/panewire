@@ -389,10 +389,19 @@ func (a *App) watch(ctx context.Context, args []string) error {
 			a.recordLostFailure(ctx, j)
 			return a.releaseQuota(ctx, j)
 		}
+		// A close the hub journalled on this node (close_journal.go) owns the
+		// job's ending until the hub releases it: the hub writes the record
+		// with its own reason and pointer, so neither fallback below consumes
+		// the terminal transition meanwhile, and the watcher outlives its
+		// deadline to act once it is released. The journal is read after this
+		// poll's look at the pane; a close the hub made is journalled before
+		// it runs, so an absence caused by it always finds its entry (hk 4594).
+		jobDir := filepath.Join(a.Jobs, id)
+		closeOwned := CloseOpOwnsEnding(jobDir, j.Pane, a.Now())
 		// An announced quota stop is watched through its hand-off grace, past
 		// the ordinary completion deadline: its fallback ends the job and
 		// releases the lease, which nothing else would.
-		if waiting == nil && !handOff.active && !quotaRetry && a.Now().After(deadline) && (!pending || latePoll) {
+		if waiting == nil && !handOff.active && !quotaRetry && !closeOwned && a.Now().After(deadline) && (!pending || latePoll) {
 			fmt.Fprintln(a.Err, "watch-expired: job stays live; quota retained")
 			return nil
 		}
@@ -441,13 +450,6 @@ func (a *App) watch(ctx context.Context, args []string) error {
 			}
 		}
 
-		// A close the hub journalled on this node (close_journal.go) owns the
-		// job's ending until the hub releases it: the hub writes the record
-		// with its own reason and pointer, so neither fallback below consumes
-		// the terminal transition meanwhile. The journal is read after the
-		// pane was seen absent; a close the hub made is journalled before it
-		// runs, so an absence caused by it always finds its entry (hk 4594).
-		closeOwned := (handOff.active || missing >= 2) && CloseOpOwnsEnding(filepath.Join(a.Jobs, id), a.Now())
 		if handOff.active && !closeOwned {
 			if handOff.expired(a.Now(), paneAgent, present) {
 				return a.quotaStopLost(ctx, j, handOff.stop, false)
@@ -471,6 +473,11 @@ func (a *App) watch(ctx context.Context, args []string) error {
 		// write below would end the job without the quota_stop record and close the
 		// intent with its event.
 		if missing >= 2 && !handOff.active && !quotaRetry && !closeOwned {
+			// The hub released its close after ending the job itself: the
+			// record and the owner's notice are its, only the lease is left.
+			if CloseOpReleasedFor(jobDir, j.Pane) && a.hkJobEnded(ctx, id) {
+				return a.releaseQuota(ctx, j)
+			}
 			if e := a.putJobRecord(ctx, id, map[string]any{"state": "lost", "at": a.Now().UTC()}); e != nil {
 				a.jobRecordFailed(ctx, id, "lost", e)
 			}

@@ -5,7 +5,9 @@ import (
 	"errors"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/mgh3326/panewire/internal/durable"
@@ -39,6 +41,9 @@ const (
 	// CloseOpUnknown: the pane is absent after a close was started whose
 	// result was never recorded (a node crash or a failed herdr close).
 	CloseOpUnknown = "unknown"
+	// CloseOpCancelled: released while still registered, before any close
+	// was started; the pane was never touched.
+	CloseOpCancelled = "cancelled"
 )
 
 // CloseOpOwnershipTTL bounds how long an unreleased operation holds back the
@@ -69,7 +74,7 @@ type CloseOp struct {
 // Final reports whether the state is the operation's last.
 func (op CloseOp) Final() bool {
 	switch op.State {
-	case CloseOpClosed, CloseOpRefused, CloseOpGone, CloseOpUnknown:
+	case CloseOpClosed, CloseOpRefused, CloseOpGone, CloseOpUnknown, CloseOpCancelled:
 		return true
 	}
 	return false
@@ -87,7 +92,7 @@ func ReadCloseOp(job *os.Root, id string) (CloseOp, bool, error) {
 	if !ValidCloseOpID(id) {
 		return CloseOp{}, false, errors.New("invalid close operation id")
 	}
-	raw, err := job.ReadFile(CloseOpDir + "/" + id + ".json")
+	raw, err := job.ReadFile(filepath.Join(CloseOpDir, id+".json"))
 	if errors.Is(err, fs.ErrNotExist) {
 		return CloseOp{}, false, nil
 	} else if err != nil {
@@ -127,33 +132,49 @@ func WriteCloseOp(job *os.Root, op CloseOp) error {
 	return durable.ReplaceFileAtomicallyInRoot(ops, op.RequestID+".json", raw, 0o600)
 }
 
-// CloseOpOwnsEnding reports whether any operation in the job directory dir
-// still owns the job's ending at now. An unreadable journal owns it: the
-// watcher must not consume the terminal record on a guess.
-func CloseOpOwnsEnding(dir string, now time.Time) bool {
-	entries, err := os.ReadDir(dir + "/" + CloseOpDir)
+// CloseOpOwnsEnding reports whether an operation on pane in the job directory
+// dir still owns the job's ending at now. An operation on another pane belongs
+// to an earlier attempt and owns nothing of this one. An unreadable journal
+// owns it: the watcher must not consume the terminal record on a guess.
+func CloseOpOwnsEnding(dir, pane string, now time.Time) bool {
+	owns, _ := closeOpsFor(dir, pane, now)
+	return owns
+}
+
+// CloseOpReleasedFor reports whether the hub released a finished operation on
+// pane: it has ended the job itself, so the watcher only frees what is local.
+func CloseOpReleasedFor(dir, pane string) bool {
+	_, released := closeOpsFor(dir, pane, time.Time{})
+	return released
+}
+
+func closeOpsFor(dir, pane string, now time.Time) (owns, released bool) {
+	entries, err := os.ReadDir(filepath.Join(dir, CloseOpDir))
 	if errors.Is(err, fs.ErrNotExist) {
-		return false
+		return false, false
 	} else if err != nil {
-		return true
+		return true, false
 	}
 	job, err := os.OpenRoot(dir)
 	if err != nil {
-		return true
+		return true, false
 	}
 	defer job.Close()
 	for _, entry := range entries {
-		name := entry.Name()
-		if len(name) <= len(".json") || name[len(name)-len(".json"):] != ".json" {
+		id, isOp := strings.CutSuffix(entry.Name(), ".json")
+		if !isOp || strings.HasPrefix(id, ".") {
 			continue // a temporary file of a write in progress
 		}
-		op, found, err := ReadCloseOp(job, name[:len(name)-len(".json")])
+		op, found, err := ReadCloseOp(job, id)
 		if err != nil {
-			return true
+			owns = true
+			continue
 		}
-		if found && op.ownsEnding(now) {
-			return true
+		if !found || op.PaneID != pane {
+			continue
 		}
+		owns = owns || op.ownsEnding(now)
+		released = released || (op.Released != nil && op.State != CloseOpCancelled && op.State != CloseOpRefused)
 	}
-	return false
+	return owns, released
 }

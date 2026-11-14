@@ -25,6 +25,10 @@ const (
 
 	// nodeCloseOpNone: no operation under that id (or no such job directory).
 	nodeCloseOpNone = "none"
+
+	// hubCapabilityCloseOps is the hello capability of a node that serves
+	// the three close-operation ops; the hub sends them to no other node.
+	hubCapabilityCloseOps = "close_ops_v1"
 )
 
 type nodePaneCloseOpArgs struct {
@@ -64,7 +68,7 @@ func validNodeCloseOpRefArgs(args nodeCloseOpRefArgs) bool {
 
 func validNodePaneCloseOpResult(result nodePaneCloseOpResult) bool {
 	switch result.Outcome {
-	case fleet.CloseOpClosed, fleet.CloseOpRefused, fleet.CloseOpGone, fleet.CloseOpUnknown:
+	case fleet.CloseOpClosed, fleet.CloseOpRefused, fleet.CloseOpGone, fleet.CloseOpUnknown, fleet.CloseOpCancelled:
 		return true
 	case nodeCaptureNotAJob:
 		return !result.Replayed
@@ -79,6 +83,8 @@ func validNodeCloseOpStatusResult(result nodeCloseOpStatusResult) bool {
 	case fleet.CloseOpRegistered, fleet.CloseOpClosing:
 		// Only a final operation can be released.
 		return !result.Released
+	case fleet.CloseOpCancelled:
+		return result.Released
 	case fleet.CloseOpClosed, fleet.CloseOpRefused, fleet.CloseOpGone, fleet.CloseOpUnknown:
 		return true
 	}
@@ -182,9 +188,10 @@ func (client *HubClient) nodePaneCloseStatus(args nodeCloseOpRefArgs) (any, stri
 	return client.nodeCloseOpRef(args, false)
 }
 
-// nodePaneCloseRelease marks a final close operation released. An operation
-// still in progress is answered unreleased: the hub repeats pane.close_op to
-// resolve it first. The caller holds nodeCommandMu.
+// nodePaneCloseRelease marks a final close operation released, and cancels
+// one still registered (no close was started, so the pane was never touched).
+// One left closing is answered unreleased: only a repeated pane.close_op can
+// tell whether its close ran. The caller holds nodeCommandMu.
 func (client *HubClient) nodePaneCloseRelease(args nodeCloseOpRefArgs) (any, string) {
 	return client.nodeCloseOpRef(args, true)
 }
@@ -205,8 +212,11 @@ func (client *HubClient) nodeCloseOpRef(args nodeCloseOpRefArgs, release bool) (
 	if !found {
 		return nodeCloseOpStatusResult{State: nodeCloseOpNone}, ""
 	}
-	if release && op.Final() && op.Released == nil {
+	if release && (op.Final() || op.State == fleet.CloseOpRegistered) && op.Released == nil {
 		now := client.nowUTC()
+		if op.State == fleet.CloseOpRegistered {
+			op.State = fleet.CloseOpCancelled
+		}
 		op.Released, op.Updated = &now, now
 		if fleet.WriteCloseOp(job, op) != nil {
 			return nil, "journal_failed"
