@@ -27,7 +27,7 @@ func TestLoginScreenAuthUnavailableMovesToNextHostT3891(t *testing.T) {
 	}
 	first := make(chan answer, 1)
 	go func() {
-		reply, err := transport.Spawn(boundedContext(t), firstRunNodeRequest(request, 941, "agy-flash38-medium"))
+		reply, err := dispatchPlacedSpawn(boundedContext(t), transport, firstRunNodeRequest(request, 941, "agy-flash38-medium"))
 		first <- answer{reply, err}
 	}()
 	sent := t14ReadNodeSpawn(t, node)

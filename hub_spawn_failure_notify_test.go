@@ -42,7 +42,7 @@ func spawnNotifyHubLanes(t *testing.T, policy string, lanes ...string) (*HubServ
 	fake, client, stop := newFakeHandoffkeep(t)
 	t.Cleanup(stop)
 	config := HubServerConfig{
-		Tokens:          map[string]string{"operator": t14OperatorToken, "machine-a": "node-token", "machine-b": "desk-token"},
+		Tokens:          map[string]string{"operator": t14OperatorToken, "machine-a": "node-token", "machine-b": "desk-token", "machine-c": "node-token"},
 		InboxStorePath:  filepath.Join(t.TempDir(), "inbox.sqlite3"),
 		ReportRelayPath: r20LanesFile(t, `{"lanes":{`+strings.Join(routes, ",")+`}}`),
 		Logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),

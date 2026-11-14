@@ -87,7 +87,7 @@ func TestFirstRunRefusalMovesToNextHost(t *testing.T) {
 			}
 			first := make(chan answer, 1)
 			go func() {
-				reply, err := transport.Spawn(boundedContext(t), firstRunNodeRequest(request, 911, test.profile))
+				reply, err := dispatchPlacedSpawn(boundedContext(t), transport, firstRunNodeRequest(request, 911, test.profile))
 				first <- answer{reply, err}
 			}()
 			sent := t14ReadNodeSpawn(t, node)
@@ -122,16 +122,19 @@ func TestFirstRunRefusalMovesToNextHost(t *testing.T) {
 				t.Fatalf("notices=%q want %q", notices, want)
 			}
 			// The next candidate binds under the same operation.
+			other := t14NamedNode(t, h, server, "machine-c", true, true)
 			second := make(chan answer, 1)
 			go func() {
-				reply, err := transport.Spawn(boundedContext(t), firstRunNodeRequest(request, 912, test.profile))
+				next := firstRunNodeRequest(request, 912, test.profile)
+				next.Machine = "machine-c"
+				reply, err := dispatchPlacedSpawn(boundedContext(t), transport, next)
 				second <- answer{reply, err}
 			}()
-			sent = t14ReadNodeSpawn(t, node)
+			sent = t14ReadNodeSpawn(t, other)
 			if sent.RequestID != t14RequestID(912) {
 				t.Fatalf("second candidate sent %s", sent.RequestID)
 			}
-			if err = wsjson.Write(t.Context(), node, nodeRefusal(sent.RequestID, "checkout_refused:dirty", false)); err != nil {
+			if err = wsjson.Write(t.Context(), other, nodeRefusal(sent.RequestID, "checkout_refused:dirty", false)); err != nil {
 				t.Fatal(err)
 			}
 			<-second
@@ -154,7 +157,7 @@ func TestFirstRunRefusalWithoutVerifiedCleanupStaysTerminal(t *testing.T) {
 	transport := &directSpawnTransport{h: h, task: task}
 	done := make(chan fleet.HubSpawnReply, 1)
 	go func() {
-		reply, _ := transport.Spawn(boundedContext(t), firstRunNodeRequest(request, 913, "codex-sol"))
+		reply, _ := dispatchPlacedSpawn(boundedContext(t), transport, firstRunNodeRequest(request, 913, "codex-sol"))
 		done <- reply
 	}()
 	sent := t14ReadNodeSpawn(t, node)

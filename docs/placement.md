@@ -155,9 +155,11 @@ The hub counts, because it places every hub spawn
 ([durable spawn operations](hub-spawn-operations.md)). A live spawn on a pool
 is a hub spawn operation that is accepted, bound or dispatching, or succeeded with a
 job that a node still lists as active, whose placed profile is in that pool.
-A spawn that succeeded less than two minutes ago counts before its first
-heartbeat. An auto spawn that is still being placed has no profile yet and
-is not counted, and neither is the spawn being placed. The hub's own selection
+A bound request waiting for its node's dispatcher counts once, using the
+profile bound for its current attempt; an earlier attempt's profile does not
+replace it. A spawn that succeeded less than two minutes ago counts before its
+first heartbeat. An auto spawn that is still being placed has no profile yet
+and is not counted, and neither is the spawn being placed. The hub's own selection
 reads the count from its operations. Any other selection (`plan`, a direct
 spawn) reads it from the hub with `GET /v1/spawns/live` and the operator
 credential.
@@ -283,8 +285,8 @@ a hub restart forgets them, which ends a backoff early and never starts one.
 
 A first-run dialog or a missing login rules out one host, not the request. When
 the hub places a spawn under `--host auto` and a node refuses with one of these
-engine codes, the hub unbinds the request and the candidate loop tries the next
-host:
+engine codes, the hub atomically records the exclusion and unbinds the request,
+then wakes placement to try the next host:
 
 | Code | Cause | Desk action |
 |---|---|---|
@@ -295,8 +297,10 @@ host:
 
 `cwd_unmapped` moves on the same way. The refusing host still counts the
 failure in its launch backoff. A refusal moves on only when the node verified
-its pane cleanup (`retryable`); otherwise a pane may still hold the job id and
-the refusal is the request's answer. A pinned `--host` keeps its refusal.
+its pane cleanup (`retryable`) and the job has not acquired a host-bound claim;
+otherwise the refusal is the request's answer. Exclusions survive hub recovery
+for the attempt and reset on a cleanup-confirmed new attempt. A pinned `--host`
+keeps its refusal.
 Nothing answers the dialog: trust stays a one-time human action on the host.
 
 The first time a host reports a need for a harness kind, the hub sends one

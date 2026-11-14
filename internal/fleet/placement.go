@@ -1290,7 +1290,11 @@ func (a *App) spawnRemote(ctx context.Context, s Spawn, brief string, c *placeCa
 }
 
 func (a *App) place(ctx context.Context, s Spawn, brief string) (handled bool, rec map[string]any, err error) {
-	defer func() { a.placementEvent(s, rec, err) }()
+	defer func() {
+		if !errors.Is(err, ErrHubPlacementBound) {
+			a.placementEvent(s, rec, err)
+		}
+	}()
 	if s.Host != "auto" {
 		return a.placeForced(ctx, s, brief)
 	}

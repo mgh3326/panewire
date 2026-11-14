@@ -254,7 +254,6 @@ func TestHubQuotaRefreshPreservesAttemptBeforePending(t *testing.T) {
 	t.Cleanup(server.Close)
 	t14NamedNode(t, h, server, "desktop", true, true)
 	node := t14NamedNode(t, h, server, "machine-b", true, true)
-	var source *changingRefreshSource
 	var mu sync.Mutex
 	var events []fleetevent.Event
 	h.spawnNewApp = func(out, errout io.Writer) (*fleet.App, error) {
@@ -263,8 +262,7 @@ func TestHubQuotaRefreshPreservesAttemptBeforePending(t *testing.T) {
 		app.Config.Hosts = map[string]map[string]any{"desktop": {}, "machine-b": {}}
 		app.Config.HostOrder = []string{"desktop", "machine-b"}
 		app.Quota = staleRefreshQuota{}
-		source = &changingRefreshSource{now: app.Now()}
-		app.Source = source
+		app.Source = &changingRefreshSource{now: app.Now()}
 		app.EventSink = func(event fleetevent.Event) {
 			mu.Lock()
 			defer mu.Unlock()
@@ -273,21 +271,18 @@ func TestHubQuotaRefreshPreservesAttemptBeforePending(t *testing.T) {
 		return app, nil
 	}
 	request := durableSpawnRequest()
-	task, _, err := h.inbox.store.claimSpawn(t.Context(), request, "test-job", "parent", time.Now())
+	_, _, err = h.inbox.store.claimSpawn(t.Context(), request, "test-job", "parent", time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
-	done := make(chan struct{})
-	go func() { defer close(done); h.executeSpawnTask(ctx, task) }()
+	h.startSpawnCoordinator(ctx)
 	readCtx, stopRead := context.WithTimeout(ctx, 2*time.Second)
 	defer stopRead()
 	var message map[string]json.RawMessage
 	if err := wsjson.Read(readCtx, node, &message); err != nil {
-		cancel()
-		<-done
-		t.Fatalf("fresh holder received no spawn after stale holder: reads=%d err=%v", source.reads.Load(), err)
+		t.Fatalf("fresh holder received no spawn after stale holder: %v", err)
 	}
 	var kind, requestID string
 	_ = json.Unmarshal(message["type"], &kind)
@@ -298,15 +293,17 @@ func TestHubQuotaRefreshPreservesAttemptBeforePending(t *testing.T) {
 	if err := wsjson.Write(ctx, node, nodeRefusal(requestID, "cwd_unmapped", true)); err != nil {
 		t.Fatal(err)
 	}
-	<-done
-	saved, err := h.inbox.store.spawnTask(t.Context(), request.RequestID)
-	if err != nil || saved.Status != "accepted" || saved.Node != nil {
-		t.Fatalf("request must remain accepted after the host refusal: status=%s err=%v", saved.Status, err)
-	}
-	spool, err := os.ReadFile(filepath.Join(stateDir, "placements", "test-job.1.json"))
-	if err != nil {
-		t.Fatalf("contacted host's failed placement attempt was not retained: %v", err)
-	}
+	var saved hubSpawnTask
+	var spool []byte
+	eventually(t, 3*time.Second, "failed placement attempt retained while quota refresh is pending", func() bool {
+		var readErr error
+		saved, readErr = h.inbox.store.spawnTask(t.Context(), request.RequestID)
+		if readErr != nil || saved.Status != "accepted" || saved.Node != nil {
+			return false
+		}
+		spool, readErr = os.ReadFile(filepath.Join(stateDir, "placements", "test-job.1.json"))
+		return readErr == nil
+	})
 	var attempt struct {
 		Record struct {
 			Outcome    string `json:"outcome"`

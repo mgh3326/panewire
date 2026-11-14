@@ -1987,6 +1987,7 @@ func (h *HubServer) connect(machineID, version, remoteAddr string, agent *hubAge
 	h.placementCache = placementCache{}
 	h.recordUIEventLocked("presence", "connected", machineID, now)
 	h.mu.Unlock()
+	h.kickSpawnPlacement()
 	h.tryPendingRevocations(machineID)
 	if previous != nil && previous != agent {
 		_ = previous.conn.Close(websocket.StatusPolicyViolation, "replaced")
@@ -2026,6 +2027,7 @@ func (h *HubServer) disconnect(machineID string, agent *hubAgent) {
 	h.publishFleetPublisher(machineID, h.now().UTC())
 	wakeLostSpawns(spawnWaiters)
 	wakeLostNodeCommands(lost)
+	h.kickSpawnPlacement()
 }
 
 // disconnectLocked is disconnect's critical section; the caller wakes the
