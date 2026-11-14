@@ -484,20 +484,45 @@ unsent.
    stopped between fence and settlement) is settled as fenced without being
    sent again.
 
-Rolling the hub back to a release without this section while a
-grant-required attempt is still `dispatching` is not supported: the older hub
-would replay it without `start_by_ms`, and the node would start it without a
-grant. Before such a rollback, wait until no operation has a `grant_required`
-node payload in a sent state.
+#### Rolling the hub back past this change
 
-Grant and fence are one row each in `spawn_attempt_grants`, keyed by node
-request id, inserted with `ON CONFLICT DO NOTHING`. Exactly one of them is
-ever recorded, and a hub restart keeps it. `start_by` only bounds waits. The
-proof is the row, never a clock or silence.
+An older hub ignores `spawn_attempt_grants` and `grant_required`. It replays
+a sent attempt without `start_by_ms`, and a node handles a frame without
+`start_by_ms` the old way: it starts it with no grant. That still starts the
+attempt at most once, because the newer hub re-places an attempt only after
+it has settled it, and a settled attempt is never replayed. A granted row is
+inert on the older hub: it keeps ownership on silence, as before this change
+(fails closed). The one unsafe row is a fence committed but not settled (the
+hub stopped between the two). The older hub would replay that attempt and the
+node could start it; a newer hub started later would then take the fence as
+proof that it never started and place it again.
 
-A node without the capability, and a hub that sends no `start_by_ms`, keep
-the earlier behavior: no grant, no fence. Old journal rows keep their
-fingerprints, because `start_by_ms` is not part of the fingerprint.
+Procedure:
+
+1. On the running (newer) hub, count fenced attempts that are still sent:
+
+   ```sql
+   SELECT count(*) FROM spawn_operations o
+     JOIN spawn_attempt_grants g ON g.node_id = o.node_id
+    WHERE g.state = 'fenced'
+      AND o.status IN ('dispatching','reconciling','deadline_exceeded');
+   ```
+
+   Run it with `sqlite3 <inbox store>` or `psql` against the hub database.
+   It is normally 0. If it is not, leave the newer hub running: its replay
+   settles each such attempt within one coordinator pass. Run the query again.
+2. When the count is 0, roll back. No grant switch or node drain is needed.
+3. Before rolling forward again, delete the fence rows of attempts that are
+   still sent. The older hub may have started them, and it writes no rows:
+
+   ```sql
+   DELETE FROM spawn_attempt_grants WHERE state = 'fenced' AND node_id IN
+     (SELECT node_id FROM spawn_operations
+       WHERE status IN ('dispatching','reconciling','deadline_exceeded'));
+   ```
+
+   The newer hub then replays them with `start_by_ms`. A node that already
+   journaled the attempt answers from its journal and asks for no grant.
 
 | Case | Test |
 |---|---|
