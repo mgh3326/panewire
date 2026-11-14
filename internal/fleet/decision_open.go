@@ -11,9 +11,20 @@ import (
 )
 
 // DefaultDecisionTimeout is how long a recorded question stays open without an
-// answer: the same six hours the watcher waits before it ends the job with
-// decision_unanswered (watch.go decisionTimeout).
+// answer: the watcher's decision timeout (PANEWIRE_DECISION_TIMEOUT_S, six
+// hours when unset — watch.go decisionTimeout).
 const DefaultDecisionTimeout = 6 * time.Hour
+
+// DecisionTimeout is the watcher's configured decision timeout, so the close
+// guard expires a question on the same schedule the watcher does.
+func DecisionTimeout() time.Duration {
+	if v := os.Getenv("PANEWIRE_DECISION_TIMEOUT_S"); v != "" {
+		if d, ok := timeoutValue(v); ok {
+			return d
+		}
+	}
+	return DefaultDecisionTimeout
+}
 
 // ErrJobPaneChanged reports that the job's newest spawned pane is not the pane
 // the caller named, so the job's records say nothing about that pane.
@@ -49,7 +60,7 @@ func OpenLaneQuestion(inboxRoot, jobID, pane string, now time.Time, timeout time
 	if timeout <= 0 {
 		timeout = DefaultDecisionTimeout
 	}
-	since, resumedAt, spawned, err := readJobDecisionLedger(filepath.Join(inboxRoot, "jobs", jobID, "events"))
+	since, resumed, spawned, err := readJobDecisionLedger(filepath.Join(inboxRoot, "jobs", jobID, "events"))
 	if err != nil {
 		return "", false, err
 	}
@@ -69,45 +80,50 @@ func OpenLaneQuestion(inboxRoot, jobID, pane string, now time.Time, timeout time
 	if now.Sub(latest.at) >= timeout {
 		return "", false, nil
 	}
-	if !resumedAt.IsZero() && resumedAt.After(latest.at) {
+	// A resume answers only the question whose id it names: the watcher stamps
+	// it at write time, which can be after a newer question's mtime, so a time
+	// comparison would let an old resume close a new question (hk 4658).
+	if resumed[latest.id] {
 		return "", false, nil
 	}
 	return latest.id, true, nil
 }
 
 // readJobDecisionLedger reads the job's events in ledger order (file-name
-// order) and reports the start of the current attempt, the newest
-// job.decision_resumed, and the pane the newest job.spawned named.
-func readJobDecisionLedger(dir string) (since, resumedAt time.Time, spawned string, err error) {
+// order) and reports the start of the current attempt, the event ids
+// job.decision_resumed answered, and the pane the newest job.spawned named.
+func readJobDecisionLedger(dir string) (since time.Time, resumed map[string]bool, spawned string, err error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		// A job whose launch never wrote an event has no events folder; that
 		// is an empty ledger, not an unreadable one, or its pane could never
 		// be released (hk 3179).
 		if errors.Is(err, fs.ErrNotExist) {
-			return time.Time{}, time.Time{}, "", nil
+			return time.Time{}, nil, "", nil
 		}
-		return time.Time{}, time.Time{}, "", err
+		return time.Time{}, nil, "", err
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
+	resumed = map[string]bool{}
 	for _, entry := range entries {
 		if !entry.Type().IsRegular() || filepath.Ext(entry.Name()) != ".json" {
 			continue
 		}
 		body, err := os.ReadFile(filepath.Join(dir, entry.Name()))
 		if err != nil {
-			return time.Time{}, time.Time{}, "", err
+			return time.Time{}, nil, "", err
 		}
 		var event struct {
 			Kind      string `json:"kind"`
 			CreatedAt string `json:"created_at"`
 			TS        string `json:"ts"`
 			Payload   struct {
-				PaneID string `json:"pane_id"`
+				PaneID  string `json:"pane_id"`
+				EventID string `json:"event_id"`
 			} `json:"payload"`
 		}
 		if err := json.Unmarshal(body, &event); err != nil || event.Kind == "" {
-			return time.Time{}, time.Time{}, "", errors.New("unreadable job event")
+			return time.Time{}, nil, "", errors.New("unreadable job event")
 		}
 		at := eventTime(event.CreatedAt, event.TS)
 		if at.IsZero() {
@@ -121,10 +137,12 @@ func readJobDecisionLedger(dir string) (since, resumedAt time.Time, spawned stri
 		case "job.reclaim", "job.reprompted":
 			since = at
 		case "job.decision_resumed":
-			resumedAt = at
+			if event.Payload.EventID != "" {
+				resumed[event.Payload.EventID] = true
+			}
 		}
 	}
-	return since, resumedAt, spawned, nil
+	return since, resumed, spawned, nil
 }
 
 // laneQuestion is the newest lane event one pane wrote since an attempt began.

@@ -137,16 +137,34 @@ func TestOpenLaneQuestion(t *testing.T) {
 			}{{"0001.json", now.Add(-7 * time.Hour), laneAsk(now.Add(-7*time.Hour), "q1", "decision", "answered by silence")}},
 		},
 		{
-			name: "a job.decision_resumed after the question closes it",
+			name: "a job.decision_resumed naming the question closes it",
 			ledger: []map[string]any{
 				spawned("w1:p1", now.Add(-time.Hour)),
-				map[string]any{"kind": "job.decision_resumed", "created_at": now.Add(-30 * time.Second).Format(time.RFC3339Nano)},
+				map[string]any{"kind": "job.decision_resumed", "created_at": now.Add(-30 * time.Second).Format(time.RFC3339Nano), "payload": map[string]any{"event_id": "q1"}},
 			},
 			lane: []struct {
 				name string
 				at   time.Time
 				body map[string]any
 			}{{"0001.json", now.Add(-time.Minute), laneAsk(now.Add(-time.Minute), "q1", "decision", "Which?")}},
+		},
+		{
+			// The watcher stamps a resume at write time, which can land after a
+			// newer question's mtime; it must answer only the question it names.
+			name: "a resume for an older question does not close a newer one",
+			ledger: []map[string]any{
+				spawned("w1:p1", now.Add(-time.Hour)),
+				map[string]any{"kind": "job.decision_resumed", "created_at": now.Add(-30 * time.Second).Format(time.RFC3339Nano), "payload": map[string]any{"event_id": "q1"}},
+			},
+			lane: []struct {
+				name string
+				at   time.Time
+				body map[string]any
+			}{
+				{"0001.json", now.Add(-2 * time.Minute), laneAsk(now.Add(-2*time.Minute), "q1", "decision", "First?")},
+				{"0002.json", now.Add(-time.Minute), laneAsk(now.Add(-time.Minute), "q2", "decision", "Second?")},
+			},
+			wantOpen: true,
 		},
 		{
 			name:   "a lane event from another pane is not this job's question",

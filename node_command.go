@@ -1084,7 +1084,7 @@ func (client *HubClient) nodePaneCloseWith(ctx context.Context, args nodePaneClo
 		if client.jobsInboxRoot == "" {
 			return nodePaneCloseResult{}, "jobs_root_unset"
 		}
-		_, open, err := fleet.OpenLaneQuestion(client.jobsInboxRoot, args.QuestionJob, args.PaneID, client.nowUTC(), fleet.DefaultDecisionTimeout)
+		_, open, err := fleet.OpenLaneQuestion(client.jobsInboxRoot, args.QuestionJob, args.PaneID, client.nowUTC(), fleet.DecisionTimeout())
 		switch {
 		case errors.Is(err, fleet.ErrJobPaneChanged):
 			return nodePaneCloseResult{Outcome: nodePaneChanged}, ""
