@@ -1,7 +1,6 @@
 package panewire
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"log/slog"
@@ -36,6 +35,30 @@ func nodeAddProcessExited(proc nodeAddProcess) bool {
 	return known && !alive
 }
 
+// nodeAddStderrLimit bounds the stderr kept from one worktree add. The node's
+// git failure log keeps only the tail of stderr, so the tail is what is worth
+// keeping.
+const nodeAddStderrLimit = 32 << 10
+
+// nodeAddStderr keeps the last nodeAddStderrLimit bytes written and drains the
+// rest, so a chatty checkout hook can neither grow the node's memory for the
+// whole add nor block on a full pipe.
+type nodeAddStderr struct {
+	tail []byte
+}
+
+func (s *nodeAddStderr) Write(p []byte) (int, error) {
+	s.tail = append(s.tail, p...)
+	if len(s.tail) > nodeAddStderrLimit {
+		copy(s.tail, s.tail[len(s.tail)-nodeAddStderrLimit:])
+		s.tail = s.tail[:nodeAddStderrLimit]
+	}
+	return len(p), nil
+}
+
+// Bytes returns the retained tail. The caller must not modify it.
+func (s *nodeAddStderr) Bytes() []byte { return s.tail }
+
 // defaultNodeAddRunner runs one worktree add as this node's child, in a group of
 // its own, and records the group before the child can outlive the node. The group
 // is also killed when the add's context ends, so a cancelled add leaves no
@@ -44,8 +67,8 @@ func defaultNodeAddRunner() nodeAddRunner {
 	return func(ctx context.Context, record func(nodeAddProcess) error, args ...string) error {
 		cmd := nodeGitCommand(ctx, args...)
 		nodeSetProcessGroup(cmd)
-		var stderr bytes.Buffer
-		cmd.Stderr = &stderr
+		stderr := &nodeAddStderr{}
+		cmd.Stderr = stderr
 		if err := cmd.Start(); err != nil {
 			return err
 		}
@@ -53,6 +76,12 @@ func defaultNodeAddRunner() nodeAddRunner {
 			slog.Warn("node worktree add identity not recorded", "err", err)
 		}
 		err := cmd.Wait()
+		if ctx.Err() != nil && cmd.Cancel != nil {
+			// Wait reads the context result once git exits, so an expiry inside
+			// the drain window never cancels the group. Kill it here; a checkout
+			// hook the group still holds would keep writing a cancelled add.
+			_ = cmd.Cancel()
+		}
 		if err != nil {
 			var exitErr *exec.ExitError
 			if errors.As(err, &exitErr) && len(exitErr.Stderr) == 0 {

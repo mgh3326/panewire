@@ -123,6 +123,30 @@ func lockInterruptedDetachedAdd(t *testing.T, fixture *nodeWorktreeFixture, dir 
 	}
 }
 
+// The add keeps a bounded tail of a checkout hook's stderr: the node's git
+// failure log keeps only the tail anyway, and a chatty hook must neither grow the
+// node's memory for the whole add nor block on a full pipe.
+func TestNodeAddStderrKeepsABoundedTail(t *testing.T) {
+	stderr := &nodeAddStderr{}
+	chunk := []byte(strings.Repeat("x", 4096))
+	for range nodeAddStderrLimit/len(chunk) + 4 {
+		if n, err := stderr.Write(chunk); n != len(chunk) || err != nil {
+			t.Fatalf("write=%d err=%v", n, err)
+		}
+	}
+	if got := len(stderr.Bytes()); got != nodeAddStderrLimit {
+		t.Fatalf("retained=%d bytes, want %d", got, nodeAddStderrLimit)
+	}
+	big := strings.Repeat("y", nodeAddStderrLimit+1)
+	stderr = &nodeAddStderr{}
+	if _, err := stderr.Write([]byte(big)); err != nil {
+		t.Fatal(err)
+	}
+	if got := string(stderr.Bytes()); got != big[1:] {
+		t.Fatalf("retained=%d bytes, want the last %d of the write", len(got), nodeAddStderrLimit)
+	}
+}
+
 // The add identity is the process group of its git child: a live group reads as
 // running, the group of an exited add reads as gone, and an identity that was
 // never recorded never reads as gone.

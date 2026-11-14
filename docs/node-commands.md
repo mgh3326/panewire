@@ -511,9 +511,11 @@ checkout hooks it started — is gone. A live add is therefore never removed; th
 answer stays `locked` until its group exits. An intent written before the node
 recorded add groups has none, so it is never reclaimed automatically: the node
 logs `node worktree add intent records no add process group` with the worktree
-path, and the operator recovers by running `git -C <clone> worktree unlock
-<dir>` and then the `worktree.remove` op, or `git -C <clone> worktree remove
-<dir>` directly once the tree is clean.
+path. Before recovery the operator confirms that no `git worktree add` process
+and no checkout hook is still running for `<dir>`; a clean tree does not show
+this. Then the operator runs `git -C <clone> worktree unlock <dir>` and the
+`worktree.remove` op, or `git -C <clone> worktree remove <dir>` directly once
+the tree is clean.
 
 Every op that touches one clone (`worktree.prepare`, `worktree.remove`)
 takes the exclusive per-clone lock `<clone>.git-op.lock`, waiting at most
