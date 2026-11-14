@@ -86,7 +86,7 @@ func knownNodeCommandOp(op string) bool {
 // result. node_lost and node_timeout are hub-local and never on the wire.
 func validNodeCommandError(code string) bool {
 	switch code {
-	case "invalid_args", "herdr_failed", "close_failed", "capture_failed", "jobs_root_unset", "work_root_unset", "refresh_failed", "done_failed", "result_failed", "mark_lost_failed", "reap_failed", "result_too_large", "sweep_failed", "journal_failed":
+	case "invalid_args", "herdr_failed", "close_failed", "capture_failed", "jobs_root_unset", "work_root_unset", "refresh_failed", "done_failed", "result_failed", "mark_lost_failed", "reap_failed", "result_too_large", "sweep_failed", "journal_failed", "record_unavailable":
 		return true
 	}
 	return false
@@ -767,6 +767,10 @@ func (client *HubClient) runNodeCommand(ctx context.Context, op string, raw json
 		defer client.nodeCommandMu.Unlock()
 		return client.nodePaneCloseOp(ctx, args)
 	case nodeCloseOpRefArgs:
+		// Under the acting lock too: a status read never sees a journal
+		// state its writer has not yet made durable.
+		client.nodeCommandMu.Lock()
+		defer client.nodeCommandMu.Unlock()
 		return client.nodePaneCloseStatus(args)
 	case nodeCloseOpReleaseArgs:
 		client.nodeCommandMu.Lock()
@@ -1003,6 +1007,13 @@ func (client *HubClient) nodePaneCloseWith(ctx context.Context, args nodePaneClo
 	// journal write) never widens the gap between that look and the close.
 	if beforeClose != nil {
 		if err := beforeClose(); err != nil {
+			var stop nodeCloseHookStop
+			if errors.As(err, &stop) {
+				if stop.code != "" {
+					return nodePaneCloseResult{}, stop.code
+				}
+				return nodePaneCloseResult{Outcome: stop.outcome}, ""
+			}
 			return nodePaneCloseResult{}, "journal_failed"
 		}
 	}

@@ -126,6 +126,21 @@ func replaceInCloseOpDir(job *os.Root, name string, raw []byte) error {
 	return durable.ReplaceFileAtomicallyInRootSynced(ops, name, raw, 0o600)
 }
 
+// SyncCloseOps makes whatever the journal shows durable: it fsyncs the
+// journal directory and the job directory, so a state a failed sync left
+// visible is not reported, or acted on, before it is durable.
+func SyncCloseOps(job *os.Root) error {
+	if err := ensureCloseOpDir(job); err != nil {
+		return err
+	}
+	ops, err := job.Open(CloseOpDir)
+	if err != nil {
+		return err
+	}
+	defer ops.Close()
+	return ops.Sync()
+}
+
 // WriteCloseOp durably replaces the operation's file: written mode 0600,
 // fsynced, then renamed into place, so a crash leaves the old or the new entry.
 func WriteCloseOp(job *os.Root, op CloseOp) error {

@@ -129,7 +129,7 @@ func (client *HubClient) nodePaneCloseOp(ctx context.Context, args nodePaneClose
 	}
 	defer job.Close()
 	op, found, err := fleet.ReadCloseOp(job, args.RequestID)
-	if err != nil {
+	if err != nil || (found && fleet.SyncCloseOps(job) != nil) {
 		return nil, "journal_failed"
 	}
 	switch {
@@ -142,7 +142,7 @@ func (client *HubClient) nodePaneCloseOp(ctx context.Context, args nodePaneClose
 	}
 	// Registering, or resuming one left registered: bind the request to the
 	// job's current attempt before any herdr call.
-	op, target, outcome, code := client.bindCloseOp(job, op, found, args)
+	op, target, outcome, code := client.bindCloseOp(ctx, job, op, found, args)
 	if code != "" {
 		return nil, code
 	}
@@ -151,6 +151,22 @@ func (client *HubClient) nodePaneCloseOp(ctx context.Context, args nodePaneClose
 	}
 	closeArgs := nodePaneCloseArgs{PaneID: args.PaneID, Name: args.Name, AgentStatus: args.AgentStatus, Cwd: args.Cwd, AllowUnnamed: args.AllowUnnamed, target: target}
 	result, code := client.nodePaneCloseWith(ctx, closeArgs, func() error {
+		// The proof is read again after the settle: the job's watcher, a
+		// separate process, may have recorded a re-prompt or an end of the
+		// attempt meanwhile.
+		again, err := readNodeCloseTarget(job)
+		if err != nil {
+			return err
+		}
+		if bound, code := client.closeTargetBound(ctx, args, again, op.Attempt); code != "" {
+			return nodeCloseHookStop{code: code}
+		} else if !bound {
+			op.State, op.Updated = fleet.CloseOpPreempted, client.nowUTC()
+			if err := fleet.WriteCloseOp(job, op); err != nil {
+				return err
+			}
+			return nodeCloseHookStop{outcome: fleet.CloseOpPreempted}
+		}
 		op.State, op.Updated = fleet.CloseOpClosing, client.nowUTC()
 		return fleet.WriteCloseOp(job, op)
 	})
@@ -160,6 +176,8 @@ func (client *HubClient) nodePaneCloseOp(ctx context.Context, args nodePaneClose
 		return nil, code
 	}
 	switch result.Outcome {
+	case fleet.CloseOpPreempted:
+		return nodePaneCloseOpResult{Outcome: fleet.CloseOpPreempted}, ""
 	case nodePaneClosed:
 		return client.finishCloseOp(job, op, fleet.CloseOpClosed)
 	case nodePaneGone:
@@ -176,11 +194,21 @@ func (client *HubClient) nodePaneCloseOp(ctx context.Context, args nodePaneClose
 // re-prompt starts an attempt on the same receipt. Any end of the attempt —
 // completion, join, revoke, hand-off, escalation, reap, or a loss other than
 // a quota stop announced for the hub's hand-over — marks it ended.
+// nodeCloseHookStop is a close hook's decision not to close: answered as the
+// outcome, or as the error code when one is set.
+type nodeCloseHookStop struct{ outcome, code string }
+
+func (stop nodeCloseHookStop) Error() string { return "close stopped: " + stop.outcome }
+
 type nodeCloseTarget struct {
 	attempt                    string
 	receipt                    bool
 	pane, label, role, session string
 	ended                      bool
+	// announced: the attempt's newest end-like event is a quota stop
+	// announced for the hub's hand-over; whether its grace already ended the
+	// job is in hk, not the ledger.
+	announced bool
 }
 
 func readNodeCloseTarget(job *os.Root) (nodeCloseTarget, error) {
@@ -194,23 +222,53 @@ func readNodeCloseTarget(job *os.Root) (nodeCloseTarget, error) {
 		case nodeJobClaimKind(event.kind):
 			target = nodeCloseTarget{attempt: event.name, role: event.role}
 		case event.kind == "job.spawned":
-			target.attempt, target.receipt, target.ended = event.name, true, false
+			target.attempt, target.receipt, target.ended, target.announced = event.name, true, false, false
 			target.pane, target.label, target.session = event.pane, event.label, event.session
 			if event.role != "" {
 				target.role = event.role
 			}
 		case event.kind == "job.reprompted":
-			target.attempt, target.ended = event.name, false
+			target.attempt, target.ended, target.announced = event.name, false, false
 		case event.kind == "job.lost":
-			if event.reason != "quota_stop" || event.final {
+			if event.reason == "quota_stop" && !event.final {
+				target.announced = true
+			} else {
 				target.ended = true
 			}
-		case event.kind == "job.completed", event.kind == "job.joined", event.kind == "job.revoked",
+		case event.kind == "job.completed", event.kind == "job.completion", event.kind == "job.record_settled",
+			event.kind == "job.joined", event.kind == "job.revoked",
 			event.kind == "job.handed_off", event.kind == "job.escalate", event.kind == "job.reaped":
 			target.ended = true
 		}
 	}
 	return target, nil
+}
+
+// closeTargetBound reports whether target still binds attempt to the
+// requested pane and label and has not ended. For an attempt whose quota stop
+// was announced for the hub's hand-over, the hk record decides whether the
+// hand-over grace already ended the job: a terminal record is an end, and an
+// unreadable one answers record_unavailable rather than guessing.
+func (client *HubClient) closeTargetBound(ctx context.Context, args nodePaneCloseOpArgs, target nodeCloseTarget, attempt string) (bool, string) {
+	if !target.receipt || target.ended || target.pane != args.PaneID || target.label != args.Name || target.attempt != attempt {
+		return false, ""
+	}
+	if !target.announced {
+		return true, ""
+	}
+	store, err := client.nodeJobStoreForCommand()
+	if err != nil {
+		return false, "record_unavailable"
+	}
+	record, err := store.Get(ctx, args.Job)
+	if err != nil {
+		return false, "record_unavailable"
+	}
+	switch record["state"] {
+	case "completed", "lost", "escalated":
+		return false, ""
+	}
+	return true, ""
 }
 
 // bindCloseOp checks the job's ledger proof (readNodeCloseTarget): its
@@ -220,12 +278,19 @@ func readNodeCloseTarget(job *os.Root) (nodeCloseTarget, error) {
 // preempted without touching herdr. Otherwise the operation is (still)
 // registered and the proof is returned for the guarded close. The caller
 // holds nodeCommandMu.
-func (client *HubClient) bindCloseOp(job *os.Root, op fleet.CloseOp, resuming bool, args nodePaneCloseOpArgs) (fleet.CloseOp, *nodeCloseTarget, string, string) {
+func (client *HubClient) bindCloseOp(ctx context.Context, job *os.Root, op fleet.CloseOp, resuming bool, args nodePaneCloseOpArgs) (fleet.CloseOp, *nodeCloseTarget, string, string) {
 	target, err := readNodeCloseTarget(job)
 	if err != nil {
 		return op, nil, "", "journal_failed"
 	}
-	bound := target.receipt && !target.ended && target.pane == args.PaneID && target.label == args.Name && (!resuming || target.attempt == op.Attempt)
+	attempt := target.attempt
+	if resuming {
+		attempt = op.Attempt
+	}
+	bound, code := client.closeTargetBound(ctx, args, target, attempt)
+	if code != "" {
+		return op, nil, "", code
+	}
 	now := client.nowUTC()
 	switch {
 	case resuming && !bound:
@@ -239,7 +304,7 @@ func (client *HubClient) bindCloseOp(job *os.Root, op fleet.CloseOp, resuming bo
 	case !bound:
 		return op, nil, nodeCloseOpMismatch, ""
 	}
-	op = fleet.CloseOp{RequestID: args.RequestID, PaneID: args.PaneID, Attempt: target.attempt, State: fleet.CloseOpRegistered, Created: now, Updated: now}
+	op = fleet.CloseOp{RequestID: args.RequestID, PaneID: args.PaneID, Attempt: attempt, State: fleet.CloseOpRegistered, Created: now, Updated: now}
 	if fleet.WriteCloseOp(job, op) != nil {
 		return op, nil, "", "journal_failed"
 	}
@@ -254,7 +319,8 @@ func (client *HubClient) finishCloseOp(job *os.Root, op fleet.CloseOp, state str
 	return nodePaneCloseOpResult{Outcome: state}, ""
 }
 
-// nodePaneCloseStatus reads one close operation.
+// nodePaneCloseStatus reads one close operation. The caller holds
+// nodeCommandMu.
 func (client *HubClient) nodePaneCloseStatus(args nodeCloseOpRefArgs) (any, string) {
 	return client.nodeCloseOpRef(args, false)
 }
@@ -277,7 +343,7 @@ func (client *HubClient) nodeCloseOpRef(args nodeCloseOpRefArgs, release bool) (
 	}
 	defer job.Close()
 	op, found, err := fleet.ReadCloseOp(job, args.RequestID)
-	if err != nil {
+	if err != nil || (found && fleet.SyncCloseOps(job) != nil) {
 		return nil, "journal_failed"
 	}
 	if !found {

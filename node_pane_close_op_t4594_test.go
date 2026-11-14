@@ -437,10 +437,81 @@ func TestCloseOpEscalationEndsTheAttempt_t4594(t *testing.T) {
 		t.Fatalf("closed an escalated attempt: %v", fake.calls)
 	}
 
-	announced := t.TempDir()
-	seedCloseOpJob(t, announced)
-	addCloseOpEvent(t, announced, "00003-job.lost.json", `{"kind":"job.lost","created_at":"2026-11-14T00:00:02Z","payload":{"pane_id":"w1:p1","reason":"quota_stop","pool":"claude"}}`)
-	wantCloseOp(t, closeOpNode(t, announced, idlePaneHerdr()), "op-1", fleet.CloseOpClosed, false)
+}
+
+// A quota stop announced for the hub's hand-over is not an end by itself: the
+// hk record decides whether the hand-over grace already ended the job. A live
+// record leaves the attempt bound, a terminal one does not, and an unreadable
+// one refuses without guessing.
+func TestCloseOpAnnouncedQuotaStopAsksHK_t4594(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		state   string
+		getErr  error
+		outcome string
+		code    string
+	}{
+		{"hand-over pending", "spawned", nil, fleet.CloseOpClosed, ""},
+		{"grace already ended it", "lost", nil, nodeCloseOpMismatch, ""},
+		{"record unreadable", "spawned", errors.New("hk down"), "", "record_unavailable"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			inbox := t.TempDir()
+			seedCloseOpJob(t, inbox)
+			addCloseOpEvent(t, inbox, "00003-job.lost.json", `{"kind":"job.lost","created_at":"2026-11-14T00:00:02Z","payload":{"pane_id":"w1:p1","reason":"quota_stop","pool":"claude"}}`)
+			fake := idlePaneHerdr()
+			client := closeOpNode(t, inbox, fake)
+			store := &roleJobs{records: map[string]map[string]any{closeOpJob: {"state": test.state}}}
+			if test.getErr != nil {
+				store.getErr = map[string]error{closeOpJob: test.getErr}
+			}
+			client.nodeJobs = store
+			result, code := nodeRun(t, client, nodeCommandPaneCloseOp, closeOpArgs("op-1"))
+			if code != test.code || (test.code == "" && result["outcome"] != test.outcome) {
+				t.Fatalf("result=%v code=%q", result, code)
+			}
+			if test.outcome != fleet.CloseOpClosed && fake.called("pane", "close") != 0 {
+				t.Fatalf("closed: %v", fake.calls)
+			}
+		})
+	}
+}
+
+// Completion receipts end the attempt: the settled record and the legacy
+// job.completion event, not only job.completed.
+func TestCloseOpCompletionReceiptsEndTheAttempt_t4594(t *testing.T) {
+	for _, kind := range []string{"job.record_settled", "job.completion"} {
+		inbox := t.TempDir()
+		seedCloseOpJob(t, inbox)
+		addCloseOpEvent(t, inbox, "00003-"+kind+".json", `{"kind":"`+kind+`","created_at":"2026-11-14T00:00:02Z","payload":{}}`)
+		fake := idlePaneHerdr()
+		wantCloseOp(t, closeOpNode(t, inbox, fake), "op-1", nodeCloseOpMismatch, false)
+		if len(fake.calls) != 0 {
+			t.Fatalf("%s: closed a completed attempt: %v", kind, fake.calls)
+		}
+	}
+}
+
+// The proof is read again after the settle: a re-prompt the watcher records
+// during it preempts the close, which never runs.
+func TestCloseOpRepromptDuringSettlePreempts_t4594(t *testing.T) {
+	inbox := t.TempDir()
+	fake := idlePaneHerdr()
+	client := closeOpNode(t, inbox, fake)
+	run := fake.run
+	client.nodeHerdr = func(ctx context.Context, args ...string) ([]byte, error) {
+		// The first look happens before the settle; the watcher records a
+		// re-prompt then.
+		if len(args) >= 2 && args[0] == "agent" && args[1] == "list" && fake.called("agent", "list") == 0 {
+			addCloseOpEvent(t, inbox, "00003-job.reprompted.json", `{"kind":"job.reprompted","created_at":"2026-11-14T00:00:02Z","payload":{}}`)
+		}
+		return run(ctx, args...)
+	}
+	wantCloseOp(t, client, "op-1", fleet.CloseOpPreempted, false)
+	if fake.called("pane", "close") != 0 {
+		t.Fatalf("closed a re-prompted attempt: %v", fake.calls)
+	}
+	wantCloseOp(t, client, "op-1", fleet.CloseOpPreempted, true)
 }
 
 // Every herdr call of a close operation runs in the session its job's
