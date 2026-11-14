@@ -686,7 +686,7 @@ func (a *App) spawnHub(ctx context.Context, s Spawn, brief string, c *placeCandi
 		if err == nil && reply.RC == 0 && reply.Error == "" && reply.Status == "" && reply.Pane != "" && s.placement != nil && !s.placement.placed {
 			s.placement.started = true
 			s.placement.placed = true
-			s.placement.execution = placementExecution{Host: c.name}
+			s.placement.execution = PlacementExecution{Host: c.name}
 		}
 		if err != nil {
 			var he *HubError

@@ -358,6 +358,7 @@ func (h *HubServer) runSpawnCoordinator(parent context.Context) {
 			}
 		}
 		h.flushSpawnNotifications(ctx)
+		h.flushPlacementRecords(ctx)
 		select {
 		case <-ctx.Done():
 			return
@@ -436,6 +437,10 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 		h.finishSpawnOutcome(task, hubSpawnOutcome{RC: 78, Stage: "placement", Reason: "configuration", Retryable: true})
 		return
 	}
+	// The queue core's outbox owns this spawn's hk placement record: persist
+	// every trace the App emits so the record survives the App and a restart.
+	app.PlacementOutbox = true
+	app.PlacementTrace = func(tr fleet.PlacementTrace) { h.notePlacementTrace(task, tr) }
 	if ctx.Err() != nil {
 		h.finishSpawnOutcome(task, hubSpawnOutcome{RC: 124, Stage: "placement", Reason: "timeout", Retryable: true})
 		return

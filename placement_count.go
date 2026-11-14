@@ -195,6 +195,9 @@ func (h *HubServer) refreshFleetLoad(ctx context.Context) {
 func (h *HubServer) completeSpawn(ctx context.Context, task hubSpawnTask, outcome hubSpawnOutcome) (bool, error) {
 	changed, err := h.inbox.store.completeSpawn(ctx, task, outcome, h.now().UTC())
 	if changed {
+		if spawnAttemptTerminal(spawnOutcomeStatus(outcome)) {
+			h.deliverPlacementRecord(h.closeCtx, task.Request.RequestID, task.Attempt)
+		}
 		switch spawnOutcomeStatus(outcome) {
 		case "failed", "retryable":
 			h.releasePlacementCount(task.Job)

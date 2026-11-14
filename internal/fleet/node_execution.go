@@ -102,7 +102,7 @@ type ExecutionReceipt struct {
 	CWD     string `json:"cwd"`
 	Label   string `json:"label"`
 	// Pool and AccountKey are what the executing host placed the job on
-	// (placementExecution): the hub records them so an exhausted pool can
+	// (PlacementExecution): the hub records them so an exhausted pool can
 	// find its live jobs (docs/quota-stop.md, "An exhausted pool").
 	Pool       string `json:"pool,omitempty"`
 	AccountKey string `json:"account_key,omitempty"`

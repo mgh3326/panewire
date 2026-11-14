@@ -372,7 +372,7 @@ func TestSpawnedSelectionMapsTraceAndOverride(t *testing.T) {
 	}, OverrideReason: "fixture"}
 	s.placement = &placementDecision{
 		plan:      &placePlan{candidates: []placeCandidate{{name: "host-b", eligible: true}, {name: "host-a", outcome: "unreachable"}}},
-		execution: placementExecution{Host: "host-b"},
+		execution: PlacementExecution{Host: "host-b"},
 	}
 	h.claimJob(s.Job, float64(42), "test-host")
 	a.spawnedJobRecord(context.Background(), s, Seat{Family: "openai", Kind: "cmd"}, Launch{ModelID: "model-x"}, "pane", "pool", "owner")
@@ -434,7 +434,7 @@ func TestSpawnedSelectionTrimsUnderHKLimit(t *testing.T) {
 func TestSpawnedSelectionKeepsLocalHostForAutoPlacement(t *testing.T) {
 	s := Spawn{Host: "auto", placement: &placementDecision{
 		plan:      &placePlan{candidates: []placeCandidate{{name: "local", eligible: true}}},
-		execution: placementExecution{Host: "local"},
+		execution: PlacementExecution{Host: "local"},
 	}}
 	got := jobSelection(s, jobSelectionSource(s))
 	host := got["host"].(map[string]any)
@@ -446,7 +446,7 @@ func TestSpawnedSelectionKeepsLocalHostForAutoPlacement(t *testing.T) {
 func TestSpawnedSelectionKeepsInvalidWinnerAdmittedAndFirst(t *testing.T) {
 	s := Spawn{Host: "auto", placement: &placementDecision{
 		plan:      &placePlan{candidates: []placeCandidate{{name: "Mac Studio", eligible: true}, {name: "remote-2", eligible: true}}},
-		execution: placementExecution{Host: "Mac Studio"},
+		execution: PlacementExecution{Host: "Mac Studio"},
 	}}
 	got := jobSelection(s, jobSelectionSource(s))
 	host := got["host"].(map[string]any)

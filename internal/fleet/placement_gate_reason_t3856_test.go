@@ -174,7 +174,7 @@ func TestPlacementRecordCarriesGateCodeInHostReason(t *testing.T) {
 		sort.Strings(out)
 		return out
 	}
-	record := func(coded bool) placementRecord {
+	record := func(coded bool) PlacementRecord {
 		a, s := remotePlacementFixture(t, "ssh", "auto", "refused", true)
 		a.Quota.(*fakeQuota).GateDo = func(r QuotaRequest) (string, error) {
 			if coded {
@@ -188,14 +188,14 @@ func TestPlacementRecordCarriesGateCodeInHostReason(t *testing.T) {
 		}
 		return onePlacement(t, h)
 	}
-	hostRow := func(r placementRecord) placementCandidateRecord {
+	hostRow := func(r PlacementRecord) PlacementCandidateRecord {
 		for _, c := range r.Candidates {
 			if c.Host == "host-b" {
 				return c
 			}
 		}
 		t.Fatalf("no host-b row: %+v", r.Candidates)
-		return placementCandidateRecord{}
+		return PlacementCandidateRecord{}
 	}
 	coded, plain := record(true), record(false)
 	if row := hostRow(coded); row.Outcome != "skipped" || row.Reason != "gate_blocked:operator_request_not_applicable" {
