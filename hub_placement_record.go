@@ -73,6 +73,7 @@ type pendingPlacementSnapshot struct {
 	Job            string
 	Status         string
 	CurrentAttempt int
+	Payload        []byte
 }
 
 // pendingPlacementSnapshots lists the attempts whose records are not yet
@@ -80,7 +81,7 @@ type pendingPlacementSnapshot struct {
 func (s *laneInboxStore) pendingPlacementSnapshots(parent context.Context) ([]pendingPlacementSnapshot, error) {
 	ctx, done := s.op(parent)
 	defer done()
-	rows, err := s.db.QueryContext(ctx, `SELECT p.request_id,p.attempt,o.job,o.status,o.attempt FROM spawn_placement_snapshots p JOIN spawn_operations o ON o.request_id=p.request_id WHERE p.recorded=0`)
+	rows, err := s.db.QueryContext(ctx, `SELECT p.request_id,p.attempt,o.job,o.status,o.attempt,p.payload FROM spawn_placement_snapshots p JOIN spawn_operations o ON o.request_id=p.request_id WHERE p.recorded=0`)
 	if err != nil {
 		return nil, err
 	}
@@ -88,7 +89,7 @@ func (s *laneInboxStore) pendingPlacementSnapshots(parent context.Context) ([]pe
 	var out []pendingPlacementSnapshot
 	for rows.Next() {
 		var row pendingPlacementSnapshot
-		if err := rows.Scan(&row.RequestID, &row.Attempt, &row.Job, &row.Status, &row.CurrentAttempt); err != nil {
+		if err := rows.Scan(&row.RequestID, &row.Attempt, &row.Job, &row.Status, &row.CurrentAttempt, &row.Payload); err != nil {
 			return nil, err
 		}
 		out = append(out, row)
@@ -115,6 +116,14 @@ func (h *HubServer) notePlacementTrace(task hubSpawnTask, tr fleet.PlacementTrac
 	}
 	if err := h.inbox.store.saveSpawnPlacementSnapshot(h.closeCtx, task.Request.RequestID, task.Attempt, payload); err != nil {
 		h.logger.Warn("placement snapshot could not be persisted", "request_id", task.Request.RequestID, "job", task.Job, "attempt", task.Attempt)
+		return
+	}
+	// A trace carrying an outcome is the record finishPlacement completed:
+	// the attempt is decided even when the request stays accepted (a quota
+	// refresh or host refusal that retries later), so it delivers now. An
+	// incomplete trace waits for the attempt's terminal row.
+	if tr.Outcome != "" {
+		h.deliverPlacementRecord(h.closeCtx, task.Request.RequestID, task.Attempt)
 		return
 	}
 	current, err := h.inbox.store.spawnTask(h.closeCtx, task.Request.RequestID)
@@ -148,7 +157,12 @@ func (h *HubServer) deliverPlacementRecord(ctx context.Context, requestID string
 		return
 	}
 	task, err := h.inbox.store.spawnTask(ctx, requestID)
-	if err != nil || task.Attempt != attempt {
+	if err != nil {
+		return
+	}
+	if task.Attempt != attempt && tr.Outcome == "" {
+		// A superseded attempt whose trace carries no verdict cannot be
+		// rebuilt: the operation's outcome now belongs to a newer attempt.
 		return
 	}
 	app, err := h.placementRecordApp()
@@ -156,7 +170,9 @@ func (h *HubServer) deliverPlacementRecord(ctx context.Context, requestID string
 		h.logger.Warn("placement record delivery unavailable; snapshot remains pending", "request_id", requestID, "attempt", attempt)
 		return
 	}
-	delivered, err := app.EnqueuePlacementRecord(ctx, hubPlacementRecord(task, tr))
+	rec := hubPlacementRecord(task, tr)
+	rec.Attempt = attempt
+	delivered, err := app.EnqueuePlacementRecord(ctx, rec)
 	if err != nil {
 		h.logger.Warn("placement record could not be enqueued; snapshot remains pending", "request_id", requestID, "attempt", attempt, "error", err)
 		return
@@ -239,6 +255,25 @@ func hubPlacementRecord(task hubSpawnTask, tr fleet.PlacementTrace) fleet.Placem
 	return rec
 }
 
+// placementDelivery holds the spawn App's delivery-relevant settings: the
+// state directory the placement spool lives in and the shared-quota override
+// that points the record post at the right hk. The queue core's App may be
+// gone before the node replies, so the outbox rebuilds its own.
+type placementDelivery struct {
+	stateDir string
+	home     string
+	quota    map[string]any
+}
+
+// notePlacementDeliveryApp copies the spawn App's delivery settings so the
+// outbox posts through the same hk endpoint and spools in the same state
+// directory the App would have used.
+func (h *HubServer) notePlacementDeliveryApp(app *fleet.App) {
+	h.placementAppMu.Lock()
+	defer h.placementAppMu.Unlock()
+	h.placementDelivery = placementDelivery{stateDir: app.StateDir, home: app.Home, quota: app.Config.Quota}
+}
+
 // placementRecordApp returns the fleet App whose state directory holds the
 // placement spool and whose hk client delivers the records. It is created on
 // first use; a hub restart builds a fresh one.
@@ -255,6 +290,16 @@ func (h *HubServer) placementRecordApp() (*fleet.App, error) {
 	app, err := build()
 	if err != nil {
 		return nil, err
+	}
+	d := h.placementDelivery
+	if d.stateDir != "" {
+		app.StateDir = d.stateDir
+	}
+	if d.home != "" {
+		app.Home = d.home
+	}
+	if d.quota != nil {
+		app.Config.Quota = d.quota
 	}
 	h.placementRecordClient = app
 	return app, nil
@@ -302,6 +347,14 @@ func (h *HubServer) flushPlacementRecords(ctx context.Context) {
 			continue
 		}
 		if spawnAttemptTerminal(row.Status) && row.CurrentAttempt == row.Attempt {
+			h.deliverPlacementRecord(h.closeCtx, row.RequestID, row.Attempt)
+			continue
+		}
+		// A superseded attempt is still owed its record when the snapshot is
+		// self-contained (the trace carries its own verdict); only one whose
+		// outcome a newer attempt overwrote cannot be rebuilt and is sealed.
+		var tr fleet.PlacementTrace
+		if json.Unmarshal(row.Payload, &tr) == nil && tr.Outcome != "" {
 			h.deliverPlacementRecord(h.closeCtx, row.RequestID, row.Attempt)
 			continue
 		}

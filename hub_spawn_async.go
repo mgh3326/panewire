@@ -441,6 +441,7 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 	// every trace the App emits so the record survives the App and a restart.
 	app.PlacementOutbox = true
 	app.PlacementTrace = func(tr fleet.PlacementTrace) { h.notePlacementTrace(task, tr) }
+	h.notePlacementDeliveryApp(app)
 	if ctx.Err() != nil {
 		h.finishSpawnOutcome(task, hubSpawnOutcome{RC: 124, Stage: "placement", Reason: "timeout", Retryable: true})
 		return

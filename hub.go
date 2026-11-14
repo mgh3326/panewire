@@ -426,10 +426,13 @@ type HubServer struct {
 	placementRecordClient *fleet.App
 	placementAppMu        sync.Mutex
 	// placementAppFn builds the delivery App in tests; nil uses fleet.New.
-	placementAppFn  func() (*fleet.App, error)
-	quotaRefresh    hubQuotaRefreshScheduler
-	spawnActions    hubSpawnActions
-	spawnAdmissions hubSpawnAdmissions
+	placementAppFn func() (*fleet.App, error)
+	// placementDelivery copies the spawn App's delivery-relevant settings so
+	// the outbox's App spools and posts where placement would have.
+	placementDelivery placementDelivery
+	quotaRefresh      hubQuotaRefreshScheduler
+	spawnActions      hubSpawnActions
+	spawnAdmissions   hubSpawnAdmissions
 	// drain is the SIGTERM state (hub_drain.go).
 	drain hubDrain
 	// spawnOrphanProbed is when the hub last probed each stranded request's

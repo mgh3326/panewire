@@ -103,6 +103,10 @@ type placementDecision struct {
 	started       bool
 	placed        bool
 	recorded      bool
+	// undecided marks a stop whose outcome the node may still change (a lost
+	// or pending hub answer): the outbox leaves the verdict to the attempt's
+	// terminal result instead of freezing this error.
+	undecided bool
 }
 
 // pendingPlacement is local-only. Old executors may return an OK receipt
@@ -278,9 +282,15 @@ func (a *App) finishPlacement(ctx context.Context, s Spawn, err error) {
 	if a.PlacementOutbox {
 		// The hub's durable outbox owns this record: the trace carries the
 		// completed payload, which its deliverer posts unchanged when the
-		// attempt's terminal result asks for it.
+		// attempt's terminal result asks for it. An undecided stop (a lost
+		// or pending hub answer) is no verdict: the node may still finish
+		// the spawn, so the terminal result names the outcome instead.
+		tr := placementTraceFromRecord(r)
+		if s.placement.undecided {
+			tr.Outcome, tr.Reason = "", ""
+		}
 		if a.PlacementTrace != nil {
-			a.PlacementTrace(placementTraceFromRecord(r))
+			a.PlacementTrace(tr)
 		}
 		return
 	}
@@ -431,9 +441,11 @@ func (a *App) FlushPlacements() {
 
 // PlacementSpooled reports whether a record file still waits in the spool:
 // false means it was delivered or quarantined, so its snapshot can be sealed.
+// Only a confirmed absence proves that — a permission or I/O error leaves
+// the record pending so a later flush retries it.
 func (a *App) PlacementSpooled(job string, attempt int) bool {
 	_, err := os.Stat(filepath.Join(a.stateDir(), "placements", job+"."+strconv.Itoa(attempt)+".json"))
-	return err == nil
+	return !os.IsNotExist(err)
 }
 
 // selectionCandidates projects a selection's host trace into one candidate row

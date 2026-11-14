@@ -267,6 +267,10 @@ type candResult struct {
 	ok          bool
 	stop        error
 	unreachable bool
+	// undecided marks a stop after which the node may still finish the
+	// spawn (a lost or pending hub answer); the placement verdict is not
+	// this error.
+	undecided bool
 	// quotaRefused marks a candidate the quota gate refused before any SSH.
 	quotaRefused bool
 	rc           int
