@@ -54,3 +54,21 @@ func TestAutoSelectionMovesToSeatOnHostWithMoreFreeCapacity(t *testing.T) {
 		}
 	}
 }
+
+func TestPlacementShadowKeepsPlacementOrderWhenSelectionMovesHosts(t *testing.T) {
+	a, s, src := workerFleet(t, map[string]float64{"mac-b": 100, "cloud-small": 120, "cloud-tiny": 50, "pi": 40})
+	src.hosts[0].Decided = true
+	events := shadowEvents(a)
+
+	sel, err := a.selectProfile(context.Background(), s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sel.chosen.host != "cloud-small" {
+		t.Fatalf("selection chose %s, want higher-capacity cloud-small", sel.chosen.host)
+	}
+	shadow := shadowEventOf(t, *events).Shadow
+	if shadow.Live.First != "mac-b" || shadow.Arms[shadowArmFixed].First != "mac-b" || shadow.Arms[shadowArmFixed].Outcome != shadowAgree {
+		t.Fatalf("placement shadow compared selection against placement: live=%+v fixed=%+v", shadow.Live, shadow.Arms[shadowArmFixed])
+	}
+}
