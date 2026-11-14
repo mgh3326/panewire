@@ -1174,11 +1174,20 @@ version=… policy_source=…` line.
 ## Role routing
 
 `policy/model-routing` supplies the v1 role allowlists. Selection filters
-profiles by role, retirement, gate, seat, and family before applying the
-`policy/quota-stop` order. `spawn`, `plan`, and `resolve` enforce
+profiles by role, retirement, gate, seat, family, and launch effort before
+applying the `policy/quota-stop` order. `spawn`, `plan`, and `resolve` enforce
 this boundary. An explicit `-m PROFILE` requires `--override-reason`, but
 that reason overrides placement only. A retired or role-ineligible profile
 is refused before placement.
+
+A catalog row that names no effort is the profile's default rung, and
+admission resolves its effort from the profile's lowest ordinary named rung.
+When the profile has no live named rung admission keeps eligible — an unrated
+rung counts only for `consult` or `builder`, or when the request arms it with
+E6 — there is nothing to resolve, so selection drops the row as
+`no_launch_effort` and tries the next candidate instead of failing the whole
+plan on it (hk 4605). A profile named explicitly (`spawn -m`) still takes the
+catalog's own refusal, `catalog row has no launch effort`.
 
 ### Role names
 

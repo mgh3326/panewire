@@ -138,16 +138,16 @@ func TestLaunchArgsRungless(t *testing.T) {
 
 func agyRows() []CatalogRow {
 	return []CatalogRow{
-		{Profile: "agy-flash38-high", Grade: "A", Pool: "agy", Gate: "default", ModelID: "gemini-3.8-flash-high"},
-		{Profile: "agy-flash38-medium", Grade: "B", Pool: "agy", Gate: "default", ModelID: "gemini-3.8-flash-medium"},
-		{Profile: "agy-flash38-low", Grade: "C", Pool: "agy", Gate: "default", ModelID: "gemini-3.8-flash-low"},
-		{Profile: "agy-opus46", Grade: "S", Pool: "agy", Gate: "escalation", ModelID: "claude-opus-4-6-thinking"},
+		{Profile: "agy-flash38-high", Effort: "high", Grade: "A", Pool: "agy", Gate: "default", ModelID: "gemini-3.8-flash-high"},
+		{Profile: "agy-flash38-medium", Effort: "medium", Grade: "B", Pool: "agy", Gate: "default", ModelID: "gemini-3.8-flash-medium"},
+		{Profile: "agy-flash38-low", Effort: "low", Grade: "C", Pool: "agy", Gate: "default", ModelID: "gemini-3.8-flash-low"},
+		{Profile: "agy-opus46", Effort: "high", Grade: "S", Pool: "agy", Gate: "escalation", ModelID: "claude-opus-4-6-thinking"},
 		{Profile: "fable", Grade: "S+", Pool: "claude", Gate: "consult_only", ModelID: "claude-fable-5-1"},
 		{Profile: "sonnet", Effort: "high", Grade: "A", Pool: "claude", Gate: "default", ModelID: "m"},
 	}
 }
 
-func TestSelectAdmitsAgyRungless(t *testing.T) {
+func TestSelectAdmitsAgyRungs(t *testing.T) {
 	waste := true
 	pools := map[string]PoolView{"agy": {Status: "ok", Class: "spend", Waste: &waste}, "claude": {Status: "ok", Class: "spend"}}
 	a, s, q := selFixture(t, "B", agyRows(), pools, []string{"agy", "claude"})
@@ -157,18 +157,23 @@ func TestSelectAdmitsAgyRungless(t *testing.T) {
 		t.Fatal(e)
 	}
 	c := sel.chosen
-	if c.seatName != "agy-flash38-medium" || c.row.Effort != "" {
+	if c.seatName != "agy-flash38-medium" || c.row.Effort != "medium" {
 		t.Fatalf("the cheapest covering waste-pool rung must win: %+v", c.row)
 	}
 	rec := sel.record()
-	for profile, want := range map[string]string{"agy-flash38-high": "below_choice", "agy-flash38-low": "dropped:grade_insufficient", "agy-opus46": "dropped:gate_class", "fable": "dropped:gate_class"} {
-		if got := candOutcome(rec, profile, "")["outcome"]; got != want {
-			t.Errorf("%s: %v want %s", profile, got, want)
+	for _, x := range []struct{ profile, effort, want string }{
+		{"agy-flash38-high", "high", "below_choice"},
+		{"agy-flash38-low", "low", "dropped:grade_insufficient"},
+		{"agy-opus46", "high", "dropped:gate_class"},
+		{"fable", "", "dropped:gate_class"},
+	} {
+		if got := candOutcome(rec, x.profile, x.effort)["outcome"]; got != x.want {
+			t.Errorf("%s@%s: %v want %s", x.profile, x.effort, got, x.want)
 		}
 	}
 	last := q.Calls[len(q.Calls)-1]
-	if last.GateProfile != "agy-flash38-medium" || last.Profile != "agy-flash38-medium" || last.Effort != "" {
-		t.Fatalf("the gate is called by the profile's own name with no effort: %+v", last)
+	if last.GateProfile != "agy-flash38-medium" || last.Profile != "agy-flash38-medium" || last.Effort != "medium" {
+		t.Fatalf("the gate is called by the profile's own name at its rung: %+v", last)
 	}
 }
 
@@ -188,16 +193,28 @@ func TestSelectEscalationAgyNeedsAllowEscalation(t *testing.T) {
 	}
 }
 
-func TestSelectRunglessSeatNeedingEffortStaysDropped(t *testing.T) {
-	rows := []CatalogRow{{Profile: "kiro-cheap", Grade: "C", Pool: "kiro", Gate: "default", ModelID: "m"}, {Profile: "oc-glm", Grade: "B", Pool: "clinepass", Gate: "default", ModelID: "glm-5.2"}}
-	a, s, q := selFixture(t, "C", rows, map[string]PoolView{"kiro": {Status: "ok", Class: "spend"}, "clinepass": {Status: "ok", Class: "spend"}}, []string{"kiro", "clinepass"})
-	q.GateDo = gatePools(map[string]string{"kiro-cheap": "kiro", "oc-glm": "clinepass"})
-	sel, e := a.selectProfile(context.Background(), s)
-	if e != nil || sel.chosen.seatName != "oc-glm" {
-		t.Fatalf("an opencode seat has no effort to pass: %v", e)
+// A rung-less row drops for two different reasons: the kiro launcher needs an
+// effort the row does not name (the seat rule), and a profile with no named
+// rung gives launch resolution nothing to resolve (hk 4605), so neither is
+// chosen over a rung that can start.
+func TestSelectRunglessRowsDrop(t *testing.T) {
+	rows := []CatalogRow{
+		{Profile: "kiro-cheap", Grade: "C", Pool: "kiro", Gate: "default", ModelID: "m"},
+		{Profile: "oc-glm", Grade: "B", Pool: "clinepass", Gate: "default", ModelID: "glm-5.2"},
+		{Profile: "sonnet", Effort: "high", Grade: "C", Pool: "claude", Gate: "default", ModelID: "m"},
 	}
-	if got := candOutcome(sel.record(), "kiro-cheap", "")["outcome"]; got != "dropped:effort_empty" {
+	a, s, q := selFixture(t, "C", rows, map[string]PoolView{"kiro": {Status: "ok", Class: "spend"}, "clinepass": {Status: "ok", Class: "spend"}, "claude": {Status: "ok", Class: "spend"}}, []string{"kiro", "clinepass", "claude"})
+	q.GateDo = gatePools(map[string]string{"kiro-cheap": "kiro", "oc-glm": "clinepass", "sonnet": "claude"})
+	sel, e := a.selectProfile(context.Background(), s)
+	if e != nil || sel.chosen.seatName != "sonnet" {
+		t.Fatalf("the rung that can start must be chosen: %v", e)
+	}
+	rec := sel.record()
+	if got := candOutcome(rec, "kiro-cheap", "")["outcome"]; got != "dropped:effort_empty" {
 		t.Fatalf("the kiro launcher passes an effort, so its rung-less row stays dropped: %v", got)
+	}
+	if got := candOutcome(rec, "oc-glm", "")["outcome"]; got != "dropped:no_launch_effort" {
+		t.Fatalf("an opencode row with no named rung has no launch effort: %v", got)
 	}
 }
 
