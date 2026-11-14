@@ -413,3 +413,68 @@ func TestAppliedReportClosureSettlesInboxItemAndAckWindow(t *testing.T) {
 		t.Fatalf("closed row broadcast relay.unconfirmed: %s", unconfirmed[0])
 	}
 }
+
+// Another node's registration can start a global replay while this node's
+// applied report is still in flight. Its rows must wait for that report.
+func TestReplayWaitsForDestinationAppliedReport(t *testing.T) {
+	rig := t989Start(t, "w1:pA")
+	ids, _ := rig.deliverAndLoseAcks([]string{"already read"}, 1)
+	attempts := rig.row(ids[0]).Attempts
+	rig.startHub()
+	rig.send("host-a", rig.dest, `{"type":"hello","machine_id":"host-a","version":"panewire-t2777","capabilities":["applied_v1"]}`)
+	// This is the same global walk a different node's registration invokes.
+	rig.hub.replayUndeliveredLaneEvents(context.Background())
+	if got := drainRelays(rig.dest); got != 0 {
+		t.Fatalf("replayed %d rows before destination's applied report", got)
+	}
+	if row := rig.row(ids[0]); row.DeliveredAt != "" || row.Attempts != attempts {
+		t.Fatalf("pending report changed row: %+v", row)
+	}
+	rig.send("host-a", rig.dest, fmt.Sprintf(`{"type":"applied","applied":{"%s":[%d]}}`, t989Lane, ids[0]))
+	eventually(t, 5*time.Second, "report closes already-read row", func() bool { return rig.row(ids[0]).DeliveredAt != "" })
+	if got := drainRelays(rig.dest); got != 0 {
+		t.Fatalf("replayed %d rows after applied report", got)
+	}
+}
+
+func TestReplayDoesNotSummarizeWhileDestinationReportPending(t *testing.T) {
+	rig := t989StartWithInbox(t)
+	ids := rig.gapRows(relayReplayGapThreshold + 1)
+	rig.startHub()
+	rig.send("host-a", rig.dest, `{"type":"hello","machine_id":"host-a","version":"panewire-t2777","capabilities":["applied_v1"]}`)
+	// Both startup and registration walks must leave the pending lane alone.
+	rig.hub.replayUndeliveredRelayEvents(context.Background())
+	rig.hub.replayUndeliveredLaneEvents(context.Background())
+	if got := drainRelays(rig.dest); got != 0 {
+		t.Fatalf("queued %d directives before the applied report", got)
+	}
+	for _, id := range ids {
+		if row := rig.row(id); row.DeliveredTo != "" || row.DeliveredAt != "" {
+			t.Fatalf("row %d retired while report was pending: %+v", id, row)
+		}
+	}
+	rig.send("host-a", rig.dest, `{"type":"applied","applied":{}}`)
+	eventually(t, 5*time.Second, "gap summary after report", func() bool { return len(rig.dest.relays) > 0 })
+	if directive := <-rig.dest.relays; !strings.Contains(directive.Text, "gap:") {
+		t.Fatalf("expected a gap summary after report, got %q", directive.Text)
+	}
+}
+
+func TestSupersededAppliedReportDoesNotReleaseNewRegistration(t *testing.T) {
+	rig := t989Start(t, "w1:pA")
+	rig.deliverAndLoseAcks([]string{"unreported"}, 0)
+	rig.startHub()
+	wire := `{"type":"hello","machine_id":"host-a","version":"panewire-t2777","capabilities":["applied_v1"]}`
+	rig.send("host-a", rig.dest, wire)
+	rig.hub.mu.Lock()
+	old := rig.hub.nodes["host-a"]
+	rig.hub.mu.Unlock()
+	rig.send("host-a", rig.dest, wire)
+	// An old report finishing late must not release the second hello.
+	rig.hub.handleAppliedReport("host-a", old, nil)
+	if got := drainRelays(rig.dest); got != 0 {
+		t.Fatalf("superseded report released %d rows", got)
+	}
+	rig.send("host-a", rig.dest, `{"type":"applied","applied":{}}`)
+	eventually(t, 5*time.Second, "new report releases replay", func() bool { return len(rig.dest.relays) == 1 })
+}

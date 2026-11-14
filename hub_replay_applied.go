@@ -52,9 +52,41 @@ func decodeHubAppliedReport(raw json.RawMessage) (map[string][]int64, bool) {
 
 // handleAppliedReport is the registration's second half: it closes what the
 // node reports, then runs the replay the hello deferred.
-func (h *HubServer) handleAppliedReport(machine string, applied map[string][]int64) {
+func (h *HubServer) handleAppliedReport(machine string, registration *hubNodeRecord, applied map[string][]int64) {
+	h.replayMu.Lock()
+	h.mu.Lock()
+	current := registration != nil && h.nodes[machine] == registration && registration.agent != nil
+	h.mu.Unlock()
+	if !current {
+		h.replayMu.Unlock()
+		return
+	}
 	h.settleNodeApplied(context.Background(), machine, applied)
+	h.mu.Lock()
+	// A disconnect can happen while the report is being settled.
+	if h.nodes[machine] == registration && registration.agent != nil {
+		registration.appliedPending = false
+	}
+	h.mu.Unlock()
+	h.replayMu.Unlock()
 	h.replayUndeliveredLaneEvents(context.Background())
+}
+
+// replayAwaitsAppliedReport checks the current destination before any replay
+// side effects, including gap collection and retirement. replayMu keeps the
+// registration stable for the whole walk.
+func (h *HubServer) replayAwaitsAppliedReport(record handoffkeepRelayEvent) bool {
+	if record.Kind != "lane.event" {
+		return false
+	}
+	route, agent, routed := h.resolveRelayRoute(record.Kind, relayEventFromRecord(record))
+	if !routed || agent == nil {
+		return false
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	node := h.nodes[route.Machine]
+	return node != nil && node.agent == agent && node.appliedPending
 }
 
 // settleNodeApplied closes, as delivered to machine, every undelivered row of
