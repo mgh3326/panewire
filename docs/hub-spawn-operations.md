@@ -48,7 +48,12 @@ terminal refusal event or placement record. If the pass already contacted a
 host, its refusal remains in the durable candidate trace while the request
 stays accepted; the attempt's one record is posted when it ends. The hub
 logs a changed refresh failure with its machine, pool and reason; repeated
-identical failures are not logged on every retry.
+identical failures are not logged on every retry. A request that times out
+while parked on a refresh names that machine and pool and the last failure
+recorded for them in its outcome and fix text (`quota_refresh` on the saved
+result), instead of the queue-starved cause: the spawn queue never held it. The
+request's refresh keys and the last failure per key are stored in the hub
+database, so both survive a restart; a successful refresh clears its entry.
 
 Refreshes coalesce by machine and pool. At most four run at once, with at most
 one per node; waiting keys are considered in arrival order while busy nodes are
