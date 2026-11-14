@@ -51,6 +51,35 @@ func TestPlanDropsNoLaunchEffortRung_t4605(t *testing.T) {
 	}
 }
 
+// An unrated named rung resolves an effort only when admission keeps it: the
+// implementer role without the E6 arm excludes it, so the profile's rung-less
+// row still has no launch effort and drops; armed, the rung counts and the row
+// stays a candidate (hk 4605).
+func TestNoLaunchEffortCountsOnlyEligibleRungs_t4605(t *testing.T) {
+	rows := []CatalogRow{
+		{Profile: "devin-ds41", Grade: "B", Pool: "devin", Gate: "default", ModelID: "deepseek-v4-1-flash"},
+		{Profile: "devin-ds41", Effort: "high", Grade: "unrated", Pool: "devin", Gate: "default", ModelID: "deepseek-v4-1-flash"},
+		{Profile: "sonnet", Effort: "high", Grade: "C", Pool: "claude", Gate: "default", ModelID: "m"},
+	}
+	pools := map[string]PoolView{"devin": {Status: "ok", Class: "spend"}, "claude": {Status: "ok", Class: "spend"}}
+	a, s, q := selFixture(t, "C", rows, pools, []string{"devin", "claude"})
+	q.GateDo = gatePools(map[string]string{"devin-ds41": "devin", "sonnet": "claude"})
+	rec := func() map[string]any {
+		sel, e := a.selectProfile(context.Background(), s)
+		if e != nil {
+			t.Fatal(e)
+		}
+		return sel.record()
+	}
+	if got := candOutcome(rec(), "devin-ds41", "")["outcome"]; got != "dropped:no_launch_effort" {
+		t.Fatalf("an unrated-only named rung resolves no effort: %v", got)
+	}
+	s.E6Arm = "devin-ds41@high"
+	if got := candOutcome(rec(), "devin-ds41", "")["outcome"]; got == "dropped:no_launch_effort" {
+		t.Fatalf("the armed unrated rung resolves an effort: %v", got)
+	}
+}
+
 func TestPinnedNoLaunchEffortProfileRefuses_t4605(t *testing.T) {
 	a := testApp(t)
 	a.BenchCatalog = func(context.Context) ([]CatalogRow, error) {

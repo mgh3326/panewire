@@ -1180,11 +1180,12 @@ is refused before placement.
 
 A catalog row that names no effort is the profile's default rung, and
 admission resolves its effort from the profile's lowest ordinary named rung.
-When the profile has no live named rung there is nothing to resolve, so
-selection drops the row as `no_launch_effort` and tries the next candidate
-instead of failing the whole plan on it (hk 4605). A profile named explicitly
-(`spawn -m`) still takes the catalog's own refusal, `catalog row has no
-launch effort`.
+When the profile has no live named rung admission keeps eligible — an unrated
+rung counts only for `consult` or `builder`, or when the request arms it with
+E6 — there is nothing to resolve, so selection drops the row as
+`no_launch_effort` and tries the next candidate instead of failing the whole
+plan on it (hk 4605). A profile named explicitly (`spawn -m`) still takes the
+catalog's own refusal, `catalog row has no launch effort`.
 
 ### Role names
 
