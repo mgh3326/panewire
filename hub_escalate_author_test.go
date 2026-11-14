@@ -1171,3 +1171,17 @@ func TestEscalateAuthorRefusesLegacyWorkerWithOwnerESC(t *testing.T) {
 		t.Fatalf("owner did not receive a decision event: %+v", items)
 	}
 }
+
+// A node whose hello predates pane_close_question_v1 cannot check the pane's
+// open question, so the close is refused and the escalation keeps the author
+// pane rather than close it unguarded (hk 4658).
+func TestEscalateAuthorOldNodeKeepsThePane(t *testing.T) {
+	f := newEscalateFixture(t, "pw-task-old-node")
+	f.hub.mu.Lock()
+	delete(f.hub.nodes["machine-a"].capabilities, hubCapabilityCloseQuestion)
+	f.hub.mu.Unlock()
+	result, _ := f.escalate(t, nil)
+	if result.Code != "pane_not_closed" {
+		t.Fatalf("code=%q reason=%q, want pane_not_closed on a node without the capability", result.Code, result.Reason)
+	}
+}

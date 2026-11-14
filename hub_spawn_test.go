@@ -83,7 +83,7 @@ func t14NamedNodeToken(t *testing.T, hub *HubServer, server *httptest.Server, ma
 	t.Cleanup(func() { _ = connection.CloseNow() })
 	hello := map[string]any{"type": "hello", "machine_id": machine, "version": "t14", "accepting": accepting}
 	if spawnV2 {
-		hello["capabilities"] = []string{"spawn_v2", "spawn_ops_v1"}
+		hello["capabilities"] = []string{"spawn_v2", "spawn_ops_v1", hubCapabilityCloseQuestion}
 	}
 	if err := wsjson.Write(t.Context(), connection, hello); err != nil {
 		t.Fatal(err)

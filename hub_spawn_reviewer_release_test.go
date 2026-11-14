@@ -46,7 +46,7 @@ func reviewerReleaseKey(role string) string {
 // reviewerReleaseHub holds task 42 under role with an operation that ended in
 // wantStatus with outcome and an hk job in state spawned (a failed holder is
 // claimed).
-func reviewerReleaseHub(t *testing.T, role, wantStatus string, outcome hubSpawnOutcome) (*HubServer, *httptest.Server, hubSpawnTask) {
+func reviewerReleaseHub(t *testing.T, role, wantStatus string, outcome hubSpawnOutcome) (*HubServer, *httptest.Server, *roleJobs, hubSpawnTask) {
 	t.Helper()
 	t.Setenv(crashReportDSNEnv, "")
 	hub, err := NewHubServer(HubServerConfig{Tokens: map[string]string{"operator": t14OperatorToken, "machine-a": "node-token"}, InboxStorePath: filepath.Join(t.TempDir(), "inbox.sqlite3")})
@@ -75,7 +75,7 @@ func reviewerReleaseHub(t *testing.T, role, wantStatus string, outcome hubSpawnO
 	if err != nil || held.Status != wantStatus {
 		t.Fatalf("holder %+v %v", held, err)
 	}
-	return hub, server, held
+	return hub, server, jobs, held
 }
 
 // A reviewer pane that finished, or sits at a startup prompt, past the grace
@@ -117,7 +117,7 @@ func TestReviewerRelease(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			hub, server, held := reviewerReleaseHub(t, tc.role, tc.status, tc.outcome)
+			hub, server, _, held := reviewerReleaseHub(t, tc.role, tc.status, tc.outcome)
 			sink := captureHubLog(hub)
 			now := held.Deadline.Add(tc.since)
 			hub.now = func() time.Time { return now }
@@ -153,6 +153,9 @@ func TestReviewerRelease(t *testing.T) {
 			if closeArgs["pane_id"] != roleHeldPane || closeArgs["name"] != "test-job" || closeArgs["cwd"] != cwd || closeArgs["agent_status"] != tc.pane.AgentStatus {
 				t.Fatalf("close args %v", closeArgs)
 			}
+			if closeArgs["question_job"] != "test-job" {
+				t.Fatalf("close args %v lack the job id an advertising node needs", closeArgs)
+			}
 			if mark["job"] != "test-job" || mark["pane_id"] != roleHeldPane || mark["label"] != "test-job" {
 				t.Fatalf("mark lost args %v", mark)
 			}
@@ -166,7 +169,7 @@ func TestReviewerRelease(t *testing.T) {
 // pane.close accepts blocked, but a pane that changes between the node's two
 // reads is refused: the hub keeps the hold and writes nothing to hk.
 func TestReviewerReleaseKeepsHoldWhenCloseIsRefused(t *testing.T) {
-	hub, server, held := reviewerReleaseHub(t, "reviewer", "succeeded", hubSpawnOutcome{RC: 0, Host: "machine-a", Pane: roleHeldPane})
+	hub, server, _, held := reviewerReleaseHub(t, "reviewer", "succeeded", hubSpawnOutcome{RC: 0, Host: "machine-a", Pane: roleHeldPane})
 	now := held.Deadline.Add(11 * time.Minute)
 	hub.now = func() time.Time { return now }
 	replies := unworkedReplies(unworkedRow("done", "/work/project.test-job"), unworkedLedger(0))
@@ -178,5 +181,55 @@ func TestReviewerReleaseKeepsHoldWhenCloseIsRefused(t *testing.T) {
 	}
 	if owner := reviewPassOwner(t, hub, "42:reviewer:p2"); result.status != http.StatusConflict || owner != held.Request.RequestID {
 		t.Fatalf("hold lost: status=%d owner=%s", result.status, owner)
+	}
+}
+
+// The node rules out an open question at close time. An open question is not a
+// hold that time frees, so the 409 carries no retry_after_s.
+func TestReviewerReleaseKeepsAnOpenQuestion(t *testing.T) {
+	hub, server, _, held := reviewerReleaseHub(t, reviewerRole, "succeeded", hubSpawnOutcome{RC: 0, Host: "machine-a", Pane: roleHeldPane})
+	hub.now = func() time.Time { return held.Deadline.Add(11 * time.Minute) }
+	replies := unworkedReplies(unworkedRow("idle", "/work/project.test-job"), nil)
+	replies["pane.close"] = map[string]any{"result": map[string]any{"outcome": nodePaneQuestionOpen}}
+	node := startUnworkedNode(t, t14Node(t, hub, server, true), replies)
+
+	result := t14Result(t, t14HTTPAsync(t, http.MethodPost, server.URL+"/v1/spawns", t14OperatorToken, reviewerReleaseRequest(reviewerRole, true)))
+	if result.status != http.StatusConflict {
+		t.Fatalf("status=%d body=%s, want the 409 hold", result.status, result.body)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(result.body, &body); err != nil || body["retry_after_s"] != nil || result.header.Get("Retry-After") != "" {
+		t.Fatalf("body=%s header=%v: an open question must not advertise a retry time", result.body, result.header)
+	}
+	if want := []string{"agents.list", "pane.capture", "pane.close"}; !reflect.DeepEqual(node.seen(), want) {
+		t.Fatalf("node commands %v, want %v", node.seen(), want)
+	}
+	var closeArgs map[string]any
+	if err := json.Unmarshal(node.args["pane.close"], &closeArgs); err != nil || closeArgs["question_job"] != "test-job" {
+		t.Fatalf("pane.close args %v err=%v, want question_job=test-job", closeArgs, err)
+	}
+	if owner, _, _, _ := hub.inbox.store.spawnRoleOwner(t.Context(), reviewerReleaseKey(reviewerRole)); owner != held.Request.RequestID {
+		t.Fatalf("owner=%s, want the holder still to own the key", owner)
+	}
+}
+
+// A node that predates pane_close_question_v1 decodes pane.close strictly and
+// would refuse the whole call, and closing without the field would drop the
+// open-question guard, so the hub keeps the hold until the node is upgraded
+// (hk 4658).
+func TestReviewerReleaseKeepsHoldForAnOldNode(t *testing.T) {
+	hub, server, _, held := reviewerReleaseHub(t, reviewerRole, "succeeded", hubSpawnOutcome{RC: 0, Host: "machine-a", Pane: roleHeldPane})
+	hub.now = func() time.Time { return held.Deadline.Add(11 * time.Minute) }
+	node := startUnworkedNode(t, t14NodeWithSpawnV2(t, hub, server, true, false), unworkedReplies(unworkedRow("done", "/work/project.test-job"), unworkedLedger(0)))
+
+	result := t14Result(t, t14HTTPAsync(t, http.MethodPost, server.URL+"/v1/spawns", t14OperatorToken, reviewerReleaseRequest(reviewerRole, true)))
+	if result.status != http.StatusConflict {
+		t.Fatalf("status=%d body=%s, want the 409 hold", result.status, result.body)
+	}
+	if want := []string{"agents.list"}; !reflect.DeepEqual(node.seen(), want) {
+		t.Fatalf("node commands %v, want %v: an old node must not get a pane.close it cannot guard", node.seen(), want)
+	}
+	if owner := reviewPassOwner(t, hub, "42:reviewer:p2"); owner != held.Request.RequestID {
+		t.Fatalf("owner=%s, want the holder still to own the key", owner)
 	}
 }

@@ -370,6 +370,17 @@ func (a *App) hostViews(ctx context.Context, cwd string) (map[string]HostView, [
 	return m, nil
 }
 
+// reasonHasToken reports that the hub's comma-joined reason list carries token
+// exactly. A substring match would let one token answer for another.
+func reasonHasToken(reason, token string) bool {
+	for _, tok := range strings.Split(reason, ",") {
+		if tok == token {
+			return true
+		}
+	}
+	return false
+}
+
 // neededAccounts resolves which shared account keys a quota pool needs:
 // explicitly configured fingerprints, or the keys presence records carry for
 // the pool.
@@ -526,6 +537,11 @@ func (a *App) plan(ctx context.Context, s Spawn, pool string, waited time.Durati
 		local.signals = hv.Signals
 		local.source = hv.Source
 		local.unusable = !viewUsable(hv, false)
+		if local.excluded == "" && reasonHasToken(hv.Reason, "lanes_full") {
+			// The machine owns its whole lane row cap: a pane placed here could
+			// not register a lane and comes up LANE_UNREGISTERED (hk 4658).
+			local.excluded = "lanes_full"
+		}
 	}
 	maxRatio, hasGuard := number(a.Config.Local, "max_load_ratio")
 	if local.load != nil && hasGuard && *local.load >= maxRatio {
@@ -571,6 +587,8 @@ func (a *App) plan(ctx context.Context, s Spawn, pool string, waited time.Durati
 			case c.excluded != "":
 			case strings.Contains(hv.Reason, "not_accepting"):
 				c.excluded = "not_accepting"
+			case reasonHasToken(hv.Reason, "lanes_full"):
+				c.excluded = "lanes_full"
 			case !hv.Connected:
 			default:
 				c.awake = true

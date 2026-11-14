@@ -698,3 +698,29 @@ func TestQuotaReplacementIsReconciledAfterAHubRestart(t *testing.T) {
 		t.Fatal("the reconcile pass did not finish")
 	}
 }
+
+// A node whose hello predates pane_close_question_v1 cannot check the pane's
+// open question, so the replacement keeps the pane rather than close it
+// unguarded (hk 4658).
+func TestQuotaReplaceOldNodeKeepsThePane(t *testing.T) {
+	f := newQuotaReplaceFixture(t, "reviewer", "mwr-old-node")
+	f.hub.mu.Lock()
+	delete(f.hub.nodes["machine-a"].capabilities, hubCapabilityCloseQuestion)
+	f.hub.mu.Unlock()
+	done := make(chan quotaReplaceResult, 1)
+	go func() {
+		job, ok := f.hub.replaceQuotaStopped(t.Context(), "machine-a", quotaStopEvent(f.job, f.stopPool))
+		done <- quotaReplaceResult{job, ok}
+	}()
+	// The hub probes the old pane; the capability gate then stops the close.
+	command := nodeCommandRead(t, f.node)
+	roleReplyPanes(t, f.node, command, []nodeAgentRow{{PaneID: roleHeldPane, Name: f.job, AgentStatus: f.paneStatus, Cwd: "/work/project.checkout"}}, true)
+	select {
+	case result := <-done:
+		if result.ok {
+			t.Fatal("the replacement closed a pane on a node that cannot check its question")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("the replacement did not give up on an old node")
+	}
+}

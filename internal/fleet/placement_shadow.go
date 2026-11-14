@@ -309,7 +309,7 @@ func viewUsable(hv HostView, ignoreMemory bool) bool {
 	prometheus := v.Source == "prometheus"
 	for _, tok := range strings.Split(v.Reason, ",") {
 		switch {
-		case tok == "active_jobs>=max", tok == "task_slots_full", tok == "disconnected":
+		case tok == "active_jobs>=max", tok == "task_slots_full", tok == "lanes_full", tok == "disconnected":
 			return false
 		case tok == "not_accepting(memory_pressure)":
 			if !ignoreMemory {
