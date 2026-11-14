@@ -223,6 +223,19 @@ func (h *HubServer) releaseFinishedReviewerSpawns(ctx context.Context) {
 		if !h.reviewerPaneStayedFinished(r.holder.Job, r.holder.Outcome.Pane) {
 			continue
 		}
+		// An idle pane can be a live reviewer between turns (waiting on a
+		// background command, a wakeup, or a prompt). The unattended pass needs
+		// positive progress before it closes: the agent is done, or it posted
+		// the result it was spawned for. The submission path, which an operator
+		// triggers, keeps the wider status set.
+		if probe.row.AgentStatus != "done" {
+			var ledger nodeJobResult
+			if !h.nodeCall(ctx, spawnHolderHost(r.holder), nodeCommandJobResult, nodeJobResultArgs{Job: r.holder.Job}, spawnHeldPaneProbeWait, &ledger) || !ledger.Found || (ledger.Findings == nil && !ledger.Report.Present) {
+				h.logger.Info("hub kept a reviewer pane", "reason", "awaiting_result", "source", "sweep",
+					"role_key", r.spawn.RoleKey(), "job", r.holder.Job, "pane_status", probe.row.AgentStatus)
+				continue
+			}
+		}
 		h.releaseFinishedReviewerHolder(ctx, app, r.spawn, r.holder, record, probe, "sweep", "")
 	}
 	h.retainReviewerPanes(live)

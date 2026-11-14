@@ -71,7 +71,7 @@ func TestReviewerPaneSweepEndsFinishedReviewerJob(t *testing.T) {
 func TestReviewerPaneSweepKeepsAnOpenQuestion(t *testing.T) {
 	hub, server, jobs, held := reviewerReleaseHub(t, reviewerRole, "succeeded", hubSpawnOutcome{RC: 0, Host: "machine-a", Pane: roleHeldPane})
 	hub.now = func() time.Time { return held.Deadline.Add(11 * time.Minute) }
-	replies := unworkedReplies(unworkedRow("idle", "/work/project.test-job"), nil)
+	replies := unworkedReplies(unworkedRow("done", "/work/project.test-job"), nil)
 	replies["pane.close"] = map[string]any{"result": map[string]any{"outcome": nodePaneQuestionOpen}}
 	node := startUnworkedNode(t, t14Node(t, hub, server, true), replies)
 	reviewerSweepActiveJob(t, hub, "machine-a", "test-job", roleHeldPane, reviewerRole)
@@ -100,7 +100,7 @@ func TestReviewerPaneSweepKeepsAnOpenQuestion(t *testing.T) {
 func TestReviewerPaneSweepKeepsWhenTheNodeCannotDecide(t *testing.T) {
 	hub, server, _, held := reviewerReleaseHub(t, reviewerRole, "succeeded", hubSpawnOutcome{RC: 0, Host: "machine-a", Pane: roleHeldPane})
 	hub.now = func() time.Time { return held.Deadline.Add(11 * time.Minute) }
-	replies := unworkedReplies(unworkedRow("idle", "/work/project.test-job"), nil)
+	replies := unworkedReplies(unworkedRow("done", "/work/project.test-job"), nil)
 	delete(replies, "pane.close") // the fake node answers herdr_failed
 	node := startUnworkedNode(t, t14Node(t, hub, server, true), replies)
 	reviewerSweepActiveJob(t, hub, "machine-a", "test-job", roleHeldPane, reviewerRole)
@@ -188,7 +188,7 @@ func TestReviewerReleaseKeepsAnOpenQuestion(t *testing.T) {
 func TestReviewerPaneSweepWaitsForASecondSighting(t *testing.T) {
 	hub, server, _, held := reviewerReleaseHub(t, reviewerRole, "succeeded", hubSpawnOutcome{RC: 0, Host: "machine-a", Pane: roleHeldPane})
 	hub.now = func() time.Time { return held.Deadline.Add(11 * time.Minute) }
-	node := startUnworkedNode(t, t14Node(t, hub, server, true), unworkedReplies(unworkedRow("idle", "/work/project.test-job"), nil))
+	node := startUnworkedNode(t, t14Node(t, hub, server, true), unworkedReplies(unworkedRow("done", "/work/project.test-job"), nil))
 	reviewerSweepActiveJob(t, hub, "machine-a", "test-job", roleHeldPane, reviewerRole)
 
 	hub.releaseFinishedReviewerSpawns(t.Context())
@@ -198,5 +198,46 @@ func TestReviewerPaneSweepWaitsForASecondSighting(t *testing.T) {
 	hub.releaseFinishedReviewerSpawns(t.Context())
 	if got := node.seen(); !reflect.DeepEqual(got, []string{"agents.list", "agents.list", "pane.capture", "pane.close", "job.mark_lost"}) {
 		t.Fatalf("second pass commands %v", got)
+	}
+}
+
+// An idle pane whose job has not posted its result is a reviewer between turns,
+// not a finished one: the unattended pass keeps it.
+func TestReviewerPaneSweepKeepsAnUnfinishedReviewer(t *testing.T) {
+	hub, server, jobs, held := reviewerReleaseHub(t, reviewerRole, "succeeded", hubSpawnOutcome{RC: 0, Host: "machine-a", Pane: roleHeldPane})
+	hub.now = func() time.Time { return held.Deadline.Add(11 * time.Minute) }
+	node := startUnworkedNode(t, t14Node(t, hub, server, true), unworkedReplies(unworkedRow("idle", "/work/project.test-job"), nil))
+	reviewerSweepActiveJob(t, hub, "machine-a", "test-job", roleHeldPane, reviewerRole)
+	sink := captureHubLog(hub)
+
+	hub.releaseFinishedReviewerSpawns(t.Context())
+	hub.releaseFinishedReviewerSpawns(t.Context())
+
+	if want := []string{"agents.list", "agents.list", "job.result"}; !reflect.DeepEqual(node.seen(), want) {
+		t.Fatalf("node commands %v, want %v (no close)", node.seen(), want)
+	}
+	if !strings.Contains(sink.String(), `"reason":"awaiting_result"`) {
+		t.Fatalf("log %q lacks the awaiting-result line", sink.String())
+	}
+	if state := jobs.state("test-job"); state != "spawned" {
+		t.Fatalf("hk record %v, want the live spawned record", state)
+	}
+}
+
+// A reviewer that posted its result is finished work even while its pane reads
+// idle, so the unattended pass releases it.
+func TestReviewerPaneSweepReleasesAPostedReview(t *testing.T) {
+	hub, server, _, held := reviewerReleaseHub(t, reviewerRole, "succeeded", hubSpawnOutcome{RC: 0, Host: "machine-a", Pane: roleHeldPane})
+	hub.now = func() time.Time { return held.Deadline.Add(11 * time.Minute) }
+	ledger := unworkedLedger(0)
+	ledger["report"] = map[string]any{"present": true, "bytes": 12, "sha256": strings.Repeat("a", 64), "last_line": "review posted"}
+	node := startUnworkedNode(t, t14Node(t, hub, server, true), unworkedReplies(unworkedRow("idle", "/work/project.test-job"), ledger))
+	reviewerSweepActiveJob(t, hub, "machine-a", "test-job", roleHeldPane, reviewerRole)
+
+	hub.releaseFinishedReviewerSpawns(t.Context())
+	hub.releaseFinishedReviewerSpawns(t.Context())
+
+	if want := []string{"agents.list", "agents.list", "job.result", "pane.capture", "pane.close", "job.mark_lost"}; !reflect.DeepEqual(node.seen(), want) {
+		t.Fatalf("node commands %v, want %v", node.seen(), want)
 	}
 }

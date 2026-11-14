@@ -168,7 +168,11 @@ a node still reports active, whose hk record is still `claimed` or `spawned`,
 and whose pane has finished. A failed placement is outside that set; its holder
 is still released by a submission for the same key (above), which carries the
 proof that its pane never worked (hk 3179). An idle reviewer pane is not proof that the work ended: a
-reviewer that asked a question is idle too. Every close therefore carries the
+reviewer between turns (waiting on a background command, a wakeup, or a prompt)
+is idle too. The unattended pass therefore closes only a pane whose agent status
+is `done`, or whose job has already posted its result (`findings.json` or
+`report.md`); anything else is kept with `reason=awaiting_result`. A reviewer
+that asked a question is idle too. Every close therefore carries the
 job id, and the node rules out an open question from its own lane-event records
 at the moment of the close (docs/node-commands.md, `pane.close`); a question the
 watcher has not copied yet cannot be raced, and the pane is kept with
