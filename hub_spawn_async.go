@@ -785,7 +785,11 @@ func (h *HubServer) spawnRefreshWaitOutcome(task hubSpawnTask) (hubSpawnRefreshW
 	var failedAt, succeededAt time.Time
 	for _, candidate := range task.RefreshWaits {
 		outcome, seen, found, err := h.inbox.store.quotaRefreshAttempt(h.closeCtx, candidate.Machine, candidate.Pool)
-		if err != nil || !found {
+		if err != nil {
+			h.logger.Warn("spawn quota refresh attempt not read", "machine", candidate.Machine, "pool", candidate.Pool, "error", err)
+			continue
+		}
+		if !found {
 			continue
 		}
 		age := now.Sub(seen) / time.Second
