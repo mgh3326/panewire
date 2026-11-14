@@ -22,6 +22,7 @@ type workDrain struct {
 	inflight int
 	draining bool
 	changed  chan struct{} // closed and replaced whenever inflight drops
+	stopping chan struct{} // closed once a drain begins
 }
 
 // begin registers one operation. It reports false once a drain has started
@@ -48,12 +49,38 @@ func (d *workDrain) begin(refuse bool) (end func(), ok bool) {
 	}, true
 }
 
+// stopSignal wakes admission waiters without waiting for the active spawn.
+func (d *workDrain) stopSignal() <-chan struct{} {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.stopping == nil {
+		d.stopping = make(chan struct{})
+		if d.draining {
+			close(d.stopping)
+		}
+	}
+	return d.stopping
+}
+
+// admitSpawn linearizes a gate-owning waiter's admission against drain. The
+// handler is already counted by begin, so a winning admission is drained.
+func (d *workDrain) admitSpawn() bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return !d.draining
+}
+
 // drain stops new spawns and waits until nothing is in flight and the event
 // queue has been written, or until the bound passes. It returns the number of
 // operations still running.
 func (d *workDrain) drain(ctx context.Context, bound time.Duration, queued func() int) int {
 	d.mu.Lock()
-	d.draining = true
+	if !d.draining {
+		d.draining = true
+		if d.stopping != nil {
+			close(d.stopping)
+		}
+	}
 	d.mu.Unlock()
 	timeout := time.NewTimer(bound)
 	defer timeout.Stop()

@@ -206,6 +206,74 @@ func TestNodeSpawnAdmissionRestartReplaysWaiter_t4579(t *testing.T) {
 	}
 }
 
+// A waiter registered before Drain must not begin a new spawn while Drain
+// lets an already-claimed spawn finish. The waiter can run after restart.
+func TestNodeSpawnAdmissionDrainLeavesWaiterReplayable_t4579(t *testing.T) {
+	started, release := make(chan struct{}), make(chan struct{})
+	var releaseOnce sync.Once
+	var runs atomic.Int32
+	root, config := t.TempDir(), t14SpawnConfig(t, t.TempDir())
+	client := &HubClient{spawnConfigPath: config, spawnJournalDir: root, fleetEvents: (&fleetEventRecorder{}).write}
+	client.spawnEngine = func(context.Context, string, string, string, string, []string) (*hubSpawnOutput, fleet.Execution) {
+		if runs.Add(1) == 1 {
+			close(started)
+			<-release
+		}
+		return t14EngineOK()
+	}
+	peer, results := admissionPeer(t)
+	ctx, cancel := context.WithCancel(t.Context())
+	var workers sync.WaitGroup
+	t.Cleanup(func() { cancel(); releaseOnce.Do(func() { close(release) }); workers.Wait() })
+	start := func(message hubOutboundMessage) {
+		workers.Add(1)
+		go func() { defer workers.Done(); client.handleHubSpawn(ctx, peer, message) }()
+	}
+	first, waiter := admissionMessage(4579013, true), admissionMessage(4579014, true)
+	start(first)
+	<-started
+	start(waiter)
+	eventually(t, time.Second, "waiter to enter admission", func() bool {
+		client.spawnActiveMu.Lock()
+		defer client.spawnActiveMu.Unlock()
+		return client.spawnWaiting[waiter.RequestID] != nil
+	})
+	drained := make(chan int, 1)
+	go func() { drained <- client.Drain(ctx) }()
+	eventually(t, time.Second, "drain to start", func() bool {
+		client.work.mu.Lock()
+		defer client.work.mu.Unlock()
+		return client.work.draining
+	})
+	eventually(t, time.Second, "unclaimed waiter to leave during drain", func() bool { return admissionInflight(client) == 1 })
+	releaseOnce.Do(func() { close(release) })
+	eventually(t, 2*time.Second, "both spawn handlers to finish", func() bool { return admissionInflight(client) == 0 })
+	if left := <-drained; left != 0 {
+		t.Fatalf("drain left %d operations", left)
+	}
+	if status := admissionJournalStatus(t, client, waiter.RequestID); status != "" || runs.Load() != 1 {
+		t.Fatalf("waiter during drain: journal status=%q, engine runs=%d", status, runs.Load())
+	}
+	if got := admissionResult(t, results, time.Second); got.RequestID != first.RequestID || got.RC != 0 {
+		t.Fatalf("first spawn answered %+v", got)
+	}
+	select {
+	case got := <-results:
+		t.Fatalf("unclaimed waiter answered during drain: %+v", got)
+	case <-time.After(100 * time.Millisecond): // proves no waiter response follows the drained spawn
+	}
+
+	restarted := &HubClient{spawnConfigPath: config, spawnJournalDir: root, fleetEvents: (&fleetEventRecorder{}).write,
+		spawnEngine: func(context.Context, string, string, string, string, []string) (*hubSpawnOutput, fleet.Execution) {
+			runs.Add(1)
+			return t14EngineOK()
+		}}
+	restarted.handleHubSpawn(t.Context(), peer, waiter)
+	if got := admissionResult(t, results, time.Second); got.RequestID != waiter.RequestID || got.RC != 0 || runs.Load() != 2 {
+		t.Fatalf("waiter replay answered %+v; engine runs=%d", got, runs.Load())
+	}
+}
+
 // Both copies arrived before admission. Once one owns execution, the other
 // must learn that fact without waiting for that execution to finish.
 func TestNodeSpawnAdmissionWakesQueuedDuplicates_t4579(t *testing.T) {

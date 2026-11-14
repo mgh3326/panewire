@@ -238,8 +238,9 @@ waits for the node's single whole-spawn gate until its execution deadline,
 without an executing journal entry. Once admitted, the node rechecks the
 journal and deadline, commits the executing entry and keeps the gate through
 checkout, launch, brief delivery and cleanup. It commits the result before
-replying. A node stop discards unclaimed waiters for replay after restart;
-claimed executions retain the restart-settlement rules. See
+replying. A node drain wakes unclaimed waiters without a reply or journal row
+for replay after restart; work admitted before the drain is allowed to finish
+within the drain bound. Claimed executions retain the restart-settlement rules. See
 [Stranded requests](#stranded-requests).
 
 Node RPC includes the absolute deadline (`TestNodeSpawnExpiredAbsoluteDeadlineSkipsEngine`). A request first received after it

@@ -196,15 +196,24 @@ func (client *HubClient) handleHubSpawn(ctx context.Context, peer *hubClientConn
 	admissionCtx, cancel := context.WithDeadline(ctx, deadline)
 	defer cancel()
 	client.spawnGateOnce.Do(func() { client.spawnGate = make(chan struct{}, 1) })
+	stop := client.work.stopSignal()
 	select {
 	case <-waiter.claimed:
 		// Another copy acquired the gate while this copy was waiting.
 		client.answerAdmissionWait(ctx, peer, journal, message, deadline)
 		return
 	case <-admissionCtx.Done():
+		select {
+		case <-stop:
+			return
+		default:
+		}
 		if ctx.Err() == nil {
 			client.answerAdmissionWait(ctx, peer, journal, message, deadline)
 		}
+		return
+	case <-stop:
+		// Unclaimed work is replayed after the node restarts.
 		return
 	case client.spawnGate <- struct{}{}:
 	}
@@ -216,6 +225,9 @@ func (client *HubClient) handleHubSpawn(ctx context.Context, peer *hubClientConn
 		}
 	}
 	defer release()
+	if !client.work.admitSpawn() {
+		return
+	}
 	claimed, known, cached, active, err := client.claimHubSpawn(ctx, journal, message, deadline, waiter)
 	if err != nil {
 		if ctx.Err() == nil {
