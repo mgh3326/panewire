@@ -704,7 +704,7 @@ func TestPlacementDeliveryRefusalNamesTheStatus(t *testing.T) {
 }
 
 func TestPlacementPermanentRefusalQuarantinesAndContinues(t *testing.T) {
-	for _, status := range []int{http.StatusBadRequest, http.StatusUnprocessableEntity} {
+	for _, status := range []int{http.StatusBadRequest, http.StatusNotFound, http.StatusUnprocessableEntity} {
 		t.Run(fmt.Sprint(status), func(t *testing.T) {
 			a := testApp(t)
 			h := placementServer(t, a)
@@ -745,6 +745,48 @@ func TestPlacementPermanentRefusalQuarantinesAndContinues(t *testing.T) {
 				t.Fatalf("rejected record retried: %d", len(requests))
 			}
 		})
+	}
+}
+
+func TestPlacementNotFoundRefusalQuarantinesAndContinues(t *testing.T) {
+	a := testApp(t)
+	h := placementServer(t, a)
+	h.statusFirst = http.StatusNotFound
+	h.refusalBody = `{"error":"not_found"}`
+	for _, id := range []string{"a", "b", "c"} {
+		p := pendingPlacement{Record: placementRecord{JobID: id}}
+		if err := a.spoolPlacement(&p); err != nil {
+			t.Fatal(err)
+		}
+	}
+	a.flushPlacements()
+	requests, rows := h.snapshot()
+	if len(requests) != 3 || len(rows) != 2 {
+		t.Fatalf("want 3 requests and 2 delivered rows, got %d/%d", len(requests), len(rows))
+	}
+	rejected := filepath.Join(a.stateDir(), "placements-rejected", "a.1.json")
+	info, err := os.Stat(rejected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0600 {
+		t.Fatalf("mode %v", info.Mode())
+	}
+	if got := placementSpool(t, a); len(got) != 0 {
+		t.Fatalf("remaining spool: %v", got)
+	}
+	cursor, err := os.ReadFile(filepath.Join(a.stateDir(), "placement-cursor"))
+	if err != nil || string(cursor) != "c.1.json" {
+		t.Fatalf("cursor %q: %v", cursor, err)
+	}
+	warnings := a.Err.(*bytes.Buffer).String()
+	if !strings.Contains(warnings, "a.1.json") || !strings.Contains(warnings, "404") || !strings.Contains(warnings, "not_found") {
+		t.Fatalf("warning: %s", warnings)
+	}
+	a.flushPlacements()
+	requests, _ = h.snapshot()
+	if len(requests) != 3 {
+		t.Fatalf("rejected record retried: %d", len(requests))
 	}
 }
 
