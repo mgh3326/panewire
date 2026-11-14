@@ -1147,7 +1147,9 @@ func (h *HubServer) relayEventByTransportID(ctx context.Context, jobID string) (
 			return handoffkeepRelayEvent{}, false, nil
 		}
 		if afterID <= pageStart {
-			return handoffkeepRelayEvent{}, false, nil
+			// A stalled cursor is a failed read, not a clean not-found: callers
+			// retry on an error, and would treat found=false as "no such row".
+			return handoffkeepRelayEvent{}, false, errors.New("handoffkeep relay event cursor did not advance")
 		}
 	}
 }
