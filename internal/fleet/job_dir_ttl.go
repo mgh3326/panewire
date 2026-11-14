@@ -468,44 +468,17 @@ func jobDirShapeOf(dir string) (jobDirShape, error) {
 
 // submissionRetiredFlags are spawn flags a stored submission.json may record
 // that the live spawn parser no longer accepts. A receipt is a frozen record
-// written by the panewire of its day, so the gate reads it after dropping
-// them (each takes one value): the gate names the submitted job and its
+// written by the panewire of its day, so the gate parses it with these
+// accepted as one-value no-ops: the gate names the submitted job and its
 // report paths, it does not spawn. mergewake's reviewer submitter dirs record
-// --builder-family this way, and a consult receipt --routing-role (hk 4627).
-// A flag the parser has never known stays, so a receipt the gate cannot
-// trust is still unreadable.
-var submissionRetiredFlags = []string{"--builder-family", "--routing-role"}
-
-// submissionSpawnArgs is args without the retired spawn flags.
-func submissionSpawnArgs(args []string) []string {
-	out := make([]string, 0, len(args))
-	for i := 0; i < len(args); i++ {
-		drop := false
-		for _, name := range submissionRetiredFlags {
-			if args[i] == name {
-				drop = true
-				// The flag's one value, never the next flag: a receipt that
-				// omitted the value must keep --keep and the like.
-				if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
-					i++
-				}
-				break
-			}
-			if strings.HasPrefix(args[i], name+"=") {
-				drop = true
-				break
-			}
-		}
-		if !drop {
-			out = append(out, args[i])
-		}
-	}
-	return out
-}
+// builder-family this way, and a consult receipt routing-role (hk 4627). A
+// flag the parser has never known stays an error, so a receipt the gate
+// cannot trust is still unreadable.
+var submissionRetiredFlags = []string{"builder-family", "routing-role"}
 
 // readSubmissionSpawn reads a submitter-side dir's submission.json and the
 // spawn its arguments name, with the spawn flags retired since the receipt
-// was written dropped. A missing receipt is fs.ErrNotExist.
+// was written accepted and dropped. A missing receipt is fs.ErrNotExist.
 func readSubmissionSpawn(dir string) (Submission, Spawn, error) {
 	path := filepath.Join(dir, "submission.json")
 	info, err := os.Lstat(path)
@@ -523,7 +496,7 @@ func readSubmissionSpawn(dir string) (Submission, Spawn, error) {
 	if err = json.Unmarshal(raw, &sub); err != nil {
 		return Submission{}, Spawn{}, err
 	}
-	s, err := parseSpawn(submissionSpawnArgs(sub.Args))
+	s, err := parseSpawnIgnoring(sub.Args, submissionRetiredFlags)
 	return sub, s, err
 }
 

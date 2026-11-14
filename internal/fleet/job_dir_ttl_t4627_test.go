@@ -9,9 +9,10 @@ import (
 // by the panewire of its day. mergewake's reviewer submitter dirs (3,597 on
 // oci, 2026-11-14) carry --builder-family, a flag retired since; the live
 // spawn parser refuses it, which made the gate call every such receipt
-// unreadable and keep the dir forever. The gate now drops the retired flags
-// before the live parser, so the dir is decided like any other submitter-side
-// dir; a flag that was never a spawn flag still keeps it.
+// unreadable and keep the dir forever. The gate now parses the receipt with
+// the retired flags accepted as one-value no-ops, so the dir is decided like
+// any other submitter-side dir; a flag that was never a spawn flag still
+// keeps it, and so does a retired name that is another flag's value.
 
 // mergewakeSubmissionArgs is the args of the real oci receipt
 // /home/opc/work/herdr-inbox/jobs/mwr-637-d24d143-p2-1794650830/submission.json
@@ -96,10 +97,13 @@ func TestJobDirTTLRetiredSubmitFlags(t *testing.T) {
 		r.store.records[id] = map[string]any{"job_id": id, "state": "completed"}
 		wantDelete(t, r, r.pass(true), id, "submission-terminal")
 	})
-	t.Run("retired flag without its value keeps the next flag", func(t *testing.T) {
+	t.Run("a retired flag name that is another flag's value", func(t *testing.T) {
+		// The receipt's --override-reason is free text; a reason that reads
+		// "--builder-family" is a value, not a flag, so --keep must survive
+		// (mergewake round 1, medium).
 		r := newTTLRig(t)
-		id := "mwr-3-valueless"
-		args := []string{"-c", "/work/tree", "-m", "auto", "-l", id, "--job", id, "--task", "42", "--owner", "owner", "--builder-family", "--keep"}
+		id := "mwr-4-value"
+		args := []string{"-c", "/work/tree", "-m", "auto", "-l", id, "--job", id, "--task", "42", "--owner", "owner", "--override-reason", "--builder-family", "--keep"}
 		r.seedSubmissionArgs(id, args)
 		r.store.records[id] = map[string]any{"job_id": id, "state": "completed"}
 		wantKeep(t, r, r.pass(true), id, "protected")

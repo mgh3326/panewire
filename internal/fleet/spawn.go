@@ -162,6 +162,17 @@ func SpawnRoleKey(task, role, pass string) string {
 }
 
 func parseSpawn(args []string) (Spawn, error) {
+	return parseSpawnIgnoring(args, nil)
+}
+
+// parseSpawnIgnoring parses args exactly as parseSpawn does, with each name in
+// ignored accepted as a flag that takes one value and is then dropped. A
+// stored submission.json is read this way: a spawn flag retired since the
+// receipt was written was legal when it was written, and the receipt names a
+// job and its report paths rather than a spawn (hk 4627). The flag grammar is
+// still the only reader, so a retired flag's name counts as a flag only where
+// the grammar starts one — not where it is another flag's value.
+func parseSpawnIgnoring(args, ignored []string) (Spawn, error) {
 	s := Spawn{Role: "implementer", Host: "auto"}
 	f := flags("spawn")
 	f.Var((*repeatedStringFlag)(&s.After), "after", "start condition (repeatable)")
@@ -180,6 +191,13 @@ func parseSpawn(args []string) (Spawn, error) {
 	f.BoolVar(&s.DryRun, "dry-run", false, "")
 	f.BoolVar(&s.Wait, "wait", false, "")
 	f.BoolVar(&s.AllowEscalation, "allow-escalation", false, "")
+	// A flag the set already defines keeps its meaning: an ignored name is one
+	// the set no longer has.
+	for _, name := range ignored {
+		if f.Lookup(name) == nil {
+			f.String(name, "", "")
+		}
+	}
 	if e := f.Parse(args); e != nil {
 		return s, fail(exitUsage, "%v", e)
 	}
