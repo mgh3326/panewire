@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -173,6 +174,9 @@ type HubLastNote struct {
 }
 
 type hubNodeRecord struct {
+	// appliedPending belongs to this registration and is guarded by HubServer.mu.
+	appliedPending    bool
+	appliedTimer      *time.Timer
 	machineID         string
 	accepting         bool
 	capabilities      map[string]bool
@@ -396,6 +400,8 @@ type hubSubscriptionMessage struct {
 // HubServer relays presence and events. Accepted spawns and lane inbox work
 // live in the configured durable store; presence and legacy job fences do not.
 type HubServer struct {
+	// replayMu excludes registration changes and report settlement from replay walks.
+	replayMu             sync.RWMutex
 	inbox                *hubInbox
 	spawnTraceOnce       sync.Once
 	spawnSentry          *sentry.Client
@@ -1237,6 +1243,19 @@ func (h *HubServer) handleAgentMessageContext(ctx context.Context, machineID, re
 		if message.Type == "ping" {
 			_ = agent.writeJSON(hubOutbound{Type: "pong"})
 		}
+	case "applied":
+		if agent.transient || !h.touch(machineID, agent) {
+			h.countUnknownMessage()
+			return
+		}
+		h.mu.Lock()
+		registration := h.nodes[machineID]
+		if registration == nil || registration.agent != agent {
+			h.mu.Unlock()
+			return
+		}
+		h.mu.Unlock()
+		go h.handleAppliedReport(machineID, registration, message.Applied)
 	case "event":
 		if message.Kind == "relay.delivered" || message.Kind == "relay.unconfirmed" {
 			// A relay ack carries the machine's word about what its pane
@@ -1491,8 +1510,10 @@ type hubInbound struct {
 	Transient    bool
 	Accepting    bool
 	Capabilities []string
-	Kind         string
-	Payload      json.RawMessage
+	// Applied is the node's delivery report (hk 3435), type "applied".
+	Applied map[string][]int64
+	Kind    string
+	Payload json.RawMessage
 }
 
 type hubHeartbeatPayload struct {
@@ -1804,6 +1825,17 @@ func parseHubInbound(payload []byte) (hubInbound, bool) {
 		if !allowed("type") {
 			return hubInbound{}, false
 		}
+	case "applied":
+		if !allowed("type", "applied") {
+			return hubInbound{}, false
+		}
+		if rawApplied, exists := fields["applied"]; exists {
+			applied, valid := decodeHubAppliedReport(rawApplied)
+			if !valid {
+				return hubInbound{}, false
+			}
+			message.Applied = applied
+		}
 	case "event":
 		if !allowed("type", "kind", "payload") || json.Unmarshal(fields["kind"], &message.Kind) != nil || message.Kind == "" {
 			return hubInbound{}, false
@@ -1895,14 +1927,25 @@ func knownHubEventKind(kind string) bool {
 }
 
 func (h *HubServer) connect(machineID, version, remoteAddr string, agent *hubAgent, accepting bool, capabilityLists ...[]string) {
+	h.replayMu.Lock()
+	defer h.replayMu.Unlock()
 	// A node registration is the safe no-restart retry trigger for durable
 	// lane.event rows whose route was absent or disconnected when produced.
+	var reportsApplied bool
+	if len(capabilityLists) > 0 {
+		reportsApplied = slices.Contains(capabilityLists[0], hubCapabilityApplied)
+	}
 	defer func() {
 		go func() {
 			// A wake an inbox-only lane is owed because its pane was not
 			// reachable is retried at once, not at its window's end (hk 3602).
 			h.retryUnroutedInboxWakes()
-			h.replayUndeliveredLaneEvents(context.Background())
+			// A node that advertises the applied report sends it right behind
+			// its hello; the replay waits for it (handleAppliedReport), so the
+			// replay and its gap summary count only rows the node has not shown.
+			if !reportsApplied {
+				h.replayUndeliveredLaneEvents(context.Background())
+			}
 		}()
 	}()
 	now := h.now().UTC()
@@ -1912,6 +1955,9 @@ func (h *HubServer) connect(machineID, version, remoteAddr string, agent *hubAge
 	var previousReadinessAt time.Time
 	h.mu.Lock()
 	if existing := h.nodes[machineID]; existing != nil {
+		if existing.appliedTimer != nil {
+			existing.appliedTimer.Stop()
+		}
 		previous, previousReadiness, previousReadinessAt = existing.agent, existing.readiness, existing.readinessAt
 		previousSnapshot = cloneHubSessionSnapshotRecord(existing.sessionSnapshot)
 	}
@@ -1926,11 +1972,17 @@ func (h *HubServer) connect(machineID, version, remoteAddr string, agent *hubAge
 		}
 	}
 	h.nodes[machineID] = &hubNodeRecord{
-		machineID: machineID, accepting: accepting, connectedSince: now, lastPing: now,
+		machineID: machineID, accepting: accepting, connectedSince: now, lastPing: now, appliedPending: reportsApplied,
 		capabilities: capabilitySet,
 		remoteMeta:   map[string]string{"version": version, "remote_addr": remoteAddr},
 		state:        "connected", stateSince: now, lastHeartbeat: now, agent: agent, activeJobs: make(map[string]HubActiveJob), sessionSnapshot: previousSnapshot,
 		readiness: previousReadiness, readinessAt: previousReadinessAt,
+	}
+	if reportsApplied {
+		registration := h.nodes[machineID]
+		registration.appliedTimer = time.AfterFunc(hubAppliedReportTimeout, func() {
+			h.expireAppliedReport(machineID, registration)
+		})
 	}
 	h.placementCache = placementCache{}
 	h.recordUIEventLocked("presence", "connected", machineID, now)
@@ -1985,6 +2037,9 @@ func (h *HubServer) disconnectLocked(machineID string, agent *hubAgent) ([]chan 
 	}
 	lost := h.loseNodeCommandsLocked(agent)
 	if record := h.nodes[machineID]; record != nil && record.agent == agent {
+		if record.appliedTimer != nil {
+			record.appliedTimer.Stop()
+		}
 		record.agent = nil
 		now := h.now().UTC()
 		if record.state == "connected" {
