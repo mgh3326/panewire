@@ -586,6 +586,14 @@ func (a *App) measureTarget(ctx context.Context, host, pool string) error {
 	return checkQuotaPlain(r, "quota refresh")
 }
 
+func (a *App) scheduleQuotaRefresh(host, pool string) {
+	seconds := integer(a.Config.Quota, "measure_timeout_s", 60)
+	if seconds <= 0 || seconds > 60 {
+		seconds = 60
+	}
+	a.ScheduleQuotaRefresh(host, pool, time.Duration(seconds)*time.Second)
+}
+
 func (a *App) judgeHost(ctx context.Context, r QuotaRequest, pool, host string, local bool, key string, acc SharedAccount) (quotaJudgment, error) {
 	j := quotaJudgment{Host: host, AccountKey: r.AccountKey, Source: "local", Outcome: "unknown", ExitCode: 4}
 	policy, err := a.poolPolicy()
@@ -619,6 +627,10 @@ func (a *App) judgeHost(ctx context.Context, r QuotaRequest, pool, host string, 
 				a.quotaObservationEvent(host, pool, observed, acc)
 			}
 		}()
+		if (j.Reason == "stale" || j.Reason == "not_observed") && !a.planOnly && a.ScheduleQuotaRefresh != nil && a.nativeQuotaPool(pool) {
+			a.scheduleQuotaRefresh(host, pool)
+			return j, ErrQuotaRefreshPending
+		}
 		// A stale or missing observation of an account this host does not hold
 		// is never refreshed by the gate, so measure it on the target first.
 		if (j.Reason == "stale" || j.Reason == "not_observed") && a.Source != nil && !slices.Contains(a.localAccountKeys(ctx, pool), key) {
@@ -657,7 +669,12 @@ func (a *App) judgeHost(ctx context.Context, r QuotaRequest, pool, host string, 
 		}
 		r.AccountKey = key
 	}
-	return a.judgeGate(ctx, r, pool, j)
+	judgment, err := a.judgeGate(ctx, r, pool, j)
+	if err != nil && !local && !a.planOnly && key != "" && a.ScheduleQuotaRefresh != nil && a.nativeQuotaPool(pool) && gateOutcome(err) == outcomeQuotaUnknown {
+		a.scheduleQuotaRefresh(host, pool)
+		return judgment, ErrQuotaRefreshPending
+	}
+	return judgment, err
 }
 
 // creditPoolStatus checks policy metadata, not a credit balance. A successful

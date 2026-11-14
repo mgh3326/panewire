@@ -408,6 +408,11 @@ func (h *HubServer) relayLaneEventContext(ctx context.Context, event hubJobEvent
 		// are acknowledged without re-POSTing.
 		h.forgetRelayEvent(key)
 		h.broadcastRelayUnrouted(event)
+		if h.laneJobEnded(event.OwnerLane) {
+			// No pane will ever take this text, so the sender's row says
+			// undeliverable now instead of queued (hk 4534).
+			h.recordInboxStage(key, laneInboxStageDropped, relayDroppedJobEnded, "", "")
+		}
 		return relayLaneEventResult{ID: stored.ID}
 	}
 	if !h.injectLaneRelayEvent(event, route, target, stored.ID, key) {
@@ -724,6 +729,26 @@ func (h *HubServer) resolveRelayRoute(kind string, event hubJobEventPayload) (re
 		return reportRelayRoute{}, nil, false
 	}
 	return route, agent, exists && agent != nil
+}
+
+// laneJobEnded reports a lane whose every hub-known job has completed, so a
+// lane event to it can never reach a pane. A lane with no known job, or with a
+// live or orphaned one, is not proven ended: a hub restart forgets ended jobs,
+// and an orphaned job may be recovered.
+func (h *HubServer) laneJobEnded(lane string) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	known := false
+	for _, job := range h.jobs {
+		if job.AgentLabel != lane {
+			continue
+		}
+		known = true
+		if !job.Completed {
+			return false
+		}
+	}
+	return known
 }
 
 // injectRelayEvent reports whether the injection was queued.
@@ -1293,11 +1318,18 @@ func (h *HubServer) replayUndeliveredLaneEvents(ctx context.Context) {
 // A mark scan failure aborts the walk rather than letting a marked row fall
 // through to the unbounded ordinary replay.
 func (h *HubServer) replayUndeliveredRelayRows(ctx context.Context, kind, source, warnText string) {
+	h.replayMu.RLock()
+	defer h.replayMu.RUnlock()
 	marks, digestMarks, err := h.unconfirmedMarkOrigins(ctx)
 	if err != nil {
 		h.logger.Warn("undelivered unconfirmed marks could not be read", "source", source)
 		return
 	}
+	// A lane.event row that passes every gate waits in gap until the walk has
+	// seen the whole backlog: a lane over the threshold gets one summary line
+	// instead of a replay of each row (hk 2777).
+	gap := newReplayGap()
+	defer h.flushReplayGaps(ctx, gap, source)
 	var afterID int64
 	for {
 		pageStart := afterID
@@ -1307,13 +1339,19 @@ func (h *HubServer) replayUndeliveredRelayRows(ctx context.Context, kind, source
 			return
 		}
 		for _, record := range records {
+			if h.replayAwaitsAppliedReport(record) {
+				if record.ID > afterID {
+					afterID = record.ID
+				}
+				continue
+			}
 			switch {
 			case isUnconfirmedMarkRecord(record):
 				h.settleUnconfirmedMarker(ctx, record)
 			case marks[record.ID]:
 				h.replayMarkedUnconfirmed(ctx, record, source, digestMarks[record.ID])
 			default:
-				h.replayRelayEvent(record, source)
+				h.replayRelayEventCollecting(record, source, gap)
 			}
 			if record.ID > afterID {
 				afterID = record.ID
@@ -1330,6 +1368,14 @@ func (h *HubServer) replayUndeliveredRelayRows(ctx context.Context, kind, source
 }
 
 func (h *HubServer) replayRelayEvent(record handoffkeepRelayEvent, source string) {
+	h.replayRelayEventCollecting(record, source, nil)
+}
+
+// replayRelayEventCollecting is replayRelayEvent with an optional gap
+// collector: a lane.event row that passed every gate is handed to it, not
+// injected, and the caller decides once the walk has counted the lane's
+// backlog (flushReplayGaps). A nil collector injects at once.
+func (h *HubServer) replayRelayEventCollecting(record handoffkeepRelayEvent, source string, gap *replayGap) {
 	if h.retireLegacyChatReplay(record) || h.replayInbox(record) {
 		return
 	}
@@ -1383,22 +1429,41 @@ func (h *HubServer) replayRelayEvent(record handoffkeepRelayEvent, source string
 		if h.refuseInboxOnlyBody("lane.event", event, record.ID, key) {
 			return
 		}
-		h.registerRelayAckEvent("lane.event", event, route.Machine, route.Pane, record.ID)
-		if !agent.queueRelay(h.inboxRelayDirective("lane.event", event, route, record.ID)) {
-			h.forgetRelayEvent(key)
-			h.forgetRelayAckEvent(record.ID, event.JobID)
-			h.broadcastRelayUnrouted(event)
+		if gap != nil {
+			gap.add(replayCandidate{record: record, key: key, event: event, route: route, agent: agent})
 			return
 		}
-		h.armRelayAckEvent(record.ID, event.JobID)
-		if route.jobRecord {
-			h.logger.Info("relay delivered", "route", "job-record", "lane", event.OwnerLane, "event_id", event.EventID)
-		}
-	} else if !h.injectRelayEvent(record.Kind, event, route, agent, nil, record.ID, key) {
+		h.injectReplayedLaneEvent(replayCandidate{record: record, key: key, event: event, route: route, agent: agent}, source)
 		return
 	}
-	// The replay just spent an attempt. Recording it is what makes the gate
-	// above converge instead of replaying the same row after every restart.
+	if !h.injectRelayEvent(record.Kind, event, route, agent, nil, record.ID, key) {
+		return
+	}
+	h.recordRelayReplayAttempt(record, event, route, source)
+}
+
+// injectReplayedLaneEvent queues one replayed lane.event row to its pane and
+// spends the replay attempt.
+func (h *HubServer) injectReplayedLaneEvent(c replayCandidate, source string) {
+	h.registerRelayAckEvent("lane.event", c.event, c.route.Machine, c.route.Pane, c.record.ID)
+	if !c.agent.queueRelay(h.inboxRelayDirective("lane.event", c.event, c.route, c.record.ID)) {
+		h.forgetRelayEvent(c.key)
+		h.forgetRelayAckEvent(c.record.ID, c.event.JobID)
+		h.broadcastRelayUnrouted(c.event)
+		return
+	}
+	h.armRelayAckEvent(c.record.ID, c.event.JobID)
+	if c.route.jobRecord {
+		h.logger.Info("relay delivered", "route", "job-record", "lane", c.event.OwnerLane, "event_id", c.event.EventID)
+	}
+	h.recordRelayReplayAttempt(c.record, c.event, c.route, source)
+}
+
+// recordRelayReplayAttempt is the tail every replayed row shares.
+func (h *HubServer) recordRelayReplayAttempt(record handoffkeepRelayEvent, event hubJobEventPayload, route reportRelayRoute, source string) {
+	// The replay just spent an attempt. Recording it is what makes the
+	// attempts gate converge instead of replaying the same row after every
+	// restart.
 	attempts, recorded := h.bumpRelayEventAttempts(record.Kind, event, route)
 	if !recorded {
 		attempts = record.Attempts + 1

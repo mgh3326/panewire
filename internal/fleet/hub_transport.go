@@ -62,12 +62,13 @@ type HubBrief struct {
 
 // HubCheckout is the worktree.prepare grammar the hub forwards to the node.
 type HubCheckout struct {
-	Origin string `json:"origin"`
-	Mode   string `json:"mode"`
-	Branch string `json:"branch,omitempty"`
-	Sha    string `json:"sha,omitempty"`
-	Fetch  string `json:"fetch,omitempty"`
-	Dir    string `json:"dir"`
+	Origin      string `json:"origin"`
+	Mode        string `json:"mode"`
+	Branch      string `json:"branch,omitempty"`
+	Sha         string `json:"sha,omitempty"`
+	Fetch       string `json:"fetch,omitempty"`
+	Dir         string `json:"dir"`
+	VerifyReuse bool   `json:"verify_reuse,omitempty"`
 }
 
 // HubSpawnReply is a completed node answer (HTTP 200). Status is set instead
@@ -628,16 +629,26 @@ func (a *App) spawnHub(ctx context.Context, s Spawn, brief string, c *placeCandi
 	if !hubKeyRule.MatchString(key) {
 		return refuse("hub_cwd_key_invalid", fail(exitConfig, "repo name %q is not a valid hub cwd key", key))
 	}
-	args, e := hubArgs(a.Jobs, s)
+	candSpawn := s
+	if herdrWorkspaceID.MatchString(s.Workspace) {
+		origin := a.OriginMachine
+		if origin == "" {
+			origin = a.machine()
+		}
+		if (s.autoSelected || s.Host != c.name) && origin != "" && c.name != origin {
+			candSpawn.Workspace = ""
+		}
+	}
+	args, e := hubArgs(a.Jobs, candSpawn)
 	if e != nil {
 		return candResult{stop: fail(exitUsage, "hub spawn: %v", e)}
 	}
 	if s.DryRun {
-		payload, e := a.prepareBriefForHost(s, c.name, brief)
+		payload, e := a.prepareBriefForHost(candSpawn, c.name, brief)
 		if e != nil {
 			return candResult{stop: e}
 		}
-		a.dryRunLine(c.name, s, payload)
+		a.dryRunLine(c.name, candSpawn, payload)
 		return candResult{ok: true}
 	}
 	if !utf8.ValidString(brief) || len([]byte(brief)) > hubMaxBriefBytes {

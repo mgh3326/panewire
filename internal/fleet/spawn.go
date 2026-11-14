@@ -144,6 +144,14 @@ func (s Spawn) RoleKey() string {
 	return SpawnRoleKey(s.Task, s.Role, s.ReviewPass)
 }
 
+// HoldsTaskRole reports whether the hub reserves a task:role key for the
+// spawn. Every writer and reader of spawn_reservations.task_role asks here. A
+// consult seat works beside the task's claimant and never takes the one-holder
+// slot, so a consult pair can share one task (hk 4568).
+func (s Spawn) HoldsTaskRole() bool {
+	return s.Task != "" && s.ParentJob == "" && !s.consultTask()
+}
+
 // SpawnRoleKey is RoleKey for a caller that holds the parts, not a Spawn.
 func SpawnRoleKey(task, role, pass string) string {
 	key := task + ":" + role
@@ -352,14 +360,64 @@ func (s Spawn) replacesParent() bool {
 	return s.resolvedRoutingRole() == "implementer"
 }
 
+// parentJob returns the parent job of jobID, read from the job store or the
+// local ledger.
+func (a *App) parentJob(ctx context.Context, jobID string) string {
+	if jobID == "" {
+		return ""
+	}
+	if store, err := a.jobStore(); err == nil {
+		if rec, err := store.Get(ctx, jobID); err == nil {
+			if p := str(rec, "parent_job"); p != "" {
+				return p
+			}
+		}
+	}
+	if local, err := a.job(jobID); err == nil && local.Inherited != "" {
+		return local.Inherited
+	}
+	if events, err := a.events(jobID); err == nil {
+		for _, ev := range events {
+			if p := str(ev.Payload, "inherited_from"); p != "" {
+				return p
+			}
+		}
+	}
+	return ""
+}
+
+// isAncestorJob reports whether ancestor is an ancestor of descendant along
+// the parent_job chain.
+func (a *App) isAncestorJob(ctx context.Context, ancestor, descendant string) bool {
+	if ancestor == "" || descendant == "" || ancestor == descendant {
+		return false
+	}
+	curr := descendant
+	visited := map[string]bool{curr: true}
+	for i := 0; i < 32; i++ {
+		p := a.parentJob(ctx, curr)
+		if p == "" || visited[p] {
+			return false
+		}
+		if p == ancestor {
+			return true
+		}
+		visited[p] = true
+		curr = p
+	}
+	return false
+}
+
 // rebindInherited moves the task to this job when the task is still bound to
-// its parent job, whatever state the parent is in, and returns the
-// job.task_link status. A spawn that inherits its parent's task as an
-// implementer seat replaces the parent: the task's claim and refs.job_id move
-// to the successor, so everything that routes by the task binding (lane events,
-// mergewake FINDINGS) reaches the job that is working. A parent that is still
-// live loses its claim the same way; its pane is left alone. The spawn has
-// landed by now, so a failure is recorded on ev and never returned.
+// its parent job or an ancestor of the parent along the --parent-job chain,
+// whatever state the parent is in, and returns the job.task_link status. A
+// spawn that inherits its parent's task as an implementer seat replaces the
+// parent: the task's claim and refs.job_id move to the successor, so
+// everything that routes by the task binding (lane events, mergewake FINDINGS)
+// reaches the job that is working. A parent that is still live loses its claim
+// the same way; its pane is left alone. When the task is still bound to an
+// earlier job in the same chain, it is rebound from that ancestor. The spawn
+// has landed by now, so a failure is recorded on ev and never returned.
 // Rule: docs/config.md, "--parent-job".
 func (a *App) rebindInherited(ctx context.Context, s Spawn, task client.Task, ev map[string]any) string {
 	refused := func(why string) string {
@@ -367,16 +425,23 @@ func (a *App) rebindInherited(ctx context.Context, s Spawn, task client.Task, ev
 		ev["rebind_error"] = strings.ToValidUTF8(clip(why, 240), "")
 		return "inherited"
 	}
-	switch bound := task.Refs.JobID; bound {
-	case "":
+	bound := task.Refs.JobID
+	if bound == "" {
 		return refused("task has no job binding")
-	case s.Job:
+	}
+	if bound == s.Job {
 		// An earlier attempt of this request rebound the task and then failed.
 		return "rebound"
-	case s.Inherited:
-	default:
-		ev["bound_job"] = bound
-		return refused("task bound to another job")
+	}
+	fromJob := s.Inherited
+	if bound != s.Inherited {
+		if a.isAncestorJob(ctx, bound, s.Inherited) {
+			fromJob = bound
+			ev["rebound_from"] = bound
+		} else {
+			ev["bound_job"] = bound
+			return refused("task bound to another job")
+		}
 	}
 	// The parent's state names the rebind in hk's audit trail and on the link
 	// event. It does not decide it: hk's own rule (an active task bound to the
@@ -393,7 +458,7 @@ func (a *App) rebindInherited(ctx context.Context, s Spawn, task client.Task, ev
 		ev["parent_state"] = state
 		reason = "respawn continues " + state + " parent job " + s.Inherited
 	}
-	t, e := hkRebindTask(ctx, s.Task, s.Inherited, s.Job, s.Label, reason)
+	t, e := hkRebindTask(ctx, s.Task, fromJob, s.Job, s.Label, reason)
 	if e == nil && t.ClaimedBy == s.Label && t.Refs.JobID == s.Job {
 		return "rebound"
 	}
@@ -402,7 +467,7 @@ func (a *App) rebindInherited(ctx context.Context, s Spawn, task client.Task, ev
 		lookup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 		current, lookupErr := hkGetTask(lookup, s.Task)
 		cancel()
-		if lookupErr == nil && current.Refs.JobID != "" && current.Refs.JobID != s.Inherited {
+		if lookupErr == nil && current.Refs.JobID != "" && current.Refs.JobID != fromJob {
 			ev["bound_job"] = current.Refs.JobID
 		}
 		return refused("task rebind refused: " + hkErrText(e))
@@ -415,13 +480,13 @@ func (a *App) rebindInherited(ctx context.Context, s Spawn, task client.Task, ev
 	if err == nil && current.Refs.JobID == s.Job && current.ClaimedBy == s.Label {
 		return "rebound"
 	}
-	if err == nil && current.Refs.JobID == s.Inherited {
-		t, e = hkRebindTask(confirm, s.Task, s.Inherited, s.Job, s.Label, reason)
+	if err == nil && current.Refs.JobID == fromJob {
+		t, e = hkRebindTask(confirm, s.Task, fromJob, s.Job, s.Label, reason)
 		if e == nil && t.ClaimedBy == s.Label && t.Refs.JobID == s.Job {
 			return "rebound"
 		}
 	}
-	if err == nil && current.Refs.JobID != s.Inherited && current.Refs.JobID != s.Job {
+	if err == nil && current.Refs.JobID != fromJob && current.Refs.JobID != s.Job {
 		ev["bound_job"] = current.Refs.JobID
 	}
 	return refused("unconfirmed")
@@ -442,7 +507,8 @@ func (a *App) finishTaskTakeover(ctx context.Context, s Spawn, task client.Task,
 		a.warn("job %s: task rebind event not recorded: %v", s.Job, e)
 	}
 	if status == "rebound" {
-		a.noteReplaced(ctx, s)
+		fromJob := str(ev, "rebound_from")
+		a.noteReplaced(ctx, s, fromJob)
 		return
 	}
 	reason := str(ev, "rebind_error")
@@ -464,18 +530,29 @@ func (a *App) finishTaskTakeover(ctx context.Context, s Spawn, task client.Task,
 // own record of the takeover. A parent on another host keeps no note here: the
 // event would create a ledger for a job this host never ran. Writing it once is
 // enough, so a replay of the same spawn finds it and stops.
-func (a *App) noteReplaced(ctx context.Context, s Spawn) {
-	events, e := a.events(s.Inherited)
+func (a *App) noteReplaced(ctx context.Context, s Spawn, from ...string) {
+	fromJob := ""
+	if len(from) > 0 {
+		fromJob = from[0]
+	}
+	a.recordReplaced(ctx, s.Inherited, s.Job, s.Task)
+	if fromJob != "" && fromJob != s.Inherited {
+		a.recordReplaced(ctx, fromJob, s.Job, s.Task)
+	}
+}
+
+func (a *App) recordReplaced(ctx context.Context, targetJob, replacedBy, taskID string) {
+	events, e := a.events(targetJob)
 	if e != nil {
 		return
 	}
 	for _, ev := range events {
-		if ev.Kind == "job.replaced" && str(ev.Payload, "replaced_by") == s.Job {
+		if ev.Kind == "job.replaced" && str(ev.Payload, "replaced_by") == replacedBy {
 			return
 		}
 	}
-	if e := a.event(ctx, s.Inherited, "job.replaced", map[string]any{"replaced_by": s.Job, "task_id": s.Task}); e != nil {
-		a.warn("job %s: replaced_by note not recorded: %v", s.Inherited, e)
+	if e := a.event(ctx, targetJob, "job.replaced", map[string]any{"replaced_by": replacedBy, "task_id": taskID}); e != nil {
+		a.warn("job %s: replaced_by note not recorded: %v", targetJob, e)
 	}
 }
 
@@ -586,12 +663,22 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 	defer func() {
 		if a.ObserveReceipt != nil {
 			x := s.placement.execution
-			a.ObserveReceipt(ExecutionReceipt{CWD: s.CWD, Label: s.Label, Job: s.Job, Host: x.Host, Pane: x.PaneID, Profile: firstNonempty(x.Profile, s.Profile), Model: x.Model, Kind: x.Kind, Role: firstNonempty(x.Role, s.Role), LaneUnregistered: s.laneUnregistered})
+			a.ObserveReceipt(ExecutionReceipt{CWD: s.CWD, Label: s.Label, Job: s.Job, Host: x.Host, Pane: x.PaneID, Profile: firstNonempty(x.Profile, s.Profile), Model: x.Model, Pool: x.Pool, AccountKey: x.AccountKey, Kind: x.Kind, Role: firstNonempty(x.Role, s.Role), LaneUnregistered: s.laneUnregistered})
 		}
 	}()
 
-	defer func() { a.finishPlacement(ctx, s, err) }()
-	defer func() { a.spawnEvents(s, err) }()
+	defer func() {
+		// A quota wait is not a terminal refusal. Preserve a host attempt if
+		// this pass already contacted one, but do not emit refusal events.
+		if errors.Is(err, ErrQuotaRefreshPending) {
+			if s.placement.contactedHost != "" || s.placement.started {
+				a.finishPlacement(ctx, s, err)
+			}
+			return
+		}
+		a.spawnEvents(s, err)
+		a.finishPlacement(ctx, s, err)
+	}()
 	if s.CWD == "" || s.Prompt == "" || s.Label == "" || !slices.Contains([]string{"T0", "T1", "T2", "T3"}, s.T) {
 		return fail(exitUsage, "spawn requires -c -p -l --t T0..T3; supply the missing flags (workspace defaults to executing local.workspace)")
 	}

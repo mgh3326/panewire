@@ -103,11 +103,11 @@ func TestOMPNoThinkingSeatLaunchAndProof(t *testing.T) {
 		}
 	}
 	const cwd = "/home/user/work/tree"
-	screen := "π > ⬢ Gemini 4 Argon > 🌳 project/tree ▶─1%──…─1M─"
-	if !OMPFooterProof(screen, "Gemini 4 Argon", "off", cwd, "/home/user", "", a.Policy.Profiles["omp-argon4"].NoThinking) {
+	screen := "π > ⬢ Gemini 4 Argon > 🌳 project/tree > ⑂ wk/fixture ▶─1%──…─1M─"
+	if !OMPFooterProof(screen, "Gemini 4 Argon", "off", cwd, "/home/user", "", "project/tree", "wk/fixture", a.Policy.Profiles["omp-argon4"].NoThinking) {
 		t.Fatal("the no-thinking seat's footer with ⬢ was refused")
 	}
-	if OMPFooterProof(screen, "Gemini 4 Argon", "off", cwd, "/home/user", "", a.Policy.Profiles["omp-musespark13"].NoThinking) {
+	if OMPFooterProof(screen, "Gemini 4 Argon", "off", cwd, "/home/user", "", "project/tree", "wk/fixture", a.Policy.Profiles["omp-musespark13"].NoThinking) {
 		t.Fatal("a thinking seat accepted the footer with ⬢")
 	}
 }
@@ -124,7 +124,9 @@ func TestOMPNoThinkingSeatProofReadsSeat(t *testing.T) {
 			q.LaunchValue = Launch{Profile: profile, ModelID: want.model, Effort: "off", Grade: gradeUnrated, Pool: commandcodePool, Gate: defaultGate}
 			q.GateDo = gatePools(map[string]string{profile: commandcodePool})
 			ompModelCatalog(fr, want.model, want.footer)
-			ompSeat(fr, "", func(int) string { return "π > ⬢ " + want.footer + " > 🌳 panewire/tree ▶─1%──…─1M─" })
+			ompSeat(fr, "", func(int) string {
+				return "π > ⬢ " + want.footer + " > 🌳 panewire/tree > ⑂ wk/fixture ▶─1%──…─1M─"
+			})
 			if err := a.Spawn(context.Background(), s); err != nil {
 				t.Fatalf("⬢ footer did not prove %s@off: %v", profile, err)
 			}
@@ -138,7 +140,9 @@ func TestOMPNoThinkingSeatProofReadsSeat(t *testing.T) {
 		q.LaunchValue = Launch{Profile: "omp-musespark13", ModelID: "commandcode/meta/muse-spark-1.3", Effort: "high", Grade: gradeUnrated, Pool: commandcodePool, Gate: defaultGate}
 		q.GateDo = gatePools(map[string]string{"omp-musespark13": commandcodePool})
 		ompModelCatalog(fr, "commandcode/meta/muse-spark-1.3", "Muse Spark 1.3")
-		ompSeat(fr, "", func(int) string { return "π > ⬢ Muse Spark 1.3 > 🌳 panewire/tree ▶─1%──…─1M─" })
+		ompSeat(fr, "", func(int) string {
+			return "π > ⬢ Muse Spark 1.3 > 🌳 panewire/tree > ⑂ wk/fixture ▶─1%──…─1M─"
+		})
 		err := a.Spawn(context.Background(), s)
 		if err == nil || !strings.Contains(err.Error(), "omp model/effort not proven") {
 			t.Fatalf("a thinking seat proved with ⬢ icon instead of an effort glyph: %v", err)
@@ -183,7 +187,8 @@ func TestOMPNoThinkingSeatLeavesOtherRungsUnchanged(t *testing.T) {
 	a := testApp(t)
 	for profile, seat := range a.Policy.Profiles {
 		if seat.Kind == "omp" && seat.NoThinking {
-			if _, ok := ompNoThinkingSeats[profile]; !ok {
+			_, seeded := ompNoThinkingSeats[profile]
+			if _, muse := ompMuseNoThinkingSeats[profile]; !seeded && !muse {
 				t.Fatalf("seat %s gained no_thinking", profile)
 			}
 		}

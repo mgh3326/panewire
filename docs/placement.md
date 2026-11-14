@@ -153,7 +153,7 @@ whole-pool cap, so a free rung must pass both keys when both are set.
 
 The hub counts, because it places every hub spawn
 ([durable spawn operations](hub-spawn-operations.md)). A live spawn on a pool
-is a hub spawn operation that is accepted or dispatching, or succeeded with a
+is a hub spawn operation that is accepted, bound or dispatching, or succeeded with a
 job that a node still lists as active, whose placed profile is in that pool.
 A spawn that succeeded less than two minutes ago counts before its first
 heartbeat. An auto spawn that is still being placed has no profile yet and
@@ -215,7 +215,7 @@ outcome, in this order:
 | `harness_missing` | The harness binary is not installed |
 | `harness_version` | `placement.harness_min_version.<kind>` (in the spawner's `hosts.toml`) is set and the version is lower or unreadable |
 | `dialog_pending` | The last launch of this kind stopped at a first-run dialog ([desk notice](#first-run-refusals-and-the-desk-notice)) |
-| `login_missing` | The node's refresh of the kind's pool failed with a login error kind, or its login probe did, or its last launch ended rc=76 at the harness's login screen ([fleet-state.md](fleet-state.md#login-probe)); that verified agy login-screen result is sent as rc=88 `auth_unavailable` so auto placement can try another host; `cmd` needs no login ([desk notice](#first-run-refusals-and-the-desk-notice)) |
+| `login_missing` | The node's refresh of the kind's pool failed with a login error kind, or its login probe did, or its last launch ended rc=76 at the harness's login screen ([fleet-state.md](fleet-state.md#login-probe)); that verified agy login-screen result is sent as rc=88 `auth_unavailable` so a placement the node refused before its hk job claim can try another host (a refusal after the claim ends on that host, [hub-spawn-operations.md](hub-spawn-operations.md)); `cmd` needs no login ([desk notice](#first-run-refusals-and-the-desk-notice)) |
 | `repo_unmapped` | The spawn's repository is not in the node's `repos` |
 | `brief_unavailable` | The spawn goes through the hub with a brief document and the node cannot fetch one |
 | `toolchain_missing` | `placement.repo_toolchains.<repo>` lists a toolchain the node lacks |
@@ -283,8 +283,14 @@ a hub restart forgets them, which ends a backoff early and never starts one.
 
 A first-run dialog or a missing login rules out one host, not the request. When
 the hub places a spawn under `--host auto` and a node refuses with one of these
-engine codes, the hub unbinds the request and the candidate loop tries the next
-host:
+engine codes before its hk job claim (result stage empty, `placement` or
+`checkout`), the hub unbinds the request and the candidate loop tries the next
+host. A dialog or login screen is normally seen after the pane launched, past
+the claim; hk then holds the job id for that host and answers another host's
+claim with 409 `job_id_taken` (rc 74), so that refusal is the request's answer
+and a replay runs on the same host ([hub-spawn-operations.md](hub-spawn-operations.md)).
+The desk notice and the launch backoff still apply, so the next submission is
+placed elsewhere:
 
 | Code | Cause | Desk action |
 |---|---|---|
@@ -295,8 +301,9 @@ host:
 
 `cwd_unmapped` moves on the same way. The refusing host still counts the
 failure in its launch backoff. A refusal moves on only when the node verified
-its pane cleanup (`retryable`); otherwise a pane may still hold the job id and
-the refusal is the request's answer. A pinned `--host` keeps its refusal.
+its pane cleanup (`retryable`) and refused before its hk job claim; otherwise a
+pane or the claim may still hold the job id and the refusal is the request's
+answer. A pinned `--host` keeps its refusal.
 Nothing answers the dialog: trust stays a one-time human action on the host.
 
 The first time a host reports a need for a harness kind, the hub sends one
@@ -419,8 +426,16 @@ still limits the hosts). A host the hub left out for a full task cap stays out
 of the plan (`task_slots_full`) on both the fleet-state and the direct read. A
 pinned `--host` is counted through the gate too. A request bound to a node that
 timed out keeps its count (the node may still launch it) until a claim, a
-definitive failure or the bridge window. The count is in hub memory, so a hub
-restart forgets the jobs decided and not yet claimed until their claims show.
+definitive failure or the bridge window. The count is in hub memory, but a hub
+restart counts again, on the host each one is bound to, every spawn that is still
+bound and unsettled (`dispatching`, `reconciling`, `succeeded`, or `deadline_exceeded`
+with a bound node), placed (bound) within the bridge window, and not yet claimed
+(`restorePlacementCounts`, hk 4460). The bind stamps `placed_ms` and the claim that ends
+the count stamps `claimed_ms` on the job's bound rows, so a job claimed before the restart
+is not counted again, even if it finished. A restored count ends with the claim, a definitive
+failure or the window, as a live one does. A refused, failed or retryable request is not
+restored, and a request not yet bound places again and counts then. A hub whose restore
+fails does not start.
 
 Every spawn decision also takes the hub's latest view: before the engine reads
 the hub's fleet state the hub recomputes the hosts' `load` values, and the
@@ -1017,10 +1032,14 @@ execution identity; this change does not install or alter DAGs.
 
 ## Quota service boundary
 
-The absorbed spawn engine now reads the hub's timestamped fleet-state snapshot
-in-process and dispatches `quota.refresh` directly to the selected node. Existing
-provider adapters and their credentials remain on that node; stale or unknown
-quota remains fail-closed. `GET /v1/state` and node refresh already provide the
+The absorbed spawn engine reads the hub's timestamped fleet-state snapshot
+in-process. A stale account schedules a bounded, deduplicated `quota.refresh`
+on its node outside placement; placement can choose a different confirmed
+account without waiting. If none is eligible, the accepted request remains
+pending until a refresh completes or its deadline expires. Existing provider
+adapters and their credentials remain on the node; stale or unknown quota is
+never treated as confirmed. The queue and its cancellation rules are described
+in [Durable spawn operations](hub-spawn-operations.md). `GET /v1/state` and node refresh provide the
 shared service needed by placement. A second provider-measurement service and a
 `panewire quota` command are not added: they would duplicate those interfaces or
 centralize credentials without a demonstrated caller need. `pacelever` remains

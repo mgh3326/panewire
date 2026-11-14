@@ -154,10 +154,11 @@ func TestSpawnBoundTimeoutCleanupAttestationContract(t *testing.T) {
 					if err != nil {
 						t.Fatal(err)
 					}
-					task, err = s.bindSpawn(t.Context(), req.RequestID, task.Attempt, hubSpawnRequest{RequestID: t14RequestID(998), Machine: "machine-a"})
+					task, err = s.bindSpawn(t.Context(), req.RequestID, task.Attempt, hubSpawnRequest{RequestID: t14RequestID(998), Machine: "machine-a"}, time.Now().UTC())
 					if err != nil {
 						t.Fatal(err)
 					}
+					task = sentSpawnFixture(t, s, task)
 					// First a hub deadline passes while the node is still running.
 					if _, err = s.completeSpawn(t.Context(), task, hubSpawnOutcome{RC: 124, Reason: "timeout", Retryable: true}, now); err != nil {
 						t.Fatal(err)
@@ -223,7 +224,7 @@ func TestAsyncSpawnCompletedNodeRefusalsRemainTerminal(t *testing.T) {
 				t.Fatal(err)
 			}
 			dispatch := hubSpawnRequest{RequestID: t14RequestID(996), Machine: "machine-a", CWDKey: "project", Brief: hubSpawnBrief{Inline: "task"}, Args: []string{"--job", "test-job"}, WaitSeconds: 600, DeadlineMS: task.Deadline.UnixMilli()}
-			task, err = h.inbox.store.bindSpawn(t.Context(), req.RequestID, task.Attempt, dispatch)
+			task, err = h.inbox.store.bindSpawn(t.Context(), req.RequestID, task.Attempt, dispatch, time.Now().UTC())
 			if err != nil {
 				t.Fatal(err)
 			}

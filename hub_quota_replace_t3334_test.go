@@ -536,6 +536,11 @@ func TestQuotaStopWaitsThroughReconcilingForTheSuccessor(t *testing.T) {
 		successor, err = f.hub.inbox.store.latestSpawnForJob(t.Context(), "mwr-7-p1-q1")
 		return err == nil
 	})
+	successor, err := f.hub.inbox.store.bindSpawn(t.Context(), successor.Request.RequestID, successor.Attempt, hubSpawnRequest{RequestID: t14RequestID(333401), Machine: "machine-a"}, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	successor = sentSpawnFixture(t, f.hub.inbox.store, successor)
 	// The node's answer is unknown for now: the operation is reconciling.
 	if _, err := f.hub.inbox.store.completeSpawn(t.Context(), successor, hubSpawnOutcome{RC: 75, Stage: "landing", Reason: "unknown"}, time.Now()); err != nil {
 		t.Fatal(err)

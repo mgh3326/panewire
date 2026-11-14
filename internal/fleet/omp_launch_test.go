@@ -156,21 +156,21 @@ func TestOMPFooterProof(t *testing.T) {
 		sonnet  = "Sonnet 5.5"
 		footer  = " π > ◒ GPT-6.1 Terra > 📁 %s ▶─1%%──1M─"
 		rowGit  = " π > ◒ Opus 5.5 > 🌳 %s > ⑂ %s ▶─1%%──1M─"
-		rowPlan = " π > ◒ Opus 5.5 > plan > 🌳 panewire/tree ▶─1%%──1M─"
+		rowPlan = " π > ◒ Opus 5.5 > plan > 🌳 panewire/tree > ⑂ wk/fixture ▶─1%%──1M─"
 	)
 	row := func(format string, args ...any) string {
 		return "history\n" + fmt.Sprintf(format, args...) + "\n╰─  hint"
 	}
 	for _, tc := range []struct {
-		name, screen, model, effort, cwd, brief string
-		want                                    bool
+		name, screen, model, effort, cwd, brief, label, branch string
+		want                                                   bool
 	}{
-		{name: "captured worktree", screen: worktree, model: opus, effort: "high", cwd: tree, want: true},
+		{name: "captured worktree", screen: worktree, model: opus, effort: "high", cwd: tree, label: "panewire/tree", branch: "wk/fixture", want: true},
 		{name: "captured folder", screen: folder, model: sonnet, effort: "medium", cwd: desk, want: true},
-		{name: "captured working footer", screen: working, model: opus, effort: "high", cwd: tree, want: true},
+		{name: "captured working footer refuses detached branch", screen: working, model: opus, effort: "high", cwd: tree, label: "panewire/tree", branch: "wk/fixture"},
 		{name: "working footer: different model", screen: working, model: sonnet, effort: "high", cwd: tree},
-		{name: "working footer: different cwd", screen: working, model: opus, effort: "high", cwd: "/home/user/work/other"},
-		{name: "working footer quoted by the brief", screen: working, model: opus, effort: "high", cwd: tree, brief: working},
+		{name: "working footer: different cwd", screen: working, model: opus, effort: "high", cwd: "/home/user/work/other", label: "panewire/other", branch: "wk/other"},
+		{name: "working footer quoted by the brief", screen: working, model: opus, effort: "high", cwd: tree, brief: working, label: "panewire/tree", branch: "detached"},
 		{name: "minutes elapsed", screen: row(" ⠙ 1m 4s > ◒ Opus 5.5 > 📁 ~/work/plain/desk ▶─1%%──1M─"), model: opus, effort: "high", cwd: desk, want: true},
 		{name: "spinner without elapsed time", screen: row(" ⠙ > ◒ Opus 5.5 > 📁 ~/work/plain/desk ▶─1%%──1M─"), model: opus, effort: "high", cwd: desk},
 		{name: "elapsed time without spinner", screen: row(" 16s > ◒ Opus 5.5 > 📁 ~/work/plain/desk ▶─1%%──1M─"), model: opus, effort: "high", cwd: desk},
@@ -180,7 +180,7 @@ func TestOMPFooterProof(t *testing.T) {
 		{name: "folder: different model", screen: folder, model: opus, effort: "medium", cwd: desk},
 		{name: "worktree: different effort", screen: worktree, model: opus, effort: "medium", cwd: tree},
 		{name: "folder: different effort", screen: folder, model: sonnet, effort: "high", cwd: desk},
-		{name: "worktree: different cwd", screen: worktree, model: opus, effort: "high", cwd: "/home/user/work/other"},
+		{name: "worktree: different cwd", screen: worktree, model: opus, effort: "high", cwd: "/home/user/work/other", label: "panewire/other", branch: "wk/other"},
 		{name: "folder: different cwd", screen: folder, model: sonnet, effort: "medium", cwd: "/home/user/work/plain/other"},
 		{name: "folder: cwd only shares a prefix", screen: folder, model: sonnet, effort: "medium", cwd: desk + "-extra"},
 		{name: "unmapped effort", screen: worktree, model: opus, effort: "auto", cwd: tree},
@@ -191,7 +191,7 @@ func TestOMPFooterProof(t *testing.T) {
 
 		{name: "longer model name is another model", screen: row(" π > ◒ GPT-5.6 Terra Pro > 📁 ~/work/plain/desk ▶─1%%──1M─"), model: "GPT-5.6 Terra", effort: "high", cwd: desk},
 		{name: "usage badge keeps the model", screen: row(" π > ◒ Opus 5.5 · Wrap-up > 📁 ~/work/plain/desk ▶─1%%──1M─"), model: opus, effort: "high", cwd: desk, want: true},
-		{name: "mode segment before the path", screen: row(rowPlan), model: opus, effort: "high", cwd: tree, want: true},
+		{name: "mode segment before the path", screen: row(rowPlan), model: opus, effort: "high", cwd: tree, label: "panewire/tree", branch: "wk/fixture", want: true},
 		{name: "no path segment", screen: row(" π > ◒ Opus 5.5 > $0.04 ▶─1%%──1M─"), model: opus, effort: "high", cwd: tree},
 		{name: "older footer", screen: "── editor ──\n\n────────\n~/work/tree\n12%/100k (anthropic) claude-opus-5-5 • high", model: opus, effort: "high", cwd: tree},
 
@@ -205,15 +205,22 @@ func TestOMPFooterProof(t *testing.T) {
 		{name: "captured clamp names another directory", screen: clamped, model: opus, effort: "high", cwd: "/home/user/work/plain-fixture-directory/desk-for-another-footer"},
 		{name: "short tail is not omp's clamp", screen: row(footer, "…ain/desk"), model: "GPT-6.1 Terra", effort: "high", cwd: "/home/user/plain/desk"},
 
-		{name: "worktree dir equals branch", screen: row(rowGit, "panewire", "tree"), model: opus, effort: "high", cwd: tree, want: true},
-		{name: "worktree branch names another dir", screen: row(rowGit, "panewire", "other"), model: opus, effort: "high", cwd: tree},
-		{name: "worktree label clamped", screen: row(rowGit, "…"+clampTail("project/tree"), "wk/x"), model: opus, effort: "high", cwd: tree, want: true},
-		{name: "worktree label clamped to other", screen: row(rowGit, "…"+clampTail("project/other"), "wk/x"), model: opus, effort: "high", cwd: tree},
-		{name: "worktree dir clamped", screen: row(rowGit, "…"+clampTail("d"), "wk/x"), model: opus, effort: "high", cwd: "/home/user/work/" + strings.Repeat("d", 45), want: true},
-		{name: "worktree short tail is not omp's clamp", screen: row(rowGit, "…ire/tree", "wk/x"), model: opus, effort: "high", cwd: tree},
+		{name: "worktree dir equals branch", screen: row(rowGit, "panewire", "tree"), model: opus, effort: "high", cwd: tree, label: "panewire", branch: "tree", want: true},
+		{name: "worktree branch mismatch", screen: row(rowGit, "panewire/tree", "wk/other"), model: opus, effort: "high", cwd: tree, label: "panewire/tree", branch: "wk/fixture"},
+		{name: "worktree label clamped", screen: row(rowGit, "…"+clampTail("project/tree"), "wk/x"), model: opus, effort: "high", cwd: tree, label: strings.Repeat("d", 39) + "project/tree", branch: "wk/x", want: true},
+		{name: "worktree label clamped to other", screen: row(rowGit, "…"+clampTail("project/other"), "wk/x"), model: opus, effort: "high", cwd: tree, label: "project/tree", branch: "wk/x"},
+		{name: "worktree clamp allows a partial worktree name", screen: row(rowGit, "…"+clampTail("d"), "wk/x"), model: opus, effort: "high", cwd: "/home/user/work/" + strings.Repeat("d", 45), label: "project/" + strings.Repeat("d", 45), branch: "wk/x", want: true},
+		{name: "worktree clamp shorter than 16 runes", screen: row(rowGit, "…ire/tree", "wk/x"), model: opus, effort: "high", cwd: tree, label: "panewire/tree", branch: "wk/x"},
+		{name: "worktree footer refuses missing cwd branch", screen: row(rowGit, "panewire/tree", "wk/fixture"), model: opus, effort: "high", cwd: tree, label: "panewire/tree"},
+		{name: "worktree footer requires branch segment", screen: row(" π > ◒ Opus 5.5 > 🌳 panewire/tree ▶─1%%──1M─"), model: opus, effort: "high", cwd: tree, label: "panewire/tree", branch: "wk/fixture"},
+		{name: "worktree clamp rejects a tail outside omp label", screen: row(rowGit, "…other/panewire/tree", "wk/fixture"), model: opus, effort: "high", cwd: tree, label: "panewire/tree", branch: "wk/fixture"},
+		{name: "Muse Spark footer clamp", screen: row(" π > ◒ Muse Spark 1.3 Contributor > 🌳 …/mergewake.exp4523-musespark13c-3539 > ⑂ exp/4523-musespark13c-3539 ▶─0.9%%─┃1M─"), model: "Muse Spark 1.3 Contributor", effort: "high", cwd: "/Users/robin/work/mergewake.exp4523-musespark13c-3539", label: "mergewake/mergewake.exp4523-musespark13c-3539", branch: "exp/4523-musespark13c-3539", want: true},
+		{name: "ParkingArcade footer clamp", screen: row(" π > ◒ DeepSeek V4.1 Flash > 🌳 …cade/ParkingArcade.ci-evidence-4556 > ⑂ wk/ci-evidence-cleanup-4556 > ⤴ #637 ▶─1%%─┃1M─"), model: "DeepSeek V4.1 Flash", effort: "high", cwd: "/Users/robin/work/ParkingArcade.ci-evidence-4556", label: "ParkingArcade/ParkingArcade.ci-evidence-4556", branch: "wk/ci-evidence-cleanup-4556", want: true},
+		{name: "role rename footer clamp", screen: row(" π > ◔ DeepSeek V4.1 Flash > 🌳 …ewire/panewire.role-rename-no-aliases > ⑂ wk/role-rename-no-aliases > ⤴ #518 ▶─1%%─┃1M─"), model: "DeepSeek V4.1 Flash", effort: "low", cwd: "/Users/robin/work/panewire.role-rename-no-aliases", label: "panewire/panewire.role-rename-no-aliases", branch: "wk/role-rename-no-aliases", want: true},
+		{name: "parent job binding footer clamp", screen: row(" π > ◔ DeepSeek V4.1 Flash > 🌳 …wire.parent-job-binding-takeover > ⑂ wk/parent-job-binding-takeover > ⤴ #520 ▶─1%%─┃1M─"), model: "DeepSeek V4.1 Flash", effort: "low", cwd: "/Users/robin/work/panewire.parent-job-binding-takeover", label: "panewire/panewire.parent-job-binding-takeover", branch: "wk/parent-job-binding-takeover", want: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := OMPFooterProof(tc.screen, tc.model, tc.effort, tc.cwd, home, tc.brief); got != tc.want {
+			if got := OMPFooterProof(tc.screen, tc.model, tc.effort, tc.cwd, home, tc.brief, tc.label, tc.branch); got != tc.want {
 				t.Fatalf("got %t for %q", got, tc.screen)
 			}
 		})
@@ -223,11 +230,19 @@ func TestOMPFooterProof(t *testing.T) {
 // The bottom row is the seat's; a footer an earlier turn printed proves nothing.
 func TestOMPFooterProofReadsTheBottomRow(t *testing.T) {
 	screen := " π > ◒ Sonnet 5.5 > 🌳 panewire/tree ▶─1%──1M─\n" + ompCapture(t, "screen_opus_high_worktree.txt")
-	if !OMPFooterProof(screen, "Opus 5.5", "high", "/home/user/work/tree", "/home/user", "") {
+	if !OMPFooterProof(screen, "Opus 5.5", "high", "/home/user/work/tree", "/home/user", "", "panewire/tree", "wk/fixture") {
 		t.Fatal("bottom row refused")
 	}
-	if OMPFooterProof(screen, "Sonnet 5.5", "high", "/home/user/work/tree", "/home/user", "") {
+	if OMPFooterProof(screen, "Sonnet 5.5", "high", "/home/user/work/tree", "/home/user", "", "panewire/tree", "wk/fixture") {
 		t.Fatal("quoted row proved")
+	}
+}
+
+func TestOMPWorktreeIdentityUsesLinkedCheckoutNames(t *testing.T) {
+	a, s, _ := ompSpawnFixture(t)
+	label, branch := a.ompWorktreeIdentity(context.Background(), s.CWD)
+	if label != "panewire/tree" || branch != "wk/fixture" {
+		t.Fatalf("OMP worktree identity = (%q, %q), want (%q, %q)", label, branch, "panewire/tree", "wk/fixture")
 	}
 }
 

@@ -94,7 +94,7 @@ func TestLiveSpawnProfilesCountsAcceptedAndDispatchingByPlacedProfile(t *testing
 	liveOp(t, h, 2, "unplaced", "auto", now)
 	bound := liveOp(t, h, 3, "bound", "auto", now)
 	node := hubSpawnRequest{RequestID: "d676220b-e763-4af1-aefd-0000000000b3", Machine: "machine-a", Args: []string{"-m", "builder-sol"}}
-	if _, err := h.inbox.store.bindSpawn(t.Context(), bound.Request.RequestID, bound.Attempt, node); err != nil {
+	if _, err := h.inbox.store.bindSpawn(t.Context(), bound.Request.RequestID, bound.Attempt, node, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	got := liveProfilesOf(t, h, "")

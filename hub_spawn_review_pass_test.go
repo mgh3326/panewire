@@ -88,7 +88,7 @@ func TestReviewPassReservationsAreIndependent(t *testing.T) {
 	dup := reviewPassSubmit(t, server, reviewPassRequest(3, "rev-p1-again", "1"))
 	var body map[string]string
 	_ = json.Unmarshal(dup.body, &body)
-	if dup.status != http.StatusConflict || body["error"] != "job_already_claimed" || body["request_id"] != reviewPassRequest(1, "", "").RequestID || body["job"] != "rev-p1" {
+	if dup.status != http.StatusConflict || body["error"] != "task_role_claimed" || body["request_id"] != reviewPassRequest(1, "", "").RequestID || body["job"] != "rev-p1" {
 		t.Fatalf("second p1: status=%d body=%s", dup.status, dup.body)
 	}
 	plain := reviewPassSubmit(t, server, reviewPassRequest(4, "rev-plain", ""))

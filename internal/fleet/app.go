@@ -61,6 +61,10 @@ type App struct {
 	// this decision may read the host view, and its release is called once the
 	// decision has told PlacementTry its host (or ended). Nil does not gate.
 	PlacementGate func(context.Context) (release func(), err error)
+	// ScheduleQuotaRefresh is set by the hub coordinator. It queues a node
+	// measurement without waiting; ordinary CLI spawns keep their synchronous
+	// refresh path.
+	ScheduleQuotaRefresh func(machine, pool string, timeout time.Duration)
 	// SharedLatest reads one account's latest stored quota reading for the
 	// admission gate; nil reads handoffkeep (admission_native.go).
 	SharedLatest func(context.Context, string) (shared.Latest, error)
@@ -75,7 +79,8 @@ type App struct {
 	JobStore      JobStore
 	// TaskState reads one hk task; nil builds it from [quota] / the
 	// handoffkeep env on first use (TaskStatus).
-	TaskState TaskStateReader
+	TaskState    TaskStateReader
+	LadderRebind func(context.Context, string, string, string, string) error
 	// PR lists the PRs hk links to one task; nil builds it the same way on
 	// first use (PRs). Reap reads it to keep a completed author's pane.
 	PR PRReader
@@ -94,6 +99,9 @@ type App struct {
 	// event carries it so Loki joins the decision to the spawn and its Sentry
 	// event. Empty outside a hub spawn.
 	RequestID string
+	// OriginMachine is the machine that submitted this hub spawn. Empty
+	// outside a hub spawn.
+	OriginMachine string
 	// EventSink receives fleet events instead of the state directory's file;
 	// tests only.
 	EventSink func(fleetevent.Event)
@@ -282,7 +290,7 @@ func validID(s string) bool { return idPattern.MatchString(s) && s != "." && s !
 func (a *App) Run(ctx context.Context, args []string) error {
 	a.flushPlacements()
 	if len(args) == 0 || args[0] == "help" || args[0] == "--help" || args[0] == "-h" {
-		fmt.Fprintln(a.Out, "Usage: panewire <spawn|done|escalate|restore|reap|prune|lanes-missing|hosts|profiles|find|name-sync|artifacts|simulate|plan|resolve|preflight> [options]")
+		fmt.Fprintln(a.Out, "Usage: panewire <spawn|done|escalate|escalate-author|restore|reap|prune|lanes-missing|hosts|profiles|find|name-sync|artifacts|simulate|plan|resolve|preflight> [options]")
 		return nil
 	}
 	if args[0] == "lead" {
@@ -291,7 +299,7 @@ func (a *App) Run(ctx context.Context, args []string) error {
 	if len(args) > 1 && (args[1] == "--help" || args[1] == "-h") {
 		return a.help(args[0])
 	}
-	if a.EnforceTrust && (args[0] == "spawn" || args[0] == "work" || args[0] == "plan" || args[0] == "resolve" || args[0] == "preflight" || args[0] == "_spawn-stdin" || args[0] == "done" || args[0] == "escalate" || args[0] == "restore" || args[0] == "reap" || args[0] == "prune" || args[0] == "artifacts" || args[0] == "_watch") {
+	if a.EnforceTrust && (args[0] == "spawn" || args[0] == "work" || args[0] == "plan" || args[0] == "resolve" || args[0] == "preflight" || args[0] == "_spawn-stdin" || args[0] == "done" || args[0] == "escalate" || args[0] == "escalate-author" || args[0] == "restore" || args[0] == "reap" || args[0] == "prune" || args[0] == "artifacts" || args[0] == "_watch") {
 		if e := a.trust(); e != nil {
 			return e
 		}
@@ -317,6 +325,8 @@ func (a *App) Run(ctx context.Context, args []string) error {
 		return a.SubmitSpawn(ctx, s)
 	case "done", "escalate", "restore":
 		return a.lifecycle(ctx, args[0], args[1:])
+	case "escalate-author":
+		return a.escalateAuthorCmd(ctx, args[1:])
 	case "reap", "prune":
 		return a.hygiene(ctx, args[0], args[1:])
 	case "hosts", "profiles", "find", "name-sync", "lanes-missing":
@@ -351,6 +361,8 @@ func (a *App) help(cmd string) error {
 		fmt.Fprintln(a.Out, "Usage: panewire done JOB [--report PATH] [--result FILE]")
 	case "escalate":
 		fmt.Fprintln(a.Out, "Usage: panewire escalate JOB --question TEXT [--report PATH]")
+	case "escalate-author":
+		fmt.Fprintln(a.Out, "Usage: panewire escalate-author --task ID --job JOB --pr owner/repo#N --round N --findings-file PATH (rc 2: intact refusal; rc 1: ended or unconfirmed; rc 124: pending)")
 	case "restore":
 		fmt.Fprintln(a.Out, "Usage: panewire restore JOB (rebind a released job to its verified existing pane)")
 	case "reap", "prune":

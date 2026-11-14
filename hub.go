@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -173,6 +174,9 @@ type HubLastNote struct {
 }
 
 type hubNodeRecord struct {
+	// appliedPending belongs to this registration and is guarded by HubServer.mu.
+	appliedPending    bool
+	appliedTimer      *time.Timer
 	machineID         string
 	accepting         bool
 	capabilities      map[string]bool
@@ -188,8 +192,11 @@ type hubNodeRecord struct {
 	lastHeartbeat time.Time
 	agent         *hubAgent
 	activeJobs    map[string]HubActiveJob
-	hostLoad      *HubHostLoad
-	hostMemory    *HubHostMemory
+	// activeReported is true once a heartbeat has carried activeJobs since the
+	// hello that created this record; the hello empties activeJobs until then.
+	activeReported bool
+	hostLoad       *HubHostLoad
+	hostMemory     *HubHostMemory
 	// hostActivity is the last heartbeat's user-input report, nil when the node
 	// sent none (host_activity.go). It is recorded only.
 	hostActivity *HubHostActivity
@@ -213,7 +220,7 @@ type hubAgent struct {
 	// machineID is the node this socket authenticated as. It is the sender
 	// the lane inbox records for a lane.event the node relays.
 	machineID   string
-	writeMu     sync.Mutex
+	writeMu     hubWriteMutex
 	transient   bool
 	failovers   chan hubFailoverEvent
 	revocations chan hubJobRevokedEvent
@@ -323,6 +330,9 @@ type hubRelayInjectEvent struct {
 	Lane    string `json:"lane,omitempty"`
 	EventID int64  `json:"event_id,omitempty"`
 	Deliver string `json:"deliver,omitempty"`
+	// Delivered, when set, runs once the writer has written the event to the
+	// node. It is never sent on the wire (hub_drain_wake.go).
+	Delivered func() `json:"-"`
 }
 
 type hubJobRevokedEvent struct {
@@ -390,6 +400,8 @@ type hubSubscriptionMessage struct {
 // HubServer relays presence and events. Accepted spawns and lane inbox work
 // live in the configured durable store; presence and legacy job fences do not.
 type HubServer struct {
+	// replayMu excludes registration changes and report settlement from replay walks.
+	replayMu             sync.RWMutex
 	inbox                *hubInbox
 	spawnTraceOnce       sync.Once
 	spawnSentry          *sentry.Client
@@ -409,6 +421,9 @@ type HubServer struct {
 	quotaReplaceBudget time.Duration
 	spawnKick          chan struct{}
 	spawnWorkers       sync.WaitGroup
+	quotaRefresh       hubQuotaRefreshScheduler
+	spawnActions       hubSpawnActions
+	spawnAdmissions    hubSpawnAdmissions
 	// drain is the SIGTERM state (hub_drain.go).
 	drain hubDrain
 	// spawnOrphanProbed is when the hub last probed each stranded request's
@@ -430,6 +445,8 @@ type HubServer struct {
 	// heldLoop counts held role reservations per role key; heldLoopMu guards it
 	// separately from mu because a Sentry send must not run under the hub lock.
 	heldLoopMu        sync.Mutex
+	ladderMu          sync.Mutex
+	ladderPlan        func(context.Context, fleet.Submission) error
 	heldLoop          map[string]*spawnHeldLoop
 	heldLoopOrder     lruIndex[string]
 	staleAfter        time.Duration
@@ -470,6 +487,7 @@ type HubServer struct {
 	prometheusBasicPass              string
 	placementCache                   placementCache
 	poolCooling                      map[string]time.Time
+	poolSweep                        poolSweepState
 	relayControl                     hubRelayControlState
 	reportRelayPath                  string
 	lanesNodeRowCap                  int
@@ -536,6 +554,9 @@ type HubServer struct {
 	// drainWake is each design lane's drain-wake state (hub_drain_wake.go),
 	// owned by the lane-stall sweep goroutine under laneStallMu.
 	drainWake map[string]*drainWakeLane
+	// drainWakeDelivered carries the writer's confirmation of a drain line back
+	// to the sweep goroutine. Created by the first sweep.
+	drainWakeDelivered chan drainWakeDelivery
 	// laneHeldCountProbe is a test hook laneHeldCountLocked fires once per
 	// scan, so a test can tell the count ran only on an activating
 	// observation.
@@ -744,6 +765,11 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 	hub.fleetState = newFleetStateStore()
 	hub.quietTimings = defaultDesignQuietTimings()
 	hub.prepareInbox()
+	if err := hub.restorePlacementCounts(); err != nil {
+		hub.closeCancel()
+		_ = hub.inbox.store.close()
+		return nil, err
+	}
 	return hub, nil
 }
 
@@ -781,6 +807,7 @@ func (h *HubServer) Close() error {
 	if h.closeCancel != nil {
 		h.closeCancel()
 	}
+	h.closeQuotaRefreshes()
 	// The mutex is held for a run's whole life, so taking it here waits the
 	// run out; the flag it then leaves set keeps every later TryLock from
 	// counting a fresh run against the WaitGroup after Close has begun.
@@ -826,6 +853,7 @@ func (h *HubServer) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/jobs/close", h.handleJobClose)
 	mux.HandleFunc("GET /v1/jobs/orphaned", h.handleOrphanedJobs)
 	mux.HandleFunc("POST /v1/jobs/reassign", h.handleReassignJob)
+	mux.HandleFunc("POST /v1/jobs/escalate-author", h.handleEscalateAuthor)
 	mux.HandleFunc("GET /v1/agent", h.handleAgent)
 	mux.HandleFunc("GET /v1/events", h.handleEvents)
 	mux.HandleFunc("POST /v1/relay/events", h.handleRelayIngress)
@@ -1215,6 +1243,19 @@ func (h *HubServer) handleAgentMessageContext(ctx context.Context, machineID, re
 		if message.Type == "ping" {
 			_ = agent.writeJSON(hubOutbound{Type: "pong"})
 		}
+	case "applied":
+		if agent.transient || !h.touch(machineID, agent) {
+			h.countUnknownMessage()
+			return
+		}
+		h.mu.Lock()
+		registration := h.nodes[machineID]
+		if registration == nil || registration.agent != agent {
+			h.mu.Unlock()
+			return
+		}
+		h.mu.Unlock()
+		go h.handleAppliedReport(machineID, registration, message.Applied)
 	case "event":
 		if message.Kind == "relay.delivered" || message.Kind == "relay.unconfirmed" {
 			// A relay ack carries the machine's word about what its pane
@@ -1469,8 +1510,10 @@ type hubInbound struct {
 	Transient    bool
 	Accepting    bool
 	Capabilities []string
-	Kind         string
-	Payload      json.RawMessage
+	// Applied is the node's delivery report (hk 3435), type "applied".
+	Applied map[string][]int64
+	Kind    string
+	Payload json.RawMessage
 }
 
 type hubHeartbeatPayload struct {
@@ -1782,6 +1825,17 @@ func parseHubInbound(payload []byte) (hubInbound, bool) {
 		if !allowed("type") {
 			return hubInbound{}, false
 		}
+	case "applied":
+		if !allowed("type", "applied") {
+			return hubInbound{}, false
+		}
+		if rawApplied, exists := fields["applied"]; exists {
+			applied, valid := decodeHubAppliedReport(rawApplied)
+			if !valid {
+				return hubInbound{}, false
+			}
+			message.Applied = applied
+		}
 	case "event":
 		if !allowed("type", "kind", "payload") || json.Unmarshal(fields["kind"], &message.Kind) != nil || message.Kind == "" {
 			return hubInbound{}, false
@@ -1873,14 +1927,25 @@ func knownHubEventKind(kind string) bool {
 }
 
 func (h *HubServer) connect(machineID, version, remoteAddr string, agent *hubAgent, accepting bool, capabilityLists ...[]string) {
+	h.replayMu.Lock()
+	defer h.replayMu.Unlock()
 	// A node registration is the safe no-restart retry trigger for durable
 	// lane.event rows whose route was absent or disconnected when produced.
+	var reportsApplied bool
+	if len(capabilityLists) > 0 {
+		reportsApplied = slices.Contains(capabilityLists[0], hubCapabilityApplied)
+	}
 	defer func() {
 		go func() {
 			// A wake an inbox-only lane is owed because its pane was not
 			// reachable is retried at once, not at its window's end (hk 3602).
 			h.retryUnroutedInboxWakes()
-			h.replayUndeliveredLaneEvents(context.Background())
+			// A node that advertises the applied report sends it right behind
+			// its hello; the replay waits for it (handleAppliedReport), so the
+			// replay and its gap summary count only rows the node has not shown.
+			if !reportsApplied {
+				h.replayUndeliveredLaneEvents(context.Background())
+			}
 		}()
 	}()
 	now := h.now().UTC()
@@ -1890,6 +1955,9 @@ func (h *HubServer) connect(machineID, version, remoteAddr string, agent *hubAge
 	var previousReadinessAt time.Time
 	h.mu.Lock()
 	if existing := h.nodes[machineID]; existing != nil {
+		if existing.appliedTimer != nil {
+			existing.appliedTimer.Stop()
+		}
 		previous, previousReadiness, previousReadinessAt = existing.agent, existing.readiness, existing.readinessAt
 		previousSnapshot = cloneHubSessionSnapshotRecord(existing.sessionSnapshot)
 	}
@@ -1904,11 +1972,17 @@ func (h *HubServer) connect(machineID, version, remoteAddr string, agent *hubAge
 		}
 	}
 	h.nodes[machineID] = &hubNodeRecord{
-		machineID: machineID, accepting: accepting, connectedSince: now, lastPing: now,
+		machineID: machineID, accepting: accepting, connectedSince: now, lastPing: now, appliedPending: reportsApplied,
 		capabilities: capabilitySet,
 		remoteMeta:   map[string]string{"version": version, "remote_addr": remoteAddr},
 		state:        "connected", stateSince: now, lastHeartbeat: now, agent: agent, activeJobs: make(map[string]HubActiveJob), sessionSnapshot: previousSnapshot,
 		readiness: previousReadiness, readinessAt: previousReadinessAt,
+	}
+	if reportsApplied {
+		registration := h.nodes[machineID]
+		registration.appliedTimer = time.AfterFunc(hubAppliedReportTimeout, func() {
+			h.expireAppliedReport(machineID, registration)
+		})
 	}
 	h.placementCache = placementCache{}
 	h.recordUIEventLocked("presence", "connected", machineID, now)
@@ -1963,6 +2037,9 @@ func (h *HubServer) disconnectLocked(machineID string, agent *hubAgent) ([]chan 
 	}
 	lost := h.loseNodeCommandsLocked(agent)
 	if record := h.nodes[machineID]; record != nil && record.agent == agent {
+		if record.appliedTimer != nil {
+			record.appliedTimer.Stop()
+		}
 		record.agent = nil
 		now := h.now().UTC()
 		if record.state == "connected" {
@@ -2352,7 +2429,7 @@ func (h *HubServer) RunMaintenance(ctx context.Context) {
 func (agent *hubAgent) writeJSON(value any) error {
 	agent.writeMu.Lock()
 	defer agent.writeMu.Unlock()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), hubWriteTimeout)
 	defer cancel()
 	return wsjson.Write(ctx, agent.conn, value)
 }
@@ -2512,6 +2589,9 @@ func (agent *hubAgent) writeRelays(ctx context.Context) {
 		case event := <-agent.relays:
 			if err := agent.writeJSON(event); err != nil {
 				return
+			}
+			if event.Delivered != nil {
+				event.Delivered()
 			}
 		}
 	}

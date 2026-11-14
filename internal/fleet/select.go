@@ -313,6 +313,7 @@ type selReq struct {
 	effort           string
 	allowEscalation  bool
 	authorFamily     string
+	excludeFamilies  []string
 	urgency          string
 	urgencySource    string
 	excludeHarnesses []string
@@ -434,6 +435,8 @@ func (a *App) seatFor(row CatalogRow, req selReq) (string, *Seat, string) {
 			reason = "seat_rung"
 		} else {
 			switch {
+			case slices.Contains(req.excludeFamilies, seat.Family):
+				reason = "family_excluded"
 			case req.route.top() && req.authorFamily != "" && seat.Family == req.authorFamily:
 				// A consult rung runs on a family other than its asker's.
 				reason = "family_excluded"
@@ -651,16 +654,17 @@ type selHost struct {
 // selPresence snapshots eligible hosts and their current account bindings for
 // one selection round. Account reads and bounded refreshes are cached by key.
 type selPresence struct {
-	a         *App
-	hub       map[string]HostView
-	presErr   bool
-	presence  []PresenceRecord
-	accounts  map[string]SharedAccount
-	hosts     []selHost
-	presTTL   time.Duration
-	now       time.Time
-	degraded  []string
-	refreshed map[string]accountRefresh
+	a              *App
+	hub            map[string]HostView
+	presErr        bool
+	presence       []PresenceRecord
+	accounts       map[string]SharedAccount
+	hosts          []selHost
+	presTTL        time.Duration
+	now            time.Time
+	degraded       []string
+	refreshed      map[string]accountRefresh
+	refreshPending bool
 	// unreachable names hosts a refresh could not reach this round;
 	// host-first admission skips them (a holder that completed a refresh is
 	// known reachable, one that failed is not).
@@ -1016,6 +1020,9 @@ func (a *App) selectFor(ctx context.Context, s Spawn, req selReq) (*selPlan, err
 	pres.admitHostFirst(ctx, s, p, pending)
 	p.markRoleEffort()
 	if p.chosen == nil {
+		if pres.refreshPending {
+			return p, ErrQuotaRefreshPending
+		}
 		return a.selectionRefused(ctx, s, req, p)
 	}
 	return p, nil

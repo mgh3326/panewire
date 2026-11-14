@@ -241,7 +241,11 @@ func (a *App) finishPlacement(ctx context.Context, s Spawn, err error) {
 		stateReason = a.fleetLog.hosts.Reason
 		r.Reason = stateReason
 	}
-	if err != nil {
+	if errors.Is(err, ErrQuotaRefreshPending) {
+		// This describes the failed host attempt, not a terminal refusal of
+		// the accepted request, which remains parked for a quota refresh.
+		r.Outcome, r.Reason = "failed", "quota_refresh_pending"
+	} else if err != nil {
 		r.Reason = exitReason(exitCode(err))
 		if d.started {
 			r.Outcome = "failed"
@@ -395,6 +399,19 @@ func (a *App) flushPlacements() {
 	a.deliverPlacements(ctx)
 }
 
+// permanentPlacementRefusal reports whether an HTTP refusal from hk is a
+// permanent rejection of the record (invalid context, missing task,
+// unprocessable payload) rather than an outage or a credential failure.
+// Permanent refusals are quarantined so they do not block subsequent records.
+func permanentPlacementRefusal(status int) bool {
+	switch status {
+	case http.StatusBadRequest, http.StatusNotFound, http.StatusGone, http.StatusUnprocessableEntity:
+		return true
+	default:
+		return false
+	}
+}
+
 func (a *App) deliverPlacements(ctx context.Context) {
 	dir := filepath.Join(a.stateDir(), "placements")
 	if noSymlinks(dir) != nil {
@@ -466,7 +483,7 @@ func (a *App) deliverPlacements(ctx context.Context) {
 		e = c.request(ctx, http.MethodPost, "/v1/placements", p.Record, nil)
 		var be *BackendError
 		conflict := errors.As(e, &be) && be.Status == http.StatusConflict
-		if errors.As(e, &be) && (be.Status == http.StatusBadRequest || be.Status == http.StatusUnprocessableEntity) {
+		if errors.As(e, &be) && permanentPlacementRefusal(be.Status) {
 			rejectedDir := filepath.Join(a.stateDir(), "placements-rejected")
 			moveErr := noSymlinks(rejectedDir)
 			if moveErr == nil {

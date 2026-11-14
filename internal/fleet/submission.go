@@ -37,6 +37,8 @@ type Submission struct {
 	OriginMachine   string           `json:"origin_machine"`
 	DeadlineSeconds int              `json:"deadline_seconds"`
 	StartConditions []StartCondition `json:"start_conditions,omitempty"`
+	// LadderStep identifies a hub-staged author replacement for replay.
+	LadderStep *LadderStepIdentity `json:"ladder_step,omitempty"`
 	// E6Arm is the exact <canon>@<effort> experiment marker the submitter saw
 	// in its environment. Hub admission and the node launch use it exactly as
 	// a local spawn reads the environment; empty means none, and an empty
@@ -49,6 +51,14 @@ type Submission struct {
 	// host as a submitter pin. It never travels on the wire or in the store
 	// (json:"-"), and no flag parses into it.
 	RetryHost string `json:"-"`
+}
+
+type LadderStepIdentity struct {
+	Parent  string `json:"parent"`
+	Round   int    `json:"round"`
+	PR      string `json:"pr"`
+	Profile string `json:"profile"`
+	Effort  string `json:"effort"`
 }
 
 type Accepted struct{ Job, Request string }
@@ -339,6 +349,9 @@ func (a *App) PrepareSubmission(ctx context.Context, s Spawn) (Submission, error
 	if originalHost == "local" {
 		submissionSpawn.Host = "local"
 	}
+	if submissionSpawn.Host == "auto" && herdrWorkspaceID.MatchString(submissionSpawn.Workspace) {
+		submissionSpawn.Workspace = ""
+	}
 	conditions, err := ParseStartConditions(s.After, s.Task)
 	if err != nil {
 		return Submission{}, fail(exitUsage, "%v", err)
@@ -510,7 +523,7 @@ func (c *hubHTTP) WaitSpawn(ctx context.Context, id string) (SpawnAttempt, error
 			return attempt, fail(result.Result.RC, "spawn refused %s: %s (operation %s)", attempt, result.Result.Reason, id)
 		case "deadline_exceeded":
 			return attempt, fail(exitStateConflict, "spawn ownership is unresolved %s; inspect operation %s and its executing node before any retry", attempt, id)
-		case "accepted", "dispatching", "reconciling":
+		case "accepted", "bound", "dispatching", "reconciling":
 		default:
 			return attempt, fail(exitStateConflict, "unknown spawn state; inspect operation %s", id)
 		}

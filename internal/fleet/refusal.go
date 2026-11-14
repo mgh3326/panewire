@@ -6,6 +6,10 @@ import (
 	"strings"
 )
 
+// ErrQuotaRefreshPending leaves an accepted hub request for another placement
+// pass after a measurement. It is never used by ordinary synchronous spawns.
+var ErrQuotaRefreshPending = errors.New("quota refresh pending")
+
 // parentJobNotFound is a --parent-job that resolved to no record after the
 // bounded wait, as opposed to a job store that could not answer.
 type parentJobNotFound struct{ cause error }
