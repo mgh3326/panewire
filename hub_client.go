@@ -230,17 +230,14 @@ type HubClient struct {
 	nodeCloseSettle    time.Duration         // fixture seam; zero is nodePaneCloseSettle.
 	// nodeHubClose is the job-ledger side of a hub close (intent, watcher);
 	// nil is nodeFleetHubClose. A fixture seam.
-	nodeHubClose nodeHubCloseLedger
-	// hubCloseWatchersReady replaces the live-watcher check behind
-	// close_ops_v1 (fleet.HubCloseWatchersReady); a fixture seam.
-	hubCloseWatchersReady func(ctx context.Context) bool
-	nodeGitLockWait       time.Duration // fixture seam; zero is nodeGitOpLockWait.
-	busyRelayMu           sync.Mutex
-	busyRelay             *relayBusyManager
-	relayCommand          relayCommandRunner   // fixture seam for agent get/wait.
-	relayEmitter          func(hubClientEvent) // fixture/connection-owned writer.
-	relayRecvSeqMu        sync.Mutex
-	relayRecvSeq          int64 // assigned synchronously by the hub read loop.
+	nodeHubClose    nodeHubCloseLedger
+	nodeGitLockWait time.Duration // fixture seam; zero is nodeGitOpLockWait.
+	busyRelayMu     sync.Mutex
+	busyRelay       *relayBusyManager
+	relayCommand    relayCommandRunner   // fixture seam for agent get/wait.
+	relayEmitter    func(hubClientEvent) // fixture/connection-owned writer.
+	relayRecvSeqMu  sync.Mutex
+	relayRecvSeq    int64 // assigned synchronously by the hub read loop.
 	// inboundHandled is a fixture seam the inbound dispatcher calls after
 	// each queued frame it ran; production leaves it nil.
 	inboundHandled func(hubOutboundMessage)
@@ -1929,7 +1926,9 @@ const defaultHubHelloAckTimeout = 5 * time.Second
 const hubCapabilityCloseQuestion = "pane_close_question_v1"
 
 // hubSpawnCapabilities is what an upgraded node advertises in hello.
-var hubSpawnCapabilities = []string{"spawn_v2", "spawn_ops_v1", hubCapabilityCloseQuestion, hubCapabilityApplied, hubCapabilityCloseOps}
+// close_ops_v1 (hubCapabilityCloseOps) is deliberately not advertised: no
+// hub may issue close ops until hk 4632 adds the migration barrier.
+var hubSpawnCapabilities = []string{"spawn_v2", "spawn_ops_v1", hubCapabilityCloseQuestion, hubCapabilityApplied}
 
 func (client *HubClient) helloAckTimeoutOrDefault() time.Duration {
 	if client.helloAckTimeout > 0 {
@@ -2028,7 +2027,7 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 	// that does not know the capabilities field drops the whole hello (see
 	// docs/r26-hub-spawn.md "Rollout order and rollback"), so the hello ack timer below re-sends it
 	// without them rather than leaving this node off the fleet.
-	if err := client.writeHello(ctx, peer, client.helloCapabilities(ctx)); err != nil {
+	if err := client.writeHello(ctx, peer, hubSpawnCapabilities); err != nil {
 		return nil, err
 	}
 	client.setRelayEmitter(func(event hubClientEvent) { _ = peer.write(ctx, hubClientWireEvent(event)) })
@@ -2171,7 +2170,7 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 				// the full hello once more; a hub that rejects capabilities
 				// drops it and keeps the record it already has.
 				capsResent = true
-				if err := client.writeHello(ctx, peer, client.helloCapabilities(ctx)); err != nil {
+				if err := client.writeHello(ctx, peer, hubSpawnCapabilities); err != nil {
 					return nil, err
 				}
 				// A repeated hello resets the hub's job and host state for

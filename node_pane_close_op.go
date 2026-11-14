@@ -6,44 +6,16 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"slices"
 	"time"
 
 	"github.com/mgh3326/panewire/internal/fleet"
 )
 
-// hubCapabilityCloseOps is advertised in hello once a node both runs the close
-// operations and records the hub-close intent its job watchers defer to (hk
-// 4652): a hub issues pane.close_op only to a node that advertises it.
+// hubCapabilityCloseOps names the close operations in hello. It is not
+// advertised (hk 4652): enabling it, with the migration barrier that no
+// old-binary panewire process is left on the host
+// (fleet.HubCloseWatchersReady is its live-watcher half), is hk 4632.
 const hubCapabilityCloseOps = "close_ops_v1"
-
-// helloCapabilities is hubSpawnCapabilities, without close_ops_v1 unless every
-// live watcher on this node understands hub-close intents: a watcher of an
-// older binary would not defer to a hub close, so until it is gone the hub
-// must not issue close ops here. Recomputed at every hello (hk 4652).
-func (client *HubClient) helloCapabilities(ctx context.Context) []string {
-	if client.closeOpsReady(ctx) {
-		return hubSpawnCapabilities
-	}
-	return slices.DeleteFunc(slices.Clone(hubSpawnCapabilities), func(c string) bool { return c == hubCapabilityCloseOps })
-}
-
-func (client *HubClient) closeOpsReady(ctx context.Context) bool {
-	if client.hubCloseWatchersReady != nil {
-		return client.hubCloseWatchersReady(ctx)
-	}
-	if client.jobsInboxRoot == "" {
-		// No jobs root: every close op answers jobs_root_unset, and no
-		// watcher of this node's jobs can be checked or raced.
-		return true
-	}
-	ready, err := fleet.HubCloseWatchersReady(ctx, filepath.Join(client.jobsInboxRoot, "jobs"), nil)
-	if err != nil {
-		slog.Warn("close_ops_v1 withheld: live watchers unreadable", "error", err)
-		return false
-	}
-	return ready
-}
 
 // Close operations (hk 4594; docs/node-commands.md, "Close operations") are
 // pane.close with a hub-chosen request id and a durable journal in the job's
@@ -507,9 +479,8 @@ func (client *HubClient) hubCloseLedger() nodeHubCloseLedger {
 
 // admitHubCloseWatcher refuses a close while the job's watcher is one that
 // does not defer: it holds the watch lock but not the hub-close lock. The
-// node-wide precondition is close_ops_v1 itself, advertised only while every
-// live watcher on the node understands hub-close intents
-// (hubCloseWatchersReady).
+// node-wide precondition is close_ops_v1 itself, which is not advertised
+// until hk 4632's migration barrier.
 func (client *HubClient) admitHubCloseWatcher(_ string, jobDir string) string {
 	watcher, err := client.hubCloseLedger().Watcher(jobDir)
 	switch {

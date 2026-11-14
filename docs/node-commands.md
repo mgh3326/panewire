@@ -249,24 +249,19 @@ node's acting lock, and a visible journal state is fsynced before it is reported
 or acted on. `journal_failed` answers a journal read, write or sync that failed;
 the operation then stays as last recorded.
 
-A node advertises `close_ops_v1` in its hello capabilities only while every
-live watcher process on it understands hub-close intents (hk 4652), and a hub
-issues `pane.close_op` only to a node that advertises it. No hub code issues
-them yet: that is hk 4632.
-
-**Precondition for close ops (`close_ops_v1`).** A watcher of this binary
-writes a capability token, `jobs/<job>/.watch-caps/<pid>` holding
-`hub_close_v1`, at its very start, before any lock, and removes it when it
-ends. At every hello the node lists the host's processes (`ps -axo
-pid=,args=`) and, for every live `_watch <job>` process of a job under its
-jobs root, requires that process's own token. One process without it (a
-watcher of an older binary, which never writes one, whether or not it holds
-a lock yet), an unreadable token or a failed process listing leaves
-`close_ops_v1` out of that hello; it returns at a later hello once those
-watchers are gone. A watcher of this binary caught before it wrote its
-token is also counted as not ready, which only delays the capability. Per
-close, the node still refuses `watcher_incompatible` when the job's watcher
-holds the watch lock but not `.panewire-watch-hubclose.lock`.
+**`close_ops_v1` is not advertised** (hk 4652): no hub may issue these ops to
+any node yet. Enabling it is hk 4632, together with its precondition, a
+migration barrier: no panewire process of an older binary (a watcher, or a
+`panewire spawn` that could still start one) may remain on the host, since
+such a watcher ignores a hub close. A watcher snapshot alone cannot prove
+that. Its live-watcher half exists: every watcher of this binary writes
+`jobs/<job>/.watch-caps/<pid>` (`hub_close_v1`) at its start, before any
+lock, and `fleet.HubCloseWatchersReady` reports whether every live
+`_watch <job>` process of a job under the jobs root carries its own token,
+failing closed on any listing or token error. Re-advertising once readiness
+changes on a live connection is also hk 4632. Per close, the node still
+refuses `watcher_incompatible` when the job's watcher holds the watch lock
+but not `.panewire-watch-hubclose.lock`.
 
 #### Hub close protocol
 
@@ -368,15 +363,15 @@ defers. Its rules, which hk 4632's caller relies on:
    replays `cancelled` (or is `invalid_args` when no intent named its pane)
    and touches no pane.
 
-What hk 4632 can rely on: a node that advertises `close_ops_v1` in its
-current registration ran no watcher, at that hello, that would ignore a hub
-close; the node writes the planned record (or keeps
+What hk 4632 can rely on, once it enables `close_ops_v1` behind its barrier:
+the node writes the planned record (or keeps
 another terminal record and still frees the lease) for every close it
 accepted, while its daemon runs, without a watcher and without another hub
 command; a watcher never writes a competing record while the close is open;
 `close_status` and `close_release` both run a settlement step. What hk 4632
-must still do: issue close ops only to a node whose current registration
-advertises `close_ops_v1`; send `end_reason` on every `pane.close_op`; treat
+must still do: add the migration barrier and advertise `close_ops_v1` (with a
+re-registration when readiness changes); issue close ops only to a node whose
+current registration advertises it; send `end_reason` on every `pane.close_op`; treat
 `close_in_progress` and `watcher_incompatible` as "not closed, retry later";
 after `unknown`, retry under a new request id while the pane is still
 there; read `attempt` from `pane.close_status` when it decides; drive every

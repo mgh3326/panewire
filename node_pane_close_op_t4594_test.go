@@ -851,12 +851,6 @@ func TestCloseOpRequiresAnEndReason_t4652(t *testing.T) {
 	}
 }
 
-func TestHelloAdvertisesCloseOps_t4652(t *testing.T) {
-	if !slices.Contains(hubSpawnCapabilities, "close_ops_v1") {
-		t.Fatalf("hello capabilities %v lack close_ops_v1", hubSpawnCapabilities)
-	}
-}
-
 // Once a hub close was opened on the attempt, a later close asks hk even after
 // the watcher cancelled that intent: a job another writer already ended in hk
 // is not closed again (hk 4652 review).
@@ -900,16 +894,10 @@ func TestCloseOpReleaseFencesAnUnregisteredRequest_t4652(t *testing.T) {
 	}
 }
 
-// close_ops_v1 is advertised only while every live watcher on the node
-// understands hub-close intents; the check runs at every hello.
-func TestHelloWithholdsCloseOpsWhileAnOldWatcherLives_t4652(t *testing.T) {
-	ready := false
-	client := &HubClient{jobsInboxRoot: t.TempDir(), hubCloseWatchersReady: func(context.Context) bool { return ready }}
-	if slices.Contains(client.helloCapabilities(context.Background()), "close_ops_v1") {
-		t.Fatal("close_ops_v1 advertised while an old watcher lives")
-	}
-	ready = true
-	if got := client.helloCapabilities(context.Background()); !slices.Equal(got, hubSpawnCapabilities) {
-		t.Fatalf("capabilities %v, want %v", got, hubSpawnCapabilities)
+// No hello advertises close_ops_v1: no hub may issue a close op to any node
+// until hk 4632 adds the migration barrier.
+func TestNoHelloAdvertisesCloseOps_t4652(t *testing.T) {
+	if slices.Contains(hubSpawnCapabilities, hubCapabilityCloseOps) {
+		t.Fatalf("hello capabilities %v advertise %s", hubSpawnCapabilities, hubCapabilityCloseOps)
 	}
 }
