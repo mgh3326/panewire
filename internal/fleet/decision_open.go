@@ -81,6 +81,12 @@ func OpenLaneQuestion(inboxRoot, jobID, pane string, now time.Time, timeout time
 func readJobDecisionLedger(dir string) (since, resumedAt time.Time, spawned string, err error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
+		// A job whose launch never wrote an event has no events folder; that
+		// is an empty ledger, not an unreadable one, or its pane could never
+		// be released (hk 3179).
+		if errors.Is(err, fs.ErrNotExist) {
+			return time.Time{}, time.Time{}, "", nil
+		}
 		return time.Time{}, time.Time{}, "", err
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })

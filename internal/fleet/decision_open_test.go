@@ -214,6 +214,13 @@ func TestOpenLaneQuestionLaneDirEdgeCases(t *testing.T) {
 		t.Fatalf("missing events-lane: open=%v err=%v, want no question", open, err)
 	}
 
+	// A job with no events folder at all — a launch that never committed —
+	// is an empty ledger too, not an error that refuses every close.
+	empty := t.TempDir()
+	if _, open, err := OpenLaneQuestion(empty, "job-a", "w1:p1", now, DefaultDecisionTimeout); err != nil || open {
+		t.Fatalf("no job events: open=%v err=%v, want no question", open, err)
+	}
+
 	dir := filepath.Join(inbox, "events-lane")
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		t.Fatal(err)

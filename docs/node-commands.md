@@ -141,7 +141,11 @@ read-to-close gap remains, as in the ssh reap path.
 The hub sends `question_job` only to a node that advertised
 `pane_close_question_v1`; against any other node it keeps the hold, because a
 node that predates the field decodes the arguments strictly and would refuse
-the whole call, and closing without the field would drop the guard.
+the whole call, and closing without the field would drop the guard. Every
+caller that passes a job — the reviewer release, author escalation and the
+quota-stop closes — takes that hold on an old node, so during a rolling
+upgrade those releases wait for the node rather than close unguarded; callers
+that pass no job are unaffected.
 
 With `question_job`, the node makes one more decision at that same point, from
 the node's own files rather than from a copy another process wrote earlier: it
