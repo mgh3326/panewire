@@ -36,8 +36,12 @@ func TestReviewerPaneSweepEndsFinishedReviewerJob(t *testing.T) {
 	sink := captureHubLog(hub)
 
 	hub.releaseFinishedReviewerSpawns(t.Context())
+	if got := node.seen(); !reflect.DeepEqual(got, []string{"agents.list"}) {
+		t.Fatalf("first pass commands %v, want the probe only", got)
+	}
+	hub.releaseFinishedReviewerSpawns(t.Context())
 
-	if want := []string{"agents.list", "pane.capture", "pane.close", "job.mark_lost"}; !reflect.DeepEqual(node.seen(), want) {
+	if want := []string{"agents.list", "agents.list", "pane.capture", "pane.close", "job.mark_lost"}; !reflect.DeepEqual(node.seen(), want) {
 		t.Fatalf("node commands %v, want %v", node.seen(), want)
 	}
 	var closeArgs, mark map[string]any
@@ -74,8 +78,9 @@ func TestReviewerPaneSweepKeepsAnOpenQuestion(t *testing.T) {
 	sink := captureHubLog(hub)
 
 	hub.releaseFinishedReviewerSpawns(t.Context())
+	hub.releaseFinishedReviewerSpawns(t.Context())
 
-	if want := []string{"agents.list", "pane.capture", "pane.close"}; !reflect.DeepEqual(node.seen(), want) {
+	if want := []string{"agents.list", "agents.list", "pane.capture", "pane.close"}; !reflect.DeepEqual(node.seen(), want) {
 		t.Fatalf("node commands %v, want %v (no mark_lost)", node.seen(), want)
 	}
 	logged := sink.String()
@@ -101,8 +106,9 @@ func TestReviewerPaneSweepKeepsWhenTheNodeCannotDecide(t *testing.T) {
 	reviewerSweepActiveJob(t, hub, "machine-a", "test-job", roleHeldPane, reviewerRole)
 
 	hub.releaseFinishedReviewerSpawns(t.Context())
+	hub.releaseFinishedReviewerSpawns(t.Context())
 
-	if want := []string{"agents.list", "pane.capture", "pane.close"}; !reflect.DeepEqual(node.seen(), want) {
+	if want := []string{"agents.list", "agents.list", "pane.capture", "pane.close"}; !reflect.DeepEqual(node.seen(), want) {
 		t.Fatalf("node commands %v, want %v", node.seen(), want)
 	}
 }
@@ -174,5 +180,23 @@ func TestReviewerReleaseKeepsAnOpenQuestion(t *testing.T) {
 	}
 	if owner, _, _, _ := hub.inbox.store.spawnRoleOwner(t.Context(), "42:reviewer:p2"); owner != held.Request.RequestID {
 		t.Fatalf("owner=%s, want the holder still to own the key", owner)
+	}
+}
+
+// A pane that reads finished once while its job still runs is not closed: the
+// same status must hold across two passes, minutes apart.
+func TestReviewerPaneSweepWaitsForASecondSighting(t *testing.T) {
+	hub, server, _, held := reviewerReleaseHub(t, reviewerRole, "succeeded", hubSpawnOutcome{RC: 0, Host: "machine-a", Pane: roleHeldPane})
+	hub.now = func() time.Time { return held.Deadline.Add(11 * time.Minute) }
+	node := startUnworkedNode(t, t14Node(t, hub, server, true), unworkedReplies(unworkedRow("idle", "/work/project.test-job"), nil))
+	reviewerSweepActiveJob(t, hub, "machine-a", "test-job", roleHeldPane, reviewerRole)
+
+	hub.releaseFinishedReviewerSpawns(t.Context())
+	if got := node.seen(); !reflect.DeepEqual(got, []string{"agents.list"}) {
+		t.Fatalf("first pass commands %v, want the probe only", got)
+	}
+	hub.releaseFinishedReviewerSpawns(t.Context())
+	if got := node.seen(); !reflect.DeepEqual(got, []string{"agents.list", "agents.list", "pane.capture", "pane.close", "job.mark_lost"}) {
+		t.Fatalf("second pass commands %v", got)
 	}
 }

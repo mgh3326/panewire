@@ -52,7 +52,10 @@ func OpenLaneQuestion(inboxRoot, jobID, pane string, now time.Time, timeout time
 	if err != nil {
 		return "", false, err
 	}
-	if spawned != pane {
+	// A job whose launch failed before its spawn receipt committed has no
+	// job.spawned to compare: the caller's pane is the only identity its records
+	// can have, and the hk 3179 no-work path still needs to release it.
+	if spawned != "" && spawned != pane {
 		return "", false, ErrJobPaneChanged
 	}
 	latest, err := newestLaneEventFromPane(filepath.Join(inboxRoot, "events-lane"), pane, since)

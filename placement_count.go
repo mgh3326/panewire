@@ -19,7 +19,11 @@ import (
 // placementCount is one decided job.
 type placementCount struct {
 	machine string
-	at      time.Time
+	// label is the agent label the placement's lane row will carry, so the lane
+	// cap can count a decided job that has no row yet and skip one whose row
+	// already exists.
+	label string
+	at    time.Time
 }
 
 // decisionGate lets one spawn decision at a time read the hub's view and
@@ -45,7 +49,7 @@ func (g *decisionGate) acquire(ctx context.Context) (func(), error) {
 // countPlacement counts job against machine from now. A job counts on one
 // host at a time: a later decision for the same job (the next candidate after
 // a refusal) moves its count.
-func (h *HubServer) countPlacement(job, machine string) {
+func (h *HubServer) countPlacement(job, machine, label string) {
 	if job == "" || machine == "" {
 		return
 	}
@@ -61,7 +65,7 @@ func (h *HubServer) countPlacement(job, machine string) {
 			delete(h.placementCounts, id)
 		}
 	}
-	h.placementCounts[job] = placementCount{machine: machine, at: now}
+	h.placementCounts[job] = placementCount{machine: machine, label: label, at: now}
 	h.placementCache = placementCache{}
 }
 
@@ -104,7 +108,7 @@ func (h *HubServer) restorePlacementCounts() error {
 		if task.Node == nil || task.Node.Machine == "" {
 			continue
 		}
-		h.placementCounts[task.Job] = placementCount{machine: task.Node.Machine, at: task.Placed}
+		h.placementCounts[task.Job] = placementCount{machine: task.Node.Machine, label: hubSpawnArg(task.Request.Args, "-l"), at: task.Placed}
 	}
 	return nil
 }
@@ -154,6 +158,25 @@ func (h *HubServer) placementCountWindowLocked() time.Duration {
 		return h.placementPolicy.spawnBridge()
 	}
 	return DefaultPlacementPolicy().spawnBridge()
+}
+
+// pendingLanePlacementsLocked is how many lane rows the decided but unclaimed
+// jobs on machine will add: a decided job counts from the placement decision,
+// so two concurrent decisions cannot both take the last free row. A job whose
+// label already names a row on machine adds none, so a re-placement is not
+// counted twice.
+func (h *HubServer) pendingLanePlacementsLocked(machine string, routes map[string]reportRelayRoute, now time.Time, bridge time.Duration) int {
+	count := 0
+	for _, held := range h.placementCounts {
+		if held.machine != machine || now.Sub(held.at) >= bridge {
+			continue
+		}
+		if route, exists := routes[held.label]; held.label != "" && exists && route.Machine == machine {
+			continue
+		}
+		count++
+	}
+	return count
 }
 
 // countedPlacementsLocked is how many decided jobs on machine the claims do

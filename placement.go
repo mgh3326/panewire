@@ -702,7 +702,8 @@ func (h *HubServer) placementCandidates(policy PlacementPolicy, metrics placemen
 		// lane row was never released still fills it. A machine at the cap is
 		// no placement candidate, or the spawn's lane registration is refused
 		// after the pane already exists (hk 4658).
-		lanesFull := h.lanesNodeRowCap > 0 && countMachineLanes(routes, machine) >= h.lanesNodeRowCap
+		lanes := countMachineLanes(routes, machine) + h.pendingLanePlacementsLocked(machine, routes, now, policy.spawnBridge())
+		lanesFull := h.lanesNodeRowCap > 0 && lanes >= h.lanesNodeRowCap
 		if lanesFull {
 			reasons = append(reasons, "lanes_full")
 		}

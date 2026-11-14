@@ -117,6 +117,35 @@ func (h *HubServer) releaseFinishedReviewerHolder(ctx context.Context, app *flee
 	return true, branch, 0
 }
 
+// reviewerPaneStayedFinished records that the holder's pane is finished now and
+// reports whether the previous pass saw it finished too. An agent's status can
+// read idle between turns while its job still runs, so one sighting never
+// authorises a close; the node's question check covers what the pane asked,
+// and this covers what it was doing.
+func (h *HubServer) reviewerPaneStayedFinished(job, pane string) bool {
+	key := job + "\x00" + pane
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.reviewerPaneSeen == nil {
+		h.reviewerPaneSeen = map[string]bool{}
+	}
+	seen := h.reviewerPaneSeen[key]
+	h.reviewerPaneSeen[key] = true
+	return seen
+}
+
+// retainReviewerPanes forgets the panes the pass no longer found finished, so a
+// pane that goes back to work starts its two sightings again.
+func (h *HubServer) retainReviewerPanes(live map[string]bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for key := range h.reviewerPaneSeen {
+		if !live[key] {
+			delete(h.reviewerPaneSeen, key)
+		}
+	}
+}
+
 // runReviewerPaneRelease runs releaseFinishedReviewerSpawns once per
 // reviewerReleaseInterval until ctx ends.
 func (h *HubServer) runReviewerPaneRelease(ctx context.Context) {
@@ -164,6 +193,8 @@ func (h *HubServer) releaseFinishedReviewerSpawns(ctx context.Context) {
 		reviewers = append(reviewers, reviewer{holder: holder, spawn: spawn})
 	}
 	if len(reviewers) == 0 {
+		// No live reviewer: any sighting kept from an earlier pass is stale.
+		h.retainReviewerPanes(nil)
 		return
 	}
 	app, err := h.newSpawnApp(io.Discard, io.Discard)
@@ -171,6 +202,7 @@ func (h *HubServer) releaseFinishedReviewerSpawns(ctx context.Context) {
 		h.logger.Warn("reviewer pane release skipped", "reason", "app_unavailable")
 		return
 	}
+	live := map[string]bool{}
 	for _, r := range reviewers {
 		readCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		record, exists, readErr := app.ExistingJob(readCtx, r.holder.Job)
@@ -184,8 +216,16 @@ func (h *HubServer) releaseFinishedReviewerSpawns(ctx context.Context) {
 			continue
 		}
 		probe := h.probeHeldPane(ctx, spawnHolderHost(r.holder), r.holder.Outcome.Pane, heldAgentName(r.holder, record))
+		if probe.state != heldPanePresent || !nodePaneClosableStatus[probe.row.AgentStatus] {
+			continue
+		}
+		live[r.holder.Job+"\x00"+r.holder.Outcome.Pane] = true
+		if !h.reviewerPaneStayedFinished(r.holder.Job, r.holder.Outcome.Pane) {
+			continue
+		}
 		h.releaseFinishedReviewerHolder(ctx, app, r.spawn, r.holder, record, probe, "sweep", "")
 	}
+	h.retainReviewerPanes(live)
 }
 
 // retryAfterSeconds is the whole seconds a caller should wait for a hold that

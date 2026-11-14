@@ -290,7 +290,7 @@ func (h *HubServer) escalateAuthor(ctx context.Context, request hubEscalateAutho
 			code, why := escalateAuthorPlanRefusal(err)
 			return cancel(code, why)
 		}
-		if closed, _ := h.closeHeldPane(ctx, holder, name, probe.row, ""); !closed {
+		if closed, _ := h.closeHeldPane(ctx, holder, name, probe.row, holder.Job); !closed {
 			again := h.probeHeldPane(ctx, spawnHolderHost(holder), holder.Outcome.Pane, name)
 			if again.state == heldPanePresent {
 				return cancel("pane_not_closed", "the author pane could not be closed")

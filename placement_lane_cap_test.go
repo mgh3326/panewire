@@ -38,3 +38,29 @@ func TestPlacementTreatsLaneCappedMachineAsNotEligible(t *testing.T) {
 		t.Fatalf("decision %q reason %q, want unavailable/lanes_full: %+v", result.Decision, result.Reason, result)
 	}
 }
+
+// A decided placement whose lane row does not exist yet counts against the cap,
+// so two decisions made before either row lands cannot both take the last slot.
+// A pending placement whose row already exists is not counted twice.
+func TestPlacementCountsAPendingPlacementAgainstTheLaneCap(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "lanes.json")
+	lanesProjectionWrite(t, path, `{"lanes":{"rev-a1":{"machine":"machine-a","pane":"w1:p1"}}}`)
+	hub := lanesNodeHub(t, path, func(config *HubServerConfig) { config.LanesNodeRowCap = 2 })
+	hub.connect("machine-a", "fixture", "fixture", &hubAgent{}, true)
+	policy := memoryPlacementPolicy("machine-a")
+
+	if result := hub.makePlacement(policy, placementMetrics{}, "hub-only", time.Now()); result.Decision != "machine-a" {
+		t.Fatalf("decision %q, want the host with one free row", result.Decision)
+	}
+	hub.countPlacement("pending-job", "machine-a", "pending-lane")
+	result := hub.makePlacement(policy, placementMetrics{}, "hub-only", time.Now())
+	if result.Decision != "unavailable" || result.Reason != "lanes_full" {
+		t.Fatalf("decision %q reason %q, want the pending placement to fill the cap", result.Decision, result.Reason)
+	}
+	// The same decision, now for the label whose row already exists: no second
+	// count, so the free row is still free.
+	hub.countPlacement("pending-job", "machine-a", "rev-a1")
+	if result := hub.makePlacement(policy, placementMetrics{}, "hub-only", time.Now()); result.Decision != "machine-a" {
+		t.Fatalf("decision %q, want the existing row not to be counted twice", result.Decision)
+	}
+}

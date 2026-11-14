@@ -564,9 +564,14 @@ type HubServer struct {
 	spawnRecords                map[string]*hubSpawnRecord
 	nodeCommands                map[string]*hubNodeCommandPending
 	unworkedLandingGrace        time.Duration
-	nodeCommandWait             time.Duration // fixture seam; zero is hubNodeCommandWait.
-	checkoutPullWait            time.Duration // fixture seam; zero is hubCheckoutPullWait.
-	nodeAgentsWait              time.Duration // fixture seam; zero is hubNodeAgentsWait.
+	// reviewerPaneSeen holds the reviewer release pass's finished panes
+	// (job\x00pane): a pane is released only after two consecutive passes see it
+	// finished, so one transient idle sighting cannot close a running job
+	// (hub_spawn_reviewer_release.go).
+	reviewerPaneSeen map[string]bool
+	nodeCommandWait  time.Duration // fixture seam; zero is hubNodeCommandWait.
+	checkoutPullWait time.Duration // fixture seam; zero is hubCheckoutPullWait.
+	nodeAgentsWait   time.Duration // fixture seam; zero is hubNodeAgentsWait.
 	// laneStallMu is TryLock'd so at most one lane-stall observation runs and
 	// is held for the run's whole life: once Close has taken it and set
 	// laneStallClosing, no new run can start and any in-flight one is already

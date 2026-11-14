@@ -104,7 +104,7 @@ func countedDecision(t *testing.T, hub *HubServer, job string) (string, map[stri
 		t.Error("no usable host in the fleet state")
 		return "", nil
 	}
-	hub.countPlacement(job, best)
+	hub.countPlacement(job, best, "")
 	return best, scores
 }
 
@@ -248,7 +248,7 @@ func TestRefusedOrNotStartedRequestReleasesItsCount(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			hub := countedHub(t)
 			task := countedTask(t, hub)
-			hub.countPlacement(task.Job, "machine-a")
+			hub.countPlacement(task.Job, "machine-a", "")
 			if got := countedBridged(hub); got != 1 {
 				t.Fatalf("decided job counts %d, want 1", got)
 			}
@@ -267,7 +267,7 @@ func TestRefusedOrNotStartedRequestReleasesItsCount(t *testing.T) {
 func TestClaimConfirmsTheCountInsteadOfAddingToIt(t *testing.T) {
 	hub := countedHub(t)
 	task := countedTask(t, hub)
-	hub.countPlacement(task.Job, "machine-a")
+	hub.countPlacement(task.Job, "machine-a", "")
 	if changed, err := hub.completeSpawn(t.Context(), task, hubSpawnOutcome{RC: 0, Stage: "landing", Host: "machine-a", NodeResult: true}); err != nil || !changed {
 		t.Fatalf("completeSpawn = %v, %v", changed, err)
 	}
@@ -288,7 +288,7 @@ func TestClaimConfirmsTheCountInsteadOfAddingToIt(t *testing.T) {
 	}
 	// And a claim that lands before the count is read (heartbeat first) is
 	// still one job.
-	hub.countPlacement(task.Job, "machine-a")
+	hub.countPlacement(task.Job, "machine-a", "")
 	if got := countedBridged(hub); got != 1 {
 		t.Fatalf("claimed job counted again by a late decision: %d", got)
 	}
@@ -299,7 +299,7 @@ func TestClaimConfirmsTheCountInsteadOfAddingToIt(t *testing.T) {
 func TestReconcilingKeepsCountAndTheBridgeWindowEndsIt(t *testing.T) {
 	hub := countedHub(t)
 	task := countedTask(t, hub)
-	hub.countPlacement(task.Job, "machine-a")
+	hub.countPlacement(task.Job, "machine-a", "")
 	if _, err := hub.completeSpawn(t.Context(), task, hubSpawnOutcome{RC: 75, Stage: "landing", Reason: "unknown", Host: "machine-a"}); err != nil {
 		t.Fatal(err)
 	}
@@ -319,8 +319,8 @@ func TestReconcilingKeepsCountAndTheBridgeWindowEndsIt(t *testing.T) {
 // The next candidate after a refusal takes the count off the refused host.
 func TestNextCandidateMovesTheCount(t *testing.T) {
 	hub, _ := countFixtureHub(t)
-	hub.countPlacement("moving-job", "oci")
-	hub.countPlacement("moving-job", "rpi")
+	hub.countPlacement("moving-job", "oci", "")
+	hub.countPlacement("moving-job", "rpi", "")
 	hub.mu.Lock()
 	held := hub.placementCounts["moving-job"]
 	n := len(hub.placementCounts)
@@ -371,7 +371,7 @@ func TestSimultaneousDecisionsSpreadThroughTheGate(t *testing.T) {
 // not un-weigh the host the job is bound for.
 func TestClaimFromAnotherNodeKeepsTheCount(t *testing.T) {
 	hub, _ := countFixtureHub(t)
-	hub.countPlacement("bound-job", "oci")
+	hub.countPlacement("bound-job", "oci", "")
 	now := time.Now().UTC()
 	hub.observeActiveJobs("rpi", []HubActiveJob{{JobID: "bound-job", AgentLabel: "agent", Epoch: 1, StartedAt: now.Format(time.RFC3339)}}, now)
 	hub.mu.Lock()
@@ -401,7 +401,7 @@ func TestBoundTimeoutKeepsTheCountUntilAClaim(t *testing.T) {
 		t.Fatal(err)
 	}
 	task = sentSpawnFixture(t, hub.inbox.store, task)
-	hub.countPlacement(task.Job, "machine-a")
+	hub.countPlacement(task.Job, "machine-a", "")
 	changed, err := hub.completeSpawn(t.Context(), task, hubSpawnOutcome{RC: 124, Stage: "landing", Reason: "timeout", Host: "machine-a"})
 	if err != nil || !changed {
 		t.Fatalf("completeSpawn = %v, %v", changed, err)
