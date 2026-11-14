@@ -46,21 +46,15 @@ var defaultPoolOrder []byte
 // pool's seat is its lowest-grade eligible row that fits. The ranked band
 // orders pools by their seat's waste urgency (selCandComparator).
 type PoolPolicy struct {
-	Version     int       `json:"version"`
-	SourceDoc   string    `json:"source_doc"`
-	Order       []string  `json:"order"`
-	Free        []FreeSet `json:"free"`
-	CreditPools []string  `json:"credit_pools"`
-	// AfterFreePools are subscription pools tried right after the free band
-	// (credit included) and before the ranked pools, for every grade they
-	// seat (decision 279). They stay ordinary subscription pools: a reading
-	// that is missing, stale or not ok is quota_unknown, and a used-up window
-	// drops them as for any pool.
-	AfterFreePools []string                     `json:"after_free_pools"`
-	WasteBelow     *float64                     `json:"waste_below_projected_pct"`
-	ExcludeAt      *float64                     `json:"exclude_at_projected_pct"`
-	WasteRisk      *WasteRiskPolicy             `json:"waste_risk"`
-	Seats          map[string]map[string]string `json:"seats"`
+	Version     int                          `json:"version"`
+	SourceDoc   string                       `json:"source_doc"`
+	Order       []string                     `json:"order"`
+	Free        []FreeSet                    `json:"free"`
+	CreditPools []string                     `json:"credit_pools"`
+	WasteBelow  *float64                     `json:"waste_below_projected_pct"`
+	ExcludeAt   *float64                     `json:"exclude_at_projected_pct"`
+	WasteRisk   *WasteRiskPolicy             `json:"waste_risk"`
+	Seats       map[string]map[string]string `json:"seats"`
 	// Burn is the rate a job's expected hours are charged at, in percent of a
 	// window per job-hour (headroomFor, select_headroom.go); absent rates take
 	// their defaults.
@@ -93,11 +87,6 @@ var poolBands = []string{"waste", "free", "ranked"}
 // creditTier is a credit pool's selection-record tier name. It ranks in the
 // interval after the free band (PoolPolicy.tierOf).
 const creditTier = "credit"
-
-// afterFreeTier is the selection-record tier name of a pool in
-// PoolPolicy.AfterFreePools. It uses the free band's index and sorts after
-// the credit interval and before the ranked band (bandRank).
-const afterFreeTier = "after_free"
 
 func LoadPoolPolicy(path string) (PoolPolicy, error) {
 	b := defaultPoolOrder
@@ -153,17 +142,6 @@ func (p *PoolPolicy) validate() error {
 	for _, pool := range p.CreditPools {
 		if !validID(pool) {
 			return fail(exitConfig, "invalid credit pool name %q", pool)
-		}
-	}
-	for _, pool := range p.AfterFreePools {
-		if !validID(pool) {
-			return fail(exitConfig, "invalid after_free_pools name %q", pool)
-		}
-		if p.isCredit(pool) {
-			return fail(exitConfig, "pool %q is in both credit_pools and after_free_pools", pool)
-		}
-		if slices.ContainsFunc(p.Free, func(fs FreeSet) bool { return fs.Pool == pool }) {
-			return fail(exitConfig, "pool %q is in both free and after_free_pools", pool)
 		}
 	}
 	for _, x := range []**float64{&p.WasteBelow, &p.ExcludeAt} {
@@ -238,8 +216,7 @@ type selCand struct {
 	urgency   *float64
 	resetHrs  *float64
 	reason    string
-	// policySeat marks the row the pool policy names as its seat (ranked band
-	// or after-free pool)
+	// policySeat marks the row the pool policy names as its ranked-band seat
 	// for the task's grade (PoolPolicy.isSeat).
 	policySeat bool
 	// cap names the [quota].pool_max_concurrent key that dropped the
@@ -526,11 +503,6 @@ func (p PoolPolicy) isCredit(pool string) bool {
 	return slices.Contains(p.CreditPools, pool)
 }
 
-// isAfterFree reports a pool the policy tries right after the free band.
-func (p PoolPolicy) isAfterFree(pool string) bool {
-	return slices.Contains(p.AfterFreePools, pool)
-}
-
 // tierOf assigns a tier from this account's view and the pool policy. A credit
 // pool uses the free band index and keeps its own record name. Cross-candidate
 // ordering belongs to orderSelCands, not tier assignment.
@@ -550,10 +522,6 @@ func (p PoolPolicy) tierOf(row CatalogRow, order []string, v PoolView) (string, 
 	tier := "ranked"
 	if long := longProjection(v); long != nil && *long < *p.WasteBelow || long == nil && !v.windowObserved && v.Waste != nil && *v.Waste {
 		tier = "waste"
-	} else if p.isAfterFree(row.Pool) {
-		// Not wasting: the pool sits right after the free band, not among the
-		// ranked pools. A pool projected to waste keeps the waste band.
-		return afterFreeTier, slices.Index(order, "free")
 	}
 	return tier, slices.Index(order, tier)
 }
@@ -1202,9 +1170,9 @@ func selCandComparator(pending []*selCand) func(*selCand, *selCand) int {
 	key := func(c *selCand) poolKey {
 		return poolKey{c.row.Pool, c.tierName, c.tier, c.risk, c.behindCredit, c.fits()}
 	}
-	rankedKey := func(k poolKey) bool { return (k.name == "ranked" || k.name == afterFreeTier) && !k.risk }
+	rankedKey := func(k poolKey) bool { return k.name == "ranked" && !k.risk }
 	grouped := func(c *selCand) bool {
-		return !c.ignoreGrade && (c.risk || c.tierName == "free" || c.tierName == creditTier || c.tierName == afterFreeTier || c.tierName == "ranked")
+		return !c.ignoreGrade && (c.risk || c.tierName == "free" || c.tierName == creditTier || c.tierName == "ranked")
 	}
 	// inGroup orders one pool group's rows: a ranked pool's policy seat first.
 	inGroup := func(x, y *selCand) int {
@@ -1241,20 +1209,6 @@ func selCandComparator(pending []*selCand) func(*selCand, *selCand) int {
 		}
 		return compareSelCands(x, y, true)
 	}
-}
-
-// bandRank orders the bands: waste, free, credit, after-free pools, ranked.
-// Credit and after-free pools share the free band's index and sort behind the
-// free seats, credit first.
-func bandRank(c *selCand) int {
-	rank := c.tier * 3
-	switch c.tierName {
-	case creditTier:
-		rank++
-	case afterFreeTier:
-		rank += 2
-	}
-	return rank
 }
 
 func compareSelCands(x, y *selCand, compareGrade bool) int {
@@ -1319,7 +1273,14 @@ func compareCands(x, y *selCand, compareGrade, roomFirst bool) int {
 		return -1
 	}
 	if !x.risk {
-		if xb, yb := bandRank(x), bandRank(y); xb != yb {
+		xb, yb := x.tier*2, y.tier*2
+		if x.tierName == creditTier {
+			xb++
+		}
+		if y.tierName == creditTier {
+			yb++
+		}
+		if xb != yb {
 			return xb - yb
 		}
 	}
@@ -1425,7 +1386,7 @@ func (p *selPlan) record() map[string]any {
 	// ordered by that seat's waste urgency.
 	seats := map[string]*selCand{}
 	for _, c := range p.ranked {
-		if _, ok := seats[c.row.Pool]; !ok && (c.tierName == "ranked" || c.tierName == afterFreeTier) && !c.risk && !c.ignoreGrade {
+		if _, ok := seats[c.row.Pool]; !ok && c.tierName == "ranked" && !c.risk && !c.ignoreGrade {
 			seats[c.row.Pool] = c
 		}
 	}
@@ -1500,7 +1461,7 @@ func (p *selPlan) record() map[string]any {
 				row["reset_hours"] = *c.resetHrs
 			}
 		}
-		if seat := seats[c.row.Pool]; seat != nil && (c.tierName == "ranked" || c.tierName == afterFreeTier) && !c.risk && !c.ignoreGrade {
+		if seat := seats[c.row.Pool]; seat != nil && c.tierName == "ranked" && !c.risk && !c.ignoreGrade {
 			if seat.urgency != nil {
 				row["pool_waste_urgency"] = *seat.urgency
 			}
@@ -1528,7 +1489,7 @@ func (p *selPlan) record() map[string]any {
 		"outcome_code":   p.outcome,
 		"mode":           "auto",
 		"decision":       fmt.Sprintf("urgency=%s source=%s tiers=%s", p.req.urgency, p.req.urgencySource, strings.Join(p.order, ">")),
-		"rule":           fmt.Sprintf("hosts first; within each host, waste-risk subscription pools rank by waste urgency (unused share per hour until reset), then band (waste, free, credit, after-free pools, then ranked); within risk, free, credit and after-free bands pools compete by their lowest fitting seat, with higher rows after that seat; ranked pools compete by their seat (the pool policy's named row for the grade, else the lowest grade >= %s that fits), the pool with the most room (waste urgency) first and ties by lowest grade; credit expiry (dollars at risk per hour, else remaining percent per hour), waste urgency and smaller effort; waste < %g%%, excluded >= %g%% projected", p.req.grade, *p.policy.WasteBelow, *p.policy.ExcludeAt),
+		"rule":           fmt.Sprintf("hosts first; within each host, waste-risk subscription pools rank by waste urgency (unused share per hour until reset), then band (waste, free, credit, then ranked); within risk, free and credit bands pools compete by their lowest fitting seat, with higher rows after that seat; ranked pools compete by their seat (the pool policy's named row for the grade, else the lowest grade >= %s that fits), the pool with the most room (waste urgency) first and ties by lowest grade; credit expiry (dollars at risk per hour, else remaining percent per hour), waste urgency and smaller effort; waste < %g%%, excluded >= %g%% projected", p.req.grade, *p.policy.WasteBelow, *p.policy.ExcludeAt),
 		"waste_risk":     map[string]any{"horizon_hours": *p.policy.WasteRisk.HorizonHours, "min_unused_pct": *p.policy.WasteRisk.MinUnusedPct},
 		"policy_version": p.policy.Version,
 		"policy_source":  p.policy.SourceDoc,

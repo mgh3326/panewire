@@ -32,11 +32,6 @@ func rankedView(urgency float64) PoolView {
 func rankedSeatPick(t *testing.T, grade string, commandcode, codex, claude float64, policyPath string) *selPlan {
 	t.Helper()
 	pools := map[string]PoolView{"commandcode": rankedView(commandcode), "codex": rankedView(codex), "claude": rankedView(claude)}
-	return rankedSeatPickPools(t, grade, pools, policyPath)
-}
-
-func rankedSeatPickPools(t *testing.T, grade string, pools map[string]PoolView, policyPath string) *selPlan {
-	t.Helper()
 	a, s, q := selFixture(t, grade, rankedSeatRows(), pools, []string{"commandcode", "codex", "claude"})
 	q.GateDo = gatePools(map[string]string{"omp-dsflash41": "commandcode", "codex-luna": "codex", "haiku": "claude"})
 	a.Config.Local["omp_commandcode"] = true
@@ -54,50 +49,24 @@ func chosenRung(sel *selPlan) string {
 	return sel.chosen.row.Profile + "@" + sel.chosen.row.Effort
 }
 
-// Command Code takes B and C ahead of the ranked pools whatever their room
-// (decision 279, hk 4699), through the embedded default policy seat.
-func TestRankedSeatsCommandcodeFirstRegardlessOfRoom_T4529(t *testing.T) {
+// Command Code takes B and C when it has more room than the other ranked
+// pools, through the embedded default policy seat; with less room the codex
+// or claude seat keeps the task.
+func TestRankedSeatsOrderPoolsByRoom_T4529(t *testing.T) {
 	cases := []struct {
 		grade                      string
 		commandcode, codex, claude float64
+		want                       string
 	}{
-		{"B", -0.083, -0.59, -0.176},
-		{"B", -0.083, -0.013, -0.176},
-		{"C", -0.083, -0.59, -0.176},
-		{"C", -0.2, -0.59, -0.176},
-		{"C", -0.2, -0.13, -0.176},
+		{"B", -0.083, -0.59, -0.176, "omp-dsflash41@high"},
+		{"B", -0.083, -0.013, -0.176, "codex-luna@high"},
+		{"C", -0.083, -0.59, -0.176, "omp-dsflash41@high"},
+		{"C", -0.2, -0.59, -0.176, "haiku@medium"},
+		{"C", -0.2, -0.13, -0.176, "codex-luna@high"},
 	}
 	for _, tc := range cases {
 		t.Run(fmt.Sprintf("%s/cc=%g/codex=%g/claude=%g", tc.grade, tc.commandcode, tc.codex, tc.claude), func(t *testing.T) {
 			sel := rankedSeatPick(t, tc.grade, tc.commandcode, tc.codex, tc.claude, "")
-			if got := chosenRung(sel); got != "omp-dsflash41@high" {
-				t.Fatalf("chosen %s, want omp-dsflash41@high", got)
-			}
-		})
-	}
-}
-
-// The ranked pools still compete by their seat's room once Command Code has
-// dropped (its window is used up): the codex or claude seat with more room
-// keeps the task.
-func TestRankedSeatsOrderPoolsByRoom_T4529(t *testing.T) {
-	cases := []struct {
-		grade         string
-		codex, claude float64
-		want          string
-	}{
-		{"B", -0.013, -0.176, "codex-luna@high"},
-		{"C", -0.59, -0.176, "haiku@medium"},
-		{"C", -0.13, -0.176, "codex-luna@high"},
-	}
-	for _, tc := range cases {
-		t.Run(fmt.Sprintf("%s/codex=%g/claude=%g", tc.grade, tc.codex, tc.claude), func(t *testing.T) {
-			pools := map[string]PoolView{
-				"commandcode": {Status: "ok", Class: "spend", Blocking: ptrF(100), Projected: ptrF(100), Urgency: ptrF(-1), ResetHours: ptrF(100)},
-				"codex":       rankedView(tc.codex),
-				"claude":      rankedView(tc.claude),
-			}
-			sel := rankedSeatPickPools(t, tc.grade, pools, "")
 			if got := chosenRung(sel); got != tc.want {
 				t.Fatalf("chosen %s, want %s", got, tc.want)
 			}
