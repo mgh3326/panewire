@@ -101,8 +101,8 @@ type nodeJobLedgerEvent struct {
 	// final are a job.lost payload's.
 	name, reason string
 	final        bool
-	// request is a hub-close intent's request id.
-	request string
+	// request and attempt are a hub-close intent's request id and attempt.
+	request, attempt string
 }
 
 func nodeJobClaimKind(kind string) bool {
@@ -177,7 +177,7 @@ func readNodeJobLedgerEvents(job *os.Root) ([]nodeJobLedgerEvent, error) {
 	}
 	// File.ReadDir is directory order; the ledger's sequence is the file-name
 	// order.
-	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
+	sort.Slice(entries, func(i, j int) bool { return fleet.CompareLedgerNames(entries[i].Name(), entries[j].Name()) < 0 })
 	events := make([]nodeJobLedgerEvent, 0, len(entries))
 	for _, entry := range entries {
 		// A dot name is an unpublished temporary event the ledger writer
@@ -212,6 +212,7 @@ func readNodeJobLedgerEvents(job *os.Root) ([]nodeJobLedgerEvent, error) {
 				Reason       string `json:"reason"`
 				Final        bool   `json:"final"`
 				RequestID    string `json:"request_id"`
+				Attempt      string `json:"attempt"`
 			} `json:"payload"`
 		}
 		if json.Unmarshal(data, &event) != nil || event.Kind == "" {
@@ -229,7 +230,7 @@ func readNodeJobLedgerEvents(job *os.Root) ([]nodeJobLedgerEvent, error) {
 			task = strconv.FormatFloat(id, 'f', -1, 64)
 		}
 		events = append(events, nodeJobLedgerEvent{kind: event.Kind, pane: event.Payload.PaneID, label: label, role: event.Payload.Role, task: task, owner: event.Payload.OwnerLane, keep: event.Payload.Keep, session: event.Payload.HerdrSession,
-			name: entry.Name(), reason: event.Payload.Reason, final: event.Payload.Final, request: event.Payload.RequestID})
+			name: entry.Name(), reason: event.Payload.Reason, final: event.Payload.Final, request: event.Payload.RequestID, attempt: event.Payload.Attempt})
 	}
 	return events, nil
 }

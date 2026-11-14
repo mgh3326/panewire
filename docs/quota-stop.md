@@ -87,3 +87,18 @@ close or a pane that vanished on its own ([node-commands.md](node-commands.md),
 (hk 4652); the hub's durable end of reviewers and consults through it
 (hk 4632); and the crash-safe hand-over of implementers (hk 4633). The existing
 screen-triggered quota-stop handover is unchanged.
+
+## Hub close (hk 4652)
+
+When the hub ends a job by closing its pane with `pane.close_op` (the
+replacement and hand-over paths of hk 4632/4633 will), the **node** writes
+the job's terminal hk record, with the planned `end_reason` carrying
+`replaced_by=` or `handed_over_to=`, releases the quota lease and records
+the final `job.lost` (`reason: "hub_close"`). The job's watcher only
+defers while the close is open, including during a quota hand-off grace:
+it writes neither the grace-expiry `quota_stop` record nor the
+missing-pane `lost`, so the successor pointer is not lost to a competing
+write. The node settles after every close answer, status and release, at
+node start and every 30 seconds. The full writer, order and restart
+contract is [node-commands.md](node-commands.md), "Hub close protocol".
+

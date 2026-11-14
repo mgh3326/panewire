@@ -50,7 +50,7 @@ func (a *App) startWatchMode(job string, rearmed bool) error {
 	}
 	defer log.Close()
 	cmd := watchCommand(exe, job, rearmed)
-	cmd.Env = append(append(os.Environ(), "HERDR_SESSION="+a.herdrSession(), "ARBITER_INBOX_ROOT="+a.Jobs), a.WatchEnv...)
+	cmd.Env = append(os.Environ(), "HERDR_SESSION="+a.herdrSession(), "ARBITER_INBOX_ROOT="+a.Jobs)
 	cmd.Stdout = log
 	cmd.Stderr = log
 	cmd.Stdin = nil
@@ -208,39 +208,6 @@ func (a *App) watch(ctx context.Context, args []string) error {
 	if e := syscall.Flock(int(hubCloseLock.Fd()), syscall.LOCK_EX); e != nil {
 		return e
 	}
-	// Leaving is decided under the job's end lock, and the hub-close lock is
-	// released under it: a node that recorded an intent while this watcher
-	// still read as aware keeps it watching; one that comes after sees no
-	// aware watcher and starts its own (watch_hub_close.go).
-	for {
-		err := a.watchPolls(ctx, args, id)
-		if ctx.Err() != nil {
-			return err
-		}
-		unlock, e := LockJobEnd(filepath.Join(a.Jobs, id))
-		if e != nil {
-			return errors.Join(err, e)
-		}
-		if j, e := a.job(id); e == nil && !j.Reaped {
-			if _, open := pendingHubCloseIntent(j); open {
-				unlock()
-				if err != nil {
-					a.warn("watch of job %s failed with a hub close open, retrying: %v", id, err)
-				}
-				if e := a.Sleep(ctx, 5*time.Second); e != nil {
-					return e
-				}
-				continue
-			}
-		}
-		hubCloseLock.Close()
-		unlock()
-		return err
-	}
-}
-
-// watchPolls is the watcher's poll loop; watch owns its locks and exit.
-func (a *App) watchPolls(ctx context.Context, args []string, id string) error {
 	timeout := time.Hour
 	if v := a.envOr("PANEWIRE_COMPLETION_TIMEOUT_S", "WRK_COMPLETION_TIMEOUT_S"); v != "" {
 		d, ok := timeoutValue(v)
@@ -275,27 +242,16 @@ func (a *App) watchPolls(ctx context.Context, args []string, id string) error {
 		if e != nil {
 			return e
 		}
-		// An open hub close owns this attempt's end (watch_hub_close.go):
-		// completion, the decision timeout, the deadline exit and the
-		// missing-pane fallback all wait, and the watcher writes only the
-		// intended record once the node's close operation is final.
+		// An open hub close owns this attempt's end, and the node settles it
+		// (watch_hub_close.go HubCloseSettlement): completion, the decision
+		// timeout, the deadline exit and the missing-pane fallback all wait.
+		// The node's final job.lost closes the intent and ends this watch; a
+		// request that closed nothing hands the job back.
 		if _, ok := pendingHubCloseIntent(j); ok && !j.Reaped {
-			out, err := a.reconcileHubCloseIntent(ctx, id)
-			if err != nil {
+			if err := a.Sleep(ctx, 5*time.Second); err != nil {
 				return err
 			}
-			switch out {
-			case hubCloseEnded:
-				return nil
-			case hubCloseWait:
-				if err := a.Sleep(ctx, 5*time.Second); err != nil {
-					return err
-				}
-				continue
-			}
-			if j, e = a.job(id); e != nil {
-				return e
-			}
+			continue
 		}
 		// The job.lost announced for a quota stop (by this watcher for a
 		// reviewer, by the manager for a handed-over implementer) is not

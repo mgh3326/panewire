@@ -510,6 +510,7 @@ func (client *HubClient) Run(ctx context.Context) {
 	go client.runLaneReconcile(ctx)
 	go client.runTaskPaneSweep(ctx)
 	go client.runQuotaPoolReconcile(ctx)
+	go client.runHubCloseSettle(ctx)
 	if client.statePublish {
 		go client.runFleetQuota(ctx)
 	}

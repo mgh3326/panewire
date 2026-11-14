@@ -2,6 +2,7 @@ package fleet
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -38,6 +39,15 @@ func hubCloseFixture(t *testing.T) (*App, *fakeHK) {
 			return Result{Out: `{"result":{"panes":[]}}`}
 		}
 		return do(c)
+	}
+	// The node's settlement retry runs between the watcher's polls, as the
+	// daemon's runHubCloseSettle pass does: the watcher itself never settles.
+	sleep := a.Sleep
+	a.Sleep = func(ctx context.Context, d time.Duration) error {
+		if _, e := (HubCloseSettlement{App: a}).Settle(ctx, "j"); e != nil {
+			t.Errorf("node settlement: %v", e)
+		}
+		return sleep(ctx, d)
 	}
 	return a, h
 }
@@ -434,27 +444,23 @@ func TestJobLedgerSkipsTemporaryEvents_t4652(t *testing.T) {
 	}
 }
 
-// A watcher leaving on an error (herdr unreadable) right after the node
-// recorded an intent does not leave: leaving is re-checked under the end lock
-// and the close is finished.
-func TestWatcherLeavingRechecksForAHubClose_t4652(t *testing.T) {
+// The node settles a final close with no watcher running at all, and again
+// after the watcher left on an error: settlement never depends on a watcher.
+func TestNodeSettlesWithoutAWatcher_t4652(t *testing.T) {
 	a, h := hubCloseFixture(t)
+	// An ambient hk route the watcher's resolver would prefer: settlement
+	// uses only the store it was given (the node's own).
+	t.Setenv("HANDOFFKEEP_URL", "https://hk-other.invalid")
+	t.Setenv("HANDOFFKEEP_TOKEN_SVC_PANEWIRE", "not-the-node")
 	in := liveIntent(t, a)
-	f := a.Runner.(*fakeRunner)
-	do := f.Do
-	lists := 0
-	f.Do = func(c Command) Result {
-		if c.Name == "herdr" && strings.Join(c.Args, " ") == "agent list" {
-			if lists++; lists == 1 {
-				recordHubClose(t, a, in)
-				writeJobCloseOp(t, a, CloseOp{RequestID: in.RequestID, Attempt: in.Attempt, State: CloseOpClosed})
-				return Result{Code: 1, Err: "herdr down"}
-			}
-		}
-		return do(c)
+	recordHubClose(t, a, in)
+	writeJobCloseOp(t, a, CloseOp{RequestID: in.RequestID, Attempt: in.Attempt, State: CloseOpClosed})
+	settle := HubCloseSettlement{App: a}
+	if st, e := settle.Settle(context.Background(), "j"); e != nil || st != HubCloseSettled {
+		t.Fatalf("settle = %v, %v", st, e)
 	}
-	if e := a.watch(context.Background(), []string{"j"}); e != nil {
-		t.Fatal(e)
+	if st, e := settle.Settle(context.Background(), "j"); e != nil || st != HubCloseNone {
+		t.Fatalf("second settle = %v, %v; want none (idempotent)", st, e)
 	}
 	wantHubCloseFinished(t, a, h)
 }
@@ -513,4 +519,31 @@ func TestWatcherCancelsAnOrphanedIntent_t4652(t *testing.T) {
 			t.Fatalf("orphaned intent finished as a hub close: %v", p)
 		}
 	}
+}
+
+// A clock stepped backwards between the receipt and the intent: the intent's
+// created_at sorts it before the receipt, but the ledger sequence (file name)
+// puts it after, as the node reads it. The watcher defers and finishes.
+func TestWatcherFoldsHubCloseInLedgerOrder_t4652(t *testing.T) {
+	a, h := hubCloseFixture(t)
+	in := liveIntent(t, a)
+	j, e := a.job("j")
+	if e != nil {
+		t.Fatal(e)
+	}
+	last := j.Events[len(j.Events)-1].name
+	body, _ := json.Marshal(map[string]any{"kind": hubCloseIntentKind, "created_at": "2020-01-01T00:00:00Z", "payload": map[string]any{
+		"request_id": in.RequestID, "attempt": in.Attempt, "pane_id": in.Pane, "label": in.Label, "end_reason": in.EndReason}})
+	name := "99999-" + hubCloseIntentKind + ".json"
+	if last >= name {
+		t.Fatalf("fixture ledger name %s sorts after %s", last, name)
+	}
+	if e := os.WriteFile(filepath.Join(a.Jobs, "j", "events", name), body, 0o600); e != nil {
+		t.Fatal(e)
+	}
+	writeJobCloseOp(t, a, CloseOp{RequestID: in.RequestID, Attempt: in.Attempt, State: CloseOpClosed})
+	if e := a.watch(context.Background(), []string{"j"}); e != nil {
+		t.Fatal(e)
+	}
+	wantHubCloseFinished(t, a, h)
 }

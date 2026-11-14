@@ -250,13 +250,17 @@ or acted on. `journal_failed` answers a journal read, write or sync that failed;
 the operation then stays as last recorded.
 
 A node advertises `close_ops_v1` in its hello capabilities once it runs these
-ops and its watchers defer to them (hk 4652); a hub issues `pane.close_op` only
-to a node that advertises it. No hub code issues them yet: that is hk 4632.
+ops and settles them, and its watchers defer to them (hk 4652); a hub issues
+`pane.close_op` only to a node that advertises it. No hub code issues them
+yet: that is hk 4632.
 
 #### Hub close protocol
 
 A *hub close* is the hub ending a job by closing its pane with
-`pane.close_op` (hk 4652). Its rules, which hk 4632's caller relies on:
+`pane.close_op` (hk 4652). **The node owns an accepted close end to end:**
+it binds and records the plan, closes, and then settles the job (hk
+terminal record, quota lease, final ledger event). The job's watcher only
+defers. Its rules, which hk 4632's caller relies on:
 
 1. **What is recorded before the close.** `pane.close_op` also takes a
    required `end_reason`: the hk `end_reason` of the `lost` record that ends
@@ -269,77 +273,91 @@ A *hub close* is the hub ending a job by closing its pane with
    `attempt`, `pane_id`, `label` (the request's `name`) and `end_reason` —
    *before* it writes `registered`, and fsyncs the events directory. A
    failed intent write answers `journal_failed` and registers nothing. A
-   replay or a `mismatch` records no intent. The binding check and the intent
-   run under the job's end lock (`jobs/<job>/.panewire-end.lock`), which the
-   watcher also takes around every terminal or expiry decision, re-reading
-   the ledger under it; so no watcher end lands between the node's check and
-   its intent. Before the intent the node also refuses:
+   replay or a `mismatch` records no intent. The binding check and the
+   intent run under the job's end lock (`jobs/<job>/.panewire-end.lock`),
+   which the watcher also takes around every terminal or expiry decision,
+   re-reading the ledger under it; so no watcher end lands between the
+   node's check and its intent. Before the intent the node also refuses
    `close_in_progress` when another operation for the attempt is still
-   `registered` or `closing` (one open close per attempt);
-   `watcher_incompatible` when the job's watcher is an older binary that does
-   not read intents (it holds the watch lock but not
-   `.panewire-watch-hubclose.lock`; the hub retries after that watcher ends or
-   is replaced). With no watcher running, the node starts one before it
-   registers, in the herdr session of the job's receipt and with the node's
-   own `handoffkeep_env` file as `PANEWIRE_HK_ENV` (a file without the
-   svc-panewire token key is refused); a failed start answers
-   `watcher_unavailable` with nothing registered. A watcher decides to leave
-   under the end lock and releases its hub-close lock under it, so a node
-   that recorded an intent while the watcher still read as aware keeps it
-   watching, and one that comes after starts a new watcher. A repeat that resumes a `registered` operation makes the same
-   watcher check.
-2. **What the watcher does while the close is open.** The intent is open
-   while it names the job's current attempt and that attempt's receipt pane
-   and label, and no `job.hub_close_cancelled` for its request, end of the
-   attempt or new attempt follows it (an intent from an older attempt, pane
-   or label is stale and ignored, the same binding the node checks).
-   While it is open the watcher writes no terminal record of its own:
-   completion from a report, the decision timeout, the deadline exit and the
-   missing-pane fallback all wait, past the completion deadline, across
-   restarts (a re-armed watcher reads the same ledger). It reads the
-   operation from `jobs/<job>/close-ops/<request_id>.json`, never herdr.
-3. **Who writes the terminal record.** The watcher does, under the end
-   lock, on the intent current under that lock (the newest one whose own
-   request no cancellation closed: a newer request that closed nothing hands
-   the job back to an older unresolved one), after fsyncing the journal it
-   read. `closed` proves the pane stopped; `gone` and `unknown` do only once
-   a successful `herdr pane list` in the receipt's session shows the pane
-   absent (the agent list misses a pane left as a plain shell), and the
-   watcher waits while it is listed (the hub may open a new request id,
-   which records a newer intent). Then the watcher writes hk
-   `state=lost` with exactly the intended `end_reason`, releases the quota
-   lease, then records a final `job.lost` (`reason: "hub_close"`,
-   `final: true`, `request_id`, `end_reason`). A crash between those steps
-   leaves the intent open and the next poll repeats them. The hub may write
-   the identical record itself (with `job.mark_lost`); the watcher accepts
-   exactly that record and finishes. Any other terminal hk record is kept:
-   the pane is proven stopped, so the watcher still releases the lease and
-   records the final `job.lost` with `superseded: true`.
-   `refused`, `cancelled` and `preempted` closed nothing: the watcher
-   records `job.hub_close_cancelled` (`not_closed`) and resumes its own
-   duties.
-4. **If the hub crashes before release.** Release is bookkeeping for the hub;
-   the watcher acts on the final state alone, so an unreleased final
-   operation still ends the job. An operation left `registered` or
-   `closing`, or an intent whose operation was never written (a node crash
-   between the two), keeps the watcher waiting with no timeout: the hub must
-   repeat the same `request_id` with the same arguments until it is final
-   (a repeat settles `closing` as `unknown`, and registers or resumes a
-   `registered` one, which closes or settles `preempted`/`mismatch`), or
-   release a `registered` one (`cancelled`). Releasing a request the node
-   never registered (answered `none`) records `job.hub_close_cancelled`
-   (`released`) for its intent, so the watcher stops waiting. An intent with
-   no operation on a job hk already ended is cancelled by the watcher
-   (`orphaned`): a repeat could no longer bind. A `mismatch` on a repeat means
-   the attempt moved on, which already closed the intent.
+   `registered` or `closing` (one open close per attempt), and
+   `watcher_incompatible` when the job's watcher is an older binary that
+   does not defer (it holds the watch lock but not
+   `.panewire-watch-hubclose.lock`). A job with no watcher running is closed
+   normally: nothing waits on a watcher.
+2. **Order.** Both the node and the watcher fold the ledger in sequence
+   order (the numeric `<seq>-` prefix of the event file name,
+   `fleet.CompareLedgerNames`), never by timestamp, so a clock stepped
+   backwards cannot hide an intent. Unpublished dot files (`.tmp-*.json`)
+   are not events.
+3. **What the watcher does.** An intent is open while it names the job's
+   current attempt and that attempt's receipt pane and label, and no
+   cancellation of its own request, end of the attempt or new attempt
+   follows it (an intent from an older attempt, pane or label is stale and
+   ignored, the same binding the node checks). While one is open the watcher
+   writes no terminal record and releases nothing: completion from a
+   report, the decision timeout, the deadline exit and the missing-pane
+   fallback all wait. It never writes the hub close's record, never reads hk
+   for it and needs no hk route of its own; a watcher that exits, or never
+   ran, leaves nothing undone.
+4. **Who writes the terminal record: the node.** Settlement
+   (`fleet.HubCloseSettlement`, under the end lock, on the intent current
+   under that lock — the newest one whose own request no cancellation
+   closed, so a newer request that closed nothing hands the job back to an
+   older unresolved one) reads the journal after fsyncing it:
+   - `closed` proves the pane stopped. `gone` and `unknown` do only once a
+     successful, strictly decoded `herdr pane list` in the receipt's herdr
+     session shows the pane absent (a pane left as a plain shell is
+     present); until then settlement stays pending, and the hub may open a
+     new request id, which records a newer intent.
+   - Then, through the node's own hk JobStore (spawn.json `handoffkeep_env`,
+     the store `job.mark_lost` uses, never an inherited environment or
+     `[quota].url`): a live record takes `state=lost` with exactly the
+     intended `end_reason`; the identical record already there (the hub may
+     write it with `job.mark_lost`) is accepted; any other terminal record
+     is kept. The node then releases the job's quota lease (re-reading the
+     pools still held) and records a final, fsynced `job.lost`
+     (`reason: "hub_close"`, `final: true`, `request_id`, `end_reason`, and
+     `superseded: true` when another record was kept). That event closes the
+     intent and ends the watcher's watch.
+   - `refused`, `cancelled` and `preempted` closed nothing: the node records
+     `job.hub_close_cancelled` (`not_closed`) and the watcher resumes.
+   - An intent with no operation on a job hk already ended is cancelled
+     (`orphaned`): a repeat could no longer bind.
+5. **When settlement runs (restart and liveness).** One step runs after
+   every `pane.close_op` answer (a new close, a replay of a final one),
+   every `pane.close_status` and every `pane.close_release`, and the daemon
+   runs a pass over every job with an open intent at node start and every
+   30 seconds (`runHubCloseSettle`). Every step is idempotent: a crash or
+   failure between the hk write, the lease release and the final event
+   leaves the intent open, and the next step repeats what is left. So an
+   accepted close is settled while the node daemon runs, with no further
+   hub command and no watcher; while the daemon is down nothing is
+   settled, and nothing competes (the watcher still defers).
+6. **Release and cancellation.** Release is hub bookkeeping; settlement
+   acts on the final state alone, so an unreleased final operation is still
+   settled. An operation left `registered` or `closing`, or an intent whose
+   operation was never written (a node crash between the two), stays
+   pending until the hub repeats the same `request_id` with the same
+   arguments (a repeat settles `closing` as `unknown`, and registers or
+   resumes a `registered` one) or releases it. Releasing a request the node
+   never registered journals a released `cancelled` tombstone under its id
+   and durably cancels its intent (`job.hub_close_cancelled`, `released`),
+   and answers `cancelled`: a delayed duplicate `pane.close_op` with that id
+   replays `cancelled` (or is `invalid_args` when no intent named its pane)
+   and touches no pane.
 
-What hk 4632 must still do: send `end_reason` on every `pane.close_op`; treat
-`close_in_progress`, `watcher_incompatible` and `watcher_unavailable` as
-"not closed, retry later"; after `unknown`, retry under a new request id while
-the pane is still there; read
-`attempt` from `pane.close_status` when it decides, drive every operation it
-opens to a final state, and never write a terminal hk record other than the
-planned one for a job whose close it opened.
+What hk 4632 can rely on: the node writes the planned record (or keeps
+another terminal record and still frees the lease) for every close it
+accepted, while its daemon runs, without a watcher and without another hub
+command; a watcher never writes a competing record while the close is open;
+`close_status` and `close_release` both run a settlement step. What hk 4632
+must still do: send `end_reason` on every `pane.close_op`; treat
+`close_in_progress` and `watcher_incompatible` as "not closed, retry later";
+after `unknown`, retry under a new request id while the pane is still
+there; read `attempt` from `pane.close_status` when it decides; drive every
+operation it opens to a final state or release it; and not write a
+terminal hk record other than the planned one for a job whose close it
+opened.
 
 ### `pane.capture`
 

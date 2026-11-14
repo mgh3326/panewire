@@ -1,6 +1,7 @@
 package fleet
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -8,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -16,9 +18,11 @@ import (
 // A hub close is the hub ending a job by closing its pane through a node close
 // operation (hk 4652; docs/node-commands.md, "Hub close protocol"). The node
 // records a hub-close intent in the job's ledger, with the planned end_reason,
-// before it registers the operation. While the intent is open for the job's
-// current attempt, its watcher writes no terminal record of its own; once the
-// operation is final it finishes the job with exactly the intended record.
+// before it registers the operation, and the node settles it: once the
+// operation is final it writes exactly the intended hk record, releases the
+// lease and records the final job.lost (HubCloseSettlement). While the intent
+// is open the job's watcher writes no terminal record of its own; it only
+// defers.
 //
 // It is a sibling of the quota-stop intent (watch_quota_stop.go), not a reuse:
 // that one cancels on a missing pane, and a hub close makes the pane missing on
@@ -26,8 +30,8 @@ import (
 const (
 	hubCloseIntentKind = "job.hub_close_intent"
 	hubCloseCancelKind = "job.hub_close_cancelled"
-	// hubCloseLostReason is the job.lost reason the watcher records when it
-	// finishes a hub close.
+	// hubCloseLostReason is the job.lost reason the node records when it
+	// settles a hub close.
 	hubCloseLostReason = "hub_close"
 )
 
@@ -54,9 +58,16 @@ func RecordHubCloseIntent(ctx context.Context, jobs, job string, in HubCloseInte
 // watcher reads intents from the event files, so the close must not proceed on
 // an intent a crash could drop.
 func (a *App) recordHubCloseIntent(ctx context.Context, job string, in HubCloseIntent) error {
-	if e := a.event(ctx, job, hubCloseIntentKind, map[string]any{
+	return a.eventSynced(ctx, job, hubCloseIntentKind, map[string]any{
 		"request_id": in.RequestID, "attempt": in.Attempt, "pane_id": in.Pane, "label": in.Label, "end_reason": in.EndReason,
-	}); e != nil {
+	})
+}
+
+// eventSynced appends a hub-close protocol event and fsyncs the events
+// directory, returning its error: the ledger's own directory sync is best
+// effort, and these events are what a close is admitted or released on.
+func (a *App) eventSynced(ctx context.Context, job, kind string, payload map[string]any) error {
+	if e := a.event(ctx, job, kind, payload); e != nil {
 		return e
 	}
 	dir, e := os.Open(filepath.Join(a.Jobs, job, "events"))
@@ -99,7 +110,8 @@ func LockJobEnd(jobDir string) (func(), error) {
 type HubCloseWatcher int
 
 const (
-	// HubCloseWatcherNone: no watcher runs; the caller starts one.
+	// HubCloseWatcherNone: no watcher runs; the node settles the close
+	// without one.
 	HubCloseWatcherNone HubCloseWatcher = iota
 	// HubCloseWatcherAware: a watcher that defers to hub-close intents runs.
 	HubCloseWatcherAware
@@ -131,30 +143,13 @@ func ProbeHubCloseWatcher(jobDir string) (HubCloseWatcher, error) {
 	return HubCloseWatcherNone, nil
 }
 
-// StartHubCloseWatcher starts the job's re-armed watcher, for a hub close that
-// found none running: the watcher is what finishes the job. session is the
-// herdr session of the job's receipt; hkEnv, when set, is the node's own
-// handoffkeep credential file (spawn.json handoffkeep_env), so the watcher
-// reads and writes the hk record with the credential the node uses.
-func StartHubCloseWatcher(jobs, session, job, hkEnv string) error {
-	a, e := New(os.Stderr, os.Stderr)
-	if e != nil {
-		return e
-	}
-	a.Jobs, a.HerdrSession = jobs, session
-	if hkEnv != "" {
-		a.WatchEnv = []string{"PANEWIRE_HK_ENV=" + hkEnv}
-	}
-	return a.startWatchMode(job, true)
-}
-
 // RecordHubCloseCancel closes the hub-close intent of request id in job's
 // ledger: the hub released a request the node never registered, so no close
 // will run for it.
 func RecordHubCloseCancel(ctx context.Context, jobs, job, id, reason string) error {
 	home, _ := os.UserHomeDir()
 	a := &App{Jobs: jobs, Home: home, Now: time.Now}
-	return a.event(ctx, job, hubCloseCancelKind, map[string]any{"request_id": id, "reason": reason})
+	return a.eventSynced(ctx, job, hubCloseCancelKind, map[string]any{"request_id": id, "reason": reason})
 }
 
 // OpenCloseOps lists the job's close operations for attempt that are not yet
@@ -220,7 +215,10 @@ func (a *App) endUnlessHubClose(id string, end func(j Job) error) (deferred bool
 func pendingHubCloseIntent(j Job) (HubCloseIntent, bool) {
 	var open []HubCloseIntent
 	var attempt, pane, label string
-	for _, ev := range j.Events {
+	// The protocol is folded in ledger sequence (file-name) order, as the
+	// node's readNodeJobLedgerEvents folds it: j.Events is ordered by
+	// timestamp, which a clock stepped backwards reorders.
+	for _, ev := range ledgerOrder(j.Events) {
 		switch ev.Kind {
 		case "job.claim", "job.claimed", "job.reclaim":
 			attempt, pane, label, open = ev.name, "", "", nil
@@ -257,18 +255,33 @@ func pendingHubCloseIntent(j Job) (HubCloseIntent, bool) {
 	return open[len(open)-1], true
 }
 
-// hubCloseOutcome is what one reconciliation of a hub-close intent did.
-type hubCloseOutcome int
+// ledgerOrder returns events in ledger sequence order (CompareLedgerNames).
+func ledgerOrder(events []Event) []Event {
+	out := slices.Clone(events)
+	slices.SortStableFunc(out, func(x, y Event) int { return CompareLedgerNames(x.name, y.name) })
+	return out
+}
 
-const (
-	// hubCloseWait: the close is still open; the watcher defers.
-	hubCloseWait hubCloseOutcome = iota
-	// hubCloseEnded: the job was finished, or another terminal record owns it.
-	hubCloseEnded
-	// hubCloseCancelled: the operation ended without closing the pane; the
-	// watcher resumes its own duties.
-	hubCloseCancelled
-)
+// CompareLedgerNames orders two ledger event file names ("<seq>-<kind>.json")
+// by their numeric sequence prefix, then by name: the ledger's own order,
+// independent of timestamps and of the prefix's width. The node's ledger
+// reader and the watcher's hub-close fold both use it.
+func CompareLedgerNames(x, y string) int {
+	seq := func(name string) (int, bool) {
+		i := strings.IndexByte(name, '-')
+		if i <= 0 {
+			return 0, false
+		}
+		n, err := strconv.Atoi(name[:i])
+		return n, err == nil
+	}
+	nx, okx := seq(x)
+	ny, oky := seq(y)
+	if okx && oky && nx != ny {
+		return cmp.Compare(nx, ny)
+	}
+	return strings.Compare(x, y)
+}
 
 // readJobCloseOp reads the job's close operation id from its journal, made
 // durable first: a state a failed fsync left visible is not acted on.
@@ -285,12 +298,78 @@ func (a *App) readJobCloseOp(job, id string) (CloseOp, bool, error) {
 	return op, found, err
 }
 
+// HubCloseSettlement is the node's settlement of hub closes: the one writer
+// of a hub close's terminal hk record, lease release and final job.lost. App
+// carries the jobs root, the clock, the local quota ledger and the node's own
+// hk JobStore (never the watcher's credential resolution). PaneListed, when
+// set, reads the full pane inventory in a herdr session; nil reads it through
+// App's runner.
+type HubCloseSettlement struct {
+	App        *App
+	PaneListed func(ctx context.Context, session, pane string) (bool, error)
+}
+
+// HubCloseState is what one settlement step left.
+type HubCloseState int
+
+const (
+	// HubCloseNone: the job has no open hub-close intent.
+	HubCloseNone HubCloseState = iota
+	// HubClosePending: the close or its settlement is unfinished; a later
+	// step (a repeat, close_status, the daemon retry or a node start) settles
+	// it.
+	HubClosePending
+	// HubCloseSettled: the job was finished, or another terminal hk record
+	// was kept and the closed pane's lease released.
+	HubCloseSettled
+	// HubCloseCancelled: the request closed nothing (or was orphaned); its
+	// intent was cancelled.
+	HubCloseCancelled
+)
+
+// Settle drives the job's current hub close one step, idempotently.
+func (s HubCloseSettlement) Settle(ctx context.Context, job string) (HubCloseState, error) {
+	out, err := s.App.settleHubClose(ctx, job, s.PaneListed)
+	return out, err
+}
+
+// PendingHubCloseJobs lists the jobs under the jobs root whose ledger holds an
+// open hub-close intent: the node's startup and retry pass settles them.
+func PendingHubCloseJobs(jobs string) ([]string, error) {
+	entries, err := os.ReadDir(jobs)
+	if err != nil {
+		return nil, err
+	}
+	a := &App{Jobs: jobs}
+	var out []string
+	for _, entry := range entries {
+		if !entry.IsDir() || !validID(entry.Name()) {
+			continue
+		}
+		if _, err := os.Stat(filepath.Join(jobs, entry.Name(), CloseOpDir)); err != nil {
+			continue
+		}
+		j, err := a.job(entry.Name())
+		if err != nil {
+			continue
+		}
+		if _, open := pendingHubCloseIntent(j); open && !j.Reaped {
+			out = append(out, entry.Name())
+		}
+	}
+	return out, nil
+}
+
 // paneProvenGone reports whether a successful read of the full herdr pane
 // inventory, in the herdr session of the job's receipt, shows the job's pane
 // absent. The agent list is not enough: a pane whose agent exited stays as a
 // plain shell. An unreadable inventory proves nothing.
-func (a *App) paneProvenGone(ctx context.Context, j Job) bool {
+func (a *App) paneProvenGone(ctx context.Context, j Job, listed func(ctx context.Context, session, pane string) (bool, error)) bool {
 	route := a.laneRoute(j)
+	if listed != nil {
+		present, err := listed(ctx, route.herdrSession(), j.Pane)
+		return err == nil && !present
+	}
 	panes, e := route.panes(ctx)
 	if e != nil {
 		return false
@@ -303,54 +382,69 @@ func (a *App) paneProvenGone(ctx context.Context, j Job) bool {
 	return true
 }
 
-// reconcileHubCloseIntent drives an open hub-close intent one step, under the
-// job's end lock. The node's journal decides first: an operation not yet
-// final (or not yet registered) keeps the watcher waiting. closed and gone
-// prove the pane stopped; unknown does only once herdr shows the pane absent,
-// and waits otherwise (the hub retries under a new request id). refused,
-// cancelled and preempted closed nothing and cancel the intent. Then hk: a
-// live record takes exactly the intended lost record; the intended record
-// already there is accepted; another terminal record is kept, and the
-// watcher still releases the lease and closes the intent, since the pane is
-// proven gone.
-func (a *App) reconcileHubCloseIntent(ctx context.Context, id string) (hubCloseOutcome, error) {
+// PaneListedIn reports whether a herdr pane list answer names pane; the
+// answer is decoded strictly, so an unreadable one is an error.
+func PaneListedIn(out []byte, pane string) (bool, error) {
+	panes, err := parsePaneList(out)
+	if err != nil {
+		return false, err
+	}
+	for _, p := range panes {
+		if p.Pane == pane {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// settleHubClose drives the job's current hub close one step, under the
+// job's end lock, on the intent current under that lock. The node's journal
+// decides first: an operation not yet final (or not yet registered) stays
+// pending. closed proves the pane stopped; gone and unknown do only once the
+// full pane inventory in the receipt's session shows the pane absent.
+// refused, cancelled and preempted closed nothing and cancel the intent. Then
+// hk, through the node's own JobStore: a live record takes exactly the
+// intended lost record; the intended record already there is accepted;
+// another terminal record is kept, and the lease is still released and the
+// intent closed, since the pane is proven stopped.
+func (a *App) settleHubClose(ctx context.Context, id string, listed func(ctx context.Context, session, pane string) (bool, error)) (HubCloseState, error) {
 	unlock, e := LockJobEnd(filepath.Join(a.Jobs, id))
 	if e != nil {
-		return hubCloseWait, e
+		return HubClosePending, e
 	}
 	defer unlock()
 	// The intent is chosen from the ledger read under the lock: the node may
 	// have recorded a newer one since the poll's snapshot.
 	j, e := a.job(id)
 	if e != nil {
-		return hubCloseWait, e
+		return HubClosePending, e
 	}
 	in, open := pendingHubCloseIntent(j)
 	if !open || j.Reaped {
-		return hubCloseCancelled, nil
+		return HubCloseNone, nil
 	}
-	cancel := func(reason string) (hubCloseOutcome, error) {
-		return hubCloseCancelled, a.event(ctx, j.ID, hubCloseCancelKind, map[string]any{"request_id": in.RequestID, "reason": reason})
+	cancel := func(reason string) (HubCloseState, error) {
+		return HubCloseCancelled, a.eventSynced(ctx, j.ID, hubCloseCancelKind, map[string]any{"request_id": in.RequestID, "reason": reason})
 	}
 	op, found, err := a.readJobCloseOp(j.ID, in.RequestID)
 	switch {
 	case err != nil:
 		a.warn("hub close of job %s waits: close operation unreadable: %v", j.ID, err)
-		return hubCloseWait, nil
+		return HubClosePending, nil
 	case !found:
 		// The node recorded the intent but never registered the operation (a
-		// crash, journal_failed, watcher_unavailable). The hub repeats the
+		// crash, journal_failed). The hub repeats the
 		// request or releases it, which cancels the intent. A job hk already
 		// ended can no longer be bound, so a repeat would only answer
 		// mismatch: the intent is orphaned and cancelled.
 		if state, _, ok := a.hkJobState(ctx, j.ID); ok && (state == "completed" || state == "lost" || state == "escalated") {
 			return cancel("orphaned")
 		}
-		return hubCloseWait, nil
+		return HubClosePending, nil
 	case !op.Final():
 		// Still registered or closing: the hub repeats the request until it
 		// is final (docs/node-commands.md).
-		return hubCloseWait, nil
+		return HubClosePending, nil
 	case op.Attempt != in.Attempt:
 		return cancel("stale")
 	}
@@ -360,8 +454,8 @@ func (a *App) reconcileHubCloseIntent(ctx context.Context, id string) (hubCloseO
 		// gone came from the node's agent list, and unknown may not have
 		// closed anything: both wait for the pane inventory to show the
 		// pane absent.
-		if !a.paneProvenGone(ctx, j) {
-			return hubCloseWait, nil
+		if !a.paneProvenGone(ctx, j, listed) {
+			return HubClosePending, nil
 		}
 	default:
 		return cancel("not_closed")
@@ -369,7 +463,7 @@ func (a *App) reconcileHubCloseIntent(ctx context.Context, id string) (hubCloseO
 	state, reason, ok := a.hkJobState(ctx, j.ID)
 	switch {
 	case !ok:
-		return hubCloseWait, nil
+		return HubClosePending, nil
 	case state == "lost" && reason == in.EndReason:
 	case state == "completed" || state == "lost" || state == "escalated":
 		a.warn("hub close of job %s: hk holds another terminal record (%s); kept", j.ID, state)
@@ -377,7 +471,7 @@ func (a *App) reconcileHubCloseIntent(ctx context.Context, id string) (hubCloseO
 	default:
 		if e := a.putJobRecord(ctx, j.ID, map[string]any{"state": "lost", "end_reason": in.EndReason, "at": a.Now().UTC()}); e != nil {
 			a.warn("hub close lost record not written, retrying: %v", e)
-			return hubCloseWait, nil
+			return HubClosePending, nil
 		}
 	}
 	return a.finishHubClose(ctx, j, in, false), nil
@@ -386,19 +480,21 @@ func (a *App) reconcileHubCloseIntent(ctx context.Context, id string) (hubCloseO
 // finishHubClose finishes a job whose pane the hub close stopped and whose hk
 // record is terminal: the lease is released, then the final job.lost closes
 // the intent. A failure between the two leaves the intent open, so the next
-// poll or a re-armed watcher repeats both idempotent steps.
-func (a *App) finishHubClose(ctx context.Context, j Job, in HubCloseIntent, superseded bool) hubCloseOutcome {
+// settlement step (a repeat, close_status, the daemon retry or a node start)
+// repeats both: the lease release re-reads the pools still held, and the
+// final job.lost closes the intent, so it is written once.
+func (a *App) finishHubClose(ctx context.Context, j Job, in HubCloseIntent, superseded bool) HubCloseState {
 	if e := a.releaseQuota(ctx, j); e != nil {
 		a.warn("hub close lease release failed, retrying: %v", e)
-		return hubCloseWait
+		return HubClosePending
 	}
 	payload := map[string]any{"pane_id": j.Pane, "reason": hubCloseLostReason, "final": true, "request_id": in.RequestID, "end_reason": in.EndReason}
 	if superseded {
 		payload["superseded"] = true
 	}
-	if e := a.event(ctx, j.ID, "job.lost", payload); e != nil {
+	if e := a.eventSynced(ctx, j.ID, "job.lost", payload); e != nil {
 		a.warn("hub close job.lost not recorded, retrying: %v", e)
-		return hubCloseWait
+		return HubClosePending
 	}
-	return hubCloseEnded
+	return HubCloseSettled
 }
