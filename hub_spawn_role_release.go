@@ -108,9 +108,16 @@ func (h *HubServer) probeNodePanes(ctx context.Context, machine, pane, agent str
 // pane is verifiably gone, or present but proven never to have worked
 // (releaseUnworkedSpawn): it marks the still-claimed hk job lost, then drops
 // the reservation. A crash between the two repeats harmlessly, because a lost
-// job already releases through the completed-or-lost path.
+// job already releases through the completed-or-lost path. A failed operation
+// that recorded no pane id is probed by its job label instead: probeHeldPane
+// needs a pane id, so without this such a holder would hold for good (hk 4620).
 func (h *HubServer) releaseFailedSpawnRole(ctx context.Context, app *fleet.App, holder hubSpawnTask, record map[string]any, roleKey string) (released bool, probe heldProbe) {
-	probe = h.probeHeldPane(ctx, spawnHolderHost(holder), holder.Outcome.Pane, "")
+	host, label := spawnHolderHost(holder), heldAgentName(holder, record)
+	if holder.Outcome.Pane == "" && label != "" {
+		probe = h.probeLabelledPane(ctx, host, label)
+	} else {
+		probe = h.probeHeldPane(ctx, host, holder.Outcome.Pane, "")
+	}
 	if probe.state == heldPanePresent {
 		released, markReason := h.releaseUnworkedSpawn(ctx, app, holder, record, probe.row)
 		if markReason != "" {
