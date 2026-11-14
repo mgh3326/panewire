@@ -409,6 +409,7 @@ func (h *HubServer) handleAcceptingOverride(writer http.ResponseWriter, request 
 	}
 	h.placementCache = placementCache{}
 	h.mu.Unlock()
+	h.kickSpawnPlacement()
 	writeJSON(writer, http.StatusOK, struct {
 		Machine             string `json:"machine"`
 		Mode                string `json:"mode"`

@@ -67,7 +67,7 @@ func (h *HubServer) liveSpawnTasks(ctx context.Context) ([]hubSpawnTask, error) 
 // profile once it ran, the one bound to its node request before or during dispatch,
 // or the one the submitter named.
 func livePlacedProfile(task hubSpawnTask) string {
-	if task.Outcome.Profile != "" {
+	if task.Status == "succeeded" && task.Outcome.Profile != "" {
 		return task.Outcome.Profile
 	}
 	if task.Node != nil {
@@ -75,6 +75,8 @@ func livePlacedProfile(task hubSpawnTask) string {
 			return profile
 		}
 	}
+	// An accepted retry still carries the prior attempt's outcome for retry
+	// policy, but that profile is not the new attempt's placement.
 	if spawn, err := fleet.ValidateSubmission(task.Request); err == nil && spawn.Profile != "auto" {
 		return spawn.Profile
 	}

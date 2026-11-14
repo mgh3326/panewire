@@ -46,18 +46,34 @@ func refusalNodeRequest(request fleet.Submission, id int, machine string) fleet.
 	return fleet.HubSpawnRequest{RequestID: t14RequestID(id), Machine: machine, CWDKey: "project", Brief: fleet.HubBrief{Doc: "briefs/test-job.md"}, Checkout: request.Repository.Checkout, Args: []string{"--job", "test-job", "-m", "sonnet", "-l", "test-job", "--role", "implementer"}, WaitSeconds: 60}
 }
 
+// dispatchPlacedSpawn exercises a single bound dispatch in older refusal
+// fixtures. Production placement ends at the durable binding; the coordinator
+// separately admits that binding to its node's dispatcher.
+func dispatchPlacedSpawn(ctx context.Context, transport *directSpawnTransport, request fleet.HubSpawnRequest) (fleet.HubSpawnReply, error) {
+	reply, err := transport.Spawn(ctx, request)
+	if !errors.Is(err, fleet.ErrHubPlacementBound) || !transport.bound || transport.task.Node == nil || transport.task.Node.RequestID != request.RequestID {
+		return reply, err
+	}
+	return transport.dispatch(ctx, *transport.task.Node)
+}
+
 // A refusal the node gives before it touches anything must not end an auto
 // placement: the candidate loop has to reach the next node. Before this, the
 // first refusal bound the operation and every later candidate saw it pending.
 func TestAutoPlacementFallsThroughUnmappedNode(t *testing.T) {
 	for _, refusal := range []string{"cwd_unmapped"} {
 		t.Run(refusal, func(t *testing.T) {
-			h := asyncSpawnHub(t)
+			h, err := NewHubServer(HubServerConfig{Tokens: map[string]string{"operator": t14OperatorToken, "machine-a": "node-token", "machine-b": "node-token"}, InboxStorePath: filepath.Join(t.TempDir(), "inbox.sqlite3")})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = h.Close() })
 			var logs bytes.Buffer
 			h.logger = slog.New(slog.NewTextHandler(&logs, nil))
 			server := httptest.NewServer(h.Handler())
 			defer server.Close()
 			node := t14Node(t, h, server, true)
+			other := t14NamedNode(t, h, server, "machine-b", true, true)
 			request := autoSpawnRequest()
 			task, _, err := h.inbox.store.claimSpawn(t.Context(), request, "test-job", "parent", time.Now())
 			if err != nil {
@@ -70,7 +86,7 @@ func TestAutoPlacementFallsThroughUnmappedNode(t *testing.T) {
 			}
 			first := make(chan answer, 1)
 			go func() {
-				reply, err := transport.Spawn(boundedContext(t), refusalNodeRequest(request, 901, "machine-a"))
+				reply, err := dispatchPlacedSpawn(boundedContext(t), transport, refusalNodeRequest(request, 901, "machine-a"))
 				first <- answer{reply, err}
 			}()
 			sent := t14ReadNodeSpawn(t, node)
@@ -91,17 +107,22 @@ func TestAutoPlacementFallsThroughUnmappedNode(t *testing.T) {
 			if line := logs.String(); !strings.Contains(line, request.RequestID) || !strings.Contains(line, "host=machine-a") || !strings.Contains(line, "profile=sonnet") || !strings.Contains(line, refusal) {
 				t.Fatalf("refusal missing from the hub log: %q", line)
 			}
-			// The next candidate binds and runs under the same operation.
+			// The refused host stays excluded; the next host binds under the
+			// same operation and an unsafe refusal there stays terminal.
+			excluded, err := dispatchPlacedSpawn(boundedContext(t), transport, refusalNodeRequest(request, 902, "machine-a"))
+			if err != nil || !excluded.NextHost || excluded.Error != refusal {
+				t.Fatalf("saved exclusion was not applied: %+v %v", excluded, err)
+			}
 			second := make(chan answer, 1)
 			go func() {
-				reply, err := transport.Spawn(boundedContext(t), refusalNodeRequest(request, 902, "machine-a"))
+				reply, err := dispatchPlacedSpawn(boundedContext(t), transport, refusalNodeRequest(request, 902, "machine-b"))
 				second <- answer{reply, err}
 			}()
-			sent = t14ReadNodeSpawn(t, node)
+			sent = t14ReadNodeSpawn(t, other)
 			if sent.RequestID != t14RequestID(902) {
 				t.Fatalf("second candidate sent %s", sent.RequestID)
 			}
-			if err = wsjson.Write(t.Context(), node, nodeRefusal(sent.RequestID, "checkout_refused:dirty", false)); err != nil {
+			if err = wsjson.Write(t.Context(), other, nodeRefusal(sent.RequestID, "checkout_refused:dirty", false)); err != nil {
 				t.Fatal(err)
 			}
 			<-second
@@ -129,7 +150,7 @@ func TestAutoPlacementOtherNodeRefusalsStayTerminal(t *testing.T) {
 			transport := &directSpawnTransport{h: h, task: task}
 			done := make(chan error, 1)
 			go func() {
-				_, err := transport.Spawn(boundedContext(t), refusalNodeRequest(request, 906, "machine-a"))
+				_, err := dispatchPlacedSpawn(boundedContext(t), transport, refusalNodeRequest(request, 906, "machine-a"))
 				done <- err
 			}()
 			sent := t14ReadNodeSpawn(t, node)
@@ -193,7 +214,7 @@ func TestPinnedHostRefusalStaysTerminal(t *testing.T) {
 	transport := &directSpawnTransport{h: h, task: task}
 	done := make(chan error, 1)
 	go func() {
-		_, err := transport.Spawn(boundedContext(t), refusalNodeRequest(request, 903, "machine-a"))
+		_, err := dispatchPlacedSpawn(boundedContext(t), transport, refusalNodeRequest(request, 903, "machine-a"))
 		done <- err
 	}()
 	sent := t14ReadNodeSpawn(t, node)
@@ -209,8 +230,8 @@ func TestPinnedHostRefusalStaysTerminal(t *testing.T) {
 	}
 }
 
-// Recovery has no candidate loop to return to, so it records the refusal.
-func TestRecoveredDispatchRefusalStaysTerminal(t *testing.T) {
+// Recovery persists the refusal and returns ownership to placement.
+func TestRecoveredDispatchRefusalReturnsToPlacement(t *testing.T) {
 	h := asyncSpawnHub(t)
 	server := httptest.NewServer(h.Handler())
 	defer server.Close()
@@ -241,7 +262,7 @@ func TestRecoveredDispatchRefusalStaysTerminal(t *testing.T) {
 		t.Fatal(err)
 	}
 	saved, err := h.inbox.store.spawnTask(t.Context(), request.RequestID)
-	if err != nil || saved.Status != "retryable" {
+	if err != nil || saved.Status != "accepted" || saved.Node != nil || len(saved.Exclusions) != 1 || saved.Exclusions[0].Machine != "machine-a" {
 		t.Fatalf("saved=%+v err=%v", saved, err)
 	}
 }

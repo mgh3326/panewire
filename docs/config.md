@@ -1770,7 +1770,8 @@ node's execution metadata and enqueues it under its deterministic
 attempt is retried across hub restarts, a duplicate delivery is an hk 409
 no-op, and permanent refusals are quarantined as below. The dispatch
 scheduler reads the snapshot back by request id and attempt
-(`spawnPlacementSnapshot`).
+(`spawnPlacementSnapshot`). The hub retries each spooled attempt with that
+attempt's saved delivery settings, even when attempts share a spool directory.
 
 Contacting a remote host does not count as starting a launch. An executor that
 fails after attempting its launch returns `FAILED placement=` metadata; only
@@ -1779,8 +1780,22 @@ the contacted host in the candidate trace. Placement clears launch state when
 it moves to another candidate. Older executors without failure receipts are
 conservatively recorded as refusals when no acceptance evidence is available.
 If another candidate needs a quota refresh after a host has been contacted,
-the failed attempt is recorded with reason `quota_refresh_pending`; the hub
-request itself remains accepted.
+the hub keeps the request accepted and saves the candidate trace without
+posting a placement record. Any other non-terminal wait does the same. When
+the attempt reaches its terminal result, the hub posts its one immutable
+record with the full durable trace, including hosts refused earlier in that
+attempt.
+
+For a legacy deferred trace without a saved base or a spooled record, the hub
+first looks up the existing hk record by job and attempt. An absent record
+allows the hub to merge the candidate traces and post once the attempt is
+terminal; an equal final record seals the local snapshot without another
+POST. A flat legacy trace has no producer version, so the existing hk version
+is authoritative when all reconstructible fields agree. A finished local
+record is compared in full, including version. A different record holds the
+attempt and the deferred trace and sends the owner a
+`legacy_placement_record_conflict` notice. Lookup errors leave the attempt
+held until its existing record can be checked.
 
 Delivery uses the existing hk client and `[quota]` URL and credentials. Each
 delivery pass has a two-second budget and cannot change the spawn result.

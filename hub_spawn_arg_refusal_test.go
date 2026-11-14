@@ -228,7 +228,7 @@ func TestHubMarksArgRefusedSpawnFailedWithoutDeadline(t *testing.T) {
 	started := time.Now()
 	done := make(chan error, 1)
 	go func() {
-		_, err := transport.Spawn(boundedContext(t), refusalNodeRequest(request, 907, "machine-a"))
+		_, err := dispatchPlacedSpawn(boundedContext(t), transport, refusalNodeRequest(request, 907, "machine-a"))
 		done <- err
 	}()
 	sent := t14ReadNodeSpawn(t, node)

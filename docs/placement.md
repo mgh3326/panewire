@@ -155,9 +155,11 @@ The hub counts, because it places every hub spawn
 ([durable spawn operations](hub-spawn-operations.md)). A live spawn on a pool
 is a hub spawn operation that is accepted, bound or dispatching, or succeeded with a
 job that a node still lists as active, whose placed profile is in that pool.
-A spawn that succeeded less than two minutes ago counts before its first
-heartbeat. An auto spawn that is still being placed has no profile yet and
-is not counted, and neither is the spawn being placed. The hub's own selection
+A bound request waiting for its node's dispatcher counts once, using the
+profile bound for its current attempt; an earlier attempt's profile does not
+replace it. A spawn that succeeded less than two minutes ago counts before its
+first heartbeat. An auto spawn that is still being placed has no profile yet
+and is not counted, and neither is the spawn being placed. The hub's own selection
 reads the count from its operations. Any other selection (`plan`, a direct
 spawn) reads it from the hub with `GET /v1/spawns/live` and the operator
 credential.
@@ -215,7 +217,7 @@ outcome, in this order:
 | `harness_missing` | The harness binary is not installed |
 | `harness_version` | `placement.harness_min_version.<kind>` (in the spawner's `hosts.toml`) is set and the version is lower or unreadable |
 | `dialog_pending` | The last launch of this kind stopped at a first-run dialog ([desk notice](#first-run-refusals-and-the-desk-notice)) |
-| `login_missing` | The node's refresh of the kind's pool failed with a login error kind, or its login probe did, or its last launch ended rc=76 at the harness's login screen ([fleet-state.md](fleet-state.md#login-probe)); that verified agy login-screen result is sent as rc=88 `auth_unavailable` so a placement the node refused before its hk job claim can try another host (a refusal after the claim ends on that host, [hub-spawn-operations.md](hub-spawn-operations.md)); `cmd` needs no login ([desk notice](#first-run-refusals-and-the-desk-notice)) |
+| `login_missing` | The node's refresh of the kind's pool failed with a login error kind, or its login probe did, or its last launch ended rc=76 at the harness's login screen ([fleet-state.md](fleet-state.md#login-probe)); that verified agy login-screen result is sent as rc=88 `auth_unavailable` so a placement the node refused before its hk job claim can try another host (after the claim, an alternate harness may run only on the same host, [hub-spawn-operations.md](hub-spawn-operations.md)); `cmd` needs no login ([desk notice](#first-run-refusals-and-the-desk-notice)) |
 | `repo_unmapped` | The spawn's repository is not in the node's `repos` |
 | `brief_unavailable` | The spawn goes through the hub with a brief document and the node cannot fetch one |
 | `toolchain_missing` | `placement.repo_toolchains.<repo>` lists a toolchain the node lacks |
@@ -281,16 +283,17 @@ a hub restart forgets them, which ends a backoff early and never starts one.
 
 ### First-run refusals and the desk notice
 
-A first-run dialog or a missing login rules out one host, not the request. When
+A first-run dialog or a missing login rules out its harness on the host. When
 the hub places a spawn under `--host auto` and a node refuses with one of these
 engine codes before its hk job claim (result stage empty, `placement` or
-`checkout`), the hub unbinds the request and the candidate loop tries the next
-host. A dialog or login screen is normally seen after the pane launched, past
-the claim; hk then holds the job id for that host and answers another host's
-claim with 409 `job_id_taken` (rc 74), so that refusal is the request's answer
-and a replay runs on the same host ([hub-spawn-operations.md](hub-spawn-operations.md)).
-The desk notice and the launch backoff still apply, so the next submission is
-placed elsewhere:
+`checkout`), the hub atomically records the exclusion and unbinds the request,
+then wakes placement to try the next host. A dialog or login screen is normally
+seen after the pane launched, past the claim; hk then holds the job id for that
+host and answers another host's claim with 409 `job_id_taken` (rc 74). After
+verified cleanup, an eligible automatically selected harness may be replaced
+on that host; if no alternate is eligible, the refusal ends that attempt there
+([hub-spawn-operations.md](hub-spawn-operations.md)). The desk notice and launch
+backoff still apply to later submissions:
 
 | Code | Cause | Desk action |
 |---|---|---|
@@ -301,9 +304,10 @@ placed elsewhere:
 
 `cwd_unmapped` moves on the same way. The refusing host still counts the
 failure in its launch backoff. A refusal moves on only when the node verified
-its pane cleanup (`retryable`) and refused before its hk job claim; otherwise a
-pane or the claim may still hold the job id and the refusal is the request's
-answer. A pinned `--host` keeps its refusal.
+its pane cleanup (`retryable`) and the job has not acquired a host-bound claim;
+otherwise the refusal is the request's answer. Exclusions survive hub recovery
+for the attempt and reset on a cleanup-confirmed new attempt. A pinned `--host`
+keeps its refusal.
 Nothing answers the dialog: trust stays a one-time human action on the host.
 
 The first time a host reports a need for a harness kind, the hub sends one

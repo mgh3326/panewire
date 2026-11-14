@@ -689,6 +689,9 @@ func (a *App) spawnHub(ctx context.Context, s Spawn, brief string, c *placeCandi
 			s.placement.execution = PlacementExecution{Host: c.name}
 		}
 		if err != nil {
+			if errors.Is(err, ErrHubPlacementBound) || errors.Is(err, ErrHubPlacementDeferred) {
+				return candResult{stop: err}
+			}
 			var he *HubError
 			if slices.Contains(args, "--report-relative") && errors.As(err, &he) && he.Kind == hubRejected && he.Status == http.StatusBadRequest && he.Code == "invalid_request" {
 				// The hub validates the whole request, so one invalid_request

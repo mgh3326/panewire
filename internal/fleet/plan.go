@@ -303,6 +303,15 @@ func (a *App) printPlan(asJSON bool, out map[string]any, sel *selPlan, pp *place
 		if !c.creditSince.IsZero() {
 			capNote += " since=" + c.creditSince.UTC().Format(time.RFC3339Nano)
 		}
+		if c.accountKey != "" {
+			capNote += fmt.Sprintf(" account=%s host=%s", c.accountKey, firstNonempty(c.host, c.evidenceHost()))
+			if !c.measuredAt.IsZero() {
+				capNote += " age=" + sel.at.Sub(c.measuredAt).Round(time.Second).String()
+			}
+			if c.stale {
+				capNote += " stale"
+			}
+		}
 		fmt.Fprintf(a.Out, "dropped %s@%s pool=%s reason=%s%s grade=%s\n", name, c.row.Effort, c.row.Pool, c.reason, capNote, c.row.Grade)
 	}
 	for _, t := range sel.hosts {

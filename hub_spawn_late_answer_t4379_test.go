@@ -203,7 +203,7 @@ func TestReplayPassSettlesNotStartedRequest_t4379(t *testing.T) {
 // instead of ending it.
 func TestNotStartedAnswerMovesAutoPlacementToNextHost_t4379(t *testing.T) {
 	s := newNotStartedSpawn(t)
-	transport := &directSpawnTransport{h: s.hub, task: s.task, placing: true, bound: true}
+	transport := &directSpawnTransport{h: s.hub, task: s.task, bound: true}
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 	type reply struct {
