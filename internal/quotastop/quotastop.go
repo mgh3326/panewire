@@ -68,9 +68,9 @@ func Classify(screen string, now time.Time, local *time.Location) (Stop, bool) {
 
 // ClassifyAgent is Classify for a pane whose herdr agent kind is agent. Only a
 // devin pane may have an indented banner read as a new limit: a blank row, then
-// Devin's banner carrying its limit text and a reset, then nothing but Devin
-// chrome (indentedDevinBlock, hk 4680). Any other row after it is output, a
-// quoted banner or a user turn, and is not a stop.
+// Devin's banner carrying its limit text and a reset, in the screen's last block
+// (indentedDevinBlock, hk 4680 and hk 4690; docs/quota-stop.md, "Last block").
+// A user turn after it, or output after a blank row, is not a stop.
 func ClassifyAgent(screen, agent string, now time.Time, local *time.Location) (Stop, bool) {
 	if local == nil {
 		local = time.Local
