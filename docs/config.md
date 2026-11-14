@@ -356,7 +356,9 @@ and leaves the paid devin rungs eligible, so a replacement for a
 `devin-paid` is the reserved paid-band key: it excludes the devin rungs that
 spend the account's paid window and leaves the SWE-2 free rungs eligible, so a
 replacement for a `quota_stop pool=devin` stays off the spent window without
-losing the free band.
+losing the free band. The hub takes the band from the stop's own pool in the
+`job.lost` payload; a job's record `pool` is its launch pool, which reads
+`devin` for both bands.
 It is a standing exclusion like `--exclude-host`, not a pin: it needs no
 containment and no override reason. Every candidate of an excluded pool drops
 with reason `pool_excluded`, visible in `--dry-run` and in the `job.placement`

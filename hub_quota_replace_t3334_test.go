@@ -61,6 +61,10 @@ type quotaReplaceFixture struct {
 	job         string
 	paneStatus  string
 	role        string
+	// stopPool is the pool the relayed job.lost reason names, which carries
+	// the band that stopped. It is the record pool unless a test says
+	// otherwise.
+	stopPool string
 }
 
 // quotaHolderRequest is the submission of a stopped job of the given role: task
@@ -128,11 +132,14 @@ func newQuotaReplaceFixtureWith(t *testing.T, role, job string, mutate func(*fle
 	if err != nil || held.Status != "succeeded" {
 		t.Fatalf("holder %+v %v", held, err)
 	}
-	return &quotaReplaceFixture{hub: hub, node: node, jobs: jobs, destination: destination, holder: held, job: job, paneStatus: "idle", role: role}
+	return &quotaReplaceFixture{hub: hub, node: node, jobs: jobs, destination: destination, holder: held, job: job, paneStatus: "idle", role: role, stopPool: "claude"}
 }
 
-func quotaStopEvent(job string) hubJobEventPayload {
-	return hubJobEventPayload{JobID: job, Epoch: 1, Reason: "quota_stop", OwnerLane: "parent"}
+// quotaStopEvent is one relayed job.lost quota stop. Its reason names the
+// stop's own pool, the only place the stopped band is recorded: the job record
+// pool is the launch pool, the catalog pool for both Devin bands (hk 4582).
+func quotaStopEvent(job, pool string) hubJobEventPayload {
+	return hubJobEventPayload{JobID: job, Epoch: 1, Reason: "quota_stop pool=" + pool, OwnerLane: "parent"}
 }
 
 type quotaReplaceResult struct {
@@ -147,7 +154,7 @@ func (f *quotaReplaceFixture) run(t *testing.T, placed hubSpawnOutcome, nodeComm
 	t.Helper()
 	done := make(chan quotaReplaceResult, 1)
 	go func() {
-		job, ok := f.hub.replaceQuotaStopped(t.Context(), "machine-a", quotaStopEvent(f.job))
+		job, ok := f.hub.replaceQuotaStopped(t.Context(), "machine-a", quotaStopEvent(f.job, f.stopPool))
 		done <- quotaReplaceResult{job, ok}
 	}()
 	var commands []map[string]json.RawMessage
@@ -281,7 +288,7 @@ func TestQuotaStopReviewerIsReplacedAtOnceOnAnotherPool(t *testing.T) {
 		t.Fatalf("second replacement=%+v", result)
 	}
 	third := newQuotaReplaceFixture(t, "reviewer", "mwr-1-p1-q1-q2")
-	if job, ok := third.hub.replaceQuotaStopped(t.Context(), "machine-a", quotaStopEvent("mwr-1-p1-q1-q2")); ok || job != "" {
+	if job, ok := third.hub.replaceQuotaStopped(t.Context(), "machine-a", quotaStopEvent("mwr-1-p1-q1-q2", "claude")); ok || job != "" {
 		t.Fatalf("a third stop got a replacement: %q", job)
 	}
 	if _, err := third.hub.inbox.store.latestSpawnForJob(t.Context(), "mwr-1-p1-q1-q2-q3"); err == nil {
@@ -346,10 +353,10 @@ func TestQuotaStopHandedOverWorkerIsReplaced(t *testing.T) {
 // reviewer has no replacement.
 func TestQuotaStopRefusesWhatItCannotReplace(t *testing.T) {
 	f := newQuotaReplaceFixture(t, "reviewer", "mwr-3-p1")
-	if job, ok := f.hub.replaceQuotaStopped(t.Context(), "machine-b", quotaStopEvent("mwr-3-p1")); ok || job != "" {
+	if job, ok := f.hub.replaceQuotaStopped(t.Context(), "machine-b", quotaStopEvent("mwr-3-p1", "claude")); ok || job != "" {
 		t.Fatal("an event from another node was honoured")
 	}
-	if job, ok := f.hub.replaceQuotaStopped(t.Context(), "machine-a", quotaStopEvent("unknown-job")); ok || job != "" {
+	if job, ok := f.hub.replaceQuotaStopped(t.Context(), "machine-a", quotaStopEvent("unknown-job", "claude")); ok || job != "" {
 		t.Fatal("an unknown job was replaced")
 	}
 }
@@ -410,7 +417,7 @@ func TestQuotaReplaceBudgetFitsTheWatcherGrace(t *testing.T) {
 	}
 	long := quotaHolderRequest("reviewer", "mwr-9-p1")
 	long.DeadlineSeconds = 3600
-	next, err := quotaReplacementRequest(long, "mwr-9-p1", "mwr-9-p1-q1", "claude", "reviewer")
+	next, err := quotaReplacementRequest(long, "mwr-9-p1", "mwr-9-p1-q1", "claude", "claude", "reviewer")
 	if err != nil || time.Duration(next.DeadlineSeconds)*time.Second != quotaReplaceDeadline {
 		t.Fatalf("the successor's spawn deadline is %ds (%v), want %v", next.DeadlineSeconds, err, quotaReplaceDeadline)
 	}
@@ -423,7 +430,7 @@ func TestQuotaReplacementStopsAtItsBudget(t *testing.T) {
 	f := newQuotaReplaceFixture(t, "reviewer", "mwr-8-p1")
 	f.hub.quotaReplaceBudget = 200 * time.Millisecond
 	started := time.Now()
-	if job, ok := f.hub.replaceQuotaStopped(t.Context(), "machine-a", quotaStopEvent(f.job)); ok || job != "" {
+	if job, ok := f.hub.replaceQuotaStopped(t.Context(), "machine-a", quotaStopEvent(f.job, "claude")); ok || job != "" {
 		t.Fatalf("replaced without a node answer: %q", job)
 	}
 	if took := time.Since(started); took > 2*time.Second {
@@ -437,7 +444,7 @@ func TestQuotaStopPaneChangedBeforeCloseGetsNoSuccessor(t *testing.T) {
 	f := newQuotaReplaceFixture(t, "reviewer", "mwr-5-p1")
 	done := make(chan quotaReplaceResult, 1)
 	go func() {
-		job, ok := f.hub.replaceQuotaStopped(t.Context(), "machine-a", quotaStopEvent(f.job))
+		job, ok := f.hub.replaceQuotaStopped(t.Context(), "machine-a", quotaStopEvent(f.job, "claude"))
 		done <- quotaReplaceResult{job, ok}
 	}()
 	command := nodeCommandRead(t, f.node)
@@ -469,7 +476,7 @@ func TestQuotaStopRefusesASuccessorWhoseEndReasonWouldNotFit(t *testing.T) {
 	if !ok || len(next) > 128 {
 		t.Fatalf("setup: the successor id %d must be valid on its own", len(next))
 	}
-	if got, ok := f.hub.replaceQuotaStopped(t.Context(), "machine-a", quotaStopEvent(job)); ok || got != "" {
+	if got, ok := f.hub.replaceQuotaStopped(t.Context(), "machine-a", quotaStopEvent(job, "claude")); ok || got != "" {
 		t.Fatalf("replaced with an id whose end_reason cannot be written: %q", got)
 	}
 	if _, err := f.hub.inbox.store.latestSpawnForJob(t.Context(), next); err == nil {
@@ -484,7 +491,7 @@ func TestQuotaStopRetriesTheStoppedJobRecordWrite(t *testing.T) {
 	f := newQuotaReplaceFixture(t, "reviewer", "mwr-6-p1")
 	done := make(chan quotaReplaceResult, 1)
 	go func() {
-		job, ok := f.hub.replaceQuotaStopped(t.Context(), "machine-a", quotaStopEvent(f.job))
+		job, ok := f.hub.replaceQuotaStopped(t.Context(), "machine-a", quotaStopEvent(f.job, "claude"))
 		done <- quotaReplaceResult{job, ok}
 	}()
 	command := nodeCommandRead(t, f.node)
@@ -524,7 +531,7 @@ func TestQuotaStopWaitsThroughReconcilingForTheSuccessor(t *testing.T) {
 	f := newQuotaReplaceFixture(t, "reviewer", "mwr-7-p1")
 	done := make(chan quotaReplaceResult, 1)
 	go func() {
-		job, ok := f.hub.replaceQuotaStopped(t.Context(), "machine-a", quotaStopEvent(f.job))
+		job, ok := f.hub.replaceQuotaStopped(t.Context(), "machine-a", quotaStopEvent(f.job, "claude"))
 		done <- quotaReplaceResult{job, ok}
 	}()
 	roleReplyPanes(t, f.node, nodeCommandRead(t, f.node), []nodeAgentRow{{PaneID: roleHeldPane, Name: f.job, AgentStatus: "idle", Cwd: "/work/project.checkout"}}, true)
@@ -581,7 +588,7 @@ func TestQuotaStopUndecidedSuccessorStillGetsItsPointer(t *testing.T) {
 	f.hub.quotaWait = 150 * time.Millisecond
 	done := make(chan quotaReplaceResult, 1)
 	go func() {
-		job, ok := f.hub.replaceQuotaStopped(t.Context(), "machine-a", quotaStopEvent(f.job))
+		job, ok := f.hub.replaceQuotaStopped(t.Context(), "machine-a", quotaStopEvent(f.job, "claude"))
 		done <- quotaReplaceResult{job, ok}
 	}()
 	roleReplyPanes(t, f.node, nodeCommandRead(t, f.node), []nodeAgentRow{{PaneID: roleHeldPane, Name: f.job, AgentStatus: "idle", Cwd: "/work/project.checkout"}}, true)
@@ -617,7 +624,7 @@ func TestQuotaStopAcceptedSuccessorGetsNoPointer(t *testing.T) {
 	f.hub.quotaWait = 100 * time.Millisecond
 	done := make(chan quotaReplaceResult, 1)
 	go func() {
-		job, ok := f.hub.replaceQuotaStopped(t.Context(), "machine-a", quotaStopEvent(f.job))
+		job, ok := f.hub.replaceQuotaStopped(t.Context(), "machine-a", quotaStopEvent(f.job, "claude"))
 		done <- quotaReplaceResult{job, ok}
 	}()
 	roleReplyPanes(t, f.node, nodeCommandRead(t, f.node), []nodeAgentRow{{PaneID: roleHeldPane, Name: f.job, AgentStatus: "idle", Cwd: "/work/project.checkout"}}, true)
@@ -661,7 +668,7 @@ func TestQuotaStopReplacesAnInheritedReviewerJob(t *testing.T) {
 // (review finding).
 func TestQuotaReplacementIsReconciledAfterAHubRestart(t *testing.T) {
 	f := newQuotaReplaceFixture(t, "reviewer", "mwr-12-p1")
-	request, err := quotaReplacementRequest(f.holder.Request, "mwr-12-p1", "mwr-12-p1-q1", "claude", "reviewer")
+	request, err := quotaReplacementRequest(f.holder.Request, "mwr-12-p1", "mwr-12-p1-q1", "claude", "claude", "reviewer")
 	if err != nil {
 		t.Fatal(err)
 	}

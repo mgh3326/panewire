@@ -88,10 +88,12 @@ func (h *HubServer) startQuotaReplacement(machine string, event hubJobEventPaylo
 
 // quotaReplacementRequest is the holder's submission for the successor: same
 // task, role, review pass, owner and brief; a new job id, agent label and (for
-// a reviewer) checkout directory; and --exclude-pool for the stopped pool's
-// band. A implementer also gets one line naming the earlier job's report and
-// branch to continue from.
-func quotaReplacementRequest(old fleet.Submission, oldJob, newJob, pool string, role string) (fleet.Submission, error) {
+// a reviewer) checkout directory; and --exclude-pool for exclude, the band the
+// stop spent (the stop's own pool through fleet.BandKey, not always the record
+// pool). pool names the stopped job in the implementer's continue line. An
+// implementer also gets one line naming the earlier job's report and branch to
+// continue from.
+func quotaReplacementRequest(old fleet.Submission, oldJob, newJob, pool, exclude string, role string) (fleet.Submission, error) {
 	id, err := fleet.NewRequestID()
 	if err != nil {
 		return fleet.Submission{}, err
@@ -124,10 +126,6 @@ func quotaReplacementRequest(old fleet.Submission, oldJob, newJob, pool string, 
 		setArg("--report-relative", newJob+strings.TrimPrefix(report, oldJob))
 	}
 	pools := []string{}
-	// The stopped pool's band, not the catalog pool: excluding devin would
-	// also drop the SWE-2 free rungs that cool apart from the paid window
-	// (fleet.BandKey, hk 4582).
-	exclude := fleet.BandKey(pool)
 	for _, p := range strings.Split(hubSpawnArg(old.Args, "--exclude-pool"), ",") {
 		if p != "" && p != exclude {
 			pools = append(pools, p)
@@ -213,6 +211,16 @@ func (h *HubServer) replaceQuotaStopped(ctx context.Context, machine string, eve
 	if err != nil || !exists || (state != "claimed" && state != "spawned") || !spawnargs.ValuePattern.MatchString(pool) {
 		return skip("job_record", "state", state)
 	}
+	// The band that stopped comes from the stop's own pool, not the record:
+	// the record pool is the launch pool, which is the catalog pool devin for
+	// both Devin bands, so it cannot tell them apart. Until this change the
+	// successor excluded the whole catalog pool, free rungs included (hk 4582).
+	// A reason that names no readable pool keeps the record pool, which
+	// excludes every rung of it.
+	exclude := pool
+	if stopPool, _ := quotaStopReasonFields(event.Reason); stopPool != "" && spawnargs.ValuePattern.MatchString(stopPool) {
+		exclude = fleet.BandKey(stopPool)
+	}
 	// The pointer to the successor is written once, with state=lost, so its
 	// whole value must fit hk's limit before anything is closed or placed.
 	key, verb := "replaced_by", "replaced"
@@ -229,7 +237,7 @@ func (h *HubServer) replaceQuotaStopped(ctx context.Context, machine string, eve
 	if probe.state == heldPaneUnknown || probe.state == heldPanePresent && (!nodePaneIdleStatus[probe.row.AgentStatus] || !validNodeCommandPath(probe.row.Cwd)) {
 		return skip("pane_not_idle", "probe", probe.reason, "status", probe.row.AgentStatus)
 	}
-	request, err := quotaReplacementRequest(holder.Request, event.JobID, newJob, pool, role)
+	request, err := quotaReplacementRequest(holder.Request, event.JobID, newJob, pool, exclude, role)
 	if err != nil {
 		return skip("request_id")
 	}
