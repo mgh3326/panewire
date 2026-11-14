@@ -930,7 +930,7 @@ func (a *App) selectFor(ctx context.Context, s Spawn, req selReq) (*selPlan, err
 	staticPassing, fallbackRungs := 0, 0
 	for _, row := range rows {
 		c := &selCand{row: row, tier: -1, ignoreGrade: req.route.top(), policySeat: policy.isSeat(row, req.grade)}
-		cooling := snapshot != nil && snapshot.poolCooling(row.Pool, p.at)
+		cooling := snapshot != nil && snapshot.cools(row, p.at)
 		reason, seatName, seat := a.staticDrop(row, req, floor, rungs, cooling)
 		probeReason := reason
 		if reason == "pool_cooling" {

@@ -1,6 +1,8 @@
 package fleet
 
 import (
+	"context"
+	"os"
 	"path"
 	"slices"
 	"strings"
@@ -38,6 +40,35 @@ func consultFloorFor(askerGrade, lane string) string {
 		return "SS"
 	}
 	return consultFloorOf(askerGrade)
+}
+
+// askerBuilderFamily is the family a consult's other-family rule excludes when
+// the caller names none: the family of the job the caller runs in (ARBITER_JOB).
+// spawn without --parent-job and resolve both read it, so one asker gets the
+// same seats from either command (hk 4572). An unreadable job refuses, as
+// spawn's --parent-job does, rather than selecting with no family.
+func (a *App) askerBuilderFamily(ctx context.Context) (string, error) {
+	id := os.Getenv("ARBITER_JOB")
+	if id == "" {
+		return "", nil
+	}
+	j, e := a.resolveParent(ctx, id)
+	if e != nil {
+		return "", fail(exitStateConflict, "ARBITER_JOB %s unreadable, so the consult's author family is unknown: %v", id, e)
+	}
+	return a.jobBuilderFamily(j), nil
+}
+
+// jobBuilderFamily is the family a job's author ran on: the family the job
+// recorded, else its profile's seat family.
+func (a *App) jobBuilderFamily(j Job) string {
+	if j.Family != "" {
+		return j.Family
+	}
+	if seat, ok := a.Policy.Profiles[j.Profile]; ok {
+		return seat.Family
+	}
+	return ""
 }
 
 // rungIndex groups catalog rows by profile and effort, so a consult candidate
@@ -159,10 +190,12 @@ func (a *App) staticDrop(row CatalogRow, req selReq, floor string, rungs rungInd
 		return "pool_invalid", "", nil
 	case slices.Contains(req.excludePools, row.Pool):
 		return "pool_excluded", "", nil
-	// The reserved devin-free key names the SWE-2 free band, not a catalog
-	// pool: a replacement that excludes the band must not take another free
-	// rung of the same account (hub quota replacement).
+	// The reserved band keys name Devin's two bands, not catalog pools: a
+	// replacement that excludes a band must not take another rung of that
+	// band (hub quota replacement), while the other band stays eligible.
 	case slices.Contains(req.excludePools, devinFreeCapKey) && IsFreeRung(row.Profile):
+		return "pool_excluded", "", nil
+	case slices.Contains(req.excludePools, devinPaidKey) && isPaidDevinRung(row.Pool, row.Profile):
 		return "pool_excluded", "", nil
 	case cooling:
 		return "pool_cooling", "", nil

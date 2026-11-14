@@ -54,13 +54,16 @@ type hubSpawnRefreshWait struct {
 	Pool    string `json:"pool"`
 }
 
-// hubSpawnRefreshOutcome is the last failure recorded for the refresh a timed
-// out request waited on; FailedAgoS is its age when the outcome was written.
+// hubSpawnRefreshOutcome is the last finished attempt for the refresh a timed
+// out request waited on. FailedAgoS is set with Reason when it failed;
+// SucceededAgoS is set when it finished without a failure, so the timeout can
+// tell a failed measurement from one that ran and from one that never ran.
 type hubSpawnRefreshOutcome struct {
-	Machine    string `json:"machine"`
-	Pool       string `json:"pool"`
-	Reason     string `json:"reason"`
-	FailedAgoS int64  `json:"failed_ago_s"`
+	Machine       string `json:"machine"`
+	Pool          string `json:"pool"`
+	Reason        string `json:"reason,omitempty"`
+	FailedAgoS    int64  `json:"failed_ago_s,omitempty"`
+	SucceededAgoS int64  `json:"succeeded_ago_s,omitempty"`
 }
 
 type hubSpawnTask struct {
@@ -103,7 +106,7 @@ func (s *laneInboxStore) ensureSpawnTasks() error {
 		`CREATE TABLE IF NOT EXISTS spawn_reservations (job TEXT PRIMARY KEY,request_id TEXT NOT NULL UNIQUE,task_role TEXT UNIQUE)`,
 		`CREATE TABLE IF NOT EXISTS spawn_notifications (event_id TEXT PRIMARY KEY,request_id TEXT NOT NULL,job TEXT NOT NULL,owner TEXT NOT NULL,result TEXT NOT NULL,created_ms BIGINT NOT NULL,delivered INTEGER NOT NULL DEFAULT 0,telemetry_recorded INTEGER NOT NULL DEFAULT 0)`,
 		`CREATE TABLE IF NOT EXISTS spawn_placement_snapshots (request_id TEXT NOT NULL,attempt INTEGER NOT NULL,payload TEXT NOT NULL,recorded INTEGER NOT NULL DEFAULT 0,delivery TEXT NOT NULL DEFAULT '',PRIMARY KEY(request_id,attempt))`,
-		`CREATE TABLE IF NOT EXISTS quota_refresh_failures (machine TEXT NOT NULL,pool TEXT NOT NULL,reason TEXT NOT NULL,seen_ms BIGINT NOT NULL,PRIMARY KEY(machine,pool))`,
+		`CREATE TABLE IF NOT EXISTS quota_refresh_attempts (machine TEXT NOT NULL,pool TEXT NOT NULL,outcome TEXT NOT NULL,seen_ms BIGINT NOT NULL,PRIMARY KEY(machine,pool))`,
 	} {
 		if _, err := s.db.ExecContext(ctx, statement); err != nil {
 			return err
@@ -837,36 +840,38 @@ func (s *laneInboxStore) noteSpawnRefreshWaits(parent context.Context, id string
 	return err
 }
 
-// recordQuotaRefreshFailure persists the last failed attempt for one
-// machine/pool, so a request that times out on it can name the failure after a
-// hub restart. The scheduler's in-memory copy only suppresses repeated logs.
-func (s *laneInboxStore) recordQuotaRefreshFailure(parent context.Context, machine, pool, reason string, now time.Time) error {
+// recordQuotaRefreshAttempt persists the latest finished attempt for one
+// machine/pool, success included (outcome ""), so a request that times out on
+// that key can tell a failed measurement from one that finished and from one
+// that never ran. The scheduler's in-memory copy only suppresses repeated logs.
+func (s *laneInboxStore) recordQuotaRefreshAttempt(parent context.Context, machine, pool, outcome string, now time.Time) error {
 	ctx, done := s.op(parent)
 	defer done()
-	_, err := s.db.ExecContext(ctx, s.q(`INSERT INTO quota_refresh_failures(machine,pool,reason,seen_ms) VALUES(?,?,?,?) ON CONFLICT(machine,pool) DO UPDATE SET reason=excluded.reason,seen_ms=excluded.seen_ms`), machine, pool, reason, now.UnixMilli())
+	_, err := s.db.ExecContext(ctx, s.q(`INSERT INTO quota_refresh_attempts(machine,pool,outcome,seen_ms) VALUES(?,?,?,?) ON CONFLICT(machine,pool) DO UPDATE SET outcome=excluded.outcome,seen_ms=excluded.seen_ms`), machine, pool, outcome, now.UnixMilli())
 	return err
 }
 
-// clearQuotaRefreshFailure drops the entry a fresh measurement disproves.
-func (s *laneInboxStore) clearQuotaRefreshFailure(parent context.Context, machine, pool string) error {
+// quotaRefreshAttempt reads the last finished attempt for one machine/pool.
+func (s *laneInboxStore) quotaRefreshAttempt(parent context.Context, machine, pool string) (string, time.Time, bool, error) {
 	ctx, done := s.op(parent)
 	defer done()
-	_, err := s.db.ExecContext(ctx, s.q(`DELETE FROM quota_refresh_failures WHERE machine=? AND pool=?`), machine, pool)
-	return err
-}
-
-// quotaRefreshFailure reads the last recorded failure for one machine/pool.
-func (s *laneInboxStore) quotaRefreshFailure(parent context.Context, machine, pool string) (string, time.Time, bool, error) {
-	ctx, done := s.op(parent)
-	defer done()
-	var reason string
+	var outcome string
 	var seen int64
-	err := s.db.QueryRowContext(ctx, s.q(`SELECT reason,seen_ms FROM quota_refresh_failures WHERE machine=? AND pool=?`), machine, pool).Scan(&reason, &seen)
+	err := s.db.QueryRowContext(ctx, s.q(`SELECT outcome,seen_ms FROM quota_refresh_attempts WHERE machine=? AND pool=?`), machine, pool).Scan(&outcome, &seen)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", time.Time{}, false, nil
 	}
 	if err != nil {
 		return "", time.Time{}, false, err
 	}
-	return reason, time.UnixMilli(seen), true, nil
+	return outcome, time.UnixMilli(seen), true, nil
+}
+
+// clearSpawnRefreshWaits drops the link a previous placement pass recorded, so
+// a pass that ends for another reason cannot leave a stale one behind.
+func (s *laneInboxStore) clearSpawnRefreshWaits(parent context.Context, id string, attempt int) error {
+	ctx, done := s.op(parent)
+	defer done()
+	_, err := s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET refresh_waits='[]' WHERE request_id=? AND attempt=? AND status='accepted' AND node_id IS NULL`), id, attempt)
+	return err
 }

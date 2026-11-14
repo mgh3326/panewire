@@ -21,7 +21,7 @@ const (
 // reported with the pool named by agent and no reset. The caller then hands
 // it over as reset_unknown, which is the conservative outcome.
 func Detect(screen, agent, herdrRule string, now time.Time, local *time.Location) (Stop, string, bool) {
-	stop, ok := Classify(screen, now, local)
+	stop, ok := ClassifyAgent(screen, agent, now, local)
 	if herdrRule != HerdrQuotaRule {
 		return stop, BasisClassifier, ok
 	}

@@ -69,6 +69,18 @@ func ReplaceFileAtomically(path, pattern string, contents []byte, perm os.FileMo
 // symlink. The temporary file is created O_EXCL|O_NOFOLLOW, and the rename
 // replaces a symlink at name rather than writing through it.
 func ReplaceFileAtomicallyInRoot(root *os.Root, name string, contents []byte, perm os.FileMode) error {
+	return replaceInRoot(root, name, contents, perm, false)
+}
+
+// ReplaceFileAtomicallyInRootSynced is ReplaceFileAtomicallyInRoot for a record
+// whose durability a caller acts on: the directory fsync after the rename must
+// succeed, or the error is returned. The new contents may already be visible
+// then; the caller must not treat the write as durable.
+func ReplaceFileAtomicallyInRootSynced(root *os.Root, name string, contents []byte, perm os.FileMode) error {
+	return replaceInRoot(root, name, contents, perm, true)
+}
+
+func replaceInRoot(root *os.Root, name string, contents []byte, perm os.FileMode, strict bool) error {
 	suffix := make([]byte, 8)
 	if _, err := rand.Read(suffix); err != nil {
 		return err
@@ -98,9 +110,16 @@ func ReplaceFileAtomicallyInRoot(root *os.Root, name string, contents []byte, pe
 	if err := root.Rename(temporaryName, name); err != nil {
 		return err
 	}
-	if directory, err := root.Open(dir); err == nil {
-		_ = directory.Sync()
-		_ = directory.Close()
+	directory, err := root.Open(dir)
+	if err != nil {
+		if strict {
+			return err
+		}
+		return nil
+	}
+	defer directory.Close()
+	if err := directory.Sync(); err != nil && strict {
+		return err
 	}
 	return nil
 }

@@ -1071,7 +1071,7 @@ shared service needed by placement. A second provider-measurement service and a
 centralize credentials without a demonstrated caller need. `pacelever` remains
 the provider measurement tool; this decision does not bypass its final gate.
 
-A quota-stop job end cools its pool across hosts until its reset, or for five minutes when no reset is known. Candidates are recorded as `pool_cooling` during that period. Cooling is held in hub memory and is lost on hub restart.
+A quota-stop job end cools its pool across hosts until its reset, or for five minutes when no reset is known. Candidates are recorded as `pool_cooling` during that period. Cooling is held in hub memory and is lost on hub restart. Devin's two bands cool apart under reserved keys: a paid stop (`pool=devin`) cools `devin-paid` and a free-band stop (`pool=devin-free`) cools `devin-free`, so neither holds the rungs that draw on the other band.
 
 When hub state is unavailable or disabled, the selection record reports `pool_cooling_hub_unavailable` or `pool_cooling_hub_state_off` in `degraded`; cooling cannot be checked.
 

@@ -117,6 +117,10 @@ func TestClassifyRejectsLimitFollowedByAgentOutput(t *testing.T) {
 		if got, ok := Classify(screen, now, time.UTC); ok {
 			t.Fatalf("%s: Classify = %+v, want no stop", name, got)
 		}
+		// Production reads a devin pane with its agent kind (hk 4680).
+		if got, ok := ClassifyAgent(screen, "devin", now, time.UTC); ok {
+			t.Fatalf("%s: ClassifyAgent(devin) = %+v, want no stop", name, got)
+		}
 	}
 	// A second limit after other output is the newest activity.
 	if _, ok := Classify(limit+"\nworking again\n\n"+limit, now, time.UTC); !ok {

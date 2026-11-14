@@ -179,7 +179,7 @@ func runNodeCheckoutGit(ctx context.Context, dir string, timeout time.Duration, 
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), nodeCheckoutGitTerminalPrompt)
 	cmd.WaitDelay = 100 * time.Millisecond
-	nodeCheckoutSetGroup(cmd)
+	nodeSetProcessGroup(cmd)
 	return cmd.Output()
 }
 
@@ -401,7 +401,7 @@ func (client *HubClient) nodeCheckoutInstall(ctx context.Context, dir string) (b
 	cmd.WaitDelay = 100 * time.Millisecond
 	// The script's own children must not outlive the bound: the whole process
 	// group is killed when the budget ends.
-	nodeCheckoutSetGroup(cmd)
+	nodeSetProcessGroup(cmd)
 	err = cmd.Run()
 	if cmd.ProcessState == nil {
 		// The script never started (not executable, or no interpreter).
