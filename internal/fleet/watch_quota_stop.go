@@ -3,6 +3,7 @@ package fleet
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"slices"
 	"time"
 
@@ -512,6 +513,10 @@ func (a *App) reconcileQuotaIntent(ctx context.Context, j Job, in quotaIntent, h
 		return quotaIntentRetry, nil
 	case seen != quotaStopFound || !stop.CreditExhaustedAt.IsZero():
 		return cancel("pane_moved_on")
+	}
+	// A close operation of this attempt owns the ending (close_journal.go).
+	if !a.commitWatcherEnding(filepath.Join(a.Jobs, j.ID), j, AttemptKey(j.Events)) {
+		return quotaIntentRetry, nil
 	}
 	if e := a.putJobRecord(ctx, j.ID, map[string]any{"state": "lost", "end_reason": in.reason, "at": a.Now().UTC()}); e != nil {
 		a.warn("quota-stop lost record not written, retrying: %v", e)

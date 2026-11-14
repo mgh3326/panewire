@@ -190,8 +190,11 @@ unreleased until a repeated `pane.close_op` settles it.
 
 An unreleased operation of the watcher's current attempt on its pane owns the
 job's ending: in any state but `refused`, `cancelled` or `preempted`, the
-watcher does not take its missing-pane fallback (plain `lost`), its quota
-hand-over grace fallback, or its completion-deadline exit. An unreadable
+watcher takes none of its own terminal paths: the missing-pane fallback
+(plain `lost`), the quota hand-over grace fallback, a reviewer's quota-stop
+intent, the unanswered-decision ending, or the completion-deadline exit.
+Completion of a reported job stays authoritative, but leaves the same
+tombstone described below. An unreadable
 journal holds it back too. Each fallback commits its ending under the journal
 lock, after checking ownership there, and leaves `close-ops/.watcher-ended.json`
 naming the attempt, so a registration after it is `preempted`: the node and the

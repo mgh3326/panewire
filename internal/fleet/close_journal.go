@@ -271,6 +271,28 @@ func CommitWatcherEnding(dir, pane, attempt string, now time.Time) (bool, error)
 	return true, replaceInCloseOpDir(job, closeOpEndedFile, raw)
 }
 
+// RecordWatcherEnding leaves the watcher's tombstone for the attempt on pane
+// under the journal lock, without deferring to an operation: for an ending
+// that is authoritative anyway (completion), so a later registration is
+// preempted.
+func RecordWatcherEnding(dir, pane, attempt string) error {
+	job, err := os.OpenRoot(dir)
+	if err != nil {
+		return err
+	}
+	defer job.Close()
+	unlock, err := LockCloseOps(job)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	raw, err := json.Marshal(watcherEnding{PaneID: pane, Attempt: attempt})
+	if err != nil {
+		return err
+	}
+	return replaceInCloseOpDir(job, closeOpEndedFile, raw)
+}
+
 // MarkJournalAwareWatcher records that a watcher which honours the journal
 // watches the job. A node opens no new operation for a job without it: a
 // watcher started by an earlier binary would not wait for the hub. Binaries

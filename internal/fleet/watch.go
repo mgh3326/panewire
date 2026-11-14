@@ -281,6 +281,24 @@ func (a *App) watch(ctx context.Context, args []string) error {
 				present, paneAgent = true, ag
 			}
 		}
+		// A close the hub journalled on this node (close_journal.go) owns the
+		// job's ending until the hub releases it: the hub writes the record
+		// with its own reason and pointer, so no terminal path below consumes
+		// the terminal transition meanwhile, and the watcher outlives its
+		// deadline to act once it is released. Each terminal write commits
+		// under the journal lock (commitWatcherEnding), which a registration
+		// also takes, so the two cannot interleave (hk 4594). Only an
+		// operation of this attempt on its pane counts. One that closed the
+		// pane, or found it gone, settles the attempt even for a rearmed
+		// watcher that never saw the pane.
+		jobDir := filepath.Join(a.Jobs, id)
+		attempt := AttemptKey(j.Events)
+		closeState := ReadCloseOpState(jobDir, j.Pane, attempt, a.Now())
+		closeOwned := closeState.Owns
+		closeSettling := closeState.PaneClosed && !present
+		if closeSettling {
+			seen = true
+		}
 		if !creditPending && present {
 			if stop, ok := a.creditStopped(j, paneAgent); ok && !stop.CreditExhaustedAt.Equal(lastCredit) && !creditRejectionPublished(j, stop) {
 				credit = stop
@@ -375,6 +393,9 @@ func (a *App) watch(ctx context.Context, args []string) error {
 				// the report here could close it locally while hk holds, or may hold,
 				// the lost record.
 				if !handOff.active && !hasIntent && pending && size == info.Size() && modified.Equal(info.ModTime()) && a.workerSignalledEnd(j) {
+					// Completion is authoritative even under a close
+					// operation; its tombstone preempts a later one.
+					a.recordWatcherEnding(jobDir, j, attempt)
 					return a.lifecycleWithOptions(ctx, "done", []string{id, "--report", j.Report}, true, len(args) == 2)
 				}
 				pending = true
@@ -384,7 +405,7 @@ func (a *App) watch(ctx context.Context, args []string) error {
 				pending = false
 			}
 		}
-		if waiting != nil && !hasIntent && !(pending && a.workerSignalledEnd(j)) && !a.Now().Before(waiting.at.Add(decisionTimeout)) {
+		if waiting != nil && !hasIntent && !closeOwned && !(pending && a.workerSignalledEnd(j)) && !a.Now().Before(waiting.at.Add(decisionTimeout)) && a.commitWatcherEnding(jobDir, j, attempt) {
 			if e := a.putJobRecord(ctx, id, map[string]any{"state": "lost", "at": a.Now().UTC()}); e != nil {
 				a.jobRecordFailed(ctx, id, "lost", e)
 			}
@@ -393,25 +414,6 @@ func (a *App) watch(ctx context.Context, args []string) error {
 			}
 			a.recordLostFailure(ctx, j)
 			return a.releaseQuota(ctx, j)
-		}
-		// A close the hub journalled on this node (close_journal.go) owns the
-		// job's ending until the hub releases it: the hub writes the record
-		// with its own reason and pointer, so neither fallback below consumes
-		// the terminal transition meanwhile, and the watcher outlives its
-		// deadline to act once it is released. The journal is read after this
-		// poll's look at the pane; a close the hub made is journalled before
-		// it runs, so an absence caused by it always finds its entry (hk 4594).
-		// Only an operation on this attempt's pane counts. One that closed
-		// the pane, or found it gone, settles the attempt even for a rearmed
-		// watcher that never saw the pane, and keeps the watch alive past
-		// its deadline until the settling below has run.
-		jobDir := filepath.Join(a.Jobs, id)
-		attempt := AttemptKey(j.Events)
-		closeState := ReadCloseOpState(jobDir, j.Pane, attempt, a.Now())
-		closeOwned := closeState.Owns
-		closeSettling := closeState.PaneClosed && !present
-		if closeSettling {
-			seen = true
 		}
 		// An announced quota stop is watched through its hand-off grace, past
 		// the ordinary completion deadline: its fallback ends the job and
@@ -549,6 +551,14 @@ func (a *App) commitWatcherEnding(jobDir string, j Job, attempt string) bool {
 		return false
 	}
 	return ok
+}
+
+// recordWatcherEnding leaves the tombstone of an ending that does not wait
+// for a close operation (completion); a journal error is only reported.
+func (a *App) recordWatcherEnding(jobDir string, j Job, attempt string) {
+	if err := RecordWatcherEnding(jobDir, j.Pane, attempt); err != nil {
+		a.warn("close journal for %s: %v", j.ID, err)
+	}
 }
 
 func workerEscalated(j Job) bool {

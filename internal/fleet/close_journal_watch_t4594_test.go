@@ -359,3 +359,74 @@ func TestCloseOpIDsNeverCollideWithJournalFiles(t *testing.T) {
 		t.Fatalf("dot id written: %v", err)
 	}
 }
+
+// A reviewer stopped on its quota screen is ended through its close intent;
+// while a close operation owns the attempt, that terminal write waits for it
+// (here, until the backstop) instead of pre-empting the hub's record.
+func TestWatcherReviewerQuotaIntentDefersToOpenCloseOp(t *testing.T) {
+	shortOwnershipTTL(t)
+	screen := "❭ [pw-x] Read the brief and review the PR\n\n" +
+		"▲ Something went wrong — Reached free model rate limit … Your limit will reset in 13 hours 9 minutes (at 22:01 UTC). Send a message to retry\n\n" +
+		"──────────\n❭ Ask Devin to build features, fix bugs, or work on your code\n──────────\n  SWE-2 max\n"
+	a, _, h, _ := quotaStopFixture(t, "reviewer", "idle", screen)
+	a.QuotaHandOffGrace = QuotaStopHandOffGrace
+	t.Setenv("PANEWIRE_COMPLETION_TIMEOUT_S", "6000")
+	now := a.Now().UTC()
+	seedCloseOp(t, a, "j", CloseOp{RequestID: "hub-close-1", PaneID: "w:p1", State: CloseOpRegistered, Created: now, Updated: now})
+	started := a.Now()
+	if e := a.watch(context.Background(), []string{"j"}); e != nil {
+		t.Fatal(e)
+	}
+	if waited := a.Now().Sub(started); waited < closeOpOwnershipTTL {
+		t.Fatalf("quota intent ended the reviewer after %v under an open close operation", waited)
+	}
+	if rec := h.record(t, "j"); str(rec, "state") != "lost" {
+		t.Fatalf("backstop did not end the reviewer: %v", rec)
+	}
+}
+
+// The unanswered-decision ending waits for an owning close operation too.
+func TestWatcherDecisionTimeoutDefersToOpenCloseOp(t *testing.T) {
+	shortOwnershipTTL(t)
+	a, _, report := watchFixture(t)
+	writeReport(t, report, "draft\n")
+	putLaneEvent(t, a, "w:p1", "ESC | question", a.Now())
+	t.Setenv("PANEWIRE_DECISION_TIMEOUT_S", "15")
+	now := a.Now().UTC()
+	seedCloseOp(t, a, "j", CloseOp{RequestID: "hub-close-1", PaneID: "w:p1", State: CloseOpRegistered, Created: now, Updated: now})
+	started := a.Now()
+	if err := a.watch(context.Background(), []string{"j"}); err != nil {
+		t.Fatal(err)
+	}
+	events, err := a.events("j")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ev := range events {
+		if ev.Kind == "job.lost" && str(ev.Payload, "reason") == "decision_unanswered" && a.Now().Sub(started) < closeOpOwnershipTTL {
+			t.Fatalf("decision timeout ended the job under an open close operation")
+		}
+	}
+}
+
+// Completion stays authoritative under a close operation, and leaves the
+// tombstone that preempts a later registration for the attempt.
+func TestWatcherCompletionLeavesTheTombstone(t *testing.T) {
+	a, _, report := watchFixture(t)
+	writeReport(t, report, "done\n")
+	putLaneEvent(t, a, "w:p1", "READY", a.Now())
+	if err := a.watch(context.Background(), []string{"j"}); err != nil {
+		t.Fatal(err)
+	}
+	if kinds := eventKindsOf(t, a, "j"); !slices.Contains(kinds, "job.completed") {
+		t.Fatalf("not completed: %v", kinds)
+	}
+	root, err := os.OpenRoot(filepath.Join(a.Jobs, "j"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	if ended, err := WatcherEnded(root, "w:p1", jobAttempt(t, a, "j")); err != nil || !ended {
+		t.Fatalf("completion left no tombstone: %v %v", ended, err)
+	}
+}
