@@ -12,6 +12,7 @@ import (
 	"context"
 	"encoding/json"
 	"sort"
+	"time"
 )
 
 // hubCapabilityApplied is the capability a node advertises when it sends the
@@ -19,6 +20,9 @@ import (
 // and replays at registration as before; the node's report then arrives as an
 // unknown message type and is dropped.
 const hubCapabilityApplied = "applied_v1"
+
+// A missing or invalid report must not hold a node's replay indefinitely.
+const hubAppliedReportTimeout = 5 * time.Second
 
 // relayAppliedReportPane is the delivered_to pane of a row a node's hello
 // closed, so the durable record shows why no ack named it.
@@ -66,10 +70,30 @@ func (h *HubServer) handleAppliedReport(machine string, registration *hubNodeRec
 	// A disconnect can happen while the report is being settled.
 	if h.nodes[machine] == registration && registration.agent != nil {
 		registration.appliedPending = false
+		if registration.appliedTimer != nil {
+			registration.appliedTimer.Stop()
+		}
 	}
 	h.mu.Unlock()
 	h.replayMu.Unlock()
 	h.replayUndeliveredLaneEvents(context.Background())
+}
+
+// expireAppliedReport releases only the registration that started this timer.
+// A late report is still accepted, but replay must eventually make progress.
+func (h *HubServer) expireAppliedReport(machine string, registration *hubNodeRecord) {
+	h.replayMu.Lock()
+	h.mu.Lock()
+	pending := h.nodes[machine] == registration && registration.agent != nil && registration.appliedPending
+	if pending {
+		registration.appliedPending = false
+	}
+	h.mu.Unlock()
+	h.replayMu.Unlock()
+	if pending {
+		h.logger.Warn("node applied report timed out; replaying without it", "machine", machine)
+		h.replayUndeliveredLaneEvents(context.Background())
+	}
 }
 
 // replayAwaitsAppliedReport checks the current destination before any replay

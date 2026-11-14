@@ -142,8 +142,8 @@ func (h *HubServer) redeliverWorkingExpiredOnIdle(machine string, request idleWa
 	}
 	// The idle path also replays a row; serialize it with registration just
 	// like the startup and hello walks, and retry after the report arrives.
-	h.replayMu.Lock()
-	defer h.replayMu.Unlock()
+	h.replayMu.RLock()
+	defer h.replayMu.RUnlock()
 	if h.replayAwaitsAppliedReport(record) {
 		restore("applied_report_pending")
 		return

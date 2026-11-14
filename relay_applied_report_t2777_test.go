@@ -470,11 +470,20 @@ func TestSupersededAppliedReportDoesNotReleaseNewRegistration(t *testing.T) {
 	old := rig.hub.nodes["host-a"]
 	rig.hub.mu.Unlock()
 	rig.send("host-a", rig.dest, wire)
-	// An old report finishing late must not release the second hello.
+	// An old report or timeout finishing late must not release the second hello.
+	rig.hub.expireAppliedReport("host-a", old)
 	rig.hub.handleAppliedReport("host-a", old, nil)
 	if got := drainRelays(rig.dest); got != 0 {
 		t.Fatalf("superseded report released %d rows", got)
 	}
 	rig.send("host-a", rig.dest, `{"type":"applied","applied":{}}`)
 	eventually(t, 5*time.Second, "new report releases replay", func() bool { return len(rig.dest.relays) == 1 })
+}
+
+func TestMissingAppliedReportEventuallyReplays(t *testing.T) {
+	rig := t989Start(t, "w1:pA")
+	rig.deliverAndLoseAcks([]string{"not reported"}, 0)
+	rig.startHub()
+	rig.send("host-a", rig.dest, `{"type":"hello","machine_id":"host-a","version":"panewire-t2777","capabilities":["applied_v1"]}`)
+	eventually(t, 7*time.Second, "replay after missing report", func() bool { return len(rig.dest.relays) == 1 })
 }

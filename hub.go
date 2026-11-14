@@ -176,6 +176,7 @@ type HubLastNote struct {
 type hubNodeRecord struct {
 	// appliedPending belongs to this registration and is guarded by HubServer.mu.
 	appliedPending    bool
+	appliedTimer      *time.Timer
 	machineID         string
 	accepting         bool
 	capabilities      map[string]bool
@@ -399,8 +400,8 @@ type hubSubscriptionMessage struct {
 // HubServer relays presence and events. Accepted spawns and lane inbox work
 // live in the configured durable store; presence and legacy job fences do not.
 type HubServer struct {
-	// replayMu serializes registration and applied reports with replay walks.
-	replayMu             sync.Mutex
+	// replayMu excludes registration changes and report settlement from replay walks.
+	replayMu             sync.RWMutex
 	inbox                *hubInbox
 	spawnTraceOnce       sync.Once
 	spawnSentry          *sentry.Client
@@ -1954,6 +1955,9 @@ func (h *HubServer) connect(machineID, version, remoteAddr string, agent *hubAge
 	var previousReadinessAt time.Time
 	h.mu.Lock()
 	if existing := h.nodes[machineID]; existing != nil {
+		if existing.appliedTimer != nil {
+			existing.appliedTimer.Stop()
+		}
 		previous, previousReadiness, previousReadinessAt = existing.agent, existing.readiness, existing.readinessAt
 		previousSnapshot = cloneHubSessionSnapshotRecord(existing.sessionSnapshot)
 	}
@@ -1973,6 +1977,12 @@ func (h *HubServer) connect(machineID, version, remoteAddr string, agent *hubAge
 		remoteMeta:   map[string]string{"version": version, "remote_addr": remoteAddr},
 		state:        "connected", stateSince: now, lastHeartbeat: now, agent: agent, activeJobs: make(map[string]HubActiveJob), sessionSnapshot: previousSnapshot,
 		readiness: previousReadiness, readinessAt: previousReadinessAt,
+	}
+	if reportsApplied {
+		registration := h.nodes[machineID]
+		registration.appliedTimer = time.AfterFunc(hubAppliedReportTimeout, func() {
+			h.expireAppliedReport(machineID, registration)
+		})
 	}
 	h.placementCache = placementCache{}
 	h.recordUIEventLocked("presence", "connected", machineID, now)
@@ -2027,6 +2037,9 @@ func (h *HubServer) disconnectLocked(machineID string, agent *hubAgent) ([]chan 
 	}
 	lost := h.loseNodeCommandsLocked(agent)
 	if record := h.nodes[machineID]; record != nil && record.agent == agent {
+		if record.appliedTimer != nil {
+			record.appliedTimer.Stop()
+		}
 		record.agent = nil
 		now := h.now().UTC()
 		if record.state == "connected" {
