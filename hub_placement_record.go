@@ -323,7 +323,7 @@ func (h *HubServer) lockPlacementTrace(ctx context.Context, task hubSpawnTask, r
 	if err == nil && deferred != nil {
 		var resolved bool
 		var observed *placementDeferredBase
-		resolved, observed, err = h.inbox.store.saveDeferredPlacementSnapshot(ctx, *deferred)
+		resolved, observed, err = h.recoverDeferredPlacementSnapshot(ctx, *deferred)
 		if observed != nil {
 			h.rememberPlacementTraceBase(task.Request.RequestID, task.Attempt, *observed, true)
 		}
@@ -764,15 +764,26 @@ func (h *HubServer) loadPlacementDeferredSavesLocked() error {
 // retryDeferredTraceSaves lands the deferred snapshot writes. Once a row
 // exists, the normal reconciliation picks up the record it tracks.
 func (h *HubServer) retryDeferredTraceSaves() {
+	ctx, cancel := context.WithTimeout(h.closeCtx, placementRecordDeliveryBudget)
+	defer cancel()
 	h.placementAppMu.Lock()
 	if err := h.loadPlacementDeferredSavesLocked(); err != nil {
 		h.placementAppMu.Unlock()
 		return
 	}
 	deferred := append([]placementDeferredSave(nil), h.placementDeferredSaves...)
+	start := 0
+	if len(deferred) != 0 {
+		start = h.placementDeferredCursor % len(deferred)
+		h.placementDeferredCursor = (start + 1) % len(deferred)
+	}
 	h.placementAppMu.Unlock()
-	for _, d := range deferred {
-		release, err := h.placementTraces.lock(h.closeCtx, d.RequestID)
+	for i := range deferred {
+		if ctx.Err() != nil {
+			return
+		}
+		d := deferred[(start+i)%len(deferred)]
+		release, err := h.placementTraces.lock(ctx, d.RequestID)
 		if err != nil {
 			continue
 		}
@@ -789,7 +800,7 @@ func (h *HubServer) retryDeferredTraceSaves() {
 			release()
 			continue
 		}
-		resolved, observed, err := h.inbox.store.saveDeferredPlacementSnapshot(h.closeCtx, d)
+		resolved, observed, err := h.recoverDeferredPlacementSnapshot(ctx, d)
 		if observed != nil {
 			h.rememberPlacementTraceBase(d.RequestID, d.Attempt, *observed, true)
 		}

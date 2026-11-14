@@ -66,6 +66,11 @@ func newDispatchPlacementHK(t *testing.T) *dispatchPlacementHK {
 			_, _ = io.WriteString(w, `{"id":`+id+`,"title":"work (grade B, T1)","state":"ready","refs":{}}`)
 		case r.Method == http.MethodPut && strings.HasPrefix(r.URL.Path, "/v1/documents/"):
 			_, _ = io.WriteString(w, `{"document":{},"changed":true}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/placements":
+			hk.mu.Lock()
+			records := append([]fleet.PlacementRecord{}, hk.records...)
+			hk.mu.Unlock()
+			_ = json.NewEncoder(w).Encode(map[string]any{"placements": records})
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/placements":
 			var record fleet.PlacementRecord
 			if json.NewDecoder(r.Body).Decode(&record) != nil {
@@ -118,6 +123,323 @@ func (hk *dispatchPlacementHK) payloadChanged() bool {
 	hk.mu.Lock()
 	defer hk.mu.Unlock()
 	return hk.changed
+}
+
+func placementDeliveryDir(t *testing.T) string {
+	t.Helper()
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+func TestLegacyPlacementReconciliation_t4581(t *testing.T) {
+	for _, conflict := range []bool{false, true} {
+		name := "equal record seals without posting"
+		if conflict {
+			name = "different record holds and notifies owner"
+		}
+		t.Run(name, func(t *testing.T) {
+			hk := placementOutboxServer(t)
+			dbPath := filepath.Join(t.TempDir(), "inbox.sqlite3")
+			hub := placementOutboxHub(t, dbPath)
+			request := durableSpawnRequest()
+			task := boundSpawnTask(t, hub, request)
+			old := placementTraceSnapshot()
+			payload, _ := json.Marshal(old)
+			if err := hub.inbox.store.saveSpawnPlacementSnapshot(t.Context(), request.RequestID, task.Attempt, payload, ""); err != nil {
+				t.Fatal(err)
+			}
+			legacy := old
+			legacy.Candidates = append(legacy.Candidates, fleet.PlacementCandidateRecord{Host: "legacy-refusal", Outcome: "skipped", Reason: "hub_cwd_unmapped"})
+			legacyPayload, _ := json.Marshal(legacy)
+			deferred, _ := json.Marshal([]placementDeferredSave{{RequestID: request.RequestID, Attempt: task.Attempt, Payload: legacyPayload}})
+			if err := os.WriteFile(hub.inbox.deferredPath, deferred, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			outcome := hubSpawnOutcome{RC: 70, Stage: "launch", Reason: "spawn_failed", Host: "machine-a", NodeResult: true}
+			if changed, err := hub.inbox.store.completeSpawn(t.Context(), task, outcome, time.Now()); err != nil || !changed {
+				t.Fatalf("commit result: changed=%v err=%v", changed, err)
+			}
+			remote := fleet.PlacementRecord{
+				JobID: task.Job, Attempt: task.Attempt, TaskID: 42, DecidedAt: "2026-11-14T00:00:00Z", ToolVersion: fleet.BuildVersion,
+				Source: "auto", Ranking: "score", StateSource: "hub", Outcome: "failed", Reason: "spawn_failed",
+				Candidates:         legacy.Candidates,
+				PlacementExecution: fleet.PlacementExecution{Host: "machine-a", Family: "claude", Profile: "claude-sonnet", Pool: "claude-sub", Role: "worker"},
+			}
+			if conflict {
+				remote.Reason = "different_final_result"
+			}
+			hk.mu.Lock()
+			hk.lookup = []fleet.PlacementRecord{remote}
+			hk.mu.Unlock()
+			hub.flushPlacementRecords(t.Context())
+			hub.flushPlacementRecords(t.Context())
+			saved, _, recorded, err := hub.inbox.store.spawnPlacementSnapshot(t.Context(), request.RequestID, task.Attempt)
+			if err != nil || recorded == conflict {
+				t.Fatalf("recorded=%v conflict=%v err=%v", recorded, conflict, err)
+			}
+			if conflict && !reflect.DeepEqual(saved, payload) {
+				t.Fatal("conflicting hk record changed the existing snapshot")
+			}
+			if records := hk.records(); len(records) != 0 {
+				t.Fatalf("existing record was posted again: %v", records)
+			}
+			hk.mu.Lock()
+			gets := hk.gets
+			hk.mu.Unlock()
+			if gets == 0 {
+				t.Fatal("legacy reconciliation did not check hk")
+			}
+			if !conflict {
+				if hub.hasDeferredTraceSaves() {
+					t.Fatal("identical record did not retire its deferred trace")
+				}
+				return
+			}
+			if !hub.hasDeferredTraceSaves() {
+				t.Fatal("conflicting legacy trace was lost")
+			}
+			var noticeText string
+			for _, n := range hub.readSpawnNotifications(t.Context(), spawnNoticePending) {
+				if strings.Contains(n.raw, "legacy_placement_record_conflict") {
+					var result hubSpawnOutcome
+					_ = json.Unmarshal([]byte(n.raw), &result)
+					noticeText = spawnNotificationEvent(n, result).Text
+				}
+			}
+			if !strings.Contains(noticeText, "PLACEMENT_RECORD_HELD") || !strings.Contains(noticeText, "legacy_placement_record_conflict") {
+				t.Fatalf("owner notice does not describe the held record: %q", noticeText)
+			}
+			if err := hub.Close(); err != nil {
+				t.Fatal(err)
+			}
+			hub = placementOutboxHub(t, dbPath)
+			hub.flushPlacementRecords(t.Context())
+			if !hub.hasDeferredTraceSaves() {
+				t.Fatal("restart lost the conflicting legacy trace")
+			}
+			var notices int
+			err = hub.inbox.store.db.QueryRow(`SELECT count(*) FROM spawn_notifications WHERE request_id=? AND owner=? AND result LIKE ?`, request.RequestID, task.Owner, "%legacy_placement_record_conflict%").Scan(&notices)
+			if err != nil || notices != 1 {
+				t.Fatalf("owner conflict notices=%d err=%v", notices, err)
+			}
+		})
+	}
+	t.Run("different local delivery paths use the deferred trace settings", func(t *testing.T) {
+		hk := placementOutboxServer(t)
+		hub := placementOutboxHub(t, filepath.Join(t.TempDir(), "inbox.sqlite3"))
+		request := durableSpawnRequest()
+		task := boundSpawnTask(t, hub, request)
+		oldDelivery, _ := json.Marshal(placementDelivery{StateDir: placementDeliveryDir(t)})
+		newDelivery, _ := json.Marshal(placementDelivery{StateDir: placementDeliveryDir(t)})
+		old := placementTraceSnapshot()
+		oldPayload, _ := json.Marshal(old)
+		if err := hub.inbox.store.saveSpawnPlacementSnapshot(t.Context(), request.RequestID, task.Attempt, oldPayload, string(oldDelivery)); err != nil {
+			t.Fatal(err)
+		}
+		legacy := old
+		legacy.Candidates = append(legacy.Candidates, fleet.PlacementCandidateRecord{Host: "legacy-refusal", Outcome: "skipped", Reason: "hub_cwd_unmapped"})
+		legacyPayload, _ := json.Marshal(legacy)
+		deferred, _ := json.Marshal([]placementDeferredSave{{RequestID: request.RequestID, Attempt: task.Attempt, Payload: legacyPayload, Delivery: string(newDelivery)}})
+		if err := os.WriteFile(hub.inbox.deferredPath, deferred, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		outcome := hubSpawnOutcome{RC: 70, Stage: "launch", Reason: "spawn_failed", Host: "machine-a", NodeResult: true}
+		if changed, err := hub.inbox.store.completeSpawn(t.Context(), task, outcome, time.Now()); err != nil || !changed {
+			t.Fatalf("commit result: changed=%v err=%v", changed, err)
+		}
+		hub.flushPlacementRecords(t.Context())
+		if records := hk.records(); len(records) != 1 || records[0]["reason"] != "spawn_failed" {
+			t.Fatalf("legacy trace with different local paths was not posted: %v", records)
+		}
+		hk.mu.Lock()
+		gets := hk.gets
+		hk.mu.Unlock()
+		if gets == 0 {
+			t.Fatal("legacy recovery posted without checking the existing hk key")
+		}
+		_, delivery, recorded, err := hub.inbox.store.spawnPlacementSnapshot(t.Context(), request.RequestID, task.Attempt)
+		if err != nil || !recorded || delivery != string(newDelivery) {
+			t.Fatalf("recorded=%v delivery=%q err=%v", recorded, delivery, err)
+		}
+	})
+	t.Run("earlier delivery spool holds a legacy attempt", func(t *testing.T) {
+		hk := placementOutboxServer(t)
+		hub := placementOutboxHub(t, filepath.Join(t.TempDir(), "inbox.sqlite3"))
+		request := durableSpawnRequest()
+		task := boundSpawnTask(t, hub, request)
+		oldDelivery, _ := json.Marshal(placementDelivery{StateDir: placementDeliveryDir(t)})
+		newDelivery, _ := json.Marshal(placementDelivery{StateDir: placementDeliveryDir(t)})
+		old := placementTraceSnapshot()
+		oldPayload, _ := json.Marshal(old)
+		if err := hub.inbox.store.saveSpawnPlacementSnapshot(t.Context(), request.RequestID, task.Attempt, oldPayload, string(oldDelivery)); err != nil {
+			t.Fatal(err)
+		}
+		legacy := old
+		legacy.Candidates = append(legacy.Candidates, fleet.PlacementCandidateRecord{Host: "legacy-refusal", Outcome: "skipped", Reason: "hub_cwd_unmapped"})
+		legacyPayload, _ := json.Marshal(legacy)
+		deferred, _ := json.Marshal([]placementDeferredSave{{RequestID: request.RequestID, Attempt: task.Attempt, Payload: legacyPayload, Delivery: string(newDelivery)}})
+		if err := os.WriteFile(hub.inbox.deferredPath, deferred, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		app, err := hub.placementRecordApp(string(oldDelivery))
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("HANDOFFKEEP_URL", "http://127.0.0.1:1")
+		if _, err := app.EnqueuePlacementRecord(t.Context(), fleet.PlacementRecord{JobID: task.Job, Attempt: task.Attempt, Outcome: "failed"}); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("HANDOFFKEEP_URL", hk.server.URL)
+		outcome := hubSpawnOutcome{RC: 70, Stage: "launch", Reason: "spawn_failed", Host: "machine-a", NodeResult: true}
+		if changed, err := hub.inbox.store.completeSpawn(t.Context(), task, outcome, time.Now()); err != nil || !changed {
+			t.Fatalf("commit result: changed=%v err=%v", changed, err)
+		}
+		hub.flushPlacementRecords(t.Context())
+		if !app.PlacementSpooled(task.Job, task.Attempt) || !hub.hasDeferredTraceSaves() || len(hk.records()) != 0 {
+			t.Fatal("legacy recovery bypassed the earlier spool")
+		}
+		hk.mu.Lock()
+		gets := hk.gets
+		hk.mu.Unlock()
+		if gets != 0 {
+			t.Fatal("legacy recovery looked up an attempt with an earlier spool")
+		}
+	})
+}
+
+func TestLegacyPlacementLookupFailure_t4581(t *testing.T) {
+	for _, name := range []string{"unavailable without a snapshot", "duplicate key", "incomplete list", "malformed key", "snapshot changes during lookup"} {
+		t.Run(name, func(t *testing.T) {
+			hk := placementOutboxServer(t)
+			hub := placementOutboxHub(t, filepath.Join(t.TempDir(), "inbox.sqlite3"))
+			request := durableSpawnRequest()
+			task := boundSpawnTask(t, hub, request)
+			old, _ := json.Marshal(placementTraceSnapshot())
+			if name != "unavailable without a snapshot" {
+				if err := hub.inbox.store.saveSpawnPlacementSnapshot(t.Context(), request.RequestID, task.Attempt, old, ""); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				old = nil
+			}
+			trace := placementTraceSnapshot()
+			trace.Candidates = append(trace.Candidates, fleet.PlacementCandidateRecord{Host: "legacy-refusal", Outcome: "skipped", Reason: "hub_cwd_unmapped"})
+			payload, _ := json.Marshal(trace)
+			deferred, _ := json.Marshal([]placementDeferredSave{{RequestID: request.RequestID, Attempt: task.Attempt, Payload: payload}})
+			if err := os.WriteFile(hub.inbox.deferredPath, deferred, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			outcome := hubSpawnOutcome{RC: 70, Stage: "launch", Reason: "spawn_failed", Host: "machine-a", NodeResult: true}
+			if changed, err := hub.inbox.store.completeSpawn(t.Context(), task, outcome, time.Now()); err != nil || !changed {
+				t.Fatalf("commit result: changed=%v err=%v", changed, err)
+			}
+			hk.mu.Lock()
+			switch name {
+			case "unavailable without a snapshot":
+				hk.lookupStatus = http.StatusServiceUnavailable
+			case "duplicate key":
+				record := fleet.PlacementRecord{JobID: task.Job, Attempt: task.Attempt}
+				hk.lookup = []fleet.PlacementRecord{record, record}
+			case "incomplete list":
+				hk.lookup = make([]fleet.PlacementRecord, 1000)
+				for i := range hk.lookup {
+					hk.lookup[i] = fleet.PlacementRecord{JobID: "another-job", Attempt: i + 1}
+				}
+			case "malformed key":
+				hk.lookup = []fleet.PlacementRecord{{Attempt: task.Attempt}}
+			case "snapshot changes during lookup":
+				newer := placementTraceSnapshot()
+				newer.Chosen = "machine-b"
+				old, _ = json.Marshal(newer)
+				hk.lookupHook = func() {
+					if err := hub.inbox.store.saveSpawnPlacementSnapshot(t.Context(), request.RequestID, task.Attempt, old, ""); err != nil {
+						t.Errorf("change snapshot during lookup: %v", err)
+					}
+				}
+			}
+			hk.mu.Unlock()
+			hub.flushPlacementRecords(t.Context())
+			got, _, recorded, err := hub.inbox.store.spawnPlacementSnapshot(t.Context(), request.RequestID, task.Attempt)
+			if err != nil || recorded || !reflect.DeepEqual(got, old) {
+				t.Fatalf("unproven lookup changed the snapshot: recorded=%v err=%v", recorded, err)
+			}
+			if !hub.hasDeferredTraceSaves() || len(hk.records()) != 0 {
+				t.Fatal("unproven lookup lost the trace or posted a record")
+			}
+			hk.mu.Lock()
+			gets := hk.gets
+			hk.mu.Unlock()
+			if gets == 0 {
+				t.Fatal("legacy recovery did not attempt the hk lookup")
+			}
+		})
+	}
+}
+
+func TestLegacyPlacementLookupDoesNotStarveOtherRecords_t4581(t *testing.T) {
+	hk := placementOutboxServer(t)
+	hub := placementOutboxHub(t, filepath.Join(t.TempDir(), "inbox.sqlite3"))
+	var deferred []placementDeferredSave
+	for i, job := range []string{"legacy-a", "legacy-b", "ready-job"} {
+		request := durableSpawnRequest()
+		request.RequestID = t14RequestID(459980 + i)
+		for j, arg := range request.Args {
+			switch arg {
+			case "test-job":
+				request.Args[j] = job
+			case "42":
+				request.Args[j] = []string{"42", "43", "44"}[i]
+			}
+		}
+		task, _, err := hub.inbox.store.claimSpawn(t.Context(), request, job, "parent", time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		trace := placementTraceSnapshot()
+		old, _ := json.Marshal(trace)
+		if err := hub.inbox.store.saveSpawnPlacementSnapshot(t.Context(), request.RequestID, task.Attempt, old, ""); err != nil {
+			t.Fatal(err)
+		}
+		if i < 2 {
+			trace.Candidates = append(trace.Candidates, fleet.PlacementCandidateRecord{Host: "legacy-refusal", Outcome: "skipped", Reason: "hub_cwd_unmapped"})
+			payload, _ := json.Marshal(trace)
+			deferred = append(deferred, placementDeferredSave{RequestID: request.RequestID, Attempt: task.Attempt, Payload: payload})
+			continue
+		}
+		outcome := hubSpawnOutcome{RC: 70, Stage: "launch", Reason: "spawn_failed", Host: "machine-a", NodeResult: true}
+		if changed, err := hub.inbox.store.completeSpawn(t.Context(), task, outcome, time.Now()); err != nil || !changed {
+			t.Fatalf("complete independent attempt: changed=%v err=%v", changed, err)
+		}
+	}
+	raw, _ := json.Marshal(deferred)
+	if err := os.WriteFile(hub.inbox.deferredPath, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	hold := make(chan struct{})
+	defer close(hold)
+	hk.mu.Lock()
+	hk.lookupHold = hold
+	hk.mu.Unlock()
+	hub.flushPlacementRecords(t.Context())
+	hk.mu.Lock()
+	methods := append([]string(nil), hk.methods...)
+	hk.mu.Unlock()
+	if len(methods) != 2 || methods[0] != "GET" || methods[1] != "POST" {
+		t.Fatalf("slow legacy lookups delayed the independent record: methods=%v", methods)
+	}
+	if records := hk.records(); len(records) != 1 || records[0]["job_id"] != "ready-job" {
+		t.Fatalf("independent record was not delivered: %v", records)
+	}
+	hub.flushPlacementRecords(t.Context())
+	hk.mu.Lock()
+	jobs := append([]string(nil), hk.lookupJobs...)
+	hk.mu.Unlock()
+	if len(jobs) != 2 || jobs[0] == jobs[1] {
+		t.Fatalf("slow legacy lookups were not rotated across passes: %v", jobs)
+	}
 }
 
 func (hk *dispatchPlacementHK) snapshot() []fleet.PlacementRecord {
@@ -917,6 +1239,91 @@ func TestPlacementSnapshotIgnoresDeferredStaleTrace_t4581(t *testing.T) {
 		app, err := hub.placementRecordApp("")
 		if err != nil || !app.PlacementSpooled(task.Job, task.Attempt) {
 			t.Fatalf("conflicting placement record was not retained: %v", err)
+		}
+	})
+	t.Run("legacy trace is carried into a new placement pass", func(t *testing.T) {
+		t.Setenv("XDG_STATE_HOME", t.TempDir())
+		hk := newDispatchPlacementHK(t)
+		config := HubServerConfig{Tokens: map[string]string{"operator": t14OperatorToken, "desktop": "node-token"}, InboxStorePath: filepath.Join(t.TempDir(), "inbox.sqlite3")}
+		hub := dispatchPlacementHub(t, config, t.TempDir(), nil)
+		request := durableSpawnRequest()
+		task, _, err := hub.inbox.store.claimSpawn(t.Context(), request, "test-job", "parent", time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		old := placementTraceSnapshot()
+		payload, _ := json.Marshal(old)
+		if err := hub.inbox.store.saveSpawnPlacementSnapshot(t.Context(), request.RequestID, task.Attempt, payload, ""); err != nil {
+			t.Fatal(err)
+		}
+		legacyTrace := old
+		legacyTrace.Candidates = append(legacyTrace.Candidates, fleet.PlacementCandidateRecord{Host: "legacy-refusal", Outcome: "skipped", Reason: "hub_cwd_unmapped"})
+		legacyPayload, _ := json.Marshal(legacyTrace)
+		legacy, _ := json.Marshal([]placementDeferredSave{{RequestID: request.RequestID, Attempt: task.Attempt, Payload: legacyPayload}})
+		if err := os.WriteFile(hub.inbox.deferredPath, legacy, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		server := httptest.NewServer(hub.Handler())
+		defer server.Close()
+		t14NamedNode(t, hub, server, "desktop", true, true)
+		ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+		defer cancel()
+		hub.executeSpawnTask(ctx, task)
+		current, err := hub.inbox.store.spawnTask(t.Context(), request.RequestID)
+		if err != nil || current.Node == nil {
+			t.Fatalf("legacy trace blocked new placement: status=%s err=%v", current.Status, err)
+		}
+		if records := hk.snapshot(); len(records) != 0 {
+			t.Fatalf("a nonterminal legacy attempt posted a record: %v", records)
+		}
+		payload, _, _, err = hub.inbox.store.spawnPlacementSnapshot(t.Context(), request.RequestID, task.Attempt)
+		var trace fleet.PlacementTrace
+		if err != nil || json.Unmarshal(payload, &trace) != nil {
+			t.Fatalf("read placement trace: %v", err)
+		}
+		for _, candidate := range trace.Candidates {
+			if candidate.Host == "legacy-refusal" {
+				return
+			}
+		}
+		t.Fatal("new placement lost a host from the legacy trace")
+	})
+	t.Run("legacy terminal trace absent in hk is merged and posted", func(t *testing.T) {
+		hk := placementOutboxServer(t)
+		hub := placementOutboxHub(t, filepath.Join(t.TempDir(), "inbox.sqlite3"))
+		request := durableSpawnRequest()
+		task := boundSpawnTask(t, hub, request)
+		old := placementTraceSnapshot()
+		payload, _ := json.Marshal(old)
+		if err := hub.inbox.store.saveSpawnPlacementSnapshot(t.Context(), request.RequestID, task.Attempt, payload, ""); err != nil {
+			t.Fatal(err)
+		}
+		legacyTrace := old
+		legacyTrace.Candidates = append(legacyTrace.Candidates, fleet.PlacementCandidateRecord{Host: "legacy-refusal", Outcome: "skipped", Reason: "hub_cwd_unmapped"})
+		legacyPayload, _ := json.Marshal(legacyTrace)
+		legacy, _ := json.Marshal([]placementDeferredSave{{RequestID: request.RequestID, Attempt: task.Attempt, Payload: legacyPayload}})
+		if err := os.WriteFile(hub.inbox.deferredPath, legacy, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		outcome := hubSpawnOutcome{RC: 70, Stage: "launch", Reason: "spawn_failed", Host: "machine-a", NodeResult: true}
+		if changed, err := hub.inbox.store.completeSpawn(t.Context(), task, outcome, time.Now()); err != nil || !changed {
+			t.Fatalf("commit result: changed=%v err=%v", changed, err)
+		}
+		hub.flushPlacementRecords(t.Context())
+		hub.flushPlacementRecords(t.Context())
+		records := hk.records()
+		if len(records) != 1 || records[0]["reason"] != "spawn_failed" {
+			t.Fatalf("legacy terminal trace did not produce its final record: %v", records)
+		}
+		candidates, ok := records[0]["candidates"].([]any)
+		if !ok || len(candidates) != 3 || candidates[2].(map[string]any)["host"] != "legacy-refusal" {
+			t.Fatalf("legacy candidate missing from final record: %v", records[0]["candidates"])
+		}
+		hk.mu.Lock()
+		gets, methods, lookupJob := hk.gets, append([]string(nil), hk.methods...), hk.lookupJob
+		hk.mu.Unlock()
+		if gets == 0 || len(methods) < 2 || methods[0] != "GET" || methods[1] != "POST" || lookupJob != task.Job {
+			t.Fatalf("legacy reconciliation did not check its existing key before posting: methods=%v job=%q", methods, lookupJob)
 		}
 	})
 	t.Run("shared spool respects each attempt's delivery settings", func(t *testing.T) {

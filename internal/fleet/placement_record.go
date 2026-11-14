@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -94,6 +95,44 @@ type PlacementRecord struct {
 	Reason      string                     `json:"reason"`
 	Candidates  []PlacementCandidateRecord `json:"candidates"`
 	PlacementExecution
+}
+
+// LookupPlacementRecord reads an attempt by its existing hk key. A full page
+// cannot prove absence: hk's list endpoint has no pagination cursor.
+func (a *App) LookupPlacementRecord(ctx context.Context, job string, attempt int) (*PlacementRecord, error) {
+	client, err := a.quotaClient()
+	if err != nil {
+		return nil, err
+	}
+	const limit = 1000
+	var response struct {
+		Placements *[]PlacementRecord `json:"placements"`
+	}
+	path := "/v1/placements?job=" + url.QueryEscape(job) + "&limit=" + strconv.Itoa(limit)
+	if err := client.get(ctx, path, &response); err != nil {
+		return nil, err
+	}
+	if response.Placements == nil {
+		return nil, errors.New("handoffkeep placement list is missing")
+	}
+	var found *PlacementRecord
+	for _, record := range *response.Placements {
+		if record.JobID == "" || record.Attempt < 1 {
+			return nil, errors.New("handoffkeep placement key is invalid")
+		}
+		if record.JobID != job || record.Attempt != attempt {
+			continue
+		}
+		if found != nil {
+			return nil, errors.New("handoffkeep placement key is ambiguous")
+		}
+		copy := record
+		found = &copy
+	}
+	if found == nil && len(*response.Placements) >= limit {
+		return nil, errors.New("handoffkeep placement list is incomplete")
+	}
+	return found, nil
 }
 
 type placementDecision struct {

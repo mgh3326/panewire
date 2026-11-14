@@ -240,8 +240,16 @@ If the deferred placement-trace file cannot be read, the hub preserves it and
 warns; requests with a durable snapshot can still dispatch or replay. Delivery
 from snapshots waits for the file to be repaired. A replay without a saved
 snapshot returns `store_unavailable` until the hub can recover its trace. A
-legacy deferred trace that conflicts with a different snapshot remains on disk
-for reconciliation instead of overwriting it or posting an incomplete record.
+legacy deferred trace with no saved base and no spooled record is checked
+against hk by its existing job and attempt before it is reconciled. If hk has
+no record, the hub merges the traces and posts the final record only after the
+attempt ends. If hk already has the same final record, the hub seals its local
+snapshot without posting again. A different record leaves the attempt held and
+the trace on disk, and sends its owner a durable
+`legacy_placement_record_conflict` notice. An unavailable or incomplete hk
+lookup also leaves the trace held. A pending attempt cannot be compared to an
+existing final record and remains held for inspection. Deferred recovery has
+a bounded, rotating pass, so slow hk lookups do not starve other records.
 
 The coordinator scans past occupied node slots. It expires a bound request at
 its absolute deadline without waiting for the node, releases its reservation,

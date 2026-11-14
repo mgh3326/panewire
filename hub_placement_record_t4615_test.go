@@ -20,15 +20,53 @@ import (
 // attempt reaches a terminal result.
 
 type placementOutboxHK struct {
-	mu       sync.Mutex
-	requests []map[string]any
-	server   *httptest.Server
+	mu           sync.Mutex
+	requests     []map[string]any
+	lookup       []fleet.PlacementRecord
+	gets         int
+	lookupStatus int
+	lookupHook   func()
+	lookupHold   <-chan struct{}
+	methods      []string
+	lookupJob    string
+	lookupJobs   []string
+	server       *httptest.Server
 }
 
 func placementOutboxServer(t *testing.T) *placementOutboxHK {
 	t.Helper()
 	h := &placementOutboxHK{}
 	h.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/placements" && r.Method == http.MethodGet {
+			h.mu.Lock()
+			h.gets++
+			h.methods = append(h.methods, "GET")
+			h.lookupJob = r.URL.Query().Get("job")
+			h.lookupJobs = append(h.lookupJobs, h.lookupJob)
+			status := h.lookupStatus
+			hook := h.lookupHook
+			hold := h.lookupHold
+			h.lookupHook = nil
+			found := append([]fleet.PlacementRecord{}, h.lookup...)
+			h.mu.Unlock()
+			if hook != nil {
+				hook()
+			}
+			if hold != nil {
+				// Simulate an hk lookup that never answers before its deadline.
+				select {
+				case <-hold:
+				case <-r.Context().Done():
+					return
+				}
+			}
+			if status != 0 {
+				w.WriteHeader(status)
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"placements": found})
+			return
+		}
 		if r.URL.Path != "/v1/placements" || r.Method != http.MethodPost {
 			http.NotFound(w, r)
 			return
@@ -37,6 +75,7 @@ func placementOutboxServer(t *testing.T) *placementOutboxHK {
 		var body map[string]any
 		_ = json.Unmarshal(b, &body)
 		h.mu.Lock()
+		h.methods = append(h.methods, "POST")
 		h.requests = append(h.requests, body)
 		h.mu.Unlock()
 		writeJSON(w, http.StatusOK, map[string]string{"status": "recorded"})

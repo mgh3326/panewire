@@ -531,6 +531,7 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 	var previous fleet.PlacementTrace
 	releaseTrace, err := h.lockPlacementTrace(parent, task, false)
 	if err != nil {
+		h.logger.Warn("placement trace recovery delayed", "request_id", task.Request.RequestID, "attempt", task.Attempt, "error", err)
 		return
 	}
 	payload, previousDelivery, _, err := h.inbox.store.spawnPlacementSnapshot(parent, task.Request.RequestID, task.Attempt)

@@ -439,6 +439,7 @@ type HubServer struct {
 	// in the inbox's deferred file so a restart does not lose it.
 	placementDeferredSaves  []placementDeferredSave
 	placementDeferredLoaded bool
+	placementDeferredCursor int
 	placementTraceBases     map[placementTraceBaseKey]placementDeferredBase
 	quotaRefresh            hubQuotaRefreshScheduler
 	spawnActions            hubSpawnActions
