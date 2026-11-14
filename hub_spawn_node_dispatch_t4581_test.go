@@ -866,3 +866,33 @@ func TestShutdownCancelsDispatcherWaitingForNodeWriter_t4581(t *testing.T) {
 		t.Fatalf("shutdown lost uncertain send ownership: status=%s node=%+v err=%v", saved.Status, saved.Node, err)
 	}
 }
+
+func TestClaimedRetryCannotUnbindOnLaterPreclaimRefusal_t4581(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	retryHK(t)
+	h, err := NewHubServer(HubServerConfig{Tokens: map[string]string{"operator": t14OperatorToken, "desktop": "node-token", "machine-a": "node-token"}, InboxStorePath: filepath.Join(t.TempDir(), "inbox.sqlite3")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = h.Close() })
+	h.spawnNewApp = func(out, errout io.Writer) (*fleet.App, error) { return retryDispatchApp(t, out, errout), nil }
+	server := httptest.NewServer(h.Handler())
+	defer server.Close()
+	node := t14NamedNode(t, h, server, "desktop", true, true)
+	request := durableSpawnRequest()
+	retry := retryableStoredHostTask(t, h, request)
+	h.startSpawnCoordinator(t.Context())
+	message := t14ReadNodeSpawn(t, node)
+	if err := wsjson.Write(t.Context(), node, nodeRefusal(message.RequestID, "cwd_unmapped", true)); err != nil {
+		t.Fatal(err)
+	}
+	var saved hubSpawnTask
+	eventually(t, 3*time.Second, "claimed retry to retain the refusing host", func() bool {
+		var err error
+		saved, err = h.inbox.store.spawnTask(t.Context(), request.RequestID)
+		return err == nil && saved.Status == "retryable"
+	})
+	if saved.Attempt != retry.Attempt || saved.Node == nil || saved.Node.Machine != "desktop" || saved.Outcome.Reason != "cwd_unmapped" {
+		t.Fatalf("pre-claim refusal moved an earlier host-bound claim: attempt=%d node=%+v outcome=%+v", saved.Attempt, saved.Node, saved.Outcome)
+	}
+}

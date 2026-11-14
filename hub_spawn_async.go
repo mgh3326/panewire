@@ -783,8 +783,10 @@ func (t *directSpawnTransport) nextHostAfterRefusal(ctx context.Context, node hu
 	// refusal before the claim moves on, and only after verified cleanup.
 	// A request the node never started also moves on, while the request's own
 	// deadline still has room for another host.
+	// A cleanup-confirmed replay can already carry a host-bound claim from its
+	// prior attempt, even when this attempt refuses before making a new claim.
 	movesOn := spawnRefusalMovesOn(spawnResultReason(result), result.Stage) || spawnNotStarted(result)
-	if result.RC == 0 || !result.Retryable || !movesOn || !t.h.now().Before(t.task.Deadline) || firstNonEmptyString(hubSpawnArg(t.task.Request.Args, "--host"), "auto") != "auto" {
+	if result.RC == 0 || !result.Retryable || !movesOn || !t.h.now().Before(t.task.Deadline) || spawnReplayPinsHost(t.task.Outcome) || firstNonEmptyString(hubSpawnArg(t.task.Request.Args, "--host"), "auto") != "auto" {
 		return false, nil
 	}
 	if result.Error == "launch_proof_failed" && result.RC != 70 {
