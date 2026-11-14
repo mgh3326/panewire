@@ -15,13 +15,23 @@ func classifyQuotaStop(screen string, now time.Time, local *time.Location) (quot
 	return quotastop.Classify(screen, now, local)
 }
 
-// quotaPolicy is accepted only when all four values are present and valid.
-// A missing or malformed policy never authorizes a wait or input.
+// quotaPolicy is accepted only when its four required values are present and
+// valid. max_wait is optional; a present line must be valid too. A missing or
+// malformed policy never authorizes a wait or input. See docs/quota-stop.md.
 type quotaPolicy struct {
-	Expected   time.Duration
-	Urgent     map[int]bool
-	MaxWaits   int
+	Expected time.Duration
+	Urgent   map[int]bool
+	MaxWaits int
+	// MaxWait is the longest reset a stop may be waited out for; zero means the
+	// policy has no max_wait line and only the expected time decides (hk 4503).
+	MaxWait    time.Duration
 	ResumeText string
+}
+
+// resetBeyondMaxWait reports whether the reset is further away than the policy's
+// max_wait allows. A policy without the line never reports it.
+func (p quotaPolicy) resetBeyondMaxWait(reset, now time.Time) bool {
+	return p.MaxWait > 0 && reset.Sub(now) > p.MaxWait
 }
 
 func quotaDuration(v string) (time.Duration, bool) {
@@ -58,7 +68,7 @@ func parseQuotaPolicy(body string) (quotaPolicy, bool) {
 		}
 		key = strings.TrimSpace(key)
 		switch key {
-		case "default_expected", "urgent_priorities", "max_waits", "resume_text":
+		case "default_expected", "urgent_priorities", "max_waits", "max_wait", "resume_text":
 			if _, exists := values[key]; exists {
 				return quotaPolicy{}, false
 			}
@@ -94,6 +104,17 @@ func parseQuotaPolicy(body string) (quotaPolicy, bool) {
 		return quotaPolicy{}, false
 	}
 	p.MaxWaits = n
+	if raw, present := values["max_wait"]; present {
+		fields := strings.Fields(raw)
+		if len(fields) == 0 {
+			return quotaPolicy{}, false
+		}
+		d, ok := quotaDuration(fields[0])
+		if !ok {
+			return quotaPolicy{}, false
+		}
+		p.MaxWait = d
+	}
 	text, err := strconv.Unquote(values["resume_text"])
 	if err != nil || strings.TrimSpace(text) == "" || strings.ContainsAny(text, "\r\n") {
 		return quotaPolicy{}, false
@@ -125,6 +146,8 @@ func (q *quotaStopManager) quotaWaits(role, pool string) bool {
 // task's expected time, which is the time left on the task. A missing expected
 // time, an unknown start, an urgent task, a second stop after one resume, a
 // dialog or an unknown reset all hand over; there is no default expected time.
+// A reset further away than the policy's max_wait hands over before the
+// expected-time comparison (hk 4503).
 func quotaDecisionJob(policy quotaPolicy, policyOK bool, priority int, expected time.Duration, started time.Time, waits int, stop quotaStop, now time.Time) (string, string) {
 	if !policyOK {
 		return "handover", "policy_unavailable"
@@ -146,6 +169,9 @@ func quotaDecisionJob(policy quotaPolicy, policyOK bool, priority int, expected 
 	}
 	if started.IsZero() {
 		return "handover", "start_unknown"
+	}
+	if policy.resetBeyondMaxWait(stop.Reset, now) {
+		return "handover", "reset_beyond_max_wait"
 	}
 	if stop.Reset.After(started.Add(expected)) {
 		return "handover", "reset_too_late"
@@ -171,6 +197,9 @@ func quotaDecision(policy quotaPolicy, policyOK bool, priority int, expected tim
 	}
 	if expected <= 0 {
 		expected = policy.Expected
+	}
+	if policy.resetBeyondMaxWait(stop.Reset, now) {
+		return "handover", "reset_beyond_max_wait"
 	}
 	if stop.Reset.Sub(now) > expected {
 		return "handover", "reset_too_late"

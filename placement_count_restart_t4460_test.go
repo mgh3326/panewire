@@ -131,7 +131,7 @@ func TestRestartDoesNotRestoreClaimedLaunch_t4460(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "inbox.sqlite3")
 	before := restartHub(t, path)
 	task := boundSpawn(t, before, 464)
-	before.countPlacement(task.Job, "machine-a")
+	before.countPlacement(task.Job, "machine-a", "")
 	if changed, err := before.completeSpawn(t.Context(), task, hubSpawnOutcome{RC: 0, Stage: "landing", Host: "machine-a", NodeResult: true}); err != nil || !changed {
 		t.Fatalf("completeSpawn = %v, %v", changed, err)
 	}
@@ -168,7 +168,7 @@ func TestFailedClaimPersistKeepsCountForRetry_t4460(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "inbox.sqlite3")
 	hub := restartHub(t, path)
 	task := boundSpawn(t, hub, 465)
-	hub.countPlacement(task.Job, "machine-a")
+	hub.countPlacement(task.Job, "machine-a", "")
 	hub.connect("machine-a", "test", "fixture", &hubAgent{}, true)
 	if err := hub.inbox.store.close(); err != nil {
 		t.Fatal(err)
@@ -190,7 +190,7 @@ func TestRestartCountsRetriedPlacementAfterEarlierClaim_t4460(t *testing.T) {
 	before := restartHub(t, path)
 	before.connect("machine-a", "test", "fixture", &hubAgent{}, true)
 	task := boundSpawn(t, before, 466)
-	before.countPlacement(task.Job, "machine-a")
+	before.countPlacement(task.Job, "machine-a", "")
 	now := time.Now().UTC()
 	before.observeActiveJobs("machine-a", []HubActiveJob{{JobID: task.Job, AgentLabel: "agent", Epoch: 1, StartedAt: now.Format(time.RFC3339)}}, now)
 	// The node never started the first attempt: a retryable, cleanly refused end.

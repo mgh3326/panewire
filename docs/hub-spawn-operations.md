@@ -155,10 +155,26 @@ ESC answer.
   re-reads the pane and refuses one that changed or whose composer is not
   provably empty).
 
-The hub then has the holder's node mark the hk job `lost` and logs one INFO line
-`hub closed a finished reviewer pane` with `branch` `reviewer_pane_finished`
-(succeeded) or `reviewer_pane_stuck` (failed). An unreachable node or an
-unreadable check keeps the hold.
+The hub then has the holder's node mark the hk job `lost`, with `end_reason`
+`reviewer_pane_finished` or `reviewer_pane_stuck` (the branch), and logs one
+INFO line `hub closed a finished reviewer pane` with `branch`
+`reviewer_pane_finished` (succeeded) or `reviewer_pane_stuck` (failed) and
+`source` `submission`. An unreachable node or an unreadable check keeps the
+hold; a close whose `job.mark_lost` write failed leaves the pane gone and the
+record live, which the next submission's absent-pane check finishes.
+
+A reviewer that asked a question is idle too, so every close carries the
+job id and the node rules out an open question from its own lane-event records
+at the moment of the close (docs/node-commands.md, `pane.close`); a question the
+watcher has not copied yet cannot be raced, and the pane is kept with
+`question-open`.
+
+The hub does not run this release on its own schedule: an unattended pass over
+every live reviewer spawn was cut from this change and moved to hk 4684. Until
+it lands, a reviewer that finishes without running `done` keeps its idle pane,
+live record and lane row until a submission for the same key reclaims it or an
+operator closes the pane; the node's ended-job sweep never reaches it, because
+it needs a terminal job record (hk 4658).
 
 When only that grace keeps a reviewer holder (the pane is present, its status is
 closable and its hk job is `claimed` or `spawned`), the `task_role_claimed` 409

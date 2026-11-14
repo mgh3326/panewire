@@ -200,6 +200,8 @@ func (a *App) hubAcceptance(e *preflightEnv, v HostView, listed bool) preflightC
 		return refuse(checkHubAcceptance, "not_listed", "the hub does not list this host")
 	case strings.Contains(v.Reason, "not_accepting"):
 		return refuse(checkHubAcceptance, "not_accepting", "hub reason: "+v.Reason)
+	case reasonHasToken(v.Reason, "lanes_full"):
+		return refuse(checkHubAcceptance, "lanes_full", "hub reason: "+v.Reason)
 	case !v.Connected:
 		return refuse(checkHubAcceptance, "disconnected", "hub reason: "+firstNonempty(v.Reason, "none"))
 	}

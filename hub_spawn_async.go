@@ -608,7 +608,7 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 		rememberRefreshWait(machine, pool)
 		h.scheduleQuotaRefresh(machine, pool, timeout)
 	}
-	app.PlacementTry = func(host string) { h.countPlacement(task.Job, host) }
+	app.PlacementTry = func(host string) { h.countPlacement(task.Job, host, hubSpawnArg(task.Request.Args, "-l")) }
 	app.PlacementGate = h.placementGate.acquire
 	app.ObserveStage = func(stage string, d time.Duration) { outcome.Stage = stage; outcome.StageMS[stage] += d.Milliseconds() }
 	app.ObserveReceipt = func(r fleet.ExecutionReceipt) {

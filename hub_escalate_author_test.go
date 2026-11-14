@@ -669,6 +669,36 @@ func TestEscalateAuthorDistinctRefusalsReachDesignLane(t *testing.T) {
 	f.awaitInfo(t, "[panewire] ESC | authorless:", "quota_refused", "has no author")
 }
 
+// A (job, round, code) ended refusal filed before the ESC existed is stored as
+// info under the shorter event id, and lane-event dedupe is first-writer-wins.
+// The ESC must carry its own id, or a replay finds that row and the lane is
+// never woken for a PR that has no author.
+func TestEscalateAuthorEndedESCSurvivesThePreUpgradeInfoRow(t *testing.T) {
+	f := newEscalateFixture(t, "author-preupgrade-esc")
+	request := f.request()
+	f.hub.relayLaneEventContext(t.Context(), hubJobEventPayload{
+		EventID:    fmt.Sprintf("ladder-step:%s:%d:ended:%s", request.Job, request.Round, "quota_refused"),
+		JobID:      request.Job,
+		OwnerLane:  "parent",
+		NotifyType: "info",
+		Text:       fmt.Sprintf("ladder step %s: quota_refused (quota) (round %d, %s); the author's pane is closed; no author runs on this PR now", request.Job, request.Round, request.PR),
+		Host:       "hub",
+		Epoch:      1,
+	}, nil)
+	if _, err := f.hub.escalateAuthorRefusal(t.Context(), request, "parent", "quota_refused", "quota", true); err != nil {
+		t.Fatal(err)
+	}
+	items, err := f.hub.inbox.store.list("parent", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.ContainsFunc(items, func(item laneInboxItem) bool {
+		return item.Event.NotifyType == "decision" && strings.HasSuffix(item.Event.EventID, ":esc") && strings.Contains(item.Event.Text, "authorless")
+	}) {
+		t.Fatalf("the pre-upgrade info row suppressed the ESC: %+v", items)
+	}
+}
+
 func TestEscalateAuthorPendingReplayDoesNotReportSuccess(t *testing.T) {
 	f := newEscalateFixture(t, "author-pending")
 	next, err := escalateAuthorSubmission(escalateHolderRequest(f.job), f.request(), f.job+"-l1")
@@ -1139,5 +1169,19 @@ func TestEscalateAuthorRefusesLegacyWorkerWithOwnerESC(t *testing.T) {
 		return item.Event.NotifyType == "decision" && strings.Contains(item.Event.Text, "legacy_worker_submission")
 	}) {
 		t.Fatalf("owner did not receive a decision event: %+v", items)
+	}
+}
+
+// A node whose hello predates pane_close_question_v1 cannot check the pane's
+// open question, so the close is refused and the escalation keeps the author
+// pane rather than close it unguarded (hk 4658).
+func TestEscalateAuthorOldNodeKeepsThePane(t *testing.T) {
+	f := newEscalateFixture(t, "pw-task-old-node")
+	f.hub.mu.Lock()
+	delete(f.hub.nodes["machine-a"].capabilities, hubCapabilityCloseQuestion)
+	f.hub.mu.Unlock()
+	result, _ := f.escalate(t, nil)
+	if result.Code != "pane_not_closed" {
+		t.Fatalf("code=%q reason=%q, want pane_not_closed on a node without the capability", result.Code, result.Reason)
 	}
 }

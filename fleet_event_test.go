@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mgh3326/panewire/internal/arbiter"
 	"github.com/mgh3326/panewire/internal/fleet"
 	"github.com/mgh3326/panewire/internal/hkcred"
 	"github.com/mgh3326/panewire/internal/quota/codex"
@@ -26,6 +27,13 @@ func TestMain(m *testing.M) {
 	if err != nil {
 		panic(err)
 	}
+	// The launch home is the operator's real home, captured before HOME
+	// moves: no test may open ledger state under it (hk 4685).
+	realHome, _ := os.UserHomeDir()
+	if realHome == "" {
+		realHome = os.Getenv("HOME")
+	}
+	arbiter.ForbidHomeForTests(realHome)
 	os.Setenv("CODEX_HOME", filepath.Join(state, "no-codex-login"))
 	os.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(state, "no-claude-login"))
 	os.Unsetenv("CLAUDE_SECURESTORAGE_CONFIG_DIR")
@@ -55,6 +63,35 @@ func TestMain(m *testing.M) {
 		panic(err)
 	}
 	os.Setenv("HOME", home)
+	// The XDG data and config roots move under the same temp home so the
+	// ledger's state.db, the hub inbox sqlite and ~/.config/panewire resolve
+	// there on every OS, not only where HOME is the fallback (hk 4685).
+	os.Setenv("XDG_DATA_HOME", filepath.Join(home, ".local", "share"))
+	os.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	// Env that names a live file, socket, endpoint or credential file must
+	// not leak into tests: a fleet pane's own ARBITER_*/PANEWIRE_* exports
+	// would otherwise point test spawns at the operator's real state. A
+	// re-exec'd test child (crash output, CLI usage) inherits this already
+	// isolated environment plus the vars its parent test set on purpose —
+	// unsetting again would strip them (the crash child's DSN, the CLI
+	// child's PANEWIRE_SOCKET).
+	testChild := os.Getenv("PANEWIRE_CRASH_CHILD") != "" || os.Getenv("PANEWIRE_CLI_USAGE_CHILD") == "1"
+	if !testChild {
+		for _, key := range []string{
+			"PANEWIRE_SOCKET", "PANEWIRE_INBOX_ROOT", "PANEWIRE_INBOX_WATCH", "PANEWIRE_LANE",
+			"ARBITER_INBOX_ROOT", "ARBITER_JOB", "HK_TASK_ID",
+			"PANEWIRE_HUB_URL", "PANEWIRE_HUB_TOKEN_ENV", "PANEWIRE_HUB_CF_ENV",
+			"PANEWIRE_NODE_ENV", "PANEWIRE_CONFIG", "PACELEVER_CONFIG",
+			"FLEET_HOSTS_CONFIG", "WRK_HOSTS_CONFIG",
+			"PANEWIRE_POLICY", "PANEWIRE_POOL_POLICY", "PANEWIRE_BRIEF_POLICY", "PANEWIRE_DELIVERY_POLICY",
+			"PANEWIRE_QUOTA_BIN", "PANEWIRE_MOCK_MCP_CONFIG", "WRK_MOCK_MCP_CONFIG",
+			"PANEWIRE_PROM_URL", "PANEWIRE_PROM_BEARER", "PANEWIRE_PROM_BASIC_USER", "PANEWIRE_PROM_BASIC_PASS",
+			"SENTRY_DSN_PANEWIRE", "CLAUDE_CODE_MESSAGING_SOCKET",
+			"HERDR_BIN", "HANDOFFKEEP_BIN", "PANEWIRE_BIN",
+		} {
+			os.Unsetenv(key)
+		}
+	}
 	code := m.Run()
 	os.RemoveAll(state)
 	os.Exit(code)
