@@ -204,6 +204,33 @@ func currentWith(o *Observation, key string, now time.Time, ttl time.Duration, f
 	return Reading{Key: key, Source: quota.SourceHandoffkeep, MeasuredAt: o.MeasuredAt, ConfirmedAt: o.ConfirmedAt, Plan: o.Plan, Buckets: o.Buckets, Free: free}, true
 }
 
+// freeOnlyObservation is the observation to publish when the stored reading is
+// still current but this host's free-tier record is not: the stored reading
+// with the merged free bucket, published without a provider measurement. It
+// answers false when the free bucket needs no publication or the stored paid
+// part could not be republished as it stands (too old, or a window past its
+// reset), which needs a measurement.
+func (f *Flow) freeOnlyObservation(o *Observation, now time.Time) (Observation, bool) {
+	if f.LocalFree == nil || o == nil || o.Kind != KindAuto || o.MeasuredAt.IsZero() {
+		return Observation{}, false
+	}
+	prior, ok := NormalizeFree(o.freeBucket(), now)
+	if !ok {
+		return Observation{}, false
+	}
+	out := *o
+	out.FreeBucket = mergeFree(prior, f.LocalFree(now), now)
+	merged, ok := NormalizeFree(out.FreeBucket, now)
+	if !ok || merged == nil {
+		return Observation{}, false
+	}
+	out.FreeBucket = merged
+	if _, ok := currentWith(&out, "", now, f.freshTTL(), merged, true); !ok {
+		return Observation{}, false
+	}
+	return out, true
+}
+
 // Refresh returns key's current reading, measuring only when the store has
 // none: a fresh stored reading is returned without measuring; otherwise this
 // host takes the lease, measures, publishes and releases. Another host's live
@@ -318,6 +345,25 @@ func (f *Flow) Refresh(ctx context.Context, c Client, key string, measure Measur
 		return Reading{}, quota.Fail(quota.ErrKindSharedUnavailable, "shared quota unavailable")
 	}
 	if reading, ok := fresh(); ok {
+		return reading, nil
+	}
+	// A local free-tier record changes what the account publishes without
+	// changing its paid reading. Publish the merged bucket over the stored
+	// reading rather than spending a provider measurement to learn nothing new:
+	// publishing a limit recorded on a pane must not wait on (or be lost to) a
+	// measurement.
+	if stored, ok := f.freeOnlyObservation(latest.Observation, f.now()); ok {
+		if c.Publish(ctx, key, holder, stored) != nil {
+			return Reading{}, quota.Fail(quota.ErrKindSharedPublishFailed, "shared publish failed")
+		}
+		if f.release(c, key, holder) != nil {
+			return Reading{}, quota.Fail(quota.ErrKindSharedReleaseFailed, "shared release failed")
+		}
+		released = true
+		reading, ok := f.current(&stored, key, f.now())
+		if !ok {
+			return Reading{}, quota.Fail(quota.ErrKindProbeFailed, "measurement failed")
+		}
 		return reading, nil
 	}
 	probeCtx, cancel := context.WithTimeout(ctx, time.Duration(f.leaseTTL())*time.Second-probeMargin)

@@ -348,8 +348,12 @@ candidate remains the spawn fails with the usual placement refusal. An explicit
 exit 2. The list is initiator-local and is not sent to a delegated host.
 
 `--exclude-pool P[,P]` removes the named quota pools from automatic selection
-for this one request (`claude`, `codex`, `devin-free`, ... as the catalog names
-them). It is a standing exclusion like `--exclude-host`, not a pin: it needs no
+for this one request (`claude`, `codex`, `devin`, ... as the catalog names
+them). `devin-free` is the reserved free-band key, not a catalog pool: it
+excludes the SWE-2 free rungs (`devin-swe2*`, [placement](placement.md#pool-concurrency-cap))
+and leaves the paid devin rungs eligible, so a replacement for a
+`quota_stop pool=devin-free` never takes another free rung of the same account.
+It is a standing exclusion like `--exclude-host`, not a pin: it needs no
 containment and no override reason. Every candidate of an excluded pool drops
 with reason `pool_excluded`, visible in `--dry-run` and in the `job.placement`
 selection record; when no candidate remains the spawn fails with the usual
@@ -989,10 +993,15 @@ published free bucket reads `exhausted` with its reset still ahead. The bucket
 is the shared reading's `free_bucket` (the hub's fleet state carries it too).
 A devin pane that reports "Reached free model rate limit" writes this host's
 `devin-free-limit.json` — the same record `panewire quota observe
-devin-free-limit` writes — and the next devin measurement publishes it to the
-shared store. An unknown reset holds for one hour. The rung returns on its own
+devin-free-limit` writes — and the stop publishes it to the shared store at
+once (`panewire quota refresh devin`): the record is merged over the current
+reading, without spending a provider measurement, so every host's selection
+drops the free rungs before the next placement rather than after the next
+measurement. An unknown reset holds for one hour. The rung returns on its own
 once the reset passes. The quota gate refuses the same rung on the same
-reading; selection drops it before the gate.
+reading; selection drops it before the gate. A `quota_stop pool=devin-free`
+replacement also carries `--exclude-pool devin-free`, which excludes the free
+rungs (the reserved free-band key, not a catalog pool).
 
 A subscription pool on pace to use its longest window ranks behind the free
 band, credit with a recorded positive balance and future expiry included.
