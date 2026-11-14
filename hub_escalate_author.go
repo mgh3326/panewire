@@ -516,6 +516,11 @@ func (h *HubServer) escalateAuthorRefusal(ctx context.Context, request hubEscala
 		// filed before the ESC existed is stored as info under the shorter id,
 		// and lane-event dedupe is first-writer-wins: without the suffix the
 		// replay would find that row and never file the wake the lane needs.
+			// Accepted trade-off: a build between #565 and this one filed ended
+			// refusals as decision under the shorter id. A replay of such a
+			// (job, round, code) after the upgrade files one duplicate ESC under
+			// :esc. It is a one-time, operator-visible duplicate, not a lost wake;
+			// checking the legacy row before filing was not worth the extra read.
 		eventID = fmt.Sprintf("ladder-step:%s:%d:ended:%s:esc", request.Job, request.Round, code)
 		notify = "decision"
 		text = fmt.Sprintf("[panewire] ESC | authorless: ladder step %s: %s (%s) (round %d); %s has no author: the pane is closed and no successor was confirmed. Decide how to continue; panewire does not start a successor automatically.", request.Job, code, reason, request.Round, request.PR)
