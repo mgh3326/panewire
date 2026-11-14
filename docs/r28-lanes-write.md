@@ -105,6 +105,33 @@ oversized current file, or a failed safe replacement returns `500` with
 `lanes_unconfigured`, `lanes_invalid`, or `lanes_write_failed` as
 appropriate.
 
+### Take a predecessor's route on a takeover
+
+A node PUT may carry `"takeover":"<job id>"`, which names the predecessor job
+whose lane row the write moves. `panewire spawn --parent-job` uses it so the
+lane a task's findings are addressed to follows the successor pane when the
+hand-over crosses machines, which the ordinary scope rule refuses.
+
+The hub finds the one non-sink row routed to that job's recorded node and
+pane, and publishes that row — name, `deliver`, `protected` and standby
+fields included — at the requested machine and pane. The row keeps its name; the
+requested lane is used only as an ordinary write when the predecessor's pane
+holds no row. The proof is the hub's own record of the named job, so a route
+no such job held is never moved: an unknown job, or one with no recorded pane,
+returns `409` with `{"error":"lane_takeover_unconfirmed"}`. A dropped record
+(hub restart) therefore degrades to the old refusal rather than a wrong move.
+
+This is the one cross-machine node write: the predecessor's row leaves the
+other machine's ownership in the same replacement. The moved row still takes
+the protected `409 lane_protected` and authority `409
+authority_lane_direct_write` refusals, and a node at its row cap first releases
+its own dead rows (the same eviction as a create), else returns `429
+lane_quota_exceeded`. A pane that already holds exactly one row answers that
+row without writing, so a retried takeover converges instead of adding a second
+name. The hub logs `lane taken over` and broadcasts one `lanes.changed` update
+for the moved name. The node command is `panewire lanes add LANE ... --takeover
+JOB`; the daemon's `lanes.put` op carries the same field.
+
 ### Dead rows are released and reused
 
 A row whose pane is gone would otherwise hold a slot until someone ran

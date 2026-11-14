@@ -104,7 +104,7 @@ func TestLaneRegistrationUsesSessionMachineAndCredential(t *testing.T) {
 				"session_lanes_token_envs": map[string]any{session: token},
 			}
 			f := a.Runner.(*fakeRunner)
-			if err := a.registerLane(context.Background(), "lane-a", "parent-a", "w:p1", "builder", a.machine()); err != nil {
+			if _, err := a.registerLane(context.Background(), lanePutRequest{Lane: "lane-a", Parent: "parent-a", Pane: "w:p1", Role: "builder", Machine: a.machine()}); err != nil {
 				t.Fatal(err)
 			}
 			args := strings.Join(f.Calls[0].Args, " ")
@@ -126,7 +126,7 @@ func TestLaneRegistrationRejectsCredentialForOtherSession(t *testing.T) {
 		"hub_url": "https://hub.example.invalid", "lanes_token_env": token,
 		"session_machine_ids": map[string]any{"default": "host-a-default", "fleet": "host-a"},
 	}
-	err := a.registerLane(context.Background(), "lane-a", "parent-a", "w:p1", "builder", a.machine())
+	_, err := a.registerLane(context.Background(), lanePutRequest{Lane: "lane-a", Parent: "parent-a", Pane: "w:p1", Role: "builder", Machine: a.machine()})
 	if code(err) != exitConfig || !strings.Contains(err.Error(), "LANE_SESSION_MACHINE_MISMATCH") {
 		t.Fatalf("cross-session credential accepted: %v", err)
 	}
