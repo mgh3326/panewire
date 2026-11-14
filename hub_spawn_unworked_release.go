@@ -81,17 +81,18 @@ func (h *HubServer) closeHeldPaneAndMarkLostBecause(ctx context.Context, app *fl
 // a true result means the pane is closed or already gone.
 func (h *HubServer) closeHeldPane(ctx context.Context, holder hubSpawnTask, name string, row nodeAgentRow, questionJob string) (bool, string) {
 	machine := spawnHolderHost(holder)
+	// An older node decodes pane.close strictly and would refuse the whole
+	// call, and closing without question_job would drop the open-question
+	// guard, so the hold stays until the node is upgraded.
+	if questionJob != "" && !h.nodeHasCapability(machine, hubCapabilityCloseQuestion) {
+		return false, "question_unsupported"
+	}
 	var captured nodePaneCaptureResult
 	capture := nodePaneCaptureArgs{PaneID: row.PaneID, Name: name, Cwd: row.Cwd, AllowUnnamed: row.Name == "", MergedAfter: 0, Write: true}
 	if !h.nodeCall(ctx, machine, nodeCommandPaneCapture, capture, spawnHeldPaneActWait, &captured) || captured.Outcome != nodeCaptureScreen {
 		return false, "capture_failed"
 	}
 	var closed nodePaneCloseResult
-	if questionJob != "" && !h.nodeHasCapability(machine, hubCapabilityCloseQuestion) {
-		// An older node decodes pane.close strictly and would refuse the whole
-		// call, so it keeps the pre-question close until it is upgraded.
-		questionJob = ""
-	}
 	closeArgs := nodePaneCloseArgs{PaneID: row.PaneID, Name: name, AgentStatus: row.AgentStatus, Cwd: row.Cwd, AllowUnnamed: row.Name == "", QuestionJob: questionJob}
 	if !h.nodeCall(ctx, machine, nodeCommandPaneClose, closeArgs, spawnHeldPaneActWait, &closed) {
 		return false, "close_unreadable"
