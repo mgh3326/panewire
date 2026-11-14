@@ -33,43 +33,42 @@ func (a *hubSpawnActions) end(id string) {
 	delete(a.active, id)
 }
 
-// hubSpawnAdmissions serializes a fresh send with accepting-override changes
-// for that node without holding the hub-wide lock during a store operation.
-// Entries disappear after their last holder or waiter leaves.
-type hubSpawnAdmissions struct {
-	mu    sync.Mutex
-	nodes map[string]*hubSpawnAdmission
+// hubKeyedLocks serializes operations on one key without holding a hub-wide
+// lock during I/O. Entries disappear after their last holder or waiter leaves.
+type hubKeyedLocks struct {
+	mu   sync.Mutex
+	keys map[string]*hubKeyedLock
 }
 
-type hubSpawnAdmission struct {
+type hubKeyedLock struct {
 	gate  chan struct{}
 	users int
 }
 
-func (a *hubSpawnAdmissions) lock(ctx context.Context, machine string) (func(), error) {
+func (a *hubKeyedLocks) lock(ctx context.Context, key string) (func(), error) {
 	a.mu.Lock()
-	if a.nodes == nil {
-		a.nodes = make(map[string]*hubSpawnAdmission)
+	if a.keys == nil {
+		a.keys = make(map[string]*hubKeyedLock)
 	}
-	node := a.nodes[machine]
-	if node == nil {
-		node = &hubSpawnAdmission{gate: make(chan struct{}, 1)}
-		a.nodes[machine] = node
+	entry := a.keys[key]
+	if entry == nil {
+		entry = &hubKeyedLock{gate: make(chan struct{}, 1)}
+		a.keys[key] = entry
 	}
-	node.users++
+	entry.users++
 	a.mu.Unlock()
 	releaseRef := func() {
 		a.mu.Lock()
-		node.users--
-		if node.users == 0 {
-			delete(a.nodes, machine)
+		entry.users--
+		if entry.users == 0 {
+			delete(a.keys, key)
 		}
 		a.mu.Unlock()
 	}
 	select {
-	case node.gate <- struct{}{}:
+	case entry.gate <- struct{}{}:
 		return func() {
-			<-node.gate
+			<-entry.gate
 			releaseRef()
 		}, nil
 	case <-ctx.Done():

@@ -668,6 +668,9 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 	}()
 
 	defer func() {
+		if errors.Is(err, ErrHubPlacementBound) || errors.Is(err, ErrHubPlacementDeferred) {
+			return
+		}
 		// A quota wait is not a terminal refusal. Preserve a host attempt if
 		// this pass already contacted one, but do not emit refusal events.
 		if errors.Is(err, ErrQuotaRefreshPending) {
@@ -990,7 +993,7 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 		}
 	}
 	a.stampSelection(&s, a.machine())
-	s.placement.execution = placementExecution{Host: a.machine(), Family: seat.Family, Model: launch.ModelID, Role: placementRole(s), Profile: s.Profile, Pool: firstNonempty(launch.Pool, gatePool(gate)), AccountKey: placementAccount(s.AccountKey)}
+	s.placement.execution = PlacementExecution{Host: a.machine(), Family: seat.Family, Model: launch.ModelID, Role: placementRole(s), Profile: s.Profile, Pool: firstNonempty(launch.Pool, gatePool(gate)), AccountKey: placementAccount(s.AccountKey)}
 	owner := s.Owner
 	if owner == "" {
 		owner = "default"

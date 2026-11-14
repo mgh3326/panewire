@@ -225,9 +225,11 @@ func TestPlacementShadowLiveMatchesBase_T3650(t *testing.T) {
 
 // liveBaseKey is a live record without the policy text a pool-order version
 // change rewrites, without the consult stamp the consult grade floor
-// added (pinned by consult_floor_test.go) and without the ranked pool seat
+// added (pinned by consult_floor_test.go), without the ranked pool seat
 // fields (seat_source, pool_waste_urgency; hk 4529, pinned by
-// select_ranked_seat_t4529_test.go). The decisions, candidate rows, host
+// select_ranked_seat_t4529_test.go) and without the quota-drop attribution
+// fields (evidence host on non-chosen rows, reading_age_s, stale; hk 4626,
+// pinned by select_account_attribution_t4626_test.go). The decisions, candidate rows, host
 // traces and events are what the base pins; the version, bands, rule sentence
 // and host rule are the policy's own words and change with the policy.
 func liveBaseKey(t *testing.T, raw string) string {
@@ -245,6 +247,13 @@ func liveBaseKey(t *testing.T, raw string) string {
 			if row, ok := c.(map[string]any); ok {
 				delete(row, "seat_source")
 				delete(row, "pool_waste_urgency")
+				delete(row, "reading_age_s")
+				delete(row, "stale")
+				if row["outcome"] != "chosen" {
+					// A drop now names the host its account bound through;
+					// the base left it empty on every non-chosen row.
+					delete(row, "host")
+				}
 			}
 		}
 	}

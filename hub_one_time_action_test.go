@@ -58,10 +58,9 @@ func deskNotices(t *testing.T, h *HubServer, destination *hubAgent) []string {
 
 // A first-run refusal comes after the node's hk job claim (stage launch), so hk
 // holds the job id for that host and another host's claim would be a 409 (hk
-// 4614): the refusal is the operation's result. The host's launch backoff still
-// counts it and the desk hears which one-time action the host needs. The same
-// refusal before the claim moves on (TestRefusalAfterJobClaimDoesNotMoveToNextHost_t4614).
-func TestFirstRunRefusalAfterClaimEndsOnTheHost(t *testing.T) {
+// 4614). A cleaned-up harness may be replaced on that host. The host's launch
+// backoff still counts the refusal and the desk hears which action it needs.
+func TestFirstRunRefusalAfterClaimPinsTheHost(t *testing.T) {
 	for _, test := range []struct {
 		name, profile, kind, tail, action string
 		rc                                int
@@ -89,7 +88,7 @@ func TestFirstRunRefusalAfterClaimEndsOnTheHost(t *testing.T) {
 			}
 			first := make(chan answer, 1)
 			go func() {
-				reply, err := transport.Spawn(boundedContext(t), firstRunNodeRequest(request, 911, test.profile))
+				reply, err := dispatchPlacedSpawn(boundedContext(t), transport, firstRunNodeRequest(request, 911, test.profile))
 				first <- answer{reply, err}
 			}()
 			sent := t14ReadNodeSpawn(t, node)
@@ -98,11 +97,15 @@ func TestFirstRunRefusalAfterClaimEndsOnTheHost(t *testing.T) {
 			}
 			got := <-first
 			if got.err != nil || got.reply.NextHost || got.reply.RC != test.rc {
-				t.Fatalf("a refusal after the hk claim went back to placement: %+v", got)
+				t.Fatalf("a refusal after the hk claim moved to another host: %+v", got)
 			}
 			saved, err := h.inbox.store.spawnTask(t.Context(), request.RequestID)
-			if err != nil || saved.Status != "retryable" || saved.Node == nil || saved.Node.Machine != "machine-a" || !saved.Outcome.Retryable {
-				t.Fatalf("refusal did not end the operation on its host: %+v %v", saved, err)
+			if err != nil || saved.Status != "accepted" || saved.Node != nil || !saved.Outcome.Retryable {
+				t.Fatalf("refusal did not pin the retry to its claimed host: status=%s host=%s err=%v", saved.Status, spawnTaskHost(saved), err)
+			}
+			foreign := boundaryTestNode(saved, 912, "machine-b")
+			if _, err := h.inbox.store.bindSpawn(t.Context(), request.RequestID, saved.Attempt, foreign, time.Now()); err == nil {
+				t.Fatal("retry was allowed to bind to a different host")
 			}
 			h.mu.Lock()
 			entry := h.launchBackoffs[launchKey{"machine-a", test.kind}]
@@ -142,7 +145,7 @@ func TestFirstRunRefusalWithoutVerifiedCleanupStaysTerminal(t *testing.T) {
 	transport := &directSpawnTransport{h: h, task: task}
 	done := make(chan fleet.HubSpawnReply, 1)
 	go func() {
-		reply, _ := transport.Spawn(boundedContext(t), firstRunNodeRequest(request, 913, "codex-sol"))
+		reply, _ := dispatchPlacedSpawn(boundedContext(t), transport, firstRunNodeRequest(request, 913, "codex-sol"))
 		done <- reply
 	}()
 	sent := t14ReadNodeSpawn(t, node)

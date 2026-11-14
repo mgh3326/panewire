@@ -85,7 +85,8 @@ func TestOldNodeResultCannotFinishReboundRequest_t4577(t *testing.T) {
 	if _, err = h.inbox.store.db.Exec(`UPDATE spawn_operations SET status='dispatching' WHERE request_id=?`, request.RequestID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = h.inbox.store.unbindRefusedSpawn(t.Context(), request.RequestID, task.Attempt, first.RequestID); err != nil {
+	task.Status = "dispatching"
+	if _, err = h.inbox.store.unbindRefusedSpawn(t.Context(), task, hubSpawnExclusion{Machine: first.Machine, Reason: "cwd_unmapped", RC: 2}, nil); err != nil {
 		t.Fatal(err)
 	}
 	second := boundaryTestNode(task, 457712, "machine-b")
@@ -119,7 +120,8 @@ func TestReboundRequestRejectsOldDispatch_t4577(t *testing.T) {
 	if _, err = h.inbox.store.db.Exec(`UPDATE spawn_operations SET status='dispatching' WHERE request_id=?`, request.RequestID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = h.inbox.store.unbindRefusedSpawn(t.Context(), request.RequestID, task.Attempt, first.RequestID); err != nil {
+	task.Status = "dispatching"
+	if _, err = h.inbox.store.unbindRefusedSpawn(t.Context(), task, hubSpawnExclusion{Machine: first.Machine, Reason: "cwd_unmapped", RC: 2}, nil); err != nil {
 		t.Fatal(err)
 	}
 	if _, err = h.inbox.store.bindSpawn(t.Context(), request.RequestID, task.Attempt, boundaryTestNode(task, 457716, "machine-b"), time.Now().UTC()); err != nil {

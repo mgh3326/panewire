@@ -195,7 +195,20 @@ func (h *HubServer) refreshFleetLoad(ctx context.Context) {
 func (h *HubServer) completeSpawn(ctx context.Context, task hubSpawnTask, outcome hubSpawnOutcome) (bool, error) {
 	changed, err := h.inbox.store.completeSpawn(ctx, task, outcome, h.now().UTC())
 	if changed {
-		switch spawnOutcomeStatus(outcome) {
+		// The store normalizes the outcome it persists (a bound attempt's
+		// timeout becomes deadline_exceeded and still accepts a node
+		// result), so the persisted status — not the caller's copy — gates
+		// record delivery and the count release.
+		status := spawnOutcomeStatus(outcome)
+		if saved, e := h.inbox.store.spawnTask(ctx, task.Request.RequestID); e == nil && saved.Attempt == task.Attempt {
+			status = saved.Status
+		}
+		if spawnAttemptTerminal(status) {
+			if !h.wakePlacementRecords() {
+				h.deliverPlacementRecord(h.closeCtx, task.Request.RequestID, task.Attempt)
+			}
+		}
+		switch status {
 		case "failed", "retryable":
 			h.releasePlacementCount(task.Job)
 		case "deadline_exceeded":

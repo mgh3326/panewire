@@ -63,7 +63,7 @@ func placementServer(t *testing.T, a *App) *placementHK {
 				}
 			}
 		}
-		var rec placementRecord
+		var rec PlacementRecord
 		if json.Unmarshal(b, &rec) != nil {
 			t.Error("invalid placement body")
 			w.WriteHeader(http.StatusBadRequest)
@@ -119,13 +119,13 @@ func (h *placementHK) snapshot() ([][]byte, map[string][]byte) {
 	return append([][]byte{}, h.requests...), rows
 }
 
-func onePlacement(t *testing.T, h *placementHK) placementRecord {
+func onePlacement(t *testing.T, h *placementHK) PlacementRecord {
 	t.Helper()
 	requests, rows := h.snapshot()
 	if len(requests) != 1 || len(rows) != 1 {
 		t.Fatalf("want exactly one request/row, got %d/%d", len(requests), len(rows))
 	}
-	var rec placementRecord
+	var rec PlacementRecord
 	if err := json.Unmarshal(requests[0], &rec); err != nil {
 		t.Fatal(err)
 	}
@@ -353,7 +353,7 @@ func TestPlacementSignalsDecodeFromBothHubSources(t *testing.T) {
 
 func remotePlacementFixture(t *testing.T, transport, source, outcome string, metadata bool) (*App, Spawn) {
 	t.Helper()
-	execution := placementExecution{Host: "host-b", Family: "anthropic", Model: "executing-model", Profile: "sonnet", Pool: "claude", Role: "worker", PaneID: "w:remote", Repo: "repo-a", AccountKey: "claude:fedcba9876543210"}
+	execution := PlacementExecution{Host: "host-b", Family: "anthropic", Model: "executing-model", Profile: "sonnet", Pool: "claude", Role: "worker", PaneID: "w:remote", Repo: "repo-a", AccountKey: "claude:fedcba9876543210"}
 	line := "OK pane=w:remote job=job-a"
 	if metadata {
 		line += " placement=" + execution.receipt()
@@ -427,7 +427,7 @@ func TestPlacementRemoteTransportsRecordEveryOutcomeAndSource(t *testing.T) {
 						t.Fatalf("accepted failure receipt lost execution metadata: %+v", r)
 					}
 					if outcome == "failed" && source == "auto" {
-						chosen := slices.ContainsFunc(r.Candidates, func(c placementCandidateRecord) bool { return c.Host == "host-b" && c.Outcome == "chosen" })
+						chosen := slices.ContainsFunc(r.Candidates, func(c PlacementCandidateRecord) bool { return c.Host == "host-b" && c.Outcome == "chosen" })
 						if !chosen {
 							t.Fatalf("failed remote launch marked its host as skipped: %+v", r.Candidates)
 						}
@@ -470,7 +470,7 @@ func TestPlacementLegacyRemoteMetadataWaitsForHKAndFreezes(t *testing.T) {
 	if len(rows) != 1 || len(requests) != 2 || !bytes.Equal(requests[0], requests[1]) || !bytes.Contains(requests[0], []byte("final-model")) {
 		t.Fatalf("legacy execution metadata was guessed or changed on retry: %q", requests)
 	}
-	var r placementRecord
+	var r PlacementRecord
 	_ = json.Unmarshal(requests[0], &r)
 	if r.Role == "" || r.Family == "" || r.TaskID == 0 || r.Host == "" {
 		t.Fatalf("resolved placed record misses required metadata: %+v", r)
@@ -490,10 +490,10 @@ func TestPlacementContactIsNotLaunchAcceptance(t *testing.T) {
 					t.Fatal("remote refusal unexpectedly succeeded")
 				}
 				r := onePlacement(t, h)
-				if r.Outcome != "refused" || r.Host != "" || slices.ContainsFunc(r.Candidates, func(c placementCandidateRecord) bool { return c.Outcome == "chosen" }) {
+				if r.Outcome != "refused" || r.Host != "" || slices.ContainsFunc(r.Candidates, func(c PlacementCandidateRecord) bool { return c.Outcome == "chosen" }) {
 					t.Fatalf("contact without acceptance was counted as a launch: outcome=%s chosen_host=%q candidates=%+v", r.Outcome, r.Host, r.Candidates)
 				}
-				if !slices.ContainsFunc(r.Candidates, func(c placementCandidateRecord) bool { return c.Host == "host-b" && c.Reason != "" }) {
+				if !slices.ContainsFunc(r.Candidates, func(c PlacementCandidateRecord) bool { return c.Host == "host-b" && c.Reason != "" }) {
 					t.Fatalf("contacted destination missing from refusal trace: %+v", r.Candidates)
 				}
 			})
@@ -527,7 +527,7 @@ func TestPlacementRetryDoesNotLeakLaunchStateIntoLocalRefusal(t *testing.T) {
 					t.Fatalf("fixture did not reach local pre-launch refusal: checks=%d err=%v", checks, err)
 				}
 				r := onePlacement(t, h)
-				if r.Outcome != "refused" || r.Host != "" || slices.ContainsFunc(r.Candidates, func(c placementCandidateRecord) bool { return c.Outcome == "chosen" }) {
+				if r.Outcome != "refused" || r.Host != "" || slices.ContainsFunc(r.Candidates, func(c PlacementCandidateRecord) bool { return c.Outcome == "chosen" }) {
 					t.Fatalf("previous candidate leaked into final refusal: outcome=%s chosen_host=%q candidates=%+v", r.Outcome, r.Host, r.Candidates)
 				}
 			})
@@ -581,7 +581,7 @@ func TestPlacementWakeRetryDoesNotChooseRejectedHost(t *testing.T) {
 					t.Fatalf("fixture did not reach the wake refusal: wakes=%v err=%v", w.calls, err)
 				}
 				r := onePlacement(t, h)
-				if r.Outcome != "refused" || r.Host != "" || slices.ContainsFunc(r.Candidates, func(c placementCandidateRecord) bool { return c.Outcome == "chosen" }) {
+				if r.Outcome != "refused" || r.Host != "" || slices.ContainsFunc(r.Candidates, func(c PlacementCandidateRecord) bool { return c.Outcome == "chosen" }) {
 					t.Fatalf("wake retry leaked launch state: outcome=%s chosen_host=%q candidates=%+v", r.Outcome, r.Host, r.Candidates)
 				}
 			})
@@ -621,19 +621,19 @@ func TestPlacementDeliveryProgressesPastUnresolvablePrefix(t *testing.T) {
 	a := testApp(t)
 	h := placementServer(t, a)
 	for i := 0; i < 32; i++ {
-		p := pendingPlacement{Record: placementRecord{
+		p := pendingPlacement{Record: PlacementRecord{
 			JobID: fmt.Sprintf("a-unresolved-%02d", i), TaskID: 42, DecidedAt: a.Now().Format(time.RFC3339Nano),
-			Source: "auto", Ranking: "unknown", StateSource: "unknown", Outcome: "placed", Candidates: []placementCandidateRecord{},
-			placementExecution: placementExecution{Host: "host-b", Role: "worker"},
+			Source: "auto", Ranking: "unknown", StateSource: "unknown", Outcome: "placed", Candidates: []PlacementCandidateRecord{},
+			PlacementExecution: PlacementExecution{Host: "host-b", Role: "worker"},
 		}, ResolveJob: true}
 		if err := a.spoolPlacement(&p); err != nil {
 			t.Fatal(err)
 		}
 	}
-	ready := pendingPlacement{Record: placementRecord{
+	ready := pendingPlacement{Record: PlacementRecord{
 		JobID: "z-ready", TaskID: 42, DecidedAt: a.Now().Format(time.RFC3339Nano),
-		Source: "auto", Ranking: "unknown", StateSource: "unknown", Outcome: "placed", Candidates: []placementCandidateRecord{},
-		placementExecution: placementExecution{Host: "host-b", Family: "anthropic", Role: "worker", Model: "model-a", PaneID: "w:remote"},
+		Source: "auto", Ranking: "unknown", StateSource: "unknown", Outcome: "placed", Candidates: []PlacementCandidateRecord{},
+		PlacementExecution: PlacementExecution{Host: "host-b", Family: "anthropic", Role: "worker", Model: "model-a", PaneID: "w:remote"},
 	}}
 	if err := a.spoolPlacement(&ready); err != nil {
 		t.Fatal(err)
@@ -710,7 +710,7 @@ func TestPlacementPermanentRefusalQuarantinesAndContinues(t *testing.T) {
 			h := placementServer(t, a)
 			h.statusFirst = status
 			for _, id := range []string{"a", "b", "c"} {
-				p := pendingPlacement{Record: placementRecord{JobID: id}}
+				p := pendingPlacement{Record: PlacementRecord{JobID: id}}
 				if err := a.spoolPlacement(&p); err != nil {
 					t.Fatal(err)
 				}
@@ -754,7 +754,7 @@ func TestPlacementNotFoundRefusalQuarantinesAndContinues(t *testing.T) {
 	h.statusFirst = http.StatusNotFound
 	h.refusalBody = `{"error":"not_found"}`
 	for _, id := range []string{"a", "b", "c"} {
-		p := pendingPlacement{Record: placementRecord{JobID: id}}
+		p := pendingPlacement{Record: PlacementRecord{JobID: id}}
 		if err := a.spoolPlacement(&p); err != nil {
 			t.Fatal(err)
 		}
@@ -797,7 +797,7 @@ func TestPlacementTransientRefusalStopsDelivery(t *testing.T) {
 			h := placementServer(t, a)
 			h.statusFirst = status
 			for _, id := range []string{"a", "b", "c"} {
-				p := pendingPlacement{Record: placementRecord{JobID: id}}
+				p := pendingPlacement{Record: PlacementRecord{JobID: id}}
 				if err := a.spoolPlacement(&p); err != nil {
 					t.Fatal(err)
 				}
@@ -840,7 +840,7 @@ func TestPlacementQuarantineCapDropsOldest(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	p := pendingPlacement{Record: placementRecord{JobID: "new"}}
+	p := pendingPlacement{Record: PlacementRecord{JobID: "new"}}
 	if err := a.spoolPlacement(&p); err != nil {
 		t.Fatal(err)
 	}
@@ -875,7 +875,7 @@ func TestPlacementConcurrentQuarantineContinuesDelivery(t *testing.T) {
 	h := placementServer(t, a)
 	h.statusFirst = 400
 	for _, id := range []string{"a", "b"} {
-		p := pendingPlacement{Record: placementRecord{JobID: id}}
+		p := pendingPlacement{Record: PlacementRecord{JobID: id}}
 		if err := a.spoolPlacement(&p); err != nil {
 			t.Fatal(err)
 		}

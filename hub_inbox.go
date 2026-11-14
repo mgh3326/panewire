@@ -20,6 +20,10 @@ import (
 type hubInbox struct {
 	store  *laneInboxStore
 	policy *deliveryPolicy
+	// deferredPath is the durable file snapshot writes the store refused
+	// are queued in until a row lands — the retry obligation survives a
+	// restart when a spooled record file cannot.
+	deferredPath string
 	// waiters bounds concurrent /v1/inbox/wait long-polls. Acquired before
 	// the handler loop and released when it returns.
 	waiters chan struct{}
@@ -89,7 +93,12 @@ func newHubInbox(policyPath, storePath, databaseURL string) (*hubInbox, error) {
 		store.close()
 		return nil, err
 	}
-	return &hubInbox{store: store, policy: policy, waiters: make(chan struct{}, hubInboxWaitMaxWaiters)}, nil
+	deferredDir := filepath.Dir(storePath)
+	if storePath == "" {
+		deferredDir = filepath.Dir(defaultHubInboxPath())
+	}
+	deferredPath := filepath.Join(deferredDir, "placement-deferred.json")
+	return &hubInbox{store: store, policy: policy, deferredPath: deferredPath, waiters: make(chan struct{}, hubInboxWaitMaxWaiters)}, nil
 }
 
 // prepareInbox runs once before the hub starts accepting events. Maintenance

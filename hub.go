@@ -213,7 +213,8 @@ type hubNodeRecord struct {
 }
 
 type hubAgent struct {
-	conn *websocket.Conn
+	conn     *websocket.Conn
+	lifetime context.Context // cancelled when this connection's handler exits
 	// credential is the node token the websocket opened with; an auth reload
 	// that no longer maps the machine to it closes the socket.
 	credential string
@@ -421,9 +422,29 @@ type HubServer struct {
 	quotaReplaceBudget time.Duration
 	spawnKick          chan struct{}
 	spawnWorkers       sync.WaitGroup
-	quotaRefresh       hubQuotaRefreshScheduler
-	spawnActions       hubSpawnActions
-	spawnAdmissions    hubSpawnAdmissions
+	placementKick      chan struct{}
+	placementAsync     atomic.Bool
+	// placementRecordClient is the App the outbox delivers hk placement
+	// records through; built on first use by placementRecordApp.
+	placementRecordClient *fleet.App
+	placementAppMu        sync.Mutex
+	// placementAppFn builds the delivery App in tests; nil uses fleet.New.
+	placementAppFn func() (*fleet.App, error)
+	// placementDeliveryKey is the delivery JSON the cached client was built
+	// for; a snapshot row with different settings gets a fresh App.
+	placementDeliveryKey string
+	// placementDeferredSaves holds trace saves the store refused; the flush
+	// retries the row insert so the spooled record they belong to is picked
+	// up instead of orphaned without a pending row. The same list is kept
+	// in the inbox's deferred file so a restart does not lose it.
+	placementDeferredSaves  []placementDeferredSave
+	placementDeferredLoaded bool
+	placementDeferredCursor int
+	placementTraceBases     map[placementTraceBaseKey]placementDeferredBase
+	quotaRefresh            hubQuotaRefreshScheduler
+	spawnActions            hubSpawnActions
+	spawnAdmissions         hubKeyedLocks
+	placementTraces         hubKeyedLocks
 	// drain is the SIGTERM state (hub_drain.go).
 	drain hubDrain
 	// spawnOrphanProbed is when the hub last probed each stranded request's
@@ -754,7 +775,7 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 	}
 	closeCtx, closeCancel := context.WithCancel(context.Background())
 	hub := &HubServer{
-		inbox: inbox, spawnKick: make(chan struct{}, 1),
+		inbox: inbox, spawnKick: make(chan struct{}, 1), placementKick: make(chan struct{}, 1),
 		authPath: config.AuthPath, alertNodes: alertNodes, relayControl: newHubRelayControlState(config, overrides), now: config.Now, staleAfter: config.StaleAfter, keepaliveInterval: config.KeepaliveInterval,
 		gracePeriod: config.GracePeriod, orphanGrace: config.OrphanGrace, unworkedLandingGrace: config.UnworkedLandingGrace, alertObservations: defaultHubAlertObservations, logger: config.Logger,
 		paneSweepInterval: config.PaneSweepInterval, paneSweepAge: config.PaneSweepAge,
@@ -1150,9 +1171,9 @@ func (h *HubServer) handleAgent(writer http.ResponseWriter, request *http.Reques
 		return
 	}
 	connection.SetReadLimit(hubMaxMessageBytes)
-	agent := &hubAgent{conn: connection, machineID: machineID, credential: hubRequestBearerToken(request), failovers: make(chan hubFailoverEvent, 64), revocations: make(chan hubJobRevokedEvent, 64), assignments: make(chan hubJobAssignedEvent, 64), features: make(chan hubFeaturesEvent, 1), relays: make(chan hubRelayInjectEvent, 64), persisted: make(chan hubRelayPersistedEvent, 64), idleRoutes: make(chan hubIdleWakeRouteEvent, 64)}
-	defer connection.CloseNow()
 	agentContext, agentCancel := context.WithCancel(request.Context())
+	agent := &hubAgent{conn: connection, lifetime: agentContext, machineID: machineID, credential: hubRequestBearerToken(request), failovers: make(chan hubFailoverEvent, 64), revocations: make(chan hubJobRevokedEvent, 64), assignments: make(chan hubJobAssignedEvent, 64), features: make(chan hubFeaturesEvent, 1), relays: make(chan hubRelayInjectEvent, 64), persisted: make(chan hubRelayPersistedEvent, 64), idleRoutes: make(chan hubIdleWakeRouteEvent, 64)}
+	defer connection.CloseNow()
 	defer agentCancel()
 	go agent.writeFailovers(agentContext)
 	go agent.writeFeatures(agentContext)
@@ -1987,6 +2008,7 @@ func (h *HubServer) connect(machineID, version, remoteAddr string, agent *hubAge
 	h.placementCache = placementCache{}
 	h.recordUIEventLocked("presence", "connected", machineID, now)
 	h.mu.Unlock()
+	h.kickSpawnPlacement()
 	h.tryPendingRevocations(machineID)
 	if previous != nil && previous != agent {
 		_ = previous.conn.Close(websocket.StatusPolicyViolation, "replaced")
@@ -2026,6 +2048,7 @@ func (h *HubServer) disconnect(machineID string, agent *hubAgent) {
 	h.publishFleetPublisher(machineID, h.now().UTC())
 	wakeLostSpawns(spawnWaiters)
 	wakeLostNodeCommands(lost)
+	h.kickSpawnPlacement()
 }
 
 // disconnectLocked is disconnect's critical section; the caller wakes the

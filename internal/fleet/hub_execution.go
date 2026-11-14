@@ -7,6 +7,14 @@ import (
 	"os"
 )
 
+// ErrHubPlacementBound tells the in-process placement engine that the hub has
+// taken durable ownership and will dispatch separately. It is not a refusal.
+var ErrHubPlacementBound = errors.New("hub_spawn_pending")
+
+// ErrHubPlacementDeferred leaves an accepted hub request for another pass
+// when its placement snapshot could not be persisted before binding.
+var ErrHubPlacementDeferred = errors.New("hub_placement_deferred")
+
 // ExecuteSubmission runs the existing placement and admission engine in the hub.
 // Only provider/node commands remain external; no launcher subprocess or SSH leg
 // is available. The submitting filesystem is represented by validated evidence.

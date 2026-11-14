@@ -44,8 +44,9 @@ refresh permits placement or its existing deadline expires. A completed refresh
 wakes another placement pass; a failed or timed-out refresh is retried while
 the request remains pending. An already-confirmed account can be selected
 without waiting for the stale accounts. A pending measurement produces no
-terminal refusal event. If the pass already contacted a host, its failed
-placement attempt remains recorded while the request stays accepted. The hub
+terminal refusal event or placement record. If the pass already contacted a
+host, its refusal remains in the durable candidate trace while the request
+stays accepted; the attempt's one record is posted when it ends. The hub
 logs a changed refresh failure with its machine, pool and reason; repeated
 identical failures are not logged on every retry.
 
@@ -218,11 +219,48 @@ request leaves no operation behind.
 
 ## State and recovery
 
-The hub stores logical operation, attempt, absolute deadline, immutable node
-request/destination, result, task/role reservation and notification outbox.
-Eight workers (`hubSpawnWorkerCount`; four until hk 4368) execute accepted work, with a bounded in-memory dispatch queue;
-the durable queue is authoritative. HTTP cancellation does not cancel accepted
-work. Shutdown ends worker contexts and waits for them before closing storage.
+The hub stores the logical operation, attempt, absolute deadline, node
+request and destination, per-attempt placement exclusions, any claimed-host
+retry pin, result, task/role reservation and notification outbox. Eight workers perform placement; they
+persist the chosen placement snapshot, commit a binding and return without
+waiting for the node. Placement waits if its snapshot cannot be saved. A separate dispatcher
+admits at most one request per node. A slow node therefore cannot occupy the
+placement workers or another node's dispatcher. The durable rows are
+authoritative; the in-memory work and node-slot indexes can be rebuilt after a
+restart. HTTP cancellation does not cancel accepted work. Shutdown ends worker
+contexts and waits for them before closing storage.
+
+The snapshot preserves the complete candidate trace across placement passes
+and hub restarts. A separate bounded delivery worker posts the attempt's one
+immutable placement record after the terminal result, and retries delivery
+without holding a placement or node-dispatch slot. A resumed attempt keeps its
+predecessor's finished record while it starts a fresh trace.
+
+If the deferred placement-trace file cannot be read, the hub preserves it and
+warns; requests with a durable snapshot can still dispatch or replay. Delivery
+from snapshots waits for the file to be repaired. A replay without a saved
+snapshot returns `store_unavailable` until the hub can recover its trace. A
+legacy deferred trace with no saved base and no spooled record is checked
+against hk by its existing job and attempt before it is reconciled. If hk has
+no record, the hub merges the traces and posts the final record only after the
+attempt ends. If hk already has the same final record, the hub seals its local
+snapshot without posting again. A flat legacy trace does not contain the
+producer version, so hk's existing version is authoritative when every
+reconstructible field matches. A finished local record is compared in full,
+including its version. Timestamps compare at hk's stored microsecond
+precision, and the lookup includes all retained rows. A different record
+leaves the attempt held and the trace on disk, and sends its owner a durable
+`legacy_placement_record_conflict` notice. An unavailable or incomplete hk
+lookup also leaves the trace held. A pending attempt cannot be compared to an
+existing final record and remains held for inspection. Deferred recovery has
+a bounded, rotating pass, so slow hk lookups do not starve other records.
+
+The coordinator scans past occupied node slots. It expires a bound request at
+its absolute deadline without waiting for the node, releases its reservation,
+and reports a retryable timeout. It also returns an unsent binding to placement
+when the node disconnects or stops accepting. The unbind must commit before
+placement can take the request; a store failure leaves the binding recoverable.
+Neither case treats a `dispatching` row as unsent.
 
 Only nodes advertising `spawn_ops_v1` can execute durable operations. Older nodes are refused with an upgrade fix, without a launcher fallback. The hub first commits the destination, node UUID and payload as `bound`; before sending node RPC it atomically changes the matching request, attempt and node UUID to `dispatching`. A recovered `bound` row is proof no send transition occurred. A recovered `dispatching` row may have reached the node, even if the hub crashed before the actual write.
 Durable node messages carry an operator-authorization marker and absolute deadline.
@@ -257,23 +295,38 @@ Under `--host auto`, a node's `cwd_unmapped` refusal returns the operation to
 placement, which tries the next candidate. The node answers it before any
 checkout or engine call. A spawn carrying a checkout on a node with a work
 root is not answered that way: the node clones into the work root, following
-[the placement rule](placement.md#the-filter). A first-run refusal (`hooks_review`, `trust_prompt`,
-`omp_setup_wizard`, `auth_unavailable`) does the same once the node verified
-its pane cleanup, and the hub tells `operator-desk` which one-time action the
-host needs ([placement.md](placement.md#first-run-refusals-and-the-desk-notice)),
-but only when the node refused before its hk job claim (result stage empty,
-`placement` or `checkout`). A refusal from the `claim`, `launch` or `landing`
-stage, such as a login screen after the pane launched, leaves the hk job record
-claimed by that node's host, and hk answers another host's claim of the job id
-with 409 `job_id_taken` (rc 74, "job id already claimed"). That refusal is the
-operation's result, and a replay of the saved request runs on the same host
+[the placement rule](placement.md#the-filter). A first-run refusal
+(`hooks_review`, `trust_prompt`, `omp_setup_wizard`, `auth_unavailable`) tells
+`operator-desk` which one-time action the host needs
+([placement.md](placement.md#first-run-refusals-and-the-desk-notice)). When the
+node verifies cleanup and the refusal precedes the hk job claim (result stage
+empty, `placement` or `checkout`), auto placement can try another host. Before
+the claim, a launch-proof refusal tries an
+alternate harness on the same host first, then another host. A refusal from
+the `claim`, `launch` or `landing` stage (apart from `deadline_not_started`)
+may leave the hk job record claimed by that node's host, so the hub treats the
+host as bound. Handoffkeep answers another host's claim of that job id with 409
+`job_id_taken` (rc 74, "job id already claimed"). After a cleanup-confirmed
+`launch_proof_failed` or another post-launch harness refusal, an automatically
+selected, non-delegated profile tries an alternate harness **on that same host
+only**. A pinned profile is not changed. If no alternate is eligible, the
+attempt ends with a refusal on that host. The hub atomically saves the host pin
+and failed harness with the unbind; the pin survives hub restart and later
+attempts, including a later refusal before the new attempt's claim. An eligible
+harness refusal during such a later attempt can try another harness on that
+same host. No result without confirmed cleanup permits another launch
 (`spawnRefusalMovesOn`, `spawnReplayPinsHost`; hk 4614).
 For agy, a verified rc=76 (`BRIEF_SUBMISSION_UNCONFIRMED`) whose newest saved
 capture matches the harness login screen is sent as rc=88 with an
-`AUTH_UNAVAILABLE` refusal; the unchanged hub classifies it as
+`AUTH_UNAVAILABLE` refusal; the hub classifies it as
 `auth_unavailable`. Other rc=76 results and results with unverified cleanup
-keep their original refusal. A pinned `--host` keeps any of these refusals as
-its result.
+keep their original refusal. A pinned `--host` remains the destination; if its
+profile was automatic, an eligible post-claim harness refusal may still try a
+different harness there. For an eligible refusal, the hub commits the unbind
+and the refused host, profile and reason together, then wakes placement. The
+exclusion survives hub restart within that attempt and is cleared by a
+cleanup-confirmed new attempt. A request that already claimed its handoffkeep
+job must not be moved to another host; that claim is host-bound.
 
 ### A job.spawn the node cannot accept
 
@@ -302,7 +355,7 @@ as the conservative pending status `dispatching`.
 
 | Status | Meaning |
 | --- | --- |
-| `accepted` | Reservation durable; no node binding yet. |
+| `accepted` | Reservation durable; no node binding yet. Any refusals from this attempt remain recorded. |
 | `bound` | Node UUID, payload and destination durable; no send transition has occurred. |
 | `dispatching` | Send transition committed; the node may have received the request. |
 | `reconciling` | Transport or execution observation unknown; ownership retained. |
@@ -343,7 +396,10 @@ sent merely because a deadline expired.
 | Failure | Recovery contract | Test / explicit non-goal |
 | --- | --- | --- |
 | Hub restart after reservation | Reopen the same operation; no second acceptance/host claim. | `TestSpawnReservationSurvivesRestartAndReplaysLostResponse`, `TestLaneInboxStoreSpawnDurabilityContract` (SQLite and CI Postgres). |
-| Deadline before dispatch | No node binding means no launch; release reservation and allow the same key/job to retry. | `TestAsyncSpawnUndispatchedTimeoutReleasesReservation` (queued and placement windows). |
+| Deadline before dispatch | An unbound or unsent bound request cannot have launched; release its reservation without waiting for a node slot and allow the same key/job to retry. | `TestAsyncSpawnUndispatchedTimeoutReleasesReservation`, `TestQueuedBoundDeadlineExpiresWithNodeSlotBusy_t4581`. |
+| Containment or disconnect before send | Unbind unsent rows even when another request occupies the node slot; on a failed store write keep the original binding for recovery. | `TestContainmentUnbindsQueuedRowsDespiteStoreFailure_t4581`, `TestDisconnectUnbindsOnlyUnsentRowsWhenWriterIsStuck_t4581`. |
+| Eligible refusal before a host-bound job claim | Atomically record the exclusion and unbind; recovery continues placement with the same logical attempt. | `TestRefusalExclusionSurvivesStoreRestartAndResetsOnRetry_t4581`, `TestRefusalWakesRealPlacementOnAnotherNode_t4581`. |
+| Cleanup-confirmed harness refusal after a host-bound job claim | Atomically pin the claimed host, record the failed harness and unbind; restart or later attempts cannot move the job to another host. Without cleanup proof, keep the original result. | `TestClaimedHarnessRetrySurvivesHubRestart_t4581`, `TestClaimedHostStaysPinnedWhenAlternativesRunOut_t4581`, `TestClaimedHarnessRefusalKeepsBindingOnStoreFailure_t4581`, `TestRefusalAfterJobClaimDoesNotMoveToNextHost_t4614`. |
 | Node disconnect or uncertain send | Retain node UUID/host; replay its journal on reconnect. | `TestSpawnUnknownRetainsOwnershipAndLateResultCommitsOutbox`, `TestAsyncSpawnLateResultReconcilesAgainstSameNode`. |
 | Duplicate accept / lost HTTP response | Identical key/body replays; changed body conflicts; CLI receipt preserves key. | Reservation test and `TestSubmissionReceiptReusesKeyAfterLostHTTPResponse`. |
 | Timeout followed by late pane | Retain ownership; reconcile receipt with exact node identity; never close working/unknown. | Late-result test and `TestFailedSpawnCleanupRequiresExactIdlePane`. |
@@ -368,8 +424,8 @@ not-started attestation. The hub settles on the durable answer:
 
 | Node evidence | Hub outcome |
 |---|---|
-| `deadline_not_started`, while the request's own deadline still has room (the hub clock is behind the node's), auto placement | Unbind and try the next eligible host. |
-| `deadline_not_started`, any other case (a pinned host, or the deadline passed) | `retryable`, reason `deadline_not_started`, stage `claim`, rc 124, with a fix text; the (task, role) slot is released, so the caller's replay starts a new attempt. The caller sees this refusal, not rc 75. |
+| `deadline_not_started`, while the request's own deadline still has room (the hub clock is behind the node's), auto placement with no earlier host-bound claim | Unbind and try the next eligible host. |
+| `deadline_not_started`, any other case (a pinned host, an earlier claim, or the deadline passed) | `retryable`, reason `deadline_not_started`, stage `claim`, rc 124, with a fix text; the (task, role) slot is released, so the caller's replay starts a new attempt. An earlier host-bound claim still pins that host. The caller sees this refusal, not rc 75. |
 | Landing wait ran out; the node answers the original frame or a replay with `deadline_not_started` within 5 s | Same `retryable` outcome. |
 | Landing wait ran out; the node answers `reconciling` (row executing), `unknown` (stale executing row), `journal_unavailable` or `journal_conflict` | `deadline_exceeded`, ownership kept, as before. |
 | Landing wait ran out; no answer within 5 s (disconnected node, stalled read loop) | `deadline_exceeded`, ownership kept. Silence is never read as not started; a later `deadline_not_started` from the coordinator's replay still settles it. |
