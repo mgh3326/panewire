@@ -475,6 +475,20 @@ unsent.
    deadline, or past it, takes the earlier path (probe, then
    `deadline_exceeded` with ownership kept). An ungranted attempt whose node
    is disconnected stays owned until a replay reaches a connected node.
+   The fence is armed when the frame has been written, and a store error
+   while fencing is retried with backoff (1 s doubling to 30 s); only a
+   recorded grant stops the retries. The node's grant wait also ends at the
+   request deadline and when its hub connection ends, and a grant read at or
+   after `start_by` is not taken.
+6. A replay of a sent attempt whose fence was already committed (a hub
+   stopped between fence and settlement) is settled as fenced without being
+   sent again.
+
+Rolling the hub back to a release without this section while a
+grant-required attempt is still `dispatching` is not supported: the older hub
+would replay it without `start_by_ms`, and the node would start it without a
+grant. Before such a rollback, wait until no operation has a `grant_required`
+node payload in a sent state.
 
 Grant and fence are one row each in `spawn_attempt_grants`, keyed by node
 request id, inserted with `ON CONFLICT DO NOTHING`. Exactly one of them is
@@ -492,6 +506,9 @@ fingerprints, because `start_by_ms` is not part of the fingerprint.
 | A granted silent attempt keeps ownership and its reservation, also after a restart | `TestSpawnGrantedSilentAttemptKeepsOwnership_t4612` |
 | A hub restart's replay of a sent, ungranted attempt carries a fresh `start_by` and fences it | `TestSpawnRestartReplayFencesUngrantedAttempt_t4612` |
 | Coordinator placement on a real node: grant-required binding, recorded grant, delivered through the node's read loop | `TestSpawnGrantEndToEndWithRealNode_t4612` |
+| A committed fence settles on replay without a resend | `TestSpawnCommittedFenceSettlesOnReplayWithoutResend_t4612` |
+| A fence store error is retried | `TestSpawnFenceRetriesAfterStoreError_t4612` |
+| The node's grant wait ends with its connection; a gate timeout or late frame still journals not-started; `granted:null` is rejected | `TestNodeSpawnGrantWaitEndsWithConnection_t4612`, `TestNodeSpawnGateTimeoutJournalsNotStarted_t4612`, `TestNodeSpawnGrantRejectsNullGranted_t4612` |
 | A legacy node gets no `start_by` and is never fenced | `TestSpawnLegacyNodeIsNeverFenced_t4612` |
 | A grant-required binding is not sent to a node without the capability | `TestSpawnGrantRequiredSkipsNodeWithoutCapability_t4612` |
 | A node starts only with a grant; a refusal or silence is journaled as never started, also for replays | `TestNodeSpawnStartsOnlyWithHubGrant_t4612`, `TestNodeSpawnPastStartByIsNotStarted_t4612`, `TestNodeSpawnWithoutStartByNeedsNoGrant_t4612`, `TestNodeSpawnGrantWire_t4612` |
