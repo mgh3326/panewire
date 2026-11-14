@@ -213,7 +213,8 @@ type hubNodeRecord struct {
 }
 
 type hubAgent struct {
-	conn *websocket.Conn
+	conn     *websocket.Conn
+	lifetime context.Context // cancelled when this connection's handler exits
 	// credential is the node token the websocket opened with; an auth reload
 	// that no longer maps the machine to it closes the socket.
 	credential string
@@ -1150,9 +1151,9 @@ func (h *HubServer) handleAgent(writer http.ResponseWriter, request *http.Reques
 		return
 	}
 	connection.SetReadLimit(hubMaxMessageBytes)
-	agent := &hubAgent{conn: connection, machineID: machineID, credential: hubRequestBearerToken(request), failovers: make(chan hubFailoverEvent, 64), revocations: make(chan hubJobRevokedEvent, 64), assignments: make(chan hubJobAssignedEvent, 64), features: make(chan hubFeaturesEvent, 1), relays: make(chan hubRelayInjectEvent, 64), persisted: make(chan hubRelayPersistedEvent, 64), idleRoutes: make(chan hubIdleWakeRouteEvent, 64)}
-	defer connection.CloseNow()
 	agentContext, agentCancel := context.WithCancel(request.Context())
+	agent := &hubAgent{conn: connection, lifetime: agentContext, machineID: machineID, credential: hubRequestBearerToken(request), failovers: make(chan hubFailoverEvent, 64), revocations: make(chan hubJobRevokedEvent, 64), assignments: make(chan hubJobAssignedEvent, 64), features: make(chan hubFeaturesEvent, 1), relays: make(chan hubRelayInjectEvent, 64), persisted: make(chan hubRelayPersistedEvent, 64), idleRoutes: make(chan hubIdleWakeRouteEvent, 64)}
+	defer connection.CloseNow()
 	defer agentCancel()
 	go agent.writeFailovers(agentContext)
 	go agent.writeFeatures(agentContext)

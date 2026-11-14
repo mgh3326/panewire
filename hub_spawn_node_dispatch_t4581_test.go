@@ -726,7 +726,7 @@ func TestDisconnectUnbindsOnlyUnsentRowsWhenWriterIsStuck_t4581(t *testing.T) {
 		t.Fatalf("failed disconnect unbind lost unsent proof: status=%s node=%+v err=%v", retained.Status, retained.Node, err)
 	}
 	uncertain, err := h.inbox.store.spawnTask(t.Context(), sent.Request.RequestID)
-	if err != nil || uncertain.Status != "dispatching" || uncertain.Node == nil || uncertain.Node.RequestID != sent.Node.RequestID {
+	if err != nil || (uncertain.Status != "dispatching" && uncertain.Status != "reconciling") || uncertain.Node == nil || uncertain.Node.RequestID != sent.Node.RequestID {
 		t.Fatalf("disconnect treated a committed send as unsent: status=%s node=%+v err=%v", uncertain.Status, uncertain.Node, err)
 	}
 	if _, err := h.inbox.store.db.Exec(`DROP TRIGGER fail_disconnect_unbind`); err != nil {
@@ -737,6 +737,17 @@ func TestDisconnectUnbindsOnlyUnsentRowsWhenWriterIsStuck_t4581(t *testing.T) {
 		saved, err := h.inbox.store.spawnTask(t.Context(), target.Request.RequestID)
 		return err == nil && saved.Status == "accepted" && saved.Node == nil
 	})
+	reconnected := t14NamedNode(t, h, server, "machine-a", true, true)
+	readCtx, cancelRead := context.WithTimeout(t.Context(), 3*time.Second)
+	defer cancelRead()
+	_, payload, err := reconnected.Read(readCtx)
+	if err != nil {
+		t.Fatalf("reconnected node could not replay while its old writer stayed locked: %v", err)
+	}
+	replay, valid := parseHubOutbound(payload)
+	if !valid || replay.Type != "job.spawn" || replay.RequestID != sent.Node.RequestID {
+		t.Fatalf("reconnected node received %s, want original request %s", payload, sent.Node.RequestID)
+	}
 }
 
 func TestDispatcherRunsRealNodeEnginesIndependently_t4581(t *testing.T) {

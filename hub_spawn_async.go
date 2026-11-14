@@ -366,7 +366,7 @@ func (h *HubServer) runSpawnCoordinator(parent context.Context) {
 				delete(nodeActive, task.Node.Machine)
 				mu.Unlock()
 				current, err := h.inbox.store.spawnTask(ctx, task.Request.RequestID)
-				if err == nil && (current.Node == nil || !spawnPending(current.Status)) {
+				if err == nil && (current.Node == nil || !spawnPending(current.Status) || current.Node.RequestID != task.Node.RequestID) {
 					h.kickSpawnPlacement()
 				}
 			}(task)
@@ -891,7 +891,15 @@ func (t *directSpawnTransport) dispatch(ctx context.Context, node hubSpawnReques
 		WaitSeconds        int               `json:"wait_seconds"`
 		DeadlineMS         int64             `json:"deadline_ms,omitempty"`
 	}{true, "job.spawn", node.RequestID, node.CWDKey, node.Brief, node.Checkout, node.Args, node.WaitSeconds, node.DeadlineMS}
-	if err := agent.writeJSONContext(ctx, message); err != nil {
+	writeCtx, cancelWrite := context.WithCancel(ctx)
+	stopConnection := func() bool { return false }
+	if agent.lifetime != nil {
+		stopConnection = context.AfterFunc(agent.lifetime, cancelWrite)
+	}
+	writeErr := agent.writeJSONContext(writeCtx, message)
+	stopConnection()
+	cancelWrite()
+	if writeErr != nil {
 		if errors.Is(ctx.Err(), context.Canceled) {
 			return fleet.HubSpawnReply{}, &fleet.HubError{Kind: "hub_spawn_pending"}
 		}
