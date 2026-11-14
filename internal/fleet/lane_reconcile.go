@@ -27,16 +27,21 @@ func (a *App) reconcileNodeLane(ctx context.Context, jobID, machine string) erro
 		a.HerdrSession = session
 	}
 	lane, parent := j.Label, j.Owner
+	// A takeover may have moved a predecessor's row, so the lane this pane
+	// holds is the one its registration recorded, not necessarily its label.
+	if j.HubLane != "" {
+		lane = j.HubLane
+	}
 	if j.Role == "builder" {
 		lane, parent = j.Owner, j.Parent
 	}
 	if boolean(j.Receipt, "lane_deferred", false) {
 		return nil
 	}
-	err = a.registerLane(ctx, lane, parent, j.Pane, j.Role, machine)
+	registration, err := a.registerLane(ctx, lanePutRequest{Lane: lane, Parent: parent, Pane: j.Pane, Role: j.Role, Machine: machine})
 	if err != nil {
 		_ = a.event(ctx, jobID, "job.lane_registration_failed", map[string]any{"lane": lane, "lane_error": laneFailureReason(err)})
 		return err
 	}
-	return a.event(ctx, jobID, "job.lane_registered", map[string]any{"hub_lane": lane, "hub_lane_machine": machine, "pane_id": j.Pane})
+	return a.event(ctx, jobID, "job.lane_registered", map[string]any{"hub_lane": registration.Lane, "hub_lane_machine": registration.Machine, "pane_id": j.Pane})
 }
