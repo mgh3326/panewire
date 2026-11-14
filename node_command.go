@@ -498,19 +498,25 @@ func canonicalNodeCommandResult(op string, raw json.RawMessage) (json.RawMessage
 	return encoded, err == nil
 }
 
-func defaultNodeCommandRunner(name string) relayCommandRunner {
-	return func(ctx context.Context, args ...string) ([]byte, error) {
-		cmd := exec.CommandContext(ctx, name, args...)
-		if name == "git" {
-			env := make([]string, 0, len(os.Environ())+1)
-			for _, value := range os.Environ() {
-				if !strings.HasPrefix(value, "LC_ALL=") {
-					env = append(env, value)
-				}
-			}
-			cmd.Env = append(env, "LC_ALL=C")
+// nodeGitCommand builds the invocation every node git call shares: the C locale
+// (so parsed porcelain and error text do not depend on the host) and a wait
+// delay that ends a pipe a git helper still holds.
+func nodeGitCommand(ctx context.Context, args ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, "git", args...)
+	env := make([]string, 0, len(os.Environ())+1)
+	for _, value := range os.Environ() {
+		if !strings.HasPrefix(value, "LC_ALL=") {
+			env = append(env, value)
 		}
-		cmd.WaitDelay = 100 * time.Millisecond
+	}
+	cmd.Env = append(env, "LC_ALL=C")
+	cmd.WaitDelay = 100 * time.Millisecond
+	return cmd
+}
+
+func defaultNodeCommandRunner() relayCommandRunner {
+	return func(ctx context.Context, args ...string) ([]byte, error) {
+		cmd := nodeGitCommand(ctx, args...)
 		out, err := cmd.Output()
 		if errors.Is(err, exec.ErrWaitDelay) && cmd.ProcessState != nil && cmd.ProcessState.Success() {
 			return out, nil
@@ -680,7 +686,18 @@ func (client *HubClient) nodeGitRunner() relayCommandRunner {
 	if client.nodeGit != nil {
 		return client.nodeGit
 	}
-	return defaultNodeCommandRunner("git")
+	return defaultNodeCommandRunner()
+}
+
+// nodeAddRunner returns the runner for one worktree add. The node's own runner
+// starts git as a child and records the child's identity; a fixture git runner
+// starts no child of the node's, so a test that wants an interrupted add states
+// its own identity on client.nodeAdd.
+func (client *HubClient) nodeAddRunner() nodeAddRunner {
+	if client != nil && client.nodeAdd != nil {
+		return client.nodeAdd
+	}
+	return defaultNodeAddRunner()
 }
 
 type nodeCommandReply struct {

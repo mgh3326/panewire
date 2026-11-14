@@ -588,6 +588,23 @@ When a branch is fast-forwarded, the result includes `fast_forwarded: true`.
 A tip mismatch that cannot be fast-forwarded includes `reason` with
 `local=<sha7> expected=<sha7> relation=ahead|diverged`.
 
+An add interrupted by a crash leaves its worktree locked `initializing`. The
+node records the process group of the `git worktree add` child in the clone's
+per-worktree intent file
+(`.git/panewire-worktree-add-intent-<sha256 of the worktree path>.json`), and a
+later prepare for that worktree reclaims it only once that group — git and the
+checkout hooks it started — is gone, so the answer stays `locked` while the add
+or a hook it started runs in that group. A checkout hook that deliberately
+daemonizes with `setsid` leaves the group and is not covered by this check: the
+node can reclaim the path while such a hook still writes into it. An intent
+written before the node recorded add groups has none, so it is never reclaimed
+automatically: the node logs `node worktree add intent records no add process
+group` with the worktree path. Before recovery the operator confirms that no
+`git worktree add` process and no checkout hook is still running for `<dir>`; a
+clean tree does not show this. Then the operator runs `git -C <clone> worktree
+unlock <dir>` and the `worktree.remove` op, or `git -C <clone> worktree remove
+<dir>` directly once the tree is clean.
+
 Every op that touches one clone (`worktree.prepare`, `worktree.remove`)
 takes the exclusive per-clone lock `<clone>.git-op.lock`, waiting at most
 60 s before answering `busy`. Both ops name `<clone>` the same way: the
