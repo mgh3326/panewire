@@ -228,16 +228,16 @@ type HubClient struct {
 	creditPresenceMu   sync.Mutex
 	creditPresence     *creditPresenceSource // the node's credit pool presence publisher; fixtures set it, a missing one builds the default.
 	nodeCloseSettle    time.Duration         // fixture seam; zero is nodePaneCloseSettle.
-	// nodeHubCloseIntent records a hub close's intent in the job's ledger;
-	// nil is fleet.RecordHubCloseIntent under the node's jobs root.
-	nodeHubCloseIntent func(ctx context.Context, job string, in fleet.HubCloseIntent) error
-	nodeGitLockWait    time.Duration // fixture seam; zero is nodeGitOpLockWait.
-	busyRelayMu        sync.Mutex
-	busyRelay          *relayBusyManager
-	relayCommand       relayCommandRunner   // fixture seam for agent get/wait.
-	relayEmitter       func(hubClientEvent) // fixture/connection-owned writer.
-	relayRecvSeqMu     sync.Mutex
-	relayRecvSeq       int64 // assigned synchronously by the hub read loop.
+	// nodeHubClose is the job-ledger side of a hub close (intent, watcher);
+	// nil is nodeFleetHubClose. A fixture seam.
+	nodeHubClose    nodeHubCloseLedger
+	nodeGitLockWait time.Duration // fixture seam; zero is nodeGitOpLockWait.
+	busyRelayMu     sync.Mutex
+	busyRelay       *relayBusyManager
+	relayCommand    relayCommandRunner   // fixture seam for agent get/wait.
+	relayEmitter    func(hubClientEvent) // fixture/connection-owned writer.
+	relayRecvSeqMu  sync.Mutex
+	relayRecvSeq    int64 // assigned synchronously by the hub read loop.
 	// inboundHandled is a fixture seam the inbound dispatcher calls after
 	// each queued frame it ran; production leaves it nil.
 	inboundHandled func(hubOutboundMessage)

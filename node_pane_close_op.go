@@ -3,6 +3,7 @@ package panewire
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
 
@@ -124,14 +125,19 @@ func validNodeCloseOpStatusResult(result nodeCloseOpStatusResult) bool {
 
 // openCloseOpJob opens the job directory a close operation is journalled in.
 func (client *HubClient) openCloseOpJob(job string) (*os.Root, bool, string) {
-	root, _, found, err := client.openNodeJobDir(job)
+	root, _, found, code := client.openCloseOpJobDir(job)
+	return root, found, code
+}
+
+func (client *HubClient) openCloseOpJobDir(job string) (*os.Root, string, bool, string) {
+	root, dir, found, err := client.openNodeJobDir(job)
 	switch {
 	case errors.Is(err, errNodeJobsRootUnset):
-		return nil, false, "jobs_root_unset"
+		return nil, "", false, "jobs_root_unset"
 	case err != nil:
-		return nil, false, "journal_failed"
+		return nil, "", false, "journal_failed"
 	}
-	return root, found, ""
+	return root, dir, found, ""
 }
 
 // nodePaneCloseOp runs one close operation. The caller holds nodeCommandMu.
@@ -144,7 +150,7 @@ func (client *HubClient) openCloseOpJob(job string) (*os.Root, bool, string) {
 // touching herdr: its close may have run, and a pane under the same id now may
 // be another one.
 func (client *HubClient) nodePaneCloseOp(ctx context.Context, args nodePaneCloseOpArgs) (any, string) {
-	job, found, code := client.openCloseOpJob(args.Job)
+	job, jobDir, found, code := client.openCloseOpJobDir(args.Job)
 	if code != "" {
 		return nil, code
 	}
@@ -168,7 +174,7 @@ func (client *HubClient) nodePaneCloseOp(ctx context.Context, args nodePaneClose
 	}
 	// Registering, or resuming one left registered: bind the request to the
 	// job's current attempt before any herdr call.
-	op, target, outcome, code := client.bindCloseOp(ctx, job, op, found, args)
+	op, target, outcome, code := client.bindCloseOp(ctx, job, jobDir, op, found, args)
 	if code != "" {
 		return nil, code
 	}
@@ -316,7 +322,19 @@ func (client *HubClient) closeTargetBound(ctx context.Context, args nodePaneClos
 // preempted without touching herdr. Otherwise the operation is (still)
 // registered and the proof is returned for the guarded close. The caller
 // holds nodeCommandMu.
-func (client *HubClient) bindCloseOp(ctx context.Context, job *os.Root, op fleet.CloseOp, resuming bool, args nodePaneCloseOpArgs) (fleet.CloseOp, *nodeCloseTarget, string, string) {
+func (client *HubClient) bindCloseOp(ctx context.Context, job *os.Root, jobDir string, op fleet.CloseOp, resuming bool, args nodePaneCloseOpArgs) (fleet.CloseOp, *nodeCloseTarget, string, string) {
+	// The job's end lock, which its watcher takes around every terminal
+	// decision, spans the binding check and the intent: no watcher end can
+	// land between them (hk 4652).
+	unlock, err := client.hubCloseLedger().LockEnd(jobDir)
+	if err != nil {
+		return op, nil, "", "journal_failed"
+	}
+	defer unlock()
+	return client.bindCloseOpLocked(ctx, job, jobDir, op, resuming, args)
+}
+
+func (client *HubClient) bindCloseOpLocked(ctx context.Context, job *os.Root, jobDir string, op fleet.CloseOp, resuming bool, args nodePaneCloseOpArgs) (fleet.CloseOp, *nodeCloseTarget, string, string) {
 	target, err := readNodeCloseTarget(job)
 	if err != nil {
 		return op, nil, "", "journal_failed"
@@ -340,15 +358,51 @@ func (client *HubClient) bindCloseOp(ctx context.Context, job *os.Root, op fleet
 		}
 		return op, nil, op.State, ""
 	case resuming:
+		// A resumed operation still needs a watcher to finish it.
+		ledger := client.hubCloseLedger()
+		watcher, err := ledger.Watcher(jobDir)
+		switch {
+		case err != nil:
+			return op, nil, "", "journal_failed"
+		case watcher == fleet.HubCloseWatcherIncompatible:
+			return op, nil, "", "watcher_incompatible"
+		case watcher == fleet.HubCloseWatcherNone && ledger.StartWatcher(args.Job) != nil:
+			return op, nil, "", "watcher_unavailable"
+		}
 		return op, &target, "", ""
 	case !bound:
 		return op, nil, nodeCloseOpMismatch, ""
 	}
+	// One open operation per attempt: a second request id while another is
+	// registered or closing would leave two intents the watcher must settle.
+	if open, err := fleet.OpenCloseOps(job, attempt); err != nil {
+		return op, nil, "", "journal_failed"
+	} else if len(open) > 0 {
+		return op, nil, "", "close_in_progress"
+	}
+	// A watcher of an older binary would not defer to the intent; none at all
+	// would leave the final operation unfinished, so one is started.
+	ledger := client.hubCloseLedger()
+	watcher, err := ledger.Watcher(jobDir)
+	switch {
+	case err != nil:
+		return op, nil, "", "journal_failed"
+	case watcher == fleet.HubCloseWatcherIncompatible:
+		return op, nil, "", "watcher_incompatible"
+	}
 	// The intent precedes the registration: a crash between the two leaves
 	// an intent with no operation, which the watcher waits on until the
 	// hub's repeat of this request registers and settles it.
-	if client.recordHubCloseIntent(ctx, args.Job, fleet.HubCloseIntent{RequestID: args.RequestID, Attempt: attempt, Pane: args.PaneID, Label: args.Name, EndReason: args.EndReason}) != nil {
+	if ledger.RecordIntent(ctx, args.Job, fleet.HubCloseIntent{RequestID: args.RequestID, Attempt: attempt, Pane: args.PaneID, Label: args.Name, EndReason: args.EndReason}) != nil {
 		return op, nil, "", "journal_failed"
+	}
+	if watcher == fleet.HubCloseWatcherNone {
+		if err := ledger.StartWatcher(args.Job); err != nil {
+			// Nothing is registered or closed; a repeat of the request
+			// records the intent again and retries the start.
+			slog.Warn("hub close watcher start failed", "job", args.Job, "error", err)
+			return op, nil, "", "watcher_unavailable"
+		}
 	}
 	op = fleet.CloseOp{RequestID: args.RequestID, PaneID: args.PaneID, Attempt: attempt, State: fleet.CloseOpRegistered, Created: now, Updated: now}
 	if fleet.WriteCloseOp(job, op) != nil {
@@ -357,11 +411,35 @@ func (client *HubClient) bindCloseOp(ctx context.Context, job *os.Root, op fleet
 	return op, &target, "", ""
 }
 
-func (client *HubClient) recordHubCloseIntent(ctx context.Context, job string, in fleet.HubCloseIntent) error {
-	if client.nodeHubCloseIntent != nil {
-		return client.nodeHubCloseIntent(ctx, job, in)
+// nodeHubCloseLedger is what a hub close needs from the job's ledger and
+// watcher (internal/fleet/watch_hub_close.go).
+type nodeHubCloseLedger interface {
+	// LockEnd takes the job's end lock, shared with its watcher's terminal
+	// decisions.
+	LockEnd(jobDir string) (func(), error)
+	Watcher(jobDir string) (fleet.HubCloseWatcher, error)
+	RecordIntent(ctx context.Context, job string, in fleet.HubCloseIntent) error
+	StartWatcher(job string) error
+}
+
+type nodeFleetHubClose struct{ jobs, session string }
+
+func (l nodeFleetHubClose) LockEnd(jobDir string) (func(), error) { return fleet.LockJobEnd(jobDir) }
+func (l nodeFleetHubClose) Watcher(jobDir string) (fleet.HubCloseWatcher, error) {
+	return fleet.ProbeHubCloseWatcher(jobDir)
+}
+func (l nodeFleetHubClose) RecordIntent(ctx context.Context, job string, in fleet.HubCloseIntent) error {
+	return fleet.RecordHubCloseIntent(ctx, l.jobs, job, in)
+}
+func (l nodeFleetHubClose) StartWatcher(job string) error {
+	return fleet.StartHubCloseWatcher(l.jobs, l.session, job)
+}
+
+func (client *HubClient) hubCloseLedger() nodeHubCloseLedger {
+	if client.nodeHubClose != nil {
+		return client.nodeHubClose
 	}
-	return fleet.RecordHubCloseIntent(ctx, filepath.Join(client.jobsInboxRoot, "jobs"), job, in)
+	return nodeFleetHubClose{jobs: filepath.Join(client.jobsInboxRoot, "jobs"), session: client.nodeSpawnSession()}
 }
 
 func (client *HubClient) finishCloseOp(job *os.Root, op fleet.CloseOp, state string) (any, string) {

@@ -255,3 +255,158 @@ func TestWatcherHubCloseThatClosedNothingCancels_t4652(t *testing.T) {
 		})
 	}
 }
+
+// The node records an intent after the watcher read its snapshot of the
+// ledger for this poll (here: while herdr is listed). The watcher's
+// missing-pane end re-checks under the end lock and defers to the close.
+func TestWatcherEndRechecksForAnIntentRecordedMidPoll_t4652(t *testing.T) {
+	a, h := hubCloseFixture(t)
+	in := liveIntent(t, a)
+	f := a.Runner.(*fakeRunner)
+	do := f.Do
+	lists := 0
+	f.Do = func(c Command) Result {
+		if c.Name == "herdr" && strings.Join(c.Args, " ") == "agent list" {
+			if lists++; lists == 2 {
+				recordHubClose(t, a, in)
+				writeJobCloseOp(t, a, CloseOp{RequestID: in.RequestID, Attempt: in.Attempt, State: CloseOpClosed})
+			}
+		}
+		return do(c)
+	}
+	if e := a.watch(context.Background(), []string{"j"}); e != nil {
+		t.Fatal(e)
+	}
+	wantHubCloseFinished(t, a, h)
+}
+
+// The completion deadline passing does not end a watcher whose job gained an
+// open hub close during the poll: it keeps watching and finishes the close.
+func TestWatcherDeadlineExitDefersToAHubClose_t4652(t *testing.T) {
+	a, h := hubCloseFixture(t)
+	t.Setenv("PANEWIRE_COMPLETION_TIMEOUT_S", "1")
+	in := liveIntent(t, a)
+	f := a.Runner.(*fakeRunner)
+	do := f.Do
+	f.Do = func(c Command) Result {
+		if c.Name == "herdr" && strings.Join(c.Args, " ") == "agent list" {
+			// The pane stays listed, so only the deadline can end the watch.
+			return Result{Out: `{"result":{"agents":[{"pane_id":"w:p1","agent_status":"working","state_change_seq":7}]}}`}
+		}
+		return do(c)
+	}
+	polls := 0
+	sleep := a.Sleep
+	a.Sleep = func(ctx context.Context, d time.Duration) error {
+		if polls++; polls == 1 {
+			recordHubClose(t, a, in)
+			writeJobCloseOp(t, a, CloseOp{RequestID: in.RequestID, Attempt: in.Attempt, State: CloseOpRegistered})
+		}
+		if polls == 10 {
+			writeJobCloseOp(t, a, CloseOp{RequestID: in.RequestID, Attempt: in.Attempt, State: CloseOpClosed})
+		}
+		return sleep(ctx, d)
+	}
+	if e := a.watch(context.Background(), []string{"j"}); e != nil {
+		t.Fatal(e)
+	}
+	wantHubCloseFinished(t, a, h)
+}
+
+// unknown does not prove the pane stopped: while herdr lists it the watcher
+// waits; once herdr shows it absent the close finishes.
+func TestWatcherUnknownCloseWaitsForThePaneToBeGone_t4652(t *testing.T) {
+	a, h := hubCloseFixture(t)
+	in := liveIntent(t, a)
+	recordHubClose(t, a, in)
+	writeJobCloseOp(t, a, CloseOp{RequestID: in.RequestID, Attempt: in.Attempt, State: CloseOpUnknown})
+	f := a.Runner.(*fakeRunner)
+	do := f.Do
+	lists := 0
+	f.Do = func(c Command) Result {
+		if c.Name == "herdr" && strings.Join(c.Args, " ") == "agent list" {
+			if lists++; lists < 10 {
+				return Result{Out: `{"result":{"agents":[{"pane_id":"w:p1","agent_status":"idle","state_change_seq":7}]}}`}
+			}
+		}
+		return do(c)
+	}
+	sleep := a.Sleep
+	a.Sleep = func(ctx context.Context, d time.Duration) error {
+		if lists < 10 && (str(h.record(t, "j"), "state") == "lost" || len(lostEvents(t, a)) != 0) {
+			t.Fatal("ended while an unknown close left the pane listed")
+		}
+		return sleep(ctx, d)
+	}
+	if e := a.watch(context.Background(), []string{"j"}); e != nil {
+		t.Fatal(e)
+	}
+	if lists < 10 {
+		t.Fatalf("finished after %d agent lists, while the pane was listed", lists)
+	}
+	wantHubCloseFinished(t, a, h)
+}
+
+// Another terminal hk record is kept, but the closed pane's lease is still
+// released and the intent closed.
+func TestWatcherHubCloseKeepsAnotherRecordAndReleases_t4652(t *testing.T) {
+	a, h := hubCloseFixture(t)
+	in := liveIntent(t, a)
+	recordHubClose(t, a, in)
+	writeJobCloseOp(t, a, CloseOp{RequestID: in.RequestID, Attempt: in.Attempt, State: CloseOpClosed})
+	h.mu.Lock()
+	h.records["j"]["state"], h.records["j"]["end_reason"] = "lost", "something else"
+	h.mu.Unlock()
+	if e := a.watch(context.Background(), []string{"j"}); e != nil {
+		t.Fatal(e)
+	}
+	if str(h.record(t, "j"), "end_reason") != "something else" {
+		t.Fatalf("hk record rewritten: %v", h.record(t, "j"))
+	}
+	lost := lostEvents(t, a)
+	if len(lost) != 1 || !boolean(lost[0], "superseded", false) {
+		t.Fatalf("job.lost %v, want one superseded hub_close", lost)
+	}
+	if st, _ := ledgerState(t, a, "j"); st != "released" {
+		t.Fatalf("quota %s, want released", st)
+	}
+}
+
+// A running watcher reads as hub-close aware; a bare watch lock (an older
+// binary) as incompatible; none as none.
+func TestProbeHubCloseWatcher_t4652(t *testing.T) {
+	a, _ := hubCloseFixture(t)
+	dir := filepath.Join(a.Jobs, "j")
+	if w, e := ProbeHubCloseWatcher(dir); e != nil || w != HubCloseWatcherNone {
+		t.Fatalf("no watcher: %v %v", w, e)
+	}
+	in := liveIntent(t, a)
+	recordHubClose(t, a, in)
+	writeJobCloseOp(t, a, CloseOp{RequestID: in.RequestID, Attempt: in.Attempt, State: CloseOpRegistered})
+	sleep := a.Sleep
+	probed := false
+	a.Sleep = func(ctx context.Context, d time.Duration) error {
+		if !probed {
+			probed = true
+			if w, e := ProbeHubCloseWatcher(dir); e != nil || w != HubCloseWatcherAware {
+				t.Errorf("running watcher: %v %v", w, e)
+			}
+			writeJobCloseOp(t, a, CloseOp{RequestID: in.RequestID, Attempt: in.Attempt, State: CloseOpClosed})
+		}
+		return sleep(ctx, d)
+	}
+	if e := a.watch(context.Background(), []string{"j"}); e != nil {
+		t.Fatal(e)
+	}
+	old, e := os.OpenFile(filepath.Join(dir, ".panewire-watch.lock"), os.O_RDWR, 0o600)
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer old.Close()
+	if !tryLock(old) {
+		t.Fatal("watch lock still held")
+	}
+	if w, e := ProbeHubCloseWatcher(dir); e != nil || w != HubCloseWatcherIncompatible {
+		t.Fatalf("old watcher: %v %v", w, e)
+	}
+}
