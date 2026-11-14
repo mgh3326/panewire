@@ -868,6 +868,21 @@ inside that band) and lists the bands in `tiers`. Credit admission is unchanged
 from version 2: credit no longer requires a balance observation, but its pool
 class must remain readable.
 
+**After-free pools (decision 279, hk 4699).** `after_free_pools` lists
+subscription pools tried right after the free band (credit rungs included) and
+before the ranked pools, for every grade the pool seats. The embedded default is
+`["commandcode"]`. The band order is waste, free, credit, after-free pools,
+ranked; the selection record names the tier `after_free`. An after-free pool is
+still an ordinary subscription pool, not a credit pool: it needs a readable,
+non-stale `ok` reading (otherwise `quota_unknown`), a used-up window drops it
+(`window_exhausted`, or the gate's refusal) and the ranked pools then take the
+task, and a pool projected to waste keeps the waste band ahead of free. It is
+not listed in `credit_pools` because that class means a hand-recorded balance
+(`creditPoolStatus`, expiry ordering, admission without an observation). A pool
+named in both `credit_pools` or `free` and `after_free_pools` is refused. Inside
+the band a pool's seat is the `seats` entry for the grade, else its lowest-fit
+row (below).
+
 The projection is pacelever's pace: for each account-scope bucket in the
 quota status, used percentage ÷ elapsed share of its window, paced at the
 status document's `generated_at`; a bucket past its reset or under 5% into its
@@ -909,7 +924,8 @@ Both keys live in the pool-order policy under `"waste_risk": {...}`; absent
 keys take the defaults, and `panewire simulate --policy`/`--policy-set` try
 other values before the policy is changed.
 
-**Ranked band: pools compete by their seat.** In the ranked band each pool
+**Ranked band: pools compete by their seat.** (Command Code no longer competes
+here: it is an after-free pool.) In the ranked band each pool
 offers one seat for the task's grade: its lowest-grade eligible row that fits
 (the lowest grade at or above the task's), unless the policy's `seats` names a
 row for that pool and grade. Pools are then ordered by their seat's waste
@@ -921,7 +937,7 @@ lower-grade task. The pool's other rows follow its seat.
 
 `seats` is `{pool: {grade: "profile@effort"}}` (`"profile"` for a rung-less
 row); `profile@effort` is the catalog row's profile and effort, the grade is
-the task's. It is read only in the ranked band. A named row that is not a
+the task's. It is read in the ranked band and for an after-free pool. A named row that is not a
 candidate (dropped, wrong pool, grade below the task's) leaves the pool on its
 lowest-fit seat. The embedded default sends Command Code's B and C tasks to
 `omp-dsflash41@high`:
@@ -930,9 +946,12 @@ lowest-fit seat. The embedded default sends Command Code's B and C tasks to
 "seats": {"commandcode": {"B": "omp-dsflash41@high", "C": "omp-dsflash41@high"}}
 ```
 
-Command Code therefore takes a B or C task when its room beats the other ranked
-pools', not unconditionally first. A pool whose lowest-fit row already is the
-intended one (devin's `devin-ds41`) needs no entry. The `seats` map is edited in
+Command Code is an after-free pool (above), so its seat for the task's grade is
+tried right after the free band whatever the ranked pools' room, and the
+`seats` entry picks which of its rows (decision 279 replaced the earlier
+"ranked by projected room" rule for this pool, decision 243). A pool whose
+lowest-fit row already is the intended one (devin's `devin-ds41`) needs no
+entry. The `seats` map is edited in
 `/etc/panewire/pool-order.json` on the hub like the other keys; a file that
 omits it has no policy seats.
 
