@@ -393,6 +393,31 @@ func TestReplayPreservesDeferredPlacementTrace_t4581(t *testing.T) {
 	if len(records) != 1 || records[0]["attempt"] != float64(task.Attempt) || records[0]["reason"] != "timeout" {
 		t.Fatalf("replay lost deferred attempt: records=%v", records)
 	}
+	t.Run("newer deferred trace replaces its base", func(t *testing.T) {
+		hub := placementOutboxHub(t, filepath.Join(t.TempDir(), "inbox.sqlite3"))
+		request := durableSpawnRequest()
+		task, _, err := hub.inbox.store.claimSpawn(t.Context(), request, "test-job", "parent", time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		old := placementTraceSnapshot()
+		hub.notePlacementTrace(task, old, "")
+		if _, err := hub.inbox.store.db.Exec(`CREATE TRIGGER fail_snapshot_update BEFORE UPDATE ON spawn_placement_snapshots BEGIN SELECT RAISE(FAIL, 'injected snapshot failure'); END`); err != nil {
+			t.Fatal(err)
+		}
+		newer := old
+		newer.Chosen = "machine-b"
+		hub.notePlacementTrace(task, newer, "")
+		if _, err := hub.inbox.store.db.Exec(`DROP TRIGGER fail_snapshot_update`); err != nil {
+			t.Fatal(err)
+		}
+		hub.retryDeferredTraceSaves()
+		payload, _, _, err := hub.inbox.store.spawnPlacementSnapshot(t.Context(), request.RequestID, task.Attempt)
+		var got fleet.PlacementTrace
+		if err != nil || json.Unmarshal(payload, &got) != nil || got.Chosen != "machine-b" {
+			t.Fatalf("newer deferred trace did not replace its base: chosen=%q err=%v", got.Chosen, err)
+		}
+	})
 }
 
 func TestPlacementDeliveryDoesNotBlockOtherDispatch_t4581(t *testing.T) {
@@ -552,7 +577,8 @@ func TestDispatchWaitsForDurablePlacementSnapshot_t4581(t *testing.T) {
 }
 
 func TestPlacementSnapshotIgnoresDeferredStaleTrace_t4581(t *testing.T) {
-	h := asyncSpawnHub(t)
+	storePath := filepath.Join(t.TempDir(), "inbox.sqlite3")
+	h := placementOutboxHub(t, storePath)
 	request := durableSpawnRequest()
 	task, _, err := h.inbox.store.claimSpawn(t.Context(), request, "test-job", "parent", time.Now())
 	if err != nil {
@@ -567,13 +593,135 @@ func TestPlacementSnapshotIgnoresDeferredStaleTrace_t4581(t *testing.T) {
 	h.deferPlacementTraceSave(request.RequestID, task.Attempt, raw, "")
 	newer := placementTraceSnapshot()
 	newer.Chosen = "machine-b"
+	// A directory cannot be removed as the deferred file. The newer DB save
+	// must still proceed, and the old file must not win after a restart.
+	deferredPath := h.inbox.deferredPath
+	h.inbox.deferredPath = t.TempDir()
 	h.notePlacementTrace(task, newer, "")
+	h.inbox.deferredPath = deferredPath
+	if err := h.Close(); err != nil {
+		t.Fatal(err)
+	}
+	h = placementOutboxHub(t, storePath)
 	h.retryDeferredTraceSaves()
 	payload, _, _, err := h.inbox.store.spawnPlacementSnapshot(t.Context(), request.RequestID, task.Attempt)
 	var got fleet.PlacementTrace
 	if err != nil || json.Unmarshal(payload, &got) != nil || got.Chosen != "machine-b" {
 		t.Fatalf("deferred older trace replaced newer choice: chosen=%s err=%v", got.Chosen, err)
 	}
+	t.Run("failed cleanup keeps dispatch and fences a known base", func(t *testing.T) {
+		t.Setenv("XDG_STATE_HOME", t.TempDir())
+		newDispatchPlacementHK(t)
+		config := HubServerConfig{Tokens: map[string]string{"operator": t14OperatorToken, "desktop": "node-token"}, InboxStorePath: filepath.Join(t.TempDir(), "inbox.sqlite3")}
+		stateDir := t.TempDir()
+		hub := dispatchPlacementHub(t, config, stateDir, nil)
+		request := durableSpawnRequest()
+		task, _, err := hub.inbox.store.claimSpawn(t.Context(), request, "test-job", "parent", time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		old := placementTraceSnapshot()
+		hub.notePlacementTrace(task, old, "")
+		if _, err := hub.inbox.store.db.Exec(`CREATE TRIGGER fail_snapshot_update BEFORE UPDATE ON spawn_placement_snapshots BEGIN SELECT RAISE(FAIL, 'injected snapshot failure'); END`); err != nil {
+			t.Fatal(err)
+		}
+		deferred := old
+		deferred.Chosen = "machine-b"
+		hub.notePlacementTrace(task, deferred, "")
+		if _, err := hub.inbox.store.db.Exec(`DROP TRIGGER fail_snapshot_update`); err != nil {
+			t.Fatal(err)
+		}
+		path := hub.inbox.deferredPath
+		hub.inbox.deferredPath = t.TempDir()
+		server := httptest.NewServer(hub.Handler())
+		defer server.Close()
+		node := t14NamedNode(t, hub, server, "desktop", true, true)
+		hub.startSpawnCoordinator(t.Context())
+		t14ReadNodeSpawn(t, node)
+		_ = node.CloseNow()
+		if err := hub.Close(); err != nil {
+			t.Fatal(err)
+		}
+		server.Close()
+		hub = dispatchPlacementHub(t, config, stateDir, nil)
+		hub.retryDeferredTraceSaves()
+		payload, _, _, err := hub.inbox.store.spawnPlacementSnapshot(t.Context(), request.RequestID, task.Attempt)
+		var got fleet.PlacementTrace
+		if err != nil || json.Unmarshal(payload, &got) != nil || got.Chosen != "desktop" {
+			t.Fatalf("old deferred trace replaced the dispatched snapshot: chosen=%q err=%v", got.Chosen, err)
+		}
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("superseded deferred file was not retired: %v", err)
+		}
+	})
+	t.Run("delivery settings are part of the base", func(t *testing.T) {
+		storePath := filepath.Join(t.TempDir(), "inbox.sqlite3")
+		hub := placementOutboxHub(t, storePath)
+		request := durableSpawnRequest()
+		task, _, err := hub.inbox.store.claimSpawn(t.Context(), request, "test-job", "parent", time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		trace := placementTraceSnapshot()
+		hub.notePlacementTrace(task, trace, "base")
+		if _, err := hub.inbox.store.db.Exec(`CREATE TRIGGER fail_snapshot_update BEFORE UPDATE ON spawn_placement_snapshots BEGIN SELECT RAISE(FAIL, 'injected snapshot failure'); END`); err != nil {
+			t.Fatal(err)
+		}
+		hub.notePlacementTrace(task, trace, "deferred")
+		if _, err := hub.inbox.store.db.Exec(`DROP TRIGGER fail_snapshot_update`); err != nil {
+			t.Fatal(err)
+		}
+		path := hub.inbox.deferredPath
+		hub.inbox.deferredPath = t.TempDir()
+		hub.notePlacementTrace(task, trace, "newer")
+		hub.inbox.deferredPath = path
+		if err := hub.Close(); err != nil {
+			t.Fatal(err)
+		}
+		hub = placementOutboxHub(t, storePath)
+		hub.retryDeferredTraceSaves()
+		_, delivery, _, err := hub.inbox.store.spawnPlacementSnapshot(t.Context(), request.RequestID, task.Attempt)
+		if err != nil || delivery != "newer" {
+			t.Fatalf("old deferred save replaced delivery settings: %q err=%v", delivery, err)
+		}
+	})
+	t.Run("ambiguous legacy trace is retained", func(t *testing.T) {
+		hk := placementOutboxServer(t)
+		hub := placementOutboxHub(t, filepath.Join(t.TempDir(), "inbox.sqlite3"))
+		request := durableSpawnRequest()
+		task := boundSpawnTask(t, hub, request)
+		old, _ := json.Marshal(placementTraceSnapshot())
+		if err := hub.inbox.store.saveSpawnPlacementSnapshot(t.Context(), request.RequestID, task.Attempt, old, ""); err != nil {
+			t.Fatal(err)
+		}
+		newer := placementTraceSnapshot()
+		newer.Chosen = "machine-b"
+		payload, _ := json.Marshal(newer)
+		legacy, _ := json.Marshal([]placementDeferredSave{{RequestID: request.RequestID, Attempt: task.Attempt, Payload: payload}})
+		if err := os.WriteFile(hub.inbox.deferredPath, legacy, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		outcome := hubSpawnOutcome{RC: 70, Stage: "launch", Reason: "spawn_failed", Host: "machine-a", NodeResult: true}
+		if changed, err := hub.inbox.store.completeSpawn(t.Context(), task, outcome, time.Now()); err != nil || !changed {
+			t.Fatalf("commit result: changed=%v err=%v", changed, err)
+		}
+		// A previously spooled record must wait too; a spool flush must not
+		// bypass the conflicting trace.
+		t.Setenv("HANDOFFKEEP_URL", "http://127.0.0.1:1")
+		hub.enqueueFinishedPlacementRecord(t.Context(), task, fleet.PlacementRecord{JobID: task.Job, Attempt: task.Attempt, Outcome: "failed", Reason: "spawn_failed"}, "")
+		t.Setenv("HANDOFFKEEP_URL", hk.server.URL)
+		hub.flushPlacementRecords(t.Context())
+		if records := hk.records(); len(records) != 0 {
+			t.Fatalf("ambiguous trace produced %d placement records", len(records))
+		}
+		if _, err := os.Stat(hub.inbox.deferredPath); err != nil {
+			t.Fatalf("ambiguous deferred trace was lost: %v", err)
+		}
+		app, err := hub.placementRecordApp("")
+		if err != nil || !app.PlacementSpooled(task.Job, task.Attempt) {
+			t.Fatalf("conflicting placement record was not retained: %v", err)
+		}
+	})
 }
 
 func TestPlacementDeferredSavePreservesUnreadableFile_t4581(t *testing.T) {
@@ -601,6 +749,56 @@ func TestPlacementDeferredSavePreservesUnreadableFile_t4581(t *testing.T) {
 	if err != nil || json.Unmarshal(got, &saves) != nil || len(saves) != 1 || saves[0].RequestID != "request" {
 		t.Fatalf("deferred save did not resume after repair: err=%v", err)
 	}
+	t.Run("unrelated dispatch", func(t *testing.T) {
+		t.Setenv("XDG_STATE_HOME", t.TempDir())
+		newDispatchPlacementHK(t)
+		config := HubServerConfig{Tokens: map[string]string{"operator": t14OperatorToken, "desktop": "node-token"}, InboxStorePath: filepath.Join(t.TempDir(), "inbox.sqlite3")}
+		hub := dispatchPlacementHub(t, config, t.TempDir(), nil)
+		if err := os.WriteFile(hub.inbox.deferredPath, original, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		server := httptest.NewServer(hub.Handler())
+		defer server.Close()
+		node := t14NamedNode(t, hub, server, "desktop", true, true)
+		hub.startSpawnCoordinator(t.Context())
+		request := durableSpawnRequest()
+		status, _, _ := t14HTTP(t, http.MethodPost, server.URL+"/v1/spawns", t14OperatorToken, request)
+		if status != http.StatusAccepted {
+			t.Fatalf("submission status=%d", status)
+		}
+		message := t14ReadNodeSpawn(t, node)
+		if message.Type != "job.spawn" {
+			t.Fatalf("unrelated spawn did not dispatch: %s", message.Type)
+		}
+		if got, err := os.ReadFile(hub.inbox.deferredPath); err != nil || string(got) != string(original) {
+			t.Fatalf("unreadable deferred data was not preserved: err=%v", err)
+		}
+	})
+	t.Run("retry with a durable snapshot", func(t *testing.T) {
+		placementOutboxServer(t)
+		hub := placementOutboxHub(t, filepath.Join(t.TempDir(), "inbox.sqlite3"))
+		request := durableSpawnRequest()
+		task := boundSpawnTask(t, hub, request)
+		if err := hub.inbox.store.saveSpawnPlacementSnapshot(t.Context(), request.RequestID, task.Attempt, payload, ""); err != nil {
+			t.Fatal(err)
+		}
+		outcome := hubSpawnOutcome{RC: 70, Stage: "launch", Reason: "spawn_failed", Host: "machine-a", Retryable: true, NodeResult: true}
+		if changed, err := hub.inbox.store.completeSpawn(t.Context(), task, outcome, time.Now()); err != nil || !changed {
+			t.Fatalf("commit result: changed=%v err=%v", changed, err)
+		}
+		if err := os.WriteFile(hub.inbox.deferredPath, original, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		server := httptest.NewServer(hub.Handler())
+		defer server.Close()
+		status, _, _ := t14HTTP(t, http.MethodPost, server.URL+"/v1/spawns", t14OperatorToken, request)
+		if status != http.StatusAccepted {
+			t.Fatalf("replay with a durable snapshot was blocked: status=%d", status)
+		}
+		if got, err := os.ReadFile(hub.inbox.deferredPath); err != nil || string(got) != string(original) {
+			t.Fatalf("unreadable deferred data was not preserved: err=%v", err)
+		}
+	})
 }
 
 func TestPendingPlacementTraceDoesNotMaskFinalResult_t4581(t *testing.T) {

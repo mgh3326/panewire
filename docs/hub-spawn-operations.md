@@ -236,6 +236,13 @@ immutable placement record after the terminal result, and retries delivery
 without holding a placement or node-dispatch slot. A resumed attempt keeps its
 predecessor's finished record while it starts a fresh trace.
 
+If the deferred placement-trace file cannot be read, the hub preserves it and
+warns; requests with a durable snapshot can still dispatch or replay. Delivery
+from snapshots waits for the file to be repaired. A replay without a saved
+snapshot returns `store_unavailable` until the hub can recover its trace. A
+legacy deferred trace that conflicts with a different snapshot remains on disk
+for reconciliation instead of overwriting it or posting an incomplete record.
+
 The coordinator scans past occupied node slots. It expires a bound request at
 its absolute deadline without waiting for the node, releases its reservation,
 and reports a retryable timeout. It also returns an unsent binding to placement
