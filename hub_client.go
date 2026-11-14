@@ -231,17 +231,16 @@ type HubClient struct {
 	// nodeHubClose is the job-ledger side of a hub close (intent, watcher);
 	// nil is nodeFleetHubClose. A fixture seam.
 	nodeHubClose nodeHubCloseLedger
-	// hubCloseFences holds, per job, the watch lock the node took for a close
-	// admitted with no watcher running, until the close is settled.
-	hubCloseFenceMu sync.Mutex
-	hubCloseFences  map[string]func()
-	nodeGitLockWait time.Duration // fixture seam; zero is nodeGitOpLockWait.
-	busyRelayMu     sync.Mutex
-	busyRelay       *relayBusyManager
-	relayCommand    relayCommandRunner   // fixture seam for agent get/wait.
-	relayEmitter    func(hubClientEvent) // fixture/connection-owned writer.
-	relayRecvSeqMu  sync.Mutex
-	relayRecvSeq    int64 // assigned synchronously by the hub read loop.
+	// hubCloseWatchersReady replaces the live-watcher check behind
+	// close_ops_v1 (fleet.HubCloseWatchersReady); a fixture seam.
+	hubCloseWatchersReady func(ctx context.Context) bool
+	nodeGitLockWait       time.Duration // fixture seam; zero is nodeGitOpLockWait.
+	busyRelayMu           sync.Mutex
+	busyRelay             *relayBusyManager
+	relayCommand          relayCommandRunner   // fixture seam for agent get/wait.
+	relayEmitter          func(hubClientEvent) // fixture/connection-owned writer.
+	relayRecvSeqMu        sync.Mutex
+	relayRecvSeq          int64 // assigned synchronously by the hub read loop.
 	// inboundHandled is a fixture seam the inbound dispatcher calls after
 	// each queued frame it ran; production leaves it nil.
 	inboundHandled func(hubOutboundMessage)
@@ -2029,7 +2028,7 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 	// that does not know the capabilities field drops the whole hello (see
 	// docs/r26-hub-spawn.md "Rollout order and rollback"), so the hello ack timer below re-sends it
 	// without them rather than leaving this node off the fleet.
-	if err := client.writeHello(ctx, peer, hubSpawnCapabilities); err != nil {
+	if err := client.writeHello(ctx, peer, client.helloCapabilities(ctx)); err != nil {
 		return nil, err
 	}
 	client.setRelayEmitter(func(event hubClientEvent) { _ = peer.write(ctx, hubClientWireEvent(event)) })
@@ -2172,7 +2171,7 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 				// the full hello once more; a hub that rejects capabilities
 				// drops it and keeps the record it already has.
 				capsResent = true
-				if err := client.writeHello(ctx, peer, hubSpawnCapabilities); err != nil {
+				if err := client.writeHello(ctx, peer, client.helloCapabilities(ctx)); err != nil {
 					return nil, err
 				}
 				// A repeated hello resets the hub's job and host state for

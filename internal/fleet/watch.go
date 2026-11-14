@@ -190,6 +190,13 @@ func (a *App) watch(ctx context.Context, args []string) error {
 		return fail(exitUsage, "invalid watch job")
 	}
 	id := args[0]
+	// First of all, before any lock: this process understands hub-close
+	// intents (hub_close_watchers.go), so the node may advertise close ops.
+	if remove, e := a.recordWatcherCaps(id); e != nil {
+		return e
+	} else {
+		defer remove()
+	}
 	lock, e := os.OpenFile(filepath.Join(a.Jobs, id, ".panewire-watch.lock"), os.O_CREATE|os.O_RDWR, 0600)
 	if e != nil {
 		return e

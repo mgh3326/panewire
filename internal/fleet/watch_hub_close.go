@@ -125,37 +125,6 @@ func LockJobEndContext(ctx context.Context, jobDir string) (func(), error) {
 	return func() { f.Close() }, nil
 }
 
-// FenceWatcher takes the job's watch lock for the node, for a close admitted
-// with no watcher running: while the node holds it, any watcher started for
-// the job, of any binary (an older one launched before an upgrade that had
-// not taken its lock yet), finds the lock held and exits at once, so none can
-// race the close. The node holds it until the close is settled. busy is true
-// when a watcher took the lock first.
-func FenceWatcher(jobDir string) (release func(), busy bool, err error) {
-	f, e := secureOpen(filepath.Join(jobDir, ".panewire-watch.lock"), true, nil)
-	if e != nil {
-		return nil, false, e
-	}
-	if !tryLock(f) {
-		f.Close()
-		return nil, true, nil
-	}
-	return func() { f.Close() }, false, nil
-}
-
-// StartWatcher starts the job's re-armed watcher in the herdr session of its
-// receipt, for a job the node fenced whose close then closed nothing: the job
-// lives on and needs its watcher back.
-func StartWatcher(jobs, job string) error {
-	a := &App{Jobs: jobs, Runner: ExecRunner{}, Now: time.Now, Out: os.Stderr, Err: os.Stderr}
-	j, e := a.job(job)
-	if e != nil {
-		return e
-	}
-	a.HerdrSession = str(j.Receipt, "herdr_session")
-	return a.startWatchMode(job, true)
-}
-
 // HubCloseWatcher is what runs as a job's watcher, for a hub close.
 type HubCloseWatcher int
 
@@ -411,7 +380,12 @@ func PendingHubCloseJobs(jobs string) ([]string, error) {
 		if err != nil || !slices.ContainsFunc(names, func(n os.DirEntry) bool { return strings.HasSuffix(n.Name(), "-"+hubCloseIntentKind+".json") }) {
 			continue
 		}
-		j, err := a.job(entry.Name())
+		evs, err := a.events(entry.Name())
+		if err != nil {
+			continue
+		}
+		// Reaped is folded in ledger sequence order, as settlement folds it.
+		j, err := foldJob(entry.Name(), ledgerOrder(evs))
 		if err != nil {
 			continue
 		}
