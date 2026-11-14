@@ -173,3 +173,27 @@ func (h *HubServer) answerSpawnClaim(ctx context.Context, machine string, agent 
 func spawnFencedResult(node hubSpawnRequest, now time.Time) hubSpawnResult {
 	return hubSpawnResult{RequestID: node.RequestID, Machine: node.Machine, JobID: hubSpawnArg(node.Args, "--job"), RC: 124, Stage: "claim", Error: "deadline_not_started", Retryable: true, CompletedAt: &now}
 }
+
+// spawnGrantRowCount counts the rows a hub older than the start proof could
+// misread: every status with spawnGrantStatusSuffix.
+func (s *laneInboxStore) spawnGrantRowCount(parent context.Context) (int, error) {
+	ctx, done := s.op(parent)
+	defer done()
+	var n int
+	err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM spawn_operations WHERE status LIKE '%\_grant' ESCAPE '\'`).Scan(&n)
+	return n, err
+}
+
+// logSpawnGrantRows prints the *_grant row count at startup, so a rollout
+// script can gate a rollback on grant_rows=0.
+func (h *HubServer) logSpawnGrantRows() {
+	if h.inbox == nil || h.inbox.store == nil {
+		return
+	}
+	n, err := h.inbox.store.spawnGrantRowCount(h.closeCtx)
+	if err != nil {
+		h.logger.Warn("hub spawn grant rows unknown", "err", err)
+		return
+	}
+	h.logger.Info("hub spawn grant rows", "grant_rows", n, "spawn_grant_drain", h.spawnGrantDrain)
+}

@@ -1014,7 +1014,9 @@ func (t *directSpawnTransport) Spawn(ctx context.Context, req fleet.HubSpawnRequ
 	t.h.mu.Lock()
 	record := t.h.nodes[req.Machine]
 	oldNode := record != nil && record.agent != nil && record.state == "connected" && !record.capabilities["spawn_ops_v1"]
-	grantRequired := record != nil && record.capabilities[hubCapabilitySpawnGrant]
+	// A draining hub binds no new grant-required attempt; placement goes on
+	// and sends without a grant, as to a node without the capability.
+	grantRequired := !t.h.spawnGrantDrain && record != nil && record.capabilities[hubCapabilitySpawnGrant]
 	t.h.mu.Unlock()
 	if oldNode {
 		return fleet.HubSpawnReply{}, &fleet.HubError{Kind: "hub_spawn_capability_required"}

@@ -1,9 +1,11 @@
 package panewire
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -447,6 +449,9 @@ func TestSpawnGrantRequiredStatusHiddenFromOlderHubsAndClients_t4612(t *testing.
 	if stored := startProofStoredStatus(t, h, task.Request.RequestID); stored != "dispatching_grant" {
 		t.Fatalf("stored status=%q, want dispatching_grant", stored)
 	}
+	if n, err := h.inbox.store.spawnGrantRowCount(t.Context()); err != nil || n != 1 {
+		t.Fatalf("grant rows=%d err=%v, want 1", n, err)
+	}
 	if sent.Status != "dispatching" {
 		t.Fatalf("store read status=%q, want dispatching", sent.Status)
 	}
@@ -527,5 +532,51 @@ func TestSpawnLegacySentGrantRowIsNeverFenced_t4612(t *testing.T) {
 	}
 	if stored := startProofStoredStatus(t, h, task.Request.RequestID); stored != "dispatching" {
 		t.Fatalf("legacy-sent row stored=%q, want plain dispatching", stored)
+	}
+}
+
+// With --spawn-grant-drain, placement goes on, but a node with the grant
+// capability gets a plain binding and a frame with no start_by: no new
+// *_grant row appears.
+func TestSpawnGrantDrainBindsNoGrantRows_t4612(t *testing.T) {
+	retryHK(t)
+	h := startProofHub(t, filepath.Join(t.TempDir(), "inbox.sqlite3"))
+	h.spawnGrantDrain = true
+	server := httptest.NewServer(h.Handler())
+	defer server.Close()
+	desktop := startProofNode(t, h, server, "desktop", []string{"spawn_v2", "spawn_ops_v1", hubCapabilitySpawnGrant})
+	h.spawnNewApp = func(out, errout io.Writer) (*fleet.App, error) { return retryDispatchApp(t, out, errout), nil }
+	h.startSpawnCoordinator(t.Context())
+	request := durableSpawnRequest()
+	if status, _, _ := t14HTTP(t, http.MethodPost, server.URL+"/v1/spawns", t14OperatorToken, request); status != http.StatusAccepted {
+		t.Fatalf("submit returned HTTP %d", status)
+	}
+	frame := t14ReadNodeSpawn(t, desktop)
+	if frame.StartByMS != 0 {
+		t.Fatalf("draining hub sent start_by_ms=%d", frame.StartByMS)
+	}
+	if stored := startProofStoredStatus(t, h, request.RequestID); stored != "dispatching" {
+		t.Fatalf("draining hub stored %q, want plain dispatching", stored)
+	}
+	if n, err := h.inbox.store.spawnGrantRowCount(t.Context()); err != nil || n != 0 {
+		t.Fatalf("grant rows=%d err=%v, want 0", n, err)
+	}
+}
+
+// With --spawn-grant-drain a quota_stop starts no hand-off.
+func TestSpawnGrantDrainStartsNoQuotaHandOff_t4612(t *testing.T) {
+	f := newQuotaReplaceFixture(t, "reviewer", "mwr-1-p1")
+	f.hub.spawnGrantDrain = true
+	var logs bytes.Buffer
+	f.hub.logger = slog.New(slog.NewTextHandler(&logs, nil))
+	event := quotaStopEvent(f.job, f.stopPool)
+	event.Reason = "quota_stop"
+	f.hub.startQuotaReplacement("machine-a", event)
+	f.hub.spawnWorkers.Wait()
+	if !strings.Contains(logs.String(), "hub quota hand-off skipped while draining grant rows") {
+		t.Fatalf("no drain skip logged: %s", logs.String())
+	}
+	if reserved, err := f.hub.inbox.store.spawnJobReserved(t.Context(), "mwr-1-p1-q1"); err != nil || reserved {
+		t.Fatalf("draining hub reserved a successor: %v %v", reserved, err)
 	}
 }

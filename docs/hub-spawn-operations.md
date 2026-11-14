@@ -547,38 +547,43 @@ ungranted attempt.
 
 #### Rolling the hub back past this change, and forward again
 
-1. Before rolling back, check reviewer quota successors. On an older hub,
-   `quotaSuccessorSpawns` reads these rows, but `spawnMayStillRun` does not
-   know the `*_grant` values, so it skips them. A successor launched just
-   before the stop whose predecessor has no `replaced_by` pointer yet would
-   leave that predecessor marked lost with no link. Roll back only when this
-   returns no rows, or once each listed successor's predecessor shows its
-   pointer:
+An older hub's status-filtered queries skip `*_grant` rows (the table above),
+so it never starts one without a grant. Other older-hub paths look a row up
+by job or id and then read its status: `spawnStatusActive` (ladder
+`escalate-author` retries), `spawnMayStillRun` (reviewer quota successors)
+and `replaceQuotaStopped` (quota hand-offs). They would misread a `*_grant`
+row as not running. So an older hub starts only once no `*_grant` row is
+left. A rollback is a quiesced drain:
+
+1. Restart the newer hub with `--spawn-grant-drain` (a hub flag, read at
+   startup). While it is set, the hub:
+   - binds no new grant-required attempt. Placement goes on, and a node with
+     the grant capability gets a plain binding and a frame with no
+     `start_by_ms`, as a node without the capability does.
+   - starts no quota hand-off. A `quota_stop` is logged as
+     `hub quota hand-off skipped while draining grant rows` and gets no
+     successor.
+   The `*_grant` rows already there go on as before: they are granted,
+   fenced or settled from their nodes' answers.
+2. Wait until no `*_grant` row is left:
 
    ```sql
-   SELECT request_id, job, status FROM spawn_operations
-    WHERE job LIKE '%-q%' AND status LIKE '%\_grant' ESCAPE '\';
+   SELECT count(*) FROM spawn_operations WHERE status LIKE '%\_grant' ESCAPE '\';
    ```
 
-2. Roll back. You need no fence gate, drain or row edits. The older hub
-   leaves every `*_grant` row alone. Requests that were never sent, and those
-   sent to nodes without the capability, behave as before.
-3. Roll forward. The newer hub picks up the `*_grant` rows: it replays each
-   with a fresh `start_by_ms`, fences one that stays ungranted, and settles
-   from the node's answer otherwise.
+   Run it with `sqlite3 <inbox store>` or `psql`. Every hub start also logs it,
+   so a rollout script can gate on the line
+   `hub spawn grant rows grant_rows=<n> spawn_grant_drain=<bool>`.
+3. Only at 0, stop the newer hub and start the older one. If the count does
+   not reach 0 within the remaining landing deadlines (a granted attempt
+   whose node stays silent keeps its row), do not roll back: restart the
+   newer hub without the flag.
 
-Cost: while the older hub runs, those attempts are held. Their reservations
-and task roles stay taken, they do not move to another host, and an
-`GET /v1/spawns/<id>` served by the older hub shows the stored `*_grant`
-value. A spawn that a node already ran still finishes on the node, and its
-result is delivered on roll-forward. To see how many are held, run this
-against the hub database (`sqlite3 <inbox store>` or `psql`):
+Roll forward by starting the newer hub without the flag. Rows the older hub
+left in plain statuses stay plain and are never fenced (see provenance above).
 
-```sql
-SELECT status, count(*) FROM spawn_operations
- WHERE status IN ('bound_grant','dispatching_grant','reconciling_grant','deadline_exceeded_grant')
- GROUP BY status;
-```
+Cost: the drain waits for grant-required spawns in flight, bounded by their
+landing deadlines. Quota-stopped jobs get no successor while the flag is set.
 
 | Case | Test |
 |---|---|
@@ -587,6 +592,7 @@ SELECT status, count(*) FROM spawn_operations
 | A granted silent attempt keeps ownership and its reservation, also after a restart | `TestSpawnGrantedSilentAttemptKeepsOwnership_t4612` |
 | A hub restart's replay of a sent, ungranted attempt carries a fresh `start_by` and fences it | `TestSpawnRestartReplayFencesUngrantedAttempt_t4612` |
 | Bound and sent grant-required statuses match no v0.0.404 status query; reads and `GET /v1/spawns/<id>` show the refined value | `TestSpawnGrantRequiredStatusHiddenFromOlderHubsAndClients_t4612` |
+| `--spawn-grant-drain` binds no `*_grant` row (placement goes on without a grant) and starts no quota hand-off | `TestSpawnGrantDrainBindsNoGrantRows_t4612`, `TestSpawnGrantDrainStartsNoQuotaHandOff_t4612` |
 | A grant-required row an older hub moved to a plain status is never granted, fenced or given `start_by` | `TestSpawnLegacySentGrantRowIsNeverFenced_t4612` |
 | Coordinator placement on a real node: grant-required binding, recorded grant, delivered through the node's read loop | `TestSpawnGrantEndToEndWithRealNode_t4612` |
 | A committed fence settles on replay without a resend | `TestSpawnCommittedFenceSettlesOnReplayWithoutResend_t4612` |
