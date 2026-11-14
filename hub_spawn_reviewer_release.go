@@ -59,8 +59,9 @@ func (h *HubServer) releaseFinishedReviewerPane(ctx context.Context, app *fleet.
 
 // releaseFinishedReviewerHolder is the rule both callers share: the holder is a
 // reviewer spawn in succeeded or failed state, its hk record still claimed or
-// spawned, and its pane is present under its own id and label with a closable
-// status past the grace. source names the caller in the INFO line.
+// spawned, its pane present under its own id and label with a closable status
+// past the grace, and the job not waiting on an ESC answer. source names the
+// caller in the INFO line.
 func (h *HubServer) releaseFinishedReviewerHolder(ctx context.Context, app *fleet.App, spawn fleet.Spawn, holder hubSpawnTask, record map[string]any, probe heldProbe, source string) (closed bool, branch string, remaining time.Duration) {
 	if spawn.Role != reviewerRole || probe.state != heldPanePresent {
 		return false, "", 0
@@ -88,6 +89,14 @@ func (h *HubServer) releaseFinishedReviewerHolder(ctx context.Context, app *flee
 	if remaining = holder.Deadline.Add(h.unworkedLandingGrace).Sub(h.now()); remaining > 0 {
 		return false, "", remaining
 	}
+	// A reviewer that asked a question (an ESC the watcher recorded as
+	// job.waiting_decision) is idle because the question is open, not because
+	// its work ended: the watcher holds the job for up to six hours for an
+	// answer. Closing the pane here would destroy a live job, so the newest
+	// ledger event decides.
+	if h.jobAwaitingDecision(holder.Job) {
+		return false, "", 0
+	}
 	// The end_reason records why the record was written, so a lost reviewer job
 	// says whether its pane finished or stopped at a startup prompt.
 	if marked, _ := h.closeHeldPaneAndMarkLostBecause(ctx, app, holder, name, row, branch); !marked {
@@ -101,6 +110,18 @@ func (h *HubServer) releaseFinishedReviewerHolder(ctx context.Context, app *flee
 		"holder_request", holder.Request.RequestID, "holder_job", holder.Job, "holder_status", holder.Status,
 		"holder_host", spawnHolderHost(holder), "holder_pane", row.PaneID, "pane_status", row.AgentStatus)
 	return true, branch, 0
+}
+
+// jobAwaitingDecision reports that the job's newest ledger event is an open
+// decision wait: the node's watcher recorded job.waiting_decision when the
+// worker asked a question and holds the job for decisionTimeout (six hours)
+// for an answer. The node publishes the newest event kind in its active-job
+// heartbeat, so the hub reads the fact here without a node command.
+func (h *HubServer) jobAwaitingDecision(jobID string) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	job := h.jobs[jobID]
+	return job != nil && job.LastEventKind == "job.waiting_decision"
 }
 
 // runReviewerPaneRelease runs releaseFinishedReviewerSpawns once per

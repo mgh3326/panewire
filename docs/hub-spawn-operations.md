@@ -160,17 +160,23 @@ INFO line `hub closed a finished reviewer pane` with `branch`
 hold.
 
 The hub applies the same rule on its own, once every five minutes
-(`source=sweep`), to every live reviewer spawn: a placed `--role reviewer`
-operation whose job a node still reports active, whose hk record is still
-`claimed` or `spawned`, and whose pane has finished. A reviewer a daemon started
-(`mwr-*`) normally writes its own record through `done`; one that does not
-otherwise keeps an idle pane, a live record and its lane row until someone
-closes the pane by hand, and the node's ended-job sweep never reaches it (hk
-4658). Checks, grace, writes and the log line are the reclaim path's; only the
-`source` differs. The pass leaves the (task, role) reservation held, so the next
-submission for the key releases it through the terminal-record path exactly as
-for a reviewer that wrote its own record. A released job is no longer in a
-node's active list, so the next heartbeat ends the pass's interest in it.
+(`source=sweep`), to every live reviewer spawn: a succeeded placement whose job
+a node still reports active, whose hk record is still `claimed` or `spawned`,
+and whose pane has finished. A failed placement is outside that set; its holder
+is still released by a submission for the same key (above), which carries the
+proof that its pane never worked (hk 3179). The sweep also keeps any job whose
+newest ledger event is `job.waiting_decision`: the watcher records it when the
+worker asks a question and holds the job for an ESC answer for up to six hours
+(`decisionTimeout`), so that job's idle pane is an open question, not finished
+work. Otherwise the checks, grace, writes and log line are the reclaim path's;
+only the `source` differs. A reviewer a daemon started (`mwr-*`) normally
+writes its own record through `done`; one that does not otherwise keeps an idle
+pane, a live record and its lane row until someone closes the pane by hand, and
+the node's ended-job sweep never reaches it (hk 4658). The pass leaves the
+(task, role) reservation held, so the next submission for the key releases it
+through the terminal-record path exactly as for a reviewer that wrote its own
+record. A released job is no longer in a node's active list, so the next
+heartbeat ends the pass's interest in it.
 
 When only that grace keeps a reviewer holder (the pane is present, its status is
 closable and its hk job is `claimed` or `spawned`), the `task_role_claimed` 409
