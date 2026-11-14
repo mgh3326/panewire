@@ -686,7 +686,7 @@ func (a *App) spawnHub(ctx context.Context, s Spawn, brief string, c *placeCandi
 		if err == nil && reply.RC == 0 && reply.Error == "" && reply.Status == "" && reply.Pane != "" && s.placement != nil && !s.placement.placed {
 			s.placement.started = true
 			s.placement.placed = true
-			s.placement.execution = placementExecution{Host: c.name}
+			s.placement.execution = PlacementExecution{Host: c.name}
 		}
 		if err != nil {
 			var he *HubError
@@ -697,9 +697,16 @@ func (a *App) spawnHub(ctx context.Context, s Spawn, brief string, c *placeCandi
 				// retry with an absolute --report the node would refuse anyway.
 				return candResult{stop: fail(exitConfig, "hub rejected the spawn request (400 %s); if the hub predates the --report-relative capability, upgrade panewire on the hub, otherwise check the request fields", he.Code)}
 			}
-			return a.hubFailure(c.name, id, err, forced)
+			res := a.hubFailure(c.name, id, err, forced)
+			if res.undecided && s.placement != nil {
+				s.placement.undecided = true
+			}
+			return res
 		}
 		if reply.Status == "lost" || reply.Status == "pending" {
+			if s.placement != nil {
+				s.placement.undecided = true
+			}
 			return candResult{stop: fail(exitStateConflict, "hub spawn on %s is %s (request %s); the node may have started it", c.name, reply.Status, id)}
 		}
 		if reply.Error == "checkout_refused:busy" && attempt == 0 {
@@ -722,7 +729,7 @@ func (a *App) hubFailure(host, id string, err error, forced bool) candResult {
 	}
 	switch he.Kind {
 	case hubPending:
-		return candResult{stop: fail(exitStateConflict, "hub spawn on %s did not answer in time (request %s); the node may still be running it", host, id)}
+		return candResult{stop: fail(exitStateConflict, "hub spawn on %s did not answer in time (request %s); the node may still be running it", host, id), undecided: true}
 	case hubNoCapacity:
 		// Not connected is how a sleeping host looks: let placement wake it.
 		return candResult{unreachable: true, rc: exitPlacement, note: he.Kind}

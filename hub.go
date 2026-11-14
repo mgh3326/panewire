@@ -421,9 +421,24 @@ type HubServer struct {
 	quotaReplaceBudget time.Duration
 	spawnKick          chan struct{}
 	spawnWorkers       sync.WaitGroup
-	quotaRefresh       hubQuotaRefreshScheduler
-	spawnActions       hubSpawnActions
-	spawnAdmissions    hubSpawnAdmissions
+	// placementRecordClient is the App the outbox delivers hk placement
+	// records through; built on first use by placementRecordApp.
+	placementRecordClient *fleet.App
+	placementAppMu        sync.Mutex
+	// placementAppFn builds the delivery App in tests; nil uses fleet.New.
+	placementAppFn func() (*fleet.App, error)
+	// placementDeliveryKey is the delivery JSON the cached client was built
+	// for; a snapshot row with different settings gets a fresh App.
+	placementDeliveryKey string
+	// placementDeferredSaves holds trace saves the store refused; the flush
+	// retries the row insert so the spooled record they belong to is picked
+	// up instead of orphaned without a pending row. The same list is kept
+	// in the inbox's deferred file so a restart does not lose it.
+	placementDeferredSaves  []placementDeferredSave
+	placementDeferredLoaded bool
+	quotaRefresh            hubQuotaRefreshScheduler
+	spawnActions            hubSpawnActions
+	spawnAdmissions         hubSpawnAdmissions
 	// drain is the SIGTERM state (hub_drain.go).
 	drain hubDrain
 	// spawnOrphanProbed is when the hub last probed each stranded request's

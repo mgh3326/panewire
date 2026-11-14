@@ -66,6 +66,7 @@ func (s *laneInboxStore) ensureSpawnTasks() error {
 		`CREATE TABLE IF NOT EXISTS spawn_operations (request_id TEXT PRIMARY KEY,job TEXT NOT NULL,owner TEXT NOT NULL,fingerprint TEXT NOT NULL,payload TEXT NOT NULL,status TEXT NOT NULL,created_ms BIGINT NOT NULL,deadline_ms BIGINT NOT NULL,node_id TEXT UNIQUE,node_payload TEXT NOT NULL DEFAULT '',result TEXT NOT NULL DEFAULT '{}',trace_recorded INTEGER NOT NULL DEFAULT 0,last_run_ms BIGINT NOT NULL DEFAULT 0,attempt INTEGER NOT NULL DEFAULT 1)`,
 		`CREATE TABLE IF NOT EXISTS spawn_reservations (job TEXT PRIMARY KEY,request_id TEXT NOT NULL UNIQUE,task_role TEXT UNIQUE)`,
 		`CREATE TABLE IF NOT EXISTS spawn_notifications (event_id TEXT PRIMARY KEY,request_id TEXT NOT NULL,job TEXT NOT NULL,owner TEXT NOT NULL,result TEXT NOT NULL,created_ms BIGINT NOT NULL,delivered INTEGER NOT NULL DEFAULT 0,telemetry_recorded INTEGER NOT NULL DEFAULT 0)`,
+		`CREATE TABLE IF NOT EXISTS spawn_placement_snapshots (request_id TEXT NOT NULL,attempt INTEGER NOT NULL,payload TEXT NOT NULL,recorded INTEGER NOT NULL DEFAULT 0,delivery TEXT NOT NULL DEFAULT '',PRIMARY KEY(request_id,attempt))`,
 	} {
 		if _, err := s.db.ExecContext(ctx, statement); err != nil {
 			return err
@@ -78,6 +79,11 @@ func (s *laneInboxStore) ensureSpawnTasks() error {
 			if err := ignoreDuplicateColumn(err); err != nil {
 				return err
 			}
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `ALTER TABLE spawn_placement_snapshots ADD COLUMN delivery TEXT NOT NULL DEFAULT ''`); err != nil {
+		if err := ignoreDuplicateColumn(err); err != nil {
+			return err
 		}
 	}
 	return nil
