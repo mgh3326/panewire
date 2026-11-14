@@ -547,3 +547,52 @@ func TestWatcherFoldsHubCloseInLedgerOrder_t4652(t *testing.T) {
 	}
 	wantHubCloseFinished(t, a, h)
 }
+
+// A reclaim into pane B whose receipt's created_at is earlier than the old
+// receipt A (a clock stepped backwards): settlement proves absence on the
+// sequence-current receipt B, in B's session, never on A. With B listed an
+// unknown close stays pending though A is gone.
+func TestSettlementUsesTheSequenceCurrentReceipt_t4652(t *testing.T) {
+	a, h := hubCloseFixture(t)
+	body, _ := json.Marshal(map[string]any{"kind": "job.spawned", "created_at": "2020-01-01T00:00:00Z", "payload": map[string]any{
+		"pane_id": "w:pB", "label": "agent-b", "role": "reviewer", "herdr_session": "new-session"}})
+	if e := os.WriteFile(filepath.Join(a.Jobs, "j", "events", "90000-job.spawned.json"), body, 0o600); e != nil {
+		t.Fatal(e)
+	}
+	in := HubCloseIntent{RequestID: "close-1", Attempt: "90000-job.spawned.json", Pane: "w:pB", Label: "agent-b", EndReason: hubCloseReason}
+	body, _ = json.Marshal(map[string]any{"kind": hubCloseIntentKind, "created_at": "2020-01-01T00:00:01Z", "payload": map[string]any{
+		"request_id": in.RequestID, "attempt": in.Attempt, "pane_id": in.Pane, "label": in.Label, "end_reason": in.EndReason}})
+	if e := os.WriteFile(filepath.Join(a.Jobs, "j", "events", "90001-"+hubCloseIntentKind+".json"), body, 0o600); e != nil {
+		t.Fatal(e)
+	}
+	writeJobCloseOp(t, a, CloseOp{RequestID: in.RequestID, Attempt: in.Attempt, State: CloseOpUnknown})
+	sessions := []string{}
+	listed := func(_ context.Context, session, pane string) (bool, error) {
+		sessions = append(sessions, session+" "+pane)
+		return pane == "w:pB", nil // B still runs; A is gone
+	}
+	settle := HubCloseSettlement{App: a, PaneListed: listed}
+	if st, e := settle.Settle(context.Background(), "j"); e != nil || st != HubClosePending {
+		t.Fatalf("settle = %v, %v; want pending while B is listed", st, e)
+	}
+	if len(sessions) != 1 || sessions[0] != "new-session w:pB" {
+		t.Fatalf("absence checked on %v, want B in its own session", sessions)
+	}
+	if str(h.record(t, "j"), "state") == "lost" {
+		t.Fatal("lost written while the sequence-current pane runs")
+	}
+}
+
+// An intent recorded before the node's crash, with no journal directory yet,
+// is still found by the daemon pass.
+func TestPendingHubCloseJobsWithoutAJournal_t4652(t *testing.T) {
+	a, _ := hubCloseFixture(t)
+	recordHubClose(t, a, liveIntent(t, a))
+	if _, e := os.Stat(filepath.Join(a.Jobs, "j", CloseOpDir)); !os.IsNotExist(e) {
+		t.Fatalf("journal directory present: %v", e)
+	}
+	jobs, e := PendingHubCloseJobs(a.Jobs)
+	if e != nil || len(jobs) != 1 || jobs[0] != "j" {
+		t.Fatalf("pending = %v, %v; want [j]", jobs, e)
+	}
+}

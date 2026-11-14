@@ -282,8 +282,12 @@ defers. Its rules, which hk 4632's caller relies on:
    `registered` or `closing` (one open close per attempt), and
    `watcher_incompatible` when the job's watcher is an older binary that
    does not defer (it holds the watch lock but not
-   `.panewire-watch-hubclose.lock`). A job with no watcher running is closed
-   normally: nothing waits on a watcher.
+   `.panewire-watch-hubclose.lock`). With no watcher running the node takes
+   the job's watch lock itself and holds it until the close is settled, so a
+   watcher started meanwhile, of any binary (an older one an upgrade left
+   launched but not yet locked included), finds it held and exits at once;
+   losing that race to a watcher answers `watcher_incompatible`. A close that
+   closed nothing drops the fence and starts the job's watcher again.
 2. **Order.** Both the node and the watcher fold the ledger in sequence
    order (the numeric `<seq>-` prefix of the event file name,
    `fleet.CompareLedgerNames`), never by timestamp, so a clock stepped
@@ -304,6 +308,8 @@ defers. Its rules, which hk 4632's caller relies on:
    under that lock — the newest one whose own request no cancellation
    closed, so a newer request that closed nothing hands the job back to an
    older unresolved one) reads the journal after fsyncing it:
+   - The job's receipt (pane, herdr session) and reaped state are folded in
+     the same ledger sequence order as the intent, never by timestamp.
    - `closed` proves the pane stopped. `gone` and `unknown` do only once a
      successful, strictly decoded `herdr pane list` in the receipt's herdr
      session shows the pane absent (a pane left as a plain shell is
@@ -327,7 +333,12 @@ defers. Its rules, which hk 4632's caller relies on:
    every `pane.close_op` answer (a new close, a replay of a final one),
    every `pane.close_status` and every `pane.close_release`, and the daemon
    runs a pass over every job with an open intent at node start and every
-   30 seconds (`runHubCloseSettle`). Every step is idempotent: a crash or
+   30 seconds (`runHubCloseSettle`). A job counts as pending from its intent
+   event alone, before its journal directory exists. Each step is bounded
+   (30 s, including the pane inventory read and the end-lock wait) and the
+   daemon pass runs outside the node's acting lock. Settlement loads no
+   `hosts.toml` or policy: it needs only the jobs root, the local quota
+   ledger, the node's hk store and herdr. Every step is idempotent: a crash or
    failure between the hk write, the lease release and the final event
    leaves the intent open, and the next step repeats what is left. So an
    accepted close is settled while the node daemon runs, with no further

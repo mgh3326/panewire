@@ -59,7 +59,15 @@ type fakeHubClose struct {
 	intents []fleet.HubCloseIntent
 	cancels []string
 	settled []string
+	started []string
+	state   fleet.HubCloseState
 	record  func(job string, in fleet.HubCloseIntent) error
+}
+
+func (f *fakeHubClose) Fence(dir string) (func(), bool, error) { return fleet.FenceWatcher(dir) }
+func (f *fakeHubClose) StartWatcher(job string) error {
+	f.started = append(f.started, job)
+	return nil
 }
 
 func (f *fakeHubClose) LockEnd(dir string) (func(), error) { return fleet.LockJobEnd(dir) }
@@ -77,7 +85,7 @@ func (f *fakeHubClose) RecordIntent(_ context.Context, job string, in fleet.HubC
 }
 func (f *fakeHubClose) Settle(_ context.Context, job string) (fleet.HubCloseState, error) {
 	f.settled = append(f.settled, job)
-	return fleet.HubCloseNone, nil
+	return f.state, nil
 }
 func (f *fakeHubClose) CancelIntent(_ context.Context, job, id string) error {
 	f.cancels = append(f.cancels, job+" "+id)
@@ -896,5 +904,33 @@ func TestCloseOpReleaseFencesAnUnregisteredRequest_t4652(t *testing.T) {
 	}
 	if len(ledger.cancels) != 1 || len(ledger.intents) != 0 || fake.called("pane", "close") != 0 {
 		t.Fatalf("cancels=%v intents=%d closes=%d", ledger.cancels, len(ledger.intents), fake.called("pane", "close"))
+	}
+}
+
+// With no watcher running the node holds the job's watch lock from admission
+// until the close is settled, so no watcher of any binary (an old one
+// launched before an upgrade included) can take the job meanwhile. A close
+// that closed nothing gives the job its watcher back.
+func TestCloseOpFencesTheWatchLockUntilSettled_t4652(t *testing.T) {
+	for _, final := range []fleet.HubCloseState{fleet.HubCloseSettled, fleet.HubCloseCancelled} {
+		inbox := t.TempDir()
+		client := closeOpNode(t, inbox, idlePaneHerdr())
+		ledger := &fakeHubClose{watcher: fleet.HubCloseWatcherNone, state: fleet.HubClosePending}
+		client.nodeHubClose = ledger
+		dir := filepath.Join(inbox, "jobs", closeOpJob)
+		wantCloseOp(t, client, "op-1", fleet.CloseOpClosed, false)
+		if _, busy, err := fleet.FenceWatcher(dir); err != nil || !busy {
+			t.Fatalf("watch lock not held by the node while settlement is pending (busy=%v err=%v)", busy, err)
+		}
+		ledger.state = final
+		wantCloseStatus(t, client, nodeCommandPaneCloseStatus, "op-1", fleet.CloseOpClosed, false)
+		release, busy, err := fleet.FenceWatcher(dir)
+		if err != nil || busy {
+			t.Fatalf("watch lock still held after settlement (busy=%v err=%v)", busy, err)
+		}
+		release()
+		if want := final == fleet.HubCloseCancelled; (len(ledger.started) == 1) != want {
+			t.Fatalf("state %v: watcher starts %v", final, ledger.started)
+		}
 	}
 }

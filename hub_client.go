@@ -230,7 +230,11 @@ type HubClient struct {
 	nodeCloseSettle    time.Duration         // fixture seam; zero is nodePaneCloseSettle.
 	// nodeHubClose is the job-ledger side of a hub close (intent, watcher);
 	// nil is nodeFleetHubClose. A fixture seam.
-	nodeHubClose    nodeHubCloseLedger
+	nodeHubClose nodeHubCloseLedger
+	// hubCloseFences holds, per job, the watch lock the node took for a close
+	// admitted with no watcher running, until the close is settled.
+	hubCloseFenceMu sync.Mutex
+	hubCloseFences  map[string]func()
 	nodeGitLockWait time.Duration // fixture seam; zero is nodeGitOpLockWait.
 	busyRelayMu     sync.Mutex
 	busyRelay       *relayBusyManager

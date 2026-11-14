@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -104,6 +105,55 @@ func LockJobEnd(jobDir string) (func(), error) {
 		return nil, e
 	}
 	return func() { f.Close() }, nil
+}
+
+// LockJobEndContext takes the job's end lock, waiting at most until ctx is
+// done, so a daemon step never blocks unbounded behind a slow holder.
+func LockJobEndContext(ctx context.Context, jobDir string) (func(), error) {
+	f, e := secureOpen(filepath.Join(jobDir, jobEndLock), true, nil)
+	if e != nil {
+		return nil, e
+	}
+	for !tryLock(f) {
+		select {
+		case <-ctx.Done():
+			f.Close()
+			return nil, ctx.Err()
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+	return func() { f.Close() }, nil
+}
+
+// FenceWatcher takes the job's watch lock for the node, for a close admitted
+// with no watcher running: while the node holds it, any watcher started for
+// the job, of any binary (an older one launched before an upgrade that had
+// not taken its lock yet), finds the lock held and exits at once, so none can
+// race the close. The node holds it until the close is settled. busy is true
+// when a watcher took the lock first.
+func FenceWatcher(jobDir string) (release func(), busy bool, err error) {
+	f, e := secureOpen(filepath.Join(jobDir, ".panewire-watch.lock"), true, nil)
+	if e != nil {
+		return nil, false, e
+	}
+	if !tryLock(f) {
+		f.Close()
+		return nil, true, nil
+	}
+	return func() { f.Close() }, false, nil
+}
+
+// StartWatcher starts the job's re-armed watcher in the herdr session of its
+// receipt, for a job the node fenced whose close then closed nothing: the job
+// lives on and needs its watcher back.
+func StartWatcher(jobs, job string) error {
+	a := &App{Jobs: jobs, Runner: ExecRunner{}, Now: time.Now, Out: os.Stderr, Err: os.Stderr}
+	j, e := a.job(job)
+	if e != nil {
+		return e
+	}
+	a.HerdrSession = str(j.Receipt, "herdr_session")
+	return a.startWatchMode(job, true)
 }
 
 // HubCloseWatcher is what runs as a job's watcher, for a hub close.
@@ -327,6 +377,15 @@ const (
 	HubCloseCancelled
 )
 
+// NewHubCloseSettlement builds the node's settlement from exactly what it
+// needs: the jobs root, the home holding the local quota ledger, the node's hk
+// store, its clock, its pane inventory reader and a warning sink. It loads no
+// hosts.toml or policy, so an unrelated configuration error never strands an
+// accepted close.
+func NewHubCloseSettlement(jobs, home string, store JobStore, now func() time.Time, listed func(ctx context.Context, session, pane string) (bool, error), warn io.Writer) HubCloseSettlement {
+	return HubCloseSettlement{App: &App{Jobs: jobs, Home: home, JobStore: store, Now: now, Runner: ExecRunner{}, Out: warn, Err: warn}, PaneListed: listed}
+}
+
 // Settle drives the job's current hub close one step, idempotently.
 func (s HubCloseSettlement) Settle(ctx context.Context, job string) (HubCloseState, error) {
 	out, err := s.App.settleHubClose(ctx, job, s.PaneListed)
@@ -346,7 +405,10 @@ func PendingHubCloseJobs(jobs string) ([]string, error) {
 		if !entry.IsDir() || !validID(entry.Name()) {
 			continue
 		}
-		if _, err := os.Stat(filepath.Join(jobs, entry.Name(), CloseOpDir)); err != nil {
+		// The intent is recorded before the journal directory exists, so
+		// the ledger's file names, which carry the event kind, decide.
+		names, err := os.ReadDir(filepath.Join(jobs, entry.Name(), "events"))
+		if err != nil || !slices.ContainsFunc(names, func(n os.DirEntry) bool { return strings.HasSuffix(n.Name(), "-"+hubCloseIntentKind+".json") }) {
 			continue
 		}
 		j, err := a.job(entry.Name())
@@ -408,14 +470,20 @@ func PaneListedIn(out []byte, pane string) (bool, error) {
 // another terminal record is kept, and the lease is still released and the
 // intent closed, since the pane is proven stopped.
 func (a *App) settleHubClose(ctx context.Context, id string, listed func(ctx context.Context, session, pane string) (bool, error)) (HubCloseState, error) {
-	unlock, e := LockJobEnd(filepath.Join(a.Jobs, id))
+	unlock, e := LockJobEndContext(ctx, filepath.Join(a.Jobs, id))
 	if e != nil {
 		return HubClosePending, e
 	}
 	defer unlock()
 	// The intent is chosen from the ledger read under the lock: the node may
-	// have recorded a newer one since the poll's snapshot.
-	j, e := a.job(id)
+	// have recorded a newer one since the poll's snapshot. The job (its
+	// receipt pane and session, reaped) is folded in the same sequence order
+	// as the intent, never by timestamp.
+	evs, e := a.events(id)
+	if e != nil {
+		return HubClosePending, e
+	}
+	j, e := foldJob(id, ledgerOrder(evs))
 	if e != nil {
 		return HubClosePending, e
 	}
