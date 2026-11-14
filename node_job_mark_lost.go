@@ -97,6 +97,10 @@ type nodeJobLedgerEvent struct {
 	kind, pane, label, role, task, session string
 	owner                                  string
 	keep                                   bool
+	// name is the event's file name (its place in the ledger); reason and
+	// final are a job.lost payload's.
+	name, reason string
+	final        bool
 }
 
 func nodeJobClaimKind(kind string) bool {
@@ -201,6 +205,8 @@ func readNodeJobLedgerEvents(job *os.Root) ([]nodeJobLedgerEvent, error) {
 				// TaskID is a string or a number in the ledger.
 				TaskID       any    `json:"task_id"`
 				HerdrSession string `json:"herdr_session"`
+				Reason       string `json:"reason"`
+				Final        bool   `json:"final"`
 			} `json:"payload"`
 		}
 		if json.Unmarshal(data, &event) != nil || event.Kind == "" {
@@ -217,7 +223,8 @@ func readNodeJobLedgerEvents(job *os.Root) ([]nodeJobLedgerEvent, error) {
 		case float64:
 			task = strconv.FormatFloat(id, 'f', -1, 64)
 		}
-		events = append(events, nodeJobLedgerEvent{kind: event.Kind, pane: event.Payload.PaneID, label: label, role: event.Payload.Role, task: task, owner: event.Payload.OwnerLane, keep: event.Payload.Keep, session: event.Payload.HerdrSession})
+		events = append(events, nodeJobLedgerEvent{kind: event.Kind, pane: event.Payload.PaneID, label: label, role: event.Payload.Role, task: task, owner: event.Payload.OwnerLane, keep: event.Payload.Keep, session: event.Payload.HerdrSession,
+			name: entry.Name(), reason: event.Payload.Reason, final: event.Payload.Final})
 	}
 	return events, nil
 }
