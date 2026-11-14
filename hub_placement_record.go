@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -549,6 +550,9 @@ func (h *HubServer) writePlacementDeferredSavesLocked() error {
 		err := os.Remove(path)
 		if err != nil && !os.IsNotExist(err) {
 			return err
+		}
+		if err == nil {
+			syncDirectoryBestEffort(filepath.Dir(path))
 		}
 		return nil
 	}
