@@ -25,7 +25,9 @@ shape; no op runs a shell, and no op takes a caller-chosen file path to write.
 The one report path an op reads (`job.done`) must be one of two fixed files in
 that job's directory. `job.close` and `job.reap` are issued by the hub after
 its own ownership checks, and the HTTP command endpoint refuses them for every
-caller, as it does `job.mark_lost`.
+caller, as it does `job.mark_lost`. The close operations
+(`pane.close_op`, `pane.close_status`, `pane.close_release`) are hub-issued in
+the same way.
 
 ## Task pane sweep
 
@@ -140,6 +142,50 @@ read-to-close gap remains, as in the ssh reap path.
 | `pane-gone` | No such pane; nothing to close. |
 
 A failed close answers `close_failed`. Acting ops run one at a time per node.
+
+### Close operations
+
+`pane.close_op` (hk 4594) is `pane.close` under a hub-chosen `request_id`
+(`^[A-Za-z0-9._:-]{1,128}$`), with every argument of `pane.close` plus
+`request_id`, all required (`allow_unnamed` included). The node journals the
+operation in the job's own directory, `jobs/<name>/close-ops/<request_id>.json`
+(mode 0600, written to a temporary file, fsynced, renamed), so its outcome
+survives a node restart. A name with no job directory answers
+`{"outcome":"not-a-job","replayed":false}` and closes nothing.
+
+The journal moves `registered` (before any herdr read) → `closing` (after
+every `pane.close` guard held, immediately before `herdr pane close`) → one
+final state:
+
+| Outcome | Meaning |
+|---|---|
+| `closed` | herdr reported the close done |
+| `refused` | the pane no longer matched (`pane-changed`); it is still running |
+| `gone` | the pane was absent before this operation reached `closing`: it vanished on its own |
+| `unknown` | the pane is absent after `closing` with no recorded result (a node restart or a failed herdr close in between) |
+
+The answer is `{"outcome":"<state>","replayed":<bool>}`. A repeat of a
+`request_id` whose state is final answers that state with `replayed:true` and
+does not touch herdr, so a lost acknowledgement is recovered by asking again.
+A repeat of one left `registered` or `closing` resumes it: a pane still present
+is closed again under the same guards; a pane absent after `closing` is
+`unknown`. A `request_id` names one attempt: after `refused`, a new attempt
+uses a new id. Reusing an id for another pane is `invalid_args`.
+
+`pane.close_status` (`request_id`, `name`) answers
+`{"state":"none"|<state>,"released":<bool>}`. `pane.close_release` takes the
+same arguments, marks a final operation released and answers the same shape;
+an operation still `registered` or `closing` stays unreleased until a repeated
+`pane.close_op` resolves it.
+
+An unreleased operation owns the job's ending: the job's watcher does not take
+its missing-pane fallback (plain `lost`) or its quota hand-over grace fallback
+while one exists in any state but `refused`, so the hub can write the record
+with its own reason and successor. An unreadable journal holds the watcher back
+too. The hub releases each operation once it has finished with the job; a
+24-hour backstop from the operation's last update lets the watcher act if it
+never does. A new journal error code, `journal_failed`, answers a journal read
+or write that failed; the operation then stays as last recorded.
 
 ### `pane.capture`
 
@@ -599,7 +645,7 @@ The HTTP command endpoint returns 200 for node-reported errors, 504 for `node_ti
 Node error codes are a closed set: `invalid_args`, `herdr_failed`,
 `close_failed`, `capture_failed`, `jobs_root_unset`, `work_root_unset`,
 `refresh_failed`, `done_failed`, `result_failed`, `mark_lost_failed`,
-`result_too_large`. A result must fit the hub's 32 KiB per-message limit; a
+`result_too_large`, `sweep_failed`, `journal_failed`. A result must fit the hub's 32 KiB per-message limit; a
 larger one answers `result_too_large`. The hub re-encodes each result through
 its op's shape, drops one outside it, and accepts an answer only from the
 machine and connection it sent the command to. An older node ignores

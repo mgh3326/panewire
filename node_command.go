@@ -76,7 +76,7 @@ func knownNodeCommandOp(op string) bool {
 	case nodeCommandAgentsList, nodeCommandPaneClose, nodeCommandPaneCapture, nodeCommandPaneRead,
 		nodeCommandWorktreeInspect, nodeCommandWorktreeList, nodeCommandWorktreePrepare, nodeCommandWorktreeRemove,
 		nodeCommandQuotaRefresh, nodeCommandJobDone, nodeCommandJobResult, nodeCommandJobMarkLost, nodeCommandPRStatus, nodeCommandJobClose, nodeCommandJobReap,
-		nodeCommandCheckoutPull, nodeCommandPaneSweep:
+		nodeCommandCheckoutPull, nodeCommandPaneSweep, nodeCommandPaneCloseOp, nodeCommandPaneCloseStatus, nodeCommandPaneCloseRelease:
 		return true
 	}
 	return false
@@ -86,7 +86,7 @@ func knownNodeCommandOp(op string) bool {
 // result. node_lost and node_timeout are hub-local and never on the wire.
 func validNodeCommandError(code string) bool {
 	switch code {
-	case "invalid_args", "herdr_failed", "close_failed", "capture_failed", "jobs_root_unset", "work_root_unset", "refresh_failed", "done_failed", "result_failed", "mark_lost_failed", "reap_failed", "result_too_large", "sweep_failed":
+	case "invalid_args", "herdr_failed", "close_failed", "capture_failed", "jobs_root_unset", "work_root_unset", "refresh_failed", "done_failed", "result_failed", "mark_lost_failed", "reap_failed", "result_too_large", "sweep_failed", "journal_failed":
 		return true
 	}
 	return false
@@ -197,23 +197,26 @@ func decodeNodeCommandStrict(raw []byte, target any) bool {
 // required: a zero value such as write:false or merged_after:0 is a decision
 // the caller must state, never a default for an omitted field.
 var nodeCommandArgFields = map[string][]string{
-	nodeCommandJobClose:        {"job", "lane", "outcome", "reason", "override"},
-	nodeCommandJobReap:         {"job", "lane", "force"},
-	nodeCommandPaneSweep:       {"age_s"},
-	nodeCommandAgentsList:      {},
-	nodeCommandPaneClose:       {"pane_id", "name", "agent_status", "cwd"},
-	nodeCommandPaneCapture:     {"pane_id", "name", "cwd", "merged_after", "write"},
-	nodeCommandPaneRead:        {"pane_id", "name", "cwd", "tail_lines"},
-	nodeCommandJobDone:         {"job", "report"},
-	nodeCommandJobResult:       {"job"},
-	nodeCommandJobMarkLost:     {"job", "pane_id", "label"},
-	nodeCommandWorktreeInspect: {"cwd"},
-	nodeCommandWorktreeList:    {"common"},
-	nodeCommandWorktreePrepare: {"origin", "mode", "branch", "sha", "fetch", "dir"},
-	nodeCommandWorktreeRemove:  {"cwd", "expect_head", "base", "regenerable"},
-	nodeCommandQuotaRefresh:    {"pool"},
-	nodeCommandPRStatus:        {"repo", "pr", "fresh"},
-	nodeCommandCheckoutPull:    {"checkout", "rev"},
+	nodeCommandJobClose:         {"job", "lane", "outcome", "reason", "override"},
+	nodeCommandJobReap:          {"job", "lane", "force"},
+	nodeCommandPaneSweep:        {"age_s"},
+	nodeCommandAgentsList:       {},
+	nodeCommandPaneClose:        {"pane_id", "name", "agent_status", "cwd"},
+	nodeCommandPaneCapture:      {"pane_id", "name", "cwd", "merged_after", "write"},
+	nodeCommandPaneRead:         {"pane_id", "name", "cwd", "tail_lines"},
+	nodeCommandJobDone:          {"job", "report"},
+	nodeCommandJobResult:        {"job"},
+	nodeCommandJobMarkLost:      {"job", "pane_id", "label"},
+	nodeCommandWorktreeInspect:  {"cwd"},
+	nodeCommandWorktreeList:     {"common"},
+	nodeCommandWorktreePrepare:  {"origin", "mode", "branch", "sha", "fetch", "dir"},
+	nodeCommandWorktreeRemove:   {"cwd", "expect_head", "base", "regenerable"},
+	nodeCommandQuotaRefresh:     {"pool"},
+	nodeCommandPRStatus:         {"repo", "pr", "fresh"},
+	nodeCommandCheckoutPull:     {"checkout", "rev"},
+	nodeCommandPaneCloseOp:      {"request_id", "pane_id", "name", "agent_status", "cwd", "allow_unnamed"},
+	nodeCommandPaneCloseStatus:  {"request_id", "name"},
+	nodeCommandPaneCloseRelease: {"request_id", "name"},
 }
 
 // nodeCommandHasFields reports whether raw is an object holding exactly the
@@ -273,6 +276,18 @@ func parseNodeCommandArgs(op string, raw json.RawMessage) (any, bool) {
 		var args nodePaneCloseArgs
 		valid := decodeNodeCommandStrict(raw, &args) && nodeCommandPaneIDPattern.MatchString(args.PaneID) && validNodeJobName(args.Name) && nodePaneClosableStatus[args.AgentStatus] && validNodeCommandPath(args.Cwd)
 		return args, valid
+	case nodeCommandPaneCloseOp:
+		var args nodePaneCloseOpArgs
+		return args, decodeNodeCommandStrict(raw, &args) && validNodePaneCloseOpArgs(args)
+	case nodeCommandPaneCloseStatus, nodeCommandPaneCloseRelease:
+		var args nodeCloseOpRefArgs
+		if !decodeNodeCommandStrict(raw, &args) || !validNodeCloseOpRefArgs(args) {
+			return nil, false
+		}
+		if op == nodeCommandPaneCloseRelease {
+			return nodeCloseOpReleaseArgs(args), true
+		}
+		return args, true
 	case nodeCommandPaneCapture:
 		var args nodePaneCaptureArgs
 		valid := decodeNodeCommandStrict(raw, &args) && nodeCommandPaneIDPattern.MatchString(args.PaneID) && validNodeJobName(args.Name) && validNodeCommandPath(args.Cwd) && args.MergedAfter >= 0
@@ -366,6 +381,14 @@ func canonicalNodeCommandResult(op string, raw json.RawMessage) (json.RawMessage
 	case nodeCommandPaneClose:
 		var result nodePaneCloseResult
 		valid = decodeNodeCommandStrict(raw, &result) && (result.Outcome == nodePaneClosed || result.Outcome == nodePaneChanged || result.Outcome == nodePaneGone)
+		target = result
+	case nodeCommandPaneCloseOp:
+		var result nodePaneCloseOpResult
+		valid = decodeNodeCommandStrict(raw, &result) && validNodePaneCloseOpResult(result)
+		target = result
+	case nodeCommandPaneCloseStatus, nodeCommandPaneCloseRelease:
+		var result nodeCloseOpStatusResult
+		valid = decodeNodeCommandStrict(raw, &result) && validNodeCloseOpStatusResult(result)
 		target = result
 	case nodeCommandPaneCapture:
 		var result nodePaneCaptureResult
@@ -732,6 +755,18 @@ func (client *HubClient) runNodeCommand(ctx context.Context, op string, raw json
 		client.nodeCommandMu.Lock()
 		defer client.nodeCommandMu.Unlock()
 		return client.nodePaneClose(ctx, args)
+	case nodePaneCloseOpArgs:
+		// The same one-at-a-time lock as pane.close: the journal and the
+		// close it records must not interleave with another acting command.
+		client.nodeCommandMu.Lock()
+		defer client.nodeCommandMu.Unlock()
+		return client.nodePaneCloseOp(ctx, args)
+	case nodeCloseOpRefArgs:
+		return client.nodePaneCloseStatus(args)
+	case nodeCloseOpReleaseArgs:
+		client.nodeCommandMu.Lock()
+		defer client.nodeCommandMu.Unlock()
+		return client.nodePaneCloseRelease(nodeCloseOpRefArgs(args))
 	case nodePaneCaptureArgs:
 		client.nodeCommandMu.Lock()
 		defer client.nodeCommandMu.Unlock()
@@ -897,6 +932,18 @@ func (client *HubClient) nodePaneMatchWithUnnamed(ctx context.Context, paneID, n
 // so an idle→working→idle bounce also refuses — leaves only that read-to-
 // close gap, which is no wider than the ssh reap's re-read then close.
 func (client *HubClient) nodePaneClose(ctx context.Context, args nodePaneCloseArgs) (any, string) {
+	result, code := client.nodePaneCloseWith(ctx, args, nil)
+	if code != "" {
+		return nil, code
+	}
+	return result, ""
+}
+
+// nodePaneCloseWith is nodePaneClose with beforeClose run after every guard
+// has held and immediately before `herdr pane close`; an error from it leaves
+// the pane open and answers close_failed. A close operation records its
+// closing state there (node_pane_close_op.go).
+func (client *HubClient) nodePaneCloseWith(ctx context.Context, args nodePaneCloseArgs, beforeClose func() error) (nodePaneCloseResult, string) {
 	// A blocked pane may be a worker waiting on an ESC answer, so the node
 	// closes one only when the job's own ledger names the reviewer role; the
 	// operator-credential command path cannot widen that (hk 3315).
@@ -907,7 +954,7 @@ func (client *HubClient) nodePaneClose(ctx context.Context, args nodePaneCloseAr
 	}
 	outcome, first, err := client.nodePaneMatchWithUnnamed(ctx, args.PaneID, args.Name, args.AgentStatus, args.Cwd, true, args.AllowUnnamed)
 	if err != nil {
-		return nil, "herdr_failed"
+		return nodePaneCloseResult{}, "herdr_failed"
 	}
 	if outcome != "" {
 		return nodePaneCloseResult{Outcome: outcome}, ""
@@ -928,11 +975,11 @@ func (client *HubClient) nodePaneClose(ctx context.Context, args nodePaneCloseAr
 	case <-timer.C:
 	case <-ctx.Done():
 		timer.Stop()
-		return nil, "herdr_failed"
+		return nodePaneCloseResult{}, "herdr_failed"
 	}
 	outcome, second, err := client.nodePaneMatchWithUnnamed(ctx, args.PaneID, args.Name, args.AgentStatus, args.Cwd, true, args.AllowUnnamed)
 	if err != nil {
-		return nil, "herdr_failed"
+		return nodePaneCloseResult{}, "herdr_failed"
 	}
 	if outcome != "" {
 		return nodePaneCloseResult{Outcome: outcome}, ""
@@ -943,8 +990,13 @@ func (client *HubClient) nodePaneClose(ctx context.Context, args nodePaneCloseAr
 	if !composerEmpty(second) {
 		return nodePaneCloseResult{Outcome: nodePaneChanged}, ""
 	}
+	if beforeClose != nil {
+		if err := beforeClose(); err != nil {
+			return nodePaneCloseResult{}, "close_failed"
+		}
+	}
 	if _, err := client.nodeHerdrRunnerFor(args.Name, args.PaneID)(ctx, "pane", "close", args.PaneID); err != nil {
-		return nil, "close_failed"
+		return nodePaneCloseResult{}, "close_failed"
 	}
 	return nodePaneCloseResult{Outcome: nodePaneClosed}, ""
 }

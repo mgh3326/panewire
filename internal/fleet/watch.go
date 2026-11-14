@@ -441,7 +441,14 @@ func (a *App) watch(ctx context.Context, args []string) error {
 			}
 		}
 
-		if handOff.active {
+		// A close the hub journalled on this node (close_journal.go) owns the
+		// job's ending until the hub releases it: the hub writes the record
+		// with its own reason and pointer, so neither fallback below consumes
+		// the terminal transition meanwhile. The journal is read after the
+		// pane was seen absent; a close the hub made is journalled before it
+		// runs, so an absence caused by it always finds its entry (hk 4594).
+		closeOwned := (handOff.active || missing >= 2) && CloseOpOwnsEnding(filepath.Join(a.Jobs, id), a.Now())
+		if handOff.active && !closeOwned {
 			if handOff.expired(a.Now(), paneAgent, present) {
 				return a.quotaStopLost(ctx, j, handOff.stop, false)
 			}
@@ -463,7 +470,7 @@ func (a *App) watch(ctx context.Context, args []string) error {
 		// An unresolved close intent is settled against hk first: the bare lost
 		// write below would end the job without the quota_stop record and close the
 		// intent with its event.
-		if missing >= 2 && !handOff.active && !quotaRetry {
+		if missing >= 2 && !handOff.active && !quotaRetry && !closeOwned {
 			if e := a.putJobRecord(ctx, id, map[string]any{"state": "lost", "at": a.Now().UTC()}); e != nil {
 				a.jobRecordFailed(ctx, id, "lost", e)
 			}

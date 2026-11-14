@@ -55,5 +55,11 @@ a fixed producer id per job, so repeat observations and hub restarts use the
 same durable relay record. A failed persistence attempt leaves the job eligible
 for a later observed exhaustion. The sweep does not close panes, change job
 records, release roles, or claim successors; the owner decides how to act.
-Automatic action and its recovery are follow-up hk 4594. The existing
+Automatic action and its recovery are follow-up hk 4594, in three steps: the
+node's pane-close operation journal, which a crash cannot confuse with a
+refused close or a pane that vanished on its own and which holds back the
+node watcher's own ending until the hub releases it
+([node-commands.md](node-commands.md), "Close operations"; shipped); the hub's
+durable end of reviewers and consults through it (hk 4632); and the
+crash-safe hand-over of implementers (hk 4633). The existing
 screen-triggered quota-stop handover is unchanged.
