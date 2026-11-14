@@ -34,7 +34,7 @@ func consultAuthorFixture(t *testing.T, family string) (*App, Spawn, *fakeQuota)
 	serveRouting(t, routingDocV1)
 	useFakeHK(t).SetTask("42", `{"id":42,"title":"implement (grade A, T1)","state":"ready","refs":{}}`)
 	putEvent(t, a, "author-job", "job.claim", map[string]any{"owner_lane": "owner", "task_id": "42", "t_level": "T1", "role": "builder"})
-	putEvent(t, a, "author-job", "job.spawned", map[string]any{"family": family, "profile": "opus", "role": "worker", "effort": "high"})
+	putEvent(t, a, "author-job", "job.spawned", map[string]any{"family": family, "profile": "opus", "role": "implementer", "effort": "high"})
 	return a, s, q
 }
 
