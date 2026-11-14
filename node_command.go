@@ -214,9 +214,9 @@ var nodeCommandArgFields = map[string][]string{
 	nodeCommandQuotaRefresh:     {"pool"},
 	nodeCommandPRStatus:         {"repo", "pr", "fresh"},
 	nodeCommandCheckoutPull:     {"checkout", "rev"},
-	nodeCommandPaneCloseOp:      {"request_id", "pane_id", "name", "agent_status", "cwd", "allow_unnamed"},
-	nodeCommandPaneCloseStatus:  {"request_id", "name"},
-	nodeCommandPaneCloseRelease: {"request_id", "name"},
+	nodeCommandPaneCloseOp:      {"request_id", "job", "pane_id", "name", "agent_status", "cwd", "allow_unnamed"},
+	nodeCommandPaneCloseStatus:  {"request_id", "job"},
+	nodeCommandPaneCloseRelease: {"request_id", "job"},
 }
 
 // nodeCommandHasFields reports whether raw is an object holding exactly the
@@ -939,9 +939,9 @@ func (client *HubClient) nodePaneClose(ctx context.Context, args nodePaneCloseAr
 	return result, ""
 }
 
-// nodePaneCloseWith is nodePaneClose with beforeClose run after every guard
-// has held and immediately before `herdr pane close`; an error from it leaves
-// the pane open and answers close_failed. A close operation records its
+// nodePaneCloseWith is nodePaneClose with beforeClose run after the first
+// guarded look and the settle, before the final look and `herdr pane close`;
+// an error from it leaves the pane open and answers close_failed. A close operation records its
 // closing state there (node_pane_close_op.go).
 func (client *HubClient) nodePaneCloseWith(ctx context.Context, args nodePaneCloseArgs, beforeClose func() error) (nodePaneCloseResult, string) {
 	// A blocked pane may be a worker waiting on an ESC answer, so the node
@@ -977,6 +977,13 @@ func (client *HubClient) nodePaneCloseWith(ctx context.Context, args nodePaneClo
 		timer.Stop()
 		return nodePaneCloseResult{}, "herdr_failed"
 	}
+	// The hook runs before the final look, so whatever it costs (a durable
+	// journal write) never widens the gap between that look and the close.
+	if beforeClose != nil {
+		if err := beforeClose(); err != nil {
+			return nodePaneCloseResult{}, "close_failed"
+		}
+	}
 	outcome, second, err := client.nodePaneMatchWithUnnamed(ctx, args.PaneID, args.Name, args.AgentStatus, args.Cwd, true, args.AllowUnnamed)
 	if err != nil {
 		return nodePaneCloseResult{}, "herdr_failed"
@@ -989,11 +996,6 @@ func (client *HubClient) nodePaneCloseWith(ctx context.Context, args nodePaneClo
 	}
 	if !composerEmpty(second) {
 		return nodePaneCloseResult{Outcome: nodePaneChanged}, ""
-	}
-	if beforeClose != nil {
-		if err := beforeClose(); err != nil {
-			return nodePaneCloseResult{}, "close_failed"
-		}
 	}
 	if _, err := client.nodeHerdrRunnerFor(args.Name, args.PaneID)(ctx, "pane", "close", args.PaneID); err != nil {
 		return nodePaneCloseResult{}, "close_failed"

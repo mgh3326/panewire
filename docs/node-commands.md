@@ -146,46 +146,66 @@ A failed close answers `close_failed`. Acting ops run one at a time per node.
 ### Close operations
 
 `pane.close_op` (hk 4594) is `pane.close` under a hub-chosen `request_id`
-(`^[A-Za-z0-9._:-]{1,128}$`), with every argument of `pane.close` plus
-`request_id`, all required (`allow_unnamed` included). The node journals the
-operation in the job's own directory, `jobs/<name>/close-ops/<request_id>.json`
-(mode 0600, written to a temporary file, fsynced, renamed), so its outcome
-survives a node restart. A name with no job directory answers
-`{"outcome":"not-a-job","replayed":false}` and closes nothing.
+(`^[A-Za-z0-9_:-][A-Za-z0-9._:-]{0,127}$`, never a leading dot) and a `job`:
+every argument of `pane.close` plus `request_id` and `job`, all required
+(`allow_unnamed` included). `job` names the job directory; `name` stays the
+herdr agent label the close guards match, which a spawn may set apart from the
+job id (`--job job-1 -l worker-a`). The node journals the operation in that
+job's directory, `jobs/<job>/close-ops/<request_id>.json` (mode 0600, written
+to a temporary file, fsynced, renamed), against the job's current attempt (the
+newest claim, spawn or re-prompt event), so its outcome survives a node
+restart. Two answers open no operation and close nothing: a `job` with no
+directory is `not-a-job`; a job whose watcher predates the journal (no
+`close-ops/.watcher-v1` marker, which every journal-aware watcher writes when it
+starts) is `unsupported`, because that watcher would not wait for the hub.
 
-The journal moves `registered` (before any herdr read) → `closing` (after
-every `pane.close` guard held, immediately before `herdr pane close`) → one
-final state:
+The journal moves `registered` → `closing` → one final state. `registered` is
+written under the journal lock (`close-ops/.lock`, an exclusive flock) before
+any herdr read. `closing` is written after the first guarded look and the
+settle, before the final look that immediately precedes `herdr pane close`, so
+the journal write never sits between that look and the close.
 
 | Outcome | Meaning |
 |---|---|
 | `closed` | herdr reported the close done |
 | `refused` | the pane no longer matched (`pane-changed`); it is still running |
-| `gone` | the pane was absent before this operation reached `closing`: it vanished on its own |
-| `unknown` | the pane is absent after `closing` with no recorded result (a node restart or a failed herdr close in between) |
+| `gone` | the pane was absent before the close could run: it vanished on its own |
+| `unknown` | the operation was found `closing` with no recorded result (a node restart or a failed herdr close); the close may have run, and the pane id may since name another pane |
+| `cancelled` | released while still `registered`; the pane was never touched |
+| `preempted` | the job's watcher had already committed its own ending of this attempt; nothing was closed |
 
 The answer is `{"outcome":"<state>","replayed":<bool>}`. A repeat of a
 `request_id` whose state is final answers that state with `replayed:true` and
 does not touch herdr, so a lost acknowledgement is recovered by asking again.
-A repeat of one left `registered` or `closing` resumes it: a pane still present
-is closed again under the same guards; a pane absent after `closing` is
-`unknown`. A `request_id` names one attempt: after `refused`, a new attempt
-uses a new id. Reusing an id for another pane is `invalid_args`.
+A repeat of one left `closing` answers `unknown`, also without touching herdr;
+one left `registered` resumes the guarded close. A `request_id` names one
+attempt: after `refused` or `unknown`, a new attempt uses a new id. Reusing an
+id for another pane is `invalid_args`.
 
-`pane.close_status` (`request_id`, `name`) answers
+`pane.close_status` (`request_id`, `job`) answers
 `{"state":"none"|<state>,"released":<bool>}`. `pane.close_release` takes the
-same arguments, marks a final operation released and answers the same shape;
-an operation still `registered` or `closing` stays unreleased until a repeated
-`pane.close_op` resolves it.
+same arguments, marks a final operation released (a `registered` one becomes
+`cancelled`) and answers the same shape; an operation left `closing` stays
+unreleased until a repeated `pane.close_op` settles it.
 
-An unreleased operation owns the job's ending: the job's watcher does not take
-its missing-pane fallback (plain `lost`) or its quota hand-over grace fallback
-while one exists in any state but `refused`, so the hub can write the record
-with its own reason and successor. An unreadable journal holds the watcher back
-too. The hub releases each operation once it has finished with the job; a
-24-hour backstop from the operation's last update lets the watcher act if it
-never does. A new journal error code, `journal_failed`, answers a journal read
-or write that failed; the operation then stays as last recorded.
+An unreleased operation of the watcher's current attempt on its pane owns the
+job's ending: in any state but `refused`, `cancelled` or `preempted`, the
+watcher does not take its missing-pane fallback (plain `lost`), its quota
+hand-over grace fallback, or its completion-deadline exit. An unreadable
+journal holds it back too. Each fallback commits its ending under the journal
+lock, after checking ownership there, and leaves `close-ops/.watcher-ended.json`
+naming the attempt, so a registration after it is `preempted`: the node and the
+watcher are separate processes, and whichever is second sees the other.
+
+An operation that closed the pane, or found it gone, settles the attempt even
+for a re-armed watcher that never saw the pane, and keeps the watch past its
+deadline until it is settled. After the hub releases such an operation, a
+record hk shows terminal is the hub's: the watcher only releases the lease. An
+hk record it cannot read is retried, not guessed live. The hub releases each
+operation once it has finished with the job; a 24-hour backstop from the
+operation's last update (or its release, for the hk retry) lets the watcher act
+if it never does. `journal_failed` answers a journal read or write that failed;
+the operation then stays as last recorded.
 
 ### `pane.capture`
 

@@ -3,6 +3,7 @@ package fleet
 import (
 	"context"
 	"encoding/json"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -45,11 +46,20 @@ func (a *App) events(id string) ([]Event, error) {
 	if !validID(id) {
 		return nil, fail(exitUsage, "invalid job id")
 	}
-	dir := filepath.Join(a.Jobs, id, "events")
+	return loadEvents(filepath.Join(a.Jobs, id, "events"))
+}
+
+// loadEvents reads a job's events directory in ledger order.
+func loadEvents(dir string) ([]Event, error) {
 	if e := noSymlinks(dir); e != nil {
 		return nil, e
 	}
-	entries, e := os.ReadDir(dir)
+	return loadEventsFS(os.DirFS(dir))
+}
+
+// loadEventsFS reads an events directory, given as fsys, in ledger order.
+func loadEventsFS(fsys fs.FS) ([]Event, error) {
+	entries, e := fs.ReadDir(fsys, ".")
 	if e != nil {
 		return nil, e
 	}
@@ -65,7 +75,7 @@ func (a *App) events(id string) ([]Event, error) {
 		if e != nil {
 			return nil, e
 		}
-		b, e := os.ReadFile(filepath.Join(dir, ent.Name()))
+		b, e := fs.ReadFile(fsys, ent.Name())
 		if e != nil {
 			return nil, e
 		}

@@ -194,6 +194,7 @@ type fakeHK struct {
 	putErrorBody           string
 	dropAfterCommit        bool
 	dropSpawnedAfterCommit bool
+	failGets               int // remaining job GETs answered 500
 }
 
 var jobRecordFields = []string{"state", "role", "label", "family", "profile", "model", "harness", "effort", "pool", "owner_lane", "parent_lane", "parent_job", "pane_id", "worktree", "report_doc", "report_sha256", "result", "end_reason", "selection"}
@@ -253,6 +254,11 @@ func (h *fakeHK) serve(w http.ResponseWriter, r *http.Request) {
 	if id, ok := strings.CutPrefix(r.URL.Path, "/v1/jobs/"); ok && id != "" {
 		switch r.Method {
 		case http.MethodGet:
+			if h.failGets > 0 {
+				h.failGets--
+				h.fail(w, 500, "unavailable")
+				return
+			}
 			if h.missing[id] > 0 {
 				h.missing[id]--
 				h.fail(w, 404, "not_found")

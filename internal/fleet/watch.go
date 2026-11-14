@@ -198,6 +198,11 @@ func (a *App) watch(ctx context.Context, args []string) error {
 	if !tryLock(lock) {
 		return nil
 	}
+	// The node opens close operations only for a job whose watcher honours
+	// them (close_journal.go); this one does.
+	if e := MarkJournalAwareWatcher(filepath.Join(a.Jobs, id)); e != nil {
+		a.warn("close journal marker for %s: %v", id, e)
+	}
 	timeout := time.Hour
 	if v := a.envOr("PANEWIRE_COMPLETION_TIMEOUT_S", "WRK_COMPLETION_TIMEOUT_S"); v != "" {
 		d, ok := timeoutValue(v)
@@ -396,12 +401,22 @@ func (a *App) watch(ctx context.Context, args []string) error {
 		// deadline to act once it is released. The journal is read after this
 		// poll's look at the pane; a close the hub made is journalled before
 		// it runs, so an absence caused by it always finds its entry (hk 4594).
+		// Only an operation on this attempt's pane counts. One that closed
+		// the pane, or found it gone, settles the attempt even for a rearmed
+		// watcher that never saw the pane, and keeps the watch alive past
+		// its deadline until the settling below has run.
 		jobDir := filepath.Join(a.Jobs, id)
-		closeOwned := CloseOpOwnsEnding(jobDir, j.Pane, a.Now())
+		attempt := AttemptKey(j.Events)
+		closeState := ReadCloseOpState(jobDir, j.Pane, attempt, a.Now())
+		closeOwned := closeState.Owns
+		closeSettling := closeState.PaneClosed && !present
+		if closeSettling {
+			seen = true
+		}
 		// An announced quota stop is watched through its hand-off grace, past
 		// the ordinary completion deadline: its fallback ends the job and
 		// releases the lease, which nothing else would.
-		if waiting == nil && !handOff.active && !quotaRetry && !closeOwned && a.Now().After(deadline) && (!pending || latePoll) {
+		if waiting == nil && !handOff.active && !quotaRetry && !closeOwned && !closeSettling && a.Now().After(deadline) && (!pending || latePoll) {
 			fmt.Fprintln(a.Err, "watch-expired: job stays live; quota retained")
 			return nil
 		}
@@ -451,7 +466,7 @@ func (a *App) watch(ctx context.Context, args []string) error {
 		}
 
 		if handOff.active && !closeOwned {
-			if handOff.expired(a.Now(), paneAgent, present) {
+			if handOff.expired(a.Now(), paneAgent, present) && a.commitWatcherEnding(jobDir, j, attempt) {
 				return a.quotaStopLost(ctx, j, handOff.stop, false)
 			}
 			if present && !handOff.unchanged(paneAgent) {
@@ -473,24 +488,67 @@ func (a *App) watch(ctx context.Context, args []string) error {
 		// write below would end the job without the quota_stop record and close the
 		// intent with its event.
 		if missing >= 2 && !handOff.active && !quotaRetry && !closeOwned {
-			// The hub released its close after ending the job itself: the
-			// record and the owner's notice are its, only the lease is left.
-			if CloseOpReleasedFor(jobDir, j.Pane) && a.hkJobEnded(ctx, id) {
+			switch a.settleMissingPane(ctx, jobDir, j, attempt, closeState) {
+			case missingPaneLeaseOnly:
+				return a.releaseQuota(ctx, j)
+			case missingPaneLost:
+				if e := a.putJobRecord(ctx, id, map[string]any{"state": "lost", "at": a.Now().UTC()}); e != nil {
+					a.jobRecordFailed(ctx, id, "lost", e)
+				}
+				if e = a.event(ctx, id, "job.lost", map[string]any{"pane_id": j.Pane}); e != nil {
+					return e
+				}
+				a.recordLostFailure(ctx, j)
 				return a.releaseQuota(ctx, j)
 			}
-			if e := a.putJobRecord(ctx, id, map[string]any{"state": "lost", "at": a.Now().UTC()}); e != nil {
-				a.jobRecordFailed(ctx, id, "lost", e)
-			}
-			if e = a.event(ctx, id, "job.lost", map[string]any{"pane_id": j.Pane}); e != nil {
-				return e
-			}
-			a.recordLostFailure(ctx, j)
-			return a.releaseQuota(ctx, j)
 		}
 		if e = a.Sleep(ctx, 5*time.Second); e != nil {
 			return e
 		}
 	}
+}
+
+type missingPaneAction int
+
+const (
+	missingPaneWait missingPaneAction = iota
+	missingPaneLeaseOnly
+	missingPaneLost
+)
+
+// settleMissingPane decides what the missing-pane fallback does. After the
+// hub released a close of this attempt, a record hk shows terminal is the
+// hub's: only the lease is left. An unreadable record is retried rather than
+// guessed live, until the ownership backstop from the release runs out.
+// Otherwise the fallback commits its plain lost ending under the journal lock,
+// losing to an operation registered meanwhile.
+func (a *App) settleMissingPane(ctx context.Context, jobDir string, j Job, attempt string, closeState CloseOpState) missingPaneAction {
+	// A host with no hk store has no record to wait for.
+	if _, e := a.jobStore(); closeState.Released && e == nil {
+		state, _, ok := a.hkJobState(ctx, j.ID)
+		if !ok && a.Now().Before(closeState.ReleasedAt.Add(closeOpOwnershipTTL)) {
+			return missingPaneWait
+		}
+		if state == "completed" || state == "lost" || state == "escalated" {
+			return missingPaneLeaseOnly
+		}
+	}
+	if a.commitWatcherEnding(jobDir, j, attempt) {
+		return missingPaneLost
+	}
+	return missingPaneWait
+}
+
+// commitWatcherEnding takes the journal lock and records this watcher's
+// ending of the attempt, unless a close operation owns it; a journal error
+// defers the ending to a later poll.
+func (a *App) commitWatcherEnding(jobDir string, j Job, attempt string) bool {
+	ok, err := CommitWatcherEnding(jobDir, j.Pane, attempt, a.Now())
+	if err != nil {
+		a.warn("close journal for %s: %v", j.ID, err)
+		return false
+	}
+	return ok
 }
 
 func workerEscalated(j Job) bool {

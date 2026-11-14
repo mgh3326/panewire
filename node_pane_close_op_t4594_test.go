@@ -5,26 +5,51 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/mgh3326/panewire/internal/fleet"
 )
 
-// closeOpNode is a node with a job directory for job-a and a fake herdr.
-func closeOpNode(t *testing.T, inbox string, fake *nodeFakeHerdr) *HubClient {
+// The job directory is jobs/job-1; herdr labels its pane job-a, as a spawn
+// with --job job-1 -l job-a does.
+const closeOpJob = "job-1"
+
+// seedCloseOpJob makes the job directory with one claim event (its attempt)
+// and, when aware, the marker a journal-aware watcher leaves.
+func seedCloseOpJob(t *testing.T, inbox string, aware bool) string {
 	t.Helper()
-	if err := os.MkdirAll(filepath.Join(inbox, "jobs", "job-a"), 0o700); err != nil {
+	dir := filepath.Join(inbox, "jobs", closeOpJob)
+	if err := os.MkdirAll(filepath.Join(dir, "events"), 0o700); err != nil {
 		t.Fatal(err)
 	}
+	claim := filepath.Join(dir, "events", "00001-job.claim.json")
+	if _, err := os.Stat(claim); err != nil {
+		if err := os.WriteFile(claim, []byte(`{"kind":"job.claim","created_at":"2026-11-14T00:00:00Z","payload":{}}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if aware {
+		if err := fleet.MarkJournalAwareWatcher(dir); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return dir
+}
+
+// closeOpNode is a node with a journal-aware job directory and a fake herdr.
+func closeOpNode(t *testing.T, inbox string, fake *nodeFakeHerdr) *HubClient {
+	t.Helper()
+	seedCloseOpJob(t, inbox, true)
 	return &HubClient{nodeHerdr: fake.run, nodeCloseSettle: time.Millisecond, jobsInboxRoot: inbox}
 }
 
 func closeOpArgs(id string) map[string]any {
-	return map[string]any{"request_id": id, "pane_id": "w1:p1", "name": "job-a", "agent_status": "idle", "cwd": "/work/a", "allow_unnamed": false}
+	return map[string]any{"request_id": id, "job": closeOpJob, "pane_id": "w1:p1", "name": "job-a", "agent_status": "idle", "cwd": "/work/a", "allow_unnamed": false}
 }
 
-func closeOpRef(id string) map[string]any { return map[string]any{"request_id": id, "name": "job-a"} }
+func closeOpRef(id string) map[string]any { return map[string]any{"request_id": id, "job": closeOpJob} }
 
 func idlePaneHerdr() *nodeFakeHerdr {
 	return &nodeFakeHerdr{agents: []string{nodeAgentList(nodeAgentJSON("w1:p1", "job-a", "idle", "/work/a"))}, read: nodeReapScreen("❯ ")}
@@ -36,16 +61,17 @@ func goneHerdr() *nodeFakeHerdr {
 
 func seedNodeCloseOp(t *testing.T, inbox, id, state string) {
 	t.Helper()
-	if err := os.MkdirAll(filepath.Join(inbox, "jobs", "job-a"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	root, err := os.OpenRoot(filepath.Join(inbox, "jobs", "job-a"))
+	root, err := os.OpenRoot(seedCloseOpJob(t, inbox, true))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer root.Close()
+	attempt, err := fleet.JobDirAttemptKey(root)
+	if err != nil {
+		t.Fatal(err)
+	}
 	now := time.Now().UTC()
-	if err := fleet.WriteCloseOp(root, fleet.CloseOp{RequestID: id, PaneID: "w1:p1", State: state, Created: now, Updated: now}); err != nil {
+	if err := fleet.WriteCloseOp(root, fleet.CloseOp{RequestID: id, PaneID: "w1:p1", Attempt: attempt, State: state, Created: now, Updated: now}); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -109,12 +135,28 @@ func TestCloseOpPaneVanishedIndependentlyIsGone_t4594(t *testing.T) {
 }
 
 // A node restart between the close and its record: the journal says closing,
-// the pane is absent, and the outcome is unknown — not gone, not closed.
+// and the outcome is unknown — not gone, not closed, not refused — without
+// touching herdr, whatever now holds the pane id: the original may be closed
+// and the id reused by another pane, even one with the same name and cwd.
 func TestCloseOpRestartBetweenCloseAndRecordIsUnknown_t4594(t *testing.T) {
 	inbox := t.TempDir()
 	seedNodeCloseOp(t, inbox, "op-1", fleet.CloseOpClosing)
 	wantCloseOp(t, closeOpNode(t, inbox, goneHerdr()), "op-1", fleet.CloseOpUnknown, false)
 	wantCloseOp(t, closeOpNode(t, inbox, goneHerdr()), "op-1", fleet.CloseOpUnknown, true)
+	for _, occupant := range []string{
+		nodeAgentJSON("w1:p1", "job-a", "idle", "/work/a"), // same identity
+		nodeAgentJSON("w1:p1", "other", "idle", "/work/b"), // reused by another
+	} {
+		seedNodeCloseOp(t, inbox, "op-reuse", fleet.CloseOpClosing)
+		fake := &nodeFakeHerdr{agents: []string{nodeAgentList(occupant)}, read: nodeReapScreen("❯ ")}
+		wantCloseOp(t, closeOpNode(t, inbox, fake), "op-reuse", fleet.CloseOpUnknown, false)
+		if len(fake.calls) != 0 {
+			t.Fatalf("replay of an interrupted close touched herdr: %v", fake.calls)
+		}
+		if err := os.Remove(filepath.Join(inbox, "jobs", closeOpJob, fleet.CloseOpDir, "op-reuse.json")); err != nil {
+			t.Fatal(err)
+		}
+	}
 
 	// A herdr close that failed leaves closing; a pane found absent after it
 	// is likewise unknown.
@@ -125,14 +167,75 @@ func TestCloseOpRestartBetweenCloseAndRecordIsUnknown_t4594(t *testing.T) {
 	}
 	wantCloseStatus(t, closeOpNode(t, inbox, goneHerdr()), nodeCommandPaneCloseRelease, "op-2", fleet.CloseOpClosing, false)
 	wantCloseOp(t, closeOpNode(t, inbox, goneHerdr()), "op-2", fleet.CloseOpUnknown, false)
+}
 
-	// An interrupted close whose pane is still there is closed again under
-	// the same guards.
-	seedNodeCloseOp(t, inbox, "op-3", fleet.CloseOpClosing)
-	again := idlePaneHerdr()
-	wantCloseOp(t, closeOpNode(t, inbox, again), "op-3", fleet.CloseOpClosed, false)
-	if again.called("pane", "close") != 1 {
-		t.Fatalf("calls=%v", again.calls)
+// closing is recorded before the final look at the pane, so the close still
+// re-reads the pane after the journal write: a pane that went back to work
+// during that write is refused, and one that vanished is gone.
+func TestCloseOpRechecksThePaneAfterRecordingClosing_t4594(t *testing.T) {
+	for _, test := range []struct {
+		second, outcome string
+	}{
+		{nodeAgentList(nodeAgentJSON("w1:p1", "job-a", "working", "/work/a")), fleet.CloseOpRefused},
+		{nodeAgentList(), fleet.CloseOpGone},
+		{nodeAgentList(nodeAgentJSON("w1:p1", "job-a", "idle", "/work/a")), fleet.CloseOpClosed},
+	} {
+		inbox := t.TempDir()
+		first := nodeAgentList(nodeAgentJSON("w1:p1", "job-a", "idle", "/work/a"))
+		fake := &nodeFakeHerdr{agents: []string{first, test.second}, read: nodeReapScreen("❯ ")}
+		client := closeOpNode(t, inbox, fake)
+		journal := filepath.Join(inbox, "jobs", closeOpJob, fleet.CloseOpDir, "op-1.json")
+		var stateAtSecondRead string
+		run := fake.run
+		client.nodeHerdr = func(ctx context.Context, args ...string) ([]byte, error) {
+			if len(args) >= 2 && args[0] == "agent" && args[1] == "list" && fake.called("agent", "list") == 1 {
+				raw, _ := os.ReadFile(journal)
+				stateAtSecondRead = string(raw)
+			}
+			return run(ctx, args...)
+		}
+		wantCloseOp(t, client, "op-1", test.outcome, false)
+		if !strings.Contains(stateAtSecondRead, `"state":"closing"`) {
+			t.Fatalf("closing not recorded before the final look: %s", stateAtSecondRead)
+		}
+	}
+}
+
+// The watcher's committed ending of the attempt preempts a registration: the
+// node closes nothing. A job whose watcher predates the journal gets no
+// operation at all.
+func TestCloseOpPreemptedAndUnsupported_t4594(t *testing.T) {
+	inbox := t.TempDir()
+	dir := seedCloseOpJob(t, inbox, true)
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	attempt, err := fleet.JobDirAttemptKey(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := fleet.CommitWatcherEnding(dir, "w1:p1", attempt, time.Now()); err != nil || !ok {
+		t.Fatalf("commit=%v err=%v", ok, err)
+	}
+	fake := idlePaneHerdr()
+	client := closeOpNode(t, inbox, fake)
+	wantCloseOp(t, client, "op-1", fleet.CloseOpPreempted, false)
+	wantCloseOp(t, client, "op-1", fleet.CloseOpPreempted, true)
+	if len(fake.calls) != 0 {
+		t.Fatalf("preempted operation touched herdr: %v", fake.calls)
+	}
+
+	old := t.TempDir()
+	seedCloseOpJob(t, old, false)
+	oldFake := idlePaneHerdr()
+	wantCloseOp(t, &HubClient{nodeHerdr: oldFake.run, nodeCloseSettle: time.Millisecond, jobsInboxRoot: old}, "op-1", nodeCloseOpUnsupported, false)
+	if len(oldFake.calls) != 0 {
+		t.Fatalf("unsupported job touched herdr: %v", oldFake.calls)
+	}
+	if _, err := os.Stat(filepath.Join(old, "jobs", closeOpJob, fleet.CloseOpDir, "op-1.json")); !os.IsNotExist(err) {
+		t.Fatalf("unsupported job journalled an operation: %v", err)
 	}
 }
 
@@ -143,6 +246,10 @@ func TestCloseOpBoundaries_t4594(t *testing.T) {
 	inbox := t.TempDir()
 	fake := idlePaneHerdr()
 	client := &HubClient{nodeHerdr: fake.run, nodeCloseSettle: time.Millisecond, jobsInboxRoot: inbox}
+	// A directory named after the pane label is not the job's.
+	if err := os.MkdirAll(filepath.Join(inbox, "jobs", "job-a"), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	wantCloseOp(t, client, "op-1", nodeCaptureNotAJob, false)
 	if fake.called("pane", "close") != 0 {
 		t.Fatal("closed a pane with no job directory to journal in")
@@ -155,7 +262,9 @@ func TestCloseOpBoundaries_t4594(t *testing.T) {
 		t.Fatalf("reused id for another pane code=%q", code)
 	}
 	for _, bad := range []map[string]any{
-		{"request_id": "../x", "pane_id": "w1:p1", "name": "job-a", "agent_status": "idle", "cwd": "/work/a", "allow_unnamed": false},
+		{"request_id": ".op", "job": closeOpJob, "pane_id": "w1:p1", "name": "job-a", "agent_status": "idle", "cwd": "/work/a", "allow_unnamed": false},
+		{"request_id": "op-1", "job": "../x", "pane_id": "w1:p1", "name": "job-a", "agent_status": "idle", "cwd": "/work/a", "allow_unnamed": false},
+		{"request_id": "../x", "job": closeOpJob, "pane_id": "w1:p1", "name": "job-a", "agent_status": "idle", "cwd": "/work/a", "allow_unnamed": false},
 		{"request_id": "op-1", "pane_id": "w1:p1", "name": "job-a", "agent_status": "idle", "cwd": "/work/a"},
 	} {
 		if _, code := nodeRun(t, client, nodeCommandPaneCloseOp, bad); code != "invalid_args" {
@@ -202,9 +311,7 @@ func TestCloseOpOverHubConnection_t4594(t *testing.T) {
 		t.Fatal(err)
 	}
 	inbox := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(inbox, "jobs", "job-a"), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	seedCloseOpJob(t, inbox, true)
 	client.nodeHerdr = fake.run
 	client.nodeCloseSettle = time.Millisecond
 	client.jobsInboxRoot = inbox
@@ -224,7 +331,7 @@ func TestCloseOpOverHubConnection_t4594(t *testing.T) {
 		record := hub.nodes["machine-a"]
 		return record != nil && record.agent != nil && record.state == "connected" && record.capabilities[hubCapabilityCloseOps]
 	})
-	args := nodePaneCloseOpArgs{RequestID: "op-1", PaneID: "w1:p1", Name: "job-a", AgentStatus: "idle", Cwd: "/work/a"}
+	args := nodePaneCloseOpArgs{RequestID: "op-1", Job: closeOpJob, PaneID: "w1:p1", Name: "job-a", AgentStatus: "idle", Cwd: "/work/a"}
 	var closed nodePaneCloseOpResult
 	if !hub.nodeCall(t.Context(), "machine-a", nodeCommandPaneCloseOp, args, 5*time.Second, &closed) || closed.Outcome != fleet.CloseOpClosed || closed.Replayed {
 		t.Fatalf("close_op=%+v", closed)
@@ -232,7 +339,7 @@ func TestCloseOpOverHubConnection_t4594(t *testing.T) {
 	if !hub.nodeCall(t.Context(), "machine-a", nodeCommandPaneCloseOp, args, 5*time.Second, &closed) || closed.Outcome != fleet.CloseOpClosed || !closed.Replayed {
 		t.Fatalf("replayed close_op=%+v", closed)
 	}
-	ref := nodeCloseOpRefArgs{RequestID: "op-1", Name: "job-a"}
+	ref := nodeCloseOpRefArgs{RequestID: "op-1", Job: closeOpJob}
 	var status nodeCloseOpStatusResult
 	if !hub.nodeCall(t.Context(), "machine-a", nodeCommandPaneCloseRelease, ref, 5*time.Second, &status) || status.State != fleet.CloseOpClosed || !status.Released {
 		t.Fatalf("release=%+v", status)
