@@ -119,14 +119,22 @@ func (h *HubServer) notePlacementTrace(task hubSpawnTask, tr fleet.PlacementTrac
 		return
 	}
 	if err := h.inbox.store.saveSpawnPlacementSnapshot(h.closeCtx, task.Request.RequestID, task.Attempt, payload, delivery); err != nil {
-		h.logger.Warn("placement snapshot could not be persisted", "request_id", task.Request.RequestID, "job", task.Job, "attempt", task.Attempt)
-		return
+		// One retry covers the transient write failure; if it still fails
+		// and this emission carries the finished record, the durable spool
+		// file becomes the retry obligation — the record is not abandoned.
+		if err2 := h.inbox.store.saveSpawnPlacementSnapshot(h.closeCtx, task.Request.RequestID, task.Attempt, payload, delivery); err2 != nil {
+			h.logger.Warn("placement snapshot could not be persisted", "request_id", task.Request.RequestID, "job", task.Job, "attempt", task.Attempt)
+			if tr.Record != nil {
+				h.enqueueFinishedPlacementRecord(h.closeCtx, task, *tr.Record, delivery)
+			}
+			return
+		}
 	}
-	// A trace carrying an outcome is the record finishPlacement completed:
-	// the attempt is decided even when the request stays accepted (a quota
-	// refresh or host refusal that retries later), so it delivers now. An
-	// incomplete trace waits for the attempt's terminal row.
-	if tr.Outcome != "" {
+	// A trace carrying the finished record is the record finishPlacement
+	// completed: the attempt is decided even when the request stays accepted
+	// (a quota refresh or host refusal that retries later), so it delivers
+	// now. An incomplete trace waits for the attempt's terminal row.
+	if tr.Record != nil {
 		h.deliverPlacementRecord(h.closeCtx, task.Request.RequestID, task.Attempt)
 		return
 	}
@@ -164,9 +172,10 @@ func (h *HubServer) deliverPlacementRecord(ctx context.Context, requestID string
 	if err != nil {
 		return
 	}
-	if task.Attempt != attempt && tr.Outcome == "" {
-		// A superseded attempt whose trace carries no verdict cannot be
-		// rebuilt: the operation's outcome now belongs to a newer attempt.
+	if task.Attempt != attempt && tr.Record == nil {
+		// A superseded attempt whose snapshot carries no finished record
+		// cannot be rebuilt: the operation's outcome now belongs to a newer
+		// attempt.
 		return
 	}
 	app, err := h.placementRecordApp(delivery)
@@ -195,6 +204,15 @@ func (h *HubServer) deliverPlacementRecord(ctx context.Context, requestID string
 // job is placed, a refusal before the node's hk job claim is refused, and
 // anything past it failed.
 func hubPlacementRecord(task hubSpawnTask, tr fleet.PlacementTrace, attempt int) fleet.PlacementRecord {
+	if tr.Record != nil {
+		// The snapshot carries the record finishPlacement completed: it is
+		// posted verbatim — never re-derived from the trace's lossy
+		// projection or mixed with the operation's current outcome (which
+		// may belong to a newer attempt). The hub owns the identity keys.
+		rec := *tr.Record
+		rec.JobID, rec.Attempt = task.Job, attempt
+		return rec
+	}
 	o := task.Outcome
 	if task.Attempt != attempt {
 		// The row's outcome belongs to a newer attempt; a superseded
@@ -221,6 +239,12 @@ func hubPlacementRecord(task hubSpawnTask, tr fleet.PlacementTrace, attempt int)
 		},
 	}
 	if rec.Outcome != "" {
+		// Contact is not launch acceptance here either: a refused trace
+		// posts no chosen host even when the operation row names the
+		// contacted one.
+		if rec.Outcome == "refused" {
+			rec.Host = ""
+		}
 		return rec
 	}
 	switch {
@@ -265,6 +289,23 @@ func hubPlacementRecord(task hubSpawnTask, tr fleet.PlacementTrace, attempt int)
 		rec.Host = ""
 	}
 	return rec
+}
+
+// enqueueFinishedPlacementRecord spools an already-completed record when its
+// snapshot row could not be persisted: the durable file keeps the delivery
+// obligation the row would have tracked.
+func (h *HubServer) enqueueFinishedPlacementRecord(ctx context.Context, task hubSpawnTask, rec fleet.PlacementRecord, delivery string) {
+	ctx, cancel := context.WithTimeout(ctx, placementRecordDeliveryBudget)
+	defer cancel()
+	app, err := h.placementRecordApp(delivery)
+	if err != nil {
+		h.logger.Warn("placement record delivery unavailable after snapshot write failure", "request_id", task.Request.RequestID, "attempt", task.Attempt)
+		return
+	}
+	rec.JobID, rec.Attempt = task.Job, task.Attempt
+	if _, err := app.EnqueuePlacementRecord(ctx, rec); err != nil {
+		h.logger.Warn("placement record could not be enqueued after snapshot write failure", "request_id", task.Request.RequestID, "attempt", task.Attempt, "error", err)
+	}
 }
 
 // placementDelivery holds the placing App's delivery-relevant settings: the

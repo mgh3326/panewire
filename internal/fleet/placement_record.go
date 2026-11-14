@@ -286,8 +286,10 @@ func (a *App) finishPlacement(ctx context.Context, s Spawn, err error) {
 		// or pending hub answer) is no verdict: the node may still finish
 		// the spawn, so the terminal result names the outcome instead.
 		tr := placementTraceFromRecord(r)
+		tr.Record = &r
 		if s.placement.undecided {
 			tr.Outcome, tr.Reason = "", ""
+			tr.Record = nil
 		}
 		if a.PlacementTrace != nil {
 			a.PlacementTrace(tr)
@@ -327,6 +329,12 @@ type PlacementTrace struct {
 	// built instead of re-deriving the verdict.
 	Outcome string `json:"outcome,omitempty"`
 	Reason  string `json:"reason,omitempty"`
+	// Record carries the finished record itself on the final emission: the
+	// trace's flat fields are a lossy projection (no pane/model/version), so
+	// the outbox posts this payload verbatim and never re-derives from it.
+	// An undecided stop carries no Record — its verdict waits for the
+	// attempt's terminal result.
+	Record *PlacementRecord `json:"record,omitempty"`
 }
 
 // emitPlacementTrace reports the decision's current trace to the hub

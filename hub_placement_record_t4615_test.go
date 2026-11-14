@@ -170,6 +170,36 @@ func TestHubPlacementRecordTerminalOutcomes(t *testing.T) {
 	}
 }
 
+// The App's final emission carries the record finishPlacement completed —
+// before the terminal outcome commits for an unbound spawn — so the record
+// must post verbatim: pane_id and model come from the record, not the still
+// empty operation outcome.
+func TestHubPlacementRecordFinishedRecordPostsVerbatim(t *testing.T) {
+	hk := placementOutboxServer(t)
+	h := placementOutboxHub(t, filepath.Join(t.TempDir(), "inbox.sqlite3"))
+	req := durableSpawnRequest()
+	req.RequestID = "d676220b-e763-4af1-aefd-000000000016"
+	task := boundSpawnTask(t, h, req)
+	tr := placementTraceSnapshot()
+	tr.Outcome = "placed"
+	tr.Record = &fleet.PlacementRecord{
+		JobID: task.Job, Attempt: task.Attempt, TaskID: 42,
+		DecidedAt: tr.DecidedAt, ToolVersion: "test",
+		Source: "auto", Ranking: "score", Outcome: "placed",
+		Candidates:         tr.Candidates,
+		PlacementExecution: fleet.PlacementExecution{Host: "machine-a", PaneID: "pane-9", Model: "opus", Pool: "claude-sub", Profile: "claude-sonnet", Family: "claude"},
+	}
+	h.notePlacementTrace(task, tr, "")
+	records := hk.records()
+	if len(records) != 1 {
+		t.Fatalf("finished record produced %d posts, want one", len(records))
+	}
+	rec := records[0]
+	if rec["pane_id"] != "pane-9" || rec["model"] != "opus" || rec["chosen_host"] != "machine-a" {
+		t.Fatalf("finished record lost execution fields: %v", rec)
+	}
+}
+
 func TestHubPlacementRecordSurvivesRestartExactlyOnce(t *testing.T) {
 	hk := placementOutboxServer(t)
 	path := filepath.Join(t.TempDir(), "inbox.sqlite3")
