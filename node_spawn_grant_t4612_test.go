@@ -158,3 +158,65 @@ func TestNodeSpawnGrantWire_t4612(t *testing.T) {
 		t.Fatal("job.spawn.grant with an extra field was accepted")
 	}
 }
+
+// A grant frame whose granted is not a JSON boolean is rejected, not read
+// as a refusal.
+func TestNodeSpawnGrantRejectsNullGranted_t4612(t *testing.T) {
+	if _, ok := parseHubOutbound([]byte(`{"type":"job.spawn.grant","request_id":"` + t14RequestID(1) + `","granted":null}`)); ok {
+		t.Fatal(`job.spawn.grant with "granted":null was accepted`)
+	}
+}
+
+// The grant wait ends with the connection: a lost hub session is a refusal
+// at once, not a wait until start_by holding the node's spawn gate.
+func TestNodeSpawnGrantWaitEndsWithConnection_t4612(t *testing.T) {
+	client, runs := grantNode(t)
+	peer, results, _ := grantPeer(t, client, "silent")
+	peer.closed = make(chan struct{})
+	message := admissionMessage(461204, true)
+	message.StartByMS = time.Now().Add(time.Minute).UnixMilli()
+	go func() {
+		// Fixture pacing: close after the claim is written.
+		time.Sleep(100 * time.Millisecond)
+		close(peer.closed)
+	}()
+	started := time.Now()
+	client.handleHubSpawn(t.Context(), peer, message)
+	if elapsed := time.Since(started); elapsed > 10*time.Second || runs.Load() != 0 {
+		t.Fatalf("wait took %s runs=%d", elapsed, runs.Load())
+	}
+	if status := admissionJournalStatus(t, client, message.RequestID); status != "completed" {
+		t.Fatalf("journal status=%q, want completed", status)
+	}
+	_ = results
+}
+
+// A grant-required frame that cannot get the spawn gate before its request
+// deadline still leaves the never-started tombstone, as does a frame already
+// past start_by while the gate is held.
+func TestNodeSpawnGateTimeoutJournalsNotStarted_t4612(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		startBy  time.Duration
+		deadline time.Duration
+	}{{"deadline before start_by", time.Minute, 300 * time.Millisecond}, {"already late", -time.Second, time.Minute}} {
+		t.Run(tc.name, func(t *testing.T) {
+			client, runs := grantNode(t)
+			peer, results, claims := grantPeer(t, client, "grant")
+			client.spawnGateOnce.Do(func() { client.spawnGate = make(chan struct{}, 1) })
+			client.spawnGate <- struct{}{}
+			defer func() { <-client.spawnGate }()
+			message := admissionMessage(461205, true)
+			message.StartByMS = time.Now().Add(tc.startBy).UnixMilli()
+			message.DeadlineMS = time.Now().Add(tc.deadline).UnixMilli()
+			client.handleHubSpawn(t.Context(), peer, message)
+			result := nextSpawnResult(t, results)
+			if runs.Load() != 0 || claims.Load() != 0 || result.Error != "deadline_not_started" {
+				t.Fatalf("runs=%d claims=%d result=%+v", runs.Load(), claims.Load(), result)
+			}
+			if status := admissionJournalStatus(t, client, message.RequestID); status != "completed" {
+				t.Fatalf("journal status=%q, want completed", status)
+			}
+		})
+	}
+}

@@ -2,6 +2,7 @@ package panewire
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -348,5 +349,70 @@ func TestSpawnGrantEndToEndWithRealNode_t4612(t *testing.T) {
 	}
 	if strings.Contains(result, "deadline_not_started") || !strings.Contains(result, "brief_doc_unavailable") {
 		t.Fatalf("node did not go on past its grant: %.300s", result)
+	}
+}
+
+// A fence committed before a hub stop, with the attempt still dispatching,
+// settles on the next hub's replay without sending the frame again.
+func TestSpawnCommittedFenceSettlesOnReplayWithoutResend_t4612(t *testing.T) {
+	retryHK(t)
+	path := filepath.Join(t.TempDir(), "inbox.sqlite3")
+	first := startProofHub(t, path)
+	task, node := startProofTask(t, first, 461261, true)
+	sentSpawnFixture(t, first.inbox.store, task)
+	if fenced, err := first.inbox.store.fenceSpawnAttempt(t.Context(), task.Request.RequestID, node.RequestID, time.Now()); err != nil || !fenced {
+		t.Fatalf("fence=%v err=%v", fenced, err)
+	}
+	_ = first.Close()
+	h := startProofHub(t, path)
+	server := httptest.NewServer(h.Handler())
+	defer server.Close()
+	desktop := startProofNode(t, h, server, "desktop", []string{"spawn_v2", "spawn_ops_v1", hubCapabilitySpawnGrant})
+	saved, err := h.inbox.store.spawnTask(t.Context(), task.Request.RequestID)
+	if err != nil || saved.Status != "dispatching" {
+		t.Fatalf("restored status=%s err=%v", saved.Status, err)
+	}
+	h.executeSpawnTask(t.Context(), saved)
+	after, err := h.inbox.store.spawnTask(t.Context(), task.Request.RequestID)
+	if err != nil || after.Status != "accepted" || len(after.Exclusions) != 1 || after.Exclusions[0].Reason != "deadline_not_started" {
+		t.Fatalf("after replay: status=%s exclusions=%+v err=%v", after.Status, after.Exclusions, err)
+	}
+	// Window that proves nothing more happens: no job.spawn reaches the node.
+	readCtx, cancel := context.WithTimeout(t.Context(), 300*time.Millisecond)
+	defer cancel()
+	var raw json.RawMessage
+	if wsjson.Read(readCtx, desktop, &raw) == nil && strings.Contains(string(raw), `"job.spawn"`) {
+		t.Fatalf("fenced attempt was sent again: %s", raw)
+	}
+}
+
+// A store error at the fence instant does not end fencing: the hub retries
+// and re-places the silent, ungranted attempt once the store is back.
+func TestSpawnFenceRetriesAfterStoreError_t4612(t *testing.T) {
+	retryHK(t)
+	h := startProofHubWindow(t, filepath.Join(t.TempDir(), "inbox.sqlite3"), 200*time.Millisecond, 100*time.Millisecond)
+	server := httptest.NewServer(h.Handler())
+	defer server.Close()
+	desktop := startProofNode(t, h, server, "desktop", []string{"spawn_v2", "spawn_ops_v1", hubCapabilitySpawnGrant})
+	task, _ := startProofTask(t, h, 461262, true)
+	if _, err := h.inbox.store.db.Exec(`ALTER TABLE spawn_attempt_grants RENAME TO spawn_attempt_grants_away`); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() { defer close(done); h.executeSpawnTask(t.Context(), task) }()
+	t14ReadNodeSpawn(t, desktop)
+	// Fixture pacing: let the first fence attempt fail on the missing table.
+	time.Sleep(600 * time.Millisecond)
+	if _, err := h.inbox.store.db.Exec(`ALTER TABLE spawn_attempt_grants_away RENAME TO spawn_attempt_grants`); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("fence was not retried after the store error")
+	}
+	after, err := h.inbox.store.spawnTask(t.Context(), task.Request.RequestID)
+	if err != nil || after.Status != "accepted" || len(after.Exclusions) != 1 {
+		t.Fatalf("after retry: status=%s exclusions=%+v err=%v", after.Status, after.Exclusions, err)
 	}
 }

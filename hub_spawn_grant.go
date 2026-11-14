@@ -87,6 +87,18 @@ func (s *laneInboxStore) fenceSpawnAttempt(parent context.Context, requestID, no
 	return state == "fenced", tx.Commit()
 }
 
+// spawnAttemptFenced reports whether the attempt nodeID has a committed fence.
+func (s *laneInboxStore) spawnAttemptFenced(parent context.Context, nodeID string) (bool, error) {
+	ctx, done := s.op(parent)
+	defer done()
+	var state string
+	err := s.db.QueryRowContext(ctx, s.q(`SELECT state FROM spawn_attempt_grants WHERE node_id=?`), nodeID).Scan(&state)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return state == "fenced", err
+}
+
 // parseHubSpawnClaim reads a node's {"type":"job.spawn.claim","request_id"}.
 func parseHubSpawnClaim(raw []byte) (string, bool) {
 	var fields map[string]json.RawMessage

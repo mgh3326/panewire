@@ -13,7 +13,8 @@ const hubCapabilitySpawnGrant = "spawn_grant_v1"
 // awaitSpawnGrant asks the hub for the start grant of a grant-required frame
 // and waits for the answer until the frame's start_by. Only true lets the
 // spawn claim its journal row; a refusal, silence or a lost connection means
-// this attempt never starts, and the hub may fence it.
+// this attempt never starts, and the hub may fence it. ctx is the admission
+// context, so the wait also ends at the request deadline.
 func (client *HubClient) awaitSpawnGrant(ctx context.Context, peer *hubClientConnection, message hubOutboundMessage) bool {
 	startBy := time.UnixMilli(message.StartByMS)
 	if !time.Now().Before(startBy) {
@@ -43,8 +44,12 @@ func (client *HubClient) awaitSpawnGrant(ctx context.Context, peer *hubClientCon
 	}
 	select {
 	case granted := <-answer:
-		return granted
+		// select picks at random when the answer and the deadline are both
+		// ready: a grant read at or after start_by is not taken.
+		return granted && time.Now().Before(startBy)
 	case <-waitCtx.Done():
+		return false
+	case <-peer.closed:
 		return false
 	}
 }

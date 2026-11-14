@@ -659,6 +659,9 @@ type hubClientConnection struct {
 	acceptsLaunchProof  atomic.Bool
 	connection          *websocket.Conn
 	writeMu             sync.Mutex
+	// closed is closed when the session on this connection ends; a nil
+	// channel (a test peer) never ends.
+	closed chan struct{}
 }
 
 type hubOutboundMessage struct {
@@ -2013,7 +2016,8 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 	connection.SetReadLimit(hubSpawnMaxBodyBytes)
 	client.serving.Add(1)
 	defer client.serving.Add(-1)
-	peer := &hubClientConnection{connection: connection}
+	peer := &hubClientConnection{connection: connection, closed: make(chan struct{})}
+	defer close(peer.closed)
 	// Each connection may reach a different hub build (failover, redeploy).
 	client.signalsPeer.Store(peer)
 	// The hello carries spawn_v2, and the ping that follows it is the
@@ -3083,7 +3087,7 @@ func parseHubOutboundRejection(payload []byte) (hubOutboundMessage, hubOutboundR
 			return hubOutboundMessage{}, reject
 		}
 	case "job.spawn.grant":
-		if len(fields) != 3 || json.Unmarshal(fields["request_id"], &message.RequestID) != nil || !validHubSpawnRequestID(message.RequestID) || json.Unmarshal(fields["granted"], &message.Granted) != nil {
+		if len(fields) != 3 || json.Unmarshal(fields["request_id"], &message.RequestID) != nil || !validHubSpawnRequestID(message.RequestID) || (string(fields["granted"]) != "true" && string(fields["granted"]) != "false") || json.Unmarshal(fields["granted"], &message.Granted) != nil {
 			return hubOutboundMessage{}, reject
 		}
 	case "job.spawn":

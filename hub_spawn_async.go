@@ -967,6 +967,17 @@ func (t *directSpawnTransport) dispatch(ctx context.Context, node hubSpawnReques
 		return fleet.HubSpawnReply{}, &fleet.HubError{Kind: "hub_spawn_pending"}
 	}
 	t.task, node = current, *current.Node
+	// A sent attempt whose fence committed before a hub stop was never
+	// granted, so never started: settle it now instead of sending it again.
+	if node.GrantRequired && current.Status != "bound" {
+		fenced, err := h.inbox.store.spawnAttemptFenced(ctx, node.RequestID)
+		if err != nil {
+			return fleet.HubSpawnReply{}, &fleet.HubError{Kind: "hub_spawn_pending"}
+		}
+		if fenced {
+			return t.settleNodeResult(ctx, node, spawnFencedResult(node, h.now().UTC()), false)
+		}
+	}
 	if current.Status == "bound" && !h.now().Before(current.Deadline) {
 		h.finishSpawnOutcome(current, hubSpawnOutcome{RC: 124, Stage: "landing", Reason: "timeout", Host: node.Machine, Retryable: true, Fix: spawnQueueWaitFix(current, h.now())})
 		return fleet.HubSpawnReply{}, &fleet.HubError{Kind: "hub_spawn_pending"}
@@ -1047,12 +1058,8 @@ func (t *directSpawnTransport) dispatch(ctx context.Context, node hubSpawnReques
 	// Every send of a grant-required attempt, a replay after a hub restart
 	// included, gives the node a fresh start_by and arms the fence after it.
 	// start_by only bounds the node's wait; the grant/fence row is the proof.
-	var fence <-chan time.Time
 	if node.GrantRequired {
 		message.StartByMS = time.Now().Add(h.spawnStartBy).UnixMilli()
-		timer := time.NewTimer(h.spawnStartBy + h.spawnStartByMargin)
-		defer timer.Stop()
-		fence = timer.C
 	}
 	writeCtx, cancelWrite := context.WithCancel(ctx)
 	stopConnection := func() bool { return false }
@@ -1071,16 +1078,34 @@ func (t *directSpawnTransport) dispatch(ctx context.Context, node hubSpawnReques
 		}
 		return t.unknown(ctx, "disconnected")
 	}
+	// The fence is armed once the frame is written, so time spent waiting
+	// for the writer never shortens the margin after start_by.
+	var fence <-chan time.Time
+	var fenceTimer *time.Timer
+	fenceRetry := time.Second
+	if node.GrantRequired {
+		fenceTimer = time.NewTimer(time.Until(time.UnixMilli(message.StartByMS)) + h.spawnStartByMargin)
+		defer fenceTimer.Stop()
+		fence = fenceTimer.C
+	}
 	for {
 		select {
 		case result := <-entry.waiter:
 			return t.settleNodeResult(ctx, node, result, false)
 		case <-fence:
-			fence = nil
-			// A lost fence means the node holds a grant: keep waiting, and
-			// past the landing bound keep ownership as before.
 			fenced, err := h.inbox.store.fenceSpawnAttempt(h.closeCtx, id, node.RequestID, h.now().UTC())
-			if err != nil || !fenced {
+			if err != nil {
+				// Undecided (a commit error may even have landed): try again
+				// with bounded backoff; the INSERT is idempotent.
+				h.logger.Warn("hub spawn fence not decided", "request_id", id, "node_request_id", node.RequestID, "err", err)
+				fenceTimer.Reset(fenceRetry)
+				fenceRetry = min(2*fenceRetry, 30*time.Second)
+				continue
+			}
+			if !fenced {
+				// A lost fence means the node holds a grant: keep waiting, and
+				// past the landing bound keep ownership as before.
+				fence = nil
 				continue
 			}
 			h.mu.Lock()
