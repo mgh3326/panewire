@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -122,11 +123,14 @@ func TestHubPlacementRecordTerminalOutcomes(t *testing.T) {
 		"failed": {hubSpawnOutcome{RC: 1, Stage: "landing", Reason: "spawn_failed:launch", Host: "machine-a", NodeResult: true}, "failed", "spawn_failed:launch", "machine-a", "chosen"},
 		// Contact is not launch acceptance: a refused record names no host.
 		"refused": {hubSpawnOutcome{RC: 70, Stage: "placement", Reason: "spawn_failed:trust_prompt", Host: "machine-a", NodeResult: true}, "refused", "spawn_failed:trust_prompt", "", "refused"},
+		// A bound attempt starved in the queue before dispatch: no node
+		// answer ever arrived, so no host claimed the job — refused.
+		"starved": {hubSpawnOutcome{RC: 124, Stage: "landing", Reason: "timeout", Retryable: true, Host: "machine-a"}, "refused", "timeout", "", "refused"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			h := placementOutboxHub(t, filepath.Join(t.TempDir(), "inbox.sqlite3"))
 			req := durableSpawnRequest()
-			req.RequestID = map[string]string{"landed": "d676220b-e763-4af1-aefd-000000000011", "failed": "d676220b-e763-4af1-aefd-000000000012", "refused": "d676220b-e763-4af1-aefd-000000000013"}[name]
+			req.RequestID = map[string]string{"landed": "d676220b-e763-4af1-aefd-000000000011", "failed": "d676220b-e763-4af1-aefd-000000000012", "refused": "d676220b-e763-4af1-aefd-000000000013", "starved": "d676220b-e763-4af1-aefd-000000000017"}[name]
 			task := boundSpawnTask(t, h, req)
 			h.notePlacementTrace(task, placementTraceSnapshot(), "")
 			changed, err := h.completeSpawn(t.Context(), task, tc.outcome)
@@ -283,5 +287,64 @@ func TestHubPlacementSnapshotLookupByRequestAndAttempt(t *testing.T) {
 	}
 	if payload, _, recorded, err := s.spawnPlacementSnapshot(t.Context(), "req-absent", 1); err != nil || recorded || payload != nil {
 		t.Fatalf("absent snapshot=%s recorded=%v err=%v", payload, recorded, err)
+	}
+}
+
+// When the snapshot write fails outright, the finished record is spooled and
+// the save is deferred to the durable file: after a restart with hk
+// reachable again, one flush must land the row and deliver the record.
+func TestHubPlacementRecordFallbackDeliveredAfterRecovery(t *testing.T) {
+	hk := placementOutboxServer(t)
+	path := filepath.Join(t.TempDir(), "inbox.sqlite3")
+	stateDir := t.TempDir()
+	if real, err := filepath.EvalSymlinks(stateDir); err == nil {
+		stateDir = real
+	}
+	delivery, err := json.Marshal(placementDelivery{StateDir: stateDir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := durableSpawnRequest()
+	req.RequestID = "d676220b-e763-4af1-aefd-000000000018"
+	h1 := placementOutboxHub(t, path)
+	task := boundSpawnTask(t, h1, req)
+	// hk unreachable while the snapshot write fails: the record can only be
+	// spooled, and the deferred file keeps the row-insert obligation.
+	os.Setenv("HANDOFFKEEP_URL", "http://127.0.0.1:1")
+	rec := fleet.PlacementRecord{JobID: "test-job", Attempt: task.Attempt, Outcome: "placed", Host: "machine-a", Family: "claude"}
+	tr := placementTraceSnapshot()
+	tr.Record = &rec
+	payload, err := json.Marshal(tr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h1.deferPlacementTraceSave(req.RequestID, task.Attempt, payload, string(delivery))
+	h1.enqueueFinishedPlacementRecord(t.Context(), task, rec, string(delivery))
+	if n := len(hk.records()); n != 0 {
+		t.Fatalf("record delivered while hk down: %d", n)
+	}
+	if _, err := os.Stat(h1.inbox.deferredPath); err != nil {
+		t.Fatalf("deferred save not persisted: %v", err)
+	}
+	h1.Close()
+	// hk reachable again; the restarted hub knows nothing in memory: the
+	// deferred file and the spool are the only state.
+	os.Setenv("HANDOFFKEEP_URL", hk.server.URL)
+	h2 := placementOutboxHub(t, path)
+	h2.flushPlacementRecords(t.Context())
+	if n := len(hk.records()); n != 1 {
+		t.Fatalf("flush produced %d records, want exactly one", n)
+	}
+	if _, err := os.Stat(h2.inbox.deferredPath); !os.IsNotExist(err) {
+		t.Fatalf("deferred file remains after the row landed: %v", err)
+	}
+	// The landed row stays pending while the attempt runs; its terminal
+	// result seals it. The repost is a duplicate hk answers 409.
+	if _, err := h2.completeSpawn(t.Context(), task, hubSpawnOutcome{RC: 0, Stage: "landing", Host: "machine-a", Pane: "pane-7", NodeResult: true}); err != nil {
+		t.Fatal(err)
+	}
+	_, _, recorded, err := h2.inbox.store.spawnPlacementSnapshot(t.Context(), req.RequestID, task.Attempt)
+	if err != nil || !recorded {
+		t.Fatalf("snapshot recorded=%v err=%v after terminal result", recorded, err)
 	}
 }

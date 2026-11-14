@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"io"
+	"os"
 	"time"
 
 	"github.com/mgh3326/panewire/internal/fleet"
@@ -119,11 +120,14 @@ func (h *HubServer) notePlacementTrace(task hubSpawnTask, tr fleet.PlacementTrac
 		return
 	}
 	if err := h.inbox.store.saveSpawnPlacementSnapshot(h.closeCtx, task.Request.RequestID, task.Attempt, payload, delivery); err != nil {
-		// One retry covers the transient write failure; if it still fails
-		// and this emission carries the finished record, the durable spool
-		// file becomes the retry obligation — the record is not abandoned.
+		// One retry covers the transient write failure; if it still fails,
+		// the save is deferred for the flush so a pending row eventually
+		// exists. When this emission carries the finished record, it is
+		// also spooled now — the file and the retried row together keep the
+		// delivery obligation.
 		if err2 := h.inbox.store.saveSpawnPlacementSnapshot(h.closeCtx, task.Request.RequestID, task.Attempt, payload, delivery); err2 != nil {
 			h.logger.Warn("placement snapshot could not be persisted", "request_id", task.Request.RequestID, "job", task.Job, "attempt", task.Attempt)
+			h.deferPlacementTraceSave(task.Request.RequestID, task.Attempt, payload, delivery)
 			if tr.Record != nil {
 				h.enqueueFinishedPlacementRecord(h.closeCtx, task, *tr.Record, delivery)
 			}
@@ -250,6 +254,11 @@ func hubPlacementRecord(task hubSpawnTask, tr fleet.PlacementTrace, attempt int)
 	switch {
 	case o.RC == 0:
 		rec.Outcome, rec.Reason = "placed", tr.StateReason
+	case !o.NodeResult:
+		// No node answer arrived — a bound attempt that starved in the
+		// queue never contacted its host, so like every other pre-claim
+		// path it is a refusal, not a launch failure the host owns.
+		rec.Outcome, rec.Reason = "refused", o.Reason
 	case o.Pane != "" || !spawnStageBeforeJobClaim(o.Stage):
 		rec.Outcome, rec.Reason = "failed", o.Reason
 	default:
@@ -289,6 +298,123 @@ func hubPlacementRecord(task hubSpawnTask, tr fleet.PlacementTrace, attempt int)
 		rec.Host = ""
 	}
 	return rec
+}
+
+// placementDeferredSave is a snapshot write the store refused, persisted to
+// the hub's deferred file and retried by the flush until a pending row
+// exists — a restart between the refused write and its retry must not
+// orphan the spooled record the emission produced.
+type placementDeferredSave struct {
+	RequestID string `json:"request_id"`
+	Attempt   int    `json:"attempt"`
+	Payload   []byte `json:"payload"`
+	Delivery  string `json:"delivery,omitempty"`
+}
+
+// deferPlacementTraceSave keeps a failed snapshot write, in memory and in
+// the deferred file, so the flush retries the row insert. The latest
+// emission replaces an older deferred one for the same attempt.
+func (h *HubServer) deferPlacementTraceSave(requestID string, attempt int, payload []byte, delivery string) {
+	h.placementAppMu.Lock()
+	defer h.placementAppMu.Unlock()
+	kept := false
+	for i, d := range h.placementDeferredSaves {
+		if d.RequestID == requestID && d.Attempt == attempt {
+			h.placementDeferredSaves[i].Payload = payload
+			h.placementDeferredSaves[i].Delivery = delivery
+			kept = true
+			break
+		}
+	}
+	if !kept {
+		h.placementDeferredSaves = append(h.placementDeferredSaves, placementDeferredSave{RequestID: requestID, Attempt: attempt, Payload: payload, Delivery: delivery})
+	}
+	if err := h.writePlacementDeferredSavesLocked(); err != nil {
+		h.logger.Warn("placement deferred saves could not be persisted", "request_id", requestID, "attempt", attempt)
+	}
+}
+
+// writePlacementDeferredSavesLocked rewrites the deferred file; an empty
+// list removes it. Caller holds placementAppMu.
+func (h *HubServer) writePlacementDeferredSavesLocked() error {
+	path := h.inbox.deferredPath
+	if len(h.placementDeferredSaves) == 0 {
+		err := os.Remove(path)
+		if err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		return nil
+	}
+	raw, err := json.Marshal(h.placementDeferredSaves)
+	if err != nil {
+		return err
+	}
+	return replaceFileAtomically(path, ".placement-deferred-*", raw, 0o600)
+}
+
+// loadPlacementDeferredSavesLocked restores deferred saves from the file,
+// once per hub run — a restart must not forget a refused write. Caller
+// holds placementAppMu.
+func (h *HubServer) loadPlacementDeferredSavesLocked() {
+	if h.placementDeferredLoaded {
+		return
+	}
+	h.placementDeferredLoaded = true
+	raw, err := os.ReadFile(h.inbox.deferredPath)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			h.logger.Warn("placement deferred saves could not be read")
+		}
+		return
+	}
+	var saves []placementDeferredSave
+	if json.Unmarshal(raw, &saves) != nil {
+		h.logger.Warn("placement deferred saves unreadable")
+		return
+	}
+	h.placementDeferredSaves = saves
+}
+
+// retryDeferredTraceSaves lands the deferred snapshot writes. Once a row
+// exists, the normal reconciliation picks up the record it tracks.
+func (h *HubServer) retryDeferredTraceSaves() {
+	h.placementAppMu.Lock()
+	h.loadPlacementDeferredSavesLocked()
+	deferred := append([]placementDeferredSave(nil), h.placementDeferredSaves...)
+	h.placementAppMu.Unlock()
+	for _, d := range deferred {
+		if err := h.inbox.store.saveSpawnPlacementSnapshot(h.closeCtx, d.RequestID, d.Attempt, d.Payload, d.Delivery); err != nil {
+			continue
+		}
+		h.placementAppMu.Lock()
+		for i, e := range h.placementDeferredSaves {
+			if e.RequestID == d.RequestID && e.Attempt == d.Attempt && string(e.Payload) == string(d.Payload) {
+				h.placementDeferredSaves = append(h.placementDeferredSaves[:i], h.placementDeferredSaves[i+1:]...)
+				break
+			}
+		}
+		if err := h.writePlacementDeferredSavesLocked(); err != nil {
+			h.logger.Warn("placement deferred saves could not be persisted", "request_id", d.RequestID, "attempt", d.Attempt)
+		}
+		h.placementAppMu.Unlock()
+	}
+}
+
+// hasDeferredTraceSaves reports whether a failed save still waits for a
+// row. The deferred file counts — its entries are loaded on the first retry.
+func (h *HubServer) hasDeferredTraceSaves() bool {
+	h.placementAppMu.Lock()
+	defer h.placementAppMu.Unlock()
+	if len(h.placementDeferredSaves) > 0 {
+		return true
+	}
+	if h.placementDeferredLoaded {
+		return false
+	}
+	if _, err := os.Stat(h.inbox.deferredPath); err != nil {
+		return false
+	}
+	return true
 }
 
 // enqueueFinishedPlacementRecord spools an already-completed record when its
@@ -370,6 +496,12 @@ func (h *HubServer) pendingPlacementRecords(ctx context.Context) bool {
 // on the same coordinator tick as spawn notifications. Without a pending
 // snapshot there is nothing the outbox owes, so no delivery App is built.
 func (h *HubServer) flushPlacementRecords(ctx context.Context) {
+	if !h.pendingPlacementRecords(ctx) && !h.hasDeferredTraceSaves() {
+		return
+	}
+	// Deferred saves retry first: a landed row turns an orphaned spooled
+	// record back into a pending one the reconciliation below can seal.
+	h.retryDeferredTraceSaves()
 	if !h.pendingPlacementRecords(ctx) {
 		return
 	}

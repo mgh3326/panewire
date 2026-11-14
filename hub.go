@@ -430,9 +430,15 @@ type HubServer struct {
 	// placementDeliveryKey is the delivery JSON the cached client was built
 	// for; a snapshot row with different settings gets a fresh App.
 	placementDeliveryKey string
-	quotaRefresh         hubQuotaRefreshScheduler
-	spawnActions         hubSpawnActions
-	spawnAdmissions      hubSpawnAdmissions
+	// placementDeferredSaves holds trace saves the store refused; the flush
+	// retries the row insert so the spooled record they belong to is picked
+	// up instead of orphaned without a pending row. The same list is kept
+	// in the inbox's deferred file so a restart does not lose it.
+	placementDeferredSaves  []placementDeferredSave
+	placementDeferredLoaded bool
+	quotaRefresh            hubQuotaRefreshScheduler
+	spawnActions            hubSpawnActions
+	spawnAdmissions         hubSpawnAdmissions
 	// drain is the SIGTERM state (hub_drain.go).
 	drain hubDrain
 	// spawnOrphanProbed is when the hub last probed each stranded request's
