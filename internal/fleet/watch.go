@@ -50,7 +50,7 @@ func (a *App) startWatchMode(job string, rearmed bool) error {
 	}
 	defer log.Close()
 	cmd := watchCommand(exe, job, rearmed)
-	cmd.Env = append(os.Environ(), "HERDR_SESSION="+a.herdrSession(), "ARBITER_INBOX_ROOT="+a.Jobs)
+	cmd.Env = append(append(os.Environ(), "HERDR_SESSION="+a.herdrSession(), "ARBITER_INBOX_ROOT="+a.Jobs), a.WatchEnv...)
 	cmd.Stdout = log
 	cmd.Stderr = log
 	cmd.Stdin = nil
@@ -208,6 +208,39 @@ func (a *App) watch(ctx context.Context, args []string) error {
 	if e := syscall.Flock(int(hubCloseLock.Fd()), syscall.LOCK_EX); e != nil {
 		return e
 	}
+	// Leaving is decided under the job's end lock, and the hub-close lock is
+	// released under it: a node that recorded an intent while this watcher
+	// still read as aware keeps it watching; one that comes after sees no
+	// aware watcher and starts its own (watch_hub_close.go).
+	for {
+		err := a.watchPolls(ctx, args, id)
+		if ctx.Err() != nil {
+			return err
+		}
+		unlock, e := LockJobEnd(filepath.Join(a.Jobs, id))
+		if e != nil {
+			return errors.Join(err, e)
+		}
+		if j, e := a.job(id); e == nil && !j.Reaped {
+			if _, open := pendingHubCloseIntent(j); open {
+				unlock()
+				if err != nil {
+					a.warn("watch of job %s failed with a hub close open, retrying: %v", id, err)
+				}
+				if e := a.Sleep(ctx, 5*time.Second); e != nil {
+					return e
+				}
+				continue
+			}
+		}
+		hubCloseLock.Close()
+		unlock()
+		return err
+	}
+}
+
+// watchPolls is the watcher's poll loop; watch owns its locks and exit.
+func (a *App) watchPolls(ctx context.Context, args []string, id string) error {
 	timeout := time.Hour
 	if v := a.envOr("PANEWIRE_COMPLETION_TIMEOUT_S", "WRK_COMPLETION_TIMEOUT_S"); v != "" {
 		d, ok := timeoutValue(v)
@@ -246,8 +279,8 @@ func (a *App) watch(ctx context.Context, args []string) error {
 		// completion, the decision timeout, the deadline exit and the
 		// missing-pane fallback all wait, and the watcher writes only the
 		// intended record once the node's close operation is final.
-		if in, ok := pendingHubCloseIntent(j); ok && !j.Reaped {
-			out, err := a.reconcileHubCloseIntent(ctx, j, in)
+		if _, ok := pendingHubCloseIntent(j); ok && !j.Reaped {
+			out, err := a.reconcileHubCloseIntent(ctx, id)
 			if err != nil {
 				return err
 			}
@@ -367,9 +400,11 @@ func (a *App) watch(ctx context.Context, args []string) error {
 						if err != nil {
 							return err
 						}
-						if e := a.event(ctx, id, "job.credit_published", published); e != nil || !deferred {
-							return e
+						if !deferred {
+							return a.event(ctx, id, "job.credit_published", published)
 						}
+						// The rejection stays pending: a close that ends
+						// up closing nothing hands it back to this path.
 						continue
 					}
 					if err := a.quotaStopAnnounce(ctx, j, credit); err != nil {
@@ -524,8 +559,17 @@ func (a *App) watch(ctx context.Context, args []string) error {
 				// stop is stale and the job lives. job.reprompted makes the
 				// job live again, so the announced job.lost is not adopted a
 				// second time and the grace does not restart.
-				if e := a.event(ctx, id, "job.reprompted", map[string]any{"reason": "quota_stop_resumed", "pane_id": j.Pane}); e != nil {
-					return e
+				// Under the end lock: a hub close recorded since this poll's
+				// look owns the pane now, and a stale re-prompt would close
+				// its intent.
+				deferred, err := a.endUnlessHubClose(id, func(Job) error {
+					return a.event(ctx, id, "job.reprompted", map[string]any{"reason": "quota_stop_resumed", "pane_id": j.Pane})
+				})
+				if err != nil {
+					return err
+				}
+				if deferred {
+					continue
 				}
 				handOff = quotaHandOff{}
 			}

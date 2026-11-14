@@ -57,7 +57,8 @@ func closeOpNode(t *testing.T, inbox string, fake *nodeFakeHerdr) *HubClient {
 type fakeHubClose struct {
 	watcher  fleet.HubCloseWatcher
 	intents  []fleet.HubCloseIntent
-	started  []string
+	started  []string // "<job> <session>"
+	cancels  []string
 	record   func(job string, in fleet.HubCloseIntent) error
 	startErr error
 }
@@ -75,9 +76,13 @@ func (f *fakeHubClose) RecordIntent(_ context.Context, job string, in fleet.HubC
 	f.intents = append(f.intents, in)
 	return nil
 }
-func (f *fakeHubClose) StartWatcher(job string) error {
-	f.started = append(f.started, job)
+func (f *fakeHubClose) StartWatcher(job, session string) error {
+	f.started = append(f.started, job+" "+session)
 	return f.startErr
+}
+func (f *fakeHubClose) CancelIntent(_ context.Context, job, id string) error {
+	f.cancels = append(f.cancels, job+" "+id)
+	return nil
 }
 
 var noHubCloseIntent = &fakeHubClose{watcher: fleet.HubCloseWatcherAware}
@@ -812,7 +817,7 @@ func TestCloseOpFencesTheWatcher_t4652(t *testing.T) {
 	wantCloseStatus(t, client, nodeCommandPaneCloseStatus, "op-1", "none", false)
 	ledger.startErr = nil
 	wantCloseOp(t, client, "op-1", fleet.CloseOpClosed, false)
-	if len(ledger.started) != 2 || ledger.started[1] != closeOpJob {
+	if len(ledger.started) != 2 || ledger.started[1] != closeOpJob+" fleet" {
 		t.Fatalf("watcher starts %v", ledger.started)
 	}
 	if fake.called("pane", "close") != 1 {
@@ -869,5 +874,20 @@ func TestCloseOpAfterAHubCloseIntentAsksHK_t4652(t *testing.T) {
 		client := closeOpNode(t, inbox, idlePaneHerdr())
 		client.nodeJobs = &roleJobs{records: map[string]map[string]any{closeOpJob: {"state": test.state}}}
 		wantCloseOp(t, client, "op-1", test.outcome, false)
+	}
+}
+
+// A release of a request whose intent was recorded but never registered
+// cancels that intent, so the watcher stops waiting on it.
+func TestCloseOpReleaseCancelsAnUnregisteredIntent_t4652(t *testing.T) {
+	inbox := t.TempDir()
+	client := closeOpNode(t, inbox, idlePaneHerdr())
+	ledger := &fakeHubClose{watcher: fleet.HubCloseWatcherAware}
+	client.nodeHubClose = ledger
+	addCloseOpEvent(t, inbox, "00003-job.hub_close_intent.json", `{"kind":"job.hub_close_intent","created_at":"2026-11-14T00:00:02Z","payload":{"request_id":"op-9","attempt":"`+closeOpAttempt+`","pane_id":"w1:p1","label":"job-a","end_reason":"r"}}`)
+	wantCloseStatus(t, client, nodeCommandPaneCloseRelease, "op-9", "none", false)
+	wantCloseStatus(t, client, nodeCommandPaneCloseRelease, "op-8", "none", false)
+	if len(ledger.cancels) != 1 || ledger.cancels[0] != closeOpJob+" op-9" {
+		t.Fatalf("cancels %v, want only op-9", ledger.cancels)
 	}
 }

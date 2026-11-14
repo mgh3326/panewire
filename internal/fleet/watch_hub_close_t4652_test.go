@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -21,13 +22,20 @@ func hubCloseFixture(t *testing.T) (*App, *fakeHK) {
 	t.Setenv("PANEWIRE_COMPLETION_TIMEOUT_S", "6000")
 	// seedLedger records a claim after the fixture's spawn; the attempt a
 	// close binds to is the spawn that follows it, as in production.
-	if e := a.event(context.Background(), "j", "job.spawned", map[string]any{"pane_id": "w:p1", "label": "agent-a", "role": "reviewer"}); e != nil {
+	if e := a.event(context.Background(), "j", "job.spawned", map[string]any{"pane_id": "w:p1", "label": "agent-a", "role": "reviewer", "herdr_session": "old-session"}); e != nil {
 		t.Fatal(e)
 	}
 	do := f.Do
 	f.Do = func(c Command) Result {
 		if c.Name == "herdr" && strings.Join(c.Args, " ") == "agent list" {
 			return Result{Out: `{"result":{"agents":[]}}`}
+		}
+		if c.Name == "herdr" && strings.Join(c.Args, " ") == "pane list" {
+			// The pane inventory is read in the receipt's session.
+			if !slices.Contains(c.Env, "HERDR_SESSION=old-session") {
+				t.Errorf("pane list in %v, want the receipt's session", c.Env)
+			}
+			return Result{Out: `{"result":{"panes":[]}}`}
 		}
 		return do(c)
 	}
@@ -169,16 +177,17 @@ func TestWatcherHubCloseSurvivesRestart_t4652(t *testing.T) {
 	in := liveIntent(t, a)
 	recordHubClose(t, a, in)
 	writeJobCloseOp(t, a, CloseOp{RequestID: in.RequestID, Attempt: in.Attempt, State: CloseOpClosing})
-	stop := errors.New("watcher stopped")
+	ctx, stop := context.WithCancel(context.Background())
 	sleep := a.Sleep
 	polls := 0
 	a.Sleep = func(ctx context.Context, d time.Duration) error {
 		if polls++; polls == 5 {
-			return stop
+			stop()
+			return ctx.Err()
 		}
 		return sleep(ctx, d)
 	}
-	if e := a.watch(context.Background(), []string{"j"}); !errors.Is(e, stop) {
+	if e := a.watch(ctx, []string{"j"}); !errors.Is(e, context.Canceled) {
 		t.Fatalf("first watcher = %v, want it stopped mid-intent", e)
 	}
 	if lost := lostEvents(t, a); len(lost) != 0 || str(h.record(t, "j"), "state") == "lost" {
@@ -324,9 +333,11 @@ func TestWatcherUnknownCloseWaitsForThePaneToBeGone_t4652(t *testing.T) {
 	do := f.Do
 	lists := 0
 	f.Do = func(c Command) Result {
-		if c.Name == "herdr" && strings.Join(c.Args, " ") == "agent list" {
+		if c.Name == "herdr" && strings.Join(c.Args, " ") == "pane list" {
+			// The agent exited but the pane stays as a plain shell: absent
+			// from the agent list, present in the pane inventory.
 			if lists++; lists < 10 {
-				return Result{Out: `{"result":{"agents":[{"pane_id":"w:p1","agent_status":"idle","state_change_seq":7}]}}`}
+				return Result{Out: `{"result":{"panes":[{"pane_id":"w:p1"}]}}`}
 			}
 		}
 		return do(c)
@@ -420,5 +431,86 @@ func TestJobLedgerSkipsTemporaryEvents_t4652(t *testing.T) {
 	}
 	if _, e := a.job("j"); e != nil {
 		t.Fatalf("a temporary event broke the ledger read: %v", e)
+	}
+}
+
+// A watcher leaving on an error (herdr unreadable) right after the node
+// recorded an intent does not leave: leaving is re-checked under the end lock
+// and the close is finished.
+func TestWatcherLeavingRechecksForAHubClose_t4652(t *testing.T) {
+	a, h := hubCloseFixture(t)
+	in := liveIntent(t, a)
+	f := a.Runner.(*fakeRunner)
+	do := f.Do
+	lists := 0
+	f.Do = func(c Command) Result {
+		if c.Name == "herdr" && strings.Join(c.Args, " ") == "agent list" {
+			if lists++; lists == 1 {
+				recordHubClose(t, a, in)
+				writeJobCloseOp(t, a, CloseOp{RequestID: in.RequestID, Attempt: in.Attempt, State: CloseOpClosed})
+				return Result{Code: 1, Err: "herdr down"}
+			}
+		}
+		return do(c)
+	}
+	if e := a.watch(context.Background(), []string{"j"}); e != nil {
+		t.Fatal(e)
+	}
+	wantHubCloseFinished(t, a, h)
+}
+
+// The intent finished is the newest open one, read under the end lock: an
+// older unknown close never writes its end_reason over a newer request.
+func TestWatcherReconcilesTheNewestIntent_t4652(t *testing.T) {
+	a, h := hubCloseFixture(t)
+	old := liveIntent(t, a)
+	old.RequestID, old.EndReason = "close-0", "quota_stop pool=devin-free replaced_by=stale"
+	recordHubClose(t, a, old)
+	writeJobCloseOp(t, a, CloseOp{RequestID: old.RequestID, Attempt: old.Attempt, State: CloseOpUnknown})
+	in := liveIntent(t, a)
+	recordHubClose(t, a, in)
+	writeJobCloseOp(t, a, CloseOp{RequestID: in.RequestID, Attempt: in.Attempt, State: CloseOpClosed})
+	if e := a.watch(context.Background(), []string{"j"}); e != nil {
+		t.Fatal(e)
+	}
+	wantHubCloseFinished(t, a, h)
+}
+
+// A newer request that closed nothing hands the job back to the older,
+// still-unresolved unknown close, which finishes with its own end_reason.
+func TestWatcherFallsBackToAnOlderUnresolvedIntent_t4652(t *testing.T) {
+	a, h := hubCloseFixture(t)
+	in := liveIntent(t, a)
+	recordHubClose(t, a, in)
+	writeJobCloseOp(t, a, CloseOp{RequestID: in.RequestID, Attempt: in.Attempt, State: CloseOpUnknown})
+	newer := liveIntent(t, a)
+	newer.RequestID, newer.EndReason = "close-2", "quota_stop pool=devin-free replaced_by=other"
+	recordHubClose(t, a, newer)
+	writeJobCloseOp(t, a, CloseOp{RequestID: newer.RequestID, Attempt: newer.Attempt, State: CloseOpRefused})
+	if e := a.watch(context.Background(), []string{"j"}); e != nil {
+		t.Fatal(e)
+	}
+	wantHubCloseFinished(t, a, h)
+}
+
+// An intent whose operation was never registered, on a job hk already ended,
+// is orphaned: the watcher stops waiting and does not write a hub-close end.
+func TestWatcherCancelsAnOrphanedIntent_t4652(t *testing.T) {
+	a, h := hubCloseFixture(t)
+	recordHubClose(t, a, liveIntent(t, a))
+	h.mu.Lock()
+	h.records["j"]["state"] = "completed"
+	h.mu.Unlock()
+	if e := a.watch(context.Background(), []string{"j"}); e != nil {
+		t.Fatal(e)
+	}
+	j, _ := a.job("j")
+	if _, open := pendingHubCloseIntent(j); open {
+		t.Fatal("orphaned intent still open")
+	}
+	for _, p := range lostEvents(t, a) {
+		if str(p, "reason") == hubCloseLostReason {
+			t.Fatalf("orphaned intent finished as a hub close: %v", p)
+		}
 	}
 }

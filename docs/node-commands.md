@@ -255,8 +255,13 @@ A *hub close* is the hub ending a job by closing its pane with
    not read intents (it holds the watch lock but not
    `.panewire-watch-hubclose.lock`; the hub retries after that watcher ends or
    is replaced). With no watcher running, the node starts one before it
-   registers; a failed start answers `watcher_unavailable` with nothing
-   registered. A repeat that resumes a `registered` operation makes the same
+   registers, in the herdr session of the job's receipt and with the node's
+   own `handoffkeep_env` file as `PANEWIRE_HK_ENV` (a file without the
+   svc-panewire token key is refused); a failed start answers
+   `watcher_unavailable` with nothing registered. A watcher decides to leave
+   under the end lock and releases its hub-close lock under it, so a node
+   that recorded an intent while the watcher still read as aware keeps it
+   watching, and one that comes after starts a new watcher. A repeat that resumes a `registered` operation makes the same
    watcher check.
 2. **What the watcher does while the close is open.** The intent is open
    while it names the job's current attempt and that attempt's receipt pane
@@ -269,10 +274,14 @@ A *hub close* is the hub ending a job by closing its pane with
    restarts (a re-armed watcher reads the same ledger). It reads the
    operation from `jobs/<job>/close-ops/<request_id>.json`, never herdr.
 3. **Who writes the terminal record.** The watcher does, under the end
-   lock, after fsyncing the journal it read. `closed` and `gone` prove the
-   pane stopped; `unknown` does only once a successful herdr read shows the
-   pane absent, and the watcher waits while herdr lists it (the hub may open
-   a new request id, which records a newer intent). Then the watcher writes hk
+   lock, on the intent current under that lock (the newest one whose own
+   request no cancellation closed: a newer request that closed nothing hands
+   the job back to an older unresolved one), after fsyncing the journal it
+   read. `closed` proves the pane stopped; `gone` and `unknown` do only once
+   a successful `herdr pane list` in the receipt's session shows the pane
+   absent (the agent list misses a pane left as a plain shell), and the
+   watcher waits while it is listed (the hub may open a new request id,
+   which records a newer intent). Then the watcher writes hk
    `state=lost` with exactly the intended `end_reason`, releases the quota
    lease, then records a final `job.lost` (`reason: "hub_close"`,
    `final: true`, `request_id`, `end_reason`). A crash between those steps
@@ -292,7 +301,11 @@ A *hub close* is the hub ending a job by closing its pane with
    repeat the same `request_id` with the same arguments until it is final
    (a repeat settles `closing` as `unknown`, and registers or resumes a
    `registered` one, which closes or settles `preempted`/`mismatch`), or
-   release a `registered` one (`cancelled`). A `mismatch` on a repeat means
+   release a `registered` one (`cancelled`). Releasing a request the node
+   never registered (answered `none`) records `job.hub_close_cancelled`
+   (`released`) for its intent, so the watcher stops waiting. An intent with
+   no operation on a job hk already ended is cancelled by the watcher
+   (`orphaned`): a repeat could no longer bind. A `mismatch` on a repeat means
    the attempt moved on, which already closed the intent.
 
 What hk 4632 must still do: send `end_reason` on every `pane.close_op`; treat

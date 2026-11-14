@@ -46,6 +46,9 @@ type App struct {
 	Now          func() time.Time
 	Bins         map[string]string
 	HerdrSession string // frozen for the lifetime of a spawn
+	// WatchEnv is added to a started watcher's environment (a hub-close
+	// watcher's PANEWIRE_HK_ENV).
+	WatchEnv []string
 	// Arbiter is the local job ledger (leases, job events, gc). Nil means the
 	// one under Home and Jobs; tests inject a store over a temp dir.
 	Arbiter        *arbiter.Store

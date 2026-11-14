@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -131,14 +132,29 @@ func ProbeHubCloseWatcher(jobDir string) (HubCloseWatcher, error) {
 }
 
 // StartHubCloseWatcher starts the job's re-armed watcher, for a hub close that
-// found none running: the watcher is what finishes the job.
-func StartHubCloseWatcher(jobs, session, job string) error {
+// found none running: the watcher is what finishes the job. session is the
+// herdr session of the job's receipt; hkEnv, when set, is the node's own
+// handoffkeep credential file (spawn.json handoffkeep_env), so the watcher
+// reads and writes the hk record with the credential the node uses.
+func StartHubCloseWatcher(jobs, session, job, hkEnv string) error {
 	a, e := New(os.Stderr, os.Stderr)
 	if e != nil {
 		return e
 	}
 	a.Jobs, a.HerdrSession = jobs, session
+	if hkEnv != "" {
+		a.WatchEnv = []string{"PANEWIRE_HK_ENV=" + hkEnv}
+	}
 	return a.startWatchMode(job, true)
+}
+
+// RecordHubCloseCancel closes the hub-close intent of request id in job's
+// ledger: the hub released a request the node never registered, so no close
+// will run for it.
+func RecordHubCloseCancel(ctx context.Context, jobs, job, id, reason string) error {
+	home, _ := os.UserHomeDir()
+	a := &App{Jobs: jobs, Home: home, Now: time.Now}
+	return a.event(ctx, job, hubCloseCancelKind, map[string]any{"request_id": id, "reason": reason})
 }
 
 // OpenCloseOps lists the job's close operations for attempt that are not yet
@@ -194,44 +210,51 @@ func (a *App) endUnlessHubClose(id string, end func(j Job) error) (deferred bool
 	return false, end(j)
 }
 
-// pendingHubCloseIntent returns the job's open hub-close intent: the newest
-// intent recorded for the current attempt and its receipt's pane and label,
-// not followed by a cancellation, an end or a new attempt. An intent naming
-// another attempt, pane or label is stale and ignored, as the node's binding
-// ignores it (node_pane_close_op.go closeTargetBound).
+// pendingHubCloseIntent returns the job's current hub-close intent: the
+// newest intent recorded for the current attempt and its receipt's pane and
+// label that no cancellation of its own request closed, and that no end or new
+// attempt followed. An intent naming another attempt, pane or label is stale
+// and ignored, as the node's binding ignores it (node_pane_close_op.go
+// closeTargetBound). A newer request that closed nothing hands the job back
+// to an older one still unresolved (an unknown close whose pane is listed).
 func pendingHubCloseIntent(j Job) (HubCloseIntent, bool) {
-	var cur HubCloseIntent
+	var open []HubCloseIntent
 	var attempt, pane, label string
-	open := false
 	for _, ev := range j.Events {
 		switch ev.Kind {
 		case "job.claim", "job.claimed", "job.reclaim":
-			attempt, pane, label, open = ev.name, "", "", false
+			attempt, pane, label, open = ev.name, "", "", nil
 		case "job.spawned":
-			attempt, pane, label, open = ev.name, str(ev.Payload, "pane_id"), str(ev.Payload, "label"), false
+			attempt, pane, label, open = ev.name, str(ev.Payload, "pane_id"), str(ev.Payload, "label"), nil
 			if label == "" {
 				label = str(ev.Payload, "agent_label")
 			}
 		case "job.reprompted":
-			attempt, open = ev.name, false
+			attempt, open = ev.name, nil
 		case hubCloseIntentKind:
-			cur = HubCloseIntent{RequestID: str(ev.Payload, "request_id"), Attempt: str(ev.Payload, "attempt"), Pane: str(ev.Payload, "pane_id"), Label: str(ev.Payload, "label"), EndReason: str(ev.Payload, "end_reason")}
-			open = ValidCloseOpID(cur.RequestID) && cur.EndReason != "" && cur.Attempt == attempt && cur.Pane == pane && cur.Pane != "" && cur.Label == label
-		case hubCloseCancelKind:
-			if str(ev.Payload, "request_id") == cur.RequestID {
-				open = false
+			in := HubCloseIntent{RequestID: str(ev.Payload, "request_id"), Attempt: str(ev.Payload, "attempt"), Pane: str(ev.Payload, "pane_id"), Label: str(ev.Payload, "label"), EndReason: str(ev.Payload, "end_reason")}
+			if ValidCloseOpID(in.RequestID) && in.EndReason != "" && in.Attempt == attempt && in.Pane == pane && in.Pane != "" && in.Label == label {
+				// A repeat of a request records its intent again.
+				open = slices.DeleteFunc(open, func(o HubCloseIntent) bool { return o.RequestID == in.RequestID })
+				open = append(open, in)
 			}
+		case hubCloseCancelKind:
+			id := str(ev.Payload, "request_id")
+			open = slices.DeleteFunc(open, func(o HubCloseIntent) bool { return o.RequestID == id })
 		case "job.completed", "job.completion", "job.record_settled", "job.joined", "job.revoked", "job.handed_off", "job.escalate", "job.reaped":
-			open = false
+			open = nil
 		case "job.lost":
 			// An announced quota stop is the hand-over the hub closes for; any
 			// other loss ends the attempt.
 			if str(ev.Payload, "reason") != "quota_stop" || boolean(ev.Payload, "final", false) {
-				open = false
+				open = nil
 			}
 		}
 	}
-	return cur, open
+	if len(open) == 0 {
+		return HubCloseIntent{}, false
+	}
+	return open[len(open)-1], true
 }
 
 // hubCloseOutcome is what one reconciliation of a hub-close intent did.
@@ -262,15 +285,18 @@ func (a *App) readJobCloseOp(job, id string) (CloseOp, bool, error) {
 	return op, found, err
 }
 
-// paneProvenGone reports whether a successful herdr read shows the job's pane
-// absent. An unreadable herdr proves nothing.
-func (a *App) paneProvenGone(ctx context.Context, pane string) bool {
-	agents, e := a.agents(ctx)
+// paneProvenGone reports whether a successful read of the full herdr pane
+// inventory, in the herdr session of the job's receipt, shows the job's pane
+// absent. The agent list is not enough: a pane whose agent exited stays as a
+// plain shell. An unreadable inventory proves nothing.
+func (a *App) paneProvenGone(ctx context.Context, j Job) bool {
+	route := a.laneRoute(j)
+	panes, e := route.panes(ctx)
 	if e != nil {
 		return false
 	}
-	for _, ag := range agents {
-		if ag.Pane == pane {
+	for _, p := range panes {
+		if p.Pane == j.Pane {
 			return false
 		}
 	}
@@ -287,12 +313,22 @@ func (a *App) paneProvenGone(ctx context.Context, pane string) bool {
 // already there is accepted; another terminal record is kept, and the
 // watcher still releases the lease and closes the intent, since the pane is
 // proven gone.
-func (a *App) reconcileHubCloseIntent(ctx context.Context, j Job, in HubCloseIntent) (hubCloseOutcome, error) {
-	unlock, e := LockJobEnd(filepath.Join(a.Jobs, j.ID))
+func (a *App) reconcileHubCloseIntent(ctx context.Context, id string) (hubCloseOutcome, error) {
+	unlock, e := LockJobEnd(filepath.Join(a.Jobs, id))
 	if e != nil {
 		return hubCloseWait, e
 	}
 	defer unlock()
+	// The intent is chosen from the ledger read under the lock: the node may
+	// have recorded a newer one since the poll's snapshot.
+	j, e := a.job(id)
+	if e != nil {
+		return hubCloseWait, e
+	}
+	in, open := pendingHubCloseIntent(j)
+	if !open || j.Reaped {
+		return hubCloseCancelled, nil
+	}
 	cancel := func(reason string) (hubCloseOutcome, error) {
 		return hubCloseCancelled, a.event(ctx, j.ID, hubCloseCancelKind, map[string]any{"request_id": in.RequestID, "reason": reason})
 	}
@@ -301,17 +337,30 @@ func (a *App) reconcileHubCloseIntent(ctx context.Context, j Job, in HubCloseInt
 	case err != nil:
 		a.warn("hub close of job %s waits: close operation unreadable: %v", j.ID, err)
 		return hubCloseWait, nil
-	case !found, !op.Final():
-		// Registered after the intent, or still closing: the hub repeats the
-		// request until it is final (docs/node-commands.md).
+	case !found:
+		// The node recorded the intent but never registered the operation (a
+		// crash, journal_failed, watcher_unavailable). The hub repeats the
+		// request or releases it, which cancels the intent. A job hk already
+		// ended can no longer be bound, so a repeat would only answer
+		// mismatch: the intent is orphaned and cancelled.
+		if state, _, ok := a.hkJobState(ctx, j.ID); ok && (state == "completed" || state == "lost" || state == "escalated") {
+			return cancel("orphaned")
+		}
+		return hubCloseWait, nil
+	case !op.Final():
+		// Still registered or closing: the hub repeats the request until it
+		// is final (docs/node-commands.md).
 		return hubCloseWait, nil
 	case op.Attempt != in.Attempt:
 		return cancel("stale")
 	}
 	switch op.State {
-	case CloseOpClosed, CloseOpGone:
-	case CloseOpUnknown:
-		if !a.paneProvenGone(ctx, j.Pane) {
+	case CloseOpClosed:
+	case CloseOpGone, CloseOpUnknown:
+		// gone came from the node's agent list, and unknown may not have
+		// closed anything: both wait for the pane inventory to show the
+		// pane absent.
+		if !a.paneProvenGone(ctx, j) {
 			return hubCloseWait, nil
 		}
 	default:
