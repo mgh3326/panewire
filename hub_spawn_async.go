@@ -689,9 +689,11 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 		outcome.Reason = "timeout"
 		// The deadline can expire inside the pass that parked the request on
 		// a refresh; that timeout names the refresh too, not the queue.
-		if wait, failure, waiting := h.spawnRefreshWaitOutcome(task); waiting {
-			outcome.QuotaRefresh = failure
-			outcome.Fix = spawnRefreshWaitFix(task, wait, failure)
+		if errors.Is(err, fleet.ErrQuotaRefreshPending) {
+			if wait, failure, waiting := h.spawnRefreshWaitOutcome(task); waiting {
+				outcome.QuotaRefresh = failure
+				outcome.Fix = spawnRefreshWaitFix(task, wait, failure)
+			}
 		}
 	}
 	if outcome.Host == "" {
