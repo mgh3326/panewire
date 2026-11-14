@@ -93,6 +93,7 @@ func newHubServerForCLIWithDeps(args []string, logger *slog.Logger, deps hubServ
 	consultTimeout := flags.Duration("consult-timeout", defaultHubConsultTimeout, "how long one consult may take from request to answer")
 	alertNodesCSV := flags.String("alert-nodes", "", "comma-separated authenticated machine IDs to alert on")
 	placementPolicyPath := flags.String("placement-policy", "/etc/panewire/placement.json", "operator-owned JSON placement policy (hot-reloaded)")
+	spawnGrantDrain := flags.Bool("spawn-grant-drain", false, "bind no new grant-required spawn and start no quota hand-off, to drain *_grant rows before a hub rollback")
 	uiAllowCFOnly := flags.Bool("ui-allow-cf-only", false, "serve /ui only to Cloudflare Access identities or loopback clients")
 	cfAccessTeam := flags.String("cf-access-team", "", "Cloudflare Access team name for Cf-Access-Jwt-Assertion verification (requires --cf-access-aud)")
 	cfAccessAUD := flags.String("cf-access-aud", "", "Cloudflare Access application AUD tag for Cf-Access-Jwt-Assertion verification (requires --cf-access-team)")
@@ -209,13 +210,14 @@ func newHubServerForCLIWithDeps(args []string, logger *slog.Logger, deps hubServ
 	if *paneSweepInterval < 0 || (*paneSweepInterval > 0 && *paneSweepInterval < minTaskPaneSweepInterval) || *paneSweepAge < 0 || *paneSweepAge > time.Duration(nodePaneSweepMaxAgeSeconds)*time.Second {
 		return nil, "", ExitConditionInvalid, errors.New("hub pane sweep flags are invalid")
 	}
-	hub, err := NewHubServer(HubServerConfig{DeliveryPolicyPath: *deliveryPolicyPath, InboxStorePath: *inboxStorePath, InboxDatabaseURL: os.Getenv(hubDatabaseURLEnv), Tokens: tokens, Scopes: scopes, AuthPath: *authPath, AlertNodes: alertNodes, Now: deps.Now, GracePeriod: *gracePeriod, PaneSweepInterval: *paneSweepInterval, PaneSweepAge: *paneSweepAge, ConsultTimeout: *consultTimeout, Logger: logger, PlacementPolicyPath: placementPath, PrometheusURL: os.Getenv("PANEWIRE_PROM_URL"), PrometheusBearer: os.Getenv("PANEWIRE_PROM_BEARER"), PrometheusBasicUser: os.Getenv("PANEWIRE_PROM_BASIC_USER"), PrometheusBasicPass: os.Getenv("PANEWIRE_PROM_BASIC_PASS"), UIAllowCFOnly: *uiAllowCFOnly, CFAccessTeam: *cfAccessTeam, CFAccessAUD: *cfAccessAUD, CFAccessCertsURL: *cfAccessCertsURL, CFAccessHTTPClient: deps.ChatHTTPClient, ReportRelayPath: routePath, LanesNodeRowCap: *lanesNodeRowCap, PRStatusHost: *prStatusHost, ControlPlaneLanesPath: *controlPlaneLanesPath, AcceptingOverridesPath: *acceptingOverridesPath, handoffkeep: handoffkeep})
+	hub, err := NewHubServer(HubServerConfig{DeliveryPolicyPath: *deliveryPolicyPath, InboxStorePath: *inboxStorePath, InboxDatabaseURL: os.Getenv(hubDatabaseURLEnv), Tokens: tokens, Scopes: scopes, AuthPath: *authPath, AlertNodes: alertNodes, Now: deps.Now, GracePeriod: *gracePeriod, PaneSweepInterval: *paneSweepInterval, PaneSweepAge: *paneSweepAge, ConsultTimeout: *consultTimeout, Logger: logger, PlacementPolicyPath: placementPath, PrometheusURL: os.Getenv("PANEWIRE_PROM_URL"), PrometheusBearer: os.Getenv("PANEWIRE_PROM_BEARER"), PrometheusBasicUser: os.Getenv("PANEWIRE_PROM_BASIC_USER"), PrometheusBasicPass: os.Getenv("PANEWIRE_PROM_BASIC_PASS"), UIAllowCFOnly: *uiAllowCFOnly, CFAccessTeam: *cfAccessTeam, CFAccessAUD: *cfAccessAUD, CFAccessCertsURL: *cfAccessCertsURL, CFAccessHTTPClient: deps.ChatHTTPClient, ReportRelayPath: routePath, LanesNodeRowCap: *lanesNodeRowCap, PRStatusHost: *prStatusHost, ControlPlaneLanesPath: *controlPlaneLanesPath, AcceptingOverridesPath: *acceptingOverridesPath, SpawnGrantDrain: *spawnGrantDrain, handoffkeep: handoffkeep})
 	if err != nil {
 		return nil, "", ExitConditionInvalid, fmt.Errorf("hub configuration is invalid: %w", err)
 	}
 	hub.logFile = logFile
 	logFile = nil
 	hub.logAuthorityLaneProtection()
+	hub.logSpawnGrantRows()
 	return hub, address, ExitOK, nil
 }
 

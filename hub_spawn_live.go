@@ -89,7 +89,7 @@ func livePlacedProfile(task hubSpawnTask) string {
 func (s *laneInboxStore) liveSpawns(parent context.Context, activeJobs []string, settled time.Time) ([]hubSpawnTask, error) {
 	ctx, done := s.op(parent)
 	defer done()
-	query := `SELECT ` + spawnTaskColumns + ` FROM spawn_operations WHERE status IN ('accepted','bound','dispatching') OR status='succeeded' AND (created_ms>=? OR last_run_ms>=?`
+	query := `SELECT ` + spawnTaskColumns + ` FROM spawn_operations WHERE status IN ('accepted','bound','dispatching','bound_grant','dispatching_grant') OR status='succeeded' AND (created_ms>=? OR last_run_ms>=?`
 	args := []any{settled.UnixMilli(), settled.UnixMilli()}
 	if len(activeJobs) > 0 {
 		query += ` OR job IN (` + strings.TrimSuffix(strings.Repeat("?,", len(activeJobs)), ",") + `)`

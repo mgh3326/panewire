@@ -84,6 +84,10 @@ type hubSpawnRequest struct {
 	Checkout    *hubSpawnCheckout `json:"checkout,omitempty"`
 	Args        []string          `json:"args"`
 	WaitSeconds int               `json:"wait_seconds"`
+	// GrantRequired is fixed at bind: the attempt goes only to a node that
+	// starts it after the hub's durable grant, and only such an attempt may
+	// be fenced on silence (hub_spawn_grant.go).
+	GrantRequired bool `json:"grant_required,omitempty"`
 }
 
 type hubSpawnResult struct {

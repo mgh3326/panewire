@@ -874,3 +874,37 @@ func TestLaneInboxStoreContractSettled(t *testing.T) {
 		expect("plain", true)
 	})
 }
+
+// A database that recorded 0011_spawn_attempt_grants as it was before
+// spawn_attempt_start_by existed (438be187) still gets that table on
+// upgrade, from its own migration (hk 4612).
+func TestLaneInboxStorePostgresUpgradeAfterOlder0011AddsStartBy_t4612(t *testing.T) {
+	config, _ := hubPostgresTestSchema(t)
+	first, err := openLaneInboxStorePostgresConfig(context.Background(), config.Copy())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Roll the schema back to what the 438be187 hub left: 0011 recorded,
+	// no spawn_attempt_start_by and no later migration that adds it.
+	for _, statement := range []string{
+		`DROP TABLE spawn_attempt_start_by`,
+		`DELETE FROM panewire_schema_migrations WHERE version='0014_spawn_attempt_start_by'`,
+	} {
+		if _, err := first.db.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var recorded bool
+	if err := first.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM panewire_schema_migrations WHERE version='0011_spawn_attempt_grants')`).Scan(&recorded); err != nil || !recorded {
+		t.Fatalf("0011 recorded=%v err=%v", recorded, err)
+	}
+	_ = first.close()
+	second, err := openLaneInboxStorePostgresConfig(context.Background(), config.Copy())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.close()
+	if err := second.recordSpawnStartBy(context.Background(), "00000000-0000-4000-8000-000000461299", 1); err != nil {
+		t.Fatalf("upgraded database lacks spawn_attempt_start_by: %v", err)
+	}
+}
