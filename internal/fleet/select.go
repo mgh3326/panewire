@@ -257,16 +257,33 @@ type selCand struct {
 	// wasteGroup names the metering group this rung's pacing and waste were
 	// judged on, for a pool that publishes only group windows; empty for every
 	// other pool.
-	wasteGroup  string
-	accountKey  string
-	host        string
-	hosts       []selHost
-	holders     []selHost
-	code        string
+	wasteGroup string
+	accountKey string
+	host       string
+	hosts      []selHost
+	holders    []selHost
+	code       string
+	// measuredAt is the shared reading's measurement time and stale marks it
+	// past its freshness window, so a quota drop can name the evidence's age.
+	measuredAt  time.Time
+	stale       bool
 	ignoreGrade bool
 	// headroom is the candidate's fit against the job's expected hours (the
 	// headroom key, select_headroom.go); nil when the job has no expected time.
 	headroom *headroomFit
+}
+
+// evidenceHost names the host an account-bound candidate was judged through:
+// the first placeable holder, else the first host that can measure the
+// account. A dropped row has no chosen host, but a quota drop still names
+// whose account reading decided it.
+func (c *selCand) evidenceHost() string {
+	for _, hs := range [][]selHost{c.hosts, c.holders} {
+		if len(hs) > 0 {
+			return hs[0].name
+		}
+	}
+	return ""
 }
 
 type selPlan struct {
@@ -980,6 +997,7 @@ func (a *App) selectFor(ctx context.Context, s Spawn, req selReq) (*selPlan, err
 				continue
 			}
 			acc := pres.account(ctx, binding.key, row.Pool, binding.holders, false)
+			x.measuredAt, x.stale = acc.MeasuredAt, acc.Observed && !acc.Fresh
 			if why := sharedReason(binding.key, acc); why != "" || acc.Quota == nil {
 				x.code = pres.accountFailureCode(binding.key)
 				x.reason = strings.ToLower(x.code)
@@ -990,6 +1008,7 @@ func (a *App) selectFor(ctx context.Context, s Spawn, req selReq) (*selPlan, err
 			p.classifyRung(&x, acc.Quota)
 			if x.code == outcomeQuotaUnknown {
 				acc = pres.account(ctx, binding.key, row.Pool, binding.holders, true)
+				x.measuredAt, x.stale = acc.MeasuredAt, acc.Observed && !acc.Fresh
 				if sharedReason(binding.key, acc) == "" && acc.Quota != nil {
 					x.reason, x.code, x.outcome = "", "", ""
 					p.classifyRung(&x, acc.Quota)
@@ -1373,7 +1392,17 @@ func (p *selPlan) record() map[string]any {
 	}
 	for _, c := range p.cands {
 		row := map[string]any{"profile": c.row.Profile, "effort": c.row.Effort, "grade": c.row.Grade, "pool": c.row.Pool, "gate": c.row.Gate, "model_id": c.row.ModelID, "outcome": c.outcome}
-		row["account_key"], row["host"], row["outcome_code"] = c.accountKey, c.host, c.code
+		host := c.host
+		if host == "" {
+			host = c.evidenceHost()
+		}
+		row["account_key"], row["host"], row["outcome_code"] = c.accountKey, host, c.code
+		if !c.measuredAt.IsZero() {
+			row["reading_age_s"] = p.at.Sub(c.measuredAt).Round(time.Second).Seconds()
+		}
+		if c.stale {
+			row["stale"] = true
+		}
 		if c.seatName != "" {
 			row["seat"] = c.seatName
 		}
