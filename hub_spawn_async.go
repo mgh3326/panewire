@@ -978,6 +978,7 @@ func (t *directSpawnTransport) Spawn(ctx context.Context, req fleet.HubSpawnRequ
 	t.h.mu.Lock()
 	record := t.h.nodes[req.Machine]
 	oldNode := record != nil && record.agent != nil && record.state == "connected" && !record.capabilities["spawn_ops_v1"]
+	grantRequired := record != nil && record.capabilities[hubCapabilitySpawnGrant]
 	t.h.mu.Unlock()
 	if oldNode {
 		return fleet.HubSpawnReply{}, &fleet.HubError{Kind: "hub_spawn_capability_required"}
@@ -994,6 +995,7 @@ func (t *directSpawnTransport) Spawn(ctx context.Context, req fleet.HubSpawnRequ
 		node.PlacementMS = time.Since(t.started).Milliseconds()
 	}
 	node.DeadlineMS = t.task.Deadline.UnixMilli()
+	node.GrantRequired = grantRequired
 	node.WaitSeconds = max(1, min(3600, int(time.Until(t.task.Deadline).Seconds())+1))
 	// The bind can commit even when its response is lost. From this point a
 	// placement caller must not release ownership or fall through to a host.
@@ -1084,6 +1086,17 @@ func (t *directSpawnTransport) dispatch(ctx context.Context, node hubSpawnReques
 		return fleet.HubSpawnReply{}, &fleet.HubError{Kind: "hub_spawn_pending"}
 	}
 	t.task, node = current, *current.Node
+	// A sent attempt whose fence committed before a hub stop was never
+	// granted, so never started: settle it now instead of sending it again.
+	if node.GrantRequired && current.Status != "bound" {
+		fenced, err := h.inbox.store.spawnAttemptFenced(ctx, node.RequestID)
+		if err != nil {
+			return fleet.HubSpawnReply{}, &fleet.HubError{Kind: "hub_spawn_pending"}
+		}
+		if fenced {
+			return t.settleNodeResult(ctx, node, spawnFencedResult(node, h.now().UTC()), false)
+		}
+	}
 	if current.Status == "bound" && !h.now().Before(current.Deadline) {
 		h.finishSpawnOutcome(current, hubSpawnOutcome{RC: 124, Stage: "landing", Reason: "timeout", Host: node.Machine, Retryable: true, Fix: spawnQueueWaitFix(current, h.now())})
 		return fleet.HubSpawnReply{}, &fleet.HubError{Kind: "hub_spawn_pending"}
@@ -1106,7 +1119,8 @@ func (t *directSpawnTransport) dispatch(ctx context.Context, node hubSpawnReques
 	}
 	h.mu.Lock()
 	record := h.nodes[node.Machine]
-	connected := record != nil && record.agent != nil && record.state == "connected" && record.capabilities["spawn_ops_v1"]
+	// A grant-required attempt goes only to a node that asks for its grant.
+	connected := record != nil && record.agent != nil && record.state == "connected" && record.capabilities["spawn_ops_v1"] && (!node.GrantRequired || record.capabilities[hubCapabilitySpawnGrant])
 	if current.Status == "bound" && (!connected || !h.acceptingEffectiveLocked(node.Machine, record.accepting)) {
 		h.mu.Unlock()
 		releaseAdmission()
@@ -1139,7 +1153,7 @@ func (t *directSpawnTransport) dispatch(ctx context.Context, node hubSpawnReques
 	}
 	h.mu.Lock()
 	record = h.nodes[node.Machine]
-	if record == nil || record.agent != agent || record.state != "connected" || !record.capabilities["spawn_ops_v1"] || current.Status == "bound" && !h.acceptingEffectiveLocked(node.Machine, record.accepting) {
+	if record == nil || record.agent != agent || record.state != "connected" || !record.capabilities["spawn_ops_v1"] || node.GrantRequired && !record.capabilities[hubCapabilitySpawnGrant] || current.Status == "bound" && !h.acceptingEffectiveLocked(node.Machine, record.accepting) {
 		h.mu.Unlock()
 		releaseAdmission()
 		return t.unknown(ctx, "disconnected")
@@ -1158,7 +1172,14 @@ func (t *directSpawnTransport) dispatch(ctx context.Context, node hubSpawnReques
 		Args               []string          `json:"args"`
 		WaitSeconds        int               `json:"wait_seconds"`
 		DeadlineMS         int64             `json:"deadline_ms,omitempty"`
-	}{true, "job.spawn", node.RequestID, node.CWDKey, node.Brief, node.Checkout, node.Args, node.WaitSeconds, node.DeadlineMS}
+		StartByMS          int64             `json:"start_by_ms,omitempty"`
+	}{true, "job.spawn", node.RequestID, node.CWDKey, node.Brief, node.Checkout, node.Args, node.WaitSeconds, node.DeadlineMS, 0}
+	// Every send of a grant-required attempt, a replay after a hub restart
+	// included, gives the node a fresh start_by and arms the fence after it.
+	// start_by only bounds the node's wait; the grant/fence row is the proof.
+	if node.GrantRequired {
+		message.StartByMS = time.Now().Add(h.spawnStartBy).UnixMilli()
+	}
 	writeCtx, cancelWrite := context.WithCancel(ctx)
 	stopConnection := func() bool { return false }
 	if agent.lifetime != nil {
@@ -1176,14 +1197,49 @@ func (t *directSpawnTransport) dispatch(ctx context.Context, node hubSpawnReques
 		}
 		return t.unknown(ctx, "disconnected")
 	}
-	select {
-	case result := <-entry.waiter:
-		return t.settleNodeResult(ctx, node, result, false)
-	case <-ctx.Done():
-		if errors.Is(ctx.Err(), context.Canceled) {
-			return fleet.HubSpawnReply{}, &fleet.HubError{Kind: "hub_spawn_pending"}
+	// The fence is armed once the frame is written, so time spent waiting
+	// for the writer never shortens the margin after start_by.
+	var fence <-chan time.Time
+	var fenceTimer *time.Timer
+	fenceRetry := time.Second
+	if node.GrantRequired {
+		fenceTimer = time.NewTimer(time.Until(time.UnixMilli(message.StartByMS)) + h.spawnStartByMargin)
+		defer fenceTimer.Stop()
+		fence = fenceTimer.C
+	}
+	for {
+		select {
+		case result := <-entry.waiter:
+			return t.settleNodeResult(ctx, node, result, false)
+		case <-fence:
+			fenced, err := h.inbox.store.fenceSpawnAttempt(h.closeCtx, id, node.RequestID, h.now().UTC())
+			if err != nil {
+				// Undecided (a commit error may even have landed): try again
+				// with bounded backoff; the INSERT is idempotent.
+				h.logger.Warn("hub spawn fence not decided", "request_id", id, "node_request_id", node.RequestID, "err", err)
+				fenceTimer.Reset(fenceRetry)
+				fenceRetry = min(2*fenceRetry, 30*time.Second)
+				continue
+			}
+			if !fenced {
+				// A lost fence means the node holds a grant: keep waiting, and
+				// past the landing bound keep ownership as before.
+				fence = nil
+				continue
+			}
+			h.mu.Lock()
+			if entry.status == "pending" {
+				entry.status = "fenced" // a late node answer for this id is ignored
+			}
+			h.mu.Unlock()
+			h.logger.Warn("hub spawn attempt fenced before its start grant", "request_id", id, "node_request_id", node.RequestID, "host", node.Machine)
+			return t.settleNodeResult(ctx, node, spawnFencedResult(node, h.now().UTC()), false)
+		case <-ctx.Done():
+			if errors.Is(ctx.Err(), context.Canceled) {
+				return fleet.HubSpawnReply{}, &fleet.HubError{Kind: "hub_spawn_pending"}
+			}
+			return t.afterSpawnDeadline(agent, entry, message)
 		}
-		return t.afterSpawnDeadline(agent, entry, message)
 	}
 }
 

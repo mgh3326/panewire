@@ -184,6 +184,10 @@ type HubClient struct {
 	spawnActiveMu sync.Mutex // also guards spawnWaiting
 	spawnActive   map[string]bool
 	spawnWaiting  map[string]*nodeSpawnWaiter
+	// spawnGrants routes job.spawn.grant answers to the spawn waiting for them
+	// (node_spawn_grant.go).
+	spawnGrantMu sync.Mutex
+	spawnGrants  map[string]chan bool
 	// work counts the operations a stop waits for (hub_client_drain.go);
 	// stopDrain is that wait's bound, zero meaning defaultStopDrain; serving
 	// counts live hub connections, so a stop with no hub does not wait for an
@@ -655,6 +659,9 @@ type hubClientConnection struct {
 	acceptsLaunchProof  atomic.Bool
 	connection          *websocket.Conn
 	writeMu             sync.Mutex
+	// closed is closed when the session on this connection ends; a nil
+	// channel (a test peer) never ends.
+	closed chan struct{}
 }
 
 type hubOutboundMessage struct {
@@ -683,6 +690,8 @@ type hubOutboundMessage struct {
 	Checkout           *hubSpawnCheckout
 	Args               []string
 	DeadlineMS         int64
+	StartByMS          int64 // grant-required attempt: the node starts only with a hub grant by then
+	Granted            bool  // job.spawn.grant answer
 	OperatorAuthorized bool
 	WaitSeconds        int
 	CommandOp          string
@@ -1916,7 +1925,7 @@ func (client *HubClient) serve(ctx context.Context, connection *websocket.Conn) 
 const defaultHubHelloAckTimeout = 5 * time.Second
 
 // hubSpawnCapabilities is what an upgraded node advertises in hello.
-var hubSpawnCapabilities = []string{"spawn_v2", "spawn_ops_v1", hubCapabilityApplied}
+var hubSpawnCapabilities = []string{"spawn_v2", "spawn_ops_v1", hubCapabilitySpawnGrant, hubCapabilityApplied}
 
 func (client *HubClient) helloAckTimeoutOrDefault() time.Duration {
 	if client.helloAckTimeout > 0 {
@@ -2007,7 +2016,8 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 	connection.SetReadLimit(hubSpawnMaxBodyBytes)
 	client.serving.Add(1)
 	defer client.serving.Add(-1)
-	peer := &hubClientConnection{connection: connection}
+	peer := &hubClientConnection{connection: connection, closed: make(chan struct{})}
+	defer close(peer.closed)
 	// Each connection may reach a different hub build (failover, redeploy).
 	client.signalsPeer.Store(peer)
 	// The hello carries spawn_v2, and the ping that follows it is the
@@ -2121,6 +2131,8 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 				continue
 			case "job.spawn":
 				go client.handleHubSpawn(ctx, peer, message)
+			case "job.spawn.grant":
+				client.deliverSpawnGrant(message.RequestID, message.Granted)
 			case "node.command":
 				go client.handleNodeCommand(ctx, peer, message)
 			}
@@ -3074,6 +3086,10 @@ func parseHubOutboundRejection(payload []byte) (hubOutboundMessage, hubOutboundR
 		if !validHubIdleWakeRouteEvent(hubIdleWakeRouteEvent{Type: message.Type, EventID: message.IdleWakeEventID, Pane: message.Pane, Eligible: message.Eligible, Lane: message.Lane, Text: message.Text, JobID: message.JobID, Reason: message.Reason}) {
 			return hubOutboundMessage{}, reject
 		}
+	case "job.spawn.grant":
+		if len(fields) != 3 || json.Unmarshal(fields["request_id"], &message.RequestID) != nil || !validHubSpawnRequestID(message.RequestID) || (string(fields["granted"]) != "true" && string(fields["granted"]) != "false") || json.Unmarshal(fields["granted"], &message.Granted) != nil {
+			return hubOutboundMessage{}, reject
+		}
 	case "job.spawn":
 		// Read the request id first: every refusal below can still answer the
 		// hub for it, so the operation ends failed instead of at its deadline.
@@ -3081,11 +3097,11 @@ func parseHubOutboundRejection(payload []byte) (hubOutboundMessage, hubOutboundR
 		var brief hubSpawnBrief
 		var briefFields map[string]json.RawMessage
 		for name := range fields {
-			if name != "type" && name != "request_id" && name != "cwd_key" && name != "brief" && name != "checkout" && name != "args" && name != "wait_seconds" && name != "deadline_ms" && name != "operator_authorized" {
+			if name != "type" && name != "request_id" && name != "cwd_key" && name != "brief" && name != "checkout" && name != "args" && name != "wait_seconds" && name != "deadline_ms" && name != "start_by_ms" && name != "operator_authorized" {
 				return hubOutboundMessage{}, reject
 			}
 		}
-		if (len(fields) < 6 || len(fields) > 9) || json.Unmarshal(fields["request_id"], &message.RequestID) != nil || json.Unmarshal(fields["cwd_key"], &message.CWDKey) != nil || json.Unmarshal(fields["brief"], &brief) != nil || json.Unmarshal(fields["brief"], &briefFields) != nil || (len(briefFields) != 1) || json.Unmarshal(fields["args"], &message.Args) != nil || message.Args == nil || json.Unmarshal(fields["wait_seconds"], &message.WaitSeconds) != nil {
+		if (len(fields) < 6 || len(fields) > 10) || json.Unmarshal(fields["request_id"], &message.RequestID) != nil || json.Unmarshal(fields["cwd_key"], &message.CWDKey) != nil || json.Unmarshal(fields["brief"], &brief) != nil || json.Unmarshal(fields["brief"], &briefFields) != nil || (len(briefFields) != 1) || json.Unmarshal(fields["args"], &message.Args) != nil || message.Args == nil || json.Unmarshal(fields["wait_seconds"], &message.WaitSeconds) != nil {
 			return hubOutboundMessage{}, reject
 		}
 		if raw, ok := briefFields["inline"]; ok {
@@ -3108,6 +3124,11 @@ func parseHubOutboundRejection(payload []byte) (hubOutboundMessage, hubOutboundR
 		}
 		if raw, ok := fields["deadline_ms"]; ok {
 			if json.Unmarshal(raw, &message.DeadlineMS) != nil || message.DeadlineMS <= 0 {
+				return hubOutboundMessage{}, reject
+			}
+		}
+		if raw, ok := fields["start_by_ms"]; ok {
+			if json.Unmarshal(raw, &message.StartByMS) != nil || message.StartByMS <= 0 {
 				return hubOutboundMessage{}, reject
 			}
 		}

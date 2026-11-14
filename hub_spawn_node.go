@@ -195,6 +195,13 @@ func (client *HubClient) handleHubSpawn(ctx context.Context, peer *hubClientConn
 	defer client.endSpawnAdmission(message.RequestID, waiter)
 	admissionCtx, cancel := context.WithDeadline(ctx, deadline)
 	defer cancel()
+	// A grant-required frame read after its start_by is journaled as never
+	// started before it waits on the gate, so every later copy gets the
+	// same answer.
+	if message.StartByMS != 0 && !time.Now().Before(time.UnixMilli(message.StartByMS)) {
+		client.refuseUngrantedSpawn(ctx, peer, journal, message)
+		return
+	}
 	client.spawnGateOnce.Do(func() { client.spawnGate = make(chan struct{}, 1) })
 	stop := client.work.stopSignal()
 	select {
@@ -209,7 +216,12 @@ func (client *HubClient) handleHubSpawn(ctx context.Context, peer *hubClientConn
 		default:
 		}
 		if ctx.Err() == nil {
-			client.answerAdmissionWait(ctx, peer, journal, message, deadline)
+			if message.StartByMS != 0 {
+				// Never granted, never started: keep the tombstone durable.
+				client.refuseUngrantedSpawn(ctx, peer, journal, message)
+			} else {
+				client.answerAdmissionWait(ctx, peer, journal, message, deadline)
+			}
 		}
 		return
 	case <-stop:
@@ -226,6 +238,12 @@ func (client *HubClient) handleHubSpawn(ctx context.Context, peer *hubClientConn
 	}
 	defer release()
 	if !client.work.admitSpawn() {
+		return
+	}
+	// A grant-required attempt claims nothing until the hub has durably
+	// granted it; without that grant it is journaled as never started.
+	if message.StartByMS != 0 && !client.awaitSpawnGrant(admissionCtx, peer, message) {
+		client.refuseUngrantedSpawn(ctx, peer, journal, message)
 		return
 	}
 	claimed, known, cached, active, err := client.claimHubSpawn(ctx, journal, message, deadline, waiter)
@@ -327,6 +345,34 @@ func (client *HubClient) claimHubSpawn(ctx context.Context, journal *nodeSpawnJo
 		close(waiter.claimed)
 	}
 	return claimed, !claimed && err == nil, cached, client.spawnActive[message.RequestID], err
+}
+
+// refuseUngrantedSpawn journals a grant-required attempt the hub did not
+// grant as completed and not started, so no later copy of the frame can
+// start it, and answers the hub with that result. A copy that claimed the row
+// first keeps its own answer.
+func (client *HubClient) refuseUngrantedSpawn(ctx context.Context, peer *hubClientConnection, journal *nodeSpawnJournal, message hubOutboundMessage) {
+	result := hubSpawnResult{RequestID: message.RequestID, JobID: hubSpawnArg(message.Args, "--job"), RC: 124, Stage: "claim", Error: "deadline_not_started", Retryable: true}
+	// The tombstone is written even when the admission wait was what ended.
+	persistCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	client.spawnActiveMu.Lock()
+	refused, err := journal.refuseUnstarted(persistCtx, message, result)
+	var known bool
+	var cached *hubSpawnResult
+	if err == nil && !refused {
+		known, cached, err = journal.lookup(persistCtx, message)
+	}
+	active := client.spawnActive[message.RequestID]
+	client.spawnActiveMu.Unlock()
+	switch {
+	case err != nil:
+		client.sendSpawnResult(ctx, peer, hubSpawnResult{RequestID: message.RequestID, RC: 75, Error: "journal_conflict"}, message.OperatorAuthorized)
+	case refused:
+		client.sendSpawnResult(ctx, peer, result, message.OperatorAuthorized)
+	case known:
+		client.answerKnownSpawn(ctx, peer, journal, message, cached, active)
+	}
 }
 
 // answerAdmissionWait rechecks the journal before attesting a timeout: a

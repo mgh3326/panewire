@@ -84,7 +84,12 @@ type HubServerConfig struct {
 	// takes the task reservation (docs/hub-spawn-operations.md). Zero is
 	// defaultUnworkedLandingGrace.
 	UnworkedLandingGrace time.Duration
-	Logger               *slog.Logger
+	// SpawnStartBy is how long a grant-required spawn frame may wait for its
+	// start grant; SpawnStartByMargin is how long after that the hub fences an
+	// ungranted attempt (hub_spawn_grant.go). Zero is the default.
+	SpawnStartBy       time.Duration
+	SpawnStartByMargin time.Duration
+	Logger             *slog.Logger
 	// PlacementPolicyPath is an optional operator-owned JSON policy. Placement
 	// never changes pressure thresholds or dispatches work.
 	PlacementPolicyPath string
@@ -564,6 +569,8 @@ type HubServer struct {
 	spawnRecords                map[string]*hubSpawnRecord
 	nodeCommands                map[string]*hubNodeCommandPending
 	unworkedLandingGrace        time.Duration
+	spawnStartBy                time.Duration
+	spawnStartByMargin          time.Duration
 	nodeCommandWait             time.Duration // fixture seam; zero is hubNodeCommandWait.
 	checkoutPullWait            time.Duration // fixture seam; zero is hubCheckoutPullWait.
 	nodeAgentsWait              time.Duration // fixture seam; zero is hubNodeAgentsWait.
@@ -681,6 +688,12 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 	if config.GracePeriod <= 0 {
 		config.GracePeriod = defaultHubGracePeriod
 	}
+	if config.SpawnStartBy <= 0 {
+		config.SpawnStartBy = defaultSpawnStartBy
+	}
+	if config.SpawnStartByMargin <= 0 {
+		config.SpawnStartByMargin = defaultSpawnStartByMargin
+	}
 	if config.UnworkedLandingGrace <= 0 {
 		config.UnworkedLandingGrace = defaultUnworkedLandingGrace
 	}
@@ -780,7 +793,7 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 	hub := &HubServer{
 		inbox: inbox, spawnKick: make(chan struct{}, 1), placementKick: make(chan struct{}, 1),
 		authPath: config.AuthPath, alertNodes: alertNodes, relayControl: newHubRelayControlState(config, overrides), now: config.Now, staleAfter: config.StaleAfter, keepaliveInterval: config.KeepaliveInterval,
-		gracePeriod: config.GracePeriod, orphanGrace: config.OrphanGrace, unworkedLandingGrace: config.UnworkedLandingGrace, alertObservations: defaultHubAlertObservations, logger: config.Logger,
+		gracePeriod: config.GracePeriod, orphanGrace: config.OrphanGrace, unworkedLandingGrace: config.UnworkedLandingGrace, spawnStartBy: config.SpawnStartBy, spawnStartByMargin: config.SpawnStartByMargin, alertObservations: defaultHubAlertObservations, logger: config.Logger,
 		paneSweepInterval: config.PaneSweepInterval, paneSweepAge: config.PaneSweepAge,
 		poolTriggerInterval: defaultPoolTriggerInterval,
 		placementPolicyPath: config.PlacementPolicyPath, placementPolicy: placementPolicy, placementPolicyModTime: placementPolicyModTime, placementPolicyObservedModTime: placementPolicyObservedModTime, placementPolicyLoaded: placementPolicyLoaded, placementPolicyStatus: placementPolicyStatus, placementPolicyLastFailure: placementPolicyLastFailure, prometheusURL: config.PrometheusURL, prometheusClient: config.PrometheusClient, prometheusBearer: config.PrometheusBearer, prometheusBasicUser: config.PrometheusBasicUser, prometheusBasicPass: config.PrometheusBasicPass,
@@ -1220,6 +1233,10 @@ func (h *HubServer) handleAgentMessage(machineID, remoteAddr string, agent *hubA
 func (h *HubServer) handleAgentMessageContext(ctx context.Context, machineID, remoteAddr string, agent *hubAgent, payload []byte) {
 	if result, ok := parseHubSpawnResult(payload); ok {
 		h.resolveSpawn(machineID, result)
+		return
+	}
+	if nodeID, ok := parseHubSpawnClaim(payload); ok {
+		h.answerSpawnClaim(ctx, machineID, agent, nodeID)
 		return
 	}
 	if result, ok := parseHubNodeCommandResult(payload); ok {
