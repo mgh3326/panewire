@@ -466,8 +466,19 @@ func jobDirShapeOf(dir string) (jobDirShape, error) {
 	return s, err
 }
 
+// submissionRetiredFlags are spawn flags a stored submission.json may record
+// that the live spawn parser no longer accepts. A receipt is a frozen record
+// written by the panewire of its day, so the gate parses it with these
+// accepted as one-value no-ops: the gate names the submitted job and its
+// report paths, it does not spawn. mergewake's reviewer submitter dirs record
+// builder-family this way, and a consult receipt routing-role (hk 4627). A
+// flag the parser has never known stays an error, so a receipt the gate
+// cannot trust is still unreadable.
+var submissionRetiredFlags = []string{"builder-family", "routing-role"}
+
 // readSubmissionSpawn reads a submitter-side dir's submission.json and the
-// spawn its arguments name. A missing receipt is fs.ErrNotExist.
+// spawn its arguments name, with the spawn flags retired since the receipt
+// was written accepted and dropped. A missing receipt is fs.ErrNotExist.
 func readSubmissionSpawn(dir string) (Submission, Spawn, error) {
 	path := filepath.Join(dir, "submission.json")
 	info, err := os.Lstat(path)
@@ -485,7 +496,7 @@ func readSubmissionSpawn(dir string) (Submission, Spawn, error) {
 	if err = json.Unmarshal(raw, &sub); err != nil {
 		return Submission{}, Spawn{}, err
 	}
-	s, err := parseSpawn(sub.Args)
+	s, err := parseSpawnIgnoring(sub.Args, submissionRetiredFlags)
 	return sub, s, err
 }
 

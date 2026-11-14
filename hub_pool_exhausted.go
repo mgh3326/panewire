@@ -20,21 +20,54 @@ import (
 // and until when. The free bucket pays only for the free-tier rungs
 // (fleet.IsFreeRung, the devin-swe2* profiles), an account window only for the
 // paid rungs, so each exhaustion reaches only the jobs its bucket pays for.
+// A pool-level cause (retired, credit_exhausted) has no account and no reset:
+// it covers every job on the pool until the pool comes back.
 type poolExhaustion struct {
 	Pool, Account string
-	// Cause is "free_limit" for the free bucket, "window:<name>" for an account window.
+	// Cause is "free_limit" for the free bucket, "window:<name>" for an account
+	// window, "retired" for a pool whose catalog rows are all retired, and
+	// "credit_exhausted" for a pane showing the provider's credit rejection.
 	Cause string
 	Reset time.Time
 }
 
+// poolCauseRetired: every catalog row of the pool is retired (hk 4625).
+const poolCauseRetired = "retired"
+
+// poolCauseCreditExhausted: a pane of a job on the pool shows the provider's
+// credit-exhausted rejection (hk 4625).
+const poolCauseCreditExhausted = "credit_exhausted"
+
+// fromQuota reports a cause read from a node's published quota value, which a
+// newer reading of the same bucket can supersede. The pool triggers are read
+// by the hub itself and are cleared by the pool coming back.
+func (e poolExhaustion) fromQuota() bool {
+	return e.Cause == poolCauseFreeLimit || strings.HasPrefix(e.Cause, "window:")
+}
+
+// poolWide reports a cause that speaks for the whole pool rather than one
+// account: every job on the pool draws on it.
+func (e poolExhaustion) poolWide() bool {
+	return e.Cause == poolCauseRetired || e.Cause == poolCauseCreditExhausted
+}
+
 // key identifies the pool event: the same exhaustion seen again has the same key.
 func (e poolExhaustion) key() string {
-	return e.Account + "|" + e.Cause + "|" + e.Reset.UTC().Format(time.RFC3339)
+	return e.Pool + "|" + e.Account + "|" + e.Cause + "|" + e.Reset.UTC().Format(time.RFC3339)
+}
+
+// expired reports whether a reset has passed. A pool-level cause has none.
+func (e poolExhaustion) expired(now time.Time) bool {
+	return !e.Reset.IsZero() && !now.Before(e.Reset)
 }
 
 // covers reports whether a job placed on profile draws on what ran out. A job
-// with no recorded profile cannot be told apart, so it is left alone.
+// with no recorded profile cannot be told apart, so it is left alone. A
+// pool-level cause covers every profile.
 func (e poolExhaustion) covers(profile string) bool {
+	if e.poolWide() {
+		return true
+	}
 	if profile == "" {
 		return false
 	}
@@ -131,12 +164,13 @@ type poolSweepState struct {
 }
 
 // seen records the pool event and reports whether it is new. An event whose
-// reset has passed is forgotten.
+// reset has passed is forgotten; a pool-level event has no reset and is held
+// until forget clears it.
 func (s *poolSweepState) seen(key string, reset, now time.Time) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for known, until := range s.events {
-		if !until.After(now) {
+		if !until.IsZero() && !until.After(now) {
 			delete(s.events, known)
 		}
 	}
@@ -146,6 +180,21 @@ func (s *poolSweepState) seen(key string, reset, now time.Time) bool {
 	_, known := s.events[key]
 	s.events[key] = reset
 	return !known
+}
+
+// held reports whether key is currently held.
+func (s *poolSweepState) held(key string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, ok := s.events[key]
+	return ok
+}
+
+// forget drops a held pool event, so the next observation of it fires again.
+func (s *poolSweepState) forget(key string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.events, key)
 }
 
 // claim reserves job for one pass; false means a pass already holds or finished it.
@@ -192,28 +241,42 @@ func poolJobSkip(role, why string) poolJobResult {
 // observePoolExhaustion is the trigger: a node published a quota value the hub
 // recorded. It never blocks the publish; the pass runs on its own goroutine.
 func (h *HubServer) observePoolExhaustion(quota *FleetStateQuota, now time.Time) {
-	if h.inbox == nil {
-		return
-	}
 	for _, exhaustion := range poolExhaustionsOf(quota, now) {
-		h.closeMu.Lock()
-		if h.closed {
-			h.closeMu.Unlock()
-			return
-		}
-		h.spawnWorkers.Add(1)
-		h.closeMu.Unlock()
-		go func() {
-			defer h.spawnWorkers.Done()
-			h.sweepExhaustedPool(h.closeCtx, exhaustion)
-		}()
+		h.startPoolSweep(exhaustion)
 	}
 }
 
+// startPoolSweep runs one exhausted-pool pass on its own goroutine, so neither
+// a publish nor the trigger tick waits for the sweep.
+func (h *HubServer) startPoolSweep(exhaustion poolExhaustion) {
+	if h.inbox == nil {
+		return
+	}
+	h.closeMu.Lock()
+	if h.closed {
+		h.closeMu.Unlock()
+		return
+	}
+	h.spawnWorkers.Add(1)
+	h.closeMu.Unlock()
+	go func() {
+		defer h.spawnWorkers.Done()
+		h.sweepExhaustedPool(h.closeCtx, exhaustion)
+	}()
+}
+
+// poolEventGone reports whether an event has ended: its reset passed, or a
+// newer quota reading cleared it. A pool-level cause is cleared only by the
+// pool coming back (poolSweep.forget).
+func (h *HubServer) poolEventGone(exhaustion poolExhaustion, now time.Time) bool {
+	return exhaustion.expired(now) || exhaustion.fromQuota() && h.exhaustionSuperseded(exhaustion, now)
+}
+
 // sweepExhaustedPool acts on every live job placed on the exhausted pool and
-// account, all at once: each owner's notice is recorded independently.
+// account, all at once: each owner's notice is recorded independently. A
+// pool-level cause (Account empty) acts on every live job on the pool.
 func (h *HubServer) sweepExhaustedPool(ctx context.Context, exhaustion poolExhaustion) {
-	if h.exhaustionSuperseded(exhaustion, h.now()) {
+	if h.poolEventGone(exhaustion, h.now()) {
 		h.logger.Debug("pool exhausted sweep superseded by a newer reading", "pool", exhaustion.Pool, "account", exhaustion.Account, "cause", exhaustion.Cause)
 		return
 	}
@@ -271,6 +334,19 @@ func skippedSummary(skipped map[string]int) string {
 	return strings.Join(parts, ",")
 }
 
+// poolExhaustionText is the one owner notice for a job on an exhausted pool.
+// Every cause asks the same act: hand the job over or end it and respawn it on
+// another pool; the cause only says what ran out.
+func poolExhaustionText(exhaustion poolExhaustion, job string) string {
+	switch exhaustion.Cause {
+	case poolCauseRetired:
+		return fmt.Sprintf("Pool %s has no live catalog row left for job %s; hand it over or end it and respawn it on another pool.", exhaustion.Pool, job)
+	case poolCauseCreditExhausted:
+		return fmt.Sprintf("Pool %s has no provider credit left for job %s; hand it over or end it and respawn it on another pool.", exhaustion.Pool, job)
+	}
+	return fmt.Sprintf("Pool %s is exhausted for job %s; hand it over or end it and respawn it on another pool.", exhaustion.Pool, job)
+}
+
 // sweepPoolJob records one notice asking the owner to act on a live job.
 func (h *HubServer) sweepPoolJob(ctx context.Context, exhaustion poolExhaustion, task hubSpawnTask) poolJobResult {
 	prior, err := fleet.ValidateSubmission(task.Request)
@@ -285,7 +361,7 @@ func (h *HubServer) sweepPoolJob(ctx context.Context, exhaustion poolExhaustion,
 	if completed {
 		return poolJobSkip(role, "completed")
 	}
-	if !h.now().Before(exhaustion.Reset) || h.exhaustionSuperseded(exhaustion, h.now()) {
+	if h.poolEventGone(exhaustion, h.now()) {
 		return poolJobSkip(role, "superseded")
 	}
 	switch role {
@@ -304,14 +380,14 @@ func (h *HubServer) sweepPoolJob(ctx context.Context, exhaustion poolExhaustion,
 		if pool, _ := record["pool"].(string); pool != "" && pool != exhaustion.Pool {
 			return poolJobSkip(role, "pool_mismatch")
 		}
-		if !h.now().Before(exhaustion.Reset) || h.exhaustionSuperseded(exhaustion, h.now()) {
+		if h.poolEventGone(exhaustion, h.now()) {
 			return poolJobSkip(role, "superseded")
 		}
 		owner := task.Owner
 		if strings.HasPrefix(task.Job, "mwr-") {
 			owner = "mergewake"
 		}
-		text := fmt.Sprintf("Pool %s is exhausted for job %s; hand it over or end it and respawn it on another pool.", exhaustion.Pool, task.Job)
+		text := poolExhaustionText(exhaustion, task.Job)
 		eventID := "pool-exhausted:" + task.Job
 		result := h.relayLaneEventContext(ctx, hubJobEventPayload{EventID: eventID, JobID: laneEventTransportID(owner, eventID), OwnerLane: owner, NotifyType: "info", Text: text, Host: "hub", Epoch: 1}, nil)
 		if result.ID == 0 || result.PersistFailed {
@@ -323,7 +399,9 @@ func (h *HubServer) sweepPoolJob(ctx context.Context, exhaustion poolExhaustion,
 	}
 }
 
-// poolExhaustionJobs filters the active operations by recorded placement.
+// poolExhaustionJobs filters the active operations by recorded placement. A
+// pool-level cause matches every account on the pool; an account event only
+// its own account.
 func (h *HubServer) poolExhaustionJobs(ctx context.Context, exhaustion poolExhaustion) ([]hubSpawnTask, error) {
 	tasks, err := h.liveSpawnTasks(ctx)
 	if err != nil {
@@ -332,7 +410,10 @@ func (h *HubServer) poolExhaustionJobs(ctx context.Context, exhaustion poolExhau
 	var onPool []hubSpawnTask
 	listed := map[string]bool{}
 	for _, task := range tasks {
-		if task.Status != "succeeded" || task.Outcome.Pool != exhaustion.Pool || task.Outcome.AccountKey != exhaustion.Account || !exhaustion.covers(task.Outcome.Profile) || listed[task.Job] {
+		if task.Status != "succeeded" || task.Outcome.Pool != exhaustion.Pool || !exhaustion.covers(task.Outcome.Profile) || listed[task.Job] {
+			continue
+		}
+		if exhaustion.Account != "" && task.Outcome.AccountKey != exhaustion.Account {
 			continue
 		}
 		listed[task.Job] = true
