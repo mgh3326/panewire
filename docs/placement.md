@@ -866,9 +866,9 @@ node's fresh pane snapshot no longer lists is still released first
 ([dead rows are released](r28-lanes-write.md#dead-rows-are-released-and-reused)),
 so a machine comes back into placement as soon as its stale rows drain.
 Reviewer lanes are the common source of leftover rows: a finished reviewer job
-now writes its terminal record and closes its pane (see
-[hub-spawn-operations.md](hub-spawn-operations.md)), so its row is released with
-the pane.
+that never ran `done` keeps its pane and row until a submission for the same
+key closes it, or the unattended pass hk 4684 adds does (see
+[hub-spawn-operations.md](hub-spawn-operations.md)).
 
 ## Machine power weights
 

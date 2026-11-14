@@ -180,3 +180,28 @@ func TestReviewerReleaseKeepsHoldWhenCloseIsRefused(t *testing.T) {
 		t.Fatalf("hold lost: status=%d owner=%s", result.status, owner)
 	}
 }
+
+// The node rules out an open question at close time. An open question is not a
+// hold that time frees, so the 409 carries no retry_after_s.
+func TestReviewerReleaseKeepsAnOpenQuestion(t *testing.T) {
+	hub, server, _, held := reviewerReleaseHub(t, reviewerRole, "succeeded", hubSpawnOutcome{RC: 0, Host: "machine-a", Pane: roleHeldPane})
+	hub.now = func() time.Time { return held.Deadline.Add(11 * time.Minute) }
+	replies := unworkedReplies(unworkedRow("idle", "/work/project.test-job"), nil)
+	replies["pane.close"] = map[string]any{"result": map[string]any{"outcome": nodePaneQuestionOpen}}
+	node := startUnworkedNode(t, t14Node(t, hub, server, true), replies)
+
+	result := t14Result(t, t14HTTPAsync(t, http.MethodPost, server.URL+"/v1/spawns", t14OperatorToken, reviewerReleaseRequest(reviewerRole, true)))
+	if result.status != http.StatusConflict {
+		t.Fatalf("status=%d body=%s, want the 409 hold", result.status, result.body)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(result.body, &body); err != nil || body["retry_after_s"] != nil || result.header.Get("Retry-After") != "" {
+		t.Fatalf("body=%s header=%v: an open question must not advertise a retry time", result.body, result.header)
+	}
+	if want := []string{"agents.list", "pane.capture", "pane.close"}; !reflect.DeepEqual(node.seen(), want) {
+		t.Fatalf("node commands %v, want %v", node.seen(), want)
+	}
+	if owner, _, _, _ := hub.inbox.store.spawnRoleOwner(t.Context(), reviewerReleaseKey(reviewerRole)); owner != held.Request.RequestID {
+		t.Fatalf("owner=%s, want the holder still to own the key", owner)
+	}
+}
