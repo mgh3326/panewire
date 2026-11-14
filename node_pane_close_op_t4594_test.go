@@ -16,9 +16,9 @@ import (
 // with --job job-1 -l job-a does.
 const closeOpJob = "job-1"
 
-// seedCloseOpJob makes the job directory with one claim event (its attempt)
-// and, when aware, the marker a journal-aware watcher leaves.
-func seedCloseOpJob(t *testing.T, inbox string, aware bool) string {
+// seedCloseOpJob makes the job directory with a claim and a spawn receipt
+// binding the attempt to pane w1:p1 and label job-a (a reviewer).
+func seedCloseOpJob(t *testing.T, inbox string) string {
 	t.Helper()
 	dir := filepath.Join(inbox, "jobs", closeOpJob)
 	if err := os.MkdirAll(filepath.Join(dir, "events"), 0o700); err != nil {
@@ -35,18 +35,13 @@ func seedCloseOpJob(t *testing.T, inbox string, aware bool) string {
 			}
 		}
 	}
-	if aware {
-		if err := fleet.MarkJournalAwareWatcher(dir); err != nil {
-			t.Fatal(err)
-		}
-	}
 	return dir
 }
 
-// closeOpNode is a node with a journal-aware job directory and a fake herdr.
+// closeOpNode is a node with the job directory and a fake herdr.
 func closeOpNode(t *testing.T, inbox string, fake *nodeFakeHerdr) *HubClient {
 	t.Helper()
-	seedCloseOpJob(t, inbox, true)
+	seedCloseOpJob(t, inbox)
 	return &HubClient{nodeHerdr: fake.run, nodeCloseSettle: time.Millisecond, jobsInboxRoot: inbox}
 }
 
@@ -66,7 +61,7 @@ func goneHerdr() *nodeFakeHerdr {
 
 func seedNodeCloseOp(t *testing.T, inbox, id, state string) {
 	t.Helper()
-	root, err := os.OpenRoot(seedCloseOpJob(t, inbox, true))
+	root, err := os.OpenRoot(seedCloseOpJob(t, inbox))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -206,44 +201,6 @@ func TestCloseOpRechecksThePaneAfterRecordingClosing_t4594(t *testing.T) {
 	}
 }
 
-// The watcher's committed ending of the attempt preempts a registration: the
-// node closes nothing. A job whose watcher predates the journal gets no
-// operation at all.
-func TestCloseOpPreemptedAndUnsupported_t4594(t *testing.T) {
-	inbox := t.TempDir()
-	dir := seedCloseOpJob(t, inbox, true)
-	root, err := os.OpenRoot(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer root.Close()
-	attempt, err := fleet.JobDirAttemptKey(root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if ok, err := fleet.CommitWatcherEnding(dir, "w1:p1", attempt, time.Now()); err != nil || !ok {
-		t.Fatalf("commit=%v err=%v", ok, err)
-	}
-	fake := idlePaneHerdr()
-	client := closeOpNode(t, inbox, fake)
-	wantCloseOp(t, client, "op-1", fleet.CloseOpPreempted, false)
-	wantCloseOp(t, client, "op-1", fleet.CloseOpPreempted, true)
-	if len(fake.calls) != 0 {
-		t.Fatalf("preempted operation touched herdr: %v", fake.calls)
-	}
-
-	old := t.TempDir()
-	seedCloseOpJob(t, old, false)
-	oldFake := idlePaneHerdr()
-	wantCloseOp(t, &HubClient{nodeHerdr: oldFake.run, nodeCloseSettle: time.Millisecond, jobsInboxRoot: old}, "op-1", nodeCloseOpUnsupported, false)
-	if len(oldFake.calls) != 0 {
-		t.Fatalf("unsupported job touched herdr: %v", oldFake.calls)
-	}
-	if _, err := os.Stat(filepath.Join(old, "jobs", closeOpJob, fleet.CloseOpDir, "op-1.json")); !os.IsNotExist(err) {
-		t.Fatalf("unsupported job journalled an operation: %v", err)
-	}
-}
-
 // The journal is the job's own: no job directory, no close; a request id
 // reused for another pane is refused; and the public endpoint refuses all
 // three ops.
@@ -300,8 +257,8 @@ func TestCloseOpReleaseCancelsOnlyBeforeClosing_t4594(t *testing.T) {
 	wantCloseStatus(t, client, nodeCommandPaneCloseRelease, "op-2", fleet.CloseOpClosing, false)
 }
 
-// The three ops cross a real hub connection from a node that advertises
-// close_ops_v1, and the hub accepts their results.
+// The three ops cross a real hub connection, and the hub accepts their
+// results.
 func TestCloseOpOverHubConnection_t4594(t *testing.T) {
 	hub, server := t14Hub(t)
 	fake := idlePaneHerdr()
@@ -316,7 +273,7 @@ func TestCloseOpOverHubConnection_t4594(t *testing.T) {
 		t.Fatal(err)
 	}
 	inbox := t.TempDir()
-	seedCloseOpJob(t, inbox, true)
+	seedCloseOpJob(t, inbox)
 	client.nodeHerdr = fake.run
 	client.nodeCloseSettle = time.Millisecond
 	client.jobsInboxRoot = inbox
@@ -330,11 +287,11 @@ func TestCloseOpOverHubConnection_t4594(t *testing.T) {
 		cancel()
 		<-done
 	}()
-	eventually(t, 2*time.Second, "node connected with close_ops_v1", func() bool {
+	eventually(t, 2*time.Second, "node connected", func() bool {
 		hub.mu.Lock()
 		defer hub.mu.Unlock()
 		record := hub.nodes["machine-a"]
-		return record != nil && record.agent != nil && record.state == "connected" && record.capabilities[hubCapabilityCloseOps]
+		return record != nil && record.agent != nil && record.state == "connected"
 	})
 	args := nodePaneCloseOpArgs{RequestID: "op-1", Job: closeOpJob, PaneID: "w1:p1", Name: "job-a", AgentStatus: "idle", Cwd: "/work/a"}
 	var closed nodePaneCloseOpResult
@@ -375,7 +332,7 @@ func TestCloseOpRefusesAMismatchedBinding_t4594(t *testing.T) {
 		}
 	}
 	// An ended attempt is not closed either.
-	dir := seedCloseOpJob(t, inbox, true)
+	dir := seedCloseOpJob(t, inbox)
 	if err := os.WriteFile(filepath.Join(dir, "events", "00003-job.completed.json"), []byte(`{"kind":"job.completed","created_at":"2026-11-14T00:00:02Z","payload":{}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -387,8 +344,7 @@ func TestCloseOpRefusesAMismatchedBinding_t4594(t *testing.T) {
 }
 
 // A registered operation resumed after its attempt moved on (a re-prompt on
-// the same pane) or after the watcher committed its ending is settled
-// preempted without touching herdr.
+// the same pane) is settled preempted without touching herdr.
 func TestCloseOpResumeRevalidatesTheAttempt_t4594(t *testing.T) {
 	inbox := t.TempDir()
 	seedNodeCloseOp(t, inbox, "op-1", fleet.CloseOpRegistered)
@@ -402,26 +358,6 @@ func TestCloseOpResumeRevalidatesTheAttempt_t4594(t *testing.T) {
 		t.Fatalf("resumed a stale attempt: %v", fake.calls)
 	}
 
-	other := t.TempDir()
-	seedNodeCloseOp(t, other, "op-2", fleet.CloseOpRegistered)
-	otherDir := filepath.Join(other, "jobs", closeOpJob)
-	root, err := os.OpenRoot(otherDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	attempt, err := fleet.JobDirAttemptKey(root)
-	root.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := fleet.RecordWatcherEnding(otherDir, "w1:p1", attempt); err != nil {
-		t.Fatal(err)
-	}
-	fake = idlePaneHerdr()
-	wantCloseOp(t, closeOpNode(t, other, fake), "op-2", fleet.CloseOpPreempted, false)
-	if len(fake.calls) != 0 {
-		t.Fatalf("resumed after the watcher's ending: %v", fake.calls)
-	}
 }
 
 // The blocked-reviewer guard reads the role from the job's own ledger, not

@@ -150,20 +150,23 @@ A failed close answers `close_failed`. Acting ops run one at a time per node.
 every argument of `pane.close` plus `request_id` and `job`, all required
 (`allow_unnamed` included). `job` names the job directory; `name` stays the
 herdr agent label the close guards match, which a spawn may set apart from the
-job id (`--job job-1 -l worker-a`). The node journals the operation in that
-job's directory, `jobs/<job>/close-ops/<request_id>.json` (mode 0600, written
-to a temporary file, fsynced, renamed), against the job's current attempt (the
-newest claim, spawn or re-prompt event), so its outcome survives a node
-restart. Two answers open no operation and close nothing: a `job` with no
-directory is `not-a-job`; a job whose watcher predates the journal (no
-`close-ops/.watcher-v1` marker, which every journal-aware watcher writes when it
-starts) is `unsupported`, because that watcher would not wait for the hub.
+job id (`--job job-1 -l worker-a`). The blocked-reviewer guard reads the role
+from the `job` ledger. The node journals the operation in that job's directory,
+`jobs/<job>/close-ops/<request_id>.json` (mode 0600, written to a temporary
+file, fsynced, renamed), against the job's current attempt (the newest claim,
+spawn or re-prompt event), so its outcome survives a node restart.
+
+Before any herdr call the node checks that the job's ledger binds its current
+attempt to the requested `pane_id` and `name` and has not ended it. Two answers
+open no operation and close nothing: a `job` with no directory is `not-a-job`;
+a request the ledger does not bind (another pane or label, or an ended attempt)
+is `mismatch`.
 
 The journal moves `registered` → `closing` → one final state. `registered` is
-written under the journal lock (`close-ops/.lock`, an exclusive flock) before
-any herdr read. `closing` is written after the first guarded look and the
-settle, before the final look that immediately precedes `herdr pane close`, so
-the journal write never sits between that look and the close.
+written before any herdr read. `closing` is written after the first guarded
+look and the settle, before the final look that immediately precedes
+`herdr pane close`, so the journal write never sits between that look and the
+close.
 
 | Outcome | Meaning |
 |---|---|
@@ -172,43 +175,28 @@ the journal write never sits between that look and the close.
 | `gone` | the pane was absent before the close could run: it vanished on its own |
 | `unknown` | the operation was found `closing` with no recorded result (a node restart or a failed herdr close); the close may have run, and the pane id may since name another pane |
 | `cancelled` | released while still `registered`; the pane was never touched |
-| `preempted` | the job's watcher had already committed its own ending of this attempt; nothing was closed |
+| `preempted` | a resumed `registered` operation whose attempt had moved on or ended; nothing was closed |
 
 The answer is `{"outcome":"<state>","replayed":<bool>}`. A repeat of a
 `request_id` whose state is final answers that state with `replayed:true` and
 does not touch herdr, so a lost acknowledgement is recovered by asking again.
-A repeat of one left `closing` answers `unknown`, also without touching herdr;
-one left `registered` resumes the guarded close. A `request_id` names one
-attempt: after `refused` or `unknown`, a new attempt uses a new id. Reusing an
-id for another pane is `invalid_args`.
+A repeat of one left `closing` answers `unknown`, also without touching herdr.
+A repeat of one left `registered` re-checks the binding against the attempt it
+was registered for, then resumes the guarded close or settles `preempted`. A
+`request_id` names one attempt: after `refused` or `unknown`, a new attempt uses
+a new id. Reusing an id for another pane is `invalid_args`.
 
 `pane.close_status` (`request_id`, `job`) answers
 `{"state":"none"|<state>,"released":<bool>}`. `pane.close_release` takes the
 same arguments, marks a final operation released (a `registered` one becomes
 `cancelled`) and answers the same shape; an operation left `closing` stays
-unreleased until a repeated `pane.close_op` settles it.
+unreleased until a repeated `pane.close_op` settles it. `journal_failed`
+answers a journal read or write that failed; the operation then stays as last
+recorded.
 
-An unreleased operation of the watcher's current attempt on its pane owns the
-job's ending: in any state but `refused`, `cancelled` or `preempted`, the
-watcher takes none of its own terminal paths: the missing-pane fallback
-(plain `lost`), the quota hand-over grace fallback, a reviewer's quota-stop
-intent, the unanswered-decision ending, or the completion-deadline exit.
-Completion of a reported job stays authoritative, but leaves the same
-tombstone described below. An unreadable
-journal holds it back too. Each fallback commits its ending under the journal
-lock, after checking ownership there, and leaves `close-ops/.watcher-ended.json`
-naming the attempt, so a registration after it is `preempted`: the node and the
-watcher are separate processes, and whichever is second sees the other.
-
-An operation that closed the pane, or found it gone, settles the attempt even
-for a re-armed watcher that never saw the pane, and keeps the watch past its
-deadline until it is settled. After the hub releases such an operation, a
-record hk shows terminal is the hub's: the watcher only releases the lease. An
-hk record it cannot read is retried, not guessed live. The hub releases each
-operation once it has finished with the job; a 24-hour backstop from the
-operation's last update (or its release, for the hk retry) lets the watcher act
-if it never does. `journal_failed` answers a journal read or write that failed;
-the operation then stays as last recorded.
+No hub code issues these ops yet, and the job's watcher does not read the
+journal yet: making the watcher defer to an open operation is hk 4652, and the
+hub's use of the ops is hk 4632.
 
 ### `pane.capture`
 

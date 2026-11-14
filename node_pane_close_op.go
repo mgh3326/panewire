@@ -29,17 +29,10 @@ const (
 
 	// nodeCloseOpNone: no operation under that id (or no such job directory).
 	nodeCloseOpNone = "none"
-	// nodeCloseOpUnsupported: the job's watcher predates the journal, so it
-	// would not wait for the hub; no operation was opened and nothing closed.
-	nodeCloseOpUnsupported = "unsupported"
 	// nodeCloseOpMismatch: the job's ledger does not bind its current attempt
 	// to this pane and label, or the attempt has ended; no operation was
 	// opened and nothing closed.
 	nodeCloseOpMismatch = "mismatch"
-
-	// hubCapabilityCloseOps is the hello capability of a node that serves
-	// the three close-operation ops; the hub sends them to no other node.
-	hubCapabilityCloseOps = "close_ops_v1"
 )
 
 type nodePaneCloseOpArgs struct {
@@ -53,8 +46,8 @@ type nodePaneCloseOpArgs struct {
 }
 
 // nodePaneCloseOpResult.Outcome is a final fleet.CloseOp state, or
-// nodeCaptureNotAJob (no job directory) or nodeCloseOpUnsupported; for those
-// two no journal entry exists and nothing was closed.
+// nodeCaptureNotAJob (no job directory) or nodeCloseOpMismatch; for those two
+// no journal entry exists and nothing was closed.
 type nodePaneCloseOpResult struct {
 	Outcome  string `json:"outcome"`
 	Replayed bool   `json:"replayed"`
@@ -86,7 +79,7 @@ func validNodePaneCloseOpResult(result nodePaneCloseOpResult) bool {
 	switch result.Outcome {
 	case fleet.CloseOpClosed, fleet.CloseOpRefused, fleet.CloseOpGone, fleet.CloseOpUnknown, fleet.CloseOpCancelled, fleet.CloseOpPreempted:
 		return true
-	case nodeCaptureNotAJob, nodeCloseOpUnsupported, nodeCloseOpMismatch:
+	case nodeCaptureNotAJob, nodeCloseOpMismatch:
 		return !result.Replayed
 	}
 	return false
@@ -119,10 +112,8 @@ func (client *HubClient) openCloseOpJob(job string) (*os.Root, bool, string) {
 
 // nodePaneCloseOp runs one close operation. The caller holds nodeCommandMu.
 //
-// The journal moves registered → closing → final. registered is written under
-// the journal lock before any herdr read; there the node also finds whether the
-// job's watcher already committed its own ending of the attempt (preempted).
-// closing is written after the first guarded look and the settle, before the
+// The journal moves registered → closing → final. registered is written,
+// against the job's current attempt, before any herdr read. closing is written after the first guarded look and the settle, before the
 // final look that precedes `herdr pane close`, so a slow journal write never
 // sits between that look and the close. A pane absent before closing was
 // recorded is gone; an operation found closing on replay is unknown, without
@@ -148,11 +139,9 @@ func (client *HubClient) nodePaneCloseOp(ctx context.Context, args nodePaneClose
 		return nodePaneCloseOpResult{Outcome: op.State, Replayed: true}, ""
 	case found && op.State == fleet.CloseOpClosing:
 		return client.finishCloseOp(job, op, fleet.CloseOpUnknown)
-	case !found && !fleet.JournalAwareWatcher(job):
-		return nodePaneCloseOpResult{Outcome: nodeCloseOpUnsupported}, ""
 	}
 	// Registering, or resuming one left registered: bind the request to the
-	// job's current attempt under the journal lock, before any herdr call.
+	// job's current attempt before any herdr call.
 	op, role, outcome, code := client.bindCloseOp(job, op, found, args)
 	if code != "" {
 		return nil, code
@@ -180,20 +169,13 @@ func (client *HubClient) nodePaneCloseOp(ctx context.Context, args nodePaneClose
 	}
 }
 
-// bindCloseOp checks, under the journal lock, that the job's ledger binds its
-// current attempt to the requested pane and label and has not ended it, and
-// that its watcher has not committed its own ending. A new request that fails
-// the binding opens nothing (mismatch); one whose watcher already ended the
-// attempt is recorded preempted. A resumed registered operation whose attempt
-// moved on, or was ended meanwhile, is settled preempted without touching
+// bindCloseOp checks that the job's ledger binds its current attempt to the
+// requested pane and label and has not ended it. A new request that fails the
+// binding opens nothing (mismatch). A resumed registered operation whose
+// attempt moved on, or ended meanwhile, is settled preempted without touching
 // herdr. Otherwise the operation is (still) registered and the job's role is
-// returned for the blocked-reviewer guard.
+// returned for the blocked-reviewer guard. The caller holds nodeCommandMu.
 func (client *HubClient) bindCloseOp(job *os.Root, op fleet.CloseOp, resuming bool, args nodePaneCloseOpArgs) (fleet.CloseOp, string, string, string) {
-	unlock, err := fleet.LockCloseOps(job)
-	if err != nil {
-		return op, "", "", "journal_failed"
-	}
-	defer unlock()
 	binding, err := fleet.ReadJobBinding(job, args.Job)
 	if err != nil {
 		return op, "", "", "journal_failed"
@@ -202,14 +184,10 @@ func (client *HubClient) bindCloseOp(job *os.Root, op fleet.CloseOp, resuming bo
 	if resuming {
 		attempt = op.Attempt
 	}
-	ended, err := fleet.WatcherEnded(job, args.PaneID, attempt)
-	if err != nil {
-		return op, "", "", "journal_failed"
-	}
 	bound := binding.Pane == args.PaneID && binding.Label == args.Name && !binding.Ended && binding.Attempt == attempt
 	now := client.nowUTC()
 	switch {
-	case resuming && (ended || !bound):
+	case resuming && !bound:
 		op.State, op.Updated = fleet.CloseOpPreempted, now
 		if fleet.WriteCloseOp(job, op) != nil {
 			return op, "", "", "journal_failed"
@@ -221,14 +199,8 @@ func (client *HubClient) bindCloseOp(job *os.Root, op fleet.CloseOp, resuming bo
 		return op, "", nodeCloseOpMismatch, ""
 	}
 	op = fleet.CloseOp{RequestID: args.RequestID, PaneID: args.PaneID, Attempt: attempt, State: fleet.CloseOpRegistered, Created: now, Updated: now}
-	if ended {
-		op.State = fleet.CloseOpPreempted
-	}
 	if fleet.WriteCloseOp(job, op) != nil {
 		return op, "", "", "journal_failed"
-	}
-	if ended {
-		return op, "", op.State, ""
 	}
 	return op, binding.Role, "", ""
 }
