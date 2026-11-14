@@ -3,6 +3,7 @@ package fleet
 import (
 	"encoding/json"
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -128,11 +129,15 @@ type laneQuestion struct {
 
 // newestLaneEventFromPane finds the newest lane event pane wrote at or after
 // since. The lane-event directory is shared, so every file is read; the same
-// size, kind, pane and event-id filters the watcher applies keep a foreign or
-// malformed file out. An unreadable directory is an error.
+// size, kind, pane and event-id filters the watcher applies keep a foreign
+// file out. A missing directory is no events — a node that never recorded one
+// has nothing to answer — while any other unreadable input is an error.
 func newestLaneEventFromPane(dir, pane string, since time.Time) (laneQuestion, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return laneQuestion{}, nil
+		}
 		return laneQuestion{}, err
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
@@ -156,8 +161,8 @@ func newestLaneEventFromPane(dir, pane string, since time.Time) (laneQuestion, e
 			EventID    string `json:"event_id"`
 			NotifyType string `json:"notify_type"`
 		}
-		if json.Unmarshal(body, &event) != nil {
-			continue
+		if err := json.Unmarshal(body, &event); err != nil {
+			return laneQuestion{}, errors.New("unreadable lane event")
 		}
 		if event.Kind != "lane.event" || event.PaneID != pane || event.EventID == "" {
 			continue

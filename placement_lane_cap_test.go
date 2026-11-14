@@ -64,3 +64,19 @@ func TestPlacementCountsAPendingPlacementAgainstTheLaneCap(t *testing.T) {
 		t.Fatalf("decision %q, want the existing row not to be counted twice", result.Decision)
 	}
 }
+
+// The lane-full reason must survive a decision another rule already turned
+// unavailable: a lane-capped machine with no fresh Prometheus load sample is
+// still lanes_full, not a bare unavailable.
+func TestPlacementKeepsLaneFullReasonWithoutLoadSample(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "lanes.json")
+	lanesProjectionWrite(t, path, `{"lanes":{"rev-a1":{"machine":"machine-a","pane":"w1:p1"},"rev-a2":{"machine":"machine-a","pane":"w1:p2"}}}`)
+	hub := lanesNodeHub(t, path, func(config *HubServerConfig) { config.LanesNodeRowCap = 2 })
+	hub.connect("machine-a", "fixture", "fixture", &hubAgent{}, true)
+	policy := memoryPlacementPolicy("machine-a")
+
+	result := hub.makePlacement(policy, placementMetrics{}, "prometheus", time.Now())
+	if result.Decision != "unavailable" || result.Reason != "lanes_full" {
+		t.Fatalf("decision %q reason %q, want unavailable/lanes_full: %+v", result.Decision, result.Reason, result)
+	}
+}

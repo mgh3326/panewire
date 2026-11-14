@@ -786,6 +786,10 @@ func (h *HubServer) makePlacement(policy PlacementPolicy, metrics placementMetri
 			decision = "unavailable"
 		}
 	}
+	// The blocked lookups name the machine the decision still points at; a
+	// rule that already replaced it with "unavailable" would find no candidate
+	// and report the wrong reason.
+	blockedMachine := decision
 	// Prometheus responding without a local load sample is not the same as a
 	// hub-only outage: never silently turn that unknown into a local decision.
 	if decision == policy.LocalMachine && source == "prometheus" && !candidates[0].MetricsKnown {
@@ -794,13 +798,13 @@ func (h *HubServer) makePlacement(policy PlacementPolicy, metrics placementMetri
 	// The capacity-pressure fallback above can still name the local machine
 	// even though it is unusable; a configured task-slot cap is an explicit
 	// exhaustion signal, so it must never survive as the decision.
-	slotBlocked := placementSlotFull(candidates, decision)
+	slotBlocked := placementSlotFull(candidates, blockedMachine)
 	if slotBlocked {
 		decision = "unavailable"
 	}
 	// A machine at its lane row cap cannot register the lane its new pane
 	// needs, so it is no more a placement than one whose task slots are full.
-	laneBlocked := placementLanesFull(candidates, decision)
+	laneBlocked := placementLanesFull(candidates, blockedMachine)
 	if laneBlocked {
 		decision = "unavailable"
 	}

@@ -200,3 +200,32 @@ func TestOpenLaneQuestionRefusesAnotherPane(t *testing.T) {
 		t.Fatalf("err=%v, want ErrJobPaneChanged", err)
 	}
 }
+
+// A node whose inbox never recorded a lane event has no events-lane directory:
+// that is "no events", not an error, or every guarded close would fail. A
+// record that cannot be parsed is unreadable, and unreadable fails closed.
+func TestOpenLaneQuestionLaneDirEdgeCases(t *testing.T) {
+	now := time.Date(2026, 11, 15, 0, 0, 0, 0, time.UTC)
+	ledger := map[string]any{"kind": "job.spawned", "created_at": now.Add(-time.Hour).Format(time.RFC3339Nano), "payload": map[string]any{"pane_id": "w1:p1"}}
+
+	inbox := t.TempDir()
+	writeDecisionLedger(t, inbox, "job-a", ledger)
+	if _, open, err := OpenLaneQuestion(inbox, "job-a", "w1:p1", now, DefaultDecisionTimeout); err != nil || open {
+		t.Fatalf("missing events-lane: open=%v err=%v, want no question", open, err)
+	}
+
+	dir := filepath.Join(inbox, "events-lane")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	bad := filepath.Join(dir, "0001.json")
+	if err := os.WriteFile(bad, []byte("{"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(bad, now, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := OpenLaneQuestion(inbox, "job-a", "w1:p1", now, DefaultDecisionTimeout); err == nil {
+		t.Fatal("a malformed lane event must fail closed")
+	}
+}
