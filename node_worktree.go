@@ -432,10 +432,11 @@ func nodeListWorktrees(ctx context.Context, git relayCommandRunner, main string)
 }
 
 type nodeWorktreeAddIntent struct {
-	Path   string `json:"path"`
-	Mode   string `json:"mode"`
-	Branch string `json:"branch"`
-	Sha    string `json:"sha"`
+	Path   string         `json:"path"`
+	Mode   string         `json:"mode"`
+	Branch string         `json:"branch"`
+	Sha    string         `json:"sha"`
+	Add    nodeAddProcess `json:"add"`
 }
 
 // nodeWorktreeAddIntentPath names the intent file of one worktree path. Each
@@ -465,59 +466,24 @@ func nodeWorktreeAddIntentPath(ctx context.Context, git relayCommandRunner, clon
 	return filepath.Join(common, "panewire-worktree-add-intent-"+hex.EncodeToString(sum[:])+".json"), nil
 }
 
-// nodeLegacyWorktreeAddIntentName is the single shared intent file panewire
-// wrote before intents were keyed by worktree path. Replay still consumes it,
-// so an add interrupted across an upgrade can reclaim its initializing lock.
-const nodeLegacyWorktreeAddIntentName = "panewire-worktree-add-intent.json"
-
-// nodeMigrateLegacyWorktreeAddIntent moves the legacy shared intent into dir's
-// own file when the legacy record names dir and dir has no file yet. The
-// per-path file is written before the legacy file is removed, so a crash in
-// between leaves both, and the next replay migrates nothing new.
-func nodeMigrateLegacyWorktreeAddIntent(ctx context.Context, git relayCommandRunner, clone, dir string) {
-	common, err := nodeGitCommonDir(ctx, git, clone)
-	if err != nil {
-		return
-	}
-	legacy := filepath.Join(common, nodeLegacyWorktreeAddIntentName)
-	contents, err := os.ReadFile(legacy)
-	if err != nil {
-		return
-	}
-	var intent nodeWorktreeAddIntent
-	// The legacy record may name the same worktree through another symlink alias
-	// of the work root, so compare resolved paths, then publish the current name.
-	if err := json.Unmarshal(contents, &intent); err != nil || !nodeSamePath(intent.Path, dir) {
-		return
-	}
-	intent.Path = filepath.Clean(dir)
-	name, err := nodeWorktreeAddIntentPath(ctx, git, clone, dir)
-	if err != nil {
-		return
-	}
-	if _, err := os.Stat(name); err == nil || !errors.Is(err, os.ErrNotExist) {
-		return
-	}
-	if _, err := nodeWriteWorktreeAddIntent(ctx, git, clone, dir, intent); err != nil {
-		slog.Warn("node worktree legacy add intent migration failed", "path", dir, "err", err)
-		return
-	}
-	nodeClearWorktreeAddIntent(legacy)
-}
-
+// nodeWriteWorktreeAddIntent resolves dir's intent file and writes it. The
+// per-path file keeps an add for one worktree from replacing, or clearing, the
+// intent an interrupted add for another worktree still needs to replay.
 func nodeWriteWorktreeAddIntent(ctx context.Context, git relayCommandRunner, clone, dir string, intent nodeWorktreeAddIntent) (string, error) {
 	name, err := nodeWorktreeAddIntentPath(ctx, git, clone, dir)
 	if err != nil {
 		return "", err
 	}
+	return name, nodeWriteWorktreeAddIntentFile(name, intent)
+}
+
+// nodeWriteWorktreeAddIntentFile replaces one intent file atomically.
+func nodeWriteWorktreeAddIntentFile(name string, intent nodeWorktreeAddIntent) error {
 	contents, err := json.Marshal(intent)
 	if err != nil {
-		return "", err
+		return err
 	}
-	if err := durable.ReplaceFileAtomically(name, ".panewire-worktree-add-intent-*", contents, 0o600); err != nil {
-		return "", err
-	}
-	return name, nil
+	return durable.ReplaceFileAtomically(name, ".panewire-worktree-add-intent-*", contents, 0o600)
 }
 
 func nodeReadWorktreeAddIntent(ctx context.Context, git relayCommandRunner, clone, dir string) (nodeWorktreeAddIntent, error) {
@@ -551,10 +517,27 @@ func nodeGitProcessWasSignaled(err error) bool {
 	return ok && status.Signaled()
 }
 
+// nodeWorktreeAddIntentMatches reports whether recorded describes this add. The
+// identity is evidence about the recorded add, not something the caller asks for,
+// so it is not part of the comparison.
+func nodeWorktreeAddIntentMatches(recorded nodeWorktreeAddIntent, dir string, expected nodeWorktreeAddIntent) bool {
+	return recorded.Path == filepath.Clean(dir) &&
+		recorded.Mode == expected.Mode &&
+		recorded.Branch == expected.Branch &&
+		recorded.Sha == expected.Sha
+}
+
+// nodeReclaimInterruptedAdd removes the worktree an earlier add left locked
+// initializing, and only that: the recorded intent must describe this add and
+// must name the add child that ran it, and that child must have exited. The lock
+// says an add is in flight, not that it is ours or that it is dead, so it never
+// authorizes a forced remove on its own (lead-verify F3, hk 4589).
 func nodeReclaimInterruptedAdd(ctx context.Context, git relayCommandRunner, clone, dir string, entries []nodeWorktreeEntry, expected nodeWorktreeAddIntent) bool {
-	nodeMigrateLegacyWorktreeAddIntent(ctx, git, clone, dir)
 	intent, err := nodeReadWorktreeAddIntent(ctx, git, clone, dir)
-	if err != nil || intent != (nodeWorktreeAddIntent{Path: filepath.Clean(dir), Mode: expected.Mode, Branch: expected.Branch, Sha: expected.Sha}) {
+	if err != nil || !nodeWorktreeAddIntentMatches(intent, dir, expected) {
+		return false
+	}
+	if !nodeAddProcessExited(intent.Add) {
 		return false
 	}
 	for _, entry := range entries {
@@ -573,15 +556,24 @@ func nodeReclaimInterruptedAdd(ctx context.Context, git relayCommandRunner, clon
 	return false
 }
 
-// nodeAddWorktree records the intended path before invoking Git so a later
-// prepare can reclaim this exact interrupted add after a node restart.
-func nodeAddWorktree(ctx context.Context, git relayCommandRunner, clone, dir string, intent nodeWorktreeAddIntent, args ...string) error {
+// nodeAddWorktree records the intended path and the identity of the git child
+// that runs the add, so a later prepare can reclaim this exact interrupted add
+// after a node restart, and nothing else.
+func nodeAddWorktree(ctx context.Context, git relayCommandRunner, add nodeAddRunner, clone, dir string, intent nodeWorktreeAddIntent, args ...string) error {
 	intent.Path = filepath.Clean(dir)
+	intent.Add = nodeAddProcess{}
 	intentPath, err := nodeWriteWorktreeAddIntent(ctx, git, clone, dir, intent)
 	if err != nil {
 		return err
 	}
-	_, addErr := git(ctx, args...)
+	// The child's identity reaches the intent while the child is alive: a restart
+	// may only reclaim a path whose add child has exited, never the live add the
+	// CodeRabbit Major on #493 describes.
+	record := func(proc nodeAddProcess) error {
+		intent.Add = proc
+		return nodeWriteWorktreeAddIntentFile(intentPath, intent)
+	}
+	addErr := add(ctx, record, args...)
 	if addErr == nil {
 		nodeClearWorktreeAddIntent(intentPath)
 		return nil
@@ -610,6 +602,11 @@ func nodeAddWorktree(ctx context.Context, git relayCommandRunner, clone, dir str
 		// no replay can reclaim this intent: clear it.
 		nodeClearWorktreeAddIntent(intentPath)
 	case atDir.Locked && atDir.LockReason == "initializing":
+		// An initializing lock names no owner. Remove only the path this attempt's
+		// recorded add child worked on, and only once that child has exited.
+		if !nodeAddProcessExited(intent.Add) {
+			return addErr
+		}
 		if _, err := git(cleanupCtx, "-C", clone, "worktree", "remove", "--force", "--force", dir); err != nil {
 			slog.Warn("node worktree interrupted add cleanup failed", "path", dir, "err", err)
 			return addErr
@@ -909,9 +906,9 @@ func (client *HubClient) nodeWorktreePrepareRun(ctx context.Context, tracker *no
 	result := nodeWorktreePrepareResult{}
 	switch args.Mode {
 	case "branch":
-		outcome = client.nodePrepareBranch(ctx, git, clone, dir, args, &result)
+		outcome = client.nodePrepareBranch(ctx, tracker, clone, dir, args, &result)
 	case "detached":
-		outcome = client.nodePrepareDetached(ctx, git, clone, dir, args)
+		outcome = client.nodePrepareDetached(ctx, tracker, clone, dir, args)
 	}
 	result.Outcome = outcome
 	if outcome == nodePreparePrepared || outcome == nodePrepareReused {
@@ -956,6 +953,18 @@ func (tracker *nodeGitTracker) git(ctx context.Context, args ...string) ([]byte,
 		tracker.exit, tracker.stderr = extractGitExitAndStderr(err)
 	}
 	return out, err
+}
+
+// add runs one worktree add through the node's add runner and records a failure
+// the way git records every other step.
+func (tracker *nodeGitTracker) add(ctx context.Context, add nodeAddRunner, clone, dir string, intent nodeWorktreeAddIntent, args ...string) error {
+	tracker.step = "worktree"
+	tracker.subcmd = "worktree"
+	err := nodeAddWorktree(ctx, tracker.runner, add, clone, dir, intent, args...)
+	if err != nil {
+		tracker.exit, tracker.stderr = extractGitExitAndStderr(err)
+	}
+	return err
 }
 
 func (tracker *nodeGitTracker) decide(ctx context.Context, result nodeWorktreePrepareResult) (nodeWorktreePrepareResult, string) {
@@ -1085,7 +1094,8 @@ func nodeGitSubcommand(args []string) string {
 	return "git"
 }
 
-func (client *HubClient) nodePrepareBranch(ctx context.Context, git relayCommandRunner, clone, dir string, args nodeWorktreePrepareArgs, result *nodeWorktreePrepareResult) string {
+func (client *HubClient) nodePrepareBranch(ctx context.Context, tracker *nodeGitTracker, clone, dir string, args nodeWorktreePrepareArgs, result *nodeWorktreePrepareResult) string {
+	git := tracker.git
 	if _, err := git(ctx, "-C", clone, "fetch", "--prune", "origin"); err != nil {
 		return nodeOutcomeGitFailed
 	}
@@ -1202,7 +1212,7 @@ func (client *HubClient) nodePrepareBranch(ctx context.Context, git relayCommand
 			}
 			result.FastForwarded = true
 		}
-		if err := nodeAddWorktree(ctx, git, clone, dir, nodeWorktreeAddIntent{Mode: "branch", Branch: args.Branch, Sha: args.Sha}, "-C", clone, "worktree", "add", dir, args.Branch); err != nil {
+		if err := tracker.add(ctx, client.nodeAddRunner(), clone, dir, nodeWorktreeAddIntent{Mode: "branch", Branch: args.Branch, Sha: args.Sha}, "-C", clone, "worktree", "add", dir, args.Branch); err != nil {
 			return nodeOutcomeGitFailed
 		}
 		return nodePreparePrepared
@@ -1210,7 +1220,7 @@ func (client *HubClient) nodePrepareBranch(ctx context.Context, git relayCommand
 	if originTip == "" || !strings.EqualFold(originTip, expected) {
 		return nodePrepareBranchElsewhere
 	}
-	if err := nodeAddWorktree(ctx, git, clone, dir, nodeWorktreeAddIntent{Mode: "branch", Branch: args.Branch, Sha: args.Sha}, "-C", clone, "worktree", "add", "-b", args.Branch, dir, "origin/"+args.Branch); err != nil {
+	if err := tracker.add(ctx, client.nodeAddRunner(), clone, dir, nodeWorktreeAddIntent{Mode: "branch", Branch: args.Branch, Sha: args.Sha}, "-C", clone, "worktree", "add", "-b", args.Branch, dir, "origin/"+args.Branch); err != nil {
 		return nodeOutcomeGitFailed
 	}
 	if _, err := git(ctx, "-C", dir, "branch", "--set-upstream-to", "origin/"+args.Branch, args.Branch); err != nil {
@@ -1278,7 +1288,8 @@ func nodeBranchRelationReason(local, expected, relation string) string {
 // to exist and to be FETCH_HEAD or an ancestor of it (a ref that contains
 // the sha, see docs/node-commands.md), and reuses only a clean worktree
 // detached at exactly that sha. The worktree is always detached at args.Sha.
-func (client *HubClient) nodePrepareDetached(ctx context.Context, git relayCommandRunner, clone, dir string, args nodeWorktreePrepareArgs) string {
+func (client *HubClient) nodePrepareDetached(ctx context.Context, tracker *nodeGitTracker, clone, dir string, args nodeWorktreePrepareArgs) string {
+	git := tracker.git
 	if _, err := git(ctx, "-C", clone, "fetch", "origin", args.Fetch); err != nil {
 		return nodeOutcomeGitFailed
 	}
@@ -1328,7 +1339,7 @@ func (client *HubClient) nodePrepareDetached(ctx context.Context, git relayComma
 		}
 		return nodePrepareReused
 	}
-	if err := nodeAddWorktree(ctx, git, clone, dir, intent, "-C", clone, "worktree", "add", "--detach", dir, args.Sha); err != nil {
+	if err := tracker.add(ctx, client.nodeAddRunner(), clone, dir, intent, "-C", clone, "worktree", "add", "--detach", dir, args.Sha); err != nil {
 		return nodeOutcomeGitFailed
 	}
 	return nodePreparePrepared

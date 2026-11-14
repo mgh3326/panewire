@@ -18,19 +18,20 @@ func TestNodeWorktreePrepareCancelledAddCanReplay(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	t.Cleanup(cancel)
 	client := fixture.client()
-	client.nodeGit = func(ctx context.Context, args ...string) ([]byte, error) {
-		if strings.Contains(strings.Join(args, " "), "worktree add") {
-			if _, err := exec.CommandContext(ctx, "git", args...).Output(); err != nil {
-				return nil, err
-			}
-			dir := args[len(args)-2]
-			if _, err := exec.Command("git", "-C", fixture.clone, "worktree", "lock", "--reason", "initializing", dir).CombinedOutput(); err != nil {
-				t.Fatalf("create interrupted-add lock state: %v", err)
-			}
-			cancel()
-			return nil, testSignaledExit(t)
+	client.nodeAdd = func(ctx context.Context, record func(nodeAddProcess) error, args ...string) error {
+		proc, err := runAddChild(ctx, args...)
+		if err != nil {
+			return err
 		}
-		return exec.CommandContext(ctx, "git", args...).Output()
+		dir := args[len(args)-2]
+		if _, err := exec.Command("git", "-C", fixture.clone, "worktree", "lock", "--reason", "initializing", dir).CombinedOutput(); err != nil {
+			t.Fatalf("create interrupted-add lock state: %v", err)
+		}
+		if err := record(proc); err != nil {
+			t.Fatalf("record add identity: %v", err)
+		}
+		cancel()
+		return testSignaledExit(t)
 	}
 
 	args := nodeWorktreePrepareArgs{Origin: fixture.origin, Mode: "branch", Branch: "feat", Dir: "repo.job"}
@@ -40,7 +41,7 @@ func TestNodeWorktreePrepareCancelledAddCanReplay(t *testing.T) {
 		t.Fatalf("interrupted prepare=%+v code=%q, want cancelled", prepared, code)
 	}
 
-	client.nodeGit = nil
+	client.nodeAdd = nil
 	prepared, code = client.nodeWorktreePrepare(t.Context(), args)
 	result, ok = prepared.(nodeWorktreePrepareResult)
 	if code != "" || !ok || (result.Outcome != nodePreparePrepared && result.Outcome != nodePrepareReused) {
@@ -54,19 +55,20 @@ func TestNodeWorktreePrepareCancelledDetachedAddCanReplay(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	t.Cleanup(cancel)
 	client := fixture.client()
-	client.nodeGit = func(ctx context.Context, args ...string) ([]byte, error) {
-		if strings.Contains(strings.Join(args, " "), "worktree add") {
-			if _, err := exec.CommandContext(ctx, "git", args...).Output(); err != nil {
-				return nil, err
-			}
-			dir := args[len(args)-2]
-			if _, err := exec.Command("git", "-C", fixture.clone, "worktree", "lock", "--reason", "initializing", dir).CombinedOutput(); err != nil {
-				t.Fatalf("create interrupted detached-add lock state: %v", err)
-			}
-			cancel()
-			return nil, testSignaledExit(t)
+	client.nodeAdd = func(ctx context.Context, record func(nodeAddProcess) error, args ...string) error {
+		proc, err := runAddChild(ctx, args...)
+		if err != nil {
+			return err
 		}
-		return exec.CommandContext(ctx, "git", args...).Output()
+		dir := args[len(args)-2]
+		if _, err := exec.Command("git", "-C", fixture.clone, "worktree", "lock", "--reason", "initializing", dir).CombinedOutput(); err != nil {
+			t.Fatalf("create interrupted detached-add lock state: %v", err)
+		}
+		if err := record(proc); err != nil {
+			t.Fatalf("record add identity: %v", err)
+		}
+		cancel()
+		return testSignaledExit(t)
 	}
 
 	args := nodeWorktreePrepareArgs{Origin: fixture.origin, Mode: "detached", Sha: fixture.main, Fetch: "refs/heads/main", Dir: "repo.detached"}
@@ -75,7 +77,7 @@ func TestNodeWorktreePrepareCancelledDetachedAddCanReplay(t *testing.T) {
 	if code != "" || !ok || result.Outcome != nodeOutcomeCancelled {
 		t.Fatalf("interrupted detached prepare=%+v code=%q, want cancelled", prepared, code)
 	}
-	client.nodeGit = nil
+	client.nodeAdd = nil
 	prepared, code = client.nodeWorktreePrepare(t.Context(), args)
 	result, ok = prepared.(nodeWorktreePrepareResult)
 	if code != "" || !ok || (result.Outcome != nodePreparePrepared && result.Outcome != nodePrepareReused) {
@@ -123,24 +125,23 @@ func TestNodeWorktreeAddCleanupRequiresInitializingLockAndSignal(t *testing.T) {
 			ctx, cancel := context.WithCancel(t.Context())
 			t.Cleanup(cancel)
 			client := fixture.client()
-			git := func(ctx context.Context, args ...string) ([]byte, error) {
-				if strings.Contains(strings.Join(args, " "), "worktree add") {
-					out, err := exec.CommandContext(ctx, "git", args...).CombinedOutput()
-					if err != nil {
-						return out, err
-					}
-					if _, err := exec.Command("git", "-C", fixture.clone, "worktree", "lock", "--reason", tc.reason, dir).CombinedOutput(); err != nil {
-						t.Fatal(err)
-					}
-					if tc.cancel {
-						cancel()
-						return nil, testSignaledExit(t)
-					}
-					return nil, errors.New("exit status 128")
+			client.nodeAdd = func(ctx context.Context, record func(nodeAddProcess) error, args ...string) error {
+				proc, err := runAddChild(ctx, args...)
+				if err != nil {
+					return err
 				}
-				return exec.CommandContext(ctx, "git", args...).CombinedOutput()
+				if _, err := exec.Command("git", "-C", fixture.clone, "worktree", "lock", "--reason", tc.reason, dir).CombinedOutput(); err != nil {
+					t.Fatal(err)
+				}
+				if err := record(proc); err != nil {
+					t.Fatalf("record add identity: %v", err)
+				}
+				if tc.cancel {
+					cancel()
+					return testSignaledExit(t)
+				}
+				return errors.New("exit status 128")
 			}
-			client.nodeGit = git
 			_, _ = client.nodeWorktreePrepare(ctx, nodeWorktreePrepareArgs{Origin: fixture.origin, Mode: "branch", Branch: "feat", Sha: fixture.feat, Dir: "repo.job"})
 			listing, err := exec.Command("git", "-C", fixture.clone, "worktree", "list", "--porcelain").CombinedOutput()
 			if err != nil || !strings.Contains(string(listing), "locked "+tc.reason) {
@@ -167,21 +168,20 @@ func TestNodeWorktreeAddCleanupDoesNotPruneMissingUnlockedWorktree(t *testing.T)
 	ctx, cancel := context.WithCancel(t.Context())
 	t.Cleanup(cancel)
 	client := fixture.client()
-	git := func(ctx context.Context, args ...string) ([]byte, error) {
-		if strings.Contains(strings.Join(args, " "), "worktree add") {
-			out, err := exec.CommandContext(ctx, "git", args...).CombinedOutput()
-			if err != nil {
-				return out, err
-			}
-			if _, err := exec.Command("git", "-C", fixture.clone, "worktree", "lock", "--reason", "initializing", dir).CombinedOutput(); err != nil {
-				t.Fatal(err)
-			}
-			cancel()
-			return nil, testSignaledExit(t)
+	client.nodeAdd = func(ctx context.Context, record func(nodeAddProcess) error, args ...string) error {
+		proc, err := runAddChild(ctx, args...)
+		if err != nil {
+			return err
 		}
-		return exec.CommandContext(ctx, "git", args...).CombinedOutput()
+		if _, err := exec.Command("git", "-C", fixture.clone, "worktree", "lock", "--reason", "initializing", dir).CombinedOutput(); err != nil {
+			t.Fatal(err)
+		}
+		if err := record(proc); err != nil {
+			t.Fatalf("record add identity: %v", err)
+		}
+		cancel()
+		return testSignaledExit(t)
 	}
-	client.nodeGit = git
 	_, _ = client.nodeWorktreePrepare(ctx, nodeWorktreePrepareArgs{Origin: fixture.origin, Mode: "branch", Branch: "feat", Sha: fixture.feat, Dir: "repo.job"})
 	listing, err := exec.Command("git", "-C", fixture.clone, "worktree", "list", "--porcelain").CombinedOutput()
 	if err != nil || !strings.Contains(string(listing), "worktree "+missing) {
@@ -199,7 +199,7 @@ func TestNodeWorktreePrepareDetachedReclaimsOwnedInterruptedAdd(t *testing.T) {
 	if _, err := exec.Command("git", "-C", fixture.clone, "worktree", "lock", "--reason", "initializing", dir).CombinedOutput(); err != nil {
 		t.Fatal(err)
 	}
-	intent := nodeWorktreeAddIntent{Path: filepath.Clean(dir), Mode: "detached", Sha: fixture.main}
+	intent := nodeWorktreeAddIntent{Path: filepath.Clean(dir), Mode: "detached", Sha: fixture.main, Add: exitedAddProcess(t)}
 	if _, err := nodeWriteWorktreeAddIntent(t.Context(), fixture.client().nodeGitRunner(), fixture.clone, dir, intent); err != nil {
 		t.Fatal(err)
 	}

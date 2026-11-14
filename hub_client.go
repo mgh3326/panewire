@@ -218,6 +218,7 @@ type HubClient struct {
 	nodeCommandMu      sync.Mutex
 	nodeHerdr          relayCommandRunner // fixture seam for node commands; nil runs herdr.
 	nodeGit            relayCommandRunner // fixture seam for node commands; nil runs git.
+	nodeAdd            nodeAddRunner      // fixture seam for the worktree add child; nil runs git and records it.
 	nodeCheckouts      map[string]string  // fixture seam for the checkout.pull allow-list; nil reads spawn.json checkouts.
 	nodeInstallWait    time.Duration      // fixture seam for install.sh's bound; zero is nodeCheckoutInstallTimeout.
 	nodeLifecycle      relayCommandRunner // fixture seam for job.done; nil runs runtug.
