@@ -990,7 +990,9 @@ is the shared reading's `free_bucket` (the hub's fleet state carries it too).
 A devin pane that reports "Reached free model rate limit" writes this host's
 `devin-free-limit.json` — the same record `panewire quota observe
 devin-free-limit` writes — and the next devin measurement publishes it to the
-shared store. An unknown reset holds for one hour. The rung returns on its own
+shared store. A SWE-2 free rung's short "Reached request rate limit" stop
+writes the same record (hk 4644), with the short reset it shows. An unknown
+reset holds for one hour. The rung returns on its own
 once the reset passes. The quota gate refuses the same rung on the same
 reading; selection drops it before the gate.
 
