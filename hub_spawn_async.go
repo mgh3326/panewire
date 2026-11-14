@@ -1184,19 +1184,6 @@ func (t *directSpawnTransport) dispatch(ctx context.Context, node hubSpawnReques
 		releaseAdmission()
 		return fleet.HubSpawnReply{}, &fleet.HubError{Kind: "hub_spawn_pending"}
 	}
-	// Only an attempt this process sent first is fenceable. A replay of one
-	// from an earlier process keeps ownership on silence: a frame that process
-	// sent may still be queued at the node, and it starts with no grant. An
-	// unreadable or missing record is not fenceable either.
-	fenceable := false
-	if node.GrantRequired {
-		if current.Status == "bound" {
-			fenceable = h.inbox.store.recordSpawnSendBoot(ctx, node.RequestID, h.bootID, h.now().UTC()) == nil
-		} else {
-			sentBy, err := h.inbox.store.spawnAttemptSentBy(ctx, node.RequestID)
-			fenceable = err == nil && sentBy == h.bootID
-		}
-	}
 	if current.Status == "bound" {
 		t.task.Status = "dispatching"
 	}
@@ -1224,7 +1211,7 @@ func (t *directSpawnTransport) dispatch(ctx context.Context, node hubSpawnReques
 		StartByMS          int64             `json:"start_by_ms,omitempty"`
 	}{true, "job.spawn", node.RequestID, node.CWDKey, node.Brief, node.Checkout, node.Args, node.WaitSeconds, node.DeadlineMS, 0}
 	// Every send of a grant-required attempt, a replay after a hub restart
-	// included, gives the node a fresh start_by and, when this process sent it first, arms the fence.
+	// included, gives the node a fresh start_by and arms the fence after it.
 	// start_by only bounds the node's wait; the grant/fence row is the proof.
 	if node.GrantRequired {
 		message.StartByMS = time.Now().Add(h.spawnStartBy).UnixMilli()
@@ -1251,7 +1238,7 @@ func (t *directSpawnTransport) dispatch(ctx context.Context, node hubSpawnReques
 	var fence <-chan time.Time
 	var fenceTimer *time.Timer
 	fenceRetry := time.Second
-	if fenceable {
+	if node.GrantRequired {
 		fenceTimer = time.NewTimer(time.Until(time.UnixMilli(message.StartByMS)) + h.spawnStartByMargin)
 		defer fenceTimer.Stop()
 		fence = fenceTimer.C

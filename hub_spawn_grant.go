@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"strings"
 	"time"
 )
 
@@ -25,11 +26,34 @@ const (
 	defaultSpawnStartByMargin = 30 * time.Second
 )
 
-// spawnAttemptSendsTable records which hub process first sent each
-// grant-required attempt. A hub fences only an attempt its own process sent:
-// a frame another process sent (an older hub after a rollback, say) may still
-// sit queued at the node and start with no grant.
-const spawnAttemptSendsTable = `CREATE TABLE IF NOT EXISTS spawn_attempt_sends (node_id TEXT PRIMARY KEY,boot_id TEXT NOT NULL,sent_ms BIGINT NOT NULL)`
+// A sent grant-required attempt is stored under its own status values, the
+// sent statuses plus spawnGrantStatusSuffix. A hub older than the start proof
+// lists none of them, so after a rollback it never replays such an attempt
+// (it would send a frame without start_by, which a node starts with no grant),
+// never sweeps it and never releases its reservation: it holds the row until a
+// newer hub returns. Every read maps the stored value back, so code and every
+// external surface see only the sent status it refines.
+const spawnGrantStatusSuffix = "_grant"
+
+// spawnStoredStatus is the stored form of status for an attempt bound as node.
+func spawnStoredStatus(status string, node *hubSpawnRequest) string {
+	if node != nil && node.GrantRequired {
+		switch status {
+		case "dispatching", "reconciling", "deadline_exceeded":
+			return status + spawnGrantStatusSuffix
+		}
+	}
+	return status
+}
+
+// spawnLogicalStatus maps a stored status back to the one it refines.
+func spawnLogicalStatus(stored string) string {
+	switch stored {
+	case "dispatching_grant", "reconciling_grant", "deadline_exceeded_grant":
+		return strings.TrimSuffix(stored, spawnGrantStatusSuffix)
+	}
+	return stored
+}
 
 const spawnAttemptGrantsTable = `CREATE TABLE IF NOT EXISTS spawn_attempt_grants (node_id TEXT PRIMARY KEY,request_id TEXT NOT NULL,state TEXT NOT NULL,decided_ms BIGINT NOT NULL)`
 
@@ -53,6 +77,7 @@ func (s *laneInboxStore) decideSpawnGrant(parent context.Context, nodeID, machin
 	if err != nil {
 		return false, err
 	}
+	status = spawnLogicalStatus(status)
 	var node hubSpawnRequest
 	if json.Unmarshal([]byte(payload), &node) != nil || !node.GrantRequired || node.Machine != machine {
 		return false, nil
@@ -91,27 +116,6 @@ func (s *laneInboxStore) fenceSpawnAttempt(parent context.Context, requestID, no
 		return false, err
 	}
 	return state == "fenced", tx.Commit()
-}
-
-// recordSpawnSendBoot records bootID as the process that sent nodeID. It is
-// written only for a first send, so a replay never makes an attempt fenceable.
-func (s *laneInboxStore) recordSpawnSendBoot(parent context.Context, nodeID, bootID string, now time.Time) error {
-	ctx, done := s.op(parent)
-	defer done()
-	_, err := s.db.ExecContext(ctx, s.q(`INSERT INTO spawn_attempt_sends(node_id,boot_id,sent_ms) VALUES(?,?,?) ON CONFLICT DO NOTHING`), nodeID, bootID, now.UnixMilli())
-	return err
-}
-
-// spawnAttemptSentBy returns the boot id that sent nodeID, or "".
-func (s *laneInboxStore) spawnAttemptSentBy(parent context.Context, nodeID string) (string, error) {
-	ctx, done := s.op(parent)
-	defer done()
-	var bootID string
-	err := s.db.QueryRowContext(ctx, s.q(`SELECT boot_id FROM spawn_attempt_sends WHERE node_id=?`), nodeID).Scan(&bootID)
-	if errors.Is(err, sql.ErrNoRows) {
-		return "", nil
-	}
-	return bootID, err
 }
 
 // spawnAttemptFenced reports whether the attempt nodeID has a committed fence.

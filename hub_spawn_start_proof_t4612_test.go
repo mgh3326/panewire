@@ -211,6 +211,9 @@ func TestSpawnGrantedSilentAttemptKeepsOwnership_t4612(t *testing.T) {
 	if err != nil || saved.Status != "deadline_exceeded" || saved.Node == nil || saved.Node.RequestID != node.RequestID {
 		t.Fatalf("granted silent attempt: status=%s err=%v", saved.Status, err)
 	}
+	if stored := startProofStoredStatus(t, h, task.Request.RequestID); stored != "deadline_exceeded_grant" {
+		t.Fatalf("stored status=%q, want deadline_exceeded_grant", stored)
+	}
 	if reserved, err := h.inbox.store.spawnJobReserved(t.Context(), "test-job"); err != nil || !reserved {
 		t.Fatalf("reservation released: %v %v", reserved, err)
 	}
@@ -271,67 +274,36 @@ func TestSpawnGrantRequiredSkipsNodeWithoutCapability_t4612(t *testing.T) {
 	}
 }
 
-// Only an attempt this hub process sent first is fenceable (decision on
-// r4574830122 / r4574832937). A sent, ungranted attempt from an earlier process
-// (an older hub after a rollback, say, whose frame may still wait at the
-// node's spawn gate) is replayed with start_by but never fenced or re-placed
-// on silence. The same attempt recorded with this process's boot id is fenced.
-func TestSpawnFenceOnlyForAttemptsThisBootSent_t4612(t *testing.T) {
-	for _, tc := range []struct {
-		name      string
-		thisBoot  bool
-		wantFence bool
-	}{{"previous boot", false, false}, {"current boot", true, true}} {
-		t.Run(tc.name, func(t *testing.T) {
-			retryHK(t)
-			path := filepath.Join(t.TempDir(), "inbox.sqlite3")
-			first := startProofHub(t, path)
-			task, node := startProofTask(t, first, 461260, true)
-			sentSpawnFixture(t, first.inbox.store, task)
-			if err := first.inbox.store.recordSpawnSendBoot(t.Context(), node.RequestID, first.bootID, time.Now()); err != nil {
-				t.Fatal(err)
-			}
-			_ = first.Close()
-			h := startProofHub(t, path)
-			if tc.thisBoot {
-				h.bootID = first.bootID
-			}
-			server := httptest.NewServer(h.Handler())
-			defer server.Close()
-			// The node stays silent past start_by + margin, as one whose gate
-			// is held by another spawn.
-			desktop := startProofNode(t, h, server, "desktop", []string{"spawn_v2", "spawn_ops_v1", hubCapabilitySpawnGrant})
-			saved, err := h.inbox.store.spawnTask(t.Context(), task.Request.RequestID)
-			if err != nil || saved.Status != "dispatching" {
-				t.Fatalf("restored status=%s err=%v", saved.Status, err)
-			}
-			ctx, cancel := context.WithCancel(t.Context())
-			defer cancel()
-			done := make(chan struct{})
-			go func() { defer close(done); h.executeSpawnTask(ctx, saved) }()
-			if frame := t14ReadNodeSpawn(t, desktop); frame.StartByMS == 0 {
-				t.Fatal("replay carried no start_by_ms")
-			}
-			select {
-			case <-done:
-			case <-time.After(2 * time.Second):
-				// Window that proves nothing more happens: 200 ms start_by +
-				// 100 ms margin passed many times over without a fence.
-				cancel()
-				<-done
-			}
-			fenced, err := h.inbox.store.spawnAttemptFenced(t.Context(), node.RequestID)
-			after, err2 := h.inbox.store.spawnTask(t.Context(), task.Request.RequestID)
-			if err != nil || err2 != nil || fenced != tc.wantFence {
-				t.Fatalf("fenced=%v want %v err=%v %v", fenced, tc.wantFence, err, err2)
-			}
-			if tc.wantFence && (after.Status != "accepted" || len(after.Exclusions) != 1 || after.Exclusions[0].Reason != "deadline_not_started") {
-				t.Fatalf("current boot: status=%s exclusions=%+v", after.Status, after.Exclusions)
-			}
-			if !tc.wantFence && (after.Status != "dispatching" || len(after.Exclusions) != 0 || after.Attempt != task.Attempt) {
-				t.Fatalf("previous boot was released: status=%s exclusions=%+v attempt=%d", after.Status, after.Exclusions, after.Attempt)
-			}
-		})
+// After a hub restart the coordinator's replay of a sent, ungranted attempt
+// carries a fresh start_by and fences it on silence like the first send.
+func TestSpawnRestartReplayFencesUngrantedAttempt_t4612(t *testing.T) {
+	retryHK(t)
+	path := filepath.Join(t.TempDir(), "inbox.sqlite3")
+	first := startProofHub(t, path)
+	task, _ := startProofTask(t, first, 461260, true)
+	sentSpawnFixture(t, first.inbox.store, task)
+	_ = first.Close()
+	h := startProofHub(t, path)
+	server := httptest.NewServer(h.Handler())
+	defer server.Close()
+	desktop := startProofNode(t, h, server, "desktop", []string{"spawn_v2", "spawn_ops_v1", hubCapabilitySpawnGrant})
+	saved, err := h.inbox.store.spawnTask(t.Context(), task.Request.RequestID)
+	if err != nil || saved.Status != "dispatching" {
+		t.Fatalf("restored status=%s err=%v", saved.Status, err)
+	}
+	done := make(chan struct{})
+	go func() { defer close(done); h.executeSpawnTask(t.Context(), saved) }()
+	if frame := t14ReadNodeSpawn(t, desktop); frame.StartByMS == 0 {
+		t.Fatal("replay carried no start_by_ms")
+	}
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("replayed silent attempt was not fenced")
+	}
+	after, err := h.inbox.store.spawnTask(t.Context(), task.Request.RequestID)
+	if err != nil || after.Status != "accepted" || len(after.Exclusions) != 1 || after.Exclusions[0].Reason != "deadline_not_started" {
+		t.Fatalf("after replay: status=%s exclusions=%+v err=%v", after.Status, after.Exclusions, err)
 	}
 }
 
@@ -445,5 +417,56 @@ func TestSpawnFenceRetriesAfterStoreError_t4612(t *testing.T) {
 	after, err := h.inbox.store.spawnTask(t.Context(), task.Request.RequestID)
 	if err != nil || after.Status != "accepted" || len(after.Exclusions) != 1 {
 		t.Fatalf("after retry: status=%s exclusions=%+v err=%v", after.Status, after.Exclusions, err)
+	}
+}
+
+func startProofStoredStatus(t *testing.T, h *HubServer, requestID string) string {
+	t.Helper()
+	var stored string
+	if err := h.inbox.store.db.QueryRow(`SELECT status FROM spawn_operations WHERE request_id=?`, requestID).Scan(&stored); err != nil {
+		t.Fatal(err)
+	}
+	return stored
+}
+
+// A sent grant-required attempt is stored under a status no hub before the
+// start proof lists (v0.0.404, 54345a76), so after a rollback such a hub never
+// replays, sweeps or releases it. Every read, the HTTP status surface
+// included, shows the sent status it refines.
+func TestSpawnGrantRequiredStatusHiddenFromOlderHubsAndClients_t4612(t *testing.T) {
+	retryHK(t)
+	h := startProofHub(t, filepath.Join(t.TempDir(), "inbox.sqlite3"))
+	server := httptest.NewServer(h.Handler())
+	defer server.Close()
+	task, _ := startProofTask(t, h, 461270, true)
+	sent := sentSpawnFixture(t, h.inbox.store, task)
+	if stored := startProofStoredStatus(t, h, task.Request.RequestID); stored != "dispatching_grant" {
+		t.Fatalf("stored status=%q, want dispatching_grant", stored)
+	}
+	if sent.Status != "dispatching" {
+		t.Fatalf("store read status=%q, want dispatching", sent.Status)
+	}
+	// The status predicates of every v0.0.404 spawn_operations query that
+	// replays, sweeps, reports or releases.
+	for _, where := range []string{
+		`status IN ('accepted','bound','dispatching','reconciling')`,
+		`status='deadline_exceeded'`,
+		`status IN ('accepted','bound','dispatching','reconciling','deadline_exceeded')`,
+		`(status IN ('bound','dispatching','reconciling','succeeded') OR status='deadline_exceeded')`,
+		`status IN ('accepted','bound','dispatching') OR status='succeeded'`,
+		`status IN ('succeeded','failed')`,
+		`status IN ('staged','retryable')`,
+	} {
+		var n int
+		if err := h.inbox.store.db.QueryRow(`SELECT count(*) FROM spawn_operations WHERE request_id=? AND (`+where+`)`, task.Request.RequestID).Scan(&n); err != nil || n != 0 {
+			t.Fatalf("an older hub's %s matches the grant-required row: n=%d err=%v", where, n, err)
+		}
+	}
+	status, _, body := t14HTTP(t, http.MethodGet, server.URL+"/v1/spawns/"+task.Request.RequestID, t14OperatorToken, nil)
+	var reply struct {
+		Status string `json:"status"`
+	}
+	if status != http.StatusOK || json.Unmarshal(body, &reply) != nil || reply.Status != "dispatching" {
+		t.Fatalf("GET /v1/spawns/<id>: HTTP %d %s, want status dispatching", status, body)
 	}
 }
