@@ -401,7 +401,9 @@ func placementTraceFromRecord(r PlacementRecord) PlacementTrace {
 // name carries an identical payload, and hk answers a reposted job+attempt
 // with 409, which deliverPlacements treats as delivered.
 func (a *App) EnqueuePlacementRecord(ctx context.Context, r PlacementRecord) (delivered bool, err error) {
-	b, err := json.Marshal(pendingPlacement{Record: r})
+	// A placed record that arrived without execution metadata resolves the
+	// shared job record before its first post, as spoolPlacement does.
+	b, err := json.Marshal(pendingPlacement{Record: r, ResolveJob: r.Outcome == "placed" && r.Family == ""})
 	if err != nil {
 		return false, err
 	}

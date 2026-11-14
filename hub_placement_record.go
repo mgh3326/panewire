@@ -231,6 +231,11 @@ func hubPlacementRecord(task hubSpawnTask, tr fleet.PlacementTrace) fleet.Placem
 	if rec.Candidates == nil {
 		rec.Candidates = []fleet.PlacementCandidateRecord{}
 	}
+	// Contact is not launch acceptance: a refused record names no chosen
+	// host, matching the records finishPlacement produces.
+	if rec.Outcome == "refused" {
+		rec.Host = ""
+	}
 	return rec
 }
 
@@ -279,17 +284,27 @@ func (h *HubServer) flushPlacementRecords(ctx context.Context) {
 		return
 	}
 	app.FlushPlacements()
-	// Seal the rows whose record file left the spool; a file still present
-	// keeps its row pending so the next tick retries its delivery.
+	// Reconcile pending snapshots against the spool. A file still present
+	// keeps its row pending so the next tick retries delivery; a live attempt
+	// has no file yet and must never be sealed. A terminal attempt with no
+	// file either never enqueued (a crash between the terminal commit and the
+	// enqueue, a delivery-App build failure, an enqueue error) or delivered
+	// before its seal could be written: rebuild and enqueue the identical
+	// record — hk dedupes the repost — and let its own mark seal it. Only an
+	// attempt that is over but owes no rebuildable record (superseded, its
+	// outcome already overwritten by a newer attempt) is sealed here.
 	pending, err := h.inbox.store.pendingPlacementSnapshots(h.closeCtx)
 	if err != nil {
 		return
 	}
 	for _, row := range pending {
-		// A live attempt has no record file yet; sealing it would lose the
-		// record its terminal result still owes.
-		if row.attemptOver() && !app.PlacementSpooled(row.Job, row.Attempt) {
-			_ = h.inbox.store.markSpawnPlacementRecorded(h.closeCtx, row.RequestID, row.Attempt)
+		if !row.attemptOver() || app.PlacementSpooled(row.Job, row.Attempt) {
+			continue
 		}
+		if spawnAttemptTerminal(row.Status) && row.CurrentAttempt == row.Attempt {
+			h.deliverPlacementRecord(h.closeCtx, row.RequestID, row.Attempt)
+			continue
+		}
+		_ = h.inbox.store.markSpawnPlacementRecorded(h.closeCtx, row.RequestID, row.Attempt)
 	}
 }

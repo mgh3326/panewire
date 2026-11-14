@@ -110,13 +110,15 @@ func boundSpawnTask(t *testing.T, h *HubServer, req fleet.Submission) hubSpawnTa
 func TestHubPlacementRecordTerminalOutcomes(t *testing.T) {
 	hk := placementOutboxServer(t)
 	for name, tc := range map[string]struct {
-		outcome hubSpawnOutcome
-		want    string
-		reason  string
+		outcome  hubSpawnOutcome
+		want     string
+		reason   string
+		wantHost string
 	}{
-		"landed":  {hubSpawnOutcome{RC: 0, Stage: "landing", Host: "machine-a", Pane: "pane-7", Profile: "claude-sonnet", Model: "sonnet", Pool: "claude-sub", NodeResult: true}, "placed", ""},
-		"failed":  {hubSpawnOutcome{RC: 1, Stage: "landing", Reason: "spawn_failed:launch", Host: "machine-a", NodeResult: true}, "failed", "spawn_failed:launch"},
-		"refused": {hubSpawnOutcome{RC: 70, Stage: "placement", Reason: "spawn_failed:trust_prompt", Host: "machine-a", NodeResult: true}, "refused", "spawn_failed:trust_prompt"},
+		"landed": {hubSpawnOutcome{RC: 0, Stage: "landing", Host: "machine-a", Pane: "pane-7", Profile: "claude-sonnet", Model: "sonnet", Pool: "claude-sub", NodeResult: true}, "placed", "", "machine-a"},
+		"failed": {hubSpawnOutcome{RC: 1, Stage: "landing", Reason: "spawn_failed:launch", Host: "machine-a", NodeResult: true}, "failed", "spawn_failed:launch", "machine-a"},
+		// Contact is not launch acceptance: a refused record names no host.
+		"refused": {hubSpawnOutcome{RC: 70, Stage: "placement", Reason: "spawn_failed:trust_prompt", Host: "machine-a", NodeResult: true}, "refused", "spawn_failed:trust_prompt", ""},
 	} {
 		t.Run(name, func(t *testing.T) {
 			h := placementOutboxHub(t, filepath.Join(t.TempDir(), "inbox.sqlite3"))
@@ -138,8 +140,11 @@ func TestHubPlacementRecordTerminalOutcomes(t *testing.T) {
 			if rec == nil {
 				t.Fatalf("no placement record delivered; records=%v", records)
 			}
-			if rec["outcome"] != tc.want || rec["attempt"].(float64) != 1 || rec["chosen_host"] != "machine-a" {
+			if rec["outcome"] != tc.want || rec["attempt"].(float64) != 1 {
 				t.Fatalf("record=%v", rec)
+			}
+			if got, _ := rec["chosen_host"].(string); got != tc.wantHost {
+				t.Fatalf("chosen_host=%q, want %q (record=%v)", got, tc.wantHost, rec)
 			}
 			if rec["reason"] != tc.reason {
 				t.Fatalf("reason=%v, want %q", rec["reason"], tc.reason)
@@ -187,6 +192,35 @@ func TestHubPlacementRecordSurvivesRestartExactlyOnce(t *testing.T) {
 	h2.notePlacementTrace(current, placementTraceSnapshot())
 	if n := len(hk.records()); n != 1 {
 		t.Fatalf("duplicate delivery produced %d records", n)
+	}
+}
+
+// A hub that committed the terminal result but died before enqueuing must
+// still produce the record: the flush rebuilds it from the snapshot instead
+// of sealing the row.
+func TestHubPlacementRecordRebuiltAfterCrashBeforeEnqueue(t *testing.T) {
+	hk := placementOutboxServer(t)
+	path := filepath.Join(t.TempDir(), "inbox.sqlite3")
+	req := durableSpawnRequest()
+	req.RequestID = "d676220b-e763-4af1-aefd-000000000015"
+	h := placementOutboxHub(t, path)
+	task := boundSpawnTask(t, h, req)
+	h.notePlacementTrace(task, placementTraceSnapshot())
+	// Commit the terminal status through the store directly, bypassing the
+	// hub's deliverPlacementRecord hook — the state a crash leaves behind.
+	if _, err := h.inbox.store.completeSpawn(t.Context(), task, hubSpawnOutcome{RC: 0, Stage: "landing", Host: "machine-a", Pane: "pane-7", NodeResult: true}, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(hk.records()); n != 0 {
+		t.Fatalf("record produced before flush: %d", n)
+	}
+	h.flushPlacementRecords(t.Context())
+	if n := len(hk.records()); n != 1 {
+		t.Fatalf("flush produced %d records, want exactly one", n)
+	}
+	_, recorded, err := h.inbox.store.spawnPlacementSnapshot(t.Context(), req.RequestID, task.Attempt)
+	if err != nil || !recorded {
+		t.Fatalf("snapshot recorded=%v err=%v after delivery", recorded, err)
 	}
 }
 
