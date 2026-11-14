@@ -876,27 +876,84 @@ func (a *App) checkTrustPrompt(ctx context.Context, kind, pane, cwd string) erro
 // registration; a hub that dropped one request usually answers the next.
 const laneRegisterRetryDelay = time.Second
 
+// lanePutRequest is one lane registration. Takeover names the predecessor job
+// whose lane row this write moves to the requested pane: a --parent-job
+// successor keeps the lane the task's findings are addressed to, which may be
+// named differently from the successor's own label.
+type lanePutRequest struct {
+	Lane     string
+	Machine  string
+	Pane     string
+	Parent   string
+	Takeover string
+	Role     string
+}
+
+// laneRegistration is the row a successful registration holds. A takeover can
+// move a row named differently from the requested lane, so the name comes from
+// the hub's answer, not from the request.
+type laneRegistration struct {
+	Lane    string
+	Machine string
+	Pane    string
+	Parent  string
+}
+
+// answer reads the published row from a hub lane projection. An answer with no
+// readable route falls back to the requested row: a write without a takeover
+// always lands under the requested name.
+func (req lanePutRequest) answer(raw []byte) laneRegistration {
+	fallback := laneRegistration{Lane: req.Lane, Machine: req.Machine, Pane: req.Pane, Parent: req.Parent}
+	var projection struct {
+		Lane    string `json:"lane"`
+		Machine string `json:"machine"`
+		Pane    string `json:"pane"`
+		Parent  string `json:"parent"`
+	}
+	if len(raw) == 0 || json.Unmarshal(raw, &projection) != nil {
+		return fallback
+	}
+	if projection.Lane == "" || len(projection.Lane) > 128 || projection.Machine == "" || projection.Pane == "" {
+		return fallback
+	}
+	return laneRegistration{Lane: projection.Lane, Machine: projection.Machine, Pane: projection.Pane, Parent: projection.Parent}
+}
+
+// laneNamePattern mirrors the hub's LaneNamePattern for the lane a task names:
+// the fleet package cannot import the root, and a name the hub would refuse is
+// not offered as a takeover hint.
+var laneNamePattern = regexp.MustCompile(`^[a-z0-9_-]{1,32}$`)
+
 // registerLaneWithRetry registers the lane and, when the hub refuses or is
 // unreachable, tries once more. A local configuration refusal (exitConfig) is
 // deterministic, so it is not retried. Each failed attempt is logged with its
-// cause; the final error is returned.
-func (a *App) registerLaneWithRetry(ctx context.Context, lane, parent, pane, role, machine string) error {
-	e := a.registerLane(ctx, lane, parent, pane, role, machine)
+// cause; the published row of the last attempt is returned.
+func (a *App) registerLaneWithRetry(ctx context.Context, req lanePutRequest) (laneRegistration, error) {
+	registration, e := a.registerLane(ctx, req)
 	if e == nil {
-		return nil
+		return registration, nil
 	}
-	a.warn("lane registration failed (session=%s machine=%s pane=%s): %v", a.herdrSession(), machine, pane, e)
+	a.warn("lane registration failed (session=%s machine=%s pane=%s): %v", a.herdrSession(), req.Machine, req.Pane, e)
 	if ErrorCode(e) == exitConfig {
-		return e
+		return laneRegistration{}, e
 	}
 	if a.Sleep(ctx, laneRegisterRetryDelay) != nil {
-		return e
+		return laneRegistration{}, e
 	}
-	e = a.registerLane(ctx, lane, parent, pane, role, machine)
+	registration, e = a.registerLane(ctx, req)
 	if e != nil {
-		a.warn("lane registration failed again (session=%s machine=%s pane=%s): %v", a.herdrSession(), machine, pane, e)
+		a.warn("lane registration failed again (session=%s machine=%s pane=%s): %v", a.herdrSession(), req.Machine, req.Pane, e)
+		return laneRegistration{}, e
 	}
-	return e
+	return registration, nil
+}
+
+// laneRefused reports whether a lane registration error is the hub's refusal
+// rather than a transport or daemon failure. Both routes keep the CLI's
+// refusal line, so the code reads the same either way.
+func laneRefused(e error) bool {
+	text := e.Error()
+	return strings.Contains(text, "lanes rejected by hub") || strings.Contains(text, "lanes rejected: ")
 }
 
 // announceLaneUnregistered tells the lane that owns the spawn that this pane's
@@ -934,26 +991,33 @@ func SanitizeFailureDetail(text string) string {
 // registerLane registers a spawned lane with the hub. On a node the daemon
 // already holds the hub credential, so the socket route goes first; the
 // fleet-config `lanes add` command stays for hosts where no daemon answers.
-func (a *App) registerLane(ctx context.Context, lane, parent, pane, role, machine string) error {
-	if e := a.registerLaneThroughDaemon(ctx, lane, parent, pane, machine); !errors.Is(e, errLaneDaemonAbsent) {
-		return e
+func (a *App) registerLane(ctx context.Context, req lanePutRequest) (laneRegistration, error) {
+	if registration, e := a.registerLaneThroughDaemon(ctx, req); !errors.Is(e, errLaneDaemonAbsent) {
+		return registration, e
 	}
 	if str(a.Config.Hub, "hub_url") == "" {
-		return fail(exitConfig, "hub lane config missing")
+		return laneRegistration{}, fail(exitConfig, "hub lane config missing")
 	}
-	args := []string{"lanes", "add", lane, "--machine", machine, "--pane", pane, "--parent", parent}
-	args = append(args, a.laneHubArgs(role)...)
+	args := []string{"lanes", "add", req.Lane, "--machine", req.Machine, "--pane", req.Pane, "--parent", req.Parent}
+	if req.Takeover != "" {
+		args = append(args, "--takeover", req.Takeover)
+	}
+	args = append(args, a.laneHubArgs(req.Role)...)
 	for i, arg := range args {
 		if arg != "--hub-token-env" || i+1 == len(args) {
 			continue
 		}
 		args[i+1] = expand(args[i+1])
 		env, e := readEnvFile(args[i+1])
-		if id := env["HUB_MACHINE_ID"]; e == nil && id != "" && id != "operator" && id != machine {
-			return fail(exitConfig, "LANE_SESSION_MACHINE_MISMATCH: session=%s route=%s credential_machine=%s; configure hub.session_machine_ids and hub.session_lanes_token_envs together", a.herdrSession(), machine, id)
+		if id := env["HUB_MACHINE_ID"]; e == nil && id != "" && id != "operator" && id != req.Machine {
+			return laneRegistration{}, fail(exitConfig, "LANE_SESSION_MACHINE_MISMATCH: session=%s route=%s credential_machine=%s; configure hub.session_machine_ids and hub.session_lanes_token_envs together", a.herdrSession(), req.Machine, id)
 		}
 	}
-	return a.must(ctx, "panewire", args...)
+	r := a.call(ctx, "panewire", args...)
+	if e := check(r, "lanes add"); e != nil {
+		return laneRegistration{}, e
+	}
+	return req.answer([]byte(r.Out)), nil
 }
 
 func (a *App) laneHubArgs(role string) []string {
