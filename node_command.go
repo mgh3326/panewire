@@ -48,7 +48,10 @@ const (
 // Closed outcome vocabularies. pane.close mirrors mergewake reap's reclose
 // reasons byte for byte so receipts read the same over either transport.
 const (
-	nodePaneClosed       = "closed"
+	nodePaneClosed = "closed"
+	// nodePaneQuestionOpen refuses the close because the job's newest lane
+	// event from this pane asks a question nobody answered yet.
+	nodePaneQuestionOpen = "question-open"
 	nodePaneChanged      = "pane-changed"
 	nodePaneGone         = "pane-gone"
 	nodeCaptureReport    = "report"
@@ -98,6 +101,9 @@ type nodePaneCloseArgs struct {
 	AgentStatus  string `json:"agent_status"`
 	Cwd          string `json:"cwd"`
 	AllowUnnamed bool   `json:"allow_unnamed,omitempty"`
+	// QuestionJob names the job whose open question the node must rule out
+	// before it closes. Empty keeps the pre-question behaviour.
+	QuestionJob string `json:"question_job,omitempty"`
 }
 
 type nodePaneCaptureArgs struct {
@@ -218,6 +224,28 @@ var nodeCommandArgFields = map[string][]string{
 
 // nodeCommandHasFields reports whether raw is an object holding exactly the
 // named fields, none of them null.
+// nodeCommandPaneCloseFields accepts the required fields plus any subset of the
+// optional allow_unnamed and question_job, which travel independently.
+func nodeCommandPaneCloseFields(raw json.RawMessage) bool {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(raw, &fields) != nil || fields == nil {
+		return false
+	}
+	for _, name := range nodeCommandArgFields[nodeCommandPaneClose] {
+		value, found := fields[name]
+		if !found || isJSONNull(value) {
+			return false
+		}
+		delete(fields, name)
+	}
+	for key, value := range fields {
+		if (key != "allow_unnamed" && key != "question_job") || isJSONNull(value) {
+			return false
+		}
+	}
+	return true
+}
+
 func nodeCommandHasFields(raw json.RawMessage, names []string) bool {
 	var fields map[string]json.RawMessage
 	if json.Unmarshal(raw, &fields) != nil || fields == nil || len(fields) != len(names) {
@@ -262,7 +290,8 @@ func parseNodeCommandArgs(op string, raw json.RawMessage) (any, bool) {
 	optionalList := op == nodeCommandWorktreeList && nodeWorktreeListFields(raw)
 	optionalInspect := op == nodeCommandWorktreeInspect && nodeWorktreeInspectFields(raw)
 	optionalEndReason := op == nodeCommandJobMarkLost && nodeCommandHasFields(raw, append(append([]string(nil), names...), "end_reason"))
-	if !known || len(raw) == 0 || len(raw) > nodeCommandMaxArgsBytes || (!nodeCommandHasFields(raw, names) && !optionalKind && !optionalDetached && !optionalUnnamed && !optionalList && !optionalInspect && !optionalEndReason) {
+	optionalQuestion := op == nodeCommandPaneClose && nodeCommandPaneCloseFields(raw)
+	if !known || len(raw) == 0 || len(raw) > nodeCommandMaxArgsBytes || (!nodeCommandHasFields(raw, names) && !optionalKind && !optionalDetached && !optionalUnnamed && !optionalList && !optionalInspect && !optionalEndReason && !optionalQuestion) {
 		return nil, false
 	}
 	switch op {
@@ -271,7 +300,7 @@ func parseNodeCommandArgs(op string, raw json.RawMessage) (any, bool) {
 		return args, decodeNodeCommandStrict(raw, &args)
 	case nodeCommandPaneClose:
 		var args nodePaneCloseArgs
-		valid := decodeNodeCommandStrict(raw, &args) && nodeCommandPaneIDPattern.MatchString(args.PaneID) && validNodeJobName(args.Name) && nodePaneClosableStatus[args.AgentStatus] && validNodeCommandPath(args.Cwd)
+		valid := decodeNodeCommandStrict(raw, &args) && nodeCommandPaneIDPattern.MatchString(args.PaneID) && validNodeJobName(args.Name) && nodePaneClosableStatus[args.AgentStatus] && validNodeCommandPath(args.Cwd) && (args.QuestionJob == "" || validNodeJobName(args.QuestionJob))
 		return args, valid
 	case nodeCommandPaneCapture:
 		var args nodePaneCaptureArgs
@@ -365,7 +394,7 @@ func canonicalNodeCommandResult(op string, raw json.RawMessage) (json.RawMessage
 		target = result
 	case nodeCommandPaneClose:
 		var result nodePaneCloseResult
-		valid = decodeNodeCommandStrict(raw, &result) && (result.Outcome == nodePaneClosed || result.Outcome == nodePaneChanged || result.Outcome == nodePaneGone)
+		valid = decodeNodeCommandStrict(raw, &result) && (result.Outcome == nodePaneClosed || result.Outcome == nodePaneChanged || result.Outcome == nodePaneGone || result.Outcome == nodePaneQuestionOpen)
 		target = result
 	case nodeCommandPaneCapture:
 		var result nodePaneCaptureResult
@@ -942,6 +971,24 @@ func (client *HubClient) nodePaneClose(ctx context.Context, args nodePaneCloseAr
 	}
 	if !composerEmpty(second) {
 		return nodePaneCloseResult{Outcome: nodePaneChanged}, ""
+	}
+	// A pane that asked a question and is idle is waiting for an answer, not
+	// finished. The node decides from its own records here, after the last
+	// read and immediately before the irreversible close, so a question the
+	// watcher has not copied yet still holds the pane.
+	if args.QuestionJob != "" {
+		if client.jobsInboxRoot == "" {
+			return nil, "jobs_root_unset"
+		}
+		_, open, err := fleet.OpenLaneQuestion(client.jobsInboxRoot, args.QuestionJob, args.PaneID, client.nowUTC(), fleet.DefaultDecisionTimeout)
+		switch {
+		case errors.Is(err, fleet.ErrJobPaneChanged):
+			return nodePaneCloseResult{Outcome: nodePaneChanged}, ""
+		case err != nil:
+			return nil, "close_failed"
+		case open:
+			return nodePaneCloseResult{Outcome: nodePaneQuestionOpen}, ""
+		}
 	}
 	if _, err := client.nodeHerdrRunnerFor(args.Name, args.PaneID)(ctx, "pane", "close", args.PaneID); err != nil {
 		return nil, "close_failed"

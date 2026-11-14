@@ -22,8 +22,12 @@ import (
 //     lane row behind, and the node's ended-job sweep never sees it: the lane
 //     cap fills and new lanes are refused `lane_quota_exceeded` (hk 4658).
 //
-// Implementers and consults are never released this way: an idle worker may be
-// waiting on an ESC answer.
+// An idle pane is not proof that the work ended: a reviewer that asked a
+// question is idle too. The close therefore carries the job id, and the node
+// rules out an open question from its own lane-event records at the moment of
+// the close (fleet.OpenLaneQuestion); a question the watcher has not copied yet
+// cannot be raced. Implementers and consults are never released this way: an
+// idle worker may be waiting on a decision.
 //
 // The node's agent list carries no time of the last state change, so the grace
 // runs from the holder's spawn deadline, as releaseUnworkedSpawn's does. Any
@@ -59,10 +63,10 @@ func (h *HubServer) releaseFinishedReviewerPane(ctx context.Context, app *fleet.
 
 // releaseFinishedReviewerHolder is the rule both callers share: the holder is a
 // reviewer spawn in succeeded or failed state, its hk record still claimed or
-// spawned, its pane present under its own id and label with a closable status
-// past the grace, and the job not waiting on an ESC answer. source names the
-// caller in the INFO line; submitter is the submitting request there, "" for
-// the sweep.
+// spawned, and its pane present under its own id and label with a closable
+// status past the grace. source names the caller in the INFO line; submitter is
+// the submitting request there, "" for the sweep. The node refuses the close if
+// the job's own records show an unanswered question.
 func (h *HubServer) releaseFinishedReviewerHolder(ctx context.Context, app *fleet.App, spawn fleet.Spawn, holder hubSpawnTask, record map[string]any, probe heldProbe, source, submitter string) (closed bool, branch string, remaining time.Duration) {
 	if spawn.Role != reviewerRole || probe.state != heldPanePresent {
 		return false, "", 0
@@ -90,17 +94,16 @@ func (h *HubServer) releaseFinishedReviewerHolder(ctx context.Context, app *flee
 	if remaining = holder.Deadline.Add(h.unworkedLandingGrace).Sub(h.now()); remaining > 0 {
 		return false, "", remaining
 	}
-	// A reviewer that asked a question (an ESC the watcher recorded as
-	// job.waiting_decision) is idle because the question is open, not because
-	// its work ended: the watcher holds the job for up to six hours for an
-	// answer. Closing the pane here would destroy a live job, so the newest
-	// event kind the node reports decides.
-	if h.jobAwaitingDecision(spawnHolderHost(holder), holder.Job) {
-		return false, "", 0
-	}
 	// The end_reason records why the record was written, so a lost reviewer job
-	// says whether its pane finished or stopped at a startup prompt.
-	if marked, _ := h.closeHeldPaneAndMarkLostBecause(ctx, app, holder, name, row, branch); !marked {
+	// says whether its pane finished or stopped at a startup prompt. The job id
+	// makes the node rule out an open question before it closes.
+	closedPane, reason := h.closeHeldPaneAndMarkLostBecause(ctx, app, holder, name, row, branch, holder.Job)
+	if !closedPane {
+		if reason == "question_open" {
+			h.logger.Info("hub kept a reviewer pane",
+				"reason", reason, "source", source, "role_key", spawn.RoleKey(),
+				"job", holder.Job, "holder_host", spawnHolderHost(holder), "holder_pane", row.PaneID)
+		}
 		return false, "", 0
 	}
 	attrs := []any{"branch", branch, "source", source, "role_key", spawn.RoleKey(), "job", holder.Job}
@@ -112,66 +115,6 @@ func (h *HubServer) releaseFinishedReviewerHolder(ctx context.Context, app *flee
 		"holder_host", spawnHolderHost(holder), "holder_pane", row.PaneID, "pane_status", row.AgentStatus)
 	h.logger.Info("hub closed a finished reviewer pane", attrs...)
 	return true, branch, 0
-}
-
-// jobAwaitingDecision reports that the job's newest ledger event is an open
-// decision wait: the node's watcher recorded job.waiting_decision when the
-// worker asked a question and holds the job for decisionTimeout (six hours)
-// for an answer. The node's active-job heartbeat carries every job it reports —
-// whatever epoch, and after a hub restart — so the newest kind is read from
-// there rather than from h.jobs, which only ever holds an epoch-1 first sighting.
-func (h *HubServer) jobAwaitingDecision(host, jobID string) bool {
-	if host == "" {
-		return false
-	}
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	record := h.nodes[host]
-	if record == nil {
-		return false
-	}
-	job, known := record.activeJobs[jobID]
-	return known && job.LastEventKind == "job.waiting_decision"
-}
-
-// reviewerPaneShowsFinished reports that probe shows the holder's own pane with a
-// closable status. Both the two-pass sighting and the release rule need it.
-func reviewerPaneShowsFinished(probe heldProbe, holder hubSpawnTask, record map[string]any) bool {
-	if probe.state != heldPanePresent {
-		return false
-	}
-	row, name := probe.row, heldAgentName(holder, record)
-	return row.PaneID == holder.Outcome.Pane && row.Name == name && nodePaneClosableStatus[row.AgentStatus]
-}
-
-// reviewerPaneStayedFinished records that the holder's pane is finished now and
-// reports whether the previous pass saw it finished too. A reviewer's pane goes
-// idle the moment it emits an ESC, but the watcher records job.waiting_decision
-// on its next five-second poll and the hub reads that kind on the next
-// heartbeat, so one sighting cannot tell a finished reviewer from one whose
-// question is not recorded yet. Two consecutive sightings are minutes apart.
-func (h *HubServer) reviewerPaneStayedFinished(job, pane string) bool {
-	key := job + "\x00" + pane
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if h.reviewerPaneSeen == nil {
-		h.reviewerPaneSeen = map[string]bool{}
-	}
-	seen := h.reviewerPaneSeen[key]
-	h.reviewerPaneSeen[key] = true
-	return seen
-}
-
-// retainReviewerPanes forgets the panes the pass no longer found finished, so a
-// pane that goes back to work starts its two sightings again.
-func (h *HubServer) retainReviewerPanes(live map[string]bool) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	for key := range h.reviewerPaneSeen {
-		if !live[key] {
-			delete(h.reviewerPaneSeen, key)
-		}
-	}
 }
 
 // runReviewerPaneRelease runs releaseFinishedReviewerSpawns once per
@@ -228,7 +171,6 @@ func (h *HubServer) releaseFinishedReviewerSpawns(ctx context.Context) {
 		h.logger.Warn("reviewer pane release skipped", "reason", "app_unavailable")
 		return
 	}
-	live := map[string]bool{}
 	for _, r := range reviewers {
 		readCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		record, exists, readErr := app.ExistingJob(readCtx, r.holder.Job)
@@ -242,16 +184,8 @@ func (h *HubServer) releaseFinishedReviewerSpawns(ctx context.Context) {
 			continue
 		}
 		probe := h.probeHeldPane(ctx, spawnHolderHost(r.holder), r.holder.Outcome.Pane, heldAgentName(r.holder, record))
-		if !reviewerPaneShowsFinished(probe, r.holder, record) {
-			continue
-		}
-		live[r.holder.Job+"\x00"+r.holder.Outcome.Pane] = true
-		if !h.reviewerPaneStayedFinished(r.holder.Job, r.holder.Outcome.Pane) {
-			continue
-		}
 		h.releaseFinishedReviewerHolder(ctx, app, r.spawn, r.holder, record, probe, "sweep", "")
 	}
-	h.retainReviewerPanes(live)
 }
 
 // retryAfterSeconds is the whole seconds a caller should wait for a hold that

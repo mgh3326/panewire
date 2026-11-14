@@ -118,9 +118,12 @@ must treat pane usage as unknown. A failed agent list answers
 
 ### `pane.close`
 
-`args: {pane_id, name, agent_status, cwd}` — the caller's snapshot of the
-pane; `agent_status` must be `idle`, `done` or `blocked` (a pane stopped at a
-prompt), never `working`. A `blocked` close also needs the job's own ledger
+`args: {pane_id, name, agent_status, cwd[, allow_unnamed][, question_job]}` —
+the caller's snapshot of the pane; `agent_status` must be `idle`, `done` or
+`blocked` (a pane stopped at a prompt), never `working`. `question_job` names a
+job whose own records the node must prove hold no unanswered question before it
+closes: an idle pane that asked a question is waiting for an answer, not
+finished. A `blocked` close also needs the job's own ledger
 (`job.claimed` or `job.spawned` event) to name role `reviewer`, because a
 blocked worker may be waiting on an ESC answer; otherwise the outcome is
 `pane-changed`. herdr has no conditional close, so the node re-reads `herdr agent list`
@@ -133,11 +136,24 @@ an unknown composer or a failed screen read refuses the close as `pane-changed`.
 The second composer read immediately precedes `herdr pane close`; an unavoidable
 read-to-close gap remains, as in the ssh reap path.
 
+With `question_job`, the node makes one more decision at that same point, from
+the node's own files rather than from a copy another process wrote earlier: it
+reads the job's ledger for the pane and the start of its current attempt, then
+the lane-event records (`<inbox>/events-lane`) that pane wrote since. A question
+is open when the newest of those asks one — its `notify_type` is `decision` or
+`blocked`, or its text starts with `ESC` — it is younger than the six-hour
+`decisionTimeout`, and no `job.decision_resumed` follows it. A later lane event
+from the same pane answers it, exactly as the watcher decides. The close is then
+refused with `question-open`; an unreadable record answers `close_failed`, never
+a close. A ledger whose newest spawned pane is another pane answers
+`pane-changed`.
+
 | `outcome` | Meaning |
 | --- | --- |
 | `closed` | Matched and `herdr pane close` succeeded. |
 | `pane-changed` | Identity/status changed, or composer is not proven empty; not closed. |
 | `pane-gone` | No such pane; nothing to close. |
+| `question-open` | `question_job`'s newest lane event from this pane asks an unanswered question; not closed. |
 
 A failed close answers `close_failed`. Acting ops run one at a time per node.
 

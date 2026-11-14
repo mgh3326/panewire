@@ -2,18 +2,16 @@ package panewire
 
 import (
 	"encoding/json"
+	"net/http"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
 )
 
-// reviewerSweepActiveJob registers the reviewer's job the way a node heartbeat
-// does: in the node's active-job list, which liveSpawnTasks reads and whose
-// LastEventKind the ESC guard reads. The fake node sends no heartbeat of its
-// own, and the hub's job registry is deliberately left alone: the guard must not
-// depend on it (an epoch>=2 job has no entry there after a hub restart).
-func reviewerSweepActiveJob(t *testing.T, hub *HubServer, machine, job, pane, role string, epoch uint64, lastEventKind string) {
+// reviewerSweepActiveJob registers the reviewer's job in the node's active-job
+// list, which liveSpawnTasks reads; the fake node sends no heartbeat of its own.
+func reviewerSweepActiveJob(t *testing.T, hub *HubServer, machine, job, pane, role string) {
 	t.Helper()
 	hub.mu.Lock()
 	defer hub.mu.Unlock()
@@ -21,37 +19,38 @@ func reviewerSweepActiveJob(t *testing.T, hub *HubServer, machine, job, pane, ro
 	if record == nil {
 		t.Fatalf("node %s is not registered", machine)
 	}
-	record.activeJobs[job] = HubActiveJob{JobID: job, Epoch: epoch, AgentLabel: job, OwnerLane: "parent", Pane: pane, Role: role, LastEventKind: lastEventKind}
+	record.activeJobs[job] = HubActiveJob{JobID: job, Epoch: 1, AgentLabel: job, OwnerLane: "parent", Pane: pane, Role: role}
 }
 
 // A daemon-started reviewer that finishes without writing its own job record
 // leaves an idle pane and a live hk record the node's ended-job sweep never
 // sees: its lane row survives until the cap refuses new lanes (hk 4658). The
 // hub's pass ends the job and closes the pane exactly as a reclaiming
-// submission does (hk 3315), but only after two consecutive passes see the
-// pane finished: a reviewer that just asked a question is idle too, and the
-// watcher records that question a few seconds later.
+// submission does (hk 3315). The close carries the job id, so the node rules
+// out an open question before it closes.
 func TestReviewerPaneSweepEndsFinishedReviewerJob(t *testing.T) {
 	hub, server, _, held := reviewerReleaseHub(t, reviewerRole, "succeeded", hubSpawnOutcome{RC: 0, Host: "machine-a", Pane: roleHeldPane})
 	hub.now = func() time.Time { return held.Deadline.Add(11 * time.Minute) }
 	node := startUnworkedNode(t, t14Node(t, hub, server, true), unworkedReplies(unworkedRow("done", "/work/project.test-job"), nil))
-	reviewerSweepActiveJob(t, hub, "machine-a", "test-job", roleHeldPane, reviewerRole, 1, "")
+	reviewerSweepActiveJob(t, hub, "machine-a", "test-job", roleHeldPane, reviewerRole)
 	sink := captureHubLog(hub)
 
 	hub.releaseFinishedReviewerSpawns(t.Context())
-	if got := node.seen(); !reflect.DeepEqual(got, []string{"agents.list"}) {
-		t.Fatalf("first pass commands %v, want the probe only", got)
-	}
-	hub.releaseFinishedReviewerSpawns(t.Context())
 
-	if want := []string{"agents.list", "agents.list", "pane.capture", "pane.close", "job.mark_lost"}; !reflect.DeepEqual(node.seen(), want) {
+	if want := []string{"agents.list", "pane.capture", "pane.close", "job.mark_lost"}; !reflect.DeepEqual(node.seen(), want) {
 		t.Fatalf("node commands %v, want %v", node.seen(), want)
 	}
-	var mark map[string]any
+	var closeArgs, mark map[string]any
+	if err := json.Unmarshal(node.args["pane.close"], &closeArgs); err != nil {
+		t.Fatal(err)
+	}
+	if closeArgs["question_job"] != "test-job" || closeArgs["pane_id"] != roleHeldPane {
+		t.Fatalf("pane.close args %v, want the job id so the node can rule out a question", closeArgs)
+	}
 	if err := json.Unmarshal(node.args["job.mark_lost"], &mark); err != nil {
 		t.Fatal(err)
 	}
-	if mark["job"] != "test-job" || mark["pane_id"] != roleHeldPane || mark["label"] != "test-job" || mark["end_reason"] != reviewerPaneFinished {
+	if mark["job"] != "test-job" || mark["end_reason"] != reviewerPaneFinished {
 		t.Fatalf("mark lost args %v", mark)
 	}
 	logged := sink.String()
@@ -63,26 +62,53 @@ func TestReviewerPaneSweepEndsFinishedReviewerJob(t *testing.T) {
 	}
 }
 
-// A reviewer whose question was answered is finished work again: the node
-// reports the resume as the newest event, so the second sighting releases it.
-func TestReviewerPaneSweepReleasesAfterDecisionAnswer(t *testing.T) {
+// A pane whose job has an unanswered question is not finished work. The node
+// refuses the close and the sweep keeps the pane and the hk record.
+func TestReviewerPaneSweepKeepsAnOpenQuestion(t *testing.T) {
+	hub, server, jobs, held := reviewerReleaseHub(t, reviewerRole, "succeeded", hubSpawnOutcome{RC: 0, Host: "machine-a", Pane: roleHeldPane})
+	hub.now = func() time.Time { return held.Deadline.Add(11 * time.Minute) }
+	replies := unworkedReplies(unworkedRow("idle", "/work/project.test-job"), nil)
+	replies["pane.close"] = map[string]any{"result": map[string]any{"outcome": nodePaneQuestionOpen}}
+	node := startUnworkedNode(t, t14Node(t, hub, server, true), replies)
+	reviewerSweepActiveJob(t, hub, "machine-a", "test-job", roleHeldPane, reviewerRole)
+	sink := captureHubLog(hub)
+
+	hub.releaseFinishedReviewerSpawns(t.Context())
+
+	if want := []string{"agents.list", "pane.capture", "pane.close"}; !reflect.DeepEqual(node.seen(), want) {
+		t.Fatalf("node commands %v, want %v (no mark_lost)", node.seen(), want)
+	}
+	logged := sink.String()
+	if !strings.Contains(logged, "hub kept a reviewer pane") || !strings.Contains(logged, `"reason":"question_open"`) {
+		t.Fatalf("log %q lacks the kept-pane line", logged)
+	}
+	if strings.Contains(logged, "closed a finished reviewer pane") || strings.Contains(logged, "hub closed") {
+		t.Fatalf("log %q claims a close the node refused", logged)
+	}
+	if state := jobs.state("test-job"); state != "spawned" {
+		t.Fatalf("hk record %v, want the live spawned record", state)
+	}
+}
+
+// A node that cannot decide (an unreadable question record) keeps the pane too:
+// the close fails closed, never open.
+func TestReviewerPaneSweepKeepsWhenTheNodeCannotDecide(t *testing.T) {
 	hub, server, _, held := reviewerReleaseHub(t, reviewerRole, "succeeded", hubSpawnOutcome{RC: 0, Host: "machine-a", Pane: roleHeldPane})
 	hub.now = func() time.Time { return held.Deadline.Add(11 * time.Minute) }
-	node := startUnworkedNode(t, t14Node(t, hub, server, true), unworkedReplies(unworkedRow("done", "/work/project.test-job"), nil))
-	reviewerSweepActiveJob(t, hub, "machine-a", "test-job", roleHeldPane, reviewerRole, 1, "job.decision_resumed")
+	replies := unworkedReplies(unworkedRow("idle", "/work/project.test-job"), nil)
+	delete(replies, "pane.close") // the fake node answers herdr_failed
+	node := startUnworkedNode(t, t14Node(t, hub, server, true), replies)
+	reviewerSweepActiveJob(t, hub, "machine-a", "test-job", roleHeldPane, reviewerRole)
 
 	hub.releaseFinishedReviewerSpawns(t.Context())
-	hub.releaseFinishedReviewerSpawns(t.Context())
 
-	if want := []string{"agents.list", "agents.list", "pane.capture", "pane.close", "job.mark_lost"}; !reflect.DeepEqual(node.seen(), want) {
+	if want := []string{"agents.list", "pane.capture", "pane.close"}; !reflect.DeepEqual(node.seen(), want) {
 		t.Fatalf("node commands %v, want %v", node.seen(), want)
 	}
 }
 
 // Each case breaks exactly one check of the pass, and the pane, the job record
-// and the lane stay as they were. passes is how many sweeps run: the hold an
-// unanswered question creates is only visible once the watcher has recorded it,
-// which the second pass covers.
+// and the lane stay as they were.
 func TestReviewerPaneSweepKeepsTheHold(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -90,20 +116,14 @@ func TestReviewerPaneSweepKeepsTheHold(t *testing.T) {
 		hkState string
 		status  string
 		since   time.Duration
-		// epoch and lastKind are what the node reports for the job.
-		epoch    uint64
-		lastKind string
-		passes   int
 		// wantOps is the commands the pass may send; nil means none at all,
 		// because the job is ruled out before its pane is probed.
 		wantOps []string
 	}{
-		{name: "a pane inside the grace", role: reviewerRole, hkState: "spawned", status: "done", since: 9 * time.Minute, epoch: 1, passes: 1, wantOps: []string{"agents.list"}},
-		{name: "a working pane", role: reviewerRole, hkState: "spawned", status: "working", since: 11 * time.Minute, epoch: 1, passes: 1, wantOps: []string{"agents.list"}},
-		{name: "an already terminal record", role: reviewerRole, hkState: "completed", status: "done", since: 11 * time.Minute, epoch: 1, passes: 1},
-		{name: "an implementer", role: "implementer", hkState: "spawned", status: "done", since: 11 * time.Minute, epoch: 1, passes: 1},
-		{name: "a reviewer waiting on an ESC answer", role: reviewerRole, hkState: "spawned", status: "idle", since: 11 * time.Minute, epoch: 1, lastKind: "job.waiting_decision", passes: 2, wantOps: []string{"agents.list", "agents.list"}},
-		{name: "a waiting reviewer the hub first sees at epoch 2", role: reviewerRole, hkState: "spawned", status: "idle", since: 11 * time.Minute, epoch: 2, lastKind: "job.waiting_decision", passes: 2, wantOps: []string{"agents.list", "agents.list"}},
+		{name: "a pane inside the grace", role: reviewerRole, hkState: "spawned", status: "done", since: 9 * time.Minute, wantOps: []string{"agents.list"}},
+		{name: "a working pane", role: reviewerRole, hkState: "spawned", status: "working", since: 11 * time.Minute, wantOps: []string{"agents.list"}},
+		{name: "an already terminal record", role: reviewerRole, hkState: "completed", status: "done", since: 11 * time.Minute},
+		{name: "an implementer", role: "implementer", hkState: "spawned", status: "done", since: 11 * time.Minute},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -113,11 +133,9 @@ func TestReviewerPaneSweepKeepsTheHold(t *testing.T) {
 			jobs.mu.Unlock()
 			hub.now = func() time.Time { return held.Deadline.Add(tc.since) }
 			node := startUnworkedNode(t, t14Node(t, hub, server, true), unworkedReplies(unworkedRow(tc.status, "/work/project.test-job"), nil))
-			reviewerSweepActiveJob(t, hub, "machine-a", "test-job", roleHeldPane, tc.role, tc.epoch, tc.lastKind)
+			reviewerSweepActiveJob(t, hub, "machine-a", "test-job", roleHeldPane, tc.role)
 
-			for range max(tc.passes, 1) {
-				hub.releaseFinishedReviewerSpawns(t.Context())
-			}
+			hub.releaseFinishedReviewerSpawns(t.Context())
 
 			got := node.seen()
 			if tc.wantOps == nil {
@@ -134,22 +152,27 @@ func TestReviewerPaneSweepKeepsTheHold(t *testing.T) {
 	}
 }
 
-// The race the two-pass rule closes: the pane is idle and past the grace, but
-// the node reports no newest kind yet (the watcher has not written
-// job.waiting_decision for a question the reviewer just asked). The first pass
-// only records the sighting.
-func TestReviewerPaneSweepWaitsOutTheDecisionWindow(t *testing.T) {
+// The submission path applies the same node rule. An open question is not a
+// hold that time frees, so the 409 carries no retry_after_s.
+func TestReviewerReleaseKeepsAnOpenQuestion(t *testing.T) {
 	hub, server, _, held := reviewerReleaseHub(t, reviewerRole, "succeeded", hubSpawnOutcome{RC: 0, Host: "machine-a", Pane: roleHeldPane})
 	hub.now = func() time.Time { return held.Deadline.Add(11 * time.Minute) }
-	node := startUnworkedNode(t, t14Node(t, hub, server, true), unworkedReplies(unworkedRow("idle", "/work/project.test-job"), nil))
-	reviewerSweepActiveJob(t, hub, "machine-a", "test-job", roleHeldPane, reviewerRole, 1, "")
+	replies := unworkedReplies(unworkedRow("idle", "/work/project.test-job"), nil)
+	replies["pane.close"] = map[string]any{"result": map[string]any{"outcome": nodePaneQuestionOpen}}
+	node := startUnworkedNode(t, t14Node(t, hub, server, true), replies)
 
-	hub.releaseFinishedReviewerSpawns(t.Context())
-	if got := node.seen(); !reflect.DeepEqual(got, []string{"agents.list"}) {
-		t.Fatalf("first pass commands %v, want the probe only", got)
+	result := t14Result(t, t14HTTPAsync(t, http.MethodPost, server.URL+"/v1/spawns", t14OperatorToken, reviewerReleaseRequest(reviewerRole, true)))
+	if result.status != http.StatusConflict {
+		t.Fatalf("status=%d body=%s, want the 409 hold", result.status, result.body)
 	}
-	hub.releaseFinishedReviewerSpawns(t.Context())
-	if want := []string{"agents.list", "agents.list", "pane.capture", "pane.close", "job.mark_lost"}; !reflect.DeepEqual(node.seen(), want) {
+	var body map[string]any
+	if err := json.Unmarshal(result.body, &body); err != nil || body["retry_after_s"] != nil || result.header.Get("Retry-After") != "" {
+		t.Fatalf("body=%s header=%v: an open question must not advertise a retry time", result.body, result.header)
+	}
+	if want := []string{"agents.list", "pane.capture", "pane.close"}; !reflect.DeepEqual(node.seen(), want) {
 		t.Fatalf("node commands %v, want %v", node.seen(), want)
+	}
+	if owner, _, _, _ := hub.inbox.store.spawnRoleOwner(t.Context(), "42:reviewer:p2"); owner != held.Request.RequestID {
+		t.Fatalf("owner=%s, want the holder still to own the key", owner)
 	}
 }
