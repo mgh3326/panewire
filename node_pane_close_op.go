@@ -40,6 +40,7 @@ func (client *HubClient) closeOpsReady(ctx context.Context) bool {
 	ready, err := fleet.HubCloseWatchersReady(ctx, filepath.Join(client.jobsInboxRoot, "jobs"), nil)
 	if err != nil {
 		slog.Warn("close_ops_v1 withheld: live watchers unreadable", "error", err)
+		return false
 	}
 	return ready
 }

@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -62,5 +63,15 @@ func TestWatcherRecordsItsCapabilityToken_t4652(t *testing.T) {
 	}
 	if _, e := os.Stat(path); !os.IsNotExist(e) {
 		t.Fatalf("token left after the watcher ended: %v", e)
+	}
+}
+
+// A listing the scanner cannot read to its end (a line over its limit) is not
+// ready: the rest of the processes were never checked.
+func TestHubCloseWatchersReadyFailsClosedOnAScanError_t4652(t *testing.T) {
+	long := "  1 /bin/sh " + strings.Repeat("x", 2<<20) + "\n  202 /old/panewire _watch job-a\n"
+	got, err := HubCloseWatchersReady(context.Background(), t.TempDir(), listing(long))
+	if got || err == nil {
+		t.Fatalf("ready=%v err=%v, want not ready with an error", got, err)
 	}
 }

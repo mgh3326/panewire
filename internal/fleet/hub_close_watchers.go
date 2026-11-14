@@ -94,5 +94,9 @@ func HubCloseWatchersReady(ctx context.Context, jobs string, list ProcessLister)
 			break
 		}
 	}
-	return true, scanner.Err()
+	if err := scanner.Err(); err != nil {
+		// A listing not scanned to its end proves nothing about the rest.
+		return false, err
+	}
+	return true, nil
 }
