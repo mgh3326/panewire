@@ -199,11 +199,11 @@ func (client *HubClient) handleHubSpawn(ctx context.Context, peer *hubClientConn
 	select {
 	case <-waiter.claimed:
 		// Another copy acquired the gate while this copy was waiting.
-		client.answerAdmissionWait(ctx, peer, journal, message)
+		client.answerAdmissionWait(ctx, peer, journal, message, deadline)
 		return
 	case <-admissionCtx.Done():
 		if ctx.Err() == nil {
-			client.answerAdmissionWait(ctx, peer, journal, message)
+			client.answerAdmissionWait(ctx, peer, journal, message, deadline)
 		}
 		return
 	case client.spawnGate <- struct{}{}:
@@ -231,7 +231,7 @@ func (client *HubClient) handleHubSpawn(ctx context.Context, peer *hubClientConn
 	if !claimed {
 		release()
 		if ctx.Err() == nil {
-			client.sendAdmissionTimeout(ctx, peer, message)
+			client.sendAdmissionTimeout(ctx, peer, message, deadline)
 		}
 		return
 	}
@@ -319,7 +319,7 @@ func (client *HubClient) claimHubSpawn(ctx context.Context, journal *nodeSpawnJo
 
 // answerAdmissionWait rechecks the journal before attesting a timeout: a
 // duplicate can have claimed or completed while this copy waited.
-func (client *HubClient) answerAdmissionWait(ctx context.Context, peer *hubClientConnection, journal *nodeSpawnJournal, message hubOutboundMessage) {
+func (client *HubClient) answerAdmissionWait(ctx context.Context, peer *hubClientConnection, journal *nodeSpawnJournal, message hubOutboundMessage, deadline time.Time) {
 	client.spawnActiveMu.Lock()
 	known, cached, err := journal.lookup(ctx, message)
 	active := client.spawnActive[message.RequestID]
@@ -329,7 +329,7 @@ func (client *HubClient) answerAdmissionWait(ctx context.Context, peer *hubClien
 	} else if known {
 		client.answerKnownSpawn(ctx, peer, journal, message, cached, active)
 	} else {
-		client.sendAdmissionTimeout(ctx, peer, message)
+		client.sendAdmissionTimeout(ctx, peer, message, deadline)
 	}
 }
 
@@ -350,11 +350,12 @@ func (client *HubClient) answerKnownSpawn(ctx context.Context, peer *hubClientCo
 	client.sendSpawnResult(ctx, peer, hubSpawnResult{RequestID: message.RequestID, RC: 75, Error: reply}, message.OperatorAuthorized)
 }
 
-func (client *HubClient) sendAdmissionTimeout(ctx context.Context, peer *hubClientConnection, message hubOutboundMessage) {
+func (client *HubClient) sendAdmissionTimeout(ctx context.Context, peer *hubClientConnection, message hubOutboundMessage, deadline time.Time) {
 	result := hubSpawnResult{RequestID: message.RequestID, JobID: hubSpawnArg(message.Args, "--job"), RC: 124, Stage: "claim", Error: "timeout"}
-	// A relative legacy timeout (or a shorter local budget) cannot prove that
-	// a future replay will not start. Only the absolute deadline can do that.
-	if message.DeadlineMS != 0 && !time.Now().Before(time.UnixMilli(message.DeadlineMS)) {
+	// A shorter local budget cannot prove that another copy did not start,
+	// even if this reply is delayed until after the absolute deadline.
+	absoluteDeadline := time.UnixMilli(message.DeadlineMS)
+	if message.DeadlineMS != 0 && !deadline.Before(absoluteDeadline) && !time.Now().Before(absoluteDeadline) {
 		result.Error, result.Retryable = "deadline_not_started", true
 	}
 	client.sendSpawnResult(ctx, peer, result, message.OperatorAuthorized)

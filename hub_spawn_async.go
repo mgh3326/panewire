@@ -573,8 +573,7 @@ type directSpawnTransport struct {
 const spawnNotStartedProbe = 5 * time.Second
 
 // spawnNotStarted reports a node answer that proves the request never began:
-// the node claimed it only after its deadline, so it holds no executing or
-// completed journal row and ran nothing (runClaimedHubSpawn).
+// the node attests that it did not start the request before its deadline.
 func spawnNotStarted(result hubSpawnResult) bool {
 	return result.RC == 124 && result.Stage == "claim" && result.Error == "deadline_not_started" && result.Retryable
 }
@@ -588,7 +587,7 @@ func spawnLandingPaneUnconfirmed(result hubSpawnResult) bool {
 }
 
 // spawnNotStartedFix tells the caller what a not-started refusal means.
-const spawnNotStartedFix = "the node never started this request: it reached the node after its deadline. Replay the same command; the replay starts a new attempt and placement can pick another host."
+const spawnNotStartedFix = "the node never started this request before its deadline. Replay the same command; the replay starts a new attempt and placement can pick another host."
 
 // nextHostRefusals are the refusals that say only that this host cannot run the
 // request now. cwd_unmapped is answered before any checkout or engine call, and

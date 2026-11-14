@@ -141,6 +141,26 @@ func TestNodeSpawnAdmissionDeadlineLeavesNoRow_t4579(t *testing.T) {
 	}
 }
 
+// A delayed reply to a shorter local wait must not become an attestation that
+// the absolute deadline passed before any duplicate started.
+func TestNodeSpawnAdmissionDelayedLocalTimeoutStaysUncertain_t4579(t *testing.T) {
+	client := &HubClient{}
+	peer, results := admissionPeer(t)
+	absoluteDeadline := time.Now().Add(-time.Second).Truncate(time.Millisecond)
+	message := admissionMessage(4579003, true)
+	message.DeadlineMS = absoluteDeadline.UnixMilli()
+
+	client.sendAdmissionTimeout(t.Context(), peer, message, absoluteDeadline.Add(-time.Second))
+	if got := admissionResult(t, results, time.Second); got.Error != "timeout" || got.Retryable {
+		t.Fatalf("delayed local timeout answered %+v; want an uncertain timeout", got)
+	}
+
+	client.sendAdmissionTimeout(t.Context(), peer, message, absoluteDeadline)
+	if got := admissionResult(t, results, time.Second); got.Error != "deadline_not_started" || !got.Retryable {
+		t.Fatalf("absolute deadline answered %+v; want not-started proof", got)
+	}
+}
+
 // Cancelling the daemon while one request waits must leave only the claimed
 // request for restart settlement. The unclaimed request can run on replay.
 func TestNodeSpawnAdmissionRestartReplaysWaiter_t4579(t *testing.T) {
