@@ -99,6 +99,9 @@ type App struct {
 	// event carries it so Loki joins the decision to the spawn and its Sentry
 	// event. Empty outside a hub spawn.
 	RequestID string
+	// OriginMachine is the machine that submitted this hub spawn. Empty
+	// outside a hub spawn.
+	OriginMachine string
 	// EventSink receives fleet events instead of the state directory's file;
 	// tests only.
 	EventSink func(fleetevent.Event)

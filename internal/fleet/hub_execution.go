@@ -37,6 +37,7 @@ func (a *App) hubSpawn(request Submission) (Spawn, func(), error) {
 	}
 	a.Repository = &request.Repository
 	a.RequestID = request.RequestID
+	a.OriginMachine = request.OriginMachine
 	if a.Config.Hosts == nil {
 		a.Config.Hosts = map[string]map[string]any{}
 	}
