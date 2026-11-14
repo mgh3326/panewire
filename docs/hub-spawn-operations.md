@@ -164,12 +164,17 @@ The hub applies the same rule on its own, once every five minutes
 a node still reports active, whose hk record is still `claimed` or `spawned`,
 and whose pane has finished. A failed placement is outside that set; its holder
 is still released by a submission for the same key (above), which carries the
-proof that its pane never worked (hk 3179). The sweep also keeps any job whose
-newest ledger event is `job.waiting_decision`: the watcher records it when the
-worker asks a question and holds the job for an ESC answer for up to six hours
-(`decisionTimeout`), so that job's idle pane is an open question, not finished
-work. Otherwise the checks, grace, writes and log line are the reclaim path's;
-only the `source` differs. A reviewer a daemon started (`mwr-*`) normally
+proof that its pane never worked (hk 3179). The sweep releases a pane only after two
+consecutive passes see it finished: a reviewer's pane goes idle the moment it
+asks a question, but the watcher records that question as
+`job.waiting_decision` on its next five-second poll and the hub reads the newest
+event kind from the node's active-job heartbeat, so one sighting cannot tell a
+finished reviewer from one whose question is not recorded yet. The sweep also
+keeps a job whose node-reported newest event is `job.waiting_decision`: the
+watcher holds that job for an ESC answer for up to six hours (`decisionTimeout`),
+so its idle pane is an open question, not finished work. Otherwise the checks,
+grace, writes and log line are the reclaim path's; only the `source` differs (and
+the sweep logs no `request`, because it has no submitting request). A reviewer a daemon started (`mwr-*`) normally
 writes its own record through `done`; one that does not otherwise keeps an idle
 pane, a live record and its lane row until someone closes the pane by hand, and
 the node's ended-job sweep never reaches it (hk 4658). The pass leaves the
