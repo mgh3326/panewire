@@ -357,14 +357,71 @@ func (h *HubServer) laneHasForeignReference(routes map[string]reportRelayRoute, 
 	return laneHasForeignChild(routes, lane, nodeMachine) || h.laneHasForeignJob(lane, nodeMachine)
 }
 
+// laneTakeoverChainBound caps how far above the successor's --parent-job the
+// hub walks for an ancestor takeover. The predecessor's client authorizes the
+// takeover with the job the task was bound to (an ancestor of --parent-job
+// after rebindInherited), while the hub trusts only its own durable spawn
+// records.
+const laneTakeoverChainBound = 8
+
 type laneSpawnProof struct {
 	task  hubSpawnTask
 	valid bool
 }
 
 // laneSpawnProof reads the accepted spawn before the lanes file lock. The
-// authenticated node is bound to the durable node placement; the parent is
-// trusted only from the saved spawn arguments.
+// authenticated node is bound to the durable node placement; the parent chain
+// is trusted only from the saved spawn arguments.
+//
+// acceptedSpawnRecord reports whether the hub's durable store holds an
+// accepted spawn for job: the saved request names the job and a successful
+// outcome pins the host and pane. Every hop of a takeover chain must meet
+// this bar.
+func (h *HubServer) acceptedSpawnRecord(ctx context.Context, job string) (hubSpawnTask, bool) {
+	if h.inbox == nil || h.inbox.store == nil || job == "" {
+		return hubSpawnTask{}, false
+	}
+	task, err := h.inbox.store.latestSpawnForJob(ctx, job)
+	if err != nil || task.Job != job || hubSpawnArg(task.Request.Args, "--job") != job || task.Outcome.RC != 0 || task.Outcome.Host == "" || task.Outcome.Pane == "" {
+		return hubSpawnTask{}, false
+	}
+	return task, true
+}
+
+// takeoverChainProven reports whether takeover equals successorParent or an
+// ancestor of it on the --parent-job chain proven from the hub's own durable
+// spawn records, bounded by laneTakeoverChainBound with every hop accepted.
+func (h *HubServer) takeoverChainProven(ctx context.Context, successorParent, takeover string) bool {
+	if successorParent == "" || takeover == "" {
+		return false
+	}
+	if successorParent == takeover {
+		_, ok := h.acceptedSpawnRecord(ctx, takeover)
+		return ok
+	}
+	current := successorParent
+	for range laneTakeoverChainBound {
+		task, ok := h.acceptedSpawnRecord(ctx, current)
+		if !ok {
+			return false
+		}
+		parent := hubSpawnArg(task.Request.Args, "--parent-job")
+		if parent == "" {
+			return false
+		}
+		if parent == takeover {
+			_, ok := h.acceptedSpawnRecord(ctx, takeover)
+			return ok
+		}
+		current = parent
+	}
+	return false
+}
+
+// laneSpawnProof reads the accepted successor spawn before the lanes file
+// lock. The authenticated node is bound to the durable node placement; the
+// takeover must equal the successor's --parent-job or an ancestor of it on
+// the --parent-job chain proven from the hub's own durable spawn records.
 func (h *HubServer) laneSpawnProof(nodeMachine string, body hubLaneWriteRequest) laneSpawnProof {
 	if h.inbox == nil || h.inbox.store == nil || nodeMachine == "" || body.Job == "" {
 		return laneSpawnProof{}
@@ -378,14 +435,12 @@ func (h *HubServer) laneSpawnProof(nodeMachine string, body hubLaneWriteRequest)
 	if task.Outcome.RC == 0 && task.Outcome.Pane != "" && (task.Outcome.Host != nodeMachine || task.Outcome.Pane != body.Pane) {
 		return laneSpawnProof{}
 	}
-	if body.Takeover != "" && hubSpawnArg(task.Request.Args, "--parent-job") != body.Takeover {
-		return laneSpawnProof{}
+	if body.Takeover == "" {
+		return laneSpawnProof{task: task, valid: true}
 	}
-	if body.Takeover != "" {
-		parent, err := h.inbox.store.latestSpawnForJob(ctx, body.Takeover)
-		if err != nil || parent.Job != body.Takeover || hubSpawnArg(parent.Request.Args, "--job") != body.Takeover || parent.Outcome.RC != 0 || parent.Outcome.Host == "" || parent.Outcome.Pane == "" {
-			return laneSpawnProof{}
-		}
+	successorParent := hubSpawnArg(task.Request.Args, "--parent-job")
+	if !h.takeoverChainProven(ctx, successorParent, body.Takeover) {
+		return laneSpawnProof{}
 	}
 	return laneSpawnProof{task: task, valid: true}
 }
@@ -521,10 +576,6 @@ func (h *HubServer) putLane(lane string, body hubLaneWriteRequest, nodeMachine s
 			if err := validateLaneWriteRequest(h, lane, remaining, snapshot.Routes); err != nil {
 				return err
 			}
-			routeJob = body.Job
-			if !spawnProof.valid {
-				routeJob = ""
-			}
 			moved := false
 			if body.Takeover != "" {
 				// A --parent-job successor takes over the row its predecessor's
@@ -584,6 +635,20 @@ func (h *HubServer) putLane(lane string, body hubLaneWriteRequest, nodeMachine s
 				return err
 			}
 		}
+		// The lane row's job binding survives unrelated writes: a write that
+		// leaves machine and pane unchanged and carries no valid proof of its
+		// own keeps the existing binding. Only a route change or a proven
+		// write naming a new job clears or replaces it, so an operator
+		// 'lanes add' without --job and an old daemon's re-register keep the
+		// binding a later --parent-job takeover moves.
+		if spawnProof.valid {
+			routeJob = body.Job
+		} else if exists && !body.Sink && body.Machine == existing.Machine && body.Pane == existing.Pane {
+			routeJob = existing.Job
+		} else {
+			routeJob = ""
+		}
+
 		route := reportRelayRoute{Machine: body.Machine, Pane: body.Pane, Job: routeJob, Parent: body.Parent, Deliver: existing.Deliver, Protected: existing.Protected, Standby: existing.Standby}
 		// Failover swaps only machine/pane; preserve an omitted standby so a later
 		// reverse swap still has its alternate destination.

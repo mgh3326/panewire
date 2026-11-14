@@ -150,3 +150,147 @@ func TestLaneTakeoverRefusals(t *testing.T) {
 		t.Fatalf("a refused takeover changed the row: %+v", routes)
 	}
 }
+
+// The client authorizes a takeover with the job the task was bound to, which
+// may be an ancestor of the successor's --parent-job after rebindInherited.
+// The hub proves the chain from its own durable spawn records.
+func seedAcceptedChainJob(t *testing.T, store *laneInboxStore, job, parentJob, machine, pane string) {
+	t.Helper()
+	request := durableSpawnRequest()
+	request.RequestID = uuid.NewString()
+	args := []string{"-c", "/work/project", "-p", "/work/brief.md", "-m", "auto", "-l", job, "--job", job, "--t", "T1", "--owner", "mergewake", "--role", "implementer", "--host", "auto", "--parent-job", parentJob}
+	if parentJob == "" {
+		args[len(args)-1] = "chain-root"
+	}
+	request.Args = args
+	task, _, err := store.claimSpawn(t.Context(), request, job, "mergewake", time.Now())
+	if err != nil {
+		t.Fatalf("claim chain job %s: %v", job, err)
+	}
+	if _, err := store.completeSpawn(t.Context(), task, hubSpawnOutcome{RC: 0, Stage: "landing", Host: machine, Pane: pane}, time.Now()); err != nil {
+		t.Fatalf("record chain job %s route: %v", job, err)
+	}
+}
+
+func bindChainSuccessor(t *testing.T, store *laneInboxStore, job, parentJob, machine string) {
+	t.Helper()
+	request := durableSpawnRequest()
+	request.RequestID = uuid.NewString()
+	request.Args = []string{"-c", "/work/project", "-p", "/work/brief.md", "-m", "auto", "-l", job, "--job", job, "--t", "T1", "--owner", "mergewake", "--role", "implementer", "--host", "auto", "--parent-job", parentJob}
+	task, _, err := store.claimSpawn(t.Context(), request, job, "mergewake", time.Now())
+	if err != nil {
+		t.Fatalf("claim chain successor %s: %v", job, err)
+	}
+	if _, err := store.bindSpawn(t.Context(), request.RequestID, task.Attempt, hubSpawnRequest{RequestID: uuid.NewString(), Machine: machine, Args: request.Args}, time.Now()); err != nil {
+		t.Fatalf("bind chain successor %s: %v", job, err)
+	}
+}
+
+func TestLaneTakeoverAncestorTwoHopsMovesLane(t *testing.T) {
+	hub, path := takeoverHub(t,
+		`{"lanes":{"task-lane":{"machine":"machine-a","pane":"w1:p1","job":"ancestor-a","parent":"mergewake"},"mergewake":{"machine":"machine-a","pane":"w9:p9"}}}`,
+		nil)
+	seedAcceptedChainJob(t, hub.inbox.store, "ancestor-a", "", "machine-a", "w1:p1")
+	seedAcceptedChainJob(t, hub.inbox.store, "mid-b", "ancestor-a", "machine-a", "w1:p2")
+	bindChainSuccessor(t, hub.inbox.store, "successor-s", "mid-b", "machine-b")
+
+	writer := lanesNodeRequest(t, hub, http.MethodPut, "/v1/lanes/task-lane", lanesNodeBToken, "machine-b",
+		`{"machine":"machine-b","pane":"w2:p5","job":"successor-s","parent":"mergewake","takeover":"ancestor-a"}`)
+	if writer.Code != http.StatusOK {
+		t.Fatalf("ancestor takeover status=%d body=%s", writer.Code, writer.Body.String())
+	}
+	routes := lanesNodeFile(t, path)
+	route, found := routes["task-lane"]
+	if !found || route.Machine != "machine-b" || route.Pane != "w2:p5" || route.Job != "successor-s" {
+		t.Fatalf("routes after ancestor takeover: %+v", routes)
+	}
+}
+
+func TestLaneTakeoverOffChainRefused(t *testing.T) {
+	hub, path := takeoverHub(t,
+		`{"lanes":{"task-lane":{"machine":"machine-a","pane":"w1:p1","job":"ancestor-a","parent":"mergewake"},"mergewake":{"machine":"machine-a","pane":"w9:p9"}}}`,
+		nil)
+	seedAcceptedChainJob(t, hub.inbox.store, "ancestor-a", "", "machine-a", "w1:p1")
+	seedAcceptedChainJob(t, hub.inbox.store, "mid-b", "ancestor-a", "machine-a", "w1:p2")
+	seedAcceptedChainJob(t, hub.inbox.store, "off-chain", "", "machine-a", "w3:p3")
+	bindChainSuccessor(t, hub.inbox.store, "successor-s", "mid-b", "machine-b")
+
+	writer := lanesNodeRequest(t, hub, http.MethodPut, "/v1/lanes/task-lane", lanesNodeBToken, "machine-b",
+		`{"machine":"machine-b","pane":"w2:p5","job":"successor-s","parent":"mergewake","takeover":"off-chain"}`)
+	if writer.Code != http.StatusConflict || writer.Body.String() != `{"error":"lane_takeover_unconfirmed"}`+"\n" {
+		t.Fatalf("off-chain takeover status=%d body=%q", writer.Code, writer.Body.String())
+	}
+	if routes := lanesNodeFile(t, path); routes["task-lane"].Machine != "machine-a" || routes["task-lane"].Job != "ancestor-a" {
+		t.Fatalf("refused off-chain takeover changed the row: %+v", routes)
+	}
+}
+
+func TestLaneTakeoverBeyondBoundRefused(t *testing.T) {
+	hub, path := takeoverHub(t,
+		`{"lanes":{"lane-far":{"machine":"machine-a","pane":"w1:p1","job":"bound-base","parent":"mergewake"},"lane-near":{"machine":"machine-a","pane":"w1:p2","job":"bound-c0","parent":"mergewake"},"mergewake":{"machine":"machine-a","pane":"w9:p9"}}}`,
+		nil)
+	seedAcceptedChainJob(t, hub.inbox.store, "bound-base", "", "machine-a", "w1:p1")
+	parent := "bound-base"
+	for _, job := range []string{"bound-c0", "bound-c1", "bound-c2", "bound-c3", "bound-c4", "bound-c5", "bound-c6", "bound-c7", "bound-c8"} {
+		pane := "w1:p1"
+		if job == "bound-c0" {
+			pane = "w1:p2"
+		}
+		seedAcceptedChainJob(t, hub.inbox.store, job, parent, "machine-a", pane)
+		parent = job
+	}
+	bindChainSuccessor(t, hub.inbox.store, "bound-successor", "bound-c8", "machine-b")
+
+	beyond := lanesNodeRequest(t, hub, http.MethodPut, "/v1/lanes/lane-far", lanesNodeBToken, "machine-b",
+		`{"machine":"machine-b","pane":"w2:p5","job":"bound-successor","parent":"mergewake","takeover":"bound-base"}`)
+	if beyond.Code != http.StatusConflict || beyond.Body.String() != `{"error":"lane_takeover_unconfirmed"}`+"\n" {
+		t.Fatalf("beyond-bound takeover status=%d body=%q", beyond.Code, beyond.Body.String())
+	}
+	if routes := lanesNodeFile(t, path); routes["lane-far"].Machine != "machine-a" {
+		t.Fatalf("refused beyond-bound takeover changed the row: %+v", routes)
+	}
+
+	within := lanesNodeRequest(t, hub, http.MethodPut, "/v1/lanes/lane-near", lanesNodeBToken, "machine-b",
+		`{"machine":"machine-b","pane":"w2:p6","job":"bound-successor","parent":"mergewake","takeover":"bound-c0"}`)
+	if within.Code != http.StatusOK {
+		t.Fatalf("within-bound takeover status=%d body=%s", within.Code, within.Body.String())
+	}
+	if routes := lanesNodeFile(t, path); routes["lane-near"].Machine != "machine-b" || routes["lane-near"].Job != "bound-successor" {
+		t.Fatalf("routes after within-bound takeover: %+v", routes)
+	}
+}
+
+func TestLaneTakeoverSurvivesUnrelatedWrites(t *testing.T) {
+	hub, path := takeoverHub(t,
+		`{"lanes":{"task-lane":{"machine":"machine-a","pane":"w1:p1","job":"job-j","parent":"mergewake"},"mergewake":{"machine":"machine-a","pane":"w9:p9"}}}`,
+		nil)
+	seedAcceptedChainJob(t, hub.inbox.store, "job-j", "", "machine-a", "w1:p1")
+
+	operator := lanesNodeRequest(t, hub, http.MethodPut, "/v1/lanes/task-lane", lanesNodeOperatorToken, "",
+		`{"machine":"machine-a","pane":"w1:p1","parent":"mergewake"}`)
+	if operator.Code != http.StatusOK {
+		t.Fatalf("operator re-add status=%d body=%s", operator.Code, operator.Body.String())
+	}
+	if routes := lanesNodeFile(t, path); routes["task-lane"].Job != "job-j" {
+		t.Fatalf("operator re-add erased the binding: %+v", routes)
+	}
+
+	reregister := lanesNodeRequest(t, hub, http.MethodPut, "/v1/lanes/task-lane", lanesNodeAToken, "machine-a",
+		`{"machine":"machine-a","pane":"w1:p1","parent":"mergewake"}`)
+	if reregister.Code != http.StatusOK {
+		t.Fatalf("node re-register status=%d body=%s", reregister.Code, reregister.Body.String())
+	}
+	if routes := lanesNodeFile(t, path); routes["task-lane"].Job != "job-j" {
+		t.Fatalf("node re-register erased the binding: %+v", routes)
+	}
+
+	bindChainSuccessor(t, hub.inbox.store, "successor-j", "job-j", "machine-b")
+	takeover := lanesNodeRequest(t, hub, http.MethodPut, "/v1/lanes/task-lane", lanesNodeBToken, "machine-b",
+		`{"machine":"machine-b","pane":"w2:p5","job":"successor-j","parent":"mergewake","takeover":"job-j"}`)
+	if takeover.Code != http.StatusOK {
+		t.Fatalf("takeover status=%d body=%s", takeover.Code, takeover.Body.String())
+	}
+	if routes := lanesNodeFile(t, path); routes["task-lane"].Machine != "machine-b" || routes["task-lane"].Pane != "w2:p5" || routes["task-lane"].Job != "successor-j" {
+		t.Fatalf("routes after takeover: %+v", routes)
+	}
+}
