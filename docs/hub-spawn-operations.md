@@ -359,10 +359,11 @@ admission wait reaches that deadline, answers `rc=124 stage=claim
 reason=deadline_not_started retryable=true` without calling the engine. It
 first checks for an existing journal entry, and a new request that expires
 while waiting leaves no journal row. A legacy request has only a relative
-wait and answers `timeout` when that wait expires: a later replay could still
-start. A node shutdown before the absolute deadline leaves the waiter for
-replay and is not a not-started attestation. The hub settles on the durable
-answer:
+wait; a durable request can also have a shorter local wait. Either answers
+`timeout` when that wait expires, even if the reply is delayed past the
+absolute deadline: another copy could still have started. A node shutdown
+before the absolute deadline leaves the waiter for replay and is not a
+not-started attestation. The hub settles on the durable answer:
 
 | Node evidence | Hub outcome |
 |---|---|
