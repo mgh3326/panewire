@@ -28,13 +28,21 @@ func takeoverHub(t *testing.T, lanes string, jobs map[string]*hubJobRecord) (*Hu
 
 func acceptedTakeoverSuccessor(t *testing.T, hub *HubServer, job, predecessor string) {
 	t.Helper()
+	if prior := hub.jobs[predecessor]; prior != nil {
+		if _, err := hub.inbox.store.latestSpawnForJob(t.Context(), predecessor); err != nil {
+			seedTakeoverPredecessor(t, hub.inbox.store, predecessor, prior.Node, prior.Pane)
+		}
+	}
 	request := durableSpawnRequest()
 	request.RequestID = uuid.NewString()
 	request.Args = []string{"-c", "/work/project", "-p", "/work/brief.md", "-m", "auto", "-l", job, "--job", job, "--t", "T1", "--owner", "mergewake", "--role", "implementer", "--host", "auto", "--parent-job", predecessor}
-	if _, _, err := hub.inbox.store.claimSpawn(t.Context(), request, job, "mergewake", time.Now()); err != nil {
+	task, _, err := hub.inbox.store.claimSpawn(t.Context(), request, job, "mergewake", time.Now())
+	if err != nil {
 		t.Fatalf("claim accepted takeover spawn: %v", err)
 	}
-	hub.jobs[job] = takeoverJob(job, "machine-b", "w2:p5")
+	if _, err := hub.inbox.store.bindSpawn(t.Context(), request.RequestID, task.Attempt, hubSpawnRequest{RequestID: uuid.NewString(), Machine: "machine-b", Args: request.Args}, time.Now()); err != nil {
+		t.Fatalf("bind accepted takeover spawn: %v", err)
+	}
 }
 
 func takeoverJob(id, node, pane string) *hubJobRecord {
@@ -43,7 +51,7 @@ func takeoverJob(id, node, pane string) *hubJobRecord {
 
 func TestLaneTakeoverMovesThePredecessorRowAcrossMachines(t *testing.T) {
 	hub, path := takeoverHub(t,
-		`{"lanes":{"mw-recheck-coverage":{"machine":"machine-a","pane":"w1:p1","parent":"mergewake"},"mergewake":{"machine":"machine-a","pane":"w9:p9"}}}`,
+		`{"lanes":{"mw-recheck-coverage":{"machine":"machine-a","pane":"w1:p1","job":"mw-recheck-coverage","parent":"mergewake"},"mergewake":{"machine":"machine-a","pane":"w9:p9"}}}`,
 		map[string]*hubJobRecord{"mw-recheck-coverage": takeoverJob("mw-recheck-coverage", "machine-a", "w1:p1")})
 	acceptedTakeoverSuccessor(t, hub, "successor-job", "mw-recheck-coverage")
 
@@ -54,7 +62,7 @@ func TestLaneTakeoverMovesThePredecessorRowAcrossMachines(t *testing.T) {
 	}
 
 	writer := lanesNodeRequest(t, hub, http.MethodPut, "/v1/lanes/mw-recheck-coverage", lanesNodeBToken, "machine-b",
-		`{"machine":"machine-b","pane":"w2:p5","parent":"mergewake","takeover":"mw-recheck-coverage"}`)
+		`{"machine":"machine-b","pane":"w2:p5","job":"successor-job","parent":"mergewake","takeover":"mw-recheck-coverage"}`)
 	if writer.Code != http.StatusOK {
 		t.Fatalf("takeover status=%d body=%s", writer.Code, writer.Body.String())
 	}
@@ -71,7 +79,7 @@ func TestLaneTakeoverMovesThePredecessorRowAcrossMachines(t *testing.T) {
 	// A retried takeover converges on the row this pane already holds instead
 	// of adding a second name.
 	retry := lanesNodeRequest(t, hub, http.MethodPut, "/v1/lanes/mw-recheck-coverage", lanesNodeBToken, "machine-b",
-		`{"machine":"machine-b","pane":"w2:p5","parent":"mergewake","takeover":"mw-recheck-coverage"}`)
+		`{"machine":"machine-b","pane":"w2:p5","job":"successor-job","parent":"mergewake","takeover":"mw-recheck-coverage"}`)
 	if retry.Code != http.StatusOK {
 		t.Fatalf("retried takeover status=%d body=%s", retry.Code, retry.Body.String())
 	}
@@ -88,12 +96,12 @@ func TestLaneTakeoverMovesThePredecessorRowAcrossMachines(t *testing.T) {
 // row keeps its name, which is the lane its task's findings are addressed to.
 func TestLaneTakeoverKeepsThePredecessorLaneName(t *testing.T) {
 	hub, path := takeoverHub(t,
-		`{"lanes":{"author-lane":{"machine":"machine-a","pane":"w1:p1","parent":"mergewake"},"mergewake":{"machine":"machine-a","pane":"w9:p9"}}}`,
+		`{"lanes":{"author-lane":{"machine":"machine-a","pane":"w1:p1","job":"fix-job-1","parent":"mergewake"},"mergewake":{"machine":"machine-a","pane":"w9:p9"}}}`,
 		map[string]*hubJobRecord{"fix-job-1": takeoverJob("fix-job-1", "machine-a", "w1:p1")})
 	acceptedTakeoverSuccessor(t, hub, "fix-job-2", "fix-job-1")
 
 	writer := lanesNodeRequest(t, hub, http.MethodPut, "/v1/lanes/fix-job-2", lanesNodeBToken, "machine-b",
-		`{"machine":"machine-b","pane":"w2:p5","parent":"mergewake","takeover":"fix-job-1"}`)
+		`{"machine":"machine-b","pane":"w2:p5","job":"fix-job-2","parent":"mergewake","takeover":"fix-job-1"}`)
 	if writer.Code != http.StatusOK {
 		t.Fatalf("takeover status=%d body=%s", writer.Code, writer.Body.String())
 	}
@@ -111,7 +119,7 @@ func TestLaneTakeoverKeepsThePredecessorLaneName(t *testing.T) {
 }
 
 func TestLaneTakeoverRefusals(t *testing.T) {
-	lanes := `{"lanes":{"lane-a":{"machine":"machine-a","pane":"w1:p1","parent":"mergewake"},"pinned":{"machine":"machine-a","pane":"w3:p3","protected":true},"mergewake":{"machine":"machine-a","pane":"w9:p9"}}}`
+	lanes := `{"lanes":{"lane-a":{"machine":"machine-a","pane":"w1:p1","job":"unrelated-job","parent":"mergewake"},"pinned":{"machine":"machine-a","pane":"w3:p3","job":"job-pinned","protected":true},"mergewake":{"machine":"machine-a","pane":"w9:p9"}}}`
 	hub, path := takeoverHub(t, lanes, map[string]*hubJobRecord{
 		// A job the hub knows, but on another pane than the row.
 		"job-elsewhere": takeoverJob("job-elsewhere", "machine-a", "w8:p8"),
@@ -119,23 +127,23 @@ func TestLaneTakeoverRefusals(t *testing.T) {
 		"job-pinned": takeoverJob("job-pinned", "machine-a", "w3:p3"),
 	})
 
-	body := func(takeover string) string {
-		return `{"machine":"machine-b","pane":"w2:p5","takeover":"` + takeover + `"}`
+	body := func(takeover, successor string) string {
+		return `{"machine":"machine-b","pane":"w2:p5","job":"` + successor + `","takeover":"` + takeover + `"}`
 	}
-	if writer := lanesNodeRequest(t, hub, http.MethodPut, "/v1/lanes/lane-a", lanesNodeBToken, "machine-b", body("job-unknown")); writer.Code != http.StatusConflict || writer.Body.String() != `{"error":"lane_takeover_unconfirmed"}`+"\n" {
+	if writer := lanesNodeRequest(t, hub, http.MethodPut, "/v1/lanes/lane-a", lanesNodeBToken, "machine-b", body("job-unknown", "successor-unknown")); writer.Code != http.StatusConflict || writer.Body.String() != `{"error":"lane_takeover_unconfirmed"}`+"\n" {
 		t.Fatalf("unknown job status=%d body=%q", writer.Code, writer.Body.String())
 	}
 	acceptedTakeoverSuccessor(t, hub, "successor-elsewhere", "job-elsewhere")
 	// A recorded predecessor on another pane does not authorize moving lane-a.
-	if writer := lanesNodeRequest(t, hub, http.MethodPut, "/v1/lanes/lane-a", lanesNodeBToken, "machine-b", body("job-elsewhere")); writer.Code != http.StatusConflict {
+	if writer := lanesNodeRequest(t, hub, http.MethodPut, "/v1/lanes/lane-a", lanesNodeBToken, "machine-b", body("job-elsewhere", "successor-elsewhere")); writer.Code != http.StatusConflict {
 		t.Fatalf("unproven takeover status=%d body=%q", writer.Code, writer.Body.String())
 	}
-	if writer := lanesNodeRequest(t, hub, http.MethodPut, "/v1/lanes/lane-a", lanesNodeBToken, "machine-b", body("bad job id")); writer.Code != http.StatusBadRequest {
+	if writer := lanesNodeRequest(t, hub, http.MethodPut, "/v1/lanes/lane-a", lanesNodeBToken, "machine-b", body("bad job id", "successor-elsewhere")); writer.Code != http.StatusBadRequest {
 		t.Fatalf("malformed takeover status=%d body=%q", writer.Code, writer.Body.String())
 	}
 	delete(hub.jobs, "successor-elsewhere")
 	acceptedTakeoverSuccessor(t, hub, "successor-pinned", "job-pinned")
-	if writer := lanesNodeRequest(t, hub, http.MethodPut, "/v1/lanes/pinned", lanesNodeBToken, "machine-b", body("job-pinned")); writer.Code != http.StatusConflict || writer.Body.String() != `{"error":"lane_protected"}`+"\n" {
+	if writer := lanesNodeRequest(t, hub, http.MethodPut, "/v1/lanes/pinned", lanesNodeBToken, "machine-b", body("job-pinned", "successor-pinned")); writer.Code != http.StatusConflict || writer.Body.String() != `{"error":"lane_protected"}`+"\n" {
 		t.Fatalf("protected takeover status=%d body=%q", writer.Code, writer.Body.String())
 	}
 	if routes := lanesNodeFile(t, path); routes["lane-a"].Machine != "machine-a" {

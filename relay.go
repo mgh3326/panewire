@@ -63,6 +63,7 @@ type reportRelayStandby struct {
 type reportRelayRoute struct {
 	Machine   string              `json:"machine"`
 	Pane      string              `json:"pane"`
+	Job       string              `json:"job,omitempty"`
 	Parent    string              `json:"parent,omitempty"`
 	Sink      bool                `json:"sink,omitempty"`
 	Deliver   string              `json:"deliver,omitempty"`
