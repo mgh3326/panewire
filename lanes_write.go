@@ -356,14 +356,14 @@ func (h *HubServer) laneHasForeignReference(routes map[string]reportRelayRoute, 
 
 // laneTakeoverRow resolves the row a takeover write moves. The accepted spawn
 // record is the authority: it must name the predecessor in --parent-job and
-// the live successor job must match the authenticated node and pane. When the
-// predecessor job record has ended or disappeared, its task lane name still
-// identifies the route to move.
+// the live successor job must match the authenticated node and pane. If the
+// predecessor is no longer in h.jobs, its durable successful spawn outcome
+// must still identify the exact machine and pane holding the lane row.
 //
 // A successor pane that already holds exactly one row is that row: a retried
 // takeover converges instead of adding a second name. No row at the
-// predecessor's pane or task lane refuses the takeover.
-func (h *HubServer) laneTakeoverRow(nodeMachine, lane string, body hubLaneWriteRequest, routes map[string]reportRelayRoute) (string, reportRelayRoute, bool, *hubLaneProjection, error) {
+// predecessor's recorded pane refuses the takeover.
+func (h *HubServer) laneTakeoverRow(nodeMachine string, body hubLaneWriteRequest, routes map[string]reportRelayRoute) (string, reportRelayRoute, bool, *hubLaneProjection, error) {
 	if !h.acceptedLaneTakeover(nodeMachine, body.Pane, body.Takeover) {
 		return "", reportRelayRoute{}, false, nil, errLaneTakeoverUnconfirmed
 	}
@@ -372,18 +372,37 @@ func (h *HubServer) laneTakeoverRow(nodeMachine, lane string, body hubLaneWriteR
 		return "", reportRelayRoute{}, false, &projection, nil
 	}
 	record := h.recordedJob(body.Takeover)
-	if record != nil && record.Node != "" && record.Pane != "" {
-		if name, row, found := laneRowAt(routes, record.Node, record.Pane); found {
+	if record != nil {
+		if record.Node != "" && record.Pane != "" {
+			if name, row, found := laneRowAt(routes, record.Node, record.Pane); found {
+				return name, row, true, nil, nil
+			}
+		}
+		return "", reportRelayRoute{}, false, nil, errLaneTakeoverUnconfirmed
+	}
+	host, pane, found := h.recordedSpawnRoute(body.Takeover)
+	if found {
+		if name, row, found := laneRowAt(routes, host, pane); found {
 			return name, row, true, nil, nil
 		}
 	}
-	if record == nil {
-		row, found := routes[lane]
-		if found {
-			return lane, row, true, nil, nil
-		}
-	}
 	return "", reportRelayRoute{}, false, nil, errLaneTakeoverUnconfirmed
+}
+
+// recordedSpawnRoute returns the hub's durable node and pane for a successful
+// predecessor spawn. A requested lane name alone is not evidence that the row
+// belongs to that predecessor.
+func (h *HubServer) recordedSpawnRoute(jobID string) (string, string, bool) {
+	if h.inbox == nil || h.inbox.store == nil {
+		return "", "", false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	task, err := h.inbox.store.latestSpawnForJob(ctx, jobID)
+	if err != nil || task.Job != jobID || task.Outcome.RC != 0 || task.Outcome.Host == "" || task.Outcome.Pane == "" {
+		return "", "", false
+	}
+	return task.Outcome.Host, task.Outcome.Pane, true
 }
 
 // acceptedLaneTakeover binds the authenticated node and pane to the durable
@@ -515,7 +534,7 @@ func (h *HubServer) putLane(lane string, body hubLaneWriteRequest, nodeMachine s
 				// findings already use follows the work onto the successor's
 				// machine. The durable accepted spawn proves the parent; without
 				// it, no other machine's lane may be moved.
-				name, row, found, held, err := h.laneTakeoverRow(nodeMachine, lane, body, snapshot.Routes)
+				name, row, found, held, err := h.laneTakeoverRow(nodeMachine, body, snapshot.Routes)
 				if err != nil {
 					return err
 				}
