@@ -1867,6 +1867,38 @@ held until its existing record can be checked.
 
 Delivery uses the existing hk client and `[quota]` URL and credentials. Each
 delivery pass has a two-second budget and cannot change the spawn result.
+
+The hub's delivery App writes its own warnings nowhere, so the hub reports each
+undelivered record itself, with the request id, job, attempt and a reason.
+A record that is still pending logs `placement record not delivered; snapshot
+stays pending` once per attempt and reason, however often the two-second flush
+retries it; a changed reason logs again. A record hk refuses for good (HTTP 400,
+404, 410 or 422) logs `placement record refused by hk and quarantined` once and
+moves to `placements-rejected/` in the hub's state directory beside a
+`.reason` sidecar; its snapshot is sealed and never retried. The reason is one
+of:
+
+| Reason | Meaning |
+|---|---|
+| `hk HTTP <status> <code>: <reason>` | hk answered the post. A 403 or 401 is a credential without the placement grant (hk derives `decided_on` from the token's host grant); 5xx is an outage. The record stays spooled and is retried. |
+| `hk_unreachable`, `delivery_budget_exhausted` | The post failed on the network, or the two-second pass ran out first. |
+| `hk_credential_unavailable: …` | The hub process has no usable svc-panewire credential ([hk service credential](#handoffkeep-service-credential)). |
+| `spool_path_refused`, `spool_unreadable`, `spool_entry_unreadable`, `spool_entry_unwritable`, `spool_entry_remains` | The placement spool under the hub's state directory is behind a symlink, unreadable, or its entry cannot be read or written. |
+| `job_store_unavailable`, `job_metadata_unavailable` | A `placed` record with no family waits for the shared job record. |
+| `trace_lock_timeout`, `deferred_trace_pending`, `delivery_app_unavailable`, `operation_unreadable` | The hub could not take the attempt's trace lock, holds a deferred trace save for it, could not build its delivery App, or could not read its operation row. |
+| `superseded_attempt_has_no_finished_record` | A newer attempt overwrote this attempt's outcome before a record could be built. |
+
+A landed attempt with no placement snapshot logs `placement record not built`.
+A snapshot whose record cannot be rebuilt is sealed with `placement record
+dropped`.
+
+After a fix or a credential change, pending snapshots deliver on their own: the
+flush retries every attempt whose snapshot is not sealed, from its spooled file
+or by rebuilding the record from the snapshot and the operation's outcome.
+Nothing needs a manual replay. Quarantined records are the exception: their
+snapshots are sealed and they are never retried. The file in
+`placements-rejected/` keeps the record, and its `.reason` sidecar keeps hk's
+answer.
 Records first enter owner-only JSON files under
 `$XDG_STATE_HOME/panewire/placements` (default
 `~/.local/state/panewire/placements`). Each subsequent panewire invocation retries
