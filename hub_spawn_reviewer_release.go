@@ -96,7 +96,7 @@ func (h *HubServer) releaseFinishedReviewerHolder(ctx context.Context, app *flee
 			h.logger.Info("hub kept a reviewer pane",
 				"reason", reason, "source", source, "role_key", spawn.RoleKey(),
 				"job", holder.Job, "holder_host", spawnHolderHost(holder), "holder_pane", row.PaneID)
-		case "capture_failed", "close_unreadable", "pane_changed":
+		case "capture_failed", "close_unreadable", "pane_changed", "question_unsupported":
 		default:
 			// The close ran and the record write did not: the pane is gone, so
 			// the next submission's absent-pane check retries this write.

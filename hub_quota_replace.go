@@ -250,7 +250,7 @@ func (h *HubServer) replaceQuotaStopped(ctx context.Context, machine string, eve
 	// and nothing is placed. A closed pane with no successor is ended by the
 	// node's watcher after its grace, as a quota stop with no replacement.
 	if probe.state == heldPanePresent {
-		if closed, _ := h.closeHeldPane(ctx, holder, name, probe.row, ""); !closed {
+		if closed, _ := h.closeHeldPane(ctx, holder, name, probe.row, event.JobID); !closed {
 			return skip("pane_not_closed", "pane", holder.Outcome.Pane)
 		}
 	}
@@ -459,7 +459,7 @@ func (h *HubServer) reconcileQuotaReplacements(ctx context.Context) int {
 		probe := h.probeHeldPane(ctx, spawnHolderHost(holder), holder.Outcome.Pane, name)
 		switch {
 		case probe.state == heldPanePresent && nodePaneIdleStatus[probe.row.AgentStatus] && validNodeCommandPath(probe.row.Cwd):
-			if closed, _ := h.closeHeldPane(ctx, holder, name, probe.row, ""); !closed {
+			if closed, _ := h.closeHeldPane(ctx, holder, name, probe.row, old); !closed {
 				continue
 			}
 		case probe.state != heldPaneAbsent:
