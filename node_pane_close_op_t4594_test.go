@@ -63,7 +63,9 @@ type fakeHubClose struct {
 	record  func(job string, in fleet.HubCloseIntent) error
 }
 
-func (f *fakeHubClose) LockEnd(dir string) (func(), error) { return fleet.LockJobEnd(dir) }
+func (f *fakeHubClose) LockEnd(ctx context.Context, dir string) (func(), error) {
+	return fleet.LockJobEndContext(ctx, dir)
+}
 func (f *fakeHubClose) Watcher(string) (fleet.HubCloseWatcher, error) {
 	return f.watcher, nil
 }
@@ -899,5 +901,29 @@ func TestCloseOpReleaseFencesAnUnregisteredRequest_t4652(t *testing.T) {
 func TestNoHelloAdvertisesCloseOps_t4652(t *testing.T) {
 	if slices.Contains(hubSpawnCapabilities, hubCapabilityCloseOps) {
 		t.Fatalf("hello capabilities %v advertise %s", hubSpawnCapabilities, hubCapabilityCloseOps)
+	}
+}
+
+// A close command waits for the job's end lock only until its own deadline:
+// a held lock answers journal_failed (retryable) and frees the acting lock.
+func TestCloseOpEndLockWaitIsBounded_t4652(t *testing.T) {
+	inbox := t.TempDir()
+	client := closeOpNode(t, inbox, idlePaneHerdr())
+	unlock, err := fleet.LockJobEnd(filepath.Join(inbox, "jobs", closeOpJob))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	var args nodePaneCloseOpArgs
+	raw, _ := json.Marshal(closeOpArgs("op-1"))
+	if err := json.Unmarshal(raw, &args); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	_, code := client.nodePaneCloseOp(ctx, args)
+	if code != "journal_failed" || time.Since(start) > 5*time.Second {
+		t.Fatalf("code=%q after %v, want journal_failed within the deadline", code, time.Since(start))
 	}
 }

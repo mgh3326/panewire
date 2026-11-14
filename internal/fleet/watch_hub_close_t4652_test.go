@@ -596,3 +596,21 @@ func TestPendingHubCloseJobsWithoutAJournal_t4652(t *testing.T) {
 		t.Fatalf("pending = %v, %v; want [j]", jobs, e)
 	}
 }
+
+// A close that closed nothing is cancelled with no hk store at all: the
+// store is resolved only by a step that touches hk.
+func TestSettlementCancelsLocallyWithoutAnHKStore_t4652(t *testing.T) {
+	a, _ := hubCloseFixture(t)
+	in := liveIntent(t, a)
+	recordHubClose(t, a, in)
+	writeJobCloseOp(t, a, CloseOp{RequestID: in.RequestID, Attempt: in.Attempt, State: CloseOpRefused})
+	resolved := 0
+	settle := HubCloseSettlement{App: &App{Jobs: a.Jobs, Home: a.Home, Now: a.Now, Runner: a.Runner, Out: a.Out, Err: a.Err, Arbiter: a.Arbiter},
+		Store: func() (JobStore, error) { resolved++; return nil, errors.New("no handoffkeep_env") }}
+	if st, e := settle.Settle(context.Background(), "j"); e != nil || st != HubCloseCancelled {
+		t.Fatalf("settle = %v, %v; want cancelled", st, e)
+	}
+	if resolved != 0 {
+		t.Fatalf("hk store resolved %d times for a local cancellation", resolved)
+	}
+}

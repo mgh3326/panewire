@@ -326,6 +326,9 @@ func (a *App) readJobCloseOp(job, id string) (CloseOp, bool, error) {
 type HubCloseSettlement struct {
 	App        *App
 	PaneListed func(ctx context.Context, session, pane string) (bool, error)
+	// Store, when set, resolves App's hk store the first time a step reads or
+	// writes hk; a step that only cancels locally never calls it.
+	Store func() (JobStore, error)
 }
 
 // HubCloseState is what one settlement step left.
@@ -351,14 +354,24 @@ const (
 // store, its clock, its pane inventory reader and a warning sink. It loads no
 // hosts.toml or policy, so an unrelated configuration error never strands an
 // accepted close.
-func NewHubCloseSettlement(jobs, home string, store JobStore, now func() time.Time, listed func(ctx context.Context, session, pane string) (bool, error), warn io.Writer) HubCloseSettlement {
-	return HubCloseSettlement{App: &App{Jobs: jobs, Home: home, JobStore: store, Now: now, Runner: ExecRunner{}, Out: warn, Err: warn}, PaneListed: listed}
+func NewHubCloseSettlement(jobs, home string, store func() (JobStore, error), now func() time.Time, listed func(ctx context.Context, session, pane string) (bool, error), warn io.Writer) HubCloseSettlement {
+	return HubCloseSettlement{App: &App{Jobs: jobs, Home: home, Now: now, Runner: ExecRunner{}, Out: warn, Err: warn}, PaneListed: listed, Store: store}
 }
 
 // Settle drives the job's current hub close one step, idempotently.
 func (s HubCloseSettlement) Settle(ctx context.Context, job string) (HubCloseState, error) {
-	out, err := s.App.settleHubClose(ctx, job, s.PaneListed)
-	return out, err
+	needHK := func() error {
+		if s.App.JobStore != nil || s.Store == nil {
+			return nil
+		}
+		store, err := s.Store()
+		if err != nil {
+			return err
+		}
+		s.App.JobStore = store
+		return nil
+	}
+	return s.App.settleHubClose(ctx, job, s.PaneListed, needHK)
 }
 
 // PendingHubCloseJobs lists the jobs under the jobs root whose ledger holds an
@@ -443,7 +456,7 @@ func PaneListedIn(out []byte, pane string) (bool, error) {
 // intended lost record; the intended record already there is accepted;
 // another terminal record is kept, and the lease is still released and the
 // intent closed, since the pane is proven stopped.
-func (a *App) settleHubClose(ctx context.Context, id string, listed func(ctx context.Context, session, pane string) (bool, error)) (HubCloseState, error) {
+func (a *App) settleHubClose(ctx context.Context, id string, listed func(ctx context.Context, session, pane string) (bool, error), needHK func() error) (HubCloseState, error) {
 	unlock, e := LockJobEndContext(ctx, filepath.Join(a.Jobs, id))
 	if e != nil {
 		return HubClosePending, e
@@ -479,6 +492,9 @@ func (a *App) settleHubClose(ctx context.Context, id string, listed func(ctx con
 		// request or releases it, which cancels the intent. A job hk already
 		// ended can no longer be bound, so a repeat would only answer
 		// mismatch: the intent is orphaned and cancelled.
+		if e := needHK(); e != nil {
+			return HubClosePending, e
+		}
 		if state, _, ok := a.hkJobState(ctx, j.ID); ok && (state == "completed" || state == "lost" || state == "escalated") {
 			return cancel("orphaned")
 		}
@@ -501,6 +517,9 @@ func (a *App) settleHubClose(ctx context.Context, id string, listed func(ctx con
 		}
 	default:
 		return cancel("not_closed")
+	}
+	if e := needHK(); e != nil {
+		return HubClosePending, e
 	}
 	state, reason, ok := a.hkJobState(ctx, j.ID)
 	switch {

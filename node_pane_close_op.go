@@ -347,7 +347,7 @@ func (client *HubClient) bindCloseOp(ctx context.Context, job *os.Root, jobDir s
 	// The job's end lock, which its watcher takes around every terminal
 	// decision, spans the binding check and the intent: no watcher end can
 	// land between them (hk 4652).
-	unlock, err := client.hubCloseLedger().LockEnd(jobDir)
+	unlock, err := client.hubCloseLedger().LockEnd(ctx, jobDir)
 	if err != nil {
 		return op, nil, "", "journal_failed"
 	}
@@ -418,7 +418,9 @@ func (client *HubClient) bindCloseOpLocked(ctx context.Context, job *os.Root, jo
 type nodeHubCloseLedger interface {
 	// LockEnd takes the job's end lock, shared with its watcher's terminal
 	// decisions.
-	LockEnd(jobDir string) (func(), error)
+	// decisions. It waits at most until ctx ends, so a close command never
+	// holds the node's acting lock past its own deadline.
+	LockEnd(ctx context.Context, jobDir string) (func(), error)
 	Watcher(jobDir string) (fleet.HubCloseWatcher, error)
 	RecordIntent(ctx context.Context, job string, in fleet.HubCloseIntent) error
 	// CancelIntent closes the intent of a request the hub released before
@@ -436,7 +438,9 @@ type nodeFleetHubClose struct {
 	client *HubClient
 }
 
-func (l nodeFleetHubClose) LockEnd(jobDir string) (func(), error) { return fleet.LockJobEnd(jobDir) }
+func (l nodeFleetHubClose) LockEnd(ctx context.Context, jobDir string) (func(), error) {
+	return fleet.LockJobEndContext(ctx, jobDir)
+}
 func (l nodeFleetHubClose) Watcher(jobDir string) (fleet.HubCloseWatcher, error) {
 	return fleet.ProbeHubCloseWatcher(jobDir)
 }
@@ -452,10 +456,6 @@ func (l nodeFleetHubClose) CancelIntent(ctx context.Context, job, requestID stri
 // the receipt's herdr session with the node's runner. The lease release and
 // the final job.lost are local ledger work.
 func (l nodeFleetHubClose) Settle(ctx context.Context, job string) (fleet.HubCloseState, error) {
-	store, err := l.client.nodeJobStoreForCommand()
-	if err != nil {
-		return fleet.HubClosePending, err
-	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return fleet.HubClosePending, err
@@ -467,7 +467,10 @@ func (l nodeFleetHubClose) Settle(ctx context.Context, job string) (fleet.HubClo
 		}
 		return fleet.PaneListedIn(out, pane)
 	}
-	return fleet.NewHubCloseSettlement(l.jobs, home, store, l.client.nowUTC, listed, slogWarnWriter{}).Settle(ctx, job)
+	// The hk store is resolved only by a step that reads or writes hk: a
+	// close that closed nothing is cancelled locally even when the node has
+	// no handoffkeep_env.
+	return fleet.NewHubCloseSettlement(l.jobs, home, l.client.nodeJobStoreForCommand, l.client.nowUTC, listed, slogWarnWriter{}).Settle(ctx, job)
 }
 
 func (client *HubClient) hubCloseLedger() nodeHubCloseLedger {
@@ -560,6 +563,10 @@ func (client *HubClient) nodePaneCloseRelease(args nodeCloseOpRefArgs) (any, str
 	return client.nodeCloseOpRef(args, true)
 }
 
+// hubCloseLockBudget bounds the end-lock wait of a release, inside the hub's
+// command deadline.
+const hubCloseLockBudget = 10 * time.Second
+
 // hubCloseSettleBudget bounds the settlement step a status or release runs.
 const hubCloseSettleBudget = 30 * time.Second
 
@@ -621,7 +628,11 @@ func (client *HubClient) runCloseOpRef(args nodeCloseOpRefArgs, release bool) (a
 // none, and any later close_op under that id is invalid_args.
 func (client *HubClient) cancelUnregisteredIntent(job *os.Root, jobDir string, args nodeCloseOpRefArgs) string {
 	ledger := client.hubCloseLedger()
-	unlock, err := ledger.LockEnd(jobDir)
+	// Inside the hub's command deadline: a held end lock answers a
+	// retryable journal_failed instead of holding the acting lock.
+	ctx, cancel := context.WithTimeout(context.Background(), hubCloseLockBudget)
+	defer cancel()
+	unlock, err := ledger.LockEnd(ctx, jobDir)
 	if err != nil {
 		return "journal_failed"
 	}
