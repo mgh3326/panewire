@@ -206,7 +206,7 @@ func TestReviewerPaneSweepWaitsForASecondSighting(t *testing.T) {
 func TestReviewerPaneSweepKeepsAnUnfinishedReviewer(t *testing.T) {
 	hub, server, jobs, held := reviewerReleaseHub(t, reviewerRole, "succeeded", hubSpawnOutcome{RC: 0, Host: "machine-a", Pane: roleHeldPane})
 	hub.now = func() time.Time { return held.Deadline.Add(11 * time.Minute) }
-	node := startUnworkedNode(t, t14Node(t, hub, server, true), unworkedReplies(unworkedRow("idle", "/work/project.test-job"), nil))
+	node := startUnworkedNode(t, t14Node(t, hub, server, true), unworkedReplies(unworkedRow("idle", "/work/project.test-job"), unworkedLedger(0)))
 	reviewerSweepActiveJob(t, hub, "machine-a", "test-job", roleHeldPane, reviewerRole)
 	sink := captureHubLog(hub)
 
@@ -239,5 +239,42 @@ func TestReviewerPaneSweepReleasesAPostedReview(t *testing.T) {
 
 	if want := []string{"agents.list", "agents.list", "job.result", "pane.capture", "pane.close", "job.mark_lost"}; !reflect.DeepEqual(node.seen(), want) {
 		t.Fatalf("node commands %v, want %v", node.seen(), want)
+	}
+}
+
+// setReply swaps one node command's answer between passes.
+func (n *unworkedNode) setReply(op string, reply map[string]any) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.replies[op] = reply
+}
+
+// A close whose mark write failed leaves a gone pane and a live record. The
+// next pass finds the pane gone and retries the write, so the job still ends.
+func TestReviewerPaneSweepRetriesTheMarkOfAClosedPane(t *testing.T) {
+	hub, server, jobs, held := reviewerReleaseHub(t, reviewerRole, "succeeded", hubSpawnOutcome{RC: 0, Host: "machine-a", Pane: roleHeldPane})
+	hub.now = func() time.Time { return held.Deadline.Add(11 * time.Minute) }
+	replies := unworkedReplies(unworkedRow("done", "/work/project.test-job"), nil)
+	replies["job.mark_lost"] = map[string]any{"error": "mark_lost_timeout"}
+	node := startUnworkedNode(t, t14Node(t, hub, server, true), replies)
+	reviewerSweepActiveJob(t, hub, "machine-a", "test-job", roleHeldPane, reviewerRole)
+	sink := captureHubLog(hub)
+
+	hub.releaseFinishedReviewerSpawns(t.Context())
+	hub.releaseFinishedReviewerSpawns(t.Context())
+	if !strings.Contains(sink.String(), "could not mark the job") {
+		t.Fatalf("log %q lacks the failed-mark warning", sink.String())
+	}
+
+	node.setReply("agents.list", map[string]any{"result": map[string]any{"agents": []nodeAgentRow{}, "panes": []nodeAgentRow{}, "panes_ok": true}})
+	node.setReply("job.mark_lost", map[string]any{"result": map[string]any{"outcome": "lost"}})
+	hub.releaseFinishedReviewerSpawns(t.Context())
+
+	got := node.seen()
+	if tail := got[len(got)-2:]; !reflect.DeepEqual(tail, []string{"agents.list", "job.mark_lost"}) {
+		t.Fatalf("last pass commands %v, want the retried mark", got)
+	}
+	if state := jobs.state("test-job"); state != "spawned" {
+		t.Fatalf("hk record %v, want the live record the node writes", state)
 	}
 }

@@ -99,10 +99,17 @@ func (h *HubServer) releaseFinishedReviewerHolder(ctx context.Context, app *flee
 	// makes the node rule out an open question before it closes.
 	closedPane, reason := h.closeHeldPaneAndMarkLostBecause(ctx, app, holder, name, row, branch, holder.Job)
 	if !closedPane {
-		if reason == "question_open" {
+		switch reason {
+		case "question_open":
 			h.logger.Info("hub kept a reviewer pane",
 				"reason", reason, "source", source, "role_key", spawn.RoleKey(),
 				"job", holder.Job, "holder_host", spawnHolderHost(holder), "holder_pane", row.PaneID)
+		case "capture_failed", "close_unreadable", "pane_changed":
+		default:
+			// The close ran and the record write did not: the pane is gone, so
+			// the sweep's absent-pane pass retries this write.
+			h.logger.Warn("hub closed a reviewer pane but could not mark the job",
+				"reason", reason, "source", source, "job", holder.Job, "holder_host", spawnHolderHost(holder))
 		}
 		return false, "", 0
 	}
@@ -215,7 +222,18 @@ func (h *HubServer) releaseFinishedReviewerSpawns(ctx context.Context) {
 		default:
 			continue
 		}
-		probe := h.probeHeldPane(ctx, spawnHolderHost(r.holder), r.holder.Outcome.Pane, heldAgentName(r.holder, record))
+		name := heldAgentName(r.holder, record)
+		probe := h.probeHeldPane(ctx, spawnHolderHost(r.holder), r.holder.Outcome.Pane, name)
+		if probe.state == heldPaneAbsent {
+			// The pane is gone but the record is still live: a close whose
+			// mark write failed leaves exactly this, and no later pass probes a
+			// pane that is not there. The node re-checks its ledger and writes
+			// the record, so a retry is safe.
+			if marked, reason := h.markHolderJobLostBecause(ctx, app, r.holder, name, reviewerPaneFinished); !marked {
+				h.logger.Warn("hub could not mark a closed reviewer pane", "reason", reason, "source", "sweep", "job", r.holder.Job)
+			}
+			continue
+		}
 		if probe.state != heldPanePresent || !nodePaneClosableStatus[probe.row.AgentStatus] {
 			continue
 		}
@@ -230,7 +248,7 @@ func (h *HubServer) releaseFinishedReviewerSpawns(ctx context.Context) {
 		// triggers, keeps the wider status set.
 		if probe.row.AgentStatus != "done" {
 			var ledger nodeJobResult
-			if !h.nodeCall(ctx, spawnHolderHost(r.holder), nodeCommandJobResult, nodeJobResultArgs{Job: r.holder.Job}, spawnHeldPaneProbeWait, &ledger) || !ledger.Found || (ledger.Findings == nil && !ledger.Report.Present) {
+			if !h.nodeCall(ctx, spawnHolderHost(r.holder), nodeCommandJobResult, nodeJobResultArgs{Job: r.holder.Job}, spawnHeldPaneProbeWait, &ledger) || !ledger.Found || !nodeResultPosted(ledger) {
 				h.logger.Info("hub kept a reviewer pane", "reason", "awaiting_result", "source", "sweep",
 					"role_key", r.spawn.RoleKey(), "job", r.holder.Job, "pane_status", probe.row.AgentStatus)
 				continue
@@ -239,6 +257,13 @@ func (h *HubServer) releaseFinishedReviewerSpawns(ctx context.Context) {
 		h.releaseFinishedReviewerHolder(ctx, app, r.spawn, r.holder, record, probe, "sweep", "")
 	}
 	h.retainReviewerPanes(live)
+}
+
+// nodeResultPosted reports a job.result that carries a validated findings
+// object or a report on disk. A null findings field decodes to the bytes
+// "null", not nil, so the emptiness check is the length.
+func nodeResultPosted(ledger nodeJobResult) bool {
+	return (len(ledger.Findings) > 0 && !isJSONNull(ledger.Findings)) || ledger.Report.Present
 }
 
 // retryAfterSeconds is the whole seconds a caller should wait for a hold that
