@@ -353,6 +353,10 @@ them). `devin-free` is the reserved free-band key, not a catalog pool: it
 excludes the SWE-2 free rungs (`devin-swe2*`, [placement](placement.md#pool-concurrency-cap))
 and leaves the paid devin rungs eligible, so a replacement for a
 `quota_stop pool=devin-free` never takes another free rung of the same account.
+`devin-paid` is the reserved paid-band key: it excludes the devin rungs that
+spend the account's paid window and leaves the SWE-2 free rungs eligible, so a
+replacement for a `quota_stop pool=devin` stays off the spent window without
+losing the free band.
 It is a standing exclusion like `--exclude-host`, not a pin: it needs no
 containment and no override reason. Every candidate of an excluded pool drops
 with reason `pool_excluded`, visible in `--dry-run` and in the `job.placement`
@@ -1003,7 +1007,10 @@ reset holds for one hour. The rung returns on its own
 once the reset passes. The quota gate refuses the same rung on the same
 reading; selection drops it before the gate. A `quota_stop pool=devin-free`
 replacement also carries `--exclude-pool devin-free`, which excludes the free
-rungs (the reserved free-band key, not a catalog pool).
+rungs (the reserved free-band key, not a catalog pool). A paid Devin weekly stop
+(`quota_stop pool=devin`) is the mirror: it cools and excludes the paid band
+alone (the reserved `devin-paid` key) until its reset, so the SWE-2 free rungs
+stay placeable while only the paid window is spent.
 
 A subscription pool on pace to use its longest window ranks behind the free
 band, credit with a recorded positive balance and future expiry included.

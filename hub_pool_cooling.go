@@ -4,6 +4,8 @@ import (
 	"maps"
 	"strings"
 	"time"
+
+	"github.com/mgh3326/panewire/internal/fleet"
 )
 
 // Pool cooling is held in hub memory and is lost on hub restart.
@@ -13,6 +15,10 @@ func (h *HubServer) observePoolCooling(reason string, now time.Time) bool {
 		return false
 	}
 	pool := strings.TrimPrefix(fields[1], "pool=")
+	// A stop of the catalog pool devin is a paid-band stop: the SWE-2 free
+	// rungs draw on the free band and cool apart under their own key, so the
+	// paid stop holds only the paid band (fleet.BandKey, hk 4582).
+	pool = fleet.BandKey(pool)
 	if !fleetStateTokenPattern.MatchString(pool) {
 		return false
 	}

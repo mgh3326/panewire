@@ -88,8 +88,8 @@ func (h *HubServer) startQuotaReplacement(machine string, event hubJobEventPaylo
 
 // quotaReplacementRequest is the holder's submission for the successor: same
 // task, role, review pass, owner and brief; a new job id, agent label and (for
-// a reviewer) checkout directory; and --exclude-pool for the stopped pool. A
-// implementer also gets one line naming the earlier job's report and
+// a reviewer) checkout directory; and --exclude-pool for the stopped pool's
+// band. A implementer also gets one line naming the earlier job's report and
 // branch to continue from.
 func quotaReplacementRequest(old fleet.Submission, oldJob, newJob, pool string, role string) (fleet.Submission, error) {
 	id, err := fleet.NewRequestID()
@@ -124,12 +124,16 @@ func quotaReplacementRequest(old fleet.Submission, oldJob, newJob, pool string, 
 		setArg("--report-relative", newJob+strings.TrimPrefix(report, oldJob))
 	}
 	pools := []string{}
+	// The stopped pool's band, not the catalog pool: excluding devin would
+	// also drop the SWE-2 free rungs that cool apart from the paid window
+	// (fleet.BandKey, hk 4582).
+	exclude := fleet.BandKey(pool)
 	for _, p := range strings.Split(hubSpawnArg(old.Args, "--exclude-pool"), ",") {
-		if p != "" && p != pool {
+		if p != "" && p != exclude {
 			pools = append(pools, p)
 		}
 	}
-	setArg("--exclude-pool", strings.Join(append(pools, pool), ","))
+	setArg("--exclude-pool", strings.Join(append(pools, exclude), ","))
 	if next.Repository.Checkout != nil {
 		checkout := *next.Repository.Checkout
 		next.Repository.Checkout = &checkout
