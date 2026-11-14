@@ -24,10 +24,15 @@ func seedCloseOpJob(t *testing.T, inbox string, aware bool) string {
 	if err := os.MkdirAll(filepath.Join(dir, "events"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	claim := filepath.Join(dir, "events", "00001-job.claim.json")
-	if _, err := os.Stat(claim); err != nil {
-		if err := os.WriteFile(claim, []byte(`{"kind":"job.claim","created_at":"2026-11-14T00:00:00Z","payload":{}}`), 0o600); err != nil {
-			t.Fatal(err)
+	for name, body := range map[string]string{
+		"00001-job.claim.json":   `{"kind":"job.claim","created_at":"2026-11-14T00:00:00Z","payload":{"owner_lane":"owner"}}`,
+		"00002-job.spawned.json": `{"kind":"job.spawned","created_at":"2026-11-14T00:00:01Z","payload":{"pane_id":"w1:p1","label":"job-a","role":"reviewer"}}`,
+	} {
+		path := filepath.Join(dir, "events", name)
+		if _, err := os.Stat(path); err != nil {
+			if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
 		}
 	}
 	if aware {
@@ -349,5 +354,100 @@ func TestCloseOpOverHubConnection_t4594(t *testing.T) {
 	}
 	if fake.called("pane", "close") != 1 {
 		t.Fatalf("calls=%v", fake.calls)
+	}
+}
+
+// The request must name the pane and label the job's current attempt runs in;
+// otherwise nothing is opened or closed (a stale or mismatched request could
+// otherwise close another job's pane while journalling in this one).
+func TestCloseOpRefusesAMismatchedBinding_t4594(t *testing.T) {
+	inbox := t.TempDir()
+	for _, change := range []func(map[string]any){
+		func(a map[string]any) { a["pane_id"] = "w1:p9" },
+		func(a map[string]any) { a["name"] = "job-b" },
+	} {
+		fake := &nodeFakeHerdr{agents: []string{nodeAgentList(nodeAgentJSON("w1:p9", "job-b", "idle", "/work/a"), nodeAgentJSON("w1:p1", "job-b", "idle", "/work/a"))}, read: nodeReapScreen("❯ ")}
+		args := closeOpArgs("op-x")
+		change(args)
+		result, code := nodeRun(t, closeOpNode(t, inbox, fake), nodeCommandPaneCloseOp, args)
+		if code != "" || result["outcome"] != nodeCloseOpMismatch || len(fake.calls) != 0 {
+			t.Fatalf("args=%v result=%v code=%q calls=%v", args, result, code, fake.calls)
+		}
+	}
+	// An ended attempt is not closed either.
+	dir := seedCloseOpJob(t, inbox, true)
+	if err := os.WriteFile(filepath.Join(dir, "events", "00003-job.completed.json"), []byte(`{"kind":"job.completed","created_at":"2026-11-14T00:00:02Z","payload":{}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fake := idlePaneHerdr()
+	wantCloseOp(t, closeOpNode(t, inbox, fake), "op-y", nodeCloseOpMismatch, false)
+	if len(fake.calls) != 0 {
+		t.Fatalf("closed an ended attempt: %v", fake.calls)
+	}
+}
+
+// A registered operation resumed after its attempt moved on (a re-prompt on
+// the same pane) or after the watcher committed its ending is settled
+// preempted without touching herdr.
+func TestCloseOpResumeRevalidatesTheAttempt_t4594(t *testing.T) {
+	inbox := t.TempDir()
+	seedNodeCloseOp(t, inbox, "op-1", fleet.CloseOpRegistered)
+	dir := filepath.Join(inbox, "jobs", closeOpJob)
+	if err := os.WriteFile(filepath.Join(dir, "events", "00003-job.reprompted.json"), []byte(`{"kind":"job.reprompted","created_at":"2026-11-14T00:00:02Z","payload":{}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fake := idlePaneHerdr()
+	wantCloseOp(t, closeOpNode(t, inbox, fake), "op-1", fleet.CloseOpPreempted, false)
+	if len(fake.calls) != 0 {
+		t.Fatalf("resumed a stale attempt: %v", fake.calls)
+	}
+
+	other := t.TempDir()
+	seedNodeCloseOp(t, other, "op-2", fleet.CloseOpRegistered)
+	otherDir := filepath.Join(other, "jobs", closeOpJob)
+	root, err := os.OpenRoot(otherDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	attempt, err := fleet.JobDirAttemptKey(root)
+	root.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fleet.RecordWatcherEnding(otherDir, "w1:p1", attempt); err != nil {
+		t.Fatal(err)
+	}
+	fake = idlePaneHerdr()
+	wantCloseOp(t, closeOpNode(t, other, fake), "op-2", fleet.CloseOpPreempted, false)
+	if len(fake.calls) != 0 {
+		t.Fatalf("resumed after the watcher's ending: %v", fake.calls)
+	}
+}
+
+// The blocked-reviewer guard reads the role from the job's own ledger, not
+// from a directory named after the pane label.
+func TestCloseOpBlockedReviewerRoleComesFromTheJob_t4594(t *testing.T) {
+	inbox := t.TempDir()
+	fake := &nodeFakeHerdr{agents: []string{nodeAgentList(nodeAgentJSON("w1:p1", "job-a", "blocked", "/work/a"))}, read: nodeReapScreen("❯ ")}
+	client := closeOpNode(t, inbox, fake)
+	args := closeOpArgs("op-1")
+	args["agent_status"] = "blocked"
+	result, code := nodeRun(t, client, nodeCommandPaneCloseOp, args)
+	if code != "" || result["outcome"] != fleet.CloseOpClosed {
+		t.Fatalf("blocked reviewer under job-1/label job-a: result=%v code=%q calls=%v", result, code, fake.calls)
+	}
+	// A decoy ledger at jobs/job-a naming another role changes nothing.
+	decoy := filepath.Join(inbox, "jobs", "job-a", "events")
+	if err := os.MkdirAll(decoy, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(decoy, "00001-job.claim.json"), []byte(`{"kind":"job.claim","payload":{"role":"implementer"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fake2 := &nodeFakeHerdr{agents: []string{nodeAgentList(nodeAgentJSON("w1:p1", "job-a", "blocked", "/work/a"))}, read: nodeReapScreen("❯ ")}
+	client.nodeHerdr = fake2.run
+	args["request_id"] = "op-2"
+	if result, code := nodeRun(t, client, nodeCommandPaneCloseOp, args); code != "" || result["outcome"] != fleet.CloseOpClosed {
+		t.Fatalf("decoy role changed the guard: result=%v code=%q", result, code)
 	}
 }

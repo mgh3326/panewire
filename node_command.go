@@ -98,6 +98,10 @@ type nodePaneCloseArgs struct {
 	AgentStatus  string `json:"agent_status"`
 	Cwd          string `json:"cwd"`
 	AllowUnnamed bool   `json:"allow_unnamed,omitempty"`
+	// role, when set, is the job's role read from its own ledger by the
+	// caller (a close operation names the job apart from the label); never
+	// on the wire.
+	role string
 }
 
 type nodePaneCaptureArgs struct {
@@ -948,7 +952,11 @@ func (client *HubClient) nodePaneCloseWith(ctx context.Context, args nodePaneClo
 	// closes one only when the job's own ledger names the reviewer role; the
 	// operator-credential command path cannot widen that (hk 3315).
 	if args.AgentStatus == "blocked" {
-		if role, err := client.nodeJobRole(args.Name); err != nil || role != "reviewer" {
+		role, err := args.role, error(nil)
+		if role == "" {
+			role, err = client.nodeJobRole(args.Name)
+		}
+		if err != nil || role != "reviewer" {
 			return nodePaneCloseResult{Outcome: nodePaneChanged}, ""
 		}
 	}

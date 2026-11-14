@@ -110,10 +110,15 @@ func loadEventsFS(fsys fs.FS) ([]Event, error) {
 }
 func (a *App) job(id string) (Job, error) {
 	evs, e := a.events(id)
-	j := Job{ID: id, Events: evs}
 	if e != nil {
-		return j, e
+		return Job{ID: id, Events: evs}, e
 	}
+	return jobFromEvents(id, evs)
+}
+
+// jobFromEvents folds a job's events, in ledger order, into its state.
+func jobFromEvents(id string, evs []Event) (Job, error) {
+	j := Job{ID: id, Events: evs}
 	for _, ev := range evs {
 		p := ev.Payload
 		switch ev.Kind {

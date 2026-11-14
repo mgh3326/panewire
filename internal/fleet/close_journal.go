@@ -134,16 +134,39 @@ func AttemptKey(events []Event) string {
 // JobDirAttemptKey is AttemptKey for the job directory root job, read in the
 // order the watcher reads it. A symlinked event is refused, as there.
 func JobDirAttemptKey(job *os.Root) (string, error) {
+	binding, err := ReadJobBinding(job, "")
+	return binding.Attempt, err
+}
+
+// JobBinding is what a job's ledger says its current attempt is: the pane and
+// herdr label it runs in, its role, and whether it has already ended.
+type JobBinding struct {
+	Attempt, Pane, Label, Role string
+	Ended                      bool
+}
+
+// ReadJobBinding reads the job directory root job the way its watcher reads it.
+func ReadJobBinding(job *os.Root, id string) (JobBinding, error) {
 	events, err := job.OpenRoot("events")
 	if err != nil {
-		return "", err
+		return JobBinding{}, err
 	}
 	defer events.Close()
 	list, err := loadEventsFS(events.FS())
 	if err != nil {
-		return "", err
+		return JobBinding{}, err
 	}
-	return AttemptKey(list), nil
+	binding := JobBinding{Attempt: AttemptKey(list)}
+	j, err := jobFromEvents(id, list)
+	if err != nil {
+		return binding, nil // no claim or receipt: nothing binds a pane
+	}
+	// A quota stop announced for the hub's hand-over is not an end: the
+	// hub's close is what follows it.
+	_, announced := announcedQuotaStop(j)
+	binding.Pane, binding.Label, binding.Ended = j.Pane, j.Label, (j.Terminal && !announced) || j.Reaped
+	binding.Role = firstNonempty(j.SpawnRole, j.Role)
+	return binding, nil
 }
 
 // ReadCloseOp reads one operation from the job directory root; found is false
