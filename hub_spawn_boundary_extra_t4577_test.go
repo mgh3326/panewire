@@ -86,7 +86,7 @@ func TestOldNodeResultCannotFinishReboundRequest_t4577(t *testing.T) {
 		t.Fatal(err)
 	}
 	task.Status = "dispatching"
-	if _, err = h.inbox.store.unbindRefusedSpawn(t.Context(), task, hubSpawnExclusion{Machine: first.Machine, Reason: "cwd_unmapped", RC: 2}); err != nil {
+	if _, err = h.inbox.store.unbindRefusedSpawn(t.Context(), task, hubSpawnExclusion{Machine: first.Machine, Reason: "cwd_unmapped", RC: 2}, nil); err != nil {
 		t.Fatal(err)
 	}
 	second := boundaryTestNode(task, 457712, "machine-b")
@@ -121,7 +121,7 @@ func TestReboundRequestRejectsOldDispatch_t4577(t *testing.T) {
 		t.Fatal(err)
 	}
 	task.Status = "dispatching"
-	if _, err = h.inbox.store.unbindRefusedSpawn(t.Context(), task, hubSpawnExclusion{Machine: first.Machine, Reason: "cwd_unmapped", RC: 2}); err != nil {
+	if _, err = h.inbox.store.unbindRefusedSpawn(t.Context(), task, hubSpawnExclusion{Machine: first.Machine, Reason: "cwd_unmapped", RC: 2}, nil); err != nil {
 		t.Fatal(err)
 	}
 	if _, err = h.inbox.store.bindSpawn(t.Context(), request.RequestID, task.Attempt, boundaryTestNode(task, 457716, "machine-b"), time.Now().UTC()); err != nil {

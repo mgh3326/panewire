@@ -219,8 +219,8 @@ request leaves no operation behind.
 ## State and recovery
 
 The hub stores the logical operation, attempt, absolute deadline, node
-request and destination, per-attempt placement exclusions, result, task/role
-reservation and notification outbox. Eight workers perform placement; they
+request and destination, per-attempt placement exclusions, any claimed-host
+retry pin, result, task/role reservation and notification outbox. Eight workers perform placement; they
 commit a binding and return without waiting for the node. A separate dispatcher
 admits at most one request per node. A slow node therefore cannot occupy the
 placement workers or another node's dispatcher. The durable rows are
@@ -262,27 +262,37 @@ Under `--host auto`, a node's `cwd_unmapped` refusal returns the operation to
 placement, which tries the next candidate. The node answers it before any
 checkout or engine call. A spawn carrying a checkout on a node with a work
 root is not answered that way: the node clones into the work root, following
-[the placement rule](placement.md#the-filter). A first-run refusal (`hooks_review`, `trust_prompt`,
-`omp_setup_wizard`, `auth_unavailable`) does the same once the node verified
-its pane cleanup, and the hub tells `operator-desk` which one-time action the
-host needs ([placement.md](placement.md#first-run-refusals-and-the-desk-notice)),
-but only when the node refused before its hk job claim (result stage empty,
-`placement` or `checkout`). A refusal from the `claim`, `launch` or `landing`
-stage, such as a login screen after the pane launched, leaves the hk job record
-claimed by that node's host, and hk answers another host's claim of the job id
-with 409 `job_id_taken` (rc 74, "job id already claimed"). That refusal is the
-operation's result, and a replay of the saved request runs on the same host
+[the placement rule](placement.md#the-filter). A first-run refusal
+(`hooks_review`, `trust_prompt`, `omp_setup_wizard`, `auth_unavailable`) tells
+`operator-desk` which one-time action the host needs
+([placement.md](placement.md#first-run-refusals-and-the-desk-notice)). When the
+node verifies cleanup and the refusal precedes the hk job claim (result stage
+empty, `placement` or `checkout`), auto placement can try another host. Before
+the claim, a launch-proof refusal tries an
+alternate harness on the same host first, then another host. A refusal from
+the `claim`, `launch` or `landing` stage leaves the hk job record claimed by
+that node's host, and hk answers another host's claim of the job id with 409
+`job_id_taken` (rc 74, "job id already claimed"). After a cleanup-confirmed
+`launch_proof_failed` or another post-launch harness refusal, an automatically
+selected, non-delegated profile tries an alternate harness **on that same host
+only**. A pinned profile is not changed. If no alternate is eligible, the
+attempt ends with a refusal on that host. The hub atomically saves the host pin
+and failed harness with the unbind; the pin survives hub restart and later
+attempts, including a later refusal before the new attempt's claim. An eligible
+harness refusal during such a later attempt can try another harness on that
+same host. No result without confirmed cleanup permits another launch
 (`spawnRefusalMovesOn`, `spawnReplayPinsHost`; hk 4614).
 For agy, a verified rc=76 (`BRIEF_SUBMISSION_UNCONFIRMED`) whose newest saved
 capture matches the harness login screen is sent as rc=88 with an
-`AUTH_UNAVAILABLE` refusal; the unchanged hub classifies it as
+`AUTH_UNAVAILABLE` refusal; the hub classifies it as
 `auth_unavailable`. Other rc=76 results and results with unverified cleanup
-keep their original refusal. A pinned `--host` keeps any of these refusals as
-its result. For an eligible auto-placement refusal, the hub commits the unbind
-and the refused host and reason together, then wakes placement. The exclusion
-survives hub restart within that attempt and is cleared by a cleanup-confirmed
-new attempt. A request that already claimed its handoffkeep job must not be
-moved to another host; that claim is host-bound.
+keep their original refusal. A pinned `--host` remains the destination; if its
+profile was automatic, an eligible post-claim harness refusal may still try a
+different harness there. For an eligible refusal, the hub commits the unbind
+and the refused host, profile and reason together, then wakes placement. The
+exclusion survives hub restart within that attempt and is cleared by a
+cleanup-confirmed new attempt. A request that already claimed its handoffkeep
+job must not be moved to another host; that claim is host-bound.
 
 ### A job.spawn the node cannot accept
 
@@ -355,6 +365,7 @@ sent merely because a deadline expired.
 | Deadline before dispatch | An unbound or unsent bound request cannot have launched; release its reservation without waiting for a node slot and allow the same key/job to retry. | `TestAsyncSpawnUndispatchedTimeoutReleasesReservation`, `TestQueuedBoundDeadlineExpiresWithNodeSlotBusy_t4581`. |
 | Containment or disconnect before send | Unbind unsent rows even when another request occupies the node slot; on a failed store write keep the original binding for recovery. | `TestContainmentUnbindsQueuedRowsDespiteStoreFailure_t4581`, `TestDisconnectUnbindsOnlyUnsentRowsWhenWriterIsStuck_t4581`. |
 | Eligible refusal before a host-bound job claim | Atomically record the exclusion and unbind; recovery continues placement with the same logical attempt. | `TestRefusalExclusionSurvivesStoreRestartAndResetsOnRetry_t4581`, `TestRefusalWakesRealPlacementOnAnotherNode_t4581`. |
+| Cleanup-confirmed harness refusal after a host-bound job claim | Atomically pin the claimed host, record the failed harness and unbind; restart or later attempts cannot move the job to another host. Without cleanup proof, keep the original result. | `TestClaimedHarnessRetrySurvivesHubRestart_t4581`, `TestClaimedHostStaysPinnedWhenAlternativesRunOut_t4581`, `TestClaimedHarnessRefusalKeepsBindingOnStoreFailure_t4581`, `TestRefusalAfterJobClaimDoesNotMoveToNextHost_t4614`. |
 | Node disconnect or uncertain send | Retain node UUID/host; replay its journal on reconnect. | `TestSpawnUnknownRetainsOwnershipAndLateResultCommitsOutbox`, `TestAsyncSpawnLateResultReconcilesAgainstSameNode`. |
 | Duplicate accept / lost HTTP response | Identical key/body replays; changed body conflicts; CLI receipt preserves key. | Reservation test and `TestSubmissionReceiptReusesKeyAfterLostHTTPResponse`. |
 | Timeout followed by late pane | Retain ownership; reconcile receipt with exact node identity; never close working/unknown. | Late-result test and `TestFailedSpawnCleanupRequiresExactIdlePane`. |

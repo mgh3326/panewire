@@ -523,7 +523,7 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 		h.finishSpawnOutcome(task, hubSpawnOutcome{RC: 124, Stage: "placement", Reason: "timeout", Retryable: true})
 		return
 	}
-	outcome := hubSpawnOutcome{Stage: "placement", StageMS: map[string]int64{}}
+	outcome := hubSpawnOutcome{Stage: "placement", Host: spawnPinnedHost(task), StageMS: map[string]int64{}}
 	h.bindPlacement(app, transport)
 	app.ScheduleQuotaRefresh = h.scheduleQuotaRefresh
 	app.PlacementTry = func(host string) { h.countPlacement(task.Job, host) }
@@ -537,13 +537,29 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 		outcome.Role = r.Role
 	}
 	request := task.Request
-	if spawnReplayPinsHost(task.Outcome) {
+	if pinnedHost := spawnPinnedHost(task); pinnedHost != "" {
 		request.Args = append([]string(nil), request.Args...)
+		foundHost := false
 		for i := 0; i+1 < len(request.Args); i++ {
 			if request.Args[i] == "--host" {
-				request.Args[i+1] = task.Outcome.Host
-				request.RetryHost = task.Outcome.Host
+				request.Args[i+1] = pinnedHost
+				foundHost = true
 			}
+		}
+		if !foundHost {
+			request.Args = append(request.Args, "--host", pinnedHost)
+		}
+		request.RetryHost = pinnedHost
+		for _, excluded := range task.Exclusions {
+			if excluded.Machine != pinnedHost {
+				continue
+			}
+			seat, ok := app.Policy.Profiles[excluded.Profile]
+			if !ok || seat.Kind == "" {
+				h.finishSpawnOutcome(task, hubSpawnOutcome{RC: 78, Stage: "placement", Reason: "configuration", Host: pinnedHost, Retryable: true})
+				return
+			}
+			request.RetryHarnesses = append(request.RetryHarnesses, seat.Kind)
 		}
 		found := false
 		for i := 0; i+1 < len(request.Args); i++ {
@@ -583,6 +599,18 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 		outcome.RC = 124
 		outcome.Reason = "timeout"
 	}
+	if outcome.Host == "" {
+		outcome.Host = spawnPinnedHost(task)
+	}
+	// If every eligible harness was already refused, the node's last
+	// cleanup-confirmed refusal is the answer, not a selection error caused by
+	// excluding that same harness. Other placement errors retain their detail.
+	if err != nil && ctx.Err() == nil && task.ClaimedHost != "" && len(task.Exclusions) > 0 && task.Outcome.NodeResult {
+		code, _, _ := strings.Cut(err.Error(), ":")
+		if code == "role_no_candidate" {
+			outcome = task.Outcome
+		}
+	}
 	if changed, _ := h.completeSpawn(parent, task, outcome); changed {
 		h.recordSpawnTrace(task, outcome)
 	}
@@ -597,7 +625,7 @@ func spawnTaskHost(task hubSpawnTask) string {
 	if task.Node != nil {
 		return task.Node.Machine
 	}
-	return ""
+	return spawnPinnedHost(task)
 }
 
 type directSpawnState struct{ h *HubServer }
@@ -719,6 +747,18 @@ func spawnReplayPinsHost(outcome hubSpawnOutcome) bool {
 	return outcome.Retryable && outcome.Host != "" && !spawnRefusalMovesOn(outcome.Reason, outcome.Stage)
 }
 
+// spawnPinnedHost also reads outcomes written before claimed_host existed.
+// resumeCleanedSpawn carries that legacy pin into the durable column.
+func spawnPinnedHost(task hubSpawnTask) string {
+	if task.ClaimedHost != "" {
+		return task.ClaimedHost
+	}
+	if spawnReplayPinsHost(task.Outcome) {
+		return task.Outcome.Host
+	}
+	return ""
+}
+
 // spawnRefusalMovesOn is spawnRefusalTriesNextHost for a refusal that has a
 // stage: only a refusal that left no hk claim behind hands the job to another
 // host. Past the claim the request stays with the refusing host, where a
@@ -737,7 +777,8 @@ func (t *directSpawnTransport) Spawn(ctx context.Context, req fleet.HubSpawnRequ
 	// a launch-proof refusal first tries another harness on this same host;
 	// other refusals rule out the host for the rest of this attempt.
 	for _, excluded := range t.task.Exclusions {
-		if excluded.Machine == req.Machine && (excluded.Reason != "launch_proof_failed" || excluded.Profile == hubSpawnArg(req.Args, "-m")) {
+		profileOnly := excluded.Reason == "launch_proof_failed" || t.task.ClaimedHost == excluded.Machine
+		if excluded.Machine == req.Machine && (!profileOnly || excluded.Profile == hubSpawnArg(req.Args, "-m")) {
 			t.h.releasePlacementCount(t.task.Job)
 			return fleet.HubSpawnReply{RC: excluded.RC, Error: excluded.Reason, NextHost: true}, nil
 		}
@@ -786,7 +827,7 @@ func (t *directSpawnTransport) nextHostAfterRefusal(ctx context.Context, node hu
 	// A cleanup-confirmed replay can already carry a host-bound claim from its
 	// prior attempt, even when this attempt refuses before making a new claim.
 	movesOn := spawnRefusalMovesOn(spawnResultReason(result), result.Stage) || spawnNotStarted(result)
-	if result.RC == 0 || !result.Retryable || !movesOn || !t.h.now().Before(t.task.Deadline) || spawnReplayPinsHost(t.task.Outcome) || firstNonEmptyString(hubSpawnArg(t.task.Request.Args, "--host"), "auto") != "auto" {
+	if result.RC == 0 || !result.Retryable || !movesOn || !t.h.now().Before(t.task.Deadline) || spawnPinnedHost(t.task) != "" || firstNonEmptyString(hubSpawnArg(t.task.Request.Args, "--host"), "auto") != "auto" {
 		return false, nil
 	}
 	if result.Error == "launch_proof_failed" && result.RC != 70 {
@@ -794,7 +835,7 @@ func (t *directSpawnTransport) nextHostAfterRefusal(ctx context.Context, node hu
 	}
 	reason := spawnResultReason(result)
 	exclusion := hubSpawnExclusion{Machine: node.Machine, Profile: hubSpawnArg(node.Args, "-m"), Reason: reason, RC: result.RC}
-	task, err := t.h.inbox.store.unbindRefusedSpawn(ctx, t.task, exclusion)
+	task, err := t.h.inbox.store.unbindRefusedSpawn(ctx, t.task, exclusion, nil)
 	if err != nil {
 		return true, err
 	}
@@ -803,6 +844,39 @@ func (t *directSpawnTransport) nextHostAfterRefusal(ctx context.Context, node hu
 	t.h.releasePlacementCount(task.Job)
 	t.h.observeLaunchOutcome(node.Machine, hubSpawnArg(node.Args, "-m"), result.RC, reason, t.h.now().UTC())
 	t.h.logger.Warn("hub spawn refused by node; trying next candidate", "request_id", task.Request.RequestID, "node_request_id", node.RequestID, "job", task.Job, "host", node.Machine, "profile", hubSpawnArg(node.Args, "-m"), "rc", result.RC, "reason", reason)
+	t.h.kickSpawnPlacement()
+	return true, nil
+}
+
+// retryHarnessAfterClaim keeps the host-bound hk claim while retrying an
+// automatically selected harness whose launch was cleaned up. The host pin,
+// failed profile and unbinding are one durable transition.
+func (t *directSpawnTransport) retryHarnessAfterClaim(ctx context.Context, node hubSpawnRequest, result hubSpawnResult, outcome hubSpawnOutcome) (bool, error) {
+	reason := spawnResultReason(result)
+	switch reason {
+	case "launch_proof_failed", "spawn_failed:hooks_review", "spawn_failed:trust_prompt", "spawn_failed:omp_setup_wizard", "spawn_failed:auth_unavailable":
+	default:
+		return false, nil
+	}
+	postLaunch := result.Stage == "launch" || result.Stage == "landing"
+	previousClaim := spawnPinnedHost(t.task) == node.Machine && spawnStageBeforeJobClaim(result.Stage)
+	if result.RC == 0 || !result.Retryable || !postLaunch && !previousClaim || !t.h.now().Before(t.task.Deadline) || reason == "launch_proof_failed" && result.RC != 70 {
+		return false, nil
+	}
+	spawn, err := fleet.ValidateSubmission(t.task.Request)
+	profile := hubSpawnArg(node.Args, "-m")
+	if err != nil || profile == "" || spawn.Delegated || spawn.Profile != "" && spawn.Profile != "auto" {
+		return false, nil
+	}
+	exclusion := hubSpawnExclusion{Machine: node.Machine, Profile: profile, Reason: reason, RC: result.RC}
+	task, err := t.h.inbox.store.unbindRefusedSpawn(ctx, t.task, exclusion, &outcome)
+	if err != nil {
+		return true, err
+	}
+	t.task, t.bound = task, false
+	t.h.releasePlacementCount(task.Job)
+	t.h.observeLaunchOutcome(node.Machine, profile, result.RC, reason, t.h.now().UTC())
+	t.h.logger.Warn("hub spawn harness refused; trying another on claimed host", "request_id", task.Request.RequestID, "node_request_id", node.RequestID, "job", task.Job, "host", node.Machine, "profile", profile, "rc", result.RC, "reason", reason)
 	t.h.kickSpawnPlacement()
 	return true, nil
 }
@@ -978,7 +1052,14 @@ func (t *directSpawnTransport) settleNodeResult(ctx context.Context, node hubSpa
 		return t.unknown(ctx, "unknown")
 	}
 	h.noteOneTimeActionRefusal(node.Machine, hubSpawnArg(node.Args, "-m"), result)
+	outcome := spawnNodeOutcome(t.task, node, result)
 	if !afterDeadline || !spawnNotStarted(result) {
+		if handled, err := t.retryHarnessAfterClaim(ctx, node, result, outcome); handled {
+			if err != nil {
+				return fleet.HubSpawnReply{}, &fleet.HubError{Kind: "hub_spawn_pending"}
+			}
+			return fleet.HubSpawnReply{RequestID: result.RequestID, RC: result.RC, JobID: result.JobID, StdoutTail: result.StdoutTail, Error: spawnResultReason(result)}, nil
+		}
 		if handled, err := t.nextHostAfterRefusal(ctx, node, result); handled {
 			if err != nil {
 				return fleet.HubSpawnReply{}, &fleet.HubError{Kind: "hub_spawn_pending"}
@@ -986,11 +1067,25 @@ func (t *directSpawnTransport) settleNodeResult(ctx context.Context, node hubSpa
 			return fleet.HubSpawnReply{RequestID: result.RequestID, RC: result.RC, JobID: result.JobID, StdoutTail: result.StdoutTail, Error: spawnResultReason(result), NextHost: true}, nil
 		}
 	}
+	changed, err := h.completeSpawn(h.closeCtx, t.task, outcome)
+	if err != nil {
+		return fleet.HubSpawnReply{}, &fleet.HubError{Kind: "hub_spawn_pending"}
+	}
+	if changed {
+		h.recordSpawnTrace(t.task, outcome)
+		// The first completion of a request is the launch outcome; a
+		// replayed completion must not count twice.
+		h.observeLaunchOutcome(node.Machine, firstNonEmptyString(hubSpawnArg(node.Args, "-m"), outcome.Profile), result.RC, outcome.Reason, h.now().UTC())
+	}
+	return fleet.HubSpawnReply{RequestID: result.RequestID, RC: result.RC, JobID: result.JobID, Pane: result.Pane, StdoutTail: result.StdoutTail, Error: result.Error}, nil
+}
+
+func spawnNodeOutcome(task hubSpawnTask, node hubSpawnRequest, result hubSpawnResult) hubSpawnOutcome {
 	stage := result.Stage
 	if stage == "" {
 		stage = "placement"
 	}
-	outcome := hubSpawnOutcome{RC: result.RC, Stage: stage, Reason: result.Error, Host: node.Machine, Pane: result.Pane, Retryable: result.Retryable, NodeResult: true, StageMS: result.StageMS, Role: hubSpawnArg(node.Args, "--role"), Profile: hubSpawnArg(node.Args, "-m"), E6Arm: t.task.Request.E6Arm}
+	outcome := hubSpawnOutcome{RC: result.RC, Stage: stage, Reason: result.Error, Host: node.Machine, Pane: result.Pane, Retryable: result.Retryable, NodeResult: true, StageMS: result.StageMS, Role: hubSpawnArg(node.Args, "--role"), Profile: hubSpawnArg(node.Args, "-m"), E6Arm: task.Request.E6Arm}
 	if outcome.StageMS == nil {
 		outcome.StageMS = map[string]int64{}
 	}
@@ -1010,17 +1105,7 @@ func (t *directSpawnTransport) settleNodeResult(ctx context.Context, node hubSpa
 	if outcome.RC != 0 {
 		outcome.Reason = spawnOutcomeReason(spawnResultReason(result), spawnResultRefusal(result.StdoutTail))
 	}
-	changed, err := h.completeSpawn(h.closeCtx, t.task, outcome)
-	if err != nil {
-		return fleet.HubSpawnReply{}, &fleet.HubError{Kind: "hub_spawn_pending"}
-	}
-	if changed {
-		h.recordSpawnTrace(t.task, outcome)
-		// The first completion of a request is the launch outcome; a
-		// replayed completion must not count twice.
-		h.observeLaunchOutcome(node.Machine, firstNonEmptyString(hubSpawnArg(node.Args, "-m"), outcome.Profile), result.RC, outcome.Reason, h.now().UTC())
-	}
-	return fleet.HubSpawnReply{RequestID: result.RequestID, RC: result.RC, JobID: result.JobID, Pane: result.Pane, StdoutTail: result.StdoutTail, Error: result.Error}, nil
+	return outcome
 }
 func (t *directSpawnTransport) unknown(ctx context.Context, reason string) (fleet.HubSpawnReply, error) {
 	outcome := hubSpawnOutcome{RC: 75, Stage: "landing", Reason: reason, Host: spawnTaskHost(t.task), E6Arm: t.task.Request.E6Arm}
@@ -1138,6 +1223,9 @@ func (h *HubServer) startSpawnCoordinator(ctx context.Context) {
 
 func (h *HubServer) finishSpawnOutcome(task hubSpawnTask, outcome hubSpawnOutcome) {
 	outcome.E6Arm = task.Request.E6Arm
+	if outcome.Host == "" {
+		outcome.Host = spawnPinnedHost(task)
+	}
 	if changed, _ := h.completeSpawn(h.closeCtx, task, outcome); changed {
 		h.recordSpawnTrace(task, outcome)
 	}
