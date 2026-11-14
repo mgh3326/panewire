@@ -1770,7 +1770,8 @@ node's execution metadata and enqueues it under its deterministic
 attempt is retried across hub restarts, a duplicate delivery is an hk 409
 no-op, and permanent refusals are quarantined as below. The dispatch
 scheduler reads the snapshot back by request id and attempt
-(`spawnPlacementSnapshot`).
+(`spawnPlacementSnapshot`). The hub retries each spooled attempt with that
+attempt's saved delivery settings, even when attempts share a spool directory.
 
 Contacting a remote host does not count as starting a launch. An executor that
 fails after attempting its launch returns `FAILED placement=` metadata; only

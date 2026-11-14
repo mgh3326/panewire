@@ -15,6 +15,16 @@ import (
 
 type retryOnlyOtherHost struct{ retrySource }
 
+// The test starts the deadline only after observing the first node frame.
+type triggeredDeadlineContext struct{ context.Context }
+
+func (c triggeredDeadlineContext) Err() error {
+	if c.Context.Err() != nil {
+		return context.DeadlineExceeded
+	}
+	return nil
+}
+
 func (s retryOnlyOtherHost) Presence(context.Context) ([]fleet.PresenceRecord, error) {
 	return []fleet.PresenceRecord{{HostID: "machine-b", AccountKey: "p:0000000000000001", LastSeen: s.now}}, nil
 }
@@ -54,7 +64,7 @@ func TestNotStartedReplayRespectsPriorHostClaim_t4581(t *testing.T) {
 			defer server.Close()
 			desktop := t14NamedNode(t, h, server, "desktop", true, true)
 			other := t14NamedNode(t, h, server, "machine-b", true, true)
-			deadline := time.Now().Add(600 * time.Millisecond)
+			deadline := time.Now().Add(30 * time.Second)
 			if _, err := h.inbox.store.db.Exec(`UPDATE spawn_operations SET deadline_ms=? WHERE request_id=?`, deadline.UnixMilli(), request.RequestID); err != nil {
 				t.Fatal(err)
 			}
@@ -69,14 +79,18 @@ func TestNotStartedReplayRespectsPriorHostClaim_t4581(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			ctx, cancel := context.WithDeadline(t.Context(), task.Deadline)
-			defer cancel()
+			safety, stopSafety := context.WithTimeout(t.Context(), 10*time.Second)
+			defer stopSafety()
+			waiting, triggerDeadline := context.WithCancel(safety)
+			defer triggerDeadline()
+			ctx := triggeredDeadlineContext{Context: waiting}
 			done := make(chan error, 1)
 			go func() {
 				_, err := (&directSpawnTransport{h: h, task: task, probeWait: 2 * time.Second}).dispatch(ctx, nodeRequest)
 				done <- err
 			}()
 			first := t14ReadNodeSpawn(t, desktop)
+			triggerDeadline()
 			probe := t14ReadNodeSpawn(t, desktop)
 			if probe.RequestID != first.RequestID {
 				t.Fatalf("deadline probe changed node request: %s then %s", first.RequestID, probe.RequestID)

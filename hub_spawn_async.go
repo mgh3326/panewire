@@ -126,7 +126,7 @@ func (h *HubServer) handleSpawnSubmit(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if old.Status == "retryable" {
-			release, lockErr := h.lockPlacementReplay(r.Context(), old)
+			release, lockErr := h.lockPlacementTrace(r.Context(), old, true)
 			if lockErr != nil {
 				writeJSON(w, 503, map[string]string{"error": "store_unavailable"})
 				return
@@ -529,12 +529,23 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 	// every trace the App emits so the record survives the App and a restart.
 	app.PlacementOutbox = true
 	var previous fleet.PlacementTrace
-	if payload, _, _, err := h.inbox.store.spawnPlacementSnapshot(parent, task.Request.RequestID, task.Attempt); err != nil {
+	releaseTrace, err := h.lockPlacementTrace(parent, task, false)
+	if err != nil {
 		return
-	} else if len(payload) != 0 && json.Unmarshal(payload, &previous) != nil {
+	}
+	payload, previousDelivery, _, err := h.inbox.store.spawnPlacementSnapshot(parent, task.Request.RequestID, task.Attempt)
+	if err != nil {
+		releaseTrace()
+		return
+	}
+	if len(payload) != 0 && json.Unmarshal(payload, &previous) != nil {
+		releaseTrace()
 		h.logger.Warn("placement snapshot could not be decoded", "request_id", task.Request.RequestID, "attempt", task.Attempt)
 		return
 	}
+	h.rememberPlacementTraceBase(task.Request.RequestID, task.Attempt, placementDeferredBase{Exists: len(payload) != 0, Payload: payload, Delivery: previousDelivery}, false)
+	releaseTrace()
+	defer h.forgetPlacementTraceBase(task.Request.RequestID, task.Attempt)
 	delivery, _ := json.Marshal(placementDelivery{StateDir: app.StateDir, Home: app.Home, Quota: app.Config.Quota})
 	app.PlacementTrace = func(tr fleet.PlacementTrace) {
 		tr = continueSpawnPlacementTrace(previous, tr, task.Exclusions)

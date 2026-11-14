@@ -413,7 +413,7 @@ func placementTraceFromRecord(r PlacementRecord) PlacementTrace {
 }
 
 // EnqueuePlacementRecord spools a fully built placement record under its
-// deterministic idempotency name and delivers pending records, reporting
+// deterministic idempotency name and delivers that record, reporting
 // whether this record's file left the spool (delivered or quarantined). The
 // hub coordinator's outbox calls it once per attempt; a rewrite of the same
 // name carries an identical payload, and hk answers a reposted job+attempt
@@ -436,15 +436,16 @@ func (a *App) EnqueuePlacementRecord(ctx context.Context, r PlacementRecord) (de
 	if err := atomicFile(path, b, 0600); err != nil {
 		return false, err
 	}
-	a.deliverPlacements(ctx)
+	a.deliverPlacementFile(ctx, filepath.Base(path))
 	_, statErr := os.Stat(path)
 	return os.IsNotExist(statErr), nil
 }
 
-// FlushPlacements delivers every record the spool still holds; the hub calls
-// it so records enqueued before a restart are retried.
-func (a *App) FlushPlacements() {
-	a.flushPlacements()
+// FlushPlacementRecord retries one attempt without sending another attempt's
+// record through this App's delivery settings.
+func (a *App) FlushPlacementRecord(ctx context.Context, job string, attempt int) bool {
+	a.deliverPlacementFile(ctx, job+"."+strconv.Itoa(attempt)+".json")
+	return !a.PlacementSpooled(job, attempt)
 }
 
 // PlacementSpooled reports whether a record file still waits in the spool:
@@ -586,6 +587,11 @@ func permanentPlacementRefusal(status int) bool {
 }
 
 func (a *App) deliverPlacements(ctx context.Context) {
+	a.deliverPlacementFile(ctx, "")
+}
+
+// An empty name retains the regular spool-wide delivery behavior.
+func (a *App) deliverPlacementFile(ctx context.Context, only string) {
 	dir := filepath.Join(a.stateDir(), "placements")
 	if noSymlinks(dir) != nil {
 		return
@@ -621,6 +627,9 @@ func (a *App) deliverPlacements(ctx context.Context) {
 		}
 		ent := entries[(start+offset)%len(entries)]
 		if ent.Type()&os.ModeSymlink != 0 || ent.IsDir() || !strings.HasSuffix(ent.Name(), ".json") {
+			continue
+		}
+		if only != "" && ent.Name() != only {
 			continue
 		}
 		attempted++
