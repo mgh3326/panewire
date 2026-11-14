@@ -110,22 +110,25 @@ func boundSpawnTask(t *testing.T, h *HubServer, req fleet.Submission) hubSpawnTa
 func TestHubPlacementRecordTerminalOutcomes(t *testing.T) {
 	hk := placementOutboxServer(t)
 	for name, tc := range map[string]struct {
-		outcome  hubSpawnOutcome
-		want     string
-		reason   string
-		wantHost string
+		outcome       hubSpawnOutcome
+		want          string
+		reason        string
+		wantHost      string
+		wantCandidate string
 	}{
-		"landed": {hubSpawnOutcome{RC: 0, Stage: "landing", Host: "machine-a", Pane: "pane-7", Profile: "claude-sonnet", Model: "sonnet", Pool: "claude-sub", NodeResult: true}, "placed", "", "machine-a"},
-		"failed": {hubSpawnOutcome{RC: 1, Stage: "landing", Reason: "spawn_failed:launch", Host: "machine-a", NodeResult: true}, "failed", "spawn_failed:launch", "machine-a"},
+		"landed": {hubSpawnOutcome{RC: 0, Stage: "landing", Host: "machine-a", Pane: "pane-7", Profile: "claude-sonnet", Model: "sonnet", Pool: "claude-sub", NodeResult: true}, "placed", "", "machine-a", "chosen"},
+		// A failed launch still marks the bound host chosen: the node
+		// claimed the job, then the launch failed.
+		"failed": {hubSpawnOutcome{RC: 1, Stage: "landing", Reason: "spawn_failed:launch", Host: "machine-a", NodeResult: true}, "failed", "spawn_failed:launch", "machine-a", "chosen"},
 		// Contact is not launch acceptance: a refused record names no host.
-		"refused": {hubSpawnOutcome{RC: 70, Stage: "placement", Reason: "spawn_failed:trust_prompt", Host: "machine-a", NodeResult: true}, "refused", "spawn_failed:trust_prompt", ""},
+		"refused": {hubSpawnOutcome{RC: 70, Stage: "placement", Reason: "spawn_failed:trust_prompt", Host: "machine-a", NodeResult: true}, "refused", "spawn_failed:trust_prompt", "", "refused"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			h := placementOutboxHub(t, filepath.Join(t.TempDir(), "inbox.sqlite3"))
 			req := durableSpawnRequest()
 			req.RequestID = map[string]string{"landed": "d676220b-e763-4af1-aefd-000000000011", "failed": "d676220b-e763-4af1-aefd-000000000012", "refused": "d676220b-e763-4af1-aefd-000000000013"}[name]
 			task := boundSpawnTask(t, h, req)
-			h.notePlacementTrace(task, placementTraceSnapshot())
+			h.notePlacementTrace(task, placementTraceSnapshot(), "")
 			changed, err := h.completeSpawn(t.Context(), task, tc.outcome)
 			if err != nil || !changed {
 				t.Fatalf("completeSpawn changed=%v err=%v", changed, err)
@@ -160,6 +163,9 @@ func TestHubPlacementRecordTerminalOutcomes(t *testing.T) {
 			if chosen == nil || len(candidates) != 2 {
 				t.Fatalf("original trace missing from candidates=%v", candidates)
 			}
+			if got := chosen["outcome"]; got != tc.wantCandidate {
+				t.Fatalf("bound host candidate outcome=%v, want %q (record=%v)", got, tc.wantCandidate, rec)
+			}
 		})
 	}
 }
@@ -171,7 +177,7 @@ func TestHubPlacementRecordSurvivesRestartExactlyOnce(t *testing.T) {
 	req.RequestID = "d676220b-e763-4af1-aefd-000000000014"
 	h1 := placementOutboxHub(t, path)
 	task := boundSpawnTask(t, h1, req)
-	h1.notePlacementTrace(task, placementTraceSnapshot())
+	h1.notePlacementTrace(task, placementTraceSnapshot(), "")
 	// The hub restarts between bind and the node's answer: only the durable
 	// snapshot survives.
 	h1.Close()
@@ -189,7 +195,7 @@ func TestHubPlacementRecordSurvivesRestartExactlyOnce(t *testing.T) {
 	}
 	// A duplicate delivery is a no-op: the recorded flag seals the snapshot.
 	h2.deliverPlacementRecord(t.Context(), req.RequestID, current.Attempt)
-	h2.notePlacementTrace(current, placementTraceSnapshot())
+	h2.notePlacementTrace(current, placementTraceSnapshot(), "")
 	if n := len(hk.records()); n != 1 {
 		t.Fatalf("duplicate delivery produced %d records", n)
 	}
@@ -205,7 +211,7 @@ func TestHubPlacementRecordRebuiltAfterCrashBeforeEnqueue(t *testing.T) {
 	req.RequestID = "d676220b-e763-4af1-aefd-000000000015"
 	h := placementOutboxHub(t, path)
 	task := boundSpawnTask(t, h, req)
-	h.notePlacementTrace(task, placementTraceSnapshot())
+	h.notePlacementTrace(task, placementTraceSnapshot(), "")
 	// Commit the terminal status through the store directly, bypassing the
 	// hub's deliverPlacementRecord hook — the state a crash leaves behind.
 	if _, err := h.inbox.store.completeSpawn(t.Context(), task, hubSpawnOutcome{RC: 0, Stage: "landing", Host: "machine-a", Pane: "pane-7", NodeResult: true}, time.Now().UTC()); err != nil {
@@ -218,7 +224,7 @@ func TestHubPlacementRecordRebuiltAfterCrashBeforeEnqueue(t *testing.T) {
 	if n := len(hk.records()); n != 1 {
 		t.Fatalf("flush produced %d records, want exactly one", n)
 	}
-	_, recorded, err := h.inbox.store.spawnPlacementSnapshot(t.Context(), req.RequestID, task.Attempt)
+	_, _, recorded, err := h.inbox.store.spawnPlacementSnapshot(t.Context(), req.RequestID, task.Attempt)
 	if err != nil || !recorded {
 		t.Fatalf("snapshot recorded=%v err=%v after delivery", recorded, err)
 	}
@@ -227,10 +233,10 @@ func TestHubPlacementRecordRebuiltAfterCrashBeforeEnqueue(t *testing.T) {
 func TestHubPlacementSnapshotLookupByRequestAndAttempt(t *testing.T) {
 	s := openSpawnStore(t, filepath.Join(t.TempDir(), "inbox.sqlite3"))
 	payload, _ := json.Marshal(placementTraceSnapshot())
-	if err := s.saveSpawnPlacementSnapshot(t.Context(), "req-lookup", 2, payload); err != nil {
+	if err := s.saveSpawnPlacementSnapshot(t.Context(), "req-lookup", 2, payload, ""); err != nil {
 		t.Fatal(err)
 	}
-	got, recorded, err := s.spawnPlacementSnapshot(t.Context(), "req-lookup", 2)
+	got, _, recorded, err := s.spawnPlacementSnapshot(t.Context(), "req-lookup", 2)
 	if err != nil || recorded || string(got) != string(payload) {
 		t.Fatalf("snapshot=%s recorded=%v err=%v", got, recorded, err)
 	}
@@ -238,14 +244,14 @@ func TestHubPlacementSnapshotLookupByRequestAndAttempt(t *testing.T) {
 	if err := s.markSpawnPlacementRecorded(t.Context(), "req-lookup", 2); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.saveSpawnPlacementSnapshot(t.Context(), "req-lookup", 2, []byte(`{"stale":true}`)); err != nil {
+	if err := s.saveSpawnPlacementSnapshot(t.Context(), "req-lookup", 2, []byte(`{"stale":true}`), ""); err != nil {
 		t.Fatal(err)
 	}
-	got, recorded, err = s.spawnPlacementSnapshot(t.Context(), "req-lookup", 2)
+	got, _, recorded, err = s.spawnPlacementSnapshot(t.Context(), "req-lookup", 2)
 	if err != nil || !recorded || string(got) != string(payload) {
 		t.Fatalf("sealed snapshot=%s recorded=%v err=%v", got, recorded, err)
 	}
-	if payload, recorded, err := s.spawnPlacementSnapshot(t.Context(), "req-absent", 1); err != nil || recorded || payload != nil {
+	if payload, _, recorded, err := s.spawnPlacementSnapshot(t.Context(), "req-absent", 1); err != nil || recorded || payload != nil {
 		t.Fatalf("absent snapshot=%s recorded=%v err=%v", payload, recorded, err)
 	}
 }

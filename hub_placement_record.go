@@ -35,26 +35,27 @@ const placementRecordDeliveryBudget = 2 * time.Second
 // saveSpawnPlacementSnapshot persists the latest placement trace for an
 // attempt. A row whose record was already produced ignores later writes, so
 // a stale App emission can never rewrite a delivered record's source.
-func (s *laneInboxStore) saveSpawnPlacementSnapshot(parent context.Context, requestID string, attempt int, payload []byte) error {
+func (s *laneInboxStore) saveSpawnPlacementSnapshot(parent context.Context, requestID string, attempt int, payload []byte, delivery string) error {
 	ctx, done := s.op(parent)
 	defer done()
-	_, err := s.db.ExecContext(ctx, s.q(`INSERT INTO spawn_placement_snapshots(request_id,attempt,payload) VALUES(?,?,?) ON CONFLICT(request_id,attempt) DO UPDATE SET payload=excluded.payload WHERE spawn_placement_snapshots.recorded=0`), requestID, attempt, string(payload))
+	_, err := s.db.ExecContext(ctx, s.q(`INSERT INTO spawn_placement_snapshots(request_id,attempt,payload,delivery) VALUES(?,?,?,?) ON CONFLICT(request_id,attempt) DO UPDATE SET payload=excluded.payload,delivery=excluded.delivery WHERE spawn_placement_snapshots.recorded=0`), requestID, attempt, string(payload), delivery)
 	return err
 }
 
-// spawnPlacementSnapshot reads the persisted placement trace of one attempt
-// and whether its record was already produced. The dispatch scheduler
-// (hk 4581) looks attempts up by request id and attempt through this method.
-func (s *laneInboxStore) spawnPlacementSnapshot(parent context.Context, requestID string, attempt int) (payload []byte, recorded bool, err error) {
+// spawnPlacementSnapshot reads the persisted placement trace of one attempt,
+// its placing App's delivery settings, and whether its record was already
+// produced. The dispatch scheduler (hk 4581) looks attempts up by request id
+// and attempt through this method.
+func (s *laneInboxStore) spawnPlacementSnapshot(parent context.Context, requestID string, attempt int) (payload []byte, delivery string, recorded bool, err error) {
 	ctx, done := s.op(parent)
 	defer done()
 	var raw string
 	var marked int
-	err = s.db.QueryRowContext(ctx, s.q(`SELECT payload,recorded FROM spawn_placement_snapshots WHERE request_id=? AND attempt=?`), requestID, attempt).Scan(&raw, &marked)
+	err = s.db.QueryRowContext(ctx, s.q(`SELECT payload,delivery,recorded FROM spawn_placement_snapshots WHERE request_id=? AND attempt=?`), requestID, attempt).Scan(&raw, &delivery, &marked)
 	if err == sql.ErrNoRows {
-		return nil, false, nil
+		return nil, "", false, nil
 	}
-	return []byte(raw), marked == 1, err
+	return []byte(raw), delivery, marked == 1, err
 }
 
 // markSpawnPlacementRecorded seals an attempt's snapshot after its record is
@@ -74,6 +75,7 @@ type pendingPlacementSnapshot struct {
 	Status         string
 	CurrentAttempt int
 	Payload        []byte
+	Delivery       string
 }
 
 // pendingPlacementSnapshots lists the attempts whose records are not yet
@@ -81,7 +83,7 @@ type pendingPlacementSnapshot struct {
 func (s *laneInboxStore) pendingPlacementSnapshots(parent context.Context) ([]pendingPlacementSnapshot, error) {
 	ctx, done := s.op(parent)
 	defer done()
-	rows, err := s.db.QueryContext(ctx, `SELECT p.request_id,p.attempt,o.job,o.status,o.attempt,p.payload FROM spawn_placement_snapshots p JOIN spawn_operations o ON o.request_id=p.request_id WHERE p.recorded=0`)
+	rows, err := s.db.QueryContext(ctx, `SELECT p.request_id,p.attempt,o.job,o.status,o.attempt,p.payload,p.delivery FROM spawn_placement_snapshots p JOIN spawn_operations o ON o.request_id=p.request_id WHERE p.recorded=0`)
 	if err != nil {
 		return nil, err
 	}
@@ -89,7 +91,7 @@ func (s *laneInboxStore) pendingPlacementSnapshots(parent context.Context) ([]pe
 	var out []pendingPlacementSnapshot
 	for rows.Next() {
 		var row pendingPlacementSnapshot
-		if err := rows.Scan(&row.RequestID, &row.Attempt, &row.Job, &row.Status, &row.CurrentAttempt, &row.Payload); err != nil {
+		if err := rows.Scan(&row.RequestID, &row.Attempt, &row.Job, &row.Status, &row.CurrentAttempt, &row.Payload, &row.Delivery); err != nil {
 			return nil, err
 		}
 		out = append(out, row)
@@ -104,9 +106,11 @@ func (p pendingPlacementSnapshot) attemptOver() bool {
 }
 
 // notePlacementTrace persists the latest placement trace a hub spawn's App
-// emits. When the attempt's terminal result is already recorded — the App's
-// final emission follows the node's answer — it delivers from this snapshot.
-func (h *HubServer) notePlacementTrace(task hubSpawnTask, tr fleet.PlacementTrace) {
+// emits, together with the App's delivery settings so the record posts the
+// way this attempt's own App would have. When the attempt's terminal result
+// is already recorded — the App's final emission follows the node's answer —
+// it delivers from this snapshot.
+func (h *HubServer) notePlacementTrace(task hubSpawnTask, tr fleet.PlacementTrace, delivery string) {
 	if h.inbox == nil || task.Request.RequestID == "" {
 		return
 	}
@@ -114,7 +118,7 @@ func (h *HubServer) notePlacementTrace(task hubSpawnTask, tr fleet.PlacementTrac
 	if err != nil {
 		return
 	}
-	if err := h.inbox.store.saveSpawnPlacementSnapshot(h.closeCtx, task.Request.RequestID, task.Attempt, payload); err != nil {
+	if err := h.inbox.store.saveSpawnPlacementSnapshot(h.closeCtx, task.Request.RequestID, task.Attempt, payload, delivery); err != nil {
 		h.logger.Warn("placement snapshot could not be persisted", "request_id", task.Request.RequestID, "job", task.Job, "attempt", task.Attempt)
 		return
 	}
@@ -143,7 +147,7 @@ func (h *HubServer) deliverPlacementRecord(ctx context.Context, requestID string
 	}
 	ctx, cancel := context.WithTimeout(ctx, placementRecordDeliveryBudget)
 	defer cancel()
-	payload, recorded, err := h.inbox.store.spawnPlacementSnapshot(ctx, requestID, attempt)
+	payload, delivery, recorded, err := h.inbox.store.spawnPlacementSnapshot(ctx, requestID, attempt)
 	if err != nil {
 		h.logger.Warn("placement snapshot could not be read", "request_id", requestID, "attempt", attempt)
 		return
@@ -165,14 +169,12 @@ func (h *HubServer) deliverPlacementRecord(ctx context.Context, requestID string
 		// rebuilt: the operation's outcome now belongs to a newer attempt.
 		return
 	}
-	app, err := h.placementRecordApp()
+	app, err := h.placementRecordApp(delivery)
 	if err != nil {
 		h.logger.Warn("placement record delivery unavailable; snapshot remains pending", "request_id", requestID, "attempt", attempt)
 		return
 	}
-	rec := hubPlacementRecord(task, tr)
-	rec.Attempt = attempt
-	delivered, err := app.EnqueuePlacementRecord(ctx, rec)
+	delivered, err := app.EnqueuePlacementRecord(ctx, hubPlacementRecord(task, tr, attempt))
 	if err != nil {
 		h.logger.Warn("placement record could not be enqueued; snapshot remains pending", "request_id", requestID, "attempt", attempt, "error", err)
 		return
@@ -192,10 +194,16 @@ func (h *HubServer) deliverPlacementRecord(ctx context.Context, requestID string
 // is posted as built. Otherwise the verdict comes from the outcome: a landed
 // job is placed, a refusal before the node's hk job claim is refused, and
 // anything past it failed.
-func hubPlacementRecord(task hubSpawnTask, tr fleet.PlacementTrace) fleet.PlacementRecord {
+func hubPlacementRecord(task hubSpawnTask, tr fleet.PlacementTrace, attempt int) fleet.PlacementRecord {
 	o := task.Outcome
+	if task.Attempt != attempt {
+		// The row's outcome belongs to a newer attempt; a superseded
+		// attempt is only rebuilt from a self-contained trace, so its
+		// execution fields come from the trace alone.
+		o = hubSpawnOutcome{}
+	}
 	rec := fleet.PlacementRecord{
-		JobID: task.Job, Attempt: task.Attempt, TaskID: tr.TaskID,
+		JobID: task.Job, Attempt: attempt, TaskID: tr.TaskID,
 		DecidedAt: tr.DecidedAt, ToolVersion: fleet.BuildVersion,
 		Source: tr.Source, Ranking: tr.Ranking, StateSource: tr.StateSource,
 		Outcome: tr.Outcome, Reason: tr.Reason,
@@ -224,14 +232,18 @@ func hubPlacementRecord(task hubSpawnTask, tr fleet.PlacementTrace) fleet.Placem
 		rec.Outcome, rec.Reason = "refused", o.Reason
 	}
 	// The host the attempt bound is its candidate: mark it in the trace, or
-	// add the contacted-host row a pre-plan trace never listed.
+	// add the contacted-host row a pre-plan trace never listed. A placed or
+	// failed record keeps the host chosen (a failed verdict means the node
+	// claimed the job; the launch failed after), as finishPlacement does;
+	// only a refused verdict downgrades the row.
+	chosen := rec.Outcome != "refused"
 	marked := false
 	for i := range rec.Candidates {
 		if rec.Candidates[i].Host != rec.Host || rec.Host == "" {
 			continue
 		}
 		marked = true
-		if rec.Outcome == "placed" {
+		if chosen {
 			rec.Candidates[i].Outcome, rec.Candidates[i].Reason = "chosen", "available"
 		} else {
 			rec.Candidates[i].Outcome, rec.Candidates[i].Reason = "refused", rec.Reason
@@ -239,7 +251,7 @@ func hubPlacementRecord(task hubSpawnTask, tr fleet.PlacementTrace) fleet.Placem
 	}
 	if !marked && rec.Host != "" {
 		outcome, reason := "refused", rec.Reason
-		if rec.Outcome == "placed" {
+		if chosen {
 			outcome, reason = "chosen", "available"
 		}
 		rec.Candidates = append(rec.Candidates, fleet.PlacementCandidateRecord{Host: rec.Host, Outcome: outcome, Reason: reason})
@@ -255,32 +267,25 @@ func hubPlacementRecord(task hubSpawnTask, tr fleet.PlacementTrace) fleet.Placem
 	return rec
 }
 
-// placementDelivery holds the spawn App's delivery-relevant settings: the
+// placementDelivery holds the placing App's delivery-relevant settings: the
 // state directory the placement spool lives in and the shared-quota override
-// that points the record post at the right hk. The queue core's App may be
-// gone before the node replies, so the outbox rebuilds its own.
+// that points the record post at the right hk. It is persisted on the
+// attempt's snapshot row, so the record posts the way its own App would
+// have, even beside a concurrent spawn with different settings.
 type placementDelivery struct {
-	stateDir string
-	home     string
-	quota    map[string]any
-}
-
-// notePlacementDeliveryApp copies the spawn App's delivery settings so the
-// outbox posts through the same hk endpoint and spools in the same state
-// directory the App would have used.
-func (h *HubServer) notePlacementDeliveryApp(app *fleet.App) {
-	h.placementAppMu.Lock()
-	defer h.placementAppMu.Unlock()
-	h.placementDelivery = placementDelivery{stateDir: app.StateDir, home: app.Home, quota: app.Config.Quota}
+	StateDir string         `json:"state_dir,omitempty"`
+	Home     string         `json:"home,omitempty"`
+	Quota    map[string]any `json:"quota,omitempty"`
 }
 
 // placementRecordApp returns the fleet App whose state directory holds the
-// placement spool and whose hk client delivers the records. It is created on
-// first use; a hub restart builds a fresh one.
-func (h *HubServer) placementRecordApp() (*fleet.App, error) {
+// placement spool and whose hk client delivers the records, built for the
+// delivery settings the placing App persisted. Clients are cached per
+// delivery JSON; a different one builds a fresh App.
+func (h *HubServer) placementRecordApp(delivery string) (*fleet.App, error) {
 	h.placementAppMu.Lock()
 	defer h.placementAppMu.Unlock()
-	if h.placementRecordClient != nil {
+	if h.placementRecordClient != nil && h.placementDeliveryKey == delivery {
 		return h.placementRecordClient, nil
 	}
 	build := h.placementAppFn
@@ -291,17 +296,20 @@ func (h *HubServer) placementRecordApp() (*fleet.App, error) {
 	if err != nil {
 		return nil, err
 	}
-	d := h.placementDelivery
-	if d.stateDir != "" {
-		app.StateDir = d.stateDir
-	}
-	if d.home != "" {
-		app.Home = d.home
-	}
-	if d.quota != nil {
-		app.Config.Quota = d.quota
+	var d placementDelivery
+	if json.Unmarshal([]byte(delivery), &d) == nil {
+		if d.StateDir != "" {
+			app.StateDir = d.StateDir
+		}
+		if d.Home != "" {
+			app.Home = d.Home
+		}
+		if d.Quota != nil {
+			app.Config.Quota = d.Quota
+		}
 	}
 	h.placementRecordClient = app
+	h.placementDeliveryKey = delivery
 	return app, nil
 }
 
@@ -324,11 +332,22 @@ func (h *HubServer) flushPlacementRecords(ctx context.Context) {
 	if !h.pendingPlacementRecords(ctx) {
 		return
 	}
-	app, err := h.placementRecordApp()
-	if err != nil {
+	pending, err := h.inbox.store.pendingPlacementSnapshots(h.closeCtx)
+	if err != nil || len(pending) == 0 {
 		return
 	}
-	app.FlushPlacements()
+	// Records still spooled retry delivery under the delivery settings their
+	// own attempt persisted.
+	flushed := map[string]bool{}
+	for _, row := range pending {
+		if flushed[row.Delivery] {
+			continue
+		}
+		flushed[row.Delivery] = true
+		if app, err := h.placementRecordApp(row.Delivery); err == nil {
+			app.FlushPlacements()
+		}
+	}
 	// Reconcile pending snapshots against the spool. A file still present
 	// keeps its row pending so the next tick retries delivery; a live attempt
 	// has no file yet and must never be sealed. A terminal attempt with no
@@ -338,12 +357,15 @@ func (h *HubServer) flushPlacementRecords(ctx context.Context) {
 	// record — hk dedupes the repost — and let its own mark seal it. Only an
 	// attempt that is over but owes no rebuildable record (superseded, its
 	// outcome already overwritten by a newer attempt) is sealed here.
-	pending, err := h.inbox.store.pendingPlacementSnapshots(h.closeCtx)
-	if err != nil {
-		return
-	}
 	for _, row := range pending {
-		if !row.attemptOver() || app.PlacementSpooled(row.Job, row.Attempt) {
+		if !row.attemptOver() {
+			continue
+		}
+		app, err := h.placementRecordApp(row.Delivery)
+		if err != nil {
+			continue
+		}
+		if app.PlacementSpooled(row.Job, row.Attempt) {
 			continue
 		}
 		if spawnAttemptTerminal(row.Status) && row.CurrentAttempt == row.Attempt {
