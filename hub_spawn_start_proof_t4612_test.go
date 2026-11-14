@@ -439,6 +439,10 @@ func TestSpawnGrantRequiredStatusHiddenFromOlderHubsAndClients_t4612(t *testing.
 	server := httptest.NewServer(h.Handler())
 	defer server.Close()
 	task, _ := startProofTask(t, h, 461270, true)
+	if stored := startProofStoredStatus(t, h, task.Request.RequestID); stored != "bound_grant" || task.Status != "bound" {
+		t.Fatalf("bound: stored=%q read=%q, want bound_grant and bound", stored, task.Status)
+	}
+	startProofOlderHubMatchesNone(t, h, task.Request.RequestID)
 	sent := sentSpawnFixture(t, h.inbox.store, task)
 	if stored := startProofStoredStatus(t, h, task.Request.RequestID); stored != "dispatching_grant" {
 		t.Fatalf("stored status=%q, want dispatching_grant", stored)
@@ -446,27 +450,82 @@ func TestSpawnGrantRequiredStatusHiddenFromOlderHubsAndClients_t4612(t *testing.
 	if sent.Status != "dispatching" {
 		t.Fatalf("store read status=%q, want dispatching", sent.Status)
 	}
-	// The status predicates of every v0.0.404 spawn_operations query that
-	// replays, sweeps, reports or releases.
-	for _, where := range []string{
-		`status IN ('accepted','bound','dispatching','reconciling')`,
-		`status='deadline_exceeded'`,
-		`status IN ('accepted','bound','dispatching','reconciling','deadline_exceeded')`,
-		`(status IN ('bound','dispatching','reconciling','succeeded') OR status='deadline_exceeded')`,
-		`status IN ('accepted','bound','dispatching') OR status='succeeded'`,
-		`status IN ('succeeded','failed')`,
-		`status IN ('staged','retryable')`,
-	} {
-		var n int
-		if err := h.inbox.store.db.QueryRow(`SELECT count(*) FROM spawn_operations WHERE request_id=? AND (`+where+`)`, task.Request.RequestID).Scan(&n); err != nil || n != 0 {
-			t.Fatalf("an older hub's %s matches the grant-required row: n=%d err=%v", where, n, err)
-		}
-	}
+	startProofOlderHubMatchesNone(t, h, task.Request.RequestID)
 	status, _, body := t14HTTP(t, http.MethodGet, server.URL+"/v1/spawns/"+task.Request.RequestID, t14OperatorToken, nil)
 	var reply struct {
 		Status string `json:"status"`
 	}
 	if status != http.StatusOK || json.Unmarshal(body, &reply) != nil || reply.Status != "dispatching" {
 		t.Fatalf("GET /v1/spawns/<id>: HTTP %d %s, want status dispatching", status, body)
+	}
+}
+
+// startProofOlderHubMatchesNone runs the status predicate of every v0.0.404
+// spawn_operations query that binds, sends, replays, sweeps, reports or
+// releases against the row.
+func startProofOlderHubMatchesNone(t *testing.T, h *HubServer, requestID string) {
+	t.Helper()
+	for _, where := range []string{
+		`status IN ('accepted','bound','dispatching','reconciling')`,
+		`status='deadline_exceeded'`,
+		`status IN ('accepted','bound','dispatching','reconciling','deadline_exceeded')`,
+		`status IN ('bound','dispatching','reconciling','deadline_exceeded')`,
+		`(status IN ('bound','dispatching','reconciling','succeeded') OR status='deadline_exceeded')`,
+		`status IN ('accepted','bound','dispatching') OR status='succeeded'`,
+		`status IN ('succeeded','failed')`,
+		`status IN ('staged','retryable')`,
+	} {
+		var n int
+		if err := h.inbox.store.db.QueryRow(`SELECT count(*) FROM spawn_operations WHERE request_id=? AND (`+where+`)`, requestID).Scan(&n); err != nil || n != 0 {
+			t.Fatalf("an older hub's %s matches the grant-required row: n=%d err=%v", where, n, err)
+		}
+	}
+}
+
+// A grant-required row that an older hub moved to a plain sent status (it
+// sent the frame with no start_by) is never treated as grant-required again:
+// the replay carries no start_by, the claim is refused, it is never fenced and
+// a later write keeps the plain status.
+func TestSpawnLegacySentGrantRowIsNeverFenced_t4612(t *testing.T) {
+	retryHK(t)
+	path := filepath.Join(t.TempDir(), "inbox.sqlite3")
+	first := startProofHub(t, path)
+	task, node := startProofTask(t, first, 461271, true)
+	// What v0.0.404 does to a bound row it sends.
+	if _, err := first.inbox.store.db.Exec(`UPDATE spawn_operations SET status='dispatching' WHERE request_id=?`, task.Request.RequestID); err != nil {
+		t.Fatal(err)
+	}
+	_ = first.Close()
+	h := startProofHub(t, path)
+	server := httptest.NewServer(h.Handler())
+	defer server.Close()
+	desktop := startProofNode(t, h, server, "desktop", []string{"spawn_v2", "spawn_ops_v1", hubCapabilitySpawnGrant})
+	saved, err := h.inbox.store.spawnTask(t.Context(), task.Request.RequestID)
+	if err != nil || saved.Status != "dispatching" || saved.Node == nil || saved.Node.GrantRequired {
+		t.Fatalf("legacy-sent row read as %+v err=%v, want dispatching without grant_required", saved.Node, err)
+	}
+	if granted, err := h.inbox.store.decideSpawnGrant(t.Context(), node.RequestID, "desktop", time.Now()); err != nil || granted {
+		t.Fatalf("legacy-sent row granted=%v err=%v", granted, err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { defer close(done); h.executeSpawnTask(ctx, saved) }()
+	if frame := t14ReadNodeSpawn(t, desktop); frame.StartByMS != 0 {
+		t.Fatalf("legacy-sent replay carried start_by_ms=%d", frame.StartByMS)
+	}
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		// Window that proves nothing more happens: 200 ms start_by + 100 ms
+		// margin passed many times over without a fence.
+		cancel()
+		<-done
+	}
+	if fenced, err := h.inbox.store.spawnAttemptFenced(t.Context(), node.RequestID); err != nil || fenced {
+		t.Fatalf("legacy-sent row fenced=%v err=%v", fenced, err)
+	}
+	if stored := startProofStoredStatus(t, h, task.Request.RequestID); stored != "dispatching" {
+		t.Fatalf("legacy-sent row stored=%q, want plain dispatching", stored)
 	}
 }

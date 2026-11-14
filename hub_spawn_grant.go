@@ -26,8 +26,8 @@ const (
 	defaultSpawnStartByMargin = 30 * time.Second
 )
 
-// A sent grant-required attempt is stored under its own status values, the
-// sent statuses plus spawnGrantStatusSuffix. A hub older than the start proof
+// A bound or sent grant-required attempt is stored under its own status
+// values, those statuses plus spawnGrantStatusSuffix. A hub older than the start proof
 // lists none of them, so after a rollback it never replays such an attempt
 // (it would send a frame without start_by, which a node starts with no grant),
 // never sweeps it and never releases its reservation: it holds the row until a
@@ -39,7 +39,7 @@ const spawnGrantStatusSuffix = "_grant"
 func spawnStoredStatus(status string, node *hubSpawnRequest) string {
 	if node != nil && node.GrantRequired {
 		switch status {
-		case "dispatching", "reconciling", "deadline_exceeded":
+		case "bound", "dispatching", "reconciling", "deadline_exceeded":
 			return status + spawnGrantStatusSuffix
 		}
 	}
@@ -49,7 +49,7 @@ func spawnStoredStatus(status string, node *hubSpawnRequest) string {
 // spawnLogicalStatus maps a stored status back to the one it refines.
 func spawnLogicalStatus(stored string) string {
 	switch stored {
-	case "dispatching_grant", "reconciling_grant", "deadline_exceeded_grant":
+	case "bound_grant", "dispatching_grant", "reconciling_grant", "deadline_exceeded_grant":
 		return strings.TrimSuffix(stored, spawnGrantStatusSuffix)
 	}
 	return stored
@@ -77,13 +77,14 @@ func (s *laneInboxStore) decideSpawnGrant(parent context.Context, nodeID, machin
 	if err != nil {
 		return false, err
 	}
-	status = spawnLogicalStatus(status)
+	// Only a row stored under a sent grant status went out with start_by:
+	// one an older hub moved to a plain status is never granted.
 	var node hubSpawnRequest
 	if json.Unmarshal([]byte(payload), &node) != nil || !node.GrantRequired || node.Machine != machine {
 		return false, nil
 	}
 	switch status {
-	case "dispatching", "reconciling", "deadline_exceeded":
+	case "dispatching_grant", "reconciling_grant", "deadline_exceeded_grant":
 	default:
 		return false, nil
 	}
