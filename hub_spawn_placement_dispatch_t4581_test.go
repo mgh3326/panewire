@@ -311,7 +311,7 @@ func TestLegacyPlacementReconciliation_t4581(t *testing.T) {
 }
 
 func TestLegacyPlacementLookupFailure_t4581(t *testing.T) {
-	for _, name := range []string{"unavailable without a snapshot", "duplicate key", "incomplete list", "malformed key", "snapshot changes during lookup"} {
+	for _, name := range []string{"unavailable without a snapshot", "duplicate key", "incomplete list", "malformed key", "missing version field", "snapshot changes during lookup"} {
 		t.Run(name, func(t *testing.T) {
 			hk := placementOutboxServer(t)
 			hub := placementOutboxHub(t, filepath.Join(t.TempDir(), "inbox.sqlite3"))
@@ -350,6 +350,14 @@ func TestLegacyPlacementLookupFailure_t4581(t *testing.T) {
 				}
 			case "malformed key":
 				hk.lookup = []fleet.PlacementRecord{{Attempt: task.Attempt}}
+			case "missing version field":
+				hk.lookup = []fleet.PlacementRecord{{
+					JobID: task.Job, Attempt: task.Attempt, TaskID: 42, DecidedAt: trace.DecidedAt,
+					Source: "auto", Ranking: "score", StateSource: "hub", Outcome: "failed", Reason: "spawn_failed",
+					Candidates:         trace.Candidates,
+					PlacementExecution: fleet.PlacementExecution{Host: "machine-a", Family: "claude", Profile: "claude-sonnet", Pool: "claude-sub", Role: "worker"},
+				}}
+				hk.lookupOmitVersion = true
 			case "snapshot changes during lookup":
 				newer := placementTraceSnapshot()
 				newer.Chosen = "machine-b"

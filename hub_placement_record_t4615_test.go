@@ -20,17 +20,19 @@ import (
 // attempt reaches a terminal result.
 
 type placementOutboxHK struct {
-	mu           sync.Mutex
-	requests     []map[string]any
-	lookup       []fleet.PlacementRecord
-	gets         int
-	lookupStatus int
-	lookupHook   func()
-	lookupHold   <-chan struct{}
-	methods      []string
-	lookupJob    string
-	lookupJobs   []string
-	server       *httptest.Server
+	mu                 sync.Mutex
+	requests           []map[string]any
+	lookup             []fleet.PlacementRecord
+	gets               int
+	lookupStatus       int
+	lookupHook         func()
+	lookupHold         <-chan struct{}
+	lookupOmitVersion  bool
+	lookupRequireSince bool
+	methods            []string
+	lookupJob          string
+	lookupJobs         []string
+	server             *httptest.Server
 }
 
 func placementOutboxServer(t *testing.T) *placementOutboxHK {
@@ -46,6 +48,8 @@ func placementOutboxServer(t *testing.T) *placementOutboxHK {
 			status := h.lookupStatus
 			hook := h.lookupHook
 			hold := h.lookupHold
+			omitVersion := h.lookupOmitVersion
+			requireSince := h.lookupRequireSince
 			h.lookupHook = nil
 			found := append([]fleet.PlacementRecord{}, h.lookup...)
 			h.mu.Unlock()
@@ -63,6 +67,24 @@ func placementOutboxServer(t *testing.T) *placementOutboxHK {
 			if status != 0 {
 				w.WriteHeader(status)
 				return
+			}
+			if requireSince && r.URL.Query().Get("since") != "0001-01-01T00:00:00Z" {
+				found = nil
+			}
+			if omitVersion {
+				rows := make([]map[string]any, 0, len(found))
+				for _, record := range found {
+					b, _ := json.Marshal(record)
+					var row map[string]any
+					_ = json.Unmarshal(b, &row)
+					delete(row, "tool_version")
+					rows = append(rows, row)
+				}
+				writeJSON(w, http.StatusOK, map[string]any{"placements": rows})
+				return
+			}
+			if found == nil {
+				found = []fleet.PlacementRecord{}
 			}
 			writeJSON(w, http.StatusOK, map[string]any{"placements": found})
 			return

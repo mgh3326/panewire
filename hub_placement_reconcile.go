@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
+	"time"
 
 	"github.com/mgh3326/panewire/internal/fleet"
 )
@@ -82,7 +84,7 @@ func (h *HubServer) recoverDeferredPlacementSnapshot(parent context.Context, d p
 		// A pending operation has no final result to compare, and an old
 		// attempt needs a self-contained finished record of its own.
 		comparable := task.Attempt == d.Attempt && spawnAttemptTerminal(task.Status) || task.Attempt != d.Attempt && merged.Record != nil
-		if !comparable || !samePlacementRecord(*remote, hubPlacementRecord(task, merged, d.Attempt)) {
+		if !comparable || !sameLegacyPlacementRecord(task, merged, d.Attempt, *remote) {
 			h.noticeLegacyPlacementConflict(ctx, task, d.Attempt)
 			return false, base, errors.New(legacyPlacementRecordConflict)
 		}
@@ -112,6 +114,25 @@ func (h *HubServer) recoverDeferredPlacementSnapshot(parent context.Context, d p
 	return true, observed, nil
 }
 
+// A flat legacy trace never recorded the producer version. Only in that
+// case is hk authoritative for the version; a finished local record must
+// match in full, including its original version. The terminal operation also
+// remains authoritative if a stale finished trace lost a timeout race.
+func sameLegacyPlacementRecord(task hubSpawnTask, trace fleet.PlacementTrace, attempt int, remote fleet.PlacementRecord) bool {
+	version := remote.ToolVersion
+	if trace.Record != nil {
+		finished := *trace.Record
+		finished.JobID, finished.Attempt = task.Job, attempt
+		if !samePlacementRecord(remote, finished) {
+			return false
+		}
+		version = finished.ToolVersion
+	}
+	expected := hubPlacementRecord(task, trace, attempt)
+	expected.ToolVersion = version
+	return samePlacementRecord(remote, expected)
+}
+
 func (s *laneInboxStore) sealReconciledPlacement(parent context.Context, requestID string, attempt int, payload []byte, delivery string) error {
 	ctx, done := s.op(parent)
 	defer done()
@@ -129,12 +150,20 @@ func (s *laneInboxStore) sealReconciledPlacement(parent context.Context, request
 }
 
 func samePlacementRecord(a, b fleet.PlacementRecord) bool {
-	left, err := json.Marshal(a)
+	// hk stores and compares decided_at at microsecond precision.
+	at, err := time.Parse(time.RFC3339Nano, a.DecidedAt)
 	if err != nil {
 		return false
 	}
-	right, err := json.Marshal(b)
-	return err == nil && string(left) == string(right)
+	bt, err := time.Parse(time.RFC3339Nano, b.DecidedAt)
+	if err != nil {
+		return false
+	}
+	a.DecidedAt = at.UTC().Truncate(time.Microsecond).Format(time.RFC3339Nano)
+	b.DecidedAt = bt.UTC().Truncate(time.Microsecond).Format(time.RFC3339Nano)
+	// Kind is an in-process receipt tag and is not part of the hk record.
+	a.Kind, b.Kind = "", ""
+	return reflect.DeepEqual(a, b)
 }
 
 // The existing spawn-notification outbox makes the owner notice durable and

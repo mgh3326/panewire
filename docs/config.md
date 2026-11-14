@@ -1790,9 +1790,12 @@ For a legacy deferred trace without a saved base or a spooled record, the hub
 first looks up the existing hk record by job and attempt. An absent record
 allows the hub to merge the candidate traces and post once the attempt is
 terminal; an equal final record seals the local snapshot without another
-POST. A different record holds the attempt and the deferred trace and sends
-the owner a `legacy_placement_record_conflict` notice. Lookup errors leave the
-attempt held until its existing record can be checked.
+POST. A flat legacy trace has no producer version, so the existing hk version
+is authoritative when all reconstructible fields agree. A finished local
+record is compared in full, including version. A different record holds the
+attempt and the deferred trace and sends the owner a
+`legacy_placement_record_conflict` notice. Lookup errors leave the attempt
+held until its existing record can be checked.
 
 Delivery uses the existing hk client and `[quota]` URL and credentials. Each
 delivery pass has a two-second budget and cannot change the spawn result.

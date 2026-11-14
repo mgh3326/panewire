@@ -244,8 +244,12 @@ legacy deferred trace with no saved base and no spooled record is checked
 against hk by its existing job and attempt before it is reconciled. If hk has
 no record, the hub merges the traces and posts the final record only after the
 attempt ends. If hk already has the same final record, the hub seals its local
-snapshot without posting again. A different record leaves the attempt held and
-the trace on disk, and sends its owner a durable
+snapshot without posting again. A flat legacy trace does not contain the
+producer version, so hk's existing version is authoritative when every
+reconstructible field matches. A finished local record is compared in full,
+including its version. Timestamps compare at hk's stored microsecond
+precision, and the lookup includes all retained rows. A different record
+leaves the attempt held and the trace on disk, and sends its owner a durable
 `legacy_placement_record_conflict` notice. An unavailable or incomplete hk
 lookup also leaves the trace held. A pending attempt cannot be compared to an
 existing final record and remains held for inspection. Deferred recovery has

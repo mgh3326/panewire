@@ -105,10 +105,17 @@ func (a *App) LookupPlacementRecord(ctx context.Context, job string, attempt int
 		return nil, err
 	}
 	const limit = 1000
-	var response struct {
-		Placements *[]PlacementRecord `json:"placements"`
+	type lookupRecord struct {
+		PlacementRecord
+		ToolVersion *string `json:"tool_version"`
 	}
-	path := "/v1/placements?job=" + url.QueryEscape(job) + "&limit=" + strconv.Itoa(limit)
+	var response struct {
+		Placements *[]lookupRecord `json:"placements"`
+	}
+	// hk's default omits records older than its retention window even when a
+	// backlog has not purged them yet. Absence needs the whole retained log.
+	query := url.Values{"job": {job}, "limit": {strconv.Itoa(limit)}, "since": {"0001-01-01T00:00:00Z"}}
+	path := "/v1/placements?" + query.Encode()
 	if err := client.get(ctx, path, &response); err != nil {
 		return nil, err
 	}
@@ -116,7 +123,12 @@ func (a *App) LookupPlacementRecord(ctx context.Context, job string, attempt int
 		return nil, errors.New("handoffkeep placement list is missing")
 	}
 	var found *PlacementRecord
-	for _, record := range *response.Placements {
+	for _, row := range *response.Placements {
+		if row.ToolVersion == nil {
+			return nil, errors.New("handoffkeep placement version is missing")
+		}
+		record := row.PlacementRecord
+		record.ToolVersion = *row.ToolVersion
 		if record.JobID == "" || record.Attempt < 1 {
 			return nil, errors.New("handoffkeep placement key is invalid")
 		}
