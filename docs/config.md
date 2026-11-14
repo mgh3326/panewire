@@ -779,7 +779,10 @@ Other spawn failures retain their normal cleanup behavior.
 An implementer spawn with `--parent-job` replaces its parent job. After the
 successor's `job.spawned` event commits, it attempts to move the task's claim
 and `refs.job_id` from the parent to the new job through `handoffkeep tasks
-rebind`, regardless of the parent's state. The parent pane is left running.
+rebind`, regardless of the parent's state. When the task is still bound to an
+earlier job in the parent's `--parent-job` chain, the successor follows the
+chain and rebinds from that ancestor holder; unrelated holders are refused.
+The parent pane is left running.
 Only implementer spawns take over; reviewer and consult children do not. Spawns with `--task`, or neither flag and
 no `ARBITER_JOB`, claim as before.
 

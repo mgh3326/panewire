@@ -9,7 +9,9 @@ import (
 	"github.com/mgh3326/panewire/internal/fleet"
 )
 
-func TestLoginScreenAuthUnavailableMovesToNextHostT3891(t *testing.T) {
+// The login screen is seen after the node's hk job claim, so the refusal ends
+// the operation on that host (hk 4614); the desk still gets its one-time notice.
+func TestLoginScreenAuthUnavailableEndsOnTheHostT3891(t *testing.T) {
 	nodeResult, _, _ := t3891RunHubSpawn(t, "agy-flash38-medium", true, t3891AgyLoginScreen)
 	h, _, destination := spawnNotifyHubLane(t, "", "operator-desk")
 	server := httptest.NewServer(h.Handler())
@@ -35,16 +37,16 @@ func TestLoginScreenAuthUnavailableMovesToNextHostT3891(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := <-first
-	if got.err != nil || !got.reply.NextHost || got.reply.RC != t3891AuthUnavailableRC {
-		t.Fatalf("placement was not handed the refusal: %+v", got)
+	if got.err != nil || got.reply.NextHost || got.reply.RC != t3891AuthUnavailableRC {
+		t.Fatalf("a login screen after the hk claim went back to placement: %+v", got)
 	}
 	reason := spawnResultReason(nodeResult)
 	if !spawnRefusalTriesNextHost(reason) {
-		t.Fatalf("reason %q would pin replay to the refusing host", reason)
+		t.Fatalf("reason %q is not a first-run refusal", reason)
 	}
 	saved, err := h.inbox.store.spawnTask(t.Context(), request.RequestID)
-	if err != nil || saved.Status != "accepted" || saved.Node != nil {
-		t.Fatalf("refusal ended the operation: %+v %v", saved, err)
+	if err != nil || saved.Status != "retryable" || saved.Node == nil || saved.Node.Machine != "machine-a" || !spawnReplayPinsHost(saved.Outcome) {
+		t.Fatalf("refusal did not end the operation on its host: %+v %v", saved, err)
 	}
 	var notices []string
 	eventually(t, 5*time.Second, "agy login notice", func() bool {

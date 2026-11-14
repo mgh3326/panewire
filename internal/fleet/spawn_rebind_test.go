@@ -233,6 +233,99 @@ func TestParentJobSuccessorTakesOverTaskBinding(t *testing.T) {
 	}
 }
 
+// 2026-11-14 (hk 4586): when a parent was itself a successor spawned over an
+// earlier job in the chain (e.g. pw-x-2 over pw-x), but the task is still
+// bound to the ancestor (pw-x), the successor (pw-x-3) follows the
+// --parent-job chain and rebinds from the ancestor holding the task.
+func TestParentJobSuccessorTakesOverAncestorTaskBinding(t *testing.T) {
+	t.Run("one step ancestor", func(t *testing.T) {
+		const ancestor = "ancestor-worker"
+		fx := newRebindFixture(t, "lost", ancestor)
+		fx.store.records[ancestor] = map[string]any{"job_id": ancestor, "task_id": "42", "host": "test-host", "state": "lost", "family": "anthropic", "owner_lane": "owner"}
+		fx.store.records[rebindParent]["parent_job"] = ancestor
+		if e := fx.a.Spawn(context.Background(), fx.s); e != nil {
+			t.Fatal(e)
+		}
+		if fx.bound != fx.s.Job || fx.claimedBy != fx.s.Label {
+			t.Fatalf("task bound to job %q claimed by %q, want %q and %q", fx.bound, fx.claimedBy, fx.s.Job, fx.s.Label)
+		}
+		calls := fx.rebinds()
+		if len(calls) != 1 {
+			t.Fatalf("task rebind calls=%v want exactly one", calls)
+		}
+		got := calls[0]
+		if got["from_job"] != ancestor || got["to_job"] != fx.s.Job || got["by"] != fx.s.Label {
+			t.Fatalf("task rebind body=%v, want from_job=%s to_job=%s", got, ancestor, fx.s.Job)
+		}
+		ev := fx.taskRebindEvent(t)
+		if ev["status"] != "rebound" || ev["inherited_from"] != rebindParent {
+			t.Fatalf("event=%v", ev)
+		}
+	})
+
+	t.Run("multi-step ancestor", func(t *testing.T) {
+		const (
+			greatGrandparent = "great-grandparent-worker"
+			grandparent      = "grandparent-worker"
+		)
+		fx := newRebindFixture(t, "lost", greatGrandparent)
+		fx.store.records[greatGrandparent] = map[string]any{"job_id": greatGrandparent, "task_id": "42", "host": "test-host", "state": "lost", "family": "anthropic", "owner_lane": "owner"}
+		fx.store.records[grandparent] = map[string]any{"job_id": grandparent, "parent_job": greatGrandparent, "task_id": "42", "host": "test-host", "state": "lost", "family": "anthropic", "owner_lane": "owner"}
+		fx.store.records[rebindParent]["parent_job"] = grandparent
+		if e := fx.a.Spawn(context.Background(), fx.s); e != nil {
+			t.Fatal(e)
+		}
+		if fx.bound != fx.s.Job || fx.claimedBy != fx.s.Label {
+			t.Fatalf("task bound to job %q claimed by %q, want %q and %q", fx.bound, fx.claimedBy, fx.s.Job, fx.s.Label)
+		}
+		calls := fx.rebinds()
+		if len(calls) != 1 {
+			t.Fatalf("task rebind calls=%v want exactly one", calls)
+		}
+		if got := calls[0]; got["from_job"] != greatGrandparent || got["to_job"] != fx.s.Job {
+			t.Fatalf("rebind calls=%v, want from_job=%s", calls, greatGrandparent)
+		}
+		if ev := fx.taskRebindEvent(t); ev["status"] != "rebound" {
+			t.Fatalf("event=%v", ev)
+		}
+	})
+
+	t.Run("ancestor resolved via local ledger", func(t *testing.T) {
+		const ancestor = "local-ancestor-worker"
+		fx := newRebindFixture(t, "lost", ancestor)
+		putEvent(t, fx.a, rebindParent, "job.claim", map[string]any{"owner_lane": "owner", "task_id": "42", "t_level": "T1", "role": "implementer", "task_inherited_from": ancestor})
+		if e := fx.a.Spawn(context.Background(), fx.s); e != nil {
+			t.Fatal(e)
+		}
+		if fx.bound != fx.s.Job || fx.claimedBy != fx.s.Label {
+			t.Fatalf("task bound to job %q claimed by %q, want %q and %q", fx.bound, fx.claimedBy, fx.s.Job, fx.s.Label)
+		}
+		calls := fx.rebinds()
+		if len(calls) != 1 || calls[0]["from_job"] != ancestor {
+			t.Fatalf("rebind calls=%v, want from_job=%s", calls, ancestor)
+		}
+		if ev := fx.taskRebindEvent(t); ev["status"] != "rebound" {
+			t.Fatalf("event=%v", ev)
+		}
+	})
+
+	t.Run("cycle in parent chain stays refused", func(t *testing.T) {
+		const other = "unrelated-job"
+		fx := newRebindFixture(t, "lost", other)
+		fx.store.records["loop-1"] = map[string]any{"job_id": "loop-1", "parent_job": rebindParent}
+		fx.store.records[rebindParent]["parent_job"] = "loop-1"
+		if e := fx.a.Spawn(context.Background(), fx.s); e != nil {
+			t.Fatal(e)
+		}
+		if len(fx.rebinds()) != 0 || fx.bound != other {
+			t.Fatalf("bound=%s calls=%v", fx.bound, fx.rebinds())
+		}
+		if ev := fx.taskRebindEvent(t); ev["status"] != "inherited" || ev["bound_job"] != other {
+			t.Fatalf("event=%v", ev)
+		}
+	})
+}
+
 func TestTakeoverRebindsOnlyAfterSpawnCommits(t *testing.T) {
 	fx := newRebindFixture(t, "spawned", rebindParent)
 	fx.afterRebind = func() {

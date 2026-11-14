@@ -537,7 +537,7 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 		outcome.Role = r.Role
 	}
 	request := task.Request
-	if task.Outcome.Retryable && task.Outcome.Host != "" && !spawnRefusalTriesNextHost(task.Outcome.Reason) {
+	if spawnReplayPinsHost(task.Outcome) {
 		request.Args = append([]string(nil), request.Args...)
 		for i := 0; i+1 < len(request.Args); i++ {
 			if request.Args[i] == "--host" {
@@ -697,6 +697,36 @@ func spawnRefusalTriesNextHost(reason string) bool {
 	return nextHostRefusals[code]
 }
 
+// spawnStageBeforeJobClaim reports a node result stage that ends before the
+// node's hk job claim: the refusal came from placement, the checkout step or an
+// early check (an empty stage), so no hk record names the refusing node. From
+// the claim on, hk holds the job id for that node's host and answers another
+// host's claim with 409 job_id_taken (rc 74, hk 4614), so a later candidate can
+// never take the job. An unknown stage counts as claimed. The node's own
+// not-started answer is a different case: spawnNotStarted.
+func spawnStageBeforeJobClaim(stage string) bool {
+	switch stage {
+	case "", "placement", "checkout":
+		return true
+	}
+	return false
+}
+
+// spawnReplayPinsHost reports whether a replay of a saved retryable refusal
+// runs on the host that refused it. A refusal that left an hk claim there pins
+// the replay, because another host's claim of the job id is a 409.
+func spawnReplayPinsHost(outcome hubSpawnOutcome) bool {
+	return outcome.Retryable && outcome.Host != "" && !spawnRefusalMovesOn(outcome.Reason, outcome.Stage)
+}
+
+// spawnRefusalMovesOn is spawnRefusalTriesNextHost for a refusal that has a
+// stage: only a refusal that left no hk claim behind hands the job to another
+// host. Past the claim the request stays with the refusing host, where a
+// verified-cleanup retry replays the identical claim.
+func spawnRefusalMovesOn(reason, stage string) bool {
+	return spawnRefusalTriesNextHost(reason) && spawnStageBeforeJobClaim(stage)
+}
+
 func (t *directSpawnTransport) Spawn(ctx context.Context, req fleet.HubSpawnRequest) (fleet.HubSpawnReply, error) {
 	if t.bound {
 		// An engine busy retry must not bind a second request or replay the old
@@ -747,11 +777,13 @@ func (t *directSpawnTransport) Spawn(ctx context.Context, req fleet.HubSpawnRequ
 // nextHostAfterRefusal hands an auto placement back to its candidate loop. A
 // pinned host is the operator's choice, so its refusal stays the answer.
 func (t *directSpawnTransport) nextHostAfterRefusal(ctx context.Context, node hubSpawnRequest, result hubSpawnResult) (bool, error) {
-	// A dialog refusal comes after the engine launched a pane, so only a
-	// verified cleanup (Retryable) lets another host take the job id.
+	// A refusal that comes after the node's hk job claim (a dialog or login
+	// screen after the pane launched) stays with that host: hk answers another
+	// host's claim of the job id with 409 job_id_taken, rc 74 (hk 4614). Only a
+	// refusal before the claim moves on, and only after verified cleanup.
 	// A request the node never started also moves on, while the request's own
 	// deadline still has room for another host.
-	movesOn := spawnRefusalTriesNextHost(spawnResultReason(result)) || spawnNotStarted(result)
+	movesOn := spawnRefusalMovesOn(spawnResultReason(result), result.Stage) || spawnNotStarted(result)
 	if result.RC == 0 || !result.Retryable || !movesOn || !t.h.now().Before(t.task.Deadline) || firstNonEmptyString(hubSpawnArg(t.task.Request.Args, "--host"), "auto") != "auto" {
 		return false, nil
 	}
