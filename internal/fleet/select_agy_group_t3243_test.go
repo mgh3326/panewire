@@ -29,8 +29,8 @@ func agyUsed(gemini5h, third5h, third7d float64) func(time.Time) []map[string]an
 
 func agyBothGroupsRows() []CatalogRow {
 	return []CatalogRow{
-		{Profile: "agy-flash38-medium", Effort: "", Grade: "B", Pool: "agy", Gate: "default", ModelID: "gemini-3.8-flash-medium"},
-		{Profile: "agy-sonnet46", Effort: "", Grade: "B", Pool: "agy", Gate: "default", ModelID: "claude-sonnet-4-6"},
+		{Profile: "agy-flash38-medium", Effort: "medium", Grade: "B", Pool: "agy", Gate: "default", ModelID: "gemini-3.8-flash-medium"},
+		{Profile: "agy-sonnet46", Effort: "medium", Grade: "B", Pool: "agy", Gate: "default", ModelID: "claude-sonnet-4-6"},
 	}
 }
 
@@ -53,7 +53,7 @@ func dropped(row map[string]any) bool {
 // Gemini exhausted: the gemini rungs are blocked, the 3p rung is still offered.
 func TestSelectAgyGeminiExhaustedStillOffersSonnet(t *testing.T) {
 	rec, sel := agySelect(t, agyUsed(100, 10, 10), agyBothGroupsRows())
-	if row := candOutcome(rec, "agy-flash38-medium", ""); row == nil || !dropped(row) {
+	if row := candOutcome(rec, "agy-flash38-medium", "medium"); row == nil || !dropped(row) {
 		t.Fatalf("a gemini rung must be blocked by the exhausted gemini window: %v", row)
 	}
 	if sel.chosen.seatName != "agy-sonnet46" {
@@ -69,7 +69,7 @@ func TestSelectAgyThirdPartyExhaustedStillOffersFlash(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			rec, sel := agySelect(t, buckets, agyBothGroupsRows())
-			if row := candOutcome(rec, "agy-sonnet46", ""); row == nil || !dropped(row) {
+			if row := candOutcome(rec, "agy-sonnet46", "medium"); row == nil || !dropped(row) {
 				t.Fatalf("a 3p rung must be blocked by the exhausted 3p window: %v", row)
 			}
 			if sel.chosen.seatName != "agy-flash38-medium" {
@@ -83,8 +83,8 @@ func TestSelectAgyThirdPartyExhaustedStillOffersFlash(t *testing.T) {
 // 90% a gemini rung reports its own 10%.
 func TestSelectAgyRungReportsItsOwnGroupUsage(t *testing.T) {
 	rec, _ := agySelect(t, agyUsed(10, 90, 40), agyBothGroupsRows())
-	flash := candOutcome(rec, "agy-flash38-medium", "")
-	sonnet := candOutcome(rec, "agy-sonnet46", "")
+	flash := candOutcome(rec, "agy-flash38-medium", "medium")
+	sonnet := candOutcome(rec, "agy-sonnet46", "medium")
 	if flash["used_pct"] != 10.0 || sonnet["used_pct"] != 90.0 {
 		t.Fatalf("used_pct gemini=%v 3p=%v, want 10 and 90", flash["used_pct"], sonnet["used_pct"])
 	}
@@ -93,9 +93,9 @@ func TestSelectAgyRungReportsItsOwnGroupUsage(t *testing.T) {
 // A rung that maps to no group keeps the conservative rule: the strictest
 // group blocks it.
 func TestSelectAgyUnmappedRungKeepsConservativeRule(t *testing.T) {
-	rows := append(agyBothGroupsRows(), CatalogRow{Profile: "agy-mystery", Effort: "", Grade: "B", Pool: "agy", Gate: "default", ModelID: "mystery-1"})
+	rows := append(agyBothGroupsRows(), CatalogRow{Profile: "agy-mystery", Effort: "medium", Grade: "B", Pool: "agy", Gate: "default", ModelID: "mystery-1"})
 	rec, sel := agySelect(t, agyUsed(100, 10, 10), rows)
-	if row := candOutcome(rec, "agy-mystery", ""); row == nil || !dropped(row) {
+	if row := candOutcome(rec, "agy-mystery", "medium"); row == nil || !dropped(row) {
 		t.Fatalf("an unmapped rung is blocked while any group is exhausted: %v", row)
 	}
 	if sel.chosen.seatName != "agy-sonnet46" {
@@ -110,7 +110,7 @@ func TestSelectAgyGroupMissingFromReadingIsUnknown(t *testing.T) {
 		return []map[string]any{{"window": "5h", "used_pct": 10, "resets_at": now.Add(4 * time.Hour).UTC().Format(time.RFC3339), "scope": "group", "model": "3p"}}
 	}
 	rec, sel := agySelect(t, only3p, agyBothGroupsRows())
-	if row := candOutcome(rec, "agy-flash38-medium", ""); row == nil || row["outcome"] != "dropped:quota_unknown" {
+	if row := candOutcome(rec, "agy-flash38-medium", "medium"); row == nil || row["outcome"] != "dropped:quota_unknown" {
 		t.Fatalf("a rung whose group has no window is quota_unknown: %v", row)
 	}
 	if sel.chosen.seatName != "agy-sonnet46" {

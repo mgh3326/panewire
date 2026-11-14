@@ -12,8 +12,8 @@ import (
 
 func agyWasteRows() []CatalogRow {
 	return []CatalogRow{
-		{Profile: "agy-flash38-medium", Effort: "", Grade: "B", Pool: "agy", Gate: "default", ModelID: "gemini-3.8-flash-medium"},
-		{Profile: "agy-sonnet46", Effort: "", Grade: "B", Pool: "agy", Gate: "default", ModelID: "claude-sonnet-4-6"},
+		{Profile: "agy-flash38-medium", Effort: "medium", Grade: "B", Pool: "agy", Gate: "default", ModelID: "gemini-3.8-flash-medium"},
+		{Profile: "agy-sonnet46", Effort: "medium", Grade: "B", Pool: "agy", Gate: "default", ModelID: "claude-sonnet-4-6"},
 		{Profile: "codex-luna", Effort: "medium", Grade: "B", Pool: "codex", Gate: "default", ModelID: "m"},
 	}
 }
@@ -41,7 +41,7 @@ func wantPct(t *testing.T, row map[string]any, key string, want float64) {
 // A 5h-only gemini group stays ranked while codex is at risk.
 func TestSelectAgyFlashWasteRiskFromGeminiFiveHour(t *testing.T) {
 	rec, sel := agyWasteSelect(t, agyUsed(0, 0, 0), agyWasteRows())
-	flash := candOutcome(rec, "agy-flash38-medium", "")
+	flash := candOutcome(rec, "agy-flash38-medium", "medium")
 	if flash["waste_risk"] != false || flash["tier"] != "ranked" || flash["waste_group"] != "gemini" {
 		t.Fatalf("gemini's 5h window must not rank as waste: %v", flash)
 	}
@@ -54,7 +54,7 @@ func TestSelectAgyFlashWasteRiskFromGeminiFiveHour(t *testing.T) {
 // at waste risk, so the 3p rung stays out of the waste band.
 func TestSelectAgyThirdPartyProjectedOverIsNotWasteRisk(t *testing.T) {
 	rec, _ := agyWasteSelect(t, agyUsed(0, 0, 95), agyWasteRows())
-	sonnet := candOutcome(rec, "agy-sonnet46", "")
+	sonnet := candOutcome(rec, "agy-sonnet46", "medium")
 	if sonnet["waste_risk"] != false {
 		t.Fatalf("a 3p 7d window projected over is not waste: %v", sonnet)
 	}
@@ -70,7 +70,7 @@ func TestSelectAgyThirdPartyProjectedOverIsNotWasteRisk(t *testing.T) {
 // here 3p blocks more than gemini, so the unmapped rung takes 3p for blocking
 // and for waste — never gemini's lower-used but wasting window.
 func TestSelectAgyUnmappedRungUsesMostRestrictiveGroupForWaste(t *testing.T) {
-	rows := append(agyWasteRows(), CatalogRow{Profile: "agy-mystery", Effort: "", Grade: "B", Pool: "agy", Gate: "default", ModelID: "mystery-1"})
+	rows := append(agyWasteRows(), CatalogRow{Profile: "agy-mystery", Effort: "medium", Grade: "B", Pool: "agy", Gate: "default", ModelID: "mystery-1"})
 	buckets := func(now time.Time) []map[string]any {
 		reset5h := now.Add(4 * time.Hour).UTC().Format(time.RFC3339)
 		reset7d := now.Add(4 * 24 * time.Hour).UTC().Format(time.RFC3339)
@@ -89,7 +89,7 @@ func TestSelectAgyUnmappedRungUsesMostRestrictiveGroupForWaste(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	mystery := candOutcome(sel.record(), "agy-mystery", "")
+	mystery := candOutcome(sel.record(), "agy-mystery", "medium")
 	if mystery["waste_group"] != "3p" {
 		t.Fatalf("an unmapped rung is judged on the strictest group: %v", mystery)
 	}

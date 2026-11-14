@@ -125,9 +125,9 @@ func TestAccountPoolViewGroupBuckets(t *testing.T) {
 // three agy rungs that passed role and grade, commandcode and codex.
 func productionShapeRows() []CatalogRow {
 	return []CatalogRow{
-		{Profile: "agy-flash38-high", Effort: "", Grade: "A", Pool: "agy", Gate: "default", ModelID: "gemini-3.8-flash-high"},
-		{Profile: "agy-flash38-medium", Effort: "", Grade: "B", Pool: "agy", Gate: "default", ModelID: "gemini-3.8-flash-medium"},
-		{Profile: "agy-sonnet46", Effort: "", Grade: "B", Pool: "agy", Gate: "default", ModelID: "claude-sonnet-4-6"},
+		{Profile: "agy-flash38-high", Effort: "high", Grade: "A", Pool: "agy", Gate: "default", ModelID: "gemini-3.8-flash-high"},
+		{Profile: "agy-flash38-medium", Effort: "medium", Grade: "B", Pool: "agy", Gate: "default", ModelID: "gemini-3.8-flash-medium"},
+		{Profile: "agy-sonnet46", Effort: "medium", Grade: "B", Pool: "agy", Gate: "default", ModelID: "claude-sonnet-4-6"},
 		{Profile: "cmd-dsflash41", Effort: "high", Grade: "A+", Pool: "commandcode", Gate: "default", ModelID: "deepseek/deepseek-v4.1-flash"},
 		{Profile: "codex-luna", Effort: "medium", Grade: "B", Pool: "codex", Gate: "default", ModelID: "gpt-6-luna"},
 	}
@@ -155,7 +155,7 @@ func TestSelectDryRunProductionShapeOffersAgyAndCommandcode(t *testing.T) {
 	for _, c := range []struct {
 		profile, effort string
 		urgency         bool
-	}{{"agy-flash38-high", "", false}, {"agy-flash38-medium", "", false}, {"agy-sonnet46", "", true}, {"cmd-dsflash41", "high", true}} {
+	}{{"agy-flash38-high", "high", false}, {"agy-flash38-medium", "medium", false}, {"agy-sonnet46", "medium", true}, {"cmd-dsflash41", "high", true}} {
 		row := candOutcome(rec, c.profile, c.effort)
 		if row == nil || row["outcome"] == "dropped:quota_unknown" || row["tier"] == nil || row["tier"] == "" {
 			t.Fatalf("%s must be a ranked candidate with a tier: %v", c.profile, row)

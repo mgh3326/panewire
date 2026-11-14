@@ -53,6 +53,24 @@ func indexRungs(rows []CatalogRow) rungIndex {
 	return ix
 }
 
+// hasLaunchEffort reports whether the profile has a live row naming an effort.
+// Admission resolves a rung-less row's effort to the profile's lowest ordinary
+// named rung, so a profile without one resolves to no effort at all and
+// refuses the launch ("catalog row has no launch effort").
+func (ix rungIndex) hasLaunchEffort(profile string) bool {
+	for key, rows := range ix {
+		if key[0] != profile || key[1] == "" {
+			continue
+		}
+		for _, row := range rows {
+			if row.RetiredAt == nil {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // launchGrade is the catalog grade of the rung row launches at. ok is false
 // when the catalog has no such rung. A row that launches at its own rung is
 // judged on its own grade; otherwise the rung in the row's pool wins over any
@@ -89,6 +107,12 @@ func topGradeDrop(row CatalogRow, launch, floor string, rungs rungIndex) string 
 	}
 	return ""
 }
+
+// reasonNoLaunchEffort drops a rung-less row whose profile has no named rung:
+// admission has no effort to resolve for it, so choosing it would fail the
+// plan with "catalog row has no launch effort" instead of trying the next
+// candidate.
+const reasonNoLaunchEffort = "no_launch_effort"
 
 // staticDrop applies the rules a candidate row meets before presence and quota,
 // in the order selectFor has always used. floor is the consult grade floor.
@@ -135,6 +159,12 @@ func (a *App) staticDrop(row CatalogRow, req selReq, floor string, rungs rungInd
 	name, seat, reason := a.seatFor(row, req)
 	if seat == nil {
 		return reason, "", nil
+	}
+	if row.Effort == "" && !rungs.hasLaunchEffort(row.Profile) {
+		// Dropped after the seat rules so a row they refuse keeps its own
+		// reason, and before the launch itself: admission resolves no effort
+		// for this profile, so selecting it would end the whole plan.
+		return reasonNoLaunchEffort, "", nil
 	}
 	if req.route.top() {
 		// Judged on the rung the spawn launches: spawn pins the launch to the
