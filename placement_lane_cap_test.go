@@ -1,0 +1,40 @@
+package panewire
+
+import (
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+)
+
+// A machine that owns its whole lane row cap cannot register the lane row a new
+// pane needs: the next lane write is refused `lane_quota_exceeded`, so a spawn
+// placed there comes up LANE_UNREGISTERED (hk 4658). Placement must not choose
+// such a machine, and when every machine is capped the decision is no
+// placement at all rather than a fallback that spends a pane and loses it.
+func TestPlacementTreatsLaneCappedMachineAsNotEligible(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "lanes.json")
+	lanesProjectionWrite(t, path, `{"lanes":{"rev-a1":{"machine":"machine-a","pane":"w1:p1"},"rev-a2":{"machine":"machine-a","pane":"w1:p2"}}}`)
+	hub := lanesNodeHub(t, path, func(config *HubServerConfig) { config.LanesNodeRowCap = 2 })
+	hub.connect("machine-a", "fixture", "fixture", &hubAgent{}, true)
+	hub.connect("machine-b", "fixture", "fixture", &hubAgent{}, true)
+	policy := memoryPlacementPolicy("machine-a", "machine-b")
+
+	result := hub.makePlacement(policy, placementMetrics{}, "hub-only", time.Now())
+	if result.Decision != "machine-b" {
+		t.Fatalf("decision %q, want the uncapped spill target: %+v", result.Decision, result)
+	}
+	capped := memoryCandidate(t, result, "machine-a")
+	if !strings.Contains(capped.Reason, "lanes_full") {
+		t.Fatalf("capped machine reason %q lacks lanes_full", capped.Reason)
+	}
+	if placementUsable(capped, policy, "hub-only") {
+		t.Fatal("a machine at its lane cap must not be usable")
+	}
+
+	lanesProjectionWrite(t, path, `{"lanes":{"rev-a1":{"machine":"machine-a","pane":"w1:p1"},"rev-a2":{"machine":"machine-a","pane":"w1:p2"},"rev-b1":{"machine":"machine-b","pane":"w9:p1"},"rev-b2":{"machine":"machine-b","pane":"w9:p2"}}}`)
+	result = hub.makePlacement(policy, placementMetrics{}, "hub-only", time.Now())
+	if result.Decision != "unavailable" || result.Reason != "lanes_full" {
+		t.Fatalf("decision %q reason %q, want unavailable/lanes_full: %+v", result.Decision, result.Reason, result)
+	}
+}

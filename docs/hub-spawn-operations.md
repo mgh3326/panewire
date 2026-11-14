@@ -147,10 +147,25 @@ ESC answer.
   re-reads the pane and refuses one that changed or whose composer is not
   provably empty).
 
-The hub then has the holder's node mark the hk job `lost` and logs one INFO line
-`hub closed a finished reviewer pane` with `branch` `reviewer_pane_finished`
-(succeeded) or `reviewer_pane_stuck` (failed). An unreachable node or an
-unreadable check keeps the hold.
+The hub then has the holder's node mark the hk job `lost`, with `end_reason`
+`reviewer_pane_finished` or `reviewer_pane_stuck` (the branch), and logs one
+INFO line `hub closed a finished reviewer pane` with `branch`
+`reviewer_pane_finished` (succeeded) or `reviewer_pane_stuck` (failed) and
+`source` `submission`. An unreachable node or an unreadable check keeps the
+hold.
+
+The hub applies the same rule on its own, once every five minutes
+(`source=sweep`), to every live reviewer spawn: a placed `--role reviewer`
+operation whose job a node still reports active, whose hk record is still
+`claimed` or `spawned`, and whose pane has finished. A reviewer a daemon started
+(`mwr-*`) normally writes its own record through `done`; one that does not
+otherwise keeps an idle pane, a live record and its lane row until someone
+closes the pane by hand, and the node's ended-job sweep never reaches it (hk
+4658). Checks, grace, writes and the log line are the reclaim path's; only the
+`source` differs. The pass leaves the (task, role) reservation held, so the next
+submission for the key releases it through the terminal-record path exactly as
+for a reviewer that wrote its own record. A released job is no longer in a
+node's active list, so the next heartbeat ends the pass's interest in it.
 
 When only that grace keeps a reviewer holder (the pane is present, its status is
 closable and its hk job is `claimed` or `spawned`), the `task_role_claimed` 409

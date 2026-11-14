@@ -46,7 +46,7 @@ func reviewerReleaseKey(role string) string {
 // reviewerReleaseHub holds task 42 under role with an operation that ended in
 // wantStatus with outcome and an hk job in state spawned (a failed holder is
 // claimed).
-func reviewerReleaseHub(t *testing.T, role, wantStatus string, outcome hubSpawnOutcome) (*HubServer, *httptest.Server, hubSpawnTask) {
+func reviewerReleaseHub(t *testing.T, role, wantStatus string, outcome hubSpawnOutcome) (*HubServer, *httptest.Server, *roleJobs, hubSpawnTask) {
 	t.Helper()
 	t.Setenv(crashReportDSNEnv, "")
 	hub, err := NewHubServer(HubServerConfig{Tokens: map[string]string{"operator": t14OperatorToken, "machine-a": "node-token"}, InboxStorePath: filepath.Join(t.TempDir(), "inbox.sqlite3")})
@@ -75,7 +75,7 @@ func reviewerReleaseHub(t *testing.T, role, wantStatus string, outcome hubSpawnO
 	if err != nil || held.Status != wantStatus {
 		t.Fatalf("holder %+v %v", held, err)
 	}
-	return hub, server, held
+	return hub, server, jobs, held
 }
 
 // A reviewer pane that finished, or sits at a startup prompt, past the grace
@@ -117,7 +117,7 @@ func TestReviewerRelease(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			hub, server, held := reviewerReleaseHub(t, tc.role, tc.status, tc.outcome)
+			hub, server, _, held := reviewerReleaseHub(t, tc.role, tc.status, tc.outcome)
 			sink := captureHubLog(hub)
 			now := held.Deadline.Add(tc.since)
 			hub.now = func() time.Time { return now }
@@ -166,7 +166,7 @@ func TestReviewerRelease(t *testing.T) {
 // pane.close accepts blocked, but a pane that changes between the node's two
 // reads is refused: the hub keeps the hold and writes nothing to hk.
 func TestReviewerReleaseKeepsHoldWhenCloseIsRefused(t *testing.T) {
-	hub, server, held := reviewerReleaseHub(t, "reviewer", "succeeded", hubSpawnOutcome{RC: 0, Host: "machine-a", Pane: roleHeldPane})
+	hub, server, _, held := reviewerReleaseHub(t, "reviewer", "succeeded", hubSpawnOutcome{RC: 0, Host: "machine-a", Pane: roleHeldPane})
 	now := held.Deadline.Add(11 * time.Minute)
 	hub.now = func() time.Time { return now }
 	replies := unworkedReplies(unworkedRow("done", "/work/project.test-job"), unworkedLedger(0))

@@ -2422,6 +2422,7 @@ func (h *HubServer) RunMaintenance(ctx context.Context) {
 	go h.runInbox(ctx)
 	go h.runLaneRelease(ctx.Done())
 	go h.runPaneSweep(ctx)
+	go h.runReviewerPaneRelease(ctx)
 	h.startSpawnCoordinator(ctx)
 	// Startup replay runs once, before the first keepalive tick: whatever
 	// Postgres still holds as undelivered predates this process.
