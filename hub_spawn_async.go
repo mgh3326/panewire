@@ -527,6 +527,9 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 			return
 		}
 	}
+	// This pass now decides placement: drop the link the previous pass left so
+	// a pass that ends for another reason cannot name a stale machine/pool.
+	h.clearSpawnRefreshWaits(task)
 	ctx, cancel := context.WithDeadline(parent, task.Deadline)
 	defer cancel()
 	transport := &directSpawnTransport{h: h, task: task, started: time.Now(), probeWait: spawnNotStartedProbe, requireSnapshot: task.Node == nil}
@@ -742,13 +745,10 @@ func (s directSpawnState) Snapshot(ctx context.Context) (fleet.FleetSnapshot, er
 }
 
 // noteSpawnRefreshWaits stores the refresh keys this placement pass parked on
-// and returns the task's current link. The durable write is the one a timeout
-// reads after a restart; an unchanged link costs one UPDATE.
+// and returns that link. The durable write is the one a timeout reads after a
+// restart; a pass with no keys leaves the link the start of the pass cleared.
 func (h *HubServer) noteSpawnRefreshWaits(task hubSpawnTask, waits []hubSpawnRefreshWait) []hubSpawnRefreshWait {
-	if len(waits) == 0 {
-		return task.RefreshWaits
-	}
-	if h.inbox != nil {
+	if len(waits) != 0 && h.inbox != nil {
 		if err := h.inbox.store.noteSpawnRefreshWaits(h.closeCtx, task.Request.RequestID, task.Attempt, waits); err != nil {
 			h.logger.Warn("spawn quota refresh link not recorded", "request_id", task.Request.RequestID, "attempt", task.Attempt, "error", err)
 		}
@@ -756,10 +756,22 @@ func (h *HubServer) noteSpawnRefreshWaits(task hubSpawnTask, waits []hubSpawnRef
 	return waits
 }
 
+// clearSpawnRefreshWaits drops the link a previous pass recorded before this
+// pass decides anything, so a pass that ends without parking on a refresh (a
+// deferred placement, say) cannot leave a stale machine/pool for the timeout.
+func (h *HubServer) clearSpawnRefreshWaits(task hubSpawnTask) {
+	if task.Node != nil || len(task.RefreshWaits) == 0 || h.inbox == nil {
+		return
+	}
+	if err := h.inbox.store.clearSpawnRefreshWaits(h.closeCtx, task.Request.RequestID, task.Attempt); err != nil {
+		h.logger.Warn("spawn quota refresh link not cleared", "request_id", task.Request.RequestID, "attempt", task.Attempt, "error", err)
+	}
+}
+
 // spawnRefreshWaitOutcome reports whether an unbound request's timeout expired
 // while it waited on a shared quota refresh. It names the wait whose last
-// attempt failed most recently, with that failure, or the first wait and nil
-// when no attempt has finished.
+// attempt failed most recently, or, when nothing failed, the wait whose last
+// attempt succeeded most recently, or the first wait when no attempt finished.
 func (h *HubServer) spawnRefreshWaitOutcome(task hubSpawnTask) (hubSpawnRefreshWait, *hubSpawnRefreshOutcome, bool) {
 	if task.Node != nil || len(task.RefreshWaits) == 0 {
 		return hubSpawnRefreshWait{}, nil, false
@@ -769,22 +781,41 @@ func (h *HubServer) spawnRefreshWaitOutcome(task hubSpawnTask) (hubSpawnRefreshW
 		return wait, nil, true
 	}
 	now := h.now()
-	var failure *hubSpawnRefreshOutcome
-	var failedAt time.Time
+	var failure, success *hubSpawnRefreshOutcome
+	var failedAt, succeededAt time.Time
 	for _, candidate := range task.RefreshWaits {
-		reason, seen, found, err := h.inbox.store.quotaRefreshFailure(h.closeCtx, candidate.Machine, candidate.Pool)
-		if err != nil || !found || (failure != nil && !seen.After(failedAt)) {
+		outcome, seen, found, err := h.inbox.store.quotaRefreshAttempt(h.closeCtx, candidate.Machine, candidate.Pool)
+		if err != nil {
+			h.logger.Warn("spawn quota refresh attempt not read", "machine", candidate.Machine, "pool", candidate.Pool, "error", err)
+			continue
+		}
+		if !found {
 			continue
 		}
 		age := now.Sub(seen) / time.Second
 		if age < 0 {
 			age = 0
 		}
-		wait = candidate
-		failure = &hubSpawnRefreshOutcome{Machine: candidate.Machine, Pool: candidate.Pool, Reason: reason, FailedAgoS: int64(age)}
-		failedAt = seen
+		record := hubSpawnRefreshOutcome{Machine: candidate.Machine, Pool: candidate.Pool}
+		if outcome != "" {
+			record.Reason, record.FailedAgoS = outcome, int64(age)
+			if failure == nil || seen.After(failedAt) {
+				failure, failedAt = &record, seen
+			}
+			continue
+		}
+		record.SucceededAgoS = int64(age)
+		if success == nil || seen.After(succeededAt) {
+			success, succeededAt = &record, seen
+		}
 	}
-	return wait, failure, true
+	if failure != nil {
+		return hubSpawnRefreshWait{Machine: failure.Machine, Pool: failure.Pool}, failure, true
+	}
+	if success != nil {
+		return hubSpawnRefreshWait{Machine: success.Machine, Pool: success.Pool}, success, true
+	}
+	return wait, nil, true
 }
 
 // spawnRefreshFailureText is the operator sentence for a recorded refresh
@@ -805,14 +836,19 @@ func spawnRefreshFailureText(reason string) string {
 }
 
 // spawnRefreshWaitFix explains a timeout that expired while the request waited
-// for a shared quota refresh. It names the machine, pool and last failure
-// instead of the spawn queue, which the request never occupied.
-func spawnRefreshWaitFix(task hubSpawnTask, wait hubSpawnRefreshWait, failure *hubSpawnRefreshOutcome) string {
+// for a shared quota refresh. It names the machine, pool and last finished
+// attempt instead of the spawn queue, which the request never occupied, and
+// never blames a measurement the hub did not see fail.
+func spawnRefreshWaitFix(task hubSpawnTask, wait hubSpawnRefreshWait, refresh *hubSpawnRefreshOutcome) string {
 	head := fmt.Sprintf("the hub did not start this request within its %ds deadline: it waited for a quota refresh on %s (pool %s), and no node ran its landing", task.Request.DeadlineSeconds, wait.Machine, wait.Pool)
-	if failure == nil {
-		return utf8PrefixWithin(fmt.Sprintf("%s; no refresh attempt finished, so the shared reading stayed stale — confirm that host can measure the pool with panewire quota refresh %s, then resubmit", head, wait.Pool), 512)
+	switch {
+	case refresh == nil:
+		return utf8PrefixWithin(fmt.Sprintf("%s; the hub had not finished a refresh attempt for it, so the shared reading stayed stale — confirm that host can measure the pool with panewire quota refresh %s, then resubmit", head, wait.Pool), 512)
+	case refresh.Reason != "":
+		return utf8PrefixWithin(fmt.Sprintf("%s; the last attempt failed %ds ago — %s (%s). Fix that measurement or restore the connection (panewire quota refresh %s), then resubmit", head, refresh.FailedAgoS, spawnRefreshFailureText(refresh.Reason), refresh.Reason, wait.Pool), 512)
+	default:
+		return utf8PrefixWithin(fmt.Sprintf("%s; the last attempt finished %ds ago, yet the placement still could not confirm the reading — check the account %s measures for pool %s, then resubmit", head, refresh.SucceededAgoS, wait.Machine, wait.Pool), 512)
 	}
-	return utf8PrefixWithin(fmt.Sprintf("%s; the last attempt failed %ds ago — %s (%s). Fix that measurement or restore the connection (panewire quota refresh %s), then resubmit", head, failure.FailedAgoS, spawnRefreshFailureText(failure.Reason), failure.Reason, wait.Pool), 512)
 }
 
 // spawnQueueWaitFix distinguishes a never-sent queue timeout from a request
