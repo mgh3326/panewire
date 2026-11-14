@@ -111,7 +111,7 @@ func newQuotaStopManager(s *Store, root string, act bool, logger *slog.Logger) (
 			return relayInjectResult{Outcome: relayInjectMaybeInPane, Evidence: "harness_changed"}
 		}
 		return relayInjectForHarnessGuarded(sendCtx, pane, harness, text, nil, func(screen string) bool {
-			stop, ok := classifyQuotaStop(screen, time.Now(), time.Local)
+			stop, ok := quotastop.ClassifyAgent(screen, harness, time.Now(), time.Local)
 			_, composerOK := relayComposer(harness, screen)
 			return ok && stop.SamePool(pool) && !stop.Choice && composerOK
 		})
@@ -739,7 +739,13 @@ func (q *quotaStopManager) tick(ctx context.Context, now time.Time, advanceSettl
 			q.failResume(ctx, r.id, r.pane, "screen_unavailable")
 			continue
 		}
-		stop, classified := classifyQuotaStop(screen, now, time.Local)
+		// The re-read names the pane's herdr agent kind as the stop was read, so an
+		// indented devin banner is read here too (hk 4680). An explain failure
+		// leaves the kind empty: the re-read then refuses, which is fail-closed.
+		explainCtx, cancelExplain := context.WithTimeout(ctx, 10*time.Second)
+		_, agent := herdrQuotaSignal(explainCtx, r.pane)
+		cancelExplain()
+		stop, classified := quotastop.ClassifyAgent(screen, agent, now, time.Local)
 		if !classified || !stop.SamePool(r.pool) || stop.Choice {
 			q.failResume(ctx, r.id, r.pane, "screen_changed_or_dialog")
 			continue

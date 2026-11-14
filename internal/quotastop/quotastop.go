@@ -59,16 +59,42 @@ var (
 	creditOpenAI    = regexp.MustCompile(`(?i)insufficient_quota|exceeded your current quota`)
 )
 
-// Classify reports the quota stop shown as the last activity of screen.
+// Classify reports the quota stop shown as the last activity of screen when the
+// pane's agent kind is not known. An indented Devin banner is read only by
+// ClassifyAgent, for a devin pane (hk 4680).
 func Classify(screen string, now time.Time, local *time.Location) (Stop, bool) {
+	return ClassifyAgent(screen, "", now, local)
+}
+
+// ClassifyAgent is Classify for a pane whose herdr agent kind is agent. Only a
+// devin pane may have an indented banner read as a new limit: a blank row, then
+// Devin's banner carrying its limit text and a reset, then nothing but Devin
+// chrome (indentedDevinBlock, hk 4680). Any other row after it is output, a
+// quoted banner or a user turn, and is not a stop.
+func ClassifyAgent(screen, agent string, now time.Time, local *time.Location) (Stop, bool) {
 	if local == nil {
 		local = time.Local
 	}
-	block, ok := statusBlock(screen)
+	if block, ok := statusBlock(screen); ok {
+		return classifyStatus(block, now, local)
+	}
+	if agent != "devin" {
+		return Stop{}, false
+	}
+	block, ok := indentedDevinBlock(screen)
 	if !ok {
 		return Stop{}, false
 	}
-	screen = block
+	out, ok := classifyStatus(block, now, local)
+	if !ok || !strings.HasPrefix(out.Pool, "devin") || out.Reset.IsZero() {
+		return Stop{}, false
+	}
+	return out, true
+}
+
+// classifyStatus reads the pool and reset of a status block already accepted by
+// the activity rule. screen is that block, never the whole pane.
+func classifyStatus(screen string, now time.Time, local *time.Location) (Stop, bool) {
 	var out Stop
 	switch {
 	case devin.MatchString(screen):
