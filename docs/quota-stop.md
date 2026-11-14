@@ -48,6 +48,28 @@ account. Free-bucket exhaustion applies only to free rungs; paid windows apply
 to paid rungs. A newer reading that clears the same bucket supersedes the
 trigger, and the hub checks the reset and freshness again before acting.
 
+Two more triggers start the same sweep for a pool that publishes no quota
+reading of its own (hk 4625). A hub pass runs once at startup and then every
+ten minutes over the pools live jobs are placed on:
+
+- **Retired catalog.** Every catalog row of the pool is retired. The hub reads
+  the bench catalog through the quota adapter and its cache; a stale catalog is
+  refused, so a notice never rests on a day-old row set. A pool the catalog does
+  not list at all fires nothing.
+- **Credit exhausted.** The pane of a live job on the pool shows the provider's
+  own credit rejection: Anthropic's "Your credit balance is too low" or
+  OpenAI's `insufficient_quota` / "You exceeded your current quota". The hub
+  reads the pane's visible tail through its node (`pane.read`, the reader the
+  quota-stop manager uses) and applies the quota-stop activity rule
+  (`internal/quotastop`), so the same words quoted by a later answer are not a
+  stop. The rejection must name the job's own pool.
+
+Neither cause names an account or a reset: it fires per pool, and every live
+job on the pool gets the one notice below, whose text names what ran out. A
+cause is held until the pool comes back — a catalog row un-retired — after
+which both of the pool's triggers re-arm and a repeat is logged as new. While a
+cause is held, later passes still notify jobs that were placed after it fired.
+
 For each implementer, reviewer, or consult the hub records one `lane.event`
 asking the owner to hand the job over or end it and respawn it on another pool.
 A job whose id starts `mwr-` is reported to the `mergewake` lane. The event has
