@@ -32,6 +32,12 @@ var (
 	atClock     = regexp.MustCompile(`(?i)\bat\s+([0-9]{1,2}:[0-9]{2}\s*(?:AM|PM)?)(?:\s+(UTC|GMT|Z))?`)
 	relative    = regexp.MustCompile(`(?i)reset(?:s)? in\s+(\d+)\s*(seconds?|minutes?|hours?)(?:\s*(?:and\s+|,\s*)?(\d+)\s*(seconds?|minutes?))?`)
 	dateReset   = regexp.MustCompile(`(?i)resets?\s+([A-Za-z]{3,9})\s+(\d{1,2}),?\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm))(?:\s+(UTC|GMT|Z)|\s*\(([A-Za-z_]+/[A-Za-z_]+)\))?`)
+	// The provider's own credit-exhausted rejection: Anthropic's "Your credit
+	// balance is too low to access the Anthropic API" and OpenAI's
+	// insufficient_quota / "You exceeded your current quota" (the errors
+	// credit_rejection.go reads from a session).
+	creditAnthropic = regexp.MustCompile(`(?i)credit balance is too low`)
+	creditOpenAI    = regexp.MustCompile(`(?i)insufficient_quota|exceeded your current quota`)
 )
 
 // Classify reports the quota stop shown as the last activity of screen.
@@ -183,7 +189,15 @@ const statusPrefixes = "│┃•⚠️■⎿ "
 // injected text, so a reset time or an "upgrade" mentioned in a directive
 // cannot change the stop.
 func statusBlock(screen string) (string, bool) {
-	var limit string
+	_, block, ok := statusBlockOf(screen, limitRow)
+	return block, ok
+}
+
+// statusBlockOf is statusBlock for any status row isStatus accepts, and also
+// returns the status row itself. CreditExhausted reads the same activity rule,
+// so a credit rejection quoted by an answer is not a stop.
+func statusBlockOf(screen string, isStatus func(string) bool) (string, string, bool) {
+	var status string
 	var tail []string
 	found, later, open, gap := false, false, false, false
 	for _, raw := range strings.Split(strings.ReplaceAll(screen, "\r", ""), "\n") {
@@ -193,7 +207,7 @@ func statusBlock(screen string) (string, bool) {
 			open = open && line == ""
 			gap = gap || line == ""
 			tail = append(tail, line)
-		case open && !promptChrome(line) && !userTurn(line) && !(gap && !strings.HasPrefix(raw, " ") && !strings.HasPrefix(raw, "\t") && limitRow(line)):
+		case open && !promptChrome(line) && !userTurn(line) && !(gap && !strings.HasPrefix(raw, " ") && !strings.HasPrefix(raw, "\t") && isStatus(strings.TrimLeft(line, statusPrefixes))):
 			// Under a user turn with no rule yet: agent output or a message
 			// row of unknown ownership. A flush-left status after a blank row
 			// is the exception: it is how a new limit follows a user turn.
@@ -204,23 +218,50 @@ func statusBlock(screen string) (string, bool) {
 			open, gap = true, false
 		default:
 			line = strings.TrimLeft(line, statusPrefixes)
-			if limitRow(line) {
-				limit, tail, found, later, open = line, nil, true, false, false
+			if isStatus(line) {
+				status, tail, found, later, open = line, nil, true, false, false
 			} else {
 				later = true
 			}
 		}
 	}
 	if !found || later {
-		return "", false
+		return "", "", false
 	}
-	return limit + "\n" + strings.Join(tail, "\n"), true
+	return status, status + "\n" + strings.Join(tail, "\n"), true
 }
 
 // limitRow reports a row that is a CLI limit line.
 func limitRow(line string) bool {
 	line = strings.TrimLeft(line, statusPrefixes)
 	return devin.MatchString(line) || devinPaid.MatchString(line) || claude.MatchString(line) || codexSignal.MatchString(line)
+}
+
+// CreditExhausted reports the pool named by a provider credit-exhausted line
+// shown as the last agent activity of screen. It applies the same activity rule
+// as a quota stop (statusBlockOf): a rejection quoted by a later answer, or one
+// followed by ordinary agent output, is not a stop. A screen that names no
+// provider credit text reports false.
+func CreditExhausted(screen string) (string, bool) {
+	line, _, ok := statusBlockOf(screen, creditRow)
+	if !ok {
+		return "", false
+	}
+	for _, provider := range []struct {
+		pool string
+		line *regexp.Regexp
+	}{{"anthropic-api", creditAnthropic}, {"openai-api", creditOpenAI}} {
+		if provider.line.MatchString(line) {
+			return provider.pool, true
+		}
+	}
+	return "", false
+}
+
+// creditRow reports a row that is a provider credit-exhausted rejection.
+func creditRow(line string) bool {
+	line = strings.TrimLeft(line, statusPrefixes)
+	return creditAnthropic.MatchString(line) || creditOpenAI.MatchString(line)
 }
 
 // userTurn reports whether line starts a user turn: the prompt mark of devin,
