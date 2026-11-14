@@ -465,10 +465,23 @@ func (a *App) rebindInherited(ctx context.Context, s Spawn, task client.Task, ev
 	var httpErr *client.HTTPError
 	if e != nil && errors.As(e, &httpErr) && httpErr.Status >= 400 && httpErr.Status < 500 {
 		lookup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		defer cancel()
 		current, lookupErr := hkGetTask(lookup, s.Task)
-		cancel()
-		if lookupErr == nil && current.Refs.JobID != "" && current.Refs.JobID != fromJob {
-			ev["bound_job"] = current.Refs.JobID
+		if lookupErr == nil {
+			if current.Refs.JobID == s.Job && current.ClaimedBy == s.Label {
+				return "rebound"
+			}
+			newFrom := current.Refs.JobID
+			if newFrom != fromJob && (newFrom == s.Inherited || a.isAncestorJob(lookup, newFrom, s.Inherited)) {
+				t, retryErr := hkRebindTask(lookup, s.Task, newFrom, s.Job, s.Label, reason)
+				if retryErr == nil && t.ClaimedBy == s.Label && t.Refs.JobID == s.Job {
+					ev["rebound_from"] = newFrom
+					return "rebound"
+				}
+			}
+			if current.Refs.JobID != "" && current.Refs.JobID != fromJob {
+				ev["bound_job"] = current.Refs.JobID
+			}
 		}
 		return refused("task rebind refused: " + hkErrText(e))
 	}
@@ -480,10 +493,17 @@ func (a *App) rebindInherited(ctx context.Context, s Spawn, task client.Task, ev
 	if err == nil && current.Refs.JobID == s.Job && current.ClaimedBy == s.Label {
 		return "rebound"
 	}
-	if err == nil && current.Refs.JobID == fromJob {
-		t, e = hkRebindTask(confirm, s.Task, fromJob, s.Job, s.Label, reason)
-		if e == nil && t.ClaimedBy == s.Label && t.Refs.JobID == s.Job {
-			return "rebound"
+	if err == nil {
+		targetFrom := fromJob
+		if current.Refs.JobID == s.Inherited || a.isAncestorJob(confirm, current.Refs.JobID, s.Inherited) {
+			targetFrom = current.Refs.JobID
+		}
+		if current.Refs.JobID == targetFrom {
+			t, e = hkRebindTask(confirm, s.Task, targetFrom, s.Job, s.Label, reason)
+			if e == nil && t.ClaimedBy == s.Label && t.Refs.JobID == s.Job {
+				ev["rebound_from"] = targetFrom
+				return "rebound"
+			}
 		}
 	}
 	if err == nil && current.Refs.JobID != fromJob && current.Refs.JobID != s.Job {

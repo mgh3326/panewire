@@ -324,6 +324,68 @@ func TestParentJobSuccessorTakesOverAncestorTaskBinding(t *testing.T) {
 			t.Fatalf("event=%v", ev)
 		}
 	})
+
+	t.Run("conflict re-resolves parent and succeeds", func(t *testing.T) {
+		const ancestor = "ancestor-worker"
+		fx := newRebindFixture(t, "spawned", ancestor)
+		fx.store.records[ancestor] = map[string]any{"job_id": ancestor, "task_id": "42", "host": "test-host", "state": "lost", "family": "anthropic", "owner_lane": "owner"}
+		fx.store.records[rebindParent]["parent_job"] = ancestor
+
+		first := true
+		fx.rebindOverride = func(body map[string]string) (int, string, bool) {
+			if first {
+				first = false
+				// Parent took over the task while successor was in flight.
+				fx.bound, fx.claimedBy = rebindParent, "parent-label"
+				return http.StatusConflict, `{"error":"conflict","reason":"current job_id is \"` + rebindParent + `\""}`, true
+			}
+			return 0, "", false
+		}
+
+		if err := fx.a.Spawn(context.Background(), fx.s); err != nil {
+			t.Fatal(err)
+		}
+		if fx.bound != fx.s.Job || fx.claimedBy != fx.s.Label {
+			t.Fatalf("task bound to job %q claimed by %q, want %q and %q", fx.bound, fx.claimedBy, fx.s.Job, fx.s.Label)
+		}
+		calls := fx.rebinds()
+		if len(calls) != 2 {
+			t.Fatalf("task rebind calls=%v want 2 (initial ancestor + retried parent)", calls)
+		}
+		if calls[0]["from_job"] != ancestor {
+			t.Fatalf("first call from_job=%s want %s", calls[0]["from_job"], ancestor)
+		}
+		if calls[1]["from_job"] != rebindParent {
+			t.Fatalf("second call from_job=%s want %s", calls[1]["from_job"], rebindParent)
+		}
+		ev := fx.taskRebindEvent(t)
+		if ev["status"] != "rebound" {
+			t.Fatalf("event=%v", ev)
+		}
+	})
+
+	t.Run("conflict confirms when already rebound", func(t *testing.T) {
+		const ancestor = "ancestor-worker"
+		fx := newRebindFixture(t, "spawned", ancestor)
+		fx.store.records[ancestor] = map[string]any{"job_id": ancestor, "task_id": "42", "host": "test-host", "state": "lost", "family": "anthropic", "owner_lane": "owner"}
+		fx.store.records[rebindParent]["parent_job"] = ancestor
+
+		fx.rebindOverride = func(body map[string]string) (int, string, bool) {
+			fx.bound, fx.claimedBy = fx.s.Job, fx.s.Label
+			return http.StatusConflict, `{"error":"conflict","reason":"already rebound"}`, true
+		}
+
+		if err := fx.a.Spawn(context.Background(), fx.s); err != nil {
+			t.Fatal(err)
+		}
+		if fx.bound != fx.s.Job || fx.claimedBy != fx.s.Label {
+			t.Fatalf("task bound to job %q claimed by %q", fx.bound, fx.claimedBy)
+		}
+		ev := fx.taskRebindEvent(t)
+		if ev["status"] != "rebound" {
+			t.Fatalf("event=%v", ev)
+		}
+	})
 }
 
 func TestTakeoverRebindsOnlyAfterSpawnCommits(t *testing.T) {
