@@ -159,6 +159,11 @@ func (a *App) staticDrop(row CatalogRow, req selReq, floor string, rungs rungInd
 		return "pool_invalid", "", nil
 	case slices.Contains(req.excludePools, row.Pool):
 		return "pool_excluded", "", nil
+	// The reserved devin-free key names the SWE-2 free band, not a catalog
+	// pool: a replacement that excludes the band must not take another free
+	// rung of the same account (hub quota replacement).
+	case slices.Contains(req.excludePools, devinFreeCapKey) && IsFreeRung(row.Profile):
+		return "pool_excluded", "", nil
 	case cooling:
 		return "pool_cooling", "", nil
 	}
