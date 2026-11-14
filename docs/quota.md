@@ -126,63 +126,83 @@ through the same four paths and the same shared store flow as claude.
 
 `commandcode` pool은 panewire 프로세스(`internal/quota/commandcode`)에서 측정하며
 claude, codex와 같은 shared store 흐름을 사용합니다. 모든 호스트에서 항상 native로
-측정합니다.
+측정합니다. 읽는 곳은 Command Code API가 아니라 **omp**입니다: Command Code를 실제로 쓰는
+harness가 omp이고, omp는 자기 login(여러 계정일 수 있음)으로 쓰기 때문에, API 키로 읽은
+값은 omp가 쓰지 않는 계정을 가리킬 수 있었습니다 (hk 4707, operator decisions 288, 289,
+290). panewire는 Command Code 키를 다루지 않습니다: `COMMAND_CODE_API_KEY`,
+`COMMANDCODE_API_KEY`, `~/.commandcode/auth.json`은 읽지 않고, CLI login도 측정 조건이
+아닙니다.
 
-- **Requests.** `GET` on the commandcode API host: `/alpha/whoami?limits=1`
-  (who the key is), `/alpha/billing/credits` (scoped with `?orgId=` when whoami
-  names an org), `/alpha/billing/subscriptions` and `/alpha/usage/summary`. Each
-  sends `Authorization: Bearer <key>` and `User-Agent: cmd/1.88.1` (the API's
-  edge rejects generic clients; this is pacelever's constant), 20 s timeout,
-  redirects refused, 2 MiB body cap. Responses may carry their object under
-  `data` or at the top level.
-- **5h and 7d** are `windowLimits.fiveHour` and `.weekly` of the credits
-  response: `used / cap`, clamped to 100 when past the cap. A window without a
-  positive `cap` or a numeric `used >= 0` is left out; a malformed value never
-  reads as an unused window. `resetAt` is epoch seconds, milliseconds or
-  microseconds, RFC 3339 or an HTTP date. The vendor's 7d limit is a rolling
-  window whose `resetAt` reads relative to the reading time (exactly 5 days after
-  the reading time), not a fixed calendar reset boundary; it is marked
-  unpaceable (no `ResetsAt`) so `projectAtReset` does not turn a moving reset into
-  an artificial pace (hk 4330). 5h keeps its `resetAt`, and 30d carries the
-  subscription `currentPeriodEnd`.
-- **30d** is the share of this billing period's plan credits already spent:
-  `totalMonthlyCredits / (totalMonthlyCredits + credits.monthlyCredits)`, with
-  `totalMonthlyCredits` from the usage summary (its `periodBasis` must be
-  `billing-period` when it says one) and `monthlyCredits` (the plan credits
-  left, USD, floored at 0) from the credits response. The reset is the
-  subscription's `data.currentPeriodEnd`. Purchased and free credits are never
-  read: they are outside the plan's allowance, so neither the numerator nor the
-  denominator includes them. There is no plan table, so a price change needs no
-  release.
-- **A missing 30d is a missing window.** If the usage summary or the credits
-  `monthlyCredits` cannot be read (a failed or malformed response, a non-numeric
-  or negative total, another `periodBasis`, a zero total) the reading has the
-  5h and 7d buckets and no 30d bucket; nothing is estimated. If only the
-  subscription is unreadable, 30d keeps its value and has no reset (and the
-  reading has no plan name). Refusing a spawn for want of a 30d window is the
-  gate's rule, not this measurement's. A deadline that ends during a secondary
-  request fails the whole measurement as `timeout` rather than publishing a
-  partial reading.
-- **Error kinds** follow pacelever's for this pool: no key `credentials`; a
-  401/403 `auth_failed`, except a 403 whose body is not JSON, which is
-  `edge_rejected`; 429 `rate_limited` (with `Retry-After`; without it the shared
-  flow backs the account off 300 s itself); a deadline `timeout`; a failed
-  request `network`; any other status `http`; unreadable JSON or no usable
-  window `parse_error`. A body saying `success: false` is `http`. Only the credits
-  and whoami requests decide the kind; a secondary request's failure never
-  does.
-- **Credentials** are located, not copied: the key is
-  `COMMAND_CODE_API_KEY`, else `COMMANDCODE_API_KEY`, else `apiKey` of
-  `~/.commandcode/auth.json` — pacelever's sources, no others. It is read into
-  memory for the requests of one measurement, and never logged, written, put in
-  an error or on a command line.
-- **Account key** `commandcode:<fp>`, `fp = hex(sha256("commandcode-account|" +
-  id))[:16]`, where `id` is whoami's `user.id`, else `org.id`: pacelever's key
-  for the same login. The fingerprint is read before each refresh, which costs
-  one whoami request the first time a key is seen and none after (the node
-  remembers it). A login whose whoami names no id has no key (`account_unknown`
-  with a store; the node still measures it directly without one).
-- **Shared store flow** as for codex: a reading stays fresh for 300 s.
+- **Source.** `omp usage --json --provider commandcode` (stdout only; stderr is never
+  read; 30 s timeout, 4 MiB cap). `omp`는 PATH에서 찾으며, 없으면 이 호스트에 Command Code
+  login이 없는 것(`credentials`)입니다. 호스트의 omp가 가진 **모든** Command Code 계정이
+  `reports[]`에 한 줄씩 나옵니다.
+- **Windows.** 계정마다 `commandcode:5h`(14 credits)와 `commandcode:7d`(35 credits)
+  limit을 읽습니다: `5h`와 `7d` account bucket, used share = `amount.usedFraction`, 없으면
+  `used / limit`, 100으로 clamp. `status: "exhausted"`는 100입니다. 값이 없거나 깨진 window는
+  bucket에서 빠집니다(깨진 값이 "안 쓴 window"로 읽히는 일은 없습니다). 두 window의
+  `durationMs`는 각각 18 000 000과 604 800 000이어야 하며, 다르면 알 수 없는 shape입니다.
+  `resetsAt`(epoch ms)는 bucket의 reset입니다. **7d reset은 고정 경계**입니다: omp의
+  `--history`에 3일 간격 snapshot에서 같은 `resetsAt`이 기록되어 있어(2026-11-15 확인), 이전
+  API 읽기에서 "rolling이라 pace 불가"로 표시하던 규칙(hk 4330)은 이 source에는 적용하지
+  않습니다. 7d는 다른 구독 pool의 7일 window와 똑같이 pace합니다. 5h reset은 0 사용일 때
+  omp가 생략할 수 있고, 그러면 reset 없는 bucket입니다.
+- **No month, no balance.** 30일 window와 credit balance는 읽지도, 투영하지도, gate하지도
+  않습니다. `commandcode:balance`는 무시합니다. 크레딧이 떨어진 계정은 pane에서 실패하며 그것을
+  받아들입니다 (decision 289). `commandcode_required_window_missing:30d` 규칙
+  (decision/2026-11-06/commandcode-30d-required-in-panewire-gate)은 이 pool에서 폐기되었습니다.
+  gate가 요구하는 window는 `5h`와 `7d`뿐입니다.
+- **Freshness.** omp는 report를 약 5분(±25%) cache하고 `fetchedAt`에 가져온 시각을
+  적습니다. panewire는 `fetchedAt`을 reading의 `measured_at`으로 게시하므로 reading의 나이는
+  omp가 값을 가져온 때부터 셉니다. **받아들이는 최대 나이는 3분**(`MaxReportAge`, shared flow가
+  reading을 "refresh due"로 보는 `OtherRefreshTTL`과 같음)입니다. 더 오래된 report가 있으면
+  `omp usage invalidate --provider commandcode`를 한 번 실행하고 다시 읽습니다. 그래도 오래된
+  계정은 **unknown**이라 빠지고(다른 계정은 유지), 모든 계정이 그러면 `probe_error`("omp usage
+  report is stale")입니다. 미래의 `fetchedAt`(1분 초과)도 unknown입니다.
+- **Fail closed.** 아는 shape가 아니면(JSON이 아님, `reports` 없음, `fetchedAt` 또는
+  `limits` 없음, `scope.accountId` 없음 또는 계정 불일치, 알려진 window의 길이가 다름, 같은
+  계정이 두 번 나옴) `parse_error`("unsupported omp usage output")이고, pool은 이 호스트에서
+  admit되지 않습니다. 이유는 같은 이유가 계속되는 동안 **한 번만** 로그에 남깁니다(omp 출력은
+  로그에도 오류에도 들어가지 않으며 고정 문장입니다). "omp 없음" 또는 "Command Code 계정
+  없음"은 `credentials`(이 호스트에 login 없음)이며 오류가 아니므로 로그하지 않습니다. 윈도우가
+  하나도 없는 계정(balance만 있는 pay-as-you-go)은 측정 대상이 아니어서 빠지고, 남는 계정이
+  없으면 `parse_error`입니다. omp가 실패하면 `probe_error`, deadline은 `timeout`입니다.
+- **Several accounts.** 이 pool만 호스트당 계정 key가 하나가 아닙니다. 한 번의 `omp usage`가
+  모든 계정을 주고, 각 계정은 자기 key로 게시·announce·판정됩니다.
+  - **Account key** `commandcode:<fp>`, `fp = hex(sha256("commandcode-account|" + id))[:16]`,
+    `id`는 omp가 report하는 Command Code user id(`scope.accountId`). 이전 API 읽기의 `user.id`와
+    같은 id이므로 key가 바뀌지 않습니다 (기존 presence, `[quota.accounts]`,
+    `[quota].measurable_accounts` 항목이 그대로 유효). 계정은 fp 순으로 정렬합니다.
+  - **Shared store flow** as for codex, per account: 계정마다 lease(120 s)와 게시, presence
+    announce가 따로입니다. reading은 300 s 동안 fresh이고 3분이 지나면 refresh 대상입니다. 노드는
+    마지막 읽기에서 본 계정 목록을 기억하므로, 모든 계정의 shared reading이 fresh이면 `omp usage`
+    를 부르지 않습니다. 한 계정의 실패는 다른 계정을 가리지 않습니다: refresh는 reading이 하나도
+    없을 때만 실패합니다. omp가 더는 목록에 올리지 않는 계정은 갱신되지 않고 stale로 떨어집니다.
+  - **Selection.** host의 presence record 중 가장 최근 것에서 30분 안에 announce된 모든
+    `commandcode:` key가 그 host의 계정입니다(`hostAccounts`); 다른 pool은 지금처럼 가장 최근 key
+    하나입니다. 계정마다 binding과 candidate가 따로이고 자기 window로 판정합니다. 한 계정이
+    소진(또는 5h가 cutoff)이면 그 계정만 drop되고, **한 계정이라도 room이 있으면 pool은 usable**,
+    모두 소진이면 pool은 drop됩니다. 정렬은 다른 구독 pool의 7일 window와 같은 규칙입니다: 주가
+    사용 안 된 채 끝날 위험(waste risk)이 큰 계정이 먼저, 그렇지 않으면 room이 많은 계정.
+  - **Which account omp uses.** omp는 세션을 시작할 때 계정을 자기 usage ranking으로 고르고
+    (소진·차단된 계정 뒤로, 5h 사용량 85% 이상인 계정 뒤로, 그다음 7d window의 "required
+    drain"이 큰 계정, 같으면 7d 사용량이 적은 계정, 그다음 5h 순) 그 세션에 고정합니다
+    (omp 18.14.2 소스 `pi-ai/src/auth/select.ts`의 `selectApiKey`와 `rank.ts`; `omp dry-balance`는
+OAuth 계정만 resolve하므로 API-key 계정인 Command Code에는 "no OAuth access resolved"를 답하고 선택을
+보여 주지 못합니다). 계정을 지정하는 flag나 설정은
+    API-key credential에는 없습니다(`task.agentAccountPools`는 OAuth 전용). 따라서 **launch 전에
+    어느 계정이 쓰일지는 알 수 없습니다.** panewire가 job에 기록하는 `account_key`는 판정에 쓴
+    계정, 곧 gate와 정렬이 고른 계정(소진된 계정을 omp도 뒤로 미루므로, room이 있는 계정이 하나뿐이면
+    omp도 그 계정을 씁니다)이며, omp의 launch 시점 선택과 일치한다는 보장은 없는 **예측**입니다.
+    launch 후 실제 계정을 읽는 길은 없습니다(omp의 세션 고정 기록은 credential 저장소에 있어
+    panewire가 읽지 않습니다).
+- **Credentials** are never read: no key, token or auth file is read, copied or sent; omp
+  uses its own login, and its stderr (which can name an account) is discarded.
+- **Plan and status.** `panewire quota status`는 이 호스트가 아는 계정마다 pool/window 행을
+  보여 주며 FRESHNESS 열에 omp report의 나이(`fresh 2m`)가 붙습니다. `panewire plan`은 계정마다
+  `account commandcode:<fp> host=<h> 5h=<x>% 7d=<y>% age=<n>` 줄을 출력하고, JSON의 candidate
+  row에는 `windows`가 있습니다. `panewire quota refresh commandcode`는 계정마다 JSON 한 줄을
+  출력합니다.
 
 ## Native measurement: devin
 
@@ -527,10 +547,10 @@ a graded rung, `alternatives` lists the same-grade rungs the stored readings of
 the other pools this host holds would admit, read with no lease and no
 measurement (hk 3211).
 
-Rules beyond pacelever's: a commandcode reading without its `30d` window is
-unmeasurable (`commandcode_required_window_missing:30d`,
-decision/2026-11-06/commandcode-30d-required-in-panewire-gate). It needs the
-node's native commandcode measurement, the only one that publishes `30d`. And
+Rules beyond pacelever's: a commandcode reading needs its `5h` and `7d` windows and
+nothing monthly (decision 289, hk 4707; this replaces
+decision/2026-11-06/commandcode-30d-required-in-panewire-gate and its
+`commandcode_required_window_missing:30d` refusal). And
 a credit rung seats only an implementer (operator, 2026-11-07 for
 cmd-dsflash41; hk 3532 extends it to every commandcode-pool rung); pacelever
 also seats a builder on a placed default rung.
@@ -564,10 +584,12 @@ a `no_thinking` field is ignored. `omp-dsflash41@off` and any
 other credit rung at `off` whose seat lacks the property are refused
 (`credit effort is not placed`).
 
-All seven omp profiles and cmd-dsflash41 share one Command Code account, its 30-day window
-(`commandcode_required_window_missing:30d`), and any
+All seven omp profiles and cmd-dsflash41 draw on the Command Code accounts omp
+holds on the host, judged on their 5-hour and weekly windows
+([§Native measurement: commandcode](#native-measurement-commandcode)), and share any
 `quota.pool_max_concurrent.commandcode` cap (see [config](config.md)). A spawn
-on any of these profiles counts against the same account reading.
+on any of these profiles counts against the pool, and the job records the account
+the gate judged (a prediction of omp's own choice, see above).
 
 Admission refuses the reviewer role for omp-dsflash41 today, because the credit
 rule admits only an implementer. The policy seat still lists reviewer, so a

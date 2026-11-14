@@ -93,7 +93,7 @@ func poolExhaustionsOf(quota *FleetStateQuota, now time.Time) []poolExhaustion {
 	}
 	var window poolExhaustion
 	for _, bucket := range quota.Buckets {
-		if bucket.UsedPct == nil || *bucket.UsedPct < 100 || !accountWideBucket(bucket) {
+		if bucket.UsedPct == nil || *bucket.UsedPct < 100 || !accountWideBucket(bucket) || !fleet.WindowRead(quota.Pool, bucket.Window) {
 			continue
 		}
 		if reset, err := time.Parse(time.RFC3339, bucket.ResetsAt); err == nil && reset.After(now) && reset.After(window.Reset) {

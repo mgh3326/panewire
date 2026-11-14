@@ -54,6 +54,9 @@ func (s *nativeQuotaSource) measurableHere(ctx context.Context) bool {
 	if s.Pool == "agy" {
 		return s.agyMeasurable()
 	}
+	if s.Pool == "commandcode" {
+		return s.commandcodeMeasurableHere()
+	}
 	_, accountFP, _ := s.poolMeasurement()
 	fp, err := accountFP(ctx)
 	if err != nil || fp == "" {

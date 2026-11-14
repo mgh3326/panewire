@@ -377,6 +377,9 @@ func admissionAuto(x *shared.Observation, pool, key string, now time.Time, ttl t
 		reading.Free = &admissionFree{State: free.State, Reset: free.ResetsAt}
 	}
 	for _, b := range x.Buckets {
+		if !WindowRead(pool, b.Window) {
+			continue
+		}
 		used := b.UsedPct
 		if !admissionValidPct(&used) || b.Scope != "account" && b.Scope != "model" && b.Scope != "group" {
 			return admissionReading{}, false

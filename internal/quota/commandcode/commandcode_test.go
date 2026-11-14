@@ -3,437 +3,269 @@ package commandcode
 import (
 	"context"
 	"errors"
-	"io"
-	"math"
-	"net/http"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
 	"github.com/mgh3326/panewire/internal/quota"
 )
 
-// secret is the API key of the test login. It may appear only in the
-// Authorization header of a request.
-const secret = "commandcode-api-key-must-not-leak"
+// fetchedA is the fetchedAt of account A in testdata/omp_usage_two_accounts.json
+// (account B's is 30 s older). The fixtures are `omp usage --json --provider
+// commandcode` output recorded on 2026-11-15 (omp 18.14.2) with the account ids
+// and e-mail replaced: no live call is made by a test.
+var fetchedA = time.UnixMilli(1794696766070).UTC()
 
-// fixtureFP is hex(sha256("commandcode-account|user_fixture_1"))[:16], the
-// fingerprint of pacelever's accountFP("commandcode", "user_fixture_1")
-// (account.go: fingerprint(pool+"-account", account)), computed with sha256sum.
-const fixtureFP = "71430d9ff98e30c3"
+const (
+	fpA = "7d279b7dcc317cda" // hex(sha256("commandcode-account|user_fixture_a"))[:16]
+	fpB = "a1fd7fc5ae227218"
+)
 
-var testNow = time.Date(2026, 11, 6, 5, 0, 0, 0, time.UTC)
-
-func fixture(t *testing.T, name string) string {
+func fixture(t *testing.T, name string) []byte {
 	t.Helper()
 	data, err := os.ReadFile(filepath.Join("testdata", name))
 	if err != nil {
 		t.Fatal(err)
 	}
-	return string(data)
+	return data
 }
 
-// api answers by request path (without the query) and records every request.
-type api struct {
-	mu       sync.Mutex
-	replies  map[string]func() (*http.Response, error)
-	requests []*http.Request
+// omp is a fake omp: it answers `usage --json` from replies in turn (the last one
+// repeats) and counts the calls, `usage invalidate` separately.
+type omp struct {
+	replies     [][]byte
+	err         error
+	reads       int
+	invalidates int
+	args        [][]string
 }
 
-func (a *api) Do(r *http.Request) (*http.Response, error) {
-	a.mu.Lock()
-	a.requests = append(a.requests, r)
-	reply := a.replies[r.URL.Path]
-	a.mu.Unlock()
-	if reply == nil {
-		return nil, errors.New("no reply for " + r.URL.Path)
+func (o *omp) run(_ context.Context, args ...string) ([]byte, error) {
+	o.args = append(o.args, args)
+	if o.err != nil {
+		return nil, o.err
 	}
-	return reply()
-}
-
-func (a *api) paths() string {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	var paths []string
-	for _, r := range a.requests {
-		paths = append(paths, r.URL.RequestURI())
+	if len(args) >= 2 && args[1] == "invalidate" {
+		o.invalidates++
+		return []byte("Invalidated\n"), nil
 	}
-	return strings.Join(paths, " ")
+	reply := o.replies[min(o.reads, len(o.replies)-1)]
+	o.reads++
+	return reply, nil
 }
 
-func respond(status int, body string) func() (*http.Response, error) {
-	return func() (*http.Response, error) {
-		return &http.Response{StatusCode: status, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(body))}, nil
-	}
+func config(o *omp, now time.Time) Config {
+	return Config{Run: o.run, Now: func() time.Time { return now }}
 }
 
-// fixtureAPI serves the four 2026-11-06 fixture bodies.
-func fixtureAPI(t *testing.T) *api {
-	return &api{replies: map[string]func() (*http.Response, error){
-		"/alpha/whoami":                respond(200, fixture(t, "whoami.json")),
-		"/alpha/billing/credits":       respond(200, fixture(t, "credits.json")),
-		"/alpha/usage/summary":         respond(200, fixture(t, "usage_summary.json")),
-		"/alpha/billing/subscriptions": respond(200, fixture(t, "subscriptions.json")),
-	}}
-}
-
-func config(a Doer, files map[string]string, env map[string]string) Config {
-	return Config{
-		HTTP: a, Now: func() time.Time { return testNow }, Home: "/home/u",
-		LookupEnv: func(name string) (string, bool) { v, ok := env[name]; return v, ok },
-		ReadFile: func(path string) ([]byte, error) {
-			if body, ok := files[path]; ok {
-				return []byte(body), nil
-			}
-			return nil, os.ErrNotExist
-		},
-	}
-}
-
-func login() map[string]string {
-	return map[string]string{"/home/u/.commandcode/auth.json": `{"apiKey":"` + secret + `"}`}
-}
-
-func bucketOf(t *testing.T, o quota.Observation, window string) quota.Bucket {
+func bucket(t *testing.T, a Account, window string) quota.Bucket {
 	t.Helper()
-	for _, b := range o.Buckets {
+	for _, b := range a.Observation.Buckets {
 		if b.Window == window {
 			return b
 		}
 	}
-	t.Fatalf("no %s bucket in %+v", window, o.Buckets)
+	t.Fatalf("account %s has no %s window: %+v", a.FP, window, a.Observation.Buckets)
 	return quota.Bucket{}
 }
 
-func hasBucket(o quota.Observation, window string) bool {
-	for _, b := range o.Buckets {
-		if b.Window == window {
-			return true
-		}
-	}
-	return false
-}
-
-// Acceptance 5: the 2026-11-06 shapes give 30d ≈ 9.3% resetting at
-// currentPeriodEnd, 7d 1.3%, 5h 0%, under pacelever's account fingerprint.
-func TestMeasureFixtureYieldsThirtyDayWindow(t *testing.T) {
-	a := fixtureAPI(t)
-	observed, err := Measure(t.Context(), config(a, login(), nil))
+func TestMeasureReadsEveryAccountOmpHolds(t *testing.T) {
+	o := &omp{replies: [][]byte{fixture(t, "omp_usage_two_accounts.json")}}
+	accounts, err := Measure(t.Context(), config(o, fetchedA.Add(90*time.Second)))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(observed.Buckets) != 3 || observed.Source != quota.SourceUsageAPI || observed.Plan != "individual-goat" || observed.AccountFP != fixtureFP {
-		t.Fatalf("observation %+v", observed)
+	if len(accounts) != 2 || accounts[0].FP != fpA || accounts[1].FP != fpB {
+		t.Fatalf("accounts = %+v, want %s then %s", accounts, fpA, fpB)
 	}
-	month := bucketOf(t, observed, "30d")
-	if want := 100 * 6.52 / 70; math.Abs(*month.UsedPct-want) > 1e-9 || math.Round(*month.UsedPct*10)/10 != 9.3 {
-		t.Fatalf("30d = %v, want %v", *month.UsedPct, want)
+	if fmt.Sprint(o.args) != "[[usage --json --provider commandcode]]" || o.invalidates != 0 {
+		t.Fatalf("omp calls = %v; one read-only usage call is expected", o.args)
 	}
-	if month.ResetsAt != "2026-11-27T07:38:00Z" || month.Scope.Kind != quota.ScopeAccount {
-		t.Fatalf("30d bucket %+v", month)
+	a := accounts[0]
+	if a.Observation.Source != quota.SourceOmpUsage || !a.Observation.MeasuredAt.Equal(fetchedA) {
+		t.Fatalf("source %q measured_at %v, want omp-usage stamped with omp's fetchedAt %v", a.Observation.Source, a.Observation.MeasuredAt, fetchedA)
 	}
-	// hk 4330: 7d rolling window carries no ResetsAt (unpaceable).
-	if week := bucketOf(t, observed, "7d"); math.Round(*week.UsedPct*10)/10 != 1.3 || week.ResetsAt != "" {
-		t.Fatalf("7d bucket %+v", week)
+	five, week := bucket(t, a, "5h"), bucket(t, a, "7d")
+	if got := *five.UsedPct; got < 1.94 || got > 1.95 {
+		t.Fatalf("5h used = %v, want 0.271789812 of 14 credits (1.94%%)", got)
 	}
-	if five := bucketOf(t, observed, "5h"); *five.UsedPct != 0 || five.ResetsAt != "2026-11-06T09:00:00Z" {
-		t.Fatalf("5h bucket %+v", five)
+	if got := *week.UsedPct; got < 73.05 || got > 73.06 {
+		t.Fatalf("7d used = %v, want 25.569563761 of 35 credits (73.06%%)", got)
 	}
-	// whoami names the org the credits request is scoped to.
-	if got := a.paths(); got != "/alpha/whoami?limits=1 /alpha/billing/credits?orgId=org_fixture_1 /alpha/usage/summary /alpha/billing/subscriptions" {
-		t.Fatalf("requests: %s", got)
+	// omp's weekly reset is a fixed boundary (unchanged across three days of
+	// recorded snapshots), so the weekly window is paceable.
+	if week.ResetsAt != "2026-11-17T14:54:38.537Z" || five.ResetsAt == "" {
+		t.Fatalf("resets 5h=%q 7d=%q", five.ResetsAt, week.ResetsAt)
 	}
-	for _, r := range a.requests {
-		if r.Header.Get("Authorization") != "Bearer "+secret || r.Header.Get("User-Agent") != "cmd/1.88.1" || r.Method != http.MethodGet {
-			t.Fatalf("request %s headers %v", r.URL.RequestURI(), r.Header)
-		}
-	}
-}
-
-// Acceptance 6: no usage summary, no 30d bucket — the 5h and 7d windows stay.
-func TestMeasureWithoutUsageSummaryHasNoThirtyDay(t *testing.T) {
-	for name, reply := range map[string]func() (*http.Response, error){
-		"not found":      respond(404, `{"error":"nope"}`),
-		"server error":   respond(500, "boom"),
-		"rate limited":   respond(429, `{}`),
-		"unauthorized":   respond(401, `{}`),
-		"malformed":      respond(200, `{"data":`),
-		"network":        func() (*http.Response, error) { return nil, errors.New("dial " + secret) },
-		"no total":       respond(200, `{"data":{"periodBasis":"billing-period"}}`),
-		"negative total": respond(200, `{"data":{"totalMonthlyCredits":-1,"periodBasis":"billing-period"}}`),
-		"string total":   respond(200, `{"data":{"totalMonthlyCredits":"6.52","periodBasis":"billing-period"}}`),
-		"other basis":    respond(200, `{"data":{"totalMonthlyCredits":6.52,"periodBasis":"calendar-month"}}`),
-	} {
-		t.Run(name, func(t *testing.T) {
-			a := fixtureAPI(t)
-			a.replies["/alpha/usage/summary"] = reply
-			observed, err := Measure(t.Context(), config(a, login(), nil))
-			if err != nil {
-				t.Fatal(err)
-			}
-			if hasBucket(observed, "30d") || len(observed.Buckets) != 2 || !hasBucket(observed, "5h") || !hasBucket(observed, "7d") {
-				t.Fatalf("buckets %+v", observed.Buckets)
-			}
-		})
-	}
-	// The summary is not even asked for when the credits response gives no
-	// monthly remainder to measure against.
-	a := fixtureAPI(t)
-	a.replies["/alpha/billing/credits"] = respond(200, `{"data":{"windowLimits":{"weekly":{"used":1,"cap":35}}}}`)
-	observed, err := Measure(t.Context(), config(a, login(), nil))
-	if err != nil || hasBucket(observed, "30d") || len(observed.Buckets) != 1 || strings.Contains(a.paths(), "usage/summary") {
-		t.Fatalf("observed %+v err=%v paths=%s", observed, err, a.paths())
+	if five.Scope.Kind != quota.ScopeAccount || week.Scope.Kind != quota.ScopeAccount {
+		t.Fatalf("scopes %+v %+v, want account", five.Scope, week.Scope)
 	}
 }
 
-// A missing subscription keeps the 30d value and leaves its reset unknown,
-// and the plan name too: nothing is made up.
-func TestMeasureWithoutSubscriptionKeepsThirtyDayWithoutReset(t *testing.T) {
-	a := fixtureAPI(t)
-	a.replies["/alpha/billing/subscriptions"] = respond(500, "boom")
-	observed, err := Measure(t.Context(), config(a, login(), nil))
+// Decision 289: the month and the credit balance are neither read nor
+// required. The fixture carries a credit balance and no 30-day window; neither
+// is a bucket, and the reading is complete without a 30d one.
+func TestMeasureHasNoMonthlyWindowAndReadsNoCreditBalance(t *testing.T) {
+	o := &omp{replies: [][]byte{fixture(t, "omp_usage_two_accounts.json")}}
+	accounts, err := Measure(t.Context(), config(o, fetchedA))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if month := bucketOf(t, observed, "30d"); month.ResetsAt != "" || observed.Plan != "" || len(observed.Buckets) != 3 {
-		t.Fatalf("observation %+v", observed)
+	for _, a := range accounts {
+		var windows []string
+		for _, b := range a.Observation.Buckets {
+			windows = append(windows, b.Window)
+		}
+		if strings.Join(windows, ",") != "5h,7d" {
+			t.Fatalf("account %s windows %v, want exactly 5h,7d", a.FP, windows)
+		}
 	}
 }
 
-// Purchased and free credits are outside the plan's allowance: they change
-// neither the 30d value nor its denominator.
-func TestMeasureExcludesPurchasedAndFreeCredits(t *testing.T) {
-	a := fixtureAPI(t)
-	a.replies["/alpha/billing/credits"] = respond(200, strings.Replace(fixture(t, "credits.json"), `"purchasedCredits":0,"freeCredits":0`, `"purchasedCredits":500,"freeCredits":25`, 1))
-	observed, err := Measure(t.Context(), config(a, login(), nil))
+func TestExhaustedAccountReadsAsFullWindow(t *testing.T) {
+	o := &omp{replies: [][]byte{fixture(t, "omp_usage_two_accounts.json")}}
+	accounts, err := Measure(t.Context(), config(o, fetchedA))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := 100 * 6.52 / 70; math.Abs(*bucketOf(t, observed, "30d").UsedPct-want) > 1e-9 {
-		t.Fatalf("30d = %v, want %v", *bucketOf(t, observed, "30d").UsedPct, want)
+	if got := *bucket(t, accounts[1], "7d").UsedPct; got != 100 {
+		t.Fatalf("exhausted weekly window reads %v, want 100", got)
+	}
+	if got := *bucket(t, accounts[1], "5h").UsedPct; got != 25 {
+		t.Fatalf("account B 5h reads %v, want 25 (3.5 of 14)", got)
 	}
 }
 
-// An exhausted plan reads 100%, and a window past its cap is clamped to 100.
-func TestMeasureExhaustedWindows(t *testing.T) {
-	a := fixtureAPI(t)
-	a.replies["/alpha/billing/credits"] = respond(200, `{"windowLimits":{"fiveHour":{"used":20,"cap":14},"weekly":{"used":35,"cap":35}},"credits":{"monthlyCredits":-3}}`)
-	observed, err := Measure(t.Context(), config(a, login(), nil))
-	if err != nil {
-		t.Fatal(err)
+func TestFingerprintContinuesTheAPIReading(t *testing.T) {
+	// The earlier API reading keyed the account by hex(sha256("commandcode-account|"+id))[:16]
+	// over the Command Code user id; omp reports the same id, so its key is the same.
+	if got := Fingerprint("user_fixture_1"); got != "71430d9ff98e30c3" {
+		t.Fatalf("Fingerprint = %s, want the key the API reading gave this id", got)
 	}
-	for _, window := range []string{"5h", "7d", "30d"} {
-		if got := *bucketOf(t, observed, window).UsedPct; got != 100 {
-			t.Fatalf("%s = %v", window, got)
+	if Fingerprint("") != "" {
+		t.Fatal("an empty id has no fingerprint")
+	}
+}
+
+func TestNoOmpOrNoAccountIsNoLogin(t *testing.T) {
+	missing := &omp{err: fmt.Errorf("start: %w", exec.ErrNotFound)}
+	if _, err := Measure(t.Context(), config(missing, fetchedA)); quota.KindOf(err) != quota.ErrKindCredentials {
+		t.Fatalf("no omp: %v, want credentials", err)
+	}
+	none := &omp{replies: [][]byte{[]byte(`{"generatedAt":1,"reports":[],"accountsWithoutUsage":[]}`)}}
+	if _, err := Measure(t.Context(), config(none, fetchedA)); quota.KindOf(err) != quota.ErrKindCredentials {
+		t.Fatalf("no commandcode account: %v, want credentials", err)
+	}
+}
+
+// An account with only a credit balance (pay-as-you-go) has no window to judge;
+// it is left out, and with no other account the pool is unmeasurable here.
+func TestAccountWithoutWindowsIsNotMeasurable(t *testing.T) {
+	o := &omp{replies: [][]byte{fixture(t, "omp_usage_payg_only.json")}}
+	if _, err := Measure(t.Context(), config(o, fetchedA)); quota.KindOf(err) != quota.ErrKindParse {
+		t.Fatalf("balance-only account: %v, want parse_error", err)
+	}
+}
+
+func TestUnknownShapeFailsClosed(t *testing.T) {
+	good := string(fixture(t, "omp_usage_two_accounts.json"))
+	cases := map[string]string{
+		"not json":              "omp 99: usage is now a table",
+		"no reports":            `{"generatedAt":1}`,
+		"reports not a list":    `{"reports":{"commandcode":[]}}`,
+		"no fetchedAt":          strings.ReplaceAll(good, `"fetchedAt"`, `"fetched"`),
+		"fetchedAt as string":   strings.Replace(good, `"fetchedAt": 1794696766070`, `"fetchedAt": "1794696766070"`, 1),
+		"limits missing":        `{"reports":[{"provider":"commandcode","fetchedAt":1794696766070}]}`,
+		"account id missing":    strings.ReplaceAll(good, `"accountId": "user_fixture_a"`, `"accountId": ""`),
+		"5h length changed":     strings.Replace(good, `"durationMs": 18000000`, `"durationMs": 3600000`, 1),
+		"weekly length changed": strings.Replace(good, `"durationMs": 604800000`, `"durationMs": 2592000000`, 1),
+		"limit without window":  strings.Replace(good, `"window": {`, `"windows": {`, 1),
+		"duplicate account":     strings.ReplaceAll(good, "user_fixture_b", "user_fixture_a"),
+	}
+	for name, output := range cases {
+		o := &omp{replies: [][]byte{[]byte(output)}}
+		_, err := Measure(t.Context(), config(o, fetchedA))
+		if quota.KindOf(err) != quota.ErrKindParse {
+			t.Errorf("%s: err = %v, want parse_error (unknown shape fails closed)", name, err)
 		}
 	}
 }
 
-// A window with a malformed value is left out; it never reads as unused.
-func TestMeasureMalformedWindowsAreLeftOut(t *testing.T) {
-	a := fixtureAPI(t)
-	a.replies["/alpha/billing/credits"] = respond(200, `{"windowLimits":{"fiveHour":{"used":"0","cap":14},"weekly":{"used":-1,"cap":35}},"credits":{"monthlyCredits":"63.48"}}`)
-	if _, err := Measure(t.Context(), config(a, login(), nil)); quota.KindOf(err) != quota.ErrKindParse {
-		t.Fatalf("err = %v", err)
-	}
-}
-
-// Acceptance 1: auth missing, refused, edge-rejected, rate limited, malformed,
-// timed out — each a kind and a fixed sentence, none carrying the key.
-func TestMeasureFailureKinds(t *testing.T) {
-	retry := func() (*http.Response, error) {
-		return &http.Response{StatusCode: 429, Header: http.Header{"Retry-After": {"90"}}, Body: io.NopCloser(strings.NewReader(`{}`))}, nil
-	}
-	for _, test := range []struct {
-		name   string
-		files  map[string]string
-		env    map[string]string
-		path   string
-		reply  func() (*http.Response, error)
-		kind   string
-		sends  bool
-		retain time.Duration
-	}{
-		{name: "no login", files: map[string]string{}, kind: quota.ErrKindCredentials},
-		{name: "empty key", files: map[string]string{"/home/u/.commandcode/auth.json": `{"apiKey":"  "}`}, kind: quota.ErrKindCredentials},
-		{name: "unreadable login", files: map[string]string{"/home/u/.commandcode/auth.json": `{`}, kind: quota.ErrKindCredentials},
-		{name: "refused key", path: "/alpha/whoami", reply: respond(401, `{"error":"unauthorized"}`), kind: quota.ErrKindAuthFailed, sends: true},
-		{name: "forbidden json", path: "/alpha/billing/credits", reply: respond(403, `{"error":"forbidden"}`), kind: quota.ErrKindAuthFailed, sends: true},
-		{name: "edge rejection", path: "/alpha/whoami", reply: respond(403, `<html>blocked</html>`), kind: quota.ErrKindEdgeRejected, sends: true},
-		{name: "rate limited", path: "/alpha/billing/credits", reply: retry, kind: quota.ErrKindRateLimited, sends: true, retain: 90 * time.Second},
-		{name: "bare rate limit", path: "/alpha/whoami", reply: respond(429, `{}`), kind: quota.ErrKindRateLimited, sends: true},
-		{name: "server error", path: "/alpha/billing/credits", reply: respond(500, "boom"), kind: quota.ErrKindHTTP, sends: true},
-		{name: "rejected body", path: "/alpha/whoami", reply: respond(200, `{"success":false}`), kind: quota.ErrKindHTTP, sends: true},
-		{name: "malformed whoami", path: "/alpha/whoami", reply: respond(200, `not json`), kind: quota.ErrKindParse, sends: true},
-		{name: "malformed credits", path: "/alpha/billing/credits", reply: respond(200, `{"data":`), kind: quota.ErrKindParse, sends: true},
-		{name: "no windows", path: "/alpha/billing/credits", reply: respond(200, `{"data":{}}`), kind: quota.ErrKindParse, sends: true},
-		{name: "network", path: "/alpha/billing/credits", reply: func() (*http.Response, error) { return nil, errors.New("Get https://x: Bearer " + secret) }, kind: quota.ErrKindNetwork, sends: true},
+func TestErrorsCarryNothingOfOmpsOutput(t *testing.T) {
+	secret := "sk-must-not-leak"
+	for name, o := range map[string]*omp{
+		"junk output": {replies: [][]byte{[]byte(secret)}},
+		"omp fails":   {err: errors.New("exit status 1: " + secret)},
 	} {
-		t.Run(test.name, func(t *testing.T) {
-			a := fixtureAPI(t)
-			if test.path != "" {
-				a.replies[test.path] = test.reply
-			}
-			files := test.files
-			if files == nil {
-				files = login()
-			}
-			_, err := Measure(t.Context(), config(a, files, test.env))
-			var failure *quota.Error
-			if !errors.As(err, &failure) || failure.Kind != test.kind {
-				t.Fatalf("err = %v, want kind %s", err, test.kind)
-			}
-			if strings.Contains(err.Error(), secret) || strings.Contains(err.Error(), "http") && test.kind != quota.ErrKindHTTP {
-				t.Fatalf("err leaks: %v", err)
-			}
-			if failure.RetryAfter != test.retain {
-				t.Fatalf("RetryAfter = %v, want %v", failure.RetryAfter, test.retain)
-			}
-			if !test.sends && len(a.requests) != 0 {
-				t.Fatalf("a request was sent without a login: %s", a.paths())
-			}
-		})
-	}
-}
-
-// A deadline that passes during a request is a timeout, and a deadline that
-// passes during a secondary request does not publish a partial reading.
-func TestMeasureTimeout(t *testing.T) {
-	hang := func(ctx context.Context) func() (*http.Response, error) {
-		return func() (*http.Response, error) {
-			<-ctx.Done() // simulated latency: the server never answers
-			return nil, ctx.Err()
+		_, err := Measure(t.Context(), config(o, fetchedA))
+		if err == nil || strings.Contains(err.Error(), secret) {
+			t.Errorf("%s: err = %v; the failure must be a fixed sentence", name, err)
 		}
 	}
-	for _, path := range []string{"/alpha/whoami", "/alpha/billing/credits", "/alpha/usage/summary", "/alpha/billing/subscriptions"} {
-		t.Run(path, func(t *testing.T) {
-			ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
-			defer cancel()
-			a := fixtureAPI(t)
-			a.replies[path] = hang(ctx)
-			if _, err := Measure(ctx, config(a, login(), nil)); quota.KindOf(err) != quota.ErrKindTimeout {
-				t.Fatalf("err = %v", err)
-			}
-		})
+	timeout := &omp{err: context.DeadlineExceeded}
+	if _, err := Measure(t.Context(), config(timeout, fetchedA)); quota.KindOf(err) != quota.ErrKindTimeout {
+		t.Fatalf("deadline: %v, want timeout", err)
+	}
+	failing := &omp{err: errors.New("exit status 2")}
+	if _, err := Measure(t.Context(), config(failing, fetchedA)); quota.KindOf(err) != quota.ErrKindProbe {
+		t.Fatalf("omp failure: %v, want probe_error", err)
 	}
 }
 
-// The key comes from pacelever's two environment names first, then auth.json.
-func TestTokenSources(t *testing.T) {
-	for _, test := range []struct {
-		name  string
-		files map[string]string
-		env   map[string]string
-		want  string
-	}{
-		{"file", login(), nil, secret},
-		{"primary env wins", login(), map[string]string{"COMMAND_CODE_API_KEY": " env-one ", "COMMANDCODE_API_KEY": "env-two"}, "env-one"},
-		{"alias env", login(), map[string]string{"COMMANDCODE_API_KEY": "env-two"}, "env-two"},
-		{"env without file", map[string]string{}, map[string]string{"COMMAND_CODE_API_KEY": "env-one"}, "env-one"},
-		{"none", map[string]string{}, nil, ""},
-	} {
-		if got := config(nil, test.files, test.env).token(); got != test.want {
-			t.Errorf("%s: token = %q, want %q", test.name, got, test.want)
-		}
+// omp serves a cached report; an account's report older than MaxReportAge is
+// unknown. The cache is invalidated once to ask for a refetch, and the refetched
+// report is what is judged.
+func TestStaleReportIsInvalidatedOnceThenJudged(t *testing.T) {
+	now := fetchedA.Add(MaxReportAge + time.Minute)
+	fresh := strings.ReplaceAll(string(fixture(t, "omp_usage_two_accounts.json")), "1794696766070", fmt.Sprint(now.Add(-time.Second).UnixMilli()))
+	fresh = strings.ReplaceAll(fresh, "1794696736070", fmt.Sprint(now.Add(-2*time.Second).UnixMilli()))
+	o := &omp{replies: [][]byte{fixture(t, "omp_usage_two_accounts.json"), []byte(fresh)}}
+	accounts, err := Measure(t.Context(), config(o, now))
+	if err != nil || len(accounts) != 2 {
+		t.Fatalf("accounts %v err %v, want both after the refetch", accounts, err)
+	}
+	if o.invalidates != 1 || o.reads != 2 {
+		t.Fatalf("invalidates %d reads %d, want one invalidate between two reads", o.invalidates, o.reads)
+	}
+	if got := fmt.Sprint(o.args[1]); got != "[usage invalidate --provider commandcode]" {
+		t.Fatalf("invalidate argv = %s", got)
 	}
 }
 
-// The fingerprint read before a refresh asks whoami once per key, then comes
-// from the cache; a different key asks again. It is the one a measurement
-// attaches, so the shared key and the lease agree.
-func TestAccountFPIsCachedPerKey(t *testing.T) {
-	a := fixtureAPI(t)
-	cfg := config(a, login(), nil)
-	cfg.Identities = &IdentityCache{}
-	for range 3 {
-		if fp, err := AccountFP(t.Context(), cfg); err != nil || fp != fixtureFP {
-			t.Fatalf("fp=%q err=%v", fp, err)
-		}
+func TestStaleAfterInvalidateIsUnknown(t *testing.T) {
+	o := &omp{replies: [][]byte{fixture(t, "omp_usage_two_accounts.json")}}
+	_, err := Measure(t.Context(), config(o, fetchedA.Add(MaxReportAge+time.Second)))
+	if quota.KindOf(err) != quota.ErrKindProbe || !strings.Contains(err.Error(), "stale") {
+		t.Fatalf("err = %v, want probe_error stale: a report omp would not refresh is unknown", err)
 	}
-	if len(a.requests) != 1 {
-		t.Fatalf("whoami asked %d times", len(a.requests))
-	}
-	observed, err := Measure(t.Context(), cfg)
-	if err != nil || observed.AccountFP != fixtureFP {
-		t.Fatalf("measurement fp=%q err=%v", observed.AccountFP, err)
-	}
-	cfg.ReadFile = func(string) ([]byte, error) { return []byte(`{"apiKey":"another-key"}`), nil }
-	before := len(a.requests)
-	if _, err := AccountFP(t.Context(), cfg); err != nil || len(a.requests) != before+1 {
-		t.Fatalf("a new key was answered from the cache: err=%v requests %d→%d", err, before, len(a.requests))
-	}
-
-	if _, err := AccountFP(t.Context(), config(a, map[string]string{}, nil)); quota.KindOf(err) != quota.ErrKindCredentials {
-		t.Fatalf("no login: %v", err)
+	if o.invalidates != 1 {
+		t.Fatalf("invalidates = %d, want exactly one attempt", o.invalidates)
 	}
 }
 
-// With no user the org names the account, and with neither the observation
-// carries no fingerprint (the node then measures but does not share it).
-func TestAccountFallsBackToOrgThenNothing(t *testing.T) {
-	a := fixtureAPI(t)
-	a.replies["/alpha/whoami"] = respond(200, `{"data":{"org":{"id":"org_fixture_1"}}}`)
-	observed, err := Measure(t.Context(), config(a, login(), nil))
-	if err != nil || observed.AccountFP != fingerprint("org_fixture_1") || observed.AccountFP == "" {
-		t.Fatalf("fp=%q err=%v", observed.AccountFP, err)
-	}
-	a.replies["/alpha/whoami"] = respond(200, `{"data":{}}`)
-	observed, err = Measure(t.Context(), config(a, login(), nil))
-	if err != nil || observed.AccountFP != "" {
-		t.Fatalf("fp=%q err=%v", observed.AccountFP, err)
-	}
-	if strings.Contains(a.paths(), "orgId") && strings.Count(a.paths(), "orgId") != 1 {
-		t.Fatalf("an org-less account sent an orgId: %s", a.paths())
+// One stale account is left out and the other is kept: "usable while one has room".
+func TestOneStaleAccountIsLeftOut(t *testing.T) {
+	now := fetchedA.Add(MaxReportAge) // A is exactly at the limit, B is 30 s older than it
+	o := &omp{replies: [][]byte{fixture(t, "omp_usage_two_accounts.json")}}
+	accounts, err := Measure(t.Context(), config(o, now))
+	if err != nil || len(accounts) != 1 || accounts[0].FP != fpA {
+		t.Fatalf("accounts %+v err %v, want only account A", accounts, err)
 	}
 }
 
-func TestResetTime(t *testing.T) {
-	for _, test := range []struct {
-		in   any
-		want string
-	}{
-		{float64(1793955600), "2026-11-06T09:00:00Z"},
-		{float64(1793955600000), "2026-11-06T09:00:00Z"},
-		{float64(1793955600000000), "2026-11-06T09:00:00Z"},
-		{"1793955600000", "2026-11-06T09:00:00Z"},
-		{"2026-11-27T09:38:00+02:00", "2026-11-27T07:38:00Z"},
-		{"Fri, 06 Nov 2026 09:00:00 GMT", "2026-11-06T09:00:00Z"},
-		{"", ""},
-		{"soon", ""},
-		{float64(0), ""},
-		{float64(5), ""},
-		{math.NaN(), ""},
-		{nil, ""},
-		{true, ""},
-		{map[string]any{}, ""},
-	} {
-		if got := resetTime(test.in); got != test.want {
-			t.Errorf("resetTime(%v) = %q, want %q", test.in, got, test.want)
-		}
+func TestReportFromTheFutureIsUnknown(t *testing.T) {
+	o := &omp{replies: [][]byte{fixture(t, "omp_usage_two_accounts.json")}}
+	if _, err := Measure(t.Context(), config(o, fetchedA.Add(-time.Hour))); quota.KindOf(err) != quota.ErrKindProbe {
+		t.Fatalf("future report: %v, want probe_error", err)
 	}
 }
 
-// A whoami that names no account is not remembered: the next fingerprint read
-// asks again and picks the account up once the API names it, instead of
-// answering "no account" for as long as the key stays the same.
-func TestAccountFPRetriesAfterAnEmptyWhoami(t *testing.T) {
-	a := fixtureAPI(t)
-	good := a.replies["/alpha/whoami"]
-	a.replies["/alpha/whoami"] = respond(200, `{"data":{}}`)
-	cfg := config(a, login(), nil)
-	cfg.Identities = &IdentityCache{}
-	if fp, err := AccountFP(t.Context(), cfg); err != nil || fp != "" {
-		t.Fatalf("fp=%q err=%v", fp, err)
-	}
-	a.replies["/alpha/whoami"] = good
-	if fp, err := AccountFP(t.Context(), cfg); err != nil || fp != fixtureFP {
-		t.Fatalf("after recovery fp=%q err=%v", fp, err)
-	}
-	before := len(a.requests)
-	if fp, _ := AccountFP(t.Context(), cfg); fp != fixtureFP || len(a.requests) != before {
-		t.Fatalf("a named account was not remembered: fp=%q requests %d→%d", fp, before, len(a.requests))
+func TestMaxReportAgeMatchesTheSharedRefreshDue(t *testing.T) {
+	if MaxReportAge != 3*time.Minute {
+		t.Fatalf("MaxReportAge = %v, want 3m (shared.OtherRefreshTTL)", MaxReportAge)
 	}
 }
