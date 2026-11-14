@@ -36,8 +36,12 @@ const (
 )
 
 type nodePaneCloseOpArgs struct {
-	RequestID    string `json:"request_id"`
-	Job          string `json:"job"`
+	RequestID string `json:"request_id"`
+	Job       string `json:"job"`
+	// Attempt is the job attempt the hub decided to close: the opaque token
+	// pane.close_status reported for the job when it decided. The node acts
+	// only while it is still the job's current attempt.
+	Attempt      string `json:"attempt"`
 	PaneID       string `json:"pane_id"`
 	Name         string `json:"name"`
 	AgentStatus  string `json:"agent_status"`
@@ -65,11 +69,17 @@ type nodeCloseOpReleaseArgs nodeCloseOpRefArgs
 type nodeCloseOpStatusResult struct {
 	State    string `json:"state"`
 	Released bool   `json:"released"`
+	// Attempt is the job's current attempt token, the value a pane.close_op
+	// for it must name; empty when the job has no readable attempt.
+	Attempt string `json:"attempt"`
 }
 
 func validNodePaneCloseOpArgs(args nodePaneCloseOpArgs) bool {
-	return fleet.ValidCloseOpID(args.RequestID) && fleet.ValidJobID(args.Job) && nodeCommandPaneIDPattern.MatchString(args.PaneID) && validNodeJobName(args.Name) && nodePaneClosableStatus[args.AgentStatus] && validNodeCommandPath(args.Cwd)
+	return fleet.ValidCloseOpID(args.RequestID) && fleet.ValidJobID(args.Job) && validNodeAttemptToken(args.Attempt) && nodeCommandPaneIDPattern.MatchString(args.PaneID) && validNodeJobName(args.Name) && nodePaneClosableStatus[args.AgentStatus] && validNodeCommandPath(args.Cwd)
 }
+
+// validNodeAttemptToken bounds an attempt token: a ledger event file name.
+func validNodeAttemptToken(token string) bool { return fleet.ValidJobID(token) }
 
 func validNodeCloseOpRefArgs(args nodeCloseOpRefArgs) bool {
 	return fleet.ValidCloseOpID(args.RequestID) && fleet.ValidJobID(args.Job)
@@ -86,6 +96,9 @@ func validNodePaneCloseOpResult(result nodePaneCloseOpResult) bool {
 }
 
 func validNodeCloseOpStatusResult(result nodeCloseOpStatusResult) bool {
+	if result.Attempt != "" && !validNodeAttemptToken(result.Attempt) {
+		return false
+	}
 	switch result.State {
 	case nodeCloseOpNone, fleet.CloseOpRegistered, fleet.CloseOpClosing:
 		// Only a final operation can be released.
@@ -206,9 +219,9 @@ type nodeCloseTarget struct {
 	pane, label, role, session string
 	ended                      bool
 	// announced: the attempt's newest end-like event is a quota stop
-	// announced for the hub's hand-over; whether its grace already ended the
-	// job is in hk, not the ledger.
-	announced bool
+	// announced for the hub's hand-over, or a reviewer's quota-stop intent
+	// is still open; whether the job already ended is in hk, not the ledger.
+	announced, intent bool
 }
 
 func readNodeCloseTarget(job *os.Root) (nodeCloseTarget, error) {
@@ -222,13 +235,19 @@ func readNodeCloseTarget(job *os.Root) (nodeCloseTarget, error) {
 		case nodeJobClaimKind(event.kind):
 			target = nodeCloseTarget{attempt: event.name, role: event.role}
 		case event.kind == "job.spawned":
-			target.attempt, target.receipt, target.ended, target.announced = event.name, true, false, false
+			target.attempt, target.receipt, target.ended, target.announced, target.intent = event.name, true, false, false, false
 			target.pane, target.label, target.session = event.pane, event.label, event.session
 			if event.role != "" {
 				target.role = event.role
 			}
 		case event.kind == "job.reprompted":
-			target.attempt, target.ended, target.announced = event.name, false, false
+			target.attempt, target.ended, target.announced, target.intent = event.name, false, false, false
+		case event.kind == "job.quota_stop_intent":
+			// The watcher writes hk lost before its final job.lost: a crash
+			// between the two leaves the intent open over an ended job.
+			target.intent = true
+		case event.kind == "job.quota_stop_cancelled":
+			target.intent = false
 		case event.kind == "job.lost":
 			if event.reason == "quota_stop" && !event.final {
 				target.announced = true
@@ -250,10 +269,11 @@ func readNodeCloseTarget(job *os.Root) (nodeCloseTarget, error) {
 // hand-over grace already ended the job: a terminal record is an end, and an
 // unreadable one answers record_unavailable rather than guessing.
 func (client *HubClient) closeTargetBound(ctx context.Context, args nodePaneCloseOpArgs, target nodeCloseTarget, attempt string) (bool, string) {
-	if !target.receipt || target.ended || target.pane != args.PaneID || target.label != args.Name || target.attempt != attempt {
+	// A receipt with no recorded session cannot say where the pane lives.
+	if !target.receipt || target.ended || target.session == "" || target.pane != args.PaneID || target.label != args.Name || target.attempt != attempt {
 		return false, ""
 	}
-	if !target.announced {
+	if !target.announced && !target.intent {
 		return true, ""
 	}
 	store, err := client.nodeJobStoreForCommand()
@@ -283,9 +303,11 @@ func (client *HubClient) bindCloseOp(ctx context.Context, job *os.Root, op fleet
 	if err != nil {
 		return op, nil, "", "journal_failed"
 	}
-	attempt := target.attempt
-	if resuming {
-		attempt = op.Attempt
+	// The attempt the hub decided on; a resumed operation keeps the one it
+	// was registered for, which a repeat must name.
+	attempt := args.Attempt
+	if resuming && op.Attempt != args.Attempt {
+		return op, nil, "", "invalid_args"
 	}
 	bound, code := client.closeTargetBound(ctx, args, target, attempt)
 	if code != "" {
@@ -347,7 +369,7 @@ func (client *HubClient) nodeCloseOpRef(args nodeCloseOpRefArgs, release bool) (
 		return nil, "journal_failed"
 	}
 	if !found {
-		return nodeCloseOpStatusResult{State: nodeCloseOpNone}, ""
+		return nodeCloseOpStatusResult{State: nodeCloseOpNone, Attempt: currentAttempt(job)}, ""
 	}
 	if release && (op.Final() || op.State == fleet.CloseOpRegistered) && op.Released == nil {
 		now := client.nowUTC()
@@ -359,5 +381,15 @@ func (client *HubClient) nodeCloseOpRef(args nodeCloseOpRefArgs, release bool) (
 			return nil, "journal_failed"
 		}
 	}
-	return nodeCloseOpStatusResult{State: op.State, Released: op.Released != nil}, ""
+	return nodeCloseOpStatusResult{State: op.State, Released: op.Released != nil, Attempt: currentAttempt(job)}, ""
+}
+
+// currentAttempt is the job's current attempt token, or empty when its
+// ledger cannot be read.
+func currentAttempt(job *os.Root) string {
+	target, err := readNodeCloseTarget(job)
+	if err != nil {
+		return ""
+	}
+	return target.attempt
 }

@@ -219,7 +219,7 @@ var nodeCommandArgFields = map[string][]string{
 	nodeCommandQuotaRefresh:     {"pool"},
 	nodeCommandPRStatus:         {"repo", "pr", "fresh"},
 	nodeCommandCheckoutPull:     {"checkout", "rev"},
-	nodeCommandPaneCloseOp:      {"request_id", "job", "pane_id", "name", "agent_status", "cwd", "allow_unnamed"},
+	nodeCommandPaneCloseOp:      {"request_id", "job", "attempt", "pane_id", "name", "agent_status", "cwd", "allow_unnamed"},
 	nodeCommandPaneCloseStatus:  {"request_id", "job"},
 	nodeCommandPaneCloseRelease: {"request_id", "job"},
 }
@@ -962,9 +962,9 @@ func (client *HubClient) nodePaneCloseWith(ctx context.Context, args nodePaneClo
 	// operator-credential command path cannot widen that (hk 3315).
 	session := client.herdrSessionFor(args.Name, args.PaneID)
 	if args.target != nil {
-		// The receipt's session; a receipt that names none ran in the
-		// node's configured session, as herdrSessionFor falls back to.
-		session = firstNonempty(args.target.session, client.nodeSpawnSession())
+		// The receipt's session; a close op never binds a receipt that
+		// names none (closeTargetBound).
+		session = args.target.session
 	}
 	if args.AgentStatus == "blocked" {
 		var role string

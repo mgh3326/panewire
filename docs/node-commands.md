@@ -146,9 +146,19 @@ A failed close answers `close_failed`. Acting ops run one at a time per node.
 ### Close operations
 
 `pane.close_op` (hk 4594) is `pane.close` under a hub-chosen `request_id`
-(`^[A-Za-z0-9_:-][A-Za-z0-9._:-]{0,127}$`, never a leading dot) and a `job`:
-every argument of `pane.close` plus `request_id` and `job`, all required
-(`allow_unnamed` included). `job` names the job directory; `name` stays the
+(`^[A-Za-z0-9_:-][A-Za-z0-9._:-]{0,127}$`, never a leading dot), a `job` and an
+`attempt`: every argument of `pane.close` plus `request_id`, `job` and
+`attempt`, all required (`allow_unnamed` included).
+
+**The attempt is the hub's decision.** `attempt` is an opaque token naming the
+job attempt the hub decided to close. The hub reads it from `pane.close_status`
+for that job (the `attempt` field, reported whether or not the operation
+exists) at the moment it decides, and passes it unchanged. The node acts only
+while that token is still the job's current attempt: a re-prompt, reclaim or
+end recorded after the hub's decision makes the request `mismatch`, and a
+resumed operation `preempted`. A repeat of a `request_id` must name the attempt
+it was registered for (`invalid_args` otherwise). This is the contract hk 4632's
+hub caller relies on. `job` names the job directory; `name` stays the
 herdr agent label the close guards match, which a spawn may set apart from the
 job id (`--job job-1 -l worker-a`). The blocked-reviewer guard reads the role
 from the `job` ledger. The node journals the operation in that job's directory,
@@ -167,8 +177,10 @@ for the hub's hand-over). For an announced quota stop the job's hk record
 decides: a terminal record means the hand-over grace already ended it, and an
 unreadable record answers the error `record_unavailable`. Two answers open no
 operation and close nothing: a `job` with no directory is `not-a-job`; a
-request the proof does not bind (another pane or label, no receipt for the
-current attempt, or an ended attempt) is `mismatch`. Every herdr read and the
+request the proof does not bind (another pane or label, another attempt than
+`attempt`, no receipt for the current attempt, a receipt that recorded no
+`herdr_session`, or an ended attempt) is `mismatch`. A reviewer's open
+`job.quota_stop_intent` asks hk the same way as an announced quota stop. Every herdr read and the
 close run in the receipt's session, and the blocked-reviewer guard uses the
 receipt's role (an empty role is unknown and refuses). The proof is read again
 after the settle, before `closing` is written: an attempt that moved on or ended
@@ -199,7 +211,9 @@ was registered for, then resumes the guarded close or settles `preempted`. A
 a new id. Reusing an id for another pane is `invalid_args`.
 
 `pane.close_status` (`request_id`, `job`) answers
-`{"state":"none"|<state>,"released":<bool>}`. `pane.close_release` takes the
+`{"state":"none"|<state>,"released":<bool>,"attempt":"<token>"}`, where
+`attempt` is the job's current attempt token (empty when its ledger cannot be
+read). `pane.close_release` takes the
 same arguments, marks a final operation released (a `registered` one becomes
 `cancelled`) and answers the same shape; an operation left `closing` stays
 unreleased until a repeated `pane.close_op` settles it. All three ops take the
