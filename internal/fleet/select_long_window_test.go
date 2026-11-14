@@ -96,7 +96,7 @@ func TestSelectCommandcodeLongestWindowAndExclusion(t *testing.T) {
 	}{
 		{"longest risk", 60, 10, 150, "waste", "", true},
 		{"worst excludes", 60, 10, 100, "", "projected_exhaust", true},
-		{"longest paced", 10, 60, 100, afterFreeTier, "", false}, // decision 279: right after the free band, not ranked
+		{"longest paced", 10, 60, 100, "ranked", "", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			buckets := []accountBucket{

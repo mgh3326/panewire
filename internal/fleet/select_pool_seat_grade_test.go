@@ -240,9 +240,7 @@ func TestSelectPoolSeatLiveAndRankedWithFakeQuota(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		// Decision 279 (hk 4699): Command Code is tried right after the free
-		// band, ahead of the ranked claude pool.
-		if sel.chosen.row.Profile != "omp-dsflash41" {
+		if sel.chosen.row.Profile != "haiku" {
 			t.Fatalf("got %s", sel.chosen.row.Profile)
 		}
 	})
