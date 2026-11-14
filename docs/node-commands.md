@@ -156,11 +156,23 @@ from the `job` ledger. The node journals the operation in that job's directory,
 file, fsynced, renamed), against the job's current attempt (the newest claim,
 spawn or re-prompt event), so its outcome survives a node restart.
 
-Before any herdr call the node checks that the job's ledger binds its current
-attempt to the requested `pane_id` and `name` and has not ended it. Two answers
-open no operation and close nothing: a `job` with no directory is `not-a-job`;
-a request the ledger does not bind (another pane or label, or an ended attempt)
-is `mismatch`.
+Before any herdr call the node reads one proof from the job's own ledger, in
+ledger (file-name) order: the current attempt (the newest claim, reclaim, spawn
+or re-prompt event), the spawn receipt belonging to it (a claim or reclaim has
+none until its own `job.spawned`), the receipt's pane, label, role and herdr
+session, and whether the attempt has ended (`job.completed`, `job.completion`,
+`job.record_settled`, `job.joined`, `job.revoked`, `job.handed_off`,
+`job.escalate`, `job.reaped`, or a `job.lost` other than a quota stop announced
+for the hub's hand-over). For an announced quota stop the job's hk record
+decides: a terminal record means the hand-over grace already ended it, and an
+unreadable record answers the error `record_unavailable`. Two answers open no
+operation and close nothing: a `job` with no directory is `not-a-job`; a
+request the proof does not bind (another pane or label, no receipt for the
+current attempt, or an ended attempt) is `mismatch`. Every herdr read and the
+close run in the receipt's session, and the blocked-reviewer guard uses the
+receipt's role (an empty role is unknown and refuses). The proof is read again
+after the settle, before `closing` is written: an attempt that moved on or ended
+meanwhile settles `preempted` and nothing is closed.
 
 The journal moves `registered` → `closing` → one final state. `registered` is
 written before any herdr read. `closing` is written after the first guarded
@@ -190,9 +202,10 @@ a new id. Reusing an id for another pane is `invalid_args`.
 `{"state":"none"|<state>,"released":<bool>}`. `pane.close_release` takes the
 same arguments, marks a final operation released (a `registered` one becomes
 `cancelled`) and answers the same shape; an operation left `closing` stays
-unreleased until a repeated `pane.close_op` settles it. `journal_failed`
-answers a journal read or write that failed; the operation then stays as last
-recorded.
+unreleased until a repeated `pane.close_op` settles it. All three ops take the
+node's acting lock, and a visible journal state is fsynced before it is reported
+or acted on. `journal_failed` answers a journal read, write or sync that failed;
+the operation then stays as last recorded.
 
 No hub code issues these ops yet, and the job's watcher does not read the
 journal yet: making the watcher defer to an open operation is hk 4652, and the
@@ -656,7 +669,7 @@ The HTTP command endpoint returns 200 for node-reported errors, 504 for `node_ti
 Node error codes are a closed set: `invalid_args`, `herdr_failed`,
 `close_failed`, `capture_failed`, `jobs_root_unset`, `work_root_unset`,
 `refresh_failed`, `done_failed`, `result_failed`, `mark_lost_failed`,
-`result_too_large`, `sweep_failed`, `journal_failed`. A result must fit the hub's 32 KiB per-message limit; a
+`result_too_large`, `sweep_failed`, `journal_failed`, `record_unavailable`. A result must fit the hub's 32 KiB per-message limit; a
 larger one answers `result_too_large`. The hub re-encodes each result through
 its op's shape, drops one outside it, and accepts an answer only from the
 machine and connection it sent the command to. An older node ignores
