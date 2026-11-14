@@ -27,6 +27,13 @@ type roleStopRig struct {
 }
 
 func newRoleStopRig(t *testing.T, role string, startedAgo time.Duration, task string) *roleStopRig {
+	return newRoleStopRigScreen(t, role, startedAgo, task, "testdata/quota-stop/devin.txt", "")
+}
+
+// newRoleStopRigScreen is newRoleStopRig with the stop screen and the profile
+// the job.spawned receipt names; an empty profile leaves the receipt without
+// one, as an older spawn record does.
+func newRoleStopRigScreen(t *testing.T, role string, startedAgo time.Duration, task, screenPath, profile string) *roleStopRig {
 	t.Helper()
 	rig := &roleStopRig{idleWakeTestRig: newIdleWakeTestRig(t, time.Second)}
 	// Jobs older than the active window are not found, so the rig runs on the
@@ -38,9 +45,14 @@ func newRoleStopRig(t *testing.T, role string, startedAgo time.Duration, task st
 		t.Fatal(err)
 	}
 	started := rig.now.Add(-startedAgo).UTC().Format(time.RFC3339)
+	spawned := `{"type":"job.spawned","created_at":"` + started + `","pane_id":"workspace:pane-1","role":"` + role + `","task_id":"42"`
+	if profile != "" {
+		spawned += `,"profile":"` + profile + `"`
+	}
+	spawned += `}`
 	for name, body := range map[string]string{
 		"00001-job.claimed.json": `{"type":"job.claimed","created_at":"` + started + `","agent_label":"worker-synthetic","owner_lane":"owner","role":"implementer","task_id":"42","epoch":1}`,
-		"00002-job.spawned.json": `{"type":"job.spawned","created_at":"` + started + `","pane_id":"workspace:pane-1","role":"` + role + `","task_id":"42"}`} {
+		"00002-job.spawned.json": spawned} {
 		if err := os.WriteFile(filepath.Join(events, name), []byte(body), 0600); err != nil {
 			t.Fatal(err)
 		}
@@ -55,7 +67,7 @@ func newRoleStopRig(t *testing.T, role string, startedAgo time.Duration, task st
 		rig.owner = append(rig.owner, e)
 		return true
 	}
-	screen, err := os.ReadFile("testdata/quota-stop/devin.txt")
+	screen, err := os.ReadFile(screenPath)
 	if err != nil {
 		t.Fatal(err)
 	}
