@@ -648,9 +648,8 @@ func TestCloseOpRequiresTheDecidedAttempt_t4594(t *testing.T) {
 	}
 	// A repeat must name the attempt the operation was registered for.
 	args["attempt"] = closeOpAttempt
-	if _, code := nodeRun(t, client, nodeCommandPaneCloseOp, args); code != "" {
-		// final state replays before the attempt check
-		t.Fatalf("replay code=%q", code)
+	if _, code := nodeRun(t, client, nodeCommandPaneCloseOp, args); code != "invalid_args" {
+		t.Fatalf("repeat with another attempt code=%q", code)
 	}
 }
 
@@ -684,5 +683,42 @@ func TestCloseOpOpenQuotaIntentAsksHK_t4594(t *testing.T) {
 		client := closeOpNode(t, inbox, fake)
 		client.nodeJobs = &roleJobs{records: map[string]map[string]any{closeOpJob: {"state": test.state}}}
 		wantCloseOp(t, client, "op-1", test.outcome, false)
+	}
+}
+
+// A repeat naming another attempt than the one its request id was registered
+// for is invalid_args before any replay or settlement: attempt B never gets
+// attempt A's recorded outcome.
+func TestCloseOpRepeatChecksTheAttemptFirst_t4594(t *testing.T) {
+	inbox := t.TempDir()
+	client := closeOpNode(t, inbox, idlePaneHerdr())
+	wantCloseOp(t, client, "op-1", fleet.CloseOpClosed, false)
+	seedNodeCloseOp(t, inbox, "op-2", fleet.CloseOpClosing)
+	for _, id := range []string{"op-1", "op-2"} {
+		args := closeOpArgs(id)
+		args["attempt"] = "00009-job.reprompted.json"
+		if result, code := nodeRun(t, client, nodeCommandPaneCloseOp, args); code != "invalid_args" {
+			t.Fatalf("%s with another attempt: result=%v code=%q", id, result, code)
+		}
+	}
+	wantCloseOp(t, client, "op-1", fleet.CloseOpClosed, true)
+}
+
+// A quota intent the watcher cancelled as superseded (hk already terminal,
+// no local terminal event) ends the attempt; another cancellation reason
+// clears the intent and leaves the attempt live.
+func TestCloseOpSupersededQuotaIntentIsAnEnd_t4594(t *testing.T) {
+	for _, test := range []struct {
+		reason, outcome string
+	}{{"superseded", nodeCloseOpMismatch}, {"pane_moved_on", fleet.CloseOpClosed}} {
+		inbox := t.TempDir()
+		seedCloseOpJob(t, inbox)
+		addCloseOpEvent(t, inbox, "00003-job.quota_stop_intent.json", `{"kind":"job.quota_stop_intent","created_at":"2026-11-14T00:00:02Z","payload":{"pane_id":"w1:p1","pool":"devin-free","end_reason":"quota_stop pool=devin-free"}}`)
+		addCloseOpEvent(t, inbox, "00004-job.quota_stop_cancelled.json", `{"kind":"job.quota_stop_cancelled","created_at":"2026-11-14T00:00:03Z","payload":{"reason":"`+test.reason+`"}}`)
+		fake := idlePaneHerdr()
+		wantCloseOp(t, closeOpNode(t, inbox, fake), "op-1", test.outcome, false)
+		if test.outcome != fleet.CloseOpClosed && len(fake.calls) != 0 {
+			t.Fatalf("%s: closed an ended attempt: %v", test.reason, fake.calls)
+		}
 	}
 }

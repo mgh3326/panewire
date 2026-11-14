@@ -157,7 +157,8 @@ exists) at the moment it decides, and passes it unchanged. The node acts only
 while that token is still the job's current attempt: a re-prompt, reclaim or
 end recorded after the hub's decision makes the request `mismatch`, and a
 resumed operation `preempted`. A repeat of a `request_id` must name the attempt
-it was registered for (`invalid_args` otherwise). This is the contract hk 4632's
+it was registered for (`invalid_args` otherwise, checked before any replay or
+settlement). This is the contract hk 4632's
 hub caller relies on. `job` names the job directory; `name` stays the
 herdr agent label the close guards match, which a spawn may set apart from the
 job id (`--job job-1 -l worker-a`). The blocked-reviewer guard reads the role
@@ -180,7 +181,8 @@ operation and close nothing: a `job` with no directory is `not-a-job`; a
 request the proof does not bind (another pane or label, another attempt than
 `attempt`, no receipt for the current attempt, a receipt that recorded no
 `herdr_session`, or an ended attempt) is `mismatch`. A reviewer's open
-`job.quota_stop_intent` asks hk the same way as an announced quota stop. Every herdr read and the
+`job.quota_stop_intent` asks hk the same way as an announced quota stop; one
+the watcher cancelled as `superseded` (hk already terminal) is an end. Every herdr read and the
 close run in the receipt's session, and the blocked-reviewer guard uses the
 receipt's role (an empty role is unknown and refuses). The proof is read again
 after the settle, before `closing` is written: an attempt that moved on or ended

@@ -146,7 +146,9 @@ func (client *HubClient) nodePaneCloseOp(ctx context.Context, args nodePaneClose
 		return nil, "journal_failed"
 	}
 	switch {
-	case found && op.PaneID != args.PaneID:
+	// A repeat names the pane and attempt it was registered for, before any
+	// replay or settlement: another attempt's outcome is never returned.
+	case found && (op.PaneID != args.PaneID || op.Attempt != args.Attempt):
 		return nil, "invalid_args"
 	case found && op.Final():
 		return nodePaneCloseOpResult{Outcome: op.State, Replayed: true}, ""
@@ -247,6 +249,11 @@ func readNodeCloseTarget(job *os.Root) (nodeCloseTarget, error) {
 			// between the two leaves the intent open over an ended job.
 			target.intent = true
 		case event.kind == "job.quota_stop_cancelled":
+			// "superseded": hk already held another terminal record, and the
+			// watcher ended without a local terminal event. That is an end.
+			if event.reason == "superseded" {
+				target.ended = true
+			}
 			target.intent = false
 		case event.kind == "job.lost":
 			if event.reason == "quota_stop" && !event.final {
