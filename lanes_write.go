@@ -2,6 +2,7 @@ package panewire
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -47,10 +48,9 @@ var (
 	errLaneNotFound           = errors.New("lane was not found")
 	errLaneProtected          = errors.New("lane is protected")
 	errLaneMachineMismatch    = errors.New("lane machine does not match the authenticated node")
-	// errLaneTakeoverUnconfirmed refuses a takeover whose predecessor job the
-	// hub cannot place on the row it would move: the write is a cross-machine
-	// replacement only when the hub's own record of that job names the row's
-	// machine and pane.
+	// errLaneTakeoverUnconfirmed refuses a takeover unless the hub has an
+	// accepted spawn for this pane that names the predecessor, and the lane
+	// row to move can be found.
 	errLaneTakeoverUnconfirmed = errors.New("lane takeover is not confirmed by the predecessor job")
 )
 
@@ -354,30 +354,65 @@ func (h *HubServer) laneHasForeignReference(routes map[string]reportRelayRoute, 
 	return laneHasForeignChild(routes, lane, nodeMachine) || h.laneHasForeignJob(lane, nodeMachine)
 }
 
-// laneTakeoverRow resolves the row a takeover write moves. A --parent-job
-// successor replaces its predecessor, and the lane the task's findings are
-// addressed to must follow the work to the successor's pane — across
-// machines. The hub names that row by the predecessor's pane, never by the
-// successor's requested name, so a renamed successor still finds the one row
-// its predecessor held. The proof is the hub's own job record: it must place
-// the named predecessor on the row's machine and pane.
+// laneTakeoverRow resolves the row a takeover write moves. The accepted spawn
+// record is the authority: it must name the predecessor in --parent-job and
+// the live successor job must match the authenticated node and pane. When the
+// predecessor job record has ended or disappeared, its task lane name still
+// identifies the route to move.
 //
 // A successor pane that already holds exactly one row is that row: a retried
 // takeover converges instead of adding a second name. No row at the
-// predecessor's pane leaves the request an ordinary write of its name.
-func (h *HubServer) laneTakeoverRow(nodeMachine string, body hubLaneWriteRequest, routes map[string]reportRelayRoute) (string, reportRelayRoute, bool, *hubLaneProjection, error) {
-	record := h.recordedJob(body.Takeover)
-	if record == nil || record.Node == "" || record.Pane == "" {
+// predecessor's pane or task lane refuses the takeover.
+func (h *HubServer) laneTakeoverRow(nodeMachine, lane string, body hubLaneWriteRequest, routes map[string]reportRelayRoute) (string, reportRelayRoute, bool, *hubLaneProjection, error) {
+	if !h.acceptedLaneTakeover(nodeMachine, body.Pane, body.Takeover) {
 		return "", reportRelayRoute{}, false, nil, errLaneTakeoverUnconfirmed
-	}
-	if name, row, found := laneRowAt(routes, record.Node, record.Pane); found {
-		return name, row, true, nil, nil
 	}
 	if name, row, found := laneRowAt(routes, nodeMachine, body.Pane); found {
 		projection := hubLaneProjection{Lane: name, Machine: row.Machine, Pane: row.Pane, Parent: row.Parent, Sink: row.Sink, Standby: row.Standby}
 		return "", reportRelayRoute{}, false, &projection, nil
 	}
-	return "", reportRelayRoute{}, false, nil, nil
+	record := h.recordedJob(body.Takeover)
+	if record != nil && record.Node != "" && record.Pane != "" {
+		if name, row, found := laneRowAt(routes, record.Node, record.Pane); found {
+			return name, row, true, nil, nil
+		}
+	}
+	if record == nil {
+		row, found := routes[lane]
+		if found {
+			return lane, row, true, nil, nil
+		}
+	}
+	return "", reportRelayRoute{}, false, nil, errLaneTakeoverUnconfirmed
+}
+
+// acceptedLaneTakeover binds the authenticated node and pane to the durable
+// spawn request that the hub accepted. The parent-job argument is trusted
+// only from this saved request, never from the lanes write itself.
+func (h *HubServer) acceptedLaneTakeover(nodeMachine, pane, predecessor string) bool {
+	if h.inbox == nil || h.inbox.store == nil || nodeMachine == "" || pane == "" || predecessor == "" {
+		return false
+	}
+	jobID := ""
+	h.mu.Lock()
+	for id, job := range h.jobs {
+		if job == nil || job.Completed || job.Orphaned || job.Node != nodeMachine || job.Pane != pane {
+			continue
+		}
+		if jobID != "" {
+			h.mu.Unlock()
+			return false
+		}
+		jobID = id
+	}
+	h.mu.Unlock()
+	if jobID == "" {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	task, err := h.inbox.store.latestSpawnForJob(ctx, jobID)
+	return err == nil && task.Job == jobID && hubSpawnArg(task.Request.Args, "--parent-job") == predecessor
 }
 
 // recordedJob copies the hub's record of a job, or nil when the hub has never
@@ -478,9 +513,9 @@ func (h *HubServer) putLane(lane string, body hubLaneWriteRequest, nodeMachine s
 				// A --parent-job successor takes over the row its predecessor's
 				// pane holds, whatever that row is named: the lane the task's
 				// findings already use follows the work onto the successor's
-				// machine. The hub's own record of the predecessor job proves
-				// the row, so no unrelated machine's lane is moved.
-				name, row, found, held, err := h.laneTakeoverRow(nodeMachine, body, snapshot.Routes)
+				// machine. The durable accepted spawn proves the parent; without
+				// it, no other machine's lane may be moved.
+				name, row, found, held, err := h.laneTakeoverRow(nodeMachine, lane, body, snapshot.Routes)
 				if err != nil {
 					return err
 				}

@@ -572,8 +572,10 @@ func (a *App) takeOverLane(ctx context.Context, s *Spawn, hint, owner, predecess
 		a.recordLaneRegistered(ctx, s, registration, pane, predecessor)
 		return
 	}
+	reason := laneFailureReason(e)
+	fmt.Fprintf(a.Out, "lane %s not moved: %s\n", hint, reason)
 	if laneRefused(e) {
-		_ = a.event(ctx, s.Job, "job.lane_takeover_failed", map[string]any{"lane": hint, "takeover_job": predecessor, "reason": laneFailureReason(e)})
+		_ = a.event(ctx, s.Job, "job.lane_takeover_failed", map[string]any{"lane": hint, "takeover_job": predecessor, "reason": reason})
 	} else {
 		a.warn("lane takeover for job %s task %s failed: %v", s.Job, s.Task, e)
 	}
