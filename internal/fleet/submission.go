@@ -349,6 +349,9 @@ func (a *App) PrepareSubmission(ctx context.Context, s Spawn) (Submission, error
 	if originalHost == "local" {
 		submissionSpawn.Host = "local"
 	}
+	if submissionSpawn.Host == "auto" && herdrWorkspaceID.MatchString(submissionSpawn.Workspace) {
+		submissionSpawn.Workspace = ""
+	}
 	conditions, err := ParseStartConditions(s.After, s.Task)
 	if err != nil {
 		return Submission{}, fail(exitUsage, "%v", err)
