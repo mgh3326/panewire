@@ -432,11 +432,8 @@ func (h *HubServer) deliverPlacementRecord(ctx context.Context, requestID string
 	job = task.Job
 	if len(payload) == 0 {
 		// Placement never produced a trace (a refusal before the plan ranked
-		// hosts), so there is nothing to record. A landed attempt with no
-		// snapshot is a record that was never built: say so.
-		if task.Attempt == attempt && task.Status == "succeeded" {
-			h.logger.Warn("placement record not built: a landed attempt has no placement snapshot", "request_id", requestID, "job", job, "attempt", attempt)
-		}
+		// hosts), so there is nothing to record. completeSpawn reports a
+		// landed attempt that has none (noteMissingPlacementSnapshot).
 		return
 	}
 	var tr fleet.PlacementTrace
@@ -461,7 +458,7 @@ func (h *HubServer) deliverPlacementRecord(ctx context.Context, requestID string
 	}
 	result, err := app.EnqueuePlacementRecord(ctx, hubPlacementRecord(task, tr, attempt))
 	if err != nil {
-		h.logger.Warn("placement record could not be enqueued; snapshot remains pending", "request_id", requestID, "attempt", attempt, "error", err)
+		h.notePlacementStall(requestID, job, attempt, placementEnqueueReason(err))
 		return
 	}
 	if !h.reportPlacementDelivery(requestID, job, attempt, result) {
@@ -894,7 +891,7 @@ func (h *HubServer) enqueueFinishedPlacementRecord(ctx context.Context, task hub
 	rec.JobID, rec.Attempt = task.Job, task.Attempt
 	result, err := app.EnqueuePlacementRecord(ctx, rec)
 	if err != nil {
-		h.logger.Warn("placement record could not be enqueued after snapshot write failure", "request_id", task.Request.RequestID, "attempt", task.Attempt, "error", err)
+		h.notePlacementStall(task.Request.RequestID, task.Job, task.Attempt, placementEnqueueReason(err))
 		return
 	}
 	// The spooled file keeps the obligation; the report says why it waits.

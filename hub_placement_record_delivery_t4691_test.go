@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -91,12 +92,15 @@ func (hk *refusalHK) postCount() int {
 // hub places it, binds the node, the node answers rc 0 and the hub verifies the
 // landed pane. The hub builds its delivery App the way production does
 // (placementAppFn unset). It returns the hub, its log and the request id.
-func succeededHubSpawn(t *testing.T) (*HubServer, *lockedBuffer, string) {
+func succeededHubSpawn(t *testing.T, prepare ...func(stateDir string)) (*HubServer, *lockedBuffer, string) {
 	t.Helper()
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	stateDir := t.TempDir()
 	if real, err := filepath.EvalSymlinks(stateDir); err == nil {
 		stateDir = real
+	}
+	for _, p := range prepare {
+		p(stateDir)
 	}
 	logs := &lockedBuffer{}
 	config := HubServerConfig{
@@ -292,5 +296,64 @@ func TestHubPlacementStallLogsOncePerReason_t4691(t *testing.T) {
 	}
 	if h.reportPlacementDelivery("req", "job", 2, fleet.PlacementDelivery{Reason: "hk_unreachable"}) {
 		t.Fatal("an undelivered record must not seal its snapshot")
+	}
+}
+
+// A spool that cannot be created fails every flush the same way. The hub says
+// so once, with the request id, job and a reason that names the spool, rather
+// than a warning per flush.
+func TestHubPlacementRecordSpoolFailureLogsOnce_t4691(t *testing.T) {
+	newRefusalHK(t)
+	h, logs, requestID := succeededHubSpawn(t, func(stateDir string) {
+		// A regular file where the spool directory belongs.
+		if err := os.WriteFile(filepath.Join(stateDir, "placements"), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if !waitUntil(5*time.Second, func() bool { return strings.Contains(logs.String(), "reason=spool_") }) {
+		t.Fatalf("the spool failure was not reported:\n%s", logs.String())
+	}
+	for range 3 {
+		h.flushPlacementRecords(t.Context())
+	}
+	// The enqueue path (no spooled file yet) fails the same way and reports once.
+	for range 3 {
+		h.deliverPlacementRecord(t.Context(), requestID, 1)
+	}
+	if n := strings.Count(logs.String(), "spool_enqueue_failed"); n != 1 {
+		t.Fatalf("enqueue failure logged %d times:\n%s", n, logs.String())
+	}
+	var lines []string
+	for _, line := range strings.Split(logs.String(), "\n") {
+		if strings.Contains(line, "placement record") && !strings.Contains(line, "hub spawn") && !strings.Contains(line, "spool_enqueue_failed") {
+			lines = append(lines, line)
+		}
+	}
+	if len(lines) != 1 {
+		t.Fatalf("want one placement line for a persistent spool failure, got %d:\n%s", len(lines), strings.Join(lines, "\n"))
+	}
+	for _, want := range []string{"request_id=" + requestID, "job=test-job", "attempt=1", "reason=spool_"} {
+		if !strings.Contains(lines[0], want) {
+			t.Fatalf("line lacks %q: %s", want, lines[0])
+		}
+	}
+}
+
+// With the asynchronous worker on, a succeeded attempt that never saved a
+// snapshot is reported when it completes: the worker only walks snapshot rows.
+func TestHubSucceededAttemptWithoutSnapshotIsReported_t4691(t *testing.T) {
+	newRefusalHK(t)
+	h := placementOutboxHub(t, filepath.Join(t.TempDir(), "inbox.sqlite3"))
+	logs := &lockedBuffer{}
+	h.logger = slog.New(slog.NewTextHandler(logs, nil))
+	h.placementAsync.Store(true)
+	task := boundSpawnTask(t, h, durableSpawnRequest())
+	outcome := hubSpawnOutcome{RC: 0, Stage: "landing", Host: "machine-a", Pane: "w1:p9", NodeResult: true}
+	if changed, err := h.completeSpawn(t.Context(), task, outcome); err != nil || !changed {
+		t.Fatalf("complete: changed=%v err=%v", changed, err)
+	}
+	out := logs.String()
+	if !strings.Contains(out, "a landed attempt has no placement snapshot") || !strings.Contains(out, "request_id="+task.Request.RequestID) {
+		t.Fatalf("the missing snapshot was not reported:\n%s", out)
 	}
 }

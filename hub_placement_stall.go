@@ -1,6 +1,9 @@
 package panewire
 
 import (
+	"context"
+	"strings"
+
 	"github.com/mgh3326/panewire/internal/fleet"
 )
 
@@ -61,4 +64,24 @@ func (h *HubServer) reportPlacementDelivery(requestID, job string, attempt int, 
 		h.logger.Info("placement record already held by hk", "request_id", requestID, "job", job, "attempt", attempt)
 	}
 	return true
+}
+
+// placementEnqueueReason is the stall reason for a record that could not be
+// spooled at all (the spool directory cannot be created, is behind a symlink,
+// or is not writable). The error names a path, never a credential.
+func placementEnqueueReason(err error) string {
+	return "spool_enqueue_failed: " + utf8PrefixWithin(strings.Join(strings.Fields(err.Error()), " "), 200)
+}
+
+// noteMissingPlacementSnapshot logs a landed attempt that has no placement
+// snapshot: its record was never built. completeSpawn calls it on the terminal
+// transition, because the asynchronous worker only enumerates existing
+// snapshot rows and would never reach such an attempt. A refusal before the
+// plan ranked hosts legitimately has none, so only succeeded is reported.
+func (h *HubServer) noteMissingPlacementSnapshot(ctx context.Context, task hubSpawnTask) {
+	payload, _, _, err := h.inbox.store.spawnPlacementSnapshot(ctx, task.Request.RequestID, task.Attempt)
+	if err != nil || len(payload) != 0 {
+		return
+	}
+	h.logger.Warn("placement record not built: a landed attempt has no placement snapshot", "request_id", task.Request.RequestID, "job", task.Job, "attempt", task.Attempt)
 }
