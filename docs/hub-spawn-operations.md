@@ -254,7 +254,14 @@ root is not answered that way: the node clones into the work root, following
 [the placement rule](placement.md#the-filter). A first-run refusal (`hooks_review`, `trust_prompt`,
 `omp_setup_wizard`, `auth_unavailable`) does the same once the node verified
 its pane cleanup, and the hub tells `operator-desk` which one-time action the
-host needs ([placement.md](placement.md#first-run-refusals-and-the-desk-notice)).
+host needs ([placement.md](placement.md#first-run-refusals-and-the-desk-notice)),
+but only when the node refused before its hk job claim (result stage empty,
+`placement` or `checkout`). A refusal from the `claim`, `launch` or `landing`
+stage, such as a login screen after the pane launched, leaves the hk job record
+claimed by that node's host, and hk answers another host's claim of the job id
+with 409 `job_id_taken` (rc 74, "job id already claimed"). That refusal is the
+operation's result, and a replay of the saved request runs on the same host
+(`spawnRefusalMovesOn`, `spawnReplayPinsHost`; hk 4614).
 For agy, a verified rc=76 (`BRIEF_SUBMISSION_UNCONFIRMED`) whose newest saved
 capture matches the harness login screen is sent as rc=88 with an
 `AUTH_UNAVAILABLE` refusal; the unchanged hub classifies it as

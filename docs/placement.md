@@ -215,7 +215,7 @@ outcome, in this order:
 | `harness_missing` | The harness binary is not installed |
 | `harness_version` | `placement.harness_min_version.<kind>` (in the spawner's `hosts.toml`) is set and the version is lower or unreadable |
 | `dialog_pending` | The last launch of this kind stopped at a first-run dialog ([desk notice](#first-run-refusals-and-the-desk-notice)) |
-| `login_missing` | The node's refresh of the kind's pool failed with a login error kind, or its login probe did, or its last launch ended rc=76 at the harness's login screen ([fleet-state.md](fleet-state.md#login-probe)); that verified agy login-screen result is sent as rc=88 `auth_unavailable` so auto placement can try another host; `cmd` needs no login ([desk notice](#first-run-refusals-and-the-desk-notice)) |
+| `login_missing` | The node's refresh of the kind's pool failed with a login error kind, or its login probe did, or its last launch ended rc=76 at the harness's login screen ([fleet-state.md](fleet-state.md#login-probe)); that verified agy login-screen result is sent as rc=88 `auth_unavailable` so a placement the node refused before its hk job claim can try another host (a refusal after the claim ends on that host, [hub-spawn-operations.md](hub-spawn-operations.md)); `cmd` needs no login ([desk notice](#first-run-refusals-and-the-desk-notice)) |
 | `repo_unmapped` | The spawn's repository is not in the node's `repos` |
 | `brief_unavailable` | The spawn goes through the hub with a brief document and the node cannot fetch one |
 | `toolchain_missing` | `placement.repo_toolchains.<repo>` lists a toolchain the node lacks |
