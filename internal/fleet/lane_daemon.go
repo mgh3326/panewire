@@ -50,13 +50,13 @@ func (a *App) laneDaemonServes() bool {
 // `lanes add` route as the fallback. Once the request is written the daemon may
 // have registered the lane, so a missing or unreadable answer is a failure
 // rather than a second attempt with another credential.
-func (a *App) registerLaneThroughDaemon(ctx context.Context, lane, parent, pane, machine string) error {
+func (a *App) registerLaneThroughDaemon(ctx context.Context, put lanePutRequest) (laneRegistration, error) {
 	if !a.laneDaemonServes() {
-		return errLaneDaemonAbsent
+		return laneRegistration{}, errLaneDaemonAbsent
 	}
 	conn, err := net.DialTimeout("unix", a.laneDaemonSocket(), laneDaemonDialTimeout)
 	if err != nil {
-		return errLaneDaemonAbsent
+		return laneRegistration{}, errLaneDaemonAbsent
 	}
 	defer conn.Close()
 	_ = conn.SetDeadline(laneDaemonDeadline(ctx, time.Now()))
@@ -66,35 +66,36 @@ func (a *App) registerLaneThroughDaemon(ctx context.Context, lane, parent, pane,
 		TimeoutMS int64 `json:"timeout_ms"`
 	}{
 		Op:        daemonop.LanesPutOp,
-		LanesPut:  daemonop.LanesPut{Lane: lane, Machine: machine, Pane: pane, Parent: parent},
+		LanesPut:  daemonop.LanesPut{Lane: put.Lane, Machine: put.Machine, Pane: put.Pane, Parent: put.Parent, Takeover: put.Takeover},
 		TimeoutMS: laneDaemonCallTimeout.Milliseconds(),
 	}
 	if err := json.NewEncoder(conn).Encode(request); err != nil {
-		return errLaneDaemonAbsent
+		return laneRegistration{}, errLaneDaemonAbsent
 	}
 	line, err := bufio.NewReader(conn).ReadString('\n')
 	if err != nil {
-		return fail(exitFailure, "lanes: the daemon accepted the registration but did not answer")
+		return laneRegistration{}, fail(exitFailure, "lanes: the daemon accepted the registration but did not answer")
 	}
 	var response struct {
-		OK    bool   `json:"ok"`
-		Code  int    `json:"code"`
-		Error string `json:"error"`
+		OK     bool            `json:"ok"`
+		Code   int             `json:"code"`
+		Error  string          `json:"error"`
+		Result json.RawMessage `json:"result"`
 	}
 	if json.Unmarshal([]byte(line), &response) != nil {
-		return fail(exitFailure, "lanes: the daemon accepted the registration and answered invalid JSON")
+		return laneRegistration{}, fail(exitFailure, "lanes: the daemon accepted the registration and answered invalid JSON")
 	}
 	if response.OK {
-		return nil
+		return put.answer(response.Result), nil
 	}
 	if response.Code == daemonop.ExitDaemonUnavailable {
-		return errLaneDaemonAbsent
+		return laneRegistration{}, errLaneDaemonAbsent
 	}
 	detail := strings.TrimSpace(response.Error)
 	if detail == "" {
 		detail = "lanes unavailable"
 	}
-	return fail(response.Code, "lanes: %s", detail)
+	return laneRegistration{}, fail(response.Code, "lanes: %s", detail)
 }
 
 // laneDaemonDeadline is the socket read deadline. The daemon bounds its hub

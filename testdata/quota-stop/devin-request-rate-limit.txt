@@ -1,0 +1,3 @@
+ ▲ Something went wrong
+   Reached request rate limit. Please switch to a different model or contact support. Your limit will reset in 8 seconds (at 10:57 UTC). Send a
+   message to retry

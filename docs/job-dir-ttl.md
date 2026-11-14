@@ -127,6 +127,12 @@ be read keeps it (`spawn-status-unreadable`). Its pane is not checked here:
 it lives on the executing node, whose own directory for the job keeps the
 contract.
 
+The receipt's spawn arguments are read with the spawn flags retired since it
+was written dropped — `--builder-family` and `--routing-role` (hk 4627). A
+receipt is a frozen record, and the gate names the submitted job and its
+report paths; it does not spawn. A flag that was never a spawn flag still
+keeps the directory (`submission-unreadable`).
+
 The receipt's `--report` is a recorded report path like any other. Its
 `--report-relative` is relative to the jobs root of the node that ran the
 job, and the same layout here names this directory: the pass records the

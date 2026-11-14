@@ -392,9 +392,10 @@ func TestEscalateAuthorInspectsWorktreeWithoutPreparingBeforeClose(t *testing.T)
 	}
 }
 
-// A rung no account admits is a quota_refused refusal: the old pane is closed
-// and the old record ends lost, no successor runs, and both the answer and the
-// design lane's info say the author is gone.
+// A rung the real placement refuses after the plan admitted it (the plan and
+// placement disagree) leaves the PR authorless: the old pane is closed, the old
+// record ends lost, no successor runs, and the design lane gets an ESC naming
+// the PR. A replay reports the same refusal; nothing starts a successor again.
 func TestEscalateAuthorRefusesWhenTheRungIsNotAdmitted(t *testing.T) {
 	f := newEscalateFixture(t, "pw-task-43")
 	placed := hubSpawnOutcome{RC: 77, Stage: "placement", Reason: "NO_ROLE_CANDIDATE: quota exhausted"}
@@ -408,7 +409,24 @@ func TestEscalateAuthorRefusesWhenTheRungIsNotAdmitted(t *testing.T) {
 	if reason := endReasonOf(t, commands[5]); reason != "ladder step round=5 replaced_by=pw-task-43-l1" {
 		t.Fatalf("end_reason=%q", reason)
 	}
-	f.awaitInfo(t, "quota_refused", "no author runs on this PR now")
+	f.awaitInfo(t, "[panewire] ESC | authorless:", "quota_refused", "mgh3326/panewire#77 has no author")
+	items, err := f.hub.inbox.store.list("parent", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.ContainsFunc(items, func(item laneInboxItem) bool {
+		return item.Event.NotifyType == "decision" && strings.Contains(item.Event.Text, "authorless") && strings.Contains(item.Event.Text, "mgh3326/panewire#77")
+	}) {
+		t.Fatalf("owner did not receive the authorless ESC as a decision: %+v", items)
+	}
+	again, replayCommands := f.escalate(t, nil)
+	if again != result || len(replayCommands) != 0 {
+		t.Fatalf("a replay must report the refusal without starting a successor: again=%+v commands=%v", again, commandOps(replayCommands))
+	}
+	successor, err := f.hub.inbox.store.latestSpawnForJob(t.Context(), f.job+"-l1")
+	if err != nil || spawnStatusActive(successor.Status) {
+		t.Fatalf("the refused successor must stay placed out: %+v err=%v", successor, err)
+	}
 }
 
 // A refusal before the pane close leaves the author running and says the PR
@@ -648,7 +666,7 @@ func TestEscalateAuthorDistinctRefusalsReachDesignLane(t *testing.T) {
 	if _, err := f.hub.escalateAuthorRefusal(t.Context(), request, "parent", "quota_refused", "quota", true); err != nil {
 		t.Fatal(err)
 	}
-	f.awaitInfo(t, "quota_refused", "no author runs")
+	f.awaitInfo(t, "[panewire] ESC | authorless:", "quota_refused", "has no author")
 }
 
 func TestEscalateAuthorPendingReplayDoesNotReportSuccess(t *testing.T) {
@@ -881,16 +899,31 @@ func TestExpiredStagedLadderReconcilerPreservesAbsentAuthor(t *testing.T) {
 	}
 }
 
-func TestEscalateAuthorRefusesUnadmittedSuccessorBeforeClose(t *testing.T) {
-	f := newEscalateFixture(t, "author-plan-refused")
-	f.hub.ladderPlan = func(context.Context, fleet.Submission) error { return fmt.Errorf("quota refused") }
-	result, commands := f.escalate(t, nil)
-	if result.Code != "quota_refused" || result.AuthorEnded || slices.Contains(commandOps(commands), "pane.close") {
-		t.Fatalf("result=%+v commands=%v", result, commandOps(commands))
-	}
-	_, job, _, err := f.hub.inbox.store.spawnRoleOwner(t.Context(), "42:implementer")
-	if err != nil || job != f.job {
-		t.Fatalf("reservation job=%q err=%v", job, err)
+// A read-only plan refusal keeps its real reason: a seat refusal
+// (NO_ROLE_CANDIDATE at rc 77) or an unknown pinned host is not a quota
+// reading and is not reported as quota_refused. The author keeps running and
+// its reservation is untouched.
+func TestEscalateAuthorPlanRefusalKeepsItsRealReason(t *testing.T) {
+	for name, tc := range map[string]struct {
+		refusal error
+		code    string
+	}{
+		"seat": {refusal: &fleet.ExitError{Code: 77, Message: "NO_ROLE_CANDIDATE: profile sonnet is retired, absent or ineligible for routing role implementer"}, code: "seat_refused"},
+		"host": {refusal: &fleet.ExitError{Code: 2, Message: `unknown host "srv9"; add it to hosts.<machine>.aliases or pass a configured machine id (panewire hosts)`}, code: "host_alias"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newEscalateFixture(t, "author-plan-refused")
+			f.hub.ladderPlan = func(context.Context, fleet.Submission) error { return tc.refusal }
+			result, commands := f.escalate(t, nil)
+			if result.Code != tc.code || !strings.Contains(result.Reason, tc.refusal.Error()) || result.AuthorEnded || slices.Contains(commandOps(commands), "pane.close") {
+				t.Fatalf("result=%+v commands=%v", result, commandOps(commands))
+			}
+			_, job, _, err := f.hub.inbox.store.spawnRoleOwner(t.Context(), "42:implementer")
+			if err != nil || job != f.job {
+				t.Fatalf("reservation job=%q err=%v", job, err)
+			}
+			f.awaitInfo(t, tc.code, tc.refusal.Error())
+		})
 	}
 }
 

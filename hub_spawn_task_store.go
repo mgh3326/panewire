@@ -36,10 +36,31 @@ type hubSpawnOutcome struct {
 	// operation record so a run stays visible after the fact.
 	E6Arm string `json:"e6_arm,omitempty"`
 	// LaneUnregistered: the pane exists but hub lane registration failed.
-	LaneUnregistered bool             `json:"lane_unregistered,omitempty"`
-	Retryable        bool             `json:"retryable,omitempty"`
-	NodeResult       bool             `json:"node_result,omitempty"`
-	StageMS          map[string]int64 `json:"stage_ms,omitempty"`
+	LaneUnregistered bool `json:"lane_unregistered,omitempty"`
+	Retryable        bool `json:"retryable,omitempty"`
+	NodeResult       bool `json:"node_result,omitempty"`
+	// QuotaRefresh names the shared quota refresh a timeout waited on and its
+	// last recorded failure (hub_quota_refresh.go). It is set only when the
+	// deadline expired before any node binding.
+	QuotaRefresh *hubSpawnRefreshOutcome `json:"quota_refresh,omitempty"`
+	StageMS      map[string]int64        `json:"stage_ms,omitempty"`
+}
+
+// hubSpawnRefreshWait is one shared quota refresh a request is parked on: the
+// machine that measures the pool. It is stored with the operation
+// (spawn_operations.refresh_waits) so the link survives a hub restart.
+type hubSpawnRefreshWait struct {
+	Machine string `json:"machine"`
+	Pool    string `json:"pool"`
+}
+
+// hubSpawnRefreshOutcome is the last failure recorded for the refresh a timed
+// out request waited on; FailedAgoS is its age when the outcome was written.
+type hubSpawnRefreshOutcome struct {
+	Machine    string `json:"machine"`
+	Pool       string `json:"pool"`
+	Reason     string `json:"reason"`
+	FailedAgoS int64  `json:"failed_ago_s"`
 }
 
 type hubSpawnTask struct {
@@ -56,6 +77,10 @@ type hubSpawnTask struct {
 	Outcome hubSpawnOutcome
 	// ClaimedHost survives attempts: handoffkeep binds a claimed job to a host.
 	ClaimedHost string
+	// RefreshWaits are the shared quota refreshes an unbound attempt parked
+	// on. A timeout before binding names them (and their last failure) instead
+	// of the queue-starved cause; binding clears them.
+	RefreshWaits []hubSpawnRefreshWait
 	// Exclusions are definitive host or harness refusals in this attempt.
 	Exclusions []hubSpawnExclusion
 }
@@ -79,14 +104,16 @@ func (s *laneInboxStore) ensureSpawnTasks() error {
 		`CREATE TABLE IF NOT EXISTS spawn_notifications (event_id TEXT PRIMARY KEY,request_id TEXT NOT NULL,job TEXT NOT NULL,owner TEXT NOT NULL,result TEXT NOT NULL,created_ms BIGINT NOT NULL,delivered INTEGER NOT NULL DEFAULT 0,telemetry_recorded INTEGER NOT NULL DEFAULT 0)`,
 		spawnAttemptGrantsTable,
 		`CREATE TABLE IF NOT EXISTS spawn_placement_snapshots (request_id TEXT NOT NULL,attempt INTEGER NOT NULL,payload TEXT NOT NULL,recorded INTEGER NOT NULL DEFAULT 0,delivery TEXT NOT NULL DEFAULT '',PRIMARY KEY(request_id,attempt))`,
+		`CREATE TABLE IF NOT EXISTS quota_refresh_failures (machine TEXT NOT NULL,pool TEXT NOT NULL,reason TEXT NOT NULL,seen_ms BIGINT NOT NULL,PRIMARY KEY(machine,pool))`,
 	} {
 		if _, err := s.db.ExecContext(ctx, statement); err != nil {
 			return err
 		}
 	}
 	// Stores from before hk 4460 lack the placement columns (postgres: the
-	// 0008 migration). A restart restores counts from these two columns.
-	for _, column := range []string{`placed_ms BIGINT NOT NULL DEFAULT 0`, `claimed_ms BIGINT NOT NULL DEFAULT 0`, `exclusions TEXT NOT NULL DEFAULT '[]'`, `claimed_host TEXT NOT NULL DEFAULT ''`} {
+	// 0008 migration). A restart restores counts from these two columns, and
+	// refresh_waits arrived with hk 4600 (postgres: 0011).
+	for _, column := range []string{`placed_ms BIGINT NOT NULL DEFAULT 0`, `claimed_ms BIGINT NOT NULL DEFAULT 0`, `exclusions TEXT NOT NULL DEFAULT '[]'`, `claimed_host TEXT NOT NULL DEFAULT ''`, `refresh_waits TEXT NOT NULL DEFAULT '[]'`} {
 		if _, err := s.db.ExecContext(ctx, `ALTER TABLE spawn_operations ADD COLUMN `+column); err != nil {
 			if err := ignoreDuplicateColumn(err); err != nil {
 				return err
@@ -269,7 +296,7 @@ func (s *laneInboxStore) bindSpawn(parent context.Context, id string, attempt in
 	// on a bound row that a restart would not count (restorePlacementCounts).
 	// A new bound attempt is unclaimed: a claim an earlier attempt left on the
 	// row does not describe this placement.
-	_, err = s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET node_id=?,node_payload=?,status='bound',placed_ms=?,claimed_ms=0 WHERE request_id=? AND attempt=? AND node_id IS NULL AND status='accepted' AND (claimed_host='' OR claimed_host=?)`), node.RequestID, string(raw), now.UnixMilli(), id, attempt, node.Machine)
+	_, err = s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET node_id=?,node_payload=?,status='bound',placed_ms=?,claimed_ms=0,refresh_waits='[]' WHERE request_id=? AND attempt=? AND node_id IS NULL AND status='accepted' AND (claimed_host='' OR claimed_host=?)`), node.RequestID, string(raw), now.UnixMilli(), id, attempt, node.Machine)
 	if err != nil {
 		return hubSpawnTask{}, err
 	}
@@ -381,9 +408,9 @@ func (s *laneInboxStore) completeSpawn(parent context.Context, task hubSpawnTask
 
 func scanSpawnTask(row interface{ Scan(...any) error }) (hubSpawnTask, error) {
 	var task hubSpawnTask
-	var payload, result, node, exclusions string
+	var payload, result, node, exclusions, refreshWaits string
 	var created, deadline, lastRun, placed int64
-	err := row.Scan(&task.Job, &task.Owner, &payload, &task.Status, &created, &deadline, &node, &result, &task.Attempt, &lastRun, &placed, &exclusions, &task.ClaimedHost)
+	err := row.Scan(&task.Job, &task.Owner, &payload, &task.Status, &created, &deadline, &node, &result, &task.Attempt, &lastRun, &placed, &exclusions, &task.ClaimedHost, &refreshWaits)
 	if err != nil {
 		return task, err
 	}
@@ -408,7 +435,10 @@ func scanSpawnTask(row interface{ Scan(...any) error }) (hubSpawnTask, error) {
 		return task, err
 	}
 	err = json.Unmarshal([]byte(exclusions), &task.Exclusions)
-	return task, err
+	if err != nil {
+		return task, err
+	}
+	return task, json.Unmarshal([]byte(refreshWaits), &task.RefreshWaits)
 }
 
 // unbindRefusedSpawn records the refusal in the same CAS that releases the
@@ -461,7 +491,7 @@ func (s *laneInboxStore) unbindSpawn(parent context.Context, id string, attempt 
 	return s.spawnTask(parent, id)
 }
 
-const spawnTaskColumns = `job,owner,payload,status,created_ms,deadline_ms,node_payload,result,attempt,last_run_ms,placed_ms,exclusions,claimed_host`
+const spawnTaskColumns = `job,owner,payload,status,created_ms,deadline_ms,node_payload,result,attempt,last_run_ms,placed_ms,exclusions,claimed_host,refresh_waits`
 
 func (s *laneInboxStore) spawnTask(parent context.Context, id string) (hubSpawnTask, error) {
 	ctx, done := s.op(parent)
@@ -667,7 +697,7 @@ func (s *laneInboxStore) resumeCleanedSpawn(parent context.Context, task hubSpaw
 	if n != 1 {
 		return task, errSpawnClaimed
 	}
-	result, err = tx.ExecContext(ctx, s.q(`UPDATE spawn_operations SET status='accepted',deadline_ms=?,node_id=NULL,node_payload='',attempt=attempt+1,trace_recorded=0,last_run_ms=0,exclusions='[]',claimed_host=? WHERE request_id=? AND status='retryable' AND attempt=?`), now.Add(time.Duration(task.Request.DeadlineSeconds)*time.Second).UnixMilli(), spawnPinnedHost(task), task.Request.RequestID, task.Attempt)
+	result, err = tx.ExecContext(ctx, s.q(`UPDATE spawn_operations SET status='accepted',deadline_ms=?,node_id=NULL,node_payload='',attempt=attempt+1,trace_recorded=0,last_run_ms=0,exclusions='[]',claimed_host=?,refresh_waits='[]' WHERE request_id=? AND status='retryable' AND attempt=?`), now.Add(time.Duration(task.Request.DeadlineSeconds)*time.Second).UnixMilli(), spawnPinnedHost(task), task.Request.RequestID, task.Attempt)
 	if err != nil {
 		return task, err
 	}
@@ -790,4 +820,54 @@ func (s *laneInboxStore) resumeUndispatchedSpawn(parent context.Context, task hu
 		return task, err
 	}
 	return s.spawnTask(parent, task.Request.RequestID)
+}
+
+// noteSpawnRefreshWaits records the shared quota refreshes an unbound attempt
+// is parked on. A timeout that later settles the attempt names them, and the
+// last failure stored for each, instead of the queue-starved cause; binding
+// the attempt clears them. It is a link, not a decision: a failed write leaves
+// placement pending on its own terms.
+func (s *laneInboxStore) noteSpawnRefreshWaits(parent context.Context, id string, attempt int, waits []hubSpawnRefreshWait) error {
+	raw, err := json.Marshal(waits)
+	if err != nil {
+		return err
+	}
+	ctx, done := s.op(parent)
+	defer done()
+	_, err = s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET refresh_waits=? WHERE request_id=? AND attempt=? AND status='accepted' AND node_id IS NULL`), string(raw), id, attempt)
+	return err
+}
+
+// recordQuotaRefreshFailure persists the last failed attempt for one
+// machine/pool, so a request that times out on it can name the failure after a
+// hub restart. The scheduler's in-memory copy only suppresses repeated logs.
+func (s *laneInboxStore) recordQuotaRefreshFailure(parent context.Context, machine, pool, reason string, now time.Time) error {
+	ctx, done := s.op(parent)
+	defer done()
+	_, err := s.db.ExecContext(ctx, s.q(`INSERT INTO quota_refresh_failures(machine,pool,reason,seen_ms) VALUES(?,?,?,?) ON CONFLICT(machine,pool) DO UPDATE SET reason=excluded.reason,seen_ms=excluded.seen_ms`), machine, pool, reason, now.UnixMilli())
+	return err
+}
+
+// clearQuotaRefreshFailure drops the entry a fresh measurement disproves.
+func (s *laneInboxStore) clearQuotaRefreshFailure(parent context.Context, machine, pool string) error {
+	ctx, done := s.op(parent)
+	defer done()
+	_, err := s.db.ExecContext(ctx, s.q(`DELETE FROM quota_refresh_failures WHERE machine=? AND pool=?`), machine, pool)
+	return err
+}
+
+// quotaRefreshFailure reads the last recorded failure for one machine/pool.
+func (s *laneInboxStore) quotaRefreshFailure(parent context.Context, machine, pool string) (string, time.Time, bool, error) {
+	ctx, done := s.op(parent)
+	defer done()
+	var reason string
+	var seen int64
+	err := s.db.QueryRowContext(ctx, s.q(`SELECT reason,seen_ms FROM quota_refresh_failures WHERE machine=? AND pool=?`), machine, pool).Scan(&reason, &seen)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", time.Time{}, false, nil
+	}
+	if err != nil {
+		return "", time.Time{}, false, err
+	}
+	return reason, time.UnixMilli(seen), true, nil
 }

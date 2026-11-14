@@ -490,12 +490,26 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 			}
 			defer h.spawnActions.end(task.Request.RequestID)
 		}
-		if unsent {
+		wait, failure, refreshWait := h.spawnRefreshWaitOutcome(task)
+		if refreshWait {
+			refreshReason := "none"
+			if failure != nil {
+				refreshReason = failure.Reason
+			}
+			h.logger.Warn("hub spawn timed out awaiting a quota refresh", "request_id", task.Request.RequestID, "job", task.Job, "machine", wait.Machine, "pool", wait.Pool, "refresh_reason", refreshReason, "queue_wait_s", spawnQueueWaitSeconds(task, h.now()))
+		} else if unsent {
 			h.logger.Warn("hub spawn starved in the queue", "request_id", task.Request.RequestID, "job", task.Job, "host", firstNonEmptyString(spawnTaskHost(task), "none"), "queue_wait_s", spawnQueueWaitSeconds(task, h.now()))
 		} else {
 			h.logger.Warn("hub spawn deadline elapsed with ownership unresolved", "request_id", task.Request.RequestID, "job", task.Job, "host", spawnTaskHost(task))
 		}
-		h.finishSpawnOutcome(task, hubSpawnOutcome{RC: 124, Stage: "landing", Reason: "timeout", Host: spawnTaskHost(task), Retryable: unsent, Fix: spawnQueueWaitFix(task, h.now())})
+		outcome := hubSpawnOutcome{RC: 124, Stage: "landing", Reason: "timeout", Host: spawnTaskHost(task), Retryable: unsent}
+		if refreshWait {
+			outcome.QuotaRefresh = failure
+			outcome.Fix = spawnRefreshWaitFix(task, wait, failure)
+		} else {
+			outcome.Fix = spawnQueueWaitFix(task, h.now())
+		}
+		h.finishSpawnOutcome(task, outcome)
 		if unsent {
 			return
 		}
@@ -573,7 +587,24 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 	}
 	outcome := hubSpawnOutcome{Stage: "placement", Host: spawnPinnedHost(task), StageMS: map[string]int64{}}
 	h.bindPlacement(app, transport)
-	app.ScheduleQuotaRefresh = h.scheduleQuotaRefresh
+	// The shared scheduler is not this request's: collect the keys this pass
+	// asks it to refresh so a timeout can name the machine and pool.
+	var refreshMu sync.Mutex
+	var refreshWaits []hubSpawnRefreshWait
+	rememberRefreshWait := func(machine, pool string) {
+		refreshMu.Lock()
+		defer refreshMu.Unlock()
+		for _, wait := range refreshWaits {
+			if wait.Machine == machine && wait.Pool == pool {
+				return
+			}
+		}
+		refreshWaits = append(refreshWaits, hubSpawnRefreshWait{Machine: machine, Pool: pool})
+	}
+	app.ScheduleQuotaRefresh = func(machine, pool string, timeout time.Duration) {
+		rememberRefreshWait(machine, pool)
+		h.scheduleQuotaRefresh(machine, pool, timeout)
+	}
 	app.PlacementTry = func(host string) { h.countPlacement(task.Job, host) }
 	app.PlacementGate = h.placementGate.acquire
 	app.ObserveStage = func(stage string, d time.Duration) { outcome.Stage = stage; outcome.StageMS[stage] += d.Milliseconds() }
@@ -631,9 +662,15 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 	if parent.Err() != nil {
 		return
 	} // Restart resumes durable accepted ownership.
-	if errors.Is(err, fleet.ErrQuotaRefreshPending) && ctx.Err() == nil {
-		h.releasePlacementCount(task.Job)
-		return
+	if errors.Is(err, fleet.ErrQuotaRefreshPending) {
+		refreshMu.Lock()
+		waits := append([]hubSpawnRefreshWait(nil), refreshWaits...)
+		refreshMu.Unlock()
+		task.RefreshWaits = h.noteSpawnRefreshWaits(task, waits)
+		if ctx.Err() == nil {
+			h.releasePlacementCount(task.Job)
+			return
+		}
 	}
 	outcome.RC = fleet.ErrorCode(err)
 	outcome.Reason = fleet.AdmissionRefusalReason(err)
@@ -650,6 +687,14 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 	if ctx.Err() != nil {
 		outcome.RC = 124
 		outcome.Reason = "timeout"
+		// The deadline can expire inside the pass that parked the request on
+		// a refresh; that timeout names the refresh too, not the queue.
+		if errors.Is(err, fleet.ErrQuotaRefreshPending) {
+			if wait, failure, waiting := h.spawnRefreshWaitOutcome(task); waiting {
+				outcome.QuotaRefresh = failure
+				outcome.Fix = spawnRefreshWaitFix(task, wait, failure)
+			}
+		}
 	}
 	if outcome.Host == "" {
 		outcome.Host = spawnPinnedHost(task)
@@ -694,6 +739,80 @@ func (s directSpawnState) Snapshot(ctx context.Context) (fleet.FleetSnapshot, er
 		err = json.Unmarshal(raw, &snap)
 	}
 	return snap, err
+}
+
+// noteSpawnRefreshWaits stores the refresh keys this placement pass parked on
+// and returns the task's current link. The durable write is the one a timeout
+// reads after a restart; an unchanged link costs one UPDATE.
+func (h *HubServer) noteSpawnRefreshWaits(task hubSpawnTask, waits []hubSpawnRefreshWait) []hubSpawnRefreshWait {
+	if len(waits) == 0 {
+		return task.RefreshWaits
+	}
+	if h.inbox != nil {
+		if err := h.inbox.store.noteSpawnRefreshWaits(h.closeCtx, task.Request.RequestID, task.Attempt, waits); err != nil {
+			h.logger.Warn("spawn quota refresh link not recorded", "request_id", task.Request.RequestID, "attempt", task.Attempt, "error", err)
+		}
+	}
+	return waits
+}
+
+// spawnRefreshWaitOutcome reports whether an unbound request's timeout expired
+// while it waited on a shared quota refresh. It names the wait whose last
+// attempt failed most recently, with that failure, or the first wait and nil
+// when no attempt has finished.
+func (h *HubServer) spawnRefreshWaitOutcome(task hubSpawnTask) (hubSpawnRefreshWait, *hubSpawnRefreshOutcome, bool) {
+	if task.Node != nil || len(task.RefreshWaits) == 0 {
+		return hubSpawnRefreshWait{}, nil, false
+	}
+	wait := task.RefreshWaits[0]
+	if h.inbox == nil {
+		return wait, nil, true
+	}
+	now := h.now()
+	var failure *hubSpawnRefreshOutcome
+	var failedAt time.Time
+	for _, candidate := range task.RefreshWaits {
+		reason, seen, found, err := h.inbox.store.quotaRefreshFailure(h.closeCtx, candidate.Machine, candidate.Pool)
+		if err != nil || !found || (failure != nil && !seen.After(failedAt)) {
+			continue
+		}
+		age := now.Sub(seen) / time.Second
+		if age < 0 {
+			age = 0
+		}
+		wait = candidate
+		failure = &hubSpawnRefreshOutcome{Machine: candidate.Machine, Pool: candidate.Pool, Reason: reason, FailedAgoS: int64(age)}
+		failedAt = seen
+	}
+	return wait, failure, true
+}
+
+// spawnRefreshFailureText is the operator sentence for a recorded refresh
+// failure (refreshQuotaFromNode's reason codes).
+func spawnRefreshFailureText(reason string) string {
+	switch reason {
+	case "node_timeout":
+		return "the node did not answer within the refresh deadline"
+	case "node_unavailable":
+		return "the node was not connected"
+	case "node_lost":
+		return "the node's connection dropped"
+	case "refresh_failed":
+		return "the node's measurement failed"
+	default:
+		return "the refresh failed"
+	}
+}
+
+// spawnRefreshWaitFix explains a timeout that expired while the request waited
+// for a shared quota refresh. It names the machine, pool and last failure
+// instead of the spawn queue, which the request never occupied.
+func spawnRefreshWaitFix(task hubSpawnTask, wait hubSpawnRefreshWait, failure *hubSpawnRefreshOutcome) string {
+	head := fmt.Sprintf("the hub did not start this request within its %ds deadline: it waited for a quota refresh on %s (pool %s), and no node ran its landing", task.Request.DeadlineSeconds, wait.Machine, wait.Pool)
+	if failure == nil {
+		return utf8PrefixWithin(fmt.Sprintf("%s; no refresh attempt finished, so the shared reading stayed stale — confirm that host can measure the pool with panewire quota refresh %s, then resubmit", head, wait.Pool), 512)
+	}
+	return utf8PrefixWithin(fmt.Sprintf("%s; the last attempt failed %ds ago — %s (%s). Fix that measurement or restore the connection (panewire quota refresh %s), then resubmit", head, failure.FailedAgoS, spawnRefreshFailureText(failure.Reason), failure.Reason, wait.Pool), 512)
 }
 
 // spawnQueueWaitFix distinguishes a never-sent queue timeout from a request

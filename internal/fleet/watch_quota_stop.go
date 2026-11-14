@@ -226,7 +226,7 @@ func (a *App) quotaStopScreen(ctx context.Context, j Job, ag Agent, seen *quotaS
 		seen.read, seen.seq = true, *ag.StateChangeSeq
 	}
 	if stop, ok := quotastop.Classify(r.Out, a.Now(), time.Local); ok {
-		return stop, quotaStopFound
+		return QuotaStopPool(stop, j.Profile), quotaStopFound
 	}
 	return quotastop.Stop{}, quotaNotStopped
 }
@@ -330,9 +330,9 @@ func announcedQuotaStop(j Job) (quotastop.Stop, bool) {
 
 // quotaStopAnnounce records job.lost for a quota stop without ending the hk
 // record, so the hub sees the stop and can replace the job first. A devin
-// free-tier limit is also written to this host's free-limit record first, so
-// the next devin measurement publishes it and later selections skip the free
-// rung until its reset (RecordFreeLimit).
+// free-tier limit is also written to this host's free-limit record and
+// published at once, so later selections skip the free rung until its reset on
+// every host (RecordFreeLimit, publishFreeLimit).
 func (a *App) quotaStopAnnounce(ctx context.Context, j Job, stop quotastop.Stop) error {
 	return a.quotaStopEvent(ctx, j, stop, false)
 }
@@ -345,6 +345,8 @@ func (a *App) quotaStopEvent(ctx context.Context, j Job, stop quotastop.Stop, fi
 	if stop.Pool == "devin-free" {
 		if e := RecordFreeLimit(devin.Config{Home: a.Home, Now: a.Now}, j.ID, stop); e != nil {
 			a.warn("free-limit observation failed: %v", e)
+		} else {
+			a.publishFreeLimit(ctx, j.ID)
 		}
 	}
 	payload := quotaStopPayload(j, stop)
@@ -354,12 +356,35 @@ func (a *App) quotaStopEvent(ctx context.Context, j Job, stop quotastop.Stop, fi
 	return a.event(ctx, j.ID, "job.lost", payload)
 }
 
+// freeLimitPublishTimeout bounds publishing a recorded free limit into the
+// shared store. The refresh is a store read, a publication and a release
+// unless the paid reading needs a measurement, so it normally ends in well
+// under a second; a slow measurement must not hold the stop.
+const freeLimitPublishTimeout = 15 * time.Second
+
+// publishFreeLimit publishes the free limit this host just recorded into the
+// devin account's shared reading, so every host's selection drops the free
+// rungs from the stop itself. Waiting for the next devin measurement is not
+// enough: a host with a fresh reading never runs one, and a host without the
+// record never publishes it, so the account keeps admitting free rungs that
+// stop on the same limit as soon as they start. A failure only logs: the
+// record is durable, and the next measurement publishes it.
+func (a *App) publishFreeLimit(ctx context.Context, job string) {
+	if !a.nativeQuotaPool("devin") {
+		return
+	}
+	if e := checkQuotaPlain(runQuotaCommand(ctx, a.Runner, refreshCommand("devin", "", true), "quota refresh", freeLimitPublishTimeout), "quota refresh"); e != nil {
+		a.warn("free-limit publish for job %s: %v", job, e)
+	}
+}
+
 // RecordFreeLimit writes a devin free-tier limit a quota-stopped pane reported
 // into cfg's host free-limit record (internal/quota/devin), the same record
 // `panewire quota observe devin-free-limit` writes. The node merges it into the
-// devin account's next published reading (shared.Flow.LocalFree), and selection
-// drops the free rung as free_limit until the reset. A zero stop.Reset uses the
-// record's one-hour unknown-reset hold. A stop of another pool is a no-op.
+// devin account's published reading (shared.Flow.LocalFree); quotaStopEvent also
+// publishes it at once (publishFreeLimit), and selection drops the free rungs
+// as free_limit until the reset. A zero stop.Reset uses the record's one-hour
+// unknown-reset hold. A stop of another pool is a no-op.
 func RecordFreeLimit(cfg devin.Config, job string, stop quotastop.Stop) error {
 	if stop.Pool != "devin-free" {
 		return nil

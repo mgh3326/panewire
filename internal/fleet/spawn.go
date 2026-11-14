@@ -162,6 +162,17 @@ func SpawnRoleKey(task, role, pass string) string {
 }
 
 func parseSpawn(args []string) (Spawn, error) {
+	return parseSpawnIgnoring(args, nil)
+}
+
+// parseSpawnIgnoring parses args exactly as parseSpawn does, with each name in
+// ignored accepted as a flag that takes one value and is then dropped. A
+// stored submission.json is read this way: a spawn flag retired since the
+// receipt was written was legal when it was written, and the receipt names a
+// job and its report paths rather than a spawn (hk 4627). The flag grammar is
+// still the only reader, so a retired flag's name counts as a flag only where
+// the grammar starts one — not where it is another flag's value.
+func parseSpawnIgnoring(args, ignored []string) (Spawn, error) {
 	s := Spawn{Role: "implementer", Host: "auto"}
 	f := flags("spawn")
 	f.Var((*repeatedStringFlag)(&s.After), "after", "start condition (repeatable)")
@@ -180,6 +191,13 @@ func parseSpawn(args []string) (Spawn, error) {
 	f.BoolVar(&s.DryRun, "dry-run", false, "")
 	f.BoolVar(&s.Wait, "wait", false, "")
 	f.BoolVar(&s.AllowEscalation, "allow-escalation", false, "")
+	// A flag the set already defines keeps its meaning: an ignored name is one
+	// the set no longer has.
+	for _, name := range ignored {
+		if f.Lookup(name) == nil {
+			f.String(name, "", "")
+		}
+	}
 	if e := f.Parse(args); e != nil {
 		return s, fail(exitUsage, "%v", e)
 	}
@@ -493,13 +511,14 @@ func (a *App) rebindInherited(ctx context.Context, s Spawn, task client.Task, ev
 }
 
 // finishTaskTakeover runs only after the successor is committed, so a failed
-// spawn never needs a compensating remote write. See docs/config.md.
-func (a *App) finishTaskTakeover(ctx context.Context, s Spawn, task client.Task, owner string) {
+// spawn never needs a compensating remote write. It moves the task binding,
+// then the lane route the task's findings use. See docs/config.md.
+func (a *App) finishTaskTakeover(ctx context.Context, s *Spawn, task client.Task, owner, hint, pane, machine string) {
 	ev := map[string]any{"task_id": s.Task, "job_id": s.Job, "inherited_from": s.Inherited}
-	takeover, cancelTakeover := context.WithTimeout(context.WithoutCancel(ctx), 20*time.Second)
-	status := a.rebindInherited(takeover, s, task, ev)
-	cancelTakeover()
 	uncancelled := context.WithoutCancel(ctx)
+	takeover, cancelTakeover := context.WithTimeout(uncancelled, 20*time.Second)
+	status := a.rebindInherited(takeover, *s, task, ev)
+	cancelTakeover()
 	ctx, cancelOutcome := context.WithTimeout(uncancelled, 10*time.Second)
 	defer cancelOutcome()
 	ev["status"] = status
@@ -507,10 +526,18 @@ func (a *App) finishTaskTakeover(ctx context.Context, s Spawn, task client.Task,
 		a.warn("job %s: task rebind event not recorded: %v", s.Job, e)
 	}
 	if status == "rebound" {
-		fromJob := str(ev, "rebound_from")
-		a.noteReplaced(ctx, s, fromJob)
+		fromJob := firstNonempty(str(ev, "rebound_from"), s.Inherited)
+		a.noteReplaced(ctx, *s, str(ev, "rebound_from"))
+		laneCtx, cancelLane := context.WithTimeout(uncancelled, 20*time.Second)
+		defer cancelLane()
+		a.takeOverLane(laneCtx, s, hint, owner, fromJob, pane, machine)
 		return
 	}
+	// The task stayed with its holder, so there is no predecessor route to
+	// take over; the pane still registers under its own label.
+	laneCtx, cancelLane := context.WithTimeout(uncancelled, 20*time.Second)
+	defer cancelLane()
+	a.registerOwnLane(laneCtx, s, owner, pane, machine)
 	reason := str(ev, "rebind_error")
 	id := sha256.Sum256([]byte(s.Job))
 	text := fmt.Sprintf("[panewire] TASK_REBIND_FAILED job=%s task=%s reason=%s; rebind manually", s.Job, s.Task, reason)
@@ -519,6 +546,65 @@ func (a *App) finishTaskTakeover(ctx context.Context, s Spawn, task client.Task,
 	r := a.call(notice, "panewire", "emit", "--kind", "lane.event", "--lane", owner, "--type", "automation-failed", "--event-id", fmt.Sprintf("task-rebind-failed-%x", id[:]), "--text", text, "--inbox-root", filepath.Dir(a.Jobs))
 	if r.Code != 0 {
 		a.warn("task rebind notice failed (exit %d)", r.Code)
+	}
+}
+
+// takeoverLaneName is the lane a takeover write offers: the task's routing
+// lane, which is the name its findings are already addressed to, else the
+// spawn's own label. The hub substitutes the row the predecessor's pane holds,
+// so this name only decides what a pane with no predecessor row registers.
+func takeoverLaneName(s Spawn, task client.Task) string {
+	if laneNamePattern.MatchString(task.Lane) {
+		return task.Lane
+	}
+	return s.Label
+}
+
+// takeOverLane moves the lane row the predecessor job holds onto this pane, so
+// the lane a task's findings are addressed to follows the takeover. A refusal
+// is expected when the lane the task names is not the predecessor's row (a
+// design task's lane stays on the design pane); the successor then registers
+// its own label as any spawn does. The outcome is recorded, never returned:
+// the spawn has landed.
+func (a *App) takeOverLane(ctx context.Context, s *Spawn, hint, owner, predecessor, pane, machine string) {
+	registration, e := a.registerLaneWithRetry(ctx, lanePutRequest{Lane: hint, Machine: machine, Pane: pane, Parent: owner, Role: s.Role, Takeover: predecessor})
+	if e == nil {
+		a.recordLaneRegistered(ctx, s, registration, pane, predecessor)
+		return
+	}
+	if laneRefused(e) {
+		_ = a.event(ctx, s.Job, "job.lane_takeover_failed", map[string]any{"lane": hint, "takeover_job": predecessor, "reason": laneFailureReason(e)})
+	} else {
+		a.warn("lane takeover for job %s task %s failed: %v", s.Job, s.Task, e)
+	}
+	a.registerOwnLane(ctx, s, owner, pane, machine)
+}
+
+// registerOwnLane registers the pane's own label, the write every spawn makes
+// when no lane is taken over.
+func (a *App) registerOwnLane(ctx context.Context, s *Spawn, owner, pane, machine string) {
+	registration, e := a.registerLaneWithRetry(ctx, lanePutRequest{Lane: s.Label, Machine: machine, Pane: pane, Parent: owner, Role: s.Role})
+	if e != nil {
+		s.laneUnregistered = true
+		s.laneError = laneFailureReason(e)
+		_ = a.event(ctx, s.Job, "job.lane_registration_failed", map[string]any{"lane": s.Label, "lane_error": s.laneError})
+		return
+	}
+	a.recordLaneRegistered(ctx, s, registration, pane, "")
+}
+
+// recordLaneRegistered keeps the published row on the spawn and records it in
+// the job's events. A takeover spawn reaches here after job.spawned, so this
+// event is where its receipt gains a lane.
+func (a *App) recordLaneRegistered(ctx context.Context, s *Spawn, registration laneRegistration, pane, takeover string) {
+	s.registeredLane = &Job{HubLane: registration.Lane, Machine: registration.Machine, Pane: pane, Role: s.Role}
+	s.laneUnregistered, s.laneError = false, ""
+	fields := map[string]any{"hub_lane": registration.Lane, "hub_lane_machine": registration.Machine, "pane_id": pane}
+	if takeover != "" {
+		fields["takeover_job"] = takeover
+	}
+	if e := a.event(ctx, s.Job, "job.lane_registered", fields); e != nil {
+		a.warn("job %s: lane registration event not recorded: %v", s.Job, e)
 	}
 }
 
@@ -1240,12 +1326,17 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 	parent := owner
 	machine := a.machine()
 	laneOK := false
-	if e := a.registerLaneWithRetry(ctx, lane, parent, pane, s.Role, machine); e != nil {
-		s.laneUnregistered = true
-		s.laneError = laneFailureReason(e)
-	} else {
-		laneOK = true
-		s.registeredLane = &Job{HubLane: lane, Machine: machine, Pane: pane, Role: s.Role}
+	// A --parent-job takeover registers after this spawn commits: it moves the
+	// predecessor's lane row, and a spawn that fails must leave that row where
+	// it is. Every other spawn registers under its own label here.
+	if !s.replacesParent() {
+		if registration, e := a.registerLaneWithRetry(ctx, lanePutRequest{Lane: lane, Machine: machine, Pane: pane, Parent: parent, Role: s.Role}); e != nil {
+			s.laneUnregistered = true
+			s.laneError = laneFailureReason(e)
+		} else {
+			lane, laneOK = registration.Lane, true
+			s.registeredLane = &Job{HubLane: lane, Machine: machine, Pane: pane, Role: s.Role}
+		}
 	}
 	receipt := map[string]any{"pane_id": pane, "tab_id": tab, "herdr_session": a.herdrSession(), "label": s.Label, "profile": s.Profile, "launch_profile": launchProfile(seat.Canon, launch.Effort), "model_id": launch.ModelID, "effort": launch.Effort, "family": seat.Family, "role": s.Role, "lane_role": s.Role, "owner_lane": owner, "parent_lane": s.Parent, "task_id": s.Task, "report": s.Report, "cwd": s.CWD, "keep": s.Keep, "pool": pool, "host": machine}
 	receipt["harness_session"] = a.harnessSession(ctx, pane, seat.Kind)
@@ -1270,7 +1361,12 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 	}
 	committed = true
 	if s.replacesParent() {
-		a.finishTaskTakeover(ctx, s, task, owner)
+		hint := takeoverLaneName(s, task)
+		a.finishTaskTakeover(ctx, &s, task, owner, hint, pane, machine)
+		lane = hint
+		if s.registeredLane != nil {
+			lane, laneOK = s.registeredLane.HubLane, true
+		}
 	}
 	s.placement.placed = true
 	if rerr := a.recordLadderStep(ctx, s, launch, seat); rerr != nil {

@@ -12,7 +12,7 @@ A candidate the idle-wake route suppressed, for any reason (`design_lane`, `ambi
 
 The default is shadow (`quota_stop.act=false`, represented by the zero-value `Config.QuotaStopAct`); no pane input or handover event is sent. Set the daemon flag `--quota-stop-act` to enable actions. The daemon account needs `handoffkeep` and its configured credentials, plus `herdr`. Job and pane identity, state, screen, and harness are checked before a single resume attempt. A nonce is appended to the policy resume text to verify its submission. An ambiguous submission is never retried. Dialogs are handed over instead of choosing an option. The operator-desk handover is a durable lane event.
 
-This feature does not change spawn routing. A devin free-tier stop also writes this host's `devin-free-limit.json` (the record `panewire quota observe devin-free-limit` writes); the next devin measurement publishes it to the shared store, and later selections skip the free rung as `free_limit` until its reset. The spawn order is panewire's pool-order policy ([config](config.md), decision/2026-11-04/pool-order-owner and decision/2026-11-11/model-routing-escalation A31).
+This feature does not change spawn routing. A devin free-tier stop also writes this host's `devin-free-limit.json` (the record `panewire quota observe devin-free-limit` writes) and publishes it at once through `panewire quota refresh devin`: the record is merged over the account's current shared reading without a provider measurement, so every host's selection skips the free rungs as `free_limit` from the stop itself, until the reset. A replacement for a `quota_stop pool=devin-free` also excludes the free band (`--exclude-pool devin-free`), so it never takes another free rung of the same account. The spawn order is panewire's pool-order policy ([config](config.md), decision/2026-11-04/pool-order-owner and decision/2026-11-11/model-routing-escalation A31).
 
 A blocked pane is never resumed. herdr refuses `agent.prompt` on a blocked pane (`agent_blocked`) and sends nothing, so a quota stop seen on a blocked wake is handed over as `blocked_dialog`, and a due wait whose pane is blocked at resume time is handed over the same way without reading the screen or spending the job's one wait.
 
@@ -34,9 +34,9 @@ Known limits: an implementer on another host does not carry uncommitted changes 
 
 ## Job end on a quota stop
 
-The job watcher ends a reviewer job whose pane is idle on a quota stop screen and has no report. It writes the hk record `state=lost` with `end_reason="quota_stop pool=<pool> reset_at=<RFC3339 UTC>"` (`reset_at` left out when unknown, at most 128 characters, no `result`), emits `job.lost` with `reason: "quota_stop"`, `pool` and `reset_at`, and releases the quota reservation. It only reads the screen and never sends input to the pane. The classifier is `internal/quotastop`; the devin line is matched anywhere in the status line, including the `▲ Something went wrong — ` prefix. The paid Devin weekly line `Quota exhausted — Your weekly usage quota has been exhausted` is the `devin` pool (paid `devin-ds41` spends the account's paid window, hk 4545), not `devin-free`, so it writes no free-limit record. Its reset is read by the same grammar as the free line; the paid reset wording is not yet captured, so a paid stop with no readable reset is handed over as reset unknown.
+The job watcher ends a reviewer job whose pane is idle on a quota stop screen and has no report. It writes the hk record `state=lost` with `end_reason="quota_stop pool=<pool> reset_at=<RFC3339 UTC>"` (`reset_at` left out when unknown, at most 128 characters, no `result`), emits `job.lost` with `reason: "quota_stop"`, `pool` and `reset_at`, and releases the quota reservation. It only reads the screen and never sends input to the pane. The classifier is `internal/quotastop`; the devin line is matched anywhere in the status line, including the `▲ Something went wrong — ` prefix. Devin's short request-rate-limit banner (`Reached request rate limit … reset in 8 seconds (at 10:57 UTC)`, hk 4644) is a Devin stop too; its text names no rung, so the running profile decides the pool (a SWE-2 free rung is `devin-free`, any other Devin rung `devin`). The paid Devin weekly line `Quota exhausted — Your weekly usage quota has been exhausted` is the `devin` pool (paid `devin-ds41` spends the account's paid window, hk 4545), not `devin-free`, so it writes no free-limit record. Its reset is read by the same grammar as the free line; the paid reset wording is not yet captured, so a paid stop with no readable reset is handed over as reset unknown.
 
-**Where the limit sits.** The limit line is found anywhere on the visible screen, not only near the prompt, as long as no newer agent output follows it. What may follow is the CLI's chrome (rules, an empty prompt, the option footer) and user turns, where a user turn is exactly one prompt-marked row (`❭`, `❯`, `›` followed by text), which is how a relay directive appears. Until a rule starts the composer, the rows after a user turn are trusted only if blank; any other row there (an answer, an option-like line, a continuation of the message) is agent output or of unknown ownership, so it is neither accepted nor taken for a status. A flush-left limit line after a blank row that follows a user turn is accepted: that is how a new limit follows the user's message. The reset and the choice flag are read from the limit line and the chrome after it, never from the injected text. A relative reset adds its parts: `reset in 13 hours 9 minutes` is 13 h 9 min. A devin free-tier stop writes the host's `devin-free-limit.json` (hk 4507).
+**Where the limit sits.** The limit line is found anywhere on the visible screen, not only near the prompt, as long as no newer agent output follows it. What may follow is the CLI's chrome (rules, an empty prompt, the option footer) and user turns, where a user turn is exactly one prompt-marked row (`❭`, `❯`, `›` followed by text), which is how a relay directive appears. Until a rule starts the composer, the rows after a user turn are trusted only if blank; any other row there (an answer, an option-like line, a continuation of the message) is agent output or of unknown ownership, so it is neither accepted nor taken for a status. A flush-left limit line after a blank row that follows a user turn is accepted: that is how a new limit follows the user's message. The reset and the choice flag are read from the limit line and the chrome after it, never from the injected text. A relative reset adds its parts: `reset in 13 hours 9 minutes` is 13 h 9 min. A devin free-tier stop writes the host's `devin-free-limit.json` (hk 4507). Devin's request-rate-limit banner is the one message the classifier joins across rows (hk 4644): its body continues onto the following rows indented like it, up to the closing `Send a message to retry`, and Devin's working-directory row (`⏺ ~/…` or `⏺ /…`) above the composer is chrome. Any other later row is still agent output. A resume re-read of this screen matches either Devin pool, because the screen cannot tell the rung from a free one or a paid one.
 
 *Known residual risk (operator decision, hk 4507): flat screen text cannot prove who wrote a row.* A directive that wraps or spans several rows is not detected (fail closed: no stop). A complete status quoted by a user message after a blank row, or an answer whose own row starts with the prompt mark, looks like the incident screen and can end a live reviewer. The sound fix is structured devin session evidence (hk 4542).
 
@@ -47,6 +47,28 @@ with a future reset, the hub scans live spawned jobs placed on that pool and
 account. Free-bucket exhaustion applies only to free rungs; paid windows apply
 to paid rungs. A newer reading that clears the same bucket supersedes the
 trigger, and the hub checks the reset and freshness again before acting.
+
+Two more triggers start the same sweep for a pool that publishes no quota
+reading of its own (hk 4625). A hub pass runs once at startup and then every
+ten minutes over the pools live jobs are placed on:
+
+- **Retired catalog.** Every catalog row of the pool is retired. The hub reads
+  the bench catalog through the quota adapter and its cache; a stale catalog is
+  refused, so a notice never rests on a day-old row set. A pool the catalog does
+  not list at all fires nothing.
+- **Credit exhausted.** The pane of a live job on the pool shows the provider's
+  own credit rejection: Anthropic's "Your credit balance is too low" or
+  OpenAI's `insufficient_quota` / "You exceeded your current quota". The hub
+  reads the pane's visible tail through its node (`pane.read`, the reader the
+  quota-stop manager uses) and applies the quota-stop activity rule
+  (`internal/quotastop`), so the same words quoted by a later answer are not a
+  stop. The rejection must name the job's own pool.
+
+Neither cause names an account or a reset: it fires per pool, and every live
+job on the pool gets the one notice below, whose text names what ran out. A
+cause is held until the pool comes back — a catalog row un-retired — after
+which both of the pool's triggers re-arm and a repeat is logged as new. While a
+cause is held, later passes still notify jobs that were placed after it fired.
 
 For each implementer, reviewer, or consult the hub records one `lane.event`
 asking the owner to hand the job over or end it and respawn it on another pool.
