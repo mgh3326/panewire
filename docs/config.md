@@ -799,6 +799,26 @@ landed and emits an `automation-failed` notice asking for a manual rebind check.
 If the process stops after landing but before the takeover, the pending link
 has no `job.task_rebind` event and the parent retains the task.
 
+A confirmed rebind also moves the lane route, so the lane the task's findings
+are addressed to follows the work instead of staying on the parent's pane. The
+successor writes the task's routing lane (its `lane` on the hk task, else the
+successor's own label) as a `takeover` of the parent job; the hub moves the one
+row the parent's pane holds to the successor's pane, whatever that row is
+named, and keeps its name. That is the one cross-machine node lane write: the
+row leaves the parent's machine for the successor's. The successor therefore
+keeps the predecessor's lane name; when its own label differs, that label gets
+no route and direct lane events to it still reach the pane through the hub's
+live-job fallback. `job.lane_registered` records the published row and the
+`takeover_job`. A lane the parent's pane did not hold — a design task's lane,
+for one — is refused; the successor registers its own label instead and
+`job.lane_takeover_failed` records the refusal. `job.spawned` precedes both, so
+a takeover spawn's receipt carries no `hub_lane`; the later
+`job.lane_registered` supplies it, and a spawn that never registers is reported
+by `LANE_UNREGISTERED` like any other. The rule is in
+[r28-lanes-write.md](r28-lanes-write.md#take-a-predecessors-route-on-a-takeover).
+A failed takeover is recorded and warned about, never returned: the spawn has
+landed by then.
+
 Automatic model selection (`spawn` with `-m` omitted or `-m auto`) reads the
 live bench catalog from handoffkeep and pool status from the quota CLI, then
 orders candidates under the versioned pool-order policy (`[local].pool_policy` or

@@ -27,6 +27,9 @@ type LanesPut struct {
 	Machine string `json:"machine,omitempty"`
 	Pane    string `json:"pane,omitempty"`
 	Parent  string `json:"parent,omitempty"`
+	// Takeover names the predecessor job whose lane row this write moves to
+	// the requested route; see `panewire lanes add --takeover`.
+	Takeover string `json:"takeover,omitempty"`
 }
 
 // ExitDaemonUnavailable is the response code for an op the daemon cannot serve
