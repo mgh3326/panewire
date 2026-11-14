@@ -445,6 +445,10 @@ type HubServer struct {
 	spawnActions            hubSpawnActions
 	spawnAdmissions         hubKeyedLocks
 	placementTraces         hubKeyedLocks
+	// placementStalls holds the reason last logged for each attempt whose
+	// record is still undelivered (hub_placement_stall.go).
+	placementStallMu sync.Mutex
+	placementStalls  map[placementTraceBaseKey]string
 	// drain is the SIGTERM state (hub_drain.go).
 	drain hubDrain
 	// spawnOrphanProbed is when the hub last probed each stranded request's
