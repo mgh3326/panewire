@@ -2,7 +2,9 @@ package panewire
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"time"
 )
 
@@ -39,8 +41,11 @@ func (s *laneInboxStore) decideSpawnGrant(parent context.Context, nodeID, machin
 	defer tx.Rollback()
 	var requestID, status, payload string
 	err = tx.QueryRowContext(ctx, s.q(`SELECT request_id,status,node_payload FROM spawn_operations WHERE node_id=?`), nodeID).Scan(&requestID, &status, &payload)
-	if err != nil {
+	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
+	}
+	if err != nil {
+		return false, err
 	}
 	var node hubSpawnRequest
 	if json.Unmarshal([]byte(payload), &node) != nil || !node.GrantRequired || node.Machine != machine {

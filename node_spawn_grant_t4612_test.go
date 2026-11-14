@@ -77,7 +77,13 @@ func TestNodeSpawnStartsOnlyWithHubGrant_t4612(t *testing.T) {
 			client, runs := grantNode(t)
 			peer, results, claims := grantPeer(t, client, tc.answer)
 			message := admissionMessage(461201, true)
-			message.StartByMS = time.Now().Add(300 * time.Millisecond).UnixMilli()
+			// The grant case gets a long start_by so a slow runner cannot
+			// turn it into silence; silence needs only a short one.
+			startBy := 5 * time.Second
+			if tc.answer == "silent" {
+				startBy = 300 * time.Millisecond
+			}
+			message.StartByMS = time.Now().Add(startBy).UnixMilli()
 			client.handleHubSpawn(t.Context(), peer, message)
 			result := nextSpawnResult(t, results)
 			if claims.Load() != 1 || runs.Load() != tc.want {

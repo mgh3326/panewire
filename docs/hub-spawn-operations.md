@@ -464,8 +464,12 @@ unsent.
    `deadline_not_started` would be (the table above): with auto placement,
    the next host. A lost fence means the node holds a grant, so the hub keeps
    waiting; past the landing bound the attempt keeps ownership as before
-   (`deadline_exceeded` or `reconciling`). A late node answer for a fenced id
-   is ignored.
+   (`deadline_exceeded`). A late node answer for a fenced id is ignored.
+   The fence is tried only while the request's landing deadline still has
+   room for `start_by` plus the margin. A send or replay closer to the
+   deadline, or past it, takes the earlier path (probe, then
+   `deadline_exceeded` with ownership kept). An ungranted attempt whose node
+   is disconnected stays owned until a replay reaches a connected node.
 
 Grant and fence are one row each in `spawn_attempt_grants`, keyed by node
 request id, inserted with `ON CONFLICT DO NOTHING`. Exactly one of them is
@@ -480,7 +484,9 @@ fingerprints, because `start_by_ms` is not part of the fingerprint.
 |---|---|
 | Grant and fence exclude each other; the grant is idempotent; only the bound machine's grant-required sent attempt is granted | `TestSpawnGrantAndFenceExcludeEachOther_t4612` |
 | An ungranted attempt is fenced and re-placed; a late claim is refused | `TestSpawnUngrantedAttemptIsFencedAndReplaced_t4612` |
-| A granted silent attempt keeps ownership and its reservation, also after a restart | `TestSpawnGrantedSilentAttemptStaysReconciling_t4612` |
+| A granted silent attempt keeps ownership and its reservation, also after a restart | `TestSpawnGrantedSilentAttemptKeepsOwnership_t4612` |
+| A hub restart's replay of a sent, ungranted attempt carries a fresh `start_by` and fences it | `TestSpawnRestartReplayFencesUngrantedAttempt_t4612` |
+| Coordinator placement on a real node: grant-required binding, recorded grant, delivered through the node's read loop | `TestSpawnGrantEndToEndWithRealNode_t4612` |
 | A legacy node gets no `start_by` and is never fenced | `TestSpawnLegacyNodeIsNeverFenced_t4612` |
 | A grant-required binding is not sent to a node without the capability | `TestSpawnGrantRequiredSkipsNodeWithoutCapability_t4612` |
 | A node starts only with a grant; a refusal or silence is journaled as never started, also for replays | `TestNodeSpawnStartsOnlyWithHubGrant_t4612`, `TestNodeSpawnPastStartByIsNotStarted_t4612`, `TestNodeSpawnWithoutStartByNeedsNoGrant_t4612`, `TestNodeSpawnGrantWire_t4612` |
