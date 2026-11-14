@@ -267,6 +267,10 @@ type candResult struct {
 	ok          bool
 	stop        error
 	unreachable bool
+	// undecided marks a stop after which the node may still finish the
+	// spawn (a lost or pending hub answer); the placement verdict is not
+	// this error.
+	undecided bool
 	// quotaRefused marks a candidate the quota gate refused before any SSH.
 	quotaRefused bool
 	rc           int
@@ -1382,6 +1386,7 @@ func (a *App) placeAuto(ctx context.Context, s Spawn, brief string) (bool, map[s
 		if s.placement != nil {
 			s.placement.plan = p
 		}
+		a.emitPlacementTrace(s, "")
 		return nil
 	}
 	if e := replan(); e != nil {
@@ -1412,7 +1417,7 @@ func (a *App) placeAuto(ctx context.Context, s Spawn, brief string) (bool, map[s
 					res.note = "launch_failed"
 				}
 				s.placement.started = false
-				s.placement.execution = placementExecution{}
+				s.placement.execution = PlacementExecution{}
 			}
 		}()
 		if a.PlacementTry != nil && !s.DryRun {
@@ -1451,6 +1456,7 @@ func (a *App) placeAuto(ctx context.Context, s Spawn, brief string) (bool, map[s
 			}
 			pendingFallback = ""
 		}
+		a.emitPlacementTrace(s, c.name)
 		return a.spawnRemote(ctx, s, brief, c, resolveRepo(), false)
 	}
 	spawn := func(c *placeCandidate) candResult {
@@ -1713,6 +1719,9 @@ func (a *App) placeForced(ctx context.Context, s Spawn, brief string) (bool, map
 		}
 	}
 	c := placeCandidate{name: s.Host, cfg: h, wakeable: str(h, "wake") == "panewire", awake: true, eligible: true}
+	// The chosen row is fixed from the start; emitting now leaves a trace even
+	// for refusals that end the request before the spawn attempt below.
+	a.emitPlacementTrace(s, s.Host)
 	// A pinned host is decided too; later auto decisions must see its job.
 	// The count goes in through the gate, so it never lands between another
 	// decision's read and its own count.
@@ -1757,6 +1766,7 @@ func (a *App) placeForced(ctx context.Context, s Spawn, brief string) (bool, map
 		if err != nil {
 			return candResult{stop: err}
 		}
+		a.emitPlacementTrace(s, c.name)
 		return a.spawnRemote(ctx, s, brief, &c, a.localRepo(ctx, s.CWD), true)
 	}
 	res := spawn()

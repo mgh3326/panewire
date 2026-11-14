@@ -57,7 +57,7 @@ type PlacementTerms struct {
 // Free is the product of the terms: the free fraction the hub's floor compares.
 func (t PlacementTerms) Free() float64 { return t.CPU * t.Mem * t.IO * t.Load * t.Jobs }
 
-type placementCandidateRecord struct {
+type PlacementCandidateRecord struct {
 	Host    string   `json:"host"`
 	Outcome string   `json:"outcome"`
 	Reason  string   `json:"reason"`
@@ -65,10 +65,10 @@ type placementCandidateRecord struct {
 	PlacementSignals
 }
 
-// placementExecution is emitted by the executing panewire in its OK receipt.
+// PlacementExecution is emitted by the executing panewire in its OK receipt.
 // The initiator must not guess the model from its own catalog: admission on
 // the destination can resolve a different launch rung.
-type placementExecution struct {
+type PlacementExecution struct {
 	Kind       string `json:"-"`
 	Host       string `json:"chosen_host,omitempty"`
 	Family     string `json:"family,omitempty"`
@@ -81,7 +81,7 @@ type placementExecution struct {
 	AccountKey string `json:"account_key,omitempty"`
 }
 
-type placementRecord struct {
+type PlacementRecord struct {
 	JobID       string                     `json:"job_id"`
 	Attempt     int                        `json:"attempt"`
 	TaskID      int64                      `json:"task_id,omitempty"`
@@ -92,24 +92,28 @@ type placementRecord struct {
 	StateSource string                     `json:"state_source"`
 	Outcome     string                     `json:"outcome"`
 	Reason      string                     `json:"reason"`
-	Candidates  []placementCandidateRecord `json:"candidates"`
-	placementExecution
+	Candidates  []PlacementCandidateRecord `json:"candidates"`
+	PlacementExecution
 }
 
 type placementDecision struct {
 	plan          *placePlan
-	execution     placementExecution
+	execution     PlacementExecution
 	contactedHost string
 	started       bool
 	placed        bool
 	recorded      bool
+	// undecided marks a stop whose outcome the node may still change (a lost
+	// or pending hub answer): the outbox leaves the verdict to the attempt's
+	// terminal result instead of freezing this error.
+	undecided bool
 }
 
 // pendingPlacement is local-only. Old executors may return an OK receipt
 // without execution metadata; resolve their shared job record before posting
 // the immutable payload, including when hk is temporarily unavailable.
 type pendingPlacement struct {
-	Record     placementRecord `json:"record"`
+	Record     PlacementRecord `json:"record"`
 	ResolveJob bool            `json:"resolve_job,omitempty"`
 }
 
@@ -141,7 +145,7 @@ func placementAccount(key string) string {
 	return fmt.Sprintf("account:%x", sum[:8])
 }
 
-func (e placementExecution) receipt() string {
+func (e PlacementExecution) receipt() string {
 	e.AccountKey = placementAccount(e.AccountKey)
 	b, _ := json.Marshal(e)
 	return base64.RawURLEncoding.EncodeToString(b)
@@ -158,12 +162,12 @@ func (d *placementDecision) remoteReceipt(host, out string) {
 		}
 		if !failed {
 			d.started, d.placed = true, true
-			d.execution = placementExecution{Host: host}
+			d.execution = PlacementExecution{Host: host}
 		}
 		for _, word := range strings.Fields(line) {
 			if raw, ok := strings.CutPrefix(word, "placement="); ok {
 				b, err := base64.RawURLEncoding.DecodeString(raw)
-				var e placementExecution
+				var e PlacementExecution
 				if err == nil && json.Unmarshal(b, &e) == nil && e.Host == host && e.Family != "" && (failed || e.PaneID != "") {
 					e.AccountKey = placementAccount(e.AccountKey)
 					d.started = true
@@ -189,8 +193,8 @@ func (a *App) finishPlacement(ctx context.Context, s Spawn, err error) {
 	}
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), placementDeliveryBudget)
 	defer cancel()
-	r := placementRecord{JobID: s.Job, DecidedAt: a.Now().UTC().Format(time.RFC3339Nano), ToolVersion: BuildVersion,
-		Source: "auto", Ranking: "unknown", StateSource: "unknown", Outcome: "refused", Candidates: []placementCandidateRecord{}}
+	r := PlacementRecord{JobID: s.Job, DecidedAt: a.Now().UTC().Format(time.RFC3339Nano), ToolVersion: BuildVersion,
+		Source: "auto", Ranking: "unknown", StateSource: "unknown", Outcome: "refused", Candidates: []PlacementCandidateRecord{}}
 	r.TaskID, _ = strconv.ParseInt(s.Task, 10, 64)
 	r.Profile, r.Role, r.AccountKey = s.Profile, placementRole(s), placementAccount(s.AccountKey)
 	if seat, ok := a.Policy.Profiles[s.Profile]; ok {
@@ -225,7 +229,7 @@ func (a *App) finishPlacement(ctx context.Context, s Spawn, err error) {
 			if signals.PowerSource != "ac" && signals.PowerSource != "battery" {
 				signals.PowerSource = ""
 			}
-			r.Candidates = append(r.Candidates, placementCandidateRecord{Host: c.name, Outcome: outcome, Reason: placementSkipReason(reason), Score: c.score, PlacementSignals: signals})
+			r.Candidates = append(r.Candidates, PlacementCandidateRecord{Host: c.name, Outcome: outcome, Reason: placementSkipReason(reason), Score: c.score, PlacementSignals: signals})
 		}
 	}
 	if len(r.Candidates) == 0 && d.contactedHost != "" {
@@ -233,7 +237,7 @@ func (a *App) finishPlacement(ctx context.Context, s Spawn, err error) {
 		if d.started || d.placed {
 			outcome, reason = "chosen", "available"
 		}
-		r.Candidates = append(r.Candidates, placementCandidateRecord{Host: d.contactedHost, Outcome: outcome, Reason: reason})
+		r.Candidates = append(r.Candidates, PlacementCandidateRecord{Host: d.contactedHost, Outcome: outcome, Reason: reason})
 	}
 	stateReason := ""
 	if a.fleetLog != nil && a.fleetLog.hosts != nil {
@@ -257,7 +261,7 @@ func (a *App) finishPlacement(ctx context.Context, s Spawn, err error) {
 	}
 	if d.execution.Host != "" && (d.started || d.placed) {
 		family, pool, repo, account := r.Family, r.Pool, r.Repo, r.AccountKey
-		r.placementExecution = d.execution
+		r.PlacementExecution = d.execution
 		r.Family = firstNonempty(r.Family, family)
 		r.Pool = firstNonempty(r.Pool, pool)
 		r.Repo = firstNonempty(r.Repo, repo)
@@ -275,6 +279,23 @@ func (a *App) finishPlacement(ctx context.Context, s Spawn, err error) {
 		r.Repo = ""
 	}
 	r.AccountKey = placementAccount(r.AccountKey)
+	if a.PlacementOutbox {
+		// The hub's durable outbox owns this record: the trace carries the
+		// completed payload, which its deliverer posts unchanged when the
+		// attempt's terminal result asks for it. An undecided stop (a lost
+		// or pending hub answer) is no verdict: the node may still finish
+		// the spawn, so the terminal result names the outcome instead.
+		tr := placementTraceFromRecord(r)
+		tr.Record = &r
+		if s.placement.undecided {
+			tr.Outcome, tr.Reason = "", ""
+			tr.Record = nil
+		}
+		if a.PlacementTrace != nil {
+			a.PlacementTrace(tr)
+		}
+		return
+	}
 	p := pendingPlacement{Record: r, ResolveJob: d.placed && d.execution.Family == ""}
 	if e := a.spoolPlacement(&p); e != nil {
 		a.warn("placement record could not be spooled")
@@ -283,10 +304,162 @@ func (a *App) finishPlacement(ctx context.Context, s Spawn, err error) {
 	a.deliverPlacements(ctx)
 }
 
+// PlacementTrace is the bind-time placement snapshot the hub coordinator
+// persists keyed by request and attempt: the candidate ranking plus the
+// pool, repo, family and account the attempt chose. A terminal node result
+// combines it with the execution receipt into the immutable hk placement
+// record, so the trace must survive the App that made the decision.
+type PlacementTrace struct {
+	DecidedAt   string                     `json:"decided_at"`
+	Source      string                     `json:"source"`
+	Ranking     string                     `json:"ranking"`
+	StateSource string                     `json:"state_source"`
+	StateReason string                     `json:"state_reason,omitempty"`
+	Pool        string                     `json:"pool,omitempty"`
+	Repo        string                     `json:"repo,omitempty"`
+	Family      string                     `json:"family,omitempty"`
+	Profile     string                     `json:"profile,omitempty"`
+	Role        string                     `json:"role,omitempty"`
+	TaskID      int64                      `json:"task_id,omitempty"`
+	AccountKey  string                     `json:"account_key,omitempty"`
+	Chosen      string                     `json:"chosen,omitempty"`
+	Candidates  []PlacementCandidateRecord `json:"candidates"`
+	// Outcome and Reason are set only on the final emission, which carries
+	// the record finishPlacement already completed; the outbox posts it as
+	// built instead of re-deriving the verdict.
+	Outcome string `json:"outcome,omitempty"`
+	Reason  string `json:"reason,omitempty"`
+	// Record carries the finished record itself on the final emission: the
+	// trace's flat fields are a lossy projection (no pane/model/version), so
+	// the outbox posts this payload verbatim and never re-derives from it.
+	// An undecided stop carries no Record — its verdict waits for the
+	// attempt's terminal result.
+	Record *PlacementRecord `json:"record,omitempty"`
+}
+
+// emitPlacementTrace reports the decision's current trace to the hub
+// coordinator. chosen names the candidate about to be bound; "" is the
+// plan-ranking emission before any host is tried.
+func (a *App) emitPlacementTrace(s Spawn, chosen string) {
+	if a.PlacementTrace == nil || s.placement == nil {
+		return
+	}
+	a.PlacementTrace(a.buildPlacementTrace(s, chosen))
+}
+
+func (a *App) buildPlacementTrace(s Spawn, chosen string) PlacementTrace {
+	tr := PlacementTrace{
+		DecidedAt:   a.Now().UTC().Format(time.RFC3339Nano),
+		Source:      "auto",
+		Ranking:     "unknown",
+		StateSource: "unknown",
+		Chosen:      chosen,
+		Candidates:  []PlacementCandidateRecord{},
+	}
+	tr.TaskID, _ = strconv.ParseInt(s.Task, 10, 64)
+	tr.Profile, tr.Role, tr.AccountKey = s.Profile, placementRole(s), placementAccount(s.AccountKey)
+	if seat, ok := a.Policy.Profiles[s.Profile]; ok {
+		tr.Family = seat.Family
+	}
+	if s.Host != "auto" {
+		tr.Source, tr.Ranking = "forced", "forced"
+	}
+	d := s.placement
+	if d.plan == nil {
+		tr.Candidates = append(tr.Candidates, selectionCandidates(s.Sel, chosen)...)
+	}
+	if d.plan != nil {
+		tr.Pool, tr.Repo = d.plan.pool, d.plan.repo
+		if tr.Source == "auto" {
+			switch d.plan.ranking() {
+			case "score", "wake":
+				tr.Ranking = d.plan.ranking()
+			case "raw_load":
+				tr.Ranking = "load"
+			}
+		}
+		for _, c := range d.plan.candidates {
+			outcome, reason := "skipped", c.outcome
+			if c.name == chosen {
+				outcome, reason = "chosen", "available"
+			} else if reason == "" {
+				reason = "not_chosen"
+			}
+			signals := c.signals
+			if signals.PowerSource != "ac" && signals.PowerSource != "battery" {
+				signals.PowerSource = ""
+			}
+			tr.Candidates = append(tr.Candidates, PlacementCandidateRecord{Host: c.name, Outcome: outcome, Reason: placementSkipReason(reason), Score: c.score, PlacementSignals: signals})
+		}
+	}
+	if a.fleetLog != nil && a.fleetLog.hosts != nil {
+		tr.StateSource = a.fleetLog.hosts.Source
+		tr.StateReason = a.fleetLog.hosts.Reason
+	}
+	return tr
+}
+
+// placementTraceFromRecord flattens a completed record into the trace shape
+// so the outbox can persist and later post it unchanged.
+func placementTraceFromRecord(r PlacementRecord) PlacementTrace {
+	return PlacementTrace{
+		DecidedAt: r.DecidedAt, Source: r.Source, Ranking: r.Ranking,
+		StateSource: r.StateSource,
+		Pool:        r.Pool, Repo: r.Repo, Family: r.Family, Profile: r.Profile,
+		Role: r.Role, TaskID: r.TaskID, AccountKey: r.AccountKey,
+		Chosen: r.Host, Candidates: r.Candidates,
+		Outcome: r.Outcome, Reason: r.Reason,
+	}
+}
+
+// EnqueuePlacementRecord spools a fully built placement record under its
+// deterministic idempotency name and delivers pending records, reporting
+// whether this record's file left the spool (delivered or quarantined). The
+// hub coordinator's outbox calls it once per attempt; a rewrite of the same
+// name carries an identical payload, and hk answers a reposted job+attempt
+// with 409, which deliverPlacements treats as delivered.
+func (a *App) EnqueuePlacementRecord(ctx context.Context, r PlacementRecord) (delivered bool, err error) {
+	// A placed record that arrived without execution metadata resolves the
+	// shared job record before its first post, as spoolPlacement does.
+	b, err := json.Marshal(pendingPlacement{Record: r, ResolveJob: r.Outcome == "placed" && r.Family == ""})
+	if err != nil {
+		return false, err
+	}
+	dir := filepath.Join(a.stateDir(), "placements")
+	if e := noSymlinks(dir); e != nil {
+		return false, e
+	}
+	if e := os.MkdirAll(dir, 0700); e != nil {
+		return false, e
+	}
+	path := filepath.Join(dir, r.JobID+"."+strconv.Itoa(r.Attempt)+".json")
+	if err := atomicFile(path, b, 0600); err != nil {
+		return false, err
+	}
+	a.deliverPlacements(ctx)
+	_, statErr := os.Stat(path)
+	return os.IsNotExist(statErr), nil
+}
+
+// FlushPlacements delivers every record the spool still holds; the hub calls
+// it so records enqueued before a restart are retried.
+func (a *App) FlushPlacements() {
+	a.flushPlacements()
+}
+
+// PlacementSpooled reports whether a record file still waits in the spool:
+// false means it was delivered or quarantined, so its snapshot can be sealed.
+// Only a confirmed absence proves that — a permission or I/O error leaves
+// the record pending so a later flush retries it.
+func (a *App) PlacementSpooled(job string, attempt int) bool {
+	_, err := os.Stat(filepath.Join(a.stateDir(), "placements", job+"."+strconv.Itoa(attempt)+".json"))
+	return !os.IsNotExist(err)
+}
+
 // selectionCandidates projects a selection's host trace into one candidate row
 // per host. launched says the host named chosen took the job.
-func selectionCandidates(sel map[string]any, chosen string) []placementCandidateRecord {
-	var out []placementCandidateRecord
+func selectionCandidates(sel map[string]any, chosen string) []PlacementCandidateRecord {
+	var out []PlacementCandidateRecord
 	hosts, _ := sel["hosts"].([]any)
 	at, untried := map[string]int{}, map[string]bool{}
 	for _, raw := range hosts {
@@ -303,7 +476,7 @@ func selectionCandidates(sel map[string]any, chosen string) []placementCandidate
 				continue
 			}
 		}
-		row := placementCandidateRecord{Host: name, Outcome: "skipped", Reason: placementSkipReason(str(host, "outcome"))}
+		row := PlacementCandidateRecord{Host: name, Outcome: "skipped", Reason: placementSkipReason(str(host, "outcome"))}
 		// A chosen host carries no refusal, whether or not execution started:
 		// the selection chose it, so "chosen" is never a skip reason.
 		if name == chosen {

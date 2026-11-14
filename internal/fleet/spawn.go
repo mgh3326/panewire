@@ -993,7 +993,7 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 		}
 	}
 	a.stampSelection(&s, a.machine())
-	s.placement.execution = placementExecution{Host: a.machine(), Family: seat.Family, Model: launch.ModelID, Role: placementRole(s), Profile: s.Profile, Pool: firstNonempty(launch.Pool, gatePool(gate)), AccountKey: placementAccount(s.AccountKey)}
+	s.placement.execution = PlacementExecution{Host: a.machine(), Family: seat.Family, Model: launch.ModelID, Role: placementRole(s), Profile: s.Profile, Pool: firstNonempty(launch.Pool, gatePool(gate)), AccountKey: placementAccount(s.AccountKey)}
 	owner := s.Owner
 	if owner == "" {
 		owner = "default"

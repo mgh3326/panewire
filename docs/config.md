@@ -1755,6 +1755,23 @@ receipt. They do not create a second decision. For an older executor, panewire
 resolves the shared hk job record before posting and freezes that payload for
 retries. A successful placement stays `placed` if a later `--wait` fails.
 
+Hub queue-core spawns are the one exception: placement and dispatch are
+separated, so the placing App is gone before the bound node answers. At bind
+the hub persists a placement snapshot — the candidate trace plus the chosen
+host, pool and account — in the `spawn_placement_snapshots` table of its
+durable store, keyed by request id and attempt. When `finishPlacement`
+completes a record, its final emission also carries that finished record, and
+the snapshot keeps it whole — the flat trace fields are only a projection, so
+the outbox posts the record itself rather than re-deriving it. When the
+attempt reaches a terminal result without a finished record (the placing App
+died or restarted first) the hub builds the record from the trace and the
+node's execution metadata and enqueues it under its deterministic
+`job.attempt.json` name in the same placement spool, so one record per
+attempt is retried across hub restarts, a duplicate delivery is an hk 409
+no-op, and permanent refusals are quarantined as below. The dispatch
+scheduler reads the snapshot back by request id and attempt
+(`spawnPlacementSnapshot`).
+
 Contacting a remote host does not count as starting a launch. An executor that
 fails after attempting its launch returns `FAILED placement=` metadata; only
 that evidence or a success receipt marks the host as chosen. A refusal keeps

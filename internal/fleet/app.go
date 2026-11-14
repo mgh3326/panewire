@@ -65,6 +65,18 @@ type App struct {
 	// measurement without waiting; ordinary CLI spawns keep their synchronous
 	// refresh path.
 	ScheduleQuotaRefresh func(machine, pool string, timeout time.Duration)
+	// PlacementTrace is set by the hub coordinator. It receives the
+	// placement decision's candidate trace as each plan is ranked and again
+	// before each candidate's hub bind, so the hub can persist the latest
+	// snapshot keyed by request and attempt for its durable placement-record
+	// outbox. Nil does nothing.
+	PlacementTrace func(PlacementTrace)
+	// PlacementOutbox moves hk placement-record delivery to the caller's
+	// durable outbox: finishPlacement emits the completed record through
+	// PlacementTrace instead of spooling to this host's placement spool. The
+	// hub coordinator sets it for queue-core spawns, whose record is produced
+	// from the persisted snapshot when the attempt reaches a terminal result.
+	PlacementOutbox bool
 	// SharedLatest reads one account's latest stored quota reading for the
 	// admission gate; nil reads handoffkeep (admission_native.go).
 	SharedLatest func(context.Context, string) (shared.Latest, error)
