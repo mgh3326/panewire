@@ -138,6 +138,10 @@ an unknown composer or a failed screen read refuses the close as `pane-changed`.
 The second composer read immediately precedes `herdr pane close`; an unavoidable
 read-to-close gap remains, as in the ssh reap path.
 
+The hub sends `question_job` only to a node that advertised
+`pane_close_question_v1`; any other node gets the older call, because a node
+that predates the field decodes the arguments strictly and would refuse it.
+
 With `question_job`, the node makes one more decision at that same point, from
 the node's own files rather than from a copy another process wrote earlier: it
 reads the job's ledger for the pane and the start of its current attempt, then

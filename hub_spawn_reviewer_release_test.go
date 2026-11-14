@@ -153,6 +153,9 @@ func TestReviewerRelease(t *testing.T) {
 			if closeArgs["pane_id"] != roleHeldPane || closeArgs["name"] != "test-job" || closeArgs["cwd"] != cwd || closeArgs["agent_status"] != tc.pane.AgentStatus {
 				t.Fatalf("close args %v", closeArgs)
 			}
+			if closeArgs["question_job"] != "test-job" {
+				t.Fatalf("close args %v lack the job id an advertising node needs", closeArgs)
+			}
 			if mark["job"] != "test-job" || mark["pane_id"] != roleHeldPane || mark["label"] != "test-job" {
 				t.Fatalf("mark lost args %v", mark)
 			}
@@ -203,5 +206,26 @@ func TestReviewerReleaseKeepsAnOpenQuestion(t *testing.T) {
 	}
 	if owner, _, _, _ := hub.inbox.store.spawnRoleOwner(t.Context(), reviewerReleaseKey(reviewerRole)); owner != held.Request.RequestID {
 		t.Fatalf("owner=%s, want the holder still to own the key", owner)
+	}
+}
+
+// A node that predates pane_close_question_v1 must keep the older close: the
+// hub omits the field, whose strict decoder would otherwise refuse the whole
+// call and hold every reviewer for the rollback window (hk 4658).
+func TestReviewerReleaseOmitsQuestionJobForAnOldNode(t *testing.T) {
+	const cwd = "/work/project.test-job"
+	hub, server, _, held := reviewerReleaseHub(t, reviewerRole, "succeeded", hubSpawnOutcome{RC: 0, Host: "machine-a", Pane: roleHeldPane})
+	hub.now = func() time.Time { return held.Deadline.Add(11 * time.Minute) }
+	node := startUnworkedNode(t, t14NodeWithSpawnV2(t, hub, server, true, false), unworkedReplies(nodeAgentRow{PaneID: roleHeldPane, Name: "test-job", AgentStatus: "done", Agent: "claude", Cwd: cwd}, unworkedLedger(0)))
+	result := t14Result(t, t14HTTPAsync(t, http.MethodPost, server.URL+"/v1/spawns", t14OperatorToken, reviewerReleaseRequest(reviewerRole, true)))
+	if result.status != http.StatusAccepted {
+		t.Fatalf("not released for an old node: status=%d body=%s", result.status, result.body)
+	}
+	var closeArgs map[string]any
+	if err := json.Unmarshal(node.args["pane.close"], &closeArgs); err != nil {
+		t.Fatal(err)
+	}
+	if _, present := closeArgs["question_job"]; present {
+		t.Fatalf("close args %v carry question_job for a node that cannot decode it", closeArgs)
 	}
 }

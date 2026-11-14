@@ -1916,8 +1916,13 @@ func (client *HubClient) serve(ctx context.Context, connection *websocket.Conn) 
 // capabilities.
 const defaultHubHelloAckTimeout = 5 * time.Second
 
+// hubCapabilityCloseQuestion is advertised by a node whose pane.close decodes
+// question_job. The hub omits the field for any other node, whose strict
+// decoder would refuse the whole call (hk 4658).
+const hubCapabilityCloseQuestion = "pane_close_question_v1"
+
 // hubSpawnCapabilities is what an upgraded node advertises in hello.
-var hubSpawnCapabilities = []string{"spawn_v2", "spawn_ops_v1", hubCapabilityApplied}
+var hubSpawnCapabilities = []string{"spawn_v2", "spawn_ops_v1", hubCapabilityCloseQuestion, hubCapabilityApplied}
 
 func (client *HubClient) helloAckTimeoutOrDefault() time.Duration {
 	if client.helloAckTimeout > 0 {

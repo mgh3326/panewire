@@ -87,6 +87,11 @@ func (h *HubServer) closeHeldPane(ctx context.Context, holder hubSpawnTask, name
 		return false, "capture_failed"
 	}
 	var closed nodePaneCloseResult
+	if questionJob != "" && !h.nodeHasCapability(machine, hubCapabilityCloseQuestion) {
+		// An older node decodes pane.close strictly and would refuse the whole
+		// call, so it keeps the pre-question close until it is upgraded.
+		questionJob = ""
+	}
 	closeArgs := nodePaneCloseArgs{PaneID: row.PaneID, Name: name, AgentStatus: row.AgentStatus, Cwd: row.Cwd, AllowUnnamed: row.Name == "", QuestionJob: questionJob}
 	if !h.nodeCall(ctx, machine, nodeCommandPaneClose, closeArgs, spawnHeldPaneActWait, &closed) {
 		return false, "close_unreadable"
@@ -98,6 +103,15 @@ func (h *HubServer) closeHeldPane(ctx context.Context, holder hubSpawnTask, name
 		return false, "question_open"
 	}
 	return false, "pane_changed"
+}
+
+// nodeHasCapability reports that machine's connected node advertised capability
+// at its hello. A node that is absent, reconnecting, or older has not.
+func (h *HubServer) nodeHasCapability(machine, capability string) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	record := h.nodes[machine]
+	return record != nil && record.agent != nil && record.capabilities[capability]
 }
 
 // releaseUnworkedSpawn closes the empty pane of a failed-before-brief holder
