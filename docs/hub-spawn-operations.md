@@ -49,11 +49,14 @@ host, its refusal remains in the durable candidate trace while the request
 stays accepted; the attempt's one record is posted when it ends. The hub
 logs a changed refresh failure with its machine, pool and reason; repeated
 identical failures are not logged on every retry. A request that times out
-while parked on a refresh names that machine and pool and the last failure
-recorded for them in its outcome and fix text (`quota_refresh` on the saved
-result), instead of the queue-starved cause: the spawn queue never held it. The
-request's refresh keys and the last failure per key are stored in the hub
-database, so both survive a restart; a successful refresh clears its entry.
+while parked on a refresh names that machine and pool and the last finished
+attempt there in its outcome and fix text (`quota_refresh` on the saved
+result), instead of the queue-starved cause: the spawn queue never held it.
+That attempt is reported as a failure with its reason, as finished without one,
+or as not yet finished, so the timeout never blames a measurement the hub did
+not see fail. The request's refresh keys and the last attempt per key are
+stored in the hub database, so both survive a restart; a pass that ends without
+parking on a refresh clears the request's link.
 
 Refreshes coalesce by machine and pool. At most four run at once, with at most
 one per node; waiting keys are considered in arrival order while busy nodes are

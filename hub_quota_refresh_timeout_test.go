@@ -134,12 +134,62 @@ func TestHubSpawnTimeoutNamesUnfinishedQuotaRefresh_t4600(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"machine-a", "claude", "no refresh attempt finished"} {
+	for _, want := range []string{"machine-a", "claude", "had not finished a refresh attempt"} {
 		if !strings.Contains(final.Outcome.Fix, want) {
 			t.Fatalf("timeout fix %q does not say %q", final.Outcome.Fix, want)
 		}
 	}
 	if strings.Contains(final.Outcome.Fix, "hub spawn worker occupancy") {
 		t.Fatalf("timeout fix %q keeps the queue-starved cause", final.Outcome.Fix)
+	}
+}
+
+// A finished measurement must not be reported as a failure: the timeout names
+// that attempt as finished, not a failure the hub never saw.
+func TestHubSpawnTimeoutNamesFinishedQuotaRefresh_t4600(t *testing.T) {
+	retryHK(t)
+	logs := &controlPlaneLogCapture{}
+	hub := timeoutRefreshHub(t, filepath.Join(t.TempDir(), "inbox.sqlite3"), logs)
+	server := httptest.NewServer(hub.Handler())
+	t.Cleanup(server.Close)
+	t14NamedNode(t, hub, server, "machine-a", true, true)
+	request := durableSpawnRequest()
+	task, _, err := hub.inbox.store.claimSpawn(t.Context(), request, "test-job", "parent", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	hub.executeSpawnTask(t.Context(), task)
+	parked, err := hub.inbox.store.spawnTask(t.Context(), request.RequestID)
+	if err != nil || parked.Status != "accepted" || parked.Node != nil {
+		t.Fatalf("the pending pass must leave the request accepted: status=%s node=%v err=%v", parked.Status, parked.Node, err)
+	}
+	if err := hub.inbox.store.recordQuotaRefreshAttempt(t.Context(), "machine-a", "claude", "", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	parked.Deadline = time.Now().Add(-time.Second)
+	hub.executeSpawnTask(t.Context(), parked)
+	final, err := hub.inbox.store.spawnTask(t.Context(), request.RequestID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"machine-a", "claude", "last attempt finished"} {
+		if !strings.Contains(final.Outcome.Fix, want) {
+			t.Fatalf("timeout fix %q does not say %q", final.Outcome.Fix, want)
+		}
+	}
+	if strings.Contains(final.Outcome.Fix, "failed") || strings.Contains(final.Outcome.Fix, "hub spawn worker occupancy") {
+		t.Fatalf("timeout fix %q blames a failure or the queue", final.Outcome.Fix)
+	}
+	raw, err := json.Marshal(final.Outcome)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var outcome map[string]any
+	if err := json.Unmarshal(raw, &outcome); err != nil {
+		t.Fatal(err)
+	}
+	refresh, _ := outcome["quota_refresh"].(map[string]any)
+	if refresh["machine"] != "machine-a" || refresh["pool"] != "claude" || refresh["reason"] != nil {
+		t.Fatalf("outcome %s does not name the finished attempt", raw)
 	}
 }
