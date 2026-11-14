@@ -105,6 +105,8 @@ func (s *laneInboxStore) ensureSpawnTasks() error {
 		`CREATE TABLE IF NOT EXISTS spawn_operations (request_id TEXT PRIMARY KEY,job TEXT NOT NULL,owner TEXT NOT NULL,fingerprint TEXT NOT NULL,payload TEXT NOT NULL,status TEXT NOT NULL,created_ms BIGINT NOT NULL,deadline_ms BIGINT NOT NULL,node_id TEXT UNIQUE,node_payload TEXT NOT NULL DEFAULT '',result TEXT NOT NULL DEFAULT '{}',trace_recorded INTEGER NOT NULL DEFAULT 0,last_run_ms BIGINT NOT NULL DEFAULT 0,attempt INTEGER NOT NULL DEFAULT 1)`,
 		`CREATE TABLE IF NOT EXISTS spawn_reservations (job TEXT PRIMARY KEY,request_id TEXT NOT NULL UNIQUE,task_role TEXT UNIQUE)`,
 		`CREATE TABLE IF NOT EXISTS spawn_notifications (event_id TEXT PRIMARY KEY,request_id TEXT NOT NULL,job TEXT NOT NULL,owner TEXT NOT NULL,result TEXT NOT NULL,created_ms BIGINT NOT NULL,delivered INTEGER NOT NULL DEFAULT 0,telemetry_recorded INTEGER NOT NULL DEFAULT 0)`,
+		spawnAttemptGrantsTable,
+		spawnAttemptStartByTable,
 		`CREATE TABLE IF NOT EXISTS spawn_placement_snapshots (request_id TEXT NOT NULL,attempt INTEGER NOT NULL,payload TEXT NOT NULL,recorded INTEGER NOT NULL DEFAULT 0,delivery TEXT NOT NULL DEFAULT '',PRIMARY KEY(request_id,attempt))`,
 		`CREATE TABLE IF NOT EXISTS quota_refresh_attempts (machine TEXT NOT NULL,pool TEXT NOT NULL,outcome TEXT NOT NULL,seen_ms BIGINT NOT NULL,PRIMARY KEY(machine,pool))`,
 	} {
@@ -298,7 +300,7 @@ func (s *laneInboxStore) bindSpawn(parent context.Context, id string, attempt in
 	// on a bound row that a restart would not count (restorePlacementCounts).
 	// A new bound attempt is unclaimed: a claim an earlier attempt left on the
 	// row does not describe this placement.
-	_, err = s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET node_id=?,node_payload=?,status='bound',placed_ms=?,claimed_ms=0,refresh_waits='[]' WHERE request_id=? AND attempt=? AND node_id IS NULL AND status='accepted' AND (claimed_host='' OR claimed_host=?)`), node.RequestID, string(raw), now.UnixMilli(), id, attempt, node.Machine)
+	_, err = s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET node_id=?,node_payload=?,status=?,placed_ms=?,claimed_ms=0,refresh_waits='[]' WHERE request_id=? AND attempt=? AND node_id IS NULL AND status='accepted' AND (claimed_host='' OR claimed_host=?)`), node.RequestID, string(raw), spawnStoredStatus("bound", &node), now.UnixMilli(), id, attempt, node.Machine)
 	if err != nil {
 		return hubSpawnTask{}, err
 	}
@@ -324,7 +326,7 @@ func (s *laneInboxStore) beginSpawnSend(parent context.Context, task hubSpawnTas
 	}
 	ctx, done := s.op(parent)
 	defer done()
-	result, err := s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET status=CASE WHEN status='bound' THEN 'dispatching' ELSE status END WHERE request_id=? AND attempt=? AND node_id=? AND status=? AND status IN ('bound','dispatching','reconciling','deadline_exceeded')`), task.Request.RequestID, task.Attempt, task.Node.RequestID, task.Status)
+	result, err := s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET status=CASE WHEN status IN ('bound','bound_grant') THEN ? ELSE status END WHERE request_id=? AND attempt=? AND node_id=? AND status=? AND status IN ('bound','dispatching','reconciling','deadline_exceeded','bound_grant','dispatching_grant','reconciling_grant','deadline_exceeded_grant')`), spawnStoredStatus("dispatching", task.Node), task.Request.RequestID, task.Attempt, task.Node.RequestID, spawnStoredStatus(task.Status, task.Node))
 	if err != nil {
 		return false, err
 	}
@@ -351,7 +353,7 @@ func (s *laneInboxStore) completeSpawn(parent context.Context, task hubSpawnTask
 		if err = tx.QueryRowContext(ctx, s.q(`SELECT node_id,status FROM spawn_operations WHERE request_id=? AND attempt=?`), task.Request.RequestID, task.Attempt).Scan(&node, &currentStatus); err != nil {
 			return false, err
 		}
-		outcome.Retryable = !node.Valid || currentStatus == "bound" || outcome.NodeResult && outcome.Retryable
+		outcome.Retryable = !node.Valid || spawnLogicalStatus(currentStatus) == "bound" || outcome.NodeResult && outcome.Retryable
 	}
 	outcome.Retryable = outcome.Retryable && spawnRefusalReplayable(outcome.Reason)
 	status := spawnOutcomeStatus(outcome)
@@ -366,7 +368,8 @@ func (s *laneInboxStore) completeSpawn(parent context.Context, task hubSpawnTask
 	if task.Node != nil {
 		nodeID = task.Node.RequestID
 	}
-	result, err := tx.ExecContext(ctx, s.q(`UPDATE spawn_operations SET status=?,result=? WHERE request_id=? AND attempt=? AND status IN ('accepted','bound','dispatching','reconciling','deadline_exceeded') AND status<>? AND NOT (status='deadline_exceeded' AND ?='reconciling') AND ((?='' AND node_id IS NULL) OR node_id=?) AND (? NOT IN ('accepted','bound') OR status=?) AND (node_id IS NULL OR status='bound' OR ?<>'timeout' OR ?<>'retryable' OR ?)`), status, string(raw), task.Request.RequestID, task.Attempt, status, status, nodeID, nodeID, task.Status, task.Status, outcome.Reason, status, outcome.NodeResult)
+	stored := spawnStoredStatus(status, task.Node)
+	result, err := tx.ExecContext(ctx, s.q(`UPDATE spawn_operations SET status=?,result=? WHERE request_id=? AND attempt=? AND status IN ('accepted','bound','dispatching','reconciling','deadline_exceeded','bound_grant','dispatching_grant','reconciling_grant','deadline_exceeded_grant') AND status<>? AND NOT (status IN ('deadline_exceeded','deadline_exceeded_grant') AND ?='reconciling') AND ((?='' AND node_id IS NULL) OR node_id=?) AND (? NOT IN ('accepted','bound') OR status=?) AND (node_id IS NULL OR status IN ('bound','bound_grant') OR ?<>'timeout' OR ?<>'retryable' OR ?)`), stored, string(raw), task.Request.RequestID, task.Attempt, stored, status, nodeID, nodeID, task.Status, spawnStoredStatus(task.Status, task.Node), outcome.Reason, status, outcome.NodeResult)
 	if err != nil {
 		return false, err
 	}
@@ -416,6 +419,8 @@ func scanSpawnTask(row interface{ Scan(...any) error }) (hubSpawnTask, error) {
 	if err != nil {
 		return task, err
 	}
+	stored := task.Status
+	task.Status = spawnLogicalStatus(stored)
 	task.Created = time.UnixMilli(created)
 	task.Deadline = time.UnixMilli(deadline)
 	if lastRun > 0 {
@@ -431,6 +436,12 @@ func scanSpawnTask(row interface{ Scan(...any) error }) (hubSpawnTask, error) {
 		task.Node = &hubSpawnRequest{}
 		if err = json.Unmarshal([]byte(node), task.Node); err != nil {
 			return task, err
+		}
+		// Provenance is the stored status, not the payload flag: a row an older
+		// hub moved to a plain status may have gone out with no start_by, so
+		// it is never treated as grant-required again.
+		if spawnLogicalStatus(stored) == stored {
+			task.Node.GrantRequired = false
 		}
 	}
 	if err = json.Unmarshal([]byte(result), &task.Outcome); err != nil {
@@ -465,7 +476,7 @@ func (s *laneInboxStore) unbindRefusedSpawn(parent context.Context, task hubSpaw
 	}
 	ctx, done := s.op(parent)
 	defer done()
-	result, err := s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET node_id=NULL,node_payload='',status='accepted',exclusions=?,claimed_host=CASE WHEN ?='' THEN claimed_host ELSE ? END,result=CASE WHEN ?='' THEN result ELSE ? END WHERE request_id=? AND attempt=? AND node_id=? AND status=? AND (claimed_host='' OR ?='' OR claimed_host=?)`), string(raw), claimedHost, claimedHost, claimedResult, claimedResult, task.Request.RequestID, task.Attempt, task.Node.RequestID, task.Status, claimedHost, claimedHost)
+	result, err := s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET node_id=NULL,node_payload='',status='accepted',exclusions=?,claimed_host=CASE WHEN ?='' THEN claimed_host ELSE ? END,result=CASE WHEN ?='' THEN result ELSE ? END WHERE request_id=? AND attempt=? AND node_id=? AND status=? AND (claimed_host='' OR ?='' OR claimed_host=?)`), string(raw), claimedHost, claimedHost, claimedResult, claimedResult, task.Request.RequestID, task.Attempt, task.Node.RequestID, spawnStoredStatus(task.Status, task.Node), claimedHost, claimedHost)
 	if err != nil {
 		return hubSpawnTask{}, err
 	}
@@ -483,7 +494,7 @@ func (s *laneInboxStore) unbindUnsentSpawn(parent context.Context, id string, at
 func (s *laneInboxStore) unbindSpawn(parent context.Context, id string, attempt int, nodeID, status string) (hubSpawnTask, error) {
 	ctx, done := s.op(parent)
 	defer done()
-	result, err := s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET node_id=NULL,node_payload='',status='accepted' WHERE request_id=? AND attempt=? AND node_id=? AND status=?`), id, attempt, nodeID, status)
+	result, err := s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET node_id=NULL,node_payload='',status='accepted' WHERE request_id=? AND attempt=? AND node_id=? AND status IN (?,?)`), id, attempt, nodeID, status, status+spawnGrantStatusSuffix)
 	if err != nil {
 		return hubSpawnTask{}, err
 	}
@@ -551,7 +562,7 @@ func (s *laneInboxStore) markSpawnClaimed(parent context.Context, job string, no
 func (s *laneInboxStore) boundSpawnsSince(parent context.Context, since time.Time) ([]hubSpawnTask, error) {
 	ctx, done := s.op(parent)
 	defer done()
-	rows, err := s.db.QueryContext(ctx, s.q(`SELECT `+spawnTaskColumns+` FROM spawn_operations WHERE node_id IS NOT NULL AND placed_ms>=? AND claimed_ms=0 AND (status IN ('bound','dispatching','reconciling','succeeded') OR status='deadline_exceeded') ORDER BY placed_ms`), since.UnixMilli())
+	rows, err := s.db.QueryContext(ctx, s.q(`SELECT `+spawnTaskColumns+` FROM spawn_operations WHERE node_id IS NOT NULL AND placed_ms>=? AND claimed_ms=0 AND (status IN ('bound','dispatching','reconciling','succeeded','bound_grant','dispatching_grant','reconciling_grant','deadline_exceeded_grant') OR status='deadline_exceeded') ORDER BY placed_ms`), since.UnixMilli())
 	if err != nil {
 		return nil, err
 	}
@@ -573,11 +584,11 @@ func (s *laneInboxStore) boundSpawnsSince(parent context.Context, since time.Tim
 func (s *laneInboxStore) pendingSpawns(parent context.Context, now time.Time) ([]hubSpawnTask, error) {
 	ctx, done := s.op(parent)
 	defer done()
-	tasks, err := s.queryPendingSpawns(ctx, `status IN ('accepted','bound','dispatching','reconciling') AND payload NOT LIKE '%"start_conditions":%' ORDER BY last_run_ms,created_ms LIMIT 32`)
+	tasks, err := s.queryPendingSpawns(ctx, `status IN ('accepted','bound','dispatching','reconciling','bound_grant','dispatching_grant','reconciling_grant') AND payload NOT LIKE '%"start_conditions":%' ORDER BY last_run_ms,created_ms LIMIT 32`)
 	if err != nil {
 		return nil, err
 	}
-	stale, err := s.queryPendingSpawns(ctx, `status='deadline_exceeded' AND payload NOT LIKE '%"start_conditions":%' ORDER BY last_run_ms,created_ms LIMIT 256`)
+	stale, err := s.queryPendingSpawns(ctx, `status IN ('deadline_exceeded','deadline_exceeded_grant') AND payload NOT LIKE '%"start_conditions":%' ORDER BY last_run_ms,created_ms LIMIT 256`)
 	if err != nil {
 		return nil, err
 	}
@@ -596,11 +607,11 @@ func (s *laneInboxStore) pendingSpawns(parent context.Context, now time.Time) ([
 func (s *laneInboxStore) pendingStartConditionSpawns(parent context.Context, now time.Time) ([]hubSpawnTask, error) {
 	ctx, done := s.op(parent)
 	defer done()
-	tasks, err := s.queryPendingSpawns(ctx, `status IN ('accepted','bound','dispatching','reconciling') AND payload LIKE '%"start_conditions":%' ORDER BY last_run_ms,created_ms LIMIT 32`)
+	tasks, err := s.queryPendingSpawns(ctx, `status IN ('accepted','bound','dispatching','reconciling','bound_grant','dispatching_grant','reconciling_grant') AND payload LIKE '%"start_conditions":%' ORDER BY last_run_ms,created_ms LIMIT 32`)
 	if err != nil {
 		return nil, err
 	}
-	stale, err := s.queryPendingSpawns(ctx, `status='deadline_exceeded' AND payload LIKE '%"start_conditions":%' ORDER BY last_run_ms,created_ms LIMIT 256`)
+	stale, err := s.queryPendingSpawns(ctx, `status IN ('deadline_exceeded','deadline_exceeded_grant') AND payload LIKE '%"start_conditions":%' ORDER BY last_run_ms,created_ms LIMIT 256`)
 	if err != nil {
 		return nil, err
 	}
@@ -642,7 +653,7 @@ type spawnScanPosition struct {
 func (s *laneInboxStore) pendingSpawnPage(parent context.Context, after spawnScanPosition) ([]hubSpawnTask, spawnScanPosition, error) {
 	ctx, done := s.op(parent)
 	defer done()
-	query := `SELECT ` + spawnTaskColumns + ` FROM spawn_operations WHERE status IN ('accepted','bound','dispatching','reconciling')`
+	query := `SELECT ` + spawnTaskColumns + ` FROM spawn_operations WHERE status IN ('accepted','bound','dispatching','reconciling','bound_grant','dispatching_grant','reconciling_grant')`
 	var args []any
 	if after.valid {
 		query += ` AND (last_run_ms>? OR (last_run_ms=? AND (created_ms>? OR (created_ms=? AND request_id>?))))`
@@ -722,6 +733,7 @@ func (s *laneInboxStore) spawnRoleOwner(parent context.Context, roleKey string) 
 	ctx, done := s.op(parent)
 	defer done()
 	err = s.db.QueryRowContext(ctx, s.q(`SELECT o.request_id,o.job,o.status FROM spawn_reservations r JOIN spawn_operations o ON r.request_id=o.request_id WHERE r.task_role=?`), roleKey).Scan(&id, &job, &status)
+	status = spawnLogicalStatus(status)
 	return
 }
 
@@ -817,7 +829,7 @@ func spawnOutcomeStatus(outcome hubSpawnOutcome) string {
 func (s *laneInboxStore) resumeUndispatchedSpawn(parent context.Context, task hubSpawnTask) (hubSpawnTask, error) {
 	ctx, done := s.op(parent)
 	defer done()
-	_, err := s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET status='accepted' WHERE request_id=? AND attempt=? AND node_id IS NULL AND status='reconciling'`), task.Request.RequestID, task.Attempt)
+	_, err := s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET status='accepted' WHERE request_id=? AND attempt=? AND node_id IS NULL AND status IN ('reconciling','reconciling_grant')`), task.Request.RequestID, task.Attempt)
 	if err != nil {
 		return task, err
 	}

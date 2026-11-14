@@ -178,6 +178,7 @@ func (s *laneInboxStore) pendingPlacementSnapshots(parent context.Context) ([]pe
 		if err := rows.Scan(&row.RequestID, &row.Attempt, &row.Job, &row.Status, &row.CurrentAttempt, &row.Payload, &row.Delivery); err != nil {
 			return nil, err
 		}
+		row.Status = spawnLogicalStatus(row.Status)
 		out = append(out, row)
 	}
 	return out, rows.Err()

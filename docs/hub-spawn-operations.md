@@ -458,7 +458,162 @@ not-started attestation. The hub settles on the durable answer:
 When the landing wait ends, the dispatching worker replays the same request id
 once and waits up to 5 s (`spawnNotStartedProbe`) before writing
 `deadline_exceeded`. Past the deadline a node never launches a request, so the
-replay cannot start a second one. The wire and journal formats are unchanged.
+replay cannot start a second one. For a grant-required attempt, see [Start proof](#start-proof).
+
+### Start proof
+
+A request the hub sends to a node that advertises `spawn_grant_v1` is
+grant-required (hk 4612; design `hub-owned-spawn-queue` §3 rule 6). The flag
+is fixed when the attempt is bound and stored with it (`grant_required` in
+the node payload). The hub never sends a grant-required attempt to a node
+that stopped advertising the capability; the binding goes back to placement
+unsent.
+
+1. Every send of the attempt, including a replay after a hub restart, carries
+   `start_by_ms` set to the send time plus `SpawnStartBy` (default 60 s).
+2. Before it claims its journal row, the node sends
+   `{"type":"job.spawn.claim","request_id":<node request id>}` and waits until
+   `start_by` for `{"type":"job.spawn.grant","request_id":…,"granted":bool}`.
+   The node calls no checkout, brief fetch or engine before the grant.
+3. The hub grants only the current sent attempt (`dispatching`,
+   `reconciling` or `deadline_exceeded`) bound to the asking machine. It
+   commits the grant before it answers, and the grant is idempotent for that
+   id. Anything else is refused.
+4. A refusal, silence until `start_by`, a lost connection, or a frame first
+   read after `start_by` makes the node journal the request as completed with
+   `rc=124 stage=claim reason=deadline_not_started`. A later copy of the frame
+   gets that answer and never starts.
+5. At `start_by` plus `SpawnStartByMargin` (default 30 s) after a send, the
+   hub tries to fence the attempt. A won fence is settled as the node's own
+   `deadline_not_started` would be (the table above): with auto placement,
+   the next host. A lost fence means the node holds a grant, so the hub keeps
+   waiting; past the landing bound the attempt keeps ownership as before
+   (`deadline_exceeded`). A late node answer for a fenced id is ignored.
+   The fence is tried only while the request's landing deadline still has
+   room for `start_by` plus the margin. A send or replay closer to the
+   deadline, or past it, takes the earlier path (probe, then
+   `deadline_exceeded` with ownership kept). An ungranted attempt whose node
+   is disconnected stays owned until a replay reaches a connected node.
+   The fence is armed when the frame has been written, and a store error
+   while fencing is retried with backoff (1 s doubling to 30 s); only a
+   recorded grant stops the retries. The node's grant wait also ends at the
+   request deadline and when its hub connection ends, and a grant read at or
+   after `start_by` is not taken.
+6. A replay of a sent attempt whose fence was already committed (a hub
+   stopped between fence and settlement) is settled as fenced without being
+   sent again. The hub records the latest `start_by_ms` it sends for each
+   attempt (`spawn_attempt_start_by`, written before the frame leaves). A
+   replay that finds that `start_by` plus the margin already passed fences
+   the attempt before it sends again. A short-lived replay, such as a
+   recovery reprobe whose context ends long before its own fence timer,
+   therefore still fences an ungranted attempt.
+
+#### Stored statuses that older hubs do not know
+
+A grant-required attempt is stored under its own status values from the
+moment it is bound: `bound_grant`, `dispatching_grant`, `reconciling_grant`
+and `deadline_exceeded_grant` refine `bound`, `dispatching`, `reconciling`
+and `deadline_exceeded`. Every read maps them
+back, so code, `GET /v1/spawns/<id>`, `spawn --wait`, spawn notices and every
+other external surface show only the existing value. Clients learn no new
+state here (hk 4659 is where they would).
+
+A hub older than the start proof (checked against v0.0.404, 54345a76) lists
+none of these values in any `spawn_operations` status query:
+
+| Older-hub query (v0.0.404) | What it does with a `*_grant` row |
+|---|---|
+| Coordinator replay, `status IN ('accepted','bound','dispatching','reconciling')` (`hub_spawn_task_store.go:576`, `:599`) | ignored: never replayed, so no frame without `start_by_ms` |
+| Stale-deadline replay, `status='deadline_exceeded'` (`:580`, `:603`) | ignored |
+| Startup and orphan sweep, `status IN ('accepted','bound','dispatching','reconciling')` (`:645`) | ignored: never swept |
+| Placement recovery, `status IN ('bound','dispatching','reconciling','succeeded') OR status='deadline_exceeded'` (`:554`) | ignored |
+| Outcome write, `status IN ('accepted','bound','dispatching','reconciling','deadline_exceeded')` (`:369`) | matches no row: never mis-terminal |
+| Live view, `status IN ('accepted','bound','dispatching') OR status='succeeded'` (`hub_spawn_live.go:92`) | not listed |
+| Role release, `status IN ('succeeded','failed')` (`:783`, `:792`) | never released: reservation and role kept |
+| Placement record seal (`spawnAttemptTerminal`) | not terminal: record kept pending |
+| Send, unbind, retry and reconcile transitions, `status=?` or literal old statuses (`:327`, `:468`, `:486`, `:702`, `:820`) | never match: they take a status the older hub read, and it never reads a `*_grant` row through the queries above |
+| Bind and first send, `status='accepted'` → `bound`, then `bound` → `dispatching` (`:301`, `:327`) | a `bound_grant` row is never sent by the older hub |
+| Reviewer quota successors (`quotaSuccessorSpawns`, `spawnMayStillRun`) | read, but skipped as not running: see rollback step 1 |
+| Staged and retryable sweeps (`:217`, `:237`, `:271`, `:744`, `:765`) | not listed |
+| Role owner lookup (`:724`) | returns the raw value; a role conflict reply from the older hub can name `dispatching_grant` |
+
+The stored status is also the provenance. A row whose payload says
+`grant_required` but whose status is plain was bound or sent by an older hub
+(only a hub before this suffix existed could leave one), so its frame may have
+had no `start_by_ms`. Such a row is read as not grant-required: no
+`start_by_ms`, no grant, no fence, and every later write keeps the plain
+status. The payload flag alone never makes a row fenceable.
+
+An older hub therefore holds such an attempt, failing closed. It never sends
+a frame without `start_by_ms` for it, so any frame a node ever got for a
+grant-required attempt carries `start_by_ms` and waits for the grant. That is
+what lets any later hub, including after an ordinary restart, fence a silent,
+ungranted attempt.
+
+#### Rolling the hub back past this change, and forward again
+
+An older hub's status-filtered queries skip `*_grant` rows (the table above),
+so it never starts one without a grant. Other older-hub paths look a row up
+by job or id and then read its status: `spawnStatusActive` (ladder
+`escalate-author` retries), `spawnMayStillRun` (reviewer quota successors)
+and `replaceQuotaStopped` (quota hand-offs). They would misread a `*_grant`
+row as not running. So an older hub starts only once no `*_grant` row is
+left. A rollback is a quiesced drain:
+
+1. Restart the newer hub with `--spawn-grant-drain` (a hub flag, read at
+   startup). While it is set, the hub:
+   - binds no new grant-required attempt. Placement goes on, and a node with
+     the grant capability gets a plain binding and a frame with no
+     `start_by_ms`, as a node without the capability does.
+   - starts no quota hand-off. A `quota_stop` is logged as
+     `hub quota hand-off skipped while draining grant rows` and gets no
+     successor.
+   The `*_grant` rows already there go on as before: they are granted,
+   fenced or settled from their nodes' answers.
+2. Wait until no `*_grant` row is left:
+
+   ```sql
+   SELECT count(*) FROM spawn_operations WHERE status LIKE '%\_grant' ESCAPE '\';
+   ```
+
+   Run it with `sqlite3 <inbox store>` or `psql`. Every hub start also logs it,
+   so a rollout script can gate on the line
+   `hub spawn grant rows grant_rows=<n> spawn_grant_drain=<bool>`.
+3. Only at 0, stop the newer hub. Then remove `--spawn-grant-drain` from the
+   hub's command line before the older binary starts: v0.0.404 does not know
+   the flag and refuses to start (`invalid hub flags`), and with
+   `Restart=always` the unit would restart-loop. Under systemd, edit
+   `ExecStart` in the unit (or its drop-in), run `systemctl daemon-reload`,
+   then switch the binary and `systemctl restart` the unit. If the count does
+   not reach 0, do not roll back: remove the flag the same way and restart the
+   newer hub.
+
+Roll forward by starting the newer hub without the flag. Rows the older hub
+left in plain statuses stay plain and are never fenced (see provenance above).
+
+Cost: the drain waits for grant-required spawns in flight, and that wait has
+no bound. A granted attempt whose node stays silent keeps its row
+(`deadline_exceeded_grant`, owned) past its landing deadline, until its
+node answers or an operator resolves it, and until then the count stays
+above 0. Quota-stopped jobs get no successor while the flag is set.
+
+| Case | Test |
+|---|---|
+| Grant and fence exclude each other; the grant is idempotent; only the bound machine's grant-required sent attempt is granted | `TestSpawnGrantAndFenceExcludeEachOther_t4612` |
+| An ungranted attempt is fenced and re-placed; a late claim is refused | `TestSpawnUngrantedAttemptIsFencedAndReplaced_t4612` |
+| A granted silent attempt keeps ownership and its reservation, also after a restart | `TestSpawnGrantedSilentAttemptKeepsOwnership_t4612` |
+| A hub restart's replay of a sent, ungranted attempt carries a fresh `start_by` and fences it | `TestSpawnRestartReplayFencesUngrantedAttempt_t4612` |
+| Bound and sent grant-required statuses match no v0.0.404 status query; reads and `GET /v1/spawns/<id>` show the refined value | `TestSpawnGrantRequiredStatusHiddenFromOlderHubsAndClients_t4612` |
+| A replay with a short context (recovery reprobe) fences an ungranted attempt past its recorded `start_by` + margin before resending | `TestSpawnShortReplayFencesPastStartBy_t4612` |
+| `--spawn-grant-drain` binds no `*_grant` row (placement goes on without a grant) and starts no quota hand-off | `TestSpawnGrantDrainBindsNoGrantRows_t4612`, `TestSpawnGrantDrainStartsNoQuotaHandOff_t4612` |
+| A grant-required row an older hub moved to a plain status is never granted, fenced or given `start_by` | `TestSpawnLegacySentGrantRowIsNeverFenced_t4612` |
+| Coordinator placement on a real node: grant-required binding, recorded grant, delivered through the node's read loop | `TestSpawnGrantEndToEndWithRealNode_t4612` |
+| A committed fence settles on replay without a resend | `TestSpawnCommittedFenceSettlesOnReplayWithoutResend_t4612` |
+| A fence store error is retried | `TestSpawnFenceRetriesAfterStoreError_t4612` |
+| The node's grant wait ends with its connection; a gate timeout or late frame still journals not-started; `granted:null` is rejected | `TestNodeSpawnGrantWaitEndsWithConnection_t4612`, `TestNodeSpawnGateTimeoutJournalsNotStarted_t4612`, `TestNodeSpawnGrantRejectsNullGranted_t4612` |
+| A legacy node gets no `start_by` and is never fenced | `TestSpawnLegacyNodeIsNeverFenced_t4612` |
+| A grant-required binding is not sent to a node without the capability | `TestSpawnGrantRequiredSkipsNodeWithoutCapability_t4612` |
+| A node starts only with a grant; a refusal or silence is journaled as never started, also for replays | `TestNodeSpawnStartsOnlyWithHubGrant_t4612`, `TestNodeSpawnPastStartByIsNotStarted_t4612`, `TestNodeSpawnWithoutStartByNeedsNoGrant_t4612`, `TestNodeSpawnGrantWire_t4612` |
 
 ### Stranded requests
 
