@@ -172,7 +172,8 @@ type HubClient struct {
 	sessionMu         sync.Mutex
 	spawnConfigPath   string
 	spawnJournalDir   string
-	spawnMu           sync.Mutex
+	spawnGateOnce     sync.Once
+	spawnGate         chan struct{}
 	spawnEngine       hubSpawnEngine
 	spawnPrepare      func(context.Context, nodeWorktreePrepareArgs) (any, string) // fixture seam
 	spawnJournalMu    sync.Mutex
@@ -180,8 +181,9 @@ type HubClient struct {
 	spawnJournalUsers int
 	// spawnActive holds the journal requests this process is executing; an
 	// executing entry missing from it was left by a restart.
-	spawnActiveMu sync.Mutex
+	spawnActiveMu sync.Mutex // also guards spawnWaiting
 	spawnActive   map[string]bool
+	spawnWaiting  map[string]*nodeSpawnWaiter
 	// work counts the operations a stop waits for (hub_client_drain.go);
 	// stopDrain is that wait's bound, zero meaning defaultStopDrain; serving
 	// counts live hub connections, so a stop with no hub does not wait for an

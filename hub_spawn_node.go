@@ -163,7 +163,12 @@ func (client *HubClient) spawnStartupError() error {
 	return nil
 }
 
+// Admission and replay semantics are documented in docs/hub-spawn-operations.md.
 func (client *HubClient) handleHubSpawn(ctx context.Context, peer *hubClientConnection, message hubOutboundMessage) {
+	deadline := time.Now().Add(time.Duration(message.WaitSeconds)*time.Second + client.spawnTimeoutExtra)
+	if message.DeadlineMS != 0 && time.UnixMilli(message.DeadlineMS).Before(deadline) {
+		deadline = time.UnixMilli(message.DeadlineMS)
+	}
 	// A stop in progress refuses a spawn before it claims the journal row: the
 	// hub replays the request to the restarted node, which then runs it whole.
 	endWork, accepted := client.beginWork(true)
@@ -178,42 +183,72 @@ func (client *HubClient) handleHubSpawn(ctx context.Context, peer *hubClientConn
 		return
 	}
 	defer client.releaseSpawnJournal()
-	claimed, cached, active, err := client.claimHubSpawn(ctx, journal, message)
+	known, cached, active, waiter, err := client.beginSpawnAdmission(ctx, journal, message)
 	if err != nil {
 		client.sendSpawnResult(ctx, peer, hubSpawnResult{RequestID: message.RequestID, RC: 75, Error: "journal_conflict"}, message.OperatorAuthorized)
 		return
 	}
-	if cached != nil {
-		client.sendSpawnResult(ctx, peer, *cached, message.OperatorAuthorized)
+	if known {
+		client.answerKnownSpawn(ctx, peer, journal, message, cached, active)
+		return
+	}
+	defer client.endSpawnAdmission(message.RequestID, waiter)
+	admissionCtx, cancel := context.WithDeadline(ctx, deadline)
+	defer cancel()
+	client.spawnGateOnce.Do(func() { client.spawnGate = make(chan struct{}, 1) })
+	stop := client.work.stopSignal()
+	select {
+	case <-waiter.claimed:
+		// Another copy acquired the gate while this copy was waiting.
+		client.answerAdmissionWait(ctx, peer, journal, message, deadline)
+		return
+	case <-admissionCtx.Done():
+		select {
+		case <-stop:
+			return
+		default:
+		}
+		if ctx.Err() == nil {
+			client.answerAdmissionWait(ctx, peer, journal, message, deadline)
+		}
+		return
+	case <-stop:
+		// Unclaimed work is replayed after the node restarts.
+		return
+	case client.spawnGate <- struct{}{}:
+	}
+	held := true
+	release := func() {
+		if held {
+			<-client.spawnGate
+			held = false
+		}
+	}
+	defer release()
+	if !client.work.admitSpawn() {
+		return
+	}
+	claimed, known, cached, active, err := client.claimHubSpawn(ctx, journal, message, deadline, waiter)
+	if err != nil {
+		if ctx.Err() == nil {
+			client.sendSpawnResult(ctx, peer, hubSpawnResult{RequestID: message.RequestID, RC: 75, Error: "journal_conflict"}, message.OperatorAuthorized)
+		}
+		return
+	}
+	if known {
+		release()
+		client.answerKnownSpawn(ctx, peer, journal, message, cached, active)
 		return
 	}
 	if !claimed {
-		// An executing entry this process is not running was left by a node
-		// restart: nothing will ever complete it, so it is settled from the pane
-		// (hub_spawn_settle.go); only a pane that cannot be read answers unknown,
-		// and the hub then decides from the panes whether the request is orphaned.
-		reply := "unknown"
-		if active {
-			reply = "reconciling"
-		} else if settled, ok := client.settleRequest(ctx, journal, message.RequestID); ok {
-			// The pane tells what the dead process could not: the replay gets
-			// the real result instead of waiting for the request deadline.
-			client.sendSpawnResult(ctx, peer, *settled, message.OperatorAuthorized)
-			return
+		release()
+		if ctx.Err() == nil {
+			client.sendAdmissionTimeout(ctx, peer, message, deadline)
 		}
-		client.sendSpawnResult(ctx, peer, hubSpawnResult{RequestID: message.RequestID, RC: 75, Error: reply}, message.OperatorAuthorized)
 		return
 	}
 	defer client.endHubSpawn(message.RequestID)
-	deadline := time.Now().Add(time.Duration(message.WaitSeconds)*time.Second + client.spawnTimeoutExtra)
-	if message.DeadlineMS != 0 && time.UnixMilli(message.DeadlineMS).Before(deadline) {
-		deadline = time.UnixMilli(message.DeadlineMS)
-	}
-	executionContext, cancel := context.WithDeadline(ctx, deadline)
-	defer cancel()
-	client.spawnMu.Lock()
-	result := client.runClaimedHubSpawn(executionContext, message)
-	client.spawnMu.Unlock()
+	result := client.runClaimedHubSpawn(admissionCtx, message)
 	// Disconnect is not cancellation of this daemon-owned execution. Its result
 	// remains available to the next authenticated replay even if this socket died.
 	if ctx.Err() != nil && result.RC != 0 {
@@ -227,23 +262,115 @@ func (client *HubClient) handleHubSpawn(ctx context.Context, peer *hubClientConn
 	if journal.complete(persistCtx, result) != nil {
 		return
 	}
+	release()
 	client.sendSpawnResult(ctx, peer, result, message.OperatorAuthorized)
 }
 
-// claimHubSpawn claims message in the journal and reports whether this process
-// is running it. The claim and the running mark change under one lock, so a
-// replay racing a fresh claim never sees an executing entry nobody owns.
-func (client *HubClient) claimHubSpawn(ctx context.Context, journal *nodeSpawnJournal, message hubOutboundMessage) (claimed bool, cached *hubSpawnResult, active bool, err error) {
+// nodeSpawnWaiter is process-local: it binds concurrent copies of an unclaimed
+// UUID and wakes them when one copy claims it. It is never restart evidence.
+type nodeSpawnWaiter struct {
+	fingerprint string
+	claimed     chan struct{}
+	users       int
+}
+
+func (client *HubClient) beginSpawnAdmission(ctx context.Context, journal *nodeSpawnJournal, message hubOutboundMessage) (known bool, cached *hubSpawnResult, active bool, waiter *nodeSpawnWaiter, err error) {
 	client.spawnActiveMu.Lock()
 	defer client.spawnActiveMu.Unlock()
+	known, cached, err = journal.lookup(ctx, message)
+	if err != nil || known {
+		return known, cached, client.spawnActive[message.RequestID], nil, err
+	}
+	if client.spawnWaiting == nil {
+		client.spawnWaiting = make(map[string]*nodeSpawnWaiter)
+	}
+	fingerprint := spawnFingerprint(message)
+	waiter = client.spawnWaiting[message.RequestID]
+	if waiter == nil {
+		waiter = &nodeSpawnWaiter{fingerprint: fingerprint, claimed: make(chan struct{})}
+		client.spawnWaiting[message.RequestID] = waiter
+	} else if waiter.fingerprint != fingerprint {
+		return false, nil, false, nil, errors.New("spawn request payload conflicts with pending admission")
+	}
+	waiter.users++
+	return false, nil, false, waiter, nil
+}
+
+func (client *HubClient) endSpawnAdmission(requestID string, waiter *nodeSpawnWaiter) {
+	client.spawnActiveMu.Lock()
+	defer client.spawnActiveMu.Unlock()
+	waiter.users--
+	if waiter.users == 0 {
+		delete(client.spawnWaiting, requestID)
+	}
+}
+
+// claimHubSpawn rechecks ownership and the deadline under the active lock.
+// The journal claim and running mark are atomic with respect to replays and
+// restart settlement; no lock is held while waiting for the gate.
+func (client *HubClient) claimHubSpawn(ctx context.Context, journal *nodeSpawnJournal, message hubOutboundMessage, deadline time.Time, waiter *nodeSpawnWaiter) (claimed, known bool, cached *hubSpawnResult, active bool, err error) {
+	client.spawnActiveMu.Lock()
+	defer client.spawnActiveMu.Unlock()
+	known, cached, err = journal.lookup(ctx, message)
+	if err != nil || known {
+		return false, known, cached, client.spawnActive[message.RequestID], err
+	}
+	if ctx.Err() != nil || !time.Now().Before(deadline) {
+		return false, false, nil, false, ctx.Err()
+	}
 	claimed, cached, err = journal.claim(ctx, message)
 	if claimed {
 		if client.spawnActive == nil {
 			client.spawnActive = map[string]bool{}
 		}
 		client.spawnActive[message.RequestID] = true
+		close(waiter.claimed)
 	}
-	return claimed, cached, client.spawnActive[message.RequestID], err
+	return claimed, !claimed && err == nil, cached, client.spawnActive[message.RequestID], err
+}
+
+// answerAdmissionWait rechecks the journal before attesting a timeout: a
+// duplicate can have claimed or completed while this copy waited.
+func (client *HubClient) answerAdmissionWait(ctx context.Context, peer *hubClientConnection, journal *nodeSpawnJournal, message hubOutboundMessage, deadline time.Time) {
+	client.spawnActiveMu.Lock()
+	known, cached, err := journal.lookup(ctx, message)
+	active := client.spawnActive[message.RequestID]
+	client.spawnActiveMu.Unlock()
+	if err != nil {
+		client.sendSpawnResult(ctx, peer, hubSpawnResult{RequestID: message.RequestID, RC: 75, Error: "journal_conflict"}, message.OperatorAuthorized)
+	} else if known {
+		client.answerKnownSpawn(ctx, peer, journal, message, cached, active)
+	} else {
+		client.sendAdmissionTimeout(ctx, peer, message, deadline)
+	}
+}
+
+func (client *HubClient) answerKnownSpawn(ctx context.Context, peer *hubClientConnection, journal *nodeSpawnJournal, message hubOutboundMessage, cached *hubSpawnResult, active bool) {
+	if cached != nil {
+		client.sendSpawnResult(ctx, peer, *cached, message.OperatorAuthorized)
+		return
+	}
+	// An executing row this process does not own was left by a node restart.
+	// Settle it from the pane, or answer unknown if that evidence is missing.
+	reply := "unknown"
+	if active {
+		reply = "reconciling"
+	} else if settled, ok := client.settleRequest(ctx, journal, message.RequestID); ok {
+		client.sendSpawnResult(ctx, peer, *settled, message.OperatorAuthorized)
+		return
+	}
+	client.sendSpawnResult(ctx, peer, hubSpawnResult{RequestID: message.RequestID, RC: 75, Error: reply}, message.OperatorAuthorized)
+}
+
+func (client *HubClient) sendAdmissionTimeout(ctx context.Context, peer *hubClientConnection, message hubOutboundMessage, deadline time.Time) {
+	result := hubSpawnResult{RequestID: message.RequestID, JobID: hubSpawnArg(message.Args, "--job"), RC: 124, Stage: "claim", Error: "timeout"}
+	// A shorter local budget cannot prove that another copy did not start,
+	// even if this reply is delayed until after the absolute deadline.
+	absoluteDeadline := time.UnixMilli(message.DeadlineMS)
+	if message.DeadlineMS != 0 && !deadline.Before(absoluteDeadline) && !time.Now().Before(absoluteDeadline) {
+		result.Error, result.Retryable = "deadline_not_started", true
+	}
+	client.sendSpawnResult(ctx, peer, result, message.OperatorAuthorized)
 }
 
 // endHubSpawn drops the running mark once the execution has returned.

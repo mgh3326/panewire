@@ -70,7 +70,7 @@ func openNodeSpawnJournal(root string) (*nodeSpawnJournal, error) {
 	}
 	return &nodeSpawnJournal{db}, nil
 }
-func (j *nodeSpawnJournal) claim(ctx context.Context, message hubOutboundMessage) (bool, *hubSpawnResult, error) {
+func spawnFingerprint(message hubOutboundMessage) string {
 	// Only execution fields contribute; transport/reconnect metadata does not.
 	raw, _ := json.Marshal(struct {
 		ID, CWD, Inline, Doc string
@@ -80,8 +80,11 @@ func (j *nodeSpawnJournal) claim(ctx context.Context, message hubOutboundMessage
 		Deadline             int64
 	}{message.RequestID, message.CWDKey, message.BriefInline, message.BriefDoc, message.Args, message.Checkout, message.WaitSeconds, message.DeadlineMS})
 	sum := sha256.Sum256(raw)
-	hash := hex.EncodeToString(sum[:])
-	result, err := j.db.ExecContext(ctx, `INSERT INTO spawn_inbox(request_id,fingerprint,status,job_id,label) VALUES(?,?,'executing',?,?) ON CONFLICT DO NOTHING`, message.RequestID, hash, hubSpawnArg(message.Args, "--job"), hubSpawnArg(message.Args, "-l"))
+	return hex.EncodeToString(sum[:])
+}
+
+func (j *nodeSpawnJournal) claim(ctx context.Context, message hubOutboundMessage) (bool, *hubSpawnResult, error) {
+	result, err := j.db.ExecContext(ctx, `INSERT INTO spawn_inbox(request_id,fingerprint,status,job_id,label) VALUES(?,?,'executing',?,?) ON CONFLICT DO NOTHING`, message.RequestID, spawnFingerprint(message), hubSpawnArg(message.Args, "--job"), hubSpawnArg(message.Args, "-l"))
 	if err != nil {
 		return false, nil, err
 	}
@@ -89,21 +92,32 @@ func (j *nodeSpawnJournal) claim(ctx context.Context, message hubOutboundMessage
 	if n == 1 {
 		return true, nil, nil
 	}
+	_, cached, err := j.lookup(ctx, message)
+	return false, cached, err
+}
+
+// lookup checks the same fingerprint as claim without creating an executing
+// row. An absent row is still replayable after a node restart.
+func (j *nodeSpawnJournal) lookup(ctx context.Context, message hubOutboundMessage) (bool, *hubSpawnResult, error) {
 	var old, status, stored string
-	if err = j.db.QueryRowContext(ctx, `SELECT fingerprint,status,result FROM spawn_inbox WHERE request_id=?`, message.RequestID).Scan(&old, &status, &stored); err != nil {
+	err := j.db.QueryRowContext(ctx, `SELECT fingerprint,status,result FROM spawn_inbox WHERE request_id=?`, message.RequestID).Scan(&old, &status, &stored)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil, nil
+	}
+	if err != nil {
 		return false, nil, err
 	}
-	if old != hash {
+	if old != spawnFingerprint(message) {
 		return false, nil, errors.New("spawn request payload conflicts with durable ownership")
 	}
 	if status != "completed" {
-		return false, nil, nil
+		return true, nil, nil
 	}
 	var cached hubSpawnResult
 	if err = json.Unmarshal([]byte(stored), &cached); err != nil {
 		return false, nil, err
 	}
-	return false, &cached, nil
+	return true, &cached, nil
 }
 func (j *nodeSpawnJournal) complete(ctx context.Context, result hubSpawnResult) error {
 	raw, err := json.Marshal(result)

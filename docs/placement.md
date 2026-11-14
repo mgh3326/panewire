@@ -262,7 +262,7 @@ failed to launch counts:
 | `cwd_unmapped` | yes | the host has no path for the repository |
 | `brief_doc_unavailable` | yes | the host cannot fetch or resolve its brief document |
 | `timeout` (landing or queue) | no | the answer was late; the launch state is unknown |
-| `deadline_not_started` | no | the node claimed the request after its deadline |
+| `deadline_not_started` | no | the node observed the absolute deadline before admitting an unclaimed request |
 | `unknown`, `reconciling` | no | the hub could not tell whether the launch happened |
 | `journal_unavailable`, `journal_conflict` | no | the node's spawn journal, not the launch |
 | `invalid_args`, `invalid_request` | no | the request is malformed |
