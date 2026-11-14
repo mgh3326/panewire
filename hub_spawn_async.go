@@ -126,7 +126,13 @@ func (h *HubServer) handleSpawnSubmit(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if old.Status == "retryable" {
+			release, lockErr := h.lockPlacementReplay(r.Context(), old)
+			if lockErr != nil {
+				writeJSON(w, 503, map[string]string{"error": "store_unavailable"})
+				return
+			}
 			old, err = h.inbox.store.resumeCleanedSpawn(r.Context(), old, h.now().UTC())
+			release()
 			if err != nil {
 				writeJSON(w, 409, map[string]string{"error": "job_already_claimed"})
 				return
@@ -415,7 +421,6 @@ func (h *HubServer) runSpawnCoordinator(parent context.Context) {
 			}
 		}
 		h.flushSpawnNotifications(ctx)
-		h.flushPlacementRecords(ctx)
 		select {
 		case <-ctx.Done():
 			return
@@ -510,7 +515,7 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 	}
 	ctx, cancel := context.WithDeadline(parent, task.Deadline)
 	defer cancel()
-	transport := &directSpawnTransport{h: h, task: task, started: time.Now(), probeWait: spawnNotStartedProbe}
+	transport := &directSpawnTransport{h: h, task: task, started: time.Now(), probeWait: spawnNotStartedProbe, requireSnapshot: task.Node == nil}
 	if task.Node != nil {
 		_, _ = transport.dispatch(ctx, *task.Node)
 		return
@@ -523,8 +528,33 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 	// The queue core's outbox owns this spawn's hk placement record: persist
 	// every trace the App emits so the record survives the App and a restart.
 	app.PlacementOutbox = true
+	var previous fleet.PlacementTrace
+	if payload, _, _, err := h.inbox.store.spawnPlacementSnapshot(parent, task.Request.RequestID, task.Attempt); err != nil {
+		return
+	} else if len(payload) != 0 && json.Unmarshal(payload, &previous) != nil {
+		h.logger.Warn("placement snapshot could not be decoded", "request_id", task.Request.RequestID, "attempt", task.Attempt)
+		return
+	}
 	delivery, _ := json.Marshal(placementDelivery{StateDir: app.StateDir, Home: app.Home, Quota: app.Config.Quota})
-	app.PlacementTrace = func(tr fleet.PlacementTrace) { h.notePlacementTrace(task, tr, string(delivery)) }
+	app.PlacementTrace = func(tr fleet.PlacementTrace) {
+		tr = continueSpawnPlacementTrace(previous, tr, task.Exclusions)
+		if task.ClaimedHost != "" && len(task.Exclusions) != 0 && tr.Record != nil {
+			// The retry's in-process admission error is not the claimed node's
+			// result. Its final outcome still belongs to the operation row.
+			tr.Record, tr.Outcome, tr.Reason = nil, "", ""
+		}
+		err := h.notePlacementTrace(task, tr, string(delivery))
+		if tr.Chosen != "" {
+			transport.snapshotHost = tr.Chosen
+			transport.snapshotProfile = tr.Profile
+			transport.snapshotReady = false
+			if err == nil {
+				payload, _, recorded, readErr := h.inbox.store.spawnPlacementSnapshot(parent, task.Request.RequestID, task.Attempt)
+				var saved fleet.PlacementTrace
+				transport.snapshotReady = readErr == nil && !recorded && json.Unmarshal(payload, &saved) == nil && saved.Chosen == tr.Chosen && saved.Profile == tr.Profile
+			}
+		}
+	}
 	if ctx.Err() != nil {
 		h.finishSpawnOutcome(task, hubSpawnOutcome{RC: 124, Stage: "placement", Reason: "timeout", Retryable: true})
 		return
@@ -582,6 +612,10 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 	if transport.bound {
 		return
 	} // The node result owns completion and cleanup facts.
+	if errors.Is(err, fleet.ErrHubPlacementDeferred) {
+		h.releasePlacementCount(task.Job)
+		return
+	}
 	if parent.Err() != nil {
 		return
 	} // Restart resumes durable accepted ownership.
@@ -673,10 +707,14 @@ func spawnQueueWaitSeconds(task hubSpawnTask, now time.Time) int64 {
 }
 
 type directSpawnTransport struct {
-	h       *HubServer
-	task    hubSpawnTask
-	bound   bool
-	started time.Time
+	h               *HubServer
+	task            hubSpawnTask
+	bound           bool
+	started         time.Time
+	requireSnapshot bool
+	snapshotReady   bool
+	snapshotHost    string
+	snapshotProfile string
 	// probeWait is how long dispatch keeps asking its node after the landing
 	// wait ran out, before it settles the request as a timeout. Zero skips the
 	// probe (the coordinator's replay pass, whose own 5 s window is the probe).
@@ -692,6 +730,12 @@ const spawnNotStartedProbe = 5 * time.Second
 // the node attests that it did not start the request before its deadline.
 func spawnNotStarted(result hubSpawnResult) bool {
 	return result.RC == 124 && result.Stage == "claim" && result.Error == "deadline_not_started" && result.Retryable
+}
+
+// spawnOutcomeNotStarted recognizes the same attestation after persistence.
+func spawnOutcomeNotStarted(outcome hubSpawnOutcome) bool {
+	reason, _, _ := strings.Cut(outcome.Reason, ": ")
+	return outcome.NodeResult && spawnNotStarted(hubSpawnResult{RC: outcome.RC, Stage: outcome.Stage, Error: reason, Retryable: outcome.Retryable})
 }
 
 // spawnLandingPaneUnconfirmed reports a landing refusal whose cleanup could
@@ -755,8 +799,7 @@ func spawnReplayPinsHost(outcome hubSpawnOutcome) bool {
 	// A completed node attestation of not-started is proof this attempt made
 	// no claim, even though its stage is claim. An earlier claim stays pinned
 	// independently in hubSpawnTask.ClaimedHost.
-	reason, _, _ := strings.Cut(outcome.Reason, ": ")
-	if outcome.NodeResult && spawnNotStarted(hubSpawnResult{RC: outcome.RC, Stage: outcome.Stage, Error: reason, Retryable: outcome.Retryable}) {
+	if spawnOutcomeNotStarted(outcome) {
 		return false
 	}
 	return !spawnRefusalMovesOn(outcome.Reason, outcome.Stage)
@@ -797,6 +840,9 @@ func (t *directSpawnTransport) Spawn(ctx context.Context, req fleet.HubSpawnRequ
 			t.h.releasePlacementCount(t.task.Job)
 			return fleet.HubSpawnReply{RC: excluded.RC, Error: excluded.Reason, NextHost: true}, nil
 		}
+	}
+	if t.requireSnapshot && (!t.snapshotReady || t.snapshotHost != req.Machine || t.snapshotProfile != hubSpawnArg(req.Args, "-m")) {
+		return fleet.HubSpawnReply{}, fleet.ErrHubPlacementDeferred
 	}
 	t.h.mu.Lock()
 	record := t.h.nodes[req.Machine]
@@ -1230,9 +1276,15 @@ func (h *HubServer) startSpawnCoordinator(ctx context.Context) {
 		return
 	}
 	h.spawnCoordinatorOnce.Do(func() {
-		h.spawnWorkers.Add(2)
+		h.placementAsync.Store(true)
+		h.spawnWorkers.Add(3)
 		go func() { defer h.spawnWorkers.Done(); h.runSpawnCoordinator(ctx) }()
 		go func() { defer h.spawnWorkers.Done(); h.runQuotaReconcile(ctx) }()
+		go func() {
+			defer h.spawnWorkers.Done()
+			defer h.placementAsync.Store(false)
+			h.runPlacementRecords(ctx)
+		}()
 	})
 }
 

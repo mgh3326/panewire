@@ -668,7 +668,7 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 	}()
 
 	defer func() {
-		if errors.Is(err, ErrHubPlacementBound) {
+		if errors.Is(err, ErrHubPlacementBound) || errors.Is(err, ErrHubPlacementDeferred) {
 			return
 		}
 		// A quota wait is not a terminal refusal. Preserve a host attempt if

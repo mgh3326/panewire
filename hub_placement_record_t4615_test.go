@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -175,9 +176,8 @@ func TestHubPlacementRecordTerminalOutcomes(t *testing.T) {
 }
 
 // The App's final emission carries the record finishPlacement completed —
-// before the terminal outcome commits for an unbound spawn — so the record
-// must post verbatim: pane_id and model come from the record, not the still
-// empty operation outcome.
+// before the terminal outcome commits — so delivery waits for that commit
+// and then posts the record verbatim, including pane_id and model.
 func TestHubPlacementRecordFinishedRecordPostsVerbatim(t *testing.T) {
 	hk := placementOutboxServer(t)
 	h := placementOutboxHub(t, filepath.Join(t.TempDir(), "inbox.sqlite3"))
@@ -192,6 +192,14 @@ func TestHubPlacementRecordFinishedRecordPostsVerbatim(t *testing.T) {
 		Source: "auto", Ranking: "score", Outcome: "placed",
 		Candidates:         tr.Candidates,
 		PlacementExecution: fleet.PlacementExecution{Host: "machine-a", PaneID: "pane-9", Model: "opus", Pool: "claude-sub", Profile: "claude-sonnet", Family: "claude"},
+	}
+	h.notePlacementTrace(task, tr, "")
+	if records := hk.records(); len(records) != 0 {
+		t.Fatalf("non-terminal attempt produced %d posts, want none", len(records))
+	}
+	changed, err := h.inbox.store.completeSpawn(t.Context(), task, hubSpawnOutcome{RC: 0, Stage: "landing", Host: "machine-a", NodeResult: true}, time.Now())
+	if err != nil || !changed {
+		t.Fatalf("completeSpawn changed=%v err=%v", changed, err)
 	}
 	h.notePlacementTrace(task, tr, "")
 	records := hk.records()
@@ -308,6 +316,10 @@ func TestHubPlacementRecordFallbackDeliveredAfterRecovery(t *testing.T) {
 	req.RequestID = "d676220b-e763-4af1-aefd-000000000018"
 	h1 := placementOutboxHub(t, path)
 	task := boundSpawnTask(t, h1, req)
+	changed, err := h1.inbox.store.completeSpawn(t.Context(), task, hubSpawnOutcome{RC: 0, Stage: "landing", Host: "machine-a", NodeResult: true}, time.Now())
+	if err != nil || !changed {
+		t.Fatalf("completeSpawn changed=%v err=%v", changed, err)
+	}
 	// hk unreachable while the snapshot write fails: the record can only be
 	// spooled, and the deferred file keeps the row-insert obligation.
 	os.Setenv("HANDOFFKEEP_URL", "http://127.0.0.1:1")
@@ -332,16 +344,17 @@ func TestHubPlacementRecordFallbackDeliveredAfterRecovery(t *testing.T) {
 	os.Setenv("HANDOFFKEEP_URL", hk.server.URL)
 	h2 := placementOutboxHub(t, path)
 	h2.flushPlacementRecords(t.Context())
-	if n := len(hk.records()); n != 1 {
-		t.Fatalf("flush produced %d records, want exactly one", n)
+	records := hk.records()
+	if len(records) == 0 {
+		t.Fatal("flush did not deliver the record")
+	}
+	for _, record := range records[1:] {
+		if !reflect.DeepEqual(records[0], record) {
+			t.Fatal("delivery retry changed the immutable record")
+		}
 	}
 	if _, err := os.Stat(h2.inbox.deferredPath); !os.IsNotExist(err) {
 		t.Fatalf("deferred file remains after the row landed: %v", err)
-	}
-	// The landed row stays pending while the attempt runs; its terminal
-	// result seals it. The repost is a duplicate hk answers 409.
-	if _, err := h2.completeSpawn(t.Context(), task, hubSpawnOutcome{RC: 0, Stage: "landing", Host: "machine-a", Pane: "pane-7", NodeResult: true}); err != nil {
-		t.Fatal(err)
 	}
 	_, _, recorded, err := h2.inbox.store.spawnPlacementSnapshot(t.Context(), req.RequestID, task.Attempt)
 	if err != nil || !recorded {

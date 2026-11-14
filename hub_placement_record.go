@@ -4,11 +4,14 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/mgh3326/panewire/internal/fleet"
+	"github.com/mgh3326/panewire/internal/fleetevent"
 )
 
 // Queue-core spawns separate placement from dispatch (#473): the App that ran
@@ -32,6 +35,10 @@ func spawnAttemptTerminal(status string) bool {
 // placementRecordDeliveryBudget bounds one outbox delivery; the record stays
 // spooled and the next flush retries it.
 const placementRecordDeliveryBudget = 2 * time.Second
+
+// recorded is 0 for a mutable snapshot, 1 after delivery, and 2 when a
+// completed attempt is frozen for delivery after the operation advances.
+const placementSnapshotFrozen = 2
 
 // saveSpawnPlacementSnapshot persists the latest placement trace for an
 // attempt. A row whose record was already produced ignores later writes, so
@@ -59,6 +66,55 @@ func (s *laneInboxStore) spawnPlacementSnapshot(parent context.Context, requestI
 	return []byte(raw), delivery, marked == 1, err
 }
 
+// continueSpawnPlacementTrace carries the original decision and its candidates
+// into a later placement pass. A claimed-host retry is forced internally, but
+// the request's original auto decision must not become a forced placement in hk.
+func continueSpawnPlacementTrace(previous, current fleet.PlacementTrace, exclusions []hubSpawnExclusion) fleet.PlacementTrace {
+	if previous.Source == "" {
+		return current
+	}
+	current.DecidedAt, current.Source, current.Ranking = previous.DecidedAt, previous.Source, previous.Ranking
+	current.StateSource, current.StateReason = previous.StateSource, previous.StateReason
+	if current.Repo == "" {
+		current.Repo = previous.Repo
+	}
+	candidates := append([]fleet.PlacementCandidateRecord(nil), previous.Candidates...)
+	positions := make(map[string]int, len(candidates))
+	for i, candidate := range candidates {
+		positions[candidate.Host] = i
+	}
+	for _, candidate := range current.Candidates {
+		if i, found := positions[candidate.Host]; found {
+			candidates[i] = candidate
+		} else {
+			positions[candidate.Host] = len(candidates)
+			candidates = append(candidates, candidate)
+		}
+	}
+	for _, excluded := range exclusions {
+		if excluded.Machine == current.Chosen {
+			continue
+		}
+		i, found := positions[excluded.Machine]
+		if !found {
+			i = len(candidates)
+			positions[excluded.Machine] = i
+			candidates = append(candidates, fleet.PlacementCandidateRecord{Host: excluded.Machine})
+		}
+		reason := "hub_" + strings.TrimPrefix(excluded.Reason, "spawn_failed:")
+		candidates[i].Outcome = "skipped"
+		candidates[i].Reason = fleetevent.Code(fleetevent.Redact(reason))
+	}
+	current.Candidates = candidates
+	if current.Record != nil {
+		record := *current.Record
+		record.DecidedAt, record.Source, record.Ranking = current.DecidedAt, current.Source, current.Ranking
+		record.StateSource, record.Candidates = current.StateSource, current.Candidates
+		current.Record = &record
+	}
+	return current
+}
+
 // markSpawnPlacementRecorded seals an attempt's snapshot after its record is
 // delivered or quarantined. A spooled-but-undelivered record keeps the row
 // pending so the flush keeps retrying it.
@@ -66,6 +122,34 @@ func (s *laneInboxStore) markSpawnPlacementRecorded(parent context.Context, requ
 	ctx, done := s.op(parent)
 	defer done()
 	_, err := s.db.ExecContext(ctx, s.q(`UPDATE spawn_placement_snapshots SET recorded=1 WHERE request_id=? AND attempt=?`), requestID, attempt)
+	return err
+}
+
+// freezeSpawnPlacementForRetry keeps a completed attempt self-contained before
+// its operation row is reused. The caller advances the attempt in this same
+// transaction, so recovery can always deliver the old record afterwards.
+func (s *laneInboxStore) freezeSpawnPlacementForRetry(ctx context.Context, tx *sql.Tx, task hubSpawnTask) error {
+	var raw string
+	err := tx.QueryRowContext(ctx, s.q(`SELECT payload FROM spawn_placement_snapshots WHERE request_id=? AND attempt=? AND recorded=0`), task.Request.RequestID, task.Attempt).Scan(&raw)
+	if err == sql.ErrNoRows {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var trace fleet.PlacementTrace
+	if err := json.Unmarshal([]byte(raw), &trace); err != nil {
+		return err
+	}
+	if trace.Record == nil {
+		record := hubPlacementRecord(task, trace, task.Attempt)
+		trace.Record, trace.Outcome, trace.Reason = &record, record.Outcome, record.Reason
+	}
+	payload, err := json.Marshal(trace)
+	if err != nil {
+		return err
+	}
+	_, err = tx.ExecContext(ctx, s.q(`UPDATE spawn_placement_snapshots SET payload=?,recorded=? WHERE request_id=? AND attempt=? AND recorded=0`), string(payload), placementSnapshotFrozen, task.Request.RequestID, task.Attempt)
 	return err
 }
 
@@ -84,7 +168,7 @@ type pendingPlacementSnapshot struct {
 func (s *laneInboxStore) pendingPlacementSnapshots(parent context.Context) ([]pendingPlacementSnapshot, error) {
 	ctx, done := s.op(parent)
 	defer done()
-	rows, err := s.db.QueryContext(ctx, `SELECT p.request_id,p.attempt,o.job,o.status,o.attempt,p.payload,p.delivery FROM spawn_placement_snapshots p JOIN spawn_operations o ON o.request_id=p.request_id WHERE p.recorded=0`)
+	rows, err := s.db.QueryContext(ctx, `SELECT p.request_id,p.attempt,o.job,o.status,o.attempt,p.payload,p.delivery FROM spawn_placement_snapshots p JOIN spawn_operations o ON o.request_id=p.request_id WHERE p.recorded<>1`)
 	if err != nil {
 		return nil, err
 	}
@@ -111,42 +195,150 @@ func (p pendingPlacementSnapshot) attemptOver() bool {
 // way this attempt's own App would have. When the attempt's terminal result
 // is already recorded — the App's final emission follows the node's answer —
 // it delivers from this snapshot.
-func (h *HubServer) notePlacementTrace(task hubSpawnTask, tr fleet.PlacementTrace, delivery string) {
+func (h *HubServer) notePlacementTrace(task hubSpawnTask, tr fleet.PlacementTrace, delivery string) error {
 	if h.inbox == nil || task.Request.RequestID == "" {
-		return
+		return errors.New("placement snapshot store unavailable")
+	}
+	// A quota refresh pauses this same attempt. Keep the candidate trace,
+	// but let its eventual terminal result determine the immutable record.
+	if tr.Reason == "quota_refresh_pending" || tr.Record != nil && tr.Record.Reason == "quota_refresh_pending" {
+		tr.Record, tr.Outcome, tr.Reason = nil, "", ""
 	}
 	payload, err := json.Marshal(tr)
 	if err != nil {
-		return
+		return err
 	}
-	if err := h.inbox.store.saveSpawnPlacementSnapshot(h.closeCtx, task.Request.RequestID, task.Attempt, payload, delivery); err != nil {
-		// One retry covers the transient write failure; if it still fails,
-		// the save is deferred for the flush so a pending row eventually
-		// exists. When this emission carries the finished record, it is
-		// also spooled now — the file and the retried row together keep the
-		// delivery obligation.
-		if err2 := h.inbox.store.saveSpawnPlacementSnapshot(h.closeCtx, task.Request.RequestID, task.Attempt, payload, delivery); err2 != nil {
-			h.logger.Warn("placement snapshot could not be persisted", "request_id", task.Request.RequestID, "job", task.Job, "attempt", task.Attempt)
-			h.deferPlacementTraceSave(task.Request.RequestID, task.Attempt, payload, delivery)
-			if tr.Record != nil {
-				h.enqueueFinishedPlacementRecord(h.closeCtx, task, *tr.Record, delivery)
-			}
-			return
+	if err := h.persistPlacementTrace(task, payload, delivery); err != nil {
+		current, readErr := h.inbox.store.spawnTask(h.closeCtx, task.Request.RequestID)
+		if tr.Record != nil && readErr == nil && current.Attempt == task.Attempt && spawnAttemptTerminal(current.Status) {
+			h.enqueueFinishedPlacementRecord(h.closeCtx, task, *tr.Record, delivery)
 		}
+		return err
 	}
-	// A trace carrying the finished record is the record finishPlacement
-	// completed: the attempt is decided even when the request stays accepted
-	// (a quota refresh or host refusal that retries later), so it delivers
-	// now. An incomplete trace waits for the attempt's terminal row.
-	if tr.Record != nil {
-		h.deliverPlacementRecord(h.closeCtx, task.Request.RequestID, task.Attempt)
-		return
-	}
+	// Even a finished App emission waits for the operation's terminal row.
 	current, err := h.inbox.store.spawnTask(h.closeCtx, task.Request.RequestID)
 	if err != nil || current.Attempt != task.Attempt || !spawnAttemptTerminal(current.Status) {
-		return
+		return nil
 	}
-	h.deliverPlacementRecord(h.closeCtx, task.Request.RequestID, task.Attempt)
+	if !h.wakePlacementRecords() {
+		h.deliverPlacementRecord(h.closeCtx, task.Request.RequestID, task.Attempt)
+	}
+	return nil
+}
+
+// persistPlacementTrace serializes fresh and deferred writes for an attempt.
+// A newer successful trace retires an older deferred copy before binding.
+func (h *HubServer) persistPlacementTrace(task hubSpawnTask, payload []byte, delivery string) error {
+	release, err := h.placementTraces.lock(h.closeCtx, task.Request.RequestID)
+	if err != nil {
+		return err
+	}
+	defer release()
+	return h.persistPlacementTraceLocked(task, payload, delivery)
+}
+
+// The request's placementTraces lock must be held across this save and the
+// retirement of any older deferred copy.
+func (h *HubServer) persistPlacementTraceLocked(task hubSpawnTask, payload []byte, delivery string) error {
+	err := h.inbox.store.saveSpawnPlacementSnapshot(h.closeCtx, task.Request.RequestID, task.Attempt, payload, delivery)
+	if err != nil {
+		err = h.inbox.store.saveSpawnPlacementSnapshot(h.closeCtx, task.Request.RequestID, task.Attempt, payload, delivery)
+	}
+	if err != nil {
+		h.logger.Warn("placement snapshot could not be persisted", "request_id", task.Request.RequestID, "job", task.Job, "attempt", task.Attempt)
+		h.placementAppMu.Lock()
+		if e := h.loadPlacementDeferredSavesLocked(); e == nil {
+			if e := h.deferPlacementTraceSaveLocked(task.Request.RequestID, task.Attempt, payload, delivery); e != nil {
+				h.logger.Warn("placement deferred saves could not be persisted", "request_id", task.Request.RequestID, "attempt", task.Attempt)
+			}
+		}
+		h.placementAppMu.Unlock()
+		return err
+	}
+	h.placementAppMu.Lock()
+	defer h.placementAppMu.Unlock()
+	if err := h.loadPlacementDeferredSavesLocked(); err != nil {
+		return err
+	}
+	old := h.placementDeferredSaves
+	kept := make([]placementDeferredSave, 0, len(old))
+	for _, d := range old {
+		if d.RequestID != task.Request.RequestID || d.Attempt != task.Attempt {
+			kept = append(kept, d)
+		}
+	}
+	if len(kept) != len(old) {
+		h.placementDeferredSaves = kept
+		if err := h.writePlacementDeferredSavesLocked(); err != nil {
+			h.placementDeferredSaves = old
+			return err
+		}
+	}
+	return nil
+}
+
+// lockPlacementReplay restores any deferred trace before the operation row is
+// reused. Its returned unlock must be held through the store's retry commit.
+func (h *HubServer) lockPlacementReplay(ctx context.Context, task hubSpawnTask) (func(), error) {
+	release, err := h.placementTraces.lock(ctx, task.Request.RequestID)
+	if err != nil {
+		return nil, err
+	}
+	h.placementAppMu.Lock()
+	err = h.loadPlacementDeferredSavesLocked()
+	var deferred *placementDeferredSave
+	if err == nil {
+		for _, save := range h.placementDeferredSaves {
+			if save.RequestID == task.Request.RequestID && save.Attempt == task.Attempt {
+				copy := save
+				deferred = &copy
+				break
+			}
+		}
+	}
+	h.placementAppMu.Unlock()
+	if err == nil && deferred != nil {
+		err = h.persistPlacementTraceLocked(task, deferred.Payload, deferred.Delivery)
+	}
+	if err != nil {
+		release()
+		return nil, err
+	}
+	return release, nil
+}
+
+// wakePlacementRecords gives the outbox its own bounded worker. A hub without
+// a running coordinator uses the synchronous delivery path instead.
+func (h *HubServer) wakePlacementRecords() bool {
+	if !h.placementAsync.Load() || h.placementKick == nil {
+		return false
+	}
+	select {
+	case h.placementKick <- struct{}{}:
+	default:
+	}
+	return true
+}
+
+func (h *HubServer) runPlacementRecords(parent context.Context) {
+	ctx, cancel := context.WithCancel(parent)
+	defer cancel()
+	stop := context.AfterFunc(h.closeCtx, cancel)
+	defer stop()
+	tick := time.NewTicker(2 * time.Second)
+	defer tick.Stop()
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+		h.flushPlacementRecords(ctx)
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+		case <-h.placementKick:
+		}
+	}
 }
 
 // deliverPlacementRecord builds the attempt's hk placement record from its
@@ -174,6 +366,9 @@ func (h *HubServer) deliverPlacementRecord(ctx context.Context, requestID string
 	}
 	task, err := h.inbox.store.spawnTask(ctx, requestID)
 	if err != nil {
+		return
+	}
+	if task.Attempt == attempt && !spawnAttemptTerminal(task.Status) {
 		return
 	}
 	if task.Attempt != attempt && tr.Record == nil {
@@ -259,7 +454,7 @@ func hubPlacementRecord(task hubSpawnTask, tr fleet.PlacementTrace, attempt int)
 		// queue never contacted its host, so like every other pre-claim
 		// path it is a refusal, not a launch failure the host owns.
 		rec.Outcome, rec.Reason = "refused", o.Reason
-	case o.Pane != "" || !spawnStageBeforeJobClaim(o.Stage):
+	case o.Pane != "" || !spawnStageBeforeJobClaim(o.Stage) && !spawnOutcomeNotStarted(o):
 		rec.Outcome, rec.Reason = "failed", o.Reason
 	default:
 		rec.Outcome, rec.Reason = "refused", o.Reason
@@ -315,8 +510,22 @@ type placementDeferredSave struct {
 // the deferred file, so the flush retries the row insert. The latest
 // emission replaces an older deferred one for the same attempt.
 func (h *HubServer) deferPlacementTraceSave(requestID string, attempt int, payload []byte, delivery string) {
+	release, err := h.placementTraces.lock(h.closeCtx, requestID)
+	if err != nil {
+		return
+	}
+	defer release()
 	h.placementAppMu.Lock()
 	defer h.placementAppMu.Unlock()
+	if err := h.loadPlacementDeferredSavesLocked(); err != nil {
+		return
+	}
+	if err := h.deferPlacementTraceSaveLocked(requestID, attempt, payload, delivery); err != nil {
+		h.logger.Warn("placement deferred saves could not be persisted", "request_id", requestID, "attempt", attempt)
+	}
+}
+
+func (h *HubServer) deferPlacementTraceSaveLocked(requestID string, attempt int, payload []byte, delivery string) error {
 	kept := false
 	for i, d := range h.placementDeferredSaves {
 		if d.RequestID == requestID && d.Attempt == attempt {
@@ -329,9 +538,7 @@ func (h *HubServer) deferPlacementTraceSave(requestID string, attempt int, paylo
 	if !kept {
 		h.placementDeferredSaves = append(h.placementDeferredSaves, placementDeferredSave{RequestID: requestID, Attempt: attempt, Payload: payload, Delivery: delivery})
 	}
-	if err := h.writePlacementDeferredSavesLocked(); err != nil {
-		h.logger.Warn("placement deferred saves could not be persisted", "request_id", requestID, "attempt", attempt)
-	}
+	return h.writePlacementDeferredSavesLocked()
 }
 
 // writePlacementDeferredSavesLocked rewrites the deferred file; an empty
@@ -355,48 +562,83 @@ func (h *HubServer) writePlacementDeferredSavesLocked() error {
 // loadPlacementDeferredSavesLocked restores deferred saves from the file,
 // once per hub run — a restart must not forget a refused write. Caller
 // holds placementAppMu.
-func (h *HubServer) loadPlacementDeferredSavesLocked() {
+func (h *HubServer) loadPlacementDeferredSavesLocked() error {
 	if h.placementDeferredLoaded {
-		return
+		return nil
 	}
-	h.placementDeferredLoaded = true
 	raw, err := os.ReadFile(h.inbox.deferredPath)
 	if err != nil {
-		if !os.IsNotExist(err) {
-			h.logger.Warn("placement deferred saves could not be read")
+		if os.IsNotExist(err) {
+			h.placementDeferredLoaded = true
+			return nil
 		}
-		return
+		h.logger.Warn("placement deferred saves could not be read")
+		return err
 	}
 	var saves []placementDeferredSave
-	if json.Unmarshal(raw, &saves) != nil {
+	if err := json.Unmarshal(raw, &saves); err != nil {
 		h.logger.Warn("placement deferred saves unreadable")
-		return
+		return err
 	}
 	h.placementDeferredSaves = saves
+	h.placementDeferredLoaded = true
+	return nil
 }
 
 // retryDeferredTraceSaves lands the deferred snapshot writes. Once a row
 // exists, the normal reconciliation picks up the record it tracks.
 func (h *HubServer) retryDeferredTraceSaves() {
 	h.placementAppMu.Lock()
-	h.loadPlacementDeferredSavesLocked()
+	if err := h.loadPlacementDeferredSavesLocked(); err != nil {
+		h.placementAppMu.Unlock()
+		return
+	}
 	deferred := append([]placementDeferredSave(nil), h.placementDeferredSaves...)
 	h.placementAppMu.Unlock()
 	for _, d := range deferred {
-		if err := h.inbox.store.saveSpawnPlacementSnapshot(h.closeCtx, d.RequestID, d.Attempt, d.Payload, d.Delivery); err != nil {
+		release, err := h.placementTraces.lock(h.closeCtx, d.RequestID)
+		if err != nil {
 			continue
 		}
 		h.placementAppMu.Lock()
-		for i, e := range h.placementDeferredSaves {
-			if e.RequestID == d.RequestID && e.Attempt == d.Attempt && string(e.Payload) == string(d.Payload) {
-				h.placementDeferredSaves = append(h.placementDeferredSaves[:i], h.placementDeferredSaves[i+1:]...)
+		index := -1
+		for i, current := range h.placementDeferredSaves {
+			if current.RequestID == d.RequestID && current.Attempt == d.Attempt && string(current.Payload) == string(d.Payload) && current.Delivery == d.Delivery {
+				index = i
 				break
 			}
 		}
+		h.placementAppMu.Unlock()
+		if index < 0 {
+			release()
+			continue
+		}
+		if err := h.inbox.store.saveSpawnPlacementSnapshot(h.closeCtx, d.RequestID, d.Attempt, d.Payload, d.Delivery); err != nil {
+			release()
+			continue
+		}
+		h.placementAppMu.Lock()
+		// Entries for other requests may have moved while the store call ran.
+		index = -1
+		for i, current := range h.placementDeferredSaves {
+			if current.RequestID == d.RequestID && current.Attempt == d.Attempt && string(current.Payload) == string(d.Payload) && current.Delivery == d.Delivery {
+				index = i
+				break
+			}
+		}
+		if index < 0 {
+			h.placementAppMu.Unlock()
+			release()
+			continue
+		}
+		old := h.placementDeferredSaves
+		h.placementDeferredSaves = append(append([]placementDeferredSave(nil), old[:index]...), old[index+1:]...)
 		if err := h.writePlacementDeferredSavesLocked(); err != nil {
+			h.placementDeferredSaves = old
 			h.logger.Warn("placement deferred saves could not be persisted", "request_id", d.RequestID, "attempt", d.Attempt)
 		}
 		h.placementAppMu.Unlock()
+		release()
 	}
 }
 
@@ -411,10 +653,8 @@ func (h *HubServer) hasDeferredTraceSaves() bool {
 	if h.placementDeferredLoaded {
 		return false
 	}
-	if _, err := os.Stat(h.inbox.deferredPath); err != nil {
-		return false
-	}
-	return true
+	_, err := os.Stat(h.inbox.deferredPath)
+	return err == nil || !os.IsNotExist(err)
 }
 
 // enqueueFinishedPlacementRecord spools an already-completed record when its
@@ -488,14 +728,17 @@ func (h *HubServer) pendingPlacementRecords(ctx context.Context) bool {
 		return false
 	}
 	var one int
-	err := h.inbox.store.db.QueryRowContext(ctx, `SELECT 1 FROM spawn_placement_snapshots WHERE recorded=0 LIMIT 1`).Scan(&one)
+	err := h.inbox.store.db.QueryRowContext(ctx, `SELECT 1 FROM spawn_placement_snapshots WHERE recorded<>1 LIMIT 1`).Scan(&one)
 	return err == nil
 }
 
-// flushPlacementRecords retries records still spooled from before a restart,
-// on the same coordinator tick as spawn notifications. Without a pending
-// snapshot there is nothing the outbox owes, so no delivery App is built.
+// flushPlacementRecords retries records still spooled from before a restart.
+// Without a pending snapshot there is nothing the outbox owes, so no delivery
+// App is built.
 func (h *HubServer) flushPlacementRecords(ctx context.Context) {
+	if h.inbox == nil {
+		return
+	}
 	if !h.pendingPlacementRecords(ctx) && !h.hasDeferredTraceSaves() {
 		return
 	}
@@ -513,6 +756,9 @@ func (h *HubServer) flushPlacementRecords(ctx context.Context) {
 	// own attempt persisted.
 	flushed := map[string]bool{}
 	for _, row := range pending {
+		if ctx.Err() != nil {
+			return
+		}
 		if flushed[row.Delivery] {
 			continue
 		}
@@ -531,6 +777,9 @@ func (h *HubServer) flushPlacementRecords(ctx context.Context) {
 	// attempt that is over but owes no rebuildable record (superseded, its
 	// outcome already overwritten by a newer attempt) is sealed here.
 	for _, row := range pending {
+		if ctx.Err() != nil {
+			return
+		}
 		if !row.attemptOver() {
 			continue
 		}

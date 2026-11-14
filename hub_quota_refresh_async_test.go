@@ -294,43 +294,26 @@ func TestHubQuotaRefreshPreservesAttemptBeforePending(t *testing.T) {
 		t.Fatal(err)
 	}
 	var saved hubSpawnTask
-	var spool []byte
-	eventually(t, 3*time.Second, "failed placement attempt retained while quota refresh is pending", func() bool {
+	var trace fleet.PlacementTrace
+	eventually(t, 3*time.Second, "contacted host retained while quota refresh is pending", func() bool {
 		var readErr error
 		saved, readErr = h.inbox.store.spawnTask(t.Context(), request.RequestID)
 		if readErr != nil || saved.Status != "accepted" || saved.Node != nil {
 			return false
 		}
-		spool, readErr = os.ReadFile(filepath.Join(stateDir, "placements", "test-job.1.json"))
-		return readErr == nil
-	})
-	var attempt struct {
-		Record struct {
-			Outcome    string `json:"outcome"`
-			Reason     string `json:"reason"`
-			Candidates []struct {
-				Host   string `json:"host"`
-				Reason string `json:"reason"`
-			} `json:"candidates"`
-		} `json:"record"`
-	}
-	if err := json.Unmarshal(spool, &attempt); err != nil {
-		t.Fatal(err)
-	}
-	if attempt.Record.Outcome != "failed" {
-		t.Errorf("pending attempt outcome=%q, want failed", attempt.Record.Outcome)
-	}
-	if attempt.Record.Reason != "quota_refresh_pending" {
-		t.Errorf("pending attempt reason=%q, want quota_refresh_pending", attempt.Record.Reason)
-	}
-	foundHost := false
-	for _, candidate := range attempt.Record.Candidates {
-		if candidate.Host == "machine-b" && candidate.Reason != "" {
-			foundHost = true
+		payload, _, recorded, readErr := h.inbox.store.spawnPlacementSnapshot(t.Context(), request.RequestID, saved.Attempt)
+		if readErr != nil || recorded || json.Unmarshal(payload, &trace) != nil || trace.Record != nil {
+			return false
 		}
-	}
-	if !foundHost {
-		t.Error("failed placement attempt omitted the contacted host")
+		for _, candidate := range trace.Candidates {
+			if candidate.Host == "machine-b" && candidate.Reason != "" && candidate.Outcome != "chosen" {
+				return true
+			}
+		}
+		return false
+	})
+	if _, err := os.Stat(filepath.Join(stateDir, "placements", "test-job.1.json")); !os.IsNotExist(err) {
+		t.Errorf("pending request spooled a placement record: stat error=%v", err)
 	}
 	mu.Lock()
 	defer mu.Unlock()

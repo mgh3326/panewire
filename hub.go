@@ -422,6 +422,8 @@ type HubServer struct {
 	quotaReplaceBudget time.Duration
 	spawnKick          chan struct{}
 	spawnWorkers       sync.WaitGroup
+	placementKick      chan struct{}
+	placementAsync     atomic.Bool
 	// placementRecordClient is the App the outbox delivers hk placement
 	// records through; built on first use by placementRecordApp.
 	placementRecordClient *fleet.App
@@ -439,7 +441,8 @@ type HubServer struct {
 	placementDeferredLoaded bool
 	quotaRefresh            hubQuotaRefreshScheduler
 	spawnActions            hubSpawnActions
-	spawnAdmissions         hubSpawnAdmissions
+	spawnAdmissions         hubKeyedLocks
+	placementTraces         hubKeyedLocks
 	// drain is the SIGTERM state (hub_drain.go).
 	drain hubDrain
 	// spawnOrphanProbed is when the hub last probed each stranded request's
@@ -770,7 +773,7 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 	}
 	closeCtx, closeCancel := context.WithCancel(context.Background())
 	hub := &HubServer{
-		inbox: inbox, spawnKick: make(chan struct{}, 1),
+		inbox: inbox, spawnKick: make(chan struct{}, 1), placementKick: make(chan struct{}, 1),
 		authPath: config.AuthPath, alertNodes: alertNodes, relayControl: newHubRelayControlState(config, overrides), now: config.Now, staleAfter: config.StaleAfter, keepaliveInterval: config.KeepaliveInterval,
 		gracePeriod: config.GracePeriod, orphanGrace: config.OrphanGrace, unworkedLandingGrace: config.UnworkedLandingGrace, alertObservations: defaultHubAlertObservations, logger: config.Logger,
 		paneSweepInterval: config.PaneSweepInterval, paneSweepAge: config.PaneSweepAge,

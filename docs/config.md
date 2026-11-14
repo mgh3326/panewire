@@ -1779,8 +1779,11 @@ the contacted host in the candidate trace. Placement clears launch state when
 it moves to another candidate. Older executors without failure receipts are
 conservatively recorded as refusals when no acceptance evidence is available.
 If another candidate needs a quota refresh after a host has been contacted,
-the failed attempt is recorded with reason `quota_refresh_pending`; the hub
-request itself remains accepted.
+the hub keeps the request accepted and saves the candidate trace without
+posting a placement record. Any other non-terminal wait does the same. When
+the attempt reaches its terminal result, the hub posts its one immutable
+record with the full durable trace, including hosts refused earlier in that
+attempt.
 
 Delivery uses the existing hk client and `[quota]` URL and credentials. Each
 delivery pass has a two-second budget and cannot change the spawn result.

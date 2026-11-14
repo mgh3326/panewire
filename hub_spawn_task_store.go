@@ -647,6 +647,9 @@ func (s *laneInboxStore) resumeCleanedSpawn(parent context.Context, task hubSpaw
 		return task, err
 	}
 	defer tx.Rollback()
+	if err = s.freezeSpawnPlacementForRetry(ctx, tx, task); err != nil {
+		return task, err
+	}
 	spawn, err := fleet.ValidateSubmission(task.Request)
 	if err != nil {
 		return task, err

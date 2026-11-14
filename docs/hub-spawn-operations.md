@@ -44,8 +44,9 @@ refresh permits placement or its existing deadline expires. A completed refresh
 wakes another placement pass; a failed or timed-out refresh is retried while
 the request remains pending. An already-confirmed account can be selected
 without waiting for the stale accounts. A pending measurement produces no
-terminal refusal event. If the pass already contacted a host, its failed
-placement attempt remains recorded while the request stays accepted. The hub
+terminal refusal event or placement record. If the pass already contacted a
+host, its refusal remains in the durable candidate trace while the request
+stays accepted; the attempt's one record is posted when it ends. The hub
 logs a changed refresh failure with its machine, pool and reason; repeated
 identical failures are not logged on every retry.
 
@@ -221,12 +222,19 @@ request leaves no operation behind.
 The hub stores the logical operation, attempt, absolute deadline, node
 request and destination, per-attempt placement exclusions, any claimed-host
 retry pin, result, task/role reservation and notification outbox. Eight workers perform placement; they
-commit a binding and return without waiting for the node. A separate dispatcher
+persist the chosen placement snapshot, commit a binding and return without
+waiting for the node. Placement waits if its snapshot cannot be saved. A separate dispatcher
 admits at most one request per node. A slow node therefore cannot occupy the
 placement workers or another node's dispatcher. The durable rows are
 authoritative; the in-memory work and node-slot indexes can be rebuilt after a
 restart. HTTP cancellation does not cancel accepted work. Shutdown ends worker
 contexts and waits for them before closing storage.
+
+The snapshot preserves the complete candidate trace across placement passes
+and hub restarts. A separate bounded delivery worker posts the attempt's one
+immutable placement record after the terminal result, and retries delivery
+without holding a placement or node-dispatch slot. A resumed attempt keeps its
+predecessor's finished record while it starts a fresh trace.
 
 The coordinator scans past occupied node slots. It expires a bound request at
 its absolute deadline without waiting for the node, releases its reservation,
