@@ -232,6 +232,28 @@ func (a *App) watch(ctx context.Context, args []string) error {
 		if e != nil {
 			return e
 		}
+		// An open hub close owns this attempt's end (watch_hub_close.go):
+		// completion, the decision timeout, the deadline exit and the
+		// missing-pane fallback all wait, and the watcher writes only the
+		// intended record once the node's close operation is final.
+		if in, ok := pendingHubCloseIntent(j); ok && !j.Reaped {
+			out, err := a.reconcileHubCloseIntent(ctx, j, in)
+			if err != nil {
+				return err
+			}
+			switch out {
+			case hubCloseEnded:
+				return nil
+			case hubCloseWait:
+				if err := a.Sleep(ctx, 5*time.Second); err != nil {
+					return err
+				}
+				continue
+			}
+			if j, e = a.job(id); e != nil {
+				return e
+			}
+		}
 		// The job.lost announced for a quota stop (by this watcher for a
 		// reviewer, by the manager for a handed-over implementer) is not
 		// an end until the grace for the hub's replacement runs out.

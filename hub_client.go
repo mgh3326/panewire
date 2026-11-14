@@ -228,7 +228,10 @@ type HubClient struct {
 	creditPresenceMu   sync.Mutex
 	creditPresence     *creditPresenceSource // the node's credit pool presence publisher; fixtures set it, a missing one builds the default.
 	nodeCloseSettle    time.Duration         // fixture seam; zero is nodePaneCloseSettle.
-	nodeGitLockWait    time.Duration         // fixture seam; zero is nodeGitOpLockWait.
+	// nodeHubCloseIntent records a hub close's intent in the job's ledger;
+	// nil is fleet.RecordHubCloseIntent under the node's jobs root.
+	nodeHubCloseIntent func(ctx context.Context, job string, in fleet.HubCloseIntent) error
+	nodeGitLockWait    time.Duration // fixture seam; zero is nodeGitOpLockWait.
 	busyRelayMu        sync.Mutex
 	busyRelay          *relayBusyManager
 	relayCommand       relayCommandRunner   // fixture seam for agent get/wait.
@@ -1917,7 +1920,7 @@ func (client *HubClient) serve(ctx context.Context, connection *websocket.Conn) 
 const defaultHubHelloAckTimeout = 5 * time.Second
 
 // hubSpawnCapabilities is what an upgraded node advertises in hello.
-var hubSpawnCapabilities = []string{"spawn_v2", "spawn_ops_v1", hubCapabilityApplied}
+var hubSpawnCapabilities = []string{"spawn_v2", "spawn_ops_v1", hubCapabilityApplied, hubCapabilityCloseOps}
 
 func (client *HubClient) helloAckTimeoutOrDefault() time.Duration {
 	if client.helloAckTimeout > 0 {

@@ -4,9 +4,15 @@ import (
 	"context"
 	"errors"
 	"os"
+	"path/filepath"
 
 	"github.com/mgh3326/panewire/internal/fleet"
 )
+
+// hubCapabilityCloseOps is advertised in hello once a node both runs the close
+// operations and records the hub-close intent its job watchers defer to (hk
+// 4652): a hub issues pane.close_op only to a node that advertises it.
+const hubCapabilityCloseOps = "close_ops_v1"
 
 // Close operations (hk 4594; docs/node-commands.md, "Close operations") are
 // pane.close with a hub-chosen request id and a durable journal in the job's
@@ -47,6 +53,11 @@ type nodePaneCloseOpArgs struct {
 	AgentStatus  string `json:"agent_status"`
 	Cwd          string `json:"cwd"`
 	AllowUnnamed bool   `json:"allow_unnamed"`
+	// EndReason is the hk end_reason of the lost record that ends the job
+	// once the close is final (hk 4652): recorded in the job's ledger as a
+	// hub-close intent before the operation is registered, so the job's
+	// watcher writes no competing record and finishes with exactly this one.
+	EndReason string `json:"end_reason"`
 }
 
 // nodePaneCloseOpResult.Outcome is a final fleet.CloseOp state, or
@@ -75,7 +86,7 @@ type nodeCloseOpStatusResult struct {
 }
 
 func validNodePaneCloseOpArgs(args nodePaneCloseOpArgs) bool {
-	return fleet.ValidCloseOpID(args.RequestID) && fleet.ValidJobID(args.Job) && validNodeAttemptToken(args.Attempt) && nodeCommandPaneIDPattern.MatchString(args.PaneID) && validNodeJobName(args.Name) && nodePaneClosableStatus[args.AgentStatus] && validNodeCommandPath(args.Cwd)
+	return fleet.ValidCloseOpID(args.RequestID) && fleet.ValidJobID(args.Job) && validNodeAttemptToken(args.Attempt) && nodeCommandPaneIDPattern.MatchString(args.PaneID) && validNodeJobName(args.Name) && nodePaneClosableStatus[args.AgentStatus] && validNodeCommandPath(args.Cwd) && validNodeEndReason(args.EndReason) && args.EndReason != ""
 }
 
 // validNodeAttemptToken bounds an attempt token: a ledger event file name.
@@ -333,11 +344,24 @@ func (client *HubClient) bindCloseOp(ctx context.Context, job *os.Root, op fleet
 	case !bound:
 		return op, nil, nodeCloseOpMismatch, ""
 	}
+	// The intent precedes the registration: a crash between the two leaves
+	// an intent with no operation, which the watcher waits on until the
+	// hub's repeat of this request registers and settles it.
+	if client.recordHubCloseIntent(ctx, args.Job, fleet.HubCloseIntent{RequestID: args.RequestID, Attempt: attempt, Pane: args.PaneID, Label: args.Name, EndReason: args.EndReason}) != nil {
+		return op, nil, "", "journal_failed"
+	}
 	op = fleet.CloseOp{RequestID: args.RequestID, PaneID: args.PaneID, Attempt: attempt, State: fleet.CloseOpRegistered, Created: now, Updated: now}
 	if fleet.WriteCloseOp(job, op) != nil {
 		return op, nil, "", "journal_failed"
 	}
 	return op, &target, "", ""
+}
+
+func (client *HubClient) recordHubCloseIntent(ctx context.Context, job string, in fleet.HubCloseIntent) error {
+	if client.nodeHubCloseIntent != nil {
+		return client.nodeHubCloseIntent(ctx, job, in)
+	}
+	return fleet.RecordHubCloseIntent(ctx, filepath.Join(client.jobsInboxRoot, "jobs"), job, in)
 }
 
 func (client *HubClient) finishCloseOp(job *os.Root, op fleet.CloseOp, state string) (any, string) {
