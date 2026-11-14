@@ -997,7 +997,9 @@ devin-free-limit` writes — and the stop publishes it to the shared store at
 once (`panewire quota refresh devin`): the record is merged over the current
 reading, without spending a provider measurement, so every host's selection
 drops the free rungs before the next placement rather than after the next
-measurement. An unknown reset holds for one hour. The rung returns on its own
+measurement. A SWE-2 free rung's short "Reached request rate limit" stop
+writes the same record (hk 4644), with the short reset it shows. An unknown
+reset holds for one hour. The rung returns on its own
 once the reset passes. The quota gate refuses the same rung on the same
 reading; selection drops it before the gate. A `quota_stop pool=devin-free`
 replacement also carries `--exclude-pool devin-free`, which excludes the free

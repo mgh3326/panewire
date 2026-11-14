@@ -113,7 +113,7 @@ func newQuotaStopManager(s *Store, root string, act bool, logger *slog.Logger) (
 		return relayInjectForHarnessGuarded(sendCtx, pane, harness, text, nil, func(screen string) bool {
 			stop, ok := classifyQuotaStop(screen, time.Now(), time.Local)
 			_, composerOK := relayComposer(harness, screen)
-			return ok && stop.Pool == pool && !stop.Choice && composerOK
+			return ok && stop.SamePool(pool) && !stop.Choice && composerOK
 		})
 	}
 	return q, nil
@@ -187,15 +187,17 @@ func (q *quotaStopManager) jobForPane(ctx context.Context, pane string) (HubActi
 }
 
 // jobFacts reads what the job's own events say that the scanned active job
-// does not keep: the role and the task it inherited. The role is the spawn
-// receipt's (reviewer, implementer, consult): the claim always says implementer, and the
-// scanned job keeps only implementer. inherited is the job a
-// replacement's task is still bound to (the claim's task_inherited_from).
-func (q *quotaStopManager) jobFacts(jobID, scanned string) (role, inherited, taskID string) {
+// does not keep: the role, the task it inherited, and the profile it runs.
+// The role is the spawn receipt's (reviewer, implementer, consult): the claim
+// always says implementer, and the scanned job keeps only implementer.
+// inherited is the job a replacement's task is still bound to (the claim's
+// task_inherited_from). profile is the job.spawned receipt's, empty when the
+// events do not name one.
+func (q *quotaStopManager) jobFacts(jobID, scanned string) (role, inherited, taskID, profile string) {
 	dir := filepath.Join(q.root, "jobs", jobID, "events")
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return scanned, "", ""
+		return scanned, "", "", ""
 	}
 	role = scanned
 	claimRole, spawnRole := "", ""
@@ -215,9 +217,11 @@ func (q *quotaStopManager) jobFacts(jobID, scanned string) (role, inherited, tas
 		var extra struct {
 			Inherited string `json:"task_inherited_from"`
 			TaskID    any    `json:"task_id"`
+			Profile   string `json:"profile"`
 			Payload   struct {
 				Inherited string `json:"task_inherited_from"`
 				TaskID    any    `json:"task_id"`
+				Profile   string `json:"profile"`
 			} `json:"payload"`
 		}
 		_ = json.Unmarshal(contents, &extra)
@@ -239,6 +243,9 @@ func (q *quotaStopManager) jobFacts(jobID, scanned string) (role, inherited, tas
 			if event.role() != "" {
 				spawnRole = event.role()
 			}
+			if v := firstHubValue(extra.Profile, extra.Payload.Profile); v != "" {
+				profile = v
+			}
 		}
 	}
 	switch {
@@ -247,7 +254,7 @@ func (q *quotaStopManager) jobFacts(jobID, scanned string) (role, inherited, tas
 	case claimRole != "":
 		role = claimRole
 	}
-	return role, inherited, taskID
+	return role, inherited, taskID, profile
 }
 
 func (q *quotaStopManager) loadPolicy(ctx context.Context, now time.Time) (quotaPolicy, bool) {
@@ -404,9 +411,8 @@ func (q *quotaStopManager) observe(ctx context.Context, c idleWakeCandidate, now
 	if !ok || quotaExcluded(c.Label) {
 		return true
 	}
-	var inherited string
-	var taskID string
-	job.Role, inherited, taskID = q.jobFacts(job.JobID, job.Role)
+	var inherited, taskID, profile string
+	job.Role, inherited, taskID, profile = q.jobFacts(job.JobID, job.Role)
 	// Reserve the wake before touching the screen. A restart can never reread it.
 	fresh, _, err := q.reserveDecision(scanCtx, c, job, now)
 	if err != nil || !fresh {
@@ -441,6 +447,9 @@ func (q *quotaStopManager) observe(ctx context.Context, c idleWakeCandidate, now
 	}
 	rule, agent := herdrQuotaSignal(readCtx, c.PaneID)
 	stop, basis, ok := quotastop.Detect(screen, agent, rule, now, time.Local)
+	// Devin's request-rate-limit text names the account limit but not the rung
+	// that drew it: the running profile names the pool (hk 4644).
+	stop = fleet.QuotaStopPool(stop, profile)
 	outcome := "not_quota"
 	if ok {
 		outcome = "quota"
@@ -731,7 +740,7 @@ func (q *quotaStopManager) tick(ctx context.Context, now time.Time, advanceSettl
 			continue
 		}
 		stop, classified := classifyQuotaStop(screen, now, time.Local)
-		if !classified || stop.Pool != r.pool || stop.Choice {
+		if !classified || !stop.SamePool(r.pool) || stop.Choice {
 			q.failResume(ctx, r.id, r.pane, "screen_changed_or_dialog")
 			continue
 		}

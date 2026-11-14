@@ -17,6 +17,21 @@ type Stop struct {
 	Pool              string
 	Reset             time.Time
 	Choice            bool
+	// PoolFromProfile marks a stop whose text names the Devin account limit
+	// but not the rung that drew it (Devin's request rate limit, hk 4644):
+	// the caller names the pool from the running profile instead.
+	PoolFromProfile bool
+}
+
+// SamePool reports whether pool names this stop's pool. A stop whose pool the
+// running profile decides matches either Devin pool: the screen cannot tell a
+// free rung's limit from a paid rung's, so a resume guard must not read that
+// difference as a changed screen.
+func (s Stop) SamePool(pool string) bool {
+	if s.PoolFromProfile {
+		return pool == "devin" || pool == "devin-free"
+	}
+	return s.Pool == pool
 }
 
 var (
@@ -25,13 +40,17 @@ var (
 	devin = regexp.MustCompile(`(?i)reached free model rate limit(?:\s|[·.…:]|$)`)
 	// devinPaid is the paid Devin weekly window spent (hk 4545). It is the devin
 	// pool, not devin-free: paid devin-ds41 spends the account's paid window.
-	devinPaid   = regexp.MustCompile(`(?i)quota exhausted\s*[—–-]\s*your weekly usage quota has been exhausted(?:\s|[·.…:]|$)`)
-	claude      = regexp.MustCompile(`(?i)^you've hit your (?:(?:weekly|session) )?limit(?:\s|[·.:]|$)`)
-	codexSignal = regexp.MustCompile(`(?i)^you've hit your usage limit[.·:].*try again at`)
-	codex       = regexp.MustCompile(`(?i)try again at\s+([0-9]{1,2}:[0-9]{2}\s*(?:AM|PM)?)(?:\s+(UTC|GMT|Z))?`)
-	atClock     = regexp.MustCompile(`(?i)\bat\s+([0-9]{1,2}:[0-9]{2}\s*(?:AM|PM)?)(?:\s+(UTC|GMT|Z))?`)
-	relative    = regexp.MustCompile(`(?i)reset(?:s)? in\s+(\d+)\s*(seconds?|minutes?|hours?)(?:\s*(?:and\s+|,\s*)?(\d+)\s*(seconds?|minutes?))?`)
-	dateReset   = regexp.MustCompile(`(?i)resets?\s+([A-Za-z]{3,9})\s+(\d{1,2}),?\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm))(?:\s+(UTC|GMT|Z)|\s*\(([A-Za-z_]+/[A-Za-z_]+)\))?`)
+	devinPaid = regexp.MustCompile(`(?i)quota exhausted\s*[—–-]\s*your weekly usage quota has been exhausted(?:\s|[·.…:]|$)`)
+	// devinRequest is Devin's short request-rate-limit stop (hk 4644). Its
+	// message wraps across rows, so only the first row is matched here;
+	// statusBlock joins the continuation.
+	devinRequest = regexp.MustCompile(`(?i)reached request rate limit(?:\s|[·.…:]|$)`)
+	claude       = regexp.MustCompile(`(?i)^you've hit your (?:(?:weekly|session) )?limit(?:\s|[·.:]|$)`)
+	codexSignal  = regexp.MustCompile(`(?i)^you've hit your usage limit[.·:].*try again at`)
+	codex        = regexp.MustCompile(`(?i)try again at\s+([0-9]{1,2}:[0-9]{2}\s*(?:AM|PM)?)(?:\s+(UTC|GMT|Z))?`)
+	atClock      = regexp.MustCompile(`(?i)\bat\s+([0-9]{1,2}:[0-9]{2}\s*(?:AM|PM)?)(?:\s+(UTC|GMT|Z))?`)
+	relative     = regexp.MustCompile(`(?i)reset(?:s)? in\s+(\d+)\s*(seconds?|minutes?|hours?)(?:\s*(?:and\s+|,\s*)?(\d+)\s*(seconds?|minutes?))?`)
+	dateReset    = regexp.MustCompile(`(?i)resets?\s+([A-Za-z]{3,9})\s+(\d{1,2}),?\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm))(?:\s+(UTC|GMT|Z)|\s*\(([A-Za-z_]+/[A-Za-z_]+)\))?`)
 )
 
 // Classify reports the quota stop shown as the last activity of screen.
@@ -50,6 +69,9 @@ func Classify(screen string, now time.Time, local *time.Location) (Stop, bool) {
 		out.Pool = "devin-free"
 	case devinPaid.MatchString(screen):
 		out.Pool = "devin"
+	case devinRequest.MatchString(screen):
+		out.Pool = "devin"
+		out.PoolFromProfile = true
 	case codexSignal.MatchString(screen) && (strings.Contains(strings.ToLower(screen), "limit") || strings.Contains(strings.ToLower(screen), "quota")):
 		out.Pool = "codex"
 	case claude.MatchString(screen):
@@ -186,13 +208,24 @@ func statusBlock(screen string) (string, bool) {
 	var limit string
 	var tail []string
 	found, later, open, gap := false, false, false, false
+	// limitOpen marks the Devin request-rate-limit banner, whose message wraps
+	// onto the next rows indented with the banner body. Those rows extend the
+	// limit line instead of counting as later agent output; the flag clears at
+	// the banner's closing sentence or at any row that ends the block.
+	limitOpen, limitIndent := false, 0
 	for _, raw := range strings.Split(strings.ReplaceAll(screen, "\r", ""), "\n") {
 		line := strings.TrimSpace(raw)
+		indent := len(raw) - len(strings.TrimLeft(raw, " \t"))
 		switch {
 		case line == "" || ruleLine(line):
 			open = open && line == ""
 			gap = gap || line == ""
+			limitOpen = false
 			tail = append(tail, line)
+		case limitOpen && indent > 0 && indent >= limitIndent && !promptChrome(line) && !userTurn(line) && !footerLine(line):
+			limit += " " + line
+			tail = nil
+			limitOpen = !requestLimitComplete(limit)
 		case open && !promptChrome(line) && !userTurn(line) && !(gap && !strings.HasPrefix(raw, " ") && !strings.HasPrefix(raw, "\t") && limitRow(line)):
 			// Under a user turn with no rule yet: agent output or a message
 			// row of unknown ownership. A flush-left status after a blank row
@@ -206,8 +239,10 @@ func statusBlock(screen string) (string, bool) {
 			line = strings.TrimLeft(line, statusPrefixes)
 			if limitRow(line) {
 				limit, tail, found, later, open = line, nil, true, false, false
+				limitOpen, limitIndent = devinRequest.MatchString(line) && !requestLimitComplete(line), indent
 			} else {
 				later = true
+				limitOpen = false
 			}
 		}
 	}
@@ -217,10 +252,17 @@ func statusBlock(screen string) (string, bool) {
 	return limit + "\n" + strings.Join(tail, "\n"), true
 }
 
+// requestLimitComplete reports whether the joined Devin request-rate-limit
+// banner has reached its closing sentence. Until then its message may wrap
+// onto the next banner-body rows; after it no row can be a continuation.
+func requestLimitComplete(text string) bool {
+	return strings.Contains(strings.ToLower(text), "send a message to retry")
+}
+
 // limitRow reports a row that is a CLI limit line.
 func limitRow(line string) bool {
 	line = strings.TrimLeft(line, statusPrefixes)
-	return devin.MatchString(line) || devinPaid.MatchString(line) || claude.MatchString(line) || codexSignal.MatchString(line)
+	return devin.MatchString(line) || devinPaid.MatchString(line) || devinRequest.MatchString(line) || claude.MatchString(line) || codexSignal.MatchString(line)
 }
 
 // userTurn reports whether line starts a user turn: the prompt mark of devin,
@@ -255,9 +297,12 @@ func promptChrome(line string) bool {
 }
 
 // footerLine reports the option menu and status footer a limit screen draws.
+// Devin also prints its working directory as "⏺ <path>" above the composer,
+// between a stop banner and the rule (hk 4644); assistant output rows share
+// the ⏺ mark, so only the working-directory form is chrome.
 func footerLine(line string) bool {
 	lower := strings.ToLower(line)
-	for _, prefix := range []string{"choose an option:", "1. wait", "2. upgrade", "1. stop", "2. use", "swe-2", "esc to", "press enter", "select an option"} {
+	for _, prefix := range []string{"choose an option:", "1. wait", "2. upgrade", "1. stop", "2. use", "swe-2", "esc to", "press enter", "select an option", "⏺ ~/", "⏺ /"} {
 		if strings.HasPrefix(lower, prefix) {
 			return true
 		}

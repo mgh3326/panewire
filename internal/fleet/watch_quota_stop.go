@@ -226,7 +226,7 @@ func (a *App) quotaStopScreen(ctx context.Context, j Job, ag Agent, seen *quotaS
 		seen.read, seen.seq = true, *ag.StateChangeSeq
 	}
 	if stop, ok := quotastop.Classify(r.Out, a.Now(), time.Local); ok {
-		return stop, quotaStopFound
+		return QuotaStopPool(stop, j.Profile), quotaStopFound
 	}
 	return quotastop.Stop{}, quotaNotStopped
 }
