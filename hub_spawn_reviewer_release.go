@@ -2,7 +2,6 @@ package panewire
 
 import (
 	"context"
-	"io"
 	"time"
 
 	"github.com/mgh3326/panewire/internal/fleet"
@@ -10,17 +9,16 @@ import (
 
 // A reviewer pane that finished, or stopped at a startup prompt, and stays open
 // keeps the (task, review pass) reservation held, so every later review of the
-// task is refused until the desk closes the pane by hand (hk 3315). Two callers
-// apply one rule:
+// task is refused until the desk closes the pane by hand (hk 3315). A new
+// submission for the same key releases a reviewer holder when its pane is not
+// working and has stayed so past the grace.
 //
-//   - a new submission for the same key releases a reviewer holder when its
-//     pane is not working and has stayed so past the grace;
-//   - the hub's own pass (reviewerReleaseInterval) does the same for every live
-//     reviewer spawn whose hk job never reached a terminal state. A reviewer
-//     that finishes without running `done` (the common case for a daemon-started
-//     `mwr-*` reviewer) otherwise leaves an idle pane, a live job record and a
-//     lane row behind, and the node's ended-job sweep never sees it: the lane
-//     cap fills and new lanes are refused `lane_quota_exceeded` (hk 4658).
+// A reviewer that finishes without running `done` (the common case for a
+// daemon-started `mwr-*` reviewer) otherwise leaves an idle pane, a live job
+// record and a lane row behind, and the node's ended-job sweep never sees it:
+// the lane cap fills and new lanes are refused `lane_quota_exceeded` (hk 4658).
+// The unattended pass that ends such a reviewer on the hub's own schedule moved
+// to hk 4684; this file keeps the submission path only.
 //
 // An idle pane is not proof that the work ended: a reviewer that asked a
 // question is idle too. The close therefore carries the job id, and the node
@@ -39,12 +37,6 @@ const (
 	// The reason names double as the INFO line's branch.
 	reviewerPaneFinished = "reviewer_pane_finished"
 	reviewerPaneStuck    = "reviewer_pane_stuck"
-
-	// reviewerReleaseInterval is how often the hub looks for a finished
-	// reviewer pane that no submission has reclaimed. It is unrelated to the
-	// ended-job pane sweep's interval: that pass needs a terminal record, and
-	// this one is what writes it.
-	reviewerReleaseInterval = 5 * time.Minute
 )
 
 // releaseFinishedReviewerPane closes a reviewer holder's not-working pane and
@@ -61,12 +53,12 @@ func (h *HubServer) releaseFinishedReviewerPane(ctx context.Context, app *fleet.
 	return h.releaseFinishedReviewerHolder(ctx, app, spawn, holder, record, probe, "submission", request.RequestID)
 }
 
-// releaseFinishedReviewerHolder is the rule both callers share: the holder is a
-// reviewer spawn in succeeded or failed state, its hk record still claimed or
-// spawned, and its pane present under its own id and label with a closable
-// status past the grace. source names the caller in the INFO line; submitter is
-// the submitting request there, "" for the sweep. The node refuses the close if
-// the job's own records show an unanswered question.
+// releaseFinishedReviewerHolder is the release rule: the holder is a reviewer
+// spawn in succeeded or failed state, its hk record still claimed or spawned,
+// and its pane present under its own id and label with a closable status past
+// the grace. source names the caller in the INFO line; submitter is the
+// submitting request there, "" for a caller with none. The node refuses the
+// close if the job's own records show an unanswered question.
 func (h *HubServer) releaseFinishedReviewerHolder(ctx context.Context, app *fleet.App, spawn fleet.Spawn, holder hubSpawnTask, record map[string]any, probe heldProbe, source, submitter string) (closed bool, branch string, remaining time.Duration) {
 	if spawn.Role != reviewerRole || probe.state != heldPanePresent {
 		return false, "", 0
@@ -107,7 +99,7 @@ func (h *HubServer) releaseFinishedReviewerHolder(ctx context.Context, app *flee
 		case "capture_failed", "close_unreadable", "pane_changed":
 		default:
 			// The close ran and the record write did not: the pane is gone, so
-			// the sweep's absent-pane pass retries this write.
+			// the next submission's absent-pane check retries this write.
 			h.logger.Warn("hub closed a reviewer pane but could not mark the job",
 				"reason", reason, "source", source, "job", holder.Job, "holder_host", spawnHolderHost(holder))
 		}
@@ -115,155 +107,13 @@ func (h *HubServer) releaseFinishedReviewerHolder(ctx context.Context, app *flee
 	}
 	attrs := []any{"branch", branch, "source", source, "role_key", spawn.RoleKey(), "job", holder.Job}
 	if submitter != "" {
-		// The submission that triggered the release; the sweep has none.
+		// The submission that triggered the release; a caller with none passes "".
 		attrs = append(attrs, "request", submitter)
 	}
 	attrs = append(attrs, "holder_request", holder.Request.RequestID, "holder_job", holder.Job, "holder_status", holder.Status,
 		"holder_host", spawnHolderHost(holder), "holder_pane", row.PaneID, "pane_status", row.AgentStatus)
 	h.logger.Info("hub closed a finished reviewer pane", attrs...)
 	return true, branch, 0
-}
-
-// reviewerPaneStayedFinished records that the holder's pane is finished now and
-// reports whether the previous pass saw it finished too. An agent's status can
-// read idle between turns while its job still runs, so one sighting never
-// authorises a close; the node's question check covers what the pane asked,
-// and this covers what it was doing.
-func (h *HubServer) reviewerPaneStayedFinished(job, pane string) bool {
-	key := job + "\x00" + pane
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if h.reviewerPaneSeen == nil {
-		h.reviewerPaneSeen = map[string]bool{}
-	}
-	seen := h.reviewerPaneSeen[key]
-	h.reviewerPaneSeen[key] = true
-	return seen
-}
-
-// retainReviewerPanes forgets the panes the pass no longer found finished, so a
-// pane that goes back to work starts its two sightings again.
-func (h *HubServer) retainReviewerPanes(live map[string]bool) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	for key := range h.reviewerPaneSeen {
-		if !live[key] {
-			delete(h.reviewerPaneSeen, key)
-		}
-	}
-}
-
-// runReviewerPaneRelease runs releaseFinishedReviewerSpawns once per
-// reviewerReleaseInterval until ctx ends.
-func (h *HubServer) runReviewerPaneRelease(ctx context.Context) {
-	ticker := time.NewTicker(reviewerReleaseInterval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			h.releaseFinishedReviewerSpawns(ctx)
-		}
-	}
-}
-
-// releaseFinishedReviewerSpawns releases every live reviewer spawn whose pane
-// finished and whose hk job is still claimed or spawned. A live operation is
-// one the hub placed whose job a node still reports active, so a released
-// reviewer drops out on the next heartbeat and is not visited again. The
-// reservation is left in place: the next submission for the key releases it
-// through the terminal-record path, exactly as for a reviewer that wrote its
-// own record.
-func (h *HubServer) releaseFinishedReviewerSpawns(ctx context.Context) {
-	if h.inbox == nil {
-		return
-	}
-	tasks, err := h.liveSpawnTasks(ctx)
-	if err != nil {
-		h.logger.Warn("reviewer pane release skipped", "reason", "store_unavailable")
-		return
-	}
-	type reviewer struct {
-		holder hubSpawnTask
-		spawn  fleet.Spawn
-	}
-	var reviewers []reviewer
-	for _, holder := range tasks {
-		if holder.Status != "succeeded" || holder.Outcome.Pane == "" {
-			continue
-		}
-		spawn, err := fleet.ValidateSubmission(holder.Request)
-		if err != nil || spawn.Role != reviewerRole {
-			continue
-		}
-		reviewers = append(reviewers, reviewer{holder: holder, spawn: spawn})
-	}
-	if len(reviewers) == 0 {
-		// No live reviewer: any sighting kept from an earlier pass is stale.
-		h.retainReviewerPanes(nil)
-		return
-	}
-	app, err := h.newSpawnApp(io.Discard, io.Discard)
-	if err != nil {
-		h.logger.Warn("reviewer pane release skipped", "reason", "app_unavailable")
-		return
-	}
-	live := map[string]bool{}
-	for _, r := range reviewers {
-		readCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		record, exists, readErr := app.ExistingJob(readCtx, r.holder.Job)
-		cancel()
-		if readErr != nil || !exists {
-			continue
-		}
-		switch state, _ := record["state"].(string); state {
-		case "claimed", "spawned":
-		default:
-			continue
-		}
-		name := heldAgentName(r.holder, record)
-		probe := h.probeHeldPane(ctx, spawnHolderHost(r.holder), r.holder.Outcome.Pane, name)
-		if probe.state == heldPaneAbsent {
-			// The pane is gone but the record is still live: a close whose
-			// mark write failed leaves exactly this, and no later pass probes a
-			// pane that is not there. The node re-checks its ledger and writes
-			// the record, so a retry is safe.
-			if marked, reason := h.markHolderJobLostBecause(ctx, app, r.holder, name, reviewerPaneFinished); !marked {
-				h.logger.Warn("hub could not mark a closed reviewer pane", "reason", reason, "source", "sweep", "job", r.holder.Job)
-			}
-			continue
-		}
-		if probe.state != heldPanePresent || !nodePaneClosableStatus[probe.row.AgentStatus] {
-			continue
-		}
-		live[r.holder.Job+"\x00"+r.holder.Outcome.Pane] = true
-		if !h.reviewerPaneStayedFinished(r.holder.Job, r.holder.Outcome.Pane) {
-			continue
-		}
-		// An idle pane can be a live reviewer between turns (waiting on a
-		// background command, a wakeup, or a prompt). The unattended pass needs
-		// positive progress before it closes: the agent is done, or it posted
-		// the result it was spawned for. The submission path, which an operator
-		// triggers, keeps the wider status set.
-		if probe.row.AgentStatus != "done" {
-			var ledger nodeJobResult
-			if !h.nodeCall(ctx, spawnHolderHost(r.holder), nodeCommandJobResult, nodeJobResultArgs{Job: r.holder.Job}, spawnHeldPaneProbeWait, &ledger) || !ledger.Found || !nodeResultPosted(ledger) {
-				h.logger.Info("hub kept a reviewer pane", "reason", "awaiting_result", "source", "sweep",
-					"role_key", r.spawn.RoleKey(), "job", r.holder.Job, "pane_status", probe.row.AgentStatus)
-				continue
-			}
-		}
-		h.releaseFinishedReviewerHolder(ctx, app, r.spawn, r.holder, record, probe, "sweep", "")
-	}
-	h.retainReviewerPanes(live)
-}
-
-// nodeResultPosted reports a job.result that carries a validated findings
-// object or a report on disk. A null findings field decodes to the bytes
-// "null", not nil, so the emptiness check is the length.
-func nodeResultPosted(ledger nodeJobResult) bool {
-	return (len(ledger.Findings) > 0 && !isJSONNull(ledger.Findings)) || ledger.Report.Present
 }
 
 // retryAfterSeconds is the whole seconds a caller should wait for a hold that
