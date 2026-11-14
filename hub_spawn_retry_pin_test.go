@@ -87,6 +87,9 @@ func retryHK(t *testing.T) {
 			io.WriteString(w, `{"id":42,"title":"work (grade B, T1)","state":"ready","refs":{}}`)
 		case r.Method == http.MethodPut && strings.HasPrefix(r.URL.Path, "/v1/documents/"):
 			io.WriteString(w, `{"document":{},"changed":true}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/placements":
+			w.WriteHeader(http.StatusServiceUnavailable)
+			io.WriteString(w, `{"error":"unavailable"}`)
 		default:
 			w.WriteHeader(http.StatusNotFound)
 			io.WriteString(w, `{"error":"not_found"}`)
