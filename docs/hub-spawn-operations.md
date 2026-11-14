@@ -501,24 +501,39 @@ unsent.
    after `start_by` is not taken.
 6. A replay of a sent attempt whose fence was already committed (a hub
    stopped between fence and settlement) is settled as fenced without being
-   sent again.
+   sent again. Otherwise a replay is fenced only under the boot-id rule
+   below.
 
-#### Rolling the hub back past this change
+#### Which hub may fence: the boot id
 
-An older hub ignores `spawn_attempt_grants` and `grant_required`. It replays
-a sent attempt without `start_by_ms`, and a node handles a frame without
-`start_by_ms` the old way: it starts it with no grant. That still starts the
-attempt at most once, because the newer hub re-places an attempt only after
-it has settled it, and a settled attempt is never replayed. A granted row is
-inert on the older hub: it keeps ownership on silence, as before this change
-(fails closed). The one unsafe row is a fence committed but not settled (the
-hub stopped between the two). The older hub would replay that attempt and the
-node could start it; a newer hub started later would then take the fence as
-proof that it never started and place it again.
+Each hub process has a random boot id. When it first sends a grant-required
+attempt it records its boot id for that node request id in
+`spawn_attempt_sends`. A replay never writes that row. A hub arms the fence
+only for an attempt whose row holds its own boot id. Any other non-terminal
+attempt, sent by an earlier process or with no row, is replayed with
+`start_by_ms` but has no fence timer and is never re-placed on silence. It
+settles only from the node's own answer (including the node's
+`deadline_not_started`, which its journal makes final for every copy of the
+frame) or through the earlier reconcile and deadline path, which keeps
+ownership. An existing fence row stays authoritative: a replay of an attempt
+already fenced settles as fenced without a resend.
 
-Procedure:
+The reason: an earlier process, such as an older hub after a rollback, may
+have sent a frame without `start_by_ms` that still waits at the node's spawn
+gate and would start with no grant. Only the process that sent every frame of
+an attempt knows that none of them can start without its grant.
 
-1. On the running (newer) hub, count fenced attempts that are still sent:
+#### Rolling the hub back past this change, and forward again
+
+An older hub ignores `spawn_attempt_grants`, `spawn_attempt_sends` and
+`grant_required`. It replays sent attempts without `start_by_ms`, and a node
+runs such a frame the old way, with no grant. That starts the attempt at most
+once, because nothing re-places it. On silence the older hub keeps
+ownership, as before this change, so a granted row fails closed.
+
+1. Before rolling back, check for fences that are committed but not settled.
+   This is normally 0, and a newer hub left running settles them within one
+   pass:
 
    ```sql
    SELECT count(*) FROM spawn_operations o
@@ -528,27 +543,20 @@ Procedure:
    ```
 
    Run it with `sqlite3 <inbox store>` or `psql` against the hub database.
-   It is normally 0. If it is not, leave the newer hub running: its replay
-   settles each such attempt within one coordinator pass. Run the query again.
-2. When the count is 0, roll back. No grant switch or node drain is needed.
-3. Before rolling forward again, delete the fence rows of attempts that are
-   still sent. The older hub may have started them, and it writes no rows:
-
-   ```sql
-   DELETE FROM spawn_attempt_grants WHERE state = 'fenced' AND node_id IN
-     (SELECT node_id FROM spawn_operations
-       WHERE status IN ('dispatching','reconciling','deadline_exceeded'));
-   ```
-
-   The newer hub then replays them with `start_by_ms`. A node that already
-   journaled the attempt answers from its journal and asks for no grant.
+   This count is a check, not the safety argument.
+2. Roll back. You need no grant switch, node drain or row edits.
+3. Roll forward. The newer hub starts with a new boot id, so no attempt the
+   older hub could have replayed is fenceable. They settle from their nodes'
+   answers or keep ownership as above. Only attempts the newer hub sends
+   first can be fenced. Leave the rows as they are: an existing fence row is
+   still authoritative.
 
 | Case | Test |
 |---|---|
 | Grant and fence exclude each other; the grant is idempotent; only the bound machine's grant-required sent attempt is granted | `TestSpawnGrantAndFenceExcludeEachOther_t4612` |
 | An ungranted attempt is fenced and re-placed; a late claim is refused | `TestSpawnUngrantedAttemptIsFencedAndReplaced_t4612` |
 | A granted silent attempt keeps ownership and its reservation, also after a restart | `TestSpawnGrantedSilentAttemptKeepsOwnership_t4612` |
-| A hub restart's replay of a sent, ungranted attempt carries a fresh `start_by` and fences it | `TestSpawnRestartReplayFencesUngrantedAttempt_t4612` |
+| Only an attempt this hub process sent first is fenced; one from an earlier process, silent past `start_by`, is not fenced or re-placed | `TestSpawnFenceOnlyForAttemptsThisBootSent_t4612` |
 | Coordinator placement on a real node: grant-required binding, recorded grant, delivered through the node's read loop | `TestSpawnGrantEndToEndWithRealNode_t4612` |
 | A committed fence settles on replay without a resend | `TestSpawnCommittedFenceSettlesOnReplayWithoutResend_t4612` |
 | A fence store error is retried | `TestSpawnFenceRetriesAfterStoreError_t4612` |

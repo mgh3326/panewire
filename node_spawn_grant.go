@@ -36,6 +36,18 @@ func (client *HubClient) awaitSpawnGrant(ctx context.Context, peer *hubClientCon
 	}()
 	waitCtx, cancel := context.WithDeadline(ctx, startBy)
 	defer cancel()
+	if peer.closed != nil {
+		// The claim write and the wait both end with the connection.
+		stop := make(chan struct{})
+		defer close(stop)
+		go func() {
+			select {
+			case <-peer.closed:
+				cancel()
+			case <-stop:
+			}
+		}()
+	}
 	if peer.write(waitCtx, struct {
 		Type      string `json:"type"`
 		RequestID string `json:"request_id"`

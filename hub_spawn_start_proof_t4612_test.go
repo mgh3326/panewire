@@ -271,36 +271,67 @@ func TestSpawnGrantRequiredSkipsNodeWithoutCapability_t4612(t *testing.T) {
 	}
 }
 
-// After a hub restart the coordinator's replay of a sent, ungranted attempt
-// carries a fresh start_by and fences it on silence like the first send.
-func TestSpawnRestartReplayFencesUngrantedAttempt_t4612(t *testing.T) {
-	retryHK(t)
-	path := filepath.Join(t.TempDir(), "inbox.sqlite3")
-	first := startProofHub(t, path)
-	task, _ := startProofTask(t, first, 461260, true)
-	sentSpawnFixture(t, first.inbox.store, task)
-	_ = first.Close()
-	h := startProofHub(t, path)
-	server := httptest.NewServer(h.Handler())
-	defer server.Close()
-	desktop := startProofNode(t, h, server, "desktop", []string{"spawn_v2", "spawn_ops_v1", hubCapabilitySpawnGrant})
-	saved, err := h.inbox.store.spawnTask(t.Context(), task.Request.RequestID)
-	if err != nil || saved.Status != "dispatching" {
-		t.Fatalf("restored status=%s err=%v", saved.Status, err)
-	}
-	done := make(chan struct{})
-	go func() { defer close(done); h.executeSpawnTask(t.Context(), saved) }()
-	if frame := t14ReadNodeSpawn(t, desktop); frame.StartByMS == 0 {
-		t.Fatal("replay carried no start_by_ms")
-	}
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("replayed silent attempt was not fenced")
-	}
-	after, err := h.inbox.store.spawnTask(t.Context(), task.Request.RequestID)
-	if err != nil || after.Status != "accepted" || len(after.Exclusions) != 1 || after.Exclusions[0].Reason != "deadline_not_started" {
-		t.Fatalf("after replay: status=%s exclusions=%+v err=%v", after.Status, after.Exclusions, err)
+// Only an attempt this hub process sent first is fenceable (decision on
+// r4574830122 / r4574832937). A sent, ungranted attempt from an earlier process
+// (an older hub after a rollback, say, whose frame may still wait at the
+// node's spawn gate) is replayed with start_by but never fenced or re-placed
+// on silence. The same attempt recorded with this process's boot id is fenced.
+func TestSpawnFenceOnlyForAttemptsThisBootSent_t4612(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		thisBoot  bool
+		wantFence bool
+	}{{"previous boot", false, false}, {"current boot", true, true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			retryHK(t)
+			path := filepath.Join(t.TempDir(), "inbox.sqlite3")
+			first := startProofHub(t, path)
+			task, node := startProofTask(t, first, 461260, true)
+			sentSpawnFixture(t, first.inbox.store, task)
+			if err := first.inbox.store.recordSpawnSendBoot(t.Context(), node.RequestID, first.bootID, time.Now()); err != nil {
+				t.Fatal(err)
+			}
+			_ = first.Close()
+			h := startProofHub(t, path)
+			if tc.thisBoot {
+				h.bootID = first.bootID
+			}
+			server := httptest.NewServer(h.Handler())
+			defer server.Close()
+			// The node stays silent past start_by + margin, as one whose gate
+			// is held by another spawn.
+			desktop := startProofNode(t, h, server, "desktop", []string{"spawn_v2", "spawn_ops_v1", hubCapabilitySpawnGrant})
+			saved, err := h.inbox.store.spawnTask(t.Context(), task.Request.RequestID)
+			if err != nil || saved.Status != "dispatching" {
+				t.Fatalf("restored status=%s err=%v", saved.Status, err)
+			}
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			done := make(chan struct{})
+			go func() { defer close(done); h.executeSpawnTask(ctx, saved) }()
+			if frame := t14ReadNodeSpawn(t, desktop); frame.StartByMS == 0 {
+				t.Fatal("replay carried no start_by_ms")
+			}
+			select {
+			case <-done:
+			case <-time.After(2 * time.Second):
+				// Window that proves nothing more happens: 200 ms start_by +
+				// 100 ms margin passed many times over without a fence.
+				cancel()
+				<-done
+			}
+			fenced, err := h.inbox.store.spawnAttemptFenced(t.Context(), node.RequestID)
+			after, err2 := h.inbox.store.spawnTask(t.Context(), task.Request.RequestID)
+			if err != nil || err2 != nil || fenced != tc.wantFence {
+				t.Fatalf("fenced=%v want %v err=%v %v", fenced, tc.wantFence, err, err2)
+			}
+			if tc.wantFence && (after.Status != "accepted" || len(after.Exclusions) != 1 || after.Exclusions[0].Reason != "deadline_not_started") {
+				t.Fatalf("current boot: status=%s exclusions=%+v", after.Status, after.Exclusions)
+			}
+			if !tc.wantFence && (after.Status != "dispatching" || len(after.Exclusions) != 0 || after.Attempt != task.Attempt) {
+				t.Fatalf("previous boot was released: status=%s exclusions=%+v attempt=%d", after.Status, after.Exclusions, after.Attempt)
+			}
+		})
 	}
 }
 

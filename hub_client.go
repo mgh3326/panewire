@@ -659,7 +659,7 @@ type hubClientConnection struct {
 	acceptsCheckoutPull atomic.Bool
 	acceptsLaunchProof  atomic.Bool
 	connection          *websocket.Conn
-	writeMu             sync.Mutex
+	writeMu             hubWriteMutex
 	// closed is closed when the session on this connection ends; a nil
 	// channel (a test peer) never ends.
 	closed chan struct{}
@@ -3209,7 +3209,11 @@ func (client *HubClient) handleHubFailover(ctx context.Context, message hubOutbo
 }
 
 func (peer *hubClientConnection) write(ctx context.Context, value any) error {
-	peer.writeMu.Lock()
+	// Admission honors ctx, so a caller with a deadline never waits behind
+	// another writer past it.
+	if err := peer.writeMu.lockContext(ctx); err != nil {
+		return err
+	}
 	defer peer.writeMu.Unlock()
 	writeContext, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()

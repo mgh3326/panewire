@@ -2,6 +2,7 @@ package panewire
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/subtle"
 	_ "embed"
 	"encoding/json"
@@ -571,9 +572,12 @@ type HubServer struct {
 	unworkedLandingGrace        time.Duration
 	spawnStartBy                time.Duration
 	spawnStartByMargin          time.Duration
-	nodeCommandWait             time.Duration // fixture seam; zero is hubNodeCommandWait.
-	checkoutPullWait            time.Duration // fixture seam; zero is hubCheckoutPullWait.
-	nodeAgentsWait              time.Duration // fixture seam; zero is hubNodeAgentsWait.
+	// bootID names this hub process in the send record of a grant-required
+	// attempt; only an attempt this process sent can be fenced.
+	bootID           string
+	nodeCommandWait  time.Duration // fixture seam; zero is hubNodeCommandWait.
+	checkoutPullWait time.Duration // fixture seam; zero is hubCheckoutPullWait.
+	nodeAgentsWait   time.Duration // fixture seam; zero is hubNodeAgentsWait.
 	// laneStallMu is TryLock'd so at most one lane-stall observation runs and
 	// is held for the run's whole life: once Close has taken it and set
 	// laneStallClosing, no new run can start and any in-flight one is already
@@ -793,7 +797,7 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 	hub := &HubServer{
 		inbox: inbox, spawnKick: make(chan struct{}, 1), placementKick: make(chan struct{}, 1),
 		authPath: config.AuthPath, alertNodes: alertNodes, relayControl: newHubRelayControlState(config, overrides), now: config.Now, staleAfter: config.StaleAfter, keepaliveInterval: config.KeepaliveInterval,
-		gracePeriod: config.GracePeriod, orphanGrace: config.OrphanGrace, unworkedLandingGrace: config.UnworkedLandingGrace, spawnStartBy: config.SpawnStartBy, spawnStartByMargin: config.SpawnStartByMargin, alertObservations: defaultHubAlertObservations, logger: config.Logger,
+		gracePeriod: config.GracePeriod, orphanGrace: config.OrphanGrace, unworkedLandingGrace: config.UnworkedLandingGrace, spawnStartBy: config.SpawnStartBy, spawnStartByMargin: config.SpawnStartByMargin, bootID: rand.Text(), alertObservations: defaultHubAlertObservations, logger: config.Logger,
 		paneSweepInterval: config.PaneSweepInterval, paneSweepAge: config.PaneSweepAge,
 		poolTriggerInterval: defaultPoolTriggerInterval,
 		placementPolicyPath: config.PlacementPolicyPath, placementPolicy: placementPolicy, placementPolicyModTime: placementPolicyModTime, placementPolicyObservedModTime: placementPolicyObservedModTime, placementPolicyLoaded: placementPolicyLoaded, placementPolicyStatus: placementPolicyStatus, placementPolicyLastFailure: placementPolicyLastFailure, prometheusURL: config.PrometheusURL, prometheusClient: config.PrometheusClient, prometheusBearer: config.PrometheusBearer, prometheusBasicUser: config.PrometheusBasicUser, prometheusBasicPass: config.PrometheusBasicPass,

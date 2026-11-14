@@ -25,6 +25,12 @@ const (
 	defaultSpawnStartByMargin = 30 * time.Second
 )
 
+// spawnAttemptSendsTable records which hub process first sent each
+// grant-required attempt. A hub fences only an attempt its own process sent:
+// a frame another process sent (an older hub after a rollback, say) may still
+// sit queued at the node and start with no grant.
+const spawnAttemptSendsTable = `CREATE TABLE IF NOT EXISTS spawn_attempt_sends (node_id TEXT PRIMARY KEY,boot_id TEXT NOT NULL,sent_ms BIGINT NOT NULL)`
+
 const spawnAttemptGrantsTable = `CREATE TABLE IF NOT EXISTS spawn_attempt_grants (node_id TEXT PRIMARY KEY,request_id TEXT NOT NULL,state TEXT NOT NULL,decided_ms BIGINT NOT NULL)`
 
 // decideSpawnGrant answers a node's job.spawn.claim. Only the current
@@ -87,6 +93,27 @@ func (s *laneInboxStore) fenceSpawnAttempt(parent context.Context, requestID, no
 	return state == "fenced", tx.Commit()
 }
 
+// recordSpawnSendBoot records bootID as the process that sent nodeID. It is
+// written only for a first send, so a replay never makes an attempt fenceable.
+func (s *laneInboxStore) recordSpawnSendBoot(parent context.Context, nodeID, bootID string, now time.Time) error {
+	ctx, done := s.op(parent)
+	defer done()
+	_, err := s.db.ExecContext(ctx, s.q(`INSERT INTO spawn_attempt_sends(node_id,boot_id,sent_ms) VALUES(?,?,?) ON CONFLICT DO NOTHING`), nodeID, bootID, now.UnixMilli())
+	return err
+}
+
+// spawnAttemptSentBy returns the boot id that sent nodeID, or "".
+func (s *laneInboxStore) spawnAttemptSentBy(parent context.Context, nodeID string) (string, error) {
+	ctx, done := s.op(parent)
+	defer done()
+	var bootID string
+	err := s.db.QueryRowContext(ctx, s.q(`SELECT boot_id FROM spawn_attempt_sends WHERE node_id=?`), nodeID).Scan(&bootID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return bootID, err
+}
+
 // spawnAttemptFenced reports whether the attempt nodeID has a committed fence.
 func (s *laneInboxStore) spawnAttemptFenced(parent context.Context, nodeID string) (bool, error) {
 	ctx, done := s.op(parent)
@@ -115,6 +142,15 @@ func parseHubSpawnClaim(raw []byte) (string, bool) {
 // answerSpawnClaim commits the grant decision before it answers. A store
 // error sends nothing: the node then gives up at start_by and never starts.
 func (h *HubServer) answerSpawnClaim(ctx context.Context, machine string, agent *hubAgent, nodeID string) {
+	if h.inbox == nil || h.inbox.store == nil {
+		// No durable store, so no sent attempt to grant.
+		_ = agent.writeJSONContext(ctx, struct {
+			Type      string `json:"type"`
+			RequestID string `json:"request_id"`
+			Granted   bool   `json:"granted"`
+		}{"job.spawn.grant", nodeID, false})
+		return
+	}
 	granted, err := h.inbox.store.decideSpawnGrant(ctx, nodeID, machine, h.now().UTC())
 	if err != nil {
 		h.logger.Warn("hub spawn grant not decided", "node_request_id", nodeID, "host", machine, "err", err)

@@ -365,13 +365,17 @@ func (client *HubClient) refuseUngrantedSpawn(ctx context.Context, peer *hubClie
 	}
 	active := client.spawnActive[message.RequestID]
 	client.spawnActiveMu.Unlock()
+	// The reply is bounded: this runs while the node's spawn gate is held,
+	// and the journal row, not the reply, is what a replay reads.
+	replyCtx, cancelReply := context.WithTimeout(ctx, 5*time.Second)
+	defer cancelReply()
 	switch {
 	case err != nil:
-		client.sendSpawnResult(ctx, peer, hubSpawnResult{RequestID: message.RequestID, RC: 75, Error: "journal_conflict"}, message.OperatorAuthorized)
+		client.sendSpawnResult(replyCtx, peer, hubSpawnResult{RequestID: message.RequestID, RC: 75, Error: "journal_conflict"}, message.OperatorAuthorized)
 	case refused:
-		client.sendSpawnResult(ctx, peer, result, message.OperatorAuthorized)
+		client.sendSpawnResult(replyCtx, peer, result, message.OperatorAuthorized)
 	case known:
-		client.answerKnownSpawn(ctx, peer, journal, message, cached, active)
+		client.answerKnownSpawn(replyCtx, peer, journal, message, cached, active)
 	}
 }
 
