@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -19,15 +20,75 @@ import (
 // attempt reaches a terminal result.
 
 type placementOutboxHK struct {
-	mu       sync.Mutex
-	requests []map[string]any
-	server   *httptest.Server
+	mu                 sync.Mutex
+	requests           []map[string]any
+	lookup             []fleet.PlacementRecord
+	gets               int
+	lookupStatus       int
+	lookupHook         func()
+	lookupHold         <-chan struct{}
+	lookupOmitVersion  bool
+	lookupRequireSince bool
+	methods            []string
+	lookupJob          string
+	lookupJobs         []string
+	server             *httptest.Server
 }
 
 func placementOutboxServer(t *testing.T) *placementOutboxHK {
 	t.Helper()
 	h := &placementOutboxHK{}
 	h.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/placements" && r.Method == http.MethodGet {
+			h.mu.Lock()
+			h.gets++
+			h.methods = append(h.methods, "GET")
+			h.lookupJob = r.URL.Query().Get("job")
+			h.lookupJobs = append(h.lookupJobs, h.lookupJob)
+			status := h.lookupStatus
+			hook := h.lookupHook
+			hold := h.lookupHold
+			omitVersion := h.lookupOmitVersion
+			requireSince := h.lookupRequireSince
+			h.lookupHook = nil
+			found := append([]fleet.PlacementRecord{}, h.lookup...)
+			h.mu.Unlock()
+			if hook != nil {
+				hook()
+			}
+			if hold != nil {
+				// Simulate an hk lookup that never answers before its deadline.
+				select {
+				case <-hold:
+				case <-r.Context().Done():
+					return
+				}
+			}
+			if status != 0 {
+				w.WriteHeader(status)
+				return
+			}
+			if requireSince && r.URL.Query().Get("since") != "0001-01-01T00:00:00Z" {
+				found = nil
+			}
+			if omitVersion {
+				rows := make([]map[string]any, 0, len(found))
+				for _, record := range found {
+					b, _ := json.Marshal(record)
+					var row map[string]any
+					_ = json.Unmarshal(b, &row)
+					delete(row, "tool_version")
+					rows = append(rows, row)
+				}
+				writeJSON(w, http.StatusOK, map[string]any{"placements": rows})
+				return
+			}
+			if found == nil {
+				found = []fleet.PlacementRecord{}
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"placements": found})
+			return
+		}
 		if r.URL.Path != "/v1/placements" || r.Method != http.MethodPost {
 			http.NotFound(w, r)
 			return
@@ -36,6 +97,7 @@ func placementOutboxServer(t *testing.T) *placementOutboxHK {
 		var body map[string]any
 		_ = json.Unmarshal(b, &body)
 		h.mu.Lock()
+		h.methods = append(h.methods, "POST")
 		h.requests = append(h.requests, body)
 		h.mu.Unlock()
 		writeJSON(w, http.StatusOK, map[string]string{"status": "recorded"})
@@ -175,9 +237,8 @@ func TestHubPlacementRecordTerminalOutcomes(t *testing.T) {
 }
 
 // The App's final emission carries the record finishPlacement completed —
-// before the terminal outcome commits for an unbound spawn — so the record
-// must post verbatim: pane_id and model come from the record, not the still
-// empty operation outcome.
+// before the terminal outcome commits — so delivery waits for that commit
+// and then posts the record verbatim, including pane_id and model.
 func TestHubPlacementRecordFinishedRecordPostsVerbatim(t *testing.T) {
 	hk := placementOutboxServer(t)
 	h := placementOutboxHub(t, filepath.Join(t.TempDir(), "inbox.sqlite3"))
@@ -192,6 +253,14 @@ func TestHubPlacementRecordFinishedRecordPostsVerbatim(t *testing.T) {
 		Source: "auto", Ranking: "score", Outcome: "placed",
 		Candidates:         tr.Candidates,
 		PlacementExecution: fleet.PlacementExecution{Host: "machine-a", PaneID: "pane-9", Model: "opus", Pool: "claude-sub", Profile: "claude-sonnet", Family: "claude"},
+	}
+	h.notePlacementTrace(task, tr, "")
+	if records := hk.records(); len(records) != 0 {
+		t.Fatalf("non-terminal attempt produced %d posts, want none", len(records))
+	}
+	changed, err := h.inbox.store.completeSpawn(t.Context(), task, hubSpawnOutcome{RC: 0, Stage: "landing", Host: "machine-a", NodeResult: true}, time.Now())
+	if err != nil || !changed {
+		t.Fatalf("completeSpawn changed=%v err=%v", changed, err)
 	}
 	h.notePlacementTrace(task, tr, "")
 	records := hk.records()
@@ -308,6 +377,10 @@ func TestHubPlacementRecordFallbackDeliveredAfterRecovery(t *testing.T) {
 	req.RequestID = "d676220b-e763-4af1-aefd-000000000018"
 	h1 := placementOutboxHub(t, path)
 	task := boundSpawnTask(t, h1, req)
+	changed, err := h1.inbox.store.completeSpawn(t.Context(), task, hubSpawnOutcome{RC: 0, Stage: "landing", Host: "machine-a", NodeResult: true}, time.Now())
+	if err != nil || !changed {
+		t.Fatalf("completeSpawn changed=%v err=%v", changed, err)
+	}
 	// hk unreachable while the snapshot write fails: the record can only be
 	// spooled, and the deferred file keeps the row-insert obligation.
 	os.Setenv("HANDOFFKEEP_URL", "http://127.0.0.1:1")
@@ -332,16 +405,17 @@ func TestHubPlacementRecordFallbackDeliveredAfterRecovery(t *testing.T) {
 	os.Setenv("HANDOFFKEEP_URL", hk.server.URL)
 	h2 := placementOutboxHub(t, path)
 	h2.flushPlacementRecords(t.Context())
-	if n := len(hk.records()); n != 1 {
-		t.Fatalf("flush produced %d records, want exactly one", n)
+	records := hk.records()
+	if len(records) == 0 {
+		t.Fatal("flush did not deliver the record")
+	}
+	for _, record := range records[1:] {
+		if !reflect.DeepEqual(records[0], record) {
+			t.Fatal("delivery retry changed the immutable record")
+		}
 	}
 	if _, err := os.Stat(h2.inbox.deferredPath); !os.IsNotExist(err) {
 		t.Fatalf("deferred file remains after the row landed: %v", err)
-	}
-	// The landed row stays pending while the attempt runs; its terminal
-	// result seals it. The repost is a duplicate hk answers 409.
-	if _, err := h2.completeSpawn(t.Context(), task, hubSpawnOutcome{RC: 0, Stage: "landing", Host: "machine-a", Pane: "pane-7", NodeResult: true}); err != nil {
-		t.Fatal(err)
 	}
 	_, _, recorded, err := h2.inbox.store.spawnPlacementSnapshot(t.Context(), req.RequestID, task.Attempt)
 	if err != nil || !recorded {

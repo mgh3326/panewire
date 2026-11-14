@@ -54,6 +54,17 @@ type hubSpawnTask struct {
 	Attempt int
 	Node    *hubSpawnRequest
 	Outcome hubSpawnOutcome
+	// ClaimedHost survives attempts: handoffkeep binds a claimed job to a host.
+	ClaimedHost string
+	// Exclusions are definitive host or harness refusals in this attempt.
+	Exclusions []hubSpawnExclusion
+}
+
+type hubSpawnExclusion struct {
+	Machine string `json:"machine"`
+	Profile string `json:"profile,omitempty"`
+	Reason  string `json:"reason"`
+	RC      int    `json:"rc"`
 }
 
 func (s *laneInboxStore) ensureSpawnTasks() error {
@@ -74,7 +85,7 @@ func (s *laneInboxStore) ensureSpawnTasks() error {
 	}
 	// Stores from before hk 4460 lack the placement columns (postgres: the
 	// 0008 migration). A restart restores counts from these two columns.
-	for _, column := range []string{`placed_ms BIGINT NOT NULL DEFAULT 0`, `claimed_ms BIGINT NOT NULL DEFAULT 0`} {
+	for _, column := range []string{`placed_ms BIGINT NOT NULL DEFAULT 0`, `claimed_ms BIGINT NOT NULL DEFAULT 0`, `exclusions TEXT NOT NULL DEFAULT '[]'`, `claimed_host TEXT NOT NULL DEFAULT ''`} {
 		if _, err := s.db.ExecContext(ctx, `ALTER TABLE spawn_operations ADD COLUMN `+column); err != nil {
 			if err := ignoreDuplicateColumn(err); err != nil {
 				return err
@@ -257,7 +268,7 @@ func (s *laneInboxStore) bindSpawn(parent context.Context, id string, attempt in
 	// on a bound row that a restart would not count (restorePlacementCounts).
 	// A new bound attempt is unclaimed: a claim an earlier attempt left on the
 	// row does not describe this placement.
-	_, err = s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET node_id=?,node_payload=?,status='bound',placed_ms=?,claimed_ms=0 WHERE request_id=? AND attempt=? AND node_id IS NULL AND status='accepted'`), node.RequestID, string(raw), now.UnixMilli(), id, attempt)
+	_, err = s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET node_id=?,node_payload=?,status='bound',placed_ms=?,claimed_ms=0 WHERE request_id=? AND attempt=? AND node_id IS NULL AND status='accepted' AND (claimed_host='' OR claimed_host=?)`), node.RequestID, string(raw), now.UnixMilli(), id, attempt, node.Machine)
 	if err != nil {
 		return hubSpawnTask{}, err
 	}
@@ -296,6 +307,9 @@ func (s *laneInboxStore) beginSpawnSend(parent context.Context, task hubSpawnTas
 func (s *laneInboxStore) completeSpawn(parent context.Context, task hubSpawnTask, outcome hubSpawnOutcome, now time.Time) (bool, error) {
 	ctx, done := s.op(parent)
 	defer done()
+	if outcome.Host == "" {
+		outcome.Host = spawnPinnedHost(task)
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return false, err
@@ -366,9 +380,9 @@ func (s *laneInboxStore) completeSpawn(parent context.Context, task hubSpawnTask
 
 func scanSpawnTask(row interface{ Scan(...any) error }) (hubSpawnTask, error) {
 	var task hubSpawnTask
-	var payload, result, node string
+	var payload, result, node, exclusions string
 	var created, deadline, lastRun, placed int64
-	err := row.Scan(&task.Job, &task.Owner, &payload, &task.Status, &created, &deadline, &node, &result, &task.Attempt, &lastRun, &placed)
+	err := row.Scan(&task.Job, &task.Owner, &payload, &task.Status, &created, &deadline, &node, &result, &task.Attempt, &lastRun, &placed, &exclusions, &task.ClaimedHost)
 	if err != nil {
 		return task, err
 	}
@@ -389,14 +403,43 @@ func scanSpawnTask(row interface{ Scan(...any) error }) (hubSpawnTask, error) {
 			return task, err
 		}
 	}
-	err = json.Unmarshal([]byte(result), &task.Outcome)
+	if err = json.Unmarshal([]byte(result), &task.Outcome); err != nil {
+		return task, err
+	}
+	err = json.Unmarshal([]byte(exclusions), &task.Exclusions)
 	return task, err
 }
 
-// unbindRefusedSpawn returns a bound operation to placement after its node
-// refused it without side effects. A crash after this only places it again.
-func (s *laneInboxStore) unbindRefusedSpawn(parent context.Context, id string, attempt int, nodeID string) (hubSpawnTask, error) {
-	return s.unbindSpawn(parent, id, attempt, nodeID, "dispatching")
+// unbindRefusedSpawn records the refusal in the same CAS that releases the
+// destination. A claimed refusal also pins the host and saves its node result.
+func (s *laneInboxStore) unbindRefusedSpawn(parent context.Context, task hubSpawnTask, exclusion hubSpawnExclusion, claimed *hubSpawnOutcome) (hubSpawnTask, error) {
+	if task.Node == nil || (task.Status != "dispatching" && task.Status != "reconciling") {
+		return hubSpawnTask{}, errSpawnClaimed
+	}
+	exclusions := append(append([]hubSpawnExclusion(nil), task.Exclusions...), exclusion)
+	raw, err := json.Marshal(exclusions)
+	if err != nil {
+		return hubSpawnTask{}, err
+	}
+	claimedHost, claimedResult := "", ""
+	if claimed != nil {
+		claimedHost = task.Node.Machine
+		result, err := json.Marshal(claimed)
+		if err != nil {
+			return hubSpawnTask{}, err
+		}
+		claimedResult = string(result)
+	}
+	ctx, done := s.op(parent)
+	defer done()
+	result, err := s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET node_id=NULL,node_payload='',status='accepted',exclusions=?,claimed_host=CASE WHEN ?='' THEN claimed_host ELSE ? END,result=CASE WHEN ?='' THEN result ELSE ? END WHERE request_id=? AND attempt=? AND node_id=? AND status=? AND (claimed_host='' OR ?='' OR claimed_host=?)`), string(raw), claimedHost, claimedHost, claimedResult, claimedResult, task.Request.RequestID, task.Attempt, task.Node.RequestID, task.Status, claimedHost, claimedHost)
+	if err != nil {
+		return hubSpawnTask{}, err
+	}
+	if n, _ := result.RowsAffected(); n != 1 {
+		return hubSpawnTask{}, errSpawnClaimed
+	}
+	return s.spawnTask(parent, task.Request.RequestID)
 }
 
 // An unsent binding can be returned to placement without a node result.
@@ -417,7 +460,7 @@ func (s *laneInboxStore) unbindSpawn(parent context.Context, id string, attempt 
 	return s.spawnTask(parent, id)
 }
 
-const spawnTaskColumns = `job,owner,payload,status,created_ms,deadline_ms,node_payload,result,attempt,last_run_ms,placed_ms`
+const spawnTaskColumns = `job,owner,payload,status,created_ms,deadline_ms,node_payload,result,attempt,last_run_ms,placed_ms,exclusions,claimed_host`
 
 func (s *laneInboxStore) spawnTask(parent context.Context, id string) (hubSpawnTask, error) {
 	ctx, done := s.op(parent)
@@ -555,6 +598,45 @@ func (s *laneInboxStore) queryPendingSpawns(ctx context.Context, where string) (
 	return tasks, rows.Err()
 }
 
+type spawnScanPosition struct {
+	lastRun, created int64
+	id               string
+	valid            bool
+}
+
+// pendingSpawnPage continues through the durable queue even when earlier rows
+// are active or waiting for a busy node. No query loads an unbounded backlog.
+func (s *laneInboxStore) pendingSpawnPage(parent context.Context, after spawnScanPosition) ([]hubSpawnTask, spawnScanPosition, error) {
+	ctx, done := s.op(parent)
+	defer done()
+	query := `SELECT ` + spawnTaskColumns + ` FROM spawn_operations WHERE status IN ('accepted','bound','dispatching','reconciling')`
+	var args []any
+	if after.valid {
+		query += ` AND (last_run_ms>? OR (last_run_ms=? AND (created_ms>? OR (created_ms=? AND request_id>?))))`
+		args = append(args, after.lastRun, after.lastRun, after.created, after.created, after.id)
+	}
+	query += ` ORDER BY last_run_ms,created_ms,request_id LIMIT 32`
+	rows, err := s.db.QueryContext(ctx, s.q(query), args...)
+	if err != nil {
+		return nil, after, err
+	}
+	defer rows.Close()
+	var tasks []hubSpawnTask
+	for rows.Next() {
+		task, err := scanSpawnTask(rows)
+		if err != nil {
+			return nil, after, err
+		}
+		tasks = append(tasks, task)
+		lastRun := int64(0)
+		if !task.LastRun.IsZero() {
+			lastRun = task.LastRun.UnixMilli()
+		}
+		after = spawnScanPosition{lastRun: lastRun, created: task.Created.UnixMilli(), id: task.Request.RequestID, valid: true}
+	}
+	return tasks, after, rows.Err()
+}
+
 // A deliberate repeat of an identical, cleanup-confirmed submission starts a
 // new attempt while preserving the logical idempotency key and old outbox rows.
 func (s *laneInboxStore) resumeCleanedSpawn(parent context.Context, task hubSpawnTask, now time.Time) (hubSpawnTask, error) {
@@ -565,6 +647,9 @@ func (s *laneInboxStore) resumeCleanedSpawn(parent context.Context, task hubSpaw
 		return task, err
 	}
 	defer tx.Rollback()
+	if err = s.freezeSpawnPlacementForRetry(ctx, tx, task); err != nil {
+		return task, err
+	}
 	spawn, err := fleet.ValidateSubmission(task.Request)
 	if err != nil {
 		return task, err
@@ -581,7 +666,7 @@ func (s *laneInboxStore) resumeCleanedSpawn(parent context.Context, task hubSpaw
 	if n != 1 {
 		return task, errSpawnClaimed
 	}
-	result, err = tx.ExecContext(ctx, s.q(`UPDATE spawn_operations SET status='accepted',deadline_ms=?,node_id=NULL,node_payload='',attempt=attempt+1,trace_recorded=0,last_run_ms=0 WHERE request_id=? AND status='retryable' AND attempt=?`), now.Add(time.Duration(task.Request.DeadlineSeconds)*time.Second).UnixMilli(), task.Request.RequestID, task.Attempt)
+	result, err = tx.ExecContext(ctx, s.q(`UPDATE spawn_operations SET status='accepted',deadline_ms=?,node_id=NULL,node_payload='',attempt=attempt+1,trace_recorded=0,last_run_ms=0,exclusions='[]',claimed_host=? WHERE request_id=? AND status='retryable' AND attempt=?`), now.Add(time.Duration(task.Request.DeadlineSeconds)*time.Second).UnixMilli(), spawnPinnedHost(task), task.Request.RequestID, task.Attempt)
 	if err != nil {
 		return task, err
 	}

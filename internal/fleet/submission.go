@@ -51,6 +51,9 @@ type Submission struct {
 	// host as a submitter pin. It never travels on the wire or in the store
 	// (json:"-"), and no flag parses into it.
 	RetryHost string `json:"-"`
+	// RetryHarnesses lists harness kinds already refused on RetryHost in this
+	// attempt. Like RetryHost, this is internal hub state, never wire input.
+	RetryHarnesses []string `json:"-"`
 }
 
 type LadderStepIdentity struct {
@@ -380,6 +383,7 @@ func ValidateSubmission(request Submission) (Spawn, error) {
 	// environment never fills it (hk 3518, panewire#307 follow-up).
 	s.e6ArmLocked = true
 	s.hubRetryHost = request.RetryHost
+	s.failedHarnesses = append([]string(nil), request.RetryHarnesses...)
 	if err := validateContainment(s); err != nil {
 		return s, err
 	}

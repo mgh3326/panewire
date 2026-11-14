@@ -45,9 +45,9 @@ func TestRefusalAfterJobClaimDoesNotMoveToNextHost_t4614(t *testing.T) {
 				t.Fatal(err)
 			}
 			task = sentSpawnFixture(t, h.inbox.store, task)
-			transport := &directSpawnTransport{h: h, task: task, placing: true, bound: true}
-			if got := transport.nextHostAfterRefusal(t.Context(), node, tc.result); got != tc.want {
-				t.Fatalf("moves on = %v, want %v (reason %q)", got, tc.want, spawnResultReason(tc.result))
+			transport := &directSpawnTransport{h: h, task: task, bound: true}
+			if got, err := transport.nextHostAfterRefusal(t.Context(), node, tc.result); err != nil || got != tc.want {
+				t.Fatalf("moves on = %v, err=%v, want %v (reason %q)", got, err, tc.want, spawnResultReason(tc.result))
 			}
 		})
 	}

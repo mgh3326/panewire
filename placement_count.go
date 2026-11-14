@@ -204,7 +204,9 @@ func (h *HubServer) completeSpawn(ctx context.Context, task hubSpawnTask, outcom
 			status = saved.Status
 		}
 		if spawnAttemptTerminal(status) {
-			h.deliverPlacementRecord(h.closeCtx, task.Request.RequestID, task.Attempt)
+			if !h.wakePlacementRecords() {
+				h.deliverPlacementRecord(h.closeCtx, task.Request.RequestID, task.Attempt)
+			}
 		}
 		switch status {
 		case "failed", "retryable":

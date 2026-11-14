@@ -65,7 +65,7 @@ func TestSpawnLandingRefusalRechecksPaneBeforeFailing(t *testing.T) {
 			}
 			done := make(chan answer, 1)
 			go func() {
-				reply, err := transport.Spawn(boundedContext(t), refusalNodeRequest(request, 910, "machine-a"))
+				reply, err := dispatchPlacedSpawn(boundedContext(t), transport, refusalNodeRequest(request, 910, "machine-a"))
 				done <- answer{reply, err}
 			}()
 			sent := t14ReadNodeSpawn(t, node)

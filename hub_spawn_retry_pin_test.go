@@ -140,16 +140,14 @@ func TestHubSpawnRetryReplayIsNotAPlacementPin(t *testing.T) {
 	if task.Outcome.Host != "desktop" || !task.Outcome.Retryable {
 		t.Fatalf("fixture lost the stored outcome: %+v", task.Outcome)
 	}
-	done := make(chan struct{})
-	go func() { defer close(done); h.executeSpawnTask(t.Context(), task) }()
+	h.startSpawnCoordinator(t.Context())
 	sent := t14ReadNodeSpawn(t, node)
 	// The node is the stored outcome's host; the rewrite keeps the override
 	// reason and the logical request key.
 	if sent.WaitSeconds == 0 || hubSpawnArg(sent.Args, "--override-reason") != "verified-cleanup-retry" || hubSpawnArg(sent.Args, "--job") != "test-job" {
 		t.Fatalf("dispatched args: %v", sent.Args)
 	}
-	t14WriteSpawnResult(t, node, sent.RequestID, 0, "test-job", "w1:p9", "OK pane=w1:p9 job=test-job\n", "")
-	<-done
+	t14WriteSpawnResult(t, node, sent.RequestID, 1, "test-job", "", "", "spawn_disabled")
 	saved, err := h.inbox.store.spawnTask(t.Context(), request.RequestID)
 	if err != nil || saved.Attempt != 2 || saved.Node == nil || saved.Node.Machine != "desktop" || saved.Node.RequestID != sent.RequestID {
 		t.Fatalf("the retry was not bound to the stored host's dispatch: %+v %v", saved, err)
