@@ -249,7 +249,7 @@ func landedSpawnResult(result hubSpawnResult, row executingSpawn, spawned localS
 	result.RC, result.Pane = 0, pane.PaneID
 	result.StdoutTail = spawnSettledLandedStamp
 	result.Receipt = &fleet.ExecutionReceipt{
-		Job: row.Job, Host: spawned.Host, Pane: pane.PaneID, Profile: spawned.Profile, Model: spawned.Model,
+		Job: row.Job, Host: spawned.Host, Pane: pane.PaneID, Profile: spawned.Profile, Model: spawned.Model, Pool: spawned.Pool, AccountKey: spawned.AccountKey,
 		Role: spawned.Role, CWD: firstNonempty(spawned.CWD, pane.Cwd), Label: firstNonempty(row.Label, pane.Name),
 		Kind: firstNonempty(fleet.ProfileKind(spawned.Profile), pane.Agent), LaneUnregistered: spawned.LaneUnregistered,
 	}
@@ -266,6 +266,7 @@ func lostSpawnResult(result hubSpawnResult, reason string, retryable bool) hubSp
 // reads: where the pane is and what the hub's pane check compares.
 type localSpawnRecord struct {
 	PaneID, HerdrSession, Host, Profile, Model, Role, CWD string
+	Pool, AccountKey                                      string
 	LaneUnregistered                                      bool
 }
 
@@ -302,13 +303,15 @@ func (client *HubClient) readLocalSpawnRecord(job string) localSpawnRecord {
 				Role             string `json:"role"`
 				CWD              string `json:"cwd"`
 				LaneUnregistered bool   `json:"lane_unregistered"`
+				Pool             string `json:"pool"`
+				AccountKey       string `json:"account_key"`
 			} `json:"payload"`
 		}
 		if json.Unmarshal(data, &event) != nil || firstNonempty(event.Type, event.Kind, event.Event) != "job.spawned" {
 			continue
 		}
 		p := event.Payload
-		found = localSpawnRecord{PaneID: p.PaneID, HerdrSession: p.HerdrSession, Host: p.Host, Profile: p.Profile, Model: p.Model, Role: p.Role, CWD: p.CWD, LaneUnregistered: p.LaneUnregistered}
+		found = localSpawnRecord{PaneID: p.PaneID, HerdrSession: p.HerdrSession, Host: p.Host, Profile: p.Profile, Model: p.Model, Pool: p.Pool, AccountKey: p.AccountKey, Role: p.Role, CWD: p.CWD, LaneUnregistered: p.LaneUnregistered}
 	}
 	return found
 }

@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/mgh3326/panewire/internal/fleet"
@@ -26,6 +27,11 @@ type hubSpawnOutcome struct {
 	Profile string `json:"profile,omitempty"`
 	Model   string `json:"model,omitempty"`
 	Role    string `json:"role,omitempty"`
+	// Pool and AccountKey are the placement record of the job: what the
+	// executing host launched it on. Empty on an operation placed before they
+	// were recorded, which the exhausted-pool sweep never touches.
+	Pool       string `json:"pool,omitempty"`
+	AccountKey string `json:"account_key,omitempty"`
 	// E6Arm is the experiment marker the submission carried, kept on the
 	// operation record so a run stays visible after the fact.
 	E6Arm string `json:"e6_arm,omitempty"`
@@ -42,6 +48,9 @@ type hubSpawnTask struct {
 	Created, Deadline  time.Time
 	// LastRun is when a coordinator worker last took the request (zero: never).
 	LastRun time.Time
+	// Placed is when the request was bound to its node, the decision the
+	// placement count rests on (zero: never bound).
+	Placed  time.Time
 	Attempt int
 	Node    *hubSpawnRequest
 	Outcome hubSpawnOutcome
@@ -62,10 +71,25 @@ func (s *laneInboxStore) ensureSpawnTasks() error {
 			return err
 		}
 	}
+	// Stores from before hk 4460 lack the placement columns (postgres: the
+	// 0008 migration). A restart restores counts from these two columns.
+	for _, column := range []string{`placed_ms BIGINT NOT NULL DEFAULT 0`, `claimed_ms BIGINT NOT NULL DEFAULT 0`} {
+		if _, err := s.db.ExecContext(ctx, `ALTER TABLE spawn_operations ADD COLUMN `+column); err != nil {
+			if err := ignoreDuplicateColumn(err); err != nil {
+				return err
+			}
+		}
+	}
 	return nil
 }
 
 func (s *laneInboxStore) claimSpawn(parent context.Context, request fleet.Submission, job, owner string, now time.Time) (hubSpawnTask, bool, error) {
+	return s.claimSpawnReplacing(parent, request, job, owner, now, "", "", "accepted")
+}
+
+// claimSpawnReplacing transfers the task role in the same transaction as the
+// successor claim, so another worker cannot claim the gap between them.
+func (s *laneInboxStore) claimSpawnReplacing(parent context.Context, request fleet.Submission, job, owner string, now time.Time, previousID, roleKey, status string) (hubSpawnTask, bool, error) {
 	ctx, done := s.op(parent)
 	defer done()
 	spawn, err := fleet.ValidateSubmission(request)
@@ -98,9 +122,20 @@ func (s *laneInboxStore) claimSpawn(parent context.Context, request fleet.Submis
 	if !errors.Is(err, sql.ErrNoRows) {
 		return hubSpawnTask{}, false, err
 	}
+
 	var taskRole any
-	if spawn.Task != "" && spawn.ParentJob == "" {
+	if spawn.HoldsTaskRole() {
 		taskRole = spawn.RoleKey()
+	}
+	if previousID != "" {
+		result, err := tx.ExecContext(ctx, s.q(`UPDATE spawn_reservations SET task_role=NULL WHERE request_id=? AND task_role=?`), previousID, roleKey)
+		if err != nil {
+			return hubSpawnTask{}, false, err
+		}
+		if n, _ := result.RowsAffected(); n != 1 {
+			return hubSpawnTask{}, false, errSpawnClaimed
+		}
+		taskRole = roleKey
 	}
 	claimed, err := tx.ExecContext(ctx, s.q(`INSERT INTO spawn_reservations(job,request_id,task_role) VALUES(?,?,?) ON CONFLICT DO NOTHING`), job, request.RequestID, taskRole)
 	if err != nil {
@@ -119,26 +154,104 @@ func (s *laneInboxStore) claimSpawn(parent context.Context, request fleet.Submis
 		return hubSpawnTask{}, false, errSpawnClaimed
 	}
 	deadline := now.Add(time.Duration(request.DeadlineSeconds) * time.Second)
-	_, err = tx.ExecContext(ctx, s.q(`INSERT INTO spawn_operations(request_id,job,owner,fingerprint,payload,status,created_ms,deadline_ms) VALUES(?,?,?,?,?,'accepted',?,?)`), request.RequestID, job, owner, fingerprint, string(raw), now.UnixMilli(), deadline.UnixMilli())
+	_, err = tx.ExecContext(ctx, s.q(`INSERT INTO spawn_operations(request_id,job,owner,fingerprint,payload,status,created_ms,deadline_ms) VALUES(?,?,?,?,?,?,?,?)`), request.RequestID, job, owner, fingerprint, string(raw), status, now.UnixMilli(), deadline.UnixMilli())
 	if err != nil {
 		return hubSpawnTask{}, false, err
 	}
 	if err = tx.Commit(); err != nil {
 		return hubSpawnTask{}, false, err
 	}
-	return hubSpawnTask{Request: request, Job: job, Owner: owner, Status: "accepted", Created: now, Deadline: deadline, Attempt: 1}, true, nil
+	return hubSpawnTask{Request: request, Job: job, Owner: owner, Status: status, Created: now, Deadline: deadline, Attempt: 1}, true, nil
 }
 
-// Bind the immutable execution destination before sending any bytes. Concurrent
-// coordinators can only replay this same node request, never select a second host.
-func (s *laneInboxStore) bindSpawn(parent context.Context, id string, attempt int, node hubSpawnRequest) (hubSpawnTask, error) {
+func (s *laneInboxStore) activateStagedSpawn(parent context.Context, id string, now time.Time, deadlineSeconds int) error {
+	ctx, done := s.op(parent)
+	defer done()
+	result, err := s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET status='accepted', deadline_ms=? WHERE request_id=? AND status='staged'`), now.Add(time.Duration(deadlineSeconds)*time.Second).UnixMilli(), id)
+	if err != nil {
+		return err
+	}
+	if n, _ := result.RowsAffected(); n != 1 {
+		return errSpawnClaimed
+	}
+	return nil
+}
+
+// cancelStagedSpawn restores the old holder only while the staged step has
+// not been activated. Both changes commit together.
+func (s *laneInboxStore) cancelStagedSpawn(parent context.Context, id, previousID, roleKey string) error {
+	ctx, done := s.op(parent)
+	defer done()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, s.q(`DELETE FROM spawn_operations WHERE request_id=? AND status='staged'`), id)
+	if err != nil {
+		return err
+	}
+	if n, _ := result.RowsAffected(); n != 1 {
+		return errSpawnClaimed
+	}
+	result, err = tx.ExecContext(ctx, s.q(`DELETE FROM spawn_reservations WHERE request_id=? AND task_role=?`), id, roleKey)
+	if err != nil {
+		return err
+	}
+	if n, _ := result.RowsAffected(); n != 1 {
+		return errSpawnClaimed
+	}
+	result, err = tx.ExecContext(ctx, s.q(`UPDATE spawn_reservations SET task_role=? WHERE request_id=? AND task_role IS NULL`), roleKey, previousID)
+	if err != nil {
+		return err
+	}
+	if n, _ := result.RowsAffected(); n != 1 {
+		return errSpawnClaimed
+	}
+	return tx.Commit()
+}
+
+// discardStagedSpawn releases a staged role when its predecessor ended for a
+// different reason. It never restores a reservation to a terminal job.
+func (s *laneInboxStore) discardStagedSpawn(parent context.Context, id, roleKey string) error {
+	ctx, done := s.op(parent)
+	defer done()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, s.q(`DELETE FROM spawn_operations WHERE request_id=? AND status='staged'`), id)
+	if err != nil {
+		return err
+	}
+	if n, _ := result.RowsAffected(); n != 1 {
+		return errSpawnClaimed
+	}
+	result, err = tx.ExecContext(ctx, s.q(`DELETE FROM spawn_reservations WHERE request_id=? AND task_role=?`), id, roleKey)
+	if err != nil {
+		return err
+	}
+	if n, _ := result.RowsAffected(); n != 1 {
+		return errSpawnClaimed
+	}
+	return tx.Commit()
+}
+
+// Bind the immutable destination without claiming it was sent. Only the
+// bound-to-dispatching transition permits a first send.
+func (s *laneInboxStore) bindSpawn(parent context.Context, id string, attempt int, node hubSpawnRequest, now time.Time) (hubSpawnTask, error) {
 	ctx, done := s.op(parent)
 	defer done()
 	raw, err := json.Marshal(node)
 	if err != nil {
 		return hubSpawnTask{}, err
 	}
-	_, err = s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET node_id=?,node_payload=?,status='dispatching' WHERE request_id=? AND attempt=? AND node_id IS NULL AND status='accepted'`), node.RequestID, string(raw), id, attempt)
+	// The placement stamp is written with the binding, so no dispatch can run
+	// on a bound row that a restart would not count (restorePlacementCounts).
+	// A new bound attempt is unclaimed: a claim an earlier attempt left on the
+	// row does not describe this placement.
+	_, err = s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET node_id=?,node_payload=?,status='bound',placed_ms=?,claimed_ms=0 WHERE request_id=? AND attempt=? AND node_id IS NULL AND status='accepted'`), node.RequestID, string(raw), now.UnixMilli(), id, attempt)
 	if err != nil {
 		return hubSpawnTask{}, err
 	}
@@ -155,6 +268,23 @@ func (s *laneInboxStore) bindSpawn(parent context.Context, id string, attempt in
 	return task, err
 }
 
+// beginSpawnSend commits the send boundary, or revalidates a replay, using the
+// complete durable identity and the state the caller actually read. Old
+// dispatching rows remain uncertain; a restart never makes them bound again.
+func (s *laneInboxStore) beginSpawnSend(parent context.Context, task hubSpawnTask) (bool, error) {
+	if task.Node == nil {
+		return false, nil
+	}
+	ctx, done := s.op(parent)
+	defer done()
+	result, err := s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET status=CASE WHEN status='bound' THEN 'dispatching' ELSE status END WHERE request_id=? AND attempt=? AND node_id=? AND status=? AND status IN ('bound','dispatching','reconciling','deadline_exceeded')`), task.Request.RequestID, task.Attempt, task.Node.RequestID, task.Status)
+	if err != nil {
+		return false, err
+	}
+	n, err := result.RowsAffected()
+	return n == 1, err
+}
+
 // Unknown observations retain the reservation. Only a definitive result may
 // release it, and only when the executing node has attested complete cleanup.
 func (s *laneInboxStore) completeSpawn(parent context.Context, task hubSpawnTask, outcome hubSpawnOutcome, now time.Time) (bool, error) {
@@ -167,10 +297,11 @@ func (s *laneInboxStore) completeSpawn(parent context.Context, task hubSpawnTask
 	defer tx.Rollback()
 	if outcome.Reason == "timeout" {
 		var node sql.NullString
-		if err = tx.QueryRowContext(ctx, s.q(`SELECT node_id FROM spawn_operations WHERE request_id=? AND attempt=?`), task.Request.RequestID, task.Attempt).Scan(&node); err != nil {
+		var currentStatus string
+		if err = tx.QueryRowContext(ctx, s.q(`SELECT node_id,status FROM spawn_operations WHERE request_id=? AND attempt=?`), task.Request.RequestID, task.Attempt).Scan(&node, &currentStatus); err != nil {
 			return false, err
 		}
-		outcome.Retryable = !node.Valid || outcome.NodeResult && outcome.Retryable
+		outcome.Retryable = !node.Valid || currentStatus == "bound" || outcome.NodeResult && outcome.Retryable
 	}
 	outcome.Retryable = outcome.Retryable && spawnRefusalReplayable(outcome.Reason)
 	status := spawnOutcomeStatus(outcome)
@@ -181,7 +312,11 @@ func (s *laneInboxStore) completeSpawn(parent context.Context, task hubSpawnTask
 	if err != nil {
 		return false, err
 	}
-	result, err := tx.ExecContext(ctx, s.q(`UPDATE spawn_operations SET status=?,result=? WHERE request_id=? AND attempt=? AND status IN ('accepted','dispatching','reconciling','deadline_exceeded') AND status<>? AND NOT (status='deadline_exceeded' AND ?='reconciling') AND (node_id IS NULL OR ?<>'timeout' OR ?<>'retryable' OR ?)`), status, string(raw), task.Request.RequestID, task.Attempt, status, status, outcome.Reason, status, outcome.NodeResult)
+	nodeID := ""
+	if task.Node != nil {
+		nodeID = task.Node.RequestID
+	}
+	result, err := tx.ExecContext(ctx, s.q(`UPDATE spawn_operations SET status=?,result=? WHERE request_id=? AND attempt=? AND status IN ('accepted','bound','dispatching','reconciling','deadline_exceeded') AND status<>? AND NOT (status='deadline_exceeded' AND ?='reconciling') AND ((?='' AND node_id IS NULL) OR node_id=?) AND (? NOT IN ('accepted','bound') OR status=?) AND (node_id IS NULL OR status='bound' OR ?<>'timeout' OR ?<>'retryable' OR ?)`), status, string(raw), task.Request.RequestID, task.Attempt, status, status, nodeID, nodeID, task.Status, task.Status, outcome.Reason, status, outcome.NodeResult)
 	if err != nil {
 		return false, err
 	}
@@ -191,6 +326,12 @@ func (s *laneInboxStore) completeSpawn(parent context.Context, task hubSpawnTask
 	}
 	if status == "retryable" {
 		if _, err = tx.ExecContext(ctx, s.q(`DELETE FROM spawn_reservations WHERE job=? AND request_id=?`), task.Job, task.Request.RequestID); err != nil {
+			return false, err
+		}
+	} else if code, _, _ := strings.Cut(outcome.Reason, ": "); status == "failed" && task.Status == "bound" && code == spawnAbandonedReason {
+		// Release the unsent role in the same transaction as its outcome and
+		// outbox notification. Any prior hk claim was handled before completion.
+		if _, err = tx.ExecContext(ctx, s.q(`UPDATE spawn_reservations SET task_role=NULL WHERE request_id=?`), task.Request.RequestID); err != nil {
 			return false, err
 		}
 	}
@@ -220,8 +361,8 @@ func (s *laneInboxStore) completeSpawn(parent context.Context, task hubSpawnTask
 func scanSpawnTask(row interface{ Scan(...any) error }) (hubSpawnTask, error) {
 	var task hubSpawnTask
 	var payload, result, node string
-	var created, deadline, lastRun int64
-	err := row.Scan(&task.Job, &task.Owner, &payload, &task.Status, &created, &deadline, &node, &result, &task.Attempt, &lastRun)
+	var created, deadline, lastRun, placed int64
+	err := row.Scan(&task.Job, &task.Owner, &payload, &task.Status, &created, &deadline, &node, &result, &task.Attempt, &lastRun, &placed)
 	if err != nil {
 		return task, err
 	}
@@ -229,6 +370,9 @@ func scanSpawnTask(row interface{ Scan(...any) error }) (hubSpawnTask, error) {
 	task.Deadline = time.UnixMilli(deadline)
 	if lastRun > 0 {
 		task.LastRun = time.UnixMilli(lastRun)
+	}
+	if placed > 0 {
+		task.Placed = time.UnixMilli(placed)
 	}
 	if err = json.Unmarshal([]byte(payload), &task.Request); err != nil {
 		return task, err
@@ -246,9 +390,18 @@ func scanSpawnTask(row interface{ Scan(...any) error }) (hubSpawnTask, error) {
 // unbindRefusedSpawn returns a bound operation to placement after its node
 // refused it without side effects. A crash after this only places it again.
 func (s *laneInboxStore) unbindRefusedSpawn(parent context.Context, id string, attempt int, nodeID string) (hubSpawnTask, error) {
+	return s.unbindSpawn(parent, id, attempt, nodeID, "dispatching")
+}
+
+// An unsent binding can be returned to placement without a node result.
+func (s *laneInboxStore) unbindUnsentSpawn(parent context.Context, id string, attempt int, nodeID string) (hubSpawnTask, error) {
+	return s.unbindSpawn(parent, id, attempt, nodeID, "bound")
+}
+
+func (s *laneInboxStore) unbindSpawn(parent context.Context, id string, attempt int, nodeID, status string) (hubSpawnTask, error) {
 	ctx, done := s.op(parent)
 	defer done()
-	result, err := s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET node_id=NULL,node_payload='',status='accepted' WHERE request_id=? AND attempt=? AND node_id=? AND status='dispatching'`), id, attempt, nodeID)
+	result, err := s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET node_id=NULL,node_payload='',status='accepted' WHERE request_id=? AND attempt=? AND node_id=? AND status=?`), id, attempt, nodeID, status)
 	if err != nil {
 		return hubSpawnTask{}, err
 	}
@@ -258,7 +411,7 @@ func (s *laneInboxStore) unbindRefusedSpawn(parent context.Context, id string, a
 	return s.spawnTask(parent, id)
 }
 
-const spawnTaskColumns = `job,owner,payload,status,created_ms,deadline_ms,node_payload,result,attempt,last_run_ms`
+const spawnTaskColumns = `job,owner,payload,status,created_ms,deadline_ms,node_payload,result,attempt,last_run_ms,placed_ms`
 
 func (s *laneInboxStore) spawnTask(parent context.Context, id string) (hubSpawnTask, error) {
 	ctx, done := s.op(parent)
@@ -297,13 +450,48 @@ func (s *laneInboxStore) spawnTaskByNode(parent context.Context, id string) (hub
 	return scanSpawnTask(s.db.QueryRowContext(ctx, s.q(`SELECT `+spawnTaskColumns+` FROM spawn_operations WHERE node_id=?`), id))
 }
 
+// markSpawnClaimed records that a job's claim reached the hub from the node it
+// was placed on. A restart must not count that job again, even if it finished
+// before the restart and no heartbeat will show it.
+func (s *laneInboxStore) markSpawnClaimed(parent context.Context, job string, now time.Time) error {
+	ctx, done := s.op(parent)
+	defer done()
+	_, err := s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET claimed_ms=? WHERE job=? AND node_id IS NOT NULL AND claimed_ms=0`), now.UnixMilli(), job)
+	return err
+}
+
+// boundSpawnsSince lists the operations placed at or after since that are bound
+// to a node, not yet claimed, and may still hold an unclaimed launch: in flight,
+// reconciling, timed out while bound, or succeeded. Refused, failed and
+// retryable ones released their count and are left out. Oldest placement first,
+// so a job's newest placement is read last (restorePlacementCounts,
+// placement_count.go).
+func (s *laneInboxStore) boundSpawnsSince(parent context.Context, since time.Time) ([]hubSpawnTask, error) {
+	ctx, done := s.op(parent)
+	defer done()
+	rows, err := s.db.QueryContext(ctx, s.q(`SELECT `+spawnTaskColumns+` FROM spawn_operations WHERE node_id IS NOT NULL AND placed_ms>=? AND claimed_ms=0 AND (status IN ('bound','dispatching','reconciling','succeeded') OR status='deadline_exceeded') ORDER BY placed_ms`), since.UnixMilli())
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var tasks []hubSpawnTask
+	for rows.Next() {
+		task, err := scanSpawnTask(rows)
+		if err != nil {
+			return nil, err
+		}
+		tasks = append(tasks, task)
+	}
+	return tasks, rows.Err()
+}
+
 // pendingSpawns returns the fresh runnable page and a bounded number of due
 // stale rows. Conditioned rows use a separate page so they cannot displace fresh
 // runnable work.
 func (s *laneInboxStore) pendingSpawns(parent context.Context, now time.Time) ([]hubSpawnTask, error) {
 	ctx, done := s.op(parent)
 	defer done()
-	tasks, err := s.queryPendingSpawns(ctx, `status IN ('accepted','dispatching','reconciling') AND payload NOT LIKE '%"start_conditions":%' ORDER BY last_run_ms,created_ms LIMIT 32`)
+	tasks, err := s.queryPendingSpawns(ctx, `status IN ('accepted','bound','dispatching','reconciling') AND payload NOT LIKE '%"start_conditions":%' ORDER BY last_run_ms,created_ms LIMIT 32`)
 	if err != nil {
 		return nil, err
 	}
@@ -326,7 +514,7 @@ func (s *laneInboxStore) pendingSpawns(parent context.Context, now time.Time) ([
 func (s *laneInboxStore) pendingStartConditionSpawns(parent context.Context, now time.Time) ([]hubSpawnTask, error) {
 	ctx, done := s.op(parent)
 	defer done()
-	tasks, err := s.queryPendingSpawns(ctx, `status IN ('accepted','dispatching','reconciling') AND payload LIKE '%"start_conditions":%' ORDER BY last_run_ms,created_ms LIMIT 32`)
+	tasks, err := s.queryPendingSpawns(ctx, `status IN ('accepted','bound','dispatching','reconciling') AND payload LIKE '%"start_conditions":%' ORDER BY last_run_ms,created_ms LIMIT 32`)
 	if err != nil {
 		return nil, err
 	}
@@ -376,7 +564,7 @@ func (s *laneInboxStore) resumeCleanedSpawn(parent context.Context, task hubSpaw
 		return task, err
 	}
 	var taskRole any
-	if spawn.Task != "" && spawn.ParentJob == "" {
+	if spawn.HoldsTaskRole() {
 		taskRole = spawn.RoleKey()
 	}
 	result, err := tx.ExecContext(ctx, s.q(`INSERT INTO spawn_reservations(job,request_id,task_role) VALUES(?,?,?) ON CONFLICT DO NOTHING`), task.Job, task.Request.RequestID, taskRole)
@@ -411,6 +599,38 @@ func (s *laneInboxStore) spawnRoleOwner(parent context.Context, roleKey string) 
 	defer done()
 	err = s.db.QueryRowContext(ctx, s.q(`SELECT o.request_id,o.job,o.status FROM spawn_reservations r JOIN spawn_operations o ON r.request_id=o.request_id WHERE r.task_role=?`), roleKey).Scan(&id, &job, &status)
 	return
+}
+
+// spawnJobReserved reports whether a reservation already holds the job id, the
+// collision a duplicate job id makes before any role is considered.
+func (s *laneInboxStore) spawnJobReserved(parent context.Context, job string) (bool, error) {
+	ctx, done := s.op(parent)
+	defer done()
+	var one int
+	err := s.db.QueryRowContext(ctx, s.q(`SELECT 1 FROM spawn_reservations WHERE job=?`), job).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return err == nil, err
+}
+
+func (s *laneInboxStore) expiredStagedSpawns(parent context.Context, now time.Time) ([]hubSpawnTask, error) {
+	ctx, done := s.op(parent)
+	defer done()
+	rows, err := s.db.QueryContext(ctx, s.q(`SELECT `+spawnTaskColumns+` FROM spawn_operations WHERE status='staged' AND deadline_ms<?`), now.UnixMilli())
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var tasks []hubSpawnTask
+	for rows.Next() {
+		task, err := scanSpawnTask(rows)
+		if err != nil {
+			return nil, err
+		}
+		tasks = append(tasks, task)
+	}
+	return tasks, rows.Err()
 }
 
 // retryableSpawns lists the operations that ended with verified cleanup and

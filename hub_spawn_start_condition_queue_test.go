@@ -40,7 +40,7 @@ func TestConditionedRowsDoNotStarveRunnableSpawnPastPendingPage(t *testing.T) {
 		}
 		if _, err := h.inbox.store.bindSpawn(t.Context(), request.RequestID, conditioned.Attempt, hubSpawnRequest{
 			RequestID: t14RequestID(3200 + i), Machine: "machine-a", WaitSeconds: 600,
-		}); err != nil {
+		}, time.Now().UTC()); err != nil {
 			t.Fatalf("bind waiting row %d: %v", i, err)
 		}
 	}

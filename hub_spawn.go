@@ -65,12 +65,13 @@ func (brief *hubSpawnBrief) UnmarshalJSON(raw []byte) error {
 }
 
 type hubSpawnCheckout struct {
-	Origin string `json:"origin"`
-	Mode   string `json:"mode"`
-	Branch string `json:"branch,omitempty"`
-	Sha    string `json:"sha,omitempty"`
-	Fetch  string `json:"fetch,omitempty"`
-	Dir    string `json:"dir"`
+	Origin      string `json:"origin"`
+	Mode        string `json:"mode"`
+	Branch      string `json:"branch,omitempty"`
+	Sha         string `json:"sha,omitempty"`
+	Fetch       string `json:"fetch,omitempty"`
+	Dir         string `json:"dir"`
+	VerifyReuse bool   `json:"verify_reuse,omitempty"`
 }
 
 type hubSpawnRequest struct {
@@ -146,9 +147,9 @@ func validHubSpawnCheckout(checkout hubSpawnCheckout) bool {
 	}
 	switch checkout.Mode {
 	case "branch":
-		return validNodeRefName(checkout.Branch) && (checkout.Sha == "" || nodeShaPattern.MatchString(checkout.Sha)) && checkout.Fetch == ""
+		return validNodeRefName(checkout.Branch) && (checkout.Sha == "" || nodeShaPattern.MatchString(checkout.Sha)) && (!checkout.VerifyReuse || checkout.Sha != "") && checkout.Fetch == ""
 	case "detached":
-		return checkout.Branch == "" && nodeShaPattern.MatchString(checkout.Sha) && validNodeFetchRef(checkout.Fetch)
+		return !checkout.VerifyReuse && checkout.Branch == "" && nodeShaPattern.MatchString(checkout.Sha) && validNodeFetchRef(checkout.Fetch)
 	default:
 		return false
 	}

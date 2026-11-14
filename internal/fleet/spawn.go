@@ -144,6 +144,14 @@ func (s Spawn) RoleKey() string {
 	return SpawnRoleKey(s.Task, s.Role, s.ReviewPass)
 }
 
+// HoldsTaskRole reports whether the hub reserves a task:role key for the
+// spawn. Every writer and reader of spawn_reservations.task_role asks here. A
+// consult seat works beside the task's claimant and never takes the one-holder
+// slot, so a consult pair can share one task (hk 4568).
+func (s Spawn) HoldsTaskRole() bool {
+	return s.Task != "" && s.ParentJob == "" && !s.consultTask()
+}
+
 // SpawnRoleKey is RoleKey for a caller that holds the parts, not a Spawn.
 func SpawnRoleKey(task, role, pass string) string {
 	key := task + ":" + role
@@ -586,12 +594,22 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 	defer func() {
 		if a.ObserveReceipt != nil {
 			x := s.placement.execution
-			a.ObserveReceipt(ExecutionReceipt{CWD: s.CWD, Label: s.Label, Job: s.Job, Host: x.Host, Pane: x.PaneID, Profile: firstNonempty(x.Profile, s.Profile), Model: x.Model, Kind: x.Kind, Role: firstNonempty(x.Role, s.Role), LaneUnregistered: s.laneUnregistered})
+			a.ObserveReceipt(ExecutionReceipt{CWD: s.CWD, Label: s.Label, Job: s.Job, Host: x.Host, Pane: x.PaneID, Profile: firstNonempty(x.Profile, s.Profile), Model: x.Model, Pool: x.Pool, AccountKey: x.AccountKey, Kind: x.Kind, Role: firstNonempty(x.Role, s.Role), LaneUnregistered: s.laneUnregistered})
 		}
 	}()
 
-	defer func() { a.finishPlacement(ctx, s, err) }()
-	defer func() { a.spawnEvents(s, err) }()
+	defer func() {
+		// A quota wait is not a terminal refusal. Preserve a host attempt if
+		// this pass already contacted one, but do not emit refusal events.
+		if errors.Is(err, ErrQuotaRefreshPending) {
+			if s.placement.contactedHost != "" || s.placement.started {
+				a.finishPlacement(ctx, s, err)
+			}
+			return
+		}
+		a.spawnEvents(s, err)
+		a.finishPlacement(ctx, s, err)
+	}()
 	if s.CWD == "" || s.Prompt == "" || s.Label == "" || !slices.Contains([]string{"T0", "T1", "T2", "T3"}, s.T) {
 		return fail(exitUsage, "spawn requires -c -p -l --t T0..T3; supply the missing flags (workspace defaults to executing local.workspace)")
 	}

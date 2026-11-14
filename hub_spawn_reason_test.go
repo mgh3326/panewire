@@ -34,7 +34,7 @@ func failSpawnThroughNode(t *testing.T, h *HubServer, server *httptest.Server, r
 		t.Fatal(err)
 	}
 	dispatch := hubSpawnRequest{RequestID: t14RequestID(741), Machine: "machine-a", CWDKey: "project", Brief: hubSpawnBrief{Inline: "task"}, Args: []string{"--job", "test-job"}, WaitSeconds: 600, DeadlineMS: task.Deadline.UnixMilli()}
-	if task, err = h.inbox.store.bindSpawn(t.Context(), req.RequestID, task.Attempt, dispatch); err != nil {
+	if task, err = h.inbox.store.bindSpawn(t.Context(), req.RequestID, task.Attempt, dispatch, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	transport := directSpawnTransport{h: h, task: task}
