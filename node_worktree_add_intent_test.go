@@ -6,29 +6,32 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
 
-// runAddChild runs one worktree add the way the node does and reports the
-// identity of the git child, read while that child is alive.
+// runAddChild runs one worktree add the way the node does — in a process group
+// of its own — and reports that group as the add's identity.
 func runAddChild(ctx context.Context, args ...string) (nodeAddProcess, error) {
 	cmd := exec.CommandContext(ctx, "git", args...)
+	nodeSetProcessGroup(cmd)
 	if err := cmd.Start(); err != nil {
 		return nodeAddProcess{}, err
 	}
-	proc, _ := nodeReadAddProcess(cmd.Process.Pid)
-	if err := cmd.Wait(); err != nil {
-		return proc, err
-	}
-	return proc, nil
+	return nodeAddProcess{Group: cmd.Process.Pid}, cmd.Wait()
 }
 
-// runningAddProcess starts a process and reports its identity, modelling an add
-// child that outlived the node that ran it. The returned function stops it.
+// runningAddProcess starts a process in a group of its own and reports that group
+// as the identity of an add child that outlived the node that ran it. The
+// returned function stops it.
 func runningAddProcess(t *testing.T) (nodeAddProcess, func()) {
 	t.Helper()
-	cmd := exec.Command("cat")
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		t.Skip("add identity needs unix process groups")
+	}
+	cmd := exec.CommandContext(t.Context(), "cat")
+	nodeSetProcessGroup(cmd)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		t.Fatal(err)
@@ -36,9 +39,9 @@ func runningAddProcess(t *testing.T) (nodeAddProcess, func()) {
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
-	proc, ok := nodeReadAddProcess(cmd.Process.Pid)
-	if !ok || proc.Start == "" {
-		t.Fatalf("identity of a live child=%+v ok=%v", proc, ok)
+	proc := nodeAddProcess{Group: cmd.Process.Pid}
+	if exited := nodeAddProcessExited(proc); exited {
+		t.Fatalf("a live add group reads as exited: %+v", proc)
 	}
 	stop := func() {
 		_ = stdin.Close()
@@ -48,8 +51,8 @@ func runningAddProcess(t *testing.T) (nodeAddProcess, func()) {
 	return proc, stop
 }
 
-// exitedAddProcess reports the identity of a process that has already exited,
-// read while it was alive.
+// exitedAddProcess reports the identity of an add group that has already gone,
+// taken while it was alive.
 func exitedAddProcess(t *testing.T) nodeAddProcess {
 	t.Helper()
 	proc, stop := runningAddProcess(t)
@@ -58,7 +61,7 @@ func exitedAddProcess(t *testing.T) nodeAddProcess {
 }
 
 // interruptedAddSeams models one node's worktree add: the add creates the linked
-// worktree, takes lockReason, records the identity of the git child that ran it,
+// worktree, takes lockReason, records the process group of the git child that ran it,
 // and dies from a signal. With crashed set, the cleanup listing after the signal
 // fails, so the lock and the intent stay on disk: the state a node restart finds
 // when its add was killed mid-flight. Without crashed, the cleanup runs as it
@@ -120,22 +123,20 @@ func lockInterruptedDetachedAdd(t *testing.T, fixture *nodeWorktreeFixture, dir 
 	}
 }
 
-// The add identity is the pair a replay compares: a live child reads back
-// unchanged, and a child that has exited reads as gone.
+// The add identity is the process group of its git child: a live group reads as
+// running, the group of an exited add reads as gone, and an identity that was
+// never recorded never reads as gone.
 func TestNodeAddProcessIdentityTracksExit(t *testing.T) {
 	live, stop := runningAddProcess(t)
 	if nodeAddProcessExited(live) {
-		t.Fatalf("live child reads as exited: %+v", live)
-	}
-	if again, ok := nodeReadAddProcess(live.PID); !ok || again != live {
-		t.Fatalf("identity read back=%+v ok=%v, want %+v", again, ok, live)
+		t.Fatalf("live add group reads as exited: %+v", live)
 	}
 	if nodeAddProcessExited(nodeAddProcess{}) {
 		t.Fatal("an identity that was never recorded must never read as exited")
 	}
 	stop()
 	if !nodeAddProcessExited(live) {
-		t.Fatalf("exited child reads as running: %+v", live)
+		t.Fatalf("exited add group reads as running: %+v", live)
 	}
 }
 

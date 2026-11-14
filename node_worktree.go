@@ -528,16 +528,27 @@ func nodeWorktreeAddIntentMatches(recorded nodeWorktreeAddIntent, dir string, ex
 }
 
 // nodeReclaimInterruptedAdd removes the worktree an earlier add left locked
-// initializing, and only that: the recorded intent must describe this add and
-// must name the add child that ran it, and that child must have exited. The lock
-// says an add is in flight, not that it is ours or that it is dead, so it never
+// initializing, and only that: the recorded intent must describe this add, must
+// name the process group that ran it, and that group must be gone. The lock says
+// an add is in flight, not that it is ours or that it is dead, so it never
 // authorizes a forced remove on its own (lead-verify F3, hk 4589).
 func nodeReclaimInterruptedAdd(ctx context.Context, git relayCommandRunner, clone, dir string, entries []nodeWorktreeEntry, expected nodeWorktreeAddIntent) bool {
 	intent, err := nodeReadWorktreeAddIntent(ctx, git, clone, dir)
 	if err != nil || !nodeWorktreeAddIntentMatches(intent, dir, expected) {
 		return false
 	}
+	if intent.Add.Group <= 0 {
+		// A record from before intents carried the add's process group cannot
+		// prove that add is gone, so it is never reclaimed automatically.
+		fields := []any{"path", dir}
+		if name, err := nodeWorktreeAddIntentPath(ctx, git, clone, dir); err == nil {
+			fields = append(fields, "intent", name)
+		}
+		slog.Warn("node worktree add intent records no add process group; the locked worktree needs manual cleanup", fields...)
+		return false
+	}
 	if !nodeAddProcessExited(intent.Add) {
+		slog.Info("node worktree add child still runs; left its worktree locked", "path", dir, "group", intent.Add.Group)
 		return false
 	}
 	for _, entry := range entries {

@@ -2,8 +2,8 @@
 
 package panewire
 
-// nodeReadAddProcess cannot identify a process on this host, so an add never
-// records a child identity and recovery never force-removes a path.
-func nodeReadAddProcess(int) (nodeAddProcess, bool) {
-	return nodeAddProcess{}, false
+// nodeProcessGroupAlive cannot name a process group on this host, so an add
+// records no usable identity and recovery never force-removes a path.
+func nodeProcessGroupAlive(int) (alive, known bool) {
+	return false, false
 }
