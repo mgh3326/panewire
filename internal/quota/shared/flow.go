@@ -218,8 +218,15 @@ func (f *Flow) freeOnlyObservation(o *Observation, now time.Time) (Observation, 
 	if !ok {
 		return Observation{}, false
 	}
+	// Only a hold is this host's evidence to publish without a measurement: an
+	// "available" record adds nothing a paid reading lacks, and the reading of
+	// another writer must still be measured over.
+	local := f.LocalFree(now)
+	if local == nil || local.State != FreeExhausted || !freeNeedsPublish(prior, local, now) {
+		return Observation{}, false
+	}
 	out := *o
-	out.FreeBucket = mergeFree(prior, f.LocalFree(now), now)
+	out.FreeBucket = mergeFree(prior, local, now)
 	merged, ok := NormalizeFree(out.FreeBucket, now)
 	if !ok || merged == nil {
 		return Observation{}, false
