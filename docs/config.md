@@ -348,8 +348,12 @@ candidate remains the spawn fails with the usual placement refusal. An explicit
 exit 2. The list is initiator-local and is not sent to a delegated host.
 
 `--exclude-pool P[,P]` removes the named quota pools from automatic selection
-for this one request (`claude`, `codex`, `devin-free`, ... as the catalog names
-them). It is a standing exclusion like `--exclude-host`, not a pin: it needs no
+for this one request (`claude`, `codex`, `devin`, ... as the catalog names
+them). `devin-free` is the reserved free-band key, not a catalog pool: it
+excludes the SWE-2 free rungs (`devin-swe2*`, [placement](placement.md#pool-concurrency-cap))
+and leaves the paid devin rungs eligible, so a replacement for a
+`quota_stop pool=devin-free` never takes another free rung of the same account.
+It is a standing exclusion like `--exclude-host`, not a pin: it needs no
 containment and no override reason. Every candidate of an excluded pool drops
 with reason `pool_excluded`, visible in `--dry-run` and in the `job.placement`
 selection record; when no candidate remains the spawn fails with the usual
@@ -989,12 +993,17 @@ published free bucket reads `exhausted` with its reset still ahead. The bucket
 is the shared reading's `free_bucket` (the hub's fleet state carries it too).
 A devin pane that reports "Reached free model rate limit" writes this host's
 `devin-free-limit.json` — the same record `panewire quota observe
-devin-free-limit` writes — and the next devin measurement publishes it to the
-shared store. A SWE-2 free rung's short "Reached request rate limit" stop
+devin-free-limit` writes — and the stop publishes it to the shared store at
+once (`panewire quota refresh devin`): the record is merged over the current
+reading, without spending a provider measurement, so every host's selection
+drops the free rungs before the next placement rather than after the next
+measurement. A SWE-2 free rung's short "Reached request rate limit" stop
 writes the same record (hk 4644), with the short reset it shows. An unknown
 reset holds for one hour. The rung returns on its own
 once the reset passes. The quota gate refuses the same rung on the same
-reading; selection drops it before the gate.
+reading; selection drops it before the gate. A `quota_stop pool=devin-free`
+replacement also carries `--exclude-pool devin-free`, which excludes the free
+rungs (the reserved free-band key, not a catalog pool).
 
 A subscription pool on pace to use its longest window ranks behind the free
 band, credit with a recorded positive balance and future expiry included.
@@ -1174,11 +1183,20 @@ version=… policy_source=…` line.
 ## Role routing
 
 `policy/model-routing` supplies the v1 role allowlists. Selection filters
-profiles by role, retirement, gate, seat, and family before applying the
-`policy/quota-stop` order. `spawn`, `plan`, and `resolve` enforce
+profiles by role, retirement, gate, seat, family, and launch effort before
+applying the `policy/quota-stop` order. `spawn`, `plan`, and `resolve` enforce
 this boundary. An explicit `-m PROFILE` requires `--override-reason`, but
 that reason overrides placement only. A retired or role-ineligible profile
 is refused before placement.
+
+A catalog row that names no effort is the profile's default rung, and
+admission resolves its effort from the profile's lowest ordinary named rung.
+When the profile has no live named rung admission keeps eligible — an unrated
+rung counts only for `consult` or `builder`, or when the request arms it with
+E6 — there is nothing to resolve, so selection drops the row as
+`no_launch_effort` and tries the next candidate instead of failing the whole
+plan on it (hk 4605). A profile named explicitly (`spawn -m`) still takes the
+catalog's own refusal, `catalog row has no launch effort`.
 
 ### Role names
 
