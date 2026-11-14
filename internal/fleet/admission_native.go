@@ -315,6 +315,13 @@ func (a *App) benchCatalog(ctx context.Context) ([]CatalogRow, error) {
 	return a.Quota.Catalog(ctx)
 }
 
+// CatalogRows is the bench catalog as the hub's exhausted-pool triggers read
+// it: a.BenchCatalog when set (a fixture), else handoffkeep through the quota
+// adapter and its cache, with a stale catalog refused (hub_pool_triggers.go).
+func (a *App) CatalogRows(ctx context.Context) ([]CatalogRow, error) {
+	return a.benchCatalog(ctx)
+}
+
 // sharedLatest reads one account's latest stored reading and operator entries.
 func (a *App) sharedLatest(ctx context.Context, key string) (shared.Latest, error) {
 	if a.SharedLatest != nil {

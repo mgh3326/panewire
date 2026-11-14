@@ -60,6 +60,7 @@ type sweepNode struct {
 	conn     *websocket.Conn
 	jobs     *quotaJobs
 	panes    map[string]nodeAgentRow // by pane id
+	screens  map[string]string       // pane id -> visible screen tail
 	commands []string                // "<op> <job or pane>"
 	reasons  map[string]string       // job -> end_reason written
 
@@ -99,6 +100,11 @@ func (n *sweepNode) answer(op string, raw json.RawMessage) map[string]any {
 		n.commands = append(n.commands, op+" "+args.Name)
 
 		return map[string]any{"outcome": nodeCaptureScreen, "saved": "/jobs/" + args.Name + "/pane-screen.txt"}
+	case "pane.read":
+		var args nodePaneReadArgs
+		_ = json.Unmarshal(raw, &args)
+		n.commands = append(n.commands, op+" "+args.Name)
+		return map[string]any{"outcome": nodePaneReadOK, "agent_status": "idle", "focused": false, "composer": "empty", "screen_tail": n.screens[args.PaneID]}
 	case "pane.close":
 		var args nodePaneCloseArgs
 		_ = json.Unmarshal(raw, &args)
@@ -168,7 +174,7 @@ func newSweepFixture(t *testing.T) *sweepFixture {
 	logs := &syncBuffer{}
 	base.hub.logger = slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	base.jobs.records["seed"]["pool"] = "devin"
-	node := &sweepNode{conn: base.node, jobs: base.jobs, reasons: map[string]string{}, panes: map[string]nodeAgentRow{
+	node := &sweepNode{conn: base.node, jobs: base.jobs, reasons: map[string]string{}, screens: map[string]string{}, panes: map[string]nodeAgentRow{
 		roleHeldPane: {PaneID: roleHeldPane, Name: "seed", AgentStatus: "idle", Cwd: "/work/project.checkout"},
 	}}
 	ctx, cancel := context.WithCancel(context.Background())
