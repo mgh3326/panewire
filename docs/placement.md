@@ -848,6 +848,28 @@ builder bundles. And the node heartbeat truncates its active-job list at 32
 entries, so `task_slots` values above 32 can never bind; keep configured caps
 at or below that.
 
+## Per-machine lane rows
+
+A node credential may own at most `--lanes-node-row-cap` rows in the shared
+lanes file (default 64), and a lane create past that cap is refused
+`lane_quota_exceeded`. A spawn's pane registers its lane after the pane exists,
+so a machine at its row cap cannot host a new job: the spawn comes up
+`LANE_UNREGISTERED` after the work started.
+
+The hub therefore reports such a machine with the reason token `lanes_full` in
+the fleet-state load value (with `usable: false`) and in the `/v1/placement`
+candidates, and host-first selection drops it as ineligible rather than ranking
+it as a last-resort fallback. When every candidate is at its cap the decision is
+`"decision": null` with `"reason": "lanes_full"`. Host preflight refuses the
+host with `hub_acceptance:lanes_full` instead of passing it. A lane row that a
+node's fresh pane snapshot no longer lists is still released first
+([dead rows are released](r28-lanes-write.md#dead-rows-are-released-and-reused)),
+so a machine comes back into placement as soon as its stale rows drain.
+Reviewer lanes are the common source of leftover rows: a finished reviewer job
+that never ran `done` keeps its pane and row until a submission for the same
+key closes it, or the unattended pass hk 4684 adds does (see
+[hub-spawn-operations.md](hub-spawn-operations.md)).
+
 ## Machine power weights
 
 `power` is optional and maps a machine id to a relative speed weight, greater
@@ -1049,7 +1071,7 @@ shared service needed by placement. A second provider-measurement service and a
 centralize credentials without a demonstrated caller need. `pacelever` remains
 the provider measurement tool; this decision does not bypass its final gate.
 
-A quota-stop job end cools its pool across hosts until its reset, or for five minutes when no reset is known. Candidates are recorded as `pool_cooling` during that period. Cooling is held in hub memory and is lost on hub restart.
+A quota-stop job end cools its pool across hosts until its reset, or for five minutes when no reset is known. Candidates are recorded as `pool_cooling` during that period. Cooling is held in hub memory and is lost on hub restart. Devin's two bands cool apart under reserved keys: a paid stop (`pool=devin`) cools `devin-paid` and a free-band stop (`pool=devin-free`) cools `devin-free`, so neither holds the rungs that draw on the other band.
 
 When hub state is unavailable or disabled, the selection record reports `pool_cooling_hub_unavailable` or `pool_cooling_hub_state_off` in `degraded`; cooling cannot be checked.
 

@@ -39,7 +39,7 @@ func TestReviewerHoldRetryAfter(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			hub, server, held := reviewerReleaseHub(t, tc.role, tc.status, tc.outcome)
+			hub, server, _, held := reviewerReleaseHub(t, tc.role, tc.status, tc.outcome)
 			now := held.Deadline.Add(tc.since)
 			hub.now = func() time.Time { return now }
 			startUnworkedNode(t, t14Node(t, hub, server, true), unworkedReplies(unworkedRow(tc.pane, cwd), unworkedLedger(0)))

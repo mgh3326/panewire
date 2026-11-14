@@ -308,7 +308,8 @@ func (h *HubServer) handleNodeCommand(writer http.ResponseWriter, request *http.
 // authorizeNodeCommand adds one rule to authorize: a reap-only op is for a
 // service whose scopes name it, so the operator credential is refused too.
 func (h *HubServer) authorizeNodeCommand(request *http.Request, op, machine string) hubAccess {
-	if op == nodeCommandJobMarkLost || op == nodeCommandJobClose || op == nodeCommandJobReap || op == nodeCommandPaneSweep {
+	if op == nodeCommandJobMarkLost || op == nodeCommandJobClose || op == nodeCommandJobReap || op == nodeCommandPaneSweep ||
+		op == nodeCommandPaneCloseOp || op == nodeCommandPaneCloseStatus || op == nodeCommandPaneCloseRelease {
 		// These commands are issued by the hub after its own checks; none is
 		// available through the public node-command endpoint.
 		return hubAccessForbidden

@@ -49,11 +49,14 @@ host, its refusal remains in the durable candidate trace while the request
 stays accepted; the attempt's one record is posted when it ends. The hub
 logs a changed refresh failure with its machine, pool and reason; repeated
 identical failures are not logged on every retry. A request that times out
-while parked on a refresh names that machine and pool and the last failure
-recorded for them in its outcome and fix text (`quota_refresh` on the saved
-result), instead of the queue-starved cause: the spawn queue never held it. The
-request's refresh keys and the last failure per key are stored in the hub
-database, so both survive a restart; a successful refresh clears its entry.
+while parked on a refresh names that machine and pool and the last finished
+attempt there in its outcome and fix text (`quota_refresh` on the saved
+result), instead of the queue-starved cause: the spawn queue never held it.
+That attempt is reported as a failure with its reason, as finished without one,
+or as not yet finished, so the timeout never blames a measurement the hub did
+not see fail. The request's refresh keys and the last attempt per key are
+stored in the hub database, so both survive a restart; a pass that ends without
+parking on a refresh clears the request's link.
 
 Refreshes coalesce by machine and pool. At most four run at once, with at most
 one per node; waiting keys are considered in arrival order while busy nodes are
@@ -152,10 +155,26 @@ ESC answer.
   re-reads the pane and refuses one that changed or whose composer is not
   provably empty).
 
-The hub then has the holder's node mark the hk job `lost` and logs one INFO line
-`hub closed a finished reviewer pane` with `branch` `reviewer_pane_finished`
-(succeeded) or `reviewer_pane_stuck` (failed). An unreachable node or an
-unreadable check keeps the hold.
+The hub then has the holder's node mark the hk job `lost`, with `end_reason`
+`reviewer_pane_finished` or `reviewer_pane_stuck` (the branch), and logs one
+INFO line `hub closed a finished reviewer pane` with `branch`
+`reviewer_pane_finished` (succeeded) or `reviewer_pane_stuck` (failed) and
+`source` `submission`. An unreachable node or an unreadable check keeps the
+hold; a close whose `job.mark_lost` write failed leaves the pane gone and the
+record live, which the next submission's absent-pane check finishes.
+
+A reviewer that asked a question is idle too, so every close carries the
+job id and the node rules out an open question from its own lane-event records
+at the moment of the close (docs/node-commands.md, `pane.close`); a question the
+watcher has not copied yet cannot be raced, and the pane is kept with
+`question-open`.
+
+The hub does not run this release on its own schedule: an unattended pass over
+every live reviewer spawn was cut from this change and moved to hk 4684. Until
+it lands, a reviewer that finishes without running `done` keeps its idle pane,
+live record and lane row until a submission for the same key reclaims it or an
+operator closes the pane; the node's ended-job sweep never reaches it, because
+it needs a terminal job record (hk 4658).
 
 When only that grace keeps a reviewer holder (the pane is present, its status is
 closable and its hk job is `claimed` or `spawned`), the `task_role_claimed` 409

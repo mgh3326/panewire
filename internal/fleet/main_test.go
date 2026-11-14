@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/mgh3326/panewire/internal/arbiter"
 	"github.com/mgh3326/panewire/internal/hkcred"
 )
 
@@ -19,7 +20,7 @@ import (
 // tests that need one set it with t.Setenv.
 var (
 	hermeticEnvPrefixes = []string{"PANEWIRE_", "FLEET_", "WRK_", "SCOPEFUEL_", "ARBITER_", "HERDR_", "HANDOFFKEEP_", "HK_", "CLINEPASS_", "MOCK_MCP_", "PACELEVER_"}
-	hermeticEnvNames    = []string{"CODEX_HOME", "CLAUDE_CONFIG_DIR", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME"}
+	hermeticEnvNames    = []string{"HOME", "CODEX_HOME", "CLAUDE_CONFIG_DIR", "CLAUDE_SECURESTORAGE_CONFIG_DIR", "SENTRY_DSN_PANEWIRE", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME"}
 )
 
 func hermeticEnv(name string) bool {
@@ -29,7 +30,18 @@ func hermeticEnv(name string) bool {
 	return slices.ContainsFunc(hermeticEnvPrefixes, func(p string) bool { return strings.HasPrefix(name, p) })
 }
 
+// testLaunchHome is the home the test binary was started with, before
+// TestMain moved HOME to the temp dir. The arbiter guard forbids ledger
+// state under it, and tests that need the real home read it here.
+var testLaunchHome string
+
 func TestMain(m *testing.M) {
+	// The launch home is captured before HOME moves: it is the operator's
+	// real home, which no test may open ledger state under (hk 4685).
+	testLaunchHome, _ = os.UserHomeDir()
+	if testLaunchHome == "" {
+		testLaunchHome = os.Getenv("HOME")
+	}
 	for _, kv := range os.Environ() {
 		if name, _, _ := strings.Cut(kv, "="); hermeticEnv(name) {
 			os.Unsetenv(name)
@@ -42,6 +54,22 @@ func TestMain(m *testing.M) {
 		panic(err)
 	}
 	os.Setenv("XDG_CACHE_HOME", cache)
+	// HOME and the XDG roots move to a private temp home so every default
+	// resolver — the job ledger's state.db, the jobs inbox, the hosts config,
+	// the bench store, credential files — lands under it instead of the
+	// developer's real home (hk 4685). XDG_DATA_HOME is pinned even though
+	// trust() would prefer it unset: a temp value still fails trust()'s
+	// canonical check, and it keeps ledger() off the real state.db for Apps
+	// built with the launch home.
+	home, err := os.MkdirTemp("", "panewire-test-home-")
+	if err != nil {
+		panic(err)
+	}
+	os.Setenv("HOME", home)
+	os.Setenv("XDG_DATA_HOME", filepath.Join(home, ".local", "share"))
+	os.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	os.Setenv("XDG_STATE_HOME", filepath.Join(home, ".local", "state"))
+	arbiter.ForbidHomeForTests(testLaunchHome)
 	// No test may fall through to the developer's real svc-panewire file
 	// (~/.config/panewire/hk-svc.env, hk 3570): point the default at a path
 	// that does not exist. A test that wants the file sets PANEWIRE_HK_ENV,
@@ -49,6 +77,7 @@ func TestMain(m *testing.M) {
 	os.Setenv(hkcred.PathEnv, filepath.Join(cache, "no-hk-svc.env"))
 	code := m.Run()
 	os.RemoveAll(cache)
+	os.RemoveAll(home)
 	os.Exit(code)
 }
 

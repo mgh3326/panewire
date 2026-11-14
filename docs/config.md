@@ -353,6 +353,12 @@ them). `devin-free` is the reserved free-band key, not a catalog pool: it
 excludes the SWE-2 free rungs (`devin-swe2*`, [placement](placement.md#pool-concurrency-cap))
 and leaves the paid devin rungs eligible, so a replacement for a
 `quota_stop pool=devin-free` never takes another free rung of the same account.
+`devin-paid` is the reserved paid-band key: it excludes the devin rungs that
+spend the account's paid window and leaves the SWE-2 free rungs eligible, so a
+replacement for a `quota_stop pool=devin` stays off the spent window without
+losing the free band. The hub takes the band from the stop's own pool in the
+`job.lost` payload; a job's record `pool` is its launch pool, which reads
+`devin` for both bands.
 It is a standing exclusion like `--exclude-host`, not a pin: it needs no
 containment and no override reason. Every candidate of an excluded pool drops
 with reason `pool_excluded`, visible in `--dry-run` and in the `job.placement`
@@ -1023,7 +1029,10 @@ reset holds for one hour. The rung returns on its own
 once the reset passes. The quota gate refuses the same rung on the same
 reading; selection drops it before the gate. A `quota_stop pool=devin-free`
 replacement also carries `--exclude-pool devin-free`, which excludes the free
-rungs (the reserved free-band key, not a catalog pool).
+rungs (the reserved free-band key, not a catalog pool). A paid Devin weekly stop
+(`quota_stop pool=devin`) is the mirror: it cools and excludes the paid band
+alone (the reserved `devin-paid` key) until its reset, so the SWE-2 free rungs
+stay placeable while only the paid window is spent.
 
 A subscription pool on pace to use its longest window ranks behind the free
 band, credit with a recorded positive balance and future expiry included.
@@ -1258,7 +1267,7 @@ Within the floor:
 
 - A rung graded `unrated` is never chosen and never asks its quota gate (`grade_unrated`).
 - A row is dropped (`grade_insufficient`) when the rung it launches at is below the floor. That rung is the row's own effort; a rung-less row launches at its profile's default effort.
-- `--author-family F` on `plan` or `resolve` drops consult rungs of family `F` (`family_excluded`). With no family, nothing is excluded and the stamp records `unknown`.
+- `--author-family F` on `plan` or `resolve` drops consult rungs of family `F` (`family_excluded`). With no `--author-family`, `resolve` and `spawn` (without `--parent-job`) take the family of the job the caller runs in (`ARBITER_JOB`), the same family `--parent-job` would give. A job that cannot be read refuses rather than selecting with no family. With no family at all, nothing is excluded and the stamp records `unknown`.
 - If no rung passes at the floor but a below-floor rung passes every other rule, consult retries once at the asker's own grade and stamps `fallback: no_rung_at_floor`. A below-floor rung on a cooling pool counts as such a rung. Unrated, absent-rung, and family-excluded rungs never trigger the retry. A session without a task grade never retries.
 
 The selection record carries a `consult` object with `asker_grade`, `asker_family`, `grade_source` (`flag`, `task`, or `without_task`), `floor`, `used_floor`, and `fallback`. `resolve --role consult` prints `floor=<G>` on its text line.

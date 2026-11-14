@@ -410,9 +410,10 @@ func (sp *selPresence) admitHostFirst(ctx context.Context, s Spawn, p *selPlan, 
 		role = p.req.route.role
 	}
 	// Record how the shadow arms would have ordered the same hosts. The live
-	// order above is not touched. The event is written after the passes below,
-	// once the waste_first arm can read the quota states they produce.
-	shadow := sp.a.recordPlacementShadow(s, role, p.req.tags, sp.hosts, ranked, sp.now)
+	// placement order stays separate from the capacity-first seat order above.
+	// The event is written after the passes below, once the waste_first arm can
+	// read the quota states they produce.
+	shadow := sp.a.recordPlacementShadow(s, role, p.req.tags, sp.hosts, rankHosts(sp.hosts), sp.now)
 	// The waste_first order is collected as the walk below judges each host
 	// (wasteSnapBuilder). Candidates the readings dropped before admission go in
 	// first: the arm reads them as refused or unknown.

@@ -222,6 +222,7 @@ type HubClient struct {
 	nodeCommandMu      sync.Mutex
 	nodeHerdr          relayCommandRunner // fixture seam for node commands; nil runs herdr.
 	nodeGit            relayCommandRunner // fixture seam for node commands; nil runs git.
+	nodeAdd            nodeAddRunner      // fixture seam for the worktree add child; nil runs git and records it.
 	nodeCheckouts      map[string]string  // fixture seam for the checkout.pull allow-list; nil reads spawn.json checkouts.
 	nodeInstallWait    time.Duration      // fixture seam for install.sh's bound; zero is nodeCheckoutInstallTimeout.
 	nodeLifecycle      relayCommandRunner // fixture seam for job.done; nil runs runtug.
@@ -1924,8 +1925,13 @@ func (client *HubClient) serve(ctx context.Context, connection *websocket.Conn) 
 // capabilities.
 const defaultHubHelloAckTimeout = 5 * time.Second
 
+// hubCapabilityCloseQuestion is advertised by a node whose pane.close decodes
+// question_job. The hub omits the field for any other node, whose strict
+// decoder would refuse the whole call (hk 4658).
+const hubCapabilityCloseQuestion = "pane_close_question_v1"
+
 // hubSpawnCapabilities is what an upgraded node advertises in hello.
-var hubSpawnCapabilities = []string{"spawn_v2", "spawn_ops_v1", hubCapabilitySpawnGrant, hubCapabilityApplied}
+var hubSpawnCapabilities = []string{"spawn_v2", "spawn_ops_v1", hubCapabilitySpawnGrant, hubCapabilityCloseQuestion, hubCapabilityApplied}
 
 func (client *HubClient) helloAckTimeoutOrDefault() time.Duration {
 	if client.helloAckTimeout > 0 {

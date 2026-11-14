@@ -46,9 +46,16 @@ func TestHKTaskAnswerRejectsInvalidUTF8(t *testing.T) {
 }
 
 func TestTrustDoesNotRequireHandoffkeepBinary(t *testing.T) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Fatal(err)
+	// trust() validates the canonical launch-home paths; TestMain pins
+	// XDG_DATA_HOME to a temp dir, which trust() refuses, so clear it here.
+	t.Setenv("XDG_DATA_HOME", "")
+	home := testLaunchHome
+	if home == "" {
+		var err error
+		home, err = os.UserHomeDir()
+		if err != nil {
+			t.Fatal(err)
+		}
 	}
 	if filepath.Clean(home) != filepath.Clean(mustCurrentHome(t)) {
 		t.Skip("user home lookup differs from canonical current user")

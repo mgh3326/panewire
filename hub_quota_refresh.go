@@ -227,20 +227,15 @@ func (h *HubServer) runQuotaRefreshes(ctx context.Context) {
 	}
 }
 
-// recordQuotaRefreshOutcome persists the latest refresh result for its key. A
-// timeout that expires while a request waits on that key reads it back through
-// spawnRefreshWaitOutcome, and it is the only copy that survives a hub restart.
+// recordQuotaRefreshOutcome persists the latest finished attempt for its key,
+// success included. A timeout that expires while a request waits on that key
+// reads it back through spawnRefreshWaitOutcome, and it is the only copy that
+// survives a hub restart.
 func (h *HubServer) recordQuotaRefreshOutcome(result hubQuotaRefreshResult) {
 	if h.inbox == nil {
 		return
 	}
-	var err error
-	if result.failure == "" {
-		err = h.inbox.store.clearQuotaRefreshFailure(h.closeCtx, result.key.machine, result.key.pool)
-	} else {
-		err = h.inbox.store.recordQuotaRefreshFailure(h.closeCtx, result.key.machine, result.key.pool, result.failure, h.now())
-	}
-	if err != nil {
+	if err := h.inbox.store.recordQuotaRefreshAttempt(h.closeCtx, result.key.machine, result.key.pool, result.failure, h.now()); err != nil {
 		h.logger.Warn("hub quota refresh state not persisted", "machine", result.key.machine, "pool", result.key.pool, "error", err)
 	}
 }
