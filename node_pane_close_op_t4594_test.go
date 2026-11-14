@@ -2,6 +2,7 @@ package panewire
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -66,10 +67,11 @@ func seedNodeCloseOp(t *testing.T, inbox, id, state string) {
 		t.Fatal(err)
 	}
 	defer root.Close()
-	attempt, err := fleet.JobDirAttemptKey(root)
+	target, err := readNodeCloseTarget(root)
 	if err != nil {
 		t.Fatal(err)
 	}
+	attempt := target.attempt
 	now := time.Now().UTC()
 	if err := fleet.WriteCloseOp(root, fleet.CloseOp{RequestID: id, PaneID: "w1:p1", Attempt: attempt, State: state, Created: now, Updated: now}); err != nil {
 		t.Fatal(err)
@@ -385,5 +387,166 @@ func TestCloseOpBlockedReviewerRoleComesFromTheJob_t4594(t *testing.T) {
 	args["request_id"] = "op-2"
 	if result, code := nodeRun(t, client, nodeCommandPaneCloseOp, args); code != "" || result["outcome"] != fleet.CloseOpClosed {
 		t.Fatalf("decoy role changed the guard: result=%v code=%q", result, code)
+	}
+}
+
+func addCloseOpEvent(t *testing.T, inbox, name, body string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(inbox, "jobs", closeOpJob, "events", name), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A reclaim starts an attempt with no receipt until its own spawn: the old
+// receipt's pane is not the new attempt's, so a close of it opens nothing.
+func TestCloseOpReclaimBeforeReceiptIsNotBound_t4594(t *testing.T) {
+	inbox := t.TempDir()
+	seedCloseOpJob(t, inbox)
+	addCloseOpEvent(t, inbox, "00003-job.reclaim.json", `{"kind":"job.reclaim","created_at":"2026-11-14T00:00:02Z","payload":{"owner_lane":"owner"}}`)
+	root, err := os.OpenRoot(filepath.Join(inbox, "jobs", closeOpJob))
+	if err != nil {
+		t.Fatal(err)
+	}
+	target, err := readNodeCloseTarget(root)
+	root.Close()
+	if err != nil || target.receipt || target.attempt != "00003-job.reclaim.json" {
+		t.Fatalf("target=%+v err=%v", target, err)
+	}
+	fake := idlePaneHerdr()
+	wantCloseOp(t, closeOpNode(t, inbox, fake), "op-1", nodeCloseOpMismatch, false)
+	if len(fake.calls) != 0 {
+		t.Fatalf("closed the previous attempt's pane: %v", fake.calls)
+	}
+	if _, err := os.Stat(filepath.Join(inbox, "jobs", closeOpJob, fleet.CloseOpDir, "op-1.json")); !os.IsNotExist(err) {
+		t.Fatalf("operation opened: %v", err)
+	}
+}
+
+// An escalation ends the attempt: a new close opens nothing, and a resumed
+// registered one settles preempted without touching herdr. A quota stop
+// announced for the hub's hand-over is not an end.
+func TestCloseOpEscalationEndsTheAttempt_t4594(t *testing.T) {
+	inbox := t.TempDir()
+	seedNodeCloseOp(t, inbox, "op-1", fleet.CloseOpRegistered)
+	addCloseOpEvent(t, inbox, "00003-job.escalate.json", `{"kind":"job.escalate","created_at":"2026-11-14T00:00:02Z","payload":{}}`)
+	fake := idlePaneHerdr()
+	client := closeOpNode(t, inbox, fake)
+	wantCloseOp(t, client, "op-1", fleet.CloseOpPreempted, false)
+	wantCloseOp(t, client, "op-2", nodeCloseOpMismatch, false)
+	if len(fake.calls) != 0 {
+		t.Fatalf("closed an escalated attempt: %v", fake.calls)
+	}
+
+	announced := t.TempDir()
+	seedCloseOpJob(t, announced)
+	addCloseOpEvent(t, announced, "00003-job.lost.json", `{"kind":"job.lost","created_at":"2026-11-14T00:00:02Z","payload":{"pane_id":"w1:p1","reason":"quota_stop","pool":"claude"}}`)
+	wantCloseOp(t, closeOpNode(t, announced, idlePaneHerdr()), "op-1", fleet.CloseOpClosed, false)
+}
+
+// Every herdr call of a close operation runs in the session its job's
+// receipt names, not the session of whichever job last used the pane id.
+func TestCloseOpUsesItsJobsSession_t4594(t *testing.T) {
+	fakeDir := t.TempDir()
+	fakeFleetHerdr(t, fakeDir, "old")
+	t.Setenv("HERDR_SESSION", "default")
+	inbox := t.TempDir()
+	for _, job := range []struct{ id, session, at string }{{closeOpJob, "old", "2026-11-14T00:00:01Z"}, {"job-newer", "fleet", "2026-11-14T00:10:00Z"}} {
+		events := filepath.Join(inbox, "jobs", job.id, "events")
+		if err := os.MkdirAll(events, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(events, "00001-job.claim.json"), []byte(`{"kind":"job.claim","created_at":"`+job.at+`","payload":{}}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(events, "00002-job.spawned.json"), []byte(`{"kind":"job.spawned","created_at":"`+job.at+`","payload":{"pane_id":"w1:pW","label":"`+t3276Worker+`","role":"reviewer","herdr_session":"`+job.session+`"}}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	client := &HubClient{nodeCloseSettle: time.Millisecond, jobsInboxRoot: inbox}
+	args := map[string]any{"request_id": "op-1", "job": closeOpJob, "pane_id": "w1:pW", "name": t3276Worker, "agent_status": "idle", "cwd": "/work/a", "allow_unnamed": false}
+	result, code := nodeRun(t, client, nodeCommandPaneCloseOp, args)
+	if errs, _ := os.ReadFile(filepath.Join(fakeDir, "errors")); len(errs) != 0 {
+		t.Fatalf("herdr called in another job's session: %s", errs)
+	}
+	// The fake lists the pane without a cwd, so the guard refuses: what
+	// matters here is that every call reached the job's own session.
+	if code != "" || result["outcome"] != fleet.CloseOpRefused {
+		t.Fatalf("result=%v code=%q", result, code)
+	}
+}
+
+// An empty role in the job's own ledger is unknown, and refuses a blocked
+// close even when a directory named after the label says reviewer.
+func TestCloseOpUnknownRoleRefusesBlocked_t4594(t *testing.T) {
+	inbox := t.TempDir()
+	dir := filepath.Join(inbox, "jobs", closeOpJob, "events")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	addCloseOpEvent(t, inbox, "00001-job.claim.json", `{"kind":"job.claim","created_at":"2026-11-14T00:00:00Z","payload":{}}`)
+	addCloseOpEvent(t, inbox, "00002-job.spawned.json", `{"kind":"job.spawned","created_at":"2026-11-14T00:00:01Z","payload":{"pane_id":"w1:p1","label":"job-a"}}`)
+	decoy := filepath.Join(inbox, "jobs", "job-a", "events")
+	if err := os.MkdirAll(decoy, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(decoy, "00001-job.claim.json"), []byte(`{"kind":"job.claim","payload":{"role":"reviewer"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fake := &nodeFakeHerdr{agents: []string{nodeAgentList(nodeAgentJSON("w1:p1", "job-a", "blocked", "/work/a"))}, read: nodeReapScreen("❯ ")}
+	args := closeOpArgs("op-1")
+	args["agent_status"] = "blocked"
+	result, code := nodeRun(t, &HubClient{nodeHerdr: fake.run, nodeCloseSettle: time.Millisecond, jobsInboxRoot: inbox}, nodeCommandPaneCloseOp, args)
+	if code != "" || result["outcome"] != fleet.CloseOpRefused || fake.called("pane", "close") != 0 {
+		t.Fatalf("result=%v code=%q calls=%v", result, code, fake.calls)
+	}
+}
+
+// A job id spawn accepts, such as one containing "..", is accepted.
+func TestCloseOpAcceptsSpawnJobIDs_t4594(t *testing.T) {
+	for _, id := range []string{"build..42", "a.b"} {
+		args := closeOpArgs("op-1")
+		args["job"] = id
+		raw, _ := json.Marshal(args)
+		if _, valid := decodeNodeCommandArgs(nodeCommandPaneCloseOp, raw); !valid {
+			t.Fatalf("job %q refused", id)
+		}
+		if _, valid := decodeNodeCommandArgs(nodeCommandPaneCloseStatus, json.RawMessage(`{"request_id":"op-1","job":"`+id+`"}`)); !valid {
+			t.Fatalf("status for job %q refused", id)
+		}
+	}
+	for _, id := range []string{"..", ".", "a/b", "-x", ""} {
+		args := closeOpArgs("op-1")
+		args["job"] = id
+		raw, _ := json.Marshal(args)
+		if _, valid := decodeNodeCommandArgs(nodeCommandPaneCloseOp, raw); valid {
+			t.Fatalf("job %q accepted", id)
+		}
+	}
+}
+
+// A failed write of closing is a journal failure, not a close failure, and
+// leaves the pane open.
+func TestCloseOpFailedClosingWriteIsJournalFailed_t4594(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores the directory permission this test relies on")
+	}
+	inbox := t.TempDir()
+	fake := idlePaneHerdr()
+	client := closeOpNode(t, inbox, fake)
+	ops := filepath.Join(inbox, "jobs", closeOpJob, fleet.CloseOpDir)
+	t.Cleanup(func() { _ = os.Chmod(ops, 0o700) })
+	run := fake.run
+	client.nodeHerdr = func(ctx context.Context, args ...string) ([]byte, error) {
+		// After registration, before the closing write.
+		if len(args) >= 2 && args[0] == "agent" && args[1] == "list" {
+			_ = os.Chmod(ops, 0o500)
+		}
+		return run(ctx, args...)
+	}
+	if _, code := nodeRun(t, client, nodeCommandPaneCloseOp, closeOpArgs("op-1")); code != "journal_failed" {
+		t.Fatalf("code=%q", code)
+	}
+	if fake.called("pane", "close") != 0 {
+		t.Fatalf("closed after a failed journal write: %v", fake.calls)
 	}
 }

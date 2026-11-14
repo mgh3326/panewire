@@ -98,10 +98,11 @@ type nodePaneCloseArgs struct {
 	AgentStatus  string `json:"agent_status"`
 	Cwd          string `json:"cwd"`
 	AllowUnnamed bool   `json:"allow_unnamed,omitempty"`
-	// role, when set, is the job's role read from its own ledger by the
-	// caller (a close operation names the job apart from the label); never
-	// on the wire.
-	role string
+	// target, when set, is the job attempt a close operation proved from the
+	// job's own ledger: its role is authoritative (an empty role is unknown,
+	// never looked up under the label) and its herdr session is used for
+	// every read and the close. Never on the wire.
+	target *nodeCloseTarget
 }
 
 type nodePaneCaptureArgs struct {
@@ -910,7 +911,11 @@ func (client *HubClient) nodePaneMatch(ctx context.Context, paneID, name, status
 // created pane never acquired the agent label; every other caller remains
 // label-strict through nodePaneMatch.
 func (client *HubClient) nodePaneMatchWithUnnamed(ctx context.Context, paneID, name, status, cwd string, checkStatus, allowUnnamed bool) (string, nodeHerdrRow, error) {
-	session := client.herdrSessionFor(name, paneID)
+	return client.nodePaneMatchInSession(ctx, client.herdrSessionFor(name, paneID), paneID, name, status, cwd, checkStatus, allowUnnamed)
+}
+
+// nodePaneMatchInSession is nodePaneMatchWithUnnamed in a given herdr session.
+func (client *HubClient) nodePaneMatchInSession(ctx context.Context, session, paneID, name, status, cwd string, checkStatus, allowUnnamed bool) (string, nodeHerdrRow, error) {
 	agents, err := client.readNodeAgentsInSession(ctx, session)
 	if err != nil {
 		return "", nodeHerdrRow{}, err
@@ -951,16 +956,25 @@ func (client *HubClient) nodePaneCloseWith(ctx context.Context, args nodePaneClo
 	// A blocked pane may be a worker waiting on an ESC answer, so the node
 	// closes one only when the job's own ledger names the reviewer role; the
 	// operator-credential command path cannot widen that (hk 3315).
+	session := client.herdrSessionFor(args.Name, args.PaneID)
+	if args.target != nil {
+		// The receipt's session; a receipt that names none ran in the
+		// node's configured session, as herdrSessionFor falls back to.
+		session = firstNonempty(args.target.session, client.nodeSpawnSession())
+	}
 	if args.AgentStatus == "blocked" {
-		role, err := args.role, error(nil)
-		if role == "" {
+		var role string
+		var err error
+		if args.target != nil {
+			role = args.target.role
+		} else {
 			role, err = client.nodeJobRole(args.Name)
 		}
 		if err != nil || role != "reviewer" {
 			return nodePaneCloseResult{Outcome: nodePaneChanged}, ""
 		}
 	}
-	outcome, first, err := client.nodePaneMatchWithUnnamed(ctx, args.PaneID, args.Name, args.AgentStatus, args.Cwd, true, args.AllowUnnamed)
+	outcome, first, err := client.nodePaneMatchInSession(ctx, session, args.PaneID, args.Name, args.AgentStatus, args.Cwd, true, args.AllowUnnamed)
 	if err != nil {
 		return nodePaneCloseResult{}, "herdr_failed"
 	}
@@ -968,8 +982,8 @@ func (client *HubClient) nodePaneCloseWith(ctx context.Context, args nodePaneClo
 		return nodePaneCloseResult{Outcome: outcome}, ""
 	}
 	composerEmpty := func(row nodeHerdrRow) bool {
-		screen, err := client.nodeReadScreen(ctx, args.Name, args.PaneID)
-		return err == nil && nodeComposerState(row.Agent, screen) == nodeComposerEmpty
+		screen, err := client.nodeHerdrRunnerForSession(session)(ctx, "pane", "read", args.PaneID, "--source", "visible", "--format", "ansi")
+		return err == nil && nodeComposerState(row.Agent, string(screen)) == nodeComposerEmpty
 	}
 	if !composerEmpty(first) {
 		return nodePaneCloseResult{Outcome: nodePaneChanged}, ""
@@ -989,10 +1003,10 @@ func (client *HubClient) nodePaneCloseWith(ctx context.Context, args nodePaneClo
 	// journal write) never widens the gap between that look and the close.
 	if beforeClose != nil {
 		if err := beforeClose(); err != nil {
-			return nodePaneCloseResult{}, "close_failed"
+			return nodePaneCloseResult{}, "journal_failed"
 		}
 	}
-	outcome, second, err := client.nodePaneMatchWithUnnamed(ctx, args.PaneID, args.Name, args.AgentStatus, args.Cwd, true, args.AllowUnnamed)
+	outcome, second, err := client.nodePaneMatchInSession(ctx, session, args.PaneID, args.Name, args.AgentStatus, args.Cwd, true, args.AllowUnnamed)
 	if err != nil {
 		return nodePaneCloseResult{}, "herdr_failed"
 	}
@@ -1005,7 +1019,7 @@ func (client *HubClient) nodePaneCloseWith(ctx context.Context, args nodePaneClo
 	if !composerEmpty(second) {
 		return nodePaneCloseResult{Outcome: nodePaneChanged}, ""
 	}
-	if _, err := client.nodeHerdrRunnerFor(args.Name, args.PaneID)(ctx, "pane", "close", args.PaneID); err != nil {
+	if _, err := client.nodeHerdrRunnerForSession(session)(ctx, "pane", "close", args.PaneID); err != nil {
 		return nodePaneCloseResult{}, "close_failed"
 	}
 	return nodePaneCloseResult{Outcome: nodePaneClosed}, ""

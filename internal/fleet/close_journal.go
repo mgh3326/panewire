@@ -60,8 +60,9 @@ func ValidCloseOpID(id string) bool { return closeOpIDPattern.MatchString(id) }
 type CloseOp struct {
 	RequestID string `json:"request_id"`
 	PaneID    string `json:"pane_id"`
-	// Attempt is the job attempt the operation was registered against
-	// (AttemptKey); an operation owns nothing of a later attempt.
+	// Attempt is the job attempt the operation was registered against: the
+	// ledger event that started it. A resumed operation acts only while it is
+	// still the job's current attempt.
 	Attempt string    `json:"attempt"`
 	State   string    `json:"state"`
 	Created time.Time `json:"created"`
@@ -77,57 +78,6 @@ func (op CloseOp) Final() bool {
 		return true
 	}
 	return false
-}
-
-// AttemptKey names the job's current attempt: the event file of the newest
-// claim, spawn or re-prompt, in the order the watcher reads them.
-func AttemptKey(events []Event) string {
-	key := ""
-	for _, ev := range events {
-		switch ev.Kind {
-		case "job.claim", "job.claimed", "job.reclaim", "job.spawned", "job.reprompted":
-			key = ev.name
-		}
-	}
-	return key
-}
-
-// JobDirAttemptKey is AttemptKey for the job directory root job, read in the
-// order the watcher reads it. A symlinked event is refused, as there.
-func JobDirAttemptKey(job *os.Root) (string, error) {
-	binding, err := ReadJobBinding(job, "")
-	return binding.Attempt, err
-}
-
-// JobBinding is what a job's ledger says its current attempt is: the pane and
-// herdr label it runs in, its role, and whether it has already ended.
-type JobBinding struct {
-	Attempt, Pane, Label, Role string
-	Ended                      bool
-}
-
-// ReadJobBinding reads the job directory root job the way its watcher reads it.
-func ReadJobBinding(job *os.Root, id string) (JobBinding, error) {
-	events, err := job.OpenRoot("events")
-	if err != nil {
-		return JobBinding{}, err
-	}
-	defer events.Close()
-	list, err := loadEventsFS(events.FS())
-	if err != nil {
-		return JobBinding{}, err
-	}
-	binding := JobBinding{Attempt: AttemptKey(list)}
-	j, err := jobFromEvents(id, list)
-	if err != nil {
-		return binding, nil // no claim or receipt: nothing binds a pane
-	}
-	// A quota stop announced for the hub's hand-over is not an end: the
-	// hub's close is what follows it.
-	_, announced := announcedQuotaStop(j)
-	binding.Pane, binding.Label, binding.Ended = j.Pane, j.Label, (j.Terminal && !announced) || j.Reaped
-	binding.Role = firstNonempty(j.SpawnRole, j.Role)
-	return binding, nil
 }
 
 // ReadCloseOp reads one operation from the job directory root; found is false
@@ -149,18 +99,19 @@ func ReadCloseOp(job *os.Root, id string) (CloseOp, bool, error) {
 	return op, true, nil
 }
 
-// ensureCloseOpDir creates the journal directory, durably, if it is missing.
+// ensureCloseOpDir creates the journal directory if it is missing and fsyncs
+// the job directory on every call, so the entry is durable even when an
+// earlier call created it and failed to sync; a sync error is returned.
 func ensureCloseOpDir(job *os.Root) error {
-	if err := job.Mkdir(CloseOpDir, 0o700); err == nil {
-		// The new directory's entry must survive a crash with the file in it.
-		if parent, err := job.Open("."); err == nil {
-			_ = parent.Sync()
-			_ = parent.Close()
-		}
-	} else if !errors.Is(err, fs.ErrExist) {
+	if err := job.Mkdir(CloseOpDir, 0o700); err != nil && !errors.Is(err, fs.ErrExist) {
 		return err
 	}
-	return nil
+	parent, err := job.Open(".")
+	if err != nil {
+		return err
+	}
+	defer parent.Close()
+	return parent.Sync()
 }
 
 func replaceInCloseOpDir(job *os.Root, name string, raw []byte) error {
@@ -172,7 +123,7 @@ func replaceInCloseOpDir(job *os.Root, name string, raw []byte) error {
 		return err
 	}
 	defer ops.Close()
-	return durable.ReplaceFileAtomicallyInRoot(ops, name, raw, 0o600)
+	return durable.ReplaceFileAtomicallyInRootSynced(ops, name, raw, 0o600)
 }
 
 // WriteCloseOp durably replaces the operation's file: written mode 0600,
@@ -187,3 +138,6 @@ func WriteCloseOp(job *os.Root, op CloseOp) error {
 	}
 	return replaceInCloseOpDir(job, op.RequestID+".json", raw)
 }
+
+// ValidJobID reports whether id is a job id spawn accepts.
+func ValidJobID(id string) bool { return validID(id) }

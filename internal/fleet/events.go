@@ -3,7 +3,6 @@ package fleet
 import (
 	"context"
 	"encoding/json"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -46,20 +45,11 @@ func (a *App) events(id string) ([]Event, error) {
 	if !validID(id) {
 		return nil, fail(exitUsage, "invalid job id")
 	}
-	return loadEvents(filepath.Join(a.Jobs, id, "events"))
-}
-
-// loadEvents reads a job's events directory in ledger order.
-func loadEvents(dir string) ([]Event, error) {
+	dir := filepath.Join(a.Jobs, id, "events")
 	if e := noSymlinks(dir); e != nil {
 		return nil, e
 	}
-	return loadEventsFS(os.DirFS(dir))
-}
-
-// loadEventsFS reads an events directory, given as fsys, in ledger order.
-func loadEventsFS(fsys fs.FS) ([]Event, error) {
-	entries, e := fs.ReadDir(fsys, ".")
+	entries, e := os.ReadDir(dir)
 	if e != nil {
 		return nil, e
 	}
@@ -75,7 +65,7 @@ func loadEventsFS(fsys fs.FS) ([]Event, error) {
 		if e != nil {
 			return nil, e
 		}
-		b, e := fs.ReadFile(fsys, ent.Name())
+		b, e := os.ReadFile(filepath.Join(dir, ent.Name()))
 		if e != nil {
 			return nil, e
 		}
@@ -110,15 +100,10 @@ func loadEventsFS(fsys fs.FS) ([]Event, error) {
 }
 func (a *App) job(id string) (Job, error) {
 	evs, e := a.events(id)
-	if e != nil {
-		return Job{ID: id, Events: evs}, e
-	}
-	return jobFromEvents(id, evs)
-}
-
-// jobFromEvents folds a job's events, in ledger order, into its state.
-func jobFromEvents(id string, evs []Event) (Job, error) {
 	j := Job{ID: id, Events: evs}
+	if e != nil {
+		return j, e
+	}
 	for _, ev := range evs {
 		p := ev.Payload
 		switch ev.Kind {
