@@ -222,10 +222,11 @@ func statusBlockOf(screen string, isStatus func(string) bool) (string, string, b
 	var status string
 	var tail []string
 	found, later, open, gap := false, false, false, false
-	// limitOpen marks the Devin request-rate-limit banner, whose message wraps
-	// onto the next rows indented with the banner body. Those rows extend the
-	// limit line instead of counting as later agent output; the flag clears at
-	// the banner's closing sentence or at any row that ends the block.
+	// limitOpen marks a Devin rate-limit banner (free-model hk 4680, request
+	// rate hk 4644), whose message wraps onto the next rows indented with the
+	// banner body. Those rows extend the limit line instead of counting as
+	// later agent output; the flag clears at the banner's closing sentence or
+	// at any row that ends the block.
 	limitOpen, limitIndent := false, 0
 	for _, raw := range strings.Split(strings.ReplaceAll(screen, "\r", ""), "\n") {
 		line := strings.TrimSpace(raw)
@@ -247,13 +248,15 @@ func statusBlockOf(screen string, isStatus func(string) bool) (string, string, b
 			later = true
 		case promptChrome(line) || !open && footerLine(line):
 			tail = append(tail, line)
+		case !open && composerLabelRule(line):
+			tail = append(tail, "────")
 		case userTurn(line):
 			open, gap = true, false
 		default:
 			line = strings.TrimLeft(line, statusPrefixes)
 			if isStatus(line) {
 				status, tail, found, later, open = line, nil, true, false, false
-				limitOpen, limitIndent = devinRequest.MatchString(line) && !requestLimitComplete(line), indent
+				limitOpen, limitIndent = (devin.MatchString(line) || devinRequest.MatchString(line)) && !requestLimitComplete(line), indent
 			} else {
 				later = true
 				limitOpen = false
@@ -337,16 +340,43 @@ func promptChrome(line string) bool {
 	return false
 }
 
-// footerLine reports the option menu and status footer a limit screen draws.
-// Devin also prints its working directory as "⏺ <path>" above the composer,
-// between a stop banner and the rule (hk 4644); assistant output rows share
-// the ⏺ mark, so only the working-directory form is chrome.
+// footerLine reports the option menu and status footer a limit screen draws,
+// and Devin's working-directory row above the composer (devinCwdRow).
 func footerLine(line string) bool {
 	lower := strings.ToLower(line)
-	for _, prefix := range []string{"choose an option:", "1. wait", "2. upgrade", "1. stop", "2. use", "swe-2", "esc to", "press enter", "select an option", "⏺ ~/", "⏺ /"} {
+	for _, prefix := range []string{"choose an option:", "1. wait", "2. upgrade", "1. stop", "2. use", "swe-2", "esc to", "press enter", "select an option"} {
 		if strings.HasPrefix(lower, prefix) {
 			return true
 		}
 	}
+	return devinCwdRow(line)
+}
+
+// devinCwdGlyphs are the status marks Devin draws before its working directory:
+// ⏺ (hk 4644) and ● (hk 4680, the screen after a free-model limit). Only these
+// two are evidenced; another mark is added with a captured screen.
+var devinCwdGlyphs = []string{"⏺", "●"}
+
+// devinCwdRow reports Devin's working-directory row: one status mark, a space,
+// then one path token (~/… or /…) and nothing else. Assistant output shares the
+// marks, so prose on the same row is output, not chrome (hk 4680).
+func devinCwdRow(line string) bool {
+	for _, glyph := range devinCwdGlyphs {
+		rest, ok := strings.CutPrefix(line, glyph+" ")
+		if !ok {
+			continue
+		}
+		if (strings.HasPrefix(rest, "~/") || strings.HasPrefix(rest, "/")) && !strings.ContainsAny(rest, " \t") {
+			return true
+		}
+	}
 	return false
+}
+
+// composerLabelRule reports the composer rule Devin draws with the first turn's
+// text as its label ("──── Your brief is the file … ─", hk 4680). It is chrome
+// only where footerLine is: after a status, never under a user turn. The label
+// is user text, so the caller keeps the rule and never its label.
+func composerLabelRule(line string) bool {
+	return strings.HasPrefix(line, "────") && strings.HasSuffix(line, " ─")
 }
