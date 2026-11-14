@@ -877,6 +877,8 @@ still an ordinary subscription pool, not a credit pool: it needs a readable,
 non-stale `ok` reading (otherwise `quota_unknown`), a used-up window drops it
 (`window_exhausted`, or the gate's refusal) and the ranked pools then take the
 task, and a pool projected to waste keeps the waste band ahead of free. It is
+never paced behind credit (credit pacing, below): the band already puts it after
+credit, and pacing would move it behind the ranked pools in the host walk. It is
 not listed in `credit_pools` because that class means a hand-recorded balance
 (`creditPoolStatus`, expiry ordering, admission without an observation). A pool
 named in both `credit_pools` or `free` and `after_free_pools` is refused. Inside

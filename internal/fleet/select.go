@@ -578,10 +578,12 @@ func longProjection(v PoolView) *float64 {
 // paced reports a subscription pool on pace to use up its longest window by
 // that window's reset (credit pacing, decision/2026-11-04/pool-order-owner):
 // that quota will be spent anyway, so a credit pool with a balance takes the
-// work first. Free seats, credit pools and pools at waste risk are never
-// paced. There is no threshold beyond "used up": 100%.
+// work first. Free seats, credit pools, pools at waste risk and after-free
+// pools are never paced: an after-free pool already sorts behind credit by its
+// band, and pacing would also move it to pass 2, behind the ranked pools it
+// must precede (decision 279). There is no threshold beyond "used up": 100%.
 func (p PoolPolicy) paced(row CatalogRow, free, risk bool, v PoolView) bool {
-	if free || risk || p.isCredit(row.Pool) || v.Class == "credit" {
+	if free || risk || p.isCredit(row.Pool) || p.isAfterFree(row.Pool) || v.Class == "credit" {
 		return false
 	}
 	long := longProjection(v)

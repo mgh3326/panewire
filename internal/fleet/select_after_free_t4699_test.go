@@ -193,3 +193,40 @@ func TestStatusBandNamesAfterFreeCommandcode_T4699(t *testing.T) {
 		t.Fatalf("stale commandcode band = %q, want unknown", got)
 	}
 }
+
+// Credit pacing demotes a subscription pool on pace to use up its longest
+// window behind credit, and host-first admission walks such a pool in pass 2,
+// after every unpaced ranked candidate. An after-free pool is exempt: it stays
+// ahead of the ranked pools after credit is tried (mergewake finding on #579).
+func TestAfterFreePoolIsNotPacedBehindCredit_T4699(t *testing.T) {
+	policy, err := LoadPoolPolicy("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Longest window projected to 120%: on pace to be used up.
+	over := PoolView{Status: "ok", Class: "spend", Blocking: ptrF(60), Projected: ptrF(120), RankProjected: ptrF(120), Urgency: ptrF(-0.2), ResetHours: ptrF(100)}
+	if policy.paced(CatalogRow{Pool: "commandcode"}, false, false, over) {
+		t.Fatal("an after-free pool must not be paced behind credit")
+	}
+	if !policy.paced(CatalogRow{Pool: "claude"}, false, false, over) {
+		t.Fatal("a ranked subscription pool on pace to use up its window is still paced behind credit")
+	}
+
+	// Through orderSelCands: a credit pool with a balance is a candidate, and
+	// the ranked pool has only a readable short window (not paced).
+	mk := func(pool, tier string, idx int, paced bool) *selCand {
+		return &selCand{row: CatalogRow{Profile: pool, Pool: pool, Grade: "B"}, tierName: tier, tier: idx, paced: paced}
+	}
+	credit := mk("anthropic-api", creditTier, 1, false)
+	credit.creditPool, credit.creditLeft = true, true
+	cc := mk("commandcode", afterFreeTier, 1, policy.paced(CatalogRow{Pool: "commandcode"}, false, false, over))
+	ranked := mk("codex", "ranked", 2, false)
+	pending := []*selCand{ranked, cc, credit}
+	orderSelCands(pending)
+	if cc.behindCredit {
+		t.Fatal("commandcode was marked behindCredit, so pass 1 would try the ranked pool first")
+	}
+	if got := []string{pending[0].row.Pool, pending[1].row.Pool, pending[2].row.Pool}; got[0] != "anthropic-api" || got[1] != "commandcode" || got[2] != "codex" {
+		t.Fatalf("order %v, want credit, commandcode, ranked", got)
+	}
+}
