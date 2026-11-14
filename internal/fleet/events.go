@@ -140,6 +140,16 @@ func (a *App) job(id string) (Job, error) {
 			if j.Task == "" {
 				j.Task = scalar(p["task_id"])
 			}
+		case "job.lane_registered":
+			// A takeover registers its lane after job.spawned, and the hub may
+			// have moved a predecessor's row, so the recorded name is the
+			// pane's route.
+			if lane := str(p, "hub_lane"); lane != "" {
+				j.HubLane = lane
+			}
+			if machine := str(p, "hub_lane_machine"); machine != "" {
+				j.Machine = machine
+			}
 		case "job.reprompted":
 			j.Terminal, j.Ended, j.Outcome = false, "", ""
 		case "job.completed", "job.joined", "job.revoked", "job.handed_off", "job.lost":
