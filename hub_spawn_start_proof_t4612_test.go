@@ -580,3 +580,29 @@ func TestSpawnGrantDrainStartsNoQuotaHandOff_t4612(t *testing.T) {
 		t.Fatalf("draining hub reserved a successor: %v %v", reserved, err)
 	}
 }
+
+// A replay with a short context (a recovery reprobe) fences an ungranted
+// attempt whose latest start_by plus the margin has passed, before sending
+// it again, and re-places it.
+func TestSpawnShortReplayFencesPastStartBy_t4612(t *testing.T) {
+	retryHK(t)
+	h := startProofHub(t, filepath.Join(t.TempDir(), "inbox.sqlite3"))
+	server := httptest.NewServer(h.Handler())
+	defer server.Close()
+	startProofNode(t, h, server, "desktop", []string{"spawn_v2", "spawn_ops_v1", hubCapabilitySpawnGrant})
+	task, node := startProofTask(t, h, 461290, true)
+	sent := sentSpawnFixture(t, h.inbox.store, task)
+	if err := h.inbox.store.recordSpawnStartBy(t.Context(), node.RequestID, time.Now().Add(-time.Second).UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+	defer cancel()
+	h.executeSpawnTask(ctx, sent)
+	if fenced, err := h.inbox.store.spawnAttemptFenced(t.Context(), node.RequestID); err != nil || !fenced {
+		t.Fatalf("short replay fenced=%v err=%v", fenced, err)
+	}
+	after, err := h.inbox.store.spawnTask(t.Context(), task.Request.RequestID)
+	if err != nil || after.Status != "accepted" || len(after.Exclusions) != 1 || after.Exclusions[0].Reason != "deadline_not_started" {
+		t.Fatalf("after short replay: status=%s exclusions=%+v err=%v", after.Status, after.Exclusions, err)
+	}
+}

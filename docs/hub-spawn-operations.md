@@ -501,7 +501,12 @@ unsent.
    after `start_by` is not taken.
 6. A replay of a sent attempt whose fence was already committed (a hub
    stopped between fence and settlement) is settled as fenced without being
-   sent again.
+   sent again. The hub records the latest `start_by_ms` it sends for each
+   attempt (`spawn_attempt_start_by`, written before the frame leaves). A
+   replay that finds that `start_by` plus the margin already passed fences
+   the attempt before it sends again. A short-lived replay, such as a
+   recovery reprobe whose context ends long before its own fence timer,
+   therefore still fences an ungranted attempt.
 
 #### Stored statuses that older hubs do not know
 
@@ -574,16 +579,23 @@ left. A rollback is a quiesced drain:
    Run it with `sqlite3 <inbox store>` or `psql`. Every hub start also logs it,
    so a rollout script can gate on the line
    `hub spawn grant rows grant_rows=<n> spawn_grant_drain=<bool>`.
-3. Only at 0, stop the newer hub and start the older one. If the count does
-   not reach 0 within the remaining landing deadlines (a granted attempt
-   whose node stays silent keeps its row), do not roll back: restart the
-   newer hub without the flag.
+3. Only at 0, stop the newer hub. Then remove `--spawn-grant-drain` from the
+   hub's command line before the older binary starts: v0.0.404 does not know
+   the flag and refuses to start (`invalid hub flags`), and with
+   `Restart=always` the unit would restart-loop. Under systemd, edit
+   `ExecStart` in the unit (or its drop-in), run `systemctl daemon-reload`,
+   then switch the binary and `systemctl restart` the unit. If the count does
+   not reach 0, do not roll back: remove the flag the same way and restart the
+   newer hub.
 
 Roll forward by starting the newer hub without the flag. Rows the older hub
 left in plain statuses stay plain and are never fenced (see provenance above).
 
-Cost: the drain waits for grant-required spawns in flight, bounded by their
-landing deadlines. Quota-stopped jobs get no successor while the flag is set.
+Cost: the drain waits for grant-required spawns in flight, and that wait has
+no bound. A granted attempt whose node stays silent keeps its row
+(`deadline_exceeded_grant`, owned) past its landing deadline, until its
+node answers or an operator resolves it, and until then the count stays
+above 0. Quota-stopped jobs get no successor while the flag is set.
 
 | Case | Test |
 |---|---|
@@ -592,6 +604,7 @@ landing deadlines. Quota-stopped jobs get no successor while the flag is set.
 | A granted silent attempt keeps ownership and its reservation, also after a restart | `TestSpawnGrantedSilentAttemptKeepsOwnership_t4612` |
 | A hub restart's replay of a sent, ungranted attempt carries a fresh `start_by` and fences it | `TestSpawnRestartReplayFencesUngrantedAttempt_t4612` |
 | Bound and sent grant-required statuses match no v0.0.404 status query; reads and `GET /v1/spawns/<id>` show the refined value | `TestSpawnGrantRequiredStatusHiddenFromOlderHubsAndClients_t4612` |
+| A replay with a short context (recovery reprobe) fences an ungranted attempt past its recorded `start_by` + margin before resending | `TestSpawnShortReplayFencesPastStartBy_t4612` |
 | `--spawn-grant-drain` binds no `*_grant` row (placement goes on without a grant) and starts no quota hand-off | `TestSpawnGrantDrainBindsNoGrantRows_t4612`, `TestSpawnGrantDrainStartsNoQuotaHandOff_t4612` |
 | A grant-required row an older hub moved to a plain status is never granted, fenced or given `start_by` | `TestSpawnLegacySentGrantRowIsNeverFenced_t4612` |
 | Coordinator placement on a real node: grant-required binding, recorded grant, delivered through the node's read loop | `TestSpawnGrantEndToEndWithRealNode_t4612` |

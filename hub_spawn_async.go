@@ -1126,10 +1126,27 @@ func (t *directSpawnTransport) dispatch(ctx context.Context, node hubSpawnReques
 	t.task, node = current, *current.Node
 	// A sent attempt whose fence committed before a hub stop was never
 	// granted, so never started: settle it now instead of sending it again.
+	// One whose latest start_by plus the margin has passed is fenced here,
+	// before any resend, so a replay with a short context (a recovery
+	// reprobe) still fences an ungranted attempt.
 	if node.GrantRequired && current.Status != "bound" {
 		fenced, err := h.inbox.store.spawnAttemptFenced(ctx, node.RequestID)
 		if err != nil {
 			return fleet.HubSpawnReply{}, &fleet.HubError{Kind: "hub_spawn_pending"}
+		}
+		if !fenced {
+			startBy, err := h.inbox.store.spawnAttemptStartBy(ctx, node.RequestID)
+			if err != nil {
+				return fleet.HubSpawnReply{}, &fleet.HubError{Kind: "hub_spawn_pending"}
+			}
+			if startBy != 0 && time.Now().After(time.UnixMilli(startBy).Add(h.spawnStartByMargin)) {
+				if fenced, err = h.inbox.store.fenceSpawnAttempt(h.closeCtx, id, node.RequestID, h.now().UTC()); err != nil {
+					return fleet.HubSpawnReply{}, &fleet.HubError{Kind: "hub_spawn_pending"}
+				}
+				if fenced {
+					h.logger.Warn("hub spawn attempt fenced before its start grant", "request_id", id, "node_request_id", node.RequestID, "host", node.Machine)
+				}
+			}
 		}
 		if fenced {
 			return t.settleNodeResult(ctx, node, spawnFencedResult(node, h.now().UTC()), false)
@@ -1181,6 +1198,16 @@ func (t *directSpawnTransport) dispatch(ctx context.Context, node hubSpawnReques
 	// Fresh sends serialize with that node's accepting override without
 	// holding h.mu across the durable CAS. Replays remain allowed when the
 	// node no longer accepts new work.
+	// The start_by this send carries is recorded before the frame can leave;
+	// without the record nothing is sent.
+	var startByMS int64
+	if node.GrantRequired {
+		startByMS = time.Now().Add(h.spawnStartBy).UnixMilli()
+		if err := h.inbox.store.recordSpawnStartBy(ctx, node.RequestID, startByMS); err != nil {
+			releaseAdmission()
+			return fleet.HubSpawnReply{}, &fleet.HubError{Kind: "hub_spawn_pending"}
+		}
+	}
 	started, err := h.inbox.store.beginSpawnSend(ctx, current)
 	if err != nil || !started {
 		releaseAdmission()
@@ -1216,7 +1243,7 @@ func (t *directSpawnTransport) dispatch(ctx context.Context, node hubSpawnReques
 	// included, gives the node a fresh start_by and arms the fence after it.
 	// start_by only bounds the node's wait; the grant/fence row is the proof.
 	if node.GrantRequired {
-		message.StartByMS = time.Now().Add(h.spawnStartBy).UnixMilli()
+		message.StartByMS = startByMS
 	}
 	writeCtx, cancelWrite := context.WithCancel(ctx)
 	stopConnection := func() bool { return false }

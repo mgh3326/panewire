@@ -174,16 +174,25 @@ func TestNodeSpawnGrantWaitEndsWithConnection_t4612(t *testing.T) {
 	peer, results, _ := grantPeer(t, client, "silent")
 	peer.closed = make(chan struct{})
 	message := admissionMessage(461204, true)
-	message.StartByMS = time.Now().Add(time.Minute).UnixMilli()
-	go func() {
-		// Fixture pacing: close after the claim is written.
-		time.Sleep(100 * time.Millisecond)
-		close(peer.closed)
-	}()
-	started := time.Now()
-	client.handleHubSpawn(t.Context(), peer, message)
-	if elapsed := time.Since(started); elapsed > 10*time.Second || runs.Load() != 0 {
-		t.Fatalf("wait took %s runs=%d", elapsed, runs.Load())
+	// start_by and the request deadline are both far past the assertion
+	// window, so only the closed connection can end the wait in time.
+	message.WaitSeconds = 300
+	message.DeadlineMS = time.Now().Add(5 * time.Minute).UnixMilli()
+	message.StartByMS = time.Now().Add(5 * time.Minute).UnixMilli()
+	done := make(chan struct{})
+	go func() { defer close(done); client.handleHubSpawn(t.Context(), peer, message) }()
+	// Fixture pacing: close after the claim is written.
+	time.Sleep(100 * time.Millisecond)
+	close(peer.closed)
+	if !waitUntil(3*time.Second, func() bool {
+		select {
+		case <-done:
+			return true
+		default:
+			return false
+		}
+	}) || runs.Load() != 0 {
+		t.Fatalf("grant wait did not end with the connection: runs=%d", runs.Load())
 	}
 	if status := admissionJournalStatus(t, client, message.RequestID); status != "completed" {
 		t.Fatalf("journal status=%q, want completed", status)

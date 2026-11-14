@@ -55,6 +55,13 @@ func spawnLogicalStatus(stored string) string {
 	return stored
 }
 
+// spawnAttemptStartByTable keeps the latest start_by the hub has sent for
+// each grant-required attempt, written before the frame leaves. Once that
+// start_by plus the margin has passed, no frame of the attempt can still be
+// granted by its node, so any replay (a short recovery reprobe included) may
+// fence it before sending again.
+const spawnAttemptStartByTable = `CREATE TABLE IF NOT EXISTS spawn_attempt_start_by (node_id TEXT PRIMARY KEY,start_by_ms BIGINT NOT NULL)`
+
 const spawnAttemptGrantsTable = `CREATE TABLE IF NOT EXISTS spawn_attempt_grants (node_id TEXT PRIMARY KEY,request_id TEXT NOT NULL,state TEXT NOT NULL,decided_ms BIGINT NOT NULL)`
 
 // decideSpawnGrant answers a node's job.spawn.claim. Only the current
@@ -117,6 +124,26 @@ func (s *laneInboxStore) fenceSpawnAttempt(parent context.Context, requestID, no
 		return false, err
 	}
 	return state == "fenced", tx.Commit()
+}
+
+// recordSpawnStartBy raises the recorded start_by of nodeID to startByMS.
+func (s *laneInboxStore) recordSpawnStartBy(parent context.Context, nodeID string, startByMS int64) error {
+	ctx, done := s.op(parent)
+	defer done()
+	_, err := s.db.ExecContext(ctx, s.q(`INSERT INTO spawn_attempt_start_by(node_id,start_by_ms) VALUES(?,?) ON CONFLICT(node_id) DO UPDATE SET start_by_ms=CASE WHEN excluded.start_by_ms>spawn_attempt_start_by.start_by_ms THEN excluded.start_by_ms ELSE spawn_attempt_start_by.start_by_ms END`), nodeID, startByMS)
+	return err
+}
+
+// spawnAttemptStartBy returns the latest start_by sent for nodeID, or 0.
+func (s *laneInboxStore) spawnAttemptStartBy(parent context.Context, nodeID string) (int64, error) {
+	ctx, done := s.op(parent)
+	defer done()
+	var startBy int64
+	err := s.db.QueryRowContext(ctx, s.q(`SELECT start_by_ms FROM spawn_attempt_start_by WHERE node_id=?`), nodeID).Scan(&startBy)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil
+	}
+	return startBy, err
 }
 
 // spawnAttemptFenced reports whether the attempt nodeID has a committed fence.
