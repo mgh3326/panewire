@@ -1,6 +1,7 @@
 package fleet
 
 import (
+	"bytes"
 	"context"
 	"strings"
 	"testing"
@@ -87,6 +88,8 @@ func TestTakeoverMovesTheTaskLaneToTheSuccessor(t *testing.T) {
 // records that the takeover did not happen.
 func TestTakeoverFallsBackToTheSuccessorLaneWhenRefused(t *testing.T) {
 	fx := newRebindFixture(t, "spawned", rebindParent)
+	var output bytes.Buffer
+	fx.a.Out = &output
 	fx.s.Inherited, fx.s.Task = rebindParent, "42"
 	fx.a.Config.Hub = map[string]any{"hub_url": "https://hub.example.invalid"}
 	fx.a.Sleep = func(context.Context, time.Duration) error { return nil }
@@ -116,6 +119,9 @@ func TestTakeoverFallsBackToTheSuccessorLaneWhenRefused(t *testing.T) {
 	}
 	if failed := jobEvent(t, fx, "job.lane_takeover_failed"); failed["lane"] != "design-lane" || failed["takeover_job"] != rebindParent {
 		t.Fatalf("job.lane_takeover_failed=%v", failed)
+	}
+	if !strings.Contains(output.String(), "lane design-lane not moved: ") || !strings.Contains(output.String(), "lane_machine_mismatch") {
+		t.Fatalf("spawn output did not explain the failed lane move: %q", output.String())
 	}
 	if registered := jobEvent(t, fx, "job.lane_registered"); registered["hub_lane"] != "worker-a" {
 		t.Fatalf("job.lane_registered=%v", registered)

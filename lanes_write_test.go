@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"golang.org/x/sys/unix"
 )
 
@@ -136,6 +137,78 @@ func TestLanesWriteCreateUpdateDeleteAndEvents(t *testing.T) {
 		if !reflect.DeepEqual(payload, map[string]string{"lane": want.lane, "op": want.op}) {
 			t.Fatalf("event payload=%v want lane=%s op=%s", payload, want.lane, want.op)
 		}
+	}
+}
+
+func TestLanesWriteTakeoverUsesAcceptedParentJobWithoutPredecessorRecord(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		parentJob     bool
+		predecessor   bool
+		wantCode      int
+		wantMovedLane bool
+	}{
+		{name: "accepted parent job moves its recorded predecessor lane", parentJob: true, predecessor: true, wantCode: http.StatusOK, wantMovedLane: true},
+		{name: "unknown predecessor cannot move a lane by name", parentJob: true, wantCode: http.StatusConflict},
+		{name: "spawn without parent job is refused", predecessor: true, wantCode: http.StatusConflict},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "lanes.json")
+			lanesProjectionWrite(t, path, `{"lanes":{"task-lane":{"machine":"machine-a","pane":"w1:p1"}}}`)
+			hub := lanesWriteHub(t, path)
+			store := openSpawnStore(t, filepath.Join(t.TempDir(), "inbox.sqlite3"))
+			hub.inbox = &hubInbox{store: store}
+			if tc.predecessor {
+				seedTakeoverPredecessor(t, store, "predecessor", "machine-a", "w1:p1")
+			}
+
+			request := durableSpawnRequest()
+			request.RequestID = "d676220b-e763-4af1-aefd-000000000002"
+			request.Args = []string{"-c", "/work/project", "-p", "/work/brief.md", "-m", "auto", "-l", "successor", "--job", "successor", "--t", "T1", "--owner", "parent", "--role", "implementer", "--host", "auto"}
+			if tc.parentJob {
+				request.Args = append(request.Args, "--parent-job", "predecessor")
+			} else {
+				request.Args = append(request.Args, "--task", "43")
+			}
+			if _, _, err := store.claimSpawn(t.Context(), request, "successor", "parent", time.Now()); err != nil {
+				t.Fatalf("claim accepted successor spawn: %v", err)
+			}
+			hub.mu.Lock()
+			hub.jobs["successor"] = &hubJobRecord{HubActiveJob: HubActiveJob{JobID: "successor", Pane: "w2:p2", OwnerLane: "parent", Epoch: 1}, Node: "machine-b"}
+			hub.mu.Unlock()
+
+			body := `{"machine":"machine-b","pane":"w2:p2","takeover":"predecessor"}`
+			requestHTTP := httptest.NewRequest(http.MethodPut, "/v1/lanes/task-lane", strings.NewReader(body))
+			requestHTTP.Header.Set(hubAuthorizationHeader, "Bearer fixture-b-token")
+			requestHTTP.Header.Set(hubMachineIDHeader, "machine-b")
+			writer := httptest.NewRecorder()
+			hub.Handler().ServeHTTP(writer, requestHTTP)
+			if writer.Code != tc.wantCode {
+				t.Fatalf("takeover status=%d body=%s, want %d", writer.Code, writer.Body.String(), tc.wantCode)
+			}
+			routes := lanesNodeFile(t, path)
+			if tc.wantMovedLane {
+				if got := routes["task-lane"]; got.Machine != "machine-b" || got.Pane != "w2:p2" {
+					t.Fatalf("task lane route=%+v, want successor route", got)
+				}
+			} else if got := routes["task-lane"]; got.Machine != "machine-a" || got.Pane != "w1:p1" {
+				t.Fatalf("refused takeover changed predecessor route: %+v", got)
+			}
+		})
+	}
+}
+
+func seedTakeoverPredecessor(t *testing.T, store *laneInboxStore, job, machine, pane string) {
+	t.Helper()
+	request := durableSpawnRequest()
+	request.RequestID = uuid.NewString()
+	request.Args = []string{"-c", "/work/project", "-p", "/work/brief.md", "-m", "auto", "-l", job, "--job", job, "--t", "T1", "--owner", "parent", "--role", "implementer", "--host", "auto", "--task", "42"}
+	task, _, err := store.claimSpawn(t.Context(), request, job, "parent", time.Now())
+	if err != nil {
+		t.Fatalf("claim predecessor spawn: %v", err)
+	}
+	if _, err := store.completeSpawn(t.Context(), task, hubSpawnOutcome{RC: 0, Stage: "landing", Host: machine, Pane: pane}, time.Now()); err != nil {
+		t.Fatalf("record predecessor spawn route: %v", err)
 	}
 }
 

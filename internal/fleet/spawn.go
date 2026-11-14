@@ -552,7 +552,9 @@ func (a *App) finishTaskTakeover(ctx context.Context, s *Spawn, task client.Task
 // takeoverLaneName is the lane a takeover write offers: the task's routing
 // lane, which is the name its findings are already addressed to, else the
 // spawn's own label. The hub substitutes the row the predecessor's pane holds,
-// so this name only decides what a pane with no predecessor row registers.
+// so this name never authorizes moving a different row. If the hub cannot
+// prove the predecessor's route, takeOverLane reports the refusal and the
+// successor registers its own label.
 func takeoverLaneName(s Spawn, task client.Task) string {
 	if laneNamePattern.MatchString(task.Lane) {
 		return task.Lane
@@ -572,8 +574,10 @@ func (a *App) takeOverLane(ctx context.Context, s *Spawn, hint, owner, predecess
 		a.recordLaneRegistered(ctx, s, registration, pane, predecessor)
 		return
 	}
+	reason := laneFailureReason(e)
+	fmt.Fprintf(a.Out, "lane %s not moved: %s\n", hint, reason)
 	if laneRefused(e) {
-		_ = a.event(ctx, s.Job, "job.lane_takeover_failed", map[string]any{"lane": hint, "takeover_job": predecessor, "reason": laneFailureReason(e)})
+		_ = a.event(ctx, s.Job, "job.lane_takeover_failed", map[string]any{"lane": hint, "takeover_job": predecessor, "reason": reason})
 	} else {
 		a.warn("lane takeover for job %s task %s failed: %v", s.Job, s.Task, e)
 	}

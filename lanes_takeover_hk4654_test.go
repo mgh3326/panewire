@@ -4,6 +4,9 @@ import (
 	"net/http"
 	"path/filepath"
 	"testing"
+	"time"
+
+	"github.com/google/uuid"
 )
 
 // hk 4654: a --parent-job successor replaces its predecessor's job, and the
@@ -16,10 +19,22 @@ func takeoverHub(t *testing.T, lanes string, jobs map[string]*hubJobRecord) (*Hu
 	path := filepath.Join(t.TempDir(), "lanes.json")
 	lanesProjectionWrite(t, path, lanes)
 	hub := lanesNodeHub(t, path, nil)
+	hub.inbox = &hubInbox{store: openSpawnStore(t, filepath.Join(t.TempDir(), "inbox.sqlite3"))}
 	for id, record := range jobs {
 		hub.jobs[id] = record
 	}
 	return hub, path
+}
+
+func acceptedTakeoverSuccessor(t *testing.T, hub *HubServer, job, predecessor string) {
+	t.Helper()
+	request := durableSpawnRequest()
+	request.RequestID = uuid.NewString()
+	request.Args = []string{"-c", "/work/project", "-p", "/work/brief.md", "-m", "auto", "-l", job, "--job", job, "--t", "T1", "--owner", "mergewake", "--role", "implementer", "--host", "auto", "--parent-job", predecessor}
+	if _, _, err := hub.inbox.store.claimSpawn(t.Context(), request, job, "mergewake", time.Now()); err != nil {
+		t.Fatalf("claim accepted takeover spawn: %v", err)
+	}
+	hub.jobs[job] = takeoverJob(job, "machine-b", "w2:p5")
 }
 
 func takeoverJob(id, node, pane string) *hubJobRecord {
@@ -30,6 +45,7 @@ func TestLaneTakeoverMovesThePredecessorRowAcrossMachines(t *testing.T) {
 	hub, path := takeoverHub(t,
 		`{"lanes":{"mw-recheck-coverage":{"machine":"machine-a","pane":"w1:p1","parent":"mergewake"},"mergewake":{"machine":"machine-a","pane":"w9:p9"}}}`,
 		map[string]*hubJobRecord{"mw-recheck-coverage": takeoverJob("mw-recheck-coverage", "machine-a", "w1:p1")})
+	acceptedTakeoverSuccessor(t, hub, "successor-job", "mw-recheck-coverage")
 
 	// Another machine cannot simply replace the row: that is the refusal the
 	// takeover path exists for.
@@ -74,6 +90,7 @@ func TestLaneTakeoverKeepsThePredecessorLaneName(t *testing.T) {
 	hub, path := takeoverHub(t,
 		`{"lanes":{"author-lane":{"machine":"machine-a","pane":"w1:p1","parent":"mergewake"},"mergewake":{"machine":"machine-a","pane":"w9:p9"}}}`,
 		map[string]*hubJobRecord{"fix-job-1": takeoverJob("fix-job-1", "machine-a", "w1:p1")})
+	acceptedTakeoverSuccessor(t, hub, "fix-job-2", "fix-job-1")
 
 	writer := lanesNodeRequest(t, hub, http.MethodPut, "/v1/lanes/fix-job-2", lanesNodeBToken, "machine-b",
 		`{"machine":"machine-b","pane":"w2:p5","parent":"mergewake","takeover":"fix-job-1"}`)
@@ -108,14 +125,16 @@ func TestLaneTakeoverRefusals(t *testing.T) {
 	if writer := lanesNodeRequest(t, hub, http.MethodPut, "/v1/lanes/lane-a", lanesNodeBToken, "machine-b", body("job-unknown")); writer.Code != http.StatusConflict || writer.Body.String() != `{"error":"lane_takeover_unconfirmed"}`+"\n" {
 		t.Fatalf("unknown job status=%d body=%q", writer.Code, writer.Body.String())
 	}
-	// The named job does not hold the row, so the write falls back to the
-	// ordinary scope rules and the foreign row answers the shared refusal.
-	if writer := lanesNodeRequest(t, hub, http.MethodPut, "/v1/lanes/lane-a", lanesNodeBToken, "machine-b", body("job-elsewhere")); writer.Code != http.StatusForbidden {
+	acceptedTakeoverSuccessor(t, hub, "successor-elsewhere", "job-elsewhere")
+	// A recorded predecessor on another pane does not authorize moving lane-a.
+	if writer := lanesNodeRequest(t, hub, http.MethodPut, "/v1/lanes/lane-a", lanesNodeBToken, "machine-b", body("job-elsewhere")); writer.Code != http.StatusConflict {
 		t.Fatalf("unproven takeover status=%d body=%q", writer.Code, writer.Body.String())
 	}
 	if writer := lanesNodeRequest(t, hub, http.MethodPut, "/v1/lanes/lane-a", lanesNodeBToken, "machine-b", body("bad job id")); writer.Code != http.StatusBadRequest {
 		t.Fatalf("malformed takeover status=%d body=%q", writer.Code, writer.Body.String())
 	}
+	delete(hub.jobs, "successor-elsewhere")
+	acceptedTakeoverSuccessor(t, hub, "successor-pinned", "job-pinned")
 	if writer := lanesNodeRequest(t, hub, http.MethodPut, "/v1/lanes/pinned", lanesNodeBToken, "machine-b", body("job-pinned")); writer.Code != http.StatusConflict || writer.Body.String() != `{"error":"lane_protected"}`+"\n" {
 		t.Fatalf("protected takeover status=%d body=%q", writer.Code, writer.Body.String())
 	}
