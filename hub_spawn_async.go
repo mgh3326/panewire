@@ -697,7 +697,7 @@ func spawnLandingPaneUnconfirmed(result hubSpawnResult) bool {
 }
 
 // spawnNotStartedFix tells the caller what a not-started refusal means.
-const spawnNotStartedFix = "the node never started this request before its deadline. Replay the same command; the replay starts a new attempt and placement can pick another host."
+const spawnNotStartedFix = "the node never started this request before its deadline. Replay the same command; the new attempt can choose another host only if no earlier attempt claimed the job."
 
 // nextHostRefusals are the refusals that say only that this host cannot run the
 // request now. cwd_unmapped is answered before any checkout or engine call, and
@@ -743,7 +743,17 @@ func spawnStageBeforeJobClaim(stage string) bool {
 // runs on the host that refused it. A refusal that left an hk claim there pins
 // the replay, because another host's claim of the job id is a 409.
 func spawnReplayPinsHost(outcome hubSpawnOutcome) bool {
-	return outcome.Retryable && outcome.Host != "" && !spawnRefusalMovesOn(outcome.Reason, outcome.Stage)
+	if !outcome.Retryable || outcome.Host == "" {
+		return false
+	}
+	// A completed node attestation of not-started is proof this attempt made
+	// no claim, even though its stage is claim. An earlier claim stays pinned
+	// independently in hubSpawnTask.ClaimedHost.
+	reason, _, _ := strings.Cut(outcome.Reason, ": ")
+	if outcome.NodeResult && spawnNotStarted(hubSpawnResult{RC: outcome.RC, Stage: outcome.Stage, Error: reason, Retryable: outcome.Retryable}) {
+		return false
+	}
+	return !spawnRefusalMovesOn(outcome.Reason, outcome.Stage)
 }
 
 // spawnPinnedHost also reads outcomes written before claimed_host existed.

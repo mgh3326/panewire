@@ -276,8 +276,9 @@ node verifies cleanup and the refusal precedes the hk job claim (result stage
 empty, `placement` or `checkout`), auto placement can try another host. Before
 the claim, a launch-proof refusal tries an
 alternate harness on the same host first, then another host. A refusal from
-the `claim`, `launch` or `landing` stage leaves the hk job record claimed by
-that node's host, and hk answers another host's claim of the job id with 409
+the `claim`, `launch` or `landing` stage (apart from `deadline_not_started`)
+may leave the hk job record claimed by that node's host, so the hub treats the
+host as bound. Handoffkeep answers another host's claim of that job id with 409
 `job_id_taken` (rc 74, "job id already claimed"). After a cleanup-confirmed
 `launch_proof_failed` or another post-launch harness refusal, an automatically
 selected, non-delegated profile tries an alternate harness **on that same host
@@ -396,8 +397,8 @@ not-started attestation. The hub settles on the durable answer:
 
 | Node evidence | Hub outcome |
 |---|---|
-| `deadline_not_started`, while the request's own deadline still has room (the hub clock is behind the node's), auto placement | Unbind and try the next eligible host. |
-| `deadline_not_started`, any other case (a pinned host, or the deadline passed) | `retryable`, reason `deadline_not_started`, stage `claim`, rc 124, with a fix text; the (task, role) slot is released, so the caller's replay starts a new attempt. The caller sees this refusal, not rc 75. |
+| `deadline_not_started`, while the request's own deadline still has room (the hub clock is behind the node's), auto placement with no earlier host-bound claim | Unbind and try the next eligible host. |
+| `deadline_not_started`, any other case (a pinned host, an earlier claim, or the deadline passed) | `retryable`, reason `deadline_not_started`, stage `claim`, rc 124, with a fix text; the (task, role) slot is released, so the caller's replay starts a new attempt. An earlier host-bound claim still pins that host. The caller sees this refusal, not rc 75. |
 | Landing wait ran out; the node answers the original frame or a replay with `deadline_not_started` within 5 s | Same `retryable` outcome. |
 | Landing wait ran out; the node answers `reconciling` (row executing), `unknown` (stale executing row), `journal_unavailable` or `journal_conflict` | `deadline_exceeded`, ownership kept, as before. |
 | Landing wait ran out; no answer within 5 s (disconnected node, stalled read loop) | `deadline_exceeded`, ownership kept. Silence is never read as not started; a later `deadline_not_started` from the coordinator's replay still settles it. |
