@@ -113,6 +113,9 @@ func (s *Store) checkTestHome() {
 	}
 	for _, home := range testForbiddenHomes {
 		for _, path := range []string{s.DB, s.Inbox} {
+			if path == "" {
+				continue // Abs("") is the cwd, not a ledger path
+			}
 			abs, err := filepath.Abs(path)
 			if err != nil {
 				continue

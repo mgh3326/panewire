@@ -17,12 +17,13 @@ func TestForbidHomeForTestsPanicsOnStoreUnderHome(t *testing.T) {
 		"db under home":     {DB: StatePath(filepath.Join(home, "data")), Inbox: filepath.Join(t.TempDir(), "jobs")},
 		"inbox under home":  {DB: StatePath(filepath.Join(t.TempDir(), "data")), Inbox: filepath.Join(home, "jobs")},
 		"both under home":   {DB: StatePath(filepath.Join(home, "data")), Inbox: filepath.Join(home, "jobs")},
+		"empty inbox":       {DB: StatePath(filepath.Join(t.TempDir(), "data")), Inbox: ""},
 		"outside forbidden": {DB: StatePath(filepath.Join(t.TempDir(), "data")), Inbox: filepath.Join(t.TempDir(), "jobs")},
 	} {
 		func() {
 			defer func() {
 				r := recover()
-				if name == "outside forbidden" {
+				if name == "outside forbidden" || name == "empty inbox" {
 					if r != nil {
 						t.Fatalf("%s: unexpected panic %v", name, r)
 					}
