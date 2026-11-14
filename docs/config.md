@@ -2027,16 +2027,18 @@ state, so a retained completed record can still appear after reap.
 
 ## Task pane sweep
 
-`panewire daemon` closes the pane of an implementer whose bound hk task is
-merged, done or dropped, or whose job was closed, once the pane has stayed not
-working for a grace; a completed author's pane waits while its PR is open. The
-rules are in [pane-sweep.md](pane-sweep.md). Two daemon flags configure it:
+`panewire daemon` closes the pane of a job that ended — a reviewer or
+consult's terminal record, an implementer's merged, done, dropped or
+handed-over end — proven the job's own by pane id and harness session, once
+the end is an hour old (a day for `--keep`), and sooner when the pane stayed
+not working for a grace. A completed author's pane waits while its PR is open.
+The rules are in [pane-sweep.md](pane-sweep.md). Two daemon flags configure it:
 
 - `--task-pane-sweep-interval DURATION` — how often the sweep runs. Default
   `5m`; `0` turns it off; any other value must be at least `10s`.
 - `--task-pane-sweep-grace DURATION` — how long a pane must have stayed not
-  working before it is closed. Default `10m`; `0` closes at the first sweep that
-  finds the task ended.
+  working before it is closed inside the close deadline. Default `10m`; `0`
+  closes at the first sweep that finds the job ended.
 
 The sweep needs `--hub-url`, `--hub-token-env` and `--hub-jobs-root`, and reads
 hk through `handoffkeep_env` in the node's `spawn.json`. After a close it also

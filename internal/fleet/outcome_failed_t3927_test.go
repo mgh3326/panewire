@@ -280,31 +280,34 @@ func TestMergedRepBodyUnchangedFromBase(t *testing.T) {
 	}
 }
 
-// An open PR prevents a sweep diagnostic. Closing the PR still does not make
-// a retained pane a reaped job or publish its failure rep.
+// A job its owner closed is swept whatever its PRs say (hk 3383). Its failure
+// rep is final only once the joined PR is no longer open, so the close defers
+// it until the PR closes.
 func TestSweepHoldsReapedFailureRepWhileOpenPRThenWritesOnClose(t *testing.T) {
 	fake := &hkBenchFake{}
 	srv := httptest.NewServer(fake)
 	defer srv.Close()
 	f := newPaneSweepFixture(t)
 	f.a.BenchStore = &BenchStore{hk: &hkQuota{base: srv.URL, token: "test-token", now: f.a.Now}, now: f.a.Now}
-	f.job("j", "implementer", "42")
-	putEvent(t, f.a, "j", "job.joined", map[string]any{"pr": "https://github.com/mgh3326/panewire/pull/9", "head": "head-9"})
+	g := newSweepGitFake(t)
+	f.withGit(g)
+	f.job("j", "implementer", "42", map[string]any{"cwd": g.worktree(t, "j")})
+	putEvent(t, f.a, "j", "job.joined", map[string]any{"pr": "https://github.com/mgh3326/panewire/pull/9", "head": paneSweepTestHead})
 	putEvent(t, f.a, "j", "job.revoked", map[string]any{})
 	f.tasks["42"] = "in_progress"
-	f.prChanges["42"] = []PRChange{{Number: 9, State: "open", Head: "head-9"}}
+	f.prChanges["42"] = []PRChange{{Number: 9, State: "open", Head: paneSweepTestHead}}
 	f.at(0)
 	f.at(11)
-	if len(f.closed()) != 0 {
-		t.Fatalf("pane closed without ownership-bound authorization: %v", f.closed())
+	if len(f.closed()) != 1 || f.reaped("j") == nil {
+		t.Fatalf("an owner-closed job's pane was kept: %v", f.info)
 	}
 	if len(fake.reps) != 0 {
 		t.Fatalf("open PR wrote %d rows at close, want 0", len(fake.reps))
 	}
-	f.prChanges["42"] = []PRChange{{Number: 9, State: "closed", Head: "head-9"}}
+	f.prChanges["42"] = []PRChange{{Number: 9, State: "closed", Head: paneSweepTestHead}}
 	f.at(12)
-	if len(fake.reps) != 0 {
-		t.Fatalf("retained pane wrote a reaped failure row: %v", fake.reps)
+	if len(fake.reps) != 1 {
+		t.Fatalf("rows after the PR closed = %d, want 1", len(fake.reps))
 	}
 }
 
@@ -335,7 +338,8 @@ func TestSweepHoldsEscalatedJobWithOpenPRUntilPRCloses(t *testing.T) {
 	}
 }
 
-// A superseded job's failure row remains pending until the pane can be reaped.
+// A superseded job's failure row is written when the pane is reaped at its
+// close.
 func TestSweepRecordsSupersededFailureRepWithoutPR(t *testing.T) {
 	fake := &hkBenchFake{}
 	srv := httptest.NewServer(fake)
@@ -347,8 +351,8 @@ func TestSweepRecordsSupersededFailureRepWithoutPR(t *testing.T) {
 	f.tasks["42"] = "in_progress"
 	f.at(0)
 	f.at(11)
-	if len(fake.reps) != 0 || len(f.closed()) != 0 {
-		t.Fatalf("retained pane wrote a reaped failure row or closed: rows=%v closed=%v", fake.reps, f.closed())
+	if len(f.closed()) != 1 || len(fake.reps) != 1 {
+		t.Fatalf("closed pane wrote %d rows, want 1: closed=%v", len(fake.reps), f.closed())
 	}
 }
 
@@ -373,11 +377,11 @@ func TestSweepWritesRowsByOutcomeFinality(t *testing.T) {
 		OpenedAt: "2026-03-01T11:00:00Z", MergedAt: "2026-03-01T12:00:00Z"}}
 	f.at(0)
 	f.at(11)
-	if len(f.closed()) != 0 {
-		t.Fatalf("panes closed without ownership-bound authorization: %v", f.closed())
+	if len(f.closed()) != 3 {
+		t.Fatalf("panes kept: closed %v", f.closed())
 	}
-	if len(fake.reps) != 1 {
-		t.Fatalf("rows = %d, want only the independently observed merged outcome", len(fake.reps))
+	if len(fake.reps) != 2 {
+		t.Fatalf("rows = %d, want the merged outcome and the reaped bare job's row: %v", len(fake.reps), fake.reps)
 	}
 	row := fake.reps[0]
 	if row["task_ref"] != "hk43" || row["merged"] != true {
