@@ -241,6 +241,9 @@ type nodeCloseTarget struct {
 	// announced for the hub's hand-over, or a reviewer's quota-stop intent
 	// is still open; whether the job already ended is in hk, not the ledger.
 	announced, intent bool
+	// hubClose: a hub-close intent was recorded on this attempt; it keeps
+	// intent set for the rest of the attempt.
+	hubClose bool
 }
 
 func readNodeCloseTarget(job *os.Root) (nodeCloseTarget, error) {
@@ -254,13 +257,18 @@ func readNodeCloseTarget(job *os.Root) (nodeCloseTarget, error) {
 		case nodeJobClaimKind(event.kind):
 			target = nodeCloseTarget{attempt: event.name, role: event.role}
 		case event.kind == "job.spawned":
-			target.attempt, target.receipt, target.ended, target.announced, target.intent = event.name, true, false, false, false
+			target.attempt, target.receipt, target.ended, target.announced, target.intent, target.hubClose = event.name, true, false, false, false, false
 			target.pane, target.label, target.session = event.pane, event.label, event.session
 			if event.role != "" {
 				target.role = event.role
 			}
 		case event.kind == "job.reprompted":
-			target.attempt, target.ended, target.announced, target.intent = event.name, false, false, false
+			target.attempt, target.ended, target.announced, target.intent, target.hubClose = event.name, false, false, false, false
+		case event.kind == "job.hub_close_intent":
+			// A hub close was opened on this attempt: whether something else
+			// already ended the job in hk (the watcher then keeps that record)
+			// is in hk, not the ledger, so every later close asks hk.
+			target.intent, target.hubClose = true, true
 		case event.kind == "job.quota_stop_intent":
 			// The watcher writes hk lost before its final job.lost: a crash
 			// between the two leaves the intent open over an ended job.
@@ -271,7 +279,7 @@ func readNodeCloseTarget(job *os.Root) (nodeCloseTarget, error) {
 			if event.reason == "superseded" {
 				target.ended = true
 			}
-			target.intent = false
+			target.intent = target.hubClose
 		case event.kind == "job.lost":
 			if event.reason == "quota_stop" && !event.final {
 				target.announced = true

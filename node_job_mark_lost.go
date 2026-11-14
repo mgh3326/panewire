@@ -178,7 +178,9 @@ func readNodeJobLedgerEvents(job *os.Root) ([]nodeJobLedgerEvent, error) {
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
 	events := make([]nodeJobLedgerEvent, 0, len(entries))
 	for _, entry := range entries {
-		if entry.IsDir() {
+		// A dot name is an unpublished temporary event the ledger writer
+		// may be writing or removing.
+		if entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
 			continue
 		}
 		if !entry.Type().IsRegular() || !strings.HasSuffix(entry.Name(), ".json") {

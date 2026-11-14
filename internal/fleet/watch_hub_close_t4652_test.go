@@ -410,3 +410,15 @@ func TestProbeHubCloseWatcher_t4652(t *testing.T) {
 		t.Fatalf("old watcher: %v %v", w, e)
 	}
 }
+
+// An unpublished temporary event (the ledger writer's .tmp-*.json, possibly
+// half written by the node) is not an event: reading the job does not fail.
+func TestJobLedgerSkipsTemporaryEvents_t4652(t *testing.T) {
+	a, _ := hubCloseFixture(t)
+	if e := os.WriteFile(filepath.Join(a.Jobs, "j", "events", ".tmp-42.json"), []byte(`{"kind":`), 0o600); e != nil {
+		t.Fatal(e)
+	}
+	if _, e := a.job("j"); e != nil {
+		t.Fatalf("a temporary event broke the ledger read: %v", e)
+	}
+}

@@ -853,3 +853,21 @@ func TestHelloAdvertisesCloseOps_t4652(t *testing.T) {
 		t.Fatalf("hello capabilities %v lack close_ops_v1", hubSpawnCapabilities)
 	}
 }
+
+// Once a hub close was opened on the attempt, a later close asks hk even after
+// the watcher cancelled that intent: a job another writer already ended in hk
+// is not closed again (hk 4652 review).
+func TestCloseOpAfterAHubCloseIntentAsksHK_t4652(t *testing.T) {
+	for _, test := range []struct {
+		state, outcome string
+	}{{"completed", nodeCloseOpMismatch}, {"spawned", fleet.CloseOpClosed}} {
+		inbox := t.TempDir()
+		seedCloseOpJob(t, inbox)
+		addCloseOpEvent(t, inbox, "00003-job.hub_close_intent.json", `{"kind":"job.hub_close_intent","created_at":"2026-11-14T00:00:02Z","payload":{"request_id":"op-0","attempt":"`+closeOpAttempt+`","pane_id":"w1:p1","label":"job-a","end_reason":"quota_stop pool=devin-free"}}`)
+		addCloseOpEvent(t, inbox, "00004-job.hub_close_cancelled.json", `{"kind":"job.hub_close_cancelled","created_at":"2026-11-14T00:00:03Z","payload":{"request_id":"op-0","reason":"not_closed"}}`)
+		addCloseOpEvent(t, inbox, ".tmp-123.json", `{"kind":`)
+		client := closeOpNode(t, inbox, idlePaneHerdr())
+		client.nodeJobs = &roleJobs{records: map[string]map[string]any{closeOpJob: {"state": test.state}}}
+		wantCloseOp(t, client, "op-1", test.outcome, false)
+	}
+}
