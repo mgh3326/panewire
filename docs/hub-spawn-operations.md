@@ -165,29 +165,44 @@ read of the same check. Each row then:
 | still waiting | stays `waiting`; no re-read until the next check |
 | a named task is in hk's `missing` | `refused`, rc 78, reason `task:N=missing`; reservation freed, one `SPAWN_FAILED` for the owner and the submitting lane |
 | the named task is `dropped` or `duplicate` | `cancelled`, rc 84, reason `task:N=<state>`; same release and notice |
-| `expires_at` passed | `given_up` as in [Time limit](#time-limit), whether or not the condition holds |
+| `expires_at` passed | `given_up` as in [Time limit](#time-limit), whether or not the condition holds. Expiry is evaluated before the hk read, so a row is ended at its limit even during an outage |
 
-An hk call that fails fails the whole check: every row stays `waiting`, one
-warning is logged per outage (not per check or row), and the failure clears
-once a read answers. A read that does not name every requested id also fails
-closed as waiting, so a condition is never decided from a partial answer.
+An hk call that fails fails the check's evaluations: every unexpired row stays
+`waiting`, one warning is logged per outage (not per check or row), and the
+failure clears once a read answers. A read that does not name every requested
+id also fails closed as waiting, so a condition is never decided from a partial
+answer. Each waiting row stores its last evaluation (`condition_result`), and
+`GET /v1/spawns/<request>` returns it as `start_condition` with the predicates
+that still block it.
 `TestStartConditionWaitsThenReleasesOnMergedAndDeployed`,
 `TestStartConditionTimeReleasesOnTheClock`,
 `TestStartConditionMissingTaskIsRefused`,
 `TestStartConditionHKFailureKeepsWaitingAndLogsOnce`,
+`TestWaitingRowGivenUpDuringHKOutage`,
 `TestStartConditions250IdsReadInTwoSnapshotCalls`,
-`TestWaitingRequestGivenUpAtItsLimit` and `TestWaitingRowsSurviveRestart` cover
-each row of the table and the batching.
+`TestWaitingRequestGivenUpAtItsLimit`, `TestWaitingRowsSurviveRestart` and
+`TestWaitingStatusReportsBlockingPredicates` cover each row of the table and
+the batching.
 
 The snapshot read comes from the pinned handoffkeep client `v0.0.295`
 (`Client.TaskStatesSnapshot`, hk 4735). A hub on an older client cannot check
 conditions and must not accept `--after`: it does not advertise the feature,
 and the CLI refuses the flag before submitting.
 
-A conditioned row an older hub left in `accepted` is moved to `waiting` by the
-startup migration (`0017_spawn_waiting_conditions.sql`, SQLite: an idempotent
-`UPDATE` at open). A bound legacy row is not moved; it keeps the guard it had
-(not replayed while its condition is unmet and its deadline is live).
+A conditioned row that reaches an executable, unbound status without passing
+the queue is returned to `waiting` instead of launched: a legacy row, a
+replayed `retryable` request, a staged activation, or a bound row a node
+refused (`unbindSpawn`, `resumeUndispatchedSpawn`). The invariant is
+`conditions_met_ms`: it is zero until the queue sees every predicate hold, and
+only a row with it set (or a bound legacy row, which keeps its own guard) may be
+placed. `TestUnboundConditionedRowReturnsToWaiting` covers both `accepted` and
+`deadline_exceeded`.
+
+The startup migration (`0017_spawn_waiting_conditions.sql`, SQLite: an
+idempotent `UPDATE` at open) moves every unbound conditioned row that never
+passed the queue — `accepted`, `deadline_exceeded`, `retryable`, `staged` — to
+`waiting`. A bound legacy row is not moved; it keeps the guard it had (not
+replayed while its condition is unmet and its deadline is live).
 
 ### Rolling back past the time limit
 
@@ -215,13 +230,14 @@ runs the predicates above against a `given_up` row.
 ### Rolling back past start conditions
 
 Decision 254: the migration is additive. `0017_spawn_waiting_conditions.sql`
-adds `conditions_met_ms` (SQLite: `ALTER TABLE` at start) with default 0, which
-an older hub neither reads nor writes, and moves unbound rows an older hub left
-`accepted` with a start condition into the new `waiting` status (SQLite runs
-the same idempotent `UPDATE` at open). A released row carries its met time, so
-a later open does not move it back to waiting. Rolling back is safe: an older
-hub (checked against the code of e00bb952) lists `waiting`, `refused` and
-`cancelled` in no status query, and a `waiting` row holds a reservation
+adds `conditions_met_ms` and `condition_result` (SQLite: `ALTER TABLE` at
+start) with defaults an older hub neither reads nor writes, and moves
+conditioned rows that never passed the queue — unbound `accepted`,
+`deadline_exceeded`, `retryable`, `staged` — into the `waiting` status (SQLite
+runs the same idempotent `UPDATE` at open). A released row carries its met
+time, so a later open does not move it back to waiting. Rolling back is safe:
+an older hub (checked against the code of e00bb952) lists `waiting`, `refused`
+and `cancelled` in no status query, and a `waiting` row holds a reservation
 without a placement slot, so nothing starts from it.
 
 | Older-hub query | What it does with a `waiting` row |

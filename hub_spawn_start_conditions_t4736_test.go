@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -411,5 +412,72 @@ func TestStartConditionSubmissionIsAcceptedAsWaiting(t *testing.T) {
 	h.Handler().ServeHTTP(w, r)
 	if w.Code != http.StatusAccepted || !strings.Contains(w.Body.String(), `"status":"waiting"`) {
 		t.Fatalf("conditioned submit = %d %s, want 202 waiting", w.Code, w.Body)
+	}
+}
+
+func TestWaitingRowGivenUpDuringHKOutage(t *testing.T) {
+	hk := newStartConditionSnapshot(t)
+	h, clock := conditionedSpawnHub(t)
+	request := durableSpawnRequest()
+	request.RequestID = t14RequestID(4970)
+	request.Args = replaceSpawnArg(request.Args, "--job", "expiring-outage")
+	request.StartConditions = []fleet.StartCondition{{Kind: "task", TaskID: "42", State: "merged"}}
+	request.ExpiresSeconds = 60
+	task, _, err := h.inbox.store.claimSpawn(t.Context(), request, "expiring-outage", "parent", clock.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	hk.setFail(true)
+
+	h.checkWaitingSpawns(t.Context())
+	if got := spawnStatusOf(t, h, task.Request.RequestID); got.Status != "waiting" {
+		t.Fatalf("row before its limit = %q, want waiting", got.Status)
+	}
+	clock.Advance(61 * time.Second)
+	h.checkWaitingSpawns(t.Context())
+	got := spawnStatusOf(t, h, task.Request.RequestID)
+	if got.Status != "given_up" {
+		t.Fatalf("expired row during an hk outage = %q, want given_up", got.Status)
+	}
+	if hk.callCount() != 1 {
+		t.Fatalf("snapshot calls = %d: expiry must not wait for hk", hk.callCount())
+	}
+}
+
+func TestUnboundConditionedRowReturnsToWaiting(t *testing.T) {
+	newStartConditionSnapshot(t)
+	h, _ := conditionedSpawnHub(t)
+	task := waitingSpawnFixture(t, h, 1, []fleet.StartCondition{{Kind: "task", TaskID: "42", State: "merged"}})
+	for _, status := range []string{"accepted", "deadline_exceeded"} {
+		if _, err := h.inbox.store.db.Exec(`UPDATE spawn_operations SET status=?,conditions_met_ms=0 WHERE request_id=?`, status, task.Request.RequestID); err != nil {
+			t.Fatal(err)
+		}
+		current := spawnStatusOf(t, h, task.Request.RequestID)
+		if current.Status != status {
+			t.Fatalf("fixture row = %q, want %q", current.Status, status)
+		}
+		h.spawnNewApp = func(io.Writer, io.Writer) (*fleet.App, error) {
+			t.Error("a conditioned row without a met condition reached spawn execution")
+			return nil, nil
+		}
+		h.executeSpawnTask(t.Context(), current)
+		if got := spawnStatusOf(t, h, task.Request.RequestID); got.Status != "waiting" {
+			t.Fatalf("unbound conditioned row %q stayed %q, want waiting", status, got.Status)
+		}
+	}
+}
+
+func TestWaitingStatusReportsBlockingPredicates(t *testing.T) {
+	newStartConditionSnapshot(t)
+	h, _ := conditionedSpawnHub(t)
+	task := waitingSpawnFixture(t, h, 1, []fleet.StartCondition{{Kind: "task", TaskID: "42", State: "merged"}})
+	h.checkWaitingSpawns(t.Context())
+
+	r := httptest.NewRequest(http.MethodGet, "/v1/spawns/"+task.Request.RequestID, nil)
+	r.Header.Set("Authorization", "Bearer "+t14OperatorToken)
+	w := httptest.NewRecorder()
+	h.Handler().ServeHTTP(w, r)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"start_condition":{"status":"waiting","reasons":["task:42=merged"]}`) {
+		t.Fatalf("waiting status = %d %s, want the blocking predicate", w.Code, w.Body)
 	}
 }

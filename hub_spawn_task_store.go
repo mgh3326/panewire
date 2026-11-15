@@ -74,6 +74,13 @@ type hubSpawnTask struct {
 	// start is not unproven ends given_up. Zero on a row from before the
 	// column: such a row is never given up.
 	Expires time.Time
+	// ConditionsMet is when the queue last saw every start condition hold
+	// (hk 4736). Zero means the row never passed the queue; a conditioned row
+	// with zero here is never launched, whatever status it reached.
+	ConditionsMet time.Time
+	// ConditionResult is the last start-condition evaluation of a waiting row,
+	// so GET /v1/spawns shows why it still waits.
+	ConditionResult fleet.StartConditionResult
 	// LastRun is when a coordinator worker last took the request (zero: never).
 	LastRun time.Time
 	// Placed is when the request was bound to its node, the decision the
@@ -106,7 +113,7 @@ func (s *laneInboxStore) ensureSpawnTasks() error {
 	ctx, done := s.op(s.life)
 	defer done()
 	for _, statement := range []string{
-		`CREATE TABLE IF NOT EXISTS spawn_operations (request_id TEXT PRIMARY KEY,job TEXT NOT NULL,owner TEXT NOT NULL,fingerprint TEXT NOT NULL,payload TEXT NOT NULL,status TEXT NOT NULL,created_ms BIGINT NOT NULL,deadline_ms BIGINT NOT NULL,node_id TEXT UNIQUE,node_payload TEXT NOT NULL DEFAULT '',result TEXT NOT NULL DEFAULT '{}',trace_recorded INTEGER NOT NULL DEFAULT 0,last_run_ms BIGINT NOT NULL DEFAULT 0,attempt INTEGER NOT NULL DEFAULT 1,conditions_met_ms BIGINT NOT NULL DEFAULT 0)`,
+		`CREATE TABLE IF NOT EXISTS spawn_operations (request_id TEXT PRIMARY KEY,job TEXT NOT NULL,owner TEXT NOT NULL,fingerprint TEXT NOT NULL,payload TEXT NOT NULL,status TEXT NOT NULL,created_ms BIGINT NOT NULL,deadline_ms BIGINT NOT NULL,node_id TEXT UNIQUE,node_payload TEXT NOT NULL DEFAULT '',result TEXT NOT NULL DEFAULT '{}',trace_recorded INTEGER NOT NULL DEFAULT 0,last_run_ms BIGINT NOT NULL DEFAULT 0,attempt INTEGER NOT NULL DEFAULT 1,conditions_met_ms BIGINT NOT NULL DEFAULT 0,condition_result TEXT NOT NULL DEFAULT '')`,
 		`CREATE TABLE IF NOT EXISTS spawn_reservations (job TEXT PRIMARY KEY,request_id TEXT NOT NULL UNIQUE,task_role TEXT UNIQUE)`,
 		`CREATE TABLE IF NOT EXISTS spawn_notifications (event_id TEXT PRIMARY KEY,request_id TEXT NOT NULL,job TEXT NOT NULL,owner TEXT NOT NULL,result TEXT NOT NULL,created_ms BIGINT NOT NULL,delivered INTEGER NOT NULL DEFAULT 0,telemetry_recorded INTEGER NOT NULL DEFAULT 0)`,
 		spawnAttemptGrantsTable,
@@ -121,7 +128,7 @@ func (s *laneInboxStore) ensureSpawnTasks() error {
 	// Stores from before hk 4460 lack the placement columns (postgres: the
 	// 0008 migration). A restart restores counts from these two columns, and
 	// refresh_waits arrived with hk 4600 (postgres: 0011).
-	for _, column := range []string{`placed_ms BIGINT NOT NULL DEFAULT 0`, `claimed_ms BIGINT NOT NULL DEFAULT 0`, `exclusions TEXT NOT NULL DEFAULT '[]'`, `claimed_host TEXT NOT NULL DEFAULT ''`, `refresh_waits TEXT NOT NULL DEFAULT '[]'`, `expires_ms BIGINT NOT NULL DEFAULT 0`, `conditions_met_ms BIGINT NOT NULL DEFAULT 0`} {
+	for _, column := range []string{`placed_ms BIGINT NOT NULL DEFAULT 0`, `claimed_ms BIGINT NOT NULL DEFAULT 0`, `exclusions TEXT NOT NULL DEFAULT '[]'`, `claimed_host TEXT NOT NULL DEFAULT ''`, `refresh_waits TEXT NOT NULL DEFAULT '[]'`, `expires_ms BIGINT NOT NULL DEFAULT 0`, `conditions_met_ms BIGINT NOT NULL DEFAULT 0`, `condition_result TEXT NOT NULL DEFAULT ''`} {
 		if _, err := s.db.ExecContext(ctx, `ALTER TABLE spawn_operations ADD COLUMN `+column); err != nil {
 			if err := ignoreDuplicateColumn(err); err != nil {
 				return err
@@ -136,7 +143,7 @@ func (s *laneInboxStore) ensureSpawnTasks() error {
 	// A row an older hub accepted with a start condition belongs to the queue
 	// now (hk 4736): waiting is a new value of status, and no older query lists
 	// it. Only unbound accepted rows move; a bound legacy row keeps its guard.
-	if _, err := s.db.ExecContext(ctx, `UPDATE spawn_operations SET status='waiting' WHERE status='accepted' AND conditions_met_ms=0 AND payload LIKE '%"start_conditions":%'`); err != nil {
+	if _, err := s.db.ExecContext(ctx, `UPDATE spawn_operations SET status='waiting' WHERE status IN ('accepted','deadline_exceeded','retryable','staged','deadline_exceeded_grant') AND conditions_met_ms=0 AND payload LIKE '%"start_conditions":%'`); err != nil {
 		return err
 	}
 	return nil
@@ -448,9 +455,9 @@ func queueSpawnNotifications(ctx context.Context, s *laneInboxStore, tx *sql.Tx,
 
 func scanSpawnTask(row interface{ Scan(...any) error }) (hubSpawnTask, error) {
 	var task hubSpawnTask
-	var payload, result, node, exclusions, refreshWaits string
-	var created, deadline, lastRun, placed, expires int64
-	err := row.Scan(&task.Job, &task.Owner, &payload, &task.Status, &created, &deadline, &node, &result, &task.Attempt, &lastRun, &placed, &exclusions, &task.ClaimedHost, &refreshWaits, &expires)
+	var payload, result, node, exclusions, refreshWaits, conditionResult string
+	var created, deadline, lastRun, placed, expires, conditionsMet int64
+	err := row.Scan(&task.Job, &task.Owner, &payload, &task.Status, &created, &deadline, &node, &result, &task.Attempt, &lastRun, &placed, &exclusions, &task.ClaimedHost, &refreshWaits, &expires, &conditionsMet, &conditionResult)
 	if err != nil {
 		return task, err
 	}
@@ -466,6 +473,14 @@ func scanSpawnTask(row interface{ Scan(...any) error }) (hubSpawnTask, error) {
 	}
 	if expires > 0 {
 		task.Expires = time.UnixMilli(expires)
+	}
+	if conditionsMet > 0 {
+		task.ConditionsMet = time.UnixMilli(conditionsMet)
+	}
+	if conditionResult != "" {
+		if err = json.Unmarshal([]byte(conditionResult), &task.ConditionResult); err != nil {
+			return task, err
+		}
 	}
 	if err = json.Unmarshal([]byte(payload), &task.Request); err != nil {
 		return task, err
@@ -542,7 +557,7 @@ func (s *laneInboxStore) unbindSpawn(parent context.Context, id string, attempt 
 	return s.spawnTask(parent, id)
 }
 
-const spawnTaskColumns = `job,owner,payload,status,created_ms,deadline_ms,node_payload,result,attempt,last_run_ms,placed_ms,exclusions,claimed_host,refresh_waits,expires_ms`
+const spawnTaskColumns = `job,owner,payload,status,created_ms,deadline_ms,node_payload,result,attempt,last_run_ms,placed_ms,exclusions,claimed_host,refresh_waits,expires_ms,conditions_met_ms,condition_result`
 
 func (s *laneInboxStore) spawnTask(parent context.Context, id string) (hubSpawnTask, error) {
 	ctx, done := s.op(parent)

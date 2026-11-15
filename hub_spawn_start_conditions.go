@@ -46,9 +46,22 @@ func (h *HubServer) checkWaitingSpawns(ctx context.Context) {
 	if err != nil || len(requests) == 0 {
 		return
 	}
-	conditions := make([][]fleet.StartCondition, len(requests))
-	for i, task := range requests {
-		conditions[i] = task.Request.StartConditions
+	// Expiry needs no hk data: a waiting row is given up at its limit even
+	// while the condition read is failing.
+	conditions := make([][]fleet.StartCondition, 0, len(requests))
+	active := make([]hubSpawnTask, 0, len(requests))
+	for _, task := range requests {
+		if !task.Expires.IsZero() && !now.Before(task.Expires) {
+			if _, err := h.inbox.store.giveUpWaitingSpawn(ctx, task, now); err != nil {
+				h.logger.Warn("hub spawn waiting expiry not recorded", "request_id", task.Request.RequestID, "job", task.Job, "error", err)
+			}
+			continue
+		}
+		active = append(active, task)
+		conditions = append(conditions, task.Request.StartConditions)
+	}
+	if len(active) == 0 {
+		return
 	}
 	snapshot, err := readStartConditionSnapshot(ctx, conditions)
 	if err != nil {
@@ -57,13 +70,7 @@ func (h *HubServer) checkWaitingSpawns(ctx context.Context) {
 	}
 	h.clearWaitingSpawnReadFailure()
 	released := false
-	for _, task := range requests {
-		if !task.Expires.IsZero() && !now.Before(task.Expires) {
-			if _, err := h.inbox.store.giveUpWaitingSpawn(ctx, task, now); err != nil {
-				h.logger.Warn("hub spawn waiting expiry not recorded", "request_id", task.Request.RequestID, "job", task.Job, "error", err)
-			}
-			continue
-		}
+	for _, task := range active {
 		result := fleet.EvaluateStartConditionSnapshot(task.Request.StartConditions, snapshot, now)
 		switch result.Status {
 		case "met":
@@ -72,6 +79,10 @@ func (h *HubServer) checkWaitingSpawns(ctx context.Context) {
 				h.logger.Warn("hub spawn start condition not released", "request_id", task.Request.RequestID, "job", task.Job, "error", err)
 			}
 			released = released || changed
+		case "waiting":
+			if err := h.inbox.store.recordWaitingSpawnResult(ctx, task, result); err != nil {
+				h.logger.Warn("hub spawn start condition result not recorded", "request_id", task.Request.RequestID, "job", task.Job, "error", err)
+			}
 		case "refused":
 			h.endWaitingSpawn(ctx, task, "refused", result.Reason, 78)
 		case "cancelled":
@@ -221,7 +232,7 @@ func (s *laneInboxStore) releaseWaitingSpawn(parent context.Context, task hubSpa
 	ctx, done := s.op(parent)
 	defer done()
 	deadline := spawnAttemptDeadline(now, task.Request.DeadlineSeconds, task.Expires)
-	result, err := s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET status='accepted',deadline_ms=?,last_run_ms=0,conditions_met_ms=? WHERE request_id=? AND attempt=? AND status='waiting'`), deadline.UnixMilli(), now.UnixMilli(), task.Request.RequestID, task.Attempt)
+	result, err := s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET status='accepted',deadline_ms=?,last_run_ms=0,conditions_met_ms=?,condition_result='' WHERE request_id=? AND attempt=? AND status='waiting'`), deadline.UnixMilli(), now.UnixMilli(), task.Request.RequestID, task.Attempt)
 	if err != nil {
 		return false, err
 	}
@@ -283,4 +294,33 @@ func (s *laneInboxStore) endWaitingSpawn(parent context.Context, task hubSpawnTa
 		return false, err
 	}
 	return true, tx.Commit()
+}
+
+// recordWaitingSpawnResult stores the last evaluation of a waiting row, so
+// GET /v1/spawns can name the predicates that still block it.
+func (s *laneInboxStore) recordWaitingSpawnResult(parent context.Context, task hubSpawnTask, result fleet.StartConditionResult) error {
+	ctx, done := s.op(parent)
+	defer done()
+	raw, err := json.Marshal(result)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET condition_result=? WHERE request_id=? AND attempt=? AND status='waiting'`), string(raw), task.Request.RequestID, task.Attempt)
+	return err
+}
+
+// returnToWaiting puts a conditioned row that became executable without
+// passing the queue back into it: a legacy row, a replay, a node refusal that
+// unbound it, or a staged activation. A row the queue already released keeps
+// its conditions_met_ms and is never moved, so this cannot re-wait a request
+// whose condition holds.
+func (s *laneInboxStore) returnToWaiting(parent context.Context, task hubSpawnTask) (bool, error) {
+	ctx, done := s.op(parent)
+	defer done()
+	result, err := s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET status='waiting' WHERE request_id=? AND attempt=? AND conditions_met_ms=0 AND status IN ('accepted','retryable','staged','deadline_exceeded','deadline_exceeded_grant')`), task.Request.RequestID, task.Attempt)
+	if err != nil {
+		return false, err
+	}
+	n, _ := result.RowsAffected()
+	return n == 1, nil
 }

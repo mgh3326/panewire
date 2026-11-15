@@ -243,13 +243,18 @@ func (h *HubServer) handleSpawnOperation(w http.ResponseWriter, r *http.Request)
 	}
 	// Never expose the persisted brief, argv or submitting paths through status
 	// reads. A reason's refusal text may name a path on the executing node.
+	var startCondition *fleet.StartConditionResult
+	if task.Status == "waiting" && task.ConditionResult.Status != "" {
+		startCondition = &task.ConditionResult
+	}
 	writeJSON(w, 200, struct {
-		Job       string          `json:"job_id"`
-		Request   string          `json:"request_id"`
-		Status    string          `json:"status"`
-		ExpiresAt string          `json:"expires_at,omitempty"`
-		Result    hubSpawnOutcome `json:"result"`
-	}{task.Job, task.Request.RequestID, spawnPublicStatus(task.Status), spawnExpiresAt(task), task.Outcome})
+		Job            string                      `json:"job_id"`
+		Request        string                      `json:"request_id"`
+		Status         string                      `json:"status"`
+		ExpiresAt      string                      `json:"expires_at,omitempty"`
+		Result         hubSpawnOutcome             `json:"result"`
+		StartCondition *fleet.StartConditionResult `json:"start_condition,omitempty"`
+	}{task.Job, task.Request.RequestID, spawnPublicStatus(task.Status), spawnExpiresAt(task), task.Outcome, startCondition})
 }
 
 // hubSpawnWorkerCount bounds placement work. Node I/O runs in a separate slot
@@ -431,15 +436,25 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 			h.finishSpawnOutcome(task, hubSpawnOutcome{RC: 1, Stage: "launch", Reason: "unknown"})
 		}
 	}()
-	if task.Node != nil && len(task.Request.StartConditions) != 0 && h.now().Before(task.Deadline) {
-		// A row bound before the queue owned start conditions (hk 4736) keeps
-		// the guard it had: while its original deadline is live, do not replay
-		// an unmet condition because the node treats an unknown request id as a
-		// new spawn. Queue rows waited before they were bound, so this read
-		// only touches a legacy row.
-		snapshot, err := readStartConditionSnapshot(parent, [][]fleet.StartCondition{task.Request.StartConditions})
-		if err != nil || fleet.EvaluateStartConditionSnapshot(task.Request.StartConditions, snapshot, h.now().UTC()).Status != "met" {
+	if len(task.Request.StartConditions) != 0 && task.ConditionsMet.IsZero() {
+		if task.Node == nil {
+			// A conditioned row that became executable without passing the
+			// queue (a legacy row, a replay, a node refusal that unbound it,
+			// a staged activation) goes back to waiting instead of launching
+			// with its --after predicates unchecked. The queue checks it and
+			// releases it to accepted once they hold.
+			_, _ = h.inbox.store.returnToWaiting(parent, task)
 			return
+		}
+		if h.now().Before(task.Deadline) {
+			// A row bound before the queue owned start conditions (hk 4736)
+			// keeps the guard it had: while its original deadline is live, do
+			// not replay an unmet condition because the node treats an unknown
+			// request id as a new spawn.
+			snapshot, err := readStartConditionSnapshot(parent, [][]fleet.StartCondition{task.Request.StartConditions})
+			if err != nil || fleet.EvaluateStartConditionSnapshot(task.Request.StartConditions, snapshot, h.now().UTC()).Status != "met" {
+				return
+			}
 		}
 	}
 	if !h.now().Before(task.Deadline) {
