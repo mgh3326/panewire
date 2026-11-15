@@ -299,10 +299,10 @@ panewire:
    only (the author's job is not bound to the task): the reviewer then runs as
    a top-level job, still excludes that family, and neither claims nor links
    the task, so several passes on one task all spawn. Any other role keeps the
-   "go together" refusal (exit 2). The hub still holds one reviewer slot per
-   task, so passes that start together name theirs: `--review-pass N` (1..9,
-   `--role reviewer` only) keys the slot `task:reviewer:p<N>`
-   ([hub-spawn-operations.md](hub-spawn-operations.md)).
+   "go together" refusal (exit 2). A reviewer holds no task/role reservation
+   (hk 4737), so any number of passes on one task spawn side by side; the hub
+   still accepts `--review-pass N` (1..9, `--role reviewer` only) and records it
+   on the operation ([hub-spawn-operations.md](hub-spawn-operations.md)).
 4. the node's `spawn.json` must map the repo name as a `cwd_key` and set
    `work_root`; `spawn_disabled`, `cwd_unmapped`, `panewire_missing` and
    `brief_doc_unavailable` refuse that host (recorded as `hub_<reason>`) and

@@ -831,6 +831,17 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 	hub.auth.Store(&authSet)
 	hub.fleetState = newFleetStateStore()
 	hub.quietTimings = defaultDesignQuietTimings()
+	if hub.inbox != nil {
+		cleared, err := hub.inbox.store.clearReviewerReservations()
+		if err != nil {
+			hub.closeCancel()
+			_ = hub.inbox.store.close()
+			return nil, err
+		}
+		if cleared > 0 {
+			hub.logger.Info("hub cleared reviewer role reservations", "rows", cleared)
+		}
+	}
 	hub.prepareInbox()
 	if err := hub.restorePlacementCounts(); err != nil {
 		hub.closeCancel()

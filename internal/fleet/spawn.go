@@ -31,7 +31,8 @@ type Spawn struct {
 	CWD, Profile, Prompt, Workspace, Label, T, Job, Owner, Effort, Role, Lane, Parent, Task, ParentJob, Host, Report, ExecutionLane, OperatorRequest, RequestedBy, Purpose, ReportRelative string
 	OverrideReason, Containment, WaitTimeout, Urgency                                                                                                                                      string
 	// ReviewPass is the explicit review pass ("1".."9") of a reviewer spawn. It
-	// only widens the hub reservation key (RoleKey); panewire never parses it out
+	// names the pass in the operation and in RoleKey; a reviewer holds no
+	// reservation (hk 4737), so it widens no slot. panewire never parses it out
 	// of a label.
 	ReviewPass                                         string   `json:"review_pass,omitempty"`
 	After                                              []string `json:"-"`
@@ -136,10 +137,11 @@ const retiredLeadSeatPointer = "the delegated lead seat is retired (--role build
 var reviewPassPattern = regexp.MustCompile(`^[1-9]$`)
 
 // RoleKey is the hub's reservation key for a spawn bound to a task: one
-// holder per (task, role), and per review pass when --review-pass is set, so
-// the p1 and p2 reviewers of one task run together. Every reader and writer
-// of spawn_reservations.task_role builds the key here. Stored keys without a
-// pass stay "task:role".
+// holder per (task, role), and per review pass when --review-pass is set. Every
+// reader and writer of spawn_reservations.task_role builds the key here.
+// Stored keys without a pass stay "task:role". No reviewer key is stored any
+// more (hk 4737); the key remains for a caller that names one, and for the
+// stored keys an older hub wrote.
 func (s Spawn) RoleKey() string {
 	return SpawnRoleKey(s.Task, s.Role, s.ReviewPass)
 }
@@ -147,9 +149,13 @@ func (s Spawn) RoleKey() string {
 // HoldsTaskRole reports whether the hub reserves a task:role key for the
 // spawn. Every writer and reader of spawn_reservations.task_role asks here. A
 // consult seat works beside the task's claimant and never takes the one-holder
-// slot, so a consult pair can share one task (hk 4568).
+// slot, so a consult pair can share one task (hk 4568). A reviewer holds no
+// slot either (hk 4737): reviews are independent work on one task, and a slot
+// only turns a dead reviewer into a refusal for every later attempt. Two
+// reviewers of one (task, pass) place side by side; a replay is still matched
+// by its request id.
 func (s Spawn) HoldsTaskRole() bool {
-	return s.Task != "" && s.ParentJob == "" && !s.consultTask()
+	return s.Task != "" && s.ParentJob == "" && !s.consultTask() && s.Role != "reviewer"
 }
 
 // SpawnRoleKey is RoleKey for a caller that holds the parts, not a Spawn.
