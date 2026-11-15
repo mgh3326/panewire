@@ -2,11 +2,9 @@ package fleet
 
 import (
 	"context"
-	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
-	"strconv"
-	"strings"
 	"testing"
 	"time"
 )
@@ -48,10 +46,11 @@ func TestSettlementFinishesAClosedOpAfterAnIndependentEnd_t4632(t *testing.T) {
 	}
 }
 
-// An independent end over an operation that closed nothing (or was never
-// started) owes nothing: no settlement, no hk write.
+// An independent end over an operation that closed nothing owes nothing: no
+// settlement, no hk write. (One never started is preempted instead:
+// TestSettlementPreemptsARegisteredCloseAnEndOvertook_t4632.)
 func TestSettlementIgnoresAnEndedIntentThatClosedNothing_t4632(t *testing.T) {
-	for _, state := range []string{"", CloseOpRegistered, CloseOpRefused, CloseOpPreempted} {
+	for _, state := range []string{CloseOpRefused, CloseOpPreempted} {
 		t.Run("state="+state, func(t *testing.T) {
 			a, h := hubCloseFixture(t)
 			in := liveIntent(t, a)
@@ -84,7 +83,7 @@ func TestWatcherDropsADecisionStaleAfterASettledClose_t4632(t *testing.T) {
 		t.Fatalf("settle = %v, %v", st, e)
 	}
 	ran := false
-	deferred, e := a.endUnlessHubClose("j", func(Job) error { ran = true; return nil })
+	deferred, e := a.endUnlessHubClose("j", snapshot(t, a), func(Job) error { ran = true; return nil })
 	if e != nil || !deferred || ran {
 		t.Fatalf("endUnlessHubClose = %v, %v (ran %v); want the stale decision dropped", deferred, e, ran)
 	}
@@ -99,7 +98,7 @@ func TestWatcherRunsADecisionAfterACancelledIntent_t4632(t *testing.T) {
 		t.Fatal(e)
 	}
 	ran := false
-	deferred, e := a.endUnlessHubClose("j", func(Job) error { ran = true; return nil })
+	deferred, e := a.endUnlessHubClose("j", snapshot(t, a), func(Job) error { ran = true; return nil })
 	if e != nil || deferred || !ran {
 		t.Fatalf("endUnlessHubClose = %v, %v (ran %v); want the decision run", deferred, e, ran)
 	}
@@ -107,95 +106,6 @@ func TestWatcherRunsADecisionAfterACancelledIntent_t4632(t *testing.T) {
 
 func (a *App) recordHubCloseCancelForTest(id string) error {
 	return a.eventSynced(context.Background(), "j", hubCloseCancelKind, map[string]any{"request_id": id, "reason": "released"})
-}
-
-// The barrier step refuses while an old-binary watcher or a spawn launcher
-// runs, and otherwise records a mode-0600 marker that CloseOpsReady reads.
-func TestCloseOpsBarrier_t4632(t *testing.T) {
-	jobs := t.TempDir()
-	if e := os.MkdirAll(filepath.Join(jobs, "j1", watchCapsDir), 0o700); e != nil {
-		t.Fatal(e)
-	}
-	list := func(out string) ProcessLister {
-		return func(context.Context) ([]byte, error) { return []byte(withStart(out)), nil }
-	}
-	now := time.Date(2026, 11, 15, 0, 0, 0, 0, time.UTC)
-	ctx := context.Background()
-	if CloseOpsReady(ctx, jobs, "v1", list("")) {
-		t.Fatal("ready before the step")
-	}
-	oldWatcher := "4242 panewire _watch j1\n"
-	if e := EnableCloseOps(ctx, jobs, "v1", now, list(oldWatcher)); !errors.Is(e, ErrCloseOpsNotReady) {
-		t.Fatalf("enable with an old watcher = %v", e)
-	}
-	if e := EnableCloseOps(ctx, jobs, "v1", now, list("4343 /usr/local/bin/panewire _spawn-stdin\n")); !errors.Is(e, ErrCloseOpsNotReady) {
-		t.Fatalf("enable with a launcher = %v", e)
-	}
-	if _, e := os.Stat(filepath.Join(jobs, CloseOpsMarker)); !errors.Is(e, os.ErrNotExist) {
-		t.Fatalf("a refused step left a marker: %v", e)
-	}
-	// A watcher of this binary carries its token.
-	if e := os.WriteFile(filepath.Join(jobs, "j1", watchCapsDir, "4242"), []byte(watcherCapsLine(testStart)), 0o600); e != nil {
-		t.Fatal(e)
-	}
-	self := strconv.Itoa(os.Getpid()) + " /usr/local/bin/panewire _spawn-stdin\n"
-	if e := EnableCloseOps(ctx, jobs, "v1", now, list(oldWatcher+self)); e != nil {
-		t.Fatalf("enable = %v", e)
-	}
-	info, e := os.Stat(filepath.Join(jobs, CloseOpsMarker))
-	if e != nil || info.Mode().Perm() != 0o600 {
-		t.Fatalf("marker %v, %v; want mode 0600", info, e)
-	}
-	if !CloseOpsReady(ctx, jobs, "v1", list(oldWatcher)) {
-		t.Fatal("not ready after the step")
-	}
-	// An old-binary watcher that starts later takes readiness away again.
-	if CloseOpsReady(ctx, jobs, "v1", list("5151 panewire _watch j1\n")) {
-		t.Fatal("ready with a token-less watcher")
-	}
-	if CloseOpsReady(ctx, jobs, "v1", func(context.Context) ([]byte, error) { return nil, errors.New("ps failed") }) {
-		t.Fatal("ready on a failed listing")
-	}
-}
-
-// Every verb that can start a watcher holds the barrier closed, the marker
-// names its binary version, both checks read one listing, and a refused step
-// removes an earlier marker (#593 review).
-func TestCloseOpsBarrierFencesEveryLaunchPath_t4632(t *testing.T) {
-	jobs := t.TempDir()
-	ctx := context.Background()
-	now := time.Now()
-	calls := 0
-	once := func(out string) ProcessLister {
-		return func(context.Context) ([]byte, error) { calls++; return []byte(withStart(out)), nil }
-	}
-	if e := EnableCloseOps(ctx, jobs, "v1", now, once("")); e != nil || calls != 1 {
-		t.Fatalf("enable = %v after %d listings, want one listing", e, calls)
-	}
-	for _, verb := range []string{"spawn", "work", "lead", "restore", "_spawn-stdin"} {
-		for _, exe := range []string{"/opt/old/panewire", "/usr/local/bin/panewire.prev", "./panewire-linux-amd64", "/tmp/panewire_1.2.0_linux_amd64"} {
-			line := "99 " + exe + " " + verb + " --job x\n"
-			if CloseOpsReady(ctx, jobs, "v1", once(line)) {
-				t.Fatalf("ready while %q runs", line)
-			}
-		}
-	}
-	t.Setenv("PANEWIRE_BIN", "/opt/custom/pw-renamed")
-	if CloseOpsReady(ctx, jobs, "v1", once("99 /opt/custom/pw-renamed spawn --job x\n")) {
-		t.Fatal("ready while a PANEWIRE_BIN-named launcher runs")
-	}
-	if !CloseOpsReady(ctx, jobs, "v1", once("99 /bin/zsh -c make spawn\n12 /usr/local/bin/panewire daemon\n")) {
-		t.Fatal("not ready with only unrelated processes")
-	}
-	if CloseOpsReady(ctx, jobs, "v2", once("")) {
-		t.Fatal("ready for another binary version")
-	}
-	if e := EnableCloseOps(ctx, jobs, "v1", now, once("99 /opt/old/panewire restore j\n")); !errors.Is(e, ErrCloseOpsNotReady) {
-		t.Fatalf("enable with a restore = %v", e)
-	}
-	if CloseOpsEnabled(jobs, "v1") {
-		t.Fatal("a refused step kept the earlier marker")
-	}
 }
 
 // #593 review: a reap after the independent end does not retire an owed
@@ -319,13 +229,13 @@ func TestOwedEndedCloseFencesWatcherDecisions_t4632(t *testing.T) {
 	}
 	ran := false
 	decide := func(Job) error { ran = true; return nil }
-	if deferred, e := a.endUnlessHubClose("j", decide); e != nil || !deferred || ran {
+	if deferred, e := a.endUnlessHubClose("j", snapshot(t, a), decide); e != nil || !deferred || ran {
 		t.Fatalf("owed: deferred=%v err=%v ran=%v; want the decision fenced", deferred, e, ran)
 	}
 	if st, e := (HubCloseSettlement{App: a}).Settle(context.Background(), "j"); e != nil || st != HubCloseSettled {
 		t.Fatalf("settle = %v, %v", st, e)
 	}
-	if deferred, e := a.endUnlessHubClose("j", decide); e != nil || !deferred || ran {
+	if deferred, e := a.endUnlessHubClose("j", snapshot(t, a), decide); e != nil || !deferred || ran {
 		t.Fatalf("settled: deferred=%v err=%v ran=%v; want the stale decision dropped", deferred, e, ran)
 	}
 	if j, _ := a.job("j"); !foldHubClose(j).settled || j.Ended != "job.revoked" {
@@ -333,24 +243,94 @@ func TestOwedEndedCloseFencesWatcherDecisions_t4632(t *testing.T) {
 	}
 }
 
-// The token's start time is the one the real ps listing prints for the same
-// process, so a live watcher of this binary reads as ready on this host.
-func TestWatcherTokenStartMatchesTheRealListing_t4632(t *testing.T) {
-	start, e := processStartOf(context.Background(), os.Getpid())
+// snapshot is the job as the watcher's poll reads it.
+func snapshot(t *testing.T, a *App) Job {
+	t.Helper()
+	j, e := a.job("j")
 	if e != nil {
-		t.Skipf("ps cannot report a start time here: %v", e)
+		t.Fatal(e)
 	}
-	out, e := psProcesses(context.Background())
-	if e != nil {
-		t.Skipf("ps listing unavailable: %v", e)
+	return j
+}
+
+// #593 review (consult B1): a decision made on a snapshot that an end or a
+// new attempt overtook is dropped under the end lock; a cancelled intent
+// moves no attempt, so it does not make a decision stale.
+func TestWatcherDropsADecisionAnEndOvertook_t4632(t *testing.T) {
+	a, _ := hubCloseFixture(t)
+	seen := snapshot(t, a)
+	if e := a.event(context.Background(), "j", "job.revoked", map[string]any{}); e != nil {
+		t.Fatal(e)
 	}
-	for _, line := range strings.Split(string(out), "\n") {
-		if p, ok := parseProcessLine(line); ok && p.pid == os.Getpid() {
-			if p.start != start {
-				t.Fatalf("listing start %q, token start %q", p.start, start)
+	ran := false
+	if deferred, e := a.endUnlessHubClose("j", seen, func(Job) error { ran = true; return nil }); e != nil || !deferred || ran {
+		t.Fatalf("deferred=%v err=%v ran=%v; want the decision dropped", deferred, e, ran)
+	}
+}
+
+// #593 review r4577077136, r4577077150: an independent end that wins before
+// the close journalled closing makes the registered operation preemptible.
+// Settlement, under the end lock, journals it preempted and cancels the
+// intent: no hk write, no lease change, and a hub repeat replays preempted.
+func TestSettlementPreemptsARegisteredCloseAnEndOvertook_t4632(t *testing.T) {
+	for _, journalled := range []bool{true, false} {
+		t.Run(fmt.Sprintf("journalled=%v", journalled), func(t *testing.T) {
+			a, h := hubCloseFixture(t)
+			in := liveIntent(t, a)
+			recordHubClose(t, a, in)
+			if journalled {
+				writeJobCloseOp(t, a, CloseOp{RequestID: in.RequestID, Attempt: in.Attempt, State: CloseOpRegistered})
 			}
-			return
+			if e := a.event(context.Background(), "j", "job.revoked", map[string]any{}); e != nil {
+				t.Fatal(e)
+			}
+			if jobs, e := PendingHubCloseJobs(a.Jobs); e != nil || len(jobs) != 1 {
+				t.Fatalf("pending = %v, %v", jobs, e)
+			}
+			if st, e := (HubCloseSettlement{App: a}).Settle(context.Background(), "j"); e != nil || st != HubCloseCancelled {
+				t.Fatalf("settle = %v, %v; want cancelled", st, e)
+			}
+			if journalled {
+				op, found, e := a.readJobCloseOp("j", in.RequestID)
+				if e != nil || !found || op.State != CloseOpPreempted {
+					t.Fatalf("op = %+v found=%v err=%v; want preempted", op, found, e)
+				}
+			}
+			if str(h.record(t, "j"), "end_reason") == hubCloseReason {
+				t.Fatal("hk took the close's record")
+			}
+			if jobs, _ := PendingHubCloseJobs(a.Jobs); len(jobs) != 0 {
+				t.Fatalf("pending after preempt = %v", jobs)
+			}
+		})
+	}
+}
+
+// #593 review r4577077160: an interrupted done (job.record_settled without
+// job.completed) is recognized for recovery; a new attempt or job.completed
+// clears it.
+func TestInterruptedCompletion_t4632(t *testing.T) {
+	report := filepath.Join(t.TempDir(), "report.md")
+	if e := os.WriteFile(report, []byte("done\n"), 0o600); e != nil {
+		t.Fatal(e)
+	}
+	ev := func(seq int, kind string) Event {
+		return Event{Kind: kind, name: fmt.Sprintf("%05d-%s.json", seq, kind)}
+	}
+	for name, test := range map[string]struct {
+		events []Event
+		want   bool
+	}{
+		"settled, not notified": {[]Event{ev(1, "job.spawned"), ev(2, eventRecordSettled)}, true},
+		"notified":              {[]Event{ev(1, "job.spawned"), ev(2, eventRecordSettled), ev(3, "job.completed")}, false},
+		"a new attempt":         {[]Event{ev(1, eventRecordSettled), ev(2, "job.reprompted")}, false},
+		"never settled":         {[]Event{ev(1, "job.spawned")}, false},
+	} {
+		if got := interruptedCompletion(Job{ID: "j", Report: report, Events: test.events}); got != test.want {
+			t.Errorf("%s: %v, want %v", name, got, test.want)
 		}
 	}
-	t.Fatal("own process not in the listing")
+	if interruptedCompletion(Job{ID: "j", Report: filepath.Join(t.TempDir(), "missing"), Events: []Event{ev(1, eventRecordSettled)}}) {
+		t.Error("a missing report cannot be finished from")
+	}
 }

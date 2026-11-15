@@ -250,39 +250,29 @@ node's acting lock, and a visible journal state is fsynced before it is reported
 or acted on. `journal_failed` answers a journal read, write or sync that failed;
 the operation then stays as last recorded.
 
-**`close_ops_v1` is advertised only behind a migration barrier** (hk 4632).
-A watcher of an older binary ignores a hub close, and a watcher snapshot
-alone cannot prove none is left, so the node advertises `close_ops_v1` only
-after a recorded step on the host, run after the upgrade:
+**`close_ops_v1` is not advertised**: no hub may issue these ops to any node
+yet. Enabling it is its own prerequisite of the hub issuer (hk 4745), decided
+on #593 (hk 4632): a watcher of an older binary ignores a hub close, and
+observing the process table (names, argv, pid tokens, start times,
+executable paths) cannot prove that none is left or can start. Activation
+needs an owned launch boundary: a recorded drain of the older binaries, launch
+admission that every supported launch path takes before its receipt becomes
+closeable, and a build identity embedded in the running image.
+`fleet.HubCloseWatchersReady` (every live `_watch <job>` process carries its
+`jobs/<job>/.watch-caps/<pid>` token) is a diagnostic for that step, not its
+proof. Per close, the node refuses `watcher_incompatible` when the job's
+watcher holds the watch lock but not `.panewire-watch-hubclose.lock`.
 
-```sh
-panewire node close-ops enable --inbox-root <jobs_inbox_root>
-```
-
-It reads one process listing and refuses (exit 7, retryable, removing any
-earlier marker) while it shows a live `_watch <job>` process of a job under
-the jobs root without its token — every watcher of this binary writes
-`jobs/<job>/.watch-caps/<pid>` (`hub_close_v1 <start>`, its `ps lstart`
-start time, so a file a killed watcher left never vouches for a process that
-reuses its pid) at its start, before any lock (`fleet.HubCloseWatchersReady`,
-failing closed on any listing or token error) — or a panewire executable
-running a verb that can start a watcher (`spawn`, `work`, `lead`, `restore`,
-`_spawn-stdin`). A panewire executable is any basename starting `panewire`
-(`panewire.prev`, `panewire-linux-amd64`, release archives), this binary's
-own name, or `PANEWIRE_BIN`. Otherwise it records `jobs/.close-ops-v1` (mode
-0600, atomic) naming its binary identity: the version plus a digest of the
-executable (`fleet.BuildIdentity`), so every development build differs. The
-node advertises `close_ops_v1` only while the marker names its own identity
-(a rollback, upgrade or rebuild needs the step again; an older daemon's
-in-process launches end with its restart) and the same one-listing check
-holds now. Every hello checks it; a session re-checks every 30 s and re-sends
-hello (with the heartbeat and completions a repeated hello needs) when the
-result changes; and every new `pane.close_op` registration checks it again,
-answering `watcher_incompatible` when it fails. A launcher records the
-`job.spawned` receipt a close binds to before it starts its watcher and stays
-live until then, so that last check fences the close it could race. Per
-close, the node also refuses `watcher_incompatible` when the job's watcher
-holds the watch lock but not `.panewire-watch-hubclose.lock`.
+**The end lock is the authority for a job's end decisions** (hk 4632).
+`jobs/<job>/.panewire-end.lock` is held by the node while it binds a close
+and records its intent, and again while it re-reads the ledger and commits
+`registered` → `closing` (or `preempted`) just before the pane is closed; by
+the watcher around each terminal decision, which it re-checks on a fresh
+ledger; by `panewire job close` before it takes the events lock; and by
+`panewire done` (and the other lifecycle commands) before the operation lock.
+The order is end, then operation, then events. An end that wins before
+`closing` makes the registered close preemptible; one that lands after it
+leaves the close owed.
 
 #### Hub close protocol
 
@@ -397,12 +387,18 @@ close the node journalled as possibly closed (`closed`, `gone`, `unknown`,
 `job.revoked`, a completion, a reap) follows its intent, keeping a competing
 terminal hk record; that settlement records `job.hub_close_settled`, not a
 terminal `job.lost`, so the independent end stays the job's local outcome.
-The node's own settlement retires every other intent of the attempt. While
-such an ended close is owed, the watcher makes no decision (as for an open
-intent); once the node's settlement (`job.lost` or `job.hub_close_settled`)
-is recorded, a watcher decision made before it is dropped and the watcher
-exits. A completion an independent end left mid-publication
-(`job.record_settled`) is finished by its own `panewire done`. What the hub caller (hk 4745) must do: issue close ops only to a node whose
+The node's own settlement retires every other intent of the attempt. An
+ended intent whose operation never started closing (`registered`, or never
+journalled) is journalled `preempted` by the node's settlement, under the end
+lock, and its intent cancelled; a hub repeat replays `preempted`. While an
+ended close is owed, the watcher makes no decision, as for an open intent. A
+watcher decision is dropped when an end or a new attempt landed after the
+snapshot it was made on, or once the node's settlement (`job.lost` or
+`job.hub_close_settled`) is recorded; a cancelled intent moves no attempt, so
+a still-valid decision runs. After a settled close the watcher finishes what
+the attempt already durably owes, with no new end decision, and then exits: a
+pending credit rejection is published and receipted (no hand-over), and a
+`done` interrupted after `job.record_settled` resumes from its receipts. What the hub caller (hk 4745) must do: issue close ops only to a node whose
 current registration advertises it; send `end_reason` on every `pane.close_op`; treat
 `close_in_progress` and `watcher_incompatible` as "not closed, retry later";
 after `unknown`, retry under a new request id while the pane is still

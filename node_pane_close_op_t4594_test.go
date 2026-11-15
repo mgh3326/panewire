@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -47,7 +48,7 @@ func closeOpNode(t *testing.T, inbox string, fake *nodeFakeHerdr) *HubClient {
 	t.Helper()
 	seedCloseOpJob(t, inbox)
 	return &HubClient{nodeHerdr: fake.run, nodeCloseSettle: time.Millisecond, jobsInboxRoot: inbox,
-		closeOpsAdmit: admitAllCloseOps, nodeHubClose: &fakeHubClose{watcher: fleet.HubCloseWatcherAware}}
+		nodeHubClose: &fakeHubClose{watcher: fleet.HubCloseWatcherAware}}
 }
 
 // fakeHubClose stands in for the job ledger and watcher, so a fixture never
@@ -85,8 +86,6 @@ func (f *fakeHubClose) CancelIntent(_ context.Context, job, id string) error {
 	f.cancels = append(f.cancels, job+" "+id)
 	return nil
 }
-
-func admitAllCloseOps(context.Context) bool { return true }
 
 var noHubCloseIntent = &fakeHubClose{watcher: fleet.HubCloseWatcherAware}
 
@@ -253,7 +252,7 @@ func TestCloseOpRechecksThePaneAfterRecordingClosing_t4594(t *testing.T) {
 func TestCloseOpBoundaries_t4594(t *testing.T) {
 	inbox := t.TempDir()
 	fake := idlePaneHerdr()
-	client := &HubClient{nodeHerdr: fake.run, nodeCloseSettle: time.Millisecond, jobsInboxRoot: inbox, closeOpsAdmit: admitAllCloseOps, nodeHubClose: &fakeHubClose{watcher: fleet.HubCloseWatcherAware}}
+	client := &HubClient{nodeHerdr: fake.run, nodeCloseSettle: time.Millisecond, jobsInboxRoot: inbox, nodeHubClose: &fakeHubClose{watcher: fleet.HubCloseWatcherAware}}
 	// A directory named after the pane label is not the job's.
 	if err := os.MkdirAll(filepath.Join(inbox, "jobs", "job-a"), 0o700); err != nil {
 		t.Fatal(err)
@@ -323,7 +322,6 @@ func TestCloseOpOverHubConnection_t4594(t *testing.T) {
 	client.nodeHerdr = fake.run
 	client.nodeCloseSettle = time.Millisecond
 	client.jobsInboxRoot = inbox
-	client.closeOpsAdmit = admitAllCloseOps
 	client.nodeHubClose = &fakeHubClose{watcher: fleet.HubCloseWatcherAware}
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan struct{})
@@ -579,7 +577,7 @@ func TestCloseOpUsesItsJobsSession_t4594(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	client := &HubClient{nodeCloseSettle: time.Millisecond, jobsInboxRoot: inbox, closeOpsAdmit: admitAllCloseOps, nodeHubClose: &fakeHubClose{watcher: fleet.HubCloseWatcherAware}}
+	client := &HubClient{nodeCloseSettle: time.Millisecond, jobsInboxRoot: inbox, nodeHubClose: &fakeHubClose{watcher: fleet.HubCloseWatcherAware}}
 	args := map[string]any{"request_id": "op-1", "job": closeOpJob, "attempt": closeOpAttempt, "pane_id": "w1:pW", "name": t3276Worker, "agent_status": "idle", "cwd": "/work/a", "allow_unnamed": false, "end_reason": "quota_stop pool=devin-free replaced_by=job-c"}
 	result, code := nodeRun(t, client, nodeCommandPaneCloseOp, args)
 	if errs, _ := os.ReadFile(filepath.Join(fakeDir, "errors")); len(errs) != 0 {
@@ -612,7 +610,7 @@ func TestCloseOpUnknownRoleRefusesBlocked_t4594(t *testing.T) {
 	fake := &nodeFakeHerdr{agents: []string{nodeAgentList(nodeAgentJSON("w1:p1", "job-a", "blocked", "/work/a"))}, read: nodeReapScreen("❯ ")}
 	args := closeOpArgs("op-1")
 	args["agent_status"] = "blocked"
-	result, code := nodeRun(t, &HubClient{nodeHerdr: fake.run, nodeCloseSettle: time.Millisecond, jobsInboxRoot: inbox, closeOpsAdmit: admitAllCloseOps, nodeHubClose: &fakeHubClose{watcher: fleet.HubCloseWatcherAware}}, nodeCommandPaneCloseOp, args)
+	result, code := nodeRun(t, &HubClient{nodeHerdr: fake.run, nodeCloseSettle: time.Millisecond, jobsInboxRoot: inbox, nodeHubClose: &fakeHubClose{watcher: fleet.HubCloseWatcherAware}}, nodeCommandPaneCloseOp, args)
 	if code != "" || result["outcome"] != fleet.CloseOpRefused || fake.called("pane", "close") != 0 {
 		t.Fatalf("result=%v code=%q calls=%v", result, code, fake.calls)
 	}
@@ -706,7 +704,7 @@ func TestCloseOpRefusesAReceiptWithoutSession_t4594(t *testing.T) {
 	addCloseOpEvent(t, inbox, "00001-job.claim.json", `{"kind":"job.claim","created_at":"2026-11-14T00:00:00Z","payload":{}}`)
 	addCloseOpEvent(t, inbox, "00002-job.spawned.json", `{"kind":"job.spawned","created_at":"2026-11-14T00:00:01Z","payload":{"pane_id":"w1:p1","label":"job-a","role":"reviewer"}}`)
 	fake := idlePaneHerdr()
-	wantCloseOp(t, &HubClient{nodeHerdr: fake.run, nodeCloseSettle: time.Millisecond, jobsInboxRoot: inbox, closeOpsAdmit: admitAllCloseOps, nodeHubClose: &fakeHubClose{watcher: fleet.HubCloseWatcherAware}}, "op-1", nodeCloseOpMismatch, false)
+	wantCloseOp(t, &HubClient{nodeHerdr: fake.run, nodeCloseSettle: time.Millisecond, jobsInboxRoot: inbox, nodeHubClose: &fakeHubClose{watcher: fleet.HubCloseWatcherAware}}, "op-1", nodeCloseOpMismatch, false)
 	if len(fake.calls) != 0 {
 		t.Fatalf("acted in a guessed session: %v", fake.calls)
 	}
@@ -896,6 +894,14 @@ func TestCloseOpReleaseFencesAnUnregisteredRequest_t4652(t *testing.T) {
 	}
 	if len(ledger.cancels) != 1 || len(ledger.intents) != 0 || fake.called("pane", "close") != 0 {
 		t.Fatalf("cancels=%v intents=%d closes=%d", ledger.cancels, len(ledger.intents), fake.called("pane", "close"))
+	}
+}
+
+// No hello advertises close_ops_v1: no hub may issue a close op to any node
+// until the activation prerequisite (an owned launch boundary) lands.
+func TestNoHelloAdvertisesCloseOps_t4652(t *testing.T) {
+	if slices.Contains(hubSpawnCapabilities, hubCapabilityCloseOps) {
+		t.Fatalf("hello capabilities %v advertise %s", hubSpawnCapabilities, hubCapabilityCloseOps)
 	}
 }
 

@@ -11,10 +11,11 @@ import (
 	"github.com/mgh3326/panewire/internal/fleet"
 )
 
-// hubCapabilityCloseOps names the close operations in hello. It is
-// advertised only behind the migration barrier (hk 4632,
-// node_close_ops_enable.go helloCapabilities): the recorded
-// `panewire node close-ops enable` step and no old-binary watcher live.
+// hubCapabilityCloseOps names the close operations in hello. It is not
+// advertised: enabling it needs an owned launch boundary that no older binary
+// can bypass, which is its own prerequisite of the hub issuer (hk 4745;
+// decided on #593, hk 4632). fleet.HubCloseWatchersReady is a diagnostic for
+// that step, not its proof.
 const hubCapabilityCloseOps = "close_ops_v1"
 
 // Close operations (hk 4594; docs/node-commands.md, "Close operations") are
@@ -198,9 +199,15 @@ func (client *HubClient) runPaneCloseOp(ctx context.Context, args nodePaneCloseO
 	}
 	closeArgs := nodePaneCloseArgs{PaneID: args.PaneID, Name: args.Name, AgentStatus: args.AgentStatus, Cwd: args.Cwd, AllowUnnamed: args.AllowUnnamed, target: target}
 	result, code := client.nodePaneCloseWith(ctx, closeArgs, func() error {
-		// The proof is read again after the settle: the job's watcher, a
-		// separate process, may have recorded a re-prompt or an end of the
-		// attempt meanwhile.
+		// The proof is read again after the settle, and the registered ->
+		// closing (or preempted) step is committed under the job's end lock
+		// (hk 4632): the watcher's decisions, `job close` and `done` take
+		// it too, so no end lands between this check and the write.
+		unlock, err := client.hubCloseLedger().LockEnd(ctx, jobDir)
+		if err != nil {
+			return nodeCloseHookStop{code: "journal_failed"}
+		}
+		defer unlock()
 		again, err := readNodeCloseTarget(job)
 		if err != nil {
 			return err
@@ -398,13 +405,9 @@ func (client *HubClient) bindCloseOpLocked(ctx context.Context, job *os.Root, jo
 		return op, nil, "", "close_in_progress"
 	}
 	// A watcher of an older binary would not defer to the intent. No
-	// watcher at all is fine: the node itself settles the close. The
-	// node-wide barrier is re-checked for every new registration (hk 4632).
+	// watcher at all is fine: the node itself settles the close.
 	if code := client.admitHubCloseWatcher(args.Job, jobDir); code != "" {
 		return op, nil, "", code
-	}
-	if !client.admitCloseOps(ctx) {
-		return op, nil, "", "watcher_incompatible"
 	}
 	// The intent precedes the registration: a crash between the two leaves
 	// an intent with no operation, which the watcher defers to until the
@@ -488,8 +491,8 @@ func (client *HubClient) hubCloseLedger() nodeHubCloseLedger {
 
 // admitHubCloseWatcher refuses a close while the job's watcher is one that
 // does not defer: it holds the watch lock but not the hub-close lock. The
-// node-wide precondition is close_ops_v1 itself, advertised only behind the
-// migration barrier.
+// node-wide precondition is close_ops_v1 itself, which is not advertised
+// until the activation prerequisite lands.
 func (client *HubClient) admitHubCloseWatcher(_ string, jobDir string) string {
 	watcher, err := client.hubCloseLedger().Watcher(jobDir)
 	switch {

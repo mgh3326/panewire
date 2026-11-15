@@ -87,6 +87,17 @@ func (a *App) lifecycleWithOptions(ctx context.Context, kind string, args []stri
 			return e
 		}
 	}
+	// The job's end lock is the authority for its end decisions (hk 4632):
+	// a hub close's binding and its registered -> closing step, the watcher's
+	// decisions and this command serialize on it. The order is end, then
+	// operation, then events; the watcher already holds end when it calls in.
+	if !watchResult {
+		unlockEnd, e := LockJobEnd(filepath.Join(a.Jobs, id))
+		if e != nil {
+			return e
+		}
+		defer unlockEnd()
+	}
 	lock, e := os.OpenFile(filepath.Join(a.Jobs, id, ".panewire-operation.lock"), os.O_CREATE|os.O_RDWR, 0600)
 	if e != nil {
 		return e

@@ -261,12 +261,11 @@ func (a *App) watch(ctx context.Context, args []string) error {
 			continue
 		}
 		// The node settled a hub close of this attempt: it wrote the record
-		// and freed the lease, so the watch is over, even during a quota
-		// hand-over's grace (hk 4632). A completion an independent end left
-		// mid-publication (job.record_settled) is finished by its own
-		// `panewire done`, not by the watcher.
+		// and freed the lease, so no end decision is left, even during a
+		// quota hand-over's grace (hk 4632). Durable publication the attempt
+		// already owes is finished first, and makes no new end decision.
 		if foldHubClose(j).settled {
-			return nil
+			return a.finishPublicationAfterHubClose(ctx, j)
 		}
 		// The job.lost announced for a quota stop (by this watcher for a
 		// reviewer, by the manager for a handed-over implementer) is not
@@ -284,7 +283,7 @@ func (a *App) watch(ctx context.Context, args []string) error {
 			// An open close intent outlives a herdr outage: hk alone can
 			// finish it, and anything else waits for herdr.
 			var out quotaIntentOutcome
-			deferred, err := a.endUnlessHubClose(id, func(j Job) (err error) {
+			deferred, err := a.endUnlessHubClose(id, j, func(j Job) (err error) {
 				out, err = a.reconcileQuotaIntent(ctx, j, intent, false, false, false, Agent{})
 				return err
 			})
@@ -367,7 +366,7 @@ func (a *App) watch(ctx context.Context, args []string) error {
 				}
 				if safeCreditStopHandoff(j, credit, current, currentPresent, currentReachable) {
 					if a.QuotaHandOffGrace <= 0 {
-						deferred, err := a.endUnlessHubClose(id, func(j Job) error { return a.quotaStopLost(ctx, j, credit, true) })
+						deferred, err := a.endUnlessHubClose(id, j, func(j Job) error { return a.quotaStopLost(ctx, j, credit, true) })
 						if err != nil {
 							return err
 						}
@@ -425,7 +424,7 @@ func (a *App) watch(ctx context.Context, args []string) error {
 				// the report here could close it locally while hk holds, or may hold,
 				// the lost record.
 				if !handOff.active && !hasIntent && pending && size == info.Size() && modified.Equal(info.ModTime()) && a.workerSignalledEnd(j) {
-					deferred, err := a.endUnlessHubClose(id, func(Job) error {
+					deferred, err := a.endUnlessHubClose(id, j, func(Job) error {
 						return a.lifecycleWithOptions(ctx, "done", []string{id, "--report", j.Report}, true, len(args) == 2)
 					})
 					if !deferred {
@@ -441,7 +440,7 @@ func (a *App) watch(ctx context.Context, args []string) error {
 			}
 		}
 		if waiting != nil && !hasIntent && !(pending && a.workerSignalledEnd(j)) && !a.Now().Before(waiting.at.Add(decisionTimeout)) {
-			deferred, err := a.endUnlessHubClose(id, func(j Job) error {
+			deferred, err := a.endUnlessHubClose(id, j, func(j Job) error {
 				if e := a.putJobRecord(ctx, id, map[string]any{"state": "lost", "at": a.Now().UTC()}); e != nil {
 					a.jobRecordFailed(ctx, id, "lost", e)
 				}
@@ -462,7 +461,7 @@ func (a *App) watch(ctx context.Context, args []string) error {
 		if waiting == nil && !handOff.active && !quotaRetry && a.Now().After(deadline) && (!pending || latePoll) {
 			// Under the end lock: a hub close recorded meanwhile keeps the
 			// watcher, which is what finishes that close.
-			deferred, err := a.endUnlessHubClose(id, func(Job) error {
+			deferred, err := a.endUnlessHubClose(id, j, func(Job) error {
 				fmt.Fprintln(a.Err, "watch-expired: job stays live; quota retained")
 				return nil
 			})
@@ -496,7 +495,7 @@ func (a *App) watch(ctx context.Context, args []string) error {
 		if !handOff.active && j.QuotaRole() != "consult" {
 			if hasIntent {
 				var out quotaIntentOutcome
-				deferred, err := a.endUnlessHubClose(id, func(j Job) (err error) {
+				deferred, err := a.endUnlessHubClose(id, j, func(j Job) (err error) {
 					out, err = a.reconcileQuotaIntent(ctx, j, intent, true, present, pending, paneAgent)
 					return err
 				})
@@ -528,7 +527,7 @@ func (a *App) watch(ctx context.Context, args []string) error {
 
 		if handOff.active {
 			if handOff.expired(a.Now(), paneAgent, present) {
-				deferred, err := a.endUnlessHubClose(id, func(j Job) error { return a.quotaStopLost(ctx, j, handOff.stop, false) })
+				deferred, err := a.endUnlessHubClose(id, j, func(j Job) error { return a.quotaStopLost(ctx, j, handOff.stop, false) })
 				if !deferred {
 					return err
 				}
@@ -542,7 +541,7 @@ func (a *App) watch(ctx context.Context, args []string) error {
 				// Under the end lock: a hub close recorded since this poll's
 				// look owns the pane now, and a stale re-prompt would close
 				// its intent.
-				deferred, err := a.endUnlessHubClose(id, func(Job) error {
+				deferred, err := a.endUnlessHubClose(id, j, func(Job) error {
 					return a.event(ctx, id, "job.reprompted", map[string]any{"reason": "quota_stop_resumed", "pane_id": j.Pane})
 				})
 				if err != nil {
@@ -562,7 +561,7 @@ func (a *App) watch(ctx context.Context, args []string) error {
 		// write below would end the job without the quota_stop record and close the
 		// intent with its event.
 		if missing >= 2 && !handOff.active && !quotaRetry {
-			deferred, err := a.endUnlessHubClose(id, func(j Job) error {
+			deferred, err := a.endUnlessHubClose(id, j, func(j Job) error {
 				if e := a.putJobRecord(ctx, id, map[string]any{"state": "lost", "at": a.Now().UTC()}); e != nil {
 					a.jobRecordFailed(ctx, id, "lost", e)
 				}
@@ -726,4 +725,62 @@ func (a *App) updateDecision(ctx context.Context, j Job) (*decisionWait, error) 
 		}
 	}
 	return waiting, nil
+}
+
+// finishPublicationAfterHubClose finishes, for an attempt the node's hub close
+// settled, what the attempt already durably owes besides its end (#593
+// review): a pending credit rejection is published and receipted, with no
+// hand-over, since the attempt has ended; and a completion `done` left after
+// job.record_settled resumes from its receipts (pin, notify), with no new hk
+// decision. A failure is returned, so the re-armed watcher retries it.
+func (a *App) finishPublicationAfterHubClose(ctx context.Context, j Job) error {
+	if credit, pending := pendingCreditRejection(j); pending {
+		var err error
+		for attempt := 1; attempt <= 3; attempt++ {
+			if err = a.publishCreditRejection(ctx, j, credit); err == nil {
+				break
+			}
+			a.warn("credit rejection publication failed (attempt %d): %v", attempt, err)
+			if errors.Is(err, errCreditAccountMismatch) || errors.Is(err, errCreditAccountUnidentifiable) {
+				break
+			}
+			if attempt < 3 {
+				if e := a.Sleep(ctx, 5*time.Second); e != nil {
+					return e
+				}
+			}
+		}
+		if err != nil {
+			return a.pauseCreditPublication(ctx, j, credit, err)
+		}
+		if err := a.event(ctx, j.ID, "job.credit_published", map[string]any{"pool": credit.Pool, "at": credit.CreditExhaustedAt.UTC().Format(time.RFC3339Nano)}); err != nil {
+			return err
+		}
+	}
+	if interruptedCompletion(j) {
+		return a.lifecycleWithOptions(ctx, "done", []string{j.ID, "--report", j.Report}, true, false)
+	}
+	return nil
+}
+
+// interruptedCompletion reports whether the attempt's `done` recorded its
+// settlement receipt (job.record_settled) but not its notification
+// (job.completed), and its report is still there to finish from.
+func interruptedCompletion(j Job) bool {
+	settled := false
+	for _, ev := range ledgerOrder(j.Events) {
+		switch ev.Kind {
+		case "job.claim", "job.claimed", "job.reclaim", "job.spawned", "job.reprompted":
+			settled = false
+		case eventRecordSettled:
+			settled = true
+		case "job.completed":
+			settled = false
+		}
+	}
+	if !settled || j.Report == "" {
+		return false
+	}
+	info, err := os.Stat(j.Report)
+	return err == nil && info.Mode().IsRegular()
 }
