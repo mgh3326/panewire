@@ -60,7 +60,7 @@ func (h *HubServer) liveSpawnTasks(ctx context.Context) ([]hubSpawnTask, error) 
 	}
 	h.mu.Unlock()
 	slices.Sort(active)
-	return h.inbox.store.liveSpawns(ctx, active, h.now().Add(-spawnLiveSettle))
+	return h.inbox.store.liveSpawns(ctx, active, h.now().Add(-spawnLiveSettle), h.now())
 }
 
 // livePlacedProfile is the profile an operation was placed on: the chosen
@@ -84,14 +84,15 @@ func livePlacedProfile(task hubSpawnTask) string {
 }
 
 // liveSpawns lists the operations that count toward a pool cap: accepted
-// (except a parked, unbound one: it holds no slot, hk 4661),
+// (except one parked, unbound and not yet due: it holds no slot; a due
+// one may be placing and counts, hk 4661),
 // bound and dispatching ones, and succeeded ones whose job is in activeJobs or that
 // started after settled.
-func (s *laneInboxStore) liveSpawns(parent context.Context, activeJobs []string, settled time.Time) ([]hubSpawnTask, error) {
+func (s *laneInboxStore) liveSpawns(parent context.Context, activeJobs []string, settled, now time.Time) ([]hubSpawnTask, error) {
 	ctx, done := s.op(parent)
 	defer done()
-	query := `SELECT ` + spawnTaskColumns + ` FROM spawn_operations WHERE (status IN ('accepted','bound','dispatching','bound_grant','dispatching_grant') AND NOT (status='accepted' AND node_id IS NULL AND park_reason<>'')) OR status='succeeded' AND (created_ms>=? OR last_run_ms>=?`
-	args := []any{settled.UnixMilli(), settled.UnixMilli()}
+	query := `SELECT ` + spawnTaskColumns + ` FROM spawn_operations WHERE (status IN ('accepted','bound','dispatching','bound_grant','dispatching_grant') AND NOT (status='accepted' AND node_id IS NULL AND park_reason<>'' AND next_check_ms>?)) OR status='succeeded' AND (created_ms>=? OR last_run_ms>=?`
+	args := []any{now.UnixMilli(), settled.UnixMilli(), settled.UnixMilli()}
 	if len(activeJobs) > 0 {
 		query += ` OR job IN (` + strings.TrimSuffix(strings.Repeat("?,", len(activeJobs)), ",") + `)`
 		for _, id := range activeJobs {

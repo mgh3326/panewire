@@ -517,6 +517,13 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 			outcome.Fix = spawnQueueWaitFix(task, h.now())
 		}
 		h.finishSpawnOutcome(task, outcome)
+		// A parked pass emitted no refusal event (App.Parks): its end at the
+		// limit is the one terminal spawn event (hk 4661).
+		if task.ParkReason != "" {
+			if ended, err := h.inbox.store.spawnTask(parent, task.Request.RequestID); err == nil && ended.Status == "given_up" {
+				h.emitFleet(fleetEvent{Kind: "spawn", Job: task.Job, RequestID: task.Request.RequestID, Outcome: "refused", Reason: "given_up", Detail: "park_reason=" + task.ParkReason})
+			}
+		}
 		if unsent {
 			return
 		}
@@ -664,7 +671,10 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 	// The same test as the park below, so a parked pass emits no terminal
 	// refusal event on every recheck.
 	parks := func(err error) bool {
-		if err == nil || ctx.Err() != nil || task.Expires.IsZero() {
+		// A request whose hk job claim pins a host is never parked: a park
+		// that reached expires_at would give it up as never started while
+		// the claim and its saved node refusal stand. It ends as before.
+		if err == nil || ctx.Err() != nil || task.Expires.IsZero() || task.ClaimedHost != "" {
 			return false
 		}
 		if spawnClaimedAnswer(task, err) {

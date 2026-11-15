@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"maps"
 	"net/http"
 	"net/http/httptest"
@@ -579,7 +580,7 @@ func TestParkedRequestHoldsNoPoolSlot_t4661(t *testing.T) {
 	parked := claimParkRequest(t, h, 160, time.Now())
 	open := claimParkRequest(t, h, 161, time.Now())
 	parkNow(t, h, parked, spawnParkQuota)
-	live, err := h.inbox.store.liveSpawns(t.Context(), nil, time.Now())
+	live, err := h.inbox.store.liveSpawns(t.Context(), nil, time.Now(), time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -618,5 +619,72 @@ func TestClaimedAnswerLeavesPoolCapToPark_t4661(t *testing.T) {
 	}
 	if spawnClaimedAnswer(task, errors.New("role_no_candidate: role_no_candidate: every eligible candidate is in a pool at its concurrency cap")) {
 		t.Fatal("a pool at its cap was taken as the claimed answer")
+	}
+}
+
+// A placement pass on a request whose hk claim pins a host never parks it,
+// so expiry cannot replace its saved node refusal with given_up.
+func TestClaimedHostRequestIsNeverParked_t4661(t *testing.T) {
+	h := asyncSpawnHub(t)
+	task := claimParkRequest(t, h, 180, time.Now())
+	if _, err := h.inbox.store.db.Exec(`UPDATE spawn_operations SET claimed_host='desktop' WHERE request_id=?`, task.Request.RequestID); err != nil {
+		t.Fatal(err)
+	}
+	h.spawnNewApp = func(io.Writer, io.Writer) (*fleet.App, error) {
+		return nil, errors.New("no app")
+	}
+	task = parkedTask(t, h, task.Request.RequestID)
+	h.executeSpawnTask(t.Context(), task)
+	if got := parkedTask(t, h, task.Request.RequestID); got.ParkReason != "" {
+		t.Fatalf("claimed request parked: %q", got.ParkReason)
+	}
+}
+
+// A due park may be placing, so it counts toward the cap again.
+func TestDueParkCountsTowardPoolCap_t4661(t *testing.T) {
+	h := asyncSpawnHub(t)
+	task := claimParkRequest(t, h, 190, time.Now())
+	h.inbox.store.parkSpawn(t.Context(), task.Request.RequestID, task.Attempt, spawnParkPoolCap, time.Now().Add(time.Minute))
+	count := func(now time.Time) bool {
+		live, err := h.inbox.store.liveSpawns(t.Context(), nil, now, now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, l := range live {
+			if l.Request.RequestID == task.Request.RequestID {
+				return true
+			}
+		}
+		return false
+	}
+	if count(time.Now()) || !count(time.Now().Add(2*time.Minute)) {
+		t.Fatal("a future park counted, or a due one did not")
+	}
+}
+
+// A parked request that reaches its limit emits one terminal spawn event.
+func TestParkedGiveUpEmitsOneSpawnEvent_t4661(t *testing.T) {
+	h := asyncSpawnHub(t)
+	var events []fleetEvent
+	h.fleetEvents = func(_ time.Time, e fleetEvent) bool { events = append(events, e); return true }
+	clock := expiryClock(h, expiryNow())
+	request, job := parkRequest(195)
+	request.ExpiresSeconds = 300
+	task, _, err := h.inbox.store.claimSpawn(t.Context(), request, job, "parent", *clock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parkNow(t, h, task, spawnParkQuota)
+	parked := parkedTask(t, h, task.Request.RequestID)
+	*clock = parked.Expires
+	h.executeSpawnTask(t.Context(), parked)
+	n := 0
+	for _, e := range events {
+		if e.Kind == "spawn" && e.RequestID == task.Request.RequestID && e.Reason == "given_up" {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("%d given_up spawn events, want 1: %+v", n, events)
 	}
 }
