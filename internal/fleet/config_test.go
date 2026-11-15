@@ -14,7 +14,7 @@ func TestConfigCaps(t *testing.T) {
 			for _, tc := range []struct {
 				name, value, wantCaps, wantErr string
 			}{
-				{name: "known_list", value: `["macos", "linux", "unity", "xcode", "gpu", "heavy-go"]`, wantCaps: "macos,linux,unity,xcode,gpu,heavy-go"},
+				{name: "known_list", value: `["macos", "linux", "unity", "blender", "xcode", "gpu", "heavy-go"]`, wantCaps: "macos,linux,unity,blender,xcode,gpu,heavy-go"},
 				{name: "empty_list", value: `[]`},
 				{name: "omitted"},
 				{name: "true", value: `true`, wantErr: "must be a list of known capability strings, got true"},
