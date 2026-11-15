@@ -163,6 +163,15 @@ func TestHostAccountsListsEveryCommandcodeAccountButOneAccountForOtherPools(t *t
 	if got := hostAccounts(presence, "commandcode", "mac", now, 24*time.Hour); !slices.Equal(got, []string{ccKeyA, ccKeyB}) {
 		t.Fatalf("commandcode accounts %v, want %s then %s (newest first; the one not announced for 3 h is gone)", got, ccKeyA, ccKeyB)
 	}
+	// A host that removed its last account stops announcing: its old record must
+	// not keep the account "held" for the presence TTL, however old the newest is.
+	hours := []PresenceRecord{{HostID: "mac", AccountKey: ccKeyA, LastSeen: now.Add(-5 * time.Hour)}, {HostID: "mac", AccountKey: ccKeyB, LastSeen: now.Add(-6 * time.Hour)}}
+	if got := hostAccounts(hours, "commandcode", "mac", now, 24*time.Hour); len(got) != 0 {
+		t.Fatalf("announcements hours old still name accounts: %v", got)
+	}
+	if got := hostAccountFor(hours, "commandcode", "mac", now, 24*time.Hour, ccKeyA); got != "" {
+		t.Fatalf("a chosen account announced hours ago is not held: %q", got)
+	}
 	if got := hostAccounts(presence, "claude", "mac", now, 24*time.Hour); !slices.Equal(got, []string{claudeKey}) {
 		t.Fatalf("claude accounts %v, want only the newest", got)
 	}

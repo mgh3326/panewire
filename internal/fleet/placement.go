@@ -420,10 +420,13 @@ func neededAccounts(quota map[string]any, pool string, presence []PresenceRecord
 // account per host, the newest.
 var multiAccountPools = []string{"commandcode"}
 
-// multiAccountWindow is how far behind the newest presence record of a host a
-// record of a multi-account pool may be and still name an account the host
-// holds: an account omp no longer lists stops being announced, while a live one
-// is announced at least every ten minutes.
+// multiAccountWindow is how old a presence record of a multi-account pool may be
+// and still name an account the host holds. A live node announces each account at
+// least every ten minutes, so an account omp no longer lists, or a host that
+// removed its last account, ages out of placement within this window instead of
+// staying "held" for the presence TTL while another host keeps the account's
+// shared reading current. A host asleep for longer is bound again by its first
+// announcement after it wakes.
 const multiAccountWindow = 30 * time.Minute
 
 // hostAccounts is every account key host currently holds in pool, newest first.
@@ -436,17 +439,13 @@ func hostAccounts(presence []PresenceRecord, pool, host string, now time.Time, t
 		return nil
 	}
 	var records []PresenceRecord
-	var newest time.Time
 	for _, rec := range presence {
 		fp, ok := strings.CutPrefix(rec.AccountKey, pool+":")
 		age := now.Sub(rec.LastSeen)
-		if rec.HostID != host || !ok || !accountFP.MatchString(fp) || age < -time.Minute || age > ttl {
+		if rec.HostID != host || !ok || !accountFP.MatchString(fp) || age < -time.Minute || age > min(ttl, multiAccountWindow) {
 			continue
 		}
 		records = append(records, rec)
-		if rec.LastSeen.After(newest) {
-			newest = rec.LastSeen
-		}
 	}
 	slices.SortFunc(records, func(a, b PresenceRecord) int {
 		if c := b.LastSeen.Compare(a.LastSeen); c != 0 {
@@ -456,7 +455,7 @@ func hostAccounts(presence []PresenceRecord, pool, host string, now time.Time, t
 	})
 	var keys []string
 	for _, rec := range records {
-		if newest.Sub(rec.LastSeen) <= multiAccountWindow && !slices.Contains(keys, rec.AccountKey) {
+		if !slices.Contains(keys, rec.AccountKey) {
 			keys = append(keys, rec.AccountKey)
 		}
 	}

@@ -181,8 +181,11 @@ harness가 omp이고, omp는 자기 login(여러 계정일 수 있음)으로 쓰
     계정은 더는 갱신·announce되지 않고, 새 계정은 바로 발견됩니다. inventory가 3분 안이고 모든
     계정의 shared reading이 fresh이면 `omp usage`를 부르지 않습니다. 한 계정의 실패는 다른 계정을 가리지 않습니다: refresh는 reading이 하나도
     없을 때만 실패합니다. omp가 더는 목록에 올리지 않는 계정은 갱신되지 않고 stale로 떨어집니다.
-  - **Selection.** host의 presence record 중 가장 최근 것에서 30분 안에 announce된 모든
-    `commandcode:` key가 그 host의 계정입니다(`hostAccounts`); 다른 pool은 지금처럼 가장 최근 key
+  - **Selection.** host의 presence record 중 **지금부터 30분 안**에 announce된 모든
+    `commandcode:` key가 그 host의 계정입니다(`hostAccounts`; live node는 계정마다 적어도 10분마다
+    announce합니다. 마지막 계정을 지운 host나 목록에서 빠진 계정은 다른 host가 shared reading을
+    fresh로 유지해도 30분 안에 placement에서 빠지고, 30분 넘게 잠든 host는 깨어나 announce하면 다시
+    묶입니다); 다른 pool은 지금처럼 가장 최근 key
     하나입니다. 계정마다 binding과 candidate가 따로이고 자기 window로 판정합니다. 한 계정이
     소진(또는 5h가 cutoff)이면 그 계정만 drop되고, **한 계정이라도 room이 있으면 pool은 usable**,
     모두 소진이면 pool은 drop됩니다. 정렬은 다른 구독 pool의 7일 window와 같은 규칙입니다: 주가

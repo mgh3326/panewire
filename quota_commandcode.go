@@ -186,6 +186,12 @@ func (s *nativeQuotaSource) refreshCommandcode(ctx context.Context) ([]shared.Re
 			refresh(account.FP)
 		}
 	}
+	// An omp output this build cannot read fails the whole refresh, even when a
+	// shared reading of another account was current: nothing is returned for the
+	// node to publish or to admit the pool on.
+	if listed && listErr != nil {
+		return nil, measured, listErr
+	}
 	if len(readings) == 0 {
 		if lastErr == nil {
 			lastErr = quota.Fail(quota.ErrKindAccountUnknown, "no account key")

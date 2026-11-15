@@ -182,6 +182,25 @@ func (s *accountStore) restamp(t *testing.T, at time.Time) {
 	}
 }
 
+// restampKey makes one account's stored reading current as of at.
+func (s *accountStore) restampKey(t *testing.T, key string, at time.Time) {
+	t.Helper()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var o map[string]any
+	if err := json.Unmarshal(s.latest[key], &o); err != nil {
+		t.Fatal(err)
+	}
+	o["measured_at"] = at
+	s.latest[key], _ = json.Marshal(o)
+}
+
+// expire makes one account's stored reading too old to be current.
+func (s *accountStore) expire(t *testing.T, key string) {
+	t.Helper()
+	s.restampKey(t, key, time.Unix(0, 0).UTC())
+}
+
 func (s *accountStore) held(host string) []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -359,6 +378,30 @@ func TestCommandcodeInventoryIsReadEvenWhileSharedReadingsAreCurrent(t *testing.
 	keyC := "commandcode:" + commandcode.Fingerprint("user_fixture_c")
 	if len(keys) != 2 || keys[0] != commandcodeKeyA && keys[1] != commandcodeKeyA || keys[0] != keyC && keys[1] != keyC {
 		t.Fatalf("keys %v, want account A and the new account C, not B", keys)
+	}
+}
+
+// An omp output the node cannot read aborts the whole refresh, also when the
+// inventory is still current and another account's shared reading is current:
+// nothing is returned to publish or admit on.
+func TestCommandcodeUnreadableOutputAbortsRefreshDespiteACurrentSharedReading(t *testing.T) {
+	store := newAccountStore(t)
+	omp := &ompFake{output: commandcodeFixture(t, "omp_usage_two_accounts.json")}
+	now := commandcodeFetched.Add(90 * time.Second)
+	source := commandcodeTestSourceAt(claudeStore(t, store.server.URL), omp, &now)
+	if _, _, err := source.RefreshAccounts(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	// 100 s on: the inventory is within 3 minutes, account A (fetched 10 s
+	// earlier in the fixture clock) is due, account B's shared reading was
+	// re-stamped current by another host, and omp now answers an unknown shape.
+	now = commandcodeFetched.Add(190 * time.Second)
+	store.restampKey(t, commandcodeKeyB, now.Add(-time.Second))
+	store.expire(t, commandcodeKeyA)
+	omp.output = []byte(`{"version":9}`)
+	readings, _, err := source.RefreshAccounts(t.Context())
+	if quota.KindOf(err) != quota.ErrKindParse || len(readings) != 0 {
+		t.Fatalf("readings %d err %v, want parse_error and no reading", len(readings), err)
 	}
 }
 
