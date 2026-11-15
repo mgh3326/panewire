@@ -9,39 +9,54 @@ kept and counted by reason.
 ## Reviewer and consult ends
 
 Before it judges any pane, the pass ends a reviewer or consult job that never
-ran `panewire done` (hk 4747). Two cases have no owner otherwise:
+ran `panewire done` (hk 4747). Who owns a posted result differs by role: only a
+reviewer has a second ender, the hub's posted-result pass
+(docs/hub-spawn-operations.md#ending-a-reviewer-job-that-posted-a-result). A
+consult's answer is its `report.md`, no pass completes it, and its consumer
+reads a lost record as a failed consult, so cleanup never stands in for
+completion.
 
-- **The pane is gone.** Neither `herdr agent list` nor `herdr pane list` carries
-  the job's pane id, and the job posted no result. The node writes the job's
-  final `job.lost` (reason `pane_gone`) and its terminal hk record (`lost`,
-  `end_reason=pane_gone`) through the node's own JobStore, then reaps the job at
-  once as `pane_gone`.
-- **The pane is alive with no result.** The job posted no findings object and
-  no `report.md`, and the pass runs more than the job's request time limit plus
-  a 15-minute grace after the spawn. A `findings.json` holding JSON null,
-  another shape or no JSON counts as absent, as the hub's result reader counts
-  it — so does one over its 24 KiB bound or not valid UTF-8. The limit is the
-  `expires_at` the job's spawn record carries: the spawn writes the hub's
-  request expiry there when the hub sent one, else the role's default from the
-  spawn. Only a record from before that field existed falls back to the role's
-  default after the spawn. The node writes the same two records with reason
-  `reviewer_no_result_timeout`; the ended-job close then takes the pane an hour
-  later, as for any other ended job.
+| Role | Result evidence | Pane proven gone | Pane present |
+|---|---|---|---|
+| reviewer | posted | keep: the hub's end | keep: the hub's end |
+| reviewer | absent | `pane_gone`, reaped | timeout at the limit plus 15 min |
+| reviewer | unjudgeable | `pane_gone`, reaped | keep; retry the read |
+| consult | posted | `pane_gone`, reaped | keep: no timeout |
+| consult | absent | `pane_gone`, reaped | timeout at the limit plus 15 min |
+| consult | unjudgeable | `pane_gone`, reaped | keep; retry the read |
+
+A **posted** result is a findings object — an object whose `findings` is an
+array, valid UTF-8, at most the hub reader's 24 KiB (`node_job_result.go`) — or
+a regular `report.md`. A file that is present but cannot be inspected (a
+non-regular name, a read error) is **unjudgeable**: it blocks only the quiet
+timeout, because the pass never claims "no result" it cannot prove, while a pane
+both herdr lists lost is proof enough to clean the job up. Both artifacts are
+inspected, and a posted one wins over an unjudgeable one.
+
+A pane is proven gone only when neither `herdr agent list` nor `herdr pane list`
+carries its id. The node writes the job's final `job.lost` and its terminal hk
+record (`lost`, with `end_reason` `pane_gone` or `reviewer_no_result_timeout`)
+through its own JobStore, then reaps a `pane_gone` job at once; a timeout leaves
+the pane to the ended-job close an hour later. The limit is the request's
+`expires_at`: the spawn record carries it, written from the hub's request expiry
+when the hub sent one, else the role's default from the spawn. Only a record
+from before that field existed falls back to the role's default after the
+spawn. The timeout waits a 15-minute grace past that limit.
 
 A `--keep` reviewer or consult is ended the same way: its live pane keeps its
 day (Timing), and a gone pane is reaped at once.
 
 The node never ends an implementer here, a job whose pane asks an unanswered
-question (the #563 guard), a job that posted a result — even when both herdr
-lists lost its pane, so a finished review is never recorded as a loss — or a job
-whose attempt announced a quota stop the hub hands to a replacement
-(watch_quota_stop.go). A posted result is left to the hub's posted-result end
-(docs/hub-spawn-operations.md).
+question (the #563 guard), or a job whose attempt announced a quota stop the hub
+hands to a replacement (watch_quota_stop.go).
 
 The proof and both writes run under the job's operation lock, the one
 `panewire done` and the quota-stop record take, so a completion cannot land
-between them. The hk record is written first: the pane sweep never sees a
-`job.lost` hk does not hold. Each end logs once with the job and the reason.
+between them; the result files are re-read there, so a result that lands while
+the pass waits for the lock cancels a reviewer's end. The hk record is written
+first: the pane sweep never sees a `job.lost` hk does not hold, and a committed
+hk end whose ledger event failed is repaired with hk's own reason. Each end logs
+once with the job and the reason.
 
 ## Candidate selection
 

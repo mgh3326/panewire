@@ -37,3 +37,38 @@ func TestPaneSweepNeverBlocksOnAFindingsFIFO(t *testing.T) {
 		t.Fatalf("a FIFO findings file was read as absent: %v", got)
 	}
 }
+
+// Unjudgeable evidence blocks only the quiet timeout: a pane both herdr lists
+// lost is still cleaned up as pane_gone.
+func TestPaneSweepEndsAGonePaneWithAFIFOFinding(t *testing.T) {
+	f := newPaneSweepFixture(t)
+	pane := f.job("r", "reviewer", "")
+	f.status[pane] = "working"
+	if err := syscall.Mkfifo(filepath.Join(f.a.Jobs, "r", "findings.json"), 0600); err != nil {
+		t.Skipf("mkfifo: %v", err)
+	}
+	delete(f.status, pane)
+	f.at(1)
+	if got := endReasons(t, f.a, "r"); len(got) != 1 || got[0] != SweepPaneGone {
+		t.Fatalf("job.lost reasons = %v", got)
+	}
+	if f.reaped("r") == nil {
+		t.Fatal("the job whose pane vanished was not reaped")
+	}
+}
+
+// A posted findings object wins over an unjudgeable report: an unreadable
+// artifact never hides positive evidence.
+func TestPaneSweepCountsFindingsWhenTheReportIsAFIFO(t *testing.T) {
+	f := newPaneSweepFixture(t)
+	pane := f.job("r", "reviewer", "")
+	f.writeJobFile("r", "findings.json", `{"findings":[]}`)
+	if err := syscall.Mkfifo(filepath.Join(f.a.Jobs, "r", "report.md"), 0600); err != nil {
+		t.Skipf("mkfifo: %v", err)
+	}
+	f.status[pane] = "working"
+	f.at(76)
+	if got := endReasons(t, f.a, "r"); len(got) != 0 {
+		t.Fatalf("a valid findings object was hidden by an unjudgeable report: %v", got)
+	}
+}

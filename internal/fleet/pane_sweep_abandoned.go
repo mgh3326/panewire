@@ -16,14 +16,20 @@ import (
 // The node's own end of a reviewer or consult job that never ran `panewire
 // done` (hk 4747). A reviewer usually ends itself: it posts its result and runs
 // `panewire done`, or the hub ends it on a posted result
-// (hub_spawn_reviewer_end.go). Two cases have no such owner, and the node that
-// spawned the pane owns them:
+// (hub_spawn_reviewer_end.go). Two cases have no such owner:
 //
-//   - the pane is gone: neither herdr list carries it any more, so the job can
-//     never finish and is reaped as pane_gone;
-//   - the pane is alive but posted no result (a findings object or a report on
-//     disk) before the request's time limit plus a grace: the job is ended and
-//     the existing one-hour pane close applies.
+//   - the pane is gone: neither herdr list carries it any more;
+//   - the pane is alive but the job posted no result before the request's time
+//     limit plus a grace: the ended-job close then takes the pane.
+//
+// Who owns a posted result differs by role, and that is the rule's centre: only
+// a reviewer has a second ender (the hub's posted-result pass), so a reviewer's
+// valid posted result is never abandoned here. A consult writes its answer as
+// its report, no pass completes it, and its consumer reads a lost record as a
+// failed consult, so a consult whose pane is lost is cleaned up as an
+// abandonment — not accepted. Unjudgeable evidence blocks only the quiet
+// timeout: the pass never claims "no result" it cannot prove, while a pane both
+// lists lost is proof enough to clean the job up.
 //
 // An implementer, a job with an open question (the #563 guard) and an announced
 // quota stop are never touched here. docs/pane-sweep.md states the rule.
@@ -40,14 +46,24 @@ const (
 )
 
 // reviewerNoResultGrace is how long past the request's time limit the node
-// waits for a reviewer's result before it ends the job.
+// waits for a result before it ends the job.
 const reviewerNoResultGrace = 15 * time.Minute
 
 // paneSweepFindingsMaxBytes bounds the findings read exactly as the hub's
 // result reader does (nodeJobFindingsLimit = 24 KiB, node_job_result.go): a
-// findings object over that bound is reported too_large there, so counting it
-// posted here would leave the job to an end that never comes.
+// findings object over that bound is reported too_large there, so it is no
+// posted result here either.
 const paneSweepFindingsMaxBytes = 24 << 10
+
+// paneSweepResultEvidence is what the job's result files prove: a posted
+// result, no result at all, or a file that cannot be judged.
+type paneSweepResultEvidence int
+
+const (
+	resultAbsent paneSweepResultEvidence = iota
+	resultPosted
+	resultUnknown
+)
 
 // paneSweepAbandoned reports a live reviewer or consult job this node owns the
 // end of: it recorded a pane and a label here, and nobody has ended it.
@@ -98,18 +114,21 @@ func (s *TaskPaneSweeper) endAbandonedReviews(ctx context.Context, a *App, jobs 
 }
 
 // abandonedEnd is the end_reason the node writes for a live reviewer or consult
-// job, or "" while the job still works. A posted result always keeps the job
-// for the hub's posted-result end, whether or not its pane is still listed: a
-// finished review must never be recorded as a loss. A pane is gone only when
-// both herdr lists lost it; a live pane is ended only after the request's time
-// limit plus reviewerNoResultGrace. The open-question guard runs under the
-// operation lock, just before the writes (endAbandonedJob).
+// job, or "" while the job still works or belongs to another owner. A
+// reviewer's valid posted result reserves the end for the hub's posted-result
+// pass and is never abandoned here, whatever its pane shows. A consult's posted
+// result stops the quiet timeout but not a proven pane loss: no other pass ends
+// a consult, and a lost record is how its consumer reads a failed consult.
+// Unjudgeable evidence blocks only the timeout, never a proven pane loss. A pane
+// is gone only when both herdr lists lost it; a live pane is ended only after
+// the request's time limit plus reviewerNoResultGrace. The open-question guard
+// runs under the operation lock, just before the writes (endAbandonedJob).
 func (s *TaskPaneSweeper) abandonedEnd(ctx context.Context, a *App, j Job, agents []Agent, panes *paneSweepPaneRows, now time.Time) string {
 	if _, stopped := announcedQuotaStop(j); stopped {
 		return ""
 	}
-	posted, known := paneSweepJobResult(a, j.ID)
-	if !known || posted {
+	evidence := paneSweepJobResult(a, j.ID)
+	if evidence == resultPosted && paneSweepRole(j) == "reviewer" {
 		return ""
 	}
 	if paneSessionProof(j, agents) == "pane_unlisted" {
@@ -117,6 +136,11 @@ func (s *TaskPaneSweeper) abandonedEnd(ctx context.Context, a *App, j Job, agent
 		if err == nil && !listed {
 			return SweepPaneGone
 		}
+	}
+	// The quiet timeout needs proof that no result exists; a result or an
+	// unjudgeable file is not that proof.
+	if evidence != resultAbsent {
+		return ""
 	}
 	limit, known := paneSweepRequestLimit(j)
 	if !known || now.Sub(limit) < reviewerNoResultGrace {
@@ -129,15 +153,19 @@ func (s *TaskPaneSweeper) abandonedEnd(ctx context.Context, a *App, j Job, agent
 // revoke, a newer claim or another end won), so there is nothing to write.
 var errJobAlreadyEnded = errors.New("job already ended")
 
+// paneSweepResultReadHook is a test seam: it runs under the operation lock just
+// before a fresh end re-reads the result files, where a reviewer's write lands.
+var paneSweepResultReadHook func(job string)
+
 // endAbandonedJob writes the job's terminal hk record and then its final
 // job.lost, in that order, so the pane sweep never sees an end hk has not
 // recorded. It returns the end_reason the ledger took, which is the one hk
 // already holds when an earlier attempt's hk write landed and its ledger event
 // did not. That repair runs even for a call with no fresh reason, before any
 // result or question guard: hk's end is already the job's fate, and a result
-// that arrived later must not leave the ledger live beside it. The proof and
-// both writes run under the job's operation lock, which `panewire done` and the
-// quota-stop record take: none of them lands between.
+// that arrived later must not leave the ledger live beside it. A fresh end
+// re-proves the policy under the job's operation lock, which `panewire done` and
+// the quota-stop record take: none of them lands between.
 func (s *TaskPaneSweeper) endAbandonedJob(ctx context.Context, a *App, j Job, reason string, now time.Time) (string, error) {
 	unlock, err := a.lockJobOperation(j.ID, quotaRecordLockWait)
 	if err != nil {
@@ -196,10 +224,18 @@ func (s *TaskPaneSweeper) endAbandonedJob(ctx context.Context, a *App, j Job, re
 	if !paneSweepNoOpenQuestion(a, latest, now) {
 		return "", errJobAlreadyEnded
 	}
-	// A result written while the pass waited for the lock is the job finishing
-	// its work: a posted job keeps the hub's posted-result end, never this
-	// rule's loss — for a gone pane as much as for the timeout.
-	if posted, known := paneSweepJobResult(a, latest.ID); !known || posted {
+	if paneSweepResultReadHook != nil {
+		paneSweepResultReadHook(latest.ID)
+	}
+	// The same policy holds under the lock: a reviewer's valid posted result
+	// reserves the end for the hub, and the quiet timeout needs proved-absent
+	// evidence. A consult's posted result, or an unjudgeable file, does not
+	// hold a proven pane loss.
+	evidence := paneSweepJobResult(a, latest.ID)
+	if evidence == resultPosted && paneSweepRole(latest) == "reviewer" {
+		return "", errJobAlreadyEnded
+	}
+	if reason == ReviewerNoResultTimeout && evidence != resultAbsent {
 		return "", errJobAlreadyEnded
 	}
 	if exists {
@@ -249,74 +285,79 @@ func paneSweepSpawnedAt(j Job) (time.Time, bool) {
 	return time.Time{}, false
 }
 
-// paneSweepJobResult reports whether the job posted a result: a findings
-// object (an object whose `findings` is an array; JSON null and any other shape
-// are absent, as the hub's result reader counts them), or a report on disk. A
-// file that cannot be read is unknown, so the caller never ends a job it could
-// not judge.
-func paneSweepJobResult(a *App, id string) (posted, known bool) {
+// paneSweepJobResult reports what the job's result files prove. Both artifacts
+// are inspected and a posted one wins over an unjudgeable one: an unreadable
+// report must not hide a valid findings object, nor the reverse.
+func paneSweepJobResult(a *App, id string) paneSweepResultEvidence {
 	root, err := os.OpenRoot(filepath.Join(a.Jobs, id))
 	if errors.Is(err, os.ErrNotExist) {
-		return false, true
+		return resultAbsent
 	}
 	if err != nil {
-		return false, false
+		return resultUnknown
 	}
 	defer root.Close()
+	report, findings := paneSweepReport(root), paneSweepFindings(root)
+	switch {
+	case report == resultPosted || findings == resultPosted:
+		return resultPosted
+	case report == resultUnknown || findings == resultUnknown:
+		return resultUnknown
+	}
+	return resultAbsent
+}
+
+// paneSweepReport classifies report.md: a regular file is a posted result, a
+// missing one is absent, and anything that cannot be inspected is unknown.
+func paneSweepReport(root *os.Root) paneSweepResultEvidence {
 	info, err := root.Lstat("report.md")
 	switch {
-	case err == nil && !info.Mode().IsRegular():
-		return false, false
-	case err == nil:
-		return true, true
-	case !errors.Is(err, os.ErrNotExist):
-		return false, false
+	case errors.Is(err, os.ErrNotExist):
+		return resultAbsent
+	case err != nil:
+		return resultUnknown
+	case !info.Mode().IsRegular():
+		return resultUnknown
 	}
-	info, err = root.Lstat("findings.json")
-	if errors.Is(err, os.ErrNotExist) {
-		return false, true
-	}
-	if err != nil {
-		return false, false
-	}
-	if !info.Mode().IsRegular() {
-		return false, false
-	}
-	// O_NONBLOCK and a look at the opened handle, as the hub's reader does: a
-	// name swapped for a FIFO between the check and the open must never stall
-	// the pass.
+	return resultPosted
+}
+
+// paneSweepFindings classifies findings.json with the hub reader's rules: an
+// object whose findings is an array, valid UTF-8, at most the hub's bound. It
+// opens with O_NONBLOCK and re-checks the handle, so a name swapped for a FIFO
+// never stalls the pass.
+func paneSweepFindings(root *os.Root) paneSweepResultEvidence {
 	file, err := root.OpenFile("findings.json", os.O_RDONLY|syscall.O_NONBLOCK, 0)
-	if err != nil {
-		return false, false
+	if errors.Is(err, os.ErrNotExist) {
+		return resultAbsent
 	}
-	opened, err := file.Stat()
-	if err != nil || !opened.Mode().IsRegular() {
+	if err != nil {
+		return resultUnknown
+	}
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() {
 		file.Close()
-		return false, false
+		return resultUnknown
 	}
 	body, err := io.ReadAll(io.LimitReader(file, paneSweepFindingsMaxBytes+1))
 	file.Close()
 	if err != nil {
-		return false, false
+		return resultUnknown
 	}
-	if len(body) > paneSweepFindingsMaxBytes {
-		// The hub reads this file as too_large, so it is no posted result.
-		return false, true
-	}
-	if !utf8.Valid(body) {
-		// The hub reads this file as not_json, so it is no posted result.
-		return false, true
+	if len(body) > paneSweepFindingsMaxBytes || !utf8.Valid(body) {
+		// The hub reads these as too_large / not_json: no posted result.
+		return resultAbsent
 	}
 	var object map[string]json.RawMessage
 	if json.Unmarshal(body, &object) != nil || object == nil {
-		return false, true
+		return resultAbsent
 	}
 	var findings []json.RawMessage
 	raw, ok := object["findings"]
 	if !ok || json.Unmarshal(raw, &findings) != nil || findings == nil {
-		return false, true
+		return resultAbsent
 	}
-	return true, true
+	return resultPosted
 }
 
 // paneSweepPaneRows reads `herdr pane list` at most once per pass.

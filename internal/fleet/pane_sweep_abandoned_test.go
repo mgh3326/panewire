@@ -83,32 +83,46 @@ func TestPaneSweepEndsAReviewerWhosePaneIsGone(t *testing.T) {
 	}
 }
 
-// A job that posted its result keeps the hub's posted-result end even when its
-// pane is gone: a finished review is never recorded as a loss, so the pane-gone
-// rule only applies to a job with no result on disk.
-func TestPaneSweepLeavesAFinishedJobWhosePaneIsGone(t *testing.T) {
-	for _, role := range []string{"reviewer", "consult"} {
-		for name, file := range map[string][2]string{
-			"findings": {"findings.json", `{"findings":[]}`},
-			"report":   {"report.md", "# findings\n"},
-		} {
-			t.Run(role+"/"+name, func(t *testing.T) {
-				f := newPaneSweepFixture(t)
-				pane := f.job("j", role, "")
-				f.writeJobFile("j", file[0], file[1])
-				delete(f.status, pane)
-				f.at(1)
-				if got := endReasons(t, f.a, "j"); len(got) != 0 {
-					t.Fatalf("a finished job's pane loss was recorded: %v", got)
-				}
-				if state := str(f.store.record(t, "j"), "state"); state != "spawned" {
-					t.Fatalf("hk record was ended: %v", f.store.record(t, "j"))
-				}
-				if f.reaped("j") != nil {
-					t.Fatal("a finished job was reaped as gone")
-				}
-			})
-		}
+// A reviewer's valid posted result is the hub's end even when its pane is gone:
+// the node never records the finished review as an abandonment.
+func TestPaneSweepLeavesAFinishedReviewerWhosePaneIsGone(t *testing.T) {
+	for name, file := range map[string][2]string{
+		"findings": {"findings.json", `{"findings":[]}`},
+		"report":   {"report.md", "# findings\n"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newPaneSweepFixture(t)
+			pane := f.job("j", "reviewer", "")
+			f.writeJobFile("j", file[0], file[1])
+			delete(f.status, pane)
+			f.at(1)
+			if got := endReasons(t, f.a, "j"); len(got) != 0 {
+				t.Fatalf("a finished review's pane loss was recorded: %v", got)
+			}
+			if state := str(f.store.record(t, "j"), "state"); state != "spawned" {
+				t.Fatalf("hk record was ended: %v", f.store.record(t, "j"))
+			}
+			if f.reaped("j") != nil {
+				t.Fatal("a finished review was reaped as gone")
+			}
+		})
+	}
+}
+
+// A consult's posted result stops the quiet timeout but not a proven pane loss:
+// no other pass ends a consult, and its consumer reads a lost record as a
+// failed consult, so the pane loss is cleaned up as an abandonment.
+func TestPaneSweepEndsAConsultWhoseGonePaneHadAPostedResult(t *testing.T) {
+	f := newPaneSweepFixture(t)
+	pane := f.job("c", "consult", "")
+	f.writeJobFile("c", "report.md", "# the answer\n")
+	delete(f.status, pane)
+	f.at(1)
+	if got := endReasons(t, f.a, "c"); len(got) != 1 || got[0] != SweepPaneGone {
+		t.Fatalf("job.lost reasons = %v", got)
+	}
+	if f.reaped("c") == nil {
+		t.Fatal("the consult whose pane vanished was not reaped")
 	}
 }
 
@@ -256,6 +270,60 @@ func TestPaneSweepRepairsAnInterruptedEnd(t *testing.T) {
 	}
 	if f.reaped("r") != nil {
 		t.Fatal("a repaired timeout end was reaped as gone")
+	}
+}
+
+// An ended hk record is repaired with its own reason even when the current
+// observation names another: the ledger must agree with hk, and the stored
+// reason decides the reap.
+func TestPaneSweepRepairsWithTheStoredReason(t *testing.T) {
+	f := newPaneSweepFixture(t)
+	pane := f.job("r", "reviewer", "")
+	delete(f.status, pane) // gone now; hk holds the earlier timeout end
+	f.store.records["r"]["state"] = "lost"
+	f.store.records["r"]["end_reason"] = ReviewerNoResultTimeout
+	f.at(1)
+	if got := endReasons(t, f.a, "r"); len(got) != 1 || got[0] != ReviewerNoResultTimeout {
+		t.Fatalf("job.lost reasons = %v", got)
+	}
+	if f.reaped("r") != nil {
+		t.Fatal("a repaired timeout end was reaped as gone in the same pass")
+	}
+}
+
+// A reviewer's result written while the pass holds the operation lock cancels
+// the fresh end: the hub's posted-result pass owns it.
+func TestPaneSweepKeepsAReviewerWhoseResultLandsUnderTheLock(t *testing.T) {
+	f := newPaneSweepFixture(t)
+	pane := f.job("r", "reviewer", "")
+	delete(f.status, pane)
+	paneSweepResultReadHook = func(job string) {
+		if job == "r" {
+			f.writeJobFile("r", "findings.json", `{"findings":[]}`)
+		}
+	}
+	t.Cleanup(func() { paneSweepResultReadHook = nil })
+	f.at(1)
+	if got := endReasons(t, f.a, "r"); len(got) != 0 {
+		t.Fatalf("a finished review's pane loss was recorded: %v", got)
+	}
+}
+
+// A consult's result landing under the lock does not hold its proven pane loss:
+// the consult is cleaned up as an abandonment either way.
+func TestPaneSweepEndsAConsultWhoseResultLandsUnderTheLock(t *testing.T) {
+	f := newPaneSweepFixture(t)
+	pane := f.job("c", "consult", "")
+	delete(f.status, pane)
+	paneSweepResultReadHook = func(job string) {
+		if job == "c" {
+			f.writeJobFile("c", "report.md", "# the answer\n")
+		}
+	}
+	t.Cleanup(func() { paneSweepResultReadHook = nil })
+	f.at(1)
+	if got := endReasons(t, f.a, "c"); len(got) != 1 || got[0] != SweepPaneGone {
+		t.Fatalf("job.lost reasons = %v", got)
 	}
 }
 
