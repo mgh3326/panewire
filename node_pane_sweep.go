@@ -88,6 +88,12 @@ func (client *HubClient) sweepTaskPanes(ctx context.Context, sweeper *fleet.Task
 	if err != nil {
 		slog.Warn("task pane sweep failed", "reason", "jobs-unreadable")
 	}
+	// Reports an ended job announced but never published are retried here, on
+	// their own budget and outside taskPaneSweepMu: an upload that waits on hk
+	// must not hold the hub's pane.sweep command (report_republish.go).
+	if err := sweeper.RepublishReports(ctx, app); err != nil {
+		slog.Warn("report republish failed", "reason", "jobs-unreadable")
+	}
 	client.expireJobDirs(ctx, app, expiry)
 }
 

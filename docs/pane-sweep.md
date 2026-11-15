@@ -110,6 +110,24 @@ the node's command lock on a fresh agent listing immediately before
 `herdr pane list` also lost the pane, in which case the job is reaped as
 `pane_gone`.
 
+## Report republish
+
+The local pass republishes reports an ended job announced but never put in
+handoffkeep: a `done` whose upload failed still writes `job.completed` with the
+report's `report_sha256`, so the completion exists while hk holds no document
+for it. Before the panes are judged, the pass PUTs exactly the announced bytes
+under `done`'s content-addressed key, writes the `job.report_published`
+receipt, and pins the terminal record (`report_doc`, `report_sha256`) when the
+report is the completing one, as step 3 of `done` does.
+
+A report whose file no longer hashes to the announced sha256 is left alone with
+`reason=report_changed`: it is still being written, or it belongs to a later
+round that only a new `done` announces, and the pass never pins bytes no
+completion named. A file that is gone is left with `reason=report_missing`. At
+most five uploads run per pass, a failed upload is retried by the next pass,
+and each republished report or refusal is logged once. The ordered
+`pane.sweep` command does not republish; only the node's own local pass does.
+
 ## Timing
 
 The local pass runs every `--task-pane-sweep-interval` (default `5m`). A
