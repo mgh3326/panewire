@@ -271,6 +271,19 @@ type placePlan struct {
 	presenceErr bool
 }
 
+// placeTry is the seat one candidate is tried with and the pool it draws from:
+// the seat the job was placed with, or the alternate the same host admitted
+// after a launch-proof failure. A try never outlives its candidate.
+type placeTry struct {
+	spawn Spawn
+	pool  string
+	// from is the profile this try replaced on the same host. The record and
+	// the task comment name the fallback it proves when this try passes
+	// admission.
+	from string
+}
+
+// candResult is one candidate's spawn outcome.
 type candResult struct {
 	ok          bool
 	stop        error
@@ -1499,10 +1512,9 @@ func (a *App) placeAuto(ctx context.Context, s Spawn, brief string) (bool, map[s
 		}
 		return repo
 	}
-	var pendingFallback string
 	var fallbacks []map[string]any
 	refreshPending := false
-	spawnOne := func(c *placeCandidate) (res candResult) {
+	spawnOne := func(c *placeCandidate, try placeTry) (res candResult) {
 		defer func() {
 			if res.stop != nil && res.note == "" {
 				res.note = exitReason(exitCode(res.stop))
@@ -1519,22 +1531,22 @@ func (a *App) placeAuto(ctx context.Context, s Spawn, brief string) (bool, map[s
 			a.PlacementTry(c.name)
 		}
 		release()
-		qr, ok := a.quotaRequest(s)
+		qr, ok := a.quotaRequest(try.spawn)
 		if !ok {
 			return candResult{rc: exitConfig, note: "quota_request_unavailable"}
 		}
 		if s.DryRun {
-			if err := a.checkDryRunAdmission(ctx, s, c.cfg); err != nil {
+			if err := a.checkDryRunAdmission(ctx, try.spawn, c.cfg); err != nil {
 				return candResult{stop: err}
 			}
 		}
-		key, acc := a.remoteAccount(ctx, pool, c.name, c.cfg, s.AccountKey)
-		if s.AccountKey != "" && key != s.AccountKey {
+		key, acc := a.remoteAccount(ctx, try.pool, c.name, c.cfg, try.spawn.AccountKey)
+		if try.spawn.AccountKey != "" && key != try.spawn.AccountKey {
 			// The host stopped holding the selected account since the plan:
 			// admission and the delegated spawn must judge the same one.
 			return candResult{rc: exitAuthUnavailable, note: "different_account", quotaRefused: true}
 		}
-		j, err := a.judgeHost(ctx, qr, pool, c.name, false, key, acc)
+		j, err := a.judgeHost(ctx, qr, try.pool, c.name, false, key, acc)
 		c.judgment = &j
 		if err != nil {
 			if errors.Is(err, ErrQuotaRefreshPending) {
@@ -1545,59 +1557,80 @@ func (a *App) placeAuto(ctx context.Context, s Spawn, brief string) (bool, map[s
 			}
 			return candResult{rc: exitCode(err), note: hostGateNote(j, err), quotaRefused: true}
 		}
-		if pendingFallback != "" {
-			fallbacks = append(fallbacks, map[string]any{"from_profile": pendingFallback, "reason": "harness_version", "rc": 70, "to_profile": s.Profile, "host": c.name})
-			if s.Sel == nil {
-				s.Sel = map[string]any{}
+		if try.from != "" {
+			fallbacks = append(fallbacks, map[string]any{"from_profile": try.from, "reason": "harness_version", "rc": 70, "to_profile": try.spawn.Profile, "host": c.name})
+			if try.spawn.Sel == nil {
+				try.spawn.Sel = map[string]any{}
 			}
-			s.Sel["launch_fallbacks"] = fallbacks
-			if err := hkCommentTask(ctx, s.Task, fmt.Sprintf("Launch fallback: from-profile=%s rc=70 reason=harness_version to-profile=%s host=%s", pendingFallback, s.Profile, c.name)); err != nil {
+			try.spawn.Sel["launch_fallbacks"] = fallbacks
+			if err := hkCommentTask(ctx, s.Task, fmt.Sprintf("Launch fallback: from-profile=%s rc=70 reason=harness_version to-profile=%s host=%s", try.from, try.spawn.Profile, c.name)); err != nil {
 				a.warn("launch fallback task comment failed: %v", err)
 			}
-			pendingFallback = ""
 		}
-		a.emitPlacementTrace(s, c.name)
-		return a.spawnRemote(ctx, s, brief, c, resolveRepo(), false)
+		a.emitPlacementTrace(try.spawn, c.name)
+		return a.spawnRemote(ctx, try.spawn, brief, c, resolveRepo(), false)
 	}
-	spawn := func(c *placeCandidate) candResult {
+	// spawn tries one candidate. Its first try is the seat the job was placed
+	// with; a launch-proof failure lets the same host admit an alternate
+	// harness, and that alternate is tried on this host only
+	// (docs/hub-spawn-operations.md, "A job.spawn the node cannot accept"). The
+	// next candidate starts again from the job's seat, so a fallback can
+	// neither outlive its host nor land a seat Spawn never resolves (hk 4335).
+	spawn := func(c *placeCandidate) (candResult, placeTry) {
+		try := placeTry{spawn: s, pool: pool}
 		for {
-			res := spawnOne(c)
+			res := spawnOne(c, try)
 			if res.note != "hub_launch_proof_failed" {
-				return res
+				return res, try
 			}
 			if !s.autoSelected || s.Delegated {
-				return res
+				return res, try
 			}
-			previous := s.Profile
-			pendingFallback = previous
+			previous := try.spawn.Profile
 			seat, ok := a.Policy.Profiles[previous]
-			if !ok || slices.Contains(s.failedHarnesses, seat.Kind) {
-				return res
+			if !ok {
+				return res, try
 			}
-			s.failedHarnesses = append(s.failedHarnesses, seat.Kind)
-			candidate := s
+			// Record the failed kind once, and still look for another kind on
+			// this host when an earlier host already recorded it: the alternate
+			// is chosen per host, so a kind that failed elsewhere must not stop
+			// this host from offering one whose harness may be healthy here.
+			if !slices.Contains(s.failedHarnesses, seat.Kind) {
+				s.failedHarnesses = append(s.failedHarnesses, seat.Kind)
+			}
+			candidate := try.spawn
 			candidate.Host, candidate.Effort = c.name, s.requestedEffort
+			// The selection must exclude the kind just recorded. try.spawn was
+			// copied before the append, so carry the list over explicitly: the
+			// alternate is a different harness kind, and a second seat of the
+			// failed kind would only repeat the failure.
+			candidate.failedHarnesses = s.failedHarnesses
 			sel, err := a.selectProfile(ctx, candidate)
-			if err != nil || sel == nil || sel.chosen == nil {
-				return res
+			if err != nil || sel == nil || sel.chosen == nil || sel.chosen.seatName == previous {
+				return res, try
 			}
-			s.Profile, s.AccountKey, s.RoutingRole, s.SelHost, s.route = sel.chosen.seatName, sel.chosen.accountKey, sel.req.route.role, sel.chosen.host, sel.req.route
-			s.Effort = firstNonempty(sel.chosen.row.Effort, s.requestedEffort)
-			if s.E6Arm != "" && !ValidE6Arm(s.E6Arm, sel.chosen.seat.Canon) {
-				s.E6Arm = ""
+			next := try.spawn
+			next.Profile, next.AccountKey, next.RoutingRole, next.SelHost, next.route = sel.chosen.seatName, sel.chosen.accountKey, sel.req.route.role, sel.chosen.host, sel.req.route
+			next.Effort = firstNonempty(sel.chosen.row.Effort, s.requestedEffort)
+			if next.E6Arm != "" && !ValidE6Arm(next.E6Arm, sel.chosen.seat.Canon) {
+				next.E6Arm = ""
 			}
-			pool = a.quotaPool(ctx, s)
-			s.Sel = sel.record()
+			next.Sel = sel.record()
+			try = placeTry{spawn: next, pool: a.quotaPool(ctx, next), from: previous}
 		}
 	}
-	emit := func(chosen string) map[string]any {
-		a.stampSelection(&s, chosen)
+	emit := func(chosen string, try placeTry) map[string]any {
+		a.stampSelection(&try.spawn, chosen)
 		rec := p.record(chosen)
-		if len(fallbacks) > 0 {
-			rec["profile"] = s.Profile
-			rec["pool"] = pool
+		// The record names the seat this run used: the plan's, unless a
+		// launch-proof fallback replaced it on the chosen host (hk 4335).
+		rec["profile"] = try.spawn.Profile
+		if try.pool == "" {
+			delete(rec, "pool")
+		} else {
+			rec["pool"] = try.pool
 		}
-		a.attachSelection(rec, s)
+		a.attachSelection(rec, try.spawn)
 		if !s.DryRun {
 			if e := a.event(ctx, s.Job, "job.placement", rec); e != nil {
 				a.warn("placement decision record failed: %v", e)
@@ -1679,10 +1712,10 @@ func (a *App) placeAuto(ctx context.Context, s Spawn, brief string) (bool, map[s
 			a.attachSelection(rec, s)
 			return false, rec, nil
 		}
-		res := spawn(c)
+		res, try := spawn(c)
 		c.outcome = res.note
 		if res.ok {
-			return true, emit(c.name), nil
+			return true, emit(c.name, try), nil
 		}
 		if res.stop != nil {
 			return true, nil, res.stop
@@ -1751,10 +1784,10 @@ func (a *App) placeAuto(ctx context.Context, s Spawn, brief string) (bool, map[s
 			continue
 		}
 		tried[w] = true
-		res := spawn(c)
+		res, try := spawn(c)
 		c.outcome = res.note
 		if res.ok {
-			return true, emit(w), nil
+			return true, emit(w, try), nil
 		}
 		if res.stop != nil {
 			return true, nil, res.stop
