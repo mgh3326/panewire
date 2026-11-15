@@ -174,40 +174,52 @@ func TestNodeSpawnSerializesOneWorktree_t4578(t *testing.T) {
 	}
 }
 
-func TestNodeSpawnSlotsDefaultsAndAdvertisement_t4578(t *testing.T) {
-	for machine, want := range map[string]int{"mbp-server": 3, "m1": 3, "rpi-5": 2, "oci-arm": 2} {
-		if got := defaultNodeSpawnSlots(machine); got != want {
-			t.Errorf("%s default slots=%d, want %d", machine, got, want)
+// Default-off: with spawn_concurrency unset the node runs one spawn at a time
+// and never advertises the capability, so the hub dispatches one at a time
+// (hubNodeSpawnSlots of a hello without it is 1). Only an explicit value above
+// one is advertised and enforced, and a change binds at the next hello.
+func TestNodeSpawnSlotsDefaultOffAndOptIn_t4578(t *testing.T) {
+	writeConfig := func(path, extra string) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte(`{"workspace":"w","herdr_session":"w","enabled":true`+extra+`}`), 0o600); err != nil {
+			t.Fatal(err)
 		}
 	}
-	client := &HubClient{machineID: "rpi-5", spawnConfigPath: t14SpawnConfig(t, t.TempDir())}
+	for _, machine := range []string{"mbp-server", "rpi", "oci"} {
+		client := &HubClient{machineID: machine, spawnConfigPath: t14SpawnConfig(t, t.TempDir())}
+		caps := client.helloCapabilities(hubSpawnCapabilities)
+		if !slices.Equal(caps, hubSpawnCapabilities) || client.nodeSpawnSlots() != 1 {
+			t.Fatalf("%s unset: capabilities %v slots %d", machine, caps, client.nodeSpawnSlots())
+		}
+		if got := hubNodeSpawnSlots(map[string]bool{"spawn_v2": true, "spawn_ops_v1": true}); got != 1 {
+			t.Fatalf("hub slots for a node without the capability=%d", got)
+		}
+	}
+	client := &HubClient{machineID: "m1", spawnConfigPath: t14SpawnConfig(t, t.TempDir())}
+	writeConfig(client.spawnConfigPath, `,"spawn_concurrency":2`)
 	caps := client.helloCapabilities(hubSpawnCapabilities)
 	if !slices.Contains(caps, hubCapabilitySpawnSlotsPrefix+"2") || client.nodeSpawnSlots() != 2 {
-		t.Fatalf("capabilities %v slots %d", caps, client.nodeSpawnSlots())
+		t.Fatalf("opt-in capabilities %v slots %d", caps, client.nodeSpawnSlots())
 	}
-	// The node enforces what it advertised: a change to spawn.json binds at
-	// the next hello, so hub and node never disagree; a spawn.json that does
-	// not load then advertises one.
-	if err := os.WriteFile(client.spawnConfigPath, []byte(`{"workspace":"w","herdr_session":"w","enabled":true,"spawn_concurrency":1}`), 0o600); err != nil {
-		t.Fatal(err)
+	if got := hubNodeSpawnSlots(map[string]bool{hubCapabilitySpawnSlotsPrefix + "2": true}); got != 2 {
+		t.Fatalf("hub slots for an opted-in node=%d", got)
 	}
+	// The node enforces what it advertised until the next hello.
+	writeConfig(client.spawnConfigPath, ``)
 	if got := client.nodeSpawnSlots(); got != 2 {
 		t.Fatalf("slots=%d before re-registering, want the advertised 2", got)
 	}
-	if caps := client.helloCapabilities(hubSpawnCapabilities); !slices.Contains(caps, hubCapabilitySpawnSlotsPrefix+"1") || client.nodeSpawnSlots() != 1 {
-		t.Fatalf("re-registered capabilities %v slots %d", caps, client.nodeSpawnSlots())
+	if caps := client.helloCapabilities(hubSpawnCapabilities); !slices.Equal(caps, hubSpawnCapabilities) || client.nodeSpawnSlots() != 1 {
+		t.Fatalf("after opting out: capabilities %v slots %d", caps, client.nodeSpawnSlots())
 	}
 	if err := os.WriteFile(client.spawnConfigPath, []byte(`{"workspace":"w","herdr_session":"w","enabled":false,"spawn_concurrency":3}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if caps := client.helloCapabilities(hubSpawnCapabilities); !slices.Contains(caps, hubCapabilitySpawnSlotsPrefix+"1") {
-		t.Fatalf("unloadable config advertised %v", caps)
+	if caps := client.helloCapabilities(hubSpawnCapabilities); !slices.Equal(caps, hubSpawnCapabilities) || client.nodeSpawnSlots() != 1 {
+		t.Fatalf("unloadable config: capabilities %v slots %d", caps, client.nodeSpawnSlots())
 	}
 	if client.helloCapabilities(nil) != nil {
 		t.Fatal("a hello without spawn capabilities advertised slots")
-	}
-	if got := hubNodeSpawnSlots(map[string]bool{"spawn_v2": true}); got != 1 {
-		t.Fatalf("older node slots=%d, want 1", got)
 	}
 }
 

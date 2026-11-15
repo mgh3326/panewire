@@ -371,6 +371,28 @@ panewire:
    `brief_doc_unavailable` refuse that host (recorded as `hub_<reason>`) and
    `--host auto` moves to the next candidate.
 
+**Per-node spawn concurrency (`spawn.json` `spawn_concurrency`, hk 4578).**
+A node runs one hub spawn at a time. Setting `spawn_concurrency` to 2..8 is an
+explicit operator opt-in: the node then admits that many checkout spawns into
+distinct job dirs at once and advertises `spawn_slots_v1=N` in hello. Unset,
+0, 1, or a `spawn.json` that does not load means one; the capability is then
+not advertised and the hub keeps one-at-a-time dispatch. A change binds at the
+node's next registration (reconnect or restart). The admission rules are in
+[hub-spawn-operations.md](hub-spawn-operations.md#acceptance-and-identity).
+
+Two steps are **not proven safe** for N>1, and they are the boundary of this
+opt-in (hk 4821):
+
+- herdr workspace create/resolve across processes and versions: an older
+  launcher, or one with a different state home, does not share the
+  workspace lock, so a missing workspace label can be created twice;
+- worktree identity between admission and prepare: the admission key is the
+  job-dir name, while `work_root`, symlinks and the `-L` lane are read again
+  later, so two distinct keys can reach one directory.
+
+Opt in only on a host where neither can happen: one panewire version, one
+state home, a fixed `work_root`, and no symlinked job dirs or lanes.
+
 대상 계정은 `quota.refresh` 노드 명령으로 갱신합니다. `claude`, `codex`,
 `commandcode`, `devin`, `agy`만 native 측정 대상이며, 다른 풀은 측정하지 않습니다.
 `measure_timeout_s`가 갱신 제한 시간을 정합니다.

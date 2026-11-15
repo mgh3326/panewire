@@ -10,7 +10,7 @@ import (
 )
 
 // Per-node spawn concurrency (hk 4578). A node runs up to N spawns at once.
-// The checkout-stability boundary that makes this safe:
+// When an operator opts in, these rules decide what may overlap:
 //
 //   - Only checkout spawns overlap. A checkout spawn executes inside its own
 //     job worktree, <work_root>/<checkout dir> (a lane's -L subdirectory
@@ -28,25 +28,20 @@ import (
 //   - Preparation of one clone (fetch, worktree add, update-ref) runs one at a
 //     time inside this process (lockSpawnPrepare), taken only after admission.
 //
-// N is spawn.json's spawn_concurrency as of the last hello; unset it is 3, or 2
-// on a host whose machine id names rpi or oci; an unreadable spawn.json gives 1. The
-// node advertises N in hello; the hub dispatches more than one at a time only
-// to a node that advertises it, and only checkout spawns into distinct dirs
+// Default-off (panewire-design decision on #613, hk 4578): N is 1 unless
+// spawn.json sets spawn_concurrency above 1, as of the node's last hello; an
+// unreadable spawn.json gives 1. Two steps are not proven safe for N>1 and are
+// the boundary of this opt-in (hk 4821): herdr workspace create/resolve across
+// processes and versions, and worktree identity between admission and
+// prepare (docs/config.md). The node advertises N in hello only when it is
+// above one; the hub dispatches more than one at a time only to such a node,
+// and only checkout spawns into distinct dirs
 // (decision 254: an older node or hub stays at one).
 
 const (
 	hubCapabilitySpawnSlotsPrefix = "spawn_slots_v1="
 	nodeSpawnSlotsMax             = 8
 )
-
-// defaultNodeSpawnSlots is the per-host default when spawn.json is silent.
-func defaultNodeSpawnSlots(machineID string) int {
-	id := strings.ToLower(machineID)
-	if strings.Contains(id, "rpi") || strings.Contains(id, "oci") {
-		return 2
-	}
-	return 3
-}
 
 // nodeSpawnSlots is the N this node enforces: the value it advertised in its
 // last hello, so the hub and the node never disagree about it. A change to
@@ -72,11 +67,12 @@ func (client *HubClient) configuredSpawnSlots() int {
 	case config.SpawnConcurrency > 0:
 		return min(config.SpawnConcurrency, nodeSpawnSlotsMax)
 	}
-	return defaultNodeSpawnSlots(client.machineID)
+	return 1
 }
 
-// helloCapabilities appends the slot count to a spawn-capable hello and makes
-// it the count this node enforces.
+// helloCapabilities makes the configured slot count the one this node
+// enforces and, only when it is above one (an explicit opt-in), appends it to
+// a spawn-capable hello; otherwise the hub keeps one-at-a-time dispatch.
 func (client *HubClient) helloCapabilities(base []string) []string {
 	if len(base) == 0 {
 		return base
@@ -87,6 +83,9 @@ func (client *HubClient) helloCapabilities(base []string) []string {
 	}
 	client.spawnSlotsAdvertised.Store(int32(slots))
 	client.nodeAdmission().wake()
+	if slots <= 1 {
+		return base
+	}
 	return append(append([]string(nil), base...), hubCapabilitySpawnSlotsPrefix+strconv.Itoa(slots))
 }
 
