@@ -129,11 +129,12 @@ type App struct {
 	// SentryWarning sends one warning-level Sentry event. Tests substitute it;
 	// nil uses SENTRY_DSN_PANEWIRE (sentry_warning.go).
 	SentryWarning func(fingerprint []string, message string, tags map[string]string)
-	// LiveSpawnProfiles counts live hub spawns by placed profile for the
+	// LiveSpawnProfiles counts live spawns by placed profile for the
 	// [quota].pool_max_concurrent cap, leaving out the hub request named by
-	// its second argument (the spawn being placed). The hub's own App reads
-	// its operations; nil reads GET /v1/spawns/live with the [hub] operator
-	// credential.
+	// its second argument (the spawn being placed). It covers every spawn
+	// placed on a node, the hub's and a direct `panewire spawn` alike. The
+	// hub's own App reads its operations and its nodes' reported jobs; nil
+	// reads GET /v1/spawns/live with the [hub] operator credential.
 	LiveSpawnProfiles func(context.Context, string) (map[string]int, error)
 	// LivePlacedByAccount counts live hub spawns' placed profiles by account
 	// key, leaving out the hub request named by its second argument. Selection
