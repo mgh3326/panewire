@@ -261,7 +261,7 @@ func cliTaskAnswer(body []byte, task string) (client.Task, bool) {
 	if json.Unmarshal(body, &t) != nil {
 		return client.Task{}, false
 	}
-	out := client.Task{Title: t.Title, State: t.State, ClaimedBy: t.ClaimedBy, Refs: client.TaskRefs{JobID: str(t.Refs, "job_id")}}
+	out := client.Task{Title: t.Title, State: t.State, ClaimedBy: t.ClaimedBy, Refs: client.TaskRefs{JobID: str(t.Refs, "job_id")}, Expected: t.Expected}
 	if t.ID == nil || scalar(t.ID) == task {
 		out.ID, _ = strconv.ParseInt(task, 10, 64)
 	}

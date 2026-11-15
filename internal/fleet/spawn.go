@@ -298,6 +298,9 @@ type Task struct {
 	Project   string         `json:"project"`
 	CreatedAt string         `json:"created_at"`
 	Priority  any            `json:"priority"`
+	// Expected is the task's expected duration ("24h0m0s"); nil when unset.
+	// The headroom key reads it (select_headroom.go).
+	Expected *string `json:"expected"`
 }
 
 // unlinkedReviewer is a reviewer that names the author's family but no

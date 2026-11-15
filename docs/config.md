@@ -1125,9 +1125,28 @@ unchanged. An unreadable task `--expected` value turns the key off on spawn
 Burn rates come from `"burn": {"short_pct_per_h": 15, "long_pct_per_h": 2}` in
 the pool-order policy. Windows of a day or less use the short rate, longer
 windows the long rate, and a window of unknown length uses the short rate.
-These are defaults, not measurements: no burn history is kept yet, so the
-per-pool values in effect are UNVERIFIED until measured burn lands (hk 4327).
-Waste-first and host-first placement are not changed by this key.
+These are defaults: a pool's rate is measured when hk has observation history
+for its accounts. The measurement reads `GET /v1/quota/accounts/{key}/observations`
+for the pool's accounts over the last six hours and divides the used share's
+rise by the hours that rise covers; a drop from one observation to the next is
+a window reset, so neither the fall nor the span between those two points
+counts. Rates are kept per window label (`5h`, `7d`), and the pool is the unit:
+a pool that several harnesses draw on shares its accounts, so every harness
+burns it at the one measured rate. A pool with no account, fewer than two
+observations, less than an hour of counted coverage, or an unreadable answer
+keeps the defaults above.
+
+The selection record's `headroom` object says which rate was used:
+`burn_source` is `measured` or `default`. A measured rate also carries
+`burn_window`, the window label (`5h`) it came from; a default carries
+`burn_reason`: `no_history`, `history_unreadable`, `too_few_points`,
+`history_span_short`, `no_window_history` (the pool has rates, but not for this
+candidate's window) or `window_unknown` (the candidate's window length is not
+known). The measured rates are cached in
+`~/.local/state/panewire/burn-history.json` for 15 minutes, so a spawn reads
+that file instead of hk history; a failed read is cached the same way. A burn
+rate only orders candidates — it never refuses or delays one. Waste-first and
+host-first placement are not changed by this key.
 
 Subscription candidates additionally need a readable `ok` nonstale spend
 status. The named credit pools, `anthropic-api` and `openai-api`, remain
