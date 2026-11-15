@@ -903,7 +903,6 @@ detector records the hk document, and the `[report]` relay text ends at the hk
 key instead of the deleted path. A rerun of the same `done` after the delete
 takes the sha256 from the completion that announced the path, so the file is
 never needed again.
-
 Publication and the pin never block completion. The only blocker is the rule
 for a strict `--result`: hk takes a `result` only in the spawned-to-completed
 write, never later, so the record must be confirmed holding it. For CLI `done

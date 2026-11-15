@@ -3,6 +3,7 @@ package fleet
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // The node sweep republishes a report whose `done` upload failed (hk 4372).
@@ -285,17 +287,22 @@ func TestReportRepublishIsBoundedPerPass(t *testing.T) {
 	fail.Store(false)
 	s, _ := loggingSweeper()
 	before := documentPuts(hk)
-	if e := s.RepublishReports(ctx, a); e != nil {
-		t.Fatal(e)
+	passes := 0
+	for documentPuts(hk)-before < len(ids) {
+		passes++
+		if passes > len(ids) {
+			t.Fatalf("after %d passes hk holds %d of %d reports", passes, documentPuts(hk)-before, len(ids))
+		}
+		prev := documentPuts(hk)
+		if e := s.RepublishReports(ctx, a); e != nil {
+			t.Fatal(e)
+		}
+		if got := documentPuts(hk) - prev; got > reportRepublishPerPass {
+			t.Fatalf("pass %d uploaded %d reports, over the bound of %d", passes, got, reportRepublishPerPass)
+		}
 	}
-	if got := documentPuts(hk) - before; got != reportRepublishPerPass {
-		t.Fatalf("first pass uploaded %d reports, want %d", got, reportRepublishPerPass)
-	}
-	if e := s.RepublishReports(ctx, a); e != nil {
-		t.Fatal(e)
-	}
-	if got := documentPuts(hk) - before; got != len(ids) {
-		t.Fatalf("two passes uploaded %d reports, want %d", got, len(ids))
+	if passes < 2 {
+		t.Fatalf("one pass published all %d reports, want the bound to spread them", len(ids))
 	}
 	for _, id := range ids {
 		body := "report of " + id + "\n"
@@ -303,5 +310,137 @@ func TestReportRepublishIsBoundedPerPass(t *testing.T) {
 		if _, ok := storedDoc(hk, key); !ok {
 			t.Fatalf("%s: hk does not hold %s", id, key)
 		}
+	}
+}
+
+// A pin write hk did not answer is repeated by a later pass: the publish
+// receipt alone must not end the retry.
+func TestReportRepublishRetriesAFailedPin(t *testing.T) {
+	ctx := context.Background()
+	a, hk := republishFixture(t)
+	fail := failReportUploads(hk)
+	body := "pin later\n"
+	path := reportFile(t, a, "j", body)
+	wantNotInHK(t, a.lifecycle(ctx, "done", []string{"j", "--report", path}))
+	fail.Store(false)
+	store := a.JobStore.(*fakeJobStore)
+	store.putErr = errors.New("hk unreachable")
+	s, lines := loggingSweeper()
+	if e := s.RepublishReports(ctx, a); e != nil {
+		t.Fatal(e)
+	}
+	if doc := store.record(t, "j")["report_doc"]; doc != nil {
+		t.Fatalf("report_doc=%v after a failed pin, want none", doc)
+	}
+	if got := strings.Join(*lines, "\n"); !strings.Contains(got, "reason=pin_failed") {
+		t.Fatalf("lines=%q, want the pin refusal", *lines)
+	}
+	store.putErr = nil
+	if e := s.RepublishReports(ctx, a); e != nil {
+		t.Fatal(e)
+	}
+	sha := reportDigest([]byte(body))
+	rec := store.record(t, "j")
+	if str(rec, "report_doc") != reportDocumentKey("j", sha) || str(rec, "report_sha256") != sha {
+		t.Fatalf("record=%v, want the report pinned by the retry pass", rec)
+	}
+	// The third pass has nothing left to write.
+	before := len(hk.Requests())
+	if e := s.RepublishReports(ctx, a); e != nil {
+		t.Fatal(e)
+	}
+	if got := len(hk.Requests()) - before; got != 0 {
+		t.Fatalf("pass after the pin made %d hk calls, want none", got)
+	}
+}
+
+// The republish upload runs outside the job's operation lock: a worker's `done`
+// must never wait behind an upload that waits on hk (hk 4831).
+func TestReportRepublishUploadsOutsideTheJobLock(t *testing.T) {
+	ctx := context.Background()
+	a, hk := republishFixture(t)
+	fail := failReportUploads(hk)
+	body := "slow to hk\n"
+	path := reportFile(t, a, "j", body)
+	wantNotInHK(t, a.lifecycle(ctx, "done", []string{"j", "--report", path}))
+	fail.Store(false)
+	// Hold the upload in hk, so the test can look at the job's lock while the
+	// sweep waits on the upload bound the way an hk outage makes it wait.
+	arrived, release := make(chan struct{}, 1), make(chan struct{})
+	hk.Handle(func(req hkRequest) (int, string, bool) {
+		if !strings.HasPrefix(req.Route(), "PUT /v1/documents/") {
+			return 0, "", false
+		}
+		select {
+		case arrived <- struct{}{}:
+		default:
+		}
+		select {
+		case <-release:
+		case <-time.After(10 * time.Second):
+		}
+		return 0, "", false
+	})
+	s, _ := loggingSweeper()
+	pass := make(chan error, 1)
+	go func() { pass <- s.RepublishReports(ctx, a) }()
+	select {
+	case <-arrived:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the sweep never reached hk")
+	}
+	unlock, err := TryLockJobOperation(filepath.Join(a.Jobs, "j"))
+	if err != nil {
+		t.Fatalf("the job's operation lock is held during the upload: %v", err)
+	}
+	unlock()
+	close(release)
+	if e := <-pass; e != nil {
+		t.Fatal(e)
+	}
+	sha := reportDigest([]byte(body))
+	if _, ok := storedDoc(hk, reportDocumentKey("j", sha)); !ok {
+		t.Fatalf("hk does not hold the report after the pass")
+	}
+}
+
+// A `done` holding the job's lock finishes its own pin: the pass uploads and
+// leaves the receipt and pin to the next one, which takes the lock it finds
+// free (hk 4831).
+func TestReportRepublishLeavesABusyJobToDone(t *testing.T) {
+	ctx := context.Background()
+	a, hk := republishFixture(t)
+	fail := failReportUploads(hk)
+	body := "done owns the lock\n"
+	path := reportFile(t, a, "j", body)
+	wantNotInHK(t, a.lifecycle(ctx, "done", []string{"j", "--report", path}))
+	fail.Store(false)
+	sha := reportDigest([]byte(body))
+	key := reportDocumentKey("j", sha)
+	unlock, err := TryLockJobOperation(filepath.Join(a.Jobs, "j"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, lines := loggingSweeper()
+	if e := s.RepublishReports(ctx, a); e != nil {
+		t.Fatal(e)
+	}
+	// The upload never waited: hk holds the bytes while the lock is still held.
+	if _, ok := storedDoc(hk, key); !ok {
+		t.Fatalf("hk does not hold %s, so the upload waited for the lock", key)
+	}
+	if rec := a.JobStore.(*fakeJobStore).record(t, "j"); str(rec, "report_sha256") != "" {
+		t.Fatalf("record=%v, want no pin while the done holds the lock", rec)
+	}
+	if got := strings.Join(*lines, "\n"); !strings.Contains(got, "reason=job_busy") {
+		t.Fatalf("lines=%q, want the busy refusal", *lines)
+	}
+	unlock()
+	if e := s.RepublishReports(ctx, a); e != nil {
+		t.Fatal(e)
+	}
+	rec := a.JobStore.(*fakeJobStore).record(t, "j")
+	if str(rec, "report_doc") != key || str(rec, "report_sha256") != sha {
+		t.Fatalf("record=%v, want the report pinned by the pass after the lock", rec)
 	}
 }
