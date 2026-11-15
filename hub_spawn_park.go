@@ -2,6 +2,7 @@ package panewire
 
 import (
 	"context"
+	"maps"
 	"math/rand/v2"
 	"strings"
 	"time"
@@ -99,7 +100,9 @@ func (h *HubServer) spawnParkRecheck() time.Duration {
 
 // spawnParkReason reads a placement refusal (its rc and text) as "no
 // candidate can take it now" and names the park reason, or "" for a refusal
-// that is not about capacity and ends the request as before.
+// that is not about capacity and ends the request as before. A refusal with
+// several blockers names each, comma-separated, the first one primary: every
+// one of their events wakes the request.
 func spawnParkReason(rc int, text string) string {
 	switch {
 	// An escalation asks the parent lane to act: it ends the request and
@@ -107,17 +110,33 @@ func spawnParkReason(rc int, text string) string {
 	case rc == 87 || strings.Contains(text, "role_exhausted_escalate"):
 		return ""
 	// Hub placement never spawns locally: every remote candidate tried and
-	// none completed. The tried notes name why.
+	// none completed. The tried notes name why; a mock lane is refused by
+	// every remote for good.
 	case rc == 80 && strings.Contains(text, "no remote candidate completed"):
-		switch {
-		case strings.Contains(text, "task_slots_full") || strings.Contains(text, "active_jobs>=max") || strings.Contains(text, "lanes_full"):
-			return spawnParkHostFull
-		case strings.Contains(text, "disconnected"):
-			return spawnParkNodeDisconnected
-		case strings.Contains(text, "quota"):
-			return spawnParkQuota
+		if strings.Contains(text, "mock_lane_remote_refused") {
+			return ""
 		}
-		return spawnParkNoEligibleHost
+		var reasons []string
+		for _, c := range []struct {
+			reason string
+			tokens []string
+		}{
+			{spawnParkHostFull, []string{"task_slots_full", "active_jobs>=max", "lanes_full"}},
+			{spawnParkNodeDisconnected, []string{"disconnected"}},
+			{spawnParkQuota, []string{"quota"}},
+			{spawnParkLaunchBackoff, []string{"launch_backoff"}},
+		} {
+			for _, token := range c.tokens {
+				if strings.Contains(text, token) {
+					reasons = append(reasons, c.reason)
+					break
+				}
+			}
+		}
+		if len(reasons) == 0 {
+			return spawnParkNoEligibleHost
+		}
+		return strings.Join(reasons, ",")
 	case strings.Contains(text, "launch_backoff"):
 		return spawnParkLaunchBackoff
 	case strings.Contains(text, "concurrency cap"):
@@ -132,6 +151,12 @@ func spawnParkReason(rc int, text string) string {
 		return spawnParkNoEligibleHost
 	}
 	return ""
+}
+
+// spawnParkPrimary is the reason the status API shows: the first named.
+func spawnParkPrimary(reason string) string {
+	primary, _, _ := strings.Cut(reason, ",")
+	return primary
 }
 
 // spawnParkUntil caps a next check at the request's limit, so a parked
@@ -152,45 +177,76 @@ func spawnParked(task hubSpawnTask, now time.Time) bool {
 // parkSpawnTask parks an attempt whose placement found no candidate. It
 // reports false when the row moved on meanwhile, and the store error when
 // the write failed or its result is unknown: the row is then still accepted
-// and a later pass parks it again. wakeGen is the wake generation read
-// before placement began: an event noted since then may have been drained
-// before this park landed, so it is noted again for the next tick.
-func (h *HubServer) parkSpawnTask(ctx context.Context, task hubSpawnTask, reason, detail string, wakeGen uint64) (bool, error) {
+// and a later pass parks it again. before is the per-reason wake count read
+// before placement began: an event for one of this park's reasons noted
+// since then may have been drained before the park landed, so that reason
+// is noted again (not as a new event, and with no kick) for the next tick.
+func (h *HubServer) parkSpawnTask(ctx context.Context, task hubSpawnTask, reason, detail string, before map[string]uint64) (bool, error) {
 	now := h.now().UTC()
 	next := spawnParkUntil(task, now.Add(h.spawnParkRecheck()))
 	parked, err := h.inbox.store.parkSpawn(ctx, task.Request.RequestID, task.Attempt, reason, next)
 	if err != nil || !parked {
 		return false, err
 	}
-	if h.spawnWakeGen.Load() != wakeGen {
-		h.noteSpawnWake(reason)
+	h.spawnWakeMu.Lock()
+	for _, r := range strings.Split(reason, ",") {
+		if h.spawnWakeCounts[r] != before[r] {
+			h.markSpawnWakeLocked(false, r)
+		}
 	}
+	h.spawnWakeMu.Unlock()
 	h.logger.Info("hub spawn parked", "request_id", task.Request.RequestID, "job", task.Job, "reason", reason, "next_check_at", next.Format(time.RFC3339), "refusal", utf8PrefixWithin(detail, 256))
 	return true, nil
 }
 
+// spawnWakeSnapshot copies the per-reason wake counts.
+func (h *HubServer) spawnWakeSnapshot() map[string]uint64 {
+	h.spawnWakeMu.Lock()
+	defer h.spawnWakeMu.Unlock()
+	return maps.Clone(h.spawnWakeCounts)
+}
+
 // noteSpawnWake records an event that may let parked requests with these
-// reasons place now; the coordinator wakes them on its next tick.
+// reasons place now, and kicks the coordinator to wake them.
 func (h *HubServer) noteSpawnWake(reasons ...string) {
 	h.spawnWakeMu.Lock()
-	if h.spawnWakes == nil {
-		h.spawnWakes = map[string]bool{}
-	}
 	for _, reason := range reasons {
-		h.spawnWakes[reason] = true
+		h.markSpawnWakeLocked(true, reason)
 	}
 	h.spawnWakeMu.Unlock()
-	h.spawnWakeGen.Add(1)
 	h.kickSpawnPlacement()
 }
 
-// wakeParkedSpawns is one tick's wake: it moves the next check of at most
+// markSpawnWakeLocked notes reason pending under spawnWakeMu, counting it as
+// an event when event is set; the pending set and the counts change
+// together, so a park can never miss a drained wake. launch_backoff is
+// timer-only: no event wakes it.
+func (h *HubServer) markSpawnWakeLocked(event bool, reason string) {
+	if reason == spawnParkLaunchBackoff {
+		return
+	}
+	if h.spawnWakes == nil {
+		h.spawnWakes = map[string]bool{}
+		h.spawnWakeCounts = map[string]uint64{}
+	}
+	h.spawnWakes[reason] = true
+	if event {
+		h.spawnWakeCounts[reason]++
+	}
+}
+
+// wakeParkedSpawns is one pass's wake: it moves the next check of at most
 // one wake batch of parked requests, whose reasons an event named, to now.
-// When the batch was full (or the store failed) the reasons stay noted for
-// the next timer tick, with no kick, so a flood of parked requests wakes one
-// batch per tick rather than at once.
-func (h *HubServer) wakeParkedSpawns(ctx context.Context) {
+// After a full batch (or a store error) the reasons stay noted and the next
+// batch waits for a timer tick (ticked), however often the coordinator runs
+// in between, so a flood of parked requests wakes one batch per tick.
+func (h *HubServer) wakeParkedSpawns(ctx context.Context, ticked bool) {
 	h.spawnWakeMu.Lock()
+	if h.spawnWakeHeld && !ticked {
+		h.spawnWakeMu.Unlock()
+		return
+	}
+	h.spawnWakeHeld = false
 	reasons := make([]string, 0, len(h.spawnWakes))
 	for reason := range h.spawnWakes {
 		reasons = append(reasons, reason)
@@ -206,12 +262,10 @@ func (h *HubServer) wakeParkedSpawns(ctx context.Context) {
 	woken, err := h.inbox.store.wakeParkedSpawns(ctx, reasons, batch, h.now().UTC())
 	if err != nil || woken >= batch {
 		h.spawnWakeMu.Lock()
-		if h.spawnWakes == nil {
-			h.spawnWakes = map[string]bool{}
-		}
 		for _, reason := range reasons {
-			h.spawnWakes[reason] = true
+			h.markSpawnWakeLocked(false, reason)
 		}
+		h.spawnWakeHeld = true
 		h.spawnWakeMu.Unlock()
 	}
 }
@@ -235,13 +289,14 @@ func (s *laneInboxStore) parkSpawn(parent context.Context, id string, attempt in
 func (s *laneInboxStore) wakeParkedSpawns(parent context.Context, reasons []string, limit int, now time.Time) (int, error) {
 	ctx, done := s.op(parent)
 	defer done()
-	marks := strings.TrimSuffix(strings.Repeat("?,", len(reasons)), ",")
+	// park_reason may name several reasons, comma-separated: match each.
+	marks := strings.TrimSuffix(strings.Repeat("(','||park_reason||',') LIKE ? OR ", len(reasons)), " OR ")
 	args := []any{now.UnixMilli(), now.UnixMilli()}
 	for _, reason := range reasons {
-		args = append(args, reason)
+		args = append(args, "%,"+reason+",%")
 	}
 	args = append(args, limit)
-	result, err := s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET next_check_ms=? WHERE request_id IN (SELECT request_id FROM spawn_operations WHERE status='accepted' AND node_id IS NULL AND next_check_ms>? AND park_reason IN (`+marks+`) ORDER BY next_check_ms,request_id LIMIT ?)`), args...)
+	result, err := s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET next_check_ms=? WHERE request_id IN (SELECT request_id FROM spawn_operations WHERE status='accepted' AND node_id IS NULL AND next_check_ms>? AND (`+marks+`) ORDER BY next_check_ms,request_id LIMIT ?)`), args...)
 	if err != nil {
 		return 0, err
 	}

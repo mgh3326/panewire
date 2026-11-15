@@ -2,7 +2,9 @@ package panewire
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -52,7 +54,7 @@ func claimParkRequest(t *testing.T, h *HubServer, n int, now time.Time) hubSpawn
 
 func parkNow(t *testing.T, h *HubServer, task hubSpawnTask, reason string) bool {
 	t.Helper()
-	parked, err := h.parkSpawnTask(t.Context(), task, reason, "", h.spawnWakeGen.Load())
+	parked, err := h.parkSpawnTask(t.Context(), task, reason, "", h.spawnWakeSnapshot())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,6 +103,9 @@ func TestSpawnParkReasonNamesNoCandidateRefusals_t4661(t *testing.T) {
 		{80, "local spawns are disabled on this host; no remote candidate completed (tried: desktop task_slots_full)", spawnParkHostFull},
 		{80, "local spawns are disabled on this host; no remote candidate completed (tried: desktop disconnected)", spawnParkNodeDisconnected},
 		{80, "local spawns are disabled on this host; no remote candidate completed (tried: desktop checkout_refused:dirty)", spawnParkNoEligibleHost},
+		{80, "local spawns are disabled on this host; no remote candidate completed (tried: a task_slots_full, b quota_exhausted)", spawnParkHostFull + "," + spawnParkQuota},
+		{80, "local spawns are disabled on this host; no remote candidate completed (tried: a launch_backoff)", spawnParkLaunchBackoff},
+		{80, "local spawns are disabled on this host; no remote candidate completed (tried: a mock_lane_remote_refused)", ""},
 		// An escalation goes to the parent lane, never a silent park.
 		{87, "role_exhausted_escalate: QUOTA_EXHAUSTED: every eligible worker account (a) is measured exhausted; ask the parent lane", ""},
 		// Refusals no wait can fix still end the request.
@@ -223,7 +228,7 @@ func TestEventWakesParkedInBatchesOfEight_t4661(t *testing.T) {
 	}
 	h.noteSpawnWake(spawnParkPoolCap)
 	for tick, want := range []int{8, 16, 20, 20} {
-		h.wakeParkedSpawns(t.Context())
+		h.wakeParkedSpawns(t.Context(), true)
 		if got := due(poolCapped); got != want {
 			t.Fatalf("tick %d: %d pool_cap requests due, want %d", tick+1, got, want)
 		}
@@ -238,7 +243,7 @@ func TestEventWakesParkedInBatchesOfEight_t4661(t *testing.T) {
 		t.Fatalf("a drained wake stays noted: %d reasons", left)
 	}
 	h.noteSpawnWake(spawnParkQuota)
-	h.wakeParkedSpawns(t.Context())
+	h.wakeParkedSpawns(t.Context(), true)
 	if got := due(quota); got != 3 {
 		t.Fatalf("a quota change woke %d of 3 quota requests", got)
 	}
@@ -460,44 +465,90 @@ func TestOlderHubPlacesParkedRowsAsAccepted_t4661(t *testing.T) {
 	}
 }
 
-// A full wake batch leaves its reasons for the next timer tick without
-// kicking the coordinator, so one event cannot drain the backlog at once.
+// A full wake batch holds the next one for a timer tick: a kick or a pass
+// in between wakes nothing more, so one event cannot drain the backlog.
 func TestFullWakeBatchWaitsForTheNextTick_t4661(t *testing.T) {
 	h := asyncSpawnHub(t)
 	expiryClock(h, expiryNow())
+	var ids []string
 	for n := range 9 {
-		parkNow(t, h, claimParkRequest(t, h, 120+n, h.now()), spawnParkPoolCap)
+		task := claimParkRequest(t, h, 120+n, h.now())
+		parkNow(t, h, task, spawnParkPoolCap)
+		ids = append(ids, task.Request.RequestID)
+	}
+	due := func() int {
+		n := 0
+		for _, id := range ids {
+			if !parkedTask(t, h, id).NextCheck.After(h.now()) {
+				n++
+			}
+		}
+		return n
 	}
 	h.noteSpawnWake(spawnParkPoolCap)
 	<-h.spawnKick
-	h.wakeParkedSpawns(t.Context())
+	h.wakeParkedSpawns(t.Context(), true)
 	select {
 	case <-h.spawnKick:
 		t.Fatal("a full batch kicked the coordinator again")
 	default:
 	}
-	h.spawnWakeMu.Lock()
-	kept := h.spawnWakes[spawnParkPoolCap]
-	h.spawnWakeMu.Unlock()
-	if !kept {
-		t.Fatal("a full batch dropped its reason")
+	h.noteSpawnWake(spawnParkPoolCap) // another event before the tick
+	h.wakeParkedSpawns(t.Context(), false)
+	if got := due(); got != 8 {
+		t.Fatalf("a pass between ticks woke more: %d due, want 8", got)
+	}
+	h.wakeParkedSpawns(t.Context(), true)
+	if got := due(); got != 9 {
+		t.Fatalf("the next tick woke %d, want 9", got)
 	}
 }
 
-// An event noted while placement ran is noted again once the park lands:
-// the wake it raced found no parked row.
+// An event for this park's reason, noted and drained while placement ran,
+// is noted again once the park lands; an event for another reason is not,
+// and launch_backoff is never event-woken.
 func TestWakeDuringPlacementIsKeptForThePark_t4661(t *testing.T) {
 	h := asyncSpawnHub(t)
 	task := claimParkRequest(t, h, 140, time.Now())
-	before := h.spawnWakeGen.Load()
-	h.noteSpawnWake(spawnParkHostFull)
-	h.wakeParkedSpawns(t.Context()) // drained before the park
+	other := claimParkRequest(t, h, 141, time.Now())
+	before := h.spawnWakeSnapshot()
+	h.noteSpawnWake(spawnParkHostFull, spawnParkLaunchBackoff)
+	h.noteSpawnWake(spawnParkQuota)
+	h.wakeParkedSpawns(t.Context(), true) // drained before the parks
 	if parked, err := h.parkSpawnTask(t.Context(), task, spawnParkHostFull, "", before); err != nil || !parked {
 		t.Fatal(parked, err)
 	}
-	h.wakeParkedSpawns(t.Context())
+	if parked, err := h.parkSpawnTask(t.Context(), other, spawnParkPoolCap, "", before); err != nil || !parked {
+		t.Fatal(parked, err)
+	}
+	h.spawnWakeMu.Lock()
+	noted := maps.Clone(h.spawnWakes)
+	h.spawnWakeMu.Unlock()
+	if !noted[spawnParkHostFull] || noted[spawnParkPoolCap] || noted[spawnParkLaunchBackoff] {
+		t.Fatalf("raced wakes noted %v, want host_full only", noted)
+	}
+	h.wakeParkedSpawns(t.Context(), true)
 	if got := parkedTask(t, h, task.Request.RequestID); got.NextCheck.After(h.now()) {
 		t.Fatalf("the raced wake was lost: next check %v", got.NextCheck)
+	}
+	if got := parkedTask(t, h, other.Request.RequestID); !got.NextCheck.After(h.now()) {
+		t.Fatal("an unrelated event woke a pool_cap park")
+	}
+}
+
+// A park with several reasons wakes on any one of their events, and reads
+// its first reason in the status API.
+func TestMixedParkWakesOnEitherReason_t4661(t *testing.T) {
+	h := asyncSpawnHub(t)
+	task := claimParkRequest(t, h, 145, time.Now())
+	parkNow(t, h, task, spawnParkHostFull+","+spawnParkQuota)
+	h.noteSpawnWake(spawnParkQuota)
+	h.wakeParkedSpawns(t.Context(), true)
+	if got := parkedTask(t, h, task.Request.RequestID); got.NextCheck.After(h.now()) {
+		t.Fatal("a quota event did not wake a host_full,quota park")
+	}
+	if got := spawnParkPrimary(spawnParkHostFull + "," + spawnParkQuota); got != spawnParkHostFull {
+		t.Fatalf("primary %q", got)
 	}
 }
 
@@ -555,5 +606,17 @@ func TestClaimedHarnessRetryIsNotBackedOff_t4661(t *testing.T) {
 	got, err := h.inbox.store.unbindRefusedSpawn(t.Context(), bound, hubSpawnExclusion{Machine: "machine-a", Profile: "codex-sol", Reason: "launch_proof_failed", RC: 70}, &claimed, time.Now())
 	if err != nil || got.ParkReason != "" || got.ClaimedHost != "machine-a" {
 		t.Fatalf("claimed retry: park=%q claimed=%q err=%v", got.ParkReason, got.ClaimedHost, err)
+	}
+}
+
+// On a claimed host whose harnesses were refused, role_no_candidate is the
+// node's answer, but a pool at its concurrency cap is capacity and parks.
+func TestClaimedAnswerLeavesPoolCapToPark_t4661(t *testing.T) {
+	task := hubSpawnTask{ClaimedHost: "desktop", Exclusions: []hubSpawnExclusion{{Machine: "desktop"}}, Outcome: hubSpawnOutcome{NodeResult: true}}
+	if !spawnClaimedAnswer(task, errors.New("role_no_candidate: no profile passes role, retirement, grade, gate and seat rules")) {
+		t.Fatal("refused harnesses are not the claimed answer")
+	}
+	if spawnClaimedAnswer(task, errors.New("role_no_candidate: role_no_candidate: every eligible candidate is in a pool at its concurrency cap")) {
+		t.Fatal("a pool at its cap was taken as the claimed answer")
 	}
 }

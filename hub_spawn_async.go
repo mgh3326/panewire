@@ -254,7 +254,7 @@ func (h *HubServer) handleSpawnOperation(w http.ResponseWriter, r *http.Request)
 	// check (hk 4661): it reads parked, with the reason and the check.
 	status, reason, nextCheckAt := spawnPublicStatus(task.Status), "", ""
 	if spawnParked(task, h.now()) {
-		status, reason, nextCheckAt = "parked", task.ParkReason, task.NextCheck.UTC().Format(time.RFC3339)
+		status, reason, nextCheckAt = "parked", spawnParkPrimary(task.ParkReason), task.NextCheck.UTC().Format(time.RFC3339)
 	}
 	// Never expose the persisted brief, argv or submitting paths through status
 	// reads. A reason's refusal text may name a path on the executing node.
@@ -383,13 +383,18 @@ func (h *HubServer) runSpawnCoordinator(parent context.Context) {
 	tick := time.NewTicker(2 * time.Second)
 	defer tick.Stop()
 	refreshSeen := h.quotaRefresh.completedCount.Load()
+	ticked := true
 	for {
 		// A finished quota refresh is a quota change for parked requests.
 		if count := h.quotaRefresh.completedCount.Load(); count != refreshSeen {
 			refreshSeen = count
-			h.noteSpawnWake(spawnParkQuota)
+			// Noted, not kicked: this pass wakes it now.
+			h.spawnWakeMu.Lock()
+			h.markSpawnWakeLocked(true, spawnParkQuota)
+			h.spawnWakeMu.Unlock()
 		}
-		h.wakeParkedSpawns(ctx)
+		h.wakeParkedSpawns(ctx, ticked)
+		ticked = false
 		if h.drain.admit() {
 			// Work claimed during a scan may move later in the ordering. Do not
 			// schedule the same row twice in one pass, even if it reappears.
@@ -426,6 +431,7 @@ func (h *HubServer) runSpawnCoordinator(parent context.Context) {
 		case <-ctx.Done():
 			return
 		case <-tick.C:
+			ticked = true
 		case <-h.spawnKick:
 		}
 	}
@@ -661,13 +667,13 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 		if err == nil || ctx.Err() != nil || task.Expires.IsZero() {
 			return false
 		}
-		if code, _, _ := strings.Cut(err.Error(), ":"); task.ClaimedHost != "" && len(task.Exclusions) > 0 && task.Outcome.NodeResult && code == "role_no_candidate" {
+		if spawnClaimedAnswer(task, err) {
 			return false
 		}
 		return spawnParkReason(fleet.ErrorCode(err), err.Error()) != ""
 	}
 	app.Parks = parks
-	wakeGen := h.spawnWakeGen.Load()
+	wakeBefore := h.spawnWakeSnapshot()
 	err = app.ExecuteSubmission(ctx, request)
 	if transport.bound {
 		return
@@ -692,11 +698,7 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 	// If every eligible harness was already refused, the node's last
 	// cleanup-confirmed refusal is the answer, not a selection error caused by
 	// excluding that same harness. Other placement errors retain their detail.
-	claimedAnswer := false
-	if err != nil && ctx.Err() == nil && task.ClaimedHost != "" && len(task.Exclusions) > 0 && task.Outcome.NodeResult {
-		code, _, _ := strings.Cut(err.Error(), ":")
-		claimedAnswer = code == "role_no_candidate"
-	}
+	claimedAnswer := err != nil && ctx.Err() == nil && spawnClaimedAnswer(task, err)
 	// No candidate can take it now: a request with a limit is parked, not
 	// ended, and is placed again on an event or its next check (hk 4661).
 	if !claimedAnswer && parks(err) {
@@ -704,7 +706,7 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 			// A recognised no-candidate refusal never ends the request: a
 			// failed or ambiguous park write leaves it accepted for the next
 			// pass to park again.
-			if _, parkErr := h.parkSpawnTask(parent, task, reason, spawnRefusalLine(err.Error()), wakeGen); parkErr != nil {
+			if _, parkErr := h.parkSpawnTask(parent, task, reason, spawnRefusalLine(err.Error()), wakeBefore); parkErr != nil {
 				h.logger.Warn("hub spawn park not stored; retried next pass", "request_id", task.Request.RequestID, "reason", reason, "error", parkErr)
 			}
 			h.releasePlacementCount(task.Job)
@@ -1681,4 +1683,12 @@ func spawnResultFix(tail string) string {
 		return r
 	}, fleetEventRedact(fix))
 	return utf8PrefixWithin(strings.TrimSpace(fix), 512)
+}
+
+// spawnClaimedAnswer reports a role_no_candidate on a claimed host whose
+// harnesses were all refused: the node's last refusal is the answer. A pool
+// at its concurrency cap is capacity, not refusal, and parks instead.
+func spawnClaimedAnswer(task hubSpawnTask, err error) bool {
+	code, _, _ := strings.Cut(err.Error(), ":")
+	return task.ClaimedHost != "" && len(task.Exclusions) > 0 && task.Outcome.NodeResult && code == "role_no_candidate" && !strings.Contains(err.Error(), "concurrency cap")
 }

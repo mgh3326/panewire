@@ -190,8 +190,17 @@ account and no placement count.
 finished quota refresh note the reasons in the table. On its next tick the
 coordinator makes at most `spawn_wake_batch` (8) parked rows with a noted
 reason due now, earliest next check first; when the batch was full the
-reasons stay noted for the next tick (2 s). Wakes are hub memory: a restart
-forgets them and the `next_check_at` timer covers it.
+reasons stay noted and the next batch waits for the next timer tick (2 s),
+however often the coordinator is kicked meanwhile. An event noted for a
+park's reason while its placement ran is noted again once the park lands, so
+a drained wake is never lost; `launch_backoff` is never event-woken. A
+refusal with several blockers (rc 80 `no remote candidate completed` with
+mixed tried notes) stores every reason (`host_full,quota`) and wakes on any;
+the status API shows the first. A mock lane's rc 80 is not parked. A parked,
+unbound row holds no pool slot (`liveSpawns`), a claimed-harness retry is not
+backed off (hk holds its claim on that host), and a parked pass emits no
+terminal refusal event. Wakes are hub memory: a restart forgets them and the
+`next_check_at` timer covers it.
 
 **Back-off.** A failed attempt is a host refusal that hands the request to
 another host (`unbindRefusedSpawn`, the next-host and claimed-harness paths)

@@ -445,11 +445,13 @@ type HubServer struct {
 	spawnWakeMu sync.Mutex
 	spawnWakes  map[string]bool
 	spawnRand   func() float64
-	// spawnWakeGen counts noted wakes, so a park can tell one raced it.
-	spawnWakeGen   atomic.Uint64
-	spawnWorkers   sync.WaitGroup
-	placementKick  chan struct{}
-	placementAsync atomic.Bool
+	// spawnWakeCounts counts each reason's noted events, so a park can tell
+	// one raced it; spawnWakeHeld holds the next batch for a timer tick.
+	spawnWakeCounts map[string]uint64
+	spawnWakeHeld   bool
+	spawnWorkers    sync.WaitGroup
+	placementKick   chan struct{}
+	placementAsync  atomic.Bool
 	// placementRecordClient is the App the outbox delivers hk placement
 	// records through; built on first use by placementRecordApp.
 	placementRecordClient *fleet.App
