@@ -80,6 +80,13 @@ type PlacementPolicy struct {
 	// (hub_readiness.go).
 	LaunchFailureThreshold int `json:"launch_failure_threshold,omitempty"`
 	LaunchBackoffMinutes   int `json:"launch_backoff_minutes,omitempty"`
+	// SpawnBackoffSeconds and SpawnBackoffMaxSeconds bound a spawn request's
+	// re-placement back-off (base × 2^(n-1), capped, ±20 %), and
+	// SpawnWakeBatch how many parked requests one tick wakes on an event.
+	// 0 means the defaults, 30 s, 600 s and 8 (hub_spawn_park.go).
+	SpawnBackoffSeconds    int `json:"spawn_backoff_seconds,omitempty"`
+	SpawnBackoffMaxSeconds int `json:"spawn_backoff_max_seconds,omitempty"`
+	SpawnWakeBatch         int `json:"spawn_wake_batch,omitempty"`
 }
 
 // PlacementMachineSlots caps how many distinct tasks may hold active jobs on
@@ -113,6 +120,7 @@ func (p PlacementPolicy) valid() bool {
 	}
 	if !machineIDPattern.MatchString(p.LocalMachine) || p.LocalMachine == hubOperatorMachineID || p.MaxActiveJobs < 1 || p.MaxActiveJobs > 10000 || p.LoadRatio < 0 || p.LoadRatio > 100 ||
 		p.LaunchFailureThreshold < 0 || p.LaunchFailureThreshold > maxPlacementLaunchFailures || p.LaunchBackoffMinutes < 0 || p.LaunchBackoffMinutes > maxPlacementLaunchBackoffMin ||
+		p.SpawnBackoffSeconds < 0 || p.SpawnBackoffSeconds > maxSpawnBackoffSec || p.SpawnBackoffMaxSeconds < 0 || p.SpawnBackoffMaxSeconds > maxSpawnBackoffSec || p.SpawnWakeBatch < 0 || p.SpawnWakeBatch > maxSpawnWakeBatch ||
 		p.SpawnBridgeSeconds < 0 || p.SpawnBridgeSeconds > int(maxPlacementSpawnBridge/time.Second) ||
 		!(p.SwapInHalfMBps >= 0 && p.SwapInHalfMBps <= 100000) || !p.Score.valid() ||
 		!validOptionalMemoryFloat(p.MemoryFreePctMin, 0, 100) || !validOptionalMemoryFloat(p.SwapUsedMBMax, 0, math.Inf(1)) ||

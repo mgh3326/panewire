@@ -250,6 +250,8 @@ func TestHubQuotaRefreshPreservesAttemptBeforePending(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = h.Close() })
+	// This test is about the next host, not the back-off before it.
+	withoutSpawnBackoff(h)
 	server := httptest.NewServer(h.Handler())
 	t.Cleanup(server.Close)
 	t14NamedNode(t, h, server, "desktop", true, true)

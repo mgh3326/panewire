@@ -789,7 +789,9 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 			}
 			return
 		}
-		a.spawnEvents(s, err)
+		if a.Parks == nil || err == nil || !a.Parks(err) {
+			a.spawnEvents(s, err)
+		}
 		a.finishPlacement(ctx, s, err)
 	}()
 	if s.CWD == "" || s.Prompt == "" || s.Label == "" || !slices.Contains([]string{"T0", "T1", "T2", "T3"}, s.T) {

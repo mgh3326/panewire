@@ -42,7 +42,7 @@ func TestAsyncSpawnUndispatchedTimeoutStartsNextAttempt(t *testing.T) {
 			if err != nil || saved.Status != "accepted" || saved.Attempt != 2 || !saved.Outcome.Retryable || saved.Outcome.Reason != "timeout" || saved.Node != nil || !saved.Deadline.After(time.Now()) {
 				t.Fatalf("undispatched timeout did not queue the next attempt: %+v %v", saved, err)
 			}
-			page, _, err := h.inbox.store.pendingSpawnPage(t.Context(), spawnScanPosition{})
+			page, _, err := h.inbox.store.pendingSpawnPage(t.Context(), spawnScanPosition{}, time.Now())
 			if err != nil || len(page) != 1 || page[0].Request.RequestID != request.RequestID || page[0].Attempt != 2 {
 				t.Fatalf("the next attempt is not scheduled: %+v %v", page, err)
 			}

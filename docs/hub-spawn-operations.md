@@ -76,9 +76,10 @@ job-directory TTL pass) knows the design's state set
 (hk design/2026-11-13/hub-owned-spawn-queue §2) before the hub emits any of it
 (hk 4659). The hub emits `accepted`, `dispatching`, `reconciling`, `succeeded`,
 `failed`, `retryable` and `deadline_exceeded`, since hk 4660 `given_up` too
-([Time limit](#time-limit)), and since hk 4736 `waiting`, `refused` and
-`cancelled` for [Start conditions](#start-conditions); `pending`, `parked`,
-`launching` and `landed` stay unemitted until their parts.
+([Time limit](#time-limit)), since hk 4736 `waiting`, `refused` and
+`cancelled` for [Start conditions](#start-conditions), and since hk 4661
+`parked`, with top-level `reason` and `next_check_at` ([Parked](#parked));
+`pending`, `launching` and `landed` stay unemitted until their parts.
 `TestHubSpawnExternalStatesUnchanged` keeps that set, and every state in it
 is one the clients know. An answer also carries `expires_at` (RFC 3339,
 the request's time limit) for a request that has one.
@@ -217,6 +218,151 @@ the row then. A bound legacy row is not moved either; it keeps the guard it had
 `waiting` is not a settled state for any reader: `spawnStatusActive` counts it,
 and an escalated conditioned successor reports `pending` rather than a false
 quota refusal.
+
+## Parked
+
+hk 4661; design hk design/2026-11-13/hub-owned-spawn-queue §2 (`parked`),
+§3 rules 3 and 4, §9a. The owner notice for a long-parked request (hk 4662)
+and start conditions (hk 4736) are later parts.
+
+**Parked, not ended.** When placement finds no candidate for a request that
+has a limit (`expires_ms>0`), the request is parked instead of ending
+`retryable`. The refusal is read by `spawnParkReason` (`hub_spawn_park.go`):
+
+| Placement refusal | `reason` | Woken early by |
+|---|---|---|
+| `launch_backoff` named, or the request's own back-off (below) | `launch_backoff` | its timer only |
+| every eligible candidate is in a pool at its concurrency cap | `pool_cap` | a job leaving a node's active set |
+| `QUOTA_*`, `quota_exhausted`, `quota_unconfirmed`, rc 86/87/89 | `quota` | a finished quota refresh |
+| a node did not connect / is not connected (`hub_node_unavailable`) | `node_disconnected` | a node connect |
+| rc 81: no awake host admitted / no host admitted / no candidate accepted | `host_full` | a node connect, a job leaving a node |
+| `role_no_candidate` (no profile passes), `NO_ELIGIBLE_HOST` | `no_eligible_host` | a node connect |
+
+Any other refusal ends the request as before. A row with no limit is never
+parked. A parked row stays `status='accepted'`, unbound and holding its
+reservation, with `park_reason` and `next_check_ms` (migration
+`0018_spawn_parked.sql`). The coordinator scan skips an accepted row until
+`next_check_ms`; `GET /v1/spawns/<request>` reads `parked` with `reason` and
+`next_check_at` while it is ahead, and `accepted` once it is due. The next
+check is one back-off base ahead, spread ±20 % (24–36 s by default), and never
+past `expires_at`, so a parked request is looked at when its limit passes and
+is given up then as in [Time limit](#time-limit). A parked request holds no
+account and no placement count.
+
+**Event wake.** A node connect, a job leaving a node's active set and a
+finished quota refresh note the reasons in the table. On its next tick the
+coordinator makes at most `spawn_wake_batch` (8) parked rows with a noted
+reason due now, earliest next check first; when the batch was full the
+reasons stay noted and the next batch waits for the next timer tick (2 s),
+however often the coordinator is kicked meanwhile. An event noted for a
+park's reason while its placement ran is noted again once the park lands, so
+a drained wake is never lost; `launch_backoff` is never event-woken. A
+refusal with several blockers (rc 80 `no remote candidate completed` with
+mixed tried notes) stores every reason (`host_full,quota`) and wakes on any;
+the status API shows the first. A mock lane's rc 80 is not parked. A parked,
+unbound row holds no pool slot (`liveSpawns`), a claimed-harness retry is not
+backed off (hk holds its claim on that host), and a parked pass emits no
+terminal refusal event. The first cleanup-confirmed refusal after the hk job
+claim is kept in `claim_result`: written with the result that proves it
+(a definitive post-claim node result; never a timeout, which is uncertain or
+the not-started evidence of [Time limit](#time-limit), and never a
+pre-claim refusal or a not-started attestation) and never replaced. A request holds a claim when it has a `claimed_host` pin or a
+`claim_result`: a pin cannot always tell a claim from a replay pin, so when
+in doubt the claim is kept. A saved result that would pin a replay (a post-claim node
+result, including one an older hub saved without `claimed_host`) holds too.
+A hub timeout of an unsent attempt and a node timeout at a stage before the
+claim pin nothing. A node's cleaned-up timeout from the claim stage on may
+come after the job claim: it still renews the attempt, but pinned to that host (so the claim is
+held from then on), and at the limit it ends `retryable` with its own result,
+never `given_up`.
+A request
+holding one may park, but
+it is never renewed or given up as unstarted: an unsent timeout, wherever the
+deadline passed, ends it with that saved refusal. A replay pin alone
+(`claimed_host` after a checkout refusal) proves no claim. Wakes are hub memory: a restart forgets them and the
+`next_check_at` timer covers it.
+
+**Back-off.** A failed attempt is a host refusal that hands the request to
+another host (`unbindRefusedSpawn`, the next-host and claimed-harness paths)
+or an attempt the node attested it never started after its deadline. It
+increments `failed_attempts` and parks the request `launch_backoff` for
+`spawn_backoff_seconds` × 2^(n-1) (30 s), at most
+`spawn_backoff_max_seconds` (600 s), spread ±20 % and then capped at that
+maximum again, and never past `expires_at`. The spread is drawn from
+`HubServer.spawnRand` (tests inject it) and the times are on the hub clock.
+A later pass that finds no other candidate never shortens a running back-off.
+An attempt the hub never sent (the queue timeout) is not a failure and starts
+the next attempt at once. The per-host `launch_backoff` of hk 4380
+([placement.md](placement.md)) is separate and counts host faults only.
+
+**Exclusions across attempts.** `exclusions` now carry into the request's
+next attempt: a host (or, for a launch-proof or claimed-host refusal, a host
+and harness) refused for a request stays excluded for every later attempt of
+that request, and for no other request. Only a client's deliberate replay of
+an ended `retryable` request starts them over. Exclusions have no `until` in
+this part.
+
+The three numbers are `placement.json` keys (0 or absent: the defaults,
+unmeasured, design §9a): `{"spawn_backoff_seconds": 30,
+"spawn_backoff_max_seconds": 600, "spawn_wake_batch": 8}`.
+
+### Rolling back past parking
+
+`0018_spawn_parked.sql` only adds `park_reason`, `next_check_ms`,
+`failed_attempts` and `claim_result` (default `''`, 0, 0, `''`); an older hub neither reads nor writes
+them. A parked row is `status='accepted'` with `node_id IS NULL`, so an older
+hub's coordinator scan lists it and its bind CAS matches it: the older hub
+places it at once, without back-off or wake batch, and its GET shows
+`accepted`. Nothing is stranded and nothing starts twice. A row it binds keeps
+a stale `park_reason` that a newer hub ignores (a bound row never reads
+parked) and clears at its next bind. `TestOlderHubPlacesParkedRowsAsAccepted_t4661`
+runs those predicates against a parked row.
+
+**Roll back only with an empty spawn queue, and keep it empty.** The
+pre-parking hub's time limit (part 3, #587) ignores `claimed_host`,
+`claim_result` and a saved post-claim result. Past `expires_at` it gives up
+an attempt it reads as unstarted, which can include a node timeout after
+the job claim. It then frees the reservation while hk may still hold the
+job. A snapshot of claim-holding rows is not enough, so the gate is the
+whole queue, with every producer frozen:
+
+1. Restart the newer hub with `--spawn-rollback-drain`. The hub keeps
+   running and its coordinator keeps placing, parking, waking and expiring
+   queued requests. But no new spawn row can be created
+   (`claimSpawnReplacing` refuses every producer):
+   - `POST /v1/spawns` and `POST /v1/consults` answer 503
+     `spawn_rollback_drain`, the consult before it stores any intent;
+   - `POST /v1/jobs/escalate-author` refuses a new ladder stage
+     (`claim_refused`) before it touches the author pane, but a replay of a
+     step already staged still completes it;
+   - a quota-stop hand-off starts no successor;
+   - a consult creates, recovers or respawns no spawn (the consult fails).
+
+   Staged ladder steps already queued still settle. Do not SIGTERM-drain
+   yet: that stops the coordinator, and a parked row would never settle.
+2. Wait until no spawn row is nonterminal, any status included (`*_grant`
+   variants too), and no consult is open:
+
+   ```sql
+   SELECT request_id, job, status, claimed_host, expires_ms FROM spawn_operations
+   WHERE status NOT IN ('succeeded','failed','retryable','given_up','refused','cancelled');
+   SELECT id, state FROM consult_requests WHERE state IN ('queued','running');
+   ```
+
+   Each row must land, end, or be cancelled. Do not raise limits to get
+   past this step. Under the flag the hub logs this count at start and each
+   minute as `hub spawn rollback rows rollback_rows=N`
+   (`spawnRollbackBlockingRows`): the gate is `rollback_rows=0`.
+3. Wait for every spawned job that is still running to finish. On the older
+   hub, a running job's quota-stop would start a successor under part 3's
+   claim-unaware expiry, and that hub has no flag to stop it.
+4. Stop the newer hub ([hub-drain.md](hub-drain.md)) and re-run both queries
+   from step 2: they must still return nothing. Remove
+   `--spawn-rollback-drain` from the service command (the older binary
+   rejects the unknown flag and would restart-loop), reload the service
+   configuration, then start the older hub. Keep spawn submissions,
+   consults and author escalations stopped for as long as it runs, and roll
+   forward before reopening them.
 
 ### Rolling back past the time limit
 

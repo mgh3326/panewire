@@ -478,6 +478,8 @@ func dispatchPlacementHub(t *testing.T, config HubServerConfig, stateDir string,
 		app.Source = claimedHarnessSource{retrySource{now: app.Now()}}
 		return app, nil
 	}
+	// These tests are about the next host, not the back-off before it.
+	withoutSpawnBackoff(h)
 	return h
 }
 

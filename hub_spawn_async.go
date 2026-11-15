@@ -109,6 +109,10 @@ func (h *HubServer) handleSpawnSubmit(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 503, map[string]string{"error": "durable_store_required", "fix": "configure the hub inbox database before accepting spawns"})
 		return
 	}
+	if h.spawnRollbackDrain {
+		writeJSON(w, 503, map[string]string{"error": "spawn_rollback_drain", "fix": "the hub is draining its spawn queue for a rollback; submit again after it restarts without --spawn-rollback-drain"})
+		return
+	}
 	owner := spawn.Owner
 	if !validLaneReference(owner) {
 		writeJSON(w, 400, map[string]string{"error": "invalid_owner", "fix": "supply an existing lane name"})
@@ -242,6 +246,12 @@ func (h *HubServer) handleSpawnOperation(w http.ResponseWriter, r *http.Request)
 		writeJSON(w, 503, map[string]string{"error": "store_unavailable"})
 		return
 	}
+	// A parked row is an accepted one no candidate can take before its next
+	// check (hk 4661): it reads parked, with the reason and the check.
+	status, reason, nextCheckAt := spawnPublicStatus(task.Status), "", ""
+	if spawnParked(task, h.now()) {
+		status, reason, nextCheckAt = "parked", spawnParkPrimary(task.ParkReason), task.NextCheck.UTC().Format(time.RFC3339)
+	}
 	// Never expose the persisted brief, argv or submitting paths through status
 	// reads. A reason's refusal text may name a path on the executing node.
 	var startCondition *fleet.StartConditionResult
@@ -252,10 +262,12 @@ func (h *HubServer) handleSpawnOperation(w http.ResponseWriter, r *http.Request)
 		Job            string                      `json:"job_id"`
 		Request        string                      `json:"request_id"`
 		Status         string                      `json:"status"`
+		Reason         string                      `json:"reason,omitempty"`
+		NextCheckAt    string                      `json:"next_check_at,omitempty"`
 		ExpiresAt      string                      `json:"expires_at,omitempty"`
 		Result         hubSpawnOutcome             `json:"result"`
 		StartCondition *fleet.StartConditionResult `json:"start_condition,omitempty"`
-	}{task.Job, task.Request.RequestID, spawnPublicStatus(task.Status), spawnExpiresAt(task), task.Outcome, startCondition})
+	}{task.Job, task.Request.RequestID, status, reason, nextCheckAt, spawnExpiresAt(task), task.Outcome, startCondition})
 }
 
 // hubSpawnWorkerCount bounds placement work. Node I/O runs in a separate slot
@@ -362,7 +374,26 @@ func (h *HubServer) runSpawnCoordinator(parent context.Context) {
 	}
 	tick := time.NewTicker(2 * time.Second)
 	defer tick.Stop()
+	refreshSeen := h.quotaRefresh.completedCount.Load()
+	ticked := true
+	// Under a rollback drain the gate count is logged at once and each
+	// minute (wall clock: an elapsed interval).
+	var rollbackLogged time.Time
 	for {
+		// A finished quota refresh is a quota change for parked requests.
+		if count := h.quotaRefresh.completedCount.Load(); count != refreshSeen {
+			refreshSeen = count
+			// Noted, not kicked: this pass wakes it now.
+			h.spawnWakeMu.Lock()
+			h.markSpawnWakeLocked(true, spawnParkQuota)
+			h.spawnWakeMu.Unlock()
+		}
+		h.wakeParkedSpawns(ctx, ticked)
+		ticked = false
+		if h.spawnRollbackDrain && time.Since(rollbackLogged) >= time.Minute {
+			rollbackLogged = time.Now()
+			h.logSpawnRollbackRows(ctx)
+		}
 		if h.drain.admit() {
 			// Start conditions are checked first so a row released in this
 			// tick is scheduled by the scan below rather than the next one.
@@ -372,7 +403,7 @@ func (h *HubServer) runSpawnCoordinator(parent context.Context) {
 			seen := map[string]bool{}
 			position := spawnScanPosition{}
 			for {
-				tasks, next, err := h.inbox.store.pendingSpawnPage(ctx, position)
+				tasks, next, err := h.inbox.store.pendingSpawnPage(ctx, position, h.now().UTC())
 				if err != nil {
 					break
 				}
@@ -401,6 +432,7 @@ func (h *HubServer) runSpawnCoordinator(parent context.Context) {
 		case <-ctx.Done():
 			return
 		case <-tick.C:
+			ticked = true
 		case <-h.spawnKick:
 		}
 	}
@@ -490,6 +522,13 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 			outcome.Fix = spawnQueueWaitFix(task, h.now())
 		}
 		h.finishSpawnOutcome(task, outcome)
+		// A parked pass emitted no refusal event (App.Parks): its end at the
+		// limit is the one terminal spawn event (hk 4661).
+		if task.ParkReason != "" {
+			if ended, err := h.inbox.store.spawnTask(parent, task.Request.RequestID); err == nil && ended.Status == "given_up" {
+				h.emitFleet(fleetEvent{Kind: "spawn", Job: task.Job, RequestID: task.Request.RequestID, Outcome: "refused", Reason: "given_up", Detail: "park_reason=" + task.ParkReason})
+			}
+		}
 		if unsent {
 			return
 		}
@@ -634,6 +673,21 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 			request.Args = append(request.Args, "--override-reason", "verified-cleanup-retry")
 		}
 	}
+	// The same test as the park below, so a parked pass emits no terminal
+	// refusal event on every recheck.
+	parks := func(err error) bool {
+		// A claimed request may park on capacity too: at its limit the
+		// timeout ends it with the saved claim refusal (h.completeSpawn).
+		if err == nil || ctx.Err() != nil || task.Expires.IsZero() {
+			return false
+		}
+		if spawnClaimedAnswer(task, err) {
+			return false
+		}
+		return spawnParkReason(fleet.ErrorCode(err), err.Error()) != ""
+	}
+	app.Parks = parks
+	wakeBefore := h.spawnWakeSnapshot()
 	err = app.ExecuteSubmission(ctx, request)
 	if transport.bound {
 		return
@@ -651,6 +705,24 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 		refreshMu.Unlock()
 		task.RefreshWaits = h.noteSpawnRefreshWaits(task, waits)
 		if ctx.Err() == nil {
+			h.releasePlacementCount(task.Job)
+			return
+		}
+	}
+	// If every eligible harness was already refused, the node's last
+	// cleanup-confirmed refusal is the answer, not a selection error caused by
+	// excluding that same harness. Other placement errors retain their detail.
+	claimedAnswer := err != nil && ctx.Err() == nil && spawnClaimedAnswer(task, err)
+	// No candidate can take it now: a request with a limit is parked, not
+	// ended, and is placed again on an event or its next check (hk 4661).
+	if !claimedAnswer && parks(err) {
+		if reason := spawnParkReason(fleet.ErrorCode(err), err.Error()); reason != "" {
+			// A recognised no-candidate refusal never ends the request: a
+			// failed or ambiguous park write leaves it accepted for the next
+			// pass to park again.
+			if _, parkErr := h.parkSpawnTask(parent, task, reason, spawnRefusalLine(err.Error()), wakeBefore); parkErr != nil {
+				h.logger.Warn("hub spawn park not stored; retried next pass", "request_id", task.Request.RequestID, "reason", reason, "error", parkErr)
+			}
 			h.releasePlacementCount(task.Job)
 			return
 		}
@@ -682,14 +754,8 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 	if outcome.Host == "" {
 		outcome.Host = spawnPinnedHost(task)
 	}
-	// If every eligible harness was already refused, the node's last
-	// cleanup-confirmed refusal is the answer, not a selection error caused by
-	// excluding that same harness. Other placement errors retain their detail.
-	if err != nil && ctx.Err() == nil && task.ClaimedHost != "" && len(task.Exclusions) > 0 && task.Outcome.NodeResult {
-		code, _, _ := strings.Cut(err.Error(), ":")
-		if code == "role_no_candidate" {
-			outcome = task.Outcome
-		}
+	if claimedAnswer {
+		outcome = task.Outcome
 	}
 	if changed, _ := h.completeSpawn(parent, task, outcome); changed {
 		h.recordSpawnTrace(task, outcome)
@@ -949,6 +1015,11 @@ func spawnReplayPinsHost(outcome hubSpawnOutcome) bool {
 	if spawnOutcomeNotStarted(outcome) {
 		return false
 	}
+	// A timeout the hub wrote for an unsent attempt, or a node timeout before
+	// the claim stage, made no claim: it pins nothing (hk 4661).
+	if code, _, _ := strings.Cut(outcome.Reason, ": "); code == "timeout" && (!outcome.NodeResult || spawnStageBeforeJobClaim(outcome.Stage)) {
+		return false
+	}
 	return !spawnRefusalMovesOn(outcome.Reason, outcome.Stage)
 }
 
@@ -980,7 +1051,7 @@ func (t *directSpawnTransport) Spawn(ctx context.Context, req fleet.HubSpawnRequ
 	}
 	// Reapply saved refusals through the existing candidate loop. In particular,
 	// a launch-proof refusal first tries another harness on this same host;
-	// other refusals rule out the host for the rest of this attempt.
+	// other refusals rule out the host for the rest of this request (hk 4661: across its attempts).
 	for _, excluded := range t.task.Exclusions {
 		profileOnly := excluded.Reason == "launch_proof_failed" || t.task.ClaimedHost == excluded.Machine
 		if excluded.Machine == req.Machine && (!profileOnly || excluded.Profile == hubSpawnArg(req.Args, "-m")) {
@@ -1047,7 +1118,7 @@ func (t *directSpawnTransport) nextHostAfterRefusal(ctx context.Context, node hu
 	}
 	reason := spawnResultReason(result)
 	exclusion := hubSpawnExclusion{Machine: node.Machine, Profile: hubSpawnArg(node.Args, "-m"), Reason: reason, RC: result.RC}
-	task, err := t.h.inbox.store.unbindRefusedSpawn(ctx, t.task, exclusion, nil)
+	task, err := t.h.inbox.store.unbindRefusedSpawn(ctx, t.task, exclusion, nil, t.h.now().UTC())
 	if err != nil {
 		return true, err
 	}
@@ -1081,7 +1152,7 @@ func (t *directSpawnTransport) retryHarnessAfterClaim(ctx context.Context, node 
 		return false, nil
 	}
 	exclusion := hubSpawnExclusion{Machine: node.Machine, Profile: profile, Reason: reason, RC: result.RC}
-	task, err := t.h.inbox.store.unbindRefusedSpawn(ctx, t.task, exclusion, &outcome)
+	task, err := t.h.inbox.store.unbindRefusedSpawn(ctx, t.task, exclusion, &outcome, t.h.now().UTC())
 	if err != nil {
 		return true, err
 	}
@@ -1635,4 +1706,12 @@ func spawnResultFix(tail string) string {
 		return r
 	}, fleetEventRedact(fix))
 	return utf8PrefixWithin(strings.TrimSpace(fix), 512)
+}
+
+// spawnClaimedAnswer reports a role_no_candidate on a claimed host whose
+// harnesses were all refused: the node's last refusal is the answer. A pool
+// at its concurrency cap is capacity, not refusal, and parks instead.
+func spawnClaimedAnswer(task hubSpawnTask, err error) bool {
+	code, _, _ := strings.Cut(err.Error(), ":")
+	return task.ClaimedHost != "" && len(task.Exclusions) > 0 && task.Outcome.NodeResult && code == "role_no_candidate" && !strings.Contains(err.Error(), "concurrency cap")
 }
