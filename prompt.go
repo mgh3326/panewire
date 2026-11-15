@@ -852,9 +852,11 @@ func classifyPromptSubmission(harness, pre, screen, body string) (string, string
 	if result == "queued" {
 		// The banner is only this call's proof when the pane was not already
 		// queued before it: a queue that held another message would read as a
-		// submission of text that never reached the harness (hk 4810). Then
-		// keep looking for this call's own echo below.
-		if preResult, _ := classifySubmissionEvidence(harness, pre, head); preResult == "queued" {
+		// submission of text that never reached the harness (hk 4810). The
+		// banner is read directly, not through classifySubmissionEvidence, so a
+		// paste chip on the preflight screen cannot hide it (classify checks
+		// the chip first). Then keep looking for this call's own echo below.
+		if relayQueuedBanner(harness, pre) {
 			result, rule = "unproven", "queued_banner_presend"
 		}
 	}

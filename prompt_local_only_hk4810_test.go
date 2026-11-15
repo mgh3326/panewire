@@ -91,3 +91,31 @@ func TestPromptTargetGoneAtReResolveKeepsPlainRefusal_hk4810(t *testing.T) {
 		t.Fatalf("prompt requests=%d want 0", got)
 	}
 }
+
+// hk 4810: a paste chip on the preflight screen must not hide an already
+// present queue banner. classifySubmissionEvidence checks the chip first, so
+// banner detection for the pre-send snapshot is read directly; the post-send
+// screen (chip gone, same banner) is then still not this call's proof.
+func TestPromptPresendBannerBehindPasteChipIsNotArrivalProof_hk4810(t *testing.T) {
+	fixture := newHerdrFixture(t, promptFixtureSchema(false))
+	defer fixture.Close()
+	const banner = "Press up to edit queued messages\n"
+	reads := 0
+	fixture.On("agent.list", func() any {
+		return map[string]any{"agents": []any{map[string]any{"agent": "orch", "name": "orch", "label": "orch", "harness": "claude", "pane_id": "p1", "workspace_id": "w1", "cwd": "/work", "revision": 10, "agent_status": "working"}}}
+	})
+	fixture.On("agent.read", func() any {
+		reads++
+		if reads == 1 {
+			return map[string]any{"text": "assistant is working\n[Pasted text #1 +2 lines]\n" + banner, "revision": 10}
+		}
+		return map[string]any{"text": "assistant is working\n" + banner, "revision": 10}
+	})
+	fixture.On("agent.prompt", func() any { return map[string]any{"accepted": true} })
+	d, _ := startPromptDaemon(t, fixture)
+	defer d.Stop()
+
+	if got := panewire.RunCLI([]string{"prompt", "--from", "sender", "--to", "orch", "--file", promptFile(t), "--timeout", "300ms"}, panewire.CLIConfig{SocketPath: dSocket(d)}); got != panewire.ExitDeliveryFailure {
+		t.Fatalf("preflight chip over an existing queue banner exit=%d want %d", got, panewire.ExitDeliveryFailure)
+	}
+}
