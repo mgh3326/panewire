@@ -33,6 +33,9 @@ const (
 // file and one stored quota reading, all at a fixed clock.
 func fleetStatusTestHub(t *testing.T, now time.Time, logs io.Writer) *HubServer {
 	t.Helper()
+	// The golden band comes from the built-in pool order; a developer's policy
+	// path must not change it.
+	t.Setenv("PANEWIRE_POOL_POLICY", "")
 	hub, err := NewHubServer(HubServerConfig{
 		Tokens:          map[string]string{"operator": "operator-token", "node-a": "node-a-token", "node-b": "node-b-token"},
 		ReportRelayPath: r20LanesFile(t, `{"lanes":{"lane-a1":{"machine":"node-a","pane":"w1:p1"},"lane-a2":{"machine":"node-a","pane":"w1:p2"},"lane-b1":{"machine":"node-b","pane":"w2:p1"}}}`),
