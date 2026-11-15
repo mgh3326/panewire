@@ -34,7 +34,7 @@ import (
 // that pinned, deleted and receipted in between is not raced.
 //
 // Attempts are bounded per pass, so an hk outage costs at most
-// reportRepublishPerPass uploads and reportRepublishPerPass pin writes each
+// reportRepublishPerPass uploads and reportRepublishPerPass pin attempts each
 // pass, and a failed one is left for the next pass rather than retried at once.
 // The two budgets are separate: a pin hk will not answer can never hold the
 // upload another job needs. A record hk keeps answering "not completed", or
@@ -43,10 +43,10 @@ import (
 // refusal is logged once per reason: the sweep runs for the daemon's life and a
 // report that cannot be published now would otherwise log every pass.
 
-// reportRepublishPerPass bounds the hk writes one sweep pass makes: this many
-// report uploads and, separately, this many pin writes. A node catching up on a
-// backlog finishes it over the next passes, and an hk outage cannot hold a pass
-// open past this many upload timeouts.
+// reportRepublishPerPass bounds one sweep pass: this many report uploads and,
+// separately, this many pin attempts that write or that hk did not answer. A
+// node catching up on a backlog finishes it over the next passes, and an hk
+// outage cannot hold a pass open past this many hk timeouts.
 const reportRepublishPerPass = 5
 
 // reportPinAttempts is how many consecutive passes a pin hk did not answer is
@@ -160,10 +160,11 @@ func (s *TaskPaneSweeper) reportPinDue(receipts doneReceipts, job, sha string) b
 }
 
 // reportPinCost is what one pin attempt charged the pass: an hk write, or an
-// attempt hk did not answer (which may have written). A read that answered
-// costs nothing, since it cannot hold the pass open the way an upload does.
-func reportPinCost(res pinResult) int {
-	if res.wrote {
+// attempt hk did not answer, which may have been a read that waited on hk's
+// timeout. Only a read that answered without writing is free: it is a fact, not
+// a wait, so it cannot hold the pass open the way an upload does.
+func reportPinCost(res pinResult, err error) int {
+	if err != nil || res.wrote {
 		return 1
 	}
 	return 0
@@ -332,7 +333,7 @@ func (s *TaskPaneSweeper) finishReport(ctx context.Context, a *App, id string, r
 	case err != nil:
 		s.reportPinUnanswered(id, rep.sha)
 		s.reportKept(id, rep.sha, rep.path, "pin_failed")
-		return reportPinCost(res)
+		return reportPinCost(res, err)
 	case res.outcome == pinAbsent:
 		// The record is not a completed one: no receipt, as step 3 of `done`
 		// leaves it, and this sweep cannot make it completed. Every pass would
@@ -342,10 +343,10 @@ func (s *TaskPaneSweeper) finishReport(ctx context.Context, a *App, id string, r
 	}
 	if err := a.event(ctx, id, eventReportPinned, map[string]any{"report_sha256": rep.sha, "document": res.document, "outcome": res.outcome}); err != nil {
 		s.reportKept(id, rep.sha, rep.path, "pin_receipt_failed")
-		return reportPinCost(res)
+		return reportPinCost(res, nil)
 	}
 	s.reportPinSettled(id, rep.sha)
-	return reportPinCost(res)
+	return reportPinCost(res, nil)
 }
 
 // reportRepublished logs one republished report, once.

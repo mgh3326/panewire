@@ -583,3 +583,35 @@ func TestReportRepublishLogsTheReceiptNotTheUpload(t *testing.T) {
 		}
 	}
 }
+
+// A pin attempt hk does not answer charges the pass: during an outage, due pins
+// cannot each wait on hk's timeout past the pass's bound (hk 4831 review).
+func TestReportRepublishChargesAnUnansweredPin(t *testing.T) {
+	ctx := context.Background()
+	a, _ := republishFixture(t)
+	var ids []string
+	for i := range 7 {
+		id := fmt.Sprintf("p%d", i)
+		seedDoneJobNamed(t, a, id)
+		body := "pin " + id + "\n"
+		path := reportFile(t, a, id, body)
+		sha := reportDigest([]byte(body))
+		key := reportDocumentKey(id, sha)
+		putEvent(t, a, id, "job.completed", map[string]any{"report": path, "report_sha256": sha, "document": key})
+		putEvent(t, a, id, "job.report_published", map[string]any{"report_sha256": sha, "document": key})
+		putEvent(t, a, id, "job.record_settled", map[string]any{"report_sha256": sha, "pinned": false})
+		ids = append(ids, id)
+	}
+	a.JobStore.(*fakeJobStore).getErr = errors.New("hk unreachable")
+	s, lines := loggingSweeper()
+	if e := s.RepublishReports(ctx, a); e != nil {
+		t.Fatal(e)
+	}
+	reads := 0
+	for _, id := range ids {
+		reads += storeCalls(a, "get "+id)
+	}
+	if reads != reportRepublishPerPass {
+		t.Fatalf("the pass read %d of %d due pins, want the bound of %d: lines=%q", reads, len(ids), reportRepublishPerPass, *lines)
+	}
+}

@@ -127,7 +127,8 @@ A report whose file no longer hashes to the announced sha256 is left alone with
 round that only a new `done` announces, and the pass never pins bytes no
 completion named. A file that is gone is left with `reason=report_missing`. A
 pin write hk did not answer is repeated by a later pass. At most five uploads
-and, separately, five pin writes run per pass, so a pin hk will not answer can
+and, separately, five pin attempts that write or that hk does not answer run per
+pass — a read that answered costs nothing — so a pin hk will not answer can
 never hold the upload another job needs; after three unanswered pin attempts,
 and at once for a record hk answers as not completed, the report waits twelve
 passes between probes rather than holding a pin slot on every one. Each
