@@ -378,6 +378,16 @@ refuses when either list still names `pane_id` or an agent row still names
 check needs only the agent list. Only when both proofs hold does it write
 `{"state":"lost"}` to handoffkeep.
 
+`end_reason` `reviewer_result_posted` changes the proofs (hk 4684, see
+[hub-spawn-operations.md](hub-spawn-operations.md#ending-a-reviewer-job-that-posted-a-result)).
+The reviewer's own result stands in for the pane proof, because its pane is
+still open when the hub ends the job and the node's ended-job sweep closes it
+afterwards. The node still applies the `job.completed` and newer-claim checks,
+reads neither herdr list, and refuses unless the ledger names role `reviewer`,
+no quota stop is announced (`job.lost` `quota_stop`, not final) or pending
+(`job.quota_stop_intent`), and the job directory holds a findings object that is
+not JSON `null` or a `report.md`.
+
 | `outcome` | Meaning |
 | --- | --- |
 | `lost` | The record was written lost. |
@@ -387,6 +397,9 @@ check needs only the agent list. Only when both proofs hold does it write
 | `completed` | the local ledger holds a `job.completed` event; nothing is written. |
 | `newer-claim` | the local ledger holds a `job.reclaim` event; nothing is written. |
 | `ledger_missing` | the job dir or its `events/` is gone, so the ledger cannot prove the attempt; nothing is written. |
+| `result-missing` | `reviewer_result_posted` only: the job directory holds no findings object and no report; nothing is written. |
+| `quota-stopped` | `reviewer_result_posted` only: a quota stop is announced or pending, so the hub's hand-over owns the record; nothing is written. |
+| `not-reviewer` | `reviewer_result_posted` only: the ledger names no `reviewer` role; nothing is written. |
 
 A missing job dir or `events/` is a ledger that is unknown, not an empty one, so
 it answers `ledger_missing` and the node never writes `lost` over a record it

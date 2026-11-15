@@ -17,8 +17,9 @@ import (
 // daemon-started `mwr-*` reviewer) otherwise leaves an idle pane, a live job
 // record and a lane row behind, and the node's ended-job sweep never sees it:
 // the lane cap fills and new lanes are refused `lane_quota_exceeded` (hk 4658).
-// The unattended pass that ends such a reviewer on the hub's own schedule moved
-// to hk 4684; this file keeps the submission path only.
+// The unattended pass that ends such a reviewer's record once it posts a
+// result is hub_spawn_reviewer_end.go (hk 4684); this file is the submission
+// path only, and it is the one that closes a pane.
 //
 // An idle pane is not proof that the work ended: a reviewer that asked a
 // question is idle too. The close therefore carries the job id, and the node

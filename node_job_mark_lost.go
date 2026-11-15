@@ -30,6 +30,13 @@ const (
 	// nodeJobMarkLostLedgerMissing: the job dir or its events/ is gone, so the
 	// local ledger cannot prove the attempt is not completed (hk 3685).
 	nodeJobMarkLostLedgerMissing = "ledger_missing"
+
+	// The three refusals of the reviewer_result_posted end (hk 4684): the node
+	// found no posted result, a quota stop is announced for the hub's
+	// hand-over, or the job's ledger names a role other than reviewer.
+	nodeJobMarkLostResultMissing = "result-missing"
+	nodeJobMarkLostQuotaStopped  = "quota-stopped"
+	nodeJobMarkLostNotReviewer   = "not-reviewer"
 )
 
 type nodeJobMarkLostArgs struct {
@@ -75,7 +82,8 @@ func validNodeJobMarkLostArgs(args nodeJobMarkLostArgs) bool {
 func validNodeJobMarkLostResult(result nodeJobMarkLostResult) bool {
 	switch result.Outcome {
 	case nodeJobMarkLostLost, nodeJobMarkLostPaneListed, nodeJobMarkLostLabelListed,
-		nodeJobMarkLostPanesUnknown, nodeJobMarkLostCompleted, nodeJobMarkLostNewerClaim, nodeJobMarkLostLedgerMissing:
+		nodeJobMarkLostPanesUnknown, nodeJobMarkLostCompleted, nodeJobMarkLostNewerClaim, nodeJobMarkLostLedgerMissing,
+		nodeJobMarkLostResultMissing, nodeJobMarkLostQuotaStopped, nodeJobMarkLostNotReviewer:
 		return true
 	}
 	return false
@@ -250,26 +258,38 @@ func (client *HubClient) nodeJobMarkLost(ctx context.Context, args nodeJobMarkLo
 	case ledger.newerClaim:
 		return nodeJobMarkLostResult{Outcome: nodeJobMarkLostNewerClaim}, ""
 	}
-	session := client.herdrSessionFor(args.Job, args.PaneID)
-	agents, code := client.nodeAgentsListInSession(ctx, session)
-	if code != "" {
-		return nil, code
-	}
-	for _, row := range agents.Agents {
-		if args.PaneID != "" && row.PaneID == args.PaneID {
-			return nodeJobMarkLostResult{Outcome: nodeJobMarkLostPaneListed}, ""
+	if args.EndReason == reviewerResultPosted {
+		// The reviewer's own result is the proof that its work ended, so its
+		// pane may still be open: the node's ended-job pane sweep closes it
+		// once this record is terminal (docs/pane-sweep.md).
+		if outcome, code := client.reviewerResultPostedProof(args.Job); outcome != "" || code != "" {
+			if code != "" {
+				return nil, code
+			}
+			return nodeJobMarkLostResult{Outcome: outcome}, ""
 		}
-		if args.Label != "" && row.Name == args.Label {
-			return nodeJobMarkLostResult{Outcome: nodeJobMarkLostLabelListed}, ""
+	} else {
+		session := client.herdrSessionFor(args.Job, args.PaneID)
+		agents, code := client.nodeAgentsListInSession(ctx, session)
+		if code != "" {
+			return nil, code
 		}
-	}
-	for _, row := range agents.Panes {
-		if args.PaneID != "" && row.PaneID == args.PaneID {
-			return nodeJobMarkLostResult{Outcome: nodeJobMarkLostPaneListed}, ""
+		for _, row := range agents.Agents {
+			if args.PaneID != "" && row.PaneID == args.PaneID {
+				return nodeJobMarkLostResult{Outcome: nodeJobMarkLostPaneListed}, ""
+			}
+			if args.Label != "" && row.Name == args.Label {
+				return nodeJobMarkLostResult{Outcome: nodeJobMarkLostLabelListed}, ""
+			}
 		}
-	}
-	if args.PaneID != "" && !agents.PanesOK {
-		return nodeJobMarkLostResult{Outcome: nodeJobMarkLostPanesUnknown}, ""
+		for _, row := range agents.Panes {
+			if args.PaneID != "" && row.PaneID == args.PaneID {
+				return nodeJobMarkLostResult{Outcome: nodeJobMarkLostPaneListed}, ""
+			}
+		}
+		if args.PaneID != "" && !agents.PanesOK {
+			return nodeJobMarkLostResult{Outcome: nodeJobMarkLostPanesUnknown}, ""
+		}
 	}
 	store, err := client.nodeJobStoreForCommand()
 	if err != nil {
