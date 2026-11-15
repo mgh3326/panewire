@@ -18,7 +18,6 @@ type stallSafetyDetails struct {
 	Agent   HerdrAgentState `json:"agent"`
 	Stop    quotastop.Stop  `json:"stop"`
 	Quota   bool            `json:"quota"`
-	WakeSeq int64           `json:"wake_seq"`
 	Attempt string          `json:"attempt"`
 }
 
@@ -134,8 +133,18 @@ func newStallSafetyManager(q *quotaStopManager, idle *idleWakeManager, limit tim
 		if err != nil {
 			return "", err
 		}
-		if seq != detail.WakeSeq || status != detail.Agent.Status {
+		if status == "working" || status == "unknown" {
 			return "pane state changed", nil
+		}
+		episodeSeq, active, err := m.state.episodeSequence(ctx, r.job, r.pane, r.attempt, r.since)
+		if err != nil {
+			return "", err
+		}
+		if !active {
+			return "inactivity episode ended", nil
+		}
+		if seq != episodeSeq {
+			return "", fmt.Errorf("waiting for current pane observation")
 		}
 		if detail.Quota {
 			job := current
@@ -144,9 +153,9 @@ func newStallSafetyManager(q *quotaStopManager, idle *idleWakeManager, limit tim
 			if role == "reviewer" {
 				return "reviewer quota stop passed to watcher", fleet.RecordReviewerQuotaIntent(ctx, filepath.Join(q.root, "jobs"), job.JobID, r.pane, detail.Stop)
 			}
-			candidate := idleWakeCandidate{PaneID: r.pane, WorkspaceID: detail.Agent.WorkspaceID, Label: detail.Agent.Label, Status: detail.Agent.Status, EventID: "stall:" + key, JobID: job.JobID, OwnerLane: job.OwnerLane}
+			candidate := idleWakeCandidate{PaneID: r.pane, WorkspaceID: detail.Agent.WorkspaceID, Label: detail.Agent.Label, Status: status, EventID: "stall:" + key, JobID: job.JobID, OwnerLane: job.OwnerLane}
 			q.store.mu.Lock()
-			_, err := q.store.db.ExecContext(ctx, `INSERT OR IGNORE INTO quota_stall_wakes(event_id,pane_id,state_change_seq) VALUES(?,?,?)`, candidate.EventID, r.pane, detail.WakeSeq)
+			_, err := q.store.db.ExecContext(ctx, `INSERT OR IGNORE INTO quota_stall_wakes(event_id,pane_id,state_change_seq) VALUES(?,?,?)`, candidate.EventID, r.pane, seq)
 			q.store.mu.Unlock()
 			if err != nil {
 				return "", err
@@ -215,7 +224,7 @@ func (m *stallSafetyManager) scan(ctx context.Context, agents []HerdrAgentState,
 		}
 		stop, quota := m.detect(readCtx, job.JobID, agent, screen, explanation, now)
 		cancel()
-		details, err := json.Marshal(stallSafetyDetails{Job: job, Agent: agent, Stop: stop, Quota: quota, WakeSeq: seq, Attempt: attempt})
+		details, err := json.Marshal(stallSafetyDetails{Job: job, Agent: agent, Stop: stop, Quota: quota, Attempt: attempt})
 		if err != nil {
 			return err
 		}
@@ -263,10 +272,15 @@ func (m *stallSafetyManager) drain(ctx context.Context, now time.Time) error {
 					return err
 				}
 				r.actionDone = 1
+				r.hkDone = 0
 			}
 		}
-		if r.hkDone == 0 && r.actionDone != 0 {
-			body := fmt.Sprintf("job: %s\npane: %s\naction: %s\nherdr explanation:\n%s\nscreen:\n%s\n", r.job, r.pane, r.actionResult, r.explanation, r.screen)
+		if r.hkDone == 0 {
+			action := r.actionResult
+			if action == "" {
+				action = "pending; delivery will be retried"
+			}
+			body := fmt.Sprintf("job: %s\npane: %s\naction: %s\nherdr explanation:\n%s\nscreen:\n%s\n", r.job, r.pane, action, r.explanation, r.screen)
 			if err := m.record(ctx, "stall-examination/"+key, r.job, body); err == nil {
 				if err := m.mark(ctx, r, "hk_done"); err != nil {
 					return err
@@ -283,6 +297,11 @@ func (m *stallSafetyManager) mark(ctx context.Context, r stallSafetyExamination,
 	}
 	m.state.store.mu.Lock()
 	defer m.state.store.mu.Unlock()
-	_, err := m.state.store.db.ExecContext(ctx, `UPDATE stall_safety_examinations SET `+column+`=1,action_result=? WHERE job=? AND pane=? AND attempt=? AND since_ms=?`, r.actionResult, r.job, r.pane, r.attempt, r.since)
+	query := `UPDATE stall_safety_examinations SET hk_done=1 WHERE job=? AND pane=? AND attempt=? AND since_ms=?`
+	if column == "action_done" {
+		_, err := m.state.store.db.ExecContext(ctx, `UPDATE stall_safety_examinations SET action_done=1,action_result=?,hk_done=0 WHERE job=? AND pane=? AND attempt=? AND since_ms=?`, r.actionResult, r.job, r.pane, r.attempt, r.since)
+		return err
+	}
+	_, err := m.state.store.db.ExecContext(ctx, query, r.job, r.pane, r.attempt, r.since)
 	return err
 }

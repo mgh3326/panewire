@@ -411,6 +411,12 @@ func (d *Daemon) eventLoop(ctx context.Context) {
 				if d.idleWake != nil && ev.AgentStatus != "" && (ev.Kind == "pane.agent_status_changed" || ev.Kind == "pane_agent_status_changed") {
 					if err := d.idleWake.Observe(ctx, HerdrAgentState{PaneID: ev.PaneID, WorkspaceID: ev.WorkspaceID, Status: ev.AgentStatus, Revision: ev.Revision}, time.Now().UTC()); err != nil {
 						d.cfg.Logger.Warn("idle-wake observation rejected")
+					} else if ev.AgentStatus == "working" && d.stallSafety != nil {
+						if _, status, err := d.stallSafety.sequence(ctx, ev.PaneID); err == nil && status == "working" {
+							if err := d.stallSafety.state.markWorking(ctx, ev.PaneID); err != nil {
+								d.cfg.Logger.Warn("stall safety working state was not recorded", "error", err)
+							}
+						}
 					}
 				}
 				// output_matched is a wake signal only: the payload carries no

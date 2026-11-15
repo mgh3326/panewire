@@ -44,7 +44,18 @@ func TestStallSafetyEpisode(t *testing.T) {
 	if due, err := state.observe(ctx, "job", "pane", "attempt-1", false, false, 1, start.Add(2*time.Hour), 30*time.Minute); err != nil || due {
 		t.Fatalf("repeat: due=%v err=%v", due, err)
 	}
-	if _, err := state.observe(ctx, "job", "pane", "attempt-1", true, false, 1, start.Add(3*time.Hour), 30*time.Minute); err != nil {
+	for _, tc := range []struct {
+		seq int64
+		at  time.Time
+	}{
+		{2, start.Add(2*time.Hour + time.Minute)},
+		{3, start.Add(2*time.Hour + 32*time.Minute)},
+	} {
+		if due, err := state.observe(ctx, "job", "pane", "attempt-1", false, false, tc.seq, tc.at, 30*time.Minute); err != nil || due {
+			t.Fatalf("non-working transition: due=%v err=%v", due, err)
+		}
+	}
+	if err := state.markWorking(ctx, "pane"); err != nil {
 		t.Fatal(err)
 	}
 	var screen, explanation string

@@ -55,7 +55,7 @@ func stallSafetyWatcherJournal(t *testing.T, rig *roleStopRig) {
 }
 
 func TestStallSafetyActiveJobExamination(t *testing.T) {
-	for _, mode := range []string{"idle", "child", "quota", "retry", "changed", "ready"} {
+	for _, mode := range []string{"idle", "child", "quota", "retry", "action_retry", "changed", "ready", "nonworking"} {
 		t.Run(mode, func(t *testing.T) {
 			rig := newRoleStopRig(t, "implementer", time.Hour, `{"tasks":[{"priority":1,"expected":"4h","refs":{"job_id":"job-active"}}]}`)
 			stallSafetyWatcherJournal(t, rig)
@@ -78,6 +78,17 @@ func TestStallSafetyActiveJobExamination(t *testing.T) {
 			} else if _, _, err := m.signalled(ctx, job); err != nil {
 				t.Fatalf("watcher journal: %v", err)
 			}
+			if mode == "action_retry" {
+				act := m.act
+				attempts := 0
+				m.act = func(ctx context.Context, r stallSafetyExamination, d stallSafetyDetails, key string, at time.Time) (string, error) {
+					attempts++
+					if attempts == 1 {
+						return "", errors.New("temporary delivery failure")
+					}
+					return act(ctx, r, d, key, at)
+				}
+			}
 			signalled := false
 			watcherSignal := m.signalled
 			m.signalled = func(ctx context.Context, job HubActiveJob) (string, bool, error) {
@@ -99,6 +110,9 @@ func TestStallSafetyActiveJobExamination(t *testing.T) {
 				if mode == "changed" {
 					rig.observe("working", 2, rig.now.Add(31*time.Minute))
 				}
+				if mode == "nonworking" {
+					rig.observe("blocked", 2, rig.now.Add(31*time.Minute))
+				}
 				if mode == "ready" {
 					signalled = true
 				}
@@ -110,7 +124,10 @@ func TestStallSafetyActiveJobExamination(t *testing.T) {
 				return stop, ok
 			}
 			agent := HerdrAgentState{PaneID: "workspace:pane-1", WorkspaceID: "workspace", Label: "worker-synthetic", Status: "idle", Harness: "codex"}
-			for _, at := range []time.Time{rig.now, rig.now.Add(31 * time.Minute), rig.now.Add(32 * time.Minute)} {
+			for index, at := range []time.Time{rig.now, rig.now.Add(31 * time.Minute), rig.now.Add(32 * time.Minute)} {
+				if mode == "nonworking" && index == 2 {
+					agent.Status = "blocked"
+				}
 				if err := m.scan(ctx, []HerdrAgentState{agent}, at); err != nil {
 					t.Fatal(err)
 				}
@@ -122,13 +139,19 @@ func TestStallSafetyActiveJobExamination(t *testing.T) {
 				return
 			}
 			wantNotes := 1
-			if mode == "retry" {
+			if mode == "retry" || mode == "action_retry" || mode == "nonworking" {
 				wantNotes = 2
 			}
 			if reads != 1 || len(notes) != wantNotes || !strings.Contains(notes[0], "job-active") {
 				t.Fatalf("reads=%d notes=%v", reads, notes)
 			}
-			if mode == "idle" || mode == "retry" {
+			if mode == "action_retry" && (!strings.Contains(notes[0], "pending") || !strings.Contains(notes[1], "blocked event recorded")) {
+				t.Fatalf("action retry records=%v", notes)
+			}
+			if wantNotes == 2 && strings.Fields(notes[0])[0] != strings.Fields(notes[1])[0] {
+				t.Fatalf("retry changed hk document key")
+			}
+			if mode == "idle" || mode == "retry" || mode == "action_retry" || mode == "nonworking" {
 				if len(rig.owner) != 1 || rig.owner[0].NotifyType != "blocked" || !strings.Contains(rig.owner[0].Text, "last screen lines") || !validLaneEventText(rig.owner[0].Text) {
 					t.Fatalf("owner events=%+v", rig.owner)
 				}

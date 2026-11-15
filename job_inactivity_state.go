@@ -47,11 +47,33 @@ func (s *stallSafetyState) observe(ctx context.Context, job, pane, attempt strin
 	if err != nil {
 		return false, err
 	}
-	if seq != previousSeq || attempt != previousAttempt {
+	if attempt != previousAttempt || (seq != previousSeq && examined == 0) {
 		_, err := s.store.db.ExecContext(ctx, `UPDATE stall_safety_episodes SET attempt=?,since_ms=?,state_seq=?,examined=0 WHERE job=? AND pane=?`, attempt, now.UnixMilli(), seq, job, pane)
 		return false, err
 	}
+	if seq != previousSeq {
+		_, err := s.store.db.ExecContext(ctx, `UPDATE stall_safety_episodes SET state_seq=? WHERE job=? AND pane=?`, seq, job, pane)
+		return false, err
+	}
 	return examined == 0 && now.After(time.UnixMilli(since).Add(limit)), nil
+}
+
+func (s *stallSafetyState) markWorking(ctx context.Context, pane string) error {
+	s.store.mu.Lock()
+	defer s.store.mu.Unlock()
+	_, err := s.store.db.ExecContext(ctx, `DELETE FROM stall_safety_episodes WHERE pane=?`, pane)
+	return err
+}
+
+func (s *stallSafetyState) episodeSequence(ctx context.Context, job, pane, attempt string, since int64) (int64, bool, error) {
+	s.store.mu.Lock()
+	defer s.store.mu.Unlock()
+	var seq int64
+	err := s.store.db.QueryRowContext(ctx, `SELECT state_seq FROM stall_safety_episodes WHERE job=? AND pane=? AND attempt=? AND since_ms=? AND examined=1`, job, pane, attempt, since).Scan(&seq)
+	if err == sql.ErrNoRows {
+		return 0, false, nil
+	}
+	return seq, err == nil, err
 }
 
 // recordExamination saves the bounded, redacted evidence before publishing any
