@@ -64,3 +64,21 @@ func TestCreditWindowOfAgreesWithCreditState(t *testing.T) {
 		})
 	}
 }
+
+// A pool-level reading names no model, so the free set must be judged by one
+// of the models it names; otherwise devin's model-scoped free rungs could
+// never make the pool read free.
+func TestStatusBandFreePoolUsesItsFreeSet(t *testing.T) {
+	t.Setenv("PANEWIRE_POOL_POLICY", "")
+	policy, err := LoadPoolPolicy("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC)
+	if got := StatusBand(policy, "devin", "spend", false, nil, now); got != "free" {
+		t.Fatalf("devin band = %q, want free", got)
+	}
+	if got := StatusBand(policy, "claude", "spend", false, nil, now); got != "unknown" {
+		t.Fatalf("claude without windows = %q, want unknown", got)
+	}
+}

@@ -55,8 +55,8 @@ func fleetStatusTestHub(t *testing.T, now time.Time, logs io.Writer) *HubServer 
 		Host: "node-a", Kind: fleetStateKindQuota, Key: fleetStatusTestAccount,
 		MeasuredAt: now.Add(-2 * time.Minute), ReceivedAt: now.Add(-2 * time.Minute),
 		Quota: &FleetStateQuota{AccountKey: fleetStatusTestAccount, Pool: "claude", Buckets: []FleetStateBucket{
-			{Window: "5h", UsedPct: new(float64(41)), ResetsAt: now.Add(3 * time.Hour).Format(time.RFC3339)},
-			{Window: "7d", UsedPct: new(float64(12)), ResetsAt: now.Add(4 * 24 * time.Hour).Format(time.RFC3339)},
+			{Window: "5h", UsedPct: new(float64(41)), ResetsAt: now.Add(3 * time.Hour).Format(time.RFC3339), Scope: "account"},
+			{Window: "7d", UsedPct: new(float64(12)), ResetsAt: now.Add(4 * 24 * time.Hour).Format(time.RFC3339), Scope: "account"},
 		}},
 	}, time.Minute)
 	hub.fleetStatusPlanFn = func(context.Context) []fleet.StatusPlan {
@@ -200,6 +200,55 @@ func TestFleetStatusDocumentBounded(t *testing.T) {
 	}
 	if len(body) > fleetStatusMaxBytes {
 		t.Fatalf("body %d bytes, want <= %d", len(body), fleetStatusMaxBytes)
+	}
+}
+
+// A pool the operator's admission policy excludes must read excluded, not
+// ranked or free; the band is the class placement refuses it under. A reading
+// the gate would reject (an already-reset or out-of-range window) reads
+// unknown, never more usable than placement.
+func TestFleetStatusBandFollowsPlacement(t *testing.T) {
+	now, _ := time.Parse(time.RFC3339, fleetStatusTestNow)
+	hub := fleetStatusTestHub(t, now, io.Discard)
+	config := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(config, []byte("[pools.claude]\nclass = \"exclude\"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PANEWIRE_CONFIG", config)
+	rows := hub.fleetStatusQuota(now, nil)
+	if len(rows) != 1 || rows[0].Band != "excluded" {
+		t.Fatalf("rows = %+v, want the excluded claude band", rows)
+	}
+
+	// A second account whose only window already reset is not a usable
+	// reading: the gate refuses it, so the band is unknown.
+	resetKey := "commandcode:00000000000000ff"
+	hub.stateStore().publish(FleetStateMessage{
+		Host: "node-a", Kind: fleetStateKindQuota, Key: resetKey,
+		MeasuredAt: now, ReceivedAt: now,
+		Quota: &FleetStateQuota{AccountKey: resetKey, Pool: "commandcode", Buckets: []FleetStateBucket{
+			{Window: "5h", UsedPct: new(float64(10)), ResetsAt: now.Add(-time.Hour).Format(time.RFC3339), Scope: "account"},
+		}},
+	}, 0)
+	rows = hub.fleetStatusQuota(now, nil)
+	for _, row := range rows {
+		if row.Account == resetKey && row.Band != "unknown" {
+			t.Fatalf("already-reset reading band = %q, want unknown", row.Band)
+		}
+	}
+}
+
+// The freshness window is the fleet config's, the same one the spawn gate
+// uses; an operator override must not leave a stale reading marked fresh.
+func TestFleetStatusFreshTTLUsesFleetConfig(t *testing.T) {
+	now, _ := time.Parse(time.RFC3339, fleetStatusTestNow)
+	hub := fleetStatusTestHub(t, now, io.Discard)
+	app := &fleet.App{Config: fleet.Config{Quota: map[string]any{
+		"pool_fresh_ttl_s": map[string]any{"claude": int64(700)},
+	}}}
+	rows := hub.fleetStatusQuota(now, app)
+	if len(rows) != 1 || rows[0].FreshTTLS != 700 {
+		t.Fatalf("rows = %+v, want fresh_ttl_s 700 from the fleet config", rows)
 	}
 }
 

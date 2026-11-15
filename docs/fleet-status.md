@@ -52,21 +52,27 @@ stale merely because its value did not change.
 ## Freshness
 
 `fresh` applies the shared quota cache's rule: the reading is fresh when its
-age is at least −1 minute and at most `fresh_ttl_s`. The hub applies the
-defaults (`claude` 900 s, every other pool 300 s) because the fleet state
-message does not carry a per-consumer TTL; `fresh_ttl_s` travels with the row
-so the page says how stale is stale. A reading that fails the rule is still
-published, with `fresh: false`.
+age is at least −1 minute and at most `fresh_ttl_s`. The hub takes
+`fresh_ttl_s` from its own fleet config (`quota.pool_fresh_ttl_s[pool]`, else
+`quota.fresh_ttl_s`), the same window a spawn gate reads, so the label cannot
+disagree with placement; when no config or fleet App is available it uses the
+defaults (`claude` 900 s, every other pool 300 s). `fresh_ttl_s` travels with
+the row so the page says how stale is stale. A reading that fails the rule is
+still published, with `fresh: false`.
 
 ## Band and tier
 
 `band` and the plan's `tier` are the pool-order selection bands
-(`internal/fleet/pool-order.json`): `free` for a pool with a free set,
-`credit` for a credit pool, `waste` when the reading's longest window is
-projected below the policy's waste threshold, `excluded` for a pool the policy
-excludes, else `ranked`. They are computed from the stored window readings with
-the same reduction selection uses, so a stale reading keeps its band but says
-`fresh: false`.
+(`internal/fleet/pool-order.json`): `free` for a pool with a free set, `credit`
+for a credit pool, `excluded` for a pool the operator's admission policy
+excludes, `waste` when the reading's longest window is projected below the
+policy's waste threshold, else `ranked`. The hub computes them with
+`fleet.StatusBand` — the same function `panewire quota status` uses — over the
+reading's windows and the pool's admission class, so an invalid, group-scoped
+or stale reading cannot be labeled more usable than placement would judge it.
+`unknown` means the reading gives no tier (stale, invalid, preserved by the
+admission policy, or a band that could not be read). A stale reading keeps its
+row but reports `fresh: false`.
 
 ## Plan
 

@@ -313,6 +313,12 @@ func (a *App) sharedFreshTTL(pool string) time.Duration {
 	return a.placementTTL("fresh_ttl_s", 300)
 }
 
+// SharedFreshTTL is the freshness window this App's config applies to one
+// pool's shared quota reading (sharedFreshTTL). A consumer that labels a
+// stored reading as fresh or stale uses this so its label cannot disagree with
+// the spawn gate on the same config.
+func (a *App) SharedFreshTTL(pool string) time.Duration { return a.sharedFreshTTL(pool) }
+
 // accountPool is the pool part of an account key ("claude:<fp>" -> "claude").
 func accountPool(key string) string {
 	pool, _, _ := strings.Cut(key, ":")

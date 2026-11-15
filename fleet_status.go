@@ -146,14 +146,30 @@ func (h *HubServer) fleetStatusWrite(ctx context.Context, body string) error {
 // values, and the plan is a read-only dry run.
 func (h *HubServer) fleetStatusDocument(ctx context.Context, now time.Time) fleetStatusDoc {
 	routes := loadReportRelayRoutes(h.reportRelayPath)
+	app := h.fleetStatusApp()
 	doc := fleetStatusDoc{
 		V:     fleetStatusVersion,
 		At:    now,
 		Hosts: h.fleetStatusHosts(routes),
-		Quota: h.fleetStatusQuota(now),
-		Plan:  h.fleetStatusPlansNow(ctx),
+		Quota: h.fleetStatusQuota(now, app),
+		Plan:  h.fleetStatusPlansNow(ctx, app),
 	}
 	return doc
+}
+
+// fleetStatusApp builds the one fleet App a cycle shares between the quota
+// labels and the plan: the App carries the operator's config, so the freshness
+// window and selection inputs are the ones a spawn would use. Tests that
+// replace the plan seam get no App, which also keeps them off the host config.
+func (h *HubServer) fleetStatusApp() *fleet.App {
+	if h.fleetStatusPlanFn != nil {
+		return nil
+	}
+	app, err := h.newSpawnApp(io.Discard, io.Discard)
+	if err != nil {
+		return nil
+	}
+	return app
 }
 
 // fleetStatusHosts lists every host the hub knows: a node record (a retained
@@ -192,8 +208,26 @@ func (h *HubServer) fleetStatusHosts(routes map[string]reportRelayRoute) []fleet
 // fleetStatusQuota lists one row per (host, account) reading the hub holds,
 // oldest reading of the same account last replaced in the state store. Rows
 // sort by host then account so the document is stable across cycles.
-func (h *HubServer) fleetStatusQuota(now time.Time) []fleetStatusQuota {
+func (h *HubServer) fleetStatusQuota(now time.Time, app *fleet.App) []fleetStatusQuota {
 	policy, policyErr := fleet.LoadPoolPolicy("")
+	// One admission class per pool per cycle: the class is what placement
+	// judges the pool under, so the band cannot disagree with a spawn.
+	classes := make(map[string]struct {
+		class string
+		ok    bool
+	})
+	classOf := func(pool string) (string, bool) {
+		if cached, seen := classes[pool]; seen {
+			return cached.class, cached.ok
+		}
+		class, err := fleet.StatusPoolClass(pool, now)
+		cached := struct {
+			class string
+			ok    bool
+		}{class: class, ok: err == nil}
+		classes[pool] = cached
+		return cached.class, cached.ok
+	}
 	out := make([]fleetStatusQuota, 0)
 	for _, message := range h.stateStore().snapshot(now).States {
 		if message.Kind != fleetStateKindQuota || message.Quota == nil {
@@ -207,35 +241,32 @@ func (h *HubServer) fleetStatusQuota(now time.Time) []fleetStatusQuota {
 			MeasuredAt: message.MeasuredAt.UTC(),
 			Windows:    make([]fleetStatusWindow, 0, len(quota.Buckets)),
 		}
-		windows := make([]fleet.QuotaWindow, 0, len(quota.Buckets))
+		windows := make([]fleet.StatusWindow, 0, len(quota.Buckets))
 		for i, bucket := range quota.Buckets {
-			// The band ranks on account-scoped windows, as CLIQuota.Pools does
-			// (a group-scoped reading ranks per group during selection). The
-			// published row keeps every window so the page can show them all.
-			if bucket.Scope == "" || bucket.Scope == "account" {
-				windows = append(windows, fleet.QuotaWindow{Window: bucket.Window, UsedPct: bucket.UsedPct, ResetsAt: bucket.ResetsAt})
-			}
+			// StatusBand reads scopes and groups from these windows, the same
+			// reduction `quota status` ranks, so a group-only reading and an
+			// invalid one cannot disagree with placement.
+			windows = append(windows, fleet.StatusWindow{Window: bucket.Window, UsedPct: bucket.UsedPct, ResetsAt: bucket.ResetsAt, Scope: bucket.Scope, Model: bucket.Model})
 			if i >= fleetStatusMaxWindows {
 				continue
 			}
 			entry.Windows = append(entry.Windows, fleetStatusWindow{Window: bucket.Window, UsedPct: bucket.UsedPct, ResetsAt: bucket.ResetsAt})
 		}
-		if len(windows) == 0 {
-			// A group-only reading ranks on its group windows during selection;
-			// label the pool from them rather than dropping every signal.
-			for _, bucket := range quota.Buckets {
-				windows = append(windows, fleet.QuotaWindow{Window: bucket.Window, UsedPct: bucket.UsedPct, ResetsAt: bucket.ResetsAt})
-			}
-		}
 		observed := fleetStateObservedAt(message)
 		ttl := fleetStatusFreshTTL(quota.Pool)
+		if app != nil {
+			// The spawn gate's own window, from the same operator config the
+			// plan rows are built with; the hardcoded default is only for a
+			// cycle where no App could be built.
+			ttl = app.SharedFreshTTL(quota.Pool)
+		}
 		age := now.Sub(observed)
 		entry.AgeS = int64(age / time.Second)
 		entry.FreshTTLS = int64(ttl / time.Second)
 		entry.Fresh = age >= -time.Minute && age <= ttl
 		entry.Band = fleetStatusBandUnknown
-		if policyErr == nil {
-			entry.Band = policy.Band(quota.Pool, fleet.QuotaView(windows, message.MeasuredAt))
+		if class, ok := classOf(quota.Pool); policyErr == nil && ok {
+			entry.Band = fleet.StatusBand(policy, quota.Pool, class, !entry.Fresh, windows, now)
 		}
 		out = append(out, entry)
 	}
@@ -264,12 +295,11 @@ func fleetStatusFreshTTL(pool string) time.Duration {
 // fleetStatusPlansNow answers the per-grade plan. The hub's own fleet App
 // places through the same state a spawn does, with a transport that refuses
 // both dispatch and measurement.
-func (h *HubServer) fleetStatusPlansNow(ctx context.Context) []fleetStatusPlan {
+func (h *HubServer) fleetStatusPlansNow(ctx context.Context, app *fleet.App) []fleetStatusPlan {
 	if h.fleetStatusPlanFn != nil {
 		return fleetStatusPlanRows(h.fleetStatusPlanFn(ctx))
 	}
-	app, err := h.newSpawnApp(io.Discard, io.Discard)
-	if err != nil || app == nil {
+	if app == nil {
 		return fleetStatusUnavailablePlans()
 	}
 	h.bindPlacement(app, planOnlyTransport{})
