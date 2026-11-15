@@ -30,10 +30,15 @@ func TestStallForegroundProcess(t *testing.T) {
 func TestStallReviewerQuotaUsesWatcherIntent(t *testing.T) {
 	a, _, _, _ := quotaStopFixture(t, "reviewer", "idle", "I stopped here.\n")
 	old := announceStartWatch
-	announceStartWatch = func(*App, string) error { return nil }
+	announceStartWatch = func(a *App, _ string) error {
+		if a.HerdrSession != "session-a" {
+			t.Fatalf("watcher session=%q", a.HerdrSession)
+		}
+		return nil
+	}
 	t.Cleanup(func() { announceStartWatch = old })
 	for i := 0; i < 2; i++ {
-		if err := RecordReviewerQuotaIntent(context.Background(), a.Jobs, "j", "w:p1", quotastop.Stop{Pool: "claude"}); err != nil {
+		if err := RecordReviewerQuotaIntent(context.Background(), a.Jobs, "j", "w:p1", "session-a", quotastop.Stop{Pool: "claude"}); err != nil {
 			t.Fatal(err)
 		}
 	}

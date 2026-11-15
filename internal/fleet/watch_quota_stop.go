@@ -323,9 +323,9 @@ var announceStartWatch = func(a *App, job string) error { return a.startWatchMod
 
 // RecordReviewerQuotaIntent hands a safety-net observation to the reviewer's
 // existing durable close and watcher reconciliation path.
-func RecordReviewerQuotaIntent(ctx context.Context, jobs, job, pane string, stop quotastop.Stop) error {
+func RecordReviewerQuotaIntent(ctx context.Context, jobs, job, pane, session string, stop quotastop.Stop) error {
 	home, _ := os.UserHomeDir()
-	a := &App{Jobs: jobs, Home: home, Now: time.Now, Runner: ExecRunner{}}
+	a := &App{Jobs: jobs, Home: home, Now: time.Now, Runner: ExecRunner{}, HerdrSession: session}
 	j, err := a.job(job)
 	if err != nil {
 		return err
