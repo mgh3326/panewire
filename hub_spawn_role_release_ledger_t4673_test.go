@@ -5,11 +5,13 @@ import (
 	"testing"
 )
 
-// hk 4673: a failed holder that recorded no pane, whose pane is gone and whose
-// node has lost the job's ledger (ledger_missing, hk 3685), frees its
-// reservation. The hub writes nothing to hk: the hk record stays claimed. The
-// new request then takes the role.
-func TestRoleReleaseFreesFailedHolderWithoutPaneOrLedger(t *testing.T) {
+// hk 4673: a failed holder that recorded no pane id keeps its reservation when
+// its node refuses job.mark_lost with ledger_missing (hk 3685). The refusal
+// means the node cannot rule out a newer claim under another label, so the hub
+// must not free the role on the label probe alone (review of PR 589). The hub
+// writes nothing to hk, and the held line names the refusal as
+// mark_lost_refused rather than release_write_failed.
+func TestRoleReleaseHoldsAndNamesLedgerRefusalForFailedHolderWithoutPane(t *testing.T) {
 	hub, server, jobs, held := roleHolderHub(t, roleUnpanedOutcome(), "claimed", "failed")
 	sink := captureHubLog(hub)
 	node := t14Node(t, hub, server, true)
@@ -17,16 +19,9 @@ func TestRoleReleaseFreesFailedHolderWithoutPaneOrLedger(t *testing.T) {
 	roleReplyPanes(t, node, nodeCommandRead(t, node), []nodeAgentRow{{PaneID: "w2:p9", Cwd: "/work/other"}}, true)
 	roleReplyMarkLost(t, node, nodeJobMarkLostLedgerMissing)
 	result := t14Result(t, response)
-	if result.status != http.StatusAccepted {
+	if result.status != http.StatusConflict || jobs.state("test-job") != "claimed" || len(jobs.writes()) != 0 {
 		t.Fatalf("status=%d body=%s hk=%v writes=%v", result.status, result.body, jobs.state("test-job"), jobs.writes())
 	}
-	if jobs.state("test-job") != "claimed" || len(jobs.writes()) != 0 {
-		t.Fatalf("hub wrote hk: state=%v writes=%v", jobs.state("test-job"), jobs.writes())
-	}
-	if owner, job, _, err := hub.inbox.store.spawnRoleOwner(t.Context(), "42:implementer"); err != nil || job != "test-job-r2" || owner == held.Request.RequestID {
-		t.Fatalf("reservation not moved: %s %s %v", owner, job, err)
-	}
-	if lines := heldRoleLines(t, sink); len(lines) != 0 {
-		t.Fatalf("a released role logged %v", lines)
-	}
+	assertRoleHeldBy(t, hub, held.Request.RequestID)
+	assertHeldLine(t, sink, "mark_lost_refused", "claimed", "absent", "ledger_missing")
 }

@@ -191,13 +191,12 @@ lacks the recorded pane, and lists no pane named like the holder's agent label
 (herdr renumbers a pane moved across workspaces), has the holder's node mark the
 hk job `lost` and releases the slot. A present pane, an unreadable pane list, an
 unreachable node or no recorded pane keeps the slot and the 409 body as before.
-A failed operation that recorded no pane id, whose label is no longer listed,
-frees its slot even when its node answers `ledger_missing` (its job dir or
-`events/` is gone, hk 3685, hk 4673); hk keeps its `claimed` record, because the
-node still never writes `lost` over a record it cannot check. A node that
-refuses `job.mark_lost` for any other reason, because its local ledger holds a
-completion or a newer claim, or because herdr still lists the pane, keeps the
-slot too; the hub logs `branch=mark_lost_refused` with the node's reason. A slot whose `release` write
+A node that refuses `job.mark_lost`, because its local ledger holds a completion
+or a newer claim, its job dir or `events/` is gone (`ledger_missing`, hk 3685),
+or herdr still lists the pane, keeps the slot too; the hub logs
+`branch=mark_lost_refused` with the node's reason. `ledger_missing` keeps the
+slot even for a failed holder with no recorded pane: the node cannot rule out a
+newer claim under another label, which the hub's label probe cannot see. A slot whose `release` write
 itself fails logs `branch=release_write_failed`. When the holder
 ran on the hub's own host the hub writes the record itself, and hk never
 rewrites a terminal record, so a holder that completes during the probe keeps
