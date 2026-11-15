@@ -63,7 +63,11 @@ the node's command lock on a fresh agent listing immediately before
 The local pass runs every `--task-pane-sweep-interval` (default `5m`). A
 candidate closes once its end lies at least an hour back — its terminal
 event's time, or the first pass that saw a task-derived end — whatever herdr
-shows the pane doing or showing (decision 266). Inside that hour the pane may
+shows the pane doing or showing (decision 266). A claim, spawn or reprompt
+clears the terminal time with the rest of the terminal state, so a job that
+completed once and was then revived (another fix round, or a respawn after a
+quota stop) dates its new end from that revival, never from the old
+completion. Inside that hour the pane may
 still close the old way: after it stayed `idle` or `done` for
 `--task-pane-sweep-grace` (default `10m`; `blocked` never counts). A working,
 renamed or missing pane resets the grace, as does a daemon restart.

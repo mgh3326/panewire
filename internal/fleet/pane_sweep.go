@@ -395,10 +395,13 @@ func paneSweepKeepCandidate(j Job, now time.Time) bool {
 }
 
 // paneSweepEndAt is the time the job's end took effect for the close
-// deadline: its terminal event's time, else the first pass that saw the
-// task-derived end (there is no earlier record of it).
+// deadline: the terminal event's time when the job's own record ended it, else
+// the first pass that saw the task-derived end (there is no earlier record of
+// it). At alone does not prove a closed job — a reviving claim, spawn or
+// reprompt clears it — so a live implementer's task end always dates from the
+// sweep's first sighting.
 func (s *TaskPaneSweeper) paneSweepEndAt(j Job, now time.Time) time.Time {
-	if !j.At.IsZero() {
+	if paneSweepClosed(j) && !j.At.IsZero() {
 		return j.At
 	}
 	key := paneSweepKey(j)

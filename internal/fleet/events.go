@@ -41,6 +41,11 @@ type Job struct {
 	Events             []Event
 }
 
+// revive clears the terminal state a later claim, spawn or reprompt supersedes.
+// Ended and At then describe the job's current run only: At is the time of the
+// newest terminal event that still stands, never one a revived job left behind.
+func (j *Job) revive() { j.Terminal, j.Ended, j.Outcome, j.At = false, "", "", time.Time{} }
+
 func (a *App) events(id string) ([]Event, error) {
 	if !validID(id) {
 		return nil, fail(exitUsage, "invalid job id")

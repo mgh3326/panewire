@@ -256,3 +256,21 @@ func TestEndedSweepClosesAKepWorkerADayAfterItsTaskEnd(t *testing.T) {
 		t.Fatalf("a --keep pane did not close a day after its task ended: %v", f.info)
 	}
 }
+
+// A worker that completed once, was reprompted for another round and whose
+// task then merged is live again: the old completion does not date its end.
+// The task-derived end starts with the first pass that saw it, so the pane is
+// not closed on that pass and closes one hour later.
+func TestEndedSweepDatesARepromptedWorkersTaskEndFromItsFirstSighting(t *testing.T) {
+	f := newPaneSweepFixture(t)
+	f.job("w", "implementer", "42")
+	putEvent(t, f.a, "w", "job.completed", map[string]any{})
+	putEvent(t, f.a, "w", "job.reprompted", map[string]any{"reason": "quota_stop_resumed"})
+	f.tasks["42"] = "merged"
+	if closes := f.endedSweep(61, time.Hour); len(closes) != 0 || len(f.closed()) != 0 {
+		t.Fatalf("a reprompted worker's pane was closed on the first sighting of its task end: %+v", closes)
+	}
+	if closes := f.endedSweep(121, time.Hour); len(closes) != 1 || len(f.closed()) != 1 {
+		t.Fatalf("a reprompted worker's pane did not close an hour after its task end was first seen: %+v closed=%v info=%v", closes, f.closed(), f.info)
+	}
+}
