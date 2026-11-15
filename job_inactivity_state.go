@@ -111,9 +111,20 @@ func (s *stallSafetyState) episodeSequence(ctx context.Context, job, pane, attem
 	return seq, err == nil, err
 }
 
+func (s *stallSafetyState) episodeStart(ctx context.Context, job, pane, attempt string) (int64, bool, error) {
+	s.store.mu.Lock()
+	defer s.store.mu.Unlock()
+	var since int64
+	err := s.store.db.QueryRowContext(ctx, `SELECT since_ms FROM stall_safety_episodes WHERE job=? AND pane=? AND attempt=? AND examined=0`, job, pane, attempt).Scan(&since)
+	if err == sql.ErrNoRows {
+		return 0, false, nil
+	}
+	return since, err == nil, err
+}
+
 // recordExamination saves the bounded, redacted evidence before publishing any
 // external effects. The first writer owns the episode's evidence.
-func (s *stallSafetyState) recordExamination(ctx context.Context, job, pane, screen, explanation, details string) (bool, error) {
+func (s *stallSafetyState) recordExamination(ctx context.Context, job, pane, attempt string, since int64, screen, explanation, details string) (bool, error) {
 	screen = stallExaminationExcerpt(redactSecrets(screen))
 	explanation = stallExaminationExcerpt(redactSecrets(explanation))
 	s.store.mu.Lock()
@@ -123,7 +134,7 @@ func (s *stallSafetyState) recordExamination(ctx context.Context, job, pane, scr
 		return false, err
 	}
 	defer tx.Rollback()
-	result, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO stall_safety_examinations(job,pane,attempt,since_ms,screen,explanation,details) SELECT job,pane,attempt,since_ms,?,?,? FROM stall_safety_episodes WHERE job=? AND pane=? AND examined=0`, screen, explanation, details, job, pane)
+	result, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO stall_safety_examinations(job,pane,attempt,since_ms,screen,explanation,details) VALUES(?,?,?,?,?,?,?)`, job, pane, attempt, since, screen, explanation, details)
 	if err != nil {
 		return false, err
 	}
@@ -131,7 +142,7 @@ func (s *stallSafetyState) recordExamination(ctx context.Context, job, pane, scr
 	if err != nil || n == 0 {
 		return false, err
 	}
-	if _, err = tx.ExecContext(ctx, `UPDATE stall_safety_episodes SET examined=1 WHERE job=? AND pane=?`, job, pane); err != nil {
+	if _, err = tx.ExecContext(ctx, `UPDATE stall_safety_episodes SET examined=1 WHERE job=? AND pane=? AND attempt=? AND since_ms=?`, job, pane, attempt, since); err != nil {
 		return false, err
 	}
 	return true, tx.Commit()

@@ -55,7 +55,7 @@ func stallSafetyWatcherJournal(t *testing.T, rig *roleStopRig) {
 }
 
 func TestStallSafetyActiveJobExamination(t *testing.T) {
-	for _, mode := range []string{"idle", "child", "quota", "retry", "action_retry", "changed", "ready", "nonworking"} {
+	for _, mode := range []string{"idle", "child", "quota", "retry", "action_retry", "changed", "ready", "nonworking", "episode_ended"} {
 		t.Run(mode, func(t *testing.T) {
 			rig := newRoleStopRig(t, "implementer", time.Hour, `{"tasks":[{"priority":1,"expected":"4h","refs":{"job_id":"job-active"}}]}`)
 			stallSafetyWatcherJournal(t, rig)
@@ -113,16 +113,17 @@ func TestStallSafetyActiveJobExamination(t *testing.T) {
 				if mode == "nonworking" {
 					rig.observe("blocked", 2, rig.now.Add(31*time.Minute))
 				}
+				if mode == "episode_ended" {
+					if err := m.state.markWorking(ctx, "workspace:pane-1"); err != nil {
+						t.Fatal(err)
+					}
+				}
 				if mode == "ready" {
 					signalled = true
 				}
 				return screen, nil
 			}
 			m.explain = func(context.Context, string) (string, error) { return `{"agent":"codex"}`, nil }
-			m.detect = func(_ context.Context, _ string, _ HerdrAgentState, screen, _ string, at time.Time) (quotastop.Stop, bool) {
-				stop, _, ok := quotastop.Detect(screen, "codex", "", quotastop.DevinSessionEvidence{}, at, time.Local)
-				return stop, ok
-			}
 			agent := HerdrAgentState{PaneID: "workspace:pane-1", WorkspaceID: "workspace", Label: "worker-synthetic", Status: "idle", Harness: "codex"}
 			for index, at := range []time.Time{rig.now, rig.now.Add(31 * time.Minute), rig.now.Add(32 * time.Minute)} {
 				if mode == "nonworking" && index == 2 {
@@ -161,7 +162,7 @@ func TestStallSafetyActiveJobExamination(t *testing.T) {
 				}
 				return
 			}
-			if mode == "changed" || mode == "ready" {
+			if mode == "changed" || mode == "ready" || mode == "episode_ended" {
 				if len(rig.owner) != 0 {
 					t.Fatalf("stale examination notified owner: %+v", rig.owner)
 				}

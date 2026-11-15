@@ -216,6 +216,13 @@ func (m *stallSafetyManager) scan(ctx context.Context, agents []HerdrAgentState,
 		if !due {
 			continue
 		}
+		since, active, err := m.state.episodeStart(ctx, job.JobID, agent.PaneID, attempt)
+		if err != nil {
+			return err
+		}
+		if !active {
+			continue
+		}
 		readCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		screen, err := m.read(readCtx, agent.PaneID)
 		if err != nil {
@@ -231,7 +238,7 @@ func (m *stallSafetyManager) scan(ctx context.Context, agents []HerdrAgentState,
 		if err != nil {
 			return err
 		}
-		if _, err = m.state.recordExamination(ctx, job.JobID, agent.PaneID, screen, explanation, string(details)); err != nil {
+		if _, err = m.state.recordExamination(ctx, job.JobID, agent.PaneID, attempt, since, screen, explanation, string(details)); err != nil {
 			return err
 		}
 	}
