@@ -456,7 +456,7 @@ func (h *HubServer) laneSpawnProof(nodeMachine string, body hubLaneWriteRequest)
 // same-pane convergence below is only a retry fallback for a move that
 // already happened, and must never pre-empt a predecessor row that still
 // needs moving.
-func laneTakeoverRow(body hubLaneWriteRequest, proof laneSpawnProof, routes map[string]reportRelayRoute) (string, reportRelayRoute, bool, *hubLaneProjection, error) {
+func laneTakeoverRow(lane string, body hubLaneWriteRequest, proof laneSpawnProof, routes map[string]reportRelayRoute) (string, reportRelayRoute, bool, *hubLaneProjection, error) {
 	if !proof.valid || body.Job != proof.task.Job {
 		return "", reportRelayRoute{}, false, nil, errLaneTakeoverUnconfirmed
 	}
@@ -469,11 +469,33 @@ func laneTakeoverRow(body hubLaneWriteRequest, proof laneSpawnProof, routes map[
 	// No row is still bound to the takeover job, so a row the successor
 	// already holds at this pane is a retried takeover converging instead
 	// of adding a second row.
-	if name, row, found := laneRowAt(routes, body.Machine, body.Pane); found && row.Job == body.Job {
+	if name, row, found := laneHeldRow(routes, lane, body.Machine, body.Pane, body.Job); found {
 		projection := hubLaneProjection{Lane: name, Machine: row.Machine, Pane: row.Pane, Parent: row.Parent, Sink: row.Sink, Standby: row.Standby}
 		return "", reportRelayRoute{}, false, &projection, nil
 	}
 	return "", reportRelayRoute{}, false, nil, errLaneTakeoverUnconfirmed
+}
+
+// laneHeldRow finds the successor's convergence row: any non-sink row already
+// routed to the successor's pane and bound to its job. A retried takeover
+// converges on it instead of adding a second row — even when the first move
+// left the successor's own earlier row beside the moved one, where laneRowAt's
+// exactly-one rule would refuse a move that already happened. The requested
+// lane wins when it matches, so the answer names the lane asked for.
+func laneHeldRow(routes map[string]reportRelayRoute, lane, machine, pane, job string) (string, reportRelayRoute, bool) {
+	if route, ok := routes[lane]; ok && !route.Sink && route.Machine == machine && route.Pane == pane && route.Job == job {
+		return lane, route, true
+	}
+	name, row := "", reportRelayRoute{}
+	for candidate, route := range routes {
+		if route.Sink || route.Machine != machine || route.Pane != pane || route.Job != job {
+			continue
+		}
+		if name == "" || candidate < name {
+			name, row = candidate, route
+		}
+	}
+	return name, row, name != ""
 }
 
 func laneRowForJob(routes map[string]reportRelayRoute, job string) (string, reportRelayRoute, bool) {
@@ -596,7 +618,7 @@ func (h *HubServer) putLane(lane string, body hubLaneWriteRequest, nodeMachine s
 				// findings already use follows the work onto the successor's
 				// machine. The durable accepted spawn proves the parent; without
 				// it, no other machine's lane may be moved.
-				name, row, found, held, err := laneTakeoverRow(body, spawnProof, snapshot.Routes)
+				name, row, found, held, err := laneTakeoverRow(lane, body, spawnProof, snapshot.Routes)
 				if err != nil {
 					return err
 				}

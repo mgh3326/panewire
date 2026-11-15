@@ -2,6 +2,7 @@ package panewire
 
 import (
 	"net/http"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -334,4 +335,21 @@ func TestLaneTakeoverMovesDespiteOwnRowAtPane(t *testing.T) {
 	if route := routes["task-lane"]; route.Machine != "machine-b" || route.Pane != "w2:p5" || route.Job != "succ-own" {
 		t.Fatalf("predecessor row not moved: %+v", routes)
 	}
+	moved, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	retry := lanesNodeRequest(t, hub, http.MethodPut, "/v1/lanes/task-lane", lanesNodeBToken, "machine-b",
+		`{"machine":"machine-b","pane":"w2:p5","job":"succ-own","parent":"mergewake","takeover":"pred-t"}`)
+	if retry.Code != http.StatusOK {
+		t.Fatalf("retried takeover status=%d body=%s", retry.Code, retry.Body.String())
+	}
+	again, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(again) != string(moved) {
+		t.Fatalf("retried takeover changed the file:\nbefore %s\nafter %s", moved, again)
+	}
+
 }
