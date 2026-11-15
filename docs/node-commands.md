@@ -480,13 +480,18 @@ path is accepted.
 | `done` | panewire's line | panewire ran and completed the job. |
 | `already-done` | the recorded line | This report already completed the job. panewire does not run again, or it answered `duplicate=yes`. |
 | `not-a-job` | — | The job directory is missing or is a symlink. panewire does not run. |
-| `report-invalid` | — | `report` is not one of the two paths, is missing, or is not a regular file. panewire does not run. |
+| `report-invalid` | — | `report` is not one of the two paths, or is not a regular file and no done marker answers it. panewire does not run. |
 
 A failed or timed-out panewire answers `done_failed` with optional `detail`: the last stderr line, redacted and bounded to 240 UTF-8 bytes. The command can be re-issued; a node
 without a jobs root answers `jobs_root_unset`. A `done` that completed the job but left its report out of hk exits non-zero (`completed; report not in hk; rerun the same command`), so it answers `done_failed` too, and the re-issued command finishes the report ([completion receipts](config.md#completion-receipts)). The node records the report's
 digest in `<inbox>/jobs/<job>/.node-job-done` after panewire succeeds. The digest
 is the key because a released job id can be claimed again: a new report for that
 id runs panewire, the same rule panewire's own duplicate check applies.
+`panewire done` writes the same marker itself when it deletes the report after
+the pin (hk 3685), so a `job.done` for a `<dir>/report.md` that is gone answers
+`already-done` with the recorded line rather than `report-invalid`. A claim,
+spawn or reprompt recorded after the marker starts a new round of that job id,
+and the marker does not answer for it.
 
 ### `job.mark_lost`
 
@@ -1026,7 +1031,11 @@ most 24 KiB and contains a `findings` array. Otherwise it is null and
 `findings_error` is `missing`, `too_large`, `not_json`, or `schema`. A missing
 job has `found: false`. Files must be regular files inside the job directory.
 `report` contains `present`, `bytes`, `sha256`, and `last_line`; the last line
-is limited to 256 UTF-8 bytes. The report body is never returned. `completed`
+is limited to 256 UTF-8 bytes. The report body is never returned. A local
+`report.md` that is gone because `done` deleted it after the hk pin (hk 3685)
+still reads `present: true`, with `sha256` taken from the job's newest
+`job.completed` that named a document; `bytes` is 0 and `last_line` empty, both
+having been facts of the deleted file. `completed`
 is true when the local event ledger contains a `job.completed` event.
 `activity_events` counts the ledger's `events/` files that are not spawn
 bookkeeping: `job.claim`, `job.reclaim`, `job.placement`, `job.task_link`,
