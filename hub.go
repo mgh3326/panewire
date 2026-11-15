@@ -482,6 +482,11 @@ type HubServer struct {
 	authFailedMissing bool
 	alertNodes        map[string]struct{}
 	now               func() time.Time
+	// waitingMu guards the start-condition check's poll time and its
+	// once-per-outage read failure log (hub_spawn_start_conditions.go).
+	waitingMu         sync.Mutex
+	waitingCheckedAt  time.Time
+	waitingReadFailed bool
 	// fleetEvents writes a fleet event. Tests substitute a recorder; production
 	// leaves it nil and events go to the state directory (emitFleet).
 	fleetEvents func(time.Time, fleetEvent) bool
