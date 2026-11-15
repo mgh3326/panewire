@@ -122,9 +122,6 @@ func (client *HubClient) refreshFleetQuota(ctx context.Context, pool string, sen
 	publishes, ok, measuredHere, kind := client.measureFleetQuotaAccounts(run, ctx, pool)
 	previous := sent[pool]
 	if !ok {
-		if measuredHere {
-			client.noteOwnQuotaMeasurement(pool)
-		}
 		// One warning per failure streak, not one per interval. Consumers see
 		// the reading age past its TTL and measure directly.
 		if !previous.failing {

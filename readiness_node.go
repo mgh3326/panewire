@@ -180,33 +180,56 @@ func (client *HubClient) noteQuotaAccount(pool, accountKey string) {
 	client.readiness.accounts[pool] = quotaAccountNote{key: accountKey, at: at}
 }
 
-// noteOwnQuotaMeasurement clears a login-screen mark after this host's own
-// credential completed a successful measurement. Shared readings do not call
-// it. A harness that spends this pool under another name (nodeHarnessPools)
-// is cleared too: the mark names the same login failing.
-func (client *HubClient) noteOwnQuotaMeasurement(pool string) {
-	client.readiness.mu.Lock()
+// loginScreenKeys is every login-screen mark a pool's evidence answers: the
+// pool itself and the harnesses nodeHarnessPools maps to it (a cmd launch
+// marks "cmd" though the node measures the commandcode pool).
+func loginScreenKeys(pool string) []string {
+	keys := []string{pool}
 	for kind, named := range nodeHarnessPools {
-		if named != pool {
-			continue
-		}
-		if _, marked := client.readiness.loginScreens[kind]; marked {
-			delete(client.readiness.loginScreens, kind)
-			client.readiness.dirty = true
+		if named == pool {
+			keys = append(keys, kind)
 		}
 	}
-	if _, marked := client.readiness.loginScreens[pool]; marked {
-		delete(client.readiness.loginScreens, pool)
+	return keys
+}
+
+// clearLoginScreenMarks forgets a pool's login-screen marks. The caller holds
+// readiness.mu. It reports whether anything changed.
+func (client *HubClient) clearLoginScreenMarks(pool string) bool {
+	changed := false
+	for _, key := range loginScreenKeys(pool) {
+		if _, marked := client.readiness.loginScreens[key]; marked {
+			delete(client.readiness.loginScreens, key)
+			changed = true
+		}
+	}
+	if changed {
 		client.readiness.dirty = true
 	}
+	return changed
+}
+
+// noteOwnQuotaMeasurement clears a pool's login-screen marks after this host's
+// own credential completed a successful measurement. Shared readings do not
+// call it, and a failed pass must not: the marks are evidence of a login the
+// pass did not prove.
+func (client *HubClient) noteOwnQuotaMeasurement(pool string) {
+	client.readiness.mu.Lock()
+	client.clearLoginScreenMarks(pool)
 	client.readiness.mu.Unlock()
 }
 
+// loginScreenMarked answers whether any mark the pool's evidence answers is
+// set, so a refresh path probes when a harness login screen is the reason.
 func (client *HubClient) loginScreenMarked(pool string) bool {
 	client.readiness.mu.Lock()
 	defer client.readiness.mu.Unlock()
-	_, marked := client.readiness.loginScreens[pool]
-	return marked
+	for _, key := range loginScreenKeys(pool) {
+		if _, marked := client.readiness.loginScreens[key]; marked {
+			return true
+		}
+	}
+	return false
 }
 
 // noteQuotaUnknown records a refresh that failed for a reason other than the

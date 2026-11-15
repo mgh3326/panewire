@@ -148,8 +148,7 @@ func (client *HubClient) noteLoginProbe(pool string, missing bool) {
 		client.readiness.probeMissing[pool] = true
 	} else {
 		delete(client.readiness.probeMissing, pool)
-		if _, marked := client.readiness.loginScreens[pool]; marked {
-			delete(client.readiness.loginScreens, pool)
+		if client.clearLoginScreenMarks(pool) {
 			changed = true
 		}
 	}
