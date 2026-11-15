@@ -107,15 +107,20 @@ type quotaPoolReconcileHooks struct {
 // HubClient owns a bounded in-memory event queue. It is intentionally not a
 // durable relay: the handoffkeep relay store owns offline delivery.
 type HubClient struct {
-	endpoint              string
-	endpoints             []string
-	machineID             string
-	token                 string
-	cfAccessClientID      string
-	cfAccessSecret        string
-	accepting             bool
-	relayControl          clientRelayControlState
-	jobsInboxRoot         string
+	endpoint         string
+	endpoints        []string
+	machineID        string
+	token            string
+	cfAccessClientID string
+	cfAccessSecret   string
+	accepting        bool
+	relayControl     clientRelayControlState
+	jobsInboxRoot    string
+	// closeOpsLister lists the host's processes for the close-ops barrier;
+	// nil runs ps. Tests replace it.
+	closeOpsLister fleet.ProcessLister
+	// closeOpsRecheck overrides closeOpsRecheckInterval in tests.
+	closeOpsRecheck       time.Duration
 	sessionCacheMu        sync.RWMutex
 	jobSessions           map[string]sessionCacheEntry
 	laneReconcileTicks    <-chan time.Time
@@ -1935,8 +1940,8 @@ const defaultHubHelloAckTimeout = 5 * time.Second
 const hubCapabilityCloseQuestion = "pane_close_question_v1"
 
 // hubSpawnCapabilities is what an upgraded node advertises in hello.
-// close_ops_v1 (hubCapabilityCloseOps) is deliberately not advertised: no
-// hub may issue close ops until hk 4632 adds the migration barrier.
+// close_ops_v1 (hubCapabilityCloseOps) is added per hello by
+// helloCapabilities, only while the migration barrier holds.
 var hubSpawnCapabilities = []string{"spawn_v2", "spawn_ops_v1", hubCapabilitySpawnGrant, hubCapabilityCloseQuestion, hubCapabilityApplied}
 
 func (client *HubClient) helloAckTimeoutOrDefault() time.Duration {
@@ -2037,7 +2042,8 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 	// that does not know the capabilities field drops the whole hello (see
 	// docs/r26-hub-spawn.md "Rollout order and rollback"), so the hello ack timer below re-sends it
 	// without them rather than leaving this node off the fleet.
-	if err := client.writeHello(ctx, peer, hubSpawnCapabilities); err != nil {
+	capabilities := client.helloCapabilities(ctx)
+	if err := client.writeHello(ctx, peer, capabilities); err != nil {
 		return nil, err
 	}
 	client.setRelayEmitter(func(event hubClientEvent) { _ = peer.write(ctx, hubClientWireEvent(event)) })
@@ -2155,6 +2161,8 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 	helloAck := time.NewTimer(client.helloAckTimeoutOrDefault())
 	defer helloAck.Stop()
 	helloRetried, acked, capsResent := false, false, false
+	closeOpsCheck := time.NewTicker(client.closeOpsRecheckOrDefault())
+	defer closeOpsCheck.Stop()
 	prefer := time.NewTicker(client.preferRetry)
 	defer prefer.Stop()
 	type preferenceResult struct {
@@ -2182,7 +2190,8 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 				// the full hello once more; a hub that rejects capabilities
 				// drops it and keeps the record it already has.
 				capsResent = true
-				if err := client.writeHello(ctx, peer, hubSpawnCapabilities); err != nil {
+				capabilities = client.helloCapabilities(ctx)
+				if err := client.writeHello(ctx, peer, capabilities); err != nil {
 					return nil, err
 				}
 				// A repeated hello resets the hub's job and host state for
@@ -2226,6 +2235,30 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 				return nil, err
 			}
 			client.commitRelaySent(event)
+		case <-closeOpsCheck.C:
+			// Readiness is re-checked inside the session too (hk 4632): an
+			// old-binary watcher that starts or ends flips close_ops_v1, and
+			// the node re-registers with the new set. A capability-free
+			// fallback session has nothing to re-advertise.
+			if !acked || helloRetried && !capsResent {
+				continue
+			}
+			next := client.helloCapabilities(ctx)
+			if slices.Equal(next, capabilities) {
+				continue
+			}
+			capabilities = next
+			if err := client.writeHello(ctx, peer, capabilities); err != nil {
+				return nil, err
+			}
+			// A repeated hello resets the hub's job and host state for this
+			// node; repeat that state at once.
+			if err := peer.write(ctx, hubClientWireEvent(client.heartbeatEvent(ctx))); err != nil {
+				return nil, err
+			}
+			if err := client.writeRelayEvents(client.jobCompletionEvents(), peer.relayWriter(ctx)); err != nil {
+				return nil, err
+			}
 		case <-ticker.C:
 			if err := peer.write(ctx, hubOutbound{Type: "ping"}); err != nil {
 				return nil, err

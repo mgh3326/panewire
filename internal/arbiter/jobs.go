@@ -62,7 +62,7 @@ func (s *Store) ReleaseClaim(ctx context.Context, job string) error {
 		if err := settleJob(c, job, moment); err != nil {
 			return err
 		}
-		_, err := s.recordEvent(c, job, "job.spawn_aborted", map[string]any{"retryable": true}, nil)
+		_, err := s.recordEvent(ctx, c, job, "job.spawn_aborted", map[string]any{"retryable": true}, nil)
 		return err
 	})
 }
@@ -142,7 +142,7 @@ func (s *Store) Claim(ctx context.Context, cl Claim) (ClaimResult, error) {
 			if _, err = c.exec("INSERT INTO jobs (job_id, owner_lane, state, t_level, created_at, updated_at) VALUES (?, ?, 'claimed', ?, ?, ?)", cl.Job, cl.Lane, cl.T, iso(moment), iso(moment)); err != nil {
 				return sqlErr(err)
 			}
-			res.EventSeq, err = s.recordEvent(c, cl.Job, "job.claim", cl.payload(label), nil)
+			res.EventSeq, err = s.recordEvent(ctx, c, cl.Job, "job.claim", cl.payload(label), nil)
 			return err
 		case err != nil:
 			return sqlErr(err)
@@ -161,7 +161,7 @@ func (s *Store) Claim(ctx context.Context, cl Claim) (ClaimResult, error) {
 		p := cl.payload(label)
 		p["previous_created_at"] = created
 		p["previous_owner_lane"] = owner
-		res.EventSeq, err = s.recordEvent(c, cl.Job, "job.reclaim", p, nil)
+		res.EventSeq, err = s.recordEvent(ctx, c, cl.Job, "job.reclaim", p, nil)
 		return err
 	})
 	return res, e
