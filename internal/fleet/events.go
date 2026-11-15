@@ -123,7 +123,7 @@ func (a *App) job(id string) (Job, error) {
 			j.Task = scalar(p["task_id"])
 			j.Inherited = str(p, "task_inherited_from")
 			j.T = str(p, "t_level")
-			j.Terminal, j.Ended, j.Outcome = false, "", ""
+			j.revive()
 			j.Reaped = false
 		case "job.spawned":
 			j.Receipt = p
@@ -140,7 +140,7 @@ func (a *App) job(id string) (Job, error) {
 			j.Report = str(p, "report")
 			j.HubLane = str(p, "hub_lane")
 			j.Machine = str(p, "hub_lane_machine")
-			j.Terminal, j.Ended, j.Outcome = false, "", ""
+			j.revive()
 			j.Reaped = false
 			if j.Task == "" {
 				j.Task = scalar(p["task_id"])
@@ -156,7 +156,7 @@ func (a *App) job(id string) (Job, error) {
 				j.Machine = machine
 			}
 		case "job.reprompted":
-			j.Terminal, j.Ended, j.Outcome = false, "", ""
+			j.revive()
 		case "job.completed", "job.joined", "job.revoked", "job.handed_off", "job.lost":
 			j.Terminal, j.Ended = true, ev.Kind
 			j.Outcome = firstNonempty(ev.Outcome, str(p, "outcome"))
