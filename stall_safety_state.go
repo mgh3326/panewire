@@ -18,7 +18,7 @@ func newStallSafetyState(store *Store) (*stallSafetyState, error) {
 	if err != nil {
 		return nil, err
 	}
-	_, err = store.db.Exec(`CREATE TABLE IF NOT EXISTS stall_safety_examinations (job TEXT NOT NULL, pane TEXT NOT NULL, since_ms INTEGER NOT NULL, screen TEXT NOT NULL, explanation TEXT NOT NULL, PRIMARY KEY(job,pane,since_ms))`)
+	_, err = store.db.Exec(`CREATE TABLE IF NOT EXISTS stall_safety_examinations (job TEXT NOT NULL, pane TEXT NOT NULL, since_ms INTEGER NOT NULL, screen TEXT NOT NULL, explanation TEXT NOT NULL, details TEXT NOT NULL DEFAULT '', hk_done INTEGER NOT NULL DEFAULT 0, action_done INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(job,pane,since_ms))`)
 	if err != nil {
 		return nil, err
 	}
@@ -51,7 +51,7 @@ func (s *stallSafetyState) observe(ctx context.Context, job, pane string, workin
 
 // recordExamination saves the bounded, redacted evidence before publishing any
 // external effects. The first writer owns the episode's evidence.
-func (s *stallSafetyState) recordExamination(ctx context.Context, job, pane, screen, explanation string) (bool, error) {
+func (s *stallSafetyState) recordExamination(ctx context.Context, job, pane, screen, explanation, details string) (bool, error) {
 	screen = utf8SuffixWithin(redactSecrets(screen), 4096)
 	explanation = utf8SuffixWithin(redactSecrets(explanation), 4096)
 	s.store.mu.Lock()
@@ -61,7 +61,7 @@ func (s *stallSafetyState) recordExamination(ctx context.Context, job, pane, scr
 		return false, err
 	}
 	defer tx.Rollback()
-	result, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO stall_safety_examinations(job,pane,since_ms,screen,explanation) SELECT job,pane,since_ms,?,? FROM stall_safety_episodes WHERE job=? AND pane=? AND examined=0`, screen, explanation, job, pane)
+	result, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO stall_safety_examinations(job,pane,since_ms,screen,explanation,details) SELECT job,pane,since_ms,?,?,? FROM stall_safety_episodes WHERE job=? AND pane=? AND examined=0`, screen, explanation, details, job, pane)
 	if err != nil {
 		return false, err
 	}

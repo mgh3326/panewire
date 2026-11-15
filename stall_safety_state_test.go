@@ -31,10 +31,10 @@ func TestStallSafetyEpisode(t *testing.T) {
 			t.Fatalf("at %s: due=%v err=%v; want %v", tc.at, due, err, tc.want)
 		}
 	}
-	if saved, err := state.recordExamination(ctx, "job", "pane", "last lines token=secretvalue123", "idle"); err != nil || !saved {
+	if saved, err := state.recordExamination(ctx, "job", "pane", "last lines token=secretvalue123", "idle", ""); err != nil || !saved {
 		t.Fatalf("record: saved=%v err=%v", saved, err)
 	}
-	if saved, err := state.recordExamination(ctx, "job", "pane", "different", "different"); err != nil || saved {
+	if saved, err := state.recordExamination(ctx, "job", "pane", "different", "different", ""); err != nil || saved {
 		t.Fatalf("duplicate: saved=%v err=%v", saved, err)
 	}
 	state, err = newStallSafetyState(store)

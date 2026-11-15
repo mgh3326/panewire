@@ -26,6 +26,6 @@ func (p *stallSafetyProbe) observe(ctx context.Context, job, pane string, workin
 	if err != nil {
 		explanation = "herdr explanation unavailable"
 	}
-	_, err = p.state.recordExamination(ctx, job, pane, screen, explanation)
+	_, err = p.state.recordExamination(ctx, job, pane, screen, explanation, "")
 	return err
 }

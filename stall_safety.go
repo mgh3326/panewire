@@ -1,0 +1,268 @@
+package panewire
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"path/filepath"
+	"time"
+
+	"github.com/mgh3326/panewire/internal/fleet"
+	"github.com/mgh3326/panewire/internal/quotastop"
+)
+
+type stallSafetyDetails struct {
+	Job     HubActiveJob    `json:"job"`
+	Agent   HerdrAgentState `json:"agent"`
+	Stop    quotastop.Stop  `json:"stop"`
+	Quota   bool            `json:"quota"`
+	WakeSeq int64           `json:"wake_seq"`
+}
+
+type stallSafetyExamination struct {
+	job, pane, screen, explanation, details string
+	since                                   int64
+	hkDone, actionDone                      int
+}
+
+type stallSafetyManager struct {
+	state     *stallSafetyState
+	limit     time.Duration
+	now       func() time.Time
+	lookup    func(context.Context, string) (HubActiveJob, bool)
+	signalled func(context.Context, HubActiveJob) (bool, error)
+	busy      func(context.Context, HubActiveJob, HerdrAgentState) (bool, error)
+	sequence  func(context.Context, string) (int64, error)
+	read      func(context.Context, string) (string, error)
+	explain   func(context.Context, string) (string, error)
+	detect    func(context.Context, string, HerdrAgentState, string, string, time.Time) (quotastop.Stop, bool)
+	record    func(context.Context, string, string, string) error
+	act       func(context.Context, stallSafetyExamination, stallSafetyDetails, string, time.Time) error
+}
+
+func (d *Daemon) runStallSafety(ctx context.Context) {
+	ticker := time.NewTicker(time.Minute)
+	defer ticker.Stop()
+	for {
+		client, err := NewHerdrClient(d.cfg.HerdrSocket)
+		if err == nil {
+			readCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			agents, readErr := client.AgentStates(readCtx)
+			cancel()
+			_ = client.Close()
+			if readErr == nil {
+				if err := d.stallSafety.scan(ctx, agents, d.stallSafety.now().UTC()); err != nil {
+					d.cfg.Logger.Warn("stall safety scan failed", "error", err)
+				}
+			} else if err := d.stallSafety.drain(ctx, d.stallSafety.now().UTC()); err != nil {
+				d.cfg.Logger.Warn("stall safety delivery failed", "error", err)
+			}
+		} else if err := d.stallSafety.drain(ctx, d.stallSafety.now().UTC()); err != nil {
+			d.cfg.Logger.Warn("stall safety delivery failed", "error", err)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+func newStallSafetyManager(q *quotaStopManager, idle *idleWakeManager, limit time.Duration) (*stallSafetyManager, error) {
+	state, err := newStallSafetyState(q.store)
+	if err != nil {
+		return nil, err
+	}
+	if limit <= 0 {
+		limit = 30 * time.Minute
+	}
+	m := &stallSafetyManager{state: state, limit: limit, now: time.Now}
+	m.lookup = q.jobForPane
+	m.sequence = func(ctx context.Context, pane string) (int64, error) {
+		q.store.mu.Lock()
+		defer q.store.mu.Unlock()
+		var seq int64
+		err := q.store.db.QueryRowContext(ctx, `SELECT state_change_seq FROM idle_wake_panes WHERE pane_id=?`, pane).Scan(&seq)
+		return seq, err
+	}
+	m.signalled = func(ctx context.Context, job HubActiveJob) (bool, error) {
+		a := &fleet.App{Jobs: filepath.Join(q.root, "jobs")}
+		return a.StallAttemptSignalled(job.JobID)
+	}
+	m.busy = func(ctx context.Context, job HubActiveJob, agent HerdrAgentState) (bool, error) {
+		a := &fleet.App{Runner: fleet.ExecRunner{}, HerdrSession: q.session(job.JobID, agent.PaneID)}
+		return a.StallForegroundBusy(ctx, agent.PaneID, agent.Harness)
+	}
+	m.read = q.read
+	m.explain = func(ctx context.Context, pane string) (string, error) {
+		out, err := herdrCommandOutput(withRelaySession(ctx, q.session("", pane)), pane, "agent", "explain", pane, "--json")
+		return string(out), err
+	}
+	m.detect = func(ctx context.Context, job string, agent HerdrAgentState, screen, explanation string, now time.Time) (quotastop.Stop, bool) {
+		rule, kind := parseHerdrExplain([]byte(explanation))
+		if kind == "" {
+			kind = agent.Harness
+		}
+		evidence := devinPaneEvidence(withRelaySession(ctx, q.session(job, agent.PaneID)), agent.PaneID, kind)
+		stop, _, ok := quotastop.Detect(screen, kind, rule, evidence, now, time.Local)
+		_, _, _, profile := q.jobFacts(job, "")
+		return fleet.QuotaStopPool(stop, profile), ok
+	}
+	m.record = q.hk.note
+	m.act = func(ctx context.Context, r stallSafetyExamination, detail stallSafetyDetails, key string, now time.Time) error {
+		if detail.Quota {
+			job, ok := q.jobForPane(ctx, r.pane)
+			if !ok || job.JobID != r.job {
+				return nil
+			}
+			role, inherited, taskID, _ := q.jobFacts(job.JobID, job.Role)
+			job.Role = role
+			if role == "reviewer" {
+				return fleet.AnnounceQuotaStop(ctx, filepath.Join(q.root, "jobs"), job.JobID, r.pane, detail.Stop)
+			}
+			candidate := idleWakeCandidate{PaneID: r.pane, WorkspaceID: detail.Agent.WorkspaceID, Label: detail.Agent.Label, Status: detail.Agent.Status, EventID: "stall:" + key, JobID: job.JobID, OwnerLane: job.OwnerLane}
+			idle.mu.Lock()
+			defer idle.mu.Unlock()
+			q.store.mu.Lock()
+			_, err := q.store.db.ExecContext(ctx, `INSERT OR IGNORE INTO quota_stall_wakes(event_id,pane_id,state_change_seq) VALUES(?,?,?)`, candidate.EventID, r.pane, detail.WakeSeq)
+			q.store.mu.Unlock()
+			if err != nil {
+				return err
+			}
+			return q.actOnQuotaStop(ctx, candidate, job, inherited, taskID, detail.Stop, "stall-examination", now)
+		}
+		text, _ := truncateLaneEventText(fmt.Sprintf("[stall] job %s pane %s: %s", r.job, r.pane, r.screen))
+		id := "stall:" + key
+		record := emitRecord{Type: "lane.event", Epoch: 1, CreatedAt: time.UnixMilli(r.since).UTC().Format(time.RFC3339Nano), OwnerLane: detail.Job.OwnerLane, EventID: id, Text: text, PaneID: r.pane, NotifyType: "blocked"}
+		if _, err := ensureLaneEmitRecord(q.root, record); err != nil {
+			return err
+		}
+		if q.enqueue != nil {
+			q.enqueue(hubScannedRelayEvent{Kind: "lane.event", NotifyType: "blocked", HubActiveJob: HubActiveJob{JobID: laneEventTransportID(record.OwnerLane, id), Epoch: 1, OwnerLane: record.OwnerLane}, PaneID: r.pane, EventID: id, Text: text})
+		}
+		return nil
+	}
+	return m, nil
+}
+
+func (m *stallSafetyManager) scan(ctx context.Context, agents []HerdrAgentState, now time.Time) error {
+	for _, agent := range agents {
+		job, ok := m.lookup(ctx, agent.PaneID)
+		if !ok || job.OwnerLane == "" {
+			continue
+		}
+		if agent.Status == "working" || agent.Status == "unknown" {
+			if _, err := m.state.observe(ctx, job.JobID, agent.PaneID, true, false, now, m.limit); err != nil {
+				return err
+			}
+			continue
+		}
+		signalled, err := m.signalled(ctx, job)
+		if err != nil {
+			continue
+		}
+		if signalled {
+			if _, err := m.state.observe(ctx, job.JobID, agent.PaneID, true, false, now, m.limit); err != nil {
+				return err
+			}
+			continue
+		}
+		busy, err := m.busy(ctx, job, agent)
+		if err != nil {
+			continue
+		}
+		due, err := m.state.observe(ctx, job.JobID, agent.PaneID, false, busy, now, m.limit)
+		if err != nil {
+			return err
+		}
+		if !due {
+			continue
+		}
+		seq, err := m.sequence(ctx, agent.PaneID)
+		if err != nil || seq <= 0 {
+			continue
+		}
+		screen, err := m.read(ctx, agent.PaneID)
+		if err != nil {
+			screen = "screen unavailable"
+		}
+		explanation, err := m.explain(ctx, agent.PaneID)
+		if err != nil {
+			explanation = "herdr explanation unavailable"
+		}
+		stop, quota := m.detect(ctx, job.JobID, agent, screen, explanation, now)
+		details, err := json.Marshal(stallSafetyDetails{Job: job, Agent: agent, Stop: stop, Quota: quota, WakeSeq: seq})
+		if err != nil {
+			return err
+		}
+		if _, err = m.state.recordExamination(ctx, job.JobID, agent.PaneID, screen, explanation, string(details)); err != nil {
+			return err
+		}
+	}
+	return m.drain(ctx, now)
+}
+
+func (m *stallSafetyManager) drain(ctx context.Context, now time.Time) error {
+	m.state.store.mu.Lock()
+	rows, err := m.state.store.db.QueryContext(ctx, `SELECT job,pane,since_ms,screen,explanation,details,hk_done,action_done FROM stall_safety_examinations WHERE details<>'' AND (hk_done=0 OR action_done=0)`)
+	if err != nil {
+		m.state.store.mu.Unlock()
+		return err
+	}
+	var pending []stallSafetyExamination
+	for rows.Next() {
+		var r stallSafetyExamination
+		if err = rows.Scan(&r.job, &r.pane, &r.since, &r.screen, &r.explanation, &r.details, &r.hkDone, &r.actionDone); err != nil {
+			break
+		}
+		pending = append(pending, r)
+	}
+	if err == nil {
+		err = rows.Err()
+	}
+	_ = rows.Close()
+	m.state.store.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	for _, r := range pending {
+		var details stallSafetyDetails
+		if err := json.Unmarshal([]byte(r.details), &details); err != nil {
+			return err
+		}
+		sum := sha256.Sum256([]byte(fmt.Sprintf("%s\x00%s\x00%d", r.job, r.pane, r.since)))
+		key := hex.EncodeToString(sum[:])
+		if r.hkDone == 0 {
+			action := "blocked owner"
+			if details.Quota {
+				action = "quota-stop action"
+			}
+			body := fmt.Sprintf("job: %s\npane: %s\naction: %s\nherdr explanation:\n%s\nscreen:\n%s\n", r.job, r.pane, action, r.explanation, r.screen)
+			if err := m.record(ctx, "stall-examination/"+key, r.job, body); err == nil {
+				if err := m.mark(ctx, r, "hk_done"); err != nil {
+					return err
+				}
+			}
+		}
+		if r.actionDone == 0 {
+			if err := m.act(ctx, r, details, key, now); err == nil {
+				if err := m.mark(ctx, r, "action_done"); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func (m *stallSafetyManager) mark(ctx context.Context, r stallSafetyExamination, column string) error {
+	if column != "hk_done" && column != "action_done" {
+		return fmt.Errorf("invalid stall outbox field")
+	}
+	m.state.store.mu.Lock()
+	defer m.state.store.mu.Unlock()
+	_, err := m.state.store.db.ExecContext(ctx, `UPDATE stall_safety_examinations SET `+column+`=1 WHERE job=? AND pane=? AND since_ms=?`, r.job, r.pane, r.since)
+	return err
+}
