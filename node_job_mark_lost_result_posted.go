@@ -27,10 +27,10 @@ const reviewerResultSettle = 10 * time.Minute
 // nodeJobMarkReviewerResultPosted is job.mark_lost for end_reason
 // reviewer_result_posted. The reviewer's own result stands in for the pane
 // proof, so its pane may still be open: the node's ended-job pane sweep closes
-// it once the record is terminal. The node proves, from its own job directory
+// it once the job's ledger ends. The node proves, from its own job directory
 // and while holding the job's operation lock (the one `panewire done` and the
 // watcher's quota-stop records take, so none of them can land between the proof
-// and the hk write):
+// and the writes):
 //
 //   - no completion after the attempt and no newer claim;
 //   - the job is a reviewer;
@@ -38,12 +38,16 @@ const reviewerResultSettle = 10 * time.Minute
 //     record with the successor's pointer);
 //   - the pane is not working (a reviewer running `done` is working);
 //   - the job posted a result (a non-null findings object or a report on disk)
-//     and the newest result file has been unchanged for reviewerResultSettle.
+//     and the result files did not change while the node read them and have
+//     been unchanged for reviewerResultSettle.
 //
-// Then it appends a final job.lost event to the job's ledger (what the pane
-// sweep reads) and writes the hk record lost.
-//
-// Any refusal writes nothing; the hub asks again on its next pass.
+// Then it writes the hk record lost, and only then appends a final job.lost
+// event to the job's ledger, which is what the pane sweep reads. That order
+// keeps the sweep from acting on a job whose hk write is still pending: it
+// cannot see an end before hk holds this end_reason. A crash or failure between
+// the two leaves hk lost with this end_reason and a ledger not yet ended; the
+// hub's next pass asks again, and the node, finding that record, only appends
+// the missing event.
 func (client *HubClient) nodeJobMarkReviewerResultPosted(ctx context.Context, args nodeJobMarkLostArgs) (any, string) {
 	refuse := func(outcome string) (any, string) { return nodeJobMarkLostResult{Outcome: outcome}, "" }
 	root, dir, found, err := client.openNodeJobDir(args.Job)
@@ -67,8 +71,7 @@ func (client *HubClient) nodeJobMarkReviewerResultPosted(ctx context.Context, ar
 	defer unlock()
 
 	// Everything below runs under the lock, so a completion or a quota-stop
-	// record written before it is seen and one written after it is refused or
-	// seen by its writer.
+	// record written before it is seen and one written after it waits for it.
 	ledger, err := client.openNodeJobLedger(args.Job, args.PaneID, args.Label)
 	if errors.Is(err, os.ErrNotExist) {
 		return refuse(nodeJobMarkLostLedgerMissing)
@@ -86,13 +89,32 @@ func (client *HubClient) nodeJobMarkReviewerResultPosted(ctx context.Context, ar
 	if err != nil {
 		return nil, "mark_lost_failed"
 	}
+	store, err := client.nodeJobStoreForCommand()
+	if err != nil {
+		return nil, "mark_lost_failed"
+	}
+	record, err := store.Get(ctx, args.Job)
+	if err != nil {
+		return nil, "mark_lost_failed"
+	}
+	switch state, _ := record["state"].(string); state {
+	case "claimed", "spawned":
+	case "lost":
+		if record["end_reason"] != reviewerResultPosted {
+			return refuse(nodeJobMarkLostCompleted)
+		}
+		// This end's hk write landed; the ledger event may not have.
+		return client.recordReviewerResultEnd(ctx, args, target)
+	default:
+		return refuse(nodeJobMarkLostCompleted)
+	}
+
 	switch {
 	case target.role != reviewerRole:
 		return refuse(nodeJobMarkLostNotReviewer)
 	case target.announced || target.intent:
 		return refuse(nodeJobMarkLostQuotaStopped)
 	}
-	newest, stamped := newestResultFileTime(root)
 
 	// An unreadable herdr list fails the command (the hub retries); a pane that
 	// is not listed is a reviewer that has stopped.
@@ -106,6 +128,12 @@ func (client *HubClient) nodeJobMarkReviewerResultPosted(ctx context.Context, ar
 		}
 	}
 
+	// The result and its files are read between two looks at the files: a write
+	// that lands during the read changes the second look and the end is refused.
+	before := resultFileStampsOf(root)
+	if reviewerResultReadHook != nil {
+		reviewerResultReadHook()
+	}
 	raw, code := client.nodeJobResult(nodeJobResultArgs{Job: args.Job})
 	if code != "" {
 		return nil, code
@@ -114,46 +142,76 @@ func (client *HubClient) nodeJobMarkReviewerResultPosted(ctx context.Context, ar
 	if !ok {
 		return nil, "mark_lost_failed"
 	}
-	if !result.Found || !nodeResultPosted(result) || !stamped {
+	after := resultFileStampsOf(root)
+	if !result.Found || !nodeResultPosted(result) || len(after) == 0 {
 		return refuse(nodeJobMarkLostResultMissing)
 	}
-	if client.nowUTC().Sub(newest) < reviewerResultSettle {
+	if !resultFileStampsEqual(before, after) || client.nowUTC().Sub(after.newest()) < reviewerResultSettle {
 		return refuse(nodeJobMarkLostResultSettling)
 	}
 
-	store, err := client.nodeJobStoreForCommand()
-	if err != nil {
+	if err := store.Put(ctx, args.Job, map[string]any{"state": "lost", "at": client.nowUTC(), "end_reason": reviewerResultPosted}); err != nil {
 		return nil, "mark_lost_failed"
 	}
-	// The node's ended-job pane sweep reads the end from the local ledger, so
-	// the ledger gets its final job.lost before hk is written: a failure after
-	// it is retried by the hub's next pass, which finds the ledger ended and
-	// writes hk only.
+	return client.recordReviewerResultEnd(ctx, args, target)
+}
+
+// reviewerResultReadHook is a test seam: it runs between the two looks at the
+// result files, where a reviewer's write can land.
+var reviewerResultReadHook func()
+
+// recordReviewerResultEnd appends the final job.lost to the ledger unless it
+// already ended, and answers lost.
+func (client *HubClient) recordReviewerResultEnd(ctx context.Context, args nodeJobMarkLostArgs, target nodeCloseTarget) (any, string) {
 	if !target.ended {
 		if err := fleet.RecordJobEnded(ctx, filepath.Join(client.jobsInboxRoot, "jobs"), args.Job, args.PaneID, reviewerResultPosted); err != nil {
 			return nil, "mark_lost_failed"
 		}
 	}
-	record := map[string]any{"state": "lost", "at": client.nowUTC(), "end_reason": reviewerResultPosted}
-	if err := store.Put(ctx, args.Job, record); err != nil {
-		return nil, "mark_lost_failed"
-	}
 	return nodeJobMarkLostResult{Outcome: nodeJobMarkLostLost}, ""
 }
 
-// newestResultFileTime is the latest modification time of findings.json and
-// report.md in the job directory; ok is false when neither is a regular file.
-func newestResultFileTime(job *os.Root) (newest time.Time, ok bool) {
+// resultFileStamp is what one look at a result file saw.
+type resultFileStamp struct {
+	mod  time.Time
+	size int64
+}
+
+// resultFileStamps maps findings.json and report.md, when they are regular
+// files, to their modification time and size.
+type resultFileStamps map[string]resultFileStamp
+
+func resultFileStampsOf(job *os.Root) resultFileStamps {
+	stamps := resultFileStamps{}
 	for _, name := range []string{"findings.json", "report.md"} {
-		info, err := job.Lstat(name)
-		if err != nil || !info.Mode().IsRegular() {
-			continue
-		}
-		if !ok || info.ModTime().After(newest) {
-			newest, ok = info.ModTime(), true
+		if info, err := job.Lstat(name); err == nil && info.Mode().IsRegular() {
+			stamps[name] = resultFileStamp{info.ModTime(), info.Size()}
 		}
 	}
-	return newest, ok
+	return stamps
+}
+
+func resultFileStampsEqual(a, b resultFileStamps) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for name, stamp := range a {
+		if other, ok := b[name]; !ok || !stamp.mod.Equal(other.mod) || stamp.size != other.size {
+			return false
+		}
+	}
+	return true
+}
+
+// newest is the latest modification time among the stamped files.
+func (stamps resultFileStamps) newest() time.Time {
+	var newest time.Time
+	for _, stamp := range stamps {
+		if stamp.mod.After(newest) {
+			newest = stamp.mod
+		}
+	}
+	return newest
 }
 
 // nodeResultPosted reports a job.result that carries a validated findings

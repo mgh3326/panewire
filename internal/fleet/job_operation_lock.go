@@ -57,6 +57,33 @@ func (a *App) lockJobOperation(id string, wait time.Duration) (func(), error) {
 	}
 }
 
+// ReviewerResultPosted is the reason of the final job.lost, and the hk
+// end_reason, of a reviewer job the hub ended because it posted its result.
+const ReviewerResultPosted = "reviewer_result_posted"
+
+// endedByResultPosted reports that the job's newest end event is the hub's
+// posted-result end (RecordJobEnded). A claim, spawn, re-prompt or another end
+// after it clears it. A quota-stop record that waited for the operation lock
+// checks this under the lock and writes nothing when the end won, so it cannot
+// re-arm a hand-over for a job hk already holds lost.
+func (a *App) endedByResultPosted(id string) bool {
+	j, err := a.job(id)
+	if err != nil {
+		return false
+	}
+	ended := false
+	for _, ev := range j.Events {
+		switch ev.Kind {
+		case "job.lost":
+			ended = str(ev.Payload, "reason") == ReviewerResultPosted
+		case "job.claim", "job.claimed", "job.reclaim", "job.spawned", "job.reprompted",
+			"job.completed", "job.joined", "job.revoked", "job.handed_off":
+			ended = false
+		}
+	}
+	return ended
+}
+
 // RecordJobEnded appends the final job.lost event of a job the hub ended
 // because it posted its result (hk 4684). The node's ended-job pane sweep
 // recognises a reviewer's end from its local ledger, not from hk, so without

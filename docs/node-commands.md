@@ -513,16 +513,19 @@ still open when the hub ends the job and the node's ended-job sweep closes it
 afterwards. The node takes the job's operation lock without waiting (the lock
 `panewire done` and the watcher's quota-stop records hold; a held lock answers
 `operation-busy`) and, under it, applies the `job.completed` and newer-claim
-checks, then refuses unless: the ledger names role `reviewer`; no quota stop is
-announced (`job.lost` `quota_stop`, not final) or pending
-(`job.quota_stop_intent`); no listed agent with that pane id and label is
-`working` (an unreadable agent list fails the command, `herdr_failed`-style);
-and the job directory holds a findings object that is not JSON `null` or a
-`report.md`, the newest of them unchanged for 10 minutes.
-Only then does it append a final `job.lost` event (reason
-`reviewer_result_posted`) to the job's ledger, which the ended-job pane sweep
-reads ([pane-sweep.md](pane-sweep.md)), and write the hk record; a ledger that
-already ended is not given a second event.
+checks and reads the hk record: a record that is not `claimed` or `spawned`
+answers `completed`, except a `lost` one carrying this `end_reason`, for which
+the node only appends the ledger event it may be missing. For a live record it
+refuses unless: the ledger names role `reviewer`; no quota stop is announced
+(`job.lost` `quota_stop`, not final) or pending (`job.quota_stop_intent`); no
+listed agent with that pane id and label is `working` (an unreadable agent list
+fails the command); and the job directory holds a findings object that is not
+JSON `null` or a `report.md`, the files unchanged between a look before and a
+look after the node reads the result, and the newest of them unchanged for 10
+minutes. Only then does it write the hk record lost and, after that, append a
+final `job.lost` event (reason `reviewer_result_posted`) to the job's ledger,
+which the ended-job pane sweep reads ([pane-sweep.md](pane-sweep.md)); a ledger
+that already ended is not given a second event.
 
 | `outcome` | Meaning |
 | --- | --- |
@@ -534,7 +537,7 @@ already ended is not given a second event.
 | `newer-claim` | the local ledger holds a `job.reclaim` event; nothing is written. |
 | `ledger_missing` | the job dir or its `events/` is gone, so the ledger cannot prove the attempt; nothing is written. |
 | `result-missing` | `reviewer_result_posted` only: the job directory holds no findings object and no report; nothing is written. |
-| `result-settling` | `reviewer_result_posted` only: the newest result file changed less than 10 minutes ago; nothing is written. |
+| `result-settling` | `reviewer_result_posted` only: a result file changed less than 10 minutes ago or while the node read it; nothing is written. |
 | `pane-working` | `reviewer_result_posted` only: the job's pane is `working`; nothing is written. |
 | `operation-busy` | `reviewer_result_posted` only: the job's operation lock is held (`done` or a quota-stop record in flight); nothing is written. |
 | `quota-stopped` | `reviewer_result_posted` only: a quota stop is announced or pending, so the hub's hand-over owns the record; nothing is written. |

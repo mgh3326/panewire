@@ -299,3 +299,66 @@ func TestReviewerEndRetriesAStillFinishingReviewerQuietly(t *testing.T) {
 		})
 	}
 }
+
+// A limit on the newest rows would displace an older orphan from every pass
+// once enough newer reviewers exist. The pass pages through the window: with a
+// page of one row, the older of two reviewer operations is still ended.
+func TestReviewerEndPagesThroughEveryReviewerOperation(t *testing.T) {
+	old := reviewerEndPage
+	reviewerEndPage = 1
+	t.Cleanup(func() { reviewerEndPage = old })
+	hub, node, jobs, _ := reviewerEndNode(t, reviewerEndPosted)
+	second := reviewerReleaseRequest(reviewerRole, true)
+	second.Args = append([]string(nil), second.Args...)
+	for i, arg := range second.Args {
+		if arg == "2" && i > 0 && second.Args[i-1] == "--review-pass" {
+			second.Args[i] = "3"
+		}
+	}
+	held, _, err := hub.inbox.store.claimSpawn(t.Context(), second, "test-job-r2", "parent", time.Now().Add(time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = hub.inbox.store.completeSpawn(t.Context(), held, hubSpawnOutcome{RC: 0, Host: "machine-a", Pane: roleHeldPane}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	jobs.mu.Lock()
+	jobs.records["test-job-r2"] = map[string]any{"state": "spawned"}
+	jobs.mu.Unlock()
+
+	hub.endPostedReviewerJobs(t.Context())
+
+	want := []string{"job.result", "job.mark_lost", "job.result", "job.mark_lost"}
+	if got := node.seen(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("node commands %v, want both reviewers ended: %v", got, want)
+	}
+}
+
+// The hk write landed and the ledger event did not (a crash between the two):
+// the record is already lost with this end_reason, but the node's pane sweep
+// sees no end. The hub asks the node to finish it, without re-reading the
+// result, and settles only once the node has.
+func TestReviewerEndFinishesAnEndWhoseLedgerEventIsMissing(t *testing.T) {
+	hub, node, jobs, sink := reviewerEndNode(t, reviewerEndPosted)
+	jobs.mu.Lock()
+	jobs.records["test-job"]["state"] = "lost"
+	jobs.records["test-job"]["end_reason"] = reviewerResultPosted
+	jobs.mu.Unlock()
+	node.reply("job.mark_lost", map[string]any{"error": "mark_lost_failed"})
+
+	hub.endPostedReviewerJobs(t.Context())
+	if want := []string{"job.mark_lost"}; !reflect.DeepEqual(node.seen(), want) {
+		t.Fatalf("node commands %v, want the finish asked and the result not re-read", node.seen())
+	}
+
+	node.reply("job.mark_lost", map[string]any{"result": map[string]any{"outcome": "lost"}})
+	hub.endPostedReviewerJobs(t.Context())
+	hub.endPostedReviewerJobs(t.Context())
+
+	if want := []string{"job.mark_lost", "job.mark_lost"}; !reflect.DeepEqual(node.seen(), want) {
+		t.Fatalf("node commands %v, want the finish retried once, then nothing", node.seen())
+	}
+	if logged := sink.String(); strings.Count(logged, "hub ended a reviewer job with a posted result") != 1 {
+		t.Fatalf("log %q, want the end line once", logged)
+	}
+}

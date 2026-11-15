@@ -251,9 +251,10 @@ record and a lane row. The node's ended-job pane sweep needs a terminal record
 neither takes it, and the node's 64-row lane cap fills (hk 4658). Every five
 minutes the hub writes the end of each such job. The rule:
 
-- **Which jobs.** The pass reads the persisted `succeeded` reviewer operations
-  created in the last 14 days (newest 1000), not the nodes' active-job
-  heartbeat: that view drops a pane idle for 30 minutes, caps each node at 32
+- **Which jobs.** The pass pages through every persisted `succeeded` reviewer
+  operation created in the last 14 days (500 rows a page, by creation time and
+  request id, so no newer row displaces an older orphan), not the nodes'
+  active-job heartbeat: that view drops a pane idle for 30 minutes, caps each node at 32
   jobs and forgets a spawn two minutes after it started, so it would miss
   exactly the long-orphaned jobs. A job whose node is not connected waits for
   the next pass; a job found ended (a terminal hk record) is not read again.
@@ -263,7 +264,9 @@ minutes the hub writes the end of each such job. The rule:
   `report.md` on disk. A reviewer writes `findings.json`, then `report.md`, then
   runs `done`, and hk never rewrites a lost record, so the node ends the job
   only when the newest result file has been unchanged for 10 minutes
-  (`reviewerResultSettle`) and the pane is not `working`. An idle, done or
+  (`reviewerResultSettle`), the files did not change while the node read the
+  result (it looks at them before and after, and refuses on any difference), and
+  the pane is not `working`. An idle, done or
   blocked pane alone is never proof: an idle reviewer can be waiting on a
   background command, a wakeup or an answer.
 - **The record is ended through the node.** The hub sends `job.mark_lost` with
@@ -277,17 +280,24 @@ minutes the hub writes the end of each such job. The rule:
   `panewire done`, which belongs to the job itself or to mergewake's reap.
 - **The hub never closes the pane.** Closing it belongs to the node's ended-job
   sweep (hk 4693, PR #577), which reads a reviewer's end from the job's local
-  ledger and closes on its own proof of pane ownership. So the node's end first
-  appends a final `job.lost` event (reason `reviewer_result_posted`) to the
-  ledger, then writes the hk record; a failed hk write is retried without a
-  second event. The owner lane receives that `job.lost` like any other.
+  ledger and closes on its own proof of pane ownership. So the node's end writes
+  the hk record first and only then appends a final `job.lost` event (reason
+  `reviewer_result_posted`) to the ledger: the sweep cannot see an end before hk
+  holds this `end_reason`, so it cannot write its own generic lost record over
+  it. If the node fails between the two, hk is lost with this `end_reason` and
+  the ledger is not ended; the hub reads that on its next pass and asks the node
+  again, and the node only appends the missing event. The owner lane receives
+  that `job.lost` like any other.
 - **A refused or failed write is retried on every pass.** A reviewer that is
   still finishing (`result-settling`, `pane-working`, `operation-busy`,
   `result-missing`) is asked again quietly.
 - **A job with an announced quota stop is skipped.** The hub's quota-stop
   hand-over writes that record with the successor's pointer and hk never
   rewrites a lost record ([quota-stop.md](quota-stop.md)); the node refuses the
-  end with `quota-stopped`, and the watcher's own record waits for the same lock.
+  end with `quota-stopped`. The watcher's own announce and intent records wait
+  for the same lock and, once they hold it, re-read the job and write nothing if
+  this end already won, so a stale announcement cannot re-arm a hand-over for an
+  ended job.
 
 The pass logs each job once per outcome, never once per pass:
 `hub ended a reviewer job with a posted result` (INFO, with `job`,

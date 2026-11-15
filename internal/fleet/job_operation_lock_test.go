@@ -86,3 +86,35 @@ func TestRecordJobEndedReadsAsAnEndToThePaneSweep(t *testing.T) {
 		t.Fatalf("job after the end: terminal=%v ended=%q closed=%v, want the sweep to see an end", j.Terminal, j.Ended, paneSweepClosed(j))
 	}
 }
+
+// A quota-stop record that waited for the lock while the hub's posted-result end
+// ran must not append its announcement afterwards: the watcher's snapshot is
+// stale, announcedQuotaStop would read the newest event as a live hand-over, and
+// the hub could start a replacement for a job hk already holds lost without a
+// successor pointer. Under the lock it re-reads the job and writes nothing.
+func TestQuotaStopRecordsWriteNothingAfterThePostedResultEnd(t *testing.T) {
+	a, _, _, _ := quotaStopFixture(t, "reviewer", "idle", "I stopped here.\n")
+	stale, err := a.job("j") // the watcher's snapshot, taken before the end
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := RecordJobEnded(context.Background(), a.Jobs, "j", "w:p1", ReviewerResultPosted); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := a.job("j")
+
+	if err := a.quotaStopAnnounce(context.Background(), stale, quotastop.Stop{Pool: "claude"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.recordQuotaIntent(context.Background(), stale, quotastop.Stop{Pool: "claude"}); err != nil {
+		t.Fatal(err)
+	}
+
+	after, _ := a.job("j")
+	if len(after.Events) != len(before.Events) {
+		t.Fatalf("events grew from %d to %d after the end: %+v", len(before.Events), len(after.Events), after.Events[len(before.Events):])
+	}
+	if _, announced := announcedQuotaStop(after); announced {
+		t.Fatal("a stale announcement re-armed a hand-over for an ended job")
+	}
+}

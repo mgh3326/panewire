@@ -339,6 +339,12 @@ func (a *App) quotaStopAnnounce(ctx context.Context, j Job, stop quotastop.Stop)
 		return err
 	}
 	defer unlock()
+	if a.endedByResultPosted(j.ID) {
+		// The hub ended the job on its posted result while this record waited
+		// for the lock; announcing a hand-over now would start a replacement
+		// for a job hk already holds lost without a successor pointer.
+		return nil
+	}
 	return a.quotaStopEvent(ctx, j, stop, false)
 }
 
@@ -479,6 +485,9 @@ func (a *App) recordQuotaIntent(ctx context.Context, j Job, stop quotastop.Stop)
 		return err
 	}
 	defer unlock()
+	if a.endedByResultPosted(j.ID) {
+		return nil
+	}
 	payload := map[string]any{"pane_id": j.Pane, "pool": stop.Pool, "end_reason": QuotaStopEndReason(stop.Pool, stop.Reset, "", "")}
 	if !stop.Reset.IsZero() {
 		payload["reset_at"] = stop.Reset.UTC().Format(time.RFC3339)

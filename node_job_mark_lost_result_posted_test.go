@@ -42,6 +42,11 @@ func writeJobFile(t *testing.T, inbox, name, content string, age time.Duration) 
 // no pane).
 func postedResultClient(t *testing.T, inbox, paneStatus string) (*HubClient, *roleJobs, *nodeFakeHerdr) {
 	t.Helper()
+	// The end appends to the job's ledger, which creates the arbiter state
+	// database on first use. Under the package's shared state directory that
+	// database would make other tests' background quota reconciliation run, so
+	// each test keeps its own.
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	var rows []string
 	if paneStatus != "" {
 		rows = append(rows, nodeAgentJSON("w2:p3", "job-a", paneStatus, "/work/x"))
@@ -90,9 +95,11 @@ func jobLostEvents(t *testing.T, inbox string) []string {
 
 // The node's ended-job pane sweep reads a reviewer's end from the local ledger,
 // not from hk, so the end appends a final job.lost with the reason; without it
-// the pane would stay open (hk 4693). A failed hk write after it is retried by
-// the hub's next pass, which must not append a second event.
-func TestNodeJobMarkLostReviewerResultPostedWritesTheLedgerEndOnceAndRetriesHk(t *testing.T) {
+// the pane would stay open (hk 4693). hk is written first: a sweep that could see
+// the ledger end before hk holds this end_reason would close the pane and write
+// a generic lost record over it. A failed hk write therefore leaves the ledger
+// untouched.
+func TestNodeJobMarkLostReviewerResultPostedWritesHkBeforeTheLedger(t *testing.T) {
 	inbox := t.TempDir()
 	markLostJobEvents(t, inbox, "job-a", reviewerLedger("reviewer")...)
 	writeJobFile(t, inbox, "findings.json", `{"findings":[]}`, reviewerResultSettle+time.Hour)
@@ -102,8 +109,8 @@ func TestNodeJobMarkLostReviewerResultPostedWritesTheLedgerEndOnceAndRetriesHk(t
 	if result, code := nodeRun(t, client, nodeCommandJobMarkLost, postedResultArgs()); code == "" {
 		t.Fatalf("result=%v, want the hk failure reported", result)
 	}
-	if got := jobLostEvents(t, inbox); len(got) != 1 {
-		t.Fatalf("ledger job.lost events %v after the failed hk write, want the end recorded", got)
+	if got := jobLostEvents(t, inbox); len(got) != 0 {
+		t.Fatalf("ledger job.lost events %v after a failed hk write, want none", got)
 	}
 	store.mu.Lock()
 	store.putErr = nil
@@ -113,7 +120,77 @@ func TestNodeJobMarkLostReviewerResultPostedWritesTheLedgerEndOnceAndRetriesHk(t
 		t.Fatalf("retry: code=%q result=%v hk=%v", code, result, store.state("job-a"))
 	}
 	if got := jobLostEvents(t, inbox); len(got) != 1 {
-		t.Fatalf("ledger job.lost events %v after the retry, want still one", got)
+		t.Fatalf("ledger job.lost events %v after the retry, want one", got)
+	}
+}
+
+// hk written, ledger not (a crash or failure between the two): the hub asks
+// again, and the node, finding its own end_reason in hk, appends only the
+// missing event and writes hk no more. A second ask adds nothing.
+func TestNodeJobMarkLostReviewerResultPostedFinishesTheLedgerOfAnEndedRecord(t *testing.T) {
+	inbox := t.TempDir()
+	markLostJobEvents(t, inbox, "job-a", reviewerLedger("reviewer")...)
+	client, store, _ := postedResultClient(t, inbox, "idle")
+	store.records["job-a"] = map[string]any{"state": "lost", "end_reason": reviewerResultPosted}
+
+	for range 2 {
+		result, code := nodeRun(t, client, nodeCommandJobMarkLost, postedResultArgs())
+		if code != "" || result["outcome"] != nodeJobMarkLostLost {
+			t.Fatalf("code=%q result=%v", code, result)
+		}
+		if len(store.writes()) != 0 {
+			t.Fatalf("wrote hk over its own record: %v", store.writes())
+		}
+		if got := jobLostEvents(t, inbox); len(got) != 1 {
+			t.Fatalf("ledger job.lost events %v, want exactly one", got)
+		}
+	}
+}
+
+// A record another end already holds is not this end's to finish.
+func TestNodeJobMarkLostReviewerResultPostedLeavesAnotherTerminalRecord(t *testing.T) {
+	inbox := t.TempDir()
+	markLostJobEvents(t, inbox, "job-a", reviewerLedger("reviewer")...)
+	client, store, _ := postedResultClient(t, inbox, "idle")
+	store.records["job-a"] = map[string]any{"state": "lost", "end_reason": "quota_stop pool=claude"}
+	result, code := nodeRun(t, client, nodeCommandJobMarkLost, postedResultArgs())
+	if code != "" || result["outcome"] != nodeJobMarkLostCompleted {
+		t.Fatalf("code=%q result=%v", code, result)
+	}
+	if got := jobLostEvents(t, inbox); len(got) != 0 || len(store.writes()) != 0 {
+		t.Fatalf("events %v writes %v, want nothing written over another end", got, store.writes())
+	}
+}
+
+// A reviewer that creates or updates report.md while the node reads the result
+// leaves the files different between the two looks. The settle age taken before
+// the read would call the old findings.json settled, so the end is refused.
+func TestNodeJobMarkLostReviewerResultPostedRefusesAFileChangedDuringTheRead(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		write func(t *testing.T, inbox string)
+	}{
+		{"report.md appears", func(t *testing.T, inbox string) { writeJobFile(t, inbox, "report.md", "# review\n", 0) }},
+		{"findings.json is rewritten", func(t *testing.T, inbox string) {
+			writeJobFile(t, inbox, "findings.json", `{"findings":[{}]}`, reviewerResultSettle+2*time.Hour)
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			inbox := t.TempDir()
+			markLostJobEvents(t, inbox, "job-a", reviewerLedger("reviewer")...)
+			writeJobFile(t, inbox, "findings.json", `{"findings":[]}`, reviewerResultSettle+time.Hour)
+			client, store, _ := postedResultClient(t, inbox, "idle")
+			reviewerResultReadHook = func() { test.write(t, inbox) }
+			t.Cleanup(func() { reviewerResultReadHook = nil })
+
+			result, code := nodeRun(t, client, nodeCommandJobMarkLost, postedResultArgs())
+			if code != "" || result["outcome"] != nodeJobMarkLostResultSettling {
+				t.Fatalf("code=%q result=%v", code, result)
+			}
+			if len(store.writes()) != 0 || len(jobLostEvents(t, inbox)) != 0 {
+				t.Fatalf("wrote hk %v / ledger %v for a result that changed during the read", store.writes(), jobLostEvents(t, inbox))
+			}
+		})
 	}
 }
 

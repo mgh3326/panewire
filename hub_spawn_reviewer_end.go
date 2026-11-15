@@ -54,21 +54,30 @@ func (h *HubServer) runReviewerEnd(ctx context.Context) {
 	}
 }
 
-const (
-	// reviewerEndWindow bounds how far back the pass looks for a succeeded
-	// reviewer operation; reviewerEndLimit bounds the rows one pass reads.
-	reviewerEndWindow = 14 * 24 * time.Hour
-	reviewerEndLimit  = 1000
-)
+// reviewerEndWindow bounds how far back the pass looks for a succeeded
+// reviewer operation. reviewerEndPage is the rows one store read returns (a
+// variable so a test can force a second page). The pass pages through the whole
+// window: a limit on the newest rows would displace an older orphan from every
+// pass.
+const reviewerEndWindow = 14 * 24 * time.Hour
 
-// succeededReviewerSpawns lists the succeeded operations created since `since`
-// whose request mentions a reviewer, newest first. The role is confirmed from the
-// validated request by the caller; the match only narrows the rows read.
-func (s *laneInboxStore) succeededReviewerSpawns(parent context.Context, since time.Time, limit int) ([]hubSpawnTask, error) {
+var reviewerEndPage = 500
+
+// succeededReviewerSpawns lists one page of the succeeded operations created
+// since `since` whose request mentions a reviewer, newest first, starting after
+// the (created, request) cursor; a zero cursor starts at the newest. The role
+// is confirmed from the validated request by the caller; the match only narrows
+// the rows read.
+func (s *laneInboxStore) succeededReviewerSpawns(parent context.Context, since time.Time, after reviewerEndCursor, limit int) ([]hubSpawnTask, error) {
 	ctx, done := s.op(parent)
 	defer done()
-	rows, err := s.db.QueryContext(ctx, s.q(`SELECT `+spawnTaskColumns+` FROM spawn_operations WHERE status='succeeded' AND created_ms>=? AND payload LIKE ? ORDER BY created_ms DESC LIMIT ?`),
-		since.UnixMilli(), "%"+reviewerRole+"%", limit)
+	query := `SELECT ` + spawnTaskColumns + ` FROM spawn_operations WHERE status='succeeded' AND created_ms>=? AND payload LIKE ?`
+	args := []any{since.UnixMilli(), `%"` + reviewerRole + `"%`}
+	if after.request != "" {
+		query += ` AND (created_ms<? OR created_ms=? AND request_id<?)`
+		args = append(args, after.created, after.created, after.request)
+	}
+	rows, err := s.db.QueryContext(ctx, s.q(query+` ORDER BY created_ms DESC, request_id DESC LIMIT ?`), append(args, limit)...)
 	if err != nil {
 		return nil, err
 	}
@@ -84,41 +93,57 @@ func (s *laneInboxStore) succeededReviewerSpawns(parent context.Context, since t
 	return tasks, rows.Err()
 }
 
+// reviewerEndCursor is the position after the last row of a page.
+type reviewerEndCursor struct {
+	created int64
+	request string
+}
+
 // endPostedReviewerJobs ends every succeeded reviewer spawn whose job posted a
-// result and whose hk record is still claimed or spawned.
+// result and whose hk record is still claimed or spawned, paging through every
+// reviewer operation in the window.
 func (h *HubServer) endPostedReviewerJobs(ctx context.Context) {
 	if h.inbox == nil {
 		return
 	}
-	tasks, err := h.inbox.store.succeededReviewerSpawns(ctx, h.now().Add(-reviewerEndWindow), reviewerEndLimit)
-	if err != nil {
-		h.logger.Warn("reviewer end pass skipped", "reason", "store_unavailable")
-		return
-	}
+	since := h.now().Add(-reviewerEndWindow)
 	seen := map[string]bool{}
 	var app *fleet.App
-	for _, holder := range tasks {
-		if holder.Status != "succeeded" || !validNodeJobName(holder.Job) {
-			continue
+	var cursor reviewerEndCursor
+	for {
+		tasks, err := h.inbox.store.succeededReviewerSpawns(ctx, since, cursor, reviewerEndPage)
+		if err != nil {
+			h.logger.Warn("reviewer end pass skipped", "reason", "store_unavailable")
+			return
 		}
-		spawn, err := fleet.ValidateSubmission(holder.Request)
-		if err != nil || spawn.Role != reviewerRole {
-			continue
-		}
-		seen[holder.Job] = true
-		host := spawnHolderHost(holder)
-		if host == "" || h.reviewerEndSettledJob(holder.Job) || !h.nodeConnected(host) {
-			// Already seen terminal, or the node cannot answer: nothing to
-			// read or write, and the next pass looks again.
-			continue
-		}
-		if app == nil {
-			if app, err = h.newSpawnApp(io.Discard, io.Discard); err != nil {
-				h.logger.Warn("reviewer end pass skipped", "reason", "app_unavailable")
-				return
+		for _, holder := range tasks {
+			if holder.Status != "succeeded" || !validNodeJobName(holder.Job) {
+				continue
 			}
+			spawn, err := fleet.ValidateSubmission(holder.Request)
+			if err != nil || spawn.Role != reviewerRole {
+				continue
+			}
+			seen[holder.Job] = true
+			host := spawnHolderHost(holder)
+			if host == "" || h.reviewerEndSettledJob(holder.Job) || !h.nodeConnected(host) {
+				// Already ended, or the node cannot answer: nothing to read or
+				// write, and the next pass looks again.
+				continue
+			}
+			if app == nil {
+				if app, err = h.newSpawnApp(io.Discard, io.Discard); err != nil {
+					h.logger.Warn("reviewer end pass skipped", "reason", "app_unavailable")
+					return
+				}
+			}
+			h.endPostedReviewerJob(ctx, app, spawn, holder)
 		}
-		h.endPostedReviewerJob(ctx, app, spawn, holder)
+		if len(tasks) < reviewerEndPage {
+			break
+		}
+		last := tasks[len(tasks)-1]
+		cursor = reviewerEndCursor{created: last.Created.UnixMilli(), request: last.Request.RequestID}
 	}
 	h.retainReviewerEnd(seen)
 }
@@ -140,13 +165,23 @@ func (h *HubServer) endPostedReviewerJob(ctx context.Context, app *fleet.App, sp
 	if err != nil || !exists {
 		return
 	}
-	if state, _ := record["state"].(string); state != "claimed" && state != "spawned" {
+	name, host := heldAgentName(holder, record), spawnHolderHost(holder)
+	state, _ := record["state"].(string)
+	if state == "lost" && record["end_reason"] == reviewerResultPosted {
+		// This end's hk write landed but its ledger event may not have (a crash
+		// or failure between the two): the node finishes it, and only then is
+		// the job settled. Without the event the pane sweep never sees the end.
+		if validNodeJobName(name) {
+			h.finishReviewerEnd(ctx, app, spawn, holder, name, host)
+		}
+		return
+	}
+	if state != "claimed" && state != "spawned" {
 		// Terminal (or unknown to this pass): never read again while it stays
 		// in the window.
 		h.markReviewerEndSettled(holder.Job)
 		return
 	}
-	name, host := heldAgentName(holder, record), spawnHolderHost(holder)
 	if !validNodeJobName(name) {
 		return
 	}
@@ -159,24 +194,34 @@ func (h *HubServer) endPostedReviewerJob(ctx context.Context, app *fleet.App, sp
 		// The ordinary state of a reviewer still at work: nothing to log.
 		return
 	}
+	h.finishReviewerEnd(ctx, app, spawn, holder, name, host)
+}
+
+// finishReviewerEnd asks the node to write the job's end (hk record and ledger
+// event, node_job_mark_lost_result_posted.go) and logs the outcome.
+func (h *HubServer) finishReviewerEnd(ctx context.Context, app *fleet.App, spawn fleet.Spawn, holder hubSpawnTask, name, host string) {
 	marked, reason := h.markHolderJobLostBecause(ctx, app, holder, name, reviewerResultPosted)
 	if marked {
 		h.forgetReviewerEndLog(holder.Job)
 		h.markReviewerEndSettled(holder.Job)
+		if reason == nodeJobMarkLostCompleted {
+			// Another terminal record (the job's own `done`) won; hk holds it.
+			return
+		}
 		h.logger.Info("hub ended a reviewer job with a posted result", "end_reason", reviewerResultPosted,
-			"role_key", spawn.RoleKey(), "job", holder.Job, "holder_request", holder.Request.RequestID, "holder_host", host,
-			"findings_posted", len(ledger.Findings) > 0 && !isJSONNull(ledger.Findings), "report_posted", ledger.Report.Present)
+			"role_key", spawn.RoleKey(), "job", holder.Job, "holder_request", holder.Request.RequestID, "holder_host", host)
 		return
 	}
 	switch reason {
 	case nodeJobMarkLostQuotaStopped:
 		h.logReviewerEndOnce(holder.Job, reason, false, "hub kept a reviewer job", "host", host)
 	case nodeJobMarkLostResultMissing, nodeJobMarkLostResultSettling, nodeJobMarkLostPaneWorking, nodeJobMarkLostBusy:
-		// The reviewer is still finishing (its files are new, its pane works, or
-		// `done` holds the lock): the next pass asks again, and nothing is logged.
+		// The reviewer is still finishing (its files are new or changing, its
+		// pane works, or `done` holds the lock): the next pass asks again, and
+		// nothing is logged.
 	case nodeJobMarkLostCompleted:
-		// The job completed itself between the hk read and the node's check;
-		// hk holds the terminal record by the next pass.
+		// The job completed itself, or hk holds another terminal record, between
+		// the hk read and the node's check.
 	default:
 		h.logReviewerEndOnce(holder.Job, reason, true, "hub could not end a reviewer job", "host", host)
 	}
