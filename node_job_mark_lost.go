@@ -339,6 +339,13 @@ func (client *HubClient) openNodeJobLedger(job, pane, label string) (nodeJobLedg
 // claimed again under another label is caught by one or the other. Either
 // record being unreadable is no proof, and the caller keeps the record (hk
 // 4799).
+//
+// This runs only for a job whose own directory or events/ is absent (the
+// ledger read returned os.ErrNotExist), so the active list's age window cannot
+// hide this job's claim: a claim it could hide is an event inside that same
+// events/, whose presence would have made the ledger read succeed. A re-claim
+// that recorded events is answered by readNodeJobLedger as newer-claim
+// instead.
 func (client *HubClient) nodeJobNoLiveAttempt(ctx context.Context, job string) bool {
 	if client.jobsInboxRoot == "" {
 		return false

@@ -60,6 +60,30 @@ func TestNodeJobMarkLostHoldsWhenANewerSpawnIsExecuting(t *testing.T) {
 	}
 }
 
+// A re-claim recorded in the job's ledger is read there, never by the
+// no-attempt proof: the ledger answers newer-claim for a claim under another
+// label, and the hub keeps the hold. The proof runs only for a job with no
+// ledger left, where the active list's age window has no claim of this job to
+// hide.
+func TestNodeJobMarkLostHoldsOnANewerClaimUnderAnotherLabel(t *testing.T) {
+	inbox := t.TempDir()
+	markLostJobEvents(t, inbox, "job-a",
+		map[string]any{"kind": "job.claim", "payload": map[string]any{"agent_label": "job-a"}},
+		map[string]any{"kind": "job.reclaim", "payload": map[string]any{"agent_label": "job-a-r2"}},
+	)
+	client, store, fake := markLostClient(t, inbox, []string{nodeAgentList()}, markLostEmptyPanes)
+	result, code := nodeRun(t, client, nodeCommandJobMarkLost, nodeJobMarkLostArgs{Job: "job-a", Label: "job-a"})
+	if code != "" || result["outcome"] != nodeJobMarkLostNewerClaim {
+		t.Fatalf("code=%q result=%v", code, result)
+	}
+	if len(store.writes()) != 0 {
+		t.Fatalf("hk writes=%v", store.writes())
+	}
+	if len(fake.calls) != 0 {
+		t.Fatalf("herdr asked before the ledger decided: %v", fake.calls)
+	}
+}
+
 // Either record naming the job, under any label, is a live attempt.
 func TestJobAttemptLiveReadsBothRecords(t *testing.T) {
 	executing := []executingSpawn{{RequestID: "request-r2", Job: "job-a", Label: "job-a-r2"}}
