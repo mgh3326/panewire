@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"sync"
 )
 
 func (a *App) workPreset(ctx context.Context, args []string) (Spawn, error) {
@@ -124,7 +125,20 @@ type createdWorkspace struct {
 	rootPane  string
 }
 
+// workspaceResolveLocks serializes the list-then-create decision for one herdr
+// session and workspace label inside this process: concurrent node spawns
+// (hk 4578) run this engine in one process, and two that both saw the label
+// absent would each create a workspace, leaving the label ambiguous.
+var workspaceResolveLocks sync.Map // session + "\x00" + label -> *sync.Mutex
+
 func (a *App) resolveWorkspace(ctx context.Context, value string) (string, *createdWorkspace, error) {
+	lock, _ := workspaceResolveLocks.LoadOrStore(a.HerdrSession+"\x00"+value, &sync.Mutex{})
+	lock.(*sync.Mutex).Lock()
+	defer lock.(*sync.Mutex).Unlock()
+	return a.resolveWorkspaceLocked(ctx, value)
+}
+
+func (a *App) resolveWorkspaceLocked(ctx context.Context, value string) (string, *createdWorkspace, error) {
 	rows, err := a.workspaceRows(ctx, value)
 	if err != nil {
 		// Herdr ids are unambiguous; keep them usable when listing is unavailable.
