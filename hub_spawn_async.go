@@ -655,6 +655,18 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 			request.Args = append(request.Args, "--override-reason", "verified-cleanup-retry")
 		}
 	}
+	// The same test as the park below, so a parked pass emits no terminal
+	// refusal event on every recheck.
+	parks := func(err error) bool {
+		if err == nil || ctx.Err() != nil || task.Expires.IsZero() {
+			return false
+		}
+		if code, _, _ := strings.Cut(err.Error(), ":"); task.ClaimedHost != "" && len(task.Exclusions) > 0 && task.Outcome.NodeResult && code == "role_no_candidate" {
+			return false
+		}
+		return spawnParkReason(fleet.ErrorCode(err), err.Error()) != ""
+	}
+	app.Parks = parks
 	wakeGen := h.spawnWakeGen.Load()
 	err = app.ExecuteSubmission(ctx, request)
 	if transport.bound {
@@ -687,7 +699,7 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 	}
 	// No candidate can take it now: a request with a limit is parked, not
 	// ended, and is placed again on an event or its next check (hk 4661).
-	if err != nil && ctx.Err() == nil && !claimedAnswer && !task.Expires.IsZero() {
+	if !claimedAnswer && parks(err) {
 		if reason := spawnParkReason(fleet.ErrorCode(err), err.Error()); reason != "" {
 			// A recognised no-candidate refusal never ends the request: a
 			// failed or ambiguous park write leaves it accepted for the next

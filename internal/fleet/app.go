@@ -77,6 +77,9 @@ type App struct {
 	// hub coordinator sets it for queue-core spawns, whose record is produced
 	// from the persisted snapshot when the attempt reaches a terminal result.
 	PlacementOutbox bool
+	// Parks reports a refusal the hub parks instead of ending the request
+	// (hk 4661): it is not terminal, so no refusal event is emitted for it.
+	Parks func(error) bool
 	// SharedLatest reads one account's latest stored quota reading for the
 	// admission gate; nil reads handoffkeep (admission_native.go).
 	SharedLatest func(context.Context, string) (shared.Latest, error)

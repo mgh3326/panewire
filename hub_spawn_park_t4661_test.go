@@ -520,3 +520,40 @@ func TestLegacyRowWithoutLimitIsNotBackedOff_t4661(t *testing.T) {
 		t.Fatalf("legacy row parked: %q %v %v", got.ParkReason, got.NextCheck, err)
 	}
 }
+
+// A parked, unbound request holds no pool slot: liveSpawns leaves it out,
+// so it cannot make another request see its pool full.
+func TestParkedRequestHoldsNoPoolSlot_t4661(t *testing.T) {
+	h := asyncSpawnHub(t)
+	parked := claimParkRequest(t, h, 160, time.Now())
+	open := claimParkRequest(t, h, 161, time.Now())
+	parkNow(t, h, parked, spawnParkQuota)
+	live, err := h.inbox.store.liveSpawns(t.Context(), nil, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]bool{}
+	for _, task := range live {
+		seen[task.Request.RequestID] = true
+	}
+	if seen[parked.Request.RequestID] || !seen[open.Request.RequestID] {
+		t.Fatalf("live spawns %v: parked counted or accepted missing", seen)
+	}
+}
+
+// A claimed-harness retry keeps the immediate retry: hk holds the job claim
+// on that host, so it is never parked toward expires_at.
+func TestClaimedHarnessRetryIsNotBackedOff_t4661(t *testing.T) {
+	h := asyncSpawnHub(t)
+	task := claimParkRequest(t, h, 170, time.Now())
+	bound, err := h.inbox.store.bindSpawn(t.Context(), task.Request.RequestID, task.Attempt, boundaryTestNode(task, 467200, "machine-a"), time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	bound = sentSpawnFixture(t, h.inbox.store, bound)
+	claimed := hubSpawnOutcome{RC: 70, Stage: "launch", Reason: "launch_proof_failed", NodeResult: true}
+	got, err := h.inbox.store.unbindRefusedSpawn(t.Context(), bound, hubSpawnExclusion{Machine: "machine-a", Profile: "codex-sol", Reason: "launch_proof_failed", RC: 70}, &claimed, time.Now())
+	if err != nil || got.ParkReason != "" || got.ClaimedHost != "machine-a" {
+		t.Fatalf("claimed retry: park=%q claimed=%q err=%v", got.ParkReason, got.ClaimedHost, err)
+	}
+}

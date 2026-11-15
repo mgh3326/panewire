@@ -83,13 +83,14 @@ func livePlacedProfile(task hubSpawnTask) string {
 	return ""
 }
 
-// liveSpawns lists the operations that count toward a pool cap: accepted,
+// liveSpawns lists the operations that count toward a pool cap: accepted
+// (except a parked, unbound one: it holds no slot, hk 4661),
 // bound and dispatching ones, and succeeded ones whose job is in activeJobs or that
 // started after settled.
 func (s *laneInboxStore) liveSpawns(parent context.Context, activeJobs []string, settled time.Time) ([]hubSpawnTask, error) {
 	ctx, done := s.op(parent)
 	defer done()
-	query := `SELECT ` + spawnTaskColumns + ` FROM spawn_operations WHERE status IN ('accepted','bound','dispatching','bound_grant','dispatching_grant') OR status='succeeded' AND (created_ms>=? OR last_run_ms>=?`
+	query := `SELECT ` + spawnTaskColumns + ` FROM spawn_operations WHERE (status IN ('accepted','bound','dispatching','bound_grant','dispatching_grant') AND NOT (status='accepted' AND node_id IS NULL AND park_reason<>'')) OR status='succeeded' AND (created_ms>=? OR last_run_ms>=?`
 	args := []any{settled.UnixMilli(), settled.UnixMilli()}
 	if len(activeJobs) > 0 {
 		query += ` OR job IN (` + strings.TrimSuffix(strings.Repeat("?,", len(activeJobs)), ",") + `)`

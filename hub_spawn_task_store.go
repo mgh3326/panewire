@@ -514,7 +514,13 @@ func (s *laneInboxStore) unbindRefusedSpawn(parent context.Context, task hubSpaw
 		}
 		claimedResult = string(result)
 	}
-	parkReason, retryAt := spawnBackoffPark(s.spawnRetryAt(task, task.FailedAttempts+1, now))
+	// A claimed-harness retry is not backed off: hk holds the job claim on
+	// that host, and a park that ran into expires_at would give the request
+	// up with the claim still held. It retries at once as before.
+	parkReason, retryAt := "", int64(0)
+	if claimed == nil {
+		parkReason, retryAt = spawnBackoffPark(s.spawnRetryAt(task, task.FailedAttempts+1, now))
+	}
 	ctx, done := s.op(parent)
 	defer done()
 	result, err := s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET node_id=NULL,node_payload='',status='accepted',exclusions=?,failed_attempts=failed_attempts+1,park_reason=?,next_check_ms=?,claimed_host=CASE WHEN ?='' THEN claimed_host ELSE ? END,result=CASE WHEN ?='' THEN result ELSE ? END WHERE request_id=? AND attempt=? AND node_id=? AND status=? AND (claimed_host='' OR ?='' OR claimed_host=?)`), string(raw), parkReason, retryAt, claimedHost, claimedHost, claimedResult, claimedResult, task.Request.RequestID, task.Attempt, task.Node.RequestID, spawnStoredStatus(task.Status, task.Node), claimedHost, claimedHost)
