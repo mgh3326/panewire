@@ -3,6 +3,7 @@ package fleet
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	neturl "net/url"
 	"regexp"
 	"strings"
@@ -52,21 +53,15 @@ func (s Spawn) checkoutSpec() (*HubCheckout, string, error) {
 	if !spawnargs.ValidFetchRef(s.CheckoutRef) {
 		return nil, "", fail(exitUsage, "--checkout-ref must be pull/<n>/head or refs/heads/<branch>, got %q", s.CheckoutRef)
 	}
-	// The origin is the repository's remote in a form the node clones. A URL
-	// keeps the endpoint it names, port included (a spec may name an ssh or
-	// git port the -c path never sees); an scp-style remote becomes the https
-	// form the -c path uploads. A credential is refused rather than dropped,
-	// and the normalized origin must still name owner/repo.
-	const originRefusal = "--checkout-origin must be the repository's remote, naming owner/repo, with no credentials: https://, ssh:// or git:// (cloned as named, port included), or git@host:owner/repo and host:owner/repo (become https)"
-	origin, ok := specOrigin(s.CheckoutOrigin)
-	if !ok {
-		return nil, "", fail(exitUsage, "%s, got %q", originRefusal, s.CheckoutOrigin)
+	// The origin becomes the https form the -c path uploads. The node keeps one
+	// clone per repository and reuses it for every spawn, and each later fetch
+	// uses that clone's own remote, so the transport must not depend on which
+	// spawn cloned it. What https cannot keep is refused by name; a credential
+	// is never dropped.
+	origin, name, why := specOrigin(s.CheckoutOrigin)
+	if why != "" {
+		return nil, "", fail(exitUsage, "%s, got %q", why, s.CheckoutOrigin)
 	}
-	ownerRepo, ok := spawnargs.OriginRepo(origin)
-	if !ok {
-		return nil, "", fail(exitUsage, "%s, got %q", originRefusal, s.CheckoutOrigin)
-	}
-	name := ownerRepo[strings.IndexByte(ownerRepo, '/')+1:]
 	if !validID(name) || !hubKeyRule.MatchString(RepoKey(name)) {
 		return nil, "", fail(exitUsage, "--checkout-origin names repository %q, which is not a hub cwd key (lowercase letters, digits, dot, underscore or hyphen, at most 64)", name)
 	}
@@ -79,48 +74,52 @@ func (s Spawn) checkoutSpec() (*HubCheckout, string, error) {
 	}, name, nil
 }
 
-// specOrigin normalizes --checkout-origin to the origin the node clones. A URL
-// keeps the endpoint it names — scheme, host and port — so ssh://host:2222 and
-// git://host:9418 are cloned there, not on 443. Its userinfo is dropped,
-// because the node's prepare takes none, but a credential (an https userinfo or
-// any password) is refused rather than silently discarded. An scp-style remote
-// becomes the userinfo-free https form the -c path uploads; a one-character
-// host is a Windows drive letter, not a remote. A local path, an unlisted
-// scheme or an owner/repo-less path is refused.
-func specOrigin(raw string) (string, bool) {
+// originRule is the sentence --checkout-origin refusals share.
+const originRule = "--checkout-origin must be the repository's remote naming owner/repo, with no credentials: an https:// URL is used as named, and ssh://, git://, git@host:owner/repo or host:owner/repo become the same https form the -c path uploads"
+
+// specOrigin normalizes --checkout-origin to the origin the node clones, with
+// the repository name the hub keys the node's cwd_map by, or the sentence
+// saying why the value cannot be carried.
+//
+// The node keeps one clone per repository and reuses it for every spawn, and
+// each later fetch runs on that clone's own remote (nodeWorktreePrepare), so
+// the transport must not depend on which spawn cloned the repository: every
+// origin becomes the userinfo-free https form the -c path uploads. An endpoint
+// https cannot keep — an explicit ssh or git port — is refused by name rather
+// than dropped, a credential is refused rather than discarded, a one-character
+// host is a Windows drive letter and not a remote, and the result must name
+// owner/repo.
+func specOrigin(raw string) (origin, name, why string) {
 	if credentialedURL(raw) {
-		return "", false
+		return "", "", originRule
 	}
-	origin := raw
 	if strings.Contains(raw, "://") {
 		u, err := neturl.Parse(raw)
 		if err != nil || u.Host == "" || u.RawQuery != "" || u.Fragment != "" {
-			return "", false
+			return "", "", originRule
 		}
 		switch u.Scheme {
 		case "https", "ssh", "git":
 		default:
-			return "", false
+			return "", "", originRule
 		}
-		u.User = nil
-		origin = u.String()
-	} else {
-		host, rest, ok := strings.Cut(raw, ":")
-		if !ok || rest == "" || strings.HasPrefix(rest, "/") {
-			return "", false
+		if u.Scheme != "https" && u.Port() != "" {
+			return "", "", fmt.Sprintf("--checkout-origin names %s port %s, which the node's https clone does not keep: pass the https URL", u.Scheme, u.Port())
 		}
-		if at := strings.LastIndex(host, "@"); at >= 0 {
-			host = host[at+1:]
-		}
-		if len(host) < 2 || strings.Contains(host, "/") {
-			return "", false
-		}
-		origin = "https://" + host + "/" + rest
 	}
-	if _, ok := spawnargs.OriginRepo(origin); !ok {
-		return "", false
+	origin, ok := hubOrigin(raw)
+	if !ok {
+		return "", "", originRule
 	}
-	return origin, true
+	u, err := neturl.Parse(origin)
+	if err != nil || len(u.Hostname()) < 2 {
+		return "", "", originRule
+	}
+	ownerRepo, ok := spawnargs.OriginRepo(origin)
+	if !ok {
+		return "", "", originRule
+	}
+	return origin, ownerRepo[strings.IndexByte(ownerRepo, '/')+1:], ""
 }
 
 // checkoutWorktreeName is the directory the node prepares a job's checkout in,
