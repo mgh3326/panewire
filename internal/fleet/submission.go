@@ -515,25 +515,99 @@ func (s SpawnAttempt) print(out io.Writer, job string) {
 	fmt.Fprintf(out, "SPAWNED job=%s %s pane=%s%s\n", job, s, firstNonempty(s.Pane, "none"), laneUnregisteredSuffix(s.LaneUnregistered))
 }
 
+// SpawnStatusRecord is one spawn operation as the client reads it: the
+// fields `spawn status` prints, under the names it prints them.
+type SpawnStatusRecord struct {
+	Request string `json:"request"`
+	// State is the request state of spawn_request_state.go, today's name or
+	// a design name.
+	State       string `json:"state"`
+	Reason      string `json:"reason,omitempty"`
+	NextCheckAt string `json:"next_check_at,omitempty"`
+	ExpiresAt   string `json:"expires_at,omitempty"`
+	// RC is the hub's recorded result code; zero means it recorded none.
+	RC    int    `json:"rc,omitempty"`
+	Stage string `json:"stage,omitempty"`
+	Job   string `json:"job,omitempty"`
+}
+
+// line is the one line `spawn status` prints for the record.
+func (r SpawnStatusRecord) line() string {
+	line := "request=" + r.Request + " state=" + r.State
+	if r.Reason != "" {
+		line += " reason=" + r.Reason
+	}
+	if r.NextCheckAt != "" {
+		line += " next_check_at=" + r.NextCheckAt
+	}
+	if r.ExpiresAt != "" {
+		line += " expires_at=" + r.ExpiresAt
+	}
+	if r.RC != 0 {
+		line += " rc=" + strconv.Itoa(r.RC)
+	}
+	if r.Stage != "" {
+		line += " stage=" + r.Stage
+	}
+	if r.Job != "" {
+		line += " job=" + r.Job
+	}
+	return line
+}
+
+// ReadSpawnStatus reads a hub spawn operation once (GET /v1/spawns/<id>) and
+// returns its state and the fields a caller reports. An id that is not a
+// plain id, a transport failure, a non-200 answer or a body with no status is
+// an error.
+func (c *hubHTTP) ReadSpawnStatus(ctx context.Context, id string) (SpawnStatusRecord, error) {
+	if !validID(id) {
+		return SpawnStatusRecord{}, fail(exitUsage, "invalid spawn operation id")
+	}
+	status, raw, err := c.doIdempotent(ctx, http.MethodGet, "/v1/spawns/"+id, nil, 5*time.Second)
+	if err != nil {
+		return SpawnStatusRecord{}, err
+	}
+	var answer struct {
+		Job         string `json:"job_id"`
+		Request     string `json:"request_id"`
+		Status      string `json:"status"`
+		Reason      string `json:"reason"`
+		NextCheckAt string `json:"next_check_at"`
+		ExpiresAt   string `json:"expires_at"`
+		// Result.RC and Result.Stage alone are read: a reason's refusal text
+		// may name a path on the executing node, and the wait already prints
+		// only these three.
+		Result struct {
+			RC     int    `json:"rc"`
+			Stage  string `json:"stage"`
+			Reason string `json:"reason"`
+		} `json:"result"`
+	}
+	if status != http.StatusOK || json.Unmarshal(raw, &answer) != nil || answer.Status == "" {
+		return SpawnStatusRecord{}, fail(exitStateConflict, "spawn status unreadable; inspect operation %s", id)
+	}
+	return SpawnStatusRecord{
+		Request:     firstNonempty(answer.Request, id),
+		State:       answer.Status,
+		Reason:      firstNonempty(answer.Reason, answer.Result.Reason),
+		NextCheckAt: answer.NextCheckAt,
+		ExpiresAt:   answer.ExpiresAt,
+		RC:          answer.Result.RC,
+		Stage:       answer.Result.Stage,
+		Job:         answer.Job,
+	}, nil
+}
+
 // SpawnStatus reads a hub spawn operation's status once (GET
 // /v1/spawns/<id>). The value is the request state of spawn_request_state.go,
 // today's names or a design name. An id that is not a plain id, a transport
 // failure, a non-200 answer or a body with no status is an error.
 func (c *hubHTTP) SpawnStatus(ctx context.Context, id string) (string, error) {
-	if !validID(id) {
-		return "", fail(exitUsage, "invalid spawn operation id")
-	}
-	status, raw, err := c.doIdempotent(ctx, http.MethodGet, "/v1/spawns/"+id, nil, 5*time.Second)
+	record, err := c.ReadSpawnStatus(ctx, id)
 	if err != nil {
 		return "", err
 	}
-	var result struct {
-		Status string `json:"status"`
-	}
-	if status != http.StatusOK || json.Unmarshal(raw, &result) != nil || result.Status == "" {
-		return "", fail(exitStateConflict, "spawn status unreadable; inspect operation %s", id)
-	}
-	return result.Status, nil
+	return record.State, nil
 }
 
 // SpawnWaitOptions shapes one WaitSpawn.
