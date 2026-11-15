@@ -125,7 +125,7 @@ func (s *laneInboxStore) scanConsult(parent context.Context, query string, args 
 func (s *laneInboxStore) activeConsults(parent context.Context) ([]hubConsult, error) {
 	ctx, done := s.op(parent)
 	defer done()
-	rows, err := s.db.QueryContext(ctx, s.q(`SELECT `+consultColumns+` FROM consult_requests WHERE state IN ('queued','running') ORDER BY created_ms`))
+	rows, err := s.db.QueryContext(ctx, s.q(`SELECT `+consultColumns+` FROM consult_requests WHERE state IN ('queued','running') OR (state='answered' AND notified=0) ORDER BY created_ms`))
 	if err != nil {
 		return nil, err
 	}

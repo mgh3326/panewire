@@ -38,10 +38,12 @@ The CLI posts to `POST /v1/consults`:
 
 ### Idempotency
 
-The key is `(task, repo#pr, head)`. The same key returns the existing consult
-(the POST answers `200` instead of `201`), whatever its state. A new head is a
-new consult, which matches the review round count. The question document may
-change between evaluations; it is not part of the key.
+The key is `(task, repo#pr, head)`. A queued, running or answered consult is
+returned unchanged (the POST answers `200` instead of `201`). A `refused` or
+`failed` row is a retry: the same POST re-plans and replaces the attempt under
+the same id, so a transient quota, hk or spawn failure is not permanent. A new
+head is a new consult, which matches the review round count. The question
+document may change between evaluations; it is not part of the key.
 
 ## Seat
 
@@ -77,12 +79,14 @@ task/role reservation (hk 4568).
 | `running` | the spawn placed; the job runs |
 | `answered` | the job completed, its report is stored and carries the answer shape; `answer_doc` names it |
 | `refused` | no seat, no repository evidence or no author family; nothing was spawned |
-| `failed` | the job or its answer did not arrive: spawn failed twice, the job was lost, the time limit passed, or the report lacks a section |
+| `failed` | the job or its answer did not arrive: spawn failed twice, the job was lost, the time limit passed, or the report lacks a section. The job's pane is closed and the job marked lost when the node still lists it |
 | `cancelled` | reserved for an operator cancel; no route in phase 1 |
 
 A lost or failed job gets one respawn on the next eligible seat (the failed
 seat profile is excluded, the family and floor rules still apply), then
 `failed`. A report that completes but lacks a section fails without a respawn.
+A queued row whose spawn operation is missing (a crash between the row and the
+claim) is started by the coordinator on its next pass.
 
 The time limit is the hub's `--consult-timeout` (default 2 h).
 
@@ -127,11 +131,14 @@ The consult routes admit:
   `HUB_TOKEN_<machine>`), which is what mergewake uses on oci;
 - a service credential holding the `consult` scope.
 
+A node credential is admitted only on the hub's `--pr-status-host` (default
+`oci`, the mergewake host); every other node gets `403`. That is the same
+machine restriction `pr.status` already uses: a consult spends a paid seat and
+can put an arbitrary hk document into a brief, so no other node may drive it.
+
 They refuse an unauthenticated caller with `401`, and a service whose scopes
 do not include `consult` with `403 {"error":"scope_forbidden"}`. The `consult`
-scope grants only these two routes. A node credential keeps the node rights it
-already had and gains the two consult routes; it is admitted only as its own
-machine (`X-Panewire-Machine-ID` plus that machine's `HUB_TOKEN_<machine>`).
+scope grants only these two routes; it is not a node credential.
 
 ## Exit status (CLI)
 

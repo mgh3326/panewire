@@ -60,8 +60,9 @@ func newConsultFixture(t *testing.T) *consultFixture {
 	t.Helper()
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	h, err := NewHubServer(HubServerConfig{
-		Tokens: map[string]string{"operator": t14OperatorToken, "machine-a": "node-token", "svc-consult": "svc-token", "svc-other": "other-token"},
-		Scopes: map[string]string{"svc-consult": "consult", "svc-other": "inbox.ack_state"},
+		Tokens:       map[string]string{"operator": t14OperatorToken, "machine-a": "node-token", "machine-b": "node-token-b", "svc-consult": "svc-token", "svc-other": "other-token"},
+		PRStatusHost: "machine-a",
+		Scopes:       map[string]string{"svc-consult": "consult", "svc-other": "inbox.ack_state"},
 		// InboxStorePath is the durable store the consult rows live in.
 		InboxStorePath:  filepath.Join(t.TempDir(), "inbox.sqlite3"),
 		ReportRelayPath: r20LanesFile(t, `{"lanes":{"parent":{"machine":"machine-b","pane":"w1:p1"}}}`),
@@ -70,6 +71,9 @@ func newConsultFixture(t *testing.T) *consultFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
+	_, relay, stopRelay := newFakeHandoffkeep(t)
+	t.Cleanup(stopRelay)
+	h.handoffkeep = relay
 	t.Cleanup(func() { h.Close() })
 	f := &consultFixture{hub: h, jobs: &quotaJobs{records: map[string]map[string]any{}}}
 	if _, _, err := h.inbox.store.claimSpawn(t.Context(), consultAuthorRequest(), "author-job", "parent", time.Now()); err != nil {
@@ -149,8 +153,11 @@ func TestConsultRoutesAdmitNodeAndScopedService(t *testing.T) {
 	if code, _ := f.post(t, "svc-other", "other-token", body); code != http.StatusForbidden {
 		t.Fatalf("unscoped service = %d, want 403", code)
 	}
+	if code, _ := f.post(t, "machine-b", "node-token-b", body); code != http.StatusForbidden {
+		t.Fatalf("node outside the pr-status host = %d, want 403", code)
+	}
 	if code, out := f.post(t, "machine-a", "node-token", body); code != http.StatusCreated || out["state"] != consultQueued {
-		t.Fatalf("node credential = %d %v, want 201 queued", code, out)
+		t.Fatalf("pr-status node credential = %d %v, want 201 queued", code, out)
 	}
 	other := consultRequestBody("42", "example/project#7", strings.Repeat("b", 40))
 	if code, out := f.post(t, "svc-consult", "svc-token", other); code != http.StatusCreated || out["state"] != consultQueued {
@@ -264,6 +271,16 @@ func TestConsultAnsweredRecordsAnswerDocument(t *testing.T) {
 	if !found {
 		t.Fatalf("lane event = %+v, want one ready event naming %s", items, doc)
 	}
+	// The answer is saved before its event; a hub that stopped in between
+	// retries from the answered row.
+	if _, err := f.hub.inbox.store.db.Exec(`UPDATE consult_requests SET notified=0 WHERE id=?`, id); err != nil {
+		t.Fatal(err)
+	}
+	f.hub.reconcileConsults(t.Context())
+	row, err = f.hub.inbox.store.consultByID(t.Context(), id)
+	if err != nil || !row.Notified {
+		t.Fatalf("row after notification retry = %+v err=%v, want notified", row, err)
+	}
 }
 
 func TestConsultReportMissingSectionFails(t *testing.T) {
@@ -358,5 +375,103 @@ func TestConsultGetUnknownIsNotFound(t *testing.T) {
 	f.hub.Handler().ServeHTTP(w, r)
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("unknown consult = %d, want 404", w.Code)
+	}
+}
+
+// A tool requester owns the spawn through the tool lane, never the tool id:
+// completion notices go to a lane that exists.
+func TestConsultToolRequesterOwnsOperatorDesk(t *testing.T) {
+	f := newConsultFixture(t)
+	body := consultRequestBody("42", "example/project#7", strings.Repeat("a", 40))
+	body["requester"] = "mergewake/example/project#7"
+	code, out := f.post(t, "", t14OperatorToken, body)
+	if code != http.StatusCreated {
+		t.Fatalf("create = %d %v", code, out)
+	}
+	row, err := f.hub.inbox.store.consultByID(t.Context(), fmt.Sprint(out["id"]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := f.hub.inbox.store.spawnTask(t.Context(), row.RequestID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if task.Owner != consultToolLane {
+		t.Fatalf("spawn owner = %q, want %q", task.Owner, consultToolLane)
+	}
+}
+
+// A refusal is a retry: the same key re-plans instead of pinning the dead row.
+func TestConsultRefusedRowCanBeRetried(t *testing.T) {
+	f := newConsultFixture(t)
+	f.err = failConsultSeat()
+	body := consultRequestBody("42", "example/project#7", strings.Repeat("a", 40))
+	code, first := f.post(t, "", t14OperatorToken, body)
+	if code != http.StatusCreated || first["state"] != consultRefused {
+		t.Fatalf("first = %d %v, want refused", code, first)
+	}
+	f.err = nil
+	code, second := f.post(t, "", t14OperatorToken, body)
+	if code != http.StatusCreated || second["state"] != consultQueued || second["id"] != first["id"] {
+		t.Fatalf("retry = %d %v, want queued under the same id", code, second)
+	}
+	if second["reason"] != nil && second["reason"] != "" {
+		t.Fatalf("retry kept the refusal reason: %v", second["reason"])
+	}
+}
+
+// A failed row is a retry too: a new attempt gets a fresh spawn.
+func TestConsultFailedRowCanBeRetried(t *testing.T) {
+	f := newConsultFixture(t)
+	body := consultRequestBody("42", "example/project#7", strings.Repeat("a", 40))
+	_, out := f.post(t, "", t14OperatorToken, body)
+	row, err := f.hub.inbox.store.consultByID(t.Context(), fmt.Sprint(out["id"]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.setSpawnStatus(t, row.RequestID, "failed")
+	f.hub.reconcileConsults(t.Context())
+	row, err = f.hub.inbox.store.consultByID(t.Context(), row.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.setSpawnStatus(t, row.RequestID, "failed")
+	f.hub.reconcileConsults(t.Context())
+	row, err = f.hub.inbox.store.consultByID(t.Context(), row.ID)
+	if err != nil || row.State != consultFailed {
+		t.Fatalf("failed row = %+v err=%v", row, err)
+	}
+	code, retry := f.post(t, "", t14OperatorToken, body)
+	if code != http.StatusCreated || retry["state"] != consultQueued || retry["id"] != out["id"] {
+		t.Fatalf("retry = %d %v, want queued", code, retry)
+	}
+	row, err = f.hub.inbox.store.consultByID(t.Context(), row.ID)
+	if err != nil || row.Respawns != 0 || row.Job == "" {
+		t.Fatalf("retried row = %+v err=%v, want a fresh attempt", row, err)
+	}
+}
+
+// A queued row whose spawn operation is missing (a crash between the row and
+// the claim) is started by the coordinator, not left until the deadline.
+func TestConsultQueuedRowWithoutSpawnRecovers(t *testing.T) {
+	f := newConsultFixture(t)
+	_, out := f.post(t, "", t14OperatorToken, consultRequestBody("42", "example/project#7", strings.Repeat("a", 40)))
+	row, err := f.hub.inbox.store.consultByID(t.Context(), fmt.Sprint(out["id"]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.hub.inbox.store.db.Exec(`DELETE FROM spawn_operations WHERE request_id=?`, row.RequestID); err != nil {
+		t.Fatal(err)
+	}
+	f.hub.reconcileConsults(t.Context())
+	row, err = f.hub.inbox.store.consultByID(t.Context(), row.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row.State != consultQueued || row.RequestID == "" {
+		t.Fatalf("row = %+v, want a recovered queued attempt", row)
+	}
+	if _, err := f.hub.inbox.store.spawnTask(t.Context(), row.RequestID); err != nil {
+		t.Fatalf("recovered row has no spawn operation: %v", err)
 	}
 }

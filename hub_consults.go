@@ -77,8 +77,17 @@ type hubConsultView struct {
 func (h *HubServer) consultAccess(request *http.Request) hubAccess {
 	caller := h.authenticate(request)
 	switch caller.kind {
-	case hubCallerOperator, hubCallerNode:
+	case hubCallerOperator:
 		return hubAccessGranted
+	case hubCallerNode:
+		// A node credential is admitted only on the mergewake host: a consult
+		// spends a paid seat and reads an arbitrary hk document into a brief,
+		// so no other node may drive it (the same rule as pr.status).
+		if caller.id == h.prStatusHost {
+			return hubAccessGranted
+		}
+		h.logger.Warn("hub consult refused for a node other than the pr-status host", "client", caller.id)
+		return hubAccessForbidden
 	case hubCallerService:
 		if hubGrantsAllow(caller.grants, hubScopeConsult, "") {
 			return hubAccessGranted
@@ -110,45 +119,61 @@ func (h *HubServer) handleConsultRequest(w http.ResponseWriter, r *http.Request)
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
 	key := consultIdemKey(request.Task, request.PR, request.Head)
-	if existing, err := h.inbox.store.consultByKey(ctx, key); err == nil {
+	existing, err := h.inbox.store.consultByKey(ctx, key)
+	replace := err == nil && (existing.State == consultRefused || existing.State == consultFailed)
+	if err == nil && !replace {
+		// A live or answered consult keeps the key: the same (task, pr, head)
+		// is the same round.
 		writeJSON(w, http.StatusOK, consultView(existing))
 		return
-	} else if !errors.Is(err, sql.ErrNoRows) {
+	}
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "store_unavailable"})
 		return
 	}
 
 	now := h.now().UTC()
-	c := hubConsult{
-		ID: uuid.NewString(), IdemKey: key, Task: request.Task, PR: request.PR, Head: request.Head,
-		Requester: request.Requester, QuestionDoc: request.QuestionDoc, AuthorJob: request.AuthorJob,
-		AuthorFamily: request.AuthorFamily, State: consultQueued, Created: now, Deadline: now.Add(h.consultTimeout),
+	var c hubConsult
+	if replace {
+		// A refused or failed row is a retry, not a permanent answer: re-plan
+		// and replace the attempt under the same key. Every transient cause
+		// (quota, hk outage, a lost job) has a way back.
+		c = existing
+		c.State, c.SeatProfile, c.SeatFamily, c.SeatGrade = consultQueued, "", "", ""
+		c.Job, c.RequestID, c.Reason, c.AnswerDoc = "", "", "", ""
+		c.Answered, c.Notified, c.Respawns = time.Time{}, false, 0
+		c.Deadline = now.Add(h.consultTimeout)
+	} else {
+		c = hubConsult{
+			ID: uuid.NewString(), IdemKey: key, Task: request.Task, PR: request.PR, Head: request.Head,
+			Requester: request.Requester, QuestionDoc: request.QuestionDoc, AuthorJob: request.AuthorJob,
+			AuthorFamily: request.AuthorFamily, State: consultQueued, Created: now, Deadline: now.Add(h.consultTimeout),
+		}
 	}
 	plan, reason := h.planConsultRequest(ctx, request)
 	if reason != "" {
 		c.State = consultRefused
 		c.Reason = reason
-		stored, _, err := h.inbox.store.insertConsult(ctx, c)
-		if err != nil {
+		if conflict, err := h.storeConsult(ctx, c, replace); err != nil {
 			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "store_unavailable"})
 			return
+		} else if conflict != nil {
+			writeJSON(w, http.StatusOK, consultView(*conflict))
+			return
 		}
-		writeJSON(w, http.StatusCreated, consultView(stored))
+		writeJSON(w, http.StatusCreated, consultView(c))
 		return
 	}
 	c.SeatProfile, c.SeatFamily, c.SeatGrade = plan.Seat.Profile, plan.Seat.Family, plan.Seat.Grade
 	c.Job, c.RequestID = plan.Job, plan.Request.RequestID
-	stored, fresh, err := h.inbox.store.insertConsult(ctx, c)
-	if err != nil {
+	if conflict, err := h.storeConsult(ctx, c, replace); err != nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "store_unavailable"})
 		return
-	}
-	if !fresh {
-		// Another caller won the same key between the read and the insert.
-		writeJSON(w, http.StatusOK, consultView(stored))
+	} else if conflict != nil {
+		writeJSON(w, http.StatusOK, consultView(*conflict))
 		return
 	}
-	if err := h.claimConsultSpawn(ctx, plan, c.Requester); err != nil {
+	if err := h.claimConsultSpawn(ctx, plan, consultOwner(c.Requester)); err != nil {
 		h.failConsult(ctx, c, consultReason(err))
 		writeJSON(w, http.StatusCreated, consultView(h.consultOrEmpty(ctx, c)))
 		return
@@ -281,6 +306,20 @@ func (h *HubServer) consultRepository(ctx context.Context, request hubConsultReq
 	return &repo, ""
 }
 
+// storeConsult writes a new row, or replaces the row the same idempotency
+// key already holds. A replace keeps the row id and created time.
+func (h *HubServer) storeConsult(ctx context.Context, c hubConsult, replace bool) (*hubConsult, error) {
+	if replace {
+		return nil, h.inbox.store.saveConsult(ctx, c)
+	}
+	stored, fresh, err := h.inbox.store.insertConsult(ctx, c)
+	if err != nil || fresh {
+		return nil, err
+	}
+	// Another caller won the same key between the read and the insert.
+	return &stored, nil
+}
+
 func (h *HubServer) claimConsultSpawn(ctx context.Context, plan fleet.ConsultPlan, owner string) error {
 	_, fresh, err := h.inbox.store.claimSpawn(ctx, plan.Request, plan.Job, owner, h.now().UTC())
 	if err != nil {
@@ -346,13 +385,23 @@ func (h *HubServer) reconcileConsults(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
+		if c.State == consultAnswered {
+			// The answer is saved; only its one lane event may still be owed.
+			h.notifyConsultAnswered(ctx, c)
+			continue
+		}
 		if !h.now().Before(c.Deadline) {
 			h.failConsult(ctx, c, "timeout: the consult passed its time limit")
 			continue
 		}
 		task, err := h.inbox.store.spawnTask(ctx, c.RequestID)
 		if errors.Is(err, sql.ErrNoRows) {
-			if c.State == consultRunning {
+			switch c.State {
+			case consultQueued:
+				// The row was inserted (or a respawn intent saved) and the
+				// hub stopped before the claim: start the attempt now.
+				h.recoverConsult(ctx, c)
+			case consultRunning:
 				if c.Respawns == 0 {
 					h.respawnConsult(ctx, c, "spawn_operation_missing")
 				} else {
@@ -446,11 +495,49 @@ func (h *HubServer) consultJobFailed(ctx context.Context, c hubConsult, reason s
 // respawnConsult runs the single allowed second attempt on the next eligible
 // seat: still at the consult floor and in another family, never the seat that
 // failed.
-func (h *HubServer) respawnConsult(ctx context.Context, c hubConsult, reason string) {
-	request := hubConsultRequest{
+func consultRequestOf(c hubConsult) hubConsultRequest {
+	return hubConsultRequest{
 		Task: c.Task, Requester: c.Requester, QuestionDoc: c.QuestionDoc, AuthorJob: c.AuthorJob,
 		AuthorFamily: c.AuthorFamily, PR: c.PR, Head: c.Head,
 	}
+}
+
+// recoverConsult starts a queued attempt whose spawn operation is missing:
+// the row was stored but the claim never ran (a crash or a store error).
+func (h *HubServer) recoverConsult(ctx context.Context, c hubConsult) {
+	request := consultRequestOf(c)
+	repo, why := h.consultRepository(ctx, request)
+	if why != "" {
+		h.failConsult(ctx, c, "recover_failed: "+why)
+		return
+	}
+	plan, err := h.resolveConsultPlan(ctx, fleet.ConsultPlanInput{
+		Task: request.Task, Question: request.QuestionDoc, AuthorJob: request.AuthorJob,
+		AuthorFamily: request.AuthorFamily, PR: request.PR, Head: request.Head,
+		Requester: request.Requester, Owner: consultOwner(request.Requester), Repository: repo,
+	})
+	if err != nil {
+		h.failConsult(ctx, c, "recover_failed: "+consultReason(err))
+		return
+	}
+	c.State, c.Job, c.RequestID = consultQueued, plan.Job, plan.Request.RequestID
+	c.SeatProfile, c.SeatFamily, c.SeatGrade = plan.Seat.Profile, plan.Seat.Family, plan.Seat.Grade
+	c.Reason = ""
+	if err := h.inbox.store.saveConsult(ctx, c); err != nil {
+		return
+	}
+	if err := h.claimConsultSpawn(ctx, plan, consultOwner(request.Requester)); err != nil {
+		h.failConsult(ctx, c, "recover_unavailable: "+consultReason(err))
+		return
+	}
+	select {
+	case h.spawnKick <- struct{}{}:
+	default:
+	}
+}
+
+func (h *HubServer) respawnConsult(ctx context.Context, c hubConsult, reason string) {
+	request := consultRequestOf(c)
 	repo, why := h.consultRepository(ctx, request)
 	if why != "" {
 		h.failConsult(ctx, c, "no_respawn_seat after "+reason+": "+why)
@@ -466,18 +553,20 @@ func (h *HubServer) respawnConsult(ctx context.Context, c hubConsult, reason str
 		h.failConsult(ctx, c, "no_respawn_seat after "+reason+": "+consultReason(err))
 		return
 	}
+	// Persist the intent before the claim: a crash after the save leaves a
+	// queued row recoverConsult starts; the reverse order could claim a second
+	// seat while the row still names the failed one.
+	c.State, c.Job, c.RequestID = consultQueued, plan.Job, plan.Request.RequestID
+	c.SeatProfile, c.SeatFamily, c.SeatGrade = plan.Seat.Profile, plan.Seat.Family, plan.Seat.Grade
+	c.Respawns, c.Reason = c.Respawns+1, ""
+	if err := h.inbox.store.saveConsult(ctx, c); err != nil {
+		return
+	}
 	if err := h.claimConsultSpawn(ctx, plan, consultOwner(request.Requester)); err != nil {
 		h.failConsult(ctx, c, "respawn_unavailable after "+reason+": "+consultReason(err))
 		return
 	}
 	h.logger.Warn("consult respawned on the next seat", "consult", c.ID, "task", c.Task, "reason", reason, "job", plan.Job, "seat", plan.Seat.Profile)
-	c.State, c.Job, c.RequestID = consultQueued, plan.Job, plan.Request.RequestID
-	c.SeatProfile, c.SeatFamily, c.SeatGrade = plan.Seat.Profile, plan.Seat.Family, plan.Seat.Grade
-	c.Respawns = c.Respawns + 1
-	c.Reason = ""
-	if err := h.inbox.store.saveConsult(ctx, c); err != nil {
-		return
-	}
 	select {
 	case h.spawnKick <- struct{}{}:
 	default:
@@ -488,12 +577,53 @@ func (h *HubServer) failConsult(ctx context.Context, c hubConsult, reason string
 	c.State = consultFailed
 	c.Reason = utf8PrefixWithin(reason, consultReasonLimit)
 	_ = h.inbox.store.saveConsult(ctx, c)
+	// A failed or timed-out consult must not leave its agent pane burning
+	// quota. Close the pane and mark the job lost when the node still lists
+	// it; a pane that changed or a node that cannot answer is left alone.
+	h.cancelConsultJob(ctx, c)
+}
+
+// cancelConsultJob is the best-effort end of a consult that will never be
+// answered: it closes the pane behind the spawn and records the job lost.
+func (h *HubServer) cancelConsultJob(ctx context.Context, c hubConsult) {
+	if c.Job == "" || c.RequestID == "" {
+		return
+	}
+	task, err := h.inbox.store.spawnTask(ctx, c.RequestID)
+	if err != nil || task.Outcome.Pane == "" {
+		return
+	}
+	host := firstNonEmptyString(task.Outcome.Host, spawnTaskHost(task))
+	if host == "" {
+		return
+	}
+	rows := h.nodePaneRows(ctx, host)
+	row, listed := rows[task.Outcome.Pane]
+	if !listed {
+		return
+	}
+	closed, why := h.closeHeldPane(ctx, task, c.Job, row, "")
+	if !closed {
+		h.logger.Warn("consult pane not closed", "consult", c.ID, "job", c.Job, "host", host, "reason", why)
+		return
+	}
+	if app, err := h.newSpawnApp(io.Discard, io.Discard); err == nil {
+		if err := app.MarkJobLost(ctx, c.Job); err != nil {
+			h.logger.Warn("consult job not marked lost after pane close", "consult", c.ID, "job", c.Job, "error", err)
+		}
+	}
 }
 
 // notifyConsultAnswered sends the one ready lane event a lane requester gets.
 // A tool requester polls GET /v1/consults/{id} instead.
 func (h *HubServer) notifyConsultAnswered(ctx context.Context, c hubConsult) {
-	if c.Notified || !validLaneReference(c.Requester) {
+	if c.Notified {
+		return
+	}
+	if !validLaneReference(c.Requester) {
+		// A tool requester polls; no event is owed, so the row is done.
+		c.Notified = true
+		_ = h.inbox.store.saveConsult(ctx, c)
 		return
 	}
 	text := fmt.Sprintf("consult %s answered for task %s: apply %s", c.ID, c.Task, c.AnswerDoc)
@@ -501,7 +631,11 @@ func (h *HubServer) notifyConsultAnswered(ctx context.Context, c hubConsult) {
 		EventID: "consult:" + c.ID + ":ready", JobID: c.Job, OwnerLane: c.Requester,
 		NotifyType: "ready", Text: utf8PrefixWithin(text, laneEventTextLimit), Host: "hub", Epoch: 1,
 	}
-	h.relayLaneEventContext(ctx, event, nil)
+	result := h.relayLaneEventContext(ctx, event, nil)
+	if result.RejectedTooLong || result.PersistFailed {
+		h.logger.Warn("consult ready event not persisted; retrying", "consult", c.ID, "lane", c.Requester, "rejected_too_long", result.RejectedTooLong, "persist_failed", result.PersistFailed)
+		return
+	}
 	c.Notified = true
 	_ = h.inbox.store.saveConsult(ctx, c)
 }
