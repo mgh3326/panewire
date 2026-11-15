@@ -219,6 +219,11 @@ func (a *App) nativeVerdict(ctx context.Context, r QuotaRequest, live bool) (adm
 	for i, k := range keys {
 		var verdict admissionVerdict
 		unread := false
+		// Each account is judged on its own evidence only: loadAccount installs a
+		// reading just on its success path (a manual-fallback admit installs none),
+		// so the previous account's reading and operator entries must not linger.
+		delete(in.Readings, d.Pool)
+		delete(in.Manual, d.Pool)
 		if why := a.loadAccount(ctx, &in, k, live, r.AccountKey == ""); why != "" {
 			verdict, unread = base.refuse(gateUnmeasurable, why), true
 		} else {

@@ -279,3 +279,34 @@ func TestLocalCommandcodeGateJudgesEveryHeldAccount(t *testing.T) {
 		}
 	})
 }
+
+// Each held account is judged on its own evidence: an account with no current
+// automatic reading but operator entries is judged on those entries, never on the
+// previous account's reading left in the inputs.
+func TestLocalCommandcodeGateDoesNotJudgeOneAccountOnAnothersReading(t *testing.T) {
+	a, _, _ := switchApp(t, gateModeNative, nil, Result{Code: 99})
+	a.Config.Local = map[string]any{"presence_id": "mac"}
+	a.Source = &fakePlacementSource{presence: []PresenceRecord{
+		{HostID: "mac", AccountKey: ccKeyA, LastSeen: switchNow.Add(-time.Minute)},
+		{HostID: "mac", AccountKey: ccKeyB, LastSeen: switchNow.Add(-2 * time.Minute)},
+	}}
+	expires := switchNow.Add(time.Hour)
+	manual := func(id int64, window string, used float64) shared.Observation {
+		return shared.Observation{ID: id, Kind: "manual", Window: window, MeasuredAt: switchNow.Add(-time.Minute), ExpiresAt: &expires, Buckets: []shared.Bucket{{Window: window, UsedPct: used, Scope: "account"}}}
+	}
+	a.SharedLatest = func(_ context.Context, key string) (shared.Latest, error) {
+		if key == ccKeyA {
+			return shared.Latest{Observation: switchReading(10, 100)}, nil // A: current reading, week used up
+		}
+		// B: no automatic reading at all, operator entries with room.
+		return shared.Latest{Manual: []shared.Observation{manual(51, "5h", 20), manual(52, "7d", 20)}}, nil
+	}
+	x := a.nativeGate(context.Background(), QuotaRequest{Profile: "cmd-dsflash41", Effort: "high", Role: "implementer"}, true)
+	var receipt gateReceipt
+	if err := json.Unmarshal([]byte(x.Out), &receipt); err != nil {
+		t.Fatalf("receipt %q: %v", x.Out, err)
+	}
+	if x.Code != 0 || receipt.ReadingKey != ccKeyB || receipt.Source == nil || *receipt.Source != sourceOperator || !slices.Equal(receipt.ManualIDs, []string{"hk-51", "hk-52"}) {
+		t.Fatalf("B must be judged (and admitted) on its own manual windows, not on A's reading: %d %s", x.Code, x.Out)
+	}
+}
