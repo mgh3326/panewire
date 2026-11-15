@@ -614,10 +614,13 @@ func (a *App) StallAttemptSignalled(job string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
+	if workerEscalated(j) {
+		return true, nil
+	}
 	var since time.Time
 	for _, ev := range j.Events {
 		switch ev.Kind {
-		case "job.spawned", "job.reclaim", "job.reprompted":
+		case "job.spawned", "job.reclaim", "job.reprompted", "job.decision_resumed":
 			since = ev.when
 		}
 	}

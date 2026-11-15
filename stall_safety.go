@@ -22,9 +22,9 @@ type stallSafetyDetails struct {
 }
 
 type stallSafetyExamination struct {
-	job, pane, screen, explanation, details string
-	since                                   int64
-	hkDone, actionDone                      int
+	job, pane, screen, explanation, details, actionResult string
+	since                                                 int64
+	hkDone, actionDone                                    int
 }
 
 type stallSafetyManager struct {
@@ -34,12 +34,12 @@ type stallSafetyManager struct {
 	lookup    func(context.Context, string) (HubActiveJob, bool)
 	signalled func(context.Context, HubActiveJob) (bool, error)
 	busy      func(context.Context, HubActiveJob, HerdrAgentState) (bool, error)
-	sequence  func(context.Context, string) (int64, error)
+	sequence  func(context.Context, string) (int64, string, error)
 	read      func(context.Context, string) (string, error)
 	explain   func(context.Context, string) (string, error)
 	detect    func(context.Context, string, HerdrAgentState, string, string, time.Time) (quotastop.Stop, bool)
 	record    func(context.Context, string, string, string) error
-	act       func(context.Context, stallSafetyExamination, stallSafetyDetails, string, time.Time) error
+	act       func(context.Context, stallSafetyExamination, stallSafetyDetails, string, time.Time) (string, error)
 }
 
 func (d *Daemon) runStallSafety(ctx context.Context) {
@@ -80,19 +80,20 @@ func newStallSafetyManager(q *quotaStopManager, idle *idleWakeManager, limit tim
 	}
 	m := &stallSafetyManager{state: state, limit: limit, now: time.Now}
 	m.lookup = q.jobForPane
-	m.sequence = func(ctx context.Context, pane string) (int64, error) {
+	m.sequence = func(ctx context.Context, pane string) (int64, string, error) {
 		q.store.mu.Lock()
 		defer q.store.mu.Unlock()
 		var seq int64
-		err := q.store.db.QueryRowContext(ctx, `SELECT state_change_seq FROM idle_wake_panes WHERE pane_id=?`, pane).Scan(&seq)
-		return seq, err
+		var status string
+		err := q.store.db.QueryRowContext(ctx, `SELECT state_change_seq,agent_status FROM idle_wake_panes WHERE pane_id=?`, pane).Scan(&seq, &status)
+		return seq, status, err
 	}
 	m.signalled = func(ctx context.Context, job HubActiveJob) (bool, error) {
 		a := &fleet.App{Jobs: filepath.Join(q.root, "jobs")}
 		return a.StallAttemptSignalled(job.JobID)
 	}
 	m.busy = func(ctx context.Context, job HubActiveJob, agent HerdrAgentState) (bool, error) {
-		a := &fleet.App{Runner: fleet.ExecRunner{}, HerdrSession: q.session(job.JobID, agent.PaneID)}
+		a := &fleet.App{Runner: fleet.ExecRunner{Timeout: 5 * time.Second}, HerdrSession: q.session(job.JobID, agent.PaneID)}
 		return a.StallForegroundBusy(ctx, agent.PaneID, agent.Harness)
 	}
 	m.read = q.read
@@ -111,16 +112,31 @@ func newStallSafetyManager(q *quotaStopManager, idle *idleWakeManager, limit tim
 		return fleet.QuotaStopPool(stop, profile), ok
 	}
 	m.record = q.hk.note
-	m.act = func(ctx context.Context, r stallSafetyExamination, detail stallSafetyDetails, key string, now time.Time) error {
+	m.act = func(ctx context.Context, r stallSafetyExamination, detail stallSafetyDetails, key string, now time.Time) (string, error) {
+		current, ok := q.jobForPane(ctx, r.pane)
+		if !ok || current.JobID != r.job {
+			return "job no longer active", nil
+		}
+		signalled, err := m.signalled(ctx, current)
+		if err != nil {
+			return "", err
+		}
+		if signalled {
+			return "job signalled READY or ESC", nil
+		}
+		seq, status, err := m.sequence(ctx, r.pane)
+		if err != nil {
+			return "", err
+		}
+		if seq != detail.WakeSeq || status != detail.Agent.Status {
+			return "pane state changed", nil
+		}
 		if detail.Quota {
-			job, ok := q.jobForPane(ctx, r.pane)
-			if !ok || job.JobID != r.job {
-				return nil
-			}
+			job := current
 			role, inherited, taskID, _ := q.jobFacts(job.JobID, job.Role)
 			job.Role = role
 			if role == "reviewer" {
-				return fleet.AnnounceQuotaStop(ctx, filepath.Join(q.root, "jobs"), job.JobID, r.pane, detail.Stop)
+				return "reviewer quota stop passed to watcher", fleet.RecordReviewerQuotaIntent(ctx, filepath.Join(q.root, "jobs"), job.JobID, r.pane, detail.Stop)
 			}
 			candidate := idleWakeCandidate{PaneID: r.pane, WorkspaceID: detail.Agent.WorkspaceID, Label: detail.Agent.Label, Status: detail.Agent.Status, EventID: "stall:" + key, JobID: job.JobID, OwnerLane: job.OwnerLane}
 			idle.mu.Lock()
@@ -129,20 +145,20 @@ func newStallSafetyManager(q *quotaStopManager, idle *idleWakeManager, limit tim
 			_, err := q.store.db.ExecContext(ctx, `INSERT OR IGNORE INTO quota_stall_wakes(event_id,pane_id,state_change_seq) VALUES(?,?,?)`, candidate.EventID, r.pane, detail.WakeSeq)
 			q.store.mu.Unlock()
 			if err != nil {
-				return err
+				return "", err
 			}
-			return q.actOnQuotaStop(ctx, candidate, job, inherited, taskID, detail.Stop, "stall-examination", now)
+			return "quota stop submitted to policy", q.actOnQuotaStop(ctx, candidate, job, inherited, taskID, detail.Stop, "stall-examination", now)
 		}
-		text, _ := truncateLaneEventText(fmt.Sprintf("[stall] job %s pane %s: %s", r.job, r.pane, r.screen))
+		text := stallNotificationText(r.job, r.pane, r.screen)
 		id := "stall:" + key
 		record := emitRecord{Type: "lane.event", Epoch: 1, CreatedAt: time.UnixMilli(r.since).UTC().Format(time.RFC3339Nano), OwnerLane: detail.Job.OwnerLane, EventID: id, Text: text, PaneID: r.pane, NotifyType: "blocked"}
 		if _, err := ensureLaneEmitRecord(q.root, record); err != nil {
-			return err
+			return "", err
 		}
 		if q.enqueue != nil {
 			q.enqueue(hubScannedRelayEvent{Kind: "lane.event", NotifyType: "blocked", HubActiveJob: HubActiveJob{JobID: laneEventTransportID(record.OwnerLane, id), Epoch: 1, OwnerLane: record.OwnerLane}, PaneID: r.pane, EventID: id, Text: text})
 		}
-		return nil
+		return "blocked event recorded for owner", nil
 	}
 	return m, nil
 }
@@ -180,19 +196,21 @@ func (m *stallSafetyManager) scan(ctx context.Context, agents []HerdrAgentState,
 		if !due {
 			continue
 		}
-		seq, err := m.sequence(ctx, agent.PaneID)
-		if err != nil || seq <= 0 {
+		seq, status, err := m.sequence(ctx, agent.PaneID)
+		if err != nil || seq <= 0 || status != agent.Status {
 			continue
 		}
-		screen, err := m.read(ctx, agent.PaneID)
+		readCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		screen, err := m.read(readCtx, agent.PaneID)
 		if err != nil {
 			screen = "screen unavailable"
 		}
-		explanation, err := m.explain(ctx, agent.PaneID)
+		explanation, err := m.explain(readCtx, agent.PaneID)
 		if err != nil {
 			explanation = "herdr explanation unavailable"
 		}
-		stop, quota := m.detect(ctx, job.JobID, agent, screen, explanation, now)
+		stop, quota := m.detect(readCtx, job.JobID, agent, screen, explanation, now)
+		cancel()
 		details, err := json.Marshal(stallSafetyDetails{Job: job, Agent: agent, Stop: stop, Quota: quota, WakeSeq: seq})
 		if err != nil {
 			return err
@@ -206,7 +224,7 @@ func (m *stallSafetyManager) scan(ctx context.Context, agents []HerdrAgentState,
 
 func (m *stallSafetyManager) drain(ctx context.Context, now time.Time) error {
 	m.state.store.mu.Lock()
-	rows, err := m.state.store.db.QueryContext(ctx, `SELECT job,pane,since_ms,screen,explanation,details,hk_done,action_done FROM stall_safety_examinations WHERE details<>'' AND (hk_done=0 OR action_done=0)`)
+	rows, err := m.state.store.db.QueryContext(ctx, `SELECT job,pane,since_ms,screen,explanation,details,hk_done,action_done,action_result FROM stall_safety_examinations WHERE details<>'' AND (hk_done=0 OR action_done=0)`)
 	if err != nil {
 		m.state.store.mu.Unlock()
 		return err
@@ -214,7 +232,7 @@ func (m *stallSafetyManager) drain(ctx context.Context, now time.Time) error {
 	var pending []stallSafetyExamination
 	for rows.Next() {
 		var r stallSafetyExamination
-		if err = rows.Scan(&r.job, &r.pane, &r.since, &r.screen, &r.explanation, &r.details, &r.hkDone, &r.actionDone); err != nil {
+		if err = rows.Scan(&r.job, &r.pane, &r.since, &r.screen, &r.explanation, &r.details, &r.hkDone, &r.actionDone, &r.actionResult); err != nil {
 			break
 		}
 		pending = append(pending, r)
@@ -234,21 +252,19 @@ func (m *stallSafetyManager) drain(ctx context.Context, now time.Time) error {
 		}
 		sum := sha256.Sum256([]byte(fmt.Sprintf("%s\x00%s\x00%d", r.job, r.pane, r.since)))
 		key := hex.EncodeToString(sum[:])
-		if r.hkDone == 0 {
-			action := "blocked owner"
-			if details.Quota {
-				action = "quota-stop action"
-			}
-			body := fmt.Sprintf("job: %s\npane: %s\naction: %s\nherdr explanation:\n%s\nscreen:\n%s\n", r.job, r.pane, action, r.explanation, r.screen)
-			if err := m.record(ctx, "stall-examination/"+key, r.job, body); err == nil {
-				if err := m.mark(ctx, r, "hk_done"); err != nil {
+		if r.actionDone == 0 {
+			if result, err := m.act(ctx, r, details, key, now); err == nil {
+				r.actionResult = result
+				if err := m.mark(ctx, r, "action_done"); err != nil {
 					return err
 				}
+				r.actionDone = 1
 			}
 		}
-		if r.actionDone == 0 {
-			if err := m.act(ctx, r, details, key, now); err == nil {
-				if err := m.mark(ctx, r, "action_done"); err != nil {
+		if r.hkDone == 0 && r.actionDone != 0 {
+			body := fmt.Sprintf("job: %s\npane: %s\naction: %s\nherdr explanation:\n%s\nscreen:\n%s\n", r.job, r.pane, r.actionResult, r.explanation, r.screen)
+			if err := m.record(ctx, "stall-examination/"+key, r.job, body); err == nil {
+				if err := m.mark(ctx, r, "hk_done"); err != nil {
 					return err
 				}
 			}
@@ -263,6 +279,6 @@ func (m *stallSafetyManager) mark(ctx context.Context, r stallSafetyExamination,
 	}
 	m.state.store.mu.Lock()
 	defer m.state.store.mu.Unlock()
-	_, err := m.state.store.db.ExecContext(ctx, `UPDATE stall_safety_examinations SET `+column+`=1 WHERE job=? AND pane=? AND since_ms=?`, r.job, r.pane, r.since)
+	_, err := m.state.store.db.ExecContext(ctx, `UPDATE stall_safety_examinations SET `+column+`=1,action_result=? WHERE job=? AND pane=? AND since_ms=?`, r.actionResult, r.job, r.pane, r.since)
 	return err
 }

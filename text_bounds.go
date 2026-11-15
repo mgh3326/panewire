@@ -32,6 +32,15 @@ func utf8PrefixWithin(value string, limit int) string { return textbound.PrefixW
 
 func utf8SuffixWithin(value string, limit int) string { return textbound.SuffixWithin(value, limit) }
 
+// stallExaminationExcerpt bounds persisted evidence and retains its last lines.
+func stallExaminationExcerpt(value string) string { return utf8SuffixWithin(value, 4096) }
+
+// stallNotificationText keeps the job, pane, and end of the visible screen.
+func stallNotificationText(job, pane, screen string) string {
+	prefix := "[stall] job " + job + " pane " + pane + ": "
+	return prefix + utf8SuffixWithin(screen, laneEventTextLimit-len(prefix))
+}
+
 // truncateRelayText is the plain byte bound for relay note text: no marker.
 func truncateRelayText(value string, limit int) string {
 	return utf8PrefixWithin(value, limit)

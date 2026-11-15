@@ -18,7 +18,7 @@ func newStallSafetyState(store *Store) (*stallSafetyState, error) {
 	if err != nil {
 		return nil, err
 	}
-	_, err = store.db.Exec(`CREATE TABLE IF NOT EXISTS stall_safety_examinations (job TEXT NOT NULL, pane TEXT NOT NULL, since_ms INTEGER NOT NULL, screen TEXT NOT NULL, explanation TEXT NOT NULL, details TEXT NOT NULL DEFAULT '', hk_done INTEGER NOT NULL DEFAULT 0, action_done INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(job,pane,since_ms))`)
+	_, err = store.db.Exec(`CREATE TABLE IF NOT EXISTS stall_safety_examinations (job TEXT NOT NULL, pane TEXT NOT NULL, since_ms INTEGER NOT NULL, screen TEXT NOT NULL, explanation TEXT NOT NULL, details TEXT NOT NULL DEFAULT '', hk_done INTEGER NOT NULL DEFAULT 0, action_done INTEGER NOT NULL DEFAULT 0, action_result TEXT NOT NULL DEFAULT '', PRIMARY KEY(job,pane,since_ms))`)
 	if err != nil {
 		return nil, err
 	}
@@ -52,8 +52,8 @@ func (s *stallSafetyState) observe(ctx context.Context, job, pane string, workin
 // recordExamination saves the bounded, redacted evidence before publishing any
 // external effects. The first writer owns the episode's evidence.
 func (s *stallSafetyState) recordExamination(ctx context.Context, job, pane, screen, explanation, details string) (bool, error) {
-	screen = utf8SuffixWithin(redactSecrets(screen), 4096)
-	explanation = utf8SuffixWithin(redactSecrets(explanation), 4096)
+	screen = stallExaminationExcerpt(redactSecrets(screen))
+	explanation = stallExaminationExcerpt(redactSecrets(explanation))
 	s.store.mu.Lock()
 	defer s.store.mu.Unlock()
 	tx, err := s.store.db.BeginTx(ctx, nil)
