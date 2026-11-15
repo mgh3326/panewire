@@ -226,10 +226,22 @@ func (a *App) quotaStopScreen(ctx context.Context, j Job, ag Agent, seen *quotaS
 	if seen != nil && ag.StateChangeSeq != nil {
 		seen.read, seen.seq = true, *ag.StateChangeSeq
 	}
-	if stop, ok := quotastop.ClassifyAgent(r.Out, ag.Kind, a.Now(), time.Local); ok {
+	stop, _, ok := quotastop.Detect(r.Out, ag.Kind, "", a.devinSessionEvidence(ag), a.Now(), time.Local)
+	if ok {
 		return QuotaStopPool(stop, j.Profile), quotaStopFound
 	}
 	return quotastop.Stop{}, quotaNotStopped
+}
+
+// devinSessionEvidence reads the devin CLI's own record of a devin pane's
+// session: its process log says how the session's last turn ended, which a
+// screen cannot prove (hk 4542). Any failure is no evidence, so the screen
+// classifier decides alone.
+func (a *App) devinSessionEvidence(ag Agent) quotastop.DevinSessionEvidence {
+	if ag.Kind != "devin" {
+		return quotastop.DevinSessionEvidence{}
+	}
+	return quotastop.ReadDevinSessionEvidence(quotastop.DevinCLIDir(a.Home), ag.SessionID(), time.Local)
 }
 
 // QuotaRole is the role a quota stop is handled by: the spawn receipt's

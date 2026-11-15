@@ -1,6 +1,9 @@
 package quotastop
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 // HerdrQuotaRule is the herdr agent-detection rule id that marks a pane as
 // showing a usage limit. herdr 0.9.5 ships no such rule, so today Detect
@@ -8,20 +11,44 @@ import "time"
 const HerdrQuotaRule = "quota_limit"
 
 // Basis names the signal that recognised a stop. It is logged with the
-// decision so a stop can be traced to herdr or to the screen text.
+// decision so a stop can be traced to the devin session's own record, to
+// herdr, or to the screen text.
 const (
+	BasisStructured = "structured"
 	BasisHerdr      = "herdr:" + HerdrQuotaRule
 	BasisClassifier = "classifier"
 )
 
-// Detect recognises a usage-limit stop: herdr's quota_limit rule first, the
-// screen classifier otherwise. agent is herdr's agent kind for the pane.
+// Detect recognises a usage-limit stop: a devin pane's own session record
+// first, herdr's quota_limit rule next, the screen classifier otherwise.
+// agent is herdr's agent kind for the pane, and evidence is the record read
+// for that pane's devin session (the zero value when none was read).
+//
+// The session record decides the free-model limit for a devin pane both ways,
+// because a screen cannot prove who wrote a row: a record whose last turn
+// ended in that limit is a stop even when the screen shows no limit, and one
+// whose session has been prompted since (or never failed a turn) refuses a
+// free-limit reading however much the screen looks like one (hk 4542). A
+// record whose last turn failed for another reason says nothing about the free
+// limit, so the screen classifier still reads that pane's own banner.
 //
 // When the rule fires and the screen text does not parse, the stop is still
 // reported with the pool named by agent and no reset. The caller then hands
 // it over as reset_unknown, which is the conservative outcome.
-func Detect(screen, agent, herdrRule string, now time.Time, local *time.Location) (Stop, string, bool) {
+func Detect(screen, agent, herdrRule string, evidence DevinSessionEvidence, now time.Time, local *time.Location) (Stop, string, bool) {
+	devin := strings.EqualFold(agent, "devin")
+	if devin && evidence.State == DevinSessionFreeLimit {
+		return Stop{Pool: "devin-free", Reset: evidence.Reset}, BasisStructured, true
+	}
 	stop, ok := ClassifyAgent(screen, agent, now, local)
+	if devin && evidence.State == DevinSessionRunning {
+		if ok && stop.Pool == "devin-free" {
+			return Stop{}, BasisStructured, false
+		}
+		if !ok && herdrRule == HerdrQuotaRule {
+			return Stop{}, BasisStructured, false
+		}
+	}
 	if herdrRule != HerdrQuotaRule {
 		return stop, BasisClassifier, ok
 	}
