@@ -10,12 +10,18 @@ import (
 // label, the row a node writes when it starts one.
 func claimJournalSpawn(t *testing.T, client *HubClient, requestID, job, label string) {
 	t.Helper()
+	claimJournalSpawnArgs(t, client, requestID, []string{"--job", job, "-l", label})
+}
+
+// claimJournalSpawnArgs is claimJournalSpawn for a request's own argv.
+func claimJournalSpawnArgs(t *testing.T, client *HubClient, requestID string, args []string) {
+	t.Helper()
 	journal, err := client.acquireSpawnJournal()
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer client.releaseSpawnJournal()
-	claimed, _, err := journal.claim(t.Context(), hubOutboundMessage{RequestID: requestID, Args: []string{"spawn", "--job", job, "-l", label}})
+	claimed, _, err := journal.claim(t.Context(), hubOutboundMessage{RequestID: requestID, Args: args})
 	if err != nil || !claimed {
 		t.Fatalf("journal claim=%v err=%v", claimed, err)
 	}
@@ -51,6 +57,55 @@ func TestNodeJobMarkLostHoldsWhenANewerSpawnIsExecuting(t *testing.T) {
 	}
 	client, store, _ := markLostClient(t, inbox, []string{nodeAgentList()}, markLostEmptyPanes)
 	claimJournalSpawn(t, client, "d676220b-e763-4af1-aefd-000000000003", "job-a", "job-a-r2")
+	result, code := nodeRun(t, client, nodeCommandJobMarkLost, nodeJobMarkLostArgs{Job: "job-a", Label: "job-a"})
+	if code != "" || result["outcome"] != nodeJobMarkLostLedgerMissing {
+		t.Fatalf("code=%q result=%v", code, result)
+	}
+	if len(store.writes()) != 0 || store.state("job-a") != "spawned" {
+		t.Fatalf("hk state=%v writes=%v", store.state("job-a"), store.writes())
+	}
+}
+
+// The operator --purpose is free text and sent before --job and -l, so the
+// journal's identity columns come from the strict flag/value pairs: a purpose
+// beginning with --job= or -l= cannot rename the row (finding r4578127795).
+func TestNodeSpawnJournalRecordsStrictSpawnIdentity(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{"the purpose forges the job", []string{"--purpose", "--job=job-b", "--job", "job-a", "-l", "job-a"}},
+		{"the purpose forges the label", []string{"--purpose", "-l=job-b", "--job", "job-a", "-l", "job-a"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client, _, _ := markLostClient(t, t.TempDir(), nil, "")
+			claimJournalSpawnArgs(t, client, "d676220b-e763-4af1-aefd-000000000004", tc.args)
+			journal, err := client.acquireSpawnJournal()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer client.releaseSpawnJournal()
+			rows, err := journal.executing(t.Context())
+			if err != nil || len(rows) != 1 {
+				t.Fatalf("rows=%+v err=%v", rows, err)
+			}
+			if rows[0].Job != "job-a" || rows[0].Label != "job-a" {
+				t.Fatalf("row=%+v, want job-a/job-a", rows[0])
+			}
+		})
+	}
+}
+
+// A spawn running for job-a is a live attempt even when the operator purpose
+// begins with --job=: the journal records the real pair, so the proof keeps
+// the hold instead of freeing the reservation beside a live attempt.
+func TestNodeJobMarkLostHoldsWhenThePurposeForgesTheJob(t *testing.T) {
+	inbox := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(inbox, "jobs"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	client, store, _ := markLostClient(t, inbox, []string{nodeAgentList()}, markLostEmptyPanes)
+	claimJournalSpawnArgs(t, client, "d676220b-e763-4af1-aefd-000000000005", []string{"--purpose", "--job=job-b", "--job", "job-a", "-l", "job-a"})
 	result, code := nodeRun(t, client, nodeCommandJobMarkLost, nodeJobMarkLostArgs{Job: "job-a", Label: "job-a"})
 	if code != "" || result["outcome"] != nodeJobMarkLostLedgerMissing {
 		t.Fatalf("code=%q result=%v", code, result)
