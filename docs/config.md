@@ -387,8 +387,13 @@ opt-in (hk 4821):
   launcher, or one with a different state home, does not share the
   workspace lock, so a missing workspace label can be created twice;
 - worktree identity between admission and prepare: the admission key is the
-  job-dir name, while `work_root`, symlinks and the `-L` lane are read again
-  later, so two distinct keys can reach one directory.
+  job-dir name (and the case-folded job id), while `work_root` and symlinks
+  are read again later, so two distinct keys can reach one directory.
+
+At every N, a `-L` lane (read as a flag, never from another flag's value)
+that resolves outside its prepared worktree is refused before launch
+(`checkout_refused:lane_outside_worktree`), since an agent keeps working
+after its slot is released.
 
 Opt in only on a host where neither can happen: one panewire version, one
 state home, a fixed `work_root`, and no symlinked job dirs or lanes.

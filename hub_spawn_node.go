@@ -613,7 +613,7 @@ func (client *HubClient) runHubSpawn(parent context.Context, message hubOutbound
 			return result
 		}
 		cwd = outcome.Worktree.Path
-		if spawnLaneEscapes(cwd, hubSpawnArg(message.Args, "-L")) {
+		if spawnLaneEscapes(cwd, hubSpawnFlagArg(message.Args, "-L")) {
 			// The held job dir must be where the agent runs (hk 4578).
 			result.RC, result.Error = 81, "checkout_refused:lane_outside_worktree"
 			return result

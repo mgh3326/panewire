@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -121,10 +122,31 @@ func (client *HubClient) spawnAdmissionKey(message hubOutboundMessage) string {
 	if spawnPathIsLink(dir) {
 		return ""
 	}
-	if lane := hubSpawnArg(message.Args, "-L"); lane != "" && spawnPathIsLink(filepath.Join(dir, lane)) {
+	if lane := hubSpawnFlagArg(message.Args, "-L"); lane != "" && spawnPathIsLink(filepath.Join(dir, lane)) {
 		return ""
 	}
-	return strings.ToLower(filepath.Clean(message.Checkout.Dir))
+	return spawnOverlapKey(message.Checkout.Dir, message.Args)
+}
+
+// spawnOverlapKey holds the case-folded job dir and job id: two job ids that
+// differ only in case share one jobs-inbox directory on a case-insensitive
+// volume (brief-delivered.md, events), so they never land at once. Parts are
+// joined by NUL; a key conflicts with another that shares any part.
+func spawnOverlapKey(dir string, args []string) string {
+	key := "dir:" + strings.ToLower(filepath.Clean(dir))
+	if job := hubSpawnFlagArg(args, "--job"); job != "" {
+		key += "\x00job:" + strings.ToLower(job)
+	}
+	return key
+}
+
+func spawnOverlapConflicts(a, b string) bool {
+	for _, part := range strings.Split(a, "\x00") {
+		if slices.Contains(strings.Split(b, "\x00"), part) {
+			return true
+		}
+	}
+	return false
 }
 
 func spawnPathIsLink(path string) bool {
@@ -155,7 +177,7 @@ func hubSpawnOverlapKey(request *hubSpawnRequest) string {
 	if request == nil || request.Checkout == nil || request.Checkout.Dir == "" {
 		return ""
 	}
-	return strings.ToLower(filepath.Clean(request.Checkout.Dir))
+	return spawnOverlapKey(request.Checkout.Dir, request.Args)
 }
 
 // nodeSpawnAdmission is the node's process-local spawn admission state.
@@ -202,7 +224,10 @@ func (a *nodeSpawnAdmission) tryAdmit(key string, limit int) (func(), <-chan str
 	if key == "" {
 		ok = ok && a.running == 0
 	} else {
-		ok = ok && a.exclusiveWaiting == 0 && !a.dirs[key]
+		ok = ok && a.exclusiveWaiting == 0
+		for held := range a.dirs {
+			ok = ok && !spawnOverlapConflicts(held, key)
+		}
 	}
 	if !ok {
 		return nil, a.changed

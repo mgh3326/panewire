@@ -360,7 +360,10 @@ func (h *HubServer) runSpawnCoordinator(parent context.Context) {
 			machine := task.Node.Machine
 			open := nodeActive[machine]
 			if len(open) > 0 {
-				busy = busy || len(open) >= slots || key == "" || open[""] > 0 || open[key] > 0
+				busy = busy || len(open) >= slots || key == "" || open[""] > 0
+				for held := range open {
+					busy = busy || spawnOverlapConflicts(held, key)
+				}
 			}
 			if mark, marked := drainFor[machine]; marked && time.Since(mark) > hubSpawnDrainMarkTTL {
 				delete(drainFor, machine)
@@ -1473,7 +1476,7 @@ func (t *directSpawnTransport) settleNodeResult(ctx context.Context, node hubSpa
 	}
 	// The authenticated node's completed journal is necessary, and a current
 	// exact pane read is additionally required before accepting late success.
-	if result.RC == 0 && (node.Checkout != nil && (result.Receipt == nil || !spawnReceiptCheckoutPath(result.Receipt.CWD, node.Checkout.Dir, hubSpawnArg(node.Args, "-L"))) || !rechecked && !h.verifySpawnPane(ctx, node.Machine, result, node.Args)) {
+	if result.RC == 0 && (node.Checkout != nil && (result.Receipt == nil || !spawnReceiptCheckoutPath(result.Receipt.CWD, node.Checkout.Dir, hubSpawnFlagArg(node.Args, "-L"))) || !rechecked && !h.verifySpawnPane(ctx, node.Machine, result, node.Args)) {
 		return t.unknown(ctx, "unknown")
 	}
 	h.noteOneTimeActionRefusal(node.Machine, hubSpawnArg(node.Args, "-m"), result)

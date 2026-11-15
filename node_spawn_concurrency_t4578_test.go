@@ -457,8 +457,12 @@ func TestNodeSpawnSymlinkedTargetsAreNotOverlapped_t4578(t *testing.T) {
 		if tc.lane != "" {
 			message.Args = append(message.Args, "-L", tc.lane)
 		}
-		if got := client.spawnAdmissionKey(message); got != tc.want {
-			t.Errorf("dir=%s lane=%s key=%q, want %q", tc.dir, tc.lane, got, tc.want)
+		want := tc.want
+		if want != "" {
+			want = spawnOverlapKey(want, message.Args)
+		}
+		if got := client.spawnAdmissionKey(message); got != want {
+			t.Errorf("dir=%s lane=%s key=%q, want %q", tc.dir, tc.lane, got, want)
 		}
 	}
 	if !spawnLaneEscapes(filepath.Join(root, "job-c"), "live") || spawnLaneEscapes(filepath.Join(root, "job-a"), "live") || spawnLaneEscapes(filepath.Join(root, "job-a"), "") {
@@ -529,5 +533,61 @@ func TestNodeSpawnHubDrainsForQueuedExclusiveRequest_t4578(t *testing.T) {
 	}
 	if got := next("after drain"); got != tasks[""].Node.RequestID {
 		t.Fatalf("after the drain the hub sent %s, want the exclusive request %s", got, tasks[""].Node.RequestID)
+	}
+}
+
+// Job ids that differ only in case share one jobs-inbox directory on a
+// case-insensitive volume, so their spawns never land at once even in
+// distinct worktrees; the hub applies the same rule.
+func TestNodeSpawnSerializesCaseAliasedJobIDs_t4578(t *testing.T) {
+	rig := newConcurrencyRig(t, 2)
+	first, second := concurrencyMessage(1, "dir-1"), concurrencyMessage(2, "dir-2")
+	first.Args, second.Args = []string{"--job", "job-Review-A"}, []string{"--job", "job-review-a"}
+	results := rig.run(t, []hubOutboundMessage{first, second})
+	select {
+	case <-rig.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("neither spawn launched")
+	}
+	// Window: the case alias must not launch while the first is landing.
+	select {
+	case owner := <-rig.started:
+		t.Fatalf("case-aliased job %s launched concurrently", owner)
+	case <-time.After(150 * time.Millisecond):
+	}
+	close(rig.release)
+	for range 2 {
+		if result := nextSpawnResult(t, results); result.RC != 0 {
+			t.Fatalf("spawn failed: %+v", result)
+		}
+	}
+	if !spawnOverlapConflicts(spawnOverlapKey("dir-1", first.Args), spawnOverlapKey("dir-2", second.Args)) || spawnOverlapConflicts(spawnOverlapKey("dir-1", []string{"--job", "a"}), spawnOverlapKey("dir-2", []string{"--job", "b"})) {
+		t.Fatal("overlap key conflict rule is wrong")
+	}
+}
+
+// The lane is read as a flag, never from another flag's value: a --purpose
+// of "-L" does not hide the real -L live.
+func TestNodeSpawnLaneReadAsFlag_t4578(t *testing.T) {
+	root := t.TempDir()
+	config := filepath.Join(t.TempDir(), "spawn.json")
+	if err := os.WriteFile(config, []byte(`{"work_root":"`+root+`","workspace":"w","herdr_session":"w","enabled":true}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, dir := range []string{"job-a", "job-c"} {
+		if err := os.MkdirAll(filepath.Join(root, dir), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink("../job-a", filepath.Join(root, "job-c", "live")); err != nil {
+		t.Fatal(err)
+	}
+	message := concurrencyMessage(1, "job-c")
+	message.Args = []string{"--job", "job-c", "--purpose", "-L", "-m", "sonnet", "-L", "live"}
+	if got := (&HubClient{spawnConfigPath: config}).spawnAdmissionKey(message); got != "" {
+		t.Fatalf("a lane hidden behind a flag value was not seen: key %q", got)
+	}
+	if lane := hubSpawnFlagArg(message.Args, "-L"); lane != "live" || !spawnLaneEscapes(filepath.Join(root, "job-c"), lane) {
+		t.Fatalf("lane=%q", lane)
 	}
 }
