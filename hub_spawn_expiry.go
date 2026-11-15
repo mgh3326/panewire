@@ -13,6 +13,17 @@ import (
 // docs/hub-spawn-operations.md#time-limit. Start conditions through the queue
 // are a later part.
 
+// spawnExpiryField is the expires_ms a job.spawn frame carries: the request's
+// absolute expiry when the target node advertised that it reads the field,
+// else zero so an older node's strict decoder never sees it (hk 4747). The
+// node writes it into the job.spawned receipt as expires_at.
+func spawnExpiryField(capabilities map[string]bool, expires time.Time) int64 {
+	if !capabilities[hubCapabilitySpawnExpires] || expires.IsZero() {
+		return 0
+	}
+	return expires.UnixMilli()
+}
+
 // spawnAttemptEndedUnstarted reports whether an outcome ends an attempt
 // whose start is proven absent, so a request with a limit renews it or gives
 // up: the landing wait ran out with the hub never having sent the attempt (or

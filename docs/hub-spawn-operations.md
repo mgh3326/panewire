@@ -116,6 +116,13 @@ refuse `--expires` rather than drop it. A deliberate replay of a `retryable`
 request starts its limit again. These are constants in this part
 (`internal/fleet/spawn_expiry.go`), not hub config.
 
+An attempt's `job.spawn` frame carries that absolute expiry as `expires_ms`, but
+only to a node that advertises `spawn_expires_v1` (`hubSpawnCapabilities`): an
+older node's strict frame decoder refuses an unknown field. The node's spawn
+writes it into the `job.spawned` receipt as `expires_at`, which the node's pane
+sweep reads to end a reviewer or consult that never posted a result
+([pane-sweep.md](pane-sweep.md#reviewer-and-consult-ends), hk 4747).
+
 The 600 s landing wait (`deadline_seconds`) is now one attempt's bound, or the
 limit when that comes first. A staged author-replacement successor
 (`activateStagedSpawn`) is capped the same way; one activated at or past the
@@ -368,6 +375,13 @@ minutes the hub writes the end of each such job. The rule:
   activates no hand-over (a hand-over would re-prompt the pane after the end and
   make the ledger live again), ends its watch on the intent path, and starts no
   watcher from `AnnounceQuotaStop`.
+
+The node also ends its own reviewer and consult jobs that never post a result:
+a pane both herdr lists lost, or a live pane past the request's time limit plus
+a grace. That rule and its end reasons are in
+[pane-sweep.md](pane-sweep.md#reviewer-and-consult-ends) (hk 4747). It leaves a
+posted result to this pass and never ends a job whose attempt announced a quota
+stop.
 
 The pass logs each job once per outcome, never once per pass:
 `hub ended a reviewer job with a posted result` (INFO, with `job`,

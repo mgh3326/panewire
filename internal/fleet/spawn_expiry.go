@@ -39,6 +39,22 @@ func SpawnExpiresFor(role string, seconds int) time.Duration {
 	return time.Duration(seconds) * time.Second
 }
 
+// spawnExpiresAt is the request time limit a spawn records as the receipt's
+// expires_at: the hub's own expiry when the frame carried it, else --expires
+// for a local spawn, else the role's default from now (hk 4747).
+func (a *App) spawnExpiresAt(s Spawn) time.Time {
+	if !s.hubExpiresAt.IsZero() {
+		return s.hubExpiresAt
+	}
+	seconds := 0
+	if s.Expires != "" {
+		if parsed, err := parseSpawnExpires(s.Expires); err == nil {
+			seconds = parsed
+		}
+	}
+	return a.Now().Add(SpawnExpiresFor(foldSpawnRole(s.Role), seconds))
+}
+
 // ValidSpawnExpiresSeconds reports whether seconds is a limit a request may
 // carry: zero (the role's default) or between SpawnExpiresMin and
 // SpawnExpiresMax.

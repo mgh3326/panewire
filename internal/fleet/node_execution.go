@@ -31,7 +31,9 @@ func ErrorCode(err error) int {
 
 // ExecuteNode is the node daemon's in-process launcher boundary. It shares the
 // CLI engine and guards, while execution paths and session come from node config.
-func ExecuteNode(ctx context.Context, cwd, brief, workspace, session string, args []string, out, errout io.Writer) Execution {
+// expiresAt is the hub's request expiry when the frame carried one (hk 4747):
+// the spawn writes it into its receipt so the pane sweep reads the real limit.
+func ExecuteNode(ctx context.Context, cwd, brief, workspace, session string, expiresAt time.Time, args []string, out, errout io.Writer) Execution {
 	result := Execution{Stage: "placement", StageMS: map[string]int64{}, Retryable: true}
 	a, err := New(out, errout)
 	if err != nil {
@@ -52,6 +54,9 @@ func ExecuteNode(ctx context.Context, cwd, brief, workspace, session string, arg
 		return result
 	}
 	s = bindNodeSpawn(s, cwd, brief, workspace)
+	if !expiresAt.IsZero() {
+		s.hubExpiresAt = expiresAt
+	}
 	a.ObserveStage = func(stage string, duration time.Duration) {
 		if stage == "claim" {
 			result.Retryable = false

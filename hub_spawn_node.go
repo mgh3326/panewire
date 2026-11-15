@@ -610,7 +610,11 @@ func (client *HubClient) runHubSpawn(parent context.Context, message hubOutbound
 	if engine == nil {
 		engine = runHubSpawnEngine
 	}
-	output, execution := engine(runContext, cwd, temporaryName, config.Workspace, config.HERDRSession, message.Args)
+	var expiresAt time.Time
+	if message.ExpiresMS > 0 {
+		expiresAt = time.UnixMilli(message.ExpiresMS)
+	}
+	output, execution := engine(runContext, cwd, temporaryName, config.Workspace, config.HERDRSession, expiresAt, message.Args)
 	result.Receipt = &execution.Receipt
 	result.StdoutTail = output.tailString()
 	result.Pane, result.JobID = output.pane, output.jobID
@@ -940,11 +944,11 @@ func hubSpawnEnvironment(environment []string, session string) []string {
 	return append(filtered, "HERDR_SESSION="+session)
 }
 
-type hubSpawnEngine func(context.Context, string, string, string, string, []string) (*hubSpawnOutput, fleet.Execution)
+type hubSpawnEngine func(context.Context, string, string, string, string, time.Time, []string) (*hubSpawnOutput, fleet.Execution)
 
-func runHubSpawnEngine(ctx context.Context, cwd, brief, workspace, session string, args []string) (*hubSpawnOutput, fleet.Execution) {
+func runHubSpawnEngine(ctx context.Context, cwd, brief, workspace, session string, expiresAt time.Time, args []string) (*hubSpawnOutput, fleet.Execution) {
 	output := &hubSpawnOutput{}
-	result := fleet.ExecuteNode(ctx, cwd, brief, workspace, session, args, output, &output.stderr)
+	result := fleet.ExecuteNode(ctx, cwd, brief, workspace, session, expiresAt, args, output, &output.stderr)
 	return output, result
 }
 

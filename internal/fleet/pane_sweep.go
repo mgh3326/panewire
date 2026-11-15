@@ -238,16 +238,23 @@ func paneSweepTaskEnd(t TaskStatus) (paneSweepEnd, bool) {
 	return end, true
 }
 
-// paneSweepRole is the job's spawn role with the names older receipts used
-// folded in: a worker or tester is an implementer, a counsel a consult.
-func paneSweepRole(j Job) string {
-	switch j.QuotaRole() {
+// foldSpawnRole folds the names older receipts used into the spawn role: a
+// worker or tester is an implementer, a counsel a consult. The default limit
+// and the pane sweep both read the folded name.
+func foldSpawnRole(role string) string {
+	switch role {
 	case "worker", "tester":
 		return "implementer"
 	case "counsel":
 		return "consult"
 	}
-	return j.QuotaRole()
+	return role
+}
+
+// paneSweepRole is the job's spawn role with the names older receipts used
+// folded in (foldSpawnRole).
+func paneSweepRole(j Job) string {
+	return foldSpawnRole(j.QuotaRole())
 }
 
 // paneSweepTaskRole reports that the job's pane is judged by its hk task and
@@ -468,7 +475,7 @@ func (s *TaskPaneSweeper) pass(ctx context.Context, a *App, ownerAge time.Durati
 		return nil, err
 	}
 	now := a.Now()
-	var candidates []Job
+	var candidates, abandoned []Job
 	for _, entry := range entries {
 		if !entry.IsDir() || !validID(entry.Name()) {
 			continue
@@ -477,13 +484,16 @@ func (s *TaskPaneSweeper) pass(ctx context.Context, a *App, ownerAge time.Durati
 		if err != nil {
 			continue
 		}
-		if paneSweepCandidate(j) || paneSweepKeepCandidate(j, now) {
+		switch {
+		case paneSweepAbandoned(j):
+			abandoned = append(abandoned, j)
+		case paneSweepCandidate(j) || paneSweepKeepCandidate(j, now):
 			candidates = append(candidates, j)
 		}
 	}
 	counts := map[string]int{}
 	defer s.reportEndedPanes(a, counts)
-	if len(candidates) == 0 {
+	if len(candidates) == 0 && len(abandoned) == 0 {
 		clear(s.idleSince)
 		return nil, nil
 	}
@@ -495,6 +505,10 @@ func (s *TaskPaneSweeper) pass(ctx context.Context, a *App, ownerAge time.Durati
 		s.info("task pane sweep kept every pane", "reason", "herdr-unreadable")
 		return nil, nil
 	}
+	// The node ends its own reviewer and consult jobs that never ran `done`
+	// before their panes are judged (hk 4747). Such a job is not one of this
+	// pass's candidates — it is still live until the end above.
+	swept := s.endAbandonedReviews(ctx, a, abandoned, agents, now)
 	if s.idleSince == nil {
 		s.idleSince = map[string]time.Time{}
 	}
@@ -523,7 +537,6 @@ func (s *TaskPaneSweeper) pass(ctx context.Context, a *App, ownerAge time.Durati
 	statuses := map[string]paneSweepTaskRead{}
 	prs := map[string]paneSweepPRRead{}
 	parents := map[string]paneSweepInherited{}
-	var swept []SweptPane
 	for _, j := range candidates {
 		closed := paneSweepClosed(j)
 		var task string
@@ -640,7 +653,7 @@ func (s *TaskPaneSweeper) pass(ctx context.Context, a *App, ownerAge time.Durati
 // keeps an admitted candidate.
 func paneSweepCounted(reason string) bool {
 	switch reason {
-	case "open_pr", "grace", "no_task", "job_changed", "pane_gone":
+	case "open_pr", "grace", "no_task", "job_changed", SweepPaneGone:
 		return false
 	}
 	return !strings.HasPrefix(reason, "pane-")
@@ -1038,7 +1051,7 @@ func (s *TaskPaneSweeper) paneUnlisted(ctx context.Context, a *App, j Job, swept
 		}
 	}
 	s.reapSweptPane(ctx, a, j, j, "", paneSweepJobEnd(j, ""), TokenUsage{}, false, a.Now())
-	swept.Reason = "pane_gone"
+	swept.Reason = SweepPaneGone
 	return swept, ""
 }
 
