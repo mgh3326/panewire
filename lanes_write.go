@@ -463,7 +463,7 @@ func (h *HubServer) laneSpawnProof(nodeMachine string, body hubLaneWriteRequest)
 // same-pane convergence below is only a retry fallback for a move that
 // already happened, and must never pre-empt a predecessor row that still
 // needs moving.
-func laneTakeoverRow(lane string, body hubLaneWriteRequest, proof laneSpawnProof, routes map[string]reportRelayRoute) (string, reportRelayRoute, bool, *hubLaneProjection, error) {
+func laneTakeoverRow(body hubLaneWriteRequest, proof laneSpawnProof, routes map[string]reportRelayRoute) (string, reportRelayRoute, bool, *hubLaneProjection, error) {
 	if !proof.valid || body.Job != proof.task.Job {
 		return "", reportRelayRoute{}, false, nil, errLaneTakeoverUnconfirmed
 	}
@@ -479,40 +479,19 @@ func laneTakeoverRow(lane string, body hubLaneWriteRequest, proof laneSpawnProof
 		}
 		return name, row, true, nil, nil
 	}
-	// No row is still bound to the takeover job, so a retry converges only on
-	// evidence tied to this takeover: the requested lane itself already
-	// sitting at the successor's pane and bound to the successor job, or —
-	// when the requested lane name is absent because the move kept the
-	// predecessor row's own name — the single row at that pane bound to the
-	// successor job. Anything else refuses.
-	if route, ok := routes[lane]; ok && !route.Sink && route.Machine == body.Machine && route.Pane == body.Pane && route.Job == body.Job {
-		projection := hubLaneProjection{Lane: lane, Machine: route.Machine, Pane: route.Pane, Parent: route.Parent, Sink: route.Sink, Standby: route.Standby}
-		return "", reportRelayRoute{}, false, &projection, nil
-	}
-	if _, ok := routes[lane]; !ok {
-		if name, row, found := laneMovedRow(routes, body.Machine, body.Pane, body.Job); found {
-			projection := hubLaneProjection{Lane: name, Machine: row.Machine, Pane: row.Pane, Parent: row.Parent, Sink: row.Sink, Standby: row.Standby}
-			return "", reportRelayRoute{}, false, &projection, nil
-		}
-	}
-	return "", reportRelayRoute{}, false, nil, errLaneTakeoverUnconfirmed
-}
-
-// laneMovedRow finds the single non-sink row at a pane bound to a job: the
-// row a takeover already moved there. Zero or several such rows prove nothing
-// about this takeover.
-func laneMovedRow(routes map[string]reportRelayRoute, machine, pane, job string) (string, reportRelayRoute, bool) {
-	name, row, count := "", reportRelayRoute{}, 0
+	// No row is still bound to the takeover job, so a retry converges only
+	// on a row stamped by this takeover: taken_over_from names the
+	// predecessor and the row is bound to the successor, under any lane
+	// name. A successor-held row without that stamp proves nothing about
+	// this takeover, so the retry refuses instead of reporting success.
 	for candidate, route := range routes {
-		if route.Sink || route.Machine != machine || route.Pane != pane || route.Job != job {
+		if route.Sink || route.Machine != body.Machine || route.Pane != body.Pane || route.Job != body.Job || route.TakenOverFrom != body.Takeover {
 			continue
 		}
-		if count == 0 {
-			name, row = candidate, route
-		}
-		count++
+		projection := hubLaneProjection{Lane: candidate, Machine: route.Machine, Pane: route.Pane, Parent: route.Parent, Sink: route.Sink, Standby: route.Standby}
+		return "", reportRelayRoute{}, false, &projection, nil
 	}
-	return name, row, count == 1
+	return "", reportRelayRoute{}, false, nil, errLaneTakeoverUnconfirmed
 }
 
 // laneRowForJob resolves the rows bound to a job. The count tells zero rows
@@ -597,8 +576,10 @@ func (h *HubServer) putLane(lane string, body hubLaneWriteRequest, nodeMachine s
 		spawnProof = h.laneSpawnProof(nodeMachine, body)
 	}
 	// written is the lane name the write actually publishes: a takeover may
-	// move a row named differently from the requested name.
+	// move a row named differently from the requested name. takeoverMoved
+	// records that move for the taken_over_from stamp below.
 	written := lane
+	takeoverMoved := false
 	unchanged := false
 	err := withLanesFileLock(h.reportRelayPath, func() error {
 		evicted = nil
@@ -639,7 +620,7 @@ func (h *HubServer) putLane(lane string, body hubLaneWriteRequest, nodeMachine s
 				// findings already use follows the work onto the successor's
 				// machine. The durable accepted spawn proves the parent; without
 				// it, no other machine's lane may be moved.
-				name, row, found, held, err := laneTakeoverRow(lane, body, spawnProof, snapshot.Routes)
+				name, row, found, held, err := laneTakeoverRow(body, spawnProof, snapshot.Routes)
 				if err != nil {
 					return err
 				}
@@ -651,6 +632,7 @@ func (h *HubServer) putLane(lane string, body hubLaneWriteRequest, nodeMachine s
 				}
 				if found {
 					moved = true
+					takeoverMoved = true
 					written, existing, exists = name, row, true
 					if existing.Machine != nodeMachine {
 						if evicted, err = h.reserveNodeRow(snapshot.Routes, nodeMachine); err != nil {
@@ -693,19 +675,27 @@ func (h *HubServer) putLane(lane string, body hubLaneWriteRequest, nodeMachine s
 		}
 		// The lane row's job binding survives unrelated writes: a write that
 		// leaves machine and pane unchanged and carries no valid proof of its
-		// own keeps the existing binding. Only a route change or a proven
-		// write naming a new job clears or replaces it, so an operator
+		// own keeps the existing binding, stamp included. Only a route change
+		// or a proven write clears or replaces them, so an operator
 		// 'lanes add' without --job and an old daemon's re-register keep the
-		// binding a later --parent-job takeover moves.
+		// binding a later --parent-job takeover moves. A takeover move stamps
+		// the row with the predecessor job as its retry evidence.
+		routeTakenOverFrom := ""
 		if spawnProof.valid {
 			routeJob = body.Job
+			if takeoverMoved {
+				routeTakenOverFrom = body.Takeover
+			} else if exists && !body.Sink && body.Machine == existing.Machine && body.Pane == existing.Pane {
+				routeTakenOverFrom = existing.TakenOverFrom
+			}
 		} else if exists && !body.Sink && body.Machine == existing.Machine && body.Pane == existing.Pane {
 			routeJob = existing.Job
+			routeTakenOverFrom = existing.TakenOverFrom
 		} else {
 			routeJob = ""
 		}
 
-		route := reportRelayRoute{Machine: body.Machine, Pane: body.Pane, Job: routeJob, Parent: body.Parent, Deliver: existing.Deliver, Protected: existing.Protected, Standby: existing.Standby}
+		route := reportRelayRoute{Machine: body.Machine, Pane: body.Pane, Job: routeJob, TakenOverFrom: routeTakenOverFrom, Parent: body.Parent, Deliver: existing.Deliver, Protected: existing.Protected, Standby: existing.Standby}
 		// Failover swaps only machine/pane; preserve an omitted standby so a later
 		// reverse swap still has its alternate destination.
 		if body.standbyPresent {

@@ -402,6 +402,30 @@ func TestLaneTakeoverMissingPredecessorWithUnrelatedRowRefused(t *testing.T) {
 	}
 }
 
+// The requested lane itself sitting at the successor pane bound to the
+// successor job proves nothing without the takeover stamp: it may be the
+// successor's own lane, never moved by this takeover. The retry refuses.
+func TestLaneTakeoverUnstampedOwnRowRefused(t *testing.T) {
+	hub, path := takeoverHub(t,
+		`{"lanes":{"succ-lane":{"machine":"machine-b","pane":"w2:p5","job":"succ-u","parent":"mergewake"},"mergewake":{"machine":"machine-a","pane":"w9:p9"}}}`,
+		nil)
+	seedAcceptedChainJob(t, hub.inbox.store, "pred-u", "", "machine-a", "w1:p1")
+	bindChainSuccessor(t, hub.inbox.store, "succ-u", "pred-u", "machine-b")
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	writer := lanesNodeRequest(t, hub, http.MethodPut, "/v1/lanes/succ-lane", lanesNodeBToken, "machine-b",
+		`{"machine":"machine-b","pane":"w2:p5","job":"succ-u","parent":"mergewake","takeover":"pred-u"}`)
+	if writer.Code != http.StatusConflict || writer.Body.String() != `{"error":"lane_takeover_unconfirmed"}`+"\n" {
+		t.Fatalf("unstamped takeover status=%d body=%q", writer.Code, writer.Body.String())
+	}
+	if after, err := os.ReadFile(path); err != nil || string(after) != string(before) {
+		t.Fatalf("refused takeover changed the file: %q", after)
+	}
+}
+
 // A lost response retries the identical PUT under a lane name that was never
 // created: the move kept the predecessor row's own name. The retry converges
 // on that moved row and changes nothing.
