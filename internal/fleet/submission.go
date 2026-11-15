@@ -179,12 +179,16 @@ func (a *App) SubmitSpawn(ctx context.Context, s Spawn) error {
 	fmt.Fprintf(a.Out, "ACCEPTED job=%s request=%s\n", accepted.Job, accepted.Request)
 	if wait {
 		waiter, ok := submitter.(interface {
-			WaitSpawn(context.Context, string) (SpawnAttempt, error)
+			WaitSpawn(context.Context, string, SpawnWaitOptions) (SpawnAttempt, error)
 		})
 		if !ok {
 			return fail(exitConfig, "hub transport cannot wait for spawn status; upgrade the configured transport")
 		}
-		attempt, err := waiter.WaitSpawn(ctx, accepted.Request)
+		timeout, err := a.waitDeadline(s)
+		if err != nil {
+			return err
+		}
+		attempt, err := waiter.WaitSpawn(ctx, accepted.Request, SpawnWaitOptions{Timeout: timeout, Notice: a.Err})
 		if err != nil {
 			return err
 		}
@@ -468,9 +472,9 @@ func (s SpawnAttempt) print(out io.Writer, job string) {
 }
 
 // SpawnStatus reads a hub spawn operation's status once (GET
-// /v1/spawns/<id>): accepted, dispatching, succeeded, failed, retryable,
-// reconciling or deadline_exceeded. An id that is not a plain id, a
-// transport failure, a non-200 answer or a body with no status is an error.
+// /v1/spawns/<id>). The value is the request state of spawn_request_state.go,
+// today's names or a design name. An id that is not a plain id, a transport
+// failure, a non-200 answer or a body with no status is an error.
 func (c *hubHTTP) SpawnStatus(ctx context.Context, id string) (string, error) {
 	if !validID(id) {
 		return "", fail(exitUsage, "invalid spawn operation id")
@@ -488,29 +492,79 @@ func (c *hubHTTP) SpawnStatus(ctx context.Context, id string) (string, error) {
 	return result.Status, nil
 }
 
-// WaitSpawn observes durable spawn state before the existing --wait completion
-// path. Admission/node refusal codes remain visible to synchronous callers.
-func (c *hubHTTP) WaitSpawn(ctx context.Context, id string) (SpawnAttempt, error) {
+// SpawnWaitOptions shapes one WaitSpawn.
+type SpawnWaitOptions struct {
+	// Timeout bounds how long the request may stay short of landed or
+	// terminal. Zero leaves only the context to end the wait.
+	Timeout time.Duration
+	// Notice hears the lines a waiting caller is owed: a parked request's
+	// reason and next check, and a state this client does not know. Nil hears
+	// nothing.
+	Notice io.Writer
+}
+
+// WaitSpawn follows a hub request's state to landed or a terminal state
+// (spawn_request_state.go maps each state), before the job-completion wait
+// takes over. Admission and node refusal codes stay visible to synchronous
+// callers. A non-terminal or unknown state keeps waiting; the wait ends at
+// opts.Timeout with exitWaitParked for a parked request and exitWaitTimeout
+// otherwise. The bound runs on the wall clock: a frozen test clock would
+// never expire it.
+func (c *hubHTTP) WaitSpawn(ctx context.Context, id string, opts SpawnWaitOptions) (SpawnAttempt, error) {
 	poll := c.statusPoll
 	if poll == 0 {
 		poll = 2 * time.Second
 	}
+	var deadline time.Time
+	if opts.Timeout > 0 {
+		deadline = time.Now().Add(opts.Timeout)
+	}
 	failures := 0
+	var told spawnWaitNotices
+	// last is the latest request state read; the bound's exit names it.
+	lastKind, lastStatus := spawnActive, ""
+	expired := func() error {
+		if deadline.IsZero() || time.Now().Before(deadline) {
+			return nil
+		}
+		if lastKind == spawnParked {
+			return fail(exitWaitParked, "spawn request %s is still parked after the wait timeout; it stays queued on the hub (operation %s)", id, id)
+		}
+		return fail(exitWaitTimeout, "wait timeout for spawn request %s in state %s; it stays on the hub (operation %s)", id, firstNonempty(lastStatus, "unknown"), id)
+	}
 	for {
-		status, raw, err := c.doIdempotent(ctx, http.MethodGet, "/v1/spawns/"+id, nil, 5*time.Second)
+		// The bound covers the read, its retries, the failure sleeps and the
+		// poll sleep alike: a read starts only inside it and ends at it.
+		if err := expired(); err != nil {
+			return SpawnAttempt{}, err
+		}
+		readCtx, cancel := ctx, context.CancelFunc(func() {})
+		if !deadline.IsZero() {
+			readCtx, cancel = context.WithDeadline(ctx, deadline)
+		}
+		status, raw, err := c.doIdempotent(readCtx, http.MethodGet, "/v1/spawns/"+id, nil, 5*time.Second)
+		cancel()
+		if ctx.Err() != nil {
+			return SpawnAttempt{}, ctx.Err()
+		}
 		if err != nil || status >= http.StatusInternalServerError {
+			if e := expired(); e != nil {
+				return SpawnAttempt{}, e
+			}
 			if failures++; failures > spawnStatusFailureLimit {
 				return SpawnAttempt{}, fail(exitStateConflict, "spawn status unavailable; inspect operation %s and retry its saved request without choosing a new host", id)
 			}
-			if err = sleepContext(ctx, poll); err != nil {
+			if err = c.sleepWithin(ctx, poll, deadline); err != nil {
 				return SpawnAttempt{}, err
 			}
 			continue
 		}
 		failures = 0
 		var result struct {
-			Status string `json:"status"`
-			Result struct {
+			Status      string `json:"status"`
+			Reason      string `json:"reason"`
+			NextCheckAt string `json:"next_check_at"`
+			Result      struct {
 				SpawnAttempt
 				RC     int    `json:"rc"`
 				Reason string `json:"reason"`
@@ -520,21 +574,45 @@ func (c *hubHTTP) WaitSpawn(ctx context.Context, id string) (SpawnAttempt, error
 			return SpawnAttempt{}, fail(exitStateConflict, "spawn status unreadable; inspect operation %s", id)
 		}
 		attempt := result.Result.SpawnAttempt
-		switch result.Status {
-		case "succeeded":
+		kind := classifySpawnState(result.Status)
+		switch kind {
+		case spawnLanded:
 			return attempt, nil
-		case "failed", "retryable":
-			return attempt, fail(result.Result.RC, "spawn refused %s: %s (operation %s)", attempt, result.Result.Reason, id)
-		case "deadline_exceeded":
+		case spawnRefused:
+			return attempt, fail(spawnRefusalRC(result.Result.RC), "spawn refused %s: %s (operation %s)", attempt, result.Result.Reason, id)
+		case spawnEnded:
+			return attempt, fail(exitWaitLost, "spawn request %s before it landed %s: %s (operation %s)", result.Status, attempt, firstNonempty(result.Reason, result.Result.Reason, "no reason recorded"), id)
+		case spawnUnresolved:
 			return attempt, fail(exitStateConflict, "spawn ownership is unresolved %s; inspect operation %s and its executing node before any retry", attempt, id)
-		case "accepted", "bound", "dispatching", "reconciling":
-		default:
-			return attempt, fail(exitStateConflict, "unknown spawn state; inspect operation %s", id)
+		case spawnParked:
+			told.parked(opts.Notice, id, firstNonempty(result.Reason, result.Result.Reason), result.NextCheckAt)
+		case spawnUnknown:
+			told.unknown(opts.Notice, result.Status)
 		}
-		if err = sleepContext(ctx, poll); err != nil {
+		lastKind, lastStatus = kind, result.Status
+		if err = c.sleepWithin(ctx, poll, deadline); err != nil {
 			return attempt, err
 		}
 	}
+}
+
+// sleepWithin sleeps d, or until deadline when that comes first (a zero
+// deadline is none). Only the caller's own context ends it with an error.
+func (c *hubHTTP) sleepWithin(ctx context.Context, d time.Duration, deadline time.Time) error {
+	if !deadline.IsZero() {
+		d = min(d, max(time.Until(deadline), 0))
+	}
+	return sleepContext(ctx, d)
+}
+
+// spawnRefusalRC is the exit code of a refused request: the hub's refusal
+// code, or the placement failure when the hub recorded none (zero would read
+// as success).
+func spawnRefusalRC(rc int) int {
+	if rc <= 0 {
+		return exitPlacement
+	}
+	return rc
 }
 
 func isNumeric(s string) bool {

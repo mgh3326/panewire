@@ -1910,13 +1910,14 @@ HTTP 409 warns and drops the conflicting file. Local attempt markers under
 | 81 | `NO_ELIGIBLE_HOST`, wake/capacity placement failure, the remote worktree for a linked-worktree job could not be prepared (also a `via = "hub"` checkout refusal), or the hub is unavailable for a forced `via = "hub"` host. |
 | 82 | Pane committed but lane unregistered under strict lane reporting (`PANEWIRE_LANE_STRICT=1`). |
 | 83 | `spawn --wait`: the job escalated. |
-| 84 | `spawn --wait`: the job was lost or revoked. |
-| 85 | `spawn --wait`: the wait deadline expired; the job is retained. |
+| 84 | `spawn --wait`: the job was lost or revoked, or its hub request ended before it landed (`cancelled`, `given_up`; nothing was spawned). |
+| 85 | `spawn --wait`: the wait deadline expired; the job, or a hub request still queued, is retained. |
 | 86 | `QUOTA_EXHAUSTED`: every eligible account is measured exhausted and the role waits, including an exhausted downgrade retry. |
 | 87 | `QUOTA_EXHAUSTED`: every eligible account is measured exhausted and the role escalates to the parent lane. |
 | 88 | `AUTH_UNAVAILABLE`: no usable current account binding on eligible hosts. |
 | 89 | `QUOTA_UNKNOWN`: quota remains unknown after one bounded account refresh. |
 | 90 | `WORKSPACE_TRUST_REQUIRED`: Codex is waiting at its directory trust prompt; initial brief is withheld. Or `HOOKS_REVIEW_REQUIRED`: Codex is waiting at its "Hooks need review" screen; initial brief is withheld. |
+| 91 | `spawn --wait`: the hub request is `parked` (no host can take it now) and the wait deadline expired; the request stays queued on the hub. |
 | 124 | A time-bounded CLI call reached its context deadline. |
 | 255 | SSH could not reach a remote host (repository check, clone or spawn leg). Never returned for a `via = "hub"` host. |
 
@@ -2059,16 +2060,18 @@ state, so a retained completed record can still appear after reap.
 
 ## Task pane sweep
 
-`panewire daemon` closes the pane of an implementer whose bound hk task is
-merged, done or dropped, or whose job was closed, once the pane has stayed not
-working for a grace; a completed author's pane waits while its PR is open. The
-rules are in [pane-sweep.md](pane-sweep.md). Two daemon flags configure it:
+`panewire daemon` closes the pane of a job that ended — a reviewer or
+consult's terminal record, an implementer's merged, done, dropped or
+handed-over end — proven the job's own by pane id and harness session, once
+the end is an hour old (a day for `--keep`), and sooner when the pane stayed
+not working for a grace. A completed author's pane waits while its PR is open.
+The rules are in [pane-sweep.md](pane-sweep.md). Two daemon flags configure it:
 
 - `--task-pane-sweep-interval DURATION` — how often the sweep runs. Default
   `5m`; `0` turns it off; any other value must be at least `10s`.
 - `--task-pane-sweep-grace DURATION` — how long a pane must have stayed not
-  working before it is closed. Default `10m`; `0` closes at the first sweep that
-  finds the task ended.
+  working before it is closed inside the close deadline. Default `10m`; `0`
+  closes at the first sweep that finds the job ended.
 
 The sweep needs `--hub-url`, `--hub-token-env` and `--hub-jobs-root`, and reads
 hk through `handoffkeep_env` in the node's `spawn.json`. After a close it also

@@ -60,6 +60,10 @@ func (client *HubClient) nodeTaskPaneSweeper() *fleet.TaskPaneSweeper {
 		client.taskPaneSweeper = &fleet.TaskPaneSweeper{
 			Grace: client.taskPaneSweepGrace,
 			Info:  slog.Info,
+			Exclusive: func() func() {
+				client.nodeCommandMu.Lock()
+				return client.nodeCommandMu.Unlock
+			},
 		}
 	})
 	return client.taskPaneSweeper
