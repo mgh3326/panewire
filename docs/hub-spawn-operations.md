@@ -32,9 +32,9 @@ reason; an unreachable or failing hub is an error, not a silent fallback.
 The CLI prints `ACCEPTED job=… request=…` after the hub commits a reservation.
 That confirms ownership of the operation, not a pane or brief delivery. Wait for
 `SPAWNED` or `SPAWN_FAILED` and perform the usual read-only landing check.
-`--wait` observes spawn state first, preserving admission/node refusal codes,
-keeps polling through `reconciling` (which sends no notice), then uses the
-existing job-completion wait and timeout behavior. Delegate panes
+`--wait` observes the request state first, preserving admission/node refusal codes,
+then uses the existing job-completion wait and timeout behavior. See
+[Request states a client reads](#request-states-a-client-reads). Delegate panes
 use the same submission path.
 
 For a stale or unobserved native quota account, the hub schedules a node
@@ -68,6 +68,33 @@ retains its place, but is sent only if a later placement pass requests it with a
 new budget. On shutdown the hub cancels refreshes; accepted requests and their
 reservations survive restart. Local, non-hub spawns keep their synchronous
 refresh behavior. See [Quota service boundary](placement.md#quota-service-boundary).
+
+## Request states a client reads
+
+`GET /v1/spawns/<request>` returns `status`. Every client (`spawn --wait`, the
+job-directory TTL pass) knows the design's state set
+(hk design/2026-11-13/hub-owned-spawn-queue §2) before the hub emits any of it
+(hk 4659). The hub still emits only `accepted`, `dispatching`, `reconciling`,
+`succeeded`, `failed`, `retryable` and `deadline_exceeded`;
+`TestHubSpawnExternalStatesUnchanged` keeps that set.
+
+| State | `spawn --wait` |
+|---|---|
+| `accepted`, `waiting`, `pending`, `bound`, `dispatching`, `launching`, `reconciling` | keeps waiting, silently |
+| `parked` | keeps waiting and prints `wait request=<id> state=parked reason=<r> next_check_at=<t>` on stderr when either changes. The client reads `reason` and `next_check_at` from the top level of the answer (`result.reason` as a fallback) and tolerates their absence. |
+| `succeeded`, `landed` | the request phase ends; the job-completion wait follows |
+| `failed`, `retryable`, `refused` | exits with the hub's recorded `result.rc` (81 when none) |
+| `cancelled`, `given_up` | exits 84; nothing was spawned |
+| `deadline_exceeded` | exits 75, ownership unresolved |
+| any other name | keeps waiting and prints `unknown state <x>: still waiting` once on stderr; never success, never failure |
+
+`--wait-timeout` (default one hour) bounds the request phase, and then bounds
+the job-completion wait again. A request still in flight at the bound exits 85,
+and one still `parked` exits 91 (see [exit codes](config.md)); the request stays
+queued on the hub either way. The bound uses the wall clock.
+
+A submitter-side job directory the hub never held a record for may be removed
+once its request is `failed`, `refused`, `given_up` or `cancelled`.
 
 ## Acceptance and identity
 

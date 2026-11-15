@@ -574,7 +574,7 @@ func (a *App) jobDirRecord(ctx context.Context, id string, submitter bool, reque
 		if err != nil {
 			return nil, "spawn-status-unreadable"
 		}
-		if status != "failed" {
+		if !spawnNeverLanded(status) {
 			return nil, "hk-missing"
 		}
 		return nil, ""

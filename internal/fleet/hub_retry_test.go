@@ -97,7 +97,7 @@ func TestWaitSpawnFollowsTheOperationThroughAnOutage(t *testing.T) {
 	defer server.Close()
 	var retried hubretry.Stats
 	c := hubHTTP{base: server.URL, token: "fixture", client: server.Client(), statusPoll: 1, retry: fastRetry(), onRetry: retried.Add}
-	attempt, err := c.WaitSpawn(context.Background(), statusTestOperation)
+	attempt, err := c.WaitSpawn(context.Background(), statusTestOperation, SpawnWaitOptions{})
 	if err != nil || attempt.Host != "node-b" {
 		t.Fatalf("attempt=%+v err=%v", attempt, err)
 	}
