@@ -160,13 +160,15 @@ func Prompt(ctx context.Context, store *Store, client *HerdrClient, req PromptRe
 	}
 
 	// Resolve again after the read. Revision drift is recorded; identity drift
-	// is a hard stop before the durable preflight commit/send boundary.
+	// is a hard stop before the durable preflight commit/send boundary. A
+	// target that no longer resolves here closed or was renamed during
+	// preflight, not one on another host or herdr session, so it keeps the
+	// condition_invalid "no exact match" answer and takes no remote hint
+	// (hk 4810).
 	sendPane, err := resolveTarget(ctx, client, req.Target)
 	if err != nil {
 		if ctx.Err() != nil {
 			err = &codedError{ExitTimeout, fmt.Errorf("timeout resolving target")}
-		} else {
-			err = promptResolveError(err)
 		}
 		return recordFailureForRequestWithPane(ctx, store, id, req, promptHash, body, req.StorePromptBody, pane, pre.Revision, digest(pre.Text), "identity_changed", err)
 	}

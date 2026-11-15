@@ -59,3 +59,35 @@ func TestPromptQueuedBannerFromBeforeTheSendIsNotArrivalProof_hk4810(t *testing.
 		t.Fatalf("pre-existing queue banner exit=%d want %d", got, panewire.ExitDeliveryFailure)
 	}
 }
+
+// hk 4810: a target that resolved before the preflight read and is gone at the
+// re-resolve closed or was renamed during preflight — a race, not a target on
+// another host or herdr session — so it keeps the plain condition_invalid
+// answer and takes no remote hint.
+func TestPromptTargetGoneAtReResolveKeepsPlainRefusal_hk4810(t *testing.T) {
+	fixture := newHerdrFixture(t, promptFixtureSchema(false))
+	defer fixture.Close()
+	lists := 0
+	fixture.On("agent.list", func() any {
+		lists++
+		if lists > 1 {
+			return map[string]any{"agents": []any{}}
+		}
+		return map[string]any{"agents": []any{map[string]any{"agent": "orch", "name": "orch", "label": "orch", "harness": "claude", "pane_id": "p1", "workspace_id": "w1", "cwd": "/work", "revision": 10, "agent_status": "idle"}}}
+	})
+	fixture.On("agent.read", func() any { return map[string]any{"text": "idle pane\n", "revision": 10} })
+	fixture.On("agent.prompt", func() any { return map[string]any{"accepted": true} })
+	d, _ := startPromptDaemon(t, fixture)
+	defer d.Stop()
+
+	code, stderr := runCLIChild(t, dSocket(d), "prompt", "--from", "sender", "--to", "orch", "--file", promptFile(t))
+	if code != panewire.ExitConditionInvalid {
+		t.Fatalf("target gone at re-resolve exit=%d want %d; stderr=%s", code, panewire.ExitConditionInvalid, stderr)
+	}
+	if strings.Contains(stderr, "reaches only panes") {
+		t.Fatalf("a preflight race carried the remote hint:\n%s", stderr)
+	}
+	if got := fixture.Requests("agent.prompt"); got != 0 {
+		t.Fatalf("prompt requests=%d want 0", got)
+	}
+}
