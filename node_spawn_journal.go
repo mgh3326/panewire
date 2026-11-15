@@ -84,7 +84,12 @@ func spawnFingerprint(message hubOutboundMessage) string {
 }
 
 func (j *nodeSpawnJournal) claim(ctx context.Context, message hubOutboundMessage) (bool, *hubSpawnResult, error) {
-	result, err := j.db.ExecContext(ctx, `INSERT INTO spawn_inbox(request_id,fingerprint,status,job_id,label) VALUES(?,?,'executing',?,?) ON CONFLICT DO NOTHING`, message.RequestID, spawnFingerprint(message), hubSpawnArg(message.Args, "--job"), hubSpawnArg(message.Args, "-l"))
+	// The journal's identity columns are read back by the takeover proof and
+	// by restart settlement, so they take the strict flag/value pairs: a
+	// --purpose value is free text sent before --job, and the lax scan would
+	// record its value as this row's job (hk 4799).
+	job, label := hubSpawnFlagArg(message.Args, "--job"), hubSpawnFlagArg(message.Args, "-l")
+	result, err := j.db.ExecContext(ctx, `INSERT INTO spawn_inbox(request_id,fingerprint,status,job_id,label) VALUES(?,?,'executing',?,?) ON CONFLICT DO NOTHING`, message.RequestID, spawnFingerprint(message), job, label)
 	if err != nil {
 		return false, nil, err
 	}
@@ -103,7 +108,7 @@ func (j *nodeSpawnJournal) refuseUnstarted(ctx context.Context, message hubOutbo
 	if err != nil {
 		return false, err
 	}
-	inserted, err := j.db.ExecContext(ctx, `INSERT INTO spawn_inbox(request_id,fingerprint,status,result,job_id,label) VALUES(?,?,'completed',?,?,?) ON CONFLICT DO NOTHING`, message.RequestID, spawnFingerprint(message), string(raw), hubSpawnArg(message.Args, "--job"), hubSpawnArg(message.Args, "-l"))
+	inserted, err := j.db.ExecContext(ctx, `INSERT INTO spawn_inbox(request_id,fingerprint,status,result,job_id,label) VALUES(?,?,'completed',?,?,?) ON CONFLICT DO NOTHING`, message.RequestID, spawnFingerprint(message), string(raw), hubSpawnFlagArg(message.Args, "--job"), hubSpawnFlagArg(message.Args, "-l"))
 	if err != nil {
 		return false, err
 	}
