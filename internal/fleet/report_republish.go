@@ -198,15 +198,18 @@ func (s *TaskPaneSweeper) republishJobReports(ctx context.Context, a *App, j Job
 			continue
 		}
 		outcome, err := a.pinReport(ctx, j.ID, doc, rep.sha)
-		if outcome == "" {
+		switch {
+		case err != nil:
 			s.reportKept(j.ID, rep.sha, rep.path, "pin_failed")
 			continue
+		case outcome.outcome == pinAbsent:
+			continue
 		}
-		if err := a.event(ctx, j.ID, eventReportPinned, map[string]any{"report_sha256": rep.sha, "document": doc, "outcome": outcome}); err != nil {
+		if err := a.event(ctx, j.ID, eventReportPinned, map[string]any{"report_sha256": rep.sha, "document": outcome.document, "outcome": outcome.outcome}); err != nil {
 			s.reportKept(j.ID, rep.sha, rep.path, "pin_receipt_failed")
 			continue
 		}
-		receipts.pins[rep.sha] = outcome
+		receipts.pins[rep.sha] = outcome.outcome
 	}
 	return attempts
 }
