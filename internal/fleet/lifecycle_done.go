@@ -122,7 +122,7 @@ func (r doneReceipts) holds(digest string) bool {
 	if digest == "" {
 		return false
 	}
-	if r.pins[digest] == "pinned" {
+	if r.pins[digest] == pinPinned {
 		return true
 	}
 	for _, s := range r.settled {
@@ -132,6 +132,10 @@ func (r doneReceipts) holds(digest string) bool {
 	}
 	return false
 }
+
+// held reports whether a pin write was answered "held": the record names
+// another report, so this one can never take the pin.
+func (r doneReceipts) held(digest string) bool { return digest != "" && r.pins[digest] == pinHeld }
 
 // completedReportDigest is the sha256 of the bytes the newest job.completed
 // announcing report carried. A report file the fleet deleted after the pin
@@ -245,18 +249,33 @@ func (a *App) doneReport(ctx context.Context, j Job, in doneInput) error {
 		}
 	}
 
-	pinPending := false
+	// Step 3: the terminal record's pin. The record, not a local settlement
+	// receipt, is the authority for the step's outcome: a same-id retry whose
+	// record ended before the upload landed reads it here and attaches the
+	// pair (hk 4354), a record already naming these bytes is a no-op, and one
+	// naming another report is a refusal. The settlement receipt only says
+	// this run settled a record the pin can attach to; a job with no hk
+	// record (or one the settlement left unwritten) keeps today's warning-only
+	// path in step 2.
+	pinPending, refused := false, doc != "" && receipts.held(in.digest)
 	pinned := doc != "" && receipts.holds(in.digest)
 	if doc != "" && len(receipts.settled) > 0 && receipts.completing(in.digest) == in.digest && !receipts.pinSettled(in.digest) {
-		outcome, e := a.pinReport(ctx, id, doc, in.digest)
-		if outcome == "" {
+		res, e := a.pinReport(ctx, id, doc, in.digest)
+		switch {
+		case e != nil:
 			pinPending = true
 			a.warn("report pin failed: reason=%s", doneResultReason(e))
-		} else if e = a.event(ctx, id, eventReportPinned, map[string]any{"report_sha256": in.digest, "document": doc, "outcome": outcome}); e != nil {
-			return e
-		} else {
-			ran = append(ran, "pinned")
-			pinned = outcome == "pinned"
+		case res.outcome == pinAbsent:
+			// The record is not completed: its state is another step's fact.
+		default:
+			p := map[string]any{"report_sha256": in.digest, "document": res.document, "outcome": res.outcome}
+			if e = a.event(ctx, id, eventReportPinned, p); e != nil {
+				return e
+			}
+			pinned, refused = res.outcome == pinPinned, res.outcome == pinHeld
+			if pinned {
+				ran = append(ran, "pinned")
+			}
 		}
 	}
 
@@ -297,6 +316,8 @@ func (a *App) doneReport(ctx context.Context, j Job, in doneInput) error {
 			return fail(exitFailure, "job %s completed; report not in hk; rerun the same command", id)
 		case pinPending:
 			return fail(exitFailure, "job %s completed; report not pinned in hk; rerun the same command", id)
+		case refused:
+			return fail(exitStateConflict, "job %s completed; hk record names another report; local report kept", id)
 		}
 	}
 	return nil
@@ -333,21 +354,60 @@ func (a *App) removePinnedReport(in doneInput) bool {
 	return true
 }
 
+// The pin step's outcomes. "pinned" and "held" are the receipts' vocabulary;
+// "absent" means the record is not a completed one, so there is nothing for
+// the late write to attach, and no receipt is written.
+const (
+	pinPinned = "pinned"
+	pinHeld   = "held"
+	pinAbsent = "absent"
+)
+
+// pinResult is step 3's answer: the outcome, and S's document (the one the
+// receipt names, written or not).
+type pinResult struct {
+	outcome  string
+	document string
+}
+
 // pinReport is the late write of report_doc and report_sha256 on a terminal
-// record. hk takes it once (hk 4354): outcome "pinned" when it committed, or
-// was already the record's pin, and "held" when the record names another
-// report, which is logged here and is not an error. An empty outcome is a
-// write hk did not answer; the next done repeats it.
-func (a *App) pinReport(ctx context.Context, id, doc, digest string) (string, error) {
-	e := a.putJobRecord(ctx, id, map[string]any{"report_doc": doc, "report_sha256": digest})
+// record (step 3). The record is read first, so the write is the one hk takes
+// once (hk 4354) only when the record holds no report, while a record that
+// already names these bytes is a no-op and one naming another report is the
+// "held" outcome: the retry's report can never take that pin. A write hk
+// refuses with 409 anyway (another writer pinned in between) is the same
+// outcome. The error is a write hk did not answer, or a record it did not
+// read; the next done repeats the step.
+func (a *App) pinReport(ctx context.Context, id, doc, digest string) (pinResult, error) {
+	store, e := a.jobStore()
+	if e != nil {
+		return pinResult{}, e
+	}
+	rec, e := store.Get(ctx, id)
+	if e != nil {
+		return pinResult{}, e
+	}
+	if str(rec, "state") != "completed" {
+		return pinResult{outcome: pinAbsent}, nil
+	}
+	heldDoc, heldSHA := str(rec, "report_doc"), str(rec, "report_sha256")
 	switch {
+	case heldDoc == "" && heldSHA == "":
+		// No report on the record: the once-only late pin.
+	case heldSHA == digest:
+		return pinResult{outcome: pinPinned, document: heldDoc}, nil
+	default:
+		a.warn("report pin kept: job %s record already names another report", id)
+		return pinResult{outcome: pinHeld, document: doc}, nil
+	}
+	switch e = a.putJobRecord(ctx, id, map[string]any{"report_doc": doc, "report_sha256": digest}); {
 	case e == nil:
-		return "pinned", nil
+		return pinResult{outcome: pinPinned, document: doc}, nil
 	case isJobStateConflict(e):
 		a.warn("report pin kept: job %s record already names another report", id)
-		return "held", nil
+		return pinResult{outcome: pinHeld, document: doc}, nil
 	}
-	return "", e
+	return pinResult{}, e
 }
 
 // repaired renders the steps a rerun finished, as " published=yes ...".

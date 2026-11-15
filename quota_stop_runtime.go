@@ -452,7 +452,8 @@ func (q *quotaStopManager) observe(ctx context.Context, c idleWakeCandidate, now
 		return
 	}
 	rule, agent := herdrQuotaSignal(readCtx, c.PaneID)
-	stop, basis, ok := quotastop.Detect(screen, agent, rule, now, time.Local)
+	evidence := devinPaneEvidence(readCtx, c.PaneID, agent)
+	stop, basis, ok := quotastop.Detect(screen, agent, rule, evidence, now, time.Local)
 	// Devin's request-rate-limit text names the account limit but not the rung
 	// that drew it: the running profile names the pool (hk 4644).
 	stop = fleet.QuotaStopPool(stop, profile)
@@ -509,6 +510,50 @@ func herdrQuotaSignal(ctx context.Context, pane string) (rule, agent string) {
 		return "", ""
 	}
 	return parseHerdrExplain(out)
+}
+
+// devinPaneEvidence reads the devin CLI's own record of the pane's session:
+// herdr names the session id, and the CLI's process log says how its last turn
+// ended (hk 4542). Only a devin pane has such a record; any failure is no
+// evidence, so the screen classifier decides alone.
+func devinPaneEvidence(ctx context.Context, pane, agent string) quotastop.DevinSessionEvidence {
+	if !strings.EqualFold(agent, "devin") {
+		return quotastop.DevinSessionEvidence{}
+	}
+	session := herdrPaneSession(ctx, pane)
+	if session == "" {
+		return quotastop.DevinSessionEvidence{}
+	}
+	return quotastop.ReadDevinSessionEvidence(quotastop.DevinCLIDir(""), session, time.Local)
+}
+
+// herdrPaneSession reads the session id herdr reports for pane. It is the id
+// the devin CLI uses for its lock file and log, so it is the whole identity
+// the evidence lookup needs.
+func herdrPaneSession(ctx context.Context, pane string) string {
+	out, err := herdrCommandOutput(ctx, pane, "agent", "list")
+	if err != nil {
+		return ""
+	}
+	var listed struct {
+		Agents []map[string]any `json:"agents"`
+		Result *struct {
+			Agents []map[string]any `json:"agents"`
+		} `json:"result"`
+	}
+	if json.Unmarshal(out, &listed) != nil {
+		return ""
+	}
+	agents := listed.Agents
+	if agents == nil && listed.Result != nil {
+		agents = listed.Result.Agents
+	}
+	for _, row := range agents {
+		if aString(row, "pane_id") == pane {
+			return agentSessionValue(row["agent_session"])
+		}
+	}
+	return ""
 }
 
 // parseHerdrExplain reads the matched rule and agent kind from herdr agent

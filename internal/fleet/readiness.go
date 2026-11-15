@@ -176,6 +176,44 @@ func (s ReadinessState) Drop(n ReadinessNeed, now time.Time) string {
 	return ""
 }
 
+// harnessCapabilities names the seat capability flags the node's own readiness
+// answers: flag to harness kind. Those flags are a harness the node measures
+// (installed, version, login), not an operator-configured tool; a capability
+// not listed here keeps its hosts.toml value as the whole answer
+// (docs/config.md, "Capability flags").
+var harnessCapabilities = map[string]string{
+	"cmd_dsflash41":   "cmd",
+	"omp_commandcode": "omp",
+}
+
+// capability answers whether host holds the seat capability flag. The host's
+// own hosts.toml boolean is an explicit override: true forces the flag on and
+// false forces it off, whatever the node reports. With neither, a harness flag
+// follows the executing node's readiness: the harness must be installed and
+// its login present. A node with no readiness report, one that does not report
+// the harness, or one that does not measure the login keeps the config answer
+// (absent = off), so missing data decides no capability.
+func capability(states map[string]ReadinessState, host string, cfg map[string]any, flag string) bool {
+	if override, present := cfg[flag]; present {
+		// An explicit value is the whole answer; a nonboolean fails closed.
+		b, ok := override.(bool)
+		return ok && b
+	}
+	kind, measured := harnessCapabilities[flag]
+	if !measured {
+		return false
+	}
+	state, reported := states[host]
+	if !reported || state.Unknown || state.Readiness == nil {
+		return false
+	}
+	h, reported := state.Readiness.Harnesses[kind]
+	if !reported || h.Login == ReadinessLoginUnknown {
+		return false
+	}
+	return h.Installed && h.Login == ReadinessLoginPresent
+}
+
 // versionAtLeast compares dotted numeric versions ("0.166.0", "v2.1"). A
 // version that does not parse is not at least anything.
 func versionAtLeast(have, want string) bool {

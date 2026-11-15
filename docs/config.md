@@ -84,9 +84,9 @@ local_delete_at = "drive_confirmed"
 | `shell_ready_timeout_ms` | `120000` | Startup readiness window, integer 30000–300000. |
 | `brief_submit_timeout_ms` | `120000` | How long a spawn waits for the brief to start a turn before it refuses with 76, integer 30000–600000. Raise it on a host that runs under sustained load. |
 | `brief_submit_retry_ms` | `15000` | How often the submit key repeats during that wait, at least 1000 and below the timeout. It goes only to an idle pane; Claude and Codex panes must also still show the brief in the composer. The brief is never pasted twice. |
-| `cmd_dsflash41` | `false` | Literal capability opt-in required by cmd policy rows. The provisioned cmd account must have no persisted MCP servers. |
-| `clinepass` | `false` | Literal capability opt-in required by the `cc-*` seats, which route the Claude Code harness through the host's local ClinePass proxy (`CLINEPASS_GATE_URL`, key read at spawn time from `CLINEPASS_GATE_KEY_FILE`; defaults are a loopback URL and `~/.config/cliproxyapi-key.txt`). |
-| `omp_commandcode` | `false` | Literal capability opt-in required by `omp-dsflash41`, `omp-musespark13`, `omp-argon4`, `omp-mimo26pro`, `omp-cc-opus55`, `omp-cc-sonnet55`, and `omp-cc-sol61`: the host's omp has the Command Code provider configured (`omp models` lists the selected model). Unrated rows admit only with `PANEWIRE_E6_ARM`; Command Code rules are in [quota](quota.md#command-code-seats). |
+| `cmd_dsflash41` | `false` | Explicit override for the `cmd` harness capability that cmd policy rows require; with no boolean here, the executing node's readiness decides (see [Capability flags](#capability-flags)). Readiness reports only that the harness is installed and logged in; it cannot see that a cmd account has no persisted MCP servers, so set this `true` where you attest that condition. |
+| `clinepass` | `false` | Operator-configured capability required by the `cc-*` seats, which route the Claude Code harness through the host's local ClinePass proxy (`CLINEPASS_GATE_URL`, key read at spawn time from `CLINEPASS_GATE_KEY_FILE`; defaults are a loopback URL and `~/.config/cliproxyapi-key.txt`). Unlike a harness flag, the node cannot measure the proxy, so this boolean is the whole answer (see [Capability flags](#capability-flags)). |
+| `omp_commandcode` | `false` | Explicit override for the `omp` harness capability required by `omp-dsflash41`, `omp-musespark13`, `omp-musespark13c`, `omp-inkling2s`, `omp-museember`, `omp-argon4`, `omp-mimo26pro`, `omp-cc-opus55`, `omp-cc-sonnet55`, and `omp-cc-sol61`: the host's omp has the Command Code provider configured (`omp models` lists the selected model). With no boolean here, the executing node's readiness decides (see [Capability flags](#capability-flags)). Unrated rows admit only with `PANEWIRE_E6_ARM`; Command Code rules are in [quota](quota.md#command-code-seats). |
 | `report_user_idle` | `false` | Literal boolean, read on each heartbeat. `true` makes a macOS node report whole seconds since the last keyboard or pointer input, as `host_activity.user_idle_s`, to a hub that accepts `host_activity`. Linux never sends it. The node reads no app names, window titles, input content or process lists. See [placement telemetry](placement.md#telemetry). |
 | `tags` | unset | Capability tags offered by this host for job placement (`spawn --tags`). Lowercase tag names. `caps` is an alias; both lists merge. |
 | `roles`, `grades` | unset | Light-host limits, as for [`[hosts.NAME]`](#hostsname): the spawn roles and task grades this machine accepts. |
@@ -95,6 +95,41 @@ local_delete_at = "drive_confirmed"
 | `brief_preamble` | selected policy block | Explicit named preamble block for this host. |
 | `pool_policy` | embedded pool-order policy | Path to the versioned pool-order JSON used by automatic model selection. |
 | `fleet_usage_alert_gb` | legacy/read-only | Retained config key; standalone disk alerts are not emitted in v0.1. |
+
+### Capability flags
+
+A seat policy row may require a host capability (`capability` in the policy).
+Two kinds exist, and only one is measured by the node:
+
+| Kind | Flags | Where the value comes from |
+| --- | --- | --- |
+| Harness | `cmd_dsflash41` (the `cmd` harness), `omp_commandcode` (the `omp` harness) | The executing node's readiness report: the flag is true when that node reports the harness installed and its login present (`harnesses.<kind>` in the heartbeat, [placement](placement.md#what-a-node-reports)). Placement, selection and admission read that report where the placing process can reach the hub's fleet state (`[hub] state` not `off` and `hub_url` configured), so no `[hosts.NAME]` copy is needed there. A placing process without fleet state sees no report and the flag comes only from the explicit boolean, as before. |
+| Operator-configured | `clinepass`, and any flag a custom seat policy row names | The boolean itself. The node cannot measure a local proxy or a licence. |
+
+In both kinds a boolean under `[local]` (the node itself) or `[hosts.NAME]`
+(another host, as the placing host reads it) is an explicit override: `true`
+forces the flag on and `false` forces it off, whatever the node reports. Only
+a missing key leaves a harness flag to readiness.
+
+An unknown answer keeps today's value, so missing data never grants or filters
+a capability: a node with no readiness report yet (an older node, or a report
+the hub dropped as stale), one that does not report the flag's harness, or one
+that does not measure the harness's login keeps the config answer, and a flag
+with no config value is off.
+
+`cmd_dsflash41` reads the `cmd` harness. A cmd seat spends the Command Code
+pool, and the node reports that pool's login as `harnesses.cmd.login` (measured
+through omp; `unknown` on a node that does not measure that pool).
+`omp_commandcode` reads the `omp` harness; omp spans several providers, so a
+node that measures no single pool for it reports the login `unknown`, and the
+config value decides.
+
+Readiness answers only that the harness is installed and logged in. A cmd
+account must also have no persisted MCP servers, which no readiness field
+measures: an explicit `true` is the operator's attestation of that condition,
+and a node that relies on readiness alone has it unchecked. `true` therefore
+means "the harness is usable and its provisioning is mine to vouch for"; write
+`false` on a node whose cmd account must not take cmd seats.
 
 Additional boolean capabilities can be named by custom seat policy rows. A
 missing or nonboolean capability fails closed. `standard` in seat policy means
@@ -370,6 +405,33 @@ panewire:
    `work_root`; `spawn_disabled`, `cwd_unmapped`, `panewire_missing` and
    `brief_doc_unavailable` refuse that host (recorded as `hub_<reason>`) and
    `--host auto` moves to the next candidate.
+
+**Per-node spawn concurrency (`spawn.json` `spawn_concurrency`, hk 4578).**
+A node runs one hub spawn at a time. Setting `spawn_concurrency` to 2..8 is an
+explicit operator opt-in: the node then admits that many checkout spawns into
+distinct job dirs at once and advertises `spawn_slots_v1=N` in hello. Unset,
+0, 1, or a `spawn.json` that does not load means one; the capability is then
+not advertised and the hub keeps one-at-a-time dispatch. A change binds at the
+node's next registration (reconnect or restart). The admission rules are in
+[hub-spawn-operations.md](hub-spawn-operations.md#acceptance-and-identity).
+
+Two steps are **not proven safe** for N>1, and they are the boundary of this
+opt-in (hk 4821):
+
+- herdr workspace create/resolve across processes and versions: an older
+  launcher, or one with a different state home, does not share the
+  workspace lock, so a missing workspace label can be created twice;
+- worktree identity between admission and prepare: the admission key is the
+  job-dir name (and the case-folded job id), while `work_root` and symlinks
+  are read again later, so two distinct keys can reach one directory.
+
+At every N, a `-L` lane (read as a flag, never from another flag's value)
+that resolves outside its prepared worktree is refused before launch
+(`checkout_refused:lane_outside_worktree`), since an agent keeps working
+after its slot is released.
+
+Opt in only on a host where neither can happen: one panewire version, one
+state home, a fixed `work_root`, and no symlinked job dirs or lanes.
 
 대상 계정은 `quota.refresh` 노드 명령으로 갱신합니다. `claude`, `codex`,
 `commandcode`, `devin`, `agy`만 native 측정 대상이며, 다른 풀은 측정하지 않습니다.
@@ -800,9 +862,15 @@ only when the report is published and is the completing one), read back when
 the answer is ambiguous or the record is already terminal, retried at most twice
 more with the same payload within a 30 s budget. The single spawned repair PUT is
 also read back after an ambiguous reply but never repeated. Step 3 is the late
-write hk accepts once on a terminal record (hk 4354): `200` is pinned, `409`
-means the record already names another report. A `409` is an outcome, logged
-(`report pin kept`) and receipted as `held`, never an error. Step 4 writes
+write hk accepts once on a terminal record (hk 4354), so a same-id retry whose
+record ended before the upload landed still attaches the report. It reads the
+record first: a record with no report takes the pair write once, a record
+already naming these bytes is a no-op with no write, and a record naming
+another report is refused — that pin can never become this report's, so `done`
+keeps the local file, logs `report pin kept` and exits 75. A `409` from the
+write itself (another writer pinned between the read and the write) is the same
+refusal. A refusal is receipted as `held`, so a rerun repeats it without
+another write. Step 4 writes
 `job.completed` and the relay once per `S`, carrying the exact document key when
 step 1 had succeeded by then, and comments on the job's hk task.
 
@@ -854,7 +922,9 @@ An interactive `done` that completed but left the report out of hk, or its pin
 unwritten, prints its `OK` line and exits 1 with `completed; report not in hk;
 rerun the same command` (or `report not pinned in hk`). That is reporting only:
 the job completed, and the same command run again finishes the missing step.
-The watcher warns and carries on. `escalate` is not part
+The one pin failure a rerun cannot fix is a record that already names another
+report: `done` exits 75 with `completed; hk record names another report; local
+report kept`. The watcher warns and carries on. `escalate` is not part
 of this: it uploads under `reports/<job>/<file name>` and writes
 `{state:"escalated", report_doc, report_sha256}`; the watcher writes
 `{state:"lost"}` after two missing-pane observations, or when a reviewer pane is
@@ -1057,9 +1127,28 @@ unchanged. An unreadable task `--expected` value turns the key off on spawn
 Burn rates come from `"burn": {"short_pct_per_h": 15, "long_pct_per_h": 2}` in
 the pool-order policy. Windows of a day or less use the short rate, longer
 windows the long rate, and a window of unknown length uses the short rate.
-These are defaults, not measurements: no burn history is kept yet, so the
-per-pool values in effect are UNVERIFIED until measured burn lands (hk 4327).
-Waste-first and host-first placement are not changed by this key.
+These are defaults: a pool's rate is measured when hk has observation history
+for its accounts. The measurement reads `GET /v1/quota/accounts/{key}/observations`
+for the pool's accounts over the last six hours and divides the used share's
+rise by the hours that rise covers; a drop from one observation to the next is
+a window reset, so neither the fall nor the span between those two points
+counts. Rates are kept per window label (`5h`, `7d`), and the pool is the unit:
+a pool that several harnesses draw on shares its accounts, so every harness
+burns it at the one measured rate. A pool with no account, fewer than two
+observations, less than an hour of counted coverage, or an unreadable answer
+keeps the defaults above.
+
+The selection record's `headroom` object says which rate was used:
+`burn_source` is `measured` or `default`. A measured rate also carries
+`burn_window`, the window label (`5h`) it came from; a default carries
+`burn_reason`: `no_history`, `history_unreadable`, `too_few_points`,
+`history_span_short`, `no_window_history` (the pool has rates, but not for this
+candidate's window) or `window_unknown` (the candidate's window length is not
+known). The measured rates are cached in
+`~/.local/state/panewire/burn-history.json` for 15 minutes, so a spawn reads
+that file instead of hk history; a failed read is cached the same way. A burn
+rate only orders candidates — it never refuses or delays one. Waste-first and
+host-first placement are not changed by this key.
 
 Subscription candidates additionally need a readable `ok` nonstale spend
 status. The named credit pools, `anthropic-api` and `openai-api`, remain

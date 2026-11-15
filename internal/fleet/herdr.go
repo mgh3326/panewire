@@ -119,6 +119,23 @@ type Agent struct {
 	Session        json.RawMessage `json:"agent_session,omitempty"`
 }
 
+// SessionID is the session id herdr reports for the agent, empty when it
+// reports none. Current herdr sends an object with a value; older snapshots
+// carried the id as a plain string.
+func (a Agent) SessionID() string {
+	var obj struct {
+		Value string `json:"value"`
+	}
+	if json.Unmarshal(a.Session, &obj) == nil && obj.Value != "" {
+		return obj.Value
+	}
+	var plain string
+	if json.Unmarshal(a.Session, &plain) == nil {
+		return plain
+	}
+	return ""
+}
+
 func (a *App) agents(ctx context.Context) ([]Agent, error) {
 	r := a.call(ctx, "herdr", "agent", "list")
 	if e := check(r, "herdr agent list"); e != nil {

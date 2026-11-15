@@ -724,7 +724,7 @@ func (a *App) plan(ctx context.Context, s Spawn, pool string, waited time.Durati
 			c.excluded = "excluded_host"
 		}
 		c.missing = missingCaps(c.cfg, required)
-		if needCap != "" && !boolean(c.cfg, needCap, false) {
+		if needCap != "" && !capability(view.states, c.name, c.cfg, needCap) {
 			c.missingCap = needCap
 		}
 		c.roleRefusal = roleRefusal(c.cfg, s.Role, s.TaskGrade)
@@ -1542,7 +1542,7 @@ func (a *App) placeAuto(ctx context.Context, s Spawn, brief string) (bool, map[s
 			return candResult{rc: exitConfig, note: "quota_request_unavailable"}
 		}
 		if s.DryRun {
-			if err := a.checkDryRunAdmission(ctx, try.spawn, c.cfg); err != nil {
+			if err := a.checkDryRunAdmission(ctx, try.spawn, c.name, c.cfg); err != nil {
 				return candResult{stop: err}
 			}
 		}
@@ -1833,7 +1833,7 @@ func (a *App) placeForced(ctx context.Context, s Spawn, brief string) (bool, map
 	if !ok {
 		return true, nil, fail(exitConfig, "placement selected unconfigured host %s", s.Host)
 	}
-	if seat, ok := a.Policy.Profiles[s.Profile]; ok && seat.Capability != "standard" && !boolean(h, seat.Capability, false) {
+	if seat, ok := a.Policy.Profiles[s.Profile]; ok && seat.Capability != "standard" && !capability(a.readinessStates(ctx), s.Host, h, seat.Capability) {
 		return true, nil, fail(exitConfig, "host %s lacks capability %s", s.Host, seat.Capability)
 	}
 	task, _, e := a.taskPrecheck(ctx, s)
@@ -1892,7 +1892,7 @@ func (a *App) placeForced(ctx context.Context, s Spawn, brief string) (bool, map
 	}
 	spawn := func() candResult {
 		if s.DryRun {
-			if err := a.checkDryRunAdmission(ctx, s, c.cfg); err != nil {
+			if err := a.checkDryRunAdmission(ctx, s, c.name, c.cfg); err != nil {
 				return candResult{stop: err}
 			}
 		}
