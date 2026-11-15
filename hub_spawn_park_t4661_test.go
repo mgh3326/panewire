@@ -688,3 +688,28 @@ func TestParkedGiveUpEmitsOneSpawnEvent_t4661(t *testing.T) {
 		t.Fatalf("%d given_up spawn events, want 1: %+v", n, events)
 	}
 }
+
+// A claimed-host retry left unbound until its deadline (a pending quota
+// refresh) ends with the claimed node's saved refusal: never given_up or
+// renewed while hk holds the claim.
+func TestClaimedRetryTimeoutKeepsNodeRefusal_t4661(t *testing.T) {
+	h := asyncSpawnHub(t)
+	clock := expiryClock(h, expiryNow())
+	request, job := parkRequest(200)
+	request.ExpiresSeconds = 300
+	task, _, err := h.inbox.store.claimSpawn(t.Context(), request, job, "parent", *clock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	saved := `{"rc":70,"stage":"launch","reason":"launch_proof_failed","host":"desktop","retryable":true,"node_result":true}`
+	if _, err := h.inbox.store.db.Exec(`UPDATE spawn_operations SET claimed_host='desktop',result=? WHERE request_id=?`, saved, task.Request.RequestID); err != nil {
+		t.Fatal(err)
+	}
+	task = parkedTask(t, h, task.Request.RequestID)
+	*clock = task.Expires
+	h.executeSpawnTask(t.Context(), task)
+	got := parkedTask(t, h, task.Request.RequestID)
+	if got.Status == "given_up" || got.Status == "accepted" || got.Outcome.Reason != "launch_proof_failed" {
+		t.Fatalf("claimed retry at its limit: status=%s outcome=%+v", got.Status, got.Outcome)
+	}
+}

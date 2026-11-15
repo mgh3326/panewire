@@ -21,7 +21,9 @@ import (
 // attempt's deadline. A not-started answer inside the deadline is a refusal
 // the next-host path or the caller owns, and ends retryable as before.
 func spawnAttemptEndedUnstarted(task hubSpawnTask, outcome hubSpawnOutcome, now time.Time) bool {
-	if task.Expires.IsZero() {
+	// A request whose hk job claim pins a host started on that node: its
+	// end is the node's saved refusal, never a renewal or given_up (hk 4661).
+	if task.Expires.IsZero() || task.ClaimedHost != "" {
 		return false
 	}
 	return outcome.Reason == "timeout" || spawnOutcomeNotStarted(outcome) && !now.Before(task.Deadline)
