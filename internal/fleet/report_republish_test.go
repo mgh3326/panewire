@@ -3,6 +3,7 @@ package fleet
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -285,17 +286,22 @@ func TestReportRepublishIsBoundedPerPass(t *testing.T) {
 	fail.Store(false)
 	s, _ := loggingSweeper()
 	before := documentPuts(hk)
-	if e := s.RepublishReports(ctx, a); e != nil {
-		t.Fatal(e)
+	passes := 0
+	for documentPuts(hk)-before < len(ids) {
+		passes++
+		if passes > len(ids) {
+			t.Fatalf("after %d passes hk holds %d of %d reports", passes, documentPuts(hk)-before, len(ids))
+		}
+		prev := documentPuts(hk)
+		if e := s.RepublishReports(ctx, a); e != nil {
+			t.Fatal(e)
+		}
+		if got := documentPuts(hk) - prev; got > reportRepublishPerPass {
+			t.Fatalf("pass %d uploaded %d reports, over the bound of %d", passes, got, reportRepublishPerPass)
+		}
 	}
-	if got := documentPuts(hk) - before; got != reportRepublishPerPass {
-		t.Fatalf("first pass uploaded %d reports, want %d", got, reportRepublishPerPass)
-	}
-	if e := s.RepublishReports(ctx, a); e != nil {
-		t.Fatal(e)
-	}
-	if got := documentPuts(hk) - before; got != len(ids) {
-		t.Fatalf("two passes uploaded %d reports, want %d", got, len(ids))
+	if passes < 2 {
+		t.Fatalf("one pass published all %d reports, want the bound to spread them", len(ids))
 	}
 	for _, id := range ids {
 		body := "report of " + id + "\n"
@@ -303,5 +309,46 @@ func TestReportRepublishIsBoundedPerPass(t *testing.T) {
 		if _, ok := storedDoc(hk, key); !ok {
 			t.Fatalf("%s: hk does not hold %s", id, key)
 		}
+	}
+}
+
+// A pin write hk did not answer is repeated by a later pass: the publish
+// receipt alone must not end the retry.
+func TestReportRepublishRetriesAFailedPin(t *testing.T) {
+	ctx := context.Background()
+	a, hk := republishFixture(t)
+	fail := failReportUploads(hk)
+	body := "pin later\n"
+	path := reportFile(t, a, "j", body)
+	wantNotInHK(t, a.lifecycle(ctx, "done", []string{"j", "--report", path}))
+	fail.Store(false)
+	store := a.JobStore.(*fakeJobStore)
+	store.putErr = errors.New("hk unreachable")
+	s, lines := loggingSweeper()
+	if e := s.RepublishReports(ctx, a); e != nil {
+		t.Fatal(e)
+	}
+	if doc := store.record(t, "j")["report_doc"]; doc != nil {
+		t.Fatalf("report_doc=%v after a failed pin, want none", doc)
+	}
+	if got := strings.Join(*lines, "\n"); !strings.Contains(got, "reason=pin_failed") {
+		t.Fatalf("lines=%q, want the pin refusal", *lines)
+	}
+	store.putErr = nil
+	if e := s.RepublishReports(ctx, a); e != nil {
+		t.Fatal(e)
+	}
+	sha := reportDigest([]byte(body))
+	rec := store.record(t, "j")
+	if str(rec, "report_doc") != reportDocumentKey("j", sha) || str(rec, "report_sha256") != sha {
+		t.Fatalf("record=%v, want the report pinned by the retry pass", rec)
+	}
+	// The third pass has nothing left to write.
+	before := len(hk.Requests())
+	if e := s.RepublishReports(ctx, a); e != nil {
+		t.Fatal(e)
+	}
+	if got := len(hk.Requests()) - before; got != 0 {
+		t.Fatalf("pass after the pin made %d hk calls, want none", got)
 	}
 }
