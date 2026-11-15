@@ -86,6 +86,10 @@ func (client *HubClient) nodeTaskPaneSweeper() *fleet.TaskPaneSweeper {
 		client.taskPaneSweeper = &fleet.TaskPaneSweeper{
 			Grace: client.taskPaneSweepGrace,
 			Info:  slog.Info,
+			Exclusive: func() func() {
+				client.nodeCommandMu.Lock()
+				return client.nodeCommandMu.Unlock
+			},
 		}
 	})
 	return client.taskPaneSweeper
@@ -109,6 +113,13 @@ func (client *HubClient) sweepTaskPanes(ctx context.Context, sweeper *fleet.Task
 	}
 	if err != nil {
 		slog.Warn("task pane sweep failed", "reason", "jobs-unreadable")
+	}
+	// Reports an ended job announced but never published are retried here, on
+	// their own budget and outside taskPaneSweepMu: an upload that waits on hk
+	// must not hold the hub's pane.sweep command (report_republish.go). The job
+	// dir TTL runs on its own loop (runJobDirTTL), not here.
+	if err := sweeper.RepublishReports(ctx, app); err != nil {
+		slog.Warn("report republish failed", "reason", "jobs-unreadable")
 	}
 }
 

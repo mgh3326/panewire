@@ -3,6 +3,7 @@ package fleet
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -78,13 +79,25 @@ func (a *App) lifecycleWithOptions(ctx context.Context, kind string, args []stri
 	}
 	strictResult := kind == "done" && !watchResult && result != nil
 	body := []byte{}
+	// A reportless command (an escalate with no --report) has no bytes, and
+	// its digest is the sha256 of none: the duplicate check still matches the
+	// record the first such escalation wrote. A readable report replaces it.
+	digest := reportDigest(body)
+	// readErr is the report read's failure. An absent report on `done` is not
+	// necessarily an error: the fleet deletes it after the pin (hk 3685), and
+	// the completion that announced it names the bytes hk holds.
+	var readErr error
 	if *report != "" {
 		if e = noSymlinks(*report); e != nil {
 			return e
 		}
-		body, e = os.ReadFile(*report)
-		if e != nil {
-			return e
+		body, readErr = os.ReadFile(*report)
+		switch {
+		case readErr == nil:
+			digest = reportDigest(body)
+		case errors.Is(readErr, os.ErrNotExist) && kind == "done":
+		default:
+			return readErr
 		}
 	}
 	lock, e := os.OpenFile(filepath.Join(a.Jobs, id, ".panewire-operation.lock"), os.O_CREATE|os.O_RDWR, 0600)
@@ -103,13 +116,23 @@ func (a *App) lifecycleWithOptions(ctx context.Context, kind string, args []stri
 	if watchResult && (j.Terminal || j.Reaped) {
 		return nil
 	}
+	recovered := false
+	if readErr != nil {
+		// The file is gone. The newest completion announcing this path names
+		// the report's bytes, so the rerun asks the ledger's receipts exactly
+		// as the first run left them instead of republishing nothing.
+		named, ok := completedReportDigest(j, *report)
+		if !ok {
+			return readErr
+		}
+		digest, recovered = named, true
+	}
 	if rejected != "" {
 		if e = a.event(ctx, id, "job.result_rejected", map[string]any{"reason": rejected}); e != nil {
 			return e
 		}
 		a.warn("watcher result rejected: %s", rejected)
 	}
-	digest := reportDigest(body)
 	eventKind := "job.completed"
 	if kind == "escalate" {
 		eventKind = "job.escalate"
@@ -128,6 +151,12 @@ func (a *App) lifecycleWithOptions(ctx context.Context, kind string, args []stri
 				usedPath = true
 			}
 		}
+	}
+	if recovered && !announced {
+		// The report file is gone and no completion announced this path for
+		// this run: there are no bytes here to complete, and the -rN snapshot
+		// a later round writes is not this rerun's to make.
+		return readErr
 	}
 	if kind == "escalate" && announced {
 		fmt.Fprintf(a.Out, "OK job=%s report=%s duplicate=yes\n", id, *report)
@@ -160,7 +189,7 @@ func (a *App) lifecycleWithOptions(ctx context.Context, kind string, args []stri
 	if kind == "done" {
 		return a.doneReport(ctx, j, doneInput{
 			report: *report, body: body, digest: digest, question: *question, result: result,
-			strict: strictResult, watcher: watchResult, late: late,
+			strict: strictResult, watcher: watchResult, late: late, recovered: recovered,
 		})
 	}
 	return a.escalateReport(ctx, j, *report, *question, body, digest, late)

@@ -35,7 +35,12 @@ mergewake's JSON array of findings (`ref`, `severity`, `path`, `line`, `title`,
 The hub returns `author_ended: true` for a refusal after the pane closes.
 A `rebind_unconfirmed` result means the successor placed but its task ownership
 is not confirmed. Refusal events identify the phase and code, so an ended
-refusal cannot be hidden behind an earlier intact refusal.
+refusal cannot be hidden behind an earlier intact refusal. An ended refusal is
+a decision event (ESC) naming the PR as authorless; panewire starts no
+successor on its own, only the owner lane's reply does. A refusal by the hub's
+read-only plan keeps the plan's own code and text — a `NO_ROLE_CANDIDATE` seat
+refusal at rc 77 reports `seat_refused`, an unknown pinned host `host_alias` —
+so it is never reported as a quota drop.
 
 A stored submission with the retired `worker` role is refused as
 `legacy_worker_submission` before any successor is staged. The owner lane

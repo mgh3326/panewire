@@ -119,12 +119,10 @@ func (client *HubClient) refreshFleetQuota(ctx context.Context, pool string, sen
 	defer client.probeFleetLogin(ctx, pool)
 	run, cancel := context.WithTimeout(ctx, fleetQuotaTimeout)
 	defer cancel()
-	publish, ok, measuredHere, kind := client.measureFleetQuotaObserved(run, ctx, pool)
+	started := client.nowUTC()
+	publishes, ok, measuredHere, kind := client.measureFleetQuotaAccounts(run, ctx, pool)
 	previous := sent[pool]
 	if !ok {
-		if measuredHere {
-			client.noteOwnQuotaMeasurement(pool)
-		}
 		// One warning per failure streak, not one per interval. Consumers see
 		// the reading age past its TTL and measure directly.
 		if !previous.failing {
@@ -142,17 +140,27 @@ func (client *HubClient) refreshFleetQuota(ctx context.Context, pool string, sen
 		}
 		return
 	}
-	client.noteQuotaAccount(pool, publish.Key)
+	// The readiness note names one account: the first.
+	client.noteQuotaAccount(pool, publishes[0].Key)
 	if measuredHere {
-		client.noteOwnQuotaMeasurement(pool)
+		client.noteOwnQuotaMeasurement(pool, started)
 	}
 	now := client.nowUTC()
-	body, _ := json.Marshal(publish)
-	if previous.body == string(body) && now.Sub(previous.at) < fleetQuotaRepublish {
-		return
-	}
-	if client.Publish("state", publish) {
-		sent[pool] = fleetQuotaSent{body: string(body), at: now}
+	for _, publish := range publishes {
+		// A pool with one account keeps its republish record under the pool's
+		// name; a pool with several keeps one per account key.
+		slot := pool
+		if len(publishes) > 1 {
+			slot = publish.Key
+		}
+		previous := sent[slot]
+		body, _ := json.Marshal(publish)
+		if previous.body == string(body) && now.Sub(previous.at) < fleetQuotaRepublish {
+			continue
+		}
+		if client.Publish("state", publish) {
+			sent[slot] = fleetQuotaSent{body: string(body), at: now}
+		}
 	}
 }
 
@@ -163,8 +171,7 @@ func (client *HubClient) agyUnmeasurableHere(pool string) bool {
 }
 
 // measureFleetQuota takes pool's reading for the fleet-state publish. The
-// pools this host measures natively (claude, codex, and commandcode once its
-// switch is flipped) are measured in this process; every other pool runs
+// pools this host measures natively (claude, codex, commandcode, devin, agy) are measured in this process; every other pool runs
 // `pacelever refresh`, and a pool in shadow also logs the node's own
 // measurement beside it (quota_shadow.go). A failed measurement answers the error kind that says
 // why: the login rule reads it. run is the measurement's own deadline and
@@ -176,22 +183,38 @@ func (client *HubClient) measureFleetQuota(run, parent context.Context, pool str
 }
 
 func (client *HubClient) measureFleetQuotaObserved(run, parent context.Context, pool string) (FleetStatePublish, bool, bool, string) {
+	publishes, ok, measuredHere, kind := client.measureFleetQuotaAccounts(run, parent, pool)
+	if !ok {
+		return FleetStatePublish{}, false, measuredHere, kind
+	}
+	return publishes[0], true, measuredHere, ""
+}
+
+// measureFleetQuotaAccounts is measureFleetQuotaObserved for every account the
+// host holds in pool: one publish each (the commandcode pool may hold several,
+// every other pool one). It succeeds when at least one account has a reading.
+func (client *HubClient) measureFleetQuotaAccounts(run, parent context.Context, pool string) ([]FleetStatePublish, bool, bool, string) {
 	if isNativeQuotaPool(pool) {
-		reading, measuredHere, err := client.nativeQuotaSource(pool).RefreshWithMeasurement(run)
+		readings, measuredHere, err := client.nativeQuotaSource(pool).RefreshAccounts(run)
 		if err != nil {
 			// A timed-out refresh says nothing about the login.
 			if run.Err() != nil {
-				return FleetStatePublish{}, false, measuredHere, fleetQuotaErrorKindUnreadable
+				return nil, false, measuredHere, fleetQuotaErrorKindUnreadable
 			}
-			return FleetStatePublish{}, false, measuredHere, quotaErrorKind(err)
+			return nil, false, measuredHere, quotaErrorKind(err)
 		}
-		publish, ok := fleetQuotaFromReading(pool, reading, client.nowUTC())
-		if !ok {
-			return FleetStatePublish{}, false, measuredHere, quota.ErrKindParse
+		var publishes []FleetStatePublish
+		for _, reading := range readings {
+			if publish, ok := fleetQuotaFromReading(pool, reading, client.nowUTC()); ok {
+				publishes = append(publishes, publish)
+			}
 		}
-		return publish, true, measuredHere, ""
+		if len(publishes) == 0 {
+			return nil, false, measuredHere, quota.ErrKindParse
+		}
+		return publishes, true, measuredHere, ""
 	}
-	return FleetStatePublish{}, false, false, "unmeasurable"
+	return nil, false, false, "unmeasurable"
 }
 
 // measureFleetQuotaWithPacelever is the fleet-state measurement of a pool the

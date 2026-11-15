@@ -99,15 +99,16 @@ func TestQueuedBoundDeadlineExpiresWithNodeSlotBusy_t4581(t *testing.T) {
 	}
 	h.startSpawnCoordinator(t.Context())
 	t14ReadNodeSpawn(t, node)
-	var saved hubSpawnTask
-	eventually(t, 3*time.Second, "queued unsent deadline to release its reservation", func() bool {
-		var err error
-		saved, err = h.inbox.store.spawnTask(t.Context(), expired.Request.RequestID)
-		return err == nil && saved.Status == "retryable" && saved.Outcome.Reason == "timeout"
+	// The queued attempt's landing wait ended without the busy node slot: it
+	// ends the attempt, not the request (hk 4660), so the request starts
+	// attempt 2 and never writes an attempt-1 outcome.
+	eventually(t, 3*time.Second, "queued unsent deadline to start the next attempt", func() bool {
+		saved, err := h.inbox.store.spawnTask(t.Context(), expired.Request.RequestID)
+		return err == nil && saved.Attempt >= 2
 	})
-	var reserved int
-	if err := h.inbox.store.db.QueryRow(`SELECT count(*) FROM spawn_reservations WHERE request_id=?`, expired.Request.RequestID).Scan(&reserved); err != nil || reserved != 0 {
-		t.Fatalf("expired queued request kept reservation: count=%d err=%v", reserved, err)
+	var notices int
+	if err := h.inbox.store.db.QueryRow(`SELECT count(*) FROM spawn_notifications WHERE event_id=?`, expired.Request.RequestID+":1:retryable").Scan(&notices); err != nil || notices != 0 {
+		t.Fatalf("the expired attempt was reported as an outcome: count=%d err=%v", notices, err)
 	}
 }
 
@@ -214,7 +215,8 @@ func TestRefusalStoreFailureRetainsDispatchOwnership_t4581(t *testing.T) {
 	}
 }
 
-func TestRefusalExclusionSurvivesStoreRestartAndResetsOnRetry_t4581(t *testing.T) {
+// Since hk 4661 the exclusion also carries into the request's next attempt.
+func TestRefusalExclusionSurvivesStoreRestartAndAttempts_t4581(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "inbox.sqlite3")
 	config := HubServerConfig{Tokens: map[string]string{"operator": t14OperatorToken, "machine-a": "node-token"}, InboxStorePath: path}
 	h, err := NewHubServer(config)
@@ -263,18 +265,14 @@ func TestRefusalExclusionSurvivesStoreRestartAndResetsOnRetry_t4581(t *testing.T
 	if changed, err := recovered.completeSpawn(t.Context(), saved, hubSpawnOutcome{RC: 124, Stage: "landing", Reason: "timeout", Retryable: true}, time.Now()); err != nil || !changed {
 		t.Fatalf("finish first attempt: changed=%v err=%v", changed, err)
 	}
-	finished, err := recovered.spawnTask(t.Context(), saved.Request.RequestID)
-	if err != nil {
-		t.Fatal(err)
+	// The timeout ends the attempt; the request starts attempt 2 itself (hk 4660).
+	retry, err := recovered.spawnTask(t.Context(), saved.Request.RequestID)
+	if err != nil || retry.Attempt != 2 || retry.Status != "accepted" || len(retry.Exclusions) != 1 || retry.Exclusions[0].Machine != "machine-a" {
+		t.Fatalf("new attempt: %+v %v", retry, err)
 	}
-	retry, err := recovered.resumeCleanedSpawn(t.Context(), finished, time.Now())
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, _ = (&directSpawnTransport{h: h, task: retry}).Spawn(t.Context(), request)
-	rebound, err := recovered.spawnTask(t.Context(), retry.Request.RequestID)
-	if err != nil || rebound.Status != "bound" || rebound.Node == nil || rebound.Node.RequestID != request.RequestID {
-		t.Fatalf("new attempt did not clear the old host exclusion: status=%s node=%+v err=%v", rebound.Status, rebound.Node, err)
+	reply, err = (&directSpawnTransport{h: h, task: retry}).Spawn(t.Context(), request)
+	if err != nil || !reply.NextHost || reply.Error != "cwd_unmapped" {
+		t.Fatalf("attempt 2 reused the host refused in attempt 1: reply=%+v err=%v", reply, err)
 	}
 }
 
@@ -448,7 +446,9 @@ func TestSubmittedWorkProgressesWhileStaleQuotaWriterIsHeld_t4581(t *testing.T) 
 	}
 }
 
-func TestQueuedBindingMakesOverCapSubmissionRefuse_t4581(t *testing.T) {
+// Since hk 4661 an over-cap submission with a time limit is parked pool_cap
+// instead of refused: it waits for a slot, unbound.
+func TestQueuedBindingMakesOverCapSubmissionPark_t4581(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	retryHK(t)
 	h, err := NewHubServer(HubServerConfig{Tokens: map[string]string{"operator": t14OperatorToken, "machine-a": "node-token", "desktop": "node-token"}, InboxStorePath: filepath.Join(t.TempDir(), "inbox.sqlite3")})
@@ -480,13 +480,13 @@ func TestQueuedBindingMakesOverCapSubmissionRefuse_t4581(t *testing.T) {
 		t.Fatalf("submission rejected before placement: status=%d body=%s", status, body)
 	}
 	var saved hubSpawnTask
-	eventually(t, 3*time.Second, "over-cap placement refusal", func() bool {
+	eventually(t, 3*time.Second, "over-cap placement parked", func() bool {
 		var err error
 		saved, err = h.inbox.store.spawnTask(t.Context(), request.RequestID)
-		return err == nil && saved.Status == "retryable"
+		return err == nil && saved.ParkReason != ""
 	})
-	if !strings.Contains(saved.Outcome.Reason, "pool_at_cap") || saved.Node != nil {
-		t.Fatalf("over-cap placement was not refused: status=%s reason=%q node=%+v", saved.Status, saved.Outcome.Reason, saved.Node)
+	if saved.Status != "accepted" || saved.ParkReason != spawnParkPoolCap || saved.Node != nil {
+		t.Fatalf("over-cap placement was not parked pool_cap: status=%s park=%q node=%+v", saved.Status, saved.ParkReason, saved.Node)
 	}
 	waiting, err := h.inbox.store.spawnTask(t.Context(), queued.Request.RequestID)
 	if err != nil || waiting.Status != "bound" {
@@ -502,6 +502,8 @@ func TestRefusalWakesRealPlacementOnAnotherNode_t4581(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = h.Close() })
+	// This test is about the next host, not the back-off before it.
+	withoutSpawnBackoff(h)
 	h.spawnNewApp = func(out, errout io.Writer) (*fleet.App, error) { return retryDispatchApp(t, out, errout), nil }
 	server := httptest.NewServer(h.Handler())
 	defer server.Close()
@@ -558,6 +560,7 @@ func TestLaunchProofReplacesHarnessOnSameNode_t4581(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	withoutSpawnBackoff(h) // about the harness retry, not the back-off
 	t.Cleanup(func() { _ = h.Close() })
 	newApp := func(out, errout io.Writer) (*fleet.App, error) {
 		app := retryDispatchApp(t, out, errout)
@@ -590,6 +593,7 @@ func TestLaunchProofReplacesHarnessOnSameNode_t4581(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	withoutSpawnBackoff(h) // about the harness retry, not the back-off
 	t.Cleanup(func() { _ = h.Close() })
 	h.spawnNewApp = newApp
 	server = httptest.NewServer(h.Handler())
@@ -772,7 +776,7 @@ func TestDispatcherRunsRealNodeEnginesIndependently_t4581(t *testing.T) {
 			spawnConfigPath: t14SpawnConfig(t, t.TempDir()),
 			spawnJournalDir: t.TempDir(),
 			fleetEvents:     (&fleetEventRecorder{}).write,
-			spawnEngine: func(context.Context, string, string, string, string, []string) (*hubSpawnOutput, fleet.Execution) {
+			spawnEngine: func(context.Context, string, string, string, string, time.Time, []string) (*hubSpawnOutput, fleet.Execution) {
 				count := running.Add(1)
 				if isA {
 					startedA.Add(1)

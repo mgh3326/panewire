@@ -88,6 +88,42 @@ type Store struct {
 	Now   func() time.Time // clock; nil means time.Now
 }
 
+// testForbiddenHomes lists home directories no Store may open state under.
+// Only a test binary's TestMain registers one — the home captured before it
+// moves HOME to a temp dir — so a test that still resolves the operator's
+// real home fails loudly instead of writing live ledger state (hk 4685).
+// Production never registers one; the check is a nil test.
+var testForbiddenHomes []string
+
+// ForbidHomeForTests registers home as forbidden for every Store this test
+// binary opens: state.db and the events inbox must both stay out from under
+// it. It exists for TestMain only.
+func ForbidHomeForTests(home string) {
+	if home == "" || home == string(filepath.Separator) {
+		return
+	}
+	testForbiddenHomes = append(testForbiddenHomes, filepath.Clean(home))
+}
+
+// checkTestHome panics when the store's database or inbox resolves under a
+// home ForbidHomeForTests registered.
+func (s *Store) checkTestHome() {
+	if len(testForbiddenHomes) == 0 {
+		return
+	}
+	for _, home := range testForbiddenHomes {
+		for _, path := range []string{s.DB, s.Inbox} {
+			abs, err := filepath.Abs(path)
+			if err != nil {
+				continue
+			}
+			if rel, err := filepath.Rel(home, abs); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+				panic(fmt.Sprintf("arbiter: test opened ledger state under the real home %s: %s", home, abs))
+			}
+		}
+	}
+}
+
 // StatePath is the state database for a data home ($XDG_DATA_HOME or
 // ~/.local/share).
 func StatePath(dataHome string) string { return filepath.Join(dataHome, "arbiter", "state.db") }
@@ -209,6 +245,7 @@ func openURI(ctx context.Context, uri string) (*conn, error) {
 
 // rw opens the database for writing. Only bootstrap may create it.
 func (s *Store) rw(ctx context.Context, bootstrap bool) (*conn, error) {
+	s.checkTestHome()
 	_, statErr := os.Stat(s.DB)
 	fresh := statErr != nil
 	if fresh {
@@ -258,6 +295,7 @@ func (s *Store) rw(ctx context.Context, bootstrap bool) (*conn, error) {
 // cannot be created by a read-only handle; with no unapplied WAL frames the
 // read falls back to an immutable one, otherwise it refuses rather than guess.
 func (s *Store) ro(ctx context.Context) (*conn, error) {
+	s.checkTestHome()
 	if _, e := os.Stat(s.DB); e != nil {
 		return nil, errf(ExitStorage, "state db is missing: %s", s.DB)
 	}

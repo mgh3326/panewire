@@ -107,7 +107,7 @@ func TestNodeSpawnAdmissionDeadlineLeavesNoRow_t4579(t *testing.T) {
 			var releaseOnce sync.Once
 			var runs atomic.Int32
 			client := &HubClient{spawnConfigPath: t14SpawnConfig(t, t.TempDir()), spawnJournalDir: t.TempDir(), fleetEvents: (&fleetEventRecorder{}).write}
-			client.spawnEngine = func(context.Context, string, string, string, string, []string) (*hubSpawnOutput, fleet.Execution) {
+			client.spawnEngine = func(context.Context, string, string, string, string, time.Time, []string) (*hubSpawnOutput, fleet.Execution) {
 				if runs.Add(1) == 1 {
 					close(started)
 					<-release
@@ -189,7 +189,7 @@ func TestNodeSpawnAdmissionRestartReplaysWaiter_t4579(t *testing.T) {
 	var startedOnce sync.Once
 	root, config := t.TempDir(), t14SpawnConfig(t, t.TempDir())
 	old := &HubClient{spawnConfigPath: config, spawnJournalDir: root, fleetEvents: (&fleetEventRecorder{}).write}
-	old.spawnEngine = func(ctx context.Context, _, _, _, _ string, _ []string) (*hubSpawnOutput, fleet.Execution) {
+	old.spawnEngine = func(ctx context.Context, _, _, _, _ string, _ time.Time, _ []string) (*hubSpawnOutput, fleet.Execution) {
 		startedOnce.Do(func() { close(started) })
 		<-ctx.Done()
 		return &hubSpawnOutput{}, fleet.Execution{RC: 124}
@@ -216,7 +216,7 @@ func TestNodeSpawnAdmissionRestartReplaysWaiter_t4579(t *testing.T) {
 	var replayRuns atomic.Int32
 	restarted := &HubClient{spawnConfigPath: config, spawnJournalDir: root, fleetEvents: (&fleetEventRecorder{}).write,
 		nodeHerdr: func(context.Context, ...string) ([]byte, error) { return nil, errors.New("herdr unavailable") },
-		spawnEngine: func(context.Context, string, string, string, string, []string) (*hubSpawnOutput, fleet.Execution) {
+		spawnEngine: func(context.Context, string, string, string, string, time.Time, []string) (*hubSpawnOutput, fleet.Execution) {
 			replayRuns.Add(1)
 			return t14EngineOK()
 		}}
@@ -235,7 +235,7 @@ func TestNodeSpawnAdmissionDrainLeavesWaiterReplayable_t4579(t *testing.T) {
 	var runs atomic.Int32
 	root, config := t.TempDir(), t14SpawnConfig(t, t.TempDir())
 	client := &HubClient{spawnConfigPath: config, spawnJournalDir: root, fleetEvents: (&fleetEventRecorder{}).write}
-	client.spawnEngine = func(context.Context, string, string, string, string, []string) (*hubSpawnOutput, fleet.Execution) {
+	client.spawnEngine = func(context.Context, string, string, string, string, time.Time, []string) (*hubSpawnOutput, fleet.Execution) {
 		if runs.Add(1) == 1 {
 			close(started)
 			<-release
@@ -290,7 +290,7 @@ func TestNodeSpawnAdmissionDrainLeavesWaiterReplayable_t4579(t *testing.T) {
 	}
 
 	restarted := &HubClient{spawnConfigPath: config, spawnJournalDir: root, fleetEvents: (&fleetEventRecorder{}).write,
-		spawnEngine: func(context.Context, string, string, string, string, []string) (*hubSpawnOutput, fleet.Execution) {
+		spawnEngine: func(context.Context, string, string, string, string, time.Time, []string) (*hubSpawnOutput, fleet.Execution) {
 			runs.Add(1)
 			return t14EngineOK()
 		}}
@@ -308,13 +308,14 @@ func TestNodeSpawnAdmissionWakesQueuedDuplicates_t4579(t *testing.T) {
 	firstRelease, secondRelease := make(chan struct{}), make(chan struct{})
 	var firstOnce, secondOnce sync.Once
 	var runs atomic.Int32
-	client := &HubClient{spawnConfigPath: t14SpawnConfig(t, t.TempDir()), spawnJournalDir: t.TempDir(), fleetEvents: (&fleetEventRecorder{}).write}
+	// The occupied gate is the node's one slot (a node with N=1).
+	client := &HubClient{spawnConfigPath: t14SpawnConfig(t, t.TempDir()), spawnJournalDir: t.TempDir(), fleetEvents: (&fleetEventRecorder{}).write, spawnSlotsOverride: 1}
 	preparedPath := t.TempDir()
 	client.spawnPrepare = func(context.Context, nodeWorktreePrepareArgs) (any, string) {
 		close(prepared)
 		return nodeWorktreePrepareResult{Outcome: nodePreparePrepared, Worktree: &nodeWorktree{Path: preparedPath}}, ""
 	}
-	client.spawnEngine = func(context.Context, string, string, string, string, []string) (*hubSpawnOutput, fleet.Execution) {
+	client.spawnEngine = func(context.Context, string, string, string, string, time.Time, []string) (*hubSpawnOutput, fleet.Execution) {
 		switch runs.Add(1) {
 		case 1:
 			close(firstStarted)
@@ -428,7 +429,7 @@ func TestNodeSpawnAdmissionSurvivesHubReconnect_t4579(t *testing.T) {
 	started, release := make(chan struct{}), make(chan struct{})
 	var releaseOnce sync.Once
 	var runs atomic.Int32
-	client.spawnEngine = func(context.Context, string, string, string, string, []string) (*hubSpawnOutput, fleet.Execution) {
+	client.spawnEngine = func(context.Context, string, string, string, string, time.Time, []string) (*hubSpawnOutput, fleet.Execution) {
 		if runs.Add(1) == 1 {
 			close(started)
 			<-release
@@ -438,8 +439,19 @@ func TestNodeSpawnAdmissionSurvivesHubReconnect_t4579(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	var sessions sync.WaitGroup
 	t.Cleanup(func() {
-		cancel()
 		releaseOnce.Do(func() { close(release) })
+		// Stop the node in Daemon.Stop's order: latch the drain, then cancel.
+		// The read loop starts each job.spawn handler in its own goroutine and
+		// only the handler's first step, beginWork, counts it, so cancelling
+		// first would let a handler that has not run yet open the spawn journal
+		// - here a TempDir - after the cleanup that removes it has begun
+		// (hk 4833).
+		drainCtx, stopDrain := context.WithTimeout(ctx, 5*time.Second)
+		defer stopDrain()
+		if left := client.Drain(drainCtx); left != 0 {
+			t.Errorf("node work still in flight at drain: %d", left)
+		}
+		cancel()
 		sessions.Wait()
 		if !waitUntil(5*time.Second, func() bool { return admissionInflight(client) == 0 }) {
 			t.Error("node spawn handlers did not finish during cleanup")

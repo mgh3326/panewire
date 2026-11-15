@@ -50,6 +50,9 @@ func StatusBand(policy PoolPolicy, pool, class string, stale bool, windows []Sta
 	}
 	buckets := make([]accountBucket, 0, len(windows))
 	for _, w := range windows {
+		if !WindowRead(pool, w.Window) {
+			continue
+		}
 		buckets = append(buckets, accountBucket{Window: w.Window, UsedPct: w.UsedPct, ResetsAt: w.ResetsAt, Scope: w.Scope, Model: w.Model})
 	}
 	v := accountPoolView(buckets, now)

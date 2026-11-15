@@ -400,7 +400,12 @@ func (f *Flow) Refresh(ctx context.Context, c Client, key string, measure Measur
 			return Reading{}, quota.Fail(quota.ErrKindAccountMismatch, "measured account differs from the shared account")
 		}
 	}
+	// The stamp is when the provider's figures were taken when the source
+	// serves a cached report (omp usage), else now.
 	at := f.now()
+	if !observed.MeasuredAt.IsZero() {
+		at = observed.MeasuredAt.UTC()
+	}
 	stored, convertErr := convert(observed, at, f.LocalFree != nil)
 	if convertErr != nil {
 		return Reading{}, convertErr
@@ -408,7 +413,7 @@ func (f *Flow) Refresh(ctx context.Context, c Client, key string, measure Measur
 	if f.LocalFree != nil {
 		stored.FreeBucket = mergeFree(latest.Observation.freeBucket(), f.LocalFree(at), at)
 	}
-	reading, ok := f.current(&stored, key, at)
+	reading, ok := f.current(&stored, key, f.now())
 	if !ok {
 		return Reading{}, quota.Fail(quota.ErrKindProbeFailed, "measurement failed")
 	}

@@ -766,7 +766,7 @@ func TestTakeoverReportsFailureAfterSpawnContextCancellation(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	fx.a.finishTaskTakeover(ctx, fx.s, client.Task{Refs: client.TaskRefs{JobID: rebindParent}}, "owner")
+	fx.a.finishTaskTakeover(ctx, &fx.s, client.Task{Refs: client.TaskRefs{JobID: rebindParent}}, "owner", fx.s.Label, "w:p1", "test-host")
 	fx.assertNotice(t, true)
 	ev := fx.taskRebindEvent(t)
 	if ev["status"] != "inherited" || ev["rebind_error"] == nil {
@@ -797,6 +797,6 @@ func TestTakeoverNotifiesWhenOutcomeLedgerIsLocked(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer conn.ExecContext(context.Background(), "ROLLBACK")
-	fx.a.finishTaskTakeover(context.Background(), fx.s, client.Task{Refs: client.TaskRefs{JobID: rebindParent}}, "owner")
+	fx.a.finishTaskTakeover(context.Background(), &fx.s, client.Task{Refs: client.TaskRefs{JobID: rebindParent}}, "owner", fx.s.Label, "w:p1", "test-host")
 	fx.assertNotice(t, true)
 }

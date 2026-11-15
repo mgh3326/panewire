@@ -30,8 +30,23 @@ type Spawn struct {
 	requestedLocal                                                                                                                                                                         bool
 	CWD, Profile, Prompt, Workspace, Label, T, Job, Owner, Effort, Role, Lane, Parent, Task, ParentJob, Host, Report, ExecutionLane, OperatorRequest, RequestedBy, Purpose, ReportRelative string
 	OverrideReason, Containment, WaitTimeout, Urgency                                                                                                                                      string
+	// Expires is --expires: the request's time limit (hk 4660). It travels as
+	// Submission.ExpiresSeconds, never in the node's args.
+	Expires string `json:"-"`
+	// CheckoutOrigin, CheckoutCommit and CheckoutRef are --checkout-origin,
+	// --checkout-commit and --checkout-ref: the pinned checkout a spec spawn
+	// names so the submitting host holds no checkout at all (hk 4738). They
+	// are submitter input only; the wire carries Repository.Checkout.
+	CheckoutOrigin, CheckoutCommit, CheckoutRef string `json:"-"`
+	// hubExpiresAt is the absolute request expiry the hub sent with a
+	// node-delivered spawn (hk 4747). The own spawn writes it into its
+	// job.spawned receipt as expires_at, which the node's pane sweep reads to
+	// end a reviewer or consult past its real limit. Zero when the hub named
+	// none: the receipt then carries the role's default.
+	hubExpiresAt time.Time
 	// ReviewPass is the explicit review pass ("1".."9") of a reviewer spawn. It
-	// only widens the hub reservation key (RoleKey); panewire never parses it out
+	// names the pass in the operation and in RoleKey; a reviewer holds no
+	// reservation (hk 4737), so it widens no slot. panewire never parses it out
 	// of a label.
 	ReviewPass                                         string   `json:"review_pass,omitempty"`
 	After                                              []string `json:"-"`
@@ -136,10 +151,11 @@ const retiredLeadSeatPointer = "the delegated lead seat is retired (--role build
 var reviewPassPattern = regexp.MustCompile(`^[1-9]$`)
 
 // RoleKey is the hub's reservation key for a spawn bound to a task: one
-// holder per (task, role), and per review pass when --review-pass is set, so
-// the p1 and p2 reviewers of one task run together. Every reader and writer
-// of spawn_reservations.task_role builds the key here. Stored keys without a
-// pass stay "task:role".
+// holder per (task, role), and per review pass when --review-pass is set. Every
+// reader and writer of spawn_reservations.task_role builds the key here.
+// Stored keys without a pass stay "task:role". No reviewer key is stored any
+// more (hk 4737); the key remains for a caller that names one, and for the
+// stored keys an older hub wrote.
 func (s Spawn) RoleKey() string {
 	return SpawnRoleKey(s.Task, s.Role, s.ReviewPass)
 }
@@ -147,9 +163,13 @@ func (s Spawn) RoleKey() string {
 // HoldsTaskRole reports whether the hub reserves a task:role key for the
 // spawn. Every writer and reader of spawn_reservations.task_role asks here. A
 // consult seat works beside the task's claimant and never takes the one-holder
-// slot, so a consult pair can share one task (hk 4568).
+// slot, so a consult pair can share one task (hk 4568). A reviewer holds no
+// slot either (hk 4737): reviews are independent work on one task, and a slot
+// only turns a dead reviewer into a refusal for every later attempt. Two
+// reviewers of one (task, pass) place side by side; a replay is still matched
+// by its request id.
 func (s Spawn) HoldsTaskRole() bool {
-	return s.Task != "" && s.ParentJob == "" && !s.consultTask()
+	return s.Task != "" && s.ParentJob == "" && !s.consultTask() && s.Role != "reviewer"
 }
 
 // SpawnRoleKey is RoleKey for a caller that holds the parts, not a Spawn.
@@ -179,7 +199,7 @@ func parseSpawnIgnoring(args, ignored []string) (Spawn, error) {
 	for _, p := range []struct {
 		k string
 		v *string
-	}{{"c", &s.CWD}, {"m", &s.Profile}, {"profile", &s.Profile}, {"p", &s.Prompt}, {"w", &s.Workspace}, {"l", &s.Label}, {"t", &s.T}, {"job", &s.Job}, {"owner", &s.Owner}, {"effort", &s.Effort}, {"role", &s.Role}, {"lane", &s.Lane}, {"parent", &s.Parent}, {"task", &s.Task}, {"parent-job", &s.ParentJob}, {"host", &s.Host}, {"report", &s.Report}, {"L", &s.ExecutionLane}, {"operator-request", &s.OperatorRequest}, {"requested-by", &s.RequestedBy}, {"purpose", &s.Purpose}, {"report-relative", &s.ReportRelative}, {"tags", &s.Tags}, {"exclude-host", &s.ExcludeHosts}, {"exclude-pool", &s.ExcludePools}, {"override-reason", &s.OverrideReason}, {"containment", &s.Containment}, {"wait-timeout", &s.WaitTimeout}, {"urgency", &s.Urgency}, {"author-family", &s.AuthorFamily}, {"builder-job", &s.BuilderJob}, {"e6-arm", &s.E6Arm}} {
+	}{{"c", &s.CWD}, {"m", &s.Profile}, {"profile", &s.Profile}, {"p", &s.Prompt}, {"w", &s.Workspace}, {"l", &s.Label}, {"t", &s.T}, {"job", &s.Job}, {"owner", &s.Owner}, {"effort", &s.Effort}, {"role", &s.Role}, {"lane", &s.Lane}, {"parent", &s.Parent}, {"task", &s.Task}, {"parent-job", &s.ParentJob}, {"host", &s.Host}, {"report", &s.Report}, {"L", &s.ExecutionLane}, {"operator-request", &s.OperatorRequest}, {"requested-by", &s.RequestedBy}, {"purpose", &s.Purpose}, {"report-relative", &s.ReportRelative}, {"tags", &s.Tags}, {"exclude-host", &s.ExcludeHosts}, {"exclude-pool", &s.ExcludePools}, {"override-reason", &s.OverrideReason}, {"containment", &s.Containment}, {"wait-timeout", &s.WaitTimeout}, {"expires", &s.Expires}, {"urgency", &s.Urgency}, {"author-family", &s.AuthorFamily}, {"builder-job", &s.BuilderJob}, {"e6-arm", &s.E6Arm}, {"checkout-origin", &s.CheckoutOrigin}, {"checkout-commit", &s.CheckoutCommit}, {"checkout-ref", &s.CheckoutRef}} {
 		f.StringVar(p.v, p.k, *p.v, "")
 	}
 	f.StringVar(&s.Grade, "grade", "", "task grade (implementer or consult)")
@@ -214,8 +234,18 @@ func parseSpawnIgnoring(args, ignored []string) (Spawn, error) {
 	if _, err := ParseStartConditions(s.After, s.Task); err != nil {
 		return s, fail(exitUsage, "%v", err)
 	}
+	if flagPassed(f, "expires") {
+		if _, err := parseSpawnExpires(s.Expires); err != nil {
+			return s, fail(exitUsage, "%v", err)
+		}
+	}
 	if s.Job == "" {
 		s.Job = s.Label
+	}
+	// A spec spawn names its worktree instead of holding one; refuse a bad or
+	// half-given spec here, where every caller reads the flag name (hk 4738).
+	if _, _, err := s.checkoutSpec(); err != nil {
+		return s, err
 	}
 	if s.Role == "builder" {
 		return s, fail(exitUsage, "%s", retiredLeadSeatPointer)
@@ -268,6 +298,9 @@ type Task struct {
 	Project   string         `json:"project"`
 	CreatedAt string         `json:"created_at"`
 	Priority  any            `json:"priority"`
+	// Expected is the task's expected duration ("24h0m0s"); nil when unset.
+	// The headroom key reads it (select_headroom.go).
+	Expected *string `json:"expected"`
 }
 
 // unlinkedReviewer is a reviewer that names the author's family but no
@@ -511,13 +544,14 @@ func (a *App) rebindInherited(ctx context.Context, s Spawn, task client.Task, ev
 }
 
 // finishTaskTakeover runs only after the successor is committed, so a failed
-// spawn never needs a compensating remote write. See docs/config.md.
-func (a *App) finishTaskTakeover(ctx context.Context, s Spawn, task client.Task, owner string) {
+// spawn never needs a compensating remote write. It moves the task binding,
+// then the lane route the task's findings use. See docs/config.md.
+func (a *App) finishTaskTakeover(ctx context.Context, s *Spawn, task client.Task, owner, hint, pane, machine string) {
 	ev := map[string]any{"task_id": s.Task, "job_id": s.Job, "inherited_from": s.Inherited}
-	takeover, cancelTakeover := context.WithTimeout(context.WithoutCancel(ctx), 20*time.Second)
-	status := a.rebindInherited(takeover, s, task, ev)
-	cancelTakeover()
 	uncancelled := context.WithoutCancel(ctx)
+	takeover, cancelTakeover := context.WithTimeout(uncancelled, 20*time.Second)
+	status := a.rebindInherited(takeover, *s, task, ev)
+	cancelTakeover()
 	ctx, cancelOutcome := context.WithTimeout(uncancelled, 10*time.Second)
 	defer cancelOutcome()
 	ev["status"] = status
@@ -525,10 +559,18 @@ func (a *App) finishTaskTakeover(ctx context.Context, s Spawn, task client.Task,
 		a.warn("job %s: task rebind event not recorded: %v", s.Job, e)
 	}
 	if status == "rebound" {
-		fromJob := str(ev, "rebound_from")
-		a.noteReplaced(ctx, s, fromJob)
+		fromJob := firstNonempty(str(ev, "rebound_from"), s.Inherited)
+		a.noteReplaced(ctx, *s, str(ev, "rebound_from"))
+		laneCtx, cancelLane := context.WithTimeout(uncancelled, 20*time.Second)
+		defer cancelLane()
+		a.takeOverLane(laneCtx, s, hint, owner, fromJob, pane, machine)
 		return
 	}
+	// The task stayed with its holder, so there is no predecessor route to
+	// take over; the pane still registers under its own label.
+	laneCtx, cancelLane := context.WithTimeout(uncancelled, 20*time.Second)
+	defer cancelLane()
+	a.registerOwnLane(laneCtx, s, owner, pane, machine)
 	reason := str(ev, "rebind_error")
 	id := sha256.Sum256([]byte(s.Job))
 	text := fmt.Sprintf("[panewire] TASK_REBIND_FAILED job=%s task=%s reason=%s; rebind manually", s.Job, s.Task, reason)
@@ -537,6 +579,69 @@ func (a *App) finishTaskTakeover(ctx context.Context, s Spawn, task client.Task,
 	r := a.call(notice, "panewire", "emit", "--kind", "lane.event", "--lane", owner, "--type", "automation-failed", "--event-id", fmt.Sprintf("task-rebind-failed-%x", id[:]), "--text", text, "--inbox-root", filepath.Dir(a.Jobs))
 	if r.Code != 0 {
 		a.warn("task rebind notice failed (exit %d)", r.Code)
+	}
+}
+
+// takeoverLaneName is the lane a takeover write offers: the task's routing
+// lane, which is the name its findings are already addressed to, else the
+// spawn's own label. The hub substitutes the row the predecessor's pane holds,
+// so this name never authorizes moving a different row. If the hub cannot
+// prove the predecessor's route, takeOverLane reports the refusal and the
+// successor registers its own label.
+func takeoverLaneName(s Spawn, task client.Task) string {
+	if laneNamePattern.MatchString(task.Lane) {
+		return task.Lane
+	}
+	return s.Label
+}
+
+// takeOverLane moves the lane row the predecessor job holds onto this pane, so
+// the lane a task's findings are addressed to follows the takeover. A refusal
+// is expected when the lane the task names is not the predecessor's row (a
+// design task's lane stays on the design pane); the successor then registers
+// its own label as any spawn does. The outcome is recorded, never returned:
+// the spawn has landed.
+func (a *App) takeOverLane(ctx context.Context, s *Spawn, hint, owner, predecessor, pane, machine string) {
+	registration, e := a.registerLaneWithRetry(ctx, lanePutRequest{Lane: hint, Machine: machine, Pane: pane, Job: s.Job, Parent: owner, Role: s.Role, Takeover: predecessor})
+	if e == nil {
+		a.recordLaneRegistered(ctx, s, registration, pane, predecessor)
+		return
+	}
+	reason := laneFailureReason(e)
+	fmt.Fprintf(a.Out, "lane %s not moved: %s\n", hint, reason)
+	if laneRefused(e) {
+		_ = a.event(ctx, s.Job, "job.lane_takeover_failed", map[string]any{"lane": hint, "takeover_job": predecessor, "reason": reason})
+	} else {
+		a.warn("lane takeover for job %s task %s failed: %v", s.Job, s.Task, e)
+	}
+	a.registerOwnLane(ctx, s, owner, pane, machine)
+}
+
+// registerOwnLane registers the pane's own label, the write every spawn makes
+// when no lane is taken over.
+func (a *App) registerOwnLane(ctx context.Context, s *Spawn, owner, pane, machine string) {
+	registration, e := a.registerLaneWithRetry(ctx, lanePutRequest{Lane: s.Label, Machine: machine, Pane: pane, Job: s.Job, Parent: owner, Role: s.Role})
+	if e != nil {
+		s.laneUnregistered = true
+		s.laneError = laneFailureReason(e)
+		_ = a.event(ctx, s.Job, "job.lane_registration_failed", map[string]any{"lane": s.Label, "lane_error": s.laneError})
+		return
+	}
+	a.recordLaneRegistered(ctx, s, registration, pane, "")
+}
+
+// recordLaneRegistered keeps the published row on the spawn and records it in
+// the job's events. A takeover spawn reaches here after job.spawned, so this
+// event is where its receipt gains a lane.
+func (a *App) recordLaneRegistered(ctx context.Context, s *Spawn, registration laneRegistration, pane, takeover string) {
+	s.registeredLane = &Job{HubLane: registration.Lane, Machine: registration.Machine, Pane: pane, Role: s.Role}
+	s.laneUnregistered, s.laneError = false, ""
+	fields := map[string]any{"hub_lane": registration.Lane, "hub_lane_machine": registration.Machine, "pane_id": pane}
+	if takeover != "" {
+		fields["takeover_job"] = takeover
+	}
+	if e := a.event(ctx, s.Job, "job.lane_registered", fields); e != nil {
+		a.warn("job %s: lane registration event not recorded: %v", s.Job, e)
 	}
 }
 
@@ -697,14 +802,30 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 			}
 			return
 		}
-		a.spawnEvents(s, err)
+		if a.Parks == nil || err == nil || !a.Parks(err) {
+			a.spawnEvents(s, err)
+		}
 		a.finishPlacement(ctx, s, err)
 	}()
-	if s.CWD == "" || s.Prompt == "" || s.Label == "" || !slices.Contains([]string{"T0", "T1", "T2", "T3"}, s.T) {
+	// A hub-submitted spec spawn has no local cwd: the node prepares its
+	// worktree from Repository.Checkout and the pane starts there (hk 4738).
+	// Every other spawn needs a cwd this host can read.
+	cwdMissing := s.CWD == "" && (a.Repository == nil || a.Repository.Checkout == nil)
+	if cwdMissing || s.Prompt == "" || s.Label == "" || !slices.Contains([]string{"T0", "T1", "T2", "T3"}, s.T) {
+		if cwdMissing && s.CheckoutOrigin != "" {
+			return fail(exitUsage, "%s runs through the hub: configure [hub] hub_url, or pass -c to spawn from a local checkout", checkoutSpecFlags)
+		}
 		return fail(exitUsage, "spawn requires -c -p -l --t T0..T3; supply the missing flags (workspace defaults to executing local.workspace)")
 	}
 	if !validID(s.Job) || !validID(s.Label) || !slices.Contains(spawnRoles, s.Role) {
 		return fail(exitUsage, "invalid job, label or role")
+	}
+	// One jobs-inbox directory holds one job. Refuse a case-only collision
+	// before admission spends or a claim creates jobs/<id>/events (hk 4824).
+	// Local, node and --parent-job spawns all arrive here; the claim added
+	// below this flow's read-only check is the atomic half.
+	if e := checkJobDirCase(a.Jobs, s.Job); e != nil {
+		return e
 	}
 	if s.Task != "" && s.ParentJob != "" {
 		return fail(exitUsage, "--task and --parent-job are exclusive")
@@ -783,12 +904,7 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 		s.Task = j.Task
 		s.Inherited = s.ParentJob
 		s.replacedRung = &j
-		authorFamily = j.Family
-		if authorFamily == "" {
-			if seat, ok := a.Policy.Profiles[j.Profile]; ok {
-				authorFamily = seat.Family
-			}
-		}
+		authorFamily = a.jobBuilderFamily(j)
 		if s.Owner == "" && !s.ownerOmitted {
 			s.Owner = j.Owner
 		}
@@ -796,6 +912,15 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 		if s.Report == "" && s.ReportRelative == "" {
 			return fail(exitUsage, "--parent-job requires --report")
 		}
+	}
+	if s.ParentJob == "" && authorFamily == "" && topRoutingRole(s.resolvedRoutingRole()) {
+		// A consult's author is the job it runs in even when --task names the
+		// task; resolve reads the same job (hk 4572).
+		family, e := a.askerBuilderFamily(ctx)
+		if e != nil {
+			return e
+		}
+		authorFamily, s.ParentFamily = family, family
 	}
 	if s.ownerOmitted {
 		if e := a.resolveOwner(ctx, &s); e != nil {
@@ -938,14 +1063,14 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 		// A dry run takes the seat gate a real spawn takes (the catalog row and
 		// Seat.Check, E6 marker included) and nothing after it: no gate receipt,
 		// lease, hub reservation or pane.
-		if seat.Capability != "standard" && !boolean(a.Config.Local, seat.Capability, false) {
+		if seat.Capability != "standard" && !capability(a.readinessStates(ctx), a.machine(), a.Config.Local, seat.Capability) {
 			return fail(exitConfig, "host %s lacks capability %s", a.machine(), seat.Capability)
 		}
 		// A pinned seat takes the launch-row gate here. An auto pick was
 		// already resolved from the catalog by selectProfile, which this
 		// dry run does not repeat.
 		if !autoSel {
-			if _, e := a.checkSpawnAdmission(ctx, s, seat, a.spawnQuotaRequest(s, seat, effort), effort, selEffort, grade, authorFamily, autoSel, a.Config.Local); e != nil {
+			if _, e := a.checkSpawnAdmission(ctx, s, seat, a.spawnQuotaRequest(s, seat, effort), effort, selEffort, grade, authorFamily, autoSel, a.machine(), a.Config.Local); e != nil {
 				return e
 			}
 		}
@@ -1006,7 +1131,7 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 			}
 			s.AccountKey = receipt.ReadingKey
 		} else {
-			key, _ := a.remoteAccount(ctx, firstNonempty(launch.Pool, gatePool(gate)), a.machine(), a.Config.Local)
+			key, _ := a.remoteAccount(ctx, firstNonempty(launch.Pool, gatePool(gate)), a.machine(), a.Config.Local, "")
 			s.AccountKey = key
 		}
 	}
@@ -1026,6 +1151,13 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 	if !admissionRecorded {
 		a.stage("placement", startedAdmission)
 		admissionRecorded = true
+	}
+	// Reserve the id's identity no-clobber before the first hk or local write.
+	// Two launchers that reached here together both passed the read-only check
+	// above; this link admits exactly one of them and the other refuses with
+	// the winner's exact id (hk 4824).
+	if e = claimJobDirIdentity(a.Jobs, s.Job); e != nil {
+		return e
 	}
 	startedClaim := time.Now()
 	if e = a.claimJobRecord(ctx, s); e != nil {
@@ -1258,14 +1390,22 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 	parent := owner
 	machine := a.machine()
 	laneOK := false
-	if e := a.registerLaneWithRetry(ctx, lane, parent, pane, s.Role, machine); e != nil {
-		s.laneUnregistered = true
-		s.laneError = laneFailureReason(e)
-	} else {
-		laneOK = true
-		s.registeredLane = &Job{HubLane: lane, Machine: machine, Pane: pane, Role: s.Role}
+	// A --parent-job takeover registers after this spawn commits: it moves the
+	// predecessor's lane row, and a spawn that fails must leave that row where
+	// it is. Every other spawn registers under its own label here.
+	if !s.replacesParent() {
+		if registration, e := a.registerLaneWithRetry(ctx, lanePutRequest{Lane: lane, Machine: machine, Pane: pane, Job: s.Job, Parent: parent, Role: s.Role}); e != nil {
+			s.laneUnregistered = true
+			s.laneError = laneFailureReason(e)
+		} else {
+			lane, laneOK = registration.Lane, true
+			s.registeredLane = &Job{HubLane: lane, Machine: machine, Pane: pane, Role: s.Role}
+		}
 	}
 	receipt := map[string]any{"pane_id": pane, "tab_id": tab, "herdr_session": a.herdrSession(), "label": s.Label, "profile": s.Profile, "launch_profile": launchProfile(seat.Canon, launch.Effort), "model_id": launch.ModelID, "effort": launch.Effort, "family": seat.Family, "role": s.Role, "lane_role": s.Role, "owner_lane": owner, "parent_lane": s.Parent, "task_id": s.Task, "report": s.Report, "cwd": s.CWD, "keep": s.Keep, "pool": pool, "host": machine}
+	// The request's time limit, so the node's pane sweep can end a reviewer or
+	// consult by its real limit (hk 4747).
+	receipt["expires_at"] = a.spawnExpiresAt(s).UTC().Format(time.RFC3339)
 	receipt["harness_session"] = a.harnessSession(ctx, pane, seat.Kind)
 	if s.AccountKey != "" {
 		receipt["account_key"] = s.AccountKey
@@ -1288,7 +1428,12 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 	}
 	committed = true
 	if s.replacesParent() {
-		a.finishTaskTakeover(ctx, s, task, owner)
+		hint := takeoverLaneName(s, task)
+		a.finishTaskTakeover(ctx, &s, task, owner, hint, pane, machine)
+		lane = hint
+		if s.registeredLane != nil {
+			lane, laneOK = s.registeredLane.HubLane, true
+		}
 	}
 	s.placement.placed = true
 	if rerr := a.recordLadderStep(ctx, s, launch, seat); rerr != nil {
@@ -1335,7 +1480,7 @@ func (a *App) spawnQuotaRequest(s Spawn, seat Seat, effort string) QuotaRequest 
 // request resolves to, then the seat's own rules (grade cover, E6 marker). A
 // dry run runs it too, so the preview refuses what a real spawn refuses. It
 // takes no gate receipt, lease or reservation.
-func (a *App) checkLaunchRow(ctx context.Context, s Spawn, seat Seat, qr QuotaRequest, effort, selEffort, grade, authorFamily string, autoSel bool, host map[string]any) (Launch, error) {
+func (a *App) checkLaunchRow(ctx context.Context, s Spawn, seat Seat, qr QuotaRequest, effort, selEffort, grade, authorFamily string, autoSel bool, hostName string, hostCfg map[string]any) (Launch, error) {
 	launch, e := a.Quota.Launch(ctx, qr)
 	if e != nil {
 		// Preserve the gate's role/quota refusal even when the catalog also
@@ -1360,7 +1505,7 @@ func (a *App) checkLaunchRow(ctx context.Context, s Spawn, seat Seat, qr QuotaRe
 			return Launch{}, fail(exitSeatRefused, "NO_ROLE_CANDIDATE: model %s in harness %s cannot consult", launch.ModelID, seat.Kind)
 		}
 	}
-	if e = seat.Check(launch, s.Role, grade, authorFamily, a.e6Arm(s.E6Arm, s.e6ArmLocked), host); e != nil {
+	if e = seat.Check(launch, s.Role, grade, authorFamily, a.e6Arm(s.E6Arm, s.e6ArmLocked), capability(a.readinessStates(ctx), hostName, hostCfg, seat.Capability)); e != nil {
 		return Launch{}, e
 	}
 	return launch, nil
@@ -1368,8 +1513,8 @@ func (a *App) checkLaunchRow(ctx context.Context, s Spawn, seat Seat, qr QuotaRe
 
 // checkSpawnAdmission covers the catalog row, seat rules and escalation gate
 // shared by a dry-run and a real spawn. It does not read quota or claim a seat.
-func (a *App) checkSpawnAdmission(ctx context.Context, s Spawn, seat Seat, qr QuotaRequest, effort, selEffort, grade, authorFamily string, autoSel bool, host map[string]any) (Launch, error) {
-	launch, err := a.checkLaunchRow(ctx, s, seat, qr, effort, selEffort, grade, authorFamily, autoSel, host)
+func (a *App) checkSpawnAdmission(ctx context.Context, s Spawn, seat Seat, qr QuotaRequest, effort, selEffort, grade, authorFamily string, autoSel bool, hostName string, hostCfg map[string]any) (Launch, error) {
+	launch, err := a.checkLaunchRow(ctx, s, seat, qr, effort, selEffort, grade, authorFamily, autoSel, hostName, hostCfg)
 	if err != nil {
 		return Launch{}, err
 	}
@@ -1380,13 +1525,13 @@ func (a *App) checkSpawnAdmission(ctx context.Context, s Spawn, seat Seat, qr Qu
 	return launch, nil
 }
 
-func (a *App) checkDryRunAdmission(ctx context.Context, s Spawn, host map[string]any) error {
+func (a *App) checkDryRunAdmission(ctx context.Context, s Spawn, hostName string, hostCfg map[string]any) error {
 	seat, ok := a.Policy.Profiles[s.Profile]
 	if !ok {
 		return fail(exitConfig, "missing seat policy for %s", s.Profile)
 	}
 	effort := firstNonempty(s.Effort, seat.Effort)
-	_, err := a.checkSpawnAdmission(ctx, s, seat, a.spawnQuotaRequest(s, seat, effort), effort, effort, s.TaskGrade, s.ParentFamily, false, host)
+	_, err := a.checkSpawnAdmission(ctx, s, seat, a.spawnQuotaRequest(s, seat, effort), effort, effort, s.TaskGrade, s.ParentFamily, false, hostName, hostCfg)
 	return err
 }
 
@@ -1394,7 +1539,7 @@ func (a *App) checkDryRunAdmission(ctx context.Context, s Spawn, host map[string
 // gate and the hub for the spawn; it claims and writes nothing.
 func (a *App) admitLaunch(ctx context.Context, s Spawn, seat Seat, effort, selEffort, grade, authorFamily string, autoSel bool) (Launch, string, error) {
 	qr := a.spawnQuotaRequest(s, seat, effort)
-	launch, e := a.checkSpawnAdmission(ctx, s, seat, qr, effort, selEffort, grade, authorFamily, autoSel, a.Config.Local)
+	launch, e := a.checkSpawnAdmission(ctx, s, seat, qr, effort, selEffort, grade, authorFamily, autoSel, a.machine(), a.Config.Local)
 	if e != nil {
 		return Launch{}, "", e
 	}
@@ -1409,7 +1554,7 @@ func (a *App) admitLaunch(ctx context.Context, s Spawn, seat Seat, effort, selEf
 		return Launch{}, "", err
 	}
 	if s.AccountKey != "" {
-		key, acc := a.remoteAccount(ctx, pool, a.machine(), a.Config.Local)
+		key, acc := a.remoteAccount(ctx, pool, a.machine(), a.Config.Local, s.AccountKey)
 		if why := selectedAccountReason(s.AccountKey, key, acc, policy.isCredit(pool)); why != "" {
 			return Launch{}, "", fail(exitAuthUnavailable, "AUTH_UNAVAILABLE: executing host %s cannot confirm the selected account %s: %s", a.machine(), s.AccountKey, why)
 		}

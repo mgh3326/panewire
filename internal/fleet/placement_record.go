@@ -42,7 +42,9 @@ type PlacementSignals struct {
 	Terms        *PlacementTerms `json:"terms,omitempty"`
 	// BelowFreeFloor is the hub's verdict that the host's free fraction is
 	// under its free floor; ranking puts such a host after every host that is
-	// not (host_fit.go, floorOrder).
+	// not (host_fit.go, floorOrder). It rides the hub's placement answer, not
+	// the hk record: hk has no such field and decodes a record with unknown
+	// fields rejected.
 	BelowFreeFloor bool `json:"below_free_floor,omitempty"`
 }
 
@@ -64,6 +66,17 @@ type PlacementCandidateRecord struct {
 	Reason  string   `json:"reason"`
 	Score   *float64 `json:"score,omitempty"`
 	PlacementSignals
+}
+
+// MarshalJSON writes the candidate as hk's record contract defines it: the
+// embedded signals minus the free-floor verdict, which belongs to the hub's
+// ranking answer only. hk decodes a posted record with unknown fields rejected
+// (internal/api/api.go decodeLimited), so a candidate under the floor carried
+// that verdict all the way into a refusal of the whole record.
+func (c PlacementCandidateRecord) MarshalJSON() ([]byte, error) {
+	type record PlacementCandidateRecord
+	c.BelowFreeFloor = false
+	return json.Marshal(record(c))
 }
 
 // PlacementExecution is emitted by the executing panewire in its OK receipt.
@@ -168,18 +181,34 @@ type pendingPlacement struct {
 	ResolveJob bool            `json:"resolve_job,omitempty"`
 }
 
-// placementRole is the hk placement record's role: review, consult or worker
-// (the work class), not a spawn role.
-func placementRole(s Spawn) string {
-	role := firstNonempty(s.RoutingRole, s.Role)
+// PlacementWorkClass maps a spawn role, and the routing role that may refine
+// it, to the work class hk's placement record carries: review, consult or
+// worker. hk accepts no other value (internal/store/placements.go,
+// checkPlacement), so every producer of a record maps through here — the
+// node's own spool and the hub's outbox, which builds its record from the
+// node's outcome and so sees the spawn role. A work class maps to itself: the
+// hub's trace already holds one, and a replay remaps a stored record.
+func PlacementWorkClass(role, routingRole string) string {
+	routed := firstNonempty(routingRole, role)
 	switch {
-	case s.Role == "reviewer" || role == "reviewer" || role == "judge":
+	case reviewWork(role) || reviewWork(routed):
 		return "review"
-	case role == "consult":
+	case routed == "consult":
 		return "consult"
 	default:
 		return "worker"
 	}
+}
+
+// reviewWork reports whether role names review work: the spawn role
+// (reviewer), the routing role that refines it (judge), or the work class
+// itself (review).
+func reviewWork(role string) bool {
+	return role == "reviewer" || role == "review" || role == "judge"
+}
+
+func placementRole(s Spawn) string {
+	return PlacementWorkClass(s.Role, s.RoutingRole)
 }
 
 func placementAccount(key string) string {
@@ -463,40 +492,63 @@ func placementTraceFromRecord(r PlacementRecord) PlacementTrace {
 	}
 }
 
+// PlacementDelivery is what one delivery pass did with a spooled record, for
+// the caller that owns the spool and must say why a record is still pending.
+// Reason never carries a credential or a response body: it is a stable code,
+// or hk's status, error code and store-authored refusal reason.
+type PlacementDelivery struct {
+	// Delivered is true when the record's file left the spool: posted, an hk
+	// 409 for the same job and attempt, or quarantined.
+	Delivered bool
+	// Quarantined is true when hk refused the record for good and it moved to
+	// placements-rejected; Reason is hk's answer.
+	Quarantined bool
+	// Duplicate is true when hk already held the job and attempt (409).
+	Duplicate bool
+	// Reason names why an undelivered record is still spooled.
+	Reason string
+}
+
 // EnqueuePlacementRecord spools a fully built placement record under its
-// deterministic idempotency name and delivers that record, reporting
-// whether this record's file left the spool (delivered or quarantined). The
-// hub coordinator's outbox calls it once per attempt; a rewrite of the same
-// name carries an identical payload, and hk answers a reposted job+attempt
-// with 409, which deliverPlacements treats as delivered.
-func (a *App) EnqueuePlacementRecord(ctx context.Context, r PlacementRecord) (delivered bool, err error) {
+// deterministic idempotency name and delivers that record, reporting what
+// became of this record's file. The hub coordinator's outbox calls it once per
+// attempt; a rewrite of the same name carries an identical payload, and hk
+// answers a reposted job+attempt with 409, which deliverPlacements treats as
+// delivered.
+func (a *App) EnqueuePlacementRecord(ctx context.Context, r PlacementRecord) (PlacementDelivery, error) {
 	// A placed record that arrived without execution metadata resolves the
 	// shared job record before its first post, as spoolPlacement does.
 	b, err := json.Marshal(pendingPlacement{Record: r, ResolveJob: r.Outcome == "placed" && r.Family == ""})
 	if err != nil {
-		return false, err
+		return PlacementDelivery{}, err
 	}
 	dir := filepath.Join(a.stateDir(), "placements")
 	if e := noSymlinks(dir); e != nil {
-		return false, e
+		return PlacementDelivery{}, e
 	}
 	if e := os.MkdirAll(dir, 0700); e != nil {
-		return false, e
+		return PlacementDelivery{}, e
 	}
 	path := filepath.Join(dir, r.JobID+"."+strconv.Itoa(r.Attempt)+".json")
 	if err := atomicFile(path, b, 0600); err != nil {
-		return false, err
+		return PlacementDelivery{}, err
 	}
-	a.deliverPlacementFile(ctx, filepath.Base(path))
-	_, statErr := os.Stat(path)
-	return os.IsNotExist(statErr), nil
+	return a.deliverOnePlacement(ctx, r.JobID, r.Attempt), nil
 }
 
 // FlushPlacementRecord retries one attempt without sending another attempt's
 // record through this App's delivery settings.
-func (a *App) FlushPlacementRecord(ctx context.Context, job string, attempt int) bool {
-	a.deliverPlacementFile(ctx, job+"."+strconv.Itoa(attempt)+".json")
-	return !a.PlacementSpooled(job, attempt)
+func (a *App) FlushPlacementRecord(ctx context.Context, job string, attempt int) PlacementDelivery {
+	return a.deliverOnePlacement(ctx, job, attempt)
+}
+
+func (a *App) deliverOnePlacement(ctx context.Context, job string, attempt int) PlacementDelivery {
+	result := a.deliverPlacementFile(ctx, job+"."+strconv.Itoa(attempt)+".json")
+	result.Delivered = !a.PlacementSpooled(job, attempt)
+	if !result.Delivered && result.Reason == "" {
+		result.Reason = "spool_entry_remains"
+	}
+	return result
 }
 
 // PlacementSpooled reports whether a record file still waits in the spool:
@@ -577,7 +629,9 @@ func (a *App) placementRepo(ctx context.Context, cwd string) string {
 // linked-worktree checkout the target node can clone instead of relying on
 // its cwd_map.
 func (a *App) placementRepoCheckout(ctx context.Context, cwd string) (string, bool) {
-	if cwd == "" {
+	// A hub-submitted spec spawn has no local cwd; its Repository is the
+	// evidence the hub placed with (hk 4738).
+	if cwd == "" && a.Repository == nil {
 		return "", false
 	}
 	bounded, cancel := context.WithTimeout(ctx, placementDeliveryBudget)
@@ -641,20 +695,42 @@ func (a *App) deliverPlacements(ctx context.Context) {
 	a.deliverPlacementFile(ctx, "")
 }
 
-// An empty name retains the regular spool-wide delivery behavior.
-func (a *App) deliverPlacementFile(ctx context.Context, only string) {
+// placementStallReason bounds an hk answer to one line of the stable shape
+// "hk HTTP <status> <code>: <reason>": the status and the error code and
+// store-authored refusal reason hk names, never the body or a credential.
+func placementStallReason(be *BackendError) string {
+	text := fmt.Sprintf("hk HTTP %d", be.Status)
+	if be.Code != "" {
+		text += " " + be.Code
+	}
+	if be.Reason != "" {
+		text += ": " + be.Reason
+	}
+	return text
+}
+
+// An empty name retains the regular spool-wide delivery behavior. For a named
+// entry the result says what became of it; a spool-wide pass returns only the
+// failures that stop every entry.
+func (a *App) deliverPlacementFile(ctx context.Context, only string) (result PlacementDelivery) {
 	dir := filepath.Join(a.stateDir(), "placements")
 	if noSymlinks(dir) != nil {
-		return
+		result.Reason = "spool_path_refused"
+		return result
 	}
 	entries, e := os.ReadDir(dir)
-	if e != nil || len(entries) == 0 {
-		return
+	if e != nil {
+		result.Reason = "spool_unreadable"
+		return result
+	}
+	if len(entries) == 0 {
+		return result
 	}
 	c, e := a.quotaClient()
 	if e != nil {
 		a.warn("placement delivery unavailable; records remain spooled")
-		return
+		result.Reason = "hk_credential_unavailable: " + backendReason(e.Error())
+		return result
 	}
 	cursorPath := filepath.Join(a.stateDir(), "placement-cursor")
 	cursor, _ := os.ReadFile(cursorPath)
@@ -672,6 +748,7 @@ func (a *App) deliverPlacementFile(ctx context.Context, only string) {
 		}
 	}()
 	attempted := 0
+	reached := only == ""
 	for offset := 0; offset < len(entries); offset++ {
 		if attempted >= 32 || ctx.Err() != nil {
 			break
@@ -683,6 +760,7 @@ func (a *App) deliverPlacementFile(ctx context.Context, only string) {
 		if only != "" && ent.Name() != only {
 			continue
 		}
+		reached = true
 		attempted++
 		previous := lastAttempted
 		lastAttempted = ent.Name()
@@ -691,16 +769,19 @@ func (a *App) deliverPlacementFile(ctx context.Context, only string) {
 		var p pendingPlacement
 		if e != nil || json.Unmarshal(b, &p) != nil {
 			a.warn("unreadable placement spool entry")
+			result.Reason = "spool_entry_unreadable"
 			continue
 		}
 		if p.ResolveJob {
 			store, err := a.jobStore()
 			if err != nil {
+				result.Reason = "job_store_unavailable"
 				break
 			}
 			job, err := store.Get(ctx, p.Record.JobID)
 			if err != nil || str(job, "family") == "" || str(job, "pane_id") == "" {
 				a.warn("placement execution metadata unavailable; record remains spooled")
+				result.Reason = "job_metadata_unavailable"
 				continue
 			}
 			r := &p.Record
@@ -710,6 +791,7 @@ func (a *App) deliverPlacementFile(ctx context.Context, only string) {
 			// Freeze the resolved payload before its first POST, so an
 			// ambiguous HTTP result always retries identical metadata.
 			if atomicFile(path, b, 0600) != nil {
+				result.Reason = "spool_entry_unwritable"
 				continue
 			}
 		}
@@ -733,21 +815,22 @@ func (a *App) deliverPlacementFile(ctx context.Context, only string) {
 				if !os.IsNotExist(moveErr) || !os.IsNotExist(sourceErr) {
 					lastAttempted = previous
 					a.warn("placement record could not be quarantined; records remain spooled")
+					result.Reason = "quarantine_failed after " + placementStallReason(be)
 					break
 				}
 			}
 			rejected = true
+			result.Quarantined, result.Reason = true, placementStallReason(be)
 			// The sidecar keeps hk's answer next to the record so the refusal
 			// can be read after the fact; a failed write only loses the note.
 			note, _ := json.Marshal(map[string]any{"status": be.Status, "error": be.Code, "reason": be.Reason})
 			if atomicFile(filepath.Join(rejectedDir, ent.Name()+".reason"), note, 0600) != nil {
 				a.warn("placement rejection reason could not be saved")
 			}
-			if be.Reason != "" {
-				a.warn("placement record %s rejected: hk HTTP %d %s: %s", ent.Name(), be.Status, be.Code, be.Reason)
-			} else {
-				a.warn("placement record %s rejected: hk HTTP %d %s", ent.Name(), be.Status, be.Code)
-			}
+			// hk's reason names the failing field (hk 197) and is already
+			// bounded by backendReason; placementStallReason omits it when hk
+			// sent none, as a strict-decode refusal does.
+			a.warn("placement record %s rejected: %s", ent.Name(), placementStallReason(be))
 			continue
 		}
 		if e != nil && !conflict {
@@ -755,19 +838,32 @@ func (a *App) deliverPlacementFile(ctx context.Context, only string) {
 			// Name hk's answer (status and error code, never the body) so a
 			// refusal such as a token scope can be told from an outage.
 			if errors.As(e, &be) {
-				a.warn("placement delivery failed: hk HTTP %d %s; records remain spooled", be.Status, be.Code)
+				result.Reason = placementStallReason(be)
+				a.warn("placement delivery failed: %s; records remain spooled", result.Reason)
+			} else if ctx.Err() != nil {
+				a.warn("placement delivery failed: hk unreachable; records remain spooled")
+				result.Reason = "delivery_budget_exhausted"
 			} else {
 				a.warn("placement delivery failed: hk unreachable; records remain spooled")
+				result.Reason = "hk_unreachable"
 			}
 			break
 		}
 		if conflict {
 			a.warn("placement delivery HTTP 409; conflicting record dropped")
+			result.Duplicate = true
 		}
 		if e := os.Remove(path); e != nil && !os.IsNotExist(e) {
 			a.warn("placement spool entry could not be removed")
 		}
 	}
+	if only != "" && !reached && result.Reason == "" {
+		if _, statErr := os.Stat(filepath.Join(dir, only)); statErr == nil {
+			// The entry exists but the pass never got to it: the budget ran out.
+			result.Reason = "delivery_budget_exhausted"
+		}
+	}
+	return result
 }
 
 func (a *App) capRejectedPlacements() {

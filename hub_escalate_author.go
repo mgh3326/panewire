@@ -287,9 +287,10 @@ func (h *HubServer) escalateAuthor(ctx context.Context, request hubEscalateAutho
 			return cancel(code, why)
 		}
 		if err := h.planLadderSuccessor(ctx, next); err != nil {
-			return cancel("quota_refused", "the successor was not admitted by the read-only placement plan")
+			code, why := escalateAuthorPlanRefusal(err)
+			return cancel(code, why)
 		}
-		if !h.closeHeldPane(ctx, holder, name, probe.row) {
+		if closed, _ := h.closeHeldPane(ctx, holder, name, probe.row, holder.Job); !closed {
 			again := h.probeHeldPane(ctx, spawnHolderHost(holder), holder.Outcome.Pane, name)
 			if again.state == heldPanePresent {
 				return cancel("pane_not_closed", "the author pane could not be closed")
@@ -335,6 +336,9 @@ func (h *HubServer) escalateAuthor(ctx context.Context, request hubEscalateAutho
 	return h.escalateAuthorOutcome(ctx, app, request, owner, newJob, prior)
 }
 
+// planLadderSuccessor runs the read-only placement plan for the successor and
+// returns nil when it admits the request. The caller reports a refusal with
+// escalateAuthorPlanRefusal, which keeps the plan's own code and text.
 func (h *HubServer) planLadderSuccessor(ctx context.Context, request fleet.Submission) error {
 	if h.ladderPlan != nil {
 		return h.ladderPlan(ctx, request)
@@ -351,12 +355,25 @@ func (h *HubServer) planLadderSuccessor(ctx context.Context, request fleet.Submi
 		return err
 	}
 	if plan.Host != hubSpawnArg(request.Args, "--host") {
-		return fmt.Errorf("plan selected a different host")
+		return fmt.Errorf("the plan selected host %q instead of the pinned host %q", plan.Host, hubSpawnArg(request.Args, "--host"))
 	}
 	return nil
 }
 
+// escalateAuthorPlanRefusal names a refused plan from the refusal table: the
+// closed-set code the spawn route reports, and the plan's own text. A seat or
+// host refusal (NO_ROLE_CANDIDATE at rc 77, an unknown host) is not a quota
+// reading, so it is not reported as quota_refused.
+func escalateAuthorPlanRefusal(err error) (code, reason string) {
+	return firstNonempty(fleet.SpawnRefusalCode(err.Error(), fleet.ErrorCode(err)), "placement"), err.Error()
+}
+
 func (h *HubServer) escalateAuthorOutcome(ctx context.Context, app *fleet.App, request hubEscalateAuthorRequest, owner, job string, task hubSpawnTask) (hubEscalateAuthorResult, error) {
+	if task.Status == "waiting" {
+		// A conditioned successor is queued, not refused: waiting is not a
+		// placement outcome, and the queue ends or releases it.
+		return hubEscalateAuthorResult{Code: "pending", Reason: "successor is queued for its start conditions; retry"}, nil
+	}
 	if spawnStatusActive(task.Status) {
 		var settled bool
 		task, settled = h.awaitSpawnOutcome(ctx, task.Request.RequestID, escalateAuthorWait)
@@ -490,21 +507,30 @@ func (h *HubServer) escalateAuthorWorktreeUsable(ctx context.Context, holder hub
 	}
 }
 
-// escalateAuthorRefusal records the refusal as one info event for the design
+// escalateAuthorRefusal records the refusal as one lane event for the design
 // lane and answers the CLI with its code. ended marks a refusal that follows
-// the pane close: the old author is gone and the PR has none, which the info
-// and the CLI both report.
+// the pane close: the old author is gone and the PR has none, which the CLI
+// reports and the lane gets as an ESC naming the PR authorless. Panewire never
+// starts a successor on its own here: only the owner lane's reply does.
 func (h *HubServer) escalateAuthorRefusal(ctx context.Context, request hubEscalateAuthorRequest, owner, code, reason string, ended bool) (hubEscalateAuthorResult, error) {
-	consequence := "the PR goes on to the next round"
+	eventID := fmt.Sprintf("ladder-step:%s:%d:preflight:%s", request.Job, request.Round, code)
+	notify := "info"
+	text := fmt.Sprintf("ladder step %s: %s (%s) (round %d, %s); the PR goes on to the next round", request.Job, code, reason, request.Round, request.PR)
 	if ended {
-		consequence = "the author's pane is closed; no author runs on this PR now"
+		// The :esc suffix is its own identity. A row this (job, round, code)
+		// filed before the ESC existed is stored as info under the shorter id,
+		// and lane-event dedupe is first-writer-wins: without the suffix the
+		// replay would find that row and never file the wake the lane needs.
+		// Accepted trade-off: a build between #565 and this one filed ended
+		// refusals as decision under the shorter id. A replay of such a
+		// (job, round, code) after the upgrade files one duplicate ESC under
+		// :esc. It is a one-time, operator-visible duplicate, not a lost wake;
+		// checking the legacy row before filing was not worth the extra read.
+		eventID = fmt.Sprintf("ladder-step:%s:%d:ended:%s:esc", request.Job, request.Round, code)
+		notify = "decision"
+		text = fmt.Sprintf("[panewire] ESC | authorless: ladder step %s: %s (%s) (round %d); %s has no author: the pane is closed and no successor was confirmed. Decide how to continue; panewire does not start a successor automatically.", request.Job, code, reason, request.Round, request.PR)
 	}
-	phase := "preflight"
-	if ended {
-		phase = "ended"
-	}
-	text := fmt.Sprintf("ladder step %s: %s (%s) (round %d, %s); %s", request.Job, code, reason, request.Round, request.PR, consequence)
-	h.relayLaneEventContext(ctx, hubJobEventPayload{EventID: fmt.Sprintf("ladder-step:%s:%d:%s:%s", request.Job, request.Round, phase, code), JobID: request.Job, OwnerLane: owner, NotifyType: "info", Text: utf8PrefixWithin(text, laneEventTextLimit), Host: "hub", Epoch: 1}, nil)
+	h.relayLaneEventContext(ctx, hubJobEventPayload{EventID: eventID, JobID: request.Job, OwnerLane: owner, NotifyType: notify, Text: utf8PrefixWithin(text, laneEventTextLimit), Host: "hub", Epoch: 1}, nil)
 	return hubEscalateAuthorResult{Code: code, Reason: reason, AuthorEnded: ended}, nil
 }
 

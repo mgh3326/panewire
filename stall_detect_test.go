@@ -643,7 +643,7 @@ func TestStallReportPathRealJournalShapes(t *testing.T) {
 		if err != nil || !found {
 			t.Fatalf("doc-key report left no record: found=%v err=%v", found, err)
 		}
-		if row.RefKind != "doc_key" || row.RefValue != "report/task172/hold-ack" || row.State != "no_report" {
+		if row.RefKind != "doc_key" || row.RefValue != "report/task172/hold-ack" || row.State != "in_hk" {
 			t.Fatalf("doc key was mishandled: %+v", row)
 		}
 	})

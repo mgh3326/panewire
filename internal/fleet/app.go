@@ -77,6 +77,9 @@ type App struct {
 	// hub coordinator sets it for queue-core spawns, whose record is produced
 	// from the persisted snapshot when the attempt reaches a terminal result.
 	PlacementOutbox bool
+	// Parks reports a refusal the hub parks instead of ending the request
+	// (hk 4661): it is not terminal, so no refusal event is emitted for it.
+	Parks func(error) bool
 	// SharedLatest reads one account's latest stored quota reading for the
 	// admission gate; nil reads handoffkeep (admission_native.go).
 	SharedLatest func(context.Context, string) (shared.Latest, error)
@@ -126,12 +129,21 @@ type App struct {
 	// SentryWarning sends one warning-level Sentry event. Tests substitute it;
 	// nil uses SENTRY_DSN_PANEWIRE (sentry_warning.go).
 	SentryWarning func(fingerprint []string, message string, tags map[string]string)
-	// LiveSpawnProfiles counts live hub spawns by placed profile for the
+	// LiveSpawnProfiles counts live spawns by placed profile for the
 	// [quota].pool_max_concurrent cap, leaving out the hub request named by
-	// its second argument (the spawn being placed). The hub's own App reads
-	// its operations; nil reads GET /v1/spawns/live with the [hub] operator
-	// credential.
+	// its second argument (the spawn being placed). It covers every spawn
+	// placed on a node, the hub's and a direct `panewire spawn` alike. The
+	// hub's own App reads its operations and its nodes' reported jobs; nil
+	// reads GET /v1/spawns/live with the [hub] operator credential.
 	LiveSpawnProfiles func(context.Context, string) (map[string]int, error)
+	// LivePlacedByAccount counts live hub spawns' placed profiles by account
+	// key, leaving out the hub request named by its second argument. Selection
+	// folds the profiles through the seat canon to find the account's live
+	// free-band launches (the SWE-2 free rungs, seat aliases included), so a
+	// burst of submissions does not trip the free limit (hk 4765). The hub's
+	// own App reads its operations; nil skips the check (a node-local
+	// selection has no fleet-wide launch record).
+	LivePlacedByAccount func(context.Context, string) (map[string]map[string]int, error)
 	// State reads the hub's fleet state snapshot; nil reads GET /v1/state
 	// with the [hub] operator credential. fleetLog records the sources used.
 	DecisionReply func(context.Context, string, string, time.Time) (bool, error)
@@ -368,7 +380,7 @@ func (a *App) help(cmd string) error {
 	case "work":
 		fmt.Fprintln(a.Out, "Usage: panewire work TASK [spawn flags override task defaults]")
 	case "spawn":
-		fmt.Fprintln(a.Out, "Usage: panewire spawn -c CWD [-m PROFILE|auto] -p BRIEF|hk:doc/KEY -w WORKSPACE -l LABEL --t T0..T3 [--task ID|--parent-job JOB] [--effort E] [--role implementer|reviewer|consult] [--review-pass 1..9 (reviewer only)] [--lane L] [--parent L] [--owner L] [--job ID] [--host auto|local|NAME] [--tags a,b,c] [--exclude-host a,b] [--exclude-pool P,P] [--report PATH] [-L live|mock] [--keep] [--job-dup-ok] [--task-hk-bypass] [--allow-escalation] [--override-reason TEXT] [--containment hk:ID] [--operator-request REF] [--requested-by NAME] [--purpose PURPOSE] [--report-relative PATH] [--wait] [--wait-timeout DUR] [--dry-run] (pins require --containment hk:ID or --operator-request REF)")
+		fmt.Fprintln(a.Out, "Usage: panewire spawn (-c CWD | --checkout-origin URL --checkout-commit SHA --checkout-ref REF) [-m PROFILE|auto] -p BRIEF|hk:doc/KEY -w WORKSPACE -l LABEL --t T0..T3 [--task ID|--parent-job JOB] [--effort E] [--role implementer|reviewer|consult] [--review-pass 1..9 (reviewer only)] [--lane L] [--parent L] [--owner L] [--job ID] [--host auto|local|NAME] [--tags a,b,c] [--exclude-host a,b] [--exclude-pool P,P] [--report PATH] [-L live|mock] [--keep] [--job-dup-ok] [--task-hk-bypass] [--allow-escalation] [--override-reason TEXT] [--containment hk:ID] [--operator-request REF] [--requested-by NAME] [--purpose PURPOSE] [--report-relative PATH] [--wait] [--wait-timeout DUR] [--expires DUR] [--dry-run] (--expires: the request time limit, 1m to 24h, default 6h implementer / 1h reviewer and consult; pins require --containment hk:ID or --operator-request REF; --checkout-* names the worktree for a hub spawn instead of -c)")
 	case "done":
 		fmt.Fprintln(a.Out, "Usage: panewire done JOB [--report PATH] [--result FILE]")
 	case "escalate":

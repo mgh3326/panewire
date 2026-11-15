@@ -1,0 +1,39 @@
+echo panewire-ready-e50b6ff52b82fe0b8cc2e545
+➜ mgh3326@raspberrypi mwr-563-64c05d7-p1-1794674594 echo panewire-ready-e50b6ff52b82fe0b8cc2e545
+panewire-ready-e50b6ff52b82fe0b8cc2e545
+➜ mgh3326@raspberrypi mwr-563-64c05d7-p1-1794674594 git:(64c05d73) devin --model swe-2-flash-high --permission-mode dan
+gerous --respect-workspace-trust false
+
+⠀⣴⣾⣶⡄⠀⠀⠀⠀
+⠀⠛⠿⠟⠻⣶⣾⣶⡄  Devin CLI
+⠀⣤⣶⣦⣴⠿⢿⠿⠃  v3000.12.57
+⠀⠻⢿⠿⠃⠀⠀⠀⠀
+
+ Pro · 0% remaining (resets in 15h 16m)
+
+❭ Your brief is the file /home/mgh3326/work/herdr-inbox/jobs/mwr-563-64c05d7-p1-1794674594/brief-delivered.md (6332
+  bytes, sha256 8856b836d00c). Read the whole file now, then follow it exactly; it is your only instruction.
+
+ ▲ Something went wrong
+   Reached free model rate limit. Upgrade to Max for higher limits, or switch to a different model. Your limit will
+   reset in 16 minutes (at 17:01 UTC). Send a message to retry
+
+❭ [r844664gezd] (같은 내용이 두 번 보이면 재실행 금지) [event] mwr-563-64c05d7-p1-1794674594 :: mergewake: your review
+  of mgh3326/panewire#563 pass 1 has no result yet. Write the two files now from the work you have already done:
+  findings.json at /home/opc/work/herdr-inbox/jobs/mwr-563-64c05d7-p1-1794674594/findings.json and report.md at /home/
+  opc/work/herdr-inbox/jobs/mwr-563-64c05d7-p1-1794674594/report.md. Then run `panewire done mwr-563-64c05d7-
+  p1-1794674594 --result /home/opc/work/herdr-inbox/jobs/mwr-563-64c05d7-p1-1794674594/findings.json --report /home/
+  opc/work/herdr-inbox/jobs/mwr-563-64c05d7-p1-1794674594/report.md` in the foreground and wait for it to finish. `OK
+  job=` means success; on a non-zero exit, fix what the error names in findings.json or report.md and run the same
+  command again. Do not start new reading.
+
+ ▲ Something went wrong
+   Reached free model rate limit. Upgrade to Max for higher limits, or switch to a different model. Your limit will
+   reset in 13 minutes (at 17:01 UTC). Send a message to retry
+
+ ● ~/work/mwr-563-64c05d7-p1-1794674594
+──────────────────────────────────────────────────────────────────────────── Your brief is the file /home/mgh3326/wo… ─
+❭ Ask Devin to build features, fix bugs, or work on your code
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+SWE-2 Flash High · bypass                                          Use /bug to report a bug to the Devin CLI developers
+

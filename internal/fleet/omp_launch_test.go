@@ -142,6 +142,7 @@ func TestOMPFooterProof(t *testing.T) {
 	folder := ompCapture(t, "screen_sonnet_medium_folder.txt")
 	working := ompCapture(t, "screen_working_footer.txt")
 	clamped := ompCapture(t, "screen_folder_clamped.txt")
+	detached := ompCapture(t, "screen_detached_worktree.txt")
 	const longCWD = "/home/user/work/plain-fixture-directory/desk-for-the-clamped-footer"
 	// clampTail is what omp keeps of a long label ending in end.
 	clampTail := func(end string) string {
@@ -170,6 +171,10 @@ func TestOMPFooterProof(t *testing.T) {
 		{name: "captured working footer refuses detached branch", screen: working, model: opus, effort: "high", cwd: tree, label: "panewire/tree", branch: "wk/fixture"},
 		{name: "working footer: different model", screen: working, model: sonnet, effort: "high", cwd: tree},
 		{name: "working footer: different cwd", screen: working, model: opus, effort: "high", cwd: "/home/user/work/other", label: "panewire/other", branch: "wk/other"},
+		// hk 4650: git names a detached HEAD "HEAD"; omp's footer names it "detached".
+		{name: "captured detached worktree", screen: detached, model: "DeepSeek V4.1 Flash", effort: "high", cwd: "/home/user/work/mergewake.mw-reap-merge-commit-handover", label: "mergewake/mergewake.mw-reap-merge-commit-handover", branch: "detached", want: true},
+		{name: "captured detached worktree refuses another branch", screen: detached, model: "DeepSeek V4.1 Flash", effort: "high", cwd: "/home/user/work/mergewake.mw-reap-merge-commit-handover", label: "mergewake/mergewake.mw-reap-merge-commit-handover", branch: "wk/other"},
+		{name: "captured detached worktree refuses a missing branch", screen: detached, model: "DeepSeek V4.1 Flash", effort: "high", cwd: "/home/user/work/mergewake.mw-reap-merge-commit-handover", label: "mergewake/mergewake.mw-reap-merge-commit-handover"},
 		{name: "working footer quoted by the brief", screen: working, model: opus, effort: "high", cwd: tree, brief: working, label: "panewire/tree", branch: "detached"},
 		{name: "minutes elapsed", screen: row(" ⠙ 1m 4s > ◒ Opus 5.5 > 📁 ~/work/plain/desk ▶─1%%──1M─"), model: opus, effort: "high", cwd: desk, want: true},
 		{name: "spinner without elapsed time", screen: row(" ⠙ > ◒ Opus 5.5 > 📁 ~/work/plain/desk ▶─1%%──1M─"), model: opus, effort: "high", cwd: desk},
@@ -243,6 +248,33 @@ func TestOMPWorktreeIdentityUsesLinkedCheckoutNames(t *testing.T) {
 	label, branch := a.ompWorktreeIdentity(context.Background(), s.CWD)
 	if label != "panewire/tree" || branch != "wk/fixture" {
 		t.Fatalf("OMP worktree identity = (%q, %q), want (%q, %q)", label, branch, "panewire/tree", "wk/fixture")
+	}
+}
+
+// hk 4650: a linked worktree on a detached HEAD has no branch to compare. git
+// prints the literal "HEAD" for it, omp's footer prints "detached", so the
+// identity must name the state the footer shows or the proof never lands.
+func TestOMPWorktreeIdentityNamesADetachedHead(t *testing.T) {
+	a := testApp(t)
+	cwd := filepath.Join(a.Home, "work", "mergewake.mw-reap-merge-commit-handover")
+	commonDir := filepath.Join(a.Home, "work", "mergewake", ".git")
+	a.Runner = &fakeRunner{Do: func(c Command) Result {
+		switch strings.Join(c.Args, " ") {
+		case "-C " + cwd + " rev-parse --abbrev-ref HEAD":
+			return Result{Out: "HEAD\n"}
+		case "-C " + cwd + " rev-parse --path-format=absolute --git-dir --git-common-dir":
+			return Result{Out: filepath.Join(commonDir, "worktrees", "mergewake.mw-reap-merge-commit-handover") + "\n" + commonDir + "\n"}
+		case "-C " + cwd + " rev-parse --show-toplevel":
+			return Result{Out: cwd + "\n"}
+		}
+		return Result{}
+	}}
+	label, branch := a.ompWorktreeIdentity(context.Background(), cwd)
+	if label != "mergewake/mergewake.mw-reap-merge-commit-handover" || branch != "detached" {
+		t.Fatalf("detached worktree identity = (%q, %q), want (%q, %q)", label, branch, "mergewake/mergewake.mw-reap-merge-commit-handover", "detached")
+	}
+	if !OMPFooterProof(ompCapture(t, "screen_detached_worktree.txt"), "DeepSeek V4.1 Flash", "high", cwd, a.Home, "", label, branch) {
+		t.Fatal("captured detached footer did not prove the seat")
 	}
 }
 

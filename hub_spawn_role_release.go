@@ -132,6 +132,20 @@ func (h *HubServer) releaseFailedSpawnRole(ctx context.Context, app *fleet.App, 
 		return false, heldProbe{reason: "hk_state_not_claimable"}
 	}
 	released, markReason := h.markLostAndRelease(ctx, app, holder, heldAgentName(holder, record), roleKey)
+	if !released && markReason == nodeJobMarkLostNoLiveAttempt && holder.Outcome.Pane == "" {
+		// hk 4799: a failed holder that recorded no pane, whose pane is
+		// absent, frees its reservation only when its node proved from its own
+		// spawn journal and active-job list that no attempt of the job is live
+		// under any label. hk is left as it is: the node still never writes
+		// lost over a record it cannot check (hk 3685), so the hk job stays
+		// claimed. A ledger the node cannot read, or a live attempt it cannot
+		// rule out, keeps the hold (hk 4673's bare ledger_missing release let
+		// a newer claim under another label through). Reviewer reservations
+		// are the subject of hk 4737.
+		if h.inbox.store.releaseCompletedSpawnRole(ctx, holder.Request.RequestID, roleKey) == nil {
+			return true, probe
+		}
+	}
 	if !released {
 		probe.write, probe.reason = true, markReason
 	}
@@ -172,7 +186,10 @@ func (h *HubServer) markHolderJobLostBecause(ctx context.Context, app *fleet.App
 	if host == "" {
 		return false, "no_host"
 	}
-	if hubHost, known := app.NodeID(); known && hubHost == host {
+	// The hub-local write has no job ledger to check, and a posted-result end
+	// rests on the node's own ledger (a role, a quota stop, the result itself),
+	// so that end goes through the node even on the hub's own host.
+	if hubHost, known := app.NodeID(); known && hubHost == host && endReason != reviewerResultPosted {
 		return h.writeJobLost(ctx, app, holder.Job, endReason)
 	}
 	if pane == "" && label == "" {
@@ -237,10 +254,11 @@ func (h *HubServer) writeJobLost(ctx context.Context, app *fleet.App, job, endRe
 // hk job never reached a terminal state (a job revoked and reaped by an older
 // binary, or one that ended without writing its record). Only a node that
 // listed every pane and lacks the recorded one proves the job gone; a present
-// pane, an unknown pane state, or no recorded pane keeps the hold. A present
-// idle pane is a reviewer that finished without completing, which stays held.
-// A listed pane with the holder's agent name under another id (a pane herdr
-// moved across workspaces) also keeps the hold.
+// pane, an unknown pane state, or no recorded pane keeps the hold. An idle
+// pane stays held: an implementer may be waiting on an answer. A reviewer
+// never reaches this rule, because it holds no reservation (hk 4737). A listed
+// pane with the holder's agent name under another id (a pane herdr moved across
+// workspaces) also keeps the hold.
 func (h *HubServer) releaseFinishedSpawnRole(ctx context.Context, app *fleet.App, holder hubSpawnTask, record map[string]any, roleKey string) (released bool, probe heldProbe) {
 	label := heldAgentName(holder, record)
 	probe = h.probeHeldPane(ctx, spawnHolderHost(holder), holder.Outcome.Pane, label)
@@ -284,10 +302,12 @@ func heldAgentName(holder hubSpawnTask, record map[string]any) string {
 // reservation, because completeSpawn deletes it, and its hk job stays
 // `claimed`, so nothing else would ever close that record. A replay of the
 // holder's own request never reaches here: it takes the replay path first.
-// Best effort: a failed hk read or write leaves the record for the next
-// submission.
+// A request that takes no slot (consult, reviewer) supersedes nothing: it
+// shares the task beside the other operation, so closing that operation's
+// record would end work the slot never displaced (hk 4568, hk 4737). Best
+// effort: a failed hk read or write leaves the record for the next submission.
 func (h *HubServer) supersedeRetryableHolders(ctx context.Context, app *fleet.App, request fleet.Submission, spawn fleet.Spawn) {
-	if spawn.Task == "" || spawn.ParentJob != "" {
+	if !spawn.HoldsTaskRole() {
 		return
 	}
 	holders, err := h.inbox.store.retryableSpawns(ctx)
@@ -364,7 +384,7 @@ func spawnRoleHeldBody(code, task, role string, holder hubSpawnTask, pane heldPa
 // succeeded and its pane is verifiably gone (a succeeded holder with no hk
 // record included). When it cannot, held carries the 409 body naming the
 // holder, and one INFO line says which branch held.
-func (h *HubServer) reclaimSpawnRole(ctx context.Context, app *fleet.App, request fleet.Submission, spawn fleet.Spawn, owner string) (task hubSpawnTask, held map[string]string, retryAfterS int, err error) {
+func (h *HubServer) reclaimSpawnRole(ctx context.Context, app *fleet.App, request fleet.Submission, spawn fleet.Spawn, owner string) (task hubSpawnTask, held map[string]string, err error) {
 	roleKey := spawn.RoleKey()
 	trace := heldTrace{branch: "owner_read_error", hk: "not_read"}
 	holder := hubSpawnTask{}
@@ -375,7 +395,7 @@ func (h *HubServer) reclaimSpawnRole(ctx context.Context, app *fleet.App, reques
 	}()
 	priorID, priorJob, priorStatus, readErr := h.inbox.store.spawnRoleOwner(ctx, roleKey)
 	if readErr != nil {
-		return task, jobHeldBody(), 0, errSpawnClaimed
+		return task, jobHeldBody(), errSpawnClaimed
 	}
 	holder, holderErr := h.inbox.store.spawnTask(ctx, priorID)
 	trace.branch = "holder_unreadable"
@@ -422,28 +442,18 @@ func (h *HubServer) reclaimSpawnRole(ctx context.Context, app *fleet.App, reques
 			trace.hk, trace.branch = state, "succeeded_pane_held"
 			released, probe = h.releaseFinishedSpawnRole(ctx, app, holder, record, roleKey)
 		}
-		if !released && readErr == nil && exists {
-			// The probes above keep a present pane. A reviewer's finished or
-			// stuck pane is released here instead (hk 3315).
-			closed, branch, remaining := h.releaseFinishedReviewerPane(ctx, app, request, spawn, holder, record, probe)
-			retryAfterS = retryAfterSeconds(remaining)
-			if closed {
-				released = h.inbox.store.releaseCompletedSpawnRole(ctx, priorID, roleKey) == nil
-				trace.branch = branch
-				if !released {
-					trace.branch = "release_write_failed"
-				}
-			}
-		}
 		trace.probe = probe
 		if released {
 			task, _, err = h.inbox.store.claimSpawn(ctx, request, spawn.Job, owner, h.now().UTC())
 			if !errors.Is(err, errSpawnClaimed) {
-				return task, nil, 0, err
+				return task, nil, err
 			}
-			retryAfterS = 0
 			trace.branch = "claim_raced"
-		} else if probe.state == heldPaneAbsent || probe.write {
+		} else if probe.write {
+			// The node refused the lost write (or its read failed), so no
+			// reservation release was tried: name the refusal, not a write.
+			trace.branch = "mark_lost_refused"
+		} else if probe.state == heldPaneAbsent {
 			trace.branch = "release_write_failed"
 		}
 	}
@@ -452,13 +462,13 @@ func (h *HubServer) reclaimSpawnRole(ctx context.Context, app *fleet.App, reques
 	// own code; only a collision on the role alone is task_role_claimed.
 	jobHeld, jobErr := h.inbox.store.spawnJobReserved(ctx, spawn.Job)
 	if jobErr != nil {
-		return task, nil, 0, jobErr
+		return task, nil, jobErr
 	}
 	code := "task_role_claimed"
 	if jobHeld {
 		code = "job_already_claimed"
 	}
-	return task, spawnRoleHeldBody(code, spawn.Task, spawn.Role, holder, probe.state, holderErr == nil), retryAfterS, errSpawnClaimed
+	return task, spawnRoleHeldBody(code, spawn.Task, spawn.Role, holder, probe.state, holderErr == nil), errSpawnClaimed
 }
 
 // heldTrace is what a refused reclaim saw: the branch that held, the hk read

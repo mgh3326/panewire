@@ -81,6 +81,9 @@ func TestPreflightEachConditionAlone(t *testing.T) {
 		{name: "hub not accepting", break_: func(_ *App, src *fakePlacementSource, _ *remoteFake) {
 			src.hosts[0].Reason = "not_accepting: acceptance overrides off"
 		}, want: []string{"hub_acceptance:not_accepting"}, detail: "acceptance overrides off"},
+		{name: "hub at its lane row cap", break_: func(_ *App, src *fakePlacementSource, _ *remoteFake) {
+			src.hosts[0].Reason = "lanes_full"
+		}, want: []string{"hub_acceptance:lanes_full"}, detail: "lanes_full"},
 		{name: "hub does not list the host", break_: func(_ *App, src *fakePlacementSource, _ *remoteFake) {
 			src.hosts = []HostView{{Name: "host-z", Connected: true}}
 		}, want: []string{"hub_acceptance:not_listed", "hub_load:load_unknown"}},

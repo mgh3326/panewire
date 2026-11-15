@@ -19,7 +19,11 @@ import (
 // placementCount is one decided job.
 type placementCount struct {
 	machine string
-	at      time.Time
+	// label is the agent label the placement's lane row will carry, so the lane
+	// cap can count a decided job that has no row yet and skip one whose row
+	// already exists.
+	label string
+	at    time.Time
 }
 
 // decisionGate lets one spawn decision at a time read the hub's view and
@@ -45,7 +49,7 @@ func (g *decisionGate) acquire(ctx context.Context) (func(), error) {
 // countPlacement counts job against machine from now. A job counts on one
 // host at a time: a later decision for the same job (the next candidate after
 // a refusal) moves its count.
-func (h *HubServer) countPlacement(job, machine string) {
+func (h *HubServer) countPlacement(job, machine, label string) {
 	if job == "" || machine == "" {
 		return
 	}
@@ -61,7 +65,7 @@ func (h *HubServer) countPlacement(job, machine string) {
 			delete(h.placementCounts, id)
 		}
 	}
-	h.placementCounts[job] = placementCount{machine: machine, at: now}
+	h.placementCounts[job] = placementCount{machine: machine, label: label, at: now}
 	h.placementCache = placementCache{}
 }
 
@@ -104,7 +108,7 @@ func (h *HubServer) restorePlacementCounts() error {
 		if task.Node == nil || task.Node.Machine == "" {
 			continue
 		}
-		h.placementCounts[task.Job] = placementCount{machine: task.Node.Machine, at: task.Placed}
+		h.placementCounts[task.Job] = placementCount{machine: task.Node.Machine, label: hubSpawnArg(task.Request.Args, "-l"), at: task.Placed}
 	}
 	return nil
 }
@@ -156,6 +160,25 @@ func (h *HubServer) placementCountWindowLocked() time.Duration {
 	return DefaultPlacementPolicy().spawnBridge()
 }
 
+// pendingLanePlacementsLocked is how many lane rows the decided but unclaimed
+// jobs on machine will add: a decided job counts from the placement decision,
+// so two concurrent decisions cannot both take the last free row. A job whose
+// label already names a row on machine adds none, so a re-placement is not
+// counted twice.
+func (h *HubServer) pendingLanePlacementsLocked(machine string, routes map[string]reportRelayRoute, now time.Time, bridge time.Duration) int {
+	count := 0
+	for _, held := range h.placementCounts {
+		if held.machine != machine || now.Sub(held.at) >= bridge {
+			continue
+		}
+		if route, exists := routes[held.label]; held.label != "" && exists && route.Machine == machine {
+			continue
+		}
+		count++
+	}
+	return count
+}
+
 // countedPlacementsLocked is how many decided jobs on machine the claims do
 // not cover yet. A job already in the node's active set is counted there, by
 // countBridgedJobs, and not twice.
@@ -193,7 +216,29 @@ func (h *HubServer) refreshFleetLoad(ctx context.Context) {
 // binding and accepts a later node result), may have started and keep it too;
 // the claim, a later definitive failure, or the bridge window ends it.
 func (h *HubServer) completeSpawn(ctx context.Context, task hubSpawnTask, outcome hubSpawnOutcome) (bool, error) {
-	changed, err := h.inbox.store.completeSpawn(ctx, task, outcome, h.now().UTC())
+	// An attempt that ended without starting may begin the request's next one
+	// inside this write, the hand-over a client's replay makes: it takes the
+	// same placement-trace lock, held only across the store call. A trace the
+	// lock cannot restore is not touched: the attempt's end is not recorded
+	// and the request stays as it is (reservation kept), to be settled by a
+	// later pass once the trace can be restored.
+	// A claimed-host retry that ran out of time unsent, wherever the deadline
+	// was crossed, ends with the claimed node's saved refusal rather than a
+	// timeout that hides it while hk holds the claim (hk 4661).
+	if outcome.Reason == "timeout" && (task.Node == nil || task.Status == "bound") && spawnHoldsClaim(task) {
+		outcome = spawnSavedClaimRefusal(task)
+	}
+	release := func() {}
+	now := h.now().UTC()
+	if spawnAttemptEndedUnstarted(task, outcome, now) && (outcome.Reason != "timeout" || task.Node == nil || task.Status == "bound" || outcome.NodeResult && outcome.Retryable) {
+		var lockErr error
+		if release, lockErr = h.lockPlacementTrace(ctx, task, true); lockErr != nil {
+			h.logger.Warn("spawn attempt end held: its placement trace cannot be restored", "request_id", task.Request.RequestID, "attempt", task.Attempt, "error", lockErr)
+			return false, lockErr
+		}
+	}
+	changed, err := h.inbox.store.completeSpawn(ctx, task, outcome, now)
+	release()
 	if changed {
 		// The store normalizes the outcome it persists (a bound attempt's
 		// timeout becomes deadline_exceeded and still accepts a node
@@ -204,12 +249,15 @@ func (h *HubServer) completeSpawn(ctx context.Context, task hubSpawnTask, outcom
 			status = saved.Status
 		}
 		if spawnAttemptTerminal(status) {
+			if status == "succeeded" {
+				h.noteMissingPlacementSnapshot(ctx, task)
+			}
 			if !h.wakePlacementRecords() {
 				h.deliverPlacementRecord(h.closeCtx, task.Request.RequestID, task.Attempt)
 			}
 		}
 		switch status {
-		case "failed", "retryable":
+		case "failed", "retryable", "given_up":
 			h.releasePlacementCount(task.Job)
 		case "deadline_exceeded":
 			// Never bound: no node was asked, so nothing launched.

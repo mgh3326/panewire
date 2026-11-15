@@ -16,8 +16,9 @@ import (
 // (the conservative answer). Root reads a mode-000 directory, so the case is
 // skipped there; the reason is the environment, not the code.
 // job.mark_lost: when the job dir or its events/ is missing the ledger is
-// unknown, so the command refuses with ledger_missing and writes nothing,
-// even though herdr lists no pane for the job.
+// unknown, so the command writes nothing, even though herdr lists no pane for
+// the job. With an empty spawn journal and no active job under that id the node
+// can still prove no attempt is live, which it answers instead (hk 4799).
 func TestNodeJobMarkLostRefusesWithoutLedger(t *testing.T) {
 	for _, tt := range []struct {
 		name  string
@@ -39,7 +40,7 @@ func TestNodeJobMarkLostRefusesWithoutLedger(t *testing.T) {
 			tt.setup(inbox)
 			client, store, fake := markLostClient(t, inbox, []string{nodeAgentList()}, markLostEmptyPanes)
 			result, code := nodeRun(t, client, nodeCommandJobMarkLost, nodeJobMarkLostArgs{Job: "job-a", PaneID: "w2:p3", Label: "job-a"})
-			if code != "" || result["outcome"] != nodeJobMarkLostLedgerMissing {
+			if code != "" || result["outcome"] != nodeJobMarkLostNoLiveAttempt {
 				t.Fatalf("code=%q result=%v", code, result)
 			}
 			if writes := store.writes(); len(writes) != 0 {

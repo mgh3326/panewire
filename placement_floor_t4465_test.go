@@ -104,7 +104,7 @@ func TestPlacementAllBelowFloorBurstSpreadsThroughThePlacementPath(t *testing.T)
 			t.Fatalf("decision %d: reason %q, want all_loaded", i+1, got.Reason)
 		}
 		counts[got.Decision]++
-		hub.countPlacement(fmt.Sprintf("burst-%d", i), got.Decision)
+		hub.countPlacement(fmt.Sprintf("burst-%d", i), got.Decision, "")
 	}
 	for name, n := range counts {
 		if n < 2 || n > 4 {

@@ -30,7 +30,7 @@ import (
 // begin (retryable). reconciling and deadline_exceeded still accept a later
 // node answer for the same attempt.
 func spawnAttemptTerminal(status string) bool {
-	return status == "succeeded" || status == "failed" || status == "retryable"
+	return status == "succeeded" || status == "failed" || status == "retryable" || status == "given_up"
 }
 
 // placementRecordDeliveryBudget bounds one outbox delivery; the record stays
@@ -178,6 +178,7 @@ func (s *laneInboxStore) pendingPlacementSnapshots(parent context.Context) ([]pe
 		if err := rows.Scan(&row.RequestID, &row.Attempt, &row.Job, &row.Status, &row.CurrentAttempt, &row.Payload, &row.Delivery); err != nil {
 			return nil, err
 		}
+		row.Status = spawnLogicalStatus(row.Status)
 		out = append(out, row)
 	}
 	return out, rows.Err()
@@ -404,12 +405,15 @@ func (h *HubServer) deliverPlacementRecord(ctx context.Context, requestID string
 	}
 	ctx, cancel := context.WithTimeout(ctx, placementRecordDeliveryBudget)
 	defer cancel()
+	job := ""
 	release, err := h.placementTraces.lock(ctx, requestID)
 	if err != nil {
+		h.notePlacementStall(requestID, job, attempt, "trace_lock_timeout")
 		return
 	}
 	defer release()
 	if h.deferredPlacementTracePending(requestID, attempt) {
+		h.notePlacementStall(requestID, job, attempt, "deferred_trace_pending")
 		return
 	}
 	payload, delivery, recorded, err := h.inbox.store.spawnPlacementSnapshot(ctx, requestID, attempt)
@@ -417,16 +421,25 @@ func (h *HubServer) deliverPlacementRecord(ctx context.Context, requestID string
 		h.logger.Warn("placement snapshot could not be read", "request_id", requestID, "attempt", attempt)
 		return
 	}
-	if recorded || len(payload) == 0 {
+	if recorded {
+		h.clearPlacementStall(requestID, attempt)
+		return
+	}
+	task, err := h.inbox.store.spawnTask(ctx, requestID)
+	if err != nil {
+		h.notePlacementStall(requestID, job, attempt, "operation_unreadable")
+		return
+	}
+	job = task.Job
+	if len(payload) == 0 {
+		// Placement never produced a trace (a refusal before the plan ranked
+		// hosts), so there is nothing to record. completeSpawn reports a
+		// landed attempt that has none (noteMissingPlacementSnapshot).
 		return
 	}
 	var tr fleet.PlacementTrace
 	if err := json.Unmarshal(payload, &tr); err != nil {
 		h.logger.Warn("placement snapshot could not be decoded", "request_id", requestID, "attempt", attempt)
-		return
-	}
-	task, err := h.inbox.store.spawnTask(ctx, requestID)
-	if err != nil {
 		return
 	}
 	if task.Attempt == attempt && !spawnAttemptTerminal(task.Status) {
@@ -436,6 +449,7 @@ func (h *HubServer) deliverPlacementRecord(ctx context.Context, requestID string
 		// A superseded attempt whose snapshot carries no finished record
 		// cannot be rebuilt: the operation's outcome now belongs to a newer
 		// attempt.
+		h.notePlacementStall(requestID, job, attempt, "superseded_attempt_has_no_finished_record")
 		return
 	}
 	app, err := h.placementRecordApp(delivery)
@@ -443,12 +457,12 @@ func (h *HubServer) deliverPlacementRecord(ctx context.Context, requestID string
 		h.logger.Warn("placement record delivery unavailable; snapshot remains pending", "request_id", requestID, "attempt", attempt)
 		return
 	}
-	delivered, err := app.EnqueuePlacementRecord(ctx, hubPlacementRecord(task, tr, attempt))
+	result, err := app.EnqueuePlacementRecord(ctx, hubPlacementRecord(task, tr, attempt))
 	if err != nil {
-		h.logger.Warn("placement record could not be enqueued; snapshot remains pending", "request_id", requestID, "attempt", attempt, "error", err)
+		h.notePlacementStall(requestID, job, attempt, placementEnqueueReason(err))
 		return
 	}
-	if !delivered {
+	if !h.reportPlacementDelivery(requestID, job, attempt, result) {
 		// hk did not take it yet; the pending row keeps the flush retrying.
 		return
 	}
@@ -464,7 +478,7 @@ func (h *HubServer) deliverPlacementRecord(ctx context.Context, requestID string
 // job is placed, a refusal before the node's hk job claim is refused, and
 // anything past it failed.
 func hubPlacementRecord(task hubSpawnTask, tr fleet.PlacementTrace, attempt int) fleet.PlacementRecord {
-	if task.Attempt == attempt && (task.Outcome.Reason == "timeout" || spawnOutcomeNotStarted(task.Outcome)) {
+	if task.Attempt == attempt && (task.Outcome.Reason == "timeout" || task.Status == "given_up" || spawnOutcomeNotStarted(task.Outcome)) {
 		// An in-process placement error can race the authoritative deadline or
 		// not-started result. The terminal operation decides this verdict.
 		tr.Record, tr.Outcome, tr.Reason = nil, "", ""
@@ -498,9 +512,12 @@ func hubPlacementRecord(task hubSpawnTask, tr fleet.PlacementTrace, attempt int)
 			Model:      o.Model,
 			Pool:       firstNonEmptyString(o.Pool, tr.Pool),
 			AccountKey: firstNonEmptyString(o.AccountKey, tr.AccountKey),
-			Role:       firstNonEmptyString(o.Role, tr.Role),
-			Family:     tr.Family,
-			Repo:       tr.Repo,
+			// The outcome carries the spawn role (implementer, reviewer,
+			// consult); hk stores the work class. The trace role is already
+			// one, and the mapping is idempotent on it.
+			Role:   fleet.PlacementWorkClass(firstNonEmptyString(o.Role, tr.Role), ""),
+			Family: tr.Family,
+			Repo:   tr.Repo,
 		},
 	}
 	if rec.Outcome != "" {
@@ -876,9 +893,13 @@ func (h *HubServer) enqueueFinishedPlacementRecord(ctx context.Context, task hub
 		return
 	}
 	rec.JobID, rec.Attempt = task.Job, task.Attempt
-	if _, err := app.EnqueuePlacementRecord(ctx, rec); err != nil {
-		h.logger.Warn("placement record could not be enqueued after snapshot write failure", "request_id", task.Request.RequestID, "attempt", task.Attempt, "error", err)
+	result, err := app.EnqueuePlacementRecord(ctx, rec)
+	if err != nil {
+		h.notePlacementStall(task.Request.RequestID, task.Job, task.Attempt, placementEnqueueReason(err))
+		return
 	}
+	// The spooled file keeps the obligation; the report says why it waits.
+	h.reportPlacementDelivery(task.Request.RequestID, task.Job, task.Attempt, result)
 }
 
 // placementDelivery holds the placing App's delivery-relevant settings: the
@@ -956,7 +977,11 @@ func (h *HubServer) flushPlacementRecords(ctx context.Context) {
 		return
 	}
 	pending, err := h.inbox.store.pendingPlacementSnapshots(h.closeCtx)
-	if err != nil || len(pending) == 0 {
+	if err != nil {
+		h.logger.Warn("placement snapshots could not be listed; records stay pending", "error", err)
+		return
+	}
+	if len(pending) == 0 {
 		return
 	}
 	// Reconcile each attempt separately, using the delivery settings saved
@@ -970,21 +995,24 @@ func (h *HubServer) flushPlacementRecords(ctx context.Context) {
 		}
 		app, err := h.placementRecordApp(row.Delivery)
 		if err != nil {
+			h.notePlacementStall(row.RequestID, row.Job, row.Attempt, "delivery_app_unavailable")
 			continue
 		}
 		attemptCtx, cancel := context.WithTimeout(ctx, placementRecordDeliveryBudget)
 		release, err := h.placementTraces.lock(attemptCtx, row.RequestID)
 		if err != nil {
 			cancel()
+			h.notePlacementStall(row.RequestID, row.Job, row.Attempt, "trace_lock_timeout")
 			continue
 		}
 		if h.deferredPlacementTracePending(row.RequestID, row.Attempt) {
 			release()
 			cancel()
+			h.notePlacementStall(row.RequestID, row.Job, row.Attempt, "deferred_trace_pending")
 			continue
 		}
 		if app.PlacementSpooled(row.Job, row.Attempt) {
-			if app.FlushPlacementRecord(attemptCtx, row.Job, row.Attempt) {
+			if h.reportPlacementDelivery(row.RequestID, row.Job, row.Attempt, app.FlushPlacementRecord(attemptCtx, row.Job, row.Attempt)) {
 				if err := h.inbox.store.markSpawnPlacementRecorded(attemptCtx, row.RequestID, row.Attempt); err != nil {
 					h.logger.Warn("placement snapshot could not be marked recorded", "request_id", row.RequestID, "attempt", row.Attempt)
 				}
@@ -1009,7 +1037,9 @@ func (h *HubServer) flushPlacementRecords(ctx context.Context) {
 			h.deliverPlacementRecord(h.closeCtx, row.RequestID, row.Attempt)
 			continue
 		}
+		h.logger.Warn("placement record dropped: a newer attempt overwrote this attempt's outcome", "request_id", row.RequestID, "job", row.Job, "attempt", row.Attempt, "current_attempt", row.CurrentAttempt)
 		_ = h.inbox.store.markSpawnPlacementRecorded(attemptCtx, row.RequestID, row.Attempt)
+		h.clearPlacementStall(row.RequestID, row.Attempt)
 		release()
 		cancel()
 	}

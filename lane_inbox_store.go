@@ -36,6 +36,11 @@ type laneInboxStore struct {
 	// inbox-class item or a must-ack one), waking every long-poll waiter so
 	// they re-check for unread work.
 	notify chan struct{}
+	// spawnRetryDelay is the hub's re-placement back-off after a request's
+	// n-th failed attempt (hub_spawn_park.go); nil retries at once.
+	spawnRetryDelay func(failures int) time.Duration
+	// spawnFrozen refuses every new spawn row (--spawn-rollback-drain).
+	spawnFrozen bool
 }
 
 type laneInboxItem struct {

@@ -220,10 +220,15 @@ func (a *App) ompProof(ctx context.Context, l Launch, noThinking bool, cwd, pane
 	}
 }
 
+// ompDetachedBranch is the branch segment OMP's status line prints when HEAD
+// names no branch. git spells the same state "HEAD" in --abbrev-ref.
+const ompDetachedBranch = "detached"
+
 // ompWorktreeIdentity mirrors OMP's linked-worktree context: the primary
 // checkout name comes from git's common directory, and the worktree name from
 // the repository root. OMP's status-line segment then joins those names unless
-// the worktree name already equals the checked-out branch.
+// the worktree name already equals the checked-out branch. A detached HEAD has
+// no branch, so the identity carries omp's own word for it (hk 4650).
 func (a *App) ompWorktreeIdentity(ctx context.Context, cwd string) (label, branch string) {
 	r := a.call(ctx, "git", "-C", cwd, "rev-parse", "--abbrev-ref", "HEAD")
 	if r.Code != 0 {
@@ -232,6 +237,11 @@ func (a *App) ompWorktreeIdentity(ctx context.Context, cwd string) (label, branc
 	branch = strings.TrimSpace(r.Out)
 	if branch == "" {
 		return "", ""
+	}
+	// --abbrev-ref prints "HEAD" only for a detached HEAD: git refuses a branch
+	// by that name. The footer must be compared against "detached", not "HEAD".
+	if branch == "HEAD" {
+		branch = ompDetachedBranch
 	}
 	r = a.call(ctx, "git", "-C", cwd, "rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir")
 	if r.Code != 0 {

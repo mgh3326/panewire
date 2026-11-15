@@ -137,6 +137,7 @@ func TestClaimedHarnessRetrySurvivesHubRestart_t4581(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			withoutSpawnBackoff(h) // about the claimed host, not the back-off
 			t.Cleanup(func() { _ = h.Close() })
 			request := durableSpawnRequest()
 			for i := 0; i+1 < len(request.Args); i++ {
@@ -167,6 +168,7 @@ func TestClaimedHarnessRetrySurvivesHubRestart_t4581(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			withoutSpawnBackoff(h) // about the claimed host, not the back-off
 			t.Cleanup(func() { _ = h.Close() })
 			h.spawnNewApp = claimedHarnessApp(t, true)
 			server := httptest.NewServer(h.Handler())
@@ -204,6 +206,7 @@ func TestClaimedHostStaysPinnedWhenAlternativesRunOut_t4581(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	withoutSpawnBackoff(h) // about the claimed host, not the back-off
 	t.Cleanup(func() { _ = h.Close() })
 	request := durableSpawnRequest()
 	task := claimedHarnessRefusal(t, h, request, hubSpawnResult{RC: 70, Error: "launch_proof_failed", Stage: "launch", Retryable: true})
@@ -240,6 +243,7 @@ func TestClaimedHostStaysPinnedWhenAlternativesRunOut_t4581(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	withoutSpawnBackoff(h) // about the claimed host, not the back-off
 	t.Cleanup(func() { _ = h.Close() })
 	h.spawnNewApp = claimedHarnessApp(t, true)
 	server = httptest.NewServer(h.Handler())
@@ -280,6 +284,7 @@ func TestClaimedHostStaysPinnedWhenAlternativesRunOut_t4581(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	withoutSpawnBackoff(h) // about the claimed host, not the back-off
 	t.Cleanup(func() { _ = h.Close() })
 	h.spawnNewApp = claimedHarnessApp(t, false)
 	server = httptest.NewServer(h.Handler())

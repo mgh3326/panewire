@@ -86,7 +86,9 @@ hk confirms an artifact when:
   the file `..` reaches from where `link` points, not the cleaned
   `summary.md`. Only the resolved path is tested against the directory. A
   path recorded through the jobs root's own alias is read under the real
-  root, which the pass resolves itself;
+  root, which the pass resolves itself. A report `done` deleted after the pin
+  (hk 3685) is not there to confirm and not a reason to keep: the check covers
+  the files the directory still holds;
 - **`findings.json` or `result.json`**: the record's `result` is not empty;
 - **`pane-screen.txt`**: not confirmed. A leftover pane screen is an ordinary
   file of the dir: the pane sweep writes it only when hk did not store the
@@ -196,7 +198,9 @@ again with fresh herdr and hk reads. A held lock keeps the directory
    directory (`changed-during-pass`).
 2. It renames the directory, in one atomic rename on the same filesystem, to
    a tombstone in the jobs root: `.expiring-<job>-<unixnano>`. A leading dot
-   is never a valid job id, so nothing reads a tombstone as a job.
+   is never a valid job id, so nothing reads a tombstone as a job; the
+   `.job-ids` identity records ([config.md](config.md#job-ids-name-one-directory-hk-4824))
+   are skipped the same way, as `invalid-id`.
 3. It takes the tombstone's inventory. If it differs from step 1's, the
    tombstone is renamed back to the job's name and the directory is kept
    (`changed-during-pass`). If that rename back fails, the tombstone stays

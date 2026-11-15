@@ -62,12 +62,12 @@ func TestUnratedSeatCheck(t *testing.T) {
 		role, grade string
 		want        int
 	}{{"consult", "", 0}, {"implementer", "C", exitSeatRefused}, {"reviewer", "C", exitSeatRefused}} {
-		if got := code(s.Check(l, tc.role, tc.grade, "anthropic", "", nil)); got != tc.want {
+		if got := code(s.Check(l, tc.role, tc.grade, "anthropic", "", true)); got != tc.want {
 			t.Errorf("%s grade=%q: exit=%d want=%d", tc.role, tc.grade, got, tc.want)
 		}
 	}
 	l.Grade = "unknown"
-	if got := code(s.Check(l, "consult", "", "", "", nil)); got != exitConfig {
+	if got := code(s.Check(l, "consult", "", "", "", true)); got != exitConfig {
 		t.Fatalf("unknown grade accepted for consult: exit=%d", got)
 	}
 }

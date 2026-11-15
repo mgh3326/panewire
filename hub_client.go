@@ -167,23 +167,31 @@ type HubClient struct {
 	panesAliveMu sync.Mutex
 	// paneIdleSince is the first heartbeat at which each pane was idle or
 	// done (hub_jobs_idle.go).
-	paneIdleSince     map[string]time.Time
-	paneIdleMu        sync.Mutex
-	sessionMu         sync.Mutex
-	spawnConfigPath   string
-	spawnJournalDir   string
-	spawnGateOnce     sync.Once
-	spawnGate         chan struct{}
-	spawnEngine       hubSpawnEngine
-	spawnPrepare      func(context.Context, nodeWorktreePrepareArgs) (any, string) // fixture seam
-	spawnJournalMu    sync.Mutex
-	spawnJournal      *nodeSpawnJournal
-	spawnJournalUsers int
+	paneIdleSince        map[string]time.Time
+	paneIdleMu           sync.Mutex
+	sessionMu            sync.Mutex
+	spawnConfigPath      string
+	spawnJournalDir      string
+	spawnSlotsAdvertised atomic.Int32
+	spawnSlotsOverride   int // fixture seam; 0 reads spawn.json
+	spawnAdmissionOnce   sync.Once
+	spawnAdmission       *nodeSpawnAdmission
+	spawnLocksMu         sync.Mutex
+	spawnLocks           map[string]chan struct{}
+	spawnEngine          hubSpawnEngine
+	spawnPrepare         func(context.Context, nodeWorktreePrepareArgs) (any, string) // fixture seam
+	spawnJournalMu       sync.Mutex
+	spawnJournal         *nodeSpawnJournal
+	spawnJournalUsers    int
 	// spawnActive holds the journal requests this process is executing; an
 	// executing entry missing from it was left by a restart.
 	spawnActiveMu sync.Mutex // also guards spawnWaiting
 	spawnActive   map[string]bool
 	spawnWaiting  map[string]*nodeSpawnWaiter
+	// spawnGrants routes job.spawn.grant answers to the spawn waiting for them
+	// (node_spawn_grant.go).
+	spawnGrantMu sync.Mutex
+	spawnGrants  map[string]chan bool
 	// work counts the operations a stop waits for (hub_client_drain.go);
 	// stopDrain is that wait's bound, zero meaning defaultStopDrain; serving
 	// counts live hub connections, so a stop with no hub does not wait for an
@@ -222,6 +230,7 @@ type HubClient struct {
 	nodeCommandMu      sync.Mutex
 	nodeHerdr          relayCommandRunner // fixture seam for node commands; nil runs herdr.
 	nodeGit            relayCommandRunner // fixture seam for node commands; nil runs git.
+	nodeAdd            nodeAddRunner      // fixture seam for the worktree add child; nil runs git and records it.
 	nodeCheckouts      map[string]string  // fixture seam for the checkout.pull allow-list; nil reads spawn.json checkouts.
 	nodeInstallWait    time.Duration      // fixture seam for install.sh's bound; zero is nodeCheckoutInstallTimeout.
 	nodeLifecycle      relayCommandRunner // fixture seam for job.done; nil runs runtug.
@@ -231,13 +240,16 @@ type HubClient struct {
 	creditPresenceMu   sync.Mutex
 	creditPresence     *creditPresenceSource // the node's credit pool presence publisher; fixtures set it, a missing one builds the default.
 	nodeCloseSettle    time.Duration         // fixture seam; zero is nodePaneCloseSettle.
-	nodeGitLockWait    time.Duration         // fixture seam; zero is nodeGitOpLockWait.
-	busyRelayMu        sync.Mutex
-	busyRelay          *relayBusyManager
-	relayCommand       relayCommandRunner   // fixture seam for agent get/wait.
-	relayEmitter       func(hubClientEvent) // fixture/connection-owned writer.
-	relayRecvSeqMu     sync.Mutex
-	relayRecvSeq       int64 // assigned synchronously by the hub read loop.
+	// nodeHubClose is the job-ledger side of a hub close (intent, watcher);
+	// nil is nodeFleetHubClose. A fixture seam.
+	nodeHubClose    nodeHubCloseLedger
+	nodeGitLockWait time.Duration // fixture seam; zero is nodeGitOpLockWait.
+	busyRelayMu     sync.Mutex
+	busyRelay       *relayBusyManager
+	relayCommand    relayCommandRunner   // fixture seam for agent get/wait.
+	relayEmitter    func(hubClientEvent) // fixture/connection-owned writer.
+	relayRecvSeqMu  sync.Mutex
+	relayRecvSeq    int64 // assigned synchronously by the hub read loop.
 	// inboundHandled is a fixture seam the inbound dispatcher calls after
 	// each queued frame it ran; production leaves it nil.
 	inboundHandled func(hubOutboundMessage)
@@ -511,6 +523,7 @@ func (client *HubClient) Run(ctx context.Context) {
 	go client.runTaskPaneSweep(ctx)
 	go client.runJobDirTTL(ctx)
 	go client.runQuotaPoolReconcile(ctx)
+	go client.runHubCloseSettle(ctx)
 	if client.statePublish {
 		go client.runFleetQuota(ctx)
 	}
@@ -659,7 +672,10 @@ type hubClientConnection struct {
 	acceptsCheckoutPull atomic.Bool
 	acceptsLaunchProof  atomic.Bool
 	connection          *websocket.Conn
-	writeMu             sync.Mutex
+	writeMu             hubWriteMutex
+	// closed is closed when the session on this connection ends; a nil
+	// channel (a test peer) never ends.
+	closed chan struct{}
 }
 
 type hubOutboundMessage struct {
@@ -688,6 +704,9 @@ type hubOutboundMessage struct {
 	Checkout           *hubSpawnCheckout
 	Args               []string
 	DeadlineMS         int64
+	ExpiresMS          int64 // the request's absolute expiry; read by a spawn_expires_v1 node
+	StartByMS          int64 // grant-required attempt: the node starts only with a hub grant by then
+	Granted            bool  // job.spawn.grant answer
 	OperatorAuthorized bool
 	WaitSeconds        int
 	CommandOp          string
@@ -1920,8 +1939,22 @@ func (client *HubClient) serve(ctx context.Context, connection *websocket.Conn) 
 // capabilities.
 const defaultHubHelloAckTimeout = 5 * time.Second
 
+// hubCapabilityCloseQuestion is advertised by a node whose pane.close decodes
+// question_job. The hub omits the field for any other node, whose strict
+// decoder would refuse the whole call (hk 4658).
+const hubCapabilityCloseQuestion = "pane_close_question_v1"
+
+// hubCapabilitySpawnExpires is advertised by a node whose job.spawn decoder
+// reads expires_ms. The hub sends the request's absolute expiry only to such a
+// node, which writes it into the job.spawned receipt as expires_at so the
+// pane sweep ends a reviewer or consult by its real limit (hk 4747). An older
+// node's strict decoder refuses the whole frame for the extra field.
+const hubCapabilitySpawnExpires = "spawn_expires_v1"
+
 // hubSpawnCapabilities is what an upgraded node advertises in hello.
-var hubSpawnCapabilities = []string{"spawn_v2", "spawn_ops_v1", hubCapabilityApplied}
+// close_ops_v1 (hubCapabilityCloseOps) is deliberately not advertised: no
+// hub may issue close ops until hk 4632 adds the migration barrier.
+var hubSpawnCapabilities = []string{"spawn_v2", "spawn_ops_v1", hubCapabilitySpawnGrant, hubCapabilityCloseQuestion, hubCapabilitySpawnExpires, hubCapabilityApplied}
 
 func (client *HubClient) helloAckTimeoutOrDefault() time.Duration {
 	if client.helloAckTimeout > 0 {
@@ -2012,7 +2045,8 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 	connection.SetReadLimit(hubSpawnMaxBodyBytes)
 	client.serving.Add(1)
 	defer client.serving.Add(-1)
-	peer := &hubClientConnection{connection: connection}
+	peer := &hubClientConnection{connection: connection, closed: make(chan struct{})}
+	defer close(peer.closed)
 	// Each connection may reach a different hub build (failover, redeploy).
 	client.signalsPeer.Store(peer)
 	// The hello carries spawn_v2, and the ping that follows it is the
@@ -2020,7 +2054,7 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 	// that does not know the capabilities field drops the whole hello (see
 	// docs/r26-hub-spawn.md "Rollout order and rollback"), so the hello ack timer below re-sends it
 	// without them rather than leaving this node off the fleet.
-	if err := client.writeHello(ctx, peer, hubSpawnCapabilities); err != nil {
+	if err := client.writeHello(ctx, peer, client.helloCapabilities(hubSpawnCapabilities)); err != nil {
 		return nil, err
 	}
 	client.setRelayEmitter(func(event hubClientEvent) { _ = peer.write(ctx, hubClientWireEvent(event)) })
@@ -2126,6 +2160,8 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 				continue
 			case "job.spawn":
 				go client.handleHubSpawn(ctx, peer, message)
+			case "job.spawn.grant":
+				client.deliverSpawnGrant(message.RequestID, message.Granted)
 			case "node.command":
 				go client.handleNodeCommand(ctx, peer, message)
 			}
@@ -2163,7 +2199,7 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 				// the full hello once more; a hub that rejects capabilities
 				// drops it and keeps the record it already has.
 				capsResent = true
-				if err := client.writeHello(ctx, peer, hubSpawnCapabilities); err != nil {
+				if err := client.writeHello(ctx, peer, client.helloCapabilities(hubSpawnCapabilities)); err != nil {
 					return nil, err
 				}
 				// A repeated hello resets the hub's job and host state for
@@ -3079,6 +3115,10 @@ func parseHubOutboundRejection(payload []byte) (hubOutboundMessage, hubOutboundR
 		if !validHubIdleWakeRouteEvent(hubIdleWakeRouteEvent{Type: message.Type, EventID: message.IdleWakeEventID, Pane: message.Pane, Eligible: message.Eligible, Lane: message.Lane, Text: message.Text, JobID: message.JobID, Reason: message.Reason}) {
 			return hubOutboundMessage{}, reject
 		}
+	case "job.spawn.grant":
+		if len(fields) != 3 || json.Unmarshal(fields["request_id"], &message.RequestID) != nil || !validHubSpawnRequestID(message.RequestID) || (string(fields["granted"]) != "true" && string(fields["granted"]) != "false") || json.Unmarshal(fields["granted"], &message.Granted) != nil {
+			return hubOutboundMessage{}, reject
+		}
 	case "job.spawn":
 		// Read the request id first: every refusal below can still answer the
 		// hub for it, so the operation ends failed instead of at its deadline.
@@ -3086,11 +3126,11 @@ func parseHubOutboundRejection(payload []byte) (hubOutboundMessage, hubOutboundR
 		var brief hubSpawnBrief
 		var briefFields map[string]json.RawMessage
 		for name := range fields {
-			if name != "type" && name != "request_id" && name != "cwd_key" && name != "brief" && name != "checkout" && name != "args" && name != "wait_seconds" && name != "deadline_ms" && name != "operator_authorized" {
+			if name != "type" && name != "request_id" && name != "cwd_key" && name != "brief" && name != "checkout" && name != "args" && name != "wait_seconds" && name != "deadline_ms" && name != "expires_ms" && name != "start_by_ms" && name != "operator_authorized" {
 				return hubOutboundMessage{}, reject
 			}
 		}
-		if (len(fields) < 6 || len(fields) > 9) || json.Unmarshal(fields["request_id"], &message.RequestID) != nil || json.Unmarshal(fields["cwd_key"], &message.CWDKey) != nil || json.Unmarshal(fields["brief"], &brief) != nil || json.Unmarshal(fields["brief"], &briefFields) != nil || (len(briefFields) != 1) || json.Unmarshal(fields["args"], &message.Args) != nil || message.Args == nil || json.Unmarshal(fields["wait_seconds"], &message.WaitSeconds) != nil {
+		if (len(fields) < 6 || len(fields) > 11) || json.Unmarshal(fields["request_id"], &message.RequestID) != nil || json.Unmarshal(fields["cwd_key"], &message.CWDKey) != nil || json.Unmarshal(fields["brief"], &brief) != nil || json.Unmarshal(fields["brief"], &briefFields) != nil || (len(briefFields) != 1) || json.Unmarshal(fields["args"], &message.Args) != nil || message.Args == nil || json.Unmarshal(fields["wait_seconds"], &message.WaitSeconds) != nil {
 			return hubOutboundMessage{}, reject
 		}
 		if raw, ok := briefFields["inline"]; ok {
@@ -3113,6 +3153,16 @@ func parseHubOutboundRejection(payload []byte) (hubOutboundMessage, hubOutboundR
 		}
 		if raw, ok := fields["deadline_ms"]; ok {
 			if json.Unmarshal(raw, &message.DeadlineMS) != nil || message.DeadlineMS <= 0 {
+				return hubOutboundMessage{}, reject
+			}
+		}
+		if raw, ok := fields["expires_ms"]; ok {
+			if json.Unmarshal(raw, &message.ExpiresMS) != nil || message.ExpiresMS <= 0 {
+				return hubOutboundMessage{}, reject
+			}
+		}
+		if raw, ok := fields["start_by_ms"]; ok {
+			if json.Unmarshal(raw, &message.StartByMS) != nil || message.StartByMS <= 0 {
 				return hubOutboundMessage{}, reject
 			}
 		}
@@ -3187,7 +3237,11 @@ func (client *HubClient) handleHubFailover(ctx context.Context, message hubOutbo
 }
 
 func (peer *hubClientConnection) write(ctx context.Context, value any) error {
-	peer.writeMu.Lock()
+	// Admission honors ctx, so a caller with a deadline never waits behind
+	// another writer past it.
+	if err := peer.writeMu.lockContext(ctx); err != nil {
+		return err
+	}
 	defer peer.writeMu.Unlock()
 	writeContext, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()

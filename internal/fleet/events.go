@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -41,6 +42,11 @@ type Job struct {
 	Events             []Event
 }
 
+// revive clears the terminal state a later claim, spawn or reprompt supersedes.
+// Ended and At then describe the job's current run only: At is the time of the
+// newest terminal event that still stands, never one a revived job left behind.
+func (j *Job) revive() { j.Terminal, j.Ended, j.Outcome, j.At = false, "", "", time.Time{} }
+
 func (a *App) events(id string) ([]Event, error) {
 	if !validID(id) {
 		return nil, fail(exitUsage, "invalid job id")
@@ -58,7 +64,10 @@ func (a *App) events(id string) ([]Event, error) {
 		if ent.Type()&os.ModeSymlink != 0 {
 			return nil, fail(exitStateConflict, "symlink event refused")
 		}
-		if ent.IsDir() || filepath.Ext(ent.Name()) != ".json" {
+		// A dot name is the ledger writer's unpublished temporary file
+		// (arbiter writeArtifact ".tmp-*.json"), which another process (the
+		// node recording a hub-close intent) may be writing or removing.
+		if ent.IsDir() || filepath.Ext(ent.Name()) != ".json" || strings.HasPrefix(ent.Name(), ".") {
 			continue
 		}
 		info, e := ent.Info()
@@ -100,10 +109,16 @@ func (a *App) events(id string) ([]Event, error) {
 }
 func (a *App) job(id string) (Job, error) {
 	evs, e := a.events(id)
-	j := Job{ID: id, Events: evs}
 	if e != nil {
-		return j, e
+		return Job{ID: id, Events: evs}, e
 	}
+	return foldJob(id, evs)
+}
+
+// foldJob builds the job from its events in the order given: timestamp order
+// for a.job, ledger sequence order for a hub close (watch_hub_close.go).
+func foldJob(id string, evs []Event) (Job, error) {
+	j := Job{ID: id, Events: evs}
 	for _, ev := range evs {
 		p := ev.Payload
 		switch ev.Kind {
@@ -118,7 +133,7 @@ func (a *App) job(id string) (Job, error) {
 			j.Task = scalar(p["task_id"])
 			j.Inherited = str(p, "task_inherited_from")
 			j.T = str(p, "t_level")
-			j.Terminal, j.Ended, j.Outcome = false, "", ""
+			j.revive()
 			j.Reaped = false
 		case "job.spawned":
 			j.Receipt = p
@@ -135,13 +150,23 @@ func (a *App) job(id string) (Job, error) {
 			j.Report = str(p, "report")
 			j.HubLane = str(p, "hub_lane")
 			j.Machine = str(p, "hub_lane_machine")
-			j.Terminal, j.Ended, j.Outcome = false, "", ""
+			j.revive()
 			j.Reaped = false
 			if j.Task == "" {
 				j.Task = scalar(p["task_id"])
 			}
+		case "job.lane_registered":
+			// A takeover registers its lane after job.spawned, and the hub may
+			// have moved a predecessor's row, so the recorded name is the
+			// pane's route.
+			if lane := str(p, "hub_lane"); lane != "" {
+				j.HubLane = lane
+			}
+			if machine := str(p, "hub_lane_machine"); machine != "" {
+				j.Machine = machine
+			}
 		case "job.reprompted":
-			j.Terminal, j.Ended, j.Outcome = false, "", ""
+			j.revive()
 		case "job.completed", "job.joined", "job.revoked", "job.handed_off", "job.lost":
 			j.Terminal, j.Ended = true, ev.Kind
 			j.Outcome = firstNonempty(ev.Outcome, str(p, "outcome"))

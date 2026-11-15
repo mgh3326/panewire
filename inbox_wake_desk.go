@@ -9,24 +9,24 @@ func inboxWakeDeskText(lane string, unread int, mostUrgent string) string {
 }
 
 // inboxWakeDestination keeps the normal lane route unless the design lane is
-// provably paneless. The desk is resolved independently through its own row.
-func (h *HubServer) inboxWakeDestination(lane, class string, route reportRelayRoute, agent *hubAgent, routed bool, unread int, mostUrgent string) (reportRelayRoute, *hubAgent, bool, string, bool) {
+// provably paneless. The desk is resolved independently through its own row,
+// from the same routes snapshot that decided paneless.
+func (h *HubServer) inboxWakeDestination(routes map[string]reportRelayRoute, lane, class string, route reportRelayRoute, agent *hubAgent, routed bool, unread int, mostUrgent string) (reportRelayRoute, *hubAgent, bool, string, bool) {
 	if class != "design" {
 		return route, agent, routed, inboxWakeText(lane, unread, mostUrgent), false
 	}
-	paneless, jobRoute, jobAgent, jobRouted, useJobRoute := h.inboxWakeDesignRoute(lane, route, routed)
+	paneless, jobRoute, jobAgent, jobRouted, useJobRoute := h.inboxWakeDesignRoute(routes, lane, route, routed)
 	if useJobRoute {
 		return jobRoute, jobAgent, jobRouted, inboxWakeText(lane, unread, mostUrgent), false
 	}
 	if !paneless {
 		return route, agent, routed, inboxWakeText(lane, unread, mostUrgent), false
 	}
-	deskRoute, deskAgent, deskRouted := h.resolveRelayRoute("lane.event", hubJobEventPayload{OwnerLane: deskPolicyLane})
+	deskRoute, deskAgent, deskRouted := h.resolveRelayRouteWithRoutes("lane.event", hubJobEventPayload{OwnerLane: deskPolicyLane}, routes)
 	return deskRoute, deskAgent, deskRouted, inboxWakeDeskText(lane, unread, mostUrgent), true
 }
 
-func (h *HubServer) inboxWakeDesignRoute(lane string, route reportRelayRoute, routed bool) (paneless bool, jobRoute reportRelayRoute, jobAgent *hubAgent, jobRouted bool, useJobRoute bool) {
-	routes := loadReportRelayRoutes(h.reportRelayPath)
+func (h *HubServer) inboxWakeDesignRoute(routes map[string]reportRelayRoute, lane string, route reportRelayRoute, routed bool) (paneless bool, jobRoute reportRelayRoute, jobAgent *hubAgent, jobRouted bool, useJobRoute bool) {
 	row, hasRow := routes[lane]
 	if !hasRow {
 		if route.jobRecord && routed {

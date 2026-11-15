@@ -1653,6 +1653,7 @@
   },
   {
    "config": "[pools.grok]\nclass = \"exclude\"\n",
+   "disagreement": "Decision 289 (hk 4707): panewire reads, projects and gates nothing monthly for commandcode, so a 30d window is ignored; pacelever judges it.",
    "latest": {
     "observation": {
      "id": 7,
@@ -1681,6 +1682,13 @@
     }
    },
    "name": "commandcode-30d-present-admits",
+   "native": {
+    "ok": true,
+    "exit_code": 0,
+    "provider_id": "commandcode",
+    "reason": "cmd-dsflash41 pool=commandcode used=20% class=spend [rung cmd-dsflash41@high]",
+    "missing_windows": []
+   },
    "now": "2026-11-07T03:00:00Z",
    "pacelever": {
     "ok": true,
@@ -1701,7 +1709,6 @@
   },
   {
    "config": "[pools.grok]\nclass = \"exclude\"\n",
-   "disagreement": "New rule (decision/2026-11-06/commandcode-30d-required-in-panewire-gate): a commandcode reading without its 30d window is unmeasurable in panewire's gate. pacelever admits it.",
    "latest": {
     "observation": {
      "id": 7,
@@ -1724,15 +1731,6 @@
     }
    },
    "name": "commandcode-30d-missing",
-   "native": {
-    "ok": false,
-    "exit_code": 4,
-    "provider_id": "commandcode",
-    "reason": "commandcode_required_window_missing:30d",
-    "missing_windows": [
-     "30d"
-    ]
-   },
    "now": "2026-11-07T03:00:00Z",
    "pacelever": {
     "ok": true,
@@ -1753,6 +1751,7 @@
   },
   {
    "config": "[pools.grok]\nclass = \"exclude\"\n",
+   "disagreement": "Decision 289 (hk 4707): panewire reads, projects and gates nothing monthly for commandcode, so a 30d window is ignored; pacelever judges it.",
    "latest": {
     "observation": {
      "id": 7,
@@ -1781,6 +1780,13 @@
     }
    },
    "name": "commandcode-30d-exhausted",
+   "native": {
+    "ok": true,
+    "exit_code": 0,
+    "provider_id": "commandcode",
+    "reason": "cmd-dsflash41 pool=commandcode used=20% class=spend [rung cmd-dsflash41@high]",
+    "missing_windows": []
+   },
    "now": "2026-11-07T03:00:00Z",
    "pacelever": {
     "ok": false,

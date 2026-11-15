@@ -97,6 +97,14 @@ func (a *App) resolveCmd(ctx context.Context, args []string) error {
 	} else if authorFamily != "" && !topRoutingRole(role) {
 		return fail(exitUsage, "--author-family goes with --role reviewer|judge|consult")
 	}
+	if topRoutingRole(role) && authorFamily == "" {
+		// No --author-family: the asker is the job it runs in, as spawn reads it.
+		family, e := a.askerBuilderFamily(ctx)
+		if e != nil {
+			return e
+		}
+		authorFamily = family
+	}
 	if a.Quota == nil {
 		return fail(exitConfig, "resolve needs the quota catalog")
 	}

@@ -265,7 +265,18 @@ func (a *App) ConsultSeat(ctx context.Context, askerGrade, lane, builderFamily, 
 	if askerGrade == "" {
 		gradeSource = "without_task"
 	}
-	return a.pickSeat(ctx, "consult", askerGrade, gradeSource, lane, builderFamily, t, nil)
+	return a.pickSeat(ctx, "consult", askerGrade, gradeSource, lane, builderFamily, t, nil, nil)
+}
+
+// ConsultSeatExcluding is ConsultSeat with the named seat profiles skipped.
+// A consult respawn names the profile that failed so the next eligible seat,
+// still at the consult floor and in another family, is chosen.
+func (a *App) ConsultSeatExcluding(ctx context.Context, askerGrade, lane, builderFamily, t string, excludeProfiles []string) (SeatChoice, error) {
+	gradeSource := "flag"
+	if askerGrade == "" {
+		gradeSource = "without_task"
+	}
+	return a.pickSeat(ctx, "consult", askerGrade, gradeSource, lane, builderFamily, t, nil, excludeProfiles)
 }
 
 // OtherFamilySeat resolves a seat of another routing family than
@@ -276,12 +287,12 @@ func (a *App) OtherFamilySeat(ctx context.Context, excludeFamily, grade, t strin
 	if excludeFamily != "" {
 		exclude = []string{excludeFamily}
 	}
-	return a.pickSeat(ctx, "implementer", grade, "flag", "", "", t, exclude)
+	return a.pickSeat(ctx, "implementer", grade, "flag", "", "", t, exclude, nil)
 }
 
 // pickSeat runs the selection core for one routing role and returns the chosen
 // seat. It places no host, spawns nothing and writes no job record.
-func (a *App) pickSeat(ctx context.Context, routingRole, grade, gradeSource, lane, builderFamily, t string, excludeFamilies []string) (SeatChoice, error) {
+func (a *App) pickSeat(ctx context.Context, routingRole, grade, gradeSource, lane, builderFamily, t string, excludeFamilies, excludeProfiles []string) (SeatChoice, error) {
 	if a.Quota == nil {
 		return SeatChoice{}, fail(exitConfig, "POLICY_UNAVAILABLE: seat selection needs the quota catalog")
 	}
@@ -295,7 +306,7 @@ func (a *App) pickSeat(ctx context.Context, routingRole, grade, gradeSource, lan
 	}
 	cwd, _ := os.Getwd()
 	s := Spawn{CWD: cwd, Profile: "auto", Host: "auto", Role: seatRole, T: t, ParentFamily: builderFamily, RoutingRole: routingRole, AllowEscalation: true, DryRun: true}
-	req := selReq{grade: grade, lane: lane, gradeSource: gradeSource, t: t, role: seatRole, allowEscalation: true, authorFamily: builderFamily, excludeFamilies: excludeFamilies, urgency: urgencyNormal, urgencySource: "default", route: route}
+	req := selReq{grade: grade, lane: lane, gradeSource: gradeSource, t: t, role: seatRole, allowEscalation: true, authorFamily: builderFamily, excludeFamilies: excludeFamilies, excludeProfiles: excludeProfiles, urgency: urgencyNormal, urgencySource: "default", route: route}
 	sel, err := a.selectFor(ctx, s, req)
 	if err != nil {
 		return SeatChoice{}, err

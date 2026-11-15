@@ -34,11 +34,11 @@ func TestClassifyAcceptsTUIStopPrefixes(t *testing.T) {
 // Detect with the herdr rule absent is the classifier alone, with its basis.
 func TestDetectWithoutHerdrRuleUsesClassifier(t *testing.T) {
 	now := time.Date(2026, 11, 12, 6, 25, 0, 0, time.UTC)
-	stop, basis, ok := Detect("You've hit your usage limit. Upgrade to Pro or try again at 9:52 AM.", "codex", "", now, time.UTC)
+	stop, basis, ok := Detect("You've hit your usage limit. Upgrade to Pro or try again at 9:52 AM.", "codex", "", DevinSessionEvidence{}, now, time.UTC)
 	if !ok || basis != BasisClassifier || stop.Pool != "codex" || stop.Reset.IsZero() {
 		t.Fatalf("Detect = (%+v, %q, %v), want codex stop with reset, basis classifier", stop, basis, ok)
 	}
-	if _, basis, ok := Detect("plain shell output", "codex", "", now, time.UTC); ok || basis != BasisClassifier {
+	if _, basis, ok := Detect("plain shell output", "codex", "", DevinSessionEvidence{}, now, time.UTC); ok || basis != BasisClassifier {
 		t.Fatalf("Detect on non-stop = (%q, %v), want no stop, basis classifier", basis, ok)
 	}
 }
@@ -48,7 +48,7 @@ func TestDetectWithoutHerdrRuleUsesClassifier(t *testing.T) {
 func TestDetectHerdrRuleWithParsedReset(t *testing.T) {
 	now := time.Date(2026, 11, 12, 6, 25, 0, 0, time.UTC)
 	reset := time.Date(2026, 11, 12, 9, 52, 0, 0, time.UTC)
-	stop, basis, ok := Detect("You've hit your usage limit. Upgrade to Pro or try again at 9:52 AM.", "codex", HerdrQuotaRule, now, time.UTC)
+	stop, basis, ok := Detect("You've hit your usage limit. Upgrade to Pro or try again at 9:52 AM.", "codex", HerdrQuotaRule, DevinSessionEvidence{}, now, time.UTC)
 	if !ok || basis != BasisHerdr || !stop.Reset.Equal(reset) {
 		t.Fatalf("Detect = (%+v, %q, %v), want reset %v, basis %q", stop, basis, ok, reset, BasisHerdr)
 	}
@@ -59,11 +59,11 @@ func TestDetectHerdrRuleWithParsedReset(t *testing.T) {
 // the caller hands it over as reset_unknown.
 func TestDetectHerdrRuleWithUnparsedTextKeepsPoolFromAgent(t *testing.T) {
 	now := time.Date(2026, 11, 12, 6, 25, 0, 0, time.UTC)
-	stop, basis, ok := Detect("unrelated text", "claude", HerdrQuotaRule, now, time.UTC)
+	stop, basis, ok := Detect("unrelated text", "claude", HerdrQuotaRule, DevinSessionEvidence{}, now, time.UTC)
 	if !ok || basis != BasisHerdr || stop.Pool != "claude" || !stop.Reset.IsZero() {
 		t.Fatalf("Detect = (%+v, %q, %v), want claude stop, no reset, basis %q", stop, basis, ok, BasisHerdr)
 	}
-	if _, _, ok := Detect("unrelated text", "unknown-agent", HerdrQuotaRule, now, time.UTC); ok {
+	if _, _, ok := Detect("unrelated text", "unknown-agent", HerdrQuotaRule, DevinSessionEvidence{}, now, time.UTC); ok {
 		t.Fatal("Detect with herdr rule and unknown agent reported a stop")
 	}
 }
@@ -116,6 +116,10 @@ func TestClassifyRejectsLimitFollowedByAgentOutput(t *testing.T) {
 	} {
 		if got, ok := Classify(screen, now, time.UTC); ok {
 			t.Fatalf("%s: Classify = %+v, want no stop", name, got)
+		}
+		// Production reads a devin pane with its agent kind (hk 4680).
+		if got, ok := ClassifyAgent(screen, "devin", now, time.UTC); ok {
+			t.Fatalf("%s: ClassifyAgent(devin) = %+v, want no stop", name, got)
 		}
 	}
 	// A second limit after other output is the newest activity.

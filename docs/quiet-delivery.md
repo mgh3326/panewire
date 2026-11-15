@@ -349,7 +349,11 @@ replay would type it, and its handoffkeep row is closed as delivered to the
 inbox.
 
 `panewire prompt` types directly through the local herdr and never reaches the
-hub, so it is unaffected too.
+hub, so it is unaffected too. It reaches only panes this host's herdr session
+serves; a job's ESC is answered with a lane event to its lane
+(`panewire emit --kind lane.event --lane <job> --type order --text ...`, checked
+with `panewire inbox status --event-id <id>`), never with `panewire prompt` into
+another host or herdr session (hk 4810).
 
 ### The one-line wake
 
@@ -635,6 +639,10 @@ The normal relay persistence/retry requirements still apply during an hk outage.
 ## Inbox commands and API
 
 By default, inbox commands use the local node daemon and its hub connection.
+`panewire spawn --wait` reads the owner lane's inbox the same way, so a session
+whose config carries no usable hub token still sees the lane's signals; only a
+daemon that does not answer sends it to the configured `[hub]` connection, which
+it reports once per wait ([config.md](config.md)).
 For direct access, set `PANEWIRE_HUB_URL`, `PANEWIRE_HUB_TOKEN_ENV` (path to the existing private
 `HUB_MACHINE_ID`/`HUB_TOKEN` env file), optional `PANEWIRE_HUB_CF_ENV`, and
 `PANEWIRE_LANE`, or pass the corresponding flags shown by `panewire inbox --help`.

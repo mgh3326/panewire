@@ -2,6 +2,7 @@ package fleet
 
 import (
 	"context"
+	"errors"
 	"os"
 	"slices"
 	"time"
@@ -225,10 +226,22 @@ func (a *App) quotaStopScreen(ctx context.Context, j Job, ag Agent, seen *quotaS
 	if seen != nil && ag.StateChangeSeq != nil {
 		seen.read, seen.seq = true, *ag.StateChangeSeq
 	}
-	if stop, ok := quotastop.Classify(r.Out, a.Now(), time.Local); ok {
+	stop, _, ok := quotastop.Detect(r.Out, ag.Kind, "", a.devinSessionEvidence(ag), a.Now(), time.Local)
+	if ok {
 		return QuotaStopPool(stop, j.Profile), quotaStopFound
 	}
 	return quotastop.Stop{}, quotaNotStopped
+}
+
+// devinSessionEvidence reads the devin CLI's own record of a devin pane's
+// session: its process log says how the session's last turn ended, which a
+// screen cannot prove (hk 4542). Any failure is no evidence, so the screen
+// classifier decides alone.
+func (a *App) devinSessionEvidence(ag Agent) quotastop.DevinSessionEvidence {
+	if ag.Kind != "devin" {
+		return quotastop.DevinSessionEvidence{}
+	}
+	return quotastop.ReadDevinSessionEvidence(quotastop.DevinCLIDir(a.Home), ag.SessionID(), time.Local)
 }
 
 // QuotaRole is the role a quota stop is handled by: the spawn receipt's
@@ -286,6 +299,11 @@ func AnnounceQuotaStop(ctx context.Context, jobs, job, pane string, stop quotast
 	home, _ := os.UserHomeDir()
 	a := &App{Jobs: jobs, Home: home, Now: time.Now, Runner: ExecRunner{}}
 	if e := a.quotaStopAnnounce(ctx, Job{ID: job, Pane: pane}, stop); e != nil {
+		if errors.Is(e, errQuotaStopSuperseded) {
+			// The hub ended the job on its posted result: nothing to announce,
+			// and no watcher to start for an ended job.
+			return nil
+		}
 		return e
 	}
 	// The job's own watcher may have ended already (a worker that waited past
@@ -334,8 +352,28 @@ func announcedQuotaStop(j Job) (quotastop.Stop, bool) {
 // published at once, so later selections skip the free rung until its reset on
 // every host (RecordFreeLimit, publishFreeLimit).
 func (a *App) quotaStopAnnounce(ctx context.Context, j Job, stop quotastop.Stop) error {
+	unlock, err := a.lockJobOperation(j.ID, quotaRecordLockWait)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	if ended, err := a.endedByResultPosted(ctx, j.ID, true); err != nil {
+		return err
+	} else if ended {
+		// The hub ended the job on its posted result while this record waited
+		// for the lock; announcing a hand-over now would start a replacement
+		// for a job hk already holds lost without a successor pointer. The
+		// caller must not activate a hand-over either.
+		return errQuotaStopSuperseded
+	}
 	return a.quotaStopEvent(ctx, j, stop, false)
 }
+
+// quotaRecordLockWait bounds how long a quota-stop record waits for the job's
+// operation lock. The lock orders the record against the hub's posted-result
+// end of a reviewer job (node_job_mark_lost_result_posted.go): whichever takes
+// it first decides, and the other sees the outcome.
+const quotaRecordLockWait = 10 * time.Second
 
 // quotaStopEvent records job.lost for a quota stop. final marks a stop whose hk
 // lost record is already written (a reviewer ended by its watcher): unlike an
@@ -416,7 +454,7 @@ func (a *App) quotaStopLost(ctx context.Context, j Job, stop quotastop.Stop, emi
 // quotaStopFinish announces job.lost (when emit) and releases the quota lease.
 func (a *App) quotaStopFinish(ctx context.Context, j Job, stop quotastop.Stop, emit bool) error {
 	if emit {
-		if e := a.quotaStopAnnounce(ctx, j, stop); e != nil {
+		if e := a.quotaStopAnnounce(ctx, j, stop); e != nil && !errors.Is(e, errQuotaStopSuperseded) {
 			return e
 		}
 	}
@@ -463,6 +501,14 @@ func pendingQuotaIntent(j Job) (quotaIntent, bool) {
 }
 
 func (a *App) recordQuotaIntent(ctx context.Context, j Job, stop quotastop.Stop) error {
+	unlock, err := a.lockJobOperation(j.ID, quotaRecordLockWait)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	if ended, _ := a.endedByResultPosted(ctx, j.ID, false); ended {
+		return errQuotaStopSuperseded
+	}
 	payload := map[string]any{"pane_id": j.Pane, "pool": stop.Pool, "end_reason": QuotaStopEndReason(stop.Pool, stop.Reset, "", "")}
 	if !stop.Reset.IsZero() {
 		payload["reset_at"] = stop.Reset.UTC().Format(time.RFC3339)
