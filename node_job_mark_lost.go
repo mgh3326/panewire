@@ -369,10 +369,12 @@ func (client *HubClient) nodeJobNoLiveAttempt(ctx context.Context, job string) b
 }
 
 // jobAttemptLive reports whether the journal's executing rows or the
-// active-job list name job, under any label.
+// active-job list name job, under any label. A row an older build wrote
+// carries no strict identity, so its real job is unknown and it might be this
+// one: it counts as live until restart settlement completes it (hk 4799).
 func jobAttemptLive(job string, rows []executingSpawn, active []HubActiveJob) bool {
 	for _, row := range rows {
-		if row.Job == job {
+		if !row.Strict || row.Job == job {
 			return true
 		}
 	}

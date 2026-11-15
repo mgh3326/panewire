@@ -561,7 +561,10 @@ active entry is a job whose ledger exists again. Only that proof lets the hub
 free a failed no-pane holder's reservation (hk 4799, then
 [hub-spawn-operations.md](hub-spawn-operations.md#acceptance-and-identity)). A
 journal or jobs directory the node cannot read is no proof, so the record and
-the reservation stay. The `reviewer_result_posted` end keeps answering
+the reservation stay. A spawn journal row written before the strict identity
+existed names no job the node can trust; while one is still executing the node
+answers `ledger_missing` too, until restart settlement completes it (hk 4799).
+The `reviewer_result_posted` end keeps answering
 `ledger_missing` for a missing ledger: it ends a reviewer's job, which holds no
 reservation (hk 4737). A failed ledger read or handoffkeep write answers
 `mark_lost_failed`; a node without a jobs root answers `jobs_root_unset`.
