@@ -314,3 +314,24 @@ func TestLaneTakeoverRefusesRowOffAcceptedPlacement(t *testing.T) {
 		t.Fatalf("refused off-placement takeover changed the row: %+v", routes)
 	}
 }
+
+// The takeover moves the predecessor's row even when the successor already
+// holds its own row at the target pane: the retry convergence must not
+// pre-empt a predecessor row that still needs moving.
+func TestLaneTakeoverMovesDespiteOwnRowAtPane(t *testing.T) {
+	hub, path := takeoverHub(t,
+		`{"lanes":{"task-lane":{"machine":"machine-a","pane":"w1:p1","job":"pred-t","parent":"mergewake"},"succ-lane":{"machine":"machine-b","pane":"w2:p5","job":"succ-own","parent":"mergewake"},"mergewake":{"machine":"machine-a","pane":"w9:p9"}}}`,
+		nil)
+	seedAcceptedChainJob(t, hub.inbox.store, "pred-t", "", "machine-a", "w1:p1")
+	bindChainSuccessor(t, hub.inbox.store, "succ-own", "pred-t", "machine-b")
+
+	writer := lanesNodeRequest(t, hub, http.MethodPut, "/v1/lanes/task-lane", lanesNodeBToken, "machine-b",
+		`{"machine":"machine-b","pane":"w2:p5","job":"succ-own","parent":"mergewake","takeover":"pred-t"}`)
+	if writer.Code != http.StatusOK {
+		t.Fatalf("takeover status=%d body=%s", writer.Code, writer.Body.String())
+	}
+	routes := lanesNodeFile(t, path)
+	if route := routes["task-lane"]; route.Machine != "machine-b" || route.Pane != "w2:p5" || route.Job != "succ-own" {
+		t.Fatalf("predecessor row not moved: %+v", routes)
+	}
+}

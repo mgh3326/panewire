@@ -451,22 +451,27 @@ func (h *HubServer) laneSpawnProof(nodeMachine string, body hubLaneWriteRequest)
 // laneTakeoverRow moves only the row sitting at the takeover job's accepted
 // placement. Pane ids are host-local and reusable, so a row bound to the job
 // at any other pane — including one bound while the job's spawn was still
-// pending — is never moved; neither is a historical spawn pane alone ever
-// enough to identify the row.
+// pending — refuses the move; neither is a historical spawn pane alone ever
+// enough to identify the row. The takeover row is checked first: the
+// same-pane convergence below is only a retry fallback for a move that
+// already happened, and must never pre-empt a predecessor row that still
+// needs moving.
 func laneTakeoverRow(body hubLaneWriteRequest, proof laneSpawnProof, routes map[string]reportRelayRoute) (string, reportRelayRoute, bool, *hubLaneProjection, error) {
 	if !proof.valid || body.Job != proof.task.Job {
 		return "", reportRelayRoute{}, false, nil, errLaneTakeoverUnconfirmed
 	}
-	if name, row, found := laneRowAt(routes, body.Machine, body.Pane); found && row.Job == body.Job {
-		projection := hubLaneProjection{Lane: name, Machine: row.Machine, Pane: row.Pane, Parent: row.Parent, Sink: row.Sink, Standby: row.Standby}
-		return "", reportRelayRoute{}, false, &projection, nil
-	}
-	name, row, found := laneRowForJob(routes, body.Takeover)
-	if found {
+	if name, row, found := laneRowForJob(routes, body.Takeover); found {
 		if row.Machine != proof.takeover.Outcome.Host || row.Pane != proof.takeover.Outcome.Pane {
 			return "", reportRelayRoute{}, false, nil, errLaneTakeoverUnconfirmed
 		}
 		return name, row, true, nil, nil
+	}
+	// No row is still bound to the takeover job, so a row the successor
+	// already holds at this pane is a retried takeover converging instead
+	// of adding a second row.
+	if name, row, found := laneRowAt(routes, body.Machine, body.Pane); found && row.Job == body.Job {
+		projection := hubLaneProjection{Lane: name, Machine: row.Machine, Pane: row.Pane, Parent: row.Parent, Sink: row.Sink, Standby: row.Standby}
+		return "", reportRelayRoute{}, false, &projection, nil
 	}
 	return "", reportRelayRoute{}, false, nil, errLaneTakeoverUnconfirmed
 }
