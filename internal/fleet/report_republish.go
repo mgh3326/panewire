@@ -161,10 +161,11 @@ func (s *TaskPaneSweeper) reportPinDue(receipts doneReceipts, job, sha string) b
 
 // reportPinCost is what one pin attempt charged the pass: an hk write, or an
 // attempt hk did not answer, which may have been a read that waited on hk's
-// timeout. Only a read that answered without writing is free: it is a fact, not
-// a wait, so it cannot hold the pass open the way an upload does.
+// timeout. A read that answered is free however it answered — a record naming
+// these bytes, one that is not completed, or the not-found answer — since a
+// fact costs no wait and cannot hold the pass open the way an upload does.
 func reportPinCost(res pinResult, err error) int {
-	if err != nil || res.wrote {
+	if res.wrote || (err != nil && !errors.Is(err, errJobNotFound)) {
 		return 1
 	}
 	return 0
