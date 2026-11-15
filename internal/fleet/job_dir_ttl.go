@@ -213,6 +213,11 @@ func (p *JobDirTTL) decide(ctx context.Context, a *App, root, id string, panes j
 	newest := shape.newest
 	var j Job
 	submitter, request := false, ""
+	// hubSide marks a dir the hub's per-spawn app wrote for a job it
+	// delegated: every event is a placement decision, the job never ran
+	// here, so there is no pane to check and the hk record — or its
+	// absence past the TTL — decides (hk 4670).
+	hubSide := false
 	// leftover is a dir with neither events/ nor a submission whose job
 	// ledger is gone: it is kept unless hk holds a terminal record (hk 3685).
 	leftover := false
@@ -221,7 +226,10 @@ func (p *JobDirTTL) decide(ctx context.Context, a *App, root, id string, panes j
 	var recorded []any
 	if _, err = os.Lstat(filepath.Join(path, "events")); err == nil {
 		if j, err = a.job(id); err != nil {
-			return keep("events-unreadable")
+			if !hubPlacementOnly(j.Events) {
+				return keep("events-unreadable")
+			}
+			hubSide = true
 		}
 		if _, pending := pendingCreditRejection(j); pending {
 			return keep("credit-publication-pending")
@@ -296,13 +304,17 @@ func (p *JobDirTTL) decide(ctx context.Context, a *App, root, id string, panes j
 		// The job ran on this node, so its pane is in this node's herdr session.
 		j.Receipt = map[string]any{"herdr_session": a.herdrSession()}
 	}
-	if !submitter {
+	if !submitter && !hubSide {
 		if pane := panes.check(ctx, a, j); pane != "" {
 			return keep(pane)
 		}
 	}
 	if !leftover {
-		rec, reason = a.jobDirRecord(ctx, id, submitter, request)
+		if hubSide {
+			rec, reason = a.jobDirHubRecord(ctx, id)
+		} else {
+			rec, reason = a.jobDirRecord(ctx, id, submitter, request)
+		}
 		if reason != "" {
 			return keep(reason)
 		}
@@ -315,6 +327,12 @@ func (p *JobDirTTL) decide(ctx context.Context, a *App, root, id string, panes j
 		v.reason = "submission-terminal"
 		if rec == nil {
 			v.reason = "submission-spawn-failed"
+		}
+	}
+	if hubSide {
+		v.reason = "hub-terminal"
+		if rec == nil {
+			v.reason = "hub-no-record"
 		}
 	}
 	return v
@@ -589,6 +607,50 @@ func (a *App) jobDirRecord(ctx context.Context, id string, submitter bool, reque
 		return nil, "hk-not-terminal"
 	}
 	return rec, ""
+}
+
+// hubPlacementOnly reports whether every event in a job dir is a
+// job.placement decision — the only kind the hub's per-spawn app records
+// for a job it delegates, so such a dir never held a claim, receipt or
+// pane on this host. At least one event is required: an empty events dir
+// is no evidence of a placement.
+func hubPlacementOnly(evs []Event) bool {
+	if len(evs) == 0 {
+		return false
+	}
+	for _, ev := range evs {
+		if ev.Kind != "job.placement" {
+			return false
+		}
+	}
+	return true
+}
+
+// jobDirHubRecord reads the hk job record for a hub-side placement dir. The
+// job ran on another host, so its end states are the job's terminal ones
+// plus the spawn outcomes failed and refused. hk holding no record at all
+// is no objection: the dir is already past the TTL, so the placement never
+// became a claimed job anything could still need.
+func (a *App) jobDirHubRecord(ctx context.Context, id string) (map[string]any, string) {
+	store, err := a.jobStore()
+	if err != nil {
+		return nil, "hk-unreadable"
+	}
+	rec, err := store.Get(ctx, id)
+	if errors.Is(err, errJobNotFound) {
+		return nil, ""
+	}
+	if err != nil || rec == nil {
+		return nil, "hk-unreadable"
+	}
+	if got := str(rec, "job_id"); got != "" && got != id {
+		return nil, "hk-unreadable"
+	}
+	switch str(rec, "state") {
+	case "completed", "lost", "failed", "refused":
+		return rec, ""
+	}
+	return nil, "hk-not-terminal"
 }
 
 func (a *App) spawnStatus(ctx context.Context, request string) (string, error) {
