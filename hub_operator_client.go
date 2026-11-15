@@ -46,6 +46,7 @@ var hubOperatorAPIPaths = map[string]bool{
 	"/v1/jobs/reassign": true,
 	"/v1/lanes":         true,
 	"/v1/placement":     true,
+	"/v1/consults":      true,
 }
 
 func validHubOperatorAPIPath(path string) bool {
@@ -57,6 +58,9 @@ func validHubOperatorAPIPath(path string) bool {
 			n, err := strconv.ParseInt(id, 10, 64)
 			return err == nil && n > 0 && strconv.FormatInt(n, 10) == id
 		}
+	}
+	if id, found := strings.CutPrefix(path, "/v1/consults/"); found {
+		return validHubSpawnRequestID(id)
 	}
 	if lane, found := strings.CutPrefix(path, "/v1/lanes/"); found {
 		return validLaneReference(lane)

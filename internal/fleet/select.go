@@ -265,7 +265,9 @@ type selCand struct {
 	code       string
 	// measuredAt is the shared reading's measurement time and stale marks it
 	// past its freshness window, so a quota drop can name the evidence's age.
-	measuredAt  time.Time
+	measuredAt time.Time
+	// windows are the account reading's windows as measured, for the plan.
+	windows     viewWindows
 	stale       bool
 	ignoreGrade bool
 	// headroom is the candidate's fit against the job's expected hours (the
@@ -322,15 +324,18 @@ type selPlan struct {
 	creditMissing []string
 }
 type selReq struct {
-	grade            string
-	lane             string
-	t                string
-	role             string
-	tags             []string
-	effort           string
-	allowEscalation  bool
-	authorFamily     string
-	excludeFamilies  []string
+	grade           string
+	lane            string
+	t               string
+	role            string
+	tags            []string
+	effort          string
+	allowEscalation bool
+	authorFamily    string
+	excludeFamilies []string
+	// excludeProfiles drops candidates by seat profile. A consult respawn
+	// names the profile that failed so the next eligible seat is chosen.
+	excludeProfiles  []string
 	urgency          string
 	urgencySource    string
 	excludeHarnesses []string
@@ -452,6 +457,8 @@ func (a *App) seatFor(row CatalogRow, req selReq) (string, *Seat, string) {
 			reason = "seat_rung"
 		} else {
 			switch {
+			case slices.Contains(req.excludeProfiles, name) || slices.Contains(req.excludeProfiles, seat.Canon):
+				reason = "profile_excluded"
 			case slices.Contains(req.excludeFamilies, seat.Family):
 				reason = "family_excluded"
 			case req.route.top() && req.authorFamily != "" && seat.Family == req.authorFamily:
@@ -998,6 +1005,7 @@ func (a *App) selectFor(ctx context.Context, s Spawn, req selReq) (*selPlan, err
 			}
 			acc := pres.account(ctx, binding.key, row.Pool, binding.holders, false)
 			x.measuredAt, x.stale = acc.MeasuredAt, acc.Observed && !acc.Fresh
+			x.windows = acc.windows()
 			if why := sharedReason(binding.key, acc); why != "" || acc.Quota == nil {
 				x.code = pres.accountFailureCode(binding.key)
 				x.reason = strings.ToLower(x.code)
@@ -1009,6 +1017,7 @@ func (a *App) selectFor(ctx context.Context, s Spawn, req selReq) (*selPlan, err
 			if x.code == outcomeQuotaUnknown {
 				acc = pres.account(ctx, binding.key, row.Pool, binding.holders, true)
 				x.measuredAt, x.stale = acc.MeasuredAt, acc.Observed && !acc.Fresh
+				x.windows = acc.windows()
 				if sharedReason(binding.key, acc) == "" && acc.Quota != nil {
 					x.reason, x.code, x.outcome = "", "", ""
 					p.classifyRung(&x, acc.Quota)
@@ -1402,6 +1411,9 @@ func (p *selPlan) record() map[string]any {
 		}
 		if c.stale {
 			row["stale"] = true
+		}
+		if len(c.windows) > 0 && slices.Contains(multiAccountPools, c.row.Pool) {
+			row["windows"] = c.windows.rows()
 		}
 		if c.seatName != "" {
 			row["seat"] = c.seatName

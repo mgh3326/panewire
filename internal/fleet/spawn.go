@@ -1086,7 +1086,7 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 			}
 			s.AccountKey = receipt.ReadingKey
 		} else {
-			key, _ := a.remoteAccount(ctx, firstNonempty(launch.Pool, gatePool(gate)), a.machine(), a.Config.Local)
+			key, _ := a.remoteAccount(ctx, firstNonempty(launch.Pool, gatePool(gate)), a.machine(), a.Config.Local, "")
 			s.AccountKey = key
 		}
 	}
@@ -1499,7 +1499,7 @@ func (a *App) admitLaunch(ctx context.Context, s Spawn, seat Seat, effort, selEf
 		return Launch{}, "", err
 	}
 	if s.AccountKey != "" {
-		key, acc := a.remoteAccount(ctx, pool, a.machine(), a.Config.Local)
+		key, acc := a.remoteAccount(ctx, pool, a.machine(), a.Config.Local, s.AccountKey)
 		if why := selectedAccountReason(s.AccountKey, key, acc, policy.isCredit(pool)); why != "" {
 			return Launch{}, "", fail(exitAuthUnavailable, "AUTH_UNAVAILABLE: executing host %s cannot confirm the selected account %s: %s", a.machine(), s.AccountKey, why)
 		}

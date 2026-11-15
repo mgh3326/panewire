@@ -370,16 +370,22 @@ func (a *App) watch(ctx context.Context, args []string) error {
 						// up closing nothing hands it back to this path.
 						continue
 					}
-					if err := a.quotaStopAnnounce(ctx, j, credit); err != nil {
+					switch err := a.quotaStopAnnounce(ctx, j, credit); {
+					case errors.Is(err, errQuotaStopSuperseded):
+						// The hub ended the job on its posted result: no hand-over
+						// is active, so no grace expires and no re-prompt can
+						// follow the end and make the ledger live again.
+					case err != nil:
 						return err
+					default:
+						// A fresh row without a seq keeps the seq the rejection was read
+						// in, so a later changed seq still shows the pane moved on (hk 4505).
+						seq := current.StateChangeSeq
+						if seq == nil {
+							seq, _ = creditRejectionStateChangeSeq(j, credit)
+						}
+						handOff = quotaHandOff{stop: credit, until: a.Now().Add(a.QuotaHandOffGrace), seq: seq, active: true}
 					}
-					// A fresh row without a seq keeps the seq the rejection was read
-					// in, so a later changed seq still shows the pane moved on (hk 4505).
-					seq := current.StateChangeSeq
-					if seq == nil {
-						seq, _ = creditRejectionStateChangeSeq(j, credit)
-					}
-					handOff = quotaHandOff{stop: credit, until: a.Now().Add(a.QuotaHandOffGrace), seq: seq, active: true}
 				}
 			}
 			if err := a.event(ctx, id, "job.credit_published", published); err != nil {
@@ -500,7 +506,10 @@ func (a *App) watch(ctx context.Context, args []string) error {
 				}
 			} else if present && !pending {
 				if stop, seen := a.quotaStopScreen(ctx, j, paneAgent, &screenRead); seen == quotaStopFound && stop.CreditExhaustedAt.IsZero() {
-					if err := a.recordQuotaIntent(ctx, j, stop); err != nil {
+					if err := a.recordQuotaIntent(ctx, j, stop); errors.Is(err, errQuotaStopSuperseded) {
+						// The hub ended the job on its posted result.
+						return nil
+					} else if err != nil {
 						return err
 					}
 					// The next poll reconciles it with a fresh look.

@@ -30,6 +30,15 @@ const (
 	// nodeJobMarkLostLedgerMissing: the job dir or its events/ is gone, so the
 	// local ledger cannot prove the attempt is not completed (hk 3685).
 	nodeJobMarkLostLedgerMissing = "ledger_missing"
+
+	// The refusals of the reviewer_result_posted end (hk 4684,
+	// node_job_mark_lost_result_posted.go).
+	nodeJobMarkLostResultMissing  = "result-missing"
+	nodeJobMarkLostResultSettling = "result-settling"
+	nodeJobMarkLostQuotaStopped   = "quota-stopped"
+	nodeJobMarkLostNotReviewer    = "not-reviewer"
+	nodeJobMarkLostPaneWorking    = "pane-working"
+	nodeJobMarkLostBusy           = "operation-busy"
 )
 
 type nodeJobMarkLostArgs struct {
@@ -75,7 +84,9 @@ func validNodeJobMarkLostArgs(args nodeJobMarkLostArgs) bool {
 func validNodeJobMarkLostResult(result nodeJobMarkLostResult) bool {
 	switch result.Outcome {
 	case nodeJobMarkLostLost, nodeJobMarkLostPaneListed, nodeJobMarkLostLabelListed,
-		nodeJobMarkLostPanesUnknown, nodeJobMarkLostCompleted, nodeJobMarkLostNewerClaim, nodeJobMarkLostLedgerMissing:
+		nodeJobMarkLostPanesUnknown, nodeJobMarkLostCompleted, nodeJobMarkLostNewerClaim, nodeJobMarkLostLedgerMissing,
+		nodeJobMarkLostResultMissing, nodeJobMarkLostResultSettling, nodeJobMarkLostQuotaStopped, nodeJobMarkLostNotReviewer,
+		nodeJobMarkLostPaneWorking, nodeJobMarkLostBusy:
 		return true
 	}
 	return false
@@ -239,6 +250,9 @@ func readNodeJobLedgerEvents(job *os.Root) ([]nodeJobLedgerEvent, error) {
 // credential, after proving from herdr and the local ledger that the job is
 // still the one the hub means and never completed.
 func (client *HubClient) nodeJobMarkLost(ctx context.Context, args nodeJobMarkLostArgs) (any, string) {
+	if args.EndReason == reviewerResultPosted {
+		return client.nodeJobMarkReviewerResultPosted(ctx, args)
+	}
 	ledger, err := client.openNodeJobLedger(args.Job, args.PaneID, args.Label)
 	if errors.Is(err, errNodeJobsRootUnset) {
 		return nil, "jobs_root_unset"

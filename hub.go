@@ -41,6 +41,9 @@ const (
 
 var hubVersionPattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
 
+// defaultHubConsultTimeout bounds one consult from request to answer.
+const defaultHubConsultTimeout = 2 * time.Hour
+
 // HubServerConfig contains only local, already-loaded static credentials. The
 // operator credential is the HUB_TOKEN_operator entry; agent credentials use
 // their own stable machine ID entries.
@@ -128,6 +131,9 @@ type HubServerConfig struct {
 	PRStatusHost string
 	// RelayAckTimeout bounds the time an injected relay may remain silent.
 	RelayAckTimeout time.Duration
+	// ConsultTimeout bounds one consult from request to answer. Zero is two
+	// hours (docs/consult-on-request.md).
+	ConsultTimeout time.Duration
 	// AcceptingOverridesPath optionally makes operator acceptance choices durable.
 	AcceptingOverridesPath string
 	// PaneSweepInterval is how often the hub asks each node to close the panes of
@@ -417,6 +423,9 @@ type HubServer struct {
 	spawnSentry          *sentry.Client
 	spawnCoordinatorOnce sync.Once
 	spawnNewApp          func(io.Writer, io.Writer) (*fleet.App, error)
+	// consultPlan resolves a consult seat and its spawn submission. Nil uses
+	// the hub's own fleet App (fleet.App.PlanConsult); tests inject one.
+	consultPlan func(context.Context, fleet.ConsultPlanInput) (fleet.ConsultPlan, error)
 	// quotaReplacePoll overrides how often a quota-stop replacement looks for
 	// its successor's outcome; zero uses quotaReplacePoll.
 	quotaReplacePoll time.Duration
@@ -483,6 +492,7 @@ type HubServer struct {
 	ladderPlan        func(context.Context, fleet.Submission) error
 	heldLoop          map[string]*spawnHeldLoop
 	heldLoopOrder     lruIndex[string]
+	consultTimeout    time.Duration
 	staleAfter        time.Duration
 	keepaliveInterval time.Duration
 	gracePeriod       time.Duration
@@ -577,12 +587,19 @@ type HubServer struct {
 	spawnRecords                map[string]*hubSpawnRecord
 	nodeCommands                map[string]*hubNodeCommandPending
 	unworkedLandingGrace        time.Duration
-	spawnStartBy                time.Duration
-	spawnStartByMargin          time.Duration
-	spawnGrantDrain             bool
-	nodeCommandWait             time.Duration // fixture seam; zero is hubNodeCommandWait.
-	checkoutPullWait            time.Duration // fixture seam; zero is hubCheckoutPullWait.
-	nodeAgentsWait              time.Duration // fixture seam; zero is hubNodeAgentsWait.
+	// reviewerEndLogged is the refusal each reviewer job last logged in the
+	// posted-result pass, so a job that keeps failing for the same reason logs
+	// once, not once a pass (hub_spawn_reviewer_end.go).
+	reviewerEndLogged map[string]string
+	// reviewerEndSettled holds the reviewer jobs the pass found ended, so it
+	// reads each hk record once while the job stays in its window.
+	reviewerEndSettled map[string]bool
+	spawnStartBy       time.Duration
+	spawnStartByMargin time.Duration
+	spawnGrantDrain    bool
+	nodeCommandWait    time.Duration // fixture seam; zero is hubNodeCommandWait.
+	checkoutPullWait   time.Duration // fixture seam; zero is hubCheckoutPullWait.
+	nodeAgentsWait     time.Duration // fixture seam; zero is hubNodeAgentsWait.
 
 	// startConditionPoll is how often the hub reads hk for the tasks a
 	// waiting spawn request names; zero is defaultStartConditionPoll. The
@@ -710,6 +727,9 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 	if config.KeepaliveInterval <= 0 {
 		config.KeepaliveInterval = 10 * time.Second
 	}
+	if config.ConsultTimeout <= 0 {
+		config.ConsultTimeout = defaultHubConsultTimeout
+	}
 	if config.GracePeriod <= 0 {
 		config.GracePeriod = defaultHubGracePeriod
 	}
@@ -817,7 +837,7 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 	closeCtx, closeCancel := context.WithCancel(context.Background())
 	hub := &HubServer{
 		inbox: inbox, spawnKick: make(chan struct{}, 1), placementKick: make(chan struct{}, 1),
-		authPath: config.AuthPath, alertNodes: alertNodes, relayControl: newHubRelayControlState(config, overrides), now: config.Now, staleAfter: config.StaleAfter, keepaliveInterval: config.KeepaliveInterval,
+		authPath: config.AuthPath, alertNodes: alertNodes, relayControl: newHubRelayControlState(config, overrides), now: config.Now, consultTimeout: config.ConsultTimeout, staleAfter: config.StaleAfter, keepaliveInterval: config.KeepaliveInterval,
 		gracePeriod: config.GracePeriod, orphanGrace: config.OrphanGrace, unworkedLandingGrace: config.UnworkedLandingGrace, spawnStartBy: config.SpawnStartBy, spawnStartByMargin: config.SpawnStartByMargin, spawnGrantDrain: config.SpawnGrantDrain, alertObservations: defaultHubAlertObservations, logger: config.Logger,
 		paneSweepInterval: config.PaneSweepInterval, paneSweepAge: config.PaneSweepAge,
 		poolTriggerInterval: defaultPoolTriggerInterval,
@@ -917,6 +937,8 @@ func (h *HubServer) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/jobs/orphaned", h.handleOrphanedJobs)
 	mux.HandleFunc("POST /v1/jobs/reassign", h.handleReassignJob)
 	mux.HandleFunc("POST /v1/jobs/escalate-author", h.handleEscalateAuthor)
+	mux.HandleFunc("POST /v1/consults", h.handleConsultRequest)
+	mux.HandleFunc("GET /v1/consults/{id}", h.handleConsultGet)
 	mux.HandleFunc("GET /v1/agent", h.handleAgent)
 	mux.HandleFunc("GET /v1/events", h.handleEvents)
 	mux.HandleFunc("POST /v1/relay/events", h.handleRelayIngress)
@@ -2468,8 +2490,10 @@ func (h *HubServer) RunMaintenance(ctx context.Context) {
 	go h.runInbox(ctx)
 	go h.runLaneRelease(ctx.Done())
 	go h.runPaneSweep(ctx)
+	go h.runReviewerEnd(ctx)
 	go h.runPoolTriggers(ctx)
 	h.startSpawnCoordinator(ctx)
+	h.startConsultCoordinator(ctx)
 	// Startup replay runs once, before the first keepalive tick: whatever
 	// Postgres still holds as undelivered predates this process.
 	h.replayUndeliveredRelayEvents(ctx)

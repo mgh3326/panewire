@@ -335,15 +335,17 @@ func TestAdmissionLocalRequestFallsBackToManualWindows(t *testing.T) {
 	a, _, _ := switchApp(t, gateModeNative, nil, Result{Code: 99})
 	a.Config.Quota["accounts"] = map[string]any{"commandcode": "0123456789abcdef"}
 	expires := switchNow.Add(48 * time.Hour)
-	entry := shared.Observation{ID: 41, Kind: "manual", Window: "credit", MeasuredAt: switchNow.Add(-time.Hour), ExpiresAt: &expires, Buckets: []shared.Bucket{{Window: "credit", UsedPct: 20, Scope: "account"}}}
+	entry := func(id int64, window string) shared.Observation {
+		return shared.Observation{ID: id, Kind: "manual", Window: window, MeasuredAt: switchNow.Add(-time.Hour), ExpiresAt: &expires, Buckets: []shared.Bucket{{Window: window, UsedPct: 20, Scope: "account"}}}
+	}
 	a.SharedLatest = func(context.Context, string) (shared.Latest, error) {
-		return shared.Latest{Manual: []shared.Observation{entry}}, nil
+		return shared.Latest{Manual: []shared.Observation{entry(41, "5h"), entry(42, "7d")}}, nil
 	}
 	local := QuotaRequest{Profile: "cmd-dsflash41", Effort: "high", Role: "implementer"}
 	x := a.nativeGate(context.Background(), local, true)
 	var receipt gateReceipt
-	if err := json.Unmarshal([]byte(x.Out), &receipt); err != nil || x.Code != 0 || receipt.Source == nil || *receipt.Source != sourceOperator || !slices.Equal(receipt.ManualIDs, []string{"hk-41"}) {
-		t.Fatalf("local request must admit on the manual credit window: %d %s", x.Code, x.Out)
+	if err := json.Unmarshal([]byte(x.Out), &receipt); err != nil || x.Code != 0 || receipt.Source == nil || *receipt.Source != sourceOperator || !slices.Equal(receipt.ManualIDs, []string{"hk-41", "hk-42"}) {
+		t.Fatalf("local request must admit on the manual 5h and 7d windows: %d %s", x.Code, x.Out)
 	}
 	named := local
 	named.AccountKey = "commandcode:0123456789abcdef"
@@ -388,21 +390,34 @@ func TestAdmissionNativeReadsStoredReadingOverHandoffkeep(t *testing.T) {
 	}
 }
 
-// TestCommandcodeRequires30dWindow pins the commandcode 30-day rule
-// (decision/2026-11-06/commandcode-30d-required-in-panewire-gate).
-func TestCommandcodeRequires30dWindow(t *testing.T) {
+// TestCommandcodeNeedsItsFiveHourAndWeeklyWindowsAndNothingMonthly pins decision
+// 289 (hk 4707): the pool is judged on its 5-hour and weekly windows; a missing
+// 30-day window is not a refusal (this replaces
+// decision/2026-11-06/commandcode-30d-required-in-panewire-gate), and a reading
+// that lacks either required window is not admitted.
+func TestCommandcodeNeedsItsFiveHourAndWeeklyWindowsAndNothingMonthly(t *testing.T) {
 	in := admissionInputs{Now: switchNow, Rows: []admissionRow{{Profile: "cmd-dsflash41", Effort: "high", Pool: "commandcode", Grade: "A+", Gate: "default", Placed: true}}, AccountScoped: true}
-	week := func(used float64) *float64 { return &used }
-	in.Readings = map[string]admissionReading{"commandcode": {Buckets: []admissionBucket{{Window: "5h", Used: week(10), ScopeKind: "account"}, {Window: "7d", Used: week(20), ScopeKind: "account"}}}}
-	d := in.admit(admissionRequest{Profile: "cmd-dsflash41", Effort: "high", Role: "implementer"})
-	if d.OK || d.Exit != gateUnmeasurable || d.Reason != "commandcode_required_window_missing:30d" {
-		t.Fatalf("commandcode without 30d must be unmeasurable: %+v", d)
+	used := func(v float64) *float64 { return &v }
+	request := admissionRequest{Profile: "cmd-dsflash41", Effort: "high", Role: "implementer"}
+	in.Readings = map[string]admissionReading{"commandcode": {Buckets: []admissionBucket{{Window: "5h", Used: used(10), ScopeKind: "account"}, {Window: "7d", Used: used(20), ScopeKind: "account"}}}}
+	if d := in.admit(request); !d.OK || len(d.Missing) != 0 {
+		t.Fatalf("commandcode with 5h and 7d and no 30d must admit: %+v", d)
 	}
-	r := in.Readings["commandcode"]
-	r.Buckets = append(r.Buckets, admissionBucket{Window: "30d", Used: week(30), ScopeKind: "account"})
-	in.Readings["commandcode"] = r
-	if d = in.admit(admissionRequest{Profile: "cmd-dsflash41", Effort: "high", Role: "implementer"}); !d.OK {
-		t.Fatalf("commandcode with 30d must admit: %+v", d)
+	for missing, windows := range map[string][]admissionBucket{
+		"7d": {{Window: "5h", Used: used(10), ScopeKind: "account"}},
+		"5h": {{Window: "7d", Used: used(20), ScopeKind: "account"}},
+	} {
+		in.Readings = map[string]admissionReading{"commandcode": {Buckets: windows}}
+		d := in.admit(request)
+		if d.OK || d.Exit != gateUnmeasurable || d.Reason != "commandcode_required_window_missing:"+missing {
+			t.Fatalf("a commandcode reading without %s must be unmeasurable: %+v", missing, d)
+		}
+	}
+	// The exhausted weekly window still refuses; a 30d window is not needed and
+	// is not a reason either.
+	in.Readings = map[string]admissionReading{"commandcode": {Buckets: []admissionBucket{{Window: "5h", Used: used(10), ScopeKind: "account"}, {Window: "7d", Used: used(100), ScopeKind: "account"}}}}
+	if d := in.admit(request); d.OK || d.Exit != gateBlocked {
+		t.Fatalf("an exhausted weekly window must block: %+v", d)
 	}
 }
 
