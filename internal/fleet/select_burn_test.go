@@ -40,8 +40,8 @@ func serveBurnObs(t *testing.T, hk *spawnHK, body string) {
 	})
 }
 
-// burnPresence is a presence snapshot binding one account to pool.
-func burnPresence(pool, key string, now time.Time) *selPresence {
+// burnPresence is a presence snapshot binding one account key.
+func burnPresence(key string, now time.Time) *selPresence {
 	return &selPresence{now: now, presence: []PresenceRecord{{HostID: "local", AccountKey: key, LastSeen: now}}, burn: map[string]burnRates{}}
 }
 
@@ -50,7 +50,7 @@ func TestBurnHistorySteadySeriesMeasuresTheRise(t *testing.T) {
 	a := testApp(t)
 	now := a.Now()
 	serveBurnObs(t, hk, burnObs(t, now, "5h", 0, 10, 20))
-	sp := burnPresence("codex", "codex:0000000000000001", now)
+	sp := burnPresence("codex:0000000000000001", now)
 	sp.a = a
 
 	r := sp.burnRates(context.Background(), "codex")
@@ -77,7 +77,7 @@ func TestBurnHistoryResetIsNotNegativeBurn(t *testing.T) {
 	// 0 -> 10 -> 5 (the 5h window reset) -> 15: two counted hours of a 10
 	// point rise each. Counting the drop would give (10-5+10)/3h = 5 %/h.
 	serveBurnObs(t, hk, burnObs(t, now, "5h", 0, 10, 5, 15))
-	sp := burnPresence("codex", "codex:0000000000000001", now)
+	sp := burnPresence("codex:0000000000000001", now)
 	sp.a = a
 
 	r := sp.burnRates(context.Background(), "codex")
@@ -91,7 +91,7 @@ func TestBurnHistoryOnePointKeepsTheDefaultAndSaysWhy(t *testing.T) {
 	a := testApp(t)
 	now := a.Now()
 	serveBurnObs(t, hk, burnObs(t, now, "5h", 42))
-	sp := burnPresence("claude", "claude:0000000000000002", now)
+	sp := burnPresence("claude:0000000000000002", now)
 	sp.a = a
 
 	r := sp.burnRates(context.Background(), "claude")
@@ -118,7 +118,7 @@ func TestBurnHistoryUnreadableKeepsTheDefaultAndSaysWhy(t *testing.T) {
 		}
 		return 0, "", false
 	})
-	sp := burnPresence("claude", "claude:0000000000000002", now)
+	sp := burnPresence("claude:0000000000000002", now)
 	sp.a = a
 
 	r := sp.burnRates(context.Background(), "claude")
@@ -137,7 +137,7 @@ func TestBurnHistoryCacheSparesTheNextSpawn(t *testing.T) {
 	now := a.Now()
 	serveBurnObs(t, hk, burnObs(t, now, "5h", 0, 10, 20))
 
-	first := burnPresence("codex", "codex:0000000000000001", now)
+	first := burnPresence("codex:0000000000000001", now)
 	first.a = a
 	if r := first.burnRates(context.Background(), "codex"); r.Windows["5h"] != 10 {
 		t.Fatalf("first read = %+v; want a measured 10 %%/h", r)
@@ -146,7 +146,7 @@ func TestBurnHistoryCacheSparesTheNextSpawn(t *testing.T) {
 		t.Fatalf("observation reads = %d; want 1", got)
 	}
 	// A later spawn inside the TTL reads the cache, not hk.
-	second := burnPresence("codex", "codex:0000000000000001", now.Add(time.Minute))
+	second := burnPresence("codex:0000000000000001", now.Add(time.Minute))
 	second.a = a
 	if r := second.burnRates(context.Background(), "codex"); r.Windows["5h"] != 10 {
 		t.Fatalf("cached read = %+v; want the measured 10 %%/h", r)
@@ -155,7 +155,7 @@ func TestBurnHistoryCacheSparesTheNextSpawn(t *testing.T) {
 		t.Fatalf("observation reads after a second spawn = %d; want 1 (the cache answers)", got)
 	}
 	// Past the TTL the history is read again.
-	third := burnPresence("codex", "codex:0000000000000001", now.Add(burnCacheTTL+time.Minute))
+	third := burnPresence("codex:0000000000000001", now.Add(burnCacheTTL+time.Minute))
 	third.a = a
 	if r := third.burnRates(context.Background(), "codex"); r.Windows["5h"] != 10 {
 		t.Fatalf("refreshed read = %+v; want the measured 10 %%/h", r)
