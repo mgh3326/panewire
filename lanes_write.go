@@ -392,7 +392,7 @@ func (h *HubServer) acceptedSpawnRecord(ctx context.Context, job string) (hubSpa
 		return hubSpawnTask{}, false
 	}
 	task, err := h.inbox.store.latestSpawnForJob(ctx, job)
-	if err != nil || task.Job != job || hubSpawnArg(task.Request.Args, "--job") != job || task.Outcome.RC != 0 || task.Outcome.Host == "" || task.Outcome.Pane == "" {
+	if err != nil || task.Job != job || hubSpawnFlagArg(task.Request.Args, "--job") != job || task.Outcome.RC != 0 || task.Outcome.Host == "" || task.Outcome.Pane == "" {
 		return hubSpawnTask{}, false
 	}
 	return task, true
@@ -415,7 +415,7 @@ func (h *HubServer) takeoverChainRecord(ctx context.Context, successorParent, ta
 		if !ok {
 			return hubSpawnTask{}, false
 		}
-		parent := hubSpawnArg(task.Request.Args, "--parent-job")
+		parent := hubSpawnFlagArg(task.Request.Args, "--parent-job")
 		if parent == "" {
 			return hubSpawnTask{}, false
 		}
@@ -438,7 +438,7 @@ func (h *HubServer) laneSpawnProof(nodeMachine string, body hubLaneWriteRequest)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	task, err := h.inbox.store.latestSpawnForJob(ctx, body.Job)
-	if err != nil || task.Job != body.Job || task.Node == nil || task.Node.Machine != nodeMachine || hubSpawnArg(task.Request.Args, "--job") != body.Job {
+	if err != nil || task.Job != body.Job || task.Node == nil || task.Node.Machine != nodeMachine || hubSpawnFlagArg(task.Request.Args, "--job") != body.Job {
 		return laneSpawnProof{}
 	}
 	if task.Outcome.RC == 0 && task.Outcome.Pane != "" && (task.Outcome.Host != nodeMachine || task.Outcome.Pane != body.Pane) {
@@ -447,7 +447,7 @@ func (h *HubServer) laneSpawnProof(nodeMachine string, body hubLaneWriteRequest)
 	if body.Takeover == "" {
 		return laneSpawnProof{task: task, valid: true}
 	}
-	successorParent := hubSpawnArg(task.Request.Args, "--parent-job")
+	successorParent := hubSpawnFlagArg(task.Request.Args, "--parent-job")
 	record, ok := h.takeoverChainRecord(ctx, successorParent, body.Takeover)
 	if !ok {
 		return laneSpawnProof{}
@@ -479,15 +479,40 @@ func laneTakeoverRow(lane string, body hubLaneWriteRequest, proof laneSpawnProof
 		}
 		return name, row, true, nil, nil
 	}
-	// No row is still bound to the takeover job, so the requested lane itself
-	// already sitting at this pane and bound to the successor job is a
-	// retried takeover converging instead of adding a second row. Any other
-	// row there proves nothing about this takeover, so it refuses.
+	// No row is still bound to the takeover job, so a retry converges only on
+	// evidence tied to this takeover: the requested lane itself already
+	// sitting at the successor's pane and bound to the successor job, or —
+	// when the requested lane name is absent because the move kept the
+	// predecessor row's own name — the single row at that pane bound to the
+	// successor job. Anything else refuses.
 	if route, ok := routes[lane]; ok && !route.Sink && route.Machine == body.Machine && route.Pane == body.Pane && route.Job == body.Job {
 		projection := hubLaneProjection{Lane: lane, Machine: route.Machine, Pane: route.Pane, Parent: route.Parent, Sink: route.Sink, Standby: route.Standby}
 		return "", reportRelayRoute{}, false, &projection, nil
 	}
+	if _, ok := routes[lane]; !ok {
+		if name, row, found := laneMovedRow(routes, body.Machine, body.Pane, body.Job); found {
+			projection := hubLaneProjection{Lane: name, Machine: row.Machine, Pane: row.Pane, Parent: row.Parent, Sink: row.Sink, Standby: row.Standby}
+			return "", reportRelayRoute{}, false, &projection, nil
+		}
+	}
 	return "", reportRelayRoute{}, false, nil, errLaneTakeoverUnconfirmed
+}
+
+// laneMovedRow finds the single non-sink row at a pane bound to a job: the
+// row a takeover already moved there. Zero or several such rows prove nothing
+// about this takeover.
+func laneMovedRow(routes map[string]reportRelayRoute, machine, pane, job string) (string, reportRelayRoute, bool) {
+	name, row, count := "", reportRelayRoute{}, 0
+	for candidate, route := range routes {
+		if route.Sink || route.Machine != machine || route.Pane != pane || route.Job != job {
+			continue
+		}
+		if count == 0 {
+			name, row = candidate, route
+		}
+		count++
+	}
+	return name, row, count == 1
 }
 
 // laneRowForJob resolves the rows bound to a job. The count tells zero rows

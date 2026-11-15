@@ -401,3 +401,108 @@ func TestLaneTakeoverMissingPredecessorWithUnrelatedRowRefused(t *testing.T) {
 		t.Fatalf("refused takeover changed the row: %+v", routes)
 	}
 }
+
+// A lost response retries the identical PUT under a lane name that was never
+// created: the move kept the predecessor row's own name. The retry converges
+// on that moved row and changes nothing.
+func TestLaneTakeoverRetryDifferentNameConverges(t *testing.T) {
+	hub, path := takeoverHub(t,
+		`{"lanes":{"lane-old":{"machine":"machine-a","pane":"w1:p1","job":"pred-r","parent":"mergewake"},"mergewake":{"machine":"machine-a","pane":"w9:p9"}}}`,
+		nil)
+	seedAcceptedChainJob(t, hub.inbox.store, "pred-r", "", "machine-a", "w1:p1")
+	bindChainSuccessor(t, hub.inbox.store, "succ-r", "pred-r", "machine-b")
+	body := `{"machine":"machine-b","pane":"w2:p5","job":"succ-r","parent":"mergewake","takeover":"pred-r"}`
+
+	first := lanesNodeRequest(t, hub, http.MethodPut, "/v1/lanes/lane-new", lanesNodeBToken, "machine-b", body)
+	if first.Code != http.StatusOK {
+		t.Fatalf("takeover status=%d body=%s", first.Code, first.Body.String())
+	}
+	if routes := lanesNodeFile(t, path); routes["lane-old"].Machine != "machine-b" || routes["lane-old"].Job != "succ-r" {
+		t.Fatalf("predecessor row not moved: %+v", routes)
+	}
+	moved, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	retry := lanesNodeRequest(t, hub, http.MethodPut, "/v1/lanes/lane-new", lanesNodeBToken, "machine-b", body)
+	if retry.Code != http.StatusOK {
+		t.Fatalf("retried takeover status=%d body=%s", retry.Code, retry.Body.String())
+	}
+	var projection hubLaneProjection
+	if err := decodeLanesJSON(retry.Body, &projection); err != nil || projection.Lane != "lane-old" {
+		t.Fatalf("retry projection=%+v err=%v", projection, err)
+	}
+	again, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(again) != string(moved) {
+		t.Fatalf("retried takeover changed the file:\nbefore %s\nafter %s", moved, again)
+	}
+}
+
+// A --purpose value that looks like --parent-job= never forges a takeover
+// parent: flag reads walk strict pairs. A successor with no real --parent-job
+// is refused even when the forgery names an accepted job with a bound row.
+func TestLaneTakeoverPurposeForgeryRefused(t *testing.T) {
+	hub, path := takeoverHub(t,
+		`{"lanes":{"task-lane":{"machine":"machine-a","pane":"w1:p1","job":"victim-f","parent":"mergewake"},"lane-p":{"machine":"machine-a","pane":"w1:p2","job":"real-p","parent":"mergewake"},"mergewake":{"machine":"machine-a","pane":"w9:p9"}}}`,
+		nil)
+	seedAcceptedChainJob(t, hub.inbox.store, "victim-f", "", "machine-a", "w1:p1")
+	seedAcceptedChainJob(t, hub.inbox.store, "real-p", "", "machine-a", "w1:p2")
+
+	forged := durableSpawnRequest()
+	forged.RequestID = uuid.NewString()
+	forged.Args = []string{"-c", "/work/project", "-p", "/work/brief.md", "-m", "auto", "-l", "succ-f", "--job", "succ-f", "--t", "T1", "--owner", "mergewake", "--role", "implementer", "--host", "auto", "--task", "43", "--purpose", "--parent-job=victim-f"}
+	forgedTask, _, err := hub.inbox.store.claimSpawn(t.Context(), forged, "succ-f", "mergewake", time.Now())
+	if err != nil {
+		t.Fatalf("claim forged successor: %v", err)
+	}
+	if _, err := hub.inbox.store.bindSpawn(t.Context(), forged.RequestID, forgedTask.Attempt, hubSpawnRequest{RequestID: uuid.NewString(), Machine: "machine-b", Args: forged.Args}, time.Now()); err != nil {
+		t.Fatalf("bind forged successor: %v", err)
+	}
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer := lanesNodeRequest(t, hub, http.MethodPut, "/v1/lanes/task-lane", lanesNodeBToken, "machine-b",
+		`{"machine":"machine-b","pane":"w2:p5","job":"succ-f","parent":"mergewake","takeover":"victim-f"}`)
+	if writer.Code != http.StatusConflict || writer.Body.String() != `{"error":"lane_takeover_unconfirmed"}`+"\n" {
+		t.Fatalf("forged takeover status=%d body=%q", writer.Code, writer.Body.String())
+	}
+	if after, err := os.ReadFile(path); err != nil || string(after) != string(before) {
+		t.Fatalf("refused forgery changed the file: %q", after)
+	}
+}
+
+// A real --parent-job still wins when a --purpose value forges another one
+// earlier in the argv: the forgery is the purpose's value, not a flag.
+func TestLaneTakeoverRealParentBeatsForgery(t *testing.T) {
+	hub, path := takeoverHub(t,
+		`{"lanes":{"task-lane":{"machine":"machine-a","pane":"w1:p1","job":"victim-f","parent":"mergewake"},"lane-p":{"machine":"machine-a","pane":"w1:p2","job":"real-p","parent":"mergewake"},"mergewake":{"machine":"machine-a","pane":"w9:p9"}}}`,
+		nil)
+	seedAcceptedChainJob(t, hub.inbox.store, "victim-f", "", "machine-a", "w1:p1")
+	seedAcceptedChainJob(t, hub.inbox.store, "real-p", "", "machine-a", "w1:p2")
+
+	mixed := durableSpawnRequest()
+	mixed.RequestID = uuid.NewString()
+	mixed.Args = []string{"-c", "/work/project", "-p", "/work/brief.md", "-m", "auto", "-l", "succ-m", "--job", "succ-m", "--t", "T1", "--owner", "mergewake", "--role", "implementer", "--host", "auto", "--purpose", "--parent-job=victim-f", "--parent-job", "real-p"}
+	mixedTask, _, err := hub.inbox.store.claimSpawn(t.Context(), mixed, "succ-m", "mergewake", time.Now())
+	if err != nil {
+		t.Fatalf("claim mixed successor: %v", err)
+	}
+	if _, err := hub.inbox.store.bindSpawn(t.Context(), mixed.RequestID, mixedTask.Attempt, hubSpawnRequest{RequestID: uuid.NewString(), Machine: "machine-b", Args: mixed.Args}, time.Now()); err != nil {
+		t.Fatalf("bind mixed successor: %v", err)
+	}
+	writer := lanesNodeRequest(t, hub, http.MethodPut, "/v1/lanes/lane-p", lanesNodeBToken, "machine-b",
+		`{"machine":"machine-b","pane":"w2:p6","job":"succ-m","parent":"mergewake","takeover":"real-p"}`)
+	if writer.Code != http.StatusOK {
+		t.Fatalf("takeover status=%d body=%s", writer.Code, writer.Body.String())
+	}
+	if routes := lanesNodeFile(t, path); routes["lane-p"].Machine != "machine-b" || routes["lane-p"].Job != "succ-m" {
+		t.Fatalf("real-parent takeover did not move: %+v", routes)
+	}
+	if routes := lanesNodeFile(t, path); routes["task-lane"].Machine != "machine-a" {
+		t.Fatalf("forgery moved the victim row: %+v", routes)
+	}
+}

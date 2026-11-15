@@ -689,6 +689,35 @@ func hubSpawnArg(args []string, flag string) string {
 	return ""
 }
 
+// hubSpawnFlagArg returns the value of flag in a hub spawn's argv, read as
+// strict flag/value pairs: the element after a flag is its value and never
+// matches as a flag itself, so --purpose "--parent-job=x" cannot forge a
+// parent. Operator boolean flags take no value and are skipped singly; a
+// --flag=value element counts only at a flag position. This mirrors the
+// node-side pair walk in spawnargs.Refusal, whose booleans are listed in
+// internal/spawnargs (operatorBooleans); the takeover proof path must read
+// --job and --parent-job this way.
+func hubSpawnFlagArg(args []string, flag string) string {
+	for i := 0; i < len(args); {
+		elem := args[i]
+		if elem == flag {
+			if i+1 < len(args) {
+				return args[i+1]
+			}
+			return ""
+		}
+		if value, ok := strings.CutPrefix(elem, flag+"="); ok {
+			return value
+		}
+		if elem == "--keep" || elem == "--job-dup-ok" || elem == "--task-hk-bypass" || elem == "--allow-escalation" {
+			i++
+			continue
+		}
+		i += 2
+	}
+	return ""
+}
+
 // hubSpawnBriefTransport is the brief fetch's transport; nil is the default.
 // Tests point it at a TLS test server.
 var hubSpawnBriefTransport http.RoundTripper
