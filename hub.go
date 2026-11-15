@@ -314,6 +314,9 @@ type hubJobEventPayload struct {
 	NotifyType    string `json:"notify_type,omitempty"`
 	Cause         string `json:"cause,omitempty"`
 	noDigest      bool
+	// inboxID is the lane inbox row that holds this lane.event whole, set by
+	// receiveInbox. The typed head points at it (laneEventRelayText).
+	inboxID int64
 	// lane.event uses these relay-only fields. It deliberately never enters
 	// the hub's job registration paths despite sharing the delivery envelope.
 	EventID        string    `json:"event_id,omitempty"`
@@ -1287,7 +1290,7 @@ func (h *HubServer) handleAgent(writer http.ResponseWriter, request *http.Reques
 	if err != nil {
 		return
 	}
-	connection.SetReadLimit(hubMaxMessageBytes)
+	connection.SetReadLimit(max(hubMaxMessageBytes, laneEventFrameMax))
 	agentContext, agentCancel := context.WithCancel(request.Context())
 	agent := &hubAgent{conn: connection, lifetime: agentContext, machineID: machineID, credential: hubRequestBearerToken(request), failovers: make(chan hubFailoverEvent, 64), revocations: make(chan hubJobRevokedEvent, 64), assignments: make(chan hubJobAssignedEvent, 64), features: make(chan hubFeaturesEvent, 1), relays: make(chan hubRelayInjectEvent, 64), persisted: make(chan hubRelayPersistedEvent, 64), idleRoutes: make(chan hubIdleWakeRouteEvent, 64)}
 	defer connection.CloseNow()
@@ -2747,7 +2750,7 @@ func (h *HubServer) handleEvents(writer http.ResponseWriter, request *http.Reque
 	if err != nil {
 		return
 	}
-	connection.SetReadLimit(hubMaxMessageBytes)
+	connection.SetReadLimit(max(hubMaxMessageBytes, laneEventFrameMax))
 	ctx, cancel := context.WithCancel(request.Context())
 	subscriber := &hubEventSubscriber{conn: connection, ctx: ctx, cancel: cancel, messages: make(chan hubSubscriptionMessage, 64)}
 	h.mu.Lock()

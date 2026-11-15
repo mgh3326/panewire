@@ -16,17 +16,18 @@ in the same lane is a producer error; `panewire emit` exits nonzero and writes
 is independent.
 
 `text` is required and must contain no NUL or C0/C1 control character
-(including tab, CR, and LF). The lane's `lanes.json` route is authoritative:
-ordinary pane routes permit 2048 bytes, while a sink route permits 8192 bytes.
-See [R23 console surface](r23-console-surface.md) for the `--sink` producer
-choice and the hub's route-based enforcement. Producers must escape structured
-payloads before passing them as text. When text is too long, the node truncates
-it once at a UTF-8 boundary, appends `[truncated]`, persists that final form,
-and broadcasts `relay.truncated`; no later component applies the 240-rune
-job-report rule. This remains the one-node truncation point: the producer
-chooses only a 2048- or 8192-byte bound, and the hub validates rather than
-truncating, so stored record, wire payload, and outbox acknowledgement stay
-identical.
+(including tab, CR, and LF). Text up to a 16 KiB ceiling is accepted; a pane
+route types a head and a pointer to the whole text kept in the lane inbox, and
+a sink route persists at most 8192 bytes. See
+[lane-event-long.md](lane-event-long.md) for the bounds and the wire gate, and
+[R23 console surface](r23-console-surface.md) for the `--sink` producer choice. Producers must escape structured
+payloads before passing them as text. A sink event is cut once at emit to 8192
+bytes at a UTF-8 boundary, with `[truncated]`. A non-sink event keeps its whole
+text in the event file. The cut the hub receives is the one it stores, so the
+stored record, wire payload, and outbox acknowledgement stay identical. A node
+cuts the wire form only for a hub without `lane_event_long` (see
+[lane-event-long.md](lane-event-long.md)). No later component applies the
+240-rune job-report rule.
 
 For example:
 

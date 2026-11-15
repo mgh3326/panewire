@@ -109,6 +109,9 @@ type emitRecord struct {
 	EventID        string `json:"event_id,omitempty"`
 	Text           string `json:"text,omitempty"`
 	Truncated      bool   `json:"truncated,omitempty"`
+	// Sink marks a lane.event emitted with --sink: its text is cut to the sink
+	// bound at emit, and the node keeps that bound on the wire (relayWire).
+	Sink bool `json:"sink,omitempty"`
 }
 
 func runEmitCLI(args []string, stdout, stderr io.Writer, cfg CLIConfig) int {
@@ -122,7 +125,7 @@ func runEmitCLI(args []string, stdout, stderr io.Writer, cfg CLIConfig) int {
 	late := fs.Bool("late", false, "completion found by a re-armed watcher")
 	deliver := fs.String("deliver", "", "interrupt | inbox (otherwise receiving-lane policy)")
 	notifyType := fs.String("type", "", "notification type: decision | order | ready | merged | blocked | findings | idle-wake | progress | report | ack | info | deploy-approval | watch-hold | culprit-hold | automation-failed")
-	sink := fs.Bool("sink", false, "allow sink lane.event text up to 8192 bytes")
+	sink := fs.Bool("sink", false, "sink lane.event text: at most 8192 bytes, cut to that at emit (otherwise text up to 16 KiB is kept whole in the lane inbox)")
 	report := fs.String("report", "", "report path")
 	ownerLane := fs.String("owner-lane", "", "owning lane")
 	epoch := fs.Uint64("epoch", 0, "job epoch (defaults to 1)")
@@ -178,6 +181,10 @@ func runEmitCLI(args []string, stdout, stderr io.Writer, cfg CLIConfig) int {
 			fmt.Fprintln(stderr, "emit: invalid --event-id")
 			return ExitUsage
 		}
+		if len(*text) > laneEventTextCeiling {
+			fmt.Fprintf(stderr, "emit: --text is %d bytes; the lane.event ceiling is %d\n", len(*text), laneEventTextCeiling)
+			return ExitUsage
+		}
 		if !validLaneEventText(*text) {
 			fmt.Fprintln(stderr, "emit: invalid --text")
 			return ExitUsage
@@ -193,18 +200,21 @@ func runEmitCLI(args []string, stdout, stderr io.Writer, cfg CLIConfig) int {
 			fmt.Fprintln(stderr, "emit: invalid --head")
 			return ExitUsage
 		}
-		limit := laneEventTextLimit
+		// Non-sink text is kept whole up to the ceiling: the hub types a head and
+		// keeps the rest in the lane inbox, and the node cuts the wire form for a
+		// hub that cannot take it (lane_event_long.go). A sink lane types nothing,
+		// so its text is cut here to the sink bound.
+		finalText, truncated := *text, false
 		if *sink {
-			limit = laneEventTextLimitSink
+			finalText, truncated = truncateLaneEventTextAtLimit(*text, laneEventTextLimitSink)
 		}
-		finalText, truncated := truncateLaneEventTextAtLimit(*text, limit)
 		// The completion watcher ties a READY, DONE or ESC event to its job by
 		// this pane, so a worker's emit names its pane without being asked.
 		paneID := *pane
 		if paneID == "" {
 			paneID = os.Getenv("HERDR_PANE_ID")
 		}
-		record := emitRecord{DeliveryClass: *deliver, NotifyType: *notifyType, Type: *kind, Cause: *cause, PR: *pr, Head: *head, Epoch: *epoch, CreatedAt: time.Now().UTC().Format(time.RFC3339), OwnerLane: *lane, Label: *label, Host: *host, PaneID: paneID, EventID: *eventID, Text: finalText, Truncated: truncated}
+		record := emitRecord{DeliveryClass: *deliver, NotifyType: *notifyType, Type: *kind, Cause: *cause, PR: *pr, Head: *head, Epoch: *epoch, CreatedAt: time.Now().UTC().Format(time.RFC3339), OwnerLane: *lane, Label: *label, Host: *host, PaneID: paneID, EventID: *eventID, Text: finalText, Truncated: truncated, Sink: *sink}
 		if record.Epoch == 0 {
 			record.Epoch = 1
 		}
@@ -446,7 +456,7 @@ func ensureLaneEmitRecord(inboxRoot string, record emitRecord) (string, error) {
 		if json.Unmarshal(contents, &existing) != nil || relayLaneEventOutboxKey(existing.OwnerLane, existing.EventID) != wantKey {
 			continue
 		}
-		if existing.Type == record.Type && existing.Epoch == record.Epoch && existing.CreatedAt == record.CreatedAt && existing.OwnerLane == record.OwnerLane && existing.Label == record.Label && existing.Host == record.Host && existing.PaneID == record.PaneID && existing.EventID == record.EventID && existing.Text == record.Text && existing.Truncated == record.Truncated && existing.DeliveryClass == record.DeliveryClass {
+		if existing.Type == record.Type && existing.Epoch == record.Epoch && existing.CreatedAt == record.CreatedAt && existing.OwnerLane == record.OwnerLane && existing.Label == record.Label && existing.Host == record.Host && existing.PaneID == record.PaneID && existing.EventID == record.EventID && existing.Text == record.Text && existing.Truncated == record.Truncated && existing.Sink == record.Sink && existing.DeliveryClass == record.DeliveryClass {
 			return filepath.Join(dir, entry.Name()), nil
 		}
 		return "", errEmitDuplicateOutboxKey
@@ -479,7 +489,7 @@ func validLaneEventID(value string) bool {
 }
 
 func validLaneEventText(value string) bool {
-	if value == "" || !utf8.ValidString(value) {
+	if value == "" || len(value) > laneEventTextCeiling || !utf8.ValidString(value) {
 		return false
 	}
 	for _, r := range value {
@@ -681,7 +691,7 @@ func pushEmitRecord(socket string, record emitRecord, inboxRoot string, timeout 
 		DeliveryClass: record.DeliveryClass, Late: record.Late, NotifyType: record.NotifyType, Cause: record.Cause, Op: "emit", Kind: record.Type, JobID: record.JobID, Epoch: record.Epoch, OwnerLane: record.OwnerLane,
 		Label: record.Label, Host: record.Host, PaneID: record.PaneID, ReportPath: record.ReportPath,
 		ReportLastLine: record.ReportLastLine, Reason: record.Reason, Question: record.Question,
-		PR: record.PR, Head: record.Head, AgentLabel: record.AgentLabel, EventID: record.EventID, Text: record.Text, Truncated: record.Truncated, InboxRoot: inboxRoot, TimeoutMS: timeout.Milliseconds(),
+		PR: record.PR, Head: record.Head, AgentLabel: record.AgentLabel, EventID: record.EventID, Text: record.Text, Truncated: record.Truncated, Sink: record.Sink, InboxRoot: inboxRoot, TimeoutMS: timeout.Milliseconds(),
 	}
 	body, _ := json.Marshal(request)
 	if _, err := fmt.Fprintf(connection, "%s\n", body); err != nil {

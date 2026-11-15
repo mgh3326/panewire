@@ -195,6 +195,8 @@ type hubScannedRelayEvent struct {
 	EventTime time.Time
 	Text      string
 	Truncated bool
+	// Sink is a lane.event its producer named a sink (emit --sink).
+	Sink bool
 }
 
 // scanHubRelayEvents retains the completion scan and also forwards the two
@@ -426,6 +428,7 @@ type hubInboxEvent struct {
 	EventID        string `json:"event_id"`
 	Text           string `json:"text"`
 	Truncated      bool   `json:"truncated"`
+	Sink           bool   `json:"sink,omitempty"`
 	Payload        struct {
 		Late           bool   `json:"late,omitempty"`
 		AgentLabel     string `json:"agent_label"`

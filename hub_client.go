@@ -95,6 +95,9 @@ type hubClientEvent struct {
 	// senderPane is a lane.event's emitting pane, added to the payload only on
 	// a connection whose hub accepts it (relayWire).
 	senderPane string
+	// sinkRecord is a lane.event whose producer named a sink (emit --sink). Its
+	// text bound is the sink bound, not the typed-line one (relayWire).
+	sinkRecord bool
 }
 
 type quotaPoolReconcileHooks struct {
@@ -656,6 +659,9 @@ type hubClientConnection struct {
 	// acceptsLaneEventPane is the same for hubFeatureLaneEventPane
 	// (lane_event_sender.go).
 	acceptsLaneEventPane atomic.Bool
+	// acceptsLaneEventLong is the same for hubFeatureLaneEventLong
+	// (lane_event_long.go).
+	acceptsLaneEventLong atomic.Bool
 	// acceptsPaneCaptureDoc is the same for hubFeaturePaneCaptureDoc
 	// (node_command.go).
 	acceptsPaneCaptureDoc atomic.Bool
@@ -2148,6 +2154,7 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 				peer.acceptsSignals.Store(slices.Contains(message.Features, hubFeatureHostSignals))
 				peer.acceptsReadiness.Store(slices.Contains(message.Features, hubFeatureReadiness))
 				peer.acceptsLaneEventPane.Store(slices.Contains(message.Features, hubFeatureLaneEventPane))
+				peer.acceptsLaneEventLong.Store(slices.Contains(message.Features, hubFeatureLaneEventLong))
 				peer.acceptsPaneCaptureDoc.Store(slices.Contains(message.Features, hubFeaturePaneCaptureDoc))
 				peer.acceptsHostActivity.Store(slices.Contains(message.Features, hubFeatureHostActivity))
 				peer.acceptsCheckoutPull.Store(slices.Contains(message.Features, hubFeatureCheckoutPull))
@@ -2581,8 +2588,9 @@ func normalizeRelayEventText(value string) string {
 // `panewire emit` path, and the restart replay path alike.
 func relayEventWireForm(job hubScannedRelayEvent) hubScannedRelayEvent {
 	if job.Kind == "lane.event" {
-		// lane.event text was validated and, if necessary, byte-truncated only
-		// by emit before its file was written. Do not apply the job.* 240-rune
+		// lane.event text was validated by emit before its file was written. A
+		// cut for an older hub is made only on the wire (lane_event_long.go), so
+		// the outbox key stays text-free. Do not apply the job.* 240-rune
 		// normalizer here: a second shape would strand its persisted cursor.
 		return job
 	}
@@ -2689,7 +2697,7 @@ func (client *HubClient) relayEventForSend(job hubScannedRelayEvent) (hubClientE
 		}{job.OwnerLane, job.EventID, job.Text, job.Epoch, job.Truncated, replay, job.Cause, job.Head, job.PR})
 		payload = relayPayloadDeliveryClass(payload, job.DeliveryClass)
 		payload = relayPayloadNotifyType(payload, job.NotifyType)
-		return hubClientEvent{Kind: job.Kind, Payload: payload, relayKey: key, relayPending: true, senderPane: laneEventSenderPane(job)}, true
+		return hubClientEvent{Kind: job.Kind, Payload: payload, relayKey: key, relayPending: true, senderPane: laneEventSenderPane(job), sinkRecord: job.Sink}, true
 	}
 	payload := hubJobCompletionPayloadForJob(job.HubActiveJob, job.EventID, replay)
 	if job.Kind == "job.escalate" || job.Kind == "job.joined" || relayTerminalSignalKinds[job.Kind] {

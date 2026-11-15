@@ -392,9 +392,12 @@ func TestLaneEventTextTruncatesAtNodeAndRejectsControlCharacters(t *testing.T) {
 	if code, _ := emitLaneEvent(t, inbox, "lane-a", "producer-2", strings.Repeat("가", 1000)); code != ExitOK {
 		t.Fatalf("long emit code=%d", code)
 	}
+	// A non-sink event keeps its whole text in the node's file (hk 4835); the
+	// cut to the typed-line bound happens only on the wire to an older hub
+	// (lane_event_long_test.go).
 	scanned := scannedLaneEvent(t, inbox, outbox)
-	if len(scanned.Text) != laneEventTextLimit || !utf8.ValidString(scanned.Text) || !strings.Contains(scanned.Text, "[truncated]") || !scanned.Truncated {
-		t.Fatalf("truncated text bytes=%d valid=%t payload=%q truncated=%t", len(scanned.Text), utf8.ValidString(scanned.Text), scanned.Text, scanned.Truncated)
+	if len(scanned.Text) != 3000 || !utf8.ValidString(scanned.Text) || strings.Contains(scanned.Text, "[truncated]") || scanned.Truncated {
+		t.Fatalf("whole text bytes=%d valid=%t truncated=%t", len(scanned.Text), utf8.ValidString(scanned.Text), scanned.Truncated)
 	}
 	fake, client, closeServer := newFakeHandoffkeep(t)
 	defer closeServer()
@@ -404,7 +407,7 @@ func TestLaneEventTextTruncatesAtNodeAndRejectsControlCharacters(t *testing.T) {
 	hub.nodes["host-a"] = &hubNodeRecord{agent: destination}
 	seen := r20t5Subscribe(t, hub)
 	hub.relayLaneEvent(hubJobEventPayload{JobID: scanned.JobID, Epoch: scanned.Epoch, OwnerLane: scanned.OwnerLane, EventID: scanned.EventID, Text: scanned.Text, Truncated: scanned.Truncated}, source)
-	if fake.rowCount() != 1 || drainRelays(destination) != 1 || len(seen("relay.truncated")) != 1 {
+	if fake.rowCount() != 1 || drainRelays(destination) != 1 || len(seen("relay.truncated")) != 0 {
 		t.Fatalf("rows=%d inject=%d truncated=%d", fake.rowCount(), drainRelays(destination), len(seen("relay.truncated")))
 	}
 	invalidInbox := t.TempDir()

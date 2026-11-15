@@ -34,6 +34,11 @@ func (peer *hubClientConnection) relayWire(event hubClientEvent) any {
 	if event.senderPane != "" && peer.acceptsLaneEventPane.Load() {
 		event.Payload = relayPayloadOptionalString(event.Payload, "pane_id", event.senderPane)
 	}
+	// Gate: a hub that did not advertise hubFeatureLaneEventLong refuses text
+	// over its own bound, so the cut form is sent to it (lane_event_long.go).
+	if event.Kind == "lane.event" && !peer.acceptsLaneEventLong.Load() {
+		event.Payload = laneEventPayloadForOldHub(event.Payload, event.sinkRecord)
+	}
 	return hubClientWireEvent(event)
 }
 
