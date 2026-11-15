@@ -373,6 +373,12 @@ type TaskPaneSweeper struct {
 	// and reason, so a report that cannot be published yet is one line rather
 	// than one per pass (report_republish.go).
 	reportNoted map[string]bool
+	// reportPins holds each report's pin attempts, so a record hk never answers
+	// cannot hold the pass's pin budget ahead of other jobs, and reportPass
+	// counts this sweeper's republish passes, the unit that back-off measures in
+	// (report_republish.go).
+	reportPins map[string]reportPinState
+	reportPass int
 }
 
 func (s *TaskPaneSweeper) info(message string, attrs ...any) {

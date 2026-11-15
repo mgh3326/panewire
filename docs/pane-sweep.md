@@ -126,9 +126,12 @@ A report whose file no longer hashes to the announced sha256 is left alone with
 `reason=report_changed`: it is still being written, or it belongs to a later
 round that only a new `done` announces, and the pass never pins bytes no
 completion named. A file that is gone is left with `reason=report_missing`. A
-pin write hk did not answer is repeated by a later pass. At most five hk writes
-(an upload or a pin) run per pass, a failure is retried by the next pass, and
-each republished report or refusal is logged once. The upload runs without the
+pin write hk did not answer is repeated by a later pass. At most five uploads
+and, separately, five pin writes run per pass, so a pin hk will not answer can
+never hold the upload another job needs; after three unanswered pin attempts,
+and at once for a record hk answers as not completed, the report waits twelve
+passes between probes rather than holding a pin slot on every one. Each
+republished report or refusal is logged once. The upload runs without the
 job's operation lock so a worker's `done` never waits behind it; the receipt and
 pin writes take that lock only briefly, and a pass that finds a `done` holding it
 leaves both writes to the next pass. The ordered `pane.sweep` command does
