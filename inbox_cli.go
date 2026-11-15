@@ -45,6 +45,29 @@ no visible row.`
 // until this deadline, so there is no tight polling.
 const inboxWaitDefaultTimeout = 60 * time.Second
 
+// Per-caller request budgets (hk 4344). One budget bounds one hub attempt; the
+// retry budget in internal/hubretry spans attempts and is separate.
+const (
+	// inboxNodeRequestTimeout bounds one hub request made for a local
+	// node-daemon inbox call. The daemon makes the call and returns its answer
+	// over the socket, and the hub's Cloudflare edge takes 1–4s of it, so the
+	// 5s attempt it replaces lost calls that were still in flight (hk 3730:
+	// list and count took 5.03–5.07s and reported the hub unavailable).
+	inboxNodeRequestTimeout = 15 * time.Second
+	// inboxDirectRequestTimeout bounds one hub request a direct --hub-url
+	// inbox call makes. Its caller waits on the answer, and the retry budget
+	// gives a slow edge another attempt, so one attempt fails sooner.
+	inboxDirectRequestTimeout = 5 * time.Second
+	// inboxClientTimeoutSlack keeps the HTTP client's own timeout above the
+	// attempt context, so a deadline ends a slow request and not the client.
+	inboxClientTimeoutSlack = 5 * time.Second
+	// inboxDaemonReplySlack keeps runInboxLocal's socket deadline above the
+	// daemon's own request budget. The daemon starts its clock after it reads
+	// the request, so its answer must reach a socket the CLI still holds, or
+	// the CLI reports the daemon unavailable instead of the daemon's answer.
+	inboxDaemonReplySlack = 5 * time.Second
+)
+
 func runInboxCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 	if len(args) == 0 {
 		fmt.Fprintln(stderr, inboxUsage)
@@ -160,7 +183,22 @@ func runInboxCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 			return ExitConditionInvalid
 		}
 	}
-	clientTimeout := 5 * time.Second
+	client, err := newInboxDirectClient(hubURL, env, cf, deps, command, timeout)
+	if err != nil {
+		fmt.Fprintln(stderr, "inbox: invalid hub URL")
+		return ExitConditionInvalid
+	}
+	if env.MachineID != hubOperatorMachineID {
+		client.machineID = env.MachineID
+	}
+	return executeInbox(client, stdout, stderr, inboxRequest{Command: command, Lane: lane, ID: id, Unread: unread, All: all, JSON: jsonMode, Timeout: timeout, EventIDs: eventIDs}, env.MachineID == hubOperatorMachineID && !laneExplicit, deps.HubRetry, inboxDirectRequestTimeout)
+}
+
+// newInboxDirectClient binds a direct --hub-url credential to a client whose
+// own timeout stays above the attempt context, so the context ends a slow
+// request and not the client (hk 4344).
+func newInboxDirectClient(hubURL string, env hubTokenEnv, cf hubCFAccessEnv, deps hubCLIDeps, command string, timeout time.Duration) (*hubOperatorClient, error) {
+	clientTimeout := inboxDirectRequestTimeout + inboxClientTimeoutSlack
 	if command == "wait" {
 		// The long-poll holds one request open for up to a full server wait;
 		// give the HTTP client the whole CLI deadline plus one server bound.
@@ -172,15 +210,7 @@ func runInboxCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 			clientTimeout = timeout + waitSlack
 		}
 	}
-	client, err := newHubOperatorClient(hubURL, env.Token, cf, deps, clientTimeout)
-	if err != nil {
-		fmt.Fprintln(stderr, "inbox: invalid hub URL")
-		return ExitConditionInvalid
-	}
-	if env.MachineID != hubOperatorMachineID {
-		client.machineID = env.MachineID
-	}
-	return executeInbox(client, stdout, stderr, inboxRequest{Command: command, Lane: lane, ID: id, Unread: unread, All: all, JSON: jsonMode, Timeout: timeout, EventIDs: eventIDs}, env.MachineID == hubOperatorMachineID && !laneExplicit, deps.HubRetry)
+	return newHubOperatorClient(hubURL, env.Token, cf, deps, clientTimeout)
 }
 
 type inboxHTTPClient interface {
@@ -189,8 +219,10 @@ type inboxHTTPClient interface {
 
 // executeInbox runs one inbox command over client. Every command is idempotent,
 // so each hub call may be sent again under policy (inbox_retry.go); the one
-// stderr line that reports the retries is the command's own.
-func executeInbox(client inboxHTTPClient, stdout, stderr io.Writer, req inboxRequest, unscopedOperator bool, policy hubretry.Policy) int {
+// stderr line that reports the retries is the command's own. attemptTimeout
+// bounds one short call; the wait's long poll derives its own bound from the
+// server hold.
+func executeInbox(client inboxHTTPClient, stdout, stderr io.Writer, req inboxRequest, unscopedOperator bool, policy hubretry.Policy, attemptTimeout time.Duration) int {
 	command, lane, id, unread, all, jsonMode, timeout, eventIDs := req.Command, req.Lane, req.ID, req.Unread, req.All, req.JSON, req.Timeout, req.EventIDs
 	if command == "wait" {
 		return runInboxWait(client, stdout, stderr, lane, timeout, jsonMode, policy)
@@ -239,7 +271,7 @@ func executeInbox(client inboxHTTPClient, stdout, stderr io.Writer, req inboxReq
 		}{id, all, lane})
 		payload = encoded
 	}
-	answer, stats, err := inboxCall{method: method, path: path, query: query, body: payload, timeout: inboxAttemptTimeout}.send(context.Background(), client, policy)
+	answer, stats, err := inboxCall{method: method, path: path, query: query, body: payload, timeout: attemptTimeout}.send(context.Background(), client, policy)
 	reportHubRetries(stderr, stats)
 	if err != nil {
 		fmt.Fprintln(stderr, "inbox: hub unavailable")

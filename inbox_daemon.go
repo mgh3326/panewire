@@ -45,16 +45,27 @@ func runInboxLocal(req inboxRequest, stdout, stderr io.Writer, socket string) in
 		return ExitDaemonUnavailable
 	}
 	defer conn.Close()
-	timeout := 15 * time.Second
+	// budget is the daemon's own request budget, sent as TimeoutMS; the CLI
+	// holds the socket for longer so the daemon's answer still arrives when
+	// that budget runs out (hk 4344).
+	budget := inboxNodeRequestTimeout
 	if req.Command == "wait" {
-		timeout = req.Timeout
-		if timeout < time.Duration(1<<63-1)-15*time.Second {
-			timeout += 15 * time.Second
+		// The daemon re-issues the long poll inside the CLI deadline, so it
+		// needs a whole server bound beyond it.
+		budget = req.Timeout
+		if budget < time.Duration(1<<63-1)-15*time.Second {
+			budget += 15 * time.Second
 		}
 	}
-	timer := time.AfterFunc(timeout, func() { _ = conn.Close() })
+	// Clamp the sum so a huge --timeout cannot overflow the socket deadline
+	// into a negative duration.
+	socketDeadline := budget
+	if socketDeadline <= time.Duration(1<<63-1)-inboxDaemonReplySlack {
+		socketDeadline += inboxDaemonReplySlack
+	}
+	timer := time.AfterFunc(socketDeadline, func() { _ = conn.Close() })
 	defer timer.Stop()
-	ms := timeout.Milliseconds()
+	ms := budget.Milliseconds()
 	if ms < 1 {
 		ms = 1
 	}
@@ -122,6 +133,6 @@ func (d *Daemon) handleInbox(ctx context.Context, req *inboxRequest) (any, error
 	// executeInbox owns this command's retries, so the stderr line it prints
 	// reaches the CLI that asked; the node client sends each call once.
 	client := nodeHubClient{ctx: ctx, client: d.cfg.Hub.Client, retry: hubretry.Policy{Budget: -1}}
-	code := executeInbox(client, &out, &errOut, *req, false, hubretry.Policy{})
+	code := executeInbox(client, &out, &errOut, *req, false, hubretry.Policy{}, inboxNodeRequestTimeout)
 	return localTextResult{Code: code, Stdout: out.String(), Stderr: errOut.String()}, nil
 }

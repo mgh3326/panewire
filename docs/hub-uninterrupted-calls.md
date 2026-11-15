@@ -27,6 +27,24 @@ the client refused, a rejected request.
 The daemon's inbox path turns its node-level retry off and lets the inbox
 command retry, so one command makes one budget, not two.
 
+## Request budgets
+
+One attempt is bounded by a per-caller budget; the retry budget above spans
+attempts (hk 4344).
+
+| Caller | One attempt |
+|---|---|
+| `panewire inbox` through the local node daemon | 15 s |
+| `panewire inbox` direct, `--hub-url` | 5 s |
+| the wait's long poll | the server hold it asked for, plus 10 s |
+
+The node budget covers the Cloudflare Access path in front of the hub, which
+takes 1–4 s of a request: the daemon path's old 5 s attempt lost calls that
+were still in flight (hk 3730). The daemon's caller holds its socket for that
+budget plus 5 s, so the daemon's answer still arrives when the budget runs out.
+The HTTP client's own timeout is set above the attempt context in every case,
+so a deadline ends a slow request and not the client.
+
 ## What the caller sees
 
 - A call that succeeds after retries returns its answer as an unretried call

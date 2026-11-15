@@ -11,11 +11,6 @@ import (
 	"github.com/mgh3326/panewire/internal/hubretry"
 )
 
-// inboxAttemptTimeout bounds one attempt at a short inbox call: the 5 seconds
-// one call had before retries. The retry budget spans attempts, so it is not
-// one of these.
-const inboxAttemptTimeout = 5 * time.Second
-
 // inboxAnswer is one read of an inbox answer. The body is read inside the
 // attempt, so a retry never holds a response open.
 type inboxAnswer struct {
