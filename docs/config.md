@@ -278,6 +278,20 @@ panewire:
    exit 81 before anything is uploaded. The worktree directory name is the local
    one. A job from a canonical checkout sends no `checkout` and runs in the
    node's `cwd_map[<repo name>]`.
+   A submitter need not hold that checkout at all: `--checkout-origin URL
+   --checkout-commit SHA --checkout-ref REF` names the spec directly and the
+   submitting host reads no checkout (`-c` is then not accepted; the two are
+   exclusive). `--checkout-origin` must be the repository's credential-free
+   clone URL naming owner/repo — `https://`, `ssh://`, `git://` or
+   `host:owner/repo` — the same origin the `-c` path uploads; `--checkout-commit` is
+   the exact 40-character commit (lowercase hex); `--checkout-ref` is
+   `pull/<n>/head` or `refs/heads/<branch>`. The node prepares a detached
+   worktree at that commit from that ref, exactly as for a `-c` spawn, and
+   refuses with `checkout_refused:sha-missing` when the fetched ref does not
+   contain the commit. The repository name, the worktree directory
+   (`<job>-checkout`) and the `cwd_key` come from the origin, not from a local
+   directory. The CLI asks the hub for `checkout_spec_v1` before submitting
+   and refuses with exit 2 against a hub that does not advertise it (hk 4738).
 3. sends the flags the hub's allowlist carries (`-m -l --t --job --owner
    --effort --role --lane --parent --task|--parent-job --report-relative -L --urgency
    --author-family --builder-job --review-pass`). The node supplies workspace, host and the

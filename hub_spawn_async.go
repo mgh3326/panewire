@@ -36,9 +36,12 @@ func (h *HubServer) handleSpawnFeatures(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	// spawn_expires_v1: the request carries expires_seconds (hk 4660).
+	// checkout_spec_v1: the request names its worktree with
+	// --checkout-origin/--checkout-commit/--checkout-ref and carries no -c
+	// (hk 4738).
 	// start_conditions_v1: --after conditions are queued as waiting and
 	// checked in one batched hk snapshot per scheduler pass (hk 4736).
-	writeJSON(w, http.StatusOK, map[string][]string{"features": {"spawn_expires_v1", "start_conditions_v1"}})
+	writeJSON(w, http.StatusOK, map[string][]string{"features": {"spawn_expires_v1", "start_conditions_v1", "checkout_spec_v1"}})
 }
 
 // decodeSpawnRequest authenticates and validates a spawn request for the submit

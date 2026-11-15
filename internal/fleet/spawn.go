@@ -33,6 +33,11 @@ type Spawn struct {
 	// Expires is --expires: the request's time limit (hk 4660). It travels as
 	// Submission.ExpiresSeconds, never in the node's args.
 	Expires string `json:"-"`
+	// CheckoutOrigin, CheckoutCommit and CheckoutRef are --checkout-origin,
+	// --checkout-commit and --checkout-ref: the pinned checkout a spec spawn
+	// names so the submitting host holds no checkout at all (hk 4738). They
+	// are submitter input only; the wire carries Repository.Checkout.
+	CheckoutOrigin, CheckoutCommit, CheckoutRef string `json:"-"`
 	// hubExpiresAt is the absolute request expiry the hub sent with a
 	// node-delivered spawn (hk 4747). The own spawn writes it into its
 	// job.spawned receipt as expires_at, which the node's pane sweep reads to
@@ -194,7 +199,7 @@ func parseSpawnIgnoring(args, ignored []string) (Spawn, error) {
 	for _, p := range []struct {
 		k string
 		v *string
-	}{{"c", &s.CWD}, {"m", &s.Profile}, {"profile", &s.Profile}, {"p", &s.Prompt}, {"w", &s.Workspace}, {"l", &s.Label}, {"t", &s.T}, {"job", &s.Job}, {"owner", &s.Owner}, {"effort", &s.Effort}, {"role", &s.Role}, {"lane", &s.Lane}, {"parent", &s.Parent}, {"task", &s.Task}, {"parent-job", &s.ParentJob}, {"host", &s.Host}, {"report", &s.Report}, {"L", &s.ExecutionLane}, {"operator-request", &s.OperatorRequest}, {"requested-by", &s.RequestedBy}, {"purpose", &s.Purpose}, {"report-relative", &s.ReportRelative}, {"tags", &s.Tags}, {"exclude-host", &s.ExcludeHosts}, {"exclude-pool", &s.ExcludePools}, {"override-reason", &s.OverrideReason}, {"containment", &s.Containment}, {"wait-timeout", &s.WaitTimeout}, {"expires", &s.Expires}, {"urgency", &s.Urgency}, {"author-family", &s.AuthorFamily}, {"builder-job", &s.BuilderJob}, {"e6-arm", &s.E6Arm}} {
+	}{{"c", &s.CWD}, {"m", &s.Profile}, {"profile", &s.Profile}, {"p", &s.Prompt}, {"w", &s.Workspace}, {"l", &s.Label}, {"t", &s.T}, {"job", &s.Job}, {"owner", &s.Owner}, {"effort", &s.Effort}, {"role", &s.Role}, {"lane", &s.Lane}, {"parent", &s.Parent}, {"task", &s.Task}, {"parent-job", &s.ParentJob}, {"host", &s.Host}, {"report", &s.Report}, {"L", &s.ExecutionLane}, {"operator-request", &s.OperatorRequest}, {"requested-by", &s.RequestedBy}, {"purpose", &s.Purpose}, {"report-relative", &s.ReportRelative}, {"tags", &s.Tags}, {"exclude-host", &s.ExcludeHosts}, {"exclude-pool", &s.ExcludePools}, {"override-reason", &s.OverrideReason}, {"containment", &s.Containment}, {"wait-timeout", &s.WaitTimeout}, {"expires", &s.Expires}, {"urgency", &s.Urgency}, {"author-family", &s.AuthorFamily}, {"builder-job", &s.BuilderJob}, {"e6-arm", &s.E6Arm}, {"checkout-origin", &s.CheckoutOrigin}, {"checkout-commit", &s.CheckoutCommit}, {"checkout-ref", &s.CheckoutRef}} {
 		f.StringVar(p.v, p.k, *p.v, "")
 	}
 	f.StringVar(&s.Grade, "grade", "", "task grade (implementer or consult)")
@@ -236,6 +241,11 @@ func parseSpawnIgnoring(args, ignored []string) (Spawn, error) {
 	}
 	if s.Job == "" {
 		s.Job = s.Label
+	}
+	// A spec spawn names its worktree instead of holding one; refuse a bad or
+	// half-given spec here, where every caller reads the flag name (hk 4738).
+	if _, _, err := s.checkoutSpec(); err != nil {
+		return s, err
 	}
 	if s.Role == "builder" {
 		return s, fail(exitUsage, "%s", retiredLeadSeatPointer)
@@ -794,7 +804,14 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 		}
 		a.finishPlacement(ctx, s, err)
 	}()
-	if s.CWD == "" || s.Prompt == "" || s.Label == "" || !slices.Contains([]string{"T0", "T1", "T2", "T3"}, s.T) {
+	// A hub-submitted spec spawn has no local cwd: the node prepares its
+	// worktree from Repository.Checkout and the pane starts there (hk 4738).
+	// Every other spawn needs a cwd this host can read.
+	cwdMissing := s.CWD == "" && (a.Repository == nil || a.Repository.Checkout == nil)
+	if cwdMissing || s.Prompt == "" || s.Label == "" || !slices.Contains([]string{"T0", "T1", "T2", "T3"}, s.T) {
+		if cwdMissing && s.CheckoutOrigin != "" {
+			return fail(exitUsage, "%s runs through the hub: configure [hub] hub_url, or pass -c to spawn from a local checkout", checkoutSpecFlags)
+		}
 		return fail(exitUsage, "spawn requires -c -p -l --t T0..T3; supply the missing flags (workspace defaults to executing local.workspace)")
 	}
 	if !validID(s.Job) || !validID(s.Label) || !slices.Contains(spawnRoles, s.Role) {
