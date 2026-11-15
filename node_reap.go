@@ -387,9 +387,18 @@ func readNodeJobDoneMarker(job *os.Root, digest string) (string, bool) {
 	return nodeJobDoneLine([]byte(line)), true
 }
 
-// nodeJobDoneMarkerCurrent reports whether no claim, spawn or reprompt landed
-// after the marker was written at. One that did starts a new round of the job
-// id, whose report the marker says nothing about.
+// nodeJobNewRoundKinds are the ledger kinds that start a new round of a job
+// id: the revive set the fleet's foldJob applies (internal/fleet/events.go),
+// job.claimed included for the node's spelling. A round differs from the one
+// an earlier marker recorded, whose report and line say nothing about it.
+var nodeJobNewRoundKinds = map[string]bool{
+	"job.claim": true, "job.claimed": true, "job.reclaim": true,
+	"job.spawned": true, "job.reprompted": true,
+}
+
+// nodeJobDoneMarkerCurrent reports whether no new round started after the
+// marker was written at. One that did means the marker answers for a report
+// the job id no longer has.
 func nodeJobDoneMarkerCurrent(job *os.Root, at time.Time) bool {
 	events, err := job.OpenRoot("events")
 	if errors.Is(err, os.ErrNotExist) {
@@ -414,8 +423,7 @@ func nodeJobDoneMarkerCurrent(job *os.Root, at time.Time) bool {
 		if sep < 0 || !strings.HasSuffix(name, ".json") {
 			continue
 		}
-		switch strings.TrimSuffix(name[sep+1:], ".json") {
-		case "job.claim", "job.claimed", "job.spawned", "job.reprompted":
+		if nodeJobNewRoundKinds[strings.TrimSuffix(name[sep+1:], ".json")] {
 			info, err := entry.Info()
 			if err != nil || info.ModTime().After(at) {
 				return false

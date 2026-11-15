@@ -165,3 +165,23 @@ func TestJobDirTTLDeletesAfterTheReportIsDeleted(t *testing.T) {
 	out := r.pass(true)
 	wantDelete(t, r, out, "j1", "confirmed")
 }
+
+// A reportless escalate is a duplicate when the same question is asked again,
+// including against a record an earlier version wrote: its digest is the
+// sha256 of no bytes, never "".
+func TestEscalateWithoutReportIsADuplicateOfItsQuestion(t *testing.T) {
+	r := newDoneRig(t)
+	putEvent(t, r.a, "j", "job.escalate", map[string]any{"report": "", "report_sha256": reportDigest(nil), "question": "which one?"})
+	if e := r.a.lifecycle(context.Background(), "escalate", []string{"j", "--question", "which one?"}); e != nil {
+		t.Fatal(e)
+	}
+	if got := len(r.events("job.escalate")); got != 1 {
+		t.Fatalf("job.escalate events=%d, want the recorded one only", got)
+	}
+	if got := len(r.relays()); got != 0 {
+		t.Fatalf("the duplicate relayed %d times", got)
+	}
+	if out := r.stdout(); !strings.Contains(out, "duplicate=yes") {
+		t.Fatalf("out=%q, want duplicate=yes", out)
+	}
+}
