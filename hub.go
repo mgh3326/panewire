@@ -147,6 +147,16 @@ type HubServerConfig struct {
 	PaneSweepInterval time.Duration
 	// PaneSweepAge is how long a job must have ended before its pane is closed.
 	PaneSweepAge time.Duration
+	// FleetStatusInterval is how often the hub writes the fleet status
+	// snapshot to hk (docs/fleet-status.md). Zero keeps it off, so a config
+	// built for a test never writes; a negative value is invalid.
+	FleetStatusInterval time.Duration
+	// FleetStatusPublish replaces the hk document write in tests; nil writes
+	// with fleet.PutHKDocument under the hub's hk credential.
+	FleetStatusPublish func(context.Context, string) error
+	// FleetStatusPlans replaces the per-grade plan in tests; nil runs the
+	// hub's own fleet App as a read-only dry run.
+	FleetStatusPlans func(context.Context) []fleet.StatusPlan
 	// handoffkeep is the durable relay-event store. It is package-private so the
 	// hub's public configuration keeps no credential-bearing field.
 	handoffkeep *handoffkeepRelayClient
@@ -269,9 +279,14 @@ type HubActiveJob struct {
 	Pane           string `json:"pane,omitempty"`
 	Tier           string `json:"tier,omitempty"`
 	Role           string `json:"role,omitempty"`
-	StartedAt      string `json:"started_at,omitempty"`
-	LastEventKind  string `json:"last_event_kind,omitempty"`
-	LastEventAt    string `json:"last_event_at,omitempty"`
+	// Profile is the profile (a catalog profile or a seat name) the job was
+	// placed on, read from its own job.spawned receipt. A node's heartbeat
+	// carries it so a direct `panewire spawn` counts toward the pool cap the
+	// hub applies to its own spawns (hk 3399).
+	Profile       string `json:"profile,omitempty"`
+	StartedAt     string `json:"started_at,omitempty"`
+	LastEventKind string `json:"last_event_kind,omitempty"`
+	LastEventAt   string `json:"last_event_at,omitempty"`
 }
 
 type hubJobRecord struct {
@@ -502,6 +517,11 @@ type HubServer struct {
 	waitingMu         sync.Mutex
 	waitingCheckedAt  time.Time
 	waitingReadFailed bool
+	// parkNoticeMu guards the parked-request owner notice's poll time and its
+	// candidate cursor (hub_spawn_park_notice.go).
+	parkNoticeMu        sync.Mutex
+	parkNoticeCheckedAt time.Time
+	parkNoticeCursor    spawnParkNoticeCursor
 	// fleetEvents writes a fleet event. Tests substitute a recorder; production
 	// leaves it nil and events go to the state directory (emitFleet).
 	fleetEvents func(time.Time, fleetEvent) bool
@@ -657,6 +677,12 @@ type HubServer struct {
 	// keeps at most one load publication in flight (docs/fleet-state.md).
 	fleetState     *fleetStateStore
 	fleetStateOnce sync.Once
+	// fleetStatusInterval is how often the fleet status snapshot is written;
+	// zero disables it. fleetStatusPublish and fleetStatusPlanFn are the
+	// test seams for the hk write and the per-grade plan (fleet_status.go).
+	fleetStatusInterval time.Duration
+	fleetStatusPublish  func(context.Context, string) error
+	fleetStatusPlanFn   func(context.Context) []fleet.StatusPlan
 	// launchBackoffs counts consecutive launch failures per (machine, kind),
 	// guarded by mu (hub_readiness.go).
 	launchBackoffs map[launchKey]*launchBackoff
@@ -779,6 +805,9 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 	if config.LanesNodeRowCap < 0 {
 		return nil, errors.New("hub lanes node row cap is invalid")
 	}
+	if config.FleetStatusInterval < 0 {
+		return nil, errors.New("hub fleet status interval is invalid")
+	}
 	if config.LanesNodeRowCap == 0 {
 		config.LanesNodeRowCap = defaultLanesNodeRowCap
 	}
@@ -852,6 +881,9 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 	}
 	hub.auth.Store(&authSet)
 	hub.fleetState = newFleetStateStore()
+	hub.fleetStatusInterval = config.FleetStatusInterval
+	hub.fleetStatusPublish = config.FleetStatusPublish
+	hub.fleetStatusPlanFn = config.FleetStatusPlans
 	hub.quietTimings = defaultDesignQuietTimings()
 	if hub.inbox != nil {
 		cleared, err := hub.inbox.store.clearReviewerReservations()
@@ -1852,7 +1884,7 @@ func decodeHubHeartbeatPayload(payload []byte) (hubHeartbeatPayload, bool) {
 				return hubHeartbeatPayload{}, false
 			}
 			for name := range rawJob {
-				if name != "job_id" && name != "agent_label" && name != "last_event_seq" && name != "push_sha" && name != "epoch" && name != "owner_lane" && name != "pane" && name != "tier" && name != "role" && name != "started_at" && name != "last_event_kind" && name != "last_event_at" {
+				if name != "job_id" && name != "agent_label" && name != "last_event_seq" && name != "push_sha" && name != "epoch" && name != "owner_lane" && name != "pane" && name != "tier" && name != "role" && name != "profile" && name != "started_at" && name != "last_event_kind" && name != "last_event_at" {
 					return hubHeartbeatPayload{}, false
 				}
 			}
@@ -2514,6 +2546,7 @@ func (h *HubServer) RunMaintenance(ctx context.Context) {
 	go h.runPaneSweep(ctx)
 	go h.runReviewerEnd(ctx)
 	go h.runPoolTriggers(ctx)
+	go h.runFleetStatus(ctx)
 	h.startSpawnCoordinator(ctx)
 	h.startConsultCoordinator(ctx)
 	// Startup replay runs once, before the first keepalive tick: whatever

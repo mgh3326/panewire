@@ -2,8 +2,6 @@ package fleet
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -59,6 +57,12 @@ type Submission struct {
 	// RetryHarnesses lists harness kinds already refused on RetryHost in this
 	// attempt. Like RetryHost, this is internal hub state, never wire input.
 	RetryHarnesses []string `json:"-"`
+	// CheckoutSpec marks a request whose worktree came from the
+	// --checkout-origin/--checkout-commit/--checkout-ref spec rather than a
+	// local -c checkout (hk 4738). Submit asks the hub for checkout_spec_v1
+	// first: a hub that predates it would run the job in the node's cwd_map
+	// path instead of the named commit. Never on the wire.
+	CheckoutSpec bool `json:"-"`
 }
 
 type LadderStepIdentity struct {
@@ -87,6 +91,9 @@ func (c *hubHTTP) Submit(ctx context.Context, request Submission) (Accepted, err
 	}
 	if request.ExpiresSeconds != 0 {
 		needs = append(needs, struct{ feature, flag string }{"spawn_expires_v1", "--expires"})
+	}
+	if request.CheckoutSpec {
+		needs = append(needs, struct{ feature, flag string }{"checkout_spec_v1", "--checkout-origin"})
 	}
 	if len(needs) != 0 {
 		status, raw, err := c.doIdempotent(ctx, http.MethodGet, "/v1/spawns/features", nil, 5*time.Second)
@@ -231,8 +238,12 @@ func (a *App) PrepareSubmission(ctx context.Context, s Spawn) (Submission, error
 		}
 	}
 
-	if s.CWD == "" || s.Prompt == "" || !validID(s.Job) || !validID(s.Label) || !isNumeric(s.Task) && s.ParentJob == "" {
-		return Submission{}, fail(exitUsage, "spawn requires -c CWD -p BRIEF -l LABEL --task TASK_ID (or --parent-job JOB)")
+	spec, specName, err := s.checkoutSpec()
+	if err != nil {
+		return Submission{}, err
+	}
+	if s.CWD == "" && spec == nil || s.Prompt == "" || !validID(s.Job) || !validID(s.Label) || !isNumeric(s.Task) && s.ParentJob == "" {
+		return Submission{}, fail(exitUsage, "spawn requires -c CWD (or %s) -p BRIEF -l LABEL --task TASK_ID (or --parent-job JOB)", checkoutSpecFlags)
 	}
 	if _, err := hubArgs(a.Jobs, s); err != nil {
 		return Submission{}, fail(exitUsage, "%v; correct the flag before submitting through the hub", err)
@@ -276,45 +287,49 @@ func (a *App) PrepareSubmission(ctx context.Context, s Spawn) (Submission, error
 	if s.E6Arm != "" && !ValidE6Arm(s.E6Arm, s.Profile) {
 		return Submission{}, fail(exitUsage, "PANEWIRE_E6_ARM must be <canon>@ or <canon>@<effort> with canon %s, got %q", s.Profile, s.E6Arm)
 	}
-	cwd, err := filepath.Abs(expand(s.CWD))
-	if err != nil {
-		return Submission{}, err
+	// hk 4738: a spawn may name its worktree instead of holding one. The spec
+	// is the same pinned checkout the -c path derives, so everything after
+	// this block sees one shape and the node prepares the same worktree.
+	var repo *repoResolution
+	cwd := ""
+	if spec != nil {
+		repo = &repoResolution{name: specName, url: spec.Origin, wt: spec.Dir}
+	} else {
+		cwd, err = filepath.Abs(expand(s.CWD))
+		if err != nil {
+			return Submission{}, err
+		}
+		cwd, err = filepath.EvalSymlinks(cwd)
+		if err != nil {
+			return Submission{}, fail(exitUsage, "cwd is unreadable; pass -c with an existing checkout")
+		}
+		s.CWD = cwd
+		repo = a.localRepo(ctx, cwd)
+		if repo == nil || repo.url == "" {
+			return Submission{}, fail(exitUsage, "checkout has no usable origin; configure origin and push the branch before spawn")
+		}
+		if repo.rel != "" {
+			return Submission{}, fail(exitPlacement, "hub_subdirectory_unsupported: pass -c with the checkout root before submitting")
+		}
+		if repo.wt == "" {
+			repo.sourceDir = cwd
+			repo.branch = strings.TrimSpace(a.call(ctx, "git", "-C", cwd, "branch", "--show-current").Out)
+			repo.head = strings.TrimSpace(a.call(ctx, "git", "-C", cwd, "rev-parse", "HEAD").Out)
+			if s.Role != "reviewer" && s.Role != "consult" && repo.branch != "" {
+				defaultRef := a.call(ctx, "git", "-C", cwd, "symbolic-ref", "--short", "refs/remotes/origin/HEAD")
+				if defaultRef.Code == 0 && strings.TrimSpace(defaultRef.Out) == "origin/"+repo.branch {
+					return Submission{}, fail(exitPlacement, "create a worktree on a new branch (git worktree add -b wk/<slug> ...) and pass it as -c")
+				}
+			}
+			repo.wt = checkoutWorktreeName(s.Job)
+		}
 	}
-	cwd, err = filepath.EvalSymlinks(cwd)
-	if err != nil {
-		return Submission{}, fail(exitUsage, "cwd is unreadable; pass -c with an existing checkout")
-	}
-	s.CWD = cwd
 	brief, err := a.readBrief(ctx, s.Prompt, hubMaxBriefBytes)
 	if _, doc, _ := briefDocKey(s.Prompt); doc && err != nil {
 		return Submission{}, err
 	}
 	if err != nil || len(brief) > hubMaxBriefBytes || !utf8.Valid(brief) || strings.TrimSpace(string(brief)) == "" {
 		return Submission{}, fail(exitUsage, "pass -p with a nonempty UTF-8 brief of at most 64 KiB")
-	}
-	repo := a.localRepo(ctx, cwd)
-	if repo == nil || repo.url == "" {
-		return Submission{}, fail(exitUsage, "checkout has no usable origin; configure origin and push the branch before spawn")
-	}
-	if repo.rel != "" {
-		return Submission{}, fail(exitPlacement, "hub_subdirectory_unsupported: pass -c with the checkout root before submitting")
-	}
-	if repo.wt == "" {
-		repo.sourceDir = cwd
-		repo.branch = strings.TrimSpace(a.call(ctx, "git", "-C", cwd, "branch", "--show-current").Out)
-		repo.head = strings.TrimSpace(a.call(ctx, "git", "-C", cwd, "rev-parse", "HEAD").Out)
-		if s.Role != "reviewer" && s.Role != "consult" && repo.branch != "" {
-			defaultRef := a.call(ctx, "git", "-C", cwd, "symbolic-ref", "--short", "refs/remotes/origin/HEAD")
-			if defaultRef.Code == 0 && strings.TrimSpace(defaultRef.Out) == "origin/"+repo.branch {
-				return Submission{}, fail(exitPlacement, "create a worktree on a new branch (git worktree add -b wk/<slug> ...) and pass it as -c")
-			}
-		}
-		repo.wt = s.Job
-		if len(repo.wt) > 110 {
-			sum := sha256.Sum256([]byte(s.Job))
-			repo.wt = repo.wt[:40] + "-" + hex.EncodeToString(sum[:])
-		}
-		repo.wt += "-checkout"
 	}
 	// A writing role must have its branch on origin before submitting: without
 	// refs/remotes/origin/<branch> the checkout spec falls back to a detached
@@ -339,7 +354,9 @@ func (a *App) PrepareSubmission(ctx context.Context, s Spawn) (Submission, error
 		}
 	}
 	var checkout *HubCheckout
-	if repo.wt != "" {
+	if spec != nil {
+		checkout = spec
+	} else if repo.wt != "" {
 		var why string
 		checkoutRepo := *repo
 		if s.Role == "reviewer" || s.Role == "consult" {
@@ -379,7 +396,7 @@ func (a *App) PrepareSubmission(ctx context.Context, s Spawn) (Submission, error
 			return Submission{}, fail(exitUsage, "%v", err)
 		}
 	}
-	request := Submission{RequestID: id, Brief: string(brief), Repository: Repository{Name: repo.name, Origin: checkout.Origin, Relative: repo.rel, Worktree: repo.wt, LocalRoot: repo.localRoot, Checkout: checkout}, OriginMachine: a.machine(), DeadlineSeconds: 600, E6Arm: s.E6Arm, Args: submissionArgs(submissionSpawn), StartConditions: conditions, ExpiresSeconds: expiresSeconds}
+	request := Submission{RequestID: id, Brief: string(brief), Repository: Repository{Name: repo.name, Origin: checkout.Origin, Relative: repo.rel, Worktree: repo.wt, LocalRoot: repo.localRoot, Checkout: checkout}, CheckoutSpec: spec != nil, OriginMachine: a.machine(), DeadlineSeconds: 600, E6Arm: s.E6Arm, Args: submissionArgs(submissionSpawn), StartConditions: conditions, ExpiresSeconds: expiresSeconds}
 	if _, err = ValidateSubmission(request); err != nil {
 		return Submission{}, err
 	}
@@ -414,7 +431,8 @@ func ValidateSubmission(request Submission) (Spawn, error) {
 		s.Host = request.OriginMachine
 		s.requestedLocal = true
 	}
-	if !regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`).MatchString(request.RequestID) || !validID(s.Job) || !validID(s.Label) || s.DryRun || s.Delegated || s.Wait || s.Prompt == "" || !filepath.IsAbs(s.CWD) || len(request.Brief) > hubMaxBriefBytes || !utf8.ValidString(request.Brief) || strings.TrimSpace(request.Brief) == "" || request.DeadlineSeconds < 1 || request.DeadlineSeconds > 3600 || !ValidSpawnExpiresSeconds(request.ExpiresSeconds) {
+	pinned := request.Repository.Checkout != nil
+	if !regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`).MatchString(request.RequestID) || !validID(s.Job) || !validID(s.Label) || s.DryRun || s.Delegated || s.Wait || s.Prompt == "" || s.CWD != "" && !filepath.IsAbs(s.CWD) || s.CWD == "" && !pinned || len(request.Brief) > hubMaxBriefBytes || !utf8.ValidString(request.Brief) || strings.TrimSpace(request.Brief) == "" || request.DeadlineSeconds < 1 || request.DeadlineSeconds > 3600 || !ValidSpawnExpiresSeconds(request.ExpiresSeconds) {
 		return s, fail(exitUsage, "invalid spawn request; rebuild it with panewire spawn")
 	}
 	if !isNumeric(s.Task) && s.ParentJob == "" {
@@ -430,7 +448,10 @@ func ValidateSubmission(request Submission) (Spawn, error) {
 		return s, fail(exitUsage, "use --t T0..T3 and a supported --role")
 	}
 	repo := request.Repository
-	if !validID(repo.Name) || repo.Worktree != "" && !validID(repo.Worktree) || !filepath.IsAbs(repo.LocalRoot) || !cloneURL.MatchString(repo.Origin) || credentialedURL(repo.Origin) || strings.ContainsAny(repo.Origin+repo.LocalRoot, "\x00\r\n") {
+	// A request with no -c names its worktree by the pinned checkout alone,
+	// so it has no local root to be absolute; every other request reads a
+	// local checkout and names the root it lives in (hk 4738).
+	if !validID(repo.Name) || repo.Worktree != "" && !validID(repo.Worktree) || s.CWD != "" && !filepath.IsAbs(repo.LocalRoot) || s.CWD == "" && repo.Worktree == "" || !cloneURL.MatchString(repo.Origin) || credentialedURL(repo.Origin) || strings.ContainsAny(repo.Origin+repo.LocalRoot, "\x00\r\n") {
 		return s, fail(exitUsage, "invalid repository descriptor; use a credential-free origin and a safe checkout name")
 	}
 	if repo.Relative != "" {

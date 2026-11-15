@@ -88,6 +88,23 @@ func (r *doneRig) relays() []string {
 	return out
 }
 
+// relayReports returns the --report of every relay emit: the report location
+// the desk's text ends at.
+func (r *doneRig) relayReports() []string {
+	var out []string
+	for _, c := range r.f.Calls {
+		if c.Name != "panewire" || len(c.Args) == 0 || c.Args[0] != "emit" {
+			continue
+		}
+		for i, arg := range c.Args {
+			if arg == "--report" && i+1 < len(c.Args) {
+				out = append(out, c.Args[i+1])
+			}
+		}
+	}
+	return out
+}
+
 // stderr is what `done` warned.
 func (r *doneRig) stderr() string { return r.a.Err.(*bytes.Buffer).String() }
 

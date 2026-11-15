@@ -3,6 +3,7 @@ package fleet
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -27,6 +28,11 @@ type doneInput struct {
 	// step that failed and carries on.
 	watcher bool
 	late    bool
+	// recovered: the report file is gone because `done` deleted it after the
+	// pin (hk 3685), and digest is the one the completion that announced it
+	// named. body is empty, so the step never publishes again; only the
+	// receipts decide what remains.
+	recovered bool
 }
 
 // settledReceipt is a job.record_settled receipt: the hk record is terminal
@@ -109,6 +115,44 @@ func (r doneReceipts) pinSettled(digest string) bool {
 	return false
 }
 
+// holds reports whether the hk record names this report: the settling write
+// carried the pin, or a pin write answered "pinned". A "held" pin names
+// another report and is not this one's.
+func (r doneReceipts) holds(digest string) bool {
+	if digest == "" {
+		return false
+	}
+	if r.pins[digest] == pinPinned {
+		return true
+	}
+	for _, s := range r.settled {
+		if s.sha == digest && s.pinned {
+			return true
+		}
+	}
+	return false
+}
+
+// held reports whether a pin write was answered "held": the record names
+// another report, so this one can never take the pin.
+func (r doneReceipts) held(digest string) bool { return digest != "" && r.pins[digest] == pinHeld }
+
+// completedReportDigest is the sha256 of the bytes the newest job.completed
+// announcing report carried. A report file the fleet deleted after the pin
+// (hk 3685) is named by that receipt, so a rerun of `done` still knows the
+// bytes hk holds.
+func completedReportDigest(j Job, report string) (string, bool) {
+	digest := ""
+	for _, ev := range j.Events {
+		if ev.Kind == "job.completed" && str(ev.Payload, "report") == report {
+			if sha := str(ev.Payload, "report_sha256"); sha != "" {
+				digest = sha
+			}
+		}
+	}
+	return digest, digest != ""
+}
+
 // resultDigest is the sha256 of the result's canonical JSON, "" for none.
 func resultDigest(result json.RawMessage) string {
 	if result == nil {
@@ -148,7 +192,7 @@ func (a *App) doneReport(ctx context.Context, j Job, in doneInput) error {
 	var ran []string
 
 	doc := receipts.published[in.digest]
-	if doc == "" {
+	if doc == "" && !in.recovered {
 		key, e := a.publishReport(ctx, j, in.report, in.body, in.digest)
 		if e != nil {
 			a.warn("report upload failed; local report retained")
@@ -205,16 +249,33 @@ func (a *App) doneReport(ctx context.Context, j Job, in doneInput) error {
 		}
 	}
 
-	pinPending := false
+	// Step 3: the terminal record's pin. The record, not a local settlement
+	// receipt, is the authority for the step's outcome: a same-id retry whose
+	// record ended before the upload landed reads it here and attaches the
+	// pair (hk 4354), a record already naming these bytes is a no-op, and one
+	// naming another report is a refusal. The settlement receipt only says
+	// this run settled a record the pin can attach to; a job with no hk
+	// record (or one the settlement left unwritten) keeps today's warning-only
+	// path in step 2.
+	pinPending, refused := false, doc != "" && receipts.held(in.digest)
+	pinned := doc != "" && receipts.holds(in.digest)
 	if doc != "" && len(receipts.settled) > 0 && receipts.completing(in.digest) == in.digest && !receipts.pinSettled(in.digest) {
-		outcome, e := a.pinReport(ctx, id, doc, in.digest)
-		if outcome == "" {
+		res, e := a.pinReport(ctx, id, doc, in.digest)
+		switch {
+		case e != nil:
 			pinPending = true
 			a.warn("report pin failed: reason=%s", doneResultReason(e))
-		} else if e = a.event(ctx, id, eventReportPinned, map[string]any{"report_sha256": in.digest, "document": doc, "outcome": outcome}); e != nil {
-			return e
-		} else {
-			ran = append(ran, "pinned")
+		case res.outcome == pinAbsent:
+			// The record is not completed: its state is another step's fact.
+		default:
+			p := map[string]any{"report_sha256": in.digest, "document": res.document, "outcome": res.outcome}
+			if e = a.event(ctx, id, eventReportPinned, p); e != nil {
+				return e
+			}
+			pinned, refused = res.outcome == pinPinned, res.outcome == pinHeld
+			if pinned {
+				ran = append(ran, "pinned")
+			}
 		}
 	}
 
@@ -238,10 +299,16 @@ func (a *App) doneReport(ctx context.Context, j Job, in doneInput) error {
 	if e := a.releaseQuota(ctx, j); e != nil {
 		return e
 	}
+	line := fmt.Sprintf("OK job=%s report=%s duplicate=yes%s", id, in.report, repaired(ran))
 	if slices.Contains(ran, "notified") {
-		fmt.Fprintf(a.Out, "OK job=%s report=%s kind=job.completed%s\n", id, in.report, relay)
-	} else {
-		fmt.Fprintf(a.Out, "OK job=%s report=%s duplicate=yes%s\n", id, in.report, repaired(ran))
+		line = fmt.Sprintf("OK job=%s report=%s kind=job.completed%s", id, in.report, relay)
+	}
+	fmt.Fprintln(a.Out, line)
+	// hk holds this report's bytes and the record names them: the local file
+	// only duplicates them (hk 3685 item 2). The marker keeps job.done's
+	// answer for the job whose report this deletes.
+	if pinned && a.removePinnedReport(in) {
+		a.markJobDone(id, in.digest, line)
 	}
 	if !in.watcher {
 		switch {
@@ -249,26 +316,98 @@ func (a *App) doneReport(ctx context.Context, j Job, in doneInput) error {
 			return fail(exitFailure, "job %s completed; report not in hk; rerun the same command", id)
 		case pinPending:
 			return fail(exitFailure, "job %s completed; report not pinned in hk; rerun the same command", id)
+		case refused:
+			return fail(exitStateConflict, "job %s completed; hk record names another report; local report kept", id)
 		}
 	}
 	return nil
 }
 
-// pinReport is the late write of report_doc and report_sha256 on a terminal
-// record. hk takes it once (hk 4354): outcome "pinned" when it committed, or
-// was already the record's pin, and "held" when the record names another
-// report, which is logged here and is not an error. An empty outcome is a
-// write hk did not answer; the next done repeats it.
-func (a *App) pinReport(ctx context.Context, id, doc, digest string) (string, error) {
-	e := a.putJobRecord(ctx, id, map[string]any{"report_doc": doc, "report_sha256": digest})
+// removePinnedReport deletes the local report whose bytes hk holds under the
+// record's pin, leaving only the pinned copy. A path outside the jobs tree
+// stays: `done --report` accepts one, and deleting outside the fleet's own
+// tree is not this step's to do. A file whose bytes changed after the
+// completion stays too: they are no longer the ones the record names. Every
+// refusal warns and none fails `done`; a report whose upload never landed keeps
+// its file for the [reap] net (hk 3685 item 3).
+func (a *App) removePinnedReport(in doneInput) bool {
+	path := filepath.Clean(in.report)
+	if !within(a.Jobs, path) {
+		a.warn("report kept: %s is outside the jobs root", in.report)
+		return false
+	}
+	body, e := os.ReadFile(path)
 	switch {
+	case errors.Is(e, os.ErrNotExist):
+		return false
+	case e != nil:
+		a.warn("report delete skipped: %v", e)
+		return false
+	case reportDigest(body) != in.digest:
+		a.warn("report kept: %s changed after the completion", in.report)
+		return false
+	}
+	if e := os.Remove(path); e != nil {
+		a.warn("report delete failed: %v", e)
+		return false
+	}
+	return true
+}
+
+// The pin step's outcomes. "pinned" and "held" are the receipts' vocabulary;
+// "absent" means the record is not a completed one, so there is nothing for
+// the late write to attach, and no receipt is written.
+const (
+	pinPinned = "pinned"
+	pinHeld   = "held"
+	pinAbsent = "absent"
+)
+
+// pinResult is step 3's answer: the outcome, and S's document (the one the
+// receipt names, written or not).
+type pinResult struct {
+	outcome  string
+	document string
+}
+
+// pinReport is the late write of report_doc and report_sha256 on a terminal
+// record (step 3). The record is read first, so the write is the one hk takes
+// once (hk 4354) only when the record holds no report, while a record that
+// already names these bytes is a no-op and one naming another report is the
+// "held" outcome: the retry's report can never take that pin. A write hk
+// refuses with 409 anyway (another writer pinned in between) is the same
+// outcome. The error is a write hk did not answer, or a record it did not
+// read; the next done repeats the step.
+func (a *App) pinReport(ctx context.Context, id, doc, digest string) (pinResult, error) {
+	store, e := a.jobStore()
+	if e != nil {
+		return pinResult{}, e
+	}
+	rec, e := store.Get(ctx, id)
+	if e != nil {
+		return pinResult{}, e
+	}
+	if str(rec, "state") != "completed" {
+		return pinResult{outcome: pinAbsent}, nil
+	}
+	heldDoc, heldSHA := str(rec, "report_doc"), str(rec, "report_sha256")
+	switch {
+	case heldDoc == "" && heldSHA == "":
+		// No report on the record: the once-only late pin.
+	case heldSHA == digest:
+		return pinResult{outcome: pinPinned, document: heldDoc}, nil
+	default:
+		a.warn("report pin kept: job %s record already names another report", id)
+		return pinResult{outcome: pinHeld, document: doc}, nil
+	}
+	switch e = a.putJobRecord(ctx, id, map[string]any{"report_doc": doc, "report_sha256": digest}); {
 	case e == nil:
-		return "pinned", nil
+		return pinResult{outcome: pinPinned, document: doc}, nil
 	case isJobStateConflict(e):
 		a.warn("report pin kept: job %s record already names another report", id)
-		return "held", nil
+		return pinResult{outcome: pinHeld, document: doc}, nil
 	}
-	return "", e
+	return pinResult{}, e
 }
 
 // repaired renders the steps a rerun finished, as " published=yes ...".
@@ -281,9 +420,11 @@ func repaired(ran []string) string {
 }
 
 // relayReport emits the completion to the parent lane's inbox: the report
-// path and its last line, with the document key when the report is in hk. It
-// returns " relay=file-only" when the emit failed and the durable arbiter
-// event alone carries it.
+// path and its last line, with the document key when the report is in hk. A
+// completion names the report by that hk key in place of the local path,
+// which the fleet deletes once the record pins it (hk 3685). It returns
+// " relay=file-only" when the emit failed and the durable arbiter event alone
+// carries it.
 func (a *App) relayReport(ctx context.Context, j Job, eventKind, report, question string, body []byte, doc string, late bool) string {
 	owner := j.Owner
 	if j.Parent != "" && (eventKind == "job.escalate" || j.Role == "builder") {
@@ -294,7 +435,13 @@ func (a *App) relayReport(ctx context.Context, j Job, eventKind, report, questio
 		last = lines[len(lines)-1]
 	}
 	if doc != "" {
-		last += " doc:" + doc
+		if eventKind == "job.completed" {
+			// The hk key replaces the path the desk used to see, so the doc:
+			// suffix would name it a second time.
+			report = doc
+		} else {
+			last += " doc:" + doc
+		}
 	}
 	argsEmit := []string{"emit", "--kind", eventKind, "--job", j.ID, "--owner-lane", owner, "--epoch", "1", "--label", j.Label, "--host", a.machine(), "--pane", j.Pane, "--inbox-root", filepath.Dir(a.Jobs)}
 	if late {

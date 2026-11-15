@@ -23,10 +23,15 @@ import (
 // a new `done` alone announces: publishing it would pin bytes no completion
 // named, so the sweep waits and logs the refusal once instead.
 //
+// A report hk already holds and the record already pins is nothing: `done`
+// deletes that local file once the pin lands (hk 3685), so the receipts, not
+// the file, decide whether a report has work left.
+//
 // The upload runs without the job's operation lock: it can wait on hk for the
 // upload bound, and a worker's `done` (which takes that lock) must never wait
 // behind it. The receipt and pin writes take the lock only briefly; neither
-// waits on hk's upload bound.
+// waits on hk's upload bound, and both re-read the job under it so a `done`
+// that pinned, deleted and receipted in between is not raced.
 //
 // Attempts are bounded per pass, so an hk outage costs at most
 // reportRepublishPerPass uploads or pin writes each pass, and a failed one is
@@ -88,9 +93,9 @@ func pinDue(receipts doneReceipts, sha string) bool {
 }
 
 // reportRepublishPending reports whether a completion announced a report this
-// pass has work for: one with no publish receipt, or the completing report
-// whose pin is still owed. It reads receipts only, no file, so a job whose
-// reports are all in hk costs a lock-free check.
+// pass has work for: one with no publish receipt and no pin naming its bytes,
+// or the completing report whose pin is still owed. It reads receipts only, no
+// file, so a job whose reports are all in hk costs a lock-free check.
 func reportRepublishPending(events []Event) bool {
 	receipts := readDoneReceipts(events)
 	for _, rep := range announcedReports(events) {
@@ -135,7 +140,8 @@ func (s *TaskPaneSweeper) RepublishReports(ctx context.Context, a *App) error {
 // republishJobReports republishes one ended job's announced reports and
 // finishes their receipts and pins, making at most budget hk writes. It
 // returns the writes it attempted, failed ones included: an hk outage must not
-// cost more than the pass's bound.
+// cost more than the pass's bound. The upload runs outside the job's operation
+// lock; only finishReport takes it.
 func (s *TaskPaneSweeper) republishJobReports(ctx context.Context, a *App, j Job, budget int) int {
 	receipts := readDoneReceipts(j.Events)
 	writes := 0
@@ -145,7 +151,8 @@ func (s *TaskPaneSweeper) republishJobReports(ctx context.Context, a *App, j Job
 		}
 		doc := publishedDocument(j.Events, rep.sha)
 		if doc == "" && receipts.pinSettled(rep.sha) {
-			// The record already names these bytes, so hk holds them.
+			// The record already names these bytes, so hk holds them, and
+			// `done` may have deleted the file after the pin (hk 3685).
 			continue
 		}
 		published := false
@@ -187,7 +194,8 @@ func (s *TaskPaneSweeper) republishJobReports(ctx context.Context, a *App, j Job
 		}
 		// A receipt alone is nothing unless the completing report still owes
 		// its pin; a report this pass just published owes its receipt either
-		// way.
+		// way. A `done` may have written both while the upload ran, in which
+		// case finishReport re-reads and does nothing.
 		if !published && !pinDue(receipts, rep.sha) {
 			continue
 		}
@@ -215,7 +223,7 @@ func (s *TaskPaneSweeper) finishReport(ctx context.Context, a *App, id string, r
 	}
 	defer unlock()
 	// Re-read under the lock: a done that finished meanwhile leaves receipts
-	// this pass must see.
+	// this pass must see, including the pin, after which it deletes the file.
 	current, err := a.job(id)
 	if err != nil {
 		return 0
@@ -231,11 +239,16 @@ func (s *TaskPaneSweeper) finishReport(ctx context.Context, a *App, id string, r
 		return 0
 	}
 	outcome, err := a.pinReport(ctx, id, doc, rep.sha)
-	if outcome == "" {
+	switch {
+	case err != nil:
 		s.reportKept(id, rep.sha, rep.path, "pin_failed")
 		return 1
+	case outcome.outcome == pinAbsent:
+		// The record is not completed: no receipt, as step 3 of `done` leaves
+		// it; the next pass repeats the pin.
+		return 1
 	}
-	if err := a.event(ctx, id, eventReportPinned, map[string]any{"report_sha256": rep.sha, "document": doc, "outcome": outcome}); err != nil {
+	if err := a.event(ctx, id, eventReportPinned, map[string]any{"report_sha256": rep.sha, "document": outcome.document, "outcome": outcome.outcome}); err != nil {
 		s.reportKept(id, rep.sha, rep.path, "pin_receipt_failed")
 		return 1
 	}

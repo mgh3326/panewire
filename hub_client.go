@@ -167,18 +167,22 @@ type HubClient struct {
 	panesAliveMu sync.Mutex
 	// paneIdleSince is the first heartbeat at which each pane was idle or
 	// done (hub_jobs_idle.go).
-	paneIdleSince     map[string]time.Time
-	paneIdleMu        sync.Mutex
-	sessionMu         sync.Mutex
-	spawnConfigPath   string
-	spawnJournalDir   string
-	spawnGateOnce     sync.Once
-	spawnGate         chan struct{}
-	spawnEngine       hubSpawnEngine
-	spawnPrepare      func(context.Context, nodeWorktreePrepareArgs) (any, string) // fixture seam
-	spawnJournalMu    sync.Mutex
-	spawnJournal      *nodeSpawnJournal
-	spawnJournalUsers int
+	paneIdleSince        map[string]time.Time
+	paneIdleMu           sync.Mutex
+	sessionMu            sync.Mutex
+	spawnConfigPath      string
+	spawnJournalDir      string
+	spawnSlotsAdvertised atomic.Int32
+	spawnSlotsOverride   int // fixture seam; 0 reads spawn.json
+	spawnAdmissionOnce   sync.Once
+	spawnAdmission       *nodeSpawnAdmission
+	spawnLocksMu         sync.Mutex
+	spawnLocks           map[string]chan struct{}
+	spawnEngine          hubSpawnEngine
+	spawnPrepare         func(context.Context, nodeWorktreePrepareArgs) (any, string) // fixture seam
+	spawnJournalMu       sync.Mutex
+	spawnJournal         *nodeSpawnJournal
+	spawnJournalUsers    int
 	// spawnActive holds the journal requests this process is executing; an
 	// executing entry missing from it was left by a restart.
 	spawnActiveMu sync.Mutex // also guards spawnWaiting
@@ -2045,7 +2049,7 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 	// that does not know the capabilities field drops the whole hello (see
 	// docs/r26-hub-spawn.md "Rollout order and rollback"), so the hello ack timer below re-sends it
 	// without them rather than leaving this node off the fleet.
-	if err := client.writeHello(ctx, peer, hubSpawnCapabilities); err != nil {
+	if err := client.writeHello(ctx, peer, client.helloCapabilities(hubSpawnCapabilities)); err != nil {
 		return nil, err
 	}
 	client.setRelayEmitter(func(event hubClientEvent) { _ = peer.write(ctx, hubClientWireEvent(event)) })
@@ -2190,7 +2194,7 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 				// the full hello once more; a hub that rejects capabilities
 				// drops it and keeps the record it already has.
 				capsResent = true
-				if err := client.writeHello(ctx, peer, hubSpawnCapabilities); err != nil {
+				if err := client.writeHello(ctx, peer, client.helloCapabilities(hubSpawnCapabilities)); err != nil {
 					return nil, err
 				}
 				// A repeated hello resets the hub's job and host state for

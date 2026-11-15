@@ -6,6 +6,19 @@ is the contract for what the relay does per harness and when it may say the
 text arrived. Hub-to-node transport is in [R20](r20-relay-persistence.md), the
 busy hold in [R27](r27-busy-relay.md), the lane routes in [R19](r19-lanes.md).
 
+An answer to a worker's ESC is a lane event to the job's lane, sent from any
+host:
+
+```sh
+panewire emit --kind lane.event --lane <job> --type order --text "…"
+panewire inbox status --event-id <id>
+```
+
+`panewire prompt` is not that path: it types through this host's one herdr
+session and never reaches the hub, so a target on another host or herdr
+session — a worker in m1's `fleet` session, say — is refused with the emit
+command named (hk 4810).
+
 ## Immediate delivery
 
 A worker directive is typed into the pane at once on every harness. It never

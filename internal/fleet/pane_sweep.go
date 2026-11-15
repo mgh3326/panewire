@@ -996,15 +996,15 @@ func (s *TaskPaneSweeper) closePane(ctx context.Context, a *App, j Job, task str
 	if reason := paneSessionProof(latest, fresh); reason != "" {
 		return s.paneUnlisted(ctx, a, latest, swept, reason)
 	}
-	// The usage is read before the close: once herdr stops listing the pane
-	// the live session reference is gone. The pane closes before hk is told
-	// the job ended, so a failed close never leaves a finished record beside
-	// an open pane.
-	usage, haveUsage := a.readJobUsage(ctx, latest, true)
+	// The session facts are read before the close: once herdr stops listing
+	// the pane the live session reference is gone. The pane closes before hk
+	// is told the job ended, so a failed close never leaves a finished record
+	// beside an open pane.
+	session, haveSession := a.readJobSession(ctx, latest, true)
 	if err := a.must(ctx, "herdr", "pane", "close", j.Pane); err != nil {
 		return SweptPane{}, "close_failed"
 	}
-	s.reapSweptPane(ctx, a, latest, j, task, end, usage, haveUsage, now)
+	s.reapSweptPane(ctx, a, latest, j, task, end, session, haveSession, now)
 	return swept, ""
 }
 
@@ -1054,21 +1054,21 @@ func (s *TaskPaneSweeper) paneUnlisted(ctx context.Context, a *App, j Job, swept
 			return SweptPane{}, reason
 		}
 	}
-	s.reapSweptPane(ctx, a, j, j, "", paneSweepJobEnd(j, ""), TokenUsage{}, false, a.Now())
+	s.reapSweptPane(ctx, a, j, j, "", paneSweepJobEnd(j, ""), jobSession{}, false, a.Now())
 	swept.Reason = SweepPaneGone
 	return swept, ""
 }
 
 // reapSweptPane is the tail a closed (or proven gone) pane leaves: the job's
-// end state on its hk record when it never reported one, the usage figures,
-// the quota lease, the lane, the job.reaped event, and the worktree.
-func (s *TaskPaneSweeper) reapSweptPane(ctx context.Context, a *App, latest, j Job, task string, end paneSweepEnd, usage TokenUsage, haveUsage bool, now time.Time) {
+// end state on its hk record when it never reported one, the usage and skill
+// facts, the quota lease, the lane, the job.reaped event, and the worktree.
+func (s *TaskPaneSweeper) reapSweptPane(ctx context.Context, a *App, latest, j Job, task string, end paneSweepEnd, session jobSession, haveSession bool, now time.Time) {
 	key := paneSweepKey(j)
 	delete(s.idleSince, key)
 	delete(s.endedSince, key)
 	a.markSweptJob(ctx, latest, end.state)
-	if haveUsage {
-		a.writeJobUsage(ctx, latest.ID, usage)
+	if haveSession {
+		a.writeJobSession(ctx, latest.ID, session)
 	}
 	if err := a.releaseQuota(ctx, j); err != nil {
 		a.warn("quota retained: %v", err)

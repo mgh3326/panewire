@@ -18,9 +18,15 @@ import (
 //   - roles: the spawn roles the host accepts. Unset accepts every role.
 //   - grades: the task grades the host accepts. Unset accepts every grade. A
 //     consult has no grade, so a host with grades set refuses it.
+//
+// Placement reads these rows from the config of the process that places: the
+// hub for spawn and --dry-run, whichever machine submitted. That one file is
+// the declaration site; a node's own tags are not read by hub placement.
+//
+// hostCapabilities is the closed list a caps array may name.
 
 var spawnRoles = []string{"implementer", "reviewer", "consult"}
-var hostCapabilities = []string{"macos", "linux", "unity", "xcode", "gpu", "heavy-go"}
+var hostCapabilities = []string{"macos", "linux", "unity", "blender", "xcode", "gpu", "heavy-go"}
 
 // hostCaps returns the declared capabilities of a host: tags and caps merged.
 func hostCaps(cfg map[string]any) []string {

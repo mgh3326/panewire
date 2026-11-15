@@ -21,26 +21,26 @@ func TestOmpDsflash41RegularSeatNeedsNoArm(t *testing.T) {
 	}
 
 	l := Launch{ModelID: "deepseek/deepseek-v4.1-flash", Effort: "high", Grade: "A+", Gate: "default"}
-	host := map[string]any{"omp_commandcode": true}
+	capabilityOn := true
 	for _, grade := range []string{"A", "B"} {
 		t.Run("worker on grade "+grade+" without an arm", func(t *testing.T) {
-			if err := s.Check(l, "implementer", grade, "", "", host); err != nil {
+			if err := s.Check(l, "implementer", grade, "", "", capabilityOn); err != nil {
 				t.Fatalf("regular seat refused a grade %s worker: %v", grade, err)
 			}
 		})
 	}
 
 	t.Run("host without omp_commandcode is refused", func(t *testing.T) {
-		if got := code(s.Check(l, "implementer", "B", "", "", map[string]any{})); got != exitConfig {
+		if got := code(s.Check(l, "implementer", "B", "", "", false)); got != exitConfig {
 			t.Fatalf("capability absent: code %d, want %d", got, exitConfig)
 		}
 	})
 
 	t.Run("reviewer needs an independent author family", func(t *testing.T) {
-		if got := code(s.Check(l, "reviewer", "B", "openai", "", host)); got != 0 {
+		if got := code(s.Check(l, "reviewer", "B", "openai", "", capabilityOn)); got != 0 {
 			t.Fatalf("independent reviewer: code %d, want 0", got)
 		}
-		if got := code(s.Check(l, "reviewer", "B", "deepseek", "", host)); got != exitSeatRefused {
+		if got := code(s.Check(l, "reviewer", "B", "deepseek", "", capabilityOn)); got != exitSeatRefused {
 			t.Fatalf("same-family reviewer: code %d, want %d", got, exitSeatRefused)
 		}
 	})

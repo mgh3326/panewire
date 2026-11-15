@@ -34,6 +34,9 @@ func normalizeHubActiveJobMetadata(job *HubActiveJob) {
 	if job.Role != "implementer" {
 		job.Role = ""
 	}
+	if !fleetStateProfilePattern.MatchString(job.Profile) {
+		job.Profile = ""
+	}
 	if job.StartedAt != "" {
 		if _, err := time.Parse(time.RFC3339, job.StartedAt); err != nil {
 			job.StartedAt = ""

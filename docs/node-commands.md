@@ -480,13 +480,18 @@ path is accepted.
 | `done` | panewire's line | panewire ran and completed the job. |
 | `already-done` | the recorded line | This report already completed the job. panewire does not run again, or it answered `duplicate=yes`. |
 | `not-a-job` | — | The job directory is missing or is a symlink. panewire does not run. |
-| `report-invalid` | — | `report` is not one of the two paths, is missing, or is not a regular file. panewire does not run. |
+| `report-invalid` | — | `report` is not one of the two paths, or is not a regular file and no done marker answers it. panewire does not run. |
 
 A failed or timed-out panewire answers `done_failed` with optional `detail`: the last stderr line, redacted and bounded to 240 UTF-8 bytes. The command can be re-issued; a node
 without a jobs root answers `jobs_root_unset`. A `done` that completed the job but left its report out of hk exits non-zero (`completed; report not in hk; rerun the same command`), so it answers `done_failed` too, and the re-issued command finishes the report ([completion receipts](config.md#completion-receipts)). The node records the report's
 digest in `<inbox>/jobs/<job>/.node-job-done` after panewire succeeds. The digest
 is the key because a released job id can be claimed again: a new report for that
 id runs panewire, the same rule panewire's own duplicate check applies.
+`panewire done` writes the same marker itself when it deletes the report after
+the pin (hk 3685), so a `job.done` for a `<dir>/report.md` that is gone answers
+`already-done` with the recorded line rather than `report-invalid`. A claim,
+spawn or reprompt recorded after the marker starts a new round of that job id,
+and the marker does not answer for it.
 
 ### `job.mark_lost`
 
@@ -541,7 +546,8 @@ that already ended is not given a second event.
 | `panes-unknown` | `herdr pane list` failed, so a pane check proves nothing. |
 | `completed` | the local ledger holds a `job.completed` event; nothing is written. |
 | `newer-claim` | the local ledger holds a `job.reclaim` event; nothing is written. |
-| `ledger_missing` | the job dir or its `events/` is gone, so the ledger cannot prove the attempt; nothing is written. |
+| `ledger_missing` | the job dir or its `events/` is gone, and the node cannot prove that no attempt of the job is live; nothing is written. |
+| `no-live-attempt` | the job dir or its `events/` is gone, and the node's spawn journal and active-job list name no live attempt of the job under any label; nothing is written. |
 | `result-missing` | `reviewer_result_posted` only: the job directory holds no findings object and no report; nothing is written. |
 | `result-settling` | `reviewer_result_posted` only: a result file changed less than 10 minutes ago or while the node read it; nothing is written. |
 | `pane-working` | `reviewer_result_posted` only: the job's pane is `working`; nothing is written. |
@@ -551,7 +557,24 @@ that already ended is not given a second event.
 
 A missing job dir or `events/` is a ledger that is unknown, not an empty one, so
 it answers `ledger_missing` and the node never writes `lost` over a record it
-cannot check. A failed ledger read or handoffkeep write answers
+cannot check. It does not free the caller either: a job id can be claimed again
+under another label, and a bare missing ledger cannot rule that attempt out. The
+node reads its own spawn journal and active-job list instead, and answers
+`no-live-attempt` only when both are readable and neither names the job under
+any label — an executing journal row is a spawn this node is starting, and an
+active entry is a job whose ledger exists again. Only that proof lets the hub
+free a failed no-pane holder's reservation (hk 4799, then
+[hub-spawn-operations.md](hub-spawn-operations.md#acceptance-and-identity)). A
+journal or jobs directory the node cannot read is no proof, so the record and
+the reservation stay. A spawn journal row written before the strict identity
+existed names no job the node can trust; while one is still executing the node
+answers `ledger_missing` for any job, not only the job the row names, because
+its real job cannot be re-derived. Restart settlement completes such a row as
+soon as herdr proves the spawn landed or is gone; while the evidence keeps that
+undecided the row can outlive the upgrade, and the hold with it (hk 4799).
+The `reviewer_result_posted` end keeps answering
+`ledger_missing` for a missing ledger: it ends a reviewer's job, which holds no
+reservation (hk 4737). A failed ledger read or handoffkeep write answers
 `mark_lost_failed`; a node without a jobs root answers `jobs_root_unset`.
 
 ### `job.reap`
@@ -1008,7 +1031,11 @@ most 24 KiB and contains a `findings` array. Otherwise it is null and
 `findings_error` is `missing`, `too_large`, `not_json`, or `schema`. A missing
 job has `found: false`. Files must be regular files inside the job directory.
 `report` contains `present`, `bytes`, `sha256`, and `last_line`; the last line
-is limited to 256 UTF-8 bytes. The report body is never returned. `completed`
+is limited to 256 UTF-8 bytes. The report body is never returned. A local
+`report.md` that is gone because `done` deleted it after the hk pin (hk 3685)
+still reads `present: true`, with `sha256` taken from the job's newest
+`job.completed` that named a document; `bytes` is 0 and `last_line` empty, both
+having been facts of the deleted file. `completed`
 is true when the local event ledger contains a `job.completed` event.
 `activity_events` counts the ledger's `events/` files that are not spawn
 bookkeeping: `job.claim`, `job.reclaim`, `job.placement`, `job.task_link`,

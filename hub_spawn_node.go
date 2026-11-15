@@ -35,6 +35,9 @@ type hubSpawnConfig struct {
 	// whole file, as cwd_map does.
 	Checkouts map[string]string `json:"checkouts,omitempty"`
 	Enabled   bool              `json:"enabled"`
+	// SpawnConcurrency is this host's N concurrent spawns (hk 4578); 0 takes
+	// the per-host default (node_spawn_concurrency.go).
+	SpawnConcurrency int `json:"spawn_concurrency,omitempty"`
 	// HandoffkeepEnvDefault is set only by resolveHubSpawnConfig on a node
 	// running on defaults, never from JSON: the credential then resolves as
 	// hkcred.Load does (handoffkeepEnv), without the HANDOFFKEEP_TOKEN
@@ -117,6 +120,8 @@ func loadHubSpawnConfig(path string) (hubSpawnConfig, error) {
 		return spawnConfigRefusal("workspace_required", "")
 	case config.HERDRSession == "":
 		return spawnConfigRefusal("herdr_session_required", "")
+	case config.SpawnConcurrency < 0 || config.SpawnConcurrency > nodeSpawnSlotsMax:
+		return spawnConfigRefusal("spawn_concurrency_range", fmt.Sprintf("spawn_concurrency must be 0..%d", nodeSpawnSlotsMax))
 	}
 	keys := make([]string, 0, len(config.CWDMap))
 	for key := range config.CWDMap {
@@ -202,39 +207,14 @@ func (client *HubClient) handleHubSpawn(ctx context.Context, peer *hubClientConn
 		client.refuseUngrantedSpawn(ctx, peer, journal, message)
 		return
 	}
-	client.spawnGateOnce.Do(func() { client.spawnGate = make(chan struct{}, 1) })
 	stop := client.work.stopSignal()
-	select {
-	case <-waiter.claimed:
-		// Another copy acquired the gate while this copy was waiting.
-		client.answerAdmissionWait(ctx, peer, journal, message, deadline)
+	// One admission covers the slot and the directory: a checkout spawn
+	// holds its own job dir, a spawn without one holds the whole node, from
+	// before the executing claim through launch, brief delivery and landing
+	// proof (hk 4578, node_spawn_concurrency.go).
+	release, admitted := client.awaitSpawnAdmission(ctx, admissionCtx, stop, waiter, client.spawnAdmissionKey(message), peer, journal, message, deadline)
+	if !admitted {
 		return
-	case <-admissionCtx.Done():
-		select {
-		case <-stop:
-			return
-		default:
-		}
-		if ctx.Err() == nil {
-			if message.StartByMS != 0 {
-				// Never granted, never started: keep the tombstone durable.
-				client.refuseUngrantedSpawn(ctx, peer, journal, message)
-			} else {
-				client.answerAdmissionWait(ctx, peer, journal, message, deadline)
-			}
-		}
-		return
-	case <-stop:
-		// Unclaimed work is replayed after the node restarts.
-		return
-	case client.spawnGate <- struct{}{}:
-	}
-	held := true
-	release := func() {
-		if held {
-			<-client.spawnGate
-			held = false
-		}
 	}
 	defer release()
 	if !client.work.admitSpawn() {
@@ -282,6 +262,47 @@ func (client *HubClient) handleHubSpawn(ctx context.Context, peer *hubClientConn
 	}
 	release()
 	client.sendSpawnResult(ctx, peer, result, message.OperatorAuthorized)
+}
+
+// awaitSpawnAdmission admits this copy under key, or answers the copy whose
+// wait ended first; false means this copy must return without claiming.
+func (client *HubClient) awaitSpawnAdmission(ctx, admissionCtx context.Context, stop <-chan struct{}, waiter *nodeSpawnWaiter, key string, peer *hubClientConnection, journal *nodeSpawnJournal, message hubOutboundMessage, deadline time.Time) (func(), bool) {
+	admission := client.nodeAdmission()
+	if key == "" {
+		admission.waitExclusive(1)
+		defer admission.waitExclusive(-1)
+	}
+	for {
+		release, changed := admission.tryAdmit(key, client.nodeSpawnSlots())
+		if release != nil {
+			return release, true
+		}
+		select {
+		case <-changed:
+		case <-waiter.claimed:
+			// Another copy claimed this request while this copy was waiting.
+			client.answerAdmissionWait(ctx, peer, journal, message, deadline)
+			return nil, false
+		case <-admissionCtx.Done():
+			select {
+			case <-stop:
+				return nil, false
+			default:
+			}
+			if ctx.Err() == nil {
+				if message.StartByMS != 0 {
+					// Never granted, never started: keep the tombstone durable.
+					client.refuseUngrantedSpawn(ctx, peer, journal, message)
+				} else {
+					client.answerAdmissionWait(ctx, peer, journal, message, deadline)
+				}
+			}
+			return nil, false
+		case <-stop:
+			// Unclaimed work is replayed after the node restarts.
+			return nil, false
+		}
+	}
 }
 
 // nodeSpawnWaiter is process-local: it binds concurrent copies of an unclaimed
@@ -567,7 +588,14 @@ func (client *HubClient) runHubSpawn(parent context.Context, message hubOutbound
 		if prepare == nil {
 			prepare = client.nodeWorktreePrepare
 		}
+		unlock, locked := client.lockSpawnPrepare(runContext, message.Checkout)
+		if !locked {
+			result.Retryable = true
+			result.RC, result.Error = 81, "checkout_refused:"+nodeOutcomeBusy
+			return result
+		}
 		prepared, code := prepare(runContext, nodeWorktreePrepareArgs{Origin: message.Checkout.Origin, Mode: message.Checkout.Mode, Branch: message.Checkout.Branch, Sha: message.Checkout.Sha, Fetch: message.Checkout.Fetch, Dir: message.Checkout.Dir, VerifyReuse: message.Checkout.VerifyReuse})
+		unlock()
 		ms := time.Since(started).Milliseconds()
 		checkoutMS = &ms
 		if code != "" {
@@ -585,6 +613,11 @@ func (client *HubClient) runHubSpawn(parent context.Context, message hubOutbound
 			return result
 		}
 		cwd = outcome.Worktree.Path
+		if spawnLaneEscapes(cwd, hubSpawnFlagArg(message.Args, "-L")) {
+			// The held job dir must be where the agent runs (hk 4578).
+			result.RC, result.Error = 81, "checkout_refused:lane_outside_worktree"
+			return result
+		}
 	}
 
 	temporary, err := os.CreateTemp("", "panewire-spawn-*")

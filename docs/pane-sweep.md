@@ -118,7 +118,9 @@ report's `report_sha256`, so the completion exists while hk holds no document
 for it. Before the panes are judged, the pass PUTs exactly the announced bytes
 under `done`'s content-addressed key, writes the `job.report_published`
 receipt, and pins the terminal record (`report_doc`, `report_sha256`) when the
-report is the completing one, as step 3 of `done` does.
+report is the completing one, as step 3 of `done` does. A report the record
+already pins is nothing to republish: hk holds its bytes, and `done` deletes the
+local file once the pin lands (hk 3685), so the receipts, not the file, decide.
 
 A report whose file no longer hashes to the announced sha256 is left alone with
 `reason=report_changed`: it is still being written, or it belongs to a later
@@ -128,7 +130,8 @@ pin write hk did not answer is repeated by a later pass. At most five hk writes
 (an upload or a pin) run per pass, a failure is retried by the next pass, and
 each republished report or refusal is logged once. The upload runs without the
 job's operation lock so a worker's `done` never waits behind it; the receipt and
-pin writes take that lock only briefly. The ordered `pane.sweep` command does
+pin writes take that lock only briefly, and a pass that finds a `done` holding it
+leaves both writes to the next pass. The ordered `pane.sweep` command does
 not republish; only the node's own local pass does.
 
 ## Timing

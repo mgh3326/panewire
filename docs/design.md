@@ -149,7 +149,7 @@ panewire prompt --from SENDER --to TARGET --file PATH [--uptake tool|status-tran
 | 인자 | 계약 |
 |---|---|
 | `--from SENDER` | 비어 있지 않은 provenance. 권고 형식은 `세션이름 (역할, pane_id)`이며, 모델명만으로 식별하지 않는다. 원문 prompt와 함께 로그에 남긴다. |
-| `--to TARGET` | `wait --agent`와 동일한 해석기: pane_id·name·label 정확 일치만. 복수 후보(전부 표시 후 실패), 부재, 현재 pane과 문맥 불일치는 전송하지 않는다. |
+| `--to TARGET` | `wait --agent`와 동일한 해석기: pane_id·name·label 정확 일치만. 복수 후보(전부 표시 후 실패), 부재, 현재 pane과 문맥 불일치는 전송하지 않는다. 이 데몬이 서비스하는 herdr 세션의 pane만 대상이며, 다른 host·herdr 세션(예: m1의 `fleet` 세션 워커)의 대상은 exit 2로 거부하고 `panewire emit --kind lane.event --lane <job> --type order --text ...`(도착 확인 `panewire inbox status --event-id <id>`)를 안내한다 — 잡의 ESC 답은 그 lane event로 보낸다(hk 4810). |
 | `--file PATH` | prompt 본문을 읽을 입력 파일. 파일은 전송의 원문 정본이며 SHA-256을 계산한다. 첫 metadata block에 수신자 identity를 기술하는 `expect:`를 포함해야 한다. |
 | `--uptake` | `status-transition` 또는 `tool`. 생략 시 제출 검증까지만 수행하며 uptake 성공을 주장하지 않는다. |
 | `--directive` | 잡의 워커에게 보내는 지시(리뷰 지적, ESC 답, 후속 명령). working 대상을 거부(exit 6)하지 않고, working 에서는 볼 수 없는 status-transition 을 요구하지 않으며 제출 증거만으로 판정한다(`uptake_result=submission_only_working`). 플래그가 없으면 기존 규칙 그대로다. |

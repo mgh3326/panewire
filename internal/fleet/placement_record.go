@@ -629,7 +629,9 @@ func (a *App) placementRepo(ctx context.Context, cwd string) string {
 // linked-worktree checkout the target node can clone instead of relying on
 // its cwd_map.
 func (a *App) placementRepoCheckout(ctx context.Context, cwd string) (string, bool) {
-	if cwd == "" {
+	// A hub-submitted spec spawn has no local cwd; its Repository is the
+	// evidence the hub placed with (hk 4738).
+	if cwd == "" && a.Repository == nil {
 		return "", false
 	}
 	bounded, cancel := context.WithTimeout(ctx, placementDeliveryBudget)
