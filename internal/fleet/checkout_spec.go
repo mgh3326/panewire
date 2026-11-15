@@ -51,16 +51,25 @@ func (s Spawn) checkoutSpec() (*HubCheckout, string, error) {
 	if !spawnargs.ValidFetchRef(s.CheckoutRef) {
 		return nil, "", fail(exitUsage, "--checkout-ref must be pull/<n>/head or refs/heads/<branch>, got %q", s.CheckoutRef)
 	}
-	ownerRepo, ok := spawnargs.OriginRepo(s.CheckoutOrigin)
-	if !ok || !cloneURL.MatchString(s.CheckoutOrigin) || credentialedURL(s.CheckoutOrigin) {
-		return nil, "", fail(exitUsage, "--checkout-origin must be the repository's clone URL naming owner/repo (https, ssh or git, or host:owner/repo, no credentials), got %q", s.CheckoutOrigin)
+	// The spec's origin becomes the userinfo-free https form the -c path
+	// uploads (hubOrigin), so an scp-style or ssh remote is accepted and
+	// normalized instead of refused, and the node clones one form for both
+	// paths. The normalized origin must still name owner/repo.
+	const originRefusal = "--checkout-origin must be the repository's remote, naming owner/repo: https://, ssh://, git://, git@host:owner/repo or host:owner/repo, with no credentials"
+	origin, ok := hubOrigin(s.CheckoutOrigin)
+	if !ok {
+		return nil, "", fail(exitUsage, "%s, got %q", originRefusal, s.CheckoutOrigin)
+	}
+	ownerRepo, ok := spawnargs.OriginRepo(origin)
+	if !ok {
+		return nil, "", fail(exitUsage, "%s, got %q", originRefusal, s.CheckoutOrigin)
 	}
 	name := ownerRepo[strings.IndexByte(ownerRepo, '/')+1:]
 	if !validID(name) || !hubKeyRule.MatchString(RepoKey(name)) {
 		return nil, "", fail(exitUsage, "--checkout-origin names repository %q, which is not a hub cwd key (lowercase letters, digits, dot, underscore or hyphen, at most 64)", name)
 	}
 	return &HubCheckout{
-		Origin: s.CheckoutOrigin,
+		Origin: origin,
 		Mode:   "detached",
 		Sha:    s.CheckoutCommit,
 		Fetch:  s.CheckoutRef,

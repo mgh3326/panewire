@@ -282,8 +282,10 @@ panewire:
    --checkout-commit SHA --checkout-ref REF` names the spec directly and the
    submitting host reads no checkout (`-c` is then not accepted; the two are
    exclusive). `--checkout-origin` must be the repository's credential-free
-   clone URL naming owner/repo — `https://`, `ssh://`, `git://` or
-   `host:owner/repo` — the same origin the `-c` path uploads; `--checkout-commit` is
+   remote naming owner/repo — `https://`, `ssh://`, `git://`,
+   `git@host:owner/repo` or `host:owner/repo` — and is normalized to the same
+   https form the `-c` path uploads, so the node clones one form for both
+   paths; `--checkout-commit` is
    the exact 40-character commit (lowercase hex); `--checkout-ref` is
    `pull/<n>/head` or `refs/heads/<branch>`. The node prepares a detached
    worktree at that commit from that ref, exactly as for a `-c` spawn, and
