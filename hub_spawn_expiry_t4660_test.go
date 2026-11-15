@@ -913,3 +913,86 @@ func TestUnreachableTaskDoesNotStarveOtherConditions_t4660(t *testing.T) {
 		t.Fatalf("an unread task must fail closed: %+v", result)
 	}
 }
+
+// ---- review round 2 (mergewake findings on head ae38439) ----
+
+// A request that waits on several tasks, some of which never answer, still
+// reads the healthy one: a pass reads only the tasks due, so the ones a
+// cut-off pass never reached come first on the next.
+func TestAndedConditionsReadProgressAcrossPasses_t4660(t *testing.T) {
+	var healthyReads atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		id := strings.TrimPrefix(r.URL.Path, "/v1/tasks/")
+		if id == "9015" {
+			healthyReads.Add(1)
+			_, _ = w.Write([]byte(`{"id":9015,"state":"merged","relations":[]}`))
+			return
+		}
+		<-r.Context().Done() // never answers; the read's own bound ends it
+	}))
+	t.Cleanup(server.Close)
+	t.Setenv("HANDOFFKEEP_URL", server.URL)
+	t.Setenv("HANDOFFKEEP_TOKEN_SVC_PANEWIRE", "start-condition-test")
+	h := asyncSpawnHub(t)
+	clock := expiryClock(h, expiryNow()) // frozen: no poll interval elapses
+	h.startConditionPoll = time.Hour
+	h.startConditionReadBound = 30 * time.Millisecond
+	h.startConditionBudget = 100 * time.Millisecond
+	var conditions []fleet.StartCondition
+	for id := 9010; id <= 9015; id++ {
+		conditions = append(conditions, fleet.StartCondition{Kind: "task", TaskID: strconv.Itoa(id), State: "merged"})
+	}
+	request := waitingRequest(500, conditions...)
+	if _, _, err := h.inbox.store.claimSpawn(t.Context(), request, "wait-job", "parent", *clock); err != nil {
+		t.Fatal(err)
+	}
+	for pass := 0; pass < 4 && healthyReads.Load() == 0; pass++ {
+		h.checkWaitingSpawns(t.Context())
+	}
+	if healthyReads.Load() == 0 {
+		t.Fatal("the healthy task was never read: the unanswering ones took every pass")
+	}
+	h.startConditionMu.Lock()
+	_, haveHealthy := h.startConditionTasks["9015"]
+	h.startConditionMu.Unlock()
+	if !haveHealthy {
+		t.Fatal("the healthy task's answer was not kept")
+	}
+	// Every task is tried once per interval, not again while it is fresh.
+	tried := healthyReads.Load()
+	h.checkWaitingSpawns(t.Context())
+	h.checkWaitingSpawns(t.Context())
+	if healthyReads.Load() != tried {
+		t.Fatalf("a fresh task was read again: %d -> %d", tried, healthyReads.Load())
+	}
+}
+
+// The limit wins over an answer that arrives after it passed: the hk reads
+// take time, so the decision is judged with the time after them.
+func TestLimitPassingDuringReadsWins_t4660(t *testing.T) {
+	for _, state := range []string{"dropped", "merged"} {
+		t.Run(state, func(t *testing.T) {
+			h := asyncSpawnHub(t)
+			clock := expiryClock(h, expiryNow())
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				*clock = clock.Add(2 * time.Hour) // the read takes this long
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"id":9000,"state":"` + state + `","relations":[]}`))
+			}))
+			t.Cleanup(server.Close)
+			t.Setenv("HANDOFFKEEP_URL", server.URL)
+			t.Setenv("HANDOFFKEEP_TOKEN_SVC_PANEWIRE", "start-condition-test")
+			request := waitingRequest(510, fleet.StartCondition{Kind: "task", TaskID: "9000", State: "merged"})
+			request.ExpiresSeconds = 3600
+			if _, _, err := h.inbox.store.claimSpawn(t.Context(), request, "wait-job", "parent", *clock); err != nil {
+				t.Fatal(err)
+			}
+			h.checkWaitingSpawns(t.Context())
+			saved, err := h.inbox.store.spawnTask(t.Context(), request.RequestID)
+			if err != nil || saved.Status != "given_up" {
+				t.Fatalf("%s answer after the limit: %+v %v; want given_up", state, saved, err)
+			}
+		})
+	}
+}

@@ -152,9 +152,11 @@ time from a cursor, so every waiting row is judged however many are waiting:
 - a time condition and the expiry are judged locally; each task a condition
   names is read from hk at most once per 60 s (`startConditionPoll`, hub
   field, default `defaultStartConditionPoll`), or at once if never read, with
-  a bound per read and 30 s per pass. A task counts as tried once its read
-  ran, answered or not, so an unreachable task is not re-read every tick and
-  never keeps the others unread. A `blockers` condition re-reads the task's
+  a bound per read (5 s) and 30 s per pass. A pass reads only the tasks that
+  are due, and a task counts as tried once its read ran, answered or not, so an
+  unreachable task is not re-read every tick and never keeps the others
+  unread, whichever requests name them. After the reads the hub judges with
+  the time then, so a limit that passed meanwhile wins over any answer. A `blockers` condition re-reads the task's
   relations on each read, so a relation added later counts. A read that failed
   keeps the last answer; a task never read fails closed: the request keeps
   waiting (`hk_unavailable`);

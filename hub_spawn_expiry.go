@@ -27,6 +27,20 @@ const spawnWaitingScanLimit = 100
 // spawnConditionReadBudget bounds the hk reads of one waiting pass.
 const spawnConditionReadBudget = 30 * time.Second
 
+func (h *HubServer) startConditionBudgetOrDefault() time.Duration {
+	if h.startConditionBudget > 0 {
+		return h.startConditionBudget
+	}
+	return spawnConditionReadBudget
+}
+
+func (h *HubServer) startConditionReadBoundOrDefault() time.Duration {
+	if h.startConditionReadBound > 0 {
+		return h.startConditionReadBound
+	}
+	return fleet.StartConditionReadBound
+}
+
 // spawnAttemptEndedUnstarted reports whether an outcome ends an attempt
 // whose start is proven absent, so a request with a limit renews it or gives
 // up: the landing wait ran out with the hub never having sent the attempt (or
@@ -258,20 +272,30 @@ func (h *HubServer) checkWaitingSpawns(ctx context.Context) {
 		}
 		live = append(live, task)
 	}
-	var stale [][]fleet.StartCondition
-	h.startConditionMu.Lock()
+	// Only the tasks due are read, each at most once per poll interval and
+	// whether or not it answered, so what a cut-off pass never reached comes
+	// first on the next, whatever else a request waits for.
+	var conditions [][]fleet.StartCondition
 	for _, task := range live {
-		for _, id := range fleet.StartConditionTaskIDs(task.Request.StartConditions) {
-			if tried, ok := h.startConditionTried[id]; !ok || now.Sub(tried) >= h.startConditionEvery() {
-				stale = append(stale, task.Request.StartConditions)
-				break
-			}
+		if len(fleet.StartConditionTaskIDs(task.Request.StartConditions)) != 0 {
+			conditions = append(conditions, task.Request.StartConditions)
 		}
 	}
-	h.startConditionMu.Unlock()
-	if len(stale) != 0 {
-		readCtx, cancel := context.WithTimeout(ctx, spawnConditionReadBudget)
-		read, attempted := fleet.ReadStartConditionTaskPass(readCtx, stale)
+	if len(conditions) != 0 {
+		h.startConditionMu.Lock()
+		cached := make(map[string]fleet.TaskSnapshot, len(h.startConditionTasks))
+		for id, snapshot := range h.startConditionTasks {
+			cached[id] = snapshot
+		}
+		h.startConditionMu.Unlock()
+		due := func(id string) bool {
+			h.startConditionMu.Lock()
+			defer h.startConditionMu.Unlock()
+			tried, ok := h.startConditionTried[id]
+			return !ok || now.Sub(tried) >= h.startConditionEvery()
+		}
+		readCtx, cancel := context.WithTimeout(ctx, h.startConditionBudgetOrDefault())
+		read, attempted := fleet.ReadStartConditionTaskPass(readCtx, conditions, cached, h.startConditionReadBoundOrDefault(), due)
 		cancel()
 		h.startConditionMu.Lock()
 		if h.startConditionTasks == nil {
@@ -293,9 +317,17 @@ func (h *HubServer) checkWaitingSpawns(ctx context.Context) {
 		h.startConditionSeen = map[string]fleet.StartConditionResult{}
 	}
 	h.startConditionMu.Unlock()
+	// The reads can take long: judge with the time after them, so a limit
+	// that passed meanwhile wins over any decision the answers would make.
+	now = h.now().UTC()
 	for _, task := range live {
-		result := fleet.EvaluateStartConditions(task.Request.StartConditions, snapshots, now)
 		id := task.Request.RequestID
+		if !task.Expires.IsZero() && !now.Before(task.Expires) {
+			h.endWaitingSpawn(ctx, task, "given_up", spawnGivenUpOutcome(task, ""), now)
+			h.forgetStartCondition(id)
+			continue
+		}
+		result := fleet.EvaluateStartConditions(task.Request.StartConditions, snapshots, now)
 		switch result.Status {
 		case "met":
 			if released, err := h.inbox.store.releaseWaitingSpawn(ctx, task, now); err == nil && released {
@@ -311,11 +343,6 @@ func (h *HubServer) checkWaitingSpawns(ctx context.Context) {
 			h.startConditionMu.Lock()
 			h.startConditionSeen[id] = result
 			h.startConditionMu.Unlock()
-		}
-	}
-	for _, task := range rows {
-		if !task.Expires.IsZero() && !now.Before(task.Expires) {
-			h.forgetStartCondition(task.Request.RequestID)
 		}
 	}
 }

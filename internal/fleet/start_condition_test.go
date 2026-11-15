@@ -195,7 +195,7 @@ func TestReadStartConditionTaskPassReportsOnlyAttemptedIDs(t *testing.T) {
 	t.Setenv("HANDOFFKEEP_URL", server.URL)
 	t.Setenv("HANDOFFKEEP_TOKEN_SVC_PANEWIRE", "pass-test")
 	conditions := [][]StartCondition{{{Kind: "task", TaskID: "11", State: "merged"}, {Kind: "task", TaskID: "12", State: "merged"}, {Kind: "task", TaskID: "13", State: "merged"}}}
-	_, attempted := ReadStartConditionTaskPass(ctx, conditions)
+	_, attempted := ReadStartConditionTaskPass(ctx, conditions, nil, time.Second, func(string) bool { return true })
 	if len(attempted) > 1 || reads.Load() != 1 || attempted["12"] || attempted["13"] {
 		t.Fatalf("attempted=%v reads=%d; the ids after the cut-off were never read", attempted, reads.Load())
 	}
@@ -203,7 +203,7 @@ func TestReadStartConditionTaskPassReportsOnlyAttemptedIDs(t *testing.T) {
 		t.Fatalf("ids=%v", ids)
 	}
 	// With a live context every id is attempted, answered or not.
-	_, attempted = ReadStartConditionTaskPass(context.Background(), conditions)
+	_, attempted = ReadStartConditionTaskPass(context.Background(), conditions, nil, time.Second, func(string) bool { return true })
 	if len(attempted) != 3 {
 		t.Fatalf("attempted=%v, want all three", attempted)
 	}

@@ -589,12 +589,15 @@ type HubServer struct {
 	// rest is the waiting passes' view (the last answer per task, when each
 	// was last tried, each request's last result and the scan cursor),
 	// guarded by startConditionMu (hub_spawn_expiry.go).
-	startConditionPoll  time.Duration
-	startConditionMu    sync.Mutex
-	startConditionTasks map[string]fleet.TaskSnapshot
-	startConditionTried map[string]time.Time
-	startConditionSeen  map[string]fleet.StartConditionResult
-	waitingCursor       spawnScanPosition
+	startConditionPoll time.Duration
+	// startConditionBudget and startConditionReadBound are fixture seams for
+	// one pass's and one read's bound; zero is the default.
+	startConditionBudget, startConditionReadBound time.Duration
+	startConditionMu                              sync.Mutex
+	startConditionTasks                           map[string]fleet.TaskSnapshot
+	startConditionTried                           map[string]time.Time
+	startConditionSeen                            map[string]fleet.StartConditionResult
+	waitingCursor                                 spawnScanPosition
 
 	// laneStallMu is TryLock'd so at most one lane-stall observation runs and
 	// is held for the run's whole life: once Close has taken it and set

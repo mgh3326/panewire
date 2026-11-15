@@ -226,8 +226,8 @@ func ReadStartConditionTasks(ctx context.Context, conditions []StartCondition) (
 	return ReadStartConditionTaskBatch(ctx, [][]StartCondition{conditions})
 }
 
-// startConditionReadBound bounds one hk task read.
-const startConditionReadBound = 5 * time.Second
+// StartConditionReadBound is the default bound on one hk task read.
+const StartConditionReadBound = 5 * time.Second
 
 // StartConditionTaskIDs lists the hk task ids a request's conditions read
 // first: the tasks it names and the targets of its blockers conditions.
@@ -256,16 +256,20 @@ func StartConditionTaskIDs(conditions []StartCondition) []string {
 // requests together, deduplicating every task id across the batch. Each read
 // has its own bound; the caller's context bounds the whole batch.
 func ReadStartConditionTaskBatch(ctx context.Context, requests [][]StartCondition) (map[string]TaskSnapshot, error) {
-	snapshots, _ := ReadStartConditionTaskPass(ctx, requests)
+	snapshots, _ := ReadStartConditionTaskPass(ctx, requests, nil, StartConditionReadBound, func(string) bool { return true })
 	return snapshots, nil
 }
 
-// ReadStartConditionTaskPass is ReadStartConditionTaskBatch that also says
-// which ids it attempted: a read that finished, answered or not. An id left
-// out was never tried because ctx ended first, so a caller that spaces its
-// retries by attempt (the hub's waiting pass) can still retry it at once and
-// no id is starved by the ones sorted before it.
-func ReadStartConditionTaskPass(ctx context.Context, requests [][]StartCondition) (map[string]TaskSnapshot, map[string]bool) {
+// ReadStartConditionTaskPass reads only the ids due says are due, each with
+// its own bound of perRead, and reports which it attempted: a read that
+// finished, answered or not. An id left out was never tried because ctx ended
+// first. A caller that records attempts and answers due from them makes
+// progress across passes: ids already attempted are skipped, so the ones a
+// cut-off pass never reached come first next time, however the conditions
+// are grouped. cached holds the last snapshots; a blockers condition whose
+// target is not due takes its blocker ids from there, so those are still
+// read when due.
+func ReadStartConditionTaskPass(ctx context.Context, requests [][]StartCondition, cached map[string]TaskSnapshot, perRead time.Duration, due func(id string) bool) (map[string]TaskSnapshot, map[string]bool) {
 	ids := make(map[string]bool)
 	blockerTargets := make(map[string]bool)
 	for _, conditions := range requests {
@@ -285,7 +289,7 @@ func ReadStartConditionTaskPass(ctx context.Context, requests [][]StartCondition
 	readIDs := func() {
 		ordered := make([]string, 0, len(ids))
 		for id := range ids {
-			if !read[id] {
+			if !read[id] && due(id) {
 				ordered = append(ordered, id)
 			}
 		}
@@ -295,7 +299,7 @@ func ReadStartConditionTaskPass(ctx context.Context, requests [][]StartCondition
 				return
 			}
 			read[id] = true
-			readCtx, cancel := context.WithTimeout(ctx, startConditionReadBound)
+			readCtx, cancel := context.WithTimeout(ctx, perRead)
 			snapshot, err := readStartConditionTask(readCtx, id)
 			cancel()
 			if ctx.Err() != nil {
@@ -311,6 +315,9 @@ func ReadStartConditionTaskPass(ctx context.Context, requests [][]StartCondition
 	readIDs()
 	for id := range blockerTargets {
 		snapshot, ok := snapshots[id]
+		if !ok {
+			snapshot, ok = cached[id]
+		}
 		if !ok {
 			continue
 		}
