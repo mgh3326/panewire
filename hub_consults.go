@@ -148,6 +148,7 @@ func (h *HubServer) handleConsultRequest(w http.ResponseWriter, r *http.Request)
 		c.State, c.SeatProfile, c.SeatFamily, c.SeatGrade = consultQueued, "", "", ""
 		c.Job, c.RequestID, c.Reason, c.AnswerDoc = "", "", "", ""
 		c.Answered, c.Notified, c.Respawns = time.Time{}, false, 0
+		c.ExcludeProfiles = nil
 		c.Deadline = now.Add(h.consultTimeout)
 	} else {
 		c = hubConsult{
