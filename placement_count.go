@@ -222,6 +222,12 @@ func (h *HubServer) completeSpawn(ctx context.Context, task hubSpawnTask, outcom
 	// lock cannot restore is not touched: the attempt's end is not recorded
 	// and the request stays as it is (reservation kept), to be settled by a
 	// later pass once the trace can be restored.
+	// A claimed-host retry that ran out of time unsent, wherever the deadline
+	// was crossed, ends with the claimed node's saved refusal rather than a
+	// timeout that hides it while hk holds the claim (hk 4661).
+	if outcome.Reason == "timeout" && (task.Node == nil || task.Status == "bound") && spawnHoldsClaim(task) {
+		outcome = task.Outcome
+	}
 	release := func() {}
 	now := h.now().UTC()
 	if spawnAttemptEndedUnstarted(task, outcome, now) && (outcome.Reason != "timeout" || task.Node == nil || task.Status == "bound" || outcome.NodeResult && outcome.Retryable) {

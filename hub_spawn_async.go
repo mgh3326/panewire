@@ -516,11 +516,6 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 		} else {
 			outcome.Fix = spawnQueueWaitFix(task, h.now())
 		}
-		// A claimed-host retry that ran out of time unsent ends with the
-		// claimed node's saved refusal, not a timeout that hides it.
-		if unsent && task.ClaimedHost != "" && task.Outcome.NodeResult {
-			outcome = task.Outcome
-		}
 		h.finishSpawnOutcome(task, outcome)
 		// A parked pass emitted no refusal event (App.Parks): its end at the
 		// limit is the one terminal spawn event (hk 4661).
@@ -679,7 +674,7 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 		// A request whose hk job claim pins a host is never parked: a park
 		// that reached expires_at would give it up as never started while
 		// the claim and its saved node refusal stand. It ends as before.
-		if err == nil || ctx.Err() != nil || task.Expires.IsZero() || task.ClaimedHost != "" {
+		if err == nil || ctx.Err() != nil || task.Expires.IsZero() || spawnHoldsClaim(task) {
 			return false
 		}
 		if spawnClaimedAnswer(task, err) {

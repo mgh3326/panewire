@@ -23,7 +23,7 @@ import (
 func spawnAttemptEndedUnstarted(task hubSpawnTask, outcome hubSpawnOutcome, now time.Time) bool {
 	// A request whose hk job claim pins a host started on that node: its
 	// end is the node's saved refusal, never a renewal or given_up (hk 4661).
-	if task.Expires.IsZero() || task.ClaimedHost != "" {
+	if task.Expires.IsZero() || spawnHoldsClaim(task) {
 		return false
 	}
 	return outcome.Reason == "timeout" || spawnOutcomeNotStarted(outcome) && !now.Before(task.Deadline)
@@ -117,4 +117,12 @@ func (s *laneInboxStore) releaseEndedSpawn(ctx context.Context, tx *sql.Tx, task
 		return err
 	}
 	return queueSpawnNotifications(ctx, s, tx, task, status, raw, now)
+}
+
+// spawnHoldsClaim reports a request whose hk job claim is proven held on its
+// claimed host: a saved node result from a stage after the job claim (the
+// claimed-harness retry). A replay pin (a checkout refusal, an unsent
+// timeout naming a host) is no claim: nothing started there.
+func spawnHoldsClaim(task hubSpawnTask) bool {
+	return task.ClaimedHost != "" && task.Outcome.NodeResult && !spawnStageBeforeJobClaim(task.Outcome.Stage)
 }
