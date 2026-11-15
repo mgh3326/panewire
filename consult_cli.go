@@ -131,7 +131,7 @@ func runConsultCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int
 			fmt.Fprintf(stderr, "consult request refused: %s\n", firstNonEmptyString(refusal["reason"], refusal["error"]))
 			return ExitUsage
 		case http.StatusUnauthorized, http.StatusForbidden:
-			fmt.Fprintln(stderr, "consult request refused: hub credential is not admitted for consults")
+			fmt.Fprintln(stderr, "consult request refused: hub credential is not admitted for consults; ask your design lane by ESC with an hk packet")
 			return ExitConditionInvalid
 		case http.StatusServiceUnavailable:
 			fmt.Fprintf(stderr, "consult request unavailable: %s\n", firstNonEmptyString(refusal["error"], "hub store is unavailable"))

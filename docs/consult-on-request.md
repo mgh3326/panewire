@@ -129,6 +129,15 @@ GET /v1/consults/{id}
 `seat` is absent when the consult was refused before a seat was chosen. A
 terminal row keeps its state across a hub restart; the rows are durable.
 
+## Who asks
+
+Only the review tool and the design lane ask for a consult. A worker does not
+call `panewire consult request` and does not call a model API for one (operator
+decision 313, hk 4837): the fleet-v1 preamble tells an implementer to send an
+ESC `--type decision` to its owner lane with the question as an hk doc key. The
+hub refuses a worker's node credential on this route, and the refusal names
+that ESC route.
+
 ## Auth
 
 The consult routes admit:
