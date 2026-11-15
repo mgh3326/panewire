@@ -209,11 +209,23 @@ func (h *HubServer) fleetStatusQuota(now time.Time) []fleetStatusQuota {
 		}
 		windows := make([]fleet.QuotaWindow, 0, len(quota.Buckets))
 		for i, bucket := range quota.Buckets {
-			windows = append(windows, fleet.QuotaWindow{Window: bucket.Window, UsedPct: bucket.UsedPct, ResetsAt: bucket.ResetsAt})
+			// The band ranks on account-scoped windows, as CLIQuota.Pools does
+			// (a group-scoped reading ranks per group during selection). The
+			// published row keeps every window so the page can show them all.
+			if bucket.Scope == "" || bucket.Scope == "account" {
+				windows = append(windows, fleet.QuotaWindow{Window: bucket.Window, UsedPct: bucket.UsedPct, ResetsAt: bucket.ResetsAt})
+			}
 			if i >= fleetStatusMaxWindows {
 				continue
 			}
 			entry.Windows = append(entry.Windows, fleetStatusWindow{Window: bucket.Window, UsedPct: bucket.UsedPct, ResetsAt: bucket.ResetsAt})
+		}
+		if len(windows) == 0 {
+			// A group-only reading ranks on its group windows during selection;
+			// label the pool from them rather than dropping every signal.
+			for _, bucket := range quota.Buckets {
+				windows = append(windows, fleet.QuotaWindow{Window: bucket.Window, UsedPct: bucket.UsedPct, ResetsAt: bucket.ResetsAt})
+			}
 		}
 		observed := fleetStateObservedAt(message)
 		ttl := fleetStatusFreshTTL(quota.Pool)
