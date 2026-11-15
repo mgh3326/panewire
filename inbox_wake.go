@@ -289,11 +289,26 @@ func inboxWakeMostUrgent(items []laneInboxItem) string {
 	return most
 }
 
+// inboxWakeRoutes reads the relay routes once for one wake, so every route
+// that wake decides on or sends to comes from the same lanes file (hk 4220).
+func (h *HubServer) inboxWakeRoutes() map[string]reportRelayRoute {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return loadReportRelayRoutes(h.reportRelayPath)
+}
+
 // sendInboxWake reads the lane's unread count and its most urgent unread
 // item and types the line into the lane's pane. A failed read never becomes
 // "0 unread": the line is skipped and stays owed. A lane with nothing unread
 // owes nothing. The caller holds the wake mutex.
 func (h *HubServer) sendInboxWake(lane, class string, startup bool) inboxWakeOutcome {
+	return h.sendInboxWakeWithRoutes(h.inboxWakeRoutes(), lane, class, startup)
+}
+
+// sendInboxWakeWithRoutes is sendInboxWake over one routes snapshot: the
+// paneless decision and the route the line is sent to read the same view, so
+// a lanes-file write between them cannot make them disagree.
+func (h *HubServer) sendInboxWakeWithRoutes(routes map[string]reportRelayRoute, lane, class string, startup bool) inboxWakeOutcome {
 	counts, err := h.inbox.store.counts(lane)
 	var items []laneInboxItem
 	if err == nil {
@@ -309,8 +324,8 @@ func (h *HubServer) sendInboxWake(lane, class string, startup bool) inboxWakeOut
 		return inboxWakeNothing
 	}
 	most := inboxWakeMostUrgent(items)
-	route, agent, routed := h.resolveRelayRoute("lane.event", hubJobEventPayload{OwnerLane: lane})
-	route, agent, routed, text, deskFallback := h.inboxWakeDestination(lane, class, route, agent, routed, unread, most)
+	route, agent, routed := h.resolveRelayRouteWithRoutes("lane.event", hubJobEventPayload{OwnerLane: lane}, routes)
+	route, agent, routed, text, deskFallback := h.inboxWakeDestination(routes, lane, class, route, agent, routed, unread, most)
 	detail := fmt.Sprintf("lane=%s class=%s unread=%d most_urgent=%s machine=%s pane=%s", lane, class, unread, most, route.Machine, route.Pane)
 	if deskFallback {
 		detail = fmt.Sprintf("lane=%s class=%s unread=%d most_urgent=%s desk=%s machine=%s pane=%s", lane, class, unread, most, deskPolicyLane, route.Machine, route.Pane)
