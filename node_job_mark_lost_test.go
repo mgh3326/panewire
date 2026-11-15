@@ -43,7 +43,7 @@ func markLostClient(t *testing.T, inbox string, agents []string, panes string) (
 	t.Helper()
 	store := &roleJobs{records: map[string]map[string]any{"job-a": {"state": "spawned"}}}
 	fake := &nodeFakeHerdr{agents: agents, panes: panes}
-	return &HubClient{jobsInboxRoot: inbox, nodeHerdr: fake.run, nodeJobs: store}, store, fake
+	return &HubClient{jobsInboxRoot: inbox, spawnJournalDir: t.TempDir(), nodeHerdr: fake.run, nodeJobs: store}, store, fake
 }
 
 const markLostEmptyPanes = `{"result":{"panes":[]}}`
