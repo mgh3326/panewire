@@ -391,7 +391,8 @@ func (s *laneInboxStore) completeSpawn(parent context.Context, task hubSpawnTask
 		nodeID = task.Node.RequestID
 	}
 	stored := spawnStoredStatus(status, task.Node)
-	result, err := tx.ExecContext(ctx, s.q(`UPDATE spawn_operations SET status=?,result=? WHERE request_id=? AND attempt=? AND status IN ('accepted','bound','dispatching','reconciling','deadline_exceeded','bound_grant','dispatching_grant','reconciling_grant','deadline_exceeded_grant') AND status<>? AND NOT (status IN ('deadline_exceeded','deadline_exceeded_grant') AND ?='reconciling') AND ((?='' AND node_id IS NULL) OR node_id=?) AND (? NOT IN ('accepted','bound') OR status=?) AND (node_id IS NULL OR status IN ('bound','bound_grant') OR ?<>'timeout' OR ?<>'retryable' OR ?)`), stored, string(raw), task.Request.RequestID, task.Attempt, stored, status, nodeID, nodeID, task.Status, spawnStoredStatus(task.Status, task.Node), outcome.Reason, status, outcome.NodeResult)
+	// A terminal post-claim node result is the claim proof a replay keeps.
+	result, err := tx.ExecContext(ctx, s.q(`UPDATE spawn_operations SET status=?,result=?,claim_result=CASE WHEN claim_result='' THEN ? ELSE claim_result END WHERE request_id=? AND attempt=? AND status IN ('accepted','bound','dispatching','reconciling','deadline_exceeded','bound_grant','dispatching_grant','reconciling_grant','deadline_exceeded_grant') AND status<>? AND NOT (status IN ('deadline_exceeded','deadline_exceeded_grant') AND ?='reconciling') AND ((?='' AND node_id IS NULL) OR node_id=?) AND (? NOT IN ('accepted','bound') OR status=?) AND (node_id IS NULL OR status IN ('bound','bound_grant') OR ?<>'timeout' OR ?<>'retryable' OR ?)`), stored, string(raw), spawnClaimProof(outcome, string(raw)), task.Request.RequestID, task.Attempt, stored, status, nodeID, nodeID, task.Status, spawnStoredStatus(task.Status, task.Node), outcome.Reason, status, outcome.NodeResult)
 	if err != nil {
 		return false, err
 	}
@@ -525,9 +526,7 @@ func (s *laneInboxStore) unbindRefusedSpawn(parent context.Context, task hubSpaw
 		claimedResult = string(result)
 		// Only a refusal after the job claim proves one; the first such
 		// proof stays (claim_result is set once).
-		if !spawnStageBeforeJobClaim(claimed.Stage) && !spawnOutcomeNotStarted(*claimed) {
-			claimProof = claimedResult
-		}
+		claimProof = spawnClaimProof(*claimed, claimedResult)
 	}
 	// A claimed-harness retry is not backed off: hk holds the job claim on
 	// that host, and a park that ran into expires_at would give the request
@@ -952,4 +951,13 @@ func (s *laneInboxStore) clearSpawnRefreshWaits(parent context.Context, id strin
 	defer done()
 	_, err := s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET refresh_waits='[]' WHERE request_id=? AND attempt=? AND status='accepted' AND node_id IS NULL`), id, attempt)
 	return err
+}
+
+// spawnClaimProof is the outcome to keep as claim_result: a node result from
+// a stage after the job claim that is not a not-started attestation, or "".
+func spawnClaimProof(outcome hubSpawnOutcome, raw string) string {
+	if outcome.NodeResult && !spawnStageBeforeJobClaim(outcome.Stage) && !spawnOutcomeNotStarted(outcome) {
+		return raw
+	}
+	return ""
 }

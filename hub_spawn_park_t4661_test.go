@@ -749,3 +749,89 @@ func TestClaimedTimeoutInsidePlacementKeepsNodeRefusal_t4661(t *testing.T) {
 		t.Fatalf("the saved refusal was replaced: %+v", got.Outcome)
 	}
 }
+
+// A terminal post-claim node result (an explicit profile's launch failure,
+// no harness retry) keeps its claim proof through a client's replay; a
+// not-started attestation writes none.
+func TestTerminalClaimProofSurvivesReplay_t4661(t *testing.T) {
+	h := asyncSpawnHub(t)
+	task := claimParkRequest(t, h, 230, time.Now())
+	bound, err := h.inbox.store.bindSpawn(t.Context(), task.Request.RequestID, task.Attempt, boundaryTestNode(task, 467400, "desktop"), time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	bound = sentSpawnFixture(t, h.inbox.store, bound)
+	failure := hubSpawnOutcome{RC: 70, Stage: "launch", Reason: "launch_proof_failed", Host: "desktop", NodeResult: true, Retryable: true}
+	if changed, err := h.inbox.store.completeSpawn(t.Context(), bound, failure, time.Now()); err != nil || !changed {
+		t.Fatalf("complete: %v %v", changed, err)
+	}
+	ended := parkedTask(t, h, task.Request.RequestID)
+	replay, err := h.inbox.store.resumeCleanedSpawn(t.Context(), ended, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !spawnHoldsClaim(replay) || replay.ClaimResult.Reason != "launch_proof_failed" {
+		t.Fatalf("replay lost the claim proof: host=%q proof=%+v", replay.ClaimedHost, replay.ClaimResult)
+	}
+	if spawnClaimProof(hubSpawnOutcome{RC: 124, Stage: "claim", Reason: "deadline_not_started", NodeResult: true, Retryable: true}, "x") != "" {
+		t.Fatal("a not-started attestation was taken as claim proof")
+	}
+}
+
+// The upgrade case: a row an older hub wrote with claimed_host and a
+// post-claim result but no claim_result stays held, with no backfill, and
+// ends with that refusal at its limit, never given_up.
+func TestUpgradedClaimedRowStaysHeld_t4661(t *testing.T) {
+	h := asyncSpawnHub(t)
+	clock := expiryClock(h, expiryNow())
+	request, job := parkRequest(240)
+	request.ExpiresSeconds = 300
+	task, _, err := h.inbox.store.claimSpawn(t.Context(), request, job, "parent", *clock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.inbox.store.db.Exec(`UPDATE spawn_operations SET claimed_host='desktop',claim_result='',result='{"rc":70,"stage":"launch","reason":"launch_proof_failed","host":"desktop","retryable":true,"node_result":true}' WHERE request_id=?`, task.Request.RequestID); err != nil {
+		t.Fatal(err)
+	}
+	task = parkedTask(t, h, task.Request.RequestID)
+	if !spawnHoldsClaim(task) {
+		t.Fatal("an upgraded claimed row is not held")
+	}
+	*clock = task.Expires
+	h.executeSpawnTask(t.Context(), task)
+	if got := parkedTask(t, h, task.Request.RequestID); got.Status == "given_up" || got.Status == "accepted" || got.Outcome.Reason != "launch_proof_failed" {
+		t.Fatalf("upgraded claimed row at its limit: status=%s outcome=%+v", got.Status, got.Outcome)
+	}
+}
+
+// A fixed-profile post-claim refusal, replayed and left unsent until its
+// deadline and limit, stays held: never renewed or given_up.
+func TestFixedProfileClaimReplayNeverGivenUp_t4661(t *testing.T) {
+	h := asyncSpawnHub(t)
+	clock := expiryClock(h, expiryNow())
+	request, job := parkRequest(250)
+	request.ExpiresSeconds = 900
+	task, _, err := h.inbox.store.claimSpawn(t.Context(), request, job, "parent", *clock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bound, err := h.inbox.store.bindSpawn(t.Context(), task.Request.RequestID, task.Attempt, boundaryTestNode(task, 467500, "desktop"), clock.UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	bound = sentSpawnFixture(t, h.inbox.store, bound)
+	failure := hubSpawnOutcome{RC: 70, Stage: "launch", Reason: "launch_proof_failed", Host: "desktop", NodeResult: true, Retryable: true}
+	if changed, err := h.inbox.store.completeSpawn(t.Context(), bound, failure, *clock); err != nil || !changed {
+		t.Fatalf("complete: %v %v", changed, err)
+	}
+	replay, err := h.inbox.store.resumeCleanedSpawn(t.Context(), parkedTask(t, h, task.Request.RequestID), *clock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	*clock = replay.Deadline
+	h.executeSpawnTask(t.Context(), replay)
+	got := parkedTask(t, h, task.Request.RequestID)
+	if got.Status == "given_up" || got.Status == "accepted" || got.Outcome.Reason != "launch_proof_failed" {
+		t.Fatalf("fixed-profile claimed replay at its deadline: status=%s attempt=%d outcome=%+v", got.Status, got.Attempt, got.Outcome)
+	}
+}

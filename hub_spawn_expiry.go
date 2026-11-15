@@ -119,10 +119,25 @@ func (s *laneInboxStore) releaseEndedSpawn(ctx context.Context, tx *sql.Tx, task
 	return queueSpawnNotifications(ctx, s, tx, task, status, raw, now)
 }
 
-// spawnHoldsClaim reports a request whose hk job claim is proven held on its
-// claimed host: claim_result, written by the first post-claim refusal and
-// kept through later results. A replay pin (a checkout refusal, an unsent
-// timeout naming a host, a not-started attestation) is no claim.
+// spawnHoldsClaim reports a request whose hk job may be claimed on its
+// claimed host: claim_result (the first post-claim refusal, kept through
+// later results), or a pinned row whose saved result is a post-claim node
+// result (the rule before hk 4661, so rows an older hub wrote, upgraded or
+// rolled forward, stay held with no backfill). claim_result is extra
+// evidence, never the only one; when in doubt the claim is kept. A replay
+// pin alone (a checkout refusal, an unsent timeout, a not-started
+// attestation) is no claim.
 func spawnHoldsClaim(task hubSpawnTask) bool {
-	return task.ClaimedHost != "" && task.ClaimResult != nil
+	if task.ClaimedHost == "" {
+		return false
+	}
+	return task.ClaimResult != nil || spawnClaimProof(task.Outcome, "x") != ""
+}
+
+// spawnSavedClaimRefusal is the refusal a held claim ends with.
+func spawnSavedClaimRefusal(task hubSpawnTask) hubSpawnOutcome {
+	if task.ClaimResult != nil {
+		return *task.ClaimResult
+	}
+	return task.Outcome
 }

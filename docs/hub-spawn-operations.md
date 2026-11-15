@@ -201,7 +201,11 @@ unbound row holds no pool slot (`liveSpawns`), a claimed-harness retry is not
 backed off (hk holds its claim on that host), and a parked pass emits no
 terminal refusal event. The first cleanup-confirmed refusal after the hk job
 claim is kept in `claim_result` (set once; a later pre-claim refusal or a
-not-started attestation never writes it). A request with one may park, but
+not-started attestation never writes it). A request holds a claim when it
+has `claim_result`, or when `claimed_host` is set and its saved result is a
+post-claim node result (the rule before this change, so rows an older hub
+wrote stay held with no backfill); when in doubt the claim is kept. A request
+holding one may park, but
 it is never renewed or given up as unstarted: an unsent timeout, wherever the
 deadline passed, ends it with that saved refusal. A replay pin alone
 (`claimed_host` after a checkout refusal) proves no claim. Wakes are hub memory: a restart forgets them and the
