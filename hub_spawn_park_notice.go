@@ -4,8 +4,8 @@ package panewire
 // design/2026-11-13/hub-owned-spawn-queue §6 notices, §9b Q2). See
 // docs/hub-spawn-operations.md#parked-notice.
 //
-// An accepted, unbound request that has been parked in one unbroken stretch
-// for longer than spawn_park_notice_seconds tells its owner lane once: the
+// An accepted, unbound request whose wait (park_since_ms) reaches
+// spawn_park_notice_seconds while it is parked tells its owner lane once: the
 // reason, since when, when it is looked at again, and what wakes it sooner.
 // Only an urgent request is told — its bound hk task's priority is 1 or 2, the
 // same set that makes a spawn urgent (fleet.UrgentTaskPriority) — because a
