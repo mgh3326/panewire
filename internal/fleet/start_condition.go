@@ -2,14 +2,11 @@ package fleet
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/mgh3326/handoffkeep/client"
 )
 
 type repeatedStringFlag []string
@@ -21,8 +18,8 @@ func (f *repeatedStringFlag) Set(value string) error {
 }
 
 // StartCondition is one parsed --after predicate. TargetTaskID is set only for
-// blockers predicates and identifies the task whose incoming blocks relations
-// are followed.
+// blockers predicates and identifies the task whose blocking tasks are
+// followed.
 type StartCondition struct {
 	Kind         string    `json:"kind"`
 	TaskID       string    `json:"task_id,omitempty"`
@@ -31,16 +28,22 @@ type StartCondition struct {
 	TargetTaskID string    `json:"target_task_id,omitempty"`
 }
 
-type TaskRelation struct {
-	Kind  string `json:"kind"`
-	SrcID string `json:"src_id"`
-	DstID string `json:"dst_id"`
+// TaskStateSnapshotChunk is the most task ids handoffkeep's snapshot route
+// accepts in one call; a read over more ids is split into calls of this size.
+const TaskStateSnapshotChunk = 200
+
+// TaskState is one task's row in a batched handoffkeep snapshot read: its
+// state and the open tasks that block it.
+type TaskState struct {
+	State    string
+	Blockers []string
 }
 
-type TaskSnapshot struct {
-	ID        string         `json:"id"`
-	State     string         `json:"state"`
-	Relations []TaskRelation `json:"relations,omitempty"`
+// TaskStateSnapshot is one snapshot of the tasks a batch names. Every
+// requested id is in Tasks or Missing.
+type TaskStateSnapshot struct {
+	Tasks   map[string]TaskState
+	Missing []string
 }
 
 type StartConditionResult struct {
@@ -165,51 +168,77 @@ func ValidateStartConditions(conditions []StartCondition, taskID string) bool {
 	return err == nil && startConditionsEqual(parsed, conditions)
 }
 
-// EvaluateStartConditions is pure: every referenced snapshot must be present;
-// missing reads fail closed as waiting/hk_unavailable.
-func EvaluateStartConditions(conditions []StartCondition, tasks map[string]TaskSnapshot, now time.Time) StartConditionResult {
+// StartConditionTaskIDs lists the task ids a batch of predicates names
+// directly: each task predicate's id and each blockers predicate's target.
+// Blocker ids are added by the caller after the first read.
+func StartConditionTaskIDs(requests [][]StartCondition) []string {
+	seen := make(map[string]bool)
+	for _, conditions := range requests {
+		for _, condition := range conditions {
+			switch condition.Kind {
+			case "task":
+				seen[condition.TaskID] = true
+			case "blockers":
+				seen[condition.TargetTaskID] = true
+			}
+		}
+	}
+	ids := make([]string, 0, len(seen))
+	for id := range seen {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+// EvaluateStartConditionSnapshot is pure: a referenced task that names no task
+// is a refusal, a dropped or duplicate one cancels the request, and otherwise
+// the request waits until every predicate holds.
+func EvaluateStartConditionSnapshot(conditions []StartCondition, snapshot TaskStateSnapshot, now time.Time) StartConditionResult {
+	missing := make(map[string]bool, len(snapshot.Missing))
+	for _, id := range snapshot.Missing {
+		missing[id] = true
+	}
+	referenced := func(id string) (TaskState, *StartConditionResult) {
+		if missing[id] {
+			return TaskState{}, &StartConditionResult{Status: "refused", Reason: "task:" + id + "=missing"}
+		}
+		task, ok := snapshot.Tasks[id]
+		if !ok {
+			return TaskState{}, &StartConditionResult{Status: "waiting", Reasons: []string{"start_condition_incomplete"}}
+		}
+		if task.State == "dropped" || task.State == "duplicate" {
+			return TaskState{}, &StartConditionResult{Status: "cancelled", Reason: "task:" + id + "=" + task.State}
+		}
+		return task, nil
+	}
 	waiting := make([]string, 0)
 	for _, condition := range conditions {
-		var ids []string
-		if condition.Kind == "task" {
-			ids = []string{condition.TaskID}
-		}
-		if condition.Kind == "blockers" {
-			ids = []string{condition.TargetTaskID}
-		}
-		for _, id := range ids {
-			task, ok := tasks[id]
-			if !ok {
-				return StartConditionResult{Status: "waiting", Reasons: []string{"hk_unavailable"}}
-			}
-			if task.State == "dropped" || task.State == "duplicate" {
-				return StartConditionResult{Status: "cancelled", Reason: "task:" + id + "=" + task.State}
-			}
-		}
 		switch condition.Kind {
 		case "time":
 			if now.Before(condition.At) {
 				waiting = append(waiting, "time:"+condition.At.Format(time.RFC3339Nano))
 			}
 		case "task":
-			if startConditionStateRank(tasks[condition.TaskID].State) < startConditionTargetRank(condition.State) {
+			task, stop := referenced(condition.TaskID)
+			if stop != nil {
+				return *stop
+			}
+			if startConditionStateRank(task.State) < startConditionTargetRank(condition.State) {
 				waiting = append(waiting, "task:"+condition.TaskID+"="+condition.State)
 			}
 		case "blockers":
-			target := tasks[condition.TargetTaskID]
-			for _, relation := range target.Relations {
-				if relation.Kind != "blocks" || relation.DstID != condition.TargetTaskID {
-					continue
-				}
-				blocker, ok := tasks[relation.SrcID]
-				if !ok {
-					return StartConditionResult{Status: "waiting", Reasons: []string{"hk_unavailable"}}
-				}
-				if blocker.State == "dropped" || blocker.State == "duplicate" {
-					return StartConditionResult{Status: "cancelled", Reason: "task:" + blocker.ID + "=" + blocker.State}
+			target, stop := referenced(condition.TargetTaskID)
+			if stop != nil {
+				return *stop
+			}
+			for _, id := range target.Blockers {
+				blocker, stop := referenced(id)
+				if stop != nil {
+					return *stop
 				}
 				if startConditionStateRank(blocker.State) < startConditionTargetRank(condition.State) {
-					waiting = append(waiting, "task:"+blocker.ID+"="+condition.State)
+					waiting = append(waiting, "task:"+id+"="+condition.State)
 				}
 			}
 		}
@@ -220,105 +249,57 @@ func EvaluateStartConditions(conditions []StartCondition, tasks map[string]TaskS
 	return StartConditionResult{Status: "met"}
 }
 
-// ReadStartConditionTasks deduplicates target ids, reads their current
-// relations, then fetches every incoming blocker within one bounded pass.
-func ReadStartConditionTasks(ctx context.Context, conditions []StartCondition) (map[string]TaskSnapshot, error) {
-	return ReadStartConditionTaskBatch(ctx, [][]StartCondition{conditions})
-}
-
-// ReadStartConditionTaskBatch resolves predicates for multiple queued
-// requests together, deduplicating every task id across the batch.
-func ReadStartConditionTaskBatch(ctx context.Context, requests [][]StartCondition) (map[string]TaskSnapshot, error) {
+// ReadTaskStateSnapshot reads ids through handoffkeep's snapshot route in one
+// pass of calls of at most TaskStateSnapshotChunk ids. Every id lands in Tasks
+// or Missing; a call that fails fails the read, so a caller never decides a
+// condition from a partial answer. The read is one consistent snapshot per
+// call and hk rejects more than TaskStateSnapshotChunk ids rather than
+// truncating them.
+func ReadTaskStateSnapshot(ctx context.Context, ids []string) (TaskStateSnapshot, error) {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	ids := make(map[string]bool)
-	blockerTargets := make(map[string]bool)
-	for _, conditions := range requests {
-		for _, condition := range conditions {
-			if condition.Kind == "task" {
-				ids[condition.TaskID] = true
+	seen := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		seen[id] = true
+	}
+	ordered := make([]string, 0, len(seen))
+	for id := range seen {
+		ordered = append(ordered, id)
+	}
+	sort.Strings(ordered)
+	out := TaskStateSnapshot{Tasks: make(map[string]TaskState, len(ordered))}
+	if len(ordered) == 0 {
+		return out, nil
+	}
+	c, err := newHKClient()
+	if err != nil {
+		return TaskStateSnapshot{}, err
+	}
+	for start := 0; start < len(ordered); start += TaskStateSnapshotChunk {
+		chunk := ordered[start:min(start+TaskStateSnapshotChunk, len(ordered))]
+		numeric := make([]int64, len(chunk))
+		for i, id := range chunk {
+			value, err := strconv.ParseInt(id, 10, 64)
+			if err != nil || value < 1 {
+				return TaskStateSnapshot{}, fmt.Errorf("invalid task id %q", id)
 			}
-			if condition.Kind == "blockers" {
-				ids[condition.TargetTaskID] = true
-				blockerTargets[condition.TargetTaskID] = true
-			}
+			numeric[i] = value
 		}
-	}
-	snapshots := make(map[string]TaskSnapshot, len(ids))
-	read := make(map[string]bool, len(ids))
-	orderedIDs := make([]string, 0, len(ids))
-	for id := range ids {
-		orderedIDs = append(orderedIDs, id)
-	}
-	sort.Strings(orderedIDs)
-	for _, id := range orderedIDs {
-		read[id] = true
-		snapshot, err := readStartConditionTask(ctx, id)
+		snapshot, err := c.TaskStatesSnapshot(ctx, numeric, "")
 		if err != nil {
-			continue
+			return TaskStateSnapshot{}, err
 		}
-		snapshots[id] = snapshot
-	}
-	for id := range blockerTargets {
-		snapshot, ok := snapshots[id]
-		if !ok {
-			continue
-		}
-		for _, relation := range snapshot.Relations {
-			if relation.Kind == "blocks" && relation.DstID == id {
-				ids[relation.SrcID] = true
+		for _, entry := range snapshot.Tasks {
+			blockers := make([]string, len(entry.Blockers))
+			for i, blocker := range entry.Blockers {
+				blockers[i] = strconv.FormatInt(blocker, 10)
 			}
+			out.Tasks[strconv.FormatInt(entry.ID, 10)] = TaskState{State: entry.State, Blockers: blockers}
+		}
+		for _, id := range snapshot.Missing {
+			out.Missing = append(out.Missing, strconv.FormatInt(id, 10))
 		}
 	}
-	orderedIDs = orderedIDs[:0]
-	for id := range ids {
-		orderedIDs = append(orderedIDs, id)
-	}
-	sort.Strings(orderedIDs)
-	for _, id := range orderedIDs {
-		if read[id] {
-			continue
-		}
-		read[id] = true
-		snapshot, err := readStartConditionTask(ctx, id)
-		if err != nil {
-			continue
-		}
-		snapshots[id] = snapshot
-	}
-	return snapshots, nil
-}
-
-func readStartConditionTask(ctx context.Context, taskID string) (TaskSnapshot, error) {
-	id, err := strconv.ParseInt(taskID, 10, 64)
-	if err != nil || id < 1 {
-		return TaskSnapshot{}, fmt.Errorf("invalid task id")
-	}
-	body, answered, err := hkAnswer(func(c client.Client) error {
-		_, found, callErr := c.GetTask(ctx, id)
-		if callErr == nil && !found {
-			return errHKNotFound
-		}
-		return callErr
-	})
-	if err != nil || !answered {
-		return TaskSnapshot{}, fmt.Errorf("handoffkeep task read unavailable")
-	}
-	var task struct {
-		ID        int64  `json:"id"`
-		State     string `json:"state"`
-		Relations []struct {
-			Kind  string `json:"kind"`
-			SrcID int64  `json:"src_id"`
-			DstID int64  `json:"dst_id"`
-		} `json:"relations"`
-	}
-	if json.Unmarshal(body, &task) != nil || task.State == "" || task.ID != id {
-		return TaskSnapshot{}, fmt.Errorf("handoffkeep task response unreadable")
-	}
-	relations := make([]TaskRelation, 0, len(task.Relations))
-	for _, relation := range task.Relations {
-		relations = append(relations, TaskRelation{Kind: relation.Kind, SrcID: strconv.FormatInt(relation.SrcID, 10), DstID: strconv.FormatInt(relation.DstID, 10)})
-	}
-	return TaskSnapshot{ID: taskID, State: task.State, Relations: relations}, nil
+	sort.Strings(out.Missing)
+	return out, nil
 }

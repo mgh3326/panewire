@@ -33,6 +33,12 @@ type Spawn struct {
 	// Expires is --expires: the request's time limit (hk 4660). It travels as
 	// Submission.ExpiresSeconds, never in the node's args.
 	Expires string `json:"-"`
+	// hubExpiresAt is the absolute request expiry the hub sent with a
+	// node-delivered spawn (hk 4747). The own spawn writes it into its
+	// job.spawned receipt as expires_at, which the node's pane sweep reads to
+	// end a reviewer or consult past its real limit. Zero when the hub named
+	// none: the receipt then carries the role's default.
+	hubExpiresAt time.Time
 	// ReviewPass is the explicit review pass ("1".."9") of a reviewer spawn. It
 	// names the pass in the operation and in RoleKey; a reviewer holds no
 	// reservation (hk 4737), so it widens no slot. panewire never parses it out
@@ -1363,6 +1369,9 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 		}
 	}
 	receipt := map[string]any{"pane_id": pane, "tab_id": tab, "herdr_session": a.herdrSession(), "label": s.Label, "profile": s.Profile, "launch_profile": launchProfile(seat.Canon, launch.Effort), "model_id": launch.ModelID, "effort": launch.Effort, "family": seat.Family, "role": s.Role, "lane_role": s.Role, "owner_lane": owner, "parent_lane": s.Parent, "task_id": s.Task, "report": s.Report, "cwd": s.CWD, "keep": s.Keep, "pool": pool, "host": machine}
+	// The request's time limit, so the node's pane sweep can end a reviewer or
+	// consult by its real limit (hk 4747).
+	receipt["expires_at"] = a.spawnExpiresAt(s).UTC().Format(time.RFC3339)
 	receipt["harness_session"] = a.harnessSession(ctx, pane, seat.Kind)
 	if s.AccountKey != "" {
 		receipt["account_key"] = s.AccountKey

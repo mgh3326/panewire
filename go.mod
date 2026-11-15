@@ -10,7 +10,7 @@ require (
 	github.com/godbus/dbus/v5 v5.2.4
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.10.0
-	github.com/mgh3326/handoffkeep v0.0.130
+	github.com/mgh3326/handoffkeep v0.0.295
 	github.com/pelletier/go-toml/v2 v2.4.3
 	golang.org/x/sys v0.48.0
 	golang.org/x/text v0.42.0

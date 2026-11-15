@@ -457,7 +457,7 @@ func (h *HubServer) reconcileConsults(ctx context.Context) {
 		switch task.Status {
 		case "failed", "retryable":
 			h.consultJobFailed(ctx, c, firstNonEmptyString(task.Outcome.Reason, task.Status))
-		case "reconciling", "deadline_exceeded", "accepted", "bound", "dispatching", "succeeded":
+		case "reconciling", "deadline_exceeded", "accepted", "bound", "dispatching", "succeeded", "waiting":
 			// Ownership or the job itself is still live; the row's deadline
 			// ends the wait.
 		default:

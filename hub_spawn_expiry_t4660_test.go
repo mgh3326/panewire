@@ -513,3 +513,47 @@ func TestHeldPlacementTraceKeepsRequestPending_t4660(t *testing.T) {
 }
 
 // ---- review round 2 (mergewake findings on head ae38439) ----
+
+// ---- hk 4747: the request's absolute expiry reaches the spawn receipt ----
+
+// The hub sends expires_ms only to a node that advertised the capability that
+// reads it; an older node's strict decoder never sees the field.
+func TestSpawnExpiresFieldOnlyForANodeThatReadsIt_t4747(t *testing.T) {
+	expires := time.Date(2026, 11, 15, 6, 0, 0, 0, time.UTC)
+	if got := spawnExpiryField(map[string]bool{hubCapabilitySpawnExpires: true}, expires); got != expires.UnixMilli() {
+		t.Fatalf("capable node got expires_ms=%d", got)
+	}
+	if got := spawnExpiryField(map[string]bool{"spawn_ops_v1": true}, expires); got != 0 {
+		t.Fatalf("an older node got expires_ms=%d", got)
+	}
+	if got := spawnExpiryField(map[string]bool{hubCapabilitySpawnExpires: true}, time.Time{}); got != 0 {
+		t.Fatalf("a request with no expiry got expires_ms=%d", got)
+	}
+}
+
+// A node advertises spawn_expires_v1 and reads expires_ms on job.spawn; a frame
+// without it keeps today's behavior, and a non-positive value is refused.
+func TestNodeSpawnReadsTheRequestExpiry_t4747(t *testing.T) {
+	advertised := false
+	for _, capability := range hubSpawnCapabilities {
+		advertised = advertised || capability == hubCapabilitySpawnExpires
+	}
+	if !advertised {
+		t.Fatalf("hello capabilities %v lack %s", hubSpawnCapabilities, hubCapabilitySpawnExpires)
+	}
+	frame := `{"type":"job.spawn","request_id":"` + t14RequestID(1) + `","cwd_key":"repo-a","brief":{"inline":"b"},"args":["--job","job-a"],"wait_seconds":10,"deadline_ms":1700000000000,"expires_ms":1700003600000,"operator_authorized":true}`
+	message, rejection := parseHubOutboundRejection([]byte(frame))
+	if rejection.Class != "" || message.ExpiresMS != 1700003600000 {
+		t.Fatalf("job.spawn with expires_ms: class=%q detail=%q expires=%d", rejection.Class, rejection.Detail, message.ExpiresMS)
+	}
+	old := `{"type":"job.spawn","request_id":"` + t14RequestID(2) + `","cwd_key":"repo-a","brief":{"inline":"b"},"args":["--job","job-a"],"wait_seconds":10,"deadline_ms":1700000000000,"operator_authorized":true}`
+	if message, ok := parseHubOutbound([]byte(old)); !ok || message.ExpiresMS != 0 {
+		t.Fatalf("a frame without expires_ms: ok=%v expires=%d", ok, message.ExpiresMS)
+	}
+	for _, field := range []string{`"expires_ms":0`, `"expires_ms":-1`, `"expires_ms":"x"`, `"expires_ms":null`} {
+		bad := `{"type":"job.spawn","request_id":"` + t14RequestID(3) + `","cwd_key":"repo-a","brief":{"inline":"b"},"args":["--job","job-a"],"wait_seconds":10,"deadline_ms":1700000000000,"operator_authorized":true,` + field + `}`
+		if _, ok := parseHubOutbound([]byte(bad)); ok {
+			t.Fatalf("job.spawn with %s was accepted", field)
+		}
+	}
+}
