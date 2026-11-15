@@ -51,6 +51,25 @@ type jobCLI struct {
 	now            func() time.Time
 }
 
+// validLegacyJobID is the legacy `panewire job` id rule: one portable ASCII
+// path component. The retired spawner minted ids outside the hub's relay
+// pattern (the frozen golden pins "jw+odd"), and the completion CLI must still
+// finish them; every id spawn accepts passes this rule. Non-ASCII is refused
+// because macOS maps an NFC and an NFD spelling of one name to one inode
+// (hk 4824).
+func validLegacyJobID(id string) bool {
+	if id == "" || len(id) > 128 || id == "." || id == ".." {
+		return false
+	}
+	for i := 0; i < len(id); i++ {
+		c := id[i]
+		if c < 0x20 || c >= 0x7f || c == '/' || c == '\\' {
+			return false
+		}
+	}
+	return true
+}
+
 func runJobCLI(args []string, stdout, stderr io.Writer, cfg CLIConfig) int {
 	if len(args) == 0 {
 		fmt.Fprintln(stderr, "usage: panewire job probe|done|escalate|joined|close ...")
@@ -122,7 +141,7 @@ func (c *jobCLI) done(args []string) int {
 	// The id names a directory under the jobs root: refuse a spelling no
 	// launcher would create, including non-ASCII, whose NFC and NFD forms
 	// share one inode on macOS (hk 4824).
-	if !validNodeJobName(job) {
+	if !validLegacyJobID(job) {
 		return c.exit(jobDie("done: invalid job id '%s'", job))
 	}
 	for len(args) > 0 {
@@ -201,7 +220,7 @@ func (c *jobCLI) escalate(args []string) int {
 	// The id names a directory under the jobs root: refuse a spelling no
 	// launcher would create, including non-ASCII, whose NFC and NFD forms
 	// share one inode on macOS (hk 4824).
-	if !validNodeJobName(job) {
+	if !validLegacyJobID(job) {
 		return c.exit(jobDie("escalate: invalid job id '%s'", job))
 	}
 	for len(args) > 0 {
@@ -258,7 +277,7 @@ func (c *jobCLI) joined(args []string) int {
 	// The id names a directory under the jobs root: refuse a spelling no
 	// launcher would create, including non-ASCII, whose NFC and NFD forms
 	// share one inode on macOS (hk 4824).
-	if !validNodeJobName(job) {
+	if !validLegacyJobID(job) {
 		return c.exit(jobDie("joined: invalid job id '%s'", job))
 	}
 	for len(args) > 0 {

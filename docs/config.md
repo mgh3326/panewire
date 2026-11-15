@@ -840,11 +840,17 @@ is not a job name: job-dir scans skip it.
 
 Job ids and the directories named after them (jobs-inbox dirs, checkout dirs)
 use one portable ASCII grammar at every input: ASCII letters, digits, `.`, `_`
-and `-`, starting with a letter or digit, at most 128 bytes, no `..`.
+and `-`, starting with a letter or digit, at most 128 bytes — the same shape as
+the hub's job id and the launcher's `validID`, so an id spawn accepts is always
+one a node command, the legacy CLI and job close accept. A `..` inside one
+component is not a path traversal, because separators are excluded.
 Non-ASCII is refused rather than normalised, because macOS maps an NFC and an
 NFD spelling of one name to a single inode, so the two spellings would share one
 directory exactly as two letter cases do. The node commands, the hub checkout
-request and the legacy `panewire job` CLI share the rule.
+request and `job close` share that rule. The legacy `panewire job` completion
+CLI accepts any ASCII single path component instead: the retired spawner minted
+ids such as `jw+odd` outside the relay shape and the frozen golden pins that
+they still complete, but non-ASCII and separators are refused.
 
 After the brief lands, panewire merges `{state:"spawned", role, label, family,
 profile, model, harness, effort, pool, owner_lane, parent_lane, parent_job,

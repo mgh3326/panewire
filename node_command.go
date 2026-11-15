@@ -181,14 +181,18 @@ type nodeWorktreeInspectResult struct {
 	Check    string        `json:"check,omitempty"`
 }
 
-// validNodeJobName is the one portable name grammar for a job id and for every
-// directory named after one (a jobs-inbox dir, a checkout dir): ASCII letters,
-// digits, '.', '_' and '-', starting with a letter or digit, at most 128 bytes,
-// with no "..". Non-ASCII is refused rather than normalised, because macOS maps
-// an NFC and an NFD spelling of one name to a single inode: two spellings would
-// share one directory exactly as two letter cases do (hk 4824).
+// validNodeJobName is the one name grammar a job id and every directory named
+// after one (a jobs-inbox dir, a checkout dir) share with the launcher and the
+// hub: ASCII letters, digits, '.', '_' and '-', starting with a letter or
+// digit, at most 128 bytes. It is exactly hubJobIDPattern, which the fleet's
+// validID matches too, so an id spawn accepts is always one the node commands,
+// the legacy job CLI and job close accept; a ".." inside one component is not a
+// path traversal because separators are excluded. Non-ASCII is refused rather
+// than normalised, because macOS maps an NFC and an NFD spelling of one name to
+// a single inode: two spellings would share one directory as two letter cases
+// do (hk 4824).
 func validNodeJobName(name string) bool {
-	return hubJobIDPattern.MatchString(name) && !strings.Contains(name, "..")
+	return hubJobIDPattern.MatchString(name)
 }
 
 func validNodeCommandPath(path string) bool {
