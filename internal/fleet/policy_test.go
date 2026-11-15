@@ -8,10 +8,15 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 )
 
 type fakeRunner struct {
+	// mu guards Calls and the Do read: concurrent spawns resolve one workspace
+	// in one process (node_spawn_concurrency_t4578_test.go), so Run is called
+	// from several goroutines at once.
+	mu    sync.Mutex
 	Calls []Command
 	Do    func(Command) Result
 }
@@ -21,10 +26,13 @@ func (f *fakeRunner) Run(_ context.Context, c Command) Result {
 		// The local ledger is in-process (internal/arbiter); panewire must never exec it.
 		panic("panewire executed arbiter: " + strings.Join(c.Args, " "))
 	}
+	f.mu.Lock()
 	f.Calls = append(f.Calls, c)
+	do := f.Do
+	f.mu.Unlock()
 	var result Result
-	if f.Do != nil {
-		result = f.Do(c)
+	if do != nil {
+		result = do(c)
 	}
 	if c.Name == "herdr" && strings.Join(c.Args, " ") == "workspace list" && result.Code == 0 && result.Out == "" {
 		result.Out = `{"result":{"workspaces":[{"workspace_id":"workspace","label":"workspace"},{"workspace_id":"target-workspace","label":"target-workspace"},{"workspace_id":"local-workspace","label":"local-workspace"},{"workspace_id":"remote-workspace","label":"remote-workspace"},{"workspace_id":"caller-only-workspace","label":"caller-only-workspace"},{"workspace_id":"workers","label":"workers"}]}}`

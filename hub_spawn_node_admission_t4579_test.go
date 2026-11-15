@@ -439,8 +439,19 @@ func TestNodeSpawnAdmissionSurvivesHubReconnect_t4579(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	var sessions sync.WaitGroup
 	t.Cleanup(func() {
-		cancel()
 		releaseOnce.Do(func() { close(release) })
+		// Stop the node in Daemon.Stop's order: latch the drain, then cancel.
+		// The read loop starts each job.spawn handler in its own goroutine and
+		// only the handler's first step, beginWork, counts it, so cancelling
+		// first would let a handler that has not run yet open the spawn journal
+		// - here a TempDir - after the cleanup that removes it has begun
+		// (hk 4833).
+		drainCtx, stopDrain := context.WithTimeout(ctx, 5*time.Second)
+		defer stopDrain()
+		if left := client.Drain(drainCtx); left != 0 {
+			t.Errorf("node work still in flight at drain: %d", left)
+		}
+		cancel()
 		sessions.Wait()
 		if !waitUntil(5*time.Second, func() bool { return admissionInflight(client) == 0 }) {
 			t.Error("node spawn handlers did not finish during cleanup")
