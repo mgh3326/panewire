@@ -15,12 +15,13 @@ ran `panewire done` (hk 4747). Two cases have no owner otherwise:
   the job's pane id. The node writes the job's final `job.lost` (reason
   `pane_gone`) and its terminal hk record (`lost`, `end_reason=pane_gone`)
   through the node's own JobStore, then reaps the job at once as `pane_gone`.
-- **The pane is alive with no result.** The job posted no findings object
-  (`findings.json` holding JSON null is absent) and no `report.md`, and the
-  pass runs more than the job's request time limit plus a 15-minute grace after
-  the spawn. The limit is the `expires_at` the job's spawn record carries, else
-  the role's default — one hour for a reviewer or a consult. The node writes
-  the same two records with reason `reviewer_no_result_timeout`; the ended-job
+- **The pane is alive with no result.** The job posted no findings object and
+  no `report.md`, and the pass runs more than the job's request time limit plus
+  a 15-minute grace after the spawn. A `findings.json` holding JSON null,
+  another shape or no JSON counts as absent, as the hub's result reader counts
+  it. The limit is the `expires_at` the job's spawn record carries, else the
+  role's default — one hour for a reviewer or a consult. The node writes the
+  same two records with reason `reviewer_no_result_timeout`; the ended-job
   close then takes the pane an hour later, as for any other ended job.
 
 A `--keep` reviewer or consult is ended the same way: its live pane keeps its
