@@ -341,8 +341,9 @@ A row whose task priority cannot be read is handled by what failed:
 | a 4xx refusal for this task, or a 2xx answer that cannot be parsed | `park_priority_failures` counts the sweep; after 3 the task reads as 0 and the row is judged |
 | hk unreachable, 5xx, 429/408, 401 (an outage) | the row stays unjudged and the sweep stops after 2 such reads; the cursor resumes after them |
 
-A notice hk refuses to persist for good (4xx) judges the row as not told and
-the sweep goes on; a transport failure or 5xx leaves it unjudged, and a later
+A notice hk refuses to persist for good judges the row as not told and the
+sweep goes on; a transport failure, a 5xx, or a retryable 4xx (401, 403, 408,
+425, 429 — the inbox batch's own permanent set) leaves it unjudged, and a later
 sweep resends the same event.
 
 The notice is at most one per reason set for the request's life: nothing

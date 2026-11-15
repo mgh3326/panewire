@@ -193,10 +193,12 @@ func (h *HubServer) checkParkedSpawnNotices(ctx context.Context) {
 }
 
 // spawnParkNoticeRejected reports whether hk refused the notice for good: the
-// text no longer fits, or a 4xx contract rejection. Neither changes on retry;
-// a transport failure or a 5xx does.
+// text no longer fits, or a 4xx the inbox batch path also treats as permanent
+// (inboxBatchPermanentlyRejected: auth, timeout and rate-limit statuses stay
+// retryable). Anything else — a transport failure, a 5xx, a 401/403/408/425/429
+// — leaves the row unjudged for a later sweep.
 func spawnParkNoticeRejected(result relayLaneEventResult) bool {
-	return result.RejectedTooLong || (result.PersistFailed && result.PersistStatus >= 400 && result.PersistStatus < 500)
+	return result.RejectedTooLong || (result.PersistFailed && inboxBatchPermanentlyRejected(result.PersistStatus))
 }
 
 // parkedSpawnUrgent decides whether the row's owner is owed a notice. The

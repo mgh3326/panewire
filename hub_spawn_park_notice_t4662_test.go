@@ -687,3 +687,39 @@ func TestSpawnParkNoticePermanentRelayRejection_t4662(t *testing.T) {
 		t.Fatalf("priorities read %d times, want 2", reads)
 	}
 }
+
+// A rate-limit or auth status on the notice write is transient: the row stays
+// unjudged and is told once hk accepts writes again (hk 4662 review).
+func TestSpawnParkNoticeTransientRelayRejection_t4662(t *testing.T) {
+	clock := time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC)
+	hk := newParkNoticePriority(t, map[string]int{"466101": 1, "466102": 1})
+	fake, client, stop := newFakeHandoffkeep(t)
+	t.Cleanup(stop)
+	for i, status := range []int{http.StatusTooManyRequests, http.StatusUnauthorized} {
+		fake.status = status
+		h, destination := parkNoticeHub(t, filepath.Join(t.TempDir(), "inbox.sqlite3"), client, &clock)
+		task := claimParkRequest(t, h, i+1, clock)
+		if !parkNow(t, h, task, spawnParkQuota) {
+			t.Fatal("the park was refused")
+		}
+		clock = clock.Add(31 * time.Minute)
+		checkParkNotices(t, h)
+		if got := spawnFailedInjections(destination); len(got) != 0 {
+			t.Fatalf("status %d injected %+v", status, got)
+		}
+		if row := parkedTask(t, h, task.Request.RequestID); row.ParkJudgedReason != "" || !row.ParkNoticeAt.IsZero() {
+			t.Fatalf("status %d judged the row not told: %+v", status, row)
+		}
+		fake.status = http.StatusCreated
+		clock = clock.Add(2 * time.Minute)
+		checkParkNotices(t, h)
+		injected := spawnFailedInjections(destination)
+		if len(injected) != 1 {
+			t.Fatalf("status %d: the notice did not arrive after recovery: %+v", status, injected)
+		}
+		if reads := hk.reads(fmt.Sprint(466100 + i + 1)); reads != 1 {
+			t.Fatalf("status %d: priority read %d times, want 1", status, reads)
+		}
+		h.Close()
+	}
+}
