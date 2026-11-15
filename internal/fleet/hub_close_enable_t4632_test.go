@@ -12,8 +12,8 @@ import (
 
 // #572 r4576225999: the node journalled closed, then `panewire job close`
 // wrote job.revoked before settlement ran. The close is still settled: hk
-// takes the intended lost record, the lease is released, and the final
-// job.lost is written once. The daemon pass lists the job.
+// takes the intended lost record and the lease is released; the revoke stays
+// the job's local outcome. The daemon pass lists the job.
 func TestSettlementFinishesAClosedOpAfterAnIndependentEnd_t4632(t *testing.T) {
 	a, h := hubCloseFixture(t)
 	in := liveIntent(t, a)
@@ -30,7 +30,15 @@ func TestSettlementFinishesAClosedOpAfterAnIndependentEnd_t4632(t *testing.T) {
 	if st, e := settle.Settle(context.Background(), "j"); e != nil || st != HubCloseSettled {
 		t.Fatalf("settle = %v, %v", st, e)
 	}
-	wantHubCloseFinished(t, a, h)
+	if rec := h.record(t, "j"); str(rec, "state") != "lost" || str(rec, "end_reason") != hubCloseReason {
+		t.Fatalf("hk = %v, want the intended lost record", rec)
+	}
+	if st, _ := ledgerState(t, a, "j"); st != "released" {
+		t.Fatalf("quota %s, want released", st)
+	}
+	if j, _ := a.job("j"); j.Ended != "job.revoked" {
+		t.Fatalf("job ended %q, want the revoke kept as its outcome", j.Ended)
+	}
 	if st, e := settle.Settle(context.Background(), "j"); e != nil || st != HubCloseNone {
 		t.Fatalf("second settle = %v, %v; want none", st, e)
 	}
@@ -112,7 +120,7 @@ func TestCloseOpsBarrier_t4632(t *testing.T) {
 	}
 	now := time.Date(2026, 11, 15, 0, 0, 0, 0, time.UTC)
 	ctx := context.Background()
-	if CloseOpsReady(ctx, jobs, list("")) {
+	if CloseOpsReady(ctx, jobs, "v1", list("")) {
 		t.Fatal("ready before the step")
 	}
 	oldWatcher := "4242 panewire _watch j1\n"
@@ -129,7 +137,7 @@ func TestCloseOpsBarrier_t4632(t *testing.T) {
 	if e := os.WriteFile(filepath.Join(jobs, "j1", watchCapsDir, "4242"), []byte(WatcherCapsToken+"\n"), 0o600); e != nil {
 		t.Fatal(e)
 	}
-	self := strconv.Itoa(os.Getpid()) + " panewire _spawn-stdin\n"
+	self := strconv.Itoa(os.Getpid()) + " /usr/local/bin/panewire _spawn-stdin\n"
 	if e := EnableCloseOps(ctx, jobs, "v1", now, list(oldWatcher+self)); e != nil {
 		t.Fatalf("enable = %v", e)
 	}
@@ -137,14 +145,128 @@ func TestCloseOpsBarrier_t4632(t *testing.T) {
 	if e != nil || info.Mode().Perm() != 0o600 {
 		t.Fatalf("marker %v, %v; want mode 0600", info, e)
 	}
-	if !CloseOpsReady(ctx, jobs, list(oldWatcher)) {
+	if !CloseOpsReady(ctx, jobs, "v1", list(oldWatcher)) {
 		t.Fatal("not ready after the step")
 	}
 	// An old-binary watcher that starts later takes readiness away again.
-	if CloseOpsReady(ctx, jobs, list("5151 panewire _watch j1\n")) {
+	if CloseOpsReady(ctx, jobs, "v1", list("5151 panewire _watch j1\n")) {
 		t.Fatal("ready with a token-less watcher")
 	}
-	if CloseOpsReady(ctx, jobs, func(context.Context) ([]byte, error) { return nil, errors.New("ps failed") }) {
+	if CloseOpsReady(ctx, jobs, "v1", func(context.Context) ([]byte, error) { return nil, errors.New("ps failed") }) {
 		t.Fatal("ready on a failed listing")
+	}
+}
+
+// Every verb that can start a watcher holds the barrier closed, the marker
+// names its binary version, both checks read one listing, and a refused step
+// removes an earlier marker (#593 review).
+func TestCloseOpsBarrierFencesEveryLaunchPath_t4632(t *testing.T) {
+	jobs := t.TempDir()
+	ctx := context.Background()
+	now := time.Now()
+	calls := 0
+	once := func(out string) ProcessLister {
+		return func(context.Context) ([]byte, error) { calls++; return []byte(out), nil }
+	}
+	if e := EnableCloseOps(ctx, jobs, "v1", now, once("")); e != nil || calls != 1 {
+		t.Fatalf("enable = %v after %d listings, want one listing", e, calls)
+	}
+	for _, verb := range []string{"spawn", "work", "lead", "restore", "_spawn-stdin"} {
+		line := "99 /opt/old/panewire " + verb + " --job x\n"
+		if CloseOpsReady(ctx, jobs, "v1", once(line)) {
+			t.Fatalf("ready while %q runs", verb)
+		}
+	}
+	if !CloseOpsReady(ctx, jobs, "v1", once("99 /bin/zsh -c panewire-ish spawn\n12 panewire daemon\n")) {
+		t.Fatal("not ready with only unrelated processes")
+	}
+	if CloseOpsReady(ctx, jobs, "v2", once("")) {
+		t.Fatal("ready for another binary version")
+	}
+	if e := EnableCloseOps(ctx, jobs, "v1", now, once("99 /opt/old/panewire restore j\n")); !errors.Is(e, ErrCloseOpsNotReady) {
+		t.Fatalf("enable with a restore = %v", e)
+	}
+	if CloseOpsEnabled(jobs, "v1") {
+		t.Fatal("a refused step kept the earlier marker")
+	}
+}
+
+// #593 review: a reap after the independent end does not retire an owed
+// close; the settlement records job.hub_close_settled, never a terminal
+// job.lost, so the revoke stays the job's local outcome.
+func TestOwedCloseSurvivesAReapAndKeepsTheRevoke_t4632(t *testing.T) {
+	a, h := hubCloseFixture(t)
+	in := liveIntent(t, a)
+	recordHubClose(t, a, in)
+	writeJobCloseOp(t, a, CloseOp{RequestID: in.RequestID, Attempt: in.Attempt, State: CloseOpClosed})
+	for _, kind := range []string{"job.revoked", "job.reaped"} {
+		if e := a.event(context.Background(), "j", kind, map[string]any{}); e != nil {
+			t.Fatal(e)
+		}
+	}
+	if jobs, e := PendingHubCloseJobs(a.Jobs); e != nil || len(jobs) != 1 {
+		t.Fatalf("pending = %v, %v; want the reaped job", jobs, e)
+	}
+	if st, e := (HubCloseSettlement{App: a}).Settle(context.Background(), "j"); e != nil || st != HubCloseSettled {
+		t.Fatalf("settle = %v, %v", st, e)
+	}
+	if rec := h.record(t, "j"); str(rec, "state") != "lost" || str(rec, "end_reason") != hubCloseReason {
+		t.Fatalf("hk = %v", rec)
+	}
+	if st, _ := ledgerState(t, a, "j"); st != "released" {
+		t.Fatalf("quota %s, want released", st)
+	}
+	if lost := lostEvents(t, a); len(lost) != 0 {
+		t.Fatalf("job.lost %v, want none after an independent end", lost)
+	}
+	j, _ := a.job("j")
+	if j.Ended != "job.reaped" && j.Ended != "job.revoked" {
+		t.Fatalf("job ended %q, want the independent end kept", j.Ended)
+	}
+	if jobs, _ := PendingHubCloseJobs(a.Jobs); len(jobs) != 0 {
+		t.Fatalf("pending after settle = %v", jobs)
+	}
+}
+
+// #593 review: the node's own settlement of B retires an older unknown A of
+// the same attempt; A is never settled into a second final job.lost.
+func TestOwnSettlementRetiresTheAttemptsOtherIntents_t4632(t *testing.T) {
+	a, h := hubCloseFixture(t)
+	first := liveIntent(t, a)
+	recordHubClose(t, a, first)
+	writeJobCloseOp(t, a, CloseOp{RequestID: first.RequestID, Attempt: first.Attempt, State: CloseOpUnknown})
+	second := first
+	second.RequestID, second.EndReason = "close-2", hubCloseReason
+	recordHubClose(t, a, second)
+	writeJobCloseOp(t, a, CloseOp{RequestID: second.RequestID, Attempt: second.Attempt, State: CloseOpClosed})
+	settle := HubCloseSettlement{App: a}
+	if st, e := settle.Settle(context.Background(), "j"); e != nil || st != HubCloseSettled {
+		t.Fatalf("settle = %v, %v", st, e)
+	}
+	if st, e := settle.Settle(context.Background(), "j"); e != nil || st != HubCloseNone {
+		t.Fatalf("second settle = %v, %v; want none", st, e)
+	}
+	if lost := lostEvents(t, a); len(lost) != 1 || str(lost[0], "request_id") != "close-2" {
+		t.Fatalf("job.lost %v, want one, for close-2", lost)
+	}
+	_ = h
+}
+
+// #593 review: a watcher whose attempt the node's settlement ended exits.
+func TestWatcherExitsAfterASettledClose_t4632(t *testing.T) {
+	a, _ := hubCloseFixture(t)
+	in := liveIntent(t, a)
+	recordHubClose(t, a, in)
+	writeJobCloseOp(t, a, CloseOp{RequestID: in.RequestID, Attempt: in.Attempt, State: CloseOpClosed})
+	if st, e := (HubCloseSettlement{App: a}).Settle(context.Background(), "j"); e != nil || st != HubCloseSettled {
+		t.Fatalf("settle = %v, %v", st, e)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if e := a.watch(ctx, []string{"j"}); e != nil {
+		t.Fatalf("watch = %v, want a clean exit", e)
+	}
+	if lost := lostEvents(t, a); len(lost) != 1 {
+		t.Fatalf("job.lost %v, want only the settlement's", lost)
 	}
 }

@@ -260,6 +260,12 @@ func (a *App) watch(ctx context.Context, args []string) error {
 			}
 			continue
 		}
+		// The node settled a hub close of this attempt: it wrote the record,
+		// freed the lease and recorded the final job.lost, so the watch is
+		// over, even during a quota hand-over's grace (hk 4632).
+		if foldHubClose(j).settled {
+			return nil
+		}
 		// The job.lost announced for a quota stop (by this watcher for a
 		// reviewer, by the manager for a handed-over implementer) is not
 		// an end until the grace for the hub's replacement runs out.

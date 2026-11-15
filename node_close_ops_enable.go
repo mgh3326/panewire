@@ -33,7 +33,26 @@ func (client *HubClient) closeOpsReady(ctx context.Context) bool {
 	if client.jobsInboxRoot == "" {
 		return false
 	}
-	return fleet.CloseOpsReady(ctx, filepath.Join(client.jobsInboxRoot, "jobs"), client.closeOpsLister)
+	return fleet.CloseOpsReady(ctx, filepath.Join(client.jobsInboxRoot, "jobs"), client.nodeVersion(), client.closeOpsLister)
+}
+
+// nodeVersion is the binary version the close-ops marker must name: the
+// hello's version, else the build's.
+func (client *HubClient) nodeVersion() string {
+	if client.version != "" {
+		return client.version
+	}
+	return fleet.BuildVersion
+}
+
+// admitCloseOps is the per-close barrier: a new close registration runs only
+// while the barrier holds now, so a launcher that started after the hello's
+// check (and holds a receipt a close could bind to) fences it.
+func (client *HubClient) admitCloseOps(ctx context.Context) bool {
+	if client.closeOpsAdmit != nil {
+		return client.closeOpsAdmit(ctx)
+	}
+	return client.closeOpsReady(ctx)
 }
 
 // runNodeCloseOpsCLI runs `panewire node close-ops enable --inbox-root DIR`,

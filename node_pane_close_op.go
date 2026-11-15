@@ -398,9 +398,13 @@ func (client *HubClient) bindCloseOpLocked(ctx context.Context, job *os.Root, jo
 		return op, nil, "", "close_in_progress"
 	}
 	// A watcher of an older binary would not defer to the intent. No
-	// watcher at all is fine: the node itself settles the close.
+	// watcher at all is fine: the node itself settles the close. The
+	// node-wide barrier is re-checked for every new registration (hk 4632).
 	if code := client.admitHubCloseWatcher(args.Job, jobDir); code != "" {
 		return op, nil, "", code
+	}
+	if !client.admitCloseOps(ctx) {
+		return op, nil, "", "watcher_incompatible"
 	}
 	// The intent precedes the registration: a crash between the two leaves
 	// an intent with no operation, which the watcher defers to until the

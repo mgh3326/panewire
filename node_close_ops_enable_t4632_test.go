@@ -103,9 +103,6 @@ func TestSessionReRegistersWhenCloseOpsReadinessChanges_t4632(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(jobs, "j1"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := fleet.EnableCloseOps(context.Background(), jobs, "v", time.Now(), closeOpsListing("")); err != nil {
-		t.Fatal(err)
-	}
 	var listing atomic.Value
 	listing.Store("77 panewire _watch j1\n")
 	client, err := NewHubClient(HubClientConfig{URL: t14WSURL(server.URL, ""), MachineID: "machine-a", Token: "node-token", AllowInsecureForTests: true, PingInterval: time.Hour, helloAckTimeout: 5 * time.Second,
@@ -115,6 +112,9 @@ func TestSessionReRegistersWhenCloseOpsReadinessChanges_t4632(t *testing.T) {
 		hostMemoryCollector: func(context.Context) (*HubHostMemory, error) { return nil, nil },
 	})
 	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fleet.EnableCloseOps(context.Background(), jobs, client.nodeVersion(), time.Now(), closeOpsListing("")); err != nil {
 		t.Fatal(err)
 	}
 	client.closeOpsLister = func(context.Context) ([]byte, error) { return []byte(listing.Load().(string)), nil }
@@ -149,4 +149,24 @@ func TestSessionReRegistersWhenCloseOpsReadinessChanges_t4632(t *testing.T) {
 		hellos, _ := hub.snapshot()
 		return len(hellos) == 2 && advertises(hellos[1])
 	})
+}
+
+// #593 review: a new close registration re-checks the barrier; a launcher
+// that started after the hello's check refuses it as watcher_incompatible,
+// before any intent is recorded.
+func TestCloseRegistrationRechecksTheBarrier_t4632(t *testing.T) {
+	inbox := t.TempDir()
+	client := closeOpNode(t, inbox, idlePaneHerdr())
+	client.closeOpsAdmit = nil
+	jobs := filepath.Join(inbox, "jobs")
+	if err := fleet.EnableCloseOps(context.Background(), jobs, client.nodeVersion(), time.Now(), closeOpsListing("")); err != nil {
+		t.Fatal(err)
+	}
+	client.closeOpsLister = closeOpsListing("4242 /opt/old/panewire spawn --job other\n")
+	ledger := client.nodeHubClose.(*fakeHubClose)
+	if _, code := nodeRun(t, client, nodeCommandPaneCloseOp, closeOpArgs("op-1")); code != "watcher_incompatible" || len(ledger.intents) != 0 {
+		t.Fatalf("close_op with a launcher live: code=%q intents=%d", code, len(ledger.intents))
+	}
+	client.closeOpsLister = closeOpsListing("")
+	wantCloseOp(t, client, "op-1", fleet.CloseOpClosed, false)
 }

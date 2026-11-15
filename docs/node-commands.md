@@ -259,18 +259,25 @@ after a recorded step on the host, run after the upgrade:
 panewire node close-ops enable --inbox-root <jobs_inbox_root>
 ```
 
-It refuses (exit 7, retryable) while any live `_watch <job>` process of a job
-under the jobs root lacks its token — every watcher of this binary writes
+It reads one process listing and refuses (exit 7, retryable, removing any
+earlier marker) while it shows a live `_watch <job>` process of a job under
+the jobs root without its token — every watcher of this binary writes
 `jobs/<job>/.watch-caps/<pid>` (`hub_close_v1`) at its start, before any lock
 (`fleet.HubCloseWatchersReady`, failing closed on any listing or token error)
-— or while a spawn launcher (`_spawn-stdin`) of any binary runs. Otherwise it
-records `jobs/.close-ops-v1` (mode 0600, atomic). Every hello then re-checks
-readiness: the marker is present and every live watcher carries its token
-now. A session also re-checks every 30 s and re-sends hello (with the
-heartbeat and completions a repeated hello needs) when the result changes,
-so a watcher an older binary starts later takes `close_ops_v1` away until it
-ends. Per close, the node still refuses `watcher_incompatible` when the
-job's watcher holds the watch lock but not `.panewire-watch-hubclose.lock`.
+— or a `panewire` process of a verb that can start a watcher (`spawn`,
+`work`, `lead`, `restore`, `_spawn-stdin`), of any binary. Otherwise it
+records `jobs/.close-ops-v1` (mode 0600, atomic) naming its binary version.
+The node advertises `close_ops_v1` only while the marker names its own
+version (a rollback or upgrade needs the step again; an older daemon's
+in-process launches end with its restart) and the same one-listing check
+holds now. Every hello checks it; a session re-checks every 30 s and re-sends
+hello (with the heartbeat and completions a repeated hello needs) when the
+result changes; and every new `pane.close_op` registration checks it again,
+answering `watcher_incompatible` when it fails. A launcher records the
+`job.spawned` receipt a close binds to before it starts its watcher and stays
+live until then, so that last check fences the close it could race. Per
+close, the node also refuses `watcher_incompatible` when the job's watcher
+holds the watch lock but not `.panewire-watch-hubclose.lock`.
 
 #### Hub close protocol
 
@@ -382,9 +389,12 @@ settlement step inline, bounded at 5 s; one that fails (for example an
 end-lock wait that expired) runs none, and the daemon pass settles it. A
 close the node journalled as possibly closed (`closed`, `gone`, `unknown`,
 `closing`) is still settled when an independent end (`panewire job close`'s
-`job.revoked`, a completion) follows its intent, keeping a competing terminal
-hk record; and a watcher decision the node's settlement made stale is
-dropped. What the hub caller (hk 4745) must do: issue close ops only to a node whose
+`job.revoked`, a completion, a reap) follows its intent, keeping a competing
+terminal hk record; that settlement records `job.hub_close_settled`, not a
+terminal `job.lost`, so the independent end stays the job's local outcome.
+The node's own settlement retires every other intent of the attempt. A
+watcher decision the node's settlement made stale is dropped, and the
+watcher then exits. What the hub caller (hk 4745) must do: issue close ops only to a node whose
 current registration advertises it; send `end_reason` on every `pane.close_op`; treat
 `close_in_progress` and `watcher_incompatible` as "not closed, retry later";
 after `unknown`, retry under a new request id while the pane is still
