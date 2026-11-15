@@ -190,11 +190,13 @@ func TestReplayPassSettlesNotStartedRequest_t4379(t *testing.T) {
 	}
 	wait()
 	got := s.status(t)
-	if got.Status != "retryable" || got.Outcome.Reason != "deadline_not_started" || got.Outcome.RC == 75 {
-		t.Fatalf("late not-started answer did not settle the request: %+v", got)
+	// The proof ends the attempt, not the request (hk 4660): the request
+	// starts attempt 2 under the same reservation.
+	if got.Status != "accepted" || got.Attempt != 2 || got.Outcome.Reason != "deadline_not_started" || got.Outcome.RC == 75 {
+		t.Fatalf("late not-started answer did not settle the attempt: %+v", got)
 	}
-	if err := s.claimNext(t); err != nil {
-		t.Fatalf("reservation still held: %v", err)
+	if err := s.claimNext(t); !errors.Is(err, errSpawnClaimed) {
+		t.Fatalf("the request's reservation was released: %v", err)
 	}
 }
 

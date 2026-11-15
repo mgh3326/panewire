@@ -19,8 +19,27 @@ import (
 // coordinator tick without it.
 const defaultStartConditionPoll = 60 * time.Second
 
-// spawnWaitingScanLimit bounds one pass over the waiting rows.
-const spawnWaitingScanLimit = 1000
+// spawnWaitingScanLimit bounds one pass over the waiting rows. Passes
+// continue from a cursor, so every waiting row is judged within
+// ceil(rows/limit) passes whatever the older ones are waiting for.
+const spawnWaitingScanLimit = 100
+
+// spawnConditionReadBudget bounds the hk reads of one waiting pass.
+const spawnConditionReadBudget = 30 * time.Second
+
+// spawnAttemptEndedUnstarted reports whether an outcome ends an attempt
+// whose start is proven absent, so a request with a limit renews it or gives
+// up: the landing wait ran out with the hub never having sent the attempt (or
+// the node attesting it, which completeSpawn decides), or the node's own
+// not-started attestation (also the start proof's fence) came after the
+// attempt's deadline. A not-started answer inside the deadline is a refusal
+// the next-host path or the caller owns, and ends retryable as before.
+func spawnAttemptEndedUnstarted(task hubSpawnTask, outcome hubSpawnOutcome, now time.Time) bool {
+	if task.Expires.IsZero() {
+		return false
+	}
+	return outcome.Reason == "timeout" || spawnOutcomeNotStarted(outcome) && !now.Before(task.Deadline)
+}
 
 // spawnAttemptDeadline is when an attempt that begins at now ends: the
 // per-attempt landing wait, or the request's limit when that comes first.
@@ -58,19 +77,51 @@ func spawnGivenUpOutcome(task hubSpawnTask, host string) hubSpawnOutcome {
 	}
 }
 
-// waitingSpawns lists the requests queued behind a start condition.
-func (s *laneInboxStore) waitingSpawns(parent context.Context) ([]hubSpawnTask, error) {
+// waitingSpawns lists up to limit requests queued behind a start condition,
+// oldest first, after the cursor (the zero cursor starts at the oldest).
+func (s *laneInboxStore) waitingSpawns(parent context.Context, after spawnScanPosition, limit int) ([]hubSpawnTask, error) {
 	ctx, done := s.op(parent)
 	defer done()
-	return s.queryPendingSpawns(ctx, fmt.Sprintf(`status='waiting' ORDER BY created_ms,request_id LIMIT %d`, spawnWaitingScanLimit))
+	query := `SELECT ` + spawnTaskColumns + ` FROM spawn_operations WHERE status='waiting'`
+	var args []any
+	if after.valid {
+		query += ` AND (created_ms>? OR (created_ms=? AND request_id>?))`
+		args = append(args, after.created, after.created, after.id)
+	}
+	rows, err := s.db.QueryContext(ctx, s.q(query+fmt.Sprintf(` ORDER BY created_ms,request_id LIMIT %d`, limit)), args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var tasks []hubSpawnTask
+	for rows.Next() {
+		task, err := scanSpawnTask(rows)
+		if err != nil {
+			return nil, err
+		}
+		tasks = append(tasks, task)
+	}
+	return tasks, rows.Err()
 }
 
 // releaseWaitingSpawn moves a request whose start condition holds to pending.
 // Its first attempt's landing wait starts now.
+//
+// A row an older hub left (no limit) gets the role's default limit from its
+// release, so a conditioned row with no limit exists only until then, and the
+// legacy guard in executeSpawnTask never applies to a request this hub queued.
 func (s *laneInboxStore) releaseWaitingSpawn(parent context.Context, task hubSpawnTask, now time.Time) (bool, error) {
 	ctx, done := s.op(parent)
 	defer done()
-	result, err := s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET status='accepted',deadline_ms=? WHERE request_id=? AND attempt=? AND status='waiting'`), spawnAttemptDeadline(now, task.Request.DeadlineSeconds, task.Expires).UnixMilli(), task.Request.RequestID, task.Attempt)
+	expires := task.Expires
+	if expires.IsZero() {
+		spawn, err := fleet.ValidateSubmission(task.Request)
+		if err != nil {
+			return false, err
+		}
+		expires = now.Add(fleet.SpawnExpiresFor(spawn.Role, task.Request.ExpiresSeconds))
+	}
+	result, err := s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET status='accepted',deadline_ms=?,expires_ms=? WHERE request_id=? AND attempt=? AND status='waiting'`), spawnAttemptDeadline(now, task.Request.DeadlineSeconds, expires).UnixMilli(), expires.UnixMilli(), task.Request.RequestID, task.Attempt)
 	if err != nil {
 		return false, err
 	}
@@ -160,27 +211,45 @@ func (s *laneInboxStore) releaseEndedSpawn(ctx context.Context, tx *sql.Tx, task
 }
 
 // parkLegacyConditionedSpawns returns a request that carries start conditions
-// but was never placed to waiting. Such a row predates the waiting state; a
-// released row is converted too and is judged again on the next pass, because
-// its conditions still hold.
+// but was never placed to waiting. Such a row predates the waiting state and
+// the time limit (expires_ms=0: this hub gives every request it queues a
+// limit, and gives a released legacy row one). Until it is parked,
+// executeSpawnTask refuses to place it.
 func (s *laneInboxStore) parkLegacyConditionedSpawns(parent context.Context) error {
 	ctx, done := s.op(parent)
 	defer done()
-	_, err := s.db.ExecContext(ctx, `UPDATE spawn_operations SET status='waiting' WHERE status='accepted' AND node_id IS NULL AND payload LIKE '%"start_conditions":%'`)
+	_, err := s.db.ExecContext(ctx, `UPDATE spawn_operations SET status='waiting' WHERE status='accepted' AND node_id IS NULL AND expires_ms=0 AND payload LIKE '%"start_conditions":%'`)
 	return err
 }
 
-// checkWaitingSpawns is one pass over the requests queued behind a start
-// condition: past its limit a request is given up; one whose condition holds
-// is released to pending; one that waits on a task hk dropped is cancelled.
-// hk is read at most once per poll interval, and sooner only for a request
-// the hub has not judged yet.
+// checkWaitingSpawns is one pass over a page of the requests queued behind a
+// start condition: past its limit a request is given up; one whose condition
+// holds is released to pending; one that waits on a task hk dropped is
+// cancelled. Each pass continues from the last, so every waiting row is
+// judged however many are waiting. hk is read for a task at most once per
+// poll interval (an unread task at once), whether or not the read answered.
 func (h *HubServer) checkWaitingSpawns(ctx context.Context) {
-	rows, err := h.inbox.store.waitingSpawns(ctx)
+	h.startConditionMu.Lock()
+	cursor := h.waitingCursor
+	h.startConditionMu.Unlock()
+	rows, err := h.inbox.store.waitingSpawns(ctx, cursor, spawnWaitingScanLimit)
 	if err != nil {
 		return
 	}
 	now := h.now().UTC()
+	h.startConditionMu.Lock()
+	switch {
+	case len(rows) < spawnWaitingScanLimit:
+		// The end of the queue: start over, and forget what no row waits for.
+		h.waitingCursor = spawnScanPosition{}
+		if len(rows) == 0 && !cursor.valid {
+			h.startConditionTasks, h.startConditionTried, h.startConditionSeen = nil, nil, nil
+		}
+	default:
+		last := rows[len(rows)-1]
+		h.waitingCursor = spawnScanPosition{created: last.Created.UnixMilli(), id: last.Request.RequestID, valid: true}
+	}
+	h.startConditionMu.Unlock()
 	var live []hubSpawnTask
 	for _, task := range rows {
 		if !task.Expires.IsZero() && !now.Before(task.Expires) {
@@ -189,44 +258,111 @@ func (h *HubServer) checkWaitingSpawns(ctx context.Context) {
 		}
 		live = append(live, task)
 	}
-	var conditions [][]fleet.StartCondition
-	unjudged := false
+	var stale [][]fleet.StartCondition
 	h.startConditionMu.Lock()
 	for _, task := range live {
-		if spawnConditionsNeedHK(task.Request.StartConditions) {
-			conditions = append(conditions, task.Request.StartConditions)
-			if _, judged := h.startConditionSeen[task.Request.RequestID]; !judged {
-				unjudged = true
+		for _, id := range fleet.StartConditionTaskIDs(task.Request.StartConditions) {
+			if tried, ok := h.startConditionTried[id]; !ok || now.Sub(tried) >= h.startConditionEvery() {
+				stale = append(stale, task.Request.StartConditions)
+				break
 			}
 		}
 	}
-	snapshots := h.startConditionTasks
-	read := len(conditions) != 0 && (unjudged || now.Sub(h.startConditionReadAt) >= h.startConditionEvery())
 	h.startConditionMu.Unlock()
-	if read {
-		snapshots, _ = fleet.ReadStartConditionTaskBatch(ctx, conditions)
+	if len(stale) != 0 {
+		readCtx, cancel := context.WithTimeout(ctx, spawnConditionReadBudget)
+		read, attempted := fleet.ReadStartConditionTaskPass(readCtx, stale)
+		cancel()
 		h.startConditionMu.Lock()
-		h.startConditionTasks, h.startConditionReadAt = snapshots, now
+		if h.startConditionTasks == nil {
+			h.startConditionTasks, h.startConditionTried = map[string]fleet.TaskSnapshot{}, map[string]time.Time{}
+		}
+		// A read that failed keeps the last answer: a condition that held
+		// stays held, and one never read fails closed (hk_unavailable).
+		for id, snapshot := range read {
+			h.startConditionTasks[id] = snapshot
+		}
+		for id := range attempted {
+			h.startConditionTried[id] = now
+		}
 		h.startConditionMu.Unlock()
 	}
-	seen := make(map[string]fleet.StartConditionResult, len(live))
+	h.startConditionMu.Lock()
+	snapshots := h.startConditionTasks
+	if h.startConditionSeen == nil {
+		h.startConditionSeen = map[string]fleet.StartConditionResult{}
+	}
+	h.startConditionMu.Unlock()
 	for _, task := range live {
 		result := fleet.EvaluateStartConditions(task.Request.StartConditions, snapshots, now)
+		id := task.Request.RequestID
 		switch result.Status {
 		case "met":
 			if released, err := h.inbox.store.releaseWaitingSpawn(ctx, task, now); err == nil && released {
-				h.logger.Info("hub spawn released from its start condition", "request_id", task.Request.RequestID, "job", task.Job)
+				h.logger.Info("hub spawn released from its start condition", "request_id", id, "job", task.Job)
+				h.kickSpawnPlacement()
 			}
+			h.forgetStartCondition(id)
 		case "cancelled":
 			outcome := hubSpawnOutcome{RC: 84, Stage: "queue", Reason: spawnOutcomeReason("start_condition_cancelled", result.Reason), Fix: "Nothing was started: a task this request waits on was dropped or closed as a duplicate. Submit the spawn again without that condition.", E6Arm: task.Request.E6Arm}
 			h.endWaitingSpawn(ctx, task, "cancelled", outcome, now)
+			h.forgetStartCondition(id)
 		default:
-			seen[task.Request.RequestID] = result
+			h.startConditionMu.Lock()
+			h.startConditionSeen[id] = result
+			h.startConditionMu.Unlock()
 		}
 	}
+	for _, task := range rows {
+		if !task.Expires.IsZero() && !now.Before(task.Expires) {
+			h.forgetStartCondition(task.Request.RequestID)
+		}
+	}
+}
+
+func (h *HubServer) forgetStartCondition(requestID string) {
 	h.startConditionMu.Lock()
-	h.startConditionSeen = seen
+	delete(h.startConditionSeen, requestID)
 	h.startConditionMu.Unlock()
+}
+
+// runWaitingSpawns judges the waiting requests on its own goroutine, so an hk
+// that answers slowly never holds up placement. It also retries the startup
+// parking of legacy conditioned rows until it succeeds.
+func (h *HubServer) runWaitingSpawns(parent context.Context) {
+	if h.inbox == nil {
+		return
+	}
+	ctx, cancel := context.WithCancel(parent)
+	defer cancel()
+	stop := context.AfterFunc(h.closeCtx, cancel)
+	defer stop()
+	tick := time.NewTicker(2 * time.Second)
+	defer tick.Stop()
+	parked := false
+	for {
+		if h.drain.admit() {
+			if !parked {
+				parked = h.inbox.store.parkLegacyConditionedSpawns(ctx) == nil
+			}
+			h.checkWaitingSpawns(ctx)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+		}
+	}
+}
+
+// evaluateHubStartCondition judges one request's conditions with a live hk
+// read, for the guard on rows an older hub left (executeSpawnTask).
+func evaluateHubStartCondition(ctx context.Context, h *HubServer, conditions []fleet.StartCondition) fleet.StartConditionResult {
+	snapshots, err := fleet.ReadStartConditionTasks(ctx, conditions)
+	if err != nil {
+		return fleet.StartConditionResult{Status: "waiting", Reasons: []string{"hk_unavailable"}}
+	}
+	return fleet.EvaluateStartConditions(conditions, snapshots, h.now().UTC())
 }
 
 func (h *HubServer) endWaitingSpawn(ctx context.Context, task hubSpawnTask, status string, outcome hubSpawnOutcome, now time.Time) {
@@ -235,17 +371,6 @@ func (h *HubServer) endWaitingSpawn(ctx context.Context, task hubSpawnTask, stat
 		return
 	}
 	h.logger.Warn("hub spawn ended while waiting", "request_id", task.Request.RequestID, "job", task.Job, "status", status, "reason", outcome.Reason)
-}
-
-// spawnConditionsNeedHK reports whether judging the conditions reads hk: a
-// time condition alone does not.
-func spawnConditionsNeedHK(conditions []fleet.StartCondition) bool {
-	for _, condition := range conditions {
-		if condition.Kind != "time" {
-			return true
-		}
-	}
-	return false
 }
 
 func (h *HubServer) startConditionEvery() time.Duration {

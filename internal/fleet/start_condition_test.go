@@ -3,6 +3,11 @@ package fleet
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -169,5 +174,37 @@ func TestSubmissionStartConditionsRoundTripAndLegacyJSON(t *testing.T) {
 	}
 	if !startConditionsEqual(decoded.StartConditions, conditions) {
 		t.Fatalf("round trip = %#v, want %#v", decoded.StartConditions, conditions)
+	}
+}
+
+// A pass reports the ids it attempted, so a caller spacing its retries by
+// attempt does not mistake an id the context cut off for one it tried.
+func TestReadStartConditionTaskPassReportsOnlyAttemptedIDs(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var reads atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		id := strings.TrimPrefix(r.URL.Path, "/v1/tasks/")
+		if reads.Add(1) == 1 {
+			cancel() // the context ends during the first read
+		}
+		fmt.Fprintf(w, `{"id":%s,"state":"merged","relations":[]}`, id)
+	}))
+	defer server.Close()
+	t.Setenv("HANDOFFKEEP_URL", server.URL)
+	t.Setenv("HANDOFFKEEP_TOKEN_SVC_PANEWIRE", "pass-test")
+	conditions := [][]StartCondition{{{Kind: "task", TaskID: "11", State: "merged"}, {Kind: "task", TaskID: "12", State: "merged"}, {Kind: "task", TaskID: "13", State: "merged"}}}
+	_, attempted := ReadStartConditionTaskPass(ctx, conditions)
+	if len(attempted) > 1 || reads.Load() != 1 || attempted["12"] || attempted["13"] {
+		t.Fatalf("attempted=%v reads=%d; the ids after the cut-off were never read", attempted, reads.Load())
+	}
+	if ids := StartConditionTaskIDs(conditions[0]); strings.Join(ids, ",") != "11,12,13" {
+		t.Fatalf("ids=%v", ids)
+	}
+	// With a live context every id is attempted, answered or not.
+	_, attempted = ReadStartConditionTaskPass(context.Background(), conditions)
+	if len(attempted) != 3 {
+		t.Fatalf("attempted=%v, want all three", attempted)
 	}
 }

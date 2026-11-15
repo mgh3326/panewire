@@ -117,8 +117,9 @@ request starts its limit again. These are constants in this part
 
 The 600 s landing wait (`deadline_seconds`) is now one attempt's bound, or the
 limit when that comes first. When it ends an attempt whose start is *proven
-absent* (the hub never sent it, the node attested `deadline_not_started`, or
-the start proof fenced it), the request is not over:
+absent* (the hub never sent it, or the node attested `deadline_not_started` or
+the start proof fenced it after the attempt's deadline), the request is not
+over:
 
 | Attempt ends, start proven absent | Result |
 |---|---|
@@ -131,24 +132,32 @@ does not apply while the node may have started it. Part 1's proof
 ([Start proof](#start-proof)) or the node's own answer settles it, and only
 then does the table above apply. A row with no limit (`expires_ms=0`, written
 before the column or by an older hub) keeps the previous behaviour: its timeout
-ends it `retryable`. A placement trace the hub cannot restore (a held legacy
-conflict) also ends the attempt `retryable`, the old way, instead of blocking.
+ends it `retryable`. A not-started answer inside the attempt's deadline is a
+refusal and ends as before (next host, or `retryable`). The hand-over takes
+the placement-trace lock a client's replay takes; if the trace cannot be
+restored (a held legacy conflict) the end of the attempt is not recorded: the
+request stays as it is with its reservation, and a later pass settles it once
+the trace can be restored.
 
 **Start conditions.** `--after task:N=merged|deployed|done`, `--after
 blockers[=merged|deployed]` and `--after time:RFC3339` (repeatable, ANDed)
 queue the request as `waiting`: it holds its reservation, takes no placement
 slot and no quota. `start_conditions_v1` in the features answer says the hub
 does this (before this part it refused such a request with
-`start_conditions_unsupported`). The coordinator judges waiting requests on
-every 2 s tick:
+`start_conditions_unsupported`). A goroutine of its own (so a slow hk never
+holds up placement) judges waiting requests every 2 s, a page of 100 at a
+time from a cursor, so every waiting row is judged however many are waiting:
 
 - past `expires_at`: `given_up` (as above);
-- a time condition and the expiry are judged locally; conditions that name
-  tasks read hk in one batch at most every 60 s (`startConditionPoll`, hub
-  field, default `defaultStartConditionPoll`), or at once for a request not
-  yet judged. A `blockers` condition re-reads the task's relations on each
-  read, so a relation added later counts. An unreadable task fails closed:
-  the request keeps waiting (`hk_unavailable`);
+- a time condition and the expiry are judged locally; each task a condition
+  names is read from hk at most once per 60 s (`startConditionPoll`, hub
+  field, default `defaultStartConditionPoll`), or at once if never read, with
+  a bound per read and 30 s per pass. A task counts as tried once its read
+  ran, answered or not, so an unreachable task is not re-read every tick and
+  never keeps the others unread. A `blockers` condition re-reads the task's
+  relations on each read, so a relation added later counts. A read that failed
+  keeps the last answer; a task never read fails closed: the request keeps
+  waiting (`hk_unavailable`);
 - every condition holds: `waiting` to `accepted` (pending), with its first
   attempt's wait starting then;
 - a named task is `dropped` or `duplicate`: `cancelled`, terminal, reason
@@ -156,9 +165,15 @@ every 2 s tick:
   reservation freed.
 
 A waiting request's answer carries `start_condition.reasons`. A hub restart
-keeps `waiting` and `expires_at` (both are columns); on start the hub also
-returns any conditioned, never-placed `accepted` row, which an older hub
-left, to `waiting` (a released one is judged again and released again).
+keeps `waiting` and `expires_at` (both are columns).
+
+A conditioned row an older hub left has no limit (`expires_ms=0`; this hub
+gives every request it queues one). The hub parks an unplaced one as `waiting`
+at start and retries until that write succeeds; until then `executeSpawnTask`
+places nothing that carries conditions and has no limit. A placed one (`bound`,
+`dispatching`, …) keeps the old guard: it is not replayed while its condition
+is unmet and its deadline is live. A legacy row released from `waiting` gets
+the role's default limit, and is an ordinary request from then on.
 
 ### Rolling back past the time limit
 

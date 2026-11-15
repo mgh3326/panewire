@@ -46,8 +46,9 @@ func ValidSpawnExpiresSeconds(seconds int) bool {
 	if seconds == 0 {
 		return true
 	}
-	d := time.Duration(seconds) * time.Second
-	return seconds > 0 && d >= SpawnExpiresMin && d <= SpawnExpiresMax
+	// Compared in seconds: converting a wire value to a Duration first
+	// would wrap an enormous one into range.
+	return seconds >= int(SpawnExpiresMin/time.Second) && seconds <= int(SpawnExpiresMax/time.Second)
 }
 
 // parseSpawnExpires reads --expires: a Go duration such as 90m or 2h, whole

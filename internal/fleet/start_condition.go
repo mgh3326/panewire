@@ -226,11 +226,46 @@ func ReadStartConditionTasks(ctx context.Context, conditions []StartCondition) (
 	return ReadStartConditionTaskBatch(ctx, [][]StartCondition{conditions})
 }
 
+// startConditionReadBound bounds one hk task read.
+const startConditionReadBound = 5 * time.Second
+
+// StartConditionTaskIDs lists the hk task ids a request's conditions read
+// first: the tasks it names and the targets of its blockers conditions.
+// Blocker ids come from the target's relations, once it is read.
+func StartConditionTaskIDs(conditions []StartCondition) []string {
+	seen := map[string]bool{}
+	var ids []string
+	for _, condition := range conditions {
+		id := ""
+		switch condition.Kind {
+		case "task":
+			id = condition.TaskID
+		case "blockers":
+			id = condition.TargetTaskID
+		}
+		if id != "" && !seen[id] {
+			seen[id] = true
+			ids = append(ids, id)
+		}
+	}
+	sort.Strings(ids)
+	return ids
+}
+
 // ReadStartConditionTaskBatch resolves predicates for multiple queued
-// requests together, deduplicating every task id across the batch.
+// requests together, deduplicating every task id across the batch. Each read
+// has its own bound; the caller's context bounds the whole batch.
 func ReadStartConditionTaskBatch(ctx context.Context, requests [][]StartCondition) (map[string]TaskSnapshot, error) {
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
+	snapshots, _ := ReadStartConditionTaskPass(ctx, requests)
+	return snapshots, nil
+}
+
+// ReadStartConditionTaskPass is ReadStartConditionTaskBatch that also says
+// which ids it attempted: a read that finished, answered or not. An id left
+// out was never tried because ctx ended first, so a caller that spaces its
+// retries by attempt (the hub's waiting pass) can still retry it at once and
+// no id is starved by the ones sorted before it.
+func ReadStartConditionTaskPass(ctx context.Context, requests [][]StartCondition) (map[string]TaskSnapshot, map[string]bool) {
 	ids := make(map[string]bool)
 	blockerTargets := make(map[string]bool)
 	for _, conditions := range requests {
@@ -245,20 +280,35 @@ func ReadStartConditionTaskBatch(ctx context.Context, requests [][]StartConditio
 		}
 	}
 	snapshots := make(map[string]TaskSnapshot, len(ids))
+	attempted := make(map[string]bool, len(ids))
 	read := make(map[string]bool, len(ids))
-	orderedIDs := make([]string, 0, len(ids))
-	for id := range ids {
-		orderedIDs = append(orderedIDs, id)
-	}
-	sort.Strings(orderedIDs)
-	for _, id := range orderedIDs {
-		read[id] = true
-		snapshot, err := readStartConditionTask(ctx, id)
-		if err != nil {
-			continue
+	readIDs := func() {
+		ordered := make([]string, 0, len(ids))
+		for id := range ids {
+			if !read[id] {
+				ordered = append(ordered, id)
+			}
 		}
-		snapshots[id] = snapshot
+		sort.Strings(ordered)
+		for _, id := range ordered {
+			if ctx.Err() != nil {
+				return
+			}
+			read[id] = true
+			readCtx, cancel := context.WithTimeout(ctx, startConditionReadBound)
+			snapshot, err := readStartConditionTask(readCtx, id)
+			cancel()
+			if ctx.Err() != nil {
+				read[id] = false
+				return
+			}
+			attempted[id] = true
+			if err == nil {
+				snapshots[id] = snapshot
+			}
+		}
 	}
+	readIDs()
 	for id := range blockerTargets {
 		snapshot, ok := snapshots[id]
 		if !ok {
@@ -270,23 +320,8 @@ func ReadStartConditionTaskBatch(ctx context.Context, requests [][]StartConditio
 			}
 		}
 	}
-	orderedIDs = orderedIDs[:0]
-	for id := range ids {
-		orderedIDs = append(orderedIDs, id)
-	}
-	sort.Strings(orderedIDs)
-	for _, id := range orderedIDs {
-		if read[id] {
-			continue
-		}
-		read[id] = true
-		snapshot, err := readStartConditionTask(ctx, id)
-		if err != nil {
-			continue
-		}
-		snapshots[id] = snapshot
-	}
-	return snapshots, nil
+	readIDs()
+	return snapshots, attempted
 }
 
 func readStartConditionTask(ctx context.Context, taskID string) (TaskSnapshot, error) {

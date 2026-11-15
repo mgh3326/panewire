@@ -93,7 +93,17 @@ func TestLegacyPlacementVersionReconciliation_t4581(t *testing.T) {
 			hk.mu.Unlock()
 			// The hub's own write: an attempt that timed out unstarted begins the
 			// next one inside it, after restoring the deferred trace (hk 4660).
-			if changed, err := hub.completeSpawn(t.Context(), task, outcome); err != nil || !changed {
+			changed, err := hub.completeSpawn(t.Context(), task, outcome)
+			if tc.timeout && tc.wantHold {
+				// A trace the hub cannot restore holds the attempt's end: nothing
+				// is recorded and the request keeps its reservation (hk 4660).
+				if changed || err == nil {
+					t.Fatalf("held trace: changed=%v err=%v; want the end held", changed, err)
+				}
+				if saved, e := hub.inbox.store.spawnTask(t.Context(), request.RequestID); e != nil || saved.Status != "bound" || saved.Attempt != task.Attempt {
+					t.Fatalf("held end changed the request: %+v %v", saved, e)
+				}
+			} else if err != nil || !changed {
 				t.Fatalf("commit result: changed=%v err=%v", changed, err)
 			}
 			hub.flushPlacementRecords(t.Context())

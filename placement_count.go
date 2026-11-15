@@ -219,17 +219,19 @@ func (h *HubServer) completeSpawn(ctx context.Context, task hubSpawnTask, outcom
 	// An attempt that ended without starting may begin the request's next one
 	// inside this write, the hand-over a client's replay makes: it takes the
 	// same placement-trace lock, held only across the store call. A trace the
-	// lock cannot restore keeps the request out of that hand-over: the attempt
-	// ends retryable as it always did, and the held trace is not touched.
+	// lock cannot restore is not touched: the attempt's end is not recorded
+	// and the request stays as it is (reservation kept), to be settled by a
+	// later pass once the trace can be restored.
 	release := func() {}
-	if outcome.Reason == "timeout" && !task.Expires.IsZero() && (task.Node == nil || task.Status == "bound" || outcome.NodeResult && outcome.Retryable) {
+	now := h.now().UTC()
+	if spawnAttemptEndedUnstarted(task, outcome, now) && (outcome.Reason != "timeout" || task.Node == nil || task.Status == "bound" || outcome.NodeResult && outcome.Retryable) {
 		var lockErr error
 		if release, lockErr = h.lockPlacementTrace(ctx, task, true); lockErr != nil {
-			h.logger.Warn("spawn attempt ended retryable: its placement trace is held", "request_id", task.Request.RequestID, "attempt", task.Attempt, "error", lockErr)
-			release, task.Expires = func() {}, time.Time{}
+			h.logger.Warn("spawn attempt end held: its placement trace cannot be restored", "request_id", task.Request.RequestID, "attempt", task.Attempt, "error", lockErr)
+			return false, lockErr
 		}
 	}
-	changed, err := h.inbox.store.completeSpawn(ctx, task, outcome, h.now().UTC())
+	changed, err := h.inbox.store.completeSpawn(ctx, task, outcome, now)
 	release()
 	if changed {
 		// The store normalizes the outcome it persists (a bound attempt's

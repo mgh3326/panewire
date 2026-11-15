@@ -385,9 +385,6 @@ func (h *HubServer) runSpawnCoordinator(parent context.Context) {
 	defer tick.Stop()
 	for {
 		if h.drain.admit() {
-			// Requests behind a start condition or past their limit settle
-			// first, so one released now is scheduled in this very pass.
-			h.checkWaitingSpawns(ctx)
 			// Work claimed during a scan may move later in the ordering. Do not
 			// schedule the same row twice in one pass, even if it reappears.
 			seen := map[string]bool{}
@@ -458,6 +455,22 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 			h.finishSpawnOutcome(task, hubSpawnOutcome{RC: 1, Stage: "launch", Reason: "unknown"})
 		}
 	}()
+	if len(task.Request.StartConditions) != 0 && task.Expires.IsZero() {
+		// A row an older hub left (it has no limit; this hub queues every
+		// conditioned request as waiting and gives it one when released).
+		if task.Node == nil {
+			// Not yet parked as waiting (runWaitingSpawns retries the park).
+			return
+		}
+		if h.now().Before(task.Deadline) && evaluateHubStartCondition(parent, h, task.Request.StartConditions).Status != "met" {
+			// A bound legacy row may already have reached the node. While the
+			// original deadline is live, do not replay an unmet condition because
+			// the node treats an unknown request id as a new spawn. At the
+			// deadline, the normal replay carries an expired deadline, which lets
+			// the node return a journal result or refuse an unstarted request.
+			return
+		}
+	}
 	if !h.now().Before(task.Deadline) {
 		if task.Status == "deadline_exceeded" && task.Node != nil {
 			h.reprobeStaleSpawn(parent, task)
@@ -1509,9 +1522,10 @@ func (h *HubServer) startSpawnCoordinator(ctx context.Context) {
 	}
 	h.spawnCoordinatorOnce.Do(func() {
 		h.placementAsync.Store(true)
-		h.spawnWorkers.Add(3)
+		h.spawnWorkers.Add(4)
 		go func() { defer h.spawnWorkers.Done(); h.runSpawnCoordinator(ctx) }()
 		go func() { defer h.spawnWorkers.Done(); h.runQuotaReconcile(ctx) }()
+		go func() { defer h.spawnWorkers.Done(); h.runWaitingSpawns(ctx) }()
 		go func() {
 			defer h.spawnWorkers.Done()
 			defer h.placementAsync.Store(false)

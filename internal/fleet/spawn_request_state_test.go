@@ -240,6 +240,10 @@ func TestParseSpawnExpires(t *testing.T) {
 	if SpawnExpiresFor("reviewer", 7200) != 2*time.Hour || SpawnExpiresFor("reviewer", 0) != time.Hour {
 		t.Fatal("an explicit limit overrides the role default")
 	}
+	// A wire value that would wrap into range as a Duration is out of range.
+	if ValidSpawnExpiresSeconds(18446744134) || ValidSpawnExpiresSeconds(int(^uint(0)>>1)) {
+		t.Fatal("an overflowing expires_seconds passed validation")
+	}
 	if !ValidSpawnExpiresSeconds(0) || ValidSpawnExpiresSeconds(86401) || ValidSpawnExpiresSeconds(59) || ValidSpawnExpiresSeconds(-1) {
 		t.Fatal("ValidSpawnExpiresSeconds bounds")
 	}

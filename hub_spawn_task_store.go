@@ -386,7 +386,7 @@ func (s *laneInboxStore) completeSpawn(parent context.Context, task hubSpawnTask
 	if n == 0 {
 		return false, nil
 	}
-	if status == "retryable" && outcome.Reason == "timeout" && !task.Expires.IsZero() {
+	if status == "retryable" && spawnAttemptEndedUnstarted(task, outcome, now) {
 		// An attempt that ended with the start provably absent no longer ends
 		// the request: it goes back to pending, or is given up at its limit.
 		return s.endUnstartedAttempt(ctx, tx, task, outcome, now)
