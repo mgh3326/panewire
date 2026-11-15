@@ -117,6 +117,15 @@ func TestCIShardsCoverEveryRootTest(t *testing.T) {
 	if !slices.Contains(strings.Split(shard.runs(), "\n"), "scripts/ci-test-shard.sh ${{ matrix.shard }}") {
 		t.Fatalf("shard job does not run scripts/ci-test-shard.sh with its matrix value: %s", shard.runs())
 	}
+	shardSpecsCoverRootTests(t, specs)
+}
+
+// shardSpecsCoverRootTests proves that the shard specs (INDEX/TOTAL) run every
+// top-level test of the root package exactly once. It asks
+// scripts/ci-test-shard.sh for each spec's -run pattern in dry-run mode, so
+// the pull request shards and the macOS deploy shards are checked the same way.
+func shardSpecsCoverRootTests(t *testing.T, specs []string) {
+	t.Helper()
 	list, err := exec.Command("go", "test", "-list", ".", ".").Output()
 	if err != nil {
 		t.Fatalf("go test -list: %v", err)
