@@ -24,9 +24,11 @@ package panewire
 // hk's batched states route carries no priority, so the priority is read once
 // per wait with one task read (fleet.ReadTaskPriority) and kept on the row
 // (park_priority; -1 is not read yet). A task hk no longer has, or an id that
-// names none, can never be urgent and reads as 0. Any other read failure stops
-// the pass — every later row's read would fail the same way — so an outage
-// costs one call, judges nothing, and is retried whole by the next pass.
+// names none, can never be urgent and reads as 0. A refusal or unreadable
+// answer about one task is counted (park_priority_failures) and read as 0 after
+// spawnParkPriorityFailures passes, so it cannot hold the page; an hk outage
+// stops the pass — every later read would fail the same way — so it costs one
+// call, judges nothing, and is retried whole by the next pass.
 
 import (
 	"context"
@@ -51,6 +53,10 @@ const (
 	// spawnParkNoticePage bounds one pass. A judged row leaves the candidate
 	// set, so a later page always makes progress on the backlog.
 	spawnParkNoticePage = 64
+	// spawnParkPriorityFailures is how many passes a task hk answers badly for
+	// (an unreadable answer, a per-task refusal) may take before the row is
+	// judged not urgent, so one broken task cannot hold the page forever.
+	spawnParkPriorityFailures = 3
 )
 
 // spawnParkNotice is how long a park must last before its owner is told.
@@ -131,12 +137,17 @@ func (h *HubServer) checkParkedSpawnNotices(ctx context.Context) {
 	for _, task := range rows {
 		priority := task.ParkPriority
 		if priority < 0 {
-			read, err := h.readParkedSpawnPriority(ctx, task)
+			read, stop, err := h.readParkedSpawnPriority(ctx, task)
 			if err != nil {
-				// An hk outage fails every later read the same way: stop the
-				// pass, judge nothing, and let the next one retry whole.
-				h.logger.Warn("hub spawn parked notice priority unread", "request_id", task.Request.RequestID, "error", err)
-				return
+				if stop {
+					// hk fails every later read the same way: stop the pass,
+					// judge nothing, and let the next one retry whole.
+					h.logger.Warn("hub spawn parked notice priority unread", "request_id", task.Request.RequestID, "error", err)
+					return
+				}
+				// hk answered badly for this one task: counted, and the pass
+				// goes on so the rows behind it are still judged.
+				continue
 			}
 			// The row moved on, so this pass judges nothing.
 			if read < 0 {
@@ -169,24 +180,40 @@ func (h *HubServer) checkParkedSpawnNotices(ctx context.Context) {
 // readParkedSpawnPriority reads a parked row's hk priority once and keeps it
 // on the row. It answers the priority to judge, or -1 when the row moved on
 // (a new wait, or another pass stored the read first). A task hk does not have
-// and an id that names none can never be urgent and store 0, so they leave the
-// candidate set; any other failure stores nothing and is returned.
-func (h *HubServer) readParkedSpawnPriority(ctx context.Context, task hubSpawnTask) (int, error) {
-	priority := 0
+// and an id that names none store 0, so the row leaves the candidate set as
+// never urgent; a per-task refusal or an unreadable answer is counted and
+// stores 0 after spawnParkPriorityFailures passes. stop reports an hk outage,
+// which fails every later read the same way, so the caller ends the pass
+// without judging anything.
+func (h *HubServer) readParkedSpawnPriority(ctx context.Context, task hubSpawnTask) (priority int, stop bool, err error) {
+	priority = 0
 	if id := hubSpawnArg(task.Request.Args, "--task"); id != "" {
 		read, err := fleet.ReadTaskPriority(ctx, id)
 		switch {
 		case err == nil:
 			priority = read
-		case !fleet.TaskReadPermanent(err):
-			return -1, err
+		case fleet.TaskReadPermanent(err):
+		case fleet.TaskReadOutage(err):
+			return -1, true, err
+		default:
+			count, gaveUp, failErr := h.inbox.store.recordSpawnParkPriorityFailure(ctx, task, spawnParkPriorityFailures)
+			if failErr != nil {
+				return -1, false, failErr
+			}
+			if !gaveUp {
+				if count == 1 {
+					h.logger.Warn("hub spawn parked notice task unreadable", "request_id", task.Request.RequestID, "error", err)
+				}
+				return -1, false, nil
+			}
+			h.logger.Warn("hub spawn parked notice task unreadable; judged not urgent", "request_id", task.Request.RequestID, "passes", count, "error", err)
 		}
 	}
 	changed, err := h.inbox.store.recordSpawnParkPriority(ctx, task, priority)
 	if err != nil || !changed {
-		return -1, err
+		return -1, false, err
 	}
-	return priority, nil
+	return priority, false, nil
 }
 
 // beginParkedSpawnNoticeCheck records this pass's time and reports whether it
@@ -226,16 +253,33 @@ func (s *laneInboxStore) parkedSpawnNoticeCandidates(parent context.Context, sin
 
 // recordSpawnParkPriority stores the priority read for the row's current wait,
 // only while it is still unread there: a read that raced a new attempt must
-// not judge the new one.
+// not judge the new one. A stored read clears the failure count.
 func (s *laneInboxStore) recordSpawnParkPriority(parent context.Context, task hubSpawnTask, priority int) (bool, error) {
 	ctx, done := s.op(parent)
 	defer done()
-	result, err := s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET park_priority=? WHERE request_id=? AND attempt=? AND park_since_ms=? AND park_priority<0`), priority, task.Request.RequestID, task.Attempt, task.ParkSince.UnixMilli())
+	result, err := s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET park_priority=?,park_priority_failures=0 WHERE request_id=? AND attempt=? AND park_since_ms=? AND park_priority<0`), priority, task.Request.RequestID, task.Attempt, task.ParkSince.UnixMilli())
 	if err != nil {
 		return false, err
 	}
 	n, _ := result.RowsAffected()
 	return n == 1, nil
+}
+
+// recordSpawnParkPriorityFailure counts a pass that could not read the row's
+// task, while the row is still unread for this wait. It answers the count and
+// whether max passes have now failed; the caller then stores priority 0 (never
+// urgent) so the row is judged and leaves the candidate page.
+func (s *laneInboxStore) recordSpawnParkPriorityFailure(parent context.Context, task hubSpawnTask, max int) (int, bool, error) {
+	ctx, done := s.op(parent)
+	defer done()
+	if _, err := s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET park_priority_failures=park_priority_failures+1 WHERE request_id=? AND attempt=? AND park_since_ms=? AND park_priority<0`), task.Request.RequestID, task.Attempt, task.ParkSince.UnixMilli()); err != nil {
+		return 0, false, err
+	}
+	var count int
+	if err := s.db.QueryRowContext(ctx, s.q(`SELECT park_priority_failures FROM spawn_operations WHERE request_id=?`), task.Request.RequestID).Scan(&count); err != nil {
+		return 0, false, err
+	}
+	return count, count >= max, nil
 }
 
 // recordSpawnParkJudgement stores the durable judgement of a parked row: the

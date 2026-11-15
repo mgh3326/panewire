@@ -24,6 +24,7 @@ import (
 type parkNoticePriority struct {
 	mu         sync.Mutex
 	priorities map[string]int
+	unreadable map[string]bool
 	read       map[string]int
 	fail       bool
 	srv        *httptest.Server
@@ -43,6 +44,16 @@ func newParkNoticePriority(t *testing.T, priorities map[string]int) *parkNoticeP
 			w.WriteHeader(http.StatusServiceUnavailable)
 			return
 		}
+		p.mu.Lock()
+		unreadable := p.unreadable[id]
+		p.mu.Unlock()
+		if unreadable {
+			// A 2xx answer the task parser cannot read: about this task, not
+			// the service.
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"id":`)
+			return
+		}
 		if !known || id == "" || strings.Contains(id, "/") {
 			http.NotFound(w, r)
 			return
@@ -60,6 +71,15 @@ func (p *parkNoticePriority) reads(id string) int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.read[id]
+}
+
+func (p *parkNoticePriority) setUnreadable(id string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.unreadable == nil {
+		p.unreadable = map[string]bool{}
+	}
+	p.unreadable[id] = true
 }
 
 func (p *parkNoticePriority) setFail(fail bool) {
@@ -385,5 +405,111 @@ func TestSpawnParkNoticeSurvivesRestart_t4662(t *testing.T) {
 	}
 	if row := parkedTask(t, second, notified.Request.RequestID); row.ParkNoticeAt.IsZero() || row.ParkJudgedReason != spawnParkQuota {
 		t.Fatalf("the notified marker did not survive the restart: %+v", row)
+	}
+}
+
+// One task hk answers badly for must not stop the pass, and must not hold the
+// candidate page forever: the rows behind it are judged, and after a bounded
+// number of passes that task reads as not urgent (hk 4662 review).
+func TestSpawnParkNoticeAnswersBadlyForOneTask_t4662(t *testing.T) {
+	clock := time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC)
+	hk := newParkNoticePriority(t, map[string]int{"466101": 1, "466102": 1})
+	hk.setUnreadable("466101")
+	_, client, stop := newFakeHandoffkeep(t)
+	t.Cleanup(stop)
+	h, destination := parkNoticeHub(t, filepath.Join(t.TempDir(), "inbox.sqlite3"), client, &clock)
+	bad := claimParkRequest(t, h, 1, clock)
+	if !parkNow(t, h, bad, spawnParkQuota) {
+		t.Fatal("the first park was refused")
+	}
+	clock = clock.Add(time.Second)
+	urgent := claimParkRequest(t, h, 2, clock)
+	if !parkNow(t, h, urgent, spawnParkQuota) {
+		t.Fatal("the urgent park was refused")
+	}
+	clock = clock.Add(31 * time.Minute)
+	checkParkNotices(t, h)
+	injected := spawnFailedInjections(destination)
+	if len(injected) != 1 || !strings.Contains(injected[0].Text, "request="+urgent.Request.RequestID) {
+		t.Fatalf("the unreadable task starved the urgent row: %+v", injected)
+	}
+	if row := parkedTask(t, h, bad.Request.RequestID); row.ParkPriority != -1 || row.ParkPriorityFailures != 1 || row.ParkJudgedReason != "" {
+		t.Fatalf("the unreadable row was judged on its first failure: %+v", row)
+	}
+	// After spawnParkPriorityFailures passes it is judged not urgent and
+	// leaves the page.
+	for pass := 2; pass <= spawnParkPriorityFailures; pass++ {
+		clock = clock.Add(2 * time.Minute)
+		checkParkNotices(t, h)
+	}
+	if got := spawnFailedInjections(destination); len(got) != 0 {
+		t.Fatalf("a later pass sent %+v", got)
+	}
+	row := parkedTask(t, h, bad.Request.RequestID)
+	if row.ParkPriority != 0 || row.ParkJudgedReason != spawnParkQuota || row.ParkPriorityFailures != 0 {
+		t.Fatalf("the unreadable row was not judged after %d failures: %+v", spawnParkPriorityFailures, row)
+	}
+}
+
+// A deliberate replay starts a new attempt with a fresh wait (hk 4662 review):
+// the park after it must not inherit the old attempt's wait start.
+func TestSpawnParkNoticeReplayStartsAFreshWait_t4662(t *testing.T) {
+	clock := time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC)
+	start := clock
+	hk := newParkNoticePriority(t, map[string]int{"466101": 1})
+	_, client, stop := newFakeHandoffkeep(t)
+	t.Cleanup(stop)
+	h, destination := parkNoticeHub(t, filepath.Join(t.TempDir(), "inbox.sqlite3"), client, &clock)
+	task := claimParkRequest(t, h, 1, clock)
+	if !parkNow(t, h, task, spawnParkQuota) {
+		t.Fatal("the park was refused")
+	}
+	// Why the wait is past the limit for the first attempt.
+	clock = clock.Add(31 * time.Minute)
+	checkParkNotices(t, h)
+	if injected := spawnFailedInjections(destination); len(injected) != 1 {
+		t.Fatalf("the first attempt sent %d notices, want 1", len(injected))
+	}
+	// completeSpawn frees the reservation before a request ends retryable; the
+	// fixture does the same, so the deliberate replay can claim it again.
+	if _, err := h.inbox.store.db.Exec(`DELETE FROM spawn_reservations WHERE job=?`, task.Job); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.inbox.store.db.Exec(`UPDATE spawn_operations SET status='retryable' WHERE request_id=?`, task.Request.RequestID); err != nil {
+		t.Fatal(err)
+	}
+	retryable := parkedTask(t, h, task.Request.RequestID)
+	replayed, err := h.inbox.store.resumeCleanedSpawn(t.Context(), retryable, clock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replayed.Attempt != retryable.Attempt+1 || !replayed.ParkSince.IsZero() || replayed.ParkPriority != -1 || replayed.ParkPriorityFailures != 0 {
+		t.Fatalf("the replay kept the old attempt's wait: %+v", replayed)
+	}
+	// The new attempt's park starts its wait over, and a new reason set is
+	// noticed only once that wait is past the limit.
+	if !parkNow(t, h, replayed, spawnParkHostFull) {
+		t.Fatal("the new attempt's park was refused")
+	}
+	row := parkedTask(t, h, replayed.Request.RequestID)
+	if !row.ParkSince.Equal(clock) {
+		t.Fatalf("the new attempt's park starts at %v, want %v", row.ParkSince, clock)
+	}
+	clock = clock.Add(29 * time.Minute)
+	checkParkNotices(t, h)
+	if got := spawnFailedInjections(destination); len(got) != 0 {
+		t.Fatalf("the new attempt's %s wait was noticed before the limit: %+v", 29*time.Minute, got)
+	}
+	clock = clock.Add(2 * time.Minute)
+	checkParkNotices(t, h)
+	injected := spawnFailedInjections(destination)
+	if len(injected) != 1 {
+		t.Fatalf("the new attempt sent %d notices, want 1", len(injected))
+	}
+	if !strings.Contains(injected[0].Text, "parked_since="+start.Add(31*time.Minute).UTC().Format(time.RFC3339)) {
+		t.Fatalf("the notice names a stale wait: %q", injected[0].Text)
+	}
+	if reads := hk.reads("466101"); reads != 2 {
+		t.Fatalf("the new attempt read the priority %d times, want 2", reads)
 	}
 }

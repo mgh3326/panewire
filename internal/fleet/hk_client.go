@@ -101,6 +101,27 @@ func TaskReadPermanent(err error) bool {
 	return errors.Is(err, errHKNotFound) || errors.Is(err, errHKTaskID)
 }
 
+// TaskReadOutage reports whether a failed task read is the hk service itself
+// failing — unreachable, refusing the credential, answering 5xx, rate-limited,
+// or timing the call out — so every later read fails the same way until hk
+// answers. A refusal hk names for one task (a 4xx code, a 403 ACL included)
+// and a 2xx answer that cannot be read (errHKUnreadable) are about that row,
+// not the service.
+func TaskReadOutage(err error) bool {
+	if err == nil || TaskReadPermanent(err) || errors.Is(err, errHKUnreadable) {
+		return false
+	}
+	var he *client.HTTPError
+	if errors.As(err, &he) {
+		switch {
+		case he.Status >= 500, he.Status == http.StatusTooManyRequests, he.Status == http.StatusRequestTimeout, he.Status == http.StatusUnauthorized:
+			return true
+		}
+		return false
+	}
+	return true
+}
+
 // hkTaskIDIs reports whether an answered task is the requested one. The id
 // is cliTaskAnswer's: the requested id when hk's answer named it or named
 // none, 0 when it named another — an explicit 0 included.

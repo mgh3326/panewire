@@ -322,9 +322,14 @@ is what the queue is for. hk's batched states route carries no priority, so the
 priority is read once per wait (one `GET /v1/tasks/{id}`) and kept in
 `park_priority` (`-1` = not read yet). A task hk no longer has, a request whose
 id names none, and a request with no task can never be urgent: they read as 0.
-Any other read failure is an hk outage — every later row's read would fail the
-same way — so it stops the pass, judges nothing, and the next pass retries
-whole: no notice is lost.
+
+A failure is read by what it is about. An hk outage — unreachable, 5xx,
+rate-limited, a timeout, a refused credential — fails every later read the same
+way, so it stops the pass, judges nothing, and the next pass retries whole: no
+notice is lost. A refusal hk names for one task (a 4xx code, a 403 ACL
+included) or a 2xx answer that cannot be read is about that row: it is counted
+in `park_priority_failures`, the pass goes on, and after 3 such passes the task
+reads as 0 and the row is judged, so one broken task cannot hold the page.
 
 The notice is at most one per reason set for the request's life: nothing
 repeats while the request stays parked for the reason the notice named, a park
@@ -344,7 +349,9 @@ limit. The notice is recorded only after handoffkeep took the durable row; a
 failed write leaves the row unjudged, and the next pass sends the same event
 again. `park_since_ms` is the request's wait: it starts at its first park,
 survives every re-park and a bind a node then refuses (so the wait that is
-counted is the whole one), and starts over with a new attempt. A judged row
+counted is the whole one), and starts over with a new attempt — the expiry
+replay and a deliberate replay of a retryable request both reset it (and the
+priority read with it, keeping the judgement). A judged row
 leaves the candidate page, so a backlog of P3 requests cannot starve an urgent
 one parked behind them; only an hk outage can hold the page, and it stops the
 pass rather than spinning through it.
@@ -362,7 +369,8 @@ parked) and clears at its next bind. `TestOlderHubPlacesParkedRowsAsAccepted_t46
 runs those predicates against a parked row.
 
 `0019_spawn_park_notice.sql` adds only `park_since_ms`, `park_priority` (-1),
-`park_notice_ms` and `park_judged_reason` (0 and `''`); an older hub neither
+`park_notice_ms`, `park_judged_reason` (0 and `''`) and
+`park_priority_failures` (0); an older hub neither
 reads nor writes them either, so a rollback loses no queue state. A newer hub
 reads a stored judgement as already judged for that reason set, so it repeats
 nothing, and it re-reads a priority only while `park_priority` is still -1.
