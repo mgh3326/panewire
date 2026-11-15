@@ -318,19 +318,31 @@ a stale `park_reason` that a newer hub ignores (a bound row never reads
 parked) and clears at its next bind. `TestOlderHubPlacesParkedRowsAsAccepted_t4661`
 runs those predicates against a parked row.
 
-**Before rolling back, settle every pending claim-holding row.** The
-pre-parking hub's time limit ignores `claimed_host` and `claim_result`: past
-`expires_at` it would give such a row up as unstarted and free its
-reservation while hk may still hold the job. Rows that would need settling:
+**Roll back only with an empty spawn queue, and keep it empty.** The
+pre-parking hub's time limit (part 3, #587) ignores `claimed_host`,
+`claim_result` and a saved post-claim result. Past `expires_at` it gives up
+an attempt it reads as unstarted, which can include a node timeout after
+the job claim. It then frees the reservation while hk may still hold the
+job. A snapshot of claim-holding rows is not enough: a row in flight, a row
+whose only evidence is its saved `result`, or a request admitted after the
+check can all reach that path. So the gate is the whole queue:
 
-```sql
-SELECT request_id, job, claimed_host, expires_ms FROM spawn_operations
-WHERE status IN ('accepted','bound','bound_grant')
-  AND (claimed_host <> '' OR claim_result <> '');
-```
+1. Stop admissions and dispatch on the newer hub. Do not submit spawns, and
+   let the hub drain ([hub-drain.md](hub-drain.md)).
+2. Wait until no row is nonterminal, any status included (`*_grant`
+   variants too):
 
-Roll back only when this returns nothing, or after each row has landed or
-been cancelled (or its limit has been raised past the rollback window).
+   ```sql
+   SELECT request_id, job, status, claimed_host, expires_ms FROM spawn_operations
+   WHERE status NOT IN ('succeeded','failed','retryable','given_up','refused','cancelled');
+   ```
+
+   Each row must land, end, or be cancelled. Do not raise limits to get
+   past this step.
+3. Start the older hub only once the query returns nothing. Keep spawn
+   submissions stopped for as long as it runs. Any request it accepts is
+   under part 3's rule, with no claim-aware expiry. Roll forward before
+   reopening submissions.
 
 ### Rolling back past the time limit
 
