@@ -3,6 +3,7 @@ package fleet
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	neturl "net/url"
 	"regexp"
 	"strings"
 
@@ -51,12 +52,13 @@ func (s Spawn) checkoutSpec() (*HubCheckout, string, error) {
 	if !spawnargs.ValidFetchRef(s.CheckoutRef) {
 		return nil, "", fail(exitUsage, "--checkout-ref must be pull/<n>/head or refs/heads/<branch>, got %q", s.CheckoutRef)
 	}
-	// The spec's origin becomes the userinfo-free https form the -c path
-	// uploads (hubOrigin), so an scp-style or ssh remote is accepted and
-	// normalized instead of refused, and the node clones one form for both
-	// paths. The normalized origin must still name owner/repo.
-	const originRefusal = "--checkout-origin must be the repository's remote, naming owner/repo: https://, ssh://, git://, git@host:owner/repo or host:owner/repo, with no credentials"
-	origin, ok := hubOrigin(s.CheckoutOrigin)
+	// The origin is the repository's remote in a form the node clones. A URL
+	// keeps the endpoint it names, port included (a spec may name an ssh or
+	// git port the -c path never sees); an scp-style remote becomes the https
+	// form the -c path uploads. A credential is refused rather than dropped,
+	// and the normalized origin must still name owner/repo.
+	const originRefusal = "--checkout-origin must be the repository's remote, naming owner/repo, with no credentials: https://, ssh:// or git:// (cloned as named, port included), or git@host:owner/repo and host:owner/repo (become https)"
+	origin, ok := specOrigin(s.CheckoutOrigin)
 	if !ok {
 		return nil, "", fail(exitUsage, "%s, got %q", originRefusal, s.CheckoutOrigin)
 	}
@@ -75,6 +77,50 @@ func (s Spawn) checkoutSpec() (*HubCheckout, string, error) {
 		Fetch:  s.CheckoutRef,
 		Dir:    checkoutWorktreeName(s.Job),
 	}, name, nil
+}
+
+// specOrigin normalizes --checkout-origin to the origin the node clones. A URL
+// keeps the endpoint it names — scheme, host and port — so ssh://host:2222 and
+// git://host:9418 are cloned there, not on 443. Its userinfo is dropped,
+// because the node's prepare takes none, but a credential (an https userinfo or
+// any password) is refused rather than silently discarded. An scp-style remote
+// becomes the userinfo-free https form the -c path uploads; a one-character
+// host is a Windows drive letter, not a remote. A local path, an unlisted
+// scheme or an owner/repo-less path is refused.
+func specOrigin(raw string) (string, bool) {
+	if credentialedURL(raw) {
+		return "", false
+	}
+	origin := raw
+	if strings.Contains(raw, "://") {
+		u, err := neturl.Parse(raw)
+		if err != nil || u.Host == "" || u.RawQuery != "" || u.Fragment != "" {
+			return "", false
+		}
+		switch u.Scheme {
+		case "https", "ssh", "git":
+		default:
+			return "", false
+		}
+		u.User = nil
+		origin = u.String()
+	} else {
+		host, rest, ok := strings.Cut(raw, ":")
+		if !ok || rest == "" || strings.HasPrefix(rest, "/") {
+			return "", false
+		}
+		if at := strings.LastIndex(host, "@"); at >= 0 {
+			host = host[at+1:]
+		}
+		if len(host) < 2 || strings.Contains(host, "/") {
+			return "", false
+		}
+		origin = "https://" + host + "/" + rest
+	}
+	if _, ok := spawnargs.OriginRepo(origin); !ok {
+		return "", false
+	}
+	return origin, true
 }
 
 // checkoutWorktreeName is the directory the node prepares a job's checkout in,
