@@ -55,6 +55,9 @@ func (r *roleJobs) Get(_ context.Context, id string) (map[string]any, error) {
 	}
 	if record, ok := r.records[id]; ok {
 		out := map[string]any{"state": record["state"]}
+		if reason, ok := record["end_reason"]; ok {
+			out["end_reason"] = reason
+		}
 		if r.completeAfterGet && id == "test-job" {
 			record["state"] = "completed"
 		}
