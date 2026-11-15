@@ -19,10 +19,13 @@ ran `panewire done` (hk 4747). Two cases have no owner otherwise:
   no `report.md`, and the pass runs more than the job's request time limit plus
   a 15-minute grace after the spawn. A `findings.json` holding JSON null,
   another shape or no JSON counts as absent, as the hub's result reader counts
-  it. The limit is the `expires_at` the job's spawn record carries, else the
-  role's default — one hour for a reviewer or a consult. The node writes the
-  same two records with reason `reviewer_no_result_timeout`; the ended-job
-  close then takes the pane an hour later, as for any other ended job.
+  it — so does one over its 24 KiB bound or not valid UTF-8. The limit is the
+  `expires_at` the job's spawn record carries: the spawn writes the hub's
+  request expiry there when the hub sent one, else the role's default from the
+  spawn. Only a record from before that field existed falls back to the role's
+  default after the spawn. The node writes the same two records with reason
+  `reviewer_no_result_timeout`; the ended-job close then takes the pane an hour
+  later, as for any other ended job.
 
 A `--keep` reviewer or consult is ended the same way: its live pane keeps its
 day (Timing), and a gone pane is reaped at once.

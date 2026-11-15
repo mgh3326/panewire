@@ -1209,6 +1209,9 @@ func (t *directSpawnTransport) dispatch(ctx context.Context, node hubSpawnReques
 		releaseAdmission()
 		return t.unknown(ctx, "disconnected")
 	}
+	// The request's absolute expiry goes only to a node that reads it (hk
+	// 4747): an older node's strict frame decoder refuses the unknown field.
+	expiresMS := spawnExpiryField(record.capabilities, current.Expires)
 	entry := &hubSpawnRecord{request: node, status: "pending", created: h.now(), waiter: make(chan hubSpawnResult, 1)}
 	h.spawnRecords[node.RequestID] = entry
 	h.mu.Unlock()
@@ -1223,8 +1226,9 @@ func (t *directSpawnTransport) dispatch(ctx context.Context, node hubSpawnReques
 		Args               []string          `json:"args"`
 		WaitSeconds        int               `json:"wait_seconds"`
 		DeadlineMS         int64             `json:"deadline_ms,omitempty"`
+		ExpiresMS          int64             `json:"expires_ms,omitempty"`
 		StartByMS          int64             `json:"start_by_ms,omitempty"`
-	}{true, "job.spawn", node.RequestID, node.CWDKey, node.Brief, node.Checkout, node.Args, node.WaitSeconds, node.DeadlineMS, 0}
+	}{true, "job.spawn", node.RequestID, node.CWDKey, node.Brief, node.Checkout, node.Args, node.WaitSeconds, node.DeadlineMS, expiresMS, 0}
 	// Every send of a grant-required attempt, a replay after a hub restart
 	// included, gives the node a fresh start_by and arms the fence after it.
 	// start_by only bounds the node's wait; the grant/fence row is the proof.

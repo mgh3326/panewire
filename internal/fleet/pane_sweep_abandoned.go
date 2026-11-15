@@ -8,7 +8,9 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"syscall"
 	"time"
+	"unicode/utf8"
 )
 
 // The node's own end of a reviewer or consult job that never ran `panewire
@@ -41,9 +43,11 @@ const (
 // waits for a reviewer's result before it ends the job.
 const reviewerNoResultGrace = 15 * time.Minute
 
-// paneSweepFindingsMaxBytes bounds the findings read the way `panewire done`
-// bounds a result (readResult): a larger file could never complete.
-const paneSweepFindingsMaxBytes = 64 << 10
+// paneSweepFindingsMaxBytes bounds the findings read exactly as the hub's
+// result reader does (nodeJobFindingsLimit = 24 KiB, node_job_result.go): a
+// findings object over that bound is reported too_large there, so counting it
+// posted here would leave the job to an end that never comes.
+const paneSweepFindingsMaxBytes = 24 << 10
 
 // paneSweepAbandoned reports a live reviewer or consult job this node owns the
 // end of: it recorded a pane and a label here, and nobody has ended it.
@@ -62,16 +66,21 @@ func (s *TaskPaneSweeper) endAbandonedReviews(ctx context.Context, a *App, jobs 
 	}
 	panes := &paneSweepPaneRows{a: a}
 	for _, j := range jobs {
+		// The judgment names a fresh end; "" means the job still works. Either
+		// way endAbandonedJob runs: hk may already hold this rule's end from a
+		// write whose ledger event failed, and only this pass finishes it.
 		reason := s.abandonedEnd(ctx, a, j, agents, panes, now)
-		if reason == "" {
+		recorded, err := s.endAbandonedJob(ctx, a, j, reason, now)
+		if errors.Is(err, errJobAlreadyEnded) {
 			continue
 		}
-		if err := s.endAbandonedJob(ctx, a, j, reason, now); err != nil {
-			if !errors.Is(err, errJobAlreadyEnded) {
+		if err != nil {
+			if reason != "" {
 				a.warn("job %s not ended (%s): %v", j.ID, reason, err)
 			}
 			continue
 		}
+		reason = recorded
 		s.info("node ended a reviewer or consult job", "job", j.ID, "pane", j.Pane, "role", paneSweepRole(j), "reason", reason)
 		if reason != SweepPaneGone {
 			continue
@@ -120,60 +129,87 @@ var errJobAlreadyEnded = errors.New("job already ended")
 
 // endAbandonedJob writes the job's terminal hk record and then its final
 // job.lost, in that order, so the pane sweep never sees an end hk has not
-// recorded. The proof and both writes run under the job's operation lock, which
-// `panewire done` and the quota-stop record take: none of them lands between.
-func (s *TaskPaneSweeper) endAbandonedJob(ctx context.Context, a *App, j Job, reason string, now time.Time) error {
+// recorded. It returns the end_reason the ledger took, which is the one hk
+// already holds when an earlier attempt's hk write landed and its ledger event
+// did not. That repair runs even for a call with no fresh reason, before any
+// result or question guard: hk's end is already the job's fate, and a result
+// that arrived later must not leave the ledger live beside it. The proof and
+// both writes run under the job's operation lock, which `panewire done` and the
+// quota-stop record take: none of them lands between.
+func (s *TaskPaneSweeper) endAbandonedJob(ctx context.Context, a *App, j Job, reason string, now time.Time) (string, error) {
 	unlock, err := a.lockJobOperation(j.ID, quotaRecordLockWait)
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer unlock()
 	latest, err := a.job(j.ID)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if !paneSweepAbandoned(latest) || latest.Pane != j.Pane || latest.Label != j.Label {
-		return errJobAlreadyEnded
-	}
-	// Re-check the question under the lock, as the pane close does: one written
-	// before the lock is seen, one written after waits for it.
-	if !paneSweepNoOpenQuestion(a, latest, now) {
-		return errJobAlreadyEnded
-	}
-	// A result written while the pass waited for the lock is the job finishing
-	// its work: the hub's posted-result end owns it, not this timeout.
-	if reason == ReviewerNoResultTimeout {
-		if posted, known := paneSweepJobResult(a, latest.ID); !known || posted {
-			return errJobAlreadyEnded
-		}
+		return "", errJobAlreadyEnded
 	}
 	store, err := a.jobStore()
 	if err != nil {
-		return err
+		return "", err
 	}
+	exists := true
 	rec, err := store.Get(ctx, j.ID)
 	switch {
 	case errors.Is(err, errJobNotFound):
 		// hk holds no record to mark; the node's ledger is what ends the job
 		// for the pane sweep.
+		exists = false
 	case err != nil:
-		return err
+		return "", err
 	default:
-		switch state, _ := rec["state"].(string); state {
-		case "claimed", "spawned":
-			if err := store.Put(ctx, j.ID, map[string]any{"state": "lost", "at": now.UTC(), "end_reason": reason}); err != nil {
-				return err
-			}
+		switch state := str(rec, "state"); state {
 		case "lost":
-			// This end's hk write landed; its ledger event may not have.
-			if str(rec, "end_reason") != reason {
-				return errJobAlreadyEnded
+			// An earlier attempt's hk write landed; its ledger event may not
+			// have. That end is already hk's, so nothing is re-proved here: a
+			// result or question that arrived meanwhile cannot reopen it, and
+			// hk already holding a terminal record keeps the hub and the close
+			// path from ending it any other way. Without this event the ledger
+			// stays live and the job is stranded.
+			stored := str(rec, "end_reason")
+			if stored != SweepPaneGone && stored != ReviewerNoResultTimeout {
+				return "", errJobAlreadyEnded
 			}
+			if err := a.event(ctx, j.ID, "job.lost", map[string]any{"pane_id": j.Pane, "reason": stored, "final": true}); err != nil {
+				return "", err
+			}
+			return stored, nil
+		case "claimed", "spawned":
 		default:
-			return errJobAlreadyEnded
+			return "", errJobAlreadyEnded
 		}
 	}
-	return a.event(ctx, j.ID, "job.lost", map[string]any{"pane_id": j.Pane, "reason": reason, "final": true})
+	// A fresh end: prove the exclusion conditions, then write hk and the
+	// ledger. A pass that judged no end and found none in hk has nothing to do.
+	if reason == "" {
+		return "", errJobAlreadyEnded
+	}
+	// Re-check the question under the lock, as the pane close does: one
+	// written before the lock is seen, one written after waits for it.
+	if !paneSweepNoOpenQuestion(a, latest, now) {
+		return "", errJobAlreadyEnded
+	}
+	// A result written while the pass waited for the lock is the job finishing
+	// its work: the hub's posted-result end owns it, not this timeout.
+	if reason == ReviewerNoResultTimeout {
+		if posted, known := paneSweepJobResult(a, latest.ID); !known || posted {
+			return "", errJobAlreadyEnded
+		}
+	}
+	if exists {
+		if err := store.Put(ctx, j.ID, map[string]any{"state": "lost", "at": now.UTC(), "end_reason": reason}); err != nil {
+			return "", err
+		}
+	}
+	if err := a.event(ctx, j.ID, "job.lost", map[string]any{"pane_id": j.Pane, "reason": reason, "final": true}); err != nil {
+		return "", err
+	}
+	return reason, nil
 }
 
 // paneSweepNoOpenQuestion reports that the job's pane asks no question left
@@ -245,8 +281,16 @@ func paneSweepJobResult(a *App, id string) (posted, known bool) {
 	if !info.Mode().IsRegular() {
 		return false, false
 	}
-	file, err := root.Open("findings.json")
+	// O_NONBLOCK and a look at the opened handle, as the hub's reader does: a
+	// name swapped for a FIFO between the check and the open must never stall
+	// the pass.
+	file, err := root.OpenFile("findings.json", os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
+		return false, false
+	}
+	opened, err := file.Stat()
+	if err != nil || !opened.Mode().IsRegular() {
+		file.Close()
 		return false, false
 	}
 	body, err := io.ReadAll(io.LimitReader(file, paneSweepFindingsMaxBytes+1))
@@ -255,7 +299,11 @@ func paneSweepJobResult(a *App, id string) (posted, known bool) {
 		return false, false
 	}
 	if len(body) > paneSweepFindingsMaxBytes {
-		// A result too large to complete through `panewire done` is not one.
+		// The hub reads this file as too_large, so it is no posted result.
+		return false, true
+	}
+	if !utf8.Valid(body) {
+		// The hub reads this file as not_json, so it is no posted result.
 		return false, true
 	}
 	var object map[string]json.RawMessage

@@ -116,6 +116,13 @@ refuse `--expires` rather than drop it. A deliberate replay of a `retryable`
 request starts its limit again. These are constants in this part
 (`internal/fleet/spawn_expiry.go`), not hub config.
 
+An attempt's `job.spawn` frame carries that absolute expiry as `expires_ms`, but
+only to a node that advertises `spawn_expires_v1` (`hubSpawnCapabilities`): an
+older node's strict frame decoder refuses an unknown field. The node's spawn
+writes it into the `job.spawned` receipt as `expires_at`, which the node's pane
+sweep reads to end a reviewer or consult that never posted a result
+([pane-sweep.md](pane-sweep.md#reviewer-and-consult-ends), hk 4747).
+
 The 600 s landing wait (`deadline_seconds`) is now one attempt's bound, or the
 limit when that comes first. A staged author-replacement successor
 (`activateStagedSpawn`) is capped the same way; one activated at or past the

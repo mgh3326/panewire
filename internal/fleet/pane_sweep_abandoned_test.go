@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -123,11 +124,15 @@ func TestPaneSweepEndsAReviewerWithNoResultPastTheLimit(t *testing.T) {
 	if f.reaped("r") != nil || len(f.closed()) != 0 {
 		t.Fatalf("a timed-out reviewer's pane closed before its hour: closed=%v reaped=%v", f.closed(), f.reaped("r"))
 	}
-	// The existing one-hour close then applies: nothing before the hour, the
-	// pane whatever it shows after it.
-	f.at(136)
-	if len(f.closed()) != 0 {
-		t.Fatalf("pane closed before the hour after its end: %v", f.closed())
+	// The existing one-hour close then applies. The end's ledger event is
+	// stamped one second after the pass (testApp's arbiter clock), and the
+	// deadline reads that stamp with >=, so minute 136 is 59m59s later and the
+	// pane closes at 137.
+	for _, minute := range []int{135, 136} {
+		f.at(minute)
+		if len(f.closed()) != 0 {
+			t.Fatalf("pane closed %d minutes after its end: %v", minute-76, f.closed())
+		}
 	}
 	f.at(137)
 	if got := f.closed(); len(got) != 1 || got[0] != pane {
@@ -195,14 +200,16 @@ func TestPaneSweepLeavesAReviewerThatPostedItsResult(t *testing.T) {
 	}
 }
 
-// A findings file that is not a findings object — JSON null, another shape, or
-// not JSON — is absent, as the hub's result reader counts it: the job is ended
-// at its limit.
+// A findings file that is no posted result — JSON null, another shape, not
+// JSON, over the hub reader's bound, or not UTF-8 — is absent, as the hub's
+// result reader counts it: the job is ended at its limit.
 func TestPaneSweepEndsAReviewerWhoseFindingsAreNotAPostedResult(t *testing.T) {
 	for name, body := range map[string]string{
 		"JSON null":         "null\n",
 		"no findings array": `{"verdict":"ok"}`,
 		"not JSON":          "findings: none\n",
+		"too large":         `{"findings":[],"pad":"` + strings.Repeat("x", paneSweepFindingsMaxBytes) + `"}`,
+		"invalid UTF-8":     "{\"findings\":[],\"note\":\"\xff\"}",
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := newPaneSweepFixture(t)
@@ -214,6 +221,28 @@ func TestPaneSweepEndsAReviewerWhoseFindingsAreNotAPostedResult(t *testing.T) {
 				t.Fatalf("a findings file that is no result was read as one: %v", got)
 			}
 		})
+	}
+}
+
+// An end whose hk write landed but whose ledger event did not is repaired on
+// the next pass even when a result arrived meanwhile: hk already holds the
+// end, so no other path can finish it and the ledger would stay live.
+func TestPaneSweepRepairsAnInterruptedEnd(t *testing.T) {
+	f := newPaneSweepFixture(t)
+	pane := f.job("r", "reviewer", "")
+	f.status[pane] = "working"
+	f.writeJobFile("r", "findings.json", `{"findings":[]}`)
+	f.store.records["r"]["state"] = "lost"
+	f.store.records["r"]["end_reason"] = ReviewerNoResultTimeout
+	f.at(76)
+	if got := endReasons(t, f.a, "r"); len(got) != 1 || got[0] != ReviewerNoResultTimeout {
+		t.Fatalf("job.lost reasons = %v", got)
+	}
+	if str(f.store.record(t, "r"), "end_reason") != ReviewerNoResultTimeout {
+		t.Fatalf("the repair rewrote hk: %v", f.store.record(t, "r"))
+	}
+	if f.reaped("r") != nil {
+		t.Fatal("a repaired timeout end was reaped as gone")
 	}
 }
 

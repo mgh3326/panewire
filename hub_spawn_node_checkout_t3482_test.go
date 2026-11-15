@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/mgh3326/panewire/internal/fleet"
 )
@@ -40,7 +41,7 @@ func TestT3482NodeClonesAnUnmappedRepoWhenTheSpawnCarriesACheckout(t *testing.T)
 			prepared++
 			return nodeWorktreePrepareResult{Outcome: nodePreparePrepared, Worktree: &nodeWorktree{Path: preparedPath}}, ""
 		},
-		spawnEngine: func(_ context.Context, cwd, _, _, _ string, _ []string) (*hubSpawnOutput, fleet.Execution) {
+		spawnEngine: func(_ context.Context, cwd, _, _, _ string, _ time.Time, _ []string) (*hubSpawnOutput, fleet.Execution) {
 			ranIn = cwd
 			return t14EngineOK()
 		},

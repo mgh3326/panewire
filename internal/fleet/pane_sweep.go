@@ -238,16 +238,23 @@ func paneSweepTaskEnd(t TaskStatus) (paneSweepEnd, bool) {
 	return end, true
 }
 
-// paneSweepRole is the job's spawn role with the names older receipts used
-// folded in: a worker or tester is an implementer, a counsel a consult.
-func paneSweepRole(j Job) string {
-	switch j.QuotaRole() {
+// foldSpawnRole folds the names older receipts used into the spawn role: a
+// worker or tester is an implementer, a counsel a consult. The default limit
+// and the pane sweep both read the folded name.
+func foldSpawnRole(role string) string {
+	switch role {
 	case "worker", "tester":
 		return "implementer"
 	case "counsel":
 		return "consult"
 	}
-	return j.QuotaRole()
+	return role
+}
+
+// paneSweepRole is the job's spawn role with the names older receipts used
+// folded in (foldSpawnRole).
+func paneSweepRole(j Job) string {
+	return foldSpawnRole(j.QuotaRole())
 }
 
 // paneSweepTaskRole reports that the job's pane is judged by its hk task and
