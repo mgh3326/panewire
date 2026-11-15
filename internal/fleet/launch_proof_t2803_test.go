@@ -234,3 +234,49 @@ func TestLaunchProofLocalCandidateKeepsPlacementSeatT4335(t *testing.T) {
 		t.Fatalf("local admission judged the wrong seat: %v", launched)
 	}
 }
+
+// A second seat of the failed kind is not an alternate: the selection excludes
+// the kind it just recorded, so one host cannot cycle between same-kind seats
+// (hk 4335).
+func TestLaunchProofAlternateIsADifferentKindT4335(t *testing.T) {
+	a, s, _, hub, _ := hubFixture(t, gitState{pushed: true}, "wk/feat", map[string]map[string]any{"h1": {"via": "hub"}})
+	a.Config.HostOrder = []string{"h1"}
+	s.autoSelected = true
+	s.Profile, s.Effort, s.T = "codex-sol", "high", "T1"
+	src := a.Source.(*fakePlacementSource)
+	now := a.Now()
+	ok := &PoolView{Status: "ok", Class: "spend", Blocking: ptrF(0)}
+	src.accounts["openai:0123456789abcdef"] = SharedAccount{Key: "openai:0123456789abcdef", Observed: true, Fresh: true, MeasuredAt: now, Quota: ok}
+	src.accounts["claude:0123456789abcdef"] = SharedAccount{Key: "claude:0123456789abcdef", Observed: true, Fresh: true, MeasuredAt: now, Quota: ok}
+	src.presenceDo = func() []PresenceRecord {
+		return []PresenceRecord{
+			{HostID: "h1", AccountKey: "openai:0123456789abcdef", LastSeen: now},
+			{HostID: "h1", AccountKey: "claude:0123456789abcdef", LastSeen: now},
+		}
+	}
+	q := a.Quota.(*fakeQuota)
+	q.LaunchValue = Launch{Pool: "openai"}
+	// Two codex-kind seats and one claude-kind seat, all on h1.
+	q.CatalogRows = []CatalogRow{
+		{Profile: "codex-sol", Effort: "high", Grade: "B", Pool: "openai", Gate: "default", ModelID: "m"},
+		{Profile: "codex-astra", Effort: "high", Grade: "B", Pool: "openai", Gate: "default", ModelID: "m"},
+		{Profile: "sonnet", Effort: "high", Grade: "B", Pool: "claude", Gate: "default", ModelID: "m"},
+	}
+	q.PoolViews = map[string]PoolView{"openai": *ok, "claude": *ok}
+	q.GateDo = gatePools(map[string]string{"codex-sol": "openai", "codex-astra": "openai", "sonnet": "claude"})
+	useFakeHK(t).SetTask(s.Task, `{"id":42,"title":"work (grade B, T1)","state":"ready","refs":{}}`)
+	hub.node = func(r HubSpawnRequest) (HubSpawnReply, error) {
+		if codexSpawn(r) {
+			return HubSpawnReply{RC: 70, Error: "launch_proof_failed", NextHost: true}, nil
+		}
+		return HubSpawnReply{Pane: "w:p1", JobID: "job-a"}, nil
+	}
+	_, rec, err := a.placeAuto(context.Background(), s, "brief")
+	if err != nil || len(hub.spawns) != 2 {
+		t.Fatalf("expected one retry on a different harness kind: spawns=%d rec=%v err=%v", len(hub.spawns), rec, err)
+	}
+	i := indexArg(hub.spawns[1].Args, "-m")
+	if i < 0 || hub.spawns[1].Args[i+1] != "sonnet" {
+		t.Fatalf("the alternate must be a different harness kind, got %+v", hub.spawns[1])
+	}
+}

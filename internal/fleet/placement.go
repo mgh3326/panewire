@@ -1600,6 +1600,11 @@ func (a *App) placeAuto(ctx context.Context, s Spawn, brief string) (bool, map[s
 			}
 			candidate := try.spawn
 			candidate.Host, candidate.Effort = c.name, s.requestedEffort
+			// The selection must exclude the kind just recorded. try.spawn was
+			// copied before the append, so carry the list over explicitly: the
+			// alternate is a different harness kind, and a second seat of the
+			// failed kind would only repeat the failure.
+			candidate.failedHarnesses = s.failedHarnesses
 			sel, err := a.selectProfile(ctx, candidate)
 			if err != nil || sel == nil || sel.chosen == nil || sel.chosen.seatName == previous {
 				return res, try
