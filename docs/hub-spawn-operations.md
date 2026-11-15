@@ -199,10 +199,17 @@ placed. `TestUnboundConditionedRowReturnsToWaiting` covers both `accepted` and
 `deadline_exceeded`.
 
 The startup migration (`0017_spawn_waiting_conditions.sql`, SQLite: an
-idempotent `UPDATE` at open) moves every unbound conditioned row that never
-passed the queue — `accepted`, `deadline_exceeded`, `retryable`, `staged` — to
-`waiting`. A bound legacy row is not moved; it keeps the guard it had (not
-replayed while its condition is unmet and its deadline is live).
+idempotent `UPDATE` at open) is a fast path for unbound conditioned rows an
+older hub left executable — `accepted`, `deadline_exceeded` — and moves them to
+`waiting`. It never takes a row another owner holds: `staged` belongs to the
+ladder (`activateStagedSpawn`/`cancelStagedSpawn`/`discardStagedSpawn` CAS on
+that status), and a `retryable` row's reservation was released by
+`completeSpawn`, so the replay path re-creates it and the execute guard waits
+the row then. A bound legacy row is not moved either; it keeps the guard it had
+(not replayed while its condition is unmet and its deadline is live).
+`waiting` is not a settled state for any reader: `spawnStatusActive` counts it,
+and an escalated conditioned successor reports `pending` rather than a false
+quota refusal.
 
 ### Rolling back past the time limit
 
@@ -231,10 +238,11 @@ runs the predicates above against a `given_up` row.
 
 Decision 254: the migration is additive. `0017_spawn_waiting_conditions.sql`
 adds `conditions_met_ms` and `condition_result` (SQLite: `ALTER TABLE` at
-start) with defaults an older hub neither reads nor writes, and moves
-conditioned rows that never passed the queue — unbound `accepted`,
-`deadline_exceeded`, `retryable`, `staged` — into the `waiting` status (SQLite
-runs the same idempotent `UPDATE` at open). A released row carries its met
+start) with defaults an older hub neither reads nor writes, and moves unbound
+`accepted` and `deadline_exceeded` conditioned rows that never passed the queue
+into the `waiting` status (SQLite runs the same idempotent `UPDATE` at open).
+It deliberately leaves `staged` (ladder-owned) and `retryable` (reservation
+already released) rows to their owners. A released row carries its met
 time, so a later open does not move it back to waiting. Rolling back is safe:
 an older hub (checked against the code of e00bb952) lists `waiting`, `refused`
 and `cancelled` in no status query, and a `waiting` row holds a reservation

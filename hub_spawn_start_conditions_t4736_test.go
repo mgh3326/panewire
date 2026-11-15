@@ -493,12 +493,18 @@ func TestWaitingSweepLeavesBoundConditionedRowsAlone(t *testing.T) {
 	}
 	bound := waitingSpawnFixture(t, h, 1, []fleet.StartCondition{{Kind: "task", TaskID: "42", State: "merged"}})
 	unbound := waitingSpawnFixture(t, h, 2, []fleet.StartCondition{{Kind: "task", TaskID: "43", State: "merged"}})
+	retryable := waitingSpawnFixture(t, h, 3, []fleet.StartCondition{{Kind: "task", TaskID: "44", State: "merged"}})
 	// A legacy row the old hub bound and let exceed its deadline: its node may
 	// already be running the request, so the sweep must not move it.
 	if _, err := h.inbox.store.db.Exec(`UPDATE spawn_operations SET status='deadline_exceeded',node_id='node-1',node_payload='{"request_id":"node-1","machine":"machine-a"}' WHERE request_id=?`, bound.Request.RequestID); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := h.inbox.store.db.Exec(`UPDATE spawn_operations SET status='accepted' WHERE request_id=?`, unbound.Request.RequestID); err != nil {
+		t.Fatal(err)
+	}
+	// completeSpawn deletes a retryable row's reservation; the sweep must not
+	// take it, or the queue could release it without one.
+	if _, err := h.inbox.store.db.Exec(`UPDATE spawn_operations SET status='retryable' WHERE request_id=?`, retryable.Request.RequestID); err != nil {
 		t.Fatal(err)
 	}
 	if err := h.Close(); err != nil {
@@ -519,5 +525,76 @@ func TestWaitingSweepLeavesBoundConditionedRowsAlone(t *testing.T) {
 	}
 	if moved.Status != "waiting" {
 		t.Fatalf("unbound conditioned row after the sweep = %q, want waiting", moved.Status)
+	}
+	kept, err := store.spawnTask(t.Context(), retryable.Request.RequestID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if kept.Status != "retryable" {
+		t.Fatalf("retryable conditioned row after the sweep = %q, want retryable", kept.Status)
+	}
+}
+
+func TestStagedConditionedRowIsNeverSweptToWaiting(t *testing.T) {
+	newStartConditionSnapshot(t)
+	path := filepath.Join(t.TempDir(), "inbox.sqlite3")
+	t.Setenv(crashReportDSNEnv, "")
+	config := HubServerConfig{Tokens: map[string]string{"operator": t14OperatorToken, "machine-a": "node-token"}, InboxStorePath: path}
+	h, err := NewHubServer(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task := waitingSpawnFixture(t, h, 1, []fleet.StartCondition{{Kind: "task", TaskID: "42", State: "merged"}})
+	if _, err := h.inbox.store.db.Exec(`UPDATE spawn_operations SET status='staged',deadline_ms=? WHERE request_id=?`, h.now().Add(time.Hour).UnixMilli(), task.Request.RequestID); err != nil {
+		t.Fatal(err)
+	}
+
+	// A second store on the same file runs the open sweep; the hub's own store
+	// stays usable for the execution pass.
+	store := openSpawnStore(t, path)
+	staged, err := store.spawnTask(t.Context(), task.Request.RequestID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if staged.Status != "staged" {
+		t.Fatalf("staged conditioned row after the sweep = %q, want staged", staged.Status)
+	}
+	var reserved int
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM spawn_reservations WHERE request_id=?`, task.Request.RequestID).Scan(&reserved); err != nil {
+		t.Fatal(err)
+	}
+	if reserved != 1 {
+		t.Fatalf("staged row lost its reservation")
+	}
+	if err := store.activateStagedSpawn(t.Context(), task.Request.RequestID, time.Now(), 600); err != nil {
+		t.Fatal(err)
+	}
+	activated, err := h.inbox.store.spawnTask(t.Context(), task.Request.RequestID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if activated.Status != "accepted" || !activated.ConditionsMet.IsZero() {
+		t.Fatalf("activated row = %q conditions_met=%v, want accepted and unmet", activated.Status, activated.ConditionsMet)
+	}
+	h.spawnNewApp = func(io.Writer, io.Writer) (*fleet.App, error) {
+		t.Error("an activated conditioned row reached spawn execution")
+		return nil, nil
+	}
+	h.executeSpawnTask(t.Context(), activated)
+	if got := spawnStatusOf(t, h, task.Request.RequestID); got.Status != "waiting" {
+		t.Fatalf("activated conditioned row = %q, want waiting", got.Status)
+	}
+}
+
+func TestWaitingLadderSuccessorReportsPending(t *testing.T) {
+	newStartConditionSnapshot(t)
+	h, _ := conditionedSpawnHub(t)
+	task := waitingSpawnFixture(t, h, 1, []fleet.StartCondition{{Kind: "task", TaskID: "42", State: "merged"}})
+	result, err := h.escalateAuthorOutcome(t.Context(), nil, hubEscalateAuthorRequest{}, "parent", task.Job, spawnStatusOf(t, h, task.Request.RequestID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Code != "pending" || result.Job != "" {
+		t.Fatalf("waiting successor outcome = %#v, want pending without a job", result)
 	}
 }

@@ -317,7 +317,7 @@ func (s *laneInboxStore) recordWaitingSpawnResult(parent context.Context, task h
 func (s *laneInboxStore) returnToWaiting(parent context.Context, task hubSpawnTask) (bool, error) {
 	ctx, done := s.op(parent)
 	defer done()
-	result, err := s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET status='waiting' WHERE request_id=? AND attempt=? AND conditions_met_ms=0 AND node_id IS NULL AND status IN ('accepted','retryable','staged','deadline_exceeded','deadline_exceeded_grant')`), task.Request.RequestID, task.Attempt)
+	result, err := s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET status='waiting' WHERE request_id=? AND attempt=? AND conditions_met_ms=0 AND node_id IS NULL AND status IN ('accepted','deadline_exceeded','deadline_exceeded_grant')`), task.Request.RequestID, task.Attempt)
 	if err != nil {
 		return false, err
 	}

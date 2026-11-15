@@ -369,6 +369,11 @@ func escalateAuthorPlanRefusal(err error) (code, reason string) {
 }
 
 func (h *HubServer) escalateAuthorOutcome(ctx context.Context, app *fleet.App, request hubEscalateAuthorRequest, owner, job string, task hubSpawnTask) (hubEscalateAuthorResult, error) {
+	if task.Status == "waiting" {
+		// A conditioned successor is queued, not refused: waiting is not a
+		// placement outcome, and the queue ends or releases it.
+		return hubEscalateAuthorResult{Code: "pending", Reason: "successor is queued for its start conditions; retry"}, nil
+	}
 	if spawnStatusActive(task.Status) {
 		var settled bool
 		task, settled = h.awaitSpawnOutcome(ctx, task.Request.RequestID, escalateAuthorWait)

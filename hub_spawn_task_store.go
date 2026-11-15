@@ -140,12 +140,14 @@ func (s *laneInboxStore) ensureSpawnTasks() error {
 			return err
 		}
 	}
-	// A row an older hub accepted with a start condition belongs to the queue
-	// now (hk 4736): waiting is a new value of status, and no older query lists
-	// it. Only unbound rows move (node_id IS NULL): a bound legacy row keeps
-	// its guard, and a bound deadline_exceeded row may still be running on its
-	// node.
-	if _, err := s.db.ExecContext(ctx, `UPDATE spawn_operations SET status='waiting' WHERE status IN ('accepted','deadline_exceeded','retryable','staged','deadline_exceeded_grant') AND node_id IS NULL AND conditions_met_ms=0 AND payload LIKE '%"start_conditions":%'`); err != nil {
+	// A row an older hub left executable with a start condition belongs to
+	// the queue now (hk 4736). This is only a fast path for rows written
+	// before the executeSpawnTask guard: it never takes a row the ladder owns
+	// (staged) or one whose reservation completeSpawn deleted (retryable — the
+	// replay path re-creates the reservation, and the guard then waits it).
+	// node_id IS NULL keeps a bound legacy row on its own guard; a bound
+	// deadline_exceeded row may still be running on its node.
+	if _, err := s.db.ExecContext(ctx, `UPDATE spawn_operations SET status='waiting' WHERE status IN ('accepted','deadline_exceeded','deadline_exceeded_grant') AND node_id IS NULL AND conditions_met_ms=0 AND payload LIKE '%"start_conditions":%'`); err != nil {
 		return err
 	}
 	return nil
@@ -153,7 +155,11 @@ func (s *laneInboxStore) ensureSpawnTasks() error {
 
 func (s *laneInboxStore) claimSpawn(parent context.Context, request fleet.Submission, job, owner string, now time.Time) (hubSpawnTask, bool, error) {
 	// A request with a start condition waits in the queue (hk 4736): the
-	// coordinator releases it to accepted once every predicate holds.
+	// coordinator releases it to accepted once every predicate holds. This is
+	// the only place a conditioned row is created; a later reader must not
+	// assume accepted implies the condition was met, because an ungated writer
+	// (unbind, replay resume, staged activation) may leave it for the
+	// executeSpawnTask guard.
 	status := "accepted"
 	if len(request.StartConditions) != 0 {
 		status = "waiting"
