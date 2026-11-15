@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -39,7 +40,14 @@ type concurrencyRig struct {
 func newConcurrencyRig(t *testing.T, slots int) *concurrencyRig {
 	t.Helper()
 	rig := &concurrencyRig{root: t.TempDir(), release: make(chan struct{}), started: make(chan string, 16)}
-	client := &HubClient{spawnConfigPath: t14SpawnConfig(t, t.TempDir()), spawnJournalDir: t.TempDir(), fleetEvents: (&fleetEventRecorder{}).write, spawnSlotsOverride: slots}
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	config := filepath.Join(t.TempDir(), "spawn.json")
+	// alias names the same directory as the checkout dir job-x.
+	contents := `{"cwd_map":{"repo-a":"` + t.TempDir() + `","alias":"` + filepath.Join(rig.root, "job-x") + `"},"work_root":"` + rig.root + `","workspace":"worker","herdr_session":"worker","enabled":true}`
+	if err := os.WriteFile(config, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	client := &HubClient{spawnConfigPath: config, spawnJournalDir: t.TempDir(), fleetEvents: (&fleetEventRecorder{}).write, spawnSlotsOverride: slots}
 	client.spawnPrepare = func(_ context.Context, args nodeWorktreePrepareArgs) (any, string) {
 		rig.mu.Lock()
 		rig.preparing++
@@ -70,7 +78,8 @@ func newConcurrencyRig(t *testing.T, slots int) *concurrencyRig {
 		delivered, _ := os.ReadFile(brief)
 		rig.mu.Lock()
 		rig.running--
-		if string(landed) != string(owner) || string(delivered) != string(text) || string(text) != "brief "+string(owner) {
+		ownBrief := !strings.HasPrefix(hubSpawnArg(args, "--job"), "job-") || string(text) == "brief "+string(owner)
+		if string(landed) != string(owner) || string(delivered) != string(text) || !ownBrief {
 			rig.disturbed = append(rig.disturbed, fmt.Sprintf("%s: launch owner %q, landing owner %q, brief %q", hubSpawnArg(args, "--job"), owner, landed, delivered))
 		}
 		rig.mu.Unlock()
@@ -98,7 +107,7 @@ func (rig *concurrencyRig) run(t *testing.T, messages []hubOutboundMessage) <-ch
 	return results
 }
 
-func TestNodeRunsNSpawnsAtOnceInDistinctWorktrees_t4578(t *testing.T) {
+func TestNodeSpawnRunsNAtOnceInDistinctWorktrees_t4578(t *testing.T) {
 	const n = 3
 	rig := newConcurrencyRig(t, n)
 	var messages []hubOutboundMessage
@@ -130,14 +139,14 @@ func TestNodeRunsNSpawnsAtOnceInDistinctWorktrees_t4578(t *testing.T) {
 	}
 }
 
-func TestNodeSerializesSpawnsForOneWorktree_t4578(t *testing.T) {
+func TestNodeSpawnSerializesOneWorktree_t4578(t *testing.T) {
 	const n = 3
 	rig := newConcurrencyRig(t, n)
-	// One dir under three spellings that fold to the same worktree key.
-	var messages []hubOutboundMessage
-	for i, dir := range []string{"job-x", "JOB-X", "job-x/."} {
-		messages = append(messages, concurrencyMessage(i+1, dir))
-	}
+	// One directory three ways: a checkout dir, the same dir in another
+	// case, and a cwd_map entry without a checkout that names it.
+	alias := admissionMessage(457809, true)
+	alias.CWDKey, alias.Args, alias.BriefInline = "alias", []string{"--job", "alias-9"}, "alias brief"
+	messages := []hubOutboundMessage{concurrencyMessage(1, "job-x"), concurrencyMessage(2, "JOB-X"), alias}
 	results := rig.run(t, messages)
 	for i := range n {
 		select {
@@ -228,7 +237,7 @@ func slotNode(t *testing.T, hub *HubServer, server *httptest.Server, slots int) 
 	return connection
 }
 
-func TestHubDispatchesUpToTheNodesAdvertisedSlots_t4578(t *testing.T) {
+func TestNodeSpawnHubDispatchesUpToAdvertisedSlots_t4578(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
 		slots int
@@ -239,8 +248,10 @@ func TestHubDispatchesUpToTheNodesAdvertisedSlots_t4578(t *testing.T) {
 			server := httptest.NewServer(h.Handler())
 			defer server.Close()
 			node := slotNode(t, h, server, tc.slots)
+			tasks := map[string]hubSpawnTask{}
 			for i := range 3 {
-				boundDispatchFixture(t, h, i+1, "machine-a")
+				task := boundDispatchFixture(t, h, i+1, "machine-a")
+				tasks[task.Node.RequestID] = task
 			}
 			h.startSpawnCoordinator(t.Context())
 			frames := make(chan hubOutboundMessage, 3)
@@ -256,9 +267,11 @@ func TestHubDispatchesUpToTheNodesAdvertisedSlots_t4578(t *testing.T) {
 					}
 				}
 			}()
+			var open []string
 			for i := range tc.want {
 				select {
-				case <-frames:
+				case frame := <-frames:
+					open = append(open, frame.RequestID)
 				case <-time.After(3 * time.Second):
 					t.Fatalf("hub sent %d of %d slots", i, tc.want)
 				}
@@ -269,6 +282,31 @@ func TestHubDispatchesUpToTheNodesAdvertisedSlots_t4578(t *testing.T) {
 			case extra := <-frames:
 				t.Fatalf("hub sent %s beyond %d slots", extra.RequestID, tc.want)
 			case <-time.After(250 * time.Millisecond):
+			}
+			// Answer the newest dispatch first: it settles on its own result,
+			// the older one stays bound and unresolved, and exactly one slot
+			// frees for the queued request.
+			answered := open[len(open)-1]
+			if err := wsjson.Write(t.Context(), node, nodeRefusal(answered, "spawn_disabled", false)); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case frame := <-frames:
+				if tasks[frame.RequestID].Node == nil || slices.Contains(open, frame.RequestID) {
+					t.Fatalf("freed slot sent %s", frame.RequestID)
+				}
+			case <-time.After(3 * time.Second):
+				t.Fatal("the freed slot sent nothing")
+			}
+			eventually(t, 3*time.Second, "the answered dispatch to settle", func() bool {
+				current, err := h.inbox.store.spawnTask(t.Context(), tasks[answered].Request.RequestID)
+				return err == nil && (current.Node == nil || current.Node.RequestID != answered || !spawnPending(current.Status))
+			})
+			for _, id := range open[:len(open)-1] {
+				current, err := h.inbox.store.spawnTask(t.Context(), tasks[id].Request.RequestID)
+				if err != nil || current.Node == nil || current.Node.RequestID != id || !spawnPending(current.Status) {
+					t.Fatalf("unanswered dispatch %s changed: %+v err=%v", id, current, err)
+				}
 			}
 		})
 	}

@@ -208,6 +208,15 @@ func (client *HubClient) handleHubSpawn(ctx context.Context, peer *hubClientConn
 		return
 	}
 	stop := client.work.stopSignal()
+	// The directory hold is taken before a node slot and the executing claim,
+	// and kept through launch, brief delivery and landing proof (hk 4578).
+	for _, key := range client.spawnHoldKeys(message) {
+		hold := client.spawnLock(key)
+		if !client.awaitSpawnAdmission(ctx, admissionCtx, stop, waiter, hold, peer, journal, message, deadline) {
+			return
+		}
+		defer func() { <-hold }()
+	}
 	gate := client.nodeSpawnGate()
 	if !client.awaitSpawnAdmission(ctx, admissionCtx, stop, waiter, gate, peer, journal, message, deadline) {
 		return
@@ -220,13 +229,6 @@ func (client *HubClient) handleHubSpawn(ctx context.Context, peer *hubClientConn
 		}
 	}
 	defer release()
-	// The worktree hold is acquired before the executing claim and kept
-	// through launch, brief delivery and landing proof (hk 4578).
-	worktree := client.spawnLock(spawnWorktreeKey(message))
-	if !client.awaitSpawnAdmission(ctx, admissionCtx, stop, waiter, worktree, peer, journal, message, deadline) {
-		return
-	}
-	defer func() { <-worktree }()
 	if !client.work.admitSpawn() {
 		return
 	}

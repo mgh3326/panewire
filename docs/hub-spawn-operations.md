@@ -774,16 +774,19 @@ completed requests replay their result, a request this node process is still
 running answers `reconciling`, and an executing entry no live execution owns
 (the node restarted mid-spawn) is settled or answers `unknown`. A new UUID
 waits, until its execution deadline and without an executing journal entry,
-for one of the node's N spawn slots and then for its worktree hold. Once
+for its directory hold and then for one of the node's N spawn slots. Once
 admitted, the node rechecks the journal and deadline, commits the executing
-entry and keeps both the slot and the worktree hold through checkout, launch,
+entry and keeps both the hold and the slot through checkout, launch,
 brief delivery, landing proof and cleanup.
 
 N is the node's `spawn_concurrency` in `spawn.json` (1..8); unset, it is 3,
-or 2 on a host whose machine id names `rpi` or `oci` (hk 4578). The worktree
-hold is keyed by the checkout's dir (case-folded), or by the cwd_map key for a
-spawn without a checkout, so two spawns of one worktree never overlap anywhere
-between preparation and landing. Preparation of one clone (fetch, worktree
+or 2 on a host whose machine id names `rpi` or `oci` (hk 4578). The directory
+hold is keyed by the one directory the spawn executes in, resolved through
+symlinks and case-folded: `<work_root>/<checkout dir>`, or the cwd_map (or
+default repo) directory for a spawn without a checkout. A cwd_map entry and a
+checkout dir that name one directory share the hold, so two spawns of one
+directory never overlap anywhere between preparation and landing; a spawn that
+runs in a clone itself also holds that clone's preparation. Preparation of one clone (fetch, worktree
 add) also runs one at a time; distinct worktrees overlap only after their own
 preparation. The node advertises `spawn_slots_v1=N` in hello and the hub keeps
 at most N dispatches open to it; a node that does not advertise it is

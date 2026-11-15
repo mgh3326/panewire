@@ -10,14 +10,12 @@ import (
 // Per-node spawn concurrency (hk 4578). A node runs up to N spawns at once;
 // the checkout-stability boundary that makes this safe is:
 //
-//   - Whole-spawn worktree hold: a spawn holds its worktree key from before
-//     its executing journal claim until its result is persisted, so checkout,
-//     workspace/tab creation, agent start, brief delivery and landing proof
-//     (spawn.go fleet.start → writeDeliveredBrief → deliver → model/task
-//     proof) all run with no other spawn touching the same worktree. The key
-//     is the checkout's dir (a validated job name, folded to lower case for
-//     case-insensitive file systems); a spawn without a checkout keys on its
-//     cwd_map key, the repository's canonical checkout.
+//   - Whole-spawn directory hold: a spawn holds its execution directory from
+//     before its executing journal claim until its result is persisted, so
+//     checkout, workspace/tab creation, agent start, brief delivery and
+//     landing proof (spawn.go fleet.start → writeDeliveredBrief → deliver →
+//     model/task proof) all run with no other spawn touching that directory
+//     (spawnHoldKeys).
 //   - Prepare serialization: worktree preparation of one repository (fetch,
 //     worktree add) runs one at a time inside this process, so two distinct
 //     worktrees of one clone never race on the clone's refs and index locks,
@@ -92,12 +90,54 @@ func hubNodeSpawnSlots(capabilities map[string]bool) int {
 	return slots
 }
 
-// spawnWorktreeKey names the worktree a spawn holds through delivery.
-func spawnWorktreeKey(message hubOutboundMessage) string {
-	if message.Checkout != nil && message.Checkout.Dir != "" {
-		return "dir:" + strings.ToLower(filepath.Clean(message.Checkout.Dir))
+// spawnHoldKeys names what a spawn holds from before its executing claim
+// until its result is persisted: the one directory it will execute in,
+// resolved the way the run resolves it, so a cwd_map entry, a default repo dir
+// and a checkout dir that name one directory share one key. A spawn that runs
+// in a clone itself also holds that clone's prepare key, since another spawn's
+// prepare moves the clone's refs. Keys are always taken in the returned order.
+func (client *HubClient) spawnHoldKeys(message hubOutboundMessage) []string {
+	config, defaults, err := client.resolveHubSpawnConfig()
+	if err != nil {
+		// The run refuses too; this key only keeps such copies apart.
+		return []string{"unresolved:" + strings.ToLower(message.CWDKey)}
 	}
-	return "cwd:" + strings.ToLower(message.CWDKey)
+	if message.Checkout != nil && config.WorkRoot != "" {
+		return []string{"dir:" + spawnDirKey(filepath.Join(config.WorkRoot, message.Checkout.Dir))}
+	}
+	cwd, found := config.CWDMap[message.CWDKey]
+	if !found && defaults {
+		cwd, found = defaultRepoDir(config.WorkRoot, message.CWDKey)
+	}
+	if !found {
+		return []string{"unresolved:" + strings.ToLower(message.CWDKey)}
+	}
+	keys := []string{"dir:" + spawnDirKey(cwd)}
+	if config.WorkRoot != "" && spawnDirKey(filepath.Dir(cwd)) == spawnDirKey(config.WorkRoot) {
+		keys = append(keys, "repo:"+strings.ToLower(filepath.Base(cwd)))
+	}
+	return keys
+}
+
+// spawnDirKey resolves symlinks in the deepest existing ancestor, so a dir
+// not yet created keys the same as it will once it exists, and folds case for
+// case-insensitive file systems.
+func spawnDirKey(path string) string {
+	path = filepath.Clean(path)
+	var rest []string
+	for {
+		if resolved, err := filepath.EvalSymlinks(path); err == nil {
+			path = resolved
+			break
+		}
+		parent := filepath.Dir(path)
+		if parent == path {
+			break
+		}
+		rest = append([]string{filepath.Base(path)}, rest...)
+		path = parent
+	}
+	return strings.ToLower(filepath.Join(append([]string{path}, rest...)...))
 }
 
 // spawnPrepareKey names the clone a checkout prepares in.
