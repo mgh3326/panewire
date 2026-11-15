@@ -93,7 +93,12 @@ while making the route file the final authority.
 
 Deploy the hub before nodes. An older hub rejects a heartbeat whose host_load
 has the six-key shape or whose active_jobs entries contain the new optional
-keys: its decoder returns false and drops that whole heartbeat. The new hub
+keys (the latest is `profile`, which a node sets from the job's own
+`job.spawned` receipt, hk 3399): its decoder returns false and drops that whole
+heartbeat. `deploy.yml` deploys the hub first, and
+`TestTask268AC5HubFirstRolloutAndLegacyNodeCompatibility` holds the two
+directions apart: the frozen pre-change vocabulary rejects a new node payload,
+while the new hub accepts a legacy one. The new hub
 continues to accept older nodes' four-key host_load and legacy active_jobs;
 their CPU measurements are null and their new job metadata is absent. After
 the hub is updated, nodes may roll out normally.
