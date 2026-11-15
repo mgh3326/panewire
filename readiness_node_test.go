@@ -458,3 +458,20 @@ func TestReadinessCmdLoginIsTheCommandCodePool(t *testing.T) {
 		t.Fatalf("cmd=%+v after a login failure", cmd)
 	}
 }
+
+// A launch that stopped at the cmd login screen marks the harness, while the
+// recovery evidence is a successful commandcode measurement. The measurement
+// must clear that mark, or cmd stays missing (and withheld by placement) with
+// no cmd launch left to clear it.
+func TestCmdLoginScreenMarkClearsOnCommandcodeMeasurement(t *testing.T) {
+	client := readinessClient(t, "", readinessFakes(map[string]string{}))
+	client.noteQuotaAccount("commandcode", "commandcode:0123456789abcdef")
+	client.readiness.loginScreens = map[string]time.Time{"cmd": client.nowUTC().Add(-time.Minute)}
+	if cmd := client.collectReadiness(t.Context()).Harnesses["cmd"]; cmd.Login != fleet.ReadinessLoginMissing {
+		t.Fatalf("a fresh login-screen mark must read missing: cmd=%+v", cmd)
+	}
+	client.noteOwnQuotaMeasurement("commandcode")
+	if cmd := client.collectReadiness(t.Context()).Harnesses["cmd"]; cmd.Login != fleet.ReadinessLoginPresent {
+		t.Fatalf("a successful commandcode measurement must clear the cmd mark: cmd=%+v", cmd)
+	}
+}

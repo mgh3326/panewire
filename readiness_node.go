@@ -180,11 +180,21 @@ func (client *HubClient) noteQuotaAccount(pool, accountKey string) {
 	client.readiness.accounts[pool] = quotaAccountNote{key: accountKey, at: at}
 }
 
-// noteOwnQuotaMeasurement clears only a login-screen mark after this host's
-// own credential completed a successful measurement. Shared readings do not
-// call it.
+// noteOwnQuotaMeasurement clears a login-screen mark after this host's own
+// credential completed a successful measurement. Shared readings do not call
+// it. A harness that spends this pool under another name (nodeHarnessPools)
+// is cleared too: the mark names the same login failing.
 func (client *HubClient) noteOwnQuotaMeasurement(pool string) {
 	client.readiness.mu.Lock()
+	for kind, named := range nodeHarnessPools {
+		if named != pool {
+			continue
+		}
+		if _, marked := client.readiness.loginScreens[kind]; marked {
+			delete(client.readiness.loginScreens, kind)
+			client.readiness.dirty = true
+		}
+	}
 	if _, marked := client.readiness.loginScreens[pool]; marked {
 		delete(client.readiness.loginScreens, pool)
 		client.readiness.dirty = true
