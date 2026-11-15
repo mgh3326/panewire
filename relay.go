@@ -151,7 +151,7 @@ func relayText(completion hubJobEventPayload) string {
 
 func relayTextForKind(kind string, event hubJobEventPayload) string {
 	if kind == "lane.event" {
-		return "(같은 내용이 두 번 보이면 재실행 금지) [event] " + event.OwnerLane + " :: " + event.Text
+		return laneEventRelayText(event)
 	}
 	if kind == "job.escalate" {
 		return escalationRelayText(event)
@@ -284,9 +284,16 @@ func (h *HubServer) relayLaneEventContext(ctx context.Context, event hubJobEvent
 	if event.OwnerLane == "" || event.EventID == "" || event.Text == "" {
 		return relayLaneEventResult{}
 	}
-	if len(event.Text) > laneEventTextLimitSink || (len(event.Text) > laneEventTextLimit && !loadReportRelayRoutes(h.reportRelayPath)[event.OwnerLane].Sink) {
+	sinkRoute := loadReportRelayRoutes(h.reportRelayPath)[event.OwnerLane].Sink
+	if (ingress && laneEventIngressTooLong(event.Text, sinkRoute)) || len(event.Text) > laneEventTextCeiling {
 		h.broadcastRelayRejected(event, "text_too_long")
 		return relayLaneEventResult{RejectedTooLong: true}
+	}
+	if !ingress && sinkRoute && len(event.Text) > laneEventTextLimitSink {
+		// A sink route records text and types none. A node's longer text is cut
+		// to the sink bound before the inbox row is written, so the row and the
+		// relay record agree. The producer's event file keeps the whole text.
+		event.Text, event.Truncated = truncateLaneEventTextAtLimit(event.Text, laneEventTextLimitSink)
 	}
 	if result, handled := h.receiveInbox("lane.event", &event, sender, hubAgentMachineID(sender), false, ctx); handled {
 		return result
@@ -337,7 +344,7 @@ func (h *HubServer) relayLaneEventContext(ctx context.Context, event hubJobEvent
 		h.forgetRelayEvent(key)
 		return relayLaneEventResult{}
 	}
-	if len(event.Text) > laneEventTextLimitSink || (!route.Sink && len(event.Text) > laneEventTextLimit) {
+	if (ingress && laneEventIngressTooLong(event.Text, route.Sink)) || len(event.Text) > laneEventTextCeiling {
 		h.forgetRelayEvent(key)
 		h.broadcastRelayRejected(event, "text_too_long")
 		return relayLaneEventResult{RejectedTooLong: true}
@@ -378,7 +385,10 @@ func (h *HubServer) relayLaneEventContext(ctx context.Context, event hubJobEvent
 	// handoffkeep is first-writer-wins. A hub that restarted after the first
 	// POST must inject the returned durable text, not a changed duplicate body.
 	if status == http.StatusOK {
+		// The inbox row from receiveInbox outlives the stored reload, so the typed head still points at it.
+		inboxID := event.inboxID
 		event = laneEventFromStored(stored)
+		event.inboxID = inboxID
 	}
 	h.rememberLanePersisted(key, stored.ID)
 	h.rememberRelayEvent(key, stored.ID)

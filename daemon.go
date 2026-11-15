@@ -706,6 +706,9 @@ type localRequest struct {
 	EventID        string `json:"event_id,omitempty"`
 	Text           string `json:"text,omitempty"`
 	Truncated      bool   `json:"truncated,omitempty"`
+	// Ceiling is set by a CLI that kept a non-sink lane.event whole (hk 4835). A
+	// request without it is a sink-bounded event, as a file without the marker is.
+	Ceiling bool `json:"ceiling,omitempty"`
 	// InboxRoot names the namespace the caller recorded the event in. A daemon
 	// that watches a different root must refuse it: the event file lives in the
 	// caller's namespace, but the relay outbox row would be written in this
@@ -927,7 +930,7 @@ func (d *Daemon) emitRelayEvent(req localRequest) error {
 		return &codedError{ExitUsage, fmt.Errorf("invalid emit request")}
 	}
 	if req.Kind == "lane.event" {
-		if !LaneNamePattern.MatchString(req.OwnerLane) || !validLaneEventID(req.EventID) || !validLaneEventText(req.Text) || len(req.Text) > laneEventTextLimitSink {
+		if !LaneNamePattern.MatchString(req.OwnerLane) || !validLaneEventID(req.EventID) || !validLaneEventText(req.Text) || (!req.Ceiling && len(req.Text) > laneEventTextLimitSink) {
 			return &codedError{ExitUsage, fmt.Errorf("invalid emit request")}
 		}
 	} else if !hubJobIDPattern.MatchString(req.JobID) || req.ReportPath == "" {
@@ -955,7 +958,7 @@ func (d *Daemon) emitRelayEvent(req localRequest) error {
 			JobID: req.JobID, Epoch: epoch, AgentLabel: req.AgentLabel, OwnerLane: req.OwnerLane,
 			Label: req.Label, Host: req.Host, ReportPath: req.ReportPath, ReportLastLine: req.ReportLastLine,
 		},
-		Reason: req.Reason, Question: req.Question, PR: req.PR, Head: req.Head, PaneID: req.PaneID, EventID: req.EventID, Text: req.Text, Truncated: req.Truncated,
+		Reason: req.Reason, Question: req.Question, PR: req.PR, Head: req.Head, PaneID: req.PaneID, EventID: req.EventID, Text: req.Text, Truncated: req.Truncated, Sink: !req.Ceiling,
 	}
 	if req.Kind == "lane.event" {
 		event.JobID = laneEventTransportID(req.OwnerLane, req.EventID)

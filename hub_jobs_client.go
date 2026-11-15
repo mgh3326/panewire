@@ -195,6 +195,9 @@ type hubScannedRelayEvent struct {
 	EventTime time.Time
 	Text      string
 	Truncated bool
+	// Sink selects the sink wire bound: a sink event, or a file or request
+	// without the ceiling marker (hk 4835).
+	Sink bool
 }
 
 // scanHubRelayEvents retains the completion scan and also forwards the two
@@ -426,6 +429,7 @@ type hubInboxEvent struct {
 	EventID        string `json:"event_id"`
 	Text           string `json:"text"`
 	Truncated      bool   `json:"truncated"`
+	Ceiling        bool   `json:"ceiling,omitempty"`
 	Payload        struct {
 		Late           bool   `json:"late,omitempty"`
 		AgentLabel     string `json:"agent_label"`

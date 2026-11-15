@@ -256,8 +256,7 @@ type hubAgent struct {
 	failovers   chan hubFailoverEvent
 	revocations chan hubJobRevokedEvent
 	assignments chan hubJobAssignedEvent
-	// features carries hub.features; featuresSent stops it after the first.
-	features     chan hubFeaturesEvent
+	// featuresSent stops hub.features after the first (queueFeatures).
 	featuresSent atomic.Bool
 	relays       chan hubRelayInjectEvent
 	persisted    chan hubRelayPersistedEvent
@@ -314,6 +313,9 @@ type hubJobEventPayload struct {
 	NotifyType    string `json:"notify_type,omitempty"`
 	Cause         string `json:"cause,omitempty"`
 	noDigest      bool
+	// inboxID is the lane inbox row that holds this lane.event whole, set by
+	// receiveInbox. The typed head points at it (laneEventRelayText).
+	inboxID int64
 	// lane.event uses these relay-only fields. It deliberately never enters
 	// the hub's job registration paths despite sharing the delivery envelope.
 	EventID        string    `json:"event_id,omitempty"`
@@ -1287,13 +1289,12 @@ func (h *HubServer) handleAgent(writer http.ResponseWriter, request *http.Reques
 	if err != nil {
 		return
 	}
-	connection.SetReadLimit(hubMaxMessageBytes)
+	connection.SetReadLimit(max(hubMaxMessageBytes, laneEventFrameMax))
 	agentContext, agentCancel := context.WithCancel(request.Context())
-	agent := &hubAgent{conn: connection, lifetime: agentContext, machineID: machineID, credential: hubRequestBearerToken(request), failovers: make(chan hubFailoverEvent, 64), revocations: make(chan hubJobRevokedEvent, 64), assignments: make(chan hubJobAssignedEvent, 64), features: make(chan hubFeaturesEvent, 1), relays: make(chan hubRelayInjectEvent, 64), persisted: make(chan hubRelayPersistedEvent, 64), idleRoutes: make(chan hubIdleWakeRouteEvent, 64)}
+	agent := &hubAgent{conn: connection, lifetime: agentContext, machineID: machineID, credential: hubRequestBearerToken(request), failovers: make(chan hubFailoverEvent, 64), revocations: make(chan hubJobRevokedEvent, 64), assignments: make(chan hubJobAssignedEvent, 64), relays: make(chan hubRelayInjectEvent, 64), persisted: make(chan hubRelayPersistedEvent, 64), idleRoutes: make(chan hubIdleWakeRouteEvent, 64)}
 	defer connection.CloseNow()
 	defer agentCancel()
 	go agent.writeFailovers(agentContext)
-	go agent.writeFeatures(agentContext)
 	go agent.writeRevocations(agentContext)
 	go agent.writeAssignments(agentContext)
 	go agent.writeRelays(agentContext)
@@ -1383,6 +1384,9 @@ func (h *HubServer) handleAgentMessageContext(ctx context.Context, machineID, re
 			return
 		}
 		if message.Type == "ping" {
+			// hub.features is written before the pong, so a node that sees the
+			// pong already knows the hub's feature state (laneEventsKnown).
+			agent.queueFeatures()
 			_ = agent.writeJSON(hubOutbound{Type: "pong"})
 		}
 	case "applied":
@@ -2647,19 +2651,6 @@ func (agent *hubAgent) writeAssignments(ctx context.Context) {
 	}
 }
 
-func (agent *hubAgent) writeFeatures(ctx context.Context) {
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case event := <-agent.features:
-			if err := agent.writeJSON(event); err != nil {
-				return
-			}
-		}
-	}
-}
-
 func (agent *hubAgent) queueRelay(event hubRelayInjectEvent) bool {
 	if agent == nil || agent.relays == nil {
 		return false
@@ -2747,7 +2738,7 @@ func (h *HubServer) handleEvents(writer http.ResponseWriter, request *http.Reque
 	if err != nil {
 		return
 	}
-	connection.SetReadLimit(hubMaxMessageBytes)
+	connection.SetReadLimit(max(hubMaxMessageBytes, laneEventFrameMax))
 	ctx, cancel := context.WithCancel(request.Context())
 	subscriber := &hubEventSubscriber{conn: connection, ctx: ctx, cancel: cancel, messages: make(chan hubSubscriptionMessage, 64)}
 	h.mu.Lock()

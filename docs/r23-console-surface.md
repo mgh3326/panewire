@@ -75,19 +75,18 @@ path.
 
 ## E. Lane-event text bounds
 
-`laneEventTextLimit` is 2048 bytes and `laneEventTextLimitSink` is 8192 bytes.
-The daemon, scanner, and heartbeat decoder can carry valid text through 8192
-bytes. `panewire emit --kind lane.event` truncates at 2048 by default; adding
-`--sink` selects 8192. In both cases it truncates once at a UTF-8 boundary,
-adds `[truncated]`, and emits `relay.truncated` when the hub receives the
-flagged record.
+The typed-line limit (`laneEventTextLimit`) is 2048 bytes and the sink limit
+(`laneEventTextLimitSink`) is 8192 bytes. Since hk 4835 a non-sink event keeps
+its whole text up to a 16 KiB ceiling: the hub stores it in the lane inbox and
+types a head plus a pointer, and a node cuts the wire form only for a hub that
+did not advertise `lane_event_long`. `--sink` still cuts at emit to 8192.
+The full contract, bounds and gate are in
+[lane-event-long.md](lane-event-long.md).
 
 Nodes do not read operator-owned `lanes.json`, so they cannot safely determine
-the destination route's authority. The producer flag therefore selects only
-its local truncation bound. The hub reads the route and rejects a non-sink
-event over 2048 before persistence with reason `text_too_long`; only a sink
-route can persist up to 8192. This preserves one node-side truncation point
-while making the route file the final authority.
+the destination route's authority. The hub reads the route: a sink route
+persists at most 8192 bytes of a node's text (longer text is cut, not refused),
+and text over the 16 KiB ceiling is refused with reason `text_too_long`.
 
 ## Deployment order and compatibility
 
