@@ -249,22 +249,36 @@ func (a *App) quotaObservation(ctx context.Context, e *preflightEnv, host string
 	}
 	var reasons, details []string
 	for _, p := range pools {
-		key := hostAccount(e.presence, p, id, now, ttl)
-		var acc SharedAccount
-		if key != "" && a.Source != nil {
-			var err error
-			if acc, err = a.Source.SharedAccount(ctx, key); err != nil {
+		// A pool whose host holds several accounts (multiAccountPools) passes
+		// while one of them has a current reading.
+		keys := hostAccounts(e.presence, p, id, now, ttl)
+		if len(keys) == 0 {
+			keys = []string{""}
+		}
+		reason, age := "", "unknown"
+		for i, key := range keys {
+			var acc SharedAccount
+			if key != "" && a.Source != nil {
+				var err error
+				if acc, err = a.Source.SharedAccount(ctx, key); err != nil {
+					acc = SharedAccount{Key: key, Degraded: true}
+				}
+			} else if key != "" {
 				acc = SharedAccount{Key: key, Degraded: true}
 			}
-		} else if key != "" {
-			acc = SharedAccount{Key: key, Degraded: true}
+			r := sharedReason(key, acc)
+			if i == 0 || r == "" {
+				reason, age = r, "unknown"
+				if !acc.MeasuredAt.IsZero() {
+					age = now.Sub(acc.MeasuredAt).Round(time.Second).String()
+				}
+			}
+			if r == "" {
+				break
+			}
 		}
-		age := "unknown"
-		if !acc.MeasuredAt.IsZero() {
-			age = now.Sub(acc.MeasuredAt).Round(time.Second).String()
-		}
-		if r := sharedReason(key, acc); r != "" {
-			reasons = append(reasons, p+":"+r)
+		if reason != "" {
+			reasons = append(reasons, p+":"+reason)
 		}
 		details = append(details, fmt.Sprintf("%s age=%s fresh_ttl=%s", p, age, a.sharedFreshTTL(p)))
 	}

@@ -117,7 +117,9 @@ publishes:
   (default 60 s, minimum 10 s) it refreshes the pool. The node measures
   `claude`, `codex`, `commandcode`, `devin` and `agy` in its own process
   ([docs/quota.md](quota.md#native-측정-풀)). Other pools are unmeasurable:
-  they are neither refreshed nor published. The node reads the shared cache
+  they are neither refreshed nor published. `commandcode` publishes one `quota`
+  value per Command Code account omp holds on the host (key `commandcode:<fp>`),
+  every other pool one. The node reads the shared cache
   first and probes only when the reading is stale, so a 60 s interval keeps
   the account's shared reading fresh at the cost of one cache read per pool
   per minute. The node publishes a reading only when it is current and carries an

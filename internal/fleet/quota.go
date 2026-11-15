@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math"
 	"slices"
 	"strconv"
@@ -124,6 +125,42 @@ type PoolView struct {
 	// Shortest is the view's shortest window, the one a job's expected hours
 	// must fit inside (headroom key, select.go); nil when no window is known.
 	Shortest *windowRoom
+	// Windows are the windows the view was ranked on, as measured; the plan
+	// shows them for an account (plan.go).
+	Windows []ViewWindow
+}
+
+// viewWindows is a reading's windows.
+type viewWindows []ViewWindow
+
+// rows is the windows as the plan's JSON rows.
+func (w viewWindows) rows() []map[string]any {
+	out := make([]map[string]any, 0, len(w))
+	for _, window := range w {
+		row := map[string]any{"window": window.Window, "used_pct": window.UsedPct}
+		if window.ResetsAt != "" {
+			row["resets_at"] = window.ResetsAt
+		}
+		out = append(out, row)
+	}
+	return out
+}
+
+// text is the windows as "5h=12.0% 7d=73.1%".
+func (w viewWindows) text() string {
+	parts := make([]string, 0, len(w))
+	for _, window := range w {
+		parts = append(parts, fmt.Sprintf("%s=%.1f%%", window.Window, window.UsedPct))
+	}
+	return strings.Join(parts, " ")
+}
+
+// ViewWindow is one measured window of an account view: its label, used share
+// and reset ("" when the reading has none).
+type ViewWindow struct {
+	Window   string
+	UsedPct  float64
+	ResetsAt string
 }
 
 // forRung is the view a catalog rung ranks and is blocked on. A rung that maps
@@ -535,11 +572,19 @@ func (a *App) heldAccountKeys(ctx context.Context, pools []string) map[string][]
 		return held
 	}
 	id := firstNonempty(str(a.Config.Local, "presence_id"), a.machine())
+	now := a.Now()
 	for _, rec := range records {
 		pool := accountPool(rec.AccountKey)
-		if rec.HostID == id && slices.Contains(pools, pool) && !slices.Contains(held[pool], rec.AccountKey) {
-			held[pool] = append(held[pool], rec.AccountKey)
+		if rec.HostID != id || !slices.Contains(pools, pool) || slices.Contains(held[pool], rec.AccountKey) {
+			continue
 		}
+		// An account of a multi-account pool is held only while its host keeps
+		// announcing it (multiAccountWindow); the pinned account and every other
+		// pool keep the unbounded record.
+		if slices.Contains(multiAccountPools, pool) && (now.Sub(rec.LastSeen) > multiAccountWindow || rec.LastSeen.After(now.Add(time.Minute))) {
+			continue
+		}
+		held[pool] = append(held[pool], rec.AccountKey)
 	}
 	return held
 }

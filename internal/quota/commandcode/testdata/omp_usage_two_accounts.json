@@ -1,0 +1,165 @@
+{
+  "generatedAt": 1794696766086,
+  "reports": [
+    {
+      "provider": "commandcode",
+      "fetchedAt": 1794696766070,
+      "limits": [
+        {
+          "id": "commandcode:5h",
+          "label": "5-hour limit",
+          "scope": {
+            "provider": "commandcode",
+            "accountId": "user_fixture_a",
+            "windowId": "5h",
+            "shared": true
+          },
+          "window": {
+            "id": "5h",
+            "label": "5-hour",
+            "durationMs": 18000000,
+            "resetsAt": 1794701907842
+          },
+          "amount": {
+            "used": 0.271789812,
+            "limit": 14,
+            "usedFraction": 0.019413558,
+            "unit": "credits"
+          },
+          "status": "ok"
+        },
+        {
+          "id": "commandcode:7d",
+          "label": "Weekly limit",
+          "scope": {
+            "provider": "commandcode",
+            "accountId": "user_fixture_a",
+            "windowId": "7d",
+            "shared": true
+          },
+          "window": {
+            "id": "7d",
+            "label": "Weekly",
+            "durationMs": 604800000,
+            "resetsAt": 1794927278537
+          },
+          "amount": {
+            "used": 25.569563761,
+            "limit": 35,
+            "usedFraction": 0.7305589646,
+            "unit": "credits"
+          },
+          "status": "ok"
+        },
+        {
+          "id": "commandcode:balance",
+          "label": "Credit balance",
+          "scope": {
+            "provider": "commandcode",
+            "accountId": "user_fixture_a",
+            "windowId": "balance",
+            "shared": true
+          },
+          "amount": {
+            "remaining": 17.5330931265,
+            "unit": "credits"
+          }
+        }
+      ],
+      "metadata": {
+        "accountId": "user_fixture_a",
+        "email": "fixture@example.invalid"
+      }
+    },
+    {
+      "provider": "commandcode",
+      "fetchedAt": 1794696736070,
+      "limits": [
+        {
+          "id": "commandcode:5h",
+          "label": "5-hour limit",
+          "scope": {
+            "provider": "commandcode",
+            "accountId": "user_fixture_b",
+            "windowId": "5h",
+            "shared": true
+          },
+          "window": {
+            "id": "5h",
+            "label": "5-hour",
+            "durationMs": 18000000,
+            "resetsAt": 1794701907842
+          },
+          "amount": {
+            "used": 3.5,
+            "limit": 14,
+            "usedFraction": 0.25,
+            "unit": "credits"
+          },
+          "status": "ok"
+        },
+        {
+          "id": "commandcode:7d",
+          "label": "Weekly limit",
+          "scope": {
+            "provider": "commandcode",
+            "accountId": "user_fixture_b",
+            "windowId": "7d",
+            "shared": true
+          },
+          "window": {
+            "id": "7d",
+            "label": "Weekly",
+            "durationMs": 604800000,
+            "resetsAt": 1794927278537
+          },
+          "amount": {
+            "used": 35.2,
+            "limit": 35,
+            "usedFraction": 1,
+            "unit": "credits"
+          },
+          "status": "exhausted"
+        },
+        {
+          "id": "commandcode:balance",
+          "label": "Credit balance",
+          "scope": {
+            "provider": "commandcode",
+            "accountId": "user_fixture_b",
+            "windowId": "balance",
+            "shared": true
+          },
+          "amount": {
+            "remaining": 17.5330931265,
+            "unit": "credits"
+          }
+        }
+      ],
+      "metadata": {
+        "accountId": "user_fixture_b",
+        "email": "fixture@example.invalid"
+      }
+    }
+  ],
+  "accountsWithoutUsage": [],
+  "disabledCredentials": [],
+  "capacity": {
+    "commandcode": [
+      {
+        "window": "5h",
+        "durationMs": 18000000,
+        "accounts": 2,
+        "usedAccounts": 0.1,
+        "remainingAccounts": 1.9
+      },
+      {
+        "window": "7d",
+        "durationMs": 604800000,
+        "accounts": 2,
+        "usedAccounts": 1.7,
+        "remainingAccounts": 0.3
+      }
+    ]
+  }
+}

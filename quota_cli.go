@@ -98,12 +98,12 @@ func runNativeQuotaStatus(ctx context.Context, jsonOutput bool, out, errOut io.W
 		}
 		source := quotaCLISource(pool)
 		generatedAt = source.now()
-		reading, err := source.stored(ctx)
+		stored, err := source.storedAccounts(ctx)
 		if err != nil {
 			fmt.Fprintf(errOut, "quota status: %s: %s\n", pool, quotaErrorKind(err))
-			reading = quotaReading{Pool: pool, Source: "unavailable", Stale: true, Buckets: []quotaBucket{}}
+			stored = []quotaReading{{Pool: pool, Source: "unavailable", Stale: true, Buckets: []quotaBucket{}}}
 		}
-		readings = append(readings, reading)
+		readings = append(readings, stored...)
 	}
 	// A credit pool has no reading to measure; its line shows the operator's
 	// class, the manual credit entry and this host's presence, on a host that

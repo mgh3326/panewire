@@ -42,6 +42,7 @@ const (
 	SourceUsageRPC    = "usage-rpc"
 	SourceCLI         = "cli:/usage"
 	SourceHandoffkeep = "handoffkeep"
+	SourceOmpUsage    = "omp-usage"
 
 	ScopeAccount = "account"
 	ScopeModel   = "model"
@@ -71,6 +72,10 @@ type Observation struct {
 	Plan      string
 	Buckets   []Bucket
 	AccountFP string
+	// MeasuredAt is when the provider's figures were taken, for a source that
+	// serves a cached report (omp usage). Zero means the figures are as old as
+	// the measurement call itself.
+	MeasuredAt time.Time
 }
 
 // Error is a measurement failure. It carries a kind and a fixed, safe

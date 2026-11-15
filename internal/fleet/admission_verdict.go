@@ -179,9 +179,9 @@ func gateReasonCode(reason string) string {
 
 func admissionNormalize(s string) string { return strings.ToLower(strings.TrimSpace(s)) }
 
-// commandcodePool is the catalog pool of the Command Code account. Every rung
-// on it draws on that one account and its 30-day window (docs/quota.md
-// §Command Code seats).
+// commandcodePool is the catalog pool of the Command Code accounts. Every rung
+// on it draws on the accounts omp holds, judged on their 5-hour and weekly
+// windows (docs/quota.md §Command Code seats).
 const commandcodePool = "commandcode"
 
 // admissionCredit marks a credit rung: a pi- profile, or any rung whose
@@ -402,11 +402,13 @@ func (in admissionInputs) resolveRow(req admissionRequest, allowUnrated bool) (a
 }
 
 // requiredWindows are the windows a reading of pool must cover. Manual
-// evidence for a credit pool or commandcode covers its credit window instead.
-// codex's low plans need only the window the plan has. commandcode needs its
-// 30-day window (decision/2026-11-06/commandcode-30d-required-in-panewire-gate).
+// evidence for a credit pool covers its credit window instead. codex's low
+// plans need only the window the plan has. commandcode needs its 5-hour and
+// weekly windows and nothing monthly: the month and the credit balance are
+// neither read nor gated (decision 289, hk 4707; this replaces
+// decision/2026-11-06/commandcode-30d-required-in-panewire-gate).
 func requiredWindows(pool, plan string, manual bool) []string {
-	if slices.Contains(creditAccountPools, pool) || manual && pool == "commandcode" {
+	if slices.Contains(creditAccountPools, pool) {
 		return []string{"credit"}
 	}
 	switch pool {
@@ -418,9 +420,7 @@ func requiredWindows(pool, plan string, manual bool) []string {
 			return []string{"30d"}
 		}
 		return []string{"5h", "7d"}
-	case "commandcode":
-		return []string{"5h", "7d", "30d"}
-	case "claude", "kimi", "agy":
+	case "claude", "kimi", "agy", "commandcode":
 		return []string{"5h", "7d"}
 	case "grok", "devin":
 		return []string{"7d"}
@@ -433,16 +433,16 @@ func requiredWindows(pool, plan string, manual bool) []string {
 }
 
 // missingWindowRefusal names the refusal for required windows a reading
-// lacks, or "" when the pool admits without them. codex's low plans refuse on
-// any missing window; commandcode refuses only without its 30-day window.
+// lacks, or "" when the pool admits without them. codex's low plans and
+// commandcode refuse on any missing window (commandcode needs its 5h and 7d).
 func missingWindowRefusal(pool, plan string, missing []string) string {
 	switch {
 	case len(missing) == 0:
 		return ""
 	case pool == "codex" && slices.Contains([]string{"plus", "prolite", "free"}, plan):
 		return "codex_required_window_missing:" + strings.Join(missing, ",")
-	case pool == "commandcode" && slices.Contains(missing, "30d"):
-		return "commandcode_required_window_missing:30d"
+	case pool == "commandcode":
+		return "commandcode_required_window_missing:" + strings.Join(missing, ",")
 	}
 	return ""
 }

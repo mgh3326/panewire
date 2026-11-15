@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -22,7 +23,13 @@ func selFixture(t *testing.T, grade string, rows []CatalogRow, pools map[string]
 	accounts := map[string]SharedAccount{}
 	for i, pool := range presentPools {
 		key := fmt.Sprintf("%s:%016x", pool, i+1)
-		presence = append(presence, PresenceRecord{HostID: "local", AccountKey: key, LastSeen: now.Add(-time.Hour)})
+		seen := now.Add(-time.Hour)
+		if slices.Contains(multiAccountPools, pool) {
+			// A live node announces such an account at least every ten minutes;
+			// an hour-old record no longer names one (multiAccountWindow).
+			seen = now
+		}
+		presence = append(presence, PresenceRecord{HostID: "local", AccountKey: key, LastSeen: seen})
 		accounts[key] = SharedAccount{Key: key, Observed: true, Fresh: true, MeasuredAt: now.Add(-time.Hour)}
 	}
 	q := &fakeQuota{CatalogRows: rows, PoolViews: pools}

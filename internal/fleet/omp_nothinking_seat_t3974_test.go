@@ -44,12 +44,14 @@ func noThinkingSpawnApp(t *testing.T, extra ...CatalogRow) *App {
 		if key != "commandcode:"+noThinkingAccountFP {
 			return shared.Latest{}, fmt.Errorf("unexpected account %q", key)
 		}
-		reset := now.Add(20 * 24 * time.Hour)
+		fiveHour, week := now.Add(3*time.Hour), now.Add(5*24*time.Hour)
 		return shared.Latest{Observation: &shared.Observation{
 			Kind:       shared.KindAuto,
 			MeasuredAt: now.Add(-time.Minute),
-			Plan:       "credit",
-			Buckets:    []shared.Bucket{{Window: "30d", UsedPct: 10, ResetsAt: &reset, Scope: "account"}},
+			Buckets: []shared.Bucket{
+				{Window: "5h", UsedPct: 10, ResetsAt: &fiveHour, Scope: "account"},
+				{Window: "7d", UsedPct: 10, ResetsAt: &week, Scope: "account"},
+			},
 		}}, nil
 	}
 	runner := &fakeRunner{Do: func(c Command) Result {
