@@ -166,4 +166,65 @@ func TestJobCLIRefusesCaseVariantOfExistingJobDir(t *testing.T) {
 	if !strings.Contains(stdout.String(), "OK job=build") {
 		t.Fatalf("stdout=%q", stdout.String())
 	}
+
+	// No local events dir means a remote close writes nothing here, so a
+	// case-variant entry must not refuse it.
+	remote := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(remote, "build", "events-elsewhere"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ARBITER_INBOX_ROOT", remote)
+	stdout.Reset()
+	stderr.Reset()
+	rc := runJobCLI([]string{"close", "Build", "--lane", "lane-a", "--outcome", "completed", "--reason", "done"}, &stdout, &stderr, CLIConfig{SocketPath: filepath.Join(root, "absent.sock")})
+	if strings.Contains(stderr.String(), "differs only in letter case") {
+		t.Fatalf("a remote close was refused by the local case guard: %s", stderr.String())
+	}
+	if rc == ExitOK {
+		t.Fatalf("a remote close without a daemon reported success: %s", stdout.String())
+	}
+}
+
+func caseInsensitiveVolume(t *testing.T, dir string) bool {
+	t.Helper()
+	probe := filepath.Join(dir, "CaseProbe")
+	if err := os.MkdirAll(probe, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(probe)
+	_, err := os.Stat(filepath.Join(dir, "caseprobe"))
+	return err == nil
+}
+
+// The legacy guard only considers directories, and an exact directory settles
+// the name: a file must not block its case variant, and on a case-sensitive
+// volume coexisting spellings keep their own directories (hk 4824 review).
+func TestJobDirCaseVariantRules(t *testing.T) {
+	fileRoot := t.TempDir()
+	if err := os.WriteFile(filepath.Join(fileRoot, "Build"), []byte("not a dir"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := jobDirCaseVariant(fileRoot, "Build"); got != "" {
+		t.Fatalf("a file named Build counted as a variant: %q", got)
+	}
+
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "build"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if got := jobDirCaseVariant(root, "Build"); got != "build" {
+		t.Fatalf("variant=%q, want build", got)
+	}
+	if got := jobDirCaseVariant(root, "build"); got != "" {
+		t.Fatalf("an exact directory did not settle the name: variant %q", got)
+	}
+	if caseInsensitiveVolume(t, root) {
+		return
+	}
+	if err := os.MkdirAll(filepath.Join(root, "Build"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if got := jobDirCaseVariant(root, "build"); got != "" {
+		t.Fatalf("coexisting exact directory was overridden by its variant: %q", got)
+	}
 }

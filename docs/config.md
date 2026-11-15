@@ -856,9 +856,12 @@ Pane and agent names are not ids: the node commands keep the older pane-name
 rule, so punctuation the hub label grammar admits (`:`, for one) stays accepted
 by pane close, capture and read. The legacy CLI also compares its spelling with
 the real jobs-root entry, and refuses `done Build`, `escalate Build`,
-`joined Build` and `close Build` when `build` exists: on a case-insensitive
-volume the wrong spelling resolves to `build`'s directory, and the record would
-be appended to another job's events.
+`joined Build` and `close Build` when a directory named `build` exists and no
+directory named exactly `Build` does: on a case-insensitive volume the wrong
+spelling resolves to `build`'s directory, and the record would be appended to
+another job's events. Only directories count, and `close` takes the check only
+when a local events directory exists, because a remote close writes nothing
+into this host's jobs root.
 
 After the brief lands, panewire merges `{state:"spawned", role, label, family,
 profile, model, harness, effort, pool, owner_lane, parent_lane, parent_job,

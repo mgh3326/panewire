@@ -97,9 +97,6 @@ func (c *jobCLI) close(args []string) int {
 		return c.exit(err)
 	}
 	jobsRoot := jobJobsRoot()
-	if err := legacyJobDirCaseRefusal("close", jobsRoot, options.job); err != nil {
-		return c.exit(err)
-	}
 	jobDir := jobsRoot + "/" + options.job
 	eventsDir := jobDir + "/events"
 	if info, err := os.Stat(eventsDir); err != nil || !info.IsDir() {
@@ -107,6 +104,13 @@ func (c *jobCLI) close(args []string) int {
 			return c.closeRemote(options)
 		}
 		return c.exit(jobDie("close: no events directory for job %s", options.job))
+	}
+	// A local events dir exists (so this close writes here); on a
+	// case-insensitive volume the wrong spelling may have resolved to another
+	// job's dir. A remote close writes nothing locally, so it is not checked
+	// (hk 4824 review).
+	if err := legacyJobDirCaseRefusal("close", jobsRoot, options.job); err != nil {
+		return c.exit(err)
 	}
 	record, name, err := c.publishJobClose(jobDir, eventsDir, options, jobCloseSource)
 	if err != nil {

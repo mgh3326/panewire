@@ -70,22 +70,32 @@ func validLegacyJobID(id string) bool {
 	return true
 }
 
-// jobDirCaseVariant names the jobs-root entry that resolves to job's directory
-// on a case-insensitive volume under a different spelling, or "" when the
-// spelling is the directory's own or there is no directory. The legacy CLI
-// writes events into that directory, so a different spelling would append one
-// job's completion, escalation or join to another job's events (hk 4824).
+// jobDirCaseVariant names the jobs-root directory that resolves to job on a
+// case-insensitive volume under a different spelling, or "" when the spelling
+// is the directory's own, no directory matches, or an exact directory already
+// settles the name (a case-sensitive volume may hold both spellings). The
+// legacy CLI writes events into that directory, so a different spelling would
+// append one job's completion, escalation or join to another job's events
+// (hk 4824).
 func jobDirCaseVariant(jobsRoot, job string) string {
 	entries, err := os.ReadDir(jobsRoot)
 	if err != nil {
 		return ""
 	}
+	variant := ""
 	for _, entry := range entries {
-		if name := entry.Name(); name != job && strings.EqualFold(name, job) {
-			return name
+		if !entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if name == job {
+			return ""
+		}
+		if variant == "" && strings.EqualFold(name, job) {
+			variant = name
 		}
 	}
-	return ""
+	return variant
 }
 
 // legacyJobDirCaseRefusal is jobDirCaseVariant as the commands refuse it.
