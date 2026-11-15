@@ -140,15 +140,14 @@ func taskMarkerPattern() string {
 // Grade and scale must be adjacent.
 var taskMarker = regexp.MustCompile(taskMarkerPattern())
 
-// Check admits one launch row for a seat role.
-func (s Seat) Check(l Launch, role, grade, authorFamily, arm string, host map[string]any) error {
+// Check admits one launch row for a seat role. capabilityOn is the host's
+// answer for the seat's capability flag, from capability.
+func (s Seat) Check(l Launch, role, grade, authorFamily, arm string, capabilityOn bool) error {
 	if !validCatalogGrade(l.Grade) || l.ModelID == "" || (l.Effort == "" && s.needsEffort()) || l.Gate == "" {
 		return fail(exitConfig, "canon launch data incomplete")
 	}
-	if !boolean(host, s.Capability, false) { // Standard harnesses predate capability flags; only their explicit policy sentinel is implicit.
-		if s.Capability != "standard" {
-			return fail(exitConfig, "host lacks capability %s", s.Capability)
-		}
+	if s.Capability != "standard" && !capabilityOn {
+		return fail(exitConfig, "host lacks capability %s", s.Capability)
 	}
 	if s.Route != "" && l.Effort != "" {
 		return fail(exitConfig, "routed seat %s takes no effort rung", s.Canon)

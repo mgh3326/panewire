@@ -123,7 +123,7 @@ func TestGradeSSSeatGate(t *testing.T) {
 			t.Fatal(err)
 		}
 		seat := p.Profiles["sonnet"]
-		got := code(seat.Check(Launch{ModelID: "m", Effort: "high", Grade: tc.launch, Gate: "default"}, "implementer", tc.task, "", "", map[string]any{seat.Capability: true}))
+		got := code(seat.Check(Launch{ModelID: "m", Effort: "high", Grade: tc.launch, Gate: "default"}, "implementer", tc.task, "", "", true))
 		if got != tc.want {
 			t.Errorf("seat grade %s covering %s: got %d want %d", tc.launch, tc.task, got, tc.want)
 		}

@@ -202,13 +202,20 @@ drops what does not fit.
 | Field | Meaning |
 |---|---|
 | `harnesses.<kind>` for `claude`, `codex`, `omp`, `agy`, `devin`, `cmd` | `installed` (the binary is found; `cmd` is always installed), `version` (the first dotted number of `--version`), `herdr_integration` (`herdr integration status` says `current`), `login` (`present` / `missing` / `unknown`) with `account` (the pacelever account key), `dialog` |
-| `harnesses.<kind>.login` | From the node's own refresh of the pool named like the kind (`--state-quota-pools`): `claude`, `codex`, `commandcode`, `devin` and `agy` are measured by the node itself. Other pools are unmeasurable and read `unknown`. `present` follows a successful refresh. `missing` follows a refresh failure with an `error_kind` of `auth`, `auth_failed`, `credentials` or `token_expired`. Any other failure (timeout, transient error, `excluded`, unreadable status) keeps a present account while its last successful refresh is under 5 minutes old, and otherwise reads `unknown`. |
+| `harnesses.<kind>.login` | From the node's own refresh of the pool named like the kind (`--state-quota-pools`): `claude`, `codex`, `commandcode`, `devin` and `agy` are measured by the node itself. The `cmd` harness has no pool of its own: a cmd seat spends the `commandcode` pool, which the node measures through omp, so `harnesses.cmd.login` is that pool's login. Other pools are unmeasurable and read `unknown`, and `omp` spans several providers so it has no single pool and reads `unknown` unless a node measures one for it. `present` follows a successful refresh. `missing` follows a refresh failure with an `error_kind` of `auth`, `auth_failed`, `credentials` or `token_expired`. Any other failure (timeout, transient error, `excluded`, unreadable status) keeps a present account while its last successful refresh is under 5 minutes old, and otherwise reads `unknown`. |
 | `harnesses.<kind>.dialog` | The first-run dialog the **last launch** stopped at: `codex_hooks_review`, `codex_directory_trust`, `omp_setup_wizard` or `claude_trust`. It is the last known state, set by a failed launch and cleared by the next launch of that kind that succeeds. The node does not open a harness to look, and a dropped pair is not launched again, so a reported dialog also expires after 30 minutes: the pair then gets one more launch, and a launch that stops at the dialog again reports it for another 30 minutes |
 | `repos` | The node's `cwd_map` keys (on defaults: the directories under the work root) |
 | `brief.handoffkeep_env` | The handoffkeep env file is present, mode 0600 and holds a URL and token |
 | `toolchains` | `go`, `node`, `bun` with their versions, when installed |
 | `panewire_version` | The node's build |
 | `config` | The effective spawn configuration: `source` (`defaults` or `spawn.json`), `workspace`, `herdr_session` (the built-in default name, else `custom`: spawn.json names are free text and never travel), `work_root` (whether it exists). See [r26-hub-spawn.md](r26-hub-spawn.md) |
+
+Seat capability flags read this report: `cmd_dsflash41` reads
+`harnesses.cmd` and `omp_commandcode` reads `harnesses.omp`. A node that
+reports the harness installed and its login present holds the capability, so
+placement does not need a `[hosts.NAME]` copy of the flag on the placing host;
+a hosts.toml boolean is only an override
+([config](config.md#capability-flags)).
 
 The report is cached on the node. It is refreshed every 5 minutes and after
 every failed launch, probed in the background so a probe never delays a

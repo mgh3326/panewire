@@ -38,7 +38,7 @@ func (sp *selPresence) hostEligible(h selHost, seat *Seat) bool {
 
 // canMeasure is hostEligible without the placement restriction.
 func (sp *selPresence) canMeasure(h selHost, seat *Seat) bool {
-	return h.eligible && (!h.excluded || h.restricted) && (h.awake || h.wakeable) && (seat.Capability == "standard" || boolean(h.cfg, seat.Capability, false))
+	return h.eligible && (!h.excluded || h.restricted) && (h.awake || h.wakeable) && (seat.Capability == "standard" || capability(sp.ready.states, h.name, h.cfg, seat.Capability))
 }
 
 func (sp *selPresence) hasHost(seat *Seat) bool {

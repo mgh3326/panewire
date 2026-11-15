@@ -1053,14 +1053,14 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 		// A dry run takes the seat gate a real spawn takes (the catalog row and
 		// Seat.Check, E6 marker included) and nothing after it: no gate receipt,
 		// lease, hub reservation or pane.
-		if seat.Capability != "standard" && !boolean(a.Config.Local, seat.Capability, false) {
+		if seat.Capability != "standard" && !capability(a.readinessStates(ctx), a.machine(), a.Config.Local, seat.Capability) {
 			return fail(exitConfig, "host %s lacks capability %s", a.machine(), seat.Capability)
 		}
 		// A pinned seat takes the launch-row gate here. An auto pick was
 		// already resolved from the catalog by selectProfile, which this
 		// dry run does not repeat.
 		if !autoSel {
-			if _, e := a.checkSpawnAdmission(ctx, s, seat, a.spawnQuotaRequest(s, seat, effort), effort, selEffort, grade, authorFamily, autoSel, a.Config.Local); e != nil {
+			if _, e := a.checkSpawnAdmission(ctx, s, seat, a.spawnQuotaRequest(s, seat, effort), effort, selEffort, grade, authorFamily, autoSel, a.machine(), a.Config.Local); e != nil {
 				return e
 			}
 		}
@@ -1463,7 +1463,7 @@ func (a *App) spawnQuotaRequest(s Spawn, seat Seat, effort string) QuotaRequest 
 // request resolves to, then the seat's own rules (grade cover, E6 marker). A
 // dry run runs it too, so the preview refuses what a real spawn refuses. It
 // takes no gate receipt, lease or reservation.
-func (a *App) checkLaunchRow(ctx context.Context, s Spawn, seat Seat, qr QuotaRequest, effort, selEffort, grade, authorFamily string, autoSel bool, host map[string]any) (Launch, error) {
+func (a *App) checkLaunchRow(ctx context.Context, s Spawn, seat Seat, qr QuotaRequest, effort, selEffort, grade, authorFamily string, autoSel bool, hostName string, hostCfg map[string]any) (Launch, error) {
 	launch, e := a.Quota.Launch(ctx, qr)
 	if e != nil {
 		// Preserve the gate's role/quota refusal even when the catalog also
@@ -1488,7 +1488,7 @@ func (a *App) checkLaunchRow(ctx context.Context, s Spawn, seat Seat, qr QuotaRe
 			return Launch{}, fail(exitSeatRefused, "NO_ROLE_CANDIDATE: model %s in harness %s cannot consult", launch.ModelID, seat.Kind)
 		}
 	}
-	if e = seat.Check(launch, s.Role, grade, authorFamily, a.e6Arm(s.E6Arm, s.e6ArmLocked), host); e != nil {
+	if e = seat.Check(launch, s.Role, grade, authorFamily, a.e6Arm(s.E6Arm, s.e6ArmLocked), capability(a.readinessStates(ctx), hostName, hostCfg, seat.Capability)); e != nil {
 		return Launch{}, e
 	}
 	return launch, nil
@@ -1496,8 +1496,8 @@ func (a *App) checkLaunchRow(ctx context.Context, s Spawn, seat Seat, qr QuotaRe
 
 // checkSpawnAdmission covers the catalog row, seat rules and escalation gate
 // shared by a dry-run and a real spawn. It does not read quota or claim a seat.
-func (a *App) checkSpawnAdmission(ctx context.Context, s Spawn, seat Seat, qr QuotaRequest, effort, selEffort, grade, authorFamily string, autoSel bool, host map[string]any) (Launch, error) {
-	launch, err := a.checkLaunchRow(ctx, s, seat, qr, effort, selEffort, grade, authorFamily, autoSel, host)
+func (a *App) checkSpawnAdmission(ctx context.Context, s Spawn, seat Seat, qr QuotaRequest, effort, selEffort, grade, authorFamily string, autoSel bool, hostName string, hostCfg map[string]any) (Launch, error) {
+	launch, err := a.checkLaunchRow(ctx, s, seat, qr, effort, selEffort, grade, authorFamily, autoSel, hostName, hostCfg)
 	if err != nil {
 		return Launch{}, err
 	}
@@ -1508,13 +1508,13 @@ func (a *App) checkSpawnAdmission(ctx context.Context, s Spawn, seat Seat, qr Qu
 	return launch, nil
 }
 
-func (a *App) checkDryRunAdmission(ctx context.Context, s Spawn, host map[string]any) error {
+func (a *App) checkDryRunAdmission(ctx context.Context, s Spawn, hostName string, hostCfg map[string]any) error {
 	seat, ok := a.Policy.Profiles[s.Profile]
 	if !ok {
 		return fail(exitConfig, "missing seat policy for %s", s.Profile)
 	}
 	effort := firstNonempty(s.Effort, seat.Effort)
-	_, err := a.checkSpawnAdmission(ctx, s, seat, a.spawnQuotaRequest(s, seat, effort), effort, effort, s.TaskGrade, s.ParentFamily, false, host)
+	_, err := a.checkSpawnAdmission(ctx, s, seat, a.spawnQuotaRequest(s, seat, effort), effort, effort, s.TaskGrade, s.ParentFamily, false, hostName, hostCfg)
 	return err
 }
 
@@ -1522,7 +1522,7 @@ func (a *App) checkDryRunAdmission(ctx context.Context, s Spawn, host map[string
 // gate and the hub for the spawn; it claims and writes nothing.
 func (a *App) admitLaunch(ctx context.Context, s Spawn, seat Seat, effort, selEffort, grade, authorFamily string, autoSel bool) (Launch, string, error) {
 	qr := a.spawnQuotaRequest(s, seat, effort)
-	launch, e := a.checkSpawnAdmission(ctx, s, seat, qr, effort, selEffort, grade, authorFamily, autoSel, a.Config.Local)
+	launch, e := a.checkSpawnAdmission(ctx, s, seat, qr, effort, selEffort, grade, authorFamily, autoSel, a.machine(), a.Config.Local)
 	if e != nil {
 		return Launch{}, "", e
 	}
