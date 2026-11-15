@@ -25,7 +25,7 @@ func (h *HubServer) newSpawnApp(out, errout io.Writer) (*fleet.App, error) {
 	app, err := fleet.New(out, errout)
 	if app != nil {
 		app.LiveSpawnProfiles = h.liveSpawnProfiles
-		app.LiveFreeBandByAccount = h.liveFreeBandByAccount
+		app.LivePlacedByAccount = h.liveProfilesByAccount
 	}
 	return app, err
 }

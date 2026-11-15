@@ -45,26 +45,31 @@ func (h *HubServer) liveSpawnProfiles(ctx context.Context, exceptRequest string)
 	return counts, nil
 }
 
-// liveFreeBandByAccount counts live hub spawns placed onto the Devin free
-// band (the SWE-2 free rungs) by account key, leaving out exceptRequest. An
-// operation that has no recorded account yet (accepted or dispatching, before
-// its first success) cannot be attributed and is not counted: the gate covers
-// bursts spaced by placement latency, not same-instant races.
-func (h *HubServer) liveFreeBandByAccount(ctx context.Context, exceptRequest string) (map[string]int, error) {
+// liveProfilesByAccount counts live hub spawns' placed profiles by account
+// key, leaving out exceptRequest. Profiles stay as placed (a seat name where
+// the launch went through a seat): selection folds them through the seat
+// canon. An operation that has no recorded account yet (accepted or
+// dispatching, before its first success) cannot be attributed and is not
+// counted: the gate covers bursts spaced by placement latency, not
+// same-instant races.
+func (h *HubServer) liveProfilesByAccount(ctx context.Context, exceptRequest string) (map[string]map[string]int, error) {
 	if h.inbox == nil {
-		return map[string]int{}, nil
+		return map[string]map[string]int{}, nil
 	}
 	tasks, err := h.liveSpawnTasks(ctx)
 	if err != nil {
 		return nil, err
 	}
-	counts := map[string]int{}
+	counts := map[string]map[string]int{}
 	for _, task := range tasks {
 		if task.Request.RequestID == exceptRequest {
 			continue
 		}
-		if profile := livePlacedProfile(task); profile != "" && fleet.IsFreeRung(profile) && task.Outcome.AccountKey != "" {
-			counts[task.Outcome.AccountKey]++
+		if profile := livePlacedProfile(task); profile != "" && task.Outcome.AccountKey != "" {
+			if counts[task.Outcome.AccountKey] == nil {
+				counts[task.Outcome.AccountKey] = map[string]int{}
+			}
+			counts[task.Outcome.AccountKey][profile]++
 		}
 	}
 	return counts, nil

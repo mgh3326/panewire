@@ -192,16 +192,27 @@ func (g *poolCapGate) freeAccountFull(ctx context.Context, account string) (stri
 
 func (g *poolCapGate) ensureFreeAccounts(ctx context.Context) {
 	g.freeAccountsLoaded = true
-	if g.a.LiveFreeBandByAccount == nil {
+	if g.a.LivePlacedByAccount == nil {
 		return
 	}
 	ctx, cancel := context.WithTimeout(ctx, poolCapReadTimeout)
 	defer cancel()
-	counts, err := g.a.LiveFreeBandByAccount(ctx, g.a.RequestID)
+	placed, err := g.a.LivePlacedByAccount(ctx, g.a.RequestID)
 	if err != nil {
 		g.freeAccountsUnavailable = true
 		g.a.warn("%s: %v; the per-account free-band check does not apply to this selection", degradedPoolCapCount, err)
 		return
+	}
+	// Fold seat names to the catalog profiles they run (a launch placed
+	// through builder-devin counts as devin-swe2), the way the pool cap
+	// folds its own live count.
+	counts := map[string]int{}
+	for account, profiles := range placed {
+		for profile, n := range profiles {
+			if _, free := devinFreeRungs[g.canon(profile)]; free {
+				counts[account] += n
+			}
+		}
 	}
 	g.freeByAccount = counts
 }
