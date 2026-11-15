@@ -229,3 +229,25 @@ func TestStallSafetyQuotaWaitRespectsPaneState(t *testing.T) {
 		})
 	}
 }
+
+func TestStallSafetyExcludesJobOutsideActiveWindow(t *testing.T) {
+	t.Setenv("PANEWIRE_JOB_ACTIVE_MAX_AGE", "72h")
+	rig := newRoleStopRig(t, "implementer", 73*time.Hour, roleStopTask)
+	rig.observe("idle", 1, rig.now)
+	reads, notes := 0, 0
+	rig.q.read = func(context.Context, string) (string, error) { reads++; return "screen", nil }
+	rig.q.hk.note = func(context.Context, string, string, string) error { notes++; return nil }
+	m, err := newStallSafetyManager(rig.q, rig.manager, 30*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent := HerdrAgentState{PaneID: "workspace:pane-1", WorkspaceID: "workspace", Label: "worker-synthetic", Status: "idle", Harness: "codex"}
+	for _, at := range []time.Time{rig.now, rig.now.Add(31 * time.Minute), rig.now.Add(2 * time.Hour)} {
+		if err := m.scan(context.Background(), []HerdrAgentState{agent}, at); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if reads != 0 || notes != 0 || len(rig.owner) != 0 {
+		t.Fatalf("job outside active window was examined: reads=%d notes=%d events=%v", reads, notes, rig.owner)
+	}
+}
