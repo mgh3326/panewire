@@ -197,9 +197,13 @@ type HubClient struct {
 	taskPaneSweepGrace    time.Duration
 	taskPaneSweepTicks    <-chan time.Time      // fixture seam; nil uses a ticker.
 	taskPaneSweepPass     func(context.Context) // fixture seam; nil runs the real pass.
-	quotaReconcile        quotaPoolReconcileHooks
-	nodeTaskState         fleet.TaskStateReader // fixture seam; nil reads spawn.json handoffkeep_env.
-	nodePR                fleet.PRReader        // fixture seam; nil reads spawn.json handoffkeep_env.
+	// Job dir TTL loop (node_pane_sweep.go): hourly and independent of the
+	// pane sweep interval, so a node without a sweep still expires dirs.
+	jobDirTTLTicks <-chan time.Time      // fixture seam; nil uses a ticker.
+	jobDirTTLPass  func(context.Context) // fixture seam; nil runs the real pass.
+	quotaReconcile quotaPoolReconcileHooks
+	nodeTaskState  fleet.TaskStateReader // fixture seam; nil reads spawn.json handoffkeep_env.
+	nodePR         fleet.PRReader        // fixture seam; nil reads spawn.json handoffkeep_env.
 
 	// taskPaneSweepMu serializes the node's sweeps over one shared sweeper: the
 	// local pass and the hub's pane.sweep command (node_pane_sweep_ended.go).
@@ -505,6 +509,7 @@ func (client *HubClient) Run(ctx context.Context) {
 	go client.runCreditRejectionRecovery(ctx)
 	go client.runLaneReconcile(ctx)
 	go client.runTaskPaneSweep(ctx)
+	go client.runJobDirTTL(ctx)
 	go client.runQuotaPoolReconcile(ctx)
 	if client.statePublish {
 		go client.runFleetQuota(ctx)

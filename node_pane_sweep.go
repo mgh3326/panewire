@@ -21,9 +21,8 @@ const defaultTaskPaneSweepInterval = 5 * time.Minute
 // hk. The grace has no minimum: a test or an operator may want none.
 const minTaskPaneSweepInterval = 10 * time.Second
 
-// jobDirTTLEvery spaces the job dir TTL passes the sweep loop runs: each one
-// reads hk for every dir past the TTL, which a 5-minute cadence does not
-// need.
+// jobDirTTLEvery spaces the job dir TTL passes: each one reads hk for every
+// dir past the TTL, which a 5-minute cadence does not need.
 const jobDirTTLEvery = time.Hour
 
 func (client *HubClient) runTaskPaneSweep(ctx context.Context) {
@@ -31,14 +30,41 @@ func (client *HubClient) runTaskPaneSweep(ctx context.Context) {
 		return
 	}
 	sweeper := client.nodeTaskPaneSweeper()
-	expiry := &fleet.JobDirTTL{Every: jobDirTTLEvery}
 	pass := client.taskPaneSweepPass
 	if pass == nil {
-		pass = func(ctx context.Context) { client.sweepTaskPanes(ctx, sweeper, expiry) }
+		pass = func(ctx context.Context) { client.sweepTaskPanes(ctx, sweeper) }
 	}
 	ticks := client.taskPaneSweepTicks
 	if ticks == nil {
 		ticker := time.NewTicker(client.taskPaneSweepInterval)
+		defer ticker.Stop()
+		ticks = ticker.C
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticks:
+			pass(ctx)
+		}
+	}
+}
+
+// runJobDirTTL is the job dir TTL loop (docs/job-dir-ttl.md). It runs on its
+// own hourly cadence whether or not the pane sweep does, so a node with
+// [reap] job_dir_ttl set but the sweep off still expires dirs (hk 4670).
+func (client *HubClient) runJobDirTTL(ctx context.Context) {
+	if client.jobsInboxRoot == "" {
+		return
+	}
+	expiry := &fleet.JobDirTTL{Every: jobDirTTLEvery}
+	pass := client.jobDirTTLPass
+	if pass == nil {
+		pass = func(ctx context.Context) { client.sweepJobDirs(ctx, expiry) }
+	}
+	ticks := client.jobDirTTLTicks
+	if ticks == nil {
+		ticker := time.NewTicker(jobDirTTLEvery)
 		defer ticker.Stop()
 		ticks = ticker.C
 	}
@@ -69,7 +95,7 @@ func (client *HubClient) nodeTaskPaneSweeper() *fleet.TaskPaneSweeper {
 // app afresh, as the node's job.done does, so a changed config or hk credential
 // is picked up; the sweeper keeps the idle times between passes. The pass holds
 // taskPaneSweepMu, which the hub's pane.sweep command also takes.
-func (client *HubClient) sweepTaskPanes(ctx context.Context, sweeper *fleet.TaskPaneSweeper, expiry *fleet.JobDirTTL) {
+func (client *HubClient) sweepTaskPanes(ctx context.Context, sweeper *fleet.TaskPaneSweeper) {
 	client.taskPaneSweepMu.Lock()
 	app, reason := client.taskPaneSweepApp(sweeper)
 	var err error
@@ -84,7 +110,6 @@ func (client *HubClient) sweepTaskPanes(ctx context.Context, sweeper *fleet.Task
 	if err != nil {
 		slog.Warn("task pane sweep failed", "reason", "jobs-unreadable")
 	}
-	client.expireJobDirs(ctx, app, expiry)
 }
 
 // taskPaneSweepApp builds the fleet app for one sweep and points the sweeper at
@@ -128,11 +153,33 @@ func (client *HubClient) taskPaneSweepApp(sweeper *fleet.TaskPaneSweeper) (*flee
 	return app, ""
 }
 
-// expireJobDirs runs the job dir TTL (docs/job-dir-ttl.md) after the pane
-// sweep, deleting, only when the node's hosts config sets [reap]
-// job_dir_ttl. Unset, it does nothing: a deploy changes no dir until the key
-// is set. Each locked re-check and delete holds the node's command lock, as
-// a sweep close does.
+// sweepJobDirs runs one job dir TTL pass. It builds the fleet app the pane
+// sweep's app has — this node's own jobs root, herdr session and hk job
+// store — but not the sweeper the TTL never reads. [reap] job_dir_ttl is
+// checked on the loaded config first, so an unset key costs one config
+// read an hour and no hk credential reads.
+func (client *HubClient) sweepJobDirs(ctx context.Context, expiry *fleet.JobDirTTL) {
+	app, err := fleet.New(slogWarnWriter{}, slogWarnWriter{})
+	if err != nil {
+		slog.Warn("job dir ttl skipped", "reason", "app-unavailable")
+		return
+	}
+	if _, ok := fleet.ConfiguredJobDirTTL(app.Config); !ok {
+		return
+	}
+	app.Jobs = filepath.Join(client.jobsInboxRoot, "jobs")
+	app.HerdrSession = client.nodeSpawnSession()
+	if app.JobStore, err = client.nodeJobStoreForCommand(); err != nil {
+		slog.Warn("job dir ttl skipped", "reason", "hk-unavailable")
+		return
+	}
+	client.expireJobDirs(ctx, app, expiry)
+}
+
+// expireJobDirs runs the job dir TTL (docs/job-dir-ttl.md), deleting, only
+// when the node's hosts config sets [reap] job_dir_ttl. Unset, it does
+// nothing: a deploy changes no dir until the key is set. Each locked
+// re-check and delete holds the node's command lock, as a sweep close does.
 func (client *HubClient) expireJobDirs(ctx context.Context, app *fleet.App, expiry *fleet.JobDirTTL) {
 	ttl, ok := fleet.ConfiguredJobDirTTL(app.Config)
 	if !ok {

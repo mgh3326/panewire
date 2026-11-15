@@ -21,13 +21,14 @@ The pass is a dry run unless one of these asks it to delete:
 | Where | How | Default |
 | --- | --- | --- |
 | CLI | `panewire reap --apply --expire-job-dirs [--job ID[,ID]]` | off; a plain `reap --apply` never deletes a dir |
-| Node daemon | `[reap] job_dir_ttl = "72h"` in the node's hosts config ([config](config.md#reap)) | unset: the sweep loop runs no TTL pass |
+| Node daemon | `[reap] job_dir_ttl = "72h"` in the node's hosts config ([config](config.md#reap)) | unset: the TTL loop deletes nothing |
 
 `panewire reap --expire-job-dirs` without `--apply` is the dry run. The CLI
 uses `[reap] job_dir_ttl` when it is set, else 72 h. The node runs the pass
-after its [task pane sweep](pane-sweep.md), at most once an hour, and only
-while the key is set, so a deploy changes nothing until panewire-design sets
-it. A value under 24 h, or one that does not parse, is a config error.
+on its own hourly loop — whether or not `--task-pane-sweep-interval` is on —
+and only while the key is set, so a deploy changes nothing until
+panewire-design sets it. A value under 24 h, or one that does not parse, is a
+config error.
 `--expire-job-dirs` takes no `--lane` (a usage error): the pass has no lane
 filter, so limit it with `--job`.
 
@@ -58,11 +59,11 @@ directory is kept. Any read error or doubt keeps it.
 | | Condition | Kept as |
 | --- | --- | --- |
 | path | A plain directory directly under the jobs root, named a valid job id. A symlink whose real path leaves the root, or any other symlink, is never followed. A `.expiring-*` tombstone (below) is listed and never touched. | `outside-root`, `symlink`, `invalid-id`, `unreadable`, `tombstone` |
-| kind | It has `events/` (a job that ran here), or `submission.json` and no `events/` (a submitter-side dir, below), or neither and an hk record for its job (a leftover, below). Anything else — lead scratch, a consult folder — is not a job. | `not-a-job`, `events-unreadable`, `submission-unreadable`, `submission-mismatch` |
+| kind | It has `events/` (a job that ran here — or a hub-side placement dir, below), or `submission.json` and no `events/` (a submitter-side dir, below), or neither and an hk record for its job (a leftover, below). Anything else — lead scratch, a consult folder — is not a job. | `not-a-job`, `events-unreadable`, `submission-unreadable`, `submission-mismatch` |
 | (a) | The job is not `--keep`, and no completion watcher holds it (`watchActive`). | `protected`, `watcher-active` |
 | (d) | The newest file mtime and event time under it are at least the TTL old. | `too-young` |
-| (c) | In the herdr session the receipt recorded, `herdr pane list` (the full inventory, plain shells included) names no pane with the job's recorded pane id or label, and neither does `herdr agent list`. The agent list alone never proves a pane gone: a shell pane whose agent exited is only in the pane list. A job that recorded neither a pane nor a label, a receipt that names no `herdr_session` (one from before it was recorded), or a list that cannot be read keeps it. A pane list answer that carries an error (an `error` member or `"ok":false`), or any row that is not an object with a pane id (`null`, `{}`), cannot be read. Only the pane list is read that strictly; the agent list still vetoes. The agent list is decoded leniently: an `error` member is ignored, and any decoded agent with the job's pane id or label keeps the directory (`pane-live`), even beside an `error` member. `"agents": null`, a `null` row and a `{}` row read as no agent. An agent answer with no `agents` key, or malformed JSON, cannot be decoded and keeps the directory (`pane-unreadable`). | `pane-live`, `pane-unknown`, `pane-session-unknown`, `pane-unreadable` |
-| (b) | The hk job record is `completed` or `lost`. `escalated` and every live state keep it. | `hk-not-terminal`, `hk-missing`, `hk-unreadable` |
+| (c) | In the herdr session the receipt recorded, `herdr pane list` (the full inventory, plain shells included) names no pane with the job's recorded pane id or label, and neither does `herdr agent list`. The agent list alone never proves a pane gone: a shell pane whose agent exited is only in the pane list. A job that recorded neither a pane nor a label, a receipt that names no `herdr_session` (one from before it was recorded), or a list that cannot be read keeps it. A pane list answer that carries an error (an `error` member or `"ok":false`), or any row that is not an object with a pane id (`null`, `{}`), cannot be read. Only the pane list is read that strictly; the agent list still vetoes. The agent list is decoded leniently: an `error` member is ignored, and any decoded agent with the job's pane id or label keeps the directory (`pane-live`), even beside an `error` member. `"agents": null`, a `null` row and a `{}` row read as no agent. An agent answer with no `agents` key, or malformed JSON, cannot be decoded and keeps the directory (`pane-unreadable`). A hub-side dir skips this check: the job never ran here, so no pane of it can be in this host's herdr. | `pane-live`, `pane-unknown`, `pane-session-unknown`, `pane-unreadable` |
+| (b) | The hk job record is `completed` or `lost` — `failed` or `refused` too for a hub-side dir. `escalated` and every live state keep it. A hub-side dir hk holds no record for goes once it is past the TTL (condition (d) already ran): the placement never became a claimed job. | `hk-not-terminal`, `hk-missing`, `hk-unreadable` |
 | (e) | hk confirms every artifact in the directory (below). | `report-…`, `result-unconfirmed`, `evidence-unconfirmed`, `evidence-unclassified` |
 
 hk confirms an artifact when:
@@ -145,6 +146,26 @@ trailing `/`. The check is by path segment, so `s1/report..md` and
 separator rule applies: `s1/sub\summary.md` names a file whose name holds a
 backslash. An empty value records nothing. The locked re-check reads the
 receipt again through the same code.
+
+### Hub-side dirs
+
+The hub's per-spawn app runs placement in its own jobs root and records
+each decision as a `job.placement` event, then binds the spawn to a node
+and stops: the job is claimed and run there, never here. The directory it
+leaves holds `.wrk-events.lock` and `events/<n>-job.placement.json` — and
+nothing else (hk 4670). A dir whose every event is `job.placement` is
+hub-side; any other kind mixed in, a malformed artifact or an empty
+`events/` keeps it as `events-unreadable`, as before.
+
+A hub-side dir skips the pane check (c): the job never ran on this host,
+so no pane of it can be in this host's herdr. The hk job record decides
+instead: `completed`, `lost`, `failed` or `refused` deletes it
+(`hub-terminal`), every other state keeps it (`hk-not-terminal`), and a
+record hk does not hold deletes it once the dir is past the TTL
+(`hub-no-record`) — the placement never became a claimed job. The age,
+watcher, lock, tombstone and artifact checks are the same as for any
+other dir; a hub-side dir with `evidence/` or `final/` files still needs
+hk to confirm them, which it cannot without a task, so such a dir keeps.
 
 ### Directories that never expire
 

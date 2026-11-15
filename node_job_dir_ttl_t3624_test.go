@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -161,4 +162,45 @@ func TestNodeJobDirTTLHonoursTheConfiguredAge(t *testing.T) {
 	if _, err := os.Stat(dir); err != nil {
 		t.Fatalf("a 73h-old dir was deleted under a 4d TTL: %v", err)
 	}
+}
+
+// hk 4670: the TTL loop is the daemon's own hourly loop, not a step of the
+// pane sweep — a node with --task-pane-sweep-interval 0 still runs it, and
+// a node with no jobs root runs nothing.
+func TestNodeJobDirTTLLoopRunsWithoutPaneSweep(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	client := newTaskPaneSweepClient(t, 0)
+	ticks := make(chan time.Time)
+	var passes atomic.Int32
+	client.jobDirTTLTicks = ticks
+	client.jobDirTTLPass = func(context.Context) { passes.Add(1) }
+	done := make(chan struct{})
+	go func() { client.runJobDirTTL(ctx); close(done) }()
+	ticks <- time.Now()
+	eventually(t, time.Second, "job dir ttl pass", func() bool { return passes.Load() == 1 })
+	cancel()
+	eventually(t, time.Second, "ttl loop shutdown", func() bool {
+		select {
+		case <-done:
+			return true
+		default:
+			return false
+		}
+	})
+
+	client = newTaskPaneSweepClient(t, 0)
+	client.jobsInboxRoot = ""
+	client.jobDirTTLTicks = make(chan time.Time)
+	client.jobDirTTLPass = func(context.Context) { t.Error("ttl pass ran without a jobs root") }
+	finished := make(chan struct{})
+	go func() { client.runJobDirTTL(context.Background()); close(finished) }()
+	eventually(t, time.Second, "ttl loop returns without a jobs root", func() bool {
+		select {
+		case <-finished:
+			return true
+		default:
+			return false
+		}
+	})
 }
