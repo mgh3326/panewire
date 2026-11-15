@@ -363,7 +363,8 @@ const (
 	pinAbsent = "absent"
 )
 
-// pinResult is step 3's answer: the outcome, and the record document it names.
+// pinResult is step 3's answer: the outcome, and S's document (the one the
+// receipt names, written or not).
 type pinResult struct {
 	outcome  string
 	document string
@@ -397,14 +398,14 @@ func (a *App) pinReport(ctx context.Context, id, doc, digest string) (pinResult,
 		return pinResult{outcome: pinPinned, document: heldDoc}, nil
 	default:
 		a.warn("report pin kept: job %s record already names another report", id)
-		return pinResult{outcome: pinHeld}, nil
+		return pinResult{outcome: pinHeld, document: doc}, nil
 	}
 	switch e = a.putJobRecord(ctx, id, map[string]any{"report_doc": doc, "report_sha256": digest}); {
 	case e == nil:
 		return pinResult{outcome: pinPinned, document: doc}, nil
 	case isJobStateConflict(e):
 		a.warn("report pin kept: job %s record already names another report", id)
-		return pinResult{outcome: pinHeld}, nil
+		return pinResult{outcome: pinHeld, document: doc}, nil
 	}
 	return pinResult{}, e
 }
