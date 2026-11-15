@@ -419,33 +419,39 @@ func TestHubInboxIndexChargesBindingStrings(t *testing.T) {
 	}
 }
 
-// TestOldJobsByPaneFallsThroughFilteredWinner (hk 4836): a pane's newest
-// binding can name a job the past-window lookup must skip because its newest
-// spawn moved to another pane. The older live job bound to the pane is then
-// the candidate, not no candidate at all.
-func TestOldJobsByPaneFallsThroughFilteredWinner(t *testing.T) {
+// TestOldJobsByPaneNewestBindingDecides (hk 4836): a pane's newest binding
+// decides who holds it. A later binding by another job supersedes an older
+// job's, so when the newer job is filtered out (in-window, ended, or moved to
+// another pane) the pane has no past-window candidate: the older job does not
+// resume it. A pane whose binding no later job supersedes keeps its old job.
+func TestOldJobsByPaneNewestBindingDecides(t *testing.T) {
 	f := newIndexFixture(t, 0)
-	const pane, elsewhere = "w1:reused", "w1:elsewhere"
-	// The older job still on the pane.
-	f.put("job-old-a", 1, "job.claimed", f.claim(1, 1, 10*24*time.Hour, ""), 10*24*time.Hour)
-	f.put("job-old-a", 2, "job.spawned", f.spawned(1, pane, 10*24*time.Hour), 10*24*time.Hour)
-	// A newer job that bound the pane and then moved to another one.
-	f.put("job-moved-b", 1, "job.claimed", f.claim(2, 1, 5*24*time.Hour, ""), 5*24*time.Hour)
-	f.put("job-moved-b", 2, "job.spawned", f.spawned(2, pane, 5*24*time.Hour), 5*24*time.Hour)
-	f.put("job-moved-b", 3, "job.spawned", f.spawned(2, elsewhere, 4*24*time.Hour), 4*24*time.Hour)
-	// A job inside the active window is never a past-window candidate.
-	f.put("job-recent-c", 1, "job.claimed", f.claim(3, 1, time.Hour, ""), time.Hour)
-	f.put("job-recent-c", 2, "job.spawned", f.spawned(3, "w1:recent", time.Hour), time.Hour)
+	const held, superseded, elsewhere, recent = "w1:held", "w1:superseded", "w1:elsewhere", "w1:recent"
+	// An old job whose binding no later job supersedes.
+	f.put("job-old-held", 1, "job.claimed", f.claim(1, 1, 10*24*time.Hour, ""), 10*24*time.Hour)
+	f.put("job-old-held", 2, "job.spawned", f.spawned(1, held, 10*24*time.Hour), 10*24*time.Hour)
+	// An old job superseded on the pane by a newer job that then moved away.
+	f.put("job-old-a", 1, "job.claimed", f.claim(2, 1, 10*24*time.Hour, ""), 10*24*time.Hour)
+	f.put("job-old-a", 2, "job.spawned", f.spawned(2, superseded, 10*24*time.Hour), 10*24*time.Hour)
+	f.put("job-moved-b", 1, "job.claimed", f.claim(3, 1, 5*24*time.Hour, ""), 5*24*time.Hour)
+	f.put("job-moved-b", 2, "job.spawned", f.spawned(3, superseded, 5*24*time.Hour), 5*24*time.Hour)
+	f.put("job-moved-b", 3, "job.spawned", f.spawned(3, elsewhere, 4*24*time.Hour), 4*24*time.Hour)
+	// A job inside the active window that binds the pane itself.
+	f.put("job-recent-c", 1, "job.claimed", f.claim(4, 1, time.Hour, ""), time.Hour)
+	f.put("job-recent-c", 2, "job.spawned", f.spawned(4, recent, time.Hour), time.Hour)
 	f.settle()
 
 	out := hubIndexFor(f.root).oldJobsByPane(context.Background(), f.now.Add(-72*time.Hour))
-	if job, ok := out[pane]; !ok || job.JobID != "job-old-a" {
-		t.Fatalf("%s: got %+v, want job-old-a", pane, job)
+	if job, ok := out[held]; !ok || job.JobID != "job-old-held" {
+		t.Fatalf("%s: got %+v, want job-old-held", held, job)
 	}
 	if job, ok := out[elsewhere]; !ok || job.JobID != "job-moved-b" {
 		t.Fatalf("%s: got %+v, want job-moved-b", elsewhere, job)
 	}
-	if job, ok := out["w1:recent"]; ok {
-		t.Fatalf("in-window job returned as a past-window candidate: %+v", job)
+	if job, ok := out[superseded]; ok {
+		t.Fatalf("%s: got %+v, want no candidate: the newer binding supersedes the old job", superseded, job)
+	}
+	if job, ok := out[recent]; ok {
+		t.Fatalf("%s: got %+v, want no candidate: the binding is inside the active window", recent, job)
 	}
 }

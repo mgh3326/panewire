@@ -547,18 +547,14 @@ func (ix *hubInboxIndex) visitJobs(ctx context.Context, includeDormant bool, fn 
 	return nil
 }
 
-// oldJobsByPane returns, per pane, the first job that qualifies among the jobs
-// whose binding names that pane, ranked the way the pane-to-session lookup
-// ranks them (a live job, then the newest binding event), and only for panes
-// whose job started before activeCutoff. It is the stall safety net's
-// candidate lookup past the active window (hk 4836).
+// oldJobsByPane returns, per pane, the job that pane's newest live binding
+// names, but only for panes whose job started before activeCutoff. It is the
+// stall safety net's candidate lookup past the active window (hk 4836).
 //
 // A job is returned with its events loaded even when it is dormant, because
 // the caller reads the claim and the spawn receipt; compaction keeps only a
 // dormant job's bindings. A job inside the window is the normal active-job
-// lookup's, an ended job no longer holds its pane, and a job whose newest
-// spawn names another pane has moved off this one, so none of those is
-// returned: the next-ranked candidate for the pane is tried instead.
+// lookup's, and an ended job no longer holds its pane, so neither is returned.
 func (ix *hubInboxIndex) oldJobsByPane(ctx context.Context, activeCutoff time.Time) map[string]HubActiveJob {
 	ix.mu.Lock()
 	defer ix.mu.Unlock()
@@ -567,7 +563,7 @@ func (ix *hubInboxIndex) oldJobsByPane(ctx context.Context, activeCutoff time.Ti
 		return nil
 	}
 	ix.gen++
-	ranked := make(map[string][]paneBindingCandidate)
+	best := make(map[string]paneBindingCandidate)
 	for _, id := range names {
 		if ctx != nil {
 			if err := ctx.Err(); err != nil {
@@ -589,24 +585,24 @@ func (ix *hubInboxIndex) oldJobsByPane(ctx context.Context, activeCutoff time.Ti
 		}
 		for i := range job.bindings {
 			fact := job.bindings[i]
-			ranked[fact.pane] = append(ranked[fact.pane], paneBindingCandidate{jobID: job.id, session: fact.session, live: !job.ended, createdAt: fact.createdAt, seq: fact.seq})
+			cand := paneBindingCandidate{jobID: job.id, session: fact.session, live: !job.ended, createdAt: fact.createdAt, seq: fact.seq}
+			if prev, ok := best[fact.pane]; ok && !betterPaneBinding(cand, prev) {
+				continue
+			}
+			best[fact.pane] = cand
 		}
 	}
-	out := make(map[string]HubActiveJob, len(ranked))
-	for pane, candidates := range ranked {
-		sort.Slice(candidates, func(i, j int) bool { return betterPaneBinding(candidates[i], candidates[j]) })
-		for _, cand := range candidates {
-			job := ix.refreshJobLocked(cand.jobID, true)
-			if job == nil || job.ended || !job.reduction.claimTime.Before(activeCutoff) {
-				continue
-			}
-			active, ok := job.reduction.activeJob()
-			if !ok || active.Pane != pane {
-				continue
-			}
-			out[pane] = active
-			break
+	out := make(map[string]HubActiveJob, len(best))
+	for pane, cand := range best {
+		job := ix.refreshJobLocked(cand.jobID, true)
+		if job == nil || job.ended || !job.reduction.claimTime.Before(activeCutoff) {
+			continue
 		}
+		active, ok := job.reduction.activeJob()
+		if !ok || active.Pane != pane {
+			continue
+		}
+		out[pane] = active
 	}
 	return out
 }
