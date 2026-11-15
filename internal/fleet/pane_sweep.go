@@ -369,6 +369,10 @@ type TaskPaneSweeper struct {
 	// about, by reason, so a daemon logs each one once
 	// (publishPaneMetricTextfile).
 	textfileWarned map[string]bool
+	// reportNoted holds the republish outcomes already logged, by job, report
+	// and reason, so a report that cannot be published yet is one line rather
+	// than one per pass (report_republish.go).
+	reportNoted map[string]bool
 }
 
 func (s *TaskPaneSweeper) info(message string, attrs ...any) {
