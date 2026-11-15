@@ -1,0 +1,280 @@
+package fleet
+
+import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+)
+
+// The node's own end of a reviewer or consult job that never ran `panewire
+// done` (hk 4747): a pane both herdr lists lost, and a live pane whose result
+// never arrived before the request's time limit plus a grace. The fixture's
+// base time is minute 0 (12:00), and a reviewer's default limit is one hour.
+
+// endReasons lists the job's job.lost reasons in ledger order.
+func endReasons(t *testing.T, a *App, job string) []string {
+	t.Helper()
+	events, err := a.events(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reasons []string
+	for _, event := range events {
+		if event.Kind == "job.lost" {
+			reasons = append(reasons, str(event.Payload, "reason"))
+		}
+	}
+	return reasons
+}
+
+func (f *paneSweepFixture) writeJobFile(job, name, body string) {
+	f.t.Helper()
+	if err := os.WriteFile(filepath.Join(f.a.Jobs, job, name), []byte(body), 0600); err != nil {
+		f.t.Fatal(err)
+	}
+}
+
+// askQuestion records a lane event the pane asked, at the given time.
+func (f *paneSweepFixture) askQuestion(pane string, at time.Time) {
+	f.t.Helper()
+	dir := filepath.Join(filepath.Dir(f.a.Jobs), "events-lane")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		f.t.Fatal(err)
+	}
+	body, err := json.Marshal(map[string]any{"kind": "lane.event", "pane_id": pane, "text": "which approach?", "event_id": "q1", "notify_type": "decision"})
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	path := filepath.Join(dir, "0001-question.json")
+	if err := os.WriteFile(path, body, 0600); err != nil {
+		f.t.Fatal(err)
+	}
+	if err := os.Chtimes(path, at, at); err != nil {
+		f.t.Fatal(err)
+	}
+}
+
+// A reviewer whose pane both herdr lists lost is ended as pane_gone and reaped;
+// nothing is closed, because there is no pane.
+func TestPaneSweepEndsAReviewerWhosePaneIsGone(t *testing.T) {
+	f := newPaneSweepFixture(t)
+	pane := f.job("r", "reviewer", "")
+	delete(f.status, pane)
+	f.at(1)
+	if got := endReasons(t, f.a, "r"); len(got) != 1 || got[0] != SweepPaneGone {
+		t.Fatalf("job.lost reasons = %v", got)
+	}
+	rec := f.store.record(t, "r")
+	if str(rec, "state") != "lost" || str(rec, "end_reason") != SweepPaneGone {
+		t.Fatalf("hk record = %v", rec)
+	}
+	reaped := f.reaped("r")
+	if reaped == nil || str(reaped, "reason") != SweepPaneGone {
+		t.Fatalf("reap = %v", reaped)
+	}
+	if len(f.closed()) != 0 {
+		t.Fatalf("a close ran for a pane herdr does not list: %v", f.closed())
+	}
+	if !f.infoHas("node ended a reviewer or consult job", "job=r", "reason="+SweepPaneGone) {
+		t.Fatalf("info lines = %q", f.info)
+	}
+}
+
+// A pane both lists lost ends the job as pane_gone whatever it left behind:
+// the hub's posted-result end only applies while the record is still live.
+func TestPaneSweepEndsAReviewerWhoseGonePaneHadAPostedResult(t *testing.T) {
+	f := newPaneSweepFixture(t)
+	pane := f.job("r", "reviewer", "")
+	f.writeJobFile("r", "report.md", "# findings\n")
+	delete(f.status, pane)
+	f.at(1)
+	if got := endReasons(t, f.a, "r"); len(got) != 1 || got[0] != SweepPaneGone {
+		t.Fatalf("job.lost reasons = %v", got)
+	}
+	if f.reaped("r") == nil {
+		t.Fatal("the job whose pane vanished was not reaped")
+	}
+}
+
+// A live reviewer that posted no result is ended once the request's time limit
+// (one hour by default) plus the grace passed, and the existing one-hour close
+// then takes its pane.
+func TestPaneSweepEndsAReviewerWithNoResultPastTheLimit(t *testing.T) {
+	f := newPaneSweepFixture(t)
+	pane := f.job("r", "reviewer", "")
+	f.status[pane] = "working"
+	f.at(74)
+	if got := endReasons(t, f.a, "r"); len(got) != 0 {
+		t.Fatalf("a reviewer inside its limit was ended: %v", got)
+	}
+	f.at(76)
+	if got := endReasons(t, f.a, "r"); len(got) != 1 || got[0] != ReviewerNoResultTimeout {
+		t.Fatalf("job.lost reasons = %v", got)
+	}
+	rec := f.store.record(t, "r")
+	if str(rec, "state") != "lost" || str(rec, "end_reason") != ReviewerNoResultTimeout {
+		t.Fatalf("hk record = %v", rec)
+	}
+	if !f.infoHas("node ended a reviewer or consult job", "job=r", "reason="+ReviewerNoResultTimeout) {
+		t.Fatalf("info lines = %q", f.info)
+	}
+	if f.reaped("r") != nil || len(f.closed()) != 0 {
+		t.Fatalf("a timed-out reviewer's pane closed before its hour: closed=%v reaped=%v", f.closed(), f.reaped("r"))
+	}
+	// The existing one-hour close then applies: nothing before the hour, the
+	// pane whatever it shows after it.
+	f.at(136)
+	if len(f.closed()) != 0 {
+		t.Fatalf("pane closed before the hour after its end: %v", f.closed())
+	}
+	f.at(137)
+	if got := f.closed(); len(got) != 1 || got[0] != pane {
+		t.Fatalf("pane was not closed after its hour: %v", got)
+	}
+	if f.reaped("r") == nil {
+		t.Fatal("the timed-out reviewer was not reaped")
+	}
+	if got := endReasons(t, f.a, "r"); len(got) != 1 {
+		t.Fatalf("the end was written more than once: %v", got)
+	}
+}
+
+// A consult is ended the same way.
+func TestPaneSweepEndsAConsultWithNoResultPastTheLimit(t *testing.T) {
+	f := newPaneSweepFixture(t)
+	pane := f.job("c", "consult", "")
+	f.status[pane] = "working"
+	f.at(76)
+	if got := endReasons(t, f.a, "c"); len(got) != 1 || got[0] != ReviewerNoResultTimeout {
+		t.Fatalf("job.lost reasons = %v", got)
+	}
+}
+
+// A --keep reviewer is ended the same way, and its live pane then keeps its
+// day (decision 268).
+func TestPaneSweepKeepsATimedOutReviewersPaneForItsDay(t *testing.T) {
+	f := newPaneSweepFixture(t)
+	pane := f.job("r", "reviewer", "", map[string]any{"keep": true})
+	f.status[pane] = "working"
+	f.at(76)
+	if got := endReasons(t, f.a, "r"); len(got) != 1 || got[0] != ReviewerNoResultTimeout {
+		t.Fatalf("job.lost reasons = %v", got)
+	}
+	f.at(137)
+	if len(f.closed()) != 0 {
+		t.Fatalf("a --keep pane closed inside its day: %v", f.closed())
+	}
+	f.at(1517)
+	if got := f.closed(); len(got) != 1 || got[0] != pane {
+		t.Fatalf("a --keep pane did not close a day after its end: %v", got)
+	}
+}
+
+// A reviewer that posted a result is left to the hub's posted-result end
+// (hub_spawn_reviewer_end.go): no result needs a second end.
+func TestPaneSweepLeavesAReviewerThatPostedItsResult(t *testing.T) {
+	for name, file := range map[string][2]string{
+		"findings object": {"findings.json", `{"findings":[]}`},
+		"report":          {"report.md", "# findings\n"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newPaneSweepFixture(t)
+			pane := f.job("r", "reviewer", "")
+			f.status[pane] = "working"
+			f.writeJobFile("r", file[0], file[1])
+			f.at(76)
+			if got := endReasons(t, f.a, "r"); len(got) != 0 {
+				t.Fatalf("a reviewer with a result was ended: %v", got)
+			}
+			if state := str(f.store.record(t, "r"), "state"); state != "spawned" {
+				t.Fatalf("a reviewer with a result was ended: %v", f.store.record(t, "r"))
+			}
+		})
+	}
+}
+
+// A findings file that is not a findings object — JSON null, another shape, or
+// not JSON — is absent, as the hub's result reader counts it: the job is ended
+// at its limit.
+func TestPaneSweepEndsAReviewerWhoseFindingsAreNotAPostedResult(t *testing.T) {
+	for name, body := range map[string]string{
+		"JSON null":         "null\n",
+		"no findings array": `{"verdict":"ok"}`,
+		"not JSON":          "findings: none\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newPaneSweepFixture(t)
+			pane := f.job("r", "reviewer", "")
+			f.status[pane] = "working"
+			f.writeJobFile("r", "findings.json", body)
+			f.at(76)
+			if got := endReasons(t, f.a, "r"); len(got) != 1 || got[0] != ReviewerNoResultTimeout {
+				t.Fatalf("a findings file that is no result was read as one: %v", got)
+			}
+		})
+	}
+}
+
+// The time limit the spawn record carries wins over the role's default.
+func TestPaneSweepUsesTheSpawnRecordsTimeLimit(t *testing.T) {
+	f := newPaneSweepFixture(t)
+	pane := f.job("r", "reviewer", "", map[string]any{"expires_at": "2026-03-01T15:00:00Z"})
+	f.status[pane] = "working"
+	f.at(76)
+	if got := endReasons(t, f.a, "r"); len(got) != 0 {
+		t.Fatalf("the default limit was used although the spawn record named one: %v", got)
+	}
+	f.at(196)
+	if got := endReasons(t, f.a, "r"); len(got) != 1 || got[0] != ReviewerNoResultTimeout {
+		t.Fatalf("the spawn record's limit was not used: %v", got)
+	}
+}
+
+// A job whose pane asks an unanswered question is kept (#563), whatever its
+// age.
+func TestPaneSweepKeepsAReviewerWithAnOpenQuestion(t *testing.T) {
+	f := newPaneSweepFixture(t)
+	pane := f.job("r", "reviewer", "")
+	f.status[pane] = "working"
+	f.askQuestion(pane, time.Date(2026, 3, 1, 12, 1, 0, 0, time.UTC))
+	f.at(76)
+	if got := endReasons(t, f.a, "r"); len(got) != 0 {
+		t.Fatalf("a reviewer with an open question was ended: %v", got)
+	}
+	if state := str(f.store.record(t, "r"), "state"); state != "spawned" {
+		t.Fatalf("a reviewer with an open question was ended: %v", f.store.record(t, "r"))
+	}
+}
+
+// An implementer is never ended here: its end belongs to its task or its owner.
+func TestPaneSweepNeverEndsAnImplementer(t *testing.T) {
+	f := newPaneSweepFixture(t)
+	pane := f.job("w", "implementer", "42")
+	f.status[pane] = "working"
+	f.tasks["42"] = "developing"
+	f.at(76)
+	if got := endReasons(t, f.a, "w"); len(got) != 0 {
+		t.Fatalf("an implementer was ended by the reviewer rule: %v", got)
+	}
+	if state := str(f.store.record(t, "w"), "state"); state != "spawned" {
+		t.Fatalf("an implementer's record was written: %v", f.store.record(t, "w"))
+	}
+}
+
+// An announced quota stop is the hub's hand-over, not this node's end.
+func TestPaneSweepLeavesAnAnnouncedQuotaStop(t *testing.T) {
+	f := newPaneSweepFixture(t)
+	f.job("r", "reviewer", "")
+	putEvent(t, f.a, "r", "job.lost", map[string]any{"pane_id": "p-r", "reason": "quota_stop", "pool": "pool-a"})
+	f.at(1)
+	for _, reason := range endReasons(t, f.a, "r") {
+		if reason == ReviewerNoResultTimeout || reason == SweepPaneGone {
+			t.Fatalf("the node ended an announced quota stop again: %v", endReasons(t, f.a, "r"))
+		}
+	}
+	if end := str(f.store.record(t, "r"), "end_reason"); end != "" {
+		t.Fatalf("hk record was ended by the reviewer rule: %v", f.store.record(t, "r"))
+	}
+}

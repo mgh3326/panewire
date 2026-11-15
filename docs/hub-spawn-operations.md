@@ -369,6 +369,13 @@ minutes the hub writes the end of each such job. The rule:
   make the ledger live again), ends its watch on the intent path, and starts no
   watcher from `AnnounceQuotaStop`.
 
+The node also ends its own reviewer and consult jobs that never post a result:
+a pane both herdr lists lost, or a live pane past the request's time limit plus
+a grace. That rule and its end reasons are in
+[pane-sweep.md](pane-sweep.md#reviewer-and-consult-ends) (hk 4747). It leaves a
+posted result to this pass and never ends a job whose attempt announced a quota
+stop.
+
 The pass logs each job once per outcome, never once per pass:
 `hub ended a reviewer job with a posted result` (INFO, with `job`,
 `holder_host`, `end_reason`), `hub could not end a reviewer job` (WARN, with the

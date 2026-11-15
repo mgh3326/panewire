@@ -6,6 +6,39 @@ pane owns the close: the sweep proves the pane is still that job's own, saves
 its last screen to handoffkeep, and closes it. A pane that proves nothing is
 kept and counted by reason.
 
+## Reviewer and consult ends
+
+Before it judges any pane, the pass ends a reviewer or consult job that never
+ran `panewire done` (hk 4747). Two cases have no owner otherwise:
+
+- **The pane is gone.** Neither `herdr agent list` nor `herdr pane list` carries
+  the job's pane id. The node writes the job's final `job.lost` (reason
+  `pane_gone`) and its terminal hk record (`lost`, `end_reason=pane_gone`)
+  through the node's own JobStore, then reaps the job at once as `pane_gone`.
+- **The pane is alive with no result.** The job posted no findings object
+  (`findings.json` holding JSON null is absent) and no `report.md`, and the
+  pass runs more than the job's request time limit plus a 15-minute grace after
+  the spawn. The limit is the `expires_at` the job's spawn record carries, else
+  the role's default — one hour for a reviewer or a consult. The node writes
+  the same two records with reason `reviewer_no_result_timeout`; the ended-job
+  close then takes the pane an hour later, as for any other ended job.
+
+A `--keep` reviewer or consult is ended the same way: its live pane keeps its
+day (Timing), and a gone pane is reaped at once.
+
+The node never ends an implementer here, a job whose pane asks an unanswered
+question (the #563 guard), or a job whose attempt announced a quota stop the hub
+hands to a replacement (watch_quota_stop.go). A job that posted a result is left
+to the hub's posted-result end (docs/hub-spawn-operations.md); a pane both lists
+lost is ended as `pane_gone` whatever the job left behind, because the node's
+record is the one that must end and the hub's end only applies while it is
+live.
+
+The proof and both writes run under the job's operation lock, the one
+`panewire done` and the quota-stop record take, so a completion cannot land
+between them. The hk record is written first: the pane sweep never sees a
+`job.lost` hk does not hold. Each end logs once with the job and the reason.
+
 ## Candidate selection
 
 The local pass considers jobs that are not reaped whose role is `implementer`,
