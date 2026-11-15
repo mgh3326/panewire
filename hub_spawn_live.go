@@ -45,6 +45,31 @@ func (h *HubServer) liveSpawnProfiles(ctx context.Context, exceptRequest string)
 	return counts, nil
 }
 
+// liveFreeBandByAccount counts live hub spawns placed onto the Devin free
+// band (the SWE-2 free rungs) by account key, leaving out exceptRequest. An
+// operation that has no recorded account yet (accepted or dispatching, before
+// its first success) cannot be attributed and is not counted: the gate covers
+// bursts spaced by placement latency, not same-instant races.
+func (h *HubServer) liveFreeBandByAccount(ctx context.Context, exceptRequest string) (map[string]int, error) {
+	if h.inbox == nil {
+		return map[string]int{}, nil
+	}
+	tasks, err := h.liveSpawnTasks(ctx)
+	if err != nil {
+		return nil, err
+	}
+	counts := map[string]int{}
+	for _, task := range tasks {
+		if task.Request.RequestID == exceptRequest {
+			continue
+		}
+		if profile := livePlacedProfile(task); profile != "" && fleet.IsFreeRung(profile) && task.Outcome.AccountKey != "" {
+			counts[task.Outcome.AccountKey]++
+		}
+	}
+	return counts, nil
+}
+
 // liveSpawnTasks lists the operations that are live by the rule above: every
 // accepted or dispatching one, and each succeeded one that a node still
 // reports active or that started within spawnLiveSettle.

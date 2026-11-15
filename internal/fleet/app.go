@@ -132,6 +132,13 @@ type App struct {
 	// its operations; nil reads GET /v1/spawns/live with the [hub] operator
 	// credential.
 	LiveSpawnProfiles func(context.Context, string) (map[string]int, error)
+	// LiveFreeBandByAccount counts live hub spawns placed onto the Devin free
+	// band (the SWE-2 free rungs) by account key, leaving out the hub request
+	// named by its second argument. Selection admits one concurrent free-band
+	// launch per account, so a burst of submissions does not trip the free
+	// limit (hk 4765). The hub's own App reads its operations; nil skips the
+	// check (a node-local selection has no fleet-wide launch record).
+	LiveFreeBandByAccount func(context.Context, string) (map[string]int, error)
 	// State reads the hub's fleet state snapshot; nil reads GET /v1/state
 	// with the [hub] operator credential. fleetLog records the sources used.
 	DecisionReply func(context.Context, string, string, time.Time) (bool, error)
