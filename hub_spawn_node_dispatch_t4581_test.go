@@ -99,15 +99,16 @@ func TestQueuedBoundDeadlineExpiresWithNodeSlotBusy_t4581(t *testing.T) {
 	}
 	h.startSpawnCoordinator(t.Context())
 	t14ReadNodeSpawn(t, node)
-	var saved hubSpawnTask
-	eventually(t, 3*time.Second, "queued unsent deadline to release its reservation", func() bool {
-		var err error
-		saved, err = h.inbox.store.spawnTask(t.Context(), expired.Request.RequestID)
-		return err == nil && saved.Status == "retryable" && saved.Outcome.Reason == "timeout"
+	// The queued attempt's landing wait ended without the busy node slot: it
+	// ends the attempt, not the request (hk 4660), so the request starts
+	// attempt 2 and never writes an attempt-1 outcome.
+	eventually(t, 3*time.Second, "queued unsent deadline to start the next attempt", func() bool {
+		saved, err := h.inbox.store.spawnTask(t.Context(), expired.Request.RequestID)
+		return err == nil && saved.Attempt >= 2
 	})
-	var reserved int
-	if err := h.inbox.store.db.QueryRow(`SELECT count(*) FROM spawn_reservations WHERE request_id=?`, expired.Request.RequestID).Scan(&reserved); err != nil || reserved != 0 {
-		t.Fatalf("expired queued request kept reservation: count=%d err=%v", reserved, err)
+	var notices int
+	if err := h.inbox.store.db.QueryRow(`SELECT count(*) FROM spawn_notifications WHERE event_id=?`, expired.Request.RequestID+":1:retryable").Scan(&notices); err != nil || notices != 0 {
+		t.Fatalf("the expired attempt was reported as an outcome: count=%d err=%v", notices, err)
 	}
 }
 
@@ -263,13 +264,10 @@ func TestRefusalExclusionSurvivesStoreRestartAndResetsOnRetry_t4581(t *testing.T
 	if changed, err := recovered.completeSpawn(t.Context(), saved, hubSpawnOutcome{RC: 124, Stage: "landing", Reason: "timeout", Retryable: true}, time.Now()); err != nil || !changed {
 		t.Fatalf("finish first attempt: changed=%v err=%v", changed, err)
 	}
-	finished, err := recovered.spawnTask(t.Context(), saved.Request.RequestID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	retry, err := recovered.resumeCleanedSpawn(t.Context(), finished, time.Now())
-	if err != nil {
-		t.Fatal(err)
+	// The timeout ends the attempt; the request starts attempt 2 itself (hk 4660).
+	retry, err := recovered.spawnTask(t.Context(), saved.Request.RequestID)
+	if err != nil || retry.Attempt != 2 || retry.Status != "accepted" || len(retry.Exclusions) != 0 {
+		t.Fatalf("new attempt: %+v %v", retry, err)
 	}
 	_, _ = (&directSpawnTransport{h: h, task: retry}).Spawn(t.Context(), request)
 	rebound, err := recovered.spawnTask(t.Context(), retry.Request.RequestID)

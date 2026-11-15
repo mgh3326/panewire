@@ -583,6 +583,17 @@ type HubServer struct {
 	nodeCommandWait             time.Duration // fixture seam; zero is hubNodeCommandWait.
 	checkoutPullWait            time.Duration // fixture seam; zero is hubCheckoutPullWait.
 	nodeAgentsWait              time.Duration // fixture seam; zero is hubNodeAgentsWait.
+
+	// startConditionPoll is how often the hub reads hk for the tasks a
+	// waiting spawn request names; zero is defaultStartConditionPoll. The
+	// rest is the last pass's view, guarded by startConditionMu
+	// (hub_spawn_expiry.go).
+	startConditionPoll   time.Duration
+	startConditionMu     sync.Mutex
+	startConditionReadAt time.Time
+	startConditionTasks  map[string]fleet.TaskSnapshot
+	startConditionSeen   map[string]fleet.StartConditionResult
+
 	// laneStallMu is TryLock'd so at most one lane-stall observation runs and
 	// is held for the run's whole life: once Close has taken it and set
 	// laneStallClosing, no new run can start and any in-flight one is already

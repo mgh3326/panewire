@@ -12,6 +12,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 
@@ -49,7 +50,7 @@ func TestSpawnSubmitRefusesInputTheNodeCouldNotLaunch_t4270(t *testing.T) {
 	}
 }
 
-func TestSpawnFeaturesDoNotAdvertiseStartConditionsBeforeQueueCore(t *testing.T) {
+func TestSpawnFeaturesAdvertiseQueueFeatures(t *testing.T) {
 	h := asyncSpawnHub(t)
 	r := httptest.NewRequest(http.MethodGet, "/v1/spawns/features", nil)
 	r.Header.Set("Authorization", "Bearer "+t14OperatorToken)
@@ -58,12 +59,14 @@ func TestSpawnFeaturesDoNotAdvertiseStartConditionsBeforeQueueCore(t *testing.T)
 	var response struct {
 		Features []string `json:"features"`
 	}
-	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil || w.Code != http.StatusOK || len(response.Features) != 0 {
-		t.Fatalf("features=%d %s, want no features before queue-core support", w.Code, w.Body)
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil || w.Code != http.StatusOK || !slices.Equal(response.Features, []string{"start_conditions_v1", "spawn_expires_v1"}) {
+		t.Fatalf("features=%d %s, want start_conditions_v1 and spawn_expires_v1 (hk 4660)", w.Code, w.Body)
 	}
 }
 
-func TestSpawnSubmitRefusesStartConditionsBeforeClaim(t *testing.T) {
+// A request with a start condition is accepted into the queue as waiting
+// (hk 4660); before queue-core support the hub refused it.
+func TestSpawnSubmitQueuesStartConditionsAsWaiting(t *testing.T) {
 	h := asyncSpawnHub(t)
 	req := durableSpawnRequest()
 	req.StartConditions = []fleet.StartCondition{{Kind: "task", TaskID: "42", State: "merged"}}
@@ -77,11 +80,15 @@ func TestSpawnSubmitRefusesStartConditionsBeforeClaim(t *testing.T) {
 	h.Handler().ServeHTTP(w, r)
 	var body map[string]string
 	_ = json.Unmarshal(w.Body.Bytes(), &body)
-	if w.Code != http.StatusBadRequest || body["reason"] != "queue_core_required" || body["fix"] == "" {
-		t.Fatalf("submit=%d %s, want clear queue-core refusal", w.Code, w.Body)
+	if w.Code != http.StatusAccepted || body["status"] != "waiting" || body["expires_at"] == "" {
+		t.Fatalf("submit=%d %s, want 202 waiting with expires_at", w.Code, w.Body)
 	}
-	if _, err := h.inbox.store.spawnTask(t.Context(), req.RequestID); !errors.Is(err, sql.ErrNoRows) {
-		t.Fatalf("refused start condition was durably accepted: %v", err)
+	task, err := h.inbox.store.spawnTask(t.Context(), req.RequestID)
+	if err != nil || task.Status != "waiting" || task.Node != nil {
+		t.Fatalf("stored %+v %v, want a waiting row", task, err)
+	}
+	if held, err := h.inbox.store.spawnJobReserved(t.Context(), "test-job"); err != nil || !held {
+		t.Fatalf("a waiting request must hold its reservation: %v %v", held, err)
 	}
 }
 

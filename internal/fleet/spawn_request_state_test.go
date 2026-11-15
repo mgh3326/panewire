@@ -198,3 +198,107 @@ func TestWaitSpawnBoundCoversReadsAndOutages(t *testing.T) {
 		})
 	}
 }
+
+// hk 4660: a waiting request says once what it waits for and when its time
+// limit ends; a given_up request names its reason and expiry in the error.
+func TestWaitSpawnWaitingAndGivenUpShowExpiry(t *testing.T) {
+	c, _ := spawnStatusSequence(t,
+		map[string]any{"status": "waiting", "expires_at": "2026-11-15T16:00:00Z", "start_condition": map[string]any{"status": "waiting", "reasons": []string{"task:9000=merged"}}},
+		map[string]any{"status": "waiting", "expires_at": "2026-11-15T16:00:00Z", "start_condition": map[string]any{"status": "waiting", "reasons": []string{"task:9000=merged"}}},
+		map[string]any{"status": "given_up", "expires_at": "2026-11-15T16:00:00Z", "result": map[string]any{"reason": "expires_at passed"}})
+	var notice bytes.Buffer
+	_, err := c.WaitSpawn(t.Context(), statusTestOperation, SpawnWaitOptions{Notice: &notice})
+	if ErrorCode(err) != exitWaitLost || !strings.Contains(err.Error(), "given_up") || !strings.Contains(err.Error(), "expires_at=2026-11-15T16:00:00Z") || !strings.Contains(err.Error(), "expires_at passed") {
+		t.Fatalf("code=%d err=%v", ErrorCode(err), err)
+	}
+	want := "wait request=" + statusTestOperation + " state=waiting expires_at=2026-11-15T16:00:00Z waiting_for=task:9000=merged\n"
+	if notice.String() != want {
+		t.Fatalf("notice=%q want exactly once %q", notice.String(), want)
+	}
+}
+
+func TestParseSpawnExpires(t *testing.T) {
+	for _, test := range []struct {
+		value   string
+		seconds int
+		bad     bool
+	}{
+		{"90m", 5400, false}, {"6h", 21600, false}, {"24h", 86400, false}, {"1m", 60, false},
+		{"24h1s", 0, true}, {"59s", 0, true}, {"0s", 0, true}, {"-1h", 0, true}, {"soon", 0, true}, {"1500ms", 0, true}, {"", 0, true},
+	} {
+		got, err := parseSpawnExpires(test.value)
+		if (err != nil) != test.bad || got != test.seconds {
+			t.Errorf("parseSpawnExpires(%q) = %d, %v; want %d bad=%v", test.value, got, err, test.seconds, test.bad)
+		}
+	}
+	if _, err := parseSpawn([]string{"--expires", "25h"}); err == nil || ErrorCode(err) != exitUsage {
+		t.Fatalf("--expires 25h must be a usage error, got %v", err)
+	}
+	if SpawnExpiresDefault("implementer") != 6*time.Hour || SpawnExpiresDefault("reviewer") != time.Hour || SpawnExpiresDefault("consult") != time.Hour {
+		t.Fatal("role defaults changed")
+	}
+	if SpawnExpiresFor("reviewer", 7200) != 2*time.Hour || SpawnExpiresFor("reviewer", 0) != time.Hour {
+		t.Fatal("an explicit limit overrides the role default")
+	}
+	if !ValidSpawnExpiresSeconds(0) || ValidSpawnExpiresSeconds(86401) || ValidSpawnExpiresSeconds(59) || ValidSpawnExpiresSeconds(-1) {
+		t.Fatal("ValidSpawnExpiresSeconds bounds")
+	}
+}
+
+// hk 4660: a hub that does not advertise spawn_expires_v1 would drop
+// expires_seconds and run the request under the default limit, so the CLI
+// refuses --expires instead of submitting.
+func TestSubmitWithExpiresNeedsHubFeature(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		features []string
+		accepted bool
+	}{
+		{"hub without the feature", []string{"start_conditions_v1"}, false},
+		{"hub with the feature", []string{"start_conditions_v1", "spawn_expires_v1"}, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var posted atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.Method == http.MethodGet && r.URL.Path == "/v1/spawns/features":
+					json.NewEncoder(w).Encode(map[string]any{"features": test.features})
+				case r.Method == http.MethodPost && r.URL.Path == "/v1/spawns":
+					var request Submission
+					if json.NewDecoder(r.Body).Decode(&request) != nil || request.ExpiresSeconds != 5400 {
+						t.Errorf("expires_seconds not sent: %+v", request)
+					}
+					posted.Add(1)
+					w.WriteHeader(http.StatusAccepted)
+					json.NewEncoder(w).Encode(map[string]any{"job_id": "test-job", "request_id": request.RequestID})
+				default:
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			t.Cleanup(server.Close)
+			c := hubHTTP{base: server.URL, token: "fixture", client: server.Client()}
+			request := Submission{RequestID: "d676220b-e763-4af1-aefd-000000000001", ExpiresSeconds: 5400}
+			_, err := c.Submit(t.Context(), request)
+			if test.accepted != (err == nil) || test.accepted != (posted.Load() == 1) {
+				t.Fatalf("accepted=%v err=%v posted=%d", test.accepted, err, posted.Load())
+			}
+			if !test.accepted && (ErrorCode(err) != exitUsage || !strings.Contains(err.Error(), "--expires")) {
+				t.Fatalf("refusal: code=%d err=%v", ErrorCode(err), err)
+			}
+		})
+	}
+	// A request without --expires never asks for the feature.
+	var asked atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/spawns/features" {
+			asked.Add(1)
+		}
+		w.WriteHeader(http.StatusAccepted)
+		json.NewEncoder(w).Encode(map[string]any{"job_id": "test-job", "request_id": "d676220b-e763-4af1-aefd-000000000001"})
+	}))
+	t.Cleanup(server.Close)
+	c := hubHTTP{base: server.URL, token: "fixture", client: server.Client()}
+	if _, err := c.Submit(t.Context(), Submission{RequestID: "d676220b-e763-4af1-aefd-000000000001"}); err != nil || asked.Load() != 0 {
+		t.Fatalf("err=%v feature reads=%d", err, asked.Load())
+	}
+}

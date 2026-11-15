@@ -216,7 +216,21 @@ func (h *HubServer) refreshFleetLoad(ctx context.Context) {
 // binding and accepts a later node result), may have started and keep it too;
 // the claim, a later definitive failure, or the bridge window ends it.
 func (h *HubServer) completeSpawn(ctx context.Context, task hubSpawnTask, outcome hubSpawnOutcome) (bool, error) {
+	// An attempt that ended without starting may begin the request's next one
+	// inside this write, the hand-over a client's replay makes: it takes the
+	// same placement-trace lock, held only across the store call. A trace the
+	// lock cannot restore keeps the request out of that hand-over: the attempt
+	// ends retryable as it always did, and the held trace is not touched.
+	release := func() {}
+	if outcome.Reason == "timeout" && !task.Expires.IsZero() && (task.Node == nil || task.Status == "bound" || outcome.NodeResult && outcome.Retryable) {
+		var lockErr error
+		if release, lockErr = h.lockPlacementTrace(ctx, task, true); lockErr != nil {
+			h.logger.Warn("spawn attempt ended retryable: its placement trace is held", "request_id", task.Request.RequestID, "attempt", task.Attempt, "error", lockErr)
+			release, task.Expires = func() {}, time.Time{}
+		}
+	}
 	changed, err := h.inbox.store.completeSpawn(ctx, task, outcome, h.now().UTC())
+	release()
 	if changed {
 		// The store normalizes the outcome it persists (a bound attempt's
 		// timeout becomes deadline_exceeded and still accepts a node
@@ -235,7 +249,7 @@ func (h *HubServer) completeSpawn(ctx context.Context, task hubSpawnTask, outcom
 			}
 		}
 		switch status {
-		case "failed", "retryable":
+		case "failed", "retryable", "given_up":
 			h.releasePlacementCount(task.Job)
 		case "deadline_exceeded":
 			// Never bound: no node was asked, so nothing launched.

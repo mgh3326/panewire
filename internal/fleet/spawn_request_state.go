@@ -3,6 +3,7 @@ package fleet
 import (
 	"fmt"
 	"io"
+	"strings"
 )
 
 // spawnStateKind is how a client treats one request state a hub reports in
@@ -71,11 +72,12 @@ func spawnNeverLanded(state string) bool {
 	return false
 }
 
-// spawnWaitNotices keeps WaitSpawn from repeating itself: a parked line only
-// when the reason or next check changes, an unknown state once per name.
+// spawnWaitNotices keeps WaitSpawn from repeating itself: a parked or waiting
+// line only when it changes, an unknown state once per name.
 type spawnWaitNotices struct {
-	parkedLine string
-	unknownSet map[string]bool
+	parkedLine  string
+	waitingLine string
+	unknownSet  map[string]bool
 }
 
 func (n *spawnWaitNotices) parked(out io.Writer, request, reason, nextCheckAt string) {
@@ -84,6 +86,17 @@ func (n *spawnWaitNotices) parked(out io.Writer, request, reason, nextCheckAt st
 		return
 	}
 	n.parkedLine = line
+	fmt.Fprintln(out, line)
+}
+
+// waiting says once what a queued request waits for and when its time limit
+// ends; a change in either says it again.
+func (n *spawnWaitNotices) waiting(out io.Writer, request, expiresAt string, reasons []string) {
+	line := fmt.Sprintf("wait request=%s state=waiting expires_at=%s waiting_for=%s", request, firstNonempty(expiresAt, "none"), firstNonempty(strings.Join(reasons, ","), "none"))
+	if out == nil || line == n.waitingLine {
+		return
+	}
+	n.waitingLine = line
 	fmt.Fprintln(out, line)
 }
 

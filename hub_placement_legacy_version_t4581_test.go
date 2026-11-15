@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 
 	"github.com/mgh3326/panewire/internal/fleet"
 )
@@ -88,13 +87,15 @@ func TestLegacyPlacementVersionReconciliation_t4581(t *testing.T) {
 			if tc.timeout {
 				outcome = hubSpawnOutcome{RC: 124, Stage: "landing", Reason: "timeout", Host: "machine-a", Retryable: true, NodeResult: true}
 			}
-			if changed, err := hub.inbox.store.completeSpawn(t.Context(), task, outcome, time.Now()); err != nil || !changed {
-				t.Fatalf("commit result: changed=%v err=%v", changed, err)
-			}
 			hk.mu.Lock()
 			hk.lookup = []fleet.PlacementRecord{remote}
 			hk.lookupRequireSince = tc.historical
 			hk.mu.Unlock()
+			// The hub's own write: an attempt that timed out unstarted begins the
+			// next one inside it, after restoring the deferred trace (hk 4660).
+			if changed, err := hub.completeSpawn(t.Context(), task, outcome); err != nil || !changed {
+				t.Fatalf("commit result: changed=%v err=%v", changed, err)
+			}
 			hub.flushPlacementRecords(t.Context())
 			_, _, recorded, err := hub.inbox.store.spawnPlacementSnapshot(t.Context(), request.RequestID, task.Attempt)
 			if err != nil || recorded == tc.wantHold {
