@@ -107,7 +107,7 @@ func (s *TaskPaneSweeper) endAbandonedReviews(ctx context.Context, a *App, jobs 
 		if err != nil {
 			continue
 		}
-		s.reapSweptPane(ctx, a, latest, j, "", paneSweepEnd{state: "lost", reason: SweepPaneGone, byJob: true}, TokenUsage{}, false, now)
+		s.reapSweptPane(ctx, a, latest, j, "", paneSweepEnd{state: "lost", reason: SweepPaneGone, byJob: true}, jobSession{}, false, now)
 		swept = append(swept, SweptPane{Job: j.ID, Pane: j.Pane, Role: paneSweepRole(j), Reason: SweepPaneGone})
 	}
 	return swept
