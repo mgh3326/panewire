@@ -566,6 +566,10 @@ func (s *TaskPaneSweeper) pass(ctx context.Context, a *App, ownerAge time.Durati
 		// still live, or unreadable, ends by its own record.
 		end, eligible := paneSweepTaskEnd(status)
 		if !eligible {
+			// A task that is live again has no end to date: forget the first
+			// sighting of an earlier end, so a task that ends again starts a
+			// fresh deadline instead of reusing the old one.
+			delete(s.endedSince, paneSweepKey(j))
 			if !closed {
 				continue
 			}

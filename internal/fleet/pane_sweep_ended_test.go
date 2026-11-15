@@ -274,3 +274,23 @@ func TestEndedSweepDatesARepromptedWorkersTaskEndFromItsFirstSighting(t *testing
 		t.Fatalf("a reprompted worker's pane did not close an hour after its task end was first seen: %+v closed=%v info=%v", closes, f.closed(), f.info)
 	}
 }
+
+// A task that reopens and ends again restarts the deadline: the first
+// sighting of the earlier end must not date the new one, or the newly ended
+// worker's pane would close at once (and a --keep pane lose its day).
+func TestEndedSweepRestartsTheDeadlineWhenATaskReopensAndEndsAgain(t *testing.T) {
+	f := newPaneSweepFixture(t)
+	pane := f.job("w", "implementer", "42")
+	f.status[pane] = "working"
+	f.tasks["42"] = "merged"
+	f.endedSweep(0, time.Hour)
+	f.tasks["42"] = "developing"
+	f.endedSweep(30, time.Hour)
+	f.tasks["42"] = "merged"
+	if closes := f.endedSweep(61, time.Hour); len(closes) != 0 || len(f.closed()) != 0 {
+		t.Fatalf("a re-ended task reused the earlier sighting: %+v", closes)
+	}
+	if closes := f.endedSweep(121, time.Hour); len(closes) != 1 || len(f.closed()) != 1 {
+		t.Fatalf("a re-ended task did not close an hour after its own end: %+v closed=%v info=%v", closes, f.closed(), f.info)
+	}
+}
