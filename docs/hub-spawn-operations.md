@@ -330,9 +330,11 @@ whole queue, with every producer frozen:
    running and its coordinator keeps placing, parking, waking and expiring
    queued requests. But no new spawn row can be created
    (`claimSpawnReplacing` refuses every producer):
-   - `POST /v1/spawns`, `POST /v1/consults` and
-     `POST /v1/jobs/escalate-author` answer 503 `spawn_rollback_drain`, the
-     consult before it stores any intent;
+   - `POST /v1/spawns` and `POST /v1/consults` answer 503
+     `spawn_rollback_drain`, the consult before it stores any intent;
+   - `POST /v1/jobs/escalate-author` refuses a new ladder stage
+     (`claim_refused`) before it touches the author pane, but a replay of a
+     step already staged still completes it;
    - a quota-stop hand-off starts no successor;
    - a consult creates, recovers or respawns no spawn (the consult fails).
 

@@ -979,12 +979,23 @@ func TestSpawnRollbackDrainFreezesProducers_t4661(t *testing.T) {
 	if err := h.claimConsultSpawn(t.Context(), fleet.ConsultPlan{}, "owner"); !errors.Is(err, errSpawnRollbackDrain) {
 		t.Fatalf("a consult spawn under rollback drain: %v", err)
 	}
-	// Every producer goes through the store's claim, which refuses too.
+	// Every producer goes through the store's claim, which refuses a new row
+	// (a new author-ladder stage included) but still answers the replay of an
+	// existing one, so a staged hand-off can settle.
+	h.inbox.store.spawnFrozen = false
+	existing, existingJob := parkRequest(301)
+	if _, _, err := h.inbox.store.claimSpawn(t.Context(), existing, existingJob, "parent", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	h.inbox.store.spawnFrozen = true
+	if replay, _, err := h.inbox.store.claimSpawn(t.Context(), existing, existingJob, "parent", time.Now()); err != nil || replay.Request.RequestID != existing.RequestID {
+		t.Fatalf("a replay of an existing row under rollback drain: %+v %v", replay.Request.RequestID, err)
+	}
 	other, job := parkRequest(300)
 	if _, _, err := h.inbox.store.claimSpawn(t.Context(), other, job, "parent", time.Now()); !errors.Is(err, errSpawnRollbackDrain) {
 		t.Fatalf("a direct claim under rollback drain: %v", err)
 	}
-	for _, path := range []string{"/v1/consults", "/v1/jobs/escalate-author"} {
+	for _, path := range []string{"/v1/consults"} {
 		r := httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{}`))
 		r.Header.Set("Authorization", "Bearer "+t14OperatorToken)
 		w := httptest.NewRecorder()

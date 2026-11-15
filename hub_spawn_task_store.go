@@ -183,11 +183,6 @@ func (s *laneInboxStore) claimSpawn(parent context.Context, request fleet.Submis
 // claimSpawnReplacing transfers the task role in the same transaction as the
 // successor claim, so another worker cannot claim the gap between them.
 func (s *laneInboxStore) claimSpawnReplacing(parent context.Context, request fleet.Submission, job, owner string, now time.Time, previousID, roleKey, status string) (hubSpawnTask, bool, error) {
-	// Every spawn producer creates its row here: under a rollback drain none
-	// may (hk 4661). Rows already queued settle as usual.
-	if s.spawnFrozen {
-		return hubSpawnTask{}, false, errSpawnRollbackDrain
-	}
 	ctx, done := s.op(parent)
 	defer done()
 	spawn, err := fleet.ValidateSubmission(request)
@@ -219,6 +214,12 @@ func (s *laneInboxStore) claimSpawnReplacing(parent context.Context, request fle
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
 		return hubSpawnTask{}, false, err
+	}
+	// Every spawn producer creates its row here: under a rollback drain none
+	// may (hk 4661). A replay of an existing row (above) still answers it, so
+	// a staged ladder step or a queued request can settle.
+	if s.spawnFrozen {
+		return hubSpawnTask{}, false, errSpawnRollbackDrain
 	}
 
 	var taskRole any
