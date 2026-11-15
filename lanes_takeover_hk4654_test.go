@@ -294,3 +294,23 @@ func TestLaneTakeoverSurvivesUnrelatedWrites(t *testing.T) {
 		t.Fatalf("routes after takeover: %+v", routes)
 	}
 }
+
+// A row bound to the takeover job at any pane other than its accepted
+// placement is never moved: the binding may have been written while the
+// job's spawn was still pending, at a pane that never hosted it.
+func TestLaneTakeoverRefusesRowOffAcceptedPlacement(t *testing.T) {
+	hub, path := takeoverHub(t,
+		`{"lanes":{"task-lane":{"machine":"machine-a","pane":"w9:p9","job":"placed-job","parent":"mergewake"},"mergewake":{"machine":"machine-a","pane":"w9:p8"}}}`,
+		nil)
+	seedAcceptedChainJob(t, hub.inbox.store, "placed-job", "", "machine-a", "w1:p1")
+	bindChainSuccessor(t, hub.inbox.store, "successor-p", "placed-job", "machine-b")
+
+	writer := lanesNodeRequest(t, hub, http.MethodPut, "/v1/lanes/task-lane", lanesNodeBToken, "machine-b",
+		`{"machine":"machine-b","pane":"w2:p5","job":"successor-p","parent":"mergewake","takeover":"placed-job"}`)
+	if writer.Code != http.StatusConflict || writer.Body.String() != `{"error":"lane_takeover_unconfirmed"}`+"\n" {
+		t.Fatalf("off-placement takeover status=%d body=%q", writer.Code, writer.Body.String())
+	}
+	if routes := lanesNodeFile(t, path); routes["task-lane"].Machine != "machine-a" || routes["task-lane"].Pane != "w9:p9" {
+		t.Fatalf("refused off-placement takeover changed the row: %+v", routes)
+	}
+}

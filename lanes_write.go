@@ -365,8 +365,11 @@ func (h *HubServer) laneHasForeignReference(routes map[string]reportRelayRoute, 
 const laneTakeoverChainBound = 8
 
 type laneSpawnProof struct {
-	task  hubSpawnTask
-	valid bool
+	task hubSpawnTask
+	// takeover is the accepted spawn record of body.Takeover: the placement
+	// a takeover move must match before it redirects the row.
+	takeover hubSpawnTask
+	valid    bool
 }
 
 // laneSpawnProof reads the accepted spawn before the lanes file lock. The
@@ -388,34 +391,33 @@ func (h *HubServer) acceptedSpawnRecord(ctx context.Context, job string) (hubSpa
 	return task, true
 }
 
-// takeoverChainProven reports whether takeover equals successorParent or an
-// ancestor of it on the --parent-job chain proven from the hub's own durable
-// spawn records, bounded by laneTakeoverChainBound with every hop accepted.
-func (h *HubServer) takeoverChainProven(ctx context.Context, successorParent, takeover string) bool {
+// takeoverChainRecord proves takeover against the successor's --parent-job
+// chain from the hub's own durable spawn records, bounded by
+// laneTakeoverChainBound with every hop accepted, and returns the accepted
+// record of the takeover job its placement is checked against.
+func (h *HubServer) takeoverChainRecord(ctx context.Context, successorParent, takeover string) (hubSpawnTask, bool) {
 	if successorParent == "" || takeover == "" {
-		return false
+		return hubSpawnTask{}, false
 	}
 	if successorParent == takeover {
-		_, ok := h.acceptedSpawnRecord(ctx, takeover)
-		return ok
+		return h.acceptedSpawnRecord(ctx, takeover)
 	}
 	current := successorParent
 	for range laneTakeoverChainBound {
 		task, ok := h.acceptedSpawnRecord(ctx, current)
 		if !ok {
-			return false
+			return hubSpawnTask{}, false
 		}
 		parent := hubSpawnArg(task.Request.Args, "--parent-job")
 		if parent == "" {
-			return false
+			return hubSpawnTask{}, false
 		}
 		if parent == takeover {
-			_, ok := h.acceptedSpawnRecord(ctx, takeover)
-			return ok
+			return h.acceptedSpawnRecord(ctx, takeover)
 		}
 		current = parent
 	}
-	return false
+	return hubSpawnTask{}, false
 }
 
 // laneSpawnProof reads the accepted successor spawn before the lanes file
@@ -439,15 +441,18 @@ func (h *HubServer) laneSpawnProof(nodeMachine string, body hubLaneWriteRequest)
 		return laneSpawnProof{task: task, valid: true}
 	}
 	successorParent := hubSpawnArg(task.Request.Args, "--parent-job")
-	if !h.takeoverChainProven(ctx, successorParent, body.Takeover) {
+	record, ok := h.takeoverChainRecord(ctx, successorParent, body.Takeover)
+	if !ok {
 		return laneSpawnProof{}
 	}
-	return laneSpawnProof{task: task, valid: true}
+	return laneSpawnProof{task: task, takeover: record, valid: true}
 }
 
-// laneTakeoverRow moves only a row whose persisted owner is the predecessor.
-// Pane ids are host-local and reusable, so a historical spawn pane alone is
-// never enough to identify the row.
+// laneTakeoverRow moves only the row sitting at the takeover job's accepted
+// placement. Pane ids are host-local and reusable, so a row bound to the job
+// at any other pane — including one bound while the job's spawn was still
+// pending — is never moved; neither is a historical spawn pane alone ever
+// enough to identify the row.
 func laneTakeoverRow(body hubLaneWriteRequest, proof laneSpawnProof, routes map[string]reportRelayRoute) (string, reportRelayRoute, bool, *hubLaneProjection, error) {
 	if !proof.valid || body.Job != proof.task.Job {
 		return "", reportRelayRoute{}, false, nil, errLaneTakeoverUnconfirmed
@@ -458,6 +463,9 @@ func laneTakeoverRow(body hubLaneWriteRequest, proof laneSpawnProof, routes map[
 	}
 	name, row, found := laneRowForJob(routes, body.Takeover)
 	if found {
+		if row.Machine != proof.takeover.Outcome.Host || row.Pane != proof.takeover.Outcome.Pane {
+			return "", reportRelayRoute{}, false, nil, errLaneTakeoverUnconfirmed
+		}
 		return name, row, true, nil, nil
 	}
 	return "", reportRelayRoute{}, false, nil, errLaneTakeoverUnconfirmed
