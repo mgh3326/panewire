@@ -134,11 +134,10 @@ func (d *Daemon) Start(ctx context.Context) error {
 				manager.quota.show = manager.quota.reportQuotaWait
 			}
 			manager.quota.enqueue = manager.enqueue
-			d.stallSafety, err = newStallSafetyManager(manager.quota, manager, d.cfg.StallSafetyLimit)
-			if err != nil {
+			d.idleWake = manager
+			if err := d.initStallSafety(); err != nil {
 				return err
 			}
-			d.idleWake = manager
 			d.cfg.Hub.Client.SetIdleWakeManager(manager)
 		}
 	}

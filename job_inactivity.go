@@ -42,6 +42,18 @@ type stallSafetyManager struct {
 	act       func(context.Context, stallSafetyExamination, stallSafetyDetails, string, time.Time) (string, error)
 }
 
+func (d *Daemon) initStallSafety() error {
+	manager, err := newStallSafetyManager(d.idleWake.quota, d.idleWake, d.cfg.StallSafetyLimit)
+	if err == nil {
+		d.stallSafety = manager
+	}
+	return err
+}
+
+func (d *Daemon) scanStallSafety(ctx context.Context, agents []HerdrAgentState, at time.Time) error {
+	return d.stallSafety.scan(ctx, agents, at)
+}
+
 func (d *Daemon) runStallSafety(ctx context.Context) {
 	ticker := time.NewTicker(time.Minute)
 	defer ticker.Stop()
@@ -53,7 +65,7 @@ func (d *Daemon) runStallSafety(ctx context.Context) {
 			cancel()
 			_ = client.Close()
 			if readErr == nil {
-				if err := d.stallSafety.scan(ctx, agents, d.stallSafety.now().UTC()); err != nil {
+				if err := d.scanStallSafety(ctx, agents, d.stallSafety.now().UTC()); err != nil {
 					d.cfg.Logger.Warn("stall safety scan failed", "error", err)
 				}
 			} else if err := d.stallSafety.drain(ctx, d.stallSafety.now().UTC()); err != nil {
