@@ -138,12 +138,18 @@ func TestJobCLIRefusesCaseVariantOfExistingJobDir(t *testing.T) {
 	t.Setenv("PANEWIRE_SOCKET", filepath.Join(root, "absent.sock"))
 
 	before, _ := os.ReadDir(events)
-	for _, args := range [][]string{
+	refusals := [][]string{
 		{"done", "Build", "--report", report},
 		{"escalate", "Build", "--question", "q"},
 		{"joined", "Build", "--pr", "https://example/pull/1", "--head", "abc1234", "--report", report},
-		{"close", "Build", "--lane", "lane-a", "--outcome", "completed", "--reason", "done"},
-	} {
+	}
+	// close refuses only when the spelling resolves to a local events dir, so
+	// the assertion holds where the volume folds case and not where it does
+	// not (there close takes the remote path; see the remote case below).
+	if caseInsensitiveVolume(t, jobs) {
+		refusals = append(refusals, []string{"close", "Build", "--lane", "lane-a", "--outcome", "completed", "--reason", "done"})
+	}
+	for _, args := range refusals {
 		var stdout, stderr bytes.Buffer
 		if rc := runJobCLI(args, &stdout, &stderr, CLIConfig{}); rc != ExitUsage {
 			t.Fatalf("%v rc=%d want %d stderr=%q", args, rc, ExitUsage, stderr.String())
