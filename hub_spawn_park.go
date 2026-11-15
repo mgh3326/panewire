@@ -185,7 +185,7 @@ func spawnParked(task hubSpawnTask, now time.Time) bool {
 func (h *HubServer) parkSpawnTask(ctx context.Context, task hubSpawnTask, reason, detail string, before map[string]uint64) (bool, error) {
 	now := h.now().UTC()
 	next := spawnParkUntil(task, now.Add(h.spawnParkRecheck()))
-	parked, err := h.inbox.store.parkSpawn(ctx, task.Request.RequestID, task.Attempt, reason, next)
+	parked, err := h.inbox.store.parkSpawn(ctx, task.Request.RequestID, task.Attempt, reason, next, now)
 	if err != nil || !parked {
 		return false, err
 	}
@@ -273,11 +273,13 @@ func (h *HubServer) wakeParkedSpawns(ctx context.Context, ticked bool) {
 
 // parkSpawn stores the park of an unbound attempt. A back-off already
 // running past next is kept with its reason: a pass that found no other
-// candidate never shortens it.
-func (s *laneInboxStore) parkSpawn(parent context.Context, id string, attempt int, reason string, next time.Time) (bool, error) {
+// candidate never shortens it. The first park of a stretch starts it at now
+// and forgets any priority read; a later park in the same stretch keeps both
+// (the expressions read the row's old values).
+func (s *laneInboxStore) parkSpawn(parent context.Context, id string, attempt int, reason string, next, now time.Time) (bool, error) {
 	ctx, done := s.op(parent)
 	defer done()
-	result, err := s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET park_reason=CASE WHEN next_check_ms>? AND park_reason<>'' THEN park_reason ELSE ? END,next_check_ms=CASE WHEN next_check_ms>? AND park_reason<>'' THEN next_check_ms ELSE ? END WHERE request_id=? AND attempt=? AND status='accepted' AND node_id IS NULL`), next.UnixMilli(), reason, next.UnixMilli(), next.UnixMilli(), id, attempt)
+	result, err := s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET park_reason=CASE WHEN next_check_ms>? AND park_reason<>'' THEN park_reason ELSE ? END,next_check_ms=CASE WHEN next_check_ms>? AND park_reason<>'' THEN next_check_ms ELSE ? END,park_since_ms=CASE WHEN park_reason='' OR park_since_ms=0 THEN ? ELSE park_since_ms END,park_priority=CASE WHEN park_reason='' OR park_since_ms=0 THEN -1 ELSE park_priority END WHERE request_id=? AND attempt=? AND status='accepted' AND node_id IS NULL`), next.UnixMilli(), reason, next.UnixMilli(), next.UnixMilli(), now.UnixMilli(), id, attempt)
 	if err != nil {
 		return false, err
 	}

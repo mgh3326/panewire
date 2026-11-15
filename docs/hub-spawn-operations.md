@@ -222,8 +222,8 @@ quota refusal.
 ## Parked
 
 hk 4661; design hk design/2026-11-13/hub-owned-spawn-queue §2 (`parked`),
-§3 rules 3 and 4, §9a. The owner notice for a long-parked request (hk 4662)
-and start conditions (hk 4736) are later parts.
+§3 rules 3 and 4, §9a. Start conditions are [above](#start-conditions); the
+owner notice for a long-parked request is [Parked notice](#parked-notice).
 
 **Parked, not ended.** When placement finds no candidate for a request that
 has a limit (`expires_ms>0`), the request is parked instead of ending
@@ -302,9 +302,45 @@ that request, and for no other request. Only a client's deliberate replay of
 an ended `retryable` request starts them over. Exclusions have no `until` in
 this part.
 
-The three numbers are `placement.json` keys (0 or absent: the defaults,
-unmeasured, design §9a): `{"spawn_backoff_seconds": 30,
-"spawn_backoff_max_seconds": 600, "spawn_wake_batch": 8}`.
+The numbers are `placement.json` keys (0 or absent: the defaults, unmeasured,
+design §9a and §9b Q2): `{"spawn_backoff_seconds": 30,
+"spawn_backoff_max_seconds": 600, "spawn_wake_batch": 8,
+"spawn_park_notice_seconds": 1800}`.
+
+### Parked notice
+
+hk 4662; design §6 (notices to the owner lane) and §9b Q2. A request parked in
+one unbroken stretch for longer than `spawn_park_notice_seconds` (1800 = 30 min
+by default) tells its owner lane once, as one `info` line:
+
+`[panewire] SPAWN_PARKED <job> request=<id> reason=quota parked_since=… next_check_at=… unpark=…`
+
+`unpark` is the wake of every reason in the stored set (the table above). Only
+an urgent request is told: the `--task` it names must have hk priority 1 or 2,
+the same set that makes a spawn urgent (`fleet.UrgentTaskPriority`). A P3 wait
+is what the queue is for. hk's batched states route carries no priority, so the
+priority is read once per stretch (one `GET /v1/tasks/{id}`) and kept in
+`park_priority` (`-1` = not read yet; a failed read is retried by the next
+pass). A request with no task is never urgent.
+
+The notice is at most one per reason set for the request's life: nothing
+repeats while the request stays parked for the reason the notice named, a park
+that names other blockers may send one more, and a later attempt that parks
+again for an already-noticed reason stays quiet. The marker is durable —
+`park_notice_ms` and `park_notice_reason` (`0019_spawn_park_notice.sql`) — so a
+restart neither repeats nor loses a notice: a row parked before the restart is
+told by the hub that starts after it. The event id also names the stretch start
+and the reason set (`spawn-park:<request>:<park_since_ms>:<reason>`), so a
+resend of the same notice is the same durable handoffkeep event.
+
+The pass (`checkParkedSpawnNotices`, `hub_spawn_park_notice.go`) runs on the
+coordinator's tick, rate-limited to 60 s, and judges at most 64 rows per pass,
+earliest stretch first. It writes nothing and reads no hk until a row is past
+the limit. The notice is recorded only after handoffkeep took the durable row;
+a failed write is retried by the next pass. `park_since_ms` starts at the first
+park of a stretch (a bind or a new attempt ends it) and survives every re-park
+of the same stretch, so a request woken and re-parked every back-off still
+counts its whole wait.
 
 ### Rolling back past parking
 
@@ -317,6 +353,12 @@ places it at once, without back-off or wake batch, and its GET shows
 a stale `park_reason` that a newer hub ignores (a bound row never reads
 parked) and clears at its next bind. `TestOlderHubPlacesParkedRowsAsAccepted_t4661`
 runs those predicates against a parked row.
+
+`0019_spawn_park_notice.sql` adds only `park_since_ms`, `park_priority` (-1),
+`park_notice_ms` and `park_notice_reason` (0 and `''`); an older hub neither
+reads nor writes them either, so a rollback loses no queue state. A newer hub
+reads a stored notice marker as already told for that reason set, so it repeats
+nothing, and it re-reads a priority only while `park_priority` is still -1.
 
 **Roll back only with an empty spawn queue, and keep it empty.** The
 pre-parking hub's time limit (part 3, #587) ignores `claimed_host`,

@@ -616,13 +616,17 @@ const (
 // --urgency is omitted (policy/quota-stop: urgent_priorities [1, 2]).
 var urgentPriorities = []int{1, 2}
 
+// UrgentTaskPriority reports whether an hk task priority is one of the urgent
+// ones. The hub's long-parked owner notice uses the same set (hk 4662).
+func UrgentTaskPriority(priority int) bool { return slices.Contains(urgentPriorities, priority) }
+
 // resolveUrgency applies the explicit flag first, then the bound task's hk
 // priority, then the normal default. The returned source names which won.
 func resolveUrgency(flag string, task client.Task) (string, string) {
 	if flag != "" {
 		return flag, "flag"
 	}
-	if slices.Contains(urgentPriorities, task.Priority) {
+	if UrgentTaskPriority(task.Priority) {
 		return urgencyUrgent, "task-priority"
 	}
 	return urgencyNormal, "default"

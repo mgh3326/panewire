@@ -260,6 +260,18 @@ func hkGetTask(ctx context.Context, task string) (client.Task, error) {
 	})
 }
 
+// ReadTaskPriority reads one task's hk priority. The spawn queue's parked
+// notice reads it once per parking stretch, because hk's batched states route
+// does not carry a priority (hk 4662). A task hk does not have is
+// errHKNotFound.
+func ReadTaskPriority(ctx context.Context, task string) (int, error) {
+	t, err := hkGetTask(ctx, task)
+	if err != nil {
+		return 0, err
+	}
+	return t.Priority, nil
+}
+
 // hkTaskProject is the task's project, "" when it has none.
 func hkTaskProject(t client.Task) string {
 	if t.Project == nil {

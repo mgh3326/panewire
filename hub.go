@@ -502,6 +502,10 @@ type HubServer struct {
 	waitingMu         sync.Mutex
 	waitingCheckedAt  time.Time
 	waitingReadFailed bool
+	// parkNoticeMu guards the parked-request owner notice's poll time
+	// (hub_spawn_park_notice.go).
+	parkNoticeMu        sync.Mutex
+	parkNoticeCheckedAt time.Time
 	// fleetEvents writes a fleet event. Tests substitute a recorder; production
 	// leaves it nil and events go to the state directory (emitFleet).
 	fleetEvents func(time.Time, fleetEvent) bool
