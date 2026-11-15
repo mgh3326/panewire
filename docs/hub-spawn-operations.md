@@ -263,11 +263,14 @@ the status API shows the first. A mock lane's rc 80 is not parked. A parked,
 unbound row holds no pool slot (`liveSpawns`), a claimed-harness retry is not
 backed off (hk holds its claim on that host), and a parked pass emits no
 terminal refusal event. The first cleanup-confirmed refusal after the hk job
-claim is kept in `claim_result` (set once; a later pre-claim refusal or a
-not-started attestation never writes it). A request holds a claim when it
-has `claim_result`, or when `claimed_host` is set and its saved result is a
-post-claim node result (the rule before this change, so rows an older hub
-wrote stay held with no backfill); when in doubt the claim is kept. A request
+claim is kept in `claim_result`: written with the result that proves it
+(a definitive post-claim node result; never a timeout, which is uncertain or
+the not-started evidence of [Time limit](#time-limit), and never a
+pre-claim refusal or a not-started attestation) and never replaced. A row
+this hub inserted (`claim_tracked=1`) holds a claim exactly when
+`claim_result` is set. A row an older hub wrote cannot tell a claim from a
+replay pin, so any `claimed_host` pin on it is held, as that hub held it.
+A request
 holding one may park, but
 it is never renewed or given up as unstarted: an unsent timeout, wherever the
 deadline passed, ends it with that saved refusal. A replay pin alone
@@ -301,7 +304,7 @@ unmeasured, design §9a): `{"spawn_backoff_seconds": 30,
 ### Rolling back past parking
 
 `0018_spawn_parked.sql` only adds `park_reason`, `next_check_ms`,
-`failed_attempts` and `claim_result` (default `''`, 0, 0, `''`); an older hub neither reads nor writes
+`failed_attempts`, `claim_result` and `claim_tracked` (default `''`, 0, 0, `''`, 0); an older hub neither reads nor writes
 them. A parked row is `status='accepted'` with `node_id IS NULL`, so an older
 hub's coordinator scan lists it and its bind CAS matches it: the older hub
 places it at once, without back-off or wake batch, and its GET shows

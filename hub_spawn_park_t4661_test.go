@@ -790,7 +790,7 @@ func TestUpgradedClaimedRowStaysHeld_t4661(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := h.inbox.store.db.Exec(`UPDATE spawn_operations SET claimed_host='desktop',claim_result='',result='{"rc":70,"stage":"launch","reason":"launch_proof_failed","host":"desktop","retryable":true,"node_result":true}' WHERE request_id=?`, task.Request.RequestID); err != nil {
+	if _, err := h.inbox.store.db.Exec(`UPDATE spawn_operations SET claimed_host='desktop',claim_result='',claim_tracked=0,result='{"rc":70,"stage":"placement","reason":"spawn_failed:auth_unavailable","host":"desktop","retryable":true,"node_result":true}' WHERE request_id=?`, task.Request.RequestID); err != nil {
 		t.Fatal(err)
 	}
 	task = parkedTask(t, h, task.Request.RequestID)
@@ -799,7 +799,7 @@ func TestUpgradedClaimedRowStaysHeld_t4661(t *testing.T) {
 	}
 	*clock = task.Expires
 	h.executeSpawnTask(t.Context(), task)
-	if got := parkedTask(t, h, task.Request.RequestID); got.Status == "given_up" || got.Status == "accepted" || got.Outcome.Reason != "launch_proof_failed" {
+	if got := parkedTask(t, h, task.Request.RequestID); got.Status == "given_up" || got.Status == "accepted" || got.Outcome.Reason != "spawn_failed:auth_unavailable" {
 		t.Fatalf("upgraded claimed row at its limit: status=%s outcome=%+v", got.Status, got.Outcome)
 	}
 }
@@ -833,5 +833,38 @@ func TestFixedProfileClaimReplayNeverGivenUp_t4661(t *testing.T) {
 	got := parkedTask(t, h, task.Request.RequestID)
 	if got.Status == "given_up" || got.Status == "accepted" || got.Outcome.Reason != "launch_proof_failed" {
 		t.Fatalf("fixed-profile claimed replay at its deadline: status=%s attempt=%d outcome=%+v", got.Status, got.Attempt, got.Outcome)
+	}
+}
+
+// A node timeout is never claim proof (uncertain, or the not-started
+// evidence of hk 4660); a definitive post-claim refusal is, and as an
+// attempt's own result it keeps that attempt from counting as unstarted.
+func TestTimeoutIsNoClaimProof_t4661(t *testing.T) {
+	for _, retryable := range []bool{false, true} {
+		if spawnClaimProof(hubSpawnOutcome{RC: 124, Stage: "claim", Reason: "timeout", NodeResult: true, Retryable: retryable}, "x") != "" {
+			t.Fatalf("a timeout (retryable=%v) became claim proof", retryable)
+		}
+	}
+	refusal := hubSpawnOutcome{RC: 70, Stage: "launch", Reason: "launch_proof_failed", NodeResult: true, Retryable: true}
+	task := hubSpawnTask{Expires: time.Now().Add(time.Hour), Deadline: time.Now().Add(-time.Second)}
+	if spawnClaimProof(refusal, "x") == "" || spawnAttemptEndedUnstarted(task, refusal, time.Now()) {
+		t.Fatal("a post-claim refusal is not proof, or its attempt counts as unstarted")
+	}
+}
+
+// A tracked row's claim is exactly claim_result: a later result write that
+// replaces the saved result keeps it.
+func TestTrackedClaimSurvivesResultOverwrite_t4661(t *testing.T) {
+	h := asyncSpawnHub(t)
+	task := claimParkRequest(t, h, 260, time.Now())
+	if !task.ClaimTracked && !parkedTask(t, h, task.Request.RequestID).ClaimTracked {
+		t.Fatal("a new row is not claim-tracked")
+	}
+	setClaim(t, h, task.Request.RequestID)
+	if _, err := h.inbox.store.db.Exec(`UPDATE spawn_operations SET result='{"rc":124,"stage":"landing","reason":"timeout"}' WHERE request_id=?`, task.Request.RequestID); err != nil {
+		t.Fatal(err)
+	}
+	if !spawnHoldsClaim(parkedTask(t, h, task.Request.RequestID)) {
+		t.Fatal("a later result write erased the claim")
 	}
 }

@@ -110,6 +110,9 @@ type hubSpawnTask struct {
 	// ClaimedHost (hk 4661): written once, never by a later pre-claim
 	// refusal or not-started attestation. A request with one ends with it.
 	ClaimResult *hubSpawnOutcome
+	// ClaimTracked marks a row this hub inserted: its claim is exactly
+	// ClaimResult. An older hub's row (false) with a host pin is held.
+	ClaimTracked bool
 }
 
 type hubSpawnExclusion struct {
@@ -141,7 +144,7 @@ func (s *laneInboxStore) ensureSpawnTasks() error {
 	// Stores from before hk 4460 lack the placement columns (postgres: the
 	// 0008 migration). A restart restores counts from these two columns, and
 	// refresh_waits arrived with hk 4600 (postgres: 0011).
-	for _, column := range []string{`placed_ms BIGINT NOT NULL DEFAULT 0`, `claimed_ms BIGINT NOT NULL DEFAULT 0`, `exclusions TEXT NOT NULL DEFAULT '[]'`, `claimed_host TEXT NOT NULL DEFAULT ''`, `refresh_waits TEXT NOT NULL DEFAULT '[]'`, `expires_ms BIGINT NOT NULL DEFAULT 0`, `conditions_met_ms BIGINT NOT NULL DEFAULT 0`, `condition_result TEXT NOT NULL DEFAULT ''`, `park_reason TEXT NOT NULL DEFAULT ''`, `next_check_ms BIGINT NOT NULL DEFAULT 0`, `failed_attempts INTEGER NOT NULL DEFAULT 0`, `claim_result TEXT NOT NULL DEFAULT ''`} {
+	for _, column := range []string{`placed_ms BIGINT NOT NULL DEFAULT 0`, `claimed_ms BIGINT NOT NULL DEFAULT 0`, `exclusions TEXT NOT NULL DEFAULT '[]'`, `claimed_host TEXT NOT NULL DEFAULT ''`, `refresh_waits TEXT NOT NULL DEFAULT '[]'`, `expires_ms BIGINT NOT NULL DEFAULT 0`, `conditions_met_ms BIGINT NOT NULL DEFAULT 0`, `condition_result TEXT NOT NULL DEFAULT ''`, `park_reason TEXT NOT NULL DEFAULT ''`, `next_check_ms BIGINT NOT NULL DEFAULT 0`, `failed_attempts INTEGER NOT NULL DEFAULT 0`, `claim_result TEXT NOT NULL DEFAULT ''`, `claim_tracked INTEGER NOT NULL DEFAULT 0`} {
 		if _, err := s.db.ExecContext(ctx, `ALTER TABLE spawn_operations ADD COLUMN `+column); err != nil {
 			if err := ignoreDuplicateColumn(err); err != nil {
 				return err
@@ -248,7 +251,7 @@ func (s *laneInboxStore) claimSpawnReplacing(parent context.Context, request fle
 	}
 	expires := now.Add(fleet.SpawnExpiresFor(spawn.Role, request.ExpiresSeconds))
 	deadline := spawnAttemptDeadline(now, request.DeadlineSeconds, expires)
-	_, err = tx.ExecContext(ctx, s.q(`INSERT INTO spawn_operations(request_id,job,owner,fingerprint,payload,status,created_ms,deadline_ms,expires_ms) VALUES(?,?,?,?,?,?,?,?,?)`), request.RequestID, job, owner, fingerprint, string(raw), status, now.UnixMilli(), deadline.UnixMilli(), expires.UnixMilli())
+	_, err = tx.ExecContext(ctx, s.q(`INSERT INTO spawn_operations(request_id,job,owner,fingerprint,payload,status,created_ms,deadline_ms,expires_ms,claim_tracked) VALUES(?,?,?,?,?,?,?,?,?,1)`), request.RequestID, job, owner, fingerprint, string(raw), status, now.UnixMilli(), deadline.UnixMilli(), expires.UnixMilli())
 	if err != nil {
 		return hubSpawnTask{}, false, err
 	}
@@ -479,7 +482,7 @@ func scanSpawnTask(row interface{ Scan(...any) error }) (hubSpawnTask, error) {
 	var task hubSpawnTask
 	var payload, result, node, exclusions, refreshWaits, conditionResult, claimResult string
 	var created, deadline, lastRun, placed, expires, conditionsMet, nextCheck int64
-	err := row.Scan(&task.Job, &task.Owner, &payload, &task.Status, &created, &deadline, &node, &result, &task.Attempt, &lastRun, &placed, &exclusions, &task.ClaimedHost, &refreshWaits, &expires, &conditionsMet, &conditionResult, &task.ParkReason, &nextCheck, &task.FailedAttempts, &claimResult)
+	err := row.Scan(&task.Job, &task.Owner, &payload, &task.Status, &created, &deadline, &node, &result, &task.Attempt, &lastRun, &placed, &exclusions, &task.ClaimedHost, &refreshWaits, &expires, &conditionsMet, &conditionResult, &task.ParkReason, &nextCheck, &task.FailedAttempts, &claimResult, &task.ClaimTracked)
 	if err != nil {
 		return task, err
 	}
@@ -600,7 +603,7 @@ func (s *laneInboxStore) unbindSpawn(parent context.Context, id string, attempt 
 	return s.spawnTask(parent, id)
 }
 
-const spawnTaskColumns = `job,owner,payload,status,created_ms,deadline_ms,node_payload,result,attempt,last_run_ms,placed_ms,exclusions,claimed_host,refresh_waits,expires_ms,conditions_met_ms,condition_result,park_reason,next_check_ms,failed_attempts,claim_result`
+const spawnTaskColumns = `job,owner,payload,status,created_ms,deadline_ms,node_payload,result,attempt,last_run_ms,placed_ms,exclusions,claimed_host,refresh_waits,expires_ms,conditions_met_ms,condition_result,park_reason,next_check_ms,failed_attempts,claim_result,claim_tracked`
 
 func (s *laneInboxStore) spawnTask(parent context.Context, id string) (hubSpawnTask, error) {
 	ctx, done := s.op(parent)
@@ -968,7 +971,10 @@ func (s *laneInboxStore) clearSpawnRefreshWaits(parent context.Context, id strin
 // spawnClaimProof is the outcome to keep as claim_result: a node result from
 // a stage after the job claim that is not a not-started attestation, or "".
 func spawnClaimProof(outcome hubSpawnOutcome, raw string) string {
-	if outcome.NodeResult && !spawnStageBeforeJobClaim(outcome.Stage) && !spawnOutcomeNotStarted(outcome) {
+	// A timeout is never proof: uncertain when not cleaned up, and a cleaned-up
+	// one is the not-started evidence the time limit renews on (hk 4660).
+	code, _, _ := strings.Cut(outcome.Reason, ": ")
+	if outcome.NodeResult && !spawnStageBeforeJobClaim(outcome.Stage) && !spawnOutcomeNotStarted(outcome) && code != "timeout" {
 		return raw
 	}
 	return ""

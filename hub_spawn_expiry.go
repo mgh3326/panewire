@@ -34,7 +34,8 @@ func spawnExpiryField(capabilities map[string]bool, expires time.Time) int64 {
 func spawnAttemptEndedUnstarted(task hubSpawnTask, outcome hubSpawnOutcome, now time.Time) bool {
 	// A request whose hk job claim pins a host started on that node: its
 	// end is the node's saved refusal, never a renewal or given_up (hk 4661).
-	if task.Expires.IsZero() || spawnHoldsClaim(task) {
+	// The incoming result may itself prove the claim (it is stored with it).
+	if task.Expires.IsZero() || spawnHoldsClaim(task) || spawnClaimProof(outcome, "x") != "" {
 		return false
 	}
 	return outcome.Reason == "timeout" || spawnOutcomeNotStarted(outcome) && !now.Before(task.Deadline)
@@ -131,18 +132,21 @@ func (s *laneInboxStore) releaseEndedSpawn(ctx context.Context, tx *sql.Tx, task
 }
 
 // spawnHoldsClaim reports a request whose hk job may be claimed on its
-// claimed host: claim_result (the first post-claim refusal, kept through
-// later results), or a pinned row whose saved result is a post-claim node
-// result (the rule before hk 4661, so rows an older hub wrote, upgraded or
-// rolled forward, stay held with no backfill). claim_result is extra
-// evidence, never the only one; when in doubt the claim is kept. A replay
-// pin alone (a checkout refusal, an unsent timeout, a not-started
-// attestation) is no claim.
+// claimed host. A row this hub inserted (claim_tracked) holds one exactly
+// when claim_result is set: the first definitive post-claim node result,
+// recorded with the write that stores it and never replaced. A row an older
+// hub wrote cannot tell a claim from a replay pin, so any pin is held, as
+// that hub held it: never renewed or given up as unstarted.
 func spawnHoldsClaim(task hubSpawnTask) bool {
 	if task.ClaimedHost == "" {
 		return false
 	}
-	return task.ClaimResult != nil || spawnClaimProof(task.Outcome, "x") != ""
+	if task.ClaimTracked {
+		return task.ClaimResult != nil
+	}
+	// A row an older hub wrote cannot tell a claim from a replay pin: it is
+	// held, as that hub held it (never renewed or given up as unstarted).
+	return true
 }
 
 // spawnSavedClaimRefusal is the refusal a held claim ends with.
