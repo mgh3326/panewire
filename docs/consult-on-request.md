@@ -41,9 +41,13 @@ The CLI posts to `POST /v1/consults`:
 The key is `(task, repo#pr, head)`. A queued, running or answered consult is
 returned unchanged (the POST answers `200` instead of `201`). A `refused` or
 `failed` row is a retry: the same POST re-plans and replaces the attempt under
-the same id, so a transient quota, hk or spawn failure is not permanent. A new
-head is a new consult, which matches the review round count. The question
-document may change between evaluations; it is not part of the key.
+the same id, so a transient quota, hk or spawn failure is not permanent. The
+retry stores the body it was sent (question document, requester, author
+evidence), which the respawn and recovery paths then rebuild from. A new head
+is a new consult, which matches the review round count. The question document
+may change between evaluations; it is not part of the key. The replacement is
+a compare-and-set on the terminal state, so concurrent POSTs cannot claim two
+seats.
 
 ## Seat
 

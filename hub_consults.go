@@ -34,6 +34,9 @@ const (
 	consultReasonLimit = 512
 	// consultPollInterval is how often the coordinator reads active rows.
 	consultPollInterval = 5 * time.Second
+	// consultRecoverGrace lets a request finish the save-then-claim window
+	// before the coordinator recovers a queued row with no spawn operation.
+	consultRecoverGrace = 30 * time.Second
 )
 
 var (
@@ -139,6 +142,7 @@ func (h *HubServer) handleConsultRequest(w http.ResponseWriter, r *http.Request)
 		// and replace the attempt under the same key. Every transient cause
 		// (quota, hk outage, a lost job) has a way back.
 		c = existing
+		c.Requester, c.QuestionDoc, c.AuthorJob, c.AuthorFamily = request.Requester, request.QuestionDoc, request.AuthorJob, request.AuthorFamily
 		c.State, c.SeatProfile, c.SeatFamily, c.SeatGrade = consultQueued, "", "", ""
 		c.Job, c.RequestID, c.Reason, c.AnswerDoc = "", "", "", ""
 		c.Answered, c.Notified, c.Respawns = time.Time{}, false, 0
@@ -150,6 +154,7 @@ func (h *HubServer) handleConsultRequest(w http.ResponseWriter, r *http.Request)
 			AuthorFamily: request.AuthorFamily, State: consultQueued, Created: now, Deadline: now.Add(h.consultTimeout),
 		}
 	}
+	c.Updated = now
 	plan, reason := h.planConsultRequest(ctx, request)
 	if reason != "" {
 		c.State = consultRefused
@@ -306,11 +311,29 @@ func (h *HubServer) consultRepository(ctx context.Context, request hubConsultReq
 	return &repo, ""
 }
 
+// saveConsult writes one row and stamps its last-update time.
+func (h *HubServer) saveConsult(ctx context.Context, c hubConsult) error {
+	c.Updated = h.now().UTC()
+	return h.inbox.store.saveConsult(ctx, c)
+}
+
 // storeConsult writes a new row, or replaces the row the same idempotency
 // key already holds. A replace keeps the row id and created time.
 func (h *HubServer) storeConsult(ctx context.Context, c hubConsult, replace bool) (*hubConsult, error) {
 	if replace {
-		return nil, h.inbox.store.saveConsult(ctx, c)
+		ok, err := h.inbox.store.replaceConsult(ctx, c)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			// Another request replaced the terminal row first.
+			current, err := h.inbox.store.consultByID(ctx, c.ID)
+			if err != nil {
+				return nil, err
+			}
+			return &current, nil
+		}
+		return nil, nil
 	}
 	stored, fresh, err := h.inbox.store.insertConsult(ctx, c)
 	if err != nil || fresh {
@@ -399,7 +422,15 @@ func (h *HubServer) reconcileConsults(ctx context.Context) {
 			switch c.State {
 			case consultQueued:
 				// The row was inserted (or a respawn intent saved) and the
-				// hub stopped before the claim: start the attempt now.
+				// hub stopped before the claim: start the attempt once the
+				// request's own save-then-claim window has passed.
+				last := c.Updated
+				if last.IsZero() {
+					last = c.Created
+				}
+				if h.now().Sub(last) < consultRecoverGrace {
+					continue
+				}
 				h.recoverConsult(ctx, c)
 			case consultRunning:
 				if c.Respawns == 0 {
@@ -415,7 +446,7 @@ func (h *HubServer) reconcileConsults(ctx context.Context) {
 		}
 		if c.State == consultQueued && (task.Node != nil || !task.Placed.IsZero() || task.Status == "succeeded") {
 			c.State = consultRunning
-			_ = h.inbox.store.saveConsult(ctx, c)
+			_ = h.saveConsult(ctx, c)
 		}
 		if app == nil {
 			app, _ = h.newSpawnApp(io.Discard, io.Discard)
@@ -470,7 +501,7 @@ func (h *HubServer) settleConsult(ctx context.Context, app *fleet.App, c hubCons
 			return true
 		}
 		c.AnswerDoc, c.Answered, c.Reason, c.State = doc, h.now().UTC(), "", consultAnswered
-		if err := h.inbox.store.saveConsult(ctx, c); err != nil {
+		if err := h.saveConsult(ctx, c); err != nil {
 			return true
 		}
 		h.notifyConsultAnswered(ctx, c)
@@ -523,7 +554,7 @@ func (h *HubServer) recoverConsult(ctx context.Context, c hubConsult) {
 	c.State, c.Job, c.RequestID = consultQueued, plan.Job, plan.Request.RequestID
 	c.SeatProfile, c.SeatFamily, c.SeatGrade = plan.Seat.Profile, plan.Seat.Family, plan.Seat.Grade
 	c.Reason = ""
-	if err := h.inbox.store.saveConsult(ctx, c); err != nil {
+	if err := h.saveConsult(ctx, c); err != nil {
 		return
 	}
 	if err := h.claimConsultSpawn(ctx, plan, consultOwner(request.Requester)); err != nil {
@@ -559,7 +590,7 @@ func (h *HubServer) respawnConsult(ctx context.Context, c hubConsult, reason str
 	c.State, c.Job, c.RequestID = consultQueued, plan.Job, plan.Request.RequestID
 	c.SeatProfile, c.SeatFamily, c.SeatGrade = plan.Seat.Profile, plan.Seat.Family, plan.Seat.Grade
 	c.Respawns, c.Reason = c.Respawns+1, ""
-	if err := h.inbox.store.saveConsult(ctx, c); err != nil {
+	if err := h.saveConsult(ctx, c); err != nil {
 		return
 	}
 	if err := h.claimConsultSpawn(ctx, plan, consultOwner(request.Requester)); err != nil {
@@ -576,7 +607,7 @@ func (h *HubServer) respawnConsult(ctx context.Context, c hubConsult, reason str
 func (h *HubServer) failConsult(ctx context.Context, c hubConsult, reason string) {
 	c.State = consultFailed
 	c.Reason = utf8PrefixWithin(reason, consultReasonLimit)
-	_ = h.inbox.store.saveConsult(ctx, c)
+	_ = h.saveConsult(ctx, c)
 	// A failed or timed-out consult must not leave its agent pane burning
 	// quota. Close the pane and mark the job lost when the node still lists
 	// it; a pane that changed or a node that cannot answer is left alone.
@@ -623,7 +654,7 @@ func (h *HubServer) notifyConsultAnswered(ctx context.Context, c hubConsult) {
 	if !validLaneReference(c.Requester) {
 		// A tool requester polls; no event is owed, so the row is done.
 		c.Notified = true
-		_ = h.inbox.store.saveConsult(ctx, c)
+		_ = h.saveConsult(ctx, c)
 		return
 	}
 	text := fmt.Sprintf("consult %s answered for task %s: apply %s", c.ID, c.Task, c.AnswerDoc)
@@ -637,5 +668,5 @@ func (h *HubServer) notifyConsultAnswered(ctx context.Context, c hubConsult) {
 		return
 	}
 	c.Notified = true
-	_ = h.inbox.store.saveConsult(ctx, c)
+	_ = h.saveConsult(ctx, c)
 }

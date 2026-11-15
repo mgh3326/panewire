@@ -22,7 +22,7 @@ const (
 type hubConsult struct {
 	ID, IdemKey, Task, PR, Head, Requester, QuestionDoc, AuthorJob, AuthorFamily string
 	State, SeatProfile, SeatFamily, SeatGrade, Job, RequestID, Reason, AnswerDoc string
-	Created, Answered, Deadline                                                  time.Time
+	Created, Updated, Answered, Deadline                                         time.Time
 	Respawns                                                                     int
 	Notified                                                                     bool
 }
@@ -57,6 +57,7 @@ func (s *laneInboxStore) ensureConsults() error {
 			reason TEXT NOT NULL DEFAULT '',
 			answer_doc TEXT NOT NULL DEFAULT '',
 			created_ms BIGINT NOT NULL,
+			updated_ms BIGINT NOT NULL DEFAULT 0,
 			answered_ms BIGINT NOT NULL DEFAULT 0,
 			deadline_ms BIGINT NOT NULL,
 			respawns INTEGER NOT NULL DEFAULT 0,
@@ -64,6 +65,11 @@ func (s *laneInboxStore) ensureConsults() error {
 		`CREATE INDEX IF NOT EXISTS consult_requests_active ON consult_requests(state) WHERE state IN ('queued','running')`,
 	} {
 		if _, err := s.db.ExecContext(ctx, statement); err != nil {
+			return err
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `ALTER TABLE consult_requests ADD COLUMN updated_ms BIGINT NOT NULL DEFAULT 0`); err != nil {
+		if err := ignoreDuplicateColumn(err); err != nil {
 			return err
 		}
 	}
@@ -76,11 +82,11 @@ func (s *laneInboxStore) insertConsult(parent context.Context, c hubConsult) (hu
 	ctx, done := s.op(parent)
 	defer done()
 	result, err := s.db.ExecContext(ctx, s.q(`INSERT INTO consult_requests
-		(id,idem_key,task,pr,head,requester,question_doc,author_job,author_family,state,seat_profile,seat_family,seat_grade,job,request_id,reason,answer_doc,created_ms,answered_ms,deadline_ms,respawns,notified)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(idem_key) DO NOTHING`),
+		(id,idem_key,task,pr,head,requester,question_doc,author_job,author_family,state,seat_profile,seat_family,seat_grade,job,request_id,reason,answer_doc,created_ms,updated_ms,answered_ms,deadline_ms,respawns,notified)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(idem_key) DO NOTHING`),
 		c.ID, c.IdemKey, c.Task, c.PR, c.Head, c.Requester, c.QuestionDoc, c.AuthorJob, c.AuthorFamily, c.State,
 		c.SeatProfile, c.SeatFamily, c.SeatGrade, c.Job, c.RequestID, c.Reason, c.AnswerDoc,
-		c.Created.UnixMilli(), c.Answered.UnixMilli(), c.Deadline.UnixMilli(), c.Respawns, consultBoolInt(c.Notified))
+		c.Created.UnixMilli(), consultUpdatedMillis(c), c.Answered.UnixMilli(), c.Deadline.UnixMilli(), c.Respawns, consultBoolInt(c.Notified))
 	if err != nil {
 		return hubConsult{}, false, err
 	}
@@ -100,19 +106,22 @@ func (s *laneInboxStore) consultByID(parent context.Context, id string) (hubCons
 	return s.scanConsult(parent, `SELECT `+consultColumns+` FROM consult_requests WHERE id=?`, id)
 }
 
-const consultColumns = `id,idem_key,task,pr,head,requester,question_doc,author_job,author_family,state,seat_profile,seat_family,seat_grade,job,request_id,reason,answer_doc,created_ms,answered_ms,deadline_ms,respawns,notified`
+const consultColumns = `id,idem_key,task,pr,head,requester,question_doc,author_job,author_family,state,seat_profile,seat_family,seat_grade,job,request_id,reason,answer_doc,created_ms,updated_ms,answered_ms,deadline_ms,respawns,notified`
 
 func (s *laneInboxStore) scanConsult(parent context.Context, query string, args ...any) (hubConsult, error) {
 	ctx, done := s.op(parent)
 	defer done()
 	var c hubConsult
-	var created, answered, deadline int64
+	var created, updated, answered, deadline int64
 	var notified int
-	err := s.db.QueryRowContext(ctx, s.q(query), args...).Scan(&c.ID, &c.IdemKey, &c.Task, &c.PR, &c.Head, &c.Requester, &c.QuestionDoc, &c.AuthorJob, &c.AuthorFamily, &c.State, &c.SeatProfile, &c.SeatFamily, &c.SeatGrade, &c.Job, &c.RequestID, &c.Reason, &c.AnswerDoc, &created, &answered, &deadline, &c.Respawns, &notified)
+	err := s.db.QueryRowContext(ctx, s.q(query), args...).Scan(&c.ID, &c.IdemKey, &c.Task, &c.PR, &c.Head, &c.Requester, &c.QuestionDoc, &c.AuthorJob, &c.AuthorFamily, &c.State, &c.SeatProfile, &c.SeatFamily, &c.SeatGrade, &c.Job, &c.RequestID, &c.Reason, &c.AnswerDoc, &created, &updated, &answered, &deadline, &c.Respawns, &notified)
 	if err != nil {
 		return hubConsult{}, err
 	}
 	c.Created = time.UnixMilli(created).UTC()
+	if updated != 0 {
+		c.Updated = time.UnixMilli(updated).UTC()
+	}
 	if answered != 0 {
 		c.Answered = time.UnixMilli(answered).UTC()
 	}
@@ -133,12 +142,15 @@ func (s *laneInboxStore) activeConsults(parent context.Context) ([]hubConsult, e
 	var out []hubConsult
 	for rows.Next() {
 		var c hubConsult
-		var created, answered, deadline int64
+		var created, updated, answered, deadline int64
 		var notified int
-		if err := rows.Scan(&c.ID, &c.IdemKey, &c.Task, &c.PR, &c.Head, &c.Requester, &c.QuestionDoc, &c.AuthorJob, &c.AuthorFamily, &c.State, &c.SeatProfile, &c.SeatFamily, &c.SeatGrade, &c.Job, &c.RequestID, &c.Reason, &c.AnswerDoc, &created, &answered, &deadline, &c.Respawns, &notified); err != nil {
+		if err := rows.Scan(&c.ID, &c.IdemKey, &c.Task, &c.PR, &c.Head, &c.Requester, &c.QuestionDoc, &c.AuthorJob, &c.AuthorFamily, &c.State, &c.SeatProfile, &c.SeatFamily, &c.SeatGrade, &c.Job, &c.RequestID, &c.Reason, &c.AnswerDoc, &created, &updated, &answered, &deadline, &c.Respawns, &notified); err != nil {
 			return nil, err
 		}
 		c.Created = time.UnixMilli(created).UTC()
+		if updated != 0 {
+			c.Updated = time.UnixMilli(updated).UTC()
+		}
 		if answered != 0 {
 			c.Answered = time.UnixMilli(answered).UTC()
 		}
@@ -149,14 +161,38 @@ func (s *laneInboxStore) activeConsults(parent context.Context) ([]hubConsult, e
 	return out, rows.Err()
 }
 
-// saveConsult writes the mutable fields of one row. One coordinator goroutine
-// owns a consult at a time, so the row id is the whole concurrency guard.
+// saveConsult writes the mutable fields of one row. The coordinator owns one
+// consult at a time; a retry replaces a terminal row under a compare-and-set.
 func (s *laneInboxStore) saveConsult(parent context.Context, c hubConsult) error {
+	_, err := s.updateConsult(parent, c, "")
+	return err
+}
+
+// replaceConsult is the retry transition: it only replaces a refused or
+// failed row, so two concurrent POSTs for one key cannot both claim a seat.
+func (s *laneInboxStore) replaceConsult(parent context.Context, c hubConsult) (bool, error) {
+	n, err := s.updateConsult(parent, c, " AND state IN ('refused','failed')")
+	return n == 1, err
+}
+
+func (s *laneInboxStore) updateConsult(parent context.Context, c hubConsult, guard string) (int64, error) {
 	ctx, done := s.op(parent)
 	defer done()
-	_, err := s.db.ExecContext(ctx, s.q(`UPDATE consult_requests SET state=?,seat_profile=?,seat_family=?,seat_grade=?,job=?,request_id=?,reason=?,answer_doc=?,answered_ms=?,deadline_ms=?,respawns=?,notified=? WHERE id=?`),
-		c.State, c.SeatProfile, c.SeatFamily, c.SeatGrade, c.Job, c.RequestID, c.Reason, c.AnswerDoc, c.Answered.UnixMilli(), c.Deadline.UnixMilli(), c.Respawns, consultBoolInt(c.Notified), c.ID)
-	return err
+	result, err := s.db.ExecContext(ctx, s.q(`UPDATE consult_requests SET requester=?,question_doc=?,author_job=?,author_family=?,state=?,seat_profile=?,seat_family=?,seat_grade=?,job=?,request_id=?,reason=?,answer_doc=?,answered_ms=?,deadline_ms=?,updated_ms=?,respawns=?,notified=? WHERE id=?`+guard),
+		c.Requester, c.QuestionDoc, c.AuthorJob, c.AuthorFamily, c.State, c.SeatProfile, c.SeatFamily, c.SeatGrade, c.Job, c.RequestID, c.Reason, c.AnswerDoc, c.Answered.UnixMilli(), c.Deadline.UnixMilli(), consultUpdatedMillis(c), c.Respawns, consultBoolInt(c.Notified), c.ID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+// consultUpdatedMillis is the row's last write; a row written before the
+// column existed falls back to its created time.
+func consultUpdatedMillis(c hubConsult) int64 {
+	if !c.Updated.IsZero() {
+		return c.Updated.UnixMilli()
+	}
+	return c.Created.UnixMilli()
 }
 
 func consultBoolInt(value bool) int {

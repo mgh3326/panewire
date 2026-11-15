@@ -463,6 +463,10 @@ func TestConsultQueuedRowWithoutSpawnRecovers(t *testing.T) {
 	if _, err := f.hub.inbox.store.db.Exec(`DELETE FROM spawn_operations WHERE request_id=?`, row.RequestID); err != nil {
 		t.Fatal(err)
 	}
+	// Past the request's save-then-claim window.
+	if _, err := f.hub.inbox.store.db.Exec(`UPDATE consult_requests SET updated_ms=? WHERE id=?`, time.Now().Add(-time.Minute).UnixMilli(), row.ID); err != nil {
+		t.Fatal(err)
+	}
 	f.hub.reconcileConsults(t.Context())
 	row, err = f.hub.inbox.store.consultByID(t.Context(), row.ID)
 	if err != nil {
@@ -473,5 +477,62 @@ func TestConsultQueuedRowWithoutSpawnRecovers(t *testing.T) {
 	}
 	if _, err := f.hub.inbox.store.spawnTask(t.Context(), row.RequestID); err != nil {
 		t.Fatalf("recovered row has no spawn operation: %v", err)
+	}
+}
+
+// A retry stores the new request body: the question, requester and author
+// evidence the plan and the respawn path will read.
+func TestConsultRetryStoresNewRequest(t *testing.T) {
+	f := newConsultFixture(t)
+	f.err = failConsultSeat()
+	first := consultRequestBody("42", "example/project#7", strings.Repeat("a", 40))
+	if code, out := f.post(t, "", t14OperatorToken, first); code != http.StatusCreated || out["state"] != consultRefused {
+		t.Fatalf("first = %d %v", code, out)
+	}
+	f.err = nil
+	second := consultRequestBody("42", "example/project#7", strings.Repeat("a", 40))
+	second["question_doc"] = "hk:doc/design/other"
+	second["requester"] = "other-lane"
+	code, out := f.post(t, "", t14OperatorToken, second)
+	if code != http.StatusCreated {
+		t.Fatalf("retry = %d %v", code, out)
+	}
+	row, err := f.hub.inbox.store.consultByID(t.Context(), fmt.Sprint(out["id"]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row.QuestionDoc != "hk:doc/design/other" || row.Requester != "other-lane" {
+		t.Fatalf("row = requester %q doc %q, want the retry's body", row.Requester, row.QuestionDoc)
+	}
+}
+
+// A retry only replaces a terminal row; a second replacement loses the CAS.
+func TestConsultReplaceIsCompareAndSet(t *testing.T) {
+	store, err := openLaneInboxStore(filepath.Join(t.TempDir(), "inbox.sqlite3"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.close()
+	if err = store.ensureConsults(); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	row := hubConsult{ID: uuid.NewString(), IdemKey: "42|r#1|abc", Task: "42", PR: "r#1", Head: "abc", Requester: "parent", QuestionDoc: "hk:doc/q", State: consultRefused, Created: now, Deadline: now.Add(time.Hour)}
+	if _, _, err := store.insertConsult(t.Context(), row); err != nil {
+		t.Fatal(err)
+	}
+	first := row
+	first.Job, first.State = "job-1", consultQueued
+	if ok, err := store.replaceConsult(t.Context(), first); err != nil || !ok {
+		t.Fatalf("first replace = %v err=%v", ok, err)
+	}
+	second := row
+	second.Job, second.State = "job-2", consultQueued
+	if ok, err := store.replaceConsult(t.Context(), second); err != nil || ok {
+		t.Fatalf("second replace = %v err=%v, want the CAS to refuse", ok, err)
+	}
+	stored, err := store.consultByID(t.Context(), row.ID)
+	if err != nil || stored.Job != "job-1" {
+		t.Fatalf("row = %+v err=%v, want job-1", stored, err)
 	}
 }
