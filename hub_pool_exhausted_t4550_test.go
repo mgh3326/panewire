@@ -283,7 +283,7 @@ func TestPoolExhaustedNotifiesOwnerWithoutEndingJob(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			e := poolExhaustion{Pool: "devin", Account: sweepDevin, Cause: poolCauseFreeLimit, Reset: time.Now().Add(time.Hour)}
+			e := poolExhaustion{Pool: "devin", Account: sweepDevin, Cause: poolCauseFreeLimit, Reset: beyondWaitableReset()}
 			if result := f.hub.sweepPoolJob(t.Context(), e, task); result.action != poolJobNotified {
 				t.Fatalf("result=%+v", result)
 			}
@@ -315,7 +315,7 @@ func TestPoolExhaustedRoutesMergewakeReviewerNotice(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	e := poolExhaustion{Pool: "devin", Account: sweepDevin, Cause: poolCauseFreeLimit, Reset: time.Now().Add(time.Hour)}
+	e := poolExhaustion{Pool: "devin", Account: sweepDevin, Cause: poolCauseFreeLimit, Reset: beyondWaitableReset()}
 	if result := f.hub.sweepPoolJob(t.Context(), e, task); result.action != poolJobNotified {
 		t.Fatalf("result=%+v", result)
 	}
@@ -332,7 +332,7 @@ func TestPoolExhaustedRetriesAnUnpersistedOwnerNotice(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	e := poolExhaustion{Pool: "devin", Account: sweepDevin, Cause: poolCauseFreeLimit, Reset: time.Now().Add(time.Hour)}
+	e := poolExhaustion{Pool: "devin", Account: sweepDevin, Cause: poolCauseFreeLimit, Reset: beyondWaitableReset()}
 	hk := f.hub.handoffkeep
 	f.hub.handoffkeep = nil
 	if result := f.hub.sweepPoolJob(t.Context(), e, task); result.action != poolJobSkipped {
@@ -380,7 +380,7 @@ func TestPoolExhaustedPublishedQuotaNotifiesOnlyMatchingLiveJobs(t *testing.T) {
 		f.addJob(t, "consult", "devin", sweepDevin, "working"),
 	}
 	other := f.addJob(t, "reviewer", "devin", "devin:1111111111111111", "idle")
-	reset := time.Now().Add(time.Hour)
+	reset := beyondWaitableReset()
 	f.publishFreeLimit(t, sweepDevin, reset, time.Now())
 	eventually(t, 5*time.Second, "the matching notices", func() bool { return f.sweeps() == 1 })
 	events := spawnFailedInjections(f.destination)
@@ -420,7 +420,7 @@ func TestPoolExhaustedNoticeUsesOneDurableRecordPerJob(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	e := poolExhaustion{Pool: "devin", Account: sweepDevin, Cause: poolCauseFreeLimit, Reset: time.Now().Add(time.Hour)}
+	e := poolExhaustion{Pool: "devin", Account: sweepDevin, Cause: poolCauseFreeLimit, Reset: beyondWaitableReset()}
 	if result := f.hub.sweepPoolJob(t.Context(), e, task); result.action != poolJobNotified {
 		t.Fatalf("result=%+v", result)
 	}

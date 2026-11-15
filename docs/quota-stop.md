@@ -57,6 +57,13 @@ account. Free-bucket exhaustion applies only to free rungs; paid windows apply
 to paid rungs. A newer reading that clears the same bucket supersedes the
 trigger, and the hub checks the reset and freshness again before acting.
 
+A free-limit reset inside `policy/quota-stop` `max_wait` (1h) sends no owner
+notice (hk 4765): the pane's quota stop waits it out and retries on it, so a
+hand-over instruction would undo the wait. Resets past that horizon still
+notify. Either way the sweep cools the Devin free band (`devin-free`) until
+the reset, so the next selection skips the free rows while the paid rungs
+stay eligible.
+
 Two more triggers start the same sweep for a pool that publishes no quota
 reading of its own (hk 4625). A hub pass runs once at startup and then every
 ten minutes over the pools live jobs are placed on:

@@ -132,6 +132,14 @@ type App struct {
 	// its operations; nil reads GET /v1/spawns/live with the [hub] operator
 	// credential.
 	LiveSpawnProfiles func(context.Context, string) (map[string]int, error)
+	// LivePlacedByAccount counts live hub spawns' placed profiles by account
+	// key, leaving out the hub request named by its second argument. Selection
+	// folds the profiles through the seat canon to find the account's live
+	// free-band launches (the SWE-2 free rungs, seat aliases included), so a
+	// burst of submissions does not trip the free limit (hk 4765). The hub's
+	// own App reads its operations; nil skips the check (a node-local
+	// selection has no fleet-wide launch record).
+	LivePlacedByAccount func(context.Context, string) (map[string]map[string]int, error)
 	// State reads the hub's fleet state snapshot; nil reads GET /v1/state
 	// with the [hub] operator credential. fleetLog records the sources used.
 	DecisionReply func(context.Context, string, string, time.Time) (bool, error)

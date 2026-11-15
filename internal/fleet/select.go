@@ -1026,6 +1026,15 @@ func (a *App) selectFor(ctx context.Context, s Spawn, req selReq) (*selPlan, err
 					x.reason, x.outcome = strings.ToLower(x.code), "dropped:"+strings.ToLower(x.code)
 				}
 			}
+			if x.reason == "" && IsFreeRung(x.row.Profile) {
+				// One concurrent free-band launch per account: a burst's second
+				// launch already moves to another pool (hk 4765).
+				if key, live := capGate.freeAccountFull(ctx, binding.key); key != "" {
+					x.reason, x.code = reasonPoolAtCap, outcomeQuotaExhausted
+					x.cap, x.capLive, x.capLimit = key, live, freeBandPerAccountLimit
+					x.outcome = "dropped:" + x.reason
+				}
+			}
 			if x.reason == "" {
 				pending = append(pending, &x)
 			}

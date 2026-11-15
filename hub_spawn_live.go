@@ -45,6 +45,36 @@ func (h *HubServer) liveSpawnProfiles(ctx context.Context, exceptRequest string)
 	return counts, nil
 }
 
+// liveProfilesByAccount counts live hub spawns' placed profiles by account
+// key, leaving out exceptRequest. Profiles stay as placed (a seat name where
+// the launch went through a seat): selection folds them through the seat
+// canon. An operation that has no recorded account yet (accepted or
+// dispatching, before its first success) cannot be attributed and is not
+// counted: the gate covers bursts spaced by placement latency, not
+// same-instant races.
+func (h *HubServer) liveProfilesByAccount(ctx context.Context, exceptRequest string) (map[string]map[string]int, error) {
+	if h.inbox == nil {
+		return map[string]map[string]int{}, nil
+	}
+	tasks, err := h.liveSpawnTasks(ctx)
+	if err != nil {
+		return nil, err
+	}
+	counts := map[string]map[string]int{}
+	for _, task := range tasks {
+		if task.Request.RequestID == exceptRequest {
+			continue
+		}
+		if profile := livePlacedProfile(task); profile != "" && task.Outcome.AccountKey != "" {
+			if counts[task.Outcome.AccountKey] == nil {
+				counts[task.Outcome.AccountKey] = map[string]int{}
+			}
+			counts[task.Outcome.AccountKey][profile]++
+		}
+	}
+	return counts, nil
+}
+
 // liveSpawnTasks lists the operations that are live by the rule above: every
 // accepted or dispatching one, and each succeeded one that a node still
 // reports active or that started within spawnLiveSettle.

@@ -151,6 +151,14 @@ aliases included. It exists because those rungs spend Devin's free-model quota
 while paid `devin-ds41` spends the account's paid window. `devin` remains a
 whole-pool cap, so a free rung must pass both keys when both are set.
 
+Beside that operator cap, hub placement admits one concurrent free-band launch
+per Devin account (hk 4765): a second concurrent launch onto the same
+account's free band is dropped `pool_at_cap` with `cap` `devin-free`, `cap_live`
+the account's live free launches and `cap_limit` 1, so a burst of submissions
+places at most one onto the free band per account. Launches placed through a
+seat count under the catalog profile they run. Only hub placement enforces
+it, from its own operations; a node-local selection has no fleet-wide launch
+
 The hub counts, because it places every hub spawn
 ([durable spawn operations](hub-spawn-operations.md)). A live spawn on a pool
 is a hub spawn operation that is accepted, bound or dispatching, or succeeded with a
