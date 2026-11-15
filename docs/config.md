@@ -818,6 +818,48 @@ claim sets `claimed_at`; the `spawned`, `completed`, `escalated`, and `lost`
 transitions send `at` with `state` and hk stores it as `spawned_at` or `ended_at`
 (set once).
 
+### Job ids name one directory (hk 4824)
+
+Before a spawn creates or reuses `jobs/<id>`, it refuses an id that differs only
+in letter case from an entry already in the jobs root (exit 2, refusal code
+`job_id_case_collision`, the message names both ids). On a case-insensitive
+volume (macOS APFS) the two ids would resolve to one directory, where one job's
+`brief-delivered.md`, events and report overwrite the other's; the rule is the
+same on a case-sensitive volume, so the answer never depends on the filesystem.
+An entry named exactly the id is reused as before.
+
+The check is not a race: the jobs root holds one no-clobber identity record per
+case-folded id under `jobs/.job-ids/<lower id>` (a private file naming the exact
+id that owns it, published with `os.Link` after its bytes are synced). Two
+launchers that both find no directory both link their record, and exactly one
+wins; the other reads the winner's exact id and refuses. The record outlives the
+job dir, so one spelling of a job id stays reserved after a job dir TTL pass.
+The same guard runs before the hub submission receipt (`jobs/<id>/submission.json`
+on the submitting host), so a refused id writes nothing there either. `.job-ids`
+is not a job name: job-dir scans skip it.
+
+Job ids and the directories named after them (jobs-inbox dirs, checkout dirs)
+use one portable ASCII grammar at every input: ASCII letters, digits, `.`, `_`
+and `-`, starting with a letter or digit, at most 128 bytes — the same shape as
+the hub's job id and the launcher's `validID`, so an id spawn accepts is always
+one a node command, the legacy CLI and job close accept. A `..` inside one
+component is not a path traversal, because separators are excluded.
+Non-ASCII is refused rather than normalised, because macOS maps an NFC and an
+NFD spelling of one name to a single inode, so the two spellings would share one
+directory exactly as two letter cases do. The node commands, the hub checkout
+request and `job close` share that rule. The legacy `panewire job` completion
+CLI accepts any ASCII single path component instead: the retired spawner minted
+ids such as `jw+odd` outside the relay shape and the frozen golden pins that
+they still complete, but non-ASCII and separators are refused.
+
+Pane and agent names are not ids: the node commands keep the older pane-name
+rule, so punctuation the hub label grammar admits (`:`, for one) stays accepted
+by pane close, capture and read. The legacy CLI also compares its spelling with
+the real jobs-root entry, and refuses `done Build`, `escalate Build`,
+`joined Build` and `close Build` when `build` exists: on a case-insensitive
+volume the wrong spelling resolves to `build`'s directory, and the record would
+be appended to another job's events.
+
 After the brief lands, panewire merges `{state:"spawned", role, label, family,
 profile, model, harness, effort, pool, owner_lane, parent_lane, parent_job,
 pane_id, worktree:{origin, branch|null, head}}` — the allowlisted fields only

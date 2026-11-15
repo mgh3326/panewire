@@ -51,6 +51,51 @@ type jobCLI struct {
 	now            func() time.Time
 }
 
+// validLegacyJobID is the legacy `panewire job` id rule: one portable ASCII
+// path component. The retired spawner minted ids outside the hub's relay
+// pattern (the frozen golden pins "jw+odd"), and the completion CLI must still
+// finish them; every id spawn accepts passes this rule. Non-ASCII is refused
+// because macOS maps an NFC and an NFD spelling of one name to one inode
+// (hk 4824).
+func validLegacyJobID(id string) bool {
+	if id == "" || len(id) > 128 || id == "." || id == ".." {
+		return false
+	}
+	for i := 0; i < len(id); i++ {
+		c := id[i]
+		if c < 0x20 || c >= 0x7f || c == '/' || c == '\\' {
+			return false
+		}
+	}
+	return true
+}
+
+// jobDirCaseVariant names the jobs-root entry that resolves to job's directory
+// on a case-insensitive volume under a different spelling, or "" when the
+// spelling is the directory's own or there is no directory. The legacy CLI
+// writes events into that directory, so a different spelling would append one
+// job's completion, escalation or join to another job's events (hk 4824).
+func jobDirCaseVariant(jobsRoot, job string) string {
+	entries, err := os.ReadDir(jobsRoot)
+	if err != nil {
+		return ""
+	}
+	for _, entry := range entries {
+		if name := entry.Name(); name != job && strings.EqualFold(name, job) {
+			return name
+		}
+	}
+	return ""
+}
+
+// legacyJobDirCaseRefusal is jobDirCaseVariant as the commands refuse it.
+func legacyJobDirCaseRefusal(verb, jobsRoot, job string) error {
+	if existing := jobDirCaseVariant(jobsRoot, job); existing != "" {
+		return jobDie("%s: job id %s differs only in letter case from the existing jobs-inbox directory %s", verb, job, existing)
+	}
+	return nil
+}
+
 func runJobCLI(args []string, stdout, stderr io.Writer, cfg CLIConfig) int {
 	if len(args) == 0 {
 		fmt.Fprintln(stderr, "usage: panewire job probe|done|escalate|joined|close ...")
@@ -119,6 +164,12 @@ func (c *jobCLI) done(args []string) int {
 	if job == "" || strings.HasPrefix(job, "-") {
 		return c.exit(jobDie("done requires a job id"))
 	}
+	// The id names a directory under the jobs root: refuse a spelling no
+	// launcher would create, including non-ASCII, whose NFC and NFD forms
+	// share one inode on macOS (hk 4824).
+	if !validLegacyJobID(job) {
+		return c.exit(jobDie("done: invalid job id '%s'", job))
+	}
 	for len(args) > 0 {
 		switch args[0] {
 		case "--report":
@@ -131,6 +182,9 @@ func (c *jobCLI) done(args []string) int {
 		}
 	}
 	jobsRoot := jobJobsRoot()
+	if err := legacyJobDirCaseRefusal("done", jobsRoot, job); err != nil {
+		return c.exit(err)
+	}
 	fields, err := jobCompletionMetadata(jobsRoot + "/" + job + "/events")
 	if err != nil {
 		return c.exit(jobDie("done cannot find job.claim/job.spawned metadata: %s", job))
@@ -192,6 +246,12 @@ func (c *jobCLI) escalate(args []string) int {
 	if job == "" || strings.HasPrefix(job, "-") {
 		return c.exit(jobDie("escalate requires a job id"))
 	}
+	// The id names a directory under the jobs root: refuse a spelling no
+	// launcher would create, including non-ASCII, whose NFC and NFD forms
+	// share one inode on macOS (hk 4824).
+	if !validLegacyJobID(job) {
+		return c.exit(jobDie("escalate: invalid job id '%s'", job))
+	}
 	for len(args) > 0 {
 		switch args[0] {
 		case "--question":
@@ -215,6 +275,9 @@ func (c *jobCLI) escalate(args []string) int {
 		return c.exit(jobDie("escalate requires an existing --report"))
 	}
 	jobsRoot := jobJobsRoot()
+	if err := legacyJobDirCaseRefusal("escalate", jobsRoot, job); err != nil {
+		return c.exit(err)
+	}
 	owner, label, pane, parent, err := jobBuilderMetadata(jobsRoot, job)
 	if err != nil {
 		return c.exit(err)
@@ -243,6 +306,12 @@ func (c *jobCLI) joined(args []string) int {
 	if job == "" || strings.HasPrefix(job, "-") {
 		return c.exit(jobDie("joined requires a job id"))
 	}
+	// The id names a directory under the jobs root: refuse a spelling no
+	// launcher would create, including non-ASCII, whose NFC and NFD forms
+	// share one inode on macOS (hk 4824).
+	if !validLegacyJobID(job) {
+		return c.exit(jobDie("joined: invalid job id '%s'", job))
+	}
 	for len(args) > 0 {
 		switch args[0] {
 		case "--pr":
@@ -268,6 +337,9 @@ func (c *jobCLI) joined(args []string) int {
 		return c.exit(jobDie("joined requires --pr, --head and an existing --report"))
 	}
 	jobsRoot := jobJobsRoot()
+	if err := legacyJobDirCaseRefusal("joined", jobsRoot, job); err != nil {
+		return c.exit(err)
+	}
 	owner, label, pane, parent, err := jobBuilderMetadata(jobsRoot, job)
 	if err != nil {
 		return c.exit(err)

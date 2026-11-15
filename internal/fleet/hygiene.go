@@ -471,8 +471,9 @@ func (a *App) lanesMissing(ctx context.Context) error {
 	}
 	count, missing := 0, 0
 	for _, entry := range entries {
-		// A job dir TTL tombstone (.expiring-*) is not a job.
-		if !entry.IsDir() || strings.HasPrefix(entry.Name(), jobDirTombstone) {
+		// A job dir TTL tombstone (.expiring-*) and the job-id identity
+		// records (.job-ids) are not jobs.
+		if !entry.IsDir() || !validID(entry.Name()) || strings.HasPrefix(entry.Name(), jobDirTombstone) {
 			continue
 		}
 		j, e := a.job(entry.Name())

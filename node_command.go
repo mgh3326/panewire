@@ -181,7 +181,27 @@ type nodeWorktreeInspectResult struct {
 	Check    string        `json:"check,omitempty"`
 }
 
+// validNodeJobName is the one name grammar a job id and every directory named
+// after one (a jobs-inbox dir, a checkout dir) share with the launcher and the
+// hub: ASCII letters, digits, '.', '_' and '-', starting with a letter or
+// digit, at most 128 bytes. It is exactly hubJobIDPattern, which the fleet's
+// validID matches too, so an id spawn accepts is always one the node commands,
+// the legacy job CLI and job close accept; a ".." inside one component is not a
+// path traversal because separators are excluded. Non-ASCII is refused rather
+// than normalised, because macOS maps an NFC and an NFD spelling of one name to
+// a single inode: two spellings would share one directory as two letter cases
+// do (hk 4824).
 func validNodeJobName(name string) bool {
+	return hubJobIDPattern.MatchString(name)
+}
+
+// validNodePaneName is the pane/agent name rule; validNodeJobName is the job
+// id and directory rule. A pane name is not a path component, so the
+// punctuation hubAgentLabelPattern admits (":", for one) stays accepted, and
+// the pre-4824 shape is kept for names the hub never minted: non-empty, at most
+// 128 bytes, no control byte, no path separator or space, no leading '-' or
+// '.', no "..".
+func validNodePaneName(name string) bool {
 	if name == "" || len(name) > 128 || name[0] == '-' || name[0] == '.' {
 		return false
 	}
@@ -308,7 +328,7 @@ func parseNodeCommandArgs(op string, raw json.RawMessage) (any, bool) {
 		return args, decodeNodeCommandStrict(raw, &args)
 	case nodeCommandPaneClose:
 		var args nodePaneCloseArgs
-		valid := decodeNodeCommandStrict(raw, &args) && nodeCommandPaneIDPattern.MatchString(args.PaneID) && validNodeJobName(args.Name) && nodePaneClosableStatus[args.AgentStatus] && validNodeCommandPath(args.Cwd) && (args.QuestionJob == "" || validNodeJobName(args.QuestionJob))
+		valid := decodeNodeCommandStrict(raw, &args) && nodeCommandPaneIDPattern.MatchString(args.PaneID) && validNodePaneName(args.Name) && nodePaneClosableStatus[args.AgentStatus] && validNodeCommandPath(args.Cwd) && (args.QuestionJob == "" || validNodeJobName(args.QuestionJob))
 		return args, valid
 	case nodeCommandPaneCloseOp:
 		var args nodePaneCloseOpArgs
@@ -324,11 +344,11 @@ func parseNodeCommandArgs(op string, raw json.RawMessage) (any, bool) {
 		return args, true
 	case nodeCommandPaneCapture:
 		var args nodePaneCaptureArgs
-		valid := decodeNodeCommandStrict(raw, &args) && nodeCommandPaneIDPattern.MatchString(args.PaneID) && validNodeJobName(args.Name) && validNodeCommandPath(args.Cwd) && args.MergedAfter >= 0
+		valid := decodeNodeCommandStrict(raw, &args) && nodeCommandPaneIDPattern.MatchString(args.PaneID) && validNodePaneName(args.Name) && validNodeCommandPath(args.Cwd) && args.MergedAfter >= 0
 		return args, valid
 	case nodeCommandPaneRead:
 		var args nodePaneReadArgs
-		valid := decodeNodeCommandStrict(raw, &args) && nodeCommandPaneIDPattern.MatchString(args.PaneID) && validNodeJobName(args.Name) && validNodeCommandPath(args.Cwd) && args.TailLines >= 0 && args.TailLines <= nodePaneReadMaxTailLines
+		valid := decodeNodeCommandStrict(raw, &args) && nodeCommandPaneIDPattern.MatchString(args.PaneID) && validNodePaneName(args.Name) && validNodeCommandPath(args.Cwd) && args.TailLines >= 0 && args.TailLines <= nodePaneReadMaxTailLines
 		return args, valid
 	case nodeCommandJobResult:
 		var args nodeJobResultArgs

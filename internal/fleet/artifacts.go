@@ -599,8 +599,9 @@ func (a *App) artifactSweep(ctx context.Context, args []string) error {
 		return e
 	}
 	for _, entry := range jobs {
-		// A job dir TTL tombstone (.expiring-*) is not a job.
-		if !entry.IsDir() || *job != "" && entry.Name() != *job || strings.HasPrefix(entry.Name(), jobDirTombstone) {
+		// A job dir TTL tombstone (.expiring-*) and the job-id identity
+		// records (.job-ids) are not jobs.
+		if !entry.IsDir() || !validID(entry.Name()) || *job != "" && entry.Name() != *job || strings.HasPrefix(entry.Name(), jobDirTombstone) {
 			continue
 		}
 		j, e := a.job(entry.Name())

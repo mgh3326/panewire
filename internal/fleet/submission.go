@@ -245,6 +245,13 @@ func (a *App) PrepareSubmission(ctx context.Context, s Spawn) (Submission, error
 	if s.CWD == "" && spec == nil || s.Prompt == "" || !validID(s.Job) || !validID(s.Label) || !isNumeric(s.Task) && s.ParentJob == "" {
 		return Submission{}, fail(exitUsage, "spawn requires -c CWD (or %s) -p BRIEF -l LABEL --task TASK_ID (or --parent-job JOB)", checkoutSpecFlags)
 	}
+	// The id names jobs/<id> on this host and on the executing node; refuse a
+	// case-only collision before the hk preflight spends a request or a plan
+	// dispatches (hk 4824). A real submission claims the identity in
+	// saveSubmission, immediately before its receipt creates the dir.
+	if err := checkJobDirCase(a.Jobs, s.Job); err != nil {
+		return Submission{}, err
+	}
 	if _, err := hubArgs(a.Jobs, s); err != nil {
 		return Submission{}, fail(exitUsage, "%v; correct the flag before submitting through the hub", err)
 	}
