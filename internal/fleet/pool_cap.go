@@ -70,14 +70,15 @@ func poolMaxConcurrent(quota map[string]any) map[string]int {
 	return caps
 }
 
-// liveSpawnsReply is the body of the hub's GET /v1/spawns/live: live hub
-// spawns by the profile each was placed on.
+// liveSpawnsReply is the body of the hub's GET /v1/spawns/live: live spawns by
+// the profile each was placed on, hub-placed and direct alike.
 type liveSpawnsReply struct {
 	Profiles map[string]int `json:"profiles"`
 }
 
 // liveSpawnProfiles counts live spawns by placed profile. The hub's own App
-// reads its operations directly; any other App reads them from the hub.
+// reads its operations and its nodes' reported jobs directly; any other App
+// reads them from the hub.
 func (a *App) liveSpawnProfiles(ctx context.Context) (map[string]int, error) {
 	if a.LiveSpawnProfiles != nil {
 		return a.LiveSpawnProfiles(ctx, a.RequestID)

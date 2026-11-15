@@ -79,6 +79,9 @@ type hubJobReduction struct {
 	lastEvent     time.Time
 	lastEventKind string
 	paneID        string
+	// profile is the profile the job's newest run was spawned on, from its
+	// job.spawned receipt; the pool cap counts the job under it (hk 3399).
+	profile string
 }
 
 // hubIndexedJob is the retained view of one job's events directory. Once
@@ -306,12 +309,18 @@ func reduceHubJobEvents(jobID string, events []hubIndexedEvent) hubJobReduction 
 			if seqOK && validHubActiveJob(candidate) {
 				r.active, r.claimTime = candidate, ev.eventTime
 			}
+			// A claim starts a new run: the prior run's placement is not its
+			// profile until its own job.spawned names one.
+			r.profile = ""
 		case "job.spawned":
-			// The spawn record is the only place the worker pane is named.
+			// The spawn record is the only place the worker pane and the
+			// placed profile are named.
 			r.paneID = ev.event.paneID()
+			r.profile = ev.event.profile()
 		default:
 			if hubJobEndKind(ev.kind) {
 				r.active, r.claimTime, r.paneID = HubActiveJob{}, time.Time{}, ""
+				r.profile = ""
 			}
 		}
 	}
@@ -330,6 +339,7 @@ func (r hubJobReduction) scanned(activeCutoff, staleCutoff time.Time) (hubScanne
 	}
 	active := r.active
 	active.Pane = r.paneID
+	active.Profile = r.profile
 	active.LastEventKind = r.lastEventKind
 	if !r.lastEvent.IsZero() {
 		active.LastEventAt = r.lastEvent.UTC().Format(time.RFC3339)

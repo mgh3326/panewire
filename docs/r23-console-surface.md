@@ -39,14 +39,17 @@ visible in both views and a completed record is in neither.
 
 Heartbeat `active_jobs` retains required `job_id`, `agent_label`,
 `last_event_seq`, and `epoch` (with optional `push_sha`). It additionally
-accepts optional `owner_lane`, `pane`, `tier`, `role`, `started_at`,
+accepts optional `owner_lane`, `pane`, `tier`, `role`, `profile`, `started_at`,
 `last_event_kind`, and `last_event_at`. Bad optional values are discarded one
 field at a time: lane labels use the hub label grammar; pane is nonempty and at
-most 128 bytes; tier is T0 through T3; role is implementer; timestamps
+most 128 bytes; tier is T0 through T3; role is implementer; profile matches
+`^[A-Za-z0-9][A-Za-z0-9._@:+-]{0,63}$`; timestamps
 are RFC3339; and event kind is lowercase `^[a-z][a-z0-9_.]{0,31}$`.
 
 Node scanning takes owner lane, role, tier, and claim time from a claim; pane
-from `job.spawned`; and kind/time from the final event. Pane is a runtime jump
+and the placed profile from `job.spawned`; and kind/time from the final event.
+The profile is what the pool cap counts a direct spawn under (placement.md,
+"Pool concurrency cap"). Pane is a runtime jump
 identifier for the console only: briefs and transcripts remain absent.
 
 ## C. Sink lanes

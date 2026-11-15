@@ -159,18 +159,24 @@ places at most one onto the free band per account. Launches placed through a
 seat count under the catalog profile they run. Only hub placement enforces
 it, from its own operations; a node-local selection has no fleet-wide launch
 
-The hub counts, because it places every hub spawn
-([durable spawn operations](hub-spawn-operations.md)). A live spawn on a pool
-is a hub spawn operation that is accepted, bound or dispatching, or succeeded with a
-job that a node still lists as active, whose placed profile is in that pool.
+The hub counts, because it sees every spawn the fleet runs. A live spawn on a
+pool is a hub spawn operation that is accepted, bound or dispatching, or
+succeeded with a job that a node still lists as active, whose placed profile is
+in that pool; plus every job a node reports active in its heartbeat that no
+live operation names, whose placed profile is in that pool. The second term is
+a direct `panewire spawn` on a node, which the hub never placed (hk 3399): the
+node reads the profile from that job's own `job.spawned` receipt, so the same
+count fills the reserved `devin-free` key. A hub spawn that has become a node
+job is in both records and counts once, under its operation; a job two nodes
+list counts once, under the node the hub holds as its owner.
 A bound request waiting for its node's dispatcher counts once, using the
 profile bound for its current attempt; an earlier attempt's profile does not
 replace it. A spawn that succeeded less than two minutes ago counts before its
 first heartbeat. An auto spawn that is still being placed has no profile yet
-and is not counted, and neither is the spawn being placed. The hub's own selection
-reads the count from its operations. Any other selection (`plan`, a direct
-spawn) reads it from the hub with `GET /v1/spawns/live` and the operator
-credential.
+and is not counted, and neither is the spawn being placed. The hub's own
+selection reads the count from its operations and its nodes' reported jobs. Any
+other selection (`plan`, a direct spawn) reads it from the hub with
+`GET /v1/spawns/live` and the operator credential.
 
 When the count cannot be read the cap does not apply. Selection records
 `pool_cap_count_unavailable` under `degraded` and the node writes a warning
