@@ -222,36 +222,48 @@ result and stops without running `done` keeps a `claimed` or `spawned` hk
 record and a lane row. The node's ended-job pane sweep needs a terminal record
 ([pane-sweep.md](pane-sweep.md)) and lane release needs the pane gone, so
 neither takes it, and the node's 64-row lane cap fills (hk 4658). Every five
-minutes the hub looks at each live reviewer spawn and writes the end of one
-that posted a result. The rule:
+minutes the hub writes the end of each such job. The rule:
 
-- **A posted result is the only proof.** The node's `job.result` answers a
-  findings object that is not JSON `null` (a `findings.json` holding `null`, or
-  not matching the schema, is absent) or a `report.md` on disk. An idle, done
-  or blocked pane is never proof: an idle reviewer can be waiting on a
+- **Which jobs.** The pass reads the persisted `succeeded` reviewer operations
+  created in the last 14 days (newest 1000), not the nodes' active-job
+  heartbeat: that view drops a pane idle for 30 minutes, caps each node at 32
+  jobs and forgets a spawn two minutes after it started, so it would miss
+  exactly the long-orphaned jobs. A job whose node is not connected waits for
+  the next pass; a job found ended (a terminal hk record) is not read again.
+- **A posted result is the proof, and it must have settled.** The node's
+  `job.result` answers a findings object that is not JSON `null` (a
+  `findings.json` holding `null`, or not matching the schema, is absent) or a
+  `report.md` on disk. A reviewer writes `findings.json`, then `report.md`, then
+  runs `done`, and hk never rewrites a lost record, so the node ends the job
+  only when the newest result file has been unchanged for 10 minutes
+  (`reviewerResultSettle`) and the pane is not `working`. An idle, done or
+  blocked pane alone is never proof: an idle reviewer can be waiting on a
   background command, a wakeup or an answer.
 - **The record is ended through the node.** The hub sends `job.mark_lost` with
   `end_reason` `reviewer_result_posted`, even for a holder on the hub's own
-  host. For that `end_reason` the node proves from its own job directory that
-  the job is a reviewer, that no quota stop is announced or pending, and that
-  the result is posted, and it does not require the pane to be gone
+  host. The node proves everything above from its own job directory while it
+  holds the job's operation lock, the lock `panewire done` and the watcher's
+  quota-stop records take, so a completion or a quota-stop record cannot land
+  between the proof and the hk write
   ([node-commands.md](node-commands.md#job-mark_lost)). The record is written
   `lost`, not `completed`: completing a job uploads its report through
   `panewire done`, which belongs to the job itself or to mergewake's reap.
-- **The hub never closes the pane.** Once the record is terminal, the node's
-  ended-job sweep closes the pane on its own proof of ownership.
-- **A write that fails is retried on every pass** until it lands. The pass reads
-  the hk record first, so a job whose record is already terminal costs nothing.
+- **The hub never closes the pane.** Closing it belongs to the node's ended-job
+  sweep, which acts on a terminal record and its own proof of pane ownership
+  (hk 4693, PR #577); this pass only writes the record that sweep waits for.
+- **A refused or failed write is retried on every pass.** A reviewer that is
+  still finishing (`result-settling`, `pane-working`, `operation-busy`,
+  `result-missing`) is asked again quietly.
 - **A job with an announced quota stop is skipped.** The hub's quota-stop
   hand-over writes that record with the successor's pointer and hk never
   rewrites a lost record ([quota-stop.md](quota-stop.md)); the node refuses the
-  end with `quota-stopped`.
+  end with `quota-stopped`, and the watcher's own record waits for the same lock.
 
 The pass logs each job once per outcome, never once per pass:
 `hub ended a reviewer job with a posted result` (INFO, with `job`,
 `holder_host`, `end_reason`), `hub could not end a reviewer job` (WARN, with the
 node's `reason`), and `hub kept a reviewer job` (INFO, `reason` `quota-stopped`
-or `result_unreadable`). A reviewer still at work logs nothing.
+or `result_unreadable`).
 
 ### Checks at submit
 

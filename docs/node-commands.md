@@ -382,11 +382,15 @@ check needs only the agent list. Only when both proofs hold does it write
 [hub-spawn-operations.md](hub-spawn-operations.md#ending-a-reviewer-job-that-posted-a-result)).
 The reviewer's own result stands in for the pane proof, because its pane is
 still open when the hub ends the job and the node's ended-job sweep closes it
-afterwards. The node still applies the `job.completed` and newer-claim checks,
-reads neither herdr list, and refuses unless the ledger names role `reviewer`,
-no quota stop is announced (`job.lost` `quota_stop`, not final) or pending
-(`job.quota_stop_intent`), and the job directory holds a findings object that is
-not JSON `null` or a `report.md`.
+afterwards. The node takes the job's operation lock without waiting (the lock
+`panewire done` and the watcher's quota-stop records hold; a held lock answers
+`operation-busy`) and, under it, applies the `job.completed` and newer-claim
+checks, then refuses unless: the ledger names role `reviewer`; no quota stop is
+announced (`job.lost` `quota_stop`, not final) or pending
+(`job.quota_stop_intent`); no listed agent with that pane id and label is
+`working` (an unreadable agent list fails the command, `herdr_failed`-style);
+and the job directory holds a findings object that is not JSON `null` or a
+`report.md`, the newest of them unchanged for 10 minutes.
 
 | `outcome` | Meaning |
 | --- | --- |
@@ -398,6 +402,9 @@ not JSON `null` or a `report.md`.
 | `newer-claim` | the local ledger holds a `job.reclaim` event; nothing is written. |
 | `ledger_missing` | the job dir or its `events/` is gone, so the ledger cannot prove the attempt; nothing is written. |
 | `result-missing` | `reviewer_result_posted` only: the job directory holds no findings object and no report; nothing is written. |
+| `result-settling` | `reviewer_result_posted` only: the newest result file changed less than 10 minutes ago; nothing is written. |
+| `pane-working` | `reviewer_result_posted` only: the job's pane is `working`; nothing is written. |
+| `operation-busy` | `reviewer_result_posted` only: the job's operation lock is held (`done` or a quota-stop record in flight); nothing is written. |
 | `quota-stopped` | `reviewer_result_posted` only: a quota stop is announced or pending, so the hub's hand-over owns the record; nothing is written. |
 | `not-reviewer` | `reviewer_result_posted` only: the ledger names no `reviewer` role; nothing is written. |
 

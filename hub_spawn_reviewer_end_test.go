@@ -7,20 +7,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
-
-// reviewerEndActiveJob registers the reviewer's job in the node's active-job
-// list, which liveSpawnTasks reads; the fake node sends no heartbeat of its own.
-func reviewerEndActiveJob(t *testing.T, hub *HubServer, machine, job, pane, role string) {
-	t.Helper()
-	hub.mu.Lock()
-	defer hub.mu.Unlock()
-	record := hub.nodes[machine]
-	if record == nil {
-		t.Fatalf("node %s is not registered", machine)
-	}
-	record.activeJobs[job] = HubActiveJob{JobID: job, Epoch: 1, AgentLabel: job, OwnerLane: "parent", Pane: pane, Role: role}
-}
 
 // reviewerEndLedger is the node's job.result answer: findings is the decoded
 // findings object (nil for none), findingsError what the node says about a
@@ -44,7 +32,6 @@ func reviewerEndNode(t *testing.T, ledger map[string]any) (*HubServer, *unworked
 	t.Helper()
 	hub, server, jobs, _ := reviewerReleaseHub(t, reviewerRole, "succeeded", hubSpawnOutcome{RC: 0, Host: "machine-a", Pane: roleHeldPane})
 	node := startUnworkedNode(t, t14Node(t, hub, server, true), unworkedReplies(unworkedRow("idle", "/work/project.test-job"), ledger))
-	reviewerEndActiveJob(t, hub, "machine-a", "test-job", roleHeldPane, reviewerRole)
 	return hub, node, jobs, captureHubLog(hub)
 }
 
@@ -186,7 +173,6 @@ func TestReviewerEndSkipsAnAnnouncedQuotaStop(t *testing.T) {
 func TestReviewerEndIgnoresOtherRoles(t *testing.T) {
 	hub, server, _, _ := reviewerReleaseHub(t, "implementer", "succeeded", hubSpawnOutcome{RC: 0, Host: "machine-a", Pane: roleHeldPane})
 	node := startUnworkedNode(t, t14Node(t, hub, server, true), unworkedReplies(unworkedRow("idle", "/work/project.test-job"), reviewerEndPosted))
-	reviewerEndActiveJob(t, hub, "machine-a", "test-job", roleHeldPane, "implementer")
 
 	hub.endPostedReviewerJobs(t.Context())
 
@@ -215,5 +201,101 @@ func TestReviewerEndOnTheHubHostStillGoesThroughTheNode(t *testing.T) {
 	}
 	if state := jobs.state("test-job"); state != "spawned" {
 		t.Fatalf("hk record %v: the hub wrote it without the node's proof", state)
+	}
+}
+
+// The nodes' active-job heartbeat drops a pane idle for 30 minutes, caps each
+// node at 32 jobs and the hub forgets a spawn two minutes after it started, so
+// it is not an inventory of unresolved reviewers. The pass reads the persisted
+// operations: a reviewer no node reports (no heartbeat registered here) and
+// started days ago is still ended.
+func TestReviewerEndFindsAnOrphanTheHeartbeatNoLongerReports(t *testing.T) {
+	hub, node, _, _ := reviewerEndNode(t, reviewerEndPosted)
+	hub.mu.Lock()
+	if active := hub.nodes["machine-a"].activeJobs; len(active) != 0 {
+		hub.mu.Unlock()
+		t.Fatalf("active jobs %v, want the node to report none", active)
+	}
+	hub.mu.Unlock()
+	hub.now = func() time.Time { return time.Now().Add(7 * 24 * time.Hour) }
+
+	hub.endPostedReviewerJobs(t.Context())
+
+	if want := []string{"job.result", "job.mark_lost"}; !reflect.DeepEqual(node.seen(), want) {
+		t.Fatalf("node commands %v, want %v", node.seen(), want)
+	}
+}
+
+// A spawn older than the window is left to an operator; the pass never reads it.
+func TestReviewerEndIgnoresASpawnOlderThanTheWindow(t *testing.T) {
+	hub, node, _, _ := reviewerEndNode(t, reviewerEndPosted)
+	hub.now = func() time.Time { return time.Now().Add(reviewerEndWindow + time.Hour) }
+
+	hub.endPostedReviewerJobs(t.Context())
+
+	if got := node.seen(); len(got) != 0 {
+		t.Fatalf("node commands %v, want none", got)
+	}
+}
+
+// A job whose node is not connected is neither read nor written; the pass tries
+// it again once the node is back.
+func TestReviewerEndWaitsForAnUnconnectedNode(t *testing.T) {
+	hub, server, jobs, _ := reviewerReleaseHub(t, reviewerRole, "succeeded", hubSpawnOutcome{RC: 0, Host: "machine-a", Pane: roleHeldPane})
+	_ = server
+	sink := captureHubLog(hub)
+
+	hub.endPostedReviewerJobs(t.Context())
+
+	if state := jobs.state("test-job"); state != "spawned" {
+		t.Fatalf("hk record %v, want it untouched", state)
+	}
+	if logged := sink.String(); strings.Contains(logged, "reviewer job") {
+		t.Fatalf("log %q reports on a node that is simply not connected", logged)
+	}
+}
+
+// A job found ended is read once, not every pass: the hk record never leaves a
+// terminal state.
+func TestReviewerEndReadsAnEndedJobOnce(t *testing.T) {
+	hub, node, jobs, _ := reviewerEndNode(t, reviewerEndPosted)
+	jobs.mu.Lock()
+	jobs.records["test-job"]["state"] = "completed"
+	jobs.mu.Unlock()
+	hub.endPostedReviewerJobs(t.Context())
+	// Were the record read again it would be live, and the node would be asked.
+	jobs.mu.Lock()
+	jobs.records["test-job"]["state"] = "spawned"
+	jobs.mu.Unlock()
+
+	hub.endPostedReviewerJobs(t.Context())
+
+	if got := node.seen(); len(got) != 0 {
+		t.Fatalf("node commands %v, want none for a job already found ended", got)
+	}
+}
+
+// The node's refusals that mean "the reviewer is still finishing" are the
+// ordinary state of a young result or a working pane: retried each pass, never
+// logged.
+func TestReviewerEndRetriesAStillFinishingReviewerQuietly(t *testing.T) {
+	for _, outcome := range []string{nodeJobMarkLostResultSettling, nodeJobMarkLostPaneWorking, nodeJobMarkLostBusy, nodeJobMarkLostResultMissing} {
+		t.Run(outcome, func(t *testing.T) {
+			hub, node, jobs, sink := reviewerEndNode(t, reviewerEndPosted)
+			node.reply("job.mark_lost", map[string]any{"result": map[string]any{"outcome": outcome}})
+
+			hub.endPostedReviewerJobs(t.Context())
+			hub.endPostedReviewerJobs(t.Context())
+
+			if want := []string{"job.result", "job.mark_lost", "job.result", "job.mark_lost"}; !reflect.DeepEqual(node.seen(), want) {
+				t.Fatalf("node commands %v, want the write asked on both passes", node.seen())
+			}
+			if state := jobs.state("test-job"); state != "spawned" {
+				t.Fatalf("hk record %v, want it untouched", state)
+			}
+			if logged := sink.String(); strings.Contains(logged, "reviewer job") {
+				t.Fatalf("log %q reports on a reviewer that is still finishing", logged)
+			}
+		})
 	}
 }

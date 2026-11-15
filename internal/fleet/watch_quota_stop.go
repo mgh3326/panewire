@@ -334,8 +334,19 @@ func announcedQuotaStop(j Job) (quotastop.Stop, bool) {
 // published at once, so later selections skip the free rung until its reset on
 // every host (RecordFreeLimit, publishFreeLimit).
 func (a *App) quotaStopAnnounce(ctx context.Context, j Job, stop quotastop.Stop) error {
+	unlock, err := a.lockJobOperation(j.ID, quotaRecordLockWait)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	return a.quotaStopEvent(ctx, j, stop, false)
 }
+
+// quotaRecordLockWait bounds how long a quota-stop record waits for the job's
+// operation lock. The lock orders the record against the hub's posted-result
+// end of a reviewer job (node_job_mark_lost_result_posted.go): whichever takes
+// it first decides, and the other sees the outcome.
+const quotaRecordLockWait = 10 * time.Second
 
 // quotaStopEvent records job.lost for a quota stop. final marks a stop whose hk
 // lost record is already written (a reviewer ended by its watcher): unlike an
@@ -463,6 +474,11 @@ func pendingQuotaIntent(j Job) (quotaIntent, bool) {
 }
 
 func (a *App) recordQuotaIntent(ctx context.Context, j Job, stop quotastop.Stop) error {
+	unlock, err := a.lockJobOperation(j.ID, quotaRecordLockWait)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	payload := map[string]any{"pane_id": j.Pane, "pool": stop.Pool, "end_reason": QuotaStopEndReason(stop.Pool, stop.Reset, "", "")}
 	if !stop.Reset.IsZero() {
 		payload["reset_at"] = stop.Reset.UTC().Format(time.RFC3339)

@@ -1,5 +1,14 @@
 package panewire
 
+import (
+	"context"
+	"errors"
+	"os"
+	"time"
+
+	"github.com/mgh3326/panewire/internal/fleet"
+)
+
 // reviewerResultPosted is the end_reason of a reviewer job the hub ends because
 // the job posted the result it was spawned for (hk 4684,
 // docs/hub-spawn-operations.md). A reviewer that finishes without running
@@ -7,40 +16,131 @@ package panewire
 // 64-row node lane cap refuses new lanes.
 const reviewerResultPosted = "reviewer_result_posted"
 
-// reviewerResultPostedProof is what job.mark_lost proves, from this node's own
-// job directory, before it ends a reviewer job whose pane may still be open:
-// the job is a reviewer, no quota stop is announced for the hub's hand-over
-// (the hub writes that record itself, with the successor's pointer, and hk
-// never rewrites a lost record), and the job posted a result. It returns an
-// outcome that refuses the write, or an error code, or both empty to go ahead.
-func (client *HubClient) reviewerResultPostedProof(job string) (outcome, code string) {
-	root, _, found, err := client.openNodeJobDir(job)
-	if err != nil || !found {
-		return "", "mark_lost_failed"
+// reviewerResultSettle is how long the newest result file must have been
+// unchanged before the node ends the job. A reviewer writes findings.json, then
+// report.md, then runs `panewire done`; hk never rewrites a lost record, so an
+// end that lands between those steps would lose the completion. Ten minutes is
+// the grace the hub already gives an unworked spawn (UnworkedLandingGrace).
+const reviewerResultSettle = 10 * time.Minute
+
+// nodeJobMarkReviewerResultPosted is job.mark_lost for end_reason
+// reviewer_result_posted. The reviewer's own result stands in for the pane
+// proof, so its pane may still be open: the node's ended-job pane sweep closes
+// it once the record is terminal. The node proves, from its own job directory
+// and while holding the job's operation lock (the one `panewire done` and the
+// watcher's quota-stop records take, so none of them can land between the proof
+// and the hk write):
+//
+//   - no completion after the attempt and no newer claim;
+//   - the job is a reviewer;
+//   - no quota stop is announced or pending (the hub's hand-over writes that
+//     record with the successor's pointer);
+//   - the pane is not working (a reviewer running `done` is working);
+//   - the job posted a result (a non-null findings object or a report on disk)
+//     and the newest result file has been unchanged for reviewerResultSettle.
+//
+// Any refusal writes nothing; the hub asks again on its next pass.
+func (client *HubClient) nodeJobMarkReviewerResultPosted(ctx context.Context, args nodeJobMarkLostArgs) (any, string) {
+	refuse := func(outcome string) (any, string) { return nodeJobMarkLostResult{Outcome: outcome}, "" }
+	root, dir, found, err := client.openNodeJobDir(args.Job)
+	if errors.Is(err, errNodeJobsRootUnset) {
+		return nil, "jobs_root_unset"
+	}
+	if err != nil {
+		return nil, "mark_lost_failed"
+	}
+	if !found {
+		return refuse(nodeJobMarkLostLedgerMissing)
+	}
+	defer root.Close()
+	unlock, err := fleet.TryLockJobOperation(dir)
+	if errors.Is(err, fleet.ErrJobOperationBusy) {
+		return refuse(nodeJobMarkLostBusy)
+	}
+	if err != nil {
+		return nil, "mark_lost_failed"
+	}
+	defer unlock()
+
+	// Everything below runs under the lock, so a completion or a quota-stop
+	// record written before it is seen and one written after it is refused or
+	// seen by its writer.
+	ledger, err := client.openNodeJobLedger(args.Job, args.PaneID, args.Label)
+	if errors.Is(err, os.ErrNotExist) {
+		return refuse(nodeJobMarkLostLedgerMissing)
+	}
+	if err != nil {
+		return nil, "mark_lost_failed"
+	}
+	switch {
+	case ledger.completed:
+		return refuse(nodeJobMarkLostCompleted)
+	case ledger.newerClaim:
+		return refuse(nodeJobMarkLostNewerClaim)
 	}
 	target, err := readNodeCloseTarget(root)
-	root.Close()
 	if err != nil {
-		return "", "mark_lost_failed"
+		return nil, "mark_lost_failed"
 	}
 	switch {
 	case target.role != reviewerRole:
-		return nodeJobMarkLostNotReviewer, ""
+		return refuse(nodeJobMarkLostNotReviewer)
 	case target.announced || target.intent:
-		return nodeJobMarkLostQuotaStopped, ""
+		return refuse(nodeJobMarkLostQuotaStopped)
 	}
-	raw, code := client.nodeJobResult(nodeJobResultArgs{Job: job})
+	newest, stamped := newestResultFileTime(root)
+
+	// An unreadable herdr list fails the command (the hub retries); a pane that
+	// is not listed is a reviewer that has stopped.
+	agents, code := client.nodeAgentsListInSession(ctx, client.herdrSessionFor(args.Job, args.PaneID))
 	if code != "" {
-		return "", code
+		return nil, code
+	}
+	for _, row := range agents.Agents {
+		if row.PaneID == args.PaneID && row.Name == args.Label && row.AgentStatus == "working" {
+			return refuse(nodeJobMarkLostPaneWorking)
+		}
+	}
+
+	raw, code := client.nodeJobResult(nodeJobResultArgs{Job: args.Job})
+	if code != "" {
+		return nil, code
 	}
 	result, ok := raw.(nodeJobResult)
 	if !ok {
-		return "", "mark_lost_failed"
+		return nil, "mark_lost_failed"
 	}
-	if !result.Found || !nodeResultPosted(result) {
-		return nodeJobMarkLostResultMissing, ""
+	if !result.Found || !nodeResultPosted(result) || !stamped {
+		return refuse(nodeJobMarkLostResultMissing)
 	}
-	return "", ""
+	if client.nowUTC().Sub(newest) < reviewerResultSettle {
+		return refuse(nodeJobMarkLostResultSettling)
+	}
+
+	store, err := client.nodeJobStoreForCommand()
+	if err != nil {
+		return nil, "mark_lost_failed"
+	}
+	record := map[string]any{"state": "lost", "at": client.nowUTC(), "end_reason": reviewerResultPosted}
+	if err := store.Put(ctx, args.Job, record); err != nil {
+		return nil, "mark_lost_failed"
+	}
+	return nodeJobMarkLostResult{Outcome: nodeJobMarkLostLost}, ""
+}
+
+// newestResultFileTime is the latest modification time of findings.json and
+// report.md in the job directory; ok is false when neither is a regular file.
+func newestResultFileTime(job *os.Root) (newest time.Time, ok bool) {
+	for _, name := range []string{"findings.json", "report.md"} {
+		info, err := job.Lstat(name)
+		if err != nil || !info.Mode().IsRegular() {
+			continue
+		}
+		if !ok || info.ModTime().After(newest) {
+			newest, ok = info.ModTime(), true
+		}
+	}
+	return newest, ok
 }
 
 // nodeResultPosted reports a job.result that carries a validated findings

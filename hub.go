@@ -580,7 +580,10 @@ type HubServer struct {
 	// reviewerEndLogged is the refusal each reviewer job last logged in the
 	// posted-result pass, so a job that keeps failing for the same reason logs
 	// once, not once a pass (hub_spawn_reviewer_end.go).
-	reviewerEndLogged  map[string]string
+	reviewerEndLogged map[string]string
+	// reviewerEndSettled holds the reviewer jobs the pass found ended, so it
+	// reads each hk record once while the job stays in its window.
+	reviewerEndSettled map[string]bool
 	spawnStartBy       time.Duration
 	spawnStartByMargin time.Duration
 	spawnGrantDrain    bool
