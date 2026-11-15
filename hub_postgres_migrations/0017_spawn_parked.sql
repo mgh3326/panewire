@@ -6,3 +6,6 @@
 ALTER TABLE spawn_operations ADD COLUMN IF NOT EXISTS park_reason TEXT NOT NULL DEFAULT '';
 ALTER TABLE spawn_operations ADD COLUMN IF NOT EXISTS next_check_ms BIGINT NOT NULL DEFAULT 0;
 ALTER TABLE spawn_operations ADD COLUMN IF NOT EXISTS failed_attempts INTEGER NOT NULL DEFAULT 0;
+-- claim_result is the cleanup-confirmed node refusal that proved an hk job
+-- claim on claimed_host ('' none): the request's end at its limit.
+ALTER TABLE spawn_operations ADD COLUMN IF NOT EXISTS claim_result TEXT NOT NULL DEFAULT '';

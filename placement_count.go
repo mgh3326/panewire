@@ -226,7 +226,7 @@ func (h *HubServer) completeSpawn(ctx context.Context, task hubSpawnTask, outcom
 	// was crossed, ends with the claimed node's saved refusal rather than a
 	// timeout that hides it while hk holds the claim (hk 4661).
 	if outcome.Reason == "timeout" && (task.Node == nil || task.Status == "bound") && spawnHoldsClaim(task) {
-		outcome = task.Outcome
+		outcome = *task.ClaimResult
 	}
 	release := func() {}
 	now := h.now().UTC()

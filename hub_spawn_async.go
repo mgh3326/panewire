@@ -671,10 +671,9 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 	// The same test as the park below, so a parked pass emits no terminal
 	// refusal event on every recheck.
 	parks := func(err error) bool {
-		// A request whose hk job claim pins a host is never parked: a park
-		// that reached expires_at would give it up as never started while
-		// the claim and its saved node refusal stand. It ends as before.
-		if err == nil || ctx.Err() != nil || task.Expires.IsZero() || spawnHoldsClaim(task) {
+		// A claimed request may park on capacity too: at its limit the
+		// timeout ends it with the saved claim refusal (h.completeSpawn).
+		if err == nil || ctx.Err() != nil || task.Expires.IsZero() {
 			return false
 		}
 		if spawnClaimedAnswer(task, err) {

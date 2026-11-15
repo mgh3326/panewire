@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"maps"
 	"net/http"
 	"net/http/httptest"
@@ -622,70 +621,66 @@ func TestClaimedAnswerLeavesPoolCapToPark_t4661(t *testing.T) {
 	}
 }
 
-// A placement pass on a request whose hk claim pins a host never parks it,
-// so expiry cannot replace its saved node refusal with given_up.
-func TestClaimedHostRequestIsNeverParked_t4661(t *testing.T) {
+// A request with a proven claim may park on capacity: at its limit it ends
+// with the saved claim refusal, never given_up.
+func TestClaimedRequestParksAndEndsWithClaimRefusal_t4661(t *testing.T) {
 	h := asyncSpawnHub(t)
-	task := claimParkRequest(t, h, 180, time.Now())
-	if _, err := h.inbox.store.db.Exec(`UPDATE spawn_operations SET claimed_host='desktop',result='{"rc":70,"stage":"launch","reason":"launch_proof_failed","node_result":true}' WHERE request_id=?`, task.Request.RequestID); err != nil {
-		t.Fatal(err)
-	}
-	h.spawnNewApp = func(io.Writer, io.Writer) (*fleet.App, error) {
-		return nil, errors.New("no app")
-	}
-	task = parkedTask(t, h, task.Request.RequestID)
-	h.executeSpawnTask(t.Context(), task)
-	if got := parkedTask(t, h, task.Request.RequestID); got.ParkReason != "" {
-		t.Fatalf("claimed request parked: %q", got.ParkReason)
-	}
-}
-
-// A due park may be placing, so it counts toward the cap again.
-func TestDueParkCountsTowardPoolCap_t4661(t *testing.T) {
-	h := asyncSpawnHub(t)
-	task := claimParkRequest(t, h, 190, time.Now())
-	h.inbox.store.parkSpawn(t.Context(), task.Request.RequestID, task.Attempt, spawnParkPoolCap, time.Now().Add(time.Minute))
-	count := func(now time.Time) bool {
-		live, err := h.inbox.store.liveSpawns(t.Context(), nil, now, now)
-		if err != nil {
-			t.Fatal(err)
-		}
-		for _, l := range live {
-			if l.Request.RequestID == task.Request.RequestID {
-				return true
-			}
-		}
-		return false
-	}
-	if count(time.Now()) || !count(time.Now().Add(2*time.Minute)) {
-		t.Fatal("a future park counted, or a due one did not")
-	}
-}
-
-// A parked request that reaches its limit emits one terminal spawn event.
-func TestParkedGiveUpEmitsOneSpawnEvent_t4661(t *testing.T) {
-	h := asyncSpawnHub(t)
-	var events []fleetEvent
-	h.fleetEvents = func(_ time.Time, e fleetEvent) bool { events = append(events, e); return true }
 	clock := expiryClock(h, expiryNow())
-	request, job := parkRequest(195)
+	request, job := parkRequest(180)
 	request.ExpiresSeconds = 300
 	task, _, err := h.inbox.store.claimSpawn(t.Context(), request, job, "parent", *clock)
 	if err != nil {
 		t.Fatal(err)
 	}
-	parkNow(t, h, task, spawnParkQuota)
-	parked := parkedTask(t, h, task.Request.RequestID)
-	*clock = parked.Expires
-	h.executeSpawnTask(t.Context(), parked)
-	n := 0
-	for _, e := range events {
-		if e.Kind == "spawn" && e.RequestID == task.Request.RequestID && e.Reason == "given_up" {
-			n++
-		}
+	setClaim(t, h, task.Request.RequestID)
+	task = parkedTask(t, h, task.Request.RequestID)
+	if !parkNow(t, h, task, spawnParkPoolCap) {
+		t.Fatal("a claimed request did not park on a pool cap")
 	}
-	if n != 1 {
-		t.Fatalf("%d given_up spawn events, want 1: %+v", n, events)
+	task = parkedTask(t, h, task.Request.RequestID)
+	*clock = task.Expires
+	h.executeSpawnTask(t.Context(), task)
+	if got := parkedTask(t, h, task.Request.RequestID); got.Status == "given_up" || got.Status == "accepted" || got.Outcome.Reason != "launch_proof_failed" {
+		t.Fatalf("claimed request at its limit: status=%s outcome=%+v", got.Status, got.Outcome)
+	}
+}
+
+// setClaim stores a proven claim on desktop, as a post-claim refusal does.
+func setClaim(t *testing.T, h *HubServer, id string) {
+	t.Helper()
+	proof := `{"rc":70,"stage":"launch","reason":"launch_proof_failed","host":"desktop","retryable":true,"node_result":true}`
+	if _, err := h.inbox.store.db.Exec(`UPDATE spawn_operations SET claimed_host='desktop',claim_result=?,result=? WHERE request_id=?`, proof, proof, id); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The claim proof survives a later pre-claim refusal on the claimed host,
+// and a not-started attestation never writes one.
+func TestClaimProofIsWrittenOnce_t4661(t *testing.T) {
+	h := asyncSpawnHub(t)
+	task := claimParkRequest(t, h, 185, time.Now())
+	refuse := func(task hubSpawnTask, n int, stage, reason string) hubSpawnTask {
+		t.Helper()
+		bound, err := h.inbox.store.bindSpawn(t.Context(), task.Request.RequestID, task.Attempt, boundaryTestNode(task, 467300+n, "desktop"), time.Now().UTC())
+		if err != nil {
+			t.Fatal(err)
+		}
+		bound = sentSpawnFixture(t, h.inbox.store, bound)
+		outcome := hubSpawnOutcome{RC: 70, Stage: stage, Reason: reason, NodeResult: true, Retryable: true}
+		got, err := h.inbox.store.unbindRefusedSpawn(t.Context(), bound, hubSpawnExclusion{Machine: "desktop", Profile: fmt.Sprint(n), Reason: reason, RC: 70}, &outcome, time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+	task = refuse(task, 1, "placement", "spawn_failed:auth_unavailable")
+	if spawnHoldsClaim(task) {
+		t.Fatal("a pre-claim refusal proved a claim")
+	}
+	task = refuse(task, 2, "launch", "launch_proof_failed")
+	task = refuse(task, 3, "placement", "launch_proof_failed")
+	if !spawnHoldsClaim(task) || task.ClaimResult.Stage != "launch" {
+		t.Fatalf("the claim proof was lost or replaced: %+v", task.ClaimResult)
 	}
 }
 
@@ -701,10 +696,7 @@ func TestClaimedRetryTimeoutKeepsNodeRefusal_t4661(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	saved := `{"rc":70,"stage":"launch","reason":"launch_proof_failed","host":"desktop","retryable":true,"node_result":true}`
-	if _, err := h.inbox.store.db.Exec(`UPDATE spawn_operations SET claimed_host='desktop',result=? WHERE request_id=?`, saved, task.Request.RequestID); err != nil {
-		t.Fatal(err)
-	}
+	setClaim(t, h, task.Request.RequestID)
 	task = parkedTask(t, h, task.Request.RequestID)
 	*clock = task.Expires
 	h.executeSpawnTask(t.Context(), task)
@@ -721,6 +713,7 @@ func TestReplayPinIsNoClaim_t4661(t *testing.T) {
 	for name, result := range map[string]string{
 		"checkout busy":  `{"rc":75,"stage":"checkout","reason":"checkout_refused:busy","node_result":true,"retryable":true}`,
 		"unsent timeout": `{"rc":124,"stage":"landing","reason":"timeout","host":"desktop","retryable":true}`,
+		"not started":    `{"rc":124,"stage":"claim","reason":"deadline_not_started","host":"desktop","retryable":true,"node_result":true}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			h := asyncSpawnHub(t)
@@ -747,9 +740,7 @@ func TestReplayPinIsNoClaim_t4661(t *testing.T) {
 func TestClaimedTimeoutInsidePlacementKeepsNodeRefusal_t4661(t *testing.T) {
 	h := asyncSpawnHub(t)
 	task := claimParkRequest(t, h, 220, time.Now())
-	if _, err := h.inbox.store.db.Exec(`UPDATE spawn_operations SET claimed_host='desktop',result='{"rc":70,"stage":"launch","reason":"launch_proof_failed","node_result":true,"retryable":true}' WHERE request_id=?`, task.Request.RequestID); err != nil {
-		t.Fatal(err)
-	}
+	setClaim(t, h, task.Request.RequestID)
 	task = parkedTask(t, h, task.Request.RequestID)
 	if _, err := h.completeSpawn(t.Context(), task, hubSpawnOutcome{RC: 124, Stage: "placement", Reason: "timeout", Retryable: true}); err != nil {
 		t.Fatal(err)

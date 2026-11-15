@@ -99,6 +99,10 @@ type hubSpawnTask struct {
 	ParkReason     string
 	NextCheck      time.Time
 	FailedAttempts int
+	// ClaimResult is the node refusal that proved an hk job claim on
+	// ClaimedHost (hk 4661): written once, never by a later pre-claim
+	// refusal or not-started attestation. A request with one ends with it.
+	ClaimResult *hubSpawnOutcome
 }
 
 type hubSpawnExclusion struct {
@@ -130,7 +134,7 @@ func (s *laneInboxStore) ensureSpawnTasks() error {
 	// Stores from before hk 4460 lack the placement columns (postgres: the
 	// 0008 migration). A restart restores counts from these two columns, and
 	// refresh_waits arrived with hk 4600 (postgres: 0011).
-	for _, column := range []string{`placed_ms BIGINT NOT NULL DEFAULT 0`, `claimed_ms BIGINT NOT NULL DEFAULT 0`, `exclusions TEXT NOT NULL DEFAULT '[]'`, `claimed_host TEXT NOT NULL DEFAULT ''`, `refresh_waits TEXT NOT NULL DEFAULT '[]'`, `expires_ms BIGINT NOT NULL DEFAULT 0`, `park_reason TEXT NOT NULL DEFAULT ''`, `next_check_ms BIGINT NOT NULL DEFAULT 0`, `failed_attempts INTEGER NOT NULL DEFAULT 0`} {
+	for _, column := range []string{`placed_ms BIGINT NOT NULL DEFAULT 0`, `claimed_ms BIGINT NOT NULL DEFAULT 0`, `exclusions TEXT NOT NULL DEFAULT '[]'`, `claimed_host TEXT NOT NULL DEFAULT ''`, `refresh_waits TEXT NOT NULL DEFAULT '[]'`, `expires_ms BIGINT NOT NULL DEFAULT 0`, `park_reason TEXT NOT NULL DEFAULT ''`, `next_check_ms BIGINT NOT NULL DEFAULT 0`, `failed_attempts INTEGER NOT NULL DEFAULT 0`, `claim_result TEXT NOT NULL DEFAULT ''`} {
 		if _, err := s.db.ExecContext(ctx, `ALTER TABLE spawn_operations ADD COLUMN `+column); err != nil {
 			if err := ignoreDuplicateColumn(err); err != nil {
 				return err
@@ -445,9 +449,9 @@ func queueSpawnNotifications(ctx context.Context, s *laneInboxStore, tx *sql.Tx,
 
 func scanSpawnTask(row interface{ Scan(...any) error }) (hubSpawnTask, error) {
 	var task hubSpawnTask
-	var payload, result, node, exclusions, refreshWaits string
+	var payload, result, node, exclusions, refreshWaits, claimResult string
 	var created, deadline, lastRun, placed, expires, nextCheck int64
-	err := row.Scan(&task.Job, &task.Owner, &payload, &task.Status, &created, &deadline, &node, &result, &task.Attempt, &lastRun, &placed, &exclusions, &task.ClaimedHost, &refreshWaits, &expires, &task.ParkReason, &nextCheck, &task.FailedAttempts)
+	err := row.Scan(&task.Job, &task.Owner, &payload, &task.Status, &created, &deadline, &node, &result, &task.Attempt, &lastRun, &placed, &exclusions, &task.ClaimedHost, &refreshWaits, &expires, &task.ParkReason, &nextCheck, &task.FailedAttempts, &claimResult)
 	if err != nil {
 		return task, err
 	}
@@ -466,6 +470,12 @@ func scanSpawnTask(row interface{ Scan(...any) error }) (hubSpawnTask, error) {
 	}
 	if nextCheck > 0 {
 		task.NextCheck = time.UnixMilli(nextCheck)
+	}
+	if claimResult != "" {
+		task.ClaimResult = &hubSpawnOutcome{}
+		if err = json.Unmarshal([]byte(claimResult), task.ClaimResult); err != nil {
+			return task, err
+		}
 	}
 	if err = json.Unmarshal([]byte(payload), &task.Request); err != nil {
 		return task, err
@@ -505,7 +515,7 @@ func (s *laneInboxStore) unbindRefusedSpawn(parent context.Context, task hubSpaw
 	if err != nil {
 		return hubSpawnTask{}, err
 	}
-	claimedHost, claimedResult := "", ""
+	claimedHost, claimedResult, claimProof := "", "", ""
 	if claimed != nil {
 		claimedHost = task.Node.Machine
 		result, err := json.Marshal(claimed)
@@ -513,6 +523,11 @@ func (s *laneInboxStore) unbindRefusedSpawn(parent context.Context, task hubSpaw
 			return hubSpawnTask{}, err
 		}
 		claimedResult = string(result)
+		// Only a refusal after the job claim proves one; the first such
+		// proof stays (claim_result is set once).
+		if !spawnStageBeforeJobClaim(claimed.Stage) && !spawnOutcomeNotStarted(*claimed) {
+			claimProof = claimedResult
+		}
 	}
 	// A claimed-harness retry is not backed off: hk holds the job claim on
 	// that host, and a park that ran into expires_at would give the request
@@ -523,7 +538,7 @@ func (s *laneInboxStore) unbindRefusedSpawn(parent context.Context, task hubSpaw
 	}
 	ctx, done := s.op(parent)
 	defer done()
-	result, err := s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET node_id=NULL,node_payload='',status='accepted',exclusions=?,failed_attempts=failed_attempts+1,park_reason=?,next_check_ms=?,claimed_host=CASE WHEN ?='' THEN claimed_host ELSE ? END,result=CASE WHEN ?='' THEN result ELSE ? END WHERE request_id=? AND attempt=? AND node_id=? AND status=? AND (claimed_host='' OR ?='' OR claimed_host=?)`), string(raw), parkReason, retryAt, claimedHost, claimedHost, claimedResult, claimedResult, task.Request.RequestID, task.Attempt, task.Node.RequestID, spawnStoredStatus(task.Status, task.Node), claimedHost, claimedHost)
+	result, err := s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET node_id=NULL,node_payload='',status='accepted',exclusions=?,failed_attempts=failed_attempts+1,park_reason=?,next_check_ms=?,claimed_host=CASE WHEN ?='' THEN claimed_host ELSE ? END,result=CASE WHEN ?='' THEN result ELSE ? END,claim_result=CASE WHEN claim_result='' THEN ? ELSE claim_result END WHERE request_id=? AND attempt=? AND node_id=? AND status=? AND (claimed_host='' OR ?='' OR claimed_host=?)`), string(raw), parkReason, retryAt, claimedHost, claimedHost, claimedResult, claimedResult, claimProof, task.Request.RequestID, task.Attempt, task.Node.RequestID, spawnStoredStatus(task.Status, task.Node), claimedHost, claimedHost)
 	if err != nil {
 		return hubSpawnTask{}, err
 	}
@@ -551,7 +566,7 @@ func (s *laneInboxStore) unbindSpawn(parent context.Context, id string, attempt 
 	return s.spawnTask(parent, id)
 }
 
-const spawnTaskColumns = `job,owner,payload,status,created_ms,deadline_ms,node_payload,result,attempt,last_run_ms,placed_ms,exclusions,claimed_host,refresh_waits,expires_ms,park_reason,next_check_ms,failed_attempts`
+const spawnTaskColumns = `job,owner,payload,status,created_ms,deadline_ms,node_payload,result,attempt,last_run_ms,placed_ms,exclusions,claimed_host,refresh_waits,expires_ms,park_reason,next_check_ms,failed_attempts,claim_result`
 
 func (s *laneInboxStore) spawnTask(parent context.Context, id string) (hubSpawnTask, error) {
 	ctx, done := s.op(parent)

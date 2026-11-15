@@ -199,7 +199,12 @@ mixed tried notes) stores every reason (`host_full,quota`) and wakes on any;
 the status API shows the first. A mock lane's rc 80 is not parked. A parked,
 unbound row holds no pool slot (`liveSpawns`), a claimed-harness retry is not
 backed off (hk holds its claim on that host), and a parked pass emits no
-terminal refusal event. Wakes are hub memory: a restart forgets them and the
+terminal refusal event. The first cleanup-confirmed refusal after the hk job
+claim is kept in `claim_result` (set once; a later pre-claim refusal or a
+not-started attestation never writes it). A request with one may park, but
+it is never renewed or given up as unstarted: an unsent timeout, wherever the
+deadline passed, ends it with that saved refusal. A replay pin alone
+(`claimed_host` after a checkout refusal) proves no claim. Wakes are hub memory: a restart forgets them and the
 `next_check_at` timer covers it.
 
 **Back-off.** A failed attempt is a host refusal that hands the request to
@@ -228,8 +233,8 @@ unmeasured, design §9a): `{"spawn_backoff_seconds": 30,
 
 ### Rolling back past parking
 
-`0017_spawn_parked.sql` only adds `park_reason`, `next_check_ms` and
-`failed_attempts` (default `''`, 0, 0); an older hub neither reads nor writes
+`0017_spawn_parked.sql` only adds `park_reason`, `next_check_ms`,
+`failed_attempts` and `claim_result` (default `''`, 0, 0, `''`); an older hub neither reads nor writes
 them. A parked row is `status='accepted'` with `node_id IS NULL`, so an older
 hub's coordinator scan lists it and its bind CAS matches it: the older hub
 places it at once, without back-off or wake batch, and its GET shows

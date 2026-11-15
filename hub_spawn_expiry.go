@@ -120,9 +120,9 @@ func (s *laneInboxStore) releaseEndedSpawn(ctx context.Context, tx *sql.Tx, task
 }
 
 // spawnHoldsClaim reports a request whose hk job claim is proven held on its
-// claimed host: a saved node result from a stage after the job claim (the
-// claimed-harness retry). A replay pin (a checkout refusal, an unsent
-// timeout naming a host) is no claim: nothing started there.
+// claimed host: claim_result, written by the first post-claim refusal and
+// kept through later results. A replay pin (a checkout refusal, an unsent
+// timeout naming a host, a not-started attestation) is no claim.
 func spawnHoldsClaim(task hubSpawnTask) bool {
-	return task.ClaimedHost != "" && task.Outcome.NodeResult && !spawnStageBeforeJobClaim(task.Outcome.Stage)
+	return task.ClaimedHost != "" && task.ClaimResult != nil
 }
