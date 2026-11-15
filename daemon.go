@@ -29,6 +29,7 @@ type Config struct {
 	SocketPath, HerdrSocket, DBPath, InboxRoot string
 	StorePromptBody                            bool
 	IdleWakeSettle                             time.Duration
+	StallSafetyLimit                           time.Duration
 	QuotaStopAct                               bool
 	Logging                                    LoggingConfig
 	Hub                                        HubDaemonConfig
