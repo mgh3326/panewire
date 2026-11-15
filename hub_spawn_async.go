@@ -288,7 +288,9 @@ func (h *HubServer) runSpawnCoordinator(parent context.Context) {
 	work := make(chan hubSpawnTask, hubSpawnWorkerCount)
 	var mu sync.Mutex
 	active := map[string]bool{}
-	nodeActive := map[string]bool{}
+	// nodeActive counts dispatches per node, up to the node's advertised
+	// slots; a node that advertises none gets one (hk 4578).
+	nodeActive := map[string]int{}
 	for range hubSpawnWorkerCount {
 		h.spawnWorkers.Add(1)
 		go func() {
@@ -329,15 +331,23 @@ func (h *HubServer) runSpawnCoordinator(parent context.Context) {
 		if task.Status == "bound" && task.Node != nil && h.handleQueuedBinding(ctx, task) {
 			return
 		}
+		slots := 1
+		if task.Node != nil {
+			h.mu.Lock()
+			if record := h.nodes[task.Node.Machine]; record != nil {
+				slots = hubNodeSpawnSlots(record.capabilities)
+			}
+			h.mu.Unlock()
+		}
 		mu.Lock()
 		busy := active[task.Request.RequestID]
-		if task.Node != nil && nodeActive[task.Node.Machine] {
+		if task.Node != nil && nodeActive[task.Node.Machine] >= slots {
 			busy = true
 		}
 		if !busy {
 			active[task.Request.RequestID] = true
 			if task.Node != nil {
-				nodeActive[task.Node.Machine] = true
+				nodeActive[task.Node.Machine]++
 			}
 		}
 		mu.Unlock()
@@ -358,7 +368,9 @@ func (h *HubServer) runSpawnCoordinator(parent context.Context) {
 				}
 				mu.Lock()
 				delete(active, task.Request.RequestID)
-				delete(nodeActive, task.Node.Machine)
+				if nodeActive[task.Node.Machine]--; nodeActive[task.Node.Machine] <= 0 {
+					delete(nodeActive, task.Node.Machine)
+				}
 				mu.Unlock()
 				current, err := h.inbox.store.spawnTask(ctx, task.Request.RequestID)
 				if err == nil && (current.Node == nil || !spawnPending(current.Status) || current.Node.RequestID != task.Node.RequestID) {

@@ -773,10 +773,21 @@ falls through to another host. The node checks its journal before admission:
 completed requests replay their result, a request this node process is still
 running answers `reconciling`, and an executing entry no live execution owns
 (the node restarted mid-spawn) is settled or answers `unknown`. A new UUID
-waits for the node's single whole-spawn gate until its execution deadline,
-without an executing journal entry. Once admitted, the node rechecks the
-journal and deadline, commits the executing entry and keeps the gate through
-checkout, launch, brief delivery and cleanup. It commits the result before
+waits, until its execution deadline and without an executing journal entry,
+for one of the node's N spawn slots and then for its worktree hold. Once
+admitted, the node rechecks the journal and deadline, commits the executing
+entry and keeps both the slot and the worktree hold through checkout, launch,
+brief delivery, landing proof and cleanup.
+
+N is the node's `spawn_concurrency` in `spawn.json` (1..8); unset, it is 3,
+or 2 on a host whose machine id names `rpi` or `oci` (hk 4578). The worktree
+hold is keyed by the checkout's dir (case-folded), or by the cwd_map key for a
+spawn without a checkout, so two spawns of one worktree never overlap anywhere
+between preparation and landing. Preparation of one clone (fetch, worktree
+add) also runs one at a time; distinct worktrees overlap only after their own
+preparation. The node advertises `spawn_slots_v1=N` in hello and the hub keeps
+at most N dispatches open to it; a node that does not advertise it is
+dispatched one at a time, and an older hub never sends more than one. It commits the result before
 replying. A node drain wakes unclaimed waiters without a reply or journal row
 for replay after restart; work admitted before the drain is allowed to finish
 within the drain bound. Claimed executions retain the restart-settlement rules. See

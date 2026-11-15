@@ -212,9 +212,10 @@ func TestNodeSpawnGateTimeoutJournalsNotStarted_t4612(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			client, runs := grantNode(t)
 			peer, results, claims := grantPeer(t, client, "grant")
-			client.spawnGateOnce.Do(func() { client.spawnGate = make(chan struct{}, 1) })
-			client.spawnGate <- struct{}{}
-			defer func() { <-client.spawnGate }()
+			client.spawnSlotsOverride = 1
+			gate := client.nodeSpawnGate()
+			gate <- struct{}{}
+			defer func() { <-gate }()
 			message := admissionMessage(461205, true)
 			message.StartByMS = time.Now().Add(tc.startBy).UnixMilli()
 			message.DeadlineMS = time.Now().Add(tc.deadline).UnixMilli()
