@@ -77,4 +77,10 @@ func TestStallSafetyEpisode(t *testing.T) {
 	if due, err := state.observe(ctx, "job", "pane", "attempt-2", false, false, 2, start.Add(5*time.Hour+34*time.Minute), 30*time.Minute); err != nil || !due {
 		t.Fatalf("new attempt after limit: due=%v err=%v", due, err)
 	}
+	if err := state.retainPanes(ctx, nil); err != nil {
+		t.Fatal(err)
+	}
+	if due, err := state.observe(ctx, "job", "pane", "attempt-2", false, false, 2, start.Add(5*time.Hour+35*time.Minute), 30*time.Minute); err != nil || due {
+		t.Fatalf("reappearing pane: due=%v err=%v", due, err)
+	}
 }

@@ -65,6 +65,41 @@ func (s *stallSafetyState) markWorking(ctx context.Context, pane string) error {
 	return err
 }
 
+func (s *stallSafetyState) retainPanes(ctx context.Context, agents []HerdrAgentState) error {
+	seen := make(map[string]bool, len(agents))
+	for _, agent := range agents {
+		seen[agent.PaneID] = true
+	}
+	s.store.mu.Lock()
+	defer s.store.mu.Unlock()
+	rows, err := s.store.db.QueryContext(ctx, `SELECT DISTINCT pane FROM stall_safety_episodes`)
+	if err != nil {
+		return err
+	}
+	var missing []string
+	for rows.Next() {
+		var pane string
+		if err := rows.Scan(&pane); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		if !seen[pane] {
+			missing = append(missing, pane)
+		}
+	}
+	err = rows.Err()
+	_ = rows.Close()
+	if err != nil {
+		return err
+	}
+	for _, pane := range missing {
+		if _, err := s.store.db.ExecContext(ctx, `DELETE FROM stall_safety_episodes WHERE pane=?`, pane); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (s *stallSafetyState) episodeSequence(ctx context.Context, job, pane, attempt string, since int64) (int64, bool, error) {
 	s.store.mu.Lock()
 	defer s.store.mu.Unlock()

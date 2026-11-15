@@ -177,6 +177,9 @@ func newStallSafetyManager(q *quotaStopManager, idle *idleWakeManager, limit tim
 }
 
 func (m *stallSafetyManager) scan(ctx context.Context, agents []HerdrAgentState, now time.Time) error {
+	if err := m.state.retainPanes(ctx, agents); err != nil {
+		return err
+	}
 	for _, agent := range agents {
 		job, ok := m.lookup(ctx, agent.PaneID)
 		if !ok || job.OwnerLane == "" {
