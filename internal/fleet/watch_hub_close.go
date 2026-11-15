@@ -226,7 +226,7 @@ func (a *App) endUnlessHubClose(id string, seen Job, end func(j Job) error) (def
 	if e != nil {
 		return false, e
 	}
-	if a.hubCloseHolds(j) || foldHubClose(j).settled || lastEndOrAttempt(j) != lastEndOrAttempt(seen) {
+	if a.hubCloseHolds(j) || foldHubClose(j).settled || lastEndOrAttempt(j) != lastEndOrAttempt(seen) || attemptEndedIndependently(j) {
 		return true, nil
 	}
 	return false, end(j)
@@ -237,6 +237,67 @@ var endOrAttemptKinds = map[string]bool{
 	"job.claim": true, "job.claimed": true, "job.reclaim": true, "job.spawned": true, "job.reprompted": true,
 	"job.completed": true, "job.completion": true, "job.record_settled": true, "job.joined": true, "job.revoked": true,
 	"job.handed_off": true, "job.escalate": true, "job.reaped": true, "job.lost": true, hubCloseSettledKind: true,
+}
+
+// attemptEndedIndependently reports whether the current attempt's newest
+// end-or-attempt event is an end other than a quota stop announced for the
+// hub's hand-over: a hand-off decision then belongs to an attempt that has
+// ended (#593 review), even when the end came before this poll's snapshot.
+func attemptEndedIndependently(j Job) bool {
+	var last *Event
+	for _, ev := range ledgerOrder(j.Events) {
+		if endOrAttemptKinds[ev.Kind] {
+			ev := ev
+			last = &ev
+		}
+	}
+	if last == nil {
+		return false
+	}
+	switch last.Kind {
+	case "job.claim", "job.claimed", "job.reclaim", "job.spawned", "job.reprompted":
+		return false
+	case "job.lost":
+		return str(last.Payload, "reason") != "quota_stop" || boolean(last.Payload, "final", false)
+	}
+	return true
+}
+
+// hubCloseInFlight reports whether a hub close of the job can still act or is
+// owed: an open or owed intent, or a journalled operation not yet final.
+func (a *App) hubCloseInFlight(j Job) (bool, error) {
+	if a.hubCloseHolds(j) {
+		return true, nil
+	}
+	root, err := os.OpenRoot(filepath.Join(a.Jobs, j.ID))
+	if err != nil {
+		return false, err
+	}
+	defer root.Close()
+	dir, err := root.Open(CloseOpDir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	} else if err != nil {
+		return false, err
+	}
+	names, err := dir.Readdirnames(-1)
+	dir.Close()
+	if err != nil {
+		return false, err
+	}
+	for _, name := range names {
+		if strings.HasPrefix(name, ".") || !strings.HasSuffix(name, ".json") {
+			continue
+		}
+		op, found, err := ReadCloseOp(root, strings.TrimSuffix(name, ".json"))
+		if err != nil {
+			return false, err
+		}
+		if found && !op.Final() {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // lastEndOrAttempt names the newest end-or-attempt event in ledger order.

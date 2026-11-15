@@ -729,11 +729,15 @@ func (a *App) updateDecision(ctx context.Context, j Job) (*decisionWait, error) 
 
 // finishPublicationAfterHubClose finishes, for an attempt the node's hub close
 // settled, what the attempt already durably owes besides its end (#593
-// review): a pending credit rejection is published and receipted, with no
-// hand-over, since the attempt has ended; and a completion `done` left after
-// job.record_settled resumes from its receipts (pin, notify), with no new hk
-// decision. A failure is returned, so the re-armed watcher retries it.
+// review). A pending credit rejection is published and receipted with no
+// hand-over, since the attempt has ended; one that cannot be published is
+// paused, for the credit re-arm, and does not hold the rest back. A completion
+// `done` left after job.record_settled resumes, under the end lock, from the
+// report its receipt names when that file still has the settled digest; an
+// independent end recorded since (an owner's `job close`) is the attempt's
+// outcome and is kept, so no completion follows it. A failure is returned.
 func (a *App) finishPublicationAfterHubClose(ctx context.Context, j Job) error {
+	var pauseErr error
 	if credit, pending := pendingCreditRejection(j); pending {
 		var err error
 		for attempt := 1; attempt <= 3; attempt++ {
@@ -751,36 +755,67 @@ func (a *App) finishPublicationAfterHubClose(ctx context.Context, j Job) error {
 			}
 		}
 		if err != nil {
-			return a.pauseCreditPublication(ctx, j, credit, err)
-		}
-		if err := a.event(ctx, j.ID, "job.credit_published", map[string]any{"pool": credit.Pool, "at": credit.CreditExhaustedAt.UTC().Format(time.RFC3339Nano)}); err != nil {
+			pauseErr = a.pauseCreditPublication(ctx, j, credit, err)
+		} else if err := a.event(ctx, j.ID, "job.credit_published", map[string]any{"pool": credit.Pool, "at": credit.CreditExhaustedAt.UTC().Format(time.RFC3339Nano)}); err != nil {
 			return err
 		}
 	}
-	if interruptedCompletion(j) {
-		return a.lifecycleWithOptions(ctx, "done", []string{j.ID, "--report", j.Report}, true, false)
+	if err := a.resumeInterruptedCompletion(ctx, j.ID); err != nil {
+		return errors.Join(pauseErr, err)
 	}
-	return nil
+	return pauseErr
 }
 
-// interruptedCompletion reports whether the attempt's `done` recorded its
-// settlement receipt (job.record_settled) but not its notification
-// (job.completed), and its report is still there to finish from.
-func interruptedCompletion(j Job) bool {
-	settled := false
+// resumeInterruptedCompletion resumes, under the end lock, a done that
+// recorded job.record_settled but not job.completed, from the report its
+// receipt names.
+func (a *App) resumeInterruptedCompletion(ctx context.Context, id string) error {
+	unlock, err := LockJobEndContext(ctx, filepath.Join(a.Jobs, id))
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	j, err := a.job(id)
+	if err != nil {
+		return err
+	}
+	report, ok := interruptedCompletion(j)
+	if !ok || j.Terminal || j.Reaped {
+		return nil
+	}
+	return a.lifecycleWithOptions(ctx, "done", []string{j.ID, "--report", report}, true, false)
+}
+
+// interruptedCompletion returns the report a done settled (its receipt's
+// report, else the spawn's) when the attempt recorded job.record_settled but
+// not job.completed and that file still has the settled digest: a report
+// that changed or is gone is never published in its place.
+func interruptedCompletion(j Job) (string, bool) {
+	var receipt map[string]any
 	for _, ev := range ledgerOrder(j.Events) {
 		switch ev.Kind {
-		case "job.claim", "job.claimed", "job.reclaim", "job.spawned", "job.reprompted":
-			settled = false
+		case "job.claim", "job.claimed", "job.reclaim", "job.spawned", "job.reprompted", "job.completed":
+			receipt = nil
 		case eventRecordSettled:
-			settled = true
-		case "job.completed":
-			settled = false
+			receipt = ev.Payload
 		}
 	}
-	if !settled || j.Report == "" {
-		return false
+	if receipt == nil {
+		return "", false
 	}
-	info, err := os.Stat(j.Report)
-	return err == nil && info.Mode().IsRegular()
+	report := str(receipt, "report")
+	if report == "" {
+		report = j.Report
+	}
+	if report == "" {
+		return "", false
+	}
+	if info, err := os.Stat(report); err != nil || !info.Mode().IsRegular() {
+		return "", false
+	}
+	body, err := os.ReadFile(report)
+	if err != nil || reportDigest(body) != str(receipt, "report_sha256") {
+		return "", false
+	}
+	return report, true
 }

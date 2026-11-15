@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -306,31 +307,115 @@ func TestSettlementPreemptsARegisteredCloseAnEndOvertook_t4632(t *testing.T) {
 	}
 }
 
-// #593 review r4577077160: an interrupted done (job.record_settled without
-// job.completed) is recognized for recovery; a new attempt or job.completed
-// clears it.
+// #593 review: an interrupted done (job.record_settled without job.completed)
+// resumes from the report its receipt names, only while that file still has
+// the settled digest; the spawn's report is the fallback for an older
+// receipt; a new attempt or job.completed clears it.
 func TestInterruptedCompletion_t4632(t *testing.T) {
-	report := filepath.Join(t.TempDir(), "report.md")
-	if e := os.WriteFile(report, []byte("done\n"), 0o600); e != nil {
-		t.Fatal(e)
-	}
-	ev := func(seq int, kind string) Event {
-		return Event{Kind: kind, name: fmt.Sprintf("%05d-%s.json", seq, kind)}
-	}
-	for name, test := range map[string]struct {
-		events []Event
-		want   bool
-	}{
-		"settled, not notified": {[]Event{ev(1, "job.spawned"), ev(2, eventRecordSettled)}, true},
-		"notified":              {[]Event{ev(1, "job.spawned"), ev(2, eventRecordSettled), ev(3, "job.completed")}, false},
-		"a new attempt":         {[]Event{ev(1, eventRecordSettled), ev(2, "job.reprompted")}, false},
-		"never settled":         {[]Event{ev(1, "job.spawned")}, false},
-	} {
-		if got := interruptedCompletion(Job{ID: "j", Report: report, Events: test.events}); got != test.want {
-			t.Errorf("%s: %v, want %v", name, got, test.want)
+	dir := t.TempDir()
+	settled := filepath.Join(dir, "settled.md")
+	other := filepath.Join(dir, "spawn-default.md")
+	for path, body := range map[string]string{settled: "settled report\n", other: "another report\n"} {
+		if e := os.WriteFile(path, []byte(body), 0o600); e != nil {
+			t.Fatal(e)
 		}
 	}
-	if interruptedCompletion(Job{ID: "j", Report: filepath.Join(t.TempDir(), "missing"), Events: []Event{ev(1, eventRecordSettled)}}) {
-		t.Error("a missing report cannot be finished from")
+	digest := reportDigest([]byte("settled report\n"))
+	ev := func(seq int, kind string, payload map[string]any) Event {
+		return Event{Kind: kind, name: fmt.Sprintf("%05d-%s.json", seq, kind), Payload: payload}
+	}
+	withPath := map[string]any{"report_sha256": digest, "report": settled}
+	noPath := map[string]any{"report_sha256": digest}
+	for name, test := range map[string]struct {
+		spawnReport string
+		events      []Event
+		want        string
+	}{
+		"receipt names the report":        {other, []Event{ev(1, "job.spawned", nil), ev(2, eventRecordSettled, withPath)}, settled},
+		"older receipt, spawn report":     {settled, []Event{ev(1, "job.spawned", nil), ev(2, eventRecordSettled, noPath)}, settled},
+		"spawn report has another digest": {other, []Event{ev(1, "job.spawned", nil), ev(2, eventRecordSettled, noPath)}, ""},
+		"no report known":                 {"", []Event{ev(1, "job.spawned", nil), ev(2, eventRecordSettled, noPath)}, ""},
+		"notified":                        {other, []Event{ev(1, "job.spawned", nil), ev(2, eventRecordSettled, withPath), ev(3, "job.completed", nil)}, ""},
+		"a new attempt":                   {other, []Event{ev(1, eventRecordSettled, withPath), ev(2, "job.reprompted", nil)}, ""},
+		"never settled":                   {other, []Event{ev(1, "job.spawned", nil)}, ""},
+	} {
+		got, ok := interruptedCompletion(Job{ID: "j", Report: test.spawnReport, Events: test.events})
+		if got != test.want || ok != (test.want != "") {
+			t.Errorf("%s: %q %v, want %q", name, got, ok, test.want)
+		}
+	}
+	if e := os.WriteFile(settled, []byte("edited after settling\n"), 0o600); e != nil {
+		t.Fatal(e)
+	}
+	if _, ok := interruptedCompletion(Job{ID: "j", Events: []Event{ev(1, eventRecordSettled, withPath)}}); ok {
+		t.Error("a report changed since settling is never published in its place")
+	}
+}
+
+// #593 review: a hand-off decision on an attempt that already ended is
+// dropped even when the end came before the poll's snapshot; an announced
+// quota stop (the hand-over itself) is not such an end.
+func TestHandOffDecisionDroppedAfterAnEarlierEnd_t4632(t *testing.T) {
+	a, _ := hubCloseFixture(t)
+	if e := a.event(context.Background(), "j", "job.lost", map[string]any{"reason": "quota_stop", "final": false}); e != nil {
+		t.Fatal(e)
+	}
+	ran := false
+	decide := func(Job) error { ran = true; return nil }
+	if deferred, e := a.endUnlessHubClose("j", snapshot(t, a), decide); e != nil || deferred || !ran {
+		t.Fatalf("announced stop: deferred=%v err=%v ran=%v; want the hand-off decision run", deferred, e, ran)
+	}
+	ran = false
+	if e := a.event(context.Background(), "j", "job.revoked", map[string]any{}); e != nil {
+		t.Fatal(e)
+	}
+	if deferred, e := a.endUnlessHubClose("j", snapshot(t, a), decide); e != nil || !deferred || ran {
+		t.Fatalf("revoked before the snapshot: deferred=%v err=%v ran=%v; want dropped", deferred, e, ran)
+	}
+}
+
+// #593 review: restore waits while a hub close of the job can still act.
+func TestHubCloseInFlightFencesRestore_t4632(t *testing.T) {
+	a, _ := hubCloseFixture(t)
+	in := liveIntent(t, a)
+	recordHubClose(t, a, in)
+	writeJobCloseOp(t, a, CloseOp{RequestID: in.RequestID, Attempt: in.Attempt, State: CloseOpClosing})
+	if inFlight, e := a.hubCloseInFlight(snapshot(t, a)); e != nil || !inFlight {
+		t.Fatalf("closing op: in flight=%v err=%v", inFlight, e)
+	}
+	if e := a.restore(context.Background(), snapshot(t, a)); e == nil || !strings.Contains(e.Error(), "in flight") {
+		t.Fatalf("restore = %v, want refused while the close is in flight", e)
+	}
+	writeJobCloseOp(t, a, CloseOp{RequestID: in.RequestID, Attempt: in.Attempt, State: CloseOpRefused})
+	if e := a.recordHubCloseCancelForTest(in.RequestID); e != nil {
+		t.Fatal(e)
+	}
+	if inFlight, e := a.hubCloseInFlight(snapshot(t, a)); e != nil || inFlight {
+		t.Fatalf("after the close resolved: in flight=%v err=%v", inFlight, e)
+	}
+}
+
+// #593 review: `done`'s end-lock wait follows its caller's context, so an
+// in-process hub job.done never holds the node's acting lock past its
+// command deadline behind a held end lock.
+func TestDoneEndLockWaitFollowsItsContext_t4632(t *testing.T) {
+	a, _ := hubCloseFixture(t)
+	report := filepath.Join(t.TempDir(), "report.md")
+	if e := os.WriteFile(report, []byte("r\n"), 0o600); e != nil {
+		t.Fatal(e)
+	}
+	unlock, e := LockJobEnd(filepath.Join(a.Jobs, "j"))
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer unlock()
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	if e := a.lifecycle(ctx, "done", []string{"j", "--report", report}); e == nil {
+		t.Fatal("done ran under a held end lock")
+	}
+	if waited := time.Since(start); waited > 5*time.Second {
+		t.Fatalf("done waited %v past its 200ms context", waited)
 	}
 }
