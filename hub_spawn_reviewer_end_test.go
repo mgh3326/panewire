@@ -2,6 +2,8 @@ package panewire
 
 import (
 	"encoding/json"
+	"io"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -11,6 +13,63 @@ import (
 
 	"github.com/mgh3326/panewire/internal/fleet"
 )
+
+// reviewerReleaseRequest is a spawn for task 42 under role (and review pass 2
+// for a reviewer); next is the same task under a new job.
+func reviewerReleaseRequest(role string, next bool) fleet.Submission {
+	request := durableSpawnRequest()
+	request.Args = append([]string(nil), request.Args...)
+	for i, arg := range request.Args {
+		switch {
+		case arg == "implementer":
+			request.Args[i] = role
+		case next && arg == "test-job":
+			request.Args[i] = "test-job-r2"
+		}
+	}
+	if role == "reviewer" {
+		request.Args = append(request.Args, "--review-pass", "2")
+	}
+	if next {
+		request.RequestID = "d676220b-e763-4af1-aefd-000000000002"
+	}
+	return request
+}
+
+// reviewerReleaseHub holds task 42 under role with an operation that ended in
+// wantStatus with outcome and an hk job in state spawned (a failed operation is
+// claimed).
+func reviewerReleaseHub(t *testing.T, role, wantStatus string, outcome hubSpawnOutcome) (*HubServer, *httptest.Server, *roleJobs, hubSpawnTask) {
+	t.Helper()
+	t.Setenv(crashReportDSNEnv, "")
+	hub, err := NewHubServer(HubServerConfig{Tokens: map[string]string{"operator": t14OperatorToken, "machine-a": "node-token"}, InboxStorePath: filepath.Join(t.TempDir(), "inbox.sqlite3")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { hub.Close() })
+	state := "spawned"
+	if wantStatus == "failed" {
+		state = "claimed"
+	}
+	jobs := &roleJobs{records: map[string]map[string]any{"test-job": {"state": state}}}
+	hub.spawnNewApp = func(out, errout io.Writer) (*fleet.App, error) {
+		return &fleet.App{JobStore: jobs, Out: out, Err: errout}, nil
+	}
+	server := httptest.NewServer(hub.Handler())
+	t.Cleanup(server.Close)
+	held, _, err := hub.inbox.store.claimSpawn(t.Context(), reviewerReleaseRequest(role, false), "test-job", "parent", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = hub.inbox.store.completeSpawn(t.Context(), held, outcome, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	held, err = hub.inbox.store.spawnTask(t.Context(), held.Request.RequestID)
+	if err != nil || held.Status != wantStatus {
+		t.Fatalf("holder %+v %v", held, err)
+	}
+	return hub, server, jobs, held
+}
 
 // reviewerEndLedger is the node's job.result answer: findings is the decoded
 // findings object (nil for none), findingsError what the node says about a
