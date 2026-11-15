@@ -127,18 +127,21 @@ func (client *HubClient) probeFleetLogin(ctx context.Context, pool string) {
 	}
 	run, cancel := context.WithTimeout(ctx, fleetQuotaTimeout)
 	defer cancel()
+	started := client.nowUTC()
 	switch client.nativeQuotaSource(pool).probeLogin(run) {
 	case loginProbeLoginMissing:
-		client.noteLoginProbe(pool, true)
+		client.noteLoginProbe(pool, true, started)
 	case loginProbeLoginPresent:
-		client.noteLoginProbe(pool, false)
+		client.noteLoginProbe(pool, false, started)
 	}
 }
 
-// noteLoginProbe records what a probe found. A pass also forgets a login-screen
-// mark: this host's credential works now. A change asks for a readiness
-// refresh and logs one line, never the measurement or the credential.
-func (client *HubClient) noteLoginProbe(pool string, missing bool) {
+// noteLoginProbe records what a probe found. A pass also forgets the
+// login-screen marks set before the probe started: this host's credential works
+// now, while a mark written during the probe is newer evidence. A change asks
+// for a readiness refresh and logs one line, never the measurement or the
+// credential.
+func (client *HubClient) noteLoginProbe(pool string, missing bool, started time.Time) {
 	client.readiness.mu.Lock()
 	changed := client.readiness.probeMissing[pool] != missing
 	if missing {
@@ -148,8 +151,7 @@ func (client *HubClient) noteLoginProbe(pool string, missing bool) {
 		client.readiness.probeMissing[pool] = true
 	} else {
 		delete(client.readiness.probeMissing, pool)
-		if _, marked := client.readiness.loginScreens[pool]; marked {
-			delete(client.readiness.loginScreens, pool)
+		if client.clearLoginScreenMarksBefore(pool, started) {
 			changed = true
 		}
 	}

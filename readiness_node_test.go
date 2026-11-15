@@ -470,8 +470,46 @@ func TestCmdLoginScreenMarkClearsOnCommandcodeMeasurement(t *testing.T) {
 	if cmd := client.collectReadiness(t.Context()).Harnesses["cmd"]; cmd.Login != fleet.ReadinessLoginMissing {
 		t.Fatalf("a fresh login-screen mark must read missing: cmd=%+v", cmd)
 	}
-	client.noteOwnQuotaMeasurement("commandcode")
+	client.noteOwnQuotaMeasurement("commandcode", client.nowUTC())
 	if cmd := client.collectReadiness(t.Context()).Harnesses["cmd"]; cmd.Login != fleet.ReadinessLoginPresent {
 		t.Fatalf("a successful commandcode measurement must clear the cmd mark: cmd=%+v", cmd)
+	}
+	// A passing login probe is the other proof that the login works.
+	client.readiness.loginScreens = map[string]time.Time{"cmd": client.nowUTC().Add(-time.Minute)}
+	client.noteLoginProbe("commandcode", false, client.nowUTC())
+	if cmd := client.collectReadiness(t.Context()).Harnesses["cmd"]; cmd.Login != fleet.ReadinessLoginPresent {
+		t.Fatalf("a passing commandcode probe must clear the cmd mark: cmd=%+v", cmd)
+	}
+	// A mark written while the proof was in flight is newer evidence: a probe
+	// that started before the launch stopped at the login screen must not
+	// forget it.
+	mark := client.nowUTC()
+	client.readiness.loginScreens = map[string]time.Time{"cmd": mark}
+	client.noteLoginProbe("commandcode", false, mark.Add(-time.Minute))
+	if cmd := client.collectReadiness(t.Context()).Harnesses["cmd"]; cmd.Login != fleet.ReadinessLoginMissing {
+		t.Fatalf("a probe that started before the mark cleared it: cmd=%+v", cmd)
+	}
+}
+
+// A pass that measured omp here but published no reading is not proof of a
+// login: refreshCommandcode returns measuredHere with the store's error when
+// every account's publication fails. The pass must not forget a launch's
+// login-screen mark, or cmd would read present and grant a cmd seat to a node
+// that just showed the login screen.
+func TestFailedCommandcodeMeasurementKeepsTheCmdLoginMark(t *testing.T) {
+	store := newAccountStore(t)
+	url := store.server.URL
+	store.server.Close()
+	spawn := claudeStore(t, url)
+	client := quotaClient(t)
+	client.loginProbeIntervalOf = func() time.Duration { return 0 }
+	client.spawnConfigPath = spawn
+	client.noteQuotaAccount("commandcode", "commandcode:0123456789abcdef")
+	omp := &ompFake{output: commandcodeFixture(t, "omp_usage_two_accounts.json")}
+	client.nativeQuota = map[string]*nativeQuotaSource{"commandcode": commandcodeTestSource(spawn, omp)}
+	client.readiness.loginScreens = map[string]time.Time{"cmd": client.nowUTC().Add(-time.Minute)}
+	client.refreshFleetQuota(t.Context(), "commandcode", map[string]fleetQuotaSent{})
+	if cmd := client.collectReadiness(t.Context()).Harnesses["cmd"]; cmd.Login != fleet.ReadinessLoginMissing {
+		t.Fatalf("a failed measurement cleared the cmd login mark: cmd=%+v", cmd)
 	}
 }

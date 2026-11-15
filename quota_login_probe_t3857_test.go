@@ -370,7 +370,7 @@ func TestSubmitUnconfirmedAtTheLoginScreenMarksLoginMissingAtOnce(t *testing.T) 
 			t.Fatal("a launch that cleared login_missing did not ask for a readiness refresh")
 		}
 		launchWithCapture(t, client, "agy-flash38-medium", fleet.ExitSubmitUnconfirmed, agyLoginScreen)
-		client.noteLoginProbe("agy", false)
+		client.noteLoginProbe("agy", false, client.nowUTC())
 		if got := poolLogin(t, client, "agy").Login; got != fleet.ReadinessLoginPresent {
 			t.Fatalf("login after a passing probe = %q", got)
 		}
@@ -422,7 +422,7 @@ func TestSubmitUnconfirmedAtTheLoginScreenMarksLoginMissingAtOnce(t *testing.T) 
 func TestSuccessfulLaunchClearsAFailedLoginProbe(t *testing.T) {
 	client := quotaClient(t)
 	client.noteQuotaAccount("agy", agyKeyForTest)
-	client.noteLoginProbe("agy", true)
+	client.noteLoginProbe("agy", true, client.nowUTC())
 	if got := poolLogin(t, client, "agy").Login; got != fleet.ReadinessLoginMissing {
 		t.Fatalf("login after a failed probe = %q", got)
 	}
