@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"maps"
 	"net/url"
 	"os"
@@ -357,6 +358,10 @@ type TaskPaneSweeper struct {
 	// (outcome_failed.go).
 	failures        map[string]deferredFailure
 	settledFailures map[string]bool
+	// textfileWarned holds the textfile publication failures already warned
+	// about, by reason, so a daemon logs each one once
+	// (publishPaneMetricTextfile).
+	textfileWarned map[string]bool
 }
 
 func (s *TaskPaneSweeper) info(message string, attrs ...any) {
@@ -1137,9 +1142,17 @@ func (a *App) capturePaneScreen(ctx context.Context, j Job) ([]byte, error) {
 // label comes from Alloy's instance label, not the file.
 const paneSweepMetricFile = "panewire_panes.prom"
 
+// paneSweepTextfileDirEnv names the directory Alloy's textfile collector
+// scrapes (deploy/alloy/README.md). On Linux Alloy runs as its own user, which
+// cannot read the node's 0600 state-dir copy, so a node daemon whose
+// environment sets this publishes the same body there at mode 0644.
+const paneSweepTextfileDirEnv = "FLEET_TEXTFILE_DIR"
+
 // reportEndedPanes writes the pass's kept-pane counts to the node_exporter
 // textfile under the node state dir and logs them. A pass that judged no
-// candidate still writes, so a stale reason clears.
+// candidate still writes, so a stale reason clears. When the node sets
+// FLEET_TEXTFILE_DIR the same body is published there too; the two writes are
+// independent, so one failing still leaves the other.
 func (s *TaskPaneSweeper) reportEndedPanes(a *App, counts map[string]int) {
 	var b strings.Builder
 	b.WriteString("# HELP panewire_ended_job_panes_open Panes of ended jobs still open on this node, by keep reason.\n")
@@ -1150,12 +1163,49 @@ func (s *TaskPaneSweeper) reportEndedPanes(a *App, counts map[string]int) {
 		total += counts[reason]
 	}
 	s.info("ended job panes open", "open", total, "reasons", fmt.Sprint(counts))
+	body := []byte(b.String())
 	dir := filepath.Join(a.stateDir(), "metrics")
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		a.warn("pane metric not written: %v", err)
-		return
-	}
-	if err := durable.ReplaceFileAtomically(filepath.Join(dir, paneSweepMetricFile), ".panewire_panes-*.tmp", []byte(b.String()), 0600); err != nil {
+	} else if err := durable.ReplaceFileAtomically(filepath.Join(dir, paneSweepMetricFile), ".panewire_panes-*.tmp", body, 0600); err != nil {
 		a.warn("pane metric not written: %v", err)
 	}
+	s.publishPaneMetricTextfile(a, body)
+}
+
+// publishPaneMetricTextfile publishes the pass's body into FLEET_TEXTFILE_DIR,
+// where Alloy's textfile collector reads it as its own user. The state-dir copy
+// stays the node's own record. The directory must already exist: a typo warns
+// instead of being created. A failed publication warns once per reason and
+// never fails the pass.
+func (s *TaskPaneSweeper) publishPaneMetricTextfile(a *App, body []byte) {
+	dir := strings.TrimSpace(os.Getenv(paneSweepTextfileDirEnv))
+	if dir == "" {
+		return
+	}
+	if err := durable.ReplaceFileAtomically(filepath.Join(dir, paneSweepMetricFile), ".panewire_panes-*.tmp", body, 0644); err != nil {
+		s.warnTextfileOnce(a, err)
+	}
+}
+
+// warnTextfileOnce logs a textfile publication failure unless that reason was
+// already logged by this sweeper, which lives for the daemon's run. The key is
+// the cause, not the message: a missing directory's error names a fresh
+// temporary file every pass.
+func (s *TaskPaneSweeper) warnTextfileOnce(a *App, err error) {
+	reason := "write_failed"
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		reason = "dir_missing"
+	case errors.Is(err, fs.ErrPermission):
+		reason = "dir_unwritable"
+	}
+	if s.textfileWarned == nil {
+		s.textfileWarned = map[string]bool{}
+	}
+	if s.textfileWarned[reason] {
+		return
+	}
+	s.textfileWarned[reason] = true
+	a.warn("pane metric not written to %s (%s): %v", paneSweepTextfileDirEnv, reason, err)
 }

@@ -23,8 +23,23 @@ they belong in the private plist's `EnvironmentVariables`.
 | Variable | Effect | Default |
 | --- | --- | --- |
 | `ALLOY_ENABLE_COLLECTORS` | JSON list of extra unix-exporter collectors, e.g. `["thermal"]` or `["textfile"]`. Thermal needs hardware CPU power status; hosts without it log an error per scrape, so it is opt-in. | unset → `[]` (no extra collectors) |
-| `FLEET_TEXTFILE_DIR` | Directory of `*.prom` files scraped when `"textfile"` is in `ALLOY_ENABLE_COLLECTORS` (app gauges such as session and quota counters). Required when enabling textfile. | unset |
+| `FLEET_TEXTFILE_DIR` | Directory of `*.prom` files scraped when `"textfile"` is in `ALLOY_ENABLE_COLLECTORS` (app gauges such as session and quota counters, and the panewire kept-pane gauge below). Required when enabling textfile. | unset |
 | `ALLOY_DISABLE_COLLECTORS` | JSON list of default unix-exporter collectors to turn off. macOS enables `thermal` by default; set `["thermal"]` on Macs without hardware CPU power status (Apple silicon), otherwise every scrape logs an error. | unset → `[]` |
+
+The panewire node daemon reads `FLEET_TEXTFILE_DIR` from its own environment.
+When it is set there, every pane-sweep pass publishes `panewire_panes.prom` —
+the `panewire_ended_job_panes_open` gauge, the panes of ended jobs still open,
+by keep reason — at mode 0644, in addition to the 0600 copy under the node
+state dir (panewire `docs/pane-sweep.md`). Alloy's EnvironmentFile is not the
+daemon's environment: set the variable in the daemon's unit as well
+(`Environment=FLEET_TEXTFILE_DIR=...` in `panewired.service`) or in the launchd
+plist's `EnvironmentVariables`. The directory must already exist and be
+writable by the node's user and readable by Alloy; a missing or unwritable
+directory never fails a sweep and is logged once per reason.
+
+```promql
+sum by (machine_id) (panewire_ended_job_panes_open)
+```
 
 ## Install
 

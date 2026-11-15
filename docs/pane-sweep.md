@@ -155,6 +155,17 @@ from Alloy's `instance` label; panewire writes none. Each pass also logs one
 structured `ended job panes open` line with the counts. The node has no
 `/metrics` endpoint; Alloy's textfile collector reads the file.
 
+Alloy's textfile collector reads `*.prom` from `FLEET_TEXTFILE_DIR`, and on
+Linux it runs as its own user, which cannot read that 0600 state-dir copy. When
+the node daemon's own environment sets `FLEET_TEXTFILE_DIR`, each pass also
+publishes the same body to `$FLEET_TEXTFILE_DIR/panewire_panes.prom`, atomically
+and at mode 0644; the state-dir copy stays. The directory must already exist
+and be writable by the node's user and readable by Alloy; panewire does not
+create it. A failed publication never fails the pass and logs one warning per
+reason (`dir_missing`, `dir_unwritable`, `write_failed`) per daemon run.
+Setting the variable for Alloy does not set it for the daemon; add it to the
+daemon's service environment too (deploy/alloy/README.md).
+
 ## Worktree
 
 After it closes a job's pane, the sweep removes the worktree the node
