@@ -167,18 +167,22 @@ type HubClient struct {
 	panesAliveMu sync.Mutex
 	// paneIdleSince is the first heartbeat at which each pane was idle or
 	// done (hub_jobs_idle.go).
-	paneIdleSince     map[string]time.Time
-	paneIdleMu        sync.Mutex
-	sessionMu         sync.Mutex
-	spawnConfigPath   string
-	spawnJournalDir   string
-	spawnGateOnce     sync.Once
-	spawnGate         chan struct{}
-	spawnEngine       hubSpawnEngine
-	spawnPrepare      func(context.Context, nodeWorktreePrepareArgs) (any, string) // fixture seam
-	spawnJournalMu    sync.Mutex
-	spawnJournal      *nodeSpawnJournal
-	spawnJournalUsers int
+	paneIdleSince        map[string]time.Time
+	paneIdleMu           sync.Mutex
+	sessionMu            sync.Mutex
+	spawnConfigPath      string
+	spawnJournalDir      string
+	spawnSlotsAdvertised atomic.Int32
+	spawnSlotsOverride   int // fixture seam; 0 reads spawn.json
+	spawnAdmissionOnce   sync.Once
+	spawnAdmission       *nodeSpawnAdmission
+	spawnLocksMu         sync.Mutex
+	spawnLocks           map[string]chan struct{}
+	spawnEngine          hubSpawnEngine
+	spawnPrepare         func(context.Context, nodeWorktreePrepareArgs) (any, string) // fixture seam
+	spawnJournalMu       sync.Mutex
+	spawnJournal         *nodeSpawnJournal
+	spawnJournalUsers    int
 	// spawnActive holds the journal requests this process is executing; an
 	// executing entry missing from it was left by a restart.
 	spawnActiveMu sync.Mutex // also guards spawnWaiting
@@ -695,6 +699,7 @@ type hubOutboundMessage struct {
 	Checkout           *hubSpawnCheckout
 	Args               []string
 	DeadlineMS         int64
+	ExpiresMS          int64 // the request's absolute expiry; read by a spawn_expires_v1 node
 	StartByMS          int64 // grant-required attempt: the node starts only with a hub grant by then
 	Granted            bool  // job.spawn.grant answer
 	OperatorAuthorized bool
@@ -1934,10 +1939,17 @@ const defaultHubHelloAckTimeout = 5 * time.Second
 // decoder would refuse the whole call (hk 4658).
 const hubCapabilityCloseQuestion = "pane_close_question_v1"
 
+// hubCapabilitySpawnExpires is advertised by a node whose job.spawn decoder
+// reads expires_ms. The hub sends the request's absolute expiry only to such a
+// node, which writes it into the job.spawned receipt as expires_at so the
+// pane sweep ends a reviewer or consult by its real limit (hk 4747). An older
+// node's strict decoder refuses the whole frame for the extra field.
+const hubCapabilitySpawnExpires = "spawn_expires_v1"
+
 // hubSpawnCapabilities is what an upgraded node advertises in hello.
 // close_ops_v1 (hubCapabilityCloseOps) is deliberately not advertised: no
 // hub may issue close ops until hk 4632 adds the migration barrier.
-var hubSpawnCapabilities = []string{"spawn_v2", "spawn_ops_v1", hubCapabilitySpawnGrant, hubCapabilityCloseQuestion, hubCapabilityApplied}
+var hubSpawnCapabilities = []string{"spawn_v2", "spawn_ops_v1", hubCapabilitySpawnGrant, hubCapabilityCloseQuestion, hubCapabilitySpawnExpires, hubCapabilityApplied}
 
 func (client *HubClient) helloAckTimeoutOrDefault() time.Duration {
 	if client.helloAckTimeout > 0 {
@@ -2037,7 +2049,7 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 	// that does not know the capabilities field drops the whole hello (see
 	// docs/r26-hub-spawn.md "Rollout order and rollback"), so the hello ack timer below re-sends it
 	// without them rather than leaving this node off the fleet.
-	if err := client.writeHello(ctx, peer, hubSpawnCapabilities); err != nil {
+	if err := client.writeHello(ctx, peer, client.helloCapabilities(hubSpawnCapabilities)); err != nil {
 		return nil, err
 	}
 	client.setRelayEmitter(func(event hubClientEvent) { _ = peer.write(ctx, hubClientWireEvent(event)) })
@@ -2182,7 +2194,7 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 				// the full hello once more; a hub that rejects capabilities
 				// drops it and keeps the record it already has.
 				capsResent = true
-				if err := client.writeHello(ctx, peer, hubSpawnCapabilities); err != nil {
+				if err := client.writeHello(ctx, peer, client.helloCapabilities(hubSpawnCapabilities)); err != nil {
 					return nil, err
 				}
 				// A repeated hello resets the hub's job and host state for
@@ -3109,11 +3121,11 @@ func parseHubOutboundRejection(payload []byte) (hubOutboundMessage, hubOutboundR
 		var brief hubSpawnBrief
 		var briefFields map[string]json.RawMessage
 		for name := range fields {
-			if name != "type" && name != "request_id" && name != "cwd_key" && name != "brief" && name != "checkout" && name != "args" && name != "wait_seconds" && name != "deadline_ms" && name != "start_by_ms" && name != "operator_authorized" {
+			if name != "type" && name != "request_id" && name != "cwd_key" && name != "brief" && name != "checkout" && name != "args" && name != "wait_seconds" && name != "deadline_ms" && name != "expires_ms" && name != "start_by_ms" && name != "operator_authorized" {
 				return hubOutboundMessage{}, reject
 			}
 		}
-		if (len(fields) < 6 || len(fields) > 10) || json.Unmarshal(fields["request_id"], &message.RequestID) != nil || json.Unmarshal(fields["cwd_key"], &message.CWDKey) != nil || json.Unmarshal(fields["brief"], &brief) != nil || json.Unmarshal(fields["brief"], &briefFields) != nil || (len(briefFields) != 1) || json.Unmarshal(fields["args"], &message.Args) != nil || message.Args == nil || json.Unmarshal(fields["wait_seconds"], &message.WaitSeconds) != nil {
+		if (len(fields) < 6 || len(fields) > 11) || json.Unmarshal(fields["request_id"], &message.RequestID) != nil || json.Unmarshal(fields["cwd_key"], &message.CWDKey) != nil || json.Unmarshal(fields["brief"], &brief) != nil || json.Unmarshal(fields["brief"], &briefFields) != nil || (len(briefFields) != 1) || json.Unmarshal(fields["args"], &message.Args) != nil || message.Args == nil || json.Unmarshal(fields["wait_seconds"], &message.WaitSeconds) != nil {
 			return hubOutboundMessage{}, reject
 		}
 		if raw, ok := briefFields["inline"]; ok {
@@ -3136,6 +3148,11 @@ func parseHubOutboundRejection(payload []byte) (hubOutboundMessage, hubOutboundR
 		}
 		if raw, ok := fields["deadline_ms"]; ok {
 			if json.Unmarshal(raw, &message.DeadlineMS) != nil || message.DeadlineMS <= 0 {
+				return hubOutboundMessage{}, reject
+			}
+		}
+		if raw, ok := fields["expires_ms"]; ok {
+			if json.Unmarshal(raw, &message.ExpiresMS) != nil || message.ExpiresMS <= 0 {
 				return hubOutboundMessage{}, reject
 			}
 		}

@@ -123,7 +123,7 @@ func (s *Store) Acquire(ctx context.Context, req LeaseReq) (Lease, error) {
 		if out.Superseded != "" {
 			superseded = out.Superseded
 		}
-		out.EventSeq, err = s.recordEvent(c, req.Job, "lease.acquire", map[string]any{
+		out.EventSeq, err = s.recordEvent(ctx, c, req.Job, "lease.acquire", map[string]any{
 			"resource": req.Resource, "kind": req.Kind, "resolved_from": "resource",
 			"token": maskToken(out.Token), "expires_at": iso(expires), "superseded": superseded,
 		}, nil)
@@ -174,7 +174,7 @@ func (s *Store) Release(ctx context.Context, job, resource, kind, token string, 
 		if err = settleJob(c, row.job, moment); err != nil {
 			return err
 		}
-		_, err = s.recordEvent(c, row.job, evKind, map[string]any{"resource": row.resource, "kind": row.kind, "token": maskToken(row.token), "forced": force}, nil)
+		_, err = s.recordEvent(ctx, c, row.job, evKind, map[string]any{"resource": row.resource, "kind": row.kind, "token": maskToken(row.token), "forced": force}, nil)
 		return err
 	})
 }
@@ -306,7 +306,7 @@ func (s *Store) RecordQuotaPool(ctx context.Context, q QuotaRun) (QuotaResult, e
 			p[k] = v
 		}
 		var err error
-		out.EventSeq, err = s.recordEvent(c, q.Job, "quota_pool.record", p, nil)
+		out.EventSeq, err = s.recordEvent(ctx, c, q.Job, "quota_pool.record", p, nil)
 		return err
 	})
 	return out, e
@@ -357,7 +357,7 @@ func (s *Store) ReleaseQuotaPool(ctx context.Context, job, pool string, force bo
 		if force {
 			kind += ".force"
 		}
-		_, err = s.recordEvent(c, job, kind, map[string]any{"job_id": job, "pool": pool, "profile": profile, "started_at": started, "forced": force}, nil)
+		_, err = s.recordEvent(ctx, c, job, kind, map[string]any{"job_id": job, "pool": pool, "profile": profile, "started_at": started, "forced": force}, nil)
 		return err
 	})
 }

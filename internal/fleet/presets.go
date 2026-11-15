@@ -2,6 +2,8 @@ package fleet
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -9,6 +11,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"time"
 )
 
 func (a *App) workPreset(ctx context.Context, args []string) (Spawn, error) {
@@ -124,7 +127,36 @@ type createdWorkspace struct {
 	rootPane  string
 }
 
+// resolveWorkspace holds a per-(herdr session, label) file lock across the
+// list-then-create decision, so neither concurrent node spawns (hk 4578, one
+// process) nor a node spawn and a local or SSH launch (separate processes)
+// can each find the label absent and each create a workspace. The wait ends
+// with the spawn's own context.
 func (a *App) resolveWorkspace(ctx context.Context, value string) (string, *createdWorkspace, error) {
+	dir := filepath.Join(a.stateDir(), "workspace-locks")
+	if e := os.MkdirAll(dir, 0o700); e != nil {
+		return "", nil, e
+	}
+	sum := sha256.Sum256([]byte(a.HerdrSession + "\x00" + value))
+	lock, e := secureOpen(filepath.Join(dir, hex.EncodeToString(sum[:8])+".lock"), true, a.warn)
+	if e != nil {
+		return "", nil, e
+	}
+	defer lock.Close()
+	// The poll stays on the wall clock: it is a wait, not a recorded time.
+	for !tryLock(lock) {
+		timer := time.NewTimer(50 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return "", nil, ctx.Err()
+		case <-timer.C:
+		}
+	}
+	return a.resolveWorkspaceLocked(ctx, value)
+}
+
+func (a *App) resolveWorkspaceLocked(ctx context.Context, value string) (string, *createdWorkspace, error) {
 	rows, err := a.workspaceRows(ctx, value)
 	if err != nil {
 		// Herdr ids are unambiguous; keep them usable when listing is unavailable.

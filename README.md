@@ -82,7 +82,7 @@ panewire prompt --from 'sender (role, pane-id)' --to orch-mock \
   --file "$HOME/work/herdr-inbox/jobs/example/prompt.md" --uptake status-transition
 ```
 
-Prompt files begin with recipient metadata such as `expect: name=orch-mock cwd=/work`; `name=` or `cwd=` is required. `cwd=` uses exact absolute-path matching. Panewire records the prompt SHA-256, path, target identity, revisions, and evidence states, but does not store prompt text by default. To opt in, pass `--store-prompt-body` to `panewire prompt` or configure the daemon with `--store-prompt-body`; the body is then kept only in the separate `delivery_bodies` table.
+Prompt files begin with recipient metadata such as `expect: name=orch-mock cwd=/work`; `name=` or `cwd=` is required. `cwd=` uses exact absolute-path matching. `panewire prompt` reaches only panes this host's herdr session serves: a target on another host or herdr session is refused with the command to use instead — answer a job's ESC with `panewire emit --kind lane.event --lane <job> --type order --text ...` and check delivery with `panewire inbox status --event-id <id>`. Panewire records the prompt SHA-256, path, target identity, revisions, and evidence states, but does not store prompt text by default. To opt in, pass `--store-prompt-body` to `panewire prompt` or configure the daemon with `--store-prompt-body`; the body is then kept only in the separate `delivery_bodies` table.
 
 The CLI never falls back to herdr directly. If the daemon socket is absent it exits 4. `PANEWIRE_SOCKET` is available for tests and non-default local installations.
 
@@ -167,7 +167,12 @@ load and publisher liveness. It serves that state as a snapshot
 every spawn. See [docs/fleet-state.md](docs/fleet-state.md) for the
 message contract, the freshness rule, rollout and rollback.
 
-The node closes a worker's pane once its hk task is merged, done or dropped, or the job was closed, and the pane has stayed not working past a grace; a worker that reported READY keeps its pane while its PR is open. See [the task pane sweep](docs/pane-sweep.md). Job directories hk has confirmed can expire after a TTL, off by default; see [the job dir TTL](docs/job-dir-ttl.md).
+The hub also writes one handoffkeep document, `fleet/status/latest`, every few
+minutes with host presence, per-host account quota and the plan per grade, for
+the console fleet-status page; `--fleet-status-interval` sets the period (`0`
+turns it off). See [docs/fleet-status.md](docs/fleet-status.md).
+
+The node closes a worker's pane once its hk task is merged, done or dropped, or the job was closed, and the pane has stayed not working past a grace; a worker that reported READY keeps its pane while its PR is open. The same pass republishes a report whose `done` upload failed, once its file still holds the bytes the completion announced. See [the task pane sweep](docs/pane-sweep.md). Job directories hk has confirmed can expire after a TTL, off by default; see [the job dir TTL](docs/job-dir-ttl.md).
 
 The daemon's hot paths (heartbeat, relay outbox, quota-stop and pane-to-session lookups) read job and lane events through an in-process index refreshed by directory mtime, so a pass costs a stat per job directory plus the directories that changed; see [the job event index](docs/job-event-index.md).
 
@@ -246,6 +251,8 @@ binary or forwarding shim is installed. The remaining hub orchestration and
 caller changes ship in the coordinated cutover before old binaries are removed.
 
 
-Spawn execution now belongs to the hub. `panewire spawn` and `work TASK` print ACCEPTED after a durable reservation; this is not landing proof. `--dry-run` stays synchronous and `--wait` preserves the job-completion contract. See [durable spawn operations](docs/hub-spawn-operations.md) for replay, timeout, recovery and Sentry behavior, and [observability](docs/observability.md) for the relay, held-reservation and job-result fleet events and their Sentry fingerprints.
+Spawn execution now belongs to the hub. `panewire spawn` and `work TASK` print ACCEPTED after a durable reservation; this is not landing proof. `--dry-run` stays synchronous and `--wait` preserves the job-completion contract. See [durable spawn operations](docs/hub-spawn-operations.md) for replay, timeout, recovery and Sentry behavior, A request carries a time limit (`--expires`, default 6 h for an implementer and 1 h for a reviewer or consult); see [time limit](docs/hub-spawn-operations.md#time-limit). A request no host can take now is parked with a reason and a next check, and re-placement after a failed attempt backs off; see [parked](docs/hub-spawn-operations.md#parked). See also [observability](docs/observability.md) for the relay, held-reservation and job-result fleet events and their Sentry fingerprints.
 
 `panewire escalate-author` is the hub's half of the review-round rule: at round 5 without a pass it starts the author again one ladder step up on the same worktree, with the findings and the consult seat, and records one info for the design lane. See [escalate author](docs/escalate-author.md).
+
+`panewire consult request` asks the hub for a consult: the hub picks the seat (one grade above the task, another family), runs one ordinary spawn and records the stored answer. See [consult on request](docs/consult-on-request.md).

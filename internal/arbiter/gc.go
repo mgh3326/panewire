@@ -339,7 +339,7 @@ func (s *Store) GCWithJobs(ctx context.Context, agents AgentSourceForJobs) (GCRe
 				return aerr
 			}
 			if fresh {
-				if _, err = s.recordEvent(c, r.job, "lease.expire", map[string]any{"resource": r.resource, "kind": r.kind, "expires_at": r.expires}, nil); err != nil {
+				if _, err = s.recordEvent(ctx, c, r.job, "lease.expire", map[string]any{"resource": r.resource, "kind": r.kind, "expires_at": r.expires}, nil); err != nil {
 					return err
 				}
 				res.Transitioned = append(res.Transitioned, Transition{r.resource, r.kind, r.job, r.expires})
@@ -461,7 +461,7 @@ func (s *Store) GCWithJobs(ctx context.Context, agents AgentSourceForJobs) (GCRe
 			if _, err = c.exec("DELETE FROM quota_pool_records WHERE job_id = ? AND pool = ?", d.quota.job, d.quota.pool); err != nil {
 				return sqlErr(err)
 			}
-			if _, err = s.recordEvent(c, d.job, "quota_pool.stale_cleanup", map[string]any{
+			if _, err = s.recordEvent(ctx, c, d.job, "quota_pool.stale_cleanup", map[string]any{
 				"job_id": d.job, "pool": d.quota.pool, "profile": d.quota.profile, "started_at": d.quota.started,
 				"agent_label": d.label, "reason": reason, "herdr_status": nonNil(d.statuses),
 			}, nil); err != nil {
@@ -490,7 +490,7 @@ func (s *Store) GCWithJobs(ctx context.Context, agents AgentSourceForJobs) (GCRe
 			if _, err = c.exec("UPDATE jobs SET state = 'released', updated_at = ? WHERE job_id = ? AND state = 'leased'", iso(moment), id); err != nil {
 				return sqlErr(err)
 			}
-			seq, rerr := s.recordEvent(c, id, "job.orphan_release", map[string]any{
+			seq, rerr := s.recordEvent(ctx, c, id, "job.orphan_release", map[string]any{
 				"job_id": id, "prior_state": o.state, "agent_label": cand.label,
 				"herdr_status": nonNil(cand.statuses), "reason": cand.reason, "forced": false,
 			}, nil)
@@ -624,7 +624,7 @@ func (s *Store) ReleaseOrphan(ctx context.Context, job string, agents AgentSourc
 		if _, err = c.exec("UPDATE jobs SET state = 'released', updated_at = ? WHERE job_id = ? AND state = 'leased'", iso(moment), job); err != nil {
 			return sqlErr(err)
 		}
-		seq, err := s.recordEvent(c, job, "job.orphan_release", map[string]any{
+		seq, err := s.recordEvent(ctx, c, job, "job.orphan_release", map[string]any{
 			"job_id": job, "prior_state": o.state, "agent_label": label,
 			"herdr_status": nonNil(statuses), "reason": reason, "forced": true,
 		}, nil)

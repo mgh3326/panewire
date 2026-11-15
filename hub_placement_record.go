@@ -30,7 +30,7 @@ import (
 // begin (retryable). reconciling and deadline_exceeded still accept a later
 // node answer for the same attempt.
 func spawnAttemptTerminal(status string) bool {
-	return status == "succeeded" || status == "failed" || status == "retryable"
+	return status == "succeeded" || status == "failed" || status == "retryable" || status == "given_up"
 }
 
 // placementRecordDeliveryBudget bounds one outbox delivery; the record stays
@@ -478,7 +478,7 @@ func (h *HubServer) deliverPlacementRecord(ctx context.Context, requestID string
 // job is placed, a refusal before the node's hk job claim is refused, and
 // anything past it failed.
 func hubPlacementRecord(task hubSpawnTask, tr fleet.PlacementTrace, attempt int) fleet.PlacementRecord {
-	if task.Attempt == attempt && (task.Outcome.Reason == "timeout" || spawnOutcomeNotStarted(task.Outcome)) {
+	if task.Attempt == attempt && (task.Outcome.Reason == "timeout" || task.Status == "given_up" || spawnOutcomeNotStarted(task.Outcome)) {
 		// An in-process placement error can race the authoritative deadline or
 		// not-started result. The terminal operation decides this verdict.
 		tr.Record, tr.Outcome, tr.Reason = nil, "", ""
@@ -512,9 +512,12 @@ func hubPlacementRecord(task hubSpawnTask, tr fleet.PlacementTrace, attempt int)
 			Model:      o.Model,
 			Pool:       firstNonEmptyString(o.Pool, tr.Pool),
 			AccountKey: firstNonEmptyString(o.AccountKey, tr.AccountKey),
-			Role:       firstNonEmptyString(o.Role, tr.Role),
-			Family:     tr.Family,
-			Repo:       tr.Repo,
+			// The outcome carries the spawn role (implementer, reviewer,
+			// consult); hk stores the work class. The trace role is already
+			// one, and the mapping is idempotent on it.
+			Role:   fleet.PlacementWorkClass(firstNonEmptyString(o.Role, tr.Role), ""),
+			Family: tr.Family,
+			Repo:   tr.Repo,
 		},
 	}
 	if rec.Outcome != "" {

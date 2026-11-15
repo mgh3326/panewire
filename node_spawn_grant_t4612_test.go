@@ -58,7 +58,7 @@ func grantNode(t *testing.T) (*HubClient, *atomic.Int32) {
 	t.Helper()
 	var runs atomic.Int32
 	client := &HubClient{spawnConfigPath: t14SpawnConfig(t, t.TempDir()), spawnJournalDir: t.TempDir(), fleetEvents: (&fleetEventRecorder{}).write}
-	client.spawnEngine = func(context.Context, string, string, string, string, []string) (*hubSpawnOutput, fleet.Execution) {
+	client.spawnEngine = func(context.Context, string, string, string, string, time.Time, []string) (*hubSpawnOutput, fleet.Execution) {
 		runs.Add(1)
 		return t14EngineOK()
 	}
@@ -212,9 +212,9 @@ func TestNodeSpawnGateTimeoutJournalsNotStarted_t4612(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			client, runs := grantNode(t)
 			peer, results, claims := grantPeer(t, client, "grant")
-			client.spawnGateOnce.Do(func() { client.spawnGate = make(chan struct{}, 1) })
-			client.spawnGate <- struct{}{}
-			defer func() { <-client.spawnGate }()
+			client.spawnSlotsOverride = 1
+			release, _ := client.nodeAdmission().tryAdmit("", 1)
+			defer release()
 			message := admissionMessage(461205, true)
 			message.StartByMS = time.Now().Add(tc.startBy).UnixMilli()
 			message.DeadlineMS = time.Now().Add(tc.deadline).UnixMilli()

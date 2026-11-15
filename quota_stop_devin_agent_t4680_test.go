@@ -24,11 +24,11 @@ func TestDetectRealDevinScreenWithExplainAgentT4680(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Date(2026, 11, 15, 16, 48, 0, 0, time.UTC)
-	stop, basis, ok := quotastop.Detect(string(raw), "devin", "", now, time.UTC)
+	stop, basis, ok := quotastop.Detect(string(raw), "devin", "", quotastop.DevinSessionEvidence{}, now, time.UTC)
 	if !ok || basis != quotastop.BasisClassifier || stop.Pool != "devin-free" || stop.Reset.IsZero() {
 		t.Fatalf("Detect(devin) = (%+v, %q, %v), want a devin-free classifier stop with a reset", stop, basis, ok)
 	}
-	if _, _, ok := quotastop.Detect(string(raw), "", "", now, time.UTC); ok {
+	if _, _, ok := quotastop.Detect(string(raw), "", "", quotastop.DevinSessionEvidence{}, now, time.UTC); ok {
 		t.Fatal("Detect with no agent kind read the indented banner")
 	}
 }

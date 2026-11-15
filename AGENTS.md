@@ -34,6 +34,8 @@ leave the old code for a cleanup PR rather than copying its pattern.
 | Bound text for a wire/record/display contract | the named variant | `text_bounds.go` |
 | Mode-0600 env/credential file | `loadMode0600Env` | `env_file.go` |
 | CLI exit status | the `Exit*` constants (`internal/arbiter` keeps its own frozen set) | `wait.go` |
+| A test run's temp state dir: name, sweep stale ones, remove read-only trees | `teststate.StatePrefix` / `SweepStale` / `RemoveAll` | `internal/teststate` |
+| Pin the go toolchain env before a `TestMain` moves HOME or `XDG_CACHE_HOME` | `teststate.PinGoToolchainEnv` | `internal/teststate` |
 
 - Never slice a string with `s[:n]` or `[]rune(s)[:n]` inline where `n` can
   cut text; use the `textbound` cuts. The truncation variants in
@@ -64,6 +66,10 @@ leave the old code for a cleanup PR rather than copying its pattern.
   outcome you assert, not on an earlier step that precedes it.
 - `time.Sleep` in a test is only for simulated latency, fixture pacing, or a
   window that proves nothing *more* happens; say which in a comment.
+- A `TestMain` scopes its run's state with `teststate.StatePrefix`, sweeps
+  stale dirs a killed run left behind, and pins the go toolchain env before it
+  moves `HOME` or `XDG_CACHE_HOME`; otherwise every run that builds with `go`
+  writes a fresh cache into the state dir (hk 4733).
 - The PR `test (ubuntu-latest)` check splits the root package across runners with
   `scripts/ci-test-shard.sh`. It deals out every name from `go test -list .`, so a new test
   needs no CI edit; `ci_workflow_shard_test.go` fails if any test would run in no shard.

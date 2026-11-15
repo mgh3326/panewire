@@ -73,7 +73,7 @@ func (h *HubServer) startQuotaReplacement(machine string, event hubJobEventPaylo
 	if h.inbox == nil || event.Reason != "quota_stop" {
 		return
 	}
-	if h.spawnGrantDrain {
+	if h.spawnGrantDrain || h.spawnRollbackDrain {
 		// A rollback drain creates no successor: an older hub could misread
 		// its *_grant row (docs/hub-spawn-operations.md).
 		h.logger.Warn("hub quota hand-off skipped while draining grant rows", "host", machine, "job", event.JobID)
@@ -364,11 +364,13 @@ func spawnMayStillRun(task hubSpawnTask) bool {
 	return false
 }
 
-// spawnStatusActive lists the operation states the coordinator still works
-// (laneInboxStore.pendingSpawns).
+// spawnStatusActive lists the operation states that are not settled for the
+// caller: the coordinator still works them (laneInboxStore.pendingSpawns), or
+// the start-condition queue holds them (waiting). A waiting row is not final:
+// it is released once its predicates hold or ended at its limit.
 func spawnStatusActive(status string) bool {
 	switch status {
-	case "accepted", "bound", "dispatching", "reconciling", "deadline_exceeded":
+	case "accepted", "bound", "dispatching", "reconciling", "deadline_exceeded", "waiting":
 		return true
 	}
 	return false
@@ -386,9 +388,10 @@ func (h *HubServer) awaitSpawnOutcome(ctx context.Context, requestID string, lim
 	for {
 		task, err := h.inbox.store.spawnTask(ctx, requestID)
 		// accepted, dispatching, reconciling and deadline_exceeded are the
-		// states the coordinator still retries (pendingSpawns); a node may yet
-		// complete the successor from reconciling. Only succeeded, failed and
-		// retryable are final.
+		// states the coordinator still retries (pendingSpawns), and waiting is
+		// held by the start-condition queue; a node may yet complete the
+		// successor from reconciling. Only succeeded, failed and retryable are
+		// final.
 		if err == nil && !spawnStatusActive(task.Status) {
 			return task, true
 		}

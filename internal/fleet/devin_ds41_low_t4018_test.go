@@ -75,13 +75,13 @@ func TestDevinDS41LowRequiresTheArm(t *testing.T) {
 		t.Fatalf("policy seat for %s does not exist", ds41LowProfile)
 	}
 	l := Launch{Profile: ds41LowProfile, ModelID: ds41LowModelID, Pool: "devin", Grade: gradeUnrated, Gate: defaultGate}
-	if err := seat.Check(l, "implementer", "A", "", "", nil); err == nil {
+	if err := seat.Check(l, "implementer", "A", "", "", true); err == nil {
 		t.Fatalf("%s admitted a graded task without PANEWIRE_E6_ARM", ds41LowProfile)
 	}
-	if err := seat.Check(l, "implementer", "A", "", "some-other-seat@", nil); err == nil {
+	if err := seat.Check(l, "implementer", "A", "", "some-other-seat@", true); err == nil {
 		t.Fatalf("%s admitted a graded task on another seat's marker", ds41LowProfile)
 	}
-	if err := seat.Check(l, "implementer", "A", "", ds41LowProfile+"@", nil); err != nil {
+	if err := seat.Check(l, "implementer", "A", "", ds41LowProfile+"@", true); err != nil {
 		t.Fatalf("%s refused its own marker: %v", ds41LowProfile, err)
 	}
 }

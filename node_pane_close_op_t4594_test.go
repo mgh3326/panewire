@@ -802,8 +802,9 @@ func TestCloseOpRecordsTheHubCloseIntentFirst_t4652(t *testing.T) {
 
 // A watcher of an older binary would not defer to the intent: the node
 // refuses before recording anything. With no watcher at all the node closes:
-// it settles the close itself, and every close_op, status and release runs a
-// settlement step.
+// it settles the close itself, and every close_op, status and release that
+// succeeds runs a settlement step; a refused one leaves it to the daemon pass
+// (hk 4632).
 func TestCloseOpFencesTheWatcherAndSettles_t4652(t *testing.T) {
 	inbox := t.TempDir()
 	fake := idlePaneHerdr()
@@ -817,8 +818,8 @@ func TestCloseOpFencesTheWatcherAndSettles_t4652(t *testing.T) {
 	wantCloseOp(t, client, "op-1", fleet.CloseOpClosed, false)
 	wantCloseOp(t, client, "op-1", fleet.CloseOpClosed, true)
 	wantCloseStatus(t, client, nodeCommandPaneCloseStatus, "op-1", fleet.CloseOpClosed, false)
-	if len(ledger.settled) != 4 {
-		t.Fatalf("settlement steps %v, want one per close_op, replay and status", ledger.settled)
+	if len(ledger.settled) != 3 {
+		t.Fatalf("settlement steps %v, want one per successful close_op, replay and status", ledger.settled)
 	}
 	if fake.called("pane", "close") != 1 {
 		t.Fatalf("calls=%v", fake.calls)
@@ -897,7 +898,7 @@ func TestCloseOpReleaseFencesAnUnregisteredRequest_t4652(t *testing.T) {
 }
 
 // No hello advertises close_ops_v1: no hub may issue a close op to any node
-// until hk 4632 adds the migration barrier.
+// until the activation prerequisite (an owned launch boundary) lands.
 func TestNoHelloAdvertisesCloseOps_t4652(t *testing.T) {
 	if slices.Contains(hubSpawnCapabilities, hubCapabilityCloseOps) {
 		t.Fatalf("hello capabilities %v advertise %s", hubSpawnCapabilities, hubCapabilityCloseOps)

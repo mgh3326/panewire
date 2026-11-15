@@ -38,7 +38,7 @@ func (sp *selPresence) hostEligible(h selHost, seat *Seat) bool {
 
 // canMeasure is hostEligible without the placement restriction.
 func (sp *selPresence) canMeasure(h selHost, seat *Seat) bool {
-	return h.eligible && (!h.excluded || h.restricted) && (h.awake || h.wakeable) && (seat.Capability == "standard" || boolean(h.cfg, seat.Capability, false))
+	return h.eligible && (!h.excluded || h.restricted) && (h.awake || h.wakeable) && (seat.Capability == "standard" || capability(sp.ready.states, h.name, h.cfg, seat.Capability))
 }
 
 func (sp *selPresence) hasHost(seat *Seat) bool {
@@ -58,24 +58,24 @@ func (sp *selPresence) bindings(seat *Seat, pool string) []accountBinding {
 		if !sp.canMeasure(h, seat) {
 			continue
 		}
-		key := hostAccount(sp.presence, pool, h.presence, sp.now, sp.presTTL)
-		if key == "" {
-			continue
-		}
-		i := slices.IndexFunc(bindings, func(b accountBinding) bool { return b.key == key })
-		if i < 0 {
-			bindings = append(bindings, accountBinding{key: key})
-			i = len(bindings) - 1
-		}
-		bindings[i].holders = append(bindings[i].holders, h)
-		if sp.hostEligible(h, seat) {
-			// The readiness filter drops the pair before ranking: the host
-			// stays a holder (it can still measure the account) but is not
-			// offered this seat.
-			if code := sp.readinessDrop(h, seat); code != "" {
-				continue
+		// A host holds one account per pool, except a multi-account pool
+		// (commandcode: every account omp holds), where each is its own binding.
+		for _, key := range hostAccounts(sp.presence, pool, h.presence, sp.now, sp.presTTL) {
+			i := slices.IndexFunc(bindings, func(b accountBinding) bool { return b.key == key })
+			if i < 0 {
+				bindings = append(bindings, accountBinding{key: key})
+				i = len(bindings) - 1
 			}
-			bindings[i].hosts = append(bindings[i].hosts, h)
+			bindings[i].holders = append(bindings[i].holders, h)
+			if sp.hostEligible(h, seat) {
+				// The readiness filter drops the pair before ranking: the host
+				// stays a holder (it can still measure the account) but is not
+				// offered this seat.
+				if code := sp.readinessDrop(h, seat); code != "" {
+					continue
+				}
+				bindings[i].hosts = append(bindings[i].hosts, h)
+			}
 		}
 	}
 	bindings = slices.DeleteFunc(bindings, func(b accountBinding) bool { return len(b.hosts) == 0 })
@@ -260,7 +260,7 @@ func (p *selPlan) classifyRung(c *selCand, account *PoolView) {
 func (p *selPlan) classify(c *selCand, v PoolView) {
 	c.blocking, c.projected, c.urgency, c.resetHrs = v.Blocking, v.Projected, v.Urgency, v.ResetHours
 	c.longProj = longProjection(v)
-	c.headroom = p.policy.headroomFor(v.Shortest, p.req.expected)
+	c.headroom = p.policy.headroomFor(v.Shortest, p.req.expected, p.windowBurn(c.row.Pool, v.Shortest))
 	c.wasteGroup = v.Group
 	if p.policy.isCredit(c.row.Pool) || v.Class == "credit" {
 		c.creditPool = true

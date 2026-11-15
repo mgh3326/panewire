@@ -126,7 +126,7 @@ func (h *HubServer) releaseUnworkedSpawn(ctx context.Context, app *fleet.App, ho
 	if state, _ := record["state"].(string); state != "claimed" || !failedBeforeBrief(holder) || checkout == nil || machine == "" || !validNodeJobName(name) || !validNodeJobName(holder.Job) {
 		return false, ""
 	}
-	if !nodePaneIdleStatus[row.AgentStatus] || !spawnReceiptCheckoutPath(row.Cwd, checkout.Dir, hubSpawnArg(holder.Request.Args, "-L")) || !validNodeCommandPath(row.Cwd) {
+	if !nodePaneIdleStatus[row.AgentStatus] || !spawnReceiptCheckoutPath(row.Cwd, checkout.Dir, hubSpawnFlagArg(holder.Request.Args, "-L")) || !validNodeCommandPath(row.Cwd) {
 		return false, ""
 	}
 	if h.now().Before(holder.Deadline.Add(h.unworkedLandingGrace)) {

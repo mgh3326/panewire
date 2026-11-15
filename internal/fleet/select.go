@@ -6,6 +6,7 @@ import (
 	_ "embed"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math"
 	"os"
 	"slices"
@@ -203,6 +204,23 @@ func (a *App) poolPolicy() (PoolPolicy, error) {
 	return p, err
 }
 
+// StatusPoolPolicy is the pool order a status reader uses: the one this App's
+// operator config applies ([local].pool_policy, then PANEWIRE_POOL_POLICY,
+// then built-in), the same one selection uses.
+func (a *App) StatusPoolPolicy() (PoolPolicy, error) { return a.poolPolicy() }
+
+// StatusPoolPolicy is the pool order the operator config applies without an
+// App: [local].pool_policy, then PANEWIRE_POOL_POLICY, then the built-in order.
+// `quota status` and the fleet status snapshot use it so a band is not
+// computed under a different tier order from a spawn.
+func StatusPoolPolicy() (PoolPolicy, error) {
+	c, err := LoadConfig(configPath(io.Discard))
+	if err != nil {
+		return PoolPolicy{}, err
+	}
+	return LoadPoolPolicy(str(c.Local, "pool_policy"))
+}
+
 // selCand is one profile/rung/account choice. Static refusals have no account.
 // Reason records a drop; Tier and TierName record its quota-policy rank.
 type selCand struct {
@@ -265,7 +283,9 @@ type selCand struct {
 	code       string
 	// measuredAt is the shared reading's measurement time and stale marks it
 	// past its freshness window, so a quota drop can name the evidence's age.
-	measuredAt  time.Time
+	measuredAt time.Time
+	// windows are the account reading's windows as measured, for the plan.
+	windows     viewWindows
 	stale       bool
 	ignoreGrade bool
 	// headroom is the candidate's fit against the job's expected hours (the
@@ -320,17 +340,25 @@ type selPlan struct {
 	// creditMissing names credit pools whose entry records no dollars, logged
 	// once per plan so the operator knows to record them.
 	creditMissing []string
+	// burnRate resolves the rate a candidate's window is charged at from the
+	// pool's observation history (select_burn.go). A plan built without
+	// admission inputs (a unit test) leaves it nil and the policy defaults
+	// apply.
+	burnRate func(pool string, window time.Duration) burnRate
 }
 type selReq struct {
-	grade            string
-	lane             string
-	t                string
-	role             string
-	tags             []string
-	effort           string
-	allowEscalation  bool
-	authorFamily     string
-	excludeFamilies  []string
+	grade           string
+	lane            string
+	t               string
+	role            string
+	tags            []string
+	effort          string
+	allowEscalation bool
+	authorFamily    string
+	excludeFamilies []string
+	// excludeProfiles drops candidates by seat profile. A consult respawn
+	// names the profile that failed so the next eligible seat is chosen.
+	excludeProfiles  []string
 	urgency          string
 	urgencySource    string
 	excludeHarnesses []string
@@ -452,6 +480,8 @@ func (a *App) seatFor(row CatalogRow, req selReq) (string, *Seat, string) {
 			reason = "seat_rung"
 		} else {
 			switch {
+			case slices.Contains(req.excludeProfiles, name) || slices.Contains(req.excludeProfiles, seat.Canon):
+				reason = "profile_excluded"
 			case slices.Contains(req.excludeFamilies, seat.Family):
 				reason = "family_excluded"
 			case req.route.top() && req.authorFamily != "" && seat.Family == req.authorFamily:
@@ -609,13 +639,30 @@ const (
 // --urgency is omitted (policy/quota-stop: urgent_priorities [1, 2]).
 var urgentPriorities = []int{1, 2}
 
+// UrgentTaskPriority reports whether an hk task priority is one of the urgent
+// ones. The hub's long-parked owner notice uses the same set (hk 4662).
+func UrgentTaskPriority(priority int) bool { return slices.Contains(urgentPriorities, priority) }
+
+// UrgencyFlag reports what an explicit --urgency flag decides: urgent (true) or
+// normal (false). explicit is false for an empty flag, where the bound task's
+// priority decides, exactly as resolveUrgency reads it (hk 4662).
+func UrgencyFlag(flag string) (urgent bool, explicit bool) {
+	switch flag {
+	case urgencyUrgent:
+		return true, true
+	case urgencyNormal:
+		return false, true
+	}
+	return false, false
+}
+
 // resolveUrgency applies the explicit flag first, then the bound task's hk
 // priority, then the normal default. The returned source names which won.
 func resolveUrgency(flag string, task client.Task) (string, string) {
 	if flag != "" {
 		return flag, "flag"
 	}
-	if slices.Contains(urgentPriorities, task.Priority) {
+	if UrgentTaskPriority(task.Priority) {
 		return urgencyUrgent, "task-priority"
 	}
 	return urgencyNormal, "default"
@@ -692,11 +739,14 @@ type selPresence struct {
 	// every (host, profile) pair the filter removed before ranking.
 	ready readinessView
 	drops []readinessDrop
+	// burn is each pool's burn measurement for this round (select_burn.go), so
+	// one plan reads a pool's history once however many candidates it has.
+	burn map[string]burnRates
 }
 
 func (a *App) newSelPresence(ctx context.Context, s Spawn, req selReq) *selPresence {
 	required := req.tags
-	sp := &selPresence{a: a, now: a.Now(), presTTL: a.placementTTL("presence_ttl_s", 86400), accounts: map[string]SharedAccount{}, refreshed: map[string]accountRefresh{}, unreachable: map[string]string{}}
+	sp := &selPresence{a: a, now: a.Now(), presTTL: a.placementTTL("presence_ttl_s", 86400), accounts: map[string]SharedAccount{}, refreshed: map[string]accountRefresh{}, unreachable: map[string]string{}, burn: map[string]burnRates{}}
 	sp.hub, sp.degraded = a.hostViews(ctx, s.CWD)
 	sp.ready = a.newReadinessView(ctx, s.CWD)
 	if a.Source == nil {
@@ -902,6 +952,9 @@ func (a *App) selectFor(ctx context.Context, s Spawn, req selReq) (*selPlan, err
 		return nil, fail(exitConfig, "POLICY_UNAVAILABLE: bench catalog unreadable: %v", e)
 	}
 	pres := a.newSelPresence(ctx, s, req)
+	p.burnRate = func(pool string, window time.Duration) burnRate {
+		return pres.burnRates(ctx, pool).rate(window, policy)
+	}
 	p.repo = pres.ready.repo
 	p.capsGap = capsGap(pres.hosts, req.tags)
 	p.degraded = append(p.degraded, pres.degraded...)
@@ -998,6 +1051,7 @@ func (a *App) selectFor(ctx context.Context, s Spawn, req selReq) (*selPlan, err
 			}
 			acc := pres.account(ctx, binding.key, row.Pool, binding.holders, false)
 			x.measuredAt, x.stale = acc.MeasuredAt, acc.Observed && !acc.Fresh
+			x.windows = acc.windows()
 			if why := sharedReason(binding.key, acc); why != "" || acc.Quota == nil {
 				x.code = pres.accountFailureCode(binding.key)
 				x.reason = strings.ToLower(x.code)
@@ -1009,12 +1063,22 @@ func (a *App) selectFor(ctx context.Context, s Spawn, req selReq) (*selPlan, err
 			if x.code == outcomeQuotaUnknown {
 				acc = pres.account(ctx, binding.key, row.Pool, binding.holders, true)
 				x.measuredAt, x.stale = acc.MeasuredAt, acc.Observed && !acc.Fresh
+				x.windows = acc.windows()
 				if sharedReason(binding.key, acc) == "" && acc.Quota != nil {
 					x.reason, x.code, x.outcome = "", "", ""
 					p.classifyRung(&x, acc.Quota)
 				} else {
 					x.code = pres.accountFailureCode(binding.key)
 					x.reason, x.outcome = strings.ToLower(x.code), "dropped:"+strings.ToLower(x.code)
+				}
+			}
+			if x.reason == "" && IsFreeRung(x.row.Profile) {
+				// One concurrent free-band launch per account: a burst's second
+				// launch already moves to another pool (hk 4765).
+				if key, live := capGate.freeAccountFull(ctx, binding.key); key != "" {
+					x.reason, x.code = reasonPoolAtCap, outcomeQuotaExhausted
+					x.cap, x.capLive, x.capLimit = key, live, freeBandPerAccountLimit
+					x.outcome = "dropped:" + x.reason
 				}
 			}
 			if x.reason == "" {
@@ -1403,6 +1467,9 @@ func (p *selPlan) record() map[string]any {
 		if c.stale {
 			row["stale"] = true
 		}
+		if len(c.windows) > 0 && slices.Contains(multiAccountPools, c.row.Pool) {
+			row["windows"] = c.windows.rows()
+		}
 		if c.seatName != "" {
 			row["seat"] = c.seatName
 		}
@@ -1473,7 +1540,14 @@ func (p *selPlan) record() map[string]any {
 			}
 		}
 		if h := c.headroom; h != nil {
-			row["headroom"] = map[string]any{"fits": h.fits, "remaining_pct": h.remainingPct, "burn_pct_per_h": h.burnPctPerH, "expected_hours": h.expectedHours, "reset_hours": h.resetHours}
+			headroom := map[string]any{"fits": h.fits, "remaining_pct": h.remainingPct, "burn_pct_per_h": h.burnPctPerH, "burn_source": h.burnSource, "expected_hours": h.expectedHours, "reset_hours": h.resetHours}
+			if h.burnReason != "" {
+				headroom["burn_reason"] = h.burnReason
+			}
+			if h.burnWindow != "" {
+				headroom["burn_window"] = h.burnWindow
+			}
+			row["headroom"] = headroom
 		}
 		if len(c.judgments) > 0 {
 			row["quota_gates"] = c.judgments

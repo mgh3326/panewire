@@ -192,22 +192,58 @@ func (a *App) nativeVerdict(ctx context.Context, r QuotaRequest, live bool) (adm
 	if !d.OK && d.Exit != gateUnmeasurable {
 		return d, ""
 	}
+	keys := []string{key}
 	if key == "" {
-		if keys := a.localAccountKeys(ctx, d.Pool); len(keys) > 0 {
-			key = keys[0]
-		} else if fp := policy.Accounts[d.Pool]; fp != "" {
-			key = d.Pool + ":" + fp
+		keys = a.localAccountKeys(ctx, d.Pool)
+		if len(keys) == 0 {
+			if fp := policy.Accounts[d.Pool]; fp != "" {
+				keys = []string{d.Pool + ":" + fp}
+			}
+		}
+		if !slices.Contains(multiAccountPools, d.Pool) {
+			// One account per host: the first.
+			keys = keys[:min(len(keys), 1)]
 		}
 	}
-	if key == "" {
+	if len(keys) == 0 {
 		return d.refuse(gateUnmeasurable, "measurement unavailable: this host holds no "+d.Pool+" account"), ""
 	}
 	in.AccountScoped = true
-	if why := a.loadAccount(ctx, &in, key, live, r.AccountKey == ""); why != "" {
-		return d.refuse(gateUnmeasurable, why), key
+	// A pool whose host holds several accounts (multiAccountPools) is judged on
+	// each in turn and admitted on the first that admits: one exhausted or
+	// unreadable account does not decide for the pool. When none admits, the first
+	// account's refusal is the verdict.
+	base := d
+	var first admissionVerdict
+	firstUnread := false
+	for i, k := range keys {
+		var verdict admissionVerdict
+		unread := false
+		// Each account is judged on its own evidence only: loadAccount installs a
+		// reading just on its success path (a manual-fallback admit installs none),
+		// so the previous account's reading and operator entries must not linger.
+		delete(in.Readings, d.Pool)
+		delete(in.Manual, d.Pool)
+		if why := a.loadAccount(ctx, &in, k, live, r.AccountKey == ""); why != "" {
+			verdict, unread = base.refuse(gateUnmeasurable, why), true
+		} else {
+			in.Now = a.Now()
+			verdict = in.judge(req)
+		}
+		if i == 0 {
+			first, firstUnread, key = verdict, unread, k
+		}
+		if verdict.OK {
+			d, key, firstUnread = verdict, k, false
+			break
+		}
+		d = first
 	}
-	in.Now = a.Now()
-	d = in.judge(req)
+	if firstUnread {
+		// No stored reading of the account could be judged: nothing to rank
+		// alternatives on.
+		return d, key
+	}
 	if live && !d.OK && d.Grade != "" && d.Exit != gateRoleDenied && d.Exit != gateUnsubscribed {
 		// Alternatives read the other same-grade pools' stored readings for
 		// the accounts this host holds — no lease, no measurement (hk 3211).
@@ -377,6 +413,9 @@ func admissionAuto(x *shared.Observation, pool, key string, now time.Time, ttl t
 		reading.Free = &admissionFree{State: free.State, Reset: free.ResetsAt}
 	}
 	for _, b := range x.Buckets {
+		if !WindowRead(pool, b.Window) {
+			continue
+		}
 		used := b.UsedPct
 		if !admissionValidPct(&used) || b.Scope != "account" && b.Scope != "model" && b.Scope != "group" {
 			return admissionReading{}, false

@@ -276,7 +276,7 @@ func (c *hkQuota) sharedAccount(ctx context.Context, key string) (SharedAccount,
 		if age := c.now().Sub(acc.MeasuredAt); age >= -time.Minute && age <= ttl {
 			acc.Fresh = true
 		}
-		acc.Quota = withFree(accountPoolView(o.Buckets, c.now()), o.FreeBucket, c.now())
+		acc.Quota = withFree(accountPoolView(readableBuckets(accountPool(key), o.Buckets), c.now()), o.FreeBucket, c.now())
 	}
 	return acc, nil
 }
@@ -294,6 +294,22 @@ func withFree(v *PoolView, free *shared.FreeBucket, now time.Time) *PoolView {
 	}
 	v.Free = f
 	return v
+}
+
+// WindowRead says a measured window of pool is one the fleet reads. The
+// commandcode month is not read, projected or gated on (decision 289, hk 4707):
+// a node that still runs the earlier API measurement publishes a 30d bucket, and
+// it is ignored until that node is replaced.
+func WindowRead(pool, window string) bool {
+	return pool != commandcodePool || window != "30d"
+}
+
+// readableBuckets is buckets without the windows WindowRead refuses for pool.
+func readableBuckets(pool string, buckets []accountBucket) []accountBucket {
+	if pool != commandcodePool {
+		return buckets
+	}
+	return slices.DeleteFunc(slices.Clone(buckets), func(b accountBucket) bool { return !WindowRead(pool, b.Window) })
 }
 
 // accountBucket is the allowlisted shared-observation wire format. Model
@@ -404,6 +420,7 @@ func rankedPoolView(buckets []accountBucket, now time.Time, rankScope, group str
 		if !inView(b) {
 			continue
 		}
+		v.Windows = append(v.Windows, ViewWindow{Window: b.Window, UsedPct: *b.UsedPct, ResetsAt: b.ResetsAt})
 		if v.Blocking == nil || *b.UsedPct > *v.Blocking {
 			v.Blocking = b.UsedPct
 		}

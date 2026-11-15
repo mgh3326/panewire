@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 
 	"github.com/mgh3326/panewire/internal/fleet"
 )
@@ -86,15 +85,28 @@ func TestLegacyPlacementVersionReconciliation_t4581(t *testing.T) {
 			}
 			outcome := hubSpawnOutcome{RC: 70, Stage: "launch", Reason: "spawn_failed", Host: "machine-a", NodeResult: true}
 			if tc.timeout {
-				outcome = hubSpawnOutcome{RC: 124, Stage: "landing", Reason: "timeout", Host: "machine-a", Retryable: true, NodeResult: true}
-			}
-			if changed, err := hub.inbox.store.completeSpawn(t.Context(), task, outcome, time.Now()); err != nil || !changed {
-				t.Fatalf("commit result: changed=%v err=%v", changed, err)
+				// The hub's own timeout of the unsent binding.
+				outcome = hubSpawnOutcome{RC: 124, Stage: "landing", Reason: "timeout", Host: "machine-a", Retryable: true}
 			}
 			hk.mu.Lock()
 			hk.lookup = []fleet.PlacementRecord{remote}
 			hk.lookupRequireSince = tc.historical
 			hk.mu.Unlock()
+			// The hub's own write: an attempt that timed out unstarted begins the
+			// next one inside it, after restoring the deferred trace (hk 4660).
+			changed, err := hub.completeSpawn(t.Context(), task, outcome)
+			if tc.timeout && tc.wantHold {
+				// A trace the hub cannot restore holds the attempt's end: nothing
+				// is recorded and the request keeps its reservation (hk 4660).
+				if changed || err == nil {
+					t.Fatalf("held trace: changed=%v err=%v; want the end held", changed, err)
+				}
+				if saved, e := hub.inbox.store.spawnTask(t.Context(), request.RequestID); e != nil || saved.Status != "bound" || saved.Attempt != task.Attempt {
+					t.Fatalf("held end changed the request: %+v %v", saved, e)
+				}
+			} else if err != nil || !changed {
+				t.Fatalf("commit result: changed=%v err=%v", changed, err)
+			}
 			hub.flushPlacementRecords(t.Context())
 			_, _, recorded, err := hub.inbox.store.spawnPlacementSnapshot(t.Context(), request.RequestID, task.Attempt)
 			if err != nil || recorded == tc.wantHold {

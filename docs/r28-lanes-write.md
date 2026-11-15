@@ -126,11 +126,17 @@ other machine's ownership in the same replacement. The moved row still takes
 the protected `409 lane_protected` and authority `409
 authority_lane_direct_write` refusals, and a node at its row cap first releases
 its own dead rows (the same eviction as a create), else returns `429
-lane_quota_exceeded`. A pane that already holds exactly one row answers that
-row without writing, so a retried takeover converges instead of adding a second
-name. The hub logs `lane taken over` and broadcasts one `lanes.changed` update
-for the moved name. The node command is `panewire lanes add LANE ... --takeover
-JOB`; the daemon's `lanes.put` op carries the same field.
+lane_quota_exceeded`. The moved row is stamped with
+`taken_over_from: <predecessor job>`; the stamp (like the job binding) is
+carried forward by writes that leave machine and pane unchanged, and cleared
+by anything else. A retried takeover converges without writing only on a row
+carrying its own predecessor stamp and bound to its successor job, whatever
+the lane name; any other row — including several rows bound to the
+predecessor, which refuses with `409 lane_takeover_ambiguous` — leaves the
+`409 lane_takeover_unconfirmed` in place. The hub logs `lane taken over` and
+broadcasts one `lanes.changed` update for the moved name. The node command is
+`panewire lanes add LANE ... --takeover JOB`; the daemon's `lanes.put` op
+carries the same field.
 
 ### Dead rows are released and reused
 

@@ -14,7 +14,7 @@ import (
 // hubCapabilityCloseOps names the close operations in hello. It is not
 // advertised (hk 4652): enabling it, with the migration barrier that no
 // old-binary panewire process is left on the host
-// (fleet.HubCloseWatchersReady is its live-watcher half), is hk 4632.
+// (fleet.HubCloseWatchersReady is its live-watcher half), is hk 4761.
 const hubCapabilityCloseOps = "close_ops_v1"
 
 // Close operations (hk 4594; docs/node-commands.md, "Close operations") are
@@ -153,12 +153,14 @@ func (client *HubClient) openCloseOpJobDir(job string) (*os.Root, string, bool, 
 // be another one.
 func (client *HubClient) nodePaneCloseOp(ctx context.Context, args nodePaneCloseOpArgs) (any, string) {
 	result, code := client.runPaneCloseOp(ctx, args)
-	// Whatever the answer, a close that is now final (or was already, on a
-	// replay) is settled by the node at once; a failed step is retried by
-	// runHubCloseSettle.
-	step, cancel := context.WithTimeout(ctx, hubCloseSettleBudget)
-	client.settleHubClose(step, args.Job)
-	cancel()
+	// A close that is now final (or was already, on a replay) is settled by
+	// the node at once, inside the command's own deadline; a failed command or
+	// step is left to runHubCloseSettle.
+	if code == "" {
+		step, cancel := context.WithTimeout(ctx, hubCloseCommandSettleBudget)
+		client.settleHubClose(step, args.Job)
+		cancel()
+	}
 	return result, code
 }
 
@@ -483,7 +485,7 @@ func (client *HubClient) hubCloseLedger() nodeHubCloseLedger {
 // admitHubCloseWatcher refuses a close while the job's watcher is one that
 // does not defer: it holds the watch lock but not the hub-close lock. The
 // node-wide precondition is close_ops_v1 itself, which is not advertised
-// until hk 4632's migration barrier.
+// until hk 4761's migration barrier.
 func (client *HubClient) admitHubCloseWatcher(_ string, jobDir string) string {
 	watcher, err := client.hubCloseLedger().Watcher(jobDir)
 	switch {
@@ -567,13 +569,22 @@ func (client *HubClient) nodePaneCloseRelease(args nodeCloseOpRefArgs) (any, str
 // command deadline.
 const hubCloseLockBudget = 10 * time.Second
 
-// hubCloseSettleBudget bounds the settlement step a status or release runs.
+// hubCloseSettleBudget bounds one settlement step of the daemon pass.
 const hubCloseSettleBudget = 30 * time.Second
+
+// hubCloseCommandSettleBudget bounds the settlement step a status or release
+// runs inline, under the acting lock: with hubCloseLockBudget it stays inside
+// the hub's command deadline. The daemon pass (runHubCloseSettle) finishes
+// whatever an inline step leaves pending.
+const hubCloseCommandSettleBudget = 5 * time.Second
 
 func (client *HubClient) nodeCloseOpRef(args nodeCloseOpRefArgs, release bool) (any, string) {
 	result, code := client.runCloseOpRef(args, release)
-	if code != "jobs_root_unset" {
-		ctx, cancel := context.WithTimeout(context.Background(), hubCloseSettleBudget)
+	// A failed command settles nothing inline (hk 4632, #572 r4576225996,
+	// r4576228677): a release whose end-lock wait expired would wait on the
+	// same lock again while holding the acting lock. The daemon pass retries.
+	if code == "" {
+		ctx, cancel := context.WithTimeout(context.Background(), hubCloseCommandSettleBudget)
 		client.settleHubClose(ctx, args.Job)
 		cancel()
 	}
@@ -660,7 +671,7 @@ func (client *HubClient) cancelUnregisteredIntent(job *os.Root, jobDir string, a
 	if fleet.WriteCloseOp(job, tombstone) != nil {
 		return "journal_failed"
 	}
-	if intent != nil && ledger.CancelIntent(context.Background(), args.Job, args.RequestID) != nil {
+	if intent != nil && ledger.CancelIntent(ctx, args.Job, args.RequestID) != nil {
 		return "journal_failed"
 	}
 	return ""

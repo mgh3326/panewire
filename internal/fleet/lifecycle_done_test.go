@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -186,37 +187,189 @@ func TestDoneSettlingWriteCarriesThePin(t *testing.T) {
 	}
 }
 
-// hk answers 409 to the late pin when the record already names another report.
-// That is an outcome, logged and receipted: done succeeds, leaves the record's
-// pin alone and does not repeat the write.
-func TestDonePinConflictIsLoggedNotAnError(t *testing.T) {
-	r := newDoneRig(t)
-	other := strings.Repeat("a", 64)
+// terminalRecord leaves the job's hk record terminal without any `done`
+// receipt, as a completion written before the record's settlement was
+// receipted does. An empty doc and sha leave the record unpinned.
+func (r *doneRig) terminalRecord(state, doc, sha string) {
+	r.t.Helper()
 	r.store.mu.Lock()
-	r.store.records["j"]["state"] = "completed"
-	r.store.records["j"]["report_doc"] = "reports/j/sha256/" + other + ".md"
-	r.store.records["j"]["report_sha256"] = other
-	r.store.mu.Unlock()
+	defer r.store.mu.Unlock()
+	rec := r.store.records["j"]
+	rec["state"] = state
+	if doc != "" {
+		rec["report_doc"] = doc
+	}
+	if sha != "" {
+		rec["report_sha256"] = sha
+	}
+}
+
+// pinWrites records every late pin write (exactly report_doc and
+// report_sha256) the pin step makes, and refuses them when refuse is set, as
+// hk's 409 for a record that names another report does.
+type pinWrites struct {
+	*fakeJobStore
+	mu     sync.Mutex
+	pins   []map[string]any
+	refuse bool
+}
+
+func (s *pinWrites) Put(ctx context.Context, id string, fields map[string]any) error {
+	if !hkLatePin(fields) {
+		return s.fakeJobStore.Put(ctx, id, fields)
+	}
+	held := map[string]any{}
+	for k, v := range fields {
+		held[k] = v
+	}
+	s.mu.Lock()
+	s.pins = append(s.pins, held)
+	refuse := s.refuse
+	s.mu.Unlock()
+	if refuse {
+		return &BackendError{Status: http.StatusConflict, Code: "job_state_conflict"}
+	}
+	return s.fakeJobStore.Put(ctx, id, fields)
+}
+
+func (s *pinWrites) written() []map[string]any {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]map[string]any(nil), s.pins...)
+}
+
+// A retry whose record is already terminal without a report pins both fields
+// in the one late write hk accepts, then deletes the local report the pin
+// covers. The record, not a local settlement receipt, decides the step.
+func TestDoneRetryPinsATerminalRecordThatEndedWithoutTheReport(t *testing.T) {
+	r := newDoneRig(t)
+	r.terminalRecord("completed", "", "")
+	pins := &pinWrites{fakeJobStore: r.store}
+	r.a.JobStore = pins
 	r.write("answer\n")
 	if e := r.done(); e != nil {
-		t.Fatalf("done failed on a pin conflict: %v", e)
+		t.Fatal(e)
 	}
-	if rec := r.store.record(t, "j"); str(rec, "report_sha256") != other {
-		t.Fatalf("record=%v, want the held pin", rec)
+	digest := reportDigest([]byte("answer\n"))
+	if got := pins.written(); len(got) != 1 {
+		t.Fatalf("late pin writes=%v, want exactly one", got)
+	} else if str(got[0], "report_doc") != r.key("answer\n") || str(got[0], "report_sha256") != digest {
+		t.Fatalf("late pin=%v, want %s %s", got[0], r.key("answer\n"), digest)
 	}
-	pins := r.events(eventReportPinned)
-	if len(pins) != 1 || str(pins[0], "outcome") != "held" {
-		t.Fatalf("pin receipts=%v, want one held", pins)
+	if rec := r.store.record(t, "j"); str(rec, "report_doc") != r.key("answer\n") || str(rec, "report_sha256") != digest {
+		t.Fatalf("record=%v, want the late pin", rec)
 	}
-	if !strings.Contains(r.stderr(), "report pin kept") {
-		t.Fatalf("warnings=%q, want the pin outcome logged", r.stderr())
+	if _, e := os.Stat(r.path); !os.IsNotExist(e) {
+		t.Fatalf("report stat error=%v, want the pinned file deleted", e)
 	}
+	if receipts := r.events(eventReportPinned); len(receipts) != 1 || str(receipts[0], "outcome") != "pinned" {
+		t.Fatalf("pin receipts=%v, want one pinned", receipts)
+	}
+	// The same command again: the record already names these bytes and the
+	// report file is gone, so nothing is written and no hk call is made.
 	calls := r.hkCalls()
 	if e := r.done(); e != nil {
 		t.Fatal(e)
 	}
 	if got := r.hkCalls(); got != calls {
+		t.Fatalf("the repeat made %d hk calls, want none", got-calls)
+	}
+	if got := pins.written(); len(got) != 1 {
+		t.Fatalf("late pin writes=%v after the repeat, want still one", got)
+	}
+}
+
+// A record another writer already pinned with these bytes needs no pin write:
+// the settling read-back confirms it, the pin step stays silent, and the local
+// report the pin covers is deleted.
+func TestDoneRetryFindsItsReportAlreadyPinned(t *testing.T) {
+	r := newDoneRig(t)
+	digest := reportDigest([]byte("answer\n"))
+	r.terminalRecord("completed", r.key("answer\n"), digest)
+	pins := &pinWrites{fakeJobStore: r.store}
+	r.a.JobStore = pins
+	r.write("answer\n")
+	if e := r.done(); e != nil {
+		t.Fatal(e)
+	}
+	if got := pins.written(); len(got) != 0 {
+		t.Fatalf("late pin writes=%v, want none", got)
+	}
+	if rec := r.store.record(t, "j"); str(rec, "report_sha256") != digest {
+		t.Fatalf("record=%v, want the held pin", rec)
+	}
+	if settled := r.events(eventRecordSettled); len(settled) != 1 || !boolean(settled[0], "pinned", false) {
+		t.Fatalf("settle receipts=%v, want one with the pin confirmed", settled)
+	}
+	if _, e := os.Stat(r.path); !os.IsNotExist(e) {
+		t.Fatalf("report stat error=%v, want the pinned file deleted", e)
+	}
+}
+
+// A record that names another report cannot take this one's pin: done refuses
+// with exit 75, keeps the local report and the record's pin, and the rerun
+// repeats the refusal without another write.
+func TestDonePinConflictIsRefused(t *testing.T) {
+	r := newDoneRig(t)
+	other := strings.Repeat("a", 64)
+	r.terminalRecord("completed", "reports/j/sha256/"+other+".md", other)
+	pins := &pinWrites{fakeJobStore: r.store}
+	r.a.JobStore = pins
+	r.write("answer\n")
+	e := r.done()
+	if code(e) != exitStateConflict || e == nil || !strings.Contains(e.Error(), "names another report") {
+		t.Fatalf("done error=%v, want exit %d naming the record's other report", e, exitStateConflict)
+	}
+	if !strings.Contains(r.stderr(), "report pin kept") {
+		t.Fatalf("warnings=%q, want the pin outcome logged", r.stderr())
+	}
+	if rec := r.store.record(t, "j"); str(rec, "report_sha256") != other {
+		t.Fatalf("record=%v, want the held pin", rec)
+	}
+	pinReceipts := r.events(eventReportPinned)
+	if len(pinReceipts) != 1 || str(pinReceipts[0], "outcome") != "held" || str(pinReceipts[0], "document") != r.key("answer\n") {
+		t.Fatalf("pin receipts=%v, want one held naming this report's document", pinReceipts)
+	}
+	if _, e := os.Stat(r.path); e != nil {
+		t.Fatalf("report stat error=%v, want the local report kept", e)
+	}
+	if got := pins.written(); len(got) != 0 {
+		t.Fatalf("late pin writes=%v, want none", got)
+	}
+	calls := r.hkCalls()
+	e = r.done()
+	if code(e) != exitStateConflict || e == nil || !strings.Contains(e.Error(), "names another report") {
+		t.Fatalf("rerun error=%v, want the same refusal", e)
+	}
+	if got := r.hkCalls(); got != calls {
 		t.Fatalf("the rerun made %d hk calls, want none", got-calls)
+	}
+}
+
+// hk refusing the late pin with 409 (another writer pinned between the read
+// and the write) keeps the local report and exits 75 naming the conflict.
+func TestDoneLatePinRefusalKeepsTheReport(t *testing.T) {
+	r := newDoneRig(t)
+	r.terminalRecord("completed", "", "")
+	pins := &pinWrites{fakeJobStore: r.store, refuse: true}
+	r.a.JobStore = pins
+	r.write("answer\n")
+	e := r.done()
+	if code(e) != exitStateConflict || e == nil || !strings.Contains(e.Error(), "names another report") {
+		t.Fatalf("done error=%v, want exit %d naming the refusal", e, exitStateConflict)
+	}
+	if got := pins.written(); len(got) != 1 {
+		t.Fatalf("late pin writes=%v, want the refused write", got)
+	}
+	if rec := r.store.record(t, "j"); str(rec, "report_doc") != "" {
+		t.Fatalf("record=%v, want no pin", rec)
+	}
+	pinReceipts := r.events(eventReportPinned)
+	if len(pinReceipts) != 1 || str(pinReceipts[0], "outcome") != "held" || str(pinReceipts[0], "document") != r.key("answer\n") {
+		t.Fatalf("pin receipts=%v, want one held naming this report's document", pinReceipts)
+	}
+	if _, e := os.Stat(r.path); e != nil {
+		t.Fatalf("report stat error=%v, want the local report kept", e)
 	}
 }
 

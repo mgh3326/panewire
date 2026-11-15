@@ -74,6 +74,12 @@ func (e poolExhaustion) covers(profile string) bool {
 	return fleet.IsFreeRung(profile) == (e.Cause == poolCauseFreeLimit)
 }
 
+// poolFreeLimitWaitableWithin mirrors policy/quota-stop max_wait (hk 4503,
+// currently 1h): a free-limit reset this close is waited out on the pane
+// (hk 569), so the hub sends no hand-over instruction for it. A reset further
+// away still notifies, since the pane hands over instead of waiting.
+const poolFreeLimitWaitableWithin = time.Hour
+
 const poolCauseFreeLimit = "free_limit"
 
 // poolExhaustionsOf reads a quota publish for what is used up and still holding
@@ -93,7 +99,7 @@ func poolExhaustionsOf(quota *FleetStateQuota, now time.Time) []poolExhaustion {
 	}
 	var window poolExhaustion
 	for _, bucket := range quota.Buckets {
-		if bucket.UsedPct == nil || *bucket.UsedPct < 100 || !accountWideBucket(bucket) {
+		if bucket.UsedPct == nil || *bucket.UsedPct < 100 || !accountWideBucket(bucket) || !fleet.WindowRead(quota.Pool, bucket.Window) {
 			continue
 		}
 		if reset, err := time.Parse(time.RFC3339, bucket.ResetsAt); err == nil && reset.After(now) && reset.After(window.Reset) {
@@ -280,6 +286,13 @@ func (h *HubServer) sweepExhaustedPool(ctx context.Context, exhaustion poolExhau
 		h.logger.Debug("pool exhausted sweep superseded by a newer reading", "pool", exhaustion.Pool, "account", exhaustion.Account, "cause", exhaustion.Cause)
 		return
 	}
+	if exhaustion.Cause == poolCauseFreeLimit {
+		// A free-limit stop holds the free band until its reset: cool it here so
+		// the next selection skips the free rows even before the shared free
+		// reading reaches every host (hk 4765). The sweep below still runs, so
+		// a reset past the pane's wait horizon notifies its owners.
+		h.observePoolCooling("quota_stop pool=devin-free reset_at="+exhaustion.Reset.Format(time.RFC3339Nano), h.now())
+	}
 	isNew := h.poolSweep.seen(exhaustion.key(), exhaustion.Reset, h.now())
 	onPool, err := h.poolExhaustionJobs(ctx, exhaustion)
 	if err != nil {
@@ -335,8 +348,9 @@ func skippedSummary(skipped map[string]int) string {
 }
 
 // poolExhaustionText is the one owner notice for a job on an exhausted pool.
-// Every cause asks the same act: hand the job over or end it and respawn it on
-// another pool; the cause only says what ran out.
+// Every notified cause asks the same act: hand the job over or end it and respawn it on
+// another pool; the cause only says what ran out. A free-limit reset inside the
+// pane's wait horizon never reaches this text (waitable_reset, above).
 func poolExhaustionText(exhaustion poolExhaustion, job string) string {
 	switch exhaustion.Cause {
 	case poolCauseRetired:
@@ -363,6 +377,11 @@ func (h *HubServer) sweepPoolJob(ctx context.Context, exhaustion poolExhaustion,
 	}
 	if h.poolEventGone(exhaustion, h.now()) {
 		return poolJobSkip(role, "superseded")
+	}
+	if exhaustion.Cause == poolCauseFreeLimit && !exhaustion.Reset.After(h.now().Add(poolFreeLimitWaitableWithin)) {
+		// The pane waits out a reset inside max_wait and retries on it (hk 569):
+		// no hand-over instruction leaves the hub (hk 4765).
+		return poolJobSkip(role, "waitable_reset")
 	}
 	switch role {
 	case "implementer", "reviewer", "consult":

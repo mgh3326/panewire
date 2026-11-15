@@ -29,6 +29,11 @@ func writeQuotaStatusTable(out io.Writer, now time.Time, host quotaStatusHost, c
 		if r.Stale {
 			freshness = "stale"
 		}
+		if r.Pool == "commandcode" && r.AgeSeconds != nil {
+			// omp serves a cached report, so the age is part of the reading
+			// (hk 4707): the time since omp fetched it.
+			freshness += " " + quotaAge(time.Duration(*r.AgeSeconds*float64(time.Second)))
+		}
 		account := r.Account
 		if account == "" {
 			account = "-"
@@ -70,6 +75,20 @@ func writeQuotaStatusTable(out io.Writer, now time.Time, host quotaStatusHost, c
 		}
 	}
 	_ = tw.Flush()
+}
+
+// quotaAge is how old a reading is, for people: "<1m" under a minute, then
+// whole minutes, hours and days.
+func quotaAge(age time.Duration) string {
+	switch {
+	case age < time.Minute:
+		return "<1m"
+	case age < time.Hour:
+		return fmt.Sprintf("%dm", int(age/time.Minute))
+	case age < 24*time.Hour:
+		return fmt.Sprintf("%dh", int(age/time.Hour))
+	}
+	return fmt.Sprintf("%dd", int(age/(24*time.Hour)))
 }
 
 // quotaResetsIn is the time left until a window resets, for people: "passed"

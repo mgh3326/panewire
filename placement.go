@@ -80,6 +80,17 @@ type PlacementPolicy struct {
 	// (hub_readiness.go).
 	LaunchFailureThreshold int `json:"launch_failure_threshold,omitempty"`
 	LaunchBackoffMinutes   int `json:"launch_backoff_minutes,omitempty"`
+	// SpawnBackoffSeconds and SpawnBackoffMaxSeconds bound a spawn request's
+	// re-placement back-off (base × 2^(n-1), capped, ±20 %), and
+	// SpawnWakeBatch how many parked requests one tick wakes on an event.
+	// SpawnParkNoticeSeconds is how long a request's wait must last while it
+	// is parked before an urgent request (its --urgency flag, else hk priority
+	// 1 or 2) tells its owner lane once. 0 means the defaults, 30 s, 600 s, 8
+	// and 1800 (hub_spawn_park.go, hub_spawn_park_notice.go).
+	SpawnBackoffSeconds    int `json:"spawn_backoff_seconds,omitempty"`
+	SpawnBackoffMaxSeconds int `json:"spawn_backoff_max_seconds,omitempty"`
+	SpawnWakeBatch         int `json:"spawn_wake_batch,omitempty"`
+	SpawnParkNoticeSeconds int `json:"spawn_park_notice_seconds,omitempty"`
 }
 
 // PlacementMachineSlots caps how many distinct tasks may hold active jobs on
@@ -113,6 +124,7 @@ func (p PlacementPolicy) valid() bool {
 	}
 	if !machineIDPattern.MatchString(p.LocalMachine) || p.LocalMachine == hubOperatorMachineID || p.MaxActiveJobs < 1 || p.MaxActiveJobs > 10000 || p.LoadRatio < 0 || p.LoadRatio > 100 ||
 		p.LaunchFailureThreshold < 0 || p.LaunchFailureThreshold > maxPlacementLaunchFailures || p.LaunchBackoffMinutes < 0 || p.LaunchBackoffMinutes > maxPlacementLaunchBackoffMin ||
+		p.SpawnBackoffSeconds < 0 || p.SpawnBackoffSeconds > maxSpawnBackoffSec || p.SpawnBackoffMaxSeconds < 0 || p.SpawnBackoffMaxSeconds > maxSpawnBackoffSec || p.SpawnWakeBatch < 0 || p.SpawnWakeBatch > maxSpawnWakeBatch || p.SpawnParkNoticeSeconds < 0 || p.SpawnParkNoticeSeconds > maxSpawnParkNoticeSec ||
 		p.SpawnBridgeSeconds < 0 || p.SpawnBridgeSeconds > int(maxPlacementSpawnBridge/time.Second) ||
 		!(p.SwapInHalfMBps >= 0 && p.SwapInHalfMBps <= 100000) || !p.Score.valid() ||
 		!validOptionalMemoryFloat(p.MemoryFreePctMin, 0, 100) || !validOptionalMemoryFloat(p.SwapUsedMBMax, 0, math.Inf(1)) ||

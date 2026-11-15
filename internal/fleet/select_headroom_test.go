@@ -14,7 +14,7 @@ func hrCand(pool string, usedPct float64, window time.Duration, reset *float64, 
 		row:      CatalogRow{Profile: pool + "-profile", Pool: pool, Grade: "B", Effort: "high"},
 		tier:     2,
 		tierName: "ranked",
-		headroom: PoolPolicy{}.headroomFor(room, expected),
+		headroom: PoolPolicy{}.headroomFor(room, expected, nil),
 	}
 }
 
@@ -74,7 +74,7 @@ func TestHeadroomNoExpectedLeavesOrderAlone(t *testing.T) {
 
 func TestHeadroomNeverRefusesACandidate(t *testing.T) {
 	spent := hrCand("codex", 100, 5*time.Hour, nil, 6*time.Hour)
-	noWindow := &selCand{row: CatalogRow{Profile: "agy-profile", Pool: "agy", Grade: "B", Effort: "high"}, tier: 2, tierName: "ranked", headroom: PoolPolicy{}.headroomFor(nil, 6*time.Hour)}
+	noWindow := &selCand{row: CatalogRow{Profile: "agy-profile", Pool: "agy", Grade: "B", Effort: "high"}, tier: 2, tierName: "ranked", headroom: PoolPolicy{}.headroomFor(nil, 6*time.Hour, nil)}
 	fresh := hrCand("claude", 0, 5*time.Hour, nil, 6*time.Hour)
 	if spent.fits() || noWindow.fits() {
 		t.Fatal("candidate without room or window fits; want not to fit")
@@ -186,9 +186,9 @@ func hrRandomCand(rng *rand.Rand, expected time.Duration) *selCand {
 			reset = ptrF(float64(rng.IntN(12)) + 0.5)
 		}
 		room := &windowRoom{usedPct: float64(rng.IntN(101)), window: windows[rng.IntN(len(windows))], resetHours: reset}
-		c.headroom = PoolPolicy{}.headroomFor(room, expected)
+		c.headroom = PoolPolicy{}.headroomFor(room, expected, nil)
 	} else {
-		c.headroom = PoolPolicy{}.headroomFor(nil, expected)
+		c.headroom = PoolPolicy{}.headroomFor(nil, expected, nil)
 	}
 	return c
 }

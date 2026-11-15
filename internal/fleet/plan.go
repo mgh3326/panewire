@@ -178,7 +178,7 @@ func (a *App) planHosts(ctx context.Context, s Spawn, grade string) (*placePlan,
 		launch, err := a.Quota.Launch(ctx, qr)
 		if err == nil {
 			seat := a.Policy.Profiles[s.Profile]
-			err = seat.Check(launch, s.Role, grade, s.ParentFamily, a.e6Arm(s.E6Arm, s.e6ArmLocked), a.Config.Local)
+			err = seat.Check(launch, s.Role, grade, s.ParentFamily, a.e6Arm(s.E6Arm, s.e6ArmLocked), capability(a.readinessStates(ctx), c.name, c.cfg, seat.Capability))
 		}
 		if err != nil {
 			c.outcome, localRefusal = "admission_refused", err
@@ -206,7 +206,11 @@ func (a *App) planHosts(ctx context.Context, s Spawn, grade string) (*placePlan,
 			}
 			continue
 		}
-		key, acc := a.remoteAccount(ctx, pool, c.name, c.cfg)
+		key, acc := a.remoteAccount(ctx, pool, c.name, c.cfg, s.AccountKey)
+		if s.AccountKey != "" && key != s.AccountKey {
+			c.outcome = "different_account"
+			continue
+		}
 		j, err := a.judgeHost(ctx, qr, pool, c.name, false, key, acc)
 		c.judgment = &j
 		if err != nil {
@@ -272,7 +276,12 @@ func (a *App) printPlan(asJSON bool, out map[string]any, sel *selPlan, pp *place
 		fmt.Fprintf(a.Out, "family_effort %s=%s chosen=%s@%s gate=%s\n", fe["key"], fe["effort"], fe["profile"], fe["effort"], fe["gate"])
 	}
 	label := func(c *selCand) string {
-		return fmt.Sprintf("%s@%s model=%s pool=%s grade=%s", c.seatName, c.row.Effort, c.row.ModelID, c.row.Pool, c.row.Grade)
+		l := fmt.Sprintf("%s@%s model=%s pool=%s grade=%s", c.seatName, c.row.Effort, c.row.ModelID, c.row.Pool, c.row.Grade)
+		if c.accountKey != "" && slices.Contains(multiAccountPools, c.row.Pool) {
+			// A pool with several accounts per host: the row is one account's.
+			l += " account=" + c.accountKey
+		}
+		return l
 	}
 	if c := sel.chosen; c != nil {
 		h := host
@@ -280,6 +289,26 @@ func (a *App) printPlan(asJSON bool, out map[string]any, sel *selPlan, pp *place
 			h = "none"
 		}
 		fmt.Fprintf(a.Out, "chosen host=%s seat=%s tier=%s waste_risk=%t%s\n", h, label(c), c.tierName, c.risk, creditNote(c))
+	}
+	// A pool whose host holds several accounts (commandcode) shows each with
+	// the windows it was judged on and the age of its reading (hk 4707).
+	var shown []string
+	for _, c := range sel.cands {
+		if c.accountKey == "" || slices.Contains(shown, c.accountKey) || !slices.Contains(multiAccountPools, c.row.Pool) {
+			continue
+		}
+		shown = append(shown, c.accountKey)
+		line := fmt.Sprintf("account %s host=%s", c.accountKey, firstNonempty(c.host, c.evidenceHost()))
+		if len(c.windows) > 0 {
+			line += " " + c.windows.text()
+		}
+		if !c.measuredAt.IsZero() {
+			line += " age=" + sel.at.Sub(c.measuredAt).Round(time.Second).String()
+		}
+		if c.stale {
+			line += " stale"
+		}
+		fmt.Fprintln(a.Out, line)
 	}
 	for _, c := range sel.ranked {
 		if c == sel.chosen {

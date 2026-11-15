@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"maps"
 	"net/url"
 	"os"
@@ -237,16 +238,23 @@ func paneSweepTaskEnd(t TaskStatus) (paneSweepEnd, bool) {
 	return end, true
 }
 
-// paneSweepRole is the job's spawn role with the names older receipts used
-// folded in: a worker or tester is an implementer, a counsel a consult.
-func paneSweepRole(j Job) string {
-	switch j.QuotaRole() {
+// foldSpawnRole folds the names older receipts used into the spawn role: a
+// worker or tester is an implementer, a counsel a consult. The default limit
+// and the pane sweep both read the folded name.
+func foldSpawnRole(role string) string {
+	switch role {
 	case "worker", "tester":
 		return "implementer"
 	case "counsel":
 		return "consult"
 	}
-	return j.QuotaRole()
+	return role
+}
+
+// paneSweepRole is the job's spawn role with the names older receipts used
+// folded in (foldSpawnRole).
+func paneSweepRole(j Job) string {
+	return foldSpawnRole(j.QuotaRole())
 }
 
 // paneSweepTaskRole reports that the job's pane is judged by its hk task and
@@ -357,6 +365,14 @@ type TaskPaneSweeper struct {
 	// (outcome_failed.go).
 	failures        map[string]deferredFailure
 	settledFailures map[string]bool
+	// textfileWarned holds the textfile publication failures already warned
+	// about, by reason, so a daemon logs each one once
+	// (publishPaneMetricTextfile).
+	textfileWarned map[string]bool
+	// reportNoted holds the republish outcomes already logged, by job, report
+	// and reason, so a report that cannot be published yet is one line rather
+	// than one per pass (report_republish.go).
+	reportNoted map[string]bool
 }
 
 func (s *TaskPaneSweeper) info(message string, attrs ...any) {
@@ -463,7 +479,7 @@ func (s *TaskPaneSweeper) pass(ctx context.Context, a *App, ownerAge time.Durati
 		return nil, err
 	}
 	now := a.Now()
-	var candidates []Job
+	var candidates, abandoned []Job
 	for _, entry := range entries {
 		if !entry.IsDir() || !validID(entry.Name()) {
 			continue
@@ -472,13 +488,16 @@ func (s *TaskPaneSweeper) pass(ctx context.Context, a *App, ownerAge time.Durati
 		if err != nil {
 			continue
 		}
-		if paneSweepCandidate(j) || paneSweepKeepCandidate(j, now) {
+		switch {
+		case paneSweepAbandoned(j):
+			abandoned = append(abandoned, j)
+		case paneSweepCandidate(j) || paneSweepKeepCandidate(j, now):
 			candidates = append(candidates, j)
 		}
 	}
 	counts := map[string]int{}
 	defer s.reportEndedPanes(a, counts)
-	if len(candidates) == 0 {
+	if len(candidates) == 0 && len(abandoned) == 0 {
 		clear(s.idleSince)
 		return nil, nil
 	}
@@ -490,6 +509,10 @@ func (s *TaskPaneSweeper) pass(ctx context.Context, a *App, ownerAge time.Durati
 		s.info("task pane sweep kept every pane", "reason", "herdr-unreadable")
 		return nil, nil
 	}
+	// The node ends its own reviewer and consult jobs that never ran `done`
+	// before their panes are judged (hk 4747). Such a job is not one of this
+	// pass's candidates — it is still live until the end above.
+	swept := s.endAbandonedReviews(ctx, a, abandoned, agents, now)
 	if s.idleSince == nil {
 		s.idleSince = map[string]time.Time{}
 	}
@@ -518,7 +541,6 @@ func (s *TaskPaneSweeper) pass(ctx context.Context, a *App, ownerAge time.Durati
 	statuses := map[string]paneSweepTaskRead{}
 	prs := map[string]paneSweepPRRead{}
 	parents := map[string]paneSweepInherited{}
-	var swept []SweptPane
 	for _, j := range candidates {
 		closed := paneSweepClosed(j)
 		var task string
@@ -635,7 +657,7 @@ func (s *TaskPaneSweeper) pass(ctx context.Context, a *App, ownerAge time.Durati
 // keeps an admitted candidate.
 func paneSweepCounted(reason string) bool {
 	switch reason {
-	case "open_pr", "grace", "no_task", "job_changed", "pane_gone":
+	case "open_pr", "grace", "no_task", "job_changed", SweepPaneGone:
 		return false
 	}
 	return !strings.HasPrefix(reason, "pane-")
@@ -974,15 +996,15 @@ func (s *TaskPaneSweeper) closePane(ctx context.Context, a *App, j Job, task str
 	if reason := paneSessionProof(latest, fresh); reason != "" {
 		return s.paneUnlisted(ctx, a, latest, swept, reason)
 	}
-	// The usage is read before the close: once herdr stops listing the pane
-	// the live session reference is gone. The pane closes before hk is told
-	// the job ended, so a failed close never leaves a finished record beside
-	// an open pane.
-	usage, haveUsage := a.readJobUsage(ctx, latest, true)
+	// The session facts are read before the close: once herdr stops listing
+	// the pane the live session reference is gone. The pane closes before hk
+	// is told the job ended, so a failed close never leaves a finished record
+	// beside an open pane.
+	session, haveSession := a.readJobSession(ctx, latest, true)
 	if err := a.must(ctx, "herdr", "pane", "close", j.Pane); err != nil {
 		return SweptPane{}, "close_failed"
 	}
-	s.reapSweptPane(ctx, a, latest, j, task, end, usage, haveUsage, now)
+	s.reapSweptPane(ctx, a, latest, j, task, end, session, haveSession, now)
 	return swept, ""
 }
 
@@ -1032,21 +1054,21 @@ func (s *TaskPaneSweeper) paneUnlisted(ctx context.Context, a *App, j Job, swept
 			return SweptPane{}, reason
 		}
 	}
-	s.reapSweptPane(ctx, a, j, j, "", paneSweepJobEnd(j, ""), TokenUsage{}, false, a.Now())
-	swept.Reason = "pane_gone"
+	s.reapSweptPane(ctx, a, j, j, "", paneSweepJobEnd(j, ""), jobSession{}, false, a.Now())
+	swept.Reason = SweepPaneGone
 	return swept, ""
 }
 
 // reapSweptPane is the tail a closed (or proven gone) pane leaves: the job's
-// end state on its hk record when it never reported one, the usage figures,
-// the quota lease, the lane, the job.reaped event, and the worktree.
-func (s *TaskPaneSweeper) reapSweptPane(ctx context.Context, a *App, latest, j Job, task string, end paneSweepEnd, usage TokenUsage, haveUsage bool, now time.Time) {
+// end state on its hk record when it never reported one, the usage and skill
+// facts, the quota lease, the lane, the job.reaped event, and the worktree.
+func (s *TaskPaneSweeper) reapSweptPane(ctx context.Context, a *App, latest, j Job, task string, end paneSweepEnd, session jobSession, haveSession bool, now time.Time) {
 	key := paneSweepKey(j)
 	delete(s.idleSince, key)
 	delete(s.endedSince, key)
 	a.markSweptJob(ctx, latest, end.state)
-	if haveUsage {
-		a.writeJobUsage(ctx, latest.ID, usage)
+	if haveSession {
+		a.writeJobSession(ctx, latest.ID, session)
 	}
 	if err := a.releaseQuota(ctx, j); err != nil {
 		a.warn("quota retained: %v", err)
@@ -1131,9 +1153,17 @@ func (a *App) capturePaneScreen(ctx context.Context, j Job) ([]byte, error) {
 // label comes from Alloy's instance label, not the file.
 const paneSweepMetricFile = "panewire_panes.prom"
 
+// paneSweepTextfileDirEnv names the directory Alloy's textfile collector
+// scrapes (deploy/alloy/README.md). On Linux Alloy runs as its own user, which
+// cannot read the node's 0600 state-dir copy, so a node daemon whose
+// environment sets this publishes the same body there at mode 0644.
+const paneSweepTextfileDirEnv = "FLEET_TEXTFILE_DIR"
+
 // reportEndedPanes writes the pass's kept-pane counts to the node_exporter
 // textfile under the node state dir and logs them. A pass that judged no
-// candidate still writes, so a stale reason clears.
+// candidate still writes, so a stale reason clears. When the node sets
+// FLEET_TEXTFILE_DIR the same body is published there too; the two writes are
+// independent, so one failing still leaves the other.
 func (s *TaskPaneSweeper) reportEndedPanes(a *App, counts map[string]int) {
 	var b strings.Builder
 	b.WriteString("# HELP panewire_ended_job_panes_open Panes of ended jobs still open on this node, by keep reason.\n")
@@ -1144,12 +1174,49 @@ func (s *TaskPaneSweeper) reportEndedPanes(a *App, counts map[string]int) {
 		total += counts[reason]
 	}
 	s.info("ended job panes open", "open", total, "reasons", fmt.Sprint(counts))
+	body := []byte(b.String())
 	dir := filepath.Join(a.stateDir(), "metrics")
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		a.warn("pane metric not written: %v", err)
-		return
-	}
-	if err := durable.ReplaceFileAtomically(filepath.Join(dir, paneSweepMetricFile), ".panewire_panes-*.tmp", []byte(b.String()), 0600); err != nil {
+	} else if err := durable.ReplaceFileAtomically(filepath.Join(dir, paneSweepMetricFile), ".panewire_panes-*.tmp", body, 0600); err != nil {
 		a.warn("pane metric not written: %v", err)
 	}
+	s.publishPaneMetricTextfile(a, body)
+}
+
+// publishPaneMetricTextfile publishes the pass's body into FLEET_TEXTFILE_DIR,
+// where Alloy's textfile collector reads it as its own user. The state-dir copy
+// stays the node's own record. The directory must already exist: a typo warns
+// instead of being created. A failed publication warns once per reason and
+// never fails the pass.
+func (s *TaskPaneSweeper) publishPaneMetricTextfile(a *App, body []byte) {
+	dir := strings.TrimSpace(os.Getenv(paneSweepTextfileDirEnv))
+	if dir == "" {
+		return
+	}
+	if err := durable.ReplaceFileAtomically(filepath.Join(dir, paneSweepMetricFile), ".panewire_panes-*.tmp", body, 0644); err != nil {
+		s.warnTextfileOnce(a, err)
+	}
+}
+
+// warnTextfileOnce logs a textfile publication failure unless that reason was
+// already logged by this sweeper, which lives for the daemon's run. The key is
+// the cause, not the message: a missing directory's error names a fresh
+// temporary file every pass.
+func (s *TaskPaneSweeper) warnTextfileOnce(a *App, err error) {
+	reason := "write_failed"
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		reason = "dir_missing"
+	case errors.Is(err, fs.ErrPermission):
+		reason = "dir_unwritable"
+	}
+	if s.textfileWarned == nil {
+		s.textfileWarned = map[string]bool{}
+	}
+	if s.textfileWarned[reason] {
+		return
+	}
+	s.textfileWarned[reason] = true
+	a.warn("pane metric not written to %s (%s): %v", paneSweepTextfileDirEnv, reason, err)
 }

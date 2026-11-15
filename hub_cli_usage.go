@@ -10,7 +10,7 @@ const hubCredentialUsage = "--hub-url URL --hub-token-env FILE [--hub-cf-env FIL
 
 const lanesUsage = `Usage:
   panewire lanes ls ` + hubCredentialUsage + `
-  panewire lanes add LANE [--machine MACHINE --pane PANE | --sink] [--parent LANE] [--takeover JOB] ` + hubCredentialUsage + `
+  panewire lanes add LANE [--machine MACHINE --pane PANE | --sink] [--job JOB] [--parent LANE] [--takeover JOB] ` + hubCredentialUsage + `
   panewire lanes rm LANE ` + hubCredentialUsage + `
   panewire lanes self-check --lane LANE --expect-machine MACHINE --expect-pane PANE --expect-epoch N ` + hubCredentialUsage + `
 
@@ -22,10 +22,11 @@ existing lane on it, and the new name is not referenced by another machine's
 lanes or jobs, and rm removes only its own lanes no foreign machine
 references. self-check requires an operator file. --sink registers a lane
 with no machine/pane route; the hub discards route fields for it, and only an
-operator token may write one. --takeover JOB moves the row the hub holds at
-JOB's pane to this route, keeping the row's name, so a --parent-job successor
-can carry the lane its task's findings use onto its own machine. A takeover
-the hub cannot confirm from its own job record answers 409
+operator token may write one. --job JOB binds a node lane row to the accepted
+spawn that owns it. --takeover JOB moves only a row bound to that predecessor,
+keeping the row's name, so a --parent-job successor can carry the lane its
+task's findings use onto its own machine. A takeover the hub cannot confirm
+from accepted spawn records answers 409
 lane_takeover_unconfirmed.`
 
 const jobsUsage = `Usage:
@@ -39,8 +40,8 @@ const fleetCensusFindUsage = "Usage: panewire fleet-census find LABEL [--contain
 const fleetCensusUsage = "Usage: panewire fleet-census [--json] [--grace D] [--jobs-root PATH] [--herdr-socket PATH] [--machine-id ID] [--node-env FILE] [" + hubCredentialUsage + "]\n" + fleetCensusFindUsage
 
 var (
-	lanesValueFlags       = hubCLIFlagSet("--hub-url --hub-token-env --hub-cf-env --machine --pane --parent --takeover --lane --expect-machine --expect-pane --expect-epoch")
-	lanesKnownFlags       = hubCLIFlagSet("--sink --hub-url --hub-token-env --hub-cf-env --machine --pane --parent --takeover --lane --expect-machine --expect-pane --expect-epoch")
+	lanesValueFlags       = hubCLIFlagSet("--hub-url --hub-token-env --hub-cf-env --machine --pane --job --parent --takeover --lane --expect-machine --expect-pane --expect-epoch")
+	lanesKnownFlags       = hubCLIFlagSet("--sink --hub-url --hub-token-env --hub-cf-env --machine --pane --job --parent --takeover --lane --expect-machine --expect-pane --expect-epoch")
 	sessionsValueFlags    = hubCLIFlagSet("--hub-url --hub-token-env --hub-cf-env --machine")
 	sessionsKnownFlags    = hubCLIFlagSet("--contains --json --hub-url --hub-token-env --hub-cf-env --machine")
 	fleetCensusValueFlags = hubCLIFlagSet("--grace --jobs-root --herdr-socket --machine-id --node-env --hub-url --hub-token-env --hub-cf-env")

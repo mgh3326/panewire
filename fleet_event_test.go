@@ -3,8 +3,8 @@ package panewire
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -15,6 +15,7 @@ import (
 	"github.com/mgh3326/panewire/internal/fleet"
 	"github.com/mgh3326/panewire/internal/hkcred"
 	"github.com/mgh3326/panewire/internal/quota/codex"
+	"github.com/mgh3326/panewire/internal/teststate"
 )
 
 // TestMain points every test's fleet events at a temporary state dir, so no
@@ -23,16 +24,28 @@ import (
 // directory, so a test that reaches the node's native quota measurement
 // without a fixture finds no credential instead of the developer's own login.
 func TestMain(m *testing.M) {
-	state, err := os.MkdirTemp("", "panewire-test-state-")
-	if err != nil {
-		panic(err)
-	}
 	// The launch home is the operator's real home, captured before HOME
 	// moves: no test may open ledger state under it (hk 4685).
 	realHome, _ := os.UserHomeDir()
 	if realHome == "" {
 		realHome = os.Getenv("HOME")
 	}
+	// The go toolchain keeps the launch environment's caches, so a test that
+	// runs go stays warm and offline. Pin them now, before HOME or
+	// XDG_CACHE_HOME move: on Linux GOCACHE derives from XDG_CACHE_HOME, and a
+	// pin taken after the move below would point every build at the state dir
+	// (hk 4733).
+	teststate.PinGoToolchainEnv()
+	// A test binary killed by -timeout, SIGTERM or a reaped pane never reaches
+	// the cleanup at the end, so remove the state dirs such a run left behind.
+	if _, err := teststate.SweepStale(os.TempDir(), time.Now(), teststate.StaleAfter, teststate.StatePrefix); err != nil {
+		fmt.Fprintf(os.Stderr, "panewire: sweeping stale test state dirs: %v\n", err)
+	}
+	state, err := os.MkdirTemp("", teststate.StatePrefix)
+	if err != nil {
+		panic(err)
+	}
+	testStateDir = state
 	arbiter.ForbidHomeForTests(realHome)
 	os.Setenv("CODEX_HOME", filepath.Join(state, "no-codex-login"))
 	os.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(state, "no-claude-login"))
@@ -53,11 +66,10 @@ func TestMain(m *testing.M) {
 	os.Setenv(hkcred.PathEnv, filepath.Join(state, "no-hk-svc.env"))
 	// No test may read the developer's real files through a default path
 	// under HOME (spawn.json, hk-svc.env, the herdr socket; hk 3570): HOME is
-	// a private directory for the whole package. The go toolchain keeps the
-	// launch HOME's caches and env file, so a test that runs go stays warm and
-	// offline. A test that needs another HOME sets it with t.Setenv.
+	// a private directory for the whole package. The go toolchain env was
+	// pinned from the launch environment above. A test that needs another HOME
+	// sets it with t.Setenv.
 	testLaunchHome = os.Getenv("HOME")
-	pinGoToolchainEnv()
 	home := filepath.Join(state, "home")
 	if err := os.MkdirAll(home, 0o700); err != nil {
 		panic(err)
@@ -93,32 +105,18 @@ func TestMain(m *testing.M) {
 		}
 	}
 	code := m.Run()
-	os.RemoveAll(state)
+	if err := teststate.RemoveAll(state); err != nil {
+		fmt.Fprintf(os.Stderr, "panewire: removing test state dir %s: %v\n", state, err)
+	}
 	os.Exit(code)
 }
+
+// testStateDir is the state dir TestMain created for this run.
+var testStateDir string
 
 // testLaunchHome is the HOME the test binary was started with, before
 // TestMain moved it.
 var testLaunchHome string
-
-// pinGoToolchainEnv fixes GOCACHE, GOMODCACHE, GOPATH and GOENV to what they
-// resolve to under the launch HOME, before TestMain moves HOME. Without go on
-// PATH nothing is pinned: no test can run go then either.
-func pinGoToolchainEnv() {
-	out, err := exec.Command("go", "env", "-json", "GOCACHE", "GOMODCACHE", "GOPATH", "GOENV").Output()
-	if err != nil {
-		return
-	}
-	var values map[string]string
-	if json.Unmarshal(out, &values) != nil {
-		return
-	}
-	for key, value := range values {
-		if value != "" && os.Getenv(key) == "" {
-			os.Setenv(key, value)
-		}
-	}
-}
 
 var fleetEventFakeSecrets = []string{"ghp_FAKEfakeFAKEfakeFAKEfake0123456789", "hunter2pass", "tok3nVALUEfake99"}
 
@@ -241,7 +239,7 @@ func TestHubSpawnFailingEngineStderrReachesResultBoundedAndRedacted(t *testing.T
 	// 8 KiB of stderr noise, then the line that explains the refusal.
 
 	message := hubOutboundMessage{RequestID: t14RequestID(91), CWDKey: "repo-a", BriefInline: "brief", WaitSeconds: 5, Args: []string{"--job", "job-stderr"}}
-	result := (&HubClient{spawnConfigPath: t14SpawnConfig(t, root), spawnEngine: func(ctx context.Context, cwd, brief, workspace, session string, args []string) (*hubSpawnOutput, fleet.Execution) {
+	result := (&HubClient{spawnConfigPath: t14SpawnConfig(t, root), spawnEngine: func(ctx context.Context, cwd, brief, workspace, session string, _ time.Time, args []string) (*hubSpawnOutput, fleet.Execution) {
 		output := &hubSpawnOutput{}
 		_, _ = output.stderr.Write([]byte(strings.Repeat("noise\n", 1500) + "panewire: quota gate refused: " + fleetEventFakeSecretText))
 		return output, fleet.Execution{RC: 70, Stage: "placement"}

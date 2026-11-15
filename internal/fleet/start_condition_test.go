@@ -2,7 +2,12 @@ package fleet
 
 import (
 	"context"
-	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/url"
+	"sort"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -57,117 +62,109 @@ func TestParseSpawnAfterRepeatableAndUsageErrors(t *testing.T) {
 	}
 }
 
-func TestReadStartConditionTasksDeduplicatesAndLoadsIncomingBlockers(t *testing.T) {
+// snapshotFakeHK answers hk's snapshot route with a task per requested id and
+// names ids in missing instead of dropping them, as the live route does.
+func snapshotFakeHK(t *testing.T, states map[string]string, missing map[string]bool) *spawnHK {
+	t.Helper()
 	hk := useFakeHK(t)
-	hk.SetTask("77", `{"id":77,"state":"ready","relations":[{"kind":"blocks","src_id":42,"dst_id":77}]}`)
-	hk.SetTask("42", `{"id":42,"state":"merged","relations":[]}`)
-	conditions := []StartCondition{
-		{Kind: "blockers", TargetTaskID: "77", State: "merged"},
-		{Kind: "task", TaskID: "77", State: "done"},
-	}
-	snapshots, err := ReadStartConditionTasks(context.Background(), conditions)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(snapshots) != 2 || snapshots["77"].Relations[0].SrcID != "42" || snapshots["77"].Relations[0].DstID != "77" {
-		t.Fatalf("snapshots = %#v", snapshots)
-	}
-	routes := hk.Routes()
-	if len(routes) != 2 || routes[0] != "GET /v1/tasks/77" || routes[1] != "GET /v1/tasks/42" {
-		t.Fatalf("routes = %q, want deduplicated target and blocker reads", routes)
-	}
-}
-
-func TestReadStartConditionTaskBatchKeepsIndependentReadsAndOnlyFollowsBlockers(t *testing.T) {
-	hk := useFakeHK(t)
-	hk.SetTask("42", `{"id":42,"state":"deployed","relations":[{"kind":"blocks","src_id":99,"dst_id":42}]}`)
 	hk.Handle(func(req hkRequest) (int, string, bool) {
-		if req.Path == "/v1/tasks/404" {
-			return 404, `{"error":"not_found"}`, true
+		if req.Path != "/v1/tasks/states/snapshot" {
+			return 0, "", false
 		}
-		return 0, "", false
+		query, err := url.ParseQuery(req.Query)
+		if err != nil {
+			return 400, `{"error":"invalid_context"}`, true
+		}
+		var tasks, absent []string
+		for _, id := range strings.Split(query.Get("ids"), ",") {
+			if missing[id] {
+				absent = append(absent, id)
+				continue
+			}
+			state, ok := states[id]
+			if !ok {
+				state = "ready"
+			}
+			tasks = append(tasks, fmt.Sprintf(`{"id":%s,"state":%q,"category":"open","blockers":[]}`, id, state))
+		}
+		return http.StatusOK, fmt.Sprintf(`{"as_of":"2026-11-15T00:00:00Z","tasks":[%s],"missing":[%s]}`, strings.Join(tasks, ","), strings.Join(absent, ",")), true
 	})
-	snapshots, err := ReadStartConditionTaskBatch(context.Background(), [][]StartCondition{
-		{{Kind: "task", TaskID: "42", State: "merged"}},
-		{{Kind: "task", TaskID: "404", State: "merged"}},
-	})
+	return hk
+}
+
+func TestReadTaskStateSnapshotChunksAndNamesMissing(t *testing.T) {
+	ids := make([]string, 250)
+	states := make(map[string]string, len(ids))
+	for i := range ids {
+		ids[i] = strconv.Itoa(1000 + i)
+		states[ids[i]] = "merged"
+	}
+	snapshotFakeHK(t, states, map[string]bool{"9999": true})
+	ids = append(ids, "9999", "1000")
+	hk := useFakeHK(t)
+
+	got, err := ReadTaskStateSnapshot(context.Background(), ids)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := EvaluateStartConditions([]StartCondition{{Kind: "task", TaskID: "42", State: "merged"}}, snapshots, time.Now()); got.Status != "met" {
-		t.Fatalf("independent successful read = %#v, want met", got)
+	if len(got.Tasks) != 250 || got.Tasks["1000"].State != "merged" {
+		t.Fatalf("snapshot tasks = %d, want every requested task once", len(got.Tasks))
 	}
-	if got := EvaluateStartConditions([]StartCondition{{Kind: "task", TaskID: "404", State: "merged"}}, snapshots, time.Now()); got.Status != "waiting" || len(got.Reasons) != 1 || got.Reasons[0] != "hk_unavailable" {
-		t.Fatalf("failed dependency = %#v, want waiting/hk_unavailable", got)
+	if len(got.Missing) != 1 || got.Missing[0] != "9999" {
+		t.Fatalf("snapshot missing = %v, want the one absent id", got.Missing)
 	}
 	routes := hk.Routes()
-	if len(routes) != 2 || routes[0] != "GET /v1/tasks/404" || routes[1] != "GET /v1/tasks/42" {
-		t.Fatalf("task predicates unexpectedly followed relations: %q", routes)
+	if len(routes) != 2 || routes[0] != "GET /v1/tasks/states/snapshot" || routes[1] != routes[0] {
+		t.Fatalf("routes = %q, want two snapshot calls for 251 ids", routes)
 	}
 }
 
-func TestEvaluateStartConditions(t *testing.T) {
+func TestEvaluateStartConditionSnapshot(t *testing.T) {
 	now := time.Date(2026, 11, 13, 0, 0, 0, 0, time.UTC)
 	blocker := StartCondition{Kind: "blockers", TargetTaskID: "77", State: "merged"}
-	blockedBy := TaskSnapshot{ID: "77", State: "ready", Relations: []TaskRelation{{Kind: "blocks", SrcID: "42", DstID: "77"}}}
+	blockedBy := TaskState{State: "ready", Blockers: []string{"42"}}
 	for _, tc := range []struct {
 		name       string
 		conditions []StartCondition
-		tasks      map[string]TaskSnapshot
+		snapshot   TaskStateSnapshot
 		want       string
+		wantReason string
 	}{
-		{"met", []StartCondition{{Kind: "task", TaskID: "42", State: "merged"}}, map[string]TaskSnapshot{"42": {ID: "42", State: "merged"}}, "met"},
-		{"deployed satisfies merged", []StartCondition{{Kind: "task", TaskID: "42", State: "merged"}}, map[string]TaskSnapshot{"42": {ID: "42", State: "deployed"}}, "met"},
-		{"completed satisfies deployed", []StartCondition{{Kind: "task", TaskID: "42", State: "deployed"}}, map[string]TaskSnapshot{"42": {ID: "42", State: "completed"}}, "met"},
-		{"done maps to completed", []StartCondition{{Kind: "task", TaskID: "42", State: "done"}}, map[string]TaskSnapshot{"42": {ID: "42", State: "completed"}}, "met"},
-		{"AND met", []StartCondition{{Kind: "task", TaskID: "42", State: "merged"}, {Kind: "time", At: now}}, map[string]TaskSnapshot{"42": {ID: "42", State: "merged"}}, "met"},
-		{"AND waits", []StartCondition{{Kind: "task", TaskID: "42", State: "merged"}, {Kind: "time", At: now.Add(time.Hour)}}, map[string]TaskSnapshot{"42": {ID: "42", State: "merged"}}, "waiting"},
-		{"waiting", []StartCondition{{Kind: "task", TaskID: "42", State: "merged"}}, map[string]TaskSnapshot{"42": {ID: "42", State: "ready"}}, "waiting"},
-		{"cancelled dropped", []StartCondition{{Kind: "task", TaskID: "42", State: "merged"}}, map[string]TaskSnapshot{"42": {ID: "42", State: "dropped"}}, "cancelled"},
-		{"cancelled duplicate", []StartCondition{{Kind: "task", TaskID: "42", State: "merged"}}, map[string]TaskSnapshot{"42": {ID: "42", State: "duplicate"}}, "cancelled"},
-		{"hk unavailable", []StartCondition{{Kind: "task", TaskID: "42", State: "merged"}}, nil, "waiting"},
-		{"relation counts", []StartCondition{blocker}, map[string]TaskSnapshot{"77": blockedBy, "42": {ID: "42", State: "merged"}}, "met"},
-		{"completed blocker satisfies deployed", []StartCondition{{Kind: "blockers", TargetTaskID: "77", State: "deployed"}}, map[string]TaskSnapshot{"77": blockedBy, "42": {ID: "42", State: "completed"}}, "met"},
-		{"relation added later counts", []StartCondition{blocker}, map[string]TaskSnapshot{"77": blockedBy, "42": {ID: "42", State: "developing"}}, "waiting"},
-		{"time waiting", []StartCondition{{Kind: "time", At: now.Add(time.Hour)}}, map[string]TaskSnapshot{}, "waiting"},
-		{"time met", []StartCondition{{Kind: "time", At: now}}, map[string]TaskSnapshot{}, "met"},
+		{"met", []StartCondition{{Kind: "task", TaskID: "42", State: "merged"}}, TaskStateSnapshot{Tasks: map[string]TaskState{"42": {State: "merged"}}}, "met", ""},
+		{"deployed satisfies merged", []StartCondition{{Kind: "task", TaskID: "42", State: "merged"}}, TaskStateSnapshot{Tasks: map[string]TaskState{"42": {State: "deployed"}}}, "met", ""},
+		{"completed satisfies deployed", []StartCondition{{Kind: "task", TaskID: "42", State: "deployed"}}, TaskStateSnapshot{Tasks: map[string]TaskState{"42": {State: "completed"}}}, "met", ""},
+		{"done maps to completed", []StartCondition{{Kind: "task", TaskID: "42", State: "done"}}, TaskStateSnapshot{Tasks: map[string]TaskState{"42": {State: "completed"}}}, "met", ""},
+		{"AND met", []StartCondition{{Kind: "task", TaskID: "42", State: "merged"}, {Kind: "time", At: now}}, TaskStateSnapshot{Tasks: map[string]TaskState{"42": {State: "merged"}}}, "met", ""},
+		{"AND waits", []StartCondition{{Kind: "task", TaskID: "42", State: "merged"}, {Kind: "time", At: now.Add(time.Hour)}}, TaskStateSnapshot{Tasks: map[string]TaskState{"42": {State: "merged"}}}, "waiting", ""},
+		{"waiting", []StartCondition{{Kind: "task", TaskID: "42", State: "merged"}}, TaskStateSnapshot{Tasks: map[string]TaskState{"42": {State: "ready"}}}, "waiting", ""},
+		{"cancelled dropped", []StartCondition{{Kind: "task", TaskID: "42", State: "merged"}}, TaskStateSnapshot{Tasks: map[string]TaskState{"42": {State: "dropped"}}}, "cancelled", "task:42=dropped"},
+		{"cancelled duplicate", []StartCondition{{Kind: "task", TaskID: "42", State: "merged"}}, TaskStateSnapshot{Tasks: map[string]TaskState{"42": {State: "duplicate"}}}, "cancelled", "task:42=duplicate"},
+		{"missing is a refusal", []StartCondition{{Kind: "task", TaskID: "42", State: "merged"}}, TaskStateSnapshot{Missing: []string{"42"}}, "refused", "task:42=missing"},
+		{"incomplete read waits", []StartCondition{{Kind: "task", TaskID: "42", State: "merged"}}, TaskStateSnapshot{}, "waiting", ""},
+		{"relation counts", []StartCondition{blocker}, TaskStateSnapshot{Tasks: map[string]TaskState{"77": blockedBy, "42": {State: "merged"}}}, "met", ""},
+		{"completed blocker satisfies deployed", []StartCondition{{Kind: "blockers", TargetTaskID: "77", State: "deployed"}}, TaskStateSnapshot{Tasks: map[string]TaskState{"77": blockedBy, "42": {State: "completed"}}}, "met", ""},
+		{"unmet blocker waits", []StartCondition{blocker}, TaskStateSnapshot{Tasks: map[string]TaskState{"77": blockedBy, "42": {State: "ready"}}}, "waiting", ""},
+		{"missing blocker is a refusal", []StartCondition{blocker}, TaskStateSnapshot{Tasks: map[string]TaskState{"77": blockedBy}, Missing: []string{"42"}}, "refused", "task:42=missing"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := EvaluateStartConditions(tc.conditions, tc.tasks, now)
+			got := EvaluateStartConditionSnapshot(tc.conditions, tc.snapshot, now)
 			if got.Status != tc.want {
-				t.Fatalf("EvaluateStartConditions() = %#v, want status %q", got, tc.want)
+				t.Fatalf("EvaluateStartConditionSnapshot() = %#v, want %s", got, tc.want)
 			}
-			if tc.name == "hk unavailable" && (len(got.Reasons) != 1 || got.Reasons[0] != "hk_unavailable") {
-				t.Fatalf("missing unavailable reason: %#v", got)
+			if tc.wantReason != "" && got.Reason != tc.wantReason {
+				t.Fatalf("reason = %q, want %q", got.Reason, tc.wantReason)
 			}
 		})
 	}
 }
 
-func TestSubmissionStartConditionsRoundTripAndLegacyJSON(t *testing.T) {
-	legacy := Submission{RequestID: "11111111-1111-4111-8111-111111111111", Args: []string{"--task", "42"}, Brief: "brief"}
-	raw, err := json.Marshal(legacy)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(raw) != `{"request_id":"11111111-1111-4111-8111-111111111111","args":["--task","42"],"brief":"brief","repository":{"name":"","origin":"","relative":"","worktree":"","local_root":""},"origin_machine":"","deadline_seconds":0}` {
-		t.Fatalf("legacy submission JSON changed: %s", raw)
-	}
-	conditions, err := ParseStartConditions([]string{"task:42=merged", "time:2026-11-14T00:00:00Z"}, "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	request := legacy
-	request.StartConditions = conditions
-	raw, err = json.Marshal(request)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var decoded Submission
-	if err := json.Unmarshal(raw, &decoded); err != nil {
-		t.Fatal(err)
-	}
-	if !startConditionsEqual(decoded.StartConditions, conditions) {
-		t.Fatalf("round trip = %#v, want %#v", decoded.StartConditions, conditions)
+func TestStartConditionTaskIDsDeduplicates(t *testing.T) {
+	ids := StartConditionTaskIDs([][]StartCondition{
+		{{Kind: "task", TaskID: "42", State: "merged"}, {Kind: "time", At: time.Now()}},
+		{{Kind: "task", TaskID: "7", State: "deployed"}, {Kind: "blockers", TargetTaskID: "77", State: "merged"}},
+	})
+	sort.Strings(ids)
+	if strings.Join(ids, ",") != "42,7,77" {
+		t.Fatalf("ids = %v", ids)
 	}
 }

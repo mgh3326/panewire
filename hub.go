@@ -41,6 +41,9 @@ const (
 
 var hubVersionPattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
 
+// defaultHubConsultTimeout bounds one consult from request to answer.
+const defaultHubConsultTimeout = 2 * time.Hour
+
 // HubServerConfig contains only local, already-loaded static credentials. The
 // operator credential is the HUB_TOKEN_operator entry; agent credentials use
 // their own stable machine ID entries.
@@ -93,7 +96,12 @@ type HubServerConfig struct {
 	// hand-offs, to drain *_grant rows before a hub rollback
 	// (docs/hub-spawn-operations.md, "Rolling the hub back past this change").
 	SpawnGrantDrain bool
-	Logger          *slog.Logger
+	// SpawnRollbackDrain freezes every spawn producer (client submissions,
+	// quota hand-offs, consult spawns) while the coordinator keeps settling
+	// the queue, before a rollback past parking (hk 4661,
+	// docs/hub-spawn-operations.md#rolling-back-past-parking).
+	SpawnRollbackDrain bool
+	Logger             *slog.Logger
 	// PlacementPolicyPath is an optional operator-owned JSON policy. Placement
 	// never changes pressure thresholds or dispatches work.
 	PlacementPolicyPath string
@@ -128,6 +136,9 @@ type HubServerConfig struct {
 	PRStatusHost string
 	// RelayAckTimeout bounds the time an injected relay may remain silent.
 	RelayAckTimeout time.Duration
+	// ConsultTimeout bounds one consult from request to answer. Zero is two
+	// hours (docs/consult-on-request.md).
+	ConsultTimeout time.Duration
 	// AcceptingOverridesPath optionally makes operator acceptance choices durable.
 	AcceptingOverridesPath string
 	// PaneSweepInterval is how often the hub asks each node to close the panes of
@@ -136,6 +147,16 @@ type HubServerConfig struct {
 	PaneSweepInterval time.Duration
 	// PaneSweepAge is how long a job must have ended before its pane is closed.
 	PaneSweepAge time.Duration
+	// FleetStatusInterval is how often the hub writes the fleet status
+	// snapshot to hk (docs/fleet-status.md). Zero keeps it off, so a config
+	// built for a test never writes; a negative value is invalid.
+	FleetStatusInterval time.Duration
+	// FleetStatusPublish replaces the hk document write in tests; nil writes
+	// with fleet.PutHKDocument under the hub's hk credential.
+	FleetStatusPublish func(context.Context, string) error
+	// FleetStatusPlans replaces the per-grade plan in tests; nil runs the
+	// hub's own fleet App as a read-only dry run.
+	FleetStatusPlans func(context.Context) []fleet.StatusPlan
 	// handoffkeep is the durable relay-event store. It is package-private so the
 	// hub's public configuration keeps no credential-bearing field.
 	handoffkeep *handoffkeepRelayClient
@@ -258,9 +279,14 @@ type HubActiveJob struct {
 	Pane           string `json:"pane,omitempty"`
 	Tier           string `json:"tier,omitempty"`
 	Role           string `json:"role,omitempty"`
-	StartedAt      string `json:"started_at,omitempty"`
-	LastEventKind  string `json:"last_event_kind,omitempty"`
-	LastEventAt    string `json:"last_event_at,omitempty"`
+	// Profile is the profile (a catalog profile or a seat name) the job was
+	// placed on, read from its own job.spawned receipt. A node's heartbeat
+	// carries it so a direct `panewire spawn` counts toward the pool cap the
+	// hub applies to its own spawns (hk 3399).
+	Profile       string `json:"profile,omitempty"`
+	StartedAt     string `json:"started_at,omitempty"`
+	LastEventKind string `json:"last_event_kind,omitempty"`
+	LastEventAt   string `json:"last_event_at,omitempty"`
 }
 
 type hubJobRecord struct {
@@ -417,6 +443,9 @@ type HubServer struct {
 	spawnSentry          *sentry.Client
 	spawnCoordinatorOnce sync.Once
 	spawnNewApp          func(io.Writer, io.Writer) (*fleet.App, error)
+	// consultPlan resolves a consult seat and its spawn submission. Nil uses
+	// the hub's own fleet App (fleet.App.PlanConsult); tests inject one.
+	consultPlan func(context.Context, fleet.ConsultPlanInput) (fleet.ConsultPlan, error)
 	// quotaReplacePoll overrides how often a quota-stop replacement looks for
 	// its successor's outcome; zero uses quotaReplacePoll.
 	quotaReplacePoll time.Duration
@@ -430,9 +459,19 @@ type HubServer struct {
 	// quotaReplaceBudget.
 	quotaReplaceBudget time.Duration
 	spawnKick          chan struct{}
-	spawnWorkers       sync.WaitGroup
-	placementKick      chan struct{}
-	placementAsync     atomic.Bool
+	// spawnWakes are the park reasons an event named since the coordinator's
+	// last wake (hub_spawn_park.go); spawnRand draws the back-off spread
+	// (nil: math/rand).
+	spawnWakeMu sync.Mutex
+	spawnWakes  map[string]bool
+	spawnRand   func() float64
+	// spawnWakeCounts counts each reason's noted events, so a park can tell
+	// one raced it; spawnWakeHeld holds the next batch for a timer tick.
+	spawnWakeCounts map[string]uint64
+	spawnWakeHeld   bool
+	spawnWorkers    sync.WaitGroup
+	placementKick   chan struct{}
+	placementAsync  atomic.Bool
 	// placementRecordClient is the App the outbox delivers hk placement
 	// records through; built on first use by placementRecordApp.
 	placementRecordClient *fleet.App
@@ -473,6 +512,16 @@ type HubServer struct {
 	authFailedMissing bool
 	alertNodes        map[string]struct{}
 	now               func() time.Time
+	// waitingMu guards the start-condition check's poll time and its
+	// once-per-outage read failure log (hub_spawn_start_conditions.go).
+	waitingMu         sync.Mutex
+	waitingCheckedAt  time.Time
+	waitingReadFailed bool
+	// parkNoticeMu guards the parked-request owner notice's poll time and its
+	// candidate cursor (hub_spawn_park_notice.go).
+	parkNoticeMu        sync.Mutex
+	parkNoticeCheckedAt time.Time
+	parkNoticeCursor    spawnParkNoticeCursor
 	// fleetEvents writes a fleet event. Tests substitute a recorder; production
 	// leaves it nil and events go to the state directory (emitFleet).
 	fleetEvents func(time.Time, fleetEvent) bool
@@ -483,6 +532,7 @@ type HubServer struct {
 	ladderPlan        func(context.Context, fleet.Submission) error
 	heldLoop          map[string]*spawnHeldLoop
 	heldLoopOrder     lruIndex[string]
+	consultTimeout    time.Duration
 	staleAfter        time.Duration
 	keepaliveInterval time.Duration
 	gracePeriod       time.Duration
@@ -577,12 +627,21 @@ type HubServer struct {
 	spawnRecords                map[string]*hubSpawnRecord
 	nodeCommands                map[string]*hubNodeCommandPending
 	unworkedLandingGrace        time.Duration
-	spawnStartBy                time.Duration
-	spawnStartByMargin          time.Duration
-	spawnGrantDrain             bool
-	nodeCommandWait             time.Duration // fixture seam; zero is hubNodeCommandWait.
-	checkoutPullWait            time.Duration // fixture seam; zero is hubCheckoutPullWait.
-	nodeAgentsWait              time.Duration // fixture seam; zero is hubNodeAgentsWait.
+	// reviewerEndLogged is the refusal each reviewer job last logged in the
+	// posted-result pass, so a job that keeps failing for the same reason logs
+	// once, not once a pass (hub_spawn_reviewer_end.go).
+	reviewerEndLogged map[string]string
+	// reviewerEndSettled holds the reviewer jobs the pass found ended, so it
+	// reads each hk record once while the job stays in its window.
+	reviewerEndSettled map[string]bool
+	spawnStartBy       time.Duration
+	spawnStartByMargin time.Duration
+	spawnGrantDrain    bool
+	spawnRollbackDrain bool
+	nodeCommandWait    time.Duration // fixture seam; zero is hubNodeCommandWait.
+	checkoutPullWait   time.Duration // fixture seam; zero is hubCheckoutPullWait.
+	nodeAgentsWait     time.Duration // fixture seam; zero is hubNodeAgentsWait.
+
 	// laneStallMu is TryLock'd so at most one lane-stall observation runs and
 	// is held for the run's whole life: once Close has taken it and set
 	// laneStallClosing, no new run can start and any in-flight one is already
@@ -618,6 +677,12 @@ type HubServer struct {
 	// keeps at most one load publication in flight (docs/fleet-state.md).
 	fleetState     *fleetStateStore
 	fleetStateOnce sync.Once
+	// fleetStatusInterval is how often the fleet status snapshot is written;
+	// zero disables it. fleetStatusPublish and fleetStatusPlanFn are the
+	// test seams for the hk write and the per-grade plan (fleet_status.go).
+	fleetStatusInterval time.Duration
+	fleetStatusPublish  func(context.Context, string) error
+	fleetStatusPlanFn   func(context.Context) []fleet.StatusPlan
 	// launchBackoffs counts consecutive launch failures per (machine, kind),
 	// guarded by mu (hub_readiness.go).
 	launchBackoffs map[launchKey]*launchBackoff
@@ -694,6 +759,9 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 	if config.KeepaliveInterval <= 0 {
 		config.KeepaliveInterval = 10 * time.Second
 	}
+	if config.ConsultTimeout <= 0 {
+		config.ConsultTimeout = defaultHubConsultTimeout
+	}
 	if config.GracePeriod <= 0 {
 		config.GracePeriod = defaultHubGracePeriod
 	}
@@ -736,6 +804,9 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 	configkeys.Warn(config.Logger, config.AcceptingOverridesPath, ignoredOverrideKeys)
 	if config.LanesNodeRowCap < 0 {
 		return nil, errors.New("hub lanes node row cap is invalid")
+	}
+	if config.FleetStatusInterval < 0 {
+		return nil, errors.New("hub fleet status interval is invalid")
 	}
 	if config.LanesNodeRowCap == 0 {
 		config.LanesNodeRowCap = defaultLanesNodeRowCap
@@ -801,8 +872,8 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 	closeCtx, closeCancel := context.WithCancel(context.Background())
 	hub := &HubServer{
 		inbox: inbox, spawnKick: make(chan struct{}, 1), placementKick: make(chan struct{}, 1),
-		authPath: config.AuthPath, alertNodes: alertNodes, relayControl: newHubRelayControlState(config, overrides), now: config.Now, staleAfter: config.StaleAfter, keepaliveInterval: config.KeepaliveInterval,
-		gracePeriod: config.GracePeriod, orphanGrace: config.OrphanGrace, unworkedLandingGrace: config.UnworkedLandingGrace, spawnStartBy: config.SpawnStartBy, spawnStartByMargin: config.SpawnStartByMargin, spawnGrantDrain: config.SpawnGrantDrain, alertObservations: defaultHubAlertObservations, logger: config.Logger,
+		authPath: config.AuthPath, alertNodes: alertNodes, relayControl: newHubRelayControlState(config, overrides), now: config.Now, consultTimeout: config.ConsultTimeout, staleAfter: config.StaleAfter, keepaliveInterval: config.KeepaliveInterval,
+		gracePeriod: config.GracePeriod, orphanGrace: config.OrphanGrace, unworkedLandingGrace: config.UnworkedLandingGrace, spawnStartBy: config.SpawnStartBy, spawnStartByMargin: config.SpawnStartByMargin, spawnGrantDrain: config.SpawnGrantDrain, spawnRollbackDrain: config.SpawnRollbackDrain, alertObservations: defaultHubAlertObservations, logger: config.Logger,
 		paneSweepInterval: config.PaneSweepInterval, paneSweepAge: config.PaneSweepAge,
 		poolTriggerInterval: defaultPoolTriggerInterval,
 		placementPolicyPath: config.PlacementPolicyPath, placementPolicy: placementPolicy, placementPolicyModTime: placementPolicyModTime, placementPolicyObservedModTime: placementPolicyObservedModTime, placementPolicyLoaded: placementPolicyLoaded, placementPolicyStatus: placementPolicyStatus, placementPolicyLastFailure: placementPolicyLastFailure, prometheusURL: config.PrometheusURL, prometheusClient: config.PrometheusClient, prometheusBearer: config.PrometheusBearer, prometheusBasicUser: config.PrometheusBasicUser, prometheusBasicPass: config.PrometheusBasicPass,
@@ -810,8 +881,26 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 	}
 	hub.auth.Store(&authSet)
 	hub.fleetState = newFleetStateStore()
+	hub.fleetStatusInterval = config.FleetStatusInterval
+	hub.fleetStatusPublish = config.FleetStatusPublish
+	hub.fleetStatusPlanFn = config.FleetStatusPlans
 	hub.quietTimings = defaultDesignQuietTimings()
+	if hub.inbox != nil {
+		cleared, err := hub.inbox.store.clearReviewerReservations()
+		if err != nil {
+			hub.closeCancel()
+			_ = hub.inbox.store.close()
+			return nil, err
+		}
+		if cleared > 0 {
+			hub.logger.Info("hub cleared reviewer role reservations", "rows", cleared)
+		}
+	}
 	hub.prepareInbox()
+	if hub.inbox != nil {
+		hub.inbox.store.spawnRetryDelay = hub.spawnRetryDelay
+		hub.inbox.store.spawnFrozen = hub.spawnRollbackDrain
+	}
 	if err := hub.restorePlacementCounts(); err != nil {
 		hub.closeCancel()
 		_ = hub.inbox.store.close()
@@ -901,6 +990,8 @@ func (h *HubServer) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/jobs/orphaned", h.handleOrphanedJobs)
 	mux.HandleFunc("POST /v1/jobs/reassign", h.handleReassignJob)
 	mux.HandleFunc("POST /v1/jobs/escalate-author", h.handleEscalateAuthor)
+	mux.HandleFunc("POST /v1/consults", h.handleConsultRequest)
+	mux.HandleFunc("GET /v1/consults/{id}", h.handleConsultGet)
 	mux.HandleFunc("GET /v1/agent", h.handleAgent)
 	mux.HandleFunc("GET /v1/events", h.handleEvents)
 	mux.HandleFunc("POST /v1/relay/events", h.handleRelayIngress)
@@ -1793,7 +1884,7 @@ func decodeHubHeartbeatPayload(payload []byte) (hubHeartbeatPayload, bool) {
 				return hubHeartbeatPayload{}, false
 			}
 			for name := range rawJob {
-				if name != "job_id" && name != "agent_label" && name != "last_event_seq" && name != "push_sha" && name != "epoch" && name != "owner_lane" && name != "pane" && name != "tier" && name != "role" && name != "started_at" && name != "last_event_kind" && name != "last_event_at" {
+				if name != "job_id" && name != "agent_label" && name != "last_event_seq" && name != "push_sha" && name != "epoch" && name != "owner_lane" && name != "pane" && name != "tier" && name != "role" && name != "profile" && name != "started_at" && name != "last_event_kind" && name != "last_event_at" {
 					return hubHeartbeatPayload{}, false
 				}
 			}
@@ -2038,7 +2129,8 @@ func (h *HubServer) connect(machineID, version, remoteAddr string, agent *hubAge
 	h.placementCache = placementCache{}
 	h.recordUIEventLocked("presence", "connected", machineID, now)
 	h.mu.Unlock()
-	h.kickSpawnPlacement()
+	// A node that connects may be the candidate a parked request lacked.
+	h.noteSpawnWake(spawnParkNodeDisconnected, spawnParkHostFull, spawnParkNoEligibleHost)
 	h.tryPendingRevocations(machineID)
 	if previous != nil && previous != agent {
 		_ = previous.conn.Close(websocket.StatusPolicyViolation, "replaced")
@@ -2452,8 +2544,11 @@ func (h *HubServer) RunMaintenance(ctx context.Context) {
 	go h.runInbox(ctx)
 	go h.runLaneRelease(ctx.Done())
 	go h.runPaneSweep(ctx)
+	go h.runReviewerEnd(ctx)
 	go h.runPoolTriggers(ctx)
+	go h.runFleetStatus(ctx)
 	h.startSpawnCoordinator(ctx)
+	h.startConsultCoordinator(ctx)
 	// Startup replay runs once, before the first keepalive tick: whatever
 	// Postgres still holds as undelivered predates this process.
 	h.replayUndeliveredRelayEvents(ctx)

@@ -90,9 +90,10 @@ func (a *App) waitJob(ctx context.Context, s Spawn, delegated ...bool) error {
 	delay := 2 * time.Second
 	warned := false
 	hkWarned := false
+	inboxRoute := waitInboxViaDaemon
 	hkWatch := len(delegated) > 0 && delegated[0]
 	for {
-		out := a.waitOutcome(ctx, s, lane, &warned, &hkWarned, hkWatch)
+		out := a.waitOutcome(ctx, s, lane, &warned, &hkWarned, &inboxRoute, hkWatch)
 		if out.name != "" {
 			fmt.Fprintf(a.Out, "wait job=%s outcome=%s report=%s pane=%s%s\n", s.Job, out.name, out.report, out.pane, laneUnregisteredSuffix(s.laneUnregistered))
 			switch out.name {
@@ -116,10 +117,11 @@ func (a *App) waitJob(ctx context.Context, s Spawn, delegated ...bool) error {
 	}
 }
 
-// waitOutcome scans the job's durable event artifacts first, then the lane
-// inbox when the hub is configured. Event reads tolerate a missing dir (a
+// waitOutcome scans the job's durable event artifacts first, then the owner
+// lane inbox when the hub is configured. The inbox read goes through the local
+// node daemon first (waitInbox, hk 3706). Event reads tolerate a missing dir (a
 // delegated job only has the initiator-side placement record here).
-func (a *App) waitOutcome(ctx context.Context, s Spawn, lane string, warned, hkWarned *bool, hkWatch bool) waitOutcome {
+func (a *App) waitOutcome(ctx context.Context, s Spawn, lane string, warned, hkWarned *bool, inboxRoute *waitInboxRoute, hkWatch bool) waitOutcome {
 	evs, e := a.events(s.Job)
 	if e != nil && !errors.Is(e, os.ErrNotExist) && !*warned {
 		*warned = true
@@ -152,13 +154,8 @@ func (a *App) waitOutcome(ctx context.Context, s Spawn, lane string, warned, hkW
 	if lane == "" || str(a.Config.Hub, "hub_url") == "" {
 		return waitOutcome{}
 	}
-	args := append([]string{"inbox", "list", "--lane", lane, "--json"}, a.controlHubArgs(true)...)
-	r := a.call(ctx, "panewire", args...)
+	r := a.waitInbox(ctx, lane, inboxRoute, warned)
 	if r.Code != 0 {
-		if !*warned {
-			*warned = true
-			a.warn("lane inbox read failed; watching local events only")
-		}
 		return waitOutcome{}
 	}
 	var msgs []struct {

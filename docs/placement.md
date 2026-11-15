@@ -151,18 +151,32 @@ aliases included. It exists because those rungs spend Devin's free-model quota
 while paid `devin-ds41` spends the account's paid window. `devin` remains a
 whole-pool cap, so a free rung must pass both keys when both are set.
 
-The hub counts, because it places every hub spawn
-([durable spawn operations](hub-spawn-operations.md)). A live spawn on a pool
-is a hub spawn operation that is accepted, bound or dispatching, or succeeded with a
-job that a node still lists as active, whose placed profile is in that pool.
+Beside that operator cap, hub placement admits one concurrent free-band launch
+per Devin account (hk 4765): a second concurrent launch onto the same
+account's free band is dropped `pool_at_cap` with `cap` `devin-free`, `cap_live`
+the account's live free launches and `cap_limit` 1, so a burst of submissions
+places at most one onto the free band per account. Launches placed through a
+seat count under the catalog profile they run. Only hub placement enforces
+it, from its own operations; a node-local selection has no fleet-wide launch
+
+The hub counts, because it sees every spawn the fleet runs. A live spawn on a
+pool is a hub spawn operation that is accepted, bound or dispatching, or
+succeeded with a job that a node still lists as active, whose placed profile is
+in that pool; plus every job a node reports active in its heartbeat that no
+live operation names, whose placed profile is in that pool. The second term is
+a direct `panewire spawn` on a node, which the hub never placed (hk 3399): the
+node reads the profile from that job's own `job.spawned` receipt, so the same
+count fills the reserved `devin-free` key. A hub spawn that has become a node
+job is in both records and counts once, under its operation; a job two nodes
+list counts once, under the node the hub holds as its owner.
 A bound request waiting for its node's dispatcher counts once, using the
 profile bound for its current attempt; an earlier attempt's profile does not
 replace it. A spawn that succeeded less than two minutes ago counts before its
 first heartbeat. An auto spawn that is still being placed has no profile yet
-and is not counted, and neither is the spawn being placed. The hub's own selection
-reads the count from its operations. Any other selection (`plan`, a direct
-spawn) reads it from the hub with `GET /v1/spawns/live` and the operator
-credential.
+and is not counted, and neither is the spawn being placed. The hub's own
+selection reads the count from its operations and its nodes' reported jobs. Any
+other selection (`plan`, a direct spawn) reads it from the hub with
+`GET /v1/spawns/live` and the operator credential.
 
 When the count cannot be read the cap does not apply. Selection records
 `pool_cap_count_unavailable` under `degraded` and the node writes a warning
@@ -188,13 +202,20 @@ drops what does not fit.
 | Field | Meaning |
 |---|---|
 | `harnesses.<kind>` for `claude`, `codex`, `omp`, `agy`, `devin`, `cmd` | `installed` (the binary is found; `cmd` is always installed), `version` (the first dotted number of `--version`), `herdr_integration` (`herdr integration status` says `current`), `login` (`present` / `missing` / `unknown`) with `account` (the pacelever account key), `dialog` |
-| `harnesses.<kind>.login` | From the node's own refresh of the pool named like the kind (`--state-quota-pools`): `claude`, `codex`, `commandcode`, `devin` and `agy` are measured by the node itself. Other pools are unmeasurable and read `unknown`. `present` follows a successful refresh. `missing` follows a refresh failure with an `error_kind` of `auth`, `auth_failed`, `credentials` or `token_expired`. Any other failure (timeout, transient error, `excluded`, unreadable status) keeps a present account while its last successful refresh is under 5 minutes old, and otherwise reads `unknown`. |
+| `harnesses.<kind>.login` | From the node's own refresh of the pool named like the kind (`--state-quota-pools`): `claude`, `codex`, `commandcode`, `devin` and `agy` are measured by the node itself. The `cmd` harness has no pool of its own: a cmd seat spends the `commandcode` pool, which the node measures through omp, so `harnesses.cmd.login` is that pool's login. Other pools are unmeasurable and read `unknown`, and `omp` spans several providers so it has no single pool and reads `unknown` unless a node measures one for it. `present` follows a successful refresh. `missing` follows a refresh failure with an `error_kind` of `auth`, `auth_failed`, `credentials` or `token_expired`. Any other failure (timeout, transient error, `excluded`, unreadable status) keeps a present account while its last successful refresh is under 5 minutes old, and otherwise reads `unknown`. |
 | `harnesses.<kind>.dialog` | The first-run dialog the **last launch** stopped at: `codex_hooks_review`, `codex_directory_trust`, `omp_setup_wizard` or `claude_trust`. It is the last known state, set by a failed launch and cleared by the next launch of that kind that succeeds. The node does not open a harness to look, and a dropped pair is not launched again, so a reported dialog also expires after 30 minutes: the pair then gets one more launch, and a launch that stops at the dialog again reports it for another 30 minutes |
 | `repos` | The node's `cwd_map` keys (on defaults: the directories under the work root) |
 | `brief.handoffkeep_env` | The handoffkeep env file is present, mode 0600 and holds a URL and token |
 | `toolchains` | `go`, `node`, `bun` with their versions, when installed |
 | `panewire_version` | The node's build |
 | `config` | The effective spawn configuration: `source` (`defaults` or `spawn.json`), `workspace`, `herdr_session` (the built-in default name, else `custom`: spawn.json names are free text and never travel), `work_root` (whether it exists). See [r26-hub-spawn.md](r26-hub-spawn.md) |
+
+Seat capability flags read this report: `cmd_dsflash41` reads
+`harnesses.cmd` and `omp_commandcode` reads `harnesses.omp`. A node that
+reports the harness installed and its login present holds the capability, so
+placement does not need a `[hosts.NAME]` copy of the flag on the placing host;
+a hosts.toml boolean is only an override
+([config](config.md#capability-flags)).
 
 The report is cached on the node. It is refreshed every 5 minutes and after
 every failed launch, probed in the background so a probe never delays a
@@ -280,6 +301,12 @@ constants live in `placement.json`:
 
 Both are optional (0 or absent means 2 and 30). The counts are in hub memory:
 a hub restart forgets them, which ends a backoff early and never starts one.
+
+A spawn request's own re-placement back-off, the parked-request wake batch and
+the long-park owner notice are separate keys (`spawn_backoff_seconds`,
+`spawn_backoff_max_seconds`, `spawn_wake_batch`,
+`spawn_park_notice_seconds`); see
+[hub-spawn-operations.md](hub-spawn-operations.md#parked-notice).
 
 ### First-run refusals and the desk notice
 
@@ -866,9 +893,10 @@ node's fresh pane snapshot no longer lists is still released first
 ([dead rows are released](r28-lanes-write.md#dead-rows-are-released-and-reused)),
 so a machine comes back into placement as soon as its stale rows drain.
 Reviewer lanes are the common source of leftover rows: a finished reviewer job
-that never ran `done` keeps its pane and row until a submission for the same
-key closes it, or the unattended pass hk 4684 adds does (see
-[hub-spawn-operations.md](hub-spawn-operations.md)).
+that never ran `done` keeps its row until the hub's posted-result pass ends its
+hk record and the node's ended-job sweep closes its pane (see
+[hub-spawn-operations.md](hub-spawn-operations.md#ending-a-reviewer-job-that-posted-a-result)).
+A reviewer that has not posted a result is never ended that way.
 
 ## Machine power weights
 

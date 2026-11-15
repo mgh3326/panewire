@@ -34,8 +34,13 @@ func TestDonePublishesToContentAddressedKeyAndWritesReceipt(t *testing.T) {
 	if len(done) != 1 || str(done[0], "document") != key {
 		t.Fatalf("completion events=%v, want one carrying the exact key %s", done, key)
 	}
-	if lines := r.relays(); len(lines) != 1 || !strings.HasSuffix(lines[0], " doc:"+key) {
-		t.Fatalf("relay last lines=%q, want one ending in doc:%s", lines, key)
+	if lines := r.relays(); len(lines) != 1 || lines[0] != "READY: done" {
+		t.Fatalf("relay last lines=%q, want the report's own last line", lines)
+	}
+	// The desk's [report] text names the hk key, not the path the fleet
+	// deletes once the record pins it (hk 3685).
+	if got := r.relayReports(); len(got) != 1 || got[0] != key {
+		t.Fatalf("relay reports=%q, want the hk key %s", got, key)
 	}
 }
 

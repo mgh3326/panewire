@@ -32,9 +32,9 @@ reason; an unreachable or failing hub is an error, not a silent fallback.
 The CLI prints `ACCEPTED job=… request=…` after the hub commits a reservation.
 That confirms ownership of the operation, not a pane or brief delivery. Wait for
 `SPAWNED` or `SPAWN_FAILED` and perform the usual read-only landing check.
-`--wait` observes spawn state first, preserving admission/node refusal codes,
-keeps polling through `reconciling` (which sends no notice), then uses the
-existing job-completion wait and timeout behavior. Delegate panes
+`--wait` observes the request state first, preserving admission/node refusal codes,
+then uses the existing job-completion wait and timeout behavior. See
+[Request states a client reads](#request-states-a-client-reads). Delegate panes
 use the same submission path.
 
 For a stale or unobserved native quota account, the hub schedules a node
@@ -69,6 +69,419 @@ new budget. On shutdown the hub cancels refreshes; accepted requests and their
 reservations survive restart. Local, non-hub spawns keep their synchronous
 refresh behavior. See [Quota service boundary](placement.md#quota-service-boundary).
 
+## Request states a client reads
+
+`GET /v1/spawns/<request>` returns `status`. Every client (`spawn --wait`, the
+job-directory TTL pass) knows the design's state set
+(hk design/2026-11-13/hub-owned-spawn-queue §2) before the hub emits any of it
+(hk 4659). The hub emits `accepted`, `dispatching`, `reconciling`, `succeeded`,
+`failed`, `retryable` and `deadline_exceeded`, since hk 4660 `given_up` too
+([Time limit](#time-limit)), since hk 4736 `waiting`, `refused` and
+`cancelled` for [Start conditions](#start-conditions), and since hk 4661
+`parked`, with top-level `reason` and `next_check_at` ([Parked](#parked));
+`pending`, `launching` and `landed` stay unemitted until their parts.
+`TestHubSpawnExternalStatesUnchanged` keeps that set, and every state in it
+is one the clients know. An answer also carries `expires_at` (RFC 3339,
+the request's time limit) for a request that has one.
+
+| State | `spawn --wait` |
+|---|---|
+| `accepted`, `waiting`, `pending`, `bound`, `dispatching`, `launching`, `reconciling` | keeps waiting, silently |
+| `parked` | keeps waiting and prints `wait request=<id> state=parked reason=<r> next_check_at=<t>` on stderr when either changes. The client reads `reason` and `next_check_at` from the top level of the answer (`result.reason` as a fallback) and tolerates their absence. |
+| `succeeded`, `landed` | the request phase ends; the job-completion wait follows |
+| `failed`, `retryable`, `refused` | exits with the hub's recorded `result.rc` (81 when none) |
+| `cancelled`, `given_up` | exits 84; nothing was spawned. The message names the state, the hub's reason and `expires_at`. |
+| `deadline_exceeded` | exits 75, ownership unresolved |
+| any other name | keeps waiting and prints `unknown state <x>: still waiting` once on stderr; never success, never failure |
+
+`--wait-timeout` (default one hour) bounds the request phase, and then bounds
+the job-completion wait again. A request still in flight at the bound exits 85,
+and one still `parked` exits 91 (see [exit codes](config.md)); the request stays
+queued on the hub either way. The bound uses the wall clock.
+
+A submitter-side job directory the hub never held a record for may be removed
+once its request is `failed`, `refused`, `given_up` or `cancelled`.
+
+## Time limit
+
+hk 4660; design hk design/2026-11-13/hub-owned-spawn-queue §3 rule 2.
+Start conditions through the queue are hk 4736; see
+[Start conditions](#start-conditions).
+
+Every accepted request has `expires_at` (`spawn_operations.expires_ms`,
+reported as `expires_at` by `GET /v1/spawns/<request>` and in the 202 answer).
+It is set at acceptance: 6 h for an implementer, 1 h for a reviewer or consult,
+or `panewire spawn --expires DUR` (a whole-second Go duration such as `90m`,
+from 1 minute to 24 h; the request carries `expires_seconds`). A hub that does
+not advertise `spawn_expires_v1` in `GET /v1/spawns/features` makes the CLI
+refuse `--expires` rather than drop it. A deliberate replay of a `retryable`
+request starts its limit again. These are constants in this part
+(`internal/fleet/spawn_expiry.go`), not hub config.
+
+An attempt's `job.spawn` frame carries that absolute expiry as `expires_ms`, but
+only to a node that advertises `spawn_expires_v1` (`hubSpawnCapabilities`): an
+older node's strict frame decoder refuses an unknown field. The node's spawn
+writes it into the `job.spawned` receipt as `expires_at`, which the node's pane
+sweep reads to end a reviewer or consult that never posted a result
+([pane-sweep.md](pane-sweep.md#reviewer-and-consult-ends), hk 4747).
+
+The 600 s landing wait (`deadline_seconds`) is now one attempt's bound, or the
+limit when that comes first. A staged author-replacement successor
+(`activateStagedSpawn`) is capped the same way; one activated at or past the
+limit is given up unsent on its first pass. When the wait ends an attempt whose
+start is *proven absent* (the hub never sent it, or the node attested
+`deadline_not_started` or the start proof fenced it after the attempt's
+deadline), the request is not over:
+
+| Attempt ends, start proven absent | Result |
+|---|---|
+| before `expires_at` | the same row, reservation and request id start attempt N+1 as `accepted`, with a fresh wait of 600 s (at most to `expires_at`). No notice. The ended attempt's placement record is sealed first, as a client's replay does. |
+| at or after `expires_at` | `given_up`: terminal, reason `expired: expires_at <t> passed after <n> attempt(s)`, rc 84, stage `queue`. One `SPAWN_FAILED` for the owner (and the submitting lane); the job id and task/role reservation are freed as for `retryable`. |
+
+A request whose start is **not** proven absent (`dispatching`, `reconciling`,
+`deadline_exceeded`) is never given up, before or after `expires_at`: the limit
+does not apply while the node may have started it. Part 1's proof
+([Start proof](#start-proof)) or the node's own answer settles it, and only
+then does the table above apply. A row with no limit (`expires_ms=0`, written
+before the column or by an older hub) keeps the previous behaviour: its timeout
+ends it `retryable`. A not-started answer inside the attempt's deadline is a
+refusal and ends as before (next host, or `retryable`). The hand-over takes
+the placement-trace lock a client's replay takes; if the trace cannot be
+restored (a held legacy conflict) the end of the attempt is not recorded: the
+request stays as it is with its reservation, and a later pass settles it once
+the trace can be restored.
+
+### Start conditions
+
+hk 4736; design hk design/2026-11-13/hub-owned-spawn-queue §4 (decision 188).
+`panewire spawn --after task:N=merged|deployed|done`, `--after blockers[=merged|
+deployed]` and `--after time:RFC3339` (several are ANDed) submit as usual once
+the hub advertises `start_conditions_v1` in `GET /v1/spawns/features`. A
+conditioned request is accepted with status `waiting`; it keeps its reservation
+and its `expires_at`, and holds no placement slot.
+
+One coordinator check, at most every 60 s (the hub's clock), gathers every
+`waiting` row and reads the tasks they name in ONE batched handoffkeep call
+`GET /v1/tasks/states/snapshot`, chunked at 200 ids per call, so the number of
+hk reads follows the ids and not the requests. `blockers` predicates read the
+target's open blockers from that snapshot and settle those ids in a second
+read of the same check. Each row then:
+
+| Check result | Row |
+|---|---|
+| every predicate holds | `accepted`, with a fresh attempt deadline (`deadline_seconds`, capped at `expires_at`), picked up by the next placement scan |
+| still waiting | stays `waiting`; no re-read until the next check |
+| a named task is in hk's `missing` | `refused`, rc 78, reason `task:N=missing`; reservation freed, one `SPAWN_FAILED` for the owner and the submitting lane |
+| the named task is `dropped` or `duplicate` | `cancelled`, rc 84, reason `task:N=<state>`; same release and notice |
+| `expires_at` passed | `given_up` as in [Time limit](#time-limit), whether or not the condition holds. Expiry is evaluated before the hk read, so a row is ended at its limit even during an outage |
+
+An hk call that fails fails the check's evaluations: every unexpired row stays
+`waiting`, one warning is logged per outage (not per check or row), and the
+failure clears once a read answers. A read that does not name every requested
+id also fails closed as waiting, so a condition is never decided from a partial
+answer. Each waiting row stores its last evaluation (`condition_result`), and
+`GET /v1/spawns/<request>` returns it as `start_condition` with the predicates
+that still block it.
+`TestStartConditionWaitsThenReleasesOnMergedAndDeployed`,
+`TestStartConditionTimeReleasesOnTheClock`,
+`TestStartConditionMissingTaskIsRefused`,
+`TestStartConditionHKFailureKeepsWaitingAndLogsOnce`,
+`TestWaitingRowGivenUpDuringHKOutage`,
+`TestStartConditions250IdsReadInTwoSnapshotCalls`,
+`TestWaitingRequestGivenUpAtItsLimit`, `TestWaitingRowsSurviveRestart` and
+`TestWaitingStatusReportsBlockingPredicates` cover each row of the table and
+the batching.
+
+The snapshot read comes from the pinned handoffkeep client `v0.0.295`
+(`Client.TaskStatesSnapshot`, hk 4735). A hub on an older client cannot check
+conditions and must not accept `--after`: it does not advertise the feature,
+and the CLI refuses the flag before submitting.
+
+A conditioned row that reaches an executable, unbound status without passing
+the queue is returned to `waiting` instead of launched: a legacy row, a
+replayed `retryable` request, a staged activation, or a bound row a node
+refused (`unbindSpawn`, `resumeUndispatchedSpawn`). The invariant is
+`conditions_met_ms`: it is zero until the queue sees every predicate hold, and
+only a row with it set (or a bound legacy row, which keeps its own guard) may be
+placed. `TestUnboundConditionedRowReturnsToWaiting` covers both `accepted` and
+`deadline_exceeded`.
+
+The startup migration (`0017_spawn_waiting_conditions.sql`, SQLite: an
+idempotent `UPDATE` at open) is a fast path for unbound conditioned rows an
+older hub left executable — `accepted`, `deadline_exceeded` — and moves them to
+`waiting`. It never takes a row another owner holds: `staged` belongs to the
+ladder (`activateStagedSpawn`/`cancelStagedSpawn`/`discardStagedSpawn` CAS on
+that status), and a `retryable` row's reservation was released by
+`completeSpawn`, so the replay path re-creates it and the execute guard waits
+the row then. A bound legacy row is not moved either; it keeps the guard it had
+(not replayed while its condition is unmet and its deadline is live).
+`waiting` is not a settled state for any reader: `spawnStatusActive` counts it,
+and an escalated conditioned successor reports `pending` rather than a false
+quota refusal.
+
+## Parked
+
+hk 4661; design hk design/2026-11-13/hub-owned-spawn-queue §2 (`parked`),
+§3 rules 3 and 4, §9a. Start conditions are [above](#start-conditions); the
+owner notice for a long-parked request is [Parked notice](#parked-notice).
+
+**Parked, not ended.** When placement finds no candidate for a request that
+has a limit (`expires_ms>0`), the request is parked instead of ending
+`retryable`. The refusal is read by `spawnParkReason` (`hub_spawn_park.go`):
+
+| Placement refusal | `reason` | Woken early by |
+|---|---|---|
+| `launch_backoff` named, or the request's own back-off (below) | `launch_backoff` | its timer only |
+| every eligible candidate is in a pool at its concurrency cap | `pool_cap` | a job leaving a node's active set |
+| `QUOTA_*`, `quota_exhausted`, `quota_unconfirmed`, rc 86/87/89 | `quota` | a finished quota refresh |
+| a node did not connect / is not connected (`hub_node_unavailable`) | `node_disconnected` | a node connect |
+| rc 81: no awake host admitted / no host admitted / no candidate accepted | `host_full` | a node connect, a job leaving a node |
+| `role_no_candidate` (no profile passes), `NO_ELIGIBLE_HOST` | `no_eligible_host` | a node connect |
+
+Any other refusal ends the request as before. A row with no limit is never
+parked. A parked row stays `status='accepted'`, unbound and holding its
+reservation, with `park_reason` and `next_check_ms` (migration
+`0018_spawn_parked.sql`). The coordinator scan skips an accepted row until
+`next_check_ms`; `GET /v1/spawns/<request>` reads `parked` with `reason` and
+`next_check_at` while it is ahead, and `accepted` once it is due. The next
+check is one back-off base ahead, spread ±20 % (24–36 s by default), and never
+past `expires_at`, so a parked request is looked at when its limit passes and
+is given up then as in [Time limit](#time-limit). A parked request holds no
+account and no placement count.
+
+**Event wake.** A node connect, a job leaving a node's active set and a
+finished quota refresh note the reasons in the table. On its next tick the
+coordinator makes at most `spawn_wake_batch` (8) parked rows with a noted
+reason due now, earliest next check first; when the batch was full the
+reasons stay noted and the next batch waits for the next timer tick (2 s),
+however often the coordinator is kicked meanwhile. An event noted for a
+park's reason while its placement ran is noted again once the park lands, so
+a drained wake is never lost; `launch_backoff` is never event-woken. A
+refusal with several blockers (rc 80 `no remote candidate completed` with
+mixed tried notes) stores every reason (`host_full,quota`) and wakes on any;
+the status API shows the first. A mock lane's rc 80 is not parked. A parked,
+unbound row holds no pool slot (`liveSpawns`), a claimed-harness retry is not
+backed off (hk holds its claim on that host), and a parked pass emits no
+terminal refusal event. The first cleanup-confirmed refusal after the hk job
+claim is kept in `claim_result`: written with the result that proves it
+(a definitive post-claim node result; never a timeout, which is uncertain or
+the not-started evidence of [Time limit](#time-limit), and never a
+pre-claim refusal or a not-started attestation) and never replaced. A request holds a claim when it has a `claimed_host` pin or a
+`claim_result`: a pin cannot always tell a claim from a replay pin, so when
+in doubt the claim is kept. A saved result that would pin a replay (a post-claim node
+result, including one an older hub saved without `claimed_host`) holds too.
+A hub timeout of an unsent attempt and a node timeout at a stage before the
+claim pin nothing. A node's cleaned-up timeout from the claim stage on may
+come after the job claim: it still renews the attempt, but pinned to that host (so the claim is
+held from then on), and at the limit it ends `retryable` with its own result,
+never `given_up`.
+A request
+holding one may park, but
+it is never renewed or given up as unstarted: an unsent timeout, wherever the
+deadline passed, ends it with that saved refusal. A replay pin alone
+(`claimed_host` after a checkout refusal) proves no claim. Wakes are hub memory: a restart forgets them and the
+`next_check_at` timer covers it.
+
+**Back-off.** A failed attempt is a host refusal that hands the request to
+another host (`unbindRefusedSpawn`, the next-host and claimed-harness paths)
+or an attempt the node attested it never started after its deadline. It
+increments `failed_attempts` and parks the request `launch_backoff` for
+`spawn_backoff_seconds` × 2^(n-1) (30 s), at most
+`spawn_backoff_max_seconds` (600 s), spread ±20 % and then capped at that
+maximum again, and never past `expires_at`. The spread is drawn from
+`HubServer.spawnRand` (tests inject it) and the times are on the hub clock.
+A later pass that finds no other candidate never shortens a running back-off.
+An attempt the hub never sent (the queue timeout) is not a failure and starts
+the next attempt at once. The per-host `launch_backoff` of hk 4380
+([placement.md](placement.md)) is separate and counts host faults only.
+
+**Exclusions across attempts.** `exclusions` now carry into the request's
+next attempt: a host (or, for a launch-proof or claimed-host refusal, a host
+and harness) refused for a request stays excluded for every later attempt of
+that request, and for no other request. Only a client's deliberate replay of
+an ended `retryable` request starts them over. Exclusions have no `until` in
+this part.
+
+The numbers are `placement.json` keys (0 or absent: the defaults, unmeasured,
+design §9a and §9b Q2): `{"spawn_backoff_seconds": 30,
+"spawn_backoff_max_seconds": 600, "spawn_wake_batch": 8,
+"spawn_park_notice_seconds": 1800}`.
+
+### Parked notice
+
+hk 4662; design §6 (notices to the owner lane) and §9b Q2. A sweep of the
+parked requests tells an urgent request's owner once when its wait (below)
+reaches `spawn_park_notice_seconds` (1800 = 30 min by default), as one `info`
+line:
+
+`[panewire] SPAWN_PARKED <job> request=<id> reason=quota parked_since=… next_check_at=… unpark=…`
+
+`unpark` is the wake of every reason in the stored set (the table above).
+Urgency is the request's own decision, exactly as placement read it at submit:
+an `--urgency` flag the submitter passed wins (`urgent` tells, `normal` stays
+quiet), and only a request without one asks its bound hk task's priority
+(`park_priority`, read once per wait; 1 or 2 is urgent). A request with no
+task and no flag is not urgent, and one with no owner lane is never told.
+
+The sweep (`checkParkedSpawnNotices`, `hub_spawn_park_notice.go`) runs on the
+coordinator's tick, 60 s apart, and examines at most 64 candidate rows from a
+keyset cursor, earliest wait first. Its progress never depends on a row's
+outcome: the cursor moves past every row it examines, whatever happens, so no
+row — a P3 backlog, a task hk answers badly for, a rejected notice — can hold
+the page. A row leaves the candidate set when it is judged: the durable
+`park_judged_reason` names the reason set it was judged under, told or not. The
+cursor wraps at the end of a sweep; it lives in hub memory, so a restart starts
+the sweep at the head, which only repeats a sweep.
+
+A row whose task priority cannot be read is handled by what failed:
+
+| Read outcome | Effect |
+|---|---|
+| the task is gone, or the request names no task | reads as 0 (never urgent) and is judged |
+| a 4xx refusal for this task, or a 2xx answer that cannot be parsed | `park_priority_failures` counts the sweep; after 3 the task reads as 0 and the row is judged |
+| hk unreachable, 5xx, 429/408, 401 (an outage) | the row stays unjudged and the sweep stops after 2 such reads; the cursor resumes after them |
+
+A notice hk refuses to persist for good judges the row as not told and the
+sweep goes on; a transport failure, a 5xx, or a retryable 4xx (401, 403, 408,
+425, 429 — the inbox batch's own permanent set) leaves it unjudged, and a later
+sweep resends the same event.
+
+The notice is at most one per reason set for the request's life: nothing
+repeats while the request stays parked for the reason the notice named, a park
+that names other blockers may send one more, and a later attempt that parks
+again for an already-judged reason stays quiet. The judgement is durable —
+`park_judged_reason` (the reason set last judged, told or not) and
+`park_notice_ms` (when the owner was told; `0019_spawn_park_notice.sql`) — so a
+restart neither repeats nor loses a notice: a row parked before the restart is
+told by the hub that starts after it. The event id also names the wait start
+and the reason set (`spawn-park:<request>:<park_since_ms>:<reason>`), so a
+resend of the same notice is the same durable handoffkeep event.
+
+`park_since_ms` is the request's wait: it starts at its first park, survives
+every re-park and a bind a node then refuses (so the wait that is counted is
+the whole one), and starts over with a new attempt — the expiry replay and a
+deliberate replay of a retryable request both reset it, the priority read and
+its failure count, keeping the judgement. A notice is recorded only after
+handoffkeep took the durable row (or refused it for good).
+
+### Rolling back past parking
+
+`0018_spawn_parked.sql` only adds `park_reason`, `next_check_ms`,
+`failed_attempts` and `claim_result` (default `''`, 0, 0, `''`); an older hub neither reads nor writes
+them. A parked row is `status='accepted'` with `node_id IS NULL`, so an older
+hub's coordinator scan lists it and its bind CAS matches it: the older hub
+places it at once, without back-off or wake batch, and its GET shows
+`accepted`. Nothing is stranded and nothing starts twice. A row it binds keeps
+a stale `park_reason` that a newer hub ignores (a bound row never reads
+parked) and clears at its next bind. `TestOlderHubPlacesParkedRowsAsAccepted_t4661`
+runs those predicates against a parked row.
+
+`0019_spawn_park_notice.sql` adds only `park_since_ms`, `park_priority` (-1),
+`park_notice_ms`, `park_judged_reason` (0 and `''`) and
+`park_priority_failures` (0); an older hub neither
+reads nor writes them either, so a rollback loses no queue state. A newer hub
+reads a stored judgement as already judged for that reason set, so it repeats
+nothing, and it re-reads a priority only while `park_priority` is still -1.
+
+**Roll back only with an empty spawn queue, and keep it empty.** The
+pre-parking hub's time limit (part 3, #587) ignores `claimed_host`,
+`claim_result` and a saved post-claim result. Past `expires_at` it gives up
+an attempt it reads as unstarted, which can include a node timeout after
+the job claim. It then frees the reservation while hk may still hold the
+job. A snapshot of claim-holding rows is not enough, so the gate is the
+whole queue, with every producer frozen:
+
+1. Restart the newer hub with `--spawn-rollback-drain`. The hub keeps
+   running and its coordinator keeps placing, parking, waking and expiring
+   queued requests. But no new spawn row can be created
+   (`claimSpawnReplacing` refuses every producer):
+   - `POST /v1/spawns` and `POST /v1/consults` answer 503
+     `spawn_rollback_drain`, the consult before it stores any intent;
+   - `POST /v1/jobs/escalate-author` refuses a new ladder stage
+     (`claim_refused`) before it touches the author pane, but a replay of a
+     step already staged still completes it;
+   - a quota-stop hand-off starts no successor;
+   - a consult creates, recovers or respawns no spawn (the consult fails).
+
+   Staged ladder steps already queued still settle. Do not SIGTERM-drain
+   yet: that stops the coordinator, and a parked row would never settle.
+2. Wait until no spawn row is nonterminal, any status included (`*_grant`
+   variants too), and no consult is open:
+
+   ```sql
+   SELECT request_id, job, status, claimed_host, expires_ms FROM spawn_operations
+   WHERE status NOT IN ('succeeded','failed','retryable','given_up','refused','cancelled');
+   SELECT id, state FROM consult_requests WHERE state IN ('queued','running');
+   ```
+
+   Each row must land, end, or be cancelled. Do not raise limits to get
+   past this step. Under the flag the hub logs this count at start and each
+   minute as `hub spawn rollback rows rollback_rows=N`
+   (`spawnRollbackBlockingRows`): the gate is `rollback_rows=0`.
+3. Wait for every spawned job that is still running to finish. On the older
+   hub, a running job's quota-stop would start a successor under part 3's
+   claim-unaware expiry, and that hub has no flag to stop it.
+4. Stop the newer hub ([hub-drain.md](hub-drain.md)) and re-run both queries
+   from step 2: they must still return nothing. Remove
+   `--spawn-rollback-drain` from the service command (the older binary
+   rejects the unknown flag and would restart-loop), reload the service
+   configuration, then start the older hub. Keep spawn submissions,
+   consults and author escalations stopped for as long as it runs, and roll
+   forward before reopening them.
+
+### Rolling back past the time limit
+
+The migration is additive: `0015_spawn_expires.sql` adds `expires_ms`
+(SQLite: `ALTER TABLE` at start) with default 0, which an older hub neither
+reads nor writes. Rows that hold `given_up` are a new value of `status`. An
+older hub (checked against the code of e00bb952) lists it in no status query:
+
+| Older-hub query | What it does with a `given_up` row |
+|---|---|
+| Coordinator replay, `status IN ('accepted','bound','dispatching','reconciling', …_grant)` | ignored |
+| Stale-deadline replay, `status IN ('deadline_exceeded', …_grant)` | ignored |
+| Outcome write, `status IN ('accepted','bound','dispatching','reconciling','deadline_exceeded', …_grant)` | matches no row: never mis-terminal |
+| Placement recovery and live view (`bound`, `dispatching`, `reconciling`, `succeeded`, `accepted`) | not listed: no pool slot or placement count |
+| Role release, `status IN ('succeeded','failed')` | not applied; the reservation was already freed |
+| `GET /v1/spawns/<request>` | passes `status` through (`given_up`); a `spawn --wait` from before hk 4659 (#584) does not know the state and exits with the state-conflict code ("unknown spawn state; inspect operation"), never as success; the request is over on the hub. Upgrade clients before the hub, as #584 was ordered |
+
+So a rollback strands nothing: `given_up` rows are terminal and ignored. One
+thing differs from a newer hub, and it is safe (nothing starts twice): a
+request that was renewed to attempt N has the older hub's single deadline
+again, so its next timeout ends it `retryable` or `deadline_exceeded` rather
+than starting another attempt. `TestOlderHubQueriesIgnoreGivenUpRows_t4660`
+runs the predicates above against a `given_up` row.
+
+### Rolling back past start conditions
+
+Decision 254: the migration is additive. `0017_spawn_waiting_conditions.sql`
+adds `conditions_met_ms` and `condition_result` (SQLite: `ALTER TABLE` at
+start) with defaults an older hub neither reads nor writes, and moves unbound
+`accepted` and `deadline_exceeded` conditioned rows that never passed the queue
+into the `waiting` status (SQLite runs the same idempotent `UPDATE` at open).
+It deliberately leaves `staged` (ladder-owned) and `retryable` (reservation
+already released) rows to their owners. A released row carries its met
+time, so a later open does not move it back to waiting. Rolling back is safe:
+an older hub (checked against the code of e00bb952) lists `waiting`, `refused`
+and `cancelled` in no status query, and a `waiting` row holds a reservation
+without a placement slot, so nothing starts from it.
+
+| Older-hub query | What it does with a `waiting` row |
+|---|---|
+| Coordinator replay (`accepted`, `bound`, `dispatching`, `reconciling`, …_grant) | ignored |
+| Stale-deadline replay (`deadline_exceeded`, …_grant) | ignored |
+| Outcome write (`accepted`, `bound`, `dispatching`, `reconciling`, `deadline_exceeded`, …_grant) | matches no row: never mis-terminal |
+| Placement recovery and live view (`bound`, `dispatching`, `reconciling`, `succeeded`, `accepted`) | not listed: no pool slot or placement count |
+| Role release (`succeeded`, `failed`) | not applied; the reservation stays held until the rollback is undone or the request ends on a newer hub |
+| `GET /v1/spawns/<request>` | passes `status` through (`waiting`); since hk 4659 (#584) a waiting client keeps waiting silently. A client from before that exits with the state-conflict code for an unknown state, never as success |
+| Submit with `--after` | the older hub answers `400 start_conditions_unsupported` and advertises no `start_conditions_v1`; the current CLI checks the feature first and refuses the flag rather than drop it |
+
+So a rollback strands a waiting request rather than starting it early: the row,
+its reservation and its `expires_at` remain for the next hub on this database.
+It is given up at `expires_at` only on a hub that reads the column and the
+queue, so a rollback leaves it waiting indefinitely until the upgrade returns.
+`refused` and `cancelled` rows are terminal and ignored the same way.
+
 ## Acceptance and identity
 
 `POST /v1/spawns` requires the operator credential. Per-host service grants do
@@ -77,7 +490,11 @@ request contains a UUID, argv, UTF-8 brief (at most 64 KiB), originating machine
 pinned repository checkout and deadline seconds (default 600, maximum 3600).
 The submitting CLI verifies the checkout is on a pushed origin ref. A canonical
 checkout gets an isolated target worktree rather than running in the node's
-canonical clone.
+canonical clone. A spawn that carries the spec itself
+(`--checkout-origin`, `--checkout-commit`, `--checkout-ref`) names the same
+pinned checkout without any local checkout, and the CLI asks for
+`checkout_spec_v1` first so a hub that would ignore the spec refuses the flag
+instead of running the job in the node's mapped path (hk 4738).
 
 The response is HTTP 202 with `job_id`, `request_id`, `operation_url`, `status`
 and `claim: durable_hub_reservation`. This is a hub DB reservation; the immutable
@@ -93,18 +510,27 @@ Inherited children do not take the parent's direct task/role slot. Completed
 job IDs remain tombstones; a new direct task/role attempt requires evidence that
 the prior landed job completed or was lost.
 
-The reservation key is `<task>:<role>`, or `<task>:reviewer:p<N>` for a reviewer
-spawned with `--review-pass N` (N is 1..9; reviewer only; any other role, 0 or 10
-is a usage refusal). One helper builds it (`fleet.Spawn.RoleKey`), and the claim,
-resume, owner lookup, release, reclaim and retryable-holder supersede paths all
-use it, so the p1 and p2 reviewers of one task hold at once while a second p1 is
-refused with the same 409 as any held slot. panewire reads the pass only from
-the flag, never from a label. A reviewer without the flag keeps `<task>:reviewer`,
-and stored keys without a pass need no migration. The held-reservation log line
-prints the key as `role_key`. An implementer holds `<task>:implementer`; a hold written under an older role name is not matched by it. A consult
-seat (`--role consult`) bound by `--task` takes no task/role slot at all
-(`fleet.Spawn.HoldsTaskRole` is false for it), so a consult pair shares one task
-(hk 4568); it works beside the claimant and never takes its exclusive claim.
+The reservation key is `<task>:<role>`. One helper builds it
+(`fleet.Spawn.RoleKey`), and the claim, resume, owner lookup, release, reclaim
+and retryable-holder supersede paths all use it. An implementer holds
+`<task>:implementer`; a hold written under an older role name is not matched by
+it. A consult seat (`--role consult`) bound by `--task` takes no task/role slot
+at all (`fleet.Spawn.HoldsTaskRole` is false for it), so a consult pair shares
+one task (hk 4568); it works beside the claimant and never takes its exclusive
+claim.
+
+A reviewer (`--role reviewer`) holds no task/role reservation either (hk 4737):
+two submissions for the same task and review pass place side by side, and a
+replay of one request id is still matched by that request id. `--review-pass N`
+(N is 1..9; reviewer only; any other role, 0 or 10 is a usage refusal) is still
+accepted and recorded on the operation, and `fleet.Spawn.RoleKey` still renders
+`<task>:reviewer:p<N>`, but no reviewer slot is stored, so a reviewer never
+answers `task_role_claimed` (exit 74). A hub upgrading from a build that stored
+reviewer keys clears them once at startup: a data-only, idempotent pass that
+runs with no request in flight, so no table or column changes. A rolled-back
+older hub reads the cleared rows as no slot held; the older behaviour then
+returns for reviewers the old binary spawns, and no row is left broken. The
+held-reservation log line prints the key as `role_key`.
 
 A prior operation in `failed` whose hk job is still `claimed` (pane cleanup
 unverified) is checked on a colliding submission: the hub asks the operation's
@@ -139,50 +565,13 @@ with exit 74. A held (task, role) slot answers the error `task_role_claimed`,
 which also names `task` and `role`; a refused job id still answers
 `job_already_claimed` (hk 2944).
 
-A **reviewer** holder whose pane is present is also released when its spawn
-`succeeded` or `failed`, and every one of these holds (hk 3315). Implementers
-and consults are never released this way, because an idle implementer may be waiting on an
-ESC answer.
-
-- the new submission is for the same (task, role, review pass) key, not a replay
-  of the holder's request;
-- the pane is listed under the holder's pane id and agent label, with status
-  `idle`, `done` or `blocked` (never `working`; any other status keeps the hold);
-- the spawn's deadline passed more than the grace ago (the same 10 minute
-  `UnworkedLandingGrace`; the node's agent list carries no time of the last
-  state change);
-- `pane.capture` saves the screen, then `pane.close` closes the pane (it
-  re-reads the pane and refuses one that changed or whose composer is not
-  provably empty).
-
-The hub then has the holder's node mark the hk job `lost`, with `end_reason`
-`reviewer_pane_finished` or `reviewer_pane_stuck` (the branch), and logs one
-INFO line `hub closed a finished reviewer pane` with `branch`
-`reviewer_pane_finished` (succeeded) or `reviewer_pane_stuck` (failed) and
-`source` `submission`. An unreachable node or an unreadable check keeps the
-hold; a close whose `job.mark_lost` write failed leaves the pane gone and the
-record live, which the next submission's absent-pane check finishes.
-
-A reviewer that asked a question is idle too, so every close carries the
-job id and the node rules out an open question from its own lane-event records
-at the moment of the close (docs/node-commands.md, `pane.close`); a question the
-watcher has not copied yet cannot be raced, and the pane is kept with
-`question-open`.
-
-The hub does not run this release on its own schedule: an unattended pass over
-every live reviewer spawn was cut from this change and moved to hk 4684. Until
-it lands, a reviewer that finishes without running `done` keeps its idle pane,
-live record and lane row until a submission for the same key reclaims it or an
-operator closes the pane; the node's ended-job sweep never reaches it, because
-it needs a terminal job record (hk 4658).
-
-When only that grace keeps a reviewer holder (the pane is present, its status is
-closable and its hk job is `claimed` or `spawned`), the `task_role_claimed` 409
-also carries `retry_after_s`, an integer of at least 1: the seconds until the
-spawn's deadline plus the grace. The response sets the same value in an HTTP
-`Retry-After` header, and the CLI appends ` retry_after_s=<n>` after the
-`(held by ...)` part of its exit 74 message. Every other hold has neither,
-because nothing time-based will free it.
+A reviewer is never released through a submission (hk 4737). It holds no slot
+for a colliding request to displace, so the hub never closes a reviewer's pane
+on that path. Closing a finished reviewer's pane belongs to the node's ended-job
+sweep (hk 4693), and ending a reviewer job that posted its result is the hub's
+own pass (hk 4684); see
+[Ending a reviewer job that posted a result](#ending-a-reviewer-job-that-posted-a-result).
+Neither depends on a colliding submission.
 
 A prior operation in `succeeded` whose hk job is still `claimed` or `spawned`
 (a job revoked and reaped by an older binary, or one that ended without writing
@@ -191,9 +580,18 @@ lacks the recorded pane, and lists no pane named like the holder's agent label
 (herdr renumbers a pane moved across workspaces), has the holder's node mark the
 hk job `lost` and releases the slot. A present pane, an unreadable pane list, an
 unreachable node or no recorded pane keeps the slot and the 409 body as before.
-A node that refuses `job.mark_lost`, because its local ledger holds a completion
-or a newer claim or because herdr still lists the pane, keeps the slot too; the
-hub logs `branch=release_write_failed` with the node's reason. When the holder
+A failed operation that recorded no pane id, whose label is no longer listed,
+frees its slot when its node answers `job.mark_lost` with `no-live-attempt`: the
+job dir or `events/` is gone (hk 3685), and the node's own spawn journal and
+active-job list name no live attempt of the job under any label, so a claim
+renewed under another label cannot be running (hk 4799). hk keeps its `claimed`
+record, because the node still never writes `lost` over a record it cannot
+check. A node that answers the bare `ledger_missing`, or whose journal or jobs
+directory it cannot read, keeps the slot: a missing ledger alone cannot rule out
+a newer attempt. A node that refuses `job.mark_lost` for any other reason, because its local ledger holds a
+completion or a newer claim, or because herdr still lists the pane, keeps the
+slot too; the hub logs `branch=mark_lost_refused` with the node's reason. A slot whose `release` write
+itself fails logs `branch=release_write_failed`. When the holder
 ran on the hub's own host the hub writes the record itself, and hk never
 rewrites a terminal record, so a holder that completes during the probe keeps
 its completed record: the refused `lost` write is followed by a re-read, and a
@@ -217,6 +615,85 @@ before repairing the receipt or starting independent work under a new job ID.
 It never exposes the saved brief, argv, credentials or submitting paths. Its
 `reason` is a stable code followed by the refusal text (`<code>: <text>`), which
 is redacted, on one line and bounded, and can name a path on the executing node.
+
+### Ending a reviewer job that posted a result
+
+A daemon-started reviewer (`--role reviewer`, job id `mwr-*`) that posts its
+result and stops without running `done` keeps a `claimed` or `spawned` hk
+record and a lane row. The node's ended-job pane sweep needs a terminal record
+([pane-sweep.md](pane-sweep.md)) and lane release needs the pane gone, so
+neither takes it, and the node's 64-row lane cap fills (hk 4658). Every five
+minutes the hub writes the end of each such job. The rule:
+
+- **Which jobs.** The pass pages through every persisted `succeeded` operation
+  created in the last 14 days (500 rows a page, by creation time and
+  request id, so no newer row displaces an older orphan), not the nodes'
+  active-job heartbeat: that view drops a pane idle for 30 minutes, caps each node at 32
+  jobs and forgets a spawn two minutes after it started, so it would miss
+  exactly the long-orphaned jobs. A job whose node is not connected waits for
+  the next pass; a job found ended (a terminal hk record) is not read again.
+- **A posted result is the proof, and it must have settled.** The node's
+  `job.result` answers a findings object that is not JSON `null` (a
+  `findings.json` holding `null`, or not matching the schema, is absent) or a
+  `report.md` on disk. A reviewer writes `findings.json`, then `report.md`, then
+  runs `done`, and hk never rewrites a lost record, so the node ends the job
+  only when the newest result file has been unchanged for 10 minutes
+  (`reviewerResultSettle`), the files did not change while the node read the
+  result (it looks at them before and after, and refuses on any difference), and
+  the pane is not `working`. An idle, done or
+  blocked pane alone is never proof: an idle reviewer can be waiting on a
+  background command, a wakeup or an answer.
+- **The record is ended through the node.** The hub sends `job.mark_lost` with
+  `end_reason` `reviewer_result_posted`, even for a holder on the hub's own
+  host. The node proves everything above from its own job directory while it
+  holds the job's operation lock, the lock `panewire done` and the watcher's
+  quota-stop records take, so a completion or a quota-stop record cannot land
+  between the proof and the hk write
+  ([node-commands.md](node-commands.md#job-mark_lost)). The record is written
+  `lost`, not `completed`: completing a job uploads its report through
+  `panewire done`, which belongs to the job itself or to mergewake's reap.
+- **The hub never closes the pane.** Closing it belongs to the node's ended-job
+  sweep (hk 4693, PR #577), which reads a reviewer's end from the job's local
+  ledger and closes on its own proof of pane ownership. So the node's end writes
+  the hk record first and only then appends a final `job.lost` event (reason
+  `reviewer_result_posted`) to the ledger: the sweep cannot see an end before hk
+  holds this `end_reason`, so it cannot write its own generic lost record over
+  it. If the node fails between the two, hk is lost with this `end_reason` and
+  the ledger is not ended; the hub reads that on its next pass and asks the node
+  again, and the node only appends the missing event. The owner lane receives
+  that `job.lost` like any other.
+- **A refused or failed write is retried on every pass.** A reviewer that is
+  still finishing (`result-settling`, `pane-working`, `operation-busy`,
+  `result-missing`) is asked again quietly.
+- **A job with an announced quota stop is skipped.** The hub's quota-stop
+  hand-over writes that record with the successor's pointer and hk never
+  rewrites a lost record ([quota-stop.md](quota-stop.md)); the node refuses the
+  end with `quota-stopped`. The watcher's own announce and intent records wait
+  for the same lock and, once they hold it, re-read the job and write nothing if
+  this end already won (the ledger's `job.lost` folded in sequence order, or hk
+  lost with this `end_reason` while the ledger event is still missing), so a
+  stale announcement cannot re-arm a hand-over for an ended job. For the
+  announcement, which the hub acts on, an hk record that cannot be read is
+  retried and then fails the record, never read as "not ended"; the close intent,
+  recorded before any hk write so it survives an hk outage and invisible to the
+  hub, is not held up by it, and its reconciliation reads hk first. The writer
+  answers a distinct "superseded" result, and the watcher then
+  activates no hand-over (a hand-over would re-prompt the pane after the end and
+  make the ledger live again), ends its watch on the intent path, and starts no
+  watcher from `AnnounceQuotaStop`.
+
+The node also ends its own reviewer and consult jobs that never post a result:
+a pane both herdr lists lost, or a live pane past the request's time limit plus
+a grace. That rule and its end reasons are in
+[pane-sweep.md](pane-sweep.md#reviewer-and-consult-ends) (hk 4747). It leaves a
+posted result to this pass and never ends a job whose attempt announced a quota
+stop.
+
+The pass logs each job once per outcome, never once per pass:
+`hub ended a reviewer job with a posted result` (INFO, with `job`,
+`holder_host`, `end_reason`), `hub could not end a reviewer job` (WARN, with the
+node's `reason`), and `hub kept a reviewer job` (INFO, `reason` `quota-stopped`
+or `result_unreadable`).
 
 ### Checks at submit
 
@@ -296,10 +773,32 @@ falls through to another host. The node checks its journal before admission:
 completed requests replay their result, a request this node process is still
 running answers `reconciling`, and an executing entry no live execution owns
 (the node restarted mid-spawn) is settled or answers `unknown`. A new UUID
-waits for the node's single whole-spawn gate until its execution deadline,
-without an executing journal entry. Once admitted, the node rechecks the
-journal and deadline, commits the executing entry and keeps the gate through
-checkout, launch, brief delivery and cleanup. It commits the result before
+waits, until its execution deadline and without an executing journal entry,
+for node admission. Once admitted, the node rechecks the journal and
+deadline, commits the executing entry and keeps the admission through
+checkout, launch, brief delivery, landing proof and cleanup, releasing it
+after the result is journaled and before the reply.
+
+Admission (hk 4578): a node runs one spawn at a time unless `spawn.json` sets
+`spawn_concurrency` above one, an operator opt-in whose two unproven steps are
+listed in [config.md](config.md) (hk 4821). N is that value as of the node's
+last hello; unset, or a `spawn.json` that does not load, gives 1, and a change
+takes effect at the next registration (reconnect or restart). Opted in, a node
+runs up to N spawns at once, but only checkout spawns overlap, each holding
+its own job dir (`<work_root>/<checkout dir>`, case-folded; `-L live|mock`
+stays inside it). A spawn without a checkout is admitted alone, and a waiting
+one blocks new admissions. Preparation of one clone runs one at a time. A job
+dir or `-L` lane that is a symlink is admitted alone, and a lane that resolves
+outside its worktree after prepare is refused
+(`checkout_refused:lane_outside_worktree`). Workspace lookup and creation for
+one herdr session and label holds a file lock in the panewire state dir. The
+node advertises `spawn_slots_v1=N` in hello only when N is above one. The hub
+opens a second dispatch to a node only when it advertised slots and every
+open dispatch and the candidate are checkout spawns into distinct dirs;
+anything else stays queued at the hub. A node without the capability, or an
+older hub, runs one at a time. While a request without a checkout is queued
+behind open dispatches, the hub opens no new dispatch to that node until it
+has run. It commits the result before
 replying. A node drain wakes unclaimed waiters without a reply or journal row
 for replay after restart; work admitted before the drain is allowed to finish
 within the drain bound. Claimed executions retain the restart-settlement rules. See
@@ -386,7 +885,11 @@ as the conservative pending status `dispatching`.
 | `deadline_exceeded` | Deadline observed; ownership retained, not terminal failure. |
 | `succeeded` | Node landing receipt and fresh exact-pane identity verified. A landing the node refused rc 70 as "pane identity or status is unconfirmed" also settles here when a pane with the job's name and cwd is still present; the hub re-checks it once and launches nothing (hk 4534). |
 | `failed` | Definite refusal, including an existing job claim; never permission to reuse a live job. |
-| `retryable` | Node attested cleanup, or admission stopped before dispatch, and a replay can succeed once the operator's fix is done; reservations released. |
+| `retryable` | Node attested cleanup, or admission stopped before dispatch, and a replay can succeed once the operator's fix is done; reservations released. An unstarted attempt's *timeout* no longer ends here for a request that has a limit: see [Time limit](#time-limit). |
+| `given_up` | The request's `expires_at` passed with no attempt that could have started; terminal, reservation freed. |
+| `waiting` | A start condition is not met ([Start conditions](#start-conditions)); reservation held, no placement slot. |
+| `refused` | A start condition named a task handoffkeep does not have; terminal, reservation freed, one `SPAWN_FAILED` (rc 78). |
+| `cancelled` | A start condition's task was dropped or duplicated; terminal, reservation freed, one `SPAWN_FAILED` (rc 84). |
 
 Before downgrading the hub to a version that does not understand `bound`, stop
 the hub and ensure it cannot send or modify operations. Back up the durable
@@ -420,14 +923,14 @@ sent merely because a deadline expired.
 | Failure | Recovery contract | Test / explicit non-goal |
 | --- | --- | --- |
 | Hub restart after reservation | Reopen the same operation; no second acceptance/host claim. | `TestSpawnReservationSurvivesRestartAndReplaysLostResponse`, `TestLaneInboxStoreSpawnDurabilityContract` (SQLite and CI Postgres). |
-| Deadline before dispatch | An unbound or unsent bound request cannot have launched; release its reservation without waiting for a node slot and allow the same key/job to retry. | `TestAsyncSpawnUndispatchedTimeoutReleasesReservation`, `TestQueuedBoundDeadlineExpiresWithNodeSlotBusy_t4581`. |
+| Deadline before dispatch | An unbound or unsent bound request cannot have launched. Its landing wait ends the attempt without waiting for a node slot: a request with a limit starts the next attempt under the same reservation, or is `given_up` at its limit ([Time limit](#time-limit)); a row with no limit ends `retryable` and releases its reservation as before. | `TestAsyncSpawnUndispatchedTimeoutStartsNextAttempt`, `TestQueuedBoundDeadlineExpiresWithNodeSlotBusy_t4581`, `TestUnstartedRequestGivenUpAtItsLimit_t4660`, `TestRequestWithoutExpiryKeepsRetryableTimeout_t4660`. |
 | Containment or disconnect before send | Unbind unsent rows even when another request occupies the node slot; on a failed store write keep the original binding for recovery. | `TestContainmentUnbindsQueuedRowsDespiteStoreFailure_t4581`, `TestDisconnectUnbindsOnlyUnsentRowsWhenWriterIsStuck_t4581`. |
 | Eligible refusal before a host-bound job claim | Atomically record the exclusion and unbind; recovery continues placement with the same logical attempt. | `TestRefusalExclusionSurvivesStoreRestartAndResetsOnRetry_t4581`, `TestRefusalWakesRealPlacementOnAnotherNode_t4581`. |
 | Cleanup-confirmed harness refusal after a host-bound job claim | Atomically pin the claimed host, record the failed harness and unbind; restart or later attempts cannot move the job to another host. Without cleanup proof, keep the original result. | `TestClaimedHarnessRetrySurvivesHubRestart_t4581`, `TestClaimedHostStaysPinnedWhenAlternativesRunOut_t4581`, `TestClaimedHarnessRefusalKeepsBindingOnStoreFailure_t4581`, `TestRefusalAfterJobClaimDoesNotMoveToNextHost_t4614`. |
 | Node disconnect or uncertain send | Retain node UUID/host; replay its journal on reconnect. | `TestSpawnUnknownRetainsOwnershipAndLateResultCommitsOutbox`, `TestAsyncSpawnLateResultReconcilesAgainstSameNode`. |
 | Duplicate accept / lost HTTP response | Identical key/body replays; changed body conflicts; CLI receipt preserves key. | Reservation test and `TestSubmissionReceiptReusesKeyAfterLostHTTPResponse`. |
 | Timeout followed by late pane | Retain ownership; reconcile receipt with exact node identity; never close working/unknown. | Late-result test and `TestFailedSpawnCleanupRequiresExactIdlePane`. |
-| Timeout, and the node never started the request | Settle `retryable` with `deadline_not_started` (see [A request the node never started](#a-request-the-node-never-started)); an executing, restarted or silent node keeps ownership. | `TestLateNotStartedAnswerSettlesRequest_t4379`, `TestTimeoutWithoutNodeRowSettlesAsNotStarted_t4379`, `TestTimeoutKeepsOwnershipWithoutNotStartedProof_t4379`. |
+| Timeout, and the node never started the request | Settle with `deadline_not_started` (see [A request the node never started](#a-request-the-node-never-started)): a request with a limit starts its next attempt, or is `given_up` past the limit; a row with no limit ends `retryable`. An executing, restarted or silent node keeps ownership, and is never given up (`TestReconcilingRequestIsNeverGivenUp_t4660`). | `TestLateNotStartedAnswerSettlesRequest_t4379`, `TestTimeoutWithoutNodeRowSettlesAsNotStarted_t4379`, `TestTimeoutKeepsOwnershipWithoutNotStartedProof_t4379`. |
 | Node restart while executing | Never rerun the spawn. The restarted node settles the executing row from herdr and the job's local spawn record: the recorded pane alive as an agent completes it with the job's receipt (the hub still verifies the pane before accepting it), a pane in neither the agent nor the pane list completes it `lost` with a reason, and anything unproven (a pane only in the pane list, a label match without a record, herdr unreadable) leaves it executing and answers `unknown`. Past the deadline, `unknown` with no pane bearing the job label finishes the request `failed` (`orphaned_after_restart`) and releases its reservation; a labelled pane keeps it for the operator. The node's stop first waits (30 s) for a launch, injection or result upload in flight. See [node restart](runbooks/node-restart.md). | `TestSpawnSettle*`, `TestStopDrain*`, `TestNodeSpawnJournalRestartDedupAndLostResultReplay`, `TestNodeSpawnReplayAnswersUnknownAfterRestart`, `TestStrandedSpawnUnknownWithoutPaneFailsAndReleases`, `TestStrandedSpawnStaysPendingWithoutProof`. |
 | Lost event or lost ACK | Commit state and outbox atomically; retry with a stable event id and actual job id. | `TestSpawnOutboxFailureRollsBackResult`, `TestAsyncSpawnLostEventRetriesWithStableJobIdentity`. |
 | Process pressure / shutdown | Bounded execution and persisted pending work. | `TestAsyncSpawnWorkersBoundedAndIndependentOfHTTP`, `TestAsyncSpawnOutlivesSubmittingHTTPContext`; HTTP-independent execution lifetime is owned by maintenance/shutdown, never the POST context. |
@@ -734,7 +1237,7 @@ reconciliation event.
 `SPAWN_FAILED` names the job, request, exit status, stage, `replay=yes|no`
 (whether replaying the saved request can help), reason and fix. It has
 notify type `automation-failed`, so it interrupts a lane that digests its reports.
-A `failed` or `retryable` spawn is also sent to the submitting lane when that
+A `failed`, `retryable` or `given_up` spawn is also sent to the submitting lane when that
 differs from the owner: `--requested-by`, else `--parent`. The owner's event id
 stays `<request_id>:<attempt>:<status>`; the submitting lane's is the same id
 with `:<lane>` appended.
