@@ -2,9 +2,11 @@ package panewire
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -12,10 +14,51 @@ import (
 	"github.com/mgh3326/panewire/internal/quotastop"
 )
 
+// The quota fixture uses flat relay events; the node's watcher journal also
+// carries kind and payload. Include both forms to exercise the real watcher.
+func stallSafetyWatcherJournal(t *testing.T, rig *roleStopRig) {
+	t.Helper()
+	root, err := filepath.EvalSymlinks(rig.manager.inboxRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rig.manager.inboxRoot, rig.q.root = root, root
+	dir := filepath.Join(root, "jobs", "job-active", "events")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		path := filepath.Join(dir, entry.Name())
+		body, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var event map[string]any
+		if err := json.Unmarshal(body, &event); err != nil {
+			t.Fatal(err)
+		}
+		payload := make(map[string]any, len(event))
+		for key, value := range event {
+			payload[key] = value
+		}
+		event["kind"] = event["type"]
+		event["payload"] = payload
+		body, err = json.Marshal(event)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, body, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 func TestStallSafetyActiveJobExamination(t *testing.T) {
 	for _, mode := range []string{"idle", "child", "quota", "retry", "changed", "ready"} {
 		t.Run(mode, func(t *testing.T) {
 			rig := newRoleStopRig(t, "implementer", time.Hour, `{"tasks":[{"priority":1,"expected":"4h","refs":{"job_id":"job-active"}}]}`)
+			stallSafetyWatcherJournal(t, rig)
 			ctx := context.Background()
 			rig.observe("idle", 1, rig.now)
 			var notes []string
@@ -30,8 +73,17 @@ func TestStallSafetyActiveJobExamination(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			if job, ok := rig.q.jobForPane(ctx, "workspace:pane-1"); !ok {
+				t.Fatal("fixture job not found")
+			} else if _, _, err := m.signalled(ctx, job); err != nil {
+				t.Fatalf("watcher journal: %v", err)
+			}
 			signalled := false
-			m.signalled = func(context.Context, HubActiveJob) (string, bool, error) { return "attempt-1", signalled, nil }
+			watcherSignal := m.signalled
+			m.signalled = func(ctx context.Context, job HubActiveJob) (string, bool, error) {
+				attempt, found, err := watcherSignal(ctx, job)
+				return attempt, found || signalled, err
+			}
 			m.busy = func(context.Context, HubActiveJob, HerdrAgentState) (bool, error) { return mode == "child", nil }
 			reads := 0
 			screen := strings.Repeat("x", 3000) + "\nlast screen lines\x1b[0m"
@@ -112,13 +164,13 @@ func TestStallSafetyQuotaWaitRespectsPaneState(t *testing.T) {
 		t.Run(fmt.Sprintf("changed=%t", changed), func(t *testing.T) {
 			installFakeHerdr(t, t.TempDir(), "#!/bin/sh\nprintf '%s\\n' '{\"agent\":\"codex\"}'\n")
 			rig := newRoleStopRig(t, "implementer", time.Hour, roleStopTask)
+			stallSafetyWatcherJournal(t, rig)
 			ctx := context.Background()
 			rig.observe("idle", 1, rig.now)
 			m, err := newStallSafetyManager(rig.q, rig.manager, 30*time.Minute)
 			if err != nil {
 				t.Fatal(err)
 			}
-			m.signalled = func(context.Context, HubActiveJob) (string, bool, error) { return "attempt-1", false, nil }
 			m.busy = func(context.Context, HubActiveJob, HerdrAgentState) (bool, error) { return false, nil }
 			m.explain = func(context.Context, string) (string, error) { return `{"agent":"codex"}`, nil }
 			data, err := os.ReadFile("testdata/quota-stop/codex.txt")
