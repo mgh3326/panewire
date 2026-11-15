@@ -188,14 +188,32 @@ unreachable host is skipped as before. `--dry-run` prepares nothing.
 
 Declare what each machine can run, and limit small machines to light work.
 Capabilities use the `--tags` vocabulary: `macos`, `linux`, `unity`,
-`xcode`, `gpu`, `heavy-go`. A task needing a capability goes only to hosts
-that declare it; the others still get the work they can do.
+`blender`, `xcode`, `gpu`, `heavy-go`. A task needing a capability goes only
+to hosts that declare it; the others still get the work they can do.
 
 In `[local]` and `[hosts.NAME]`, `caps` must be a TOML array containing only
 the capability strings listed above. An empty array declares no capabilities.
 Booleans, numbers, strings, tables, nonstring array entries, and unknown
 capability names refuse config loading with exit 70. The error names the host's
 `caps` key and the invalid value.
+
+**One declaration, read by the hub.** A `spawn` and its `--dry-run` are placed
+by the hub, which reads these lists from its own config file
+(`~/.config/fleet/hosts.toml`, or `FLEET_HOSTS_CONFIG` as the `panewire hub`
+process sees it; `fleet.New` loads it in `internal/fleet/app.go`). `plan` and
+`SubmitHostRefusal` apply it (`internal/fleet/placement.go`,
+`internal/fleet/submit_preflight.go`) to `[local]` and every `[hosts.NAME]`,
+whichever machine submitted the job. Declare each host once, there. A
+submitting host's own copy is not read for placement, so the list is not
+copied to each placing host; the node `hello` carries protocol capabilities
+(`spawn_v2`, …) and its heartbeat readiness carries runtime facts, not this
+list. The separate `panewire plan` diagnostic plans on the machine that runs
+it and reads that machine's config.
+
+Capabilities are a configured value only: placement looks for no licence.
+Declaring `unity` or `blender` says the host has the tool installed; a lapsed
+Unity entitlement is the operator's to handle, and ParkingArcade's job-time
+preflight and expiry warning name it (hk 4794).
 
 Recommended declarations by machine class:
 
@@ -227,6 +245,31 @@ tags = ["linux"]
 roles = ["implementer"]
 grades = ["C", "B"]
 ```
+
+For the machines that have Unity 6000.6.5f1 and Blender today (checked
+2026-11-15), add the `tags` line to each host's existing section in the hub
+process's `hosts.toml`, keeping its `ssh`, `via`, `workspace` and other keys:
+
+```toml
+[hosts.mac-personal]
+tags = ["macos", "unity", "blender", "xcode"]
+
+[hosts.mac-work]
+tags = ["macos", "unity", "blender", "xcode"]
+
+[hosts.mac-dev]
+tags = ["macos", "unity", "blender", "xcode"]
+
+[hosts.desktop]
+tags = ["linux", "unity", "blender", "gpu"]
+```
+
+`oci` has neither tool and declares no such name; the hub machine itself
+declares its own in `[local] tags`. All four run the same Unity build; Blender
+is 4.5.14 LTS on mac-personal and 5.2.2 LTS on the others, which the one
+`blender` name covers (a 5.2-only name would need a new entry in the closed
+list). Do not copy these lines to the nodes' own configs: hub placement does
+not read them there.
 
 These are recommendations, not code defaults: a host without `tags` declares
 no capability. An invalid `roles` or `grades` value refuses the config with
