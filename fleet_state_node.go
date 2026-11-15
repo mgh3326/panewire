@@ -119,6 +119,7 @@ func (client *HubClient) refreshFleetQuota(ctx context.Context, pool string, sen
 	defer client.probeFleetLogin(ctx, pool)
 	run, cancel := context.WithTimeout(ctx, fleetQuotaTimeout)
 	defer cancel()
+	started := client.nowUTC()
 	publishes, ok, measuredHere, kind := client.measureFleetQuotaAccounts(run, ctx, pool)
 	previous := sent[pool]
 	if !ok {
@@ -142,7 +143,7 @@ func (client *HubClient) refreshFleetQuota(ctx context.Context, pool string, sen
 	// The readiness note names one account: the first.
 	client.noteQuotaAccount(pool, publishes[0].Key)
 	if measuredHere {
-		client.noteOwnQuotaMeasurement(pool)
+		client.noteOwnQuotaMeasurement(pool, started)
 	}
 	now := client.nowUTC()
 	for _, publish := range publishes {

@@ -470,15 +470,24 @@ func TestCmdLoginScreenMarkClearsOnCommandcodeMeasurement(t *testing.T) {
 	if cmd := client.collectReadiness(t.Context()).Harnesses["cmd"]; cmd.Login != fleet.ReadinessLoginMissing {
 		t.Fatalf("a fresh login-screen mark must read missing: cmd=%+v", cmd)
 	}
-	client.noteOwnQuotaMeasurement("commandcode")
+	client.noteOwnQuotaMeasurement("commandcode", client.nowUTC())
 	if cmd := client.collectReadiness(t.Context()).Harnesses["cmd"]; cmd.Login != fleet.ReadinessLoginPresent {
 		t.Fatalf("a successful commandcode measurement must clear the cmd mark: cmd=%+v", cmd)
 	}
 	// A passing login probe is the other proof that the login works.
 	client.readiness.loginScreens = map[string]time.Time{"cmd": client.nowUTC().Add(-time.Minute)}
-	client.noteLoginProbe("commandcode", false)
+	client.noteLoginProbe("commandcode", false, client.nowUTC())
 	if cmd := client.collectReadiness(t.Context()).Harnesses["cmd"]; cmd.Login != fleet.ReadinessLoginPresent {
 		t.Fatalf("a passing commandcode probe must clear the cmd mark: cmd=%+v", cmd)
+	}
+	// A mark written while the proof was in flight is newer evidence: a probe
+	// that started before the launch stopped at the login screen must not
+	// forget it.
+	mark := client.nowUTC()
+	client.readiness.loginScreens = map[string]time.Time{"cmd": mark}
+	client.noteLoginProbe("commandcode", false, mark.Add(-time.Minute))
+	if cmd := client.collectReadiness(t.Context()).Harnesses["cmd"]; cmd.Login != fleet.ReadinessLoginMissing {
+		t.Fatalf("a probe that started before the mark cleared it: cmd=%+v", cmd)
 	}
 }
 

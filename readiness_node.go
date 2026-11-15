@@ -193,12 +193,14 @@ func loginScreenKeys(pool string) []string {
 	return keys
 }
 
-// clearLoginScreenMarks forgets a pool's login-screen marks. The caller holds
-// readiness.mu. It reports whether anything changed.
-func (client *HubClient) clearLoginScreenMarks(pool string) bool {
+// clearLoginScreenMarksBefore forgets a pool's login-screen marks stamped at
+// or before cutoff. A mark written after the proof started (a launch that
+// stopped at the login screen while the measurement or probe was in flight) is
+// newer evidence and survives. The caller holds readiness.mu.
+func (client *HubClient) clearLoginScreenMarksBefore(pool string, cutoff time.Time) bool {
 	changed := false
 	for _, key := range loginScreenKeys(pool) {
-		if _, marked := client.readiness.loginScreens[key]; marked {
+		if at, marked := client.readiness.loginScreens[key]; marked && !at.After(cutoff) {
 			delete(client.readiness.loginScreens, key)
 			changed = true
 		}
@@ -209,13 +211,13 @@ func (client *HubClient) clearLoginScreenMarks(pool string) bool {
 	return changed
 }
 
-// noteOwnQuotaMeasurement clears a pool's login-screen marks after this host's
-// own credential completed a successful measurement. Shared readings do not
-// call it, and a failed pass must not: the marks are evidence of a login the
-// pass did not prove.
-func (client *HubClient) noteOwnQuotaMeasurement(pool string) {
+// noteOwnQuotaMeasurement clears a pool's login-screen marks set before a
+// successful own measurement started. Shared readings do not call it, and a
+// failed pass must not: the marks are evidence of a login the pass did not
+// prove.
+func (client *HubClient) noteOwnQuotaMeasurement(pool string, started time.Time) {
 	client.readiness.mu.Lock()
-	client.clearLoginScreenMarks(pool)
+	client.clearLoginScreenMarksBefore(pool, started)
 	client.readiness.mu.Unlock()
 }
 
