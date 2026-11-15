@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"regexp"
@@ -62,6 +63,25 @@ type readEvidence struct {
 var pasteChipRE = regexp.MustCompile(`\[Pasted text #[^\]]+\]`)
 var codexToolRE = regexp.MustCompile(`•\s*Ran\b`)
 
+// promptLocalOnlyHint names the command that does reach a job's lane on another
+// host or herdr session. `panewire prompt` stays local (operator decision 309,
+// hk 4810): it types through this daemon's one herdr session, so a target that
+// session does not serve is refused with this hint instead of a bare not-found.
+const promptLocalOnlyHint = "panewire prompt reaches only panes on this host's herdr session; " +
+	"answer a job's ESC with `panewire emit --kind lane.event --lane <job> --type order --text ...` " +
+	"and check delivery with `panewire inbox status --event-id <id>`"
+
+// promptResolveError turns a target this herdr session does not serve into a
+// usage error that teaches the lane-event path; every other resolution failure
+// keeps its own code.
+func promptResolveError(err error) error {
+	var notFound *targetNotFound
+	if errors.As(err, &notFound) {
+		return &codedError{ExitUsage, fmt.Errorf("%s: %v", promptLocalOnlyHint, err)}
+	}
+	return err
+}
+
 func Prompt(ctx context.Context, store *Store, client *HerdrClient, req PromptRequest, caps GuardResult) (PromptResult, error) {
 	if store == nil || client == nil {
 		return PromptResult{}, &codedError{ExitInternal, fmt.Errorf("prompt requires store and herdr client")}
@@ -107,6 +127,8 @@ func Prompt(ctx context.Context, store *Store, client *HerdrClient, req PromptRe
 	if err != nil {
 		if ctx.Err() != nil {
 			err = &codedError{ExitTimeout, fmt.Errorf("timeout resolving target")}
+		} else {
+			err = promptResolveError(err)
 		}
 		return recordFailureForRequest(ctx, store, id, req, promptHash, body, req.StorePromptBody, "ambiguous", err)
 	}
@@ -143,6 +165,8 @@ func Prompt(ctx context.Context, store *Store, client *HerdrClient, req PromptRe
 	if err != nil {
 		if ctx.Err() != nil {
 			err = &codedError{ExitTimeout, fmt.Errorf("timeout resolving target")}
+		} else {
+			err = promptResolveError(err)
 		}
 		return recordFailureForRequestWithPane(ctx, store, id, req, promptHash, body, req.StorePromptBody, pane, pre.Revision, digest(pre.Text), "identity_changed", err)
 	}
@@ -807,7 +831,10 @@ func promptTailMarker(body string) string {
 //     composerRegion to that line (fixture f3);
 //   - the marker is an earlier message's. markerFor's 24 runes of a fleet
 //     brief are its boilerplate header, which every relay message and most
-//     briefs start with (fixture f5-pre: #623's delta brief).
+//     briefs start with (fixture f5-pre: #623's delta brief);
+//   - the queue banner was already on screen before the send, so a pane
+//     holding someone else's queued message proves nothing about this text
+//     (hk 4810).
 //
 // So the composer must be located (promptComposer; unlocated proves
 // nothing), this call's text in it is residue, and a submission needs the
@@ -820,6 +847,15 @@ func promptTailMarker(body string) string {
 func classifyPromptSubmission(harness, pre, screen, body string) (string, string) {
 	head, tail := markerFor(body), promptTailMarker(body)
 	result, rule := classifySubmissionEvidence(harness, screen, head)
+	if result == "queued" {
+		// The banner is only this call's proof when the pane was not already
+		// queued before it: a queue that held another message would read as a
+		// submission of text that never reached the harness (hk 4810). Then
+		// keep looking for this call's own echo below.
+		if preResult, _ := classifySubmissionEvidence(harness, pre, head); preResult == "queued" {
+			result, rule = "unproven", "queued_banner_presend"
+		}
+	}
 	if result == "queued" || !harnessHasSubmissionEvidence(harness) {
 		return result, rule
 	}
@@ -1035,6 +1071,8 @@ func finishPrompt(ctx context.Context, s *Store, d Delivery, err error) (PromptR
 }
 func errorCodeFor(code int) string {
 	switch code {
+	case ExitUsage:
+		return "usage"
 	case ExitConditionInvalid:
 		return "condition_invalid"
 	case ExitDaemonUnavailable:

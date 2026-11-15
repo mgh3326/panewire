@@ -349,7 +349,11 @@ replay would type it, and its handoffkeep row is closed as delivered to the
 inbox.
 
 `panewire prompt` types directly through the local herdr and never reaches the
-hub, so it is unaffected too.
+hub, so it is unaffected too. It reaches only panes this host's herdr session
+serves; a job's ESC is answered with a lane event to its lane
+(`panewire emit --kind lane.event --lane <job> --type order --text ...`, checked
+with `panewire inbox status --event-id <id>`), never with `panewire prompt` into
+another host or herdr session (hk 4810).
 
 ### The one-line wake
 
