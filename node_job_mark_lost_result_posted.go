@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/mgh3326/panewire/internal/fleet"
@@ -38,6 +39,9 @@ const reviewerResultSettle = 10 * time.Minute
 //   - the pane is not working (a reviewer running `done` is working);
 //   - the job posted a result (a non-null findings object or a report on disk)
 //     and the newest result file has been unchanged for reviewerResultSettle.
+//
+// Then it appends a final job.lost event to the job's ledger (what the pane
+// sweep reads) and writes the hk record lost.
 //
 // Any refusal writes nothing; the hub asks again on its next pass.
 func (client *HubClient) nodeJobMarkReviewerResultPosted(ctx context.Context, args nodeJobMarkLostArgs) (any, string) {
@@ -120,6 +124,15 @@ func (client *HubClient) nodeJobMarkReviewerResultPosted(ctx context.Context, ar
 	store, err := client.nodeJobStoreForCommand()
 	if err != nil {
 		return nil, "mark_lost_failed"
+	}
+	// The node's ended-job pane sweep reads the end from the local ledger, so
+	// the ledger gets its final job.lost before hk is written: a failure after
+	// it is retried by the hub's next pass, which finds the ledger ended and
+	// writes hk only.
+	if !target.ended {
+		if err := fleet.RecordJobEnded(ctx, filepath.Join(client.jobsInboxRoot, "jobs"), args.Job, args.PaneID, reviewerResultPosted); err != nil {
+			return nil, "mark_lost_failed"
+		}
 	}
 	record := map[string]any{"state": "lost", "at": client.nowUTC(), "end_reason": reviewerResultPosted}
 	if err := store.Put(ctx, args.Job, record); err != nil {

@@ -69,3 +69,20 @@ func TestQuotaIntentRecordWaitsForTheJobOperationLock(t *testing.T) {
 		t.Fatal("the intent was not recorded after the lock was released")
 	}
 }
+
+// The ended-job pane sweep reads a reviewer's end from the job's ledger: the
+// event the hub's posted-result end appends must read as an end to the sweep's
+// own predicate, for a reviewer, or its pane is never closed (hk 4693).
+func TestRecordJobEndedReadsAsAnEndToThePaneSweep(t *testing.T) {
+	a, _, _, _ := quotaStopFixture(t, "reviewer", "idle", "I stopped here.\n")
+	if err := RecordJobEnded(context.Background(), a.Jobs, "j", "w:p1", "reviewer_result_posted"); err != nil {
+		t.Fatal(err)
+	}
+	j, err := a.job("j")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !j.Terminal || j.Ended != "job.lost" || !paneSweepClosed(j) {
+		t.Fatalf("job after the end: terminal=%v ended=%q closed=%v, want the sweep to see an end", j.Terminal, j.Ended, paneSweepClosed(j))
+	}
+}

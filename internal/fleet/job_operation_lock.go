@@ -1,6 +1,7 @@
 package fleet
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -54,4 +55,15 @@ func (a *App) lockJobOperation(id string, wait time.Duration) (func(), error) {
 		}
 		time.Sleep(jobOperationLockPoll)
 	}
+}
+
+// RecordJobEnded appends the final job.lost event of a job the hub ended
+// because it posted its result (hk 4684). The node's ended-job pane sweep
+// recognises a reviewer's end from its local ledger, not from hk, so without
+// this event the pane would stay open after the hk record is written. jobs is
+// the node's jobs root (<inbox>/jobs).
+func RecordJobEnded(ctx context.Context, jobs, job, pane, reason string) error {
+	home, _ := os.UserHomeDir()
+	a := &App{Jobs: jobs, Home: home, Now: time.Now, Runner: ExecRunner{}}
+	return a.event(ctx, job, "job.lost", map[string]any{"pane_id": pane, "reason": reason, "final": true})
 }

@@ -519,6 +519,10 @@ announced (`job.lost` `quota_stop`, not final) or pending
 `working` (an unreadable agent list fails the command, `herdr_failed`-style);
 and the job directory holds a findings object that is not JSON `null` or a
 `report.md`, the newest of them unchanged for 10 minutes.
+Only then does it append a final `job.lost` event (reason
+`reviewer_result_posted`) to the job's ledger, which the ended-job pane sweep
+reads ([pane-sweep.md](pane-sweep.md)), and write the hk record; a ledger that
+already ended is not given a second event.
 
 | `outcome` | Meaning |
 | --- | --- |

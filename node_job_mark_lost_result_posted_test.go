@@ -1,6 +1,7 @@
 package panewire
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -70,7 +71,49 @@ func TestNodeJobMarkLostReviewerResultPostedWritesWithAListedPane(t *testing.T) 
 			if got := store.records["job-a"]["end_reason"]; store.state("job-a") != "lost" || got != reviewerResultPosted {
 				t.Fatalf("hk state=%v end_reason=%v", store.state("job-a"), got)
 			}
+			if got := jobLostEvents(t, inbox); len(got) != 1 {
+				t.Fatalf("ledger job.lost events %v, want the one final event", got)
+			}
 		})
+	}
+}
+
+// jobLostEvents lists the job.lost event files in the job's ledger.
+func jobLostEvents(t *testing.T, inbox string) []string {
+	t.Helper()
+	names, err := filepath.Glob(filepath.Join(inbox, "jobs", "job-a", "events", "*job.lost*.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return names
+}
+
+// The node's ended-job pane sweep reads a reviewer's end from the local ledger,
+// not from hk, so the end appends a final job.lost with the reason; without it
+// the pane would stay open (hk 4693). A failed hk write after it is retried by
+// the hub's next pass, which must not append a second event.
+func TestNodeJobMarkLostReviewerResultPostedWritesTheLedgerEndOnceAndRetriesHk(t *testing.T) {
+	inbox := t.TempDir()
+	markLostJobEvents(t, inbox, "job-a", reviewerLedger("reviewer")...)
+	writeJobFile(t, inbox, "findings.json", `{"findings":[]}`, reviewerResultSettle+time.Hour)
+	client, store, _ := postedResultClient(t, inbox, "idle")
+	store.putErr = errors.New("hk unavailable")
+
+	if result, code := nodeRun(t, client, nodeCommandJobMarkLost, postedResultArgs()); code == "" {
+		t.Fatalf("result=%v, want the hk failure reported", result)
+	}
+	if got := jobLostEvents(t, inbox); len(got) != 1 {
+		t.Fatalf("ledger job.lost events %v after the failed hk write, want the end recorded", got)
+	}
+	store.mu.Lock()
+	store.putErr = nil
+	store.mu.Unlock()
+	result, code := nodeRun(t, client, nodeCommandJobMarkLost, postedResultArgs())
+	if code != "" || result["outcome"] != nodeJobMarkLostLost || store.state("job-a") != "lost" {
+		t.Fatalf("retry: code=%q result=%v hk=%v", code, result, store.state("job-a"))
+	}
+	if got := jobLostEvents(t, inbox); len(got) != 1 {
+		t.Fatalf("ledger job.lost events %v after the retry, want still one", got)
 	}
 }
 

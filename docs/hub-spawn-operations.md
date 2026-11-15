@@ -276,8 +276,11 @@ minutes the hub writes the end of each such job. The rule:
   `lost`, not `completed`: completing a job uploads its report through
   `panewire done`, which belongs to the job itself or to mergewake's reap.
 - **The hub never closes the pane.** Closing it belongs to the node's ended-job
-  sweep, which acts on a terminal record and its own proof of pane ownership
-  (hk 4693, PR #577); this pass only writes the record that sweep waits for.
+  sweep (hk 4693, PR #577), which reads a reviewer's end from the job's local
+  ledger and closes on its own proof of pane ownership. So the node's end first
+  appends a final `job.lost` event (reason `reviewer_result_posted`) to the
+  ledger, then writes the hk record; a failed hk write is retried without a
+  second event. The owner lane receives that `job.lost` like any other.
 - **A refused or failed write is retried on every pass.** A reviewer that is
   still finishing (`result-settling`, `pane-working`, `operation-busy`,
   `result-missing`) is asked again quietly.
