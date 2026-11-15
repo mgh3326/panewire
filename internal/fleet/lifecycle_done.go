@@ -364,10 +364,13 @@ const (
 )
 
 // pinResult is step 3's answer: the outcome, and S's document (the one the
-// receipt names, written or not).
+// receipt names, written or not). wrote says the step issued hk's write rather
+// than only its read, which is what the republish sweep charges its per-pass
+// budget for (report_republish.go).
 type pinResult struct {
 	outcome  string
 	document string
+	wrote    bool
 }
 
 // pinReport is the late write of report_doc and report_sha256 on a terminal
@@ -402,12 +405,12 @@ func (a *App) pinReport(ctx context.Context, id, doc, digest string) (pinResult,
 	}
 	switch e = a.putJobRecord(ctx, id, map[string]any{"report_doc": doc, "report_sha256": digest}); {
 	case e == nil:
-		return pinResult{outcome: pinPinned, document: doc}, nil
+		return pinResult{outcome: pinPinned, document: doc, wrote: true}, nil
 	case isJobStateConflict(e):
 		a.warn("report pin kept: job %s record already names another report", id)
-		return pinResult{outcome: pinHeld, document: doc}, nil
+		return pinResult{outcome: pinHeld, document: doc, wrote: true}, nil
 	}
-	return pinResult{}, e
+	return pinResult{wrote: true}, e
 }
 
 // repaired renders the steps a rerun finished, as " published=yes ...".

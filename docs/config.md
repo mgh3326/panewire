@@ -170,6 +170,9 @@ publishes the seed after merge.
 | `state` | `"on"` (default) reads the hub's fleet state for placement and the quota gate; `"off"` skips it and measures directly as before (the rollback switch). Cooling cannot be checked when hub state is off or unavailable; the selection record reports the condition in `degraded`. See [Fleet state](#fleet-state). |
 | `state_publisher_ttl_s` | Seconds a publisher heartbeat stays alive. Default 90. |
 
+A leading `~` in a credential-file path above is expanded before the CLI opens
+the file.
+
 Worker lane credentials use lanes_token_env, then hub_token_env. Lane listing
 and lanes of legacy builder jobs use lanes_token_env, then operator_token_env, then hub_token_env.
 Panewire owns authentication and relay transport; panewire never prints credentials.

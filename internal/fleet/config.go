@@ -385,6 +385,9 @@ func stringsValue(m map[string]any, k string) []string {
 	}
 	return out
 }
+
+// hubArgs is the connection a hub call passes. The credential-file paths are
+// expanded here because the CLI opens them as given and does not expand "~".
 func (c Config) hubArgs(role string) []string {
 	var a []string
 	if v := str(c.Hub, "hub_url"); v != "" {
@@ -398,10 +401,10 @@ func (c Config) hubArgs(role string) []string {
 		token = str(c.Hub, "hub_token_env")
 	}
 	if token != "" {
-		a = append(a, "--hub-token-env", token)
+		a = append(a, "--hub-token-env", expand(token))
 	}
 	if v := str(c.Hub, "hub_cf_env"); v != "" {
-		a = append(a, "--hub-cf-env", v)
+		a = append(a, "--hub-cf-env", expand(v))
 	}
 	return a
 }
@@ -444,9 +447,9 @@ func (a *App) controlHubArgs(operator bool) []string {
 	if operator {
 		token = firstNonempty(str(a.Config.Hub, "operator_token_env"), token)
 	}
-	args := []string{"--hub-url", str(a.Config.Hub, "hub_url"), "--hub-token-env", token}
+	args := []string{"--hub-url", str(a.Config.Hub, "hub_url"), "--hub-token-env", expand(token)}
 	if v := str(a.Config.Hub, "hub_cf_env"); v != "" {
-		args = append(args, "--hub-cf-env", v)
+		args = append(args, "--hub-cf-env", expand(v))
 	}
 	return args
 }

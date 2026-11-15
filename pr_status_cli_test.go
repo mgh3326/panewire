@@ -317,9 +317,10 @@ func TestPRStatusFallsBackToGHOnlyWhenBothSourcesFail(t *testing.T) {
 
 func TestPRStatusFallbackWhenHubCannotBeAsked(t *testing.T) {
 	fakeGH(t, ghViewFixture, ghThreadsFixture)
-	down := newPRCLIStub(t, 200, "")
-	downURL := down.URL
-	down.Close()
+	// Port 1 is privileged and never served here. A closed stub's port could be
+	// reused by a stub opened later in this or a parallel test, and then
+	// "unreachable" would reach a live server.
+	downURL := "http://127.0.0.1:1"
 	refused := newPRCLIStub(t, 403, `{"error":"scope_forbidden"}`)
 	unavailable := newPRCLIStub(t, 503, `{"error":"node_unavailable","state":"disconnected"}`)
 	garbled := newPRCLIStub(t, 200, `{"result":{"mergewake":{"outcome":"ok"},"hk":{"outcome":"ok"}}}`)
@@ -339,7 +340,7 @@ func TestPRStatusFallbackWhenHubCannotBeAsked(t *testing.T) {
 	}
 	// A half-given connection is not the local node: gh answers, and the line says why.
 	prCLIConnection(t, "") // clears the environment
-	run := runPR(t, "status", "owner/name", "152", "--hub-url", down.URL)
+	run := runPR(t, "status", "owner/name", "152", "--hub-url", downURL)
 	if run.code != ExitOK || !strings.Contains(run.stdout, "fallback: hub connection is not configured") {
 		t.Fatalf("code=%d stdout=%q stderr=%q", run.code, run.stdout, run.stderr)
 	}
