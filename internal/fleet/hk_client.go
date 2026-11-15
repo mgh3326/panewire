@@ -80,13 +80,25 @@ func hkErrText(err error) string { return "handoffkeep: " + err.Error() }
 // have.
 var errHKNotFound = errors.New("not_found")
 
+// errHKTaskID is a task id that cannot name a task; it is permanent for the
+// request that carries it (TaskReadPermanent).
+var errHKTaskID = errors.New("task id must be positive")
+
 // hkTaskID parses a task id as the hk CLI did.
 func hkTaskID(task string) (int64, error) {
 	id, err := strconv.ParseInt(task, 10, 64)
 	if err != nil || id < 1 {
-		return 0, errors.New("task id must be positive")
+		return 0, errHKTaskID
 	}
 	return id, nil
+}
+
+// TaskReadPermanent reports whether a failed task read will not change on a
+// retry for as long as the request stands: the task is gone, or the id names
+// no task. Any other error is an hk outage or an unreadable answer, which a
+// later read may answer.
+func TaskReadPermanent(err error) bool {
+	return errors.Is(err, errHKNotFound) || errors.Is(err, errHKTaskID)
 }
 
 // hkTaskIDIs reports whether an answered task is the requested one. The id
