@@ -3,7 +3,10 @@
 // names and the socket path live here instead of in two copies.
 package daemonop
 
-import "path/filepath"
+import (
+	"path/filepath"
+	"time"
+)
 
 // SocketPathEnv overrides the daemon's default socket path.
 const SocketPathEnv = "PANEWIRE_SOCKET"
@@ -31,6 +34,27 @@ type LanesPut struct {
 	// Takeover names the predecessor job whose lane row this write moves to
 	// the requested route; see `panewire lanes add --takeover`.
 	Takeover string `json:"takeover,omitempty"`
+}
+
+// InboxOp runs one inbox command with the node hub client the daemon holds, so
+// a caller without the hub token reads the lanes its node serves.
+const InboxOp = "inbox"
+
+// Inbox is the payload of the inbox op: one `panewire inbox` command, answered
+// with the text, streams and exit status that command would have printed
+// itself. Both the CLI's own local route and the fleet spawn engine's wait
+// send it, so the field names live here.
+type Inbox struct {
+	Command string        `json:"command"`
+	Lane    string        `json:"lane,omitempty"`
+	ID      int64         `json:"id,omitempty"`
+	Unread  bool          `json:"unread,omitempty"`
+	All     bool          `json:"all,omitempty"`
+	JSON    bool          `json:"json,omitempty"`
+	Timeout time.Duration `json:"timeout"`
+	// EventIDs are the ids a status request asks about; no other command
+	// carries them.
+	EventIDs []string `json:"event_ids,omitempty"`
 }
 
 // ExitDaemonUnavailable is the response code for an op the daemon cannot serve

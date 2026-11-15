@@ -406,6 +406,33 @@ panewire:
    `brief_doc_unavailable` refuse that host (recorded as `hub_<reason>`) and
    `--host auto` moves to the next candidate.
 
+**Per-node spawn concurrency (`spawn.json` `spawn_concurrency`, hk 4578).**
+A node runs one hub spawn at a time. Setting `spawn_concurrency` to 2..8 is an
+explicit operator opt-in: the node then admits that many checkout spawns into
+distinct job dirs at once and advertises `spawn_slots_v1=N` in hello. Unset,
+0, 1, or a `spawn.json` that does not load means one; the capability is then
+not advertised and the hub keeps one-at-a-time dispatch. A change binds at the
+node's next registration (reconnect or restart). The admission rules are in
+[hub-spawn-operations.md](hub-spawn-operations.md#acceptance-and-identity).
+
+Two steps are **not proven safe** for N>1, and they are the boundary of this
+opt-in (hk 4821):
+
+- herdr workspace create/resolve across processes and versions: an older
+  launcher, or one with a different state home, does not share the
+  workspace lock, so a missing workspace label can be created twice;
+- worktree identity between admission and prepare: the admission key is the
+  job-dir name (and the case-folded job id), while `work_root` and symlinks
+  are read again later, so two distinct keys can reach one directory.
+
+At every N, a `-L` lane (read as a flag, never from another flag's value)
+that resolves outside its prepared worktree is refused before launch
+(`checkout_refused:lane_outside_worktree`), since an agent keeps working
+after its slot is released.
+
+Opt in only on a host where neither can happen: one panewire version, one
+state home, a fixed `work_root`, and no symlinked job dirs or lanes.
+
 대상 계정은 `quota.refresh` 노드 명령으로 갱신합니다. `claude`, `codex`,
 `commandcode`, `devin`, `agy`만 native 측정 대상이며, 다른 풀은 측정하지 않습니다.
 `measure_timeout_s`가 갱신 제한 시간을 정합니다.
@@ -610,7 +637,7 @@ below overrides the URL.
 | `gate` | `"native"` | 폐기 키입니다. 남아 있으면 경고 후 native verdict를 사용합니다. `"native"` 이외의 값은 설정 오류입니다. |
 | `launch` | `"native"` | 폐기 키입니다. 남아 있으면 경고 후 native catalog lookup을 사용합니다. `"native"` 이외의 값은 설정 오류입니다. |
 | `pool_fresh_ttl_s` | unset | Optional pool → seconds table (`[quota.pool_fresh_ttl_s]`, nonnegative integers) that overrides `fresh_ttl_s` for one pool. |
-| `pool_max_concurrent` | unset | Optional pool → positive integer table (`pool_max_concurrent = { "openai-api" = 2 }`; pool name as in the catalog's `pool` column) that caps live spawns on a pool fleet-wide. A candidate whose pool is at its cap is dropped `pool_at_cap` and selection moves to the next pool; a spawn never waits for a slot. A pool not named has no cap. Read at each placement. A value that is not a positive integer is refused at config load with the key named (`quota.pool_max_concurrent.openai-api must be a positive integer`). When the live count cannot be read from the hub the cap does not apply and the reason is logged. The reserved key `devin-free` caps only the SWE-2 free rungs (`devin-swe2`, `devin-swe2-medium`, `devin-swe2-max`, `devin-swe2-flash`, `devin-swe2-flash-medium`, `devin-swe2-flash-max`) by their live spawns: those rungs draw on Devin's free-model quota while paid `devin-ds41` draws on the account's paid window, so capping them must not cap paid devin. `devin` stays a whole-pool cap; when both keys are set a free rung must pass both. How the count is made and the refusal text: [placement](placement.md#pool-concurrency-cap). |
+| `pool_max_concurrent` | unset | Optional pool → positive integer table (`pool_max_concurrent = { "openai-api" = 2 }`; pool name as in the catalog's `pool` column) that caps live spawns on a pool fleet-wide: hub spawns and direct `panewire spawn` jobs on a node both count. A candidate whose pool is at its cap is dropped `pool_at_cap` and selection moves to the next pool; a spawn never waits for a slot. A pool not named has no cap. Read at each placement. A value that is not a positive integer is refused at config load with the key named (`quota.pool_max_concurrent.openai-api must be a positive integer`). When the live count cannot be read from the hub the cap does not apply and the reason is logged. The reserved key `devin-free` caps only the SWE-2 free rungs (`devin-swe2`, `devin-swe2-medium`, `devin-swe2-max`, `devin-swe2-flash`, `devin-swe2-flash-medium`, `devin-swe2-flash-max`) by their live spawns: those rungs draw on Devin's free-model quota while paid `devin-ds41` draws on the account's paid window, so capping them must not cap paid devin. `devin` stays a whole-pool cap; when both keys are set a free rung must pass both. How the count is made and the refusal text: [placement](placement.md#pool-concurrency-cap). |
 | `credit_total_usd` | unset | Optional pool → dollars table (`[quota.credit_total_usd]`, positive numbers): each prepaid credit pool's grant total. A shared manual entry records only its used percentage, so panewire derives the dollar balance `total × (100 − used_pct) / 100` for credit ranking, dollars at risk and burn; an entry's own `remaining_usd` still wins. Set it on the hub and every node, and **update it whenever a new grant is bought** — a stale total gives wrong dollars. Keeping the dollars in the shared record needs hk 3418; until it lands this table stays the source. |
 | `measure_timeout_s` | `60` | 대상 계정의 native refresh(`panewire quota refresh <pool>`) 제한 시간입니다. 다른 풀은 측정 소스가 없습니다. |
 | `accounts` | unset | Optional pool → 16-hex account-fingerprint table for exact account keys. For `agy` it is the account the node measures: agy has no login to derive a key from ([docs/quota.md](quota.md#native-measurement-agy)). |
@@ -835,9 +862,15 @@ only when the report is published and is the completing one), read back when
 the answer is ambiguous or the record is already terminal, retried at most twice
 more with the same payload within a 30 s budget. The single spawned repair PUT is
 also read back after an ambiguous reply but never repeated. Step 3 is the late
-write hk accepts once on a terminal record (hk 4354): `200` is pinned, `409`
-means the record already names another report. A `409` is an outcome, logged
-(`report pin kept`) and receipted as `held`, never an error. Step 4 writes
+write hk accepts once on a terminal record (hk 4354), so a same-id retry whose
+record ended before the upload landed still attaches the report. It reads the
+record first: a record with no report takes the pair write once, a record
+already naming these bytes is a no-op with no write, and a record naming
+another report is refused — that pin can never become this report's, so `done`
+keeps the local file, logs `report pin kept` and exits 75. A `409` from the
+write itself (another writer pinned between the read and the write) is the same
+refusal. A refusal is receipted as `held`, so a rerun repeats it without
+another write. Step 4 writes
 `job.completed` and the relay once per `S`, carrying the exact document key when
 step 1 had succeeded by then, and comments on the job's hk task.
 
@@ -889,7 +922,9 @@ An interactive `done` that completed but left the report out of hk, or its pin
 unwritten, prints its `OK` line and exits 1 with `completed; report not in hk;
 rerun the same command` (or `report not pinned in hk`). That is reporting only:
 the job completed, and the same command run again finishes the missing step.
-The watcher warns and carries on. `escalate` is not part
+The one pin failure a rerun cannot fix is a record that already names another
+report: `done` exits 75 with `completed; hk record names another report; local
+report kept`. The watcher warns and carries on. `escalate` is not part
 of this: it uploads under `reports/<job>/<file name>` and writes
 `{state:"escalated", report_doc, report_sha256}`; the watcher writes
 `{state:"lost"}` after two missing-pane observations, or when a reviewer pane is
@@ -906,6 +941,13 @@ record: `completed` exits 0 (the result is read from the record by the
 caller), `escalated` exits 83, `lost` exits 84, and a record still pending,
 absent or unreadable leaves the local signals and the usual deadline to
 decide (the unreadable case warns once with reason `hk-unavailable`).
+
+`spawn --wait` reads the owner lane's inbox through the local node daemon, the
+route `panewire inbox list` takes by default ([quiet-delivery.md](quiet-delivery.md)),
+so a session whose own config carries no usable hub token still sees the
+lane's `READY` and `escalate` signals. Only when no daemon answers does the
+wait fall back to reading `inbox list` with the `[hub]` connection this
+config names; it then warns once per wait, not once per poll.
 
 After the brief lands, a failed task claim leaves the pane running and the spawn
 landed. The `job.task_link` event records `status: failed` and a bounded reason;

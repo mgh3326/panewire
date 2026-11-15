@@ -421,6 +421,7 @@ type hubInboxEvent struct {
 	Head           string `json:"head"`
 	PaneID         string `json:"pane_id"`
 	Role           string `json:"role"`
+	Profile        string `json:"profile"`
 	TLevel         string `json:"t_level"`
 	EventID        string `json:"event_id"`
 	Text           string `json:"text"`
@@ -443,6 +444,7 @@ type hubInboxEvent struct {
 		Head           string `json:"head"`
 		PaneID         string `json:"pane_id"`
 		Role           string `json:"role"`
+		Profile        string `json:"profile"`
 		TLevel         string `json:"t_level"`
 	} `json:"payload"`
 }
@@ -502,6 +504,7 @@ func (e hubInboxEvent) pr() string       { return firstHubValue(e.PR, e.Payload.
 func (e hubInboxEvent) head() string     { return firstHubValue(e.Head, e.Payload.Head) }
 func (e hubInboxEvent) paneID() string   { return firstHubValue(e.PaneID, e.Payload.PaneID) }
 func (e hubInboxEvent) role() string     { return firstHubValue(e.Role, e.Payload.Role) }
+func (e hubInboxEvent) profile() string  { return firstHubValue(e.Profile, e.Payload.Profile) }
 func (e hubInboxEvent) tLevel() string   { return firstHubValue(e.TLevel, e.Payload.TLevel) }
 func (e hubInboxEvent) notifyType() string {
 	if !validNotifyType(e.NotifyType) {

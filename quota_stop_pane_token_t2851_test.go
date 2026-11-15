@@ -2,6 +2,7 @@ package panewire
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"os"
@@ -144,6 +145,79 @@ func TestQuotaStopPaneTokenRefreshSchedule(t *testing.T) {
 	q.refreshQuotaWaits(context.Background(), due)
 	if len(*reports) != 2 {
 		t.Fatalf("reports=%+v, want a refresh at the margin", *reports)
+	}
+}
+
+// A herdr that fails the report-metadata call leaves the wait decision and
+// its resume exactly as they were, and the failure is logged once however
+// often the token is retried (hk 2851).
+func TestQuotaStopPaneTokenHerdrFailureKeepsTheWait(t *testing.T) {
+	dir := t.TempDir()
+	argvLog := filepath.Join(dir, "argv")
+	binary := filepath.Join(dir, "herdr")
+	// A herdr that records the call and refuses it, as an old or closed
+	// server would.
+	script := "#!/bin/sh\nfor arg in \"$@\"; do printf '%s\\n' \"$arg\"; done > \"$PANEWIRE_TEST_ARGV\"\necho pane_not_found >&2\nexit 1\n"
+	if err := os.WriteFile(binary, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HERDR_BIN", binary)
+	t.Setenv("PANEWIRE_TEST_ARGV", argvLog)
+
+	rig := newRoleStopRig(t, "implementer", time.Hour, roleStopTask)
+	var logs strings.Builder
+	rig.q.logger = slog.New(slog.NewTextHandler(&logs, nil))
+	rig.q.session = func(string, string) string { return "" }
+	rig.q.show = rig.q.reportQuotaWait
+	rig.run()
+
+	if decision, reason := rig.decision(t); decision != "wait" || reason != "reset_within_expected" {
+		t.Fatalf("decision=%s reason=%s, want the wait the refusal must not change", decision, reason)
+	}
+	if rig.sends != 1 {
+		t.Fatalf("sends=%d, want the one resume at the reset", rig.sends)
+	}
+	if n := strings.Count(logs.String(), "quota wait token was not reported"); n != 1 {
+		t.Fatalf("token failure logged %d times, want once; logs=%s", n, logs.String())
+	}
+}
+
+// A clear herdr refused is retried after its backoff and stops once herdr
+// takes it; the pane's wait is tracked no further (hk 2851).
+func TestQuotaStopPaneTokenRetriesFailedClear(t *testing.T) {
+	q := newPaneTokenManager(t, true)
+	now := time.Date(2026, 11, 14, 0, 0, 0, 0, time.UTC)
+	reset := now.Add(time.Hour).Format(time.RFC3339)
+	refuse := true
+	var sets, clears int
+	q.show = func(_ context.Context, _, value string, _ time.Duration) error {
+		if value != "" {
+			sets++
+			return nil
+		}
+		clears++
+		if refuse {
+			return errors.New("herdr refused the clear")
+		}
+		return nil
+	}
+	q.showQuotaWait(context.Background(), "workspace:pane-1", "claude", reset, now)
+	q.clearQuotaWait(context.Background(), "workspace:pane-1", now)
+	if sets != 1 || clears != 1 {
+		t.Fatalf("sets=%d clears=%d, want one report and one refused clear", sets, clears)
+	}
+	q.retryQuotaClears(context.Background(), now.Add(time.Second))
+	if clears != 1 {
+		t.Fatalf("clears=%d, want no retry before the backoff", clears)
+	}
+	refuse = false
+	q.retryQuotaClears(context.Background(), now.Add(paneQuotaTokenRetryAfter))
+	if clears != 2 {
+		t.Fatalf("clears=%d, want the retry after the backoff", clears)
+	}
+	q.retryQuotaClears(context.Background(), now.Add(time.Hour))
+	if clears != 2 {
+		t.Fatalf("clears=%d, want no retry once herdr took the clear", clears)
 	}
 }
 

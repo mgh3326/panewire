@@ -279,9 +279,14 @@ type HubActiveJob struct {
 	Pane           string `json:"pane,omitempty"`
 	Tier           string `json:"tier,omitempty"`
 	Role           string `json:"role,omitempty"`
-	StartedAt      string `json:"started_at,omitempty"`
-	LastEventKind  string `json:"last_event_kind,omitempty"`
-	LastEventAt    string `json:"last_event_at,omitempty"`
+	// Profile is the profile (a catalog profile or a seat name) the job was
+	// placed on, read from its own job.spawned receipt. A node's heartbeat
+	// carries it so a direct `panewire spawn` counts toward the pool cap the
+	// hub applies to its own spawns (hk 3399).
+	Profile       string `json:"profile,omitempty"`
+	StartedAt     string `json:"started_at,omitempty"`
+	LastEventKind string `json:"last_event_kind,omitempty"`
+	LastEventAt   string `json:"last_event_at,omitempty"`
 }
 
 type hubJobRecord struct {
@@ -1879,7 +1884,7 @@ func decodeHubHeartbeatPayload(payload []byte) (hubHeartbeatPayload, bool) {
 				return hubHeartbeatPayload{}, false
 			}
 			for name := range rawJob {
-				if name != "job_id" && name != "agent_label" && name != "last_event_seq" && name != "push_sha" && name != "epoch" && name != "owner_lane" && name != "pane" && name != "tier" && name != "role" && name != "started_at" && name != "last_event_kind" && name != "last_event_at" {
+				if name != "job_id" && name != "agent_label" && name != "last_event_seq" && name != "push_sha" && name != "epoch" && name != "owner_lane" && name != "pane" && name != "tier" && name != "role" && name != "profile" && name != "started_at" && name != "last_event_kind" && name != "last_event_at" {
 					return hubHeartbeatPayload{}, false
 				}
 			}

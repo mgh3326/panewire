@@ -277,6 +277,10 @@ func (h *HubServer) handleSpawnOperation(w http.ResponseWriter, r *http.Request)
 // for each node, so a slow landing cannot consume a placement worker.
 const hubSpawnWorkerCount = 8
 
+// hubSpawnDrainMarkTTL bounds a node's drain mark (runSpawnCoordinator) past
+// the last scan that saw its waiting request; scans run every 2s.
+const hubSpawnDrainMarkTTL = 10 * time.Second
+
 func (h *HubServer) runSpawnCoordinator(parent context.Context) {
 	if h.inbox == nil {
 		return
@@ -288,7 +292,18 @@ func (h *HubServer) runSpawnCoordinator(parent context.Context) {
 	work := make(chan hubSpawnTask, hubSpawnWorkerCount)
 	var mu sync.Mutex
 	active := map[string]bool{}
-	nodeActive := map[string]bool{}
+	// nodeActive holds each node's open dispatches by overlap key. A node gets
+	// a second one only when it advertised the slots and every open dispatch
+	// and the candidate are checkout spawns into distinct dirs, the overlap the
+	// node admits at once, so a dispatched request never waits on the node
+	// past its start window (hk 4578). A node that advertises none gets one.
+	nodeActive := map[string]map[string]int{}
+	// drainFor marks a node where a request without a checkout is queued
+	// behind open dispatches: no new dispatch opens there until it has run, so
+	// it is not starved by later checkouts. The mark is refreshed by each scan
+	// that still finds the request waiting and lapses when no scan has for
+	// hubSpawnDrainMarkTTL (the request ended some other way).
+	drainFor := map[string]time.Time{}
 	for range hubSpawnWorkerCount {
 		h.spawnWorkers.Add(1)
 		go func() {
@@ -329,15 +344,47 @@ func (h *HubServer) runSpawnCoordinator(parent context.Context) {
 		if task.Status == "bound" && task.Node != nil && h.handleQueuedBinding(ctx, task) {
 			return
 		}
+		slots := 1
+		if task.Node != nil {
+			h.mu.Lock()
+			if record := h.nodes[task.Node.Machine]; record != nil {
+				slots = hubNodeSpawnSlots(record.capabilities)
+			}
+			h.mu.Unlock()
+		}
 		mu.Lock()
 		busy := active[task.Request.RequestID]
-		if task.Node != nil && nodeActive[task.Node.Machine] {
-			busy = true
+		var key string
+		if task.Node != nil {
+			key = hubSpawnOverlapKey(task.Node)
+			machine := task.Node.Machine
+			open := nodeActive[machine]
+			if len(open) > 0 {
+				busy = busy || len(open) >= slots || key == "" || open[""] > 0
+				for held := range open {
+					busy = busy || spawnOverlapConflicts(held, key)
+				}
+			}
+			if mark, marked := drainFor[machine]; marked && time.Since(mark) > hubSpawnDrainMarkTTL {
+				delete(drainFor, machine)
+			}
+			switch {
+			case key == "" && busy && !active[task.Request.RequestID]:
+				drainFor[machine] = time.Now()
+			case key == "" && !busy:
+				delete(drainFor, machine)
+			case key != "":
+				_, draining := drainFor[machine]
+				busy = busy || draining
+			}
 		}
 		if !busy {
 			active[task.Request.RequestID] = true
 			if task.Node != nil {
-				nodeActive[task.Node.Machine] = true
+				if nodeActive[task.Node.Machine] == nil {
+					nodeActive[task.Node.Machine] = map[string]int{}
+				}
+				nodeActive[task.Node.Machine][key]++
 			}
 		}
 		mu.Unlock()
@@ -358,7 +405,14 @@ func (h *HubServer) runSpawnCoordinator(parent context.Context) {
 				}
 				mu.Lock()
 				delete(active, task.Request.RequestID)
-				delete(nodeActive, task.Node.Machine)
+				if open := nodeActive[task.Node.Machine]; open != nil {
+					if open[key]--; open[key] <= 0 {
+						delete(open, key)
+					}
+					if len(open) == 0 {
+						delete(nodeActive, task.Node.Machine)
+					}
+				}
 				mu.Unlock()
 				current, err := h.inbox.store.spawnTask(ctx, task.Request.RequestID)
 				if err == nil && (current.Node == nil || !spawnPending(current.Status) || current.Node.RequestID != task.Node.RequestID) {
@@ -1422,7 +1476,7 @@ func (t *directSpawnTransport) settleNodeResult(ctx context.Context, node hubSpa
 	}
 	// The authenticated node's completed journal is necessary, and a current
 	// exact pane read is additionally required before accepting late success.
-	if result.RC == 0 && (node.Checkout != nil && (result.Receipt == nil || !spawnReceiptCheckoutPath(result.Receipt.CWD, node.Checkout.Dir, hubSpawnArg(node.Args, "-L"))) || !rechecked && !h.verifySpawnPane(ctx, node.Machine, result, node.Args)) {
+	if result.RC == 0 && (node.Checkout != nil && (result.Receipt == nil || !spawnReceiptCheckoutPath(result.Receipt.CWD, node.Checkout.Dir, hubSpawnFlagArg(node.Args, "-L"))) || !rechecked && !h.verifySpawnPane(ctx, node.Machine, result, node.Args)) {
 		return t.unknown(ctx, "unknown")
 	}
 	h.noteOneTimeActionRefusal(node.Machine, hubSpawnArg(node.Args, "-m"), result)

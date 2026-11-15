@@ -639,6 +639,10 @@ The normal relay persistence/retry requirements still apply during an hk outage.
 ## Inbox commands and API
 
 By default, inbox commands use the local node daemon and its hub connection.
+`panewire spawn --wait` reads the owner lane's inbox the same way, so a session
+whose config carries no usable hub token still sees the lane's signals; only a
+daemon that does not answer sends it to the configured `[hub]` connection, which
+it reports once per wait ([config.md](config.md)).
 For direct access, set `PANEWIRE_HUB_URL`, `PANEWIRE_HUB_TOKEN_ENV` (path to the existing private
 `HUB_MACHINE_ID`/`HUB_TOKEN` env file), optional `PANEWIRE_HUB_CF_ENV`, and
 `PANEWIRE_LANE`, or pass the corresponding flags shown by `panewire inbox --help`.

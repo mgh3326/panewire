@@ -308,7 +308,8 @@ func TestNodeSpawnAdmissionWakesQueuedDuplicates_t4579(t *testing.T) {
 	firstRelease, secondRelease := make(chan struct{}), make(chan struct{})
 	var firstOnce, secondOnce sync.Once
 	var runs atomic.Int32
-	client := &HubClient{spawnConfigPath: t14SpawnConfig(t, t.TempDir()), spawnJournalDir: t.TempDir(), fleetEvents: (&fleetEventRecorder{}).write}
+	// The occupied gate is the node's one slot (a node with N=1).
+	client := &HubClient{spawnConfigPath: t14SpawnConfig(t, t.TempDir()), spawnJournalDir: t.TempDir(), fleetEvents: (&fleetEventRecorder{}).write, spawnSlotsOverride: 1}
 	preparedPath := t.TempDir()
 	client.spawnPrepare = func(context.Context, nodeWorktreePrepareArgs) (any, string) {
 		close(prepared)
