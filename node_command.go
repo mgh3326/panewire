@@ -663,14 +663,7 @@ func nodeJobHerdrBindingByPaneFromRoot(inboxRoot, pane string) (nodePaneBinding,
 	if pane == "" || inboxRoot == "" {
 		return nodePaneBinding{}, false
 	}
-	type paneCandidate struct {
-		jobID     string
-		session   string
-		live      bool
-		createdAt string
-		seq       int64
-	}
-	var best paneCandidate
+	var best paneBindingCandidate
 	found := false
 	err := hubIndexFor(inboxRoot).visitJobs(nil, true, func(job *hubIndexedJob) bool {
 		// The newest binding event of the job that names this pane.
@@ -683,13 +676,10 @@ func nodeJobHerdrBindingByPaneFromRoot(inboxRoot, pane string) (nodePaneBinding,
 		if match == nil {
 			return true
 		}
-		cand := paneCandidate{jobID: job.id, session: match.session, live: !job.ended, createdAt: match.createdAt, seq: match.seq}
-		if !found {
+		cand := paneBindingCandidate{jobID: job.id, session: match.session, live: !job.ended, createdAt: match.createdAt, seq: match.seq}
+		if !found || betterPaneBinding(cand, best) {
 			best = cand
 			found = true
-		} else if (!best.live && cand.live) ||
-			(best.live == cand.live && (cand.createdAt > best.createdAt || (cand.createdAt == best.createdAt && cand.seq > best.seq))) {
-			best = cand
 		}
 		return true
 	})

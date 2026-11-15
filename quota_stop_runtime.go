@@ -105,6 +105,7 @@ func newQuotaStopManager(s *Store, root string, act bool, logger *slog.Logger) (
 		tasks: func(ctx context.Context, afterID int64) ([]byte, error) {
 			return fleet.HKTaskListPageAnswer(ctx, afterID, quotaStopTaskLimit)
 		},
+		job: fleet.ReadJobRecord,
 		note: func(ctx context.Context, key, job, body string) error {
 			return fleet.PutHKDocument(ctx, key, "note", job, body)
 		},
@@ -132,11 +133,13 @@ func newQuotaStopManager(s *Store, root string, act bool, logger *slog.Logger) (
 // `handoffkeep doc get policy/quota-stop`, `tasks list --limit 1000` and `doc
 // put --kind note --job` until then. policy and tasks give hk's 2xx answer,
 // which the manager reads as it read that CLI output; any other outcome is
-// an error. note writes one note document for the job.
+// an error. note writes one note document for the job. job is the job record
+// read the stall safety net's past-window path confirms against (hk 4836).
 type quotaStopHK struct {
 	policy func(context.Context) ([]byte, error)
 	task   func(context.Context, string) ([]byte, error)
 	tasks  func(context.Context, int64) ([]byte, error)
+	job    func(context.Context, string) (map[string]any, error)
 	note   func(ctx context.Context, key, job, body string) error
 }
 
@@ -193,6 +196,21 @@ func (q *quotaStopManager) jobForPane(ctx context.Context, pane string) (HubActi
 		return HubActiveJob{}, false
 	}
 	return found, count == 1 && found.JobID != "" && !quotaExcluded(found.AgentLabel)
+}
+
+// oldJobsByPane maps each pane whose only job started before the active
+// window to that job, in one index pass. It is the stall safety net's
+// candidate set past the window (hk 4836); a job it returns still has to be
+// confirmed against hk before anything is examined. An excluded label's job is
+// left out, as jobForPane leaves it out.
+func (q *quotaStopManager) oldJobsByPane(ctx context.Context, now time.Time) map[string]HubActiveJob {
+	jobs := hubIndexFor(q.root).oldJobsByPane(ctx, now.Add(-hubJobActiveMaxAge()))
+	for pane, job := range jobs {
+		if quotaExcluded(job.AgentLabel) {
+			delete(jobs, pane)
+		}
+	}
+	return jobs
 }
 
 // jobFacts reads what the job's own events say that the scanned active job
