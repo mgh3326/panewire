@@ -96,6 +96,21 @@ func (j *nodeSpawnJournal) claim(ctx context.Context, message hubOutboundMessage
 	return false, cached, err
 }
 
+// refuseUnstarted records a request this node will never start as completed
+// with result, unless a row for it already exists.
+func (j *nodeSpawnJournal) refuseUnstarted(ctx context.Context, message hubOutboundMessage, result hubSpawnResult) (bool, error) {
+	raw, err := json.Marshal(result)
+	if err != nil {
+		return false, err
+	}
+	inserted, err := j.db.ExecContext(ctx, `INSERT INTO spawn_inbox(request_id,fingerprint,status,result,job_id,label) VALUES(?,?,'completed',?,?,?) ON CONFLICT DO NOTHING`, message.RequestID, spawnFingerprint(message), string(raw), hubSpawnArg(message.Args, "--job"), hubSpawnArg(message.Args, "-l"))
+	if err != nil {
+		return false, err
+	}
+	n, err := inserted.RowsAffected()
+	return n == 1, err
+}
+
 // lookup checks the same fingerprint as claim without creating an executing
 // row. An absent row is still replayable after a node restart.
 func (j *nodeSpawnJournal) lookup(ctx context.Context, message hubOutboundMessage) (bool, *hubSpawnResult, error) {

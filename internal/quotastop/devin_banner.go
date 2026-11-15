@@ -21,10 +21,12 @@ func devinLimitText(text string) bool {
 	return devin.MatchString(text) || devinPaid.MatchString(text) || devinRequest.MatchString(text)
 }
 
-// devinChromeRow reports a trimmed row that may follow a Devin banner: a blank
-// row, a rule, the labelled composer rule, the empty input row or its
-// placeholder, Devin's working-directory row and its model footer. Any other
-// row is output, a quoted banner or a user turn.
+// devinChromeRow reports a trimmed row that is Devin chrome: a rule, the
+// labelled composer rule, the empty input row or its placeholder, Devin's
+// working-directory row and its model footer. indentedDevinBlock accepts such a
+// row only in a block of chrome after a blank row (docs/quota-stop.md, "last
+// block"); a row after a blank that is not chrome is output, a quoted banner or
+// another block.
 func devinChromeRow(trimmed string) bool {
 	return trimmed == "" || ruleLine(trimmed) || composerLabelRule(trimmed) ||
 		promptChrome(trimmed) || devinCwdRow(trimmed) || devinFooter.MatchString(trimmed)
@@ -32,11 +34,14 @@ func devinChromeRow(trimmed string) bool {
 
 // indentedDevinBlock finds the last Devin limit banner in screen that is
 // indented, follows a blank row, and reaches its closing sentence. It returns
-// the banner's joined text only when nothing but Devin chrome follows it (hk
-// 4680, operator decision B). The banner is one indented row, or a "▲ Something
-// went wrong" row whose body is indented on the rows after it. Only the last
-// banner is considered: an earlier banner has a later banner's rows after it,
-// which are not chrome.
+// the banner's joined text only when the banner is in the screen's last block
+// (hk 4680, operator decision B; hk 4690, operator decision 264): the rows
+// directly under the banner, up to the next blank row, are its own block and
+// whatever they are is not checked; after a blank row, only blocks of Devin
+// chrome may follow, and no user turn may follow at all. The banner is one
+// indented row, or a "▲ Something went wrong" row whose body is indented on the
+// rows after it. Only the last banner is considered: an earlier banner has a
+// later banner's rows after it, which are not chrome.
 func indentedDevinBlock(screen string) (string, bool) {
 	lines := strings.Split(strings.ReplaceAll(screen, "\r", ""), "\n")
 	start := -1
@@ -69,8 +74,18 @@ func indentedDevinBlock(screen string) (string, bool) {
 	if !devinLimitText(text) || !requestLimitComplete(text) {
 		return "", false
 	}
+	// gap is set by the first blank row after the banner's block. From then on
+	// every row must be chrome, so a later block of output, a quoted banner or
+	// a user turn means the banner is not in the last block.
+	gap := false
 	for _, raw := range lines[end+1:] {
-		if !devinChromeRow(strings.TrimSpace(raw)) {
+		row := strings.TrimSpace(raw)
+		switch {
+		case row == "":
+			gap = true
+		case userTurn(row) && !promptChrome(row):
+			return "", false
+		case gap && !devinChromeRow(row):
 			return "", false
 		}
 	}

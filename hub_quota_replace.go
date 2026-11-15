@@ -73,6 +73,12 @@ func (h *HubServer) startQuotaReplacement(machine string, event hubJobEventPaylo
 	if h.inbox == nil || event.Reason != "quota_stop" {
 		return
 	}
+	if h.spawnGrantDrain {
+		// A rollback drain creates no successor: an older hub could misread
+		// its *_grant row (docs/hub-spawn-operations.md).
+		h.logger.Warn("hub quota hand-off skipped while draining grant rows", "host", machine, "job", event.JobID)
+		return
+	}
 	h.closeMu.Lock()
 	if h.closed {
 		h.closeMu.Unlock()
