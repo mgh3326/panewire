@@ -191,7 +191,7 @@ func (s *laneInboxStore) waitingSpawnRequests(parent context.Context) ([]hubSpaw
 	var afterID string
 	paged := false
 	for {
-		query := `SELECT ` + spawnTaskColumns + ` FROM spawn_operations WHERE status='waiting'`
+		query := `SELECT ` + spawnTaskColumns + ` FROM spawn_operations WHERE status='waiting' AND node_id IS NULL`
 		var args []any
 		if paged {
 			query += ` AND (created_ms>? OR (created_ms=? AND request_id>?))`
@@ -232,7 +232,7 @@ func (s *laneInboxStore) releaseWaitingSpawn(parent context.Context, task hubSpa
 	ctx, done := s.op(parent)
 	defer done()
 	deadline := spawnAttemptDeadline(now, task.Request.DeadlineSeconds, task.Expires)
-	result, err := s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET status='accepted',deadline_ms=?,last_run_ms=0,conditions_met_ms=?,condition_result='' WHERE request_id=? AND attempt=? AND status='waiting'`), deadline.UnixMilli(), now.UnixMilli(), task.Request.RequestID, task.Attempt)
+	result, err := s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET status='accepted',deadline_ms=?,last_run_ms=0,conditions_met_ms=?,condition_result='' WHERE request_id=? AND attempt=? AND status='waiting' AND node_id IS NULL`), deadline.UnixMilli(), now.UnixMilli(), task.Request.RequestID, task.Attempt)
 	if err != nil {
 		return false, err
 	}
@@ -255,7 +255,7 @@ func (s *laneInboxStore) giveUpWaitingSpawn(parent context.Context, task hubSpaw
 		return false, err
 	}
 	defer tx.Rollback()
-	result, err := tx.ExecContext(ctx, s.q(`UPDATE spawn_operations SET status='given_up',result=? WHERE request_id=? AND attempt=? AND status='waiting'`), string(raw), task.Request.RequestID, task.Attempt)
+	result, err := tx.ExecContext(ctx, s.q(`UPDATE spawn_operations SET status='given_up',result=? WHERE request_id=? AND attempt=? AND status='waiting' AND node_id IS NULL`), string(raw), task.Request.RequestID, task.Attempt)
 	if err != nil {
 		return false, err
 	}
@@ -283,7 +283,7 @@ func (s *laneInboxStore) endWaitingSpawn(parent context.Context, task hubSpawnTa
 		return false, err
 	}
 	defer tx.Rollback()
-	result, err := tx.ExecContext(ctx, s.q(`UPDATE spawn_operations SET status=?,result=? WHERE request_id=? AND attempt=? AND status='waiting'`), status, string(raw), task.Request.RequestID, task.Attempt)
+	result, err := tx.ExecContext(ctx, s.q(`UPDATE spawn_operations SET status=?,result=? WHERE request_id=? AND attempt=? AND status='waiting' AND node_id IS NULL`), status, string(raw), task.Request.RequestID, task.Attempt)
 	if err != nil {
 		return false, err
 	}
@@ -317,7 +317,7 @@ func (s *laneInboxStore) recordWaitingSpawnResult(parent context.Context, task h
 func (s *laneInboxStore) returnToWaiting(parent context.Context, task hubSpawnTask) (bool, error) {
 	ctx, done := s.op(parent)
 	defer done()
-	result, err := s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET status='waiting' WHERE request_id=? AND attempt=? AND conditions_met_ms=0 AND status IN ('accepted','retryable','staged','deadline_exceeded','deadline_exceeded_grant')`), task.Request.RequestID, task.Attempt)
+	result, err := s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET status='waiting' WHERE request_id=? AND attempt=? AND conditions_met_ms=0 AND node_id IS NULL AND status IN ('accepted','retryable','staged','deadline_exceeded','deadline_exceeded_grant')`), task.Request.RequestID, task.Attempt)
 	if err != nil {
 		return false, err
 	}

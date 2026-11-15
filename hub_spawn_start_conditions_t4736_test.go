@@ -481,3 +481,43 @@ func TestWaitingStatusReportsBlockingPredicates(t *testing.T) {
 		t.Fatalf("waiting status = %d %s, want the blocking predicate", w.Code, w.Body)
 	}
 }
+
+func TestWaitingSweepLeavesBoundConditionedRowsAlone(t *testing.T) {
+	newStartConditionSnapshot(t)
+	path := filepath.Join(t.TempDir(), "inbox.sqlite3")
+	t.Setenv(crashReportDSNEnv, "")
+	config := HubServerConfig{Tokens: map[string]string{"operator": t14OperatorToken, "machine-a": "node-token"}, InboxStorePath: path}
+	h, err := NewHubServer(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bound := waitingSpawnFixture(t, h, 1, []fleet.StartCondition{{Kind: "task", TaskID: "42", State: "merged"}})
+	unbound := waitingSpawnFixture(t, h, 2, []fleet.StartCondition{{Kind: "task", TaskID: "43", State: "merged"}})
+	// A legacy row the old hub bound and let exceed its deadline: its node may
+	// already be running the request, so the sweep must not move it.
+	if _, err := h.inbox.store.db.Exec(`UPDATE spawn_operations SET status='deadline_exceeded',node_id='node-1',node_payload='{"request_id":"node-1","machine":"machine-a"}' WHERE request_id=?`, bound.Request.RequestID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.inbox.store.db.Exec(`UPDATE spawn_operations SET status='accepted' WHERE request_id=?`, unbound.Request.RequestID); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store := openSpawnStore(t, path)
+	reopened, err := store.spawnTask(t.Context(), bound.Request.RequestID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reopened.Status != "deadline_exceeded" || reopened.Node == nil || reopened.Node.RequestID != "node-1" {
+		t.Fatalf("bound conditioned row after the sweep = status %q node %+v, want deadline_exceeded still bound", reopened.Status, reopened.Node)
+	}
+	moved, err := store.spawnTask(t.Context(), unbound.Request.RequestID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if moved.Status != "waiting" {
+		t.Fatalf("unbound conditioned row after the sweep = %q, want waiting", moved.Status)
+	}
+}

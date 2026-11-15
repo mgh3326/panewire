@@ -142,8 +142,10 @@ func (s *laneInboxStore) ensureSpawnTasks() error {
 	}
 	// A row an older hub accepted with a start condition belongs to the queue
 	// now (hk 4736): waiting is a new value of status, and no older query lists
-	// it. Only unbound accepted rows move; a bound legacy row keeps its guard.
-	if _, err := s.db.ExecContext(ctx, `UPDATE spawn_operations SET status='waiting' WHERE status IN ('accepted','deadline_exceeded','retryable','staged','deadline_exceeded_grant') AND conditions_met_ms=0 AND payload LIKE '%"start_conditions":%'`); err != nil {
+	// it. Only unbound rows move (node_id IS NULL): a bound legacy row keeps
+	// its guard, and a bound deadline_exceeded row may still be running on its
+	// node.
+	if _, err := s.db.ExecContext(ctx, `UPDATE spawn_operations SET status='waiting' WHERE status IN ('accepted','deadline_exceeded','retryable','staged','deadline_exceeded_grant') AND node_id IS NULL AND conditions_met_ms=0 AND payload LIKE '%"start_conditions":%'`); err != nil {
 		return err
 	}
 	return nil

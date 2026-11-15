@@ -15,4 +15,4 @@ ALTER TABLE spawn_operations ADD COLUMN IF NOT EXISTS condition_result TEXT NOT 
 
 UPDATE spawn_operations SET status='waiting'
  WHERE status IN ('accepted','deadline_exceeded','retryable','staged','deadline_exceeded_grant')
-   AND conditions_met_ms=0 AND payload LIKE '%"start_conditions":%';
+   AND node_id IS NULL AND conditions_met_ms=0 AND payload LIKE '%"start_conditions":%';
