@@ -2,6 +2,7 @@ package panewire
 
 import (
 	"context"
+	"errors"
 	"maps"
 	"math/rand/v2"
 	"strings"
@@ -322,3 +323,6 @@ func spawnBackoffPark(retryAt time.Time) (string, int64) {
 	}
 	return spawnParkLaunchBackoff, retryAt.UnixMilli()
 }
+
+// errSpawnRollbackDrain refuses a hub-made spawn under --spawn-rollback-drain.
+var errSpawnRollbackDrain = errors.New("spawn_rollback_drain")

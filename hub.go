@@ -96,7 +96,12 @@ type HubServerConfig struct {
 	// hand-offs, to drain *_grant rows before a hub rollback
 	// (docs/hub-spawn-operations.md, "Rolling the hub back past this change").
 	SpawnGrantDrain bool
-	Logger          *slog.Logger
+	// SpawnRollbackDrain freezes every spawn producer (client submissions,
+	// quota hand-offs, consult spawns) while the coordinator keeps settling
+	// the queue, before a rollback past parking (hk 4661,
+	// docs/hub-spawn-operations.md#rolling-back-past-parking).
+	SpawnRollbackDrain bool
+	Logger             *slog.Logger
 	// PlacementPolicyPath is an optional operator-owned JSON policy. Placement
 	// never changes pressure thresholds or dispatches work.
 	PlacementPolicyPath string
@@ -612,6 +617,7 @@ type HubServer struct {
 	spawnStartBy       time.Duration
 	spawnStartByMargin time.Duration
 	spawnGrantDrain    bool
+	spawnRollbackDrain bool
 	nodeCommandWait    time.Duration // fixture seam; zero is hubNodeCommandWait.
 	checkoutPullWait   time.Duration // fixture seam; zero is hubCheckoutPullWait.
 	nodeAgentsWait     time.Duration // fixture seam; zero is hubNodeAgentsWait.
@@ -838,7 +844,7 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 	hub := &HubServer{
 		inbox: inbox, spawnKick: make(chan struct{}, 1), placementKick: make(chan struct{}, 1),
 		authPath: config.AuthPath, alertNodes: alertNodes, relayControl: newHubRelayControlState(config, overrides), now: config.Now, consultTimeout: config.ConsultTimeout, staleAfter: config.StaleAfter, keepaliveInterval: config.KeepaliveInterval,
-		gracePeriod: config.GracePeriod, orphanGrace: config.OrphanGrace, unworkedLandingGrace: config.UnworkedLandingGrace, spawnStartBy: config.SpawnStartBy, spawnStartByMargin: config.SpawnStartByMargin, spawnGrantDrain: config.SpawnGrantDrain, alertObservations: defaultHubAlertObservations, logger: config.Logger,
+		gracePeriod: config.GracePeriod, orphanGrace: config.OrphanGrace, unworkedLandingGrace: config.UnworkedLandingGrace, spawnStartBy: config.SpawnStartBy, spawnStartByMargin: config.SpawnStartByMargin, spawnGrantDrain: config.SpawnGrantDrain, spawnRollbackDrain: config.SpawnRollbackDrain, alertObservations: defaultHubAlertObservations, logger: config.Logger,
 		paneSweepInterval: config.PaneSweepInterval, paneSweepAge: config.PaneSweepAge,
 		poolTriggerInterval: defaultPoolTriggerInterval,
 		placementPolicyPath: config.PlacementPolicyPath, placementPolicy: placementPolicy, placementPolicyModTime: placementPolicyModTime, placementPolicyObservedModTime: placementPolicyObservedModTime, placementPolicyLoaded: placementPolicyLoaded, placementPolicyStatus: placementPolicyStatus, placementPolicyLastFailure: placementPolicyLastFailure, prometheusURL: config.PrometheusURL, prometheusClient: config.PrometheusClient, prometheusBearer: config.PrometheusBearer, prometheusBasicUser: config.PrometheusBasicUser, prometheusBasicPass: config.PrometheusBasicPass,

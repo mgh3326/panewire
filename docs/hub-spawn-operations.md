@@ -323,12 +323,18 @@ pre-parking hub's time limit (part 3, #587) ignores `claimed_host`,
 `claim_result` and a saved post-claim result. Past `expires_at` it gives up
 an attempt it reads as unstarted, which can include a node timeout after
 the job claim. It then frees the reservation while hk may still hold the
-job. A snapshot of claim-holding rows is not enough: a row in flight, a row
-whose only evidence is its saved `result`, or a request admitted after the
-check can all reach that path. So the gate is the whole queue:
+job. A snapshot of claim-holding rows is not enough, so the gate is the
+whole queue, with every producer frozen:
 
-1. Stop admissions and dispatch on the newer hub. Do not submit spawns, and
-   let the hub drain ([hub-drain.md](hub-drain.md)).
+1. Restart the newer hub with `--spawn-rollback-drain`. The hub keeps
+   running and its coordinator keeps placing, parking, waking and expiring
+   queued requests. But nothing creates a new one:
+   - `POST /v1/spawns` answers 503 `spawn_rollback_drain`;
+   - a quota-stop hand-off starts no successor;
+   - a consult creates, recovers or respawns no spawn (the consult fails).
+
+   Do not SIGTERM-drain yet: that stops the coordinator, and a parked row
+   would never settle.
 2. Wait until no row is nonterminal, any status included (`*_grant`
    variants too):
 
@@ -339,10 +345,15 @@ check can all reach that path. So the gate is the whole queue:
 
    Each row must land, end, or be cancelled. Do not raise limits to get
    past this step.
-3. Start the older hub only once the query returns nothing. Keep spawn
-   submissions stopped for as long as it runs. Any request it accepts is
-   under part 3's rule, with no claim-aware expiry. Roll forward before
-   reopening submissions.
+3. Also wait for producers that still own live work. Running consults must
+   answer or fail (no `consult_requests` row in state `queued` or `running`). A `succeeded` job
+   that is still running can trigger a quota hand-off on the older hub, so
+   wait for those jobs to finish, or accept that their hand-off runs under
+   part 3's rule.
+4. Only then stop the newer hub ([hub-drain.md](hub-drain.md)), re-run the
+   query (it must still return nothing), and start the older hub. Keep
+   external submissions stopped for as long as it runs. Roll forward before
+   reopening them.
 
 ### Rolling back past the time limit
 

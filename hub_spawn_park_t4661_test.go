@@ -1,6 +1,7 @@
 package panewire
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -8,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -948,5 +950,32 @@ func TestLegacyClaimPersistsBeforeOverwrite_t4661(t *testing.T) {
 	got := parkedTask(t, h, task.Request.RequestID)
 	if got.ClaimedHost != "desktop" || got.ClaimResult == nil || got.ClaimResult.Reason != "timeout" || !spawnHoldsClaim(got) {
 		t.Fatalf("legacy claim lost: host=%q proof=%+v status=%s", got.ClaimedHost, got.ClaimResult, got.Status)
+	}
+}
+
+// --spawn-rollback-drain freezes every spawn producer: a client submission
+// is refused 503, a quota hand-off starts nothing, a consult spawn is refused.
+func TestSpawnRollbackDrainFreezesProducers_t4661(t *testing.T) {
+	h := asyncSpawnHub(t)
+	h.spawnRollbackDrain = true
+	request := durableSpawnRequest()
+	raw, _ := json.Marshal(request)
+	r := httptest.NewRequest(http.MethodPost, "/v1/spawns", bytes.NewReader(raw))
+	r.Header.Set("Authorization", "Bearer "+t14OperatorToken)
+	w := httptest.NewRecorder()
+	h.Handler().ServeHTTP(w, r)
+	if w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), "spawn_rollback_drain") {
+		t.Fatalf("submission under rollback drain: %d %s", w.Code, w.Body)
+	}
+	if _, err := h.inbox.store.spawnTask(t.Context(), request.RequestID); err == nil {
+		t.Fatal("a refused submission left an operation")
+	}
+	h.startQuotaReplacement("machine-a", hubJobEventPayload{JobID: "stopped-job", Reason: "quota_stop"})
+	var n int
+	if err := h.inbox.store.db.QueryRow(`SELECT count(*) FROM spawn_operations`).Scan(&n); err != nil || n != 0 {
+		t.Fatalf("a quota hand-off created %d operations, err=%v", n, err)
+	}
+	if err := h.claimConsultSpawn(t.Context(), fleet.ConsultPlan{}, "owner"); !errors.Is(err, errSpawnRollbackDrain) {
+		t.Fatalf("a consult spawn under rollback drain: %v", err)
 	}
 }

@@ -108,6 +108,10 @@ func (h *HubServer) handleSpawnSubmit(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 503, map[string]string{"error": "durable_store_required", "fix": "configure the hub inbox database before accepting spawns"})
 		return
 	}
+	if h.spawnRollbackDrain {
+		writeJSON(w, 503, map[string]string{"error": "spawn_rollback_drain", "fix": "the hub is draining its spawn queue for a rollback; submit again after it restarts without --spawn-rollback-drain"})
+		return
+	}
 	owner := spawn.Owner
 	if !validLaneReference(owner) {
 		writeJSON(w, 400, map[string]string{"error": "invalid_owner", "fix": "supply an existing lane name"})

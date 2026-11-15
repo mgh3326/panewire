@@ -348,6 +348,9 @@ func (h *HubServer) storeConsult(ctx context.Context, c hubConsult, replace bool
 }
 
 func (h *HubServer) claimConsultSpawn(ctx context.Context, plan fleet.ConsultPlan, owner string) error {
+	if h.spawnRollbackDrain {
+		return errSpawnRollbackDrain
+	}
 	_, fresh, err := h.inbox.store.claimSpawn(ctx, plan.Request, plan.Job, owner, h.now().UTC())
 	if err != nil {
 		return err
