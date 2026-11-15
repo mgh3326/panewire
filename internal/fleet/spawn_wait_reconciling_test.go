@@ -31,7 +31,7 @@ func TestWaitSpawnKeepsPollingThroughReconciling(t *testing.T) {
 		map[string]any{"status": "reconciling"},
 		map[string]any{"status": "reconciling"},
 		map[string]any{"status": "succeeded", "result": map[string]any{"rc": 0, "host": "node-b", "profile": "sonnet", "pane": "w:p9"}})
-	attempt, err := c.WaitSpawn(t.Context(), statusTestOperation)
+	attempt, err := c.WaitSpawn(t.Context(), statusTestOperation, SpawnWaitOptions{})
 	if err != nil || attempt.Host != "node-b" || attempt.Pane != "w:p9" {
 		t.Fatalf("attempt=%+v err=%v", attempt, err)
 	}
@@ -46,7 +46,7 @@ func TestWaitSpawnReconcilingThenDeadlineIsUnresolved(t *testing.T) {
 	c, _ := spawnStatusSequence(t,
 		map[string]any{"status": "reconciling"},
 		map[string]any{"status": "deadline_exceeded", "result": map[string]any{"rc": 124, "reason": "timeout"}})
-	_, err := c.WaitSpawn(t.Context(), statusTestOperation)
+	_, err := c.WaitSpawn(t.Context(), statusTestOperation, SpawnWaitOptions{})
 	if ErrorCode(err) != exitStateConflict || !strings.Contains(err.Error(), "ownership is unresolved") {
 		t.Fatalf("err=%v code=%d", err, ErrorCode(err))
 	}
@@ -57,7 +57,7 @@ func TestWaitSpawnReconcilingWaitsUntilContextEnds(t *testing.T) {
 	c, reads := spawnStatusSequence(t, map[string]any{"status": "reconciling"})
 	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
 	defer cancel()
-	if _, err := c.WaitSpawn(ctx, statusTestOperation); err == nil {
+	if _, err := c.WaitSpawn(ctx, statusTestOperation, SpawnWaitOptions{}); err == nil {
 		t.Fatal("reconciling returned without a terminal status")
 	}
 	if reads.Load() < 2 {

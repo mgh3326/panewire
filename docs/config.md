@@ -1910,13 +1910,14 @@ HTTP 409 warns and drops the conflicting file. Local attempt markers under
 | 81 | `NO_ELIGIBLE_HOST`, wake/capacity placement failure, the remote worktree for a linked-worktree job could not be prepared (also a `via = "hub"` checkout refusal), or the hub is unavailable for a forced `via = "hub"` host. |
 | 82 | Pane committed but lane unregistered under strict lane reporting (`PANEWIRE_LANE_STRICT=1`). |
 | 83 | `spawn --wait`: the job escalated. |
-| 84 | `spawn --wait`: the job was lost or revoked. |
-| 85 | `spawn --wait`: the wait deadline expired; the job is retained. |
+| 84 | `spawn --wait`: the job was lost or revoked, or its hub request ended before it landed (`cancelled`, `given_up`; nothing was spawned). |
+| 85 | `spawn --wait`: the wait deadline expired; the job, or a hub request still queued, is retained. |
 | 86 | `QUOTA_EXHAUSTED`: every eligible account is measured exhausted and the role waits, including an exhausted downgrade retry. |
 | 87 | `QUOTA_EXHAUSTED`: every eligible account is measured exhausted and the role escalates to the parent lane. |
 | 88 | `AUTH_UNAVAILABLE`: no usable current account binding on eligible hosts. |
 | 89 | `QUOTA_UNKNOWN`: quota remains unknown after one bounded account refresh. |
 | 90 | `WORKSPACE_TRUST_REQUIRED`: Codex is waiting at its directory trust prompt; initial brief is withheld. Or `HOOKS_REVIEW_REQUIRED`: Codex is waiting at its "Hooks need review" screen; initial brief is withheld. |
+| 91 | `spawn --wait`: the hub request is `parked` (no host can take it now) and the wait deadline expired; the request stays queued on the hub. |
 | 124 | A time-bounded CLI call reached its context deadline. |
 | 255 | SSH could not reach a remote host (repository check, clone or spawn leg). Never returned for a `via = "hub"` host. |
 
