@@ -654,7 +654,7 @@ HANDOFFKEEP_TOKEN_SVC_PANEWIRE, or create ~/.config/panewire/hk-svc.env`):
 | via=hub brief upload | The hub candidate is refused, `brief upload to <key> failed: …`. |
 | `panewire work TASK_ID` | Refused, `cannot read task <id>; run handoffkeep tasks show <id> and restore task access` (exit 70). |
 | Artifact sweep | Every job's task is unreadable, so nothing is swept; an artifact record write fails with exit 1. |
-| `done` / `escalate` report upload and task comment | Warnings (`report upload failed; local report retained`, `task comment failed: … unconfigured …`); the job completes without a report document. An interactive `done` then exits non-zero (`completed; report not in hk; rerun the same command`); the rerun publishes the report ([Completion receipts](#completion-receipts)). |
+| `done` / `escalate` report upload and task comment | Warnings (`report upload failed; local report retained`, `task comment failed: … unconfigured …`); the job completes without a report document. An interactive `done` then exits non-zero (`completed; report not in hk; rerun the same command`); the rerun, or the node's local sweep, publishes the report ([Completion receipts](#completion-receipts)). |
 | `panewire job` done, escalate and joined report upload | Warning `<unconfigured error>; report document not uploaded (job=<job>)`; no document link. |
 | Quota stop manager | No policy (the last good copy, else hand over), no task, and the note is retried each minute. |
 
@@ -736,6 +736,13 @@ and its own `job.completed` and relay, and never writes the record.
 "Duplicate" is not a branch: it is the case where every step has its receipt,
 and it makes no hk call and writes no event (`OK … duplicate=yes`). A repeat that
 finishes a step prints the steps it ran (`published=yes pinned=yes`).
+
+A report `done` announced but never published is republished by the node's
+local sweep: it PUTs the announced bytes again, writes the publish receipt, and
+pins the record when the report is the completing one. It publishes only bytes
+that still hash to the announced sha256 — a report whose file changed waits,
+since only a new `done` announces those bytes — and it never pins what no
+completion named ([pane-sweep.md](pane-sweep.md#report-republish)).
 
 Publication and the pin never block completion. The only blocker is the rule
 for a strict `--result`: hk takes a `result` only in the spawned-to-completed
@@ -2082,6 +2089,8 @@ consult's terminal record, an implementer's merged, done, dropped or
 handed-over end — proven the job's own by pane id and harness session, once
 the end is an hour old (a day for `--keep`), and sooner when the pane stayed
 not working for a grace. A completed author's pane waits while its PR is open.
+The same pass republishes a report whose `done` upload failed, once its file
+still holds the bytes the completion announced.
 The rules are in [pane-sweep.md](pane-sweep.md). Two daemon flags configure it:
 
 - `--task-pane-sweep-interval DURATION` — how often the sweep runs. Default
