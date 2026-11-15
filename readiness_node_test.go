@@ -441,3 +441,20 @@ func TestSpawnStartupGuardRunsOnDefaults(t *testing.T) {
 	}
 	client.releaseSpawnJournal()
 }
+
+// hk 3325: a cmd seat spends the commandcode pool, so the cmd harness reports
+// that pool's login (and account) rather than staying unknown. A cmd
+// capability reads it (internal/fleet/readiness.go).
+func TestReadinessCmdLoginIsTheCommandCodePool(t *testing.T) {
+	client := readinessClient(t, "", readinessFakes(map[string]string{}))
+	client.noteQuotaAccount("commandcode", "commandcode:0123456789abcdef")
+	report := client.collectReadiness(t.Context())
+	if cmd := report.Harnesses["cmd"]; !cmd.Installed || cmd.Login != fleet.ReadinessLoginPresent || cmd.Account != "commandcode:0123456789abcdef" {
+		t.Fatalf("cmd=%+v", cmd)
+	}
+	client.noteQuotaAccount("commandcode", "")
+	report = client.collectReadiness(t.Context())
+	if cmd := report.Harnesses["cmd"]; cmd.Login != fleet.ReadinessLoginMissing || cmd.Account != "" {
+		t.Fatalf("cmd=%+v after a login failure", cmd)
+	}
+}

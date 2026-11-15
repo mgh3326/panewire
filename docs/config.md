@@ -84,9 +84,9 @@ local_delete_at = "drive_confirmed"
 | `shell_ready_timeout_ms` | `120000` | Startup readiness window, integer 30000–300000. |
 | `brief_submit_timeout_ms` | `120000` | How long a spawn waits for the brief to start a turn before it refuses with 76, integer 30000–600000. Raise it on a host that runs under sustained load. |
 | `brief_submit_retry_ms` | `15000` | How often the submit key repeats during that wait, at least 1000 and below the timeout. It goes only to an idle pane; Claude and Codex panes must also still show the brief in the composer. The brief is never pasted twice. |
-| `cmd_dsflash41` | `false` | Literal capability opt-in required by cmd policy rows. The provisioned cmd account must have no persisted MCP servers. |
-| `clinepass` | `false` | Literal capability opt-in required by the `cc-*` seats, which route the Claude Code harness through the host's local ClinePass proxy (`CLINEPASS_GATE_URL`, key read at spawn time from `CLINEPASS_GATE_KEY_FILE`; defaults are a loopback URL and `~/.config/cliproxyapi-key.txt`). |
-| `omp_commandcode` | `false` | Literal capability opt-in required by `omp-dsflash41`, `omp-musespark13`, `omp-argon4`, `omp-mimo26pro`, `omp-cc-opus55`, `omp-cc-sonnet55`, and `omp-cc-sol61`: the host's omp has the Command Code provider configured (`omp models` lists the selected model). Unrated rows admit only with `PANEWIRE_E6_ARM`; Command Code rules are in [quota](quota.md#command-code-seats). |
+| `cmd_dsflash41` | `false` | Explicit override for the `cmd` harness capability that cmd policy rows require; with no boolean here, the executing node's readiness decides (see [Capability flags](#capability-flags)). The provisioned cmd account must have no persisted MCP servers. |
+| `clinepass` | `false` | Operator-configured capability required by the `cc-*` seats, which route the Claude Code harness through the host's local ClinePass proxy (`CLINEPASS_GATE_URL`, key read at spawn time from `CLINEPASS_GATE_KEY_FILE`; defaults are a loopback URL and `~/.config/cliproxyapi-key.txt`). Unlike a harness flag, the node cannot measure the proxy, so this boolean is the whole answer (see [Capability flags](#capability-flags)). |
+| `omp_commandcode` | `false` | Explicit override for the `omp` harness capability required by `omp-dsflash41`, `omp-musespark13`, `omp-argon4`, `omp-mimo26pro`, `omp-cc-opus55`, `omp-cc-sonnet55`, and `omp-cc-sol61`: the host's omp has the Command Code provider configured (`omp models` lists the selected model). With no boolean here, the executing node's readiness decides (see [Capability flags](#capability-flags)). Unrated rows admit only with `PANEWIRE_E6_ARM`; Command Code rules are in [quota](quota.md#command-code-seats). |
 | `report_user_idle` | `false` | Literal boolean, read on each heartbeat. `true` makes a macOS node report whole seconds since the last keyboard or pointer input, as `host_activity.user_idle_s`, to a hub that accepts `host_activity`. Linux never sends it. The node reads no app names, window titles, input content or process lists. See [placement telemetry](placement.md#telemetry). |
 | `tags` | unset | Capability tags offered by this host for job placement (`spawn --tags`). Lowercase tag names. `caps` is an alias; both lists merge. |
 | `roles`, `grades` | unset | Light-host limits, as for [`[hosts.NAME]`](#hostsname): the spawn roles and task grades this machine accepts. |
@@ -95,6 +95,34 @@ local_delete_at = "drive_confirmed"
 | `brief_preamble` | selected policy block | Explicit named preamble block for this host. |
 | `pool_policy` | embedded pool-order policy | Path to the versioned pool-order JSON used by automatic model selection. |
 | `fleet_usage_alert_gb` | legacy/read-only | Retained config key; standalone disk alerts are not emitted in v0.1. |
+
+### Capability flags
+
+A seat policy row may require a host capability (`capability` in the policy).
+Two kinds exist, and only one is measured by the node:
+
+| Kind | Flags | Where the value comes from |
+| --- | --- | --- |
+| Harness | `cmd_dsflash41` (the `cmd` harness), `omp_commandcode` (the `omp` harness) | The executing node's readiness report: the flag is true when that node reports the harness installed and its login present (`harnesses.<kind>` in the heartbeat, [placement](placement.md#what-a-node-reports)). Placement, selection and admission read that report wherever the spawn runs, so no `[hosts.NAME]` copy is needed on the submitting host. |
+| Operator-configured | `clinepass`, and any flag a custom seat policy row names | The boolean itself. The node cannot measure a local proxy or a licence. |
+
+In both kinds a boolean under `[local]` (the node itself) or `[hosts.NAME]`
+(another host, as the placing host reads it) is an explicit override: `true`
+forces the flag on and `false` forces it off, whatever the node reports. Only
+a missing key leaves a harness flag to readiness.
+
+An unknown answer keeps today's value, so missing data never grants or filters
+a capability: a node with no readiness report yet (an older node, or a report
+the hub dropped as stale), one that does not report the flag's harness, or one
+that does not measure the harness's login keeps the config answer, and a flag
+with no config value is off.
+
+`cmd_dsflash41` reads the `cmd` harness. A cmd seat spends the Command Code
+pool, and the node reports that pool's login as `harnesses.cmd.login` (measured
+through omp; `unknown` on a node that does not measure that pool).
+`omp_commandcode` reads the `omp` harness; omp spans several providers, so a
+node that measures no single pool for it reports the login `unknown`, and the
+config value decides.
 
 Additional boolean capabilities can be named by custom seat policy rows. A
 missing or nonboolean capability fails closed. `standard` in seat policy means

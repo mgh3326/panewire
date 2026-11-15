@@ -78,13 +78,13 @@ func TestDevinE6SeatsRequireTheArm(t *testing.T) {
 		t.Run(profile, func(t *testing.T) {
 			seat := a.Policy.Profiles[profile]
 			l := Launch{Profile: profile, ModelID: want.model, Pool: "devin", Grade: gradeUnrated, Gate: defaultGate}
-			if err := seat.Check(l, "implementer", "A", "", "", nil); err == nil {
+			if err := seat.Check(l, "implementer", "A", "", "", true); err == nil {
 				t.Fatalf("%s admitted a graded task without PANEWIRE_E6_ARM", profile)
 			}
-			if err := seat.Check(l, "implementer", "A", "", "some-other-seat@", nil); err == nil {
+			if err := seat.Check(l, "implementer", "A", "", "some-other-seat@", true); err == nil {
 				t.Fatalf("%s admitted a graded task on another seat's marker", profile)
 			}
-			if err := seat.Check(l, "implementer", "A", "", profile+"@", nil); err != nil {
+			if err := seat.Check(l, "implementer", "A", "", profile+"@", true); err != nil {
 				t.Fatalf("%s refused its own marker: %v", profile, err)
 			}
 		})
