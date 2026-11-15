@@ -38,7 +38,7 @@ func (a *App) reconcileNodeLane(ctx context.Context, jobID, machine string) erro
 	if boolean(j.Receipt, "lane_deferred", false) {
 		return nil
 	}
-	registration, err := a.registerLane(ctx, lanePutRequest{Lane: lane, Parent: parent, Pane: j.Pane, Role: j.Role, Machine: machine})
+	registration, err := a.registerLane(ctx, lanePutRequest{Lane: lane, Parent: parent, Pane: j.Pane, Job: jobID, Role: j.Role, Machine: machine})
 	if err != nil {
 		_ = a.event(ctx, jobID, "job.lane_registration_failed", map[string]any{"lane": lane, "lane_error": laneFailureReason(err)})
 		return err

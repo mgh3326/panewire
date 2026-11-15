@@ -23,6 +23,7 @@ type lanesCLIOptions struct {
 	Lane            string
 	Machine         string
 	Pane            string
+	Job             string
 	Parent          string
 	Takeover        string
 	ExpectedMachine string
@@ -61,6 +62,10 @@ func runLanesCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 		if detail, code := validateLaneAdd(options.Lane, options.Machine, options.Pane, options.Parent, options.Takeover, options.Sink); code != ExitOK {
 			fmt.Fprintln(stderr, detail)
 			return code
+		}
+		if options.Job != "" && !hubJobIDPattern.MatchString(options.Job) {
+			fmt.Fprintln(stderr, "lanes rejected: invalid job")
+			return ExitConditionInvalid
 		}
 	}
 	if options.Command == "self-check" && (options.ExpectedMachine == hubOperatorMachineID || !machineIDPattern.MatchString(options.ExpectedMachine) || !validLanePane(options.ExpectedPane)) {
@@ -266,10 +271,11 @@ func laneAddThroughHub(ctx context.Context, client hubLaneWriter, options lanesC
 	encoded, err := json.Marshal(struct {
 		Machine  string `json:"machine"`
 		Pane     string `json:"pane"`
+		Job      string `json:"job,omitempty"`
 		Parent   string `json:"parent,omitempty"`
 		Sink     bool   `json:"sink,omitempty"`
 		Takeover string `json:"takeover,omitempty"`
-	}{Machine: options.Machine, Pane: options.Pane, Parent: options.Parent, Sink: options.Sink, Takeover: options.Takeover})
+	}{Machine: options.Machine, Pane: options.Pane, Job: options.Job, Parent: options.Parent, Sink: options.Sink, Takeover: options.Takeover})
 	if err != nil {
 		return hubLaneProjection{}, "lanes unavailable", ExitInternal
 	}
@@ -327,7 +333,7 @@ func parseLanesCLI(args []string) (lanesCLIOptions, error) {
 				return lanesCLIOptions{}, errors.New("invalid sink value")
 			}
 			options.Sink = parsed
-		case "--hub-url", "--hub-token-env", "--hub-cf-env", "--machine", "--pane", "--parent", "--takeover", "--lane", "--expect-machine", "--expect-pane", "--expect-epoch":
+		case "--hub-url", "--hub-token-env", "--hub-cf-env", "--machine", "--pane", "--job", "--parent", "--takeover", "--lane", "--expect-machine", "--expect-pane", "--expect-epoch":
 			switch name {
 			case "--lane", "--expect-epoch":
 				if options.Command != "self-check" {
@@ -336,6 +342,10 @@ func parseLanesCLI(args []string) (lanesCLIOptions, error) {
 			case "--takeover":
 				if options.Command != "add" {
 					return lanesCLIOptions{}, errors.New("invalid takeover flag")
+				}
+			case "--job":
+				if options.Command != "add" {
+					return lanesCLIOptions{}, errors.New("invalid job flag")
 				}
 			case "--expect-machine", "--expect-pane":
 				// rm takes them as a guard the hub checks: remove the lane
@@ -366,6 +376,8 @@ func parseLanesCLI(args []string) (lanesCLIOptions, error) {
 				options.Machine = value
 			case "--pane":
 				options.Pane = value
+			case "--job":
+				options.Job = value
 			case "--parent":
 				options.Parent = value
 			case "--takeover":

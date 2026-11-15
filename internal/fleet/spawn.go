@@ -552,7 +552,9 @@ func (a *App) finishTaskTakeover(ctx context.Context, s *Spawn, task client.Task
 // takeoverLaneName is the lane a takeover write offers: the task's routing
 // lane, which is the name its findings are already addressed to, else the
 // spawn's own label. The hub substitutes the row the predecessor's pane holds,
-// so this name only decides what a pane with no predecessor row registers.
+// so this name never authorizes moving a different row. If the hub cannot
+// prove the predecessor's route, takeOverLane reports the refusal and the
+// successor registers its own label.
 func takeoverLaneName(s Spawn, task client.Task) string {
 	if laneNamePattern.MatchString(task.Lane) {
 		return task.Lane
@@ -567,13 +569,15 @@ func takeoverLaneName(s Spawn, task client.Task) string {
 // its own label as any spawn does. The outcome is recorded, never returned:
 // the spawn has landed.
 func (a *App) takeOverLane(ctx context.Context, s *Spawn, hint, owner, predecessor, pane, machine string) {
-	registration, e := a.registerLaneWithRetry(ctx, lanePutRequest{Lane: hint, Machine: machine, Pane: pane, Parent: owner, Role: s.Role, Takeover: predecessor})
+	registration, e := a.registerLaneWithRetry(ctx, lanePutRequest{Lane: hint, Machine: machine, Pane: pane, Job: s.Job, Parent: owner, Role: s.Role, Takeover: predecessor})
 	if e == nil {
 		a.recordLaneRegistered(ctx, s, registration, pane, predecessor)
 		return
 	}
+	reason := laneFailureReason(e)
+	fmt.Fprintf(a.Out, "lane %s not moved: %s\n", hint, reason)
 	if laneRefused(e) {
-		_ = a.event(ctx, s.Job, "job.lane_takeover_failed", map[string]any{"lane": hint, "takeover_job": predecessor, "reason": laneFailureReason(e)})
+		_ = a.event(ctx, s.Job, "job.lane_takeover_failed", map[string]any{"lane": hint, "takeover_job": predecessor, "reason": reason})
 	} else {
 		a.warn("lane takeover for job %s task %s failed: %v", s.Job, s.Task, e)
 	}
@@ -583,7 +587,7 @@ func (a *App) takeOverLane(ctx context.Context, s *Spawn, hint, owner, predecess
 // registerOwnLane registers the pane's own label, the write every spawn makes
 // when no lane is taken over.
 func (a *App) registerOwnLane(ctx context.Context, s *Spawn, owner, pane, machine string) {
-	registration, e := a.registerLaneWithRetry(ctx, lanePutRequest{Lane: s.Label, Machine: machine, Pane: pane, Parent: owner, Role: s.Role})
+	registration, e := a.registerLaneWithRetry(ctx, lanePutRequest{Lane: s.Label, Machine: machine, Pane: pane, Job: s.Job, Parent: owner, Role: s.Role})
 	if e != nil {
 		s.laneUnregistered = true
 		s.laneError = laneFailureReason(e)
@@ -1334,7 +1338,7 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 	// predecessor's lane row, and a spawn that fails must leave that row where
 	// it is. Every other spawn registers under its own label here.
 	if !s.replacesParent() {
-		if registration, e := a.registerLaneWithRetry(ctx, lanePutRequest{Lane: lane, Machine: machine, Pane: pane, Parent: parent, Role: s.Role}); e != nil {
+		if registration, e := a.registerLaneWithRetry(ctx, lanePutRequest{Lane: lane, Machine: machine, Pane: pane, Job: s.Job, Parent: parent, Role: s.Role}); e != nil {
 			s.laneUnregistered = true
 			s.laneError = laneFailureReason(e)
 		} else {

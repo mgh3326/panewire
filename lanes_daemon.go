@@ -16,10 +16,13 @@ func (d *Daemon) handleLanesPut(ctx context.Context, req daemonop.LanesPut) (any
 	if detail, code := validateLaneAdd(req.Lane, req.Machine, req.Pane, req.Parent, req.Takeover, false); code != ExitOK {
 		return nil, &codedError{code, errors.New(detail)}
 	}
+	if req.Job != "" && !hubJobIDPattern.MatchString(req.Job) {
+		return nil, &codedError{ExitConditionInvalid, errors.New("lanes rejected: invalid job")}
+	}
 	if d.cfg.Hub.Client == nil {
 		return nil, &codedError{ExitDaemonUnavailable, errors.New("lanes: daemon has no hub client")}
 	}
-	result, detail, code := laneAddThroughHub(ctx, nodeHubClient{ctx: ctx, client: d.cfg.Hub.Client}, lanesCLIOptions{Lane: req.Lane, Machine: req.Machine, Pane: req.Pane, Parent: req.Parent, Takeover: req.Takeover})
+	result, detail, code := laneAddThroughHub(ctx, nodeHubClient{ctx: ctx, client: d.cfg.Hub.Client}, lanesCLIOptions{Lane: req.Lane, Machine: req.Machine, Pane: req.Pane, Job: req.Job, Parent: req.Parent, Takeover: req.Takeover})
 	if code != ExitOK {
 		return nil, &codedError{code, errors.New(detail)}
 	}

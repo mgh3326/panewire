@@ -26,6 +26,7 @@ type LanesPut struct {
 	Lane    string `json:"lane,omitempty"`
 	Machine string `json:"machine,omitempty"`
 	Pane    string `json:"pane,omitempty"`
+	Job     string `json:"job,omitempty"`
 	Parent  string `json:"parent,omitempty"`
 	// Takeover names the predecessor job whose lane row this write moves to
 	// the requested route; see `panewire lanes add --takeover`.
