@@ -208,25 +208,13 @@ func (client *HubClient) handleHubSpawn(ctx context.Context, peer *hubClientConn
 		return
 	}
 	stop := client.work.stopSignal()
-	// The directory hold is taken before a node slot and the executing claim,
-	// and kept through launch, brief delivery and landing proof (hk 4578).
-	for _, key := range client.spawnHoldKeys(message) {
-		hold := client.spawnLock(key)
-		if !client.awaitSpawnAdmission(ctx, admissionCtx, stop, waiter, hold, peer, journal, message, deadline) {
-			return
-		}
-		defer func() { <-hold }()
-	}
-	gate := client.nodeSpawnGate()
-	if !client.awaitSpawnAdmission(ctx, admissionCtx, stop, waiter, gate, peer, journal, message, deadline) {
+	// One admission covers the slot and the directory: a checkout spawn
+	// holds its own job dir, a spawn without one holds the whole node, from
+	// before the executing claim through launch, brief delivery and landing
+	// proof (hk 4578, node_spawn_concurrency.go).
+	release, admitted := client.awaitSpawnAdmission(ctx, admissionCtx, stop, waiter, spawnAdmissionKey(message), peer, journal, message, deadline)
+	if !admitted {
 		return
-	}
-	held := true
-	release := func() {
-		if held {
-			<-gate
-			held = false
-		}
 	}
 	defer release()
 	if !client.work.admitSpawn() {
@@ -276,34 +264,44 @@ func (client *HubClient) handleHubSpawn(ctx context.Context, peer *hubClientConn
 	client.sendSpawnResult(ctx, peer, result, message.OperatorAuthorized)
 }
 
-// awaitSpawnAdmission takes one slot of slot, or answers the copy whose wait
-// ended first; false means this copy must return without claiming.
-func (client *HubClient) awaitSpawnAdmission(ctx, admissionCtx context.Context, stop <-chan struct{}, waiter *nodeSpawnWaiter, slot chan struct{}, peer *hubClientConnection, journal *nodeSpawnJournal, message hubOutboundMessage, deadline time.Time) bool {
-	select {
-	case <-waiter.claimed:
-		// Another copy claimed this request while this copy was waiting.
-		client.answerAdmissionWait(ctx, peer, journal, message, deadline)
-		return false
-	case <-admissionCtx.Done():
+// awaitSpawnAdmission admits this copy under key, or answers the copy whose
+// wait ended first; false means this copy must return without claiming.
+func (client *HubClient) awaitSpawnAdmission(ctx, admissionCtx context.Context, stop <-chan struct{}, waiter *nodeSpawnWaiter, key string, peer *hubClientConnection, journal *nodeSpawnJournal, message hubOutboundMessage, deadline time.Time) (func(), bool) {
+	admission := client.nodeAdmission()
+	if key == "" {
+		admission.waitExclusive(1)
+		defer admission.waitExclusive(-1)
+	}
+	for {
+		release, changed := admission.tryAdmit(key, client.nodeSpawnSlots())
+		if release != nil {
+			return release, true
+		}
 		select {
-		case <-stop:
-			return false
-		default:
-		}
-		if ctx.Err() == nil {
-			if message.StartByMS != 0 {
-				// Never granted, never started: keep the tombstone durable.
-				client.refuseUngrantedSpawn(ctx, peer, journal, message)
-			} else {
-				client.answerAdmissionWait(ctx, peer, journal, message, deadline)
+		case <-changed:
+		case <-waiter.claimed:
+			// Another copy claimed this request while this copy was waiting.
+			client.answerAdmissionWait(ctx, peer, journal, message, deadline)
+			return nil, false
+		case <-admissionCtx.Done():
+			select {
+			case <-stop:
+				return nil, false
+			default:
 			}
+			if ctx.Err() == nil {
+				if message.StartByMS != 0 {
+					// Never granted, never started: keep the tombstone durable.
+					client.refuseUngrantedSpawn(ctx, peer, journal, message)
+				} else {
+					client.answerAdmissionWait(ctx, peer, journal, message, deadline)
+				}
+			}
+			return nil, false
+		case <-stop:
+			// Unclaimed work is replayed after the node restarts.
+			return nil, false
 		}
-		return false
-	case <-stop:
-		// Unclaimed work is replayed after the node restarts.
-		return false
-	case slot <- struct{}{}:
-		return true
 	}
 }
 

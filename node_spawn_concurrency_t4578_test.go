@@ -2,6 +2,7 @@ package panewire
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -181,8 +182,22 @@ func TestNodeSpawnSlotsDefaultsAndAdvertisement_t4578(t *testing.T) {
 	}
 	client := &HubClient{machineID: "rpi-5", spawnConfigPath: t14SpawnConfig(t, t.TempDir())}
 	caps := client.helloCapabilities(hubSpawnCapabilities)
-	if !slices.Contains(caps, hubCapabilitySpawnSlotsPrefix+"2") || cap(client.nodeSpawnGate()) != 2 {
-		t.Fatalf("capabilities %v gate %d", caps, cap(client.nodeSpawnGate()))
+	if !slices.Contains(caps, hubCapabilitySpawnSlotsPrefix+"2") || client.nodeSpawnSlots() != 2 {
+		t.Fatalf("capabilities %v slots %d", caps, client.nodeSpawnSlots())
+	}
+	// The limit is read live: a configured value applies without a restart,
+	// and a spawn.json that does not load fails closed to one.
+	if err := os.WriteFile(client.spawnConfigPath, []byte(`{"workspace":"w","herdr_session":"w","enabled":true,"spawn_concurrency":1}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := client.nodeSpawnSlots(); got != 1 {
+		t.Fatalf("configured slots=%d, want 1", got)
+	}
+	if err := os.WriteFile(client.spawnConfigPath, []byte(`{"workspace":"w","herdr_session":"w","enabled":false,"spawn_concurrency":3}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := client.nodeSpawnSlots(); got != 1 {
+		t.Fatalf("unloadable config slots=%d, want 1", got)
 	}
 	if client.helloCapabilities(nil) != nil {
 		t.Fatal("a hello without spawn capabilities advertised slots")
@@ -250,7 +265,7 @@ func TestNodeSpawnHubDispatchesUpToAdvertisedSlots_t4578(t *testing.T) {
 			node := slotNode(t, h, server, tc.slots)
 			tasks := map[string]hubSpawnTask{}
 			for i := range 3 {
-				task := boundDispatchFixture(t, h, i+1, "machine-a")
+				task := checkoutDispatchFixture(t, h, i+1, fmt.Sprintf("job-%d", i+1))
 				tasks[task.Node.RequestID] = task
 			}
 			h.startSpawnCoordinator(t.Context())
@@ -262,8 +277,12 @@ func TestNodeSpawnHubDispatchesUpToAdvertisedSlots_t4578(t *testing.T) {
 					if err != nil {
 						return
 					}
-					if message, ok := parseHubOutbound(payload); ok && message.Type == "job.spawn" {
-						frames <- message
+					var frame struct {
+						Type      string `json:"type"`
+						RequestID string `json:"request_id"`
+					}
+					if json.Unmarshal(payload, &frame) == nil && frame.Type == "job.spawn" {
+						frames <- hubOutboundMessage{Type: frame.Type, RequestID: frame.RequestID}
 					}
 				}
 			}()
@@ -307,6 +326,88 @@ func TestNodeSpawnHubDispatchesUpToAdvertisedSlots_t4578(t *testing.T) {
 				if err != nil || current.Node == nil || current.Node.RequestID != id || !spawnPending(current.Status) {
 					t.Fatalf("unanswered dispatch %s changed: %+v err=%v", id, current, err)
 				}
+			}
+		})
+	}
+}
+
+// checkoutDispatchFixture binds a checkout spawn into dir on machine-a; an
+// empty dir binds a spawn without a checkout.
+func checkoutDispatchFixture(t *testing.T, h *HubServer, n int, dir string) hubSpawnTask {
+	t.Helper()
+	request := durableSpawnRequest()
+	request.RequestID = t14RequestID(457900 + n)
+	job := fmt.Sprintf("overlap-%d", n)
+	request.Args = append([]string(nil), request.Args...)
+	for i, arg := range request.Args {
+		switch arg {
+		case "test-job":
+			request.Args[i] = job
+		case "42":
+			request.Args[i] = fmt.Sprint(457900 + n)
+		}
+	}
+	task, _, err := h.inbox.store.claimSpawn(t.Context(), request, job, "parent", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	node := boundaryTestNode(task, 457950+n, "machine-a")
+	node.CWDKey = "repo-a"
+	node.Args = []string{"--job", job, "-m", "sonnet"}
+	if dir != "" {
+		node.Checkout = &hubSpawnCheckout{Origin: "https://github.com/mgh3326/panewire.git", Mode: "detached", Sha: fmt.Sprintf("%040x", n), Dir: dir}
+	}
+	task, err = h.inbox.store.bindSpawn(t.Context(), request.RequestID, task.Attempt, node, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return task
+}
+
+// The hub overlaps only checkout spawns into distinct dirs: a second spawn of
+// one dir, or a spawn without a checkout, stays queued at the hub instead of
+// waiting on the node past its start window.
+func TestNodeSpawnHubKeepsNonOverlappingWorkQueued_t4578(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		dirs []string
+	}{{"same dir", []string{"job-x", "JOB-X"}}, {"no checkout first", []string{"", "job-y"}}, {"no checkout second", []string{"job-y", ""}}} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := asyncSpawnHub(t)
+			server := httptest.NewServer(h.Handler())
+			defer server.Close()
+			node := slotNode(t, h, server, 3)
+			for i, dir := range tc.dirs {
+				checkoutDispatchFixture(t, h, i+1, dir)
+			}
+			h.startSpawnCoordinator(t.Context())
+			frames := make(chan hubOutboundMessage, 2)
+			go func() {
+				// Ends when the test closes the connection.
+				for {
+					_, payload, err := node.Read(context.Background())
+					if err != nil {
+						return
+					}
+					var frame struct {
+						Type      string `json:"type"`
+						RequestID string `json:"request_id"`
+					}
+					if json.Unmarshal(payload, &frame) == nil && frame.Type == "job.spawn" {
+						frames <- hubOutboundMessage{Type: frame.Type, RequestID: frame.RequestID}
+					}
+				}
+			}()
+			select {
+			case <-frames:
+			case <-time.After(3 * time.Second):
+				t.Fatal("hub sent nothing")
+			}
+			// Window: the second request must stay at the hub.
+			select {
+			case extra := <-frames:
+				t.Fatalf("hub overlapped %s", extra.RequestID)
+			case <-time.After(250 * time.Millisecond):
 			}
 		})
 	}

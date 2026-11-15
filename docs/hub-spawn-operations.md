@@ -774,23 +774,24 @@ completed requests replay their result, a request this node process is still
 running answers `reconciling`, and an executing entry no live execution owns
 (the node restarted mid-spawn) is settled or answers `unknown`. A new UUID
 waits, until its execution deadline and without an executing journal entry,
-for its directory hold and then for one of the node's N spawn slots. Once
-admitted, the node rechecks the journal and deadline, commits the executing
-entry and keeps both the hold and the slot through checkout, launch,
-brief delivery, landing proof and cleanup.
+for node admission. Once admitted, the node rechecks the journal and
+deadline, commits the executing entry and keeps the admission through
+checkout, launch, brief delivery, landing proof and cleanup, releasing it
+after the result is journaled and before the reply.
 
-N is the node's `spawn_concurrency` in `spawn.json` (1..8); unset, it is 3,
-or 2 on a host whose machine id names `rpi` or `oci` (hk 4578). The directory
-hold is keyed by the one directory the spawn executes in, resolved through
-symlinks and case-folded: `<work_root>/<checkout dir>`, or the cwd_map (or
-default repo) directory for a spawn without a checkout. A cwd_map entry and a
-checkout dir that name one directory share the hold, so two spawns of one
-directory never overlap anywhere between preparation and landing; a spawn that
-runs in a clone itself also holds that clone's preparation. Preparation of one clone (fetch, worktree
-add) also runs one at a time; distinct worktrees overlap only after their own
-preparation. The node advertises `spawn_slots_v1=N` in hello and the hub keeps
-at most N dispatches open to it; a node that does not advertise it is
-dispatched one at a time, and an older hub never sends more than one. It commits the result before
+Admission (hk 4578): a node runs up to N spawns at once, but only checkout
+spawns overlap, each holding its own job dir (`<work_root>/<checkout dir>`,
+case-folded; `-L live|mock` stays inside it). A spawn without a checkout is
+admitted alone, and a waiting one blocks new admissions. Preparation of one
+clone runs one at a time. N is `spawn.json` `spawn_concurrency` (1..8), read
+live; unset it is 3, or 2 on a host whose machine id names `rpi` or `oci`; a
+`spawn.json` that does not load gives 1. The node advertises
+`spawn_slots_v1=N` in hello. The hub opens a second dispatch to a node only
+when it advertised slots and every open dispatch and the candidate are
+checkout spawns into distinct dirs, so a dispatched request does not wait on
+the node past its start window; anything else stays queued at the hub. A
+node without the capability, or an older hub, runs one at a time. A lowered
+limit binds the node at once and the hub's dispatch from the next reconnect. It commits the result before
 replying. A node drain wakes unclaimed waiters without a reply or journal row
 for replay after restart; work admitted before the drain is allowed to finish
 within the drain bound. Claimed executions retain the restart-settlement rules. See

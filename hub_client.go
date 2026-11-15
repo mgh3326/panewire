@@ -172,10 +172,9 @@ type HubClient struct {
 	sessionMu          sync.Mutex
 	spawnConfigPath    string
 	spawnJournalDir    string
-	spawnSlotsOnce     sync.Once
-	spawnSlots         int
 	spawnSlotsOverride int // fixture seam; 0 reads spawn.json
-	spawnGate          chan struct{}
+	spawnAdmissionOnce sync.Once
+	spawnAdmission     *nodeSpawnAdmission
 	spawnLocksMu       sync.Mutex
 	spawnLocks         map[string]chan struct{}
 	spawnEngine        hubSpawnEngine

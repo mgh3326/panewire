@@ -288,9 +288,12 @@ func (h *HubServer) runSpawnCoordinator(parent context.Context) {
 	work := make(chan hubSpawnTask, hubSpawnWorkerCount)
 	var mu sync.Mutex
 	active := map[string]bool{}
-	// nodeActive counts dispatches per node, up to the node's advertised
-	// slots; a node that advertises none gets one (hk 4578).
-	nodeActive := map[string]int{}
+	// nodeActive holds each node's open dispatches by overlap key. A node gets
+	// a second one only when it advertised the slots and every open dispatch
+	// and the candidate are checkout spawns into distinct dirs, the overlap the
+	// node admits at once, so a dispatched request never waits on the node
+	// past its start window (hk 4578). A node that advertises none gets one.
+	nodeActive := map[string]map[string]int{}
 	for range hubSpawnWorkerCount {
 		h.spawnWorkers.Add(1)
 		go func() {
@@ -341,13 +344,20 @@ func (h *HubServer) runSpawnCoordinator(parent context.Context) {
 		}
 		mu.Lock()
 		busy := active[task.Request.RequestID]
-		if task.Node != nil && nodeActive[task.Node.Machine] >= slots {
-			busy = true
+		var key string
+		if task.Node != nil {
+			key = hubSpawnOverlapKey(task.Node)
+			if open := nodeActive[task.Node.Machine]; len(open) > 0 {
+				busy = busy || len(open) >= slots || key == "" || open[""] > 0 || open[key] > 0
+			}
 		}
 		if !busy {
 			active[task.Request.RequestID] = true
 			if task.Node != nil {
-				nodeActive[task.Node.Machine]++
+				if nodeActive[task.Node.Machine] == nil {
+					nodeActive[task.Node.Machine] = map[string]int{}
+				}
+				nodeActive[task.Node.Machine][key]++
 			}
 		}
 		mu.Unlock()
@@ -368,8 +378,13 @@ func (h *HubServer) runSpawnCoordinator(parent context.Context) {
 				}
 				mu.Lock()
 				delete(active, task.Request.RequestID)
-				if nodeActive[task.Node.Machine]--; nodeActive[task.Node.Machine] <= 0 {
-					delete(nodeActive, task.Node.Machine)
+				if open := nodeActive[task.Node.Machine]; open != nil {
+					if open[key]--; open[key] <= 0 {
+						delete(open, key)
+					}
+					if len(open) == 0 {
+						delete(nodeActive, task.Node.Machine)
+					}
 				}
 				mu.Unlock()
 				current, err := h.inbox.store.spawnTask(ctx, task.Request.RequestID)
