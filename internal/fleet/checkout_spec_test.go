@@ -35,9 +35,9 @@ func TestSpawnCheckoutSpecValidation(t *testing.T) {
 		{"commit upper case", append(slices.Clone(base), "--checkout-origin", "https://git.invalid/org/repo-a.git", "--checkout-commit", strings.ToUpper(hubHead), "--checkout-ref", "pull/7/head"), "40-character commit id"},
 		{"ref is a tag", append(slices.Clone(base), "--checkout-origin", "https://git.invalid/org/repo-a.git", "--checkout-commit", hubHead, "--checkout-ref", "refs/tags/v1"), "pull/<n>/head or refs/heads/<branch>"},
 		{"ref is a bare branch", append(slices.Clone(base), "--checkout-origin", "https://git.invalid/org/repo-a.git", "--checkout-commit", hubHead, "--checkout-ref", "main"), "pull/<n>/head or refs/heads/<branch>"},
-		{"origin carries a credential", append(slices.Clone(base), "--checkout-origin", "https://user:pw@git.invalid/org/repo-a.git", "--checkout-commit", hubHead, "--checkout-ref", "pull/7/head"), "clone URL naming owner/repo"},
-		{"origin names no owner", append(slices.Clone(base), "--checkout-origin", "https://git.invalid/repo-a.git", "--checkout-commit", hubHead, "--checkout-ref", "pull/7/head"), "clone URL naming owner/repo"},
-		{"origin is a local path", append(slices.Clone(base), "--checkout-origin", "/work/fleet/repo-a", "--checkout-commit", hubHead, "--checkout-ref", "pull/7/head"), "clone URL naming owner/repo"},
+		{"origin carries a credential", append(slices.Clone(base), "--checkout-origin", "https://user:pw@git.invalid/org/repo-a.git", "--checkout-commit", hubHead, "--checkout-ref", "pull/7/head"), "naming owner/repo"},
+		{"origin names no owner", append(slices.Clone(base), "--checkout-origin", "https://git.invalid/repo-a.git", "--checkout-commit", hubHead, "--checkout-ref", "pull/7/head"), "naming owner/repo"},
+		{"origin is a local path", append(slices.Clone(base), "--checkout-origin", "/work/fleet/repo-a", "--checkout-commit", hubHead, "--checkout-ref", "pull/7/head"), "naming owner/repo"},
 		{"valid spec", valid, ""},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -54,9 +54,18 @@ func TestSpawnCheckoutSpecValidation(t *testing.T) {
 		})
 	}
 
-	spec, name, err := Spawn{Job: "job-a", CheckoutOrigin: "https://git.invalid/org/repo-a.git", CheckoutCommit: hubHead, CheckoutRef: "pull/7/head"}.checkoutSpec()
-	if err != nil || name != "repo-a" || !reflect.DeepEqual(spec, &HubCheckout{Origin: "https://git.invalid/org/repo-a.git", Mode: "detached", Sha: hubHead, Fetch: "pull/7/head", Dir: "job-a-checkout"}) {
-		t.Fatalf("spec=%+v name=%q err=%v", spec, name, err)
+	// Every remote form the docs name is accepted, and the spec carries the
+	// userinfo-free https form the -c path uploads, which the node clones.
+	for _, test := range []struct{ name, origin, want string }{
+		{"https", "https://git.invalid/org/repo-a.git", "https://git.invalid/org/repo-a.git"},
+		{"scp with user", "git@git.invalid:org/repo-a.git", "https://git.invalid/org/repo-a.git"},
+		{"scp without user", "git.invalid:org/repo-a", "https://git.invalid/org/repo-a"},
+		{"ssh", "ssh://git@git.invalid/org/repo-a", "https://git.invalid/org/repo-a"},
+	} {
+		spec, name, err := Spawn{Job: "job-a", CheckoutOrigin: test.origin, CheckoutCommit: hubHead, CheckoutRef: "pull/7/head"}.checkoutSpec()
+		if err != nil || name != "repo-a" || !reflect.DeepEqual(spec, &HubCheckout{Origin: test.want, Mode: "detached", Sha: hubHead, Fetch: "pull/7/head", Dir: "job-a-checkout"}) {
+			t.Fatalf("%s: spec=%+v name=%q err=%v", test.name, spec, name, err)
+		}
 	}
 }
 
