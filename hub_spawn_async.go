@@ -277,6 +277,10 @@ func (h *HubServer) handleSpawnOperation(w http.ResponseWriter, r *http.Request)
 // for each node, so a slow landing cannot consume a placement worker.
 const hubSpawnWorkerCount = 8
 
+// hubSpawnDrainMarkTTL bounds a node's drain mark (runSpawnCoordinator) past
+// the last scan that saw its waiting request; scans run every 2s.
+const hubSpawnDrainMarkTTL = 10 * time.Second
+
 func (h *HubServer) runSpawnCoordinator(parent context.Context) {
 	if h.inbox == nil {
 		return
@@ -294,6 +298,12 @@ func (h *HubServer) runSpawnCoordinator(parent context.Context) {
 	// node admits at once, so a dispatched request never waits on the node
 	// past its start window (hk 4578). A node that advertises none gets one.
 	nodeActive := map[string]map[string]int{}
+	// drainFor marks a node where a request without a checkout is queued
+	// behind open dispatches: no new dispatch opens there until it has run, so
+	// it is not starved by later checkouts. The mark is refreshed by each scan
+	// that still finds the request waiting and lapses when no scan has for
+	// hubSpawnDrainMarkTTL (the request ended some other way).
+	drainFor := map[string]time.Time{}
 	for range hubSpawnWorkerCount {
 		h.spawnWorkers.Add(1)
 		go func() {
@@ -347,8 +357,22 @@ func (h *HubServer) runSpawnCoordinator(parent context.Context) {
 		var key string
 		if task.Node != nil {
 			key = hubSpawnOverlapKey(task.Node)
-			if open := nodeActive[task.Node.Machine]; len(open) > 0 {
+			machine := task.Node.Machine
+			open := nodeActive[machine]
+			if len(open) > 0 {
 				busy = busy || len(open) >= slots || key == "" || open[""] > 0 || open[key] > 0
+			}
+			if mark, marked := drainFor[machine]; marked && time.Since(mark) > hubSpawnDrainMarkTTL {
+				delete(drainFor, machine)
+			}
+			switch {
+			case key == "" && busy && !active[task.Request.RequestID]:
+				drainFor[machine] = time.Now()
+			case key == "" && !busy:
+				delete(drainFor, machine)
+			case key != "":
+				_, draining := drainFor[machine]
+				busy = busy || draining
 			}
 		}
 		if !busy {

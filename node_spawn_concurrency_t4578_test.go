@@ -185,19 +185,23 @@ func TestNodeSpawnSlotsDefaultsAndAdvertisement_t4578(t *testing.T) {
 	if !slices.Contains(caps, hubCapabilitySpawnSlotsPrefix+"2") || client.nodeSpawnSlots() != 2 {
 		t.Fatalf("capabilities %v slots %d", caps, client.nodeSpawnSlots())
 	}
-	// The limit is read live: a configured value applies without a restart,
-	// and a spawn.json that does not load fails closed to one.
+	// The node enforces what it advertised: a change to spawn.json binds at
+	// the next hello, so hub and node never disagree; a spawn.json that does
+	// not load then advertises one.
 	if err := os.WriteFile(client.spawnConfigPath, []byte(`{"workspace":"w","herdr_session":"w","enabled":true,"spawn_concurrency":1}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if got := client.nodeSpawnSlots(); got != 1 {
-		t.Fatalf("configured slots=%d, want 1", got)
+	if got := client.nodeSpawnSlots(); got != 2 {
+		t.Fatalf("slots=%d before re-registering, want the advertised 2", got)
+	}
+	if caps := client.helloCapabilities(hubSpawnCapabilities); !slices.Contains(caps, hubCapabilitySpawnSlotsPrefix+"1") || client.nodeSpawnSlots() != 1 {
+		t.Fatalf("re-registered capabilities %v slots %d", caps, client.nodeSpawnSlots())
 	}
 	if err := os.WriteFile(client.spawnConfigPath, []byte(`{"workspace":"w","herdr_session":"w","enabled":false,"spawn_concurrency":3}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if got := client.nodeSpawnSlots(); got != 1 {
-		t.Fatalf("unloadable config slots=%d, want 1", got)
+	if caps := client.helloCapabilities(hubSpawnCapabilities); !slices.Contains(caps, hubCapabilitySpawnSlotsPrefix+"1") {
+		t.Fatalf("unloadable config advertised %v", caps)
 	}
 	if client.helloCapabilities(nil) != nil {
 		t.Fatal("a hello without spawn capabilities advertised slots")
@@ -410,5 +414,108 @@ func TestNodeSpawnHubKeepsNonOverlappingWorkQueued_t4578(t *testing.T) {
 			case <-time.After(250 * time.Millisecond):
 			}
 		})
+	}
+}
+
+// A symlinked job dir or lane may name another job's worktree: such a spawn
+// is admitted alone, and a lane that leaves its worktree after prepare is
+// refused before launch.
+func TestNodeSpawnSymlinkedTargetsAreNotOverlapped_t4578(t *testing.T) {
+	root := t.TempDir()
+	config := filepath.Join(t.TempDir(), "spawn.json")
+	if err := os.WriteFile(config, []byte(`{"work_root":"`+root+`","workspace":"w","herdr_session":"w","enabled":true}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	client := &HubClient{spawnConfigPath: config}
+	for _, dir := range []string{"job-a", "job-c"} {
+		if err := os.MkdirAll(filepath.Join(root, dir), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(filepath.Join(root, "job-a"), filepath.Join(root, "job-b")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("../job-a", filepath.Join(root, "job-c", "live")); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		dir, lane, want string
+	}{{"job-a", "", "job-a"}, {"job-b", "", ""}, {"job-c", "", "job-c"}, {"job-c", "live", ""}, {"job-a", "live", "job-a"}} {
+		message := concurrencyMessage(1, tc.dir)
+		if tc.lane != "" {
+			message.Args = append(message.Args, "-L", tc.lane)
+		}
+		if got := client.spawnAdmissionKey(message); got != tc.want {
+			t.Errorf("dir=%s lane=%s key=%q, want %q", tc.dir, tc.lane, got, tc.want)
+		}
+	}
+	if !spawnLaneEscapes(filepath.Join(root, "job-c"), "live") || spawnLaneEscapes(filepath.Join(root, "job-a"), "live") || spawnLaneEscapes(filepath.Join(root, "job-a"), "") {
+		t.Fatal("lane escape check is wrong")
+	}
+}
+
+// A request without a checkout queued behind open dispatches drains the
+// node: later checkouts do not refill the freed slots ahead of it.
+func TestNodeSpawnHubDrainsForQueuedExclusiveRequest_t4578(t *testing.T) {
+	h := asyncSpawnHub(t)
+	server := httptest.NewServer(h.Handler())
+	defer server.Close()
+	node := slotNode(t, h, server, 2)
+	tasks := map[string]hubSpawnTask{}
+	for i, dir := range []string{"job-a", "job-b", "", "job-d"} {
+		task := checkoutDispatchFixture(t, h, i+1, dir)
+		tasks[dir] = task
+		// Distinct ages fix the scan order.
+		time.Sleep(10 * time.Millisecond) // fixture pacing
+	}
+	h.startSpawnCoordinator(t.Context())
+	frames := make(chan string, 4)
+	go func() {
+		// Ends when the test closes the connection.
+		for {
+			_, payload, err := node.Read(context.Background())
+			if err != nil {
+				return
+			}
+			var frame struct {
+				Type      string `json:"type"`
+				RequestID string `json:"request_id"`
+			}
+			if json.Unmarshal(payload, &frame) == nil && frame.Type == "job.spawn" {
+				frames <- frame.RequestID
+			}
+		}
+	}()
+	next := func(label string) string {
+		select {
+		case id := <-frames:
+			return id
+		case <-time.After(5 * time.Second):
+			t.Fatalf("no frame: %s", label)
+			return ""
+		}
+	}
+	open := []string{next("first"), next("second")}
+	slices.Sort(open)
+	want := []string{tasks["job-a"].Node.RequestID, tasks["job-b"].Node.RequestID}
+	slices.Sort(want)
+	if !slices.Equal(open, want) {
+		t.Fatalf("opened %v, want %v", open, want)
+	}
+	if err := wsjson.Write(t.Context(), node, nodeRefusal(tasks["job-a"].Node.RequestID, "spawn_disabled", false)); err != nil {
+		t.Fatal(err)
+	}
+	// Window: with job-b still open, neither the exclusive request nor the
+	// later checkout may start.
+	select {
+	case id := <-frames:
+		t.Fatalf("hub refilled the drained slot with %s", id)
+	case <-time.After(2500 * time.Millisecond):
+	}
+	if err := wsjson.Write(t.Context(), node, nodeRefusal(tasks["job-b"].Node.RequestID, "spawn_disabled", false)); err != nil {
+		t.Fatal(err)
+	}
+	if got := next("after drain"); got != tasks[""].Node.RequestID {
+		t.Fatalf("after the drain the hub sent %s, want the exclusive request %s", got, tasks[""].Node.RequestID)
 	}
 }

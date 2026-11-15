@@ -212,7 +212,7 @@ func (client *HubClient) handleHubSpawn(ctx context.Context, peer *hubClientConn
 	// holds its own job dir, a spawn without one holds the whole node, from
 	// before the executing claim through launch, brief delivery and landing
 	// proof (hk 4578, node_spawn_concurrency.go).
-	release, admitted := client.awaitSpawnAdmission(ctx, admissionCtx, stop, waiter, spawnAdmissionKey(message), peer, journal, message, deadline)
+	release, admitted := client.awaitSpawnAdmission(ctx, admissionCtx, stop, waiter, client.spawnAdmissionKey(message), peer, journal, message, deadline)
 	if !admitted {
 		return
 	}
@@ -613,6 +613,11 @@ func (client *HubClient) runHubSpawn(parent context.Context, message hubOutbound
 			return result
 		}
 		cwd = outcome.Worktree.Path
+		if spawnLaneEscapes(cwd, hubSpawnArg(message.Args, "-L")) {
+			// The held job dir must be where the agent runs (hk 4578).
+			result.RC, result.Error = 81, "checkout_refused:lane_outside_worktree"
+			return result
+		}
 	}
 
 	temporary, err := os.CreateTemp("", "panewire-spawn-*")

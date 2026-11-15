@@ -783,15 +783,21 @@ Admission (hk 4578): a node runs up to N spawns at once, but only checkout
 spawns overlap, each holding its own job dir (`<work_root>/<checkout dir>`,
 case-folded; `-L live|mock` stays inside it). A spawn without a checkout is
 admitted alone, and a waiting one blocks new admissions. Preparation of one
-clone runs one at a time. N is `spawn.json` `spawn_concurrency` (1..8), read
-live; unset it is 3, or 2 on a host whose machine id names `rpi` or `oci`; a
-`spawn.json` that does not load gives 1. The node advertises
+clone runs one at a time. A job dir or `-L` lane that is a symlink is
+admitted alone, and a lane that resolves outside its worktree after prepare
+is refused (`checkout_refused:lane_outside_worktree`). Workspace lookup and
+creation for one herdr session and label is serialized by a file lock, across
+processes too. N is `spawn.json` `spawn_concurrency` (1..8) as of the node's
+last hello; unset it is 3, or 2 on a host whose machine id names `rpi` or
+`oci`; a `spawn.json` that does not load gives 1. A change takes effect at the
+next registration (reconnect or restart), for the node and the hub together. The node advertises
 `spawn_slots_v1=N` in hello. The hub opens a second dispatch to a node only
 when it advertised slots and every open dispatch and the candidate are
 checkout spawns into distinct dirs, so a dispatched request does not wait on
 the node past its start window; anything else stays queued at the hub. A
-node without the capability, or an older hub, runs one at a time. A lowered
-limit binds the node at once and the hub's dispatch from the next reconnect. It commits the result before
+node without the capability, or an older hub, runs one at a time. While a
+request without a checkout is queued behind open dispatches, the hub opens no
+new dispatch to that node until it has run. It commits the result before
 replying. A node drain wakes unclaimed waiters without a reply or journal row
 for replay after restart; work admitted before the drain is allowed to finish
 within the drain bound. Claimed executions retain the restart-settlement rules. See

@@ -167,21 +167,22 @@ type HubClient struct {
 	panesAliveMu sync.Mutex
 	// paneIdleSince is the first heartbeat at which each pane was idle or
 	// done (hub_jobs_idle.go).
-	paneIdleSince      map[string]time.Time
-	paneIdleMu         sync.Mutex
-	sessionMu          sync.Mutex
-	spawnConfigPath    string
-	spawnJournalDir    string
-	spawnSlotsOverride int // fixture seam; 0 reads spawn.json
-	spawnAdmissionOnce sync.Once
-	spawnAdmission     *nodeSpawnAdmission
-	spawnLocksMu       sync.Mutex
-	spawnLocks         map[string]chan struct{}
-	spawnEngine        hubSpawnEngine
-	spawnPrepare       func(context.Context, nodeWorktreePrepareArgs) (any, string) // fixture seam
-	spawnJournalMu     sync.Mutex
-	spawnJournal       *nodeSpawnJournal
-	spawnJournalUsers  int
+	paneIdleSince        map[string]time.Time
+	paneIdleMu           sync.Mutex
+	sessionMu            sync.Mutex
+	spawnConfigPath      string
+	spawnJournalDir      string
+	spawnSlotsAdvertised atomic.Int32
+	spawnSlotsOverride   int // fixture seam; 0 reads spawn.json
+	spawnAdmissionOnce   sync.Once
+	spawnAdmission       *nodeSpawnAdmission
+	spawnLocksMu         sync.Mutex
+	spawnLocks           map[string]chan struct{}
+	spawnEngine          hubSpawnEngine
+	spawnPrepare         func(context.Context, nodeWorktreePrepareArgs) (any, string) // fixture seam
+	spawnJournalMu       sync.Mutex
+	spawnJournal         *nodeSpawnJournal
+	spawnJournalUsers    int
 	// spawnActive holds the journal requests this process is executing; an
 	// executing entry missing from it was left by a restart.
 	spawnActiveMu sync.Mutex // also guards spawnWaiting
