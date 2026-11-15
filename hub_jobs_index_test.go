@@ -418,3 +418,34 @@ func TestHubInboxIndexChargesBindingStrings(t *testing.T) {
 		t.Fatalf("a record over the budget was retained: %+v bytes=%d", ix.jobs[id], ix.jobBytes)
 	}
 }
+
+// TestOldJobsByPaneFallsThroughFilteredWinner (hk 4836): a pane's newest
+// binding can name a job the past-window lookup must skip because its newest
+// spawn moved to another pane. The older live job bound to the pane is then
+// the candidate, not no candidate at all.
+func TestOldJobsByPaneFallsThroughFilteredWinner(t *testing.T) {
+	f := newIndexFixture(t, 0)
+	const pane, elsewhere = "w1:reused", "w1:elsewhere"
+	// The older job still on the pane.
+	f.put("job-old-a", 1, "job.claimed", f.claim(1, 1, 10*24*time.Hour, ""), 10*24*time.Hour)
+	f.put("job-old-a", 2, "job.spawned", f.spawned(1, pane, 10*24*time.Hour), 10*24*time.Hour)
+	// A newer job that bound the pane and then moved to another one.
+	f.put("job-moved-b", 1, "job.claimed", f.claim(2, 1, 5*24*time.Hour, ""), 5*24*time.Hour)
+	f.put("job-moved-b", 2, "job.spawned", f.spawned(2, pane, 5*24*time.Hour), 5*24*time.Hour)
+	f.put("job-moved-b", 3, "job.spawned", f.spawned(2, elsewhere, 4*24*time.Hour), 4*24*time.Hour)
+	// A job inside the active window is never a past-window candidate.
+	f.put("job-recent-c", 1, "job.claimed", f.claim(3, 1, time.Hour, ""), time.Hour)
+	f.put("job-recent-c", 2, "job.spawned", f.spawned(3, "w1:recent", time.Hour), time.Hour)
+	f.settle()
+
+	out := hubIndexFor(f.root).oldJobsByPane(context.Background(), f.now.Add(-72*time.Hour))
+	if job, ok := out[pane]; !ok || job.JobID != "job-old-a" {
+		t.Fatalf("%s: got %+v, want job-old-a", pane, job)
+	}
+	if job, ok := out[elsewhere]; !ok || job.JobID != "job-moved-b" {
+		t.Fatalf("%s: got %+v, want job-moved-b", elsewhere, job)
+	}
+	if job, ok := out["w1:recent"]; ok {
+		t.Fatalf("in-window job returned as a past-window candidate: %+v", job)
+	}
+}
