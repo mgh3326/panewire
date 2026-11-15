@@ -875,9 +875,11 @@ decide (the unreadable case warns once with reason `hk-unavailable`).
 `spawn --wait` reads the owner lane's inbox through the local node daemon, the
 route `panewire inbox list` takes by default ([quiet-delivery.md](quiet-delivery.md)),
 so a session whose own config carries no usable hub token still sees the
-lane's `READY` and `escalate` signals. Only when no daemon answers does the
-wait fall back to reading `inbox list` with the `[hub]` connection this
-config names; it then warns once per wait, not once per poll.
+lane's `READY` and `escalate` signals. A session that carries its own lane
+credential (`session_lanes_token_envs`) reads with that credential instead, as
+lane registration does. Only when no daemon answers does the wait fall back to
+reading `inbox list` with the `[hub]` connection this config names; it then
+warns once per wait, not once per poll.
 
 After the brief lands, a failed task claim leaves the pane running and the spawn
 landed. The `job.task_link` event records `status: failed` and a bounded reason;

@@ -31,10 +31,15 @@ const (
 // waitInbox reads the owner lane's inbox as `panewire inbox list --lane L
 // --json` reports it, through the local node daemon first (hk 3706): the
 // daemon holds the node credential, so a design session without the hub token
-// still reads its lane. The hub route needs the credential this host's config
-// names, so it is only used when the daemon is absent. Either way the wait
-// warns at most once.
+// still reads its lane. A session that carries its own lane credential keeps
+// that credential, as lane registration does (laneDaemonServes): the node
+// identity is not substitutable for it. The hub route needs the credential this
+// host's config names, so it is also the fallback when the daemon is absent.
+// Either way the wait warns at most once.
 func (a *App) waitInbox(ctx context.Context, lane string, route *waitInboxRoute, warned *bool) Result {
+	if *route == waitInboxViaDaemon && !a.laneDaemonServes() {
+		*route = waitInboxViaHub
+	}
 	if *route == waitInboxViaDaemon {
 		if r, answered := a.inboxThroughDaemon(ctx, lane); answered {
 			if r.Code != 0 && !*warned {

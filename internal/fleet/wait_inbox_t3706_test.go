@@ -165,3 +165,40 @@ func TestWaitDaemonWithoutHubClientFallsBack(t *testing.T) {
 		t.Fatalf("warnings=%d: %q", n, errs)
 	}
 }
+
+// A session with its own lane credential reads through that credential, the way
+// lane registration does: the daemon's node identity may not serve its lane, so
+// its answer is not this wait's answer.
+func TestWaitWithOwnLaneCredentialSkipsTheDaemon(t *testing.T) {
+	a, s, f := waitInboxFixture(t)
+	a.HerdrSession = "fleet"
+	a.Config.Hub = map[string]any{
+		"hub_url":                  "https://hub.invalid",
+		"hub_token_env":            filepath.Join(t.TempDir(), "absent.env"),
+		"session_lanes_token_envs": map[string]any{"fleet": filepath.Join(t.TempDir(), "lane.env")},
+	}
+	f.Do = func(c Command) Result {
+		if strings.HasPrefix(strings.Join(c.Args, " "), "inbox list") {
+			return Result{Out: `[{"kind":"lane.event","event":{"job_id":"j","text":"[j] READY | https://pr.invalid/1 | /jobs/j/report.md"}}]`}
+		}
+		return Result{}
+	}
+	stub := newLaneDaemonStub(t, func(map[string]any) string {
+		return `{"ok":false,"code":6,"error":"inbox: hub returned HTTP 403"}`
+	})
+	t.Setenv("PANEWIRE_SOCKET", stub.path)
+	if e := a.waitJob(context.Background(), s); e != nil {
+		t.Fatalf("the session's own connection must end the wait: %v (err=%q)", e, waitErrText(a))
+	}
+	if out := waitOut(a); !strings.Contains(out, "outcome=ready") {
+		t.Fatalf("out=%q", out)
+	}
+	select {
+	case request := <-stub.requests:
+		t.Fatalf("a session with its own lane credential asked the daemon: %v", request)
+	default:
+	}
+	if errs := waitErrText(a); errs != "" {
+		t.Fatalf("the own-credential route is not a fallback and must not warn: %q", errs)
+	}
+}
