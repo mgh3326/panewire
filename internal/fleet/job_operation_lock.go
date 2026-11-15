@@ -61,18 +61,26 @@ func (a *App) lockJobOperation(id string, wait time.Duration) (func(), error) {
 // end_reason, of a reviewer job the hub ended because it posted its result.
 const ReviewerResultPosted = "reviewer_result_posted"
 
-// endedByResultPosted reports that the job's newest end event is the hub's
-// posted-result end (RecordJobEnded). A claim, spawn, re-prompt or another end
-// after it clears it. A quota-stop record that waited for the operation lock
-// checks this under the lock and writes nothing when the end won, so it cannot
-// re-arm a hand-over for a job hk already holds lost.
-func (a *App) endedByResultPosted(id string) bool {
+// endedByResultPosted reports that the job's newest end is the hub's
+// posted-result end (RecordJobEnded). Two records can show it: the ledger's
+// final job.lost, and an hk record lost with this end_reason, which the node
+// writes first, so a failure between the two leaves the hk record alone. A
+// claim, spawn, re-prompt or another end after the ledger event clears it. The
+// ledger is folded in sequence order, not timestamp order: a clock stepped
+// backwards reorders timestamps (see ledgerOrder). A quota-stop record that
+// waited for the operation lock checks this under the lock and writes nothing
+// when the end won, so it cannot re-arm a hand-over for a job hk already holds
+// lost.
+func (a *App) endedByResultPosted(ctx context.Context, id string) bool {
+	if state, reason, ok := a.hkJobState(ctx, id); ok && state == "lost" && reason == ReviewerResultPosted {
+		return true
+	}
 	j, err := a.job(id)
 	if err != nil {
 		return false
 	}
 	ended := false
-	for _, ev := range j.Events {
+	for _, ev := range ledgerOrder(j.Events) {
 		switch ev.Kind {
 		case "job.lost":
 			ended = str(ev.Payload, "reason") == ReviewerResultPosted

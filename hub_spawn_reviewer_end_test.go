@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/mgh3326/panewire/internal/fleet"
 )
 
 // reviewerEndLedger is the node's job.result answer: findings is the decoded
@@ -360,5 +362,46 @@ func TestReviewerEndFinishesAnEndWhoseLedgerEventIsMissing(t *testing.T) {
 	}
 	if logged := sink.String(); strings.Count(logged, "hub ended a reviewer job with a posted result") != 1 {
 		t.Fatalf("log %q, want the end line once", logged)
+	}
+}
+
+// argv takes the role as `--role reviewer` or `--role=reviewer`; a candidate
+// query that matched on the stored text of the first form alone would never see
+// an orphan submitted the second way.
+func TestReviewerEndFindsAReviewerSubmittedWithTheEqualsForm(t *testing.T) {
+	hub, server, jobs, _ := reviewerReleaseHub(t, "implementer", "succeeded", hubSpawnOutcome{RC: 0, Host: "machine-a", Pane: roleHeldPane})
+	node := startUnworkedNode(t, t14Node(t, hub, server, true), unworkedReplies(unworkedRow("idle", "/work/project.test-job"), reviewerEndPosted))
+	jobs.mu.Lock()
+	jobs.records["test-job-eq"] = map[string]any{"state": "spawned"}
+	jobs.mu.Unlock()
+	request := reviewerReleaseRequest(reviewerRole, true)
+	var args []string
+	for i := 0; i < len(request.Args); i++ {
+		switch {
+		case request.Args[i] == "--role" && i+1 < len(request.Args) && request.Args[i+1] == reviewerRole:
+			args = append(args, "--role="+reviewerRole)
+			i++
+		case request.Args[i] == "2" && i > 0 && request.Args[i-1] == "--review-pass":
+			args = append(args, "3")
+		default:
+			args = append(args, request.Args[i])
+		}
+	}
+	request.Args = args
+	if spawn, err := fleet.ValidateSubmission(request); err != nil || spawn.Role != reviewerRole {
+		t.Fatalf("the --role=reviewer form must validate as a reviewer: role %q, err %v, args %v", spawn.Role, err, request.Args)
+	}
+	held, _, err := hub.inbox.store.claimSpawn(t.Context(), request, "test-job-eq", "parent", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = hub.inbox.store.completeSpawn(t.Context(), held, hubSpawnOutcome{RC: 0, Host: "machine-a", Pane: roleHeldPane}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+
+	hub.endPostedReviewerJobs(t.Context())
+
+	if want := []string{"job.result", "job.mark_lost"}; !reflect.DeepEqual(node.seen(), want) {
+		t.Fatalf("node commands %v, want the --role=reviewer job ended", node.seen())
 	}
 }

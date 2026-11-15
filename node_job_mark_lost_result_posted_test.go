@@ -300,6 +300,12 @@ func TestNodeJobMarkLostReviewerResultPostedRefusals(t *testing.T) {
 		{"implementer", reviewerLedger("implementer"), nodeJobMarkLostNotReviewer},
 		{"no role", reviewerLedger(""), nodeJobMarkLostNotReviewer},
 		{"completed", reviewerLedger("reviewer", map[string]any{"kind": "job.completed"}), nodeJobMarkLostCompleted},
+		// A ledger already ended another way, whose hk write may still be pending,
+		// is not this end's to take: the record would claim an end it did not cause.
+		{"reaped", reviewerLedger("reviewer", map[string]any{"kind": "job.reaped"}), nodeJobMarkLostCompleted},
+		{"handed off", reviewerLedger("reviewer", map[string]any{"kind": "job.handed_off"}), nodeJobMarkLostCompleted},
+		{"revoked", reviewerLedger("reviewer", map[string]any{"kind": "job.revoked"}), nodeJobMarkLostCompleted},
+		{"another final job.lost", reviewerLedger("reviewer", map[string]any{"kind": "job.lost", "payload": map[string]any{"reason": "something_else", "final": true}}), nodeJobMarkLostCompleted},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			inbox := t.TempDir()

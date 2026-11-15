@@ -516,7 +516,7 @@ afterwards. The node takes the job's operation lock without waiting (the lock
 checks and reads the hk record: a record that is not `claimed` or `spawned`
 answers `completed`, except a `lost` one carrying this `end_reason`, for which
 the node only appends the ledger event it may be missing. For a live record it
-refuses unless: the ledger names role `reviewer`; no quota stop is announced
+refuses unless: the ledger has not already ended another way (`job.reaped`, `job.handed_off`, `job.joined`, `job.revoked`, `job.escalate` or another final `job.lost`: answers `completed`, because that end's own hk write may still be pending); the ledger names role `reviewer`; no quota stop is announced
 (`job.lost` `quota_stop`, not final) or pending (`job.quota_stop_intent`); no
 listed agent with that pane id and label is `working` (an unreadable agent list
 fails the command); and the job directory holds a findings object that is not

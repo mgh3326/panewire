@@ -110,6 +110,11 @@ func (client *HubClient) nodeJobMarkReviewerResultPosted(ctx context.Context, ar
 	}
 
 	switch {
+	case target.ended:
+		// The ledger already ended another way (a reap, a hand-off, a join, a
+		// revoke, an escalation) whose own hk write may still be pending. This
+		// end did not cause it and must not take its record.
+		return refuse(nodeJobMarkLostCompleted)
 	case target.role != reviewerRole:
 		return refuse(nodeJobMarkLostNotReviewer)
 	case target.announced || target.intent:

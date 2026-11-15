@@ -251,8 +251,8 @@ record and a lane row. The node's ended-job pane sweep needs a terminal record
 neither takes it, and the node's 64-row lane cap fills (hk 4658). Every five
 minutes the hub writes the end of each such job. The rule:
 
-- **Which jobs.** The pass pages through every persisted `succeeded` reviewer
-  operation created in the last 14 days (500 rows a page, by creation time and
+- **Which jobs.** The pass pages through every persisted `succeeded` operation
+  created in the last 14 days (500 rows a page, by creation time and
   request id, so no newer row displaces an older orphan), not the nodes'
   active-job heartbeat: that view drops a pane idle for 30 minutes, caps each node at 32
   jobs and forgets a spawn two minutes after it started, so it would miss
@@ -296,8 +296,9 @@ minutes the hub writes the end of each such job. The rule:
   rewrites a lost record ([quota-stop.md](quota-stop.md)); the node refuses the
   end with `quota-stopped`. The watcher's own announce and intent records wait
   for the same lock and, once they hold it, re-read the job and write nothing if
-  this end already won, so a stale announcement cannot re-arm a hand-over for an
-  ended job.
+  this end already won (the ledger's `job.lost` folded in sequence order, or hk
+  lost with this `end_reason` while the ledger event is still missing), so a
+  stale announcement cannot re-arm a hand-over for an ended job.
 
 The pass logs each job once per outcome, never once per pass:
 `hub ended a reviewer job with a posted result` (INFO, with `job`,

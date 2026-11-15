@@ -63,16 +63,16 @@ const reviewerEndWindow = 14 * 24 * time.Hour
 
 var reviewerEndPage = 500
 
-// succeededReviewerSpawns lists one page of the succeeded operations created
-// since `since` whose request mentions a reviewer, newest first, starting after
-// the (created, request) cursor; a zero cursor starts at the newest. The role
-// is confirmed from the validated request by the caller; the match only narrows
-// the rows read.
-func (s *laneInboxStore) succeededReviewerSpawns(parent context.Context, since time.Time, after reviewerEndCursor, limit int) ([]hubSpawnTask, error) {
+// succeededSpawns lists one page of the succeeded operations created
+// since `since`, newest first, starting after the (created, request) cursor; a
+// zero cursor starts at the newest. The caller keeps the reviewers: no text match
+// on the stored request is a safe filter, because argv takes the role as
+// `--role reviewer` or `--role=reviewer`.
+func (s *laneInboxStore) succeededSpawns(parent context.Context, since time.Time, after reviewerEndCursor, limit int) ([]hubSpawnTask, error) {
 	ctx, done := s.op(parent)
 	defer done()
-	query := `SELECT ` + spawnTaskColumns + ` FROM spawn_operations WHERE status='succeeded' AND created_ms>=? AND payload LIKE ?`
-	args := []any{since.UnixMilli(), `%"` + reviewerRole + `"%`}
+	query := `SELECT ` + spawnTaskColumns + ` FROM spawn_operations WHERE status='succeeded' AND created_ms>=?`
+	args := []any{since.UnixMilli()}
 	if after.request != "" {
 		query += ` AND (created_ms<? OR created_ms=? AND request_id<?)`
 		args = append(args, after.created, after.created, after.request)
@@ -111,7 +111,7 @@ func (h *HubServer) endPostedReviewerJobs(ctx context.Context) {
 	var app *fleet.App
 	var cursor reviewerEndCursor
 	for {
-		tasks, err := h.inbox.store.succeededReviewerSpawns(ctx, since, cursor, reviewerEndPage)
+		tasks, err := h.inbox.store.succeededSpawns(ctx, since, cursor, reviewerEndPage)
 		if err != nil {
 			h.logger.Warn("reviewer end pass skipped", "reason", "store_unavailable")
 			return
