@@ -51,6 +51,9 @@ var (
 	// errLaneTakeoverUnconfirmed refuses a takeover unless the accepted spawn
 	// names the predecessor and a lane row is explicitly bound to that job.
 	errLaneTakeoverUnconfirmed = errors.New("lane takeover is not confirmed by the predecessor job")
+	// errLaneTakeoverAmbiguous refuses a takeover when several rows are bound
+	// to the predecessor job: moving one would strand the others' reports.
+	errLaneTakeoverAmbiguous = errors.New("lane takeover is ambiguous: several rows are bound to the predecessor job")
 )
 
 // validLaneReference accepts current lane names and labels used by older
@@ -195,6 +198,10 @@ func (h *HubServer) handlePutLane(writer http.ResponseWriter, request *http.Requ
 	if err != nil {
 		if errors.Is(err, errLaneMachineMismatch) {
 			writeLaneJSONError(writer, http.StatusForbidden, "lane_machine_mismatch")
+			return
+		}
+		if errors.Is(err, errLaneTakeoverAmbiguous) {
+			writeLaneJSONError(writer, http.StatusConflict, "lane_takeover_ambiguous")
 			return
 		}
 		if errors.Is(err, errLaneTakeoverUnconfirmed) {
@@ -460,54 +467,43 @@ func laneTakeoverRow(lane string, body hubLaneWriteRequest, proof laneSpawnProof
 	if !proof.valid || body.Job != proof.task.Job {
 		return "", reportRelayRoute{}, false, nil, errLaneTakeoverUnconfirmed
 	}
-	if name, row, found := laneRowForJob(routes, body.Takeover); found {
+	name, row, count := laneRowForJob(routes, body.Takeover)
+	if count > 1 {
+		// Several rows claim the predecessor job: moving one would strand the
+		// others' reports, so the takeover is refused outright.
+		return "", reportRelayRoute{}, false, nil, errLaneTakeoverAmbiguous
+	}
+	if count == 1 {
 		if row.Machine != proof.takeover.Outcome.Host || row.Pane != proof.takeover.Outcome.Pane {
 			return "", reportRelayRoute{}, false, nil, errLaneTakeoverUnconfirmed
 		}
 		return name, row, true, nil, nil
 	}
-	// No row is still bound to the takeover job, so a row the successor
-	// already holds at this pane is a retried takeover converging instead
-	// of adding a second row.
-	if name, row, found := laneHeldRow(routes, lane, body.Machine, body.Pane, body.Job); found {
-		projection := hubLaneProjection{Lane: name, Machine: row.Machine, Pane: row.Pane, Parent: row.Parent, Sink: row.Sink, Standby: row.Standby}
+	// No row is still bound to the takeover job, so the requested lane itself
+	// already sitting at this pane and bound to the successor job is a
+	// retried takeover converging instead of adding a second row. Any other
+	// row there proves nothing about this takeover, so it refuses.
+	if route, ok := routes[lane]; ok && !route.Sink && route.Machine == body.Machine && route.Pane == body.Pane && route.Job == body.Job {
+		projection := hubLaneProjection{Lane: lane, Machine: route.Machine, Pane: route.Pane, Parent: route.Parent, Sink: route.Sink, Standby: route.Standby}
 		return "", reportRelayRoute{}, false, &projection, nil
 	}
 	return "", reportRelayRoute{}, false, nil, errLaneTakeoverUnconfirmed
 }
 
-// laneHeldRow finds the successor's convergence row: any non-sink row already
-// routed to the successor's pane and bound to its job. A retried takeover
-// converges on it instead of adding a second row — even when the first move
-// left the successor's own earlier row beside the moved one, where laneRowAt's
-// exactly-one rule would refuse a move that already happened. The requested
-// lane wins when it matches, so the answer names the lane asked for.
-func laneHeldRow(routes map[string]reportRelayRoute, lane, machine, pane, job string) (string, reportRelayRoute, bool) {
-	if route, ok := routes[lane]; ok && !route.Sink && route.Machine == machine && route.Pane == pane && route.Job == job {
-		return lane, route, true
-	}
-	name, row := "", reportRelayRoute{}
-	for candidate, route := range routes {
-		if route.Sink || route.Machine != machine || route.Pane != pane || route.Job != job {
-			continue
-		}
-		if name == "" || candidate < name {
-			name, row = candidate, route
-		}
-	}
-	return name, row, name != ""
-}
-
-func laneRowForJob(routes map[string]reportRelayRoute, job string) (string, reportRelayRoute, bool) {
+// laneRowForJob resolves the rows bound to a job. The count tells zero rows
+// from one from several: only one row may move.
+func laneRowForJob(routes map[string]reportRelayRoute, job string) (string, reportRelayRoute, int) {
 	name, row, count := "", reportRelayRoute{}, 0
 	for lane, route := range routes {
 		if route.Sink || route.Job != job {
 			continue
 		}
-		name, row = lane, route
+		if count == 0 {
+			name, row = lane, route
+		}
 		count++
 	}
-	return name, row, count == 1
+	return name, row, count
 }
 
 // recordedJob copies the hub's record of a job, or nil when the hub has never

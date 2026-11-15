@@ -353,3 +353,51 @@ func TestLaneTakeoverMovesDespiteOwnRowAtPane(t *testing.T) {
 	}
 
 }
+
+// Two rows bound to the predecessor job refuse the takeover with a distinct
+// code, even when the successor already holds its own row at the target pane:
+// moving one would strand the other's reports.
+func TestLaneTakeoverAmbiguousPredecessorRefused(t *testing.T) {
+	hub, path := takeoverHub(t,
+		`{"lanes":{"t1":{"machine":"machine-a","pane":"w1:p1","job":"pred-a","parent":"mergewake"},"t2":{"machine":"machine-a","pane":"w1:p2","job":"pred-a","parent":"mergewake"},"succ-lane":{"machine":"machine-b","pane":"w2:p5","job":"succ-a","parent":"mergewake"},"mergewake":{"machine":"machine-a","pane":"w9:p9"}}}`,
+		nil)
+	seedAcceptedChainJob(t, hub.inbox.store, "pred-a", "", "machine-a", "w1:p1")
+	bindChainSuccessor(t, hub.inbox.store, "succ-a", "pred-a", "machine-b")
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	writer := lanesNodeRequest(t, hub, http.MethodPut, "/v1/lanes/t1", lanesNodeBToken, "machine-b",
+		`{"machine":"machine-b","pane":"w2:p5","job":"succ-a","parent":"mergewake","takeover":"pred-a"}`)
+	if writer.Code != http.StatusConflict || writer.Body.String() != `{"error":"lane_takeover_ambiguous"}`+"\n" {
+		t.Fatalf("ambiguous takeover status=%d body=%q", writer.Code, writer.Body.String())
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Fatalf("refused ambiguous takeover changed the file:\nbefore %s\nafter %s", before, after)
+	}
+}
+
+// No row bound to the predecessor job refuses the takeover, even when the
+// successor holds an unrelated lane at the target pane: that row proves
+// nothing about this takeover.
+func TestLaneTakeoverMissingPredecessorWithUnrelatedRowRefused(t *testing.T) {
+	hub, path := takeoverHub(t,
+		`{"lanes":{"task-lane":{"machine":"machine-a","pane":"w1:p1","parent":"mergewake"},"succ-lane":{"machine":"machine-b","pane":"w2:p5","job":"succ-m","parent":"mergewake"},"mergewake":{"machine":"machine-a","pane":"w9:p9"}}}`,
+		nil)
+	seedAcceptedChainJob(t, hub.inbox.store, "pred-m", "", "machine-a", "w1:p1")
+	bindChainSuccessor(t, hub.inbox.store, "succ-m", "pred-m", "machine-b")
+
+	writer := lanesNodeRequest(t, hub, http.MethodPut, "/v1/lanes/task-lane", lanesNodeBToken, "machine-b",
+		`{"machine":"machine-b","pane":"w2:p5","job":"succ-m","parent":"mergewake","takeover":"pred-m"}`)
+	if writer.Code != http.StatusConflict || writer.Body.String() != `{"error":"lane_takeover_unconfirmed"}`+"\n" {
+		t.Fatalf("missing-predecessor takeover status=%d body=%q", writer.Code, writer.Body.String())
+	}
+	if routes := lanesNodeFile(t, path); routes["task-lane"].Machine != "machine-a" || routes["task-lane"].Pane != "w1:p1" {
+		t.Fatalf("refused takeover changed the row: %+v", routes)
+	}
+}
