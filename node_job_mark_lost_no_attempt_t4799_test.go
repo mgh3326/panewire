@@ -115,6 +115,41 @@ func TestNodeJobMarkLostHoldsWhenThePurposeForgesTheJob(t *testing.T) {
 	}
 }
 
+// A legacy row herdr still vouches for outlives restart settlement, and the
+// proof holds every job while it does, because its real job cannot be
+// re-derived (finding r4578181606).
+func TestNodeJobMarkLostHoldsWhileALegacyRowSurvivesSettlement(t *testing.T) {
+	inbox := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(inbox, "jobs"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	agents := nodeAgentList(nodeAgentJSON("w2:p9", "job-b", "working", "/work/other"))
+	client, store, _ := markLostClient(t, inbox, []string{agents}, markLostEmptyPanes)
+	journal, err := client.acquireSpawnJournal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.releaseSpawnJournal()
+	if _, err := journal.db.ExecContext(t.Context(), `INSERT INTO spawn_inbox(request_id,fingerprint,status,job_id,label) VALUES('legacy-request','fingerprint','executing','job-b','job-b')`); err != nil {
+		t.Fatal(err)
+	}
+	// A listed label with no job record behind it is one of the outcomes
+	// settleExecutingSpawn cannot prove, so the row stays executing.
+	if settled, left := client.settleExecutingSpawns(t.Context(), journal); settled != 0 || left != 1 {
+		t.Fatalf("settled=%d left=%d, want 0/1", settled, left)
+	}
+	if rows, err := journal.executing(t.Context()); err != nil || len(rows) != 1 || rows[0].Strict {
+		t.Fatalf("rows=%+v err=%v", rows, err)
+	}
+	result, code := nodeRun(t, client, nodeCommandJobMarkLost, nodeJobMarkLostArgs{Job: "job-a", Label: "job-a"})
+	if code != "" || result["outcome"] != nodeJobMarkLostLedgerMissing {
+		t.Fatalf("code=%q result=%v", code, result)
+	}
+	if len(store.writes()) != 0 || store.state("job-a") != "spawned" {
+		t.Fatalf("hk state=%v writes=%v", store.state("job-a"), store.writes())
+	}
+}
+
 // A journal row an older build wrote keeps the lax identity, so the proof
 // cannot trust its job id: it holds for any job while that row is still
 // executing, and a strict row for another job never holds.
