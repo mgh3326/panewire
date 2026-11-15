@@ -11,7 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -305,9 +305,10 @@ func TestCommandcodeRefreshPublishesEveryAccountUnderItsOwnKey(t *testing.T) {
 	}
 }
 
-// A refresh whose shared readings are all current asks omp nothing: the accounts
-// are the ones the last read listed.
-func TestCommandcodeCurrentSharedReadingsAskOmpNothing(t *testing.T) {
+// Every refresh reads omp first and works only on the accounts that read
+// vouches for: current shared readings are reused (no new publication) but never
+// stand in for the omp read.
+func TestCommandcodeEveryPassReadsOmpAndReusesCurrentSharedReadings(t *testing.T) {
 	store := newAccountStore(t)
 	omp := &ompFake{output: commandcodeFixture(t, "omp_usage_two_accounts.json")}
 	source := commandcodeTestSource(claudeStore(t, store.server.URL), omp)
@@ -315,8 +316,11 @@ func TestCommandcodeCurrentSharedReadingsAskOmpNothing(t *testing.T) {
 		t.Fatalf("first refresh: reads=%d err=%v", omp.readCount(), err)
 	}
 	readings, measured, err := source.RefreshAccounts(t.Context())
-	if err != nil || measured || len(readings) != 2 || omp.readCount() != 1 {
+	if err != nil || !measured || len(readings) != 2 || omp.readCount() != 2 {
 		t.Fatalf("second refresh: readings=%d measured=%v reads=%d err=%v", len(readings), measured, omp.readCount(), err)
+	}
+	if store.published(commandcodeKeyA) != 1 || store.published(commandcodeKeyB) != 1 {
+		t.Fatal("a current shared reading was published again")
 	}
 }
 
@@ -347,44 +351,68 @@ func TestCommandcodeAccountOmpNoLongerHoldsDoesNotHideTheOther(t *testing.T) {
 	}
 }
 
-// The account inventory is read from omp at least every MaxReportAge even when
-// another host keeps the shared readings current: a removed account is no longer
-// refreshed or announced, and a new one is found.
-func TestCommandcodeInventoryIsReadEvenWhileSharedReadingsAreCurrent(t *testing.T) {
-	store := newAccountStore(t)
-	omp := &ompFake{output: commandcodeFixture(t, "omp_usage_two_accounts.json")}
-	now := commandcodeFetched.Add(90 * time.Second)
-	source := commandcodeTestSourceAt(claudeStore(t, store.server.URL), omp, &now)
-	if _, _, err := source.RefreshAccounts(t.Context()); err != nil {
-		t.Fatal(err)
-	}
-	// Four minutes on, another host has re-stamped both shared readings as
-	// current, and omp now holds account A and a new account C, not B.
-	now = commandcodeFetched.Add(5 * time.Minute)
-	store.restamp(t, now.Add(-time.Second))
-	moved := bytes.ReplaceAll(omp.output, []byte("user_fixture_b"), []byte("user_fixture_c"))
-	moved = bytes.ReplaceAll(moved, []byte("1794696766070"), []byte(strconv.FormatInt(now.Add(-time.Second).UnixMilli(), 10)))
-	moved = bytes.ReplaceAll(moved, []byte("1794696736070"), []byte(strconv.FormatInt(now.Add(-2*time.Second).UnixMilli(), 10)))
-	omp.output = moved
-	before := omp.readCount()
-	readings, _, err := source.RefreshAccounts(t.Context())
-	if err != nil || omp.readCount() == before {
-		t.Fatalf("err=%v reads %d->%d: the inventory must be read again", err, before, omp.readCount())
-	}
-	var keys []string
-	for _, r := range readings {
-		keys = append(keys, r.Key)
-	}
-	keyC := "commandcode:" + commandcode.Fingerprint("user_fixture_c")
-	if len(keys) != 2 || keys[0] != commandcodeKeyA && keys[1] != commandcodeKeyA || keys[0] != keyC && keys[1] != keyC {
-		t.Fatalf("keys %v, want account A and the new account C, not B", keys)
+// The accounts of a pass are the ones that pass's omp read vouches for, whatever
+// the shared readings say and whatever an earlier pass listed: with every shared
+// reading current, a removed account is neither returned nor announced and a new
+// one is found; with cached {A,B} and omp now listing only one of them, the other
+// is dropped whichever of the two the loop would reach first.
+func TestCommandcodeAccountsAreTheOnesTheCurrentOmpReadVouchesFor(t *testing.T) {
+	for name, tc := range map[string]struct {
+		replace, with string // how omp's output changes after the first pass
+		want          []string
+	}{
+		"B replaced by new C":  {"user_fixture_b", "user_fixture_c", []string{commandcodeKeyA, "commandcode:" + commandcode.Fingerprint("user_fixture_c")}},
+		"A replaced by new C":  {"user_fixture_a", "user_fixture_c", []string{commandcodeKeyB, "commandcode:" + commandcode.Fingerprint("user_fixture_c")}},
+		"omp output unchanged": {"", "", []string{commandcodeKeyA, commandcodeKeyB}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			store := newAccountStore(t)
+			omp := &ompFake{output: commandcodeFixture(t, "omp_usage_two_accounts.json")}
+			now := commandcodeFetched.Add(90 * time.Second)
+			source := commandcodeTestSourceAt(claudeStore(t, store.server.URL), omp, &now)
+			if _, _, err := source.RefreshAccounts(t.Context()); err != nil {
+				t.Fatal(err)
+			}
+			now = commandcodeFetched.Add(100 * time.Second)
+			store.restamp(t, now.Add(-time.Second)) // another host keeps both shared readings current
+			if tc.replace != "" {
+				omp.output = bytes.ReplaceAll(omp.output, []byte(tc.replace), []byte(tc.with))
+			}
+			before := omp.readCount()
+			store.mu.Lock()
+			presenceBefore := len(store.presence)
+			store.mu.Unlock()
+			readings, _, err := source.RefreshAccounts(t.Context())
+			if err != nil || omp.readCount() != before+1 {
+				t.Fatalf("err=%v reads %d->%d: every pass reads omp once", err, before, omp.readCount())
+			}
+			var keys []string
+			for _, r := range readings {
+				keys = append(keys, r.Key)
+			}
+			if !slices.Equal(keys, sortedCopy(tc.want)) {
+				t.Fatalf("keys %v, want %v", keys, tc.want)
+			}
+			// No presence announcement names an account this pass's omp read did not list.
+			listed := map[string]bool{}
+			for _, k := range tc.want {
+				listed[k] = true
+			}
+			store.mu.Lock()
+			defer store.mu.Unlock()
+			for _, p := range store.presence[presenceBefore:] {
+				if !listed[p.AccountKey] {
+					t.Fatalf("announced %s, which this pass's omp read does not list", p.AccountKey)
+				}
+			}
+		})
 	}
 }
 
-// An omp output the node cannot read aborts the whole refresh, also when the
-// inventory is still current and another account's shared reading is current:
-// nothing is returned to publish or admit on.
-func TestCommandcodeUnreadableOutputAbortsRefreshDespiteACurrentSharedReading(t *testing.T) {
+// An omp that cannot be read fails every pass whole and touches the store not at
+// all, with young cached accounts, with every shared reading current, and again
+// after another host restamps them: no cached list or shared reading stands in.
+func TestCommandcodeUnreadableOmpFailsEveryPassWithoutAnyStoreEffect(t *testing.T) {
 	store := newAccountStore(t)
 	omp := &ompFake{output: commandcodeFixture(t, "omp_usage_two_accounts.json")}
 	now := commandcodeFetched.Add(90 * time.Second)
@@ -392,16 +420,25 @@ func TestCommandcodeUnreadableOutputAbortsRefreshDespiteACurrentSharedReading(t 
 	if _, _, err := source.RefreshAccounts(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	// 100 s on: the inventory is within 3 minutes, account A (fetched 10 s
-	// earlier in the fixture clock) is due, account B's shared reading was
-	// re-stamped current by another host, and omp now answers an unknown shape.
-	now = commandcodeFetched.Add(190 * time.Second)
-	store.restampKey(t, commandcodeKeyB, now.Add(-time.Second))
-	store.expire(t, commandcodeKeyA)
-	omp.output = []byte(`{"version":9}`)
-	readings, _, err := source.RefreshAccounts(t.Context())
-	if quota.KindOf(err) != quota.ErrKindParse || len(readings) != 0 {
-		t.Fatalf("readings %d err %v, want parse_error and no reading", len(readings), err)
+	omp.output = []byte("omp 99 prints a table now")
+	for pass, restamp := range []bool{false, true, true} {
+		now = commandcodeFetched.Add(time.Duration(100+pass*10) * time.Second)
+		if restamp {
+			store.restamp(t, now.Add(-time.Second))
+		}
+		store.mu.Lock()
+		calls := len(store.calls)
+		store.mu.Unlock()
+		readings, _, err := source.RefreshAccounts(t.Context())
+		store.mu.Lock()
+		after := len(store.calls)
+		store.mu.Unlock()
+		if quota.KindOf(err) != quota.ErrKindParse || len(readings) != 0 || after != calls {
+			t.Fatalf("pass %d: readings %d err %v store calls %d->%d, want parse_error, no readings, no store effect", pass, len(readings), err, calls, after)
+		}
+	}
+	if status, err := source.storedAccounts(t.Context()); err == nil && len(status) != 0 {
+		t.Fatalf("status listed %v from a list the failed read no longer vouches for", status)
 	}
 }
 
@@ -563,4 +600,10 @@ func TestQuotaCLIRefreshCommandcodePrintsEachAccount(t *testing.T) {
 	if json.Unmarshal([]byte(lines[0]), &a) != nil || json.Unmarshal([]byte(lines[1]), &b) != nil || a.Account != commandcodeFPA || b.Account != commandcodeFPB || a.Pool != "commandcode" || len(a.Buckets) != 2 {
 		t.Fatalf("lines %q", lines)
 	}
+}
+
+func sortedCopy(keys []string) []string {
+	out := slices.Clone(keys)
+	slices.Sort(out)
+	return out
 }

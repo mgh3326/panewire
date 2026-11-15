@@ -21,19 +21,21 @@ import (
 // `commandcode:<fp>`.
 
 // commandcodeState is what the pool remembers between refreshes: the account
-// fingerprints omp listed at its last good read and when, and the failure
-// reasons already logged. The list is the host's inventory of accounts only while
-// it is younger than commandcode.MaxReportAge; an older one is read again before
-// any account is refreshed or announced, whatever the shared readings say.
+// fingerprints omp listed at its last good read and when (a hint for the status
+// table and the login probe, never an input to a refresh), and the failure
+// reasons already logged. pass serializes refreshes: a refresh's effects (the
+// shared flow's presence, lease and publication) all derive from one omp
+// snapshot, and two refreshes never interleave their effects.
 type commandcodeState struct {
+	pass    sync.Mutex
 	mu      sync.Mutex
 	known   []string
 	knownAt time.Time
 	warned  map[string]bool
 }
 
-// inventory is the accounts omp listed, or nil when that read is older than
-// MaxReportAge (or there was none): the caller must list again.
+// inventory is the accounts omp listed at the last good read, or nil when that
+// read is older than MaxReportAge (or there was none or it failed).
 func (st *commandcodeState) inventory(now time.Time) []string {
 	st.mu.Lock()
 	defer st.mu.Unlock()
@@ -61,9 +63,8 @@ func (s *nativeQuotaSource) measureCommandcode(ctx context.Context) ([]commandco
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	if err != nil {
-		if quota.KindOf(err) == quota.ErrKindCredentials {
-			st.known, st.knownAt = nil, time.Time{}
-		}
+		// Whatever the failure, the last list no longer vouches for any account.
+		st.known, st.knownAt = nil, time.Time{}
 		if s.Warn != nil && ctx.Err() == nil && quota.KindOf(err) != quota.ErrKindCredentials && !st.warned[err.Error()] {
 			if st.warned == nil {
 				st.warned = map[string]bool{}
@@ -93,135 +94,97 @@ func commandcodeMeasurer(account commandcode.Account) shared.Measurer {
 }
 
 // refreshCommandcode is RefreshAccounts for the commandcode pool: the current
-// reading of every account omp holds. With a shared store each account takes its
-// own lease and the reading stays current in the store; the one `omp usage` call
-// a refresh needs is made only when some account's shared reading is not current.
-// An account that fails does not hide the others; the refresh fails when none
-// has a reading.
+// reading of every account omp holds.
+//
+// The invariant is that every reading returned, presence announced and
+// observation published names an account the omp snapshot read by THIS pass
+// vouches for (a fresh report of that account). So the pass reads omp first, once,
+// and fails whole when it cannot: nothing is returned or announced from a cached
+// list, and another host keeping a shared reading current says nothing about this
+// host's login. Only then does each account of the snapshot take its own lease
+// and publication through the shared flow (reusing a current shared reading
+// where one exists, and announcing presence either way); the flow never calls
+// omp and the set it works on is fixed. An account's store failure does not hide
+// the others; the refresh fails when none has a reading.
 func (s *nativeQuotaSource) refreshCommandcode(ctx context.Context) ([]shared.Reading, bool, error) {
-	store, err := quotaStoreClient(s.SpawnConfigPath, s.StoreTransport)
-	if errors.Is(err, errQuotaStoreUnconfigured) {
-		accounts, err := s.measureCommandcode(ctx)
-		if err != nil {
-			return nil, false, err
-		}
-		var readings []shared.Reading
-		for _, account := range accounts {
-			reading, err := s.measureDirect(ctx, commandcodeMeasurer(account))
-			if err != nil {
-				return nil, true, err
-			}
-			readings = append(readings, reading)
-		}
-		return readings, true, nil
-	}
-	if err != nil {
+	s.commandcodeState.pass.Lock()
+	defer s.commandcodeState.pass.Unlock()
+	store, storeErr := quotaStoreClient(s.SpawnConfigPath, s.StoreTransport)
+	direct := errors.Is(storeErr, errQuotaStoreUnconfigured)
+	if storeErr != nil && !direct {
+		// Reading omp first or not, a configured store this node cannot use fails
+		// the refresh without effects.
 		return nil, false, quota.Fail(quota.ErrKindSharedUnavailable, "shared quota unavailable")
 	}
-	s.flowOnce.Do(func() {
-		s.flow = &shared.Flow{Now: s.Now, FreshTTL: s.refreshTTL(shared.OtherFreshTTL), HostID: s.HostID, Wait: s.Wait}
-	})
-	var (
-		listed   bool
-		accounts []commandcode.Account
-		listErr  error
-		measured bool
-	)
-	list := func(ctx context.Context) ([]commandcode.Account, error) {
-		if !listed {
-			listed = true
-			accounts, listErr = s.measureCommandcode(ctx)
-		}
-		return accounts, listErr
+	accounts, err := s.measureCommandcode(ctx)
+	if err != nil {
+		return nil, false, err
 	}
-	// The inventory is read from omp at least every MaxReportAge, independent of
-	// how current the shared readings are: another host keeping them current must
-	// not let a removed account stay announced or hide a new one.
-	fps := s.commandcodeState.inventory(s.now())
-	if len(fps) == 0 {
-		found, err := list(ctx)
-		if err != nil {
-			return nil, false, err
-		}
-		for _, account := range found {
-			fps = append(fps, account.FP)
-		}
+	if !direct {
+		s.flowOnce.Do(func() {
+			s.flow = &shared.Flow{Now: s.Now, FreshTTL: s.refreshTTL(shared.OtherFreshTTL), HostID: s.HostID, Wait: s.Wait}
+		})
 	}
+	stale := quota.Fail(quota.ErrKindProbe, "omp usage report is stale")
 	var (
 		readings []shared.Reading
 		lastErr  error
-		done     []string
 	)
-	refresh := func(fp string) {
-		done = append(done, fp)
-		reading, err := s.flow.Refresh(ctx, store, "commandcode:"+fp, func(ctx context.Context) (quota.Observation, error) {
-			found, err := list(ctx)
-			if err != nil {
-				return quota.Observation{}, err
-			}
-			for _, account := range found {
-				if account.FP == fp {
-					measured = true
-					return commandcodeMeasurer(account)(ctx)
+	for _, account := range accounts {
+		// An account's own report decides whether this host vouches for it: not
+		// the shared reading, and not the time of the pass.
+		witnessed := func() bool { return commandcode.Fresh(s.now(), account.Observation.MeasuredAt) }
+		if !witnessed() {
+			lastErr = stale
+			continue
+		}
+		var reading shared.Reading
+		var err error
+		if direct {
+			reading, err = s.measureDirect(ctx, commandcodeMeasurer(account))
+		} else {
+			reading, err = s.flow.Refresh(ctx, store, "commandcode:"+account.FP, func(ctx context.Context) (quota.Observation, error) {
+				if !witnessed() {
+					return quota.Observation{}, stale
 				}
-			}
-			// omp no longer holds the account the shared reading was for.
-			return quota.Observation{}, quota.Fail(quota.ErrKindAccountUnknown, "omp no longer holds the account")
-		})
+				return commandcodeMeasurer(account)(ctx)
+			})
+		}
+		if err == nil && !witnessed() {
+			// A lease wait outlived the report.
+			err = stale
+		}
 		if err != nil {
 			lastErr = err
-			return
+			continue
 		}
 		// A reading published by a node that still measures through the API
 		// carries a 30d bucket; the month is not read (decision 289).
 		reading.Buckets = slices.DeleteFunc(slices.Clone(reading.Buckets), func(b shared.Bucket) bool { return !fleet.WindowRead("commandcode", b.Window) })
 		readings = append(readings, reading)
 	}
-	for _, fp := range fps {
-		refresh(fp)
-	}
-	// An account omp lists that this host did not know yet is refreshed in the same pass.
-	for _, account := range accounts {
-		if listErr == nil && !slices.Contains(done, account.FP) {
-			refresh(account.FP)
-		}
-	}
-	// An omp output this build cannot read fails the whole refresh, even when a
-	// shared reading of another account was current: nothing is returned for the
-	// node to publish or to admit the pool on.
-	if listed && listErr != nil {
-		return nil, measured, listErr
-	}
 	if len(readings) == 0 {
 		if lastErr == nil {
 			lastErr = quota.Fail(quota.ErrKindAccountUnknown, "no account key")
 		}
-		return nil, measured, lastErr
+		return nil, true, lastErr
 	}
 	slices.SortFunc(readings, func(a, b shared.Reading) int { return strings.Compare(a.Key, b.Key) })
-	return readings, measured, nil
+	return readings, true, nil
 }
 
 // storedCommandcode is storedAccounts for the commandcode pool: each account this
-// host is known to hold, read from the shared store without measuring. The
-// accounts are the ones the node listed last, else the ones its presence records
-// name, else the ones omp lists now.
+// host holds, read from the shared store without measuring.
 func (s *nativeQuotaSource) storedCommandcode(ctx context.Context) ([]quotaReading, error) {
 	store, err := quotaStoreClient(s.SpawnConfigPath, s.StoreTransport)
 	if err != nil {
 		return nil, quota.Fail(quota.ErrKindSharedUnavailable, "shared quota unavailable")
 	}
-	fps := s.commandcodeState.knownFPs()
-	if len(fps) == 0 && s.HostID != "" {
-		if records, err := store.Presence(ctx); err == nil {
-			for _, record := range records {
-				if fp, ok := strings.CutPrefix(record.AccountKey, "commandcode:"); ok && record.HostID == s.HostID && !slices.Contains(fps, fp) {
-					fps = append(fps, fp)
-				}
-			}
-			slices.Sort(fps)
-		}
-	}
+	// The accounts are the ones the last good omp read listed while that read is
+	// current, else the ones omp lists now: never the ones an old presence record
+	// or an old list names (a removed account would stay "fresh" through another
+	// host's readings).
+	fps := s.commandcodeState.inventory(s.now())
 	if len(fps) == 0 {
 		accounts, err := s.measureCommandcode(ctx)
 		if err != nil {
@@ -244,13 +207,13 @@ func (s *nativeQuotaSource) storedCommandcode(ctx context.Context) ([]quotaReadi
 
 // commandcodeMeasurableHere says whether this host lists a Command Code account
 // omp holds as measurable (`[quota].measurable_accounts`): the login probe's gate.
-// It reads the accounts the last refresh listed, so it asks omp nothing.
+// It reads the accounts the last good refresh listed (while current), so it asks omp nothing.
 func (s *nativeQuotaSource) commandcodeMeasurableHere() bool {
 	listed := fleet.HostMeasurableAccount
 	if s.MeasurableAccount != nil {
 		listed = s.MeasurableAccount
 	}
-	for _, fp := range s.commandcodeState.knownFPs() {
+	for _, fp := range s.commandcodeState.inventory(s.now()) {
 		if listed("commandcode:" + fp) {
 			return true
 		}

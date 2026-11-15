@@ -2,6 +2,7 @@ package fleet
 
 import (
 	"context"
+	"encoding/json"
 	"slices"
 	"testing"
 	"time"
@@ -228,4 +229,53 @@ func TestCommandcodeMonthlyBucketFromAnOlderNodeIsIgnored(t *testing.T) {
 	if got := readableBuckets("kiro", buckets); len(got) != 2 {
 		t.Fatalf("another pool's windows are all read: %+v", got)
 	}
+}
+
+// An explicit-profile (local) request names no account. For a multi-account pool
+// the gate judges the host's accounts in turn and admits on the first that
+// admits, so one exhausted or unreadable account does not decide for the pool;
+// when none admits the first account's refusal is the verdict. An account whose
+// presence is older than multiAccountWindow is not held.
+func TestLocalCommandcodeGateJudgesEveryHeldAccount(t *testing.T) {
+	week := func(used float64) *shared.Observation {
+		o := switchReading(10, used)
+		return o
+	}
+	run := func(t *testing.T, seen map[string]time.Duration, readings map[string]*shared.Observation) (Result, gateReceipt) {
+		t.Helper()
+		a, _, _ := switchApp(t, gateModeNative, nil, Result{Code: 99})
+		a.Config.Local = map[string]any{"presence_id": "mac"}
+		src := &fakePlacementSource{}
+		for key, ago := range seen {
+			src.presence = append(src.presence, PresenceRecord{HostID: "mac", AccountKey: key, LastSeen: switchNow.Add(-ago)})
+		}
+		a.Source = src
+		a.SharedLatest = func(_ context.Context, key string) (shared.Latest, error) {
+			return shared.Latest{Observation: readings[key]}, nil
+		}
+		x := a.nativeGate(context.Background(), QuotaRequest{Profile: "cmd-dsflash41", Effort: "high", Role: "implementer"}, true)
+		var receipt gateReceipt
+		if err := json.Unmarshal([]byte(x.Out), &receipt); err != nil {
+			t.Fatalf("receipt %q: %v", x.Out, err)
+		}
+		return x, receipt
+	}
+	t.Run("the first account is exhausted, the second admits", func(t *testing.T) {
+		x, receipt := run(t, map[string]time.Duration{ccKeyA: time.Minute, ccKeyB: 2 * time.Minute}, map[string]*shared.Observation{ccKeyA: week(100), ccKeyB: week(30)})
+		if x.Code != 0 || receipt.ReadingKey != ccKeyB {
+			t.Fatalf("code %d reading key %s, want admitted on %s: %s", x.Code, receipt.ReadingKey, ccKeyB, x.Out)
+		}
+	})
+	t.Run("every account is exhausted", func(t *testing.T) {
+		x, receipt := run(t, map[string]time.Duration{ccKeyA: time.Minute, ccKeyB: 2 * time.Minute}, map[string]*shared.Observation{ccKeyA: week(100), ccKeyB: week(100)})
+		if x.Code != gateBlocked || receipt.ReadingKey != ccKeyA {
+			t.Fatalf("code %d reading key %s, want blocked with the first account's refusal: %s", x.Code, receipt.ReadingKey, x.Out)
+		}
+	})
+	t.Run("an account announced hours ago is not held", func(t *testing.T) {
+		x, receipt := run(t, map[string]time.Duration{ccKeyA: 5 * time.Hour, ccKeyB: time.Minute}, map[string]*shared.Observation{ccKeyA: week(10), ccKeyB: week(100)})
+		if x.Code != gateBlocked || receipt.ReadingKey != ccKeyB {
+			t.Fatalf("code %d reading key %s, want blocked on B alone (A is not held): %s", x.Code, receipt.ReadingKey, x.Out)
+		}
+	})
 }

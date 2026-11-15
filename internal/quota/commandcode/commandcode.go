@@ -186,12 +186,14 @@ func Measure(ctx context.Context, cfg Config) ([]Account, error) {
 	return fresh, nil
 }
 
-// fresh says a report fetched at is neither older than MaxReportAge nor from the
-// future.
-func (c Config) fresh(fetched time.Time) bool {
-	age := c.now().Sub(fetched)
+// Fresh says a report fetched at is, as of now, neither older than MaxReportAge
+// nor from the future.
+func Fresh(now, fetched time.Time) bool {
+	age := now.Sub(fetched)
 	return age >= -futureSkew && age <= MaxReportAge
 }
+
+func (c Config) fresh(fetched time.Time) bool { return Fresh(c.now(), fetched) }
 
 // read runs `omp usage` once. stale says some account's report is too old to
 // use, so a refresh is worth asking for.
@@ -229,7 +231,12 @@ var errShape = quota.Fail(quota.ErrKindParse, "unsupported omp usage output")
 func parse(out []byte) ([]Account, error) {
 	var doc ompReport
 	decoder := json.NewDecoder(bytes.NewReader(out))
-	if decoder.Decode(&doc) != nil || doc.Reports == nil {
+	// One document and nothing after it: trailing output is an output this
+	// package does not know.
+	if decoder.Decode(&doc) != nil || doc.Reports == nil || decoder.More() {
+		return nil, errShape
+	}
+	if _, err := decoder.Token(); err != io.EOF {
 		return nil, errShape
 	}
 	var accounts []Account
@@ -329,8 +336,13 @@ func usedPct(limit ompLimit) (*float64, bool) {
 		return quota.Pct(100), true
 	}
 	switch {
-	case amount.UsedFraction != nil && finite(*amount.UsedFraction) && *amount.UsedFraction >= 0:
-		return quota.Pct(min(100**amount.UsedFraction, 100)), true
+	case amount.UsedFraction != nil:
+		// A fraction that is present decides: an invalid one is not papered over
+		// by used/limit.
+		if finite(*amount.UsedFraction) && *amount.UsedFraction >= 0 {
+			return quota.Pct(min(100**amount.UsedFraction, 100)), true
+		}
+		return nil, false
 	case amount.Used != nil && amount.Limit != nil && finite(*amount.Used) && finite(*amount.Limit) && *amount.Limit > 0 && *amount.Used >= 0:
 		return quota.Pct(min(100**amount.Used / *amount.Limit, 100)), true
 	}

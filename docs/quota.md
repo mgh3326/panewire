@@ -138,8 +138,8 @@ harness가 omp이고, omp는 자기 login(여러 계정일 수 있음)으로 쓰
   login이 없는 것(`credentials`)입니다. 호스트의 omp가 가진 **모든** Command Code 계정이
   `reports[]`에 한 줄씩 나옵니다.
 - **Windows.** 계정마다 `commandcode:5h`(14 credits)와 `commandcode:7d`(35 credits)
-  limit을 읽습니다: `5h`와 `7d` account bucket, used share = `amount.usedFraction`, 없으면
-  `used / limit`, 100으로 clamp. `status: "exhausted"`는 100입니다. 값이 없거나 깨진 window는
+  limit을 읽습니다: `5h`와 `7d` account bucket, used share = `amount.usedFraction`(있는데 잘못된 값이면 `used / limit`로 덮지 않고
+  알 수 없는 shape), 없을 때만 `used / limit`, 100으로 clamp. `status: "exhausted"`는 100입니다. 값이 없거나 깨진 window는
   bucket에서 빠집니다(깨진 값이 "안 쓴 window"로 읽히는 일은 없습니다). 두 window의
   `durationMs`는 각각 18 000 000과 604 800 000이어야 하며, 다르면 알 수 없는 shape입니다.
   `resetsAt`(epoch ms)는 bucket의 reset입니다. **7d reset은 고정 경계**입니다: omp의
@@ -162,7 +162,7 @@ harness가 omp이고, omp는 자기 login(여러 계정일 수 있음)으로 쓰
   report is stale")입니다. 미래의 `fetchedAt`(1분 초과)도 unknown입니다.
 - **Fail closed.** 아는 shape가 아니면(JSON이 아님, `reports` 없음, `fetchedAt` 또는
   `limits` 없음, `scope.accountId` 없음 또는 계정 불일치, 알려진 window의 길이가 다르거나 amount를
-  읽을 수 없음(다른 window가 멀쩡해도 부분 reading은 게시하지 않습니다), 같은 계정이 두 번 나옴) `parse_error`("unsupported omp usage output")이고, pool은 이 호스트에서
+  읽을 수 없음(다른 window가 멀쩡해도 부분 reading은 게시하지 않습니다), 같은 계정이 두 번 나옴, JSON 문서 뒤에 다른 출력이 붙음) `parse_error`("unsupported omp usage output")이고, pool은 이 호스트에서
   admit되지 않습니다. 이유는 같은 이유가 계속되는 동안 **한 번만** 로그에 남깁니다(omp 출력은
   로그에도 오류에도 들어가지 않으며 고정 문장입니다). "omp 없음" 또는 "Command Code 계정
   없음"은 `credentials`(이 호스트에 login 없음)이며 오류가 아니므로 로그하지 않습니다. 윈도우가
@@ -175,12 +175,22 @@ harness가 omp이고, omp는 자기 login(여러 계정일 수 있음)으로 쓰
     같은 id이므로 key가 바뀌지 않습니다 (기존 presence, `[quota.accounts]`,
     `[quota].measurable_accounts` 항목이 그대로 유효). 계정은 fp 순으로 정렬합니다.
   - **Shared store flow** as for codex, per account: 계정마다 lease(120 s)와 게시, presence
-    announce가 따로입니다. reading은 300 s 동안 fresh이고 3분이 지나면 refresh 대상입니다. 노드는
-    omp가 목록에 올린 계정(inventory)을 기억하고, 이 목록이 3분(`MaxReportAge`)보다 오래되면 다른
-    host가 shared reading을 fresh로 유지하고 있어도 `omp usage`를 다시 읽습니다: 목록에서 빠진
-    계정은 더는 갱신·announce되지 않고, 새 계정은 바로 발견됩니다. inventory가 3분 안이고 모든
-    계정의 shared reading이 fresh이면 `omp usage`를 부르지 않습니다. 한 계정의 실패는 다른 계정을 가리지 않습니다: refresh는 reading이 하나도
+    announce가 따로입니다. reading은 300 s 동안 fresh이고 3분이 지나면 refresh 대상입니다. **모든
+    refresh는 먼저 omp를 읽습니다**(pass당 `omp usage --json` 한 번; report가 3분보다 오래됐을 때만
+    `invalidate` 뒤 한 번 더). 그 pass의 omp 읽기가 보증하는 계정(자기 `fetchedAt`이 3분 안)만
+    반환·announce·게시합니다. 불변식: 반환한 reading, announce한 presence, 게시한 observation의
+    key는 모두 **이번 pass의 omp snapshot이 보증하는 계정**입니다. 다른 host가 shared reading을
+    fresh로 유지하는 것은 이 host의 login 증거가 아니므로, shared reading이 fresh이어도 omp 읽기를
+    건너뛰지 않고, 옛 계정 목록이 계정을 되살리지도 않습니다. omp를 읽지 못하거나(unknown shape,
+    probe 실패, timeout, 전부 stale) 한 계정도 보증하지 못하면 refresh는 통째로 실패하며 store를
+    전혀 건드리지 않습니다. 계정 목록 cache는 status 표와 login probe의 힌트일 뿐 refresh의 입력이
+    아니고, 어떤 실패에서도 비워집니다. 같은 노드의 refresh는 직렬화됩니다(`pass` lock). snapshot이
+    확정된 뒤 각 계정은 shared flow로 lease·게시·announce를 따로 합니다(fresh한 shared reading은
+    재사용하되 announce는 계속, flow는 omp를 부르지 않음). 한 계정의 실패는 다른 계정을 가리지 않습니다: refresh는 reading이 하나도
     없을 때만 실패합니다. omp가 더는 목록에 올리지 않는 계정은 갱신되지 않고 stale로 떨어집니다.
+  - **Presence의 한계.** 계정 철회는 전용 계약이 없어(shared presence에는 delete·generation이
+    없음) 30분 창으로 근사합니다. 명시적 host/pool inventory snapshot(원자적 전체 교체)과 잠든 host를
+    깨우는 힌트 분리는 별도 후속 과제입니다.
   - **Selection.** host의 presence record 중 **지금부터 30분 안**에 announce된 모든
     `commandcode:` key가 그 host의 계정입니다(`hostAccounts`; live node는 계정마다 적어도 10분마다
     announce합니다. 마지막 계정을 지운 host나 목록에서 빠진 계정은 다른 host가 shared reading을

@@ -185,6 +185,8 @@ func TestUnknownShapeFailsClosed(t *testing.T) {
 		"weekly length changed": strings.Replace(good, `"durationMs": 604800000`, `"durationMs": 2592000000`, 1),
 		"limit without window":  strings.Replace(good, `"window": {`, `"windows": {`, 1),
 		"duplicate account":     strings.ReplaceAll(good, "user_fixture_b", "user_fixture_a"),
+		"trailing output":       good + "\nnot-json",
+		"second document":       good + good,
 	}
 	for name, output := range cases {
 		o := &omp{replies: [][]byte{[]byte(output)}}
@@ -208,6 +210,8 @@ func TestUnreadableRecognizedWindowFailsClosed(t *testing.T) {
 		"amount as strings":     window("7d", "604800000", `{"used":"35","limit":"35"}`),
 		"zero limit":            window("7d", "604800000", `{"used":1,"limit":0}`),
 		"negative fraction":     window("7d", "604800000", `{"usedFraction":-1}`),
+		// A present fraction decides: used/limit must not paper over a bad one.
+		"bad fraction, good used/limit": window("7d", "604800000", `{"usedFraction":-1,"used":1,"limit":35}`),
 	} {
 		doc := fmt.Sprintf(`{"reports":[{"provider":"commandcode","fetchedAt":%d,"limits":[%s,%s]}]}`, fetchedA.UnixMilli(), five, week)
 		o := &omp{replies: [][]byte{[]byte(doc)}}

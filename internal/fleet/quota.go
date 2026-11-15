@@ -572,11 +572,19 @@ func (a *App) heldAccountKeys(ctx context.Context, pools []string) map[string][]
 		return held
 	}
 	id := firstNonempty(str(a.Config.Local, "presence_id"), a.machine())
+	now := a.Now()
 	for _, rec := range records {
 		pool := accountPool(rec.AccountKey)
-		if rec.HostID == id && slices.Contains(pools, pool) && !slices.Contains(held[pool], rec.AccountKey) {
-			held[pool] = append(held[pool], rec.AccountKey)
+		if rec.HostID != id || !slices.Contains(pools, pool) || slices.Contains(held[pool], rec.AccountKey) {
+			continue
 		}
+		// An account of a multi-account pool is held only while its host keeps
+		// announcing it (multiAccountWindow); the pinned account and every other
+		// pool keep the unbounded record.
+		if slices.Contains(multiAccountPools, pool) && (now.Sub(rec.LastSeen) > multiAccountWindow || rec.LastSeen.After(now.Add(time.Minute))) {
+			continue
+		}
+		held[pool] = append(held[pool], rec.AccountKey)
 	}
 	return held
 }
