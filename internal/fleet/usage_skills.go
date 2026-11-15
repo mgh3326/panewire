@@ -78,8 +78,8 @@ func (r UsageReader) ReadSkills(ref HarnessSession, cwd string) SkillUsage {
 func readClaudeSkills(path string) ([]SkillUse, bool) {
 	counts := map[string]int64{}
 	seen := map[string]bool{}
-	overflow := false
-	ok := scanUsageLines(path, func(line []byte) {
+	overflow, skipped := false, false
+	ok := scanUsageLinesNotify(path, func(line []byte) {
 		var entry struct {
 			Type    string `json:"type"`
 			Message struct {
@@ -116,10 +116,10 @@ func readClaudeSkills(path string) ([]SkillUse, bool) {
 			}
 			counts[name]++
 		}
-	})
+	}, func() { skipped = true })
 	// A partial list is worse than none: hk replaces the whole array, and an
-	// overflowed record cannot prove the calls it dropped.
-	if !ok || overflow {
+	// overflowed or skipped-over record cannot prove the calls it dropped.
+	if !ok || overflow || skipped {
 		return nil, false
 	}
 	out := make([]SkillUse, 0, len(counts))

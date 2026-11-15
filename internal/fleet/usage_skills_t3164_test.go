@@ -106,6 +106,58 @@ func TestCompletionWritesClaudeSkills(t *testing.T) {
 	}
 }
 
+// writeClaudeSkillsOverlongFixture adds one normal Skill call and one whose
+// args push its JSONL line past the reader's per-line bound, which the scan
+// skips. No list can be complete while a Skill line is unread.
+func writeClaudeSkillsOverlongFixture(t *testing.T, root string) {
+	t.Helper()
+	big := fmt.Sprintf(`{"type":"assistant","message":{"id":"big","role":"assistant","content":[{"type":"tool_use","id":"toolu_big","name":"Skill","input":{"skill":"beta","args":%q}}]}}`, strings.Repeat("x", maxUsageLineBytes))
+	writeUsageFile(t, claudeFixturePath(root, testClaudeID), jsonl(
+		`{"type":"assistant","message":{"id":"m1","role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Skill","input":{"skill":"alpha"}}]}}`,
+		big,
+	))
+}
+
+func TestReadClaudeSkillsSkippedLineIsNotAPartialList(t *testing.T) {
+	root := t.TempDir()
+	writeClaudeSkillsOverlongFixture(t, root)
+	got := UsageReader{Root: root}.ReadSkills(HarnessSession{Kind: "claude", ID: testClaudeID, Source: "herdr:claude"}, testCWD)
+	if !got.Supported {
+		t.Fatal("claude must be supported")
+	}
+	if got.Known || len(got.Skills) != 0 {
+		t.Fatalf("known/skills = %v/%v, want no partial list", got.Known, got.Skills)
+	}
+}
+
+func TestOverlongSkillLineWritesNoSkills(t *testing.T) {
+	a := testApp(t)
+	ledgerRunner(t, a)
+	writeClaudeSkillsOverlongFixture(t, a.Home)
+	jobs, bodies := hkJobUpdateContract(t)
+	usageJob(t, a, claudeSession())
+	a.JobStore = jobs
+
+	doneJob(t, a)
+
+	sawSupported := false
+	for _, body := range bodies() {
+		var doc map[string]any
+		if json.Unmarshal([]byte(body), &doc) != nil {
+			continue
+		}
+		if _, ok := doc["skills"]; ok {
+			t.Errorf("over-long record wrote a partial skills list: %s", body)
+		}
+		if supported, ok := doc["skills_supported"].(bool); ok && supported {
+			sawSupported = true
+		}
+	}
+	if !sawSupported {
+		t.Fatalf("no body carried skills_supported:true; bodies=%v", bodies())
+	}
+}
+
 func TestNonClaudeHarnessReportsSkillsUnsupported(t *testing.T) {
 	a := testApp(t)
 	ledgerRunner(t, a)

@@ -247,6 +247,14 @@ func usageModel(s string) string {
 // maxUsageFileBytes, or cannot be read. Lines over maxUsageLineBytes are
 // skipped whole.
 func scanUsageLines(path string, each func(line []byte)) bool {
+	return scanUsageLinesNotify(path, each, nil)
+}
+
+// scanUsageLinesNotify is scanUsageLines with skipped called once for every
+// line dropped for its length. A caller whose result must be complete (the
+// skill list, hk 3164) refuses on any skip instead of reporting a partial
+// read.
+func scanUsageLinesNotify(path string, each func(line []byte), skipped func()) bool {
 	info, err := os.Lstat(path)
 	if err != nil || !info.Mode().IsRegular() || info.Size() > maxUsageFileBytes {
 		return false
@@ -278,6 +286,9 @@ func scanUsageLines(path string, each func(line []byte)) bool {
 		if !skipping {
 			if len(line)+len(chunk) > maxUsageLineBytes {
 				skipping, line = true, line[:0]
+				if skipped != nil {
+					skipped()
+				}
 			} else {
 				line = append(line, chunk...)
 			}

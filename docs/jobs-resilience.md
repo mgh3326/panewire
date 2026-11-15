@@ -168,7 +168,9 @@ so no zero count is recorded. Only claude has
 a record the node reads the same bounded way: `Skill` tool_use blocks in the
 session JSONL above, counted once per tool_use id (a message is written once
 per content block), with the name matched against claude's lowercase skill-id
-character set. Arguments, tool text and every other input are never decoded,
+character set. A line the bounded scan had to skip makes the list unknown:
+no array is sent, never a partial one. Arguments, tool text and every other
+input are never decoded,
 retained or sent; no version is recorded. Every other harness sends
 `skills_supported:false` and no array. A job whose `job.spawned` carries no
 `harness_session` sends neither field. An hk refusal is the same warning as a
