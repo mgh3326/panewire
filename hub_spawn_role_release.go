@@ -132,6 +132,16 @@ func (h *HubServer) releaseFailedSpawnRole(ctx context.Context, app *fleet.App, 
 		return false, heldProbe{reason: "hk_state_not_claimable"}
 	}
 	released, markReason := h.markLostAndRelease(ctx, app, holder, heldAgentName(holder, record), roleKey)
+	if !released && markReason == nodeJobMarkLostLedgerMissing && holder.Outcome.Pane == "" {
+		// hk 4673: a failed holder that recorded no pane, whose pane is
+		// absent and whose node has no ledger left (job dir or events/ gone),
+		// frees its reservation. hk is left as it is: the node still never
+		// writes lost over a record it cannot check (hk 3685), so the hk job
+		// stays claimed. Reviewer reservations are the subject of hk 4737.
+		if h.inbox.store.releaseCompletedSpawnRole(ctx, holder.Request.RequestID, roleKey) == nil {
+			return true, probe
+		}
+	}
 	if !released {
 		probe.write, probe.reason = true, markReason
 	}
@@ -435,7 +445,11 @@ func (h *HubServer) reclaimSpawnRole(ctx context.Context, app *fleet.App, reques
 				return task, nil, err
 			}
 			trace.branch = "claim_raced"
-		} else if probe.state == heldPaneAbsent || probe.write {
+		} else if probe.write {
+			// The node refused the lost write (or its read failed), so no
+			// reservation release was tried: name the refusal, not a write.
+			trace.branch = "mark_lost_refused"
+		} else if probe.state == heldPaneAbsent {
 			trace.branch = "release_write_failed"
 		}
 	}
