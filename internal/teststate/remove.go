@@ -32,6 +32,11 @@ func removeDir(path string) error {
 	if err != nil {
 		return ignoreNotExist(err)
 	}
+	if !info.IsDir() {
+		// The walk classified this entry as a directory, but it is no longer
+		// one: remove that entry and never the tree a link names.
+		return ignoreNotExist(os.Remove(path))
+	}
 	if info.Mode().Perm()&0o700 != 0o700 {
 		if err := os.Chmod(path, info.Mode().Perm()|0o700); err != nil {
 			return ignoreNotExist(err)

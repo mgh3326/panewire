@@ -64,3 +64,28 @@ func TestRemoveAllDoesNotFollowSymlink(t *testing.T) {
 		t.Fatalf("RemoveAll followed a symlink: %v", err)
 	}
 }
+
+// TestRemoveDirRemovesASymlinkWithoutItsTarget hands removeDir an entry the walk
+// classified as a directory but which is now a link: the link goes, the tree it
+// names stays. Reading or chmod-ing through the link would delete that tree.
+func TestRemoveDirRemovesASymlinkWithoutItsTarget(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	outsideFile := filepath.Join(outside, "keep")
+	if err := os.WriteFile(outsideFile, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "link")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := removeDir(link); err != nil {
+		t.Fatalf("removeDir: %v", err)
+	}
+	if _, err := os.Stat(outsideFile); err != nil {
+		t.Fatalf("removeDir followed a symlink: %v", err)
+	}
+	if _, err := os.Lstat(link); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("the link must be removed: %v", err)
+	}
+}
