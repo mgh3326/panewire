@@ -154,8 +154,8 @@ func (s *laneInboxStore) activeConsults(parent context.Context) ([]hubConsult, e
 func (s *laneInboxStore) saveConsult(parent context.Context, c hubConsult) error {
 	ctx, done := s.op(parent)
 	defer done()
-	_, err := s.db.ExecContext(ctx, s.q(`UPDATE consult_requests SET state=?,seat_profile=?,seat_family=?,seat_grade=?,job=?,request_id=?,reason=?,answer_doc=?,answered_ms=?,respawns=?,notified=? WHERE id=?`),
-		c.State, c.SeatProfile, c.SeatFamily, c.SeatGrade, c.Job, c.RequestID, c.Reason, c.AnswerDoc, c.Answered.UnixMilli(), c.Respawns, consultBoolInt(c.Notified), c.ID)
+	_, err := s.db.ExecContext(ctx, s.q(`UPDATE consult_requests SET state=?,seat_profile=?,seat_family=?,seat_grade=?,job=?,request_id=?,reason=?,answer_doc=?,answered_ms=?,deadline_ms=?,respawns=?,notified=? WHERE id=?`),
+		c.State, c.SeatProfile, c.SeatFamily, c.SeatGrade, c.Job, c.RequestID, c.Reason, c.AnswerDoc, c.Answered.UnixMilli(), c.Deadline.UnixMilli(), c.Respawns, consultBoolInt(c.Notified), c.ID)
 	return err
 }
 
