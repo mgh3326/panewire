@@ -375,6 +375,9 @@ func (h *HubServer) runSpawnCoordinator(parent context.Context) {
 	defer tick.Stop()
 	refreshSeen := h.quotaRefresh.completedCount.Load()
 	ticked := true
+	// Under a rollback drain the gate count is logged at once and each
+	// minute (wall clock: an elapsed interval).
+	var rollbackLogged time.Time
 	for {
 		// A finished quota refresh is a quota change for parked requests.
 		if count := h.quotaRefresh.completedCount.Load(); count != refreshSeen {
@@ -386,6 +389,10 @@ func (h *HubServer) runSpawnCoordinator(parent context.Context) {
 		}
 		h.wakeParkedSpawns(ctx, ticked)
 		ticked = false
+		if h.spawnRollbackDrain && time.Since(rollbackLogged) >= time.Minute {
+			rollbackLogged = time.Now()
+			h.logSpawnRollbackRows(ctx)
+		}
 		if h.drain.admit() {
 			// Start conditions are checked first so a row released in this
 			// tick is scheduled by the scan below rather than the next one.

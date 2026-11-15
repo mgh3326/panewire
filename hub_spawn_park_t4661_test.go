@@ -998,3 +998,37 @@ func TestSpawnRollbackDrainFreezesProducers_t4661(t *testing.T) {
 		t.Fatalf("a refused consult stored %d intents, err=%v", consults, err)
 	}
 }
+
+// The rollback gate counts every nonterminal spawn row (a parked one, a
+// *_grant one) and every open consult; it reads 0 only when all have ended.
+func TestSpawnRollbackGateCountsBlockingRows_t4661(t *testing.T) {
+	h := asyncSpawnHub(t)
+	count := func() int {
+		t.Helper()
+		n, err := h.inbox.store.spawnRollbackBlockingRows(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	if got := count(); got != 0 {
+		t.Fatalf("an empty store blocks a rollback: %d", got)
+	}
+	parked := claimParkRequest(t, h, 310, time.Now())
+	parkNow(t, h, parked, spawnParkQuota)
+	granted := claimParkRequest(t, h, 311, time.Now())
+	if _, err := h.inbox.store.db.Exec(`UPDATE spawn_operations SET status='dispatching_grant' WHERE request_id=?`, granted.Request.RequestID); err != nil {
+		t.Fatal(err)
+	}
+	if got := count(); got != 2 {
+		t.Fatalf("gate counts %d, want the parked and the grant row", got)
+	}
+	for _, id := range []string{parked.Request.RequestID, granted.Request.RequestID} {
+		if _, err := h.inbox.store.db.Exec(`UPDATE spawn_operations SET status='given_up' WHERE request_id=?`, id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := count(); got != 0 {
+		t.Fatalf("ended rows still block: %d", got)
+	}
+}

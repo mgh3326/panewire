@@ -326,3 +326,38 @@ func spawnBackoffPark(retryAt time.Time) (string, int64) {
 
 // errSpawnRollbackDrain refuses a hub-made spawn under --spawn-rollback-drain.
 var errSpawnRollbackDrain = errors.New("spawn_rollback_drain")
+
+// spawnRollbackTerminal are the statuses a rollback past parking may leave
+// behind: every other spawn row blocks it (docs/hub-spawn-operations.md,
+// "Rolling back past parking").
+const spawnRollbackTerminal = `'succeeded','failed','retryable','given_up','refused','cancelled'`
+
+// spawnRollbackBlockingRows counts what blocks a rollback past parking: the
+// nonterminal spawn rows (any status, *_grant included) and the open
+// consults. The rollback gate is 0.
+func (s *laneInboxStore) spawnRollbackBlockingRows(parent context.Context) (int, error) {
+	ctx, done := s.op(parent)
+	defer done()
+	var spawns, consults int
+	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM spawn_operations WHERE status NOT IN (`+spawnRollbackTerminal+`)`).Scan(&spawns); err != nil {
+		return 0, err
+	}
+	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM consult_requests WHERE state IN ('queued','running')`).Scan(&consults); err != nil {
+		return 0, err
+	}
+	return spawns + consults, nil
+}
+
+// logSpawnRollbackRows prints the rollback gate count under
+// --spawn-rollback-drain, so a rollout script can wait for rollback_rows=0.
+func (h *HubServer) logSpawnRollbackRows(ctx context.Context) {
+	if !h.spawnRollbackDrain || h.inbox == nil {
+		return
+	}
+	n, err := h.inbox.store.spawnRollbackBlockingRows(ctx)
+	if err != nil {
+		h.logger.Warn("hub spawn rollback rows unknown", "err", err)
+		return
+	}
+	h.logger.Info("hub spawn rollback rows", "rollback_rows", n, "spawn_rollback_drain", true)
+}

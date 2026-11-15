@@ -348,7 +348,9 @@ whole queue, with every producer frozen:
    ```
 
    Each row must land, end, or be cancelled. Do not raise limits to get
-   past this step.
+   past this step. Under the flag the hub logs this count at start and each
+   minute as `hub spawn rollback rows rollback_rows=N`
+   (`spawnRollbackBlockingRows`): the gate is `rollback_rows=0`.
 3. Wait for every spawned job that is still running to finish. On the older
    hub, a running job's quota-stop would start a successor under part 3's
    claim-unaware expiry, and that hub has no flag to stop it.
