@@ -739,7 +739,7 @@ func (d *Daemon) handle(ctx context.Context, c net.Conn) {
 			}
 		case "emit":
 			err = d.emitRelayEvent(req)
-		case "inbox":
+		case daemonop.InboxOp:
 			result, err = d.handleInbox(callCtx, req.Inbox)
 		case "jobs.own":
 			result, err = d.handleOwnJobs(callCtx, req.OwnJobs)

@@ -11,21 +11,13 @@ import (
 	"net"
 	"time"
 
+	"github.com/mgh3326/panewire/internal/daemonop"
 	"github.com/mgh3326/panewire/internal/hubretry"
 )
 
-type inboxRequest struct {
-	Command string        `json:"command"`
-	Lane    string        `json:"lane,omitempty"`
-	ID      int64         `json:"id,omitempty"`
-	Unread  bool          `json:"unread,omitempty"`
-	All     bool          `json:"all,omitempty"`
-	JSON    bool          `json:"json,omitempty"`
-	Timeout time.Duration `json:"timeout"`
-	// EventIDs are the ids a status request asks about; no other command
-	// carries them.
-	EventIDs []string `json:"event_ids,omitempty"`
-}
+// inboxRequest is the inbox op's payload, shared with the fleet spawn engine
+// so its wait reads the lane inbox with the same request the CLI sends.
+type inboxRequest = daemonop.Inbox
 
 // localTextResult is a daemon op's rendered answer: the same text, streams and
 // exit status the CLI would have printed itself.
@@ -69,7 +61,7 @@ func runInboxLocal(req inboxRequest, stdout, stderr io.Writer, socket string) in
 	if ms < 1 {
 		ms = 1
 	}
-	if err := json.NewEncoder(conn).Encode(localRequest{Op: "inbox", Inbox: &req, TimeoutMS: ms}); err != nil {
+	if err := json.NewEncoder(conn).Encode(localRequest{Op: daemonop.InboxOp, Inbox: &req, TimeoutMS: ms}); err != nil {
 		fmt.Fprintln(stderr, "inbox: daemon unavailable")
 		return ExitDaemonUnavailable
 	}
