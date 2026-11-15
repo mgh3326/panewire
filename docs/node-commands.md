@@ -31,12 +31,13 @@ the same way.
 
 ## Task pane sweep
 
-The node also closes finished worker panes by itself, without a hub command:
-see [pane-sweep.md](pane-sweep.md). It matches a pane by id, name and tab and
-requires an idle status, and uploads the screen to hk as the same screen
-document `pane.capture` uploads. It writes `pane-screen.txt` only when that
-upload fails (see [pane-sweep.md](pane-sweep.md)). It does not run
-`pane.close`'s composer guard.
+The node also closes ended jobs' panes by itself, without a hub command: see
+[pane-sweep.md](pane-sweep.md). It proves the pane is the job's own by the
+recorded pane id and harness session id, saves the last screen to hk as the
+same screen document `pane.capture` uploads, then closes it. It does not run
+`pane.close`'s status, composer, or `question_job` guards: the job's end plus
+the session proof is the authority (see
+[pane-sweep.md](pane-sweep.md#close)).
 
 The hub's `pane.sweep` command runs a second, ended-job sweep on the hub's
 schedule; see [pane-sweep.md](pane-sweep.md#hub-ordered-sweep).
@@ -561,12 +562,15 @@ the nodes before the hub for `panewire jobs close` to work end to end.
 The hub's ticker sends it (see [pane-sweep.md](pane-sweep.md#hub-ordered-sweep));
 no `node.command` caller may issue it, and the public endpoint refuses it.
 
-The node closes the pane of every job whose own latest record ended at least
-`age_s` seconds ago, whatever herdr shows the pane doing (no idle, grace or
-composer check). It keeps an implementer's pane while its worktree is on
-an open PR, as the idle sweep does. It replies `{"closed": [...]}`, one
-`{job, pane, role, reason}` per pane closed, with `reason` `job_revoked`,
-`job_completed`, `job_handed_off`, `job_lost`, or the job's outcome.
+The node runs its sweep with `age_s` as the close deadline (see
+[pane-sweep.md](pane-sweep.md#timing)): the pane of every job whose end lies at
+least `age_s` seconds ago — and any pane past its idle grace — is proven the
+job's own by pane id and harness session id and closed, whatever herdr shows
+it doing. An implementer's pane still waits while its worktree is on an open
+PR, and a `--keep` pane waits out its day. It replies `{"closed": [...]}`,
+one `{job, pane, role, reason}` per pane closed, with `reason` `job_revoked`,
+`job_completed`, `job_handed_off`, `job_lost`, the job's task end state, or
+`pane_gone` when the pane had already vanished.
 
 A node without a jobs root answers `jobs_root_unset`. A failed read of the
 jobs, the agent list, or the hk record answers `sweep_failed`. An out-of-range

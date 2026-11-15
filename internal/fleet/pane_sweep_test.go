@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -33,6 +35,8 @@ type paneSweepFixture struct {
 	prErr     error
 	prRead    int
 	info      []string
+	hk        *spawnHK // the fake hk screen documents and task reads go to
+	paneList  bool     // false makes `herdr pane list` fail
 }
 
 // paneSweepTestHead is the HEAD the fixture's git answers when a test does not
@@ -42,7 +46,7 @@ const paneSweepTestHead = "0123456789abcdef0123456789abcdef01234567"
 func newPaneSweepFixture(t *testing.T) *paneSweepFixture {
 	t.Helper()
 	a := testApp(t)
-	f := &paneSweepFixture{t: t, a: a, store: a.JobStore.(*fakeJobStore), now: time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC),
+	f := &paneSweepFixture{t: t, a: a, store: a.JobStore.(*fakeJobStore), now: time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC), hk: useFakeHK(t), paneList: true,
 		status: map[string]string{}, names: map[string]string{}, cwds: map[string]string{}, sessions: map[string]string{}, shut: map[string]bool{}, tasks: map[string]string{}, category: map[string]string{}, prChanges: map[string][]PRChange{}}
 	a.Now = func() time.Time { return f.now }
 	f.runner = &fakeRunner{}
@@ -63,6 +67,19 @@ func newPaneSweepFixture(t *testing.T) *paneSweepFixture {
 			}
 			slices.Sort(rows)
 			return Result{Out: `{"result":{"agents":[` + strings.Join(rows, ",") + `]}}`}
+		case c.Name == "herdr" && line == "pane list":
+			if !f.paneList {
+				return Result{Code: 1, Err: "pane list failed"}
+			}
+			var rows []string
+			for pane := range f.status {
+				if f.shut[pane] {
+					continue
+				}
+				rows = append(rows, fmt.Sprintf(`{"pane_id":%q,"label":%q,"name":%q}`, pane, f.names[pane], f.names[pane]))
+			}
+			slices.Sort(rows)
+			return Result{Out: `{"result":{"panes":[` + strings.Join(rows, ",") + `]}}`}
 		case c.Name == "herdr" && strings.HasPrefix(line, "pane close "):
 			f.shut[strings.TrimPrefix(line, "pane close ")] = true
 			return Result{}
@@ -104,7 +121,8 @@ func (f *paneSweepFixture) job(id, role, task string, extra ...map[string]any) s
 	f.t.Helper()
 	pane := "p-" + id
 	putEvent(f.t, f.a, id, "job.claim", map[string]any{"owner_lane": "owner", "parent_lane": "parent", "task_id": task, "t_level": "T1", "role": role})
-	spawned := map[string]any{"pane_id": pane, "tab_id": "t-" + pane, "label": "agent-" + id, "profile": "cmd-dsflash41", "family": "deepseek"}
+	spawned := map[string]any{"pane_id": pane, "tab_id": "t-" + pane, "label": "agent-" + id, "profile": "cmd-dsflash41", "family": "deepseek",
+		"harness_session": map[string]any{"kind": "omp", "id": "sess-" + id}}
 	for _, more := range extra {
 		for key, value := range more {
 			spawned[key] = value
@@ -116,6 +134,7 @@ func (f *paneSweepFixture) job(id, role, task string, extra ...map[string]any) s
 	}
 	f.store.records[id]["state"] = "spawned"
 	f.status[pane], f.names[pane] = "idle", "agent-"+id
+	f.sessions[pane] = `{"value":"sess-` + id + `"}`
 	return pane
 }
 
@@ -149,6 +168,16 @@ func (f *paneSweepFixture) infoHas(parts ...string) bool {
 		}
 	}
 	return false
+}
+
+// readPaneSweepMetric reads the node_exporter textfile the last pass wrote.
+func readPaneSweepMetric(t *testing.T, a *App) string {
+	t.Helper()
+	body, err := os.ReadFile(filepath.Join(a.stateDir(), "metrics", paneSweepMetricFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(body)
 }
 
 func (f *paneSweepFixture) reaped(id string) map[string]any {
@@ -200,11 +229,11 @@ func TestPaneSweepResetsTheIdleTimeWhenThePaneWorks(t *testing.T) {
 		t.Fatalf("pane closed 9 minutes after it went idle again")
 	}
 	f.at(21)
-	if len(f.closed()) != 0 || !f.infoHas("pane="+pane, "reason=ownership-unproven") {
-		t.Fatalf("pane was not retained after its idle grace: %v", f.info)
+	if got := f.closed(); len(got) != 1 || got[0] != pane {
+		t.Fatalf("pane was not closed after its idle grace: %v", got)
 	}
-	if len(diagnosticRecords(t, f.a, pane)) == 0 {
-		t.Fatal("pane that passed its idle grace has no local diagnostic")
+	if f.reaped("j") == nil {
+		t.Fatal("the swept job was not reaped")
 	}
 }
 
@@ -254,22 +283,23 @@ func TestPaneSweepKeepsEveryPaneWhenTheTaskReadFails(t *testing.T) {
 	if len(f.closed()) != 0 || f.reaped("j") != nil {
 		t.Fatalf("pane closed although the task could not be read")
 	}
-	if !f.infoHas("task pane kept", "job=j", "reason=task-read-failed") {
+	if !f.infoHas("task pane kept", "job=j", "reason=task_read_failed") {
 		t.Fatalf("info lines = %q", f.info)
 	}
-	// The candidate is still kept after hk answers because its ownership
-	// cannot be established from mutable pane metadata.
+	// Once hk answers the pane is closed on the next pass.
 	f.taskErr = nil
 	f.at(61)
-	if len(f.closed()) != 0 || !f.infoHas("reason=ownership-unproven") {
-		t.Fatalf("pane was not kept after task state recovered: %v", f.info)
+	if len(f.closed()) != 1 {
+		t.Fatalf("pane was not closed after task state recovered: %v", f.closed())
 	}
 }
 
-func TestPaneSweepKeepsAPaneWhoseIdentityDoesNotMatchTheJob(t *testing.T) {
+// Past the end's close deadline the pane is the job's own by pane id and
+// session, so it closes whatever herdr shows it doing or named (decision
+// 266). A session that no longer matches is what keeps it.
+func TestPaneSweepClosesAPaneWhateverItShowsPastTheDeadline(t *testing.T) {
 	for name, change := range map[string]func(f *paneSweepFixture, pane string){
 		"renamed":  func(f *paneSweepFixture, pane string) { f.names[pane] = "somebody-else" },
-		"gone":     func(f *paneSweepFixture, pane string) { delete(f.status, pane) },
 		"blocked":  func(f *paneSweepFixture, pane string) { f.status[pane] = "blocked" },
 		"unknown":  func(f *paneSweepFixture, pane string) { f.status[pane] = "unknown" },
 		"working":  func(f *paneSweepFixture, pane string) { f.status[pane] = "working" },
@@ -281,11 +311,42 @@ func TestPaneSweepKeepsAPaneWhoseIdentityDoesNotMatchTheJob(t *testing.T) {
 			f.tasks["42"] = "merged"
 			change(f, pane)
 			f.at(0)
-			f.at(60)
-			if len(f.closed()) != 0 || f.reaped("j") != nil {
-				t.Fatalf("pane closed although it is %s", name)
+			f.at(61)
+			if got := f.closed(); len(got) != 1 || got[0] != pane || f.reaped("j") == nil {
+				t.Fatalf("pane kept although it is %s: closed %v reaped %v", name, f.closed(), f.reaped("j"))
 			}
 		})
+	}
+}
+
+// Inside the deadline the pane still closes only after it stayed not working
+// for the grace.
+func TestPaneSweepKeepsAWorkingPaneInsideTheDeadline(t *testing.T) {
+	f := newPaneSweepFixture(t)
+	pane := f.job("j", "implementer", "42")
+	f.tasks["42"] = "merged"
+	f.status[pane] = "working"
+	f.at(0)
+	f.at(59)
+	if len(f.closed()) != 0 || f.reaped("j") != nil {
+		t.Fatalf("pane closed inside the deadline although it is working")
+	}
+}
+
+// A pane that vanishes before its close is reaped as gone — nothing is
+// closed, and the job does not linger on a pane that no longer exists.
+func TestPaneSweepReapsAJobWhosePaneIsGone(t *testing.T) {
+	f := newPaneSweepFixture(t)
+	pane := f.job("j", "implementer", "42")
+	f.tasks["42"] = "merged"
+	delete(f.status, pane)
+	f.at(0)
+	f.at(61)
+	if len(f.closed()) != 0 {
+		t.Fatalf("a pane close ran for a pane herdr does not list: %v", f.closed())
+	}
+	if f.reaped("j") == nil {
+		t.Fatal("the job whose pane vanished was not reaped")
 	}
 }
 
@@ -307,7 +368,7 @@ func TestPaneSweepKeepsThePaneWhenItsScreenCannotBeSaved(t *testing.T) {
 	if len(f.closed()) != 0 || f.reaped("j") != nil {
 		t.Fatalf("pane closed without its screen saved")
 	}
-	if !f.infoHas("reason=diagnostic-unavailable") {
+	if !f.infoHas("reason=screen_save_failed") {
 		t.Fatalf("info lines = %q", f.info)
 	}
 }
@@ -336,11 +397,8 @@ func TestPaneSweepRestartsTheGraceAfterHerdrCannotBeRead(t *testing.T) {
 		t.Fatalf("pane closed on idle time from before herdr was unreadable")
 	}
 	f.at(22)
-	if len(f.closed()) != 0 || !f.infoHas("pane="+pane, "reason=ownership-unproven") {
-		t.Fatalf("pane was not retained after herdr recovered: %v", f.info)
-	}
-	if len(diagnosticRecords(t, f.a, pane)) == 0 {
-		t.Fatal("pane that passed its idle grace has no local diagnostic")
+	if got := f.closed(); len(got) != 1 || got[0] != pane {
+		t.Fatalf("pane was not closed after herdr recovered: %v", got)
 	}
 }
 

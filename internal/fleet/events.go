@@ -42,6 +42,11 @@ type Job struct {
 	Events             []Event
 }
 
+// revive clears the terminal state a later claim, spawn or reprompt supersedes.
+// Ended and At then describe the job's current run only: At is the time of the
+// newest terminal event that still stands, never one a revived job left behind.
+func (j *Job) revive() { j.Terminal, j.Ended, j.Outcome, j.At = false, "", "", time.Time{} }
+
 func (a *App) events(id string) ([]Event, error) {
 	if !validID(id) {
 		return nil, fail(exitUsage, "invalid job id")
@@ -128,7 +133,7 @@ func foldJob(id string, evs []Event) (Job, error) {
 			j.Task = scalar(p["task_id"])
 			j.Inherited = str(p, "task_inherited_from")
 			j.T = str(p, "t_level")
-			j.Terminal, j.Ended, j.Outcome = false, "", ""
+			j.revive()
 			j.Reaped = false
 		case "job.spawned":
 			j.Receipt = p
@@ -145,7 +150,7 @@ func foldJob(id string, evs []Event) (Job, error) {
 			j.Report = str(p, "report")
 			j.HubLane = str(p, "hub_lane")
 			j.Machine = str(p, "hub_lane_machine")
-			j.Terminal, j.Ended, j.Outcome = false, "", ""
+			j.revive()
 			j.Reaped = false
 			if j.Task == "" {
 				j.Task = scalar(p["task_id"])
@@ -161,7 +166,7 @@ func foldJob(id string, evs []Event) (Job, error) {
 				j.Machine = machine
 			}
 		case "job.reprompted":
-			j.Terminal, j.Ended, j.Outcome = false, "", ""
+			j.revive()
 		case "job.completed", "job.joined", "job.revoked", "job.handed_off", "job.lost":
 			j.Terminal, j.Ended = true, ev.Kind
 			j.Outcome = firstNonempty(ev.Outcome, str(p, "outcome"))

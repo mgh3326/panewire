@@ -2,6 +2,7 @@ package fleet
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -21,16 +22,16 @@ func TestPaneSweepKeepsAWorkingReviewerPane(t *testing.T) {
 	}
 }
 
-// A job.lost of a quota stop is handed to a replacement by the reviewer
-// watcher, so its pane stays open until that hand-off ends (watch_quota_stop.go).
-func TestPaneSweepKeepsAReviewerPaneStoppedByQuota(t *testing.T) {
+// A reviewer's job.lost of a quota stop ends the job (decision 266): the hub
+// hands the review to a replacement in a new pane, so this one closes.
+func TestPaneSweepClosesAReviewerPaneStoppedByQuota(t *testing.T) {
 	f := newPaneSweepFixture(t)
 	f.job("r", "reviewer", "")
 	putEvent(t, f.a, "r", "job.lost", map[string]any{"reason": "quota_stop", "pool": "pool-a"})
 	f.at(0)
 	f.at(11)
-	if len(f.closed()) != 0 {
-		t.Fatalf("quota-stopped reviewer pane closed: %v", f.info)
+	if len(f.closed()) != 1 || f.reaped("r") == nil {
+		t.Fatalf("quota-stopped reviewer pane kept: %v", f.info)
 	}
 }
 
@@ -60,24 +61,24 @@ func TestPaneSweepKeepsANamelessPaneInAnotherWorktree(t *testing.T) {
 	}
 }
 
-// A reviewer's worktree stays with mergewake (docs/pane-sweep.md): closing the
-// pane never removes it, even when the job was abandoned.
+// An abandoned job's close removes its node-prepared worktree after saving
+// its changes to the job dir (docs/pane-sweep.md).
 func TestPaneSweepKeepsAReviewerWorktree(t *testing.T) {
 	g := newSweepGitFake(t)
 	f := newPaneSweepFixture(t)
 	f.withGit(g)
 	cwd := g.worktree(t, "r")
-	f.job("r", "implementer", "", map[string]any{"role": "reviewer", "cwd": cwd})
+	pane := f.job("r", "implementer", "", map[string]any{"role": "reviewer", "cwd": cwd})
 	putEvent(t, f.a, "r", "job.revoked", map[string]any{"outcome": "abandoned"})
 	f.at(0)
 	f.at(11)
-	if len(f.closed()) != 0 {
-		t.Fatalf("abandoned reviewer pane closed without ownership proof: %v", f.closed())
+	if got := f.closed(); len(got) != 1 || got[0] != pane {
+		t.Fatalf("abandoned reviewer pane kept: %v", f.info)
 	}
-	if _, err := os.Stat(cwd); err != nil {
-		t.Fatalf("reviewer worktree removed: %v", err)
+	if _, err := os.Stat(cwd); !os.IsNotExist(err) {
+		t.Fatalf("abandoned worktree kept, err %v", err)
 	}
-	if !f.infoHas("job=r", "reason=ownership-unproven") {
-		t.Fatalf("pane was not retained for unproven ownership: %v", f.info)
+	if _, err := os.Stat(filepath.Join(f.a.Jobs, "r", AbandonedWorktreeFile)); err != nil {
+		t.Fatalf("abandoned worktree patch not saved: %v", err)
 	}
 }
