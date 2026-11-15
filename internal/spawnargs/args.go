@@ -1,7 +1,9 @@
 // Package spawnargs holds the one rule for the flags a hub job.spawn may
 // carry. The node applies it to every job.spawn it receives, and the submitter
 // applies the same rule to the args the hub will send, so a request the node
-// would drop is refused before it leaves with the flag named.
+// would drop is refused before it leaves with the flag named. checkout.go holds
+// the same rule for the checkout spec a spawn carries (worktree.prepare): its
+// origin, its commit and the ref to fetch.
 package spawnargs
 
 import (

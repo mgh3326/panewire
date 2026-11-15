@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"net/url"
 	"os"
 	"os/exec"
 	"path"
@@ -20,6 +19,7 @@ import (
 
 	"github.com/mgh3326/panewire/internal/durable"
 	"github.com/mgh3326/panewire/internal/harnessstate"
+	"github.com/mgh3326/panewire/internal/spawnargs"
 )
 
 // worktree.prepare, worktree.remove and quota.refresh (docs/node-commands.md,
@@ -71,7 +71,6 @@ var (
 var (
 	nodeReviewerDirPattern = regexp.MustCompile(`^mwr-[a-z0-9._-]+$`)
 	nodeShaPattern         = regexp.MustCompile(`^[0-9a-fA-F]{40}$`)
-	nodeFetchPullPattern   = regexp.MustCompile(`^pull/[0-9]+/head$`)
 	nodeQuotaPoolPattern   = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
 	nodeGlobClass          = regexp.MustCompile(`\[[^\]]*\]`)
 )
@@ -119,34 +118,14 @@ type nodeQuotaRefreshResult struct {
 	Outcome string `json:"outcome"`
 }
 
-// validNodeRefName mirrors git's check-ref-format rules for the argument
-// shapes these ops accept: no control bytes, "..", "@{", whitespace or git's
+// validNodeRefName is the git ref grammar worktree ops accept
+// (spawnargs.ValidRefName): no control bytes, "..", "@{", whitespace or git's
 // magic chars, no segment leading with '.' or ending ".lock".
-func validNodeRefName(name string) bool {
-	if name == "" || name == "@" || len(name) > 200 || hasControlByte(name) {
-		return false
-	}
-	if strings.HasPrefix(name, "/") || strings.HasSuffix(name, "/") || strings.HasSuffix(name, ".") ||
-		strings.HasPrefix(name, "-") || strings.ContainsAny(name, " ~^:?*[\\") ||
-		strings.Contains(name, "..") || strings.Contains(name, "@{") || strings.Contains(name, "//") {
-		return false
-	}
-	for _, seg := range strings.Split(name, "/") {
-		if seg == "" || strings.HasPrefix(seg, ".") || strings.HasSuffix(seg, ".lock") {
-			return false
-		}
-	}
-	return true
-}
+func validNodeRefName(name string) bool { return spawnargs.ValidRefName(name) }
 
 // validNodeFetchRef is the closed set of fetch shapes: a branch head or a
 // pull-request head.
-func validNodeFetchRef(fetch string) bool {
-	if rest, ok := strings.CutPrefix(fetch, "refs/heads/"); ok {
-		return validNodeRefName(rest)
-	}
-	return nodeFetchPullPattern.MatchString(fetch)
-}
+func validNodeFetchRef(fetch string) bool { return spawnargs.ValidFetchRef(fetch) }
 
 func validNodeGlob(glob string) bool {
 	if glob == "" || len(glob) > 128 || hasControlByte(glob) {
@@ -158,138 +137,13 @@ func validNodeGlob(glob string) bool {
 	return strings.Trim(nodeGlobClass.ReplaceAllString(glob, ""), "*?/") != ""
 }
 
-// nodeOriginRepo normalizes an origin argument to "owner/repo" for the clone
-// identity check. Any userinfo refuses the value: URL userinfo, or an '@' in
-// anything that is not an absolute local path. URL and scp-style remotes need
-// exactly owner/repo path segments; a local clone source stands in with its
-// last two.
-func nodeOriginRepo(raw string) (string, bool) {
-	// git clone receives the raw argument, so its control bytes are refused
-	// before trimming could hide a trailing one.
-	u := strings.TrimSpace(raw)
-	if hasControlByte(raw) || !nodeOriginShapeOK(u) {
-		return "", false
-	}
-	switch {
-	case strings.Contains(u, "://"):
-		return nodeURLOriginRepo(u)
-	case filepath.IsAbs(u):
-		seg := nodeOriginPathSegments(u)
-		if len(seg) < 2 {
-			return "", false
-		}
-		return seg[len(seg)-2] + "/" + seg[len(seg)-1], true
-	case strings.Contains(u, "@"):
-		return "", false
-	}
-	host, repoPath, ok := strings.Cut(u, ":")
-	if !ok {
-		return "", false
-	}
-	return nodeScpOriginRepo(host, repoPath)
-}
+// nodeOriginRepo normalizes a caller-supplied origin to "owner/repo" for the
+// clone identity check (spawnargs.OriginRepo). Any userinfo refuses the value.
+func nodeOriginRepo(raw string) (string, bool) { return spawnargs.OriginRepo(raw) }
 
-// nodeCloneRemoteRepo reads owner/repo from a clone's own origin. Unlike a
-// caller-supplied origin, an existing clone may use the scp-style SSH form
-// user@host:owner/repo.git; its user part is dropped, never refused. The
-// remote splits at its first ':' and only the host side can hold userinfo,
-// so an '@' in the repo path (host:owner/re@po.git) stays part of the path.
-func nodeCloneRemoteRepo(raw string) (string, bool) {
-	u := strings.TrimSpace(raw)
-	if !nodeOriginShapeOK(u) {
-		return "", false
-	}
-	if strings.Contains(u, "://") {
-		if v, err := url.Parse(u); err == nil && v.User != nil {
-			v.User = nil
-			u = v.String()
-		}
-		return nodeURLOriginRepo(u)
-	}
-	if filepath.IsAbs(u) {
-		return nodeOriginRepo(u)
-	}
-	host, repoPath, ok := strings.Cut(u, ":")
-	if !ok {
-		return "", false
-	}
-	if at := strings.LastIndex(host, "@"); at >= 0 && !strings.Contains(host, "/") {
-		host = host[at+1:]
-	}
-	return nodeScpOriginRepo(host, repoPath)
-}
-
-// nodeOriginShapeOK is the check every origin form shares.
-func nodeOriginShapeOK(u string) bool {
-	// A leading '-' would reach git as an option, never a repository.
-	return u != "" && !strings.HasPrefix(u, "-") && len(u) <= 2048 && !hasControlByte(u) && !strings.Contains(u, " ")
-}
-
-func nodeURLOriginRepo(u string) (string, bool) {
-	v, err := url.Parse(u)
-	// A query or fragment can carry a credential that git would persist in
-	// the clone's config; origins never need one.
-	if err != nil || v.User != nil || v.RawQuery != "" || v.ForceQuery || v.Fragment != "" || strings.Contains(u, "#") {
-		return "", false
-	}
-	switch v.Scheme {
-	case "http", "https", "ssh", "git":
-		if v.Host == "" {
-			return "", false
-		}
-	case "file":
-	default:
-		return "", false
-	}
-	seg := nodeOriginPathSegments(v.Path)
-	// A file:// origin is a local path: same last-two rule as an absolute
-	// path, so a clone made through file:// matches the plain-path origin.
-	if v.Scheme == "file" && len(seg) >= 2 {
-		seg = seg[len(seg)-2:]
-	}
-	if len(seg) != 2 {
-		return "", false
-	}
-	return seg[0] + "/" + seg[1], true
-}
-
-// nodeScpOriginRepo reads an scp-style host:owner/repo whose userinfo, if
-// any, is already gone.
-func nodeScpOriginRepo(host, repoPath string) (string, bool) {
-	// An empty host (":owner/repo") is a local path to git, and a
-	// one-character host is drive-letter shaped (C:owner/repo): a local path
-	// on Windows, never a remote worth trusting. A '/' before the colon
-	// makes the whole value a relative path.
-	if len(host) < 2 || strings.ContainsAny(host, "/@") {
-		return "", false
-	}
-	seg := nodeOriginPathSegments(repoPath)
-	if len(seg) != 2 {
-		return "", false
-	}
-	return seg[0] + "/" + seg[1], true
-}
-
-func nodeOriginPathSegments(p string) []string {
-	p = strings.TrimSuffix(strings.Trim(p, "/"), ".git")
-	var out []string
-	for _, seg := range strings.Split(p, "/") {
-		// A dot segment changes which repository the path names, so the
-		// identity check fails closed instead of normalizing it away.
-		if seg == "." || seg == ".." {
-			return nil
-		}
-		// A segment becomes a directory name under the work root: it may
-		// hold no path syntax of any platform (backslash, drive colon).
-		if strings.ContainsAny(seg, "\\:") {
-			return nil
-		}
-		if seg != "" {
-			out = append(out, seg)
-		}
-	}
-	return out
-}
+// nodeCloneRemoteRepo reads owner/repo from a clone's own origin, which may
+// carry the scp-style user@host: form (spawnargs.CloneRemoteRepo).
+func nodeCloneRemoteRepo(raw string) (string, bool) { return spawnargs.CloneRemoteRepo(raw) }
 
 // nodeWorkRoot reads only `work_root` from the node's spawn.json. The file
 // carries spawn's other keys too, so this decodes loosely instead of going

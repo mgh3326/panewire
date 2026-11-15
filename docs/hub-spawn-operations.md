@@ -425,7 +425,11 @@ request contains a UUID, argv, UTF-8 brief (at most 64 KiB), originating machine
 pinned repository checkout and deadline seconds (default 600, maximum 3600).
 The submitting CLI verifies the checkout is on a pushed origin ref. A canonical
 checkout gets an isolated target worktree rather than running in the node's
-canonical clone.
+canonical clone. A spawn that carries the spec itself
+(`--checkout-origin`, `--checkout-commit`, `--checkout-ref`) names the same
+pinned checkout without any local checkout, and the CLI asks for
+`checkout_spec_v1` first so a hub that would ignore the spec refuses the flag
+instead of running the job in the node's mapped path (hk 4738).
 
 The response is HTTP 202 with `job_id`, `request_id`, `operation_url`, `status`
 and `claim: durable_hub_reservation`. This is a hub DB reservation; the immutable
