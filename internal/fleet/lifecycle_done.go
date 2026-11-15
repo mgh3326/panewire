@@ -181,11 +181,6 @@ func (a *App) doneReport(ctx context.Context, j Job, in doneInput) error {
 		switch {
 		case e == nil:
 			p := map[string]any{"report_sha256": completing, "pinned": pin && holds}
-			// The report the settlement is for, so an interrupted done
-			// resumes from that report, not the spawn's default (hk 4632).
-			if path, err := filepath.Abs(in.report); err == nil && in.report != "" {
-				p["report"] = path
-			}
 			if resultSHA != "" {
 				p["result_sha256"] = resultSHA
 			}

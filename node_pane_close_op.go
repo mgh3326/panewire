@@ -12,10 +12,9 @@ import (
 )
 
 // hubCapabilityCloseOps names the close operations in hello. It is not
-// advertised: enabling it needs an owned launch boundary that no older binary
-// can bypass, which is its own prerequisite of the hub issuer (hk 4745;
-// decided on #593, hk 4632). fleet.HubCloseWatchersReady is a diagnostic for
-// that step, not its proof.
+// advertised (hk 4652): enabling it, with the migration barrier that no
+// old-binary panewire process is left on the host
+// (fleet.HubCloseWatchersReady is its live-watcher half), is hk 4761.
 const hubCapabilityCloseOps = "close_ops_v1"
 
 // Close operations (hk 4594; docs/node-commands.md, "Close operations") are
@@ -199,15 +198,9 @@ func (client *HubClient) runPaneCloseOp(ctx context.Context, args nodePaneCloseO
 	}
 	closeArgs := nodePaneCloseArgs{PaneID: args.PaneID, Name: args.Name, AgentStatus: args.AgentStatus, Cwd: args.Cwd, AllowUnnamed: args.AllowUnnamed, target: target}
 	result, code := client.nodePaneCloseWith(ctx, closeArgs, func() error {
-		// The proof is read again after the settle, and the registered ->
-		// closing (or preempted) step is committed under the job's end lock
-		// (hk 4632): the watcher's decisions, `job close` and `done` take
-		// it too, so no end lands between this check and the write.
-		unlock, err := client.hubCloseLedger().LockEnd(ctx, jobDir)
-		if err != nil {
-			return nodeCloseHookStop{code: "journal_failed"}
-		}
-		defer unlock()
+		// The proof is read again after the settle: the job's watcher, a
+		// separate process, may have recorded a re-prompt or an end of the
+		// attempt meanwhile.
 		again, err := readNodeCloseTarget(job)
 		if err != nil {
 			return err
@@ -492,7 +485,7 @@ func (client *HubClient) hubCloseLedger() nodeHubCloseLedger {
 // admitHubCloseWatcher refuses a close while the job's watcher is one that
 // does not defer: it holds the watch lock but not the hub-close lock. The
 // node-wide precondition is close_ops_v1 itself, which is not advertised
-// until the activation prerequisite lands.
+// until hk 4761's migration barrier.
 func (client *HubClient) admitHubCloseWatcher(_ string, jobDir string) string {
 	watcher, err := client.hubCloseLedger().Watcher(jobDir)
 	switch {

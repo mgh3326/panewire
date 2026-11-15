@@ -31,10 +31,6 @@ import (
 const (
 	hubCloseIntentKind = "job.hub_close_intent"
 	hubCloseCancelKind = "job.hub_close_cancelled"
-	// hubCloseSettledKind settles a hub close an independent end (a revoke,
-	// a completion) preceded: it is not a terminal event, so the job keeps
-	// that end as its outcome (hk 4632).
-	hubCloseSettledKind = "job.hub_close_settled"
 	// hubCloseLostReason is the job.lost reason the node records when it
 	// settles a hub close.
 	hubCloseLostReason = "hub_close"
@@ -209,14 +205,10 @@ func OpenCloseOps(job *os.Root, attempt string) ([]CloseOp, error) {
 	return open, nil
 }
 
-// endUnlessHubClose runs end, a terminal or expiry decision the watcher made
-// on its snapshot seen, under the job's end lock and on a freshly read ledger.
-// deferred is true, and end does not run, when a hub close owns the end
-// (hubCloseHolds), when the node settled a hub close of the attempt, or when
-// an end or a new attempt landed after seen (#593 review): a decision is never
-// made for an attempt that ended or changed under it. A cancelled intent
-// closed nothing and moved no attempt, so a still-valid decision runs.
-func (a *App) endUnlessHubClose(id string, seen Job, end func(j Job) error) (deferred bool, err error) {
+// endUnlessHubClose runs end, a terminal or expiry decision of the watcher,
+// under the job's end lock, unless a freshly read ledger shows an open hub
+// close: deferred is then true and end does not run.
+func (a *App) endUnlessHubClose(id string, end func(j Job) error) (deferred bool, err error) {
 	unlock, e := LockJobEnd(filepath.Join(a.Jobs, id))
 	if e != nil {
 		return false, e
@@ -226,89 +218,10 @@ func (a *App) endUnlessHubClose(id string, seen Job, end func(j Job) error) (def
 	if e != nil {
 		return false, e
 	}
-	if a.hubCloseHolds(j) || foldHubClose(j).settled || lastEndOrAttempt(j) != lastEndOrAttempt(seen) || attemptEndedIndependently(j) {
+	if _, open := pendingHubCloseIntent(j); open && !j.Reaped {
 		return true, nil
 	}
 	return false, end(j)
-}
-
-// endOrAttemptKinds are the ledger events that end an attempt or start one.
-var endOrAttemptKinds = map[string]bool{
-	"job.claim": true, "job.claimed": true, "job.reclaim": true, "job.spawned": true, "job.reprompted": true,
-	"job.completed": true, "job.completion": true, "job.record_settled": true, "job.joined": true, "job.revoked": true,
-	"job.handed_off": true, "job.escalate": true, "job.reaped": true, "job.lost": true, hubCloseSettledKind: true,
-}
-
-// attemptEndedIndependently reports whether the current attempt's newest
-// end-or-attempt event is an end other than a quota stop announced for the
-// hub's hand-over: a hand-off decision then belongs to an attempt that has
-// ended (#593 review), even when the end came before this poll's snapshot.
-func attemptEndedIndependently(j Job) bool {
-	var last *Event
-	for _, ev := range ledgerOrder(j.Events) {
-		if endOrAttemptKinds[ev.Kind] {
-			ev := ev
-			last = &ev
-		}
-	}
-	if last == nil {
-		return false
-	}
-	switch last.Kind {
-	case "job.claim", "job.claimed", "job.reclaim", "job.spawned", "job.reprompted":
-		return false
-	case "job.lost":
-		return str(last.Payload, "reason") != "quota_stop" || boolean(last.Payload, "final", false)
-	}
-	return true
-}
-
-// hubCloseInFlight reports whether a hub close of the job can still act or is
-// owed: an open or owed intent, or a journalled operation not yet final.
-func (a *App) hubCloseInFlight(j Job) (bool, error) {
-	if a.hubCloseHolds(j) {
-		return true, nil
-	}
-	root, err := os.OpenRoot(filepath.Join(a.Jobs, j.ID))
-	if err != nil {
-		return false, err
-	}
-	defer root.Close()
-	dir, err := root.Open(CloseOpDir)
-	if errors.Is(err, fs.ErrNotExist) {
-		return false, nil
-	} else if err != nil {
-		return false, err
-	}
-	names, err := dir.Readdirnames(-1)
-	dir.Close()
-	if err != nil {
-		return false, err
-	}
-	for _, name := range names {
-		if strings.HasPrefix(name, ".") || !strings.HasSuffix(name, ".json") {
-			continue
-		}
-		op, found, err := ReadCloseOp(root, strings.TrimSuffix(name, ".json"))
-		if err != nil {
-			return false, err
-		}
-		if found && !op.Final() {
-			return true, nil
-		}
-	}
-	return false, nil
-}
-
-// lastEndOrAttempt names the newest end-or-attempt event in ledger order.
-func lastEndOrAttempt(j Job) string {
-	last := ""
-	for _, ev := range ledgerOrder(j.Events) {
-		if endOrAttemptKinds[ev.Kind] {
-			last = ev.name
-		}
-	}
-	return last
 }
 
 // pendingHubCloseIntent returns the job's current hub-close intent: the
@@ -319,152 +232,46 @@ func lastEndOrAttempt(j Job) string {
 // closeTargetBound). A newer request that closed nothing hands the job back
 // to an older one still unresolved (an unknown close whose pane is listed).
 func pendingHubCloseIntent(j Job) (HubCloseIntent, bool) {
-	fold := foldHubClose(j)
-	if len(fold.open) == 0 {
-		return HubCloseIntent{}, false
-	}
-	return fold.open[len(fold.open)-1], true
-}
-
-// hubCloseFold is the hub-close protocol folded over a job's ledger.
-type hubCloseFold struct {
-	// open are the current attempt's intents no end, cancellation or new
-	// attempt followed, oldest first.
-	open []HubCloseIntent
-	// ended are the current attempt's intents an independent end (a revoke,
-	// a completion, another loss) followed before their own settlement or
-	// cancellation, oldest first. The node may already have closed the pane
-	// for one, so its settlement still owes the lease release and hk record
-	// (hk 4632, #572 r4576225999); settleHubClose decides from the journal.
-	ended []HubCloseIntent
-	// settled: the node's own final job.lost for a hub close ended the
-	// current attempt (#572 r4576226003).
-	settled bool
-}
-
-func foldHubClose(j Job) hubCloseFold {
-	var fold hubCloseFold
+	var open []HubCloseIntent
 	var attempt, pane, label string
-	without := func(list []HubCloseIntent, id string) []HubCloseIntent {
-		return slices.DeleteFunc(list, func(o HubCloseIntent) bool { return o.RequestID == id })
-	}
-	endOpen := func() {
-		fold.ended = append(fold.ended, fold.open...)
-		fold.open = nil
-	}
 	// The protocol is folded in ledger sequence (file-name) order, as the
 	// node's readNodeJobLedgerEvents folds it: j.Events is ordered by
 	// timestamp, which a clock stepped backwards reorders.
 	for _, ev := range ledgerOrder(j.Events) {
 		switch ev.Kind {
 		case "job.claim", "job.claimed", "job.reclaim":
-			attempt, pane, label, fold = ev.name, "", "", hubCloseFold{}
+			attempt, pane, label, open = ev.name, "", "", nil
 		case "job.spawned":
-			attempt, pane, label, fold = ev.name, str(ev.Payload, "pane_id"), str(ev.Payload, "label"), hubCloseFold{}
+			attempt, pane, label, open = ev.name, str(ev.Payload, "pane_id"), str(ev.Payload, "label"), nil
 			if label == "" {
 				label = str(ev.Payload, "agent_label")
 			}
 		case "job.reprompted":
-			attempt, fold = ev.name, hubCloseFold{}
+			attempt, open = ev.name, nil
 		case hubCloseIntentKind:
 			in := HubCloseIntent{RequestID: str(ev.Payload, "request_id"), Attempt: str(ev.Payload, "attempt"), Pane: str(ev.Payload, "pane_id"), Label: str(ev.Payload, "label"), EndReason: str(ev.Payload, "end_reason")}
 			if ValidCloseOpID(in.RequestID) && in.EndReason != "" && in.Attempt == attempt && in.Pane == pane && in.Pane != "" && in.Label == label {
 				// A repeat of a request records its intent again.
-				fold.open = append(without(fold.open, in.RequestID), in)
-				fold.ended = without(fold.ended, in.RequestID)
+				open = slices.DeleteFunc(open, func(o HubCloseIntent) bool { return o.RequestID == in.RequestID })
+				open = append(open, in)
 			}
 		case hubCloseCancelKind:
 			id := str(ev.Payload, "request_id")
-			fold.open, fold.ended = without(fold.open, id), without(fold.ended, id)
+			open = slices.DeleteFunc(open, func(o HubCloseIntent) bool { return o.RequestID == id })
 		case "job.completed", "job.completion", "job.record_settled", "job.joined", "job.revoked", "job.handed_off", "job.escalate", "job.reaped":
-			endOpen()
-		case hubCloseSettledKind:
-			// The node settled an ended intent: the attempt's close is done,
-			// no other intent of the attempt is owed, and a watcher decision
-			// made before it is stale.
-			fold.open, fold.ended = nil, nil
-			fold.settled = true
+			open = nil
 		case "job.lost":
-			if str(ev.Payload, "reason") == hubCloseLostReason && boolean(ev.Payload, "final", false) && str(ev.Payload, "request_id") != "" {
-				// The node's own settlement ended the attempt: every other
-				// intent of it is retired with it, not owed.
-				fold.open, fold.ended = nil, nil
-				fold.settled = true
-				continue
-			}
 			// An announced quota stop is the hand-over the hub closes for; any
 			// other loss ends the attempt.
 			if str(ev.Payload, "reason") != "quota_stop" || boolean(ev.Payload, "final", false) {
-				endOpen()
+				open = nil
 			}
 		}
 	}
-	return fold
-}
-
-// hubCloseHolds reports whether a hub close owns the attempt's end, so the
-// watcher makes no decision: an open intent, or an intent an independent end
-// followed whose operation may have closed the pane and whose settlement is
-// still owed (#593 review). An unreadable journal holds, failing closed.
-func (a *App) hubCloseHolds(j Job) bool {
-	if _, open := pendingHubCloseIntent(j); open && !j.Reaped {
-		return true
+	if len(open) == 0 {
+		return HubCloseIntent{}, false
 	}
-	_, owed, err := a.endedHubCloseIntent(j)
-	return owed || err != nil
-}
-
-// closeOpMayHaveClosed reports whether a journalled operation's pane may have
-// been closed by it: closed, gone and unknown are final ones that did or may
-// have; closing is one a node restart interrupted mid-close.
-func closeOpMayHaveClosed(op CloseOp) bool {
-	switch op.State {
-	case CloseOpClosed, CloseOpGone, CloseOpUnknown, CloseOpClosing:
-		return true
-	}
-	return false
-}
-
-// endedHubCloseIntent returns the newest intent an independent end followed
-// whose operation may have closed the pane: its settlement is still owed.
-func (a *App) endedHubCloseIntent(j Job) (HubCloseIntent, bool, error) {
-	ended := foldHubClose(j).ended
-	for i := len(ended) - 1; i >= 0; i-- {
-		op, found, err := a.readJobCloseOp(j.ID, ended[i].RequestID)
-		if errors.Is(err, fs.ErrNotExist) {
-			continue
-		} else if err != nil {
-			return HubCloseIntent{}, false, err
-		}
-		if found && op.Attempt == ended[i].Attempt && closeOpMayHaveClosed(op) {
-			return ended[i], true, nil
-		}
-	}
-	return HubCloseIntent{}, false, nil
-}
-
-// preemptibleHubCloseIntent returns the newest intent an independent end
-// followed whose operation never started closing (registered, or never
-// written): under the end lock, which the registered -> closing step also
-// takes, it can no longer act, so settlement preempts it rather than wait for
-// a hub repeat that may never come (#593 review).
-func (a *App) preemptibleHubCloseIntent(j Job) (HubCloseIntent, *CloseOp, bool, error) {
-	ended := foldHubClose(j).ended
-	for i := len(ended) - 1; i >= 0; i-- {
-		op, found, err := a.readJobCloseOp(j.ID, ended[i].RequestID)
-		if errors.Is(err, fs.ErrNotExist) {
-			return ended[i], nil, true, nil
-		} else if err != nil {
-			return HubCloseIntent{}, nil, false, err
-		}
-		switch {
-		case !found:
-			return ended[i], nil, true, nil
-		case op.Attempt == ended[i].Attempt && op.State == CloseOpRegistered:
-			return ended[i], &op, true, nil
-		}
-	}
-	return HubCloseIntent{}, nil, false, nil
+	return open[len(open)-1], true
 }
 
 // ledgerOrder returns events in ledger sequence order (CompareLedgerNames).
@@ -595,13 +402,7 @@ func PendingHubCloseJobs(jobs string) ([]string, error) {
 		if err != nil {
 			continue
 		}
-		// A reap ends the open intents, but an ended one whose pane may have
-		// closed stays owed: the sweep's reap does not retry hk or the lease.
 		if _, open := pendingHubCloseIntent(j); open && !j.Reaped {
-			out = append(out, entry.Name())
-		} else if _, owed, err := a.endedHubCloseIntent(j); err == nil && owed {
-			out = append(out, entry.Name())
-		} else if _, _, preempt, err := a.preemptibleHubCloseIntent(j); err == nil && preempt {
 			out = append(out, entry.Name())
 		}
 	}
@@ -674,21 +475,8 @@ func (a *App) settleHubClose(ctx context.Context, id string, listed func(ctx con
 		return HubClosePending, e
 	}
 	in, open := pendingHubCloseIntent(j)
-	if open && j.Reaped {
-		open = false
-	}
-	ended := !open
-	if !open {
-		// An intent an independent end followed (a revoke after the close was
-		// journalled) is still settled when its operation may have closed the
-		// pane; a competing terminal hk record is kept below.
-		var err error
-		if in, open, err = a.endedHubCloseIntent(j); err != nil {
-			a.warn("hub close of job %s waits: close operation unreadable: %v", j.ID, err)
-			return HubClosePending, nil
-		} else if !open {
-			return a.preemptEndedHubClose(ctx, j)
-		}
+	if !open || j.Reaped {
+		return HubCloseNone, nil
 	}
 	cancel := func(reason string) (HubCloseState, error) {
 		return HubCloseCancelled, a.eventSynced(ctx, j.ID, hubCloseCancelKind, map[string]any{"request_id": in.RequestID, "reason": reason})
@@ -711,20 +499,16 @@ func (a *App) settleHubClose(ctx context.Context, id string, listed func(ctx con
 			return cancel("orphaned")
 		}
 		return HubClosePending, nil
-	case !op.Final() && !(ended && op.State == CloseOpClosing):
+	case !op.Final():
 		// Still registered or closing: the hub repeats the request until it
-		// is final (docs/node-commands.md). An operation left closing (a
-		// node crash mid-close) after an independent end will get no
-		// repeat; it may have closed the pane, so it settles below as
-		// unknown does, once the pane inventory shows the pane absent (#593
-		// od-4a876257a3).
+		// is final (docs/node-commands.md).
 		return HubClosePending, nil
 	case op.Attempt != in.Attempt:
 		return cancel("stale")
 	}
 	switch op.State {
 	case CloseOpClosed:
-	case CloseOpGone, CloseOpUnknown, CloseOpClosing:
+	case CloseOpGone, CloseOpUnknown:
 		// gone came from the node's agent list, and unknown may not have
 		// closed anything: both wait for the pane inventory to show the
 		// pane absent.
@@ -744,40 +528,14 @@ func (a *App) settleHubClose(ctx context.Context, id string, listed func(ctx con
 	case state == "lost" && reason == in.EndReason:
 	case state == "completed" || state == "lost" || state == "escalated":
 		a.warn("hub close of job %s: hk holds another terminal record (%s); kept", j.ID, state)
-		return a.finishHubClose(ctx, j, in, true, ended), nil
+		return a.finishHubClose(ctx, j, in, true), nil
 	default:
 		if e := a.putJobRecord(ctx, j.ID, map[string]any{"state": "lost", "end_reason": in.EndReason, "at": a.Now().UTC()}); e != nil {
 			a.warn("hub close lost record not written, retrying: %v", e)
 			return HubClosePending, nil
 		}
 	}
-	return a.finishHubClose(ctx, j, in, false, ended), nil
-}
-
-// preemptEndedHubClose, under the end lock, preempts an ended intent whose
-// operation never started closing: a registered operation is journalled
-// preempted (a hub repeat replays it) and the intent is cancelled.
-func (a *App) preemptEndedHubClose(ctx context.Context, j Job) (HubCloseState, error) {
-	in, op, found, err := a.preemptibleHubCloseIntent(j)
-	if err != nil {
-		a.warn("hub close of job %s waits: close operation unreadable: %v", j.ID, err)
-		return HubClosePending, nil
-	}
-	if !found {
-		return HubCloseNone, nil
-	}
-	if op != nil {
-		root, err := os.OpenRoot(filepath.Join(a.Jobs, j.ID))
-		if err != nil {
-			return HubClosePending, err
-		}
-		defer root.Close()
-		op.State, op.Updated = CloseOpPreempted, a.Now().UTC()
-		if err := WriteCloseOp(root, *op); err != nil {
-			return HubClosePending, err
-		}
-	}
-	return HubCloseCancelled, a.eventSynced(ctx, j.ID, hubCloseCancelKind, map[string]any{"request_id": in.RequestID, "reason": "preempted"})
+	return a.finishHubClose(ctx, j, in, false), nil
 }
 
 // finishHubClose finishes a job whose pane the hub close stopped and whose hk
@@ -786,11 +544,7 @@ func (a *App) preemptEndedHubClose(ctx context.Context, j Job) (HubCloseState, e
 // settlement step (a repeat, close_status, the daemon retry or a node start)
 // repeats both: the lease release re-reads the pools still held, and the
 // final job.lost closes the intent, so it is written once.
-//
-// ended: an independent end already recorded the job's local outcome, so the
-// settlement is recorded as job.hub_close_settled, not a terminal job.lost
-// that would replace that outcome.
-func (a *App) finishHubClose(ctx context.Context, j Job, in HubCloseIntent, superseded, ended bool) HubCloseState {
+func (a *App) finishHubClose(ctx context.Context, j Job, in HubCloseIntent, superseded bool) HubCloseState {
 	if e := a.releaseQuota(ctx, j); e != nil {
 		a.warn("hub close lease release failed, retrying: %v", e)
 		return HubClosePending
@@ -799,12 +553,7 @@ func (a *App) finishHubClose(ctx context.Context, j Job, in HubCloseIntent, supe
 	if superseded {
 		payload["superseded"] = true
 	}
-	kind := "job.lost"
-	if ended {
-		kind = hubCloseSettledKind
-		delete(payload, "final")
-	}
-	if e := a.eventSynced(ctx, j.ID, kind, payload); e != nil {
+	if e := a.eventSynced(ctx, j.ID, "job.lost", payload); e != nil {
 		a.warn("hub close job.lost not recorded, retrying: %v", e)
 		return HubClosePending
 	}

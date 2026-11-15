@@ -87,17 +87,6 @@ func (a *App) lifecycleWithOptions(ctx context.Context, kind string, args []stri
 			return e
 		}
 	}
-	// The job's end lock is the authority for its end decisions (hk 4632):
-	// a hub close's binding and its registered -> closing step, the watcher's
-	// decisions and this command serialize on it. The order is end, then
-	// operation, then events; the watcher already holds end when it calls in.
-	if !watchResult {
-		unlockEnd, e := LockJobEndContext(ctx, filepath.Join(a.Jobs, id))
-		if e != nil {
-			return e
-		}
-		defer unlockEnd()
-	}
 	lock, e := os.OpenFile(filepath.Join(a.Jobs, id, ".panewire-operation.lock"), os.O_CREATE|os.O_RDWR, 0600)
 	if e != nil {
 		return e
@@ -275,20 +264,6 @@ func (a *App) releaseQuota(ctx context.Context, j Job) error {
 	return nil
 }
 func (a *App) restore(ctx context.Context, j Job) error {
-	// A new attempt never starts on a pane an earlier hub close can still
-	// act on (#593 review): under the end lock, restore waits while a close
-	// operation is in flight or a close is owed.
-	unlockEnd, e := LockJobEndContext(ctx, filepath.Join(a.Jobs, j.ID))
-	if e != nil {
-		return e
-	}
-	defer unlockEnd()
-	if j, e = a.job(j.ID); e != nil {
-		return e
-	}
-	if inFlight, err := a.hubCloseInFlight(j); err != nil || inFlight {
-		return fail(exitStateConflict, "restore waits: a hub close of job %s is in flight", j.ID)
-	}
 	d, e := a.durable(ctx, j.ID)
 	if e != nil {
 		return e

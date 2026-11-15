@@ -254,18 +254,11 @@ func (a *App) watch(ctx context.Context, args []string) error {
 		// timeout, the deadline exit and the missing-pane fallback all wait.
 		// The node's final job.lost closes the intent and ends this watch; a
 		// request that closed nothing hands the job back.
-		if a.hubCloseHolds(j) {
+		if _, ok := pendingHubCloseIntent(j); ok && !j.Reaped {
 			if err := a.Sleep(ctx, 5*time.Second); err != nil {
 				return err
 			}
 			continue
-		}
-		// The node settled a hub close of this attempt: it wrote the record
-		// and freed the lease, so no end decision is left, even during a
-		// quota hand-over's grace (hk 4632). Durable publication the attempt
-		// already owes is finished first, and makes no new end decision.
-		if foldHubClose(j).settled {
-			return a.finishPublicationAfterHubClose(ctx, j)
 		}
 		// The job.lost announced for a quota stop (by this watcher for a
 		// reviewer, by the manager for a handed-over implementer) is not
@@ -283,7 +276,7 @@ func (a *App) watch(ctx context.Context, args []string) error {
 			// An open close intent outlives a herdr outage: hk alone can
 			// finish it, and anything else waits for herdr.
 			var out quotaIntentOutcome
-			deferred, err := a.endUnlessHubClose(id, j, func(j Job) (err error) {
+			deferred, err := a.endUnlessHubClose(id, func(j Job) (err error) {
 				out, err = a.reconcileQuotaIntent(ctx, j, intent, false, false, false, Agent{})
 				return err
 			})
@@ -366,7 +359,7 @@ func (a *App) watch(ctx context.Context, args []string) error {
 				}
 				if safeCreditStopHandoff(j, credit, current, currentPresent, currentReachable) {
 					if a.QuotaHandOffGrace <= 0 {
-						deferred, err := a.endUnlessHubClose(id, j, func(j Job) error { return a.quotaStopLost(ctx, j, credit, true) })
+						deferred, err := a.endUnlessHubClose(id, func(j Job) error { return a.quotaStopLost(ctx, j, credit, true) })
 						if err != nil {
 							return err
 						}
@@ -424,7 +417,7 @@ func (a *App) watch(ctx context.Context, args []string) error {
 				// the report here could close it locally while hk holds, or may hold,
 				// the lost record.
 				if !handOff.active && !hasIntent && pending && size == info.Size() && modified.Equal(info.ModTime()) && a.workerSignalledEnd(j) {
-					deferred, err := a.endUnlessHubClose(id, j, func(Job) error {
+					deferred, err := a.endUnlessHubClose(id, func(Job) error {
 						return a.lifecycleWithOptions(ctx, "done", []string{id, "--report", j.Report}, true, len(args) == 2)
 					})
 					if !deferred {
@@ -440,7 +433,7 @@ func (a *App) watch(ctx context.Context, args []string) error {
 			}
 		}
 		if waiting != nil && !hasIntent && !(pending && a.workerSignalledEnd(j)) && !a.Now().Before(waiting.at.Add(decisionTimeout)) {
-			deferred, err := a.endUnlessHubClose(id, j, func(j Job) error {
+			deferred, err := a.endUnlessHubClose(id, func(j Job) error {
 				if e := a.putJobRecord(ctx, id, map[string]any{"state": "lost", "at": a.Now().UTC()}); e != nil {
 					a.jobRecordFailed(ctx, id, "lost", e)
 				}
@@ -461,7 +454,7 @@ func (a *App) watch(ctx context.Context, args []string) error {
 		if waiting == nil && !handOff.active && !quotaRetry && a.Now().After(deadline) && (!pending || latePoll) {
 			// Under the end lock: a hub close recorded meanwhile keeps the
 			// watcher, which is what finishes that close.
-			deferred, err := a.endUnlessHubClose(id, j, func(Job) error {
+			deferred, err := a.endUnlessHubClose(id, func(Job) error {
 				fmt.Fprintln(a.Err, "watch-expired: job stays live; quota retained")
 				return nil
 			})
@@ -495,7 +488,7 @@ func (a *App) watch(ctx context.Context, args []string) error {
 		if !handOff.active && j.QuotaRole() != "consult" {
 			if hasIntent {
 				var out quotaIntentOutcome
-				deferred, err := a.endUnlessHubClose(id, j, func(j Job) (err error) {
+				deferred, err := a.endUnlessHubClose(id, func(j Job) (err error) {
 					out, err = a.reconcileQuotaIntent(ctx, j, intent, true, present, pending, paneAgent)
 					return err
 				})
@@ -527,7 +520,7 @@ func (a *App) watch(ctx context.Context, args []string) error {
 
 		if handOff.active {
 			if handOff.expired(a.Now(), paneAgent, present) {
-				deferred, err := a.endUnlessHubClose(id, j, func(j Job) error { return a.quotaStopLost(ctx, j, handOff.stop, false) })
+				deferred, err := a.endUnlessHubClose(id, func(j Job) error { return a.quotaStopLost(ctx, j, handOff.stop, false) })
 				if !deferred {
 					return err
 				}
@@ -541,7 +534,7 @@ func (a *App) watch(ctx context.Context, args []string) error {
 				// Under the end lock: a hub close recorded since this poll's
 				// look owns the pane now, and a stale re-prompt would close
 				// its intent.
-				deferred, err := a.endUnlessHubClose(id, j, func(Job) error {
+				deferred, err := a.endUnlessHubClose(id, func(Job) error {
 					return a.event(ctx, id, "job.reprompted", map[string]any{"reason": "quota_stop_resumed", "pane_id": j.Pane})
 				})
 				if err != nil {
@@ -561,7 +554,7 @@ func (a *App) watch(ctx context.Context, args []string) error {
 		// write below would end the job without the quota_stop record and close the
 		// intent with its event.
 		if missing >= 2 && !handOff.active && !quotaRetry {
-			deferred, err := a.endUnlessHubClose(id, j, func(j Job) error {
+			deferred, err := a.endUnlessHubClose(id, func(j Job) error {
 				if e := a.putJobRecord(ctx, id, map[string]any{"state": "lost", "at": a.Now().UTC()}); e != nil {
 					a.jobRecordFailed(ctx, id, "lost", e)
 				}
@@ -725,97 +718,4 @@ func (a *App) updateDecision(ctx context.Context, j Job) (*decisionWait, error) 
 		}
 	}
 	return waiting, nil
-}
-
-// finishPublicationAfterHubClose finishes, for an attempt the node's hub close
-// settled, what the attempt already durably owes besides its end (#593
-// review). A pending credit rejection is published and receipted with no
-// hand-over, since the attempt has ended; one that cannot be published is
-// paused, for the credit re-arm, and does not hold the rest back. A completion
-// `done` left after job.record_settled resumes, under the end lock, from the
-// report its receipt names when that file still has the settled digest; an
-// independent end recorded since (an owner's `job close`) is the attempt's
-// outcome and is kept, so no completion follows it. A failure is returned.
-func (a *App) finishPublicationAfterHubClose(ctx context.Context, j Job) error {
-	var pauseErr error
-	if credit, pending := pendingCreditRejection(j); pending {
-		var err error
-		for attempt := 1; attempt <= 3; attempt++ {
-			if err = a.publishCreditRejection(ctx, j, credit); err == nil {
-				break
-			}
-			a.warn("credit rejection publication failed (attempt %d): %v", attempt, err)
-			if errors.Is(err, errCreditAccountMismatch) || errors.Is(err, errCreditAccountUnidentifiable) {
-				break
-			}
-			if attempt < 3 {
-				if e := a.Sleep(ctx, 5*time.Second); e != nil {
-					return e
-				}
-			}
-		}
-		if err != nil {
-			pauseErr = a.pauseCreditPublication(ctx, j, credit, err)
-		} else if err := a.event(ctx, j.ID, "job.credit_published", map[string]any{"pool": credit.Pool, "at": credit.CreditExhaustedAt.UTC().Format(time.RFC3339Nano)}); err != nil {
-			return err
-		}
-	}
-	if err := a.resumeInterruptedCompletion(ctx, j.ID); err != nil {
-		return errors.Join(pauseErr, err)
-	}
-	return pauseErr
-}
-
-// resumeInterruptedCompletion resumes, under the end lock, a done that
-// recorded job.record_settled but not job.completed, from the report its
-// receipt names.
-func (a *App) resumeInterruptedCompletion(ctx context.Context, id string) error {
-	unlock, err := LockJobEndContext(ctx, filepath.Join(a.Jobs, id))
-	if err != nil {
-		return err
-	}
-	defer unlock()
-	j, err := a.job(id)
-	if err != nil {
-		return err
-	}
-	report, ok := interruptedCompletion(j)
-	if !ok || j.Terminal || j.Reaped {
-		return nil
-	}
-	return a.lifecycleWithOptions(ctx, "done", []string{j.ID, "--report", report}, true, false)
-}
-
-// interruptedCompletion returns the report a done settled (its receipt's
-// report, else the spawn's) when the attempt recorded job.record_settled but
-// not job.completed and that file still has the settled digest: a report
-// that changed or is gone is never published in its place.
-func interruptedCompletion(j Job) (string, bool) {
-	var receipt map[string]any
-	for _, ev := range ledgerOrder(j.Events) {
-		switch ev.Kind {
-		case "job.claim", "job.claimed", "job.reclaim", "job.spawned", "job.reprompted", "job.completed":
-			receipt = nil
-		case eventRecordSettled:
-			receipt = ev.Payload
-		}
-	}
-	if receipt == nil {
-		return "", false
-	}
-	report := str(receipt, "report")
-	if report == "" {
-		report = j.Report
-	}
-	if report == "" {
-		return "", false
-	}
-	if info, err := os.Stat(report); err != nil || !info.Mode().IsRegular() {
-		return "", false
-	}
-	body, err := os.ReadFile(report)
-	if err != nil || reportDigest(body) != str(receipt, "report_sha256") {
-		return "", false
-	}
-	return report, true
 }

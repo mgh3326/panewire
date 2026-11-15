@@ -11,8 +11,6 @@ import (
 	"syscall"
 	"testing"
 	"time"
-
-	"github.com/mgh3326/panewire/internal/fleet"
 )
 
 // jobCloseFixture is an isolated jobs root: ARBITER_INBOX_ROOT, HOSTNAME,
@@ -125,8 +123,8 @@ func (f *jobCloseFixture) revokedRecords(job string) []map[string]any {
 }
 
 // assertNoSideEffects: the declaration never reaches herdr or the daemon,
-// and leaves nothing in the job directories besides events/, the events lock
-// and the end lock (an attempted emit would leave emit-failures.log).
+// and leaves nothing in the job directories besides events/ and the events
+// lock (an attempted emit would leave emit-failures.log).
 func (f *jobCloseFixture) assertNoSideEffects() {
 	f.t.Helper()
 	jobs, err := os.ReadDir(f.jobs)
@@ -139,7 +137,7 @@ func (f *jobCloseFixture) assertNoSideEffects() {
 			f.t.Fatal(err)
 		}
 		for _, entry := range entries {
-			if entry.Name() != "events" && entry.Name() != ".wrk-events.lock" && entry.Name() != ".panewire-end.lock" {
+			if entry.Name() != "events" && entry.Name() != ".wrk-events.lock" {
 				f.t.Fatalf("close left %s/%s behind", job.Name(), entry.Name())
 			}
 		}
@@ -522,34 +520,5 @@ func TestJobCloseHelpAndDispatch(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	if rc := runJobCLI([]string{"close", "--help"}, &stdout, &stderr, CLIConfig{}); rc != ExitOK || !strings.HasPrefix(stdout.String(), "Usage: panewire job close JOB") {
 		t.Fatalf("help rc=%d stdout=%q", rc, stdout.String())
-	}
-}
-
-// hk 4632: `job close` takes the job's end lock before it publishes, so its
-// revoke serializes with a hub close's registered -> closing step and the
-// watcher's decisions.
-func TestJobCloseWaitsForTheEndLock_t4632(t *testing.T) {
-	f := newJobCloseFixture(t)
-	f.claim("j1", "00001-job.claim.json", "job.claim", "director-1")
-	f.spawned("j1", "00002-job.spawned.json", "w16:p28P", "w16:t9")
-	unlock, err := fleet.LockJobEnd(filepath.Join(f.jobs, "j1"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	done := make(chan int, 1)
-	go func() { done <- f.run("j1", "--lane", "director-1", "--outcome", "completed", "--reason", "r") }()
-	// Window that proves nothing more happens: the close must not publish
-	// while the end lock is held.
-	time.Sleep(300 * time.Millisecond)
-	if got := f.names("j1"); len(got) != 2 {
-		unlock()
-		t.Fatalf("close published under a held end lock: %q", got)
-	}
-	unlock()
-	if rc := <-done; rc != ExitOK {
-		t.Fatalf("rc=%d stderr=%q", rc, f.stderr.String())
-	}
-	if got := f.names("j1"); len(got) != 3 {
-		t.Fatalf("events after close = %q", got)
 	}
 }

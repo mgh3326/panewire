@@ -11,8 +11,6 @@ import (
 	"strings"
 	"syscall"
 	"unicode/utf8"
-
-	"github.com/mgh3326/panewire/internal/fleet"
 )
 
 // See docs/job-close.md for the ownership, routing and record contract.
@@ -257,14 +255,6 @@ func scanJobCloseState(eventsDir string) (jobCloseState, error) {
 // publish see one state. The record lands by link, which never replaces an
 // existing name; a collision rescans and retries.
 func (c *jobCLI) publishJobClose(jobDir, eventsDir string, options jobCloseOptions, source string) (jobCloseRecord, string, error) {
-	// The end lock first (hk 4632): it serializes this end with a hub
-	// close's binding and registered -> closing step and with the watcher's
-	// decisions. The order is end, then events.
-	unlockEnd, err := fleet.LockJobEnd(jobDir)
-	if err != nil {
-		return jobCloseRecord{}, "", &jobExit{code: 1, message: "close: " + err.Error()}
-	}
-	defer unlockEnd()
 	lock, err := os.OpenFile(filepath.Join(jobDir, ".wrk-events.lock"), os.O_WRONLY|os.O_CREATE, 0o666)
 	if err != nil {
 		return jobCloseRecord{}, "", &jobExit{code: 1, message: "close: " + err.Error()}
