@@ -93,36 +93,41 @@ func TestNodeJobDoneAnswersAlreadyDoneAfterTheReportIsDeleted(t *testing.T) {
 }
 
 // A released job id claimed again is a new round: the old round's marker must
-// not answer for it.
-func TestNodeJobDoneIgnoresAMarkerBeforeTheLastClaim(t *testing.T) {
-	runs, _, lifecycle := nodeReapLifecycle(t, "", false)
-	client, report := nodeReapJobDir(t, "job-a", nodeJobReportFile)
-	client.nodeLifecycle = lifecycle
-	args := nodeJobDoneArgs{Job: "job-a", Report: report}
-	if _, code := nodeRun(t, client, nodeCommandJobDone, args); code != "" {
-		t.Fatalf("first run code=%q", code)
-	}
-	if err := os.Remove(report); err != nil {
-		t.Fatal(err)
-	}
-	events := filepath.Join(filepath.Dir(report), "events")
-	if err := os.MkdirAll(events, 0700); err != nil {
-		t.Fatal(err)
-	}
-	claim := filepath.Join(events, "00001-job.claimed.json")
-	if err := os.WriteFile(claim, []byte(`{"kind":"job.claimed"}`), 0600); err != nil {
-		t.Fatal(err)
-	}
-	later := time.Now().Add(time.Second)
-	if err := os.Chtimes(claim, later, later); err != nil {
-		t.Fatal(err)
-	}
-	result, code := nodeRun(t, client, nodeCommandJobDone, args)
-	if code != "" || result["outcome"] != nodeJobReportInvalid {
-		t.Fatalf("after a new claim code=%q result=%v, want report-invalid", code, result)
-	}
-	if runs() != 1 {
-		t.Fatalf("panewire ran %d times, want one", runs())
+// not answer for it. Every kind the fleet's foldJob treats as a revive starts
+// one.
+func TestNodeJobDoneIgnoresAMarkerBeforeTheLastNewRound(t *testing.T) {
+	for _, kind := range []string{"job.claim", "job.claimed", "job.reclaim", "job.spawned", "job.reprompted"} {
+		t.Run(kind, func(t *testing.T) {
+			runs, _, lifecycle := nodeReapLifecycle(t, "", false)
+			client, report := nodeReapJobDir(t, "job-a", nodeJobReportFile)
+			client.nodeLifecycle = lifecycle
+			args := nodeJobDoneArgs{Job: "job-a", Report: report}
+			if _, code := nodeRun(t, client, nodeCommandJobDone, args); code != "" {
+				t.Fatalf("first run code=%q", code)
+			}
+			if err := os.Remove(report); err != nil {
+				t.Fatal(err)
+			}
+			events := filepath.Join(filepath.Dir(report), "events")
+			if err := os.MkdirAll(events, 0700); err != nil {
+				t.Fatal(err)
+			}
+			record := filepath.Join(events, "00001-"+kind+".json")
+			if err := os.WriteFile(record, []byte(`{"kind":"`+kind+`"}`), 0600); err != nil {
+				t.Fatal(err)
+			}
+			later := time.Now().Add(time.Second)
+			if err := os.Chtimes(record, later, later); err != nil {
+				t.Fatal(err)
+			}
+			result, code := nodeRun(t, client, nodeCommandJobDone, args)
+			if code != "" || result["outcome"] != nodeJobReportInvalid {
+				t.Fatalf("%s after the marker code=%q result=%v, want report-invalid", kind, code, result)
+			}
+			if runs() != 1 {
+				t.Fatalf("panewire ran %d times, want one", runs())
+			}
+		})
 	}
 }
 

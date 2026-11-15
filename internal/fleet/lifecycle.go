@@ -79,7 +79,10 @@ func (a *App) lifecycleWithOptions(ctx context.Context, kind string, args []stri
 	}
 	strictResult := kind == "done" && !watchResult && result != nil
 	body := []byte{}
-	digest := ""
+	// A reportless command (an escalate with no --report) has no bytes, and
+	// its digest is the sha256 of none: the duplicate check still matches the
+	// record the first such escalation wrote. A readable report replaces it.
+	digest := reportDigest(body)
 	// readErr is the report read's failure. An absent report on `done` is not
 	// necessarily an error: the fleet deletes it after the pin (hk 3685), and
 	// the completion that announced it names the bytes hk holds.
