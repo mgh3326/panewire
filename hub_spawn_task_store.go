@@ -106,7 +106,7 @@ func (s *laneInboxStore) ensureSpawnTasks() error {
 	ctx, done := s.op(s.life)
 	defer done()
 	for _, statement := range []string{
-		`CREATE TABLE IF NOT EXISTS spawn_operations (request_id TEXT PRIMARY KEY,job TEXT NOT NULL,owner TEXT NOT NULL,fingerprint TEXT NOT NULL,payload TEXT NOT NULL,status TEXT NOT NULL,created_ms BIGINT NOT NULL,deadline_ms BIGINT NOT NULL,node_id TEXT UNIQUE,node_payload TEXT NOT NULL DEFAULT '',result TEXT NOT NULL DEFAULT '{}',trace_recorded INTEGER NOT NULL DEFAULT 0,last_run_ms BIGINT NOT NULL DEFAULT 0,attempt INTEGER NOT NULL DEFAULT 1)`,
+		`CREATE TABLE IF NOT EXISTS spawn_operations (request_id TEXT PRIMARY KEY,job TEXT NOT NULL,owner TEXT NOT NULL,fingerprint TEXT NOT NULL,payload TEXT NOT NULL,status TEXT NOT NULL,created_ms BIGINT NOT NULL,deadline_ms BIGINT NOT NULL,node_id TEXT UNIQUE,node_payload TEXT NOT NULL DEFAULT '',result TEXT NOT NULL DEFAULT '{}',trace_recorded INTEGER NOT NULL DEFAULT 0,last_run_ms BIGINT NOT NULL DEFAULT 0,attempt INTEGER NOT NULL DEFAULT 1,conditions_met_ms BIGINT NOT NULL DEFAULT 0)`,
 		`CREATE TABLE IF NOT EXISTS spawn_reservations (job TEXT PRIMARY KEY,request_id TEXT NOT NULL UNIQUE,task_role TEXT UNIQUE)`,
 		`CREATE TABLE IF NOT EXISTS spawn_notifications (event_id TEXT PRIMARY KEY,request_id TEXT NOT NULL,job TEXT NOT NULL,owner TEXT NOT NULL,result TEXT NOT NULL,created_ms BIGINT NOT NULL,delivered INTEGER NOT NULL DEFAULT 0,telemetry_recorded INTEGER NOT NULL DEFAULT 0)`,
 		spawnAttemptGrantsTable,
@@ -121,7 +121,7 @@ func (s *laneInboxStore) ensureSpawnTasks() error {
 	// Stores from before hk 4460 lack the placement columns (postgres: the
 	// 0008 migration). A restart restores counts from these two columns, and
 	// refresh_waits arrived with hk 4600 (postgres: 0011).
-	for _, column := range []string{`placed_ms BIGINT NOT NULL DEFAULT 0`, `claimed_ms BIGINT NOT NULL DEFAULT 0`, `exclusions TEXT NOT NULL DEFAULT '[]'`, `claimed_host TEXT NOT NULL DEFAULT ''`, `refresh_waits TEXT NOT NULL DEFAULT '[]'`, `expires_ms BIGINT NOT NULL DEFAULT 0`} {
+	for _, column := range []string{`placed_ms BIGINT NOT NULL DEFAULT 0`, `claimed_ms BIGINT NOT NULL DEFAULT 0`, `exclusions TEXT NOT NULL DEFAULT '[]'`, `claimed_host TEXT NOT NULL DEFAULT ''`, `refresh_waits TEXT NOT NULL DEFAULT '[]'`, `expires_ms BIGINT NOT NULL DEFAULT 0`, `conditions_met_ms BIGINT NOT NULL DEFAULT 0`} {
 		if _, err := s.db.ExecContext(ctx, `ALTER TABLE spawn_operations ADD COLUMN `+column); err != nil {
 			if err := ignoreDuplicateColumn(err); err != nil {
 				return err
@@ -133,11 +133,23 @@ func (s *laneInboxStore) ensureSpawnTasks() error {
 			return err
 		}
 	}
+	// A row an older hub accepted with a start condition belongs to the queue
+	// now (hk 4736): waiting is a new value of status, and no older query lists
+	// it. Only unbound accepted rows move; a bound legacy row keeps its guard.
+	if _, err := s.db.ExecContext(ctx, `UPDATE spawn_operations SET status='waiting' WHERE status='accepted' AND conditions_met_ms=0 AND payload LIKE '%"start_conditions":%'`); err != nil {
+		return err
+	}
 	return nil
 }
 
 func (s *laneInboxStore) claimSpawn(parent context.Context, request fleet.Submission, job, owner string, now time.Time) (hubSpawnTask, bool, error) {
-	return s.claimSpawnReplacing(parent, request, job, owner, now, "", "", "accepted")
+	// A request with a start condition waits in the queue (hk 4736): the
+	// coordinator releases it to accepted once every predicate holds.
+	status := "accepted"
+	if len(request.StartConditions) != 0 {
+		status = "waiting"
+	}
+	return s.claimSpawnReplacing(parent, request, job, owner, now, "", "", status)
 }
 
 // claimSpawnReplacing transfers the task role in the same transaction as the
@@ -421,7 +433,7 @@ func queueSpawnNotifications(ctx context.Context, s *laneInboxStore, tx *sql.Tx,
 	// The owner keeps the bare event id. A failed or retryable spawn also tells
 	// the submitting lane, whose only other sign of it was ACCEPTED.
 	lanes := []struct{ id, lane string }{{eventID, task.Owner}}
-	if status == "failed" || status == "retryable" || status == "given_up" {
+	if status == "failed" || status == "retryable" || status == "given_up" || status == "refused" || status == "cancelled" {
 		if lane := spawnSubmitterLane(task.Request.Args); lane != "" && lane != task.Owner {
 			lanes = append(lanes, struct{ id, lane string }{eventID + ":" + lane, lane})
 		}
@@ -605,39 +617,16 @@ func (s *laneInboxStore) boundSpawnsSince(parent context.Context, since time.Tim
 }
 
 // pendingSpawns returns the fresh runnable page and a bounded number of due
-// stale rows. Conditioned rows use a separate page so they cannot displace fresh
-// runnable work.
+// stale rows. Conditioned rows wait as status waiting, so they hold no slot
+// here until the start-condition check releases them.
 func (s *laneInboxStore) pendingSpawns(parent context.Context, now time.Time) ([]hubSpawnTask, error) {
 	ctx, done := s.op(parent)
 	defer done()
-	tasks, err := s.queryPendingSpawns(ctx, `status IN ('accepted','bound','dispatching','reconciling','bound_grant','dispatching_grant','reconciling_grant') AND payload NOT LIKE '%"start_conditions":%' ORDER BY last_run_ms,created_ms LIMIT 32`)
+	tasks, err := s.queryPendingSpawns(ctx, `status IN ('accepted','bound','dispatching','reconciling','bound_grant','dispatching_grant','reconciling_grant') ORDER BY last_run_ms,created_ms LIMIT 32`)
 	if err != nil {
 		return nil, err
 	}
-	stale, err := s.queryPendingSpawns(ctx, `status IN ('deadline_exceeded','deadline_exceeded_grant') AND payload NOT LIKE '%"start_conditions":%' ORDER BY last_run_ms,created_ms LIMIT 256`)
-	if err != nil {
-		return nil, err
-	}
-	due := 0
-	for _, task := range stale {
-		if due < spawnStaleBatch && spawnStaleProbeDue(task, now) {
-			tasks = append(tasks, task)
-			due++
-		}
-	}
-	return tasks, nil
-}
-
-// pendingStartConditionSpawns gives legacy conditioned rows their own bounded
-// fresh page and due-stale pass, separate from ordinary runnable spawns.
-func (s *laneInboxStore) pendingStartConditionSpawns(parent context.Context, now time.Time) ([]hubSpawnTask, error) {
-	ctx, done := s.op(parent)
-	defer done()
-	tasks, err := s.queryPendingSpawns(ctx, `status IN ('accepted','bound','dispatching','reconciling','bound_grant','dispatching_grant','reconciling_grant') AND payload LIKE '%"start_conditions":%' ORDER BY last_run_ms,created_ms LIMIT 32`)
-	if err != nil {
-		return nil, err
-	}
-	stale, err := s.queryPendingSpawns(ctx, `status IN ('deadline_exceeded','deadline_exceeded_grant') AND payload LIKE '%"start_conditions":%' ORDER BY last_run_ms,created_ms LIMIT 256`)
+	stale, err := s.queryPendingSpawns(ctx, `status IN ('deadline_exceeded','deadline_exceeded_grant') ORDER BY last_run_ms,created_ms LIMIT 256`)
 	if err != nil {
 		return nil, err
 	}

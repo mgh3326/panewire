@@ -34,10 +34,10 @@ func (h *HubServer) handleSpawnFeatures(w http.ResponseWriter, r *http.Request) 
 		hubUnauthorized(w)
 		return
 	}
-	// spawn_expires_v1: the request carries expires_seconds (hk 4660). Start
-	// conditions are deliberately not advertised until the queue owns their
-	// lifecycle on a batched hk observation (hk 4660 follow-up).
-	writeJSON(w, http.StatusOK, map[string][]string{"features": {"spawn_expires_v1"}})
+	// spawn_expires_v1: the request carries expires_seconds (hk 4660).
+	// start_conditions_v1: --after conditions are queued as waiting and
+	// checked in one batched hk snapshot per scheduler pass (hk 4736).
+	writeJSON(w, http.StatusOK, map[string][]string{"features": {"spawn_expires_v1", "start_conditions_v1"}})
 }
 
 // decodeSpawnRequest authenticates and validates a spawn request for the submit
@@ -67,10 +67,6 @@ func (h *HubServer) decodeSpawnRequest(w http.ResponseWriter, r *http.Request) (
 	}
 	if err != nil || !validHubSpawnRequestID(request.RequestID) || !hubSpawnMachinePattern.MatchString(request.OriginMachine) {
 		writeJSON(w, 400, map[string]string{"error": "invalid_request", "fix": "rebuild the request with panewire spawn"})
-		return fleet.Submission{}, fleet.Spawn{}, false
-	}
-	if len(request.StartConditions) != 0 {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "start_conditions_unsupported", "reason": "queue_core_required", "fix": "start conditions are not enabled on this hub; upgrade after queue-core support is deployed"})
 		return fleet.Submission{}, fleet.Spawn{}, false
 	}
 	// The node applies this same rule to the args it receives; refusing here
@@ -245,29 +241,15 @@ func (h *HubServer) handleSpawnOperation(w http.ResponseWriter, r *http.Request)
 		writeJSON(w, 503, map[string]string{"error": "store_unavailable"})
 		return
 	}
-	var startCondition *fleet.StartConditionResult
-	if len(task.Request.StartConditions) != 0 && spawnPending(task.Status) {
-		result := evaluateHubStartCondition(r.Context(), h, task.Request.StartConditions)
-		startCondition = &result
-	}
 	// Never expose the persisted brief, argv or submitting paths through status
 	// reads. A reason's refusal text may name a path on the executing node.
 	writeJSON(w, 200, struct {
-		Job            string                      `json:"job_id"`
-		Request        string                      `json:"request_id"`
-		Status         string                      `json:"status"`
-		ExpiresAt      string                      `json:"expires_at,omitempty"`
-		Result         hubSpawnOutcome             `json:"result"`
-		StartCondition *fleet.StartConditionResult `json:"start_condition,omitempty"`
-	}{task.Job, task.Request.RequestID, spawnPublicStatus(task.Status), spawnExpiresAt(task), task.Outcome, startCondition})
-}
-
-func evaluateHubStartCondition(ctx context.Context, h *HubServer, conditions []fleet.StartCondition) fleet.StartConditionResult {
-	snapshots, err := fleet.ReadStartConditionTasks(ctx, conditions)
-	if err != nil {
-		return fleet.StartConditionResult{Status: "waiting", Reasons: []string{"hk_unavailable"}}
-	}
-	return fleet.EvaluateStartConditions(conditions, snapshots, h.now().UTC())
+		Job       string          `json:"job_id"`
+		Request   string          `json:"request_id"`
+		Status    string          `json:"status"`
+		ExpiresAt string          `json:"expires_at,omitempty"`
+		Result    hubSpawnOutcome `json:"result"`
+	}{task.Job, task.Request.RequestID, spawnPublicStatus(task.Status), spawnExpiresAt(task), task.Outcome})
 }
 
 // hubSpawnWorkerCount bounds placement work. Node I/O runs in a separate slot
@@ -376,6 +358,9 @@ func (h *HubServer) runSpawnCoordinator(parent context.Context) {
 	defer tick.Stop()
 	for {
 		if h.drain.admit() {
+			// Start conditions are checked first so a row released in this
+			// tick is scheduled by the scan below rather than the next one.
+			h.checkWaitingSpawns(ctx)
 			// Work claimed during a scan may move later in the ordering. Do not
 			// schedule the same row twice in one pass, even if it reappears.
 			seen := map[string]bool{}
@@ -399,8 +384,7 @@ func (h *HubServer) runSpawnCoordinator(parent context.Context) {
 			// Deadline-exceeded replays retain their existing bounded backoff.
 			now := h.now().UTC()
 			ordinary, _ := h.inbox.store.pendingSpawns(ctx, now)
-			conditioned, _ := h.inbox.store.pendingStartConditionSpawns(ctx, now)
-			for _, task := range append(ordinary, conditioned...) {
+			for _, task := range ordinary {
 				if task.Status == "deadline_exceeded" {
 					schedule(task)
 				}
@@ -447,20 +431,14 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 			h.finishSpawnOutcome(task, hubSpawnOutcome{RC: 1, Stage: "launch", Reason: "unknown"})
 		}
 	}()
-	if len(task.Request.StartConditions) != 0 {
-		if task.Node == nil {
-			h.finishSpawnOutcome(task, hubSpawnOutcome{
-				RC: 78, Stage: "placement", Reason: "start_conditions_unsupported",
-				Fix: "start conditions are disabled until queue-core support is deployed; submit again after the hub advertises start_conditions_v1",
-			})
-			return
-		}
-		if h.now().Before(task.Deadline) && evaluateHubStartCondition(parent, h, task.Request.StartConditions).Status != "met" {
-			// A bound legacy row may already have reached the node. While the
-			// original deadline is live, do not replay an unmet condition because
-			// the node treats an unknown request id as a new spawn. At the
-			// deadline, the normal replay carries an expired deadline, which lets
-			// the node return a journal result or refuse an unstarted request.
+	if task.Node != nil && len(task.Request.StartConditions) != 0 && h.now().Before(task.Deadline) {
+		// A row bound before the queue owned start conditions (hk 4736) keeps
+		// the guard it had: while its original deadline is live, do not replay
+		// an unmet condition because the node treats an unknown request id as a
+		// new spawn. Queue rows waited before they were bound, so this read
+		// only touches a legacy row.
+		snapshot, err := readStartConditionSnapshot(parent, [][]fleet.StartCondition{task.Request.StartConditions})
+		if err != nil || fleet.EvaluateStartConditionSnapshot(task.Request.StartConditions, snapshot, h.now().UTC()).Status != "met" {
 			return
 		}
 	}
