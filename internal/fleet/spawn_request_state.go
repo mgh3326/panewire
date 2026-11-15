@@ -59,6 +59,25 @@ func classifySpawnState(state string) spawnStateKind {
 	return spawnRequestStates[state]
 }
 
+// spawnStatusExit is the exit code a one-shot read reports for a record: the
+// classes spawn --wait ends on, without the wait. A request still in flight,
+// or in a state this client does not know, exits 85 like the wait's deadline.
+func spawnStatusExit(record SpawnStatusRecord) int {
+	switch classifySpawnState(record.State) {
+	case spawnLanded:
+		return 0
+	case spawnRefused:
+		return spawnRefusalRC(record.RC)
+	case spawnEnded:
+		return exitWaitLost
+	case spawnUnresolved:
+		return exitStateConflict
+	case spawnParked:
+		return exitWaitParked
+	}
+	return exitWaitTimeout
+}
+
 // spawnNeverLanded reports a terminal state in which no pane was started for
 // the request, so a submitter-side job directory the hub never held a record
 // for may go (job_dir_ttl.go). Today only failed qualifies on the wire; the
