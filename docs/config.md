@@ -872,6 +872,13 @@ caller), `escalated` exits 83, `lost` exits 84, and a record still pending,
 absent or unreadable leaves the local signals and the usual deadline to
 decide (the unreadable case warns once with reason `hk-unavailable`).
 
+`spawn --wait` reads the owner lane's inbox through the local node daemon, the
+route `panewire inbox list` takes by default ([quiet-delivery.md](quiet-delivery.md)),
+so a session whose own config carries no usable hub token still sees the
+lane's `READY` and `escalate` signals. Only when no daemon answers does the
+wait fall back to reading `inbox list` with the `[hub]` connection this
+config names; it then warns once per wait, not once per poll.
+
 After the brief lands, a failed task claim leaves the pane running and the spawn
 landed. The `job.task_link` event records `status: failed` and a bounded reason;
 panewire warns and sends an owner-lane notice so the task can be linked manually.
