@@ -77,7 +77,7 @@ func TestRoleReleaseHoldsWithHolderNodeReason(t *testing.T) {
 				t.Fatalf("status=%d body=%s hk=%v writes=%v", result.status, result.body, jobs.state("test-job"), jobs.writes())
 			}
 			assertRoleHeldBy(t, hub, held.Request.RequestID)
-			assertHeldLine(t, sink, "release_write_failed", "spawned", "absent", test.why)
+			assertHeldLine(t, sink, "mark_lost_refused", "spawned", "absent", test.why)
 		})
 	}
 }
@@ -96,7 +96,7 @@ func TestRoleReleaseHoldsWhenHolderNodeDoesNotAnswer(t *testing.T) {
 		t.Fatalf("status=%d body=%s hk=%v writes=%v", result.status, result.body, jobs.state("test-job"), jobs.writes())
 	}
 	assertRoleHeldBy(t, hub, held.Request.RequestID)
-	assertHeldLine(t, sink, "release_write_failed", "spawned", "absent", "mark_lost_timeout")
+	assertHeldLine(t, sink, "mark_lost_refused", "spawned", "absent", "mark_lost_timeout")
 }
 
 // The hub writes the record itself only for a holder on its own host, whose
