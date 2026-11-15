@@ -113,6 +113,8 @@ func newStallSafetyManager(q *quotaStopManager, idle *idleWakeManager, limit tim
 	}
 	m.record = q.hk.note
 	m.act = func(ctx context.Context, r stallSafetyExamination, detail stallSafetyDetails, key string, now time.Time) (string, error) {
+		idle.mu.Lock()
+		defer idle.mu.Unlock()
 		current, ok := q.jobForPane(ctx, r.pane)
 		if !ok || current.JobID != r.job {
 			return "job no longer active", nil
@@ -139,8 +141,6 @@ func newStallSafetyManager(q *quotaStopManager, idle *idleWakeManager, limit tim
 				return "reviewer quota stop passed to watcher", fleet.RecordReviewerQuotaIntent(ctx, filepath.Join(q.root, "jobs"), job.JobID, r.pane, detail.Stop)
 			}
 			candidate := idleWakeCandidate{PaneID: r.pane, WorkspaceID: detail.Agent.WorkspaceID, Label: detail.Agent.Label, Status: detail.Agent.Status, EventID: "stall:" + key, JobID: job.JobID, OwnerLane: job.OwnerLane}
-			idle.mu.Lock()
-			defer idle.mu.Unlock()
 			q.store.mu.Lock()
 			_, err := q.store.db.ExecContext(ctx, `INSERT OR IGNORE INTO quota_stall_wakes(event_id,pane_id,state_change_seq) VALUES(?,?,?)`, candidate.EventID, r.pane, detail.WakeSeq)
 			q.store.mu.Unlock()
@@ -170,7 +170,7 @@ func (m *stallSafetyManager) scan(ctx context.Context, agents []HerdrAgentState,
 			continue
 		}
 		if agent.Status == "working" || agent.Status == "unknown" {
-			if _, err := m.state.observe(ctx, job.JobID, agent.PaneID, true, false, now, m.limit); err != nil {
+			if _, err := m.state.observe(ctx, job.JobID, agent.PaneID, true, false, 0, now, m.limit); err != nil {
 				return err
 			}
 			continue
@@ -180,24 +180,24 @@ func (m *stallSafetyManager) scan(ctx context.Context, agents []HerdrAgentState,
 			continue
 		}
 		if signalled {
-			if _, err := m.state.observe(ctx, job.JobID, agent.PaneID, true, false, now, m.limit); err != nil {
+			if _, err := m.state.observe(ctx, job.JobID, agent.PaneID, true, false, 0, now, m.limit); err != nil {
 				return err
 			}
+			continue
+		}
+		seq, status, err := m.sequence(ctx, agent.PaneID)
+		if err != nil || seq <= 0 || status != agent.Status {
 			continue
 		}
 		busy, err := m.busy(ctx, job, agent)
 		if err != nil {
 			continue
 		}
-		due, err := m.state.observe(ctx, job.JobID, agent.PaneID, false, busy, now, m.limit)
+		due, err := m.state.observe(ctx, job.JobID, agent.PaneID, false, busy, seq, now, m.limit)
 		if err != nil {
 			return err
 		}
 		if !due {
-			continue
-		}
-		seq, status, err := m.sequence(ctx, agent.PaneID)
-		if err != nil || seq <= 0 || status != agent.Status {
 			continue
 		}
 		readCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
