@@ -34,10 +34,15 @@ func TestRemoveAllHandlesReadOnlyTree(t *testing.T) {
 }
 
 // TestRemoveAllMissingPathIsNotAnError keeps the cleanup idempotent: two runs
-// racing on the same leftover dir both succeed.
+// racing on the same leftover dir both succeed. The tolerance has to hold at
+// every level, so removeDir must not report a directory that vanished between
+// its own stat and its listing.
 func TestRemoveAllMissingPathIsNotAnError(t *testing.T) {
-	if err := RemoveAll(filepath.Join(t.TempDir(), "gone")); err != nil {
-		t.Fatalf("RemoveAll on a missing path: %v", err)
+	missing := filepath.Join(t.TempDir(), "gone")
+	for name, remove := range map[string]func(string) error{"RemoveAll": RemoveAll, "removeDir": removeDir} {
+		if err := remove(missing); err != nil {
+			t.Fatalf("%s on a missing path: %v", name, err)
+		}
 	}
 }
 
