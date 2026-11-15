@@ -298,7 +298,15 @@ minutes the hub writes the end of each such job. The rule:
   for the same lock and, once they hold it, re-read the job and write nothing if
   this end already won (the ledger's `job.lost` folded in sequence order, or hk
   lost with this `end_reason` while the ledger event is still missing), so a
-  stale announcement cannot re-arm a hand-over for an ended job.
+  stale announcement cannot re-arm a hand-over for an ended job. For the
+  announcement, which the hub acts on, an hk record that cannot be read is
+  retried and then fails the record, never read as "not ended"; the close intent,
+  recorded before any hk write so it survives an hk outage and invisible to the
+  hub, is not held up by it, and its reconciliation reads hk first. The writer
+  answers a distinct "superseded" result, and the watcher then
+  activates no hand-over (a hand-over would re-prompt the pane after the end and
+  make the ledger live again), ends its watch on the intent path, and starts no
+  watcher from `AnnounceQuotaStop`.
 
 The pass logs each job once per outcome, never once per pass:
 `hub ended a reviewer job with a posted result` (INFO, with `job`,

@@ -3,7 +3,10 @@ package fleet
 import (
 	"context"
 	"errors"
+	"net/http/httptest"
 	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -103,11 +106,11 @@ func TestQuotaStopRecordsWriteNothingAfterThePostedResultEnd(t *testing.T) {
 	}
 	before, _ := a.job("j")
 
-	if err := a.quotaStopAnnounce(context.Background(), stale, quotastop.Stop{Pool: "claude"}); err != nil {
-		t.Fatal(err)
+	if err := a.quotaStopAnnounce(context.Background(), stale, quotastop.Stop{Pool: "claude"}); !errors.Is(err, errQuotaStopSuperseded) {
+		t.Fatalf("announce: %v, want errQuotaStopSuperseded", err)
 	}
-	if err := a.recordQuotaIntent(context.Background(), stale, quotastop.Stop{Pool: "claude"}); err != nil {
-		t.Fatal(err)
+	if err := a.recordQuotaIntent(context.Background(), stale, quotastop.Stop{Pool: "claude"}); !errors.Is(err, errQuotaStopSuperseded) {
+		t.Fatalf("intent: %v, want errQuotaStopSuperseded", err)
 	}
 
 	after, _ := a.job("j")
@@ -132,11 +135,11 @@ func TestQuotaStopRecordsWriteNothingWhenOnlyHkHoldsThePostedResultEnd(t *testin
 	h.records["j"]["end_reason"] = ReviewerResultPosted
 	before := len(stale.Events)
 
-	if err := a.quotaStopAnnounce(context.Background(), stale, quotastop.Stop{Pool: "claude"}); err != nil {
-		t.Fatal(err)
+	if err := a.quotaStopAnnounce(context.Background(), stale, quotastop.Stop{Pool: "claude"}); !errors.Is(err, errQuotaStopSuperseded) {
+		t.Fatalf("announce: %v, want errQuotaStopSuperseded", err)
 	}
-	if err := a.recordQuotaIntent(context.Background(), stale, quotastop.Stop{Pool: "claude"}); err != nil {
-		t.Fatal(err)
+	if err := a.recordQuotaIntent(context.Background(), stale, quotastop.Stop{Pool: "claude"}); !errors.Is(err, errQuotaStopSuperseded) {
+		t.Fatalf("intent: %v, want errQuotaStopSuperseded", err)
 	}
 
 	after, _ := a.job("j")
@@ -154,8 +157,8 @@ func TestEndedByResultPostedFoldsTheLedgerInSequenceOrder(t *testing.T) {
 	if err := RecordJobEnded(context.Background(), a.Jobs, "j", "w:p1", ReviewerResultPosted); err != nil {
 		t.Fatal(err)
 	}
-	if !a.endedByResultPosted(context.Background(), "j") {
-		t.Fatal("setup: the job should read as ended by its posted result")
+	if ended, err := a.endedByResultPosted(context.Background(), "j", true); err != nil || !ended {
+		t.Fatalf("setup: the job should read as ended by its posted result (%v, %v)", ended, err)
 	}
 	now := a.Now
 	t.Cleanup(func() { a.Now = now })
@@ -164,7 +167,133 @@ func TestEndedByResultPostedFoldsTheLedgerInSequenceOrder(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if a.endedByResultPosted(context.Background(), "j") {
+	if ended, _ := a.endedByResultPosted(context.Background(), "j", true); ended {
 		t.Fatal("a re-prompt after the end (stamped earlier by a stepped clock) did not clear it")
+	}
+}
+
+// An hk record that cannot be read is not proof that the end did not happen. The
+// announcement, which the hub acts on, retries the read and then fails, writing
+// nothing, rather than falling through to the still-live ledger.
+func TestQuotaStopAnnounceFailsRatherThanWriteWhenHkCannotBeRead(t *testing.T) {
+	a, _, _, _ := quotaStopFixture(t, "reviewer", "idle", "I stopped here.\n")
+	stale, err := a.job("j")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := newFakeJobStore()
+	store.getErr = errors.New("hk unavailable")
+	a.JobStore = store
+	a.Sleep = func(context.Context, time.Duration) error { return nil }
+	before := len(stale.Events)
+
+	if err := a.quotaStopAnnounce(context.Background(), stale, quotastop.Stop{Pool: "claude"}); err == nil || errors.Is(err, errQuotaStopSuperseded) {
+		t.Fatalf("announce: %v, want the hk read failure", err)
+	}
+	if after, _ := a.job("j"); len(after.Events) != before {
+		t.Fatalf("events grew from %d to %d while hk could not be read", before, len(after.Events))
+	}
+	if got := len(store.calls); got != endedByResultPostedAttempts {
+		t.Fatalf("hk reads %d, want %d (retried before giving up)", got, endedByResultPostedAttempts)
+	}
+}
+
+// The close intent is recorded before any hk write so it survives an hk outage,
+// and the hub never sees it; an unreadable hk record does not stop it, and its
+// reconciliation reads hk first.
+func TestQuotaIntentIsRecordedWhenHkCannotBeRead(t *testing.T) {
+	a, _, _, _ := quotaStopFixture(t, "reviewer", "idle", "I stopped here.\n")
+	stale, _ := a.job("j")
+	store := newFakeJobStore()
+	store.getErr = errors.New("hk unavailable")
+	a.JobStore = store
+	before := len(stale.Events)
+
+	if err := a.recordQuotaIntent(context.Background(), stale, quotastop.Stop{Pool: "claude"}); err != nil {
+		t.Fatal(err)
+	}
+	if after, _ := a.job("j"); len(after.Events) != before+1 {
+		t.Fatalf("events %d -> %d, want the intent recorded", before, len(after.Events))
+	}
+}
+
+// A missing hk record holds no end, and an app with no hk store holds none either.
+func TestEndedByResultPostedTreatsAMissingHkRecordAsNoEnd(t *testing.T) {
+	a, _, _, _ := quotaStopFixture(t, "reviewer", "idle", "I stopped here.\n")
+	store := newFakeJobStore()
+	a.JobStore = store
+	if ended, err := a.endedByResultPosted(context.Background(), "j", true); err != nil || ended {
+		t.Fatalf("missing record: ended=%v err=%v, want neither", ended, err)
+	}
+}
+
+// AnnounceQuotaStop, the node's hand-over announcement, writes nothing and
+// starts no watcher for a job the hub already ended on its posted result.
+func TestAnnounceQuotaStopSkipsAJobEndedByItsPostedResult(t *testing.T) {
+	a, _, _, _ := quotaStopFixture(t, "reviewer", "idle", "I stopped here.\n")
+	if err := RecordJobEnded(context.Background(), a.Jobs, "j", "w:p1", ReviewerResultPosted); err != nil {
+		t.Fatal(err)
+	}
+	started := []string{}
+	old := announceStartWatch
+	announceStartWatch = func(_ *App, job string) error { started = append(started, job); return nil }
+	t.Cleanup(func() { announceStartWatch = old })
+	before, _ := a.job("j")
+
+	if err := AnnounceQuotaStop(context.Background(), a.Jobs, "j", "w:p1", quotastop.Stop{Pool: "claude"}); err != nil {
+		t.Fatal(err)
+	}
+	after, _ := a.job("j")
+	if len(after.Events) != len(before.Events) || len(started) != 0 {
+		t.Fatalf("events %d -> %d, watchers started %v: want nothing for an ended job", len(before.Events), len(after.Events), started)
+	}
+}
+
+// The credit hand-off: the hub's end lands while the watcher is between reading
+// the pane and announcing. The announcement is superseded, so no hand-over is
+// activated; one activated here would re-prompt the pane at the end of the grace
+// and append job.reprompted after the final job.lost, making the ledger live
+// again so the pane sweep could not close the pane.
+func TestCreditHandOffIsNotActivatedWhenThePostedResultEndWins(t *testing.T) {
+	hk := &hkBenchFake{}
+	srv := httptest.NewServer(hk)
+	defer srv.Close()
+	a, runner, _, _ := quotaStopFixture(t, "implementer", "idle", "")
+	t.Setenv("HANDOFFKEEP_URL", "https://hk.test.invalid")
+	t.Setenv("HANDOFFKEEP_TOKEN_SVC_PANEWIRE", "test-token")
+	t.Setenv("PANEWIRE_COMPLETION_TIMEOUT_S", "600")
+	a.Config.Quota = map[string]any{"url": srv.URL, "accounts": map[string]any{"anthropic-api": "0123456789abcdef"}}
+	a.QuotaHandOffGrace = 2 * time.Minute
+	creditWatchSession(t, a, "implementer")
+	original := runner.Do
+	lists, ended := 0, false
+	runner.Do = func(c Command) Result {
+		if c.Name == "herdr" && strings.Join(c.Args, " ") == "agent list" {
+			lists++
+			if lists == 2 && !ended {
+				// The hub's end lands after the watcher read the pane and
+				// before its announcement takes the operation lock.
+				ended = true
+				if err := RecordJobEnded(context.Background(), a.Jobs, "j", "w:p1", ReviewerResultPosted); err != nil {
+					t.Error(err)
+				}
+			}
+			if lists >= 3 {
+				// The pane resumes: a hand-over activated now would re-prompt it.
+				return Result{Out: `{"result":{"agents":[{"pane_id":"w:p1","agent_status":"working","state_change_seq":9}]}}`}
+			}
+			return Result{Out: `{"result":{"agents":[{"pane_id":"w:p1","agent_status":"idle","state_change_seq":7}]}}`}
+		}
+		return original(c)
+	}
+
+	if err := a.watch(context.Background(), []string{"j"}); err != nil {
+		t.Fatal(err)
+	}
+	// The fixture's ledger has no other re-prompt, so any job.reprompted is the
+	// hand-over's.
+	kinds := eventKindsOf(t, a, "j")
+	if !ended || !slices.Contains(kinds, "job.lost") || slices.Contains(kinds, "job.reprompted") {
+		t.Fatalf("end injected=%v lists=%d events %v: want the end and no re-prompt", ended, lists, kinds)
 	}
 }

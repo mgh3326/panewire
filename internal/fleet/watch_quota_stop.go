@@ -2,6 +2,7 @@ package fleet
 
 import (
 	"context"
+	"errors"
 	"os"
 	"slices"
 	"time"
@@ -286,6 +287,11 @@ func AnnounceQuotaStop(ctx context.Context, jobs, job, pane string, stop quotast
 	home, _ := os.UserHomeDir()
 	a := &App{Jobs: jobs, Home: home, Now: time.Now, Runner: ExecRunner{}}
 	if e := a.quotaStopAnnounce(ctx, Job{ID: job, Pane: pane}, stop); e != nil {
+		if errors.Is(e, errQuotaStopSuperseded) {
+			// The hub ended the job on its posted result: nothing to announce,
+			// and no watcher to start for an ended job.
+			return nil
+		}
 		return e
 	}
 	// The job's own watcher may have ended already (a worker that waited past
@@ -339,11 +345,14 @@ func (a *App) quotaStopAnnounce(ctx context.Context, j Job, stop quotastop.Stop)
 		return err
 	}
 	defer unlock()
-	if a.endedByResultPosted(ctx, j.ID) {
+	if ended, err := a.endedByResultPosted(ctx, j.ID, true); err != nil {
+		return err
+	} else if ended {
 		// The hub ended the job on its posted result while this record waited
 		// for the lock; announcing a hand-over now would start a replacement
-		// for a job hk already holds lost without a successor pointer.
-		return nil
+		// for a job hk already holds lost without a successor pointer. The
+		// caller must not activate a hand-over either.
+		return errQuotaStopSuperseded
 	}
 	return a.quotaStopEvent(ctx, j, stop, false)
 }
@@ -433,7 +442,7 @@ func (a *App) quotaStopLost(ctx context.Context, j Job, stop quotastop.Stop, emi
 // quotaStopFinish announces job.lost (when emit) and releases the quota lease.
 func (a *App) quotaStopFinish(ctx context.Context, j Job, stop quotastop.Stop, emit bool) error {
 	if emit {
-		if e := a.quotaStopAnnounce(ctx, j, stop); e != nil {
+		if e := a.quotaStopAnnounce(ctx, j, stop); e != nil && !errors.Is(e, errQuotaStopSuperseded) {
 			return e
 		}
 	}
@@ -485,8 +494,8 @@ func (a *App) recordQuotaIntent(ctx context.Context, j Job, stop quotastop.Stop)
 		return err
 	}
 	defer unlock()
-	if a.endedByResultPosted(ctx, j.ID) {
-		return nil
+	if ended, _ := a.endedByResultPosted(ctx, j.ID, false); ended {
+		return errQuotaStopSuperseded
 	}
 	payload := map[string]any{"pane_id": j.Pane, "pool": stop.Pool, "end_reason": QuotaStopEndReason(stop.Pool, stop.Reset, "", "")}
 	if !stop.Reset.IsZero() {

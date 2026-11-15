@@ -3,6 +3,7 @@ package fleet
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -61,35 +62,108 @@ func (a *App) lockJobOperation(id string, wait time.Duration) (func(), error) {
 // end_reason, of a reviewer job the hub ended because it posted its result.
 const ReviewerResultPosted = "reviewer_result_posted"
 
+// errQuotaStopSuperseded is what a quota-stop record returns, with nothing
+// written, when the hub's posted-result end won while it waited for the
+// operation lock. Its callers must not go on as if the record had been written:
+// an activated hand-over would later re-prompt the pane and make the ended
+// ledger live again.
+var errQuotaStopSuperseded = errors.New("quota stop superseded by the posted-result end")
+
+// endedByResultPostedAttempts and endedByResultPostedRetry bound how long a
+// quota-stop record waits for hk to become readable before it gives up.
+const (
+	endedByResultPostedAttempts = 3
+	endedByResultPostedRetry    = 2 * time.Second
+)
+
 // endedByResultPosted reports that the job's newest end is the hub's
 // posted-result end (RecordJobEnded). Two records can show it: the ledger's
 // final job.lost, and an hk record lost with this end_reason, which the node
-// writes first, so a failure between the two leaves the hk record alone. A
-// claim, spawn, re-prompt or another end after the ledger event clears it. The
-// ledger is folded in sequence order, not timestamp order: a clock stepped
-// backwards reorders timestamps (see ledgerOrder). A quota-stop record that
-// waited for the operation lock checks this under the lock and writes nothing
-// when the end won, so it cannot re-arm a hand-over for a job hk already holds
-// lost.
-func (a *App) endedByResultPosted(ctx context.Context, id string) bool {
-	if state, reason, ok := a.hkJobState(ctx, id); ok && state == "lost" && reason == ReviewerResultPosted {
-		return true
+// writes first, so a failure between the two leaves the hk record alone. An hk
+// record that cannot be read is an error, never "not ended": the quota-stop
+// record would otherwise be written over an end hk may already hold. A missing
+// hk record, or an app with no hk store configured, holds no end. The ledger is
+// folded in sequence order, not timestamp order: a clock stepped backwards
+// reorders timestamps (see ledgerOrder). A quota-stop record that waited for the
+// operation lock checks this under the lock and writes nothing when the end won,
+// so it cannot re-arm a hand-over for a job hk already holds lost.
+//
+// strictHK says what an unreadable hk record means. The announcement is what the
+// hub acts on, so it is strict: the read is retried and then fails the record.
+// The close intent is not strict: it is recorded before any hk write so that it
+// survives an hk outage, it has no effect the hub sees, and its reconciliation
+// reads hk first and ends the watch without announcing when hk holds another end
+// (reconcileQuotaIntent), so an unreadable record there is left to that step.
+func (a *App) endedByResultPosted(ctx context.Context, id string, strictHK bool) (bool, error) {
+	attempts := endedByResultPostedAttempts
+	if !strictHK {
+		attempts = 1
+	}
+	ended, err := a.hkHoldsPostedResultEnd(ctx, id, attempts)
+	if err != nil && strictHK {
+		return false, err
+	}
+	if ended {
+		return true, nil
 	}
 	j, err := a.job(id)
 	if err != nil {
-		return false
+		return false, nil
 	}
-	ended := false
+	ledgerEnded := false
 	for _, ev := range ledgerOrder(j.Events) {
 		switch ev.Kind {
 		case "job.lost":
-			ended = str(ev.Payload, "reason") == ReviewerResultPosted
+			ledgerEnded = str(ev.Payload, "reason") == ReviewerResultPosted
 		case "job.claim", "job.claimed", "job.reclaim", "job.spawned", "job.reprompted",
 			"job.completed", "job.joined", "job.revoked", "job.handed_off":
-			ended = false
+			ledgerEnded = false
 		}
 	}
-	return ended
+	return ledgerEnded, nil
+}
+
+// hkHoldsPostedResultEnd reads the job's hk record, retrying a read error a
+// few times, and reports whether it is lost with ReviewerResultPosted.
+func (a *App) hkHoldsPostedResultEnd(ctx context.Context, id string, attempts int) (bool, error) {
+	store, err := a.jobStore()
+	if err != nil {
+		return false, nil
+	}
+	var last error
+	for attempt := 0; attempt < attempts; attempt++ {
+		if attempt > 0 {
+			if err := a.sleepOrWait(ctx, endedByResultPostedRetry); err != nil {
+				return false, err
+			}
+		}
+		rec, err := store.Get(ctx, id)
+		if errors.Is(err, errJobNotFound) {
+			return false, nil
+		}
+		if err != nil {
+			last = err
+			continue
+		}
+		state, _ := rec["state"].(string)
+		reason, _ := rec["end_reason"].(string)
+		return state == "lost" && reason == ReviewerResultPosted, nil
+	}
+	return false, fmt.Errorf("hk record of %s unreadable: %w", id, last)
+}
+
+// sleepOrWait waits d through the app's Sleep, or the real clock when the app
+// has none (AnnounceQuotaStop builds one without).
+func (a *App) sleepOrWait(ctx context.Context, d time.Duration) error {
+	if a.Sleep != nil {
+		return a.Sleep(ctx, d)
+	}
+	select {
+	case <-time.After(d):
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // RecordJobEnded appends the final job.lost event of a job the hub ended
