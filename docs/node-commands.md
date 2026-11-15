@@ -563,7 +563,10 @@ free a failed no-pane holder's reservation (hk 4799, then
 journal or jobs directory the node cannot read is no proof, so the record and
 the reservation stay. A spawn journal row written before the strict identity
 existed names no job the node can trust; while one is still executing the node
-answers `ledger_missing` too, until restart settlement completes it (hk 4799).
+answers `ledger_missing` for any job, not only the job the row names, because
+its real job cannot be re-derived. Restart settlement completes such a row as
+soon as herdr proves the spawn landed or is gone; while the evidence keeps that
+undecided the row can outlive the upgrade, and the hold with it (hk 4799).
 The `reviewer_result_posted` end keeps answering
 `ledger_missing` for a missing ledger: it ends a reviewer's job, which holds no
 reservation (hk 4737). A failed ledger read or handoffkeep write answers
