@@ -158,3 +158,19 @@ began, so the claude output total can undercount (the Agent SDK cost-tracking
 guide says to read output from the result message, which a transcript
 reader has no access to). Codex `input_tokens` includes `cached_input_tokens`.
 The code is `internal/fleet/usage_reader.go` and `usage_record.go`.
+
+## Skill usage capture
+
+The same terminal PUT carries `skills` and `skills_supported` (hk 3164). The
+array replaces the stored one, and each element is `{name, source, calls}`.
+Only called skills are sent: the session lists no available-but-unused skill,
+so no zero count is recorded. Only claude has
+a record the node reads the same bounded way: `Skill` tool_use blocks in the
+session JSONL above, counted once per tool_use id (a message is written once
+per content block), with the name matched against claude's lowercase skill-id
+character set. Arguments, tool text and every other input are never decoded,
+retained or sent; no version is recorded. Every other harness sends
+`skills_supported:false` and no array. A job whose `job.spawned` carries no
+`harness_session` sends neither field. An hk refusal is the same warning as a
+failed usage write and changes nothing about job end. The code is
+`internal/fleet/usage_skills.go`.

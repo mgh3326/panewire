@@ -309,7 +309,7 @@ func (s *terminalUsageStore) Put(ctx context.Context, id string, fields map[stri
 	}
 	s.writes = append(s.writes, fields)
 	if state := str(rec, "state"); state == "completed" || state == "escalated" || state == "lost" {
-		if _, ok := fields["usage"]; !ok || len(fields) != 1 {
+		if !hkUsageOnlyUpdate(fields) {
 			return &BackendError{Status: 409, Code: "terminal_job"}
 		}
 	}
@@ -336,7 +336,10 @@ func TestUsageWritesRespectTerminalJob(t *testing.T) {
 	if got := usageOf(t, base.record(t, "j"))["input_tokens"]; got != int64(42) {
 		t.Fatalf("reap usage input tokens = %v", got)
 	}
-	if len(store.writes) != 1 || len(store.writes[0]) != 1 || store.writes[0]["usage"] == nil {
+	if len(store.writes) != 1 || store.writes[0]["usage"] == nil {
+		t.Fatalf("reap writes = %v", store.writes)
+	}
+	if _, model := store.writes[0]["model"]; model {
 		t.Fatalf("reap writes = %v", store.writes)
 	}
 	store.writes = nil
@@ -346,7 +349,10 @@ func TestUsageWritesRespectTerminalJob(t *testing.T) {
 	}
 	j.Terminal = false // The local event may lag the already-terminal hk record.
 	a.recordJobUsage(t.Context(), j, false)
-	if len(store.writes) != 1 || len(store.writes[0]) != 1 || store.writes[0]["usage"] == nil {
+	if len(store.writes) != 1 || store.writes[0]["usage"] == nil {
+		t.Fatalf("terminal completion writes = %v", store.writes)
+	}
+	if _, model := store.writes[0]["model"]; model {
 		t.Fatalf("terminal completion writes = %v", store.writes)
 	}
 }
