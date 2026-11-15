@@ -442,6 +442,21 @@ func (h *HubServer) handleQueuedBinding(ctx context.Context, task hubSpawnTask) 
 	return true
 }
 
+// observeHubSpawnReceipt records an in-process launch's placement record on
+// its outcome: the pool and account the execution drew on, so the exhausted-
+// pool sweep and the per-account free-band gate can find the live job
+// (hk 4765). The node path records the same fields from the node's own
+// receipt (hub_spawn_settle.go).
+func observeHubSpawnReceipt(outcome *hubSpawnOutcome, r fleet.ExecutionReceipt) {
+	outcome.Host = r.Host
+	outcome.Pane = r.Pane
+	outcome.Profile = r.Profile
+	outcome.Model = r.Model
+	outcome.Role = r.Role
+	outcome.Pool = r.Pool
+	outcome.AccountKey = r.AccountKey
+}
+
 func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) {
 	defer func() {
 		if recover() != nil {
@@ -599,11 +614,7 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 	app.PlacementGate = h.placementGate.acquire
 	app.ObserveStage = func(stage string, d time.Duration) { outcome.Stage = stage; outcome.StageMS[stage] += d.Milliseconds() }
 	app.ObserveReceipt = func(r fleet.ExecutionReceipt) {
-		outcome.Host = r.Host
-		outcome.Pane = r.Pane
-		outcome.Profile = r.Profile
-		outcome.Model = r.Model
-		outcome.Role = r.Role
+		observeHubSpawnReceipt(&outcome, r)
 	}
 	request := task.Request
 	if pinnedHost := spawnPinnedHost(task); pinnedHost != "" {

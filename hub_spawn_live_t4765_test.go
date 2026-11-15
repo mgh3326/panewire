@@ -3,6 +3,8 @@ package panewire
 import (
 	"testing"
 	"time"
+
+	"github.com/mgh3326/panewire/internal/fleet"
 )
 
 // The per-account gate reads live placed profiles by account: two launches on
@@ -49,5 +51,30 @@ func TestLiveProfilesByAccountCountsPlacedProfiles(t *testing.T) {
 	}
 	if got[acctA]["devin-swe2"] != 0 || len(got[acctA]) != 3 || len(got) != 2 {
 		t.Fatalf("live profiles except self = %v, want the spawn being placed out", got)
+	}
+}
+
+// An in-process launch records its pool and account on the outcome through
+// the receipt hook, so it counts toward the account's live free band instead
+// of slipping the per-account gate (hk 4765).
+func TestHubLocalReceiptRecordsPoolAndAccount(t *testing.T) {
+	h := asyncSpawnHub(t)
+	task := liveOp(t, h, 7, "local-free", "auto", time.Now())
+	const account = "devin:cccccccccccccccc"
+	var outcome hubSpawnOutcome
+	observeHubSpawnReceipt(&outcome, fleet.ExecutionReceipt{Host: "machine-a", Pane: "w1:p1", Profile: "devin-swe2", Model: "swe-2", Pool: "devin", AccountKey: account, Role: "implementer"})
+	if outcome.Pool != "devin" || outcome.AccountKey != account || outcome.Profile != "devin-swe2" {
+		t.Fatalf("in-process receipt kept %+v, want pool, account and profile", outcome)
+	}
+	outcome.RC, outcome.Stage = 0, "done"
+	if changed, err := h.inbox.store.completeSpawn(t.Context(), task, outcome, time.Now()); err != nil || !changed {
+		t.Fatalf("complete %s: %v %v", task.Job, changed, err)
+	}
+	got, err := h.liveProfilesByAccount(t.Context(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got[account]["devin-swe2"] != 1 {
+		t.Fatalf("live profiles = %v, want the hub-local free launch on its account", got)
 	}
 }
