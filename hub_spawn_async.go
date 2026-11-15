@@ -270,16 +270,24 @@ func (h *HubServer) handleSpawnOperation(w http.ResponseWriter, r *http.Request)
 		result := evaluateHubStartCondition(r.Context(), h, task.Request.StartConditions)
 		startCondition = &result
 	}
+	// A parked row is an accepted one no candidate can take before its next
+	// check (hk 4661): it reads parked, with the reason and the check.
+	status, reason, nextCheckAt := spawnPublicStatus(task.Status), "", ""
+	if spawnParked(task, h.now()) {
+		status, reason, nextCheckAt = "parked", task.ParkReason, task.NextCheck.UTC().Format(time.RFC3339)
+	}
 	// Never expose the persisted brief, argv or submitting paths through status
 	// reads. A reason's refusal text may name a path on the executing node.
 	writeJSON(w, 200, struct {
 		Job            string                      `json:"job_id"`
 		Request        string                      `json:"request_id"`
 		Status         string                      `json:"status"`
+		Reason         string                      `json:"reason,omitempty"`
+		NextCheckAt    string                      `json:"next_check_at,omitempty"`
 		ExpiresAt      string                      `json:"expires_at,omitempty"`
 		Result         hubSpawnOutcome             `json:"result"`
 		StartCondition *fleet.StartConditionResult `json:"start_condition,omitempty"`
-	}{task.Job, task.Request.RequestID, spawnPublicStatus(task.Status), spawnExpiresAt(task), task.Outcome, startCondition})
+	}{task.Job, task.Request.RequestID, status, reason, nextCheckAt, spawnExpiresAt(task), task.Outcome, startCondition})
 }
 
 func evaluateHubStartCondition(ctx context.Context, h *HubServer, conditions []fleet.StartCondition) fleet.StartConditionResult {
@@ -394,14 +402,21 @@ func (h *HubServer) runSpawnCoordinator(parent context.Context) {
 	}
 	tick := time.NewTicker(2 * time.Second)
 	defer tick.Stop()
+	refreshSeen := h.quotaRefresh.completedCount.Load()
 	for {
+		// A finished quota refresh is a quota change for parked requests.
+		if count := h.quotaRefresh.completedCount.Load(); count != refreshSeen {
+			refreshSeen = count
+			h.noteSpawnWake(spawnParkQuota)
+		}
+		h.wakeParkedSpawns(ctx)
 		if h.drain.admit() {
 			// Work claimed during a scan may move later in the ordering. Do not
 			// schedule the same row twice in one pass, even if it reappears.
 			seen := map[string]bool{}
 			position := spawnScanPosition{}
 			for {
-				tasks, next, err := h.inbox.store.pendingSpawnPage(ctx, position)
+				tasks, next, err := h.inbox.store.pendingSpawnPage(ctx, position, h.now().UTC())
 				if err != nil {
 					break
 				}
@@ -681,6 +696,22 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 			return
 		}
 	}
+	// If every eligible harness was already refused, the node's last
+	// cleanup-confirmed refusal is the answer, not a selection error caused by
+	// excluding that same harness. Other placement errors retain their detail.
+	claimedAnswer := false
+	if err != nil && ctx.Err() == nil && task.ClaimedHost != "" && len(task.Exclusions) > 0 && task.Outcome.NodeResult {
+		code, _, _ := strings.Cut(err.Error(), ":")
+		claimedAnswer = code == "role_no_candidate"
+	}
+	// No candidate can take it now: a request with a limit is parked, not
+	// ended, and is placed again on an event or its next check (hk 4661).
+	if err != nil && ctx.Err() == nil && !claimedAnswer && !task.Expires.IsZero() {
+		if reason := spawnParkReason(fleet.ErrorCode(err), err.Error()); reason != "" && h.parkSpawnTask(parent, task, reason, spawnRefusalLine(err.Error())) {
+			h.releasePlacementCount(task.Job)
+			return
+		}
+	}
 	outcome.RC = fleet.ErrorCode(err)
 	outcome.Reason = fleet.AdmissionRefusalReason(err)
 	if err != nil {
@@ -708,14 +739,8 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 	if outcome.Host == "" {
 		outcome.Host = spawnPinnedHost(task)
 	}
-	// If every eligible harness was already refused, the node's last
-	// cleanup-confirmed refusal is the answer, not a selection error caused by
-	// excluding that same harness. Other placement errors retain their detail.
-	if err != nil && ctx.Err() == nil && task.ClaimedHost != "" && len(task.Exclusions) > 0 && task.Outcome.NodeResult {
-		code, _, _ := strings.Cut(err.Error(), ":")
-		if code == "role_no_candidate" {
-			outcome = task.Outcome
-		}
+	if claimedAnswer {
+		outcome = task.Outcome
 	}
 	if changed, _ := h.completeSpawn(parent, task, outcome); changed {
 		h.recordSpawnTrace(task, outcome)
@@ -1006,7 +1031,7 @@ func (t *directSpawnTransport) Spawn(ctx context.Context, req fleet.HubSpawnRequ
 	}
 	// Reapply saved refusals through the existing candidate loop. In particular,
 	// a launch-proof refusal first tries another harness on this same host;
-	// other refusals rule out the host for the rest of this attempt.
+	// other refusals rule out the host for the rest of this request (hk 4661: across its attempts).
 	for _, excluded := range t.task.Exclusions {
 		profileOnly := excluded.Reason == "launch_proof_failed" || t.task.ClaimedHost == excluded.Machine
 		if excluded.Machine == req.Machine && (!profileOnly || excluded.Profile == hubSpawnArg(req.Args, "-m")) {
@@ -1073,7 +1098,7 @@ func (t *directSpawnTransport) nextHostAfterRefusal(ctx context.Context, node hu
 	}
 	reason := spawnResultReason(result)
 	exclusion := hubSpawnExclusion{Machine: node.Machine, Profile: hubSpawnArg(node.Args, "-m"), Reason: reason, RC: result.RC}
-	task, err := t.h.inbox.store.unbindRefusedSpawn(ctx, t.task, exclusion, nil)
+	task, err := t.h.inbox.store.unbindRefusedSpawn(ctx, t.task, exclusion, nil, t.h.now().UTC())
 	if err != nil {
 		return true, err
 	}
@@ -1107,7 +1132,7 @@ func (t *directSpawnTransport) retryHarnessAfterClaim(ctx context.Context, node 
 		return false, nil
 	}
 	exclusion := hubSpawnExclusion{Machine: node.Machine, Profile: profile, Reason: reason, RC: result.RC}
-	task, err := t.h.inbox.store.unbindRefusedSpawn(ctx, t.task, exclusion, &outcome)
+	task, err := t.h.inbox.store.unbindRefusedSpawn(ctx, t.task, exclusion, &outcome, t.h.now().UTC())
 	if err != nil {
 		return true, err
 	}

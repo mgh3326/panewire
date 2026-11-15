@@ -289,6 +289,14 @@ func (h *HubServer) observeActiveJobs(machineID string, active []HubActiveJob, r
 	if !maps.Equal(previous, record.activeJobs) {
 		h.placementCache = placementCache{}
 	}
+	// A job that left the set freed a pool slot and a host slot.
+	slotFreed := false
+	for id := range previous {
+		if _, still := record.activeJobs[id]; !still {
+			slotFreed = true
+			break
+		}
+	}
 	// A job absent after the node has reconnected is a local terminal-file
 	// observation. Inspect the durable-in-process job view rather than just the
 	// replaced websocket record, because connect deliberately starts a fresh
@@ -303,6 +311,9 @@ func (h *HubServer) observeActiveJobs(machineID string, active []HubActiveJob, r
 		}
 	}
 	h.mu.Unlock()
+	if slotFreed {
+		h.noteSpawnWake(spawnParkPoolCap, spawnParkHostFull)
+	}
 	h.markPlacementClaims(claimed, h.now().UTC())
 	h.tryPendingRevocations(machineID)
 }

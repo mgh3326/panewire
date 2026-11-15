@@ -281,6 +281,10 @@ constants live in `placement.json`:
 Both are optional (0 or absent means 2 and 30). The counts are in hub memory:
 a hub restart forgets them, which ends a backoff early and never starts one.
 
+A spawn request's own re-placement back-off and the parked-request wake batch
+are separate keys (`spawn_backoff_seconds`, `spawn_backoff_max_seconds`,
+`spawn_wake_batch`); see [hub-spawn-operations.md](hub-spawn-operations.md#parked).
+
 ### First-run refusals and the desk notice
 
 A first-run dialog or a missing login rules out its harness on the host. When

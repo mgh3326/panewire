@@ -72,7 +72,15 @@ func (s *laneInboxStore) endUnstartedAttempt(ctx context.Context, tx *sql.Tx, ta
 		if err := s.freezeSpawnPlacementForRetry(ctx, tx, ended); err != nil {
 			return false, err
 		}
-		result, err := tx.ExecContext(ctx, s.q(`UPDATE spawn_operations SET status='accepted',deadline_ms=?,node_id=NULL,node_payload='',attempt=attempt+1,trace_recorded=0,last_run_ms=0,exclusions='[]',claimed_host=?,refresh_waits='[]' WHERE request_id=? AND status='retryable' AND attempt=?`), spawnAttemptDeadline(now, task.Request.DeadlineSeconds, task.Expires).UnixMilli(), spawnPinnedHost(task), task.Request.RequestID, task.Attempt)
+		// The request's exclusions carry into the new attempt (hk 4661). An
+		// attempt the node attested it never started is a failed attempt, so
+		// the next one waits out the back-off; one the hub never sent is not.
+		failed, parkReason, retryAt := 0, "", int64(0)
+		if spawnOutcomeNotStarted(outcome) {
+			failed = 1
+			parkReason, retryAt = spawnBackoffPark(s.spawnRetryAt(task, task.FailedAttempts+1, now))
+		}
+		result, err := tx.ExecContext(ctx, s.q(`UPDATE spawn_operations SET status='accepted',deadline_ms=?,node_id=NULL,node_payload='',attempt=attempt+1,trace_recorded=0,last_run_ms=0,claimed_host=?,refresh_waits='[]',failed_attempts=failed_attempts+?,park_reason=?,next_check_ms=? WHERE request_id=? AND status='retryable' AND attempt=?`), spawnAttemptDeadline(now, task.Request.DeadlineSeconds, task.Expires).UnixMilli(), spawnPinnedHost(task), failed, parkReason, retryAt, task.Request.RequestID, task.Attempt)
 		if err != nil {
 			return false, err
 		}

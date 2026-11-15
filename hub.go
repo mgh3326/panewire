@@ -439,9 +439,15 @@ type HubServer struct {
 	// quotaReplaceBudget.
 	quotaReplaceBudget time.Duration
 	spawnKick          chan struct{}
-	spawnWorkers       sync.WaitGroup
-	placementKick      chan struct{}
-	placementAsync     atomic.Bool
+	// spawnWakes are the park reasons an event named since the coordinator's
+	// last wake (hub_spawn_park.go); spawnRand draws the back-off spread
+	// (nil: math/rand).
+	spawnWakeMu    sync.Mutex
+	spawnWakes     map[string]bool
+	spawnRand      func() float64
+	spawnWorkers   sync.WaitGroup
+	placementKick  chan struct{}
+	placementAsync atomic.Bool
 	// placementRecordClient is the App the outbox delivers hk placement
 	// records through; built on first use by placementRecordApp.
 	placementRecordClient *fleet.App
@@ -833,6 +839,9 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 	hub.fleetState = newFleetStateStore()
 	hub.quietTimings = defaultDesignQuietTimings()
 	hub.prepareInbox()
+	if hub.inbox != nil {
+		hub.inbox.store.spawnRetryDelay = hub.spawnRetryDelay
+	}
 	if err := hub.restorePlacementCounts(); err != nil {
 		hub.closeCancel()
 		_ = hub.inbox.store.close()
@@ -2061,7 +2070,8 @@ func (h *HubServer) connect(machineID, version, remoteAddr string, agent *hubAge
 	h.placementCache = placementCache{}
 	h.recordUIEventLocked("presence", "connected", machineID, now)
 	h.mu.Unlock()
-	h.kickSpawnPlacement()
+	// A node that connects may be the candidate a parked request lacked.
+	h.noteSpawnWake(spawnParkNodeDisconnected, spawnParkHostFull, spawnParkNoEligibleHost)
 	h.tryPendingRevocations(machineID)
 	if previous != nil && previous != agent {
 		_ = previous.conn.Close(websocket.StatusPolicyViolation, "replaced")

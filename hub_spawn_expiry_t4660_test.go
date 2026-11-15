@@ -145,7 +145,7 @@ func TestUnstartedRequestGivenUpAtItsLimit_t4660(t *testing.T) {
 		t.Fatalf("at the limit: %+v %v; want given_up with its reason", saved, err)
 	}
 	// Terminal: no further pass touches it, and the job and role are free.
-	page, _, err := h.inbox.store.pendingSpawnPage(t.Context(), spawnScanPosition{})
+	page, _, err := h.inbox.store.pendingSpawnPage(t.Context(), spawnScanPosition{}, time.Now())
 	if err != nil || len(page) != 0 {
 		t.Fatalf("a given_up request was scheduled again: %+v %v", page, err)
 	}

@@ -3,17 +3,19 @@ package panewire
 import (
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/mgh3326/panewire/internal/fleet"
 )
 
 // hk 4659: the clients learn the design's request states (waiting, pending,
 // parked, launching, landed, refused, given_up, cancelled) before any hub
-// emits them. hk 4660 is the first part to emit one: given_up. The rest stay
+// emits them. hk 4660 is the first part to emit one: given_up; hk 4661 adds
+// parked, read from an accepted row's park columns. The rest stay
 // unemitted until their parts, and every state the hub emits is one the
 // clients know.
 func TestHubSpawnExternalStatesUnchanged(t *testing.T) {
-	want := []string{"accepted", "deadline_exceeded", "dispatching", "failed", "given_up", "reconciling", "retryable", "succeeded"}
+	want := []string{"accepted", "deadline_exceeded", "dispatching", "failed", "given_up", "parked", "reconciling", "retryable", "succeeded"}
 	// Every status a spawn_operations row can hold today, each also in its
 	// grant-required stored form (hub_spawn_grant.go). A read maps the stored
 	// value back (spawnLogicalStatus) and the API shows spawnPublicStatus.
@@ -24,6 +26,11 @@ func TestHubSpawnExternalStatesUnchanged(t *testing.T) {
 	seen := map[string]bool{}
 	for _, status := range stored {
 		seen[spawnPublicStatus(spawnLogicalStatus(status))] = true
+	}
+	// parked is no stored status: the status read shows an accepted, unbound
+	// row whose next check is ahead as parked (hk 4661).
+	if spawnParked(hubSpawnTask{Status: "accepted", ParkReason: spawnParkQuota, NextCheck: time.Now().Add(time.Minute)}, time.Now()) {
+		seen["parked"] = true
 	}
 	var got []string
 	for status := range seen {
