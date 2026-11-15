@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"sync/atomic"
 	"testing"
@@ -15,8 +16,11 @@ import (
 	"github.com/mgh3326/panewire/internal/fleet"
 )
 
+// closeOpsListing is a ps listing with one start time (ps lstart) after
+// each pid.
 func closeOpsListing(out string) fleet.ProcessLister {
-	return func(context.Context) ([]byte, error) { return []byte(out), nil }
+	stamped := regexp.MustCompile(`(?m)^(\s*\d+) `).ReplaceAllString(out, "${1} Sun Nov 15 12:00:00 2026 ")
+	return func(context.Context) ([]byte, error) { return []byte(stamped), nil }
 }
 
 // close_ops_v1 is never in the static set; a hello carries it only after the
@@ -117,7 +121,7 @@ func TestSessionReRegistersWhenCloseOpsReadinessChanges_t4632(t *testing.T) {
 	if err := fleet.EnableCloseOps(context.Background(), jobs, client.nodeVersion(), time.Now(), closeOpsListing("")); err != nil {
 		t.Fatal(err)
 	}
-	client.closeOpsLister = func(context.Context) ([]byte, error) { return []byte(listing.Load().(string)), nil }
+	client.closeOpsLister = func(ctx context.Context) ([]byte, error) { return closeOpsListing(listing.Load().(string))(ctx) }
 	client.closeOpsRecheck = 50 * time.Millisecond
 	connection, _, err := websocket.Dial(t.Context(), client.endpoint, nil)
 	if err != nil {

@@ -36,13 +36,13 @@ func (client *HubClient) closeOpsReady(ctx context.Context) bool {
 	return fleet.CloseOpsReady(ctx, filepath.Join(client.jobsInboxRoot, "jobs"), client.nodeVersion(), client.closeOpsLister)
 }
 
-// nodeVersion is the binary version the close-ops marker must name: the
-// hello's version, else the build's.
+// nodeVersion is the binary identity the close-ops marker must name
+// (fleet.BuildIdentity); tests set closeOpsIdentity.
 func (client *HubClient) nodeVersion() string {
-	if client.version != "" {
-		return client.version
+	if client.closeOpsIdentity != "" {
+		return client.closeOpsIdentity
 	}
-	return fleet.BuildVersion
+	return fleet.BuildIdentity()
 }
 
 // admitCloseOps is the per-close barrier: a new close registration runs only
@@ -73,7 +73,7 @@ func runNodeCloseOpsCLI(args []string, stdout, stderr io.Writer, now func() time
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	jobs := filepath.Join(*inbox, "jobs")
-	if err := fleet.EnableCloseOps(ctx, jobs, fleet.BuildVersion, now(), list); err != nil {
+	if err := fleet.EnableCloseOps(ctx, jobs, fleet.BuildIdentity(), now(), list); err != nil {
 		fmt.Fprintf(stderr, "panewire node close-ops enable: %v\n", err)
 		if errors.Is(err, fleet.ErrCloseOpsNotReady) {
 			fmt.Fprintln(stderr, "wait for the old processes to end (or reap their jobs), then run it again")

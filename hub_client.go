@@ -119,6 +119,8 @@ type HubClient struct {
 	// closeOpsLister lists the host's processes for the close-ops barrier;
 	// nil runs ps. Tests replace it.
 	closeOpsLister fleet.ProcessLister
+	// closeOpsIdentity replaces fleet.BuildIdentity in tests.
+	closeOpsIdentity string
 	// closeOpsAdmit replaces the per-close barrier check in tests.
 	closeOpsAdmit func(context.Context) bool
 	// closeOpsRecheck overrides closeOpsRecheckInterval in tests.

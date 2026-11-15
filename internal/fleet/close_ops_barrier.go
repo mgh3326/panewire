@@ -4,13 +4,16 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/mgh3326/panewire/internal/durable"
@@ -22,8 +25,9 @@ import (
 // binary that would ignore a hub close was left on the host, and only while
 // that still holds:
 //
-//   - the marker names the node's own binary version, so a rollback or an
-//     upgrade needs the step again, and an in-process launch of an older node
+//   - the marker names the node's own binary identity (BuildIdentity: the
+//     version and a digest of the executable), so a rollback, an upgrade or
+//     another development build needs the step again, and an in-process launch of an older node
 //     daemon (which a version change restarts) cannot outlive it;
 //   - one process listing shows no watcher without the hub-close token and no
 //     process of a verb that can start a watcher (spawn, work, lead, restore,
@@ -57,21 +61,35 @@ func launchersIdle(out []byte, self int) (bool, error) {
 	scanner := bufio.NewScanner(bytes.NewReader(out))
 	scanner.Buffer(make([]byte, 0, 64<<10), 1<<20)
 	for scanner.Scan() {
-		fields := strings.Fields(scanner.Text())
-		if len(fields) < 3 {
+		process, ok := parseProcessLine(scanner.Text())
+		if !ok || process.pid == self {
 			continue
 		}
-		pid, err := strconv.Atoi(fields[0])
-		if err != nil || pid == self {
-			continue
-		}
-		for i := 1; i+1 < len(fields); i++ {
-			if filepath.Base(fields[i]) == "panewire" && closeOpsLaunchVerbs[fields[i+1]] {
+		for i := 0; i+1 < len(process.args); i++ {
+			if panewireExecutable(process.args[i]) && closeOpsLaunchVerbs[process.args[i+1]] {
 				return false, nil
 			}
 		}
 	}
 	return true, scanner.Err()
+}
+
+// panewireExecutable reports whether an argument names a panewire binary
+// under any name it ships or is kept under: a basename starting "panewire"
+// (panewire, panewire.prev, panewire-linux-amd64, panewire_<v>_<os>_<arch>),
+// this process's own executable, or the PANEWIRE_BIN override (#593 review).
+func panewireExecutable(arg string) bool {
+	base := filepath.Base(arg)
+	if strings.HasPrefix(base, "panewire") {
+		return true
+	}
+	if exe, err := os.Executable(); err == nil && base == filepath.Base(exe) {
+		return true
+	}
+	if bin := os.Getenv("PANEWIRE_BIN"); bin != "" && base == filepath.Base(bin) {
+		return true
+	}
+	return false
 }
 
 // closeOpsQuiet checks both process classes over one listing.
@@ -140,4 +158,35 @@ func CloseOpsReady(ctx context.Context, jobs, version string, list ProcessLister
 		return false
 	}
 	return closeOpsQuiet(ctx, jobs, list) == nil
+}
+
+var (
+	buildIdentityOnce sync.Once
+	buildIdentity     string
+)
+
+// BuildIdentity is the close-ops marker's binary identity: BuildVersion plus
+// a digest of this process's executable, read once per process (the node
+// daemon reads it at its first hello). A development build reports one
+// shared version, so the digest is what makes another build of it need the
+// step again (#593 review). An unreadable executable gives "", which no
+// marker matches.
+func BuildIdentity() string {
+	buildIdentityOnce.Do(func() {
+		exe, err := os.Executable()
+		if err != nil {
+			return
+		}
+		f, err := os.Open(exe)
+		if err != nil {
+			return
+		}
+		defer f.Close()
+		sum := sha256.New()
+		if _, err := io.Copy(sum, f); err != nil {
+			return
+		}
+		buildIdentity = BuildVersion + "@" + hex.EncodeToString(sum.Sum(nil))[:16]
+	})
+	return buildIdentity
 }

@@ -254,15 +254,17 @@ func (a *App) watch(ctx context.Context, args []string) error {
 		// timeout, the deadline exit and the missing-pane fallback all wait.
 		// The node's final job.lost closes the intent and ends this watch; a
 		// request that closed nothing hands the job back.
-		if _, ok := pendingHubCloseIntent(j); ok && !j.Reaped {
+		if a.hubCloseHolds(j) {
 			if err := a.Sleep(ctx, 5*time.Second); err != nil {
 				return err
 			}
 			continue
 		}
-		// The node settled a hub close of this attempt: it wrote the record,
-		// freed the lease and recorded the final job.lost, so the watch is
-		// over, even during a quota hand-over's grace (hk 4632).
+		// The node settled a hub close of this attempt: it wrote the record
+		// and freed the lease, so the watch is over, even during a quota
+		// hand-over's grace (hk 4632). A completion an independent end left
+		// mid-publication (job.record_settled) is finished by its own
+		// `panewire done`, not by the watcher.
 		if foldHubClose(j).settled {
 			return nil
 		}

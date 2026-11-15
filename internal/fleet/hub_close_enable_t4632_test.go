@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -116,7 +117,7 @@ func TestCloseOpsBarrier_t4632(t *testing.T) {
 		t.Fatal(e)
 	}
 	list := func(out string) ProcessLister {
-		return func(context.Context) ([]byte, error) { return []byte(out), nil }
+		return func(context.Context) ([]byte, error) { return []byte(withStart(out)), nil }
 	}
 	now := time.Date(2026, 11, 15, 0, 0, 0, 0, time.UTC)
 	ctx := context.Background()
@@ -134,7 +135,7 @@ func TestCloseOpsBarrier_t4632(t *testing.T) {
 		t.Fatalf("a refused step left a marker: %v", e)
 	}
 	// A watcher of this binary carries its token.
-	if e := os.WriteFile(filepath.Join(jobs, "j1", watchCapsDir, "4242"), []byte(WatcherCapsToken+"\n"), 0o600); e != nil {
+	if e := os.WriteFile(filepath.Join(jobs, "j1", watchCapsDir, "4242"), []byte(watcherCapsLine(testStart)), 0o600); e != nil {
 		t.Fatal(e)
 	}
 	self := strconv.Itoa(os.Getpid()) + " /usr/local/bin/panewire _spawn-stdin\n"
@@ -166,18 +167,24 @@ func TestCloseOpsBarrierFencesEveryLaunchPath_t4632(t *testing.T) {
 	now := time.Now()
 	calls := 0
 	once := func(out string) ProcessLister {
-		return func(context.Context) ([]byte, error) { calls++; return []byte(out), nil }
+		return func(context.Context) ([]byte, error) { calls++; return []byte(withStart(out)), nil }
 	}
 	if e := EnableCloseOps(ctx, jobs, "v1", now, once("")); e != nil || calls != 1 {
 		t.Fatalf("enable = %v after %d listings, want one listing", e, calls)
 	}
 	for _, verb := range []string{"spawn", "work", "lead", "restore", "_spawn-stdin"} {
-		line := "99 /opt/old/panewire " + verb + " --job x\n"
-		if CloseOpsReady(ctx, jobs, "v1", once(line)) {
-			t.Fatalf("ready while %q runs", verb)
+		for _, exe := range []string{"/opt/old/panewire", "/usr/local/bin/panewire.prev", "./panewire-linux-amd64", "/tmp/panewire_1.2.0_linux_amd64"} {
+			line := "99 " + exe + " " + verb + " --job x\n"
+			if CloseOpsReady(ctx, jobs, "v1", once(line)) {
+				t.Fatalf("ready while %q runs", line)
+			}
 		}
 	}
-	if !CloseOpsReady(ctx, jobs, "v1", once("99 /bin/zsh -c panewire-ish spawn\n12 panewire daemon\n")) {
+	t.Setenv("PANEWIRE_BIN", "/opt/custom/pw-renamed")
+	if CloseOpsReady(ctx, jobs, "v1", once("99 /opt/custom/pw-renamed spawn --job x\n")) {
+		t.Fatal("ready while a PANEWIRE_BIN-named launcher runs")
+	}
+	if !CloseOpsReady(ctx, jobs, "v1", once("99 /bin/zsh -c make spawn\n12 /usr/local/bin/panewire daemon\n")) {
 		t.Fatal("not ready with only unrelated processes")
 	}
 	if CloseOpsReady(ctx, jobs, "v2", once("")) {
@@ -297,4 +304,53 @@ func TestSettlementRecoversAClosingOpAfterAnIndependentEnd_t4632(t *testing.T) {
 	if st, _ := ledgerState(t, a, "j"); st != "released" {
 		t.Fatalf("quota %s, want released", st)
 	}
+}
+
+// #593 review: an owed close after an independent end fences the watcher's
+// decisions (no stale re-prompt revives the job), and its settlement, which
+// writes job.hub_close_settled, drops them too.
+func TestOwedEndedCloseFencesWatcherDecisions_t4632(t *testing.T) {
+	a, _ := hubCloseFixture(t)
+	in := liveIntent(t, a)
+	recordHubClose(t, a, in)
+	writeJobCloseOp(t, a, CloseOp{RequestID: in.RequestID, Attempt: in.Attempt, State: CloseOpUnknown})
+	if e := a.event(context.Background(), "j", "job.revoked", map[string]any{}); e != nil {
+		t.Fatal(e)
+	}
+	ran := false
+	decide := func(Job) error { ran = true; return nil }
+	if deferred, e := a.endUnlessHubClose("j", decide); e != nil || !deferred || ran {
+		t.Fatalf("owed: deferred=%v err=%v ran=%v; want the decision fenced", deferred, e, ran)
+	}
+	if st, e := (HubCloseSettlement{App: a}).Settle(context.Background(), "j"); e != nil || st != HubCloseSettled {
+		t.Fatalf("settle = %v, %v", st, e)
+	}
+	if deferred, e := a.endUnlessHubClose("j", decide); e != nil || !deferred || ran {
+		t.Fatalf("settled: deferred=%v err=%v ran=%v; want the stale decision dropped", deferred, e, ran)
+	}
+	if j, _ := a.job("j"); !foldHubClose(j).settled || j.Ended != "job.revoked" {
+		t.Fatalf("settled=%v ended=%q", foldHubClose(j).settled, j.Ended)
+	}
+}
+
+// The token's start time is the one the real ps listing prints for the same
+// process, so a live watcher of this binary reads as ready on this host.
+func TestWatcherTokenStartMatchesTheRealListing_t4632(t *testing.T) {
+	start, e := processStartOf(context.Background(), os.Getpid())
+	if e != nil {
+		t.Skipf("ps cannot report a start time here: %v", e)
+	}
+	out, e := psProcesses(context.Background())
+	if e != nil {
+		t.Skipf("ps listing unavailable: %v", e)
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		if p, ok := parseProcessLine(line); ok && p.pid == os.Getpid() {
+			if p.start != start {
+				t.Fatalf("listing start %q, token start %q", p.start, start)
+			}
+			return
+		}
+	}
+	t.Fatal("own process not in the listing")
 }

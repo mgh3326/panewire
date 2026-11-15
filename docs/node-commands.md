@@ -262,13 +262,18 @@ panewire node close-ops enable --inbox-root <jobs_inbox_root>
 It reads one process listing and refuses (exit 7, retryable, removing any
 earlier marker) while it shows a live `_watch <job>` process of a job under
 the jobs root without its token — every watcher of this binary writes
-`jobs/<job>/.watch-caps/<pid>` (`hub_close_v1`) at its start, before any lock
-(`fleet.HubCloseWatchersReady`, failing closed on any listing or token error)
-— or a `panewire` process of a verb that can start a watcher (`spawn`,
-`work`, `lead`, `restore`, `_spawn-stdin`), of any binary. Otherwise it
-records `jobs/.close-ops-v1` (mode 0600, atomic) naming its binary version.
-The node advertises `close_ops_v1` only while the marker names its own
-version (a rollback or upgrade needs the step again; an older daemon's
+`jobs/<job>/.watch-caps/<pid>` (`hub_close_v1 <start>`, its `ps lstart`
+start time, so a file a killed watcher left never vouches for a process that
+reuses its pid) at its start, before any lock (`fleet.HubCloseWatchersReady`,
+failing closed on any listing or token error) — or a panewire executable
+running a verb that can start a watcher (`spawn`, `work`, `lead`, `restore`,
+`_spawn-stdin`). A panewire executable is any basename starting `panewire`
+(`panewire.prev`, `panewire-linux-amd64`, release archives), this binary's
+own name, or `PANEWIRE_BIN`. Otherwise it records `jobs/.close-ops-v1` (mode
+0600, atomic) naming its binary identity: the version plus a digest of the
+executable (`fleet.BuildIdentity`), so every development build differs. The
+node advertises `close_ops_v1` only while the marker names its own identity
+(a rollback, upgrade or rebuild needs the step again; an older daemon's
 in-process launches end with its restart) and the same one-listing check
 holds now. Every hello checks it; a session re-checks every 30 s and re-sends
 hello (with the heartbeat and completions a repeated hello needs) when the
@@ -392,9 +397,12 @@ close the node journalled as possibly closed (`closed`, `gone`, `unknown`,
 `job.revoked`, a completion, a reap) follows its intent, keeping a competing
 terminal hk record; that settlement records `job.hub_close_settled`, not a
 terminal `job.lost`, so the independent end stays the job's local outcome.
-The node's own settlement retires every other intent of the attempt. A
-watcher decision the node's settlement made stale is dropped, and the
-watcher then exits. What the hub caller (hk 4745) must do: issue close ops only to a node whose
+The node's own settlement retires every other intent of the attempt. While
+such an ended close is owed, the watcher makes no decision (as for an open
+intent); once the node's settlement (`job.lost` or `job.hub_close_settled`)
+is recorded, a watcher decision made before it is dropped and the watcher
+exits. A completion an independent end left mid-publication
+(`job.record_settled`) is finished by its own `panewire done`. What the hub caller (hk 4745) must do: issue close ops only to a node whose
 current registration advertises it; send `end_reason` on every `pane.close_op`; treat
 `close_in_progress` and `watcher_incompatible` as "not closed, retry later";
 after `unknown`, retry under a new request id while the pane is still

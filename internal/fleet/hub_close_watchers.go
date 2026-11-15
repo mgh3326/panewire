@@ -29,28 +29,79 @@ const (
 )
 
 // recordWatcherCaps writes this process's token for job and returns its
-// removal; a stale file is harmless, since only a live pid is checked.
+// removal. The token names the process's start time as ps reports it, so a
+// file a killed watcher left behind never vouches for a later process that
+// reuses its pid (#593 review). A start time ps cannot read is left empty,
+// which no listing matches: that watcher holds close ops off, failing closed.
 func (a *App) recordWatcherCaps(job string) (func(), error) {
 	dir := filepath.Join(a.Jobs, job, watchCapsDir)
 	if e := os.MkdirAll(dir, 0o700); e != nil {
 		return nil, e
 	}
+	start, _ := processStartOf(context.Background(), os.Getpid())
 	path := filepath.Join(dir, strconv.Itoa(os.Getpid()))
-	if e := durable.ReplaceFileAtomically(path, ".tmp-caps-*", []byte(WatcherCapsToken+"\n"), 0o600); e != nil {
+	if e := durable.ReplaceFileAtomically(path, ".tmp-caps-*", []byte(watcherCapsLine(start)), 0o600); e != nil {
 		return nil, e
 	}
 	return func() { os.Remove(path) }, nil
 }
 
-// ProcessLister lists the host's processes as `ps -axo pid=,args=` prints
-// them; tests replace it.
+// watcherCapsLine is a token file's content for a process started at start.
+func watcherCapsLine(start string) string { return WatcherCapsToken + " " + start + "\n" }
+
+// processStartOf reads a process's start time as `ps -o lstart=` prints it;
+// tests replace it.
+var processStartOf = func(ctx context.Context, pid int) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "ps", "-o", "lstart=", "-p", strconv.Itoa(pid))
+	cmd.Env = append(os.Environ(), "LC_ALL=C")
+	out, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+	start := strings.Join(strings.Fields(string(out)), " ")
+	if len(strings.Fields(start)) != lstartFields {
+		return "", errors.New("unreadable process start time")
+	}
+	return start, nil
+}
+
+// lstartFields is the width of ps's lstart column ("Sun Nov 15 12:41:36 2026").
+const lstartFields = 5
+
+// ProcessLister lists the host's processes as `ps -axo pid=,lstart=,args=`
+// prints them in the C locale; tests replace it.
 type ProcessLister func(ctx context.Context) ([]byte, error)
 
 // psProcesses runs ps, bounded, on Linux and macOS alike.
 func psProcesses(ctx context.Context) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	return exec.CommandContext(ctx, "ps", "-axo", "pid=,args=").Output()
+	cmd := exec.CommandContext(ctx, "ps", "-axo", "pid=,lstart=,args=")
+	cmd.Env = append(os.Environ(), "LC_ALL=C")
+	return cmd.Output()
+}
+
+// listedProcess is one line of a ProcessLister listing.
+type listedProcess struct {
+	pid   int
+	start string
+	args  []string
+}
+
+// parseProcessLine reads one listing line; ok is false for a line too short
+// or without a numeric pid.
+func parseProcessLine(line string) (listedProcess, bool) {
+	fields := strings.Fields(line)
+	if len(fields) < 2+lstartFields {
+		return listedProcess{}, false
+	}
+	pid, err := strconv.Atoi(fields[0])
+	if err != nil {
+		return listedProcess{}, false
+	}
+	return listedProcess{pid: pid, start: strings.Join(fields[1:1+lstartFields], " "), args: fields[1+lstartFields:]}, true
 }
 
 // HubCloseWatchersReady reports whether every live `_watch <job>` process for
@@ -69,15 +120,12 @@ func HubCloseWatchersReady(ctx context.Context, jobs string, list ProcessLister)
 	scanner := bufio.NewScanner(bytes.NewReader(out))
 	scanner.Buffer(make([]byte, 0, 64<<10), 1<<20)
 	for scanner.Scan() {
-		fields := strings.Fields(scanner.Text())
-		if len(fields) < 3 {
+		process, ok := parseProcessLine(scanner.Text())
+		if !ok {
 			continue
 		}
-		pid, err := strconv.Atoi(fields[0])
-		if err != nil {
-			continue
-		}
-		for i := 1; i+1 < len(fields); i++ {
+		fields := process.args
+		for i := 0; i+1 < len(fields); i++ {
 			if fields[i] != "_watch" || !validID(fields[i+1]) {
 				continue
 			}
@@ -85,8 +133,10 @@ func HubCloseWatchersReady(ctx context.Context, jobs string, list ProcessLister)
 			if info, err := os.Stat(filepath.Join(jobs, job)); err != nil || !info.IsDir() {
 				break // another jobs root's watcher
 			}
-			token, err := os.ReadFile(filepath.Join(jobs, job, watchCapsDir, strconv.Itoa(pid)))
-			if errors.Is(err, fs.ErrNotExist) || err == nil && strings.TrimSpace(string(token)) != WatcherCapsToken {
+			// The token must name this process's start time: a file left
+			// by a killed watcher whose pid was reused does not.
+			token, err := os.ReadFile(filepath.Join(jobs, job, watchCapsDir, strconv.Itoa(process.pid)))
+			if errors.Is(err, fs.ErrNotExist) || err == nil && string(token) != watcherCapsLine(process.start) {
 				return false, nil
 			} else if err != nil {
 				return false, err

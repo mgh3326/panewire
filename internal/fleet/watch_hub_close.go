@@ -222,7 +222,7 @@ func (a *App) endUnlessHubClose(id string, end func(j Job) error) (deferred bool
 	if e != nil {
 		return false, e
 	}
-	if _, open := pendingHubCloseIntent(j); open && !j.Reaped {
+	if a.hubCloseHolds(j) {
 		return true, nil
 	}
 	// The node settled a hub close of this attempt after the watcher's
@@ -304,8 +304,10 @@ func foldHubClose(j Job) hubCloseFold {
 			endOpen()
 		case hubCloseSettledKind:
 			// The node settled an ended intent: the attempt's close is done,
-			// and no other intent of the attempt is owed.
+			// no other intent of the attempt is owed, and a watcher decision
+			// made before it is stale.
 			fold.open, fold.ended = nil, nil
+			fold.settled = true
 		case "job.lost":
 			if str(ev.Payload, "reason") == hubCloseLostReason && boolean(ev.Payload, "final", false) && str(ev.Payload, "request_id") != "" {
 				// The node's own settlement ended the attempt: every other
@@ -322,6 +324,18 @@ func foldHubClose(j Job) hubCloseFold {
 		}
 	}
 	return fold
+}
+
+// hubCloseHolds reports whether a hub close owns the attempt's end, so the
+// watcher makes no decision: an open intent, or an intent an independent end
+// followed whose operation may have closed the pane and whose settlement is
+// still owed (#593 review). An unreadable journal holds, failing closed.
+func (a *App) hubCloseHolds(j Job) bool {
+	if _, open := pendingHubCloseIntent(j); open && !j.Reaped {
+		return true
+	}
+	_, owed, err := a.endedHubCloseIntent(j)
+	return owed || err != nil
 }
 
 // closeOpMayHaveClosed reports whether a journalled operation's pane may have
