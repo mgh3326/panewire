@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -58,7 +59,10 @@ func (a *App) events(id string) ([]Event, error) {
 		if ent.Type()&os.ModeSymlink != 0 {
 			return nil, fail(exitStateConflict, "symlink event refused")
 		}
-		if ent.IsDir() || filepath.Ext(ent.Name()) != ".json" {
+		// A dot name is the ledger writer's unpublished temporary file
+		// (arbiter writeArtifact ".tmp-*.json"), which another process (the
+		// node recording a hub-close intent) may be writing or removing.
+		if ent.IsDir() || filepath.Ext(ent.Name()) != ".json" || strings.HasPrefix(ent.Name(), ".") {
 			continue
 		}
 		info, e := ent.Info()
@@ -100,10 +104,16 @@ func (a *App) events(id string) ([]Event, error) {
 }
 func (a *App) job(id string) (Job, error) {
 	evs, e := a.events(id)
-	j := Job{ID: id, Events: evs}
 	if e != nil {
-		return j, e
+		return Job{ID: id, Events: evs}, e
 	}
+	return foldJob(id, evs)
+}
+
+// foldJob builds the job from its events in the order given: timestamp order
+// for a.job, ledger sequence order for a hub close (watch_hub_close.go).
+func foldJob(id string, evs []Event) (Job, error) {
+	j := Job{ID: id, Events: evs}
 	for _, ev := range evs {
 		p := ev.Payload
 		switch ev.Kind {

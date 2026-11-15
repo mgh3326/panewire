@@ -232,13 +232,16 @@ type HubClient struct {
 	creditPresenceMu   sync.Mutex
 	creditPresence     *creditPresenceSource // the node's credit pool presence publisher; fixtures set it, a missing one builds the default.
 	nodeCloseSettle    time.Duration         // fixture seam; zero is nodePaneCloseSettle.
-	nodeGitLockWait    time.Duration         // fixture seam; zero is nodeGitOpLockWait.
-	busyRelayMu        sync.Mutex
-	busyRelay          *relayBusyManager
-	relayCommand       relayCommandRunner   // fixture seam for agent get/wait.
-	relayEmitter       func(hubClientEvent) // fixture/connection-owned writer.
-	relayRecvSeqMu     sync.Mutex
-	relayRecvSeq       int64 // assigned synchronously by the hub read loop.
+	// nodeHubClose is the job-ledger side of a hub close (intent, watcher);
+	// nil is nodeFleetHubClose. A fixture seam.
+	nodeHubClose    nodeHubCloseLedger
+	nodeGitLockWait time.Duration // fixture seam; zero is nodeGitOpLockWait.
+	busyRelayMu     sync.Mutex
+	busyRelay       *relayBusyManager
+	relayCommand    relayCommandRunner   // fixture seam for agent get/wait.
+	relayEmitter    func(hubClientEvent) // fixture/connection-owned writer.
+	relayRecvSeqMu  sync.Mutex
+	relayRecvSeq    int64 // assigned synchronously by the hub read loop.
 	// inboundHandled is a fixture seam the inbound dispatcher calls after
 	// each queued frame it ran; production leaves it nil.
 	inboundHandled func(hubOutboundMessage)
@@ -511,6 +514,7 @@ func (client *HubClient) Run(ctx context.Context) {
 	go client.runLaneReconcile(ctx)
 	go client.runTaskPaneSweep(ctx)
 	go client.runQuotaPoolReconcile(ctx)
+	go client.runHubCloseSettle(ctx)
 	if client.statePublish {
 		go client.runFleetQuota(ctx)
 	}
@@ -1931,6 +1935,8 @@ const defaultHubHelloAckTimeout = 5 * time.Second
 const hubCapabilityCloseQuestion = "pane_close_question_v1"
 
 // hubSpawnCapabilities is what an upgraded node advertises in hello.
+// close_ops_v1 (hubCapabilityCloseOps) is deliberately not advertised: no
+// hub may issue close ops until hk 4632 adds the migration barrier.
 var hubSpawnCapabilities = []string{"spawn_v2", "spawn_ops_v1", hubCapabilitySpawnGrant, hubCapabilityCloseQuestion, hubCapabilityApplied}
 
 func (client *HubClient) helloAckTimeoutOrDefault() time.Duration {

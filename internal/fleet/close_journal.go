@@ -17,8 +17,8 @@ import (
 // docs/node-commands.md, "Close operations"). It survives a node restart, so
 // the hub can ask what became of close X and is never left to guess between a
 // refused close, a lost acknowledgement and a pane that vanished on its own.
-// The job's watcher does not read it yet; that, and the hub's use of the
-// operations, are hk 4652 and hk 4632.
+// The job's watcher defers to an open hub close (watch_hub_close.go, hk 4652);
+// the hub's use of the operations is hk 4632.
 
 // CloseOpDir is the directory, inside a job directory, holding one file per
 // close operation. Names beginning with a dot are reserved for the journal's
