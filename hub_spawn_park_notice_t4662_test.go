@@ -25,6 +25,7 @@ type parkNoticePriority struct {
 	mu         sync.Mutex
 	priorities map[string]int
 	unreadable map[string]bool
+	broken     map[string]bool
 	read       map[string]int
 	fail       bool
 	srv        *httptest.Server
@@ -42,6 +43,14 @@ func newParkNoticePriority(t *testing.T, priorities map[string]int) *parkNoticeP
 		p.mu.Unlock()
 		if fail {
 			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		p.mu.Lock()
+		broken := p.broken[id]
+		p.mu.Unlock()
+		if broken {
+			// A 5xx for this one record: about the row, not the service.
+			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
 		p.mu.Lock()
@@ -71,6 +80,15 @@ func (p *parkNoticePriority) reads(id string) int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.read[id]
+}
+
+func (p *parkNoticePriority) setBroken(id string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.broken == nil {
+		p.broken = map[string]bool{}
+	}
+	p.broken[id] = true
 }
 
 func (p *parkNoticePriority) setUnreadable(id string) {
@@ -228,7 +246,7 @@ func TestSpawnParkNoticeSkipsNormalPriority_t4662(t *testing.T) {
 	if reads := hk.reads("466102"); reads != 1 {
 		t.Fatalf("priority read %d times, want 1", reads)
 	}
-	rows, err := h.inbox.store.parkedSpawnNoticeCandidates(t.Context(), clock, spawnParkNoticePage)
+	rows, err := h.inbox.store.parkedSpawnNoticeCandidates(t.Context(), clock, spawnParkNoticeCursor{}, spawnParkNoticePage)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -511,5 +529,161 @@ func TestSpawnParkNoticeReplayStartsAFreshWait_t4662(t *testing.T) {
 	}
 	if reads := hk.reads("466101"); reads != 2 {
 		t.Fatalf("the new attempt read the priority %d times, want 2", reads)
+	}
+}
+
+// The request's own --urgency decision decides whether its owner is told: the
+// flag wins over the task's hk priority, exactly as placement reads it, and a
+// flag-decided row needs no hk read (hk 4662 review).
+func TestSpawnParkNoticeHonoursTheUrgencyFlag_t4662(t *testing.T) {
+	clock := time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC)
+	hk := newParkNoticePriority(t, map[string]int{"466101": 3, "466102": 1})
+	_, client, stop := newFakeHandoffkeep(t)
+	t.Cleanup(stop)
+	h, destination := parkNoticeHub(t, filepath.Join(t.TempDir(), "inbox.sqlite3"), client, &clock)
+	claim := func(n int, urgency, reason string) hubSpawnTask {
+		t.Helper()
+		request, job := parkRequest(n)
+		request.Args = append(request.Args, "--urgency", urgency)
+		task, _, err := h.inbox.store.claimSpawn(t.Context(), request, job, "parent", clock)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !parkNow(t, h, task, reason) {
+			t.Fatalf("park %d was refused", n)
+		}
+		return task
+	}
+	// --urgency urgent on a P3 task is urgent for placement, so its owner is
+	// told; --urgency normal on a P1 task is normal, so its owner is not.
+	told := claim(1, "urgent", spawnParkQuota)
+	clock = clock.Add(time.Second)
+	quiet := claim(2, "normal", spawnParkQuota)
+	clock = clock.Add(31 * time.Minute)
+	checkParkNotices(t, h)
+	injected := spawnFailedInjections(destination)
+	if len(injected) != 1 || !strings.Contains(injected[0].Text, "request="+told.Request.RequestID) {
+		t.Fatalf("the urgency flag was ignored: %+v", injected)
+	}
+	if reads := hk.reads("466101") + hk.reads("466102"); reads != 0 {
+		t.Fatalf("a flag-decided row read hk %d times, want 0", reads)
+	}
+	for _, id := range []string{told.Request.RequestID, quiet.Request.RequestID} {
+		if row := parkedTask(t, h, id); row.ParkJudgedReason != spawnParkQuota {
+			t.Fatalf("a flag-decided row was not judged: %+v", row)
+		}
+	}
+}
+
+// One record hk answers 5xx for must not hold the sweep: the rows behind it are
+// examined in the same pass, and a down service ends the sweep after a bounded
+// number of reads, resuming after the cursor (hk 4662 review).
+func TestSpawnParkNoticeBadRecordDoesNotHoldTheSweep_t4662(t *testing.T) {
+	clock := time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC)
+	hk := newParkNoticePriority(t, map[string]int{"466101": 1, "466102": 1, "466103": 1})
+	hk.setBroken("466101")
+	_, client, stop := newFakeHandoffkeep(t)
+	t.Cleanup(stop)
+	h, destination := parkNoticeHub(t, filepath.Join(t.TempDir(), "inbox.sqlite3"), client, &clock)
+	bad := claimParkRequest(t, h, 1, clock)
+	if !parkNow(t, h, bad, spawnParkQuota) {
+		t.Fatal("the first park was refused")
+	}
+	clock = clock.Add(time.Second)
+	urgent := claimParkRequest(t, h, 2, clock)
+	if !parkNow(t, h, urgent, spawnParkQuota) {
+		t.Fatal("the urgent park was refused")
+	}
+	clock = clock.Add(31 * time.Minute)
+	checkParkNotices(t, h)
+	injected := spawnFailedInjections(destination)
+	if len(injected) != 1 || !strings.Contains(injected[0].Text, "request="+urgent.Request.RequestID) {
+		t.Fatalf("the bad record held the sweep: %+v", injected)
+	}
+	if row := parkedTask(t, h, bad.Request.RequestID); row.ParkPriority != -1 || row.ParkJudgedReason != "" {
+		t.Fatalf("a 5xx row was judged before its read succeeded: %+v", row)
+	}
+}
+
+// A service that answers nothing costs spawnParkNoticeOutages reads per sweep,
+// and the cursor spreads the next sweeps over the remaining rows, so an outage
+// cannot pin the sweep to the same head rows and no notice is lost once hk
+// answers again (hk 4662 review).
+func TestSpawnParkNoticeOutageEndsTheSweep_t4662(t *testing.T) {
+	clock := time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC)
+	hk := newParkNoticePriority(t, map[string]int{"466101": 3, "466102": 3, "466103": 3})
+	hk.setFail(true)
+	_, client, stop := newFakeHandoffkeep(t)
+	t.Cleanup(stop)
+	h, destination := parkNoticeHub(t, filepath.Join(t.TempDir(), "inbox.sqlite3"), client, &clock)
+	for n := 1; n <= 3; n++ {
+		task := claimParkRequest(t, h, n, clock)
+		if !parkNow(t, h, task, spawnParkQuota) {
+			t.Fatalf("park %d was refused", n)
+		}
+		clock = clock.Add(time.Second)
+	}
+	total := func() int { return hk.reads("466101") + hk.reads("466102") + hk.reads("466103") }
+	clock = clock.Add(31 * time.Minute)
+	checkParkNotices(t, h)
+	if got := total(); got != spawnParkNoticeOutages {
+		t.Fatalf("the outage sweep read %d rows, want %d", got, spawnParkNoticeOutages)
+	}
+	if got := hk.reads("466103"); got != 0 {
+		t.Fatalf("the sweep did not stop after the bounded outage reads: third row read %d", got)
+	}
+	// The next sweep resumes after the cursor at the row the stop left it on.
+	clock = clock.Add(2 * time.Minute)
+	checkParkNotices(t, h)
+	if got := hk.reads("466103"); got != 1 {
+		t.Fatalf("the sweep did not resume after the cursor: third row read %d", got)
+	}
+	// With hk answering again, the wrapped sweep judges every row; a P3 row is
+	// told nothing.
+	hk.setFail(false)
+	clock = clock.Add(2 * time.Minute)
+	checkParkNotices(t, h)
+	if got := spawnFailedInjections(destination); len(got) != 0 {
+		t.Fatalf("P3 rows sent %+v", got)
+	}
+	for n := 1; n <= 3; n++ {
+		if row := parkedTask(t, h, t14RequestID(466100+n)); row.ParkJudgedReason != spawnParkQuota {
+			t.Fatalf("row %d was not judged after recovery: %+v", n, row)
+		}
+	}
+}
+
+// A permanent handoffkeep rejection of one notice judges that row as not told
+// instead of retrying it at the head of every sweep, so the rows behind it are
+// still judged (hk 4662 review).
+func TestSpawnParkNoticePermanentRelayRejection_t4662(t *testing.T) {
+	clock := time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC)
+	hk := newParkNoticePriority(t, map[string]int{"466101": 1, "466102": 1})
+	fake, client, stop := newFakeHandoffkeep(t)
+	t.Cleanup(stop)
+	fake.status = http.StatusBadRequest
+	h, destination := parkNoticeHub(t, filepath.Join(t.TempDir(), "inbox.sqlite3"), client, &clock)
+	first := claimParkRequest(t, h, 1, clock)
+	if !parkNow(t, h, first, spawnParkQuota) {
+		t.Fatal("the first park was refused")
+	}
+	clock = clock.Add(time.Second)
+	second := claimParkRequest(t, h, 2, clock)
+	if !parkNow(t, h, second, spawnParkQuota) {
+		t.Fatal("the second park was refused")
+	}
+	clock = clock.Add(31 * time.Minute)
+	checkParkNotices(t, h)
+	if got := spawnFailedInjections(destination); len(got) != 0 {
+		t.Fatalf("a rejected notice was injected: %+v", got)
+	}
+	for _, task := range []hubSpawnTask{first, second} {
+		row := parkedTask(t, h, task.Request.RequestID)
+		if row.ParkJudgedReason != spawnParkQuota || !row.ParkNoticeAt.IsZero() {
+			t.Fatalf("a rejected row was not judged as not told: %+v", row)
+		}
+	}
+	if reads := hk.reads("466101") + hk.reads("466102"); reads != 2 {
+		t.Fatalf("priorities read %d times, want 2", reads)
 	}
 }

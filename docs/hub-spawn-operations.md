@@ -309,27 +309,41 @@ design §9a and §9b Q2): `{"spawn_backoff_seconds": 30,
 
 ### Parked notice
 
-hk 4662; design §6 (notices to the owner lane) and §9b Q2. A request whose
-wait (below) reaches `spawn_park_notice_seconds` (1800 = 30 min by default)
-while parked tells its owner lane once, as one `info` line:
+hk 4662; design §6 (notices to the owner lane) and §9b Q2. A sweep of the
+parked requests tells an urgent request's owner once when its wait (below)
+reaches `spawn_park_notice_seconds` (1800 = 30 min by default), as one `info`
+line:
 
 `[panewire] SPAWN_PARKED <job> request=<id> reason=quota parked_since=… next_check_at=… unpark=…`
 
-`unpark` is the wake of every reason in the stored set (the table above). Only
-an urgent request is told: the `--task` it names must have hk priority 1 or 2,
-the same set that makes a spawn urgent (`fleet.UrgentTaskPriority`). A P3 wait
-is what the queue is for. hk's batched states route carries no priority, so the
-priority is read once per wait (one `GET /v1/tasks/{id}`) and kept in
-`park_priority` (`-1` = not read yet). A task hk no longer has, a request whose
-id names none, and a request with no task can never be urgent: they read as 0.
+`unpark` is the wake of every reason in the stored set (the table above).
+Urgency is the request's own decision, exactly as placement read it at submit:
+an `--urgency` flag the submitter passed wins (`urgent` tells, `normal` stays
+quiet), and only a request without one asks its bound hk task's priority
+(`park_priority`, read once per wait; 1 or 2 is urgent). A request with no
+task and no flag is not urgent, and one with no owner lane is never told.
 
-A failure is read by what it is about. An hk outage — unreachable, 5xx,
-rate-limited, a timeout, a refused credential — fails every later read the same
-way, so it stops the pass, judges nothing, and the next pass retries whole: no
-notice is lost. A refusal hk names for one task (a 4xx code, a 403 ACL
-included) or a 2xx answer that cannot be read is about that row: it is counted
-in `park_priority_failures`, the pass goes on, and after 3 such passes the task
-reads as 0 and the row is judged, so one broken task cannot hold the page.
+The sweep (`checkParkedSpawnNotices`, `hub_spawn_park_notice.go`) runs on the
+coordinator's tick, 60 s apart, and examines at most 64 candidate rows from a
+keyset cursor, earliest wait first. Its progress never depends on a row's
+outcome: the cursor moves past every row it examines, whatever happens, so no
+row — a P3 backlog, a task hk answers badly for, a rejected notice — can hold
+the page. A row leaves the candidate set when it is judged: the durable
+`park_judged_reason` names the reason set it was judged under, told or not. The
+cursor wraps at the end of a sweep; it lives in hub memory, so a restart starts
+the sweep at the head, which only repeats a sweep.
+
+A row whose task priority cannot be read is handled by what failed:
+
+| Read outcome | Effect |
+|---|---|
+| the task is gone, or the request names no task | reads as 0 (never urgent) and is judged |
+| a 4xx refusal for this task, or a 2xx answer that cannot be parsed | `park_priority_failures` counts the sweep; after 3 the task reads as 0 and the row is judged |
+| hk unreachable, 5xx, 429/408, 401 (an outage) | the row stays unjudged and the sweep stops after 2 such reads; the cursor resumes after them |
+
+A notice hk refuses to persist for good (4xx) judges the row as not told and
+the sweep goes on; a transport failure or 5xx leaves it unjudged, and a later
+sweep resends the same event.
 
 The notice is at most one per reason set for the request's life: nothing
 repeats while the request stays parked for the reason the notice named, a park
@@ -342,19 +356,12 @@ told by the hub that starts after it. The event id also names the wait start
 and the reason set (`spawn-park:<request>:<park_since_ms>:<reason>`), so a
 resend of the same notice is the same durable handoffkeep event.
 
-The pass (`checkParkedSpawnNotices`, `hub_spawn_park_notice.go`) runs on the
-coordinator's tick, rate-limited to 60 s, and judges at most 64 rows per pass,
-earliest wait first. It writes nothing and reads no hk until a row is past the
-limit. The notice is recorded only after handoffkeep took the durable row; a
-failed write leaves the row unjudged, and the next pass sends the same event
-again. `park_since_ms` is the request's wait: it starts at its first park,
-survives every re-park and a bind a node then refuses (so the wait that is
-counted is the whole one), and starts over with a new attempt — the expiry
-replay and a deliberate replay of a retryable request both reset it (and the
-priority read with it, keeping the judgement). A judged row
-leaves the candidate page, so a backlog of P3 requests cannot starve an urgent
-one parked behind them; only an hk outage can hold the page, and it stops the
-pass rather than spinning through it.
+`park_since_ms` is the request's wait: it starts at its first park, survives
+every re-park and a bind a node then refuses (so the wait that is counted is
+the whole one), and starts over with a new attempt — the expiry replay and a
+deliberate replay of a retryable request both reset it, the priority read and
+its failure count, keeping the judgement. A notice is recorded only after
+handoffkeep took the durable row (or refused it for good).
 
 ### Rolling back past parking
 

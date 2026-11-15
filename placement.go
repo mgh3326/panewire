@@ -84,9 +84,9 @@ type PlacementPolicy struct {
 	// re-placement back-off (base × 2^(n-1), capped, ±20 %), and
 	// SpawnWakeBatch how many parked requests one tick wakes on an event.
 	// SpawnParkNoticeSeconds is how long a request's wait must last while it
-	// is parked before an urgent (hk priority 1 or 2) request tells its owner
-	// lane once. 0 means the defaults, 30 s, 600 s, 8 and 1800
-	// (hub_spawn_park.go, hub_spawn_park_notice.go).
+	// is parked before an urgent request (its --urgency flag, else hk priority
+	// 1 or 2) tells its owner lane once. 0 means the defaults, 30 s, 600 s, 8
+	// and 1800 (hub_spawn_park.go, hub_spawn_park_notice.go).
 	SpawnBackoffSeconds    int `json:"spawn_backoff_seconds,omitempty"`
 	SpawnBackoffMaxSeconds int `json:"spawn_backoff_max_seconds,omitempty"`
 	SpawnWakeBatch         int `json:"spawn_wake_batch,omitempty"`

@@ -620,6 +620,19 @@ var urgentPriorities = []int{1, 2}
 // ones. The hub's long-parked owner notice uses the same set (hk 4662).
 func UrgentTaskPriority(priority int) bool { return slices.Contains(urgentPriorities, priority) }
 
+// UrgencyFlag reports what an explicit --urgency flag decides: urgent (true) or
+// normal (false). explicit is false for an empty flag, where the bound task's
+// priority decides, exactly as resolveUrgency reads it (hk 4662).
+func UrgencyFlag(flag string) (urgent bool, explicit bool) {
+	switch flag {
+	case urgencyUrgent:
+		return true, true
+	case urgencyNormal:
+		return false, true
+	}
+	return false, false
+}
+
 // resolveUrgency applies the explicit flag first, then the bound task's hk
 // priority, then the normal default. The returned source names which won.
 func resolveUrgency(flag string, task client.Task) (string, string) {
