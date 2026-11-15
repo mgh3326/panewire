@@ -225,7 +225,7 @@ func (a *App) hubSharedAccount(ctx context.Context, key string) (SharedAccount, 
 	if best == nil {
 		return SharedAccount{}, reason
 	}
-	quota := withFree(accountPoolView(best.Quota.Buckets, now), best.Quota.FreeBucket, now)
+	quota := withFree(accountPoolView(readableBuckets(accountPool(key), best.Quota.Buckets), now), best.Quota.FreeBucket, now)
 	if quota == nil {
 		return SharedAccount{}, stateStale
 	}

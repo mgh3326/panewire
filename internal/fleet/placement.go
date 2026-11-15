@@ -77,6 +77,14 @@ type SharedAccount struct {
 	State *StateUse
 }
 
+// windows are the account reading's measured windows, nil without a reading.
+func (a SharedAccount) windows() viewWindows {
+	if a.Quota == nil {
+		return nil
+	}
+	return a.Quota.Windows
+}
+
 // PlacementSource supplies the external reads a placement decision needs:
 // the hub's host list, pacelever's host-presence records and the shared quota
 // cache. A read error degrades the corresponding inputs to "unknown".
@@ -406,6 +414,73 @@ func neededAccounts(quota map[string]any, pool string, presence []PresenceRecord
 // hostAccount selects the most recent fresh presence for this host and pool.
 // Equal-time conflicting keys are ambiguous; an older login must never replace
 // the current account merely because its quota happens to be available.
+// multiAccountPools are the pools whose host may hold several accounts at once:
+// commandcode, whose omp lists every Command Code account it holds
+// (docs/quota.md §Native measurement: commandcode). Every other pool has one
+// account per host, the newest.
+var multiAccountPools = []string{"commandcode"}
+
+// multiAccountWindow is how old a presence record of a multi-account pool may be
+// and still name an account the host holds. A live node announces each account at
+// least every ten minutes, so an account omp no longer lists, or a host that
+// removed its last account, ages out of placement within this window instead of
+// staying "held" for the presence TTL while another host keeps the account's
+// shared reading current. A host asleep for longer is bound again by its first
+// announcement after it wakes.
+const multiAccountWindow = 30 * time.Minute
+
+// hostAccounts is every account key host currently holds in pool, newest first.
+// A pool outside multiAccountPools has at most one: hostAccount's.
+func hostAccounts(presence []PresenceRecord, pool, host string, now time.Time, ttl time.Duration) []string {
+	if !slices.Contains(multiAccountPools, pool) {
+		if key := hostAccount(presence, pool, host, now, ttl); key != "" {
+			return []string{key}
+		}
+		return nil
+	}
+	var records []PresenceRecord
+	for _, rec := range presence {
+		fp, ok := strings.CutPrefix(rec.AccountKey, pool+":")
+		age := now.Sub(rec.LastSeen)
+		if rec.HostID != host || !ok || !accountFP.MatchString(fp) || age < -time.Minute || age > min(ttl, multiAccountWindow) {
+			continue
+		}
+		records = append(records, rec)
+	}
+	slices.SortFunc(records, func(a, b PresenceRecord) int {
+		if c := b.LastSeen.Compare(a.LastSeen); c != 0 {
+			return c
+		}
+		return strings.Compare(a.AccountKey, b.AccountKey)
+	})
+	var keys []string
+	for _, rec := range records {
+		if !slices.Contains(keys, rec.AccountKey) {
+			keys = append(keys, rec.AccountKey)
+		}
+	}
+	return keys
+}
+
+// hostAccountFor is hostAccount for a caller that may have chosen an account:
+// want when host holds it. A multi-account pool with no usable choice takes the
+// host's first account (newest announcement, then key order), so two accounts
+// announced in the same instant never make the host unusable; every other pool
+// keeps hostAccount's rule, which refuses a tie.
+func hostAccountFor(presence []PresenceRecord, pool, host string, now time.Time, ttl time.Duration, want string) string {
+	if !slices.Contains(multiAccountPools, pool) {
+		return hostAccount(presence, pool, host, now, ttl)
+	}
+	keys := hostAccounts(presence, pool, host, now, ttl)
+	if want != "" && slices.Contains(keys, want) {
+		return want
+	}
+	if len(keys) > 0 {
+		return keys[0]
+	}
+	return ""
+}
+
 func hostAccount(presence []PresenceRecord, pool, host string, now time.Time, ttl time.Duration) string {
 	var newest time.Time
 	key := ""
@@ -428,7 +503,9 @@ func hostAccount(presence []PresenceRecord, pool, host string, now time.Time, tt
 	return key
 }
 
-func (a *App) remoteAccount(ctx context.Context, pool, host string, cfg map[string]any) (string, SharedAccount) {
+// remoteAccount is the account host holds in pool and its stored reading: want
+// when the caller has chosen one the host holds, else the host's newest.
+func (a *App) remoteAccount(ctx context.Context, pool, host string, cfg map[string]any, want string) (string, SharedAccount) {
 	if a.Source == nil || pool == "" {
 		return "", SharedAccount{}
 	}
@@ -436,7 +513,7 @@ func (a *App) remoteAccount(ctx context.Context, pool, host string, cfg map[stri
 	if err != nil {
 		return "", SharedAccount{}
 	}
-	key := hostAccount(presence, pool, firstNonempty(str(cfg, "presence_id"), host), a.Now(), a.placementTTL("presence_ttl_s", 86400))
+	key := hostAccountFor(presence, pool, firstNonempty(str(cfg, "presence_id"), host), a.Now(), a.placementTTL("presence_ttl_s", 86400), want)
 	if key == "" {
 		return "", SharedAccount{}
 	}
@@ -621,7 +698,7 @@ func (a *App) plan(ctx context.Context, s Spawn, pool string, waited time.Durati
 	for i := range enum {
 		c := &enum[i]
 		notReady := view.drop(c.name, c.cfg, kind)
-		if c.excluded == "" && s.AccountKey != "" && hostAccount(presence, pool, firstNonempty(str(c.cfg, "presence_id"), c.name), now, presTTL) != s.AccountKey {
+		if c.excluded == "" && s.AccountKey != "" && hostAccountFor(presence, pool, firstNonempty(str(c.cfg, "presence_id"), c.name), now, presTTL, s.AccountKey) != s.AccountKey {
 			c.excluded = "different_account"
 		}
 		if c.excluded == "" && slices.Contains(excluded, c.name) {
@@ -1451,7 +1528,12 @@ func (a *App) placeAuto(ctx context.Context, s Spawn, brief string) (bool, map[s
 				return candResult{stop: err}
 			}
 		}
-		key, acc := a.remoteAccount(ctx, pool, c.name, c.cfg)
+		key, acc := a.remoteAccount(ctx, pool, c.name, c.cfg, s.AccountKey)
+		if s.AccountKey != "" && key != s.AccountKey {
+			// The host stopped holding the selected account since the plan:
+			// admission and the delegated spawn must judge the same one.
+			return candResult{rc: exitAuthUnavailable, note: "different_account", quotaRefused: true}
+		}
 		j, err := a.judgeHost(ctx, qr, pool, c.name, false, key, acc)
 		c.judgment = &j
 		if err != nil {
@@ -1775,7 +1857,7 @@ func (a *App) placeForced(ctx context.Context, s Spawn, brief string) (bool, map
 				return candResult{stop: err}
 			}
 		}
-		key, acc := a.remoteAccount(ctx, pool, c.name, c.cfg)
+		key, acc := a.remoteAccount(ctx, pool, c.name, c.cfg, s.AccountKey)
 		if s.AccountKey != "" && key != s.AccountKey {
 			return candResult{stop: fail(exitAuthUnavailable, "AUTH_UNAVAILABLE: target no longer holds the selected account")}
 		}

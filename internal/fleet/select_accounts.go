@@ -58,24 +58,24 @@ func (sp *selPresence) bindings(seat *Seat, pool string) []accountBinding {
 		if !sp.canMeasure(h, seat) {
 			continue
 		}
-		key := hostAccount(sp.presence, pool, h.presence, sp.now, sp.presTTL)
-		if key == "" {
-			continue
-		}
-		i := slices.IndexFunc(bindings, func(b accountBinding) bool { return b.key == key })
-		if i < 0 {
-			bindings = append(bindings, accountBinding{key: key})
-			i = len(bindings) - 1
-		}
-		bindings[i].holders = append(bindings[i].holders, h)
-		if sp.hostEligible(h, seat) {
-			// The readiness filter drops the pair before ranking: the host
-			// stays a holder (it can still measure the account) but is not
-			// offered this seat.
-			if code := sp.readinessDrop(h, seat); code != "" {
-				continue
+		// A host holds one account per pool, except a multi-account pool
+		// (commandcode: every account omp holds), where each is its own binding.
+		for _, key := range hostAccounts(sp.presence, pool, h.presence, sp.now, sp.presTTL) {
+			i := slices.IndexFunc(bindings, func(b accountBinding) bool { return b.key == key })
+			if i < 0 {
+				bindings = append(bindings, accountBinding{key: key})
+				i = len(bindings) - 1
 			}
-			bindings[i].hosts = append(bindings[i].hosts, h)
+			bindings[i].holders = append(bindings[i].holders, h)
+			if sp.hostEligible(h, seat) {
+				// The readiness filter drops the pair before ranking: the host
+				// stays a holder (it can still measure the account) but is not
+				// offered this seat.
+				if code := sp.readinessDrop(h, seat); code != "" {
+					continue
+				}
+				bindings[i].hosts = append(bindings[i].hosts, h)
+			}
 		}
 	}
 	bindings = slices.DeleteFunc(bindings, func(b accountBinding) bool { return len(b.hosts) == 0 })
