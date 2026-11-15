@@ -369,7 +369,13 @@ the node writes the planned record (or keeps
 another terminal record and still frees the lease) for every close it
 accepted, while its daemon runs, without a watcher and without another hub
 command; a watcher never writes a competing record while the close is open;
-`close_status` and `close_release` both run a settlement step. What hk 4632
+a `close_op`, `close_status` or `close_release` that succeeds runs one
+settlement step inline, whose lock waits (the end lock and the job's events
+lock) end with a 5 s context; one that fails (for example an end-lock wait
+that expired) runs none and leaves it to the daemon pass. The bound covers
+waits on locks, not the filesystem: an fsync of the job's journal or events
+directory that stalls is not cancellable and can hold the acting lock until
+it returns. What hk 4632
 must still do: add the migration barrier and advertise `close_ops_v1` (with a
 re-registration when readiness changes); issue close ops only to a node whose
 current registration advertises it; send `end_reason` on every `pane.close_op`; treat
