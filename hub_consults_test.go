@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -49,11 +50,12 @@ func consultPlanFixture(job string) fleet.ConsultPlan {
 }
 
 type consultFixture struct {
-	hub   *HubServer
-	jobs  *quotaJobs
-	calls int
-	plans []fleet.ConsultPlan
-	err   error
+	hub    *HubServer
+	jobs   *quotaJobs
+	calls  int
+	plans  []fleet.ConsultPlan
+	inputs []fleet.ConsultPlanInput
+	err    error
 }
 
 func newConsultFixture(t *testing.T) *consultFixture {
@@ -82,7 +84,8 @@ func newConsultFixture(t *testing.T) *consultFixture {
 	h.spawnNewApp = func(out, errout io.Writer) (*fleet.App, error) {
 		return &fleet.App{JobStore: f.jobs, Out: out, Err: errout}, nil
 	}
-	h.consultPlan = func(context.Context, fleet.ConsultPlanInput) (fleet.ConsultPlan, error) {
+	h.consultPlan = func(_ context.Context, in fleet.ConsultPlanInput) (fleet.ConsultPlan, error) {
+		f.inputs = append(f.inputs, in)
 		f.calls++
 		if f.err != nil {
 			return fleet.ConsultPlan{}, f.err
@@ -463,8 +466,8 @@ func TestConsultQueuedRowWithoutSpawnRecovers(t *testing.T) {
 	if _, err := f.hub.inbox.store.db.Exec(`DELETE FROM spawn_operations WHERE request_id=?`, row.RequestID); err != nil {
 		t.Fatal(err)
 	}
-	// Past the request's save-then-claim window.
-	if _, err := f.hub.inbox.store.db.Exec(`UPDATE consult_requests SET updated_ms=? WHERE id=?`, time.Now().Add(-time.Minute).UnixMilli(), row.ID); err != nil {
+	// Past the request's pre-claim lease.
+	if _, err := f.hub.inbox.store.db.Exec(`UPDATE consult_requests SET claim_until_ms=0 WHERE id=?`, row.ID); err != nil {
 		t.Fatal(err)
 	}
 	f.hub.reconcileConsults(t.Context())
@@ -534,5 +537,49 @@ func TestConsultReplaceIsCompareAndSet(t *testing.T) {
 	stored, err := store.consultByID(t.Context(), row.ID)
 	if err != nil || stored.Job != "job-1" {
 		t.Fatalf("row = %+v err=%v, want job-1", stored, err)
+	}
+}
+
+func TestConsultLeaseIsBoundedByRemainingTime(t *testing.T) {
+	now := time.Now()
+	if got := consultLease(now, now.Add(20*time.Second)); got != 10*time.Second {
+		t.Fatalf("lease for 20s = %v, want 10s", got)
+	}
+	if got := consultLease(now, now.Add(2*time.Hour)); got != consultRecoverGrace {
+		t.Fatalf("lease for 2h = %v, want %v", got, consultRecoverGrace)
+	}
+	if got := consultLease(now, now.Add(-time.Second)); got != 0 {
+		t.Fatalf("lease past deadline = %v, want 0", got)
+	}
+}
+
+// A respawn intent saved by a crash keeps excluding the seat that failed, and
+// recovery starts from that persisted exclusion.
+func TestConsultRespawnRecoveryKeepsExcludedSeat(t *testing.T) {
+	f := newConsultFixture(t)
+	_, out := f.post(t, "", t14OperatorToken, consultRequestBody("42", "example/project#7", strings.Repeat("a", 40)))
+	first, err := f.hub.inbox.store.consultByID(t.Context(), fmt.Sprint(out["id"]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.setSpawnStatus(t, first.RequestID, "failed")
+	f.hub.reconcileConsults(t.Context())
+	second, err := f.hub.inbox.store.consultByID(t.Context(), first.ID)
+	if err != nil || second.Respawns != 1 {
+		t.Fatalf("respawn = %+v err=%v", second, err)
+	}
+	if !slices.Contains(second.ExcludeProfiles, first.SeatProfile) {
+		t.Fatalf("row excludes %v, want %q persisted", second.ExcludeProfiles, first.SeatProfile)
+	}
+	if _, err := f.hub.inbox.store.db.Exec(`DELETE FROM spawn_operations WHERE request_id=?`, second.RequestID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.hub.inbox.store.db.Exec(`UPDATE consult_requests SET claim_until_ms=0 WHERE id=?`, second.ID); err != nil {
+		t.Fatal(err)
+	}
+	f.hub.reconcileConsults(t.Context())
+	last := f.inputs[len(f.inputs)-1]
+	if !slices.Contains(last.ExcludeProfiles, first.SeatProfile) {
+		t.Fatalf("recovery plan excludes %v, want %q", last.ExcludeProfiles, first.SeatProfile)
 	}
 }

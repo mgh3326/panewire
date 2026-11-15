@@ -90,7 +90,10 @@ A lost or failed job gets one respawn on the next eligible seat (the failed
 seat profile is excluded, the family and floor rules still apply), then
 `failed`. A report that completes but lacks a section fails without a respawn.
 A queued row whose spawn operation is missing (a crash between the row and the
-claim) is started by the coordinator on its next pass.
+claim) is started by the coordinator once its pre-claim lease expires; the
+lease is capped at half the remaining time, so recovery still fits before the
+deadline. The failed seat profiles a respawn must keep excluding are stored on
+the row, so recovery does not pick the same broken seat again.
 
 The time limit is the hub's `--consult-timeout` (default 2 h).
 

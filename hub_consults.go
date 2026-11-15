@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -34,8 +35,9 @@ const (
 	consultReasonLimit = 512
 	// consultPollInterval is how often the coordinator reads active rows.
 	consultPollInterval = 5 * time.Second
-	// consultRecoverGrace lets a request finish the save-then-claim window
-	// before the coordinator recovers a queued row with no spawn operation.
+	// consultRecoverGrace is the longest pre-claim lease; the actual lease is
+	// also capped at half the remaining time so recovery fits before the
+	// consult deadline.
 	consultRecoverGrace = 30 * time.Second
 )
 
@@ -155,6 +157,7 @@ func (h *HubServer) handleConsultRequest(w http.ResponseWriter, r *http.Request)
 		}
 	}
 	c.Updated = now
+	c.ClaimUntil = now.Add(consultLease(now, c.Deadline))
 	plan, reason := h.planConsultRequest(ctx, request)
 	if reason != "" {
 		c.State = consultRefused
@@ -422,13 +425,9 @@ func (h *HubServer) reconcileConsults(ctx context.Context) {
 			switch c.State {
 			case consultQueued:
 				// The row was inserted (or a respawn intent saved) and the
-				// hub stopped before the claim: start the attempt once the
-				// request's own save-then-claim window has passed.
-				last := c.Updated
-				if last.IsZero() {
-					last = c.Created
-				}
-				if h.now().Sub(last) < consultRecoverGrace {
+				// hub stopped before the claim: start the attempt once its
+				// pre-claim lease expires (zero for older rows).
+				if c.ClaimUntil.After(h.now()) {
 					continue
 				}
 				h.recoverConsult(ctx, c)
@@ -526,6 +525,21 @@ func (h *HubServer) consultJobFailed(ctx context.Context, c hubConsult, reason s
 // respawnConsult runs the single allowed second attempt on the next eligible
 // seat: still at the consult floor and in another family, never the seat that
 // failed.
+// consultLease bounds the save-then-claim window: long enough for a request
+// to finish, half the remaining time so recovery still fits before the
+// deadline, and never longer than consultRecoverGrace.
+func consultLease(now, deadline time.Time) time.Duration {
+	remaining := deadline.Sub(now)
+	if remaining <= 0 {
+		return 0
+	}
+	lease := remaining / 2
+	if lease > consultRecoverGrace {
+		lease = consultRecoverGrace
+	}
+	return lease
+}
+
 func consultRequestOf(c hubConsult) hubConsultRequest {
 	return hubConsultRequest{
 		Task: c.Task, Requester: c.Requester, QuestionDoc: c.QuestionDoc, AuthorJob: c.AuthorJob,
@@ -546,6 +560,7 @@ func (h *HubServer) recoverConsult(ctx context.Context, c hubConsult) {
 		Task: request.Task, Question: request.QuestionDoc, AuthorJob: request.AuthorJob,
 		AuthorFamily: request.AuthorFamily, PR: request.PR, Head: request.Head,
 		Requester: request.Requester, Owner: consultOwner(request.Requester), Repository: repo,
+		ExcludeProfiles: c.ExcludeProfiles,
 	})
 	if err != nil {
 		h.failConsult(ctx, c, "recover_failed: "+consultReason(err))
@@ -554,6 +569,7 @@ func (h *HubServer) recoverConsult(ctx context.Context, c hubConsult) {
 	c.State, c.Job, c.RequestID = consultQueued, plan.Job, plan.Request.RequestID
 	c.SeatProfile, c.SeatFamily, c.SeatGrade = plan.Seat.Profile, plan.Seat.Family, plan.Seat.Grade
 	c.Reason = ""
+	c.ClaimUntil = h.now().Add(consultLease(h.now(), c.Deadline))
 	if err := h.saveConsult(ctx, c); err != nil {
 		return
 	}
@@ -574,11 +590,14 @@ func (h *HubServer) respawnConsult(ctx context.Context, c hubConsult, reason str
 		h.failConsult(ctx, c, "no_respawn_seat after "+reason+": "+why)
 		return
 	}
+	if c.SeatProfile != "" && !slices.Contains(c.ExcludeProfiles, c.SeatProfile) {
+		c.ExcludeProfiles = append(c.ExcludeProfiles, c.SeatProfile)
+	}
 	plan, err := h.resolveConsultPlan(ctx, fleet.ConsultPlanInput{
 		Task: request.Task, Question: request.QuestionDoc, AuthorJob: request.AuthorJob,
 		AuthorFamily: request.AuthorFamily, PR: request.PR, Head: request.Head,
 		Requester: request.Requester, Owner: consultOwner(request.Requester), Repository: repo,
-		ExcludeProfiles: []string{c.SeatProfile},
+		ExcludeProfiles: c.ExcludeProfiles,
 	})
 	if err != nil {
 		h.failConsult(ctx, c, "no_respawn_seat after "+reason+": "+consultReason(err))
@@ -590,6 +609,7 @@ func (h *HubServer) respawnConsult(ctx context.Context, c hubConsult, reason str
 	c.State, c.Job, c.RequestID = consultQueued, plan.Job, plan.Request.RequestID
 	c.SeatProfile, c.SeatFamily, c.SeatGrade = plan.Seat.Profile, plan.Seat.Family, plan.Seat.Grade
 	c.Respawns, c.Reason = c.Respawns+1, ""
+	c.ClaimUntil = h.now().Add(consultLease(h.now(), c.Deadline))
 	if err := h.saveConsult(ctx, c); err != nil {
 		return
 	}
