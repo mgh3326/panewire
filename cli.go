@@ -179,6 +179,13 @@ func fleetCommand(command string) bool {
 
 const promptUsage = `Usage: panewire prompt --from SENDER --to TARGET --file PATH [--uptake tool|status-transition] [--timeout DURATION] [--store-prompt-body] [--directive]
 
+panewire prompt types into a pane on this host's herdr session only; a target
+it does not serve there is refused. Answer a job's ESC (a worker on any host or
+herdr session) with a lane event to its lane:
+  panewire emit --kind lane.event --lane <job> --type order --text ...
+and check delivery with:
+  panewire inbox status --event-id <id>
+
 ` + expectFileContract + `
 `
 

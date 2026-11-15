@@ -55,7 +55,17 @@ func resolveTarget(ctx context.Context, c *HerdrClient, target string) (paneIden
 	if pane, found, err := uniqueTarget(labeled, "label", target); found || err != nil {
 		return pane, err
 	}
-	return paneIdentity{}, &codedError{ExitConditionInvalid, fmt.Errorf("no exact match for agent target %q (targets match pane_id, name, or label exactly)", target)}
+	return paneIdentity{}, &codedError{ExitConditionInvalid, &targetNotFound{target: target}}
+}
+
+// targetNotFound is resolveTarget's not-found answer: the target matches no
+// agent this herdr serves. `wait` reports it as an invalid condition; `prompt`
+// rewrites it into a usage refusal that names the command which does reach a
+// remote lane (hk 4810), so it is a type rather than a formatted string.
+type targetNotFound struct{ target string }
+
+func (e *targetNotFound) Error() string {
+	return fmt.Sprintf("no exact match for agent target %q (targets match pane_id, name, or label exactly)", e.target)
 }
 
 // uniqueTarget applies the ambiguous-means-fail rule to one tier: zero
