@@ -17,6 +17,15 @@ func (a *App) saveSubmission(request Submission) (Submission, error) {
 	if err != nil {
 		return Submission{}, err
 	}
+	// The receipt below creates jobs/<job> on the submitting host before the
+	// hub dispatches, so the case guard and its no-clobber identity claim run
+	// here too (hk 4824).
+	if err = checkJobDirCase(a.Jobs, spawn.Job); err != nil {
+		return Submission{}, err
+	}
+	if err = claimJobDirIdentity(a.Jobs, spawn.Job); err != nil {
+		return Submission{}, err
+	}
 	if err = os.MkdirAll(a.Jobs, 0700); err != nil {
 		return Submission{}, err
 	}

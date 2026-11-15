@@ -119,6 +119,12 @@ func (c *jobCLI) done(args []string) int {
 	if job == "" || strings.HasPrefix(job, "-") {
 		return c.exit(jobDie("done requires a job id"))
 	}
+	// The id names a directory under the jobs root: refuse a spelling no
+	// launcher would create, including non-ASCII, whose NFC and NFD forms
+	// share one inode on macOS (hk 4824).
+	if !validNodeJobName(job) {
+		return c.exit(jobDie("done: invalid job id '%s'", job))
+	}
 	for len(args) > 0 {
 		switch args[0] {
 		case "--report":
@@ -192,6 +198,12 @@ func (c *jobCLI) escalate(args []string) int {
 	if job == "" || strings.HasPrefix(job, "-") {
 		return c.exit(jobDie("escalate requires a job id"))
 	}
+	// The id names a directory under the jobs root: refuse a spelling no
+	// launcher would create, including non-ASCII, whose NFC and NFD forms
+	// share one inode on macOS (hk 4824).
+	if !validNodeJobName(job) {
+		return c.exit(jobDie("escalate: invalid job id '%s'", job))
+	}
 	for len(args) > 0 {
 		switch args[0] {
 		case "--question":
@@ -242,6 +254,12 @@ func (c *jobCLI) joined(args []string) int {
 	}
 	if job == "" || strings.HasPrefix(job, "-") {
 		return c.exit(jobDie("joined requires a job id"))
+	}
+	// The id names a directory under the jobs root: refuse a spelling no
+	// launcher would create, including non-ASCII, whose NFC and NFD forms
+	// share one inode on macOS (hk 4824).
+	if !validNodeJobName(job) {
+		return c.exit(jobDie("joined: invalid job id '%s'", job))
 	}
 	for len(args) > 0 {
 		switch args[0] {

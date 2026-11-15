@@ -177,7 +177,9 @@ again with fresh herdr and hk reads. A held lock keeps the directory
    directory (`changed-during-pass`).
 2. It renames the directory, in one atomic rename on the same filesystem, to
    a tombstone in the jobs root: `.expiring-<job>-<unixnano>`. A leading dot
-   is never a valid job id, so nothing reads a tombstone as a job.
+   is never a valid job id, so nothing reads a tombstone as a job; the
+   `.job-ids` identity records ([config.md](config.md#job-ids-name-one-directory-hk-4824))
+   are skipped the same way, as `invalid-id`.
 3. It takes the tombstone's inventory. If it differs from step 1's, the
    tombstone is renamed back to the job's name and the directory is kept
    (`changed-during-pass`). If that rename back fails, the tombstone stays

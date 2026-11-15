@@ -820,6 +820,13 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 	if !validID(s.Job) || !validID(s.Label) || !slices.Contains(spawnRoles, s.Role) {
 		return fail(exitUsage, "invalid job, label or role")
 	}
+	// One jobs-inbox directory holds one job. Refuse a case-only collision
+	// before admission spends or a claim creates jobs/<id>/events (hk 4824).
+	// Local, node and --parent-job spawns all arrive here; the claim added
+	// below this flow's read-only check is the atomic half.
+	if e := checkJobDirCase(a.Jobs, s.Job); e != nil {
+		return e
+	}
 	if s.Task != "" && s.ParentJob != "" {
 		return fail(exitUsage, "--task and --parent-job are exclusive")
 	}
@@ -1144,6 +1151,13 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 	if !admissionRecorded {
 		a.stage("placement", startedAdmission)
 		admissionRecorded = true
+	}
+	// Reserve the id's identity no-clobber before the first hk or local write.
+	// Two launchers that reached here together both passed the read-only check
+	// above; this link admits exactly one of them and the other refuses with
+	// the winner's exact id (hk 4824).
+	if e = claimJobDirIdentity(a.Jobs, s.Job); e != nil {
+		return e
 	}
 	startedClaim := time.Now()
 	if e = a.claimJobRecord(ctx, s); e != nil {

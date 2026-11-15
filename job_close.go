@@ -124,9 +124,10 @@ func parseJobCloseArgs(args []string) (jobCloseOptions, error) {
 	if options.job == "" || strings.HasPrefix(options.job, "-") {
 		return options, jobDie("close requires a job id")
 	}
-	// The id names a directory under the jobs root: one path component, the
-	// hub's job id shape, so "../x" or "a/b" can never place a record elsewhere.
-	if !hubJobIDPattern.MatchString(options.job) {
+	// The id names a directory under the jobs root: one portable path
+	// component (hk 4824), so "../x", "a/b" or an NFC/NFD spelling can never
+	// place a record elsewhere or in another job's directory.
+	if !validNodeJobName(options.job) {
 		return options, jobDie("close: invalid job id '%s'", options.job)
 	}
 	seen := map[string]bool{}
