@@ -115,6 +115,47 @@ func TestNodeJobMarkLostHoldsWhenThePurposeForgesTheJob(t *testing.T) {
 	}
 }
 
+// A journal row an older build wrote keeps the lax identity, so the proof
+// cannot trust its job id: it holds for any job while that row is still
+// executing, and a strict row for another job never holds.
+func TestNodeJobMarkLostHoldsWhileALegacyRowExecutes(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		write func(t *testing.T, client *HubClient)
+		want  string
+	}{
+		{"a strict row for another job does not hold", func(t *testing.T, client *HubClient) {
+			claimJournalSpawnArgs(t, client, "d676220b-e763-4af1-aefd-000000000006", []string{"--job", "job-b", "-l", "job-b"})
+		}, nodeJobMarkLostNoLiveAttempt},
+		{"a row from an older build holds", func(t *testing.T, client *HubClient) {
+			journal, err := client.acquireSpawnJournal()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer client.releaseSpawnJournal()
+			if _, err := journal.db.ExecContext(t.Context(), `INSERT INTO spawn_inbox(request_id,fingerprint,status,job_id,label) VALUES('legacy-request','fingerprint','executing','job-b','job-b')`); err != nil {
+				t.Fatal(err)
+			}
+		}, nodeJobMarkLostLedgerMissing},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			inbox := t.TempDir()
+			if err := os.MkdirAll(filepath.Join(inbox, "jobs"), 0700); err != nil {
+				t.Fatal(err)
+			}
+			client, store, _ := markLostClient(t, inbox, []string{nodeAgentList()}, markLostEmptyPanes)
+			tc.write(t, client)
+			result, code := nodeRun(t, client, nodeCommandJobMarkLost, nodeJobMarkLostArgs{Job: "job-a", Label: "job-a"})
+			if code != "" || result["outcome"] != tc.want {
+				t.Fatalf("code=%q result=%v, want %q", code, result, tc.want)
+			}
+			if len(store.writes()) != 0 || store.state("job-a") != "spawned" {
+				t.Fatalf("hk state=%v writes=%v", store.state("job-a"), store.writes())
+			}
+		})
+	}
+}
+
 // A re-claim recorded in the job's ledger is read there, never by the
 // no-attempt proof: the ledger answers newer-claim for a claim under another
 // label, and the hub keeps the hold. The proof runs only for a job with no
@@ -141,7 +182,7 @@ func TestNodeJobMarkLostHoldsOnANewerClaimUnderAnotherLabel(t *testing.T) {
 
 // Either record naming the job, under any label, is a live attempt.
 func TestJobAttemptLiveReadsBothRecords(t *testing.T) {
-	executing := []executingSpawn{{RequestID: "request-r2", Job: "job-a", Label: "job-a-r2"}}
+	executing := []executingSpawn{{RequestID: "request-r2", Job: "job-a", Label: "job-a-r2", Strict: true}}
 	active := []HubActiveJob{{JobID: "job-a", AgentLabel: "job-a-r2"}}
 	for _, tc := range []struct {
 		name  string
@@ -150,6 +191,8 @@ func TestJobAttemptLiveReadsBothRecords(t *testing.T) {
 		alive bool
 	}{
 		{"neither record names the job", nil, []HubActiveJob{{JobID: "job-b"}}, false},
+		{"a strict row for another job", []executingSpawn{{RequestID: "request-r3", Job: "job-b", Label: "job-b", Strict: true}}, nil, false},
+		{"a row from an older build", []executingSpawn{{RequestID: "legacy", Job: "job-b", Label: "job-b"}}, nil, true},
 		{"an executing spawn under another label", executing, nil, true},
 		{"an active job under another label", nil, active, true},
 		{"both records name the job", executing, active, true},
