@@ -253,7 +253,7 @@ func TestReconcilingRequestIsNeverGivenUp_t4660(t *testing.T) {
 		h := asyncSpawnHub(t)
 		now := expiryNow()
 		request := durableSpawnRequest()
-		request.ExpiresSeconds = 600
+		request.ExpiresSeconds = 1200
 		task, _, err := h.inbox.store.claimSpawn(t.Context(), request, "test-job", "parent", now)
 		if err != nil {
 			t.Fatal(err)
@@ -262,11 +262,12 @@ func TestReconcilingRequestIsNeverGivenUp_t4660(t *testing.T) {
 			t.Fatal(err)
 		}
 		task = sentSpawnFixture(t, h.inbox.store, task)
-		proof := hubSpawnOutcome{RC: 124, Stage: "claim", Reason: "timeout", Retryable: true, NodeResult: true, Host: "machine-a"}
-		if changed, err := h.completeSpawn(t.Context(), task, proof); err != nil || changed {
-			// h.now is the wall clock here: the limit (10 minutes) has not
-			// passed, so the proof renews the attempt instead.
-			_ = changed
+		// The node's explicit not-started attestation.
+		proof := hubSpawnOutcome{RC: 124, Stage: "claim", Reason: "deadline_not_started", Retryable: true, NodeResult: true, Host: "machine-a"}
+		// The attestation after the attempt's deadline, inside the limit
+		// (20 minutes), renews the attempt.
+		if changed, err := h.inbox.store.completeSpawn(t.Context(), task, proof, task.Deadline); err != nil || !changed {
+			t.Fatalf("complete: %v %v", changed, err)
 		}
 		saved, err := h.inbox.store.spawnTask(t.Context(), request.RequestID)
 		if err != nil || saved.Status != "accepted" || saved.Attempt != 2 {

@@ -674,8 +674,8 @@ func TestClaimProofIsWrittenOnce_t4661(t *testing.T) {
 		return got
 	}
 	task = refuse(task, 1, "placement", "spawn_failed:auth_unavailable")
-	if spawnHoldsClaim(task) {
-		t.Fatal("a pre-claim refusal proved a claim")
+	if task.ClaimResult != nil {
+		t.Fatal("a pre-claim refusal was recorded as claim proof")
 	}
 	task = refuse(task, 2, "launch", "launch_proof_failed")
 	task = refuse(task, 3, "placement", "launch_proof_failed")
@@ -706,32 +706,26 @@ func TestClaimedRetryTimeoutKeepsNodeRefusal_t4661(t *testing.T) {
 	}
 }
 
-// Only a saved post-claim node result proves a held claim: a replay pin
-// after a checkout refusal (before the job claim) or an unsent timeout naming
-// a host still renews and gives up as unstarted.
-func TestReplayPinIsNoClaim_t4661(t *testing.T) {
-	for name, result := range map[string]string{
-		"checkout busy":  `{"rc":75,"stage":"checkout","reason":"checkout_refused:busy","node_result":true,"retryable":true}`,
-		"unsent timeout": `{"rc":124,"stage":"landing","reason":"timeout","host":"desktop","retryable":true}`,
-		"not started":    `{"rc":124,"stage":"claim","reason":"deadline_not_started","host":"desktop","retryable":true,"node_result":true}`,
-	} {
-		t.Run(name, func(t *testing.T) {
-			h := asyncSpawnHub(t)
-			clock := expiryClock(h, expiryNow())
-			task := claimParkRequest(t, h, 210, *clock)
-			if _, err := h.inbox.store.db.Exec(`UPDATE spawn_operations SET claimed_host='desktop',result=? WHERE request_id=?`, result, task.Request.RequestID); err != nil {
-				t.Fatal(err)
-			}
-			task = parkedTask(t, h, task.Request.RequestID)
-			if spawnHoldsClaim(task) {
-				t.Fatal("a replay pin was read as a held claim")
-			}
-			*clock = task.Deadline
-			h.executeSpawnTask(t.Context(), task)
-			if got := parkedTask(t, h, task.Request.RequestID); got.Status != "accepted" || got.Attempt != 2 {
-				t.Fatalf("the attempt did not renew: status=%s attempt=%d", got.Status, got.Attempt)
-			}
-		})
+// Any host pin is held, a replay pin included (ambiguous evidence keeps the
+// claim): at its deadline the request ends with its saved refusal, never
+// renewed or given up as unstarted; an unpinned unsent attempt still renews.
+func TestHostPinIsHeld_t4661(t *testing.T) {
+	h := asyncSpawnHub(t)
+	clock := expiryClock(h, expiryNow())
+	pinned := claimParkRequest(t, h, 210, *clock)
+	if _, err := h.inbox.store.db.Exec(`UPDATE spawn_operations SET claimed_host='desktop',result='{"rc":75,"stage":"checkout","reason":"checkout_refused:busy","node_result":true,"retryable":true}' WHERE request_id=?`, pinned.Request.RequestID); err != nil {
+		t.Fatal(err)
+	}
+	free := claimParkRequest(t, h, 211, *clock)
+	pinned = parkedTask(t, h, pinned.Request.RequestID)
+	*clock = pinned.Deadline
+	h.executeSpawnTask(t.Context(), pinned)
+	h.executeSpawnTask(t.Context(), free)
+	if got := parkedTask(t, h, pinned.Request.RequestID); got.Status == "given_up" || got.Status == "accepted" || got.Outcome.Reason != "checkout_refused:busy" {
+		t.Fatalf("a pinned request at its deadline: status=%s outcome=%+v", got.Status, got.Outcome)
+	}
+	if got := parkedTask(t, h, free.Request.RequestID); got.Status != "accepted" || got.Attempt != 2 {
+		t.Fatalf("an unpinned unsent attempt did not renew: status=%s attempt=%d", got.Status, got.Attempt)
 	}
 }
 
@@ -790,7 +784,7 @@ func TestUpgradedClaimedRowStaysHeld_t4661(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := h.inbox.store.db.Exec(`UPDATE spawn_operations SET claimed_host='desktop',claim_result='',claim_tracked=0,result='{"rc":70,"stage":"placement","reason":"spawn_failed:auth_unavailable","host":"desktop","retryable":true,"node_result":true}' WHERE request_id=?`, task.Request.RequestID); err != nil {
+	if _, err := h.inbox.store.db.Exec(`UPDATE spawn_operations SET claimed_host='desktop',claim_result='',result='{"rc":70,"stage":"placement","reason":"spawn_failed:auth_unavailable","host":"desktop","retryable":true,"node_result":true}' WHERE request_id=?`, task.Request.RequestID); err != nil {
 		t.Fatal(err)
 	}
 	task = parkedTask(t, h, task.Request.RequestID)
@@ -850,6 +844,17 @@ func TestTimeoutIsNoClaimProof_t4661(t *testing.T) {
 	if spawnClaimProof(refusal, "x") == "" || spawnAttemptEndedUnstarted(task, refusal, time.Now()) {
 		t.Fatal("a post-claim refusal is not proof, or its attempt counts as unstarted")
 	}
+	// A node timeout may follow the job claim: at the limit it is never
+	// given up as unstarted.
+	expired := hubSpawnTask{Expires: time.Now().Add(-time.Second), Deadline: time.Now().Add(-time.Second)}
+	for _, stage := range []string{"claim", "launch", "landing"} {
+		if spawnAttemptEndedUnstarted(expired, hubSpawnOutcome{RC: 124, Stage: stage, Reason: "timeout", NodeResult: true, Retryable: true}, time.Now()) {
+			t.Fatalf("a node timeout at %s was given up as unstarted", stage)
+		}
+	}
+	if !spawnAttemptEndedUnstarted(task, hubSpawnOutcome{RC: 124, Stage: "claim", Reason: "deadline_not_started", NodeResult: true, Retryable: true}, time.Now()) {
+		t.Fatal("the explicit not-started attestation no longer renews")
+	}
 }
 
 // A tracked row's claim is exactly claim_result: a later result write that
@@ -857,14 +862,31 @@ func TestTimeoutIsNoClaimProof_t4661(t *testing.T) {
 func TestTrackedClaimSurvivesResultOverwrite_t4661(t *testing.T) {
 	h := asyncSpawnHub(t)
 	task := claimParkRequest(t, h, 260, time.Now())
-	if !task.ClaimTracked && !parkedTask(t, h, task.Request.RequestID).ClaimTracked {
-		t.Fatal("a new row is not claim-tracked")
-	}
 	setClaim(t, h, task.Request.RequestID)
 	if _, err := h.inbox.store.db.Exec(`UPDATE spawn_operations SET result='{"rc":124,"stage":"landing","reason":"timeout"}' WHERE request_id=?`, task.Request.RequestID); err != nil {
 		t.Fatal(err)
 	}
 	if !spawnHoldsClaim(parkedTask(t, h, task.Request.RequestID)) {
 		t.Fatal("a later result write erased the claim")
+	}
+}
+
+// A node timeout renews the attempt pinned to that host, so the claim it may
+// hold is kept: the next end is never renewed or given up as unstarted.
+func TestNodeTimeoutRenewalKeepsTheHost_t4661(t *testing.T) {
+	h := asyncSpawnHub(t)
+	task := claimParkRequest(t, h, 270, time.Now())
+	bound, err := h.inbox.store.bindSpawn(t.Context(), task.Request.RequestID, task.Attempt, boundaryTestNode(task, 467600, "desktop"), time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	bound = sentSpawnFixture(t, h.inbox.store, bound)
+	timeout := hubSpawnOutcome{RC: 124, Stage: "claim", Reason: "timeout", Host: "desktop", NodeResult: true, Retryable: true}
+	if changed, err := h.inbox.store.completeSpawn(t.Context(), bound, timeout, time.Now()); err != nil || !changed {
+		t.Fatalf("complete: %v %v", changed, err)
+	}
+	got := parkedTask(t, h, task.Request.RequestID)
+	if got.Status != "accepted" || got.Attempt != 2 || got.ClaimedHost != "desktop" || !spawnHoldsClaim(got) {
+		t.Fatalf("renewal after a node timeout: status=%s attempt=%d host=%q", got.Status, got.Attempt, got.ClaimedHost)
 	}
 }

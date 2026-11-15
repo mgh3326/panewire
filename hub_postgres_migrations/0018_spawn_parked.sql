@@ -9,7 +9,3 @@ ALTER TABLE spawn_operations ADD COLUMN IF NOT EXISTS failed_attempts INTEGER NO
 -- claim_result is the cleanup-confirmed node refusal that proved an hk job
 -- claim on claimed_host ('' none): the request's end at its limit.
 ALTER TABLE spawn_operations ADD COLUMN IF NOT EXISTS claim_result TEXT NOT NULL DEFAULT '';
--- claim_tracked marks a row this hub inserted (1): its claim is exactly
--- claim_result. A row an older hub wrote (0) with a host pin is held as
--- claimed, conservatively, as the older hub treated it.
-ALTER TABLE spawn_operations ADD COLUMN IF NOT EXISTS claim_tracked INTEGER NOT NULL DEFAULT 0;

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -32,10 +33,14 @@ func spawnExpiryField(capabilities map[string]bool, expires time.Time) int64 {
 // attempt's deadline. A not-started answer inside the deadline is a refusal
 // the next-host path or the caller owns, and ends retryable as before.
 func spawnAttemptEndedUnstarted(task hubSpawnTask, outcome hubSpawnOutcome, now time.Time) bool {
-	// A request whose hk job claim pins a host started on that node: its
-	// end is the node's saved refusal, never a renewal or given_up (hk 4661).
-	// The incoming result may itself prove the claim (it is stored with it).
-	if task.Expires.IsZero() || spawnHoldsClaim(task) || spawnClaimProof(outcome, "x") != "" {
+	// A request that may hold an hk claim is never renewed or given up as
+	// unstarted (hk 4661). A node's cleaned-up timeout may come after the job
+	// claim: it renews (pinned to its host, endUnstartedAttempt), but at the
+	// limit it ends retryable with its own result, never given_up.
+	if task.Expires.IsZero() || spawnHoldsClaim(task) {
+		return false
+	}
+	if spawnNodeTimeout(outcome) && !now.Before(task.Expires) {
 		return false
 	}
 	return outcome.Reason == "timeout" || spawnOutcomeNotStarted(outcome) && !now.Before(task.Deadline)
@@ -89,12 +94,18 @@ func (s *laneInboxStore) endUnstartedAttempt(ctx context.Context, tx *sql.Tx, ta
 		// The request's exclusions carry into the new attempt (hk 4661). An
 		// attempt the node attested it never started is a failed attempt, so
 		// the next one waits out the back-off; one the hub never sent is not.
+		// A node timeout may follow the job claim: the next attempt stays on
+		// that host, so the claim is held from then on.
+		pin := spawnPinnedHost(task)
+		if spawnNodeTimeout(outcome) && outcome.Host != "" {
+			pin = outcome.Host
+		}
 		failed, parkReason, retryAt := 0, "", int64(0)
 		if spawnOutcomeNotStarted(outcome) {
 			failed = 1
 			parkReason, retryAt = spawnBackoffPark(s.spawnRetryAt(task, task.FailedAttempts+1, now))
 		}
-		result, err := tx.ExecContext(ctx, s.q(`UPDATE spawn_operations SET status='accepted',deadline_ms=?,node_id=NULL,node_payload='',attempt=attempt+1,trace_recorded=0,last_run_ms=0,claimed_host=?,refresh_waits='[]',failed_attempts=failed_attempts+?,park_reason=?,next_check_ms=? WHERE request_id=? AND status='retryable' AND attempt=?`), spawnAttemptDeadline(now, task.Request.DeadlineSeconds, task.Expires).UnixMilli(), spawnPinnedHost(task), failed, parkReason, retryAt, task.Request.RequestID, task.Attempt)
+		result, err := tx.ExecContext(ctx, s.q(`UPDATE spawn_operations SET status='accepted',deadline_ms=?,node_id=NULL,node_payload='',attempt=attempt+1,trace_recorded=0,last_run_ms=0,claimed_host=?,refresh_waits='[]',failed_attempts=failed_attempts+?,park_reason=?,next_check_ms=? WHERE request_id=? AND status='retryable' AND attempt=?`), spawnAttemptDeadline(now, task.Request.DeadlineSeconds, task.Expires).UnixMilli(), pin, failed, parkReason, retryAt, task.Request.RequestID, task.Attempt)
 		if err != nil {
 			return false, err
 		}
@@ -131,22 +142,13 @@ func (s *laneInboxStore) releaseEndedSpawn(ctx context.Context, tx *sql.Tx, task
 	return queueSpawnNotifications(ctx, s, tx, task, status, raw, now)
 }
 
-// spawnHoldsClaim reports a request whose hk job may be claimed on its
-// claimed host. A row this hub inserted (claim_tracked) holds one exactly
-// when claim_result is set: the first definitive post-claim node result,
-// recorded with the write that stores it and never replaced. A row an older
-// hub wrote cannot tell a claim from a replay pin, so any pin is held, as
-// that hub held it: never renewed or given up as unstarted.
+// spawnHoldsClaim reports a request whose hk job may be claimed on a host:
+// any claimed_host pin, or a recorded claim_result. A pin cannot always tell
+// a claim from a replay pin (and an older hub may have written the row), so
+// it is held: when in doubt the claim is kept, and the request is never
+// renewed or given up as unstarted while hk may hold the job.
 func spawnHoldsClaim(task hubSpawnTask) bool {
-	if task.ClaimedHost == "" {
-		return false
-	}
-	if task.ClaimTracked {
-		return task.ClaimResult != nil
-	}
-	// A row an older hub wrote cannot tell a claim from a replay pin: it is
-	// held, as that hub held it (never renewed or given up as unstarted).
-	return true
+	return task.ClaimedHost != "" || task.ClaimResult != nil
 }
 
 // spawnSavedClaimRefusal is the refusal a held claim ends with.
@@ -155,4 +157,11 @@ func spawnSavedClaimRefusal(task hubSpawnTask) hubSpawnOutcome {
 		return *task.ClaimResult
 	}
 	return task.Outcome
+}
+
+// spawnNodeTimeout is a node's own timeout answer: it may come after the job
+// claim, so the next attempt stays on that host.
+func spawnNodeTimeout(outcome hubSpawnOutcome) bool {
+	code, _, _ := strings.Cut(outcome.Reason, ": ")
+	return outcome.NodeResult && code == "timeout"
 }

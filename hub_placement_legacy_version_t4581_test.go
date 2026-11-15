@@ -85,7 +85,8 @@ func TestLegacyPlacementVersionReconciliation_t4581(t *testing.T) {
 			}
 			outcome := hubSpawnOutcome{RC: 70, Stage: "launch", Reason: "spawn_failed", Host: "machine-a", NodeResult: true}
 			if tc.timeout {
-				outcome = hubSpawnOutcome{RC: 124, Stage: "landing", Reason: "timeout", Host: "machine-a", Retryable: true, NodeResult: true}
+				// The hub's own timeout of the unsent binding.
+				outcome = hubSpawnOutcome{RC: 124, Stage: "landing", Reason: "timeout", Host: "machine-a", Retryable: true}
 			}
 			hk.mu.Lock()
 			hk.lookup = []fleet.PlacementRecord{remote}
