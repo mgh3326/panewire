@@ -61,14 +61,19 @@ type reportRelayStandby struct {
 }
 
 type reportRelayRoute struct {
-	Machine   string              `json:"machine"`
-	Pane      string              `json:"pane"`
-	Parent    string              `json:"parent,omitempty"`
-	Sink      bool                `json:"sink,omitempty"`
-	Deliver   string              `json:"deliver,omitempty"`
-	Protected bool                `json:"protected,omitempty"`
-	Standby   *reportRelayStandby `json:"standby,omitempty"`
-	jobRecord bool
+	Machine string `json:"machine"`
+	Pane    string `json:"pane"`
+	Job     string `json:"job,omitempty"`
+	// TakenOverFrom names the predecessor job a takeover moved this row
+	// from. It is the retry evidence: a repeated takeover converges only on
+	// a row stamped with its own predecessor and bound to its successor.
+	TakenOverFrom string              `json:"taken_over_from,omitempty"`
+	Parent        string              `json:"parent,omitempty"`
+	Sink          bool                `json:"sink,omitempty"`
+	Deliver       string              `json:"deliver,omitempty"`
+	Protected     bool                `json:"protected,omitempty"`
+	Standby       *reportRelayStandby `json:"standby,omitempty"`
+	jobRecord     bool
 }
 
 var errReportRelayRoutesInvalid = errors.New("report relay routes invalid")

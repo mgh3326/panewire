@@ -172,7 +172,10 @@ func (h *HubServer) markHolderJobLostBecause(ctx context.Context, app *fleet.App
 	if host == "" {
 		return false, "no_host"
 	}
-	if hubHost, known := app.NodeID(); known && hubHost == host {
+	// The hub-local write has no job ledger to check, and a posted-result end
+	// rests on the node's own ledger (a role, a quota stop, the result itself),
+	// so that end goes through the node even on the hub's own host.
+	if hubHost, known := app.NodeID(); known && hubHost == host && endReason != reviewerResultPosted {
 		return h.writeJobLost(ctx, app, holder.Job, endReason)
 	}
 	if pane == "" && label == "" {

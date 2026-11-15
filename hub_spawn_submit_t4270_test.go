@@ -49,6 +49,8 @@ func TestSpawnSubmitRefusesInputTheNodeCouldNotLaunch_t4270(t *testing.T) {
 	}
 }
 
+// Start conditions stay unadvertised and refused until the queue owns them on a
+// batched hk observation; spawn_expires_v1 (hk 4660) is the only feature.
 func TestSpawnFeaturesDoNotAdvertiseStartConditionsBeforeQueueCore(t *testing.T) {
 	h := asyncSpawnHub(t)
 	r := httptest.NewRequest(http.MethodGet, "/v1/spawns/features", nil)
@@ -58,8 +60,8 @@ func TestSpawnFeaturesDoNotAdvertiseStartConditionsBeforeQueueCore(t *testing.T)
 	var response struct {
 		Features []string `json:"features"`
 	}
-	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil || w.Code != http.StatusOK || len(response.Features) != 0 {
-		t.Fatalf("features=%d %s, want no features before queue-core support", w.Code, w.Body)
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil || w.Code != http.StatusOK || len(response.Features) != 1 || response.Features[0] != "spawn_expires_v1" {
+		t.Fatalf("features=%d %s, want only spawn_expires_v1 before queue-core support", w.Code, w.Body)
 	}
 }
 

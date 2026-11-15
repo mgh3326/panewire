@@ -15,7 +15,9 @@ import (
 	"github.com/mgh3326/panewire/internal/fleet"
 )
 
-func TestAsyncSpawnUndispatchedTimeoutReleasesReservation(t *testing.T) {
+// An attempt that times out before any dispatch ends the attempt, not the
+// request (hk 4660): the reservation stays and attempt 2 is queued.
+func TestAsyncSpawnUndispatchedTimeoutStartsNextAttempt(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	for _, phase := range []string{"queued", "placement"} {
 		t.Run(phase, func(t *testing.T) {
@@ -37,16 +39,15 @@ func TestAsyncSpawnUndispatchedTimeoutReleasesReservation(t *testing.T) {
 			}
 			h.executeSpawnTask(t.Context(), task)
 			saved, err := h.inbox.store.spawnTask(t.Context(), request.RequestID)
-			if err != nil || saved.Status != "retryable" || !saved.Outcome.Retryable || saved.Outcome.Reason != "timeout" || saved.Node != nil {
-				t.Fatalf("undispatched timeout retained ownership: %+v %v", saved, err)
+			if err != nil || saved.Status != "accepted" || saved.Attempt != 2 || !saved.Outcome.Retryable || saved.Outcome.Reason != "timeout" || saved.Node != nil || !saved.Deadline.After(time.Now()) {
+				t.Fatalf("undispatched timeout did not queue the next attempt: %+v %v", saved, err)
 			}
-			pending, err := h.inbox.store.pendingSpawns(t.Context(), time.Now())
-			if err != nil || len(pending) != 0 {
-				t.Fatalf("reselected: %+v %v", pending, err)
+			page, _, err := h.inbox.store.pendingSpawnPage(t.Context(), spawnScanPosition{})
+			if err != nil || len(page) != 1 || page[0].Request.RequestID != request.RequestID || page[0].Attempt != 2 {
+				t.Fatalf("the next attempt is not scheduled: %+v %v", page, err)
 			}
-			retried, err := h.inbox.store.resumeCleanedSpawn(t.Context(), saved, time.Now())
-			if err != nil || retried.Attempt != 2 || retried.Request.RequestID != request.RequestID || !retried.Deadline.After(time.Now()) {
-				t.Fatalf("same-key retry failed: %+v %v", retried, err)
+			if _, _, err := h.inbox.store.claimSpawn(t.Context(), roleSecondRequest(), "test-job-r2", "parent", time.Now()); !errors.Is(err, errSpawnClaimed) {
+				t.Fatalf("a queued request must keep its task/role reservation: %v", err)
 			}
 		})
 	}

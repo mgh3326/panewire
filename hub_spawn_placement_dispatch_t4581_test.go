@@ -715,9 +715,9 @@ func TestReplayPreservesDeferredPlacementTrace_t4581(t *testing.T) {
 		t.Fatal(err)
 	}
 	h.deferPlacementTraceSave(request.RequestID, task.Attempt, payload, "")
-	outcome := hubSpawnOutcome{RC: 124, Stage: "placement", Reason: "timeout", Retryable: true}
+	outcome := hubSpawnOutcome{RC: 81, Stage: "checkout", Reason: "checkout_refused:busy", Retryable: true}
 	if changed, err := h.inbox.store.completeSpawn(t.Context(), task, outcome, time.Now()); err != nil || !changed {
-		t.Fatalf("commit timeout: changed=%v err=%v", changed, err)
+		t.Fatalf("commit refusal: changed=%v err=%v", changed, err)
 	}
 	server := httptest.NewServer(h.Handler())
 	defer server.Close()
@@ -740,7 +740,7 @@ func TestReplayPreservesDeferredPlacementTrace_t4581(t *testing.T) {
 	}
 	h.flushPlacementRecords(t.Context())
 	records := hk.records()
-	if len(records) != 1 || records[0]["attempt"] != float64(task.Attempt) || records[0]["reason"] != "timeout" {
+	if len(records) != 1 || records[0]["attempt"] != float64(task.Attempt) || records[0]["reason"] != "checkout_refused:busy" {
 		t.Fatalf("replay lost deferred attempt: records=%v", records)
 	}
 	t.Run("newer deferred trace replaces its base", func(t *testing.T) {
@@ -923,9 +923,9 @@ func TestReplayPreservesDeferredPlacementTrace_t4581(t *testing.T) {
 		}
 		payload, _ := json.Marshal(placementTraceSnapshot())
 		hub.deferPlacementTraceSave(request.RequestID, task.Attempt, payload, "")
-		outcome := hubSpawnOutcome{RC: 124, Stage: "placement", Reason: "timeout", Retryable: true}
+		outcome := hubSpawnOutcome{RC: 81, Stage: "checkout", Reason: "checkout_refused:busy", Retryable: true}
 		if changed, err := hub.inbox.store.completeSpawn(t.Context(), task, outcome, time.Now()); err != nil || !changed {
-			t.Fatalf("commit timeout: changed=%v err=%v", changed, err)
+			t.Fatalf("commit refusal: changed=%v err=%v", changed, err)
 		}
 		path := hub.inbox.deferredPath
 		hub.inbox.deferredPath = nonemptyDeferredDirectory(t)

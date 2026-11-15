@@ -587,12 +587,20 @@ type HubServer struct {
 	spawnRecords                map[string]*hubSpawnRecord
 	nodeCommands                map[string]*hubNodeCommandPending
 	unworkedLandingGrace        time.Duration
-	spawnStartBy                time.Duration
-	spawnStartByMargin          time.Duration
-	spawnGrantDrain             bool
-	nodeCommandWait             time.Duration // fixture seam; zero is hubNodeCommandWait.
-	checkoutPullWait            time.Duration // fixture seam; zero is hubCheckoutPullWait.
-	nodeAgentsWait              time.Duration // fixture seam; zero is hubNodeAgentsWait.
+	// reviewerEndLogged is the refusal each reviewer job last logged in the
+	// posted-result pass, so a job that keeps failing for the same reason logs
+	// once, not once a pass (hub_spawn_reviewer_end.go).
+	reviewerEndLogged map[string]string
+	// reviewerEndSettled holds the reviewer jobs the pass found ended, so it
+	// reads each hk record once while the job stays in its window.
+	reviewerEndSettled map[string]bool
+	spawnStartBy       time.Duration
+	spawnStartByMargin time.Duration
+	spawnGrantDrain    bool
+	nodeCommandWait    time.Duration // fixture seam; zero is hubNodeCommandWait.
+	checkoutPullWait   time.Duration // fixture seam; zero is hubCheckoutPullWait.
+	nodeAgentsWait     time.Duration // fixture seam; zero is hubNodeAgentsWait.
+
 	// laneStallMu is TryLock'd so at most one lane-stall observation runs and
 	// is held for the run's whole life: once Close has taken it and set
 	// laneStallClosing, no new run can start and any in-flight one is already
@@ -2467,6 +2475,7 @@ func (h *HubServer) RunMaintenance(ctx context.Context) {
 	go h.runInbox(ctx)
 	go h.runLaneRelease(ctx.Done())
 	go h.runPaneSweep(ctx)
+	go h.runReviewerEnd(ctx)
 	go h.runPoolTriggers(ctx)
 	h.startSpawnCoordinator(ctx)
 	h.startConsultCoordinator(ctx)

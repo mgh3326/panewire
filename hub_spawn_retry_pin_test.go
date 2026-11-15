@@ -24,7 +24,7 @@ func retryableStoredHostTask(t *testing.T, h *HubServer, request fleet.Submissio
 	if err != nil {
 		t.Fatal(err)
 	}
-	failed := hubSpawnOutcome{RC: 124, Stage: "admission", Reason: "timeout", Host: "desktop", Profile: "codex-luna", Retryable: true}
+	failed := hubSpawnOutcome{RC: 81, Stage: "checkout", Reason: "checkout_refused:busy", Host: "desktop", Profile: "codex-luna", Retryable: true}
 	if _, err = h.inbox.store.completeSpawn(t.Context(), task, failed, time.Now()); err != nil {
 		t.Fatal(err)
 	}

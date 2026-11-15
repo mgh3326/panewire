@@ -35,9 +35,10 @@ func (h *HubServer) handleSpawnFeatures(w http.ResponseWriter, r *http.Request) 
 		hubUnauthorized(w)
 		return
 	}
-	// Start conditions are deliberately not advertised until the queue core
-	// owns their lifecycle and expiry semantics.
-	writeJSON(w, http.StatusOK, map[string][]string{"features": {}})
+	// spawn_expires_v1: the request carries expires_seconds (hk 4660). Start
+	// conditions are deliberately not advertised until the queue owns their
+	// lifecycle on a batched hk observation (hk 4660 follow-up).
+	writeJSON(w, http.StatusOK, map[string][]string{"features": {"spawn_expires_v1"}})
 }
 
 // decodeSpawnRequest authenticates and validates a spawn request for the submit
@@ -230,7 +231,11 @@ func writeSpawnHeld(w http.ResponseWriter, held map[string]string, retryAfterS i
 }
 
 func (h *HubServer) acceptSpawnResponse(w http.ResponseWriter, task hubSpawnTask) {
-	writeJSON(w, 202, map[string]string{"job_id": task.Job, "request_id": task.Request.RequestID, "status": spawnPublicStatus(task.Status), "operation_url": "/v1/spawns/" + task.Request.RequestID, "claim": "durable_hub_reservation"})
+	body := map[string]string{"job_id": task.Job, "request_id": task.Request.RequestID, "status": spawnPublicStatus(task.Status), "operation_url": "/v1/spawns/" + task.Request.RequestID, "claim": "durable_hub_reservation"}
+	if expires := spawnExpiresAt(task); expires != "" {
+		body["expires_at"] = expires
+	}
+	writeJSON(w, 202, body)
 }
 
 // Older submitters understand dispatching as pending but not the new bound
@@ -271,9 +276,10 @@ func (h *HubServer) handleSpawnOperation(w http.ResponseWriter, r *http.Request)
 		Job            string                      `json:"job_id"`
 		Request        string                      `json:"request_id"`
 		Status         string                      `json:"status"`
+		ExpiresAt      string                      `json:"expires_at,omitempty"`
 		Result         hubSpawnOutcome             `json:"result"`
 		StartCondition *fleet.StartConditionResult `json:"start_condition,omitempty"`
-	}{task.Job, task.Request.RequestID, spawnPublicStatus(task.Status), task.Outcome, startCondition})
+	}{task.Job, task.Request.RequestID, spawnPublicStatus(task.Status), spawnExpiresAt(task), task.Outcome, startCondition})
 }
 
 func evaluateHubStartCondition(ctx context.Context, h *HubServer, conditions []fleet.StartCondition) fleet.StartConditionResult {

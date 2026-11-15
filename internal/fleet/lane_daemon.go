@@ -66,7 +66,7 @@ func (a *App) registerLaneThroughDaemon(ctx context.Context, put lanePutRequest)
 		TimeoutMS int64 `json:"timeout_ms"`
 	}{
 		Op:        daemonop.LanesPutOp,
-		LanesPut:  daemonop.LanesPut{Lane: put.Lane, Machine: put.Machine, Pane: put.Pane, Parent: put.Parent, Takeover: put.Takeover},
+		LanesPut:  daemonop.LanesPut{Lane: put.Lane, Machine: put.Machine, Pane: put.Pane, Job: put.Job, Parent: put.Parent, Takeover: put.Takeover},
 		TimeoutMS: laneDaemonCallTimeout.Milliseconds(),
 	}
 	if err := json.NewEncoder(conn).Encode(request); err != nil {

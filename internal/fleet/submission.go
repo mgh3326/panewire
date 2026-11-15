@@ -37,6 +37,11 @@ type Submission struct {
 	OriginMachine   string           `json:"origin_machine"`
 	DeadlineSeconds int              `json:"deadline_seconds"`
 	StartConditions []StartCondition `json:"start_conditions,omitempty"`
+	// ExpiresSeconds is the request's time limit from acceptance (--expires).
+	// Zero means the role's default: 6 h for an implementer, 1 h for a
+	// reviewer or consult (hk 4660). The attempt's DeadlineSeconds ends an
+	// attempt, never the request.
+	ExpiresSeconds int `json:"expires_seconds,omitempty"`
 	// LadderStep identifies a hub-staged author replacement for replay.
 	LadderStep *LadderStepIdentity `json:"ladder_step,omitempty"`
 	// E6Arm is the exact <canon>@<effort> experiment marker the submitter saw
@@ -74,13 +79,22 @@ type SpawnSubmitter interface {
 // operation by that id and answers a replay with the operation it already
 // holds, so the submit may be sent again (docs/hub-uninterrupted-calls.md).
 func (c *hubHTTP) Submit(ctx context.Context, request Submission) (Accepted, error) {
+	// A hub that predates a feature would drop the field and run the request
+	// without it, so the submitter asks for the feature first.
+	var needs []struct{ feature, flag string }
 	if len(request.StartConditions) != 0 {
+		needs = append(needs, struct{ feature, flag string }{"start_conditions_v1", "--after start conditions"})
+	}
+	if request.ExpiresSeconds != 0 {
+		needs = append(needs, struct{ feature, flag string }{"spawn_expires_v1", "--expires"})
+	}
+	if len(needs) != 0 {
 		status, raw, err := c.doIdempotent(ctx, http.MethodGet, "/v1/spawns/features", nil, 5*time.Second)
 		if err != nil {
-			return Accepted{}, fail(exitConfig, "unable to verify hub support for --after start conditions: %v", err)
+			return Accepted{}, fail(exitConfig, "unable to verify hub support for %s: %v", needs[0].flag, err)
 		}
 		if status != http.StatusOK {
-			return Accepted{}, fail(exitConfig, "unable to verify hub support for --after start conditions (HTTP %d)", status)
+			return Accepted{}, fail(exitConfig, "unable to verify hub support for %s (HTTP %d)", needs[0].flag, status)
 		}
 		var features struct {
 			Features []string `json:"features"`
@@ -88,8 +102,10 @@ func (c *hubHTTP) Submit(ctx context.Context, request Submission) (Accepted, err
 		if json.Unmarshal(raw, &features) != nil {
 			return Accepted{}, fail(exitConfig, "hub returned an unreadable spawn feature response")
 		}
-		if !slices.Contains(features.Features, "start_conditions_v1") {
-			return Accepted{}, fail(exitUsage, "hub does not support --after start conditions; upgrade the hub before submitting")
+		for _, need := range needs {
+			if !slices.Contains(features.Features, need.feature) {
+				return Accepted{}, fail(exitUsage, "hub does not support %s; upgrade the hub before submitting", need.flag)
+			}
 		}
 	}
 	status, raw, err := c.doIdempotent(ctx, http.MethodPost, "/v1/spawns", request, 15*time.Second)
@@ -363,7 +379,13 @@ func (a *App) PrepareSubmission(ctx context.Context, s Spawn) (Submission, error
 	if err != nil {
 		return Submission{}, fail(exitUsage, "%v", err)
 	}
-	request := Submission{RequestID: id, Brief: string(brief), Repository: Repository{Name: repo.name, Origin: checkout.Origin, Relative: repo.rel, Worktree: repo.wt, LocalRoot: repo.localRoot, Checkout: checkout}, OriginMachine: a.machine(), DeadlineSeconds: 600, E6Arm: s.E6Arm, Args: submissionArgs(submissionSpawn), StartConditions: conditions}
+	expiresSeconds := 0
+	if s.Expires != "" {
+		if expiresSeconds, err = parseSpawnExpires(s.Expires); err != nil {
+			return Submission{}, fail(exitUsage, "%v", err)
+		}
+	}
+	request := Submission{RequestID: id, Brief: string(brief), Repository: Repository{Name: repo.name, Origin: checkout.Origin, Relative: repo.rel, Worktree: repo.wt, LocalRoot: repo.localRoot, Checkout: checkout}, OriginMachine: a.machine(), DeadlineSeconds: 600, E6Arm: s.E6Arm, Args: submissionArgs(submissionSpawn), StartConditions: conditions, ExpiresSeconds: expiresSeconds}
 	if _, err = ValidateSubmission(request); err != nil {
 		return Submission{}, err
 	}
@@ -398,7 +420,7 @@ func ValidateSubmission(request Submission) (Spawn, error) {
 		s.Host = request.OriginMachine
 		s.requestedLocal = true
 	}
-	if !regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`).MatchString(request.RequestID) || !validID(s.Job) || !validID(s.Label) || s.DryRun || s.Delegated || s.Wait || s.Prompt == "" || !filepath.IsAbs(s.CWD) || len(request.Brief) > hubMaxBriefBytes || !utf8.ValidString(request.Brief) || strings.TrimSpace(request.Brief) == "" || request.DeadlineSeconds < 1 || request.DeadlineSeconds > 3600 {
+	if !regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`).MatchString(request.RequestID) || !validID(s.Job) || !validID(s.Label) || s.DryRun || s.Delegated || s.Wait || s.Prompt == "" || !filepath.IsAbs(s.CWD) || len(request.Brief) > hubMaxBriefBytes || !utf8.ValidString(request.Brief) || strings.TrimSpace(request.Brief) == "" || request.DeadlineSeconds < 1 || request.DeadlineSeconds > 3600 || !ValidSpawnExpiresSeconds(request.ExpiresSeconds) {
 		return s, fail(exitUsage, "invalid spawn request; rebuild it with panewire spawn")
 	}
 	if !isNumeric(s.Task) && s.ParentJob == "" {
@@ -564,7 +586,10 @@ func (c *hubHTTP) WaitSpawn(ctx context.Context, id string, opts SpawnWaitOption
 			Status      string `json:"status"`
 			Reason      string `json:"reason"`
 			NextCheckAt string `json:"next_check_at"`
-			Result      struct {
+			// ExpiresAt is the request's time limit (hk 4660); the hub
+			// reports it on every state.
+			ExpiresAt string `json:"expires_at"`
+			Result    struct {
 				SpawnAttempt
 				RC     int    `json:"rc"`
 				Reason string `json:"reason"`
@@ -581,7 +606,11 @@ func (c *hubHTTP) WaitSpawn(ctx context.Context, id string, opts SpawnWaitOption
 		case spawnRefused:
 			return attempt, fail(spawnRefusalRC(result.Result.RC), "spawn refused %s: %s (operation %s)", attempt, result.Result.Reason, id)
 		case spawnEnded:
-			return attempt, fail(exitWaitLost, "spawn request %s before it landed %s: %s (operation %s)", result.Status, attempt, firstNonempty(result.Reason, result.Result.Reason, "no reason recorded"), id)
+			limit := ""
+			if result.ExpiresAt != "" {
+				limit = " expires_at=" + result.ExpiresAt
+			}
+			return attempt, fail(exitWaitLost, "spawn request %s before it landed %s: %s%s (operation %s)", result.Status, attempt, firstNonempty(result.Reason, result.Result.Reason, "no reason recorded"), limit, id)
 		case spawnUnresolved:
 			return attempt, fail(exitStateConflict, "spawn ownership is unresolved %s; inspect operation %s and its executing node before any retry", attempt, id)
 		case spawnParked:

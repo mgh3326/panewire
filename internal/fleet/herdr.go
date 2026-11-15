@@ -884,6 +884,7 @@ type lanePutRequest struct {
 	Lane     string
 	Machine  string
 	Pane     string
+	Job      string
 	Parent   string
 	Takeover string
 	Role     string
@@ -999,6 +1000,9 @@ func (a *App) registerLane(ctx context.Context, req lanePutRequest) (laneRegistr
 		return laneRegistration{}, fail(exitConfig, "hub lane config missing")
 	}
 	args := []string{"lanes", "add", req.Lane, "--machine", req.Machine, "--pane", req.Pane, "--parent", req.Parent}
+	if req.Job != "" {
+		args = append(args, "--job", req.Job)
+	}
 	if req.Takeover != "" {
 		args = append(args, "--takeover", req.Takeover)
 	}

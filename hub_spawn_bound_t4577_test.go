@@ -52,16 +52,17 @@ func TestBoundSpawnExpiresWithoutNodeProof_t4577(t *testing.T) {
 		t.Fatal(err)
 	}
 	h.executeSpawnTask(t.Context(), task)
+	// The attempt's landing wait ended; the request's limit has not (hk 4660).
 	saved, err := h.inbox.store.spawnTask(t.Context(), request.RequestID)
-	if err != nil || saved.Status != "retryable" || !saved.Outcome.Retryable {
-		t.Fatalf("expired unsent status=%q outcome=%+v err=%v; want retryable", saved.Status, saved.Outcome, err)
+	if err != nil || saved.Status != "accepted" || saved.Attempt != 2 || saved.Node != nil || !saved.Outcome.Retryable || saved.Outcome.Reason != "timeout" || !saved.Deadline.After(time.Now()) {
+		t.Fatalf("expired unsent status=%q attempt=%d outcome=%+v err=%v; want accepted attempt 2", saved.Status, saved.Attempt, saved.Outcome, err)
 	}
-	if _, _, err := h.inbox.store.claimSpawn(t.Context(), roleSecondRequest(), "test-job-r2", "parent", time.Now()); err != nil {
-		t.Fatalf("expired unsent request retained task/role reservation: %v", err)
+	if _, _, err := h.inbox.store.claimSpawn(t.Context(), roleSecondRequest(), "test-job-r2", "parent", time.Now()); !errors.Is(err, errSpawnClaimed) {
+		t.Fatalf("a request still queued must keep its task/role reservation: %v", err)
 	}
 	var count int
-	if err := h.inbox.store.db.QueryRow(`SELECT count(*) FROM spawn_notifications WHERE event_id=?`, request.RequestID+":1:retryable").Scan(&count); err != nil || count != 1 {
-		t.Fatalf("retryable outbox rows=%d err=%v", count, err)
+	if err := h.inbox.store.db.QueryRow(`SELECT count(*) FROM spawn_notifications WHERE request_id=?`, request.RequestID).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("a new attempt is not an outcome: outbox rows=%d err=%v", count, err)
 	}
 }
 
