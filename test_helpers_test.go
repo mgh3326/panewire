@@ -1,6 +1,8 @@
 package panewire
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -47,4 +49,18 @@ func awaitClientEvent(t *testing.T, timeout time.Duration, events <-chan hubClie
 			t.Fatalf("timed out waiting for %s", kind)
 		}
 	}
+}
+
+// writeMode0600 writes content to dir/name as a mode-0600 file and returns its
+// path. Credential-file tests use it so the file is readable only by its owner.
+func writeMode0600(t *testing.T, dir, name, content string) string {
+	t.Helper()
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0600); err != nil {
+		t.Fatal(err)
+	}
+	return path
 }

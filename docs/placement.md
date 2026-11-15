@@ -22,7 +22,6 @@ panewire's host-first placement — read that score.
   "max_active_jobs": 5,
   "memory_free_pct_min": 30,
   "spawn_bridge_seconds": 300,
-  "wake_on_spill": false,
   "machines": {
     "desktop": {"task_slots": 2}
   }
@@ -39,9 +38,15 @@ their own optional `score` object, see [Constants](#constants).
 
 For `-m auto`, selection ranks eligible hosts before choosing an account or
 model rung. Host capability tags, accepted roles and grades, accepting state,
-and harness readiness filter the candidates. The existing placement order
-then applies: load bucket, the hub's decided host, score v2 when every host
-has a score, otherwise load, then configuration order.
+and harness readiness filter the candidates. Within each load bucket,
+selection uses score v2 when every eligible host has a score, then the hub's
+decided host as a tie-breaker; if any host lacks a score, the hub decision
+breaks ties before the raw-load fallback. Score v2 includes the free fraction
+weighted by host power and recent-spawn bridge cost. Selection uses that
+capacity signal before choosing a seat because placement cannot change the
+profile after selection pins it to the hosts that hold that seat. This lets an
+auto request choose a seat on a less loaded host even while the hub's
+hysteresis still names another host.
 
 On each host in that order, selection considers only the accounts it holds
 and the rungs its harnesses can launch. Grade, role, routing, effort, and seat
@@ -53,6 +58,19 @@ until expiry — the balance less the spend projected before expiry — or, for 
 entry without a recorded dollar balance, by the percentage rule (remaining
 percent per hour). On a full tie inside the band a credit rung goes before a
 free rung.
+
+In the ranked band each pool offers one seat for the task's grade (its
+lowest-grade eligible row that fits, or the row the pool-order policy's `seats`
+names), and pools are ordered by their seat's waste urgency: the pool with the
+most room first, ties in lowest-grade order. See `docs/config.md`.
+
+A manually recorded dollar balance stays dollar-ranked for four hours after
+`measured_at`; after that it is stale, loses its dollar value, and ranks behind
+subscription quota. Entries with only a percentage never become stale because
+they have no dollar source to age; they continue to rank by remaining percent
+per hour. A configured total supplies a dollar source for an entry with only a
+percentage. Plan output records `state=stale` and `stale_since` for aged dollar
+balances.
 
 Selection walks the ranked hosts twice. Pass 1 tries every candidate except a
 subscription pool paced behind credit (a subscription on pace to use up its
@@ -96,25 +114,31 @@ provider credit rejection. The watcher reads the final structured assistant
 error, not pane text, and uses omp's completion timestamp (or the session entry
 timestamp when completion time is absent). This is the harness host's time;
 the provider response does not include a recorded rejection timestamp. The
-watcher writes a zero balance to the shared manual credit store before it
-announces the quota stop. It records a pending publication locally first. After
-three failed attempts it ends the job as quota-stopped; the node retries the
-pending publication on restart and periodically thereafter, retaining the job
-directory until publication succeeds. The stored observation has no billing expiry; a later
-manual credit measurement reopens the account. Replaying an older rejection
-cannot replace a newer entry. Selection and `plan` show `credit_exhausted` and
-its `since` time. The shared store keeps the close across a hub restart and
-when `/v1/state` is unavailable. If the shared store cannot be read, admission
-fails closed.
+watcher records a pending publication locally first, then writes a zero balance
+to the shared manual credit store before it announces the quota stop. It makes
+at most three attempts in one watcher run. If the account cannot be identified,
+or those attempts fail, it sends one owner notice and pauses while keeping the
+pending rejection and job directory. The node retries a paused publication
+when the account can be identified. Before a recovered publication hands off a
+job, the watcher requires Herdr to be reachable and the pane to remain idle at
+the state-change sequence recorded with the rejection; it still publishes the
+account closure if the pane has resumed, but does not end that job. The stored
+observation has no billing expiry; a later manual credit measurement reopens
+the account. Replaying an older rejection cannot replace a newer entry.
+Selection and `plan` show `credit_exhausted` and its `since` time. The shared
+store keeps the close across a hub restart and when `/v1/state` is unavailable.
+If the shared store cannot be read, admission fails closed.
 
 ### Pool concurrency cap
 
 `[quota].pool_max_concurrent = { "openai-api" = 2 }` limits live spawns on a pool,
 fleet-wide ([config](config.md#quota)). Selection drops a candidate whose pool
 is at its cap with the reason `pool_at_cap`, naming the cap in `cap` (the
-candidate's pool, or the reserved `devin-free` key). The reason shows in the
-selection record and as `dropped … reason=pool_at_cap cap=…` in `plan` and
-`--dry-run`. Selection then goes on to the next candidate or pool as for any
+candidate's pool, or the reserved `devin-free` key). The selection record in
+`job.placement` and JSON plan output also includes `cap_live` and `cap_limit`:
+the count and limit used for that decision. Text plan output shows `live` and
+`limit` beside the cap. These counts are a snapshot, not a reservation.
+Selection then goes on to the next candidate or pool as for any
 other drop. A spawn never waits for a slot. If every candidate is dropped and
 at least one only for `pool_at_cap`, the refusal names the caps and their
 limits (`pool_at_cap: openai-api=2 at [quota].pool_max_concurrent`).
@@ -127,16 +151,32 @@ aliases included. It exists because those rungs spend Devin's free-model quota
 while paid `devin-ds41` spends the account's paid window. `devin` remains a
 whole-pool cap, so a free rung must pass both keys when both are set.
 
-The hub counts, because it places every hub spawn
-([durable spawn operations](hub-spawn-operations.md)). A live spawn on a pool
-is a hub spawn operation that is accepted or dispatching, or succeeded with a
-job that a node still lists as active, whose placed profile is in that pool.
-A spawn that succeeded less than two minutes ago counts before its first
-heartbeat. An auto spawn that is still being placed has no profile yet and
-is not counted, and neither is the spawn being placed. The hub's own selection
-reads the count from its operations. Any other selection (`plan`, a direct
-spawn) reads it from the hub with `GET /v1/spawns/live` and the operator
-credential.
+Beside that operator cap, hub placement admits one concurrent free-band launch
+per Devin account (hk 4765): a second concurrent launch onto the same
+account's free band is dropped `pool_at_cap` with `cap` `devin-free`, `cap_live`
+the account's live free launches and `cap_limit` 1, so a burst of submissions
+places at most one onto the free band per account. Launches placed through a
+seat count under the catalog profile they run. Only hub placement enforces
+it, from its own operations; a node-local selection has no fleet-wide launch
+
+The hub counts, because it sees every spawn the fleet runs. A live spawn on a
+pool is a hub spawn operation that is accepted, bound or dispatching, or
+succeeded with a job that a node still lists as active, whose placed profile is
+in that pool; plus every job a node reports active in its heartbeat that no
+live operation names, whose placed profile is in that pool. The second term is
+a direct `panewire spawn` on a node, which the hub never placed (hk 3399): the
+node reads the profile from that job's own `job.spawned` receipt, so the same
+count fills the reserved `devin-free` key. A hub spawn that has become a node
+job is in both records and counts once, under its operation; a job two nodes
+list counts once, under the node the hub holds as its owner.
+A bound request waiting for its node's dispatcher counts once, using the
+profile bound for its current attempt; an earlier attempt's profile does not
+replace it. A spawn that succeeded less than two minutes ago counts before its
+first heartbeat. An auto spawn that is still being placed has no profile yet
+and is not counted, and neither is the spawn being placed. The hub's own
+selection reads the count from its operations and its nodes' reported jobs. Any
+other selection (`plan`, a direct spawn) reads it from the hub with
+`GET /v1/spawns/live` and the operator credential.
 
 When the count cannot be read the cap does not apply. Selection records
 `pool_cap_count_unavailable` under `degraded` and the node writes a warning
@@ -162,13 +202,20 @@ drops what does not fit.
 | Field | Meaning |
 |---|---|
 | `harnesses.<kind>` for `claude`, `codex`, `omp`, `agy`, `devin`, `cmd` | `installed` (the binary is found; `cmd` is always installed), `version` (the first dotted number of `--version`), `herdr_integration` (`herdr integration status` says `current`), `login` (`present` / `missing` / `unknown`) with `account` (the pacelever account key), `dialog` |
-| `harnesses.<kind>.login` | From the node's own refresh of the pool named like the kind (`--state-quota-pools`): `claude`, `codex`, `commandcode`, `devin` and `agy` are measured by the node itself. Other pools are unmeasurable and read `unknown`. `present` follows a successful refresh. `missing` follows a refresh failure with an `error_kind` of `auth`, `auth_failed`, `credentials` or `token_expired`. Any other failure (timeout, transient error, `excluded`, unreadable status) keeps a present account while its last successful refresh is under 5 minutes old, and otherwise reads `unknown`. |
+| `harnesses.<kind>.login` | From the node's own refresh of the pool named like the kind (`--state-quota-pools`): `claude`, `codex`, `commandcode`, `devin` and `agy` are measured by the node itself. The `cmd` harness has no pool of its own: a cmd seat spends the `commandcode` pool, which the node measures through omp, so `harnesses.cmd.login` is that pool's login. Other pools are unmeasurable and read `unknown`, and `omp` spans several providers so it has no single pool and reads `unknown` unless a node measures one for it. `present` follows a successful refresh. `missing` follows a refresh failure with an `error_kind` of `auth`, `auth_failed`, `credentials` or `token_expired`. Any other failure (timeout, transient error, `excluded`, unreadable status) keeps a present account while its last successful refresh is under 5 minutes old, and otherwise reads `unknown`. |
 | `harnesses.<kind>.dialog` | The first-run dialog the **last launch** stopped at: `codex_hooks_review`, `codex_directory_trust`, `omp_setup_wizard` or `claude_trust`. It is the last known state, set by a failed launch and cleared by the next launch of that kind that succeeds. The node does not open a harness to look, and a dropped pair is not launched again, so a reported dialog also expires after 30 minutes: the pair then gets one more launch, and a launch that stops at the dialog again reports it for another 30 minutes |
 | `repos` | The node's `cwd_map` keys (on defaults: the directories under the work root) |
 | `brief.handoffkeep_env` | The handoffkeep env file is present, mode 0600 and holds a URL and token |
 | `toolchains` | `go`, `node`, `bun` with their versions, when installed |
 | `panewire_version` | The node's build |
 | `config` | The effective spawn configuration: `source` (`defaults` or `spawn.json`), `workspace`, `herdr_session` (the built-in default name, else `custom`: spawn.json names are free text and never travel), `work_root` (whether it exists). See [r26-hub-spawn.md](r26-hub-spawn.md) |
+
+Seat capability flags read this report: `cmd_dsflash41` reads
+`harnesses.cmd` and `omp_commandcode` reads `harnesses.omp`. A node that
+reports the harness installed and its login present holds the capability, so
+placement does not need a `[hosts.NAME]` copy of the flag on the placing host;
+a hosts.toml boolean is only an override
+([config](config.md#capability-flags)).
 
 The report is cached on the node. It is refreshed every 5 minutes and after
 every failed launch, probed in the background so a probe never delays a
@@ -191,7 +238,7 @@ outcome, in this order:
 | `harness_missing` | The harness binary is not installed |
 | `harness_version` | `placement.harness_min_version.<kind>` (in the spawner's `hosts.toml`) is set and the version is lower or unreadable |
 | `dialog_pending` | The last launch of this kind stopped at a first-run dialog ([desk notice](#first-run-refusals-and-the-desk-notice)) |
-| `login_missing` | The node's refresh of the kind's pool failed with a login error kind, or its login probe did, or its last launch ended rc=76 at the harness's login screen ([fleet-state.md](fleet-state.md#login-probe)); that verified agy login-screen result is sent as rc=88 `auth_unavailable` so auto placement can try another host; `cmd` needs no login ([desk notice](#first-run-refusals-and-the-desk-notice)) |
+| `login_missing` | The node's refresh of the kind's pool failed with a login error kind, or its login probe did, or its last launch ended rc=76 at the harness's login screen ([fleet-state.md](fleet-state.md#login-probe)); that verified agy login-screen result is sent as rc=88 `auth_unavailable` so a placement the node refused before its hk job claim can try another host (after the claim, an alternate harness may run only on the same host, [hub-spawn-operations.md](hub-spawn-operations.md)); `cmd` needs no login ([desk notice](#first-run-refusals-and-the-desk-notice)) |
 | `repo_unmapped` | The spawn's repository is not in the node's `repos` |
 | `brief_unavailable` | The spawn goes through the hub with a brief document and the node cannot fetch one |
 | `toolchain_missing` | `placement.repo_toolchains.<repo>` lists a toolchain the node lacks |
@@ -228,10 +275,24 @@ launch-failure backoff, which the hub observes itself, still applies to it.
 
 The hub sees every node answer to a spawn. It counts consecutive launch
 failures per (host, harness kind). Two in a row exclude that pair for 30
-minutes; a success clears the count at once. A busy checkout
-(`checkout_refused:busy`) and `dirty`, `sha-missing`, or `branch-elsewhere`
-checkout refusals are not launch failures, on either the
-terminal or next-host path. A profile with no harness kind is not counted. The
+minutes; a success clears the count at once. Only a failure that shows the host
+failed to launch counts:
+
+| Node reason | Counts | Why |
+|---|---|---|
+| `spawn_failed`, with or without its engine code (`spawn_failed:<code>`) | yes | the engine did not launch on this host |
+| `spawn_disabled` | yes | the host's spawn policy refuses every launch |
+| `cwd_unmapped` | yes | the host has no path for the repository |
+| `brief_doc_unavailable` | yes | the host cannot fetch or resolve its brief document |
+| `timeout` (landing or queue) | no | the answer was late; the launch state is unknown |
+| `deadline_not_started` | no | the node observed the absolute deadline before admitting an unclaimed request |
+| `unknown`, `reconciling` | no | the hub could not tell whether the launch happened |
+| `journal_unavailable`, `journal_conflict` | no | the node's spawn journal, not the launch |
+| `invalid_args`, `invalid_request` | no | the request is malformed |
+| `checkout_refused:<code>` (`busy`, `dirty`, `sha-missing`, `branch-elsewhere`, and the rest) | no | checkout state, not the harness's ability to launch, on either the terminal or next-host path |
+| any other reason, or none | no | not a host launch fault |
+
+A profile with no harness kind is not counted. The
 constants live in `placement.json`:
 
 ```json
@@ -241,12 +302,25 @@ constants live in `placement.json`:
 Both are optional (0 or absent means 2 and 30). The counts are in hub memory:
 a hub restart forgets them, which ends a backoff early and never starts one.
 
+A spawn request's own re-placement back-off, the parked-request wake batch and
+the long-park owner notice are separate keys (`spawn_backoff_seconds`,
+`spawn_backoff_max_seconds`, `spawn_wake_batch`,
+`spawn_park_notice_seconds`); see
+[hub-spawn-operations.md](hub-spawn-operations.md#parked-notice).
+
 ### First-run refusals and the desk notice
 
-A first-run dialog or a missing login rules out one host, not the request. When
+A first-run dialog or a missing login rules out its harness on the host. When
 the hub places a spawn under `--host auto` and a node refuses with one of these
-engine codes, the hub unbinds the request and the candidate loop tries the next
-host:
+engine codes before its hk job claim (result stage empty, `placement` or
+`checkout`), the hub atomically records the exclusion and unbinds the request,
+then wakes placement to try the next host. A dialog or login screen is normally
+seen after the pane launched, past the claim; hk then holds the job id for that
+host and answers another host's claim with 409 `job_id_taken` (rc 74). After
+verified cleanup, an eligible automatically selected harness may be replaced
+on that host; if no alternate is eligible, the refusal ends that attempt there
+([hub-spawn-operations.md](hub-spawn-operations.md)). The desk notice and launch
+backoff still apply to later submissions:
 
 | Code | Cause | Desk action |
 |---|---|---|
@@ -257,8 +331,10 @@ host:
 
 `cwd_unmapped` moves on the same way. The refusing host still counts the
 failure in its launch backoff. A refusal moves on only when the node verified
-its pane cleanup (`retryable`); otherwise a pane may still hold the job id and
-the refusal is the request's answer. A pinned `--host` keeps its refusal.
+its pane cleanup (`retryable`) and the job has not acquired a host-bound claim;
+otherwise the refusal is the request's answer. Exclusions survive hub recovery
+for the attempt and reset on a cleanup-confirmed new attempt. A pinned `--host`
+keeps its refusal.
 Nothing answers the dialog: trust stays a one-time human action on the host.
 
 The first time a host reports a need for a harness kind, the hub sends one
@@ -306,9 +382,9 @@ CPU busy with load1 at 20–44 on 10 cores and its score stayed near 70.
 
 ```text
 free  = cpu * mem * io * load * jobs
-score = free * power - 10 * claims_in_the_bridge_window
+score = free * power - bridge_cost * 100 / power * claims_in_the_bridge_window
         - 1000 if disconnected, - 500 if load_unknown, - 200 if not accepting,
-        - 100 if throttled, + 5 for a placement hold, + 5 if burst-ready
+        - 100 if throttled
 ```
 
 Each term runs from 0 to 1, and is 1 when its signal is absent or harmless.
@@ -339,11 +415,63 @@ as a term but carries no special weight.
 
 **Spawn bridge.** A metric lags a spawn by minutes, so for
 `spawn_bridge_seconds` (default 600; 1–3600) after a job's claim the job
-itself costs 10 points. That keeps the next spawn off the same host until the
+itself costs `bridge_cost * 100 / power` points (`bridge_cost` defaults to 10, so
+10 on a power-100 host, 20 on power 50, 33 on power 30 and 83 on power 12). The
+same job is a larger share of a weak host, so a weak host is held back longer. That keeps the next spawn off the same host until the
 metrics cover the first one. After the window the job costs nothing: its load
-is in the metrics, and the `jobs` term counts it for as long as it lives. The
-hub learns about a claim at the node's next heartbeat (every 10 s); two spawns
-placed before that heartbeat can still pick the same host.
+is in the metrics, and the `jobs` term counts it for as long as it lives.
+
+A job counts from the placement decision, not from the claim (hk 4448). The
+claim reaches the hub only after the node has checked out, started and landed
+the job, which took over a minute in the 2026-11-13 burst that sent six jobs to
+one host. The hub's spawn engine tells the hub which host it is trying at the
+moment it decides (`App.PlacementTry`), and the hub holds that job against the
+host (`placement_count.go`) until one of these happens:
+
+- the node's heartbeat lists the job: the claim is the count from then on, so
+  the job is never counted twice and the count never exceeds one claim;
+- the request ends without a launch (refused, never started, timed out): the
+  count is released, and a refusal that moves on to the next candidate moves it
+  to that host;
+- `spawn_bridge_seconds` pass without a claim, as for any claim.
+
+A request still reconciling, and a launched one whose claim has not shown, keep
+their count. The count adds to the host's `bridged_jobs` and so to the
+bridge cost only. It does not change `active_jobs`, the `jobs` term or
+task slots. The count is only that: a claim from a node other than the decided
+host does not release it.
+
+One decision at a time reads the hub's view and counts its job: the engine takes
+the hub's decision gate (`App.PlacementGate`) before it reads hosts and gives it
+up at its first `PlacementTry`, so jobs submitted together see each other. Each
+decision is a new plan read under the gate: the first, the fallback after a
+refusal (a host that filled its task slots, stopped accepting or fell under the
+load threshold in the meantime is judged as it is now) and the one after a wake
+(the woken host is counted only if it is still a place the job may go). The new
+plan keeps what the attempts proved about the hosts already tried, in the
+placement record. The gate is never held through a wake or a launch. The fleet
+snapshot is read again for every decision, and `SelHost`, the host host-first
+selection named before the gate on reads that did not yet carry other jobs'
+counts, does not outrank the scores this decision reads (the account it chose
+still limits the hosts). A host the hub left out for a full task cap stays out
+of the plan (`task_slots_full`) on both the fleet-state and the direct read. A
+pinned `--host` is counted through the gate too. A request bound to a node that
+timed out keeps its count (the node may still launch it) until a claim, a
+definitive failure or the bridge window. The count is in hub memory, but a hub
+restart counts again, on the host each one is bound to, every spawn that is still
+bound and unsettled (`dispatching`, `reconciling`, `succeeded`, or `deadline_exceeded`
+with a bound node), placed (bound) within the bridge window, and not yet claimed
+(`restorePlacementCounts`, hk 4460). The bind stamps `placed_ms` and the claim that ends
+the count stamps `claimed_ms` on the job's bound rows, so a job claimed before the restart
+is not counted again, even if it finished. A restored count ends with the claim, a definitive
+failure or the window, as a live one does. A refused, failed or retryable request is not
+restored, and a request not yet bound places again and counts then. A hub whose restore
+fails does not start.
+
+Every spawn decision also takes the hub's latest view: before the engine reads
+the hub's fleet state the hub recomputes the hosts' `load` values, and the
+fallback read (`panewire place`'s endpoint) skips the 30 s cache. No decision
+ranks on a value published for an earlier one.
 
 Stale or missing data never reads as idle:
 
@@ -358,7 +486,7 @@ Stale or missing data never reads as idle:
   `source=hub-only`: every candidate counts as having known metrics and no
   `load_unknown` penalty applies. The Prometheus terms (`cpu`, `io`, `load`)
   read 1. `mem` still follows the node-reported `memory_free_pct`, and the
-  `jobs` term, the claim bridge and the hold/burst adjustments still apply, so
+  `jobs` term and the claim bridge still apply, so
   hosts can still rank differently. An idle-looking score in that state
   reflects missing data, not a measured idle host; the hub-only fallback is
   unchanged by score v2 and described under Prometheus below.
@@ -370,19 +498,62 @@ at equal power the less loaded one does.
 ### The decision
 
 `decision` follows policy order (`local_machine`, then `spill_targets`) among
-usable machines, then two rules adjust it. Both look only at usable
+usable machines, then the rules below adjust it. They look only at usable
 candidates (connected, accepting, above the memory floor, not throttled, under
-the job cap, with a free task slot):
+the job cap, with a free task slot). A host with no terms (an old hub) has an
+unknown `free`, never a low one: the floor does not apply to it.
 
-1. **All loaded.** If the best usable score is under 15, no host is a good
-   place. `reason` is `all_loaded` and the decision goes to the host with the
-   highest measured `mem` term (ties: higher score, then policy order). A host
-   that reports no memory never counts as the one with the most; if no usable
-   host reports it, the policy-order winner keeps the decision.
-2. **Hysteresis.** Otherwise the policy-order winner keeps the decision unless
-   the best other usable host scores at least 1.25 times as much. Then `reason`
-   is `challenger` and that host takes it. A rival that is merely ahead does
-   not flip the decision, so back-to-back spawns do not bounce between hosts.
+1. **Free floor.** A host whose `free` (the product of the terms, before
+   `power` and the bridge) is under `free_floor` (default 0.05) is not chosen
+   while another usable host has `free` at or above it. When the policy-order
+   winner is under the floor, the decision moves to the first host at or above
+   it in policy order, and `reason` is `below_free_floor`. A below-floor host
+   never takes the decision from a host at the floor, whatever its score: a
+   score under `free * power - bridge` can be the least negative one on a
+   saturated host (2026-11-13 04:00:57Z, task 4172: oci at 99.8 % CPU busy
+   scored +0.05 because it alone had no claims, while rpi at `free` 0.218 scored
+   -17.4).
+2. **All below the floor.** If every usable host is under it, no host is a good
+   place. `reason` is `all_loaded` and the decision goes to the highest
+   `free * power` less the bridge cost of the jobs already decided onto the
+   host, which is the score (ties: higher `free * power`, then policy order). The
+   stronger of equally saturated hosts is used first, and a burst spreads: the
+   bridge term moves with each decided job, while `free` and `power` do not move
+   until the claims and the metrics catch up. This replaces the earlier
+   "highest `mem` term when the best score is under 15" rule.
+3. **Hysteresis.** Among the hosts at or above the floor, the winner (the
+   policy-order winner, or the first host at the floor in policy order when the
+   floor moved the decision) keeps the decision unless the best other host at
+   the floor scores at least 1.25 times as much (for a winner scoring under
+   zero, a rival whose score is the winner's divided by 1.25 or better). Then
+   `reason` is `challenger` and that host takes it. A rival that is merely ahead does not flip the
+   decision, so back-to-back spawns do not bounce between hosts.
+
+**The spawn engine applies the floor before the load bucket.** The floor is an
+eligibility rule (decision 231), so the engine's host ranking
+(`rankHosts` and the `plan` ordering) puts it first. It looks only at awake
+hosts: a sleeper has no metrics and stays behind every awake host through the
+bucket order. Awake hosts rank by tier: eligible (usable by the hub's verdict and
+at or above the floor) first, then usable hosts under the floor, then the hub's
+unusable hosts (throttled, at the job cap, slot-full, not accepting; a
+slot-full host the direct hub path left out is carried as a view with no terms,
+which reads as above the floor and is still unusable). An unusable host is a
+fallback and never outranks a usable one, whatever its `free` or bucket. Within a
+tier, bucket, the hub's decision and the score order the hosts as before. When
+every usable host is under the floor, the highest score ranks first (as in rule
+2, so decided jobs count) and the bucket does not apply. With no awake host under
+the floor, or none usable, the ranking is unchanged. A host under the floor is
+ranked behind, not removed: it is still tried if every other host refuses the
+job. The hub's verdict covers the local host like any other.
+
+The hub marks each candidate `below_free_floor` in `signals`. The flag is
+offered only to a caller that asks for it: `GET /v1/placement?signals=1&floor=1`
+(`panewire place --signals --floor`, which the spawn engine's host list uses).
+A caller that asks for `signals=1` alone, such as the previous release's
+`place --signals`, decodes strictly and would reject a field it does not know, so
+it gets the signals without the flag. The fleet-state `load` values carry the
+flag; their readers do not decode strictly. A hub that predates the flag sends
+none, and no host is then under the floor.
 
 A decision the rules left alone has no `reason`. Tagged requests (below) have
 no policy-order winner and always take the highest score.
@@ -403,10 +574,26 @@ default.
   "mem_floor": 0.20, "mem_span": 0.20,
   "pagein_half_mbps": 10, "linux_swap_in_half_mbps": 20,
   "load_knee": 0.75, "load_cap": 4,
-  "jobs_half": 8, "claim_cost": 10,
-  "hysteresis": 1.25, "all_loaded_below": 15
+  "jobs_half": 8, "bridge_cost": 10,
+  "hysteresis": 1.25, "free_floor": 0.05
 }}
 ```
+
+`bridge_cost` is the points one claim costs a power-100 host (0..10000); a host
+of power `p` pays `bridge_cost * 100 / p`. `free_floor` (0..1) is the free
+fraction under which a host is not chosen while another is at or above it. The
+earlier `claim_cost` and `all_loaded_below` still load and are ignored.
+
+**Rollout and rollback.** The policy decoder refuses unknown keys, so an older
+binary rejects a `placement.json` that sets `bridge_cost` or `free_floor`
+("placement policy is invalid"). Update the config only after the rollback
+window of the release that reads these keys; until then leave the defaults
+(unset) in place. A config that still sets `claim_cost` or `all_loaded_below`
+loads on both sides. The fleet's `[placement.shadow]` keys `free_floor` and
+`bridge_cost` in `hosts.toml` are refused the same way by an older binary
+(the fleet commands and the spawn app then fail to start): set them only after
+every reader of that file has this release and delete them before a rollback
+([Fleet config](config.md#placement)).
 
 ### Telemetry
 
@@ -415,8 +602,9 @@ Every decision leaves two kinds of Loki fleet event (`tool=panewire`, see
 
 - `kind=placement`, one per placement decision, with `request_id` (the hub
   spawn request), `job`, `chosen`, `reason` (`policy_order`, `challenger`,
-  `all_loaded`, else the ranking metric) and `candidates`: for every host its
-  `score`, the terms `cpu`, `mem`, `io`, `load`, `jobs`, its `power`, its
+  `below_free_floor`, `all_loaded`, else the ranking metric) and `candidates`:
+  for every host its `score`, the terms `cpu`, `mem`, `io`, `load`, `jobs`,
+  their product `free`, its `power`, its
   `bridge` count (claims inside the bridge window) and `outcome`.
 - `kind=node_spawn`, for failed and refused spawns as before and now for
   **successful** ones: `outcome=ok`, `reason=spawned`, with `request_id`,
@@ -461,8 +649,8 @@ signal.
 
 hk 3650. The static `power` is not re-tuned by hand
 (`decision/2026-11-09/placement-measurement-direction` §1, §3). Instead, each
-time the spawn engine has ranked the hosts for a job (spawn, delegate and panel
-selection all rank in `admitHostFirst`), it ranks the same hosts again under two
+time the spawn engine has ranked the hosts for a job (spawn selection
+ranks in `admitHostFirst`), it ranks the same hosts again under two
 alternative rules and writes one fleet event, `kind=placement_shadow`
 ([observability](observability.md#fleet-events)). The arms are pure functions of
 the readings the live ranking already had: no extra call, the App's clock, and
@@ -486,16 +674,16 @@ panic in an arm is caught and recorded as `shadow_error`; the spawn goes on.
 
 | Arm | What it changes against the live order |
 | --- | --- |
-| `fixed` | Defect A: one load measure for every host, never mixed: the hub's CPU-busy fraction when any candidate has one (`load_measure=cpu_busy`, threshold `shadow.cpu_busy_over`, default `load_threshold`), else load5 per core for every host alike (`load5_per_core`; a host without a reading ranks as unknown). The local `max_load_ratio` guard keeps its own unit. Defect B: a host the hub marks unusable leaves the order, a slot-full host included (the fleet-state host list omits it, so the spawn engine keeps its name for the shadow only); the hub's decision (policy order = configuration order, local first; `shadow.hysteresis`, `shadow.all_loaded_below`; none for a tagged request) is applied when the hub did not already send one. The score is the hub's. |
+| `fixed` | Defect A: one load measure for every host, never mixed: the hub's CPU-busy fraction when any candidate has one (`load_measure=cpu_busy`, threshold `shadow.cpu_busy_over`, default `load_threshold`), else load5 per core for every host alike (`load5_per_core`; a host without a reading ranks as unknown). The local `max_load_ratio` guard keeps its own unit. Defect B: a host the hub marks unusable leaves the order, a slot-full host included (the fleet-state host list omits it, so the spawn engine keeps its name for the shadow only); the hub's decision (policy order = configuration order, local first; `shadow.hysteresis`, `shadow.free_floor`, the same rules as the hub's decision above; none for a tagged request) is applied when the hub did not already send one. The score is the hub's. |
 | `waste_first` | Not a host order, so it is not a key of `arms`: the account a pool-first order would have spent, recorded beside the host arms (hk 3651, [below](#the-waste_first-account-arm-hk-3651)). It does not enter the event `outcome`. |
-| `measured` | `fixed`, plus: one memory signal for admission and rank, the capability map, and each of CPU busy and load per core used once. Memory signal: the pressure level (normal, warn, critical) of a host that declares the `macos` capability when it sent one (the wire does not say which OS a pressure value is from, so any other host's pressure is ignored), else available memory (Linux `MemAvailable`/`MemTotal`; macOS Prometheus available); with the swap-in rate (node `swap_in_per_s`, else the Linux `pswpin` rate). Critical pressure, or available memory under `shadow.mem_refuse_below_pct`, refuses the host; a host the hub dropped only for its own memory floor is judged again by this signal when it is known; a host with no memory reading stays dropped. The score is rebuilt as `mem * swap * load * jobs * capability - bridged * claim_cost` (the `cpu` term is dropped: CPU busy already decides the bucket), without the hub's hold and burst bonuses; a host with no score signals keeps the hub's score. |
+| `measured` | `fixed`, plus: one memory signal for admission and rank, the capability map, and each of CPU busy and load per core used once. Memory signal: the pressure level (normal, warn, critical) of a host that declares the `macos` capability when it sent one (the wire does not say which OS a pressure value is from, so any other host's pressure is ignored), else available memory (Linux `MemAvailable`/`MemTotal`; macOS Prometheus available); with the swap-in rate (node `swap_in_per_s`, else the Linux `pswpin` rate). Critical pressure, or available memory under `shadow.mem_refuse_below_pct`, refuses the host; a host the hub dropped only for its own memory floor is judged again by this signal when it is known; a host with no memory reading stays dropped. The score is rebuilt as `mem * swap * load * jobs * capability - bridged * bridge_cost * 100 / capability` (the `cpu` term is dropped: CPU busy already decides the bucket), without the hub's hold and burst bonuses; a host with no score signals keeps the hub's score. |
 
 `capability` is `placement.capability.light.<host>` or
 `placement.capability.heavy.<host>`; a host with no entry for the class falls
 back to the hub's `power` (100 when the hub sent none). The map is empty by
 default. The work class comes from the spawn role in one function,
-`workClassOf`: `light` for reviewer, counsel (consult) and design-type seats,
-`heavy` for everything else (worker, tester). It is a recorded guess, to be
+`workClassOf`: `light` for reviewer, consult and design-type seats,
+`heavy` for everything else (implementer). It is a recorded guess, to be
 checked by measurement; the role is recorded with it.
 
 **Reading the event.** `live` is the live host order, each host with its bucket
@@ -535,7 +723,7 @@ spent instead, next to the live choice. Live placement is unchanged.
   account the live run bound to a host. A candidate joins at the first usable
   host whose walk ranks it in pass 1, judged with that host's own credit-pacing
   flag (T2997), not the selection-wide one. They are sorted by the live comparator
-  (`sortSelCands`: waste-risk pools first, then band, grade, urgency and the
+  (`sortSelCands`: waste-risk pools first, then band, the headroom fit for a known job length (`plan --expected`, config.md), grade, urgency and the
   rest), the same comparison the live path uses. **Pass 2 is not modelled.**
   Pass 2 is the paced-pool band the live walk tries only when pass 1 chose
   nothing. A live choice that came from pass 2 is recorded with `pass: 2`.
@@ -587,7 +775,7 @@ One real event (macOS `mac-b` at warn pressure, 60% free, swapping hard; the
 hub scores it 100, so live and `fixed` keep it first and `measured` does not):
 
 ```json
-{"ts":"2026-11-09T00:00:00Z","host":"node","tool":"panewire","kind":"placement_shadow","job":"job-a","outcome":"disagree","reason":"heavy","detail":"work_class=heavy role=worker fixed=agree measured=disagree","request_id":"req-1","shadow":{"role":"worker","work_class":"heavy","live":{"first":"mac-b","order":[{"host":"mac-b","bucket":0,"score":100},{"host":"cloud-small","bucket":0,"score":90},{"host":"cloud-tiny","bucket":1,"score":1},{"host":"pi","bucket":1,"score":1}]},"arms":{"fixed":{"outcome":"agree","first":"mac-b","order":[{"host":"mac-b","bucket":0,"score":100},{"host":"cloud-small","bucket":0,"score":90},{"host":"cloud-tiny","bucket":1,"score":1},{"host":"pi","bucket":1,"score":1}]},"measured":{"outcome":"disagree","first":"cloud-small","order":[{"host":"cloud-small","bucket":0,"score":100},{"host":"mac-b","bucket":0,"score":10},{"host":"cloud-tiny","bucket":1,"score":1},{"host":"pi","bucket":1,"score":1}]}},"load_measure":"cpu_busy","inputs":[{"host":"mac-b","cpu_busy":0.2,"load1_per_core":0.1,"mem_available":0.8,"mem_free_pct":60,"pressure":1,"swap_in_per_s":20000,"jobs":0,"power":100,"memory_source":"pressure"},{"host":"cloud-small","cpu_busy":0.1,"load1_per_core":0.1,"mem_available":0.8,"jobs":0,"power":100,"memory_source":"available"},{"host":"cloud-tiny","memory_source":"none"},{"host":"pi","memory_source":"none"}]}}
+{"ts":"2026-11-09T00:00:00Z","host":"node","tool":"panewire","kind":"placement_shadow","job":"job-a","outcome":"disagree","reason":"heavy","detail":"work_class=heavy role=implementer fixed=agree measured=disagree","request_id":"req-1","shadow":{"role":"implementer","work_class":"heavy","live":{"first":"mac-b","order":[{"host":"mac-b","bucket":0,"score":100},{"host":"cloud-small","bucket":0,"score":90},{"host":"cloud-tiny","bucket":1,"score":1},{"host":"pi","bucket":1,"score":1}]},"arms":{"fixed":{"outcome":"agree","first":"mac-b","order":[{"host":"mac-b","bucket":0,"score":100},{"host":"cloud-small","bucket":0,"score":90},{"host":"cloud-tiny","bucket":1,"score":1},{"host":"pi","bucket":1,"score":1}]},"measured":{"outcome":"disagree","first":"cloud-small","order":[{"host":"cloud-small","bucket":0,"score":100},{"host":"mac-b","bucket":0,"score":10},{"host":"cloud-tiny","bucket":1,"score":1},{"host":"pi","bucket":1,"score":1}]}},"load_measure":"cpu_busy","inputs":[{"host":"mac-b","cpu_busy":0.2,"load1_per_core":0.1,"mem_available":0.8,"mem_free_pct":60,"pressure":1,"swap_in_per_s":20000,"jobs":0,"power":100,"memory_source":"pressure"},{"host":"cloud-small","cpu_busy":0.1,"load1_per_core":0.1,"mem_available":0.8,"jobs":0,"power":100,"memory_source":"available"},{"host":"cloud-tiny","memory_source":"none"},{"host":"pi","memory_source":"none"}]}}
 ```
 
 hk 3649 adds `swap_out_per_s` and `user_idle_s` to the node heartbeat. Until it
@@ -605,9 +793,6 @@ slots and `--explain`. A job leaves it when any of these is true:
 - herdr no longer lists an agent on its pane;
 - herdr has reported its pane `idle` or `done` for 30 minutes (the clock
   restarts when the pane works again, and when the node restarts).
-
-The idle-shutdown probe keeps its own scan without the 30-minute rule, so a
-lead waiting on its workers still keeps its host awake.
 
 The default is the same local `mac-work` / `desktop` spill shape. Policy files
 must be regular files; unknown fields and duplicate targets are rejected. A
@@ -665,7 +850,7 @@ exactly as before.
 
 The hub counts **tasks**, not jobs. A task is the `owner_lane` bundle on that
 machine: a builder job (whose claim `owner_lane` is its own lane) plus every
-tester/worker job that builder spawned with `--owner <builder lane>`. Two jobs
+implementer job that builder spawned with `--owner <builder lane>`. Two jobs
 of the same task consume one slot. A job whose `owner_lane` is empty or the
 legacy `"default"` sentinel cannot be attributed to a task and counts as a
 task of its own — unowned jobs therefore over-count rather than slip through.
@@ -673,8 +858,7 @@ Counts come from the node heartbeat's active-job list, the same source as
 `active_jobs`.
 
 A machine whose task count reaches `task_slots` is removed from `candidates`
-entirely — it is never the decision, is skipped by the `wake_on_spill`
-shortcut, and is invisible to consumers that walk the candidate list. When
+entirely — it is never the decision, and is invisible to consumers that walk the candidate list. When
 every machine is full the response is explicit: `"decision": null`,
 `"candidates": []`, `"reason": "task_slots_exhausted"`. A narrower form —
 the decision machine is slot-full but other candidates remain — answers
@@ -690,6 +874,29 @@ directly) all share that lane, so they count as one task — the same rule as
 builder bundles. And the node heartbeat truncates its active-job list at 32
 entries, so `task_slots` values above 32 can never bind; keep configured caps
 at or below that.
+
+## Per-machine lane rows
+
+A node credential may own at most `--lanes-node-row-cap` rows in the shared
+lanes file (default 64), and a lane create past that cap is refused
+`lane_quota_exceeded`. A spawn's pane registers its lane after the pane exists,
+so a machine at its row cap cannot host a new job: the spawn comes up
+`LANE_UNREGISTERED` after the work started.
+
+The hub therefore reports such a machine with the reason token `lanes_full` in
+the fleet-state load value (with `usable: false`) and in the `/v1/placement`
+candidates, and host-first selection drops it as ineligible rather than ranking
+it as a last-resort fallback. When every candidate is at its cap the decision is
+`"decision": null` with `"reason": "lanes_full"`. Host preflight refuses the
+host with `hub_acceptance:lanes_full` instead of passing it. A lane row that a
+node's fresh pane snapshot no longer lists is still released first
+([dead rows are released](r28-lanes-write.md#dead-rows-are-released-and-reused)),
+so a machine comes back into placement as soon as its stale rows drain.
+Reviewer lanes are the common source of leftover rows: a finished reviewer job
+that never ran `done` keeps its row until the hub's posted-result pass ends its
+hk record and the node's ended-job sweep closes its pane (see
+[hub-spawn-operations.md](hub-spawn-operations.md#ending-a-reviewer-job-that-posted-a-result)).
+A reviewer that has not posted a result is never ended that way.
 
 ## Machine power weights
 
@@ -754,7 +961,6 @@ is:
   "spill_targets": ["desktop", "mac-dev"],
   "max_active_jobs": 5,
   "memory_free_pct_min": 30,
-  "wake_on_spill": false,
   "machines": {
     "mac-personal": {"task_slots": 3},
     "mac-dev": {"task_slots": 3},
@@ -816,22 +1022,18 @@ node-exporter collectors must stay enabled on every host (see
 `PANEWIRE_PROM_BASIC_USER`/`PANEWIRE_PROM_BASIC_PASS` outside the repository.
 Prometheus samples must have `machine_id`. A missing load sample is explicitly
 `load_unknown`: it cannot select the local machine; if no safe spill candidate
-exists the decision is `unavailable`. Results are cached for 30 seconds.
+exists the decision is `unavailable`. The operator read (`panewire place`) is
+cached for 30 seconds; a spawn's own placement never reads that cache.
 If Prometheus is unavailable or malformed, the endpoint always returns a 200
 hub-only decision based on connected/accepting state and heartbeat active-job
 counts; it never returns a scheduler 500.
 
 ```json
-{"decision":"mac-work","candidates":[{"machine":"mac-work","score":37,"load_ratio":0.53,"throttled":false,"active_jobs":1,"connected":true,"metrics_known":true,"memory_free_pct":null,"swap_used_mb":null,"memory_known":false,"holds_active":false,"burst_ready":false,"reason":"memory_unknown"}],"source":"prometheus","asof":"2026-09-04T00:20:00Z"}
+{"decision":"mac-work","candidates":[{"machine":"mac-work","score":37,"load_ratio":0.53,"throttled":false,"active_jobs":1,"connected":true,"metrics_known":true,"memory_free_pct":null,"swap_used_mb":null,"memory_known":false,"reason":"memory_unknown"}],"source":"prometheus","asof":"2026-09-04T00:20:00Z"}
 ```
 
 A node that does not send memory telemetry records `memory_unknown` rather
 than `available`; this remains fail-open and does not change its score.
-
-When `wake_on_spill` is true and the selected spill target is disconnected, the
-hub starts the existing R16 on-demand burst request in the background with a
-short placement hold. The returned decision remains advisory: callers must
-wait for the target's normal authenticated heartbeat before assigning work.
 
 `panewire` invokes the stable CLI contract:
 
@@ -884,16 +1086,20 @@ execution identity; this change does not install or alter DAGs.
 
 ## Quota service boundary
 
-The absorbed spawn engine now reads the hub's timestamped fleet-state snapshot
-in-process and dispatches `quota.refresh` directly to the selected node. Existing
-provider adapters and their credentials remain on that node; stale or unknown
-quota remains fail-closed. `GET /v1/state` and node refresh already provide the
+The absorbed spawn engine reads the hub's timestamped fleet-state snapshot
+in-process. A stale account schedules a bounded, deduplicated `quota.refresh`
+on its node outside placement; placement can choose a different confirmed
+account without waiting. If none is eligible, the accepted request remains
+pending until a refresh completes or its deadline expires. Existing provider
+adapters and their credentials remain on the node; stale or unknown quota is
+never treated as confirmed. The queue and its cancellation rules are described
+in [Durable spawn operations](hub-spawn-operations.md). `GET /v1/state` and node refresh provide the
 shared service needed by placement. A second provider-measurement service and a
 `panewire quota` command are not added: they would duplicate those interfaces or
 centralize credentials without a demonstrated caller need. `pacelever` remains
 the provider measurement tool; this decision does not bypass its final gate.
 
-A quota-stop job end cools its pool across hosts until its reset, or for five minutes when no reset is known. Candidates are recorded as `pool_cooling` during that period. Cooling is held in hub memory and is lost on hub restart.
+A quota-stop job end cools its pool across hosts until its reset, or for five minutes when no reset is known. Candidates are recorded as `pool_cooling` during that period. Cooling is held in hub memory and is lost on hub restart. Devin's two bands cool apart under reserved keys: a paid stop (`pool=devin`) cools `devin-paid` and a free-band stop (`pool=devin-free`) cools `devin-free`, so neither holds the rungs that draw on the other band.
 
 When hub state is unavailable or disabled, the selection record reports `pool_cooling_hub_unavailable` or `pool_cooling_hub_state_off` in `degraded`; cooling cannot be checked.
 
@@ -905,7 +1111,8 @@ the gate once for the chosen rung before it judges any host
 (`requestGate.RequestRefusal`, admission_native.go); a refusal ends the spawn
 with the gate's reason verbatim and the exit status the gate maps it to, and no
 host is judged or contacted. `-m auto` keeps skipping such a rung in selection
-and trying the next.
+and trying the next; a selection such refusals decide fails
+`POLICY_UNAVAILABLE` and names the codes (`; gate refused: <code>, …`).
 
 The refusals decided without a reading are the first judgment of
 `admissionInputs.judgeWith` (admission_verdict.go) with no reading: the role

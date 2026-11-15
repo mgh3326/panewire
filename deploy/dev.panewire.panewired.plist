@@ -17,6 +17,11 @@
 	</dict>
 	<key>RunAtLoad</key><true/>
 	<key>KeepAlive</key><true/>
+	<!-- A restart (launchctl kickstart -k) must not kill the detached `panewire _watch`
+	     children: they record a running job's result. See docs/runbooks/node-restart.md. -->
+	<key>AbandonProcessGroup</key><true/>
+	<!-- Seconds launchd waits after SIGTERM: longer than the daemon's 30 s stop drain. -->
+	<key>ExitTimeOut</key><integer>60</integer>
 	<key>StandardOutPath</key><string>/Users/REPLACE_ME/Library/Logs/panewired.log</string>
 	<key>StandardErrorPath</key><string>/Users/REPLACE_ME/Library/Logs/panewired.error.log</string>
 </dict>

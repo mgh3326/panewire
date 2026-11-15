@@ -457,6 +457,30 @@ func TestMeasureWakeRefreshesARefusedToken(t *testing.T) {
 	}
 }
 
+func TestBinaryOverrideUsesPanewireThenLegacy(t *testing.T) {
+	cfg := config(nil, nil)
+	cfg.LookupEnv = func(name string) (string, bool) {
+		switch name {
+		case "PANEWIRE_AGY_BIN":
+			return "/new/agy", true
+		case "PACELEVER_AGY_BIN":
+			return "/old/agy", true
+		default:
+			return "", false
+		}
+	}
+	cfg.LookPath = func(name string) (string, error) { return name, nil }
+	if got := cfg.binary(); got != "/new/agy" {
+		t.Fatalf("new override = %q", got)
+	}
+	cfg.LookupEnv = func(name string) (string, bool) {
+		return "/old/agy", name == "PACELEVER_AGY_BIN"
+	}
+	if got := cfg.binary(); got != "/old/agy" {
+		t.Fatalf("legacy override = %q", got)
+	}
+}
+
 // A token another holder already refreshed is reused without waking the CLI.
 func TestMeasureReusesATokenAnotherHolderRefreshed(t *testing.T) {
 	files := loginFiles("expired-token")
@@ -736,14 +760,26 @@ func TestLoginFileLocations(t *testing.T) {
 	}
 }
 
-func TestWakeLockPathSharesPaceleversLock(t *testing.T) {
+func TestWakeLockPathUsesPanewireAndLegacyCache(t *testing.T) {
 	cfg := config(nil, nil)
-	if got := cfg.wakeLockPath(); got != "/home/u/.cache/pacelever/agy-wake.lock" {
+	if got := cfg.wakeLockPath(); got != "/home/u/.cache/panewire/agy-wake.lock" {
 		t.Fatalf("default %q", got)
 	}
 	cfg.LookupEnv = func(name string) (string, bool) { return "/c/snapshots.json", name == "PACELEVER_CACHE" }
 	if got := cfg.wakeLockPath(); got != "/c/agy-wake.lock" {
 		t.Fatalf("PACELEVER_CACHE %q", got)
+	}
+	cfg.LookupEnv = func(name string) (string, bool) {
+		if name == "PANEWIRE_CACHE" {
+			return "/new/records.json", true
+		}
+		if name == "PACELEVER_CACHE" {
+			return "/old/records.json", true
+		}
+		return "", false
+	}
+	if got := cfg.wakeLockPath(); got != "/new/agy-wake.lock" {
+		t.Fatalf("PANEWIRE_CACHE precedence %q", got)
 	}
 }
 

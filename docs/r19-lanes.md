@@ -5,7 +5,7 @@ relay decision. It contains identifiers only; do not put credentials,
 addresses, or installation-specific pane names in a public configuration.
 
 ```json
-{"lanes":{"lane-a":{"machine":"host-a","pane":"w1:p1","parent":"captain"},"captain":{"machine":"host-a","pane":"w1:p2","parent":null}}}
+{"lanes":{"lane-a":{"machine":"host-a","pane":"w1:p1","parent":"parent-lane"},"parent-lane":{"machine":"host-a","pane":"w1:p2","parent":null}}}
 ```
 
 `job.completed` is injected into its `owner_lane` pane. `job.escalate` and
@@ -32,11 +32,10 @@ A deliberately deferred lane is left to its designated owner.
 For direct lane events, a unique live job can supply a missing route; see
 [R21 direct lane events](r21-lane-event.md).
 
-Lanes that carry control-plane authority are moved with
-`POST /v1/control-plane/transfer`; a direct `PUT` **or `DELETE`** on one of them
-is refused with 409, and a transfer has to carry the whole configured bundle.
-The authority set itself is deployment configuration. See
-[control-plane-transfer.md](control-plane-transfer.md).
+Lanes that carry control-plane authority cannot be written through this API: a
+direct `PUT` **or `DELETE`** on one of them is refused with 409
+`authority_lane_direct_write`. The authority set itself is deployment
+configuration. See [authority-lanes.md](authority-lanes.md).
 
 After a `relay.inject`, the hub waits `RELAY_ACK_TIMEOUT` (15 seconds by
 default) for `relay.delivered` or `relay.unconfirmed`. On silence it broadcasts

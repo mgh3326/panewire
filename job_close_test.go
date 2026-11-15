@@ -74,7 +74,7 @@ func (f *jobCloseFixture) event(job, name, body string) {
 // claim writes an arbiter-envelope claim (or reclaim) naming owner.
 func (f *jobCloseFixture) claim(job, name, kind, owner string) {
 	f.t.Helper()
-	payload, _ := json.Marshal(map[string]any{"agent_label": job, "owner_lane": owner, "role": "worker"})
+	payload, _ := json.Marshal(map[string]any{"agent_label": job, "owner_lane": owner, "role": "implementer"})
 	f.event(job, name, fmt.Sprintf(`{"job_id":%q,"seq":1,"kind":%q,"payload":%s,"created_at":"2026-09-21T00:00:00Z"}`, job, kind, payload))
 }
 

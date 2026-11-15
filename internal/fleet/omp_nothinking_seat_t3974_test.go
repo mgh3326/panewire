@@ -35,6 +35,7 @@ func noThinkingSpawnApp(t *testing.T, extra ...CatalogRow) *App {
 	t.Helper()
 	rows := append(ompSeedCatalog(t), extra...)
 	a := testApp(t)
+	a.modelFamilies = func(context.Context) (ModelFamiliesPolicy, error) { return launchTestModelFamilies(), nil }
 	a.Config.Local = map[string]any{"omp_commandcode": true}
 	a.Config.Quota = map[string]any{"accounts": map[string]any{"commandcode": noThinkingAccountFP}}
 	a.BenchCatalog = func(context.Context) ([]CatalogRow, error) { return rows, nil }
@@ -43,12 +44,14 @@ func noThinkingSpawnApp(t *testing.T, extra ...CatalogRow) *App {
 		if key != "commandcode:"+noThinkingAccountFP {
 			return shared.Latest{}, fmt.Errorf("unexpected account %q", key)
 		}
-		reset := now.Add(20 * 24 * time.Hour)
+		fiveHour, week := now.Add(3*time.Hour), now.Add(5*24*time.Hour)
 		return shared.Latest{Observation: &shared.Observation{
 			Kind:       shared.KindAuto,
 			MeasuredAt: now.Add(-time.Minute),
-			Plan:       "credit",
-			Buckets:    []shared.Bucket{{Window: "30d", UsedPct: 10, ResetsAt: &reset, Scope: "account"}},
+			Buckets: []shared.Bucket{
+				{Window: "5h", UsedPct: 10, ResetsAt: &fiveHour, Scope: "account"},
+				{Window: "7d", UsedPct: 10, ResetsAt: &week, Scope: "account"},
+			},
 		}}, nil
 	}
 	runner := &fakeRunner{Do: func(c Command) Result {
@@ -62,7 +65,7 @@ func noThinkingSpawnApp(t *testing.T, extra ...CatalogRow) *App {
 // pinnedWorkerSpawn is a pinned worker spawn of one seat, with the marker
 // named by PANEWIRE_E6_ARM as the operator passes it.
 func pinnedWorkerSpawn(a *App, profile string) Spawn {
-	return Spawn{Profile: profile, Role: "worker", T: "T1", Task: "3974", Effort: "off", Containment: "hk:3974", CWD: a.Home}
+	return Spawn{Profile: profile, Role: "implementer", T: "T1", Task: "3974", Effort: "off", Containment: "hk:3974", CWD: a.Home}
 }
 
 // (a) With handoffkeep's row carrying no no_thinking field, a pinned worker
@@ -102,11 +105,11 @@ func TestOMPNoThinkingSeatLaunchAndProof(t *testing.T) {
 		}
 	}
 	const cwd = "/home/user/work/tree"
-	screen := "π > ⬢ Gemini 4 Argon > 🌳 project/tree ▶─1%──…─1M─"
-	if !OMPFooterProof(screen, "Gemini 4 Argon", "off", cwd, "/home/user", "", a.Policy.Profiles["omp-argon4"].NoThinking) {
+	screen := "π > ⬢ Gemini 4 Argon > 🌳 project/tree > ⑂ wk/fixture ▶─1%──…─1M─"
+	if !OMPFooterProof(screen, "Gemini 4 Argon", "off", cwd, "/home/user", "", "project/tree", "wk/fixture", a.Policy.Profiles["omp-argon4"].NoThinking) {
 		t.Fatal("the no-thinking seat's footer with ⬢ was refused")
 	}
-	if OMPFooterProof(screen, "Gemini 4 Argon", "off", cwd, "/home/user", "", a.Policy.Profiles["omp-musespark13"].NoThinking) {
+	if OMPFooterProof(screen, "Gemini 4 Argon", "off", cwd, "/home/user", "", "project/tree", "wk/fixture", a.Policy.Profiles["omp-musespark13"].NoThinking) {
 		t.Fatal("a thinking seat accepted the footer with ⬢")
 	}
 }
@@ -123,7 +126,9 @@ func TestOMPNoThinkingSeatProofReadsSeat(t *testing.T) {
 			q.LaunchValue = Launch{Profile: profile, ModelID: want.model, Effort: "off", Grade: gradeUnrated, Pool: commandcodePool, Gate: defaultGate}
 			q.GateDo = gatePools(map[string]string{profile: commandcodePool})
 			ompModelCatalog(fr, want.model, want.footer)
-			ompSeat(fr, "", func(int) string { return "π > ⬢ " + want.footer + " > 🌳 panewire/tree ▶─1%──…─1M─" })
+			ompSeat(fr, "", func(int) string {
+				return "π > ⬢ " + want.footer + " > 🌳 panewire/tree > ⑂ wk/fixture ▶─1%──…─1M─"
+			})
 			if err := a.Spawn(context.Background(), s); err != nil {
 				t.Fatalf("⬢ footer did not prove %s@off: %v", profile, err)
 			}
@@ -137,7 +142,9 @@ func TestOMPNoThinkingSeatProofReadsSeat(t *testing.T) {
 		q.LaunchValue = Launch{Profile: "omp-musespark13", ModelID: "commandcode/meta/muse-spark-1.3", Effort: "high", Grade: gradeUnrated, Pool: commandcodePool, Gate: defaultGate}
 		q.GateDo = gatePools(map[string]string{"omp-musespark13": commandcodePool})
 		ompModelCatalog(fr, "commandcode/meta/muse-spark-1.3", "Muse Spark 1.3")
-		ompSeat(fr, "", func(int) string { return "π > ⬢ Muse Spark 1.3 > 🌳 panewire/tree ▶─1%──…─1M─" })
+		ompSeat(fr, "", func(int) string {
+			return "π > ⬢ Muse Spark 1.3 > 🌳 panewire/tree > ⑂ wk/fixture ▶─1%──…─1M─"
+		})
 		err := a.Spawn(context.Background(), s)
 		if err == nil || !strings.Contains(err.Error(), "omp model/effort not proven") {
 			t.Fatalf("a thinking seat proved with ⬢ icon instead of an effort glyph: %v", err)
@@ -182,7 +189,8 @@ func TestOMPNoThinkingSeatLeavesOtherRungsUnchanged(t *testing.T) {
 	a := testApp(t)
 	for profile, seat := range a.Policy.Profiles {
 		if seat.Kind == "omp" && seat.NoThinking {
-			if _, ok := ompNoThinkingSeats[profile]; !ok {
+			_, seeded := ompNoThinkingSeats[profile]
+			if _, muse := ompMuseNoThinkingSeats[profile]; !seeded && !muse {
 				t.Fatalf("seat %s gained no_thinking", profile)
 			}
 		}
@@ -226,7 +234,7 @@ func TestOMPNoThinkingSeatLeavesOtherRungsUnchanged(t *testing.T) {
 			}
 			for _, effort := range tc.efforts {
 				in := admissionInputs{Rows: admissionRows(seed), Seats: a.Policy.Profiles}
-				if _, _, _, err := in.resolveRow(admissionRequest{Profile: tc.profile, Effort: effort, Role: "worker", E6Arm: tc.profile + "@" + effort}, true); err != nil {
+				if _, _, _, err := in.resolveRow(admissionRequest{Profile: tc.profile, Effort: effort, Role: "implementer", E6Arm: tc.profile + "@" + effort}, true); err != nil {
 					t.Fatalf("%s@%s refused: %v", tc.profile, effort, err)
 				}
 			}
@@ -253,7 +261,7 @@ func TestOMPNoThinkingSeatLeavesOtherRungsUnchanged(t *testing.T) {
 		}
 		in := admissionInputs{Rows: rows, Seats: a.Policy.Profiles}
 		for _, effort := range []string{"low", "high", "max"} {
-			if _, _, _, err := in.resolveRow(admissionRequest{Profile: "omp-dsflash41", Effort: effort, Role: "worker", E6Arm: "omp-dsflash41@" + effort}, true); err != nil {
+			if _, _, _, err := in.resolveRow(admissionRequest{Profile: "omp-dsflash41", Effort: effort, Role: "implementer", E6Arm: "omp-dsflash41@" + effort}, true); err != nil {
 				t.Fatalf("omp-dsflash41@%s refused: %v", effort, err)
 			}
 		}

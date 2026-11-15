@@ -151,7 +151,7 @@ func TestSubmitHostRefusalNamesTheMissingCapability_t4270(t *testing.T) {
 // task bound to that builder; the submit must not refuse what the node takes.
 func TestSubmitPrepareAcceptsReviewPassOfBuilderBoundTask_t4270(t *testing.T) {
 	task := taskJSON(map[string]any{"state": "developing", "title": "task (grade A, T1)", "claimed_by": "builder-label", "refs": map[string]any{"job_id": "builder-1"}})
-	a, s := submitPreflightFixture(t, "job-a", task, "--role", "reviewer", "--builder-family", "openai", "--builder-job", "builder-1", "--report-relative", "job-a/report.md")
+	a, s := submitPreflightFixture(t, "job-a", task, "--role", "reviewer", "--author-family", "openai", "--builder-job", "builder-1", "--report-relative", "job-a/report.md")
 	if err := a.submitPreflight(context.Background(), s); err != nil {
 		t.Fatalf("a review pass of the builder's task was refused: %v", err)
 	}
@@ -191,12 +191,12 @@ func TestSubmitPrepareReplayIgnoresLaterTaskState_t4270(t *testing.T) {
 func TestSubmitPrepareAcceptsWhatTheNodeExempts_t4270(t *testing.T) {
 	merged := taskJSON(map[string]any{"state": "merged", "title": "task (grade A, T1)"})
 	for name, extra := range map[string][]string{
-		"counsel":                   {"--role", "counsel"},
-		"reviewer with family only": {"--role", "reviewer", "--builder-family", "openai"},
+		"consult":                   {"--role", "consult"},
+		"reviewer with family only": {"--role", "reviewer", "--author-family", "openai"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			task := merged
-			if name == "counsel" {
+			if name == "consult" {
 				task = taskJSON(map[string]any{"state": "developing", "title": "task without a marker"})
 			}
 			a, s := submitPreflightFixture(t, "job-a", task, extra...)

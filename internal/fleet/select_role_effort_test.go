@@ -45,8 +45,8 @@ func gateAsked(q *fakeQuota, profile, effort string) bool {
 // the record names codex-sol skipped with role_effort_unplaced.
 func TestLeadSkipsFamilyWhoseRoleEffortRungIsUnplaced(t *testing.T) {
 	for _, tc := range []struct{ name, role, override string }{
-		{"--routing-role consult", "worker", "consult"},
-		{"--role counsel (consult)", "counsel", ""},
+		{"resolve --role consult (implementer seat)", "implementer", "consult"},
+		{"--role consult", "consult", ""},
 	} {
 		a, s, q := roleEffortFixture(t)
 		s.Role, s.RoutingRole = tc.role, tc.override
@@ -129,7 +129,7 @@ func TestNonLeadRolesKeepTodaysOrdering(t *testing.T) {
 	} {
 		a, s, q := roleEffortFixture(t)
 		serveRouting(t, tc.body)
-		s.Role = "worker"
+		s.Role = "implementer"
 		q.CatalogRows = append(q.CatalogRows, CatalogRow{Profile: "sonnet", Effort: "high", Grade: "C", Pool: "claude", Gate: "default", ModelID: "sonnet-m"})
 		sel, e := a.selectProfile(context.Background(), s)
 		if e != nil {
@@ -165,7 +165,7 @@ func TestNonLeadRolesKeepTodaysOrdering(t *testing.T) {
 }
 
 // Acceptance 4: `panewire resolve --role consult` prints the choice spawn's
-// selection makes, and `plan --routing-role consult` agrees.
+// selection makes, and `plan --role consult` agrees.
 func TestResolveLeadMatchesSpawnUnderRoleEffortCap(t *testing.T) {
 	a, s, _ := roleEffortFixture(t)
 	s.RoutingRole = "consult"
@@ -212,7 +212,7 @@ func TestResolveLeadMatchesSpawnUnderRoleEffortCap(t *testing.T) {
 	a, _, q := roleEffortFixture(t)
 	q.LaunchValue = Launch{Profile: "opus", ModelID: "opus-m", Effort: "high", Grade: "S", Gate: "default", Pool: "claude"}
 	out = captureOut(a)
-	if e := a.Run(context.Background(), []string{"plan", "--t", "T1", "--routing-role", "consult", "--grade", "A", "--json"}); e != nil {
+	if e := a.Run(context.Background(), []string{"plan", "--t", "T1", "--role", "consult", "--grade", "A", "--json"}); e != nil {
 		t.Fatalf("plan: %v\n%s", e, out)
 	}
 	var plan map[string]any

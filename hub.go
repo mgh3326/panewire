@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -22,6 +23,7 @@ import (
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
 	"github.com/getsentry/sentry-go"
+	"github.com/mgh3326/panewire/internal/configkeys"
 	"github.com/mgh3326/panewire/internal/fleet"
 )
 
@@ -32,9 +34,15 @@ const (
 	hubMaxMessageBytes     = 32 << 10
 	hubUIEventLimit        = 20
 	hubVersion             = "panewire-r13"
+	// nodeLoopHKTimeout bounds each message's synchronous handoffkeep work so
+	// the websocket loop resumes and can process later node messages.
+	nodeLoopHKTimeout = 5 * time.Second
 )
 
 var hubVersionPattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
+
+// defaultHubConsultTimeout bounds one consult from request to answer.
+const defaultHubConsultTimeout = 2 * time.Hour
 
 // HubServerConfig contains only local, already-loaded static credentials. The
 // operator credential is the HUB_TOKEN_operator entry; agent credentials use
@@ -79,16 +87,23 @@ type HubServerConfig struct {
 	// takes the task reservation (docs/hub-spawn-operations.md). Zero is
 	// defaultUnworkedLandingGrace.
 	UnworkedLandingGrace time.Duration
-	Notifier             HubNotifier
-	Logger               *slog.Logger
-	BurstPolicyPath      string
-	// WakeConfigPath is the optional operator-owned JSON routing table for
-	// `panewire node wake` (hot-reloaded like the burst policy). Empty leaves
-	// the wake endpoint answering unknown_target for every machine.
-	WakeConfigPath string
-	// PlacementPolicyPath is an optional operator-owned JSON policy. It is
-	// deliberately separate from the R12 burst policy because placement never
-	// changes pressure thresholds or dispatches work.
+	// SpawnStartBy is how long a grant-required spawn frame may wait for its
+	// start grant; SpawnStartByMargin is how long after that the hub fences an
+	// ungranted attempt (hub_spawn_grant.go). Zero is the default.
+	SpawnStartBy       time.Duration
+	SpawnStartByMargin time.Duration
+	// SpawnGrantDrain stops new grant-required bindings and new quota
+	// hand-offs, to drain *_grant rows before a hub rollback
+	// (docs/hub-spawn-operations.md, "Rolling the hub back past this change").
+	SpawnGrantDrain bool
+	// SpawnRollbackDrain freezes every spawn producer (client submissions,
+	// quota hand-offs, consult spawns) while the coordinator keeps settling
+	// the queue, before a rollback past parking (hk 4661,
+	// docs/hub-spawn-operations.md#rolling-back-past-parking).
+	SpawnRollbackDrain bool
+	Logger             *slog.Logger
+	// PlacementPolicyPath is an optional operator-owned JSON policy. Placement
+	// never changes pressure thresholds or dispatches work.
 	PlacementPolicyPath string
 	PrometheusURL       string
 	PrometheusClient    *http.Client
@@ -121,17 +136,30 @@ type HubServerConfig struct {
 	PRStatusHost string
 	// RelayAckTimeout bounds the time an injected relay may remain silent.
 	RelayAckTimeout time.Duration
+	// ConsultTimeout bounds one consult from request to answer. Zero is two
+	// hours (docs/consult-on-request.md).
+	ConsultTimeout time.Duration
 	// AcceptingOverridesPath optionally makes operator acceptance choices durable.
 	AcceptingOverridesPath string
+	// PaneSweepInterval is how often the hub asks each node to close the panes of
+	// jobs that ended at least PaneSweepAge ago (docs/pane-sweep.md). Zero keeps the
+	// sweep off, so a config built without it never ticks.
+	PaneSweepInterval time.Duration
+	// PaneSweepAge is how long a job must have ended before its pane is closed.
+	PaneSweepAge time.Duration
+	// FleetStatusInterval is how often the hub writes the fleet status
+	// snapshot to hk (docs/fleet-status.md). Zero keeps it off, so a config
+	// built for a test never writes; a negative value is invalid.
+	FleetStatusInterval time.Duration
+	// FleetStatusPublish replaces the hk document write in tests; nil writes
+	// with fleet.PutHKDocument under the hub's hk credential.
+	FleetStatusPublish func(context.Context, string) error
+	// FleetStatusPlans replaces the per-grade plan in tests; nil runs the
+	// hub's own fleet App as a read-only dry run.
+	FleetStatusPlans func(context.Context) []fleet.StatusPlan
 	// handoffkeep is the durable relay-event store. It is package-private so the
 	// hub's public configuration keeps no credential-bearing field.
 	handoffkeep *handoffkeepRelayClient
-	// ChatStore is the durable operator-chat store. It is package-private for
-	// the same reason as handoffkeep. A nil store disables the chat endpoints
-	// (503); the hub and the relay paths run regardless.
-	ChatStore ChatStore
-	// ChatDeskLane is the fixed server-owned destination for operator chat.
-	ChatDeskLane string
 }
 
 // HubNode is the deliberately small presence view returned to authenticated
@@ -152,6 +180,9 @@ type HubNode struct {
 	RemoteMeta          map[string]string   `json:"remote_meta"`
 	State               string              `json:"state"`
 	SessionSnapshot     *HubSessionSnapshot `json:"session_snapshot,omitempty"`
+	// Checkouts is each allow-listed git checkout's revision from the last
+	// heartbeat (node_checkout_pull.go); nil when the node reported none.
+	Checkouts map[string]HubCheckoutRev `json:"checkouts,omitempty"`
 }
 
 // HubNodeLoad is the CPU-only console projection of a heartbeat host_load.
@@ -173,6 +204,9 @@ type HubLastNote struct {
 }
 
 type hubNodeRecord struct {
+	// appliedPending belongs to this registration and is guarded by HubServer.mu.
+	appliedPending    bool
+	appliedTimer      *time.Timer
 	machineID         string
 	accepting         bool
 	capabilities      map[string]bool
@@ -188,11 +222,16 @@ type hubNodeRecord struct {
 	lastHeartbeat time.Time
 	agent         *hubAgent
 	activeJobs    map[string]HubActiveJob
-	hostLoad      *HubHostLoad
-	hostMemory    *HubHostMemory
+	// activeReported is true once a heartbeat has carried activeJobs since the
+	// hello that created this record; the hello empties activeJobs until then.
+	activeReported bool
+	hostLoad       *HubHostLoad
+	hostMemory     *HubHostMemory
 	// hostActivity is the last heartbeat's user-input report, nil when the node
 	// sent none (host_activity.go). It is recorded only.
-	hostActivity    *HubHostActivity
+	hostActivity *HubHostActivity
+	// checkouts is the last heartbeat's checkout revisions (node_checkout_pull.go).
+	checkouts       map[string]HubCheckoutRev
 	sessionSnapshot *hubSessionSnapshotRecord
 	// powerSource and powerAt are the last power report (host_signals.go).
 	powerSource string
@@ -204,21 +243,19 @@ type hubNodeRecord struct {
 }
 
 type hubAgent struct {
-	conn *websocket.Conn
+	conn     *websocket.Conn
+	lifetime context.Context // cancelled when this connection's handler exits
 	// credential is the node token the websocket opened with; an auth reload
 	// that no longer maps the machine to it closes the socket.
 	credential string
 	// machineID is the node this socket authenticated as. It is the sender
 	// the lane inbox records for a lane.event the node relays.
 	machineID   string
-	writeMu     sync.Mutex
+	writeMu     hubWriteMutex
 	transient   bool
 	failovers   chan hubFailoverEvent
-	bursts      chan hubBurstEvent
-	wakes       chan hubWakeRequestEvent
 	revocations chan hubJobRevokedEvent
 	assignments chan hubJobAssignedEvent
-	holds       chan hubBurstHoldsEvent
 	// features carries hub.features; featuresSent stops it after the first.
 	features     chan hubFeaturesEvent
 	featuresSent atomic.Bool
@@ -242,9 +279,14 @@ type HubActiveJob struct {
 	Pane           string `json:"pane,omitempty"`
 	Tier           string `json:"tier,omitempty"`
 	Role           string `json:"role,omitempty"`
-	StartedAt      string `json:"started_at,omitempty"`
-	LastEventKind  string `json:"last_event_kind,omitempty"`
-	LastEventAt    string `json:"last_event_at,omitempty"`
+	// Profile is the profile (a catalog profile or a seat name) the job was
+	// placed on, read from its own job.spawned receipt. A node's heartbeat
+	// carries it so a direct `panewire spawn` counts toward the pool cap the
+	// hub applies to its own spawns (hk 3399).
+	Profile       string `json:"profile,omitempty"`
+	StartedAt     string `json:"started_at,omitempty"`
+	LastEventKind string `json:"last_event_kind,omitempty"`
+	LastEventAt   string `json:"last_event_at,omitempty"`
 }
 
 type hubJobRecord struct {
@@ -304,11 +346,6 @@ type hubJobEventPayload struct {
 	// operatorIngress marks an event the operator posted through the R24
 	// HTTP ingress; the inbox-only rule leaves it as before (hk 3602).
 	operatorIngress bool
-	// operatorChat marks an operator chat turn the hub's own chat created
-	// (relayChatMessage), or a replay of one the chat store vouches for
-	// (hubChatTurn). The inbox-only rule leaves it as before; an event id
-	// that merely looks like chat-N earns nothing (hk 3602).
-	operatorChat bool
 }
 
 type relayAckPayload struct {
@@ -329,6 +366,9 @@ type hubRelayInjectEvent struct {
 	Lane    string `json:"lane,omitempty"`
 	EventID int64  `json:"event_id,omitempty"`
 	Deliver string `json:"deliver,omitempty"`
+	// Delivered, when set, runs once the writer has written the event to the
+	// node. It is never sent on the wire (hub_drain_wake.go).
+	Delivered func() `json:"-"`
 }
 
 type hubJobRevokedEvent struct {
@@ -358,11 +398,6 @@ type hubJobAssignedEvent struct {
 	Type  string `json:"type"`
 	JobID string `json:"job_id"`
 	Epoch uint64 `json:"epoch"`
-}
-
-type hubBurstHoldsEvent struct {
-	Type        string `json:"type"`
-	HoldsActive bool   `json:"holds_active"`
 }
 
 type hubEvent struct {
@@ -401,11 +436,16 @@ type hubSubscriptionMessage struct {
 // HubServer relays presence and events. Accepted spawns and lane inbox work
 // live in the configured durable store; presence and legacy job fences do not.
 type HubServer struct {
+	// replayMu excludes registration changes and report settlement from replay walks.
+	replayMu             sync.RWMutex
 	inbox                *hubInbox
 	spawnTraceOnce       sync.Once
 	spawnSentry          *sentry.Client
 	spawnCoordinatorOnce sync.Once
 	spawnNewApp          func(io.Writer, io.Writer) (*fleet.App, error)
+	// consultPlan resolves a consult seat and its spawn submission. Nil uses
+	// the hub's own fleet App (fleet.App.PlanConsult); tests inject one.
+	consultPlan func(context.Context, fleet.ConsultPlanInput) (fleet.ConsultPlan, error)
 	// quotaReplacePoll overrides how often a quota-stop replacement looks for
 	// its successor's outcome; zero uses quotaReplacePoll.
 	quotaReplacePoll time.Duration
@@ -419,7 +459,46 @@ type HubServer struct {
 	// quotaReplaceBudget.
 	quotaReplaceBudget time.Duration
 	spawnKick          chan struct{}
-	spawnWorkers       sync.WaitGroup
+	// spawnWakes are the park reasons an event named since the coordinator's
+	// last wake (hub_spawn_park.go); spawnRand draws the back-off spread
+	// (nil: math/rand).
+	spawnWakeMu sync.Mutex
+	spawnWakes  map[string]bool
+	spawnRand   func() float64
+	// spawnWakeCounts counts each reason's noted events, so a park can tell
+	// one raced it; spawnWakeHeld holds the next batch for a timer tick.
+	spawnWakeCounts map[string]uint64
+	spawnWakeHeld   bool
+	spawnWorkers    sync.WaitGroup
+	placementKick   chan struct{}
+	placementAsync  atomic.Bool
+	// placementRecordClient is the App the outbox delivers hk placement
+	// records through; built on first use by placementRecordApp.
+	placementRecordClient *fleet.App
+	placementAppMu        sync.Mutex
+	// placementAppFn builds the delivery App in tests; nil uses fleet.New.
+	placementAppFn func() (*fleet.App, error)
+	// placementDeliveryKey is the delivery JSON the cached client was built
+	// for; a snapshot row with different settings gets a fresh App.
+	placementDeliveryKey string
+	// placementDeferredSaves holds trace saves the store refused; the flush
+	// retries the row insert so the spooled record they belong to is picked
+	// up instead of orphaned without a pending row. The same list is kept
+	// in the inbox's deferred file so a restart does not lose it.
+	placementDeferredSaves  []placementDeferredSave
+	placementDeferredLoaded bool
+	placementDeferredCursor int
+	placementTraceBases     map[placementTraceBaseKey]placementDeferredBase
+	quotaRefresh            hubQuotaRefreshScheduler
+	spawnActions            hubSpawnActions
+	spawnAdmissions         hubKeyedLocks
+	placementTraces         hubKeyedLocks
+	// placementStalls holds the reason last logged for each attempt whose
+	// record is still undelivered (hub_placement_stall.go).
+	placementStallMu sync.Mutex
+	placementStalls  map[placementTraceBaseKey]string
+	// drain is the SIGTERM state (hub_drain.go).
+	drain hubDrain
 	// spawnOrphanProbed is when the hub last probed each stranded request's
 	// node for a labelled pane (hub_spawn_orphan.go); guarded by mu.
 	spawnOrphanProbed map[string]time.Time
@@ -433,20 +512,32 @@ type HubServer struct {
 	authFailedMissing bool
 	alertNodes        map[string]struct{}
 	now               func() time.Time
+	// waitingMu guards the start-condition check's poll time and its
+	// once-per-outage read failure log (hub_spawn_start_conditions.go).
+	waitingMu         sync.Mutex
+	waitingCheckedAt  time.Time
+	waitingReadFailed bool
+	// parkNoticeMu guards the parked-request owner notice's poll time and its
+	// candidate cursor (hub_spawn_park_notice.go).
+	parkNoticeMu        sync.Mutex
+	parkNoticeCheckedAt time.Time
+	parkNoticeCursor    spawnParkNoticeCursor
 	// fleetEvents writes a fleet event. Tests substitute a recorder; production
 	// leaves it nil and events go to the state directory (emitFleet).
 	fleetEvents func(time.Time, fleetEvent) bool
 	// heldLoop counts held role reservations per role key; heldLoopMu guards it
 	// separately from mu because a Sentry send must not run under the hub lock.
 	heldLoopMu        sync.Mutex
+	ladderMu          sync.Mutex
+	ladderPlan        func(context.Context, fleet.Submission) error
 	heldLoop          map[string]*spawnHeldLoop
 	heldLoopOrder     lruIndex[string]
+	consultTimeout    time.Duration
 	staleAfter        time.Duration
 	keepaliveInterval time.Duration
 	gracePeriod       time.Duration
 	orphanGrace       time.Duration
 	alertObservations int
-	notifier          HubNotifier
 	logger            *slog.Logger
 	// logFile is the optional --log-file sink; the hub owns it once the CLI
 	// constructor succeeds and Close releases it.
@@ -457,13 +548,6 @@ type HubServer struct {
 	lastNotes                        map[string]*HubLastNote
 	subscribers                      map[*hubEventSubscriber]struct{}
 	alerts                           map[string]*hubAlertState
-	burstPolicyPath                  string
-	burstPolicy                      BurstPolicy
-	burstPolicyModTime               time.Time
-	wakeConfigPath                   string
-	wakeTargets                      map[string]HubWakeTarget
-	wakeConfigModTime                time.Time
-	burstState                       *hubBurstState
 	unknownMessages                  uint64
 	unfencedCompletions              uint64
 	startedAt                        time.Time
@@ -472,7 +556,6 @@ type HubServer struct {
 	uiEvents                         []hubUIEvent
 	jobs                             map[string]*hubJobRecord
 	pendingRevocations               map[string]map[string]hubJobRevokedEvent
-	holds                            map[string]*hubBurstHold
 	placementPolicyPath              string
 	placementPolicy                  PlacementPolicy
 	placementPolicyModTime           time.Time
@@ -488,6 +571,7 @@ type HubServer struct {
 	prometheusBasicPass              string
 	placementCache                   placementCache
 	poolCooling                      map[string]time.Time
+	poolSweep                        poolSweepState
 	relayControl                     hubRelayControlState
 	reportRelayPath                  string
 	lanesNodeRowCap                  int
@@ -496,7 +580,6 @@ type HubServer struct {
 	laneReleaseGrace                 time.Duration
 	laneReleaseInterval              time.Duration
 	lanesWriteOps                    lanesWriteOps
-	controlReadiness                 func(controlPlaneTransferRequest, map[string]reportRelayRoute) []controlPlaneReadinessCheck
 	controlPlaneLanesPath            string
 	controlPlaneLanes                map[string]struct{}
 	controlPlaneLanesModTime         time.Time
@@ -504,14 +587,20 @@ type HubServer struct {
 	controlPlaneLanesLoaded          bool
 	controlPlaneLanesStatus          string
 	controlPlaneLanesLastFailure     string
+
+	// paneSweepInterval and paneSweepAge drive runPaneSweep (hub_pane_sweep.go); a
+	// zero interval keeps the sweep off.
+	paneSweepInterval time.Duration
+	paneSweepAge      time.Duration
+	// poolTriggerInterval drives runPoolTriggers (hub_pool_triggers.go); a zero
+	// interval keeps the retired-pool and credit-exhausted triggers off.
+	poolTriggerInterval time.Duration
 	// relayDedupe is an active injection claim. lanePersisted keeps the durable
 	// row ID while that claim is deliberately released between lane retries.
-	relayDedupe         map[string]int64
-	relayHeld           map[int64]hubRelayHeldProjection
-	relayCancelled      map[int64]struct{}
-	relayCancelledOrder lruIndex[int64]
-	lanePersisted       map[string]int64
-	lanePersistedOrder  lruIndex[string]
+	relayDedupe        map[string]int64
+	relayHeld          map[int64]hubRelayHeldProjection
+	lanePersisted      map[string]int64
+	lanePersistedOrder lruIndex[string]
 	// laneEventSHA remembers the durable payload fingerprint behind each
 	// lane.event dedupe key, so a resend under a different body is recorded
 	// as a mismatch even on paths that never reach a second POST (#725).
@@ -529,35 +618,8 @@ type HubServer struct {
 	quietTimings designQuietTimings
 
 	// unconfirmedNotices spaces delivery-unconfirmed notices (hk 3431).
-	unconfirmedNotices unconfirmedNoticeWindows
-	handoffkeep        *handoffkeepRelayClient
-	chatStore          ChatStore
-	chatDeskLane       string
-	chatKick           chan struct{}
-	chatMu             sync.Mutex
-	chatPending        map[int64]chatPendingMessage
-	// chatLaneOf preserves a failed message's lane until restart. After
-	// restart, the durable relay event is the route authority.
-	chatLaneOf map[int64]string
-	// chatCancelled marks rows closed by cancel. The store's only terminal
-	// state is delivered, so without this flag a cancelled row displays as a
-	// real delivery; the flag is hub-memory and lasts until restart.
-	chatCancelled map[int64]struct{}
-	// chatRetryMu serializes one full retry decision — link recovery, live
-	// relay check, new row — so two concurrent retries of the same failed
-	// row cannot both mint a directive. chatRetriedFrom maps a failed source
-	// id to the retry row it produced; after a restart the same information
-	// is recovered from the durable retry marker on the retry's relay row.
-	chatRetryMu     sync.Mutex
-	chatRetriedFrom map[int64]int64
-	// chatSweepCursor is the settled-prefix watermark the orphan sweep has
-	// consumed: the highest message id below which every stored row was
-	// permanently settled (assistant, not_sent, failed, or failed during
-	// the pass), so a growing backlog cannot pin the sweep on the oldest
-	// rows. chatMsgHighWater positions the /chat/data tail window.
-	chatSweepCursor             int64
-	chatMsgHighWater            int64
-	chatSweepWarned             bool
+	unconfirmedNotices          unconfirmedNoticeWindows
+	handoffkeep                 *handoffkeepRelayClient
 	unpersistedRelayEvents      uint64
 	replayExhaustedEvents       uint64
 	alreadyDeliveredRelayEvents uint64
@@ -565,8 +627,21 @@ type HubServer struct {
 	spawnRecords                map[string]*hubSpawnRecord
 	nodeCommands                map[string]*hubNodeCommandPending
 	unworkedLandingGrace        time.Duration
-	nodeCommandWait             time.Duration // fixture seam; zero is hubNodeCommandWait.
-	nodeAgentsWait              time.Duration // fixture seam; zero is hubNodeAgentsWait.
+	// reviewerEndLogged is the refusal each reviewer job last logged in the
+	// posted-result pass, so a job that keeps failing for the same reason logs
+	// once, not once a pass (hub_spawn_reviewer_end.go).
+	reviewerEndLogged map[string]string
+	// reviewerEndSettled holds the reviewer jobs the pass found ended, so it
+	// reads each hk record once while the job stays in its window.
+	reviewerEndSettled map[string]bool
+	spawnStartBy       time.Duration
+	spawnStartByMargin time.Duration
+	spawnGrantDrain    bool
+	spawnRollbackDrain bool
+	nodeCommandWait    time.Duration // fixture seam; zero is hubNodeCommandWait.
+	checkoutPullWait   time.Duration // fixture seam; zero is hubCheckoutPullWait.
+	nodeAgentsWait     time.Duration // fixture seam; zero is hubNodeAgentsWait.
+
 	// laneStallMu is TryLock'd so at most one lane-stall observation runs and
 	// is held for the run's whole life: once Close has taken it and set
 	// laneStallClosing, no new run can start and any in-flight one is already
@@ -575,6 +650,12 @@ type HubServer struct {
 	laneStallMu      sync.Mutex
 	laneStallClosing bool
 	laneStallSweeps  sync.WaitGroup
+	// drainWake is each design lane's drain-wake state (hub_drain_wake.go),
+	// owned by the lane-stall sweep goroutine under laneStallMu.
+	drainWake map[string]*drainWakeLane
+	// drainWakeDelivered carries the writer's confirmation of a drain line back
+	// to the sweep goroutine. Created by the first sweep.
+	drainWakeDelivered chan drainWakeDelivery
 	// laneHeldCountProbe is a test hook laneHeldCountLocked fires once per
 	// scan, so a test can tell the count ran only on an activating
 	// observation.
@@ -596,9 +677,20 @@ type HubServer struct {
 	// keeps at most one load publication in flight (docs/fleet-state.md).
 	fleetState     *fleetStateStore
 	fleetStateOnce sync.Once
+	// fleetStatusInterval is how often the fleet status snapshot is written;
+	// zero disables it. fleetStatusPublish and fleetStatusPlanFn are the
+	// test seams for the hk write and the per-grade plan (fleet_status.go).
+	fleetStatusInterval time.Duration
+	fleetStatusPublish  func(context.Context, string) error
+	fleetStatusPlanFn   func(context.Context) []fleet.StatusPlan
 	// launchBackoffs counts consecutive launch failures per (machine, kind),
 	// guarded by mu (hub_readiness.go).
 	launchBackoffs map[launchKey]*launchBackoff
+	// placementCounts are the jobs decided onto a host and not yet claimed by
+	// it, guarded by mu (placement_count.go).
+	placementCounts map[string]placementCount
+	// placementGate admits one spawn decision at a time (placement_count.go).
+	placementGate decisionGate
 	// oneTimeActions is the first-run needs already told to the desk, guarded
 	// by mu (hub_one_time_action.go).
 	oneTimeActions map[oneTimeActionKey]time.Time
@@ -609,8 +701,6 @@ type HubServer struct {
 	closeMu    sync.Mutex
 	closed     bool
 	stallBeats map[string]*hubStallBeatState
-	// sessionReap keeps the latest session-reap (#603) report per machine.
-	sessionReap map[string]*hubSessionReapRecord
 }
 
 // hubStallBeatState is the hub's half of the detector no-data contract. It
@@ -627,9 +717,6 @@ type hubStallBeatState struct {
 // NewHubServer validates a complete static-token configuration. Tokens remain
 // private to the server and are never included in errors or logs.
 func NewHubServer(config HubServerConfig) (*HubServer, error) {
-	if config.ChatStore != nil && !validReportRelayLaneName(config.ChatDeskLane) {
-		return nil, errors.New("hub chat desk lane is required and must be valid")
-	}
 	if len(config.Tokens) == 0 {
 		return nil, errors.New("hub token configuration is required")
 	}
@@ -672,32 +759,23 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 	if config.KeepaliveInterval <= 0 {
 		config.KeepaliveInterval = 10 * time.Second
 	}
+	if config.ConsultTimeout <= 0 {
+		config.ConsultTimeout = defaultHubConsultTimeout
+	}
 	if config.GracePeriod <= 0 {
 		config.GracePeriod = defaultHubGracePeriod
+	}
+	if config.SpawnStartBy <= 0 {
+		config.SpawnStartBy = defaultSpawnStartBy
+	}
+	if config.SpawnStartByMargin <= 0 {
+		config.SpawnStartByMargin = defaultSpawnStartByMargin
 	}
 	if config.UnworkedLandingGrace <= 0 {
 		config.UnworkedLandingGrace = defaultUnworkedLandingGrace
 	}
 	if config.OrphanGrace <= 0 {
 		config.OrphanGrace = config.GracePeriod
-	}
-	var burstPolicy BurstPolicy
-	var burstPolicyModTime time.Time
-	if config.BurstPolicyPath != "" {
-		policy, modTime, err := LoadBurstPolicy(config.BurstPolicyPath)
-		if err != nil {
-			return nil, errors.New("hub burst policy is invalid")
-		}
-		burstPolicy, burstPolicyModTime = policy, modTime
-	}
-	var wakeTargets map[string]HubWakeTarget
-	var wakeConfigModTime time.Time
-	if config.WakeConfigPath != "" {
-		targets, modTime, err := LoadHubWakeConfig(config.WakeConfigPath)
-		if err != nil {
-			return nil, errors.New("hub wake config is invalid")
-		}
-		wakeTargets, wakeConfigModTime = targets, modTime
 	}
 	placementPolicy := DefaultPlacementPolicy()
 	var placementPolicyModTime time.Time
@@ -710,6 +788,7 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 		if err != nil {
 			return nil, errors.New("hub placement policy is invalid")
 		} else {
+			configkeys.Warn(config.Logger, config.PlacementPolicyPath, policy.ignoredKeys)
 			placementPolicy, placementPolicyModTime = policy, modTime
 			placementPolicyObservedModTime = modTime
 			placementPolicyStatus = "current"
@@ -718,12 +797,16 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 	if config.RelayAckTimeout <= 0 {
 		config.RelayAckTimeout = relayAckTimeoutFromEnv()
 	}
-	overrides, err := loadAcceptingOverrides(config.AcceptingOverridesPath)
+	overrides, ignoredOverrideKeys, err := loadAcceptingOverrides(config.AcceptingOverridesPath)
 	if err != nil {
 		return nil, errors.New("hub accepting overrides are invalid")
 	}
+	configkeys.Warn(config.Logger, config.AcceptingOverridesPath, ignoredOverrideKeys)
 	if config.LanesNodeRowCap < 0 {
 		return nil, errors.New("hub lanes node row cap is invalid")
+	}
+	if config.FleetStatusInterval < 0 {
+		return nil, errors.New("hub fleet status interval is invalid")
 	}
 	if config.LanesNodeRowCap == 0 {
 		config.LanesNodeRowCap = defaultLanesNodeRowCap
@@ -747,7 +830,7 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 	}
 	controlPlaneLanes := make(map[string]struct{}, len(config.ControlPlaneLanes))
 	for _, lane := range config.ControlPlaneLanes {
-		if !laneNamePattern.MatchString(lane) {
+		if !LaneNamePattern.MatchString(lane) {
 			return nil, errors.New("hub control-plane lanes are invalid")
 		}
 		if _, duplicate := controlPlaneLanes[lane]; duplicate {
@@ -783,18 +866,46 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 	if err != nil {
 		return nil, err
 	}
+	if inbox != nil {
+		configkeys.Warn(config.Logger, config.DeliveryPolicyPath, inbox.policy.ignoredKeys)
+	}
 	closeCtx, closeCancel := context.WithCancel(context.Background())
 	hub := &HubServer{
-		inbox: inbox, spawnKick: make(chan struct{}, 1),
-		authPath: config.AuthPath, alertNodes: alertNodes, relayControl: newHubRelayControlState(config, overrides), now: config.Now, staleAfter: config.StaleAfter, keepaliveInterval: config.KeepaliveInterval,
-		gracePeriod: config.GracePeriod, orphanGrace: config.OrphanGrace, unworkedLandingGrace: config.UnworkedLandingGrace, alertObservations: defaultHubAlertObservations, notifier: config.Notifier, logger: config.Logger, burstPolicyPath: config.BurstPolicyPath,
+		inbox: inbox, spawnKick: make(chan struct{}, 1), placementKick: make(chan struct{}, 1),
+		authPath: config.AuthPath, alertNodes: alertNodes, relayControl: newHubRelayControlState(config, overrides), now: config.Now, consultTimeout: config.ConsultTimeout, staleAfter: config.StaleAfter, keepaliveInterval: config.KeepaliveInterval,
+		gracePeriod: config.GracePeriod, orphanGrace: config.OrphanGrace, unworkedLandingGrace: config.UnworkedLandingGrace, spawnStartBy: config.SpawnStartBy, spawnStartByMargin: config.SpawnStartByMargin, spawnGrantDrain: config.SpawnGrantDrain, spawnRollbackDrain: config.SpawnRollbackDrain, alertObservations: defaultHubAlertObservations, logger: config.Logger,
+		paneSweepInterval: config.PaneSweepInterval, paneSweepAge: config.PaneSweepAge,
+		poolTriggerInterval: defaultPoolTriggerInterval,
 		placementPolicyPath: config.PlacementPolicyPath, placementPolicy: placementPolicy, placementPolicyModTime: placementPolicyModTime, placementPolicyObservedModTime: placementPolicyObservedModTime, placementPolicyLoaded: placementPolicyLoaded, placementPolicyStatus: placementPolicyStatus, placementPolicyLastFailure: placementPolicyLastFailure, prometheusURL: config.PrometheusURL, prometheusClient: config.PrometheusClient, prometheusBearer: config.PrometheusBearer, prometheusBasicUser: config.PrometheusBasicUser, prometheusBasicPass: config.PrometheusBasicPass,
-		nodes: make(map[string]*hubNodeRecord), lastNotes: make(map[string]*HubLastNote), subscribers: make(map[*hubEventSubscriber]struct{}), alerts: make(map[string]*hubAlertState), burstPolicy: burstPolicy, burstPolicyModTime: burstPolicyModTime, wakeConfigPath: config.WakeConfigPath, wakeTargets: wakeTargets, wakeConfigModTime: wakeConfigModTime, burstState: &hubBurstState{}, startedAt: config.Now().UTC(), uiAllowCFOnly: config.UIAllowCFOnly, jobs: make(map[string]*hubJobRecord), pendingRevocations: make(map[string]map[string]hubJobRevokedEvent), holds: make(map[string]*hubBurstHold), reportRelayPath: config.ReportRelayPath, lanesNodeRowCap: config.LanesNodeRowCap, prStatusHost: config.PRStatusHost, controlPlaneLanesPath: config.ControlPlaneLanesPath, controlPlaneLanes: controlPlaneLanes, controlPlaneLanesModTime: controlPlaneLanesModTime, controlPlaneLanesObservedModTime: controlPlaneLanesObservedModTime, controlPlaneLanesLoaded: controlPlaneLanesLoaded, controlPlaneLanesStatus: controlPlaneLanesStatus, controlPlaneLanesLastFailure: controlPlaneLanesLastFailure, relayDedupe: make(map[string]int64), relayHeld: make(map[int64]hubRelayHeldProjection), relayCancelled: make(map[int64]struct{}), lanePersisted: make(map[string]int64), laneEventSHA: make(map[string]string), replayExhausted: make(map[int64]struct{}), handoffkeep: config.handoffkeep, chatStore: config.ChatStore, chatDeskLane: config.ChatDeskLane, chatKick: make(chan struct{}, 1), chatPending: make(map[int64]chatPendingMessage), chatLaneOf: make(map[int64]string), chatCancelled: make(map[int64]struct{}), chatRetriedFrom: make(map[int64]int64), cfAccess: cfAccess, spawnRecords: make(map[string]*hubSpawnRecord), stallBeats: make(map[string]*hubStallBeatState), closeCtx: closeCtx, closeCancel: closeCancel,
+		nodes: make(map[string]*hubNodeRecord), lastNotes: make(map[string]*HubLastNote), subscribers: make(map[*hubEventSubscriber]struct{}), alerts: make(map[string]*hubAlertState), startedAt: config.Now().UTC(), uiAllowCFOnly: config.UIAllowCFOnly, jobs: make(map[string]*hubJobRecord), pendingRevocations: make(map[string]map[string]hubJobRevokedEvent), reportRelayPath: config.ReportRelayPath, lanesNodeRowCap: config.LanesNodeRowCap, prStatusHost: config.PRStatusHost, controlPlaneLanesPath: config.ControlPlaneLanesPath, controlPlaneLanes: controlPlaneLanes, controlPlaneLanesModTime: controlPlaneLanesModTime, controlPlaneLanesObservedModTime: controlPlaneLanesObservedModTime, controlPlaneLanesLoaded: controlPlaneLanesLoaded, controlPlaneLanesStatus: controlPlaneLanesStatus, controlPlaneLanesLastFailure: controlPlaneLanesLastFailure, relayDedupe: make(map[string]int64), relayHeld: make(map[int64]hubRelayHeldProjection), lanePersisted: make(map[string]int64), laneEventSHA: make(map[string]string), replayExhausted: make(map[int64]struct{}), handoffkeep: config.handoffkeep, cfAccess: cfAccess, spawnRecords: make(map[string]*hubSpawnRecord), stallBeats: make(map[string]*hubStallBeatState), closeCtx: closeCtx, closeCancel: closeCancel,
 	}
 	hub.auth.Store(&authSet)
 	hub.fleetState = newFleetStateStore()
+	hub.fleetStatusInterval = config.FleetStatusInterval
+	hub.fleetStatusPublish = config.FleetStatusPublish
+	hub.fleetStatusPlanFn = config.FleetStatusPlans
 	hub.quietTimings = defaultDesignQuietTimings()
+	if hub.inbox != nil {
+		cleared, err := hub.inbox.store.clearReviewerReservations()
+		if err != nil {
+			hub.closeCancel()
+			_ = hub.inbox.store.close()
+			return nil, err
+		}
+		if cleared > 0 {
+			hub.logger.Info("hub cleared reviewer role reservations", "rows", cleared)
+		}
+	}
 	hub.prepareInbox()
+	if hub.inbox != nil {
+		hub.inbox.store.spawnRetryDelay = hub.spawnRetryDelay
+		hub.inbox.store.spawnFrozen = hub.spawnRollbackDrain
+	}
+	if err := hub.restorePlacementCounts(); err != nil {
+		hub.closeCancel()
+		_ = hub.inbox.store.close()
+		return nil, err
+	}
 	return hub, nil
 }
 
@@ -832,6 +943,7 @@ func (h *HubServer) Close() error {
 	if h.closeCancel != nil {
 		h.closeCancel()
 	}
+	h.closeQuotaRefreshes()
 	// The mutex is held for a run's whole life, so taking it here waits the
 	// run out; the flag it then leaves set keeps every later TryLock from
 	// counting a fresh run against the WaitGroup after Close has begun.
@@ -864,24 +976,11 @@ func (h *HubServer) Handler() http.Handler {
 	mux.HandleFunc("GET /healthz", h.handleHealthz)
 	mux.HandleFunc("GET /ui", h.handleUI)
 	mux.HandleFunc("GET /ui/data.json", h.handleUIData)
-	mux.HandleFunc("GET /chat", h.handleChat)
-	mux.HandleFunc("GET /chat/data", h.handleChatData)
-	mux.HandleFunc("POST /chat/messages", h.handleChatMessageCreate)
-	mux.HandleFunc("POST /chat/messages/{id}/retry", h.handleChatMessageRetry)
-	mux.HandleFunc("POST /chat/messages/{id}/cancel", h.handleChatMessageCancel)
-	mux.HandleFunc("POST /chat/questions/{id}/transition", h.handleChatQuestionTransition)
-	mux.HandleFunc("POST /v1/chat/questions", h.handleChatQuestionUpsert)
 	mux.HandleFunc("GET /v1/nodes", h.handleNodes)
 	mux.HandleFunc("GET /v1/lanes", h.handleLanes)
 	mux.HandleFunc("PUT /v1/lanes/{lane}", h.handlePutLane)
 	mux.HandleFunc("DELETE /v1/lanes/{lane}", h.handleDeleteLane)
-	mux.HandleFunc("POST /v1/control-plane/transfer", h.handleControlPlaneTransfer)
 	mux.HandleFunc("POST /v1/nodes/{machine}/accepting", h.handleAcceptingOverride)
-	mux.HandleFunc("POST /v1/nodes/wake", h.handleNodeWake)
-	mux.HandleFunc("GET /v1/burst", h.handleBurst)
-	mux.HandleFunc("POST /v1/burst/request", h.handleBurstRequest)
-	mux.HandleFunc("POST /v1/burst/release", h.handleBurstRelease)
-	mux.HandleFunc("GET /v1/burst/holds", h.handleBurstHolds)
 	mux.HandleFunc("GET /v1/placement", h.handlePlacement)
 	mux.HandleFunc("GET /v1/state", h.handleFleetStateSnapshot)
 	mux.HandleFunc("GET /v1/jobs", h.handleJobs)
@@ -889,8 +988,10 @@ func (h *HubServer) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/jobs/reap", h.handleJobReap)
 	mux.HandleFunc("POST /v1/jobs/close", h.handleJobClose)
 	mux.HandleFunc("GET /v1/jobs/orphaned", h.handleOrphanedJobs)
-	mux.HandleFunc("GET /v1/session-reap", h.handleSessionReap)
 	mux.HandleFunc("POST /v1/jobs/reassign", h.handleReassignJob)
+	mux.HandleFunc("POST /v1/jobs/escalate-author", h.handleEscalateAuthor)
+	mux.HandleFunc("POST /v1/consults", h.handleConsultRequest)
+	mux.HandleFunc("GET /v1/consults/{id}", h.handleConsultGet)
 	mux.HandleFunc("GET /v1/agent", h.handleAgent)
 	mux.HandleFunc("GET /v1/events", h.handleEvents)
 	mux.HandleFunc("POST /v1/relay/events", h.handleRelayIngress)
@@ -900,18 +1001,18 @@ func (h *HubServer) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/inbox/ack-state", h.handleInboxAckState)
 	mux.HandleFunc("POST /v1/inbox/{id}/read", h.handleInboxRead)
 	mux.HandleFunc("POST /v1/inbox/ack", h.handleInboxAck)
-	mux.HandleFunc("GET /v1/relay/held", h.handleRelayHeld)
-	mux.HandleFunc("PATCH /v1/relay/events/{id}", h.handleRelayHeldEdit)
-	mux.HandleFunc("DELETE /v1/relay/events/{id}", h.handleRelayHeldDelete)
 	mux.HandleFunc("POST /v1/spawns", h.handleSpawnSubmit)
+	mux.HandleFunc("POST /v1/spawns/plan", h.handleSpawnPlan)
+	mux.HandleFunc("GET /v1/spawns/features", h.handleSpawnFeatures)
 	mux.HandleFunc("GET /v1/spawns/live", h.handleSpawnLive)
 	mux.HandleFunc("GET /v1/spawns/{request_id}", h.handleSpawnOperation)
 	mux.HandleFunc("POST /v1/spawns/{request_id}/abandon", h.handleSpawnAbandon)
 	mux.HandleFunc("POST /v1/spawn", h.handleSpawn)
 	mux.HandleFunc("GET /v1/spawn/{request_id}", h.handleSpawnGet)
 	mux.HandleFunc("GET /v1/nodes/agents", h.handleNodesAgents)
+	mux.HandleFunc("POST /v1/fleet/checkout-pull", h.handleCheckoutPull)
 	mux.HandleFunc("POST /v1/nodes/{machine}/command", h.handleNodeCommand)
-	return h.countRoutes(mux)
+	return h.drainGuard(h.countRoutes(mux))
 }
 
 //go:embed hub_ui.html
@@ -923,7 +1024,6 @@ type hubUIData struct {
 	SchemaVersion int          `json:"schema_version"`
 	Hub           hubUIHub     `json:"hub"`
 	Nodes         []hubUINode  `json:"nodes"`
-	Burst         hubUIBurst   `json:"burst"`
 	Events        []hubUIEvent `json:"events"`
 }
 
@@ -945,27 +1045,6 @@ type hubUINode struct {
 	AcceptingOverride  string    `json:"accepting_override"`
 	LastPingMS         int64     `json:"last_ping_ms"`
 	Version            string    `json:"version"`
-}
-
-type hubUIBurstPolicy struct {
-	SourceMachine   string  `json:"source_machine"`
-	TargetMachine   string  `json:"target_machine"`
-	SwapGB          float64 `json:"swap_gb"`
-	Load5           float64 `json:"load5"`
-	Consecutive     int     `json:"consecutive"`
-	IdleMinutes     int     `json:"idle_minutes"`
-	CooldownMinutes int     `json:"cooldown_minutes"`
-}
-
-type hubUIBurst struct {
-	Configured  bool              `json:"configured"`
-	Policy      *hubUIBurstPolicy `json:"policy"`
-	SourceRuns  int               `json:"source_runs"`
-	LastLoad    HubHostLoad       `json:"last_load"`
-	LastUp      time.Time         `json:"last_up"`
-	LastDown    time.Time         `json:"last_down"`
-	UpCompleted bool              `json:"up_completed"`
-	IdleSince   time.Time         `json:"idle_since"`
 }
 
 func (h *HubServer) handleUI(writer http.ResponseWriter, request *http.Request) {
@@ -1050,36 +1129,12 @@ func (h *HubServer) uiData() hubUIData {
 		nodes = append(nodes, hubUINode{MachineID: record.machineID, State: record.state, StateSince: record.stateSince, AlertClass: alertClass, Accepting: effective, AcceptingEffective: effective, AcceptingOverride: h.acceptingOverrideLocked(record.machineID), LastPingMS: age.Milliseconds(), Version: record.remoteMeta["version"]})
 	}
 	sort.Slice(nodes, func(i, j int) bool { return nodes[i].MachineID < nodes[j].MachineID })
-	var policy *hubUIBurstPolicy
-	if h.burstPolicyPath != "" {
-		h.reloadBurstPolicyLocked()
-		policy = &hubUIBurstPolicy{SourceMachine: h.burstPolicy.SourceMachine, TargetMachine: h.burstPolicy.TargetMachine, SwapGB: h.burstPolicy.SwapGB, Load5: h.burstPolicy.Load5, Consecutive: h.burstPolicy.Consecutive, IdleMinutes: h.burstPolicy.IdleMinutes, CooldownMinutes: h.burstPolicy.CooldownMinutes}
-	}
 	events := append([]hubUIEvent(nil), h.uiEvents...)
 	uptime := now.Sub(h.startedAt)
 	if uptime < 0 {
 		uptime = 0
 	}
-	state := *h.burstState
-	return hubUIData{SchemaVersion: 1, Hub: hubUIHub{Version: hubVersion, UptimeMS: uptime.Milliseconds(), UnknownMessages: h.unknownMessages, UnfencedCompletions: h.unfencedCompletions, RelayPayloadMismatches: h.relayPayloadMismatches}, Nodes: nodes, Burst: hubUIBurst{Configured: h.burstPolicyPath != "", Policy: policy, SourceRuns: state.SourceRuns, LastLoad: state.LastLoad, LastUp: state.LastUp, LastDown: state.LastDown, UpCompleted: state.UpCompleted, IdleSince: state.IdleSince}, Events: events}
-}
-
-func (h *HubServer) handleBurst(writer http.ResponseWriter, request *http.Request) {
-	if !h.authorizeOperator(request) {
-		hubUnauthorized(writer)
-		return
-	}
-	policy, state, configured := h.burstStatus()
-	writeJSON(writer, http.StatusOK, struct {
-		Configured  bool        `json:"configured"`
-		Policy      BurstPolicy `json:"policy,omitempty"`
-		SourceRuns  int         `json:"source_runs"`
-		IdleSince   time.Time   `json:"idle_since,omitempty"`
-		LastUp      time.Time   `json:"last_up,omitempty"`
-		LastDown    time.Time   `json:"last_down,omitempty"`
-		UpCompleted bool        `json:"up_completed"`
-		LastLoad    HubHostLoad `json:"last_load"`
-	}{configured, policy, state.SourceRuns, state.IdleSince, state.LastUp, state.LastDown, state.UpCompleted, state.LastLoad})
+	return hubUIData{SchemaVersion: 1, Hub: hubUIHub{Version: hubVersion, UptimeMS: uptime.Milliseconds(), UnknownMessages: h.unknownMessages, UnfencedCompletions: h.unfencedCompletions, RelayPayloadMismatches: h.relayPayloadMismatches}, Nodes: nodes, Events: events}
 }
 
 func (h *HubServer) handleOrphanedJobs(writer http.ResponseWriter, request *http.Request) {
@@ -1103,7 +1158,7 @@ func (h *HubServer) handleJobs(writer http.ResponseWriter, request *http.Request
 		hubUnauthorized(writer)
 		return
 	}
-	if lane != "" && !validReportRelayLaneName(lane) {
+	if lane != "" && !validLaneReference(lane) {
 		http.Error(writer, "invalid owner_lane", http.StatusBadRequest)
 		return
 	}
@@ -1202,7 +1257,7 @@ func (h *HubServer) handleLanes(writer http.ResponseWriter, request *http.Reques
 	})
 	if nodeMachine != "" {
 		// A node's envelope carries only its own machine's lanes and none of
-		// the control-plane transfer fields the operator envelope has.
+		// the control-plane fields the operator envelope has.
 		writeJSON(writer, http.StatusOK, struct {
 			Lanes []hubLaneProjection `json:"lanes"`
 		}{Lanes: lanes})
@@ -1233,16 +1288,14 @@ func (h *HubServer) handleAgent(writer http.ResponseWriter, request *http.Reques
 		return
 	}
 	connection.SetReadLimit(hubMaxMessageBytes)
-	agent := &hubAgent{conn: connection, machineID: machineID, credential: hubRequestBearerToken(request), failovers: make(chan hubFailoverEvent, 64), bursts: make(chan hubBurstEvent, 64), wakes: make(chan hubWakeRequestEvent, 64), revocations: make(chan hubJobRevokedEvent, 64), assignments: make(chan hubJobAssignedEvent, 64), holds: make(chan hubBurstHoldsEvent, 4), features: make(chan hubFeaturesEvent, 1), relays: make(chan hubRelayInjectEvent, 64), persisted: make(chan hubRelayPersistedEvent, 64), idleRoutes: make(chan hubIdleWakeRouteEvent, 64)}
-	defer connection.CloseNow()
 	agentContext, agentCancel := context.WithCancel(request.Context())
+	agent := &hubAgent{conn: connection, lifetime: agentContext, machineID: machineID, credential: hubRequestBearerToken(request), failovers: make(chan hubFailoverEvent, 64), revocations: make(chan hubJobRevokedEvent, 64), assignments: make(chan hubJobAssignedEvent, 64), features: make(chan hubFeaturesEvent, 1), relays: make(chan hubRelayInjectEvent, 64), persisted: make(chan hubRelayPersistedEvent, 64), idleRoutes: make(chan hubIdleWakeRouteEvent, 64)}
+	defer connection.CloseNow()
 	defer agentCancel()
 	go agent.writeFailovers(agentContext)
-	go agent.writeBursts(agentContext)
-	go agent.writeWakes(agentContext)
+	go agent.writeFeatures(agentContext)
 	go agent.writeRevocations(agentContext)
 	go agent.writeAssignments(agentContext)
-	go agent.writeHolds(agentContext)
 	go agent.writeRelays(agentContext)
 	go agent.writePersisted(agentContext)
 	go agent.writeIdleWakeRoutes(agentContext)
@@ -1263,7 +1316,9 @@ func (h *HubServer) handleAgent(writer http.ResponseWriter, request *http.Reques
 			h.countUnknownMessage()
 			continue
 		}
-		h.handleAgentMessage(machineID, request.RemoteAddr, agent, payload)
+		ctx, cancel := context.WithTimeout(request.Context(), nodeLoopHKTimeout)
+		h.handleAgentMessageContext(ctx, machineID, request.RemoteAddr, agent, payload)
+		cancel()
 		if !h.agentCredentialCurrent(machineID, agent) {
 			h.closeRevokedAgent(machineID, agent)
 			return
@@ -1272,15 +1327,20 @@ func (h *HubServer) handleAgent(writer http.ResponseWriter, request *http.Reques
 }
 
 func (h *HubServer) handleAgentMessage(machineID, remoteAddr string, agent *hubAgent, payload []byte) {
+	h.handleAgentMessageContext(context.Background(), machineID, remoteAddr, agent, payload)
+}
+
+func (h *HubServer) handleAgentMessageContext(ctx context.Context, machineID, remoteAddr string, agent *hubAgent, payload []byte) {
 	if result, ok := parseHubSpawnResult(payload); ok {
 		h.resolveSpawn(machineID, result)
 		return
 	}
-	if result, ok := parseHubNodeCommandResult(payload); ok {
-		h.resolveNodeCommand(machineID, agent, result)
+	if nodeID, ok := parseHubSpawnClaim(payload); ok {
+		h.answerSpawnClaim(ctx, machineID, agent, nodeID)
 		return
 	}
-	if h.handleSessionReapMessage(machineID, agent, payload) {
+	if result, ok := parseHubNodeCommandResult(payload); ok {
+		h.resolveNodeCommand(machineID, agent, result)
 		return
 	}
 	message, ok := parseHubInbound(payload)
@@ -1325,13 +1385,26 @@ func (h *HubServer) handleAgentMessage(machineID, remoteAddr string, agent *hubA
 		if message.Type == "ping" {
 			_ = agent.writeJSON(hubOutbound{Type: "pong"})
 		}
+	case "applied":
+		if agent.transient || !h.touch(machineID, agent) {
+			h.countUnknownMessage()
+			return
+		}
+		h.mu.Lock()
+		registration := h.nodes[machineID]
+		if registration == nil || registration.agent != agent {
+			h.mu.Unlock()
+			return
+		}
+		h.mu.Unlock()
+		go h.handleAppliedReport(machineID, registration, message.Applied)
 	case "event":
 		if message.Kind == "relay.delivered" || message.Kind == "relay.unconfirmed" {
 			// A relay ack carries the machine's word about what its pane
 			// showed, not connection state: a report arriving on a superseded
 			// connection is still this row's answer, and the entitlement
 			// checks inside already bind it to this machine (#989).
-			h.handleRelayAck(machineID, message)
+			h.handleRelayAckContext(ctx, machineID, message)
 			return
 		}
 		if !agent.transient && !h.touch(machineID, agent) {
@@ -1359,6 +1432,7 @@ func (h *HubServer) handleAgentMessage(machineID, remoteAddr string, agent *hubA
 				record.lastHeartbeat = received
 				record.hostLoad = cloneHubHostLoad(heartbeat.HostLoad)
 				record.hostActivity = heartbeat.HostActivity
+				record.checkouts = heartbeat.Checkouts
 				h.observeHostSignalsLocked(record, heartbeat.HostSignals, received)
 				h.observeReadinessLocked(record, heartbeat.Readiness, received)
 				if !equalHubHostMemory(record.hostMemory, heartbeat.HostMemory) {
@@ -1375,14 +1449,6 @@ func (h *HubServer) handleAgentMessage(machineID, remoteAddr string, agent *hubA
 			h.publishFleetReadiness(machineID, received)
 			h.observeHeartbeatAlerts(machineID, heartbeat)
 			h.observeActiveJobs(machineID, heartbeat.ActiveJobs, received)
-			if heartbeat.HostLoad != nil {
-				h.mu.Lock()
-				bursts := h.observeBurstLocked(received, machineID, *heartbeat.HostLoad)
-				h.mu.Unlock()
-				for _, burst := range bursts {
-					h.dispatchBurst(burst)
-				}
-			}
 			h.sendHeartbeatDirectives(machineID, agent)
 		}
 		if message.Kind == "job.completed" {
@@ -1405,7 +1471,7 @@ func (h *HubServer) handleAgentMessage(machineID, remoteAddr string, agent *hubA
 			if completion.Replay {
 				h.logger.Info("relay record replayed after node restart", "job", completion.JobID, "kind", message.Kind, "node", machineID)
 			}
-			h.relayJobCompletionFrom(machineID, completion)
+			h.relayJobCompletionFromContext(ctx, machineID, completion)
 		}
 		if message.Kind == "job.escalate" || message.Kind == "job.joined" || relayTerminalSignalKinds[message.Kind] {
 			event, truncated, valid := decodeHubJobEscalationPayloadDetailed(message.Payload)
@@ -1429,11 +1495,11 @@ func (h *HubServer) handleAgentMessage(machineID, remoteAddr string, agent *hubA
 					h.lateRegisterJobCompletion(machineID, event, received)
 				}
 			}
-			if message.Kind == "job.lost" && h.observePoolCooling(event.Reason, received) && !validReportRelayLaneName(event.OwnerLane) {
+			if message.Kind == "job.lost" && h.observePoolCooling(event.Reason, received) && !validLaneReference(event.OwnerLane) {
 				// This acknowledges in-memory cooling, not durable relay persistence.
 				agent.queuePersisted(hubRelayPersistedEvent{Type: "pool.cooling.ack", JobID: event.JobID, Kind: message.Kind, Epoch: event.Epoch, ReportPath: event.ReportPath, Reason: event.Reason, EventID: 1, ProducerEventID: event.EventID})
 			}
-			h.relayJobEventFrom(machineID, message.Kind, event)
+			h.relayJobEventFromContext(ctx, machineID, message.Kind, event)
 			if message.Kind == "job.lost" && !event.Replay {
 				h.startQuotaReplacement(machineID, event)
 			}
@@ -1444,7 +1510,7 @@ func (h *HubServer) handleAgentMessage(machineID, remoteAddr string, agent *hubA
 				h.countUnknownMessage()
 				return
 			}
-			h.relayLaneEvent(event, agent)
+			h.relayLaneEventContext(ctx, event, agent)
 		}
 		if message.Kind == "idle-wake.route.request" {
 			request, valid := decodeIdleWakeRouteRequest(message.Payload)
@@ -1477,9 +1543,7 @@ func (h *HubServer) handleAgentMessage(machineID, remoteAddr string, agent *hubA
 				h.countUnknownMessage()
 				return
 			}
-			if h.consumeRelayCancelled(cancelled.OriginalEventID) {
-				return
-			}
+			h.forgetRelayHeld(cancelled.OriginalEventID)
 		}
 		if message.Kind == "relay.batched" {
 			if _, valid := decodeRelayBatchedPayload(message.Payload); !valid {
@@ -1495,7 +1559,7 @@ func (h *HubServer) handleAgentMessage(machineID, remoteAddr string, agent *hubA
 			}
 			h.recordInboxStageByRelayID(dropped.OriginalEventID, laneInboxStageDropped, dropped.Reason, machineID, dropped.Pane)
 			h.observeRelayDropped(machineID, dropped)
-			h.escalateUnconfirmedRelay(machineID, dropped)
+			h.escalateUnconfirmedRelayContext(ctx, machineID, dropped)
 		}
 		if message.Kind == "job.revocation.ack" {
 			ack, valid := decodeHubJobCompletionPayload(message.Payload)
@@ -1526,6 +1590,10 @@ func (h *HubServer) handleAgentMessage(machineID, remoteAddr string, agent *hubA
 // a WARN naming the reason — a silent drop is how #989's pane-mismatch rows
 // stayed undelivered and replayed at every restart.
 func (h *HubServer) handleRelayAck(machineID string, message hubInbound) {
+	h.handleRelayAckContext(context.Background(), machineID, message)
+}
+
+func (h *HubServer) handleRelayAckContext(ctx context.Context, machineID string, message hubInbound) {
 	received := h.now().UTC()
 	ack, valid := decodeRelayAckPayload(message.Payload)
 	if !valid {
@@ -1547,7 +1615,7 @@ func (h *HubServer) handleRelayAck(machineID string, message hubInbound) {
 			h.countUnknownMessage()
 			return
 		}
-		if !h.markRelayEventUnconfirmed(pending) {
+		if !h.markRelayEventUnconfirmedContext(ctx, pending) {
 			return
 		}
 		h.consumeRelayPending(key)
@@ -1564,11 +1632,11 @@ func (h *HubServer) handleRelayAck(machineID string, message hubInbound) {
 		// A delivery that outlived its window (unconfirmed first, a restart,
 		// a late ack) is still a delivery, and handoffkeep must hear it or
 		// replay re-sends it.
-		if !h.recordLateRelayDelivery(machineID, ack) {
+		if !h.recordLateRelayDeliveryContext(ctx, machineID, ack) {
 			h.countUnknownMessage()
 			return
 		}
-	} else if !h.markRelayEventDelivered(pending) {
+	} else if !h.markRelayEventDeliveredContext(ctx, pending) {
 		// The window is spent but the durable write failed; the row is
 		// still undelivered, and claiming it in the feed would hide that.
 		h.countUnknownMessage()
@@ -1584,8 +1652,10 @@ type hubInbound struct {
 	Transient    bool
 	Accepting    bool
 	Capabilities []string
-	Kind         string
-	Payload      json.RawMessage
+	// Applied is the node's delivery report (hk 3435), type "applied".
+	Applied map[string][]int64
+	Kind    string
+	Payload json.RawMessage
 }
 
 type hubHeartbeatPayload struct {
@@ -1603,6 +1673,8 @@ type hubHeartbeatPayload struct {
 	SnapshotStatus  string                    `json:"snapshot_status,omitempty"`
 	Truncated       bool                      `json:"truncated,omitempty"`
 	StallDetect     *hubStallBeatPayload      `json:"stall_detect,omitempty"`
+	// Checkouts is the node's allow-listed checkout revisions (node_checkout_pull.go).
+	Checkouts map[string]HubCheckoutRev `json:"checkouts,omitempty"`
 }
 
 // hubStallBeatPayload is the node detector's no-data contract. beat_ms is the
@@ -1647,7 +1719,7 @@ func decodeHubHeartbeatPayload(payload []byte) (hubHeartbeatPayload, bool) {
 		return hubHeartbeatPayload{}, false
 	}
 	for name := range fields {
-		if name != "status" && name != "checks" && name != "host_load" && name != "load_error" && name != "host_memory" && name != "quota" && name != "active_jobs" && name != "holds_active" && name != "host_signals" && name != "host_activity" && name != "readiness" && name != "sessions" && name != "snapshot_status" && name != "truncated" && name != "stall_detect" && name != "pane_ids" && name != "pane_ids_complete" {
+		if name != "status" && name != "checks" && name != "host_load" && name != "load_error" && name != "host_memory" && name != "quota" && name != "active_jobs" && name != "holds_active" && name != "host_signals" && name != "host_activity" && name != "readiness" && name != "sessions" && name != "snapshot_status" && name != "truncated" && name != "stall_detect" && name != "pane_ids" && name != "pane_ids_complete" && name != "checkouts" {
 			return hubHeartbeatPayload{}, false
 		}
 	}
@@ -1756,6 +1828,13 @@ func decodeHubHeartbeatPayload(payload []byte) (hubHeartbeatPayload, bool) {
 		}
 		heartbeat.PaneIDs, heartbeat.PaneIDsComplete = &ids, &complete
 	}
+	if rawCheckouts, exists := fields["checkouts"]; exists {
+		checkouts, valid := decodeHubCheckoutRevs(rawCheckouts)
+		if !valid {
+			return hubHeartbeatPayload{}, false
+		}
+		heartbeat.Checkouts = checkouts
+	}
 	rawSnapshotStatus, hasSnapshotStatus := fields["snapshot_status"]
 	if hasSnapshotStatus {
 		if json.Unmarshal(rawSnapshotStatus, &heartbeat.SnapshotStatus) != nil || (heartbeat.SnapshotStatus != hubSnapshotStatusOK && heartbeat.SnapshotStatus != hubSnapshotStatusUnavailable) {
@@ -1805,7 +1884,7 @@ func decodeHubHeartbeatPayload(payload []byte) (hubHeartbeatPayload, bool) {
 				return hubHeartbeatPayload{}, false
 			}
 			for name := range rawJob {
-				if name != "job_id" && name != "agent_label" && name != "last_event_seq" && name != "push_sha" && name != "epoch" && name != "owner_lane" && name != "pane" && name != "tier" && name != "role" && name != "started_at" && name != "last_event_kind" && name != "last_event_at" {
+				if name != "job_id" && name != "agent_label" && name != "last_event_seq" && name != "push_sha" && name != "epoch" && name != "owner_lane" && name != "pane" && name != "tier" && name != "role" && name != "profile" && name != "started_at" && name != "last_event_kind" && name != "last_event_at" {
 					return hubHeartbeatPayload{}, false
 				}
 			}
@@ -1887,6 +1966,17 @@ func parseHubInbound(payload []byte) (hubInbound, bool) {
 	case "ping", "pong":
 		if !allowed("type") {
 			return hubInbound{}, false
+		}
+	case "applied":
+		if !allowed("type", "applied") {
+			return hubInbound{}, false
+		}
+		if rawApplied, exists := fields["applied"]; exists {
+			applied, valid := decodeHubAppliedReport(rawApplied)
+			if !valid {
+				return hubInbound{}, false
+			}
+			message.Applied = applied
 		}
 	case "event":
 		if !allowed("type", "kind", "payload") || json.Unmarshal(fields["kind"], &message.Kind) != nil || message.Kind == "" {
@@ -1979,14 +2069,25 @@ func knownHubEventKind(kind string) bool {
 }
 
 func (h *HubServer) connect(machineID, version, remoteAddr string, agent *hubAgent, accepting bool, capabilityLists ...[]string) {
+	h.replayMu.Lock()
+	defer h.replayMu.Unlock()
 	// A node registration is the safe no-restart retry trigger for durable
 	// lane.event rows whose route was absent or disconnected when produced.
+	var reportsApplied bool
+	if len(capabilityLists) > 0 {
+		reportsApplied = slices.Contains(capabilityLists[0], hubCapabilityApplied)
+	}
 	defer func() {
 		go func() {
 			// A wake an inbox-only lane is owed because its pane was not
 			// reachable is retried at once, not at its window's end (hk 3602).
 			h.retryUnroutedInboxWakes()
-			h.replayUndeliveredLaneEvents(context.Background())
+			// A node that advertises the applied report sends it right behind
+			// its hello; the replay waits for it (handleAppliedReport), so the
+			// replay and its gap summary count only rows the node has not shown.
+			if !reportsApplied {
+				h.replayUndeliveredLaneEvents(context.Background())
+			}
 		}()
 	}()
 	now := h.now().UTC()
@@ -1996,6 +2097,9 @@ func (h *HubServer) connect(machineID, version, remoteAddr string, agent *hubAge
 	var previousReadinessAt time.Time
 	h.mu.Lock()
 	if existing := h.nodes[machineID]; existing != nil {
+		if existing.appliedTimer != nil {
+			existing.appliedTimer.Stop()
+		}
 		previous, previousReadiness, previousReadinessAt = existing.agent, existing.readiness, existing.readinessAt
 		previousSnapshot = cloneHubSessionSnapshotRecord(existing.sessionSnapshot)
 	}
@@ -2010,18 +2114,23 @@ func (h *HubServer) connect(machineID, version, remoteAddr string, agent *hubAge
 		}
 	}
 	h.nodes[machineID] = &hubNodeRecord{
-		machineID: machineID, accepting: accepting, connectedSince: now, lastPing: now,
+		machineID: machineID, accepting: accepting, connectedSince: now, lastPing: now, appliedPending: reportsApplied,
 		capabilities: capabilitySet,
 		remoteMeta:   map[string]string{"version": version, "remote_addr": remoteAddr},
 		state:        "connected", stateSince: now, lastHeartbeat: now, agent: agent, activeJobs: make(map[string]HubActiveJob), sessionSnapshot: previousSnapshot,
 		readiness: previousReadiness, readinessAt: previousReadinessAt,
 	}
+	if reportsApplied {
+		registration := h.nodes[machineID]
+		registration.appliedTimer = time.AfterFunc(hubAppliedReportTimeout, func() {
+			h.expireAppliedReport(machineID, registration)
+		})
+	}
 	h.placementCache = placementCache{}
 	h.recordUIEventLocked("presence", "connected", machineID, now)
-	if h.burstPolicyPath != "" && machineID == h.burstPolicy.TargetMachine && accepting && !h.burstState.LastUp.IsZero() {
-		h.burstState.UpCompleted = true
-	}
 	h.mu.Unlock()
+	// A node that connects may be the candidate a parked request lacked.
+	h.noteSpawnWake(spawnParkNodeDisconnected, spawnParkHostFull, spawnParkNoEligibleHost)
 	h.tryPendingRevocations(machineID)
 	if previous != nil && previous != agent {
 		_ = previous.conn.Close(websocket.StatusPolicyViolation, "replaced")
@@ -2061,6 +2170,7 @@ func (h *HubServer) disconnect(machineID string, agent *hubAgent) {
 	h.publishFleetPublisher(machineID, h.now().UTC())
 	wakeLostSpawns(spawnWaiters)
 	wakeLostNodeCommands(lost)
+	h.kickSpawnPlacement()
 }
 
 // disconnectLocked is disconnect's critical section; the caller wakes the
@@ -2072,13 +2182,15 @@ func (h *HubServer) disconnectLocked(machineID string, agent *hubAgent) ([]chan 
 	}
 	lost := h.loseNodeCommandsLocked(agent)
 	if record := h.nodes[machineID]; record != nil && record.agent == agent {
+		if record.appliedTimer != nil {
+			record.appliedTimer.Stop()
+		}
 		record.agent = nil
 		now := h.now().UTC()
 		if record.state == "connected" {
 			record.stateSince = now
 		}
 		record.state = "disconnected"
-		h.markBurstHoldsLostLocked(machineID)
 		h.recordUIEventLocked("presence", "disconnected", machineID, now)
 	}
 	return spawnWaiters, lost
@@ -2347,6 +2459,7 @@ func (h *HubServer) Nodes() []HubNode {
 		nodes = append(nodes, HubNode{
 			MachineID: record.machineID, AlertClass: h.alertClass(record.machineID), Accepting: effective, AcceptingEffective: effective, AcceptingOverride: h.acceptingOverrideLocked(record.machineID), Containment: h.relayControl.acceptingOverride[record.machineID].Containment, ContainmentVerified: h.relayControl.acceptingOverride[record.machineID].ContainmentVerified, ConnectedSince: record.connectedSince, LastPingMS: age.Milliseconds(), LastNote: lastNote, Load: hubNodeLoadFromHostLoad(record.hostLoad), Memory: cloneHubHostMemory(record.hostMemory), RemoteMeta: remoteMeta, State: record.state,
 			SessionSnapshot: hubSessionSnapshotView(record.sessionSnapshot, record.state == "stale" || record.state == "disconnected"),
+			Checkouts:       cloneHubCheckoutRevs(record.checkouts),
 		})
 	}
 	sort.Slice(nodes, func(i, j int) bool { return nodes[i].MachineID < nodes[j].MachineID })
@@ -2383,14 +2496,17 @@ func (h *HubServer) Sweep() {
 	var pings []pendingPing
 	var notifications []hubNotification
 	var failovers []hubFailoverEvent
+	var staleSpawnWaiters []chan hubSpawnResult
 	h.mu.Lock()
-	h.sweepBurstHoldsLocked(now)
 	for _, record := range h.nodes {
 		if record.agent != nil && now.Sub(record.lastPing) >= h.staleAfter && record.state != "stale" {
 			record.state = "stale"
 			record.stateSince = now
-			h.markBurstHoldsLostLocked(record.machineID)
 			h.recordUIEventLocked("presence", "stale", record.machineID, now)
+			// A dispatch bound to this socket would otherwise wait out its
+			// deadline for a node that is not answering; wake it now so the
+			// operation is requeued at once (hub_drain.go).
+			staleSpawnWaiters = append(staleSpawnWaiters, h.loseSpawnsLocked(record.machineID)...)
 		}
 		recordNotifications, recordFailovers := h.observeNodeAlertLocked(now, record)
 		notifications = append(notifications, recordNotifications...)
@@ -2401,6 +2517,7 @@ func (h *HubServer) Sweep() {
 		}
 	}
 	h.mu.Unlock()
+	wakeLostSpawns(staleSpawnWaiters)
 	h.sweepFleetState(now)
 	h.startFleetLoadPublish(now)
 	h.logRouteHits(now)
@@ -2424,13 +2541,14 @@ func (h *HubServer) RunMaintenance(ctx context.Context) {
 	h.mu.Lock()
 	h.maintenanceCtx = ctx
 	h.mu.Unlock()
-	// The chat outbox worker runs beside the relay maintenance loop. It is
-	// inert without a configured chat store and never shares h.mu across a
-	// network call.
-	go h.runChatDispatcher(ctx)
 	go h.runInbox(ctx)
 	go h.runLaneRelease(ctx.Done())
+	go h.runPaneSweep(ctx)
+	go h.runReviewerEnd(ctx)
+	go h.runPoolTriggers(ctx)
+	go h.runFleetStatus(ctx)
 	h.startSpawnCoordinator(ctx)
+	h.startConsultCoordinator(ctx)
 	// Startup replay runs once, before the first keepalive tick: whatever
 	// Postgres still holds as undelivered predates this process.
 	h.replayUndeliveredRelayEvents(ctx)
@@ -2457,14 +2575,6 @@ func (h *HubServer) RunMaintenance(ctx context.Context) {
 	}
 }
 
-func (agent *hubAgent) writeJSON(value any) error {
-	agent.writeMu.Lock()
-	defer agent.writeMu.Unlock()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	return wsjson.Write(ctx, agent.conn, value)
-}
-
 func (agent *hubAgent) queueFailover(event hubFailoverEvent) {
 	if agent == nil || agent.failovers == nil {
 		return
@@ -2484,59 +2594,6 @@ func (agent *hubAgent) writeFailovers(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case event := <-agent.failovers:
-			if err := agent.writeJSON(event); err != nil {
-				return
-			}
-		}
-	}
-}
-
-func (agent *hubAgent) queueBurst(event hubBurstEvent) {
-	if agent == nil || agent.bursts == nil {
-		return
-	}
-	select {
-	case agent.bursts <- event:
-	default:
-		if agent.conn != nil {
-			_ = agent.conn.Close(websocket.StatusPolicyViolation, "slow")
-		}
-	}
-}
-
-func (agent *hubAgent) writeBursts(ctx context.Context) {
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case event := <-agent.bursts:
-			if err := agent.writeJSON(event); err != nil {
-				return
-			}
-		}
-	}
-}
-
-// queueWake drops the event rather than blocking the request path or closing
-// the shared agent connection when a waker node is slow; requestNodeWake
-// redispatches on its slow cadence, so a dropped event is recovered without
-// disturbing the failover/burst/relay streams on the same connection.
-func (agent *hubAgent) queueWake(event hubWakeRequestEvent) {
-	if agent == nil || agent.wakes == nil {
-		return
-	}
-	select {
-	case agent.wakes <- event:
-	default:
-	}
-}
-
-func (agent *hubAgent) writeWakes(ctx context.Context) {
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case event := <-agent.wakes:
 			if err := agent.writeJSON(event); err != nil {
 				return
 			}
@@ -2590,33 +2647,11 @@ func (agent *hubAgent) writeAssignments(ctx context.Context) {
 	}
 }
 
-func (agent *hubAgent) queueHolds(event hubBurstHoldsEvent) {
-	if agent == nil || agent.holds == nil {
-		return
-	}
-	select {
-	case agent.holds <- event:
-	default:
-		select {
-		case <-agent.holds:
-		default:
-		}
-		select {
-		case agent.holds <- event:
-		default:
-		}
-	}
-}
-
-func (agent *hubAgent) writeHolds(ctx context.Context) {
+func (agent *hubAgent) writeFeatures(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case event := <-agent.holds:
-			if err := agent.writeJSON(event); err != nil {
-				return
-			}
 		case event := <-agent.features:
 			if err := agent.writeJSON(event); err != nil {
 				return
@@ -2695,6 +2730,9 @@ func (agent *hubAgent) writeRelays(ctx context.Context) {
 		case event := <-agent.relays:
 			if err := agent.writeJSON(event); err != nil {
 				return
+			}
+			if event.Delivered != nil {
+				event.Delivered()
 			}
 		}
 	}

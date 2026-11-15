@@ -760,6 +760,16 @@ func TestJobEventEmitPushDerivesTheEventFileIdentity(t *testing.T) {
 	}
 }
 
+func TestRelayOutboxScanRetainsHistoricalDottedOwnerLane(t *testing.T) {
+	inbox := t.TempDir()
+	body := strings.Replace(relayEventIDBody, `"owner_lane":"lane-a"`, `"owner_lane":"legacy.parent"`, 1)
+	r20WriteEvent(t, inbox, "job-legacy", "00001-job.completed.json", body, time.Time{})
+	scanned := scanHubRelayEventsWithin(inbox, 0)
+	if len(scanned) != 1 || scanned[0].OwnerLane != "legacy.parent" {
+		t.Fatalf("historical terminal event was skipped: %+v", scanned)
+	}
+}
+
 // The hub dedupe key separates two rounds of the same job once the producer's
 // event identity arrives; a payload without one keeps the historic key.
 func TestJobRelayEventDedupeKeyCountsProducerEventID(t *testing.T) {

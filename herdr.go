@@ -144,19 +144,10 @@ func (c *HerdrClient) PanesAlive(ctx context.Context) (map[string]bool, error) {
 // optional display context; pane, status, revision, and herdr's independent
 // state-change sequence remain usable.
 func (c *HerdrClient) AgentStates(ctx context.Context) ([]HerdrAgentState, error) {
-	return c.agentStates(ctx, false)
+	return c.agentStates(ctx)
 }
 
-// AgentStatesAll is the fail-closed sibling for decisions that cannot afford
-// an invisible pane — the idle-shutdown probe, where a pane herdr lists but
-// this build cannot classify must still block poweroff. Entries whose pane id
-// or status fails validation are kept with Status "unknown" instead of being
-// dropped; callers that only admit positively-idle panes then block on them.
-func (c *HerdrClient) AgentStatesAll(ctx context.Context) ([]HerdrAgentState, error) {
-	return c.agentStates(ctx, true)
-}
-
-func (c *HerdrClient) agentStates(ctx context.Context, keepUnknown bool) ([]HerdrAgentState, error) {
+func (c *HerdrClient) agentStates(ctx context.Context) ([]HerdrAgentState, error) {
 	snapshot, err := c.Call(ctx, "agent.list", map[string]any{})
 	if err != nil {
 		return nil, err
@@ -176,17 +167,11 @@ func (c *HerdrClient) agentStates(ctx context.Context, keepUnknown bool) ([]Herd
 			pane.Label = displayLabel
 		}
 		if !validIdleWakePane(pane.PaneID) {
-			if keepUnknown {
-				states = append(states, HerdrAgentState{Status: "unknown", Authoritative: true})
-			}
 			continue
 		}
 		status := pane.Status
 		if !validObservedAgentStatus(status) {
-			if !keepUnknown {
-				continue
-			}
-			status = "unknown"
+			continue
 		}
 		states = append(states, HerdrAgentState{PaneID: pane.PaneID, WorkspaceID: pane.WorkspaceID, Label: pane.Label, AgentName: pane.Name, DisplayLabel: displayLabel, Harness: pane.Harness, Status: status, Revision: pane.Revision, SourceStateChangeSeq: pane.StateChangeSeq, InteractiveReady: pane.InteractiveReady, Authoritative: true})
 	}

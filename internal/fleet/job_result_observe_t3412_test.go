@@ -21,9 +21,10 @@ func jobResultEvents(a *App) *[]fleetevent.Event {
 	return events
 }
 
-// Acceptance (c): the #311 duplicate attach emits job_result attached and no
-// Sentry event, because the stored result was the one requested.
-func TestDuplicateDoneEmitsJobResultAttached(t *testing.T) {
+// A done --result on a terminal record without a result is refused (hk cannot
+// take the result late), so it emits no job_result attached and no Sentry
+// event: nothing was attached.
+func TestDuplicateDoneWithoutStoredResultEmitsNoAttach(t *testing.T) {
 	a, report, _ := watcherCompletes(t)
 	events := jobResultEvents(a)
 	var warnings []string
@@ -32,14 +33,14 @@ func TestDuplicateDoneEmitsJobResultAttached(t *testing.T) {
 	}
 	findings := filepath.Join(a.Jobs, "j", "findings.json")
 	writeReport(t, findings, `{"findings":[{"severity":"high"}]}`)
-	if e := a.lifecycle(context.Background(), "done", []string{"j", "--report", report, "--result", findings}); e != nil {
-		t.Fatal(e)
+	if e := a.lifecycle(context.Background(), "done", []string{"j", "--report", report, "--result", findings}); code(e) != exitStateConflict || !strings.Contains(e.Error(), "reason=terminal_without_result") {
+		t.Fatalf("error=%v, want terminal_without_result", e)
 	}
-	if len(*events) != 1 || (*events)[0].Outcome != "attached" || (*events)[0].Job != "j" {
+	if len(*events) != 0 {
 		t.Fatalf("job_result events=%+v", *events)
 	}
 	if len(warnings) != 0 {
-		t.Fatalf("attached result sent Sentry warnings: %v", warnings)
+		t.Fatalf("refused result sent Sentry warnings: %v", warnings)
 	}
 }
 

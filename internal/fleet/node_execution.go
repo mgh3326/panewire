@@ -10,11 +10,12 @@ import (
 )
 
 type Execution struct {
-	Receipt   ExecutionReceipt `json:"receipt"`
-	RC        int              `json:"rc"`
-	Stage     string           `json:"stage"`
-	StageMS   map[string]int64 `json:"stage_ms"`
-	Retryable bool             `json:"retryable"`
+	Receipt      ExecutionReceipt `json:"receipt"`
+	RC           int              `json:"rc"`
+	Stage        string           `json:"stage"`
+	StageMS      map[string]int64 `json:"stage_ms"`
+	Retryable    bool             `json:"retryable"`
+	FailureClass string           `json:"failure_class,omitempty"`
 }
 
 func ErrorCode(err error) int {
@@ -30,7 +31,9 @@ func ErrorCode(err error) int {
 
 // ExecuteNode is the node daemon's in-process launcher boundary. It shares the
 // CLI engine and guards, while execution paths and session come from node config.
-func ExecuteNode(ctx context.Context, cwd, brief, workspace, session string, args []string, out, errout io.Writer) Execution {
+// expiresAt is the hub's request expiry when the frame carried one (hk 4747):
+// the spawn writes it into its receipt so the pane sweep reads the real limit.
+func ExecuteNode(ctx context.Context, cwd, brief, workspace, session string, expiresAt time.Time, args []string, out, errout io.Writer) Execution {
 	result := Execution{Stage: "placement", StageMS: map[string]int64{}, Retryable: true}
 	a, err := New(out, errout)
 	if err != nil {
@@ -51,6 +54,9 @@ func ExecuteNode(ctx context.Context, cwd, brief, workspace, session string, arg
 		return result
 	}
 	s = bindNodeSpawn(s, cwd, brief, workspace)
+	if !expiresAt.IsZero() {
+		s.hubExpiresAt = expiresAt
+	}
 	a.ObserveStage = func(stage string, duration time.Duration) {
 		if stage == "claim" {
 			result.Retryable = false
@@ -62,6 +68,10 @@ func ExecuteNode(ctx context.Context, cwd, brief, workspace, session string, arg
 	a.ObserveRetryable = func(safe bool) { result.Retryable = safe }
 	err = a.Spawn(ctx, s)
 	result.RC = ErrorCode(err)
+	var proof interface{ LaunchFailureClass() string }
+	if errors.As(err, &proof) {
+		result.FailureClass = proof.LaunchFailureClass()
+	}
 	if err != nil {
 		fmt.Fprintln(errout, err)
 		fmt.Fprintln(errout, "Fix:", spawnRefusalFix(err))
@@ -96,7 +106,12 @@ type ExecutionReceipt struct {
 	Role    string `json:"role"`
 	CWD     string `json:"cwd"`
 	Label   string `json:"label"`
-	Kind    string `json:"kind"`
+	// Pool and AccountKey are what the executing host placed the job on
+	// (PlacementExecution): the hub records them so an exhausted pool can
+	// find its live jobs (docs/quota-stop.md, "An exhausted pool").
+	Pool       string `json:"pool,omitempty"`
+	AccountKey string `json:"account_key,omitempty"`
+	Kind       string `json:"kind"`
 	// LaneUnregistered is true when the pane exists but hub lane registration
 	// failed after its retry (receipt field lane_unregistered).
 	LaneUnregistered bool `json:"lane_unregistered,omitempty"`
@@ -115,6 +130,37 @@ func (a *App) ExistingJob(ctx context.Context, id string) (map[string]any, bool,
 	return record, err == nil, err
 }
 
+// ConfirmLadderTaskBinding verifies the task link and retries an inherited
+// rebind when the node did not confirm it.
+func (a *App) ConfirmLadderTaskBinding(ctx context.Context, task, parent, job, label string) error {
+	status, err := a.TaskStatus(ctx, task)
+	if err == nil && status.JobID == job {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if status.JobID != parent {
+		return fmt.Errorf("task is bound to %q", status.JobID)
+	}
+	if a.LadderRebind != nil {
+		err = a.LadderRebind(ctx, task, parent, job, label)
+	} else {
+		_, err = hkRebindTask(ctx, task, parent, job, label, "ladder step continues parent job "+parent)
+	}
+	if err != nil {
+		return err
+	}
+	status, err = a.TaskStatus(ctx, task)
+	if err != nil {
+		return err
+	}
+	if status.JobID != job {
+		return fmt.Errorf("task rebind was not confirmed")
+	}
+	return nil
+}
+
 func (a *App) CheckTrust() error {
 	if a.EnforceTrust {
 		return a.trust()
@@ -124,6 +170,9 @@ func (a *App) CheckTrust() error {
 
 func bindNodeSpawn(s Spawn, cwd, brief, workspace string) Spawn {
 	s.CWD, s.Prompt, s.Host, s.Delegated = cwd, brief, "local", true
+	// A node-delivered spawn's marker is the --e6-arm the hub sent; the node
+	// process environment never fills an empty one (hk 3518).
+	s.e6ArmLocked = true
 	if s.Workspace == "" {
 		s.Workspace = workspace
 	}

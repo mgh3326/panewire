@@ -466,8 +466,19 @@ func jobDirShapeOf(dir string) (jobDirShape, error) {
 	return s, err
 }
 
+// submissionRetiredFlags are spawn flags a stored submission.json may record
+// that the live spawn parser no longer accepts. A receipt is a frozen record
+// written by the panewire of its day, so the gate parses it with these
+// accepted as one-value no-ops: the gate names the submitted job and its
+// report paths, it does not spawn. mergewake's reviewer submitter dirs record
+// builder-family this way, and a consult receipt routing-role (hk 4627). A
+// flag the parser has never known stays an error, so a receipt the gate
+// cannot trust is still unreadable.
+var submissionRetiredFlags = []string{"builder-family", "routing-role"}
+
 // readSubmissionSpawn reads a submitter-side dir's submission.json and the
-// spawn its arguments name. A missing receipt is fs.ErrNotExist.
+// spawn its arguments name, with the spawn flags retired since the receipt
+// was written accepted and dropped. A missing receipt is fs.ErrNotExist.
 func readSubmissionSpawn(dir string) (Submission, Spawn, error) {
 	path := filepath.Join(dir, "submission.json")
 	info, err := os.Lstat(path)
@@ -485,7 +496,7 @@ func readSubmissionSpawn(dir string) (Submission, Spawn, error) {
 	if err = json.Unmarshal(raw, &sub); err != nil {
 		return Submission{}, Spawn{}, err
 	}
-	s, err := parseSpawn(sub.Args)
+	s, err := parseSpawnIgnoring(sub.Args, submissionRetiredFlags)
 	return sub, s, err
 }
 
@@ -563,7 +574,7 @@ func (a *App) jobDirRecord(ctx context.Context, id string, submitter bool, reque
 		if err != nil {
 			return nil, "spawn-status-unreadable"
 		}
-		if status != "failed" {
+		if !spawnNeverLanded(status) {
 			return nil, "hk-missing"
 		}
 		return nil, ""
@@ -603,7 +614,7 @@ func (a *App) jobDirArtifacts(ctx context.Context, root, dir string, j Job, rec 
 	if reason != "" {
 		return reason
 	}
-	if reason = jobDirReports(ctx, reports, j.ID, rec); reason != "" {
+	if reason = jobDirReports(ctx, reports, j.ID); reason != "" {
 		return reason
 	}
 	for _, name := range []string{"findings.json", "result.json"} {
@@ -692,33 +703,25 @@ func resolveExisting(path string) (string, error) {
 	}
 }
 
-// jobDirReports confirms each local report file: the record names a
-// report_doc, and the local bytes' sha256 equals the record's report_sha256
-// pin for that doc, else the sha256 hk holds for reports/<job>/<basename>,
-// the key `panewire done` uploads a report under.
-func jobDirReports(ctx context.Context, reports []string, id string, rec map[string]any) string {
-	if len(reports) == 0 {
-		return ""
-	}
-	pinned := str(rec, "report_doc")
-	if pinned == "" {
-		return "report-unconfirmed"
-	}
+// jobDirReports confirms each local report file by its own bytes: the key
+// `panewire done` publishes them to is content-addressed
+// (reportDocumentKey), so hk confirms a report when it holds a document at
+// that key with the file's sha256. A report published before keys were
+// content-addressed is confirmed at the legacy key reports/<job>/<basename>
+// instead. The job record's pin and the job's events play no part: a report
+// published but never pinned is still in hk.
+func jobDirReports(ctx context.Context, reports []string, id string) string {
 	for _, path := range reports {
 		_, local, err := hashFile(path)
 		if err != nil {
 			return "report-unconfirmed"
 		}
-		key := "reports/" + id + "/" + filepath.Base(path)
-		want := ""
-		if key == pinned {
-			want = str(rec, "report_sha256")
+		want, reason := hkDocumentSHA(ctx, reportDocumentKey(id, local), "report-unconfirmed")
+		if reason == "report-unconfirmed" {
+			want, reason = hkDocumentSHA(ctx, legacyReportDocumentKey(id, path), "report-unconfirmed")
 		}
-		if want == "" {
-			var reason string
-			if want, reason = hkDocumentSHA(ctx, key, "report-unconfirmed"); reason != "" {
-				return reason
-			}
+		if reason != "" {
+			return reason
 		}
 		if !strings.EqualFold(want, local) {
 			return "report-sha-mismatch"
@@ -849,13 +852,23 @@ func (a *App) jobDirEvidence(ctx context.Context, dir string, j Job) string {
 		if !ok || rec.Archive.SourceHost != "" && rec.Archive.SourceHost != a.machine() {
 			continue
 		}
+		// The walk names real paths, so the record's paths are resolved
+		// before the join: a ./ or .. after a symlink, a symlinked
+		// component, or an alias of the jobs root names the file the walk
+		// sees, which a lexical filepath.Join would not (hk 3643).
 		src := rec.Archive.Source
-		if !filepath.IsAbs(src) || !within(dir, src) {
+		if !filepath.IsAbs(src) {
+			continue
+		}
+		if src, err = resolveExisting(src); err != nil || !within(dir, src) {
 			continue
 		}
 		for _, row := range rec.Archive.Contents {
-			path := filepath.Join(src, row.Path)
-			if filepath.IsAbs(row.Path) || !within(src, path) || !pending[path] {
+			if filepath.IsAbs(row.Path) {
+				continue
+			}
+			path, err := resolveExisting(src + string(filepath.Separator) + row.Path)
+			if err != nil || !within(src, path) || !pending[path] {
 				continue
 			}
 			class, mirror, err := a.artifactClass(pol, j.ID, path)

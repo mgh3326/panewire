@@ -118,6 +118,7 @@ func TestLanesPutDaemonParity(t *testing.T) {
 
 	cases := []daemonop.LanesPut{
 		{Lane: "lane-ok", Machine: "host-a", Pane: "w1:p1", Parent: "desk"},
+		{Lane: "lane-job", Machine: "host-a", Pane: "w1:p2", Job: "job-1", Parent: "desk"},
 		{Lane: "lane-replace", Machine: "host-a", Pane: "w1:p1", Parent: "desk"},
 		{Lane: "lane-mismatch", Machine: "host-a", Pane: "w1:p1", Parent: "desk"},
 		{Lane: "lane-cap", Machine: "host-a", Pane: "w1:p1", Parent: "desk"},
@@ -134,6 +135,9 @@ func TestLanesPutDaemonParity(t *testing.T) {
 			args := []string{"add", put.Lane, "--machine", put.Machine, "--pane", put.Pane, "--hub-url", server.URL, "--hub-token-env", tokenPath}
 			if put.Parent != "" {
 				args = append(args, "--parent", put.Parent)
+			}
+			if put.Job != "" {
+				args = append(args, "--job", put.Job)
 			}
 			var directOut, directErr bytes.Buffer
 			mu.Lock()

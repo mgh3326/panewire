@@ -33,6 +33,15 @@ const (
 	// spawnStuckAfter is how long past its deadline a pending request runs
 	// before the hub warns once that its ownership is stuck.
 	spawnStuckAfter = 30 * time.Minute
+	// spawnStaleProbeMin and spawnStaleProbeMax bound the back-off between
+	// replays of a deadline_exceeded row: a quarter of its age past the
+	// deadline, so a row that stays silent costs fewer probes the longer it
+	// waits.
+	spawnStaleProbeMin = 30 * time.Second
+	spawnStaleProbeMax = time.Hour
+	// spawnStaleBatch caps the stale rows one coordinator pass hands to the
+	// workers, so they never take every worker from fresh requests.
+	spawnStaleBatch = 2
 	// spawnAbandonReasonLimit bounds the operator's --reason text.
 	spawnAbandonReasonLimit = 256
 )
@@ -40,10 +49,50 @@ const (
 // spawnPending reports whether status still holds ownership unresolved.
 func spawnPending(status string) bool {
 	switch status {
-	case "accepted", "dispatching", "reconciling", "deadline_exceeded":
+	case "accepted", "bound", "dispatching", "reconciling", "deadline_exceeded":
 		return true
 	}
 	return false
+}
+
+// spawnStaleProbeDue reports whether a deadline_exceeded row is due for its
+// next replay at now. The back-off lives in the row's last_run_ms, so it
+// survives a hub restart.
+func spawnStaleProbeDue(task hubSpawnTask, now time.Time) bool {
+	every := min(max(now.Sub(task.Deadline)/4, spawnStaleProbeMin), spawnStaleProbeMax)
+	return !now.Before(task.LastRun.Add(every))
+}
+
+// reprobeStaleSpawn runs one back-off probe of a bound request that is past
+// its deadline. It replays the request so a completed node journal settles it
+// as usual (settleNodeResult). A node that stays silent, restarted without
+// answering unknown, or still reports reconciling never reaches the orphan
+// rule through that replay, so a request stuck spawnStuckAfter past its
+// deadline also gets the pane check directly: no pane bearing the job label on
+// its node finishes it as orphaned and frees its reservation. A past-deadline
+// node never launches a request, so asking again cannot start a second one,
+// and any pane or unreadable node keeps ownership.
+func (h *HubServer) reprobeStaleSpawn(parent context.Context, task hubSpawnTask) {
+	ctx, cancel := context.WithTimeout(parent, 5*time.Second)
+	defer cancel()
+	transport := directSpawnTransport{h: h, task: task}
+	_, _ = transport.dispatch(ctx, *task.Node)
+	h.noteStuckSpawn(task)
+	if h.now().Sub(task.Deadline) < spawnStuckAfter {
+		return
+	}
+	if !h.spawnActions.begin(task.Request.RequestID) {
+		return
+	}
+	defer h.spawnActions.end(task.Request.RequestID)
+	current, err := h.inbox.store.spawnTask(parent, task.Request.RequestID)
+	if err != nil || current.Status != "deadline_exceeded" || current.Attempt != task.Attempt {
+		return
+	}
+	outcome := hubSpawnOutcome{RC: 75, Stage: "landing", Reason: spawnOrphanedReason, Host: spawnTaskHost(task), NodeResult: true}
+	if released, why := h.finishUnownedSpawn(parent, current, outcome); !released {
+		h.logger.Info("hub kept a stale spawn", "request_id", task.Request.RequestID, "job", task.Job, "host", spawnTaskHost(task), "reason", why)
+	}
 }
 
 // resolveOrphanedSpawn runs when task's node answered unknown after the
@@ -67,12 +116,12 @@ func (h *HubServer) resolveOrphanedSpawn(task hubSpawnTask) bool {
 	return released
 }
 
-// finishUnownedSpawn finishes a bound pending request as failed with outcome
-// once the node lists no pane bearing its job label: it marks a live hk job
-// lost through that node, completes the request and releases its (task, role)
-// reservation. Anything it cannot prove keeps the request pending; why names
-// the check that held it. A crash after the lost write converges: a failed
-// holder whose hk job is lost releases on the next claim.
+// finishUnownedSpawn finishes a pending request as failed with outcome. A
+// possibly sent request must first have no pane bearing its job label; an
+// unsent binding needs no pane probe. It marks a live hk job lost, completes
+// the request and releases its (task, role) reservation. Anything it cannot
+// prove keeps the request pending; why names the check that held it. A crash
+// after the lost write converges on the next claim.
 func (h *HubServer) finishUnownedSpawn(ctx context.Context, task hubSpawnTask, outcome hubSpawnOutcome) (released bool, why string) {
 	if task.Node == nil {
 		return false, "not_bound"
@@ -88,23 +137,28 @@ func (h *HubServer) finishUnownedSpawn(ctx context.Context, task hubSpawnTask, o
 		return false, "hk_read_error"
 	}
 	label := heldAgentName(task, record)
-	if label == "" {
-		return false, "no_label"
-	}
-	probe := h.probeLabelledPane(ctx, task.Node.Machine, label)
-	switch probe.state {
-	case heldPanePresent:
-		return false, "pane_present:" + probe.row.PaneID
-	case heldPaneUnknown:
-		return false, probe.reason
+	if task.Status != "bound" {
+		if label == "" {
+			return false, "no_label"
+		}
+		probe := h.probeLabelledPane(ctx, task.Node.Machine, label)
+		switch probe.state {
+		case heldPanePresent:
+			return false, "pane_present:" + probe.row.PaneID
+		case heldPaneUnknown:
+			return false, probe.reason
+		}
 	}
 	code, _, _ := strings.Cut(outcome.Reason, ": ")
 	if state, _ := record["state"].(string); exists && !hkTerminalState(state) {
+		if label == "" {
+			return false, "no_label"
+		}
 		if lost, reason := h.markHolderJobLostBecause(ctx, app, task, label, code); !lost {
 			return false, "mark_lost:" + reason
 		}
 	}
-	changed, err := h.inbox.store.completeSpawn(ctx, task, outcome, h.now().UTC())
+	changed, err := h.completeSpawn(ctx, task, outcome)
 	if err != nil {
 		return false, "store_unavailable"
 	}
@@ -115,18 +169,26 @@ func (h *HubServer) finishUnownedSpawn(ctx context.Context, task hubSpawnTask, o
 	h.mu.Lock()
 	delete(h.spawnOrphanProbed, task.Request.RequestID)
 	h.mu.Unlock()
-	if err = h.releaseSpawnRole(ctx, task); err != nil {
-		return false, "release_write_failed"
+	if task.Status != "bound" {
+		if err = h.releaseSpawnRole(ctx, task); err != nil {
+			return false, "release_write_failed"
+		}
 	}
 	return true, ""
 }
 
 // releaseSpawnRole frees the (task, role) slot a finished request holds. A
-// child or task-less request holds none.
+// child, task-less or consult request holds none. A stored request this build
+// cannot parse (one written under a role name the rename retired) still holds
+// at most the one slot its request id reserved, so it is freed by that id alone
+// and never stays stuck behind a role it no longer names.
 func (h *HubServer) releaseSpawnRole(ctx context.Context, task hubSpawnTask) error {
 	spawn, err := fleet.ValidateSubmission(task.Request)
-	if err != nil || spawn.Task == "" || spawn.ParentJob != "" {
-		return err
+	if err != nil {
+		return h.inbox.store.releaseCompletedSpawnRoleOf(ctx, task.Request.RequestID)
+	}
+	if !spawn.HoldsTaskRole() {
+		return nil
 	}
 	return h.inbox.store.releaseCompletedSpawnRole(ctx, task.Request.RequestID, spawn.RoleKey())
 }
@@ -161,6 +223,11 @@ func (h *HubServer) handleSpawnAbandon(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, map[string]string{"error": "invalid_request", "fix": "name a request id and a one-line --reason"})
 		return
 	}
+	if !h.spawnActions.begin(id) {
+		writeJSON(w, 409, map[string]string{"error": "spawn_abandon_refused", "reason": "sending_or_abandoning", "request_id": id})
+		return
+	}
+	defer h.spawnActions.end(id)
 	task, err := h.inbox.store.spawnTask(r.Context(), id)
 	if errors.Is(err, sql.ErrNoRows) {
 		writeJSON(w, 404, map[string]string{"error": "not_found"})

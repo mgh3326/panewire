@@ -1,14 +1,16 @@
-// Package commandcode measures the commandcode pool's quota the way pacelever
-// does — the CLI login key, the same headers, the 5h and 7d window limits of
-// /alpha/billing/credits, the same account fingerprint — and adds the monthly
-// window pacelever could not read: 30d is the share of the billing period's
-// plan credits already spent (docs/quota.md §Native measurement: commandcode).
+// Package commandcode measures the commandcode pool's quota from omp, the
+// harness that spends it: `omp usage --json --provider commandcode` lists every
+// Command Code account omp holds on the host, each with a 5-hour and a weekly
+// limit and the time omp fetched them (docs/quota.md §Native measurement:
+// commandcode). panewire handles no Command Code key and calls no Command Code
+// API; the month and the credit balance are not read.
 //
-// The API key is read into memory for the requests of one measurement. It is
-// never logged, written, placed in an error, or put on a command line.
+// The reading depends on omp's output shape, so an output this package does not
+// know is an error, never a guess: the pool is then not admitted.
 package commandcode
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -16,137 +18,107 @@ import (
 	"errors"
 	"io"
 	"math"
-	"net/http"
-	"net/url"
 	"os"
-	"path/filepath"
+	"os/exec"
+	"slices"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/mgh3326/panewire/internal/quota"
+	"github.com/mgh3326/panewire/internal/quota/shared"
 )
 
 const (
-	// APIBase is the commandcode API host.
-	APIBase = "https://api.commandcode.ai"
-	// UserAgent is the CLI's own user agent: the API's edge rejects generic
-	// clients. It is the one pacelever sends.
-	UserAgent     = "cmd/1.88.1"
-	apiTimeout    = 20 * time.Second
-	apiBodyLimit  = 2 << 20
-	authFileLimit = 1 << 20
-	// billingPeriod is the usage summary's periodBasis that the 30d window is
-	// defined on; any other basis is not the plan's monthly allowance.
-	billingPeriod = "billing-period"
+	provider = "commandcode"
+	// MaxReportAge is the oldest omp report this package accepts. omp caches a
+	// report for 5 minutes (±25%), so an older one means omp did not refetch;
+	// the cache is then invalidated once, and a report that is still older is
+	// unknown. It is the age at which the shared flow would call a reading due
+	// for a refresh (shared.OtherRefreshTTL): an older one could never be
+	// published as current.
+	MaxReportAge = shared.OtherRefreshTTL
+	// ompTimeout bounds one omp call; a cold `omp usage` takes about 3 s.
+	ompTimeout = 30 * time.Second
+	// outputLimit bounds what is read of omp's output.
+	outputLimit = 4 << 20
+	futureSkew  = time.Minute
+
+	fiveHourMs = int64(5 * time.Hour / time.Millisecond)
+	weeklyMs   = int64(7 * 24 * time.Hour / time.Millisecond)
 )
 
-// Doer is the HTTP client the requests go through.
-type Doer interface {
-	Do(*http.Request) (*http.Response, error)
-}
-
-// Config is everything a measurement reads from its environment. The zero
-// value measures this host's login against the real API, filesystem and wall
-// clock; tests replace the seams.
+// Config is everything a measurement reads from its environment. The zero value
+// runs this host's omp against the wall clock; tests replace the seams.
 type Config struct {
-	HTTP    Doer   // nil: 20 s timeout, redirects refused
-	BaseURL string // empty: APIBase
-	// Now is the clock for a Retry-After date; nil is the wall clock.
+	// Now is the clock for report ages; nil is the wall clock.
 	Now func() time.Time
-	// Home is the home directory; empty is os.UserHomeDir.
-	Home string
-	// LookupEnv reads the environment; nil is os.LookupEnv.
-	LookupEnv func(string) (string, bool)
-	// ReadFile reads the CLI login file; nil is os.ReadFile.
-	ReadFile func(string) ([]byte, error)
-	// Identities remembers the account behind a key between measurements, so
-	// the fingerprint read before each refresh costs no request once known.
-	// Nil asks every time.
-	Identities *IdentityCache
+	// Run runs omp with args and returns its standard output; nil runs the real
+	// binary. A run that cannot start (no omp) must wrap exec.ErrNotFound.
+	Run func(ctx context.Context, args ...string) ([]byte, error)
+	// Binary is the omp executable; empty is `omp` on PATH.
+	Binary string
 }
 
 func (c Config) now() time.Time {
 	if c.Now != nil {
-		return c.Now()
+		return c.Now().UTC()
 	}
 	return time.Now().UTC()
 }
 
-func (c Config) lookupEnv(name string) string {
-	if c.LookupEnv != nil {
-		value, _ := c.LookupEnv(name)
-		return strings.TrimSpace(value)
+func (c Config) run(ctx context.Context, args ...string) ([]byte, error) {
+	if c.Run != nil {
+		return c.Run(ctx, args...)
 	}
-	return strings.TrimSpace(os.Getenv(name))
+	binary := c.Binary
+	if binary == "" {
+		binary = "omp"
+	}
+	path, err := exec.LookPath(binary)
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(ctx, ompTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, path, args...)
+	// omp's own failure text can name an account; it is never read.
+	cmd.Stderr = nil
+	cmd.WaitDelay = 2 * time.Second
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, err
+	}
+	if err = cmd.Start(); err != nil {
+		return nil, err
+	}
+	out, readErr := io.ReadAll(io.LimitReader(stdout, outputLimit+1))
+	waitErr := cmd.Wait()
+	switch {
+	case ctx.Err() != nil:
+		return nil, ctx.Err()
+	case readErr != nil:
+		return nil, readErr
+	case waitErr != nil:
+		return nil, waitErr
+	case len(out) > outputLimit:
+		return nil, errors.New("omp output too large")
+	}
+	return out, nil
 }
 
-// token is the CLI login key: pacelever's two environment names, then the
-// apiKey of ~/.commandcode/auth.json. An unreadable, oversized or malformed
-// file has none.
-func (c Config) token() string {
-	for _, name := range []string{"COMMAND_CODE_API_KEY", "COMMANDCODE_API_KEY"} {
-		if value := c.lookupEnv(name); value != "" {
-			return value
-		}
-	}
-	home := c.Home
-	if home == "" {
-		home, _ = os.UserHomeDir()
-	}
-	read := c.ReadFile
-	if read == nil {
-		read = os.ReadFile
-	}
-	data, err := read(filepath.Join(home, ".commandcode", "auth.json"))
-	if err != nil || len(data) > authFileLimit {
-		return ""
-	}
-	var file struct {
-		APIKey string `json:"apiKey"`
-	}
-	if json.Unmarshal(data, &file) != nil {
-		return ""
-	}
-	return strings.TrimSpace(file.APIKey)
+// Account is one Command Code account omp holds. FP is the account's
+// fingerprint, hex(sha256("commandcode-account|"+id))[:16] over the Command
+// Code user id, the key pacelever and the earlier API reading used for the same
+// account. Observation carries the 5h and 7d windows and MeasuredAt, the time
+// omp fetched them.
+type Account struct {
+	FP          string
+	Observation quota.Observation
 }
 
-// Identity is the account a key belongs to: Org scopes the credits request,
-// FP is the shared-account fingerprint ("" when the API names no account).
-type Identity struct {
-	Org string
-	FP  string
-}
-
-// IdentityCache remembers the identity of the last key it saw.
-type IdentityCache struct {
-	mu       sync.Mutex
-	keyHash  [sha256.Size]byte
-	identity Identity
-	known    bool
-}
-
-func (c *IdentityCache) get(token string) (Identity, bool) {
-	if c == nil {
-		return Identity{}, false
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.identity, c.known && c.keyHash == sha256.Sum256([]byte(token))
-}
-
-func (c *IdentityCache) put(token string, identity Identity) {
-	if c == nil {
-		return
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.keyHash, c.identity, c.known = sha256.Sum256([]byte(token)), identity, true
-}
-
-// fingerprint is hex(sha256("commandcode-account|"+id))[:16]; no account has
-// none. It is pacelever's accountFP("commandcode", id).
-func fingerprint(account string) string {
+// Fingerprint is the account key's fingerprint for a Command Code user id; an
+// empty id has none.
+func Fingerprint(account string) string {
 	if account == "" {
 		return ""
 	}
@@ -154,273 +126,238 @@ func fingerprint(account string) string {
 	return hex.EncodeToString(sum[:8])
 }
 
-// AccountFP is this host's commandcode account fingerprint, "" when the API
-// names no account for the key. It needs one request (whoami) the first time a
-// key is seen, with exactly the hash a measurement attaches to its
-// observation. Without a key nothing is sent and the failure is credentials.
-func AccountFP(ctx context.Context, cfg Config) (string, error) {
-	token := cfg.token()
-	if token == "" {
-		return "", quota.Fail(quota.ErrKindCredentials, "credentials unavailable")
-	}
-	if identity, ok := cfg.Identities.get(token); ok {
-		return identity.FP, nil
-	}
-	identity, err := cfg.whoami(ctx, token)
-	if err != nil {
-		return "", err
-	}
-	return identity.FP, nil
+// ompReport is the part of `omp usage --json` this package reads.
+type ompReport struct {
+	Reports []struct {
+		Provider  string     `json:"provider"`
+		FetchedAt *float64   `json:"fetchedAt"`
+		Limits    []ompLimit `json:"limits"`
+	} `json:"reports"`
 }
 
-// Measure reads the commandcode quota. Without a key nothing is sent. The
-// 5h and 7d windows come from the credits response and are required; 30d needs
-// the usage summary as well, and the subscription for its reset. A secondary
-// request that fails leaves its window out — never a guessed value — unless
-// the context ended, which fails the whole measurement. The error is a
-// *quota.Error.
-func Measure(ctx context.Context, cfg Config) (quota.Observation, error) {
-	token := cfg.token()
-	if token == "" {
-		return quota.Observation{}, quota.Fail(quota.ErrKindCredentials, "credentials unavailable")
-	}
-	identity, err := cfg.whoami(ctx, token)
-	if err != nil {
-		return quota.Observation{}, err
-	}
-	path := "/alpha/billing/credits"
-	if identity.Org != "" {
-		path += "?orgId=" + url.QueryEscape(identity.Org)
-	}
-	credits, err := cfg.get(ctx, token, path)
-	if err != nil {
-		return quota.Observation{}, err
-	}
-	observed := quota.Observation{Source: quota.SourceUsageAPI, AccountFP: identity.FP}
-	observed.Buckets = windowBuckets(credits)
-	remaining, remainingOK := monthlyRemaining(credits)
-
-	// The secondary reads are best effort: their loss costs the 30d window and
-	// the plan name, not the reading.
-	var spent *float64
-	if remainingOK {
-		if summary, err := cfg.get(ctx, token, "/alpha/usage/summary"); err == nil {
-			spent = monthlySpent(summary)
-		} else if ctx.Err() != nil {
-			return quota.Observation{}, err
-		}
-	}
-	reset := ""
-	if subscription, err := cfg.get(ctx, token, "/alpha/billing/subscriptions"); err == nil {
-		reset, observed.Plan = subscriptionPeriod(subscription)
-	} else if ctx.Err() != nil {
-		return quota.Observation{}, err
-	}
-	if spent != nil {
-		if total := *spent + remaining; total > 0 {
-			if pct := quota.Pct(100 * *spent / total); pct != nil {
-				observed.Buckets = append(observed.Buckets, quota.Bucket{Window: "30d", UsedPct: pct, ResetsAt: reset, Scope: quota.Scope{Kind: quota.ScopeAccount}})
-			}
-		}
-	}
-	if len(observed.Buckets) == 0 {
-		return quota.Observation{}, quota.Fail(quota.ErrKindParse, "usage response has no usable windows")
-	}
-	return observed, nil
+type ompLimit struct {
+	ID    string `json:"id"`
+	Scope struct {
+		AccountID string `json:"accountId"`
+	} `json:"scope"`
+	Window *struct {
+		ID         string   `json:"id"`
+		DurationMs *float64 `json:"durationMs"`
+		ResetsAt   *float64 `json:"resetsAt"`
+	} `json:"window"`
+	Amount *struct {
+		Used         *float64 `json:"used"`
+		Limit        *float64 `json:"limit"`
+		UsedFraction *float64 `json:"usedFraction"`
+	} `json:"amount"`
+	Status string `json:"status"`
 }
 
-// whoami asks who the key is and remembers the answer. pacelever's rule: the
-// account is the user id, else the org id; a body that says success=false is a
-// refusal.
-func (c Config) whoami(ctx context.Context, token string) (Identity, error) {
-	body, err := c.get(ctx, token, "/alpha/whoami?limits=1")
+// Measure reads every Command Code account omp holds, ordered by fingerprint.
+// No omp, or none holding a Command Code account, is `credentials` (no login
+// here). An output this package does not know, a duplicate account or an account
+// with no usable window is `parse_error`; an omp that fails or whose reports are
+// all older than MaxReportAge is `probe_error`; a deadline is `timeout`. An
+// account whose own report is stale is left out, never guessed. The error is a
+// *quota.Error with a fixed sentence: omp's output never reaches it.
+func Measure(ctx context.Context, cfg Config) ([]Account, error) {
+	accounts, stale, err := cfg.read(ctx)
 	if err != nil {
-		return Identity{}, err
+		return nil, err
 	}
-	data := object(body["data"])
-	if len(data) == 0 {
-		data = body
+	if stale {
+		// omp serves its cache; ask it to fetch again, once.
+		if _, err := cfg.run(ctx, "usage", "invalidate", "--provider", provider); err != nil {
+			return nil, ompFailure(ctx, err)
+		}
+		if accounts, stale, err = cfg.read(ctx); err != nil {
+			return nil, err
+		}
 	}
-	if success, ok := data["success"].(bool); ok && !success {
-		return Identity{}, quota.Fail(quota.ErrKindHTTP, "commandcode rejected the request")
+	fresh := accounts[:0:0]
+	for _, account := range accounts {
+		if cfg.fresh(account.Observation.MeasuredAt) {
+			fresh = append(fresh, account)
+		}
 	}
-	org := text(object(data["org"])["id"])
-	account := text(object(data["user"])["id"])
-	if account == "" {
-		account = org
+	if len(fresh) == 0 {
+		return nil, quota.Fail(quota.ErrKindProbe, "omp usage report is stale")
 	}
-	identity := Identity{Org: org, FP: fingerprint(account)}
-	// Only a named account is remembered: a whoami that omitted both ids must
-	// be asked again, not pin the key to "no account" after the API recovers.
-	if identity.FP != "" {
-		c.Identities.put(token, identity)
-	}
-	return identity, nil
+	return fresh, nil
 }
 
-// get is one authenticated GET answered with its JSON object. Every failure is
-// a kind plus a fixed sentence; the response body, the URL and the key never
-// reach an error. Auth failures follow pacelever: a 403 whose body is not JSON
-// is the edge refusing the client, any other 401/403 a refused login.
-func (c Config) get(ctx context.Context, token, path string) (map[string]any, error) {
-	client := c.HTTP
-	if client == nil {
-		client = &http.Client{Timeout: apiTimeout, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	}
-	base := c.BaseURL
-	if base == "" {
-		base = APIBase
-	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(base, "/")+path, nil)
+// Fresh says a report fetched at is, as of now, neither older than MaxReportAge
+// nor from the future.
+func Fresh(now, fetched time.Time) bool {
+	age := now.Sub(fetched)
+	return age >= -futureSkew && age <= MaxReportAge
+}
+
+func (c Config) fresh(fetched time.Time) bool { return Fresh(c.now(), fetched) }
+
+// read runs `omp usage` once. stale says some account's report is too old to
+// use, so a refresh is worth asking for.
+func (c Config) read(ctx context.Context) (accounts []Account, stale bool, err error) {
+	out, err := c.run(ctx, "usage", "--json", "--provider", provider)
 	if err != nil {
-		return nil, quota.Fail(quota.ErrKindNetwork, "usage request failed")
+		return nil, false, ompFailure(ctx, err)
 	}
-	request.Header.Set("Authorization", "Bearer "+token)
-	request.Header.Set("User-Agent", UserAgent)
-	request.Header.Set("Accept", "application/json")
-	response, err := client.Do(request)
+	accounts, err = parse(out)
 	if err != nil {
-		if errors.Is(ctx.Err(), context.DeadlineExceeded) || os.IsTimeout(err) {
-			return nil, quota.Fail(quota.ErrKindTimeout, "usage request timed out")
-		}
-		return nil, quota.Fail(quota.ErrKindNetwork, "usage request failed")
+		return nil, false, err
 	}
-	defer response.Body.Close()
-	var body map[string]any
-	decoded := json.NewDecoder(io.LimitReader(response.Body, apiBodyLimit)).Decode(&body) == nil
-	switch status := response.StatusCode; {
-	case status == http.StatusOK:
-		if !decoded {
-			return nil, quota.Fail(quota.ErrKindParse, "invalid usage JSON")
+	for _, account := range accounts {
+		if !c.fresh(account.Observation.MeasuredAt) {
+			stale = true
 		}
-		return body, nil
-	case status == http.StatusForbidden && !decoded:
-		return nil, quota.Fail(quota.ErrKindEdgeRejected, "commandcode edge rejected the request")
-	case status == http.StatusUnauthorized || status == http.StatusForbidden:
-		return nil, quota.Fail(quota.ErrKindAuthFailed, "commandcode authentication failed")
+	}
+	return accounts, stale, nil
+}
+
+func ompFailure(ctx context.Context, err error) error {
+	switch {
+	case errors.Is(err, exec.ErrNotFound) || errors.Is(err, os.ErrNotExist):
+		return quota.Fail(quota.ErrKindCredentials, "omp is not installed")
+	case errors.Is(ctx.Err(), context.DeadlineExceeded) || errors.Is(err, context.DeadlineExceeded):
+		return quota.Fail(quota.ErrKindTimeout, "omp usage timed out")
+	}
+	return quota.Fail(quota.ErrKindProbe, "omp usage failed")
+}
+
+var errShape = quota.Fail(quota.ErrKindParse, "unsupported omp usage output")
+
+// parse reads one `omp usage --json` document: the Command Code reports, one per
+// account. Anything outside the shape documented in docs/quota.md fails closed.
+func parse(out []byte) ([]Account, error) {
+	var doc ompReport
+	decoder := json.NewDecoder(bytes.NewReader(out))
+	// One document and nothing after it: trailing output is an output this
+	// package does not know.
+	if decoder.Decode(&doc) != nil || doc.Reports == nil || decoder.More() {
+		return nil, errShape
+	}
+	if _, err := decoder.Token(); err != io.EOF {
+		return nil, errShape
+	}
+	var accounts []Account
+	unmeasurable := false
+	for _, report := range doc.Reports {
+		if report.Provider != provider {
+			continue
+		}
+		if report.FetchedAt == nil || !finite(*report.FetchedAt) || *report.FetchedAt <= 0 || report.Limits == nil {
+			return nil, errShape
+		}
+		account, err := parseReport(report.Limits)
+		if err != nil {
+			return nil, err
+		}
+		if len(account.Observation.Buckets) == 0 {
+			unmeasurable = true
+			continue
+		}
+		account.Observation.MeasuredAt = time.UnixMilli(int64(*report.FetchedAt)).UTC()
+		if slices.ContainsFunc(accounts, func(a Account) bool { return a.FP == account.FP }) {
+			return nil, errShape
+		}
+		accounts = append(accounts, account)
+	}
+	switch {
+	case len(accounts) > 0:
+	case unmeasurable:
+		return nil, quota.Fail(quota.ErrKindParse, "omp commandcode account has no usable window")
 	default:
-		// No default wait on a bare 429: the shared flow backs off itself.
-		return nil, quota.StatusError(status, response.Header, c.now(), 0)
+		return nil, quota.Fail(quota.ErrKindCredentials, "omp holds no commandcode account")
 	}
+	slices.SortFunc(accounts, func(a, b Account) int { return strings.Compare(a.FP, b.FP) })
+	return accounts, nil
 }
 
-// payload is the response's data object, or the response itself when it has
-// no data envelope.
-func payload(body map[string]any) map[string]any {
-	if data := object(body["data"]); len(data) > 0 {
-		return data
+// parseReport reads one account's limits: the 5-hour and weekly windows. The
+// credit balance and any other limit are not read. A pay-as-you-go account has
+// only a balance, no window at all: it comes back with no bucket and the caller
+// leaves it out. A window that is present but unreadable is errShape.
+func parseReport(limits []ompLimit) (Account, error) {
+	var account Account
+	id := ""
+	for _, limit := range limits {
+		if limit.Scope.AccountID == "" {
+			return Account{}, errShape
+		}
+		if id != "" && limit.Scope.AccountID != id {
+			return Account{}, errShape
+		}
+		id = limit.Scope.AccountID
 	}
-	return body
-}
-
-// windowBuckets reads windowLimits.fiveHour and .weekly as 5h and 7d: used
-// over cap. A window with no positive cap or a malformed used value is left
-// out (a malformed value must never read as an unused window); one past its
-// cap is exhausted, 100%.
-func windowBuckets(credits map[string]any) []quota.Bucket {
-	limits := object(payload(credits)["windowLimits"])
-	var buckets []quota.Bucket
-	for _, axis := range []struct{ key, window string }{{"fiveHour", "5h"}, {"weekly", "7d"}} {
-		w := object(limits[axis.key])
-		capacity, capacityOK := number(w["cap"])
-		used, usedOK := number(w["used"])
-		if !capacityOK || capacity <= 0 || !usedOK || used < 0 {
+	if id == "" {
+		return Account{}, errShape
+	}
+	account.FP = Fingerprint(id)
+	account.Observation = quota.Observation{Source: quota.SourceOmpUsage}
+	seen := map[string]bool{}
+	for _, limit := range limits {
+		window, duration := "", int64(0)
+		switch limit.ID {
+		case provider + ":5h":
+			window, duration = "5h", fiveHourMs
+		case provider + ":7d":
+			window, duration = "7d", weeklyMs
+		default:
 			continue
 		}
-		pct := quota.Pct(min(100*used/capacity, 100))
-		if pct == nil {
-			continue
+		// The window is named by id and length; a length omp changed is not the
+		// window this package paces.
+		if seen[window] || limit.Window == nil || limit.Window.DurationMs == nil || *limit.Window.DurationMs != float64(duration) || limit.Amount == nil {
+			return Account{}, errShape
 		}
-		buckets = append(buckets, quota.Bucket{Window: axis.window, UsedPct: pct, ResetsAt: resetTime(w["resetAt"]), Scope: quota.Scope{Kind: quota.ScopeAccount}})
+		seen[window] = true
+		pct, ok := usedPct(limit)
+		if !ok {
+			// A recognized window whose amount cannot be read is an output this
+			// package does not know: never a partial reading that would hide
+			// the window (an exhausted week beside a valid 5h).
+			return Account{}, errShape
+		}
+		bucket := quota.Bucket{Window: window, UsedPct: pct, Scope: quota.Scope{Kind: quota.ScopeAccount}}
+		if limit.Window.ResetsAt != nil {
+			bucket.ResetsAt = epochTime(*limit.Window.ResetsAt)
+		}
+		account.Observation.Buckets = append(account.Observation.Buckets, bucket)
 	}
-	return buckets
+	return account, nil
 }
 
-// monthlyRemaining is credits.monthlyCredits: the plan credits left this
-// billing period, in USD. Purchased and free credits are not part of the
-// plan's allowance and are never read.
-func monthlyRemaining(credits map[string]any) (float64, bool) {
-	remaining, ok := number(object(payload(credits)["credits"])["monthlyCredits"])
-	return max(remaining, 0), ok
-}
-
-// monthlySpent is the usage summary's totalMonthlyCredits: the plan credits
-// spent this billing period. A summary on any other basis, or without a
-// non-negative number, gives none.
-func monthlySpent(summary map[string]any) *float64 {
-	data := payload(summary)
-	if basis, ok := data["periodBasis"].(string); ok && basis != billingPeriod {
-		return nil
+// usedPct is a limit's used share in percent, clamped to 100 past the cap. An
+// exhausted status is 100 whatever the numbers say; a limit with neither a valid
+// fraction nor a positive limit and a used value has none.
+func usedPct(limit ompLimit) (*float64, bool) {
+	amount := limit.Amount
+	if limit.Status == "exhausted" {
+		return quota.Pct(100), true
 	}
-	spent, ok := number(data["totalMonthlyCredits"])
-	if !ok || spent < 0 {
-		return nil
+	switch {
+	case amount.UsedFraction != nil:
+		// A fraction that is present decides: an invalid one is not papered over
+		// by used/limit.
+		if finite(*amount.UsedFraction) && *amount.UsedFraction >= 0 {
+			return quota.Pct(min(100**amount.UsedFraction, 100)), true
+		}
+		return nil, false
+	case amount.Used != nil && amount.Limit != nil && finite(*amount.Used) && finite(*amount.Limit) && *amount.Limit > 0 && *amount.Used >= 0:
+		return quota.Pct(min(100**amount.Used / *amount.Limit, 100)), true
 	}
-	return &spent
+	return nil, false
 }
 
-// subscriptionPeriod is the current period's end (the 30d reset) and the plan
-// id of data.
-func subscriptionPeriod(subscription map[string]any) (reset, plan string) {
-	data := payload(subscription)
-	return resetTime(data["currentPeriodEnd"]), text(data["planId"])
-}
+func finite(n float64) bool { return !math.IsNaN(n) && !math.IsInf(n, 0) }
 
-func object(v any) map[string]any {
-	m, _ := v.(map[string]any)
-	return m
-}
-
-func text(v any) string {
-	s, _ := v.(string)
-	return strings.TrimSpace(s)
-}
-
-// number accepts a decoded JSON number only.
-func number(v any) (float64, bool) {
-	n, ok := v.(float64)
-	return n, ok && !math.IsNaN(n) && !math.IsInf(n, 0)
-}
-
-// resetTime reads a reset sent as epoch seconds, milliseconds or microseconds
-// (number or numeric string), RFC 3339 or an HTTP date, as an RFC 3339 string;
-// anything else, and a time outside 2000..2200, is "".
-func resetTime(v any) string {
-	switch x := v.(type) {
-	case float64:
-		return epochTime(x)
-	case string:
-		s := strings.TrimSpace(x)
-		if s == "" {
-			return ""
-		}
-		if at, err := time.Parse(time.RFC3339Nano, s); err == nil {
-			return at.UTC().Format(time.RFC3339Nano)
-		}
-		if n, ok := quota.ParseFinite(s); ok {
-			return epochTime(n)
-		}
-		if at, err := http.ParseTime(s); err == nil {
-			return at.UTC().Format(time.RFC3339Nano)
-		}
-	}
-	return ""
-}
-
-func epochTime(n float64) string {
-	if math.IsNaN(n) || math.IsInf(n, 0) || n <= 0 || n > 9.2e18 {
+// epochTime is an epoch-millisecond reset as RFC 3339; an absent, non-positive or
+// implausible (outside 2000..2200) time is "".
+func epochTime(ms float64) string {
+	if !finite(ms) || ms <= 0 || ms > 9.2e15 {
 		return ""
 	}
-	var at time.Time
-	switch {
-	case n >= 1e14:
-		at = time.UnixMicro(int64(n))
-	case n >= 1e11:
-		at = time.UnixMilli(int64(n))
-	default:
-		at = time.Unix(int64(n), 0)
-	}
-	at = at.UTC()
+	at := time.UnixMilli(int64(ms)).UTC()
 	if at.Before(time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)) || at.After(time.Date(2200, 1, 1, 0, 0, 0, 0, time.UTC)) {
 		return ""
 	}

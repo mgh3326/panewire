@@ -1,8 +1,8 @@
 package panewire
 
 import (
+	"bytes"
 	"context"
-	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -13,12 +13,13 @@ import (
 	"github.com/mgh3326/panewire/internal/quotastop"
 )
 
-// roleStopRig is a worker or tester job on a quota stop screen, with the
+// roleStopRig is an implementer job on a quota stop screen, with the
 // quota-stop manager in SHADOW mode (--quota-stop-act off): hk 3334 has the
 // manager act for these roles regardless.
 type roleStopRig struct {
 	*idleWakeTestRig
 	q         *quotaStopManager
+	logs      bytes.Buffer
 	sends     int
 	announce  []quotastop.Stop
 	announced []string
@@ -26,6 +27,13 @@ type roleStopRig struct {
 }
 
 func newRoleStopRig(t *testing.T, role string, startedAgo time.Duration, task string) *roleStopRig {
+	return newRoleStopRigScreen(t, role, startedAgo, task, "testdata/quota-stop/devin.txt", "")
+}
+
+// newRoleStopRigScreen is newRoleStopRig with the stop screen and the profile
+// the job.spawned receipt names; an empty profile leaves the receipt without
+// one, as an older spawn record does.
+func newRoleStopRigScreen(t *testing.T, role string, startedAgo time.Duration, task, screenPath, profile string) *roleStopRig {
 	t.Helper()
 	rig := &roleStopRig{idleWakeTestRig: newIdleWakeTestRig(t, time.Second)}
 	// Jobs older than the active window are not found, so the rig runs on the
@@ -37,14 +45,19 @@ func newRoleStopRig(t *testing.T, role string, startedAgo time.Duration, task st
 		t.Fatal(err)
 	}
 	started := rig.now.Add(-startedAgo).UTC().Format(time.RFC3339)
+	spawned := `{"type":"job.spawned","created_at":"` + started + `","pane_id":"workspace:pane-1","role":"` + role + `","task_id":"42"`
+	if profile != "" {
+		spawned += `,"profile":"` + profile + `"`
+	}
+	spawned += `}`
 	for name, body := range map[string]string{
-		"00001-job.claimed.json": `{"type":"job.claimed","created_at":"` + started + `","agent_label":"worker-synthetic","owner_lane":"owner","role":"worker","task_id":"42","epoch":1}`,
-		"00002-job.spawned.json": `{"type":"job.spawned","created_at":"` + started + `","pane_id":"workspace:pane-1","role":"` + role + `","task_id":"42"}`} {
+		"00001-job.claimed.json": `{"type":"job.claimed","created_at":"` + started + `","agent_label":"worker-synthetic","owner_lane":"owner","role":"implementer","task_id":"42","epoch":1}`,
+		"00002-job.spawned.json": spawned} {
 		if err := os.WriteFile(filepath.Join(events, name), []byte(body), 0600); err != nil {
 			t.Fatal(err)
 		}
 	}
-	q, err := newQuotaStopManager(rig.store, root, false, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	q, err := newQuotaStopManager(rig.store, root, false, slog.New(slog.NewTextHandler(&rig.logs, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -54,7 +67,7 @@ func newRoleStopRig(t *testing.T, role string, startedAgo time.Duration, task st
 		rig.owner = append(rig.owner, e)
 		return true
 	}
-	screen, err := os.ReadFile("testdata/quota-stop/devin.txt")
+	screen, err := os.ReadFile(screenPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -95,11 +108,11 @@ func (rig *roleStopRig) decision(t *testing.T) (decision, reason string) {
 
 const roleStopTask = `{"tasks":[{"priority":3,"expected":"4h","refs":{"job_id":"job-active"}}]}`
 
-// (b) hk 3334: a worker or tester whose reset is inside its expected time
+// (b) hk 3334: an implementer whose reset is inside its expected time
 // waits, is resumed once at the reset, and the job is not lost, with
 // --quota-stop-act off.
 func TestQuotaStopWorkerWithinExpectedWaitsAndResumesOnce(t *testing.T) {
-	for _, role := range []string{"worker", "tester"} {
+	for _, role := range []string{"implementer"} {
 		t.Run(role, func(t *testing.T) {
 			rig := newRoleStopRig(t, role, time.Hour, roleStopTask)
 			rig.run()
@@ -140,7 +153,7 @@ func TestQuotaStopWorkerBeyondExpectedIsHandedOver(t *testing.T) {
 		"priority 1":                      {time.Hour, `{"tasks":[{"priority":1,"expected":"4h","refs":{"job_id":"job-active"}}]}`, "urgent"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			rig := newRoleStopRig(t, "worker", tc.startedAgo, tc.task)
+			rig := newRoleStopRig(t, "implementer", tc.startedAgo, tc.task)
 			rig.run()
 			if d, reason := rig.decision(t); d != "handover" || reason != tc.reason {
 				t.Fatalf("decision=%s reason=%s, want handover %s", d, reason, tc.reason)
@@ -160,7 +173,7 @@ func TestQuotaStopWorkerBeyondExpectedIsHandedOver(t *testing.T) {
 // claim says worker for every spawned job; the spawn receipt's role decides
 // (a reviewer is not resumed like a worker).
 func TestQuotaStopOtherRolesStayShadow(t *testing.T) {
-	for _, role := range []string{"reviewer", "counsel"} {
+	for _, role := range []string{"reviewer", "consult"} {
 		t.Run("role="+role, func(t *testing.T) {
 			rig := newRoleStopRig(t, role, 5*time.Hour, roleStopTask)
 			rig.run()
@@ -174,7 +187,7 @@ func TestQuotaStopOtherRolesStayShadow(t *testing.T) {
 // A screen the manager could not read is no proof of a stop: a worker is
 // never handed over on it, even though the manager acts for workers.
 func TestQuotaStopWorkerReadFailureIsNotHandedOver(t *testing.T) {
-	rig := newRoleStopRig(t, "worker", time.Hour, roleStopTask)
+	rig := newRoleStopRig(t, "implementer", time.Hour, roleStopTask)
 	rig.q.read = func(context.Context, string) (string, error) { return "", os.ErrNotExist }
 	rig.run()
 	if len(rig.announce) != 0 || rig.sends != 0 {
@@ -182,14 +195,14 @@ func TestQuotaStopWorkerReadFailureIsNotHandedOver(t *testing.T) {
 	}
 }
 
-// A tester inherits its builder's task: the task is bound to the builder's job,
+// A replacement implementer inherits its parent's task: the task is bound to the parent's job,
 // so the manager finds it through the claim's task_inherited_from and decides
 // on its expected time, not task_unavailable (review finding).
-func TestQuotaStopTesterFindsItsInheritedTask(t *testing.T) {
-	rig := newRoleStopRig(t, "tester", time.Hour, `{"tasks":[{"priority":3,"expected":"4h","refs":{"job_id":"builder-job"}}]}`)
+func TestQuotaStopImplementerFindsItsInheritedTask(t *testing.T) {
+	rig := newRoleStopRig(t, "implementer", time.Hour, `{"tasks":[{"priority":3,"expected":"4h","refs":{"job_id":"builder-job"}}]}`)
 	events := filepath.Join(rig.manager.inboxRoot, "jobs", "job-active", "events")
 	started := rig.now.Add(-time.Hour).UTC().Format(time.RFC3339)
-	claim := `{"type":"job.claimed","created_at":"` + started + `","agent_label":"worker-synthetic","owner_lane":"owner","role":"worker","task_inherited_from":"builder-job","epoch":1}`
+	claim := `{"type":"job.claimed","created_at":"` + started + `","agent_label":"worker-synthetic","owner_lane":"owner","role":"implementer","task_inherited_from":"builder-job","epoch":1}`
 	if err := os.WriteFile(filepath.Join(events, "00001-job.claimed.json"), []byte(claim), 0600); err != nil {
 		t.Fatal(err)
 	}

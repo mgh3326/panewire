@@ -1,15 +1,17 @@
 #!/bin/sh
 # Run one shard of the root package's tests: scripts/ci-test-shard.sh INDEX/TOTAL
 #
-# Every top-level test name from `go test -list .` is sorted and dealt out
-# round-robin, so each name lands in exactly one shard and a test added later
-# is picked up by the shard that its position selects. There is no pattern list
-# to keep in step with the code. ci_workflow_test.go proves the shards in
-# ci.yml cover every test.
+# Top-level test names from `go test -list .` are balanced across shards
+# by recorded test durations (scripts/ci-test-durations.json, operator decision 178)
+# via Largest Processing Time (LPT) bin packing.
+# Each name lands in exactly one shard and a test added later is picked up
+# deterministically. ci_workflow_shard_test.go proves the shards in ci.yml
+# cover every test and balance durations evenly.
 #
 # Test hooks (used by ci_workflow_test.go):
-#   PANEWIRE_SHARD_NAMES_FILE  read the names from this file, not `go test -list`
-#   PANEWIRE_SHARD_DRY_RUN=1   print the -run pattern and exit
+#   PANEWIRE_SHARD_NAMES_FILE     read the names from this file, not `go test -list`
+#   PANEWIRE_SHARD_DURATIONS_FILE read durations from this file, not ci-test-durations.json
+#   PANEWIRE_SHARD_DRY_RUN=1      print the -run pattern and exit
 set -eu
 
 spec=${1:?usage: ci-test-shard.sh INDEX/TOTAL}
@@ -23,6 +25,9 @@ if [ "$total" -lt 1 ] || [ "$index" -ge "$total" ]; then
 	exit 2
 fi
 
+script_dir=$(cd "$(dirname "$0")" && pwd)
+durations_arg="${PANEWIRE_SHARD_DURATIONS_FILE:-$script_dir/ci-test-durations.json}"
+
 if [ -n "${PANEWIRE_SHARD_NAMES_FILE:-}" ]; then
 	all=$(cat "$PANEWIRE_SHARD_NAMES_FILE")
 else
@@ -30,8 +35,9 @@ else
 fi
 
 # Keep only test names: drop go's trailing "ok  <pkg>  <time>" line.
-names=$(printf '%s\n' "$all" | grep -v -e '^ok[[:space:]]' -e '^$' | LC_ALL=C sort |
-	awk -v i="$index" -v n="$total" '(NR - 1) % n == i')
+# Assign tests to shards balanced by recorded durations.
+names=$(printf '%s\n' "$all" | grep -v -e '^ok[[:space:]]' -e '^$' |
+	python3 "$script_dir/ci-test-shard-balance.py" "$index" "$total" "$durations_arg")
 if [ -z "$names" ]; then
 	echo "shard $spec selected no tests" >&2
 	exit 1

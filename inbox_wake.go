@@ -38,7 +38,7 @@ var inboxWakeUrgency = []string{"info", "ready", "findings", "automation-failed"
 // Every type not named here (merged, closed, progress, report, ack, info,
 // idle-wake) is info.
 var inboxWakeTypeKinds = map[string]string{
-	"decision": "decision", "order": "decision", "deploy-approval": "decision",
+	"decision": "decision", "order": "order", "deploy-approval": "decision",
 	"blocked": "blocked", "watch-hold": "blocked", "culprit-hold": "blocked",
 	"automation-failed": "automation-failed",
 	"findings":          "findings",
@@ -88,6 +88,10 @@ func inboxWakeKind(kind string, e hubJobEventPayload) string {
 }
 
 func inboxWakeRank(kind string) int {
+	// Orders keep their declared display kind, but share decision urgency.
+	if kind == "order" {
+		kind = "decision"
+	}
 	for rank, k := range inboxWakeUrgency {
 		if k == kind {
 			return rank
@@ -103,7 +107,7 @@ func inboxWakeRank(kind string) int {
 // event id that merely looks like chat-N earns nothing. The hub's digest and
 // hold batches are not exempt: flushInbox files them (fileInboxOnlyBatch).
 func inboxOnlyExempt(e hubJobEventPayload) bool {
-	return e.operatorIngress || e.operatorChat
+	return e.operatorIngress
 }
 
 // inboxWakeText is the wake line. N comes from a successful count read only.
@@ -271,14 +275,26 @@ func (h *HubServer) retryUnroutedInboxWakes() {
 	}
 }
 
+// inboxWakeMostUrgent is the highest-ranked unread kind. order shares decision's
+// rank, so on that tie order wins: the line must not depend on inbox order (hk 4458).
 func inboxWakeMostUrgent(items []laneInboxItem) string {
 	most := "info"
 	for _, item := range items {
-		if k := inboxWakeKind(item.Kind, item.Event); inboxWakeRank(k) > inboxWakeRank(most) {
+		k := inboxWakeKind(item.Kind, item.Event)
+		rank, mostRank := inboxWakeRank(k), inboxWakeRank(most)
+		if rank > mostRank || (rank == mostRank && k == "order") {
 			most = k
 		}
 	}
 	return most
+}
+
+// inboxWakeRoutes reads the relay routes once for one wake, so every route
+// that wake decides on or sends to comes from the same lanes file (hk 4220).
+func (h *HubServer) inboxWakeRoutes() map[string]reportRelayRoute {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return loadReportRelayRoutes(h.reportRelayPath)
 }
 
 // sendInboxWake reads the lane's unread count and its most urgent unread
@@ -286,6 +302,13 @@ func inboxWakeMostUrgent(items []laneInboxItem) string {
 // "0 unread": the line is skipped and stays owed. A lane with nothing unread
 // owes nothing. The caller holds the wake mutex.
 func (h *HubServer) sendInboxWake(lane, class string, startup bool) inboxWakeOutcome {
+	return h.sendInboxWakeWithRoutes(h.inboxWakeRoutes(), lane, class, startup)
+}
+
+// sendInboxWakeWithRoutes is sendInboxWake over one routes snapshot: the
+// paneless decision and the route the line is sent to read the same view, so
+// a lanes-file write between them cannot make them disagree.
+func (h *HubServer) sendInboxWakeWithRoutes(routes map[string]reportRelayRoute, lane, class string, startup bool) inboxWakeOutcome {
 	counts, err := h.inbox.store.counts(lane)
 	var items []laneInboxItem
 	if err == nil {
@@ -301,8 +324,8 @@ func (h *HubServer) sendInboxWake(lane, class string, startup bool) inboxWakeOut
 		return inboxWakeNothing
 	}
 	most := inboxWakeMostUrgent(items)
-	route, agent, routed := h.resolveRelayRoute("lane.event", hubJobEventPayload{OwnerLane: lane})
-	route, agent, routed, text, deskFallback := h.inboxWakeDestination(lane, class, route, agent, routed, unread, most)
+	route, agent, routed := h.resolveRelayRouteWithRoutes("lane.event", hubJobEventPayload{OwnerLane: lane}, routes)
+	route, agent, routed, text, deskFallback := h.inboxWakeDestination(routes, lane, class, route, agent, routed, unread, most)
 	detail := fmt.Sprintf("lane=%s class=%s unread=%d most_urgent=%s machine=%s pane=%s", lane, class, unread, most, route.Machine, route.Pane)
 	if deskFallback {
 		detail = fmt.Sprintf("lane=%s class=%s unread=%d most_urgent=%s desk=%s machine=%s pane=%s", lane, class, unread, most, deskPolicyLane, route.Machine, route.Pane)

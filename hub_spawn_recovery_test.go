@@ -40,8 +40,8 @@ func TestAsyncSpawnLateResultReconcilesAgainstSameNode(t *testing.T) {
 				t.Fatal(err)
 			}
 			spec := *req.Repository.Checkout
-			dispatch := hubSpawnRequest{RequestID: t14RequestID(881), Machine: "machine-a", CWDKey: "project", Brief: hubSpawnBrief{Inline: "task"}, Checkout: &hubSpawnCheckout{Origin: spec.Origin, Mode: spec.Mode, Branch: spec.Branch, Sha: spec.Sha, Dir: spec.Dir}, Args: []string{"--job", "test-job", "-l", "test-job", "-m", "codex-sol", "--t", "T1", "--task", "42", "--owner", "parent", "--role", "worker"}, WaitSeconds: 600, DeadlineMS: task.Deadline.UnixMilli()}
-			task, err = h.inbox.store.bindSpawn(t.Context(), req.RequestID, task.Attempt, dispatch)
+			dispatch := hubSpawnRequest{RequestID: t14RequestID(881), Machine: "machine-a", CWDKey: "project", Brief: hubSpawnBrief{Inline: "task"}, Checkout: &hubSpawnCheckout{Origin: spec.Origin, Mode: spec.Mode, Branch: spec.Branch, Sha: spec.Sha, Dir: spec.Dir}, Args: []string{"--job", "test-job", "-l", "test-job", "-m", "codex-sol", "--t", "T1", "--task", "42", "--owner", "parent", "--role", "implementer"}, WaitSeconds: 600, DeadlineMS: task.Deadline.UnixMilli()}
+			task, err = h.inbox.store.bindSpawn(t.Context(), req.RequestID, task.Attempt, dispatch, time.Now().UTC())
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -71,7 +71,7 @@ func TestAsyncSpawnLateResultReconcilesAgainstSameNode(t *testing.T) {
 			if replay.RequestID != sent.RequestID {
 				t.Fatal("recovery created a new execution request")
 			}
-			receipt := fleet.ExecutionReceipt{Job: "test-job", Host: "machine-a", Pane: "pane-1", Profile: "codex-sol", Model: "model-fixture", Role: "worker", CWD: "/work/" + spec.Dir, Label: "test-job", Kind: "codex"}
+			receipt := fleet.ExecutionReceipt{Job: "test-job", Host: "machine-a", Pane: "pane-1", Profile: "codex-sol", Model: "model-fixture", Role: "implementer", CWD: "/work/" + spec.Dir, Label: "test-job", Kind: "codex"}
 			if err = wsjson.Write(t.Context(), node, map[string]any{"type": "job.spawn.result", "request_id": replay.RequestID, "rc": 0, "job_id": "test-job", "pane": "pane-1", "stdout_tail": "OK pane=pane-1 job=test-job", "receipt": receipt, "stage": "landing", "stage_ms": map[string]int64{"landing": 12}}); err != nil {
 				t.Fatal(err)
 			}
@@ -151,7 +151,7 @@ func TestAsyncSpawnLostEventRetriesWithStableJobIdentity(t *testing.T) {
 func TestAsyncSpawnWorkersBoundedAndIndependentOfHTTP(t *testing.T) {
 	h := asyncSpawnHub(t)
 	req := durableSpawnRequest()
-	for i := 0; i < 6; i++ {
+	for i := 0; i < hubSpawnWorkerCount+2; i++ {
 		current := req
 		current.RequestID = t14RequestID(900 + i)
 		current.Args = append([]string(nil), req.Args...)
@@ -167,7 +167,7 @@ func TestAsyncSpawnWorkersBoundedAndIndependentOfHTTP(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	started := make(chan struct{}, 10)
+	started := make(chan struct{}, hubSpawnWorkerCount+2)
 	release := make(chan struct{})
 	defer close(release)
 	var active, peak atomic.Int32
@@ -187,7 +187,7 @@ func TestAsyncSpawnWorkersBoundedAndIndependentOfHTTP(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	h.startSpawnCoordinator(ctx)
-	for range 4 {
+	for range hubSpawnWorkerCount {
 		select {
 		case <-started:
 		case <-time.After(time.Second):
@@ -196,10 +196,10 @@ func TestAsyncSpawnWorkersBoundedAndIndependentOfHTTP(t *testing.T) {
 	}
 	select {
 	case <-started:
-		t.Fatal("more than four workers executed")
+		t.Fatalf("more than %d workers executed", hubSpawnWorkerCount)
 	case <-time.After(30 * time.Millisecond):
 	}
-	if peak.Load() != 4 {
+	if peak.Load() != hubSpawnWorkerCount {
 		t.Fatal(peak.Load())
 	}
 }
@@ -232,7 +232,7 @@ func TestAsyncSpawnOutlivesSubmittingHTTPContext(t *testing.T) {
 func TestNodeSpawnExpiredAbsoluteDeadlineSkipsEngine(t *testing.T) {
 	client := &HubClient{}
 	called := false
-	client.spawnEngine = func(context.Context, string, string, string, string, []string) (*hubSpawnOutput, fleet.Execution) {
+	client.spawnEngine = func(context.Context, string, string, string, string, time.Time, []string) (*hubSpawnOutput, fleet.Execution) {
 		called = true
 		return &hubSpawnOutput{}, fleet.Execution{}
 	}

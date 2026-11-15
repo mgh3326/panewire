@@ -309,14 +309,16 @@ func TestPromptMismatchIsNotDedupedAfterExpectCorrection(t *testing.T) {
 	}
 }
 
+// A target this herdr session does not serve is a usage refusal naming the
+// lane-event command (hk 4810), still with nothing typed.
 func TestPromptMissingTargetDoesNotCallHerdrPrompt(t *testing.T) {
 	fixture := newHerdrFixture(t, promptFixtureSchema(false))
 	defer fixture.Close()
 	configurePromptFixture(fixture, "claude", promptEchoScreen)
 	d, _ := startPromptDaemon(t, fixture)
 	defer d.Stop()
-	if got := panewire.RunCLI([]string{"prompt", "--from", "sender", "--to", "missing", "--file", promptFile(t)}, panewire.CLIConfig{SocketPath: dSocket(d)}); got != panewire.ExitConditionInvalid {
-		t.Fatalf("exit=%d want %d", got, panewire.ExitConditionInvalid)
+	if got := panewire.RunCLI([]string{"prompt", "--from", "sender", "--to", "missing", "--file", promptFile(t)}, panewire.CLIConfig{SocketPath: dSocket(d)}); got != panewire.ExitUsage {
+		t.Fatalf("exit=%d want %d", got, panewire.ExitUsage)
 	}
 	if got := fixture.Requests("agent.prompt"); got != 0 {
 		t.Fatalf("prompt requests=%d", got)

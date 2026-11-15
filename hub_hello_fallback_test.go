@@ -100,7 +100,7 @@ func runHelloFallbackNode(t *testing.T, server *httptest.Server, ackTimeout time
 
 func helloHasSpawnV2(hello map[string]any) bool {
 	capabilities, _ := hello["capabilities"].([]any)
-	return len(capabilities) == 2 && capabilities[0] == "spawn_v2" && capabilities[1] == "spawn_ops_v1"
+	return len(capabilities) == len(hubSpawnCapabilities) && capabilities[0] == "spawn_v2" && capabilities[1] == "spawn_ops_v1"
 }
 
 func TestHelloFallbackOldHubRegistersWithoutCapabilities(t *testing.T) {

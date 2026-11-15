@@ -6,8 +6,8 @@ leave the old code for a cleanup PR rather than copying its pattern.
 
 ## Layout
 
-- The `panewire` package lives at the repository root; `cmd/panewire` and
-  `cmd/panewire-assistant` stay thin `main` wrappers.
+- The `panewire` package lives at the repository root; `cmd/panewire` stays a
+  thin `main` wrapper.
 - `internal/` holds packages the root imports (`fleet`, `arbiter`,
   `fleetevent`) and the shared helper packages (`durable`, `textbound`) that
   both the root and those packages use. An internal package never imports the
@@ -34,6 +34,8 @@ leave the old code for a cleanup PR rather than copying its pattern.
 | Bound text for a wire/record/display contract | the named variant | `text_bounds.go` |
 | Mode-0600 env/credential file | `loadMode0600Env` | `env_file.go` |
 | CLI exit status | the `Exit*` constants (`internal/arbiter` keeps its own frozen set) | `wait.go` |
+| A test run's temp state dir: name, sweep stale ones, remove read-only trees | `teststate.StatePrefix` / `SweepStale` / `RemoveAll` | `internal/teststate` |
+| Pin the go toolchain env before a `TestMain` moves HOME or `XDG_CACHE_HOME` | `teststate.PinGoToolchainEnv` | `internal/teststate` |
 
 - Never slice a string with `s[:n]` or `[]rune(s)[:n]` inline where `n` can
   cut text; use the `textbound` cuts. The truncation variants in
@@ -44,13 +46,12 @@ leave the old code for a cleanup PR rather than copying its pattern.
   fsynced before they become visible.
 - Log with `log/slog` in the root package (`internal/fleet` reports through
   its `App`'s `warn`); never print credentials, tokens, or request bodies.
-- Some HTTP bodies are pinned byte for byte (`/healthz`, the assistant's
-  error bodies); check the tests before changing how a handler writes.
+- Some HTTP bodies are pinned byte for byte (`/healthz` and the lanes
+  refusal bodies); check the tests before changing how a handler writes.
 - Code that needs the current time and must be testable takes a
   `now func() time.Time` dependency instead of calling `time.Now()` inline.
   When a type already carries one, every recorded timestamp and time-based
-  rule goes through it (`HubServer.now`, `HubClient.nowUTC()`,
-  `assistantCFVerifier.nowUnix()`); never add a second accessor. Elapsed
+  rule goes through it (`HubServer.now`, `HubClient.nowUTC()`); never add a second accessor. Elapsed
   time for timeouts and deadlines stays on the wall clock, because a frozen
   test clock would never expire it.
 
@@ -65,6 +66,10 @@ leave the old code for a cleanup PR rather than copying its pattern.
   outcome you assert, not on an earlier step that precedes it.
 - `time.Sleep` in a test is only for simulated latency, fixture pacing, or a
   window that proves nothing *more* happens; say which in a comment.
+- A `TestMain` scopes its run's state with `teststate.StatePrefix`, sweeps
+  stale dirs a killed run left behind, and pins the go toolchain env before it
+  moves `HOME` or `XDG_CACHE_HOME`; otherwise every run that builds with `go`
+  writes a fresh cache into the state dir (hk 4733).
 - The PR `test (ubuntu-latest)` check splits the root package across runners with
   `scripts/ci-test-shard.sh`. It deals out every name from `go test -list .`, so a new test
   needs no CI edit; `ci_workflow_shard_test.go` fails if any test would run in no shard.
@@ -77,7 +82,7 @@ leave the old code for a cleanup PR rather than copying its pattern.
 
 ## Before pushing
 
-CI runs these checks. A person may run them all before pushing. A fleet session (a pane spawned by panewire) follows the spawn preamble instead: it runs `gofmt -l .`, `go vet ./...` and `go test` for the packages it changed, on a host the preamble allows (never `go test` on mbp-server: use `remote-gotest`), and leaves `go test ./...` and the `-race` runs to CI.
+CI runs these checks. A person may run them all before pushing. A fleet session (a pane spawned by panewire) follows the spawn preamble instead: it runs `gofmt -l .`, `go vet ./...` and `go test` for the packages it changed, on any host, and leaves `go test ./...` and the `-race` runs to CI.
 
 ```sh
 gofmt -l .        # must print nothing

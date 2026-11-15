@@ -29,7 +29,7 @@ func TestPlacementRecordTakesNodeLiveSignalsFromHubState(t *testing.T) {
 	if signals.CPUBusyShort == nil || *signals.CPUBusyShort != 0.17 || signals.SignalAgeS == nil || *signals.SignalAgeS != 7 || signals.PowerSource != "battery" {
 		t.Fatalf("record signals=%+v; want cpu_busy_short 0.17, signal_age_s 7, power_source battery", signals)
 	}
-	encoded, err := json.Marshal(placementCandidateRecord{Host: "host-b", Outcome: "skipped", Reason: "not_chosen", PlacementSignals: signals})
+	encoded, err := json.Marshal(PlacementCandidateRecord{Host: "host-b", Outcome: "skipped", Reason: "not_chosen", PlacementSignals: signals})
 	if err != nil {
 		t.Fatal(err)
 	}

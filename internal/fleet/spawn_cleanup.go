@@ -8,6 +8,11 @@ import (
 
 const FailedSpawnCloseSettle = 2 * time.Second
 
+// FailedSpawnUnconfirmed is the closed phrase of the refusal a failed spawn's
+// cleanup gives when the pane is not provably the one it launched. The hub
+// matches it in a landing refusal to re-check the pane (hub_spawn_async.go).
+const FailedSpawnUnconfirmed = "pane identity or status is unconfirmed"
+
 // A deadline can expire after the harness starts working. Preserve an unknown
 // or working pane and its leases; timeout alone never authorizes closing it.
 func (a *App) closeFailedSpawn(ctx context.Context, s Spawn, pane, kind string) error {
@@ -59,7 +64,7 @@ func (a *App) failedSpawnPane(ctx context.Context, s Spawn, pane, kind string) (
 		}
 		matches++
 		if agent.Name != s.Label || agent.Kind != kind || agent.CWD == "" || filepath.Clean(agent.CWD) != filepath.Clean(s.CWD) || agent.Focused || agent.StateChangeSeq == nil || (agent.Status != "idle" && agent.Status != "done") {
-			return Agent{}, fail(exitStateConflict, "failed spawn pane identity or status is unconfirmed; inspect panewire find %s on the executing host before cleanup", s.Label)
+			return Agent{}, fail(exitStateConflict, "failed spawn %s; inspect panewire find %s on the executing host before cleanup", FailedSpawnUnconfirmed, s.Label)
 		}
 		matched = agent
 	}

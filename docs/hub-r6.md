@@ -31,7 +31,6 @@ every host other than `127.0.0.1`.
 panewire hub \
   --listen 127.0.0.1:9377 \
   --hub-auth /etc/panewire/hub-auth.env \
-  --hub-tg-env /etc/panewire/hub-tg.env \
   --hub-grace 2m \
   --alert-nodes machine-a,machine-b
 ```
@@ -58,7 +57,7 @@ or token minting endpoint.
 `watched`, preserving the R7 behavior. When supplied, it is a comma-separated
 list of authenticated node machine IDs: listed nodes are `watched`; every
 other authenticated node is `presence-only`. Presence-only nodes stay in the
-presence API and status output, but never enter the Telegram presence or
+presence API and status output, but never enter the presence or
 heartbeat-check alert state machine. An empty, duplicate, reserved, malformed,
 or unauthenticated ID rejects hub startup; correct the auth file or list before
 restarting.
@@ -92,8 +91,8 @@ seconds with no application keepalive and restores `connected` after a new
 The bearer token is never copied to logs, error responses, event payloads, or
 status output.
 
-`--hub-tg-env` is optional. When set, it is an explicit non-symlink regular
-mode-`0600` file with `TG_BOT_TOKEN` and `TG_CHAT_ID`. The hub sends one
+The hub writes each alert to its log as a `hub alert` record: WARN for an
+incident and INFO for a recovery. It records one
 incident after a node has stayed `disconnected` or `stale` for `--hub-grace`
 (two minutes by default). While that presence incident remains active, it
 redelivers the down notification every 30 minutes, measured from the last
@@ -102,7 +101,7 @@ as soon as the node is observed connected, and the hub sends one recovery after
 two connected observations. A later distinct down incident starts a new
 reminder interval. Each failed local check likewise needs two consecutive
 heartbeat observations; its recovery also needs two healthy observations and
-does not use presence-down reminders. Telegram presence-down text contains the
+does not use presence-down reminders. Presence-down alert text contains the
 machine ID, reason, check name, and the operator line
 `REBOOT/UNLOCK NEEDED — fleet on <machine> is dead until a human acts`; recovery
 and check messages retain their existing fields without that line.
@@ -139,7 +138,8 @@ It can then send `{"type":"ping"}` and events:
 ```
 
 The hub replies to node `ping` with `pong`, sends its own `ping` keepalive,
-and accepts the node's `pong` response. Unknown fields, malformed envelopes,
+and accepts the node's `pong` response. A hub that is stopping sends `{"type":"redial"}` and
+closes the socket; the node dials again at once ([hub-drain.md](hub-drain.md)). Unknown fields, malformed envelopes,
 and unknown event kinds are ignored while an internal counter advances; they
 do not disconnect an authenticated node. Authentication failures are rejected
 before the WebSocket handshake.
@@ -223,6 +223,18 @@ only as headers on the HTTPS request.
 
 ### Operator session find
 
+`panewire find` is the everyday locator: it resolves a pane on this host
+through herdr and, when the fleet hosts config carries a `[hub]` operator
+credential (`operator_token_env` or `hub_token_env`), also asks the hub where
+the same name lives on every other host — matching session `agent_name`,
+`label` and `display_label` from `/v1/nodes`, `job_id` from `/v1/jobs`, and
+lane names from `/v1/lanes`. Every match line prints `machine=` next to
+`pane_id=` so the operator knows which host to point `panewire prompt` at;
+`--pane-only` prints the bare pane id for a local match and
+`machine:pane_id` for a remote one. Node hosts without an operator credential
+keep the local-only lookup, and each hub projection that fails is a stderr
+warning rather than a silent gap.
+
 `panewire fleet-census find` locates sessions by canonical agent name across the
 session snapshots that nodes already publish through `/v1/nodes`. It issues
 exactly one authenticated `GET /v1/nodes` through the same credentialled
@@ -303,12 +315,13 @@ execution facility.
    `/etc/panewire/hub-auth.env` as mode `0600` owned by the dedicated
    `panewire` service account (keep the containing directory root-controlled).
    Do not put its values in a systemd unit or command line.
-2. Create `/etc/panewire/hub-tg.env` as a mode-`0600` file only when Telegram
-   notification is desired. Install a `panewire-hub.service` unit whose
-   `ExecStart` is equivalent to `panewire hub --listen 127.0.0.1:9377
-   --hub-auth /etc/panewire/hub-auth.env --hub-tg-env
-   /etc/panewire/hub-tg.env --hub-grace 2m --alert-nodes machine-a,machine-b`.
-   Run it as a dedicated unprivileged service account with `Restart=always`.
+2. Install a `panewire-hub.service` unit whose `ExecStart` is equivalent to
+   `panewire hub --listen 127.0.0.1:9377 --hub-auth /etc/panewire/hub-auth.env
+   --hub-grace 2m --alert-nodes machine-a,machine-b`. A unit that still passes
+   `--hub-tg-env` refuses to start: drop that flag before deploy (hk 4442).
+   Run it as a dedicated unprivileged service account with `Restart=always`
+   and `TimeoutStopSec=45` or more, so the SIGTERM drain can finish
+   ([hub-drain.md](hub-drain.md)).
    Verify locally with `curl http://127.0.0.1:9377/healthz`.
 3. Configure `cloudflared` on that same NCP host to map the hostname
    `hub.example.invalid` to `http://127.0.0.1:9377`. The hub itself remains

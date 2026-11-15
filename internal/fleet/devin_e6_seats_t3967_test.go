@@ -17,7 +17,7 @@ var devinE6Seats = map[string]struct{ model, family string }{
 func devinE6Rows() []CatalogRow {
 	var rows []CatalogRow
 	for profile, want := range devinE6Seats {
-		rows = append(rows, CatalogRow{Profile: profile, Effort: "", ModelID: want.model, Pool: "devin", Grade: gradeUnrated, Gate: defaultGate})
+		rows = append(rows, CatalogRow{Profile: profile, Effort: "high", ModelID: want.model, Pool: "devin", Grade: gradeUnrated, Gate: defaultGate})
 	}
 	return rows
 }
@@ -50,9 +50,9 @@ func TestDevinE6SeatsPinnedSpawnResolvesLikeDS41Max(t *testing.T) {
 				t.Fatalf("catalog rows for %s: %+v", profile, found)
 			}
 			catalog := overlayLaunchCatalog(found, false)
-			req := admissionRequest{Profile: profile, Effort: "", Role: "worker", E6Arm: profile + "@"}
+			req := admissionRequest{Profile: profile, Effort: "high", Role: "implementer", E6Arm: profile + "@high"}
 			resolved, effort, why := catalog.resolveRow(req, true, a.Policy.Profiles)
-			if why != "" || resolved.ModelID != want.model || resolved.Pool != "devin" || effort != "" {
+			if why != "" || resolved.ModelID != want.model || resolved.Pool != "devin" || effort != "high" {
 				t.Fatalf("resolved row=%+v effort=%q why=%q", resolved, effort, why)
 			}
 			in := admissionInputs{Rows: admissionRows(found), Seats: a.Policy.Profiles}
@@ -78,13 +78,13 @@ func TestDevinE6SeatsRequireTheArm(t *testing.T) {
 		t.Run(profile, func(t *testing.T) {
 			seat := a.Policy.Profiles[profile]
 			l := Launch{Profile: profile, ModelID: want.model, Pool: "devin", Grade: gradeUnrated, Gate: defaultGate}
-			if err := seat.Check(l, "worker", "A", "", "", nil); err == nil {
+			if err := seat.Check(l, "implementer", "A", "", "", true); err == nil {
 				t.Fatalf("%s admitted a graded task without PANEWIRE_E6_ARM", profile)
 			}
-			if err := seat.Check(l, "worker", "A", "", "some-other-seat@", nil); err == nil {
+			if err := seat.Check(l, "implementer", "A", "", "some-other-seat@", true); err == nil {
 				t.Fatalf("%s admitted a graded task on another seat's marker", profile)
 			}
-			if err := seat.Check(l, "worker", "A", "", profile+"@", nil); err != nil {
+			if err := seat.Check(l, "implementer", "A", "", profile+"@", true); err != nil {
 				t.Fatalf("%s refused its own marker: %v", profile, err)
 			}
 		})
@@ -162,7 +162,7 @@ func TestDevinE6SeatsExistingDevinSeatsUnchanged(t *testing.T) {
 		{"devin-fusion-opus55", "fusion-claude-opus-5-5-high-sidekick-swe-2-medium", "anthropic"},
 	} {
 		seat, ok := a.Policy.Profiles[tc.profile]
-		if !ok || seat.Kind != "devin" || seat.Family != tc.family || seat.Capability != "standard" || !reflect.DeepEqual(seat.Roles, []string{"worker", "tester", "reviewer", "counsel"}) {
+		if !ok || seat.Kind != "devin" || seat.Family != tc.family || seat.Capability != "standard" || !reflect.DeepEqual(seat.Roles, []string{"implementer", "reviewer", "consult"}) {
 			t.Fatalf("existing devin seat %s changed: %+v", tc.profile, seat)
 		}
 		argv, _, err := a.launchArgs(seat, Launch{ModelID: tc.model})

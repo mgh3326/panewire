@@ -30,6 +30,11 @@ var agentStatuses = map[string]bool{"idle": true, "working": true, "blocked": tr
 // external read cannot be released on stale Herdr evidence.
 type AgentSource func(context.Context) ([]Agent, error)
 
+// AgentSourceForJobs reads snapshots for every local job that may be
+// reconciled. The ids are collected after the GC state snapshot, so jobs
+// claimed during the external reads are still fenced by the write pass.
+type AgentSourceForJobs func(context.Context, []string) ([]Agent, error)
+
 type snapshot struct {
 	state string
 	claim sql.NullInt64
@@ -266,12 +271,25 @@ type GCResult struct {
 // job reclaimed after the Herdr snapshot, or still inside the startup grace,
 // is skipped.
 func (s *Store) GC(ctx context.Context, agents AgentSource) (GCResult, error) {
+	return s.GCWithJobs(ctx, func(ctx context.Context, _ []string) ([]Agent, error) {
+		return agents(ctx)
+	})
+}
+
+// GCWithJobs is GC with the set of currently leased or quota-held jobs passed
+// to its external agent source. A source can use each job's recorded Herdr
+// session and must return an error if any required session cannot be read.
+func (s *Store) GCWithJobs(ctx context.Context, agents AgentSourceForJobs) (GCResult, error) {
 	var res GCResult
 	snaps, e := s.snapshots(ctx, "")
 	if e != nil {
 		return res, e
 	}
-	list, e := agents(ctx)
+	jobIDs, e := s.reconciliationJobs(ctx)
+	if e != nil {
+		return res, e
+	}
+	list, e := agents(ctx, jobIDs)
 	if e != nil {
 		return res, e
 	}
@@ -321,7 +339,7 @@ func (s *Store) GC(ctx context.Context, agents AgentSource) (GCResult, error) {
 				return aerr
 			}
 			if fresh {
-				if _, err = s.recordEvent(c, r.job, "lease.expire", map[string]any{"resource": r.resource, "kind": r.kind, "expires_at": r.expires}, nil); err != nil {
+				if _, err = s.recordEvent(ctx, c, r.job, "lease.expire", map[string]any{"resource": r.resource, "kind": r.kind, "expires_at": r.expires}, nil); err != nil {
 					return err
 				}
 				res.Transitioned = append(res.Transitioned, Transition{r.resource, r.kind, r.job, r.expires})
@@ -443,7 +461,7 @@ func (s *Store) GC(ctx context.Context, agents AgentSource) (GCResult, error) {
 			if _, err = c.exec("DELETE FROM quota_pool_records WHERE job_id = ? AND pool = ?", d.quota.job, d.quota.pool); err != nil {
 				return sqlErr(err)
 			}
-			if _, err = s.recordEvent(c, d.job, "quota_pool.stale_cleanup", map[string]any{
+			if _, err = s.recordEvent(ctx, c, d.job, "quota_pool.stale_cleanup", map[string]any{
 				"job_id": d.job, "pool": d.quota.pool, "profile": d.quota.profile, "started_at": d.quota.started,
 				"agent_label": d.label, "reason": reason, "herdr_status": nonNil(d.statuses),
 			}, nil); err != nil {
@@ -472,7 +490,7 @@ func (s *Store) GC(ctx context.Context, agents AgentSource) (GCResult, error) {
 			if _, err = c.exec("UPDATE jobs SET state = 'released', updated_at = ? WHERE job_id = ? AND state = 'leased'", iso(moment), id); err != nil {
 				return sqlErr(err)
 			}
-			seq, rerr := s.recordEvent(c, id, "job.orphan_release", map[string]any{
+			seq, rerr := s.recordEvent(ctx, c, id, "job.orphan_release", map[string]any{
 				"job_id": id, "prior_state": o.state, "agent_label": cand.label,
 				"herdr_status": nonNil(cand.statuses), "reason": cand.reason, "forced": false,
 			}, nil)
@@ -484,6 +502,32 @@ func (s *Store) GC(ctx context.Context, agents AgentSource) (GCResult, error) {
 		return nil
 	})
 	return res, e
+}
+
+func (s *Store) reconciliationJobs(ctx context.Context) ([]string, error) {
+	c, err := s.ro(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer c.Close()
+	rows, err := c.rows(`SELECT job_id FROM jobs WHERE state = 'leased'
+		UNION SELECT job_id FROM quota_pool_records ORDER BY job_id`)
+	if err != nil {
+		return nil, sqlErr(err)
+	}
+	defer rows.Close()
+	var jobs []string
+	for rows.Next() {
+		var job string
+		if err := rows.Scan(&job); err != nil {
+			return nil, sqlErr(err)
+		}
+		jobs = append(jobs, job)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, sqlErr(err)
+	}
+	return jobs, nil
 }
 
 func nonNil(s []string) []string {
@@ -580,7 +624,7 @@ func (s *Store) ReleaseOrphan(ctx context.Context, job string, agents AgentSourc
 		if _, err = c.exec("UPDATE jobs SET state = 'released', updated_at = ? WHERE job_id = ? AND state = 'leased'", iso(moment), job); err != nil {
 			return sqlErr(err)
 		}
-		seq, err := s.recordEvent(c, job, "job.orphan_release", map[string]any{
+		seq, err := s.recordEvent(ctx, c, job, "job.orphan_release", map[string]any{
 			"job_id": job, "prior_state": o.state, "agent_label": label,
 			"herdr_status": nonNil(statuses), "reason": reason, "forced": true,
 		}, nil)

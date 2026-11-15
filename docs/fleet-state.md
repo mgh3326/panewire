@@ -64,6 +64,8 @@ Each `(host, kind, key)` triple names one latest value.
 
 ## Freshness rule
 
+*A hub spawn decision does not reuse a snapshot across decisions (hk 4448): the freshness window below is how old a value may be, and a decision that waited at the placement gate reads the state again after it. A host the hub reports slot-full stays excluded, never turned into an unreported host. See docs/placement.md, "Spawn bridge".*
+
 A consumer uses a hub value only when both of these hold:
 
 1. **The publisher is alive.** The latest `publisher` message for the host has
@@ -115,7 +117,9 @@ publishes:
   (default 60 s, minimum 10 s) it refreshes the pool. The node measures
   `claude`, `codex`, `commandcode`, `devin` and `agy` in its own process
   ([docs/quota.md](quota.md#native-측정-풀)). Other pools are unmeasurable:
-  they are neither refreshed nor published. The node reads the shared cache
+  they are neither refreshed nor published. `commandcode` publishes one `quota`
+  value per Command Code account omp holds on the host (key `commandcode:<fp>`),
+  every other pool one. The node reads the shared cache
   first and probes only when the reading is stale, so a 60 s interval keeps
   the account's shared reading fresh at the cost of one cache read per pool
   per minute. The node publishes a reading only when it is current and carries an
@@ -165,8 +169,10 @@ and the `login_missing` placement drop are unchanged.
   is the harness's login screen and pane cleanup was verified, the node marks
   that (host, harness) `login_missing` at once and sends rc=88 with the
   `AUTH_UNAVAILABLE` refusal and sign-in hint. An unchanged hub classifies it
-  as `auth_unavailable`; auto placement tries the next host and the desk gets
-  its one-time `log in` notice. Without verified cleanup, or without a complete
+  as `auth_unavailable`; the desk gets its one-time `log in` notice. The rc=76
+  refusal comes after the node's hk job claim, so the operation ends on that
+  host (hk answers another host's claim of the job id with 409) and the host is
+  dropped from the next placement. Without verified cleanup, or without a complete
   matching capture, the node keeps rc=76 and the original refusal. The saved
   capture and job record are unchanged. The screens are the
   `harnessLoginScreens` table in `relay_harness_adapter.go`; every listed line

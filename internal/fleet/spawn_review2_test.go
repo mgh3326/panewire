@@ -86,9 +86,9 @@ func TestLifecycleUsesExplicitNodeRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 	a.Jobs = root
-	seedJob(t, a, "j", "worker")
+	seedJob(t, a, "j", "implementer")
 	store := a.JobStore.(*fakeJobStore)
-	if err := store.Claim(t.Context(), "j", "42", "test-host"); err != nil {
+	if err := store.claimSpawned(t.Context(), "j", "42", "test-host"); err != nil {
 		t.Fatal(err)
 	}
 	path := filepath.Join(root, "j", "report.md")
@@ -96,6 +96,7 @@ func TestLifecycleUsesExplicitNodeRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 	a.Jobs = filepath.Join(a.Home, "wrong-root")
+	useFakeHK(t).Handle(hkCommentAnswer)
 	if err := a.executeLifecycleAt(t.Context(), root, []string{"done", "j", "--report", path}); err != nil {
 		t.Fatal(err)
 	}
@@ -106,7 +107,7 @@ func TestLifecycleUsesExplicitNodeRoot(t *testing.T) {
 
 func TestSubmissionReceiptAtomicConcurrentPublication(t *testing.T) {
 	a := &App{Jobs: t.TempDir()}
-	base := Submission{RequestID: "00000000-0000-4000-8000-000000000001", Args: []string{"-c", "/work/project", "-p", "/work/brief.md", "-m", "auto", "-l", "job", "--job", "job", "--t", "T1", "--task", "42", "--owner", "parent", "--role", "worker"}, Brief: "brief", Repository: Repository{Name: "project", Origin: "https://github.com/example/project.git", LocalRoot: "/work/project"}, OriginMachine: "machine-a", DeadlineSeconds: 600}
+	base := Submission{RequestID: "00000000-0000-4000-8000-000000000001", Args: []string{"-c", "/work/project", "-p", "/work/brief.md", "-m", "auto", "-l", "job", "--job", "job", "--t", "T1", "--task", "42", "--owner", "parent", "--role", "implementer"}, Brief: "brief", Repository: Repository{Name: "project", Origin: "https://github.com/example/project.git", LocalRoot: "/work/project"}, OriginMachine: "machine-a", DeadlineSeconds: 600}
 	if err := os.MkdirAll(filepath.Join(a.Jobs, "job"), 0700); err != nil {
 		t.Fatal(err)
 	}

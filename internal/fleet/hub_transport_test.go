@@ -204,11 +204,11 @@ func TestHubCanonicalCheckoutSendsNoCheckout(t *testing.T) {
 func TestHubSpawnArgs(t *testing.T) {
 	a, s, _, hub, _ := hubFixture(t, gitState{pushed: true}, "wk/feat", hubHosts())
 	s.Label, s.T, s.Effort, s.Owner, s.Lane, s.Parent, s.Urgency = "label-a", "T2", "high", "lane-a", "lane-b", "lane-c", "urgent"
-	s.Role, s.BuilderFamily, s.BuilderJob = "reviewer", "anthropic", "job-b"
+	s.Role, s.AuthorFamily, s.BuilderJob = "reviewer", "anthropic", "job-b"
 	if _, _, e := a.placeAuto(context.Background(), s, "brief"); e != nil {
 		t.Fatal(e)
 	}
-	want := []string{"-m", "sonnet", "-l", "label-a", "--t", "T2", "--job", "job-a", "--owner", "lane-a", "--effort", "high", "--role", "reviewer", "--lane", "lane-b", "--parent", "lane-c", "--task", "42", "--urgency", "urgent", "--builder-family", "anthropic", "--builder-job", "job-b"}
+	want := []string{"-m", "sonnet", "-l", "label-a", "--t", "T2", "--job", "job-a", "--owner", "lane-a", "--effort", "high", "--role", "reviewer", "--lane", "lane-b", "--parent", "lane-c", "--task", "42", "--urgency", "urgent", "--author-family", "anthropic", "--builder-job", "job-b"}
 	if !reflect.DeepEqual(hub.spawns[0].Args, want) {
 		t.Fatalf("args:\n got %v\nwant %v", hub.spawns[0].Args, want)
 	}

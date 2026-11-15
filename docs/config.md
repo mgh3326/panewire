@@ -80,14 +80,13 @@ local_delete_at = "drive_confirmed"
 | `max_load_ratio` | unset | Nonnegative load5 / CPU threshold for fallback spillover when hub placement is unavailable. |
 | `max_active` | unset | Nonnegative active-agent threshold for fallback spillover. |
 | `workspace` | unset | Herdr workspace for local spawns, named by label (`workers`), not by id. Herdr deletes a workspace when its last pane closes; spawn recreates a missing label with `herdr workspace create --label` before creating the tab. A configured id is used only while it still exists. |
-| `heavy_max` | legacy | Accepted and ignored; the `heavy` command was removed. |
 | `heavy_load_wait` | legacy | Accepted and ignored; the `heavy` command was removed. |
 | `shell_ready_timeout_ms` | `120000` | Startup readiness window, integer 30000–300000. |
 | `brief_submit_timeout_ms` | `120000` | How long a spawn waits for the brief to start a turn before it refuses with 76, integer 30000–600000. Raise it on a host that runs under sustained load. |
 | `brief_submit_retry_ms` | `15000` | How often the submit key repeats during that wait, at least 1000 and below the timeout. It goes only to an idle pane; Claude and Codex panes must also still show the brief in the composer. The brief is never pasted twice. |
-| `cmd_dsflash41` | `false` | Literal capability opt-in required by cmd policy rows. The provisioned cmd account must have no persisted MCP servers. |
-| `clinepass` | `false` | Literal capability opt-in required by the `cc-*` seats, which route the Claude Code harness through the host's local ClinePass proxy (`CLINEPASS_GATE_URL`, key read at spawn time from `CLINEPASS_GATE_KEY_FILE`; defaults are a loopback URL and `~/.config/cliproxyapi-key.txt`). |
-| `omp_commandcode` | `false` | Literal capability opt-in required by `omp-dsflash41`, `omp-musespark13`, `omp-argon4`, `omp-mimo26pro`, `omp-cc-opus55`, `omp-cc-sonnet55`, and `omp-cc-sol61`: the host's omp has the Command Code provider configured (`omp models` lists the selected model). Unrated rows admit only with `PANEWIRE_E6_ARM`; Command Code rules are in [quota](quota.md#command-code-seats). |
+| `cmd_dsflash41` | `false` | Explicit override for the `cmd` harness capability that cmd policy rows require; with no boolean here, the executing node's readiness decides (see [Capability flags](#capability-flags)). Readiness reports only that the harness is installed and logged in; it cannot see that a cmd account has no persisted MCP servers, so set this `true` where you attest that condition. |
+| `clinepass` | `false` | Operator-configured capability required by the `cc-*` seats, which route the Claude Code harness through the host's local ClinePass proxy (`CLINEPASS_GATE_URL`, key read at spawn time from `CLINEPASS_GATE_KEY_FILE`; defaults are a loopback URL and `~/.config/cliproxyapi-key.txt`). Unlike a harness flag, the node cannot measure the proxy, so this boolean is the whole answer (see [Capability flags](#capability-flags)). |
+| `omp_commandcode` | `false` | Explicit override for the `omp` harness capability required by `omp-dsflash41`, `omp-musespark13`, `omp-musespark13c`, `omp-inkling2s`, `omp-museember`, `omp-argon4`, `omp-mimo26pro`, `omp-cc-opus55`, `omp-cc-sonnet55`, and `omp-cc-sol61`: the host's omp has the Command Code provider configured (`omp models` lists the selected model). With no boolean here, the executing node's readiness decides (see [Capability flags](#capability-flags)). Unrated rows admit only with `PANEWIRE_E6_ARM`; Command Code rules are in [quota](quota.md#command-code-seats). |
 | `report_user_idle` | `false` | Literal boolean, read on each heartbeat. `true` makes a macOS node report whole seconds since the last keyboard or pointer input, as `host_activity.user_idle_s`, to a hub that accepts `host_activity`. Linux never sends it. The node reads no app names, window titles, input content or process lists. See [placement telemetry](placement.md#telemetry). |
 | `tags` | unset | Capability tags offered by this host for job placement (`spawn --tags`). Lowercase tag names. `caps` is an alias; both lists merge. |
 | `roles`, `grades` | unset | Light-host limits, as for [`[hosts.NAME]`](#hostsname): the spawn roles and task grades this machine accepts. |
@@ -96,6 +95,41 @@ local_delete_at = "drive_confirmed"
 | `brief_preamble` | selected policy block | Explicit named preamble block for this host. |
 | `pool_policy` | embedded pool-order policy | Path to the versioned pool-order JSON used by automatic model selection. |
 | `fleet_usage_alert_gb` | legacy/read-only | Retained config key; standalone disk alerts are not emitted in v0.1. |
+
+### Capability flags
+
+A seat policy row may require a host capability (`capability` in the policy).
+Two kinds exist, and only one is measured by the node:
+
+| Kind | Flags | Where the value comes from |
+| --- | --- | --- |
+| Harness | `cmd_dsflash41` (the `cmd` harness), `omp_commandcode` (the `omp` harness) | The executing node's readiness report: the flag is true when that node reports the harness installed and its login present (`harnesses.<kind>` in the heartbeat, [placement](placement.md#what-a-node-reports)). Placement, selection and admission read that report where the placing process can reach the hub's fleet state (`[hub] state` not `off` and `hub_url` configured), so no `[hosts.NAME]` copy is needed there. A placing process without fleet state sees no report and the flag comes only from the explicit boolean, as before. |
+| Operator-configured | `clinepass`, and any flag a custom seat policy row names | The boolean itself. The node cannot measure a local proxy or a licence. |
+
+In both kinds a boolean under `[local]` (the node itself) or `[hosts.NAME]`
+(another host, as the placing host reads it) is an explicit override: `true`
+forces the flag on and `false` forces it off, whatever the node reports. Only
+a missing key leaves a harness flag to readiness.
+
+An unknown answer keeps today's value, so missing data never grants or filters
+a capability: a node with no readiness report yet (an older node, or a report
+the hub dropped as stale), one that does not report the flag's harness, or one
+that does not measure the harness's login keeps the config answer, and a flag
+with no config value is off.
+
+`cmd_dsflash41` reads the `cmd` harness. A cmd seat spends the Command Code
+pool, and the node reports that pool's login as `harnesses.cmd.login` (measured
+through omp; `unknown` on a node that does not measure that pool).
+`omp_commandcode` reads the `omp` harness; omp spans several providers, so a
+node that measures no single pool for it reports the login `unknown`, and the
+config value decides.
+
+Readiness answers only that the harness is installed and logged in. A cmd
+account must also have no persisted MCP servers, which no readiness field
+measures: an explicit `true` is the operator's attestation of that condition,
+and a node that relies on readiness alone has it unchecked. `true` therefore
+means "the harness is usable and its provisioning is mine to vouch for"; write
+`false` on a node whose cmd account must not take cmd seats.
 
 Additional boolean capabilities can be named by custom seat policy rows. A
 missing or nonboolean capability fails closed. `standard` in seat policy means
@@ -112,8 +146,7 @@ The embedded OMP profiles use the `omp` binary with standard host admission:
 | `omp-haiku` | `omp` | `anthropic/claude-haiku-5-5` | `credit` | `anthropic-api` |
 | `omp-luna` | `omp` | `openai/gpt-6-luna` | `credit` | `openai-api` |
 
-OMP launches with `--model <provider/model>:<effort>` and uses `-p` for a
-headless delegate. Startup and brief delivery require a visible footer that
+OMP launches with `--model <provider/model>:<effort>`. Startup and brief delivery require a visible footer that
 matches the model, effort, and working directory. The catalog seed at
 [`catalog/omp-credit-seed.json`](catalog/omp-credit-seed.json) mirrors native
 grades and gates for each effort. The `omp-haiku` and `omp-luna` rungs are
@@ -136,6 +169,9 @@ publishes the seed after merge.
 | `quota_gate` | Only `"local"` is accepted: explicit local-only quota mode. It contradicts hub_token_env; remove one of those keys. |
 | `state` | `"on"` (default) reads the hub's fleet state for placement and the quota gate; `"off"` skips it and measures directly as before (the rollback switch). Cooling cannot be checked when hub state is off or unavailable; the selection record reports the condition in `degraded`. See [Fleet state](#fleet-state). |
 | `state_publisher_ttl_s` | Seconds a publisher heartbeat stays alive. Default 90. |
+
+A leading `~` in a credential-file path above is expanded before the CLI opens
+the file.
 
 Worker lane credentials use lanes_token_env, then hub_token_env. Lane listing
 and lanes of legacy builder jobs use lanes_token_env, then operator_token_env, then hub_token_env.
@@ -165,14 +201,13 @@ and its error is preserved in the registration warning.
 | `hub_wait` | `240` | `via = "hub"` only: seconds (1..300) the hub waits for the node to answer a spawn. It bounds the whole node run, so it must exceed the node's `brief_submit_timeout_ms` plus launch time; a shorter budget cuts the submit window. A first spawn that clones a large repo may need more. |
 | `brief_doc_prefix` | `briefs/` | `via = "hub"` only: handoffkeep key prefix the brief is uploaded under; it must match the node's own `brief_doc_prefix` (ends in `/`). |
 | `tags` | unset | Capability tags offered by this host (`caps` is an alias; both lists merge). A job's required `--tags` must be a subset for the host to be a placement candidate. A capability the host does not declare is unknown and fails closed for this host only: the host is excluded for jobs that need it and stays eligible for every other job. See [Host capabilities and light hosts](#host-capabilities-and-light-hosts). |
-| `roles` | unset (all) | Nonempty list of spawn roles (`worker`, `tester`, `reviewer`, `counsel`) this host accepts. Other roles record `role_not_accepted:<role>`. A list that still names the retired `builder` role is a config error (exit 70) that names the key to edit: delete `"builder"` from `<host>.roles`. |
+| `roles` | unset (all) | Nonempty list of spawn roles (`implementer`, `reviewer`, `consult`) this host accepts. Other roles record `role_not_accepted:<role>`. A list that still names the retired `builder` role is a config error (exit 70) that names the key to edit: delete `"builder"` from `<host>.roles`. |
 | `grades` | unset (all) | Nonempty list of task grades (`C`, `B`, `A`, `A+`, `S`, `S+`, `SS`) this host accepts. Other grades record `grade_not_accepted:<grade>`; a consult has no grade and records `grade_not_accepted:none`. |
 | `presence_id` | host `NAME` | Identity this host uses in pacelever host-presence records. |
-| `capacity` | legacy | Accepted and ignored; hosts no longer displays this inventory value. |
 | `heavy` | legacy | Accepted and ignored; the `heavy` command and its host lock were removed. |
-| `wake` | off | `"panewire"` marks the host wakeable: the placement policy may request `panewire node wake` when asleep, then waits for the node to connect. |
-| `wake_hold` | `10` | Burst hold in minutes. |
-| `wake_wait` | `90` | Burst command timeout in seconds; wake refusal returns 81. |
+| `wake` | off | Retired with `panewire node wake`: a wake attempt now fails with "no waker configured" and starts nothing. Still accepted. |
+| `wake_hold` | `10` | Retired with `wake`; still accepted. |
+| `wake_wait` | `90` | Retired with `wake`; still accepted. |
 | `brief_policy`, `brief_preamble` | host policy default | Optional initiator-side preview settings for this host; deploy matching policy on the execution host. |
 
 When the job cwd is a linked git worktree and placement picks a remote host,
@@ -191,14 +226,32 @@ unreachable host is skipped as before. `--dry-run` prepares nothing.
 
 Declare what each machine can run, and limit small machines to light work.
 Capabilities use the `--tags` vocabulary: `macos`, `linux`, `unity`,
-`xcode`, `gpu`, `heavy-go`. A task needing a capability goes only to hosts
-that declare it; the others still get the work they can do.
+`blender`, `xcode`, `gpu`, `heavy-go`. A task needing a capability goes only
+to hosts that declare it; the others still get the work they can do.
 
 In `[local]` and `[hosts.NAME]`, `caps` must be a TOML array containing only
 the capability strings listed above. An empty array declares no capabilities.
 Booleans, numbers, strings, tables, nonstring array entries, and unknown
 capability names refuse config loading with exit 70. The error names the host's
 `caps` key and the invalid value.
+
+**One declaration, read by the hub.** A `spawn` and its `--dry-run` are placed
+by the hub, which reads these lists from its own config file
+(`~/.config/fleet/hosts.toml`, or `FLEET_HOSTS_CONFIG` as the `panewire hub`
+process sees it; `fleet.New` loads it in `internal/fleet/app.go`). `plan` and
+`SubmitHostRefusal` apply it (`internal/fleet/placement.go`,
+`internal/fleet/submit_preflight.go`) to `[local]` and every `[hosts.NAME]`,
+whichever machine submitted the job. Declare each host once, there. A
+submitting host's own copy is not read for placement, so the list is not
+copied to each placing host; the node `hello` carries protocol capabilities
+(`spawn_v2`, …) and its heartbeat readiness carries runtime facts, not this
+list. The separate `panewire plan` diagnostic plans on the machine that runs
+it and reads that machine's config.
+
+Capabilities are a configured value only: placement looks for no licence.
+Declaring `unity` or `blender` says the host has the tool installed; a lapsed
+Unity entitlement is the operator's to handle, and ParkingArcade's job-time
+preflight and expiry warning name it (hk 4794).
 
 Recommended declarations by machine class:
 
@@ -207,8 +260,8 @@ Recommended declarations by machine class:
 | macOS development machines | `["macos", "unity", "xcode"]` | none |
 | Linux desktop | `["linux", "unity", "gpu"]` | none |
 | Small cloud VM | `["linux"]` | none; no `unity` |
-| One-core cloud VM | `["linux"]` | `roles = ["worker", "tester", "reviewer"]`, `grades = ["C", "B", "A"]` (no consult, no heavy grade) |
-| Raspberry Pi | `["linux"]` | `roles = ["worker", "tester"]`, `grades = ["C", "B"]` (Python and docs work) |
+| One-core cloud VM | `["linux"]` | `roles = ["implementer", "reviewer"]`, `grades = ["C", "B", "A"]` (no consult, no heavy grade) |
+| Raspberry Pi | `["linux"]` | `roles = ["implementer"]`, `grades = ["C", "B"]` (Python and docs work) |
 
 ```toml
 [hosts.mac-b]
@@ -222,14 +275,39 @@ tags = ["linux"]
 
 [hosts.cloud-tiny]
 tags = ["linux"]
-roles = ["worker", "tester", "reviewer"]
+roles = ["implementer", "reviewer"]
 grades = ["C", "B", "A"]
 
 [hosts.pi]
 tags = ["linux"]
-roles = ["worker", "tester"]
+roles = ["implementer"]
 grades = ["C", "B"]
 ```
+
+For the machines that have Unity 6000.6.5f1 and Blender today (checked
+2026-11-15), add the `tags` line to each host's existing section in the hub
+process's `hosts.toml`, keeping its `ssh`, `via`, `workspace` and other keys:
+
+```toml
+[hosts.mac-personal]
+tags = ["macos", "unity", "blender", "xcode"]
+
+[hosts.mac-work]
+tags = ["macos", "unity", "blender", "xcode"]
+
+[hosts.mac-dev]
+tags = ["macos", "unity", "blender", "xcode"]
+
+[hosts.desktop]
+tags = ["linux", "unity", "blender", "gpu"]
+```
+
+`oci` has neither tool and declares no such name; the hub machine itself
+declares its own in `[local] tags`. All four run the same Unity build; Blender
+is 4.5.14 LTS on mac-personal and 5.2.2 LTS on the others, which the one
+`blender` name covers (a 5.2-only name would need a new entry in the closed
+list). Do not copy these lines to the nodes' own configs: hub placement does
+not read them there.
 
 These are recommendations, not code defaults: a host without `tags` declares
 no capability. An invalid `roles` or `grades` value refuses the config with
@@ -266,7 +344,7 @@ panewire:
    with `fetch: pull/<n>/head` when a local `origin/pull/<n>/head` ref points
    at HEAD, or `fetch: refs/heads/<branch>` of an origin branch containing it
    (a detached HEAD, or a branch whose commits sit on another origin ref).
-   A writing role (any role but `reviewer` and `counsel`) whose `branch` has no
+   A writing role (any role but `reviewer` and `consult`) whose `branch` has no
    local `refs/remotes/origin/<branch>` is refused (exit 81) before anything is
    uploaded, naming the `git -C <cwd> push -u origin <branch>` command to run.
    The same roles are refused (exit 81) when HEAD is a strict ancestor of that
@@ -281,9 +359,29 @@ panewire:
    exit 81 before anything is uploaded. The worktree directory name is the local
    one. A job from a canonical checkout sends no `checkout` and runs in the
    node's `cwd_map[<repo name>]`.
+   A submitter need not hold that checkout at all: `--checkout-origin URL
+   --checkout-commit SHA --checkout-ref REF` names the spec directly and the
+   submitting host reads no checkout (`-c` is then not accepted; the two are
+   exclusive). `--checkout-origin` must be the repository's remote naming
+   owner/repo, with no credentials. An `https://` URL is used as named;
+   `ssh://`, `git://`, `git@host:owner/repo` and `host:owner/repo` are
+   converted to the same userinfo-free https form the `-c` path uploads,
+   because the node keeps one clone per repository and its later fetches run
+   on that clone's remote. An explicit `ssh`/`git` port is refused by name (it
+   cannot survive the conversion), a password or an https userinfo refuses, and
+   a one-character host (a Windows drive letter) is not a remote;
+   `--checkout-commit` is
+   the exact 40-character commit (lowercase hex); `--checkout-ref` is
+   `pull/<n>/head` or `refs/heads/<branch>`. The node prepares a detached
+   worktree at that commit from that ref, exactly as for a `-c` spawn, and
+   refuses with `checkout_refused:sha-missing` when the fetched ref does not
+   contain the commit. The repository name, the worktree directory
+   (`<job>-checkout`) and the `cwd_key` come from the origin, not from a local
+   directory. The CLI asks the hub for `checkout_spec_v1` before submitting
+   and refuses with exit 2 against a hub that does not advertise it (hk 4738).
 3. sends the flags the hub's allowlist carries (`-m -l --t --job --owner
    --effort --role --lane --parent --task|--parent-job --report-relative -L --urgency
-   --builder-family --builder-job --review-pass`). The node supplies workspace, host and the
+   --author-family --builder-job --review-pass`). The node supplies workspace, host and the
    override reason. A flag the allowlist cannot carry (`--keep`, `--job-dup-ok`,
    `--task-hk-bypass`, `--allow-escalation`, `--operator-request`,
    `--requested-by`, `--purpose`) refuses the spawn (exit 2)
@@ -298,18 +396,45 @@ panewire:
    message naming the missing capability instead of retrying with an absolute
    path. Upgrade panewire on the hub to a version whose spawn allowlist carries the
    flag.
-   `--builder-family` may be sent without `--builder-job` for `--role reviewer`
+   `--author-family` may be sent without `--builder-job` for `--role reviewer`
    only (the author's job is not bound to the task): the reviewer then runs as
    a top-level job, still excludes that family, and neither claims nor links
    the task, so several passes on one task all spawn. Any other role keeps the
-   "go together" refusal (exit 2). The hub still holds one reviewer slot per
-   task, so passes that start together name theirs: `--review-pass N` (1..9,
-   `--role reviewer` only) keys the slot `task:reviewer:p<N>`
-   ([hub-spawn-operations.md](hub-spawn-operations.md)).
+   "go together" refusal (exit 2). A reviewer holds no task/role reservation
+   (hk 4737), so any number of passes on one task spawn side by side; the hub
+   still accepts `--review-pass N` (1..9, `--role reviewer` only) and records it
+   on the operation ([hub-spawn-operations.md](hub-spawn-operations.md)).
 4. the node's `spawn.json` must map the repo name as a `cwd_key` and set
    `work_root`; `spawn_disabled`, `cwd_unmapped`, `panewire_missing` and
    `brief_doc_unavailable` refuse that host (recorded as `hub_<reason>`) and
    `--host auto` moves to the next candidate.
+
+**Per-node spawn concurrency (`spawn.json` `spawn_concurrency`, hk 4578).**
+A node runs one hub spawn at a time. Setting `spawn_concurrency` to 2..8 is an
+explicit operator opt-in: the node then admits that many checkout spawns into
+distinct job dirs at once and advertises `spawn_slots_v1=N` in hello. Unset,
+0, 1, or a `spawn.json` that does not load means one; the capability is then
+not advertised and the hub keeps one-at-a-time dispatch. A change binds at the
+node's next registration (reconnect or restart). The admission rules are in
+[hub-spawn-operations.md](hub-spawn-operations.md#acceptance-and-identity).
+
+Two steps are **not proven safe** for N>1, and they are the boundary of this
+opt-in (hk 4821):
+
+- herdr workspace create/resolve across processes and versions: an older
+  launcher, or one with a different state home, does not share the
+  workspace lock, so a missing workspace label can be created twice;
+- worktree identity between admission and prepare: the admission key is the
+  job-dir name (and the case-folded job id), while `work_root` and symlinks
+  are read again later, so two distinct keys can reach one directory.
+
+At every N, a `-L` lane (read as a flag, never from another flag's value)
+that resolves outside its prepared worktree is refused before launch
+(`checkout_refused:lane_outside_worktree`), since an agent keeps working
+after its slot is released.
+
+Opt in only on a host where neither can happen: one panewire version, one
+state home, a fixed `work_root`, and no symlinked job dirs or lanes.
 
 대상 계정은 `quota.refresh` 노드 명령으로 갱신합니다. `claude`, `codex`,
 `commandcode`, `devin`, `agy`만 native 측정 대상이며, 다른 풀은 측정하지 않습니다.
@@ -351,8 +476,18 @@ candidate remains the spawn fails with the usual placement refusal. An explicit
 exit 2. The list is initiator-local and is not sent to a delegated host.
 
 `--exclude-pool P[,P]` removes the named quota pools from automatic selection
-for this one request (`claude`, `codex`, `devin-free`, ... as the catalog names
-them). It is a standing exclusion like `--exclude-host`, not a pin: it needs no
+for this one request (`claude`, `codex`, `devin`, ... as the catalog names
+them). `devin-free` is the reserved free-band key, not a catalog pool: it
+excludes the SWE-2 free rungs (`devin-swe2*`, [placement](placement.md#pool-concurrency-cap))
+and leaves the paid devin rungs eligible, so a replacement for a
+`quota_stop pool=devin-free` never takes another free rung of the same account.
+`devin-paid` is the reserved paid-band key: it excludes the devin rungs that
+spend the account's paid window and leaves the SWE-2 free rungs eligible, so a
+replacement for a `quota_stop pool=devin` stays off the spent window without
+losing the free band. The hub takes the band from the stop's own pool in the
+`job.lost` payload; a job's record `pool` is its launch pool, which reads
+`devin` for both bands.
+It is a standing exclusion like `--exclude-host`, not a pin: it needs no
 containment and no override reason. Every candidate of an excluded pool drops
 with reason `pool_excluded`, visible in `--dry-run` and in the `job.placement`
 selection record; when no candidate remains the spawn fails with the usual
@@ -369,8 +504,8 @@ restated here. `docs/quota-stop.md` has the mechanics.
 
 | Role | What happens |
 | --- | --- |
-| reviewer | The hub submits a replacement at once: same task, role, review pass, owner and brief, job id `<old>-q<n>` and `--exclude-pool <pool>`. The old hk record ends `quota_stop pool=<pool> replaced_by=<new job>`; `replaced_by` is the last `key=value` token (mergewake follows it). At most 2 replacements per review pass (`<old>-q1`, then `<old>-q1-q2`). When no other pool can take it, there is no replacement and the watcher ends the job as before. |
-| worker, tester | The quota-stop manager acts even with `--quota-stop-act` off. It waits and resumes the same pane once at the reset when the reset is at or before the job's start plus the task's expected time; otherwise (reset later, no expected time, an urgent task, or a second stop after one resume) the job is handed over like a reviewer, with `end_reason` `quota_stop pool=<pool> handed_over_to=<new job>`, the same worktree and branch, and one brief line naming the earlier job's report and branch. |
+| reviewer | On a quota screen the watcher ends the job at once, with no grace (hk 4507): the hk record ends `quota_stop pool=<pool> reset_at=<RFC3339 UTC>` and `job.lost` carries `reason: "quota_stop"`; mergewake respawns the review on another model. A reviewer stopped on a credit rejection is still replaced by the hub: same task, role, review pass, owner and brief, job id `<old>-q<n>` and `--exclude-pool <pool>`; the old hk record ends `quota_stop pool=<pool> replaced_by=<new job>` (`replaced_by` is the last `key=value` token, mergewake follows it), at most 2 replacements per review pass (`<old>-q1`, then `<old>-q1-q2`), and when no other pool can take it the watcher ends the job after its grace. |
+| implementer | The quota-stop manager acts even with `--quota-stop-act` off. It waits and resumes the same pane once at the reset when the reset is at or before the job's start plus the task's expected time; otherwise (reset later, no expected time, an urgent task, or a second stop after one resume) the job is handed over like a reviewer, with `end_reason` `quota_stop pool=<pool> handed_over_to=<new job>`, the same worktree and branch, and one brief line naming the earlier job's report and branch. |
 
 The owner gets one info lane event for either action. `--quota-stop-act` still
 gates every other role.
@@ -413,7 +548,7 @@ unpublished measurement keeps the refusal; `quota_gates` records
 `gate_basis` is also recorded as `basis`.
 
 실행 호스트는 native gate receipt에서 요청한 `account_key`와 pool을 확인합니다.
-선택 계정은 JSON receipt가 필요하며, pane 및 headless launch는 quota lease를
+선택 계정은 JSON receipt가 필요하며, pane launch는 quota lease를
 기록하기 전에 계정 연결을 다시 검사합니다. 대상 호스트도 spawn 전에 마지막
 local gate를 수행합니다. 원격 checkout provisioning은 변경하지 않습니다.
 
@@ -429,6 +564,21 @@ No host installation or service management is performed by spawn.
 | `load_threshold` | `1.0` | load5/ncpu value above which a host takes no new job while anything else qualifies. |
 | `wake_after_s` | `600` | How long the task must have waited before saturated awake hosts justify waking a sleeper. |
 
+The hub's spawn-queue numbers are `placement.json` keys too, not
+`hosts.toml`:
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `spawn_backoff_seconds` | `30` | Base of a request's re-placement back-off (`base × 2^(n-1)`, spread ±20 %). |
+| `spawn_backoff_max_seconds` | `600` | Cap of that back-off, re-applied after the spread. |
+| `spawn_wake_batch` | `8` | How many parked requests one timer tick wakes on an event. |
+| `spawn_park_notice_seconds` | `1800` | How long a request's wait must last while it is parked before an urgent request (its `--urgency` flag, else hk priority 1 or 2) tells its owner lane once, with the reason, since when, the next check and what would unpark it. A P3 wait is never told. |
+
+Every value is unmeasured; 0 or absent keeps the default. See
+[hub-spawn-operations.md](hub-spawn-operations.md#parked-notice) for the
+notice's one-per-reason rule, its durable marker and how a hub restart treats
+it.
+
 `[placement.shadow]` and `[placement.capability.<class>]` tune the placement
 shadow comparison, which records how other rankings would have ordered the
 hosts and never changes a placement. Every key is optional; see
@@ -440,17 +590,40 @@ default.
 | `shadow.enabled` | `true` | `false` stops recording the `placement_shadow` event. |
 | `shadow.cpu_busy_over` | `load_threshold` | CPU-busy fraction at or above which a host counts as loaded in the shadow arms. |
 | `shadow.hysteresis` | `1.25` | Factor a rival's hub score must reach over the policy-order host's to take the decision. |
-| `shadow.all_loaded_below` | `15` | Best score under which every host counts as loaded. |
+| `shadow.free_floor` | `0.05` | Free fraction (0..1) under which a host is not chosen while another is at or above it. `shadow.all_loaded_below` is retired: it still loads and is ignored. |
 | `shadow.mem_refuse_below_pct` | `30` | The measured arm refuses a host whose available memory is below this percentage. |
 | `shadow.pressure_refuse_level` | `2` | The measured arm refuses a macOS host at or above this pressure level (0 normal, 1 warn, 2 critical). |
 | `shadow.pressure_warn_mem` | `0.5` | The memory term of a macOS host at warn pressure. |
 | `shadow.mem_floor`, `shadow.mem_span` | `0.20`, `0.20` | The memory term is 0 at `mem_floor` available and 1 at `mem_floor + mem_span`. |
 | `shadow.swap_in_half_per_s` | `5000` | Swap-ins per second (pages) that halve the swap term. |
 | `shadow.load_knee`, `shadow.load_cap` | `0.75`, `4` | Load per core below the knee costs nothing; a higher reading stops costing more at the cap. |
-| `shadow.jobs_half`, `shadow.claim_cost` | `8`, `10` | Live job count that halves the jobs term; points one claim in the spawn bridge costs. |
+| `shadow.jobs_half`, `shadow.bridge_cost` | `8`, `10` | Live job count that halves the jobs term; points one claim in the spawn bridge costs a power-100 host (a host of capability `c` pays `bridge_cost * 100 / c`). `shadow.claim_cost` is retired: it still loads and is ignored. |
 | `capability.light.<host>`, `capability.heavy.<host>` | none | The host's capability for light and heavy work, in the unit of the hub's `power`. A host with no entry keeps its `power`. |
 
+**Rollout and rollback of `shadow.free_floor` and `shadow.bridge_cost`.** A
+binary from before hk 4465 validates `[placement.shadow]` strictly and refuses
+these two keys as unknown, and the fleet commands and the spawn app do not
+start on a config it refuses. Set either key in `hosts.toml` only once every
+binary that reads that file has the release that knows them, and delete both
+keys before rolling a host back. The retired `shadow.all_loaded_below` and
+`shadow.claim_cost` load on both sides. The same ordering holds for the hub's
+`placement.json` keys of the same names
+([Constants](placement.md#constants)).
+
 ## `[quota]`
+
+Panewire's pool and profile settings are read from
+`~/.config/panewire/config.toml` (or `$XDG_CONFIG_HOME/panewire/config.toml`).
+`PANEWIRE_CONFIG` selects an explicit file. During migration, panewire also
+checks `~/.config/pacelever/config.toml` and the older scopefuel path when the
+panewire file is absent; `PACELEVER_CONFIG` remains a fallback override.
+Create the panewire file before removing the legacy file so host behavior
+continues unchanged.
+
+Quota cache records use `<XDG cache>/panewire/` (or `~/.cache/panewire/`).
+`PANEWIRE_CACHE` is a file path override; records are stored beside it.
+`PACELEVER_CACHE` is checked as a legacy fallback. Native writes go to the
+panewire location.
 
 Shared-quota read settings for presence-aware placement. The URL and bearer
 are panewire's svc-panewire credential
@@ -467,7 +640,7 @@ below overrides the URL.
 | `gate` | `"native"` | 폐기 키입니다. 남아 있으면 경고 후 native verdict를 사용합니다. `"native"` 이외의 값은 설정 오류입니다. |
 | `launch` | `"native"` | 폐기 키입니다. 남아 있으면 경고 후 native catalog lookup을 사용합니다. `"native"` 이외의 값은 설정 오류입니다. |
 | `pool_fresh_ttl_s` | unset | Optional pool → seconds table (`[quota.pool_fresh_ttl_s]`, nonnegative integers) that overrides `fresh_ttl_s` for one pool. |
-| `pool_max_concurrent` | unset | Optional pool → positive integer table (`pool_max_concurrent = { "openai-api" = 2 }`; pool name as in the catalog's `pool` column) that caps live spawns on a pool fleet-wide. A candidate whose pool is at its cap is dropped `pool_at_cap` and selection moves to the next pool; a spawn never waits for a slot. A pool not named has no cap. Read at each placement. A value that is not a positive integer is refused at config load with the key named (`quota.pool_max_concurrent.openai-api must be a positive integer`). When the live count cannot be read from the hub the cap does not apply and the reason is logged. The reserved key `devin-free` caps only the SWE-2 free rungs (`devin-swe2`, `devin-swe2-medium`, `devin-swe2-max`, `devin-swe2-flash`, `devin-swe2-flash-medium`, `devin-swe2-flash-max`) by their live spawns: those rungs draw on Devin's free-model quota while paid `devin-ds41` draws on the account's paid window, so capping them must not cap paid devin. `devin` stays a whole-pool cap; when both keys are set a free rung must pass both. How the count is made and the refusal text: [placement](placement.md#pool-concurrency-cap). |
+| `pool_max_concurrent` | unset | Optional pool → positive integer table (`pool_max_concurrent = { "openai-api" = 2 }`; pool name as in the catalog's `pool` column) that caps live spawns on a pool fleet-wide: hub spawns and direct `panewire spawn` jobs on a node both count. A candidate whose pool is at its cap is dropped `pool_at_cap` and selection moves to the next pool; a spawn never waits for a slot. A pool not named has no cap. Read at each placement. A value that is not a positive integer is refused at config load with the key named (`quota.pool_max_concurrent.openai-api must be a positive integer`). When the live count cannot be read from the hub the cap does not apply and the reason is logged. The reserved key `devin-free` caps only the SWE-2 free rungs (`devin-swe2`, `devin-swe2-medium`, `devin-swe2-max`, `devin-swe2-flash`, `devin-swe2-flash-medium`, `devin-swe2-flash-max`) by their live spawns: those rungs draw on Devin's free-model quota while paid `devin-ds41` draws on the account's paid window, so capping them must not cap paid devin. `devin` stays a whole-pool cap; when both keys are set a free rung must pass both. How the count is made and the refusal text: [placement](placement.md#pool-concurrency-cap). |
 | `credit_total_usd` | unset | Optional pool → dollars table (`[quota.credit_total_usd]`, positive numbers): each prepaid credit pool's grant total. A shared manual entry records only its used percentage, so panewire derives the dollar balance `total × (100 − used_pct) / 100` for credit ranking, dollars at risk and burn; an entry's own `remaining_usd` still wins. Set it on the hub and every node, and **update it whenever a new grant is bought** — a stale total gives wrong dollars. Keeping the dollars in the shared record needs hk 3418; until it lands this table stays the source. |
 | `measure_timeout_s` | `60` | 대상 계정의 native refresh(`panewire quota refresh <pool>`) 제한 시간입니다. 다른 풀은 측정 소스가 없습니다. |
 | `accounts` | unset | Optional pool → 16-hex account-fingerprint table for exact account keys. For `agy` it is the account the node measures: agy has no login to derive a key from ([docs/quota.md](quota.md#native-measurement-agy)). |
@@ -589,9 +762,7 @@ the `panewire job` upload had 3 s, and a timed-out upload still warns
 `rc=124`); the other calls get 8 s. hk checks a comment's body as the CLI did
 before sending it.
 
-**Explicit files.** A file the operator names (the hub's `--handoffkeep-env`
-and `--chat-env`, a node's `spawn.json` `handoffkeep_env`, and the assistant's
-`-config`) is read as before, and its bearer is `HANDOFFKEEP_TOKEN_SVC_PANEWIRE`
+**Explicit files.** A file the operator names (the hub's `--handoffkeep-env`, and a node's `spawn.json` `handoffkeep_env`) is read as before, and its bearer is `HANDOFFKEEP_TOKEN_SVC_PANEWIRE`
 when present, else `HANDOFFKEEP_TOKEN`, so files written before hk 3570 keep
 working. **Node on defaults.** With no `spawn.json`, the node's hk credential
 is not an explicit file: it resolves through the same loader, in the same
@@ -626,7 +797,7 @@ HANDOFFKEEP_TOKEN_SVC_PANEWIRE, or create ~/.config/panewire/hk-svc.env`):
 | via=hub brief upload | The hub candidate is refused, `brief upload to <key> failed: …`. |
 | `panewire work TASK_ID` | Refused, `cannot read task <id>; run handoffkeep tasks show <id> and restore task access` (exit 70). |
 | Artifact sweep | Every job's task is unreadable, so nothing is swept; an artifact record write fails with exit 1. |
-| `done` / `escalate` report upload and task comment | Warnings (`report upload failed; local report retained`, `task comment failed: … unconfigured …`); the job completes without a report document. |
+| `done` / `escalate` report upload and task comment | Warnings (`report upload failed; local report retained`, `task comment failed: … unconfigured …`); the job completes without a report document. An interactive `done` then exits non-zero (`completed; report not in hk; rerun the same command`); the rerun, or the node's local sweep, publishes the report ([Completion receipts](#completion-receipts)). |
 | `panewire job` done, escalate and joined report upload | Warning `<unconfigured error>; report document not uploaded (job=<job>)`; no document link. |
 | Quota stop manager | No policy (the last good copy, else hand over), no task, and the note is retried each minute. |
 
@@ -638,9 +809,56 @@ spawns that need hk are refused.
 
 Each spawn writes a record to hk `/v1/jobs` on the executing host (the design
 is `design/2026-10-30/cross-host-jobs`): the claim `POST {job_id, task_id,
-host}` runs before the local claim and a taken id refuses with exit 74, like
+host, at}` runs before the local claim and a taken id refuses with exit 74, like
 the ledger's duplicate. `host` is the node's `HUB_MACHINE_ID`. hk unreachable
 or unconfigured fails the spawn closed. The task precheck also fails closed before launch.
+`task_id` is `null` for a task-less job (a reviewer or consult run); a non-empty
+non-numeric task id still refuses before the POST. `at` is the client clock: the
+claim sets `claimed_at`; the `spawned`, `completed`, `escalated`, and `lost`
+transitions send `at` with `state` and hk stores it as `spawned_at` or `ended_at`
+(set once).
+
+### Job ids name one directory (hk 4824)
+
+Before a spawn creates or reuses `jobs/<id>`, it refuses an id that differs only
+in letter case from an entry already in the jobs root (exit 2, refusal code
+`job_id_case_collision`, the message names both ids). On a case-insensitive
+volume (macOS APFS) the two ids would resolve to one directory, where one job's
+`brief-delivered.md`, events and report overwrite the other's; the rule is the
+same on a case-sensitive volume, so the answer never depends on the filesystem.
+An entry named exactly the id is reused as before.
+
+The check is not a race: the jobs root holds one no-clobber identity record per
+case-folded id under `jobs/.job-ids/<lower id>` (a private file naming the exact
+id that owns it, published with `os.Link` after its bytes are synced). Two
+launchers that both find no directory both link their record, and exactly one
+wins; the other reads the winner's exact id and refuses. The record outlives the
+job dir, so one spelling of a job id stays reserved after a job dir TTL pass.
+The same guard runs before the hub submission receipt (`jobs/<id>/submission.json`
+on the submitting host), so a refused id writes nothing there either. `.job-ids`
+is not a job name: job-dir scans skip it.
+
+Job ids and the directories named after them (jobs-inbox dirs, checkout dirs)
+use one portable ASCII grammar at every input: ASCII letters, digits, `.`, `_`
+and `-`, starting with a letter or digit, at most 128 bytes — the same shape as
+the hub's job id and the launcher's `validID`, so an id spawn accepts is always
+one a node command, the legacy CLI and job close accept. A `..` inside one
+component is not a path traversal, because separators are excluded.
+Non-ASCII is refused rather than normalised, because macOS maps an NFC and an
+NFD spelling of one name to a single inode, so the two spellings would share one
+directory exactly as two letter cases do. The node commands, the hub checkout
+request and `job close` share that rule. The legacy `panewire job` completion
+CLI accepts any ASCII single path component instead: the retired spawner minted
+ids such as `jw+odd` outside the relay shape and the frozen golden pins that
+they still complete, but non-ASCII and separators are refused.
+
+Pane and agent names are not ids: the node commands keep the older pane-name
+rule, so punctuation the hub label grammar admits (`:`, for one) stays accepted
+by pane close, capture and read. The legacy CLI also compares its spelling with
+the real jobs-root entry, and refuses `done Build`, `escalate Build`,
+`joined Build` and `close Build` when `build` exists: on a case-insensitive
+volume the wrong spelling resolves to `build`'s directory, and the record would
+be appended to another job's events.
 
 After the brief lands, panewire merges `{state:"spawned", role, label, family,
 profile, model, harness, effort, pool, owner_lane, parent_lane, parent_job,
@@ -661,27 +879,105 @@ including `local` when an automatic request falls back to local execution; an
 invalid host id is stored as `unknown` rather than being cut into another id.
 Candidate lists are trimmed in rank order to keep `selection` below hk's 32 KiB
 limit.
-`panewire done` writes `{state:"completed", report_doc}` plus `result` when
-`--result FILE` (a JSON object of at most 64 KiB) is given, in the same PUT.
-For CLI `done --result`, success requires hk to confirm that record or a read
-back to show the same completed result and report pin. An ambiguous
-completed-record PUT is read back and retried at most twice more with the same
-payload, within a 30 s completion budget. The single spawned repair PUT is also
-read back after an ambiguous reply but is never repeated. A refusal or
-unresolved state exits non-zero, emits no completion event or relay, and records
-`job.record_failed` with `op` and a safe
-`reason` token. Conflicts use exit 75. Safe reasons are `secret_like_content`
+### Completion receipts
+
+A report's identity is `(job, S)`, `S` the sha256 of its bytes. `panewire done`
+publishes it to the content-addressed hk document `reports/<job>/sha256/<S>.md`
+(kind `report`, linked to the job's task), so one key names one byte string and
+a retry PUTs the same key. `done` then runs four steps in order. Each step has
+one authority and one local receipt (an event in the job's ledger), and a step
+whose receipt exists is skipped:
+
+| Step | Fact | Authority | Receipt |
+| --- | --- | --- | --- |
+| 1 publish | hk holds the bytes of `S` | the hk document | `job.report_published {report_sha256, document}` |
+| 2 settle | the hk record is terminal, holding the caller's `result` | the hk job record | `job.record_settled {report_sha256, pinned, result_sha256}` |
+| 3 pin | the record's `report_doc` and `report_sha256` name the completing report | the hk job record | `job.report_pinned {report_sha256, document, outcome}` |
+| 4 notify | the parent was told about `S` | the local ledger, then the relay | `job.completed {report_sha256, document}` |
+
+Step 1 confirms hk holds exactly these bytes, by the sha256 in hk's answer or a
+read-back. The key lies under `reports/<job>/sha256/`, which a basename key can
+never reach (a file name holds no slash), so a key there only ever holds the
+bytes with that sha256; `escalate` and the legacy `panewire job` keep
+uploading under the literal file name `reports/<job>/<file name>`.
+
+Step 2 is the only writer of the record, `strictCompletedPutUntil`:
+one PUT of `{state:"completed", result?, report_doc?, report_sha256?}` (the pin
+only when the report is published and is the completing one), read back when
+the answer is ambiguous or the record is already terminal, retried at most twice
+more with the same payload within a 30 s budget. The single spawned repair PUT is
+also read back after an ambiguous reply but never repeated. Step 3 is the late
+write hk accepts once on a terminal record (hk 4354), so a same-id retry whose
+record ended before the upload landed still attaches the report. It reads the
+record first: a record with no report takes the pair write once, a record
+already naming these bytes is a no-op with no write, and a record naming
+another report is refused — that pin can never become this report's, so `done`
+keeps the local file, logs `report pin kept` and exits 75. A `409` from the
+write itself (another writer pinned between the read and the write) is the same
+refusal. A refusal is receipted as `held`, so a rerun repeats it without
+another write. Step 4 writes
+`job.completed` and the relay once per `S`, carrying the exact document key when
+step 1 had succeeded by then, and comments on the job's hk task.
+
+The completing report is the one the record's pin belongs to: the sha256 of the
+settling receipt (for a job that completed before settlements were receipted,
+the first `job.completed`). A later report, other bytes, gets its own document
+and its own `job.completed` and relay, and never writes the record.
+
+"Duplicate" is not a branch: it is the case where every step has its receipt,
+and it makes no hk call and writes no event (`OK … duplicate=yes`). A repeat that
+finishes a step prints the steps it ran (`published=yes pinned=yes`).
+
+A report `done` announced but never published is republished by the node's
+local sweep: it PUTs the announced bytes again, writes the publish receipt, and
+pins the record when the report is the completing one. It publishes only bytes
+that still hash to the announced sha256 — a report whose file changed waits,
+since only a new `done` announces those bytes — and it never pins what no
+completion named ([pane-sweep.md](pane-sweep.md#report-republish)).
+
+Once the record names the report (step 3 `pinned`, or the settling write carried
+it), `done` deletes the local report file: hk holds the bytes, and the file is
+only a second copy (hk 3685). It also records the result line in
+`<jobs>/<job>/.node-job-done`, the marker a node's `job.done` answers from. The
+file stays when the upload failed or the pin is still pending; that copy is what
+the republish sweep and the `[reap]` net work from. A path outside the jobs root
+stays too. Readers answer from the record after the delete: `job.result` reports
+the report present with the completion's sha256 (the byte count and last line
+were local facts), `job.done` answers `already-done` from the marker, the stall
+detector records the hk document, and the `[report]` relay text ends at the hk
+key instead of the deleted path. A rerun of the same `done` after the delete
+takes the sha256 from the completion that announced the path, so the file is
+never needed again.
+
+Publication and the pin never block completion. The only blocker is the rule
+for a strict `--result`: hk takes a `result` only in the spawned-to-completed
+write, never later, so the record must be confirmed holding it. For CLI `done
+--result` that is a completed record read back with the same result; a refusal
+or unresolved state exits non-zero, emits no completion event or relay and
+records `job.record_failed` with `op` and a safe `reason` token. Conflicts use
+exit 75. A `--result` on a record that is completed without one is
+`terminal_without_result` on both paths: the interactive `done` fails, the
+watcher warns and continues. Safe reasons are `secret_like_content`
 or `secret_like_content:<pattern>` (pattern matches `[a-z0-9_]{1,40}`),
-`terminal_without_result`, `result_conflict`, `report_conflict`,
-`job_escalated`, `job_lost`, `no_spawn_evidence`, a validated hk code matching
-`[a-z0-9_]{1,64}`, `http_<status>`, `hk_unreachable`, `hk_unconfigured`, or
-`local_event_failed` when the local result-attachment event cannot be recorded.
-The headless delegate keeps warn-and-continue; so does `done` without
-`--result`. Watcher completion is unchanged. `escalate` writes
-`{state:"escalated"}` and the watcher writes `{state:"lost"}` after two
-missing-pane observations, or when a reviewer pane is idle on a quota or
-rate-limit screen with no report (see `docs/quota-stop.md`; a worker or tester is
-the quota-stop manager's). Their failed record writes remain best effort.
+`terminal_without_result`, `result_conflict`, `job_escalated`, `job_lost`,
+`no_spawn_evidence`, a validated hk code matching `[a-z0-9_]{1,64}`,
+`http_<status>`, `hk_unreachable` or `hk_unconfigured`.
+
+An interactive `done` that completed but left the report out of hk, or its pin
+unwritten, prints its `OK` line and exits 1 with `completed; report not in hk;
+rerun the same command` (or `report not pinned in hk`). That is reporting only:
+the job completed, and the same command run again finishes the missing step.
+The one pin failure a rerun cannot fix is a record that already names another
+report: `done` exits 75 with `completed; hk record names another report; local
+report kept`. The watcher warns and carries on. `escalate` is not part
+of this: it uploads under `reports/<job>/<file name>` and writes
+`{state:"escalated", report_doc, report_sha256}`; the watcher writes
+`{state:"lost"}` after two missing-pane observations, or when a reviewer pane is
+idle on a quota or rate-limit screen with no report (see
+`docs/quota-stop.md`; an implementer is the quota-stop manager's). Their
+failed record writes remain best effort. The artifact sweep confirms a local
+report by hashing it and reading the content-addressed key, then the legacy key
+`reports/<job>/<file name>` ([job-dir-ttl.md](job-dir-ttl.md)).
 
 `--parent-job` resolves the local job directory first, then `GET
 /v1/jobs/<job>` on any host — waiting up to 30 s for a lagging record before
@@ -691,25 +987,66 @@ caller), `escalated` exits 83, `lost` exits 84, and a record still pending,
 absent or unreadable leaves the local signals and the usual deadline to
 decide (the unreadable case warns once with reason `hk-unavailable`).
 
+`spawn --wait` reads the owner lane's inbox through the local node daemon, the
+route `panewire inbox list` takes by default ([quiet-delivery.md](quiet-delivery.md)),
+so a session whose own config carries no usable hub token still sees the
+lane's `READY` and `escalate` signals. A session that carries its own lane
+credential (`session_lanes_token_envs`) reads with that credential instead, as
+lane registration does. Only when no daemon answers does the wait fall back to
+reading `inbox list` with the `[hub]` connection this config names; it then
+warns once per wait, not once per poll.
+
 After the brief lands, a failed task claim leaves the pane running and the spawn
 landed. The `job.task_link` event records `status: failed` and a bounded reason;
 panewire warns and sends an owner-lane notice so the task can be linked manually.
 A successful claim records `status: linked`. A claim that fails while hk's task
 record already has `refs.job_id` equal to this job (a design session rebound
 the task before the spawn) records `status: already_linked`, with no warning and
-no notice: there is nothing to link (hk 3426). Other spawn failures retain their
-normal cleanup behavior.
+no notice: there is nothing to link (hk 3426). A spawn that does not claim the
+task — an unlinked reviewer or a consult — records `status: unlinked`; a consult
+(`--role consult`) may join a task another job or claimant holds, so a consult
+pair can share it. The rule follows the spawn role: an implementer claims the
+task even when `panewire resolve` routed it as consult.
+Other spawn failures retain their normal cleanup behavior.
 
-An inherited spawn normally leaves the task bound to its parent job. It rebinds
-the task to the new job, through `handoffkeep tasks rebind`, only after the brief
-lands and only when all of these hold: the parent's hk record state is `lost`,
-`failed` or `completed`; the task's `refs.job_id` is the parent; the new job id
-differs; and the spawn is a replacement seat (routing role `implementer`),
-not a reviewer, tester, consult or `panewire delegate` child. The
-`job.task_link` event then says `status: rebound`. Otherwise it says `inherited`,
-adding `bound_job` when the task is bound to a third job and `rebind_error` when
-the rebind failed or the parent's state was unreadable; neither fails the landed
-spawn.
+An implementer spawn with `--parent-job` replaces its parent job. After the
+successor's `job.spawned` event commits, it attempts to move the task's claim
+and `refs.job_id` from the parent to the new job through `handoffkeep tasks
+rebind`, regardless of the parent's state. When the task is still bound to an
+earlier job in the parent's `--parent-job` chain, the successor follows the
+chain and rebinds from that ancestor holder; unrelated holders are refused.
+The parent pane is left running.
+Only implementer spawns take over; reviewer and consult children do not. Spawns with `--task`, or neither flag and
+no `ARBITER_JOB`, claim as before.
+
+The earlier `job.task_link` event records `status: inherited` and
+`takeover: pending`. After landing, `job.task_rebind` records the outcome:
+`rebound` on confirmation, otherwise `inherited` with a reason and, when known,
+`bound_job`. A confirmed takeover also writes `job.replaced` on the parent's
+local ledger, when present. A refused or unconfirmed takeover leaves the spawn
+landed and emits an `automation-failed` notice asking for a manual rebind check.
+If the process stops after landing but before the takeover, the pending link
+has no `job.task_rebind` event and the parent retains the task.
+
+A confirmed rebind also moves the lane route, so the lane the task's findings
+are addressed to follows the work instead of staying on the parent's pane. The
+successor writes the task's routing lane (its `lane` on the hk task, else the
+successor's own label) as a `takeover` of the parent job; the hub moves the one
+row the parent's pane holds to the successor's pane, whatever that row is
+named, and keeps its name. That is the one cross-machine node lane write: the
+row leaves the parent's machine for the successor's. The successor therefore
+keeps the predecessor's lane name; when its own label differs, that label gets
+no route and direct lane events to it still reach the pane through the hub's
+live-job fallback. `job.lane_registered` records the published row and the
+`takeover_job`. A lane the parent's pane did not hold — a design task's lane,
+for one — is refused; the successor registers its own label instead and
+`job.lane_takeover_failed` records the refusal. `job.spawned` precedes both, so
+a takeover spawn's receipt carries no `hub_lane`; the later
+`job.lane_registered` supplies it, and a spawn that never registers is reported
+by `LANE_UNREGISTERED` like any other. The rule is in
+[r28-lanes-write.md](r28-lanes-write.md#take-a-predecessors-route-on-a-takeover).
+A failed takeover is recorded and warned about, never returned: the spawn has
+landed by then.
 
 Automatic model selection (`spawn` with `-m` omitted or `-m auto`) reads the
 live bench catalog from handoffkeep and pool status from the quota CLI, then
@@ -795,6 +1132,69 @@ Both keys live in the pool-order policy under `"waste_risk": {...}`; absent
 keys take the defaults, and `panewire simulate --policy`/`--policy-set` try
 other values before the policy is changed.
 
+**Ranked band: pools compete by their seat.** In the ranked band each pool
+offers one seat for the task's grade: its lowest-grade eligible row that fits
+(the lowest grade at or above the task's), unless the policy's `seats` names a
+row for that pool and grade. Pools are then ordered by their seat's waste
+urgency, the measure the waste, free and credit bands use, so the pool with the
+most room goes first. A pool whose reset can be paced ranks ahead of one whose
+cannot; ties keep the previous order (lowest grade, then effort and score). A
+row above the task's grade is eligible, so a pool's higher-grade row can serve a
+lower-grade task. The pool's other rows follow its seat.
+
+`seats` is `{pool: {grade: "profile@effort"}}` (`"profile"` for a rung-less
+row); `profile@effort` is the catalog row's profile and effort, the grade is
+the task's. It is read only in the ranked band. A named row that is not a
+candidate (dropped, wrong pool, grade below the task's) leaves the pool on its
+lowest-fit seat. The embedded default sends Command Code's B and C tasks to
+`omp-dsflash41@high`:
+
+```json
+"seats": {"commandcode": {"B": "omp-dsflash41@high", "C": "omp-dsflash41@high"}}
+```
+
+Command Code therefore takes a B or C task when its room beats the other ranked
+pools', not unconditionally first. A pool whose lowest-fit row already is the
+intended one (devin's `devin-ds41`) needs no entry. The `seats` map is edited in
+`/etc/panewire/pool-order.json` on the hub like the other keys; a file that
+omits it has no policy seats.
+
+**Headroom for a known job length** (`plan --expected DURATION`, or the task's
+`--expected` on spawn, e.g. `6h` or `2d`). After the band order and before
+waste urgency, a subscription candidate whose shortest in-view window fits the
+job ranks ahead of one that does not. Nothing is refused: the key only orders.
+A window fits when its remaining share is at least `burn_pct_per_h × hours`,
+or when its reset comes within half the job, so a window that resets mid-job
+counts as room. Without an expected duration the key is off and the order is
+unchanged. An unreadable task `--expected` value turns the key off on spawn
+(degraded note `expected_unreadable`); `plan` rejects it with a usage error.
+
+Burn rates come from `"burn": {"short_pct_per_h": 15, "long_pct_per_h": 2}` in
+the pool-order policy. Windows of a day or less use the short rate, longer
+windows the long rate, and a window of unknown length uses the short rate.
+These are defaults: a pool's rate is measured when hk has observation history
+for its accounts. The measurement reads `GET /v1/quota/accounts/{key}/observations`
+for the pool's accounts over the last six hours and divides the used share's
+rise by the hours that rise covers; a drop from one observation to the next is
+a window reset, so neither the fall nor the span between those two points
+counts. Rates are kept per window label (`5h`, `7d`), and the pool is the unit:
+a pool that several harnesses draw on shares its accounts, so every harness
+burns it at the one measured rate. A pool with no account, fewer than two
+observations, less than an hour of counted coverage, or an unreadable answer
+keeps the defaults above.
+
+The selection record's `headroom` object says which rate was used:
+`burn_source` is `measured` or `default`. A measured rate also carries
+`burn_window`, the window label (`5h`) it came from; a default carries
+`burn_reason`: `no_history`, `history_unreadable`, `too_few_points`,
+`history_span_short`, `no_window_history` (the pool has rates, but not for this
+candidate's window) or `window_unknown` (the candidate's window length is not
+known). The measured rates are cached in
+`~/.local/state/panewire/burn-history.json` for 15 minutes, so a spawn reads
+that file instead of hk history; a failed read is cached the same way. A burn
+rate only orders candidates — it never refuses or delays one. Waste-first and
+host-first placement are not changed by this key.
+
 Subscription candidates additionally need a readable `ok` nonstale spend
 status. The named credit pools, `anthropic-api` and `openai-api`, remain
 admissible without a balance observation. An operator pool class of `exclude`
@@ -861,10 +1261,20 @@ published free bucket reads `exhausted` with its reset still ahead. The bucket
 is the shared reading's `free_bucket` (the hub's fleet state carries it too).
 A devin pane that reports "Reached free model rate limit" writes this host's
 `devin-free-limit.json` — the same record `panewire quota observe
-devin-free-limit` writes — and the next devin measurement publishes it to the
-shared store. An unknown reset holds for one hour. The rung returns on its own
+devin-free-limit` writes — and the stop publishes it to the shared store at
+once (`panewire quota refresh devin`): the record is merged over the current
+reading, without spending a provider measurement, so every host's selection
+drops the free rungs before the next placement rather than after the next
+measurement. A SWE-2 free rung's short "Reached request rate limit" stop
+writes the same record (hk 4644), with the short reset it shows. An unknown
+reset holds for one hour. The rung returns on its own
 once the reset passes. The quota gate refuses the same rung on the same
-reading; selection drops it before the gate.
+reading; selection drops it before the gate. A `quota_stop pool=devin-free`
+replacement also carries `--exclude-pool devin-free`, which excludes the free
+rungs (the reserved free-band key, not a catalog pool). A paid Devin weekly stop
+(`quota_stop pool=devin`) is the mirror: it cools and excludes the paid band
+alone (the reserved `devin-paid` key) until its reset, so the SWE-2 free rungs
+stay placeable while only the paid window is spent.
 
 A subscription pool on pace to use its longest window ranks behind the free
 band, credit with a recorded positive balance and future expiry included.
@@ -912,7 +1322,8 @@ per candidate, `waste_risk` (`true`/`false`) on every candidate and
 `unused_at_reset_pct` (its input) whenever the longest window could be
 paced,
 `waste_urgency`, `reset_hours` and `waste_order` (`usd`, `reset` or
-`projected_fallback`) per ranked candidate,
+`projected_fallback`) per ranked candidate, `pool_waste_urgency` and, on a ranked
+pool's seat, `seat_source` (`lowest_fit` or `policy`),
 `waste_group` (`gemini` or `3p`) on a candidate of a pool that publishes only
 group windows,
 `tier: credit` and the `credit` object (`balance_usd`, `burn_usd_per_h`,
@@ -939,7 +1350,7 @@ spawn, no job writes. The input file is a minimal JSON document — or a
 {
   "now": "2026-10-31T07:24:00Z",
   "grade": "A",
-  "role": "worker",
+  "role": "implementer",
   "effort": "",
   "allow_escalation": false,
   "credit_pools": ["anthropic-api"],
@@ -997,8 +1408,8 @@ carries `policy_file` and `policy_overrides`.
 ### `panewire plan`
 
 `panewire plan [--grade G] --t T0..T3 [--role R] [--tags a,b] [--effort E]
-[--urgency normal|urgent] [--exclude-host a,b] [--exclude-pool P,P] [--builder-family F]
-[--routing-role R] [--allow-escalation] [--json]` answers "right now, which host and which
+[--urgency normal|urgent] [--exclude-host a,b] [--exclude-pool P,P] [--author-family F]
+[--allow-escalation] [--json]` answers "right now, which host and which
 model would a spawn get" without a task or brief. It is live and read-only:
 it runs the spawn's selection core with catalog, account observations,
 presence, and account-bound gates. Worker roles use `--grade` instead of a
@@ -1027,7 +1438,7 @@ placement record.
 | Exit | Meaning |
 | --- | --- |
 | 0 | A host and model were found. |
-| 2 | Usage: missing or invalid `--grade`/`--t`/`--role`/`--urgency`/tags, or `--builder-family` without tester/reviewer (or the reverse). |
+| 2 | Usage: missing or invalid `--grade`/`--t`/`--role`/`--urgency`/tags, or `--author-family` without `--role reviewer` (or the reverse; consult takes it optionally). |
 | 70 | Configuration, unreadable catalog or policy. |
 | 77 | No catalog rung was admitted. |
 | 80 | Local spawning is disabled and no remote host admitted the seat. |
@@ -1043,15 +1454,42 @@ version=… policy_source=…` line.
 ## Role routing
 
 `policy/model-routing` supplies the v1 role allowlists. Selection filters
-profiles by role, retirement, gate, seat, and family before applying the
-`policy/quota-stop` order. `spawn`, `plan`, `resolve`, and `delegate` enforce
+profiles by role, retirement, gate, seat, family, and launch effort before
+applying the `policy/quota-stop` order. `spawn`, `plan`, and `resolve` enforce
 this boundary. An explicit `-m PROFILE` requires `--override-reason`, but
 that reason overrides placement only. A retired or role-ineligible profile
 is refused before placement.
 
+A catalog row that names no effort is the profile's default rung, and
+admission resolves its effort from the profile's lowest ordinary named rung.
+When the profile has no live named rung admission keeps eligible — an unrated
+rung counts only for `consult` or `builder`, or when the request arms it with
+E6 — there is nothing to resolve, so selection drops the row as
+`no_launch_effort` and tries the next candidate instead of failing the whole
+plan on it (hk 4605). A profile named explicitly (`spawn -m`) still takes the
+catalog's own refusal, `catalog row has no launch effort`.
+
+### Role names
+
+A role has one name on every surface — `spawn --role`, the routing table, the
+host `roles` list, the job claim, the `job.spawned` receipt and the reservation
+key `<task>:<role>`: `implementer`, `reviewer` and `consult` (consult is
+operator-only through the hub). `builder` stays the claim role of a job that
+reports to a parent lane. `verifier` and `judge` are resolve-only roles.
+`worker`, `tester`, `counsel` and `captain` are not roles, and no flag, config
+value or record maps them: `spawn --role worker` exits 2, a host `roles` list
+that names one is a config error, and `--builder-family` and `--routing-role`
+are unknown flags (`--author-family` replaces the first; a spawn's `--role` is
+its routing role). The hub, every node and every sender move to the new names
+in one rollout: a job claimed or reserved under an old name is not matched by
+new code, and a node or hub on the other side of the rename refuses or blanks
+the new or old role. Roll out with no live job, no held reservation and no
+pending spawn: drain first, then upgrade the hub and every node together.
+There is no mixed-version window (decision 208).
+
 ### Consult
 
-`--role counsel` maps to routing role `consult`. It admits only `opus` and `fable` through `claude`, or
+`--role consult` routes as routing role `consult`. It admits only `opus` and `fable` through `claude`, or
 `codex-sol` and `codex-astra` through `codex`. OMP also admits the exact model
 selectors `anthropic/claude-opus-5-5`, `anthropic/claude-fable-5-2`,
 `openai/gpt-6.1-sol`, and `openai/gpt-6-astra`. The Fable 5.1 selector
@@ -1065,13 +1503,13 @@ The routing table's profile allowlist still applies. OMP profiles must be
 listed by name or covered by `"*"`. Catalog and launch model IDs are checked,
 so a top-profile name cannot admit a non-top OMP model.
 
-Consult grade is a floor on the rung, not the seat grade. The floor is one grade above the asker's task grade, capped at `SS`. A consult without a task grade takes `S+`. `plan --role counsel`, `resolve --role consult`, and `spawn --role counsel` accept `--grade C|B|A|A+|S|S+|SS` as the asker grade; an empty or unknown value exits 2 and names the accepted grades.
+Consult grade is a floor on the rung, not the seat grade. The floor is one grade above the asker's task grade, capped at `SS`. A consult without a task grade takes `S+`. `plan --role consult`, `resolve --role consult`, and `spawn --role consult` accept `--grade C|B|A|A+|S|S+|SS` as the asker grade; an empty or unknown value exits 2 and names the accepted grades.
 
 Within the floor:
 
 - A rung graded `unrated` is never chosen and never asks its quota gate (`grade_unrated`).
 - A row is dropped (`grade_insufficient`) when the rung it launches at is below the floor. That rung is the row's own effort; a rung-less row launches at its profile's default effort.
-- `--builder-family F` on `plan` or `resolve` drops consult rungs of family `F` (`family_excluded`). With no family, nothing is excluded and the stamp records `unknown`.
+- `--author-family F` on `plan` or `resolve` drops consult rungs of family `F` (`family_excluded`). With no `--author-family`, `resolve` and `spawn` (without `--parent-job`) take the family of the job the caller runs in (`ARBITER_JOB`), the same family `--parent-job` would give. A job that cannot be read refuses rather than selecting with no family. With no family at all, nothing is excluded and the stamp records `unknown`.
 - If no rung passes at the floor but a below-floor rung passes every other rule, consult retries once at the asker's own grade and stamps `fallback: no_rung_at_floor`. A below-floor rung on a cooling pool counts as such a rung. Unrated, absent-rung, and family-excluded rungs never trigger the retry. A session without a task grade never retries.
 
 The selection record carries a `consult` object with `asker_grade`, `asker_family`, `grade_source` (`flag`, `task`, or `without_task`), `floor`, `used_floor`, and `fallback`. `resolve --role consult` prints `floor=<G>` on its text line.
@@ -1082,9 +1520,7 @@ The selection record carries a `consult` object with `asker_grade`, `asker_famil
 
 A consult never runs above its role's `effort` (`high` in the
 current table) unless the request passes `--allow-escalation`. This rule
-applies the same way to `spawn -m auto`, `plan`, and `resolve`. `delegate`
-routes only as implementer, explorer, verifier, or reviewer, so the cap does
-not apply to it.
+applies the same way to `spawn -m auto`, `plan`, and `resolve`.
 It does not use task grade. Other roles keep grade-driven selection and
 today's ordering.
 
@@ -1167,17 +1603,12 @@ allows (any profile ID when the role allows `"*"`), or its effort is not
 one of `low`, `medium`, `high`, `xhigh`, `max`, or `ultra`.
 This PR does not parse the proposed v2 schema.
 
-The seat-role map is read from `panewire_role_map` or its pre-#155 name
-`runtug_role_map` (the name hk publishes today); two maps that differ are
-refused, and the cache stores the map as `panewire_role_map`. A seat role
-the map does not name takes its builtin routing role (`worker` implementer, `tester` verifier, `reviewer` reviewer, `counsel`
-consult) instead of running unfiltered.
-
-`--routing-role consult|implementer|explorer|verifier|reviewer|judge`
-on `spawn` or `plan` selects the routing role. Seat admission still uses
-`--role`. Counsel retains its required routing role.
-Delegate maps `reader` to `explorer`, `verifier` to `verifier`, and
-`reviewer` to `reviewer`. `--patch` uses `implementer` eligibility.
+A spawn role is its routing role: `--role implementer`, `reviewer` and
+`consult` route as `implementer`, `reviewer` and `consult`. The table's
+`panewire_role_map` (and its pre-#155 name `runtug_role_map`) is not read, so
+a table that still publishes one parses and the map changes nothing.
+`verifier` and `judge` are resolve-only: `panewire resolve --role verifier|judge`
+selects them, and no spawn takes them. A spawn takes no `--routing-role`.
 
 A valid document is cached atomically at
 `$XDG_STATE_HOME/panewire/model-routing.json`, or
@@ -1329,10 +1760,10 @@ The nested `routing` object carries `routing_version`, `policy_source`,
 the allowlist, and the exhaustion rule. The hk job metadata schema is
 unchanged.
 
-`panewire resolve --role consult|implementer|explorer|verifier|reviewer|judge
-[--grade G] [--t T0..T3] [--builder-family F] [--harness KIND] [--allow-escalation] [--json]` runs the same
+`panewire resolve --role consult|implementer|verifier|reviewer|judge
+[--grade G] [--t T0..T3] [--author-family F] [--harness KIND] [--allow-escalation] [--json]` runs the same
 selection core without a launch or job write. `--t` defaults to `T0`.
-Reviewer and judge require `--builder-family` to exclude that family.
+Reviewer and judge require `--author-family` to exclude that family.
 The result names the account and host selected now; it is not a reservation.
 The text answer ends with `profile=<profile> effort=<effort>`.
 `effort` is the role's starting effort, or the selected rung's when absent.
@@ -1340,125 +1771,12 @@ For a consult rung chosen above the role effort with
 `--allow-escalation`, `effort` is the chosen rung's.
 
 `--harness omp` restricts selection to OMP seats before quota ordering. For
-`--role implementer` or `--role explorer`, an OMP choice also returns
+`--role implementer`, an OMP choice also returns
 `omp_agent` when a user agent's frontmatter `model:` exactly matches the
 selected `model_id`. Panewire reads only the frontmatter of regular Markdown
 files in `~/.omp/agent/agents/`, in filename order. The first matching agent's
 `name:` supplies the hint. Missing or malformed frontmatter leaves the JSON
 field absent. Text output appends `omp_agent=<name>` when available.
-
-## Delegation
-
-`panewire delegate` is the one-call form of "ask another model": a lead session
-(Claude Code, Codex) hands over reading, verification or a cross-check and gets
-one answer back. In-session subagents run only on their own vendor's models;
-`delegate` reaches any seat in the policy, so the work can run on free or
-spare-quota models. It reuses the spawn, wait and job-result machinery and
-writes nothing in the caller's tree.
-
-```sh
-panewire delegate --role reader|verifier|reviewer --prompt FILE [--grade G] [--cwd DIR]
-  [--timeout D] [--headless] [--patch] [--panel 2..4] [--family F] [--workspace W] [--json]
-```
-
-| Flag | Meaning |
-| --- | --- |
-| `--role` | `reader` reads and answers, `verifier` runs only the acceptance commands in the prompt, `reviewer` reviews. Reader and verifier use `worker` seats; `reviewer` uses `reviewer` seats and excludes the caller's model family. |
-| `--prompt FILE` | The task. The role preamble and the steps for filing the answer are put in front of it. |
-| `--grade G` | The catalog grade the seat must cover (`C`, `B`, `A`, `A+`, `S`, `S+`, `SS`; default `C`). The task title is not read. |
-| `--cwd DIR` | The tree the delegate reads (default: the current directory). |
-| `--timeout D` | A duration or seconds, default 15m: the pane wait, or the headless CLI call. |
-| `--headless` | Run the selected seat's CLI once on this host with the brief, instead of a pane. |
-| `--patch` | The delegate works in a temporary detached worktree and the result carries a patch path (below). |
-| `--panel N` | N from 2 to 4: see Panel. |
-| `--family F` | The caller's model family, for a reviewer outside a panewire job. Inside a job the job's own family is used. |
-| `--workspace W` | The herdr workspace for the pane, by label (`workers`), or `[local] workspace`. Not needed with `--headless`. |
-| `--json` | Print one JSON document instead of text. |
-
-**Selection.** The seat is chosen by the same code as `spawn` auto-selection
-and `panewire plan`: catalog rungs that cover the grade and the role, ordered by
-the pool policy (waste-risk pools first, then the band order), admitted through
-presence and the quota gate. Free models are one band of that policy, not a
-default target. A reviewer drops every seat of the caller's family.
-
-**Job record.** Each delegation is a job: `delegate-<parent>-<n>`, where
-`<parent>` is the enclosing job (`ARBITER_JOB`), and `<n>` the next free number
-in the local jobs dir. Outside a job the id is `delegate_<host>_<n>`, where
-`<host>` is `HUB_MACHINE_ID`, so two hosts never hand out the same id to hk;
-without a node id the delegation refuses. It is claimed in hk and the local ledger,
-holds a quota lease, carries the parent job, task and owner lane, and ends with
-`done`, so placement, quota and hk records match any other job. A task is
-required: run inside a panewire job or set `HK_TASK_ID`. The job directory holds
-`brief.md`, `result.json`, `report.md` and, with `--patch`, `changes.patch`.
-
-**Pane mode (default).** `delegate` runs `spawn --wait` with automatic
-selection (the pane may be placed on another host), reads the `result` of the
-hk job record, which the delegate files with `panewire done JOB --result`
-(`{"answer": TEXT}`), then closes the pane after checking it is still the one
-the job spawned. If only the report exists because the completion watcher
-finished the job on the delegate's terminal signal, the report text is the
-answer. A delegate placed on
-another host is answered the same way; its pane is left for that host's `reap`.
-When the wait fails (escalated, lost, timeout), the pane stays for
-`panewire reap` and nothing is printed on stdout.
-
-**Headless mode.** The seat's CLI runs once, in `--cwd`, with the brief and a
-deadline of `--timeout`; its output is the answer. The job is claimed, leased
-and completed with the same `done` call. Kinds with a one-shot form: `claude`,
-`codex`, `devin`, `cmd`, `omp`, `opencode`; any other kind is refused
-with exit 70 before anything is claimed. The one-shot flags are fixed in code
-and have been exercised only against a fake runner.
-
-**No writes.** The role preambles forbid editing: `reader` and `reviewer` run
-read-only commands, `verifier` runs only the acceptance commands it was given.
-A role that must try a change uses `--patch`: delegate adds a detached worktree
-of `--cwd` in a temporary directory (at `HEAD` plus the caller's uncommitted
-tracked changes), runs the delegate there, writes `git diff` against that base
-to `changes.patch` in the job directory and removes the worktree. The result
-carries `patch` (omitted when nothing changed). The caller decides whether to
-apply it (`git apply`). The worktree registration in `--cwd`'s `.git` is added
-and removed; no file in the tree changes.
-
-**Panel.** `--panel N` picks N seats of N distinct model families, then runs
-all N at once, each as its own delegate job (pane or `--headless`, and its own
-scratch tree with `--patch`). Families are chosen one selection at a time with
-the families already chosen excluded, so the panel is the N best admitted
-families under the normal policy. When fewer than N are admitted, the panel
-runs with those and says why (`reason`, and a warning on stderr). A member that
-fails, is lost or times out does not stop the others; it is listed as `failed`
-with its exit status. The panel tells each model to file `verdict` (one word)
-and `points` (short claims, `file:line` where they have one) next to its
-`answer`; without points, lines of the answer are compared. The table lists:
-
-- **agreements** — points two or more members made (word overlap of at least
-  half);
-- **disagreements** — differing verdicts, and `file:line` locations that members
-  cite with different claims;
-- **unique** — points only one member made.
-
-**Output.** The answer is the last thing printed. Text: a header line
-`delegate job=… role=… mode=… profile=…`, `patch=PATH` when there is one, then
-the answer. Spawn and wait chatter goes to stderr. `--json` prints one object:
-`job`, `role`, `mode` (`pane` or `headless`), `profile`, `family`, `patch`,
-`result` (the filed object) and `answer`. A panel prints a header line, each
-member (`== A job=… profile=… family=… status=answered ==` and its answer),
-then `== side by side ==` with verdicts, agreements, disagreements and unique
-points last. Its `--json` object has `requested`, `answered`, `reason`,
-`members` (each the single-call object plus `label`, `status`, `exit`, `error`)
-and `table`.
-
-**Exit statuses.** 0 the answer was printed (a panel: at least one member
-answered; check `answered` and `reason` for a short panel). 2 usage. 70
-configuration, or a seat kind with no headless form. 75 the parent job is
-unreadable. 77 or 81 no seat or host was admitted (a panel with no admitted
-family at all). 83, 84, 85 the pane job escalated, was lost or timed out. 124
-the headless CLI hit `--timeout`. 1 the job finished without an answer, or
-the headless CLI failed. Spawn and quota refusals keep their own statuses. A
-panel with no answered member returns the first failed member's status.
-
-**When to delegate.** Delegate reading, verification and cross-family review.
-Keep tight design loops, where the next step depends on the last answer, in
-the session's own subagents.
 
 `plan` also prints the remote-spawn preflight (below) of every remote host it
 evaluated, as `preflight host=NAME ok=… reasons=…` lines and, with `--json`, a
@@ -1473,7 +1791,9 @@ named reason. It is read-only: it reads the hub host list, hk presence and the
 shared observation, and makes one SSH probe per host that tests two paths,
 reads one boolean from the remote `hosts.toml` and asks `panewire` and `panewire`
 for their versions. It never prints a URL or a file's contents, and writes no
-task, job or event.
+task, job or event. The whole run is bounded by a 90-second budget; a probe
+that does not answer in time reports its checks failed (`probe_failed_rcN`)
+rather than holding the command.
 
 | Check | Fails with | Meaning |
 | --- | --- | --- |
@@ -1539,7 +1859,7 @@ job's own inbox subtree even if a wider root is configured.
 `kind`, `family`, `capability` and nonempty `roles`. Optional `effort` and `pin`
 fix an alias to a rung; `e6` requires an exact marker. A nonempty `rungs` map is
 closed: unlisted efforts are refused. A rung has `roles` and optional `e6`.
-Roles are worker, tester, reviewer and counsel. Model IDs and grades
+Roles are implementer, reviewer and consult. Model IDs and grades
 are read from the quota tool, never this file.
 
 `PANEWIRE_BRIEF_POLICY` overrides `[local].brief_policy`. Brief policy schema:
@@ -1555,8 +1875,8 @@ are read from the quota tool, never this file.
 ```
 
 Use the complete shipped block when creating a custom policy; a custom file
-does not pick up later bullets, such as the test-host rule that names
-`mbp-server` by `hostname -s` (hk 3733). Selection order
+does not pick up later bullets, such as the test-host rule (one rule on
+every host since hk 4496). Selection order
 is default → host → profile → local.brief_preamble. Missing block names refuse.
 The policy version and selected block appear in every brief and dry-run output.
 See [DESIGN.md](../DESIGN.md#standard-brief-preamble-the-single-source-of-fleet-rules)
@@ -1600,6 +1920,8 @@ embedded `delivery-policy.yaml`) carries the lane classes under `relay:`. See
 | `relay.inbox_wake_window` | `5m` | Coalescing window of the one-line wake, `10s` to `1h`. |
 | `relay.worker_inbox_trial` | `[]` | Worker lane patterns that are inbox-only with the wake during the trial. |
 | `relay.worker_inbox_trial_until` | none | RFC3339 end of the trial. It is required with a trial list, and the trial is off from this instant. |
+| `relay.drain_wake_interval` | `1h` | Least gap between two drain lines for one design lane, `10m` to `24h`. |
+| `relay.drain_wake_threshold` | `0` | A design lane counts as drained at or below this many in-flight jobs, `0` to `10`. |
 
 The wake line is
 `[inbox] <lane>: N unread (most urgent: <kind>) | panewire inbox list --lane <lane>`.
@@ -1616,9 +1938,8 @@ do not replace:
 | --- | --- |
 | Jobs | One row per job claimed on this host (`claimed → leased → released`), written with its `job.claim`/`job.reclaim` event. The duplicate arbiter on this host; cross-host duplicates are refused by the hk claim first. |
 | quota_pool records | One execution record per job and pool, written at admission and deleted at `done`, `reap` or a failed spawn. No TTL. |
-| path, linear_permit leases | Exclusive leases with a TTL (90 and 30 minutes by default), a monotonic fencing token, archived history and expiry by `gc`. Library only: panewire itself takes no such lease today. |
+| path, linear_permit leases | Exclusive leases with a TTL (90 and 30 minutes by default), a monotonic fencing token and archived history. Library only: panewire itself takes no such lease today. |
 | Job events | `job.*`, `lease.*` and `quota_pool.*` events, one artifact each. |
-| gc | `panewire gc [--json]`: expires leases, cleans quota_pool records and releases leased jobs whose exact agent label is gone from Herdr. |
 
 State is read and written in place; no migration or import is needed:
 
@@ -1682,7 +2003,7 @@ outcome, reason, detail`) to `$XDG_STATE_HOME/panewire/events/fleet-events.jsonl
 | `quota_observation` | `stale` or `unusable` | the shared-observation reason (`stale`, `not_observed`, `measure_failed`, ...) | a target account's quota observation refused a host; `detail` carries `target=`, `pool=` and `age_min=` |
 | `relay` | `delivered`, `dropped:<reason>` or `unconfirmed:<reason>` | the drop code, or the first token of the report | the hub saw one worker or design lane row's outcome |
 | `spawn_held` | the held branch (`succeeded_pane_held`, `failed_pane_held`, ...) | the pane-probe reason | a refused reclaim kept a role reservation |
-| `job_result` | `attached`, `conflict` or `missing` | `duplicate_done`, `different_result` or `no_result` | a `done` attached, conflicted with, or lacked a result |
+| `job_result` | `conflict` or `missing` | `different_result` or `no_result` | a `done` conflicted with, or lacked, a result |
 | `inbox_wake` | `sent` or `skipped` | the lane class (`design`, `desk`, `trial`), or `startup` for the line a hub start owes, when sent; `count_failed` or `unrouted` when skipped | the hub typed, or could not type, an inbox-only lane's one-line wake; `job` is the lane and `detail` names `unread=`, `most_urgent=`, `machine=` and `pane=`. See [inbox-only lanes](quiet-delivery.md#inbox-only-lanes) |
 
 The relay, held-reservation and job-result kinds and their Sentry fingerprints
@@ -1700,7 +2021,7 @@ trace described in [Automatic selection](placement.md#automatic-selection).
 
 Every real spawn decision produces one immutable handoffkeep record through
 `POST /v1/placements`. This includes automatic and forced placement, local and
-remote sessions, headless delegation, and refusals or failures before launch.
+remote sessions, and refusals or failures before launch.
 Dry runs produce no record. See handoffkeep's
 [Linear work board contract](https://github.com/mgh3326/handoffkeep/blob/main/docs/linear-work-board.md).
 
@@ -1712,7 +2033,11 @@ reasons. Missing signals stay absent. Forced placements can have an empty
 candidate list. The server derives `decided_on` from the node token's host grant.
 
 Execution metadata includes `family`, the admitted `model`, `role` (`worker`, `review`, or `consult`), `profile`, `pool`, `pane_id`, the repository
-name, and an opaque `account_key`. Account fingerprints remain fingerprints.
+name, and an opaque `account_key`. The `role` is hk's work class, not the spawn
+role: every producer maps the role it holds through `fleet.PlacementWorkClass`,
+so `implementer` records as `worker`, `reviewer` (and the `judge` routing role)
+as `review`, and `consult` as `consult`. hk accepts only that set and rejects a
+record that names another role. Account fingerprints remain fingerprints.
 Other account aliases become hashes. Briefs, local paths, login identities,
 credentials, and terminal output do not enter the record. Mergewake passes the
 owning task with `--task` and `--role reviewer`; the producer records that task
@@ -1725,15 +2050,95 @@ receipt. They do not create a second decision. For an older executor, panewire
 resolves the shared hk job record before posting and freezes that payload for
 retries. A successful placement stays `placed` if a later `--wait` fails.
 
+Hub queue-core spawns are the one exception: placement and dispatch are
+separated, so the placing App is gone before the bound node answers. At bind
+the hub persists a placement snapshot — the candidate trace plus the chosen
+host, pool and account — in the `spawn_placement_snapshots` table of its
+durable store, keyed by request id and attempt. When `finishPlacement`
+completes a record, its final emission also carries that finished record, and
+the snapshot keeps it whole — the flat trace fields are only a projection, so
+the outbox posts the record itself rather than re-deriving it. When the
+attempt reaches a terminal result without a finished record (the placing App
+died or restarted first) the hub builds the record from the trace and the
+node's execution metadata and enqueues it under its deterministic
+`job.attempt.json` name in the same placement spool, so one record per
+attempt is retried across hub restarts, a duplicate delivery is an hk 409
+no-op, and permanent refusals are quarantined as below. The dispatch
+scheduler reads the snapshot back by request id and attempt
+(`spawnPlacementSnapshot`). The hub retries each spooled attempt with that
+attempt's saved delivery settings, even when attempts share a spool directory.
+
 Contacting a remote host does not count as starting a launch. An executor that
 fails after attempting its launch returns `FAILED placement=` metadata; only
 that evidence or a success receipt marks the host as chosen. A refusal keeps
 the contacted host in the candidate trace. Placement clears launch state when
 it moves to another candidate. Older executors without failure receipts are
 conservatively recorded as refusals when no acceptance evidence is available.
+If another candidate needs a quota refresh after a host has been contacted,
+the hub keeps the request accepted and saves the candidate trace without
+posting a placement record. Any other non-terminal wait does the same. When
+the attempt reaches its terminal result, the hub posts its one immutable
+record with the full durable trace, including hosts refused earlier in that
+attempt.
+
+For a legacy deferred trace without a saved base or a spooled record, the hub
+first looks up the existing hk record by job and attempt. An absent record
+allows the hub to merge the candidate traces and post once the attempt is
+terminal; an equal final record seals the local snapshot without another
+POST. A flat legacy trace has no producer version, so the existing hk version
+is authoritative when all reconstructible fields agree. A finished local
+record is compared in full, including version. A different record holds the
+attempt and the deferred trace and sends the owner a
+`legacy_placement_record_conflict` notice. Lookup errors leave the attempt
+held until its existing record can be checked.
 
 Delivery uses the existing hk client and `[quota]` URL and credentials. Each
 delivery pass has a two-second budget and cannot change the spawn result.
+
+The hub's delivery App writes its own warnings nowhere, so the hub reports each
+undelivered record itself, with the request id, job, attempt and a reason.
+A record that is still pending logs `placement record not delivered; snapshot
+stays pending` once per attempt and reason, however often the two-second flush
+retries it; a changed reason logs again. A record hk refuses for good (HTTP 400,
+404, 410 or 422) logs `placement record refused by hk and quarantined` once and
+moves to `placements-rejected/` in the hub's state directory beside a
+`.reason` sidecar; its snapshot is sealed and never retried. The reason is one
+of:
+
+| Reason | Meaning |
+|---|---|
+| `hk HTTP <status> <code>: <reason>` | hk answered the post. A 403 or 401 is a credential without the placement grant (hk derives `decided_on` from the token's host grant); 5xx is an outage. The record stays spooled and is retried. |
+| `hk_unreachable`, `delivery_budget_exhausted` | The post failed on the network, or the two-second pass ran out first. |
+| `hk_credential_unavailable: …` | The hub process has no usable svc-panewire credential ([hk service credential](#handoffkeep-service-credential)). |
+| `spool_path_refused`, `spool_unreadable`, `spool_entry_unreadable`, `spool_entry_unwritable`, `spool_entry_remains` | The placement spool under the hub's state directory is behind a symlink, unreadable, or its entry cannot be read or written. |
+| `job_store_unavailable`, `job_metadata_unavailable` | A `placed` record with no family waits for the shared job record. |
+| `trace_lock_timeout`, `deferred_trace_pending`, `delivery_app_unavailable`, `operation_unreadable` | The hub could not take the attempt's trace lock, holds a deferred trace save for it, could not build its delivery App, or could not read its operation row. |
+| `superseded_attempt_has_no_finished_record` | A newer attempt overwrote this attempt's outcome before a record could be built. |
+
+A landed attempt with no placement snapshot logs `placement record not built`.
+A snapshot whose record cannot be rebuilt is sealed with `placement record
+dropped`.
+
+After a fix or a credential change, pending snapshots deliver on their own: the
+flush retries every attempt whose snapshot is not sealed, from its spooled file
+or by rebuilding the record from the snapshot and the operation's outcome.
+Nothing needs a manual replay. Quarantined records are the exception: their
+snapshots are sealed and they are never retried. The file in
+`placements-rejected/` keeps the record, and its `.reason` sidecar keeps hk's
+answer. An operator replays the quarantine with one command:
+
+```sh
+panewire placement-requeue            # panewire's own state directory
+panewire placement-requeue --state-dir DIR
+```
+
+It re-posts every record under `placements-rejected/` with its role mapped to
+hk's work class and with the record written exactly as this release posts one,
+using the ambient handoffkeep credential and `[quota]` URL. A record hk takes,
+or already holds (a 409 no-op), leaves the quarantine with its sidecar; a
+record hk refuses again, or cannot be posted because hk is unavailable, stays
+there for the next run and the command exits non-zero. The hub never runs it.
+
 Records first enter owner-only JSON files under
 `$XDG_STATE_HOME/panewire/placements` (default
 `~/.local/state/panewire/placements`). Each subsequent panewire invocation retries
@@ -1763,14 +2168,15 @@ HTTP 409 warns and drops the conflicting file. Local attempt markers under
 | 80 | Local spawning disabled/unavailable without a remote fallback. |
 | 81 | `NO_ELIGIBLE_HOST`, wake/capacity placement failure, the remote worktree for a linked-worktree job could not be prepared (also a `via = "hub"` checkout refusal), or the hub is unavailable for a forced `via = "hub"` host. |
 | 82 | Pane committed but lane unregistered under strict lane reporting (`PANEWIRE_LANE_STRICT=1`). |
-| 83 | `spawn --wait` (and `delegate`): the job escalated. |
-| 84 | `spawn --wait`: the job was lost or revoked. |
-| 85 | `spawn --wait`: the wait deadline expired; the job is retained. |
+| 83 | `spawn --wait`: the job escalated. |
+| 84 | `spawn --wait`: the job was lost or revoked, or its hub request ended before it landed (`cancelled`, `given_up`; nothing was spawned). |
+| 85 | `spawn --wait`: the wait deadline expired; the job, or a hub request still queued, is retained. |
 | 86 | `QUOTA_EXHAUSTED`: every eligible account is measured exhausted and the role waits, including an exhausted downgrade retry. |
 | 87 | `QUOTA_EXHAUSTED`: every eligible account is measured exhausted and the role escalates to the parent lane. |
 | 88 | `AUTH_UNAVAILABLE`: no usable current account binding on eligible hosts. |
 | 89 | `QUOTA_UNKNOWN`: quota remains unknown after one bounded account refresh. |
 | 90 | `WORKSPACE_TRUST_REQUIRED`: Codex is waiting at its directory trust prompt; initial brief is withheld. Or `HOOKS_REVIEW_REQUIRED`: Codex is waiting at its "Hooks need review" screen; initial brief is withheld. |
+| 91 | `spawn --wait`: the hub request is `parked` (no host can take it now) and the wait deadline expired; the request stays queued on the hub. |
 | 124 | A time-bounded CLI call reached its context deadline. |
 | 255 | SSH could not reach a remote host (repository check, clone or spawn leg). Never returned for a `via = "hub"` host. |
 
@@ -1822,8 +2228,7 @@ below.
 `-p` starts with `hk:doc/`: the rest of the value is the document key, for
 example `-p hk:doc/brief/2026-11-09/my-job`, the key a design session stores
 its briefs under. Every other `-p` value is a file path and reads exactly as
-before. `panewire delegate --prompt FILE` has its own reader and takes only a
-file.
+before.
 
 The key must be nonempty, at most 512 bytes of UTF-8, and must not start with
 `/` or contain a control character or `..`; any other key is refused with
@@ -1914,16 +2319,20 @@ state, so a retained completed record can still appear after reap.
 
 ## Task pane sweep
 
-`panewire daemon` closes the pane of a worker or tester whose bound hk task is
-merged, done or dropped, or whose job was closed, once the pane has stayed not
-working for a grace; a completed author's pane waits while its PR is open. The
-rules are in [pane-sweep.md](pane-sweep.md). Two daemon flags configure it:
+`panewire daemon` closes the pane of a job that ended — a reviewer or
+consult's terminal record, an implementer's merged, done, dropped or
+handed-over end — proven the job's own by pane id and harness session, once
+the end is an hour old (a day for `--keep`), and sooner when the pane stayed
+not working for a grace. A completed author's pane waits while its PR is open.
+The same pass republishes a report whose `done` upload failed, once its file
+still holds the bytes the completion announced.
+The rules are in [pane-sweep.md](pane-sweep.md). Two daemon flags configure it:
 
 - `--task-pane-sweep-interval DURATION` — how often the sweep runs. Default
   `5m`; `0` turns it off; any other value must be at least `10s`.
 - `--task-pane-sweep-grace DURATION` — how long a pane must have stayed not
-  working before it is closed. Default `10m`; `0` closes at the first sweep that
-  finds the task ended.
+  working before it is closed inside the close deadline. Default `10m`; `0`
+  closes at the first sweep that finds the job ended.
 
 The sweep needs `--hub-url`, `--hub-token-env` and `--hub-jobs-root`, and reads
 hk through `handoffkeep_env` in the node's `spawn.json`. After a close it also

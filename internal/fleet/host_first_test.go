@@ -48,14 +48,14 @@ func TestHostFirstPlacement(t *testing.T) {
 		{
 			// Account A ranks first in pool order but its only holder is
 			// saturated; the idle machine's account B wins.
-			name: "account only on a busy host", role: "counsel", grade: "A", rows: consultRows,
+			name: "account only on a busy host", role: "consult", grade: "A", rows: consultRows,
 			place:    map[string]string{"cloud-small": testClaudeA, "mac-b": testClaudeB},
 			load:     map[string]float64{"cloud-small": 1.6, "mac-b": 0.2},
 			wantHost: "mac-b", wantKey: testClaudeB,
-			hostOutcome: map[string]string{"mac-b": "chosen", "cloud-small": "not_tried", "cloud-tiny": "role_not_accepted:counsel", "pi": "role_not_accepted:counsel"},
+			hostOutcome: map[string]string{"mac-b": "chosen", "cloud-small": "not_tried", "cloud-tiny": "role_not_accepted:consult", "pi": "role_not_accepted:consult"},
 		},
 		{
-			name: "unity lead skips the waste account on a non-unity host", role: "counsel", grade: "A", tags: "unity", rows: consultRows,
+			name: "unity lead skips the waste account on a non-unity host", role: "consult", grade: "A", tags: "unity", rows: consultRows,
 			place:    map[string]string{"cloud-small": testClaudeA, "mac-b": testClaudeB},
 			load:     map[string]float64{"cloud-small": 0.1, "mac-b": 0.5},
 			wantHost: "mac-b", wantKey: testClaudeB,
@@ -63,7 +63,7 @@ func TestHostFirstPlacement(t *testing.T) {
 		},
 		{
 			// The best host's own accounts are refused: skip it, not fatal.
-			name: "refused accounts skip the host", role: "counsel", grade: "A", rows: consultRows,
+			name: "refused accounts skip the host", role: "consult", grade: "A", rows: consultRows,
 			place:    map[string]string{"mac-b": testClaudeA, "cloud-small": testClaudeB},
 			load:     map[string]float64{"mac-b": 0.1, "cloud-small": 0.5},
 			gate:     refuseA,
@@ -71,7 +71,7 @@ func TestHostFirstPlacement(t *testing.T) {
 			hostOutcome: map[string]string{"mac-b": "all_refused", "cloud-small": "chosen"},
 		},
 		{
-			name: "all hosts refused", role: "counsel", grade: "A", rows: consultRows,
+			name: "all hosts refused", role: "consult", grade: "A", rows: consultRows,
 			place:       map[string]string{"cloud-small": testClaudeA, "mac-b": testClaudeB},
 			load:        map[string]float64{"cloud-small": 0.1, "mac-b": 0.5},
 			gate:        refuseAll,
@@ -79,20 +79,20 @@ func TestHostFirstPlacement(t *testing.T) {
 			hostOutcome: map[string]string{"mac-b": "all_refused", "cloud-small": "all_refused"},
 		},
 		{
-			name: "no host declares the cap", role: "counsel", grade: "A", tags: "gpu", rows: consultRows,
+			name: "no host declares the cap", role: "consult", grade: "A", tags: "gpu", rows: consultRows,
 			place:    map[string]string{"cloud-small": testClaudeA, "mac-b": testClaudeB},
 			wantCode: exitPlacement, wantErr: "NO_ELIGIBLE_HOST: no account admitted routing role consult; no host declares cap gpu",
 			hostOutcome: map[string]string{"mac-b": "missing_caps:gpu", "cloud-small": "missing_caps:gpu"},
 		},
 		{
-			name: "pi never takes a lead", role: "counsel", grade: "B", rows: consultRows,
+			name: "pi never takes a lead", role: "consult", grade: "B", rows: consultRows,
 			// Fitting hosts exist but none holds a login: AUTH_UNAVAILABLE.
 			place:    map[string]string{"pi": testClaudeB},
 			wantCode: exitAuthUnavailable, wantErr: "AUTH_UNAVAILABLE",
-			hostOutcome: map[string]string{"pi": "role_not_accepted:counsel", "mac-b": "no_candidate_present"},
+			hostOutcome: map[string]string{"pi": "role_not_accepted:consult", "mac-b": "no_candidate_present"},
 		},
 		{
-			name: "one-core vm never takes a heavy grade", role: "worker", grade: "S", rows: workerRows,
+			name: "one-core vm never takes a heavy grade", role: "implementer", grade: "S", rows: workerRows,
 			place:    map[string]string{"cloud-tiny": testClaudeB},
 			wantCode: exitAuthUnavailable, wantErr: "AUTH_UNAVAILABLE",
 			hostOutcome: map[string]string{"cloud-tiny": "grade_not_accepted:S", "pi": "grade_not_accepted:S"},
@@ -132,7 +132,7 @@ func TestHostFirstPlacement(t *testing.T) {
 // A refusal about the account itself holds on every host: the account is not
 // judged again on the next host that holds it.
 func TestHostFirstAccountRefusalNotRepeated(t *testing.T) {
-	a, s, q, _ := hostFirstFixture(t, "worker", "B", workerRows,
+	a, s, q, _ := hostFirstFixture(t, "implementer", "B", workerRows,
 		map[string]string{"mac-b": testClaudeA, "cloud-small": testClaudeA, "pi": testClaudeB},
 		map[string]float64{"mac-b": 0.1, "cloud-small": 0.2, "pi": 0.3})
 	gate := q.GateDo
@@ -160,14 +160,14 @@ func TestHostFirstAccountRefusalNotRepeated(t *testing.T) {
 // The placement plan tries the host selection chose first inside its load
 // bucket; a saturated preferred host stays a last resort.
 func TestPlacementPlanPrefersSelectedHost(t *testing.T) {
-	a, _, _, _ := hostFirstFixture(t, "worker", "B", workerRows, nil, map[string]float64{"mac-b": 0.5, "cloud-small": 0.2, "cloud-tiny": 0.1, "pi": 0.1})
-	p, _ := a.plan(context.Background(), Spawn{Role: "worker", TaskGrade: "B", SelHost: "mac-b"}, "", 0)
+	a, _, _, _ := hostFirstFixture(t, "implementer", "B", workerRows, nil, map[string]float64{"mac-b": 0.5, "cloud-small": 0.2, "cloud-tiny": 0.1, "pi": 0.1})
+	p, _ := a.plan(context.Background(), Spawn{Role: "implementer", TaskGrade: "B", SelHost: "mac-b"}, "", 0)
 	if len(p.ordered) == 0 || p.ordered[0].name != "mac-b" {
 		t.Fatalf("selection's host not first in its bucket: %v", p.ordered)
 	}
 	src := a.Source.(*fakePlacementSource)
 	src.hosts[0].LoadRatio = ptrF(1.5)
-	p, _ = a.plan(context.Background(), Spawn{Role: "worker", TaskGrade: "B", SelHost: "mac-b"}, "", 0)
+	p, _ = a.plan(context.Background(), Spawn{Role: "implementer", TaskGrade: "B", SelHost: "mac-b"}, "", 0)
 	if p.ordered[len(p.ordered)-1].name != "mac-b" {
 		t.Fatalf("a saturated preferred host must stay last: %v", p.ordered[0].name)
 	}
@@ -175,11 +175,11 @@ func TestPlacementPlanPrefersSelectedHost(t *testing.T) {
 
 // Acceptance 4: `panewire plan --json` explains every host.
 func TestPlanJSONExplainsHosts(t *testing.T) {
-	a, _, _, _ := hostFirstFixture(t, "counsel", "A", consultRows,
+	a, _, _, _ := hostFirstFixture(t, "consult", "A", consultRows,
 		map[string]string{"cloud-small": testClaudeA, "mac-b": testClaudeB},
 		map[string]float64{"cloud-small": 0.1, "mac-b": 0.5})
 	out := a.Out.(interface{ String() string })
-	if err := a.planCmd(context.Background(), []string{"--t", "T2", "--role", "counsel", "--tags", "unity", "--grade", "A", "--json"}); err != nil {
+	if err := a.planCmd(context.Background(), []string{"--t", "T2", "--role", "consult", "--tags", "unity", "--grade", "A", "--json"}); err != nil {
 		t.Fatalf("%v\n%s", err, out.String())
 	}
 	var doc struct {
@@ -205,7 +205,7 @@ func TestPlanJSONExplainsHosts(t *testing.T) {
 // The hub scores this machine too; without its score the whole ranking fell
 // back to raw load and an idle Pi outranked a much stronger machine.
 func TestHostFirstRanksByHubScoreWithLocal(t *testing.T) {
-	a, s, _, src := hostFirstFixture(t, "worker", "B", workerRows,
+	a, s, _, src := hostFirstFixture(t, "implementer", "B", workerRows,
 		map[string]string{"pi": testClaudeB, "mac-b": testClaudeB}, nil)
 	a.Config.Local["spawn"] = true
 	for i := range src.hosts {
@@ -245,7 +245,7 @@ func TestHostFirstRefreshRefusalKeepsHostUp(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rows := []CatalogRow{consultRows[0], {Profile: "codex-sol", Effort: "high", Grade: "S", Pool: "codex", Gate: "default", ModelID: "sol-m"}}
-			a, s, q, src := hostFirstFixture(t, "counsel", "A", rows, nil, map[string]float64{"mac-b": 0.1})
+			a, s, q, src := hostFirstFixture(t, "consult", "A", rows, nil, map[string]float64{"mac-b": 0.1})
 			// mac-b holds claude A (unmeasured: needs a refresh) and codex C.
 			src.presence = []PresenceRecord{{HostID: "mac-b", AccountKey: testClaudeA, LastSeen: a.Now()}, {HostID: "mac-b", AccountKey: testCodexA, LastSeen: a.Now()}}
 			src.accounts[testClaudeA] = SharedAccount{Key: testClaudeA, Observed: true}

@@ -3,17 +3,19 @@ package panewire
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
 
+	"github.com/mgh3326/panewire/internal/arbiter"
 	"github.com/mgh3326/panewire/internal/fleet"
 	"github.com/mgh3326/panewire/internal/hkcred"
 	"github.com/mgh3326/panewire/internal/quota/codex"
+	"github.com/mgh3326/panewire/internal/teststate"
 )
 
 // TestMain points every test's fleet events at a temporary state dir, so no
@@ -22,10 +24,29 @@ import (
 // directory, so a test that reaches the node's native quota measurement
 // without a fixture finds no credential instead of the developer's own login.
 func TestMain(m *testing.M) {
-	state, err := os.MkdirTemp("", "panewire-test-state-")
+	// The launch home is the operator's real home, captured before HOME
+	// moves: no test may open ledger state under it (hk 4685).
+	realHome, _ := os.UserHomeDir()
+	if realHome == "" {
+		realHome = os.Getenv("HOME")
+	}
+	// The go toolchain keeps the launch environment's caches, so a test that
+	// runs go stays warm and offline. Pin them now, before HOME or
+	// XDG_CACHE_HOME move: on Linux GOCACHE derives from XDG_CACHE_HOME, and a
+	// pin taken after the move below would point every build at the state dir
+	// (hk 4733).
+	teststate.PinGoToolchainEnv()
+	// A test binary killed by -timeout, SIGTERM or a reaped pane never reaches
+	// the cleanup at the end, so remove the state dirs such a run left behind.
+	if _, err := teststate.SweepStale(os.TempDir(), time.Now(), teststate.StaleAfter, teststate.StatePrefix); err != nil {
+		fmt.Fprintf(os.Stderr, "panewire: sweeping stale test state dirs: %v\n", err)
+	}
+	state, err := os.MkdirTemp("", teststate.StatePrefix)
 	if err != nil {
 		panic(err)
 	}
+	testStateDir = state
+	arbiter.ForbidHomeForTests(realHome)
 	os.Setenv("CODEX_HOME", filepath.Join(state, "no-codex-login"))
 	os.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(state, "no-claude-login"))
 	os.Unsetenv("CLAUDE_SECURESTORAGE_CONFIG_DIR")
@@ -45,43 +66,57 @@ func TestMain(m *testing.M) {
 	os.Setenv(hkcred.PathEnv, filepath.Join(state, "no-hk-svc.env"))
 	// No test may read the developer's real files through a default path
 	// under HOME (spawn.json, hk-svc.env, the herdr socket; hk 3570): HOME is
-	// a private directory for the whole package. The go toolchain keeps the
-	// launch HOME's caches and env file, so a test that runs go stays warm and
-	// offline. A test that needs another HOME sets it with t.Setenv.
+	// a private directory for the whole package. The go toolchain env was
+	// pinned from the launch environment above. A test that needs another HOME
+	// sets it with t.Setenv.
 	testLaunchHome = os.Getenv("HOME")
-	pinGoToolchainEnv()
 	home := filepath.Join(state, "home")
 	if err := os.MkdirAll(home, 0o700); err != nil {
 		panic(err)
 	}
 	os.Setenv("HOME", home)
+	// The XDG data and config roots move under the same temp home so the
+	// ledger's state.db, the hub inbox sqlite and ~/.config/panewire resolve
+	// there on every OS, not only where HOME is the fallback (hk 4685).
+	os.Setenv("XDG_DATA_HOME", filepath.Join(home, ".local", "share"))
+	os.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	// Env that names a live file, socket, endpoint or credential file must
+	// not leak into tests: a fleet pane's own ARBITER_*/PANEWIRE_* exports
+	// would otherwise point test spawns at the operator's real state. A
+	// re-exec'd test child (crash output, CLI usage) inherits this already
+	// isolated environment plus the vars its parent test set on purpose —
+	// unsetting again would strip them (the crash child's DSN, the CLI
+	// child's PANEWIRE_SOCKET).
+	testChild := os.Getenv("PANEWIRE_CRASH_CHILD") != "" || os.Getenv("PANEWIRE_CLI_USAGE_CHILD") == "1"
+	if !testChild {
+		for _, key := range []string{
+			"PANEWIRE_SOCKET", "PANEWIRE_INBOX_ROOT", "PANEWIRE_INBOX_WATCH", "PANEWIRE_LANE",
+			"ARBITER_INBOX_ROOT", "ARBITER_JOB", "HK_TASK_ID",
+			"PANEWIRE_HUB_URL", "PANEWIRE_HUB_TOKEN_ENV", "PANEWIRE_HUB_CF_ENV",
+			"PANEWIRE_NODE_ENV", "PANEWIRE_CONFIG", "PACELEVER_CONFIG",
+			"FLEET_HOSTS_CONFIG", "WRK_HOSTS_CONFIG",
+			"PANEWIRE_POLICY", "PANEWIRE_POOL_POLICY", "PANEWIRE_BRIEF_POLICY", "PANEWIRE_DELIVERY_POLICY",
+			"PANEWIRE_QUOTA_BIN", "PANEWIRE_MOCK_MCP_CONFIG", "WRK_MOCK_MCP_CONFIG",
+			"PANEWIRE_PROM_URL", "PANEWIRE_PROM_BEARER", "PANEWIRE_PROM_BASIC_USER", "PANEWIRE_PROM_BASIC_PASS",
+			"SENTRY_DSN_PANEWIRE", "CLAUDE_CODE_MESSAGING_SOCKET",
+			"HERDR_BIN", "HANDOFFKEEP_BIN", "PANEWIRE_BIN",
+		} {
+			os.Unsetenv(key)
+		}
+	}
 	code := m.Run()
-	os.RemoveAll(state)
+	if err := teststate.RemoveAll(state); err != nil {
+		fmt.Fprintf(os.Stderr, "panewire: removing test state dir %s: %v\n", state, err)
+	}
 	os.Exit(code)
 }
+
+// testStateDir is the state dir TestMain created for this run.
+var testStateDir string
 
 // testLaunchHome is the HOME the test binary was started with, before
 // TestMain moved it.
 var testLaunchHome string
-
-// pinGoToolchainEnv fixes GOCACHE, GOMODCACHE, GOPATH and GOENV to what they
-// resolve to under the launch HOME, before TestMain moves HOME. Without go on
-// PATH nothing is pinned: no test can run go then either.
-func pinGoToolchainEnv() {
-	out, err := exec.Command("go", "env", "-json", "GOCACHE", "GOMODCACHE", "GOPATH", "GOENV").Output()
-	if err != nil {
-		return
-	}
-	var values map[string]string
-	if json.Unmarshal(out, &values) != nil {
-		return
-	}
-	for key, value := range values {
-		if value != "" && os.Getenv(key) == "" {
-			os.Setenv(key, value)
-		}
-	}
-}
 
 var fleetEventFakeSecrets = []string{"ghp_FAKEfakeFAKEfakeFAKEfake0123456789", "hunter2pass", "tok3nVALUEfake99"}
 
@@ -180,7 +215,7 @@ func TestHubSpawnConfigRulesAreNamed(t *testing.T) {
 		`{"cwd_map":{},"workspace":"w","herdr_session":"s","enabled":false}`:              "enabled_false",
 		`{"cwd_map":{},"workspace":"","herdr_session":"s","enabled":true}`:                "workspace_required",
 		`{"cwd_map":{"a":"relative"},"workspace":"w","herdr_session":"s","enabled":true}`: "cwd_map_dir_absolute",
-		`{"cwd":{},"workspace":"w","herdr_session":"s","enabled":true}`:                   "config_json_invalid",
+		`{"cwd_map":"x","workspace":"w","herdr_session":"s","enabled":true}`:              "config_json_invalid",
 		`{"cwd_map":{},"workspace":"w","herdr_session":"s","enabled":true} {}`:            "config_trailing_data",
 	}
 	for contents, rule := range cases {
@@ -204,7 +239,7 @@ func TestHubSpawnFailingEngineStderrReachesResultBoundedAndRedacted(t *testing.T
 	// 8 KiB of stderr noise, then the line that explains the refusal.
 
 	message := hubOutboundMessage{RequestID: t14RequestID(91), CWDKey: "repo-a", BriefInline: "brief", WaitSeconds: 5, Args: []string{"--job", "job-stderr"}}
-	result := (&HubClient{spawnConfigPath: t14SpawnConfig(t, root), spawnEngine: func(ctx context.Context, cwd, brief, workspace, session string, args []string) (*hubSpawnOutput, fleet.Execution) {
+	result := (&HubClient{spawnConfigPath: t14SpawnConfig(t, root), spawnEngine: func(ctx context.Context, cwd, brief, workspace, session string, _ time.Time, args []string) (*hubSpawnOutput, fleet.Execution) {
 		output := &hubSpawnOutput{}
 		_, _ = output.stderr.Write([]byte(strings.Repeat("noise\n", 1500) + "panewire: quota gate refused: " + fleetEventFakeSecretText))
 		return output, fleet.Execution{RC: 70, Stage: "placement"}
@@ -305,6 +340,31 @@ func TestFleetEventRedactCoversKeyAssignmentsPEMBlobsAndEmails(t *testing.T) {
 	sha := "2cdf695b2e8f19ce4fda2f7fad4236125453c22c"
 	if got := fleetEventRedact("head " + sha + " exit=3"); got != "head "+sha+" exit=3" {
 		t.Fatalf("a commit SHA and plain fields must survive: %q", got)
+	}
+}
+
+// hk's secret_like_content refusal names the guard pattern, never the matched
+// text; the spawn outcome reason carries it, so redaction keeps exactly the
+// code:pattern form. hk's free-form "code: reason" and out-of-charset patterns
+// still meet the credential rules.
+func TestFleetEventRedactKeepsHKGuardPatternOnly(t *testing.T) {
+	for _, input := range []string{
+		"brief upload to briefs/job-a.md failed: handoffkeep: secret_like_content:private_key",
+		"handoffkeep: secret_like_content:github_token and handoffkeep: secret_like_content:aws_key",
+	} {
+		got := fleetEventRedact(input)
+		if !strings.Contains(got, "secret_like_content:") || strings.Contains(got, "[redacted]") {
+			t.Fatalf("%q lost the guard pattern: %q", input, got)
+		}
+	}
+	for input, secret := range map[string]string{
+		"handoffkeep: secret_like_content: hunter2 real reason":       "hunter2",
+		"handoffkeep: secret_like_content:../x":                       "../x",
+		"handoffkeep: secret_like_content:" + strings.Repeat("a", 41): strings.Repeat("a", 41),
+	} {
+		if got := fleetEventRedact(input); strings.Contains(got, secret) {
+			t.Fatalf("%q kept %q: %q", input, secret, got)
+		}
 	}
 }
 

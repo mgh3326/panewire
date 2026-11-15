@@ -8,9 +8,9 @@ import (
 	"testing"
 )
 
-// Workers on m1b read "never on mbp" as themselves (its computer name is a
-// MacBook Pro) and stopped; the preamble names the one no-test host by
-// hostname so every worker can tell (hk 3733).
+// The test rule is the same on every host (operator decision 237, hk 4496):
+// mbp-server was a no-test host until 2026-11-13 (hk 3733). The bullet must
+// say so and no line of the block may forbid go test on a host.
 func TestSpawnBriefPreambleStatesTestHostRuleT3733(t *testing.T) {
 	a, s, _, _ := cmdFixture(t)
 	if e := a.Spawn(context.Background(), s); e != nil {
@@ -26,38 +26,27 @@ func TestSpawnBriefPreambleStatesTestHostRuleT3733(t *testing.T) {
 	if start < 0 || end < start {
 		t.Fatalf("delivered brief has no fleet-v1 block: %q", brief)
 	}
+	block := brief[start:end]
+	if strings.Contains(block, "never run `go test`") || strings.Contains(block, "remote-gotest") {
+		t.Fatalf("fleet-v1 block still forbids go test on a host: %q", block)
+	}
 	var bullet string
-	for _, line := range strings.Split(brief[start:end], "\n") {
-		if strings.HasPrefix(line, "- ") && strings.Contains(line, "mbp-server") {
+	for _, line := range strings.Split(block, "\n") {
+		if strings.HasPrefix(line, "- Test host:") {
 			bullet = line
 		}
 	}
 	if bullet == "" {
-		t.Fatalf("fleet-v1 block has no bullet naming mbp-server: %q", brief[start:end])
+		t.Fatalf("fleet-v1 block has no test-host bullet: %q", block)
 	}
-	// The rule's polarity: mbp-server is forbidden and every other host is
-	// told to run the tests itself. Substrings alone would let "never" turn
-	// into "always" or the permission drop out unnoticed.
 	for _, want := range []string{
-		"never run `go test` on mbp-server",
+		"every host, mbp-server included",
 		"run `go test` for the packages you changed directly in your worktree",
-	} {
-		if !strings.Contains(bullet, want) {
-			t.Errorf("host-test bullet lacks the rule %q: %q", want, bullet)
-		}
-	}
-	for _, want := range []string{
-		"`hostname -s`",
-		"`go test`",
-		"robinui-MacBookPro",
-		"home-desktop",
-		"directly in your worktree",
-		"`remote-gotest` exists only on mbp-server",
-		"`remote-gotest <m1b|desktop> <repo> <ref>",
+		"`go test ./...`",
 		"CI",
 	} {
 		if !strings.Contains(bullet, want) {
-			t.Errorf("host-test bullet lacks %q: %q", want, bullet)
+			t.Errorf("test-host bullet lacks %q: %q", want, bullet)
 		}
 	}
 }

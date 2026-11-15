@@ -93,13 +93,6 @@ func TestHubHandoffkeepClientsSendCFAccessPair(t *testing.T) {
 		t.Fatalf("relay client: status=%d err=%v", status, err)
 	}
 
-	chat, err := newHandoffkeepChatStore(env, server.Client())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if status, _, err := chat.do(context.Background(), http.MethodGet, chat.endpoint("/v1/documents/x"), nil); err != nil || status != http.StatusOK {
-		t.Fatalf("chat store: status=%d err=%v", status, err)
-	}
 }
 
 // A redirect never carries the CF Access secret to another host: the clients
@@ -123,13 +116,6 @@ func TestHandoffkeepClientsDoNotForwardCFSecretOnRedirect(t *testing.T) {
 	}
 	if status, _, _ := relay.do(context.Background(), http.MethodGet, relay.endpoint("/v1/documents/x"), nil); status != http.StatusFound {
 		t.Fatalf("relay client followed the redirect: status=%d", status)
-	}
-	chat, err := newHandoffkeepChatStore(env, redirecting.Client())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if status, _, _ := chat.do(context.Background(), http.MethodGet, chat.endpoint("/v1/documents/x"), nil); status != http.StatusFound {
-		t.Fatalf("chat store followed the redirect: status=%d", status)
 	}
 	if leaked {
 		t.Fatal("the CF Access secret reached the redirect target")

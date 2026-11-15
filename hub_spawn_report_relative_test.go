@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mgh3326/panewire/internal/fleet"
 )
@@ -42,7 +43,7 @@ func TestHubSpawnReportRelativeReachesNodeEngineVerbatim(t *testing.T) {
 		t.Fatal("node rejected report-relative")
 	}
 	var got []string
-	client := &HubClient{spawnConfigPath: t14SpawnConfig(t, root), spawnEngine: func(ctx context.Context, cwd, brief, workspace, session string, args []string) (*hubSpawnOutput, fleet.Execution) {
+	client := &HubClient{spawnConfigPath: t14SpawnConfig(t, root), spawnEngine: func(ctx context.Context, cwd, brief, workspace, session string, _ time.Time, args []string) (*hubSpawnOutput, fleet.Execution) {
 		got = append([]string(nil), args...)
 		return t14EngineOK()
 	}}

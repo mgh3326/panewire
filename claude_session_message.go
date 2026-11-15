@@ -40,7 +40,7 @@ const claudeSessionPostTimeout = 5 * time.Second
 func claudeSessionMessageLanesFromEnv() []string {
 	var lanes []string
 	for _, lane := range strings.Split(os.Getenv(claudeSessionMessageLanesEnv), ",") {
-		if lane = strings.TrimSpace(lane); hubAgentLabelPattern.MatchString(lane) {
+		if lane = strings.TrimSpace(lane); validLaneReference(lane) {
 			lanes = append(lanes, lane)
 		}
 	}
@@ -90,7 +90,7 @@ func (client *HubClient) deliverWakeAsSessionMessage(ctx context.Context, messag
 	// daemon started without --inbox-root or --hub-jobs-root reads it there.
 	socket, err := readClaudeSocketRegistration(emitInboxRoot(client.jobsInboxRoot), lane, message.Pane)
 	if err == nil {
-		err = postClaudeSessionMessage(ctx, socket, message.Text)
+		err = postClaudeSessionMessage(ctx, socket, "panewire-hub: "+message.Text)
 	}
 	if err != nil {
 		// The socket path and the text stay out of the log.

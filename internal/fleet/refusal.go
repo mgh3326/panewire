@@ -6,6 +6,10 @@ import (
 	"strings"
 )
 
+// ErrQuotaRefreshPending leaves an accepted hub request for another placement
+// pass after a measurement. It is never used by ordinary synchronous spawns.
+var ErrQuotaRefreshPending = errors.New("quota refresh pending")
+
 // parentJobNotFound is a --parent-job that resolved to no record after the
 // bounded wait, as opposed to a job store that could not answer.
 type parentJobNotFound struct{ cause error }
@@ -125,6 +129,7 @@ var spawnRefusals = []spawnRefusal{
 	{match: "missing seat policy", code: "seat_policy_missing", hint: "Run panewire resolve --role ROLE --t Tn to select a rung with an admitted seat policy, or repair the policy that omits this profile, then retry."},
 	{match: "quota catalog", code: "quota_catalog", hint: "Read the reason after quota catalog: for an unknown, retired or unplaced rung (e6_arm_required) select an admitted rung with panewire resolve, or set only the exact PANEWIRE_E6_ARM the operator authorized; for a stale or unreadable catalog check handoffkeep's bench catalog with panewire catalog list. Then retry; admission cannot decide without it."},
 	{match: "symlink path refused", code: "symlink_path", hint: "Replace the named symlink with a real directory or point the executing node's jobs root at a symlink-free path, then replay the request."},
+	{match: "differs only in letter case", code: "job_id_case_collision", hint: "Choose a job id that differs from the existing jobs-inbox directory by more than letter case; the existing job keeps its directory."},
 	{match: "report must be under", code: "report_path", hint: "Pass --report inside this job's own jobs/JOB directory, or its --parent-job directory, then retry."},
 	{match: "cwd is not a directory", code: "cwd_not_directory", hint: "Run panewire preflight --json on the executing node and repair its checkout or spawn.json.cwd_map path, then replay the request."},
 	{match: "task does not exist", code: "task_not_found", hint: "Run handoffkeep tasks show TASK_ID on the executing node; if the task exists, that node's handoffkeep points at another server."},
@@ -140,6 +145,12 @@ var spawnRefusals = []spawnRefusal{
 	// An unconfirmed submission is not a bad brief: point at the pane capture.
 	{match: "BRIEF_SUBMISSION_UNCONFIRMED", code: "submit_unconfirmed", hint: "Read the saved jobs/JOB/spawn-failure-*.txt capture. If the brief sat in the composer on a loaded host, raise local.brief_submit_timeout_ms there; retry the same command after verified cleanup."},
 	{match: "agent must be idle before initial brief", code: "submit_unconfirmed", hint: spawnBriefHint},
+	// hk's secret guard names the pattern, never the matched text; the row
+	// must win over the broad "brief" match below so the SPAWN_FAILED reason
+	// keeps the guard's code and this hint. The code itself cannot be
+	// secret_like_content: the reason's ": " separator would read as hk's
+	// free-form "code: reason" and the redactor would eat it.
+	{match: "secret_like_content", code: "hk_guard_refused", hint: "hk's secret guard refused the write as secret-like content and named the pattern in the reason; remove the secret-shaped text from the brief or task field and retry."},
 	{match: "brief", code: "brief_invalid", hint: spawnBriefHint},
 	{match: "task title", code: "task_title", hint: "Set the task title marker to (grade X, Tn), matching --t, then retry."},
 	{match: "task scale", code: "task_scale", hint: "Make --t match the task title's T level, then retry."},

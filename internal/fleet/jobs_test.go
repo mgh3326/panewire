@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -15,12 +16,80 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/mgh3326/panewire/internal/arbiter"
 )
 
+// hkJobTerminal are the states hk never rewrites (handoffkeep
+// internal/store/jobs.go, jobTerminal).
+var hkJobTerminal = map[string]bool{"completed": true, "escalated": true, "lost": true}
+
+// hkJobRank orders the states: a write never moves one backwards.
+var hkJobRank = map[string]int{"claimed": 0, "spawned": 1, "completed": 2, "escalated": 2, "lost": 2}
+
+// hkJobUpdateRefusal is hk's UpdateJob verdict on fields written over rec,
+// "" when hk accepts it: a result needs state completed; a terminal record
+// is never rewritten except by a usage-only update (usage, skills,
+// skills_supported) or the once-only late pin of report_doc together with
+// report_sha256 (hk 4354: allowed while the record holds neither, idempotent
+// for the same two values, job_state_conflict for any other); states only
+// move forward; completed needs a spawned record; a pin needs a report doc.
+// It returns the HTTP status and the error code hk answers with.
+func hkJobUpdateRefusal(rec, fields map[string]any) (int, string) {
+	state := str(rec, "state")
+	if _, hasResult := fields["result"]; hasResult && fields["state"] != "completed" {
+		return http.StatusBadRequest, "invalid_context"
+	}
+	if _, pin := fields["report_sha256"]; pin && str(fields, "report_doc") == "" && str(rec, "report_doc") == "" {
+		return http.StatusBadRequest, "invalid_context"
+	}
+	if hkJobTerminal[state] {
+		switch {
+		case hkUsageOnlyUpdate(fields):
+		case hkLatePin(fields):
+			held, sha := str(rec, "report_doc"), str(rec, "report_sha256")
+			if held == "" && sha == "" || held == str(fields, "report_doc") && sha == str(fields, "report_sha256") {
+				return 0, ""
+			}
+			return http.StatusConflict, "job_state_conflict"
+		default:
+			return http.StatusConflict, "job_state_conflict"
+		}
+	}
+	if next := str(fields, "state"); next != "" {
+		if hkJobRank[next] < hkJobRank[state] || next == "completed" && state != "spawned" {
+			return http.StatusConflict, "job_state_conflict"
+		}
+	}
+	return 0, ""
+}
+
+// hkUsageOnlyUpdate is JobUpdate.usageOnly: some of usage, skills and
+// skills_supported, and nothing else.
+func hkUsageOnlyUpdate(fields map[string]any) bool {
+	found := false
+	for k := range fields {
+		switch k {
+		case "usage", "skills", "skills_supported":
+			found = true
+		default:
+			return false
+		}
+	}
+	return found
+}
+
+// hkLatePin is an update of exactly report_doc and report_sha256.
+func hkLatePin(fields map[string]any) bool {
+	_, doc := fields["report_doc"]
+	_, sha := fields["report_sha256"]
+	return doc && sha && len(fields) == 2
+}
+
 // fakeJobStore is an in-memory JobStore mirroring the hk write rules: a claim
-// replays only an identical claim, and a taken id conflicts.
+// replays only an identical claim, a taken id conflicts, and Put applies
+// hkJobUpdateRefusal.
 type fakeJobStore struct {
 	mu      sync.Mutex
 	records map[string]map[string]any
@@ -45,6 +114,16 @@ func (s *fakeJobStore) Claim(_ context.Context, jobID, taskID, host string) erro
 	s.records[jobID] = map[string]any{"job_id": jobID, "task_id": taskID, "host": host, "state": "claimed"}
 	return nil
 }
+
+// claimSpawned claims the record and leaves it spawned, as a started spawn
+// does: hk completes only a spawned record.
+func (s *fakeJobStore) claimSpawned(ctx context.Context, jobID, taskID, host string) error {
+	if e := s.Claim(ctx, jobID, taskID, host); e != nil {
+		return e
+	}
+	return s.Put(ctx, jobID, map[string]any{"state": "spawned"})
+}
+
 func (s *fakeJobStore) Put(_ context.Context, jobID string, fields map[string]any) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -52,13 +131,12 @@ func (s *fakeJobStore) Put(_ context.Context, jobID string, fields map[string]an
 	if s.putErr != nil {
 		return s.putErr
 	}
-	// handoffkeep's checkJobUpdate: a result needs state=completed.
-	if _, hasResult := fields["result"]; hasResult && fields["state"] != "completed" {
-		return &BackendError{Status: http.StatusBadRequest, Code: "invalid_context"}
-	}
 	rec, ok := s.records[jobID]
 	if !ok {
 		return errJobNotFound
+	}
+	if status, code := hkJobUpdateRefusal(rec, fields); status != 0 {
+		return &BackendError{Status: status, Code: code}
 	}
 	for k, v := range fields {
 		rec[k] = v
@@ -153,8 +231,9 @@ func (h *fakeHK) serve(w http.ResponseWriter, r *http.Request) {
 			JobID  string `json:"job_id"`
 			TaskID any    `json:"task_id"`
 			Host   string `json:"host"`
+			At     string `json:"at"`
 		}
-		if e := json.NewDecoder(r.Body).Decode(&body); e != nil || body.JobID == "" || body.Host == "" {
+		if e := json.NewDecoder(r.Body).Decode(&body); e != nil || body.JobID == "" || body.Host == "" || body.At == "" {
 			h.fail(w, 400, "invalid_context")
 			return
 		}
@@ -166,7 +245,7 @@ func (h *fakeHK) serve(w http.ResponseWriter, r *http.Request) {
 			h.fail(w, 409, "job_id_taken")
 			return
 		}
-		rec := map[string]any{"job_id": body.JobID, "task_id": body.TaskID, "host": body.Host, "state": "claimed"}
+		rec := map[string]any{"job_id": body.JobID, "task_id": body.TaskID, "host": body.Host, "state": "claimed", "claimed_at": body.At}
 		h.records[body.JobID] = rec
 		h.writeJSON(w, 201, rec)
 		return
@@ -191,16 +270,18 @@ func (h *fakeHK) serve(w http.ResponseWriter, r *http.Request) {
 				h.fail(w, 404, "not_found")
 				return
 			}
-			if slices.Contains([]string{"completed", "escalated", "lost"}, str(rec, "state")) {
-				h.fail(w, 409, "job_state_conflict")
-				return
-			}
 			var fields map[string]any
 			if e := json.NewDecoder(r.Body).Decode(&fields); e != nil {
 				h.fail(w, 400, "invalid_context")
 				return
 			}
-			h.putBodies = append(h.putBodies, fields)
+			if hkJobTerminal[str(rec, "state")] {
+				if status, code := hkJobUpdateRefusal(rec, fields); status != 0 {
+					h.fail(w, status, code)
+					return
+				}
+			}
+			h.putBodies = append(h.putBodies, maps.Clone(fields))
 			if len(h.putStatuses) > 0 {
 				status := h.putStatuses[0]
 				h.putStatuses = h.putStatuses[1:]
@@ -223,7 +304,7 @@ func (h *fakeHK) serve(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			for k := range fields {
-				if !slices.Contains(jobRecordFields, k) {
+				if k != "at" && !slices.Contains(jobRecordFields, k) {
 					h.fail(w, 400, "invalid_context")
 					return
 				}
@@ -231,6 +312,22 @@ func (h *fakeHK) serve(w http.ResponseWriter, r *http.Request) {
 			if st := str(fields, "state"); st != "" && !slices.Contains([]string{"claimed", "spawned", "completed", "escalated", "lost"}, st) {
 				h.fail(w, 400, "invalid_context")
 				return
+			}
+			// hk stores a transition's client time as <state>_at (the "at" key
+			// needs a state); the fake keeps that shape.
+			if at, ok := fields["at"]; ok {
+				key := "ended_at"
+				switch str(fields, "state") {
+				case "":
+					h.fail(w, 400, "invalid_context")
+					return
+				case "spawned":
+					key = "spawned_at"
+				case "claimed":
+					key = "claimed_at"
+				}
+				fields[key] = at
+				delete(fields, "at")
 			}
 			if str(fields, "state") == "completed" && str(rec, "state") != "spawned" {
 				h.fail(w, 409, "job_state_conflict")
@@ -275,7 +372,7 @@ func TestSpawnedSelectionMapsTraceAndOverride(t *testing.T) {
 	}, OverrideReason: "fixture"}
 	s.placement = &placementDecision{
 		plan:      &placePlan{candidates: []placeCandidate{{name: "host-b", eligible: true}, {name: "host-a", outcome: "unreachable"}}},
-		execution: placementExecution{Host: "host-b"},
+		execution: PlacementExecution{Host: "host-b"},
 	}
 	h.claimJob(s.Job, float64(42), "test-host")
 	a.spawnedJobRecord(context.Background(), s, Seat{Family: "openai", Kind: "cmd"}, Launch{ModelID: "model-x"}, "pane", "pool", "owner")
@@ -337,7 +434,7 @@ func TestSpawnedSelectionTrimsUnderHKLimit(t *testing.T) {
 func TestSpawnedSelectionKeepsLocalHostForAutoPlacement(t *testing.T) {
 	s := Spawn{Host: "auto", placement: &placementDecision{
 		plan:      &placePlan{candidates: []placeCandidate{{name: "local", eligible: true}}},
-		execution: placementExecution{Host: "local"},
+		execution: PlacementExecution{Host: "local"},
 	}}
 	got := jobSelection(s, jobSelectionSource(s))
 	host := got["host"].(map[string]any)
@@ -349,7 +446,7 @@ func TestSpawnedSelectionKeepsLocalHostForAutoPlacement(t *testing.T) {
 func TestSpawnedSelectionKeepsInvalidWinnerAdmittedAndFirst(t *testing.T) {
 	s := Spawn{Host: "auto", placement: &placementDecision{
 		plan:      &placePlan{candidates: []placeCandidate{{name: "Mac Studio", eligible: true}, {name: "remote-2", eligible: true}}},
-		execution: placementExecution{Host: "Mac Studio"},
+		execution: PlacementExecution{Host: "Mac Studio"},
 	}}
 	got := jobSelection(s, jobSelectionSource(s))
 	host := got["host"].(map[string]any)
@@ -409,7 +506,9 @@ func TestSpawnedSelectionNeverCarriesPromptOrAbsolutePaths(t *testing.T) {
 	}
 }
 
-func (h *fakeHK) client() JobStore { return newHKJobs(&hkQuota{base: h.srv.URL, token: "test-token"}) }
+func (h *fakeHK) client() JobStore {
+	return newHKJobs(&hkQuota{base: h.srv.URL, token: "test-token"}, time.Now)
+}
 
 func (h *fakeHK) record(t *testing.T, id string) map[string]any {
 	t.Helper()
@@ -536,7 +635,7 @@ func TestSpawnedRecordAllowlistOnly(t *testing.T) {
 	if str(rec, "state") != "spawned" {
 		t.Fatalf("state=%v", rec["state"])
 	}
-	allowed := append(append([]string{}, jobRecordFields...), "job_id", "task_id", "host")
+	allowed := append(append([]string{}, jobRecordFields...), "job_id", "task_id", "host", "claimed_at", "spawned_at", "ended_at")
 	for k, v := range rec {
 		if !slices.Contains(allowed, k) {
 			t.Fatalf("non-allowlisted key %q in record", k)
@@ -574,7 +673,7 @@ func TestDoneResultOnePutThenRelay(t *testing.T) {
 		h.records["j"]["state"] = "spawned"
 		var seq []string
 		a.JobStore = seqStore{JobStore: h.client(), seq: &seq, name: "hk"}
-		seedJob(t, a, "j", "worker")
+		seedJob(t, a, "j", "implementer")
 		origDo := f.Do
 		f.Do = func(c Command) Result {
 			if c.Name == "panewire" {
@@ -634,7 +733,7 @@ func TestDoneResultOnePutThenRelay(t *testing.T) {
 func TestDoneRejectsNonObjectResult(t *testing.T) {
 	a := testApp(t)
 	ledgerRunner(t, a)
-	seedJob(t, a, "j", "worker")
+	seedJob(t, a, "j", "implementer")
 	path := filepath.Join(a.Jobs, "j", "report.md")
 	if e := os.WriteFile(path, []byte("done\n"), 0600); e != nil {
 		t.Fatal(e)
@@ -656,7 +755,7 @@ func TestDoneRecordWriteFailureStillRelays(t *testing.T) {
 	h := newFakeHK(t)
 	h.down = true
 	a.JobStore = h.client()
-	seedJob(t, a, "j", "worker")
+	seedJob(t, a, "j", "implementer")
 	emits := 0
 	origDo := f.Do
 	f.Do = func(c Command) Result {
@@ -669,9 +768,7 @@ func TestDoneRecordWriteFailureStillRelays(t *testing.T) {
 	if e := os.WriteFile(path, []byte("done\n"), 0600); e != nil {
 		t.Fatal(e)
 	}
-	if e := a.lifecycle(context.Background(), "done", []string{"j", "--report", path}); e != nil {
-		t.Fatal(e)
-	}
+	wantNotInHK(t, a.lifecycle(context.Background(), "done", []string{"j", "--report", path}))
 	if emits != 1 {
 		t.Fatalf("emits=%d", emits)
 	}
@@ -696,7 +793,7 @@ func TestWatcherLostWritesJobRecord(t *testing.T) {
 	h.claimJob("j", float64(42), "test-host")
 	h.records["j"]["state"] = "spawned"
 	a.JobStore = h.client()
-	seedJob(t, a, "j", "worker")
+	seedJob(t, a, "j", "implementer")
 	if e := a.watch(context.Background(), []string{"j"}); e != nil {
 		t.Fatal(e)
 	}
@@ -712,7 +809,7 @@ func TestEscalateWritesJobRecord(t *testing.T) {
 	h.claimJob("j", float64(42), "test-host")
 	h.records["j"]["state"] = "spawned"
 	a.JobStore = h.client()
-	seedJob(t, a, "j", "worker")
+	seedJob(t, a, "j", "implementer")
 	if e := a.lifecycle(context.Background(), "escalate", []string{"j", "--question", "which branch?"}); e != nil {
 		t.Fatal(e)
 	}
@@ -727,7 +824,7 @@ func TestParentResolveLocalFirst(t *testing.T) {
 	a := testApp(t)
 	h := newFakeHK(t)
 	a.JobStore = h.client()
-	putEvent(t, a, "pj", "job.claim", map[string]any{"owner_lane": "owner", "task_id": "11", "t_level": "T1", "role": "worker"})
+	putEvent(t, a, "pj", "job.claim", map[string]any{"owner_lane": "owner", "task_id": "11", "t_level": "T1", "role": "implementer"})
 	j, e := a.resolveParent(context.Background(), "pj")
 	if e != nil {
 		t.Fatal(e)
@@ -853,7 +950,7 @@ func TestWaitDelegatedHKRows(t *testing.T) {
 			if tt.name == "completed with result" {
 				h.records["j"]["result"] = map[string]any{"findings": []any{}}
 			}
-			s := Spawn{Job: "j", Role: "worker", WaitTimeout: "5s"}
+			s := Spawn{Job: "j", Role: "implementer", WaitTimeout: "5s"}
 			e := a.waitJob(context.Background(), s, true)
 			if code(e) != tt.want {
 				t.Fatalf("state %q: exit %d want %d (%v)", tt.state, code(e), tt.want, e)
@@ -887,7 +984,7 @@ func TestWaitDelegatedHKWarnSurvivesEarlierWarnings(t *testing.T) {
 	h := newFakeHK(t)
 	h.down = true
 	a.JobStore = h.client()
-	s := Spawn{Job: "j", Role: "worker", WaitTimeout: "5s"}
+	s := Spawn{Job: "j", Role: "implementer", WaitTimeout: "5s"}
 	if code(a.waitJob(context.Background(), s, true)) != 85 {
 		t.Fatal("unreadable hk must bound and fall back")
 	}
@@ -902,7 +999,7 @@ func TestWaitDelegatedHKUnavailableWarnsOnce(t *testing.T) {
 	h := newFakeHK(t)
 	h.down = true
 	a.JobStore = h.client()
-	s := Spawn{Job: "j", Role: "worker", WaitTimeout: "5s"}
+	s := Spawn{Job: "j", Role: "implementer", WaitTimeout: "5s"}
 	if code(a.waitJob(context.Background(), s, true)) != 85 {
 		t.Fatal("unreadable hk must bound and fall back")
 	}

@@ -2,11 +2,12 @@ package panewire
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
-	"net/url"
 	"os"
 	"os/exec"
 	"path"
@@ -16,7 +17,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mgh3326/panewire/internal/durable"
 	"github.com/mgh3326/panewire/internal/harnessstate"
+	"github.com/mgh3326/panewire/internal/spawnargs"
 )
 
 // worktree.prepare, worktree.remove and quota.refresh (docs/node-commands.md,
@@ -68,18 +71,18 @@ var (
 var (
 	nodeReviewerDirPattern = regexp.MustCompile(`^mwr-[a-z0-9._-]+$`)
 	nodeShaPattern         = regexp.MustCompile(`^[0-9a-fA-F]{40}$`)
-	nodeFetchPullPattern   = regexp.MustCompile(`^pull/[0-9]+/head$`)
 	nodeQuotaPoolPattern   = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
 	nodeGlobClass          = regexp.MustCompile(`\[[^\]]*\]`)
 )
 
 type nodeWorktreePrepareArgs struct {
-	Origin string `json:"origin"`
-	Mode   string `json:"mode"`
-	Branch string `json:"branch"`
-	Sha    string `json:"sha"`
-	Fetch  string `json:"fetch"`
-	Dir    string `json:"dir"`
+	Origin      string `json:"origin"`
+	Mode        string `json:"mode"`
+	Branch      string `json:"branch"`
+	Sha         string `json:"sha"`
+	Fetch       string `json:"fetch"`
+	Dir         string `json:"dir"`
+	VerifyReuse bool   `json:"verify_reuse,omitempty"`
 }
 
 type nodeWorktreeRemoveArgs struct {
@@ -115,34 +118,14 @@ type nodeQuotaRefreshResult struct {
 	Outcome string `json:"outcome"`
 }
 
-// validNodeRefName mirrors git's check-ref-format rules for the argument
-// shapes these ops accept: no control bytes, "..", "@{", whitespace or git's
+// validNodeRefName is the git ref grammar worktree ops accept
+// (spawnargs.ValidRefName): no control bytes, "..", "@{", whitespace or git's
 // magic chars, no segment leading with '.' or ending ".lock".
-func validNodeRefName(name string) bool {
-	if name == "" || name == "@" || len(name) > 200 || hasControlByte(name) {
-		return false
-	}
-	if strings.HasPrefix(name, "/") || strings.HasSuffix(name, "/") || strings.HasSuffix(name, ".") ||
-		strings.HasPrefix(name, "-") || strings.ContainsAny(name, " ~^:?*[\\") ||
-		strings.Contains(name, "..") || strings.Contains(name, "@{") || strings.Contains(name, "//") {
-		return false
-	}
-	for _, seg := range strings.Split(name, "/") {
-		if seg == "" || strings.HasPrefix(seg, ".") || strings.HasSuffix(seg, ".lock") {
-			return false
-		}
-	}
-	return true
-}
+func validNodeRefName(name string) bool { return spawnargs.ValidRefName(name) }
 
 // validNodeFetchRef is the closed set of fetch shapes: a branch head or a
 // pull-request head.
-func validNodeFetchRef(fetch string) bool {
-	if rest, ok := strings.CutPrefix(fetch, "refs/heads/"); ok {
-		return validNodeRefName(rest)
-	}
-	return nodeFetchPullPattern.MatchString(fetch)
-}
+func validNodeFetchRef(fetch string) bool { return spawnargs.ValidFetchRef(fetch) }
 
 func validNodeGlob(glob string) bool {
 	if glob == "" || len(glob) > 128 || hasControlByte(glob) {
@@ -154,138 +137,13 @@ func validNodeGlob(glob string) bool {
 	return strings.Trim(nodeGlobClass.ReplaceAllString(glob, ""), "*?/") != ""
 }
 
-// nodeOriginRepo normalizes an origin argument to "owner/repo" for the clone
-// identity check. Any userinfo refuses the value: URL userinfo, or an '@' in
-// anything that is not an absolute local path. URL and scp-style remotes need
-// exactly owner/repo path segments; a local clone source stands in with its
-// last two.
-func nodeOriginRepo(raw string) (string, bool) {
-	// git clone receives the raw argument, so its control bytes are refused
-	// before trimming could hide a trailing one.
-	u := strings.TrimSpace(raw)
-	if hasControlByte(raw) || !nodeOriginShapeOK(u) {
-		return "", false
-	}
-	switch {
-	case strings.Contains(u, "://"):
-		return nodeURLOriginRepo(u)
-	case filepath.IsAbs(u):
-		seg := nodeOriginPathSegments(u)
-		if len(seg) < 2 {
-			return "", false
-		}
-		return seg[len(seg)-2] + "/" + seg[len(seg)-1], true
-	case strings.Contains(u, "@"):
-		return "", false
-	}
-	host, repoPath, ok := strings.Cut(u, ":")
-	if !ok {
-		return "", false
-	}
-	return nodeScpOriginRepo(host, repoPath)
-}
+// nodeOriginRepo normalizes a caller-supplied origin to "owner/repo" for the
+// clone identity check (spawnargs.OriginRepo). Any userinfo refuses the value.
+func nodeOriginRepo(raw string) (string, bool) { return spawnargs.OriginRepo(raw) }
 
-// nodeCloneRemoteRepo reads owner/repo from a clone's own origin. Unlike a
-// caller-supplied origin, an existing clone may use the scp-style SSH form
-// user@host:owner/repo.git; its user part is dropped, never refused. The
-// remote splits at its first ':' and only the host side can hold userinfo,
-// so an '@' in the repo path (host:owner/re@po.git) stays part of the path.
-func nodeCloneRemoteRepo(raw string) (string, bool) {
-	u := strings.TrimSpace(raw)
-	if !nodeOriginShapeOK(u) {
-		return "", false
-	}
-	if strings.Contains(u, "://") {
-		if v, err := url.Parse(u); err == nil && v.User != nil {
-			v.User = nil
-			u = v.String()
-		}
-		return nodeURLOriginRepo(u)
-	}
-	if filepath.IsAbs(u) {
-		return nodeOriginRepo(u)
-	}
-	host, repoPath, ok := strings.Cut(u, ":")
-	if !ok {
-		return "", false
-	}
-	if at := strings.LastIndex(host, "@"); at >= 0 && !strings.Contains(host, "/") {
-		host = host[at+1:]
-	}
-	return nodeScpOriginRepo(host, repoPath)
-}
-
-// nodeOriginShapeOK is the check every origin form shares.
-func nodeOriginShapeOK(u string) bool {
-	// A leading '-' would reach git as an option, never a repository.
-	return u != "" && !strings.HasPrefix(u, "-") && len(u) <= 2048 && !hasControlByte(u) && !strings.Contains(u, " ")
-}
-
-func nodeURLOriginRepo(u string) (string, bool) {
-	v, err := url.Parse(u)
-	// A query or fragment can carry a credential that git would persist in
-	// the clone's config; origins never need one.
-	if err != nil || v.User != nil || v.RawQuery != "" || v.ForceQuery || v.Fragment != "" || strings.Contains(u, "#") {
-		return "", false
-	}
-	switch v.Scheme {
-	case "http", "https", "ssh", "git":
-		if v.Host == "" {
-			return "", false
-		}
-	case "file":
-	default:
-		return "", false
-	}
-	seg := nodeOriginPathSegments(v.Path)
-	// A file:// origin is a local path: same last-two rule as an absolute
-	// path, so a clone made through file:// matches the plain-path origin.
-	if v.Scheme == "file" && len(seg) >= 2 {
-		seg = seg[len(seg)-2:]
-	}
-	if len(seg) != 2 {
-		return "", false
-	}
-	return seg[0] + "/" + seg[1], true
-}
-
-// nodeScpOriginRepo reads an scp-style host:owner/repo whose userinfo, if
-// any, is already gone.
-func nodeScpOriginRepo(host, repoPath string) (string, bool) {
-	// An empty host (":owner/repo") is a local path to git, and a
-	// one-character host is drive-letter shaped (C:owner/repo): a local path
-	// on Windows, never a remote worth trusting. A '/' before the colon
-	// makes the whole value a relative path.
-	if len(host) < 2 || strings.ContainsAny(host, "/@") {
-		return "", false
-	}
-	seg := nodeOriginPathSegments(repoPath)
-	if len(seg) != 2 {
-		return "", false
-	}
-	return seg[0] + "/" + seg[1], true
-}
-
-func nodeOriginPathSegments(p string) []string {
-	p = strings.TrimSuffix(strings.Trim(p, "/"), ".git")
-	var out []string
-	for _, seg := range strings.Split(p, "/") {
-		// A dot segment changes which repository the path names, so the
-		// identity check fails closed instead of normalizing it away.
-		if seg == "." || seg == ".." {
-			return nil
-		}
-		// A segment becomes a directory name under the work root: it may
-		// hold no path syntax of any platform (backslash, drive colon).
-		if strings.ContainsAny(seg, "\\:") {
-			return nil
-		}
-		if seg != "" {
-			out = append(out, seg)
-		}
-	}
-	return out
-}
+// nodeCloneRemoteRepo reads owner/repo from a clone's own origin, which may
+// carry the scp-style user@host: form (spawnargs.CloneRemoteRepo).
+func nodeCloneRemoteRepo(raw string) (string, bool) { return spawnargs.CloneRemoteRepo(raw) }
 
 // nodeWorkRoot reads only `work_root` from the node's spawn.json. The file
 // carries spawn's other keys too, so this decodes loosely instead of going
@@ -387,10 +245,11 @@ func nodeGitVersionOK(ctx context.Context, git relayCommandRunner) (bool, error)
 }
 
 type nodeWorktreeEntry struct {
-	Path     string
-	Branch   string
-	Detached bool
-	Locked   bool
+	Path       string
+	Branch     string
+	Detached   bool
+	Locked     bool
+	LockReason string
 }
 
 // nodeListWorktrees parses `git worktree list --porcelain` for the clone.
@@ -419,10 +278,207 @@ func nodeListWorktrees(ctx context.Context, git relayCommandRunner, main string)
 			cur.Detached = true
 		case strings.HasPrefix(line, "locked"):
 			cur.Locked = true
+			cur.LockReason = strings.TrimSpace(strings.TrimPrefix(line, "locked"))
 		}
 	}
 	flush()
 	return entries, nil
+}
+
+type nodeWorktreeAddIntent struct {
+	Path   string         `json:"path"`
+	Mode   string         `json:"mode"`
+	Branch string         `json:"branch"`
+	Sha    string         `json:"sha"`
+	Add    nodeAddProcess `json:"add"`
+}
+
+// nodeWorktreeAddIntentPath names the intent file of one worktree path. Each
+// path has its own file, so an add for one worktree never replaces, or clears,
+// the intent an interrupted add for another worktree still needs to replay.
+func nodeGitCommonDir(ctx context.Context, git relayCommandRunner, clone string) (string, error) {
+	out, err := git(ctx, "-C", clone, "rev-parse", "--git-common-dir")
+	if err != nil {
+		return "", err
+	}
+	common := strings.TrimSpace(string(out))
+	if common == "" {
+		return "", errors.New("git common dir is empty")
+	}
+	if !filepath.IsAbs(common) {
+		common = filepath.Join(clone, common)
+	}
+	return common, nil
+}
+
+func nodeWorktreeAddIntentPath(ctx context.Context, git relayCommandRunner, clone, dir string) (string, error) {
+	common, err := nodeGitCommonDir(ctx, git, clone)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256([]byte(filepath.Clean(dir)))
+	return filepath.Join(common, "panewire-worktree-add-intent-"+hex.EncodeToString(sum[:])+".json"), nil
+}
+
+// nodeWriteWorktreeAddIntent resolves dir's intent file and writes it. The
+// per-path file keeps an add for one worktree from replacing, or clearing, the
+// intent an interrupted add for another worktree still needs to replay.
+func nodeWriteWorktreeAddIntent(ctx context.Context, git relayCommandRunner, clone, dir string, intent nodeWorktreeAddIntent) (string, error) {
+	name, err := nodeWorktreeAddIntentPath(ctx, git, clone, dir)
+	if err != nil {
+		return "", err
+	}
+	return name, nodeWriteWorktreeAddIntentFile(name, intent)
+}
+
+// nodeWriteWorktreeAddIntentFile replaces one intent file atomically.
+func nodeWriteWorktreeAddIntentFile(name string, intent nodeWorktreeAddIntent) error {
+	contents, err := json.Marshal(intent)
+	if err != nil {
+		return err
+	}
+	return durable.ReplaceFileAtomically(name, ".panewire-worktree-add-intent-*", contents, 0o600)
+}
+
+func nodeReadWorktreeAddIntent(ctx context.Context, git relayCommandRunner, clone, dir string) (nodeWorktreeAddIntent, error) {
+	name, err := nodeWorktreeAddIntentPath(ctx, git, clone, dir)
+	if err != nil {
+		return nodeWorktreeAddIntent{}, err
+	}
+	contents, err := os.ReadFile(name)
+	if err != nil {
+		return nodeWorktreeAddIntent{}, err
+	}
+	var intent nodeWorktreeAddIntent
+	if err := json.Unmarshal(contents, &intent); err != nil {
+		return nodeWorktreeAddIntent{}, err
+	}
+	return intent, nil
+}
+
+func nodeClearWorktreeAddIntent(name string) {
+	if err := os.Remove(name); err != nil && !errors.Is(err, os.ErrNotExist) {
+		slog.Warn("node worktree add intent cleanup failed", "err", err)
+	}
+}
+
+func nodeGitProcessWasSignaled(err error) bool {
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ProcessState == nil {
+		return false
+	}
+	status, ok := exitErr.ProcessState.Sys().(interface{ Signaled() bool })
+	return ok && status.Signaled()
+}
+
+// nodeWorktreeAddIntentMatches reports whether recorded describes this add. The
+// identity is evidence about the recorded add, not something the caller asks for,
+// so it is not part of the comparison.
+func nodeWorktreeAddIntentMatches(recorded nodeWorktreeAddIntent, dir string, expected nodeWorktreeAddIntent) bool {
+	return recorded.Path == filepath.Clean(dir) &&
+		recorded.Mode == expected.Mode &&
+		recorded.Branch == expected.Branch &&
+		recorded.Sha == expected.Sha
+}
+
+// nodeReclaimInterruptedAdd removes the worktree an earlier add left locked
+// initializing, and only that: the recorded intent must describe this add, must
+// name the process group that ran it, and that group must be gone. The lock says
+// an add is in flight, not that it is ours or that it is dead, so it never
+// authorizes a forced remove on its own (lead-verify F3, hk 4589).
+func nodeReclaimInterruptedAdd(ctx context.Context, git relayCommandRunner, clone, dir string, entries []nodeWorktreeEntry, expected nodeWorktreeAddIntent) bool {
+	intent, err := nodeReadWorktreeAddIntent(ctx, git, clone, dir)
+	if err != nil || !nodeWorktreeAddIntentMatches(intent, dir, expected) {
+		return false
+	}
+	if intent.Add.Group <= 0 {
+		// A record from before intents carried the add's process group cannot
+		// prove that add is gone, so it is never reclaimed automatically.
+		fields := []any{"path", dir}
+		if name, err := nodeWorktreeAddIntentPath(ctx, git, clone, dir); err == nil {
+			fields = append(fields, "intent", name)
+		}
+		slog.Warn("node worktree add intent records no add process group; the locked worktree needs manual cleanup", fields...)
+		return false
+	}
+	if !nodeAddProcessExited(intent.Add) {
+		slog.Info("node worktree add child still runs; left its worktree locked", "path", dir, "group", intent.Add.Group)
+		return false
+	}
+	for _, entry := range entries {
+		if !nodeSamePath(entry.Path, dir) || !entry.Locked || entry.LockReason != "initializing" {
+			continue
+		}
+		if _, err := git(ctx, "-C", clone, "worktree", "remove", "--force", "--force", dir); err != nil {
+			slog.Warn("node worktree interrupted add reclaim failed", "path", dir, "err", err)
+			return false
+		}
+		if path, err := nodeWorktreeAddIntentPath(ctx, git, clone, dir); err == nil {
+			nodeClearWorktreeAddIntent(path)
+		}
+		return true
+	}
+	return false
+}
+
+// nodeAddWorktree records the intended path and the identity of the git child
+// that runs the add, so a later prepare can reclaim this exact interrupted add
+// after a node restart, and nothing else.
+func nodeAddWorktree(ctx context.Context, git relayCommandRunner, add nodeAddRunner, clone, dir string, intent nodeWorktreeAddIntent, args ...string) error {
+	intent.Path = filepath.Clean(dir)
+	intent.Add = nodeAddProcess{}
+	intentPath, err := nodeWriteWorktreeAddIntent(ctx, git, clone, dir, intent)
+	if err != nil {
+		return err
+	}
+	// The child's identity reaches the intent while the child is alive: a restart
+	// may only reclaim a path whose add child has exited, never the live add the
+	// CodeRabbit Major on #493 describes.
+	record := func(proc nodeAddProcess) error {
+		intent.Add = proc
+		return nodeWriteWorktreeAddIntentFile(intentPath, intent)
+	}
+	addErr := add(ctx, record, args...)
+	if addErr == nil {
+		nodeClearWorktreeAddIntent(intentPath)
+		return nil
+	}
+	if !nodeGitProcessWasSignaled(addErr) {
+		nodeClearWorktreeAddIntent(intentPath)
+		return addErr
+	}
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	entries, err := nodeListWorktrees(cleanupCtx, git, clone)
+	if err != nil {
+		slog.Warn("node worktree interrupted add cleanup failed", "path", dir, "err", err)
+		return addErr
+	}
+	var atDir *nodeWorktreeEntry
+	for i := range entries {
+		if nodeSamePath(entries[i].Path, dir) {
+			atDir = &entries[i]
+			break
+		}
+	}
+	switch {
+	case atDir == nil:
+		// Git left nothing at this path (it rolled back, or never created it), so
+		// no replay can reclaim this intent: clear it.
+		nodeClearWorktreeAddIntent(intentPath)
+	case atDir.Locked && atDir.LockReason == "initializing":
+		// An initializing lock names no owner. Remove only the path this attempt's
+		// recorded add child worked on, and only once that child has exited.
+		if !nodeAddProcessExited(intent.Add) {
+			return addErr
+		}
+		if _, err := git(cleanupCtx, "-C", clone, "worktree", "remove", "--force", "--force", dir); err != nil {
+			slog.Warn("node worktree interrupted add cleanup failed", "path", dir, "err", err)
+			return addErr
+		}
+		nodeClearWorktreeAddIntent(intentPath)
+	}
+	return addErr
 }
 
 // nodeCanonicalClonePath is the one name prepare and remove give a clone:
@@ -715,9 +771,9 @@ func (client *HubClient) nodeWorktreePrepareRun(ctx context.Context, tracker *no
 	result := nodeWorktreePrepareResult{}
 	switch args.Mode {
 	case "branch":
-		outcome = client.nodePrepareBranch(ctx, git, clone, dir, args, &result)
+		outcome = client.nodePrepareBranch(ctx, tracker, clone, dir, args, &result)
 	case "detached":
-		outcome = client.nodePrepareDetached(ctx, git, clone, dir, args)
+		outcome = client.nodePrepareDetached(ctx, tracker, clone, dir, args)
 	}
 	result.Outcome = outcome
 	if outcome == nodePreparePrepared || outcome == nodePrepareReused {
@@ -762,6 +818,18 @@ func (tracker *nodeGitTracker) git(ctx context.Context, args ...string) ([]byte,
 		tracker.exit, tracker.stderr = extractGitExitAndStderr(err)
 	}
 	return out, err
+}
+
+// add runs one worktree add through the node's add runner and records a failure
+// the way git records every other step.
+func (tracker *nodeGitTracker) add(ctx context.Context, add nodeAddRunner, clone, dir string, intent nodeWorktreeAddIntent, args ...string) error {
+	tracker.step = "worktree"
+	tracker.subcmd = "worktree"
+	err := nodeAddWorktree(ctx, tracker.runner, add, clone, dir, intent, args...)
+	if err != nil {
+		tracker.exit, tracker.stderr = extractGitExitAndStderr(err)
+	}
+	return err
 }
 
 func (tracker *nodeGitTracker) decide(ctx context.Context, result nodeWorktreePrepareResult) (nodeWorktreePrepareResult, string) {
@@ -891,7 +959,8 @@ func nodeGitSubcommand(args []string) string {
 	return "git"
 }
 
-func (client *HubClient) nodePrepareBranch(ctx context.Context, git relayCommandRunner, clone, dir string, args nodeWorktreePrepareArgs, result *nodeWorktreePrepareResult) string {
+func (client *HubClient) nodePrepareBranch(ctx context.Context, tracker *nodeGitTracker, clone, dir string, args nodeWorktreePrepareArgs, result *nodeWorktreePrepareResult) string {
+	git := tracker.git
 	if _, err := git(ctx, "-C", clone, "fetch", "--prune", "origin"); err != nil {
 		return nodeOutcomeGitFailed
 	}
@@ -916,6 +985,14 @@ func (client *HubClient) nodePrepareBranch(ctx context.Context, git relayCommand
 		}
 		expected = strings.ToLower(originTip)
 	}
+	if args.VerifyReuse && !strings.EqualFold(originTip, expected) {
+		if originTip == "" || expected == "" {
+			return nodePrepareBranchElsewhere
+		}
+		if _, err := git(ctx, "-C", clone, "merge-base", "--is-ancestor", expected, originTip); err != nil {
+			return nodePrepareBranchElsewhere
+		}
+	}
 	var atDir *nodeWorktreeEntry
 	for i := range entries {
 		if nodeSamePath(entries[i].Path, dir) {
@@ -924,10 +1001,17 @@ func (client *HubClient) nodePrepareBranch(ctx context.Context, git relayCommand
 			return nodePrepareBranchElsewhere
 		}
 	}
-	if atDir != nil {
-		if atDir.Locked {
+	intent := nodeWorktreeAddIntent{Mode: "branch", Branch: args.Branch, Sha: args.Sha}
+	if atDir != nil && atDir.Locked {
+		if args.VerifyReuse {
 			return nodeRemoveLocked
 		}
+		if !nodeReclaimInterruptedAdd(ctx, git, clone, dir, entries, intent) {
+			return nodeRemoveLocked
+		}
+		atDir = nil
+	}
+	if atDir != nil {
 		if atDir.Branch != args.Branch {
 			return nodePrepareBranchElsewhere
 		}
@@ -945,6 +1029,9 @@ func (client *HubClient) nodePrepareBranch(ctx context.Context, git relayCommand
 			return nodeOutcomeGitFailed
 		}
 		if !strings.EqualFold(head, expected) {
+			if args.VerifyReuse {
+				return nodePrepareBranchElsewhere
+			}
 			relation, err := nodeCommitRelation(ctx, git, clone, head, expected)
 			if err != nil {
 				return nodeOutcomeGitFailed
@@ -967,6 +1054,9 @@ func (client *HubClient) nodePrepareBranch(ctx context.Context, git relayCommand
 		}
 		return nodePrepareReused
 	}
+	if args.VerifyReuse {
+		return nodePrepareBranchElsewhere
+	}
 	if _, err := git(ctx, "-C", clone, "show-ref", "--verify", "--quiet", "refs/heads/"+args.Branch); err == nil {
 		out, err := git(ctx, "-C", clone, "rev-parse", "--verify", "refs/heads/"+args.Branch+"^{commit}")
 		if err != nil {
@@ -987,7 +1077,7 @@ func (client *HubClient) nodePrepareBranch(ctx context.Context, git relayCommand
 			}
 			result.FastForwarded = true
 		}
-		if _, err := git(ctx, "-C", clone, "worktree", "add", dir, args.Branch); err != nil {
+		if err := tracker.add(ctx, client.nodeAddRunner(), clone, dir, nodeWorktreeAddIntent{Mode: "branch", Branch: args.Branch, Sha: args.Sha}, "-C", clone, "worktree", "add", dir, args.Branch); err != nil {
 			return nodeOutcomeGitFailed
 		}
 		return nodePreparePrepared
@@ -995,7 +1085,7 @@ func (client *HubClient) nodePrepareBranch(ctx context.Context, git relayCommand
 	if originTip == "" || !strings.EqualFold(originTip, expected) {
 		return nodePrepareBranchElsewhere
 	}
-	if _, err := git(ctx, "-C", clone, "worktree", "add", "-b", args.Branch, dir, "origin/"+args.Branch); err != nil {
+	if err := tracker.add(ctx, client.nodeAddRunner(), clone, dir, nodeWorktreeAddIntent{Mode: "branch", Branch: args.Branch, Sha: args.Sha}, "-C", clone, "worktree", "add", "-b", args.Branch, dir, "origin/"+args.Branch); err != nil {
 		return nodeOutcomeGitFailed
 	}
 	if _, err := git(ctx, "-C", dir, "branch", "--set-upstream-to", "origin/"+args.Branch, args.Branch); err != nil {
@@ -1063,7 +1153,8 @@ func nodeBranchRelationReason(local, expected, relation string) string {
 // to exist and to be FETCH_HEAD or an ancestor of it (a ref that contains
 // the sha, see docs/node-commands.md), and reuses only a clean worktree
 // detached at exactly that sha. The worktree is always detached at args.Sha.
-func (client *HubClient) nodePrepareDetached(ctx context.Context, git relayCommandRunner, clone, dir string, args nodeWorktreePrepareArgs) string {
+func (client *HubClient) nodePrepareDetached(ctx context.Context, tracker *nodeGitTracker, clone, dir string, args nodeWorktreePrepareArgs) string {
+	git := tracker.git
 	if _, err := git(ctx, "-C", clone, "fetch", "origin", args.Fetch); err != nil {
 		return nodeOutcomeGitFailed
 	}
@@ -1089,10 +1180,14 @@ func (client *HubClient) nodePrepareDetached(ctx context.Context, git relayComma
 			atDir = &entries[i]
 		}
 	}
-	if atDir != nil {
-		if atDir.Locked {
+	intent := nodeWorktreeAddIntent{Mode: "detached", Sha: args.Sha}
+	if atDir != nil && atDir.Locked {
+		if !nodeReclaimInterruptedAdd(ctx, git, clone, dir, entries, intent) {
 			return nodeRemoveLocked
 		}
+		atDir = nil
+	}
+	if atDir != nil {
 		head, err := nodeGitHead(ctx, git, dir)
 		if err != nil {
 			return nodeOutcomeGitFailed
@@ -1109,7 +1204,7 @@ func (client *HubClient) nodePrepareDetached(ctx context.Context, git relayComma
 		}
 		return nodePrepareReused
 	}
-	if _, err := git(ctx, "-C", clone, "worktree", "add", "--detach", dir, args.Sha); err != nil {
+	if err := tracker.add(ctx, client.nodeAddRunner(), clone, dir, intent, "-C", clone, "worktree", "add", "--detach", dir, args.Sha); err != nil {
 		return nodeOutcomeGitFailed
 	}
 	return nodePreparePrepared
@@ -1288,25 +1383,27 @@ func (client *HubClient) nodeQuotaRefresh(ctx context.Context, args nodeQuotaRef
 	}
 	source := client.nativeQuotaSource(args.Pool)
 	marked := client.loginScreenMarked(args.Pool)
-	reading, measuredHere, err := source.RefreshWithMeasurement(ctx)
-	if measuredHere {
-		client.noteOwnQuotaMeasurement(args.Pool)
-	}
+	started := client.nowUTC()
+	readings, measuredHere, err := source.RefreshAccounts(ctx)
 	if err != nil {
 		return nil, "refresh_failed"
 	}
+	if measuredHere {
+		client.noteOwnQuotaMeasurement(args.Pool, started)
+	}
 	if marked && !measuredHere && source.measurableHere(ctx) {
+		probed := client.nowUTC()
 		switch source.probeLogin(ctx) {
 		case loginProbeLoginPresent:
-			client.noteOwnQuotaMeasurement(args.Pool)
+			client.noteOwnQuotaMeasurement(args.Pool, probed)
 		case loginProbeLoginMissing:
 			return nil, "refresh_failed"
 		}
 	}
-	if reading.Key == "" {
+	if readings[0].Key == "" {
 		client.noteQuotaUnknown(args.Pool)
 	} else {
-		client.noteQuotaAccount(args.Pool, reading.Key)
+		client.noteQuotaAccount(args.Pool, readings[0].Key)
 	}
 	return nodeQuotaRefreshResult{Outcome: nodeQuotaRefreshed}, ""
 }

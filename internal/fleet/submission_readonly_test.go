@@ -14,9 +14,9 @@ func TestSubmissionCheckoutRoles(t *testing.T) {
 		mode, fetch        string
 	}{
 		{"canonical reviewer", "reviewer", "main", true, false, "detached", "refs/heads/main"},
-		{"canonical counsel", "counsel", "main", true, false, "detached", "refs/heads/main"},
-		{"canonical worker", "worker", "main", true, true, "", ""},
-		{"linked worker", "worker", "wk/x", false, false, "branch", ""},
+		{"canonical counsel", "consult", "main", true, false, "detached", "refs/heads/main"},
+		{"canonical implementer", "implementer", "main", true, true, "", ""},
+		{"linked implementer", "implementer", "wk/x", false, false, "branch", ""},
 		{"linked reviewer", "reviewer", "wk/x", false, false, "detached", "refs/heads/wk/x"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

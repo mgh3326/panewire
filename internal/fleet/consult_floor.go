@@ -1,6 +1,8 @@
 package fleet
 
 import (
+	"context"
+	"os"
 	"path"
 	"slices"
 	"strings"
@@ -40,6 +42,35 @@ func consultFloorFor(askerGrade, lane string) string {
 	return consultFloorOf(askerGrade)
 }
 
+// askerBuilderFamily is the family a consult's other-family rule excludes when
+// the caller names none: the family of the job the caller runs in (ARBITER_JOB).
+// spawn without --parent-job and resolve both read it, so one asker gets the
+// same seats from either command (hk 4572). An unreadable job refuses, as
+// spawn's --parent-job does, rather than selecting with no family.
+func (a *App) askerBuilderFamily(ctx context.Context) (string, error) {
+	id := os.Getenv("ARBITER_JOB")
+	if id == "" {
+		return "", nil
+	}
+	j, e := a.resolveParent(ctx, id)
+	if e != nil {
+		return "", fail(exitStateConflict, "ARBITER_JOB %s unreadable, so the consult's author family is unknown: %v", id, e)
+	}
+	return a.jobBuilderFamily(j), nil
+}
+
+// jobBuilderFamily is the family a job's author ran on: the family the job
+// recorded, else its profile's seat family.
+func (a *App) jobBuilderFamily(j Job) string {
+	if j.Family != "" {
+		return j.Family
+	}
+	if seat, ok := a.Policy.Profiles[j.Profile]; ok {
+		return seat.Family
+	}
+	return ""
+}
+
 // rungIndex groups catalog rows by profile and effort, so a consult candidate
 // can be judged on the rung it launches at.
 type rungIndex map[[2]string][]CatalogRow
@@ -51,6 +82,30 @@ func indexRungs(rows []CatalogRow) rungIndex {
 		ix[k] = append(ix[k], row)
 	}
 	return ix
+}
+
+// hasLaunchEffort reports whether admission would resolve an effort for this
+// profile under the request: a live row naming an effort that its eligibility
+// rules keep (launch_native.go resolveRow). An unrated row counts only when the
+// role may try one or the request arms that rung with E6; otherwise it is
+// excluded and the launch resolves no effort, which is the refusal selection
+// must skip ("catalog row has no launch effort").
+func (ix rungIndex) hasLaunchEffort(profile, arm string, allowUnrated bool) bool {
+	for key, rows := range ix {
+		if key[0] != profile || key[1] == "" {
+			continue
+		}
+		for _, row := range rows {
+			if row.RetiredAt != nil {
+				continue
+			}
+			if admissionMarkerRequired(launchRowFrom(row).admissionRow, allowUnrated) && arm != profile+"@"+row.Effort {
+				continue
+			}
+			return true
+		}
+	}
+	return false
 }
 
 // launchGrade is the catalog grade of the rung row launches at. ok is false
@@ -89,6 +144,12 @@ func topGradeDrop(row CatalogRow, launch, floor string, rungs rungIndex) string 
 	}
 	return ""
 }
+
+// reasonNoLaunchEffort drops a rung-less row whose profile has no named rung:
+// admission has no effort to resolve for it, so choosing it would fail the
+// plan with "catalog row has no launch effort" instead of trying the next
+// candidate.
+const reasonNoLaunchEffort = "no_launch_effort"
 
 // staticDrop applies the rules a candidate row meets before presence and quota,
 // in the order selectFor has always used. floor is the consult grade floor.
@@ -129,12 +190,25 @@ func (a *App) staticDrop(row CatalogRow, req selReq, floor string, rungs rungInd
 		return "pool_invalid", "", nil
 	case slices.Contains(req.excludePools, row.Pool):
 		return "pool_excluded", "", nil
+	// The reserved band keys name Devin's two bands, not catalog pools: a
+	// replacement that excludes a band must not take another rung of that
+	// band (hub quota replacement), while the other band stays eligible.
+	case slices.Contains(req.excludePools, devinFreeCapKey) && IsFreeRung(row.Profile):
+		return "pool_excluded", "", nil
+	case slices.Contains(req.excludePools, devinPaidKey) && isPaidDevinRung(row.Pool, row.Profile):
+		return "pool_excluded", "", nil
 	case cooling:
 		return "pool_cooling", "", nil
 	}
 	name, seat, reason := a.seatFor(row, req)
 	if seat == nil {
 		return reason, "", nil
+	}
+	if row.Effort == "" && !rungs.hasLaunchEffort(row.Profile, a.e6Arm(req.e6Arm, req.e6ArmLocked), admissionUnratedRole(admissionRequest{Role: req.role})) {
+		// Dropped after the seat rules so a row they refuse keeps its own
+		// reason, and before the launch itself: admission resolves no effort
+		// for this profile, so selecting it would end the whole plan.
+		return reasonNoLaunchEffort, "", nil
 	}
 	if req.route.top() {
 		// Judged on the rung the spawn launches: spawn pins the launch to the
@@ -152,7 +226,7 @@ func (a *App) staticDrop(row CatalogRow, req selReq, floor string, rungs rungInd
 // grade and family ("unknown" when the spawn named none), where the grade came
 // from, the floor asked and the floor used, and the fallback taken, if any.
 func (p *selPlan) consultStamp() map[string]any {
-	family := p.req.builderFamily
+	family := p.req.authorFamily
 	if family == "" {
 		family = "unknown"
 	}

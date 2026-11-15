@@ -11,10 +11,9 @@ import (
 	"github.com/mgh3326/panewire/internal/textbound"
 )
 
-// A job's saved pane screen also goes to hk (hk 3617), so the evidence a
-// close leaves behind outlives the node's job directory: the task pane sweep
-// (savePaneScreen) and the pane.capture node command upload it after the
-// local file is written. See docs/pane-sweep.md and docs/node-commands.md.
+// An explicit pane.capture node command may upload a job's pane screen to hk,
+// and the task pane sweep uploads the last screen of a job's own pane before
+// it closes it. See docs/pane-sweep.md and docs/node-commands.md.
 
 // PaneScreenDocMaxBytes is hk's document body cap (handoffkeep
 // internal/store/store.go DocumentMaxBytes, v0.0.130).

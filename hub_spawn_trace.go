@@ -38,7 +38,7 @@ func (h *HubServer) recordSpawnTrace(task hubSpawnTask, result hubSpawnOutcome) 
 		role = hubSpawnArg(task.Request.Args, "--role")
 	}
 	if role == "" {
-		role = "worker"
+		role = "implementer"
 	}
 	tags := map[string]string{"job": task.Job, "host": host, "profile": profile, "role": role, "rc": strconv.Itoa(result.RC)}
 

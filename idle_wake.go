@@ -94,6 +94,9 @@ type idleWakeManager struct {
 	// flushSuppressionLogLocked. Guarded by mu.
 	suppressCounts      map[string]int
 	suppressWindowStart time.Time
+	// quotaNoJob holds, per suppressed candidate whose pane had no local job,
+	// when to look again. Guarded by mu.
+	quotaNoJob map[string]time.Time
 }
 
 func newIdleWakeManager(store *Store, inboxRoot string, settle time.Duration, request func(idleWakeRouteRequest) bool, enqueue func(hubScannedRelayEvent) bool, logger *slog.Logger) (*idleWakeManager, error) {
@@ -576,6 +579,33 @@ func (s *Store) assignedIdleWakeCandidates(ctx context.Context) ([]idleWakeCandi
 	return candidates, rows.Err()
 }
 
+// suppressedIdleWakeCandidates returns settled candidates whose wake the route
+// suppressed, whatever the reason, that the quota observer has not read yet and
+// whose pane is still in the idle episode they describe. Suppression is about
+// waking, not reading: a suppressed candidate gets no event, so without this
+// read a worker's quota stop on a design-lane, ambiguous_owner or
+// parentless_lane pane was never observed (hk 4233, hk 4507). The
+// quota_stop_decisions row keyed by event_id makes each candidate a one-time
+// read; the episode join drops candidates of panes that moved on.
+func (s *Store) suppressedIdleWakeCandidates(ctx context.Context) ([]idleWakeCandidate, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rows, err := s.db.QueryContext(ctx, `SELECT c.pane_id,c.state_change_seq,c.workspace_id,c.label,c.agent_status,c.changed_at,c.due_at,c.settled_at,c.event_id,c.owner_lane,c.text,c.job_id FROM idle_wake_candidates c JOIN idle_wake_panes p ON p.pane_id=c.pane_id AND p.state_change_seq=c.state_change_seq AND p.agent_status IN ('idle','done') WHERE c.decision=? AND c.settled_at IS NOT NULL AND c.event_id NOT IN (SELECT event_id FROM quota_stop_decisions) ORDER BY c.settled_at,c.pane_id,c.state_change_seq`, idleWakeDecisionSuppressed)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var candidates []idleWakeCandidate
+	for rows.Next() {
+		candidate, scanErr := scanIdleWakeCandidate(rows)
+		if scanErr != nil {
+			return nil, scanErr
+		}
+		candidates = append(candidates, candidate)
+	}
+	return candidates, rows.Err()
+}
+
 func (s *Store) markIdleWakeMaterialized(ctx context.Context, eventID string, at time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -685,7 +715,13 @@ func (m *idleWakeManager) flushSuppressionLogLocked(at time.Time) {
 	m.suppressWindowStart = at
 }
 
+// materializeAssigned also reads the quota stops of suppressed candidates
+// (see suppressedIdleWakeCandidates): they get no event, but a stopped worker
+// still needs its quota decision.
 func (m *idleWakeManager) materializeAssigned(ctx context.Context, at time.Time) {
+	if m.quota != nil {
+		m.observeSuppressed(ctx, at)
+	}
 	candidates, err := m.store.assignedIdleWakeCandidates(ctx)
 	if err != nil {
 		m.logger.Warn("idle-wake materialization scan unavailable")
@@ -704,6 +740,41 @@ func (m *idleWakeManager) materializeAssigned(ctx context.Context, at time.Time)
 		m.enqueue(event)
 		if err := m.store.markIdleWakeMaterialized(ctx, candidate.EventID, at); err != nil {
 			m.logger.Warn("idle-wake materialization was not recorded")
+		}
+	}
+}
+
+// quotaNoJobRetry is how long a suppressed candidate whose pane has no local job
+// is left alone before the next look for one. Such a pane (a human's, say) can
+// stay idle for days, and every look scans the jobs directory.
+const quotaNoJobRetry = 5 * time.Minute
+
+// observeSuppressed reads the quota stop of each suppressed candidate still
+// waiting for its one read. Caller holds m.mu.
+func (m *idleWakeManager) observeSuppressed(ctx context.Context, at time.Time) {
+	candidates, err := m.store.suppressedIdleWakeCandidates(ctx)
+	if err != nil {
+		m.logger.Warn("idle-wake suppressed quota scan unavailable")
+		return
+	}
+	live := make(map[string]struct{}, len(candidates))
+	for _, candidate := range candidates {
+		live[candidate.EventID] = struct{}{}
+		if retry, ok := m.quotaNoJob[candidate.EventID]; ok && at.Before(retry) {
+			continue
+		}
+		if m.quota.observeBounded(ctx, candidate, at) && ctx.Err() == nil {
+			if m.quotaNoJob == nil {
+				m.quotaNoJob = make(map[string]time.Time)
+			}
+			m.quotaNoJob[candidate.EventID] = at.Add(quotaNoJobRetry)
+		} else {
+			delete(m.quotaNoJob, candidate.EventID)
+		}
+	}
+	for id := range m.quotaNoJob {
+		if _, ok := live[id]; !ok {
+			delete(m.quotaNoJob, id)
 		}
 	}
 }
@@ -758,7 +829,7 @@ func (h *HubServer) resolveIdleWakeOwner(machineID, pane string) idleWakeOwnerRe
 		if route.Parent == "" {
 			return idleWakeOwnerResolution{Reason: idleWakeReasonParentless}
 		}
-		if _, exists := routes[route.Parent]; !exists || !hubAgentLabelPattern.MatchString(route.Parent) {
+		if _, exists := routes[route.Parent]; !exists || !validLaneReference(route.Parent) {
 			return idleWakeOwnerResolution{Reason: idleWakeReasonInvalid}
 		}
 		return idleWakeOwnerResolution{Lane: route.Parent, Label: direct[0]}
@@ -780,7 +851,7 @@ func (h *HubServer) resolveIdleWakeOwner(machineID, pane string) idleWakeOwnerRe
 		return idleWakeOwnerResolution{Reason: idleWakeReasonAmbiguous}
 	}
 	job := matches[0]
-	if _, exists := routes[job.OwnerLane]; !exists || !hubAgentLabelPattern.MatchString(job.OwnerLane) {
+	if _, exists := routes[job.OwnerLane]; !exists || !validLaneReference(job.OwnerLane) {
 		return idleWakeOwnerResolution{Reason: idleWakeReasonInvalid}
 	}
 	return idleWakeOwnerResolution{Lane: job.OwnerLane, JobID: job.JobID, Label: job.AgentLabel}
@@ -829,7 +900,7 @@ func validHubIdleWakeRouteEvent(event hubIdleWakeRouteEvent) bool {
 		return false
 	}
 	if event.Eligible {
-		return hubAgentLabelPattern.MatchString(event.Lane) && validLaneEventText(event.Text) && len(event.Text) <= laneEventTextLimit && event.Reason == "" && (event.JobID == "" || hubJobIDPattern.MatchString(event.JobID))
+		return validLaneReference(event.Lane) && validLaneEventText(event.Text) && len(event.Text) <= laneEventTextLimit && event.Reason == "" && (event.JobID == "" || hubJobIDPattern.MatchString(event.JobID))
 	}
 	return event.Lane == "" && event.Text == "" && event.JobID == "" && validIdleWakeDecisionReason(event.Reason)
 }

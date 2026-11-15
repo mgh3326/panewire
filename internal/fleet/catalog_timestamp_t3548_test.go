@@ -88,7 +88,7 @@ func TestLaunchNativeRefreshesUndatedCache(t *testing.T) {
 	}
 	t.Setenv("PACELEVER_CONFIG", path)
 	writeUndatedCatalogCache(t, client, launchRulesCatalog(), "not a time")
-	got, err := a.Quota.Launch(context.Background(), QuotaRequest{Profile: "opus", Effort: "high", Role: "worker"})
+	got, err := a.Quota.Launch(context.Background(), QuotaRequest{Profile: "opus", Effort: "high", Role: "implementer"})
 	if err != nil || got.ModelID != "claude-opus-5-1" || state.count() != 1 {
 		t.Fatalf("an undated cache must be refreshed, not resolved as fresh: %+v %v reads=%d", got, err, state.count())
 	}

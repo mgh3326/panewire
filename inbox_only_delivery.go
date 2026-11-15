@@ -2,8 +2,6 @@ package panewire
 
 import (
 	"context"
-	"strconv"
-	"strings"
 	"time"
 )
 
@@ -87,45 +85,6 @@ func inboxWakeFiledWorthy(items []laneInboxItem) bool {
 		}
 	}
 	return false
-}
-
-// replayedRelayEvent is relayEventFromRecord for a replay. A chat-* row keeps
-// the operator-chat provenance of its first relay only when the hub's chat
-// store vouches for it (hubChatTurn).
-func (h *HubServer) replayedRelayEvent(record handoffkeepRelayEvent) hubJobEventPayload {
-	event := relayEventFromRecord(record)
-	event.operatorChat = h.hubChatTurn(record)
-	return event
-}
-
-// hubChatTurn reports whether a durable lane.event row for an inbox-only lane
-// is an operator chat turn the hub's chat created: the chat store holds an
-// operator message whose id and body hash derive the row's event id exactly
-// (chatRelayEventID). Anything else whose id looks like chat-N is a lane
-// notification. Only inbox-only lanes ask the store.
-func (h *HubServer) hubChatTurn(record handoffkeepRelayEvent) bool {
-	if record.Kind != "lane.event" || h.chatStore == nil || h.inbox == nil || h.inbox.policy.inboxOnlyClass(record.OwnerLane, h.now()) == "" {
-		return false
-	}
-	match := chatRelayEventPattern.FindStringSubmatch(record.EventID)
-	if match == nil || match[2] == "" {
-		return false
-	}
-	id, err := strconv.ParseInt(match[1], 10, 64)
-	if err != nil {
-		return false
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), hubChatStoreTimeout)
-	defer cancel()
-	message, found, err := h.chatStore.GetChatMessage(ctx, id)
-	if err != nil || !found || message.Author != hubChatOperatorName || message.SourceChannel == "assistant" || chatRelayEventID(id, message.Body) != record.EventID {
-		return false
-	}
-	var questionIDs []string
-	if record.Question != "" {
-		questionIDs = strings.Split(record.Question, ",")
-	}
-	return record.Text == chatRelayText(id, questionIDs, message.Body)
 }
 
 // hasBatch reports whether id names a hub digest, escalation or hold batch

@@ -27,7 +27,7 @@ func firstRunRefusal(requestID, tail string, rc int) map[string]any {
 
 func firstRunNodeRequest(request fleet.Submission, id int, profile string) fleet.HubSpawnRequest {
 	node := refusalNodeRequest(request, id, "machine-a")
-	node.Args = []string{"--job", "test-job", "-m", profile, "-l", "test-job", "--role", "worker"}
+	node.Args = []string{"--job", "test-job", "-m", profile, "-l", "test-job", "--role", "implementer"}
 	return node
 }
 
@@ -56,10 +56,11 @@ func deskNotices(t *testing.T, h *HubServer, destination *hubAgent) []string {
 	return texts
 }
 
-// A first-run refusal rules out only the host that gave it: the request goes
-// back to placement, the host's launch backoff counts it, and the desk hears
-// which one-time action the host needs. A pinned host keeps the refusal.
-func TestFirstRunRefusalMovesToNextHost(t *testing.T) {
+// A first-run refusal comes after the node's hk job claim (stage launch), so hk
+// holds the job id for that host and another host's claim would be a 409 (hk
+// 4614). A cleaned-up harness may be replaced on that host. The host's launch
+// backoff still counts the refusal and the desk hears which action it needs.
+func TestFirstRunRefusalAfterClaimPinsTheHost(t *testing.T) {
 	for _, test := range []struct {
 		name, profile, kind, tail, action string
 		rc                                int
@@ -87,7 +88,7 @@ func TestFirstRunRefusalMovesToNextHost(t *testing.T) {
 			}
 			first := make(chan answer, 1)
 			go func() {
-				reply, err := transport.Spawn(boundedContext(t), firstRunNodeRequest(request, 911, test.profile))
+				reply, err := dispatchPlacedSpawn(boundedContext(t), transport, firstRunNodeRequest(request, 911, test.profile))
 				first <- answer{reply, err}
 			}()
 			sent := t14ReadNodeSpawn(t, node)
@@ -95,12 +96,16 @@ func TestFirstRunRefusalMovesToNextHost(t *testing.T) {
 				t.Fatal(err)
 			}
 			got := <-first
-			if got.err != nil || !got.reply.NextHost || got.reply.RC != test.rc {
-				t.Fatalf("placement was not handed the refusal: %+v", got)
+			if got.err != nil || got.reply.NextHost || got.reply.RC != test.rc {
+				t.Fatalf("a refusal after the hk claim moved to another host: %+v", got)
 			}
 			saved, err := h.inbox.store.spawnTask(t.Context(), request.RequestID)
-			if err != nil || saved.Status != "accepted" || saved.Node != nil {
-				t.Fatalf("refusal ended the operation: %+v %v", saved, err)
+			if err != nil || saved.Status != "accepted" || saved.Node != nil || !saved.Outcome.Retryable {
+				t.Fatalf("refusal did not pin the retry to its claimed host: status=%s host=%s err=%v", saved.Status, spawnTaskHost(saved), err)
+			}
+			foreign := boundaryTestNode(saved, 912, "machine-b")
+			if _, err := h.inbox.store.bindSpawn(t.Context(), request.RequestID, saved.Attempt, foreign, time.Now()); err == nil {
+				t.Fatal("retry was allowed to bind to a different host")
 			}
 			h.mu.Lock()
 			entry := h.launchBackoffs[launchKey{"machine-a", test.kind}]
@@ -121,20 +126,6 @@ func TestFirstRunRefusalMovesToNextHost(t *testing.T) {
 			if len(notices) != 1 || notices[0] != want {
 				t.Fatalf("notices=%q want %q", notices, want)
 			}
-			// The next candidate binds under the same operation.
-			second := make(chan answer, 1)
-			go func() {
-				reply, err := transport.Spawn(boundedContext(t), firstRunNodeRequest(request, 912, test.profile))
-				second <- answer{reply, err}
-			}()
-			sent = t14ReadNodeSpawn(t, node)
-			if sent.RequestID != t14RequestID(912) {
-				t.Fatalf("second candidate sent %s", sent.RequestID)
-			}
-			if err = wsjson.Write(t.Context(), node, nodeRefusal(sent.RequestID, "checkout_refused:dirty", false)); err != nil {
-				t.Fatal(err)
-			}
-			<-second
 		})
 	}
 }
@@ -154,7 +145,7 @@ func TestFirstRunRefusalWithoutVerifiedCleanupStaysTerminal(t *testing.T) {
 	transport := &directSpawnTransport{h: h, task: task}
 	done := make(chan fleet.HubSpawnReply, 1)
 	go func() {
-		reply, _ := transport.Spawn(boundedContext(t), firstRunNodeRequest(request, 913, "codex-sol"))
+		reply, _ := dispatchPlacedSpawn(boundedContext(t), transport, firstRunNodeRequest(request, 913, "codex-sol"))
 		done <- reply
 	}()
 	sent := t14ReadNodeSpawn(t, node)

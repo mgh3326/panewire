@@ -3,7 +3,6 @@ package fleet
 import (
 	"context"
 	"encoding/json"
-	"path/filepath"
 	"slices"
 	"sort"
 	"strings"
@@ -36,7 +35,8 @@ const gateReasonCatalog = `[{"profile":"sonnet","effort":"high","model_id":"clau
 // An accepted host answers the remote spawn.
 func gateReasonFixture(t *testing.T, weekly float64) (*App, Spawn, *gateCountQuota, *fakeRunner) {
 	t.Helper()
-	t.Setenv("PACELEVER_CONFIG", filepath.Join(t.TempDir(), "absent.toml"))
+	isolateConfigHome(t)
+	t.Setenv("PACELEVER_CONFIG", "")
 	src := &fakePlacementSource{hosts: []HostView{
 		{Name: "first", Connected: true, LoadRatio: ptrF(0.1)},
 		{Name: "second", Connected: true, LoadRatio: ptrF(0.5)},
@@ -47,6 +47,7 @@ func gateReasonFixture(t *testing.T, weekly float64) (*App, Spawn, *gateCountQuo
 		}
 		return Result{}
 	})
+	a.modelFamilies = func(context.Context) (ModelFamiliesPolicy, error) { return launchTestModelFamilies(), nil }
 	a.Config.Hosts = map[string]map[string]any{"first": {}, "second": {}}
 	a.Config.HostOrder = []string{"first", "second"}
 	q := &gateCountQuota{admissionQuota: admissionQuota{CLIQuota{Runner: f, Binary: "pacelever"}, a}}
@@ -97,7 +98,6 @@ func TestRequestRefusalCodesCoverEveryReadingIndependentRefusal(t *testing.T) {
 	}{
 		{"operator request on an ordinary rung", "operator_request_not_applicable", func(s *Spawn) { s.OperatorRequest, s.Purpose = "hk:task/3836", "operator-request" }},
 		{"invalid operator request ref", "operator_request_ref_invalid", func(s *Spawn) { s.OperatorRequest, s.Purpose = "task 3836", "operator-request" }},
-		{"requested-by without operator request", "requested_by_requires_operator_request", func(s *Spawn) { s.RequestedBy = "operator" }},
 		{"unknown effort rung", "unknown_effort_rung", func(s *Spawn) { s.Effort = "turbo" }},
 		{"retired or unknown profile", "profile_sonnet_is_unknown_or_retired", func(*Spawn) {}},
 	} {
@@ -143,7 +143,7 @@ func TestHostNoteKeepsGateCodeAndQuotaRefusedStaysForReadings(t *testing.T) {
 // every host and carries no gate code.
 func TestReadingRefusalIsNotACodedGateRefusal(t *testing.T) {
 	a, s, q, _ := gateReasonFixture(t, 99)
-	if refusal := q.RequestRefusal(context.Background(), QuotaRequest{Profile: "sonnet", Effort: "high", Role: "worker"}); refusal != nil {
+	if refusal := q.RequestRefusal(context.Background(), QuotaRequest{Profile: "sonnet", Effort: "high", Role: "implementer"}); refusal != nil {
 		t.Fatalf("a reading's refusal was decided before the hosts: %v", refusal)
 	}
 	_, _, err := a.placeAuto(context.Background(), s, "brief")
@@ -174,7 +174,7 @@ func TestPlacementRecordCarriesGateCodeInHostReason(t *testing.T) {
 		sort.Strings(out)
 		return out
 	}
-	record := func(coded bool) placementRecord {
+	record := func(coded bool) PlacementRecord {
 		a, s := remotePlacementFixture(t, "ssh", "auto", "refused", true)
 		a.Quota.(*fakeQuota).GateDo = func(r QuotaRequest) (string, error) {
 			if coded {
@@ -188,14 +188,14 @@ func TestPlacementRecordCarriesGateCodeInHostReason(t *testing.T) {
 		}
 		return onePlacement(t, h)
 	}
-	hostRow := func(r placementRecord) placementCandidateRecord {
+	hostRow := func(r PlacementRecord) PlacementCandidateRecord {
 		for _, c := range r.Candidates {
 			if c.Host == "host-b" {
 				return c
 			}
 		}
 		t.Fatalf("no host-b row: %+v", r.Candidates)
-		return placementCandidateRecord{}
+		return PlacementCandidateRecord{}
 	}
 	coded, plain := record(true), record(false)
 	if row := hostRow(coded); row.Outcome != "skipped" || row.Reason != "gate_blocked:operator_request_not_applicable" {

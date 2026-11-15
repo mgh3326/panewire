@@ -140,6 +140,14 @@ func (h *HubServer) redeliverWorkingExpiredOnIdle(machine string, request idleWa
 	if !found {
 		return
 	}
+	// The idle path also replays a row; serialize it with registration just
+	// like the startup and hello walks, and retry after the report arrives.
+	h.replayMu.RLock()
+	defer h.replayMu.RUnlock()
+	if h.replayAwaitsAppliedReport(record) {
+		restore("applied_report_pending")
+		return
+	}
 	// The original send's injection claim outlives the node's drop: nothing
 	// releases it until a restart. That send is over, so its claim is released
 	// here and the replay takes it again; a claim another row holds stays.

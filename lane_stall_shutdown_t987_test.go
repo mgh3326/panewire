@@ -26,13 +26,12 @@ import (
 // pane instead of hiding that inside undelivered_count.
 
 // t987StallHub mirrors t961StallHub with a caller-supplied log destination.
-func t987StallHub(t *testing.T, lanes string, client *handoffkeepRelayClient, notifier HubNotifier, logs io.Writer) *HubServer {
+func t987StallHub(t *testing.T, lanes string, client *handoffkeepRelayClient, notifier *hubAlertLog) *HubServer {
 	t.Helper()
 	hub, err := NewHubServer(HubServerConfig{
 		Tokens:          map[string]string{"operator": "op", "host-a": "node-a", "host-b": "node-b"},
 		ReportRelayPath: r20LanesFile(t, lanes),
-		Notifier:        notifier,
-		Logger:          slog.New(slog.NewTextHandler(logs, nil)),
+		Logger:          notifier.Logger(),
 		handoffkeep:     client,
 	})
 	if err != nil {
@@ -140,7 +139,7 @@ func TestT987LaneStallCloseRacesSweepStream(t *testing.T) {
 	}
 	var totalRecords, lateRecords atomic.Int64
 	handler := &t987CloseCountingHandler{inner: slog.NewTextHandler(logFile, nil), total: &totalRecords, late: &lateRecords}
-	hub := t987StallHub(t, `{"lanes":{"lane-a":{"machine":"host-a","pane":"w1:p1"}}}`, client, &task198Notifier{}, io.Discard)
+	hub := t987StallHub(t, `{"lanes":{"lane-a":{"machine":"host-a","pane":"w1:p1"}}}`, client, newHubAlertLog(io.Discard))
 	hub.mu.Lock()
 	hub.logger = slog.New(handler)
 	hub.mu.Unlock()
@@ -249,12 +248,11 @@ func TestT987MaintenanceCancelReturnsStallRun(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	notifier := &task198Notifier{}
+	notifier := newHubAlertLog(nil)
 	hub, err := NewHubServer(HubServerConfig{
 		Tokens:            map[string]string{"operator": "op", "host-a": "node-a"},
 		ReportRelayPath:   r20LanesFile(t, `{"lanes":{"lane-a":{"machine":"host-a","pane":"w1:p1"}}}`),
-		Notifier:          notifier,
-		Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Logger:            notifier.Logger(),
 		KeepaliveInterval: 5 * time.Millisecond,
 		handoffkeep:       client,
 	})
@@ -301,7 +299,7 @@ func TestT987MaintenanceCancelReturnsStallRun(t *testing.T) {
 func TestT987LaneStallPrunesInactiveEntry(t *testing.T) {
 	fake, client, closeServer := newFakeHandoffkeep(t)
 	defer closeServer()
-	hub := t961StallHub(t, `{"lanes":{"lane-a":{"machine":"host-a","pane":"w1:p1"}}}`, client, &task198Notifier{})
+	hub := t961StallHub(t, `{"lanes":{"lane-a":{"machine":"host-a","pane":"w1:p1"}}}`, client, newHubAlertLog(nil))
 	t961ActiveNode(hub, "host-a", HubActiveJob{JobID: "t987-young-job", OwnerLane: "lane-a"})
 	fake.seedUndelivered(t961LaneRow(11, "lane-a", "t987-young", time.Now().UTC().Format(time.RFC3339Nano), 1))
 
@@ -323,7 +321,7 @@ func TestT987LaneStallPrunesInactiveEntry(t *testing.T) {
 func TestT987LaneStallKeepsEntryUntilRecovery(t *testing.T) {
 	fake, client, closeServer := newFakeHandoffkeep(t)
 	defer closeServer()
-	notifier := &task198Notifier{}
+	notifier := newHubAlertLog(nil)
 	hub := t961StallHub(t, `{"lanes":{"lane-a":{"machine":"host-a","pane":"w1:p1"}}}`, client, notifier)
 	t961ActiveNode(hub, "host-a", HubActiveJob{JobID: "t987-ep", OwnerLane: "lane-a"})
 	old := time.Now().UTC().Add(-(relayLaneStallAge + time.Minute)).Format(time.RFC3339Nano)
@@ -367,7 +365,7 @@ func TestT987LaneStallEphemeralLanesLeaveNoEntries(t *testing.T) {
 	for i := range routes {
 		routes[i] = fmt.Sprintf(`"t987-e%02d":{"machine":"host-a","pane":"w1:p%d"}`, i, i)
 	}
-	hub := t961StallHub(t, `{"lanes":{`+strings.Join(routes, ",")+`}}`, client, &task198Notifier{})
+	hub := t961StallHub(t, `{"lanes":{`+strings.Join(routes, ",")+`}}`, client, newHubAlertLog(nil))
 	jobs := make([]HubActiveJob, 0, 25)
 	for i := 0; i < 25; i++ {
 		jobs = append(jobs, HubActiveJob{JobID: fmt.Sprintf("t987-e%02d-job", i), OwnerLane: fmt.Sprintf("t987-e%02d", i)})
@@ -390,7 +388,7 @@ func TestT987LaneStallHeldCountAnnotatesAlarm(t *testing.T) {
 	fake, client, closeServer := newFakeHandoffkeep(t)
 	defer closeServer()
 	var logBuf bytes.Buffer
-	hub := t987StallHub(t, `{"lanes":{"lane-a":{"machine":"host-a","pane":"w1:p1"}}}`, client, &task198Notifier{}, &logBuf)
+	hub := t987StallHub(t, `{"lanes":{"lane-a":{"machine":"host-a","pane":"w1:p1"}}}`, client, newHubAlertLog(&logBuf))
 	t961ActiveNode(hub, "host-a", HubActiveJob{JobID: "t987-held", OwnerLane: "lane-a"})
 	old := time.Now().UTC().Add(-(relayLaneStallAge + time.Minute)).Format(time.RFC3339Nano)
 	fake.seedUndelivered(
@@ -447,12 +445,11 @@ func TestT987TesterGraceClockSurvivesOldestRowTurnover(t *testing.T) {
 	fake, client, closeServer := newFakeHandoffkeep(t)
 	defer closeServer()
 	base := time.Date(2026, 9, 29, 12, 0, 0, 0, time.UTC)
-	notifier := &task198Notifier{}
+	notifier := newHubAlertLog(nil)
 	hub, err := NewHubServer(HubServerConfig{
 		Tokens:          map[string]string{"operator": "op", "host-a": "node-a"},
 		ReportRelayPath: r20LanesFile(t, `{"lanes":{"lane-a":{"machine":"host-a","pane":"w1:p1"}}}`),
-		Notifier:        notifier,
-		Logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Logger:          notifier.Logger(),
 		Now:             func() time.Time { return base },
 		GracePeriod:     relayLaneStallAge + 30*time.Minute,
 		handoffkeep:     client,

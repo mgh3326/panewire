@@ -22,6 +22,10 @@ const (
 	hubScopeInboxAck        = "inbox.ack"
 	hubScopeInboxAckState   = "inbox.ack_state"
 	hubScopeStateRead       = "state.read"
+	// consult admits the consult-on-request routes (create and read) to a
+	// service credential. A node credential needs no scope; the operator has
+	// every route.
+	hubScopeConsult = "consult"
 
 	hubScopeAnyMachine = "*"
 )
@@ -166,11 +170,11 @@ func parseHubScopes(raw string) ([]hubScopeGrant, error) {
 	for _, item := range strings.Split(raw, ",") {
 		scope := strings.TrimSpace(item)
 		switch {
-		case scope == hubScopeNodesAgentsRead, scope == hubScopeStateRead, scope == hubScopeInboxAckState:
+		case scope == hubScopeNodesAgentsRead, scope == hubScopeStateRead, scope == hubScopeInboxAckState, scope == hubScopeConsult:
 			grants = append(grants, hubScopeGrant{name: scope})
 		case strings.HasPrefix(scope, hubScopeInboxRead+":"), strings.HasPrefix(scope, hubScopeInboxAck+":"), strings.HasPrefix(scope, hubScopeJobsClose+":"):
 			name, lane, _ := strings.Cut(scope, ":")
-			if !(lane == "*" && name != hubScopeJobsClose) && !validReportRelayLaneName(lane) {
+			if !(lane == "*" && name != hubScopeJobsClose) && !validLaneReference(lane) {
 				return nil, invalid
 			}
 			grants = append(grants, hubScopeGrant{name: name, resource: lane})
@@ -202,7 +206,7 @@ func hubGrantsAllow(grants []hubScopeGrant, scope, resource string) bool {
 			return true
 		}
 		// Inbox wildcards require an explicit valid lane; jobs.close stays lane-specific.
-		if grant.resource == hubScopeAnyMachine && scope != hubScopeJobsClose && ((scope != hubScopeInboxRead && scope != hubScopeInboxAck) || validReportRelayLaneName(resource)) {
+		if grant.resource == hubScopeAnyMachine && scope != hubScopeJobsClose && ((scope != hubScopeInboxRead && scope != hubScopeInboxAck) || validLaneReference(resource)) {
 			return true
 		}
 	}

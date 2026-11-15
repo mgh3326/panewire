@@ -10,7 +10,6 @@ import (
 	"io"
 	"net/http"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -26,22 +25,43 @@ func (h *HubServer) newSpawnApp(out, errout io.Writer) (*fleet.App, error) {
 	app, err := fleet.New(out, errout)
 	if app != nil {
 		app.LiveSpawnProfiles = h.liveSpawnProfiles
+		app.LivePlacedByAccount = h.liveProfilesByAccount
 	}
 	return app, err
 }
-func (h *HubServer) handleSpawnSubmit(w http.ResponseWriter, r *http.Request) {
-	// Placement chooses a resource after acceptance; only the unscoped operator
-	// may grant that authority. Per-host service tokens cannot escape their host.
+
+func (h *HubServer) handleSpawnFeatures(w http.ResponseWriter, r *http.Request) {
 	if h.authenticate(r).kind != hubCallerOperator {
 		hubUnauthorized(w)
 		return
 	}
+	// spawn_expires_v1: the request carries expires_seconds (hk 4660).
+	// checkout_spec_v1: the request names its worktree with
+	// --checkout-origin/--checkout-commit/--checkout-ref and carries no -c
+	// (hk 4738).
+	// start_conditions_v1: --after conditions are queued as waiting and
+	// checked in one batched hk snapshot per scheduler pass (hk 4736).
+	writeJSON(w, http.StatusOK, map[string][]string{"features": {"spawn_expires_v1", "start_conditions_v1", "checkout_spec_v1"}})
+}
+
+// decodeSpawnRequest authenticates and validates a spawn request for the submit
+// and plan routes. When it returns false it has already written the refusal.
+func (h *HubServer) decodeSpawnRequest(w http.ResponseWriter, r *http.Request) (fleet.Submission, fleet.Spawn, bool) {
+	// Placement chooses a resource after acceptance; only the unscoped operator
+	// may grant that authority. Per-host service tokens cannot escape their host.
+	if h.authenticate(r).kind != hubCallerOperator {
+		hubUnauthorized(w)
+		return fleet.Submission{}, fleet.Spawn{}, false
+	}
 	var request fleet.Submission
 	if !decodeHubJSON(w, r, hubSpawnMaxBodyBytes, &request) {
 		writeJSON(w, 400, map[string]string{"error": "invalid_request"})
-		return
+		return fleet.Submission{}, fleet.Spawn{}, false
 	}
 	spawn, err := fleet.ValidateSubmission(request)
+	if request.LadderStep != nil {
+		err = errors.New("ladder step metadata is hub-internal")
+	}
 	if err == nil {
 		raw, _ := json.Marshal(request.Repository.Checkout)
 		var spec hubSpawnCheckout
@@ -51,21 +71,53 @@ func (h *HubServer) handleSpawnSubmit(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil || !validHubSpawnRequestID(request.RequestID) || !hubSpawnMachinePattern.MatchString(request.OriginMachine) {
 		writeJSON(w, 400, map[string]string{"error": "invalid_request", "fix": "rebuild the request with panewire spawn"})
-		return
+		return fleet.Submission{}, fleet.Spawn{}, false
 	}
 	// The node applies this same rule to the args it receives; refusing here
 	// keeps a submitter whose own check is older from binding an operation the
 	// node would drop.
 	if reason := spawnargs.Refusal(request.Args, true); reason != "" {
 		writeJSON(w, 400, map[string]string{"error": "invalid_request", "reason": reason, "fix": "correct the named flag; the node would refuse this request"})
+		return fleet.Submission{}, fleet.Spawn{}, false
+	}
+	return request, spawn, true
+}
+
+// bindPlacement gives a placement app the hub's view of the fleet: the host list
+// and the hub state it reads. The spawn executor and the dry-run plan both place
+// through it, so a plan sees the hosts a real spawn would.
+func (h *HubServer) bindPlacement(app *fleet.App, transport fleet.HubTransport) {
+	app.Hub = transport
+	app.State = directSpawnState{h}
+	app.PlacementHosts = func(ctx context.Context, cwd string) ([]fleet.HostView, error) {
+		result := h.placementFresh(ctx, "worker", cwd)
+		raw, err := json.Marshal(result)
+		if err != nil {
+			return nil, err
+		}
+		views, err := fleet.ParseHubHosts(string(raw))
+		for _, machine := range result.slotFull {
+			views = append(views, fleet.HostView{Name: machine, Connected: true, SlotFull: true})
+		}
+		return views, err
+	}
+}
+
+func (h *HubServer) handleSpawnSubmit(w http.ResponseWriter, r *http.Request) {
+	request, spawn, ok := h.decodeSpawnRequest(w, r)
+	if !ok {
 		return
 	}
 	if h.inbox == nil {
 		writeJSON(w, 503, map[string]string{"error": "durable_store_required", "fix": "configure the hub inbox database before accepting spawns"})
 		return
 	}
+	if h.spawnRollbackDrain {
+		writeJSON(w, 503, map[string]string{"error": "spawn_rollback_drain", "fix": "the hub is draining its spawn queue for a rollback; submit again after it restarts without --spawn-rollback-drain"})
+		return
+	}
 	owner := spawn.Owner
-	if !hubAgentLabelPattern.MatchString(owner) {
+	if !validLaneReference(owner) {
 		writeJSON(w, 400, map[string]string{"error": "invalid_owner", "fix": "supply an existing lane name"})
 		return
 	}
@@ -78,7 +130,13 @@ func (h *HubServer) handleSpawnSubmit(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if old.Status == "retryable" {
+			release, lockErr := h.lockPlacementTrace(r.Context(), old, true)
+			if lockErr != nil {
+				writeJSON(w, 503, map[string]string{"error": "store_unavailable"})
+				return
+			}
 			old, err = h.inbox.store.resumeCleanedSpawn(r.Context(), old, h.now().UTC())
+			release()
 			if err != nil {
 				writeJSON(w, 409, map[string]string{"error": "job_already_claimed"})
 				return
@@ -137,12 +195,11 @@ func (h *HubServer) handleSpawnSubmit(w http.ResponseWriter, r *http.Request) {
 	}
 	task, _, err := h.inbox.store.claimSpawn(r.Context(), request, spawn.Job, owner, h.now().UTC())
 	held := map[string]string{"error": "job_already_claimed", "fix": "inspect the existing operation; do not submit a new request while ownership is live"}
-	retryAfterS := 0
 	if errors.Is(err, errSpawnClaimed) && spawn.ParentJob == "" {
-		task, held, retryAfterS, err = h.reclaimSpawnRole(r.Context(), app, request, spawn, owner)
+		task, held, err = h.reclaimSpawnRole(r.Context(), app, request, spawn, owner)
 	}
 	if errors.Is(err, errSpawnClaimed) {
-		writeSpawnHeld(w, held, retryAfterS)
+		writeJSON(w, http.StatusConflict, held)
 		return
 	}
 	if err != nil {
@@ -157,27 +214,23 @@ func (h *HubServer) handleSpawnSubmit(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// writeSpawnHeld answers a held reservation with 409. retryAfterS above zero
-// means the hold frees on its own after that many seconds: the body carries it
-// as retry_after_s and the Retry-After header repeats it. Every other hold has
-// neither, because nothing time-based will free it.
-func writeSpawnHeld(w http.ResponseWriter, held map[string]string, retryAfterS int) {
-	if retryAfterS < 1 {
-		writeJSON(w, 409, held)
-		return
+func (h *HubServer) acceptSpawnResponse(w http.ResponseWriter, task hubSpawnTask) {
+	body := map[string]string{"job_id": task.Job, "request_id": task.Request.RequestID, "status": spawnPublicStatus(task.Status), "operation_url": "/v1/spawns/" + task.Request.RequestID, "claim": "durable_hub_reservation"}
+	if expires := spawnExpiresAt(task); expires != "" {
+		body["expires_at"] = expires
 	}
-	body := make(map[string]any, len(held)+1)
-	for key, value := range held {
-		body[key] = value
-	}
-	body["retry_after_s"] = retryAfterS
-	w.Header().Set("Retry-After", strconv.Itoa(retryAfterS))
-	writeJSON(w, 409, body)
+	writeJSON(w, 202, body)
 }
 
-func (h *HubServer) acceptSpawnResponse(w http.ResponseWriter, task hubSpawnTask) {
-	writeJSON(w, 202, map[string]string{"job_id": task.Job, "request_id": task.Request.RequestID, "status": task.Status, "operation_url": "/v1/spawns/" + task.Request.RequestID, "claim": "durable_hub_reservation"})
+// Older submitters understand dispatching as pending but not the new bound
+// state. Its conservative wire projection does not alter the durable proof.
+func spawnPublicStatus(status string) string {
+	if status == "bound" {
+		return "dispatching"
+	}
+	return status
 }
+
 func (h *HubServer) handleSpawnOperation(w http.ResponseWriter, r *http.Request) {
 	if h.authenticate(r).kind != hubCallerOperator {
 		hubUnauthorized(w)
@@ -196,15 +249,37 @@ func (h *HubServer) handleSpawnOperation(w http.ResponseWriter, r *http.Request)
 		writeJSON(w, 503, map[string]string{"error": "store_unavailable"})
 		return
 	}
+	// A parked row is an accepted one no candidate can take before its next
+	// check (hk 4661): it reads parked, with the reason and the check.
+	status, reason, nextCheckAt := spawnPublicStatus(task.Status), "", ""
+	if spawnParked(task, h.now()) {
+		status, reason, nextCheckAt = "parked", spawnParkPrimary(task.ParkReason), task.NextCheck.UTC().Format(time.RFC3339)
+	}
 	// Never expose the persisted brief, argv or submitting paths through status
 	// reads. A reason's refusal text may name a path on the executing node.
+	var startCondition *fleet.StartConditionResult
+	if task.Status == "waiting" && task.ConditionResult.Status != "" {
+		startCondition = &task.ConditionResult
+	}
 	writeJSON(w, 200, struct {
-		Job     string          `json:"job_id"`
-		Request string          `json:"request_id"`
-		Status  string          `json:"status"`
-		Result  hubSpawnOutcome `json:"result"`
-	}{task.Job, task.Request.RequestID, task.Status, task.Outcome})
+		Job            string                      `json:"job_id"`
+		Request        string                      `json:"request_id"`
+		Status         string                      `json:"status"`
+		Reason         string                      `json:"reason,omitempty"`
+		NextCheckAt    string                      `json:"next_check_at,omitempty"`
+		ExpiresAt      string                      `json:"expires_at,omitempty"`
+		Result         hubSpawnOutcome             `json:"result"`
+		StartCondition *fleet.StartConditionResult `json:"start_condition,omitempty"`
+	}{task.Job, task.Request.RequestID, status, reason, nextCheckAt, spawnExpiresAt(task), task.Outcome, startCondition})
 }
+
+// hubSpawnWorkerCount bounds placement work. Node I/O runs in a separate slot
+// for each node, so a slow landing cannot consume a placement worker.
+const hubSpawnWorkerCount = 8
+
+// hubSpawnDrainMarkTTL bounds a node's drain mark (runSpawnCoordinator) past
+// the last scan that saw its waiting request; scans run every 2s.
+const hubSpawnDrainMarkTTL = 10 * time.Second
 
 func (h *HubServer) runSpawnCoordinator(parent context.Context) {
 	if h.inbox == nil {
@@ -214,10 +289,22 @@ func (h *HubServer) runSpawnCoordinator(parent context.Context) {
 	defer cancel()
 	stop := context.AfterFunc(h.closeCtx, cancel)
 	defer stop()
-	work := make(chan hubSpawnTask, 4)
+	work := make(chan hubSpawnTask, hubSpawnWorkerCount)
 	var mu sync.Mutex
 	active := map[string]bool{}
-	for range 4 {
+	// nodeActive holds each node's open dispatches by overlap key. A node gets
+	// a second one only when it advertised the slots and every open dispatch
+	// and the candidate are checkout spawns into distinct dirs, the overlap the
+	// node admits at once, so a dispatched request never waits on the node
+	// past its start window (hk 4578). A node that advertises none gets one.
+	nodeActive := map[string]map[string]int{}
+	// drainFor marks a node where a request without a checkout is queued
+	// behind open dispatches: no new dispatch opens there until it has run, so
+	// it is not starved by later checkouts. The mark is refreshed by each scan
+	// that still finds the request waiting and lapses when no scan has for
+	// hubSpawnDrainMarkTTL (the request ended some other way).
+	drainFor := map[string]time.Time{}
+	for range hubSpawnWorkerCount {
 		h.spawnWorkers.Add(1)
 		go func() {
 			defer h.spawnWorkers.Done()
@@ -226,36 +313,177 @@ func (h *HubServer) runSpawnCoordinator(parent context.Context) {
 				case <-ctx.Done():
 					return
 				case task := <-work:
-					h.inbox.store.touchSpawn(ctx, task.Request.RequestID, h.now().UTC())
-					h.executeSpawnTask(ctx, task)
+					refreshCount := h.quotaRefresh.completedCount.Load()
+					// A draining hub starts nothing new; the durable row stays
+					// pending for the next hub (hub_drain.go).
+					if h.drain.enter() {
+						current, err := h.inbox.store.spawnTask(ctx, task.Request.RequestID)
+						if err == nil && current.Attempt == task.Attempt && current.Node == nil && spawnPending(current.Status) {
+							h.inbox.store.touchSpawn(ctx, task.Request.RequestID, h.now().UTC())
+							h.executeSpawnTask(ctx, current)
+						}
+						h.drain.leave()
+					}
 					mu.Lock()
 					delete(active, task.Request.RequestID)
 					mu.Unlock()
+					current, err := h.inbox.store.spawnTask(ctx, task.Request.RequestID)
+					if err == nil && (current.Node != nil || current.Status != "accepted") {
+						h.kickSpawnPlacement()
+					}
+					// A refresh may finish while this task is still marked active;
+					// its wake can then be consumed before the task is eligible.
+					if h.quotaRefresh.completedCount.Load() != refreshCount {
+						h.kickSpawnPlacement()
+					}
 				}
 			}
 		}()
 	}
-	tick := time.NewTicker(2 * time.Second)
-	defer tick.Stop()
-	for {
-		tasks, err := h.inbox.store.pendingSpawns(ctx)
-		if err == nil {
-			for _, task := range tasks {
+	schedule := func(task hubSpawnTask) {
+		if task.Status == "bound" && task.Node != nil && h.handleQueuedBinding(ctx, task) {
+			return
+		}
+		slots := 1
+		if task.Node != nil {
+			h.mu.Lock()
+			if record := h.nodes[task.Node.Machine]; record != nil {
+				slots = hubNodeSpawnSlots(record.capabilities)
+			}
+			h.mu.Unlock()
+		}
+		mu.Lock()
+		busy := active[task.Request.RequestID]
+		var key string
+		if task.Node != nil {
+			key = hubSpawnOverlapKey(task.Node)
+			machine := task.Node.Machine
+			open := nodeActive[machine]
+			if len(open) > 0 {
+				busy = busy || len(open) >= slots || key == "" || open[""] > 0
+				for held := range open {
+					busy = busy || spawnOverlapConflicts(held, key)
+				}
+			}
+			if mark, marked := drainFor[machine]; marked && time.Since(mark) > hubSpawnDrainMarkTTL {
+				delete(drainFor, machine)
+			}
+			switch {
+			case key == "" && busy && !active[task.Request.RequestID]:
+				drainFor[machine] = time.Now()
+			case key == "" && !busy:
+				delete(drainFor, machine)
+			case key != "":
+				_, draining := drainFor[machine]
+				busy = busy || draining
+			}
+		}
+		if !busy {
+			active[task.Request.RequestID] = true
+			if task.Node != nil {
+				if nodeActive[task.Node.Machine] == nil {
+					nodeActive[task.Node.Machine] = map[string]int{}
+				}
+				nodeActive[task.Node.Machine][key]++
+			}
+		}
+		mu.Unlock()
+		if busy {
+			return
+		}
+		if task.Node != nil {
+			h.spawnWorkers.Add(1)
+			go func(task hubSpawnTask) {
+				defer h.spawnWorkers.Done()
+				if h.drain.enter() {
+					current, err := h.inbox.store.spawnTask(ctx, task.Request.RequestID)
+					if err == nil && current.Attempt == task.Attempt && current.Node != nil && current.Node.RequestID == task.Node.RequestID && current.Node.Machine == task.Node.Machine && spawnPending(current.Status) {
+						h.inbox.store.touchSpawn(ctx, task.Request.RequestID, h.now().UTC())
+						h.executeSpawnTask(ctx, current)
+					}
+					h.drain.leave()
+				}
 				mu.Lock()
-				busy := active[task.Request.RequestID]
-				if !busy {
-					active[task.Request.RequestID] = true
+				delete(active, task.Request.RequestID)
+				if open := nodeActive[task.Node.Machine]; open != nil {
+					if open[key]--; open[key] <= 0 {
+						delete(open, key)
+					}
+					if len(open) == 0 {
+						delete(nodeActive, task.Node.Machine)
+					}
 				}
 				mu.Unlock()
-				if busy {
-					continue
+				current, err := h.inbox.store.spawnTask(ctx, task.Request.RequestID)
+				if err == nil && (current.Node == nil || !spawnPending(current.Status) || current.Node.RequestID != task.Node.RequestID) {
+					h.kickSpawnPlacement()
 				}
-				select {
-				case work <- task:
-				default:
-					mu.Lock()
-					delete(active, task.Request.RequestID)
-					mu.Unlock()
+			}(task)
+			return
+		}
+		select {
+		case work <- task:
+		default:
+			mu.Lock()
+			delete(active, task.Request.RequestID)
+			mu.Unlock()
+		}
+	}
+	tick := time.NewTicker(2 * time.Second)
+	defer tick.Stop()
+	refreshSeen := h.quotaRefresh.completedCount.Load()
+	ticked := true
+	// Under a rollback drain the gate count is logged at once and each
+	// minute (wall clock: an elapsed interval).
+	var rollbackLogged time.Time
+	for {
+		// A finished quota refresh is a quota change for parked requests.
+		if count := h.quotaRefresh.completedCount.Load(); count != refreshSeen {
+			refreshSeen = count
+			// Noted, not kicked: this pass wakes it now.
+			h.spawnWakeMu.Lock()
+			h.markSpawnWakeLocked(true, spawnParkQuota)
+			h.spawnWakeMu.Unlock()
+		}
+		h.wakeParkedSpawns(ctx, ticked)
+		ticked = false
+		if h.spawnRollbackDrain && time.Since(rollbackLogged) >= time.Minute {
+			rollbackLogged = time.Now()
+			h.logSpawnRollbackRows(ctx)
+		}
+		if h.drain.admit() {
+			// Start conditions are checked first so a row released in this
+			// tick is scheduled by the scan below rather than the next one.
+			h.checkWaitingSpawns(ctx)
+			// A request parked too long tells its owner once (hk 4662); the
+			// pass is rate-limited, so most ticks skip it.
+			h.checkParkedSpawnNotices(ctx)
+			// Work claimed during a scan may move later in the ordering. Do not
+			// schedule the same row twice in one pass, even if it reappears.
+			seen := map[string]bool{}
+			position := spawnScanPosition{}
+			for {
+				tasks, next, err := h.inbox.store.pendingSpawnPage(ctx, position, h.now().UTC())
+				if err != nil {
+					break
+				}
+				for _, task := range tasks {
+					if !seen[task.Request.RequestID] {
+						seen[task.Request.RequestID] = true
+						schedule(task)
+					}
+				}
+				if len(tasks) < 32 {
+					break
+				}
+				position = next
+			}
+			// Deadline-exceeded replays retain their existing bounded backoff.
+			now := h.now().UTC()
+			ordinary, _ := h.inbox.store.pendingSpawns(ctx, now)
+			for _, task := range ordinary {
+				if task.Status == "deadline_exceeded" {
+					schedule(task)
 				}
 			}
 		}
@@ -264,19 +492,104 @@ func (h *HubServer) runSpawnCoordinator(parent context.Context) {
 		case <-ctx.Done():
 			return
 		case <-tick.C:
+			ticked = true
 		case <-h.spawnKick:
 		}
 	}
 }
+
+// handleQueuedBinding expires or unbinds an unsent row independently of the
+// node slot. Its durable CAS decides whether a concurrent send won.
+func (h *HubServer) handleQueuedBinding(ctx context.Context, task hubSpawnTask) bool {
+	if !h.drain.enter() {
+		return true
+	}
+	defer h.drain.leave()
+	if !h.now().Before(task.Deadline) {
+		h.executeSpawnTask(ctx, task)
+		return true
+	}
+	h.mu.Lock()
+	record := h.nodes[task.Node.Machine]
+	admitted := record != nil && record.agent != nil && record.state == "connected" && record.capabilities["spawn_ops_v1"] && h.acceptingEffectiveLocked(task.Node.Machine, record.accepting)
+	h.mu.Unlock()
+	if admitted {
+		return false
+	}
+	if _, err := h.inbox.store.unbindUnsentSpawn(ctx, task.Request.RequestID, task.Attempt, task.Node.RequestID); err == nil {
+		h.releasePlacementCount(task.Job)
+		h.kickSpawnPlacement()
+	}
+	return true
+}
+
 func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) {
 	defer func() {
 		if recover() != nil {
 			h.finishSpawnOutcome(task, hubSpawnOutcome{RC: 1, Stage: "launch", Reason: "unknown"})
 		}
 	}()
-	if !h.now().Before(task.Deadline) {
-		h.finishSpawnOutcome(task, hubSpawnOutcome{RC: 124, Stage: "landing", Reason: "timeout", Host: spawnTaskHost(task), Retryable: task.Node == nil})
+	if len(task.Request.StartConditions) != 0 && task.ConditionsMet.IsZero() {
 		if task.Node == nil {
+			// A conditioned row that became executable without passing the
+			// queue (a legacy row, a replay, a node refusal that unbound it,
+			// a staged activation) goes back to waiting instead of launching
+			// with its --after predicates unchecked. The queue checks it and
+			// releases it to accepted once they hold.
+			_, _ = h.inbox.store.returnToWaiting(parent, task)
+			return
+		}
+		if h.now().Before(task.Deadline) {
+			// A row bound before the queue owned start conditions (hk 4736)
+			// keeps the guard it had: while its original deadline is live, do
+			// not replay an unmet condition because the node treats an unknown
+			// request id as a new spawn.
+			snapshot, err := readStartConditionSnapshot(parent, [][]fleet.StartCondition{task.Request.StartConditions})
+			if err != nil || fleet.EvaluateStartConditionSnapshot(task.Request.StartConditions, snapshot, h.now().UTC()).Status != "met" {
+				return
+			}
+		}
+	}
+	if !h.now().Before(task.Deadline) {
+		if task.Status == "deadline_exceeded" && task.Node != nil {
+			h.reprobeStaleSpawn(parent, task)
+			return
+		}
+		unsent := task.Node == nil || task.Status == "bound"
+		if task.Status == "bound" {
+			if !h.spawnActions.begin(task.Request.RequestID) {
+				return
+			}
+			defer h.spawnActions.end(task.Request.RequestID)
+		}
+		wait, failure, refreshWait := h.spawnRefreshWaitOutcome(task)
+		if refreshWait {
+			refreshReason := "none"
+			if failure != nil {
+				refreshReason = failure.Reason
+			}
+			h.logger.Warn("hub spawn timed out awaiting a quota refresh", "request_id", task.Request.RequestID, "job", task.Job, "machine", wait.Machine, "pool", wait.Pool, "refresh_reason", refreshReason, "queue_wait_s", spawnQueueWaitSeconds(task, h.now()))
+		} else if unsent {
+			h.logger.Warn("hub spawn starved in the queue", "request_id", task.Request.RequestID, "job", task.Job, "host", firstNonEmptyString(spawnTaskHost(task), "none"), "queue_wait_s", spawnQueueWaitSeconds(task, h.now()))
+		} else {
+			h.logger.Warn("hub spawn deadline elapsed with ownership unresolved", "request_id", task.Request.RequestID, "job", task.Job, "host", spawnTaskHost(task))
+		}
+		outcome := hubSpawnOutcome{RC: 124, Stage: "landing", Reason: "timeout", Host: spawnTaskHost(task), Retryable: unsent}
+		if refreshWait {
+			outcome.QuotaRefresh = failure
+			outcome.Fix = spawnRefreshWaitFix(task, wait, failure)
+		} else {
+			outcome.Fix = spawnQueueWaitFix(task, h.now())
+		}
+		h.finishSpawnOutcome(task, outcome)
+		// A parked pass emitted no refusal event (App.Parks): its end at the
+		// limit is the one terminal spawn event (hk 4661).
+		if task.ParkReason != "" {
+			if ended, err := h.inbox.store.spawnTask(parent, task.Request.RequestID); err == nil && ended.Status == "given_up" {
+				h.emitFleet(fleetEvent{Kind: "spawn", Job: task.Job, RequestID: task.Request.RequestID, Outcome: "refused", Reason: "given_up", Detail: "park_reason=" + task.ParkReason})
+			}
+		}
+		if unsent {
 			return
 		}
 		ctx, cancel := context.WithTimeout(parent, 5*time.Second)
@@ -293,9 +606,12 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 			return
 		}
 	}
+	// This pass now decides placement: drop the link the previous pass left so
+	// a pass that ends for another reason cannot name a stale machine/pool.
+	h.clearSpawnRefreshWaits(task)
 	ctx, cancel := context.WithDeadline(parent, task.Deadline)
 	defer cancel()
-	transport := &directSpawnTransport{h: h, task: task, started: time.Now()}
+	transport := &directSpawnTransport{h: h, task: task, started: time.Now(), probeWait: spawnNotStartedProbe, requireSnapshot: task.Node == nil}
 	if task.Node != nil {
 		_, _ = transport.dispatch(ctx, *task.Node)
 		return
@@ -305,21 +621,74 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 		h.finishSpawnOutcome(task, hubSpawnOutcome{RC: 78, Stage: "placement", Reason: "configuration", Retryable: true})
 		return
 	}
+	// The queue core's outbox owns this spawn's hk placement record: persist
+	// every trace the App emits so the record survives the App and a restart.
+	app.PlacementOutbox = true
+	var previous fleet.PlacementTrace
+	releaseTrace, err := h.lockPlacementTrace(parent, task, false)
+	if err != nil {
+		h.logger.Warn("placement trace recovery delayed", "request_id", task.Request.RequestID, "attempt", task.Attempt, "error", err)
+		return
+	}
+	payload, previousDelivery, _, err := h.inbox.store.spawnPlacementSnapshot(parent, task.Request.RequestID, task.Attempt)
+	if err != nil {
+		releaseTrace()
+		return
+	}
+	if len(payload) != 0 && json.Unmarshal(payload, &previous) != nil {
+		releaseTrace()
+		h.logger.Warn("placement snapshot could not be decoded", "request_id", task.Request.RequestID, "attempt", task.Attempt)
+		return
+	}
+	h.rememberPlacementTraceBase(task.Request.RequestID, task.Attempt, placementDeferredBase{Exists: len(payload) != 0, Payload: payload, Delivery: previousDelivery}, false)
+	releaseTrace()
+	defer h.forgetPlacementTraceBase(task.Request.RequestID, task.Attempt)
+	delivery, _ := json.Marshal(placementDelivery{StateDir: app.StateDir, Home: app.Home, Quota: app.Config.Quota})
+	app.PlacementTrace = func(tr fleet.PlacementTrace) {
+		tr = continueSpawnPlacementTrace(previous, tr, task.Exclusions)
+		if task.ClaimedHost != "" && len(task.Exclusions) != 0 && tr.Record != nil {
+			// The retry's in-process admission error is not the claimed node's
+			// result. Its final outcome still belongs to the operation row.
+			tr.Record, tr.Outcome, tr.Reason = nil, "", ""
+		}
+		err := h.notePlacementTrace(task, tr, string(delivery))
+		if tr.Chosen != "" {
+			transport.snapshotHost = tr.Chosen
+			transport.snapshotProfile = tr.Profile
+			transport.snapshotReady = false
+			if err == nil {
+				payload, _, recorded, readErr := h.inbox.store.spawnPlacementSnapshot(parent, task.Request.RequestID, task.Attempt)
+				var saved fleet.PlacementTrace
+				transport.snapshotReady = readErr == nil && !recorded && json.Unmarshal(payload, &saved) == nil && saved.Chosen == tr.Chosen && saved.Profile == tr.Profile
+			}
+		}
+	}
 	if ctx.Err() != nil {
 		h.finishSpawnOutcome(task, hubSpawnOutcome{RC: 124, Stage: "placement", Reason: "timeout", Retryable: true})
 		return
 	}
-	outcome := hubSpawnOutcome{Stage: "placement", StageMS: map[string]int64{}}
-	app.Hub = transport
-	app.State = directSpawnState{h}
-	app.Wake = directSpawnWake{h}
-	app.PlacementHosts = func(ctx context.Context, cwd string) ([]fleet.HostView, error) {
-		raw, err := json.Marshal(h.placement(ctx, "worker", cwd))
-		if err != nil {
-			return nil, err
+	outcome := hubSpawnOutcome{Stage: "placement", Host: spawnPinnedHost(task), StageMS: map[string]int64{}}
+	h.bindPlacement(app, transport)
+	// The shared scheduler is not this request's: collect the keys this pass
+	// asks it to refresh so a timeout can name the machine and pool.
+	var refreshMu sync.Mutex
+	var refreshWaits []hubSpawnRefreshWait
+	rememberRefreshWait := func(machine, pool string) {
+		refreshMu.Lock()
+		defer refreshMu.Unlock()
+		for _, wait := range refreshWaits {
+			if wait.Machine == machine && wait.Pool == pool {
+				return
+			}
 		}
-		return fleet.ParseHubHosts(string(raw))
+		refreshWaits = append(refreshWaits, hubSpawnRefreshWait{Machine: machine, Pool: pool})
 	}
+	app.ScheduleQuotaRefresh = func(machine, pool string, timeout time.Duration) {
+		rememberRefreshWait(machine, pool)
+		h.scheduleQuotaRefresh(machine, pool, timeout)
+	}
+	app.PlacementTry = func(host string) { h.countPlacement(task.Job, host, hubSpawnArg(task.Request.Args, "-l")) }
+	app.PlacementGate = h.placementGate.acquire
 	app.ObserveStage = func(stage string, d time.Duration) { outcome.Stage = stage; outcome.StageMS[stage] += d.Milliseconds() }
 	app.ObserveReceipt = func(r fleet.ExecutionReceipt) {
 		outcome.Host = r.Host
@@ -329,13 +698,29 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 		outcome.Role = r.Role
 	}
 	request := task.Request
-	if task.Outcome.Retryable && task.Outcome.Host != "" && !spawnRefusalTriesNextHost(task.Outcome.Reason) {
+	if pinnedHost := spawnPinnedHost(task); pinnedHost != "" {
 		request.Args = append([]string(nil), request.Args...)
+		foundHost := false
 		for i := 0; i+1 < len(request.Args); i++ {
 			if request.Args[i] == "--host" {
-				request.Args[i+1] = task.Outcome.Host
-				request.RetryHost = task.Outcome.Host
+				request.Args[i+1] = pinnedHost
+				foundHost = true
 			}
+		}
+		if !foundHost {
+			request.Args = append(request.Args, "--host", pinnedHost)
+		}
+		request.RetryHost = pinnedHost
+		for _, excluded := range task.Exclusions {
+			if excluded.Machine != pinnedHost {
+				continue
+			}
+			seat, ok := app.Policy.Profiles[excluded.Profile]
+			if !ok || seat.Kind == "" {
+				h.finishSpawnOutcome(task, hubSpawnOutcome{RC: 78, Stage: "placement", Reason: "configuration", Host: pinnedHost, Retryable: true})
+				return
+			}
+			request.RetryHarnesses = append(request.RetryHarnesses, seat.Kind)
 		}
 		found := false
 		for i := 0; i+1 < len(request.Args); i++ {
@@ -348,13 +733,60 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 			request.Args = append(request.Args, "--override-reason", "verified-cleanup-retry")
 		}
 	}
+	// The same test as the park below, so a parked pass emits no terminal
+	// refusal event on every recheck.
+	parks := func(err error) bool {
+		// A claimed request may park on capacity too: at its limit the
+		// timeout ends it with the saved claim refusal (h.completeSpawn).
+		if err == nil || ctx.Err() != nil || task.Expires.IsZero() {
+			return false
+		}
+		if spawnClaimedAnswer(task, err) {
+			return false
+		}
+		return spawnParkReason(fleet.ErrorCode(err), err.Error()) != ""
+	}
+	app.Parks = parks
+	wakeBefore := h.spawnWakeSnapshot()
 	err = app.ExecuteSubmission(ctx, request)
 	if transport.bound {
 		return
 	} // The node result owns completion and cleanup facts.
+	if errors.Is(err, fleet.ErrHubPlacementDeferred) {
+		h.releasePlacementCount(task.Job)
+		return
+	}
 	if parent.Err() != nil {
 		return
 	} // Restart resumes durable accepted ownership.
+	if errors.Is(err, fleet.ErrQuotaRefreshPending) {
+		refreshMu.Lock()
+		waits := append([]hubSpawnRefreshWait(nil), refreshWaits...)
+		refreshMu.Unlock()
+		task.RefreshWaits = h.noteSpawnRefreshWaits(task, waits)
+		if ctx.Err() == nil {
+			h.releasePlacementCount(task.Job)
+			return
+		}
+	}
+	// If every eligible harness was already refused, the node's last
+	// cleanup-confirmed refusal is the answer, not a selection error caused by
+	// excluding that same harness. Other placement errors retain their detail.
+	claimedAnswer := err != nil && ctx.Err() == nil && spawnClaimedAnswer(task, err)
+	// No candidate can take it now: a request with a limit is parked, not
+	// ended, and is placed again on an event or its next check (hk 4661).
+	if !claimedAnswer && parks(err) {
+		if reason := spawnParkReason(fleet.ErrorCode(err), err.Error()); reason != "" {
+			// A recognised no-candidate refusal never ends the request: a
+			// failed or ambiguous park write leaves it accepted for the next
+			// pass to park again.
+			if _, parkErr := h.parkSpawnTask(parent, task, reason, spawnRefusalLine(err.Error()), wakeBefore); parkErr != nil {
+				h.logger.Warn("hub spawn park not stored; retried next pass", "request_id", task.Request.RequestID, "reason", reason, "error", parkErr)
+			}
+			h.releasePlacementCount(task.Job)
+			return
+		}
+	}
 	outcome.RC = fleet.ErrorCode(err)
 	outcome.Reason = fleet.AdmissionRefusalReason(err)
 	if err != nil {
@@ -370,8 +802,22 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 	if ctx.Err() != nil {
 		outcome.RC = 124
 		outcome.Reason = "timeout"
+		// The deadline can expire inside the pass that parked the request on
+		// a refresh; that timeout names the refresh too, not the queue.
+		if errors.Is(err, fleet.ErrQuotaRefreshPending) {
+			if wait, failure, waiting := h.spawnRefreshWaitOutcome(task); waiting {
+				outcome.QuotaRefresh = failure
+				outcome.Fix = spawnRefreshWaitFix(task, wait, failure)
+			}
+		}
 	}
-	if changed, _ := h.inbox.store.completeSpawn(parent, task, outcome, h.now().UTC()); changed {
+	if outcome.Host == "" {
+		outcome.Host = spawnPinnedHost(task)
+	}
+	if claimedAnswer {
+		outcome = task.Outcome
+	}
+	if changed, _ := h.completeSpawn(parent, task, outcome); changed {
 		h.recordSpawnTrace(task, outcome)
 	}
 }
@@ -385,12 +831,17 @@ func spawnTaskHost(task hubSpawnTask) string {
 	if task.Node != nil {
 		return task.Node.Machine
 	}
-	return ""
+	return spawnPinnedHost(task)
 }
 
 type directSpawnState struct{ h *HubServer }
 
+// Snapshot is the hub's fleet state as a spawn decision reads it. The load
+// values in it are recomputed first, so a decision never ranks hosts on a
+// value published up to the freshness window ago, and so it sees every job
+// already counted onto a host (placement_count.go).
 func (s directSpawnState) Snapshot(ctx context.Context) (fleet.FleetSnapshot, error) {
+	s.h.refreshFleetLoad(ctx)
 	raw, err := json.Marshal(s.h.fleetSnapshot(s.h.now()))
 	var snap fleet.FleetSnapshot
 	if err == nil {
@@ -399,23 +850,177 @@ func (s directSpawnState) Snapshot(ctx context.Context) (fleet.FleetSnapshot, er
 	return snap, err
 }
 
-type directSpawnWake struct{ h *HubServer }
-
-func (w directSpawnWake) Wake(ctx context.Context, host string, request fleet.WakeRequest) error {
-	_, code := w.h.requestNodeWake(ctx, host)
-	if code != "" {
-		return errors.New("node wake refused")
+// noteSpawnRefreshWaits stores the refresh keys this placement pass parked on
+// and returns that link. The durable write is the one a timeout reads after a
+// restart; a pass with no keys leaves the link the start of the pass cleared.
+func (h *HubServer) noteSpawnRefreshWaits(task hubSpawnTask, waits []hubSpawnRefreshWait) []hubSpawnRefreshWait {
+	if len(waits) != 0 && h.inbox != nil {
+		if err := h.inbox.store.noteSpawnRefreshWaits(h.closeCtx, task.Request.RequestID, task.Attempt, waits); err != nil {
+			h.logger.Warn("spawn quota refresh link not recorded", "request_id", task.Request.RequestID, "attempt", task.Attempt, "error", err)
+		}
 	}
-	return nil
+	return waits
+}
+
+// clearSpawnRefreshWaits drops the link a previous pass recorded before this
+// pass decides anything, so a pass that ends without parking on a refresh (a
+// deferred placement, say) cannot leave a stale machine/pool for the timeout.
+func (h *HubServer) clearSpawnRefreshWaits(task hubSpawnTask) {
+	if task.Node != nil || len(task.RefreshWaits) == 0 || h.inbox == nil {
+		return
+	}
+	if err := h.inbox.store.clearSpawnRefreshWaits(h.closeCtx, task.Request.RequestID, task.Attempt); err != nil {
+		h.logger.Warn("spawn quota refresh link not cleared", "request_id", task.Request.RequestID, "attempt", task.Attempt, "error", err)
+	}
+}
+
+// spawnRefreshWaitOutcome reports whether an unbound request's timeout expired
+// while it waited on a shared quota refresh. It names the wait whose last
+// attempt failed most recently, or, when nothing failed, the wait whose last
+// attempt succeeded most recently, or the first wait when no attempt finished.
+func (h *HubServer) spawnRefreshWaitOutcome(task hubSpawnTask) (hubSpawnRefreshWait, *hubSpawnRefreshOutcome, bool) {
+	if task.Node != nil || len(task.RefreshWaits) == 0 {
+		return hubSpawnRefreshWait{}, nil, false
+	}
+	wait := task.RefreshWaits[0]
+	if h.inbox == nil {
+		return wait, nil, true
+	}
+	now := h.now()
+	var failure, success *hubSpawnRefreshOutcome
+	var failedAt, succeededAt time.Time
+	for _, candidate := range task.RefreshWaits {
+		outcome, seen, found, err := h.inbox.store.quotaRefreshAttempt(h.closeCtx, candidate.Machine, candidate.Pool)
+		if err != nil {
+			h.logger.Warn("spawn quota refresh attempt not read", "machine", candidate.Machine, "pool", candidate.Pool, "error", err)
+			continue
+		}
+		if !found {
+			continue
+		}
+		age := now.Sub(seen) / time.Second
+		if age < 0 {
+			age = 0
+		}
+		record := hubSpawnRefreshOutcome{Machine: candidate.Machine, Pool: candidate.Pool}
+		if outcome != "" {
+			record.Reason, record.FailedAgoS = outcome, int64(age)
+			if failure == nil || seen.After(failedAt) {
+				failure, failedAt = &record, seen
+			}
+			continue
+		}
+		record.SucceededAgoS = int64(age)
+		if success == nil || seen.After(succeededAt) {
+			success, succeededAt = &record, seen
+		}
+	}
+	if failure != nil {
+		return hubSpawnRefreshWait{Machine: failure.Machine, Pool: failure.Pool}, failure, true
+	}
+	if success != nil {
+		return hubSpawnRefreshWait{Machine: success.Machine, Pool: success.Pool}, success, true
+	}
+	return wait, nil, true
+}
+
+// spawnRefreshFailureText is the operator sentence for a recorded refresh
+// failure (refreshQuotaFromNode's reason codes).
+func spawnRefreshFailureText(reason string) string {
+	switch reason {
+	case "node_timeout":
+		return "the node did not answer within the refresh deadline"
+	case "node_unavailable":
+		return "the node was not connected"
+	case "node_lost":
+		return "the node's connection dropped"
+	case "refresh_failed":
+		return "the node's measurement failed"
+	default:
+		return "the refresh failed"
+	}
+}
+
+// spawnRefreshWaitFix explains a timeout that expired while the request waited
+// for a shared quota refresh. It names the machine, pool and last finished
+// attempt instead of the spawn queue, which the request never occupied, and
+// never blames a measurement the hub did not see fail.
+func spawnRefreshWaitFix(task hubSpawnTask, wait hubSpawnRefreshWait, refresh *hubSpawnRefreshOutcome) string {
+	head := fmt.Sprintf("the hub did not start this request within its %ds deadline: it waited for a quota refresh on %s (pool %s), and no node ran its landing", task.Request.DeadlineSeconds, wait.Machine, wait.Pool)
+	switch {
+	case refresh == nil:
+		return utf8PrefixWithin(fmt.Sprintf("%s; the hub had not finished a refresh attempt for it, so the shared reading stayed stale — confirm that host can measure the pool with panewire quota refresh %s, then resubmit", head, wait.Pool), 512)
+	case refresh.Reason != "":
+		return utf8PrefixWithin(fmt.Sprintf("%s; the last attempt failed %ds ago — %s (%s). Fix that measurement or restore the connection (panewire quota refresh %s), then resubmit", head, refresh.FailedAgoS, spawnRefreshFailureText(refresh.Reason), refresh.Reason, wait.Pool), 512)
+	default:
+		return utf8PrefixWithin(fmt.Sprintf("%s; the last attempt finished %ds ago, yet the placement still could not confirm the reading — check the account %s measures for pool %s, then resubmit", head, refresh.SucceededAgoS, wait.Machine, wait.Pool), 512)
+	}
+}
+
+// spawnQueueWaitFix distinguishes a never-sent queue timeout from a request
+// whose committed send may have reached its node.
+func spawnQueueWaitFix(task hubSpawnTask, now time.Time) string {
+	if task.Node != nil && task.Status != "bound" {
+		return fmt.Sprintf("the node %s may have started this request; inspect its saved operation and executing node before retrying", task.Node.Machine)
+	}
+	return fmt.Sprintf("the hub did not start this request within its %ds deadline (about %ds in the spawn queue, host=%s); no node ran its landing — check hub spawn worker occupancy, then resubmit", task.Request.DeadlineSeconds, spawnQueueWaitSeconds(task, now), firstNonEmptyString(spawnTaskHost(task), "none"))
+}
+
+// spawnQueueWaitSeconds is how long a request waited for a coordinator worker:
+// its whole deadline, plus however far past the deadline the worker picked it.
+func spawnQueueWaitSeconds(task hubSpawnTask, now time.Time) int64 {
+	waited := int64(task.Request.DeadlineSeconds)
+	if !task.Deadline.IsZero() {
+		waited += int64(now.Sub(task.Deadline) / time.Second)
+	}
+	if waited < 0 {
+		waited = 0
+	}
+	return waited
 }
 
 type directSpawnTransport struct {
-	h       *HubServer
-	task    hubSpawnTask
-	bound   bool
-	placing bool // inside the candidate loop, which can try another host
-	started time.Time
+	h               *HubServer
+	task            hubSpawnTask
+	bound           bool
+	started         time.Time
+	requireSnapshot bool
+	snapshotReady   bool
+	snapshotHost    string
+	snapshotProfile string
+	// probeWait is how long dispatch keeps asking its node after the landing
+	// wait ran out, before it settles the request as a timeout. Zero skips the
+	// probe (the coordinator's replay pass, whose own 5 s window is the probe).
+	probeWait time.Duration
 }
+
+// spawnNotStartedProbe bounds the question dispatch puts to a node once the
+// request's deadline has passed: did you ever start this? Past the deadline a
+// node never launches a request, so asking again cannot start a second one.
+const spawnNotStartedProbe = 5 * time.Second
+
+// spawnNotStarted reports a node answer that proves the request never began:
+// the node attests that it did not start the request before its deadline.
+func spawnNotStarted(result hubSpawnResult) bool {
+	return result.RC == 124 && result.Stage == "claim" && result.Error == "deadline_not_started" && result.Retryable
+}
+
+// spawnOutcomeNotStarted recognizes the same attestation after persistence.
+func spawnOutcomeNotStarted(outcome hubSpawnOutcome) bool {
+	reason, _, _ := strings.Cut(outcome.Reason, ": ")
+	return outcome.NodeResult && spawnNotStarted(hubSpawnResult{RC: outcome.RC, Stage: outcome.Stage, Error: reason, Retryable: outcome.Retryable})
+}
+
+// spawnLandingPaneUnconfirmed reports a landing refusal whose cleanup could
+// not prove the pane the node launched (fleet.FailedSpawnUnconfirmed,
+// internal/fleet/spawn_cleanup.go). The pane is named, so the hub can ask the
+// node whether a pane with the job's name and cwd is still there.
+func spawnLandingPaneUnconfirmed(result hubSpawnResult) bool {
+	return result.RC == 70 && result.Stage == "landing" && result.Pane != "" && strings.Contains(result.StdoutTail, fleet.FailedSpawnUnconfirmed)
+}
+
+// spawnNotStartedFix tells the caller what a not-started refusal means.
+const spawnNotStartedFix = "the node never started this request before its deadline. Replay the same command; the new attempt can choose another host only if no earlier attempt claimed the job."
 
 // nextHostRefusals are the refusals that say only that this host cannot run the
 // request now. cwd_unmapped is answered before any checkout or engine call, and
@@ -432,11 +1037,7 @@ var nextHostRefusals = map[string]bool{
 	"spawn_failed:trust_prompt":         true,
 	"spawn_failed:omp_setup_wizard":     true,
 	"spawn_failed:auth_unavailable":     true,
-}
-
-func checkoutRefusalMovesNextHost(reason string) bool {
-	code, _, _ := strings.Cut(reason, ": ")
-	return code == "checkout_refused:dirty" || code == "checkout_refused:sha-missing" || code == "checkout_refused:branch-elsewhere"
+	"launch_proof_failed":               true,
 }
 
 // spawnRefusalTriesNextHost names a node refusal that moves an auto placement
@@ -446,18 +1047,90 @@ func spawnRefusalTriesNextHost(reason string) bool {
 	return nextHostRefusals[code]
 }
 
+// spawnStageBeforeJobClaim reports a node result stage that ends before the
+// node's hk job claim: the refusal came from placement, the checkout step or an
+// early check (an empty stage), so no hk record names the refusing node. From
+// the claim on, hk holds the job id for that node's host and answers another
+// host's claim with 409 job_id_taken (rc 74, hk 4614), so a later candidate can
+// never take the job. An unknown stage counts as claimed. The node's own
+// not-started answer is a different case: spawnNotStarted.
+func spawnStageBeforeJobClaim(stage string) bool {
+	switch stage {
+	case "", "placement", "checkout":
+		return true
+	}
+	return false
+}
+
+// spawnReplayPinsHost reports whether a replay of a saved retryable refusal
+// runs on the host that refused it. A refusal that left an hk claim there pins
+// the replay, because another host's claim of the job id is a 409.
+func spawnReplayPinsHost(outcome hubSpawnOutcome) bool {
+	if !outcome.Retryable || outcome.Host == "" {
+		return false
+	}
+	// A completed node attestation of not-started is proof this attempt made
+	// no claim, even though its stage is claim. An earlier claim stays pinned
+	// independently in hubSpawnTask.ClaimedHost.
+	if spawnOutcomeNotStarted(outcome) {
+		return false
+	}
+	// A timeout the hub wrote for an unsent attempt, or a node timeout before
+	// the claim stage, made no claim: it pins nothing (hk 4661).
+	if code, _, _ := strings.Cut(outcome.Reason, ": "); code == "timeout" && (!outcome.NodeResult || spawnStageBeforeJobClaim(outcome.Stage)) {
+		return false
+	}
+	return !spawnRefusalMovesOn(outcome.Reason, outcome.Stage)
+}
+
+// spawnPinnedHost also reads outcomes written before claimed_host existed.
+// resumeCleanedSpawn carries that legacy pin into the durable column.
+func spawnPinnedHost(task hubSpawnTask) string {
+	if task.ClaimedHost != "" {
+		return task.ClaimedHost
+	}
+	if spawnReplayPinsHost(task.Outcome) {
+		return task.Outcome.Host
+	}
+	return ""
+}
+
+// spawnRefusalMovesOn is spawnRefusalTriesNextHost for a refusal that has a
+// stage: only a refusal that left no hk claim behind hands the job to another
+// host. Past the claim the request stays with the refusing host, where a
+// verified-cleanup retry replays the identical claim.
+func spawnRefusalMovesOn(reason, stage string) bool {
+	return spawnRefusalTriesNextHost(reason) && spawnStageBeforeJobClaim(stage)
+}
+
 func (t *directSpawnTransport) Spawn(ctx context.Context, req fleet.HubSpawnRequest) (fleet.HubSpawnReply, error) {
+	if t.bound {
+		// An engine busy retry must not bind a second request or replay the old
+		// journal id after this transport has published a binding.
+		return fleet.HubSpawnReply{}, fleet.ErrHubPlacementBound
+	}
+	// Reapply saved refusals through the existing candidate loop. In particular,
+	// a launch-proof refusal first tries another harness on this same host;
+	// other refusals rule out the host for the rest of this request (hk 4661: across its attempts).
+	for _, excluded := range t.task.Exclusions {
+		profileOnly := excluded.Reason == "launch_proof_failed" || t.task.ClaimedHost == excluded.Machine
+		if excluded.Machine == req.Machine && (!profileOnly || excluded.Profile == hubSpawnArg(req.Args, "-m")) {
+			t.h.releasePlacementCount(t.task.Job)
+			return fleet.HubSpawnReply{RC: excluded.RC, Error: excluded.Reason, NextHost: true}, nil
+		}
+	}
+	if t.requireSnapshot && (!t.snapshotReady || t.snapshotHost != req.Machine || t.snapshotProfile != hubSpawnArg(req.Args, "-m")) {
+		return fleet.HubSpawnReply{}, fleet.ErrHubPlacementDeferred
+	}
 	t.h.mu.Lock()
 	record := t.h.nodes[req.Machine]
 	oldNode := record != nil && record.agent != nil && record.state == "connected" && !record.capabilities["spawn_ops_v1"]
+	// A draining hub binds no new grant-required attempt; placement goes on
+	// and sends without a grant, as to a node without the capability.
+	grantRequired := !t.h.spawnGrantDrain && record != nil && record.capabilities[hubCapabilitySpawnGrant]
 	t.h.mu.Unlock()
 	if oldNode {
 		return fleet.HubSpawnReply{}, &fleet.HubError{Kind: "hub_spawn_capability_required"}
-	}
-	if t.bound {
-		// A definitive node refusal already completed this attempt. An engine
-		// busy retry must not bind a second request or replay the old journal id.
-		return fleet.HubSpawnReply{}, &fleet.HubError{Kind: "hub_spawn_pending"}
 	}
 	raw, err := json.Marshal(req)
 	if err != nil {
@@ -471,49 +1144,203 @@ func (t *directSpawnTransport) Spawn(ctx context.Context, req fleet.HubSpawnRequ
 		node.PlacementMS = time.Since(t.started).Milliseconds()
 	}
 	node.DeadlineMS = t.task.Deadline.UnixMilli()
+	node.GrantRequired = grantRequired
 	node.WaitSeconds = max(1, min(3600, int(time.Until(t.task.Deadline).Seconds())+1))
 	// The bind can commit even when its response is lost. From this point a
 	// placement caller must not release ownership or fall through to a host.
 	t.bound = true
-	task, err := t.h.inbox.store.bindSpawn(ctx, t.task.Request.RequestID, t.task.Attempt, node)
+	task, err := t.h.inbox.store.bindSpawn(ctx, t.task.Request.RequestID, t.task.Attempt, node, t.h.now().UTC())
 	if err != nil {
-		return fleet.HubSpawnReply{}, &fleet.HubError{Kind: "hub_spawn_pending"}
+		return fleet.HubSpawnReply{}, fleet.ErrHubPlacementBound
 	}
 	t.task = task
-	t.placing = true
-	return t.dispatch(ctx, *task.Node)
+	t.h.kickSpawnPlacement()
+	return fleet.HubSpawnReply{}, fleet.ErrHubPlacementBound
 }
 
 // nextHostAfterRefusal hands an auto placement back to its candidate loop. A
 // pinned host is the operator's choice, so its refusal stays the answer.
-func (t *directSpawnTransport) nextHostAfterRefusal(ctx context.Context, node hubSpawnRequest, result hubSpawnResult) bool {
-	// A dialog refusal comes after the engine launched a pane, so only a
-	// verified cleanup (Retryable) lets another host take the job id.
-	if !t.placing || result.RC == 0 || !result.Retryable || !spawnRefusalTriesNextHost(spawnResultReason(result)) || firstNonEmptyString(hubSpawnArg(t.task.Request.Args, "--host"), "auto") != "auto" {
-		return false
+func (t *directSpawnTransport) nextHostAfterRefusal(ctx context.Context, node hubSpawnRequest, result hubSpawnResult) (bool, error) {
+	// A refusal that comes after the node's hk job claim (a dialog or login
+	// screen after the pane launched) stays with that host: hk answers another
+	// host's claim of the job id with 409 job_id_taken, rc 74 (hk 4614). Only a
+	// refusal before the claim moves on, and only after verified cleanup.
+	// A request the node never started also moves on, while the request's own
+	// deadline still has room for another host.
+	// A cleanup-confirmed replay can already carry a host-bound claim from its
+	// prior attempt, even when this attempt refuses before making a new claim.
+	movesOn := spawnRefusalMovesOn(spawnResultReason(result), result.Stage) || spawnNotStarted(result)
+	if result.RC == 0 || !result.Retryable || !movesOn || !t.h.now().Before(t.task.Deadline) || spawnPinnedHost(t.task) != "" || firstNonEmptyString(hubSpawnArg(t.task.Request.Args, "--host"), "auto") != "auto" {
+		return false, nil
 	}
-	task, err := t.h.inbox.store.unbindRefusedSpawn(ctx, t.task.Request.RequestID, t.task.Attempt, node.RequestID)
+	if result.Error == "launch_proof_failed" && result.RC != 70 {
+		return false, nil
+	}
+	reason := spawnResultReason(result)
+	exclusion := hubSpawnExclusion{Machine: node.Machine, Profile: hubSpawnArg(node.Args, "-m"), Reason: reason, RC: result.RC}
+	task, err := t.h.inbox.store.unbindRefusedSpawn(ctx, t.task, exclusion, nil, t.h.now().UTC())
 	if err != nil {
-		return false
+		return true, err
 	}
 	t.task, t.bound = task, false
-	reason := spawnResultReason(result)
+	// The refused host no longer holds this job; the next candidate counts it.
+	t.h.releasePlacementCount(task.Job)
 	t.h.observeLaunchOutcome(node.Machine, hubSpawnArg(node.Args, "-m"), result.RC, reason, t.h.now().UTC())
 	t.h.logger.Warn("hub spawn refused by node; trying next candidate", "request_id", task.Request.RequestID, "node_request_id", node.RequestID, "job", task.Job, "host", node.Machine, "profile", hubSpawnArg(node.Args, "-m"), "rc", result.RC, "reason", reason)
-	return true
+	t.h.kickSpawnPlacement()
+	return true, nil
+}
+
+// retryHarnessAfterClaim keeps the host-bound hk claim while retrying an
+// automatically selected harness whose launch was cleaned up. The host pin,
+// failed profile and unbinding are one durable transition.
+func (t *directSpawnTransport) retryHarnessAfterClaim(ctx context.Context, node hubSpawnRequest, result hubSpawnResult, outcome hubSpawnOutcome) (bool, error) {
+	reason := spawnResultReason(result)
+	switch reason {
+	case "launch_proof_failed", "spawn_failed:hooks_review", "spawn_failed:trust_prompt", "spawn_failed:omp_setup_wizard", "spawn_failed:auth_unavailable":
+	default:
+		return false, nil
+	}
+	postLaunch := result.Stage == "launch" || result.Stage == "landing"
+	previousClaim := spawnPinnedHost(t.task) == node.Machine && spawnStageBeforeJobClaim(result.Stage)
+	if result.RC == 0 || !result.Retryable || !postLaunch && !previousClaim || !t.h.now().Before(t.task.Deadline) || reason == "launch_proof_failed" && result.RC != 70 {
+		return false, nil
+	}
+	spawn, err := fleet.ValidateSubmission(t.task.Request)
+	profile := hubSpawnArg(node.Args, "-m")
+	if err != nil || profile == "" || spawn.Delegated || spawn.Profile != "" && spawn.Profile != "auto" {
+		return false, nil
+	}
+	exclusion := hubSpawnExclusion{Machine: node.Machine, Profile: profile, Reason: reason, RC: result.RC}
+	task, err := t.h.inbox.store.unbindRefusedSpawn(ctx, t.task, exclusion, &outcome, t.h.now().UTC())
+	if err != nil {
+		return true, err
+	}
+	t.task, t.bound = task, false
+	t.h.releasePlacementCount(task.Job)
+	t.h.observeLaunchOutcome(node.Machine, profile, result.RC, reason, t.h.now().UTC())
+	t.h.logger.Warn("hub spawn harness refused; trying another on claimed host", "request_id", task.Request.RequestID, "node_request_id", node.RequestID, "job", task.Job, "host", node.Machine, "profile", profile, "rc", result.RC, "reason", reason)
+	t.h.kickSpawnPlacement()
+	return true, nil
 }
 func (t *directSpawnTransport) dispatch(ctx context.Context, node hubSpawnRequest) (fleet.HubSpawnReply, error) {
 	h := t.h
+	id := t.task.Request.RequestID
+	if !h.spawnActions.begin(id) {
+		return fleet.HubSpawnReply{}, &fleet.HubError{Kind: "hub_spawn_pending"}
+	}
+	defer h.spawnActions.end(id)
+	current, err := h.inbox.store.spawnTask(ctx, id)
+	if err != nil || current.Attempt != t.task.Attempt || current.Node == nil || current.Node.RequestID != node.RequestID || current.Node.Machine != node.Machine || !spawnPending(current.Status) {
+		return fleet.HubSpawnReply{}, &fleet.HubError{Kind: "hub_spawn_pending"}
+	}
+	t.task, node = current, *current.Node
+	// A sent attempt whose fence committed before a hub stop was never
+	// granted, so never started: settle it now instead of sending it again.
+	// One whose latest start_by plus the margin has passed is fenced here,
+	// before any resend, so a replay with a short context (a recovery
+	// reprobe) still fences an ungranted attempt.
+	if node.GrantRequired && current.Status != "bound" {
+		fenced, err := h.inbox.store.spawnAttemptFenced(ctx, node.RequestID)
+		if err != nil {
+			return fleet.HubSpawnReply{}, &fleet.HubError{Kind: "hub_spawn_pending"}
+		}
+		if !fenced {
+			startBy, err := h.inbox.store.spawnAttemptStartBy(ctx, node.RequestID)
+			if err != nil {
+				return fleet.HubSpawnReply{}, &fleet.HubError{Kind: "hub_spawn_pending"}
+			}
+			if startBy != 0 && time.Now().After(time.UnixMilli(startBy).Add(h.spawnStartByMargin)) {
+				if fenced, err = h.inbox.store.fenceSpawnAttempt(h.closeCtx, id, node.RequestID, h.now().UTC()); err != nil {
+					return fleet.HubSpawnReply{}, &fleet.HubError{Kind: "hub_spawn_pending"}
+				}
+				if fenced {
+					h.logger.Warn("hub spawn attempt fenced before its start grant", "request_id", id, "node_request_id", node.RequestID, "host", node.Machine)
+				}
+			}
+		}
+		if fenced {
+			return t.settleNodeResult(ctx, node, spawnFencedResult(node, h.now().UTC()), false)
+		}
+	}
+	if current.Status == "bound" && !h.now().Before(current.Deadline) {
+		h.finishSpawnOutcome(current, hubSpawnOutcome{RC: 124, Stage: "landing", Reason: "timeout", Host: node.Machine, Retryable: true, Fix: spawnQueueWaitFix(current, h.now())})
+		return fleet.HubSpawnReply{}, &fleet.HubError{Kind: "hub_spawn_pending"}
+	}
+	releaseAdmission := func() {}
+	if current.Status == "bound" {
+		releaseAdmission, err = h.spawnAdmissions.lock(ctx, node.Machine)
+		if err != nil {
+			return fleet.HubSpawnReply{}, &fleet.HubError{Kind: "hub_spawn_pending"}
+		}
+		if ctx.Err() != nil {
+			releaseAdmission()
+			return fleet.HubSpawnReply{}, &fleet.HubError{Kind: "hub_spawn_pending"}
+		}
+		if !h.now().Before(current.Deadline) {
+			releaseAdmission()
+			h.finishSpawnOutcome(current, hubSpawnOutcome{RC: 124, Stage: "landing", Reason: "timeout", Host: node.Machine, Retryable: true, Fix: spawnQueueWaitFix(current, h.now())})
+			return fleet.HubSpawnReply{}, &fleet.HubError{Kind: "hub_spawn_pending"}
+		}
+	}
 	h.mu.Lock()
 	record := h.nodes[node.Machine]
-	if record == nil || record.agent == nil || record.state != "connected" || !record.capabilities["spawn_ops_v1"] {
+	// A grant-required attempt goes only to a node that asks for its grant.
+	connected := record != nil && record.agent != nil && record.state == "connected" && record.capabilities["spawn_ops_v1"] && (!node.GrantRequired || record.capabilities[hubCapabilitySpawnGrant])
+	if current.Status == "bound" && (!connected || !h.acceptingEffectiveLocked(node.Machine, record.accepting)) {
 		h.mu.Unlock()
+		releaseAdmission()
+		if _, err := h.inbox.store.unbindUnsentSpawn(ctx, id, current.Attempt, node.RequestID); err == nil {
+			h.releasePlacementCount(current.Job)
+			select {
+			case h.spawnKick <- struct{}{}:
+			default:
+			}
+		}
+		return fleet.HubSpawnReply{}, &fleet.HubError{Kind: "hub_spawn_pending"}
+	}
+	if !connected {
+		h.mu.Unlock()
+		releaseAdmission()
 		return t.unknown(ctx, "disconnected")
 	}
 	agent := record.agent
+	h.mu.Unlock()
+	// Fresh sends serialize with that node's accepting override without
+	// holding h.mu across the durable CAS. Replays remain allowed when the
+	// node no longer accepts new work.
+	// The start_by this send carries is recorded before the frame can leave;
+	// without the record nothing is sent.
+	var startByMS int64
+	if node.GrantRequired {
+		startByMS = time.Now().Add(h.spawnStartBy).UnixMilli()
+		if err := h.inbox.store.recordSpawnStartBy(ctx, node.RequestID, startByMS); err != nil {
+			releaseAdmission()
+			return fleet.HubSpawnReply{}, &fleet.HubError{Kind: "hub_spawn_pending"}
+		}
+	}
+	started, err := h.inbox.store.beginSpawnSend(ctx, current)
+	if err != nil || !started {
+		releaseAdmission()
+		return fleet.HubSpawnReply{}, &fleet.HubError{Kind: "hub_spawn_pending"}
+	}
+	if current.Status == "bound" {
+		t.task.Status = "dispatching"
+	}
+	h.mu.Lock()
+	record = h.nodes[node.Machine]
+	if record == nil || record.agent != agent || record.state != "connected" || !record.capabilities["spawn_ops_v1"] || node.GrantRequired && !record.capabilities[hubCapabilitySpawnGrant] || current.Status == "bound" && !h.acceptingEffectiveLocked(node.Machine, record.accepting) {
+		h.mu.Unlock()
+		releaseAdmission()
+		return t.unknown(ctx, "disconnected")
+	}
+	// The request's absolute expiry goes only to a node that reads it (hk
+	// 4747): an older node's strict frame decoder refuses the unknown field.
+	expiresMS := spawnExpiryField(record.capabilities, current.Expires)
 	entry := &hubSpawnRecord{request: node, status: "pending", created: h.now(), waiter: make(chan hubSpawnResult, 1)}
 	h.spawnRecords[node.RequestID] = entry
 	h.mu.Unlock()
+	releaseAdmission()
 	message := struct {
 		OperatorAuthorized bool              `json:"operator_authorized"`
 		Type               string            `json:"type"`
@@ -524,73 +1351,196 @@ func (t *directSpawnTransport) dispatch(ctx context.Context, node hubSpawnReques
 		Args               []string          `json:"args"`
 		WaitSeconds        int               `json:"wait_seconds"`
 		DeadlineMS         int64             `json:"deadline_ms,omitempty"`
-	}{true, "job.spawn", node.RequestID, node.CWDKey, node.Brief, node.Checkout, node.Args, node.WaitSeconds, node.DeadlineMS}
-	if agent.writeJSON(message) != nil {
-		return t.unknown(ctx, "disconnected")
+		ExpiresMS          int64             `json:"expires_ms,omitempty"`
+		StartByMS          int64             `json:"start_by_ms,omitempty"`
+	}{true, "job.spawn", node.RequestID, node.CWDKey, node.Brief, node.Checkout, node.Args, node.WaitSeconds, node.DeadlineMS, expiresMS, 0}
+	// Every send of a grant-required attempt, a replay after a hub restart
+	// included, gives the node a fresh start_by and arms the fence after it.
+	// start_by only bounds the node's wait; the grant/fence row is the proof.
+	if node.GrantRequired {
+		message.StartByMS = startByMS
 	}
-	select {
-	case result := <-entry.waiter:
-		// unknown: the node holds no live execution of this request. Past the
-		// deadline nothing will finish it, so a node without a labelled pane
-		// makes it orphaned (hub_spawn_orphan.go).
-		if result.CompletedAt != nil && result.Error == "unknown" && !h.now().Before(t.task.Deadline) && h.resolveOrphanedSpawn(t.task) {
-			return fleet.HubSpawnReply{}, &fleet.HubError{Kind: "hub_spawn_pending"}
-		}
-		if result.CompletedAt == nil || result.Error == "reconciling" || result.Error == "unknown" || result.Error == "journal_unavailable" || result.Error == "journal_conflict" {
-			return t.unknown(ctx, "unknown")
-		}
-		// The authenticated node's completed journal is necessary, and a current
-		// exact pane read is additionally required before accepting late success.
-		if result.RC == 0 && (node.Checkout != nil && (result.Receipt == nil || !spawnReceiptCheckoutPath(result.Receipt.CWD, node.Checkout.Dir, hubSpawnArg(node.Args, "-L"))) || !h.verifySpawnPane(ctx, node.Machine, result, node.Args)) {
-			return t.unknown(ctx, "unknown")
-		}
-		h.noteOneTimeActionRefusal(node.Machine, hubSpawnArg(node.Args, "-m"), result)
-		if t.nextHostAfterRefusal(ctx, node, result) {
-			return fleet.HubSpawnReply{RequestID: result.RequestID, RC: result.RC, JobID: result.JobID, StdoutTail: result.StdoutTail, Error: spawnResultReason(result), NextHost: true}, nil
-		}
-		stage := result.Stage
-		if stage == "" {
-			stage = "placement"
-		}
-		outcome := hubSpawnOutcome{RC: result.RC, Stage: stage, Reason: result.Error, Host: node.Machine, Pane: result.Pane, Retryable: result.Retryable, NodeResult: true, StageMS: result.StageMS, Role: hubSpawnArg(node.Args, "--role"), Profile: hubSpawnArg(node.Args, "-m"), E6Arm: t.task.Request.E6Arm}
-		if outcome.StageMS == nil {
-			outcome.StageMS = map[string]int64{}
-		}
-		outcome.StageMS["placement"] = min(int64(3600000), outcome.StageMS["placement"]+node.PlacementMS)
-		outcome.Fix = spawnResultFix(result.StdoutTail)
-		if result.Receipt != nil {
-			outcome.Profile = result.Receipt.Profile
-			outcome.Model = result.Receipt.Model
-			outcome.Role = result.Receipt.Role
-			outcome.LaneUnregistered = result.Receipt.LaneUnregistered
-		}
-		if outcome.RC != 0 {
-			outcome.Reason = spawnOutcomeReason(spawnResultReason(result), spawnResultRefusal(result.StdoutTail))
-		}
-		changed, err := h.inbox.store.completeSpawn(h.closeCtx, t.task, outcome, h.now().UTC())
-		if err != nil {
-			return fleet.HubSpawnReply{}, &fleet.HubError{Kind: "hub_spawn_pending"}
-		}
-		if changed {
-			h.recordSpawnTrace(t.task, outcome)
-			// The first completion of a request is the launch outcome; a
-			// replayed completion must not count twice.
-			h.observeLaunchOutcome(node.Machine, firstNonEmptyString(hubSpawnArg(node.Args, "-m"), outcome.Profile), result.RC, outcome.Reason, h.now().UTC())
-		}
-		return fleet.HubSpawnReply{RequestID: result.RequestID, RC: result.RC, JobID: result.JobID, Pane: result.Pane, StdoutTail: result.StdoutTail, Error: result.Error}, nil
-	case <-ctx.Done():
+	writeCtx, cancelWrite := context.WithCancel(ctx)
+	stopConnection := func() bool { return false }
+	if agent.lifetime != nil {
+		stopConnection = context.AfterFunc(agent.lifetime, cancelWrite)
+	}
+	writeErr := agent.writeJSONContext(writeCtx, message)
+	stopConnection()
+	cancelWrite()
+	if writeErr != nil {
 		if errors.Is(ctx.Err(), context.Canceled) {
 			return fleet.HubSpawnReply{}, &fleet.HubError{Kind: "hub_spawn_pending"}
 		}
-		return t.unknown(h.closeCtx, "timeout")
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return t.afterSpawnDeadline(agent, entry, message)
+		}
+		return t.unknown(ctx, "disconnected")
 	}
+	// The fence is armed once the frame is written, so time spent waiting
+	// for the writer never shortens the margin after start_by.
+	var fence <-chan time.Time
+	var fenceTimer *time.Timer
+	fenceRetry := time.Second
+	if node.GrantRequired {
+		fenceTimer = time.NewTimer(time.Until(time.UnixMilli(message.StartByMS)) + h.spawnStartByMargin)
+		defer fenceTimer.Stop()
+		fence = fenceTimer.C
+	}
+	for {
+		select {
+		case result := <-entry.waiter:
+			return t.settleNodeResult(ctx, node, result, false)
+		case <-fence:
+			fenced, err := h.inbox.store.fenceSpawnAttempt(h.closeCtx, id, node.RequestID, h.now().UTC())
+			if err != nil {
+				// Undecided (a commit error may even have landed): try again
+				// with bounded backoff; the INSERT is idempotent.
+				h.logger.Warn("hub spawn fence not decided", "request_id", id, "node_request_id", node.RequestID, "err", err)
+				fenceTimer.Reset(fenceRetry)
+				fenceRetry = min(2*fenceRetry, 30*time.Second)
+				continue
+			}
+			if !fenced {
+				// A lost fence means the node holds a grant: keep waiting, and
+				// past the landing bound keep ownership as before.
+				fence = nil
+				continue
+			}
+			h.mu.Lock()
+			if entry.status == "pending" {
+				entry.status = "fenced" // a late node answer for this id is ignored
+			}
+			h.mu.Unlock()
+			h.logger.Warn("hub spawn attempt fenced before its start grant", "request_id", id, "node_request_id", node.RequestID, "host", node.Machine)
+			return t.settleNodeResult(ctx, node, spawnFencedResult(node, h.now().UTC()), false)
+		case <-ctx.Done():
+			if errors.Is(ctx.Err(), context.Canceled) {
+				return fleet.HubSpawnReply{}, &fleet.HubError{Kind: "hub_spawn_pending"}
+			}
+			return t.afterSpawnDeadline(agent, entry, message)
+		}
+	}
+}
+
+func (t *directSpawnTransport) afterSpawnDeadline(agent *hubAgent, entry *hubSpawnRecord, message any) (fleet.HubSpawnReply, error) {
+	if t.probeWait > 0 {
+		if result, answered := t.probeNode(agent, entry, message); answered {
+			probeCtx, cancel := context.WithTimeout(t.h.closeCtx, t.probeWait)
+			defer cancel()
+			return t.settleNodeResult(probeCtx, entry.request, result, true)
+		}
+	}
+	return t.unknown(t.h.closeCtx, "timeout")
+}
+
+// probeNode asks the node once more after the landing wait ran out, by
+// replaying the same request id, and waits at most probeWait for a definite
+// answer. Silence or an uncertain answer (still executing, restarted, journal
+// trouble) returns false: the caller keeps ownership as a timeout, never
+// guessing from silence. An answer to the original frame counts too.
+func (t *directSpawnTransport) probeNode(agent *hubAgent, entry *hubSpawnRecord, message any) (hubSpawnResult, bool) {
+	ctx, cancel := context.WithTimeout(t.h.closeCtx, t.probeWait)
+	defer cancel()
+	if agent.writeJSONContext(ctx, message) != nil {
+		return hubSpawnResult{}, false
+	}
+	select {
+	case result := <-entry.waiter:
+		uncertain := result.CompletedAt == nil || result.Error == "reconciling" || result.Error == "unknown" || result.Error == "journal_unavailable" || result.Error == "journal_conflict"
+		return result, !uncertain
+	case <-ctx.Done():
+		return hubSpawnResult{}, false
+	}
+}
+
+// settleNodeResult applies one answer from the bound node.
+func (t *directSpawnTransport) settleNodeResult(ctx context.Context, node hubSpawnRequest, result hubSpawnResult, afterDeadline bool) (fleet.HubSpawnReply, error) {
+	h := t.h
+	// unknown: the node holds no live execution of this request. Past the
+	// deadline nothing will finish it, so a node without a labelled pane
+	// makes it orphaned (hub_spawn_orphan.go).
+	if result.CompletedAt != nil && result.Error == "unknown" && !h.now().Before(t.task.Deadline) && h.resolveOrphanedSpawn(t.task) {
+		return fleet.HubSpawnReply{}, &fleet.HubError{Kind: "hub_spawn_pending"}
+	}
+	if result.CompletedAt == nil || result.Error == "reconciling" || result.Error == "unknown" || result.Error == "journal_unavailable" || result.Error == "journal_conflict" {
+		return t.unknown(ctx, "unknown")
+	}
+	// A landing refused only because the node could not confirm its pane may
+	// still have the job's pane running the brief. The same exact pane read
+	// that gates late success re-checks it: a pane found there settles the
+	// request as landed, and nothing is launched again.
+	rechecked := spawnLandingPaneUnconfirmed(result) && h.verifySpawnPane(ctx, node.Machine, result, node.Args)
+	if rechecked {
+		result.RC, result.Error, result.Retryable = 0, "", false
+	}
+	// The authenticated node's completed journal is necessary, and a current
+	// exact pane read is additionally required before accepting late success.
+	if result.RC == 0 && (node.Checkout != nil && (result.Receipt == nil || !spawnReceiptCheckoutPath(result.Receipt.CWD, node.Checkout.Dir, hubSpawnFlagArg(node.Args, "-L"))) || !rechecked && !h.verifySpawnPane(ctx, node.Machine, result, node.Args)) {
+		return t.unknown(ctx, "unknown")
+	}
+	h.noteOneTimeActionRefusal(node.Machine, hubSpawnArg(node.Args, "-m"), result)
+	outcome := spawnNodeOutcome(t.task, node, result)
+	if !afterDeadline || !spawnNotStarted(result) {
+		if handled, err := t.retryHarnessAfterClaim(ctx, node, result, outcome); handled {
+			if err != nil {
+				return fleet.HubSpawnReply{}, &fleet.HubError{Kind: "hub_spawn_pending"}
+			}
+			return fleet.HubSpawnReply{RequestID: result.RequestID, RC: result.RC, JobID: result.JobID, StdoutTail: result.StdoutTail, Error: spawnResultReason(result)}, nil
+		}
+		if handled, err := t.nextHostAfterRefusal(ctx, node, result); handled {
+			if err != nil {
+				return fleet.HubSpawnReply{}, &fleet.HubError{Kind: "hub_spawn_pending"}
+			}
+			return fleet.HubSpawnReply{RequestID: result.RequestID, RC: result.RC, JobID: result.JobID, StdoutTail: result.StdoutTail, Error: spawnResultReason(result), NextHost: true}, nil
+		}
+	}
+	changed, err := h.completeSpawn(h.closeCtx, t.task, outcome)
+	if err != nil {
+		return fleet.HubSpawnReply{}, &fleet.HubError{Kind: "hub_spawn_pending"}
+	}
+	if changed {
+		h.recordSpawnTrace(t.task, outcome)
+		// The first completion of a request is the launch outcome; a
+		// replayed completion must not count twice.
+		h.observeLaunchOutcome(node.Machine, firstNonEmptyString(hubSpawnArg(node.Args, "-m"), outcome.Profile), result.RC, outcome.Reason, h.now().UTC())
+	}
+	return fleet.HubSpawnReply{RequestID: result.RequestID, RC: result.RC, JobID: result.JobID, Pane: result.Pane, StdoutTail: result.StdoutTail, Error: result.Error}, nil
+}
+
+func spawnNodeOutcome(task hubSpawnTask, node hubSpawnRequest, result hubSpawnResult) hubSpawnOutcome {
+	stage := result.Stage
+	if stage == "" {
+		stage = "placement"
+	}
+	outcome := hubSpawnOutcome{RC: result.RC, Stage: stage, Reason: result.Error, Host: node.Machine, Pane: result.Pane, Retryable: result.Retryable, NodeResult: true, StageMS: result.StageMS, Role: hubSpawnArg(node.Args, "--role"), Profile: hubSpawnArg(node.Args, "-m"), E6Arm: task.Request.E6Arm}
+	if outcome.StageMS == nil {
+		outcome.StageMS = map[string]int64{}
+	}
+	outcome.StageMS["placement"] = min(int64(3600000), outcome.StageMS["placement"]+node.PlacementMS)
+	outcome.Fix = spawnResultFix(result.StdoutTail)
+	if outcome.Fix == "" && spawnNotStarted(result) {
+		outcome.Fix = spawnNotStartedFix
+	}
+	if result.Receipt != nil {
+		outcome.Profile = result.Receipt.Profile
+		outcome.Model = result.Receipt.Model
+		outcome.Pool = result.Receipt.Pool
+		outcome.AccountKey = result.Receipt.AccountKey
+		outcome.Role = result.Receipt.Role
+		outcome.LaneUnregistered = result.Receipt.LaneUnregistered
+	}
+	if outcome.RC != 0 {
+		outcome.Reason = spawnOutcomeReason(spawnResultReason(result), spawnResultRefusal(result.StdoutTail))
+	}
+	return outcome
 }
 func (t *directSpawnTransport) unknown(ctx context.Context, reason string) (fleet.HubSpawnReply, error) {
 	outcome := hubSpawnOutcome{RC: 75, Stage: "landing", Reason: reason, Host: spawnTaskHost(t.task), E6Arm: t.task.Request.E6Arm}
 	if reason == "timeout" {
 		outcome.RC = 124
 	}
-	if changed, _ := t.h.inbox.store.completeSpawn(ctx, t.task, outcome, t.h.now().UTC()); changed {
+	if changed, _ := t.h.completeSpawn(ctx, t.task, outcome); changed {
 		t.h.recordSpawnTrace(t.task, outcome)
 	}
 	return fleet.HubSpawnReply{}, &fleet.HubError{Kind: "hub_spawn_pending"}
@@ -683,7 +1633,8 @@ func spawnNotificationText(job, request string, result hubSpawnOutcome) string {
 
 // Node results stay in the node's private journal indefinitely, so ACK loss and
 // prolonged offline periods never erase the only receipt. Automatic journal GC
-// and adoption of a pane after a node process crash are explicit non-goals.
+// is an explicit non-goal. A pane a node crash left behind is settled by the
+// restarted node from herdr (hub_spawn_settle.go), not adopted by the hub.
 
 func (h *HubServer) startSpawnCoordinator(ctx context.Context) {
 	h.closeMu.Lock()
@@ -692,15 +1643,24 @@ func (h *HubServer) startSpawnCoordinator(ctx context.Context) {
 		return
 	}
 	h.spawnCoordinatorOnce.Do(func() {
-		h.spawnWorkers.Add(2)
+		h.placementAsync.Store(true)
+		h.spawnWorkers.Add(3)
 		go func() { defer h.spawnWorkers.Done(); h.runSpawnCoordinator(ctx) }()
 		go func() { defer h.spawnWorkers.Done(); h.runQuotaReconcile(ctx) }()
+		go func() {
+			defer h.spawnWorkers.Done()
+			defer h.placementAsync.Store(false)
+			h.runPlacementRecords(ctx)
+		}()
 	})
 }
 
 func (h *HubServer) finishSpawnOutcome(task hubSpawnTask, outcome hubSpawnOutcome) {
 	outcome.E6Arm = task.Request.E6Arm
-	if changed, _ := h.inbox.store.completeSpawn(h.closeCtx, task, outcome, h.now().UTC()); changed {
+	if outcome.Host == "" {
+		outcome.Host = spawnPinnedHost(task)
+	}
+	if changed, _ := h.completeSpawn(h.closeCtx, task, outcome); changed {
 		h.recordSpawnTrace(task, outcome)
 	}
 }
@@ -806,4 +1766,12 @@ func spawnResultFix(tail string) string {
 		return r
 	}, fleetEventRedact(fix))
 	return utf8PrefixWithin(strings.TrimSpace(fix), 512)
+}
+
+// spawnClaimedAnswer reports a role_no_candidate on a claimed host whose
+// harnesses were all refused: the node's last refusal is the answer. A pool
+// at its concurrency cap is capacity, not refusal, and parks instead.
+func spawnClaimedAnswer(task hubSpawnTask, err error) bool {
+	code, _, _ := strings.Cut(err.Error(), ":")
+	return task.ClaimedHost != "" && len(task.Exclusions) > 0 && task.Outcome.NodeResult && code == "role_no_candidate" && !strings.Contains(err.Error(), "concurrency cap")
 }

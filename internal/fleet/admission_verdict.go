@@ -76,7 +76,8 @@ func admissionRows(rows []CatalogRow) []admissionRow {
 }
 
 // admissionRequest is one gate question: the gate profile and the seat it
-// asks for. E6Arm is the exact measurement marker, PACELEVER_E6_ARM.
+// asks for. E6Arm is the exact measurement marker, PANEWIRE_E6_ARM (with the
+// retired PACELEVER_E6_ARM environment name accepted as a fallback).
 type admissionRequest struct {
 	Profile, Effort, Role, Purpose, OperatorRequest, RequestedBy, E6Arm string
 }
@@ -178,9 +179,9 @@ func gateReasonCode(reason string) string {
 
 func admissionNormalize(s string) string { return strings.ToLower(strings.TrimSpace(s)) }
 
-// commandcodePool is the catalog pool of the Command Code account. Every rung
-// on it draws on that one account and its 30-day window (docs/quota.md
-// §Command Code seats).
+// commandcodePool is the catalog pool of the Command Code accounts. Every rung
+// on it draws on the accounts omp holds, judged on their 5-hour and weekly
+// windows (docs/quota.md §Command Code seats).
 const commandcodePool = "commandcode"
 
 // admissionCredit marks a credit rung: a pi- profile, or any rung whose
@@ -213,21 +214,21 @@ func admissionPct(v float64) *float64 {
 }
 
 // admissionRoleCheck is pacelever's roleCheck as of v0.3.28: a credit rung
-// (pi- profiles and commandcode-pool rungs) seats only a worker or tester, or a
+// (pi- profiles and commandcode-pool rungs) seats only an implementer, or a
 // builder on a placed default rung, and the consult models keep their seat
-// restrictions. cmd-dsflash41 is narrower still: worker or tester only.
+// restrictions. cmd-dsflash41 is narrower still: implementer only.
 func admissionRoleCheck(req admissionRequest, row admissionRow) *gateDenial {
 	role := admissionNormalize(req.Role)
 	if admissionCredit(req.Profile, row.Pool) {
-		allowed := role == "worker" || role == "tester" || (role == "builder" && row.Placed && row.Gate == defaultGate)
+		allowed := role == "implementer" || (role == "builder" && row.Placed && row.Gate == defaultGate)
 		if !allowed {
-			return &gateDenial{gateRoleDenied, "role_restricted: credit rung requires worker/tester; placed default rungs also allow builder"}
+			return &gateDenial{gateRoleDenied, "role_restricted: credit rung requires implementer; placed default rungs also allow builder"}
 		}
 	}
-	// Operator 2026-11-07 (hk 3248): cmd-dsflash41 seats only a worker or
-	// tester — stricter than pacelever, which also seats a builder.
-	if req.Profile == "cmd-dsflash41" && role != "worker" && role != "tester" {
-		return &gateDenial{gateRoleDenied, "role_restricted: cmd-dsflash41 seats only a worker or tester"}
+	// Operator 2026-11-07 (hk 3248): cmd-dsflash41 seats only an implementer
+	// — stricter than pacelever, which also seats a builder.
+	if req.Profile == "cmd-dsflash41" && role != "implementer" {
+		return &gateDenial{gateRoleDenied, "role_restricted: cmd-dsflash41 seats only an implementer"}
 	}
 	if strings.Contains(req.Profile, "astra") && req.Profile != "codex-astra" {
 		return &gateDenial{gateRoleDenied, "role_restricted: removed astra seat alias"}
@@ -258,7 +259,7 @@ func admissionValidRef(s string) bool {
 // measurement marker.
 func admissionUnratedRole(req admissionRequest) bool {
 	switch admissionNormalize(req.Role) {
-	case "lead", "consult", "builder", "counsel":
+	case "consult", "builder":
 		return true
 	}
 	return false
@@ -401,11 +402,13 @@ func (in admissionInputs) resolveRow(req admissionRequest, allowUnrated bool) (a
 }
 
 // requiredWindows are the windows a reading of pool must cover. Manual
-// evidence for a credit pool or commandcode covers its credit window instead.
-// codex's low plans need only the window the plan has. commandcode needs its
-// 30-day window (decision/2026-11-06/commandcode-30d-required-in-panewire-gate).
+// evidence for a credit pool covers its credit window instead. codex's low
+// plans need only the window the plan has. commandcode needs its 5-hour and
+// weekly windows and nothing monthly: the month and the credit balance are
+// neither read nor gated (decision 289, hk 4707; this replaces
+// decision/2026-11-06/commandcode-30d-required-in-panewire-gate).
 func requiredWindows(pool, plan string, manual bool) []string {
-	if slices.Contains(creditAccountPools, pool) || manual && pool == "commandcode" {
+	if slices.Contains(creditAccountPools, pool) {
 		return []string{"credit"}
 	}
 	switch pool {
@@ -417,9 +420,7 @@ func requiredWindows(pool, plan string, manual bool) []string {
 			return []string{"30d"}
 		}
 		return []string{"5h", "7d"}
-	case "commandcode":
-		return []string{"5h", "7d", "30d"}
-	case "claude", "kimi", "agy":
+	case "claude", "kimi", "agy", "commandcode":
 		return []string{"5h", "7d"}
 	case "grok", "devin":
 		return []string{"7d"}
@@ -432,16 +433,16 @@ func requiredWindows(pool, plan string, manual bool) []string {
 }
 
 // missingWindowRefusal names the refusal for required windows a reading
-// lacks, or "" when the pool admits without them. codex's low plans refuse on
-// any missing window; commandcode refuses only without its 30-day window.
+// lacks, or "" when the pool admits without them. codex's low plans and
+// commandcode refuse on any missing window (commandcode needs its 5h and 7d).
 func missingWindowRefusal(pool, plan string, missing []string) string {
 	switch {
 	case len(missing) == 0:
 		return ""
 	case pool == "codex" && slices.Contains([]string{"plus", "prolite", "free"}, plan):
 		return "codex_required_window_missing:" + strings.Join(missing, ",")
-	case pool == "commandcode" && slices.Contains(missing, "30d"):
-		return "commandcode_required_window_missing:30d"
+	case pool == "commandcode":
+		return "commandcode_required_window_missing:" + strings.Join(missing, ",")
 	}
 	return ""
 }
@@ -539,6 +540,13 @@ var devinFreeRungs = map[string]string{
 	"devin-swe2-flash":        "swe-2-flash-high",
 	"devin-swe2-flash-medium": "swe-2-flash-medium",
 	"devin-swe2-flash-max":    "swe-2-flash-max",
+}
+
+// IsFreeRung reports whether profile is a free-tier rung (a SWE-2 profile of
+// devinFreeRungs): it draws on the pool's free bucket, not its paid windows.
+func IsFreeRung(profile string) bool {
+	_, free := devinFreeRungs[profile]
+	return free
 }
 
 func (in admissionInputs) judgeWith(req admissionRequest, allowUnrated bool) admissionVerdict {
@@ -768,7 +776,7 @@ func (in admissionInputs) recommend(grade, role string) []admissionAlternative {
 		seen[key] = true
 		req := admissionRequest{Profile: row.Profile, Effort: row.Effort, Role: role}
 		if req.Role == "" && admissionCredit(row.Profile, row.Pool) {
-			req.Role = "worker"
+			req.Role = "implementer"
 		}
 		d := in.judge(req)
 		r := admissionAlternative{Profile: row.Profile, Effort: row.Effort, candidate: d.OK, priority: 2}

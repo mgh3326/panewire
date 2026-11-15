@@ -67,6 +67,10 @@ var spawnRefusalCauses = []struct {
 	{"symlink path refused: /jobs-root", exitUsage, "symlink_path"},
 	{"cwd is not a directory", exitUsage, "cwd_not_directory"},
 	{"OMP_SETUP_WIZARD: omp is in its setup wizard despite OMP_SKIP_SETUP; seat withheld", exitConfig, "omp_setup_wizard"},
+	// hk 3301: the brief upload's hk guard refusal names the pattern, and the
+	// broad "brief" row must not claim it.
+	{"brief upload to briefs/job-a.md failed: handoffkeep: secret_like_content:private_key", exitPlacement, "hk_guard_refused"},
+	{"handoffkeep: secret_like_content", exitUsage, "hk_guard_refused"},
 }
 
 func TestSpawnRefusalCodeNamesEachObservedCause(t *testing.T) {

@@ -85,6 +85,7 @@ const (
 	exitAuthUnavailable     = 88  // no usable login/account binding
 	exitQuotaUnknown        = 89  // quota still unknown after one bounded refresh
 	exitTrustPrompt         = 90  // harness is waiting for workspace trust
+	exitWaitParked          = 91  // spawn --wait: the request is parked (no host can take it now) and the wait deadline expired
 	exitTimeout             = 124 // a time-bounded CLI call hit its deadline
 	exitUnreachable         = 255 // SSH could not reach the host (ssh's own status)
 )
@@ -101,6 +102,11 @@ type ExitError struct {
 }
 
 func (e *ExitError) Error() string { return e.Message }
+
+type launchProofError struct{ *ExitError }
+
+func (*launchProofError) LaunchFailureClass() string { return "harness_version" }
+func (e *launchProofError) Unwrap() error            { return e.ExitError }
 func fail(code int, format string, args ...any) error {
 	return &ExitError{code, fmt.Sprintf(format, args...)}
 }

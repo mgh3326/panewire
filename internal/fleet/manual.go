@@ -119,7 +119,7 @@ func prepareManual(m ManualObservation, ttl time.Duration, now time.Time) (Manua
 			m.Window = "7d"
 		case "kiro":
 			m.Window = "30d"
-		case "anthropic-api", "openai-api", "commandcode":
+		case "anthropic-api", "openai-api":
 			m.Window = "credit"
 		default:
 			return m, fmt.Errorf("--window required")

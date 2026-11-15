@@ -129,11 +129,6 @@ func TestHoldNeverHeldKinds(t *testing.T) {
 			}
 		})
 	}
-	t.Run("operator chat", func(t *testing.T) {
-		h, a, _, _, _ := holdHub(t, "", true)
-		holdNotice(t, h, a, "chat-1", "", "operator instruction")
-		holdReceive(t, a)
-	})
 }
 func TestHoldUnknownStateNotHeld(t *testing.T) {
 	for _, state := range []string{"missing", "stale", "unknown", "truncated"} {

@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/mgh3326/panewire/internal/durable"
 )
@@ -66,7 +67,7 @@ func (s *Store) AppendEvent(ctx context.Context, job, kind string, payload map[s
 	var n int
 	e = c.write(func() error {
 		var err error
-		n, err = s.recordEvent(c, job, kind, payload, seq)
+		n, err = s.recordEvent(ctx, c, job, kind, payload, seq)
 		return err
 	})
 	return n, e
@@ -126,7 +127,7 @@ func highestPrefix(dir string) int {
 // caller's transaction, under the events lock. Numbering and submission are
 // serialised by <job dir>/.wrk-events.lock; the UNIQUE(job_id, seq) index and
 // the exclusive artifact link stop a double consumption.
-func (s *Store) recordEvent(c *conn, job, kind string, payload map[string]any, seq *int) (int, error) {
+func (s *Store) recordEvent(ctx context.Context, c *conn, job, kind string, payload map[string]any, seq *int) (int, error) {
 	dir := s.eventsDir(job)
 	if e := os.MkdirAll(dir, 0o755); e != nil {
 		return 0, errf(ExitStorage, "cannot create the events directory: %v", e)
@@ -136,7 +137,7 @@ func (s *Store) recordEvent(c *conn, job, kind string, payload map[string]any, s
 		return 0, errf(ExitStorage, "cannot open the events lock: %v", e)
 	}
 	defer lock.Close()
-	if e = syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); e != nil {
+	if e = flockContext(ctx, lock); e != nil {
 		return 0, errf(ExitStorage, "cannot take the events lock: %v", e)
 	}
 	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
@@ -171,6 +172,35 @@ func (s *Store) recordEvent(c *conn, job, kind string, payload map[string]any, s
 		return 0, e
 	}
 	return n, nil
+}
+
+// eventsLockPoll paces flockContext's retries.
+const eventsLockPoll = 20 * time.Millisecond
+
+// flockContext takes an exclusive flock on f, waiting at most until ctx is
+// done: a stalled holder of the events lock must not hold a caller (and the
+// write transaction it has open) past its own deadline (hk 4632, #572
+// r4576228684). An uncancellable ctx blocks as before.
+func flockContext(ctx context.Context, f *os.File) error {
+	if ctx.Done() == nil {
+		return syscall.Flock(int(f.Fd()), syscall.LOCK_EX)
+	}
+	for {
+		e := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		if e == nil {
+			return nil
+		}
+		if !errors.Is(e, syscall.EWOULDBLOCK) && !errors.Is(e, syscall.EINTR) {
+			return e
+		}
+		timer := time.NewTimer(eventsLockPoll)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
 }
 
 // encodeBody is the artifact body: one JSON object with sorted keys and no

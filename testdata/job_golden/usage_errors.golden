@@ -25,7 +25,7 @@
 == step ["escalate" "jw" "--question" "worker is not a builder"] rc=2
 -- stdout
 -- stderr
-<cmd>: jw is not a builder claim with a parent lane (legacy captain alias is accepted)
+<cmd>: jw is not a builder claim with a parent lane
 == step ["escalate" "jb"] rc=2
 -- stdout
 -- stderr

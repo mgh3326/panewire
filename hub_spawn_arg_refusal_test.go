@@ -228,7 +228,7 @@ func TestHubMarksArgRefusedSpawnFailedWithoutDeadline(t *testing.T) {
 	started := time.Now()
 	done := make(chan error, 1)
 	go func() {
-		_, err := transport.Spawn(boundedContext(t), refusalNodeRequest(request, 907, "machine-a"))
+		_, err := dispatchPlacedSpawn(boundedContext(t), transport, refusalNodeRequest(request, 907, "machine-a"))
 		done <- err
 	}()
 	sent := t14ReadNodeSpawn(t, node)
@@ -328,17 +328,16 @@ func TestSpawnArgsValidRequestPreserved(t *testing.T) {
 		"--job", "job-a",
 		"--owner", "desk",
 		"--effort", "high",
-		"--role", "worker",
+		"--role", "implementer",
 		"--lane", "job-a",
 		"--parent", "desk",
 		"--task", "3965",
 		"--report-relative", "job-a/report.md",
 		"-L", "live",
 		"--urgency", "normal",
-		"--builder-family", "anthropic",
+		"--author-family", "anthropic",
 		"--builder-job", "job-b",
 		"--grade", "B",
-		"--routing-role", "implementer",
 		"--review-pass", "2",
 		"--override-reason", "hk 3965",
 		"--containment", "hk:3965",

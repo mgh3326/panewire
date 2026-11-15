@@ -11,6 +11,8 @@ import (
 	"regexp"
 	"syscall"
 	"time"
+
+	"github.com/mgh3326/panewire/internal/quotastop"
 )
 
 // laneEventMaxBytes bounds one events-lane record, as the relay scanner does.
@@ -21,6 +23,10 @@ const laneEventMaxBytes = 16 << 10
 // as "READY withheld" inside a progress note, does not count.
 var laneTerminalMarker = regexp.MustCompile(`^(\[[^\]]*\]\s*)?(READY|DONE)\b`)
 
+// watchExecutable names the binary a detached watcher runs; tests point it at
+// a stand-in.
+var watchExecutable = os.Executable
+
 func (a *App) startWatch(job string) error {
 	return a.startWatchMode(job, false)
 }
@@ -30,7 +36,7 @@ func (a *App) startWatchMode(job string, rearmed bool) error {
 	if _, ok := a.Runner.(ExecRunner); !ok {
 		return nil
 	}
-	exe, e := os.Executable()
+	exe, e := watchExecutable()
 	if e != nil {
 		return e
 	}
@@ -53,6 +59,17 @@ func (a *App) startWatchMode(job string, rearmed bool) error {
 	}
 	return cmd.Process.Release()
 }
+
+// watchCommand builds the watcher's command. The watcher must outlive the
+// daemon that starts it, because a rollout restarts the daemon while a job
+// runs and the watcher is what records that job's result (hk 4345):
+//
+//   - Setsid gives it its own session and process group, so a signal to the
+//     daemon's group, and launchd's group kill, miss it.
+//   - The service manager must also leave it alone: systemd KillMode=process
+//     (KillMode=mixed still SIGKILLs the cgroup's remaining processes once the
+//     main process exits) and AbandonProcessGroup in the launchd plist. Both
+//     are in deploy/; TestDeployUnitsLetWatchersOutliveDaemon pins them.
 func watchCommand(exe, job string, rearmed bool) *exec.Cmd {
 	args := []string{"_watch", job}
 	if rearmed {
@@ -86,8 +103,11 @@ func (a *App) rearmWatchers(start func(string) error, log func(string), pendingO
 		if err != nil {
 			continue
 		}
-		_, pendingCredit := pendingCreditRejection(j)
+		credit, pendingCredit := pendingCreditRejection(j)
 		if pendingOnly && !pendingCredit {
+			continue
+		}
+		if pendingOnly && creditPublicationPaused(j, credit) && !creditPublicationAccountReady(a, j, credit) {
 			continue
 		}
 		if (j.Reaped || j.Pane == "") && !pendingCredit || a.watchActive(id) {
@@ -105,6 +125,38 @@ func (a *App) rearmWatchers(start func(string) error, log func(string), pendingO
 		log(id)
 	}
 	return errors.Join(failures...)
+}
+
+func (a *App) pauseCreditPublication(ctx context.Context, j Job, stop quotastop.Stop, cause error) error {
+	latest, err := a.job(j.ID)
+	if err != nil {
+		return err
+	}
+	if creditPublicationPaused(latest, stop) {
+		return nil
+	}
+	reason := "publication_unavailable"
+	if errors.Is(cause, errCreditAccountMismatch) {
+		reason = "receipt_account_mismatch"
+	} else if errors.Is(cause, errCreditAccountUnidentifiable) {
+		reason = "account_not_identifiable"
+	}
+	if latest.Owner != "" {
+		at := stop.CreditExhaustedAt.UTC().Format(time.RFC3339Nano)
+		text := fmt.Sprintf("[%s] CREDIT_CLOSE_PAUSED | pool=%s at=%s | 공유 exhausted-credit 게시가 일시 중단됐습니다(reason=%s). 계정 fingerprint를 확인하면 다음 안전 재시도에서 복구합니다.", j.ID, stop.Pool, at, reason)
+		eventID := fmt.Sprintf("credit-close-paused-%s-%d", j.ID, stop.CreditExhaustedAt.Unix())
+		r := a.call(ctx, "panewire", "emit", "--kind", "lane.event", "--lane", latest.Owner, "--type", "info", "--event-id", eventID, "--inbox-root", filepath.Dir(a.Jobs), "--text", text)
+		if err := check(r, "credit publication notice"); err != nil {
+			return err
+		}
+	} else {
+		a.warn("credit rejection publication paused without an owner lane (job %s, pool %s)", j.ID, stop.Pool)
+	}
+	return a.event(ctx, j.ID, "job.credit_publication_paused", map[string]any{
+		"pool":   stop.Pool,
+		"at":     stop.CreditExhaustedAt.UTC().Format(time.RFC3339Nano),
+		"reason": reason,
+	})
 }
 
 // RearmPendingCreditWatchers retries durable credit publications without
@@ -138,6 +190,13 @@ func (a *App) watch(ctx context.Context, args []string) error {
 		return fail(exitUsage, "invalid watch job")
 	}
 	id := args[0]
+	// First of all, before any lock: this process understands hub-close
+	// intents (hub_close_watchers.go), so the node may advertise close ops.
+	if remove, e := a.recordWatcherCaps(id); e != nil {
+		return e
+	} else {
+		defer remove()
+	}
 	lock, e := os.OpenFile(filepath.Join(a.Jobs, id, ".panewire-watch.lock"), os.O_CREATE|os.O_RDWR, 0600)
 	if e != nil {
 		return e
@@ -145,6 +204,16 @@ func (a *App) watch(ctx context.Context, args []string) error {
 	defer lock.Close()
 	if !tryLock(lock) {
 		return nil
+	}
+	// Held for the watcher's life: it tells the node this watcher defers to
+	// hub-close intents (watch_hub_close.go ProbeHubCloseWatcher).
+	hubCloseLock, e := secureOpen(filepath.Join(a.Jobs, id, hubCloseWatchLock), true, a.warn)
+	if e != nil {
+		return e
+	}
+	defer hubCloseLock.Close()
+	if e := syscall.Flock(int(hubCloseLock.Fd()), syscall.LOCK_EX); e != nil {
+		return e
 	}
 	timeout := time.Hour
 	if v := a.envOr("PANEWIRE_COMPLETION_TIMEOUT_S", "WRK_COMPLETION_TIMEOUT_S"); v != "" {
@@ -173,14 +242,26 @@ func (a *App) watch(ctx context.Context, args []string) error {
 	var screenRead quotaStopWatch
 	var handOff quotaHandOff
 	var creditAttempts int
+	quotaRetry := false
 	var lastCredit time.Time
 	for {
 		j, e := a.job(id)
 		if e != nil {
 			return e
 		}
+		// An open hub close owns this attempt's end, and the node settles it
+		// (watch_hub_close.go HubCloseSettlement): completion, the decision
+		// timeout, the deadline exit and the missing-pane fallback all wait.
+		// The node's final job.lost closes the intent and ends this watch; a
+		// request that closed nothing hands the job back.
+		if _, ok := pendingHubCloseIntent(j); ok && !j.Reaped {
+			if err := a.Sleep(ctx, 5*time.Second); err != nil {
+				return err
+			}
+			continue
+		}
 		// The job.lost announced for a quota stop (by this watcher for a
-		// reviewer, by the manager for a handed-over worker or tester) is not
+		// reviewer, by the manager for a handed-over implementer) is not
 		// an end until the grace for the hub's replacement runs out.
 		if !handOff.active {
 			if stop, ok := announcedQuotaStop(j); ok && !j.Reaped {
@@ -188,7 +269,32 @@ func (a *App) watch(ctx context.Context, args []string) error {
 			}
 		}
 		credit, creditPending := pendingCreditRejection(j)
+		intent, hasIntent := pendingQuotaIntent(j)
+		quotaRetry = hasIntent
 		agents, e := a.agents(ctx)
+		if e != nil && hasIntent && !creditPending && !j.Reaped {
+			// An open close intent outlives a herdr outage: hk alone can
+			// finish it, and anything else waits for herdr.
+			var out quotaIntentOutcome
+			deferred, err := a.endUnlessHubClose(id, func(j Job) (err error) {
+				out, err = a.reconcileQuotaIntent(ctx, j, intent, false, false, false, Agent{})
+				return err
+			})
+			if err != nil {
+				return err
+			}
+			if deferred {
+				continue
+			}
+			if out == quotaIntentEnded {
+				return nil
+			}
+			a.warn("quota-stop close intent waits for herdr: %v", e)
+			if err := a.Sleep(ctx, 5*time.Second); err != nil {
+				return err
+			}
+			continue
+		}
 		if e != nil && !creditPending {
 			if workerEscalated(j) {
 				return a.releaseQuota(ctx, j)
@@ -209,24 +315,25 @@ func (a *App) watch(ctx context.Context, args []string) error {
 			if stop, ok := a.creditStopped(j, paneAgent); ok && !stop.CreditExhaustedAt.Equal(lastCredit) && !creditRejectionPublished(j, stop) {
 				credit = stop
 				payload := map[string]any{"pool": stop.Pool, "at": stop.CreditExhaustedAt.UTC().Format(time.RFC3339Nano)}
+				if paneAgent.StateChangeSeq != nil {
+					payload["state_change_seq"] = *paneAgent.StateChangeSeq
+				}
 				if err := a.event(ctx, id, "job.credit_rejection", payload); err != nil {
 					return err
 				}
-				creditPending = true
+				j, e = a.job(id)
+				if e != nil {
+					return e
+				}
+				credit, creditPending = pendingCreditRejection(j)
 			}
 		}
 		if creditPending {
 			if err := a.publishCreditRejection(ctx, j, credit); err != nil {
 				creditAttempts++
 				a.warn("credit rejection publication failed (attempt %d): %v", creditAttempts, err)
-				if creditAttempts >= 3 {
-					if j.Terminal || j.Reaped || j.QuotaRole() == "counsel" {
-						return nil
-					}
-					if workerEscalated(j) {
-						return a.releaseQuota(ctx, j)
-					}
-					return a.quotaStopLost(ctx, j, credit, true)
+				if errors.Is(err, errCreditAccountMismatch) || errors.Is(err, errCreditAccountUnidentifiable) || creditAttempts >= 3 {
+					return a.pauseCreditPublication(ctx, j, credit, err)
 				}
 				if err := a.Sleep(ctx, 5*time.Second); err != nil {
 					return err
@@ -236,17 +343,50 @@ func (a *App) watch(ctx context.Context, args []string) error {
 			creditAttempts = 0
 			lastCredit = credit.CreditExhaustedAt
 			published := map[string]any{"pool": credit.Pool, "at": credit.CreditExhaustedAt.UTC().Format(time.RFC3339Nano)}
-			if !j.Terminal && !j.Reaped && !workerEscalated(j) && j.QuotaRole() != "counsel" && !handOff.active {
-				if a.QuotaHandOffGrace <= 0 {
-					if err := a.quotaStopLost(ctx, j, credit, true); err != nil {
+			if !j.Terminal && !j.Reaped && !workerEscalated(j) && j.QuotaRole() != "consult" && !handOff.active {
+				// The pane may have resumed while the rejection was being
+				// written, so the hand-off is decided on a fresh row, not on
+				// the snapshot read before the write (hk 4505).
+				current, currentPresent, currentReachable := a.paneAfterPublication(ctx, j.Pane)
+				for !currentReachable {
+					// The rejection stays pending until the pane is read: writing
+					// job.credit_published now would end the retry for good (hk 4505).
+					a.warn("credit hand-off waits for herdr: agent list unavailable")
+					if err := a.Sleep(ctx, 5*time.Second); err != nil {
 						return err
 					}
-					return a.event(ctx, id, "job.credit_published", published)
+					current, currentPresent, currentReachable = a.paneAfterPublication(ctx, j.Pane)
 				}
-				if err := a.quotaStopAnnounce(ctx, j, credit); err != nil {
-					return err
+				if safeCreditStopHandoff(j, credit, current, currentPresent, currentReachable) {
+					if a.QuotaHandOffGrace <= 0 {
+						deferred, err := a.endUnlessHubClose(id, func(j Job) error { return a.quotaStopLost(ctx, j, credit, true) })
+						if err != nil {
+							return err
+						}
+						if !deferred {
+							return a.event(ctx, id, "job.credit_published", published)
+						}
+						// The rejection stays pending: a close that ends
+						// up closing nothing hands it back to this path.
+						continue
+					}
+					switch err := a.quotaStopAnnounce(ctx, j, credit); {
+					case errors.Is(err, errQuotaStopSuperseded):
+						// The hub ended the job on its posted result: no hand-over
+						// is active, so no grace expires and no re-prompt can
+						// follow the end and make the ledger live again.
+					case err != nil:
+						return err
+					default:
+						// A fresh row without a seq keeps the seq the rejection was read
+						// in, so a later changed seq still shows the pane moved on (hk 4505).
+						seq := current.StateChangeSeq
+						if seq == nil {
+							seq, _ = creditRejectionStateChangeSeq(j, credit)
+						}
+						handOff = quotaHandOff{stop: credit, until: a.Now().Add(a.QuotaHandOffGrace), seq: seq, active: true}
+					}
 				}
-				handOff = quotaHandOff{stop: credit, until: a.Now().Add(a.QuotaHandOffGrace), seq: paneAgent.StateChangeSeq, active: true}
 			}
 			if err := a.event(ctx, id, "job.credit_published", published); err != nil {
 				return err
@@ -273,8 +413,17 @@ func (a *App) watch(ctx context.Context, args []string) error {
 
 		if j.Report != "" {
 			if info, e := os.Stat(j.Report); e == nil && info.Mode().IsRegular() {
-				if !handOff.active && pending && size == info.Size() && modified.Equal(info.ModTime()) && a.workerSignalledEnd(j) {
-					return a.lifecycleWithOptions(ctx, "done", []string{id, "--report", j.Report}, true, len(args) == 2)
+				// An open close intent is settled against hk first (below): completing
+				// the report here could close it locally while hk holds, or may hold,
+				// the lost record.
+				if !handOff.active && !hasIntent && pending && size == info.Size() && modified.Equal(info.ModTime()) && a.workerSignalledEnd(j) {
+					deferred, err := a.endUnlessHubClose(id, func(Job) error {
+						return a.lifecycleWithOptions(ctx, "done", []string{id, "--report", j.Report}, true, len(args) == 2)
+					})
+					if !deferred {
+						return err
+					}
+					continue
 				}
 				pending = true
 				size = info.Size()
@@ -283,22 +432,36 @@ func (a *App) watch(ctx context.Context, args []string) error {
 				pending = false
 			}
 		}
-		if waiting != nil && !(pending && a.workerSignalledEnd(j)) && !a.Now().Before(waiting.at.Add(decisionTimeout)) {
-			if e := a.putJobRecord(ctx, id, map[string]any{"state": "lost"}); e != nil {
-				a.jobRecordFailed(ctx, id, "lost", e)
+		if waiting != nil && !hasIntent && !(pending && a.workerSignalledEnd(j)) && !a.Now().Before(waiting.at.Add(decisionTimeout)) {
+			deferred, err := a.endUnlessHubClose(id, func(j Job) error {
+				if e := a.putJobRecord(ctx, id, map[string]any{"state": "lost", "at": a.Now().UTC()}); e != nil {
+					a.jobRecordFailed(ctx, id, "lost", e)
+				}
+				if e := a.event(ctx, id, "job.lost", map[string]any{"pane_id": j.Pane, "reason": "decision_unanswered"}); e != nil {
+					return e
+				}
+				a.recordLostFailure(ctx, j)
+				return a.releaseQuota(ctx, j)
+			})
+			if !deferred {
+				return err
 			}
-			if e := a.event(ctx, id, "job.lost", map[string]any{"pane_id": j.Pane, "reason": "decision_unanswered"}); e != nil {
-				return e
-			}
-			a.recordLostFailure(ctx, j)
-			return a.releaseQuota(ctx, j)
+			continue
 		}
 		// An announced quota stop is watched through its hand-off grace, past
 		// the ordinary completion deadline: its fallback ends the job and
 		// releases the lease, which nothing else would.
-		if waiting == nil && !handOff.active && a.Now().After(deadline) && (!pending || latePoll) {
-			fmt.Fprintln(a.Err, "watch-expired: job stays live; quota retained")
-			return nil
+		if waiting == nil && !handOff.active && !quotaRetry && a.Now().After(deadline) && (!pending || latePoll) {
+			// Under the end lock: a hub close recorded meanwhile keeps the
+			// watcher, which is what finishes that close.
+			deferred, err := a.endUnlessHubClose(id, func(Job) error {
+				fmt.Fprintln(a.Err, "watch-expired: job stays live; quota retained")
+				return nil
+			})
+			if !deferred {
+				return err
+			}
+			continue
 		}
 		if waiting == nil && a.Now().After(deadline) {
 			latePoll = true
@@ -309,35 +472,76 @@ func (a *App) watch(ctx context.Context, args []string) error {
 		} else if seen {
 			missing++
 		}
-		// An idle pane stopped by a quota screen with no report will not
-		// finish: end the job with the reason, so it is retried, not lost
-		// silently at the watch deadline.
-		// Not while a hand-off is active: its stop is already announced, and a
-		// pane that reports no state_change_seq would be read and announced on
-		// every poll, moving the grace deadline each time.
-		if present && !pending && !handOff.active && j.QuotaRole() != "counsel" {
-			if stop, ok := a.quotaStopped(ctx, j, paneAgent, &screenRead); ok && stop.CreditExhaustedAt.IsZero() {
-				if a.QuotaHandOffGrace <= 0 {
-					return a.quotaStopLost(ctx, j, stop, true)
-				}
-				if err := a.quotaStopAnnounce(ctx, j, stop); err != nil {
+		// An idle reviewer pane stopped by a quota screen with no report will
+		// not finish: end the job at once with the reason, so mergewake
+		// respawns the review on another model instead of waiting out a
+		// grace (hk 4507). The hub's replacement needs a live hk record, so a
+		// reviewer stopped on its screen is not replaced there; only an implementer
+		// the manager announced, and a credit stop, get the grace.
+		// The lost record is what mergewake acts on, so job.lost and the lease
+		// release wait for it. The close is a durable intent (watch_quota_stop.go
+		// quotaIntent): recorded before the first hk write with the exact
+		// end_reason, reconciled on every poll past the completion deadline,
+		// across read errors, herdr outages and restarts. Only a successful
+		// contradictory look at the pane cancels it.
+		// Not while a hand-off is active: its stop is already announced.
+		if !handOff.active && j.QuotaRole() != "consult" {
+			if hasIntent {
+				var out quotaIntentOutcome
+				deferred, err := a.endUnlessHubClose(id, func(j Job) (err error) {
+					out, err = a.reconcileQuotaIntent(ctx, j, intent, true, present, pending, paneAgent)
+					return err
+				})
+				if err != nil {
 					return err
 				}
-				handOff = quotaHandOff{stop: stop, until: a.Now().Add(a.QuotaHandOffGrace), seq: paneAgent.StateChangeSeq, active: true}
+				if deferred {
+					continue
+				}
+				switch out {
+				case quotaIntentEnded:
+					return nil
+				case quotaIntentCancelled:
+					quotaRetry = false
+				}
+			} else if present && !pending {
+				if stop, seen := a.quotaStopScreen(ctx, j, paneAgent, &screenRead); seen == quotaStopFound && stop.CreditExhaustedAt.IsZero() {
+					if err := a.recordQuotaIntent(ctx, j, stop); errors.Is(err, errQuotaStopSuperseded) {
+						// The hub ended the job on its posted result.
+						return nil
+					} else if err != nil {
+						return err
+					}
+					// The next poll reconciles it with a fresh look.
+					quotaRetry = true
+				}
 			}
 		}
 
 		if handOff.active {
 			if handOff.expired(a.Now(), paneAgent, present) {
-				return a.quotaStopLost(ctx, j, handOff.stop, false)
+				deferred, err := a.endUnlessHubClose(id, func(j Job) error { return a.quotaStopLost(ctx, j, handOff.stop, false) })
+				if !deferred {
+					return err
+				}
+				continue
 			}
 			if present && !handOff.unchanged(paneAgent) {
 				// The pane moved on during the grace (someone resumed it): the
 				// stop is stale and the job lives. job.reprompted makes the
 				// job live again, so the announced job.lost is not adopted a
 				// second time and the grace does not restart.
-				if e := a.event(ctx, id, "job.reprompted", map[string]any{"reason": "quota_stop_resumed", "pane_id": j.Pane}); e != nil {
-					return e
+				// Under the end lock: a hub close recorded since this poll's
+				// look owns the pane now, and a stale re-prompt would close
+				// its intent.
+				deferred, err := a.endUnlessHubClose(id, func(Job) error {
+					return a.event(ctx, id, "job.reprompted", map[string]any{"reason": "quota_stop_resumed", "pane_id": j.Pane})
+				})
+				if err != nil {
+					return err
+				}
+				if deferred {
+					continue
 				}
 				handOff = quotaHandOff{}
 			}
@@ -346,15 +550,24 @@ func (a *App) watch(ctx context.Context, args []string) error {
 		// after placing the successor: the hk record is the hub's to write
 		// (with the successor pointer), and the watcher ends the job after the
 		// grace instead.
-		if missing >= 2 && !handOff.active {
-			if e := a.putJobRecord(ctx, id, map[string]any{"state": "lost"}); e != nil {
-				a.jobRecordFailed(ctx, id, "lost", e)
+		// An unresolved close intent is settled against hk first: the bare lost
+		// write below would end the job without the quota_stop record and close the
+		// intent with its event.
+		if missing >= 2 && !handOff.active && !quotaRetry {
+			deferred, err := a.endUnlessHubClose(id, func(j Job) error {
+				if e := a.putJobRecord(ctx, id, map[string]any{"state": "lost", "at": a.Now().UTC()}); e != nil {
+					a.jobRecordFailed(ctx, id, "lost", e)
+				}
+				if e := a.event(ctx, id, "job.lost", map[string]any{"pane_id": j.Pane}); e != nil {
+					return e
+				}
+				a.recordLostFailure(ctx, j)
+				return a.releaseQuota(ctx, j)
+			})
+			if !deferred {
+				return err
 			}
-			if e = a.event(ctx, id, "job.lost", map[string]any{"pane_id": j.Pane}); e != nil {
-				return e
-			}
-			a.recordLostFailure(ctx, j)
-			return a.releaseQuota(ctx, j)
+			continue
 		}
 		if e = a.Sleep(ctx, 5*time.Second); e != nil {
 			return e

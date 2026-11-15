@@ -97,6 +97,9 @@ func (h *HubServer) setSpawnNotificationState(ctx context.Context, id string, fr
 }
 
 func spawnNotificationEvent(n spawnNotification, result hubSpawnOutcome) hubJobEventPayload {
+	if result.Stage == "placement_record" && result.Reason == legacyPlacementRecordConflict {
+		return hubJobEventPayload{EventID: n.id, JobID: n.job, OwnerLane: n.owner, NotifyType: "automation-failed", Text: "[panewire] PLACEMENT_RECORD_HELD " + n.job + " request=" + n.request + " reason=" + legacyPlacementRecordConflict + " fix=Inspect the existing hk placement record and the retained hub trace before recovery.", Host: "hub", Epoch: 1}
+	}
 	return hubJobEventPayload{EventID: n.id, JobID: n.job, OwnerLane: n.owner, NotifyType: spawnNotificationType(result), Text: spawnNotificationText(n.job, n.request, result), Host: "hub", Epoch: 1}
 }
 

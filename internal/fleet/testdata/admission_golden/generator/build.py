@@ -58,7 +58,7 @@ CLAUDE_OK = [b("5h", 20, t(h=3)), b("7d", 40, t(d=5))]
 S = []
 def sc(name, req, latest, config=CONFIG, note=None, native=None):
     pool = req.pop("pool")
-    req.setdefault("role", "worker")
+    req.setdefault("role", "implementer")
     req["account_key"] = req.get("account_key", pool + ":" + FP)
     x = {"name": name, "now": NOW, "request": req, "config": config, "catalog": CATALOG, "latest": latest}
     if note: x["disagreement"] = note
@@ -86,8 +86,8 @@ sc("claude-escalation-operator-override", {"pool": "claude", "profile": "sonnet"
 sc("claude-escalation-default-request-refused", {"pool": "claude", "profile": "opus", "effort": "high", "operator_request": "hk:task/3248"}, {"observation": auto(CLAUDE_OK)})
 sc("requested-by-needs-operator-request", {"pool": "claude", "profile": "opus", "effort": "high", "requested_by": "desk"}, {"observation": auto(CLAUDE_OK)})
 sc("operator-request-ref-invalid", {"pool": "claude", "profile": "sonnet", "effort": "xhigh", "operator_request": "task 12"}, {"observation": auto(CLAUDE_OK)})
-sc("fable-worker-consult-gate", {"pool": "claude", "profile": "fable"}, {"observation": auto(CLAUDE_OK)},
-   note="Operator decision (hk 4212): fable holds worker seats like other profiles; panewire no longer refuses the role. The recorded catalog row is consult_only, so the gate refuses on that row's rule (no --operator-request). pacelever v0.3.28 still refuses the role.",
+sc("fable-implementer-consult-gate", {"pool": "claude", "profile": "fable"}, {"observation": auto(CLAUDE_OK)},
+   note="Operator decision (hk 4212): fable holds implementer seats like other profiles; panewire no longer refuses the role. The recorded catalog row is consult_only, so the gate refuses on that row's rule (no --operator-request). pacelever v0.3.28 still refuses the role.",
    native={"ok": False, "exit_code": 3, "provider_id": "claude", "reason": "consult_only: pass --operator-request"})
 sc("fable-builder-consult-gate", {"pool": "claude", "profile": "fable", "role": "builder"}, {"observation": auto(CLAUDE_OK)},
    note="Operator decision (hk 4212): fable holds builder seats like other profiles; panewire no longer refuses the role. The recorded catalog row is consult_only, so the gate refuses on that row's rule (no --operator-request). pacelever v0.3.28 still refuses the role.",
@@ -118,18 +118,17 @@ sc("commandcode-30d-missing", {"pool": "commandcode", "profile": "cmd-dsflash41"
    native={"ok": False, "exit_code": 4, "provider_id": "commandcode", "reason": "commandcode_required_window_missing:30d", "missing_windows": ["30d"]})
 sc("commandcode-30d-exhausted", {"pool": "commandcode", "profile": "cmd-dsflash41", "effort": "high"}, {"observation": auto([b("5h", 10, t(h=2)), b("7d", 20, t(d=5)), b("30d", 100, t(d=20))])})
 sc("cmd-dsflash41-reviewer-denied", {"pool": "commandcode", "profile": "cmd-dsflash41", "effort": "high", "role": "reviewer"}, {"observation": auto(CC_OK)})
-sc("cmd-dsflash41-tester-admit", {"pool": "commandcode", "profile": "cmd-dsflash41", "effort": "high", "role": "tester"}, {"observation": auto(CC_OK)})
 sc("cmd-dsflash41-builder-denied", {"pool": "commandcode", "profile": "cmd-dsflash41", "effort": "high", "role": "builder"}, {"observation": auto(CC_OK)},
-   note="Operator decision 2026-11-07 (hk 3248 comment 11914): cmd-dsflash41 seats only a worker or tester. pacelever v0.3.28 also seats a builder on a placed default rung.",
-   native={"ok": False, "exit_code": 5, "provider_id": "commandcode", "reason": "role_restricted: cmd-dsflash41 seats only a worker or tester"})
+   note="Operator decision 2026-11-07 (hk 3248 comment 11914): cmd-dsflash41 seats only an implementer. pacelever v0.3.28 also seats a builder on a placed default rung.",
+   native={"ok": False, "exit_code": 5, "provider_id": "commandcode", "reason": "role_restricted: cmd-dsflash41 seats only an implementer"})
 sc("cmd-dsflash41-needs-effort", {"pool": "commandcode", "profile": "cmd-dsflash41", "effort": ""}, {"observation": auto(CC_OK)})
 sc("cmd-dsflash41-effort-not-placed", {"pool": "commandcode", "profile": "cmd-dsflash41", "effort": "medium"}, {"observation": auto(CC_OK)})
 # credit pool: operator entries
 sc("pi-reviewer-denied", {"pool": "anthropic-api", "profile": "pi-sonnet55", "effort": "high", "role": "reviewer"}, {"observation": None, "manual": [manual("credit", 40)]})
-sc("pi-worker-manual-credit-admit", {"pool": "anthropic-api", "profile": "pi-sonnet55", "effort": "high"}, {"observation": None, "manual": [manual("credit", 40)]})
-sc("pi-worker-no-credit-entry", {"pool": "anthropic-api", "profile": "pi-sonnet55", "effort": "high"}, {"observation": None, "manual": []})
-sc("pi-worker-credit-expired-entry", {"pool": "anthropic-api", "profile": "pi-sonnet55", "effort": "high"}, {"observation": None, "manual": [manual("credit", 40, expires=t(h=-1))]})
-sc("pi-worker-credit-exhausted", {"pool": "anthropic-api", "profile": "pi-sonnet55", "effort": "high"}, {"observation": None, "manual": [manual("credit", 99.5)]})
+sc("pi-implementer-manual-credit-admit", {"pool": "anthropic-api", "profile": "pi-sonnet55", "effort": "high"}, {"observation": None, "manual": [manual("credit", 40)]})
+sc("pi-implementer-no-credit-entry", {"pool": "anthropic-api", "profile": "pi-sonnet55", "effort": "high"}, {"observation": None, "manual": []})
+sc("pi-implementer-credit-expired-entry", {"pool": "anthropic-api", "profile": "pi-sonnet55", "effort": "high"}, {"observation": None, "manual": [manual("credit", 40, expires=t(h=-1))]})
+sc("pi-implementer-credit-exhausted", {"pool": "anthropic-api", "profile": "pi-sonnet55", "effort": "high"}, {"observation": None, "manual": [manual("credit", 99.5)]})
 sc("pi-latest-credit-entry-wins", {"pool": "anthropic-api", "profile": "pi-sonnet55", "effort": "high"}, {"observation": None, "manual": [manual("credit", 99.5, id=40), manual("credit", 30, id=41)]})
 sc("pi-consult-only-needs-request", {"pool": "anthropic-api", "profile": "pi-sonnet55", "effort": "max"}, {"observation": None, "manual": [manual("credit", 40)]})
 sc("pi-consult-only-with-request", {"pool": "anthropic-api", "profile": "pi-sonnet55", "effort": "max", "operator_request": "hk:doc/decision/x", "requested_by": "desk"}, {"observation": None, "manual": [manual("credit", 40)]})

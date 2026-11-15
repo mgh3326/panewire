@@ -1,7 +1,7 @@
 {
   "now": "2026-11-11T00:00:00Z",
   "grade": "A",
-  "role": "worker",
+  "role": "implementer",
   "pools": [
     {"id": "devin", "class": "spend", "used_pct": 4},
     {"id": "anthropic-api", "class": "credit", "credit_left_pct": 46.4, "resets_at": "2026-11-16T00:00:00Z"},

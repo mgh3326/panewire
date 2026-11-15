@@ -2,7 +2,7 @@
 
 `panewire quota`가 쿼터 인터페이스입니다. 판정, launch lookup, 측정은 panewire의 native 구현만 사용합니다.
 
-- `panewire quota status [--json]`은 측정 가능한 native 풀의 저장된 값을 읽습니다. 측정이나 게시를 실행하지 않습니다. 이 host가 presence를 게시하는 credit pool도 각각 한 줄로 보여 줍니다 ([Credit pool presence](#credit-pool-presence)).
+- `panewire quota status [--json]`은 측정 가능한 native 풀의 저장된 값을 읽습니다. 측정이나 게시를 실행하지 않습니다. 이 host가 presence를 게시하는 credit pool도 각각 한 줄로 보여 줍니다 ([Credit pool presence](#credit-pool-presence)). 텍스트 출력은 HOST, POOL, ACCOUNT, WINDOW, USED, RESETS IN, FRESHNESS, BAND 열을 가진 표로, pool과 window마다 한 행입니다. 기계용 출력은 `--json`(Status JSON v2)이며 텍스트 표와 독립입니다.
 - `panewire quota refresh POOL`은 `claude`, `codex`, `commandcode`, `devin`, `agy`만 측정합니다. 다른 풀은 측정 소스가 없다는 이유와 함께 exit 5(`ExitConditionInvalid`)로 거부합니다.
 - `[quota].gate`, `[quota].launch`, `[quota].native_pools`, `PANEWIRE_QUOTA_BIN`은 폐기되었습니다. 설정 파일에 키가 있으면 migration 경고를 출력합니다. `gate`와 `launch`는 지정할 경우 `"native"`만 허용하며, `native_pools`는 무시됩니다. 환경 변수 `PANEWIRE_QUOTA_BIN`도 무시됩니다.
 - operator credit pools (`anthropic-api`, `openai-api`)의 수동 기록은 shared store에서 계속 읽습니다.
@@ -110,8 +110,8 @@ through the same four paths and the same shared store flow as claude.
   into memory for the one HTTP request; the app-server reads its own login. It
   is never logged, written, put in an error or on a command line. The
   app-server inherits the node's environment with `CODEX_HOME` set.
-- **Binary** resolution: `PACELEVER_CODEX_BIN` (kept so an existing override
-  works), then the configured path, then `codex` on `PATH`, then on macOS
+- **Binary** resolution: `PANEWIRE_CODEX_BIN` (`PACELEVER_CODEX_BIN` fallback),
+  then the configured path, then `codex` on `PATH`, then on macOS
   `/Applications/Codex.app/Contents/Resources/codex` and
   `~/Applications/Codex.app/Contents/Resources/codex`.
 - **Account key** `codex:<fp>`, `fp = hex(sha256("codex-account|" +
@@ -126,58 +126,99 @@ through the same four paths and the same shared store flow as claude.
 
 `commandcode` pool은 panewire 프로세스(`internal/quota/commandcode`)에서 측정하며
 claude, codex와 같은 shared store 흐름을 사용합니다. 모든 호스트에서 항상 native로
-측정합니다.
+측정합니다. 읽는 곳은 Command Code API가 아니라 **omp**입니다: Command Code를 실제로 쓰는
+harness가 omp이고, omp는 자기 login(여러 계정일 수 있음)으로 쓰기 때문에, API 키로 읽은
+값은 omp가 쓰지 않는 계정을 가리킬 수 있었습니다 (hk 4707, operator decisions 288, 289,
+290). panewire는 Command Code 키를 다루지 않습니다: `COMMAND_CODE_API_KEY`,
+`COMMANDCODE_API_KEY`, `~/.commandcode/auth.json`은 읽지 않고, CLI login도 측정 조건이
+아닙니다.
 
-- **Requests.** `GET` on the commandcode API host: `/alpha/whoami?limits=1`
-  (who the key is), `/alpha/billing/credits` (scoped with `?orgId=` when whoami
-  names an org), `/alpha/billing/subscriptions` and `/alpha/usage/summary`. Each
-  sends `Authorization: Bearer <key>` and `User-Agent: cmd/1.88.1` (the API's
-  edge rejects generic clients; this is pacelever's constant), 20 s timeout,
-  redirects refused, 2 MiB body cap. Responses may carry their object under
-  `data` or at the top level.
-- **5h and 7d** are `windowLimits.fiveHour` and `.weekly` of the credits
-  response: `used / cap`, clamped to 100 when past the cap. A window without a
-  positive `cap` or a numeric `used >= 0` is left out; a malformed value never
-  reads as an unused window. `resetAt` is epoch seconds, milliseconds or
-  microseconds, RFC 3339 or an HTTP date.
-- **30d** is the share of this billing period's plan credits already spent:
-  `totalMonthlyCredits / (totalMonthlyCredits + credits.monthlyCredits)`, with
-  `totalMonthlyCredits` from the usage summary (its `periodBasis` must be
-  `billing-period` when it says one) and `monthlyCredits` (the plan credits
-  left, USD, floored at 0) from the credits response. The reset is the
-  subscription's `data.currentPeriodEnd`. Purchased and free credits are never
-  read: they are outside the plan's allowance, so neither the numerator nor the
-  denominator includes them. There is no plan table, so a price change needs no
-  release.
-- **A missing 30d is a missing window.** If the usage summary or the credits
-  `monthlyCredits` cannot be read (a failed or malformed response, a non-numeric
-  or negative total, another `periodBasis`, a zero total) the reading has the
-  5h and 7d buckets and no 30d bucket; nothing is estimated. If only the
-  subscription is unreadable, 30d keeps its value and has no reset (and the
-  reading has no plan name). Refusing a spawn for want of a 30d window is the
-  gate's rule, not this measurement's. A deadline that ends during a secondary
-  request fails the whole measurement as `timeout` rather than publishing a
-  partial reading.
-- **Error kinds** follow pacelever's for this pool: no key `credentials`; a
-  401/403 `auth_failed`, except a 403 whose body is not JSON, which is
-  `edge_rejected`; 429 `rate_limited` (with `Retry-After`; without it the shared
-  flow backs the account off 300 s itself); a deadline `timeout`; a failed
-  request `network`; any other status `http`; unreadable JSON or no usable
-  window `parse_error`. A body saying `success: false` is `http`. Only the credits
-  and whoami requests decide the kind; a secondary request's failure never
-  does.
-- **Credentials** are located, not copied: the key is
-  `COMMAND_CODE_API_KEY`, else `COMMANDCODE_API_KEY`, else `apiKey` of
-  `~/.commandcode/auth.json` — pacelever's sources, no others. It is read into
-  memory for the requests of one measurement, and never logged, written, put in
-  an error or on a command line.
-- **Account key** `commandcode:<fp>`, `fp = hex(sha256("commandcode-account|" +
-  id))[:16]`, where `id` is whoami's `user.id`, else `org.id`: pacelever's key
-  for the same login. The fingerprint is read before each refresh, which costs
-  one whoami request the first time a key is seen and none after (the node
-  remembers it). A login whose whoami names no id has no key (`account_unknown`
-  with a store; the node still measures it directly without one).
-- **Shared store flow** as for codex: a reading stays fresh for 300 s.
+- **Source.** `omp usage --json --provider commandcode` (stdout only; stderr is never
+  read; 30 s timeout, 4 MiB cap). `omp`는 PATH에서 찾으며, 없으면 이 호스트에 Command Code
+  login이 없는 것(`credentials`)입니다. 호스트의 omp가 가진 **모든** Command Code 계정이
+  `reports[]`에 한 줄씩 나옵니다.
+- **Windows.** 계정마다 `commandcode:5h`(14 credits)와 `commandcode:7d`(35 credits)
+  limit을 읽습니다: `5h`와 `7d` account bucket, used share = `amount.usedFraction`(있는데 잘못된 값이면 `used / limit`로 덮지 않고
+  알 수 없는 shape), 없을 때만 `used / limit`, 100으로 clamp. `status: "exhausted"`는 100입니다. 값이 없거나 깨진 window는
+  bucket에서 빠집니다(깨진 값이 "안 쓴 window"로 읽히는 일은 없습니다). 두 window의
+  `durationMs`는 각각 18 000 000과 604 800 000이어야 하며, 다르면 알 수 없는 shape입니다.
+  `resetsAt`(epoch ms)는 bucket의 reset입니다. **7d reset은 고정 경계**입니다: omp의
+  `--history`에 3일 간격 snapshot에서 같은 `resetsAt`이 기록되어 있어(2026-11-15 확인), 이전
+  API 읽기에서 "rolling이라 pace 불가"로 표시하던 규칙(hk 4330)은 이 source에는 적용하지
+  않습니다. 7d는 다른 구독 pool의 7일 window와 똑같이 pace합니다. 5h reset은 0 사용일 때
+  omp가 생략할 수 있고, 그러면 reset 없는 bucket입니다.
+- **No month, no balance.** 30일 window와 credit balance는 읽지도, 투영하지도, gate하지도
+  않습니다. `commandcode:balance`는 무시합니다. 크레딧이 떨어진 계정은 pane에서 실패하며 그것을
+  받아들입니다 (decision 289). `commandcode_required_window_missing:30d` 규칙
+  (decision/2026-11-06/commandcode-30d-required-in-panewire-gate)은 이 pool에서 폐기되었습니다.
+  gate가 요구하는 window는 `5h`와 `7d`뿐이고, 둘 중 하나가 없는 reading은
+  `commandcode_required_window_missing:<window>`로 unmeasurable입니다.
+- **Freshness.** omp는 report를 약 5분(±25%) cache하고 `fetchedAt`에 가져온 시각을
+  적습니다. panewire는 `fetchedAt`을 reading의 `measured_at`으로 게시하므로 reading의 나이는
+  omp가 값을 가져온 때부터 셉니다. **받아들이는 최대 나이는 3분**(`MaxReportAge`, shared flow가
+  reading을 "refresh due"로 보는 `OtherRefreshTTL`과 같음)입니다. 더 오래된 report가 있으면
+  `omp usage invalidate --provider commandcode`를 한 번 실행하고 다시 읽습니다. 그래도 오래된
+  계정은 **unknown**이라 빠지고(다른 계정은 유지), 모든 계정이 그러면 `probe_error`("omp usage
+  report is stale")입니다. 미래의 `fetchedAt`(1분 초과)도 unknown입니다.
+- **Fail closed.** 아는 shape가 아니면(JSON이 아님, `reports` 없음, `fetchedAt` 또는
+  `limits` 없음, `scope.accountId` 없음 또는 계정 불일치, 알려진 window의 길이가 다르거나 amount를
+  읽을 수 없음(다른 window가 멀쩡해도 부분 reading은 게시하지 않습니다), 같은 계정이 두 번 나옴, JSON 문서 뒤에 다른 출력이 붙음) `parse_error`("unsupported omp usage output")이고, pool은 이 호스트에서
+  admit되지 않습니다. 이유는 같은 이유가 계속되는 동안 **한 번만** 로그에 남깁니다(omp 출력은
+  로그에도 오류에도 들어가지 않으며 고정 문장입니다). "omp 없음" 또는 "Command Code 계정
+  없음"은 `credentials`(이 호스트에 login 없음)이며 오류가 아니므로 로그하지 않습니다. 윈도우가
+  하나도 없는 계정(balance만 있는 pay-as-you-go)은 측정 대상이 아니어서 빠지고, 남는 계정이
+  없으면 `parse_error`입니다. omp가 실패하면 `probe_error`, deadline은 `timeout`입니다.
+- **Several accounts.** 이 pool만 호스트당 계정 key가 하나가 아닙니다. 한 번의 `omp usage`가
+  모든 계정을 주고, 각 계정은 자기 key로 게시·announce·판정됩니다.
+  - **Account key** `commandcode:<fp>`, `fp = hex(sha256("commandcode-account|" + id))[:16]`,
+    `id`는 omp가 report하는 Command Code user id(`scope.accountId`). 이전 API 읽기의 `user.id`와
+    같은 id이므로 key가 바뀌지 않습니다 (기존 presence, `[quota.accounts]`,
+    `[quota].measurable_accounts` 항목이 그대로 유효). 계정은 fp 순으로 정렬합니다.
+  - **Shared store flow** as for codex, per account: 계정마다 lease(120 s)와 게시, presence
+    announce가 따로입니다. reading은 300 s 동안 fresh이고 3분이 지나면 refresh 대상입니다. **모든
+    refresh는 먼저 omp를 읽습니다**(pass당 `omp usage --json` 한 번; report가 3분보다 오래됐을 때만
+    `invalidate` 뒤 한 번 더). 그 pass의 omp 읽기가 보증하는 계정(자기 `fetchedAt`이 3분 안)만
+    반환·announce·게시합니다. 불변식: 반환한 reading, announce한 presence, 게시한 observation의
+    key는 모두 **이번 pass의 omp snapshot이 보증하는 계정**입니다. 다른 host가 shared reading을
+    fresh로 유지하는 것은 이 host의 login 증거가 아니므로, shared reading이 fresh이어도 omp 읽기를
+    건너뛰지 않고, 옛 계정 목록이 계정을 되살리지도 않습니다. omp를 읽지 못하거나(unknown shape,
+    probe 실패, timeout, 전부 stale) 한 계정도 보증하지 못하면 refresh는 통째로 실패하며 store를
+    전혀 건드리지 않습니다. 계정 목록 cache는 status 표와 login probe의 힌트일 뿐 refresh의 입력이
+    아니고, 어떤 실패에서도 비워집니다. 같은 노드의 refresh는 직렬화됩니다(`pass` lock). snapshot이
+    확정된 뒤 각 계정은 shared flow로 lease·게시·announce를 따로 합니다(fresh한 shared reading은
+    재사용하되 announce는 계속, flow는 omp를 부르지 않음). 한 계정의 실패는 다른 계정을 가리지 않습니다: refresh는 reading이 하나도
+    없을 때만 실패합니다. omp가 더는 목록에 올리지 않는 계정은 갱신되지 않고 stale로 떨어집니다.
+  - **Presence의 한계.** 계정 철회는 전용 계약이 없어(shared presence에는 delete·generation이
+    없음) 30분 창으로 근사합니다. 명시적 host/pool inventory snapshot(원자적 전체 교체)과 잠든 host를
+    깨우는 힌트 분리는 별도 후속 과제입니다.
+  - **Selection.** host의 presence record 중 **지금부터 30분 안**에 announce된 모든
+    `commandcode:` key가 그 host의 계정입니다(`hostAccounts`; live node는 계정마다 적어도 10분마다
+    announce합니다. 마지막 계정을 지운 host나 목록에서 빠진 계정은 다른 host가 shared reading을
+    fresh로 유지해도 30분 안에 placement에서 빠지고, 30분 넘게 잠든 host는 깨어나 announce하면 다시
+    묶입니다); 다른 pool은 지금처럼 가장 최근 key
+    하나입니다. 계정마다 binding과 candidate가 따로이고 자기 window로 판정합니다. 한 계정이
+    소진(또는 5h가 cutoff)이면 그 계정만 drop되고, **한 계정이라도 room이 있으면 pool은 usable**,
+    모두 소진이면 pool은 drop됩니다. 정렬은 다른 구독 pool의 7일 window와 같은 규칙입니다: 주가
+    사용 안 된 채 끝날 위험(waste risk)이 큰 계정이 먼저, 그렇지 않으면 room이 많은 계정.
+  - **Which account omp uses.** omp는 세션을 시작할 때 계정을 자기 usage ranking으로 고르고
+    (소진·차단된 계정 뒤로, 5h 사용량 85% 이상인 계정 뒤로, 그다음 7d window의 "required
+    drain"이 큰 계정, 같으면 7d 사용량이 적은 계정, 그다음 5h 순) 그 세션에 고정합니다
+    (omp 18.14.2 소스 `pi-ai/src/auth/select.ts`의 `selectApiKey`와 `rank.ts`; `omp dry-balance`는
+OAuth 계정만 resolve하므로 API-key 계정인 Command Code에는 "no OAuth access resolved"를 답하고 선택을
+보여 주지 못합니다). 계정을 지정하는 flag나 설정은
+    API-key credential에는 없습니다(`task.agentAccountPools`는 OAuth 전용). 따라서 **launch 전에
+    어느 계정이 쓰일지는 알 수 없습니다.** panewire가 job에 기록하는 `account_key`는 판정에 쓴
+    계정, 곧 gate와 정렬이 고른 계정(소진된 계정을 omp도 뒤로 미루므로, room이 있는 계정이 하나뿐이면
+    omp도 그 계정을 씁니다)이며, omp의 launch 시점 선택과 일치한다는 보장은 없는 **예측**입니다.
+    launch 후 실제 계정을 읽는 길은 없습니다(omp의 세션 고정 기록은 credential 저장소에 있어
+    panewire가 읽지 않습니다).
+- **Credentials** are never read: no key, token or auth file is read, copied or sent; omp
+  uses its own login, and its stderr (which can name an account) is discarded.
+- **Plan and status.** `panewire quota status`는 이 호스트가 아는 계정마다 pool/window 행을
+  보여 주며 FRESHNESS 열에 omp report의 나이(`fresh 2m`)가 붙습니다. `panewire plan`은 계정마다
+  `account commandcode:<fp> host=<h> 5h=<x>% 7d=<y>% age=<n>` 줄을 출력하고, JSON의 candidate
+  row에는 `windows`가 있습니다. `panewire quota refresh commandcode`는 계정마다 JSON 한 줄을
+  출력합니다.
 
 ## Native measurement: devin
 
@@ -193,8 +234,9 @@ source, bucket, error kind, account fingerprint 및 shared store 형식을 유�
   request. It has no account key, so it cannot read the shared reading itself;
   placement and the quota gate read it from the store as before.
 - **Web source first.** With `DEVIN_BEARER_TOKEN` in the environment and
-  `[pools.devin] org_id` in pacelever's `config.toml` (`PACELEVER_CONFIG`, else
-  `<XDG config>/pacelever/config.toml`; the id must look like `org-…`),
+  `[pools.devin] org_id` in panewire's `config.toml` (`PANEWIRE_CONFIG`, else
+  `<XDG config>/panewire/config.toml`; legacy pacelever paths are read when
+  the panewire file is absent; the id must look like `org-…`),
   `GET /api/<org>/billing/quota/usage` on devin's web app host with the bearer
   token and `x-cog-org-id`; 20 s timeout, redirects refused, 2 MiB cap, and a
   body that is one JSON object and nothing after it. `1d` (omitted when
@@ -208,15 +250,17 @@ source, bucket, error kind, account fingerprint 및 shared store 형식을 유�
   falls through to the probe without being reported, as pacelever's does.
 - **The `/usage` probe.** `devin --respect-workspace-trust false` runs on a
   200×50 pseudo-terminal in a private empty git repository (`devin` from
-  `PACELEVER_DEVIN_BIN`, `[pools.devin] bin`, or `PATH`), at most 35 s. The
+  `PANEWIRE_DEVIN_BIN` (`PACELEVER_DEVIN_BIN` fallback), `[pools.devin] bin`,
+  or `PATH`), at most 35 s. The
   probe waits for an input prompt, types `/usage`, and, after the input has
   settled (500 ms), Enter in a separate write; it parses the panel once the
   screen has been quiet 250 ms. **The prompt is any of `❯`, `❭` (U+276D, devin's
   own), `›`, `> ` or `Shift+Tab`** — without U+276D the probe never types and ends
   at its timeout (pacelever#57). A line naming weekly/7-day, 5h/5-hour, daily
   or monthly with a percentage is a `7d`/`5h`/`1d`/`30d` bucket (`% used`,
-  `% left` or `% remaining`; a reset of "resets in 6d 2h" is now + that); a panel
-  with none falls back to the plan line's "NN% remaining". A trust prompt, a
+  `% left` or `% remaining`); an absolute reset date (such as `resets Nov 15, 8:00 AM (UTC)`)
+  is parsed directly as a stable UTC timestamp, while a duration like "resets in 6d 2h"
+  is now + that (hk 4330); a panel with none falls back to the plan line's "NN% remaining". A trust prompt, a
   timeout, an early exit or a missing binary is `probe_error` with the stage
   reached; an unreadable panel is `parse_error`. The TUI's whole process group is
   killed and reaped on every exit path. pacelever's `devin models list` Free tags
@@ -276,9 +320,10 @@ source, bucket, error kind, account fingerprint 및 shared store 형식을 유�
   endpoint, then the production one (pacelever's hosts, in that order), with
   the CLI's OAuth token, merged with the per-model list
   (`fetchAvailableModels`, best effort) that supplies a group the summary omits.
-  A refused token is re-armed once with `agy models` under the lock file
-  pacelever uses (`<cache>/pacelever/agy-wake.lock`, so the two never wake the
-  CLI at once) and retried; a token another holder just refreshed is reused. The
+  A refused token is re-armed once with `agy models` under the panewire lock
+  file (`<cache>/panewire/agy-wake.lock`; the legacy cache path is used during
+  migration), so concurrent refreshes never wake the CLI at once. It is
+  retried; a token another holder just refreshed is reused. The
   OS keyring item the CLI keeps is the login when the file has none, and the
   fallback when the file's token stays refused: on macOS the keychain item
   (`security find-generic-password -s gemini -a antigravity`), on Linux the
@@ -289,7 +334,8 @@ source, bucket, error kind, account fingerprint 및 shared store 형식을 유�
   `~/.gemini/antigravity-cli/antigravity-oauth-token`, else of
   `$XDG_CONFIG_HOME/antigravity-cli/antigravity-oauth-token`. It is read into
   memory for one measurement and never logged, written, put in an error or on a
-  command line. `PACELEVER_AGY_BIN` names the agy binary, else `agy` on `PATH`.
+  command line. `PANEWIRE_AGY_BIN` names the agy binary (`PACELEVER_AGY_BIN`
+  fallback), else `agy` on `PATH`.
 - **Error kinds** follow pacelever's: no login `credentials`; a refused login
   `auth_failed`; 429 `rate_limited` (with `Retry-After`); a 5xx a retryable
   `network` failure; any other status `http`; a request that got no answer
@@ -337,17 +383,14 @@ provided by [Artificial Analysis](https://artificialanalysis.ai/); see its
 
 ## Launch
 
-Before admission, every spawn, delegate, placement and plan resolves the
-launch rung: the profile (its canon), effort, model id, grade, gate, pool and
-family a request runs. Until hk 3548 only `pacelever policy launch PROFILE
+Before admission, every spawn, placement and plan resolves the
+launch rung: its profile, effort, model id, grade, gate, pool and family.
+Until hk 3548 only `pacelever policy launch PROFILE
 --json` answered it, from pacelever's own catalog cache (one-hour TTL), so a
 row added in handoffkeep was refused until that cache expired (2026-11-08:
 `omp-dsflash41@max`, `e6_arm_required: unplaced profile`, expired by hand on
-two hosts). panewire now has its own lookup
-(`internal/fleet/launch_native.go`), a rule-for-rule port of pacelever
-v0.3.28's `policy launch` (catalog.go `resolveLaunch`, `resolveRow`,
-`roleCheck`, `defaultEffort`; bench.go `decodeCatalog`, `ReadCatalog`). It
-reads:
+two hosts). panewire now resolves launches from the live catalog and
+`policy/model-families`. It reads:
 
 - **The bench catalog** through panewire's catalog client and its freshness
   rule ([catalog.md](catalog.md#cache)): a cache entry younger than the TTL,
@@ -359,31 +402,37 @@ reads:
   refuses a request, the lookup reads handoffkeep once more before it
   refuses, so a new row is found by the next lookup; that read replaces the
   cache the selection also reads (see [Shadow and native
-  launch](#shadow-and-native-launch)). Without any catalog it judges the
-  bundled snapshot as stale, as pacelever does.
-- **pacelever's bundled snapshot** (`internal/fleet/catalog-snapshot.json`,
-  pacelever v0.3.28's `catalog_snapshot.json` byte for byte) for what the
-  handoffkeep rows do not carry: each rung's family; a rung the snapshot holds
-  unplaced at the same grade stays unplaced (it needs an exact E6 marker); the
-  effort a profile defaults to; the alias `codex-max` → `codex-sol`; and the
-  rows of a profile handoffkeep does not list.
-- **pacelever's `config.toml`**, loaded with every rule pacelever v0.3.28's
-  `LoadConfig` applies before `policy launch` resolves anything
-  (`internal/fleet/pacelever_config.go`): the TOML types of `[quota]`,
+  launch](#shadow-and-native-launch)). Without a usable catalog there are no
+  launch rows; panewire supplies no bundled catalog rows.
+- **The model-family policy** (`policy/model-families`) for family identity by
+  quota pool and the family ladder metadata. It is a best-effort family
+  override: if the document is unavailable or malformed, launch uses the live
+  catalog row's family and continues. An unlisted pool also keeps the family
+  field on its live catalog row. Placement comes from the live catalog grade
+  (`unrated` means unplaced); `entry_effort` remains the ladder entry and does
+  not set a launch default. Per-profile defaults, aliases, and catalog rows
+  absent from handoffkeep are not retained.
+- **The panewire config file**, loaded with the validation rules ported from
+  pacelever v0.3.28's `LoadConfig` before native launch resolves anything
+  (`internal/fleet/launch_config.go`): the TOML types of `[quota]`,
   `[profiles]`, `[bench]`, `[settings]` and each known pool; the shared quota
   TTL ranges, `host_id`, per-pool fresh TTLs, account fingerprints and
   measurable account keys; and each known pool's class, exploration, cutoff,
   in-flight reserve and `credit_max_age_s`. A file pacelever refuses exits 2.
   The pool policy in it, read as [Admission](#admission) reads it, gives
   subscription. The gate and the credit pool views keep their narrower read.
-- **The E6 marker** from the request, else `PACELEVER_E6_ARM`. For a rung whose catalog effort is empty the marker is `<canon>@`; [config](config.md) lists the forms.
+- **The E6 marker** from the request, else `PANEWIRE_E6_ARM` (with
+  `PACELEVER_E6_ARM` fallback) — a request whose marker is already
+  authoritative (a hub submission or a node-delivered spawn) reads no
+  environment: its empty marker stays empty. For a rung whose catalog effort
+  is empty the marker is `<canon>@`. A launch still requires a nonempty
+  catalog effort; [config](config.md) lists the forms.
 
-It answers as `pacelever policy launch` does through panewire: a refusal exits 3
-with pacelever's reason (`quota catalog: e6_arm_required: …`; the pacelever path
-reports `quota catalog: dependency failed`, since pacelever prints its reason
-only on stderr), a missing profile or an unreadable pool policy exits 2, and a
-stale catalog is refused `quota catalog is stale` (exit 70) unless the rung's
-own rule refuses first. The rules, each with its test in
+The native lookup refuses invalid launch config, unknown profiles, unplaced
+rungs without their exact marker and stale catalogs. Model-family policy
+failure uses the live catalog family as described above. A stale catalog is
+refused with `quota catalog is stale` (exit 70) unless the rung's own rule
+refuses first. The rules, each with its test in
 `internal/fleet/launch_native_test.go`:
 
 | Rule (pacelever v0.3.28) | Refusal |
@@ -392,20 +441,22 @@ own rule refuses first. The rules, each with its test in
 | An effort outside the effort ladder must be a catalog rung | `unknown effort rung` |
 | `codex-med`, `builder-terra-*` and any profile with a `gpt-5.6-terra` row | `model_refused: retired model identity` |
 | A profile with no live row | `profile "P" is unknown or retired` |
-| An unrated or unplaced rung needs the exact `<canon>@<effort>` marker, except for the lead, consult, builder and counsel roles on an unrated rung | `e6_arm_required: exact measurement marker required`, `e6_arm_required: unplaced profile requires exact measurement marker`, `e6_arm_required` |
+| An unrated or unplaced rung needs the exact `<canon>@<effort>` marker, except for the consult and builder roles on an unrated rung | `e6_arm_required: exact measurement marker required`, `e6_arm_required: unplaced profile requires exact measurement marker`, `e6_arm_required` |
 | A requested rung that is retired | `rung is retired in the catalog` |
 | A credit or `codex-terra61` request for a rung that is not placed | `e6_arm_required: rung is not placed` |
-| Seat roles: a credit rung seats a worker or tester, or a builder on a placed default rung; `fable` and `codex-astra` have no role restriction of their own (their rung's gate decides, as for any profile); any other `astra` profile is removed | `role_restricted: …` |
+| Seat roles: a credit rung seats an implementer, or a builder on a placed default rung; `fable` and `codex-astra` have no role restriction of their own (their rung's gate decides, as for any profile); any other `astra` profile is removed | `role_restricted: …` |
 | An `--operator-request` must be `hk:task/N` or `hk:doc/…` | `operator_request_ref_invalid` |
 | An unsubscribed profile or pool | `profile is unsubscribed` |
 | A `consult_only` rung needs `--operator-request` (not `codex-astra`) | `profile is consult_only; pass --operator-request` |
 | On a stale catalog, an escalation rung needs `--operator-request` | `catalog is stale; non-default gate requires --operator-request` |
 
-An effortless request resolves to the profile's default effort, else the best
-graded ordinary rung at the lowest effort; a requested effort with no eligible
-rung of its own falls back to that rung and keeps the requested effort, as in
-pacelever. The launch rule for a credit rung is pacelever's (`pi-` profiles
-and `cmd-dsflash41`); the gate's stricter one ([Command Code
+An effortless request resolves to the lowest effort among the best graded
+ordinary live rows; this is the default for every profile and has no
+per-profile override. A requested effort with no eligible live rung is
+refused, so panewire never substitutes a different effort silently. The
+launch effort is always copied from the selected live row, and a row with no
+effort cannot launch. Credit launches follow the profile rule for `pi-`
+profiles and `cmd-dsflash41`; the gate's stricter rule ([Command Code
 seats](#command-code-seats)) still refuses at admission. pacelever's
 exploration does not apply: panewire passes no `--task`, so pacelever keeps
 its baseline answer.
@@ -433,8 +484,9 @@ pacelever retired (hk 3998):
 - `omp` is installed on the host. The node looks on `PATH` and in the fleet's
   install directories, because a daemon's `PATH` can be narrower than an
   operator shell's.
-- The operator's pool class is not `exclude`: `[pools.<pool>]` in pacelever's
-  `config.toml` (`PACELEVER_CONFIG`, else `~/.config/pacelever/config.toml`). An
+- The operator's pool class is not `exclude`: `[pools.<pool>]` in panewire's
+  `config.toml` (`PANEWIRE_CONFIG`, else `~/.config/panewire/config.toml`,
+  with legacy pacelever paths read during migration). An
   `until` date that has passed lifts the exclusion, as it does for the gate.
 - The shared store holds an unexpired manual `window=credit` entry for the
   pool's account (`manual` in `/v1/quota/accounts/<key>/latest`).
@@ -462,17 +514,22 @@ every host reads the same entry; a pool with no fingerprint there refuses with
 `shared account fingerprint required`. The same command with
 `--pool openai-api` records the other pool.
 
-`panewire quota status` lists a line for each credit pool on a host that
-publishes it (the harness is installed), with the class, the manual entry's
-state (`live`, `expired`, `absent`, or `unknown` when the store could not be
-read) and this host's presence (`present`, `absent` or `unknown`), so an
-operator can see why a credit rung is or is not placeable there. The presence
+`panewire quota status` lists a row for each credit pool on a host that
+publishes it (the harness is installed). The text table's credit row shows the
+used share of the entry the `credit` state reads (the unexpired entry that
+expires last; when none is unexpired, the newest recorded entry) and the time
+until it expires. The band of every row is judged under the pool's admission
+class (`[pools.<pool>] class`), so an excluded pool reads `excluded`. The entry's state
+(`live`, `expired`, `absent`, or `unknown` when the store could not be read) and
+this host's presence (`present`, `absent` or `unknown`) are the `credit` and
+`presence` fields of `--json`, with `class`, so an operator can see why a credit
+rung is or is not placeable there. The presence
 record carries the id placement reads the local host under:
 `[local].presence_id`, else the fleet machine id.
 
 ## Admission
 
-Every spawn, delegate, placement and selection asks one admission question per
+Every spawn, placement and selection asks one admission question per
 candidate: may this profile, effort and role run on this account now? Until
 hk 3248 that answer came from `pacelever gate`. panewire now computes the same
 verdict itself (`internal/fleet/admission_verdict.go`, a rule-for-rule port of
@@ -490,8 +547,9 @@ pacelever v0.3.28's gate) from three inputs:
   or stale catalog refuses (exit 2). No pacelever process runs. The launch rung
   the verdict is asked about comes from the launch lookup ([Launch](#launch)),
   which has its own switch.
-- **The pool policy** in pacelever's `config.toml` (`PACELEVER_CONFIG`, else
-  `~/.config/pacelever/config.toml`): class and its `until` date, cutoff,
+- **The pool policy** in panewire's `config.toml` (`PANEWIRE_CONFIG`, else
+  `~/.config/panewire/config.toml`, with legacy pacelever paths read during
+  migration): class and its `until` date, cutoff,
   subscription, `fusion_billing_fp`. A missing file is the default policy; an
   invalid one refuses (exit 2).
 
@@ -505,11 +563,11 @@ a graded rung, `alternatives` lists the same-grade rungs the stored readings of
 the other pools this host holds would admit, read with no lease and no
 measurement (hk 3211).
 
-Rules beyond pacelever's: a commandcode reading without its `30d` window is
-unmeasurable (`commandcode_required_window_missing:30d`,
-decision/2026-11-06/commandcode-30d-required-in-panewire-gate). It needs the
-node's native commandcode measurement, the only one that publishes `30d`. And
-a credit rung seats only a worker or tester (operator, 2026-11-07 for
+Rules beyond pacelever's: a commandcode reading needs its `5h` and `7d` windows and
+nothing monthly (decision 289, hk 4707; this replaces
+decision/2026-11-06/commandcode-30d-required-in-panewire-gate and its
+`commandcode_required_window_missing:30d` refusal). And
+a credit rung seats only an implementer (operator, 2026-11-07 for
 cmd-dsflash41; hk 3532 extends it to every commandcode-pool rung); pacelever
 also seats a builder on a placed default rung.
 
@@ -518,19 +576,19 @@ also seats a builder on a placed default rung.
 A rung is a credit rung when its catalog row's pool is `commandcode`
 (`admissionCredit` in `internal/fleet/admission_verdict.go`). The pool decides,
 not the profile name: a credit rung needs an explicit effort, ranks as credit
-among alternatives, and seats only a worker or tester. The profiles that draw on
+among alternatives, and seats only an implementer. The profiles that draw on
 the pool:
 
 | Profile | Harness | How it reaches Command Code | Seat roles | Notes |
 |---|---|---|---|---|
-| `cmd-dsflash41` | cmd | the cmd harness's Command Code provider | worker, tester | Operator 2026-11-07 (hk 3248): no builder. |
-| `omp-dsflash41` | omp | omp's `commandcode` provider, gated by the host's `omp_commandcode` capability | worker, tester, reviewer | The policy seat lists reviewer, but admission refuses it on a credit rung (see below). |
-| `omp-musespark13` | omp | `commandcode/meta/muse-spark-1.3`, gated by `omp_commandcode` | worker, tester, reviewer | low, high, max; unrated until routing-policy grades it. |
-| `omp-argon4` | omp | `commandcode/google/gemini-4-argon`, gated by `omp_commandcode` | worker, tester, reviewer | off only; no thinking levels. |
-| `omp-mimo26pro` | omp | `commandcode/xiaomi/mimo-v2.6-pro`, gated by `omp_commandcode` | worker, tester, reviewer | off only; no thinking levels. |
-| `omp-cc-opus55` | omp | `commandcode/claude-opus-5-5`, gated by `omp_commandcode` | worker, tester, reviewer | low, high, max; separate from `omp-opus`. |
-| `omp-cc-sonnet55` | omp | `commandcode/claude-sonnet-5-5`, gated by `omp_commandcode` | worker, tester, reviewer | low, high, max; separate from `omp-sonnet`. |
-| `omp-cc-sol61` | omp | `commandcode/gpt-6.1-sol`, gated by `omp_commandcode` | worker, tester, reviewer | off only; no thinking levels; separate from `omp-sol`. |
+| `cmd-dsflash41` | cmd | the cmd harness's Command Code provider | implementer | Operator 2026-11-07 (hk 3248): no builder. |
+| `omp-dsflash41` | omp | omp's `commandcode` provider, gated by the host's `omp_commandcode` capability | implementer, reviewer | The policy seat lists reviewer, but admission refuses it on a credit rung (see below). |
+| `omp-musespark13` | omp | `commandcode/meta/muse-spark-1.3`, gated by `omp_commandcode` | implementer, reviewer | low, high, max; unrated until routing-policy grades it. |
+| `omp-argon4` | omp | `commandcode/google/gemini-4-argon`, gated by `omp_commandcode` | implementer, reviewer | off only; no thinking levels. |
+| `omp-mimo26pro` | omp | `commandcode/xiaomi/mimo-v2.6-pro`, gated by `omp_commandcode` | implementer, reviewer | off only; no thinking levels. |
+| `omp-cc-opus55` | omp | `commandcode/claude-opus-5-5`, gated by `omp_commandcode` | implementer, reviewer | low, high, max; separate from `omp-opus`. |
+| `omp-cc-sonnet55` | omp | `commandcode/claude-sonnet-5-5`, gated by `omp_commandcode` | implementer, reviewer | low, high, max; separate from `omp-sonnet`. |
+| `omp-cc-sol61` | omp | `commandcode/gpt-6.1-sol`, gated by `omp_commandcode` | implementer, reviewer | off only; no thinking levels; separate from `omp-sol`. |
 
 A seat whose model has no controllable thinking levels carries `no_thinking` in
 the seat policy (`internal/fleet/policy.json`, hk 3974). Admission admits its
@@ -542,13 +600,15 @@ a `no_thinking` field is ignored. `omp-dsflash41@off` and any
 other credit rung at `off` whose seat lacks the property are refused
 (`credit effort is not placed`).
 
-All seven omp profiles and cmd-dsflash41 share one Command Code account, its 30-day window
-(`commandcode_required_window_missing:30d`), and any
+All seven omp profiles and cmd-dsflash41 draw on the Command Code accounts omp
+holds on the host, judged on their 5-hour and weekly windows
+([§Native measurement: commandcode](#native-measurement-commandcode)), and share any
 `quota.pool_max_concurrent.commandcode` cap (see [config](config.md)). A spawn
-on any of these profiles counts against the same account reading.
+on any of these profiles counts against the pool, and the job records the account
+the gate judged (a prediction of omp's own choice, see above).
 
 Admission refuses the reviewer role for omp-dsflash41 today, because the credit
-rule admits only a worker or tester. The policy seat still lists reviewer, so a
+rule admits only an implementer. The policy seat still lists reviewer, so a
 reviewer launch passes the seat check but is refused at admission. Whether to
 lift that for omp-dsflash41 is the operator's decision; it is not changed here.
 

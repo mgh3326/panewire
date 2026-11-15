@@ -108,7 +108,7 @@ func TestDesignLaneKeepsReviewerLifecycleInHKOnly_t4270(t *testing.T) {
 // daemon's but started as a worker, are still listed.
 func TestDesignLaneKeepsReviewerSpawnedInHKOnly_t4270(t *testing.T) {
 	h, _, fake := t3434Hub(t, filepath.Join(t.TempDir(), "inbox.sqlite3"))
-	for _, tc := range []struct{ job, role string }{{t4270Reviewer, "reviewer"}, {"mwr-9-aaaaaaa-p1-1", "worker"}, {"hk4270-own-worker", "worker"}} {
+	for _, tc := range []struct{ job, role string }{{t4270Reviewer, "reviewer"}, {"mwr-9-aaaaaaa-p1-1", "implementer"}, {"hk4270-own-worker", "implementer"}} {
 		task, _, err := h.inbox.store.claimSpawn(t.Context(), t4270Request(tc.job, t3426Design, "", tc.role), tc.job, t3426Design, time.Now())
 		if err != nil {
 			t.Fatal(err)
@@ -246,7 +246,7 @@ func TestHeldReviewerSpawnFailureIsDeliveredWhenHoldEnds_t4270(t *testing.T) {
 // at once.
 func TestDesignLaneOwnSpawnFailureIsUnchanged_t4270(t *testing.T) {
 	h, _, _ := spawnNotifyHubLanes(t, "", "panewire-design")
-	req := t4270Request("hk4270-own-worker", "panewire-design", "", "worker")
+	req := t4270Request("hk4270-own-worker", "panewire-design", "", "implementer")
 	task, _, err := h.inbox.store.claimSpawn(t.Context(), req, "hk4270-own-worker", "panewire-design", time.Now())
 	if err != nil {
 		t.Fatal(err)

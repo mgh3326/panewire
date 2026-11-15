@@ -373,10 +373,11 @@ func decodeCatalogEnvelope(data []byte) ([]json.RawMessage, error) {
 	return rows, nil
 }
 
-// decodeCatalogRows applies pacelever's catalog validation: a row must name a
-// profile, model, known grade and known gate; a row in a pool panewire does
-// not serve is ignored with a warning; rungs are unique by profile@effort;
-// and a profile's grades must not improve as effort rises.
+// decodeCatalogRows applies pacelever's catalog validation: rows without a
+// profile, model, known grade or known gate are skipped with a warning; a row
+// in a pool panewire does not serve is ignored with a warning; rungs are
+// unique by profile@effort; and a profile's grades must not improve as effort
+// rises.
 func decodeCatalogRows(raw []json.RawMessage) ([]CatalogEntry, []string, []int, error) {
 	if len(raw) == 0 {
 		return nil, nil, nil, errors.New("empty bench catalog")
@@ -391,7 +392,8 @@ func decodeCatalogRows(raw []json.RawMessage) ([]CatalogEntry, []string, []int, 
 			return nil, nil, nil, errors.New("invalid catalog row types")
 		}
 		if row.Profile == "" || row.ModelID == "" || !validCatalogGrade(row.Grade) || (row.Gate != "default" && row.Gate != "escalation" && row.Gate != "consult_only") {
-			return nil, nil, nil, errors.New("catalog row lacks valid identity, grade or gate")
+			warnings = append(warnings, fmt.Sprintf("catalog_row_invalid:%s@%s", row.Profile, row.Effort))
+			continue
 		}
 		if !catalogPool(row.Pool) {
 			warnings = append(warnings, fmt.Sprintf("unknown pool [%s] ignored", row.Pool))
@@ -468,9 +470,6 @@ func validateCatalogMonotonic(rows []CatalogEntry) error {
 	return nil
 }
 
-// ValidCatalogGrade reports whether grade is one the catalog accepts.
-func ValidCatalogGrade(grade string) bool { return validCatalogGrade(grade) }
-
 // CatalogWire is the row shape handoffkeep accepts. Local fields (placement,
 // billing, family, group) never leave the caller, exactly as in pacelever.
 func CatalogWire(rows []CatalogEntry) []map[string]any {
@@ -523,13 +522,6 @@ func (c *CatalogClient) PushCatalog(ctx context.Context, rows []CatalogEntry) er
 		return err
 	}
 	return c.request(ctx, http.MethodPut, "/v1/bench/catalog", map[string]any{"catalog": CatalogWire(rows)}, nil)
-}
-
-// PushGrade writes one grade projection through handoffkeep's operator
-// endpoint.
-func (c *CatalogClient) PushGrade(ctx context.Context, profile, grade, deviationRef, boundaryVersion string) error {
-	entry := map[string]any{"profile": profile, "grade": grade, "deviation_ref": deviationRef, "boundary_version": boundaryVersion}
-	return c.request(ctx, http.MethodPut, "/v1/bench/grades", map[string]any{"grades": []any{entry}}, nil)
 }
 
 func (c *CatalogClient) request(ctx context.Context, method, path string, body, out any) error {

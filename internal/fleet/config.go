@@ -29,6 +29,9 @@ type Config struct {
 	// Reap holds [reap] job_dir_ttl, the node's opt-in to the job dir TTL
 	// (docs/job-dir-ttl.md).
 	Reap map[string]any `toml:"reap"`
+	// ignoredTables names top-level tables this release does not read; New
+	// warns about each, so a config from a newer or older release still loads.
+	ignoredTables []string
 }
 
 func expand(p string) string {
@@ -92,6 +95,14 @@ func warnRetiredQuotaKeys(c Config, errw io.Writer) {
 	}
 }
 
+// warnIgnoredHostsTables names each top-level key of the hosts config that
+// this release does not read. The file still loads; the key is ignored.
+func warnIgnoredHostsTables(c Config, path string, errw io.Writer) {
+	for _, key := range c.ignoredTables {
+		fmt.Fprintf(errw, "panewire: warning: unknown hosts key [%s] in %s is not read by this release; ignored\n", key, path)
+	}
+}
+
 // ReportUserIdle reads [local] report_user_idle from the node's hosts config. The
 // node reads it on each heartbeat, so an edit applies at the next one. A
 // missing or unreadable config means off: the node reports no user input.
@@ -118,7 +129,7 @@ func LoadConfig(path string) (Config, error) {
 	}
 	for _, k := range slices.Sorted(maps.Keys(raw)) {
 		if k != "local" && k != "hub" && k != "hosts" && k != "artifacts" && k != "placement" && k != "quota" && k != "sweep" && k != "reap" {
-			return c, fail(exitConfig, "unknown hosts table %q", k)
+			c.ignoredTables = append(c.ignoredTables, k)
 		}
 	}
 	if e = toml.Unmarshal(b, &c); e != nil {
@@ -374,6 +385,9 @@ func stringsValue(m map[string]any, k string) []string {
 	}
 	return out
 }
+
+// hubArgs is the connection a hub call passes. The credential-file paths are
+// expanded here because the CLI opens them as given and does not expand "~".
 func (c Config) hubArgs(role string) []string {
 	var a []string
 	if v := str(c.Hub, "hub_url"); v != "" {
@@ -387,10 +401,10 @@ func (c Config) hubArgs(role string) []string {
 		token = str(c.Hub, "hub_token_env")
 	}
 	if token != "" {
-		a = append(a, "--hub-token-env", token)
+		a = append(a, "--hub-token-env", expand(token))
 	}
 	if v := str(c.Hub, "hub_cf_env"); v != "" {
-		a = append(a, "--hub-cf-env", v)
+		a = append(a, "--hub-cf-env", expand(v))
 	}
 	return a
 }
@@ -433,9 +447,9 @@ func (a *App) controlHubArgs(operator bool) []string {
 	if operator {
 		token = firstNonempty(str(a.Config.Hub, "operator_token_env"), token)
 	}
-	args := []string{"--hub-url", str(a.Config.Hub, "hub_url"), "--hub-token-env", token}
+	args := []string{"--hub-url", str(a.Config.Hub, "hub_url"), "--hub-token-env", expand(token)}
 	if v := str(a.Config.Hub, "hub_cf_env"); v != "" {
-		args = append(args, "--hub-cf-env", v)
+		args = append(args, "--hub-cf-env", expand(v))
 	}
 	return args
 }

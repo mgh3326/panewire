@@ -16,7 +16,9 @@
    calls `scripts/build-release.sh dist/release
    <tag>`. The script builds CGO-disabled (`CGO_ENABLED=0`, `-trimpath`) binaries
    named `panewire_<tag>_<os>_<arch>` for linux/amd64, linux/arm64,
-   darwin/amd64 and darwin/arm64, and writes `SHA256SUMS`. The workflow
+   darwin/amd64 and darwin/arm64, and writes `SHA256SUMS`. It then writes
+   `components.json`, which names the daemons (hub, node) the release changed;
+   see [`release-components.md`](release-components.md). The workflow
    checks that `panewire version` prints the tag. It runs the tests. Then it
    publishes the GitHub Release with `GITHUB_TOKEN`.
 
@@ -37,6 +39,14 @@ It keeps the old binary as `panewire.prev` and restarts the owning service.
 If the version or service check fails, it restores `panewire.prev`. The hub's
 `panewire update publish` remains a separate, operator-run path. Its release
 notes show the command for each tag.
+
+A release that stops reading a config key says so in its release notes, naming
+the key and the file. An unknown key in a config file is ignored with one
+warning per key, not refused, so an upgraded hub's service check still passes
+while the key stays in the file. A malformed value for a known key still
+refuses the file. The one exception is `runtug_path` in spawn.json, which still
+refuses, because ignoring it would run a different binary than the one
+configured. Operators delete a retired key once the notes name it.
 
 ## Pin, hold, roll back
 

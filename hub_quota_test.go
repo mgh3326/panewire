@@ -3,15 +3,11 @@ package panewire
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
-	"time"
-
-	"github.com/coder/websocket"
 )
 
 const (
@@ -49,50 +45,6 @@ func TestHubQuotaHeartbeatOmitsQuotaField(t *testing.T) {
 	}
 	if _, ok := decodeHubHeartbeatPayload(event.Payload); !ok {
 		t.Fatalf("own heartbeat no longer decodes: %s", event.Payload)
-	}
-}
-
-// A legacy hub's quota.request is still decoded, and the node answers
-// unsupported so the hub's waiter completes instead of timing out.
-func TestHubQuotaRequestAnswersUnsupported(t *testing.T) {
-	message, ok := parseHubOutbound([]byte(`{"type":"quota.request","request_id":"quota-abc123","tool":"scopefuel"}`))
-	if !ok || message.RequestID != "quota-abc123" {
-		t.Fatalf("quota.request no longer decodes: %+v ok=%t", message, ok)
-	}
-
-	reports := make(chan []byte, 1)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		conn, err := websocket.Accept(w, r, nil)
-		if err != nil {
-			return
-		}
-		defer conn.CloseNow()
-		_, payload, err := conn.Read(r.Context())
-		if err == nil {
-			reports <- payload
-		}
-	}))
-	defer server.Close()
-	conn, _, err := websocket.Dial(t.Context(), r6WSURL(server.URL, ""), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer conn.CloseNow()
-
-	client := &HubClient{}
-	client.handleHubQuota(t.Context(), &hubClientConnection{connection: conn}, message)
-	select {
-	case payload := <-reports:
-		var report struct {
-			Type      string `json:"type"`
-			RequestID string `json:"request_id"`
-			Error     string `json:"error"`
-		}
-		if json.Unmarshal(payload, &report) != nil || report.Type != "quota.report" || report.RequestID != "quota-abc123" || report.Error != "unsupported" {
-			t.Fatalf("quota.report=%s", payload)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("node did not answer quota.request")
 	}
 }
 

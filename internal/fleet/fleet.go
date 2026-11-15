@@ -32,7 +32,7 @@ func (s fleetSource) Hosts(ctx context.Context, cwd string) ([]HostView, error) 
 	if str(s.a.Config.Hub, "hub_url") == "" || firstNonempty(str(s.a.Config.Hub, "operator_token_env"), str(s.a.Config.Hub, "hub_token_env")) == "" {
 		return nil, fail(exitConfig, "hub placement unavailable")
 	}
-	args := append([]string{"place", "--class", "worker", "--signals", "--cwd", cwd}, s.a.controlHubArgs(true)...)
+	args := append([]string{"place", "--class", "worker", "--signals", "--floor", "--cwd", cwd}, s.a.controlHubArgs(true)...)
 	r := s.a.call(ctx, "panewire", args...)
 	if e := check(r, "hub placement"); e != nil {
 		return nil, e
@@ -54,32 +54,6 @@ func (s fleetSource) SharedAccount(ctx context.Context, key string) (SharedAccou
 		return SharedAccount{Key: key, Degraded: true}, e
 	}
 	return c.sharedAccount(ctx, key)
-}
-
-// cliWaker drives the in-flight `panewire node wake` contract: request the
-// node, hold it awake for a bounded window and let the caller wait for the
-// connect.
-type cliWaker struct{ a *App }
-
-func (w cliWaker) Wake(ctx context.Context, host string, req WakeRequest) error {
-	hold := req.HoldMinutes
-	if hold <= 0 {
-		hold = 10
-	}
-	wait := req.WaitSeconds
-	if wait <= 0 {
-		wait = 90
-	}
-	args := []string{"node", "wake", "--target", host,
-		"--hold", fmt.Sprintf("%dm", hold),
-		"--timeout", fmt.Sprintf("%ds", wait),
-		"--reason", req.Reason}
-	args = append(args, w.a.controlHubArgs(true)...)
-	r := w.a.call(ctx, "panewire", args...)
-	if e := check(r, "node wake"); e != nil {
-		return e
-	}
-	return nil
 }
 
 // quotaURL is the configured shared-quota endpoint: hosts.toml [quota] url,
@@ -302,7 +276,7 @@ func (c *hkQuota) sharedAccount(ctx context.Context, key string) (SharedAccount,
 		if age := c.now().Sub(acc.MeasuredAt); age >= -time.Minute && age <= ttl {
 			acc.Fresh = true
 		}
-		acc.Quota = withFree(accountPoolView(o.Buckets, c.now()), o.FreeBucket, c.now())
+		acc.Quota = withFree(accountPoolView(readableBuckets(accountPool(key), o.Buckets), c.now()), o.FreeBucket, c.now())
 	}
 	return acc, nil
 }
@@ -320,6 +294,22 @@ func withFree(v *PoolView, free *shared.FreeBucket, now time.Time) *PoolView {
 	}
 	v.Free = f
 	return v
+}
+
+// WindowRead says a measured window of pool is one the fleet reads. The
+// commandcode month is not read, projected or gated on (decision 289, hk 4707):
+// a node that still runs the earlier API measurement publishes a 30d bucket, and
+// it is ignored until that node is replaced.
+func WindowRead(pool, window string) bool {
+	return pool != commandcodePool || window != "30d"
+}
+
+// readableBuckets is buckets without the windows WindowRead refuses for pool.
+func readableBuckets(pool string, buckets []accountBucket) []accountBucket {
+	if pool != commandcodePool {
+		return buckets
+	}
+	return slices.DeleteFunc(slices.Clone(buckets), func(b accountBucket) bool { return !WindowRead(pool, b.Window) })
 }
 
 // accountBucket is the allowlisted shared-observation wire format. Model
@@ -430,12 +420,21 @@ func rankedPoolView(buckets []accountBucket, now time.Time, rankScope, group str
 		if !inView(b) {
 			continue
 		}
+		v.Windows = append(v.Windows, ViewWindow{Window: b.Window, UsedPct: *b.UsedPct, ResetsAt: b.ResetsAt})
 		if v.Blocking == nil || *b.UsedPct > *v.Blocking {
 			v.Blocking = b.UsedPct
 		}
 		w, err := windowDuration(b.Window)
 		if err == nil {
 			v.windowObserved = true
+		}
+		if err == nil && (v.Shortest == nil || w < v.Shortest.window) {
+			room := windowRoom{usedPct: *b.UsedPct, window: w}
+			if reset, perr := time.Parse(time.RFC3339Nano, b.ResetsAt); perr == nil {
+				h := reset.Sub(now).Hours()
+				room.resetHours = &h
+			}
+			v.Shortest = &room
 		}
 		long := err == nil && w >= 24*time.Hour
 		if err == nil && !long && (v.ShortUsed == nil || *b.UsedPct > *v.ShortUsed) {
@@ -465,4 +464,12 @@ func rankedPoolView(buckets []accountBucket, now time.Time, rankScope, group str
 		}
 	}
 	return v
+}
+
+// windowRoom is one window's used share and time to its reset. It is the view
+// a job's expected hours must fit inside (headroomFit, select.go).
+type windowRoom struct {
+	usedPct    float64
+	window     time.Duration
+	resetHours *float64
 }

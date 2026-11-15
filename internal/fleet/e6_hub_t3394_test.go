@@ -9,6 +9,12 @@ import (
 	"testing"
 )
 
+func TestQuotaE6EnvUsesPanewireName(t *testing.T) {
+	if got := quotaE6Env("omp-dsflash41@high"); !slices.Equal(got, []string{"PANEWIRE_E6_ARM=omp-dsflash41@high"}) {
+		t.Fatalf("quota E6 env = %v", got)
+	}
+}
+
 // prepareE6Submission runs the submitter half over the hub fixture: a linked
 // worktree on a pushed branch, an explicit profile and the marker named by the
 // environment.
@@ -85,7 +91,7 @@ func (q *e6Quota) Launch(ctx context.Context, r QuotaRequest) (Launch, error) {
 
 func e6AdmissionSubmission(t *testing.T, arm string) Submission {
 	t.Helper()
-	s := Spawn{CWD: "/work/project", Profile: "omp-dsflash41", Prompt: "/work/brief.md", Job: "job-a", Label: "job-a", T: "T1", Task: "42", Role: "worker", Owner: "parent", Host: "auto", Effort: "high", Containment: "hk:12"}
+	s := Spawn{CWD: "/work/project", Profile: "omp-dsflash41", Prompt: "/work/brief.md", Job: "job-a", Label: "job-a", T: "T1", Task: "42", Role: "implementer", Owner: "parent", Host: "auto", Effort: "high", Containment: "hk:12"}
 	return Submission{
 		RequestID:       "00000000-0000-4000-8000-000000000001",
 		Args:            submissionArgs(s),
@@ -179,7 +185,7 @@ func TestCLIQuotaPassesE6ArmToPacelever(t *testing.T) {
 		t.Fatalf("pacelever calls=%d", len(f.Calls))
 	}
 	for _, call := range f.Calls {
-		if !slices.Contains(call.Env, "PACELEVER_E6_ARM=omp-dsflash41@high") {
+		if !slices.Contains(call.Env, "PANEWIRE_E6_ARM=omp-dsflash41@high") {
 			t.Fatalf("%v did not receive the marker: %v", call.Args, call.Env)
 		}
 	}

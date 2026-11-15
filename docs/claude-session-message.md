@@ -5,7 +5,7 @@ home-desktop (Linux) on 2026-11-12.
 
 ## Session names
 
-`panewire spawn` and `panewire delegate --headless` start every Claude session
+`panewire spawn` starts every Claude session
 with `--name <job id>`, so `ListAgents`, `/list-agents` and `@name` address a
 fleet seat by the id the fleet already uses. Only `claude` takes the flag; every
 other harness argv is unchanged (`withSessionName` in `internal/fleet/herdr.go`).
@@ -27,8 +27,12 @@ Off by default. For the lanes named in the node daemon's
 
     [inbox] <lane>: N unread (most urgent: <kind>) | panewire inbox list --lane <lane>
 
-to the lane's Claude Code session instead of typing it into the pane. The text
-is unchanged and the hub inbox stays the record. Nothing else changes: every
+to the lane's Claude Code session instead of typing it into the pane. The
+session message carries the sender prefix `panewire-hub: ` before the line;
+the line typed into the pane has no prefix. The text is otherwise unchanged
+and the hub inbox stays the record. The line's kind is documented in
+[quiet-delivery.md](quiet-delivery.md#inbox-only-lanes) (`order` displays as
+`order`, ranked as `decision`; hk 4458). Nothing else changes: every
 other lane, every other line and every non-Claude harness is typed as before,
 and so is the lane's own line whenever the post cannot be made.
 

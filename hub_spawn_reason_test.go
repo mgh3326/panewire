@@ -34,7 +34,7 @@ func failSpawnThroughNode(t *testing.T, h *HubServer, server *httptest.Server, r
 		t.Fatal(err)
 	}
 	dispatch := hubSpawnRequest{RequestID: t14RequestID(741), Machine: "machine-a", CWDKey: "project", Brief: hubSpawnBrief{Inline: "task"}, Args: []string{"--job", "test-job"}, WaitSeconds: 600, DeadlineMS: task.Deadline.UnixMilli()}
-	if task, err = h.inbox.store.bindSpawn(t.Context(), req.RequestID, task.Attempt, dispatch); err != nil {
+	if task, err = h.inbox.store.bindSpawn(t.Context(), req.RequestID, task.Attempt, dispatch, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	transport := directSpawnTransport{h: h, task: task}
@@ -102,6 +102,21 @@ func TestSpawnReasonUnclassifiedKeepsTheBareForm(t *testing.T) {
 	requestID := failSpawnThroughNode(t, h, server, "a refusal nobody has written yet", 70, false)
 	if status, reason := spawnOperationStatus(t, server, requestID); status != "failed" || reason != "spawn_failed: a refusal nobody has written yet" {
 		t.Fatalf("status=%q reason=%q", status, reason)
+	}
+}
+
+// hk 3301: a brief upload refused by hk's secret guard reaches the
+// SPAWN_FAILED reason with the guard's pattern name, never the matched text.
+func TestSpawnReasonNamesHKGuardPattern(t *testing.T) {
+	const tail = "stdout\nstderr: panewire: brief upload to briefs/job-a.md failed: handoffkeep: secret_like_content:private_key\nFix: hk's secret guard refused the write as secret-like content and named the pattern in the reason; remove the secret-shaped text from the brief or task field and retry."
+	result := hubSpawnResult{RC: 81, Error: "spawn_failed", StdoutTail: tail}
+	reason := spawnOutcomeReason(spawnResultReason(result), spawnResultRefusal(result.StdoutTail))
+	if !strings.HasPrefix(reason, "spawn_failed:hk_guard_refused: ") || !strings.Contains(reason, "secret_like_content:private_key") {
+		t.Fatalf("reason=%q", reason)
+	}
+	notice := spawnNotificationText("job-a", "req-1", hubSpawnOutcome{RC: 81, Stage: "launch", Reason: reason, Fix: spawnResultFix(result.StdoutTail)})
+	if !strings.Contains(notice, "reason=spawn_failed:hk_guard_refused") || !strings.Contains(notice, "secret_like_content:private_key") {
+		t.Fatalf("notice=%q", notice)
 	}
 }
 
@@ -275,7 +290,7 @@ func TestSpawnTraceCloseWithoutClientBuildsNone(t *testing.T) {
 func runFailingHubSpawn(t *testing.T, requestID, stderr string, rc int) hubSpawnResult {
 	t.Helper()
 	message := hubOutboundMessage{RequestID: requestID, CWDKey: "repo-a", BriefInline: "brief", WaitSeconds: 5, Args: []string{"--job", "job-coded"}}
-	return (&HubClient{spawnConfigPath: t14SpawnConfig(t, t.TempDir()), spawnEngine: func(context.Context, string, string, string, string, []string) (*hubSpawnOutput, fleet.Execution) {
+	return (&HubClient{spawnConfigPath: t14SpawnConfig(t, t.TempDir()), spawnEngine: func(context.Context, string, string, string, string, time.Time, []string) (*hubSpawnOutput, fleet.Execution) {
 		output := &hubSpawnOutput{}
 		_, _ = output.stderr.Write([]byte(stderr))
 		return output, fleet.Execution{RC: rc, Stage: "launch"}

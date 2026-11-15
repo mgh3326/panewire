@@ -47,6 +47,10 @@ func TestSpawnSubmitRefusesInputTheNodeCouldNotLaunch_t4270(t *testing.T) {
 	}
 }
 
+// Start conditions are advertised and queued as waiting since hk 4736; the
+// feature check and the waiting submission are covered by
+// hub_spawn_start_conditions_t4736_test.go.
+
 func replaceSpawnArg(args []string, flag, value string) []string {
 	for i := 0; i+1 < len(args); i++ {
 		if args[i] == flag {

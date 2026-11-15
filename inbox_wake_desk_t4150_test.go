@@ -74,9 +74,9 @@ func TestInboxWakeDesignWithoutRowFallsBackToDesk(t *testing.T) {
 	delete(routes, t3602Design)
 	t4150Routes(t, r, routes)
 	got := t4150Event(t, r, t3602Design)
-	t3602OneWake(t, got, "w1:desk", t4150DeskWake(t3602Design, 1, "decision"))
+	t3602OneWake(t, got, "w1:desk", t4150DeskWake(t3602Design, 1, "order"))
 	ev := t4150DeskEvent(t, r, t3602Design, false)
-	if ev.Detail != "lane=handoffkeep-design class=design unread=1 most_urgent=decision desk=operator-desk machine=host-a pane=w1:desk" {
+	if ev.Detail != "lane=handoffkeep-design class=design unread=1 most_urgent=order desk=operator-desk machine=host-a pane=w1:desk" {
 		t.Fatalf("desk event=%+v", ev)
 	}
 	item := t3602Unread(t, r.h, t3602Design, "lane.event", t3426ItemJobID(t, r.h, t3602Design))
@@ -124,7 +124,7 @@ func TestInboxWakeDesignWithoutRowKeepsUnroutableLiveJobOwed(t *testing.T) {
 	r.h.mu.Unlock()
 	r.h.retryUnroutedInboxWakes()
 	r.h.flushInboxWakes()
-	t3602OneWake(t, t3426Injected(r.agent), "w1:job", t3602Wake(t3602Design, 1, "decision"))
+	t3602OneWake(t, t3426Injected(r.agent), "w1:job", t3602Wake(t3602Design, 1, "order"))
 }
 
 func TestInboxWakeDesignWithProvenGonePaneFallsBackToDesk(t *testing.T) {
@@ -139,7 +139,7 @@ func TestInboxWakeDesignWithProvenGonePaneFallsBackToDesk(t *testing.T) {
 	r.clock.advance(laneWriteSettle + time.Second)
 	t4150Snapshot(t, r, "w1:desk", "w1:workdesk", "w1:worker", "w1:review", "w1:trial")
 	got := t4150Event(t, r, t3602Design)
-	t3602OneWake(t, got, "w1:desk", t4150DeskWake(t3602Design, 1, "decision"))
+	t3602OneWake(t, got, "w1:desk", t4150DeskWake(t3602Design, 1, "order"))
 	t4150DeskEvent(t, r, t3602Design, false)
 }
 
@@ -162,7 +162,7 @@ func TestInboxWakeDesignProvenGonePaneWithLiveJobKeepsLaneRoute(t *testing.T) {
 	}
 	r.h.mu.Unlock()
 	got := t4150Event(t, r, t3602Design)
-	t3602OneWake(t, got, "w1:job", t3602Wake(t3602Design, 1, "decision"))
+	t3602OneWake(t, got, "w1:job", t3602Wake(t3602Design, 1, "order"))
 	for _, ev := range r.wakeEvents() {
 		if ev.Reason == "desk_fallback" {
 			t.Fatalf("live job was diverted to desk: %+v", ev)
@@ -215,7 +215,7 @@ func TestInboxWakeDesignStaleSnapshotKeepsLaneRoute(t *testing.T) {
 	r.h.nodes["host-a"].sessionSnapshot.receivedAt = r.clock.Now().Add(-sessionsFindSnapshotMaxAge - time.Second)
 	r.h.mu.Unlock()
 	got := t4150Event(t, r, t3602Design)
-	t3602OneWake(t, got, "w1:design", t3602Wake(t3602Design, 1, "decision"))
+	t3602OneWake(t, got, "w1:design", t3602Wake(t3602Design, 1, "order"))
 }
 
 func TestInboxWakeDesignDeskWindowChoosesTargetAfresh(t *testing.T) {
@@ -224,7 +224,7 @@ func TestInboxWakeDesignDeskWindowChoosesTargetAfresh(t *testing.T) {
 	delete(routes, t3602Design)
 	t4150Routes(t, r, routes)
 	got := t4150Event(t, r, t3602Design)
-	t3602OneWake(t, got, "w1:desk", t4150DeskWake(t3602Design, 1, "decision"))
+	t3602OneWake(t, got, "w1:desk", t4150DeskWake(t3602Design, 1, "order"))
 	if got := t4150Event(t, r, t3602Design); len(got) != 0 {
 		t.Fatalf("inside-window injections=%+v", got)
 	}
@@ -233,7 +233,7 @@ func TestInboxWakeDesignDeskWindowChoosesTargetAfresh(t *testing.T) {
 	t4150Snapshot(t, r, "w1:design", "w1:desk", "w1:workdesk", "w1:worker", "w1:review", "w1:trial")
 	r.clock.advance(r.h.inbox.policy.Relay.wakeWindow)
 	r.h.flushInboxWakes()
-	t3602OneWake(t, t3426Injected(r.agent), "w1:design", t3602Wake(t3602Design, 2, "decision"))
+	t3602OneWake(t, t3426Injected(r.agent), "w1:design", t3602Wake(t3602Design, 2, "order"))
 }
 
 func TestInboxWakeDesignDeskUnreachableRetriesOnHello(t *testing.T) {
@@ -253,7 +253,7 @@ func TestInboxWakeDesignDeskUnreachableRetriesOnHello(t *testing.T) {
 	t4150Routes(t, r, routes)
 	r.h.retryUnroutedInboxWakes()
 	r.h.flushInboxWakes()
-	t3602OneWake(t, t3426Injected(r.agent), "w1:desk", t4150DeskWake(t3602Design, 1, "decision"))
+	t3602OneWake(t, t3426Injected(r.agent), "w1:desk", t4150DeskWake(t3602Design, 1, "order"))
 }
 
 func TestInboxWakeDesignStartupSeedFallsBackToDesk(t *testing.T) {
@@ -268,14 +268,14 @@ func TestInboxWakeDesignStartupSeedFallsBackToDesk(t *testing.T) {
 	r.h.seedStartupInboxWakes()
 	r.clock.advance(r.h.inbox.policy.Relay.wakeWindow)
 	r.h.flushInboxWakes()
-	t3602OneWake(t, t3426Injected(r.agent), "w1:desk", t4150DeskWake(t3602Design, 1, "decision"))
+	t3602OneWake(t, t3426Injected(r.agent), "w1:desk", t4150DeskWake(t3602Design, 1, "order"))
 	t4150DeskEvent(t, r, t3602Design, true)
 }
 
 func TestInboxWakeDesignLivePaneLineIsUnchanged(t *testing.T) {
 	r := newT3602Rig(t, "default")
 	got := t4150Event(t, r, t3602Design)
-	t3602OneWake(t, got, "w1:design", t3602Wake(t3602Design, 1, "decision"))
+	t3602OneWake(t, got, "w1:design", t3602Wake(t3602Design, 1, "order"))
 }
 
 func TestInboxWakePanelessNonDesignLanesDoNotFallback(t *testing.T) {

@@ -14,11 +14,18 @@ var (
 	ansiEscape     = regexp.MustCompile("\x1b(?:\\[[0-?]*[ -/]*[@-~]|\\][^\x07\x1b]*(?:\x07|\x1b\\\\)|\\([0-2])")
 	percentPattern = regexp.MustCompile(`(?i)([0-9]+(?:\.[0-9]+)?)\s*%\s*(left|used|remaining)?`)
 	resetsIn       = regexp.MustCompile(`(?i)resets?\s+in\s+((?:[0-9]+(?:\.[0-9]+)?\s*(?:days?|hours?|minutes?|seconds?|weeks?|[dhmsw])\s*)+)`)
+	resetsDate     = regexp.MustCompile(`(?i)\bresets?\s+([A-Za-z]{3,9})\.?\s+([0-9]{1,2})(?:,?\s+([0-9]{4}))?(?:,?\s+at|,)?\s+([0-9]{1,2})(?::([0-9]{2}))?(?::([0-9]{2}))?\s*([ap]\.?m\.?)?(?:\s*(?:\(([A-Za-z0-9_+\-/]+)\)|([A-Za-z0-9_+\-/]+)))?`)
 	remainingPanel = regexp.MustCompile(`(?i)(?:Pro|Ultra|Free)[^\n]*?([0-9]+(?:\.[0-9]+)?)%\s+remaining`)
 	windowWeekly   = regexp.MustCompile(`(?i)\b(?:weekly|7-day)\b`)
 	windowFiveHour = regexp.MustCompile(`(?i)\b(?:5h|5-hour)\b`)
 	windowDaily    = regexp.MustCompile(`(?i)\bdaily\b`)
 	windowMonthly  = regexp.MustCompile(`(?i)\bmonthly\b`)
+
+	months = map[string]time.Month{
+		"jan": time.January, "feb": time.February, "mar": time.March, "apr": time.April,
+		"may": time.May, "jun": time.June, "jul": time.July, "aug": time.August,
+		"sep": time.September, "oct": time.October, "nov": time.November, "dec": time.December,
+	}
 )
 
 // cleanScreen strips terminal escapes and carriage returns from probe output.
@@ -69,6 +76,89 @@ func resetIn(s string, now time.Time) string {
 	return now.Add(d).UTC().Format(time.RFC3339Nano)
 }
 
+// resetDate parses an absolute reset date phrase like "resets Nov 15, 8:00 AM (UTC)"
+// or "resets Nov 15 at 8am (Asia/Seoul)", returning RFC3339Nano UTC or "".
+func resetDate(s string, now time.Time) string {
+	m := resetsDate.FindStringSubmatch(s)
+	if m == nil {
+		return ""
+	}
+	month, ok := months[strings.ToLower(m[1])[:3]]
+	if !ok {
+		return ""
+	}
+	day, err := strconv.Atoi(m[2])
+	if err != nil || day < 1 || day > 31 {
+		return ""
+	}
+	hour, err := strconv.Atoi(m[4])
+	if err != nil {
+		return ""
+	}
+	minute := 0
+	if m[5] != "" {
+		if minute, err = strconv.Atoi(m[5]); err != nil || minute < 0 || minute > 59 {
+			return ""
+		}
+	}
+	sec := 0
+	if m[6] != "" {
+		if sec, err = strconv.Atoi(m[6]); err != nil || sec < 0 || sec > 59 {
+			return ""
+		}
+	}
+	ampm := strings.ToLower(strings.ReplaceAll(m[7], ".", ""))
+	if ampm == "pm" {
+		if hour < 12 {
+			hour += 12
+		}
+	} else if ampm == "am" {
+		if hour == 12 {
+			hour = 0
+		}
+	}
+	if hour < 0 || hour > 23 {
+		return ""
+	}
+	zoneStr := m[8]
+	if zoneStr == "" {
+		zoneStr = m[9]
+	}
+	var loc *time.Location
+	switch strings.ToUpper(strings.TrimSpace(zoneStr)) {
+	case "", "UTC", "GMT", "Z":
+		loc = time.UTC
+	default:
+		var lErr error
+		loc, lErr = time.LoadLocation(zoneStr)
+		if lErr != nil {
+			return ""
+		}
+	}
+	var reset time.Time
+	if m[3] != "" {
+		year, yErr := strconv.Atoi(m[3])
+		if yErr != nil || year < 2000 || year > 2100 {
+			return ""
+		}
+		reset = time.Date(year, month, day, hour, minute, sec, 0, loc)
+	} else {
+		localNow := now.In(loc)
+		reset = time.Date(localNow.Year(), month, day, hour, minute, sec, 0, loc)
+		if !reset.After(now) {
+			reset = reset.AddDate(1, 0, 0)
+		}
+	}
+	return reset.UTC().Format(time.RFC3339Nano)
+}
+
+func parseReset(s string, now time.Time) string {
+	if r := resetDate(s, now); r != "" {
+		return r
+	}
+	return resetIn(s, now)
+}
+
 func number(s string) float64 {
 	n, _ := strconv.ParseFloat(strings.ReplaceAll(s, ",", ""), 64)
 	return n
@@ -87,10 +177,11 @@ type screenPlan struct {
 	reset string
 }
 
-// screenWindow names the window a line reports. The "resets in …" phrase is
-// removed first so a duration like "3d 5h" or "15h" never counts as a window.
+// screenWindow names the window a line reports. The "resets in …" and "resets <date>"
+// phrases are removed first so tokens like "5h" inside "3d 5h" never count as a window.
 func screenWindow(line string) string {
 	probe := resetsIn.ReplaceAllString(line, " ")
+	probe = resetsDate.ReplaceAllString(probe, " ")
 	switch {
 	case windowWeekly.MatchString(probe):
 		return "7d"
@@ -124,7 +215,7 @@ func ParseScreen(text string, now time.Time) (quota.Observation, error) {
 	var plans []screenPlan
 	for _, line := range strings.Split(clean, "\n") {
 		if m := remainingPanel.FindStringSubmatch(line); m != nil {
-			plans = append(plans, screenPlan{used: 100 - number(m[1]), reset: resetIn(line, now)})
+			plans = append(plans, screenPlan{used: 100 - number(m[1]), reset: parseReset(line, now)})
 		}
 		window := screenWindow(line)
 		if window == "" {
@@ -138,7 +229,7 @@ func ParseScreen(text string, now time.Time) (quota.Observation, error) {
 		if strings.EqualFold(m[2], "left") || strings.EqualFold(m[2], "remaining") {
 			used = 100 - used
 		}
-		buckets = append(buckets, screenBucket{window: window, used: used, reset: resetIn(line, now)})
+		buckets = append(buckets, screenBucket{window: window, used: used, reset: parseReset(line, now)})
 	}
 	if len(buckets) == 0 {
 		if len(plans) > 0 {

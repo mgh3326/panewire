@@ -51,6 +51,12 @@ var nodeHarnessBinaries = map[string]string{"claude": "claude", "codex": "codex"
 // `herdr integration status`.
 var nodeHerdrIntegrations = map[string]string{"claude": "claude", "codex": "codex", "omp": "omp", "agy": "antigravity-cli", "devin": "devin"}
 
+// nodeHarnessPools names the quota pool whose login answers a harness kind.
+// The pool is named like the harness, except the Command Code harness: a cmd
+// seat spends the commandcode pool, which this node measures through omp
+// (docs/quota.md), so that is the login a cmd capability reads.
+var nodeHarnessPools = map[string]string{"cmd": "commandcode"}
+
 var nodeToolchains = map[string][]string{"go": {"go", "version"}, "node": {"node", "--version"}, "bun": {"bun", "--version"}}
 
 // nodeReadinessDeps are the probe's external reads. The zero value runs the
@@ -174,23 +180,58 @@ func (client *HubClient) noteQuotaAccount(pool, accountKey string) {
 	client.readiness.accounts[pool] = quotaAccountNote{key: accountKey, at: at}
 }
 
-// noteOwnQuotaMeasurement clears only a login-screen mark after this host's
-// own credential completed a successful measurement. Shared readings do not
-// call it.
-func (client *HubClient) noteOwnQuotaMeasurement(pool string) {
-	client.readiness.mu.Lock()
-	if _, marked := client.readiness.loginScreens[pool]; marked {
-		delete(client.readiness.loginScreens, pool)
+// loginScreenKeys is every login-screen mark a pool's evidence answers: the
+// pool itself and the harnesses nodeHarnessPools maps to it (a cmd launch
+// marks "cmd" though the node measures the commandcode pool).
+func loginScreenKeys(pool string) []string {
+	keys := []string{pool}
+	for kind, named := range nodeHarnessPools {
+		if named == pool {
+			keys = append(keys, kind)
+		}
+	}
+	return keys
+}
+
+// clearLoginScreenMarksBefore forgets a pool's login-screen marks stamped at
+// or before cutoff. A mark written after the proof started (a launch that
+// stopped at the login screen while the measurement or probe was in flight) is
+// newer evidence and survives. The caller holds readiness.mu.
+func (client *HubClient) clearLoginScreenMarksBefore(pool string, cutoff time.Time) bool {
+	changed := false
+	for _, key := range loginScreenKeys(pool) {
+		if at, marked := client.readiness.loginScreens[key]; marked && !at.After(cutoff) {
+			delete(client.readiness.loginScreens, key)
+			changed = true
+		}
+	}
+	if changed {
 		client.readiness.dirty = true
 	}
+	return changed
+}
+
+// noteOwnQuotaMeasurement clears a pool's login-screen marks set before a
+// successful own measurement started. Shared readings do not call it, and a
+// failed pass must not: the marks are evidence of a login the pass did not
+// prove.
+func (client *HubClient) noteOwnQuotaMeasurement(pool string, started time.Time) {
+	client.readiness.mu.Lock()
+	client.clearLoginScreenMarksBefore(pool, started)
 	client.readiness.mu.Unlock()
 }
 
+// loginScreenMarked answers whether any mark the pool's evidence answers is
+// set, so a refresh path probes when a harness login screen is the reason.
 func (client *HubClient) loginScreenMarked(pool string) bool {
 	client.readiness.mu.Lock()
 	defer client.readiness.mu.Unlock()
-	_, marked := client.readiness.loginScreens[pool]
-	return marked
+	for _, key := range loginScreenKeys(pool) {
+		if _, marked := client.readiness.loginScreens[key]; marked {
+			return true
+		}
+	}
+	return false
 }
 
 // noteQuotaUnknown records a refresh that failed for a reason other than the
@@ -345,6 +386,38 @@ func defaultRepoDir(workRoot, key string) (string, bool) {
 	return path, true
 }
 
+// readinessLogin answers one harness kind's login from the node's pool
+// evidence and its own launch evidence: a login probe and the quota loop's
+// refresh are keyed by the pool the kind spends (its own unless
+// nodeHarnessPools names another), a login screen by the harness that stopped
+// at it.
+func (client *HubClient) readinessLogin(ctx context.Context, kind string, accounts map[string]quotaAccountNote, probeMissing map[string]bool, loginScreens map[string]time.Time, at time.Time) (login, account string) {
+	pool := kind
+	if named, ok := nodeHarnessPools[kind]; ok {
+		pool = named
+	}
+	note, measured := accounts[pool]
+	periodicMeasurementPath := false
+	for _, key := range []string{kind, pool} {
+		if _, marked := loginScreens[key]; marked {
+			periodicMeasurementPath = client.statePublish && slices.Contains(client.stateQuotaPools, pool) && client.nativeQuotaSource(pool).measurableHere(ctx)
+			break
+		}
+	}
+	loginScreen := loginScreenActive(loginScreens, kind, at, periodicMeasurementPath) ||
+		pool != kind && loginScreenActive(loginScreens, pool, at, periodicMeasurementPath)
+	switch {
+	case probeMissing[pool] || loginScreen || measured && note.key == "":
+		// The loop's last refresh, a login probe and a launch that stopped at
+		// the login screen each say the login is missing; a refresh that read
+		// a shared reading says nothing against them.
+		return fleet.ReadinessLoginMissing, ""
+	case measured:
+		return fleet.ReadinessLoginPresent, note.key
+	}
+	return fleet.ReadinessLoginUnknown, ""
+}
+
 // collectReadiness probes the node. It never fails: a probe that cannot run
 // reports the thing as absent.
 func (client *HubClient) collectReadiness(ctx context.Context) *fleet.Readiness {
@@ -367,29 +440,17 @@ func (client *HubClient) collectReadiness(ctx context.Context) *fleet.Readiness 
 			h.Dialog = mark.marker
 		}
 		if kind == "cmd" {
+			// cmd runs inside a herdr pane, so the node finds no binary to
+			// probe and reports it installed by definition.
 			h.Installed, h.HerdrIntegration = true, true
-			out.Harnesses[kind] = h
-			continue
+		} else {
+			if path, ok := deps.find(nodeHarnessBinaries[kind]); ok {
+				h.Installed = true
+				h.Version = versionToken(deps.output(ctx, path, "--version"))
+			}
+			h.HerdrIntegration = integrations[nodeHerdrIntegrations[kind]]
 		}
-		if path, ok := deps.find(nodeHarnessBinaries[kind]); ok {
-			h.Installed = true
-			h.Version = versionToken(deps.output(ctx, path, "--version"))
-		}
-		h.HerdrIntegration = integrations[nodeHerdrIntegrations[kind]]
-		note, measured := accounts[kind]
-		periodicMeasurementPath := false
-		if _, marked := loginScreens[kind]; marked {
-			periodicMeasurementPath = client.statePublish && slices.Contains(client.stateQuotaPools, kind) && client.nativeQuotaSource(kind).measurableHere(ctx)
-		}
-		switch {
-		case probeMissing[kind] || loginScreenActive(loginScreens, kind, out.CheckedAt, periodicMeasurementPath) || measured && note.key == "":
-			// The loop's last refresh, a login probe and a launch that stopped at
-			// the login screen each say the login is missing; a refresh that read
-			// a shared reading says nothing against them.
-			h.Login = fleet.ReadinessLoginMissing
-		case measured:
-			h.Login, h.Account = fleet.ReadinessLoginPresent, note.key
-		}
+		h.Login, h.Account = client.readinessLogin(ctx, kind, accounts, probeMissing, loginScreens, out.CheckedAt)
 		out.Harnesses[kind] = h
 	}
 	for tool, argv := range nodeToolchains {

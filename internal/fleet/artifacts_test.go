@@ -53,7 +53,7 @@ func TestArtifactSweepConfirmationAndHashGates(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			a := testApp(t)
 			f := ledgerRunner(t, a)
-			seedJob(t, a, "j", "worker")
+			seedJob(t, a, "j", "implementer")
 			putEvent(t, a, "j", "job.completed", map[string]any{})
 			src := filepath.Join(a.Jobs, "j", "final")
 			if e := os.MkdirAll(src, 0700); e != nil {

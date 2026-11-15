@@ -18,9 +18,18 @@ func TestSubmitConflictPrintsHubReasonAndFix(t *testing.T) {
 			`{"error":"job_already_claimed","request_id":"4a2514ef","job":"pw-author-trailer","host":"m1b","pane":"w2:p3","fix":"close pane w2:p3 on m1b, then resubmit"}`,
 			[]string{"job_already_claimed", "request=4a2514ef", "job=pw-author-trailer", "host=m1b", "pane=w2:p3", "fix: close pane w2:p3 on m1b, then resubmit"},
 		},
-		"held by the landing grace": {
+		// A (task, role) held by a live job is the hub's own code: the CLI
+		// prints it and its fix, and never falls back to "job id" (hk 2944).
+		"task role held": {
+			`{"error":"task_role_claimed","task":"2939","role":"worker","request_id":"4a2514ef","job":"at-2939-ci-tiers","host":"m1b","pane":"w2:p3","fix":"inspect the existing operation; do not submit a new request while ownership is live"}`,
+			[]string{"hub refused spawn: task_role_claimed", "job=at-2939-ci-tiers", "fix: inspect the existing operation"},
+		},
+		// A body from an older hub may still carry retry_after_s; a reviewer
+		// holds no reservation now (hk 4737), so the CLI prints the holder and
+		// fix only.
+		"a body from an older hub": {
 			`{"error":"job_already_claimed","request_id":"4a2514ef","job":"mwr-283-7e8272c-p1","host":"m1b","pane":"w5:p78","retry_after_s":412,"fix":"inspect the existing operation"}`,
-			[]string{"(held by request=4a2514ef job=mwr-283-7e8272c-p1 host=m1b pane=w5:p78) retry_after_s=412; fix: inspect"},
+			[]string{"(held by request=4a2514ef job=mwr-283-7e8272c-p1 host=m1b pane=w5:p78); fix: inspect"},
 		},
 		"no holder": {
 			`{"error":"idempotency_payload_conflict","fix":"use a new job id"}`,

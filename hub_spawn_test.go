@@ -83,7 +83,7 @@ func t14NamedNodeToken(t *testing.T, hub *HubServer, server *httptest.Server, ma
 	t.Cleanup(func() { _ = connection.CloseNow() })
 	hello := map[string]any{"type": "hello", "machine_id": machine, "version": "t14", "accepting": accepting}
 	if spawnV2 {
-		hello["capabilities"] = []string{"spawn_v2", "spawn_ops_v1"}
+		hello["capabilities"] = []string{"spawn_v2", "spawn_ops_v1", hubCapabilityCloseQuestion}
 	}
 	if err := wsjson.Write(t.Context(), connection, hello); err != nil {
 		t.Fatal(err)
@@ -430,11 +430,11 @@ func TestPW6InlineSpawnWireGolden(t *testing.T) {
 }
 
 func TestPW6SpawnArgsValidation(t *testing.T) {
-	valid := []string{"-m", "omp-dsflash41", "--role", "reviewer", "--builder-family", "openai", "--parent-job", "parent-1", "--builder-job", "builder-1", "--e6-arm", "omp-dsflash41@high"}
+	valid := []string{"-m", "omp-dsflash41", "--role", "reviewer", "--author-family", "openai", "--parent-job", "parent-1", "--builder-job", "builder-1", "--e6-arm", "omp-dsflash41@high"}
 	if !validHubSpawnArgs(valid) {
 		t.Fatal("valid new spawn args rejected")
 	}
-	for _, args := range [][]string{{"--role", "root"}, {"--builder-family", "made-up"}, {"--parent-job", "../secret"}, {"--builder-job", "two words"}, {"--e6-arm", "two words"}, {"--unknown", "value"}, {"--e6-arm", "omp-dsflash41@high"}, {"-m", "omp-dsflash41", "--e6-arm", "other@"}} {
+	for _, args := range [][]string{{"--role", "root"}, {"--author-family", "made-up"}, {"--parent-job", "../secret"}, {"--builder-job", "two words"}, {"--e6-arm", "two words"}, {"--unknown", "value"}, {"--e6-arm", "omp-dsflash41@high"}, {"-m", "omp-dsflash41", "--e6-arm", "other@"}} {
 		if validHubSpawnArgs(args) {
 			t.Errorf("invalid args accepted: %q", args)
 		}
@@ -468,7 +468,7 @@ func TestPW6NodeFetchesBriefDocFromHandoffkeep(t *testing.T) {
 	briefPath := filepath.Join(root, "brief")
 	t.Setenv("T14_BRIEF_FILE", briefPath)
 
-	client := &HubClient{spawnConfigPath: config, spawnEngine: func(ctx context.Context, cwd, brief, workspace, session string, args []string) (*hubSpawnOutput, fleet.Execution) {
+	client := &HubClient{spawnConfigPath: config, spawnEngine: func(ctx context.Context, cwd, brief, workspace, session string, _ time.Time, args []string) (*hubSpawnOutput, fleet.Execution) {
 		raw, err := os.ReadFile(brief)
 		if err != nil {
 			t.Error(err)
@@ -507,7 +507,7 @@ func TestPW6CheckoutRefusalSkipsSpawnAndPreparedCWD(t *testing.T) {
 	preparedCWD := ""
 	client := &HubClient{spawnConfigPath: config, spawnPrepare: func(context.Context, nodeWorktreePrepareArgs) (any, string) {
 		return nodeWorktreePrepareResult{Outcome: nodePreparePrepared, Worktree: &nodeWorktree{Path: filepath.Join(root, "prepared")}}, ""
-	}, spawnEngine: func(ctx context.Context, cwd, brief, workspace, session string, args []string) (*hubSpawnOutput, fleet.Execution) {
+	}, spawnEngine: func(ctx context.Context, cwd, brief, workspace, session string, _ time.Time, args []string) (*hubSpawnOutput, fleet.Execution) {
 		preparedCWD = cwd
 		return t14EngineOK()
 	}}
@@ -705,7 +705,7 @@ func TestT14NodeAC9AC10AC13ArgvAndTemporary(t *testing.T) {
 	seen := make(chan string, 1)
 	marker := filepath.Join(root, "must-not-run")
 	args := []string{"--owner", "x; touch " + marker}
-	client := &HubClient{spawnConfigPath: t14SpawnConfig(t, root), spawnEngine: func(ctx context.Context, cwd, brief, workspace, session string, received []string) (*hubSpawnOutput, fleet.Execution) {
+	client := &HubClient{spawnConfigPath: t14SpawnConfig(t, root), spawnEngine: func(ctx context.Context, cwd, brief, workspace, session string, _ time.Time, received []string) (*hubSpawnOutput, fleet.Execution) {
 		if cwd != root || workspace != "worker" || session != "worker" || strings.Join(args, "\x00") != strings.Join(received, "\x00") {
 			t.Errorf("execution inputs: cwd=%q workspace=%q session=%q args=%v", cwd, workspace, session, received)
 		}
@@ -748,7 +748,7 @@ func TestT14NodeAC10FailureAndAC11TimeoutCleanup(t *testing.T) {
 		t.Run(strconv.FormatBool(timeout), func(t *testing.T) {
 			root := t.TempDir()
 			temporary := ""
-			client := &HubClient{spawnConfigPath: t14SpawnConfig(t, root), spawnEngine: func(ctx context.Context, cwd, brief, workspace, session string, args []string) (*hubSpawnOutput, fleet.Execution) {
+			client := &HubClient{spawnConfigPath: t14SpawnConfig(t, root), spawnEngine: func(ctx context.Context, cwd, brief, workspace, session string, _ time.Time, args []string) (*hubSpawnOutput, fleet.Execution) {
 				temporary = brief
 				if timeout {
 					<-ctx.Done()
@@ -822,7 +822,7 @@ func TestT14NodeAC12SerialAndIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	client.spawnEngine = func(ctx context.Context, cwd, brief, workspace, session string, args []string) (*hubSpawnOutput, fleet.Execution) {
+	client.spawnEngine = func(ctx context.Context, cwd, brief, workspace, session string, _ time.Time, args []string) (*hubSpawnOutput, fleet.Execution) {
 		file, err := os.OpenFile(ledger, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
 		if err != nil {
 			t.Error(err)

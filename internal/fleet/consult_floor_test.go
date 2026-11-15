@@ -47,12 +47,12 @@ func consultFloorSelectWith(t *testing.T, o consultFloorOpts, rows []CatalogRow,
 		a.State = &fakeStateReader{snap: FleetSnapshot{Cooling: cooling}}
 	}
 	serveRouting(t, routingDoc(block))
-	route, e := a.routeFor(context.Background(), "worker", "consult")
+	route, e := a.routeFor(context.Background(), "implementer", "consult")
 	if e != nil {
 		t.Fatalf("route: %v", e)
 	}
-	s.Role, s.RoutingRole, s.Task, s.AllowEscalation = "worker", "consult", "", o.allowEscalation
-	req := selReq{grade: grade, t: "T1", role: "worker", builderFamily: family, allowEscalation: o.allowEscalation, urgency: urgencyNormal, urgencySource: "default", route: route}
+	s.Role, s.RoutingRole, s.Task, s.AllowEscalation = "implementer", "consult", "", o.allowEscalation
+	req := selReq{grade: grade, t: "T1", role: "implementer", authorFamily: family, allowEscalation: o.allowEscalation, urgency: urgencyNormal, urgencySource: "default", route: route}
 	return a.selectFor(context.Background(), s, req)
 }
 
@@ -62,7 +62,7 @@ func consultFloorSpawnSelect(t *testing.T, rows []CatalogRow, present []string, 
 	a, s, q := selFixture(t, grade, rows, pools, present)
 	q.GateDo = gatePools(map[string]string{"opus": "claude", "codex-sol": "codex", "codex-astra": "codex"})
 	serveRouting(t, routingDoc(routingBlockV1))
-	s.Role, s.RoutingRole, s.Parent, s.ParentFamily = "worker", "consult", parentLane, family
+	s.Role, s.RoutingRole, s.Parent, s.ParentFamily = "implementer", "consult", parentLane, family
 	return a.selectProfile(context.Background(), s)
 }
 
@@ -271,7 +271,7 @@ func TestConsultFloorResolveGradeFlag(t *testing.T) {
 	q.GateDo = gatePools(map[string]string{"opus": "claude", "codex-sol": "codex", "codex-astra": "codex"})
 	serveRouting(t, routingDocV1)
 	out := captureOut(a)
-	if e := a.Run(context.Background(), []string{"resolve", "--role", "consult", "--t", "T1", "--grade", "S+", "--builder-family", "anthropic", "--json"}); e != nil {
+	if e := a.Run(context.Background(), []string{"resolve", "--role", "consult", "--t", "T1", "--grade", "S+", "--author-family", "anthropic", "--json"}); e != nil {
 		t.Fatalf("resolve --grade S+: %v", e)
 	}
 	var r map[string]any
@@ -279,7 +279,7 @@ func TestConsultFloorResolveGradeFlag(t *testing.T) {
 		t.Fatalf("resolve json: %v\n%s", err, out)
 	}
 	if r["grade"] != "S+" || r["profile"] != "codex-sol" {
-		t.Fatalf("resolve --grade S+ --builder-family anthropic = grade %v profile %v, want S+ codex-sol", r["grade"], r["profile"])
+		t.Fatalf("resolve --grade S+ --author-family anthropic = grade %v profile %v, want S+ codex-sol", r["grade"], r["profile"])
 	}
 	for _, grade := range []string{"Z", ""} {
 		a2, _, _ := selFixture(t, "S", rows, pools, consultFloorBothPools)
@@ -298,7 +298,7 @@ func TestConsultResolveLaneUsesDesignFloor(t *testing.T) {
 	q.GateDo = gatePools(map[string]string{"opus": "claude", "codex-sol": "codex", "codex-astra": "codex"})
 	serveRouting(t, routingDoc(routingBlockV1))
 	out := captureOut(a)
-	if err := a.Run(context.Background(), []string{"resolve", "--role", "consult", "--t", "T1", "--grade", "A", "--lane", "routing-policy", "--builder-family", "anthropic", "--json"}); err != nil {
+	if err := a.Run(context.Background(), []string{"resolve", "--role", "consult", "--t", "T1", "--grade", "A", "--lane", "routing-policy", "--author-family", "anthropic", "--json"}); err != nil {
 		t.Fatalf("resolve consult: %v", err)
 	}
 	var r map[string]any

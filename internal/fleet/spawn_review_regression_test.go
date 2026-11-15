@@ -78,7 +78,7 @@ func TestLaneCredentialWithoutLocalIdentityDefersToPanewire(t *testing.T) {
 				called = c.Name == "panewire" && strings.Contains(strings.Join(c.Args, " "), "--hub-token-env "+path)
 				return tc.result
 			}
-			err := a.registerLane(context.Background(), "lane-a", "parent-a", "w:p1", "builder", "host-a")
+			_, err := a.registerLane(context.Background(), lanePutRequest{Lane: "lane-a", Parent: "parent-a", Pane: "w:p1", Role: "builder", Machine: "host-a"})
 			if !called || code(err) != tc.result.Code || err != nil && !strings.Contains(err.Error(), tc.result.Err) {
 				t.Fatalf("panewire did not own credential decision: called=%t err=%v", called, err)
 			}

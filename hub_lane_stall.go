@@ -88,6 +88,7 @@ func (h *HubServer) startLaneStallSweep(now time.Time) {
 		ctx, cancel := context.WithTimeout(h.laneStallBaseContext(), laneStallSweepBudget)
 		defer cancel()
 		h.sweepLaneStalls(ctx, now)
+		h.sweepDrainWakes(ctx, now)
 	}()
 }
 

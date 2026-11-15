@@ -125,27 +125,3 @@ func claudeSpawnFixture(t *testing.T) (*App, Spawn, *fakeRunner) {
 	}
 	return a, s, fr
 }
-
-// A headless claude delegate binds an inbox socket too, so it is named after
-// its delegate job id like a pane seat.
-func TestDelegateHeadlessClaudeRunsUnderJobName(t *testing.T) {
-	e := newDelegateEnv(t)
-	base := e.runner.do
-	e.runner.do = func(c Command) Result {
-		if c.Name == "claude" {
-			return Result{Out: "no findings\n"}
-		}
-		return base(c)
-	}
-	if err := e.a.delegate(context.Background(), delegateArgs(e, "--role", "reviewer", "--headless", "--family", "cognition")); err != nil {
-		t.Fatal(err)
-	}
-	calls := e.runner.named("claude")
-	if len(calls) != 1 {
-		t.Fatalf("claude calls: %d", len(calls))
-	}
-	i := slices.Index(calls[0].Args, "--name")
-	if i < 0 || i+1 >= len(calls[0].Args) || calls[0].Args[i+1] != "delegate_test-host_1" {
-		t.Fatalf("headless claude argv lacks --name <delegate job>: %v", calls[0].Args)
-	}
-}

@@ -8,7 +8,7 @@ import (
 
 func TestSelectRetainsEveryProfileAccountCandidate(t *testing.T) {
 	a, s, q, _ := accountConsultFixture(t)
-	s.Role = "counsel"
+	s.Role = "consult"
 	q.CatalogRows = q.CatalogRows[1:]
 	q.GateDo = func(r QuotaRequest) (string, error) {
 		if r.AccountKey == testClaudeB {

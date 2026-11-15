@@ -63,7 +63,7 @@ func TestQuietClassification(t *testing.T) {
 	if d != 5*time.Minute || w != 2*time.Second {
 		t.Fatal(d, w)
 	}
-	for _, raw := range []string{"default: typo", "default: interrupt\nunknown: true", "default: interrupt\ndigest_window: -1s", "default: interrupt\nrules: [{match: '[', class: inbox}]", "default: inbox\n---\ndefault: interrupt"} {
+	for _, raw := range []string{"default: typo", "default: interrupt\ndigest_window: -1s", "default: interrupt\nrules: [{match: '[', class: inbox}]", "default: inbox\n---\ndefault: interrupt"} {
 		t.Run(raw, func(t *testing.T) {
 			if _, err := parseDeliveryPolicy([]byte(raw)); err == nil {
 				t.Fatal("invalid policy accepted")
@@ -429,10 +429,12 @@ func TestQuietInboxCLIAndNodeScope(t *testing.T) {
 	}
 }
 
-func TestQuietLegacyWireAndChat(t *testing.T) {
+func TestQuietLegacyWire(t *testing.T) {
 	p, _ := loadDeliveryPolicy("default")
-	if p.classify("lane-a", "lane.event", hubJobEventPayload{EventID: "chat-1", Text: "FYI"}, false) != "interrupt" {
-		t.Fatal("empty class")
+	// A chat-N event id is an ordinary lane notification now: the operator chat
+	// that exempted it from quiet delivery was removed.
+	if p.classify("lane-a", "lane.event", hubJobEventPayload{EventID: "chat-1", Text: "FYI"}, false) != p.classify("lane-a", "lane.event", hubJobEventPayload{EventID: "ev-1", Text: "FYI"}, false) {
+		t.Fatal("chat-N event id has its own delivery class")
 	}
 	raw := []byte(`{"job_id":"j1","epoch":1}`)
 	if !bytes.Equal(raw, relayPayloadDeliveryClass(raw, "")) {

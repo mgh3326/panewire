@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -22,7 +23,13 @@ func selFixture(t *testing.T, grade string, rows []CatalogRow, pools map[string]
 	accounts := map[string]SharedAccount{}
 	for i, pool := range presentPools {
 		key := fmt.Sprintf("%s:%016x", pool, i+1)
-		presence = append(presence, PresenceRecord{HostID: "local", AccountKey: key, LastSeen: now.Add(-time.Hour)})
+		seen := now.Add(-time.Hour)
+		if slices.Contains(multiAccountPools, pool) {
+			// A live node announces such an account at least every ten minutes;
+			// an hour-old record no longer names one (multiAccountWindow).
+			seen = now
+		}
+		presence = append(presence, PresenceRecord{HostID: "local", AccountKey: key, LastSeen: seen})
 		accounts[key] = SharedAccount{Key: key, Observed: true, Fresh: true, MeasuredAt: now.Add(-time.Hour)}
 	}
 	q := &fakeQuota{CatalogRows: rows, PoolViews: pools}
@@ -44,7 +51,7 @@ func selFixture(t *testing.T, grade string, rows []CatalogRow, pools map[string]
 	a.Config.Local = map[string]any{}
 	a.Runner = &fakeRunner{}
 	useFakeHK(t).SetTask("42", fmt.Sprintf(`{"id":42,"title":"work (grade %s, T1)","state":"ready","refs":{}}`, grade))
-	s := Spawn{CWD: a.Home + "/repo", Job: "job-a", Task: "42", Role: "worker", Host: "auto", T: "T1"}
+	s := Spawn{CWD: a.Home + "/repo", Job: "job-a", Task: "42", Role: "implementer", Host: "auto", T: "T1"}
 	return a, s, q
 }
 
@@ -140,7 +147,7 @@ func TestSelectNonDevinGradeBPreservesCandidate(t *testing.T) {
 	serveRouting(t, strings.Replace(routingBlockV1,
 		`"devin-swe2-max", "cmd-dsflash41"`,
 		`"devin-swe2-max", "devin-swe2-flash", "devin-swe2-flash-medium", "devin-swe2-flash-max", "cmd-dsflash41"`, 1))
-	s.OnlyFamily = "openai"
+	s.ExcludePools = "devin" // keeps the codex candidate the test follows
 	q.GateDo = gatePools(map[string]string{"devin-swe2-flash": "devin", "devin-swe2-flash-medium": "devin", "codex-sol": "codex"})
 	q.PoolViews = map[string]PoolView{"codex": {Status: "ok", Class: "spend", Blocking: ptrF(0)}}
 	basePolicy := map[string]any{}
@@ -417,8 +424,8 @@ func TestSelectEscalationGateNeedsFlag(t *testing.T) {
 	}
 }
 
-func TestSelectTesterExcludesBuilderFamily(t *testing.T) {
-	// A tester routes to the verifier role (opus, codex-terra61).
+func TestSelectReviewerExcludesAuthorFamily(t *testing.T) {
+	// A reviewer routes to the reviewer role, which excludes the author's family.
 	rows := []CatalogRow{
 		{Profile: "opus", Effort: "high", Grade: "S", Pool: "claude", Gate: "default", ModelID: "m"},
 		{Profile: "codex-terra61", Effort: "high", Grade: "S", Pool: "codex", Gate: "default", ModelID: "m"},
@@ -429,7 +436,7 @@ func TestSelectTesterExcludesBuilderFamily(t *testing.T) {
 	}
 	a, s, q := selFixture(t, "S", rows, pools, []string{"claude", "codex"})
 	serveRouting(t, routingDocV1)
-	s.Role = "tester"
+	s.Role = "reviewer"
 	s.ParentFamily = "anthropic"
 	q.GateDo = gatePools(map[string]string{"codex-terra61": "codex"})
 	sel, e := a.selectProfile(context.Background(), s)
@@ -437,7 +444,7 @@ func TestSelectTesterExcludesBuilderFamily(t *testing.T) {
 		t.Fatalf("%v", e)
 	}
 	if got := candOutcome(sel.record(), "opus", "high")["outcome"]; got != "dropped:family_excluded" {
-		t.Fatalf("the builder's family must be excluded for testers: %v", got)
+		t.Fatalf("the author's family must be excluded for reviewers: %v", got)
 	}
 }
 

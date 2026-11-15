@@ -35,8 +35,8 @@ func TestPoolViewGroupShortDoesNotRank(t *testing.T) {
 
 func TestSelectAgyWeeklyAndShortGroup(t *testing.T) {
 	rows := []CatalogRow{
-		{Profile: "agy-flash38-medium", Grade: "B", Pool: "agy", Gate: "default", ModelID: "gemini-3.8-flash-medium"},
-		{Profile: "agy-flash38-low", Grade: "C", Pool: "agy", Gate: "default", ModelID: "gemini-3.8-flash-low"},
+		{Profile: "agy-flash38-medium", Effort: "medium", Grade: "B", Pool: "agy", Gate: "default", ModelID: "gemini-3.8-flash-medium"},
+		{Profile: "agy-flash38-low", Effort: "low", Grade: "C", Pool: "agy", Gate: "default", ModelID: "gemini-3.8-flash-low"},
 		{Profile: "codex-luna", Grade: "B", Pool: "codex", Gate: "default", ModelID: "m"},
 	}
 	for _, grade := range []string{"B", "C"} {
@@ -66,7 +66,7 @@ func TestSelectAgyWeeklyAndShortGroup(t *testing.T) {
 }
 
 func TestSelectAgyUntouchedWeekly(t *testing.T) {
-	rows := []CatalogRow{{Profile: "agy-flash38-medium", Grade: "B", Pool: "agy", Gate: "default", ModelID: "gemini-3.8-flash-medium"}}
+	rows := []CatalogRow{{Profile: "agy-flash38-medium", Effort: "medium", Grade: "B", Pool: "agy", Gate: "default", ModelID: "gemini-3.8-flash-medium"}}
 	a, s, q := agyReadingFixture(t, func(now time.Time) []map[string]any {
 		return []map[string]any{{"window": "7d", "used_pct": 0, "resets_at": now.Add(168 * time.Hour).UTC().Format(time.RFC3339), "scope": "group", "model": "gemini"}}
 	}, rows, []string{"agy"})
@@ -229,7 +229,7 @@ func TestSelectCommandcodeRiskPickWithFakeQuota(t *testing.T) {
 }
 
 func TestSelectAgyLiveGroupShapeUntouched(t *testing.T) {
-	rows := []CatalogRow{{Profile: "agy-flash38-medium", Grade: "B", Pool: "agy", Gate: "default", ModelID: "gemini-3.8-flash-medium"}}
+	rows := []CatalogRow{{Profile: "agy-flash38-medium", Effort: "medium", Grade: "B", Pool: "agy", Gate: "default", ModelID: "gemini-3.8-flash-medium"}}
 	a, s, q := agyReadingFixture(t, func(now time.Time) []map[string]any {
 		return []map[string]any{
 			{"window": "5h", "used_pct": 0, "resets_at": now.Add(5 * time.Hour).UTC().Format(time.RFC3339), "scope": "group", "model": "gemini"},

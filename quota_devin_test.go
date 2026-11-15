@@ -196,7 +196,6 @@ func TestFleetQuotaDevinNativeRunsNoPacelever(t *testing.T) {
 		return claudeAPIReply(200, devinWebBody(t))(r)
 	})}
 	pacelever := &devinPacelever{}
-	client.nodePacelever = pacelever.run
 	warned := newWarnLog(client)
 
 	client.refreshFleetQuota(t.Context(), "devin", map[string]fleetQuotaSent{})
@@ -265,7 +264,6 @@ func TestNodeQuotaRefreshDevinNativeRunsNoPacelever(t *testing.T) {
 	client.spawnConfigPath = claudeStore(t, hk.server.URL)
 	client.nativeQuota = map[string]*nativeQuotaSource{"devin": devinTestSource(client.spawnConfigPath, devinLoginFiles(true), claudeAPIReply(200, devinWebBody(t)))}
 	pacelever := &devinPacelever{}
-	client.nodePacelever = pacelever.run
 	if result, failure := client.nodeQuotaRefresh(t.Context(), nodeQuotaRefreshArgs{Pool: "devin"}); failure != "" || result == nil {
 		t.Fatalf("result %v failure %q", result, failure)
 	}
@@ -292,7 +290,6 @@ func TestDevinNativeHostWithoutALoginTakesNoLease(t *testing.T) {
 	}
 	client.nativeQuota = map[string]*nativeQuotaSource{"devin": source}
 	pacelever := &devinPacelever{}
-	client.nodePacelever = pacelever.run
 	if _, failure := client.nodeQuotaRefresh(t.Context(), nodeQuotaRefreshArgs{Pool: "devin"}); failure != "refresh_failed" {
 		t.Fatalf("failure %q", failure)
 	}

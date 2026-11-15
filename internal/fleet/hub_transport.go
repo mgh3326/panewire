@@ -20,6 +20,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/mgh3326/handoffkeep/client"
+	"github.com/mgh3326/panewire/internal/hubretry"
 	"github.com/mgh3326/panewire/internal/spawnargs"
 )
 
@@ -61,12 +62,13 @@ type HubBrief struct {
 
 // HubCheckout is the worktree.prepare grammar the hub forwards to the node.
 type HubCheckout struct {
-	Origin string `json:"origin"`
-	Mode   string `json:"mode"`
-	Branch string `json:"branch,omitempty"`
-	Sha    string `json:"sha,omitempty"`
-	Fetch  string `json:"fetch,omitempty"`
-	Dir    string `json:"dir"`
+	Origin      string `json:"origin"`
+	Mode        string `json:"mode"`
+	Branch      string `json:"branch,omitempty"`
+	Sha         string `json:"sha,omitempty"`
+	Fetch       string `json:"fetch,omitempty"`
+	Dir         string `json:"dir"`
+	VerifyReuse bool   `json:"verify_reuse,omitempty"`
 }
 
 // HubSpawnReply is a completed node answer (HTTP 200). Status is set instead
@@ -104,6 +106,9 @@ type HubError struct {
 	Kind   string
 	Status int
 	Code   string
+	// transport is the connection failure behind a hubDown with no status, so
+	// a retry can tell a dropped connection from a refused request.
+	transport error
 }
 
 func (e *HubError) Error() string {
@@ -113,6 +118,9 @@ func (e *HubError) Error() string {
 	return e.Kind
 }
 
+// Unwrap exposes the transport failure, if there was one.
+func (e *HubError) Unwrap() error { return e.transport }
+
 // hubHTTP is the production HubTransport. Credentials come from the files
 // named in [hub] and never appear in errors; redirects are refused so the
 // bearer never follows another origin.
@@ -120,6 +128,10 @@ type hubHTTP struct {
 	base, token, cfID, cfSecret string
 	client                      *http.Client
 	statusPoll                  time.Duration // 0 means the WaitSpawn default
+	// retry bounds doIdempotent; the zero value is the production policy.
+	retry hubretry.Policy
+	// onRetry hears each idempotent call that was sent again. Nil hears nothing.
+	onRetry func(hubretry.Stats)
 }
 
 var hubPoolRule = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
@@ -132,8 +144,22 @@ func (a *App) hub() (HubTransport, error) {
 	if e != nil {
 		return nil, e
 	}
+	c.onRetry = a.noteHubRetry
 	a.Hub = c
 	return c, nil
+}
+
+// noteHubRetry adds one call's retries to the command's tally.
+func (a *App) noteHubRetry(stats hubretry.Stats) { a.hubRetries.Add(stats) }
+
+// reportHubRetries prints the one line a command owes when a hub call was sent
+// again, on stderr so stdout keeps the command's receipt lines, then clears the
+// tally.
+func (a *App) reportHubRetries() {
+	if a.hubRetries.Retries > 0 && a.Err != nil {
+		fmt.Fprintln(a.Err, a.hubRetries.Line())
+	}
+	a.hubRetries = hubretry.Stats{}
 }
 
 func newHubHTTP(cfg map[string]any) (*hubHTTP, error) {
@@ -220,7 +246,7 @@ func (c *hubHTTP) do(ctx context.Context, method, path string, body any, timeout
 	}
 	resp, e := client.Do(req)
 	if e != nil {
-		return 0, nil, &HubError{Kind: hubDown}
+		return 0, nil, &HubError{Kind: hubDown, transport: e}
 	}
 	defer resp.Body.Close()
 	data, e := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
@@ -228,6 +254,25 @@ func (c *hubHTTP) do(ctx context.Context, method, path string, body any, timeout
 		return resp.StatusCode, nil, &HubError{Kind: hubDown, Status: resp.StatusCode}
 	}
 	return resp.StatusCode, data, nil
+}
+
+// doIdempotent is do for a call that may be sent again: a transport error, a
+// 502 or a 503 is retried within c.retry's budget (docs/hub-uninterrupted-calls.md).
+// Only a GET, or a POST that the hub keys by a request id, may use it. Each
+// retried call is reported through c.onRetry.
+func (c *hubHTTP) doIdempotent(ctx context.Context, method, path string, body any, timeout time.Duration) (int, []byte, error) {
+	type answer struct {
+		status int
+		data   []byte
+	}
+	got, stats, err := hubretry.Do(ctx, c.retry, func(ctx context.Context) (answer, int, error) {
+		status, data, err := c.do(ctx, method, path, body, timeout)
+		return answer{status, data}, status, err
+	}, nil)
+	if stats.Retries > 0 && c.onRetry != nil {
+		c.onRetry(stats)
+	}
+	return got.status, got.data, err
 }
 
 // classify maps a non-answer status to a HubError.
@@ -479,10 +524,9 @@ func hubSpawnArgs(jobs string, s Spawn) ([]string, error) {
 	add("--report-relative", report)
 	add("-L", s.ExecutionLane)
 	add("--urgency", s.Urgency)
-	add("--builder-family", s.BuilderFamily)
+	add("--author-family", s.AuthorFamily)
 	add("--builder-job", s.BuilderJob)
 	add("--grade", s.Grade)
-	add("--routing-role", s.RoutingRole)
 	add("--review-pass", s.ReviewPass)
 	add("--override-reason", s.OverrideReason)
 	add("--containment", s.Containment)
@@ -585,16 +629,26 @@ func (a *App) spawnHub(ctx context.Context, s Spawn, brief string, c *placeCandi
 	if !hubKeyRule.MatchString(key) {
 		return refuse("hub_cwd_key_invalid", fail(exitConfig, "repo name %q is not a valid hub cwd key", key))
 	}
-	args, e := hubArgs(a.Jobs, s)
+	candSpawn := s
+	if herdrWorkspaceID.MatchString(s.Workspace) {
+		origin := a.OriginMachine
+		if origin == "" {
+			origin = a.machine()
+		}
+		if (s.autoSelected || s.Host != c.name) && origin != "" && c.name != origin {
+			candSpawn.Workspace = ""
+		}
+	}
+	args, e := hubArgs(a.Jobs, candSpawn)
 	if e != nil {
 		return candResult{stop: fail(exitUsage, "hub spawn: %v", e)}
 	}
 	if s.DryRun {
-		payload, e := a.prepareBriefForHost(s, c.name, brief)
+		payload, e := a.prepareBriefForHost(candSpawn, c.name, brief)
 		if e != nil {
 			return candResult{stop: e}
 		}
-		fmt.Fprintf(a.Out, "dry-run host=%s profile=%s role=%s job=%s\n%s\n", c.name, s.Profile, s.Role, s.Job, payload)
+		a.dryRunLine(c.name, candSpawn, payload)
 		return candResult{ok: true}
 	}
 	if !utf8.ValidString(brief) || len([]byte(brief)) > hubMaxBriefBytes {
@@ -632,9 +686,12 @@ func (a *App) spawnHub(ctx context.Context, s Spawn, brief string, c *placeCandi
 		if err == nil && reply.RC == 0 && reply.Error == "" && reply.Status == "" && reply.Pane != "" && s.placement != nil && !s.placement.placed {
 			s.placement.started = true
 			s.placement.placed = true
-			s.placement.execution = placementExecution{Host: c.name}
+			s.placement.execution = PlacementExecution{Host: c.name}
 		}
 		if err != nil {
+			if errors.Is(err, ErrHubPlacementBound) || errors.Is(err, ErrHubPlacementDeferred) {
+				return candResult{stop: err}
+			}
 			var he *HubError
 			if slices.Contains(args, "--report-relative") && errors.As(err, &he) && he.Kind == hubRejected && he.Status == http.StatusBadRequest && he.Code == "invalid_request" {
 				// The hub validates the whole request, so one invalid_request
@@ -643,9 +700,16 @@ func (a *App) spawnHub(ctx context.Context, s Spawn, brief string, c *placeCandi
 				// retry with an absolute --report the node would refuse anyway.
 				return candResult{stop: fail(exitConfig, "hub rejected the spawn request (400 %s); if the hub predates the --report-relative capability, upgrade panewire on the hub, otherwise check the request fields", he.Code)}
 			}
-			return a.hubFailure(c.name, id, err, forced)
+			res := a.hubFailure(c.name, id, err, forced)
+			if res.undecided && s.placement != nil {
+				s.placement.undecided = true
+			}
+			return res
 		}
 		if reply.Status == "lost" || reply.Status == "pending" {
+			if s.placement != nil {
+				s.placement.undecided = true
+			}
 			return candResult{stop: fail(exitStateConflict, "hub spawn on %s is %s (request %s); the node may have started it", c.name, reply.Status, id)}
 		}
 		if reply.Error == "checkout_refused:busy" && attempt == 0 {
@@ -668,7 +732,7 @@ func (a *App) hubFailure(host, id string, err error, forced bool) candResult {
 	}
 	switch he.Kind {
 	case hubPending:
-		return candResult{stop: fail(exitStateConflict, "hub spawn on %s did not answer in time (request %s); the node may still be running it", host, id)}
+		return candResult{stop: fail(exitStateConflict, "hub spawn on %s did not answer in time (request %s); the node may still be running it", host, id), undecided: true}
 	case hubNoCapacity:
 		// Not connected is how a sleeping host looks: let placement wake it.
 		return candResult{unreachable: true, rc: exitPlacement, note: he.Kind}

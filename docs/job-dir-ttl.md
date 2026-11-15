@@ -69,11 +69,13 @@ hk confirms an artifact when:
 
 - **a report** — every top-level `report*.md` (the `-rN` rounds included),
   and every report path the spawn receipt (`--report`), a completion
-  (`done`/`escalate`, `job.result_attached`) or the submission recorded,
-  when it lies in the directory and exists: the record names a
-  `report_doc`, and the sha256 of the local bytes equals the record's
-  `report_sha256` for that document, else the `sha256` hk holds for
-  `reports/<job>/<basename>`. A recorded path outside the directory (a
+  (`done`/`escalate`) or the submission recorded, when it lies in the
+  directory and exists: hk holds a document at the key `done` publishes the
+  local bytes to, `reports/<job>/sha256/<sha256>.md`, whose `sha256` equals
+  the local bytes', else at the legacy key `reports/<job>/<basename>` (a
+  report published before keys were content-addressed). The job record's pin
+  and the job's events play no part, so a report published but never pinned
+  is confirmed. A recorded path outside the directory (a
   parent job's) is not this pass's to delete and is skipped. A recorded
   path is judged by the file it really names: one that is not a string,
   not absolute, or not clean (`filepath.Clean` would change it: `..`, `.`,
@@ -83,7 +85,9 @@ hk confirms an artifact when:
   the file `..` reaches from where `link` points, not the cleaned
   `summary.md`. Only the resolved path is tested against the directory. A
   path recorded through the jobs root's own alias is read under the real
-  root, which the pass resolves itself;
+  root, which the pass resolves itself. A report `done` deleted after the pin
+  (hk 3685) is not there to confirm and not a reason to keep: the check covers
+  the files the directory still holds;
 - **`findings.json` or `result.json`**: the record's `result` is not empty;
 - **`pane-screen.txt`**: not confirmed. A leftover pane screen is an ordinary
   file of the dir: the pane sweep writes it only when hk did not store the
@@ -125,6 +129,12 @@ be read keeps it (`spawn-status-unreadable`). Its pane is not checked here:
 it lives on the executing node, whose own directory for the job keeps the
 contract.
 
+The receipt's spawn arguments are read with the spawn flags retired since it
+was written dropped — `--builder-family` and `--routing-role` (hk 4627). A
+receipt is a frozen record, and the gate names the submitted job and its
+report paths; it does not spawn. A flag that was never a spawn flag still
+keeps the directory (`submission-unreadable`).
+
 The receipt's `--report` is a recorded report path like any other. Its
 `--report-relative` is relative to the jobs root of the node that ran the
 job, and the same layout here names this directory: the pass records the
@@ -143,8 +153,8 @@ receipt again through the same code.
 Some directories fail the gate on every pass, so the TTL never deletes
 them; the operator decides:
 
-- A receipt that records a label but no `herdr_session` (a headless
-  receipt, or one from before the session was recorded): `pane-session-unknown`.
+- A receipt that records a label but no `herdr_session` (one from before the
+  session was recorded): `pane-session-unknown`.
 - A receipt that records neither a pane nor a label: `pane-unknown`.
 - A recorded report path that goes through a symlink other than the jobs
   root's own alias: `report-path-unreadable`. On macOS, for one, a path
@@ -167,7 +177,9 @@ again with fresh herdr and hk reads. A held lock keeps the directory
    directory (`changed-during-pass`).
 2. It renames the directory, in one atomic rename on the same filesystem, to
    a tombstone in the jobs root: `.expiring-<job>-<unixnano>`. A leading dot
-   is never a valid job id, so nothing reads a tombstone as a job.
+   is never a valid job id, so nothing reads a tombstone as a job; the
+   `.job-ids` identity records ([config.md](config.md#job-ids-name-one-directory-hk-4824))
+   are skipped the same way, as `invalid-id`.
 3. It takes the tombstone's inventory. If it differs from step 1's, the
    tombstone is renamed back to the job's name and the directory is kept
    (`changed-during-pass`). If that rename back fails, the tombstone stays

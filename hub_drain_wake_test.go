@@ -1,0 +1,552 @@
+package panewire
+
+import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
+	"sort"
+	"strconv"
+	"testing"
+	"time"
+)
+
+// hk 4473 (operator decision 233): a design lane whose in-flight work drains
+// while hk still shows open backlog for its project gets one interrupting
+// line, at most once per relay.drain_wake_interval. The lane's project is its
+// name without the -design suffix.
+
+const (
+	t4473Lane = "handoffkeep-design"
+	t4473Pane = "w1:design"
+	t4473Line = "2 backlog, 0 in work: dispatch the next batch"
+	// t4473PageLimit is the page the hub asks hk for; hk's first page must be
+	// full for the cursor to be followed.
+	t4473PageLimit = 1000
+)
+
+type t4473Task struct {
+	ID               int64
+	Project          string
+	State            string
+	AwaitingDecision bool
+	Priority         int
+}
+
+// t4473Handler serves GET /v1/tasks from tasks the way hk does, including both
+// of hk's list branches: with after_id (even 0) it pages by ID after that
+// cursor; without it, it falls back to the queue read, ordered by priority and
+// then ID, and takes no cursor. Every other route goes to the relay fake.
+func t4473Handler(relay http.Handler, tasks []t4473Task) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/tasks" {
+			relay.ServeHTTP(w, r)
+			return
+		}
+		query := r.URL.Query()
+		after, _ := strconv.ParseInt(query.Get("after_id"), 10, 64)
+		limit, _ := strconv.Atoi(query.Get("limit"))
+		page := make([]t4473Task, 0, len(tasks))
+		for _, task := range tasks {
+			if query.Has("project") && task.Project != query.Get("project") {
+				continue
+			}
+			if query.Has("state") && task.State != query.Get("state") {
+				continue
+			}
+			if query.Has("after_id") && task.ID <= after {
+				continue
+			}
+			page = append(page, task)
+		}
+		if !query.Has("after_id") {
+			sort.SliceStable(page, func(i, j int) bool {
+				if page[i].Priority != page[j].Priority {
+					return page[i].Priority > page[j].Priority
+				}
+				return page[i].ID < page[j].ID
+			})
+		}
+		if len(page) > limit {
+			page = page[:limit]
+		}
+		out := make([]map[string]any, 0, len(page))
+		for _, task := range page {
+			out = append(out, map[string]any{"id": task.ID, "project": task.Project, "state": task.State, "awaiting_decision": task.AwaitingDecision})
+		}
+		body := map[string]any{"tasks": out}
+		if query.Has("project") {
+			// hk echoes the requested filter, which is how a client tells a
+			// filtered answer from a server that dropped the parameter.
+			body["project"] = query.Get("project")
+		}
+		_ = json.NewEncoder(w).Encode(body)
+	})
+}
+
+// t4473Rig is the inbox-wake rig with an hk whose task list is tasks.
+func t4473Rig(t *testing.T, tasks []t4473Task) (*t3602Rig, *t3602Clock) {
+	t.Helper()
+	return t4473RigWith(t, tasks, nil)
+}
+
+// t4473RigWith is t4473Rig with wrap applied to the hk handler, for a server
+// that behaves unlike the pinned hk.
+func t4473RigWith(t *testing.T, tasks []t4473Task, wrap func(http.Handler) http.Handler) (*t3602Rig, *t3602Clock) {
+	t.Helper()
+	return t4473RigAt(t, filepath.Join(t.TempDir(), "inbox.sqlite3"), tasks, wrap)
+}
+
+// t4473RigAt is t4473RigWith on the inbox store at path, so a test can restart
+// the hub on the same store.
+func t4473RigAt(t *testing.T, path string, tasks []t4473Task, wrap func(http.Handler) http.Handler) (*t3602Rig, *t3602Clock) {
+	t.Helper()
+	fake := &fakeHandoffkeep{nextID: 100, status: http.StatusCreated, rows: map[string]*handoffkeepRelayEvent{}}
+	var hk http.Handler = t4473Handler(fake, tasks)
+	if wrap != nil {
+		hk = wrap(hk)
+	}
+	server := httptest.NewServer(hk)
+	t.Cleanup(server.Close)
+	client, err := newHandoffkeepRelayClient(hubHandoffkeepEnv{URL: server.URL, Token: "test-token"}, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	start, _ := time.Parse(time.RFC3339, t3602Start)
+	clock := &t3602Clock{now: start}
+	return t3602Hub(t, path, "default", fake, client, clock), clock
+}
+
+// t4473OldTaskServer models an hk that predates the task project filter: it
+// drops the parameter, so it neither filters by project nor echoes it.
+func t4473OldTaskServer(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/tasks" && r.URL.Query().Has("project") {
+			u := *r.URL
+			query := u.Query()
+			query.Del("project")
+			u.RawQuery = query.Encode()
+			r = r.Clone(r.Context())
+			r.URL = &u
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// t4473Sweep runs one lane-stall sweep and waits for it, which is where the
+// drain-wake check runs. It skips Sweep itself: Sweep pings the rig's agent,
+// which has no socket.
+func t4473Sweep(rig *t3602Rig) {
+	rig.h.startLaneStallSweep(rig.h.now().UTC())
+	rig.h.laneStallSweeps.Wait()
+}
+
+// t4473SetInFlight replaces the host's active jobs; the node record keeps its
+// agent, so the lane stays routable. The host is marked as having reported, as
+// its heartbeat would have done.
+func t4473SetInFlight(rig *t3602Rig, lane string, count int) {
+	active := map[string]HubActiveJob{}
+	for i := range count {
+		id := "t4473-job-" + strconv.Itoa(i)
+		active[id] = HubActiveJob{JobID: id, OwnerLane: lane}
+	}
+	rig.h.mu.Lock()
+	rig.h.nodes["host-a"].activeJobs = active
+	rig.h.nodes["host-a"].activeReported = true
+	rig.h.mu.Unlock()
+}
+
+// t4473Lines drains the relay injects queued so far and returns the drain-wake
+// lines among them. Reading a line off the channel stands in for the writer:
+// the line counts as written, so its delivery is confirmed.
+func t4473Lines(rig *t3602Rig) []string {
+	var out []string
+	for {
+		select {
+		case ev := <-rig.agent.relays:
+			if ev.Pane == t4473Pane && len(ev.Text) > 0 && ev.Text[0] >= '0' && ev.Text[0] <= '9' {
+				out = append(out, ev.Text)
+				if ev.Delivered != nil {
+					ev.Delivered()
+				}
+			}
+		default:
+			return out
+		}
+	}
+}
+
+// Drain edge: one line when in-flight falls to zero with open backlog; a second
+// drain inside the interval waits, and fires once the interval has passed.
+func TestDrainWakeOneLinePerIntervalAfterDrain(t *testing.T) {
+	rig, clock := t4473Rig(t, []t4473Task{
+		{ID: 1, Project: "handoffkeep", State: "backlog"},
+		{ID: 2, Project: "handoffkeep", State: "unstarted"},
+		{ID: 3, Project: "other", State: "backlog"},
+		{ID: 4, Project: "handoffkeep", State: "developing"},
+	})
+	t4473SetInFlight(rig, t4473Lane, 1)
+	t4473Sweep(rig)
+	if got := t4473Lines(rig); len(got) != 0 {
+		t.Fatalf("a lane with work in flight got a drain line: %q", got)
+	}
+	t4473SetInFlight(rig, t4473Lane, 0)
+	t4473Sweep(rig)
+	if got := t4473Lines(rig); len(got) != 1 || got[0] != t4473Line {
+		t.Fatalf("drain lines=%q, want exactly [%q]", got, t4473Line)
+	}
+	t4473SetInFlight(rig, t4473Lane, 1)
+	t4473Sweep(rig)
+	t4473SetInFlight(rig, t4473Lane, 0)
+	clock.advance(10 * time.Minute)
+	t4473Sweep(rig)
+	if got := t4473Lines(rig); len(got) != 0 {
+		t.Fatalf("a second drain inside the interval sent %q", got)
+	}
+	clock.advance(time.Hour)
+	t4473Sweep(rig)
+	if got := t4473Lines(rig); len(got) != 1 || got[0] != t4473Line {
+		t.Fatalf("the deferred drain after the interval sent %q, want exactly [%q]", got, t4473Line)
+	}
+}
+
+// The backlog is read page by page in ID order: the project's backlog runs past
+// hk's first full page, with the priority order of hk's no-cursor read running
+// opposite to ID order, so a first page taken without after_id loses the rows
+// below its cursor (hk 4473 review).
+func TestDrainWakeReadsBacklogPastFirstPage(t *testing.T) {
+	tasks := make([]t4473Task, 0, t4473PageLimit*2+2)
+	for id := int64(1); id <= t4473PageLimit; id++ {
+		tasks = append(tasks, t4473Task{ID: id, Project: "handoffkeep", State: "backlog"})
+	}
+	for id := int64(t4473PageLimit + 1); id <= t4473PageLimit*2; id++ {
+		tasks = append(tasks, t4473Task{ID: id, Project: "handoffkeep", State: "backlog", Priority: 1})
+	}
+	tasks = append(tasks,
+		t4473Task{ID: t4473PageLimit*2 + 1, Project: "handoffkeep", State: "unstarted"},
+		t4473Task{ID: t4473PageLimit*2 + 2, Project: "other", State: "backlog"},
+	)
+	rig, _ := t4473Rig(t, tasks)
+	t4473SetInFlight(rig, t4473Lane, 1)
+	t4473Sweep(rig)
+	t4473SetInFlight(rig, t4473Lane, 0)
+	t4473Sweep(rig)
+	want := "2001 backlog, 0 in work: dispatch the next batch"
+	if got := t4473Lines(rig); len(got) != 1 || got[0] != want {
+		t.Fatalf("drain lines=%q, want exactly [%q]", got, want)
+	}
+}
+
+// An hk that predates the project filter ignores it and cannot echo it. Its
+// page does not say whose tasks those are, so counting them would wake this
+// lane for another project's backlog: the read fails and sends no line.
+func TestDrainWakeRefusesUnfilteredTaskList(t *testing.T) {
+	rig, _ := t4473RigWith(t, []t4473Task{
+		{ID: 1, Project: "other", State: "backlog"},
+		{ID: 2, Project: "other", State: "backlog"},
+		{ID: 3, Project: "other", State: "unstarted"},
+	}, t4473OldTaskServer)
+	t4473SetInFlight(rig, t4473Lane, 1)
+	t4473Sweep(rig)
+	t4473SetInFlight(rig, t4473Lane, 0)
+	t4473Sweep(rig)
+	if got := t4473Lines(rig); len(got) != 0 {
+		t.Fatalf("an unfiltered task list sent %q", got)
+	}
+}
+
+// A task waiting on the operator (decision 233) is not open backlog: the drain
+// counts only the pre-start tasks nobody is blocked on.
+func TestDrainWakeSkipsTasksAwaitingDecision(t *testing.T) {
+	rig, _ := t4473Rig(t, []t4473Task{
+		{ID: 1, Project: "handoffkeep", State: "backlog", AwaitingDecision: true},
+		{ID: 2, Project: "handoffkeep", State: "unstarted", AwaitingDecision: true},
+		{ID: 3, Project: "handoffkeep", State: "backlog"},
+		{ID: 4, Project: "handoffkeep", State: "unstarted"},
+	})
+	t4473SetInFlight(rig, t4473Lane, 1)
+	t4473Sweep(rig)
+	t4473SetInFlight(rig, t4473Lane, 0)
+	t4473Sweep(rig)
+	want := "2 backlog, 0 in work: dispatch the next batch"
+	if got := t4473Lines(rig); len(got) != 1 || got[0] != want {
+		t.Fatalf("drain lines=%q, want exactly [%q]", got, want)
+	}
+}
+
+// A host that reconnects has a hello that empties its active jobs until the
+// first heartbeat. The sweep in that gap must not read the empty set as a drain
+// (hk 4567, the medium finding on PR #513); the jobs the heartbeat reports
+// decide the next drain.
+func TestDrainWakeNoLineWhileHostReconnects(t *testing.T) {
+	rig, _ := t4473Rig(t, []t4473Task{
+		{ID: 1, Project: "handoffkeep", State: "backlog"},
+	})
+	t4473SetInFlight(rig, t4473Lane, 3)
+	t4473Sweep(rig)
+	rig.h.connect("host-a", "test", "fixture", rig.agent, true)
+	t4473Sweep(rig)
+	if got := t4473Lines(rig); len(got) != 0 {
+		t.Fatalf("a sweep between the hello and the first heartbeat sent %q", got)
+	}
+	heartbeat := func(count int) {
+		active := make([]HubActiveJob, 0, count)
+		for i := range count {
+			active = append(active, HubActiveJob{JobID: "t4567-job-" + strconv.Itoa(i), OwnerLane: t4473Lane})
+		}
+		rig.h.observeActiveJobs("host-a", active, rig.clock.now)
+	}
+	heartbeat(3)
+	t4473Sweep(rig)
+	if got := t4473Lines(rig); len(got) != 0 {
+		t.Fatalf("a lane with three jobs reported by the heartbeat got a drain line: %q", got)
+	}
+	heartbeat(0)
+	t4473Sweep(rig)
+	if got := t4473Lines(rig); len(got) != 1 || got[0] != "1 backlog, 0 in work: dispatch the next batch" {
+		t.Fatalf("drain lines=%q, want exactly one after the heartbeat reports the drain", got)
+	}
+}
+
+// A drain owed while the interval holds out must survive a hub restart (hk
+// 4567, restart loss): the restarted hub sends it once the interval has passed,
+// and the interval itself survives the restart.
+func TestDrainWakeOwedLineSurvivesRestart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "inbox.sqlite3")
+	tasks := []t4473Task{
+		{ID: 1, Project: "handoffkeep", State: "backlog"},
+		{ID: 2, Project: "handoffkeep", State: "unstarted"},
+	}
+	rig, clock := t4473RigAt(t, path, tasks, nil)
+	t4473SetInFlight(rig, t4473Lane, 1)
+	t4473Sweep(rig)
+	t4473SetInFlight(rig, t4473Lane, 0)
+	t4473Sweep(rig)
+	if got := t4473Lines(rig); len(got) != 1 {
+		t.Fatalf("first drain lines=%q, want one", got)
+	}
+	t4473SetInFlight(rig, t4473Lane, 1)
+	t4473Sweep(rig)
+	clock.advance(10 * time.Minute)
+	t4473SetInFlight(rig, t4473Lane, 0)
+	t4473Sweep(rig)
+	if got := t4473Lines(rig); len(got) != 0 {
+		t.Fatalf("a drain inside the interval sent %q", got)
+	}
+	hk := rig.h.handoffkeep
+	if err := rig.h.Close(); err != nil {
+		t.Fatal(err)
+	}
+	rig = t3602Hub(t, path, "default", rig.fake, hk, clock)
+	t4473SetInFlight(rig, t4473Lane, 0)
+	t4473Sweep(rig)
+	if got := t4473Lines(rig); len(got) != 0 {
+		t.Fatalf("the restarted hub sent %q before the interval passed", got)
+	}
+	clock.advance(time.Hour)
+	t4473SetInFlight(rig, t4473Lane, 0)
+	t4473Sweep(rig)
+	if got := t4473Lines(rig); len(got) != 1 || got[0] != t4473Line {
+		t.Fatalf("the restarted hub's owed drain lines=%q, want exactly [%q]", got, t4473Line)
+	}
+}
+
+// A line queued but never written (the writer exits with the line still
+// buffered) stays owed. A restart in that window must still send it once the
+// interval has passed (PR #524 review, hk 4567).
+func TestDrainWakeLineDroppedBeforeWriteIsOwedAfterRestart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "inbox.sqlite3")
+	tasks := []t4473Task{
+		{ID: 1, Project: "handoffkeep", State: "backlog"},
+		{ID: 2, Project: "handoffkeep", State: "unstarted"},
+	}
+	rig, clock := t4473RigAt(t, path, tasks, nil)
+	t4473SetInFlight(rig, t4473Lane, 1)
+	t4473Sweep(rig)
+	t4473SetInFlight(rig, t4473Lane, 0)
+	t4473Sweep(rig)
+	// The line is queued but never read off the channel: the writer never wrote it.
+	hk := rig.h.handoffkeep
+	if err := rig.h.Close(); err != nil {
+		t.Fatal(err)
+	}
+	rig = t3602Hub(t, path, "default", rig.fake, hk, clock)
+	t4473SetInFlight(rig, t4473Lane, 0)
+	t4473Sweep(rig)
+	if got := t4473Lines(rig); len(got) != 0 {
+		t.Fatalf("the restarted hub sent %q before the interval passed", got)
+	}
+	clock.advance(time.Hour)
+	t4473SetInFlight(rig, t4473Lane, 0)
+	t4473Sweep(rig)
+	if got := t4473Lines(rig); len(got) != 1 || got[0] != t4473Line {
+		t.Fatalf("the restarted hub's owed drain lines=%q, want exactly [%q]", got, t4473Line)
+	}
+}
+
+// The owed state is durable before the line is queued: while the store refuses
+// writes, a drain queues nothing; once it recovers, the owed line goes out
+// (PR #524 review, hk 4567).
+func TestDrainWakeNoLineQueuedBeforeOwedIsSaved(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "inbox.sqlite3")
+	tasks := []t4473Task{
+		{ID: 1, Project: "handoffkeep", State: "backlog"},
+		{ID: 2, Project: "handoffkeep", State: "unstarted"},
+	}
+	rig, _ := t4473RigAt(t, path, tasks, nil)
+	db := rig.h.inbox.store.db
+	for _, trigger := range []string{
+		`CREATE TRIGGER t4567_refuse_insert BEFORE INSERT ON drain_wake_lanes BEGIN SELECT RAISE(ABORT, 'refused'); END`,
+		`CREATE TRIGGER t4567_refuse_update BEFORE UPDATE ON drain_wake_lanes BEGIN SELECT RAISE(ABORT, 'refused'); END`,
+	} {
+		if _, err := db.Exec(trigger); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t4473SetInFlight(rig, t4473Lane, 1)
+	t4473Sweep(rig)
+	t4473SetInFlight(rig, t4473Lane, 0)
+	t4473Sweep(rig)
+	if got := t4473Lines(rig); len(got) != 0 {
+		t.Fatalf("a drain queued %q while its owed state could not be saved", got)
+	}
+	for _, name := range []string{"t4567_refuse_insert", "t4567_refuse_update"} {
+		if _, err := db.Exec(`DROP TRIGGER ` + name); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t4473Sweep(rig)
+	if got := t4473Lines(rig); len(got) != 1 || got[0] != t4473Line {
+		t.Fatalf("after the store recovered, drain lines=%q, want exactly [%q]", got, t4473Line)
+	}
+}
+
+// A restart after a line was sent keeps the interval: the restarted hub does
+// not send the same line again before relay.drain_wake_interval has passed
+// (PR #524 review, hk 4567). The save that orders the queue time before the
+// queue cannot be split from its sweep in this harness, so the ordering itself
+// is checked by reading the code and by TestDrainWakeNoLineQueuedBeforeOwedIsSaved.
+func TestDrainWakeRestartAfterWriteKeepsInterval(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "inbox.sqlite3")
+	tasks := []t4473Task{
+		{ID: 1, Project: "handoffkeep", State: "backlog"},
+		{ID: 2, Project: "handoffkeep", State: "unstarted"},
+	}
+	rig, clock := t4473RigAt(t, path, tasks, nil)
+	t4473SetInFlight(rig, t4473Lane, 1)
+	t4473Sweep(rig)
+	t4473SetInFlight(rig, t4473Lane, 0)
+	t4473Sweep(rig)
+	if got := t4473Lines(rig); len(got) != 1 {
+		t.Fatalf("first drain lines=%q, want one", got)
+	}
+	hk := rig.h.handoffkeep
+	if err := rig.h.Close(); err != nil {
+		t.Fatal(err)
+	}
+	rig = t3602Hub(t, path, "default", rig.fake, hk, clock)
+	t4473SetInFlight(rig, t4473Lane, 0)
+	t4473Sweep(rig)
+	if got := t4473Lines(rig); len(got) != 0 {
+		t.Fatalf("the restarted hub sent %q inside the interval", got)
+	}
+}
+
+// A save that fails must be retried on a later sweep, not forgotten: the drain
+// sets pending while the store refuses the write, the store recovers, and a
+// restart then still owes the line (PR #524 review, hk 4567).
+func TestDrainWakeFailedSaveIsRetried(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "inbox.sqlite3")
+	tasks := []t4473Task{
+		{ID: 1, Project: "handoffkeep", State: "backlog"},
+		{ID: 2, Project: "handoffkeep", State: "unstarted"},
+	}
+	rig, clock := t4473RigAt(t, path, tasks, nil)
+	t4473SetInFlight(rig, t4473Lane, 1)
+	t4473Sweep(rig)
+	t4473SetInFlight(rig, t4473Lane, 0)
+	t4473Sweep(rig)
+	if got := t4473Lines(rig); len(got) != 1 {
+		t.Fatalf("first drain lines=%q, want one", got)
+	}
+	// Busy again, then the store refuses writes while the next drain marks its line owed.
+	t4473SetInFlight(rig, t4473Lane, 1)
+	t4473Sweep(rig)
+	db := rig.h.inbox.store.db
+	if _, err := db.Exec(`CREATE TRIGGER t4567_refuse BEFORE INSERT ON drain_wake_lanes BEGIN SELECT RAISE(ABORT, 'refused'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TRIGGER t4567_refuse_update BEFORE UPDATE ON drain_wake_lanes BEGIN SELECT RAISE(ABORT, 'refused'); END`); err != nil {
+		t.Fatal(err)
+	}
+	clock.advance(10 * time.Minute)
+	t4473SetInFlight(rig, t4473Lane, 0)
+	t4473Sweep(rig)
+	// The store recovers; a sweep with no drain change must still write the owed line.
+	if _, err := db.Exec(`DROP TRIGGER t4567_refuse`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`DROP TRIGGER t4567_refuse_update`); err != nil {
+		t.Fatal(err)
+	}
+	t4473Sweep(rig)
+	hk := rig.h.handoffkeep
+	if err := rig.h.Close(); err != nil {
+		t.Fatal(err)
+	}
+	rig = t3602Hub(t, path, "default", rig.fake, hk, clock)
+	t4473SetInFlight(rig, t4473Lane, 0)
+	clock.advance(time.Hour)
+	t4473Sweep(rig)
+	if got := t4473Lines(rig); len(got) != 1 || got[0] != t4473Line {
+		t.Fatalf("after a failed save and a restart, drain lines=%q, want exactly [%q]", got, t4473Line)
+	}
+}
+
+// Nothing open for the project: a drain sends nothing.
+func TestDrainWakeSilentWithoutOpenBacklog(t *testing.T) {
+	rig, _ := t4473Rig(t, []t4473Task{
+		{ID: 1, Project: "handoffkeep", State: "developing"},
+		{ID: 2, Project: "other", State: "backlog"},
+	})
+	t4473SetInFlight(rig, t4473Lane, 1)
+	t4473Sweep(rig)
+	t4473SetInFlight(rig, t4473Lane, 0)
+	t4473Sweep(rig)
+	if got := t4473Lines(rig); len(got) != 0 {
+		t.Fatalf("a drain with no open backlog sent %q", got)
+	}
+}
+
+// relay.drain_wake_interval and relay.drain_wake_threshold parse and refuse as
+// documented: the interval defaults to 1h and is 10m..24h; the threshold is 0..10.
+func TestDrainWakeConfig(t *testing.T) {
+	base := "default: interrupt\n"
+	policy, err := parseDeliveryPolicy([]byte(base))
+	if err != nil {
+		t.Fatalf("default policy refused: %v", err)
+	}
+	if policy.Relay.drainWakeInterval != defaultDrainWakeInterval || policy.Relay.DrainWakeThreshold != 0 {
+		t.Fatalf("defaults interval=%v threshold=%d, want %v and 0", policy.Relay.drainWakeInterval, policy.Relay.DrainWakeThreshold, defaultDrainWakeInterval)
+	}
+	for _, good := range []string{
+		"relay:\n  drain_wake_interval: 30m\n  drain_wake_threshold: 2\n",
+		"relay:\n  drain_wake_interval: 10m\n",
+		"relay:\n  drain_wake_interval: 24h\n  drain_wake_threshold: 10\n",
+	} {
+		if _, err := parseDeliveryPolicy([]byte(base + good)); err != nil {
+			t.Fatalf("policy %q refused: %v", good, err)
+		}
+	}
+	for _, bad := range []string{
+		"relay:\n  drain_wake_interval: 9m\n",
+		"relay:\n  drain_wake_interval: 25h\n",
+		"relay:\n  drain_wake_interval: soon\n",
+		"relay:\n  drain_wake_threshold: -1\n",
+		"relay:\n  drain_wake_threshold: 11\n",
+	} {
+		if _, err := parseDeliveryPolicy([]byte(base + bad)); err == nil {
+			t.Fatalf("policy %q was accepted", bad)
+		}
+	}
+}

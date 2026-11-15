@@ -36,8 +36,7 @@ replay, and every inbox rule. Otherwise explicit class wins, then the `types:`
 map resolves a declared `--type` (decision/order/ready/blocked/findings → interrupt;
 report/ack/info → inbox, all overridable globally or per lane), then the first
 matching rule, with lane
-rules ahead of global rules. Messages originating in the operator chat UI remain
-interrupts, including declarative instructions. Escalation, joined and revoked job events use the
+rules ahead of global rules. Escalation, joined and revoked job events use the
 **receiving parent lane's** policy and inbox, following existing routing.
 
 Inbox-class events deliver **immediately** instead of waiting for the deadline
@@ -232,10 +231,10 @@ on the node that sent it. The node names the emitting pane in the wire payload's
 `pane_id` (see [R21 direct lane events](r21-lane-event.md)), and the hub looks
 for a job that the sending node's latest heartbeat lists in that pane and that
 the hub holds as not completed and not orphaned on that node, with role
-`worker` and the owner lane equal to the lane the event is for. A worker of
+`implementer` and the owner lane equal to the lane the event is for. A worker of
 another design lane sharing the pane is not this lane's: its progress is not
-quieted for this lane. Every `panewire spawn` job claims as `worker`, whether
-it was spawned as a worker, tester, reviewer or counsel; a builder or captain
+quieted for this lane. Every `panewire spawn` job claims as `implementer`, whether
+it was spawned as an implementer, reviewer or consult; a builder
 is not one. Design sessions, the desk and workers share hosts, so the node
 match alone does not decide. Whatever the hub cannot attribute this way is
 delivered as before:
@@ -255,12 +254,12 @@ A completion of a job with neither a task nor a PR — a consult answer the
 session waits for — is delivered as before, and so is one whose hk job record
 cannot be read. A consult answer — a `lane.event` whose text starts with
 `[consult-done]`, sent `--type ready` as rstack's ops consult reference gives
-the answerer — is also delivered (hk 3434), from a counsel job's pane too: the
+the answerer — is also delivered (hk 3434), from a consult job's pane too: the
 session that asked waits for it in its pane. `job.escalate`, a worker's
 action events above, and the `decision`, `blocked`, `findings` and
 `automation-failed` types from anyone else still interrupt. Lanes that are not
-design lanes, `operator-desk` included, are unchanged, and so are chat relays
-and `job.*` kinds.
+design lanes, `operator-desk` included, are unchanged, and so are `job.*`
+kinds.
 
 ### Records kept in hk only
 
@@ -318,6 +317,8 @@ relay:
   design_lanes: ["*-design"]                         # default
   desk_lanes: ["operator-desk", "*-operator-desk"]   # default
   inbox_wake_window: 5m                              # default; 10s..1h
+  drain_wake_interval: 1h                            # default; 10m..24h
+  drain_wake_threshold: 0                            # default; 0..10
   worker_inbox_trial: []                             # default: no trial
   worker_inbox_trial_until: "2026-11-16T00:00:00Z"   # required with a trial
 ```
@@ -327,27 +328,19 @@ default covers `operator-desk` and per-fleet desks such as
 `work-operator-desk`. A desk lane is never a design lane. An explicit empty
 list turns a class off.
 
-Two kinds of traffic keep their existing delivery in every lane:
+One kind of traffic keeps its existing delivery in every lane:
 
-- operator chat turns the hub's own chat creates, which are not lane
-  notifications. The hub marks the turn where it creates it; an event id that
-  merely looks like `chat-N` (a `panewire emit --event-id chat-7`, a job event)
-  is a lane notification. A restart replay of a chat row keeps its delivery
-  only when the chat store holds the operator message whose id and body hash
-  make up the row's event id, and the row's text matches the hub-rendered
-  message and question ids;
 - events the operator posts through the [R24 HTTP ingress](r24-http-ingress.md)
-  with the operator token, including the assistant's `deliver` tool and its
-  outbox notices. This is the explicit operator path into a pane, so it is
-  kept. A restart replay of such a row is filed like any other item.
+  with the operator token. This is the explicit operator path into a pane, so it
+  is kept. A restart replay of such a row is filed like any other item.
 
 The hub's digest and hold batches are not typed into an inbox-only lane
 either. A batch built for one (an item stored before the lane became
 inbox-only, for example) is filed: its items become unread inbox items, the
 batch is quarantined with the reason `inbox-only lane: items filed unread`,
 and the lane gets its wake. The inbox summary pointer (`inbox_summary`) is not
-added to anything typed into an inbox-only lane, so an operator chat turn to
-the desk is typed as sent.
+added to anything typed into an inbox-only lane, so anything typed to the desk
+is typed as sent.
 
 The rule holds where a body would be typed, not only where an event arrives.
 An item stored under another class, by an older hub or before the lane became
@@ -356,7 +349,11 @@ replay would type it, and its handoffkeep row is closed as delivered to the
 inbox.
 
 `panewire prompt` types directly through the local herdr and never reaches the
-hub, so it is unaffected too.
+hub, so it is unaffected too. It reaches only panes this host's herdr session
+serves; a job's ESC is answered with a lane event to its lane
+(`panewire emit --kind lane.event --lane <job> --type order --text ...`, checked
+with `panewire inbox status --event-id <id>`), never with `panewire prompt` into
+another host or herdr session (hk 4810).
 
 ### The one-line wake
 
@@ -370,8 +367,11 @@ work, through the lane's node daemon like any relay:
 `N` is the lane's unread count, the same number `panewire inbox count` shows.
 `<kind>` is the most urgent unread item, in this order: `decision` >
 `blocked` > `automation-failed` (SPAWN_FAILED) > `findings` > `ready` >
-`info`. The declared `--type` decides the kind. `order` and `deploy-approval`
-rank as `decision`, and `watch-hold` and `culprit-hold` as `blocked`. An
+`info`. The declared `--type` decides the kind. An `order` keeps its display
+kind, so the line reads `most urgent: order`, but ranks as `decision`;
+`deploy-approval` displays and ranks as `decision`, and `watch-hold` and
+`culprit-hold` as `blocked`. When an `order` and a `decision` are both unread,
+the line shows `order`, whatever their inbox order (hk 4458). An
 untyped item is ranked by its kind (`job.escalate` is a decision, `job.lost`
 and `job.revoked` are blocked, a completion is ready), by a leading
 `[consult-done]` (ready), or by its tags (ESC, URGENT and needs_decision;
@@ -395,6 +395,20 @@ When the line is sent:
   sends exactly one more line, and only if the lane still has unread items.
   That line opens the next window. A window end that finds nothing unread
   closes the window instead, so the next item is announced at once.
+- A design lane whose in-flight jobs fall to `relay.drain_wake_threshold`
+  (default 0) while hk lists open backlog for its project gets one line,
+  `N backlog, M in work: dispatch the next batch`. The project is the lane
+  name without `-design`; the backlog is the hk tasks in state `backlog` or
+  `unstarted` that do not await an operator decision, counted per state with
+  hk's project and state filters, page by page; an answer that does not echo
+  the project filter counts as an error, never as backlog. The line goes out
+  on the drain and at most once per `relay.drain_wake_interval` (default 1h).
+  A lane first seen idle gets no line. The owed line and the last send are
+  kept in the inbox store (`drain_wake_lanes`), so a hub restart keeps a line
+  still owed. A line stays owed until the writer confirms it was written; a
+  queued line never written is sent again after the interval. No drain is read while a connected host has not heartbeated its
+  active jobs since its hello: the hello empties them until that heartbeat.
+  This is an interim until the hub-owned queue (hk 4376) replaces the hk read.
 - A line still owed to a [trial](#worker-trial) lane when its trial ends is
   dropped: the lane is a worker lane again.
 - When the hub starts, every inbox-only lane with unread items above `info`
@@ -443,8 +457,8 @@ is retried at the window's end or the next node hello. A desk-routed line is
 an `inbox_wake` with outcome `sent` and reason `desk_fallback`; a startup line
 also includes `startup=true` in its detail.
 
-Worker lanes are unchanged: a job, reviewer, tester or counsel lane keeps
-body injection for READY, findings, an ESC answer, chat and everything else.
+Worker lanes are unchanged: a job, reviewer or consult lane keeps
+body injection for READY, findings, an ESC answer and everything else.
 
 ### Worker trial
 
@@ -569,8 +583,7 @@ batches never disable other digests.
 
 When enabled, interrupt batching uses the same transactional outbox: arrivals
 for one receiving lane within the oldest item's window become one turn. A
-single item is also delayed by that window. Must-act tags and chat UI turns
-bypass batching. The flush runs every 100ms; a batch is never sent early.
+single item is also delayed by that window. Must-act tags bypass batching. The flush runs every 100ms; a batch is never sent early.
 
 ## Holding interrupts while a receiver works
 
@@ -601,7 +614,7 @@ Old nodes without working-state reports deliver as before.
 
 READY, FINDINGS, BLOCKED and MERGED interrupt notices can be held. The READY tag
 still selects the interrupt class, but does not bypass this hold. Types `decision`
-and `order`, kinds `job.escalate`, `job.lost`, `job.revoked`, operator chat UI turns,
+and `order`, kinds `job.escalate`, `job.lost`, `job.revoked`,
 and whole-word BLOCKER/URGENT/ESC tags always bypass the queue. BOUNCE and
 needs_decision tags also bypass it. Original IDs and must-ack requirements remain
 available through `inbox list` and `inbox ack`.
@@ -626,6 +639,10 @@ The normal relay persistence/retry requirements still apply during an hk outage.
 ## Inbox commands and API
 
 By default, inbox commands use the local node daemon and its hub connection.
+`panewire spawn --wait` reads the owner lane's inbox the same way, so a session
+whose config carries no usable hub token still sees the lane's signals; only a
+daemon that does not answer sends it to the configured `[hub]` connection, which
+it reports once per wait ([config.md](config.md)).
 For direct access, set `PANEWIRE_HUB_URL`, `PANEWIRE_HUB_TOKEN_ENV` (path to the existing private
 `HUB_MACHINE_ID`/`HUB_TOKEN` env file), optional `PANEWIRE_HUB_CF_ENV`, and
 `PANEWIRE_LANE`, or pass the corresponding flags shown by `panewire inbox --help`.

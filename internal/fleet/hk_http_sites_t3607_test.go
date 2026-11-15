@@ -109,8 +109,8 @@ func asCLI(a hkAnswerFixture) cliOut {
 // claimed.
 func seedDoneJob(t *testing.T, a *App) {
 	t.Helper()
-	seedJob(t, a, "j", "worker")
-	if e := a.JobStore.Claim(context.Background(), "j", "42", a.machine()); e != nil {
+	seedJob(t, a, "j", "implementer")
+	if e := a.JobStore.(*fakeJobStore).claimSpawned(context.Background(), "j", "42", a.machine()); e != nil {
 		t.Fatal(e)
 	}
 }
@@ -131,7 +131,7 @@ func newSweepFixture(t *testing.T) sweepFixture {
 	f := ledgerRunner(t, a)
 	hk := useFakeHK(t)
 	noHKCLI(t, f)
-	seedJob(t, a, "j", "worker")
+	seedJob(t, a, "j", "implementer")
 	putEvent(t, a, "j", "job.completed", map[string]any{})
 	src := filepath.Join(a.Jobs, "j", "final")
 	if e := os.MkdirAll(src, 0700); e != nil {
@@ -237,13 +237,20 @@ func TestHKSitesGoOverHTTPWithSvcToken(t *testing.T) {
 		if e := a.lifecycle(ctx, "done", []string{"j", "--report", path}); e != nil {
 			t.Fatal(e)
 		}
-		key := "reports/j/report.md"
-		reqs := hkOnly(t, hk, docRoute(http.MethodPut, key), "POST /v1/tasks/42/comments")
-		put := hkJSON(t, reqs[0])
-		if put["key"] != key || put["kind"] != "report" || put["job"] != "j" || put["body"] != report {
-			t.Fatalf("report put key=%v kind=%v job=%v body bytes=%d, want the CLI's doc put: the key, kind report, the job and the whole file (%d bytes)", put["key"], put["kind"], put["job"], len(put["body"].(string)), len(report))
+		key := reportDocumentKey("j", reportDigest([]byte(report)))
+		reqs := hkOnly(t, hk, "PUT /v1/attachments", docRoute(http.MethodPut, key), "POST /v1/tasks/42/comments")
+		if string(reqs[0].Body) != report || reqs[0].Header.Get("X-HK-Name") != "report.md" || reqs[0].Header.Get("Content-Type") != reportAttachmentMIME || reqs[0].Header.Get("X-HK-Ref") != "document:"+key {
+			t.Fatalf("report attachment name=%q MIME=%q ref=%q bytes=%d, want report.md, %s, document:%s and the whole file (%d bytes)", reqs[0].Header.Get("X-HK-Name"), reqs[0].Header.Get("Content-Type"), reqs[0].Header.Get("X-HK-Ref"), len(reqs[0].Body), reportAttachmentMIME, key, len(report))
 		}
-		if got := hkJSON(t, reqs[1]); len(got) != 1 || got["body"] != "panewire job.completed job=j report="+path {
+		put := hkJSON(t, reqs[1])
+		if put["key"] != key || put["kind"] != "report" || put["job"] != "j" {
+			t.Fatalf("report manifest put key=%v kind=%v job=%v, want the content-addressed report document", put["key"], put["kind"], put["job"])
+		}
+		var manifest reportManifest
+		if err := json.Unmarshal([]byte(put["body"].(string)), &manifest); err != nil || manifest.Schema != "panewire.report-manifest.v1" || manifest.JobID != "j" || manifest.ReportSHA256 != reportDigest([]byte(report)) || manifest.SizeBytes != int64(len(report)) || manifest.AttachmentSHA256 != reportDigest([]byte(report)) {
+			t.Fatalf("report manifest=%+v err=%v", manifest, err)
+		}
+		if got := hkJSON(t, reqs[2]); len(got) != 1 || got["body"] != "panewire job.completed job=j report="+path {
 			t.Fatalf("comment body=%v", got)
 		}
 		if out := a.Out.(*bytes.Buffer).String(); !strings.Contains(out, "OK job=j report="+path+" kind=job.completed") {
@@ -277,9 +284,7 @@ func TestHKSiteFailuresKeepCLIHandling(t *testing.T) {
 		if e := os.WriteFile(path, []byte("done\n"), 0600); e != nil {
 			t.Fatal(e)
 		}
-		if e := a.lifecycle(ctx, "done", []string{"j", "--report", path}); e != nil {
-			t.Fatal(e)
-		}
+		wantNotInHK(t, a.lifecycle(ctx, "done", []string{"j", "--report", path}))
 		errs := a.Err.(*bytes.Buffer).String()
 		if !strings.Contains(errs, "panewire: warning: report upload failed; local report retained\n") {
 			t.Fatalf("warnings=%q", errs)
@@ -293,7 +298,7 @@ func TestHKSiteFailuresKeepCLIHandling(t *testing.T) {
 		if rec := a.JobStore.(*fakeJobStore).record(t, "j"); rec["report_doc"] != nil {
 			t.Fatalf("record=%v, want no report_doc", rec)
 		}
-		hkOnly(t, hk, docRoute(http.MethodPut, "reports/j/report.md"), "POST /v1/tasks/42/comments")
+		hkOnly(t, hk, docRoute(http.MethodPut, reportDocumentKey("j", reportDigest([]byte("done\n")))), "POST /v1/tasks/42/comments")
 	})
 
 	t.Run("artifact record write refused", func(t *testing.T) {
@@ -367,9 +372,7 @@ func TestHKSitesUnconfigured(t *testing.T) {
 		if e := os.WriteFile(path, []byte("done\n"), 0600); e != nil {
 			t.Fatal(e)
 		}
-		if e := a.lifecycle(ctx, "done", []string{"j", "--report", path}); e != nil {
-			t.Fatal(e)
-		}
+		wantNotInHK(t, a.lifecycle(ctx, "done", []string{"j", "--report", path}))
 		errs := a.Err.(*bytes.Buffer).String()
 		if !strings.Contains(errs, "report upload failed; local report retained") || !strings.Contains(errs, "task comment failed: handoffkeep: handoffkeep: "+unconfigured) {
 			t.Fatalf("warnings=%q", errs)
@@ -670,7 +673,7 @@ func TestHKSiteUploadsUseTheUploadBound(t *testing.T) {
 	if e := a.lifecycle(ctx, "done", []string{"j", "--report", path}); e != nil {
 		t.Fatal(e)
 	}
-	if rec := a.JobStore.(*fakeJobStore).record(t, "j"); str(rec, "report_doc") != "reports/j/report.md" {
+	if rec := a.JobStore.(*fakeJobStore).record(t, "j"); str(rec, "report_doc") != reportDocumentKey("j", reportDigest([]byte("done\n"))) {
 		t.Fatalf("record=%v, want the report uploaded under the upload bound", rec)
 	}
 	if errs := a.Err.(*bytes.Buffer).String(); !strings.Contains(errs, "task comment failed: ") {

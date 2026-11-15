@@ -1,0 +1,29 @@
+{
+  "generatedAt": 1794696766070,
+  "reports": [
+    {
+      "provider": "commandcode",
+      "fetchedAt": 1794696766070,
+      "limits": [
+        {
+          "id": "commandcode:balance",
+          "label": "Credit balance",
+          "scope": {
+            "provider": "commandcode",
+            "accountId": "user_fixture_payg",
+            "windowId": "balance",
+            "shared": true
+          },
+          "amount": {
+            "remaining": 17.5330931265,
+            "unit": "credits"
+          }
+        }
+      ],
+      "metadata": {
+        "accountId": "user_fixture_payg",
+        "email": "fixture@example.invalid"
+      }
+    }
+  ]
+}

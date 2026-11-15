@@ -183,7 +183,7 @@ func TestWaitOutputAndSpawnedNoticeNameUnregisteredLane(t *testing.T) {
 	}
 
 	a := testApp(t)
-	s := Spawn{Job: "job-w", Owner: "desk", Role: "worker", WaitTimeout: "1s", laneUnregistered: true}
+	s := Spawn{Job: "job-w", Owner: "desk", Role: "implementer", WaitTimeout: "1s", laneUnregistered: true}
 	putEvent(t, a, s.Job, "job.completed", map[string]any{"report": "r.md"})
 	if err := a.waitJob(context.Background(), s); err != nil {
 		t.Fatal(err)

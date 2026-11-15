@@ -340,7 +340,7 @@ func TestLanesCLIPrintsHubErrorCode(t *testing.T) {
 		{name: "quota", status: http.StatusTooManyRequests, body: `{"error":"lane_quota_exceeded"}`, want: "lanes rejected by hub: lane_quota_exceeded"},
 		{name: "file full", status: http.StatusRequestEntityTooLarge, body: `{"error":"lanes_file_full"}`, want: "lanes rejected by hub: lanes_file_full"},
 		{name: "mismatch", status: http.StatusForbidden, body: `{"error":"lane_machine_mismatch"}`, want: "lanes rejected by hub: lane_machine_mismatch"},
-		{name: "authority use hint", status: http.StatusConflict, body: `{"error":"authority_lane_direct_write","use":"POST /v1/control-plane/transfer"}`, want: "lanes rejected by hub: authority_lane_direct_write (use: POST /v1/control-plane/transfer)"},
+		{name: "authority use hint", status: http.StatusConflict, body: `{"error":"authority_lane_direct_write","use":"edit the lanes file on the hub host"}`, want: "lanes rejected by hub: authority_lane_direct_write (use: edit the lanes file on the hub host)"},
 		{name: "server failure code", status: http.StatusInternalServerError, body: `{"error":"lanes_write_failed"}`, want: "lanes unavailable: lanes_write_failed"},
 		{name: "unparseable body", status: http.StatusForbidden, body: `denied`, want: "lanes rejected by hub"},
 	} {

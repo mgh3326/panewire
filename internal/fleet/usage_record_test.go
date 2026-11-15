@@ -33,10 +33,10 @@ func (s *usageFailStore) Put(ctx context.Context, id string, fields map[string]a
 func usageJob(t *testing.T, a *App, session map[string]any) *fakeJobStore {
 	t.Helper()
 	store := a.JobStore.(*fakeJobStore)
-	if err := store.Claim(t.Context(), "j", "42", "test-host"); err != nil {
+	if err := store.claimSpawned(t.Context(), "j", "42", "test-host"); err != nil {
 		t.Fatal(err)
 	}
-	seedJob(t, a, "j", "worker")
+	seedJob(t, a, "j", "implementer")
 	putEvent(t, a, "j", "job.spawned", map[string]any{"pane_id": "w:p1", "tab_id": "w:t1", "label": "agent-a", "cwd": testCWD, "harness_session": session})
 	return store
 }
@@ -47,6 +47,7 @@ func claudeSession() map[string]any {
 
 func doneJob(t *testing.T, a *App) {
 	t.Helper()
+	useFakeHK(t).Handle(hkCommentAnswer)
 	path := filepath.Join(a.Jobs, "j", "report.md")
 	if err := os.WriteFile(path, []byte("done\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -173,10 +174,10 @@ func TestCompletionWithoutHarnessSessionWritesNoUsage(t *testing.T) {
 	a := testApp(t)
 	ledgerRunner(t, a)
 	store := a.JobStore.(*fakeJobStore)
-	if err := store.Claim(t.Context(), "j", "42", "test-host"); err != nil {
+	if err := store.claimSpawned(t.Context(), "j", "42", "test-host"); err != nil {
 		t.Fatal(err)
 	}
-	seedJob(t, a, "j", "worker")
+	seedJob(t, a, "j", "implementer")
 	doneJob(t, a)
 	if _, ok := store.record(t, "j")["usage"]; ok {
 		t.Fatal("usage written for a receipt that names no session")
@@ -308,7 +309,7 @@ func (s *terminalUsageStore) Put(ctx context.Context, id string, fields map[stri
 	}
 	s.writes = append(s.writes, fields)
 	if state := str(rec, "state"); state == "completed" || state == "escalated" || state == "lost" {
-		if _, ok := fields["usage"]; !ok || len(fields) != 1 {
+		if !hkUsageOnlyUpdate(fields) {
 			return &BackendError{Status: 409, Code: "terminal_job"}
 		}
 	}
@@ -335,7 +336,10 @@ func TestUsageWritesRespectTerminalJob(t *testing.T) {
 	if got := usageOf(t, base.record(t, "j"))["input_tokens"]; got != int64(42) {
 		t.Fatalf("reap usage input tokens = %v", got)
 	}
-	if len(store.writes) != 1 || len(store.writes[0]) != 1 || store.writes[0]["usage"] == nil {
+	if len(store.writes) != 1 || store.writes[0]["usage"] == nil {
+		t.Fatalf("reap writes = %v", store.writes)
+	}
+	if _, model := store.writes[0]["model"]; model {
 		t.Fatalf("reap writes = %v", store.writes)
 	}
 	store.writes = nil
@@ -345,7 +349,10 @@ func TestUsageWritesRespectTerminalJob(t *testing.T) {
 	}
 	j.Terminal = false // The local event may lag the already-terminal hk record.
 	a.recordJobUsage(t.Context(), j, false)
-	if len(store.writes) != 1 || len(store.writes[0]) != 1 || store.writes[0]["usage"] == nil {
+	if len(store.writes) != 1 || store.writes[0]["usage"] == nil {
+		t.Fatalf("terminal completion writes = %v", store.writes)
+	}
+	if _, model := store.writes[0]["model"]; model {
 		t.Fatalf("terminal completion writes = %v", store.writes)
 	}
 }

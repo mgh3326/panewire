@@ -40,7 +40,7 @@ type nodeJobReapResult struct {
 }
 
 func validNodeJobReapArgs(args nodeJobReapArgs) bool {
-	return validNodeJobName(args.Job) && validReportRelayLaneName(args.Lane)
+	return validNodeJobName(args.Job) && validLaneReference(args.Lane)
 }
 
 func validNodeJobReapResult(result nodeJobReapResult) bool {

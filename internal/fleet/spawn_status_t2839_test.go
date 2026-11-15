@@ -8,9 +8,28 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+
+	"github.com/mgh3326/panewire/internal/hubretry"
 )
 
 const statusTestOperation = "00000000-0000-4000-8000-000000000001"
+
+func TestWaitSpawnContinuesThroughBound_t4577(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) == 1 {
+			json.NewEncoder(w).Encode(map[string]any{"status": "bound"})
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]any{"status": "succeeded", "result": map[string]any{"host": "node-b"}})
+	}))
+	defer server.Close()
+	c := hubHTTP{base: server.URL, token: "fixture", client: server.Client(), statusPoll: 1}
+	attempt, err := c.WaitSpawn(t.Context(), statusTestOperation, SpawnWaitOptions{})
+	if err != nil || attempt.Host != "node-b" {
+		t.Fatalf("bound operation stopped the wait: attempt=%+v err=%v", attempt, err)
+	}
+}
 
 func TestWaitSpawnRefusalNamesHostAndProfile(t *testing.T) {
 	for name, test := range map[string]struct {
@@ -26,7 +45,7 @@ func TestWaitSpawnRefusalNamesHostAndProfile(t *testing.T) {
 			}))
 			defer server.Close()
 			c := hubHTTP{base: server.URL, token: "fixture", client: server.Client()}
-			_, err := c.WaitSpawn(t.Context(), statusTestOperation)
+			_, err := c.WaitSpawn(t.Context(), statusTestOperation, SpawnWaitOptions{})
 			if err == nil || !strings.Contains(err.Error(), test.want) || !strings.Contains(err.Error(), statusTestOperation) {
 				t.Fatalf("err=%v want %q", err, test.want)
 			}
@@ -40,7 +59,7 @@ func TestWaitSpawnSuccessReportsWhereItLanded(t *testing.T) {
 	}))
 	defer server.Close()
 	c := hubHTTP{base: server.URL, token: "fixture", client: server.Client()}
-	attempt, err := c.WaitSpawn(t.Context(), statusTestOperation)
+	attempt, err := c.WaitSpawn(t.Context(), statusTestOperation, SpawnWaitOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,7 +76,7 @@ func TestWaitSpawnCarriesUnregisteredLane(t *testing.T) {
 	}))
 	defer server.Close()
 	c := hubHTTP{base: server.URL, token: "fixture", client: server.Client()}
-	attempt, err := c.WaitSpawn(t.Context(), statusTestOperation)
+	attempt, err := c.WaitSpawn(t.Context(), statusTestOperation, SpawnWaitOptions{})
 	if err != nil || !attempt.LaneUnregistered {
 		t.Fatalf("attempt=%+v err=%v", attempt, err)
 	}
@@ -80,7 +99,7 @@ func TestWaitSpawnSurvivesTransientStatusFailures(t *testing.T) {
 			}))
 			defer server.Close()
 			c := hubHTTP{base: server.URL, token: "fixture", client: server.Client(), statusPoll: 1}
-			if _, err := c.WaitSpawn(t.Context(), statusTestOperation); err != nil {
+			if _, err := c.WaitSpawn(t.Context(), statusTestOperation, SpawnWaitOptions{}); err != nil {
 				t.Fatalf("transient failure ended the wait: %v", err)
 			}
 		})
@@ -94,8 +113,10 @@ func TestWaitSpawnSustainedOutageStillAnswersUnavailable(t *testing.T) {
 		w.WriteHeader(http.StatusServiceUnavailable)
 	}))
 	defer server.Close()
-	c := hubHTTP{base: server.URL, token: "fixture", client: server.Client(), statusPoll: 1}
-	_, err := c.WaitSpawn(t.Context(), statusTestOperation)
+	// The per-read retry is off so this counts the status reads WaitSpawn
+	// itself makes before it gives up; the retry is covered by hub_retry_test.go.
+	c := hubHTTP{base: server.URL, token: "fixture", client: server.Client(), statusPoll: 1, retry: hubretry.Policy{Budget: -1}}
+	_, err := c.WaitSpawn(t.Context(), statusTestOperation, SpawnWaitOptions{})
 	if ErrorCode(err) != exitStateConflict || !strings.Contains(err.Error(), "spawn status unavailable") {
 		t.Fatalf("err=%v", err)
 	}
@@ -113,7 +134,7 @@ func TestWaitSpawnDefinitiveStatusIsNotRetried(t *testing.T) {
 	}))
 	defer server.Close()
 	c := hubHTTP{base: server.URL, token: "fixture", client: server.Client(), statusPoll: 1}
-	if _, err := c.WaitSpawn(t.Context(), statusTestOperation); ErrorCode(err) != exitStateConflict {
+	if _, err := c.WaitSpawn(t.Context(), statusTestOperation, SpawnWaitOptions{}); ErrorCode(err) != exitStateConflict {
 		t.Fatalf("err=%v", err)
 	}
 	if calls.Load() != 1 {

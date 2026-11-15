@@ -15,7 +15,9 @@ import (
 	"github.com/mgh3326/panewire/internal/fleet"
 )
 
-func TestAsyncSpawnUndispatchedTimeoutReleasesReservation(t *testing.T) {
+// An attempt that times out before any dispatch ends the attempt, not the
+// request (hk 4660): the reservation stays and attempt 2 is queued.
+func TestAsyncSpawnUndispatchedTimeoutStartsNextAttempt(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	for _, phase := range []string{"queued", "placement"} {
 		t.Run(phase, func(t *testing.T) {
@@ -37,16 +39,15 @@ func TestAsyncSpawnUndispatchedTimeoutReleasesReservation(t *testing.T) {
 			}
 			h.executeSpawnTask(t.Context(), task)
 			saved, err := h.inbox.store.spawnTask(t.Context(), request.RequestID)
-			if err != nil || saved.Status != "retryable" || !saved.Outcome.Retryable || saved.Outcome.Reason != "timeout" || saved.Node != nil {
-				t.Fatalf("undispatched timeout retained ownership: %+v %v", saved, err)
+			if err != nil || saved.Status != "accepted" || saved.Attempt != 2 || !saved.Outcome.Retryable || saved.Outcome.Reason != "timeout" || saved.Node != nil || !saved.Deadline.After(time.Now()) {
+				t.Fatalf("undispatched timeout did not queue the next attempt: %+v %v", saved, err)
 			}
-			pending, err := h.inbox.store.pendingSpawns(t.Context())
-			if err != nil || len(pending) != 0 {
-				t.Fatalf("reselected: %+v %v", pending, err)
+			page, _, err := h.inbox.store.pendingSpawnPage(t.Context(), spawnScanPosition{}, time.Now())
+			if err != nil || len(page) != 1 || page[0].Request.RequestID != request.RequestID || page[0].Attempt != 2 {
+				t.Fatalf("the next attempt is not scheduled: %+v %v", page, err)
 			}
-			retried, err := h.inbox.store.resumeCleanedSpawn(t.Context(), saved, time.Now())
-			if err != nil || retried.Attempt != 2 || retried.Request.RequestID != request.RequestID || !retried.Deadline.After(time.Now()) {
-				t.Fatalf("same-key retry failed: %+v %v", retried, err)
+			if _, _, err := h.inbox.store.claimSpawn(t.Context(), roleSecondRequest(), "test-job-r2", "parent", time.Now()); !errors.Is(err, errSpawnClaimed) {
+				t.Fatalf("a queued request must keep its task/role reservation: %v", err)
 			}
 		})
 	}
@@ -60,7 +61,7 @@ func TestSpawnBindingRefusesDifferentNodeRequest(t *testing.T) {
 		t.Fatal(err)
 	}
 	node := hubSpawnRequest{RequestID: t14RequestID(988), Machine: "machine-a", Args: []string{"--job", "test-job"}, WaitSeconds: 300}
-	task, err = h.inbox.store.bindSpawn(t.Context(), request.RequestID, task.Attempt, node)
+	task, err = h.inbox.store.bindSpawn(t.Context(), request.RequestID, task.Attempt, node, time.Now().UTC())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -68,7 +69,7 @@ func TestSpawnBindingRefusesDifferentNodeRequest(t *testing.T) {
 		t.Fatal(err)
 	}
 	node.RequestID = t14RequestID(989)
-	if _, err = h.inbox.store.bindSpawn(t.Context(), request.RequestID, task.Attempt, node); !errors.Is(err, errSpawnClaimed) {
+	if _, err = h.inbox.store.bindSpawn(t.Context(), request.RequestID, task.Attempt, node, time.Now().UTC()); !errors.Is(err, errSpawnClaimed) {
 		t.Fatalf("new request silently reused old binding: %v", err)
 	}
 	transport := directSpawnTransport{h: h, task: task, bound: true}
@@ -81,7 +82,7 @@ func TestSpawnOperatorFlagsRequireAuthorizedDurableMessage(t *testing.T) {
 	_, server := t14Hub(t)
 	_, scopedServer := pw2Hub(t, map[string]string{"svc-machine": "spawn@node-a"}, "", nil)
 	service := pw2Caller{"svc-machine", "svc-machine", pw2ServiceToken("svc-machine")}
-	flags := [][]string{{"--task-hk-bypass"}, {"--job-dup-ok"}, {"--allow-escalation"}, {"--keep"}, {"--grade", "A"}, {"--routing-role", "consult"}, {"--override-reason", "operator request"}, {"--operator-request", "request-a"}, {"--requested-by", "operator"}, {"--purpose", "inspect launch"}, {"-w", "worker pool"}}
+	flags := [][]string{{"--task-hk-bypass"}, {"--job-dup-ok"}, {"--allow-escalation"}, {"--keep"}, {"--grade", "A"}, {"--role", "consult"}, {"--override-reason", "operator request"}, {"--operator-request", "request-a"}, {"--requested-by", "operator"}, {"--purpose", "inspect launch"}, {"-w", "worker pool"}}
 	for _, args := range flags {
 		body := t14SpawnBody(t14RequestID(985))
 		body["args"] = args
@@ -149,7 +150,7 @@ func TestNodeSpawnLegacyResultKeepsOldWireShape(t *testing.T) {
 
 func TestNodeSpawnSuccessfulReceiptSurvivesContextExpiry(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
-	client := &HubClient{spawnConfigPath: t14SpawnConfig(t, t.TempDir()), spawnEngine: func(context.Context, string, string, string, string, []string) (*hubSpawnOutput, fleet.Execution) {
+	client := &HubClient{spawnConfigPath: t14SpawnConfig(t, t.TempDir()), spawnEngine: func(context.Context, string, string, string, string, time.Time, []string) (*hubSpawnOutput, fleet.Execution) {
 		cancel()
 		return t14EngineOK()
 	}}
@@ -178,7 +179,7 @@ func TestHubSpawnArgsRefuseBuilderRoleKeepReviewerAuthorFlags(t *testing.T) {
 	if validHubSpawnArgs([]string{"--role", "builder", "--lane", "job", "--parent", "caller"}) {
 		t.Fatal("--role builder must not pass the hub allowlist")
 	}
-	if !validHubSpawnArgs([]string{"--role", "reviewer", "--builder-family", "anthropic", "--builder-job", "author-job"}) {
-		t.Fatal("a reviewer must keep --builder-family and --builder-job")
+	if !validHubSpawnArgs([]string{"--role", "reviewer", "--author-family", "anthropic", "--builder-job", "author-job"}) {
+		t.Fatal("a reviewer must keep --author-family and --builder-job")
 	}
 }

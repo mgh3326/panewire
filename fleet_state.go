@@ -326,14 +326,33 @@ func (s *fleetStateStore) publish(message FleetStateMessage, repeat time.Duratio
 	key := fleetStateKey{message.Host, message.Kind, message.Key}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if previous, exists := s.latest[key]; exists && fleetStateBody(previous) == fleetStateBody(message) && message.ReceivedAt.Sub(previous.ReceivedAt) < repeat {
-		return false
+	if previous, exists := s.latest[key]; exists {
+		if fleetStateBody(previous) == fleetStateBody(message) && message.ReceivedAt.Sub(previous.ReceivedAt) < repeat {
+			return false
+		}
+		// The store keeps one value per host and account, so a delayed quota
+		// reading must not replace a newer one: the supersession check reads
+		// exactly this value, and an old exhausted publish arriving after a
+		// newer available one would otherwise be the only thing it sees.
+		if message.Kind == fleetStateKindQuota && fleetStateObservedAt(message).Before(fleetStateObservedAt(previous)) {
+			return false
+		}
 	}
 	s.seq++
 	message.V, message.Seq = fleetStateVersion, s.seq
 	s.latest[key] = message
 	s.boundHostLocked(message.Host, message.Kind)
 	return true
+}
+
+// fleetStateObservedAt is when a reading was taken: its measurement, or a later
+// confirmation of it.
+func fleetStateObservedAt(message FleetStateMessage) time.Time {
+	at := message.MeasuredAt
+	if message.ConfirmedAt != nil && message.ConfirmedAt.After(at) {
+		at = *message.ConfirmedAt
+	}
+	return at
 }
 
 // boundHostLocked keeps one host's quota keys within their cap, dropping the
@@ -408,7 +427,13 @@ func (h *HubServer) publishFleetStateFromNode(machineID string, publish FleetSta
 		}
 		return true
 	}
-	h.stateStore().publish(FleetStateMessage{Host: machineID, Kind: publish.Kind, Key: publish.Key, MeasuredAt: publish.MeasuredAt.UTC(), ConfirmedAt: utcPtr(publish.ConfirmedAt), ReceivedAt: received, Quota: publish.Quota}, fleetStateNodeRepeat)
+	recorded := h.stateStore().publish(FleetStateMessage{Host: machineID, Kind: publish.Kind, Key: publish.Key, MeasuredAt: publish.MeasuredAt.UTC(), ConfirmedAt: utcPtr(publish.ConfirmedAt), ReceivedAt: received, Quota: publish.Quota}, fleetStateNodeRepeat)
+	// A quota value that shows a pool used up is the trigger of the
+	// exhausted-pool sweep (hub_pool_exhausted.go); an identical value
+	// repeated within fleetStateNodeRepeat is not recorded and not a new look.
+	if recorded && publish.Kind == fleetStateKindQuota {
+		h.observePoolExhaustion(publish.Quota, received)
+	}
 	return true
 }
 

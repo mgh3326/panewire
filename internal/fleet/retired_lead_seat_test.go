@@ -12,8 +12,8 @@ import (
 // that names the key to edit, for a remote host and for [local].
 func TestHostConfigListingBuilderIsRefusedNamingKey(t *testing.T) {
 	for name, tc := range map[string]struct{ body, want string }{
-		"remote host": {"[hosts.pi]\nroles = [\"worker\", \"builder\"]\n", `delete "builder" from hosts.pi.roles`},
-		"local":       {"[local]\nroles = [\"builder\", \"tester\"]\n", `delete "builder" from local.roles`},
+		"remote host": {"[hosts.pi]\nroles = [\"implementer\", \"builder\"]\n", `delete "builder" from hosts.pi.roles`},
+		"local":       {"[local]\nroles = [\"implementer\", \"builder\"]\n", `delete "builder" from local.roles`},
 	} {
 		t.Run(name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "hosts.toml")
@@ -28,13 +28,13 @@ func TestHostConfigListingBuilderIsRefusedNamingKey(t *testing.T) {
 	}
 }
 
-// panewire reads no lead entry. A policy with none routes worker, tester,
-// reviewer and counsel from their own entries and refuses nothing.
+// panewire reads no lead entry. A policy with none routes implementer,
+// reviewer and consult from their own entries and refuses nothing.
 func TestPolicyWithoutLeadEntryRoutesEverySeatRole(t *testing.T) {
 	if strings.Contains(routingBlockV1, `"lead"`) {
 		t.Fatal("the routing fixture must not carry a lead entry")
 	}
-	for seat, want := range map[string]string{"worker": "implementer", "tester": "verifier", "reviewer": "reviewer", "counsel": "consult"} {
+	for seat, want := range map[string]string{"implementer": "implementer", "reviewer": "reviewer", "consult": "consult"} {
 		a := testApp(t)
 		a.Runner = &fakeRunner{}
 		serveRouting(t, routingDocV1)
@@ -52,11 +52,11 @@ func TestLeadEntryInPolicyIsNeverRead(t *testing.T) {
 	a := testApp(t)
 	a.Runner = &fakeRunner{}
 	serveRouting(t, routingDoc(leadOnly))
-	if _, err := a.routeFor(context.Background(), "counsel", ""); exitCode(err) != exitConfig || err == nil || !strings.Contains(err.Error(), "POLICY_UNAVAILABLE") {
-		t.Fatalf("counsel must not fall back to a lead entry: %v", err)
+	if _, err := a.routeFor(context.Background(), "consult", ""); exitCode(err) != exitConfig || err == nil || !strings.Contains(err.Error(), "POLICY_UNAVAILABLE") {
+		t.Fatalf("consult must not fall back to a lead entry: %v", err)
 	}
-	if _, err := a.routeFor(context.Background(), "worker", "lead"); exitCode(err) != exitUsage {
-		t.Fatalf("--routing-role lead must be a usage refusal: %v", err)
+	if _, err := a.routeFor(context.Background(), "implementer", "lead"); exitCode(err) != exitUsage {
+		t.Fatalf("a lead routing override must be a usage refusal: %v", err)
 	}
 	if err := a.resolveCmd(context.Background(), []string{"--role", "lead"}); exitCode(err) != exitUsage {
 		t.Fatalf("resolve --role lead must be a usage refusal: %v", err)
@@ -64,8 +64,7 @@ func TestLeadEntryInPolicyIsNeverRead(t *testing.T) {
 }
 
 // Until desk deletes it (stage 2), the table still carries a lead entry, with
-// the family_effort lead had. panewire ignores it without refusing the table,
-// and refuses a seat role mapped to lead.
+// the family_effort lead had. panewire ignores it without refusing the table.
 func TestLeadEntryWithFamilyEffortDoesNotBreakThePolicy(t *testing.T) {
 	withLead := strings.Replace(routingBlockV1, `"consult":     {`, `"lead":        {"allowed": ["opus"], "effort": "high", "on_exhaustion": "wait", "family_effort": {"codex-sol": "xhigh"}},
     "consult":     {`, 1)
@@ -75,9 +74,5 @@ func TestLeadEntryWithFamilyEffortDoesNotBreakThePolicy(t *testing.T) {
 	}
 	if _, ok := p.Roles["lead"]; ok || p.Roles["consult"].Allowed == nil {
 		t.Fatalf("lead must be dropped and consult kept: %v", p.Roles)
-	}
-	mapped := strings.Replace(withLead, `"worker": "implementer"`, `"worker": "lead"`, 1)
-	if _, err := parseRoutingDoc(routingDoc(mapped)); err == nil || !strings.Contains(err.Error(), "unknown role lead") {
-		t.Fatalf("a seat role mapped to lead must be refused: %v", err)
 	}
 }

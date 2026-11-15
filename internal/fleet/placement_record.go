@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -39,6 +40,12 @@ type PlacementSignals struct {
 	LiveJobs     *int            `json:"live_jobs,omitempty"`
 	Load1PerCore *float64        `json:"load1_per_core,omitempty"`
 	Terms        *PlacementTerms `json:"terms,omitempty"`
+	// BelowFreeFloor is the hub's verdict that the host's free fraction is
+	// under its free floor; ranking puts such a host after every host that is
+	// not (host_fit.go, floorOrder). It rides the hub's placement answer, not
+	// the hk record: hk has no such field and decodes a record with unknown
+	// fields rejected.
+	BelowFreeFloor bool `json:"below_free_floor,omitempty"`
 }
 
 // PlacementTerms are the hub's five score factors for one candidate, each 0..1.
@@ -50,7 +57,10 @@ type PlacementTerms struct {
 	Jobs float64 `json:"jobs"`
 }
 
-type placementCandidateRecord struct {
+// Free is the product of the terms: the free fraction the hub's floor compares.
+func (t PlacementTerms) Free() float64 { return t.CPU * t.Mem * t.IO * t.Load * t.Jobs }
+
+type PlacementCandidateRecord struct {
 	Host    string   `json:"host"`
 	Outcome string   `json:"outcome"`
 	Reason  string   `json:"reason"`
@@ -58,10 +68,21 @@ type placementCandidateRecord struct {
 	PlacementSignals
 }
 
-// placementExecution is emitted by the executing panewire in its OK receipt.
+// MarshalJSON writes the candidate as hk's record contract defines it: the
+// embedded signals minus the free-floor verdict, which belongs to the hub's
+// ranking answer only. hk decodes a posted record with unknown fields rejected
+// (internal/api/api.go decodeLimited), so a candidate under the floor carried
+// that verdict all the way into a refusal of the whole record.
+func (c PlacementCandidateRecord) MarshalJSON() ([]byte, error) {
+	type record PlacementCandidateRecord
+	c.BelowFreeFloor = false
+	return json.Marshal(record(c))
+}
+
+// PlacementExecution is emitted by the executing panewire in its OK receipt.
 // The initiator must not guess the model from its own catalog: admission on
 // the destination can resolve a different launch rung.
-type placementExecution struct {
+type PlacementExecution struct {
 	Kind       string `json:"-"`
 	Host       string `json:"chosen_host,omitempty"`
 	Family     string `json:"family,omitempty"`
@@ -74,7 +95,7 @@ type placementExecution struct {
 	AccountKey string `json:"account_key,omitempty"`
 }
 
-type placementRecord struct {
+type PlacementRecord struct {
 	JobID       string                     `json:"job_id"`
 	Attempt     int                        `json:"attempt"`
 	TaskID      int64                      `json:"task_id,omitempty"`
@@ -85,37 +106,109 @@ type placementRecord struct {
 	StateSource string                     `json:"state_source"`
 	Outcome     string                     `json:"outcome"`
 	Reason      string                     `json:"reason"`
-	Candidates  []placementCandidateRecord `json:"candidates"`
-	placementExecution
+	Candidates  []PlacementCandidateRecord `json:"candidates"`
+	PlacementExecution
+}
+
+// LookupPlacementRecord reads an attempt by its existing hk key. A full page
+// cannot prove absence: hk's list endpoint has no pagination cursor.
+func (a *App) LookupPlacementRecord(ctx context.Context, job string, attempt int) (*PlacementRecord, error) {
+	client, err := a.quotaClient()
+	if err != nil {
+		return nil, err
+	}
+	const limit = 1000
+	type lookupRecord struct {
+		PlacementRecord
+		ToolVersion *string `json:"tool_version"`
+	}
+	var response struct {
+		Placements *[]lookupRecord `json:"placements"`
+	}
+	// hk's default omits records older than its retention window even when a
+	// backlog has not purged them yet. Absence needs the whole retained log.
+	query := url.Values{"job": {job}, "limit": {strconv.Itoa(limit)}, "since": {"0001-01-01T00:00:00Z"}}
+	path := "/v1/placements?" + query.Encode()
+	if err := client.get(ctx, path, &response); err != nil {
+		return nil, err
+	}
+	if response.Placements == nil {
+		return nil, errors.New("handoffkeep placement list is missing")
+	}
+	var found *PlacementRecord
+	for _, row := range *response.Placements {
+		if row.ToolVersion == nil {
+			return nil, errors.New("handoffkeep placement version is missing")
+		}
+		record := row.PlacementRecord
+		record.ToolVersion = *row.ToolVersion
+		if record.JobID == "" || record.Attempt < 1 {
+			return nil, errors.New("handoffkeep placement key is invalid")
+		}
+		if record.JobID != job || record.Attempt != attempt {
+			continue
+		}
+		if found != nil {
+			return nil, errors.New("handoffkeep placement key is ambiguous")
+		}
+		copy := record
+		found = &copy
+	}
+	if found == nil && len(*response.Placements) >= limit {
+		return nil, errors.New("handoffkeep placement list is incomplete")
+	}
+	return found, nil
 }
 
 type placementDecision struct {
 	plan          *placePlan
-	execution     placementExecution
+	execution     PlacementExecution
 	contactedHost string
 	started       bool
 	placed        bool
 	recorded      bool
+	// undecided marks a stop whose outcome the node may still change (a lost
+	// or pending hub answer): the outbox leaves the verdict to the attempt's
+	// terminal result instead of freezing this error.
+	undecided bool
 }
 
 // pendingPlacement is local-only. Old executors may return an OK receipt
 // without execution metadata; resolve their shared job record before posting
 // the immutable payload, including when hk is temporarily unavailable.
 type pendingPlacement struct {
-	Record     placementRecord `json:"record"`
+	Record     PlacementRecord `json:"record"`
 	ResolveJob bool            `json:"resolve_job,omitempty"`
 }
 
-func placementRole(s Spawn) string {
-	role := firstNonempty(s.RoutingRole, builtinRoleMap[s.Role])
+// PlacementWorkClass maps a spawn role, and the routing role that may refine
+// it, to the work class hk's placement record carries: review, consult or
+// worker. hk accepts no other value (internal/store/placements.go,
+// checkPlacement), so every producer of a record maps through here — the
+// node's own spool and the hub's outbox, which builds its record from the
+// node's outcome and so sees the spawn role. A work class maps to itself: the
+// hub's trace already holds one, and a replay remaps a stored record.
+func PlacementWorkClass(role, routingRole string) string {
+	routed := firstNonempty(routingRole, role)
 	switch {
-	case s.Role == "reviewer" || role == "reviewer" || role == "judge":
+	case reviewWork(role) || reviewWork(routed):
 		return "review"
-	case role == "consult":
+	case routed == "consult":
 		return "consult"
 	default:
 		return "worker"
 	}
+}
+
+// reviewWork reports whether role names review work: the spawn role
+// (reviewer), the routing role that refines it (judge), or the work class
+// itself (review).
+func reviewWork(role string) bool {
+	return role == "reviewer" || role == "review" || role == "judge"
+}
+
+func placementRole(s Spawn) string {
+	return PlacementWorkClass(s.Role, s.RoutingRole)
 }
 
 func placementAccount(key string) string {
@@ -132,7 +225,7 @@ func placementAccount(key string) string {
 	return fmt.Sprintf("account:%x", sum[:8])
 }
 
-func (e placementExecution) receipt() string {
+func (e PlacementExecution) receipt() string {
 	e.AccountKey = placementAccount(e.AccountKey)
 	b, _ := json.Marshal(e)
 	return base64.RawURLEncoding.EncodeToString(b)
@@ -149,12 +242,12 @@ func (d *placementDecision) remoteReceipt(host, out string) {
 		}
 		if !failed {
 			d.started, d.placed = true, true
-			d.execution = placementExecution{Host: host}
+			d.execution = PlacementExecution{Host: host}
 		}
 		for _, word := range strings.Fields(line) {
 			if raw, ok := strings.CutPrefix(word, "placement="); ok {
 				b, err := base64.RawURLEncoding.DecodeString(raw)
-				var e placementExecution
+				var e PlacementExecution
 				if err == nil && json.Unmarshal(b, &e) == nil && e.Host == host && e.Family != "" && (failed || e.PaneID != "") {
 					e.AccountKey = placementAccount(e.AccountKey)
 					d.started = true
@@ -180,8 +273,8 @@ func (a *App) finishPlacement(ctx context.Context, s Spawn, err error) {
 	}
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), placementDeliveryBudget)
 	defer cancel()
-	r := placementRecord{JobID: s.Job, DecidedAt: a.Now().UTC().Format(time.RFC3339Nano), ToolVersion: BuildVersion,
-		Source: "auto", Ranking: "unknown", StateSource: "unknown", Outcome: "refused", Candidates: []placementCandidateRecord{}}
+	r := PlacementRecord{JobID: s.Job, DecidedAt: a.Now().UTC().Format(time.RFC3339Nano), ToolVersion: BuildVersion,
+		Source: "auto", Ranking: "unknown", StateSource: "unknown", Outcome: "refused", Candidates: []PlacementCandidateRecord{}}
 	r.TaskID, _ = strconv.ParseInt(s.Task, 10, 64)
 	r.Profile, r.Role, r.AccountKey = s.Profile, placementRole(s), placementAccount(s.AccountKey)
 	if seat, ok := a.Policy.Profiles[s.Profile]; ok {
@@ -216,7 +309,7 @@ func (a *App) finishPlacement(ctx context.Context, s Spawn, err error) {
 			if signals.PowerSource != "ac" && signals.PowerSource != "battery" {
 				signals.PowerSource = ""
 			}
-			r.Candidates = append(r.Candidates, placementCandidateRecord{Host: c.name, Outcome: outcome, Reason: placementSkipReason(reason), Score: c.score, PlacementSignals: signals})
+			r.Candidates = append(r.Candidates, PlacementCandidateRecord{Host: c.name, Outcome: outcome, Reason: placementSkipReason(reason), Score: c.score, PlacementSignals: signals})
 		}
 	}
 	if len(r.Candidates) == 0 && d.contactedHost != "" {
@@ -224,7 +317,7 @@ func (a *App) finishPlacement(ctx context.Context, s Spawn, err error) {
 		if d.started || d.placed {
 			outcome, reason = "chosen", "available"
 		}
-		r.Candidates = append(r.Candidates, placementCandidateRecord{Host: d.contactedHost, Outcome: outcome, Reason: reason})
+		r.Candidates = append(r.Candidates, PlacementCandidateRecord{Host: d.contactedHost, Outcome: outcome, Reason: reason})
 	}
 	stateReason := ""
 	if a.fleetLog != nil && a.fleetLog.hosts != nil {
@@ -232,7 +325,11 @@ func (a *App) finishPlacement(ctx context.Context, s Spawn, err error) {
 		stateReason = a.fleetLog.hosts.Reason
 		r.Reason = stateReason
 	}
-	if err != nil {
+	if errors.Is(err, ErrQuotaRefreshPending) {
+		// This describes the failed host attempt, not a terminal refusal of
+		// the accepted request, which remains parked for a quota refresh.
+		r.Outcome, r.Reason = "failed", "quota_refresh_pending"
+	} else if err != nil {
 		r.Reason = exitReason(exitCode(err))
 		if d.started {
 			r.Outcome = "failed"
@@ -244,7 +341,7 @@ func (a *App) finishPlacement(ctx context.Context, s Spawn, err error) {
 	}
 	if d.execution.Host != "" && (d.started || d.placed) {
 		family, pool, repo, account := r.Family, r.Pool, r.Repo, r.AccountKey
-		r.placementExecution = d.execution
+		r.PlacementExecution = d.execution
 		r.Family = firstNonempty(r.Family, family)
 		r.Pool = firstNonempty(r.Pool, pool)
 		r.Repo = firstNonempty(r.Repo, repo)
@@ -262,6 +359,23 @@ func (a *App) finishPlacement(ctx context.Context, s Spawn, err error) {
 		r.Repo = ""
 	}
 	r.AccountKey = placementAccount(r.AccountKey)
+	if a.PlacementOutbox {
+		// The hub's durable outbox owns this record: the trace carries the
+		// completed payload, which its deliverer posts unchanged when the
+		// attempt's terminal result asks for it. An undecided stop (a lost
+		// or pending hub answer) is no verdict: the node may still finish
+		// the spawn, so the terminal result names the outcome instead.
+		tr := placementTraceFromRecord(r)
+		tr.Record = &r
+		if s.placement.undecided {
+			tr.Outcome, tr.Reason = "", ""
+			tr.Record = nil
+		}
+		if a.PlacementTrace != nil {
+			a.PlacementTrace(tr)
+		}
+		return
+	}
 	p := pendingPlacement{Record: r, ResolveJob: d.placed && d.execution.Family == ""}
 	if e := a.spoolPlacement(&p); e != nil {
 		a.warn("placement record could not be spooled")
@@ -270,10 +384,186 @@ func (a *App) finishPlacement(ctx context.Context, s Spawn, err error) {
 	a.deliverPlacements(ctx)
 }
 
+// PlacementTrace is the bind-time placement snapshot the hub coordinator
+// persists keyed by request and attempt: the candidate ranking plus the
+// pool, repo, family and account the attempt chose. A terminal node result
+// combines it with the execution receipt into the immutable hk placement
+// record, so the trace must survive the App that made the decision.
+type PlacementTrace struct {
+	DecidedAt   string                     `json:"decided_at"`
+	Source      string                     `json:"source"`
+	Ranking     string                     `json:"ranking"`
+	StateSource string                     `json:"state_source"`
+	StateReason string                     `json:"state_reason,omitempty"`
+	Pool        string                     `json:"pool,omitempty"`
+	Repo        string                     `json:"repo,omitempty"`
+	Family      string                     `json:"family,omitempty"`
+	Profile     string                     `json:"profile,omitempty"`
+	Role        string                     `json:"role,omitempty"`
+	TaskID      int64                      `json:"task_id,omitempty"`
+	AccountKey  string                     `json:"account_key,omitempty"`
+	Chosen      string                     `json:"chosen,omitempty"`
+	Candidates  []PlacementCandidateRecord `json:"candidates"`
+	// Outcome and Reason are set only on the final emission, which carries
+	// the record finishPlacement already completed; the outbox posts it as
+	// built instead of re-deriving the verdict.
+	Outcome string `json:"outcome,omitempty"`
+	Reason  string `json:"reason,omitempty"`
+	// Record carries the finished record itself on the final emission: the
+	// trace's flat fields are a lossy projection (no pane/model/version), so
+	// the outbox posts this payload verbatim and never re-derives from it.
+	// An undecided stop carries no Record — its verdict waits for the
+	// attempt's terminal result.
+	Record *PlacementRecord `json:"record,omitempty"`
+}
+
+// emitPlacementTrace reports the decision's current trace to the hub
+// coordinator. chosen names the candidate about to be bound; "" is the
+// plan-ranking emission before any host is tried.
+func (a *App) emitPlacementTrace(s Spawn, chosen string) {
+	if a.PlacementTrace == nil || s.placement == nil {
+		return
+	}
+	a.PlacementTrace(a.buildPlacementTrace(s, chosen))
+}
+
+func (a *App) buildPlacementTrace(s Spawn, chosen string) PlacementTrace {
+	tr := PlacementTrace{
+		DecidedAt:   a.Now().UTC().Format(time.RFC3339Nano),
+		Source:      "auto",
+		Ranking:     "unknown",
+		StateSource: "unknown",
+		Chosen:      chosen,
+		Candidates:  []PlacementCandidateRecord{},
+	}
+	tr.TaskID, _ = strconv.ParseInt(s.Task, 10, 64)
+	tr.Profile, tr.Role, tr.AccountKey = s.Profile, placementRole(s), placementAccount(s.AccountKey)
+	if seat, ok := a.Policy.Profiles[s.Profile]; ok {
+		tr.Family = seat.Family
+	}
+	if s.Host != "auto" {
+		tr.Source, tr.Ranking = "forced", "forced"
+	}
+	d := s.placement
+	if d.plan == nil {
+		tr.Candidates = append(tr.Candidates, selectionCandidates(s.Sel, chosen)...)
+	}
+	if d.plan != nil {
+		tr.Pool, tr.Repo = d.plan.pool, d.plan.repo
+		if tr.Source == "auto" {
+			switch d.plan.ranking() {
+			case "score", "wake":
+				tr.Ranking = d.plan.ranking()
+			case "raw_load":
+				tr.Ranking = "load"
+			}
+		}
+		for _, c := range d.plan.candidates {
+			outcome, reason := "skipped", c.outcome
+			if c.name == chosen {
+				outcome, reason = "chosen", "available"
+			} else if reason == "" {
+				reason = "not_chosen"
+			}
+			signals := c.signals
+			if signals.PowerSource != "ac" && signals.PowerSource != "battery" {
+				signals.PowerSource = ""
+			}
+			tr.Candidates = append(tr.Candidates, PlacementCandidateRecord{Host: c.name, Outcome: outcome, Reason: placementSkipReason(reason), Score: c.score, PlacementSignals: signals})
+		}
+	}
+	if a.fleetLog != nil && a.fleetLog.hosts != nil {
+		tr.StateSource = a.fleetLog.hosts.Source
+		tr.StateReason = a.fleetLog.hosts.Reason
+	}
+	return tr
+}
+
+// placementTraceFromRecord flattens a completed record into the trace shape
+// so the outbox can persist and later post it unchanged.
+func placementTraceFromRecord(r PlacementRecord) PlacementTrace {
+	return PlacementTrace{
+		DecidedAt: r.DecidedAt, Source: r.Source, Ranking: r.Ranking,
+		StateSource: r.StateSource,
+		Pool:        r.Pool, Repo: r.Repo, Family: r.Family, Profile: r.Profile,
+		Role: r.Role, TaskID: r.TaskID, AccountKey: r.AccountKey,
+		Chosen: r.Host, Candidates: r.Candidates,
+		Outcome: r.Outcome, Reason: r.Reason,
+	}
+}
+
+// PlacementDelivery is what one delivery pass did with a spooled record, for
+// the caller that owns the spool and must say why a record is still pending.
+// Reason never carries a credential or a response body: it is a stable code,
+// or hk's status, error code and store-authored refusal reason.
+type PlacementDelivery struct {
+	// Delivered is true when the record's file left the spool: posted, an hk
+	// 409 for the same job and attempt, or quarantined.
+	Delivered bool
+	// Quarantined is true when hk refused the record for good and it moved to
+	// placements-rejected; Reason is hk's answer.
+	Quarantined bool
+	// Duplicate is true when hk already held the job and attempt (409).
+	Duplicate bool
+	// Reason names why an undelivered record is still spooled.
+	Reason string
+}
+
+// EnqueuePlacementRecord spools a fully built placement record under its
+// deterministic idempotency name and delivers that record, reporting what
+// became of this record's file. The hub coordinator's outbox calls it once per
+// attempt; a rewrite of the same name carries an identical payload, and hk
+// answers a reposted job+attempt with 409, which deliverPlacements treats as
+// delivered.
+func (a *App) EnqueuePlacementRecord(ctx context.Context, r PlacementRecord) (PlacementDelivery, error) {
+	// A placed record that arrived without execution metadata resolves the
+	// shared job record before its first post, as spoolPlacement does.
+	b, err := json.Marshal(pendingPlacement{Record: r, ResolveJob: r.Outcome == "placed" && r.Family == ""})
+	if err != nil {
+		return PlacementDelivery{}, err
+	}
+	dir := filepath.Join(a.stateDir(), "placements")
+	if e := noSymlinks(dir); e != nil {
+		return PlacementDelivery{}, e
+	}
+	if e := os.MkdirAll(dir, 0700); e != nil {
+		return PlacementDelivery{}, e
+	}
+	path := filepath.Join(dir, r.JobID+"."+strconv.Itoa(r.Attempt)+".json")
+	if err := atomicFile(path, b, 0600); err != nil {
+		return PlacementDelivery{}, err
+	}
+	return a.deliverOnePlacement(ctx, r.JobID, r.Attempt), nil
+}
+
+// FlushPlacementRecord retries one attempt without sending another attempt's
+// record through this App's delivery settings.
+func (a *App) FlushPlacementRecord(ctx context.Context, job string, attempt int) PlacementDelivery {
+	return a.deliverOnePlacement(ctx, job, attempt)
+}
+
+func (a *App) deliverOnePlacement(ctx context.Context, job string, attempt int) PlacementDelivery {
+	result := a.deliverPlacementFile(ctx, job+"."+strconv.Itoa(attempt)+".json")
+	result.Delivered = !a.PlacementSpooled(job, attempt)
+	if !result.Delivered && result.Reason == "" {
+		result.Reason = "spool_entry_remains"
+	}
+	return result
+}
+
+// PlacementSpooled reports whether a record file still waits in the spool:
+// false means it was delivered or quarantined, so its snapshot can be sealed.
+// Only a confirmed absence proves that — a permission or I/O error leaves
+// the record pending so a later flush retries it.
+func (a *App) PlacementSpooled(job string, attempt int) bool {
+	_, err := os.Stat(filepath.Join(a.stateDir(), "placements", job+"."+strconv.Itoa(attempt)+".json"))
+	return !os.IsNotExist(err)
+}
+
 // selectionCandidates projects a selection's host trace into one candidate row
 // per host. launched says the host named chosen took the job.
-func selectionCandidates(sel map[string]any, chosen string) []placementCandidateRecord {
-	var out []placementCandidateRecord
+func selectionCandidates(sel map[string]any, chosen string) []PlacementCandidateRecord {
+	var out []PlacementCandidateRecord
 	hosts, _ := sel["hosts"].([]any)
 	at, untried := map[string]int{}, map[string]bool{}
 	for _, raw := range hosts {
@@ -290,7 +580,7 @@ func selectionCandidates(sel map[string]any, chosen string) []placementCandidate
 				continue
 			}
 		}
-		row := placementCandidateRecord{Host: name, Outcome: "skipped", Reason: placementSkipReason(str(host, "outcome"))}
+		row := PlacementCandidateRecord{Host: name, Outcome: "skipped", Reason: placementSkipReason(str(host, "outcome"))}
 		// A chosen host carries no refusal, whether or not execution started:
 		// the selection chose it, so "chosen" is never a skip reason.
 		if name == chosen {
@@ -339,7 +629,9 @@ func (a *App) placementRepo(ctx context.Context, cwd string) string {
 // linked-worktree checkout the target node can clone instead of relying on
 // its cwd_map.
 func (a *App) placementRepoCheckout(ctx context.Context, cwd string) (string, bool) {
-	if cwd == "" {
+	// A hub-submitted spec spawn has no local cwd; its Repository is the
+	// evidence the hub placed with (hk 4738).
+	if cwd == "" && a.Repository == nil {
 		return "", false
 	}
 	bounded, cancel := context.WithTimeout(ctx, placementDeliveryBudget)
@@ -386,19 +678,59 @@ func (a *App) flushPlacements() {
 	a.deliverPlacements(ctx)
 }
 
+// permanentPlacementRefusal reports whether an HTTP refusal from hk is a
+// permanent rejection of the record (invalid context, missing task,
+// unprocessable payload) rather than an outage or a credential failure.
+// Permanent refusals are quarantined so they do not block subsequent records.
+func permanentPlacementRefusal(status int) bool {
+	switch status {
+	case http.StatusBadRequest, http.StatusNotFound, http.StatusGone, http.StatusUnprocessableEntity:
+		return true
+	default:
+		return false
+	}
+}
+
 func (a *App) deliverPlacements(ctx context.Context) {
+	a.deliverPlacementFile(ctx, "")
+}
+
+// placementStallReason bounds an hk answer to one line of the stable shape
+// "hk HTTP <status> <code>: <reason>": the status and the error code and
+// store-authored refusal reason hk names, never the body or a credential.
+func placementStallReason(be *BackendError) string {
+	text := fmt.Sprintf("hk HTTP %d", be.Status)
+	if be.Code != "" {
+		text += " " + be.Code
+	}
+	if be.Reason != "" {
+		text += ": " + be.Reason
+	}
+	return text
+}
+
+// An empty name retains the regular spool-wide delivery behavior. For a named
+// entry the result says what became of it; a spool-wide pass returns only the
+// failures that stop every entry.
+func (a *App) deliverPlacementFile(ctx context.Context, only string) (result PlacementDelivery) {
 	dir := filepath.Join(a.stateDir(), "placements")
 	if noSymlinks(dir) != nil {
-		return
+		result.Reason = "spool_path_refused"
+		return result
 	}
 	entries, e := os.ReadDir(dir)
-	if e != nil || len(entries) == 0 {
-		return
+	if e != nil {
+		result.Reason = "spool_unreadable"
+		return result
+	}
+	if len(entries) == 0 {
+		return result
 	}
 	c, e := a.quotaClient()
 	if e != nil {
 		a.warn("placement delivery unavailable; records remain spooled")
-		return
+		result.Reason = "hk_credential_unavailable: " + backendReason(e.Error())
+		return result
 	}
 	cursorPath := filepath.Join(a.stateDir(), "placement-cursor")
 	cursor, _ := os.ReadFile(cursorPath)
@@ -416,6 +748,7 @@ func (a *App) deliverPlacements(ctx context.Context) {
 		}
 	}()
 	attempted := 0
+	reached := only == ""
 	for offset := 0; offset < len(entries); offset++ {
 		if attempted >= 32 || ctx.Err() != nil {
 			break
@@ -424,6 +757,10 @@ func (a *App) deliverPlacements(ctx context.Context) {
 		if ent.Type()&os.ModeSymlink != 0 || ent.IsDir() || !strings.HasSuffix(ent.Name(), ".json") {
 			continue
 		}
+		if only != "" && ent.Name() != only {
+			continue
+		}
+		reached = true
 		attempted++
 		previous := lastAttempted
 		lastAttempted = ent.Name()
@@ -432,16 +769,19 @@ func (a *App) deliverPlacements(ctx context.Context) {
 		var p pendingPlacement
 		if e != nil || json.Unmarshal(b, &p) != nil {
 			a.warn("unreadable placement spool entry")
+			result.Reason = "spool_entry_unreadable"
 			continue
 		}
 		if p.ResolveJob {
 			store, err := a.jobStore()
 			if err != nil {
+				result.Reason = "job_store_unavailable"
 				break
 			}
 			job, err := store.Get(ctx, p.Record.JobID)
 			if err != nil || str(job, "family") == "" || str(job, "pane_id") == "" {
 				a.warn("placement execution metadata unavailable; record remains spooled")
+				result.Reason = "job_metadata_unavailable"
 				continue
 			}
 			r := &p.Record
@@ -451,13 +791,14 @@ func (a *App) deliverPlacements(ctx context.Context) {
 			// Freeze the resolved payload before its first POST, so an
 			// ambiguous HTTP result always retries identical metadata.
 			if atomicFile(path, b, 0600) != nil {
+				result.Reason = "spool_entry_unwritable"
 				continue
 			}
 		}
 		e = c.request(ctx, http.MethodPost, "/v1/placements", p.Record, nil)
 		var be *BackendError
 		conflict := errors.As(e, &be) && be.Status == http.StatusConflict
-		if errors.As(e, &be) && (be.Status == http.StatusBadRequest || be.Status == http.StatusUnprocessableEntity) {
+		if errors.As(e, &be) && permanentPlacementRefusal(be.Status) {
 			rejectedDir := filepath.Join(a.stateDir(), "placements-rejected")
 			moveErr := noSymlinks(rejectedDir)
 			if moveErr == nil {
@@ -474,21 +815,22 @@ func (a *App) deliverPlacements(ctx context.Context) {
 				if !os.IsNotExist(moveErr) || !os.IsNotExist(sourceErr) {
 					lastAttempted = previous
 					a.warn("placement record could not be quarantined; records remain spooled")
+					result.Reason = "quarantine_failed after " + placementStallReason(be)
 					break
 				}
 			}
 			rejected = true
+			result.Quarantined, result.Reason = true, placementStallReason(be)
 			// The sidecar keeps hk's answer next to the record so the refusal
 			// can be read after the fact; a failed write only loses the note.
 			note, _ := json.Marshal(map[string]any{"status": be.Status, "error": be.Code, "reason": be.Reason})
 			if atomicFile(filepath.Join(rejectedDir, ent.Name()+".reason"), note, 0600) != nil {
 				a.warn("placement rejection reason could not be saved")
 			}
-			if be.Reason != "" {
-				a.warn("placement record %s rejected: hk HTTP %d %s: %s", ent.Name(), be.Status, be.Code, be.Reason)
-			} else {
-				a.warn("placement record %s rejected: hk HTTP %d %s", ent.Name(), be.Status, be.Code)
-			}
+			// hk's reason names the failing field (hk 197) and is already
+			// bounded by backendReason; placementStallReason omits it when hk
+			// sent none, as a strict-decode refusal does.
+			a.warn("placement record %s rejected: %s", ent.Name(), placementStallReason(be))
 			continue
 		}
 		if e != nil && !conflict {
@@ -496,19 +838,32 @@ func (a *App) deliverPlacements(ctx context.Context) {
 			// Name hk's answer (status and error code, never the body) so a
 			// refusal such as a token scope can be told from an outage.
 			if errors.As(e, &be) {
-				a.warn("placement delivery failed: hk HTTP %d %s; records remain spooled", be.Status, be.Code)
+				result.Reason = placementStallReason(be)
+				a.warn("placement delivery failed: %s; records remain spooled", result.Reason)
+			} else if ctx.Err() != nil {
+				a.warn("placement delivery failed: hk unreachable; records remain spooled")
+				result.Reason = "delivery_budget_exhausted"
 			} else {
 				a.warn("placement delivery failed: hk unreachable; records remain spooled")
+				result.Reason = "hk_unreachable"
 			}
 			break
 		}
 		if conflict {
 			a.warn("placement delivery HTTP 409; conflicting record dropped")
+			result.Duplicate = true
 		}
 		if e := os.Remove(path); e != nil && !os.IsNotExist(e) {
 			a.warn("placement spool entry could not be removed")
 		}
 	}
+	if only != "" && !reached && result.Reason == "" {
+		if _, statErr := os.Stat(filepath.Join(dir, only)); statErr == nil {
+			// The entry exists but the pass never got to it: the budget ran out.
+			result.Reason = "delivery_budget_exhausted"
+		}
+	}
+	return result
 }
 
 func (a *App) capRejectedPlacements() {

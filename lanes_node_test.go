@@ -175,11 +175,11 @@ func TestLanesNodeWriteParentStandbyAndAuthority(t *testing.T) {
 
 	// An authority lane on the node's own machine stays operator-managed.
 	writer := lanesNodePut(t, hub, "lane-authority", `{"machine":"machine-a","pane":"w1:p9"}`)
-	if writer.Code != http.StatusConflict || writer.Body.String() != `{"error":"authority_lane_direct_write","use":"POST /v1/control-plane/transfer"}`+"\n" {
+	if writer.Code != http.StatusConflict || writer.Body.String() != `{"error":"authority_lane_direct_write","use":"edit the lanes file on the hub host"}`+"\n" {
 		t.Fatalf("own authority lane status=%d body=%s", writer.Code, writer.Body.String())
 	}
 	writer = lanesNodeDelete(t, hub, "lane-authority")
-	if writer.Code != http.StatusConflict || writer.Body.String() != `{"error":"authority_lane_direct_write","use":"POST /v1/control-plane/transfer"}`+"\n" {
+	if writer.Code != http.StatusConflict || writer.Body.String() != `{"error":"authority_lane_direct_write","use":"edit the lanes file on the hub host"}`+"\n" {
 		t.Fatalf("own authority delete status=%d body=%s", writer.Code, writer.Body.String())
 	}
 	// A foreign or missing authority name reports only the scope refusal —
@@ -530,29 +530,20 @@ func TestLanesNodeTokenRouteTable(t *testing.T) {
 		{name: "node delete of missing lane is 403", method: http.MethodDelete, path: "/v1/lanes/rt-missing", nodeWant: []int{403}, opWant: 404},
 
 		{name: "nodes", method: http.MethodGet, path: "/v1/nodes", nodeWant: []int{401}, opWant: 200},
-		{name: "control-plane transfer", method: http.MethodPost, path: "/v1/control-plane/transfer", body: `{}`, nodeWant: []int{401}, opWant: 400},
+		{name: "control-plane transfer retired", method: http.MethodPost, path: "/v1/control-plane/transfer", body: `{}`, nodeWant: []int{404}, opWant: 404},
 		{name: "accepting override", method: http.MethodPost, path: "/v1/nodes/machine-a/accepting", body: `{"mode":"off","containment":"hk:12"}`, nodeWant: []int{401}, opWant: 200},
-		{name: "burst", method: http.MethodGet, path: "/v1/burst", nodeWant: []int{401}, opWant: 200},
-		{name: "burst request", method: http.MethodPost, path: "/v1/burst/request", body: `{}`, nodeWant: []int{401}, opWant: 400},
-		{name: "burst release", method: http.MethodPost, path: "/v1/burst/release", body: `{}`, nodeWant: []int{401}, opWant: 400},
-		{name: "burst holds", method: http.MethodGet, path: "/v1/burst/holds", nodeWant: []int{401}, opWant: 200},
 		{name: "placement", method: http.MethodGet, path: "/v1/placement", nodeWant: []int{401}, opWant: 400},
 		{name: "placement slots retired", method: http.MethodGet, path: "/v1/placement/slots", nodeWant: []int{404}, opWant: 404},
 		{name: "retired quota list", method: http.MethodGet, path: "/v1/quota", nodeWant: []int{404}, opWant: 404},
 		{name: "jobs", method: http.MethodGet, path: "/v1/jobs", nodeWant: []int{401}, opWant: 200},
 		{name: "orphaned jobs", method: http.MethodGet, path: "/v1/jobs/orphaned", nodeWant: []int{401}, opWant: 200},
-		{name: "session reap", method: http.MethodGet, path: "/v1/session-reap", nodeWant: []int{401}, opWant: 200},
 		{name: "job reassign", method: http.MethodPost, path: "/v1/jobs/reassign", body: `{}`, nodeWant: []int{401}, opWant: 409},
 		{name: "operator events websocket", method: http.MethodGet, path: "/v1/events", nodeWant: []int{401}, opWant: 426},
 		{name: "relay ingress", method: http.MethodPost, path: "/v1/relay/events", body: `{}`, nodeWant: []int{401}, opWant: 400},
-		{name: "relay held", method: http.MethodGet, path: "/v1/relay/held", nodeWant: []int{401}, opWant: 200},
-		{name: "relay held edit", method: http.MethodPatch, path: "/v1/relay/events/1", body: `{}`, nodeWant: []int{401}, opWant: 400},
-		{name: "relay held delete", method: http.MethodDelete, path: "/v1/relay/events/1", nodeWant: []int{401}, opWant: 409},
 		{name: "spawn", method: http.MethodPost, path: "/v1/spawn", body: `{}`, nodeWant: []int{401}, opWant: 400},
 		{name: "spawn status", method: http.MethodGet, path: "/v1/spawn/12345678-1234-4123-8123-123456789abc", nodeWant: []int{401}, opWant: 404},
 		{name: "retired per-machine quota get", method: http.MethodGet, path: "/v1/quota/machine-a", nodeWant: []int{404}, opWant: 404},
 		{name: "retired per-machine quota request", method: http.MethodPost, path: "/v1/quota/machine-a", body: `{}`, nodeWant: []int{404}, opWant: 404},
-		{name: "chat question upsert", method: http.MethodPost, path: "/v1/chat/questions", body: `{}`, nodeWant: []int{401}, opWant: 503},
 
 		{name: "quota v2 bindings retired", method: http.MethodGet, path: "/v2/quota/bindings", nodeWant: []int{404}, opWant: 404},
 		{name: "quota v2 binding put retired", method: http.MethodPut, path: "/v2/quota/bindings", body: `{}`, nodeWant: []int{404}, opWant: 404},
@@ -564,12 +555,6 @@ func TestLanesNodeTokenRouteTable(t *testing.T) {
 		// bearer or Cloudflare Access), never by a node credential.
 		{name: "ui page", method: http.MethodGet, path: "/ui", nodeWant: []int{404}, opWant: 404},
 		{name: "ui data", method: http.MethodGet, path: "/ui/data.json", nodeWant: []int{404}, opWant: 404},
-		{name: "chat page", method: http.MethodGet, path: "/chat", nodeWant: []int{404}, opWant: 200},
-		{name: "chat data", method: http.MethodGet, path: "/chat/data", nodeWant: []int{404}, opWant: 503},
-		{name: "chat message create", method: http.MethodPost, path: "/chat/messages", body: `{}`, nodeWant: []int{404}, opWant: 503},
-		{name: "chat message retry", method: http.MethodPost, path: "/chat/messages/1/retry", body: `{}`, nodeWant: []int{404}, opWant: 503},
-		{name: "chat message cancel", method: http.MethodPost, path: "/chat/messages/1/cancel", body: `{}`, nodeWant: []int{404}, opWant: 503},
-		{name: "chat question transition", method: http.MethodPost, path: "/chat/questions/q-1/transition", body: `{}`, nodeWant: []int{404}, opWant: 503},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			node := lanesNodeRequest(t, hub, test.method, test.path, lanesNodeAToken, "machine-a", test.body)

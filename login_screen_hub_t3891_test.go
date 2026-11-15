@@ -9,7 +9,9 @@ import (
 	"github.com/mgh3326/panewire/internal/fleet"
 )
 
-func TestLoginScreenAuthUnavailableMovesToNextHostT3891(t *testing.T) {
+// The login screen is seen after the node's hk job claim, so an alternate
+// harness can run only on that host (hk 4614); the desk still gets its notice.
+func TestLoginScreenAuthUnavailablePinsTheHostT3891(t *testing.T) {
 	nodeResult, _, _ := t3891RunHubSpawn(t, "agy-flash38-medium", true, t3891AgyLoginScreen)
 	h, _, destination := spawnNotifyHubLane(t, "", "operator-desk")
 	server := httptest.NewServer(h.Handler())
@@ -27,7 +29,7 @@ func TestLoginScreenAuthUnavailableMovesToNextHostT3891(t *testing.T) {
 	}
 	first := make(chan answer, 1)
 	go func() {
-		reply, err := transport.Spawn(boundedContext(t), firstRunNodeRequest(request, 941, "agy-flash38-medium"))
+		reply, err := dispatchPlacedSpawn(boundedContext(t), transport, firstRunNodeRequest(request, 941, "agy-flash38-medium"))
 		first <- answer{reply, err}
 	}()
 	sent := t14ReadNodeSpawn(t, node)
@@ -35,16 +37,20 @@ func TestLoginScreenAuthUnavailableMovesToNextHostT3891(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := <-first
-	if got.err != nil || !got.reply.NextHost || got.reply.RC != t3891AuthUnavailableRC {
-		t.Fatalf("placement was not handed the refusal: %+v", got)
+	if got.err != nil || got.reply.NextHost || got.reply.RC != t3891AuthUnavailableRC {
+		t.Fatalf("a login screen after the hk claim moved to another host: %+v", got)
 	}
 	reason := spawnResultReason(nodeResult)
 	if !spawnRefusalTriesNextHost(reason) {
-		t.Fatalf("reason %q would pin replay to the refusing host", reason)
+		t.Fatalf("reason %q is not a first-run refusal", reason)
 	}
 	saved, err := h.inbox.store.spawnTask(t.Context(), request.RequestID)
-	if err != nil || saved.Status != "accepted" || saved.Node != nil {
-		t.Fatalf("refusal ended the operation: %+v %v", saved, err)
+	if err != nil || saved.Status != "accepted" || saved.Node != nil || !spawnReplayPinsHost(saved.Outcome) {
+		t.Fatalf("refusal did not pin the retry to its claimed host: status=%s host=%s err=%v", saved.Status, spawnTaskHost(saved), err)
+	}
+	foreign := boundaryTestNode(saved, 942, "machine-b")
+	if _, err := h.inbox.store.bindSpawn(t.Context(), request.RequestID, saved.Attempt, foreign, time.Now()); err == nil {
+		t.Fatal("retry was allowed to bind to a different host")
 	}
 	var notices []string
 	eventually(t, 5*time.Second, "agy login notice", func() bool {

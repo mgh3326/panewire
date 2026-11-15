@@ -5,6 +5,7 @@ import (
 	"context"
 	"log/slog"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -24,12 +25,17 @@ func TestCheckoutRefusalMovesToNextHost(t *testing.T) {
 		{"dirty without verified cleanup", "dirty", false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			h := asyncSpawnHub(t)
+			h, err := NewHubServer(HubServerConfig{Tokens: map[string]string{"operator": t14OperatorToken, "machine-a": "node-token", "machine-b": "node-token"}, InboxStorePath: filepath.Join(t.TempDir(), "inbox.sqlite3")})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = h.Close() })
 			var logs bytes.Buffer
 			h.logger = slog.New(slog.NewTextHandler(&logs, nil))
 			server := httptest.NewServer(h.Handler())
 			defer server.Close()
 			node := t14Node(t, h, server, true)
+			other := t14NamedNode(t, h, server, "machine-b", true, true)
 			request := autoSpawnRequest()
 			task, _, err := h.inbox.store.claimSpawn(context.Background(), request, "test-job", "parent", h.now().UTC())
 			if err != nil {
@@ -42,7 +48,7 @@ func TestCheckoutRefusalMovesToNextHost(t *testing.T) {
 			}
 			first := make(chan answer, 1)
 			go func() {
-				reply, err := transport.Spawn(boundedContext(t), refusalNodeRequest(request, 940, "machine-a"))
+				reply, err := dispatchPlacedSpawn(boundedContext(t), transport, refusalNodeRequest(request, 940, "machine-a"))
 				first <- answer{reply, err}
 			}()
 			sent := t14ReadNodeSpawn(t, node)
@@ -90,14 +96,14 @@ func TestCheckoutRefusalMovesToNextHost(t *testing.T) {
 
 			second := make(chan answer, 1)
 			go func() {
-				reply, err := transport.Spawn(boundedContext(t), refusalNodeRequest(request, 941, "machine-a"))
+				reply, err := dispatchPlacedSpawn(boundedContext(t), transport, refusalNodeRequest(request, 941, "machine-b"))
 				second <- answer{reply, err}
 			}()
-			sent = t14ReadNodeSpawn(t, node)
+			sent = t14ReadNodeSpawn(t, other)
 			if sent.RequestID != t14RequestID(941) {
 				t.Fatalf("second candidate did not bind under the same operation: %+v", sent)
 			}
-			if err = wsjson.Write(context.Background(), node, nodeRefusal(sent.RequestID, "checkout_refused:dirty", false)); err != nil {
+			if err = wsjson.Write(context.Background(), other, nodeRefusal(sent.RequestID, "checkout_refused:dirty", false)); err != nil {
 				t.Fatal(err)
 			}
 			<-second
@@ -166,7 +172,7 @@ func TestPinnedCheckoutRefusalStaysTerminal(t *testing.T) {
 	transport := &directSpawnTransport{h: h, task: task}
 	done := make(chan fleet.HubSpawnReply, 1)
 	go func() {
-		reply, _ := transport.Spawn(boundedContext(t), refusalNodeRequest(request, 942, "machine-a"))
+		reply, _ := dispatchPlacedSpawn(boundedContext(t), transport, refusalNodeRequest(request, 942, "machine-a"))
 		done <- reply
 	}()
 	sent := t14ReadNodeSpawn(t, node)

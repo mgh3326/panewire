@@ -369,24 +369,6 @@
   ]
  },
  {
-  "name": "escalate_captain_role",
-  "host_dependent": false,
-  "handoffkeep": "absent",
-  "socket": "ok",
-  "files": {
-   "inbox/jobs/jc/events/00001-job.claim.json": "{\"created_at\": \"2026-09-21T00:00:00+00:00\", \"job_id\": \"jc\", \"kind\": \"job.claim\", \"payload\": {\"agent_label\": \"jb-label\", \"owner_lane\": \"builder-lane\", \"parent_lane\": \"parent-lane\", \"role\": \"captain\", \"t_level\": \"T2\"}, \"seq\": 1}\n",
-   "inbox/jobs/jc/events/00002-job.spawned.json": "{\"created_at\": \"2026-09-21T00:00:01+00:00\", \"job_id\": \"jc\", \"kind\": \"job.spawned\", \"payload\": {\"label\": \"jc\", \"owner_lane\": \"x\", \"pane_id\": \"w4:p2\"}, \"seq\": 2}\n"
-  },
-  "steps": [
-   [
-    "escalate",
-    "jc",
-    "--question",
-    "legacy captain asks"
-   ]
-  ]
- },
- {
   "name": "escalate_two_questions",
   "host_dependent": false,
   "handoffkeep": "absent",
@@ -451,29 +433,6 @@
     "https://example.invalid/pr/2",
     "--head",
     "cafef00d",
-    "--report",
-    "@ROOT@/reports/report.md"
-   ]
-  ]
- },
- {
-  "name": "joined_captain_emit_rejected",
-  "host_dependent": false,
-  "handoffkeep": "absent",
-  "socket": "reject",
-  "files": {
-   "inbox/jobs/jc/events/00001-job.claim.json": "{\"created_at\": \"2026-09-21T00:00:00+00:00\", \"job_id\": \"jc\", \"kind\": \"job.claim\", \"payload\": {\"agent_label\": \"jb-label\", \"owner_lane\": \"builder-lane\", \"parent_lane\": \"parent-lane\", \"role\": \"captain\", \"t_level\": \"T2\"}, \"seq\": 1}\n",
-   "inbox/jobs/jc/events/00002-job.spawned.json": "{\"created_at\": \"2026-09-21T00:00:01+00:00\", \"job_id\": \"jc\", \"kind\": \"job.spawned\", \"payload\": {\"label\": \"jc\", \"owner_lane\": \"x\", \"pane_id\": \"w4:p2\"}, \"seq\": 2}\n",
-   "reports/report.md": "captain joined\n"
-  },
-  "steps": [
-   [
-    "joined",
-    "jc",
-    "--pr",
-    "https://example.invalid/pr/3",
-    "--head",
-    "abc123",
     "--report",
     "@ROOT@/reports/report.md"
    ]

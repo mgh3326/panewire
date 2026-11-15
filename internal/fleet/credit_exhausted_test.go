@@ -52,7 +52,7 @@ func TestOmpCreditRejectionStopsJobButQuotedAnswerDoesNot(t *testing.T) {
 			if err := os.WriteFile(path, []byte(content), 0600); err != nil {
 				t.Fatal(err)
 			}
-			job := Job{Pane: "p", SpawnRole: "worker", Receipt: map[string]any{"pool": "anthropic-api", "cwd": "/tmp/project", "harness_session": map[string]any{"kind": "omp", "id": path}}}
+			job := Job{Pane: "p", SpawnRole: "implementer", Receipt: map[string]any{"pool": "anthropic-api", "cwd": "/tmp/project", "harness_session": map[string]any{"kind": "omp", "id": path}}}
 			stop, ok := a.quotaStopped(context.Background(), job, Agent{Status: "idle"}, &quotaStopWatch{})
 			if ok != tc.want || ok && stop.Pool != "anthropic-api" {
 				t.Fatalf("stop = %+v, %t; want pool anthropic-api, %t", stop, ok, tc.want)
@@ -72,7 +72,7 @@ func TestCreditRejectionPublishesBeforeQuotaStop(t *testing.T) {
 		hk.ServeHTTP(w, r)
 	}))
 	defer srv.Close()
-	a, _, jobs, report := quotaStopFixture(t, "worker", "idle", "")
+	a, _, jobs, report := quotaStopFixture(t, "implementer", "idle", "")
 	if err := os.WriteFile(report, []byte("partial report"), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -89,7 +89,7 @@ func TestCreditRejectionPublishesBeforeQuotaStop(t *testing.T) {
 	if err := os.WriteFile(path, []byte(message), 0600); err != nil {
 		t.Fatal(err)
 	}
-	putEvent(t, a, "j", "job.spawned", map[string]any{"pane_id": "w:p1", "role": "worker", "pool": "anthropic-api", "cwd": "/tmp/project", "harness_session": map[string]any{"kind": "omp", "id": path}})
+	putEvent(t, a, "j", "job.spawned", map[string]any{"pane_id": "w:p1", "role": "implementer", "pool": "anthropic-api", "cwd": "/tmp/project", "harness_session": map[string]any{"kind": "omp", "id": path}})
 	if err := a.watch(context.Background(), []string{"j"}); err != nil {
 		t.Fatal(err)
 	}
@@ -298,19 +298,19 @@ func TestCreditPublicationFailureIsBoundedAndRearmed(t *testing.T) {
 		hk.ServeHTTP(w, r)
 	}))
 	defer srv.Close()
-	a, _, jobs, _ := quotaStopFixture(t, "worker", "idle", "")
+	a, _, jobs, _ := quotaStopFixture(t, "implementer", "idle", "")
 	t.Setenv("HANDOFFKEEP_URL", "https://hk.test.invalid")
 	t.Setenv("HANDOFFKEEP_TOKEN_SVC_PANEWIRE", "test-token")
 	a.Config.Quota = map[string]any{"url": srv.URL, "accounts": map[string]any{"anthropic-api": "0123456789abcdef"}}
-	creditWatchSession(t, a, "worker")
+	creditWatchSession(t, a, "implementer")
 	if err := a.watch(context.Background(), []string{"j"}); err != nil {
 		t.Fatal(err)
 	}
 	if attempts.Load() != 3 {
 		t.Fatalf("publication attempts = %d, want 3", attempts.Load())
 	}
-	if got := str(jobs.record(t, "j"), "end_reason"); got != "quota_stop pool=anthropic-api" {
-		t.Fatalf("end reason = %q", got)
+	if got := str(jobs.record(t, "j"), "state"); got != "spawned" {
+		t.Fatalf("job state after failed publication = %q, want spawned until closure is published", got)
 	}
 	job, err := a.job("j")
 	if err != nil {
@@ -319,6 +319,10 @@ func TestCreditPublicationFailureIsBoundedAndRearmed(t *testing.T) {
 	if _, ok := pendingCreditRejection(job); !ok {
 		t.Fatal("failed publication was not recorded for recovery")
 	}
+	stop, ok := pendingCreditRejection(job)
+	if !ok || !creditPublicationPaused(job, stop) {
+		t.Fatal("failed publication was not durably paused")
+	}
 	fail.Store(false)
 	started := 0
 	if err := a.rearmWatchers(func(id string) error { started++; return a.watch(context.Background(), []string{id, "--rearmed"}) }, func(string) {}, true); err != nil {
@@ -326,6 +330,9 @@ func TestCreditPublicationFailureIsBoundedAndRearmed(t *testing.T) {
 	}
 	if started != 1 || len(hk.manual) != 1 {
 		t.Fatalf("rearm started=%d, published=%d", started, len(hk.manual))
+	}
+	if got := str(jobs.record(t, "j"), "end_reason"); got != "quota_stop pool=anthropic-api" {
+		t.Fatalf("end reason after recovered publication = %q", got)
 	}
 	job, err = a.job("j")
 	if err != nil {
@@ -336,15 +343,325 @@ func TestCreditPublicationFailureIsBoundedAndRearmed(t *testing.T) {
 	}
 }
 
+func TestCreditPermanentPublishFailureDoesNotRearmUntilAccountIsKnown(t *testing.T) {
+	a, runner, _, _ := quotaStopFixture(t, "implementer", "idle", "")
+	creditWatchSession(t, a, "implementer")
+	if err := a.watch(context.Background(), []string{"j"}); err != nil {
+		t.Fatal(err)
+	}
+
+	starts := 0
+	for range 3 {
+		if err := a.rearmWatchers(func(string) error {
+			starts++
+			return nil
+		}, func(string) {}, true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if starts != 0 {
+		t.Fatalf("pending permanent rejection rearmed %d times without an identifiable account", starts)
+	}
+	job, err := a.job("j")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stop, ok := pendingCreditRejection(job)
+	if !ok || !creditPublicationPaused(job, stop) {
+		t.Fatal("permanent rejection did not enter durable paused state")
+	}
+	notices := 0
+	for _, call := range runner.Calls {
+		if call.Name == "panewire" && slices.Contains(call.Args, "emit") && strings.Contains(strings.Join(call.Args, " "), "CREDIT_CLOSE_PAUSED") {
+			notices++
+		}
+	}
+	if notices != 1 {
+		t.Fatalf("operator notices = %d, want one", notices)
+	}
+}
+
+func TestRecoveredCreditPublicationNeverHandsOffResumedPane(t *testing.T) {
+	hk := &hkBenchFake{}
+	var fail atomic.Bool
+	fail.Store(true)
+	var attempts atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPut && strings.HasSuffix(r.URL.Path, "/observation") {
+			attempts.Add(1)
+			if fail.Load() {
+				http.Error(w, "unavailable", 503)
+				return
+			}
+		}
+		hk.ServeHTTP(w, r)
+	}))
+	defer srv.Close()
+	a, runner, jobs, _ := quotaStopFixture(t, "implementer", "idle", "")
+	t.Setenv("HANDOFFKEEP_URL", "https://hk.test.invalid")
+	t.Setenv("HANDOFFKEEP_TOKEN_SVC_PANEWIRE", "test-token")
+	a.Config.Quota = map[string]any{"url": srv.URL, "accounts": map[string]any{"anthropic-api": "0123456789abcdef"}}
+	creditWatchSession(t, a, "implementer")
+	if err := a.watch(context.Background(), []string{"j"}); err != nil {
+		t.Fatal(err)
+	}
+	if attempts.Load() != 3 {
+		t.Fatalf("initial publication attempts = %d, want 3", attempts.Load())
+	}
+	fail.Store(false)
+	original := runner.Do
+	runner.Do = func(c Command) Result {
+		if c.Name == "herdr" && strings.Join(c.Args, " ") == "agent list" {
+			return Result{Out: `{"result":{"agents":[{"pane_id":"w:p1","agent_status":"working","state_change_seq":8}]}}`}
+		}
+		return original(c)
+	}
+	started := 0
+	if err := a.rearmWatchers(func(id string) error {
+		started++
+		return a.watch(context.Background(), []string{id, "--rearmed"})
+	}, func(string) {}, true); err != nil {
+		t.Fatal(err)
+	}
+	if started != 1 || len(hk.manual) != 1 {
+		t.Fatalf("recovery started=%d, published=%d", started, len(hk.manual))
+	}
+	if slices.Contains(eventKindsOf(t, a, "j"), "job.lost") || str(jobs.record(t, "j"), "state") != "spawned" {
+		t.Fatal("recovery handed off a pane that had resumed")
+	}
+	job, err := a.job("j")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, pending := pendingCreditRejection(job); pending {
+		t.Fatal("recovered publication remained pending")
+	}
+}
+
+func TestSafeCreditStopHandoffRequiresReachableHerdrAndUnchangedPane(t *testing.T) {
+	at := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	seq := int64(7)
+	job := Job{Events: []Event{{
+		Kind: "job.credit_rejection",
+		Payload: map[string]any{
+			"pool":             "anthropic-api",
+			"at":               at.Format(time.RFC3339Nano),
+			"state_change_seq": float64(seq),
+		},
+	}}}
+	stop := quotastop.Stop{Pool: "anthropic-api", CreditExhaustedAt: at}
+	for _, tc := range []struct {
+		name           string
+		reachable      bool
+		present        bool
+		status         string
+		stateChangeSeq *int64
+		want           bool
+	}{
+		{name: "unchanged idle pane", reachable: true, present: true, status: "idle", stateChangeSeq: &seq, want: true},
+		{name: "Herdr unavailable", reachable: false, present: true, status: "idle", stateChangeSeq: &seq},
+		{name: "pane resumed", reachable: true, present: true, status: "working", stateChangeSeq: &seq},
+		{name: "pane changed", reachable: true, present: true, status: "idle", stateChangeSeq: ptr(int64(8))},
+		{name: "pane absent", reachable: true, status: "idle", stateChangeSeq: &seq},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := safeCreditStopHandoff(job, stop, Agent{Status: tc.status, StateChangeSeq: tc.stateChangeSeq}, tc.present, tc.reachable)
+			if got != tc.want {
+				t.Fatalf("safe handoff = %t, want %t", got, tc.want)
+			}
+		})
+	}
+}
+
+// A herdr that omits state_change_seq cannot prove the pane unchanged, so the
+// idle or done check stands alone when either side has no seq (hk 4505).
+func TestSafeCreditStopHandoffFallsBackToStatusWithoutStateChangeSeq(t *testing.T) {
+	at := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	seq := int64(7)
+	rejection := func(payload map[string]any) Job {
+		payload["pool"], payload["at"] = "anthropic-api", at.Format(time.RFC3339Nano)
+		return Job{Events: []Event{{Kind: "job.credit_rejection", Payload: payload}}}
+	}
+	withSeq := rejection(map[string]any{"state_change_seq": float64(seq)})
+	withoutSeq := rejection(map[string]any{})
+	stop := quotastop.Stop{Pool: "anthropic-api", CreditExhaustedAt: at}
+	for _, tc := range []struct {
+		name  string
+		job   Job
+		agent Agent
+		want  bool
+	}{
+		{name: "pane seq missing, idle", job: withSeq, agent: Agent{Status: "idle"}, want: true},
+		{name: "pane seq missing, done", job: withSeq, agent: Agent{Status: "done"}, want: true},
+		{name: "pane seq missing, working", job: withSeq, agent: Agent{Status: "working"}, want: false},
+		{name: "rejection seq missing, idle", job: withoutSeq, agent: Agent{Status: "idle", StateChangeSeq: &seq}, want: true},
+		{name: "rejection seq missing, working", job: withoutSeq, agent: Agent{Status: "working", StateChangeSeq: &seq}, want: false},
+		{name: "no rejection recorded", job: Job{}, agent: Agent{Status: "idle", StateChangeSeq: &seq}, want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := safeCreditStopHandoff(tc.job, stop, tc.agent, true, true); got != tc.want {
+				t.Fatalf("safe handoff = %t, want %t", got, tc.want)
+			}
+		})
+	}
+}
+
+// The credit-rejected idle worker of a herdr that omits state_change_seq is
+// handed off like any other: the job ends lost with the quota-stop reason
+// (grace zero), not left spawned on an exhausted account (hk 4505).
+func TestCreditHandOffWhenHerdrOmitsStateChangeSeq(t *testing.T) {
+	hk := &hkBenchFake{}
+	srv := httptest.NewServer(hk)
+	defer srv.Close()
+	a, runner, jobs, _ := quotaStopFixture(t, "implementer", "idle", "")
+	t.Setenv("HANDOFFKEEP_URL", "https://hk.test.invalid")
+	t.Setenv("HANDOFFKEEP_TOKEN_SVC_PANEWIRE", "test-token")
+	a.Config.Quota = map[string]any{"url": srv.URL, "accounts": map[string]any{"anthropic-api": "0123456789abcdef"}}
+	a.QuotaHandOffGrace = 0
+	creditWatchSession(t, a, "implementer")
+	original := runner.Do
+	runner.Do = func(c Command) Result {
+		if c.Name == "herdr" && strings.Join(c.Args, " ") == "agent list" {
+			return Result{Out: `{"result":{"agents":[{"pane_id":"w:p1","agent_status":"idle"}]}}`}
+		}
+		return original(c)
+	}
+	if err := a.watch(context.Background(), []string{"j"}); err != nil {
+		t.Fatal(err)
+	}
+	rec := jobs.record(t, "j")
+	if str(rec, "state") != "lost" || !strings.HasPrefix(str(rec, "end_reason"), "quota_stop pool=anthropic-api") {
+		t.Fatalf("credit-rejected idle pane without seq: state=%v end_reason=%q, want lost quota_stop", rec["state"], rec["end_reason"])
+	}
+}
+
+// The pane resumes while the rejection is written to the shared store. The
+// hand-off decision reads the agent list after that write, not the snapshot
+// taken before it, so the resumed pane is not ended (hk 4505).
+func TestCreditRejectionDoesNotHandOffPaneResumedDuringPublish(t *testing.T) {
+	hk := &hkBenchFake{}
+	var resumed atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hk.ServeHTTP(w, r)
+		if r.Method == http.MethodPut && strings.HasSuffix(r.URL.Path, "/observation") {
+			resumed.Store(true)
+		}
+	}))
+	defer srv.Close()
+	a, runner, jobs, _ := quotaStopFixture(t, "implementer", "idle", "")
+	t.Setenv("HANDOFFKEEP_URL", "https://hk.test.invalid")
+	t.Setenv("HANDOFFKEEP_TOKEN_SVC_PANEWIRE", "test-token")
+	a.Config.Quota = map[string]any{"url": srv.URL, "accounts": map[string]any{"anthropic-api": "0123456789abcdef"}}
+	a.QuotaHandOffGrace = 0
+	creditWatchSession(t, a, "implementer")
+	original := runner.Do
+	runner.Do = func(c Command) Result {
+		if c.Name == "herdr" && strings.Join(c.Args, " ") == "agent list" {
+			if resumed.Load() {
+				return Result{Out: `{"result":{"agents":[{"pane_id":"w:p1","agent_status":"working","state_change_seq":8}]}}`}
+			}
+			return Result{Out: `{"result":{"agents":[{"pane_id":"w:p1","agent_status":"idle","state_change_seq":7}]}}`}
+		}
+		return original(c)
+	}
+	if err := a.watch(context.Background(), []string{"j"}); err != nil {
+		t.Fatal(err)
+	}
+	if !resumed.Load() {
+		t.Fatal("fixture never published the rejection")
+	}
+	if got := str(jobs.record(t, "j"), "state"); got != "spawned" {
+		t.Fatalf("job state = %q after the pane resumed during publication, want spawned", got)
+	}
+	if slices.Contains(eventKindsOf(t, a, "j"), "job.lost") {
+		t.Fatal("resumed pane was handed off on a pre-publish snapshot")
+	}
+}
+
+// herdr fails the agent list read right after the rejection is published. The
+// rejection stays pending until a pane row is read, so the idle pane is still
+// handed off once herdr answers again (hk 4505).
+func TestCreditHandOffWaitsForHerdrAfterPublication(t *testing.T) {
+	hk := &hkBenchFake{}
+	srv := httptest.NewServer(hk)
+	defer srv.Close()
+	a, runner, jobs, _ := quotaStopFixture(t, "implementer", "idle", "")
+	t.Setenv("HANDOFFKEEP_URL", "https://hk.test.invalid")
+	t.Setenv("HANDOFFKEEP_TOKEN_SVC_PANEWIRE", "test-token")
+	a.Config.Quota = map[string]any{"url": srv.URL, "accounts": map[string]any{"anthropic-api": "0123456789abcdef"}}
+	a.QuotaHandOffGrace = 0
+	creditWatchSession(t, a, "implementer")
+	original := runner.Do
+	lists := 0
+	runner.Do = func(c Command) Result {
+		if c.Name == "herdr" && strings.Join(c.Args, " ") == "agent list" {
+			lists++
+			if lists == 2 {
+				return Result{Code: 1, Err: "herdr unavailable"}
+			}
+			return Result{Out: `{"result":{"agents":[{"pane_id":"w:p1","agent_status":"idle","state_change_seq":7}]}}`}
+		}
+		return original(c)
+	}
+	if err := a.watch(context.Background(), []string{"j"}); err != nil {
+		t.Fatal(err)
+	}
+	rec := jobs.record(t, "j")
+	if str(rec, "state") != "lost" || !strings.HasPrefix(str(rec, "end_reason"), "quota_stop pool=anthropic-api") {
+		t.Fatalf("idle pane after herdr outage: state=%v end_reason=%q, want lost quota_stop", rec["state"], rec["end_reason"])
+	}
+}
+
+// The fresh row after publication omits state_change_seq. The hand-off keeps
+// the seq the rejection was read in, so a later row with a changed seq shows
+// the pane moved on: the job is reprompted, not ended at the grace (hk 4505).
+func TestCreditHandOffKeepsRejectionSeqWhenFreshRowOmitsIt(t *testing.T) {
+	hk := &hkBenchFake{}
+	srv := httptest.NewServer(hk)
+	defer srv.Close()
+	a, runner, jobs, _ := quotaStopFixture(t, "implementer", "idle", "")
+	t.Setenv("HANDOFFKEEP_URL", "https://hk.test.invalid")
+	t.Setenv("HANDOFFKEEP_TOKEN_SVC_PANEWIRE", "test-token")
+	t.Setenv("PANEWIRE_COMPLETION_TIMEOUT_S", "600")
+	a.Config.Quota = map[string]any{"url": srv.URL, "accounts": map[string]any{"anthropic-api": "0123456789abcdef"}}
+	a.QuotaHandOffGrace = 2 * time.Minute
+	creditWatchSession(t, a, "implementer")
+	original := runner.Do
+	lists := 0
+	runner.Do = func(c Command) Result {
+		if c.Name == "herdr" && strings.Join(c.Args, " ") == "agent list" {
+			lists++
+			switch lists {
+			case 1:
+				return Result{Out: `{"result":{"agents":[{"pane_id":"w:p1","agent_status":"idle","state_change_seq":7}]}}`}
+			case 2:
+				return Result{Out: `{"result":{"agents":[{"pane_id":"w:p1","agent_status":"idle"}]}}`}
+			default:
+				return Result{Out: `{"result":{"agents":[{"pane_id":"w:p1","agent_status":"idle","state_change_seq":8}]}}`}
+			}
+		}
+		return original(c)
+	}
+	if err := a.watch(context.Background(), []string{"j"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := str(jobs.record(t, "j"), "state"); got == "lost" {
+		t.Fatal("pane that moved on during the grace ended lost")
+	}
+	if !slices.Contains(eventKindsOf(t, a, "j"), "job.reprompted") {
+		t.Fatal("pane that moved on during the grace was not reprompted")
+	}
+}
+
 func TestCreditCounselPublishesWithoutEndingJob(t *testing.T) {
 	hk := &hkBenchFake{}
 	srv := httptest.NewServer(hk)
 	defer srv.Close()
-	a, _, jobs, _ := quotaStopFixture(t, "counsel", "idle", "")
+	a, _, jobs, _ := quotaStopFixture(t, "consult", "idle", "")
 	t.Setenv("HANDOFFKEEP_URL", "https://hk.test.invalid")
 	t.Setenv("HANDOFFKEEP_TOKEN_SVC_PANEWIRE", "test-token")
 	a.Config.Quota = map[string]any{"url": srv.URL, "accounts": map[string]any{"anthropic-api": "0123456789abcdef"}}
-	creditWatchSession(t, a, "counsel")
+	creditWatchSession(t, a, "consult")
 	if err := a.watch(context.Background(), []string{"j"}); err != nil {
 		t.Fatal(err)
 	}
@@ -394,19 +711,21 @@ func TestCreditWatcherResumedDuringHandoff(t *testing.T) {
 	hk := &hkBenchFake{}
 	srv := httptest.NewServer(hk)
 	defer srv.Close()
-	a, runner, jobs, _ := quotaStopFixture(t, "worker", "idle", "")
+	a, runner, jobs, _ := quotaStopFixture(t, "implementer", "idle", "")
 	t.Setenv("HANDOFFKEEP_URL", "https://hk.test.invalid")
 	t.Setenv("HANDOFFKEEP_TOKEN_SVC_PANEWIRE", "test-token")
 	t.Setenv("PANEWIRE_COMPLETION_TIMEOUT_S", "600")
 	a.Config.Quota = map[string]any{"url": srv.URL, "accounts": map[string]any{"anthropic-api": "0123456789abcdef"}}
 	a.QuotaHandOffGrace = 2 * time.Minute
-	creditWatchSession(t, a, "worker")
+	creditWatchSession(t, a, "implementer")
 	original := runner.Do
 	lists := 0
 	runner.Do = func(c Command) Result {
 		if c.Name == "herdr" && strings.Join(c.Args, " ") == "agent list" {
+			// List 1 is the loop's snapshot, list 2 the read after the
+			// publication (which decides the hand-off), list 3 the resume.
 			lists++
-			if lists > 1 {
+			if lists > 2 {
 				return Result{Out: `{"result":{"agents":[{"pane_id":"w:p1","agent_status":"working","state_change_seq":8}]}}`}
 			}
 		}
@@ -447,11 +766,11 @@ func TestCreditTerminalPaneStillPublishes(t *testing.T) {
 	hk := &hkBenchFake{}
 	srv := httptest.NewServer(hk)
 	defer srv.Close()
-	a, _, _, _ := quotaStopFixture(t, "worker", "idle", "")
+	a, _, _, _ := quotaStopFixture(t, "implementer", "idle", "")
 	t.Setenv("HANDOFFKEEP_URL", "https://hk.test.invalid")
 	t.Setenv("HANDOFFKEEP_TOKEN_SVC_PANEWIRE", "test-token")
 	a.Config.Quota = map[string]any{"url": srv.URL, "accounts": map[string]any{"anthropic-api": "0123456789abcdef"}}
-	creditWatchSession(t, a, "worker")
+	creditWatchSession(t, a, "implementer")
 	if err := a.Sleep(context.Background(), 2*time.Second); err != nil {
 		t.Fatal(err)
 	}
@@ -471,11 +790,11 @@ func TestCreditTerminalPaneStillPublishes(t *testing.T) {
 func TestCreditCounselFailureKeepsJobLive(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { http.Error(w, "unavailable", 503) }))
 	defer srv.Close()
-	a, _, jobs, _ := quotaStopFixture(t, "counsel", "idle", "")
+	a, _, jobs, _ := quotaStopFixture(t, "consult", "idle", "")
 	t.Setenv("HANDOFFKEEP_URL", "https://hk.test.invalid")
 	t.Setenv("HANDOFFKEEP_TOKEN_SVC_PANEWIRE", "test-token")
 	a.Config.Quota = map[string]any{"url": srv.URL, "accounts": map[string]any{"anthropic-api": "0123456789abcdef"}}
-	creditWatchSession(t, a, "counsel")
+	creditWatchSession(t, a, "consult")
 	if err := a.watch(context.Background(), []string{"j"}); err != nil {
 		t.Fatal(err)
 	}
@@ -485,7 +804,7 @@ func TestCreditCounselFailureKeepsJobLive(t *testing.T) {
 }
 
 func TestCreditEscalationReleasesWhenHerdrUnavailable(t *testing.T) {
-	a, runner, _, _ := quotaStopFixture(t, "worker", "idle", "")
+	a, runner, _, _ := quotaStopFixture(t, "implementer", "idle", "")
 	putEvent(t, a, "j", "job.escalate", map[string]any{})
 	runner.Do = func(c Command) Result {
 		if c.Name == "herdr" {
@@ -505,11 +824,11 @@ func TestCreditEscalatedJobDoesNotAnnounceStop(t *testing.T) {
 	hk := &hkBenchFake{}
 	srv := httptest.NewServer(hk)
 	defer srv.Close()
-	a, _, _, _ := quotaStopFixture(t, "worker", "idle", "")
+	a, _, _, _ := quotaStopFixture(t, "implementer", "idle", "")
 	t.Setenv("HANDOFFKEEP_URL", "https://hk.test.invalid")
 	t.Setenv("HANDOFFKEEP_TOKEN_SVC_PANEWIRE", "test-token")
 	a.Config.Quota = map[string]any{"url": srv.URL, "accounts": map[string]any{"anthropic-api": "0123456789abcdef"}}
-	creditWatchSession(t, a, "worker")
+	creditWatchSession(t, a, "implementer")
 	putEvent(t, a, "j", "job.escalate", map[string]any{})
 	if err := a.watch(context.Background(), []string{"j"}); err != nil {
 		t.Fatal(err)

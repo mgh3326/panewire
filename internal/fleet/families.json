@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "counted_by": "pool",
+  "families": {
+    "claude": {"harness": "claude", "billing": "subscription", "models": ["haiku", "sonnet", "opus", "fable"], "effort_via": "flag", "efforts": ["low", "medium", "high", "xhigh", "max"], "ladder_cap": "high", "ladder_cap_by_model": {"haiku": "max", "sonnet": "max"}, "entry_effort": "medium"},
+    "codex": {"harness": "codex", "billing": "subscription", "models": ["codex-luna", "codex-terra61", "codex-sol", "codex-astra"], "effort_via": "flag", "efforts": ["low", "medium", "high", "xhigh", "max"], "ladder_cap": "max", "entry_effort": "medium"},
+    "anthropic-api": {"harness": "omp", "billing": "credit", "ends": "2026-12-02", "models": ["omp-haiku", "omp-sonnet", "omp-opus"], "effort_via": "flag", "efforts": ["low", "medium", "high", "xhigh", "max"], "ladder_cap": "high", "entry_effort": "medium"},
+    "openai-api": {"harness": "omp", "billing": "credit", "ends": "2026-11-18", "models": ["omp-luna", "omp-terra61", "omp-sol"], "effort_via": "flag", "efforts": ["low", "medium", "high", "xhigh", "max"], "ladder_cap": "max", "entry_effort": "medium"},
+    "commandcode": {"harness": "omp", "billing": "plan", "models": ["omp-dsflash41"], "experiment_models": ["omp-musespark13", "omp-mimo26pro", "omp-cc-sonnet55"], "effort_via": "flag", "efforts": ["low", "high", "max"], "ladder_cap": "max"},
+    "devin": {"harness": "devin", "billing": "subscription", "free_until": {"devin-swe2": "2026-11-30", "devin-swe2-flash": "2026-12-04T18:00:00Z"}, "models": ["devin-swe2-flash", "devin-swe2", "devin-ds41"], "effort_via": "profile_suffix", "efforts": ["medium", "high", "max"], "ladder_cap": "max", "ladder_cap_by_model": {"devin-ds41": "high"}, "entry_effort": "medium"},
+    "agy": {"harness": "agy", "billing": "subscription", "models": ["agy-flash38"], "effort_via": "profile_suffix", "efforts": ["low", "medium", "high"], "ladder_cap": "high"},
+    "clinepass": {"harness": "cc,oc", "billing": "plan", "models": ["oc-minimax-m3", "oc-qwen37-max", "cc-glm", "oc-glm"], "effort_via": "none"},
+    "kiro": {"harness": "kiro", "billing": "unknown", "models": ["kiro-cheap"], "effort_via": "none"}
+  },
+  "ladder": {
+    "trigger_reviewed_heads": 3,
+    "steps": ["same_model_next_effort", "next_model_at_entry_effort", "other_family_same_grade_once", "lead"]
+  },
+  "consult": {"grade": "asker_plus_one", "family": "other", "without_task": "S+", "design_session": "SS", "unrated": "never"}
+}

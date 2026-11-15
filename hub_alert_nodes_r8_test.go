@@ -14,15 +14,7 @@ import (
 
 func TestR8PresenceOnlyNodeSuppressesPresenceAndCheckAlerts(t *testing.T) {
 	clock := time.Date(2026, 8, 31, 5, 0, 0, 0, time.UTC)
-	capture := &r7TelegramCapture{token: "r8-presence-only-bot-token"}
-	server := httptest.NewServer(capture)
-	defer server.Close()
-	notifier, err := newHubTelegramNotifier(hubTelegramEnv{BotToken: capture.token, ChatID: "r8-presence-only-chat"}, hubNotifierDeps{
-		HTTPClient: server.Client(), BaseURL: server.URL, AllowInsecureForTests: true,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	capture := newHubAlertLog(nil)
 	hub, err := NewHubServer(HubServerConfig{
 		Tokens: map[string]string{
 			"operator": r6OperatorToken,
@@ -32,7 +24,7 @@ func TestR8PresenceOnlyNodeSuppressesPresenceAndCheckAlerts(t *testing.T) {
 		AlertNodes:  map[string]struct{}{"node-a": {}},
 		Now:         func() time.Time { return clock },
 		GracePeriod: defaultHubGracePeriod,
-		Notifier:    notifier,
+		Logger:      capture.Logger(),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -45,7 +37,7 @@ func TestR8PresenceOnlyNodeSuppressesPresenceAndCheckAlerts(t *testing.T) {
 	hub.Sweep() // first post-grace observation
 	clock = clock.Add(time.Second)
 	hub.Sweep() // second post-grace observation: a removed scope gate alerts here
-	if got := capture.Messages(); len(got) != 0 {
+	if got := capture.Texts(); len(got) != 0 {
 		t.Fatalf("presence-only disconnect notified: %v", got)
 	}
 
@@ -53,7 +45,7 @@ func TestR8PresenceOnlyNodeSuppressesPresenceAndCheckAlerts(t *testing.T) {
 	hub.connect("node-b", "r8-b", "fixture", agent, false)
 	r8Heartbeat(t, hub, "node-b", agent, HubCheckFail)
 	r8Heartbeat(t, hub, "node-b", agent, HubCheckFail)
-	if got := capture.Messages(); len(got) != 0 {
+	if got := capture.Texts(); len(got) != 0 {
 		t.Fatalf("presence-only check notified: %v", got)
 	}
 

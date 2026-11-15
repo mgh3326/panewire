@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/mgh3326/panewire/internal/fleetevent"
+	"github.com/mgh3326/panewire/internal/hubretry"
 
 	"github.com/mgh3326/panewire/internal/arbiter"
 	"github.com/mgh3326/panewire/internal/quota/shared"
@@ -29,6 +30,17 @@ type App struct {
 	ConfigPath   string
 	Policy       Policy
 	Out, Err     io.Writer
+	// hubRetries tallies the idempotent hub calls this command sent again; it
+	// is printed once when the command ends (reportHubRetries).
+	hubRetries hubretry.Stats
+
+	// planOnly marks a dry run that measures nothing: a quota refresh writes
+	// presence, lease and observation to the shared quota store. planFromHub
+	// marks a receipt the hub planned; dryRunLine labels its receipt with it.
+	// lastPlan is the placement the dry run chose.
+	planOnly, planFromHub bool
+	lastPlan              *SpawnPlan
+
 	Jobs, Home   string
 	Sleep        func(context.Context, time.Duration) error
 	Now          func() time.Time
@@ -40,19 +52,50 @@ type App struct {
 	warned         map[string]bool
 	ompModelNames  map[string]string // omp's footer names, read once per spawn
 	PlacementHosts func(context.Context, string) ([]HostView, error)
+	// PlacementTry is called with the host the moment placement decides to
+	// try it for a spawn, before any gate or upload that takes time, so the
+	// owner of the host view can count the job at once. A later call for the
+	// same spawn names the next candidate. Nil does nothing.
+	PlacementTry func(host string)
+	// PlacementGate admits one placement decision at a time: it returns when
+	// this decision may read the host view, and its release is called once the
+	// decision has told PlacementTry its host (or ended). Nil does not gate.
+	PlacementGate func(context.Context) (release func(), err error)
+	// ScheduleQuotaRefresh is set by the hub coordinator. It queues a node
+	// measurement without waiting; ordinary CLI spawns keep their synchronous
+	// refresh path.
+	ScheduleQuotaRefresh func(machine, pool string, timeout time.Duration)
+	// PlacementTrace is set by the hub coordinator. It receives the
+	// placement decision's candidate trace as each plan is ranked and again
+	// before each candidate's hub bind, so the hub can persist the latest
+	// snapshot keyed by request and attempt for its durable placement-record
+	// outbox. Nil does nothing.
+	PlacementTrace func(PlacementTrace)
+	// PlacementOutbox moves hk placement-record delivery to the caller's
+	// durable outbox: finishPlacement emits the completed record through
+	// PlacementTrace instead of spooling to this host's placement spool. The
+	// hub coordinator sets it for queue-core spawns, whose record is produced
+	// from the persisted snapshot when the attempt reaches a terminal result.
+	PlacementOutbox bool
+	// Parks reports a refusal the hub parks instead of ending the request
+	// (hk 4661): it is not terminal, so no refusal event is emitted for it.
+	Parks func(error) bool
 	// SharedLatest reads one account's latest stored quota reading for the
 	// admission gate; nil reads handoffkeep (admission_native.go).
 	SharedLatest func(context.Context, string) (shared.Latest, error)
 	// BenchCatalog reads the bench catalog for the admission gate; nil reads
 	// handoffkeep through catalog.go.
 	BenchCatalog func(context.Context) ([]CatalogRow, error)
-	Source       PlacementSource
-	Wake         Waker
-	LoadRatio    func(context.Context) (float64, error)
-	JobStore     JobStore
+	// modelFamilies substitutes the HK policy reader in tests.
+	modelFamilies func(context.Context) (ModelFamiliesPolicy, error)
+	Source        PlacementSource
+	Wake          Waker
+	LoadRatio     func(context.Context) (float64, error)
+	JobStore      JobStore
 	// TaskState reads one hk task; nil builds it from [quota] / the
 	// handoffkeep env on first use (TaskStatus).
-	TaskState TaskStateReader
+	TaskState    TaskStateReader
+	LadderRebind func(context.Context, string, string, string, string) error
 	// PR lists the PRs hk links to one task; nil builds it the same way on
 	// first use (PRs). Reap reads it to keep a completed author's pane.
 	PR PRReader
@@ -71,6 +114,9 @@ type App struct {
 	// event carries it so Loki joins the decision to the spawn and its Sentry
 	// event. Empty outside a hub spawn.
 	RequestID string
+	// OriginMachine is the machine that submitted this hub spawn. Empty
+	// outside a hub spawn.
+	OriginMachine string
 	// EventSink receives fleet events instead of the state directory's file;
 	// tests only.
 	EventSink func(fleetevent.Event)
@@ -83,12 +129,21 @@ type App struct {
 	// SentryWarning sends one warning-level Sentry event. Tests substitute it;
 	// nil uses SENTRY_DSN_PANEWIRE (sentry_warning.go).
 	SentryWarning func(fingerprint []string, message string, tags map[string]string)
-	// LiveSpawnProfiles counts live hub spawns by placed profile for the
+	// LiveSpawnProfiles counts live spawns by placed profile for the
 	// [quota].pool_max_concurrent cap, leaving out the hub request named by
-	// its second argument (the spawn being placed). The hub's own App reads
-	// its operations; nil reads GET /v1/spawns/live with the [hub] operator
-	// credential.
+	// its second argument (the spawn being placed). It covers every spawn
+	// placed on a node, the hub's and a direct `panewire spawn` alike. The
+	// hub's own App reads its operations and its nodes' reported jobs; nil
+	// reads GET /v1/spawns/live with the [hub] operator credential.
 	LiveSpawnProfiles func(context.Context, string) (map[string]int, error)
+	// LivePlacedByAccount counts live hub spawns' placed profiles by account
+	// key, leaving out the hub request named by its second argument. Selection
+	// folds the profiles through the seat canon to find the account's live
+	// free-band launches (the SWE-2 free rungs, seat aliases included), so a
+	// burst of submissions does not trip the free limit (hk 4765). The hub's
+	// own App reads its operations; nil skips the check (a node-local
+	// selection has no fleet-wide launch record).
+	LivePlacedByAccount func(context.Context, string) (map[string]map[string]int, error)
 	// State reads the hub's fleet state snapshot; nil reads GET /v1/state
 	// with the [hub] operator credential. fleetLog records the sources used.
 	DecisionReply func(context.Context, string, string, time.Time) (bool, error)
@@ -98,8 +153,6 @@ type App struct {
 	QuotaHandOffGrace time.Duration
 	State             FleetStateReader
 	fleetLog          *fleetStateLog
-	// spawnFn replaces Spawn where delegate starts its pane; tests only.
-	spawnFn func(context.Context, *App, Spawn) error
 	// Version is the build line `panewire --version` prints, compared with the
 	// remote hosts' by the preflight.
 	Version string
@@ -133,6 +186,7 @@ func New(out, errout io.Writer) (*App, error) {
 		return nil, e
 	}
 	warnRetiredQuotaKeys(c, errout)
+	warnIgnoredHostsTables(c, path, errout)
 	p, e := LoadPolicy(os.Getenv("PANEWIRE_POLICY"))
 	if e != nil {
 		return nil, e
@@ -151,11 +205,10 @@ func New(out, errout io.Writer) (*App, error) {
 	if os.Getenv("PANEWIRE_QUOTA_BIN") != "" {
 		fmt.Fprintln(errout, "panewire: 경고: PANEWIRE_QUOTA_BIN 설정은 폐기되어 무시됩니다")
 	}
-	cliQuota := CLIQuota{Runner: a.Runner, CreditTotalUSD: creditTotals(c.Quota), Accounts: quotaAccounts(c.Quota)}
+	cliQuota := CLIQuota{Runner: a.Runner, Now: a.Now, CreditTotalUSD: creditTotals(c.Quota), Accounts: quotaAccounts(c.Quota)}
 	cliQuota.SharedLatest = a.sharedLatest
 	a.Quota = admissionQuota{cliQuota, a}
 	a.Source = stateSource{a: a, inner: fleetSource{a}}
-	a.Wake = cliWaker{a}
 	a.LoadRatio = a.loadRatio
 	a.Version = BuildVersion
 	a.EnforceTrust = true
@@ -261,7 +314,7 @@ func validID(s string) bool { return idPattern.MatchString(s) && s != "." && s !
 func (a *App) Run(ctx context.Context, args []string) error {
 	a.flushPlacements()
 	if len(args) == 0 || args[0] == "help" || args[0] == "--help" || args[0] == "-h" {
-		fmt.Fprintln(a.Out, "Usage: panewire <spawn|delegate|done|escalate|restore|reap|prune|lanes-missing|hosts|profiles|find|name-sync|artifacts|simulate|plan|resolve|preflight> [options]")
+		fmt.Fprintln(a.Out, "Usage: panewire <spawn|done|escalate|escalate-author|restore|reap|prune|lanes-missing|hosts|profiles|find|name-sync|artifacts|simulate|plan|resolve|preflight> [options]")
 		return nil
 	}
 	if args[0] == "lead" {
@@ -270,7 +323,7 @@ func (a *App) Run(ctx context.Context, args []string) error {
 	if len(args) > 1 && (args[1] == "--help" || args[1] == "-h") {
 		return a.help(args[0])
 	}
-	if a.EnforceTrust && (args[0] == "spawn" || args[0] == "work" || args[0] == "delegate" || args[0] == "plan" || args[0] == "resolve" || args[0] == "preflight" || args[0] == "_spawn-stdin" || args[0] == "done" || args[0] == "escalate" || args[0] == "restore" || args[0] == "reap" || args[0] == "prune" || args[0] == "gc" || args[0] == "artifacts" || args[0] == "_watch") {
+	if a.EnforceTrust && (args[0] == "spawn" || args[0] == "work" || args[0] == "plan" || args[0] == "resolve" || args[0] == "preflight" || args[0] == "_spawn-stdin" || args[0] == "done" || args[0] == "escalate" || args[0] == "escalate-author" || args[0] == "restore" || args[0] == "reap" || args[0] == "prune" || args[0] == "artifacts" || args[0] == "_watch") {
 		if e := a.trust(); e != nil {
 			return e
 		}
@@ -282,7 +335,7 @@ func (a *App) Run(ctx context.Context, args []string) error {
 			return e
 		}
 		if s.DryRun {
-			return a.Spawn(ctx, s)
+			return a.previewSpawn(ctx, s)
 		}
 		return a.SubmitSpawn(ctx, s)
 	case "spawn":
@@ -291,15 +344,15 @@ func (a *App) Run(ctx context.Context, args []string) error {
 			return e
 		}
 		if s.DryRun {
-			return a.Spawn(ctx, s)
+			return a.previewSpawn(ctx, s)
 		}
 		return a.SubmitSpawn(ctx, s)
 	case "done", "escalate", "restore":
 		return a.lifecycle(ctx, args[0], args[1:])
+	case "escalate-author":
+		return a.escalateAuthorCmd(ctx, args[1:])
 	case "reap", "prune":
 		return a.hygiene(ctx, args[0], args[1:])
-	case "gc":
-		return a.gc(ctx, args[1:])
 	case "hosts", "profiles", "find", "name-sync", "lanes-missing":
 		return a.diagnostics(ctx, args[0], args[1:])
 	case "artifacts":
@@ -310,8 +363,6 @@ func (a *App) Run(ctx context.Context, args []string) error {
 		return a.planCmd(ctx, args[1:])
 	case "resolve":
 		return a.resolveCmd(ctx, args[1:])
-	case "delegate":
-		return a.delegate(ctx, args[1:])
 	case "preflight":
 		return a.preflightCmd(ctx, args[1:])
 	case "_artifact-inventory":
@@ -329,11 +380,13 @@ func (a *App) help(cmd string) error {
 	case "work":
 		fmt.Fprintln(a.Out, "Usage: panewire work TASK [spawn flags override task defaults]")
 	case "spawn":
-		fmt.Fprintln(a.Out, "Usage: panewire spawn -c CWD [-m PROFILE|auto] -p BRIEF|hk:doc/KEY -w WORKSPACE -l LABEL --t T0..T3 [--task ID|--parent-job JOB] [--effort E] [--role worker|tester|reviewer|counsel] [--review-pass 1..9 (reviewer only)] [--routing-role consult|implementer|explorer|verifier|reviewer|judge] [--lane L] [--parent L] [--owner L] [--job ID] [--host auto|local|NAME] [--tags a,b,c] [--exclude-host a,b] [--exclude-pool P,P] [--report PATH] [-L live|mock] [--keep] [--job-dup-ok] [--task-hk-bypass] [--allow-escalation] [--override-reason TEXT] [--containment hk:ID] [--operator-request REF] [--requested-by NAME] [--purpose PURPOSE] [--report-relative PATH] [--wait] [--wait-timeout DUR] [--dry-run] (pins require --containment hk:ID or --operator-request REF)")
+		fmt.Fprintln(a.Out, "Usage: panewire spawn (-c CWD | --checkout-origin URL --checkout-commit SHA --checkout-ref REF) [-m PROFILE|auto] -p BRIEF|hk:doc/KEY -w WORKSPACE -l LABEL --t T0..T3 [--task ID|--parent-job JOB] [--effort E] [--role implementer|reviewer|consult] [--review-pass 1..9 (reviewer only)] [--lane L] [--parent L] [--owner L] [--job ID] [--host auto|local|NAME] [--tags a,b,c] [--exclude-host a,b] [--exclude-pool P,P] [--report PATH] [-L live|mock] [--keep] [--job-dup-ok] [--task-hk-bypass] [--allow-escalation] [--override-reason TEXT] [--containment hk:ID] [--operator-request REF] [--requested-by NAME] [--purpose PURPOSE] [--report-relative PATH] [--wait] [--wait-timeout DUR] [--expires DUR] [--dry-run] (--expires: the request time limit, 1m to 24h, default 6h implementer / 1h reviewer and consult; pins require --containment hk:ID or --operator-request REF; --checkout-* names the worktree for a hub spawn instead of -c)")
 	case "done":
 		fmt.Fprintln(a.Out, "Usage: panewire done JOB [--report PATH] [--result FILE]")
 	case "escalate":
 		fmt.Fprintln(a.Out, "Usage: panewire escalate JOB --question TEXT [--report PATH]")
+	case "escalate-author":
+		fmt.Fprintln(a.Out, "Usage: panewire escalate-author --task ID --job JOB --pr owner/repo#N --round N --findings-file PATH (rc 2: intact refusal; rc 1: ended or unconfirmed; rc 124: pending)")
 	case "restore":
 		fmt.Fprintln(a.Out, "Usage: panewire restore JOB (rebind a released job to its verified existing pane)")
 	case "reap", "prune":
@@ -341,18 +394,14 @@ func (a *App) help(cmd string) error {
 		if cmd == "reap" {
 			fmt.Fprintln(a.Out, "       panewire reap --expire-job-dirs [--job ID[,ID]] [--apply] (job dir TTL; a dry run without --apply; docs/job-dir-ttl.md)")
 		}
-	case "gc":
-		fmt.Fprintln(a.Out, "Usage: panewire gc [--json] (expire path/linear_permit leases, clean quota_pool records and release leased jobs whose agent left Herdr)")
 	case "artifacts":
 		fmt.Fprintln(a.Out, "Usage: panewire artifacts move SRC --dest DEST [--source-host HOST] [--apply] | sweep [--job JOB] [--age 7d] [--policy FILE] [--apply]")
 	case "simulate":
 		fmt.Fprintln(a.Out, "Usage: panewire simulate --selection FILE [--now RFC3339] [--policy FILE] [--policy-set key=value] ... [--set pool:used=N,reset=RFC3339|+Nh[,window=D][,projected=N]] ... (rank a recorded selection input; no quota reads, no spawn)")
-	case "delegate":
-		fmt.Fprintln(a.Out, "Usage: panewire delegate --role reader|verifier|reviewer --prompt FILE [--grade G] [--cwd DIR] [--timeout D] [--headless] [--patch] [--panel 2..4] [--family F] [--workspace W] [--json] (hand one bounded reading, verifying or cross-checking task to a free or spare-quota model; the answer is the last thing printed)")
 	case "plan":
-		fmt.Fprintln(a.Out, "Usage: panewire plan [--grade G] --t T0..T3 [--role R] [--tags a,b] [--effort E] [--urgency normal|urgent] [--exclude-host a,b] [--exclude-pool P,P] [--builder-family F] [--routing-role R] [--allow-escalation] [--credit-at TIME] [--json] (live, read-only: the host and model a spawn would get now; no task, spawn or job write)")
+		fmt.Fprintln(a.Out, "Usage: panewire plan [--grade G] --t T0..T3 [--role R] [--tags a,b] [--effort E] [--urgency normal|urgent] [--exclude-host a,b] [--exclude-pool P,P] [--author-family F] [--allow-escalation] [--credit-at TIME] [--expected DURATION] [--json] (live, read-only: the host and model a spawn would get now; no task, spawn or job write; --expected 6h or 2d keys subscription pools by whether their shortest window fits the job)")
 	case "resolve":
-		fmt.Fprintln(a.Out, "Usage: panewire resolve --role consult|implementer|explorer|verifier|reviewer|judge [--grade G] [--t T0..T3] [--builder-family F] [--lane L (consult asker lane)] [--harness KIND] [--allow-escalation] [--json] (read-only: the profile and effort role routing and quota ordering pick now, for an in-session subagent; no host placement, spawn or job write; the answer is the last thing printed)")
+		fmt.Fprintln(a.Out, "Usage: panewire resolve --role consult|implementer|verifier|reviewer|judge [--grade G] [--t T0..T3] [--author-family F] [--lane L (consult asker lane)] [--harness KIND] [--allow-escalation] [--json] (read-only: the profile and effort role routing and quota ordering pick now, for an in-session subagent; no host placement, spawn or job write; the answer is the last thing printed)")
 	case "preflight":
 		fmt.Fprintln(a.Out, "Usage: panewire preflight [--host NAME] [--pool P] [--json] (read-only: per remote host, hub acceptance, shared quota observation age, quota transport setting, hub load/memory, mergewake review config and panewire/panewire version skew, each with a named reason; exit 0 when all good, 78 otherwise)")
 	default:

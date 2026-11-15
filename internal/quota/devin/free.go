@@ -1,6 +1,7 @@
 package devin
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -14,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/mgh3326/panewire/internal/configpath"
 	"github.com/mgh3326/panewire/internal/durable"
 	"github.com/mgh3326/panewire/internal/quota/shared"
 )
@@ -29,6 +31,7 @@ type limitRecord struct {
 	Rung       string `json:"rung,omitempty"`
 	Source     string `json:"source,omitempty"`
 	Unparsed   bool   `json:"unparsed,omitempty"`
+	Damaged    bool   `json:"damaged,omitempty"`
 }
 
 const limitRecordSchema = "pacelever.devin-free-limit.v1"
@@ -95,41 +98,29 @@ func ObserveFreeLimit(cfg Config, resetAt, observedAt, rung, source, accountKey 
 	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
 
 	document := map[string]json.RawMessage{}
-	records := map[string]json.RawMessage{}
-	info, statErr := os.Lstat(path)
-	if statErr != nil && !errors.Is(statErr, fs.ErrNotExist) {
-		if clear {
-			return clearCorruptLimitFile(path, accountKey)
-		}
-		return fmt.Errorf("%w: devin 쿼터 캐시를 확인할 수 없습니다", ErrFreeLimitStore)
-	}
-	if errors.Is(statErr, fs.ErrNotExist) {
-		if clear {
+	records, found, readErr := readLimitRecords(cfg)
+	if readErr != nil {
+		if clear && accountKey == "" {
+			for _, candidate := range cfg.cachePaths() {
+				if err := removeLimitFile(candidate); err != nil {
+					return err
+				}
+			}
 			return nil
 		}
-	} else {
-		if !info.Mode().IsRegular() {
-			if clear {
-				return clearCorruptLimitFile(path, accountKey)
-			}
-			return fmt.Errorf("%w: devin 쿼터 캐시는 일반 파일이어야 합니다", ErrFreeLimitStore)
+		if clear && accountKey != "" {
+			return clearCorruptLimitFile(path, accountKey)
 		}
-		if info.Mode().Perm()&0o077 != 0 && !clear {
-			return fmt.Errorf("%w: devin 쿼터 캐시는 mode 0600이어야 합니다; 복구하려면 quota observe devin-free-limit --clear를 실행하세요", ErrFreeLimitStore)
-		}
-		data, err := os.ReadFile(path)
-		if err != nil || !decodeJSONObject(data, &document) {
-			if clear {
-				return clearCorruptLimitFile(path, accountKey)
-			}
-			return fmt.Errorf("%w: devin 쿼터 캐시를 읽을 수 없습니다; 복구하려면 quota observe devin-free-limit --clear를 실행하세요", ErrFreeLimitStore)
-		}
-		if raw := document["records"]; len(raw) == 0 || json.Unmarshal(raw, &records) != nil || records == nil {
-			if clear {
-				return clearCorruptLimitFile(path, accountKey)
-			}
-			return fmt.Errorf("%w: devin 쿼터 캐시 records가 올바르지 않습니다; 복구하려면 quota observe devin-free-limit --clear를 실행하세요", ErrFreeLimitStore)
-		}
+		return fmt.Errorf("%w: devin 쿼터 캐시를 읽을 수 없습니다; 복구하려면 quota observe devin-free-limit --clear를 실행하세요", ErrFreeLimitStore)
+	}
+	if clear && !found {
+		return nil
+	}
+	if data, err := cfg.readFileErr(path); err == nil {
+		_ = decodeJSONObject(data, &document)
+	}
+	if len(document) == 0 {
+		document = map[string]json.RawMessage{}
 	}
 	if records == nil {
 		records = map[string]json.RawMessage{}
@@ -160,8 +151,18 @@ func ObserveFreeLimit(cfg Config, resetAt, observedAt, rung, source, accountKey 
 			records[id] = encoded
 		}
 	}
+	cachePaths := cfg.cachePaths()
+	legacyPaths := cachePaths[1:]
 	if clear && len(records) == 0 {
-		return removeLimitFile(path)
+		if err := removeLimitFile(path); err != nil {
+			return err
+		}
+		for _, candidate := range legacyPaths {
+			if err := removeLimitFile(candidate); err != nil {
+				return err
+			}
+		}
+		return nil
 	}
 	encodedRecords, err := json.Marshal(records)
 	if err != nil {
@@ -173,10 +174,78 @@ func ObserveFreeLimit(cfg Config, resetAt, observedAt, rung, source, accountKey 
 	if err != nil {
 		return fmt.Errorf("%w: devin 쿼터 캐시를 인코딩할 수 없습니다", ErrFreeLimitStore)
 	}
-	if err := durable.ReplaceFileAtomically(path, ".devin-free-limit-*", append(data, '\n'), 0o600); err != nil {
+	replace := cfg.ReplaceFile
+	if replace == nil {
+		replace = durable.ReplaceFileAtomically
+	}
+	if err := replace(path, ".devin-free-limit-*", append(data, '\n'), 0o600); err != nil {
 		return fmt.Errorf("%w: devin 쿼터 observation을 저장할 수 없습니다", ErrFreeLimitStore)
 	}
+	if err := verifyLimitFile(cfg, path, records); err != nil {
+		return fmt.Errorf("%w: devin 쿼터 observation을 저장 후 확인할 수 없습니다", ErrFreeLimitStore)
+	}
+	for _, candidate := range legacyPaths {
+		if err := removeLegacyLimitFile(path, candidate); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+func verifyLimitFile(cfg Config, path string, expected map[string]json.RawMessage) error {
+	data, err := cfg.readFileErr(path)
+	if err != nil {
+		return err
+	}
+	if cfg.ReadFile == nil {
+		info, statErr := os.Lstat(path)
+		if statErr != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 {
+			return ErrFreeLimitStore
+		}
+	}
+	var document struct {
+		Schema  string                      `json:"schema"`
+		Records *map[string]json.RawMessage `json:"records"`
+	}
+	if !decodeJSONObject(data, &document) || document.Schema != limitRecordSchema || document.Records == nil || !sameLimitRecords(expected, *document.Records) {
+		return ErrFreeLimitStore
+	}
+	return nil
+}
+
+func sameLimitRecords(left, right map[string]json.RawMessage) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for id, leftRaw := range left {
+		rightRaw, ok := right[id]
+		if !ok {
+			return false
+		}
+		var leftJSON, rightJSON bytes.Buffer
+		if json.Compact(&leftJSON, leftRaw) != nil || json.Compact(&rightJSON, rightRaw) != nil || !bytes.Equal(leftJSON.Bytes(), rightJSON.Bytes()) {
+			return false
+		}
+	}
+	return true
+}
+
+func removeLegacyLimitFile(primary, candidate string) error {
+	primaryInfo, err := os.Stat(primary)
+	if err != nil {
+		return fmt.Errorf("%w: devin 쿼터 캐시 파일을 비교할 수 없습니다", ErrFreeLimitStore)
+	}
+	candidateInfo, err := os.Stat(candidate)
+	if errors.Is(err, fs.ErrNotExist) {
+		return removeLimitFile(candidate)
+	}
+	if err != nil {
+		return fmt.Errorf("%w: devin 쿼터 캐시 파일을 비교할 수 없습니다", ErrFreeLimitStore)
+	}
+	if os.SameFile(primaryInfo, candidateInfo) {
+		return nil
+	}
+	return removeLimitFile(candidate)
 }
 
 func removeLimitFile(path string) error {
@@ -238,13 +307,95 @@ func (c Config) limitIdentities() []string {
 	return ids
 }
 
-// cacheDir is pacelever's cache directory: PACELEVER_CACHE's directory, else
-// <XDG cache>/pacelever.
+// cachePath is panewire's record path, followed by the legacy pacelever path.
+// An explicit cache variable names the record file itself.
+func (c Config) cachePaths() []string {
+	return configpath.CacheCandidates(c.env, c.home(), "devin-free-limit.json")
+}
+
+// cacheDir is panewire's cache directory, used for new records and locks.
 func (c Config) cacheDir() string {
-	if p := c.env("PACELEVER_CACHE"); p != "" {
-		return filepath.Dir(p)
+	if p := c.env("PANEWIRE_CACHE"); p != "" {
+		return filepath.Dir(filepath.Join(filepath.Dir(p), "devin-free-limit.json"))
 	}
-	return filepath.Join(c.cacheBase(), "pacelever")
+	return filepath.Join(c.cacheBase(), "panewire")
+}
+
+func readLimitRecords(c Config) (map[string]json.RawMessage, bool, error) {
+	merged := map[string]json.RawMessage{}
+	found := false
+	for _, path := range c.cachePaths() {
+		data, err := c.readFileErr(path)
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return nil, true, err
+		}
+		if c.ReadFile == nil {
+			info, statErr := os.Lstat(path)
+			if statErr != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 {
+				return nil, true, ErrFreeLimitStore
+			}
+		}
+		var document struct {
+			Records *map[string]json.RawMessage `json:"records"`
+		}
+		if !decodeJSONObject(data, &document) || document.Records == nil {
+			return nil, true, ErrFreeLimitStore
+		}
+		found = true
+		for id, raw := range *document.Records {
+			previous, exists := merged[id]
+			if !exists {
+				merged[id] = raw
+				continue
+			}
+			merged[id] = conservativeLimitRecord(previous, raw)
+		}
+	}
+	return merged, found, nil
+}
+
+func conservativeLimitRecord(a, b json.RawMessage) json.RawMessage {
+	var left, right limitRecord
+	leftOKJSON := json.Unmarshal(a, &left) == nil
+	if !leftOKJSON {
+		left = limitRecord{}
+	}
+	rightOKJSON := json.Unmarshal(b, &right) == nil
+	if !rightOKJSON {
+		right = limitRecord{}
+	}
+	leftReset, leftOK := left.effectiveReset()
+	rightReset, rightOK := right.effectiveReset()
+	merged := left
+	switch {
+	case !leftOK && rightOK:
+		merged = right
+	case leftOK && rightOK && rightReset.After(leftReset):
+		merged = right
+	}
+	merged.Damaged = left.Damaged || right.Damaged || !leftOKJSON || !rightOKJSON || !leftOK || !rightOK
+	encoded, err := json.Marshal(merged)
+	if err != nil {
+		return a
+	}
+	return encoded
+}
+
+func readLimitFile(c Config) ([]byte, error) {
+	records, found, err := readLimitRecords(c)
+	if err != nil {
+		return nil, err
+	}
+	if !found {
+		return nil, fs.ErrNotExist
+	}
+	data, err := json.Marshal(struct {
+		Records map[string]json.RawMessage `json:"records"`
+	}{Records: records})
+	return data, err
 }
 
 // LocalFree is this host's own free-tier state at now, read from the record
@@ -261,7 +412,7 @@ func LocalFree(cfg Config) func(now time.Time) *shared.FreeBucket {
 		var store struct {
 			Records *map[string]limitRecord `json:"records"`
 		}
-		data, err := cfg.readFileErr(filepath.Join(cfg.cacheDir(), "devin-free-limit.json"))
+		data, err := readLimitFile(cfg)
 		switch {
 		case errors.Is(err, fs.ErrNotExist):
 			return &shared.FreeBucket{State: shared.FreeAvailable}
@@ -275,6 +426,9 @@ func LocalFree(cfg Config) func(now time.Time) *shared.FreeBucket {
 			record, ok := records[id]
 			if !ok {
 				continue
+			}
+			if record.Damaged {
+				unknown = true
 			}
 			reset, ok := record.effectiveReset()
 			switch {

@@ -27,7 +27,6 @@ func TestFleetQuotaAgyWithoutAMeasurableAccountIsNotLoginMissing(t *testing.T) {
 			client.spawnConfigPath = claudeStore(t, hk.server.URL)
 			api := newAgyAPI()
 			client.nativeQuota = map[string]*nativeQuotaSource{"agy": agyTestSource(client.spawnConfigPath, agyLoginFiles(agyToken), api, c.fp, c.measurable)}
-			client.nodePacelever = (&paceleverRunnerFake{pool: "agy"}).run
 			warned := newWarnLog(client)
 			client.nativeQuota["agy"].Warn = client.warnMessage
 
@@ -65,7 +64,6 @@ func TestFleetQuotaAgyMeasurableAuthFailedIsLoginMissing(t *testing.T) {
 	client := quotaClient(t)
 	client.spawnConfigPath = claudeStore(t, hk.server.URL)
 	client.nativeQuota = map[string]*nativeQuotaSource{"agy": agyTestSource(client.spawnConfigPath, agyLoginFiles(agyToken), agyRefusingAPI{}, agyFPForTest, true)}
-	client.nodePacelever = (&paceleverRunnerFake{pool: "agy"}).run
 	warned := newWarnLog(client)
 	client.nativeQuota["agy"].Warn = client.warnMessage
 

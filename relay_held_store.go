@@ -129,17 +129,6 @@ func scanRelayHeld(rows *sql.Rows) ([]relayHeld, error) {
 	return held, rows.Err()
 }
 
-func (s *Store) UpdateRelayHeldText(ctx context.Context, eventID int64, text string) (bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	result, err := s.db.ExecContext(ctx, `UPDATE relay_held SET text=?,edited=1 WHERE event_id=?`, text, eventID)
-	if err != nil {
-		return false, err
-	}
-	n, err := result.RowsAffected()
-	return n == 1, err
-}
-
 // ExtendRelayHeldMaxWait moves a held row's deadline (held_since + max_wait)
 // later. It never shortens one, so a stale caller cannot pull a wait earlier.
 func (s *Store) ExtendRelayHeldMaxWait(ctx context.Context, eventID int64, maxWait time.Duration) (bool, error) {

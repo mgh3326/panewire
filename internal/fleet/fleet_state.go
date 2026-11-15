@@ -57,11 +57,22 @@ type FleetSnapshot struct {
 	Cooling map[string]time.Time `json:"pool_cooling,omitempty"`
 }
 
-func (s *FleetSnapshot) poolCooling(pool string, now time.Time) bool {
-	if pool == "devin" && now.Before(s.Cooling["devin-free"]) {
+// cools reports whether a candidate row's quota is held by a stop: a stop of
+// its catalog pool holds every rung of that pool, and a stop of a reserved band
+// key holds that band alone. Devin's bands hold apart, the way its cap and
+// --exclude-pool keys read them: a paid weekly stop leaves the SWE-2 free rungs
+// eligible and a free-band stop leaves the paid rungs eligible (hk 4582).
+func (s *FleetSnapshot) cools(row CatalogRow, now time.Time) bool {
+	if now.Before(s.Cooling[row.Pool]) {
 		return true
 	}
-	return now.Before(s.Cooling[pool])
+	if row.Pool != "devin" {
+		return false
+	}
+	if IsFreeRung(row.Profile) {
+		return now.Before(s.Cooling[devinFreeCapKey])
+	}
+	return now.Before(s.Cooling[devinPaidKey])
 }
 
 type FleetStateMessage struct {
@@ -214,7 +225,7 @@ func (a *App) hubSharedAccount(ctx context.Context, key string) (SharedAccount, 
 	if best == nil {
 		return SharedAccount{}, reason
 	}
-	quota := withFree(accountPoolView(best.Quota.Buckets, now), best.Quota.FreeBucket, now)
+	quota := withFree(accountPoolView(readableBuckets(accountPool(key), best.Quota.Buckets), now), best.Quota.FreeBucket, now)
 	if quota == nil {
 		return SharedAccount{}, stateStale
 	}
@@ -229,6 +240,18 @@ func (m FleetStateMessage) validAt() time.Time {
 		return *m.ConfirmedAt
 	}
 	return m.MeasuredAt
+}
+
+// ReadingFresh applies the spawn gate's whole freshness rule to one stored
+// quota reading: the reading's host has an alive publisher at the snapshot,
+// and the reading's age is inside the pool's window. A status reader uses it
+// so its fresh/stale label cannot disagree with a spawn on the same state.
+func (a *App) ReadingFresh(snap *FleetSnapshot, message FleetStateMessage, pool string, now time.Time) bool {
+	if snap == nil || !a.publisherAlive(snap, message.Host) {
+		return false
+	}
+	age := now.Sub(message.validAt())
+	return age >= -time.Minute && age <= a.sharedFreshTTL(pool)
 }
 
 // hubHosts answers the host list from the hub's load values. It is used only

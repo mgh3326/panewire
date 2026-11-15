@@ -85,7 +85,7 @@ func planChoice(t *testing.T, e *hubOnlyEnv) (string, string, string) {
 	t.Helper()
 	buf := e.a.Out.(interface{ String() string })
 	before := len(buf.String())
-	if err := e.a.planCmd(context.Background(), []string{"--grade", "C", "--t", "T1", "--role", "worker", "--json"}); err != nil {
+	if err := e.a.planCmd(context.Background(), []string{"--grade", "C", "--t", "T1", "--role", "implementer", "--json"}); err != nil {
 		t.Fatalf("plan refused: %v", err)
 	}
 	var out struct {
