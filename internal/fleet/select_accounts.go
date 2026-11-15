@@ -260,7 +260,7 @@ func (p *selPlan) classifyRung(c *selCand, account *PoolView) {
 func (p *selPlan) classify(c *selCand, v PoolView) {
 	c.blocking, c.projected, c.urgency, c.resetHrs = v.Blocking, v.Projected, v.Urgency, v.ResetHours
 	c.longProj = longProjection(v)
-	c.headroom = p.policy.headroomFor(v.Shortest, p.req.expected)
+	c.headroom = p.policy.headroomFor(v.Shortest, p.req.expected, p.windowBurn(c.row.Pool, v.Shortest))
 	c.wasteGroup = v.Group
 	if p.policy.isCredit(c.row.Pool) || v.Class == "credit" {
 		c.creditPool = true
