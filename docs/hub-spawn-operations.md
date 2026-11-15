@@ -318,6 +318,20 @@ a stale `park_reason` that a newer hub ignores (a bound row never reads
 parked) and clears at its next bind. `TestOlderHubPlacesParkedRowsAsAccepted_t4661`
 runs those predicates against a parked row.
 
+**Before rolling back, settle every pending claim-holding row.** The
+pre-parking hub's time limit ignores `claimed_host` and `claim_result`: past
+`expires_at` it would give such a row up as unstarted and free its
+reservation while hk may still hold the job. Rows that would need settling:
+
+```sql
+SELECT request_id, job, claimed_host, expires_ms FROM spawn_operations
+WHERE status IN ('accepted','bound','bound_grant')
+  AND (claimed_host <> '' OR claim_result <> '');
+```
+
+Roll back only when this returns nothing, or after each row has landed or
+been cancelled (or its limit has been raised past the rollback window).
+
 ### Rolling back past the time limit
 
 The migration is additive: `0015_spawn_expires.sql` adds `expires_ms`

@@ -418,8 +418,15 @@ func (s *laneInboxStore) completeSpawn(parent context.Context, task hubSpawnTask
 		nodeID = task.Node.RequestID
 	}
 	stored := spawnStoredStatus(status, task.Node)
-	// A terminal post-claim node result is the claim proof a replay keeps.
-	result, err := tx.ExecContext(ctx, s.q(`UPDATE spawn_operations SET status=?,result=?,claim_result=CASE WHEN claim_result='' THEN ? ELSE claim_result END WHERE request_id=? AND attempt=? AND status IN ('accepted','bound','dispatching','reconciling','deadline_exceeded','bound_grant','dispatching_grant','reconciling_grant','deadline_exceeded_grant') AND status<>? AND NOT (status IN ('deadline_exceeded','deadline_exceeded_grant') AND ?='reconciling') AND ((?='' AND node_id IS NULL) OR node_id=?) AND (? NOT IN ('accepted','bound') OR status=?) AND (node_id IS NULL OR status IN ('bound','bound_grant') OR ?<>'timeout' OR ?<>'retryable' OR ?)`), stored, string(raw), spawnClaimProof(outcome, string(raw)), task.Request.RequestID, task.Attempt, stored, status, nodeID, nodeID, task.Status, spawnStoredStatus(task.Status, task.Node), outcome.Reason, status, outcome.NodeResult)
+	// A terminal post-claim node result is the claim proof a replay keeps; a
+	// claim inferred from an older hub's saved result is made durable before
+	// this write replaces it.
+	legacyHost, legacyProof := spawnLegacyClaim(task)
+	proof := spawnClaimProof(outcome, string(raw))
+	if proof == "" {
+		proof = legacyProof
+	}
+	result, err := tx.ExecContext(ctx, s.q(`UPDATE spawn_operations SET status=?,result=?,claim_result=CASE WHEN claim_result='' THEN ? ELSE claim_result END,claimed_host=CASE WHEN claimed_host='' THEN ? ELSE claimed_host END WHERE request_id=? AND attempt=? AND status IN ('accepted','bound','dispatching','reconciling','deadline_exceeded','bound_grant','dispatching_grant','reconciling_grant','deadline_exceeded_grant') AND status<>? AND NOT (status IN ('deadline_exceeded','deadline_exceeded_grant') AND ?='reconciling') AND ((?='' AND node_id IS NULL) OR node_id=?) AND (? NOT IN ('accepted','bound') OR status=?) AND (node_id IS NULL OR status IN ('bound','bound_grant') OR ?<>'timeout' OR ?<>'retryable' OR ?)`), stored, string(raw), proof, legacyHost, task.Request.RequestID, task.Attempt, stored, status, nodeID, nodeID, task.Status, spawnStoredStatus(task.Status, task.Node), outcome.Reason, status, outcome.NodeResult)
 	if err != nil {
 		return false, err
 	}
@@ -562,6 +569,13 @@ func (s *laneInboxStore) unbindRefusedSpawn(parent context.Context, task hubSpaw
 		// Only a refusal after the job claim proves one; the first such
 		// proof stays (claim_result is set once).
 		claimProof = spawnClaimProof(*claimed, claimedResult)
+	}
+	legacyHost, legacyProof := spawnLegacyClaim(task)
+	if claimProof == "" {
+		claimProof = legacyProof
+	}
+	if claimedHost == "" {
+		claimedHost = legacyHost
 	}
 	// A claimed-harness retry is not backed off: hk holds the job claim on
 	// that host, and a park that ran into expires_at would give the request
@@ -975,4 +989,18 @@ func spawnClaimProof(outcome hubSpawnOutcome, raw string) string {
 		return raw
 	}
 	return ""
+}
+
+// spawnLegacyClaim is a claim held only by an older hub's saved result (no
+// claimed_host, no claim_result): its host and the result, to persist before
+// a later write replaces that result. Empty when there is none.
+func spawnLegacyClaim(task hubSpawnTask) (string, string) {
+	if task.ClaimedHost != "" || task.ClaimResult != nil || !spawnReplayPinsHost(task.Outcome) {
+		return "", ""
+	}
+	raw, err := json.Marshal(task.Outcome)
+	if err != nil {
+		return "", ""
+	}
+	return task.Outcome.Host, string(raw)
 }

@@ -924,3 +924,29 @@ func TestPreClaimTimeoutsPinNothing_t4661(t *testing.T) {
 		}
 	}
 }
+
+// A claim held only by an older hub's saved result is persisted (host and
+// proof) by the write that replaces that result, so a later not-started
+// answer cannot erase it.
+func TestLegacyClaimPersistsBeforeOverwrite_t4661(t *testing.T) {
+	h := asyncSpawnHub(t)
+	task := claimParkRequest(t, h, 290, time.Now())
+	legacy := `{"rc":124,"stage":"landing","reason":"timeout","host":"desktop","retryable":true,"node_result":true}`
+	if _, err := h.inbox.store.db.Exec(`UPDATE spawn_operations SET claimed_host='',claim_result='',result=? WHERE request_id=?`, legacy, task.Request.RequestID); err != nil {
+		t.Fatal(err)
+	}
+	task = parkedTask(t, h, task.Request.RequestID)
+	bound, err := h.inbox.store.bindSpawn(t.Context(), task.Request.RequestID, task.Attempt, boundaryTestNode(task, 467800, "desktop"), time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	bound = sentSpawnFixture(t, h.inbox.store, bound)
+	notStarted := hubSpawnOutcome{RC: 124, Stage: "claim", Reason: "deadline_not_started", Host: "desktop", NodeResult: true, Retryable: true}
+	if _, err := h.inbox.store.completeSpawn(t.Context(), bound, notStarted, bound.Deadline); err != nil {
+		t.Fatal(err)
+	}
+	got := parkedTask(t, h, task.Request.RequestID)
+	if got.ClaimedHost != "desktop" || got.ClaimResult == nil || got.ClaimResult.Reason != "timeout" || !spawnHoldsClaim(got) {
+		t.Fatalf("legacy claim lost: host=%q proof=%+v status=%s", got.ClaimedHost, got.ClaimResult, got.Status)
+	}
+}
