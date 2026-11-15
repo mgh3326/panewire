@@ -81,10 +81,11 @@ The plan runs the selection core (`internal/fleet`, the code behind
 `panewire plan`) for each grade with role `implementer`, scale `T1`, the hub's
 own fleet App and the hub's placement view. It is a dry run: no account is
 measured (a reading that would need measuring keeps its stored value and the
-row may report `QUOTA_UNKNOWN` or a refusal), no host or slot is reserved, and
-the plan transport refuses both dispatch and refresh. When the hub cannot build
-its fleet App, every grade still gets a row with `outcome` `POLICY_UNAVAILABLE`
-so the document's shape does not change.
+row may report `QUOTA_UNKNOWN` or a refusal), no host or slot is reserved, no
+load is refreshed or republished, and the plan transport refuses both dispatch
+and refresh. When the hub cannot build its fleet App, every grade still gets a
+row with `outcome` `POLICY_UNAVAILABLE` so the document's shape does not
+change.
 
 ## No secrets
 
