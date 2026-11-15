@@ -38,6 +38,12 @@ func stallExaminationExcerpt(value string) string { return utf8SuffixWithin(valu
 // stallNotificationText keeps the job, pane, and end of the visible screen.
 func stallNotificationText(job, pane, screen string) string {
 	prefix := "[stall] job " + job + " pane " + pane + ": "
+	screen = strings.Map(func(r rune) rune {
+		if r <= 0x1f || (r >= 0x7f && r <= 0x9f) {
+			return ' '
+		}
+		return r
+	}, screen)
 	return prefix + utf8SuffixWithin(screen, laneEventTextLimit-len(prefix))
 }
 

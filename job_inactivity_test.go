@@ -31,10 +31,10 @@ func TestStallSafetyActiveJobExamination(t *testing.T) {
 				t.Fatal(err)
 			}
 			signalled := false
-			m.signalled = func(context.Context, HubActiveJob) (bool, error) { return signalled, nil }
+			m.signalled = func(context.Context, HubActiveJob) (string, bool, error) { return "attempt-1", signalled, nil }
 			m.busy = func(context.Context, HubActiveJob, HerdrAgentState) (bool, error) { return mode == "child", nil }
 			reads := 0
-			screen := strings.Repeat("x", 3000) + " last screen lines"
+			screen := strings.Repeat("x", 3000) + "\nlast screen lines\x1b[0m"
 			if mode == "quota" {
 				data, err := os.ReadFile("testdata/quota-stop/codex.txt")
 				if err != nil {
@@ -77,8 +77,12 @@ func TestStallSafetyActiveJobExamination(t *testing.T) {
 				t.Fatalf("reads=%d notes=%v", reads, notes)
 			}
 			if mode == "idle" || mode == "retry" {
-				if len(rig.owner) != 1 || rig.owner[0].NotifyType != "blocked" || !strings.Contains(rig.owner[0].Text, "last screen lines") {
+				if len(rig.owner) != 1 || rig.owner[0].NotifyType != "blocked" || !strings.Contains(rig.owner[0].Text, "last screen lines") || !validLaneEventText(rig.owner[0].Text) {
 					t.Fatalf("owner events=%+v", rig.owner)
+				}
+				published := scanHubLaneEventsWithin(rig.manager.inboxRoot, 0)
+				if len(published) != 1 || published[0].NotifyType != "blocked" || !strings.Contains(published[0].Text, "last screen lines") {
+					t.Fatalf("durable lane events=%+v", published)
 				}
 				return
 			}
@@ -114,7 +118,7 @@ func TestStallSafetyQuotaWaitRespectsPaneState(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			m.signalled = func(context.Context, HubActiveJob) (bool, error) { return false, nil }
+			m.signalled = func(context.Context, HubActiveJob) (string, bool, error) { return "attempt-1", false, nil }
 			m.busy = func(context.Context, HubActiveJob, HerdrAgentState) (bool, error) { return false, nil }
 			m.explain = func(context.Context, string) (string, error) { return `{"agent":"codex"}`, nil }
 			data, err := os.ReadFile("testdata/quota-stop/codex.txt")

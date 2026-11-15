@@ -14,18 +14,18 @@ type stallSafetyState struct{ store *Store }
 func newStallSafetyState(store *Store) (*stallSafetyState, error) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
-	_, err := store.db.Exec(`CREATE TABLE IF NOT EXISTS stall_safety_episodes (job TEXT NOT NULL, pane TEXT NOT NULL, since_ms INTEGER NOT NULL, state_seq INTEGER NOT NULL, examined INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(job,pane))`)
+	_, err := store.db.Exec(`CREATE TABLE IF NOT EXISTS stall_safety_episodes (job TEXT NOT NULL, pane TEXT NOT NULL, attempt TEXT NOT NULL, since_ms INTEGER NOT NULL, state_seq INTEGER NOT NULL, examined INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(job,pane))`)
 	if err != nil {
 		return nil, err
 	}
-	_, err = store.db.Exec(`CREATE TABLE IF NOT EXISTS stall_safety_examinations (job TEXT NOT NULL, pane TEXT NOT NULL, since_ms INTEGER NOT NULL, screen TEXT NOT NULL, explanation TEXT NOT NULL, details TEXT NOT NULL DEFAULT '', hk_done INTEGER NOT NULL DEFAULT 0, action_done INTEGER NOT NULL DEFAULT 0, action_result TEXT NOT NULL DEFAULT '', PRIMARY KEY(job,pane,since_ms))`)
+	_, err = store.db.Exec(`CREATE TABLE IF NOT EXISTS stall_safety_examinations (job TEXT NOT NULL, pane TEXT NOT NULL, attempt TEXT NOT NULL, since_ms INTEGER NOT NULL, screen TEXT NOT NULL, explanation TEXT NOT NULL, details TEXT NOT NULL DEFAULT '', hk_done INTEGER NOT NULL DEFAULT 0, action_done INTEGER NOT NULL DEFAULT 0, action_result TEXT NOT NULL DEFAULT '', PRIMARY KEY(job,pane,attempt,since_ms))`)
 	if err != nil {
 		return nil, err
 	}
 	return &stallSafetyState{store: store}, nil
 }
 
-func (s *stallSafetyState) observe(ctx context.Context, job, pane string, working, busy bool, seq int64, now time.Time, limit time.Duration) (bool, error) {
+func (s *stallSafetyState) observe(ctx context.Context, job, pane, attempt string, working, busy bool, seq int64, now time.Time, limit time.Duration) (bool, error) {
 	s.store.mu.Lock()
 	defer s.store.mu.Unlock()
 	if working {
@@ -33,21 +33,22 @@ func (s *stallSafetyState) observe(ctx context.Context, job, pane string, workin
 		return false, err
 	}
 	if busy {
-		_, err := s.store.db.ExecContext(ctx, `INSERT INTO stall_safety_episodes(job,pane,since_ms,state_seq,examined) VALUES(?,?,?,?,0) ON CONFLICT(job,pane) DO UPDATE SET since_ms=excluded.since_ms,state_seq=excluded.state_seq,examined=0`, job, pane, now.UnixMilli(), seq)
+		_, err := s.store.db.ExecContext(ctx, `INSERT INTO stall_safety_episodes(job,pane,attempt,since_ms,state_seq,examined) VALUES(?,?,?,?,?,0) ON CONFLICT(job,pane) DO UPDATE SET attempt=excluded.attempt,since_ms=excluded.since_ms,state_seq=excluded.state_seq,examined=0`, job, pane, attempt, now.UnixMilli(), seq)
 		return false, err
 	}
 	var since, previousSeq int64
+	var previousAttempt string
 	var examined int
-	err := s.store.db.QueryRowContext(ctx, `SELECT since_ms,state_seq,examined FROM stall_safety_episodes WHERE job=? AND pane=?`, job, pane).Scan(&since, &previousSeq, &examined)
+	err := s.store.db.QueryRowContext(ctx, `SELECT since_ms,state_seq,examined,attempt FROM stall_safety_episodes WHERE job=? AND pane=?`, job, pane).Scan(&since, &previousSeq, &examined, &previousAttempt)
 	if err == sql.ErrNoRows {
-		_, err = s.store.db.ExecContext(ctx, `INSERT INTO stall_safety_episodes(job,pane,since_ms,state_seq) VALUES(?,?,?,?)`, job, pane, now.UnixMilli(), seq)
+		_, err = s.store.db.ExecContext(ctx, `INSERT INTO stall_safety_episodes(job,pane,attempt,since_ms,state_seq) VALUES(?,?,?,?,?)`, job, pane, attempt, now.UnixMilli(), seq)
 		return false, err
 	}
 	if err != nil {
 		return false, err
 	}
-	if seq != previousSeq {
-		_, err := s.store.db.ExecContext(ctx, `UPDATE stall_safety_episodes SET since_ms=?,state_seq=?,examined=0 WHERE job=? AND pane=?`, now.UnixMilli(), seq, job, pane)
+	if seq != previousSeq || attempt != previousAttempt {
+		_, err := s.store.db.ExecContext(ctx, `UPDATE stall_safety_episodes SET attempt=?,since_ms=?,state_seq=?,examined=0 WHERE job=? AND pane=?`, attempt, now.UnixMilli(), seq, job, pane)
 		return false, err
 	}
 	return examined == 0 && now.After(time.UnixMilli(since).Add(limit)), nil
@@ -65,7 +66,7 @@ func (s *stallSafetyState) recordExamination(ctx context.Context, job, pane, scr
 		return false, err
 	}
 	defer tx.Rollback()
-	result, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO stall_safety_examinations(job,pane,since_ms,screen,explanation,details) SELECT job,pane,since_ms,?,?,? FROM stall_safety_episodes WHERE job=? AND pane=? AND examined=0`, screen, explanation, details, job, pane)
+	result, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO stall_safety_examinations(job,pane,attempt,since_ms,screen,explanation,details) SELECT job,pane,attempt,since_ms,?,?,? FROM stall_safety_episodes WHERE job=? AND pane=? AND examined=0`, screen, explanation, details, job, pane)
 	if err != nil {
 		return false, err
 	}

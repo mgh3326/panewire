@@ -19,12 +19,13 @@ type stallSafetyDetails struct {
 	Stop    quotastop.Stop  `json:"stop"`
 	Quota   bool            `json:"quota"`
 	WakeSeq int64           `json:"wake_seq"`
+	Attempt string          `json:"attempt"`
 }
 
 type stallSafetyExamination struct {
-	job, pane, screen, explanation, details, actionResult string
-	since                                                 int64
-	hkDone, actionDone                                    int
+	job, pane, attempt, screen, explanation, details, actionResult string
+	since                                                          int64
+	hkDone, actionDone                                             int
 }
 
 type stallSafetyManager struct {
@@ -32,7 +33,7 @@ type stallSafetyManager struct {
 	limit     time.Duration
 	now       func() time.Time
 	lookup    func(context.Context, string) (HubActiveJob, bool)
-	signalled func(context.Context, HubActiveJob) (bool, error)
+	signalled func(context.Context, HubActiveJob) (string, bool, error)
 	busy      func(context.Context, HubActiveJob, HerdrAgentState) (bool, error)
 	sequence  func(context.Context, string) (int64, string, error)
 	read      func(context.Context, string) (string, error)
@@ -88,9 +89,9 @@ func newStallSafetyManager(q *quotaStopManager, idle *idleWakeManager, limit tim
 		err := q.store.db.QueryRowContext(ctx, `SELECT state_change_seq,agent_status FROM idle_wake_panes WHERE pane_id=?`, pane).Scan(&seq, &status)
 		return seq, status, err
 	}
-	m.signalled = func(ctx context.Context, job HubActiveJob) (bool, error) {
+	m.signalled = func(ctx context.Context, job HubActiveJob) (string, bool, error) {
 		a := &fleet.App{Jobs: filepath.Join(q.root, "jobs")}
-		return a.StallAttemptSignalled(job.JobID)
+		return a.StallAttemptState(job.JobID)
 	}
 	m.busy = func(ctx context.Context, job HubActiveJob, agent HerdrAgentState) (bool, error) {
 		a := &fleet.App{Runner: fleet.ExecRunner{Timeout: 5 * time.Second}, HerdrSession: q.session(job.JobID, agent.PaneID)}
@@ -119,12 +120,15 @@ func newStallSafetyManager(q *quotaStopManager, idle *idleWakeManager, limit tim
 		if !ok || current.JobID != r.job {
 			return "job no longer active", nil
 		}
-		signalled, err := m.signalled(ctx, current)
+		attempt, signalled, err := m.signalled(ctx, current)
 		if err != nil {
 			return "", err
 		}
 		if signalled {
 			return "job signalled READY or ESC", nil
+		}
+		if attempt != detail.Attempt {
+			return "job attempt changed", nil
 		}
 		seq, status, err := m.sequence(ctx, r.pane)
 		if err != nil {
@@ -170,17 +174,17 @@ func (m *stallSafetyManager) scan(ctx context.Context, agents []HerdrAgentState,
 			continue
 		}
 		if agent.Status == "working" || agent.Status == "unknown" {
-			if _, err := m.state.observe(ctx, job.JobID, agent.PaneID, true, false, 0, now, m.limit); err != nil {
+			if _, err := m.state.observe(ctx, job.JobID, agent.PaneID, "", true, false, 0, now, m.limit); err != nil {
 				return err
 			}
 			continue
 		}
-		signalled, err := m.signalled(ctx, job)
+		attempt, signalled, err := m.signalled(ctx, job)
 		if err != nil {
 			continue
 		}
 		if signalled {
-			if _, err := m.state.observe(ctx, job.JobID, agent.PaneID, true, false, 0, now, m.limit); err != nil {
+			if _, err := m.state.observe(ctx, job.JobID, agent.PaneID, attempt, true, false, 0, now, m.limit); err != nil {
 				return err
 			}
 			continue
@@ -193,7 +197,7 @@ func (m *stallSafetyManager) scan(ctx context.Context, agents []HerdrAgentState,
 		if err != nil {
 			continue
 		}
-		due, err := m.state.observe(ctx, job.JobID, agent.PaneID, false, busy, seq, now, m.limit)
+		due, err := m.state.observe(ctx, job.JobID, agent.PaneID, attempt, false, busy, seq, now, m.limit)
 		if err != nil {
 			return err
 		}
@@ -211,7 +215,7 @@ func (m *stallSafetyManager) scan(ctx context.Context, agents []HerdrAgentState,
 		}
 		stop, quota := m.detect(readCtx, job.JobID, agent, screen, explanation, now)
 		cancel()
-		details, err := json.Marshal(stallSafetyDetails{Job: job, Agent: agent, Stop: stop, Quota: quota, WakeSeq: seq})
+		details, err := json.Marshal(stallSafetyDetails{Job: job, Agent: agent, Stop: stop, Quota: quota, WakeSeq: seq, Attempt: attempt})
 		if err != nil {
 			return err
 		}
@@ -224,7 +228,7 @@ func (m *stallSafetyManager) scan(ctx context.Context, agents []HerdrAgentState,
 
 func (m *stallSafetyManager) drain(ctx context.Context, now time.Time) error {
 	m.state.store.mu.Lock()
-	rows, err := m.state.store.db.QueryContext(ctx, `SELECT job,pane,since_ms,screen,explanation,details,hk_done,action_done,action_result FROM stall_safety_examinations WHERE details<>'' AND (hk_done=0 OR action_done=0)`)
+	rows, err := m.state.store.db.QueryContext(ctx, `SELECT job,pane,attempt,since_ms,screen,explanation,details,hk_done,action_done,action_result FROM stall_safety_examinations WHERE details<>'' AND (hk_done=0 OR action_done=0)`)
 	if err != nil {
 		m.state.store.mu.Unlock()
 		return err
@@ -232,7 +236,7 @@ func (m *stallSafetyManager) drain(ctx context.Context, now time.Time) error {
 	var pending []stallSafetyExamination
 	for rows.Next() {
 		var r stallSafetyExamination
-		if err = rows.Scan(&r.job, &r.pane, &r.since, &r.screen, &r.explanation, &r.details, &r.hkDone, &r.actionDone, &r.actionResult); err != nil {
+		if err = rows.Scan(&r.job, &r.pane, &r.attempt, &r.since, &r.screen, &r.explanation, &r.details, &r.hkDone, &r.actionDone, &r.actionResult); err != nil {
 			break
 		}
 		pending = append(pending, r)
@@ -250,7 +254,7 @@ func (m *stallSafetyManager) drain(ctx context.Context, now time.Time) error {
 		if err := json.Unmarshal([]byte(r.details), &details); err != nil {
 			return err
 		}
-		sum := sha256.Sum256([]byte(fmt.Sprintf("%s\x00%s\x00%d", r.job, r.pane, r.since)))
+		sum := sha256.Sum256([]byte(fmt.Sprintf("%s\x00%s\x00%s\x00%d", r.job, r.pane, r.attempt, r.since)))
 		key := hex.EncodeToString(sum[:])
 		if r.actionDone == 0 {
 			if result, err := m.act(ctx, r, details, key, now); err == nil {
@@ -279,6 +283,6 @@ func (m *stallSafetyManager) mark(ctx context.Context, r stallSafetyExamination,
 	}
 	m.state.store.mu.Lock()
 	defer m.state.store.mu.Unlock()
-	_, err := m.state.store.db.ExecContext(ctx, `UPDATE stall_safety_examinations SET `+column+`=1,action_result=? WHERE job=? AND pane=? AND since_ms=?`, r.actionResult, r.job, r.pane, r.since)
+	_, err := m.state.store.db.ExecContext(ctx, `UPDATE stall_safety_examinations SET `+column+`=1,action_result=? WHERE job=? AND pane=? AND attempt=? AND since_ms=?`, r.actionResult, r.job, r.pane, r.attempt, r.since)
 	return err
 }

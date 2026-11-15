@@ -607,24 +607,23 @@ func (a *App) paneEmittedMarker(pane string, since time.Time) bool {
 	return a.paneEmittedMatching(pane, since, laneTerminalMarker)
 }
 
-// StallAttemptSignalled reports a completion or escalation from this job's
-// current attempt, using the same lane-event rules as the watcher.
-func (a *App) StallAttemptSignalled(job string) (bool, error) {
+// StallAttemptState identifies the current attempt and reports its completion
+// or escalation using the watcher's lane-event rules.
+func (a *App) StallAttemptState(job string) (string, bool, error) {
 	j, err := a.job(job)
 	if err != nil {
-		return false, err
-	}
-	if workerEscalated(j) {
-		return true, nil
+		return "", false, err
 	}
 	var since time.Time
+	var attempt string
 	for _, ev := range j.Events {
 		switch ev.Kind {
 		case "job.spawned", "job.reclaim", "job.reprompted", "job.decision_resumed":
 			since = ev.when
+			attempt = ev.name
 		}
 	}
-	return a.paneEmittedMatching(j.Pane, since, laneTerminalMarker) || a.paneEmittedMatching(j.Pane, since, laneDecisionMarker), nil
+	return attempt, workerEscalated(j) || a.paneEmittedMatching(j.Pane, since, laneTerminalMarker) || a.paneEmittedMatching(j.Pane, since, laneDecisionMarker), nil
 }
 
 func (a *App) paneEmittedMatching(pane string, since time.Time, marker *regexp.Regexp) bool {
