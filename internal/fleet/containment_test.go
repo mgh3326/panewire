@@ -120,7 +120,7 @@ func TestContainmentHubArgs(t *testing.T) {
 }
 
 func TestContainmentSubmissionLocalHost(t *testing.T) {
-	request := Submission{RequestID: "00000000-0000-4000-8000-000000000001", Args: []string{"-c", "/work/project", "-p", "/work/brief.md", "-m", "auto", "-l", "job", "--job", "job", "--t", "T1", "--task", "42", "--owner", "parent", "--role", "worker", "--host", "local", "--override-reason", "r"}, Brief: "task", Repository: Repository{Name: "project", Origin: "https://github.com/example/project.git", LocalRoot: "/work/project"}, OriginMachine: "machine-a", DeadlineSeconds: 600}
+	request := Submission{RequestID: "00000000-0000-4000-8000-000000000001", Args: []string{"-c", "/work/project", "-p", "/work/brief.md", "-m", "auto", "-l", "job", "--job", "job", "--t", "T1", "--task", "42", "--owner", "parent", "--role", "implementer", "--host", "local", "--override-reason", "r"}, Brief: "task", Repository: Repository{Name: "project", Origin: "https://github.com/example/project.git", LocalRoot: "/work/project"}, OriginMachine: "machine-a", DeadlineSeconds: 600}
 	s, err := ValidateSubmission(request)
 	if err != nil || s.Host != "machine-a" {
 		t.Fatalf("local submission: %+v %v", s, err)

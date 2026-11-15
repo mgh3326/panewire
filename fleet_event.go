@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -154,6 +155,13 @@ var fleetEventExtraSecrets = []*regexp.Regexp{
 
 var fleetEventUserinfo = regexp.MustCompile(`(?i)\b([a-z][a-z0-9+.-]*://)[^/\s:@]+(:[^/\s@]*)?@`)
 
+// fleetEventHKGuardPattern is hk's secret_like_content refusal token: hk
+// names the guard pattern (a rule name such as private_key, never the matched
+// text), and the spawn outcome reason must carry it, so redaction keeps
+// exactly this form. hk's free-form reason ("code: reason", with a space) and
+// any pattern outside the rule-name charset still meet the credential rules.
+var fleetEventHKGuardPattern = regexp.MustCompile(`secret_like_content:[a-z0-9_]+`)
+
 // fleetEventLongBlob matches a long base64-alphabet run, a key or token body
 // no named pattern caught; pure hex runs (commit SHAs, digests) are kept.
 var (
@@ -166,16 +174,28 @@ var (
 func fleetEventRedact(text string) string {
 	text = strings.ToValidUTF8(text, "?")
 	text = fleetEventUserinfo.ReplaceAllString(text, "${1}[redacted]@")
+	var hkGuard []string
+	text = fleetEventHKGuardPattern.ReplaceAllStringFunc(text, func(match string) string {
+		if len(match) > len("secret_like_content:")+40 {
+			return match
+		}
+		hkGuard = append(hkGuard, match)
+		return "\x00hkguard" + strconv.Itoa(len(hkGuard)-1) + "\x00"
+	})
 	// The extra set goes first: the stall set only removes a PEM header and
 	// stops a quoted assignment value at its first space, leaving the rest.
 	for _, pattern := range fleetEventExtraSecrets {
 		text = pattern.ReplaceAllString(text, "[redacted]")
 	}
 	text = redactSecrets(text)
-	return fleetEventLongBlob.ReplaceAllStringFunc(text, func(match string) string {
+	text = fleetEventLongBlob.ReplaceAllStringFunc(text, func(match string) string {
 		if fleetEventHexOnly.MatchString(match) {
 			return match
 		}
 		return "[redacted]"
 	})
+	for i, match := range hkGuard {
+		text = strings.ReplaceAll(text, "\x00hkguard"+strconv.Itoa(i)+"\x00", match)
+	}
+	return text
 }

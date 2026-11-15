@@ -12,7 +12,7 @@ import (
 // hubRetrySubmission is a valid hub submission whose host is pinned to desktop
 // and carries no containment or operator reference.
 func hubRetrySubmission(host string, extra ...string) Submission {
-	args := []string{"-c", "/work/project", "-p", "/work/brief.md", "-m", "auto", "-l", "test-job", "--job", "test-job", "--t", "T1", "--task", "42", "--owner", "parent", "--role", "worker", "--host", host, "--override-reason", "verified-cleanup-retry"}
+	args := []string{"-c", "/work/project", "-p", "/work/brief.md", "-m", "auto", "-l", "test-job", "--job", "test-job", "--t", "T1", "--task", "42", "--owner", "parent", "--role", "implementer", "--host", host, "--override-reason", "verified-cleanup-retry"}
 	return Submission{
 		RequestID: "d676220b-e763-4af1-aefd-000000000001", Args: append(args, extra...), Brief: "Implement the task", OriginMachine: "machine-a", DeadlineSeconds: 600,
 		Repository: Repository{Name: "project", Origin: "https://github.com/example/project.git", LocalRoot: "/work/project", Worktree: "project.test-job"},

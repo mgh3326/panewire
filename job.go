@@ -215,14 +215,11 @@ func (c *jobCLI) escalate(args []string) int {
 		return c.exit(jobDie("escalate requires an existing --report"))
 	}
 	jobsRoot := jobJobsRoot()
-	owner, label, pane, parent, role, err := jobBuilderMetadata(jobsRoot, job)
+	owner, label, pane, parent, err := jobBuilderMetadata(jobsRoot, job)
 	if err != nil {
 		return c.exit(err)
 	}
 	reason := "builder escalation"
-	if role == "captain" {
-		reason = "captain escalation"
-	}
 	suffix := ""
 	if report != "" {
 		suffix = c.uploadReportDocument(job, report)
@@ -271,14 +268,11 @@ func (c *jobCLI) joined(args []string) int {
 		return c.exit(jobDie("joined requires --pr, --head and an existing --report"))
 	}
 	jobsRoot := jobJobsRoot()
-	owner, label, pane, parent, role, err := jobBuilderMetadata(jobsRoot, job)
+	owner, label, pane, parent, err := jobBuilderMetadata(jobsRoot, job)
 	if err != nil {
 		return c.exit(err)
 	}
 	reason := "builder joined PR"
-	if role == "captain" {
-		reason = "captain joined PR"
-	}
 	suffix := c.uploadReportDocument(job, report)
 	host := jobHost()
 	if err := c.builderFlatEvent(jobsRoot, job, owner, label, pane, parent, host, "job.joined", report, suffix, reason, "", pr, head); err != nil {
@@ -456,17 +450,17 @@ func bashReadTab(line string, count int) []string {
 	return fields
 }
 
-func jobBuilderMetadata(jobsRoot, job string) (owner, label, pane, parent, role string, err error) {
+func jobBuilderMetadata(jobsRoot, job string) (owner, label, pane, parent string, err error) {
 	fields, metadataErr := jobCompletionMetadata(jobsRoot + "/" + job + "/events")
 	if metadataErr != nil {
-		return "", "", "", "", "", jobDie("cannot find job.claim/job.spawned metadata: %s", job)
+		return "", "", "", "", jobDie("cannot find job.claim/job.spawned metadata: %s", job)
 	}
 	read := bashReadTab(fields, 5)
-	owner, label, pane, parent, role = read[0], read[1], read[2], read[3], read[4]
-	if (role != "builder" && role != "captain") || parent == "" {
-		return "", "", "", "", "", jobDie("%s is not a builder claim with a parent lane (legacy captain alias is accepted)", job)
+	owner, label, pane, parent = read[0], read[1], read[2], read[3]
+	if read[4] != "builder" || parent == "" {
+		return "", "", "", "", jobDie("%s is not a builder claim with a parent lane", job)
 	}
-	return owner, label, pane, parent, role, nil
+	return owner, label, pane, parent, nil
 }
 
 // jobFindLatestReport mirrors find_latest_report: report*.md regular files in

@@ -22,7 +22,9 @@ import (
 // that finds nothing unread closes it. A line owed to a worker lane whose
 // trial has ended is dropped. The hub owns the
 // decision because it owns the inbox store and sees each arrival; the line
-// travels to the lane's node like any relay and the node daemon types it.
+// travels to the lane's node like any relay and the node daemon types it (for a
+// lane in PANEWIRE_CLAUDE_SESSION_MESSAGE_LANES it posts the line to the lane's
+// Claude Code session first: docs/claude-session-message.md).
 // The line is a plain, unidentified inject: it writes no handoffkeep row, so
 // nothing replays it after a hub restart, and the window state is in memory:
 // a hub start owes each inbox-only lane with unread items above info one line
@@ -36,7 +38,7 @@ var inboxWakeUrgency = []string{"info", "ready", "findings", "automation-failed"
 // Every type not named here (merged, closed, progress, report, ack, info,
 // idle-wake) is info.
 var inboxWakeTypeKinds = map[string]string{
-	"decision": "decision", "order": "decision", "deploy-approval": "decision",
+	"decision": "decision", "order": "order", "deploy-approval": "decision",
 	"blocked": "blocked", "watch-hold": "blocked", "culprit-hold": "blocked",
 	"automation-failed": "automation-failed",
 	"findings":          "findings",
@@ -86,6 +88,10 @@ func inboxWakeKind(kind string, e hubJobEventPayload) string {
 }
 
 func inboxWakeRank(kind string) int {
+	// Orders keep their declared display kind, but share decision urgency.
+	if kind == "order" {
+		kind = "decision"
+	}
 	for rank, k := range inboxWakeUrgency {
 		if k == kind {
 			return rank
@@ -101,7 +107,7 @@ func inboxWakeRank(kind string) int {
 // event id that merely looks like chat-N earns nothing. The hub's digest and
 // hold batches are not exempt: flushInbox files them (fileInboxOnlyBatch).
 func inboxOnlyExempt(e hubJobEventPayload) bool {
-	return e.operatorIngress || e.operatorChat
+	return e.operatorIngress
 }
 
 // inboxWakeText is the wake line. N comes from a successful count read only.
@@ -244,7 +250,12 @@ func (h *HubServer) seedStartupInboxWakes() {
 		if w.lanes == nil {
 			w.lanes = map[string]*inboxWakeLane{}
 		}
-		w.lanes[lane] = &inboxWakeLane{pending: true, class: class, startup: true}
+		w.lanes[lane] = &inboxWakeLane{
+			windowEnd: now.Add(h.inbox.policy.Relay.wakeWindow),
+			pending:   true,
+			class:     class,
+			startup:   true,
+		}
 	}
 }
 
@@ -264,10 +275,14 @@ func (h *HubServer) retryUnroutedInboxWakes() {
 	}
 }
 
+// inboxWakeMostUrgent is the highest-ranked unread kind. order shares decision's
+// rank, so on that tie order wins: the line must not depend on inbox order (hk 4458).
 func inboxWakeMostUrgent(items []laneInboxItem) string {
 	most := "info"
 	for _, item := range items {
-		if k := inboxWakeKind(item.Kind, item.Event); inboxWakeRank(k) > inboxWakeRank(most) {
+		k := inboxWakeKind(item.Kind, item.Event)
+		rank, mostRank := inboxWakeRank(k), inboxWakeRank(most)
+		if rank > mostRank || (rank == mostRank && k == "order") {
 			most = k
 		}
 	}
@@ -295,8 +310,14 @@ func (h *HubServer) sendInboxWake(lane, class string, startup bool) inboxWakeOut
 	}
 	most := inboxWakeMostUrgent(items)
 	route, agent, routed := h.resolveRelayRoute("lane.event", hubJobEventPayload{OwnerLane: lane})
-	text := inboxWakeText(lane, unread, most)
+	route, agent, routed, text, deskFallback := h.inboxWakeDestination(lane, class, route, agent, routed, unread, most)
 	detail := fmt.Sprintf("lane=%s class=%s unread=%d most_urgent=%s machine=%s pane=%s", lane, class, unread, most, route.Machine, route.Pane)
+	if deskFallback {
+		detail = fmt.Sprintf("lane=%s class=%s unread=%d most_urgent=%s desk=%s machine=%s pane=%s", lane, class, unread, most, deskPolicyLane, route.Machine, route.Pane)
+		if startup {
+			detail += " startup=true"
+		}
+	}
 	if !routed || route.Sink || route.Pane == "" || !agent.queueRelay(hubRelayInjectEvent{Type: "relay.inject", JobID: laneEventTransportID(lane, "inbox-wake"), Pane: route.Pane, Text: text}) {
 		h.logger.Info("inbox wake not sent: lane pane unreachable; retrying at the window's end or the next node hello", "lane", lane)
 		h.emitFleet(fleetEvent{Kind: "inbox_wake", Job: lane, Outcome: "skipped", Reason: "unrouted", Detail: detail})
@@ -305,6 +326,9 @@ func (h *HubServer) sendInboxWake(lane, class string, startup bool) inboxWakeOut
 	reason := class
 	if startup {
 		reason = "startup"
+	}
+	if deskFallback {
+		reason = "desk_fallback"
 	}
 	h.emitFleet(fleetEvent{Kind: "inbox_wake", Job: lane, Outcome: "sent", Reason: reason, Detail: detail})
 	return inboxWakeSent

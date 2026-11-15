@@ -134,6 +134,7 @@ func TestNodeCommandPaneCloseExactMatch(t *testing.T) {
 		{"status changed", nodeAgentJSON("w1:p1", "job-a", "working", "/work/a"), nodePaneChanged},
 		{"cwd changed", nodeAgentJSON("w1:p1", "job-a", "idle", "/work/b"), nodePaneChanged},
 		{"name changed", nodeAgentJSON("w1:p1", "job-b", "idle", "/work/a"), nodePaneChanged},
+		{"unnamed without explicit permission", nodeAgentJSON("w1:p1", "", "idle", "/work/a"), nodePaneChanged},
 		{"gone", nodeAgentJSON("w1:p9", "job-a", "idle", "/work/a"), nodePaneGone},
 	}
 	for _, test := range cases {
@@ -149,6 +150,15 @@ func TestNodeCommandPaneCloseExactMatch(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("explicit unnamed pane identity matches id and cwd", func(t *testing.T) {
+		args := nodePaneCloseArgs{PaneID: "w1:p1", Name: "job-a", AgentStatus: "idle", Cwd: "/work/a", AllowUnnamed: true}
+		fake := &nodeFakeHerdr{agents: []string{nodeAgentList(nodeAgentJSON("w1:p1", "", "idle", "/work/a"))}, read: nodeReapScreen("❯ ")}
+		result, code := nodeRun(t, &HubClient{nodeHerdr: fake.run, nodeCloseSettle: time.Millisecond}, nodeCommandPaneClose, args)
+		if code != "" || result["outcome"] != nodePaneClosed || fake.called("pane", "close", "w1:p1") != 1 {
+			t.Fatalf("result=%v code=%q calls=%v", result, code, fake.calls)
+		}
+	})
 
 	fake := &nodeFakeHerdr{agents: []string{nodeAgentList(nodeAgentJSON("w1:p1", "job-a", "idle", "/work/a"))}, closeErr: errors.New("close failed"), read: nodeReapScreen("❯ ")}
 	if _, code := nodeRun(t, &HubClient{nodeHerdr: fake.run, nodeCloseSettle: time.Millisecond}, nodeCommandPaneClose, expected); code != "close_failed" {
@@ -187,7 +197,7 @@ func TestNodeCommandPaneCloseBlocked(t *testing.T) {
 	}{
 		{name: "reviewer job closes", listed: "blocked", events: []map[string]any{claim("reviewer")}, outcome: nodePaneClosed},
 		{name: "role from the spawned receipt closes", listed: "blocked", events: []map[string]any{{"kind": "job.spawned", "payload": map[string]any{"role": "reviewer", "pane_id": "w1:p1"}}}, outcome: nodePaneClosed},
-		{name: "worker job is refused", listed: "blocked", events: []map[string]any{claim("worker")}, outcome: nodePaneChanged},
+		{name: "implementer job is refused", listed: "blocked", events: []map[string]any{claim("implementer")}, outcome: nodePaneChanged},
 		{name: "ledger with no role is refused", listed: "blocked", events: []map[string]any{{"kind": "job.claimed"}}, outcome: nodePaneChanged},
 		{name: "unknown job is refused", listed: "blocked", outcome: nodePaneChanged},
 		{name: "unset jobs root is refused", listed: "blocked", noJobs: true, events: []map[string]any{claim("reviewer")}, outcome: nodePaneChanged},

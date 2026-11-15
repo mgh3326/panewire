@@ -45,13 +45,13 @@ func TestProfileCreditLooksUpRows(t *testing.T) {
 
 func TestOmpDsflash41CreditRequiresExplicitPlacedEffort(t *testing.T) {
 	in := omp3532Inputs()
-	if _, _, _, e := in.resolveRow(admissionRequest{Profile: "omp-dsflash41", Role: "worker"}, false); e == nil || !strings.Contains(e.msg, "explicit --effort required for credit profile") {
+	if _, _, _, e := in.resolveRow(admissionRequest{Profile: "omp-dsflash41", Role: "implementer"}, false); e == nil || !strings.Contains(e.msg, "explicit --effort required for credit profile") {
 		t.Fatalf("credit rung without effort must demand one: %+v", e)
 	}
-	if _, _, _, e := in.resolveRow(admissionRequest{Profile: "omp-dsflash41", Effort: "medium", Role: "worker"}, false); e == nil || !strings.Contains(e.msg, "credit effort is not placed") {
+	if _, _, _, e := in.resolveRow(admissionRequest{Profile: "omp-dsflash41", Effort: "medium", Role: "implementer"}, false); e == nil || !strings.Contains(e.msg, "credit effort is not placed") {
 		t.Fatalf("credit rung at an unplaced effort must be refused: %+v", e)
 	}
-	row, resolved, _, e := in.resolveRow(admissionRequest{Profile: "omp-dsflash41", Effort: "high", Role: "worker"}, false)
+	row, resolved, _, e := in.resolveRow(admissionRequest{Profile: "omp-dsflash41", Effort: "high", Role: "implementer"}, false)
 	if e != nil || resolved != "high" || row.Pool != "commandcode" {
 		t.Fatalf("omp-dsflash41@high: row=%+v resolved=%q err=%+v", row, resolved, e)
 	}
@@ -63,7 +63,7 @@ func TestOmpDsflash41RankedAsCreditAlternative(t *testing.T) {
 	in := omp3532Inputs()
 	in.Rows = append(in.Rows, admissionRow{Profile: "cmd-dsflash41", Effort: "high", Pool: "commandcode", Grade: "A+", Gate: defaultGate, Placed: true})
 	var omp, cmd *admissionAlternative
-	alts := in.recommend("A+", "worker")
+	alts := in.recommend("A+", "implementer")
 	for i := range alts {
 		switch alts[i].Profile {
 		case "omp-dsflash41":
@@ -87,7 +87,7 @@ func TestOmpDsflash41RankedAsCreditAlternative(t *testing.T) {
 // reviewer role it gained in hk 3532 is refused at admission (docs/quota.md).
 func TestOmpDsflash41CreditRoleRule(t *testing.T) {
 	row := admissionRow{Profile: "omp-dsflash41", Effort: "high", Pool: "commandcode", Grade: "A+", Gate: defaultGate, Placed: true}
-	for _, role := range []string{"worker", "tester"} {
+	for _, role := range []string{"implementer"} {
 		if d := admissionRoleCheck(admissionRequest{Profile: "omp-dsflash41", Role: role}, row); d != nil {
 			t.Fatalf("credit rung must seat %s: %s", role, d.msg)
 		}
@@ -97,13 +97,13 @@ func TestOmpDsflash41CreditRoleRule(t *testing.T) {
 	}
 }
 
-// cmd-dsflash41 keeps its worker-or-tester rule and its credit ranking.
+// cmd-dsflash41 keeps its implementer-only rule and its credit ranking.
 func TestCmdDsflash41CreditUnchanged(t *testing.T) {
 	row := admissionRow{Profile: "cmd-dsflash41", Effort: "high", Pool: "commandcode", Grade: "A+", Gate: defaultGate, Placed: true}
 	if d := admissionRoleCheck(admissionRequest{Profile: "cmd-dsflash41", Role: "builder"}, row); d == nil {
 		t.Fatal("cmd-dsflash41 must still refuse a builder")
 	}
-	if d := admissionRoleCheck(admissionRequest{Profile: "cmd-dsflash41", Role: "worker"}, row); d != nil {
+	if d := admissionRoleCheck(admissionRequest{Profile: "cmd-dsflash41", Role: "implementer"}, row); d != nil {
 		t.Fatalf("cmd-dsflash41 worker: %s", d.msg)
 	}
 }

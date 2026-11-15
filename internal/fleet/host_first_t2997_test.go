@@ -17,7 +17,7 @@ func scoredAccountFixture(t *testing.T, rows []CatalogRow, shared bool) (*App, S
 		place["cloud-small"] = testClaudeA
 		place["pi"] = testClaudeB
 	}
-	a, s, q, src := hostFirstFixture(t, "worker", "B", rows, place,
+	a, s, q, src := hostFirstFixture(t, "implementer", "B", rows, place,
 		map[string]float64{"mac-b": 0.1, "cloud-small": 0.2, "cloud-tiny": 0.3, "pi": 0.4})
 	// Both accounts are waste. Account A appears first in configuration and
 	// has greater waste urgency, while B's host has the higher placement score.
@@ -117,7 +117,7 @@ func TestHostFirstT2997WasteBeatsRankedInsideHost(t *testing.T) {
 }
 
 func TestHostFirstT2997PacingUsesOnlyPresentCredit(t *testing.T) {
-	paced := PoolView{Status: "ok", Class: "spend", Blocking: ptrF(60), LongProjected: ptrF(120), Projected: ptrF(120), ShortUsed: ptrF(40)}
+	paced := PoolView{Status: "ok", Class: "spend", Blocking: ptrF(60), RankProjected: ptrF(120), Projected: ptrF(120), ShortUsed: ptrF(40)}
 	a, s := creditFixture(t, balance(80, 30*24*time.Hour), paced, "", nil)
 	src := a.Source.(*fakePlacementSource)
 	q := a.Quota.(*fakeQuota)

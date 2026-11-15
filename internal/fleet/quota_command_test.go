@@ -54,3 +54,28 @@ func TestQuotaExecRunnerSignalFailure(t *testing.T) {
 		t.Fatalf("code=%d, want %d", r.Code, exitFailure)
 	}
 }
+
+// A gate failure names its cause, not the warnings the gate prints first
+// (hk 2944): a non-timeout failure shows its first non-warning stderr line, and
+// a runner deadline shows the last non-warning stderr line after the timeout.
+func TestQuotaGateNamesFirstNonWarningLine(t *testing.T) {
+	ctx := context.Background()
+	refused := &fakeRunner{Do: func(c Command) Result {
+		return Result{Code: 4, Err: "warning: unknown pool [upstage] ignored\nerror: y\nlate line"}
+	}}
+	if err := checkQuota(runQuotaCommand(ctx, refused, Command{Name: "pacelever"}, "quota gate", time.Second), "quota gate"); err == nil || err.Error() != "quota gate: error: y" {
+		t.Fatalf("refusal = %v, want quota gate: error: y", err)
+	}
+	warningOnly := &fakeRunner{Do: func(c Command) Result {
+		return Result{Code: exitTimeout, Err: "warning: unknown pool [upstage] ignored"}
+	}}
+	if err := checkQuota(runQuotaCommand(ctx, warningOnly, Command{Name: "pacelever"}, "quota gate", time.Second), "quota gate"); err == nil || err.Error() != "quota gate: timed out after 1s" {
+		t.Fatalf("warning-only deadline = %v, want quota gate: timed out after 1s", err)
+	}
+	lastLine := &fakeRunner{Do: func(c Command) Result {
+		return Result{Code: exitTimeout, Err: "warning: x\nfirst line\nlast line"}
+	}}
+	if err := checkQuota(runQuotaCommand(ctx, lastLine, Command{Name: "pacelever"}, "quota gate", time.Second), "quota gate"); err == nil || err.Error() != "quota gate: timed out after 1s: last line" {
+		t.Fatalf("deadline with stderr = %v, want quota gate: timed out after 1s: last line", err)
+	}
+}

@@ -193,7 +193,7 @@ func TestT12ActiveJobsAPIAndHeartbeatMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	hub.jobs["job-a"] = &hubJobRecord{HubActiveJob: HubActiveJob{JobID: "job-a", AgentLabel: "worker-a", Epoch: 1, OwnerLane: "lane-a", Pane: "pane-a", Tier: "T2", Role: "worker", StartedAt: "2026-09-05T00:00:00Z", LastEventKind: "job.spawned", LastEventAt: "2026-09-05T00:01:00Z"}, Node: "host-a", Orphaned: true}
+	hub.jobs["job-a"] = &hubJobRecord{HubActiveJob: HubActiveJob{JobID: "job-a", AgentLabel: "worker-a", Epoch: 1, OwnerLane: "lane-a", Pane: "pane-a", Tier: "T2", Role: "implementer", StartedAt: "2026-09-05T00:00:00Z", LastEventKind: "job.spawned", LastEventAt: "2026-09-05T00:01:00Z"}, Node: "host-a", Orphaned: true}
 	hub.jobs["job-complete"] = &hubJobRecord{HubActiveJob: HubActiveJob{JobID: "job-complete", AgentLabel: "worker-a", Epoch: 1}, Node: "host-a", Completed: true}
 
 	request := httptest.NewRequest(http.MethodGet, "/v1/jobs?machine=host-a", nil)
@@ -206,7 +206,7 @@ func TestT12ActiveJobsAPIAndHeartbeatMetadata(t *testing.T) {
 	var jobs struct {
 		Jobs []hubConsoleJob `json:"jobs"`
 	}
-	if err := json.Unmarshal(recording.Body.Bytes(), &jobs); err != nil || len(jobs.Jobs) != 1 || jobs.Jobs[0].JobID != "job-a" || jobs.Jobs[0].Machine != "host-a" || jobs.Jobs[0].Pane != "pane-a" || jobs.Jobs[0].Tier != "T2" || jobs.Jobs[0].Role != "worker" {
+	if err := json.Unmarshal(recording.Body.Bytes(), &jobs); err != nil || len(jobs.Jobs) != 1 || jobs.Jobs[0].JobID != "job-a" || jobs.Jobs[0].Machine != "host-a" || jobs.Jobs[0].Pane != "pane-a" || jobs.Jobs[0].Tier != "T2" || jobs.Jobs[0].Role != "implementer" {
 		t.Fatalf("active jobs=%+v err=%v", jobs, err)
 	}
 	if orphaned := hub.orphanedJobs(); len(orphaned) != 1 || orphaned[0].JobID != "job-a" {
@@ -232,7 +232,7 @@ func TestT12ActiveJobsAPIAndHeartbeatMetadata(t *testing.T) {
 	if !ok || len(legacy.ActiveJobs) != 1 {
 		t.Fatalf("legacy active_jobs=%+v ok=%t", legacy.ActiveJobs, ok)
 	}
-	expanded, ok := decodeHubHeartbeatPayload([]byte(`{"status":"alive","active_jobs":[{"job_id":"job-new","agent_label":"worker-a","last_event_seq":1,"epoch":1,"owner_lane":"lane-a","pane":"pane-a","tier":"T2","role":"worker","started_at":"2026-09-05T00:00:00Z","last_event_kind":"job.spawned","last_event_at":"2026-09-05T00:01:00Z"}]}`))
+	expanded, ok := decodeHubHeartbeatPayload([]byte(`{"status":"alive","active_jobs":[{"job_id":"job-new","agent_label":"worker-a","last_event_seq":1,"epoch":1,"owner_lane":"lane-a","pane":"pane-a","tier":"T2","role":"implementer","started_at":"2026-09-05T00:00:00Z","last_event_kind":"job.spawned","last_event_at":"2026-09-05T00:01:00Z"}]}`))
 	if !ok || len(expanded.ActiveJobs) != 1 || expanded.ActiveJobs[0].Pane != "pane-a" || expanded.ActiveJobs[0].Tier != "T2" {
 		t.Fatalf("expanded active_jobs=%+v ok=%t", expanded.ActiveJobs, ok)
 	}
@@ -250,7 +250,7 @@ func TestT12JobsCLIListsAndFiltersActiveRegistry(t *testing.T) {
 		}
 		_ = json.NewEncoder(writer).Encode(struct {
 			Jobs []hubConsoleJob `json:"jobs"`
-		}{Jobs: []hubConsoleJob{{Machine: "host-a", JobID: "job-a", OwnerLane: "lane-a", Pane: "pane-a", Tier: "T2", Role: "worker"}}})
+		}{Jobs: []hubConsoleJob{{Machine: "host-a", JobID: "job-a", OwnerLane: "lane-a", Pane: "pane-a", Tier: "T2", Role: "implementer"}}})
 	}))
 	defer server.Close()
 	tokenPath := filepath.Join(t.TempDir(), "operator.env")
@@ -259,7 +259,7 @@ func TestT12JobsCLIListsAndFiltersActiveRegistry(t *testing.T) {
 	}
 	var stdout, stderr bytes.Buffer
 	code := runJobsCLI([]string{"jobs", "--hub-url", server.URL, "--hub-token-env", tokenPath, "--machine", "host-a"}, &stdout, &stderr, hubCLIDeps{HTTPClient: server.Client(), AllowInsecureForTests: true})
-	if code != ExitOK || !strings.Contains(stdout.String(), "MACHINE\tJOB_ID") || !strings.Contains(stdout.String(), "host-a\tjob-a\tlane-a\tpane-a\tT2\tworker") {
+	if code != ExitOK || !strings.Contains(stdout.String(), "MACHINE\tJOB_ID") || !strings.Contains(stdout.String(), "host-a\tjob-a\tlane-a\tpane-a\tT2\timplementer") {
 		t.Fatalf("jobs CLI code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
 }
@@ -278,11 +278,11 @@ func TestT12ScannerCarriesConsoleMetadataAndCompletionRemovesIt(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	write("00001-job.claimed.json", `{"type":"job.claimed","created_at":"2026-09-05T00:00:00Z","agent_label":"worker-a","owner_lane":"lane-a","role":"worker","t_level":"T2","epoch":1}`)
+	write("00001-job.claimed.json", `{"type":"job.claimed","created_at":"2026-09-05T00:00:00Z","agent_label":"worker-a","owner_lane":"lane-a","role":"implementer","t_level":"T2","epoch":1}`)
 	write("00002-job.spawned.json", `{"type":"job.spawned","created_at":"2026-09-05T00:01:00Z","pane_id":"pane-a"}`)
 	write("00003-job.progress.json", `{"type":"job.progress","created_at":"2026-09-05T00:02:00Z"}`)
 	jobs := scanHubActiveJobs(root)
-	if len(jobs) != 1 || jobs[0].OwnerLane != "lane-a" || jobs[0].Pane != "pane-a" || jobs[0].Tier != "T2" || jobs[0].Role != "worker" || jobs[0].StartedAt != "2026-09-05T00:00:00Z" || jobs[0].LastEventKind != "job.progress" || jobs[0].LastEventAt != "2026-09-05T00:02:00Z" {
+	if len(jobs) != 1 || jobs[0].OwnerLane != "lane-a" || jobs[0].Pane != "pane-a" || jobs[0].Tier != "T2" || jobs[0].Role != "implementer" || jobs[0].StartedAt != "2026-09-05T00:00:00Z" || jobs[0].LastEventKind != "job.progress" || jobs[0].LastEventAt != "2026-09-05T00:02:00Z" {
 		t.Fatalf("scanned console metadata=%+v", jobs)
 	}
 	write("00004-job.completed.json", `{"type":"job.completed","created_at":"2026-09-05T00:03:00Z"}`)

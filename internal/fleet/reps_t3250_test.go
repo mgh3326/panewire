@@ -346,6 +346,7 @@ func TestCreditBalancesReadSharedManualEntries(t *testing.T) {
 	now := time.Date(2026, 11, 7, 9, 0, 0, 0, time.UTC)
 	expires := time.Date(2026, 11, 16, 0, 0, 0, 0, time.UTC)
 	q := CLIQuota{
+		Now:            func() time.Time { return now },
 		Accounts:       map[string]string{"anthropic-api": "0123456789abcdef"},
 		CreditTotalUSD: map[string]float64{"anthropic-api": 200},
 		SharedLatest: func(context.Context, string) (shared.Latest, error) {
@@ -376,7 +377,7 @@ func TestPaneSweepRecordsAMergedJobOutcome(t *testing.T) {
 	defer srv.Close()
 	f := newPaneSweepFixture(t)
 	f.a.BenchStore = &BenchStore{hk: &hkQuota{base: srv.URL, token: "test-token", now: f.a.Now}, now: f.a.Now}
-	f.job("j", "worker", "42")
+	f.job("j", "implementer", "42")
 	putEvent(t, f.a, "j", "job.joined", map[string]any{"pr": "https://github.com/mgh3326/panewire/pull/9", "head": "head-9"})
 	f.tasks["42"], f.category["42"] = "merged", "completed"
 	f.prChanges["42"] = []PRChange{{Number: 9, State: "merged", Head: "head-9",
@@ -398,7 +399,7 @@ func TestAutomaticOutcomeRecordsOneRow(t *testing.T) {
 	defer srv.Close()
 	a := benchFakeApp(t, srv)
 	a.Now = func() time.Time { return time.Date(2026, 11, 7, 8, 0, 0, 0, time.UTC) }
-	putEvent(t, a, "pw-job", "job.claim", map[string]any{"task_id": "3250", "t_level": "T2", "role": "worker"})
+	putEvent(t, a, "pw-job", "job.claim", map[string]any{"task_id": "3250", "t_level": "T2", "role": "implementer"})
 	putEvent(t, a, "pw-job", "job.spawned", map[string]any{
 		"profile": "sonnet", "effort": "high", "model_id": "claude-sonnet-5-5",
 		"harness_session": map[string]any{"kind": "claude", "id": "s1"}, "task_id": "3250",

@@ -43,8 +43,7 @@ terminal files from being resent after node restart.
 
 The hub waits `--hub-grace` after a disconnected/stale presence transition
 before emitting one `job.orphaned` event. It appears in the authenticated
-`/v1/events` stream, UI Recent events, and (when Telegram is configured) as
-one metadata-only line.
+`/v1/events` stream and UI Recent events.
 
 ## Operator flow
 
@@ -129,8 +128,8 @@ does not know are not written. A failed hk read or write is a warning plus a
 
 When the node completes a job (`panewire done`, `escalate`, and the completion
 watcher) it reads that job's token usage and writes it with a second
-`PUT /v1/jobs/{job}`, after the terminal record. `panewire reap` and the
-delegate close read again and write again, before the pane closes. The `usage`
+`PUT /v1/jobs/{job}`, after the terminal record. `panewire reap` reads
+again and writes again, before the pane closes. The `usage`
 object replaces the stored one as a whole, so the later read wins; a reap read
 with no figures is not written, so it cannot erase the completion read. A job
 whose `job.spawned` carries no `harness_session` gets no usage write. A failed
@@ -159,3 +158,21 @@ began, so the claude output total can undercount (the Agent SDK cost-tracking
 guide says to read output from the result message, which a transcript
 reader has no access to). Codex `input_tokens` includes `cached_input_tokens`.
 The code is `internal/fleet/usage_reader.go` and `usage_record.go`.
+
+## Skill usage capture
+
+The same terminal PUT carries `skills` and `skills_supported` (hk 3164). The
+array replaces the stored one, and each element is `{name, source, calls}`.
+Only called skills are sent: the session lists no available-but-unused skill,
+so no zero count is recorded. Only claude has
+a record the node reads the same bounded way: `Skill` tool_use blocks in the
+session JSONL above, counted once per tool_use id (a message is written once
+per content block), with the name matched against claude's lowercase skill-id
+character set. A line the bounded scan had to skip makes the list unknown:
+no array is sent, never a partial one. Arguments, tool text and every other
+input are never decoded,
+retained or sent; no version is recorded. Every other harness sends
+`skills_supported:false` and no array. A job whose `job.spawned` carries no
+`harness_session` sends neither field. An hk refusal is the same warning as a
+failed usage write and changes nothing about job end. The code is
+`internal/fleet/usage_skills.go`.

@@ -309,6 +309,24 @@ func TestLaneInboxStoreContractDigestAndEscalationBatches(t *testing.T) {
 	})
 }
 
+func TestLaneInboxStartupKeepsHistoricalDottedBatchPending(t *testing.T) {
+	store, err := openLaneInboxStore(filepath.Join(t.TempDir(), "inbox.sqlite3"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.close()
+	if _, err := store.db.ExecContext(context.Background(), `INSERT INTO lane_inbox_batches(id,lane,text) VALUES(?,?,?)`, "batch-legacy", "legacy.parent", "1 unread inbox items | lane legacy.parent"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.quarantineInvalidBatches(); err != nil {
+		t.Fatal(err)
+	}
+	batches, err := store.pendingBatches()
+	if err != nil || len(batches) != 1 || batches[0].Lane != "legacy.parent" {
+		t.Fatalf("historical batch was lost: batches=%+v err=%v", batches, err)
+	}
+}
+
 func TestLaneInboxStoreContractQuarantineInvalidAndRecoverMustAct(t *testing.T) {
 	forEachLaneInboxBackend(t, func(t *testing.T, open func() *laneInboxStore) {
 		s := open()
@@ -486,13 +504,12 @@ func TestLaneInboxStorePostgresConcurrentStartsMigrateOnce(t *testing.T) {
 	}
 }
 
-// Every database call in the store, the Postgres backend and migrate-sqlite
-// passes a context (the CodeRabbit Major on #126). The store's contexts come
-// from s.op/s.opWithin and carry a deadline; migrate-sqlite's copy is bounded
-// by lock_timeout (TestHubMigrateSQLiteApplyFailsFastOnAHeldLock).
+// Every database call in the store and the Postgres backend passes a context
+// (the CodeRabbit Major on #126). The store's contexts come from
+// s.op/s.opWithin and carry a deadline.
 func TestLaneInboxStoreCallsTakeAContext(t *testing.T) {
 	bare := map[string]bool{"Exec": true, "Query": true, "QueryRow": true, "Begin": true, "Ping": true, "Prepare": true}
-	for _, file := range []string{"lane_inbox_store.go", "lane_inbox_store_postgres.go", "hub_migrate_sqlite.go"} {
+	for _, file := range []string{"lane_inbox_store.go", "lane_inbox_store_postgres.go"} {
 		parsed, err := parser.ParseFile(token.NewFileSet(), file, nil, 0)
 		if err != nil {
 			t.Fatal(err)
@@ -790,18 +807,17 @@ func TestLaneInboxStoreSpawnDurabilityContract(t *testing.T) {
 			if _, err = store.completeSpawn(t.Context(), task, hubSpawnOutcome{RC: 124, Stage: "placement", Reason: "timeout"}, time.Now()); err != nil {
 				t.Fatal(err)
 			}
+			// An unstarted attempt's timeout ends the attempt, not the request
+			// (hk 4660): the same reservation starts attempt 2 with no notice.
 			task, err = second.spawnTask(t.Context(), request.RequestID)
-			if err != nil || task.Status != "retryable" {
-				t.Fatalf("unbound timeout retained ownership: %+v %v", task, err)
+			if err != nil || task.Status != "accepted" || task.Attempt != 2 || task.Node != nil || !task.Deadline.After(time.Now()) {
+				t.Fatalf("unbound timeout did not start the next attempt: %+v %v", task, err)
 			}
-			task, err = second.resumeCleanedSpawn(t.Context(), task, time.Now())
-			if err != nil || task.Attempt != 2 {
-				t.Fatalf("same-key retry: %+v %v", task, err)
-			}
-			task, err = store.bindSpawn(t.Context(), request.RequestID, task.Attempt, hubSpawnRequest{RequestID: t14RequestID(984), Machine: "machine-a", Args: []string{"--job", "test-job"}, WaitSeconds: 300})
+			task, err = store.bindSpawn(t.Context(), request.RequestID, task.Attempt, hubSpawnRequest{RequestID: t14RequestID(984), Machine: "machine-a", Args: []string{"--job", "test-job"}, WaitSeconds: 300}, time.Now().UTC())
 			if err != nil {
 				t.Fatal(err)
 			}
+			task = sentSpawnFixture(t, store, task)
 			if _, err = store.completeSpawn(t.Context(), task, hubSpawnOutcome{RC: 124, Stage: "landing", Reason: "timeout", Retryable: true}, time.Now()); err != nil {
 				t.Fatal(err)
 			}
@@ -809,20 +825,11 @@ func TestLaneInboxStoreSpawnDurabilityContract(t *testing.T) {
 				t.Fatal(err)
 			}
 			var notifications int
-			if err = second.db.QueryRow(`SELECT count(*) FROM spawn_notifications`).Scan(&notifications); err != nil || notifications != 3 {
+			if err = second.db.QueryRow(`SELECT count(*) FROM spawn_notifications`).Scan(&notifications); err != nil || notifications != 2 {
 				t.Fatalf("outbox %d %v", notifications, err)
 			}
 			if _, err = store.db.Exec(`UPDATE spawn_notifications SET delivered=1`); err != nil {
 				t.Fatal(err)
-			}
-			// The snapshot migrator must refuse rather than silently drop spawn ownership.
-			tx, err := store.db.BeginTx(t.Context(), nil)
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer tx.Rollback()
-			if _, err = readHubInboxSnapshotTx(t.Context(), tx, store.dialect); err == nil || !strings.Contains(err.Error(), "spawn ownership exists") {
-				t.Fatalf("inbox-only migration dropped spawn state: %v", err)
 			}
 		})
 	}
@@ -864,4 +871,38 @@ func TestLaneInboxStoreContractSettled(t *testing.T) {
 		}
 		expect("plain", true)
 	})
+}
+
+// A database that recorded 0011_spawn_attempt_grants as it was before
+// spawn_attempt_start_by existed (438be187) still gets that table on
+// upgrade, from its own migration (hk 4612).
+func TestLaneInboxStorePostgresUpgradeAfterOlder0011AddsStartBy_t4612(t *testing.T) {
+	config, _ := hubPostgresTestSchema(t)
+	first, err := openLaneInboxStorePostgresConfig(context.Background(), config.Copy())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Roll the schema back to what the 438be187 hub left: 0011 recorded,
+	// no spawn_attempt_start_by and no later migration that adds it.
+	for _, statement := range []string{
+		`DROP TABLE spawn_attempt_start_by`,
+		`DELETE FROM panewire_schema_migrations WHERE version='0014_spawn_attempt_start_by'`,
+	} {
+		if _, err := first.db.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var recorded bool
+	if err := first.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM panewire_schema_migrations WHERE version='0011_spawn_attempt_grants')`).Scan(&recorded); err != nil || !recorded {
+		t.Fatalf("0011 recorded=%v err=%v", recorded, err)
+	}
+	_ = first.close()
+	second, err := openLaneInboxStorePostgresConfig(context.Background(), config.Copy())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.close()
+	if err := second.recordSpawnStartBy(context.Background(), "00000000-0000-4000-8000-000000461299", 1); err != nil {
+		t.Fatalf("upgraded database lacks spawn_attempt_start_by: %v", err)
+	}
 }

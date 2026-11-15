@@ -27,6 +27,11 @@ const (
 	// devinFreeCapKey is the reserved pool_max_concurrent key for the SWE-2
 	// free rungs.
 	devinFreeCapKey = "devin-free"
+	// freeBandPerAccountLimit is the concurrent free-band launches one account
+	// holds: one. A burst of submissions onto the same account's free band
+	// trips the free limit, so the second concurrent launch already moves to
+	// another pool (hk 4765).
+	freeBandPerAccountLimit = 1
 	// degradedPoolCapCount marks a selection that could not read the live
 	// count: the cap did not apply to it (fail-open).
 	degradedPoolCapCount = "pool_cap_count_unavailable"
@@ -65,14 +70,15 @@ func poolMaxConcurrent(quota map[string]any) map[string]int {
 	return caps
 }
 
-// liveSpawnsReply is the body of the hub's GET /v1/spawns/live: live hub
-// spawns by the profile each was placed on.
+// liveSpawnsReply is the body of the hub's GET /v1/spawns/live: live spawns by
+// the profile each was placed on, hub-placed and direct alike.
 type liveSpawnsReply struct {
 	Profiles map[string]int `json:"profiles"`
 }
 
 // liveSpawnProfiles counts live spawns by placed profile. The hub's own App
-// reads its operations directly; any other App reads them from the hub.
+// reads its operations and its nodes' reported jobs directly; any other App
+// reads them from the hub.
 func (a *App) liveSpawnProfiles(ctx context.Context) (map[string]int, error) {
 	if a.LiveSpawnProfiles != nil {
 		return a.LiveSpawnProfiles(ctx, a.RequestID)
@@ -109,6 +115,11 @@ type poolCapGate struct {
 	live        map[string]int // by pool
 	freeLive    int            // SWE-2 free rungs (devinFreeCapKey)
 	unavailable bool
+	// freeByAccount counts live free-band launches by account key; loaded
+	// lazily, only when a free rung reaches the per-account check.
+	freeByAccount           map[string]int
+	freeAccountsLoaded      bool
+	freeAccountsUnavailable bool
 }
 
 func (a *App) newPoolCapGate(rows []CatalogRow) *poolCapGate {
@@ -160,6 +171,53 @@ func (g *poolCapGate) load(ctx context.Context) {
 	g.freeLive = g.freeRungSpawns(profiles)
 }
 
+// freeAccountFull reports whether account already holds a concurrent free-band
+// launch: the second one moves to another pool (hk 4765). A selection without
+// the fleet-wide launch record (no hook) or with an unreadable one skips the
+// check, so the operator cap stays the only gate there.
+func (g *poolCapGate) freeAccountFull(ctx context.Context, account string) (string, int) {
+	if account == "" {
+		return "", 0
+	}
+	if !g.freeAccountsLoaded {
+		g.ensureFreeAccounts(ctx)
+	}
+	if g.freeAccountsUnavailable {
+		return "", 0
+	}
+	if live := g.freeByAccount[account]; live >= freeBandPerAccountLimit {
+		return devinFreeCapKey, live
+	}
+	return "", 0
+}
+
+func (g *poolCapGate) ensureFreeAccounts(ctx context.Context) {
+	g.freeAccountsLoaded = true
+	if g.a.LivePlacedByAccount == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, poolCapReadTimeout)
+	defer cancel()
+	placed, err := g.a.LivePlacedByAccount(ctx, g.a.RequestID)
+	if err != nil {
+		g.freeAccountsUnavailable = true
+		g.a.warn("%s: %v; the per-account free-band check does not apply to this selection", degradedPoolCapCount, err)
+		return
+	}
+	// Fold seat names to the catalog profiles they run (a launch placed
+	// through builder-devin counts as devin-swe2), the way the pool cap
+	// folds its own live count.
+	counts := map[string]int{}
+	for account, profiles := range placed {
+		for profile, n := range profiles {
+			if _, free := devinFreeRungs[g.canon(profile)]; free {
+				counts[account] += n
+			}
+		}
+	}
+	g.freeByAccount = counts
+}
+
 // canon maps a placed profile (a seat name or a catalog profile) to the
 // catalog profile it runs.
 func (g *poolCapGate) canon(profile string) string {
@@ -202,7 +260,7 @@ func (g *poolCapGate) freeRungSpawns(profiles map[string]int) int {
 // degraded names what the selection record reports when the count was needed
 // and unreadable.
 func (g *poolCapGate) degraded() []string {
-	if g.unavailable {
+	if g.unavailable || g.freeAccountsUnavailable {
 		return []string{degradedPoolCapCount}
 	}
 	return nil
@@ -213,9 +271,11 @@ func (g *poolCapGate) degraded() []string {
 // and their limits.
 func (p *selPlan) poolAtCapNote() string {
 	var caps []string
+	limits := map[string]int{}
 	for _, c := range p.cands {
 		if c.reason == reasonPoolAtCap && c.cap != "" && !slices.Contains(caps, c.cap) {
 			caps = append(caps, c.cap)
+			limits[c.cap] = c.capLimit
 		}
 	}
 	if len(caps) == 0 {
@@ -223,7 +283,13 @@ func (p *selPlan) poolAtCapNote() string {
 	}
 	slices.Sort(caps)
 	for i, key := range caps {
-		caps[i] = fmt.Sprintf("%s=%d", key, p.poolCaps[key])
+		limit, ok := p.poolCaps[key]
+		if !ok {
+			// A per-account free-band drop names the reserved key without an
+			// operator cap: report the gate's own limit.
+			limit = limits[key]
+		}
+		caps[i] = fmt.Sprintf("%s=%d", key, limit)
 	}
 	return "; " + reasonPoolAtCap + ": " + strings.Join(caps, ", ") + " at [quota].pool_max_concurrent"
 }

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -139,6 +140,72 @@ func (client *HubClient) nodeJobResult(args nodeJobResultArgs) (any, string) {
 			result.Findings = data
 		}
 	}
+	// The ledger is read before the report file: a report the fleet deleted
+	// after the pin (hk 3685) is still posted, and the completion receipt names
+	// its bytes.
+	var completedSHA string
+	events, err := root.OpenRoot("events")
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, "result_failed"
+	}
+	if err == nil {
+		defer events.Close()
+		dir, err := events.Open(".")
+		if err != nil {
+			return nil, "result_failed"
+		}
+		entries, err := dir.ReadDir(-1)
+		dir.Close()
+		if err != nil {
+			return nil, "result_failed"
+		}
+		activity := 0
+		for _, entry := range entries {
+			if !entry.Type().IsRegular() || !nodeJobBookkeepingEvent(entry.Name()) {
+				activity++
+			}
+		}
+		result.ActivityEvents = &activity
+		for _, entry := range entries {
+			if !strings.HasSuffix(entry.Name(), "-job.completed.json") {
+				continue
+			}
+			f, err := openNodeResultFile(events, entry.Name())
+			if err != nil {
+				continue
+			}
+			data, err := io.ReadAll(io.LimitReader(f, 1<<20))
+			f.Close()
+			if err != nil {
+				return nil, "result_failed"
+			}
+			var event struct {
+				Kind    string `json:"kind"`
+				Type    string `json:"type"`
+				Payload struct {
+					Document     string `json:"document"`
+					Report       string `json:"report"`
+					ReportSHA256 string `json:"report_sha256"`
+				} `json:"payload"`
+			}
+			if json.Unmarshal(data, &event) != nil || (event.Kind != "job.completed" && event.Type != "job.completed") {
+				continue
+			}
+			result.Completed = true
+			// The entries are in ledger order, so the last completion wins: a
+			// later round's report is the job's current one. Only a completion
+			// of this directory's report.md names the bytes this field answers
+			// for; another round's report is not this file.
+			if event.Payload.Document != "" && event.Payload.ReportSHA256 != "" && filepath.Base(event.Payload.Report) == "report.md" {
+				completedSHA = event.Payload.ReportSHA256
+			}
+		}
+	}
+	if result.ActivityEvents == nil {
+		// No events directory: the ledger holds nothing after the claim.
+		zero := 0
+		result.ActivityEvents = &zero
+	}
 	f, err = openNodeResultFile(root, "report.md")
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, "result_failed"
@@ -176,56 +243,11 @@ func (client *HubClient) nodeJobResult(args nodeJobResultArgs) (any, string) {
 			line = previous
 		}
 		result.Report = nodeJobReport{true, size, hex.EncodeToString(hash.Sum(nil)), utf8PrefixWithin(strings.ToValidUTF8(string(line), "�"), nodeJobLastLineLimit)}
-	}
-	events, err := root.OpenRoot("events")
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return nil, "result_failed"
-	}
-	if err == nil {
-		defer events.Close()
-		dir, err := events.Open(".")
-		if err != nil {
-			return nil, "result_failed"
-		}
-		entries, err := dir.ReadDir(-1)
-		dir.Close()
-		if err != nil {
-			return nil, "result_failed"
-		}
-		activity := 0
-		for _, entry := range entries {
-			if !entry.Type().IsRegular() || !nodeJobBookkeepingEvent(entry.Name()) {
-				activity++
-			}
-		}
-		result.ActivityEvents = &activity
-		for _, entry := range entries {
-			if !strings.HasSuffix(entry.Name(), "-job.completed.json") {
-				continue
-			}
-			f, err := openNodeResultFile(events, entry.Name())
-			if err != nil {
-				continue
-			}
-			data, err := io.ReadAll(io.LimitReader(f, 1<<20))
-			f.Close()
-			if err != nil {
-				return nil, "result_failed"
-			}
-			var event struct {
-				Kind string `json:"kind"`
-				Type string `json:"type"`
-			}
-			if json.Unmarshal(data, &event) == nil && (event.Kind == "job.completed" || event.Type == "job.completed") {
-				result.Completed = true
-				break
-			}
-		}
-	}
-	if result.ActivityEvents == nil {
-		// No events directory: the ledger holds nothing after the claim.
-		zero := 0
-		result.ActivityEvents = &zero
+	} else if completedSHA != "" {
+		// The report's bytes are in hk under the pinned key: the sha256 the
+		// completion recorded is its identity. The byte count and last line
+		// were facts of the local file and go with it.
+		result.Report = nodeJobReport{Present: true, SHA256: completedSHA}
 	}
 	return result, ""
 }

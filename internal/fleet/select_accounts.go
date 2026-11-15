@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"slices"
+	"sort"
 	"strings"
 	"time"
 
@@ -37,7 +38,7 @@ func (sp *selPresence) hostEligible(h selHost, seat *Seat) bool {
 
 // canMeasure is hostEligible without the placement restriction.
 func (sp *selPresence) canMeasure(h selHost, seat *Seat) bool {
-	return h.eligible && (!h.excluded || h.restricted) && (h.awake || h.wakeable) && (seat.Capability == "standard" || boolean(h.cfg, seat.Capability, false))
+	return h.eligible && (!h.excluded || h.restricted) && (h.awake || h.wakeable) && (seat.Capability == "standard" || capability(sp.ready.states, h.name, h.cfg, seat.Capability))
 }
 
 func (sp *selPresence) hasHost(seat *Seat) bool {
@@ -57,24 +58,24 @@ func (sp *selPresence) bindings(seat *Seat, pool string) []accountBinding {
 		if !sp.canMeasure(h, seat) {
 			continue
 		}
-		key := hostAccount(sp.presence, pool, h.presence, sp.now, sp.presTTL)
-		if key == "" {
-			continue
-		}
-		i := slices.IndexFunc(bindings, func(b accountBinding) bool { return b.key == key })
-		if i < 0 {
-			bindings = append(bindings, accountBinding{key: key})
-			i = len(bindings) - 1
-		}
-		bindings[i].holders = append(bindings[i].holders, h)
-		if sp.hostEligible(h, seat) {
-			// The readiness filter drops the pair before ranking: the host
-			// stays a holder (it can still measure the account) but is not
-			// offered this seat.
-			if code := sp.readinessDrop(h, seat); code != "" {
-				continue
+		// A host holds one account per pool, except a multi-account pool
+		// (commandcode: every account omp holds), where each is its own binding.
+		for _, key := range hostAccounts(sp.presence, pool, h.presence, sp.now, sp.presTTL) {
+			i := slices.IndexFunc(bindings, func(b accountBinding) bool { return b.key == key })
+			if i < 0 {
+				bindings = append(bindings, accountBinding{key: key})
+				i = len(bindings) - 1
 			}
-			bindings[i].hosts = append(bindings[i].hosts, h)
+			bindings[i].holders = append(bindings[i].holders, h)
+			if sp.hostEligible(h, seat) {
+				// The readiness filter drops the pair before ranking: the host
+				// stays a holder (it can still measure the account) but is not
+				// offered this seat.
+				if code := sp.readinessDrop(h, seat); code != "" {
+					continue
+				}
+				bindings[i].hosts = append(bindings[i].hosts, h)
+			}
 		}
 	}
 	bindings = slices.DeleteFunc(bindings, func(b accountBinding) bool { return len(b.hosts) == 0 })
@@ -132,6 +133,29 @@ func (sp *selPresence) account(ctx context.Context, key, pool string, hosts []se
 		local := ordered[i]
 		copy(ordered[1:i+1], ordered[:i])
 		ordered[0] = local
+	}
+	if sp.a.planOnly {
+		// A plan measures nothing: a refresh writes presence, lease and
+		// observation to the shared quota store. Name the measurement the
+		// spawn would run and judge the stored reading as it is, so the rung
+		// drops as would_measure instead of measure_failed.
+		host := ""
+		if len(ordered) > 0 {
+			host = ordered[0].name
+		}
+		sp.a.wouldMeasureLine(host, pool)
+		sp.refreshed[key] = accountRefresh{measured: measureWould, host: host, err: fail(exitEvictionUnconfirmed, "would measure account %s on %s before a spawn", key, host)}
+		return acc
+	}
+	if sp.a.ScheduleQuotaRefresh != nil && sp.a.nativeQuotaPool(pool) {
+		for _, host := range ordered {
+			sp.a.scheduleQuotaRefresh(host.name, pool)
+		}
+		sp.refreshPending = true
+		sp.refreshed[key] = accountRefresh{measured: "pending", err: ErrQuotaRefreshPending}
+		acc = SharedAccount{Key: key, Degraded: true}
+		sp.accounts[key] = acc
+		return acc
 	}
 	refresh, cancel := context.WithTimeout(ctx, sp.a.placementTTL("measure_timeout_s", 60))
 	defer cancel()
@@ -195,7 +219,11 @@ func (sp *selPresence) unknownJudgment(b accountBinding, why string) quotaJudgme
 	}
 	host, status := b.hosts[0], exitEvictionUnconfirmed
 	r := sp.refreshed[b.key]
-	if r.measured != "" {
+	if r.measured == measureWould {
+		// A plan skipped the measurement; name what the spawn would run
+		// instead of reporting a measurement that never ran.
+		why = "would_measure"
+	} else if r.measured != "" {
 		why = "measure_" + why
 		if r.measured == "failed" {
 			why = "measure_failed"
@@ -232,15 +260,20 @@ func (p *selPlan) classifyRung(c *selCand, account *PoolView) {
 func (p *selPlan) classify(c *selCand, v PoolView) {
 	c.blocking, c.projected, c.urgency, c.resetHrs = v.Blocking, v.Projected, v.Urgency, v.ResetHours
 	c.longProj = longProjection(v)
+	c.headroom = p.policy.headroomFor(v.Shortest, p.req.expected, p.windowBurn(c.row.Pool, v.Shortest))
 	c.wasteGroup = v.Group
 	if p.policy.isCredit(c.row.Pool) || v.Class == "credit" {
 		c.creditPool = true
 		c.creditLeft = false
-		// A credit pool ranks in the free band (version 3); "credit" names
-		// the pool class inside it.
+		// Version 3 retains the free index; the comparator places credit after free.
 		c.tierName, c.tier = creditTier, slices.Index(p.order, "free")
 		if v.Class == "exclude" {
 			c.reason, c.code, c.outcome = "pool_excluded", outcomeNoRoleCandidate, "dropped:pool_excluded"
+			return
+		}
+		if v.Credit != nil && v.Credit.LeftPct <= 0 {
+			c.reason, c.code, c.outcome = "credit_exhausted", outcomeQuotaExhausted, "dropped:credit_exhausted"
+			c.tier, c.creditSince = -1, v.Credit.MeasuredAt
 			return
 		}
 		at := p.req.creditAt
@@ -261,7 +294,8 @@ func (p *selPlan) classify(c *selCand, v PoolView) {
 			p.creditMissing = append(p.creditMissing, c.row.Pool)
 		}
 		if ok, hours := v.Credit.expiring(at); ok {
-			c.creditLeft = true
+			c.creditLeft = v.Credit.StaleAt.IsZero()
+			c.staleCredit = !v.Credit.StaleAt.IsZero()
 			c.credit = &creditFinal{balance: v.Credit, hoursLeft: hours}
 			if v.Credit.BalanceUSD != nil {
 				burn := v.Credit.BurnUSDPerH
@@ -333,6 +367,11 @@ func gateOutcome(err error) string {
 }
 
 func hostGateFailure(err error) bool {
+	// A refusal the request, the catalog or policy decided reads the same on
+	// every host: it is the candidate's, not the host's.
+	if gateCodeNote(err) != "" {
+		return false
+	}
 	code := gateOutcome(err)
 	return code == outcomeNoEligibleHost || code == outcomePolicyUnavailable
 }
@@ -386,6 +425,14 @@ func (sp *selPresence) admitAccount(ctx context.Context, qr QuotaRequest, c *sel
 			j, err = sp.a.judgeGate(ctx, qr, c.row.Pool, quotaJudgment{Host: h.name, AccountKey: c.accountKey, Source: source})
 		} else {
 			j, err = sp.a.judgeHost(ctx, qr, c.row.Pool, h.name, h.local, c.accountKey, acc)
+		}
+		if errors.Is(err, ErrQuotaRefreshPending) {
+			// The final gate can require a newer observation than the one
+			// selection read. Queue all holders just as for an initially
+			// stale account, and keep the selection pending.
+			sp.account(ctx, c.accountKey, c.row.Pool, c.holders, true)
+			sp.refreshPending = true
+			return append(judgments, j), err
 		}
 		if err != nil && !c.creditPool && gateOutcome(err) == outcomeQuotaUnknown {
 			if _, refreshed := sp.refreshed[c.accountKey]; !refreshed {
@@ -451,7 +498,7 @@ func (a *App) selectionRefused(ctx context.Context, s Spawn, req selReq, p *selP
 			}
 			p.outcome = outcomeNoRoleCandidate
 			note := fmt.Sprintf(": no account admitted routing role %s%s%s%s", routingRole(req), hostScope(s), p.capsGap+p.hostDropNote(), p.poolAtCapNote())
-			return p, fail(exitSeatRefused, "%s%s%s", c.reason, note, rolePurposeHint(s))
+			return p, fail(exitSeatRefused, "%s%s", c.reason, note)
 		}
 	}
 	order := []string{outcomeQuotaUnknown, outcomeAuthUnavailable, outcomeNoEligibleHost, outcomePolicyUnavailable, outcomeNoRoleCandidate}
@@ -472,6 +519,12 @@ func (a *App) selectionRefused(ctx context.Context, s Spawn, req selReq, p *selP
 		if code == outcomeNoEligibleHost {
 			gap = p.capsGap + p.hostDropNote()
 		}
+		if code == outcomePolicyUnavailable {
+			gap = gateBlockNote(accounts)
+		}
+		if code == outcomeQuotaUnknown {
+			gap = wouldMeasureNote(accounts)
+		}
 		return p, fail(exit, "%s: no account admitted routing role %s%s%s%s", code, routingRole(req), hostScope(s), gap, p.poolAtCapNote())
 	}
 	if slices.ContainsFunc(accounts, func(c *selCand) bool { return c.code == outcomeQuotaExhausted }) {
@@ -488,11 +541,49 @@ func (a *App) selectionRefused(ctx context.Context, s Spawn, req selReq, p *selP
 	return p, fail(exitSeatRefused, "%s: %s: no profile passes role, retirement, grade, gate and seat rules", reasonRoleNoCandidate, outcomeNoRoleCandidate)
 }
 
-func rolePurposeHint(s Spawn) string {
-	if s.Profile == "codex-astra" {
-		return " (codex-astra는 --purpose " + strings.Join(astraPurposeValues[:], "|") + " 중 하나를 지정하세요)"
+// gateBlockNote names the gate refusals that decided candidates without a
+// quota reading — the request, the catalog or policy — so a
+// POLICY_UNAVAILABLE refusal says which gate code refused, not only the
+// outcome.
+func gateBlockNote(cands []*selCand) string {
+	var codes []string
+	for _, c := range cands {
+		code, ok := strings.CutPrefix(c.reason, "gate_blocked:")
+		if !ok || code == "" || slices.Contains(codes, code) {
+			continue
+		}
+		codes = append(codes, code)
 	}
-	return ""
+	if len(codes) == 0 {
+		return ""
+	}
+	sort.Strings(codes)
+	if len(codes) > 3 {
+		codes = append(codes[:3], "…")
+	}
+	return "; gate refused: " + strings.Join(codes, ", ")
+}
+
+// wouldMeasureNote names the measurements a dry run skipped, so its refusal
+// says the plan stopped at a measurement it must not run, not at an unknown
+// quota.
+func wouldMeasureNote(cands []*selCand) string {
+	var seen []string
+	for _, c := range cands {
+		for _, j := range c.judgments {
+			if j.Measured != measureWould {
+				continue
+			}
+			name := fmt.Sprintf("host=%s pool=%s", j.Host, c.row.Pool)
+			if !slices.Contains(seen, name) {
+				seen = append(seen, name)
+			}
+		}
+	}
+	if len(seen) == 0 {
+		return ""
+	}
+	return "; a spawn would measure " + strings.Join(seen, ", ") + " first, and a dry run measures nothing"
 }
 
 func routingRole(req selReq) string {

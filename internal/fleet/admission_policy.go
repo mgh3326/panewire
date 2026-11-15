@@ -5,15 +5,15 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
-	"path/filepath"
 	"slices"
 	"strings"
 	"time"
 
+	"github.com/mgh3326/panewire/internal/configpath"
 	"github.com/pelletier/go-toml/v2"
 )
 
-// admissionPoolPolicy is one pool's operator policy from pacelever's config
+// admissionPoolPolicy is one pool's operator policy from panewire's config
 // file: its class (spend, preserve or exclude, until a date), the cutoff,
 // subscription and ranking weights.
 type admissionPoolPolicy struct {
@@ -26,14 +26,12 @@ type admissionPoolPolicy struct {
 }
 
 // admissionPolicy is the policy the gate judges with. It is read from
-// pacelever's config.toml — the file the operator edits with `pacelever
-// policy set` — so moving the verdict leaves the operator's policy in place.
+// panewire's config.toml.
 type admissionPolicy struct {
 	Pools    map[string]admissionPoolPolicy
 	Profiles map[string]*bool
 	Settings map[string]float64
-	// Accounts is pacelever's [quota.accounts]: the account fingerprint this
-	// host is pinned to per pool, which pacelever's own gate judges.
+	// Accounts contains the account fingerprint this host is pinned to per pool.
 	Accounts map[string]string
 }
 
@@ -41,41 +39,34 @@ type admissionPolicy struct {
 // any other pool is ignored, as pacelever ignores it.
 var admissionPolicyPools = []string{"claude", "codex", "grok", "kimi", "devin", "kiro", "agy", "clinepass", "commandcode", "anthropic-api", "openai-api"}
 
-// paceleverConfigPath is pacelever's config file: PACELEVER_CONFIG, else
-// config.toml under $XDG_CONFIG_HOME/pacelever (or ~/.config/pacelever).
-func paceleverConfigPath(getenv func(string) string, home string) (path, legacy string) {
-	if p := getenv("PACELEVER_CONFIG"); p != "" {
-		return p, ""
+// readPanewireConfig checks panewire's path before the pacelever and scopefuel
+// paths. Only a missing file falls through; an unreadable file fails closed.
+func readPanewireConfig(getenv func(string) string, home string) (data []byte, found bool, err error) {
+	paths := configpath.AdmissionCandidates(getenv, home, "config.toml")
+	_, variable, explicit := configpath.Explicit(getenv)
+	for _, path := range paths {
+		data, err = os.ReadFile(path)
+		if errors.Is(err, fs.ErrNotExist) {
+			if explicit {
+				return nil, false, fmt.Errorf("%s %q does not exist", variable, path)
+			}
+			continue
+		}
+		if err != nil {
+			if explicit {
+				return nil, false, fmt.Errorf("cannot read %s %q", variable, path)
+			}
+			return nil, false, fmt.Errorf("cannot read panewire configuration %q", path)
+		}
+		return data, true, nil
 	}
-	base := getenv("XDG_CONFIG_HOME")
-	if base == "" {
-		base = filepath.Join(home, ".config")
-	}
-	return filepath.Join(base, "pacelever", "config.toml"), filepath.Join(base, "scopefuel", "config.toml")
-}
-
-// readPaceleverConfig reads pacelever's config file, falling back to the
-// legacy scopefuel file as pacelever does. found is false when neither
-// exists.
-func readPaceleverConfig(getenv func(string) string, home string) (data []byte, found bool, err error) {
-	path, legacy := paceleverConfigPath(getenv, home)
-	data, err = os.ReadFile(path)
-	if errors.Is(err, fs.ErrNotExist) && legacy != "" {
-		data, err = os.ReadFile(legacy)
-	}
-	if errors.Is(err, fs.ErrNotExist) {
-		return nil, false, nil
-	}
-	if err != nil {
-		return nil, false, fmt.Errorf("cannot read pacelever configuration")
-	}
-	return data, true, nil
+	return nil, false, nil
 }
 
 // loadAdmissionPolicy reads the policy. A missing file is the default policy;
 // an unreadable or invalid one is an error, never a guessed policy.
 func loadAdmissionPolicy(getenv func(string) string, home string) (admissionPolicy, error) {
-	data, found, err := readPaceleverConfig(getenv, home)
+	data, found, err := readPanewireConfig(getenv, home)
 	if err != nil || !found {
 		return admissionPolicy{}, err
 	}
@@ -94,7 +85,7 @@ func parseAdmissionPolicy(data []byte) (admissionPolicy, error) {
 		} `toml:"quota"`
 	}
 	if err := toml.Unmarshal(data, &raw); err != nil {
-		return admissionPolicy{}, fmt.Errorf("invalid pacelever configuration (values withheld)")
+		return admissionPolicy{}, fmt.Errorf("invalid panewire configuration (values withheld)")
 	}
 	p := admissionPolicy{Pools: map[string]admissionPoolPolicy{}, Profiles: map[string]*bool{}, Settings: raw.Settings, Accounts: map[string]string{}}
 	for pool, fp := range raw.Quota.Accounts {

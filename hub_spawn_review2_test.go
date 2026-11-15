@@ -37,7 +37,7 @@ func TestOperatorSpawnAcceptsCanonicalSubmissionArgs(t *testing.T) {
 				Config:     fleet.Config{Local: map[string]any{"machine_id": "machine-a"}},
 				Repository: &fleet.Repository{Name: "project", Origin: origin, LocalRoot: root, Worktree: "project.job", Checkout: &fleet.HubCheckout{Origin: origin, Mode: "branch", Branch: "wk/task", Sha: strings.Repeat("a", 40), Dir: "project.job"}},
 			}
-			request, err := app.PrepareSubmission(t.Context(), fleet.Spawn{CWD: cwd, Prompt: brief, Profile: "auto", Host: "auto", Label: "job", Job: "job", T: "T1", Task: "42", Owner: "parent", Role: "worker", Grade: "S+", ExcludeHosts: excluded, Containment: "hk:12"})
+			request, err := app.PrepareSubmission(t.Context(), fleet.Spawn{CWD: cwd, Prompt: brief, Profile: "auto", Host: "auto", Label: "job", Job: "job", T: "T1", Task: "42", Owner: "parent", Role: "implementer", Grade: "S+", ExcludeHosts: excluded, Containment: "hk:12"})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -69,7 +69,7 @@ func TestOperatorSpawnAcceptsCanonicalSubmissionArgs(t *testing.T) {
 
 func TestOperatorSpawnGradeAndRoleBoundary(t *testing.T) {
 	for _, grade := range []string{"C", "B", "A", "A+", "S", "S+", "SS"} {
-		args := []string{"--grade", grade, "--role", "counsel"}
+		args := []string{"--grade", grade, "--role", "consult"}
 		if !validHubSpawnArgsForMode(args, true) {
 			t.Fatalf("operator grade rejected: %s", grade)
 		}
@@ -154,10 +154,11 @@ func TestSpawnBoundTimeoutCleanupAttestationContract(t *testing.T) {
 					if err != nil {
 						t.Fatal(err)
 					}
-					task, err = s.bindSpawn(t.Context(), req.RequestID, task.Attempt, hubSpawnRequest{RequestID: t14RequestID(998), Machine: "machine-a"})
+					task, err = s.bindSpawn(t.Context(), req.RequestID, task.Attempt, hubSpawnRequest{RequestID: t14RequestID(998), Machine: "machine-a"}, time.Now().UTC())
 					if err != nil {
 						t.Fatal(err)
 					}
+					task = sentSpawnFixture(t, s, task)
 					// First a hub deadline passes while the node is still running.
 					if _, err = s.completeSpawn(t.Context(), task, hubSpawnOutcome{RC: 124, Reason: "timeout", Retryable: true}, now); err != nil {
 						t.Fatal(err)
@@ -171,21 +172,19 @@ func TestSpawnBoundTimeoutCleanupAttestationContract(t *testing.T) {
 					if err != nil {
 						t.Fatal(err)
 					}
-					want := "deadline_exceeded"
+					// The node's cleanup proof ends the attempt, not the request
+					// (hk 4660): the request starts attempt 2 under the same
+					// reservation. Without the proof it keeps its ownership.
+					want, attempt := "deadline_exceeded", 1
 					if attested {
-						want = "retryable"
+						want, attempt = "accepted", 2
 					}
-					if task.Status != want || task.Outcome.Retryable != attested {
+					if task.Status != want || task.Attempt != attempt || task.Outcome.Retryable != attested {
 						t.Fatalf("ownership status: %+v", task)
 					}
 					req.RequestID = t14RequestID(997)
-					_, fresh, err := s.claimSpawn(t.Context(), req, "test-job", "parent", now)
-					if attested {
-						if err != nil || !fresh {
-							t.Fatalf("verified cleanup blocked retry: %v", err)
-						}
-					} else if !errors.Is(err, errSpawnClaimed) {
-						t.Fatalf("unproven timeout freed ownership: %v", err)
+					if _, _, err := s.claimSpawn(t.Context(), req, "test-job", "parent", now); !errors.Is(err, errSpawnClaimed) {
+						t.Fatalf("a request still queued or unproven freed its ownership: %v", err)
 					}
 				})
 			}
@@ -223,7 +222,7 @@ func TestAsyncSpawnCompletedNodeRefusalsRemainTerminal(t *testing.T) {
 				t.Fatal(err)
 			}
 			dispatch := hubSpawnRequest{RequestID: t14RequestID(996), Machine: "machine-a", CWDKey: "project", Brief: hubSpawnBrief{Inline: "task"}, Args: []string{"--job", "test-job"}, WaitSeconds: 600, DeadlineMS: task.Deadline.UnixMilli()}
-			task, err = h.inbox.store.bindSpawn(t.Context(), req.RequestID, task.Attempt, dispatch)
+			task, err = h.inbox.store.bindSpawn(t.Context(), req.RequestID, task.Attempt, dispatch, time.Now().UTC())
 			if err != nil {
 				t.Fatal(err)
 			}

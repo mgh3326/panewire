@@ -36,6 +36,19 @@ func TestLanesStandbyAC1ParsePresent(t *testing.T) {
 	}
 }
 
+func TestReportRelayRoutesRetainHistoricalDottedLanes(t *testing.T) {
+	routes, err := parseReportRelayRoutes([]byte(`{"lanes":{"legacy.parent":{"machine":"machine-a","pane":"w1:p1"},"child-lane":{"machine":"machine-b","pane":"w2:p2","parent":"legacy.parent"}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := routes["legacy.parent"]; got.Machine != "machine-a" {
+		t.Fatalf("historical route dropped: %+v", got)
+	}
+	if got := routes["child-lane"]; got.Parent != "legacy.parent" {
+		t.Fatalf("historical parent dropped: %+v", got)
+	}
+}
+
 func TestLanesStandbyAC2ExistingFixtureUnchanged(t *testing.T) {
 	routes, err := parseReportRelayRoutes([]byte(r20t8Lanes))
 	if err != nil {

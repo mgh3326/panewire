@@ -50,14 +50,14 @@ func t3434Hub(t *testing.T, path string) (*HubServer, *hubAgent, *fakeHandoffkee
 	h.mu.Unlock()
 	now := time.Now()
 	h.observeActiveJobs("host-a", []HubActiveJob{
-		{JobID: t3434WorkerJob, AgentLabel: t3434WorkerJob, Epoch: 1, OwnerLane: t3426Design, Pane: t3434WorkerPane, Role: "worker"},
-		{JobID: t3434ConsultJob, AgentLabel: t3434ConsultJob, Epoch: 1, OwnerLane: t3426Design, Pane: t3434ConsultPan, Role: "worker"},
-		{JobID: "hk3434-done", AgentLabel: "hk3434-done", Epoch: 1, OwnerLane: t3426Design, Pane: "w1:finished", Role: "worker"},
+		{JobID: t3434WorkerJob, AgentLabel: t3434WorkerJob, Epoch: 1, OwnerLane: t3426Design, Pane: t3434WorkerPane, Role: "implementer"},
+		{JobID: t3434ConsultJob, AgentLabel: t3434ConsultJob, Epoch: 1, OwnerLane: t3426Design, Pane: t3434ConsultPan, Role: "implementer"},
+		{JobID: "hk3434-done", AgentLabel: "hk3434-done", Epoch: 1, OwnerLane: t3426Design, Pane: "w1:finished", Role: "implementer"},
 		{JobID: "hk3434-captain", AgentLabel: "hk3434-captain", Epoch: 1, OwnerLane: t3426Design, Pane: "w1:captain", Role: "captain"},
 		{JobID: "hk3434-builder", AgentLabel: "hk3434-builder", Epoch: 1, OwnerLane: t3426Design, Pane: "w1:builder"},
 	}, now)
 	h.observeActiveJobs("host-b", []HubActiveJob{
-		{JobID: "hk3434-remote", AgentLabel: "hk3434-remote", Epoch: 1, OwnerLane: t3426Design, Pane: "w1:remote", Role: "worker"},
+		{JobID: "hk3434-remote", AgentLabel: "hk3434-remote", Epoch: 1, OwnerLane: t3426Design, Pane: "w1:remote", Role: "implementer"},
 	}, now)
 	// hk3434-done has ended: the hub marked it completed and the node's next
 	// heartbeat no longer lists it.
@@ -436,7 +436,7 @@ func TestQuietDesignWorkerLaneEventEndToEnd(t *testing.T) {
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
 	for name, record := range map[string]string{
-		"00001-job.claimed.json": `{"type":"job.claimed","job_id":"` + t3434WorkerJob + `","epoch":1,"agent_label":"` + t3434WorkerJob + `","owner_lane":"` + t3426Design + `","role":"worker","created_at":"` + now + `"}`,
+		"00001-job.claimed.json": `{"type":"job.claimed","job_id":"` + t3434WorkerJob + `","epoch":1,"agent_label":"` + t3434WorkerJob + `","owner_lane":"` + t3426Design + `","role":"implementer","created_at":"` + now + `"}`,
 		"00002-job.spawned.json": `{"type":"job.spawned","job_id":"` + t3434WorkerJob + `","pane_id":"` + t3434WorkerPane + `","created_at":"` + now + `"}`,
 	} {
 		if err := os.WriteFile(filepath.Join(events, name), []byte(record), 0o600); err != nil {
@@ -466,7 +466,7 @@ func TestQuietDesignWorkerLaneEventEndToEnd(t *testing.T) {
 
 	eventually(t, 10*time.Second, "the hub sees the worker job and the node the feature", func() bool {
 		peer := client.signalsPeer.Load()
-		return peer != nil && peer.acceptsLaneEventPane.Load() && h.laneEventFromWorker("host-a", t3434WorkerPane)
+		return peer != nil && peer.acceptsLaneEventPane.Load() && h.laneEventFromWorker("host-a", t3434WorkerPane, t3426Design)
 	})
 	progress := emitRecord{Type: "lane.event", Epoch: 1, CreatedAt: now, OwnerLane: t3426Design, EventID: "e2e-progress", PaneID: t3434WorkerPane, Text: "hk 3430: PR #221 open"}
 	decision := emitRecord{Type: "lane.event", Epoch: 1, CreatedAt: now, OwnerLane: t3426Design, EventID: "e2e-decision", PaneID: t3434WorkerPane, NotifyType: "decision", Text: "ESC hk 3430: which order do we ship?"}
@@ -537,7 +537,7 @@ var t3434WorkerActions = []struct{ notifyType, text, most string }{
 	{"decision", "ESC hk 3430: which migration order do we ship?", "decision"},
 	{"blocked", "BLOCKED hk 3430: CI needs an operator secret", "blocked"},
 	{"findings", "hk 3430: review findings on #221 | /jobs/hk3430/findings.md", "findings"},
-	{"order", "hk 3430: rebase #222 on #221 first", "decision"},
+	{"order", "hk 3430: rebase #222 on #221 first", "order"},
 	{"automation-failed", "hk 3430: mergewake watch failed on #221", "automation-failed"},
 	{"deploy-approval", "hk 3430: #221 needs a deploy approval", "decision"},
 	{"watch-hold", "hk 3430: watch hold on #221", "blocked"},

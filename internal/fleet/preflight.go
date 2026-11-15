@@ -90,6 +90,14 @@ func (h hostPreflight) record() map[string]any {
 	return map[string]any{"ok": h.OK, "reasons": h.reasons(), "failed": failed}
 }
 
+// preflightBudget bounds the whole command. The hub and hk reads and one SSH
+// probe per host run in sequence, and a probe whose connection stalls after
+// connecting would otherwise hold the runner's per-call limit once per
+// remaining host — the intermittent >120s stall seen on mbp (hk 3598). The
+// command is a diagnostic; it must answer inside the wait its callers give
+// it. A var only so a test can shrink it.
+var preflightBudget = 90 * time.Second
+
 func pass(name, detail string) preflightCheck {
 	return preflightCheck{Name: name, OK: true, Detail: detail}
 }
@@ -192,6 +200,8 @@ func (a *App) hubAcceptance(e *preflightEnv, v HostView, listed bool) preflightC
 		return refuse(checkHubAcceptance, "not_listed", "the hub does not list this host")
 	case strings.Contains(v.Reason, "not_accepting"):
 		return refuse(checkHubAcceptance, "not_accepting", "hub reason: "+v.Reason)
+	case reasonHasToken(v.Reason, "lanes_full"):
+		return refuse(checkHubAcceptance, "lanes_full", "hub reason: "+v.Reason)
 	case !v.Connected:
 		return refuse(checkHubAcceptance, "disconnected", "hub reason: "+firstNonempty(v.Reason, "none"))
 	}
@@ -239,22 +249,36 @@ func (a *App) quotaObservation(ctx context.Context, e *preflightEnv, host string
 	}
 	var reasons, details []string
 	for _, p := range pools {
-		key := hostAccount(e.presence, p, id, now, ttl)
-		var acc SharedAccount
-		if key != "" && a.Source != nil {
-			var err error
-			if acc, err = a.Source.SharedAccount(ctx, key); err != nil {
+		// A pool whose host holds several accounts (multiAccountPools) passes
+		// while one of them has a current reading.
+		keys := hostAccounts(e.presence, p, id, now, ttl)
+		if len(keys) == 0 {
+			keys = []string{""}
+		}
+		reason, age := "", "unknown"
+		for i, key := range keys {
+			var acc SharedAccount
+			if key != "" && a.Source != nil {
+				var err error
+				if acc, err = a.Source.SharedAccount(ctx, key); err != nil {
+					acc = SharedAccount{Key: key, Degraded: true}
+				}
+			} else if key != "" {
 				acc = SharedAccount{Key: key, Degraded: true}
 			}
-		} else if key != "" {
-			acc = SharedAccount{Key: key, Degraded: true}
+			r := sharedReason(key, acc)
+			if i == 0 || r == "" {
+				reason, age = r, "unknown"
+				if !acc.MeasuredAt.IsZero() {
+					age = now.Sub(acc.MeasuredAt).Round(time.Second).String()
+				}
+			}
+			if r == "" {
+				break
+			}
 		}
-		age := "unknown"
-		if !acc.MeasuredAt.IsZero() {
-			age = now.Sub(acc.MeasuredAt).Round(time.Second).String()
-		}
-		if r := sharedReason(key, acc); r != "" {
-			reasons = append(reasons, p+":"+r)
+		if reason != "" {
+			reasons = append(reasons, p+":"+reason)
 		}
 		details = append(details, fmt.Sprintf("%s age=%s fresh_ttl=%s", p, age, a.sharedFreshTTL(p)))
 	}
@@ -441,6 +465,8 @@ func (a *App) printPreflightChecks(h hostPreflight) {
 // remote-spawn preflight alone. Read-only; exit 0 when every checked host is
 // good, exitPreflight (with the reasons on stdout and in the error) otherwise.
 func (a *App) preflightCmd(ctx context.Context, args []string) error {
+	ctx, cancel := context.WithTimeout(ctx, preflightBudget)
+	defer cancel()
 	var host, pool string
 	var asJSON bool
 	f := flags("preflight")

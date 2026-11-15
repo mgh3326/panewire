@@ -41,7 +41,7 @@ func TestStructuredGateRefusalsAreIndependentOfMessages(t *testing.T) {
 		{"typed exhaustion", outcomeQuotaExhausted, "", "weekly limit reached", outcomeQuotaExhausted, exitRoleWait, false},
 		{"reason code", "", "window_exhausted", "사용량 한도 초과", outcomeQuotaExhausted, exitRoleWait, false},
 		{"typed policy", outcomeNoRoleCandidate, "", "quota exhausted is not the reason", outcomeNoRoleCandidate, exitSeatRefused, false},
-		{"role flag", "", "", "role_restricted: astra requires director, architect, or operator-request purpose", outcomeNoRoleCandidate, exitSeatRefused, true},
+		{"role flag", "", "", "role_restricted: removed astra seat alias", outcomeNoRoleCandidate, exitSeatRefused, true},
 		{"ambiguous measured block", "", "", "weekly limit reached", outcomeQuotaUnknown, exitQuotaUnknown, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -103,7 +103,7 @@ func TestAllHostsRoleDeniedReturnsRoleRestricted(t *testing.T) {
 	secondAccount := "codex:00000000000000d4"
 	src.presence = []PresenceRecord{{HostID: "host-a", AccountKey: testCodexA, LastSeen: a.Now()}, {HostID: "host-b", AccountKey: secondAccount, LastSeen: a.Now()}}
 	src.accounts[secondAccount] = SharedAccount{Key: secondAccount, Observed: true, Fresh: true, MeasuredAt: a.Now(), Quota: ptrPool(riskPool(30, 8))}
-	reason := "role_restricted: astra requires director, architect, or operator-request purpose"
+	reason := "role_restricted: removed astra seat alias"
 	calls := 0
 	q.GateDo = func(r QuotaRequest) (string, error) { calls++; return "", fail(exitSeatRefused, "%s", reason) }
 	sel, err := a.selectProfile(context.Background(), s)
@@ -127,7 +127,7 @@ func TestMixedQuotaUnknownAndRoleDenialPrefersUnknownQuota(t *testing.T) {
 	secondAccount := "codex:00000000000000d4"
 	src.presence = []PresenceRecord{{HostID: "host-a", AccountKey: testCodexA, LastSeen: a.Now()}, {HostID: "host-b", AccountKey: secondAccount, LastSeen: a.Now()}}
 	src.accounts[secondAccount] = SharedAccount{Key: secondAccount, Observed: true, Fresh: true, MeasuredAt: a.Now(), Quota: ptrPool(riskPool(30, 8))}
-	denial := "role_restricted: astra requires director, architect, or operator-request purpose"
+	denial := "role_restricted: removed astra seat alias"
 	calls := 0
 	visited := map[string]bool{}
 	q.GateDo = func(r QuotaRequest) (string, error) {
@@ -180,20 +180,20 @@ func TestNonRoleNoRoleCandidateDoesNotBeatAuthFailure(t *testing.T) {
 		{accountKey: "credit:one", code: outcomeNoRoleCandidate, reason: "pool_excluded"},
 		{accountKey: "claude:two", code: outcomeAuthUnavailable, reason: "auth_unavailable"},
 	}}
-	_, err := a.selectionRefused(context.Background(), Spawn{}, selReq{role: "worker"}, p)
+	_, err := a.selectionRefused(context.Background(), Spawn{}, selReq{role: "implementer"}, p)
 	if exitCode(err) != exitAuthUnavailable || !strings.Contains(err.Error(), "AUTH_UNAVAILABLE") || strings.Contains(err.Error(), "role_restricted") {
 		t.Fatalf("pool exclusion masked sign-in refusal: %v", err)
 	}
 }
 
-func TestRoleRestrictedRefusalKeepsDiagnosticSuffixAndAllPurposeHints(t *testing.T) {
+func TestRoleRestrictedRefusalKeepsDiagnosticSuffixAndPoolHints(t *testing.T) {
 	a := testApp(t)
 	p := &selPlan{poolCaps: map[string]int{"codex": 2}, cands: []*selCand{
-		{accountKey: "codex:one", code: outcomeNoRoleCandidate, reason: "role_restricted: astra requires director, architect, or operator-request purpose"},
+		{accountKey: "codex:one", code: outcomeNoRoleCandidate, reason: "role_restricted: removed astra seat alias"},
 		{accountKey: "codex:two", reason: reasonPoolAtCap, cap: "codex"},
 	}}
-	_, err := a.selectionRefused(context.Background(), Spawn{Profile: "codex-astra", Host: "host-a"}, selReq{role: "counsel"}, p)
-	for _, want := range []string{"role_restricted: astra requires director, architect, or operator-request purpose", "routing role counsel", "--host host-a restricts accounts", "pool_at_cap: codex=2", "round-extension"} {
+	_, err := a.selectionRefused(context.Background(), Spawn{Profile: "codex-astra", Host: "host-a"}, selReq{role: "consult"}, p)
+	for _, want := range []string{"role_restricted: removed astra seat alias", "routing role consult", "--host host-a restricts accounts", "pool_at_cap: codex=2"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("refusal lost %q: %v", want, err)
 		}
@@ -289,7 +289,7 @@ func TestPlanKeepsTypedGateRefusalOutcome(t *testing.T) {
 	}
 	out := &bytes.Buffer{}
 	a.Out = out
-	err := a.planCmd(context.Background(), []string{"--role", "counsel", "--t", "T1", "--json"})
+	err := a.planCmd(context.Background(), []string{"--role", "consult", "--t", "T1", "--grade", "A", "--json"})
 	var doc map[string]any
 	if parseErr := json.Unmarshal(out.Bytes(), &doc); parseErr != nil {
 		t.Fatalf("plan JSON: %v", parseErr)

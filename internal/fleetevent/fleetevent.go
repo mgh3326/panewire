@@ -177,7 +177,8 @@ type RungAttempt struct {
 }
 
 // Candidate is one host's part in a placement decision: the five terms of its
-// free fraction (each 0..1), its power and the claims inside the spawn bridge,
+// free fraction (each 0..1) and their product free (the value the free floor
+// compares), its power and the claims inside the spawn bridge,
 // the resulting score, and why it was not chosen when it was not. A term is
 // nil when the hub sent none for that host.
 type Candidate struct {
@@ -189,6 +190,7 @@ type Candidate struct {
 	IO      *float64 `json:"io,omitempty"`
 	Load    *float64 `json:"load,omitempty"`
 	Jobs    *float64 `json:"jobs,omitempty"`
+	Free    *float64 `json:"free,omitempty"`
 	Power   *float64 `json:"power,omitempty"`
 	Bridge  *int     `json:"bridge,omitempty"`
 	Outcome string   `json:"outcome,omitempty"`

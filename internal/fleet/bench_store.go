@@ -174,6 +174,10 @@ func (s *BenchStore) retryRep(ctx context.Context, r Rep) (Rep, error) {
 		IDs []int64 `json:"ids"`
 	}
 	if err := s.hk.request(ctx, http.MethodPut, "/v1/bench/reps", map[string]any{"reps": []map[string]any{repWire(r)}}, &result); err != nil {
+		var backend *BackendError
+		if errors.As(err, &backend) && backend.Status == http.StatusConflict && backend.Code == "bench_rep_conflict" {
+			return r, fmt.Errorf("rep saved pending: bench_rep_conflict for origin:%d; drop the pending row before resubmitting different content with a fresh origin id", r.OriginID)
+		}
 		return r, fmt.Errorf("rep saved pending: %w", err)
 	}
 	if len(result.IDs) != 1 || result.IDs[0] <= 0 {

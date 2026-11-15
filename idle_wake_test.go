@@ -670,8 +670,8 @@ func TestIdleWakeOwnerResolutionFailsClosedOnAmbiguity(t *testing.T) {
 		t.Fatalf("ambiguous active jobs=%+v", got)
 	}
 	hub = r20Hub(t, `{"lanes":{"worker":{"machine":"host-a","pane":"workspace:pane-1","parent":"-owner"},"-owner":{"machine":"host-a","pane":"workspace:owner"}}}`, nil, nil)
-	if got := hub.resolveIdleWakeOwner("host-a", "workspace:pane-1"); got.Reason != idleWakeReasonInvalid || got.Lane != "" {
-		t.Fatalf("lane outside direct-event vocabulary=%+v", got)
+	if got := hub.resolveIdleWakeOwner("host-a", "workspace:pane-1"); got.Reason != "" || got.Lane != "-owner" {
+		t.Fatalf("valid lane rejected at direct-event boundary=%+v", got)
 	}
 }
 

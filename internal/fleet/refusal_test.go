@@ -23,7 +23,7 @@ func TestActionableSpawnRefusals(t *testing.T) {
 		{"task scale does not match --t", "--t", exitSeatRefused},
 		{"initial submission unconfirmed", "saved", exitSubmitUnconfirmed},
 		{"account unavailable", "Sign in", exitAuthUnavailable},
-		{"role_restricted: astra requires director", "round-extension", exitSeatRefused},
+		{"role_restricted: removed astra seat alias", "Pick a seat the refusal's rule admits", exitSeatRefused},
 	} {
 		err := fail(test.status, "%s", test.message)
 		if code(err) != test.status || !strings.Contains(spawnRefusalFix(err), test.fix) {
@@ -54,7 +54,7 @@ var spawnRefusalCauses = []struct {
 	{"QUOTA_UNKNOWN: credit pool status unavailable", exitQuotaUnknown, "quota_unknown"},
 	{"AUTH_UNAVAILABLE: target no longer holds the selected account", exitAuthUnavailable, "auth_unavailable"},
 	{"seat does not allow role worker", exitSeatRefused, "seat_refused"},
-	{"role_restricted: astra requires director, architect, or operator-request purpose", exitSeatRefused, "role_restricted"},
+	{"role_restricted: removed astra seat alias", exitSeatRefused, "role_restricted"},
 	{"BRIEF_SUBMISSION_UNCONFIRMED: session=s pane=p; no working transition or submitted brief turn", exitSubmitUnconfirmed, "submit_unconfirmed"},
 	{"agent must be idle before initial brief", exitSubmitUnconfirmed, "submit_unconfirmed"},
 	{"WORKSPACE_TRUST_REQUIRED: Codex directory trust prompt for /w; brief withheld; approve only this worktree in the executing CODEX_HOME", exitTrustPrompt, "trust_prompt"},
@@ -67,6 +67,10 @@ var spawnRefusalCauses = []struct {
 	{"symlink path refused: /jobs-root", exitUsage, "symlink_path"},
 	{"cwd is not a directory", exitUsage, "cwd_not_directory"},
 	{"OMP_SETUP_WIZARD: omp is in its setup wizard despite OMP_SKIP_SETUP; seat withheld", exitConfig, "omp_setup_wizard"},
+	// hk 3301: the brief upload's hk guard refusal names the pattern, and the
+	// broad "brief" row must not claim it.
+	{"brief upload to briefs/job-a.md failed: handoffkeep: secret_like_content:private_key", exitPlacement, "hk_guard_refused"},
+	{"handoffkeep: secret_like_content", exitUsage, "hk_guard_refused"},
 }
 
 func TestSpawnRefusalCodeNamesEachObservedCause(t *testing.T) {

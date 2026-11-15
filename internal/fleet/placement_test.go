@@ -283,7 +283,7 @@ func remoteFixture(t *testing.T, src *fakePlacementSource, w *fakeWaker, taskCre
 		return Result{}
 	}
 	a.Runner = f
-	s := Spawn{CWD: cwd, Profile: "sonnet", Job: "job-a", Task: "42", Role: "worker", Host: "auto"}
+	s := Spawn{CWD: cwd, Profile: "sonnet", Job: "job-a", Task: "42", Role: "implementer", Host: "auto"}
 	return a, s, f
 }
 
@@ -880,9 +880,9 @@ func TestParseSpawnExcludeHost(t *testing.T) {
 	}
 }
 
-func TestParseSpawnBuilderFamilyFlags(t *testing.T) {
-	s, e := parseSpawn([]string{"--builder-family", "anthropic", "--builder-job", "wk-7", "--task", "12", "--role", "reviewer"})
-	if e != nil || s.BuilderFamily != "anthropic" || s.BuilderJob != "wk-7" || s.Task != "12" {
+func TestParseSpawnAuthorFamilyFlags(t *testing.T) {
+	s, e := parseSpawn([]string{"--author-family", "anthropic", "--builder-job", "wk-7", "--task", "12", "--role", "reviewer"})
+	if e != nil || s.AuthorFamily != "anthropic" || s.BuilderJob != "wk-7" || s.Task != "12" {
 		t.Fatalf("%+v %v", s, e)
 	}
 }

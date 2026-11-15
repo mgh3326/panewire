@@ -29,14 +29,15 @@ var (
 // operator request may target. Anything else — including a mutated request
 // URL reaching the transport — fails closed.
 var hubOperatorAPIPaths = map[string]bool{
-	"/v1/inbox":           true,
-	"/v1/inbox/count":     true,
-	"/v1/inbox/wait":      true,
-	"/v1/inbox/ack":       true,
-	"/v1/inbox/ack-state": true,
-	"/v1/nodes":           true,
-	"/v1/nodes/wake":      true,
-	"/v1/jobs":            true,
+	"/v1/inbox":               true,
+	"/v1/inbox/count":         true,
+	"/v1/inbox/wait":          true,
+	"/v1/inbox/ack":           true,
+	"/v1/inbox/ack-state":     true,
+	"/v1/nodes":               true,
+	"/v1/nodes/wake":          true,
+	"/v1/fleet/checkout-pull": true,
+	"/v1/jobs":                true,
 	// Shared with nodeHubClient, which uses this boundary for daemon requests.
 	"/v1/jobs/close":    true,
 	"/v1/jobs/mine":     true,
@@ -45,10 +46,7 @@ var hubOperatorAPIPaths = map[string]bool{
 	"/v1/jobs/reassign": true,
 	"/v1/lanes":         true,
 	"/v1/placement":     true,
-	"/v1/burst":         true,
-	"/v1/burst/request": true,
-	"/v1/burst/release": true,
-	"/v1/burst/holds":   true,
+	"/v1/consults":      true,
 }
 
 func validHubOperatorAPIPath(path string) bool {
@@ -61,8 +59,11 @@ func validHubOperatorAPIPath(path string) bool {
 			return err == nil && n > 0 && strconv.FormatInt(n, 10) == id
 		}
 	}
+	if id, found := strings.CutPrefix(path, "/v1/consults/"); found {
+		return validHubSpawnRequestID(id)
+	}
 	if lane, found := strings.CutPrefix(path, "/v1/lanes/"); found {
-		return laneNamePattern.MatchString(lane)
+		return validLaneReference(lane)
 	}
 	if id, found := strings.CutPrefix(path, "/v1/spawns/"); found {
 		if id, ok := strings.CutSuffix(id, "/abandon"); ok {

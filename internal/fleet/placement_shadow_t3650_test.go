@@ -55,18 +55,18 @@ func TestPlacementShadowLiveUnchanged_T3650(t *testing.T) {
 		build func(t *testing.T) (*App, Spawn)
 	}{
 		{"account only on a busy host", func(t *testing.T) (*App, Spawn) {
-			a, s, _, _ := hostFirstFixture(t, "counsel", "A", consultRows,
+			a, s, _, _ := hostFirstFixture(t, "consult", "A", consultRows,
 				map[string]string{"cloud-small": testClaudeA, "mac-b": testClaudeB}, map[string]float64{"cloud-small": 1.6, "mac-b": 0.2})
 			return a, s
 		}},
 		{"refused accounts skip the host", func(t *testing.T) (*App, Spawn) {
-			a, s, _, _ := hostFirstFixture(t, "counsel", "A", consultRows,
+			a, s, _, _ := hostFirstFixture(t, "consult", "A", consultRows,
 				map[string]string{"mac-b": testClaudeA, "cloud-small": testClaudeB}, map[string]float64{"mac-b": 0.1, "cloud-small": 0.5})
 			refuseA(a)
 			return a, s
 		}},
 		{"unity cap", func(t *testing.T) (*App, Spawn) {
-			a, s, _, _ := hostFirstFixture(t, "counsel", "A", consultRows,
+			a, s, _, _ := hostFirstFixture(t, "consult", "A", consultRows,
 				map[string]string{"cloud-small": testClaudeA, "mac-b": testClaudeB}, map[string]float64{"cloud-small": 0.1, "mac-b": 0.5})
 			s.Tags = "unity"
 			return a, s
@@ -267,8 +267,8 @@ func TestPlacementShadowMemorySignal_T3650(t *testing.T) {
 }
 
 func TestPlacementShadowMemoryAdmission_T3650(t *testing.T) {
-	pol := shadowPolicy{threshold: 1, cpuBusyOver: 1, hysteresis: 1.25, allLoadedBelow: 15, memRefuseBelowPct: 30, pressureRefuseLevel: 2, pressureWarnMem: 0.5,
-		memFloor: 0.2, memSpan: 0.2, swapInHalf: 5000, loadKnee: 0.75, loadCap: 4, jobsHalf: 8, claimCost: 10}
+	pol := shadowPolicy{threshold: 1, cpuBusyOver: 1, hysteresis: 1.25, freeFloor: 0.05, memRefuseBelowPct: 30, pressureRefuseLevel: 2, pressureWarnMem: 0.5,
+		memFloor: 0.2, memSpan: 0.2, swapInHalf: 5000, loadKnee: 0.75, loadCap: 4, jobsHalf: 8, bridgeCost: 10}
 	mk := func(name, reason string, pressure, free *float64) selHost {
 		hv := &HostView{Name: name, Connected: true, Reason: reason, Signals: sigs(100), Extra: HostExtra{Pressure: pressure, MemFreePct: free}}
 		return selHost{name: name, awake: true, view: hv, score: ptrF(50), cfg: map[string]any{"tags": []any{"macos"}}}
@@ -318,7 +318,7 @@ func TestPlacementShadowCapability_T3650(t *testing.T) {
 		return *shadowEventOf(t, *events).Shadow
 	}
 	absent := build(nil)
-	if absent.WorkClass != "heavy" || absent.Role != "worker" || absent.Arms["measured"].First != "mac-b" {
+	if absent.WorkClass != "heavy" || absent.Role != "implementer" || absent.Arms["measured"].First != "mac-b" {
 		t.Fatalf("absent map: %+v", absent)
 	}
 	for _, in := range absent.Inputs {
@@ -347,7 +347,7 @@ func TestPlacementShadowCapability_T3650(t *testing.T) {
 }
 
 func TestPlacementShadowWorkClass_T3650(t *testing.T) {
-	for role, want := range map[string]string{"reviewer": "light", "counsel": "light", "consult": "light", "design": "light", "design-lead": "light", "worker": "heavy", "tester": "heavy", "": "heavy", "other": "heavy"} {
+	for role, want := range map[string]string{"reviewer": "light", "consult": "light", "design": "light", "design-lead": "light", "implementer": "heavy", "": "heavy", "other": "heavy"} {
 		if got := workClassOf(role); got != want {
 			t.Errorf("workClassOf(%q) = %s, want %s", role, got, want)
 		}
@@ -380,7 +380,7 @@ func TestPlacementShadowArmPanic_T3650(t *testing.T) {
 
 // (g) The event stays bounded however many hosts the fleet has.
 func TestPlacementShadowEventBounded_T3650(t *testing.T) {
-	a, s, _, src := hostFirstFixture(t, "worker", "B", workerRows, map[string]string{"mac-b": testClaudeB}, nil)
+	a, s, _, src := hostFirstFixture(t, "implementer", "B", workerRows, map[string]string{"mac-b": testClaudeB}, nil)
 	for i := 0; i < 26; i++ {
 		name := fmt.Sprintf("extra-%02d", i)
 		a.Config.Hosts[name] = map[string]any{"tags": []any{"linux"}}
@@ -433,9 +433,16 @@ func TestPlacementShadowPolicyConfig_T3650(t *testing.T) {
 	if err := validShadowPolicy(map[string]any{"shadow": map[string]any{"hysteresis": 1.5, "swap_in_half_per_s": int64(100)}, "capability": map[string]any{"heavy": map[string]any{"mac-b": int64(150)}}}); err != nil {
 		t.Fatal(err)
 	}
+	// The retired keys still load; the new ones are range checked.
+	if err := validShadowPolicy(map[string]any{"shadow": map[string]any{"all_loaded_below": 15.0, "claim_cost": 10.0, "free_floor": 0.1, "bridge_cost": 20.0}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := validShadowPolicy(map[string]any{"shadow": map[string]any{"free_floor": 1.5}}); err == nil {
+		t.Error("accepted free_floor 1.5")
+	}
 	a := testApp(t)
 	pol := a.shadowPolicy()
-	if !pol.enabled || pol.hysteresis != 1.25 || pol.allLoadedBelow != 15 || pol.memRefuseBelowPct != 30 || pol.cpuBusyOver != pol.threshold || len(pol.capability) != 0 {
+	if !pol.enabled || pol.hysteresis != 1.25 || pol.freeFloor != 0.05 || pol.bridgeCost != 10 || pol.memRefuseBelowPct != 30 || pol.cpuBusyOver != pol.threshold || len(pol.capability) != 0 {
 		t.Fatalf("defaults %+v", pol)
 	}
 }
@@ -504,7 +511,7 @@ func TestPlacementShadowPressureNeedsMacOS_T3650(t *testing.T) {
 func TestPlacementShadowSlotFullHost_T3650(t *testing.T) {
 	hosts := []string{"mac-b", "cloud-small", "cloud-tiny", "pi"}
 	fixture := func(t *testing.T, full ...string) (*App, Spawn, *fakeStateReader) {
-		a, s, _, src := hostFirstFixture(t, "worker", "B", workerRows,
+		a, s, _, src := hostFirstFixture(t, "implementer", "B", workerRows,
 			map[string]string{"mac-b": testClaudeB, "cloud-small": testClaudeB, "cloud-tiny": testClaudeB, "pi": testClaudeB}, nil)
 		a.Config.Hub = map[string]any{"hub_url": "https://hub.invalid"}
 		reader := &fakeStateReader{}

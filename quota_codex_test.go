@@ -15,6 +15,7 @@ import (
 	"github.com/mgh3326/panewire/internal/fleet"
 	"github.com/mgh3326/panewire/internal/quota"
 	"github.com/mgh3326/panewire/internal/quota/codex"
+	"github.com/mgh3326/panewire/internal/quota/shared"
 )
 
 // codexSecret is the access token of the test login. It may appear only in the
@@ -135,7 +136,6 @@ func TestFleetQuotaCodexIsMeasuredNatively(t *testing.T) {
 	}
 	client.nativeQuota = map[string]*nativeQuotaSource{"codex": codexTestSource(client.spawnConfigPath, codexLoginFiles(codexSecret, "fixture-acct"), rpc, api)}
 	var pacelever []string
-	client.nodePacelever = paceleverNeverForNative(t, &pacelever)
 	var warnings []string
 	client.warn = func(m string) { warnings = append(warnings, m) }
 
@@ -215,8 +215,6 @@ func TestFleetQuotaCodexFallsBackToTheAPI(t *testing.T) {
 		return claudeAPIReply(200, codexAPIBody())(r)
 	})}
 	var pacelever []string
-	client.nodePacelever = paceleverNeverForNative(t, &pacelever)
-
 	client.refreshFleetQuota(t.Context(), "codex", map[string]fleetQuotaSent{})
 
 	if len(requests) != 1 || requests[0].Header.Get("Authorization") != "Bearer "+codexSecret || requests[0].Header.Get("ChatGPT-Account-Id") != "fixture-acct" {
@@ -257,7 +255,6 @@ func TestFleetQuotaCodexLoginClassification(t *testing.T) {
 			rpc := &codexRPCFake{startErr: errors.New("no codex binary")}
 			client.nativeQuota = map[string]*nativeQuotaSource{"codex": codexTestSource(client.spawnConfigPath, test.files, rpc, test.api)}
 			var pacelever []string
-			client.nodePacelever = paceleverNeverForNative(t, &pacelever)
 			var warnings []string
 			client.warn = func(m string) { warnings = append(warnings, m) }
 			client.refreshFleetQuota(t.Context(), "codex", map[string]fleetQuotaSent{})
@@ -286,8 +283,6 @@ func TestNodeQuotaRefreshCodexIsNative(t *testing.T) {
 	rpc := &codexRPCFake{lines: codexRPCLines()}
 	client.nativeQuota = map[string]*nativeQuotaSource{"codex": codexTestSource(client.spawnConfigPath, codexLoginFiles(codexSecret, "fixture-acct"), rpc, claudeAPIReply(500, "unused"))}
 	var pacelever []string
-	client.nodePacelever = paceleverNeverForNative(t, &pacelever)
-
 	result, code := nodeRun(t, client, nodeCommandQuotaRefresh, map[string]any{"pool": "codex"})
 	if code != "" || result["outcome"] != nodeQuotaRefreshed {
 		t.Fatalf("codex refresh: result=%v code=%q", result, code)
@@ -300,14 +295,14 @@ func TestNodeQuotaRefreshCodexIsNative(t *testing.T) {
 	}
 
 	failing := &HubClient{nativeQuota: map[string]*nativeQuotaSource{"codex": codexTestSource("/nonexistent", codexLoginFiles("", ""), &codexRPCFake{}, claudeAPIReply(200, codexAPIBody()))}}
-	failing.nodePacelever = paceleverNeverForNative(t, &pacelever)
 	if _, code := nodeRun(t, failing, nodeCommandQuotaRefresh, map[string]any{"pool": "codex"}); code != "refresh_failed" {
 		t.Fatalf("failing codex refresh code=%q", code)
 	}
 }
 
-// A reading is current for 300 s, pacelever's rule for every pool but claude:
-// four minutes later it is reused, six minutes later it is measured again.
+// The shared reading is refreshed with a two-minute margin before its
+// 300-second reader TTL: three minutes later it is reused, four minutes later
+// it is measured again.
 func TestCodexSharedReadingFreshnessIsFiveMinutes(t *testing.T) {
 	hk := newClaudeHK(t)
 	rpc := &codexRPCFake{}
@@ -318,7 +313,7 @@ func TestCodexSharedReadingFreshnessIsFiveMinutes(t *testing.T) {
 	for _, step := range []struct {
 		after  time.Duration
 		starts int
-	}{{0, 1}, {4 * time.Minute, 1}, {6 * time.Minute, 2}} {
+	}{{0, 1}, {3 * time.Minute, 1}, {4 * time.Minute, 2}} {
 		now = claudeTestNow.Add(step.after)
 		if _, err := source.Refresh(t.Context()); err != nil {
 			t.Fatalf("after %v: %v", step.after, err)
@@ -326,6 +321,39 @@ func TestCodexSharedReadingFreshnessIsFiveMinutes(t *testing.T) {
 		if rpc.starts != step.starts {
 			t.Fatalf("after %v: %d measurements, want %d", step.after, rpc.starts, step.starts)
 		}
+	}
+}
+
+func TestOtherPoolRefreshesBeforeReaderTTL(t *testing.T) {
+	hk := newClaudeHK(t)
+	rpc := &codexRPCFake{lines: codexRPCLines()}
+	source := codexTestSource(claudeStore(t, hk.server.URL), codexLoginFiles(codexSecret, "fixture-acct"), rpc, claudeAPIReply(500, "unused"))
+	now := claudeTestNow
+	source.Now = func() time.Time { return now }
+	_, _, readerTTL := source.poolMeasurement()
+	if readerTTL != shared.OtherFreshTTL {
+		t.Fatalf("reader TTL=%s, want %s", readerTTL, shared.OtherFreshTTL)
+	}
+	if got := source.refreshTTL(readerTTL); got != shared.OtherRefreshTTL {
+		t.Fatalf("publisher refresh TTL=%s, want %s", got, shared.OtherRefreshTTL)
+	}
+	for elapsed := time.Duration(0); elapsed <= 10*time.Minute; elapsed += time.Second {
+		now = claudeTestNow.Add(elapsed)
+		if elapsed%time.Minute == 0 {
+			if _, err := source.Refresh(t.Context()); err != nil {
+				t.Fatalf("publisher refresh at %s: %v", elapsed, err)
+			}
+		}
+		reading, err := source.stored(t.Context())
+		if err != nil {
+			t.Fatalf("stored reader at %s: %v", elapsed, err)
+		}
+		if reading.Stale {
+			t.Fatalf("stored reader marked healthy publisher's reading stale at %s (age %v)", elapsed, reading.AgeSeconds)
+		}
+	}
+	if rpc.starts != 3 {
+		t.Fatalf("measurements=%d, want one at initial publish and one at each 4-minute refresh cycle", rpc.starts)
 	}
 }
 

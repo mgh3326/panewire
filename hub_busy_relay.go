@@ -1,11 +1,7 @@
 package panewire
 
 import (
-	"context"
 	"encoding/json"
-	"net/http"
-	"sort"
-	"strconv"
 	"time"
 )
 
@@ -28,7 +24,7 @@ func decodeRelayHeldPayload(raw []byte) (relayHeldPayload, bool) {
 	// that held it (working/blocked), a restored row after a node restart,
 	// and retryOrDropWithin's retry re-arm (#683: that one used to be
 	// rejected, so retries were invisible in the held projection).
-	if json.Unmarshal(raw, &value) != nil || value.EventID < 1 || !hubJobIDPattern.MatchString(value.JobID) || value.Pane == "" || value.Pane == relayCancelledPane || len(value.Pane) > 128 || !hubAgentLabelPattern.MatchString(value.Lane) || (value.Reason != "working" && value.Reason != "blocked" && value.Reason != "restored" && value.Reason != "retry") || len(value.Preview) > 240 || !validRelayDeliver(value.DeliverPolicy) {
+	if json.Unmarshal(raw, &value) != nil || value.EventID < 1 || !hubJobIDPattern.MatchString(value.JobID) || value.Pane == "" || value.Pane == relayCancelledPane || len(value.Pane) > 128 || !validLaneReference(value.Lane) || (value.Reason != "working" && value.Reason != "blocked" && value.Reason != "restored" && value.Reason != "retry") || len(value.Preview) > 240 || !validRelayDeliver(value.DeliverPolicy) {
 		return relayHeldPayload{}, false
 	}
 	if _, err := time.Parse(time.RFC3339Nano, value.HeldSince); err != nil {
@@ -39,7 +35,7 @@ func decodeRelayHeldPayload(raw []byte) (relayHeldPayload, bool) {
 
 func decodeRelayReleasedPayload(raw []byte) (relayReleasedPayload, bool) {
 	var value relayReleasedPayload
-	if json.Unmarshal(raw, &value) != nil || !hubJobIDPattern.MatchString(value.JobID) || value.Pane == "" || value.Pane == relayCancelledPane || len(value.Pane) > 128 || !hubAgentLabelPattern.MatchString(value.Lane) || value.OriginalEventID < 1 || !validRelayFinalText(value.FinalText) {
+	if json.Unmarshal(raw, &value) != nil || !hubJobIDPattern.MatchString(value.JobID) || value.Pane == "" || value.Pane == relayCancelledPane || len(value.Pane) > 128 || !validLaneReference(value.Lane) || value.OriginalEventID < 1 || !validRelayFinalText(value.FinalText) {
 		return relayReleasedPayload{}, false
 	}
 	return value, true
@@ -55,7 +51,7 @@ func decodeRelayCancelledPayload(raw []byte) (relayCancelledPayload, bool) {
 // that by dropping the held projection in consumeRelayDropped below.
 func decodeRelayDroppedPayload(raw []byte) (relayDroppedPayload, bool) {
 	var value relayDroppedPayload
-	if json.Unmarshal(raw, &value) != nil || !hubJobIDPattern.MatchString(value.JobID) || value.Pane == "" || value.Pane == relayCancelledPane || len(value.Pane) > 128 || !hubAgentLabelPattern.MatchString(value.Lane) || value.OriginalEventID < 1 || value.Reason == "" || len(value.Reason) > 64 {
+	if json.Unmarshal(raw, &value) != nil || !hubJobIDPattern.MatchString(value.JobID) || value.Pane == "" || value.Pane == relayCancelledPane || len(value.Pane) > 128 || !validLaneReference(value.Lane) || value.OriginalEventID < 1 || value.Reason == "" || len(value.Reason) > 64 {
 		return relayDroppedPayload{}, false
 	}
 	return value, true
@@ -63,7 +59,7 @@ func decodeRelayDroppedPayload(raw []byte) (relayDroppedPayload, bool) {
 
 func decodeRelayBatchedPayload(raw []byte) (relayBatchedPayload, bool) {
 	var value relayBatchedPayload
-	if json.Unmarshal(raw, &value) != nil || value.Pane == "" || value.Pane == relayCancelledPane || !hubAgentLabelPattern.MatchString(value.Lane) || len(value.EventIDs) < 2 {
+	if json.Unmarshal(raw, &value) != nil || value.Pane == "" || value.Pane == relayCancelledPane || !validLaneReference(value.Lane) || len(value.EventIDs) < 2 {
 		return relayBatchedPayload{}, false
 	}
 	for _, id := range value.EventIDs {
@@ -148,139 +144,15 @@ func (h *HubServer) consumeRelayDropped(machine string, dropped relayDroppedPayl
 	return true
 }
 
-func (h *HubServer) consumeRelayCancelled(id int64) bool {
+// forgetRelayHeld drops the held projection for an event a node reports as
+// cancelled. Older nodes still emit relay.cancelled; the current hub no longer
+// issues cancels itself.
+func (h *HubServer) forgetRelayHeld(id int64) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if _, exists := h.relayCancelled[id]; !exists {
-		delete(h.relayHeld, id)
-		return false
-	}
-	delete(h.relayCancelled, id)
-	h.relayCancelledOrder.forget(id)
-	return true
-}
-
-func (h *HubServer) rememberRelayCancelledLocked(id int64) {
-	_, evicted, overflowed := h.relayCancelledOrder.touch(id, relayCancelledMaxEntries)
-	if overflowed {
-		// The durable sentinel already prevents replay; eviction can only allow
-		// one late node confirmation to be observed as a duplicate broadcast.
-		delete(h.relayCancelled, evicted)
-	}
-	h.relayCancelled[id] = struct{}{}
-}
-
-func (h *HubServer) handleRelayHeld(writer http.ResponseWriter, request *http.Request) {
-	if !h.authorizeOperator(request) {
-		hubUnauthorized(writer)
-		return
-	}
-	lane := request.URL.Query().Get("lane")
-	if lane != "" && !hubAgentLabelPattern.MatchString(lane) {
-		writeJSON(writer, http.StatusBadRequest, map[string]string{"error": "invalid_lane"})
-		return
-	}
-	h.mu.Lock()
-	held := make([]hubRelayHeldProjection, 0, len(h.relayHeld))
-	for _, item := range h.relayHeld {
-		if lane == "" || item.Lane == lane {
-			held = append(held, item)
-		}
-	}
-	h.mu.Unlock()
-	sort.Slice(held, func(i, j int) bool { return held[i].ID < held[j].ID })
-	writeJSON(writer, http.StatusOK, struct {
-		Held []hubRelayHeldProjection `json:"held"`
-	}{Held: held})
-}
-
-func (h *HubServer) handleRelayHeldEdit(writer http.ResponseWriter, request *http.Request) {
-	if !h.authorizeOperator(request) {
-		hubUnauthorized(writer)
-		return
-	}
-	id, valid := parseRelayHeldID(request)
-	if !valid {
-		writeJSON(writer, http.StatusBadRequest, map[string]string{"error": "invalid_event"})
-		return
-	}
-	var body struct {
-		Text string `json:"text"`
-	}
-	if !decodeHubJSON(writer, request, hubRelayIngressMaxBodyBytes, &body) || !validRelayFinalText(body.Text) {
-		writeJSON(writer, http.StatusBadRequest, map[string]string{"error": "invalid_request"})
-		return
-	}
-	if !h.queueRelayHeldControl(id, hubRelayInjectEvent{Type: "relay.edit", EventID: id, Text: body.Text}) {
-		writeJSON(writer, http.StatusConflict, map[string]string{"error": "not_held"})
-		return
-	}
-	writeJSON(writer, http.StatusOK, map[string]any{"id": id})
-}
-
-func (h *HubServer) handleRelayHeldDelete(writer http.ResponseWriter, request *http.Request) {
-	if !h.authorizeOperator(request) {
-		hubUnauthorized(writer)
-		return
-	}
-	id, valid := parseRelayHeldID(request)
-	if !valid {
-		writeJSON(writer, http.StatusBadRequest, map[string]string{"error": "invalid_event"})
-		return
-	}
-	h.mu.Lock()
-	held, exists := h.relayHeld[id]
-	if !exists {
-		h.mu.Unlock()
-		writeJSON(writer, http.StatusConflict, map[string]string{"error": "not_held"})
-		return
-	}
-	record := h.nodes[held.Machine]
-	if record == nil || record.agent == nil || !record.agent.queueRelay(hubRelayInjectEvent{Type: "relay.cancel", EventID: id}) {
-		h.mu.Unlock()
-		writeJSON(writer, http.StatusConflict, map[string]string{"error": "node_unavailable"})
-		return
-	}
 	delete(h.relayHeld, id)
-	h.rememberRelayCancelledLocked(id)
-	h.cancelRelayPendingLocked(id, held.JobID)
-	h.mu.Unlock()
-	if h.handoffkeep != nil {
-		if err := h.handoffkeep.markDelivered(context.Background(), id, held.Machine, relayCancelledPane); err != nil {
-			// The node still receives cancellation, but an undelivered record
-			// must remain visible as an operator error rather than pretending it
-			// can never replay.
-			h.logger.Warn("relay cancellation was not recorded", "event_id", id)
-		}
-	}
-	payload, _ := json.Marshal(relayCancelledPayload{OriginalEventID: id})
-	h.broadcast(hubEvent{Kind: "relay.cancelled", Payload: payload, Received: h.now().UTC()})
-	writer.WriteHeader(http.StatusNoContent)
-}
-
-func (h *HubServer) queueRelayHeldControl(id int64, control hubRelayInjectEvent) bool {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	held, exists := h.relayHeld[id]
-	if !exists {
-		return false
-	}
-	record := h.nodes[held.Machine]
-	if record == nil || record.agent == nil || !record.agent.queueRelay(control) {
-		return false
-	}
-	if control.Type == "relay.edit" {
-		held.Preview = truncateRelayText(control.Text, 240)
-		h.relayHeld[id] = held
-	}
-	return true
 }
 
 func (h *HubServer) cancelRelayPendingLocked(eventID int64, jobID string) {
 	delete(h.relayControl.relayPending, relayPendingKey(eventID, jobID))
-}
-
-func parseRelayHeldID(request *http.Request) (int64, bool) {
-	id, err := strconv.ParseInt(request.PathValue("id"), 10, 64)
-	return id, err == nil && id > 0
 }

@@ -93,14 +93,6 @@ func t441HubFixture(t *testing.T, recorded chan<- t441RecordedRequest) *httptest
 			_, _ = writer.Write([]byte(`{"lane":"lane-a","removed":true}`))
 		case "GET /v1/placement":
 			_, _ = writer.Write([]byte(`{"decision":"machine-a","source":"hub-only","asof":"2026-09-19T00:00:00Z","candidates":[{"machine":"machine-a","score":1,"reason":"ok"}]}`))
-		case "GET /v1/burst":
-			_, _ = writer.Write([]byte(`{"policy":"fixture"}`))
-		case "POST /v1/burst/request":
-			_, _ = writer.Write([]byte(`{"id":"hold-x","status":"active"}`))
-		case "POST /v1/burst/release":
-			_, _ = writer.Write([]byte(`{"released":true}`))
-		case "GET /v1/burst/holds":
-			_, _ = writer.Write([]byte(`{"holds":[]}`))
 		default:
 			writer.WriteHeader(http.StatusNotFound)
 		}
@@ -154,22 +146,6 @@ func TestHubOperatorSuccessMatrix(t *testing.T) {
 		{name: "place", wantMethod: http.MethodGet, wantPath: "/v1/placement", wantCode: ExitOK,
 			run: func(t *testing.T, hubURL, tokenEnv, cfEnv string, deps hubCLIDeps, stdout, stderr *bytes.Buffer) int {
 				return runPlaceCLI([]string{"--class", "worker", "--cwd", "repo", "--hub-url", hubURL, "--hub-token-env", tokenEnv, "--hub-cf-env", cfEnv}, stdout, stderr, deps)
-			}},
-		{name: "burst request", wantMethod: http.MethodPost, wantPath: "/v1/burst/request", wantCode: ExitOK,
-			run: func(t *testing.T, hubURL, tokenEnv, cfEnv string, deps hubCLIDeps, stdout, stderr *bytes.Buffer) int {
-				return runBurstCLIWithDeps([]string{"request", "--hub-url", hubURL, "--hub-token-env", tokenEnv, "--hub-cf-env", cfEnv, "--target", "machine-a", "--hold", "1m", "--reason", "t", "--timeout", "5s"}, stdout, stderr, deps)
-			}},
-		{name: "burst release", wantMethod: http.MethodPost, wantPath: "/v1/burst/release", wantCode: ExitOK,
-			run: func(t *testing.T, hubURL, tokenEnv, cfEnv string, deps hubCLIDeps, stdout, stderr *bytes.Buffer) int {
-				return runBurstCLIWithDeps([]string{"release", "--hub-url", hubURL, "--hub-token-env", tokenEnv, "--hub-cf-env", cfEnv, "--lease-id", "hold-x", "--timeout", "5s"}, stdout, stderr, deps)
-			}},
-		{name: "burst holds", wantMethod: http.MethodGet, wantPath: "/v1/burst/holds", wantCode: ExitOK,
-			run: func(t *testing.T, hubURL, tokenEnv, cfEnv string, deps hubCLIDeps, stdout, stderr *bytes.Buffer) int {
-				return runBurstCLIWithDeps([]string{"holds", "--hub-url", hubURL, "--hub-token-env", tokenEnv, "--hub-cf-env", cfEnv}, stdout, stderr, deps)
-			}},
-		{name: "burst show live", wantMethod: http.MethodGet, wantPath: "/v1/burst", wantCode: ExitOK,
-			run: func(t *testing.T, hubURL, tokenEnv, cfEnv string, deps hubCLIDeps, stdout, stderr *bytes.Buffer) int {
-				return runBurstCLIWithDeps([]string{"show", "--hub-url", hubURL, "--hub-token-env", tokenEnv, "--hub-cf-env", cfEnv}, stdout, stderr, deps)
 			}},
 		{name: "fleet-census find", wantMethod: http.MethodGet, wantPath: "/v1/nodes", wantCode: ExitOK,
 			run: func(t *testing.T, hubURL, tokenEnv, cfEnv string, deps hubCLIDeps, stdout, stderr *bytes.Buffer) int {
@@ -318,7 +294,7 @@ func TestHubOperatorClientIsDedicated(t *testing.T) {
 func TestHubOperatorCLISourceNeverUsesDefaultClient(t *testing.T) {
 	for _, file := range []string{
 		"hub_operator_client.go", "hub_cli.go", "lanes_cli.go",
-		"placement_cli.go", "burst.go",
+		"placement_cli.go",
 		"fleet_census_find.go",
 	} {
 		data, err := os.ReadFile(file)
@@ -455,7 +431,6 @@ func TestHubOperatorAPIPathAdversaries(t *testing.T) {
 	for _, path := range []string{
 		"/v1/nodes", "/v1/jobs", "/v1/jobs/orphaned", "/v1/jobs/reassign",
 		"/v1/lanes", "/v1/lanes/lane-a", "/v1/placement",
-		"/v1/burst", "/v1/burst/request", "/v1/burst/release", "/v1/burst/holds",
 	} {
 		if !validHubOperatorAPIPath(path) {
 			t.Fatalf("fixed API path %q rejected", path)
@@ -675,26 +650,4 @@ func TestHubOperatorCredentialsOnlyAfterValidation(t *testing.T) {
 		request.Header.Get("CF-Access-Client-Secret") != t441CFClientSecret {
 		t.Fatal("validated request missing credential headers")
 	}
-}
-
-// TestHubOperatorReadsStayBounded is a body-level bound check on the raw
-// copy paths (burst show): an oversized response is capped
-// instead of streamed without limit.
-func TestHubOperatorReadsStayBounded(t *testing.T) {
-	tokenEnv, _ := t441Envs(t)
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		if request.URL.Path == "/v1/burst" {
-			_, _ = writer.Write([]byte(strings.Repeat("b", 128<<10)))
-			return
-		}
-		writer.WriteHeader(http.StatusAccepted)
-		_, _ = writer.Write([]byte(strings.Repeat("u", 128<<10)))
-	}))
-	defer server.Close()
-	var stdout, stderr bytes.Buffer
-	code := runBurstCLIWithDeps([]string{"show", "--hub-url", server.URL, "--hub-token-env", tokenEnv}, &stdout, &stderr, t441Deps(server))
-	if code != ExitOK || int64(stdout.Len()) > 64<<10 {
-		t.Fatalf("burst show unbounded read: code=%d bytes=%d", code, stdout.Len())
-	}
-	t441AssertNoCredentialLeak(t, stdout.String(), stderr.String(), "")
 }

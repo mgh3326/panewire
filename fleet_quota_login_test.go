@@ -1,7 +1,6 @@
 package panewire
 
 import (
-	"context"
 	"strings"
 	"testing"
 
@@ -23,7 +22,6 @@ func poolLogin(t *testing.T, client *HubClient, pool string) fleet.HarnessReadin
 func TestUnmeasurablePoolRefreshDoesNotInvokeCLI(t *testing.T) {
 	client := quotaClient(t)
 	var calls int
-	client.nodePacelever = func(context.Context, ...string) ([]byte, error) { calls++; return nil, nil }
 	warned := newWarnLog(client)
 	sent := map[string]fleetQuotaSent{}
 	client.refreshFleetQuota(t.Context(), "grok", sent)

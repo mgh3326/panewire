@@ -2,9 +2,8 @@ package fleet
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -13,8 +12,6 @@ import (
 	"strings"
 	"syscall"
 	"time"
-
-	"github.com/mgh3326/handoffkeep/client"
 
 	"github.com/mgh3326/panewire/internal/arbiter"
 )
@@ -80,14 +77,27 @@ func (a *App) lifecycleWithOptions(ctx context.Context, kind string, args []stri
 			}
 		}
 	}
+	strictResult := kind == "done" && !watchResult && result != nil
 	body := []byte{}
+	// A reportless command (an escalate with no --report) has no bytes, and
+	// its digest is the sha256 of none: the duplicate check still matches the
+	// record the first such escalation wrote. A readable report replaces it.
+	digest := reportDigest(body)
+	// readErr is the report read's failure. An absent report on `done` is not
+	// necessarily an error: the fleet deletes it after the pin (hk 3685), and
+	// the completion that announced it names the bytes hk holds.
+	var readErr error
 	if *report != "" {
 		if e = noSymlinks(*report); e != nil {
 			return e
 		}
-		body, e = os.ReadFile(*report)
-		if e != nil {
-			return e
+		body, readErr = os.ReadFile(*report)
+		switch {
+		case readErr == nil:
+			digest = reportDigest(body)
+		case errors.Is(readErr, os.ErrNotExist) && kind == "done":
+		default:
+			return readErr
 		}
 	}
 	lock, e := os.OpenFile(filepath.Join(a.Jobs, id, ".panewire-operation.lock"), os.O_CREATE|os.O_RDWR, 0600)
@@ -106,46 +116,53 @@ func (a *App) lifecycleWithOptions(ctx context.Context, kind string, args []stri
 	if watchResult && (j.Terminal || j.Reaped) {
 		return nil
 	}
+	recovered := false
+	if readErr != nil {
+		// The file is gone. The newest completion announcing this path names
+		// the report's bytes, so the rerun asks the ledger's receipts exactly
+		// as the first run left them instead of republishing nothing.
+		named, ok := completedReportDigest(j, *report)
+		if !ok {
+			return readErr
+		}
+		digest, recovered = named, true
+	}
 	if rejected != "" {
 		if e = a.event(ctx, id, "job.result_rejected", map[string]any{"reason": rejected}); e != nil {
 			return e
 		}
 		a.warn("watcher result rejected: %s", rejected)
 	}
-	hash := sha256.Sum256(body)
-	digest := hex.EncodeToString(hash[:])
 	eventKind := "job.completed"
 	if kind == "escalate" {
 		eventKind = "job.escalate"
 	}
-	rounds := 0
-	usedPath := false
+	// A report already announced (same bytes, same question) is the case where
+	// every receipt exists; it is not a branch of its own. rounds and usedPath
+	// pick the -rN snapshot name for a later answer at the same path.
+	rounds, usedPath, announced := 0, false, false
 	for _, ev := range j.Events {
 		if ev.Kind == eventKind {
 			rounds++
 			if str(ev.Payload, "report_sha256") == digest && str(ev.Payload, "question") == *question {
-				suffix := ""
-				if kind == "done" {
-					if e = a.releaseQuota(ctx, j); e != nil {
-						return e
-					}
-					var status string
-					if status, e = a.attachDuplicateResult(ctx, id, *report, digest, result); e != nil {
-						return e
-					}
-					if status != "" {
-						suffix = " " + status
-					}
-				}
-				fmt.Fprintf(a.Out, "OK job=%s report=%s duplicate=yes%s\n", id, *report, suffix)
-				return nil
+				announced = true
 			}
 			if str(ev.Payload, "report") == *report {
 				usedPath = true
 			}
 		}
 	}
-	if usedPath && *report != "" {
+	if recovered && !announced {
+		// The report file is gone and no completion announced this path for
+		// this run: there are no bytes here to complete, and the -rN snapshot
+		// a later round writes is not this rerun's to make.
+		return readErr
+	}
+	if kind == "escalate" && announced {
+		fmt.Fprintf(a.Out, "OK job=%s report=%s duplicate=yes\n", id, *report)
+		return nil
+	}
+	if usedPath && !announced && *report != "" {
 		ext := filepath.Ext(*report)
 		stem := strings.TrimSuffix(*report, ext)
 		for n := rounds + 1; ; n++ {
@@ -169,110 +186,15 @@ func (a *App) lifecycleWithOptions(ctx context.Context, kind string, args []stri
 			break
 		}
 	}
-	// The report goes to hk over HTTP with the svc-panewire credential (hk
-	// 3607): kind report, the job and the report file's bytes, read when
-	// sent as `handoffkeep doc put --file` read them, under the upload bound.
-	// The document is linked to the job's hk task when the job has a numeric
-	// one, with origin class job (hk 3615); docSHA is the uploaded bytes'
-	// sha256, which the record pins next to report_doc.
-	doc, docSHA := "", ""
-	if *report != "" {
-		key := "reports/" + id + "/" + filepath.Base(*report)
-		b, e := os.ReadFile(*report)
-		if e == nil {
-			upload := client.Document{Key: key, Kind: "report", Job: id, Body: string(b), OriginClass: "job"}
-			if task, err := hkTaskID(j.Task); err == nil {
-				upload.TaskID = &task
-			}
-			e = hkPutDocument(ctx, upload)
-		}
-		if e == nil {
-			doc = key
-			sum := sha256.Sum256(b)
-			docSHA = hex.EncodeToString(sum[:])
-		} else {
-			a.warn("report upload failed; local report retained")
-		}
-	}
-	a.recordJobUsage(ctx, j, false)
-	// The hk record state is written before the relay: one PUT carries the
-	// terminal state, the report doc with its sha256 pin and — for done
-	// --result — the findings.
-	// A failed write degrades to a job.record_failed event and the relay
-	// still goes out, so a cross-host reader falls back per the design.
-	state := "completed"
-	if kind == "escalate" {
-		state = "escalated"
-	}
-	rec := map[string]any{"state": state}
-	if doc != "" {
-		rec["report_doc"] = doc
-		rec["report_sha256"] = docSHA
-	}
-	if result != nil {
-		rec["result"] = result
-	}
-	if e := a.putJobRecord(ctx, id, rec); e != nil {
-		a.jobRecordFailed(ctx, id, state, e)
-	}
-	p := map[string]any{"report": *report, "report_sha256": digest, "question": *question, "owner_lane": j.Owner, "parent_lane": j.Parent, "label": j.Label, "pane_id": j.Pane, "document": doc}
-	if late {
-		p["late"] = true
-	}
-	if e = a.event(ctx, id, eventKind, p); e != nil {
-		return e
-	}
-	if kind == "escalate" {
-		if _, rerr := a.recordFailedOutcome(ctx, j, j.Task, "escalated", a.PRs); rerr != nil {
-			a.warn("failure rep not recorded: %v", rerr)
-		}
-	}
-	if kind == "done" && result == nil && j.SpawnRole == "reviewer" {
-		a.jobResultEvent(id, "missing", "no_result", "")
-		a.warn("reviewer done carried no result: %s", id)
-	}
-	owner := j.Owner
-	if j.Parent != "" && (kind == "escalate" || j.Role == "builder" || j.Role == "captain") {
-		owner = j.Parent
-	}
-	last := strings.TrimSpace(string(body))
-	if lines := strings.Split(last, "\n"); len(lines) > 0 {
-		last = lines[len(lines)-1]
-	}
-	if doc != "" {
-		last += " doc:" + doc
-	}
-	argsEmit := []string{"emit", "--kind", eventKind, "--job", id, "--owner-lane", owner, "--epoch", "1", "--label", j.Label, "--host", a.machine(), "--pane", j.Pane, "--inbox-root", filepath.Dir(a.Jobs)}
-	if late {
-		argsEmit = append(argsEmit, "--late", "--deliver", "inbox")
-	}
-	if *report != "" {
-		argsEmit = append(argsEmit, "--report", *report, "--report-last-line", last)
-	}
-	if *question != "" {
-		argsEmit = append(argsEmit, "--question", *question)
-	}
-	r := a.call(ctx, "panewire", argsEmit...)
-	relay := ""
-	if r.Code != 0 {
-		relay = " relay=file-only"
-		a.warn("relay failed; durable arbiter event retained")
-		_ = a.event(ctx, id, "job.relay_failed", map[string]any{"kind": eventKind, "exit": r.Code})
-	}
-	if j.Task != "" {
-		comment := "panewire " + eventKind + " job=" + id + " report=" + *report
-		if e = hkCheck(hkCommentTask(ctx, j.Task, comment), "handoffkeep"); e != nil {
-			a.warn("task comment failed: %v", e)
-		}
-	}
 	if kind == "done" {
-		if e = a.releaseQuota(ctx, j); e != nil {
-			return e
-		}
+		return a.doneReport(ctx, j, doneInput{
+			report: *report, body: body, digest: digest, question: *question, result: result,
+			strict: strictResult, watcher: watchResult, late: late, recovered: recovered,
+		})
 	}
-	fmt.Fprintf(a.Out, "OK job=%s report=%s kind=%s%s\n", id, *report, eventKind, relay)
-	return nil
+	return a.escalateReport(ctx, j, *report, *question, body, digest, late)
 }
+
 func readResult(path string) (json.RawMessage, error) {
 	if e := noSymlinks(path); e != nil {
 		return nil, e
@@ -302,15 +224,14 @@ func readResult(path string) (json.RawMessage, error) {
 }
 
 // watcherResultFile finds the result a finished pane filed in its job dir:
-// findings.json (a reviewer's convention), then result.json (`panewire
-// delegate`, delegatePaths.result). The report's directory is checked first,
-// where a worker writes both files.
+// findings.json, a reviewer's convention. The report's directory is checked
+// first, where a reviewer writes it.
 func watcherResultFile(jobs, id, report string) (string, string) {
 	var candidates []string
 	if report != "" {
 		candidates = append(candidates, filepath.Join(filepath.Dir(report), "findings.json"))
 	}
-	candidates = append(candidates, filepath.Join(jobs, id, "findings.json"), filepath.Join(jobs, id, "result.json"))
+	candidates = append(candidates, filepath.Join(jobs, id, "findings.json"))
 	seen := map[string]bool{}
 	for _, path := range candidates {
 		if seen[path] {
@@ -327,46 +248,6 @@ func watcherResultFile(jobs, id, report string) (string, string) {
 		return path, ""
 	}
 	return "", ""
-}
-
-// attachDuplicateResult stores the result a later `done --result` carries when
-// a completion for the same report already exists and this call returned
-// duplicate. The record may still have no result (the watcher or an earlier
-// done completed without one); a stored result is never overwritten.
-func (a *App) attachDuplicateResult(ctx context.Context, id, report, digest string, result json.RawMessage) (string, error) {
-	if result == nil {
-		return "", nil
-	}
-	store, e := a.jobStore()
-	if e != nil {
-		a.warn("result attach failed: %v", e)
-		return "result=unattached", nil
-	}
-	rec, e := store.Get(ctx, id)
-	if e != nil {
-		a.warn("result attach: job record unreadable: %v", e)
-		return "result=unattached", nil
-	}
-	if stored := rec["result"]; stored != nil {
-		if sameJSONValue(stored, result) {
-			return "result=equal", nil
-		}
-		a.warn("result conflict: job %s already has a different result; keeping it", id)
-		a.jobResultEvent(id, "conflict", "different_result", "stored result kept")
-		a.captureSentryWarning([]string{"job-result-conflict"}, "JOB_RESULT_CONFLICT "+id, map[string]string{"job": id})
-		return "result=conflict", nil
-	}
-	// hk accepts a result only in a write that also names completed; the job is
-	// already completed locally, so this re-states the same state.
-	if e := store.Put(ctx, id, map[string]any{"state": "completed", "result": result}); e != nil {
-		a.warn("result attach failed: %v", e)
-		return "result=unattached", nil
-	}
-	if e := a.event(ctx, id, "job.result_attached", map[string]any{"report": report, "report_sha256": digest}); e != nil {
-		return "", e
-	}
-	a.jobResultEvent(id, "attached", "duplicate_done", "duplicate completion")
-	return "result=attached", nil
 }
 
 // sameJSONValue compares two decoded JSON values: key order, whitespace and
@@ -435,8 +316,8 @@ func (a *App) restore(ctx context.Context, j Job) error {
 	if found != 1 || j.Pane == "" || j.Tab == "" {
 		return fail(exitUsage, "restore requires one verified existing pane")
 	}
-	role := "worker"
-	if j.Role == "builder" || j.Role == "captain" {
+	role := "implementer"
+	if j.Role == "builder" {
 		role = "builder"
 	}
 	claim := arbiter.Claim{ReclaimReleased: true, Job: j.ID, Lane: j.Owner, AgentLabel: j.Label, T: j.T, Role: role, TaskID: j.Task}

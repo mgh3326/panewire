@@ -12,7 +12,7 @@ import (
 // true (credit is pending elsewhere), so the order must take each host's own
 // pass-1 membership, or the candidate the live walk chose is missing from it.
 func TestWasteSnapshotKeepsHostPassOneCandidate_T3651(t *testing.T) {
-	paced := PoolView{Status: "ok", Class: "spend", Blocking: ptrF(60), LongProjected: ptrF(120), Projected: ptrF(120), ShortUsed: ptrF(40)}
+	paced := PoolView{Status: "ok", Class: "spend", Blocking: ptrF(60), RankProjected: ptrF(120), Projected: ptrF(120), ShortUsed: ptrF(40)}
 	a, s, _, src := creditBandFixture(t, []CatalogRow{creditRow, sonnetRow}, map[string]string{"mac-b": testClaudeA, "cloud-small": testCreditA}, balance(80, 100*time.Hour))
 	src.accounts[testClaudeA] = SharedAccount{Key: testClaudeA, Observed: true, Fresh: true, MeasuredAt: a.Now(), Quota: &paced}
 	var order []*selCand

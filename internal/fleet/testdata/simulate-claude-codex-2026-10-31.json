@@ -1,7 +1,7 @@
 {
   "now": "2026-10-31T07:24:00Z",
   "grade": "A",
-  "role": "worker",
+  "role": "implementer",
   "pools": [
     {"id": "devin", "class": "spend", "used_pct": 4, "projected_pct": 8, "resets_at": "2026-11-01T00:00:00Z", "window": "1d"},
     {"id": "claude", "class": "spend", "waste": true, "used_pct": 31, "projected_pct": 31.8, "resets_at": "2026-10-31T16:48:00Z", "window": "7d"},

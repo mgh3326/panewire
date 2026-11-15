@@ -16,7 +16,7 @@ func TestPresetFlagSets(t *testing.T) {
 	t.Setenv("PANEWIRE_LANE", "caller-lane")
 	useFakeHK(t).SetTask("42", `{"id":42,"title":"change (grade A, T1)","state":"ready","refs":{"worktree":{"path":"/work/project.feature"}}}`)
 	job := "task42-work"
-	want, err := parseSpawn([]string{"-c", "/work/project.feature", "-m", "auto", "-p", filepath.Join(a.Jobs, job, "brief.md"), "-w", "workers", "-l", job, "--job", job, "--t", "T1", "--task", "42", "--host", "auto", "--report", filepath.Join(a.Jobs, job, "report.md"), "--role", "worker", "--dry-run"})
+	want, err := parseSpawn([]string{"-c", "/work/project.feature", "-m", "auto", "-p", filepath.Join(a.Jobs, job, "brief.md"), "-w", "workers", "-l", job, "--job", job, "--t", "T1", "--task", "42", "--host", "auto", "--report", filepath.Join(a.Jobs, job, "report.md"), "--role", "implementer", "--dry-run"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -56,7 +56,6 @@ func TestRetiredLeadSeatRefused(t *testing.T) {
 	for name, args := range map[string][]string{
 		"lead command": {"lead", "42", "--parent", "caller"},
 		"role builder": spawnArgs("builder"),
-		"role captain": spawnArgs("captain"),
 	} {
 		t.Run(name, func(t *testing.T) {
 			a := testApp(t)

@@ -79,7 +79,7 @@ func TestSelectWasteUrgency(t *testing.T) {
 // must not outrank by itself — the 7d window still decides, and the
 // 2026-10-31 case still picks claude (≈67% unused in 9.4 h) over codex
 // (≈70% unused in 95 h). A pool whose only window is sub-daily, and a pool
-// whose longest window cannot be paced, get no urgency at all.
+// whose longest window is fresh, uses its unused share for urgency.
 func TestPoolsWasteUrgencyUsesLongestWindow(t *testing.T) {
 	a := testApp(t)
 	now := a.Now()
@@ -115,8 +115,8 @@ func TestPoolsWasteUrgencyUsesLongestWindow(t *testing.T) {
 	if u := pools["short"].Urgency; u != nil {
 		t.Fatalf("a sub-daily-only pool must not rank by urgency: %v", *u)
 	}
-	if u := pools["long-unpaced"].Urgency; u != nil {
-		t.Fatalf("an unpaceable longest window leaves no urgency: %v", *u)
+	if u := pools["long-unpaced"].Urgency; u == nil || math.Abs(*u-99.0/(29*24)) > 0.0001 {
+		t.Fatalf("fresh longest window uses unused share per hour: %v", u)
 	}
 	// Blocking still sees the short window: it stays an admission gate.
 	if b := pools["short"].Blocking; b == nil || *b != 3 {

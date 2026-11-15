@@ -100,12 +100,23 @@ func capInboxSummaryContent(content string, budget int) string {
 const hubPaneIDLimit = 128
 
 // boundLaneEventPaneID is the lane.event wire's sender pane: the value whole,
-// or "" when it is over hubPaneIDLimit or holds a control byte. A pane id is
+// or "" when it is over hubPaneIDLimit or holds any control byte. A pane id is
 // an identity, so a cut one would name some other pane; no pane is the
 // fail-open answer the hub already gives an older node.
 func boundLaneEventPaneID(pane string) string {
-	if utf8PrefixWithin(pane, hubPaneIDLimit) != pane || strings.ContainsAny(pane, "\x00\r\n\t") {
+	if utf8PrefixWithin(pane, hubPaneIDLimit) != pane || hasControlByte(pane) {
 		return ""
 	}
 	return pane
+}
+
+// hasControlByte reports any ASCII control byte (< 0x20, or DEL). Git's
+// check-ref-format refuses every one, and none belongs in an origin or glob.
+func hasControlByte(s string) bool {
+	for i := range len(s) {
+		if s[i] < 0x20 || s[i] == 0x7f {
+			return true
+		}
+	}
+	return false
 }

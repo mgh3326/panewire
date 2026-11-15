@@ -467,6 +467,14 @@ func TestBinaryResolution(t *testing.T) {
 	if got := cfg.binary(); got != "/opt/codex" {
 		t.Fatalf("environment first: %q", got)
 	}
+	env[legacyBinaryOverrideEnv] = "/old/codex"
+	if got := cfg.binary(); got != "/opt/codex" {
+		t.Fatalf("new environment override must win: %q", got)
+	}
+	delete(env, BinaryOverrideEnv)
+	if got := cfg.binary(); got != "/old/codex" {
+		t.Fatalf("legacy environment fallback: %q", got)
+	}
 }
 
 // The token reaches only the Authorization header: not an error, not the

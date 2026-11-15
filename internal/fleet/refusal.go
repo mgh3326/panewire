@@ -6,6 +6,10 @@ import (
 	"strings"
 )
 
+// ErrQuotaRefreshPending leaves an accepted hub request for another placement
+// pass after a measurement. It is never used by ordinary synchronous spawns.
+var ErrQuotaRefreshPending = errors.New("quota refresh pending")
+
 // parentJobNotFound is a --parent-job that resolved to no record after the
 // bounded wait, as opposed to a job store that could not answer.
 type parentJobNotFound struct{ cause error }
@@ -140,6 +144,12 @@ var spawnRefusals = []spawnRefusal{
 	// An unconfirmed submission is not a bad brief: point at the pane capture.
 	{match: "BRIEF_SUBMISSION_UNCONFIRMED", code: "submit_unconfirmed", hint: "Read the saved jobs/JOB/spawn-failure-*.txt capture. If the brief sat in the composer on a loaded host, raise local.brief_submit_timeout_ms there; retry the same command after verified cleanup."},
 	{match: "agent must be idle before initial brief", code: "submit_unconfirmed", hint: spawnBriefHint},
+	// hk's secret guard names the pattern, never the matched text; the row
+	// must win over the broad "brief" match below so the SPAWN_FAILED reason
+	// keeps the guard's code and this hint. The code itself cannot be
+	// secret_like_content: the reason's ": " separator would read as hk's
+	// free-form "code: reason" and the redactor would eat it.
+	{match: "secret_like_content", code: "hk_guard_refused", hint: "hk's secret guard refused the write as secret-like content and named the pattern in the reason; remove the secret-shaped text from the brief or task field and retry."},
 	{match: "brief", code: "brief_invalid", hint: spawnBriefHint},
 	{match: "task title", code: "task_title", hint: "Set the task title marker to (grade X, Tn), matching --t, then retry."},
 	{match: "task scale", code: "task_scale", hint: "Make --t match the task title's T level, then retry."},
@@ -148,9 +158,9 @@ var spawnRefusals = []spawnRefusal{
 	{match: "--owner", code: "owner_flag", hint: "Pass --owner LANE explicitly."},
 	{match: "containment_required", code: "containment_required", hint: "Use --containment hk:<task id> for a pin that works around a problem, or --operator-request REF for an approved pin."},
 	{match: "--override-reason", code: "override_reason_required", hint: "Use -m auto --host auto, or provide --override-reason TEXT for an intentional pin."},
+	{match: "role_restricted:", code: "role_restricted", hint: "Pick a seat the refusal's rule admits: the role or profile it names, or a rung whose role list covers the request, then retry."},
 	{match: "alias", code: "host_alias", hint: "Run panewire hosts and use the canonical host key, or fix the aliases list in the hosts config."},
 	{match: "requires PANEWIRE_E6_ARM=", code: "e6_arm_required", hint: "Set the exact PANEWIRE_E6_ARM value named in the refusal only if the operator authorized that rung; otherwise select an admitted rung."},
-	{match: "role_restricted:", code: "role_restricted", hint: "codex-astra에는 --purpose " + strings.Join(astraPurposeValues[:], "|") + " 중 하나를 지정하세요."},
 	{rc: exitDuplicate, code: "duplicate", hint: "Inspect the existing job with panewire find JOB. Use a new --job only for new work; never override a live duplicate. Failed launches with verified cleanup can retry on the same host."},
 	{rc: exitSubmitUnconfirmed, code: "submit_unconfirmed", hint: "Read the saved jobs/JOB/spawn-failure-*.txt capture and fix the harness submission failure; retry the same command after verified cleanup."},
 	{rc: exitAuthUnavailable, code: "auth_unavailable", hint: "Sign in to the selected quota account on the executing host and refresh that pool with panewire quota refresh POOL, then retry."},

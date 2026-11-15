@@ -97,6 +97,18 @@ func TestJobsMineListsOneLaneAcrossMachines(t *testing.T) {
 	}
 }
 
+func TestJobsMineRetainsHistoricalDottedLane(t *testing.T) {
+	hub, server := ownJobsHub(t)
+	if err := os.WriteFile(hub.reportRelayPath, []byte(`{"lanes":{"legacy.parent":{"machine":"node-a","pane":"w1:p1"}}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	hub.jobs["job-legacy"] = &hubJobRecord{HubActiveJob: HubActiveJob{JobID: "job-legacy", OwnerLane: "legacy.parent", Pane: "w1:p1"}, Node: "node-a"}
+	status, body := ownJobsCaller.do(t, server, http.MethodGet, "/v1/jobs/mine?lane=legacy.parent", "")
+	if status != http.StatusOK || !strings.Contains(body, `"job_id":"job-legacy"`) {
+		t.Fatalf("historical own-jobs query status=%d body=%s", status, body)
+	}
+}
+
 // TestJobsMineNamesTheTaskFromTheSpawnOperation: the task column is the task
 // the hub's own spawn operation named, and a job this hub did not spawn through
 // its store lists none.
@@ -364,11 +376,13 @@ func TestOwnJobsRequestIsClosed(t *testing.T) {
 		valid bool
 	}{
 		{ownJobsRequest{Command: "mine", Lane: "lane-a"}, true},
+		{ownJobsRequest{Command: "mine", Lane: "legacy.parent"}, true},
 		{ownJobsRequest{Command: "mine", Lane: "lane-a", JSON: true}, true},
 		{ownJobsRequest{Command: "mine", Lane: "lane-a", Job: "job-a"}, false},
 		{ownJobsRequest{Command: "mine", Lane: "lane-a", Force: true}, false},
 		{ownJobsRequest{Command: "mine"}, false},
 		{ownJobsRequest{Command: "close", Lane: "lane-a", Job: "job-a"}, true},
+		{ownJobsRequest{Command: "close", Lane: "legacy.parent", Job: "job-a"}, true},
 		{ownJobsRequest{Command: "close", Lane: "lane-a", Job: "job-a", Force: true}, true},
 		{ownJobsRequest{Command: "close", Lane: "lane-a"}, false},
 		{ownJobsRequest{Command: "close", Lane: "bad/name", Job: "job-a"}, false},

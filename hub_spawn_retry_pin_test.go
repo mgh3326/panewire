@@ -24,7 +24,7 @@ func retryableStoredHostTask(t *testing.T, h *HubServer, request fleet.Submissio
 	if err != nil {
 		t.Fatal(err)
 	}
-	failed := hubSpawnOutcome{RC: 124, Stage: "admission", Reason: "timeout", Host: "desktop", Profile: "codex-luna", Retryable: true}
+	failed := hubSpawnOutcome{RC: 81, Stage: "checkout", Reason: "checkout_refused:busy", Host: "desktop", Profile: "codex-luna", Retryable: true}
 	if _, err = h.inbox.store.completeSpawn(t.Context(), task, failed, time.Now()); err != nil {
 		t.Fatal(err)
 	}
@@ -87,6 +87,9 @@ func retryHK(t *testing.T) {
 			io.WriteString(w, `{"id":42,"title":"work (grade B, T1)","state":"ready","refs":{}}`)
 		case r.Method == http.MethodPut && strings.HasPrefix(r.URL.Path, "/v1/documents/"):
 			io.WriteString(w, `{"document":{},"changed":true}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/placements":
+			w.WriteHeader(http.StatusServiceUnavailable)
+			io.WriteString(w, `{"error":"unavailable"}`)
 		default:
 			w.WriteHeader(http.StatusNotFound)
 			io.WriteString(w, `{"error":"not_found"}`)
@@ -137,16 +140,14 @@ func TestHubSpawnRetryReplayIsNotAPlacementPin(t *testing.T) {
 	if task.Outcome.Host != "desktop" || !task.Outcome.Retryable {
 		t.Fatalf("fixture lost the stored outcome: %+v", task.Outcome)
 	}
-	done := make(chan struct{})
-	go func() { defer close(done); h.executeSpawnTask(t.Context(), task) }()
+	h.startSpawnCoordinator(t.Context())
 	sent := t14ReadNodeSpawn(t, node)
 	// The node is the stored outcome's host; the rewrite keeps the override
 	// reason and the logical request key.
 	if sent.WaitSeconds == 0 || hubSpawnArg(sent.Args, "--override-reason") != "verified-cleanup-retry" || hubSpawnArg(sent.Args, "--job") != "test-job" {
 		t.Fatalf("dispatched args: %v", sent.Args)
 	}
-	t14WriteSpawnResult(t, node, sent.RequestID, 0, "test-job", "w1:p9", "OK pane=w1:p9 job=test-job\n", "")
-	<-done
+	t14WriteSpawnResult(t, node, sent.RequestID, 1, "test-job", "", "", "spawn_disabled")
 	saved, err := h.inbox.store.spawnTask(t.Context(), request.RequestID)
 	if err != nil || saved.Attempt != 2 || saved.Node == nil || saved.Node.Machine != "desktop" || saved.Node.RequestID != sent.RequestID {
 		t.Fatalf("the retry was not bound to the stored host's dispatch: %+v %v", saved, err)

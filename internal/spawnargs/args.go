@@ -1,7 +1,9 @@
 // Package spawnargs holds the one rule for the flags a hub job.spawn may
 // carry. The node applies it to every job.spawn it receives, and the submitter
 // applies the same rule to the args the hub will send, so a request the node
-// would drop is refused before it leaves with the flag named.
+// would drop is refused before it leaves with the flag named. checkout.go holds
+// the same rule for the checkout spec a spawn carries (worktree.prepare): its
+// origin, its commit and the ref to fetch.
 package spawnargs
 
 import (
@@ -48,9 +50,9 @@ func gradeDescription() string {
 	return strings.Join(grades[:len(grades)-1], ", ") + " or " + grades[len(grades)-1]
 }
 
-var baseFlags = []string{"-m", "-w", "-l", "--t", "--effort", "--e6-arm", "--job", "--owner", "--report", "--report-relative", "--role", "--lane", "--parent", "-L", "--task", "--parent-job", "--tags", "--urgency", "--builder-family", "--builder-job", "--review-pass"}
+var baseFlags = []string{"-m", "-w", "-l", "--t", "--effort", "--e6-arm", "--job", "--owner", "--report", "--report-relative", "--role", "--lane", "--parent", "-L", "--task", "--parent-job", "--tags", "--urgency", "--author-family", "--builder-job", "--review-pass"}
 
-var operatorFlags = []string{"-c", "-p", "--host", "--exclude-host", "--exclude-pool", "--grade", "--routing-role", "--override-reason", "--containment", "--operator-request", "--requested-by", "--purpose"}
+var operatorFlags = []string{"-c", "-p", "--host", "--exclude-host", "--exclude-pool", "--grade", "--override-reason", "--containment", "--operator-request", "--requested-by", "--purpose"}
 
 var operatorBooleans = []string{"--keep", "--job-dup-ok", "--task-hk-bypass", "--allow-escalation"}
 
@@ -144,16 +146,16 @@ func valueRefusal(flag, value string, operator bool) string {
 func argValueRefusal(flag, value string, operator bool) string {
 	switch flag {
 	case "--role":
-		if value == "worker" || value == "reviewer" || value == "tester" || operator && value == "counsel" {
+		if value == "implementer" || value == "reviewer" || operator && value == "consult" {
 			return ""
 		}
-		return "--role value must be worker, reviewer or tester"
-	case "--builder-family":
+		return "--role value must be implementer or reviewer"
+	case "--author-family":
 		switch value {
 		case "anthropic", "openai", "google", "xai", "deepseek", "meta", "mistral", "other":
 			return ""
 		}
-		return "--builder-family value must be anthropic, openai, google, xai, deepseek, meta, mistral or other"
+		return "--author-family value must be anthropic, openai, google, xai, deepseek, meta, mistral or other"
 	case "--review-pass":
 		if len(value) == 1 && value[0] >= '1' && value[0] <= '9' {
 			return ""

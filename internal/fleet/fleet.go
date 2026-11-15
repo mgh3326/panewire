@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -30,7 +32,7 @@ func (s fleetSource) Hosts(ctx context.Context, cwd string) ([]HostView, error) 
 	if str(s.a.Config.Hub, "hub_url") == "" || firstNonempty(str(s.a.Config.Hub, "operator_token_env"), str(s.a.Config.Hub, "hub_token_env")) == "" {
 		return nil, fail(exitConfig, "hub placement unavailable")
 	}
-	args := append([]string{"place", "--class", "worker", "--signals", "--cwd", cwd}, s.a.controlHubArgs(true)...)
+	args := append([]string{"place", "--class", "worker", "--signals", "--floor", "--cwd", cwd}, s.a.controlHubArgs(true)...)
 	r := s.a.call(ctx, "panewire", args...)
 	if e := check(r, "hub placement"); e != nil {
 		return nil, e
@@ -52,32 +54,6 @@ func (s fleetSource) SharedAccount(ctx context.Context, key string) (SharedAccou
 		return SharedAccount{Key: key, Degraded: true}, e
 	}
 	return c.sharedAccount(ctx, key)
-}
-
-// cliWaker drives the in-flight `panewire node wake` contract: request the
-// node, hold it awake for a bounded window and let the caller wait for the
-// connect.
-type cliWaker struct{ a *App }
-
-func (w cliWaker) Wake(ctx context.Context, host string, req WakeRequest) error {
-	hold := req.HoldMinutes
-	if hold <= 0 {
-		hold = 10
-	}
-	wait := req.WaitSeconds
-	if wait <= 0 {
-		wait = 90
-	}
-	args := []string{"node", "wake", "--target", host,
-		"--hold", fmt.Sprintf("%dm", hold),
-		"--timeout", fmt.Sprintf("%ds", wait),
-		"--reason", req.Reason}
-	args = append(args, w.a.controlHubArgs(true)...)
-	r := w.a.call(ctx, "panewire", args...)
-	if e := check(r, "node wake"); e != nil {
-		return e
-	}
-	return nil
 }
 
 // quotaURL is the configured shared-quota endpoint: hosts.toml [quota] url,
@@ -140,9 +116,12 @@ func (c *hkQuota) get(ctx context.Context, path string, out any) error {
 // another origin. Non-2xx answers yield BackendError carrying the status and,
 // when the body names one, the hk error code — never the body itself.
 func (c *hkQuota) request(ctx context.Context, method, path string, body, out any) error {
+	callCtx, cancel := context.WithTimeout(ctx, hkCallTimeout)
+	defer cancel()
+
 	client := c.client
 	if client == nil {
-		client = &http.Client{Timeout: 8 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+		client = &http.Client{Timeout: hkCallTimeout, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	}
 	var rdr io.Reader
 	if body != nil {
@@ -152,7 +131,7 @@ func (c *hkQuota) request(ctx context.Context, method, path string, body, out an
 		}
 		rdr = bytes.NewReader(b)
 	}
-	req, e := http.NewRequestWithContext(ctx, method, c.base+path, rdr)
+	req, e := http.NewRequestWithContext(callCtx, method, c.base+path, rdr)
 	if e != nil {
 		return fmt.Errorf("invalid backend request")
 	}
@@ -167,33 +146,60 @@ func (c *hkQuota) request(ctx context.Context, method, path string, body, out an
 	}
 	resp, e := client.Do(req)
 	if e != nil {
-		return fmt.Errorf("handoffkeep request failed")
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if errors.Is(callCtx.Err(), context.DeadlineExceeded) || hkRequestTimedOut(e) {
+			return fmt.Errorf("handoffkeep request timed out after %s", hkCallTimeout)
+		}
+		return fmt.Errorf("%w", errHKTransport)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		var er struct {
-			Code   string `json:"error"`
-			Reason string `json:"reason"`
+			Code    string `json:"error"`
+			Reason  string `json:"reason"`
+			Pattern string `json:"pattern"`
 		}
 		_ = json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&er)
-		return &BackendError{Status: resp.StatusCode, Code: er.Code, Reason: backendReason(er.Reason)}
+		pattern := ""
+		if safeHKPattern.MatchString(er.Pattern) {
+			pattern = er.Pattern
+		}
+		return &BackendError{Status: resp.StatusCode, Code: er.Code, Reason: backendReason(er.Reason), Pattern: pattern}
 	}
 	if out != nil {
 		if e := json.NewDecoder(io.LimitReader(resp.Body, 16<<20)).Decode(out); e != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			if errors.Is(callCtx.Err(), context.DeadlineExceeded) {
+				return fmt.Errorf("handoffkeep request timed out after %s", hkCallTimeout)
+			}
 			return fmt.Errorf("handoffkeep response is not valid JSON")
 		}
 	}
 	return nil
 }
 
+func hkRequestTimedOut(err error) bool {
+	var timeout interface{ Timeout() bool }
+	return errors.As(err, &timeout) && timeout.Timeout()
+}
+
 // BackendError reports an HTTP failure without response details. Reason is
 // hk's store-authored refusal reason (the failing field or rule, hk #197),
 // bounded and flattened to one line; nothing else of the body is kept.
 type BackendError struct {
-	Status int
-	Code   string
-	Reason string
+	Status  int
+	Code    string
+	Reason  string
+	Pattern string
 }
+
+var safeHKPattern = regexp.MustCompile(`^[a-z0-9_]{1,40}$`)
+
+var errHKTransport = errors.New("handoffkeep transport failure")
 
 // backendReasonMaxBytes bounds the hk refusal reason a warning or a
 // quarantine sidecar may carry.
@@ -270,7 +276,7 @@ func (c *hkQuota) sharedAccount(ctx context.Context, key string) (SharedAccount,
 		if age := c.now().Sub(acc.MeasuredAt); age >= -time.Minute && age <= ttl {
 			acc.Fresh = true
 		}
-		acc.Quota = withFree(accountPoolView(o.Buckets, c.now()), o.FreeBucket, c.now())
+		acc.Quota = withFree(accountPoolView(readableBuckets(accountPool(key), o.Buckets), c.now()), o.FreeBucket, c.now())
 	}
 	return acc, nil
 }
@@ -288,6 +294,22 @@ func withFree(v *PoolView, free *shared.FreeBucket, now time.Time) *PoolView {
 	}
 	v.Free = f
 	return v
+}
+
+// WindowRead says a measured window of pool is one the fleet reads. The
+// commandcode month is not read, projected or gated on (decision 289, hk 4707):
+// a node that still runs the earlier API measurement publishes a 30d bucket, and
+// it is ignored until that node is replaced.
+func WindowRead(pool, window string) bool {
+	return pool != commandcodePool || window != "30d"
+}
+
+// readableBuckets is buckets without the windows WindowRead refuses for pool.
+func readableBuckets(pool string, buckets []accountBucket) []accountBucket {
+	if pool != commandcodePool {
+		return buckets
+	}
+	return slices.DeleteFunc(slices.Clone(buckets), func(b accountBucket) bool { return !WindowRead(pool, b.Window) })
 }
 
 // accountBucket is the allowlisted shared-observation wire format. Model
@@ -372,10 +394,7 @@ func pct(v *float64) float64 {
 // group is set — after checking that every bucket in the reading is valid and
 // still running.
 //
-// A group view ranks on its longest window even when that is sub-daily: the
-// group has no longer one to pace, so its 5h reset is the only point where the
-// rest is lost (hk 3415). Every other view ranks on a window of a day or more
-// only, since a sub-daily rate window is an admission gate.
+// Only windows of a day or more rank a pool or group; shorter windows gate admission.
 func rankedPoolView(buckets []accountBucket, now time.Time, rankScope, group string) *PoolView {
 	inView := func(b accountBucket) bool { return b.Scope == rankScope && (group == "" || b.Model == group) }
 	var rankLen time.Duration
@@ -393,7 +412,7 @@ func rankedPoolView(buckets []accountBucket, now time.Time, rankScope, group str
 			rankLen = w
 		}
 	}
-	if group == "" && rankLen < 24*time.Hour {
+	if rankLen < 24*time.Hour {
 		rankLen = 0
 	}
 	v := &PoolView{Status: "ok", Class: "spend", Group: group}
@@ -401,10 +420,22 @@ func rankedPoolView(buckets []accountBucket, now time.Time, rankScope, group str
 		if !inView(b) {
 			continue
 		}
+		v.Windows = append(v.Windows, ViewWindow{Window: b.Window, UsedPct: *b.UsedPct, ResetsAt: b.ResetsAt})
 		if v.Blocking == nil || *b.UsedPct > *v.Blocking {
 			v.Blocking = b.UsedPct
 		}
 		w, err := windowDuration(b.Window)
+		if err == nil {
+			v.windowObserved = true
+		}
+		if err == nil && (v.Shortest == nil || w < v.Shortest.window) {
+			room := windowRoom{usedPct: *b.UsedPct, window: w}
+			if reset, perr := time.Parse(time.RFC3339Nano, b.ResetsAt); perr == nil {
+				h := reset.Sub(now).Hours()
+				room.resetHours = &h
+			}
+			v.Shortest = &room
+		}
 		long := err == nil && w >= 24*time.Hour
 		if err == nil && !long && (v.ShortUsed == nil || *b.UsedPct > *v.ShortUsed) {
 			v.ShortUsed = b.UsedPct
@@ -416,10 +447,11 @@ func rankedPoolView(buckets []accountBucket, now time.Time, rankScope, group str
 		if v.Projected == nil || *x > *v.Projected {
 			v.Projected = x
 		}
-		// LongProjected is a day-or-more window's projection, or the group's
-		// ranking window when that group has no longer one.
-		if (long || err == nil && w == rankLen) && (v.LongProjected == nil || *x > *v.LongProjected) {
-			v.LongProjected = x
+		if long && (v.WorstLongProjected == nil || *x > *v.WorstLongProjected) {
+			v.WorstLongProjected = x
+		}
+		if rankLen != 0 && err == nil && w == rankLen && (v.RankProjected == nil || *x > *v.RankProjected) {
+			v.RankProjected = x
 		}
 		if rankLen == 0 || err != nil || w != rankLen {
 			continue
@@ -432,4 +464,12 @@ func rankedPoolView(buckets []accountBucket, now time.Time, rankScope, group str
 		}
 	}
 	return v
+}
+
+// windowRoom is one window's used share and time to its reset. It is the view
+// a job's expected hours must fit inside (headroomFit, select.go).
+type windowRoom struct {
+	usedPct    float64
+	window     time.Duration
+	resetHours *float64
 }

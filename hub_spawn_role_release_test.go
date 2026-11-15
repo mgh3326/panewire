@@ -55,6 +55,9 @@ func (r *roleJobs) Get(_ context.Context, id string) (map[string]any, error) {
 	}
 	if record, ok := r.records[id]; ok {
 		out := map[string]any{"state": record["state"]}
+		if reason, ok := record["end_reason"]; ok {
+			out["end_reason"] = reason
+		}
 		if r.completeAfterGet && id == "test-job" {
 			record["state"] = "completed"
 		}
@@ -102,7 +105,7 @@ func roleHolderHub(t *testing.T, outcome hubSpawnOutcome, hkState, wantStatus st
 	t.Cleanup(func() { hub.Close() })
 	jobs := &roleJobs{records: map[string]map[string]any{"test-job": {"state": hkState}}}
 	hub.spawnNewApp = func(out, errout io.Writer) (*fleet.App, error) {
-		return &fleet.App{JobStore: jobs, Out: out, Err: errout}, nil
+		return &fleet.App{JobStore: jobs, Out: out, Err: errout, Now: time.Now}, nil
 	}
 	server := httptest.NewServer(hub.Handler())
 	t.Cleanup(server.Close)
@@ -189,7 +192,7 @@ func TestRoleReleaseAfterFailedSpawn(t *testing.T) {
 		if len(jobs.writes()) != 0 || jobs.state("test-job") != "claimed" {
 			t.Fatalf("hub wrote hk: state=%v writes=%v", jobs.state("test-job"), jobs.writes())
 		}
-		owner, job, _, err := hub.inbox.store.spawnRoleOwner(t.Context(), "42:worker")
+		owner, job, _, err := hub.inbox.store.spawnRoleOwner(t.Context(), "42:implementer")
 		if err != nil || job != "test-job-r2" || owner == held.Request.RequestID {
 			t.Fatalf("reservation not moved: %s %s %v", owner, job, err)
 		}
@@ -256,7 +259,7 @@ func TestRoleReleaseAfterFailedSpawn(t *testing.T) {
 
 func assertRoleHeldBy(t *testing.T, hub *HubServer, request string) {
 	t.Helper()
-	owner, _, _, err := hub.inbox.store.spawnRoleOwner(t.Context(), "42:worker")
+	owner, _, _, err := hub.inbox.store.spawnRoleOwner(t.Context(), "42:implementer")
 	if err != nil || owner != request {
 		t.Fatalf("reservation moved to %s (%v)", owner, err)
 	}
@@ -281,7 +284,7 @@ func TestRoleReleaseAfterPrePaneRefusal(t *testing.T) {
 			jobs.records["test-job"] = map[string]any{"state": "claimed"}
 		}
 		hub.spawnNewApp = func(out, errout io.Writer) (*fleet.App, error) {
-			return &fleet.App{JobStore: jobs, Out: out, Err: errout}, nil
+			return &fleet.App{JobStore: jobs, Out: out, Err: errout, Now: time.Now}, nil
 		}
 		server := httptest.NewServer(hub.Handler())
 		t.Cleanup(server.Close)
@@ -304,7 +307,7 @@ func TestRoleReleaseAfterPrePaneRefusal(t *testing.T) {
 		if result.status != http.StatusAccepted {
 			t.Fatalf("status=%d body=%s", result.status, result.body)
 		}
-		owner, job, _, err := hub.inbox.store.spawnRoleOwner(t.Context(), "42:worker")
+		owner, job, _, err := hub.inbox.store.spawnRoleOwner(t.Context(), "42:implementer")
 		if err != nil || job != "test-job-r2" || owner == held.Request.RequestID {
 			t.Fatalf("reservation not moved: %s %s %v", owner, job, err)
 		}

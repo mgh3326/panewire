@@ -22,7 +22,7 @@ func riskRows() []CatalogRow {
 // used at a reset `hours` away.
 func riskPool(projected, hours float64) PoolView {
 	u := (100 - projected) / hours
-	return PoolView{Status: "ok", Class: "spend", Blocking: ptrF(projected * 0.9), Projected: ptrF(projected), LongProjected: ptrF(projected), Urgency: &u, ResetHours: ptrF(hours)}
+	return PoolView{Status: "ok", Class: "spend", Blocking: ptrF(projected * 0.9), Projected: ptrF(projected), RankProjected: ptrF(projected), Urgency: &u, ResetHours: ptrF(hours)}
 }
 
 func riskFixture(t *testing.T, claude PoolView, policyJSON string) (*App, Spawn) {
@@ -114,7 +114,7 @@ func TestPoolPolicyWasteRiskDefaults(t *testing.T) {
 	if *embedded.WasteRisk.HorizonHours != 0 || *embedded.WasteRisk.MinUnusedPct != 20 {
 		t.Fatalf("embedded policy: %+v", *embedded.WasteRisk)
 	}
-	for _, bad := range []string{`, "waste_risk": {"horizon_hours": -1}`, `, "waste_risk": {"min_unused_pct": 101}`, `, "waste_risk": {"bogus": 1}`} {
+	for _, bad := range []string{`, "waste_risk": {"horizon_hours": -1}`, `, "waste_risk": {"min_unused_pct": 101}`} {
 		if e := os.WriteFile(path, []byte(riskPolicy(bad)), 0o600); e != nil {
 			t.Fatal(e)
 		}

@@ -23,6 +23,10 @@ direct notification for the pane's owner after a default 60-second settle. It
 does not decide job completion or alter job lifecycle state. See the
 [idle-wake contract and isolated E2E runbook](docs/idle-wake.md).
 
+Claude seats start under their job id (`--name`). A trial, off by default, can
+deliver a lane's inbox wake line to its Claude Code session as a session message
+instead of typing it; see [Claude session names and session messages](docs/claude-session-message.md).
+
 Escalation `question` text is capped at 240 characters for hub relay; read the
 full question from the referenced events file (or its explicit report file).
 
@@ -52,7 +56,7 @@ What the node relay does per harness when it types a lane event into a worker pa
 
 ## Installation and use
 
-R1 ships one executable, `panewire`, with a `daemon` subcommand. This avoids two separately versioned Go artifacts while keeping the launchd entry point explicit (`panewire daemon`).
+R1 ships one executable, `panewire`, with a `daemon` subcommand. This avoids two separately versioned Go artifacts while keeping the launchd entry point explicit (`panewire daemon`). Each GitHub Release names the daemons it changed in `components.json`; see [`docs/release-components.md`](docs/release-components.md).
 
 The daemon uses `modernc.org/sqlite` to keep the build cgo-free and `log/slog` for structured startup/reconnect diagnostics. Inbox watching uses fsnotify with one registration per directory: macOS kqueue is not recursive, so the watcher walks the root and adds newly created directories immediately. This is simpler to operate and test on the required macOS runner than relying on a separate FSEvents backend.
 
@@ -63,7 +67,7 @@ panewire daemon --herdr-socket "$HOME/.config/herdr/herdr.sock" \
   --inbox-root "$HOME/work/herdr-inbox"
 ```
 
-Install [deploy/dev.panewire.panewired.plist](deploy/dev.panewire.panewired.plist) as `~/Library/LaunchAgents/dev.panewire.panewired.plist` after replacing its user-specific paths. It uses the same `panewire` executable and restarts on exit.
+Install [deploy/dev.panewire.panewired.plist](deploy/dev.panewire.panewired.plist) as `~/Library/LaunchAgents/dev.panewire.panewired.plist` after replacing its user-specific paths. It uses the same `panewire` executable and restarts on exit. On Linux, [deploy/panewired.service](deploy/panewired.service) is the counterpart; both keep the detached job watchers alive across a restart ([node restart runbook](docs/runbooks/node-restart.md)).
 
 Release installs should pin a tag and stamp the same version the hub sees, e.g.
 `go install -ldflags "-X main.version=<tag>" github.com/mgh3326/panewire/cmd/panewire@<tag>`.
@@ -78,11 +82,11 @@ panewire prompt --from 'sender (role, pane-id)' --to orch-mock \
   --file "$HOME/work/herdr-inbox/jobs/example/prompt.md" --uptake status-transition
 ```
 
-Prompt files begin with recipient metadata such as `expect: name=orch-mock cwd=/work`; `name=` or `cwd=` is required. `cwd=` uses exact absolute-path matching. Panewire records the prompt SHA-256, path, target identity, revisions, and evidence states, but does not store prompt text by default. To opt in, pass `--store-prompt-body` to `panewire prompt` or configure the daemon with `--store-prompt-body`; the body is then kept only in the separate `delivery_bodies` table.
+Prompt files begin with recipient metadata such as `expect: name=orch-mock cwd=/work`; `name=` or `cwd=` is required. `cwd=` uses exact absolute-path matching. `panewire prompt` reaches only panes this host's herdr session serves: a target on another host or herdr session is refused with the command to use instead — answer a job's ESC with `panewire emit --kind lane.event --lane <job> --type order --text ...` and check delivery with `panewire inbox status --event-id <id>`. Panewire records the prompt SHA-256, path, target identity, revisions, and evidence states, but does not store prompt text by default. To opt in, pass `--store-prompt-body` to `panewire prompt` or configure the daemon with `--store-prompt-body`; the body is then kept only in the separate `delivery_bodies` table.
 
 The CLI never falls back to herdr directly. If the daemon socket is absent it exits 4. `PANEWIRE_SOCKET` is available for tests and non-default local installations.
 
-Quota readings, refreshes, and observations use `panewire quota`; see [the quota command contract](docs/quota.md). The bench catalog, its grades and Artificial Analysis annotations use `panewire catalog`; see [the catalog command contract](docs/catalog.md). Reps, manual credit, and automatic model outcomes use `panewire reps` and `panewire manual`; see [reps and outcomes](docs/reps.md).
+Quota readings, refreshes, and observations use `panewire quota`; see [the quota command contract](docs/quota.md) and [exhausted API credit](docs/placement.md#exhausted-api-credit). The bench catalog, its grades and Artificial Analysis annotations use `panewire catalog`; see [the catalog command contract](docs/catalog.md). Reps, manual credit, and automatic model outcomes use `panewire reps` and `panewire manual`; see [reps and outcomes](docs/reps.md).
 
 ## Status
 
@@ -93,8 +97,8 @@ R2: prompt target safety, verified submission/uptake, privacy-preserving deliver
 `panewire hub` is the optional, always-on live channel for presence and
 operator event push.
 
-- The hub evaluates node presence and local heartbeat checks, and can send
-  optional Telegram incident/recovery notification.
+- The hub evaluates node presence and local heartbeat checks, and logs each incident and
+  recovery as a `hub alert` line.
 - The hub is useful only while both sides are connected. `panewired` retries
   the connection as a non-blocking side channel.
 
@@ -123,9 +127,7 @@ It attempts URLs in order, backs off only after all fail, and every
 `HUB_PREFER_RETRY` (default `10m`) probes a higher-priority route before
 switching. Cloudflare Access headers apply only to non-tailnet URLs.
 
-Quota collection at the hub is retired: nodes no longer run a quota tool
-and a legacy hub's `quota.request` is answered `unsupported` so a
-mixed-version pair completes the round trip instead of timing out.
+Quota collection at the hub is retired: nodes no longer run a quota tool.
 
 By default every authenticated node is watched for presence and heartbeat-check
 alerts. Pass `--alert-nodes machine-a,machine-b` on the hub to limit alerts to
@@ -134,8 +136,14 @@ those authenticated machine IDs; other nodes remain visible as
 
 See [docs/hub-r6.md](docs/hub-r6.md) for token-file formats, CLI examples, the
 closed WebSocket vocabulary, and the NCP/systemd + tunnel deployment runbook.
+How the hub stops on SIGTERM and how a node redials: [docs/hub-drain.md](docs/hub-drain.md).
 [docs/runbooks/hub-log-access.md](docs/runbooks/hub-log-access.md) covers how a
 non-root operator reads hub logs on NCP.
+
+A hub restart does not fail the idempotent calls: inbox commands, the spawn
+submit and the node's repeatable hub calls are sent again through a transport
+error, 502 or 503 for up to a minute. See
+[hub calls that ride through a restart](docs/hub-uninterrupted-calls.md).
 
 Operator tools reach a node's herdr panes and git worktrees through the hub
 instead of ssh: `GET /v1/nodes/agents` lists every node's agents, and
@@ -145,6 +153,8 @@ instead of ssh: `GET /v1/nodes/agents` lists every node's agents, and
 uses its own scoped token instead of the operator's; see
 [docs/hub-scopes.md](docs/hub-scopes.md). `pane.read` and `job.done` admit only
 such a service; `panewire node pane-read` and `panewire node job-done` call them.
+
+The hub also orders every node to fast-forward its allow-listed git checkouts (`panewire fleet checkout-pull`) and records each order in hk; see [docs/checkout-pull.md](docs/checkout-pull.md).
 
 `panewire pr status` and `panewire pr findings` read a PR's gate state and open
 review findings from handoffkeep's change record (mergewake's last decision when
@@ -157,7 +167,14 @@ load and publisher liveness. It serves that state as a snapshot
 every spawn. See [docs/fleet-state.md](docs/fleet-state.md) for the
 message contract, the freshness rule, rollout and rollback.
 
-The node closes a worker's pane once its hk task is merged, done or dropped, or the job was closed, and the pane has stayed not working past a grace; a worker that reported READY keeps its pane while its PR is open. See [the task pane sweep](docs/pane-sweep.md). Job directories hk has confirmed can expire after a TTL, off by default; see [the job dir TTL](docs/job-dir-ttl.md).
+The hub also writes one handoffkeep document, `fleet/status/latest`, every few
+minutes with host presence, per-host account quota and the plan per grade, for
+the console fleet-status page; `--fleet-status-interval` sets the period (`0`
+turns it off). See [docs/fleet-status.md](docs/fleet-status.md).
+
+The node closes a worker's pane once its hk task is merged, done or dropped, or the job was closed, and the pane has stayed not working past a grace; a worker that reported READY keeps its pane while its PR is open. The same pass republishes a report whose `done` upload failed, once its file still holds the bytes the completion announced. See [the task pane sweep](docs/pane-sweep.md). Job directories hk has confirmed can expire after a TTL, off by default; see [the job dir TTL](docs/job-dir-ttl.md).
+
+The daemon's hot paths (heartbeat, relay outbox, quota-stop and pane-to-session lookups) read job and lane events through an in-process index refreshed by directory mtime, so a pass costs a stat per job directory plus the directories that changed; see [the job event index](docs/job-event-index.md).
 
 Harness conversation references in job events are described in the [job record contract](docs/jobs-resilience.md#harness-session-identity).
 
@@ -233,13 +250,9 @@ See [spawn configuration and exit statuses](docs/config.md) and
 binary or forwarding shim is installed. The remaining hub orchestration and
 caller changes ship in the coordinated cutover before old binaries are removed.
 
-## Delegation
 
-`panewire delegate --role reader --prompt /brief.md --cwd /work/project`
-assigns a bounded reading task through the same quota and role policy. Use
-`--headless` when the selected harness supports it, `--patch` for an isolated
-scratch checkout, or `--panel` for independent readers. See
-[Delegation configuration](docs/config.md) for roles, results and exit codes.
+Spawn execution now belongs to the hub. `panewire spawn` and `work TASK` print ACCEPTED after a durable reservation; this is not landing proof. `--dry-run` stays synchronous and `--wait` preserves the job-completion contract. See [durable spawn operations](docs/hub-spawn-operations.md) for replay, timeout, recovery and Sentry behavior, A request carries a time limit (`--expires`, default 6 h for an implementer and 1 h for a reviewer or consult); see [time limit](docs/hub-spawn-operations.md#time-limit). A request no host can take now is parked with a reason and a next check, and re-placement after a failed attempt backs off; see [parked](docs/hub-spawn-operations.md#parked). See also [observability](docs/observability.md) for the relay, held-reservation and job-result fleet events and their Sentry fingerprints.
 
+`panewire escalate-author` is the hub's half of the review-round rule: at round 5 without a pass it starts the author again one ladder step up on the same worktree, with the findings and the consult seat, and records one info for the design lane. See [escalate author](docs/escalate-author.md).
 
-Spawn execution now belongs to the hub. `panewire spawn` and `work TASK` print ACCEPTED after a durable reservation; this is not landing proof. `--dry-run` stays synchronous and `--wait` preserves the job-completion contract. See [durable spawn operations](docs/hub-spawn-operations.md) for replay, timeout, recovery and Sentry behavior, and [observability](docs/observability.md) for the relay, held-reservation and job-result fleet events and their Sentry fingerprints.
+`panewire consult request` asks the hub for a consult: the hub picks the seat (one grade above the task, another family), runs one ordinary spawn and records the stored answer. See [consult on request](docs/consult-on-request.md).

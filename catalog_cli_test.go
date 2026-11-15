@@ -219,32 +219,18 @@ func TestCatalogCredentialsFromConfigFile(t *testing.T) {
 	}
 }
 
-func TestCatalogGradeSetPayload(t *testing.T) {
-	recorder := &catalogRecorder{}
-	server := httptest.NewServer(recorder)
-	t.Cleanup(server.Close)
-	catalogTestEnv(t, server.URL)
-	var out, errs bytes.Buffer
-	if code := runCatalogCLI([]string{"grade", "set", "--profile", "example", "--grade", "A", "--deviation-ref", "hk:task/1", "--boundary-version", "v1"}, &out, &errs); code != ExitOK {
-		t.Fatalf("exit=%d stderr=%s", code, errs.String())
-	}
-	want := `{"grades":[{"boundary_version":"v1","deviation_ref":"hk:task/1","grade":"A","profile":"example"}]}`
-	if recorder.method != http.MethodPut || recorder.path != "/v1/bench/grades" || string(recorder.body) != want {
-		t.Fatalf("grade request=%s %s %s", recorder.method, recorder.path, recorder.body)
-	}
-	if code := runCatalogCLI([]string{"grade", "set", "--profile", "example", "--grade", "Z", "--deviation-ref", "hk:task/1"}, &out, &errs); code != ExitConditionInvalid {
-		t.Fatalf("invalid grade exit=%d", code)
-	}
-}
-
-func TestGradeSSCatalogGradeSetDryRun(t *testing.T) {
-	var out, errs bytes.Buffer
-	if code := runCatalogCLI([]string{"grade", "set", "--profile", "example", "--grade", "SS", "--deviation-ref", "hk:task/4044", "--dry-run"}, &out, &errs); code != ExitOK {
-		t.Fatalf("exit=%d stderr=%s", code, errs.String())
-	}
-	want := "{\n  \"boundary_version\": \"\",\n  \"deviation_ref\": \"hk:task/4044\",\n  \"grade\": \"SS\",\n  \"profile\": \"example\"\n}\n"
-	if out.String() != want {
-		t.Fatalf("grade dry-run output differs: %q", out.String())
+func TestCatalogGradeCommandRemoved(t *testing.T) {
+	for _, args := range [][]string{
+		{"grade"},
+		{"grade", "set", "--profile", "example", "--grade", "A", "--deviation-ref", "hk:task/1"},
+	} {
+		var out, errs bytes.Buffer
+		if code := runCatalogCLI(args, &out, &errs); code != ExitUsage || !strings.Contains(errs.String(), "usage:") {
+			t.Fatalf("args=%v exit=%d stderr=%q", args, code, errs.String())
+		}
+		if out.Len() != 0 {
+			t.Fatalf("args=%v wrote output: %q", args, out.String())
+		}
 	}
 }
 

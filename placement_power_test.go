@@ -164,13 +164,15 @@ func TestPlacementScoreBase(t *testing.T) {
 		{"idle half power", 1, 0, 50, 50},
 		{"half free strongest", .5, 0, 100, 50},
 		{"a claim costs a tenth of a power-100 host", 1, 1, 100, 90},
-		{"a claim costs a fifth of a power-50 host", 1, 1, 50, 40},
+		{"a claim costs a fifth of a power-50 host", 1, 1, 50, 30},
+		{"a claim costs a third of a power-30 host", 1, 1, 30, 30 - 100.0/3},
+		{"a claim costs most of a power-12 host", 0, 1, 12, -1000.0 / 12},
 		{"claims add up", 1, 3, 100, 70},
 		{"fully busy host", 0, 0, 100, 0},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := (PlacementPolicy{}).scoreK().scoreBase(tc.free, tc.bridged, tc.power); got != tc.want {
+			if got := (PlacementPolicy{}).scoreK().scoreBase(tc.free, tc.bridged, tc.power); math.Abs(got-tc.want) > 1e-9 {
 				t.Fatalf("score=%v, want %v", got, tc.want)
 			}
 		})

@@ -7,21 +7,13 @@ import (
 	"time"
 )
 
-// agy publishes only group-scoped windows (hk 3317), so a rung's pacing, waste
-// risk and waste urgency come from the group it draws from — the group→rung
-// mapping of hk 3243. A group whose longest window is sub-daily (gemini's 5h)
-// is judged on that window exactly as an account window is (hk 3415), so a
-// fresh gemini group is at waste risk and ranks in the waste band by urgency
-// against every other waste candidate.
-//
-// Acceptance (c) — an exhausted gemini group blocks only its own rungs — is
-// the pre-existing TestSelectAgyGeminiExhaustedStillOffersSonnet, which this
-// change leaves untouched.
+// Each agy rung ranks on its own group's long window. A 5h-only group
+// still gates admission but does not create leftover quota.
 
 func agyWasteRows() []CatalogRow {
 	return []CatalogRow{
-		{Profile: "agy-flash38-medium", Effort: "", Grade: "B", Pool: "agy", Gate: "default", ModelID: "gemini-3.8-flash-medium"},
-		{Profile: "agy-sonnet46", Effort: "", Grade: "B", Pool: "agy", Gate: "default", ModelID: "claude-sonnet-4-6"},
+		{Profile: "agy-flash38-medium", Effort: "medium", Grade: "B", Pool: "agy", Gate: "default", ModelID: "gemini-3.8-flash-medium"},
+		{Profile: "agy-sonnet46", Effort: "medium", Grade: "B", Pool: "agy", Gate: "default", ModelID: "claude-sonnet-4-6"},
 		{Profile: "codex-luna", Effort: "medium", Grade: "B", Pool: "codex", Gate: "default", ModelID: "m"},
 	}
 }
@@ -46,36 +38,15 @@ func wantPct(t *testing.T, row map[string]any, key string, want float64) {
 	}
 }
 
-// (a) gemini 5h at 0% with 4 h to reset: the flash rung is at waste risk with
-// urgency (100-0)/4 = 25/h, outranks a lower-urgency codex waste candidate, and
-// is chosen.
+// A 5h-only gemini group stays ranked while codex is at risk.
 func TestSelectAgyFlashWasteRiskFromGeminiFiveHour(t *testing.T) {
 	rec, sel := agyWasteSelect(t, agyUsed(0, 0, 0), agyWasteRows())
-	flash := candOutcome(rec, "agy-flash38-medium", "")
-	if flash["waste_risk"] != true {
-		t.Fatalf("a fresh gemini group is at waste risk: %v", flash)
+	flash := candOutcome(rec, "agy-flash38-medium", "medium")
+	if flash["waste_risk"] != false || flash["tier"] != "ranked" || flash["waste_group"] != "gemini" {
+		t.Fatalf("gemini's 5h window must not rank as waste: %v", flash)
 	}
-	if flash["waste_group"] != "gemini" {
-		t.Fatalf("the trace names the group used: %v", flash)
-	}
-	if flash["waste_order"] != "reset" {
-		t.Fatalf("waste is judged on the group's 5h reset: %v", flash)
-	}
-	wantPct(t, flash, "waste_urgency", 25)
-	wantPct(t, flash, "unused_at_reset_pct", 100)
-
-	codex := candOutcome(rec, "codex-luna", "medium")
-	if codex["waste_risk"] != true {
-		t.Fatalf("the fixture's codex candidate is also waste risk: %v", codex)
-	}
-	if cu, ok := codex["waste_urgency"].(float64); !ok || cu >= 25 {
-		t.Fatalf("codex urgency must be lower than gemini's 25: %v", codex)
-	}
-	if sel.chosen.seatName != "agy-flash38-medium" {
-		t.Fatalf("the higher-urgency gemini rung wins the waste band: %s", sel.chosen.seatName)
-	}
-	if chosen := rec["chosen"].(map[string]any); chosen["waste_group"] != "gemini" {
-		t.Fatalf("the chosen record names the group: %v", chosen)
+	if sel.chosen.seatName != "codex-luna" {
+		t.Fatalf("codex waste risk should win: %s", sel.chosen.seatName)
 	}
 }
 
@@ -83,7 +54,7 @@ func TestSelectAgyFlashWasteRiskFromGeminiFiveHour(t *testing.T) {
 // at waste risk, so the 3p rung stays out of the waste band.
 func TestSelectAgyThirdPartyProjectedOverIsNotWasteRisk(t *testing.T) {
 	rec, _ := agyWasteSelect(t, agyUsed(0, 0, 95), agyWasteRows())
-	sonnet := candOutcome(rec, "agy-sonnet46", "")
+	sonnet := candOutcome(rec, "agy-sonnet46", "medium")
 	if sonnet["waste_risk"] != false {
 		t.Fatalf("a 3p 7d window projected over is not waste: %v", sonnet)
 	}
@@ -99,7 +70,7 @@ func TestSelectAgyThirdPartyProjectedOverIsNotWasteRisk(t *testing.T) {
 // here 3p blocks more than gemini, so the unmapped rung takes 3p for blocking
 // and for waste — never gemini's lower-used but wasting window.
 func TestSelectAgyUnmappedRungUsesMostRestrictiveGroupForWaste(t *testing.T) {
-	rows := append(agyWasteRows(), CatalogRow{Profile: "agy-mystery", Effort: "", Grade: "B", Pool: "agy", Gate: "default", ModelID: "mystery-1"})
+	rows := append(agyWasteRows(), CatalogRow{Profile: "agy-mystery", Effort: "medium", Grade: "B", Pool: "agy", Gate: "default", ModelID: "mystery-1"})
 	buckets := func(now time.Time) []map[string]any {
 		reset5h := now.Add(4 * time.Hour).UTC().Format(time.RFC3339)
 		reset7d := now.Add(4 * 24 * time.Hour).UTC().Format(time.RFC3339)
@@ -112,13 +83,13 @@ func TestSelectAgyUnmappedRungUsesMostRestrictiveGroupForWaste(t *testing.T) {
 	a, s, q := agyReadingFixture(t, buckets, rows, []string{"agy", "codex"})
 	// The default policy has no seat for the unmapped rung; one alias is
 	// enough for it to reach classification.
-	a.Policy.Profiles["agy-mystery"] = Seat{Canon: "agy-mystery", Kind: "agy", Family: "google", Capability: "standard", Roles: []string{"worker", "tester", "reviewer", "counsel"}}
+	a.Policy.Profiles["agy-mystery"] = Seat{Canon: "agy-mystery", Kind: "agy", Family: "google", Capability: "standard", Roles: []string{"implementer", "reviewer", "consult"}}
 	q.GateDo = gatePools(withAgyGates(map[string]string{"codex-luna": "codex"}))
 	sel, e := a.selectProfile(context.Background(), s)
 	if e != nil {
 		t.Fatal(e)
 	}
-	mystery := candOutcome(sel.record(), "agy-mystery", "")
+	mystery := candOutcome(sel.record(), "agy-mystery", "medium")
 	if mystery["waste_group"] != "3p" {
 		t.Fatalf("an unmapped rung is judged on the strictest group: %v", mystery)
 	}

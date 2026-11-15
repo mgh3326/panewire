@@ -201,6 +201,30 @@ func TestFreshLatestIsReusedWithoutMeasuring(t *testing.T) {
 	}
 }
 
+func TestOtherReadingStaysFreshAcrossPublisherCycles(t *testing.T) {
+	now := testNow
+	hk := newFakeHK(t)
+	hk.latest = stored(now, 42)
+	flow := &Flow{Now: func() time.Time { return now }, FreshTTL: OtherRefreshTTL, Wait: time.Millisecond}
+	var measurements int
+	for elapsed := time.Duration(0); elapsed <= 10*time.Minute; elapsed += time.Second {
+		now = testNow.Add(elapsed)
+		reading, err := flow.Refresh(t.Context(), hk.client(), testKey, func(context.Context) (quota.Observation, error) {
+			measurements++
+			return quota.Observation{Source: quota.SourceUsageAPI, AccountFP: "0123456789abcdef", Buckets: []quota.Bucket{{Window: "5h", UsedPct: pct(42), Scope: quota.Scope{Kind: quota.ScopeAccount}}}}, nil
+		})
+		if err != nil {
+			t.Fatalf("at %s: Refresh: %v", elapsed, err)
+		}
+		if age := now.Sub(ValidAt(&Observation{MeasuredAt: reading.MeasuredAt, ConfirmedAt: reading.ConfirmedAt})); age > OtherFreshTTL {
+			t.Fatalf("at %s: reading stale at age %s", elapsed, age)
+		}
+	}
+	if measurements != 3 {
+		t.Fatalf("measurements=%d, want one at each 3 minute refresh threshold", measurements)
+	}
+}
+
 // Claude readings are valid for 900 s: one second older is stale.
 func TestFreshnessBoundary(t *testing.T) {
 	for _, tt := range []struct {

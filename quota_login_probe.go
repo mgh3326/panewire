@@ -28,10 +28,9 @@ import (
 // lines, so a larger file is not a capture it wrote.
 const loginScreenCaptureMax = 64 << 10
 
-// nodeLoginScreenTTL is how long a login-screen mark stays reported when
-// nothing else clears it. A host with the mark is not launched on, so no
-// launch could clear it once the host owner has logged in; after the TTL the
-// pair gets one more launch, as with a first-run dialog.
+// nodeLoginScreenTTL is how long a login-screen mark stays reported when the
+// daemon has no periodic measurement path for the pool. A pool that the daemon
+// polls and this host can measure stays marked until proof clears it.
 const nodeLoginScreenTTL = nodeDialogTTL
 
 // loginProbeOutcome is what one probe of a pool found.
@@ -54,6 +53,9 @@ const (
 func (s *nativeQuotaSource) measurableHere(ctx context.Context) bool {
 	if s.Pool == "agy" {
 		return s.agyMeasurable()
+	}
+	if s.Pool == "commandcode" {
+		return s.commandcodeMeasurableHere()
 	}
 	_, accountFP, _ := s.poolMeasurement()
 	fp, err := accountFP(ctx)
@@ -125,18 +127,21 @@ func (client *HubClient) probeFleetLogin(ctx context.Context, pool string) {
 	}
 	run, cancel := context.WithTimeout(ctx, fleetQuotaTimeout)
 	defer cancel()
+	started := client.nowUTC()
 	switch client.nativeQuotaSource(pool).probeLogin(run) {
 	case loginProbeLoginMissing:
-		client.noteLoginProbe(pool, true)
+		client.noteLoginProbe(pool, true, started)
 	case loginProbeLoginPresent:
-		client.noteLoginProbe(pool, false)
+		client.noteLoginProbe(pool, false, started)
 	}
 }
 
-// noteLoginProbe records what a probe found. A pass also forgets a login-screen
-// mark: this host's credential works now. A change asks for a readiness
-// refresh and logs one line, never the measurement or the credential.
-func (client *HubClient) noteLoginProbe(pool string, missing bool) {
+// noteLoginProbe records what a probe found. A pass also forgets the
+// login-screen marks set before the probe started: this host's credential works
+// now, while a mark written during the probe is newer evidence. A change asks
+// for a readiness refresh and logs one line, never the measurement or the
+// credential.
+func (client *HubClient) noteLoginProbe(pool string, missing bool, started time.Time) {
 	client.readiness.mu.Lock()
 	changed := client.readiness.probeMissing[pool] != missing
 	if missing {
@@ -146,8 +151,7 @@ func (client *HubClient) noteLoginProbe(pool string, missing bool) {
 		client.readiness.probeMissing[pool] = true
 	} else {
 		delete(client.readiness.probeMissing, pool)
-		if _, marked := client.readiness.loginScreens[pool]; marked {
-			delete(client.readiness.loginScreens, pool)
+		if client.clearLoginScreenMarksBefore(pool, started) {
 			changed = true
 		}
 	}
@@ -217,4 +221,11 @@ func (client *HubClient) launchShowedLoginScreen(kind, job string) bool {
 func loginScreenFresh(marks map[string]time.Time, kind string, now time.Time) bool {
 	at, marked := marks[kind]
 	return marked && !at.After(now) && now.Sub(at) < nodeLoginScreenTTL
+}
+
+func loginScreenActive(marks map[string]time.Time, kind string, now time.Time, periodicMeasurementPath bool) bool {
+	if _, marked := marks[kind]; !marked {
+		return false
+	}
+	return periodicMeasurementPath || loginScreenFresh(marks, kind, now)
 }

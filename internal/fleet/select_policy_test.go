@@ -134,7 +134,7 @@ func TestSelectionPolicyScenarios(t *testing.T) {
 		t.Run(tt.situation, func(t *testing.T) {
 			present := []string{"devin", "claude", "codex", "anthropic-api"}
 			a, s, q := selFixture(t, tt.grade, policyCatalog, nil, present)
-			pools, e := CLIQuota{Runner: &fakeRunner{Do: func(c Command) Result {
+			pools, e := CLIQuota{Now: a.Now, Runner: &fakeRunner{Do: func(c Command) Result {
 				if strings.Join(c.Args, " ") == "manual list" {
 					if !strings.HasPrefix(tt.situation, "credit balance recorded") {
 						return Result{Code: 2, Err: "no manual store"}
@@ -198,8 +198,8 @@ func TestPoolsProjectAtReset(t *testing.T) {
 	if p := pools["hot"].Projected; p == nil || *p != 120 {
 		t.Fatalf("the highest account bucket projection wins: %v", p)
 	}
-	if pools["fresh"].Projected != nil {
-		t.Fatal("a window under 5% elapsed has no projection")
+	if p := pools["fresh"].Projected; p == nil || *p != 1 {
+		t.Fatalf("a fresh long window projects its used share: %v", p)
 	}
 	if p := pools["over"].Projected; p == nil || *p != 208 {
 		t.Fatalf("an over-consumed reading still projects: %v", p)
@@ -282,7 +282,7 @@ func creditStore(now time.Time, pool string, used float64) string {
 		"schema": "pacelever.manual.v1",
 		"latest": map[string]string{pool + ":credit": "m1"},
 		"history": []map[string]any{{"manual_observation_id": "m1", "event": "set", "pool": pool, "window": "credit", "used_pct": used,
-			"expires_at": now.Add(30 * 24 * time.Hour).Format(time.RFC3339Nano)}},
+			"measured_at": now.Add(-time.Hour).Format(time.RFC3339Nano), "expires_at": now.Add(30 * 24 * time.Hour).Format(time.RFC3339Nano)}},
 	})
 	return string(b)
 }

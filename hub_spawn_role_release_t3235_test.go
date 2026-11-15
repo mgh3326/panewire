@@ -32,7 +32,7 @@ func TestRoleReleaseMarksLostThroughHolderNode(t *testing.T) {
 	if len(jobs.writes()) != 0 || jobs.state("test-job") != "spawned" {
 		t.Fatalf("hub wrote hk: state=%v writes=%v", jobs.state("test-job"), jobs.writes())
 	}
-	owner, job, _, err := hub.inbox.store.spawnRoleOwner(t.Context(), "42:worker")
+	owner, job, _, err := hub.inbox.store.spawnRoleOwner(t.Context(), "42:implementer")
 	if err != nil || job != "test-job-r2" || owner == held.Request.RequestID {
 		t.Fatalf("reservation not moved: %s %s %v", owner, job, err)
 	}
@@ -77,7 +77,7 @@ func TestRoleReleaseHoldsWithHolderNodeReason(t *testing.T) {
 				t.Fatalf("status=%d body=%s hk=%v writes=%v", result.status, result.body, jobs.state("test-job"), jobs.writes())
 			}
 			assertRoleHeldBy(t, hub, held.Request.RequestID)
-			assertHeldLine(t, sink, "release_write_failed", "spawned", "absent", test.why)
+			assertHeldLine(t, sink, "mark_lost_refused", "spawned", "absent", test.why)
 		})
 	}
 }
@@ -96,7 +96,7 @@ func TestRoleReleaseHoldsWhenHolderNodeDoesNotAnswer(t *testing.T) {
 		t.Fatalf("status=%d body=%s hk=%v writes=%v", result.status, result.body, jobs.state("test-job"), jobs.writes())
 	}
 	assertRoleHeldBy(t, hub, held.Request.RequestID)
-	assertHeldLine(t, sink, "release_write_failed", "spawned", "absent", "mark_lost_timeout")
+	assertHeldLine(t, sink, "mark_lost_refused", "spawned", "absent", "mark_lost_timeout")
 }
 
 // The hub writes the record itself only for a holder on its own host, whose
@@ -121,7 +121,7 @@ func TestRoleReleaseWritesHKLostOnHubOwnHost(t *testing.T) {
 	if seen := node.seen(); len(seen) != 1 || seen[0] != nodeCommandAgentsList {
 		t.Fatalf("node saw %v", seen)
 	}
-	owner, job, _, err := hub.inbox.store.spawnRoleOwner(t.Context(), "42:worker")
+	owner, job, _, err := hub.inbox.store.spawnRoleOwner(t.Context(), "42:implementer")
 	if err != nil || job != "test-job-r2" || owner == held.Request.RequestID {
 		t.Fatalf("reservation not moved: %s %s %v", owner, job, err)
 	}

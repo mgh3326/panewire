@@ -7,8 +7,7 @@ import (
 )
 
 // The 2026-11-11 order on a fixture: a free SWE-2 rung, a live omp credit rung
-// and a ranked subscription rung. The credit rung ranks in the free band and
-// is chosen; the ranked pool is below the choice.
+// and a ranked subscription rung. Free is chosen before credit and ranked.
 func TestSimulatePoolOrderCreditBesideFree_T4006(t *testing.T) {
 	rec, fr, err := runSimulate(t, "--selection", filepath.Join("testdata", "simulate-pool-order-credit-free.json"))
 	if err != nil {
@@ -25,8 +24,8 @@ func TestSimulatePoolOrderCreditBesideFree_T4006(t *testing.T) {
 		t.Fatalf("tiers = %s", got)
 	}
 	chosen := rec["chosen"].(map[string]any)
-	if chosen["seat"] != "omp-opus" || chosen["tier"] != "credit" {
-		t.Fatalf("the credit rung is chosen in the free band: %v", chosen)
+	if chosen["seat"] != "devin-swe2" || chosen["tier"] != "free" {
+		t.Fatalf("the free rung is chosen before credit: %v", chosen)
 	}
 	if got := candOutcome(rec, "sonnet", "high")["outcome"]; got != "below_choice" {
 		t.Fatalf("the ranked pool is below the choice: %v", got)

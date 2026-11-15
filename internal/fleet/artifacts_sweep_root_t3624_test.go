@@ -31,7 +31,7 @@ func TestArtifactSweepUploadedHatchByJobsRoot(t *testing.T) {
 			a := testApp(t)
 			a.Jobs = filepath.Join(a.Home, tt.jobs)
 			f := ledgerRunner(t, a)
-			seedJob(t, a, "j", "worker")
+			seedJob(t, a, "j", "implementer")
 			putEvent(t, a, "j", "job.completed", map[string]any{})
 			files := map[string][]byte{"final/app.bin": []byte("bin\n"), "evidence/run.log": []byte("log\n")}
 			var docs []string

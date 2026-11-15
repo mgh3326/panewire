@@ -55,9 +55,34 @@ func openNodeSpawnJournal(root string) (*nodeSpawnJournal, error) {
 			return nil, err
 		}
 	}
+	// job_id and label name what an executing row launched, so a restart can
+	// settle it from the pane (hub_spawn_settle.go). Rows written before the
+	// columns existed keep an empty value and settle as lost.
+	for _, column := range []string{"job_id", "label"} {
+		var present int
+		if err = db.QueryRowContext(ctx, `SELECT count(*) FROM pragma_table_info('spawn_inbox') WHERE name=?`, column).Scan(&present); err == nil && present == 0 {
+			_, err = db.ExecContext(ctx, `ALTER TABLE spawn_inbox ADD COLUMN `+column+` TEXT NOT NULL DEFAULT ''`)
+		}
+		if err != nil {
+			db.Close()
+			return nil, err
+		}
+	}
+	// strict marks a row whose job_id and label came from the strict
+	// flag/value pairs. A row an older build wrote is 0: its identity may name
+	// a forged --purpose value, so the takeover proof holds while any such row
+	// is still executing (hk 4799).
+	var strictPresent int
+	if err = db.QueryRowContext(ctx, `SELECT count(*) FROM pragma_table_info('spawn_inbox') WHERE name='strict'`).Scan(&strictPresent); err == nil && strictPresent == 0 {
+		_, err = db.ExecContext(ctx, `ALTER TABLE spawn_inbox ADD COLUMN strict INTEGER NOT NULL DEFAULT 0`)
+	}
+	if err != nil {
+		db.Close()
+		return nil, err
+	}
 	return &nodeSpawnJournal{db}, nil
 }
-func (j *nodeSpawnJournal) claim(ctx context.Context, message hubOutboundMessage) (bool, *hubSpawnResult, error) {
+func spawnFingerprint(message hubOutboundMessage) string {
 	// Only execution fields contribute; transport/reconnect metadata does not.
 	raw, _ := json.Marshal(struct {
 		ID, CWD, Inline, Doc string
@@ -67,8 +92,16 @@ func (j *nodeSpawnJournal) claim(ctx context.Context, message hubOutboundMessage
 		Deadline             int64
 	}{message.RequestID, message.CWDKey, message.BriefInline, message.BriefDoc, message.Args, message.Checkout, message.WaitSeconds, message.DeadlineMS})
 	sum := sha256.Sum256(raw)
-	hash := hex.EncodeToString(sum[:])
-	result, err := j.db.ExecContext(ctx, `INSERT INTO spawn_inbox(request_id,fingerprint,status) VALUES(?,?,'executing') ON CONFLICT DO NOTHING`, message.RequestID, hash)
+	return hex.EncodeToString(sum[:])
+}
+
+func (j *nodeSpawnJournal) claim(ctx context.Context, message hubOutboundMessage) (bool, *hubSpawnResult, error) {
+	// The journal's identity columns are read back by the takeover proof and
+	// by restart settlement, so they take the strict flag/value pairs: a
+	// --purpose value is free text sent before --job, and the lax scan would
+	// record its value as this row's job (hk 4799).
+	job, label := hubSpawnFlagArg(message.Args, "--job"), hubSpawnFlagArg(message.Args, "-l")
+	result, err := j.db.ExecContext(ctx, `INSERT INTO spawn_inbox(request_id,fingerprint,status,job_id,label,strict) VALUES(?,?,'executing',?,?,1) ON CONFLICT DO NOTHING`, message.RequestID, spawnFingerprint(message), job, label)
 	if err != nil {
 		return false, nil, err
 	}
@@ -76,21 +109,47 @@ func (j *nodeSpawnJournal) claim(ctx context.Context, message hubOutboundMessage
 	if n == 1 {
 		return true, nil, nil
 	}
+	_, cached, err := j.lookup(ctx, message)
+	return false, cached, err
+}
+
+// refuseUnstarted records a request this node will never start as completed
+// with result, unless a row for it already exists.
+func (j *nodeSpawnJournal) refuseUnstarted(ctx context.Context, message hubOutboundMessage, result hubSpawnResult) (bool, error) {
+	raw, err := json.Marshal(result)
+	if err != nil {
+		return false, err
+	}
+	inserted, err := j.db.ExecContext(ctx, `INSERT INTO spawn_inbox(request_id,fingerprint,status,result,job_id,label,strict) VALUES(?,?,'completed',?,?,?,1) ON CONFLICT DO NOTHING`, message.RequestID, spawnFingerprint(message), string(raw), hubSpawnFlagArg(message.Args, "--job"), hubSpawnFlagArg(message.Args, "-l"))
+	if err != nil {
+		return false, err
+	}
+	n, err := inserted.RowsAffected()
+	return n == 1, err
+}
+
+// lookup checks the same fingerprint as claim without creating an executing
+// row. An absent row is still replayable after a node restart.
+func (j *nodeSpawnJournal) lookup(ctx context.Context, message hubOutboundMessage) (bool, *hubSpawnResult, error) {
 	var old, status, stored string
-	if err = j.db.QueryRowContext(ctx, `SELECT fingerprint,status,result FROM spawn_inbox WHERE request_id=?`, message.RequestID).Scan(&old, &status, &stored); err != nil {
+	err := j.db.QueryRowContext(ctx, `SELECT fingerprint,status,result FROM spawn_inbox WHERE request_id=?`, message.RequestID).Scan(&old, &status, &stored)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil, nil
+	}
+	if err != nil {
 		return false, nil, err
 	}
-	if old != hash {
+	if old != spawnFingerprint(message) {
 		return false, nil, errors.New("spawn request payload conflicts with durable ownership")
 	}
 	if status != "completed" {
-		return false, nil, nil
+		return true, nil, nil
 	}
 	var cached hubSpawnResult
 	if err = json.Unmarshal([]byte(stored), &cached); err != nil {
 		return false, nil, err
 	}
-	return false, &cached, nil
+	return true, &cached, nil
 }
 func (j *nodeSpawnJournal) complete(ctx context.Context, result hubSpawnResult) error {
 	raw, err := json.Marshal(result)
@@ -99,4 +158,44 @@ func (j *nodeSpawnJournal) complete(ctx context.Context, result hubSpawnResult) 
 	}
 	_, err = j.db.ExecContext(ctx, `UPDATE spawn_inbox SET status='completed',result=? WHERE request_id=? AND status='executing'`, string(raw), result.RequestID)
 	return err
+}
+
+// executingSpawn is a journal row no completion has been written for. Strict
+// is false for a row an older build wrote, whose identity may be a forged
+// --purpose value (hk 4799).
+type executingSpawn struct {
+	RequestID, Job, Label string
+	Strict                bool
+}
+
+func (j *nodeSpawnJournal) executing(ctx context.Context) ([]executingSpawn, error) {
+	rows, err := j.db.QueryContext(ctx, `SELECT request_id,job_id,label,strict FROM spawn_inbox WHERE status='executing' ORDER BY rowid`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []executingSpawn
+	for rows.Next() {
+		var row executingSpawn
+		var strict int
+		if err = rows.Scan(&row.RequestID, &row.Job, &row.Label, &strict); err != nil {
+			return nil, err
+		}
+		row.Strict = strict != 0
+		out = append(out, row)
+	}
+	return out, rows.Err()
+}
+
+// resultOf returns the stored completion of a request, if it has one.
+func (j *nodeSpawnJournal) resultOf(ctx context.Context, requestID string) (*hubSpawnResult, error) {
+	var status, stored string
+	if err := j.db.QueryRowContext(ctx, `SELECT status,result FROM spawn_inbox WHERE request_id=?`, requestID).Scan(&status, &stored); err != nil || status != "completed" {
+		return nil, err
+	}
+	var result hubSpawnResult
+	if err := json.Unmarshal([]byte(stored), &result); err != nil {
+		return nil, err
+	}
+	return &result, nil
 }

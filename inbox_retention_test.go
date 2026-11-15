@@ -132,10 +132,18 @@ func TestInboxRetentionPolicy(t *testing.T) {
 	if err != nil || p.Retention.Days != 2 || p.Retention.PerLane != 7 {
 		t.Fatalf("%+v %v", p, err)
 	}
-	for _, r := range []string{"{days: -1}", "{per_lane: -1}", "{days: 36501}", "{typo: 2}"} {
+	for _, r := range []string{"{days: -1}", "{per_lane: -1}", "{days: 36501}"} {
 		if _, err := parseDeliveryPolicy([]byte("default: interrupt\nretention: " + r)); err == nil {
 			t.Fatal("accepted", r)
 		}
+	}
+	// An unknown key inside a known table is ignored with a warning, not refused.
+	p, err = parseDeliveryPolicy([]byte("default: interrupt\nretention: {typo: 2}"))
+	if err != nil || p.Retention.Days != 30 || p.Retention.PerLane != 2000 {
+		t.Fatalf("typo key: %+v %v", p, err)
+	}
+	if len(p.ignoredKeys) != 1 || p.ignoredKeys[0] != "retention.typo" {
+		t.Fatalf("ignoredKeys=%v, want [retention.typo]", p.ignoredKeys)
 	}
 }
 

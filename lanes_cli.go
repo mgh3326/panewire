@@ -23,7 +23,9 @@ type lanesCLIOptions struct {
 	Lane            string
 	Machine         string
 	Pane            string
+	Job             string
 	Parent          string
+	Takeover        string
 	ExpectedMachine string
 	ExpectedPane    string
 	ExpectedEpoch   uint64
@@ -52,14 +54,18 @@ func runLanesCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 		}
 		return writeHubCLIUsage(stderr, "lanes: --hub-url and --hub-token-env are required", lanesUsage)
 	}
-	if !laneNamePattern.MatchString(options.Lane) && options.Command != "ls" {
+	if !validLaneReference(options.Lane) && options.Command != "ls" {
 		fmt.Fprintln(stderr, "lanes rejected: invalid lane")
 		return ExitConditionInvalid
 	}
 	if options.Command == "add" {
-		if detail, code := validateLaneAdd(options.Lane, options.Machine, options.Pane, options.Parent); code != ExitOK {
+		if detail, code := validateLaneAdd(options.Lane, options.Machine, options.Pane, options.Parent, options.Takeover, options.Sink); code != ExitOK {
 			fmt.Fprintln(stderr, detail)
 			return code
+		}
+		if options.Job != "" && !hubJobIDPattern.MatchString(options.Job) {
+			fmt.Fprintln(stderr, "lanes rejected: invalid job")
+			return ExitConditionInvalid
 		}
 	}
 	if options.Command == "self-check" && (options.ExpectedMachine == hubOperatorMachineID || !machineIDPattern.MatchString(options.ExpectedMachine) || !validLanePane(options.ExpectedPane)) {
@@ -234,15 +240,20 @@ func runLanesCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 // validateLaneAdd answers the refusal line and exit status for a lane write.
 // The order and wording are the `lanes add` contract; the daemon's lanes.put
 // op reports the same line so a spawn receipt records it unchanged.
-func validateLaneAdd(lane, machine, pane, parent string) (string, int) {
-	if !laneNamePattern.MatchString(lane) {
+func validateLaneAdd(lane, machine, pane, parent, takeover string, sink bool) (string, int) {
+	if !LaneNamePattern.MatchString(lane) {
 		return "lanes rejected: invalid lane", ExitConditionInvalid
 	}
-	if machine == hubOperatorMachineID || !machineIDPattern.MatchString(machine) || !validLanePane(pane) {
+	// A sink lane has no route: the hub discards machine and pane for it, so
+	// demanding them here would refuse a write the hub accepts (hk 3729).
+	if !sink && (machine == hubOperatorMachineID || !machineIDPattern.MatchString(machine) || !validLanePane(pane)) {
 		return "lanes rejected: invalid route", ExitConditionInvalid
 	}
-	if parent != "" && (!laneNamePattern.MatchString(parent) || parent == lane) {
+	if parent != "" && (!validLaneReference(parent) || parent == lane) {
 		return "lanes rejected: invalid parent", ExitConditionInvalid
+	}
+	if takeover != "" && (!hubJobIDPattern.MatchString(takeover) || sink) {
+		return "lanes rejected: invalid takeover", ExitConditionInvalid
 	}
 	return "", ExitOK
 }
@@ -258,11 +269,13 @@ type hubLaneWriter interface {
 // routes share it so a refusal keeps its text and status across the socket.
 func laneAddThroughHub(ctx context.Context, client hubLaneWriter, options lanesCLIOptions) (hubLaneProjection, string, int) {
 	encoded, err := json.Marshal(struct {
-		Machine string `json:"machine"`
-		Pane    string `json:"pane"`
-		Parent  string `json:"parent,omitempty"`
-		Sink    bool   `json:"sink,omitempty"`
-	}{Machine: options.Machine, Pane: options.Pane, Parent: options.Parent, Sink: options.Sink})
+		Machine  string `json:"machine"`
+		Pane     string `json:"pane"`
+		Job      string `json:"job,omitempty"`
+		Parent   string `json:"parent,omitempty"`
+		Sink     bool   `json:"sink,omitempty"`
+		Takeover string `json:"takeover,omitempty"`
+	}{Machine: options.Machine, Pane: options.Pane, Job: options.Job, Parent: options.Parent, Sink: options.Sink, Takeover: options.Takeover})
 	if err != nil {
 		return hubLaneProjection{}, "lanes unavailable", ExitInternal
 	}
@@ -272,7 +285,7 @@ func laneAddThroughHub(ctx context.Context, client hubLaneWriter, options lanesC
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK && response.StatusCode != http.StatusCreated {
-		detail, code := lanesRefusalForParent(response, options.Parent)
+		detail, code := lanesRefusalForParent(response, options.Parent, options.Takeover)
 		return hubLaneProjection{}, detail, code
 	}
 	var result hubLaneProjection
@@ -320,11 +333,19 @@ func parseLanesCLI(args []string) (lanesCLIOptions, error) {
 				return lanesCLIOptions{}, errors.New("invalid sink value")
 			}
 			options.Sink = parsed
-		case "--hub-url", "--hub-token-env", "--hub-cf-env", "--machine", "--pane", "--parent", "--lane", "--expect-machine", "--expect-pane", "--expect-epoch":
+		case "--hub-url", "--hub-token-env", "--hub-cf-env", "--machine", "--pane", "--job", "--parent", "--takeover", "--lane", "--expect-machine", "--expect-pane", "--expect-epoch":
 			switch name {
 			case "--lane", "--expect-epoch":
 				if options.Command != "self-check" {
 					return lanesCLIOptions{}, errors.New("invalid self-check flag")
+				}
+			case "--takeover":
+				if options.Command != "add" {
+					return lanesCLIOptions{}, errors.New("invalid takeover flag")
+				}
+			case "--job":
+				if options.Command != "add" {
+					return lanesCLIOptions{}, errors.New("invalid job flag")
 				}
 			case "--expect-machine", "--expect-pane":
 				// rm takes them as a guard the hub checks: remove the lane
@@ -355,8 +376,12 @@ func parseLanesCLI(args []string) (lanesCLIOptions, error) {
 				options.Machine = value
 			case "--pane":
 				options.Pane = value
+			case "--job":
+				options.Job = value
 			case "--parent":
 				options.Parent = value
+			case "--takeover":
+				options.Takeover = value
 			case "--lane":
 				options.Lane = value
 			case "--expect-machine":
@@ -376,7 +401,7 @@ func parseLanesCLI(args []string) (lanesCLIOptions, error) {
 	}
 	switch options.Command {
 	case "add":
-		if len(positionals) != 1 || !options.seen["--machine"] || !options.seen["--pane"] {
+		if len(positionals) != 1 || (!options.Sink && (!options.seen["--machine"] || !options.seen["--pane"])) {
 			return lanesCLIOptions{}, errors.New("lane and route flags are required")
 		}
 		options.Lane = positionals[0]
@@ -425,15 +450,16 @@ func lanesCLIStatus(stderr io.Writer, response *http.Response) int {
 }
 
 func lanesCLIStatusForParent(stderr io.Writer, response *http.Response, parent string) int {
-	line, code := lanesRefusalForParent(response, parent)
+	line, code := lanesRefusalForParent(response, parent, "")
 	fmt.Fprintln(stderr, line)
 	return code
 }
 
 // lanesRefusalForParent returns the stderr line and exit status for a hub
 // refusal, keeping the code and the parent hint that make a lane_quota_exceeded
-// or a lane_machine_mismatch actionable.
-func lanesRefusalForParent(response *http.Response, parent string) (string, int) {
+// or a lane_machine_mismatch actionable. A takeover write names the job whose
+// row it moves instead: its parent hint would point at the wrong lane.
+func lanesRefusalForParent(response *http.Response, parent, takeover string) (string, int) {
 	var body struct {
 		Error string `json:"error"`
 		Use   string `json:"use"`
@@ -444,8 +470,11 @@ func lanesRefusalForParent(response *http.Response, parent string) (string, int)
 		code = ""
 	}
 	detail := code
-	if response.StatusCode == http.StatusForbidden && code == "lane_machine_mismatch" && parent != "" {
+	if response.StatusCode == http.StatusForbidden && code == "lane_machine_mismatch" && takeover == "" && parent != "" {
 		detail += " (check that parent lane " + parent + " is registered on the hub)"
+	}
+	if code == "lane_takeover_unconfirmed" && takeover != "" {
+		detail += " (the hub has no route for job " + takeover + " at the pane it holds)"
 	}
 	if use := lanesPrintableHint(body.Use); use != "" {
 		detail += " (use: " + use + ")"
@@ -490,7 +519,7 @@ func decodeLanesJSON(reader io.Reader, target any) error {
 }
 
 func validHubLaneProjection(lane hubLaneProjection) bool {
-	if !laneNamePattern.MatchString(lane.Lane) || lane.Parent != "" && !laneNamePattern.MatchString(lane.Parent) {
+	if !LaneNamePattern.MatchString(lane.Lane) || lane.Parent != "" && !LaneNamePattern.MatchString(lane.Parent) {
 		return false
 	}
 	if lane.Sink {

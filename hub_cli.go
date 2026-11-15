@@ -23,6 +23,8 @@ import (
 
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
+
+	"github.com/mgh3326/panewire/internal/hubretry"
 )
 
 // loadHubAuthFile accepts the intentionally small server-side token format:
@@ -69,8 +71,6 @@ func (values *hubListenValues) Set(raw string) error {
 }
 
 type hubServerCLIDeps struct {
-	TelegramHTTPClient    *http.Client
-	TelegramBaseURL       string
 	AllowInsecureForTests bool
 	HandoffkeepHTTPClient *http.Client
 	ChatHTTPClient        *http.Client
@@ -87,12 +87,15 @@ func newHubServerForCLIWithDeps(args []string, logger *slog.Logger, deps hubServ
 	var listens hubListenValues
 	flags.Var(&listens, "listen", "repeatable loopback or tailnet listen address")
 	authPath := flags.String("hub-auth", "", "mode-0600 HUB_TOKEN_<machine_id> file")
-	tgEnvPath := flags.String("hub-tg-env", "", "optional mode-0600 TG_BOT_TOKEN/TG_CHAT_ID env file")
 	gracePeriod := flags.Duration("hub-grace", defaultHubGracePeriod, "continuous disconnected/stale grace period")
+	paneSweepInterval := flags.Duration("pane-sweep-interval", defaultHubPaneSweepInterval, "how often the hub asks each node to close panes of jobs that ended (0 turns the sweep off)")
+	paneSweepAge := flags.Duration("pane-sweep-age", defaultHubPaneSweepAge, "how long a job must have ended before its pane is closed")
+	fleetStatusInterval := flags.Duration("fleet-status-interval", defaultFleetStatusInterval, "how often the hub writes the fleet status snapshot to hk (0 turns it off); see docs/fleet-status.md")
+	consultTimeout := flags.Duration("consult-timeout", defaultHubConsultTimeout, "how long one consult may take from request to answer")
 	alertNodesCSV := flags.String("alert-nodes", "", "comma-separated authenticated machine IDs to alert on")
-	burstPolicyPath := flags.String("burst-policy", "", "explicit regular JSON burst policy file (hot-reloaded)")
-	wakeConfigPath := flags.String("wake-config", "", "operator-owned JSON wake routing file for `panewire node wake` (hot-reloaded)")
 	placementPolicyPath := flags.String("placement-policy", "/etc/panewire/placement.json", "operator-owned JSON placement policy (hot-reloaded)")
+	spawnRollbackDrain := flags.Bool("spawn-rollback-drain", false, "accept no spawn submission and start no quota hand-off or consult spawn, while queued spawns settle, before a hub rollback past parking")
+	spawnGrantDrain := flags.Bool("spawn-grant-drain", false, "bind no new grant-required spawn and start no quota hand-off, to drain *_grant rows before a hub rollback")
 	uiAllowCFOnly := flags.Bool("ui-allow-cf-only", false, "serve /ui only to Cloudflare Access identities or loopback clients")
 	cfAccessTeam := flags.String("cf-access-team", "", "Cloudflare Access team name for Cf-Access-Jwt-Assertion verification (requires --cf-access-aud)")
 	cfAccessAUD := flags.String("cf-access-aud", "", "Cloudflare Access application AUD tag for Cf-Access-Jwt-Assertion verification (requires --cf-access-team)")
@@ -107,8 +110,6 @@ func newHubServerForCLIWithDeps(args []string, logger *slog.Logger, deps hubServ
 	reportRelayPath := flags.String("report-relay-routes", "", "deprecated alias for --lanes")
 	acceptingOverridesPath := flags.String("accepting-overrides", "", "optional accepting override JSON (updated by operator POST)")
 	handoffkeepEnvPath := flags.String("handoffkeep-env", "", "optional mode-0600 HANDOFFKEEP_URL/HANDOFFKEEP_TOKEN_SVC_PANEWIRE env file enabling durable relay events (legacy HANDOFFKEEP_TOKEN accepted)")
-	chatEnvPath := flags.String("chat-env", "", "optional mode-0600 HANDOFFKEEP_URL/HANDOFFKEEP_TOKEN_SVC_PANEWIRE env file for the operator chat store (defaults to --handoffkeep-env; legacy HANDOFFKEEP_TOKEN accepted)")
-	chatDeskLane := flags.String("chat-desk-lane", "", "fixed destination lane for operator chat; required when chat store is enabled")
 	// PANEWIRE_DELIVERY_POLICY is the env-var kill switch equal to the flag:
 	// "off" restores pre-policy pane delivery without editing the unit's
 	// arguments. An explicit --delivery-policy always wins.
@@ -166,6 +167,9 @@ func newHubServerForCLIWithDeps(args []string, logger *slog.Logger, deps hubServ
 	if *lanesNodeRowCap < 0 {
 		return nil, "", ExitConditionInvalid, errors.New("hub lanes node row cap must not be negative")
 	}
+	if *fleetStatusInterval < 0 {
+		return nil, "", ExitConditionInvalid, errors.New("hub fleet status interval must not be negative")
+	}
 	if !machineIDPattern.MatchString(*prStatusHost) || *prStatusHost == hubOperatorMachineID {
 		return nil, "", ExitConditionInvalid, errors.New("hub pr-status host is not a machine id")
 	}
@@ -189,19 +193,6 @@ func newHubServerForCLIWithDeps(args []string, logger *slog.Logger, deps hubServ
 			return nil, "", ExitConditionInvalid, errors.New("hub alert nodes are invalid")
 		}
 	}
-	var notifier HubNotifier
-	if *tgEnvPath != "" {
-		env, err := loadHubTelegramEnv(*tgEnvPath)
-		if err != nil {
-			return nil, "", ExitConditionInvalid, errors.New("hub Telegram env is invalid")
-		}
-		notifier, err = newHubTelegramNotifier(env, hubNotifierDeps{
-			HTTPClient: deps.TelegramHTTPClient, BaseURL: deps.TelegramBaseURL, AllowInsecureForTests: deps.AllowInsecureForTests,
-		})
-		if err != nil {
-			return nil, "", ExitConditionInvalid, errors.New("hub Telegram configuration is invalid")
-		}
-	}
 	placementPath := *placementPolicyPath
 	if _, err := os.Stat(placementPath); !placementPolicySet && os.IsNotExist(err) {
 		placementPath = ""
@@ -221,35 +212,17 @@ func newHubServerForCLIWithDeps(args []string, logger *slog.Logger, deps hubServ
 			return nil, "", ExitConditionInvalid, errors.New("hub handoffkeep configuration is invalid")
 		}
 	}
-	// The chat store defaults to the relay handoffkeep but is a separate client
-	// with its own pool, so a chat outage and a relay outage stay independent.
-	// --chat-env splits the failure domain explicitly ahead of any later
-	// storage separation.
-	var chatStore ChatStore
-	chatEnv := *chatEnvPath
-	if chatEnv == "" {
-		chatEnv = *handoffkeepEnvPath
+	if *paneSweepInterval < 0 || (*paneSweepInterval > 0 && *paneSweepInterval < minTaskPaneSweepInterval) || *paneSweepAge < 0 || *paneSweepAge > time.Duration(nodePaneSweepMaxAgeSeconds)*time.Second {
+		return nil, "", ExitConditionInvalid, errors.New("hub pane sweep flags are invalid")
 	}
-	if chatEnv != "" {
-		env, err := loadHubHandoffkeepEnv(chatEnv)
-		if err != nil {
-			return nil, "", ExitConditionInvalid, errors.New("hub chat store env is invalid")
-		}
-		chatStore, err = newHandoffkeepChatStore(env, deps.ChatHTTPClient)
-		if err != nil {
-			return nil, "", ExitConditionInvalid, errors.New("hub chat store configuration is invalid")
-		}
-	}
-	if chatStore != nil && !validReportRelayLaneName(*chatDeskLane) {
-		return nil, "", ExitConditionInvalid, errors.New("hub chat desk lane is required and must be valid")
-	}
-	hub, err := NewHubServer(HubServerConfig{DeliveryPolicyPath: *deliveryPolicyPath, InboxStorePath: *inboxStorePath, InboxDatabaseURL: os.Getenv(hubDatabaseURLEnv), Tokens: tokens, Scopes: scopes, AuthPath: *authPath, AlertNodes: alertNodes, Now: deps.Now, GracePeriod: *gracePeriod, Notifier: notifier, Logger: logger, BurstPolicyPath: *burstPolicyPath, WakeConfigPath: *wakeConfigPath, PlacementPolicyPath: placementPath, PrometheusURL: os.Getenv("PANEWIRE_PROM_URL"), PrometheusBearer: os.Getenv("PANEWIRE_PROM_BEARER"), PrometheusBasicUser: os.Getenv("PANEWIRE_PROM_BASIC_USER"), PrometheusBasicPass: os.Getenv("PANEWIRE_PROM_BASIC_PASS"), UIAllowCFOnly: *uiAllowCFOnly, CFAccessTeam: *cfAccessTeam, CFAccessAUD: *cfAccessAUD, CFAccessCertsURL: *cfAccessCertsURL, CFAccessHTTPClient: deps.ChatHTTPClient, ReportRelayPath: routePath, LanesNodeRowCap: *lanesNodeRowCap, PRStatusHost: *prStatusHost, ControlPlaneLanesPath: *controlPlaneLanesPath, AcceptingOverridesPath: *acceptingOverridesPath, handoffkeep: handoffkeep, ChatStore: chatStore, ChatDeskLane: *chatDeskLane})
+	hub, err := NewHubServer(HubServerConfig{DeliveryPolicyPath: *deliveryPolicyPath, InboxStorePath: *inboxStorePath, InboxDatabaseURL: os.Getenv(hubDatabaseURLEnv), Tokens: tokens, Scopes: scopes, AuthPath: *authPath, AlertNodes: alertNodes, Now: deps.Now, GracePeriod: *gracePeriod, PaneSweepInterval: *paneSweepInterval, PaneSweepAge: *paneSweepAge, FleetStatusInterval: *fleetStatusInterval, ConsultTimeout: *consultTimeout, Logger: logger, PlacementPolicyPath: placementPath, PrometheusURL: os.Getenv("PANEWIRE_PROM_URL"), PrometheusBearer: os.Getenv("PANEWIRE_PROM_BEARER"), PrometheusBasicUser: os.Getenv("PANEWIRE_PROM_BASIC_USER"), PrometheusBasicPass: os.Getenv("PANEWIRE_PROM_BASIC_PASS"), UIAllowCFOnly: *uiAllowCFOnly, CFAccessTeam: *cfAccessTeam, CFAccessAUD: *cfAccessAUD, CFAccessCertsURL: *cfAccessCertsURL, CFAccessHTTPClient: deps.ChatHTTPClient, ReportRelayPath: routePath, LanesNodeRowCap: *lanesNodeRowCap, PRStatusHost: *prStatusHost, ControlPlaneLanesPath: *controlPlaneLanesPath, AcceptingOverridesPath: *acceptingOverridesPath, SpawnGrantDrain: *spawnGrantDrain, SpawnRollbackDrain: *spawnRollbackDrain, handoffkeep: handoffkeep})
 	if err != nil {
 		return nil, "", ExitConditionInvalid, fmt.Errorf("hub configuration is invalid: %w", err)
 	}
 	hub.logFile = logFile
 	logFile = nil
 	hub.logAuthorityLaneProtection()
+	hub.logSpawnGrantRows()
 	return hub, address, ExitOK, nil
 }
 
@@ -329,15 +302,26 @@ func (t hubLogTeeHandler) Enabled(ctx context.Context, level slog.Level) bool {
 	return t.primary.Enabled(ctx, level) || t.file.Enabled(ctx, level)
 }
 
+// Handle writes the record to every sink that takes it and fails only when no
+// enabled sink accepted it. A record that reached one sink is not lost, so a
+// broken sink must not make a caller retry and duplicate it on the other one.
 func (t hubLogTeeHandler) Handle(ctx context.Context, record slog.Record) error {
+	var accepted bool
 	var err error
 	if t.primary.Enabled(ctx, record.Level) {
-		err = t.primary.Handle(ctx, record)
+		if err = t.primary.Handle(ctx, record); err == nil {
+			accepted = true
+		}
 	}
 	if t.file.Enabled(ctx, record.Level) {
-		if fileErr := t.file.Handle(ctx, record); err == nil {
+		if fileErr := t.file.Handle(ctx, record); fileErr == nil {
+			accepted = true
+		} else if err == nil {
 			err = fileErr
 		}
+	}
+	if accepted {
+		return nil
 	}
 	return err
 }
@@ -372,9 +356,6 @@ func parseHubAlertNodes(raw string, tokens map[string]string) (map[string]struct
 }
 
 func runHubCLI(args []string) int {
-	if len(args) > 0 && args[0] == "migrate-sqlite" {
-		return runHubMigrateSQLite(context.Background(), args[1:], os.Getenv(hubDatabaseURLEnv), os.Stdout, os.Stderr)
-	}
 	if len(args) > 0 && args[0] == "spawn" {
 		return runHubSpawnCLI(args[1:], os.Stdout, os.Stderr, hubCLIDeps{})
 	}
@@ -406,27 +387,47 @@ func runHubCLI(args []string) int {
 			_ = listener.Close()
 		}
 	}()
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	// The first signal starts the drain; a second one then ends the process at
+	// once, the way an operator expects of ^C twice.
+	go func() { <-ctx.Done(); stop() }()
+	return serveHub(ctx, hub, listeners, hubDrainTimeout)
+}
+
+// serveHub serves until ctx ends, then drains (hub_drain.go): new work is
+// refused with a retryable answer, work in flight gets up to drainTimeout, each
+// node is told to redial, and only then do the listeners close. The
+// maintenance loops and spawn workers run on their own context that ends after
+// the drain, so a dispatch in flight is not cancelled by the signal itself.
+func serveHub(ctx context.Context, hub *HubServer, listeners []net.Listener, drainTimeout time.Duration) int {
 	server := &http.Server{
 		Handler:           hub.Handler(),
 		ReadHeaderTimeout: 5 * time.Second,
 		IdleTimeout:       2 * time.Minute,
 	}
-	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer cancel()
-	go hub.RunMaintenance(ctx)
-	go func() {
-		<-ctx.Done()
-		shutdownContext, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer shutdownCancel()
-		_ = server.Shutdown(shutdownContext)
-	}()
+	runCtx, runCancel := context.WithCancel(context.Background())
+	defer runCancel()
+	go hub.RunMaintenance(runCtx)
 	errs := make(chan error, len(listeners))
 	for _, listener := range listeners {
 		go func(listener net.Listener) { errs <- server.Serve(listener) }(listener)
 	}
-	if serveErr := <-errs; serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
-		fmt.Fprintln(os.Stderr, "hub unavailable")
-		return ExitInternal
+	select {
+	case serveErr := <-errs:
+		if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
+			fmt.Fprintln(os.Stderr, "hub unavailable")
+			return ExitInternal
+		}
+		return ExitOK
+	case <-ctx.Done():
+	}
+	hub.Drain(drainTimeout)
+	runCancel()
+	shutdownContext, shutdownCancel := context.WithTimeout(context.Background(), hubDrainShutdownBudget)
+	defer shutdownCancel()
+	if server.Shutdown(shutdownContext) != nil {
+		_ = server.Close()
 	}
 	return ExitOK
 }
@@ -470,6 +471,9 @@ type hubCLIDeps struct {
 	HTTPClient            *http.Client
 	AllowInsecureForTests bool
 	Now                   func() time.Time
+	// HubRetry bounds how an idempotent hub call is sent again; the zero value
+	// is the production policy (hubretry.Budget).
+	HubRetry hubretry.Policy
 }
 
 // runHubEmitCLI sends one display-only note as an authenticated node and
@@ -554,10 +558,6 @@ func hubEmitTextProvided(flags *flag.FlagSet) bool {
 }
 
 func buildHubDaemonClient(rawURL, tokenEnvPath, cfEnvPath string, checks []HubCheck, accepting bool, failoverWakeOn, failoverWakeMAC string, deps daemonCLIDeps) (*HubClient, error) {
-	return buildHubDaemonClientWithBurst(rawURL, tokenEnvPath, cfEnvPath, checks, accepting, failoverWakeOn, failoverWakeMAC, "", false, "", deps)
-}
-
-func buildHubDaemonClientWithBurst(rawURL, tokenEnvPath, cfEnvPath string, checks []HubCheck, accepting bool, failoverWakeOn, failoverWakeMAC, burstWakeMAC string, burstPoweroffAllowed bool, wakeTargetsPath string, deps daemonCLIDeps) (*HubClient, error) {
 	env, err := loadHubTokenEnv(tokenEnvPath)
 	if err != nil || env.MachineID == hubOperatorMachineID {
 		return nil, errors.New("hub token env must contain a node credential")
@@ -575,7 +575,7 @@ func buildHubDaemonClientWithBurst(rawURL, tokenEnvPath, cfEnvPath string, check
 	}
 	client, err := NewHubClient(HubClientConfig{
 		URL: rawURL, MachineID: env.MachineID, Token: env.Token, CFAccessClientID: cfAccess.ClientID, CFAccessClientSecret: cfAccess.ClientSecret, Accepting: accepting,
-		FailoverWakeOn: failoverWakeOn, FailoverWakeMAC: failoverWakeMAC, BurstWakeMAC: burstWakeMAC, BurstPoweroffAllowed: burstPoweroffAllowed, WakeTargetsPath: wakeTargetsPath, Checks: checks,
+		FailoverWakeOn: failoverWakeOn, FailoverWakeMAC: failoverWakeMAC, Checks: checks,
 		Version:               deps.Version,
 		AllowInsecureForTests: deps.AllowInsecureForTests,
 		Warn:                  func(message string) { logger.Warn(message) },
@@ -656,11 +656,31 @@ func validHubStatusNodes(nodes []HubNode) bool {
 func renderHubStatus(writer io.Writer, nodes []HubNode) {
 	rows := append([]HubNode(nil), nodes...)
 	sort.Slice(rows, func(i, j int) bool { return rows[i].MachineID < rows[j].MachineID })
-	fmt.Fprintln(writer, "MACHINE\tCLASS\tSTATE\tACCEPTING\tCONTAINMENT\tCONNECTED_SINCE\tLAST_PING_MS\tLAST_NOTE\tREMOTE_META")
+	fmt.Fprintln(writer, "MACHINE\tCLASS\tSTATE\tACCEPTING\tCONTAINMENT\tCONNECTED_SINCE\tLAST_PING_MS\tLAST_NOTE\tREMOTE_META\tCHECKOUTS")
 	for _, node := range rows {
 		meta, _ := json.Marshal(node.RemoteMeta)
-		fmt.Fprintf(writer, "%s\t%s\t%s\t%t\t%s\t%s\t%d\t%s\t%s\n", node.MachineID, node.AlertClass, node.State, node.Accepting, node.Containment, node.ConnectedSince.UTC().Format(time.RFC3339), node.LastPingMS, renderHubLastNote(node.LastNote, time.Now().UTC()), meta)
+		fmt.Fprintf(writer, "%s\t%s\t%s\t%t\t%s\t%s\t%d\t%s\t%s\t%s\n", node.MachineID, node.AlertClass, node.State, node.Accepting, node.Containment, node.ConnectedSince.UTC().Format(time.RFC3339), node.LastPingMS, renderHubLastNote(node.LastNote, time.Now().UTC()), meta, renderHubCheckouts(node.Checkouts))
 	}
+}
+
+// renderHubCheckouts names each checkout's revision as name=sha@branch, in name
+// order; a detached checkout has no @branch. An empty list renders as nothing.
+func renderHubCheckouts(checkouts map[string]HubCheckoutRev) string {
+	names := make([]string, 0, len(checkouts))
+	for name := range checkouts {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	parts := make([]string, 0, len(names))
+	for _, name := range names {
+		rev := checkouts[name]
+		if rev.Branch == "" {
+			parts = append(parts, name+"="+rev.Sha)
+			continue
+		}
+		parts = append(parts, name+"="+rev.Sha+"@"+rev.Branch)
+	}
+	return strings.Join(parts, " ")
 }
 
 func runJobsCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
@@ -701,7 +721,7 @@ func runJobsCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 	if args[0] == "jobs" && *machine != "" && !machineIDPattern.MatchString(*machine) {
 		return writeHubCLIUsage(stderr, "jobs: invalid --machine", jobsUsage)
 	}
-	if args[0] == "list" && !validReportRelayLaneName(*lane) {
+	if args[0] == "list" && !validLaneReference(*lane) {
 		return writeHubCLIUsage(stderr, "jobs list: valid --lane is required", jobsUsage)
 	}
 	env, err := loadHubTokenEnv(*tokenEnvPath)

@@ -21,9 +21,9 @@ the document with its own handoffkeep client.
 >   `^[a-z0-9._-]{1,64}$`, inline/doc 중 정확히 하나(빈 값은 400), 선택적 `checkout`은
 >   `worktree.prepare` 문법, `args`는 **runtug 플래그 allowlist**만
 >   (`-m -w -l --t --effort --job --owner --report --role --lane --parent
->   -L --task --parent-job --builder-family --builder-job --review-pass --tags --urgency`), 각 값
+>   -L --task --parent-job --author-family --builder-job --review-pass --tags --urgency`), 각 값
 >   `^[A-Za-z0-9._:/@-]{1,200}$` 단 `--tags`만 쉼표 목록(최대 16개) 허용
->   (공백·셸 메타문자 거부), `--role`, `--builder-family`, `--parent-job`, `--builder-job` 값은 유효성
+>   (공백·셸 메타문자 거부), `--role`, `--author-family`, `--parent-job`, `--builder-job` 값은 유효성
 >   검사를 거치며, `wait_seconds`는 1..300.
 > - `--report-relative`는 **노드의** jobs root 기준 상대 경로다. 절대 경로, 끝 `/`,
 >   빈 세그먼트·`.`·`..` 세그먼트는 400으로 거부하며, 노드는 다른 플래그처럼
@@ -71,13 +71,13 @@ Request:
   `^[a-z0-9._-]{1,64}$`, exactly one nonempty `brief.inline` or `brief.doc`, optional `checkout`
   following the `worktree.prepare` grammar, and `args` accepts **only runtug
   flags** (`-m -w -l --t --effort --job --owner --report --report-relative --role --lane
-  --parent -L --task --parent-job --builder-family --builder-job --review-pass
+  --parent -L --task --parent-job --author-family --builder-job --review-pass
   --tags --urgency`), each value
   `^[A-Za-z0-9._:/@-]{1,200}$` — except `--tags`, a comma list of up to 16
   entries, all within the 200-char bound — (spaces and shell metacharacters
   rejected),
-  and `wait_seconds` is 1..300. `--role` accepts `worker`,
-  `reviewer`, or `tester`; `--builder-family` accepts `anthropic`, `openai`,
+  and `wait_seconds` is 1..300. `--role` accepts `implementer`
+  or `reviewer` (`consult` for an operator); `--author-family` accepts `anthropic`, `openai`,
   `google`, `xai`, `deepseek`, `meta`, `mistral`, or `other`; job values use
   `^[A-Za-z0-9._-]{1,128}$`; `--review-pass` is one digit 1..9 and sets the
   reviewer reservation key to `task:reviewer:p<N>`

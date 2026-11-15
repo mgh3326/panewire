@@ -24,7 +24,7 @@ func TestT998LaneStallHeldCountCountsOnlyCountedRows(t *testing.T) {
 	fake, client, closeServer := newFakeHandoffkeep(t)
 	defer closeServer()
 	var logBuf bytes.Buffer
-	hub := t987StallHub(t, `{"lanes":{"lane-a":{"machine":"host-a","pane":"w1:p1"}}}`, client, &task198Notifier{}, &logBuf)
+	hub := t987StallHub(t, `{"lanes":{"lane-a":{"machine":"host-a","pane":"w1:p1"}}}`, client, newHubAlertLog(&logBuf))
 	var scans atomic.Int64
 	hub.laneHeldCountProbe = func() { scans.Add(1) }
 	t961ActiveNode(hub, "host-a", HubActiveJob{JobID: "t998-held", OwnerLane: "lane-a"})

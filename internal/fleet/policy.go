@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/mgh3326/panewire/internal/configkeys"
 	"github.com/mgh3326/panewire/internal/grade"
 )
 
@@ -139,15 +140,14 @@ func taskMarkerPattern() string {
 // Grade and scale must be adjacent.
 var taskMarker = regexp.MustCompile(taskMarkerPattern())
 
-// Check admits one launch row for a seat role.
-func (s Seat) Check(l Launch, role, grade, builderFamily, arm string, host map[string]any) error {
+// Check admits one launch row for a seat role. capabilityOn is the host's
+// answer for the seat's capability flag, from capability.
+func (s Seat) Check(l Launch, role, grade, authorFamily, arm string, capabilityOn bool) error {
 	if !validCatalogGrade(l.Grade) || l.ModelID == "" || (l.Effort == "" && s.needsEffort()) || l.Gate == "" {
 		return fail(exitConfig, "canon launch data incomplete")
 	}
-	if !boolean(host, s.Capability, false) { // Standard harnesses predate capability flags; only their explicit policy sentinel is implicit.
-		if s.Capability != "standard" {
-			return fail(exitConfig, "host lacks capability %s", s.Capability)
-		}
+	if s.Capability != "standard" && !capabilityOn {
+		return fail(exitConfig, "host lacks capability %s", s.Capability)
 	}
 	if s.Route != "" && l.Effort != "" {
 		return fail(exitConfig, "routed seat %s takes no effort rung", s.Canon)
@@ -171,7 +171,7 @@ func (s Seat) Check(l Launch, role, grade, builderFamily, arm string, host map[s
 	if e6 && !armed {
 		return fail(exitSeatRefused, "requires PANEWIRE_E6_ARM=%s@%s", s.Canon, l.Effort)
 	}
-	if grade != "" && role != "counsel" {
+	if grade != "" && role != "consult" {
 		n, ok := gradeOrder[grade]
 		if ok && l.Grade == gradeUnrated {
 			// An E6 arm admits an unrated rung for a graded task; it never raises a grade.
@@ -182,12 +182,12 @@ func (s Seat) Check(l Launch, role, grade, builderFamily, arm string, host map[s
 			return fail(exitSeatRefused, "canon grade %s does not cover task grade %s", l.Grade, grade)
 		}
 	}
-	if role == "tester" || role == "reviewer" {
-		if builderFamily == "" {
-			return fail(exitSeatRefused, "tester requires readable builder family")
+	if role == "reviewer" {
+		if authorFamily == "" {
+			return fail(exitSeatRefused, "reviewer requires readable author family")
 		}
-		if s.Family == builderFamily {
-			return fail(exitSeatRefused, "tester and builder share family %s", s.Family)
+		if s.Family == authorFamily {
+			return fail(exitSeatRefused, "reviewer and author share family %s", s.Family)
 		}
 	}
 	return nil
@@ -200,6 +200,20 @@ func decode(b []byte, v any) error {
 	d := json.NewDecoder(strings.NewReader(string(b)))
 	d.DisallowUnknownFields()
 	return d.Decode(v)
+}
+
+// decodeConfig is decode for a config document that may carry keys this
+// release does not read: they come back for the caller to warn about instead
+// of refusing the file. A malformed value for a key the struct reads still
+// fails.
+func decodeConfig(b []byte, v any) ([]string, error) {
+	if e := uniqueJSON(b); e != nil {
+		return nil, e
+	}
+	if e := json.NewDecoder(strings.NewReader(string(b))).Decode(v); e != nil {
+		return nil, e
+	}
+	return configkeys.JSON(b, v)
 }
 func uniqueJSON(b []byte) error {
 	d := json.NewDecoder(strings.NewReader(string(b)))

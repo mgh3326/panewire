@@ -62,6 +62,49 @@ fallback: they let `panewire emit` succeed with no daemon running, and they let
 a node that was offline hand its backlog to the hub on reconnect. The answer to
 "was this report delivered" lives only in Postgres.
 
+## What a node already delivered, and a gap after a restart
+
+The node's `relay_delivered` table (`relay_delivered_store.go`) is the durable
+fact that a pane received a row. The `relay.delivered` ack that carries it to
+the hub is a socket event: a socket that dies between the delivery and the ack
+left the hub row open, and the next restart replayed a batch the pane had
+already read (hk 3435).
+
+- **Applied report.** A node that advertises the capability `applied_v1` sends
+  an `{"type":"applied","applied":{lane:[row ids]}}` message right behind its
+  hello and ping: the row ids it delivered, newest first, at most 256 per lane,
+  64 lanes and 1500 ids in all (`relayApplied*` constants; the hub reads a
+  frame under 32 KiB and refuses a report outside the bounds). The hello itself
+  is unchanged, so a hub that predates the report still registers the node
+  (it ignores the capability name and replays at registration; the report is
+  dropped as an unknown message type) and the capability-free fallback hello is
+  followed by no report. The store read waits at most 1 s; past that the report
+  goes out empty.
+- **The report closes first, then the replay runs.** For a node advertising
+  `applied_v1` the hub holds the registration replay until the report arrives.
+  It then closes each undelivered row of a reported lane whose id is listed
+  (`delivered_to` = `<machine>/applied-report`), and only if the row was routed
+  to the reporting machine (the row's own machine, or the lane's current
+  route — the entitlement a late `relay.delivered` ack needs); another
+  machine's report closes nothing. The report is a set of exact ids, not a
+  high-water mark: hub row ids are not commit-ordered per lane, and a row the
+  node never saw may sit below one it did, so a max-id cursor would drop it
+  silently. A node that dies before it sends the report replays at its next hello;
+  a node without the capability replays at registration as before.
+- **A gap is one line.** The hello replay and the startup replay hold every
+  `lane.event` row that passed the replay gates until the walk has counted its
+  lane. A lane owed more than `relayReplayGapThreshold` (20) rows gets one
+  summary line — `[panewire] gap: N events for <lane> were not replayed after
+  the restart (first …, last …) | panewire inbox list --lane <lane>` — filed as
+  an interrupt lane.event with id `replay-gap-<last row id>`, and the rows the
+  lane inbox holds retire with `hub/replay-retired:gap`. The summary is filed
+  first, so a failure replays the rows and a repeated walk reuses the same
+  summary. A hub with no lane inbox (`--delivery-policy off`, no store) never
+  summarizes, since the line points at `panewire inbox list`; a row the inbox
+  lacks replays. A lane within
+  the threshold replays row by row as before. Rows held for their one labelled
+  `[replayed after hub restart]` replay (#1002) are outside the count.
+
 ## `--handoffkeep-env`
 
 `panewire hub --handoffkeep-env <path>` enables persistence. The file must be a
@@ -80,8 +123,8 @@ A file written before hk 3570 may carry `HANDOFFKEEP_TOKEN` instead of
 ([config.md](config.md#handoffkeep-service-credential)).
 
 The same file format is the node's `spawn.json` `handoffkeep_env` (brief
-fetch) and the hub's `--chat-env`. When the CF Access pair is present, every
-handoffkeep request (relay, chat, node brief fetch) sends it with the bearer; a
+fetch) and the hub's relay store. When the CF Access pair is present, every
+handoffkeep request (relay, node brief fetch) sends it with the bearer; a
 file with only one of the two is refused.
 
 Values never appear in a log line or an error message. A plaintext `http://`
@@ -150,7 +193,8 @@ spends an attempt, the hub closes these rows. Each gets a `delivered_to` of
   which is the node outbox's own default bound (`stale`). A row with no
   `received_at` is never aged out.
 
-Chat rows keep the chat store as their only authority and skip this gate.
+Legacy `chat-N` rows, written before the operator chat was removed, retire
+at replay (`chat-terminal`) and are never injected.
 
 **An unproven pane submission is replayed at most once (#1002, #1034).** A
 `relay.unconfirmed` report that matches a live window still retires the
@@ -176,7 +220,7 @@ before. A marked row gets **at most one** replay whose pane text is prefixed
 duplicate, do not re-run]` — the original send named by the row's `event_time`
 (`received_at` for older rows) — and no labelled copy is ever queued until
 the durable retire for that row has already succeeded. Once the listed row
-clears the pre-queue gates (chat store, age, attempts, dedupe, route) the
+clears the pre-queue gates (age, attempts, dedupe, route) the
 walk re-reads it — a listing page is stale the moment it is taken — and a
 row that is delivered, retired, or gone is left to its marker rather than
 injected. Only then is the retire written, `delivered_to`
@@ -189,7 +233,7 @@ broadcasts `relay.unrouted` and logs one warning naming the row, and never
 re-marks it. The spent marker then retires with
 `hub/replay-retired:unconfirmed-mark`; a marker whose original is already
 delivered, exhausted, or gone retires on sight. Every other row class —
-never-attempted, held, exhausted, chat, sink — replays exactly as before.
+never-attempted, held, exhausted, sink — replays exactly as before.
 
 The lane-stall observation counts a marked row as ordinary backlog until its
 one replay retires it — bounded by the next trigger that can route the row,
@@ -197,7 +241,7 @@ never forever. The marker row itself is on an unroutable lane and never
 counts.
 
 **A successful replay is announced too (#961).** Once a re-injection has
-cleared every gate — the delivered and retired rows, the chat gate, the age
+cleared every gate — the delivered and retired rows, the age
 gates, `attempts < 3`, dedupe, route resolution, and the sink rejection —
 and the directive is queued and the attempt recorded, the hub logs one Info
 line and broadcasts `relay.replay_injected` with
@@ -456,5 +500,5 @@ path.
 Example lane file (identifiers only — never real addresses, panes, or tokens):
 
 ```json
-{"lanes":{"lane-a":{"machine":"host-a","pane":"w1:p1","parent":"captain"}}}
+{"lanes":{"lane-a":{"machine":"host-a","pane":"w1:p1","parent":"parent-lane"}}}
 ```

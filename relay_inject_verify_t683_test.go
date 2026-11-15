@@ -543,3 +543,34 @@ func TestTask683RejectedPromptStaysRetryable(t *testing.T) {
 		t.Fatalf("hub decoder rejected relay.held reason retry: %s", payload)
 	}
 }
+
+func TestBusyRelayDecodersRetainHistoricalDottedLane(t *testing.T) {
+	held, err := json.Marshal(relayHeldPayload{EventID: 1, JobID: "job-a", Pane: "w1:p1", Lane: "legacy.parent", Reason: "restored", HeldSince: time.Now().UTC().Format(time.RFC3339Nano), DeliverPolicy: "idle"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := decodeRelayHeldPayload(held); !ok {
+		t.Fatalf("historical relay.held rejected: %s", held)
+	}
+	released, err := json.Marshal(relayReleasedPayload{JobID: "job-a", Pane: "w1:p1", Lane: "legacy.parent", FinalText: "done", OriginalEventID: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := decodeRelayReleasedPayload(released); !ok {
+		t.Fatalf("historical relay.released rejected: %s", released)
+	}
+	dropped, err := json.Marshal(relayDroppedPayload{JobID: "job-a", Pane: "w1:p1", Lane: "legacy.parent", OriginalEventID: 1, Reason: "retry_exhausted"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := decodeRelayDroppedPayload(dropped); !ok {
+		t.Fatalf("historical relay.dropped rejected: %s", dropped)
+	}
+	batched, err := json.Marshal(relayBatchedPayload{Pane: "w1:p1", Lane: "legacy.parent", EventIDs: []int64{1, 2}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := decodeRelayBatchedPayload(batched); !ok {
+		t.Fatalf("historical relay.batched rejected: %s", batched)
+	}
+}

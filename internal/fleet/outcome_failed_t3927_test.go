@@ -31,7 +31,7 @@ func failureApp(t *testing.T, srv *httptest.Server) *App {
 // PR. extra keys go onto the job.spawned receipt.
 func seedBareJob(t *testing.T, a *App, id string, extra map[string]any) {
 	t.Helper()
-	putEvent(t, a, id, "job.claim", map[string]any{"task_id": "3250", "t_level": "T2", "role": "worker"})
+	putEvent(t, a, id, "job.claim", map[string]any{"task_id": "3250", "t_level": "T2", "role": "implementer"})
 	receipt := map[string]any{
 		"profile": "sonnet", "effort": "high", "model_id": "claude-sonnet-5-5",
 		"harness_session": map[string]any{"kind": "claude", "id": "s1"}, "task_id": "3250",
@@ -255,7 +255,7 @@ func TestMergedRepBodyUnchangedFromBase(t *testing.T) {
 	defer srv.Close()
 	a := benchFakeApp(t, srv)
 	a.Now = func() time.Time { return time.Date(2026, 11, 7, 8, 0, 0, 0, time.UTC) }
-	putEvent(t, a, "pw-job", "job.claim", map[string]any{"task_id": "3250", "t_level": "T2", "role": "worker"})
+	putEvent(t, a, "pw-job", "job.claim", map[string]any{"task_id": "3250", "t_level": "T2", "role": "implementer"})
 	putEvent(t, a, "pw-job", "job.spawned", map[string]any{
 		"profile": "sonnet", "effort": "high", "model_id": "claude-sonnet-5-5",
 		"harness_session": map[string]any{"kind": "claude", "id": "s1"}, "task_id": "3250",
@@ -280,42 +280,34 @@ func TestMergedRepBodyUnchangedFromBase(t *testing.T) {
 	}
 }
 
-// A reaped job whose joined PR is open writes nothing when its pane closes;
-// once the PR is closed unmerged, a later pass writes its one row. A later pass
-// does not write it again.
+// A job its owner closed is swept whatever its PRs say (hk 3383). Its failure
+// rep is final only once the joined PR is no longer open, so the close defers
+// it until the PR closes.
 func TestSweepHoldsReapedFailureRepWhileOpenPRThenWritesOnClose(t *testing.T) {
 	fake := &hkBenchFake{}
 	srv := httptest.NewServer(fake)
 	defer srv.Close()
 	f := newPaneSweepFixture(t)
 	f.a.BenchStore = &BenchStore{hk: &hkQuota{base: srv.URL, token: "test-token", now: f.a.Now}, now: f.a.Now}
-	f.job("j", "worker", "42")
-	putEvent(t, f.a, "j", "job.joined", map[string]any{"pr": "https://github.com/mgh3326/panewire/pull/9", "head": "head-9"})
+	g := newSweepGitFake(t)
+	f.withGit(g)
+	f.job("j", "implementer", "42", map[string]any{"cwd": g.worktree(t, "j")})
+	putEvent(t, f.a, "j", "job.joined", map[string]any{"pr": "https://github.com/mgh3326/panewire/pull/9", "head": paneSweepTestHead})
 	putEvent(t, f.a, "j", "job.revoked", map[string]any{})
 	f.tasks["42"] = "in_progress"
-	f.prChanges["42"] = []PRChange{{Number: 9, State: "open", Head: "head-9"}}
+	f.prChanges["42"] = []PRChange{{Number: 9, State: "open", Head: paneSweepTestHead}}
 	f.at(0)
 	f.at(11)
-	if len(f.closed()) != 1 {
-		t.Fatalf("pane not closed: %v", f.closed())
+	if len(f.closed()) != 1 || f.reaped("j") == nil {
+		t.Fatalf("an owner-closed job's pane was kept: %v", f.info)
 	}
 	if len(fake.reps) != 0 {
 		t.Fatalf("open PR wrote %d rows at close, want 0", len(fake.reps))
 	}
-	f.prChanges["42"] = []PRChange{{Number: 9, State: "closed", Head: "head-9"}}
+	f.prChanges["42"] = []PRChange{{Number: 9, State: "closed", Head: paneSweepTestHead}}
 	f.at(12)
 	if len(fake.reps) != 1 {
-		t.Fatalf("rows after PR closed = %d, want 1", len(fake.reps))
-	}
-	if row := fake.reps[0]; row["completed"] != float64(0) || row["task_ref"] != "hk42" {
-		t.Fatalf("row = %v", row)
-	}
-	if notes, _ := fake.reps[0]["notes"].(string); !strings.Contains(notes, `"ended":"reaped"`) {
-		t.Fatalf("notes = %s", notes)
-	}
-	f.at(13)
-	if len(fake.reps) != 1 {
-		t.Fatalf("later pass duplicated the row: %d", len(fake.reps))
+		t.Fatalf("rows after the PR closed = %d, want 1", len(fake.reps))
 	}
 }
 
@@ -327,7 +319,7 @@ func TestSweepHoldsEscalatedJobWithOpenPRUntilPRCloses(t *testing.T) {
 	defer srv.Close()
 	f := newPaneSweepFixture(t)
 	f.a.BenchStore = &BenchStore{hk: &hkQuota{base: srv.URL, token: "test-token", now: f.a.Now}, now: f.a.Now}
-	f.job("e", "worker", "44")
+	f.job("e", "implementer", "44")
 	putEvent(t, f.a, "e", "job.joined", map[string]any{"pr": "https://github.com/mgh3326/panewire/pull/10", "head": "head-10"})
 	putEvent(t, f.a, "e", "job.escalate", map[string]any{})
 	f.tasks["44"] = "in_progress"
@@ -346,23 +338,21 @@ func TestSweepHoldsEscalatedJobWithOpenPRUntilPRCloses(t *testing.T) {
 	}
 }
 
-// A superseded job gets its row even with no PR of its own.
+// A superseded job's failure row is written when the pane is reaped at its
+// close.
 func TestSweepRecordsSupersededFailureRepWithoutPR(t *testing.T) {
 	fake := &hkBenchFake{}
 	srv := httptest.NewServer(fake)
 	defer srv.Close()
 	f := newPaneSweepFixture(t)
 	f.a.BenchStore = &BenchStore{hk: &hkQuota{base: srv.URL, token: "test-token", now: f.a.Now}, now: f.a.Now}
-	f.job("j", "worker", "42")
+	f.job("j", "implementer", "42")
 	putEvent(t, f.a, "j", "job.revoked", map[string]any{"outcome": "superseded"})
 	f.tasks["42"] = "in_progress"
 	f.at(0)
 	f.at(11)
-	if len(fake.reps) != 1 {
-		t.Fatalf("rows = %d, want 1", len(fake.reps))
-	}
-	if notes, _ := fake.reps[0]["notes"].(string); !strings.Contains(notes, `"ended":"superseded"`) {
-		t.Fatalf("notes = %s", notes)
+	if len(f.closed()) != 1 || len(fake.reps) != 1 {
+		t.Fatalf("closed pane wrote %d rows, want 1: closed=%v", len(fake.reps), f.closed())
 	}
 }
 
@@ -375,12 +365,12 @@ func TestSweepWritesRowsByOutcomeFinality(t *testing.T) {
 	defer srv.Close()
 	f := newPaneSweepFixture(t)
 	f.a.BenchStore = &BenchStore{hk: &hkQuota{base: srv.URL, token: "test-token", now: f.a.Now}, now: f.a.Now}
-	f.job("bare", "worker", "42")
+	f.job("bare", "implementer", "42")
 	putEvent(t, f.a, "bare", "job.revoked", map[string]any{})
-	f.job("merged", "worker", "43")
+	f.job("merged", "implementer", "43")
 	putEvent(t, f.a, "merged", "job.joined", map[string]any{"pr": "https://github.com/mgh3326/panewire/pull/9", "head": "head-9"})
 	putEvent(t, f.a, "merged", "job.revoked", map[string]any{})
-	f.job("done", "worker", "44")
+	f.job("done", "implementer", "44")
 	putEvent(t, f.a, "done", "job.completed", map[string]any{})
 	f.tasks["42"], f.tasks["43"], f.tasks["44"] = "in_progress", "in_progress", "in_progress"
 	f.prChanges["43"] = []PRChange{{Number: 9, State: "merged", Head: "head-9",
@@ -388,22 +378,13 @@ func TestSweepWritesRowsByOutcomeFinality(t *testing.T) {
 	f.at(0)
 	f.at(11)
 	if len(f.closed()) != 3 {
-		t.Fatalf("panes closed = %v, want all three", f.closed())
+		t.Fatalf("panes kept: closed %v", f.closed())
 	}
 	if len(fake.reps) != 2 {
-		t.Fatalf("rows = %d, want the reaped row and the merged row", len(fake.reps))
+		t.Fatalf("rows = %d, want the merged outcome and the reaped bare job's row: %v", len(fake.reps), fake.reps)
 	}
-	byTask := map[string]map[string]any{}
-	for _, row := range fake.reps {
-		byTask[row["task_ref"].(string)] = row
-	}
-	if row := byTask["hk42"]; row == nil || row["completed"] != float64(0) {
-		t.Fatalf("bare job row = %v, want a completed=0 row", row)
-	}
-	if row := byTask["hk43"]; row == nil || row["merged"] != true {
-		t.Fatalf("merged job row = %v, want the merged row", row)
-	}
-	if _, ok := byTask["hk44"]; ok {
-		t.Fatalf("completed job without a PR wrote a failure row")
+	row := fake.reps[0]
+	if row["task_ref"] != "hk43" || row["merged"] != true {
+		t.Fatalf("merged job row = %v", row)
 	}
 }

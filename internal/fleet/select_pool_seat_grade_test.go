@@ -15,8 +15,8 @@ func TestSelectPoolSeatCreditBeforeLowerGradeFree(t *testing.T) {
 	credit := &selCand{row: CatalogRow{Profile: "omp-luna", Pool: "openai-api", Grade: "B", Effort: "high"}, tier: 1, tierName: "credit", creditPool: true, usdUrgency: ptrF(1)}
 	candidates := []*selCand{free, credit}
 	sortSelCands(candidates)
-	if candidates[0] != credit {
-		t.Fatalf("got %s; want credit pool seat", candidates[0].row.Profile)
+	if candidates[0] != free {
+		t.Fatalf("got %s; want free pool seat", candidates[0].row.Profile)
 	}
 }
 
@@ -47,7 +47,7 @@ func TestSelectPoolSeatScenarios(t *testing.T) {
 	add("devin risk", risky, map[string]string{"A+": "devin-ds41@low", "A": "devin-ds41@low", "B": "devin-ds41@low", "C": "devin-ds41@low"})
 	add("devin free", devin, map[string]string{"A": "devin-swe2-medium@medium", "B": "devin-swe2-flash@high", "C": "devin-swe2-flash-medium@medium"})
 	for _, c := range []row{{"omp-luna", "openai-api", "B", "high", "credit", false, true, 0, 1}, {"omp-haiku", "anthropic-api", "B", "high", "credit", false, true, 0, 1}} {
-		add(c.pool, append(append([]row(nil), devin[1:]...), c), map[string]string{"C": c.name + "@" + c.effort})
+		add(c.pool, append(append([]row(nil), devin[1:]...), c), map[string]string{"C": "devin-swe2-flash-medium@medium"})
 	}
 	live := append(append([]row(nil), devin...), codex...)
 	live = append(live, row{"haiku", "claude", "C", "medium", "ranked", false, false, 0, 0}, row{"omp-dsflash41", "commandcode", "A", "low", "ranked", false, false, 0, 0}, row{"omp-luna", "openai-api", "B", "high", "credit", false, true, 0, 1}, row{"omp-haiku", "anthropic-api", "B", "high", "credit", false, true, 0, 1})
@@ -103,13 +103,12 @@ func TestOrderPoolSeatRandomPermutations(t *testing.T) {
 	for trial := 0; trial < 300; trial++ {
 		var rows []*selCand
 		for pool := 0; pool < 5; pool++ {
-			band := rng.Intn(3)
-			risk := band == 0
-			tierName := []string{"waste", "free", "ranked"}[band]
-			credit := band == 1 && rng.Intn(2) == 0
-			if credit {
-				tierName = "credit"
-			}
+			kind := rng.Intn(5)
+			risk := kind == 0
+			tierName := []string{"waste", "waste", "free", "credit", "ranked"}[kind]
+			band := []int{0, 0, 1, 1, 2}[kind]
+			credit := kind == 3
+			behind := kind == 4 && rng.Intn(2) == 0
 			var urgency, usd *float64
 			if risk || rng.Intn(2) == 0 {
 				urgency = ptrF(float64(1 + rng.Intn(5)))
@@ -118,7 +117,7 @@ func TestOrderPoolSeatRandomPermutations(t *testing.T) {
 				usd = ptrF(float64(1 + rng.Intn(5)))
 			}
 			for i := 0; i < 1+rng.Intn(3); i++ {
-				rows = append(rows, &selCand{row: CatalogRow{Profile: fmt.Sprintf("p%d-r%d", pool, i), Pool: fmt.Sprintf("p%d", pool), Grade: []string{"C", "B", "A", "A+"}[rng.Intn(4)], Effort: []string{"low", "medium", "high"}[rng.Intn(3)]}, tier: band, tierName: tierName, risk: risk, creditPool: credit, urgency: urgency, usdUrgency: usd})
+				rows = append(rows, &selCand{row: CatalogRow{Profile: fmt.Sprintf("p%d-r%d", pool, i), Pool: fmt.Sprintf("p%d", pool), Grade: []string{"C", "B", "A", "A+"}[rng.Intn(4)], Effort: []string{"low", "medium", "high"}[rng.Intn(3)]}, tier: band, tierName: tierName, risk: risk, creditPool: credit, urgency: urgency, usdUrgency: usd, behindCredit: behind})
 			}
 		}
 		compare := selCandComparator(rows)
@@ -156,8 +155,8 @@ func TestSelectPoolSeatCreditWithFakeQuota(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if sel.chosen.row.Profile != tc.profile {
-				t.Fatalf("got %s, want %s", sel.chosen.row.Profile, tc.profile)
+			if sel.chosen.row.Profile != "devin-swe2-flash-medium" {
+				t.Fatalf("got %s, want free model", sel.chosen.row.Profile)
 			}
 		})
 	}

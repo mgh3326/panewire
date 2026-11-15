@@ -1,14 +1,12 @@
 package panewire
 
 import (
-	"bytes"
 	"context"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"hash/fnv"
-	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -39,23 +37,17 @@ type HubWait func(context.Context, time.Duration) error
 // channel. A zero config is never started by Daemon, preserving stage1/2's
 // historical behavior.
 type HubClientConfig struct {
-	URL                  string
-	URLs                 []string
-	MachineID            string
-	Token                string
-	CFAccessClientID     string
-	CFAccessClientSecret string
-	Accepting            bool
-	RelayInjectTimeout   time.Duration
-	JobsInboxRoot        string
-	FailoverWakeOn       string
-	FailoverWakeMAC      string
-	BurstWakeMAC         string
-	BurstPoweroffAllowed bool
-	// WakeTargetsPath is the waker node's own JSON allowlist: which target
-	// machines a hub wake event may select, and each target's MAC plus UDP
-	// broadcast destination. The wire event carries none of these values.
-	WakeTargetsPath       string
+	URL                   string
+	URLs                  []string
+	MachineID             string
+	Token                 string
+	CFAccessClientID      string
+	CFAccessClientSecret  string
+	Accepting             bool
+	RelayInjectTimeout    time.Duration
+	JobsInboxRoot         string
+	FailoverWakeOn        string
+	FailoverWakeMAC       string
 	Checks                []HubCheck
 	Execute               HubCheckExecutor
 	PingInterval          time.Duration
@@ -80,8 +72,7 @@ type HubClientConfig struct {
 	// failoverWakeDestination is a package-private fixture override. Production
 	// always uses the fixed broadcast destination below.
 	failoverWakeDestination string
-	burstPoweroff           func(context.Context) error // fixture seam; production is fixed sudo -n poweroff.
-	helloAckTimeout         time.Duration               // fixture seam; zero means defaultHubHelloAckTimeout.
+	helloAckTimeout         time.Duration // fixture seam; zero means defaultHubHelloAckTimeout.
 }
 
 // HubDaemonConfig keeps the optional hub process separate from the local
@@ -106,6 +97,13 @@ type hubClientEvent struct {
 	senderPane string
 }
 
+type quotaPoolReconcileHooks struct {
+	app    func() (*fleet.App, error)
+	agents func(context.Context, string) ([]nodeHerdrRow, error)
+	ticks  <-chan time.Time
+	pass   func(context.Context)
+}
+
 // HubClient owns a bounded in-memory event queue. It is intentionally not a
 // durable relay: the handoffkeep relay store owns offline delivery.
 type HubClient struct {
@@ -118,6 +116,8 @@ type HubClient struct {
 	accepting             bool
 	relayControl          clientRelayControlState
 	jobsInboxRoot         string
+	sessionCacheMu        sync.RWMutex
+	jobSessions           map[string]sessionCacheEntry
 	laneReconcileTicks    <-chan time.Time
 	laneReconcileJobs     func(context.Context) []HubActiveJob
 	laneReconcileList     func(context.Context) (map[string]hubLaneProjection, error)
@@ -127,15 +127,7 @@ type HubClient struct {
 	failoverWakeDest      string
 	failoverWakeMu        sync.Mutex
 	failoverWakeArmed     bool
-	burstWakeMAC          net.HardwareAddr
-	burstPoweroffAllowed  bool
-	burstPoweroff         func(context.Context) error
 	helloAckTimeout       time.Duration
-	burstMu               sync.Mutex
-	burstSeen             map[string]time.Time
-	wakeTargets           map[string]NodeWakeTarget
-	wakeMu                sync.Mutex
-	wakeSeen              map[string]time.Time
 	checks                []HubCheck
 	execute               HubCheckExecutor
 	pingInterval          time.Duration
@@ -168,37 +160,62 @@ type HubClient struct {
 	now func() time.Time
 	// fleetEvents writes a fleet event. Tests substitute a recorder; production
 	// leaves it nil and events go to the state directory (emitFleetEvent).
-	fleetEvents      func(time.Time, fleetEvent) bool
-	assignedJobs     map[string]uint64
-	assignmentMu     sync.Mutex
-	burstHoldsActive bool
-	panesAlive       panesAliveFunc
-	panesAliveMu     sync.Mutex
+	fleetEvents  func(time.Time, fleetEvent) bool
+	assignedJobs map[string]uint64
+	assignmentMu sync.Mutex
+	panesAlive   panesAliveFunc
+	panesAliveMu sync.Mutex
 	// paneIdleSince is the first heartbeat at which each pane was idle or
 	// done (hub_jobs_idle.go).
-	paneIdleSince     map[string]time.Time
-	paneIdleMu        sync.Mutex
-	sessionMu         sync.Mutex
-	spawnConfigPath   string
-	spawnJournalDir   string
-	spawnMu           sync.Mutex
-	spawnEngine       hubSpawnEngine
-	spawnPrepare      func(context.Context, nodeWorktreePrepareArgs) (any, string) // fixture seam
-	spawnJournalMu    sync.Mutex
-	spawnJournal      *nodeSpawnJournal
-	spawnJournalUsers int
+	paneIdleSince        map[string]time.Time
+	paneIdleMu           sync.Mutex
+	sessionMu            sync.Mutex
+	spawnConfigPath      string
+	spawnJournalDir      string
+	spawnSlotsAdvertised atomic.Int32
+	spawnSlotsOverride   int // fixture seam; 0 reads spawn.json
+	spawnAdmissionOnce   sync.Once
+	spawnAdmission       *nodeSpawnAdmission
+	spawnLocksMu         sync.Mutex
+	spawnLocks           map[string]chan struct{}
+	spawnEngine          hubSpawnEngine
+	spawnPrepare         func(context.Context, nodeWorktreePrepareArgs) (any, string) // fixture seam
+	spawnJournalMu       sync.Mutex
+	spawnJournal         *nodeSpawnJournal
+	spawnJournalUsers    int
 	// spawnActive holds the journal requests this process is executing; an
 	// executing entry missing from it was left by a restart.
-	spawnActiveMu sync.Mutex
+	spawnActiveMu sync.Mutex // also guards spawnWaiting
 	spawnActive   map[string]bool
+	spawnWaiting  map[string]*nodeSpawnWaiter
+	// spawnGrants routes job.spawn.grant answers to the spawn waiting for them
+	// (node_spawn_grant.go).
+	spawnGrantMu sync.Mutex
+	spawnGrants  map[string]chan bool
+	// work counts the operations a stop waits for (hub_client_drain.go);
+	// stopDrain is that wait's bound, zero meaning defaultStopDrain; serving
+	// counts live hub connections, so a stop with no hub does not wait for an
+	// event queue nothing is writing.
+	work      workDrain
+	stopDrain time.Duration
+	serving   atomic.Int32
 	// Task pane sweep (node_pane_sweep.go, docs/pane-sweep.md). An interval of
 	// zero leaves the sweep off, as in every fixture.
 	taskPaneSweepInterval time.Duration
 	taskPaneSweepGrace    time.Duration
 	taskPaneSweepTicks    <-chan time.Time      // fixture seam; nil uses a ticker.
 	taskPaneSweepPass     func(context.Context) // fixture seam; nil runs the real pass.
+	quotaReconcile        quotaPoolReconcileHooks
 	nodeTaskState         fleet.TaskStateReader // fixture seam; nil reads spawn.json handoffkeep_env.
 	nodePR                fleet.PRReader        // fixture seam; nil reads spawn.json handoffkeep_env.
+
+	// taskPaneSweepMu serializes the node's sweeps over one shared sweeper: the
+	// local pass and the hub's pane.sweep command (node_pane_sweep_ended.go).
+	// Lock order: taskPaneSweepMu, then nodeCommandMu.
+	taskPaneSweepMu     sync.Mutex
+	taskPaneSweeperOnce sync.Once
+	taskPaneSweeper     *fleet.TaskPaneSweeper
+
 	// Fleet state publisher (fleet_state_node.go, docs/fleet-state.md).
 	statePublish       bool
 	stateQuotaPools    []string
@@ -209,23 +226,31 @@ type HubClient struct {
 	nodeCommandMu      sync.Mutex
 	nodeHerdr          relayCommandRunner // fixture seam for node commands; nil runs herdr.
 	nodeGit            relayCommandRunner // fixture seam for node commands; nil runs git.
+	nodeAdd            nodeAddRunner      // fixture seam for the worktree add child; nil runs git and records it.
+	nodeCheckouts      map[string]string  // fixture seam for the checkout.pull allow-list; nil reads spawn.json checkouts.
+	nodeInstallWait    time.Duration      // fixture seam for install.sh's bound; zero is nodeCheckoutInstallTimeout.
 	nodeLifecycle      relayCommandRunner // fixture seam for job.done; nil runs runtug.
 	nodeJobs           fleet.JobStore     // fixture seam for job.mark_lost; nil reads spawn.json handoffkeep_env.
-	nodePacelever      relayCommandRunner // legacy test fixture seam; production quota refresh never invokes an external quota CLI.
 	nativeQuotaMu      sync.Mutex
 	nativeQuota        map[string]*nativeQuotaSource // the node's own measurement per native pool; fixtures set it, a missing pool builds the default.
 	creditPresenceMu   sync.Mutex
 	creditPresence     *creditPresenceSource // the node's credit pool presence publisher; fixtures set it, a missing one builds the default.
 	nodeCloseSettle    time.Duration         // fixture seam; zero is nodePaneCloseSettle.
-	nodeGitLockWait    time.Duration         // fixture seam; zero is nodeGitOpLockWait.
-	busyRelayMu        sync.Mutex
-	busyRelay          *relayBusyManager
-	relayCommand       relayCommandRunner   // fixture seam for agent get/wait.
-	relayEmitter       func(hubClientEvent) // fixture/connection-owned writer.
-	relayRecvSeqMu     sync.Mutex
-	relayRecvSeq       int64 // assigned synchronously by the hub read loop.
-	idleWakeMu         sync.Mutex
-	idleWake           *idleWakeManager
+	// nodeHubClose is the job-ledger side of a hub close (intent, watcher);
+	// nil is nodeFleetHubClose. A fixture seam.
+	nodeHubClose    nodeHubCloseLedger
+	nodeGitLockWait time.Duration // fixture seam; zero is nodeGitOpLockWait.
+	busyRelayMu     sync.Mutex
+	busyRelay       *relayBusyManager
+	relayCommand    relayCommandRunner   // fixture seam for agent get/wait.
+	relayEmitter    func(hubClientEvent) // fixture/connection-owned writer.
+	relayRecvSeqMu  sync.Mutex
+	relayRecvSeq    int64 // assigned synchronously by the hub read loop.
+	// inboundHandled is a fixture seam the inbound dispatcher calls after
+	// each queued frame it ran; production leaves it nil.
+	inboundHandled func(hubOutboundMessage)
+	idleWakeMu     sync.Mutex
+	idleWake       *idleWakeManager
 	// signalsPeer is the current connection, whose hub decides on host_signals.
 	signalsPeer          atomic.Pointer[hubClientConnection]
 	hostSignalsCollector func(context.Context) *HubHostSignals // fixture seam; nil collects
@@ -295,26 +320,6 @@ func NewHubClient(config HubClientConfig) (*HubClient, error) {
 			return nil, errors.New("hub client configuration is invalid")
 		}
 	}
-	burstMACText := config.BurstWakeMAC
-	if burstMACText == "" && wakeRequested {
-		burstMACText = config.FailoverWakeMAC
-	}
-	var burstMAC net.HardwareAddr
-	if burstMACText != "" {
-		var burstErr error
-		burstMAC, burstErr = parseHubFailoverWakeMAC(burstMACText)
-		if burstErr != nil {
-			return nil, errors.New("hub client configuration is invalid")
-		}
-	}
-	var wakeTargets map[string]NodeWakeTarget
-	if config.WakeTargetsPath != "" {
-		targets, wakeErr := LoadNodeWakeConfig(config.WakeTargetsPath)
-		if wakeErr != nil {
-			return nil, errors.New("hub client configuration is invalid")
-		}
-		wakeTargets = targets
-	}
 	wakeDestination := hubFailoverWakeBroadcastAddress
 	if config.failoverWakeDestination != "" {
 		address, resolveErr := net.ResolveUDPAddr("udp4", config.failoverWakeDestination)
@@ -361,22 +366,23 @@ func NewHubClient(config HubClientConfig) (*HubClient, error) {
 	if config.Execute == nil {
 		config.Execute = executeHubCheck
 	}
-	if config.burstPoweroff == nil {
-		config.burstPoweroff = executeHubBurstPoweroff
-	}
 	if config.helloAckTimeout <= 0 {
 		config.helloAckTimeout = defaultHubHelloAckTimeout
 	}
-	return &HubClient{
+	client := &HubClient{
 		endpoint: endpoints[0], endpoints: endpoints, machineID: config.MachineID, token: config.Token, cfAccessClientID: config.CFAccessClientID, cfAccessSecret: config.CFAccessClientSecret, accepting: config.Accepting, jobsInboxRoot: config.JobsInboxRoot, spawnConfigPath: defaultHubSpawnConfigPath(config.SpawnConfigPath), spawnConfigDefault: config.SpawnConfigPath == "", spawnJournalDir: config.SpawnJournalDir, spawnTimeoutExtra: 0,
 		failoverWakeOn: config.FailoverWakeOn, failoverWakeMAC: wakeMAC, failoverWakeDest: wakeDestination, failoverWakeArmed: wakeRequested,
-		burstWakeMAC: burstMAC, burstPoweroffAllowed: config.BurstPoweroffAllowed, burstPoweroff: config.burstPoweroff, helloAckTimeout: config.helloAckTimeout, burstSeen: make(map[string]time.Time),
-		wakeTargets: wakeTargets, wakeSeen: make(map[string]time.Time),
-		relayControl: newClientRelayControlState(config),
-		checks:       cloneHubChecks(config.Checks), execute: config.Execute,
+		helloAckTimeout: config.helloAckTimeout,
+		relayControl:    newClientRelayControlState(config),
+		checks:          cloneHubChecks(config.Checks), execute: config.Execute,
 		pingInterval: config.PingInterval, initialBackoff: config.InitialBackoff, maxBackoff: config.MaxBackoff, preferRetry: config.PreferRetry, version: config.Version,
 		dial: config.Dial, wait: config.Wait, warn: config.Warn, relayInject: config.relayInject, relayCommand: config.relayCommand, hostLoadCollector: config.hostLoadCollector, hostMemoryCollector: config.hostMemoryCollector, sessionCollector: config.sessionCollector, events: make(chan hubClientEvent, 64), completedJobs: make(map[string]uint64), completedReports: make(map[string]struct{}), assignedJobs: make(map[string]uint64),
-	}, nil
+		jobSessions: make(map[string]sessionCacheEntry),
+	}
+	setPaneSessionResolver(func(p string) string {
+		return client.herdrSessionFor("", p)
+	})
+	return client, nil
 }
 
 const hubFailoverWakeBroadcastAddress = "255.255.255.255:9"
@@ -497,18 +503,28 @@ func (client *HubClient) Publish(kind string, payload any) bool {
 
 // Run reconnects until its context is canceled. Any hub error is isolated to
 // this goroutine: it never propagates into local daemon loops.
+var hubRequestIDPattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,96}$`)
+
+func validHubRequestID(value string) bool { return hubRequestIDPattern.MatchString(value) }
+
 func (client *HubClient) Run(ctx context.Context) {
 	if err := client.spawnStartupError(); err != nil {
 		client.warn(err.Error())
 		return
 	}
 	client.rearmWatchers()
+	go client.runSpawnSettle(ctx)
+	go client.runCreditRejectionRecovery(ctx)
 	go client.runLaneReconcile(ctx)
 	go client.runTaskPaneSweep(ctx)
+	go client.runQuotaPoolReconcile(ctx)
+	go client.runHubCloseSettle(ctx)
 	if client.statePublish {
 		go client.runFleetQuota(ctx)
 	}
 	backoff := client.initialBackoff
+	var redialUntil time.Time
+	firstRedial := false
 	for {
 		if ctx.Err() != nil {
 			return
@@ -519,6 +535,9 @@ func (client *HubClient) Run(ctx context.Context) {
 			client.endpoint = endpoint
 			err = client.serve(ctx, connection)
 			_ = connection.CloseNow()
+			// A session that was up has just ended: the hub most likely
+			// restarted, so come back on the fast schedule (hub_redial.go).
+			redialUntil, firstRedial = time.Now().Add(hubRedialFastWindow), true
 		}
 		if ctx.Err() != nil {
 			return
@@ -526,10 +545,39 @@ func (client *HubClient) Run(ctx context.Context) {
 		// Neither error nor endpoint data is included: a transport response can
 		// reflect a credential or bearer value through an intermediary.
 		client.warn("hub unavailable; retrying")
-		if client.wait(ctx, backoff) != nil {
+		delay := backoff
+		if time.Now().Before(redialUntil) {
+			delay = hubRedialDelay(backoff, firstRedial)
+			firstRedial = false
+		}
+		if client.wait(ctx, delay) != nil {
 			return
 		}
 		backoff = nextHubBackoff(backoff, client.maxBackoff)
+	}
+}
+
+// A failed shared-store write is retained in the job ledger. Retry bounded
+// watcher runs independently of the pane and the fleet-state publisher.
+func (client *HubClient) runCreditRejectionRecovery(ctx context.Context) {
+	if client.jobsInboxRoot == "" {
+		return
+	}
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			config, _, err := client.resolveHubSpawnConfig()
+			if err == nil {
+				err = fleet.RearmPendingCreditWatchers(filepath.Join(client.jobsInboxRoot, "jobs"), config.HERDRSession, client.rearmStart, func(id string) { slog.Info("credit publication re-armed", "job", id) })
+			}
+			if err != nil {
+				slog.Warn("credit publication re-arm failed", "error", err)
+			}
+		}
 	}
 }
 
@@ -614,8 +662,15 @@ type hubClientConnection struct {
 	// acceptsHostActivity is the same for hubFeatureHostActivity
 	// (host_activity.go).
 	acceptsHostActivity atomic.Bool
+	// acceptsCheckoutPull is the same for hubFeatureCheckoutPull
+	// (node_checkout_pull.go).
+	acceptsCheckoutPull atomic.Bool
+	acceptsLaunchProof  atomic.Bool
 	connection          *websocket.Conn
-	writeMu             sync.Mutex
+	writeMu             hubWriteMutex
+	// closed is closed when the session on this connection ends; a nil
+	// channel (a test peer) never ends.
+	closed chan struct{}
 }
 
 type hubOutboundMessage struct {
@@ -624,10 +679,8 @@ type hubOutboundMessage struct {
 	Machine            string
 	Phase              string
 	EmittedAt          time.Time
-	WakeMAC            string
 	JobID              string
 	Epoch              uint64
-	HoldsActive        bool
 	Pane               string
 	Text               string
 	DeliverPolicy      string
@@ -646,6 +699,9 @@ type hubOutboundMessage struct {
 	Checkout           *hubSpawnCheckout
 	Args               []string
 	DeadlineMS         int64
+	ExpiresMS          int64 // the request's absolute expiry; read by a spawn_expires_v1 node
+	StartByMS          int64 // grant-required attempt: the node starts only with a hub grant by then
+	Granted            bool  // job.spawn.grant answer
 	OperatorAuthorized bool
 	WaitSeconds        int
 	CommandOp          string
@@ -847,15 +903,74 @@ func relayInjectForHarnessGuarded(ctx context.Context, pane, harness, text strin
 	}
 }
 
+type relaySessionKey struct{}
+
+type sessionCacheEntry struct {
+	session  string
+	cachedAt time.Time
+}
+
+var activePaneSessionResolver atomic.Pointer[func(pane string) string]
+
+func setPaneSessionResolver(resolver func(pane string) string) {
+	activePaneSessionResolver.Store(&resolver)
+}
+
+func activePaneSession(pane string) string {
+	if r := activePaneSessionResolver.Load(); r != nil && *r != nil {
+		return (*r)(pane)
+	}
+	return ""
+}
+
+func withRelaySession(ctx context.Context, session string) context.Context {
+	if session == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, relaySessionKey{}, session)
+}
+
+func relaySessionFrom(ctx context.Context) (string, bool) {
+	session, ok := ctx.Value(relaySessionKey{}).(string)
+	return session, ok && session != ""
+}
+
+func relaySessionFromContext(ctx context.Context, pane string) string {
+	if session, ok := relaySessionFrom(ctx); ok && session != "" {
+		return session
+	}
+	if pane != "" {
+		if session := activePaneSession(pane); session != "" {
+			return session
+		}
+	}
+	return firstNonempty(os.Getenv("HERDR_SESSION"), "default")
+}
+
+func herdrCommand(ctx context.Context, pane string, args ...string) *exec.Cmd {
+	session := relaySessionFromContext(ctx, pane)
+	cmd := exec.CommandContext(ctx, herdrExecutable(), args...)
+	cmd.Env = hubSpawnEnvironment(os.Environ(), session)
+	return cmd
+}
+
+func herdrCommandOutput(ctx context.Context, pane string, args ...string) ([]byte, error) {
+	return herdrCommand(ctx, pane, args...).Output()
+}
+
+func herdrCommandRun(ctx context.Context, pane string, args ...string) error {
+	return herdrCommand(ctx, pane, args...).Run()
+}
+
 // relaySendText types text into pane. A pane-level harness (cmd) gets the
 // pane call, because herdr refuses agent prompt for it with agent_not_ready
 // (hk 3330); every other harness keeps herdr's agent prompt. The caller
 // decides what a failure means.
 func relaySendText(ctx context.Context, pane, harness, text string) error {
 	if adapter, ok := relayAdapterFor(harness); ok && adapter.paneTransport {
-		return exec.CommandContext(ctx, "herdr", "pane", "send-text", pane, text).Run()
+		return herdrCommandRun(ctx, pane, "pane", "send-text", pane, text)
 	}
-	return exec.CommandContext(ctx, "herdr", "agent", "prompt", pane, text).Run()
+	return herdrCommandRun(ctx, pane, "agent", "prompt", pane, text)
 }
 
 // relaySendReturn presses return in pane, at the same level as the text: a
@@ -863,13 +978,13 @@ func relaySendText(ctx context.Context, pane, harness, text string) error {
 // would type through one transport and submit through another.
 func relaySendReturn(ctx context.Context, pane, harness string) error {
 	if adapter, ok := relayAdapterFor(harness); ok && adapter.paneTransport {
-		return exec.CommandContext(ctx, "herdr", "pane", "send-keys", pane, "return").Run()
+		return herdrCommandRun(ctx, pane, "pane", "send-keys", pane, "return")
 	}
-	return exec.CommandContext(ctx, "herdr", "agent", "send-keys", pane, "return").Run()
+	return herdrCommandRun(ctx, pane, "agent", "send-keys", pane, "return")
 }
 
 func relayInjectHarness(ctx context.Context, pane string) string {
-	out, err := exec.CommandContext(ctx, "herdr", "agent", "get", pane).Output()
+	out, err := herdrCommandOutput(ctx, pane, "agent", "get", pane)
 	if err != nil {
 		return ""
 	}
@@ -1086,14 +1201,14 @@ type relayPaneReads struct {
 // of pane. For a harness whose proof needs the agent status it reads that too.
 func relayReadPane(ctx context.Context, pane, harness string) relayPaneReads {
 	var reads relayPaneReads
-	if out, err := exec.CommandContext(ctx, "herdr", "agent", "read", pane, "--source", "visible", "--lines", relayVerifyVisibleLines).Output(); err == nil {
+	if out, err := herdrCommandOutput(ctx, pane, "agent", "read", pane, "--source", "visible", "--lines", relayVerifyVisibleLines); err == nil {
 		reads.visible, reads.anyOK, reads.visibleOK = string(out), true, true
 	}
-	if out, err := exec.CommandContext(ctx, "herdr", "agent", "read", pane, "--source", "recent-unwrapped", "--lines", relayVerifyUnwrappedLines).Output(); err == nil {
+	if out, err := herdrCommandOutput(ctx, pane, "agent", "read", pane, "--source", "recent-unwrapped", "--lines", relayVerifyUnwrappedLines); err == nil {
 		reads.unwrapped, reads.anyOK = string(out), true
 	}
 	if adapter, ok := relayAdapterFor(harness); ok && adapter.proof == relayProofEchoAndWorking {
-		if out, err := exec.CommandContext(ctx, "herdr", "agent", "get", pane).Output(); err == nil {
+		if out, err := herdrCommandOutput(ctx, pane, "agent", "get", pane); err == nil {
 			reads.status, _ = parseRelayAgentStatus(out)
 		}
 	}
@@ -1423,7 +1538,7 @@ func relayComposerState(harness, visible string) string {
 // relayReadPaneANSI reads pane's visible screen with its SGR attributes, the
 // source relayAnsiComposerState needs to tell a dim suggestion from a draft.
 func relayReadPaneANSI(ctx context.Context, pane string) (string, error) {
-	out, err := exec.CommandContext(ctx, "herdr", "pane", "read", pane, "--source", "visible", "--format", "ansi").Output()
+	out, err := herdrCommandOutput(ctx, pane, "pane", "read", pane, "--source", "visible", "--format", "ansi")
 	return string(out), err
 }
 
@@ -1551,11 +1666,11 @@ type devinPaneRead struct {
 }
 
 func readDevinPane(ctx context.Context, pane string) (devinPaneRead, error) {
-	visible, err := exec.CommandContext(ctx, "herdr", "agent", "read", pane, "--source", "visible", "--lines", devinRelayVisibleLines).Output()
+	visible, err := herdrCommandOutput(ctx, pane, "agent", "read", pane, "--source", "visible", "--lines", devinRelayVisibleLines)
 	if err != nil {
 		return devinPaneRead{}, err
 	}
-	unwrapped, err := exec.CommandContext(ctx, "herdr", "agent", "read", pane, "--source", "recent-unwrapped", "--lines", devinRelayUnwrappedLines).Output()
+	unwrapped, err := herdrCommandOutput(ctx, pane, "agent", "read", pane, "--source", "recent-unwrapped", "--lines", devinRelayUnwrappedLines)
 	if err != nil {
 		return devinPaneRead{}, err
 	}
@@ -1668,7 +1783,7 @@ func devinRelayInjectGuarded(ctx context.Context, pane, text string, members []s
 	}
 	after := before
 	if !devinComposerHolds(before.visible, text, nonces) {
-		if exec.CommandContext(ctx, "herdr", "agent", "prompt", pane, text).Run() != nil {
+		if herdrCommandRun(ctx, pane, "agent", "prompt", pane, text) != nil {
 			// herdr may have typed part of the text before failing; the next
 			// attempt's composer check decides whether a retry would
 			// duplicate it.
@@ -1708,7 +1823,7 @@ func devinRelayInjectGuarded(ctx context.Context, pane, text string, members []s
 		result.Outcome, result.Evidence = relayInjectMaybeInPane, evidence+" return_withheld:"+rule
 		return result
 	}
-	if exec.CommandContext(ctx, "herdr", "agent", "send-keys", pane, "return").Run() != nil {
+	if herdrCommandRun(ctx, pane, "agent", "send-keys", pane, "return") != nil {
 		result.Outcome, result.Evidence = relayInjectMaybeInPane, evidence+" return_failed"
 		return result
 	}
@@ -1777,7 +1892,7 @@ func devinActivity(screen string) string {
 }
 
 func relayAgentStatus(ctx context.Context, pane string) (string, bool) {
-	out, err := exec.CommandContext(ctx, "herdr", "agent", "get", pane).Output()
+	out, err := herdrCommandOutput(ctx, pane, "agent", "get", pane)
 	if err != nil {
 		return "", false
 	}
@@ -1819,8 +1934,22 @@ func (client *HubClient) serve(ctx context.Context, connection *websocket.Conn) 
 // capabilities.
 const defaultHubHelloAckTimeout = 5 * time.Second
 
+// hubCapabilityCloseQuestion is advertised by a node whose pane.close decodes
+// question_job. The hub omits the field for any other node, whose strict
+// decoder would refuse the whole call (hk 4658).
+const hubCapabilityCloseQuestion = "pane_close_question_v1"
+
+// hubCapabilitySpawnExpires is advertised by a node whose job.spawn decoder
+// reads expires_ms. The hub sends the request's absolute expiry only to such a
+// node, which writes it into the job.spawned receipt as expires_at so the
+// pane sweep ends a reviewer or consult by its real limit (hk 4747). An older
+// node's strict decoder refuses the whole frame for the extra field.
+const hubCapabilitySpawnExpires = "spawn_expires_v1"
+
 // hubSpawnCapabilities is what an upgraded node advertises in hello.
-var hubSpawnCapabilities = []string{"spawn_v2", "spawn_ops_v1"}
+// close_ops_v1 (hubCapabilityCloseOps) is deliberately not advertised: no
+// hub may issue close ops until hk 4632 adds the migration barrier.
+var hubSpawnCapabilities = []string{"spawn_v2", "spawn_ops_v1", hubCapabilitySpawnGrant, hubCapabilityCloseQuestion, hubCapabilitySpawnExpires, hubCapabilityApplied}
 
 func (client *HubClient) helloAckTimeoutOrDefault() time.Duration {
 	if client.helloAckTimeout > 0 {
@@ -1829,10 +1958,62 @@ func (client *HubClient) helloAckTimeoutOrDefault() time.Duration {
 	return defaultHubHelloAckTimeout
 }
 
+// hubAppliedMessage is the node's delivery report on the wire: lane → durable
+// row ids its panes received (Store.RelayAppliedIDs). It follows the hello and
+// ping of every registration that advertises hubCapabilityApplied, and the hub
+// closes those rows before it replays (hk 3435).
+type hubAppliedMessage struct {
+	Type    string             `json:"type"`
+	Applied map[string][]int64 `json:"applied"`
+}
+
+// relayAppliedReadBudget bounds how long the report waits for the store: a
+// node whose journal lock is held (hk 4375) must still register, so the report
+// is then sent empty and the hub falls back to the node's own dedupe.
+const relayAppliedReadBudget = time.Second
+
+// appliedMessage builds the report for a registration that advertised the
+// capability; ok is false for the capability-free fallback hello, which a hub
+// that predates the report needs unchanged.
+func (client *HubClient) appliedMessage(ctx context.Context, capabilities []string) (hubAppliedMessage, bool) {
+	if !slices.Contains(capabilities, hubCapabilityApplied) {
+		return hubAppliedMessage{}, false
+	}
+	message := hubAppliedMessage{Type: "applied", Applied: map[string][]int64{}}
+	store := client.relayStore()
+	if store == nil {
+		return message, true
+	}
+	type report struct {
+		applied map[string][]int64
+		err     error
+	}
+	done := make(chan report, 1)
+	go func() {
+		applied, err := store.RelayAppliedIDs(ctx)
+		done <- report{applied, err}
+	}()
+	timer := time.NewTimer(relayAppliedReadBudget)
+	defer timer.Stop()
+	select {
+	case got := <-done:
+		if got.err == nil {
+			message.Applied = got.applied
+			return message, true
+		}
+	case <-timer.C:
+	case <-ctx.Done():
+	}
+	client.warnMessage("relay applied report could not be read; the hub may replay rows this node already delivered")
+	return message, true
+}
+
 // writeHello sends the node hello followed by a ping. The ping is the
 // registration probe: the hub answers it only for a node whose hello it
 // accepted, so the pong is the hello's acknowledgement and an accepting hub
-// costs no extra wait. Capabilities are omitted from the wire when empty.
+// costs no extra wait. Capabilities are omitted from the wire when empty. A
+// registration that advertises hubCapabilityApplied ends with the applied
+// report, which releases the replay the hub held back at registration.
 func (client *HubClient) writeHello(ctx context.Context, peer *hubClientConnection, capabilities []string) error {
 	if err := peer.write(ctx, struct {
 		Type         string   `json:"type"`
@@ -1843,7 +2024,13 @@ func (client *HubClient) writeHello(ctx context.Context, peer *hubClientConnecti
 	}{Type: "hello", MachineID: client.machineID, Version: client.version, Accepting: client.accepting, Capabilities: capabilities}); err != nil {
 		return err
 	}
-	return peer.write(ctx, hubOutbound{Type: "ping"})
+	if err := peer.write(ctx, hubOutbound{Type: "ping"}); err != nil {
+		return err
+	}
+	if message, ok := client.appliedMessage(ctx, capabilities); ok {
+		return peer.write(ctx, message)
+	}
+	return nil
 }
 
 // serveConnection returns a non-nil connection only when the caller should
@@ -1851,7 +2038,10 @@ func (client *HubClient) writeHello(ctx context.Context, peer *hubClientConnecti
 // connection has been closed by then.
 func (client *HubClient) serveConnection(ctx context.Context, connection *websocket.Conn) (*websocket.Conn, error) {
 	connection.SetReadLimit(hubSpawnMaxBodyBytes)
-	peer := &hubClientConnection{connection: connection}
+	client.serving.Add(1)
+	defer client.serving.Add(-1)
+	peer := &hubClientConnection{connection: connection, closed: make(chan struct{})}
+	defer close(peer.closed)
 	// Each connection may reach a different hub build (failover, redeploy).
 	client.signalsPeer.Store(peer)
 	// The hello carries spawn_v2, and the ping that follows it is the
@@ -1859,7 +2049,7 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 	// that does not know the capabilities field drops the whole hello (see
 	// docs/r26-hub-spawn.md "Rollout order and rollback"), so the hello ack timer below re-sends it
 	// without them rather than leaving this node off the fleet.
-	if err := client.writeHello(ctx, peer, hubSpawnCapabilities); err != nil {
+	if err := client.writeHello(ctx, peer, client.helloCapabilities(hubSpawnCapabilities)); err != nil {
 		return nil, err
 	}
 	client.setRelayEmitter(func(event hubClientEvent) { _ = peer.write(ctx, hubClientWireEvent(event)) })
@@ -1873,6 +2063,17 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 	}
 	readErrors := make(chan error, 1)
 	registered := make(chan struct{}, 1)
+	// Every inbound handler that can block on a lock, the node journal or the
+	// network runs on one ordered worker so the reader below keeps reading:
+	// a stalled recordRelayPersisted once kept job.spawn, pongs and every
+	// frame behind it waiting past their deadlines (hk 4375). One worker
+	// preserves the wire's receive order between the queued frames; the queue
+	// is bounded, and a session whose backlog fills it ends and resyncs on
+	// reconnect rather than letting the queue grow without bound.
+	inbound := make(chan hubOutboundMessage, hubInboundQueueDepth)
+	inboundDone := make(chan struct{})
+	defer close(inboundDone)
+	go client.serveHubInbound(ctx, peer, inbound, readErrors, inboundDone)
 	go func() {
 		for {
 			messageType, payload, err := connection.Read(ctx)
@@ -1888,7 +2089,9 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 			}
 			message, rejection := parseHubOutboundRejection(payload)
 			if rejection.Class != "" {
-				client.handleUnparsedHubMessage(ctx, peer, payload, rejection)
+				// The refusal answers with a peer write; it cannot sit in the
+				// read loop behind writeMu while a resync batch holds it.
+				go client.handleUnparsedHubMessage(ctx, peer, payload, rejection)
 				continue
 			}
 			if message.Type == "relay.inject" {
@@ -1899,44 +2102,47 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 				continue
 			}
 			switch message.Type {
+			case "redial":
+				// The hub is restarting and has finished what it owed this
+				// node. The session ends through the inbound queue, so every
+				// frame the hub sent ahead of the redial is applied before the
+				// dispatcher reports it.
+				select {
+				case inbound <- message:
+				default:
+					select {
+					case readErrors <- errHubInboundQueueFull:
+					case <-ctx.Done():
+					}
+				}
+				return
 			case "pong":
 				select {
 				case registered <- struct{}{}:
 				default:
 				}
 			case "ping":
-				if err := peer.write(ctx, hubOutbound{Type: "pong"}); err != nil {
+				// The pong write contends on writeMu, which a long
+				// writeRelayEvents resync batch can hold for minutes; it goes
+				// to its own goroutine so the loop keeps reading. A failed
+				// write still ends the session.
+				go func() {
+					if err := peer.write(ctx, hubOutbound{Type: "pong"}); err != nil {
+						select {
+						case readErrors <- err:
+						case <-ctx.Done():
+						}
+					}
+				}()
+			case "failover", "job.revoked", "job.assigned", "relay.persisted", "pool.cooling.ack", "idle-wake.route":
+				select {
+				case inbound <- message:
+				default:
 					select {
-					case readErrors <- err:
+					case readErrors <- errHubInboundQueueFull:
 					case <-ctx.Done():
 					}
 					return
-				}
-			case "failover":
-				client.handleHubFailover(ctx, message)
-			case "burst":
-				client.handleHubBurst(ctx, message)
-			case "wake":
-				client.handleHubWake(ctx, message)
-			case "job.revoked":
-				if err := writeHubRevocation(client.jobsInboxRoot, hubJobRevokedEvent{Type: message.Type, JobID: message.JobID, Epoch: message.Epoch}); err != nil {
-					client.warn("job revocation local write unavailable")
-				} else if err := peer.write(ctx, hubClientWireEvent(hubClientEvent{Kind: "job.revocation.ack", Payload: hubJobCompletionPayload(message.JobID, message.Epoch)})); err != nil {
-					select {
-					case readErrors <- err:
-					case <-ctx.Done():
-					}
-					return
-				}
-			case "job.assigned":
-				client.assignmentMu.Lock()
-				client.assignedJobs[message.JobID] = message.Epoch
-				client.assignmentMu.Unlock()
-			case "relay.persisted", "pool.cooling.ack":
-				client.recordRelayPersisted(message)
-			case "idle-wake.route":
-				if manager := client.idleWakeManager(); manager != nil {
-					manager.ApplyRoute(ctx, hubIdleWakeRouteEvent{Type: message.Type, EventID: message.IdleWakeEventID, Pane: message.Pane, Eligible: message.Eligible, Lane: message.Lane, Text: message.Text, JobID: message.JobID, Reason: message.Reason})
 				}
 			case "hub.features":
 				peer.acceptsSignals.Store(slices.Contains(message.Features, hubFeatureHostSignals))
@@ -1944,19 +2150,13 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 				peer.acceptsLaneEventPane.Store(slices.Contains(message.Features, hubFeatureLaneEventPane))
 				peer.acceptsPaneCaptureDoc.Store(slices.Contains(message.Features, hubFeaturePaneCaptureDoc))
 				peer.acceptsHostActivity.Store(slices.Contains(message.Features, hubFeatureHostActivity))
+				peer.acceptsCheckoutPull.Store(slices.Contains(message.Features, hubFeatureCheckoutPull))
+				peer.acceptsLaunchProof.Store(slices.Contains(message.Features, hubFeatureLaunchProof))
 				continue
-			case "burst.holds":
-				client.burstMu.Lock()
-				client.burstHoldsActive = message.HoldsActive
-				client.burstMu.Unlock()
-			case "relay.edit":
-				client.relayBusyManager().edit(ctx, message.EventID, message.Text)
-			case "relay.cancel":
-				client.relayBusyManager().cancel(ctx, message.EventID)
-			case "quota.request":
-				go client.handleHubQuota(ctx, peer, message)
 			case "job.spawn":
 				go client.handleHubSpawn(ctx, peer, message)
+			case "job.spawn.grant":
+				client.deliverSpawnGrant(message.RequestID, message.Granted)
 			case "node.command":
 				go client.handleNodeCommand(ctx, peer, message)
 			}
@@ -1994,7 +2194,7 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 				// the full hello once more; a hub that rejects capabilities
 				// drops it and keeps the record it already has.
 				capsResent = true
-				if err := client.writeHello(ctx, peer, hubSpawnCapabilities); err != nil {
+				if err := client.writeHello(ctx, peer, client.helloCapabilities(hubSpawnCapabilities)); err != nil {
 					return nil, err
 				}
 				// A repeated hello resets the hub's job and host state for
@@ -2079,6 +2279,104 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 			}()
 		}
 	}
+}
+
+// hubInboundQueueDepth bounds the ordered work one session may owe its inbound
+// dispatcher. A node that cannot keep up ends the session instead of dropping
+// single frames silently; the resync on reconnect replays what the hub is owed.
+const hubInboundQueueDepth = 256
+
+// errHubInboundQueueFull ends a session whose inbound backlog overran the
+// queue: losing a job.revoked or relay.persisted silently is worse than a
+// reconnect, which resyncs node state and lets the hub replay what it is owed.
+var errHubInboundQueueFull = errors.New("hub inbound work queue full")
+
+// serveHubInbound runs the ordered half of inbound hub work. Handlers that
+// may block on a lock, the node journal or the network - failover,
+// job.revoked, job.assigned, relay.persisted, pool.cooling.ack and
+// idle-wake.route - leave the read loop for this one worker, which preserves
+// the wire's receive order between them. A session-fatal error (a job.revocation.ack write failure) returns
+// through readErrors, the same channel the reader uses.
+func (client *HubClient) serveHubInbound(ctx context.Context, peer *hubClientConnection, inbound <-chan hubOutboundMessage, readErrors chan<- error, done <-chan struct{}) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-done:
+			client.drainHubInbound(ctx, peer, inbound)
+			return
+		case message := <-inbound:
+			if err := client.handleHubInboundMessage(ctx, peer, message); err != nil {
+				select {
+				case readErrors <- err:
+				case <-ctx.Done():
+				case <-done:
+				}
+				// The error ends the session, but the frames already read are
+				// still this node's to apply: drain them like any other end.
+				client.drainHubInbound(ctx, peer, inbound)
+				return
+			}
+			if client.inboundHandled != nil {
+				client.inboundHandled(message)
+			}
+		}
+	}
+}
+
+// drainHubInbound applies what the reader already queued as the session ends
+// - a read error, an endpoint switch, or a handler that failed against the
+// dead connection - so a received job.revoked or relay.persisted is never
+// silently dropped. A failed ack write is not a reason to drop the rest of
+// the queue: the hub replays unacked work on reconnect.
+func (client *HubClient) drainHubInbound(ctx context.Context, peer *hubClientConnection, inbound <-chan hubOutboundMessage) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case message := <-inbound:
+			if err := client.handleHubInboundMessage(ctx, peer, message); errors.Is(err, errHubRedial) {
+				return
+			}
+		default:
+			return
+		}
+	}
+}
+
+// handleHubInboundMessage is the ordered dispatcher's per-frame switch. It
+// returns the error that must end the session; local warnings are handled
+// inside each case.
+func (client *HubClient) handleHubInboundMessage(ctx context.Context, peer *hubClientConnection, message hubOutboundMessage) error {
+	switch message.Type {
+	case "redial":
+		return errHubRedial
+	case "failover":
+		client.handleHubFailover(ctx, message)
+	case "job.revoked":
+		if err := writeHubRevocation(client.jobsInboxRoot, hubJobRevokedEvent{Type: message.Type, JobID: message.JobID, Epoch: message.Epoch}); err != nil {
+			client.warn("job revocation local write unavailable")
+		} else if err := peer.write(ctx, hubClientWireEvent(hubClientEvent{Kind: "job.revocation.ack", Payload: hubJobCompletionPayload(message.JobID, message.Epoch)})); err != nil {
+			return err
+		}
+	case "job.assigned":
+		// Monotonic: a superseded session's drain can still run while a newer
+		// session already recorded a later epoch for the same job, and the
+		// read side only ever raises a scanned epoch (heartbeatEvent,
+		// jobCompletionEvents), never lowers it.
+		client.assignmentMu.Lock()
+		if message.Epoch > client.assignedJobs[message.JobID] {
+			client.assignedJobs[message.JobID] = message.Epoch
+		}
+		client.assignmentMu.Unlock()
+	case "relay.persisted", "pool.cooling.ack":
+		client.recordRelayPersisted(message)
+	case "idle-wake.route":
+		if manager := client.idleWakeManager(); manager != nil {
+			manager.ApplyRoute(ctx, hubIdleWakeRouteEvent{Type: message.Type, EventID: message.IdleWakeEventID, Pane: message.Pane, Eligible: message.Eligible, Lane: message.Lane, Text: message.Text, JobID: message.JobID, Reason: message.Reason})
+		}
+	}
+	return nil
 }
 
 // relayWriter is the one-event write this connection performs. Taking it as a
@@ -2173,6 +2471,9 @@ func (client *HubClient) heartbeatEvent(ctx context.Context) hubClientEvent {
 		client.resetIdleClock()
 	}
 	heartbeat := hubHeartbeatPayload{Status: "alive", Checks: runHubChecks(ctx, client.checks, client.execute), ActiveJobs: active, HostSignals: client.hostSignalsForHeartbeat(ctx), HostActivity: client.hostActivityForHeartbeat(ctx), Readiness: client.readinessForHeartbeat(ctx)}
+	if client.checkoutPeerAccepted() {
+		heartbeat.Checkouts = client.checkoutRevisionsForHeartbeat(ctx)
+	}
 	if provider := client.stallBeatProvider(); provider != nil {
 		if beat := provider(); beat != nil {
 			heartbeat.StallDetect = beat
@@ -2707,29 +3008,13 @@ func parseHubOutboundRejection(payload []byte) (hubOutboundMessage, hubOutboundR
 	}
 	reject := hubOutboundRejection{Class: hubUnparsedInvalidRequest, Type: message.Type}
 	switch message.Type {
-	case "ping", "pong":
+	case "ping", "pong", "redial":
 		if len(fields) != 1 {
 			return hubOutboundMessage{}, reject
 		}
 	case "failover":
 		var emittedAt string
 		if len(fields) != 4 || json.Unmarshal(fields["machine"], &message.Machine) != nil || json.Unmarshal(fields["phase"], &message.Phase) != nil || json.Unmarshal(fields["emitted_at"], &emittedAt) != nil || !parseHubFailoverEmittedAt(emittedAt, &message.EmittedAt) || !machineIDPattern.MatchString(message.Machine) || !validHubFailoverPhase(message.Phase) {
-			return hubOutboundMessage{}, reject
-		}
-	case "burst":
-		var emittedAt string
-		if json.Unmarshal(fields["machine"], &message.Machine) != nil || json.Unmarshal(fields["phase"], &message.Phase) != nil || json.Unmarshal(fields["emitted_at"], &emittedAt) != nil || !parseHubFailoverEmittedAt(emittedAt, &message.EmittedAt) || !machineIDPattern.MatchString(message.Machine) || !validHubBurstPhase(message.Phase) {
-			return hubOutboundMessage{}, reject
-		}
-		if message.Phase == hubFailoverPhaseUp {
-			if len(fields) != 5 || json.Unmarshal(fields["wake_mac"], &message.WakeMAC) != nil {
-				return hubOutboundMessage{}, reject
-			}
-			mac, err := parseHubFailoverWakeMAC(message.WakeMAC)
-			if err != nil || len(mac) != 6 {
-				return hubOutboundMessage{}, reject
-			}
-		} else if len(fields) != 4 {
 			return hubOutboundMessage{}, reject
 		}
 	case "job.revoked":
@@ -2743,15 +3028,6 @@ func parseHubOutboundRejection(payload []byte) (hubOutboundMessage, hubOutboundR
 	case "hub.features":
 		// Extra fields are a newer hub's; features alone is this node's business.
 		if json.Unmarshal(fields["features"], &message.Features) != nil {
-			return hubOutboundMessage{}, reject
-		}
-	case "burst.holds":
-		if len(fields) != 2 || json.Unmarshal(fields["holds_active"], &message.HoldsActive) != nil {
-			return hubOutboundMessage{}, reject
-		}
-	case "wake":
-		var emittedAt string
-		if len(fields) != 3 || json.Unmarshal(fields["machine"], &message.Machine) != nil || json.Unmarshal(fields["emitted_at"], &emittedAt) != nil || !parseHubFailoverEmittedAt(emittedAt, &message.EmittedAt) || !machineIDPattern.MatchString(message.Machine) {
 			return hubOutboundMessage{}, reject
 		}
 	case "relay.inject":
@@ -2771,7 +3047,7 @@ func parseHubOutboundRejection(payload []byte) (hubOutboundMessage, hubOutboundR
 			if json.Unmarshal(fields["kind"], &message.Kind) != nil || (message.Kind != "lane.event" && message.Kind != "job.completed" && message.Kind != "job.escalate" && message.Kind != "job.joined") {
 				return hubOutboundMessage{}, reject
 			}
-			if json.Unmarshal(fields["lane"], &message.Lane) != nil || json.Unmarshal(fields["event_id"], &message.EventID) != nil || json.Unmarshal(fields["deliver"], &message.DeliverPolicy) != nil || !hubAgentLabelPattern.MatchString(message.Lane) || message.EventID < 1 {
+			if json.Unmarshal(fields["lane"], &message.Lane) != nil || json.Unmarshal(fields["event_id"], &message.EventID) != nil || json.Unmarshal(fields["deliver"], &message.DeliverPolicy) != nil || !validLaneReference(message.Lane) || message.EventID < 1 {
 				return hubOutboundMessage{}, reject
 			}
 			if _, valid := parseRelayDeliveryPolicy(message.DeliverPolicy); !valid || !validRelayInjectedText(message.Kind, message.Text) {
@@ -2793,7 +3069,10 @@ func parseHubOutboundRejection(payload []byte) (hubOutboundMessage, hubOutboundR
 			return hubOutboundMessage{}, reject
 		}
 		if message.Kind == "lane.event" {
-			if len(fields) != 9 || json.Unmarshal(fields["lane"], &message.Lane) != nil || json.Unmarshal(fields["producer_event_id"], &message.ProducerEventID) != nil || !hubAgentLabelPattern.MatchString(message.Lane) || !validLaneEventID(message.ProducerEventID) {
+			// Older hubs acknowledge lane events with the shared relay
+			// envelope only. The transport job_id still identifies the
+			// producer's outbox row, so it is safe to retire that row below.
+			if len(fields) != 7 && (len(fields) != 9 || json.Unmarshal(fields["lane"], &message.Lane) != nil || json.Unmarshal(fields["producer_event_id"], &message.ProducerEventID) != nil || !validLaneReference(message.Lane) || !validLaneEventID(message.ProducerEventID)) {
 				return hubOutboundMessage{}, reject
 			}
 		} else if len(fields) == 8 {
@@ -2831,11 +3110,8 @@ func parseHubOutboundRejection(payload []byte) (hubOutboundMessage, hubOutboundR
 		if !validHubIdleWakeRouteEvent(hubIdleWakeRouteEvent{Type: message.Type, EventID: message.IdleWakeEventID, Pane: message.Pane, Eligible: message.Eligible, Lane: message.Lane, Text: message.Text, JobID: message.JobID, Reason: message.Reason}) {
 			return hubOutboundMessage{}, reject
 		}
-	case "quota.request":
-		// "scopefuel" is the retired quota tool's wire spelling; a legacy hub
-		// still sends it, so the name stays admitted for one release.
-		var tool string
-		if len(fields) != 3 || json.Unmarshal(fields["request_id"], &message.RequestID) != nil || json.Unmarshal(fields["tool"], &tool) != nil || !validHubRequestID(message.RequestID) || tool != "scopefuel" {
+	case "job.spawn.grant":
+		if len(fields) != 3 || json.Unmarshal(fields["request_id"], &message.RequestID) != nil || !validHubSpawnRequestID(message.RequestID) || (string(fields["granted"]) != "true" && string(fields["granted"]) != "false") || json.Unmarshal(fields["granted"], &message.Granted) != nil {
 			return hubOutboundMessage{}, reject
 		}
 	case "job.spawn":
@@ -2845,11 +3121,11 @@ func parseHubOutboundRejection(payload []byte) (hubOutboundMessage, hubOutboundR
 		var brief hubSpawnBrief
 		var briefFields map[string]json.RawMessage
 		for name := range fields {
-			if name != "type" && name != "request_id" && name != "cwd_key" && name != "brief" && name != "checkout" && name != "args" && name != "wait_seconds" && name != "deadline_ms" && name != "operator_authorized" {
+			if name != "type" && name != "request_id" && name != "cwd_key" && name != "brief" && name != "checkout" && name != "args" && name != "wait_seconds" && name != "deadline_ms" && name != "expires_ms" && name != "start_by_ms" && name != "operator_authorized" {
 				return hubOutboundMessage{}, reject
 			}
 		}
-		if (len(fields) < 6 || len(fields) > 9) || json.Unmarshal(fields["request_id"], &message.RequestID) != nil || json.Unmarshal(fields["cwd_key"], &message.CWDKey) != nil || json.Unmarshal(fields["brief"], &brief) != nil || json.Unmarshal(fields["brief"], &briefFields) != nil || (len(briefFields) != 1) || json.Unmarshal(fields["args"], &message.Args) != nil || message.Args == nil || json.Unmarshal(fields["wait_seconds"], &message.WaitSeconds) != nil {
+		if (len(fields) < 6 || len(fields) > 11) || json.Unmarshal(fields["request_id"], &message.RequestID) != nil || json.Unmarshal(fields["cwd_key"], &message.CWDKey) != nil || json.Unmarshal(fields["brief"], &brief) != nil || json.Unmarshal(fields["brief"], &briefFields) != nil || (len(briefFields) != 1) || json.Unmarshal(fields["args"], &message.Args) != nil || message.Args == nil || json.Unmarshal(fields["wait_seconds"], &message.WaitSeconds) != nil {
 			return hubOutboundMessage{}, reject
 		}
 		if raw, ok := briefFields["inline"]; ok {
@@ -2872,6 +3148,16 @@ func parseHubOutboundRejection(payload []byte) (hubOutboundMessage, hubOutboundR
 		}
 		if raw, ok := fields["deadline_ms"]; ok {
 			if json.Unmarshal(raw, &message.DeadlineMS) != nil || message.DeadlineMS <= 0 {
+				return hubOutboundMessage{}, reject
+			}
+		}
+		if raw, ok := fields["expires_ms"]; ok {
+			if json.Unmarshal(raw, &message.ExpiresMS) != nil || message.ExpiresMS <= 0 {
+				return hubOutboundMessage{}, reject
+			}
+		}
+		if raw, ok := fields["start_by_ms"]; ok {
+			if json.Unmarshal(raw, &message.StartByMS) != nil || message.StartByMS <= 0 {
 				return hubOutboundMessage{}, reject
 			}
 		}
@@ -2905,54 +3191,6 @@ func validRelayInjectedText(kind, text string) bool {
 	// The hub's normal lane ingress remains bounded by validLaneRelayText;
 	// this receiving-side directive also admits the B3 single-item exception.
 	return validRelayFinalText(text)
-}
-
-func (client *HubClient) handleHubBurst(ctx context.Context, message hubOutboundMessage) {
-	if !validHubBurstPhase(message.Phase) {
-		return
-	}
-	key := message.Phase + ":" + message.EmittedAt.Format(time.RFC3339Nano)
-	client.burstMu.Lock()
-	if _, seen := client.burstSeen[key]; seen {
-		client.burstMu.Unlock()
-		return
-	}
-	client.burstSeen[key] = message.EmittedAt
-	mac := append(net.HardwareAddr(nil), client.burstWakeMAC...)
-	poweroffAllowed, poweroff := client.burstPoweroffAllowed, client.burstPoweroff
-	client.burstMu.Unlock()
-	if message.Phase == hubFailoverPhaseUp {
-		policyMAC, err := parseHubFailoverWakeMAC(message.WakeMAC)
-		if err != nil || len(mac) != 6 || !bytes.Equal(mac, policyMAC) {
-			client.warn("burst wake unavailable")
-			return
-		}
-		if err := sendHubFailoverWakePacket(ctx, hubFailoverWakeBroadcastAddress, policyMAC); err != nil {
-			client.warn("burst wake unavailable")
-		}
-		return
-	}
-	if !poweroffAllowed {
-		return
-	}
-	// The hub is authoritative for idle evaluation, but a target that has
-	// already received a live hold must also reject a delayed down event. This
-	// prevents an in-flight or future emitter from defeating the hold locally.
-	client.burstMu.Lock()
-	holdsActive := client.burstHoldsActive
-	client.burstMu.Unlock()
-	if holdsActive {
-		return
-	}
-	if err := poweroff(ctx); err != nil {
-		client.warn("burst poweroff unavailable")
-	}
-}
-
-func executeHubBurstPoweroff(ctx context.Context) error {
-	command := exec.CommandContext(ctx, "sudo", "-n", "/usr/sbin/poweroff")
-	command.Stdout, command.Stderr = io.Discard, io.Discard
-	return command.Run()
 }
 
 // parseHubFailoverEmittedAt accepts only the canonical RFC3339 UTC rendering
@@ -2994,7 +3232,11 @@ func (client *HubClient) handleHubFailover(ctx context.Context, message hubOutbo
 }
 
 func (peer *hubClientConnection) write(ctx context.Context, value any) error {
-	peer.writeMu.Lock()
+	// Admission honors ctx, so a caller with a deadline never waits behind
+	// another writer past it.
+	if err := peer.writeMu.lockContext(ctx); err != nil {
+		return err
+	}
 	defer peer.writeMu.Unlock()
 	writeContext, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
@@ -3003,4 +3245,4 @@ func (peer *hubClientConnection) write(ctx context.Context, value any) error {
 
 // relayPersistedKinds bounds the hub-originated acknowledgement to the
 // relay record kinds. It is a closed set, not a passthrough.
-var relayPersistedKinds = map[string]bool{"job.completed": true, "job.escalate": true, "job.joined": true, "job.lost": true, "lane.event": true}
+var relayPersistedKinds = map[string]bool{"job.completed": true, "job.escalate": true, "job.joined": true, "job.lost": true, "job.revoked": true, "lane.event": true}

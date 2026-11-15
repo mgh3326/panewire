@@ -21,13 +21,12 @@ func TestSubmissionRefusesWorktreeBehindOrigin(t *testing.T) {
 		refused bool
 		want    HubCheckout
 	}{
-		{"behind worker", gitState{pushed: true, originTip: newer}, "worker", true, HubCheckout{}},
-		{"behind tester", gitState{pushed: true, originTip: newer}, "tester", true, HubCheckout{}},
-		{"equal keeps the branch spec", gitState{pushed: true}, "worker", false,
+		{"behind implementer", gitState{pushed: true, originTip: newer}, "implementer", true, HubCheckout{}},
+		{"equal keeps the branch spec", gitState{pushed: true}, "implementer", false,
 			HubCheckout{Origin: origin, Mode: "branch", Branch: "wk/x", Sha: hubHead, Dir: "repo-a.wk"}},
-		{"ahead and pushed elsewhere keeps today's behaviour", gitState{onOrigin: true, originTip: newer, contained: []string{"refs/remotes/origin/main"}}, "worker", false, detachedMain},
+		{"ahead and pushed elsewhere keeps today's behaviour", gitState{onOrigin: true, originTip: newer, contained: []string{"refs/remotes/origin/main"}}, "implementer", false, detachedMain},
 		{"behind reviewer is unchanged", gitState{pushed: true, originTip: newer, pointsAt: []string{"refs/remotes/origin/main"}}, "reviewer", false, detachedMain},
-		{"behind counsel is unchanged", gitState{pushed: true, originTip: newer, pointsAt: []string{"refs/remotes/origin/main"}}, "counsel", false, detachedMain},
+		{"behind counsel is unchanged", gitState{pushed: true, originTip: newer, pointsAt: []string{"refs/remotes/origin/main"}}, "consult", false, detachedMain},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			a, s, _, hub, _ := hubFixture(t, tc.state, "wk/x", hubHosts())

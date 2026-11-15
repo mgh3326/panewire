@@ -141,7 +141,7 @@ func TestAdmissionGoldenCoversEveryPoolAndRule(t *testing.T) {
 		"claude-5h-exhausted", "claude-preserve-cutoff-90", "claude-stale-reading", "claude-malformed-scope",
 		"codex-plus-missing-5h", "codex-free-missing-30d", "codex-prolite-7d-only-admits",
 		"commandcode-30d-missing", "commandcode-30d-exhausted", "cmd-dsflash41-reviewer-denied", "cmd-dsflash41-builder-denied",
-		"pi-reviewer-denied", "pi-worker-manual-credit-admit", "devin-swe2-free-exhausted",
+		"pi-reviewer-denied", "pi-implementer-manual-credit-admit", "devin-swe2-free-exhausted",
 		"agy-group-window-gates-its-group", "grok-excluded-pool", "fusion-billing-fp-differs",
 		"devin-ds41-paid-exhausted-alternatives", "claude-escalation-operator-override",
 	} {

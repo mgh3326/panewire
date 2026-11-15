@@ -20,6 +20,10 @@ import (
 type hubInbox struct {
 	store  *laneInboxStore
 	policy *deliveryPolicy
+	// deferredPath is the durable file snapshot writes the store refused
+	// are queued in until a row lands — the retry obligation survives a
+	// restart when a spooled record file cannot.
+	deferredPath string
 	// waiters bounds concurrent /v1/inbox/wait long-polls. Acquired before
 	// the handler loop and released when it returns.
 	waiters chan struct{}
@@ -89,7 +93,16 @@ func newHubInbox(policyPath, storePath, databaseURL string) (*hubInbox, error) {
 		store.close()
 		return nil, err
 	}
-	return &hubInbox{store: store, policy: policy, waiters: make(chan struct{}, hubInboxWaitMaxWaiters)}, nil
+	if err = store.ensureConsults(); err != nil {
+		store.close()
+		return nil, err
+	}
+	deferredDir := filepath.Dir(storePath)
+	if storePath == "" {
+		deferredDir = filepath.Dir(defaultHubInboxPath())
+	}
+	deferredPath := filepath.Join(deferredDir, "placement-deferred.json")
+	return &hubInbox{store: store, policy: policy, deferredPath: deferredPath, waiters: make(chan struct{}, hubInboxWaitMaxWaiters)}, nil
 }
 
 // prepareInbox runs once before the hub starts accepting events. Maintenance
@@ -167,7 +180,11 @@ func (h *HubServer) receivingLane(kind string, e hubJobEventPayload) string {
 // senderID is the node that relayed the event, or "" when the hub itself did
 // (replay, HTTP ingress, its own digests); the row records it for the ack-state
 // lookup.
-func (h *HubServer) receiveInbox(kind string, event *hubJobEventPayload, sender *hubAgent, senderID string, replay bool) (result relayLaneEventResult, handled bool) {
+func (h *HubServer) receiveInbox(kind string, event *hubJobEventPayload, sender *hubAgent, senderID string, replay bool, contexts ...context.Context) (result relayLaneEventResult, handled bool) {
+	jobLookupContext := h.closeCtx
+	if len(contexts) > 0 && contexts[0] != nil {
+		jobLookupContext = contexts[0]
+	}
 	if h.inbox == nil && kind == "job.completed" && event.Late {
 		return relayLaneEventResult{PersistFailed: true}, true
 	}
@@ -175,6 +192,12 @@ func (h *HubServer) receiveInbox(kind string, event *hubJobEventPayload, sender 
 		return result, false
 	}
 	lane := h.receivingLane(kind, *event)
+	if reason := h.designFilterReason(kind, *event, lane); reason != "" {
+		if result, handled := h.receiveFiltered(kind, event, sender, senderID, reason); handled {
+			return result, true
+		}
+		// hk's row belongs to another event: this one takes the inbox path.
+	}
 	if event.NotifyType == "" && h.inbox.policy.Lanes[lane].InboxSummary != nil {
 		switch kind {
 		case "job.completed", "job.joined":
@@ -186,7 +209,7 @@ func (h *HubServer) receiveInbox(kind string, event *hubJobEventPayload, sender 
 	class := h.inbox.policy.classify(lane, kind, *event, replay)
 	// hk 3426: a design lane keeps a worker's routine result in its inbox; no
 	// owner-completion or idle promotion below puts it in the pane.
-	quiet := h.inbox.policy.designQuiet(lane, kind, *event, func() bool { return h.jobHasTask(event.JobID) }, func() bool { return h.laneEventFromWorker(senderID, event.PaneID) })
+	quiet := h.inbox.policy.designQuiet(lane, kind, *event, func() bool { return h.jobHasTaskContext(jobLookupContext, event.JobID) }, func() bool { return h.laneEventFromWorker(senderID, event.PaneID, lane) })
 	if quiet || (kind == "job.completed" && event.Late) {
 		class = "inbox"
 	}
@@ -232,7 +255,7 @@ func (h *HubServer) receiveInbox(kind string, event *hubJobEventPayload, sender 
 	}
 	// Ordinary deadline digests still exclude must-ack types. Working holds
 	// retain each original ID so the receiver can acknowledge its items.
-	if event.Late || event.noDigest || h.inbox.policy.mustAct(lane, *event) || mustAckNotifyTypes[event.NotifyType] || chatRelayEventPattern.MatchString(event.EventID) {
+	if event.Late || event.noDigest || h.inbox.policy.mustAct(lane, *event) || mustAckNotifyTypes[event.NotifyType] {
 		window = 0
 	}
 	if directive {
@@ -321,14 +344,29 @@ func (h *HubServer) receiverInboxState(lane string) receiverInboxState {
 // hub-placed spawns use. A missing or unreadable record counts as no task, so
 // the completion is delivered as before (hk 3426).
 func (h *HubServer) jobHasTask(jobID string) bool {
-	ctx, cancel := context.WithTimeout(h.closeCtx, handoffkeepTimeout)
+	return h.jobHasTaskContext(h.closeCtx, jobID)
+}
+
+func (h *HubServer) jobHasTaskContext(parent context.Context, jobID string) bool {
+	ctx, cancel := context.WithTimeout(parent, nodeLoopHKTimeout)
 	defer cancel()
 	task, _, err := h.jobTaskID(ctx, jobID)
 	if err != nil {
-		h.logger.Warn("job record unreadable; design-lane completion delivered", "job", jobID)
+		h.logger.Warn("job record unreadable; design-lane completion delivered", "job", jobID, "error_class", hubHKReadErrorClass(err))
 		return false
 	}
 	return task != ""
+}
+
+func hubHKReadErrorClass(err error) string {
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		return "timeout"
+	case errors.Is(err, context.Canceled):
+		return "canceled"
+	default:
+		return "unavailable"
+	}
 }
 
 // jobTaskID returns the task id the job's hk record names ("" when it names
@@ -396,9 +434,8 @@ func (h *HubServer) replayInboxAged(record handoffkeepRelayEvent, receiptAge boo
 	// A stale row is retired before it can be migrated: the inbox evidence
 	// that would suppress it is pruned after the same replay window, so a row
 	// whose handoffkeep mark once failed would otherwise come back as a new
-	// item on every restart (hk 2976). Chat rows keep the chat store as their
-	// only authority.
-	if h.handoffkeep != nil && !strings.HasPrefix(record.DeliveredTo, relayReplayRetiredMarker) && chatRelayEventPattern.FindStringSubmatch(record.EventID) == nil {
+	// item on every restart (hk 2976).
+	if h.handoffkeep != nil && !strings.HasPrefix(record.DeliveredTo, relayReplayRetiredMarker) {
 		if reason := h.relayReplayRetireReasonAged(record, receiptAge); reason != "" {
 			h.retireRelayReplay(record, reason)
 			return true
@@ -407,7 +444,7 @@ func (h *HubServer) replayInboxAged(record handoffkeepRelayEvent, receiptAge boo
 	if h.inbox == nil {
 		return false
 	}
-	event := h.replayedRelayEvent(record)
+	event := relayEventFromRecord(record)
 	// settled is strictly broader than the old injected-only check: a receiver
 	// read — including a must-ack item read before its ack — is evidence the
 	// lane already has the event, so a restart must not inject it again (hk
@@ -427,7 +464,7 @@ func (h *HubServer) replayInboxAged(record handoffkeepRelayEvent, receiptAge boo
 	if !handled {
 		return false
 	}
-	if !result.PersistFailed && h.handoffkeep != nil {
+	if !result.PersistFailed && !result.AlreadyDelivered && h.handoffkeep != nil {
 		if err := h.handoffkeep.markDelivered(context.Background(), record.ID, "hub", "inbox"); err != nil {
 			h.logger.Warn("inbox replay row retirement deferred", "event_id", record.ID)
 		}
@@ -530,16 +567,25 @@ func (h *HubServer) flushInbox() {
 	// A held-batching failure must not starve ordinary digests or batches
 	// that are already pending for other lanes.
 	if err := h.makeHeldBatches(); err != nil {
+		if h.closeCtx.Err() != nil {
+			return
+		}
 		h.logger.Error("held inbox batching failed; continuing with ordinary batches")
 		failed = true
 	}
 	if err := h.inbox.store.makeBatches(h.now().UTC()); err != nil {
+		if h.closeCtx.Err() != nil {
+			return
+		}
 		h.logger.Error("inbox batching failed")
 		failed = true
 		return
 	}
-	batches, err := h.inbox.store.pendingBatches()
+	batches, err := h.inbox.store.pendingBatchesForContext(h.closeCtx)
 	if err != nil {
+		if h.closeCtx.Err() != nil && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
+			return
+		}
 		h.logger.Error("inbox batch listing failed")
 		failed = true
 		return
@@ -558,6 +604,9 @@ func (h *HubServer) flushInbox() {
 			// An inbox-only lane is never typed a batch (hk 3602): its items
 			// are filed unread and the batch is retired untyped.
 			if err := h.fileInboxOnlyBatch(b.Lane, class, b.ID); err != nil {
+				if h.closeCtx.Err() != nil {
+					return
+				}
 				h.logger.Error("inbox-only batch filing failed; batch retained", "lane", b.Lane)
 				failed = true
 			}
@@ -565,6 +614,9 @@ func (h *HubServer) flushInbox() {
 		}
 		if h.inbox.policy.Lanes[b.Lane].InboxSummary != nil {
 			if err := h.inbox.store.quarantineBatch(b.ID, "external scheduler owns lane digest"); err != nil {
+				if h.closeCtx.Err() != nil {
+					return
+				}
 				failed = true
 			}
 			continue
@@ -575,6 +627,9 @@ func (h *HubServer) flushInbox() {
 			var err error
 			b, err = h.prepareHeldBatch(b)
 			if err != nil {
+				if h.closeCtx.Err() != nil {
+					return
+				}
 				h.logger.Error("held inbox preparation failed; batch retained", "lane", lane)
 				failed = true
 				blockedLanes[lane] = true
@@ -586,6 +641,9 @@ func (h *HubServer) flushInbox() {
 		}
 		if reason := b.invalidReason(); reason != "" {
 			if err := h.inbox.store.quarantineBatch(b.ID, reason); err != nil {
+				if h.closeCtx.Err() != nil {
+					return
+				}
 				h.logger.Error("inbox batch quarantine failed")
 				failed = true
 				return
@@ -602,6 +660,9 @@ func (h *HubServer) flushInbox() {
 		// batch. Its usual replay owns retries from here, without re-escalating.
 		if result.ID > 0 && !result.PersistFailed {
 			if err := h.inbox.store.markBatchSent(b.ID); err != nil {
+				if h.closeCtx.Err() != nil {
+					return
+				}
 				h.logger.Error("inbox batch handoff recording failed")
 				failed = true
 				return
@@ -614,11 +675,17 @@ func (h *HubServer) flushInbox() {
 		if inboxBatchPermanentlyRejected(result.PersistStatus) {
 			reason := fmt.Sprintf("handoffkeep permanently rejected batch: HTTP %d", result.PersistStatus)
 			if err := h.inbox.store.quarantineBatch(b.ID, reason); err != nil {
+				if h.closeCtx.Err() != nil {
+					return
+				}
 				h.logger.Error("inbox batch quarantine failed")
 				failed = true
 				return
 			}
 			continue
+		}
+		if h.closeCtx.Err() != nil {
+			return
 		}
 		failed = true
 		// One failed persistence attempt ends the pass: whatever made this
@@ -803,7 +870,7 @@ func (h *HubServer) handleInboxWait(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	lane := r.URL.Query().Get("lane")
-	if !validReportRelayLaneName(lane) {
+	if !validLaneReference(lane) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "lane_required"})
 		return
 	}
@@ -861,6 +928,12 @@ func (h *HubServer) handleInboxWait(w http.ResponseWriter, r *http.Request) {
 		case <-wake:
 		case <-r.Context().Done():
 		case <-h.closeCtx.Done():
+		case <-h.drain.Started():
+			// SIGTERM: end the poll with the retryable answer rather than
+			// holding the caller until this process exits (hub_drain.go).
+			timer.Stop()
+			writeHubDraining(w)
+			return
 		case <-timer.C:
 		}
 		timer.Stop()

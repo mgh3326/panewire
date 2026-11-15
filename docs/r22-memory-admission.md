@@ -57,8 +57,8 @@ candidate is pressured and no usable spill target exists, the decision is
 `unavailable`. This is intentionally fail-closed to protect the local host;
 the mitigation is to hot-reload an adjusted threshold policy.
 
-Because memory pressure follows the non-accepting path, `wake_on_spill` does
-not wake a disconnected spill target for memory pressure: the decision remains
+Because memory pressure follows the non-accepting path, a disconnected spill
+target is never chosen for memory pressure: the decision remains
 `unavailable`. Capacity-pressure spill behavior is unchanged.
 
 When either additive live field (`swap_in_per_s` or `pressure`) is present,

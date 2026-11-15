@@ -74,7 +74,8 @@ func (manager *relayBusyManager) forgetCmdScreen(pane string) {
 // relay.cmd_stale_after ago, and the composer reads empty. A failed read is not
 // evidence: it changes nothing, and the row keeps its hold.
 func (manager *relayBusyManager) cmdStaleWorkingDigest(parent context.Context, item relayHeld, lease string) string {
-	readContext, cancel := context.WithTimeout(parent, manager.client.relayInjectTimeout())
+	session := manager.client.herdrSessionFor(item.JobID, item.Pane)
+	readContext, cancel := context.WithTimeout(withRelaySession(parent, session), manager.client.relayInjectTimeout())
 	ansi, err := relayReadPaneANSI(readContext, item.Pane)
 	cancel()
 	if err != nil || ansi == "" {

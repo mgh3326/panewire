@@ -49,7 +49,7 @@ func decodeHubRelayIngressRequest(writer http.ResponseWriter, request *http.Requ
 	if !decodeHubJSON(writer, request, hubRelayIngressMaxBodyBytes, &body) {
 		return hubRelayIngressRequest{}, false
 	}
-	if body.Kind != "lane.event" || !hubAgentLabelPattern.MatchString(body.Lane) || !validLaneEventID(body.EventID) || !validLaneEventText(body.Text) || !hubAgentLabelPattern.MatchString(body.Label) {
+	if body.Kind != "lane.event" || !LaneNamePattern.MatchString(body.Lane) || !validLaneEventID(body.EventID) || !validLaneEventText(body.Text) || !hubAgentLabelPattern.MatchString(body.Label) {
 		return hubRelayIngressRequest{}, false
 	}
 	if body.Host == "" {

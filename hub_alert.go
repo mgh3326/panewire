@@ -2,6 +2,8 @@ package panewire
 
 import (
 	"context"
+	"errors"
+	"log/slog"
 	"sort"
 	"strings"
 	"time"
@@ -44,11 +46,6 @@ type HubAlert struct {
 	MachineID string
 	Reason    string
 	Check     string
-}
-
-// HubNotifier is the optional server-side notification boundary.
-type HubNotifier interface {
-	Send(context.Context, HubAlert) error
 }
 
 type hubAlertState struct {
@@ -272,9 +269,6 @@ func (h *HubServer) pendingHubNotificationLocked(key string, state *hubAlertStat
 }
 
 func (h *HubServer) pendingHubNotificationAtLocked(now time.Time, key string, state *hubAlertState) []hubNotification {
-	if h.notifier == nil {
-		return nil
-	}
 	if state.active && !state.incidentDelivered && !state.incidentPending {
 		state.incidentPending = true
 		return []hubNotification{{
@@ -320,12 +314,38 @@ func hubAlertMachineID(key string) string {
 	return "unknown"
 }
 
+// errHubAlertNotLogged reports that the log handler did not accept the alert:
+// its level filters it out or its write failed. The alert stays pending.
+var errHubAlertNotLogged = errors.New("hub alert was not accepted by the log")
+
+// logHubAlert is the hub's only alert sink. The three identifiers are logged as
+// attributes so an operator can filter on them; the rendered text carries the
+// same content for a reader of the plain log. It writes through the handler
+// directly, because slog.Logger.Log discards the handler's error: an error
+// return here is the only evidence that the record was written.
+func (h *HubServer) logHubAlert(alert HubAlert) error {
+	level := slog.LevelWarn
+	if alert.Recovery {
+		level = slog.LevelInfo
+	}
+	ctx := context.Background()
+	handler := h.logger.Handler()
+	if !handler.Enabled(ctx, level) {
+		return errHubAlertNotLogged
+	}
+	record := slog.NewRecord(h.now(), level, "hub alert", 0)
+	record.AddAttrs(
+		slog.String("text", formatHubAlert(alert)), slog.String("machine", alert.MachineID),
+		slog.String("reason", alert.Reason), slog.String("check", alert.Check),
+		slog.Bool("recovery", alert.Recovery))
+	return handler.Handle(ctx, record)
+}
+
+// dispatchHubNotifications delivers each due alert to the hub log. The log line
+// is the delivery: it either happens or the process is gone, so a delivered
+// alert is recorded in the same pass that decides it is due.
 func (h *HubServer) dispatchHubNotifications(notifications []hubNotification) {
 	for _, notification := range notifications {
-		notifier := h.notifier
-		if notifier == nil {
-			continue
-		}
 		h.mu.Lock()
 		state := h.alerts[notification.key]
 		shouldSend := state != nil && state.incidentGeneration == notification.generation
@@ -354,16 +374,25 @@ func (h *HubServer) dispatchHubNotifications(notifications []hubNotification) {
 		if !shouldSend {
 			continue
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		err := notifier.Send(ctx, notification.alert)
-		cancel()
-		if err != nil {
-			h.logger.Warn("hub Telegram notification failed")
+		if err := h.logHubAlert(notification.alert); err != nil {
+			// Not written: clear the pending flag without marking the alert
+			// delivered, so the next sweep emits it again. A level-filtered
+			// record writes nothing, so retrying it each sweep cannot flood.
+			h.mu.Lock()
+			if state := h.alerts[notification.key]; state != nil && state.incidentGeneration == notification.generation {
+				switch {
+				case notification.reminder:
+					state.reminderPending = false
+				case notification.incident:
+					state.incidentPending = false
+				default:
+					state.recoveryPending = false
+				}
+			}
+			h.mu.Unlock()
+			continue
 		}
-		var deliveredAt time.Time
-		if err == nil {
-			deliveredAt = h.now().UTC()
-		}
+		deliveredAt := h.now().UTC()
 		h.mu.Lock()
 		state = h.alerts[notification.key]
 		if state != nil && state.incidentGeneration == notification.generation {
@@ -373,13 +402,13 @@ func (h *HubServer) dispatchHubNotifications(notifications []hubNotification) {
 				} else {
 					state.incidentPending = false
 				}
-				if err == nil && state.active && (!notification.reminder || !state.remindersStopped) {
+				if state.active && (!notification.reminder || !state.remindersStopped) {
 					state.incidentDelivered = true
 					state.lastIncidentDelivery = deliveredAt
 				}
 			} else {
 				state.recoveryPending = false
-				if err == nil && !state.active && state.recoveryNeeded {
+				if !state.active && state.recoveryNeeded {
 					state.recoveryNeeded = false
 					state.incidentDelivered = false
 					state.lastIncidentDelivery = time.Time{}

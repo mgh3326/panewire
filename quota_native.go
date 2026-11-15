@@ -25,16 +25,14 @@ import (
 // The node measures the claude, codex, commandcode, devin and agy pools itself
 // (docs/quota.md §Native measurement): each pool's own source (claude: the OAuth
 // usage API then one `claude -p /usage`; codex: the app-server then the wham
-// usage API; commandcode: the billing, subscription and usage-summary APIs;
+// usage API; commandcode: `omp usage --json`, every account omp holds;
 // devin: the web quota endpoint then the `/usage` probe; agy: the running app's
 // loopback server then the cloud quota summary) and the shared
 // quota store's lease/publish flow. Every other pool still goes through
 // pacelever until its own change.
 //
-// claude and codex are always native. commandcode, devin and agy have a switch (docs/quota.md
-// §Native measurement: commandcode): it is native only once the host's
-// `[quota].native_pools` lists it, and until then it is in shadow — see
-// quota_shadow.go.
+// Every pool listed in nativeStatusPools is always native (`[quota].native_pools`
+// is retired, docs/quota.md).
 
 // isNativeQuotaPool says whether this host measures pool itself. The host
 // config is read at call time, so flipping a switch needs no restart.
@@ -82,9 +80,9 @@ type nativeQuotaSource struct {
 
 	flowOnce sync.Once
 	flow     *shared.Flow
-	// commandcodeAccounts remembers the account behind the login so the
-	// fingerprint read before each refresh costs no request once known.
-	commandcodeAccounts commandcode.IdentityCache
+	// commandcodeState is what the commandcode pool remembers between
+	// refreshes (quota_commandcode.go).
+	commandcodeState commandcodeState
 	// agyUnconfiguredOnce limits the "no agy account here" line to one.
 	agyUnconfiguredOnce sync.Once
 }
@@ -133,19 +131,12 @@ func (s *nativeQuotaSource) now() time.Time {
 	return time.Now().UTC()
 }
 
-// poolMeasurement is what Refresh needs of a pool: how to measure it, the
+// poolMeasurement is what Refresh needs of a pool (every pool but commandcode,
+// which holds several accounts and has its own path, quota_commandcode.go): how to measure it, the
 // account fingerprint the login names before any request (or why the host has
 // no login), and how long a shared reading stays current.
 func (s *nativeQuotaSource) poolMeasurement() (measure shared.Measurer, accountFP func(context.Context) (string, error), freshTTL time.Duration) {
 	switch s.Pool {
-	case "commandcode":
-		config := s.Commandcode
-		config.Now = s.Now
-		config.Identities = &s.commandcodeAccounts
-		// The account is the one whoami names, so the fingerprint needs a
-		// request the first time a login is seen (cached after that).
-		return func(ctx context.Context) (quota.Observation, error) { return commandcode.Measure(ctx, config) },
-			func(ctx context.Context) (string, error) { return commandcode.AccountFP(ctx, config) }, shared.OtherFreshTTL
 	case "agy":
 		return s.agyMeasurement()
 	case "devin":
@@ -232,27 +223,76 @@ func (s *nativeQuotaSource) agyMeasurement() (shared.Measurer, func(context.Cont
 		}, shared.OtherFreshTTL
 }
 
+// refreshTTL reserves one publisher cycle and one measurement timeout before
+// the reader freshness window ends. The longer reader TTL remains the status
+// contract and the bound for readers that consume the shared store directly.
+func (s *nativeQuotaSource) refreshTTL(readerTTL time.Duration) time.Duration {
+	if s.Pool == "claude" {
+		return readerTTL
+	}
+	return readerTTL - shared.DefaultRefreshMargin
+}
+
 // Refresh answers the pool's current reading: the shared one when fresh, else
 // a measurement published under the shared lease. With no shared store
 // configured it measures directly. The error is a *quota.Error.
 func (s *nativeQuotaSource) Refresh(ctx context.Context) (shared.Reading, error) {
+	reading, _, err := s.RefreshWithMeasurement(ctx)
+	return reading, err
+}
+
+// RefreshWithMeasurement is RefreshAccounts for a caller that reads one
+// account: the first reading.
+func (s *nativeQuotaSource) RefreshWithMeasurement(ctx context.Context) (shared.Reading, bool, error) {
+	readings, measured, err := s.RefreshAccounts(ctx)
+	if err != nil {
+		return shared.Reading{}, measured, err
+	}
+	return readings[0], measured, nil
+}
+
+// RefreshAccounts reports the current reading of every account this host holds
+// in the pool, and whether this call measured successfully with this host's
+// credential (a shared fresh reading returns measured=false). A pool holds one
+// account per host, except commandcode, whose omp may hold several.
+func (s *nativeQuotaSource) RefreshAccounts(ctx context.Context) ([]shared.Reading, bool, error) {
+	if s.Pool == "commandcode" {
+		return s.refreshCommandcode(ctx)
+	}
+	reading, measured, err := s.refreshOne(ctx)
+	if err != nil {
+		return nil, measured, err
+	}
+	return []shared.Reading{reading}, measured, nil
+}
+
+func (s *nativeQuotaSource) refreshOne(ctx context.Context) (shared.Reading, bool, error) {
 	measure, accountFP, freshTTL := s.poolMeasurement()
+	measured := false
+	ownMeasure := func(ctx context.Context) (quota.Observation, error) {
+		observation, err := measure(ctx)
+		if err == nil {
+			measured = true
+		}
+		return observation, err
+	}
 	store, err := quotaStoreClient(s.SpawnConfigPath, s.StoreTransport)
 	if errors.Is(err, errQuotaStoreUnconfigured) {
-		return s.measureDirect(ctx, measure)
+		reading, err := s.measureDirect(ctx, ownMeasure)
+		return reading, measured, err
 	}
 	if err != nil {
-		return shared.Reading{}, quota.Fail(quota.ErrKindSharedUnavailable, "shared quota unavailable")
+		return shared.Reading{}, false, quota.Fail(quota.ErrKindSharedUnavailable, "shared quota unavailable")
 	}
 	fp, err := accountFP(ctx)
 	if err != nil {
-		return shared.Reading{}, err
+		return shared.Reading{}, false, err
 	}
 	if fp == "" {
-		return shared.Reading{}, quota.Fail(quota.ErrKindAccountUnknown, "no account key")
+		return shared.Reading{}, false, quota.Fail(quota.ErrKindAccountUnknown, "no account key")
 	}
 	s.flowOnce.Do(func() {
-		s.flow = &shared.Flow{Now: s.Now, FreshTTL: freshTTL, HostID: s.HostID, Wait: s.Wait}
+		s.flow = &shared.Flow{Now: s.Now, FreshTTL: s.refreshTTL(freshTTL), HostID: s.HostID, Wait: s.Wait}
 		if s.Pool == "devin" {
 			config := s.Devin
 			config.Now = s.Now
@@ -260,7 +300,8 @@ func (s *nativeQuotaSource) Refresh(ctx context.Context) (shared.Reading, error)
 			s.flow.MaxWait = devinLeaseWait
 		}
 	})
-	return s.flow.Refresh(ctx, store, s.Pool+":"+fp, measure)
+	reading, err := s.flow.Refresh(ctx, store, s.Pool+":"+fp, ownMeasure)
+	return reading, measured, err
 }
 
 // nativeStatusPools are the pools panewire can measure itself, in the order
@@ -273,6 +314,26 @@ var nativeStatusPools = []string{"claude", "codex", "commandcode", "devin", "agy
 // `panewire quota status` reports it when pacelever is absent. The error is a
 // *quota.Error.
 func (s *nativeQuotaSource) stored(ctx context.Context) (quotaReading, error) {
+	readings, err := s.storedAccounts(ctx)
+	if err != nil {
+		return quotaReading{}, err
+	}
+	return readings[0], nil
+}
+
+// storedAccounts is stored for every account this host holds in the pool.
+func (s *nativeQuotaSource) storedAccounts(ctx context.Context) ([]quotaReading, error) {
+	if s.Pool == "commandcode" {
+		return s.storedCommandcode(ctx)
+	}
+	reading, err := s.storedOne(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return []quotaReading{reading}, nil
+}
+
+func (s *nativeQuotaSource) storedOne(ctx context.Context) (quotaReading, error) {
 	_, accountFP, freshTTL := s.poolMeasurement()
 	store, err := quotaStoreClient(s.SpawnConfigPath, s.StoreTransport)
 	if err != nil {
@@ -285,6 +346,12 @@ func (s *nativeQuotaSource) stored(ctx context.Context) (quotaReading, error) {
 	if fp == "" {
 		return quotaReading{}, quota.Fail(quota.ErrKindAccountUnknown, "no account key")
 	}
+	return s.storedReading(ctx, store, fp, freshTTL)
+}
+
+// storedReading is account fp's reading as the shared store holds it, read
+// without measuring.
+func (s *nativeQuotaSource) storedReading(ctx context.Context, store shared.Client, fp string, freshTTL time.Duration) (quotaReading, error) {
 	latest, err := store.Latest(ctx, s.Pool+":"+fp)
 	if err != nil {
 		return quotaReading{}, quota.Fail(quota.ErrKindSharedUnavailable, "shared quota unavailable")
@@ -297,6 +364,9 @@ func (s *nativeQuotaSource) stored(ctx context.Context) (quotaReading, error) {
 	age := max(s.now().Sub(shared.ValidAt(o)).Seconds(), 0)
 	reading.AgeSeconds, reading.Stale = &age, age > freshTTL.Seconds()
 	for _, b := range o.Buckets {
+		if !fleet.WindowRead(s.Pool, b.Window) {
+			continue
+		}
 		used := b.UsedPct
 		bucket := quotaBucket{Window: b.Window, UsedPct: &used}
 		if b.ResetsAt != nil {
@@ -317,6 +387,13 @@ var devinLeaseWait = 15 * time.Second
 // publication, no presence. Shadow mode uses it to compare against pacelever
 // without changing what other hosts read.
 func (s *nativeQuotaSource) measureOnly(ctx context.Context) (shared.Reading, error) {
+	if s.Pool == "commandcode" {
+		accounts, err := s.measureCommandcode(ctx)
+		if err != nil {
+			return shared.Reading{}, err
+		}
+		return s.measureDirect(ctx, commandcodeMeasurer(accounts[0]))
+	}
 	measure, _, _ := s.poolMeasurement()
 	return s.measureDirect(ctx, measure)
 }
@@ -329,6 +406,9 @@ func (s *nativeQuotaSource) measureDirect(ctx context.Context, measure shared.Me
 		return shared.Reading{}, err
 	}
 	at := s.now()
+	if !observed.MeasuredAt.IsZero() {
+		at = observed.MeasuredAt.UTC()
+	}
 	stored, err := shared.Convert(observed, at)
 	if err != nil {
 		return shared.Reading{}, err
@@ -380,12 +460,12 @@ var quotaCLISource = func(pool string) *nativeQuotaSource {
 
 // runNativeQuotaRefresh is `panewire quota refresh <pool>` for a native pool:
 // it measures through the same source the node daemon uses and prints the
-// reading.
+// reading, one JSON line per account the host holds in the pool.
 func runNativeQuotaRefresh(ctx context.Context, pool string, out, errOut io.Writer) int {
 	source := quotaCLISource(pool)
 	ctx, cancel := context.WithTimeout(ctx, fleetQuotaTimeout)
 	defer cancel()
-	reading, err := source.Refresh(ctx)
+	readings, _, err := source.RefreshAccounts(ctx)
 	if err != nil {
 		_, _ = errOut.Write([]byte("quota refresh: " + quotaErrorKind(err) + "\n"))
 		if ctx.Err() != nil {
@@ -393,25 +473,27 @@ func runNativeQuotaRefresh(ctx context.Context, pool string, out, errOut io.Writ
 		}
 		return ExitInternal
 	}
-	_, account, _ := strings.Cut(reading.Key, ":")
-	validAt := reading.MeasuredAt
-	if reading.ConfirmedAt != nil && reading.ConfirmedAt.After(validAt) {
-		validAt = *reading.ConfirmedAt
-	}
-	age := max(source.now().Sub(validAt).Seconds(), 0)
-	result := quotaReading{Pool: pool, Account: account, Source: reading.Source, AgeSeconds: &age}
-	for _, b := range reading.Buckets {
-		used := b.UsedPct
-		bucket := quotaBucket{Window: b.Window, UsedPct: &used}
-		if b.ResetsAt != nil {
-			bucket.ResetsAt = b.ResetsAt.UTC().Format(time.RFC3339Nano)
+	for _, reading := range readings {
+		_, account, _ := strings.Cut(reading.Key, ":")
+		validAt := reading.MeasuredAt
+		if reading.ConfirmedAt != nil && reading.ConfirmedAt.After(validAt) {
+			validAt = *reading.ConfirmedAt
 		}
-		bucket.Scope.Kind, bucket.Scope.Name = b.Scope, b.Model
-		result.Buckets = append(result.Buckets, bucket)
+		age := max(source.now().Sub(validAt).Seconds(), 0)
+		result := quotaReading{Pool: pool, Account: account, Source: reading.Source, AgeSeconds: &age}
+		for _, b := range reading.Buckets {
+			used := b.UsedPct
+			bucket := quotaBucket{Window: b.Window, UsedPct: &used}
+			if b.ResetsAt != nil {
+				bucket.ResetsAt = b.ResetsAt.UTC().Format(time.RFC3339Nano)
+			}
+			bucket.Scope.Kind, bucket.Scope.Name = b.Scope, b.Model
+			result.Buckets = append(result.Buckets, bucket)
+		}
+		if result.Buckets == nil {
+			result.Buckets = []quotaBucket{}
+		}
+		_ = json.NewEncoder(out).Encode(result)
 	}
-	if result.Buckets == nil {
-		result.Buckets = []quotaBucket{}
-	}
-	_ = json.NewEncoder(out).Encode(result)
 	return 0
 }

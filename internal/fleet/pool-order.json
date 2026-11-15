@@ -11,5 +11,6 @@
   "credit_pools": ["anthropic-api", "openai-api"],
   "waste_below_projected_pct": 100,
   "exclude_at_projected_pct": 100,
-  "waste_risk": {"horizon_hours": 0, "min_unused_pct": 20}
+  "waste_risk": {"horizon_hours": 0, "min_unused_pct": 20},
+  "seats": {"commandcode": {"B": "omp-dsflash41@high", "C": "omp-dsflash41@high"}}
 }

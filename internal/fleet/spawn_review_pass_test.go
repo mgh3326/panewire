@@ -15,10 +15,9 @@ func TestParseSpawnReviewPass(t *testing.T) {
 		{"reviewer p1", []string{"--role", "reviewer", "--review-pass", "1"}, "1", true},
 		{"reviewer p9", []string{"--role", "reviewer", "--review-pass", "9"}, "9", true},
 		{"no flag", []string{"--role", "reviewer"}, "", true},
-		{"worker", []string{"--role", "worker", "--review-pass", "1"}, "", false},
+		{"implementer", []string{"--role", "implementer", "--review-pass", "1"}, "", false},
 		{"default role", []string{"--review-pass", "1"}, "", false},
-		{"tester", []string{"--role", "tester", "--review-pass", "1"}, "", false},
-		{"counsel", []string{"--role", "counsel", "--review-pass", "1"}, "", false},
+		{"consult", []string{"--role", "consult", "--review-pass", "1"}, "", false},
 		{"zero", []string{"--role", "reviewer", "--review-pass", "0"}, "", false},
 		{"ten", []string{"--role", "reviewer", "--review-pass", "10"}, "", false},
 		{"label form", []string{"--role", "reviewer", "--review-pass", "p1"}, "", false},
@@ -41,7 +40,7 @@ func TestSpawnRoleKey(t *testing.T) {
 		s    Spawn
 		want string
 	}{
-		{Spawn{Task: "42", Role: "worker"}, "42:worker"},
+		{Spawn{Task: "42", Role: "implementer"}, "42:implementer"},
 		{Spawn{Task: "42", Role: "reviewer"}, "42:reviewer"},
 		{Spawn{Task: "42", Role: "reviewer", ReviewPass: "1"}, "42:reviewer:p1"},
 		{Spawn{Task: "42", Role: "reviewer", ReviewPass: "2"}, "42:reviewer:p2"},

@@ -9,8 +9,8 @@ import (
 func waitApp(t *testing.T) (*App, Spawn) {
 	t.Helper()
 	a := testApp(t)
-	putEvent(t, a, "j", "job.claim", map[string]any{"owner_lane": "default", "task_id": "42", "t_level": "T1", "role": "worker"})
-	return a, Spawn{Job: "j", Role: "worker", Owner: "default", WaitTimeout: "10s"}
+	putEvent(t, a, "j", "job.claim", map[string]any{"owner_lane": "default", "task_id": "42", "t_level": "T1", "role": "implementer"})
+	return a, Spawn{Job: "j", Role: "implementer", Owner: "default", WaitTimeout: "10s"}
 }
 
 func waitOut(a *App) string { return a.Out.(interface{ String() string }).String() }

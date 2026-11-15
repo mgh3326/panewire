@@ -706,19 +706,29 @@ const (
 var stallNoteReportPattern = regexp.MustCompile(`(?:^|\s)report=(\S+)`)
 
 // stallReportRefOf extracts the report reference a terminal event declares,
-// by shape, as a string. Sources in precedence order: the top-level
-// report_path field (the current panewire emit shape, 535 of 543 real
-// records), the legacy-era top-level report field (worker.complete),
-// payload.report_path, then the `report=` token inside payload.note — free
-// text and therefore the weakest signal. The result is metadata for the job
-// row; nothing here resolves it against the filesystem. The only path the
-// detector ever stats is the convention jobs/<job>/report.md, per scan in
-// observeReports.
+// by shape, as a string. Sources in precedence order: the hk document key the
+// completion pinned (payload.document, the durable location once `done`
+// deletes the local copy, hk 3685), the top-level report_path field (the
+// current panewire emit shape, 535 of 543 real records), the legacy-era
+// top-level report field (worker.complete), payload.report_path, then the
+// `report=` token inside payload.note — free text and therefore the weakest
+// signal. A report_path under reports/ is an hk key too: hk report documents
+// live under that prefix, and a completion now names one there in place of the
+// local path. The result is metadata for the job row; nothing here resolves it
+// against the filesystem. The only path the detector ever stats is the
+// convention jobs/<job>/report.md, per scan in observeReports.
 func stallReportRefOf(event stallInboxEvent) (kind, ref string) {
+	if doc := stallPayloadString(event.Payload, "document"); doc != "" {
+		return stallReportRefDocKey, doc
+	}
 	for _, candidate := range []string{event.ReportPath, event.Report, stallPayloadString(event.Payload, "report_path")} {
-		if candidate != "" {
-			return stallReportRefPath, candidate
+		if candidate == "" {
+			continue
 		}
+		if strings.HasPrefix(candidate, "reports/") {
+			return stallReportRefDocKey, candidate
+		}
+		return stallReportRefPath, candidate
 	}
 	if note := stallPayloadString(event.Payload, "note"); note != "" {
 		if match := stallNoteReportPattern.FindStringSubmatch(note); match != nil {
@@ -1665,7 +1675,7 @@ func (m *stallDetectManager) armNotification(ctx context.Context, incident stall
 		IncidentKey: incident.incidentKey(), Lane: lane, Level: 0,
 		GraceDeadlineAt: at.Add(m.cfg.NotifyGrace),
 	}
-	if lane == "" || !hubAgentLabelPattern.MatchString(lane) {
+	if lane == "" || !validLaneReference(lane) {
 		row.SuppressedReason = stallNotifyNoLane
 		row.Lane = ""
 	} else if !m.cfg.Notify {
@@ -1731,7 +1741,7 @@ func (m *stallDetectManager) escalateNotification(ctx context.Context, row stall
 			parent = job.ParentLane
 		}
 	}
-	if parent == "" || !hubAgentLabelPattern.MatchString(parent) {
+	if parent == "" || !validLaneReference(parent) {
 		row.SuppressedReason = stallNotifyNoLane
 		_ = m.store.upsertStallNotification(ctx, row)
 		return
@@ -2161,14 +2171,17 @@ func (m *stallDetectManager) cpuForDir(ctx context.Context, dir string) string {
 	return strings.Join(strings.Fields(string(out)), ",")
 }
 
-// observeReports records the convention file's existence for every terminal
-// job. jobs/<job>/report.md is the only path the detector ever examines, and
-// it is examined with Lstat: a symlink is recorded "symlink_refused" and
-// never followed, a regular file yields state "observed" with its mtime, and
-// an absent one yields "no_report" — a recorded decision, never a silent
-// drop. Declared references stay on the job row as inert strings; the
-// detector reads, hashes, copies, and uploads no report body — that handling
-// is deferred to a follow-up package pending a structural isolation call.
+// observeReports records where each terminal job's report is. A job whose
+// terminal event named an hk document is recorded "in_hk" naming that key: the
+// report's own location, and the state `done` leaves behind once it deletes
+// the local copy after the pin (hk 3685). Otherwise jobs/<job>/report.md is the
+// only path the detector ever examines, and it is examined with Lstat: a
+// symlink is recorded "symlink_refused" and never followed, a regular file
+// yields state "observed" with its mtime, and an absent one yields "no_report"
+// — a recorded decision, never a silent drop. Declared references stay on the
+// job row as inert strings; the detector reads, hashes, copies, and uploads no
+// report body — that handling is deferred to a follow-up package pending a
+// structural isolation call.
 func (m *stallDetectManager) observeReports(ctx context.Context, at time.Time) {
 	jobs, err := m.store.stallJobs(ctx, true)
 	if err != nil {
@@ -2182,6 +2195,15 @@ func (m *stallDetectManager) observeReports(ctx context.Context, at time.Time) {
 		row := stallReportRow{
 			JobID: job.JobID, Attempt: job.Attempt, Path: path,
 			RefKind: job.ReportKind, RefValue: job.ReportPath, ObservedAt: at,
+		}
+		if job.ReportKind == stallReportRefDocKey {
+			// The report lives in hk. hk is read nowhere here: the hk read path
+			// belongs to the fleet's own hk client, and the observed state is
+			// the completed job's record, not a body.
+			row.State = "in_hk"
+			row.Note = "report is hk document " + job.ReportPath
+			_ = m.store.upsertStallReport(ctx, row)
+			continue
 		}
 		info, err := m.deps.lstat(path)
 		switch {

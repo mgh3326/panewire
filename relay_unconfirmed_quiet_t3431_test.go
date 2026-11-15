@@ -30,6 +30,18 @@ const (
 	t3431Task   = "3431"
 )
 
+type t3431FailReadTransport struct {
+	next    http.RoundTripper
+	afterID int64
+}
+
+func (rt t3431FailReadTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.Method == http.MethodGet && req.URL.Query().Get("after_id") == fmt.Sprint(rt.afterID) && req.URL.Query().Get("limit") == "1" {
+		return &http.Response{StatusCode: http.StatusInternalServerError, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"error":"forced"}`)), Request: req}, nil
+	}
+	return rt.next.RoundTrip(req)
+}
+
 type t3431Clock struct {
 	mu  sync.Mutex
 	now time.Time
@@ -701,6 +713,87 @@ func TestUnconfirmedNoticeFoldDuringFailedRetriesIsNamed_t3431(t *testing.T) {
 	suffix := fmt.Sprintf("(+1 more unconfirmed for this lane since %s UTC)", first.Format("15:04"))
 	if !strings.HasSuffix(got[0].Text, t3431TodayText(row, "mergewake-findings-3")+" "+suffix) {
 		t.Fatalf("the next notice does not name R2 (want suffix %q):\n%q", suffix, got[0].Text)
+	}
+}
+
+// A retry whose post was stored uses the first post's text. Folds arriving
+// while it is in flight must remain for the following notice.
+func TestUnconfirmedNoticeDuplicateRetryPreservesLaterFolds_t3431(t *testing.T) {
+	windows := &unconfirmedNoticeWindows{}
+	first := time.Date(2026, 11, 7, 10, 42, 0, 0, time.UTC)
+	windows.fold(t3431Design, t3431Worker, 1, first)
+	note, _, _ := windows.admit(t3431Design, t3431Worker, 2, first.Add(time.Minute))
+	windows.record(t3431Design, t3431Worker, 2, note, first.Add(time.Minute))
+	windows.fold(t3431Design, t3431Worker, 3, first.Add(2*time.Minute))
+	windows.record(t3431Design, t3431Worker, 2, unconfirmedNoticeNote{}, first.Add(3*time.Minute))
+	w := windows.byLanes[[2]string{t3431Design, t3431Worker}]
+	if _, stillFolded := w.folded[1]; stillFolded || note.text == "" {
+		t.Fatal("fixture did not model the first stored notice")
+	}
+	if _, stillFolded := w.folded[3]; !stillFolded {
+		t.Fatal("duplicate retry cleared a later fold absent from the stored notice")
+	}
+}
+
+// A concurrent ingress duplicate with no resolved durable id cannot prove
+// that any notice was stored.
+func TestUnconfirmedNoticeZeroIDDuplicateLeavesWindowOpen_t3431(t *testing.T) {
+	rig := t3431LiveRig(t)
+	r1 := rig.relayRow()
+	rig.onFirstNoticePost(func() {
+		rig.hub.mu.Lock()
+		key := relayEventDedupeKey("lane.event", hubJobEventPayload{JobID: r1.JobID, Epoch: 1, OwnerLane: t3431Worker, EventID: fmt.Sprintf("mergewake-findings-%d", rig.seq)})
+		rig.hub.relayDedupe[key] = 0
+		rig.hub.mu.Unlock()
+	})
+	t650Send(t, rig.hub, "host-a", rig.dest, "relay.dropped", r1)
+	if len(rig.notices()) != 1 {
+		t.Fatal("initial notice missing")
+	}
+	rig.clock.advance(time.Minute)
+	r2, _ := rig.drop()
+	if got := rig.notices(); len(got) != 0 {
+		t.Fatalf("folded row unexpectedly sent: %+v", got)
+	}
+	rig.clock.advance(31 * time.Minute)
+	r3, _ := rig.drop()
+	got := t3431NoticeFor(rig.notices(), r3)
+	if len(got) != 1 || t3431FoldCount(got[0].Text) != 1 {
+		t.Fatalf("zero-id duplicate recorded a window: %+v", got)
+	}
+	_ = r2
+}
+
+// Repeating one overflow row must not inflate the counted overflow total.
+func TestUnconfirmedNoticeOverflowRedropCountedOnce_t3431(t *testing.T) {
+	w := &unconfirmedNoticeWindow{folded: make(map[int64]time.Time), overRows: make(map[int64]struct{})}
+	for i := int64(1); i <= unconfirmedNoticeFoldLimit; i++ {
+		w.fold(i, time.Unix(i, 0))
+	}
+	w.fold(1000, time.Unix(1000, 0))
+	w.fold(1000, time.Unix(1001, 0))
+	if w.over != 1 {
+		t.Fatalf("overflow duplicate counted %d times, want 1", w.over)
+	}
+}
+
+// A final failed row read still folds the known worker lane's drop.
+func TestUnconfirmedNoticeGiveUpAfterRowReadFailureFolds_t3431(t *testing.T) {
+	prev := unconfirmedEscalationBackoff
+	unconfirmedEscalationBackoff = []time.Duration{time.Millisecond}
+	t.Cleanup(func() { unconfirmedEscalationBackoff = prev })
+	rig := t3431LiveRig(t)
+	r1 := rig.relayRow()
+	client := rig.hub.handoffkeep.client
+	previous := client.Transport
+	client.Transport = t3431FailReadTransport{next: previous, afterID: r1.OriginalEventID - 1}
+	t.Cleanup(func() { client.Transport = previous })
+	t650Send(t, rig.hub, "host-a", rig.dest, "relay.dropped", r1)
+	eventually(t, 5*time.Second, "give-up after failed row read", func() bool { return strings.Contains(rig.logs.String(), "relay unconfirmed escalation gave up") })
+	rig.clock.advance(time.Minute)
+	r2, _ := rig.drop()
+	if got := t3431NoticeFor(rig.notices(), r2); len(got) != 1 || t3431FoldCount(got[0].Text) != 1 {
+		t.Fatalf("row-read failure was not folded: %+v", got)
 	}
 }
 

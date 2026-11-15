@@ -36,6 +36,11 @@ type laneInboxStore struct {
 	// inbox-class item or a must-ack one), waking every long-poll waiter so
 	// they re-check for unread work.
 	notify chan struct{}
+	// spawnRetryDelay is the hub's re-placement back-off after a request's
+	// n-th failed attempt (hub_spawn_park.go); nil retries at once.
+	spawnRetryDelay func(failures int) time.Duration
+	// spawnFrozen refuses every new spawn row (--spawn-rollback-drain).
+	spawnFrozen bool
 }
 
 type laneInboxItem struct {
@@ -80,7 +85,7 @@ func (b laneInboxBatch) invalidReason() string {
 	if !validLaneEventText(b.Text) {
 		return "lane.event text is empty, invalid UTF-8, or contains control characters"
 	}
-	if !validLaneEventID(b.ID) || !hubAgentLabelPattern.MatchString(b.Lane) {
+	if !validLaneEventID(b.ID) || !validLaneReference(b.Lane) {
 		return "invalid lane.event batch identity or lane"
 	}
 	return ""
@@ -128,6 +133,7 @@ func openLaneInboxStore(path string) (*laneInboxStore, error) {
 		`INSERT OR IGNORE INTO lane_inbox_id_floor(singleton,floor) VALUES(1,0)`,
 		`CREATE TABLE IF NOT EXISTS lane_inbox_batches (id TEXT PRIMARY KEY, lane TEXT NOT NULL, text TEXT NOT NULL, sent INTEGER NOT NULL DEFAULT 0)`,
 		`CREATE TABLE IF NOT EXISTS lane_inbox_batch_quarantine (batch_id TEXT PRIMARY KEY, reason TEXT NOT NULL)`,
+		`CREATE TABLE IF NOT EXISTS drain_wake_lanes (lane TEXT PRIMARY KEY, pending INTEGER NOT NULL DEFAULT 0, last_sent INTEGER NOT NULL DEFAULT 0)`,
 	} {
 		if _, err := db.ExecContext(ctx, q); err != nil {
 			db.Close()
@@ -942,7 +948,11 @@ func (s *laneInboxStore) makeBatches(now time.Time) error {
 }
 
 func (s *laneInboxStore) pendingBatches() ([]laneInboxBatch, error) {
-	ctx, done := s.op(s.life)
+	return s.pendingBatchesForContext(s.life)
+}
+
+func (s *laneInboxStore) pendingBatchesForContext(parent context.Context) ([]laneInboxBatch, error) {
+	ctx, done := s.op(parent)
 	defer done()
 	rows, err := s.db.QueryContext(ctx, `SELECT id,lane,text,
  (SELECT count(*) FROM lane_inbox i WHERE i.digest_batch=b.id OR i.escalation_batch=b.id),

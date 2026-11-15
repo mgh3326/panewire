@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/mgh3326/panewire/internal/fleet"
 )
@@ -27,8 +28,22 @@ const (
 	nodeJobMarkLostCompleted    = "completed"
 	nodeJobMarkLostNewerClaim   = "newer-claim"
 	// nodeJobMarkLostLedgerMissing: the job dir or its events/ is gone, so the
-	// local ledger cannot prove the attempt is not completed (hk 3685).
+	// local ledger cannot prove the attempt is not completed (hk 3685), and
+	// the node cannot yet rule out a live attempt of the same job.
 	nodeJobMarkLostLedgerMissing = "ledger_missing"
+	// nodeJobMarkLostNoLiveAttempt: the ledger is gone, and this node's spawn
+	// journal and active-job list name no live attempt of the job under any
+	// label, so no attempt of it is running (hk 4799). Nothing is written.
+	nodeJobMarkLostNoLiveAttempt = "no-live-attempt"
+
+	// The refusals of the reviewer_result_posted end (hk 4684,
+	// node_job_mark_lost_result_posted.go).
+	nodeJobMarkLostResultMissing  = "result-missing"
+	nodeJobMarkLostResultSettling = "result-settling"
+	nodeJobMarkLostQuotaStopped   = "quota-stopped"
+	nodeJobMarkLostNotReviewer    = "not-reviewer"
+	nodeJobMarkLostPaneWorking    = "pane-working"
+	nodeJobMarkLostBusy           = "operation-busy"
 )
 
 type nodeJobMarkLostArgs struct {
@@ -74,7 +89,10 @@ func validNodeJobMarkLostArgs(args nodeJobMarkLostArgs) bool {
 func validNodeJobMarkLostResult(result nodeJobMarkLostResult) bool {
 	switch result.Outcome {
 	case nodeJobMarkLostLost, nodeJobMarkLostPaneListed, nodeJobMarkLostLabelListed,
-		nodeJobMarkLostPanesUnknown, nodeJobMarkLostCompleted, nodeJobMarkLostNewerClaim, nodeJobMarkLostLedgerMissing:
+		nodeJobMarkLostPanesUnknown, nodeJobMarkLostCompleted, nodeJobMarkLostNewerClaim, nodeJobMarkLostLedgerMissing,
+		nodeJobMarkLostNoLiveAttempt,
+		nodeJobMarkLostResultMissing, nodeJobMarkLostResultSettling, nodeJobMarkLostQuotaStopped, nodeJobMarkLostNotReviewer,
+		nodeJobMarkLostPaneWorking, nodeJobMarkLostBusy:
 		return true
 	}
 	return false
@@ -93,9 +111,15 @@ type nodeJobLedger struct {
 // job.reap, which must prove the job's own identity before it closes a pane;
 // the mark-lost path ignores them.
 type nodeJobLedgerEvent struct {
-	kind, pane, label, role, task string
-	owner                         string
-	keep                          bool
+	kind, pane, label, role, task, session string
+	owner                                  string
+	keep                                   bool
+	// name is the event's file name (its place in the ledger); reason and
+	// final are a job.lost payload's.
+	name, reason string
+	final        bool
+	// request and attempt are a hub-close intent's request id and attempt.
+	request, attempt string
 }
 
 func nodeJobClaimKind(kind string) bool {
@@ -170,10 +194,12 @@ func readNodeJobLedgerEvents(job *os.Root) ([]nodeJobLedgerEvent, error) {
 	}
 	// File.ReadDir is directory order; the ledger's sequence is the file-name
 	// order.
-	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
+	sort.Slice(entries, func(i, j int) bool { return fleet.CompareLedgerNames(entries[i].Name(), entries[j].Name()) < 0 })
 	events := make([]nodeJobLedgerEvent, 0, len(entries))
 	for _, entry := range entries {
-		if entry.IsDir() {
+		// A dot name is an unpublished temporary event the ledger writer
+		// may be writing or removing.
+		if entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
 			continue
 		}
 		if !entry.Type().IsRegular() || !strings.HasSuffix(entry.Name(), ".json") {
@@ -198,7 +224,12 @@ func readNodeJobLedgerEvents(job *os.Root) ([]nodeJobLedgerEvent, error) {
 				OwnerLane  string `json:"owner_lane"`
 				Keep       bool   `json:"keep"`
 				// TaskID is a string or a number in the ledger.
-				TaskID any `json:"task_id"`
+				TaskID       any    `json:"task_id"`
+				HerdrSession string `json:"herdr_session"`
+				Reason       string `json:"reason"`
+				Final        bool   `json:"final"`
+				RequestID    string `json:"request_id"`
+				Attempt      string `json:"attempt"`
 			} `json:"payload"`
 		}
 		if json.Unmarshal(data, &event) != nil || event.Kind == "" {
@@ -215,7 +246,8 @@ func readNodeJobLedgerEvents(job *os.Root) ([]nodeJobLedgerEvent, error) {
 		case float64:
 			task = strconv.FormatFloat(id, 'f', -1, 64)
 		}
-		events = append(events, nodeJobLedgerEvent{kind: event.Kind, pane: event.Payload.PaneID, label: label, role: event.Payload.Role, task: task, owner: event.Payload.OwnerLane, keep: event.Payload.Keep})
+		events = append(events, nodeJobLedgerEvent{kind: event.Kind, pane: event.Payload.PaneID, label: label, role: event.Payload.Role, task: task, owner: event.Payload.OwnerLane, keep: event.Payload.Keep, session: event.Payload.HerdrSession,
+			name: entry.Name(), reason: event.Payload.Reason, final: event.Payload.Final, request: event.Payload.RequestID, attempt: event.Payload.Attempt})
 	}
 	return events, nil
 }
@@ -224,12 +256,21 @@ func readNodeJobLedgerEvents(job *os.Root) ([]nodeJobLedgerEvent, error) {
 // credential, after proving from herdr and the local ledger that the job is
 // still the one the hub means and never completed.
 func (client *HubClient) nodeJobMarkLost(ctx context.Context, args nodeJobMarkLostArgs) (any, string) {
+	if args.EndReason == reviewerResultPosted {
+		return client.nodeJobMarkReviewerResultPosted(ctx, args)
+	}
 	ledger, err := client.openNodeJobLedger(args.Job, args.PaneID, args.Label)
 	if errors.Is(err, errNodeJobsRootUnset) {
 		return nil, "jobs_root_unset"
 	}
 	if errors.Is(err, os.ErrNotExist) {
-		// Ledger unknown, not "not completed": refuse, write nothing (hk 3685).
+		// Ledger unknown, not "not completed": the node writes nothing (hk
+		// 3685). It can still prove, from its own records, that no attempt of
+		// the job is live under any label; only that proof releases the
+		// caller's reservation (hk 4799).
+		if client.nodeJobNoLiveAttempt(ctx, args.Job) {
+			return nodeJobMarkLostResult{Outcome: nodeJobMarkLostNoLiveAttempt}, ""
+		}
 		return nodeJobMarkLostResult{Outcome: nodeJobMarkLostLedgerMissing}, ""
 	}
 	if err != nil {
@@ -241,11 +282,11 @@ func (client *HubClient) nodeJobMarkLost(ctx context.Context, args nodeJobMarkLo
 	case ledger.newerClaim:
 		return nodeJobMarkLostResult{Outcome: nodeJobMarkLostNewerClaim}, ""
 	}
-	list, code := client.nodeAgentsList(ctx)
+	session := client.herdrSessionFor(args.Job, args.PaneID)
+	agents, code := client.nodeAgentsListInSession(ctx, session)
 	if code != "" {
 		return nil, code
 	}
-	agents := list.(nodeAgentsListResult)
 	for _, row := range agents.Agents {
 		if args.PaneID != "" && row.PaneID == args.PaneID {
 			return nodeJobMarkLostResult{Outcome: nodeJobMarkLostPaneListed}, ""
@@ -266,7 +307,7 @@ func (client *HubClient) nodeJobMarkLost(ctx context.Context, args nodeJobMarkLo
 	if err != nil {
 		return nil, "mark_lost_failed"
 	}
-	record := map[string]any{"state": "lost"}
+	record := map[string]any{"state": "lost", "at": client.nowUTC()}
 	if args.EndReason != "" {
 		record["end_reason"] = args.EndReason
 	}
@@ -289,6 +330,63 @@ func (client *HubClient) openNodeJobLedger(job, pane, label string) (nodeJobLedg
 	}
 	defer root.Close()
 	return readNodeJobLedger(root, pane, label)
+}
+
+// nodeJobNoLiveAttempt reports whether this node's own records prove that no
+// attempt of job is live, under any label. Two records are read: the spawn
+// journal, whose executing rows name the job each in-flight spawn will run,
+// and the active-job list, which the node scans from its job ledgers. A job
+// claimed again under another label is caught by one or the other. Either
+// record being unreadable is no proof, and the caller keeps the record (hk
+// 4799).
+//
+// This runs only for a job whose own directory or events/ is absent (the
+// ledger read returned os.ErrNotExist), so the active list's age window cannot
+// hide this job's claim: a claim it could hide is an event inside that same
+// events/, whose presence would have made the ledger read succeed. A re-claim
+// that recorded events is answered by readNodeJobLedger as newer-claim
+// instead.
+func (client *HubClient) nodeJobNoLiveAttempt(ctx context.Context, job string) bool {
+	if client.jobsInboxRoot == "" {
+		return false
+	}
+	journal, err := client.acquireSpawnJournal()
+	if err != nil {
+		return false
+	}
+	defer client.releaseSpawnJournal()
+	rows, err := journal.executing(ctx)
+	if err != nil {
+		return false
+	}
+	// A nil pane source keeps every listed job: the release path has its own
+	// pane proof, and this one must never drop a job on an unknown pane.
+	active, err := scanActiveJobsForLimit(ctx, client.jobsInboxRoot, nil, 0)
+	if err != nil {
+		return false
+	}
+	return !jobAttemptLive(job, rows, active)
+}
+
+// jobAttemptLive reports whether the journal's executing rows or the
+// active-job list name job, under any label. A row an older build wrote
+// carries no strict identity, so its real job is unknown and it might be this
+// one: it counts as live, and keeps every job's release held, while it
+// executes. Restart settlement completes it as soon as herdr proves the spawn
+// landed or is gone; while the evidence keeps that undecided the row can
+// outlive the upgrade, and the hold with it (hk 4799).
+func jobAttemptLive(job string, rows []executingSpawn, active []HubActiveJob) bool {
+	for _, row := range rows {
+		if !row.Strict || row.Job == job {
+			return true
+		}
+	}
+	for _, listed := range active {
+		if listed.JobID == job {
+			return true
+		}
+	}
+	return false
 }
 
 // nodeJobStoreForCommand is the node's own hk client: spawn.json
@@ -334,6 +432,50 @@ func (client *HubClient) nodeJobRole(name string) (string, error) {
 		}
 	}
 	return role, err
+}
+
+// nodeJobHerdrSession is the herdr session recorded in the job's ledger: the
+// newest spawned or claim event that carries one.
+func (client *HubClient) nodeJobHerdrSession(name string) (string, error) {
+	if name == "" || client == nil || client.jobsInboxRoot == "" {
+		return "", errors.New("empty job or client")
+	}
+	client.sessionCacheMu.RLock()
+	if client.jobSessions != nil {
+		if entry, ok := client.jobSessions[name]; ok && time.Since(entry.cachedAt) < 10*time.Second {
+			client.sessionCacheMu.RUnlock()
+			return entry.session, nil
+		}
+	}
+	client.sessionCacheMu.RUnlock()
+
+	root, _, found, err := client.openNodeJobDir(name)
+	if err != nil {
+		return "", err
+	}
+	if !found {
+		return "", errors.New("job ledger is unavailable")
+	}
+	defer root.Close()
+	events, err := readNodeJobLedgerEvents(root)
+	if errors.Is(err, os.ErrNotExist) {
+		err = nil
+	}
+	session := ""
+	for _, event := range events {
+		if event.session != "" && (nodeJobClaimKind(event.kind) || event.kind == "job.spawned") {
+			session = event.session
+		}
+	}
+	if err == nil {
+		client.sessionCacheMu.Lock()
+		if client.jobSessions == nil {
+			client.jobSessions = make(map[string]sessionCacheEntry)
+		}
+		client.jobSessions[name] = sessionCacheEntry{session: session, cachedAt: time.Now()}
+		client.sessionCacheMu.Unlock()
+	}
+	return session, err
 }
 
 // nodeJobTask is the task the job's ledger names, read as the fleet's job

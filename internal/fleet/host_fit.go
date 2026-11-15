@@ -18,9 +18,15 @@ import (
 //   - roles: the spawn roles the host accepts. Unset accepts every role.
 //   - grades: the task grades the host accepts. Unset accepts every grade. A
 //     consult has no grade, so a host with grades set refuses it.
+//
+// Placement reads these rows from the config of the process that places: the
+// hub for spawn and --dry-run, whichever machine submitted. That one file is
+// the declaration site; a node's own tags are not read by hub placement.
+//
+// hostCapabilities is the closed list a caps array may name.
 
-var spawnRoles = []string{"worker", "tester", "reviewer", "counsel"}
-var hostCapabilities = []string{"macos", "linux", "unity", "xcode", "gpu", "heavy-go"}
+var spawnRoles = []string{"implementer", "reviewer", "consult"}
+var hostCapabilities = []string{"macos", "linux", "unity", "blender", "xcode", "gpu", "heavy-go"}
 
 // hostCaps returns the declared capabilities of a host: tags and caps merged.
 func hostCaps(cfg map[string]any) []string {
@@ -112,10 +118,110 @@ func hostBucket(h selHost) int {
 	return 0
 }
 
-// rankHosts orders the fit hosts: bucket, then the host the hub decided on, then the hub score (free capacity
-// weighted by the host's power) when every ranked host has one, else the raw
-// load, then configuration order (local first).
+// floorKey is a host's free-floor ranking key from the hub's signals: whether
+// its free fraction is under the floor (the hub's verdict) and the value that
+// orders hosts when every host is under it: the host's score, which is free
+// times power less the bridge cost of the jobs already decided onto it (so a
+// burst spreads), or free times power when the host has no score. A host the
+// hub sent no terms for is never under the floor.
+func floorKey(sig PlacementSignals, score *float64) (below bool, value float64) {
+	if sig.Terms == nil {
+		return false, 0
+	}
+	if score != nil {
+		return sig.BelowFreeFloor, *score
+	}
+	power := 100.0
+	if sig.Power != nil && *sig.Power > 0 {
+		power = *sig.Power
+	}
+	return sig.BelowFreeFloor, sig.Terms.Free() * power
+}
+
+// floorSide is one host as the free floor sees it.
+type floorSide struct {
+	awake, below, usable bool
+	value                float64
+}
+
+// tier is a host's place under the free floor: 0 eligible (usable and at or
+// above the floor), 1 usable but under it, 2 unusable by the hub's verdict
+// (throttled, at its job cap, slot-full, not accepting).
+func (s floorSide) tier() int {
+	switch {
+	case !s.usable:
+		return 2
+	case s.below:
+		return 1
+	}
+	return 0
+}
+
+// floorCtx is what the free floor knows about the whole list.
+type floorCtx struct {
+	// anyBelow: some awake host is under the floor. With none, the floor does
+	// nothing and the ranking is the one it was before the floor existed.
+	anyBelow bool
+	// anyUsable: some awake host is usable by the hub's verdict. With none the
+	// floor has nothing to prefer.
+	anyUsable bool
+	// anyEligible: some awake host is usable and not under the floor. When
+	// some host is usable and none is eligible, every usable host is under it.
+	anyEligible bool
+}
+
+func floorContext(sides []floorSide) floorCtx {
+	var c floorCtx
+	for _, s := range sides {
+		if !s.awake {
+			continue
+		}
+		c.anyBelow = c.anyBelow || s.below
+		c.anyUsable = c.anyUsable || s.usable
+		c.anyEligible = c.anyEligible || s.usable && !s.below
+	}
+	return c
+}
+
+// floorOrder is the free floor as an eligibility rule that runs before the load
+// bucket (decision 231). It looks only at awake hosts: a sleeper stays behind
+// every awake host through the bucket order, and has no metrics to judge.
+// Awake hosts rank by tier: eligible first, then usable hosts under the floor,
+// then the hub's unusable ones, which stay as fallbacks and never outrank a
+// usable host, whatever their free reading or bucket (a synthetic slot-full view
+// has no terms and reads as above the floor). Within a tier the other rules
+// order the hosts, as they did before the floor, except that when every usable
+// host is under the floor (none is eligible) the higher floorValue, the score,
+// ranks first and the bucket does not apply. With no awake host under the floor
+// or none usable it does nothing. 0 means the floor does not separate the two.
+func floorOrder(x, y floorSide, c floorCtx) int {
+	if !x.awake || !y.awake || !c.anyBelow || !c.anyUsable {
+		return 0
+	}
+	if tx, ty := x.tier(), y.tier(); tx != ty {
+		return tx - ty
+	}
+	if !c.anyEligible {
+		return cmp.Compare(y.value, x.value)
+	}
+	return 0
+}
+
+// rankHosts is the placement-aligned host order used by the shadow arms: the
+// free floor, then bucket, the hub's decided host, score when every ranked
+// host has one, else raw load and configuration order (local first).
 func rankHosts(hosts []selHost) []selHost {
+	return rankHostsWithCapacity(hosts, false)
+}
+
+// rankSelectionHosts compares current capacity before the hub's decided host.
+// Selection must choose a seat before placement can see its hosts, so the
+// bridge cost in the hub score can move auto selection off a saturated seat.
+func rankSelectionHosts(hosts []selHost) []selHost {
+	return rankHostsWithCapacity(hosts, true)
+}
+
+func rankHostsWithCapacity(hosts []selHost, capacityFirst bool) []selHost {
 	var out []selHost
 	for _, h := range hosts {
 		if h.fit == "" {
@@ -123,21 +229,43 @@ func rankHosts(hosts []selHost) []selHost {
 		}
 	}
 	byScore := !slices.ContainsFunc(out, func(h selHost) bool { return h.score == nil })
+	side := func(h selHost) floorSide {
+		return floorSide{awake: h.awake, below: h.below, usable: hubUsable(h, h.memExcluded), value: h.floorValue}
+	}
+	sides := make([]floorSide, len(out))
+	for i, h := range out {
+		sides[i] = side(h)
+	}
+	floor := floorContext(sides)
 	slices.SortStableFunc(out, func(x, y selHost) int {
+		if c := floorOrder(side(x), side(y), floor); c != 0 {
+			return c
+		}
 		if bx, by := hostBucket(x), hostBucket(y); bx != by {
 			return bx - by
 		}
-		// The hub's decision carries its hysteresis margin and all-loaded rule.
+		if capacityFirst && byScore {
+			if c := cmp.Compare(*y.score, *x.score); c != 0 {
+				return c
+			}
+		}
+		// The hub's decision carries its hysteresis margin and all-loaded rule;
+		// it breaks a tie after selection has compared current host capacity.
 		if x.decided != y.decided {
 			if x.decided {
 				return -1
 			}
 			return 1
 		}
-		if byScore {
-			return cmp.Compare(*y.score, *x.score)
+		if !capacityFirst && byScore {
+			if c := cmp.Compare(*y.score, *x.score); c != 0 {
+				return c
+			}
 		}
-		return cmp.Compare(loadOrInf(x.load), loadOrInf(y.load))
+		if !byScore {
+			return cmp.Compare(loadOrInf(x.load), loadOrInf(y.load))
+		}
+		return 0
 	})
 	return out
 }
@@ -282,15 +410,16 @@ func capsGap(hosts []selHost, required []string) string {
 // credit on another host is only the pass 2 last band and never demotes it.
 // See docs/placement.md for the selection order and trace fields.
 func (sp *selPresence) admitHostFirst(ctx context.Context, s Spawn, p *selPlan, pending []*selCand) {
-	ranked := rankHosts(sp.hosts)
+	ranked := rankSelectionHosts(sp.hosts)
 	role := s.Role
 	if p.req.route.top() {
 		role = p.req.route.role
 	}
 	// Record how the shadow arms would have ordered the same hosts. The live
-	// order above is not touched. The event is written after the passes below,
-	// once the waste_first arm can read the quota states they produce.
-	shadow := sp.a.recordPlacementShadow(s, role, p.req.tags, sp.hosts, ranked, sp.now)
+	// placement order stays separate from the capacity-first seat order above.
+	// The event is written after the passes below, once the waste_first arm can
+	// read the quota states they produce.
+	shadow := sp.a.recordPlacementShadow(s, role, p.req.tags, sp.hosts, rankHosts(sp.hosts), sp.now)
 	// The waste_first order is collected as the walk below judges each host
 	// (wasteSnapBuilder). Candidates the readings dropped before admission go in
 	// first: the arm reads them as refused or unknown.
@@ -431,7 +560,7 @@ func (sp *selPresence) admitPass(ctx context.Context, s Spawn, p *selPlan, pendi
 			if p.req.route.top() {
 				role = p.req.route.role
 			}
-			qr := QuotaRequest{Profile: c.seat.Canon, GateProfile: c.seat.gateName(), Effort: c.row.Effort, Role: role, OperatorRequest: s.OperatorRequest, RequestedBy: s.RequestedBy, Purpose: s.Purpose, AccountKey: c.accountKey}
+			qr := QuotaRequest{Profile: c.seat.Canon, GateProfile: c.seat.gateName(), Effort: c.row.Effort, Role: role, OperatorRequest: s.OperatorRequest, RequestedBy: gateRequestedBy(s), Purpose: s.Purpose, AccountKey: c.accountKey}
 			judgments, err := sp.admitAccount(ctx, qr, c, p, []selHost{h})
 			c.judgments = append(c.judgments, judgments...)
 			if err == nil {

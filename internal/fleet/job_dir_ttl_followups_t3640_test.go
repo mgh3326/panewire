@@ -26,11 +26,11 @@ func (r *ttlRig) seedRelative(rel string, extra ...string) {
 	r.store.records["s1"] = map[string]any{"job_id": "s1", "state": "completed"}
 }
 
-// pin makes body the report hk confirms for job id: the record's report_doc
-// names reports/<id>/<base> and pins body's sha256, so no document is read.
-func (r *ttlRig) pin(id, base string, body []byte) {
-	r.store.records[id]["report_doc"] = "reports/" + id + "/" + base
-	r.store.records[id]["report_sha256"] = sha(body)
+// pin makes body the report hk confirms for job id: hk holds a document at
+// the key `done` publishes body to, content-addressed by its bytes. The job
+// record names no pin: a report is confirmed by its bytes alone.
+func (r *ttlRig) pin(id, _ string, body []byte) {
+	r.doc(reportDocumentKey(id, sha(body)), body, "")
 }
 
 // linkDeep makes <id>/link -> sub/deep beside an unconfirmed
@@ -235,11 +235,10 @@ func TestJobDirTTLReportRelativeCleanPaths(t *testing.T) {
 		}},
 		{name: "nested without its doc", rel: "s1/out/review/summary.md", action: "keep", reason: "report-unconfirmed", setup: func(r *ttlRig) {
 			r.write("s1", "out/review/summary.md", body)
-			r.store.records["s1"]["report_doc"] = "reports/s1/summary.md"
 		}},
 		{name: "nested with another hash", rel: "s1/out/review/summary.md", action: "keep", reason: "report-sha-mismatch", setup: func(r *ttlRig) {
 			r.write("s1", "out/review/summary.md", body)
-			r.pin("s1", "summary.md", []byte("other bytes\n"))
+			r.doc("reports/s1/summary.md", body, sha([]byte("other bytes\n")))
 		}},
 		{name: "nested, absent", rel: "s1/out/review/summary.md", action: "delete", reason: "submission-terminal"},
 		// 7: dot substrings are not dot segments.

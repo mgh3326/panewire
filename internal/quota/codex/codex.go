@@ -57,7 +57,7 @@ type Config struct {
 	// ReadFile reads auth.json; nil is os.ReadFile.
 	ReadFile func(string) ([]byte, error)
 	// Binary is the configured codex executable, tried after the
-	// PACELEVER_CODEX_BIN override and before PATH.
+	// PANEWIRE_CODEX_BIN override and before PATH.
 	Binary string
 	// GOOS is the platform name; empty is runtime.GOOS. The desktop app's
 	// bundled binary is looked up only for "darwin".

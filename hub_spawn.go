@@ -65,12 +65,13 @@ func (brief *hubSpawnBrief) UnmarshalJSON(raw []byte) error {
 }
 
 type hubSpawnCheckout struct {
-	Origin string `json:"origin"`
-	Mode   string `json:"mode"`
-	Branch string `json:"branch,omitempty"`
-	Sha    string `json:"sha,omitempty"`
-	Fetch  string `json:"fetch,omitempty"`
-	Dir    string `json:"dir"`
+	Origin      string `json:"origin"`
+	Mode        string `json:"mode"`
+	Branch      string `json:"branch,omitempty"`
+	Sha         string `json:"sha,omitempty"`
+	Fetch       string `json:"fetch,omitempty"`
+	Dir         string `json:"dir"`
+	VerifyReuse bool   `json:"verify_reuse,omitempty"`
 }
 
 type hubSpawnRequest struct {
@@ -83,6 +84,10 @@ type hubSpawnRequest struct {
 	Checkout    *hubSpawnCheckout `json:"checkout,omitempty"`
 	Args        []string          `json:"args"`
 	WaitSeconds int               `json:"wait_seconds"`
+	// GrantRequired is fixed at bind: the attempt goes only to a node that
+	// starts it after the hub's durable grant, and only such an attempt may
+	// be fenced on silence (hub_spawn_grant.go).
+	GrantRequired bool `json:"grant_required,omitempty"`
 }
 
 type hubSpawnResult struct {
@@ -146,9 +151,9 @@ func validHubSpawnCheckout(checkout hubSpawnCheckout) bool {
 	}
 	switch checkout.Mode {
 	case "branch":
-		return validNodeRefName(checkout.Branch) && (checkout.Sha == "" || nodeShaPattern.MatchString(checkout.Sha)) && checkout.Fetch == ""
+		return validNodeRefName(checkout.Branch) && (checkout.Sha == "" || nodeShaPattern.MatchString(checkout.Sha)) && (!checkout.VerifyReuse || checkout.Sha != "") && checkout.Fetch == ""
 	case "detached":
-		return checkout.Branch == "" && nodeShaPattern.MatchString(checkout.Sha) && validNodeFetchRef(checkout.Fetch)
+		return !checkout.VerifyReuse && checkout.Branch == "" && nodeShaPattern.MatchString(checkout.Sha) && validNodeFetchRef(checkout.Fetch)
 	default:
 		return false
 	}
@@ -225,7 +230,7 @@ func parseHubSpawnResult(raw []byte) (hubSpawnResult, bool) {
 
 func validHubSpawnResultError(value string) bool {
 	switch value {
-	case "spawn_disabled", "cwd_unmapped", "spawn_failed", "timeout", "brief_doc_unavailable", "journal_unavailable", "journal_conflict", "reconciling", "unknown", "deadline_not_started", "invalid_args", "invalid_request":
+	case "spawn_disabled", "cwd_unmapped", "spawn_failed", "launch_proof_failed", "timeout", "brief_doc_unavailable", "journal_unavailable", "journal_conflict", "reconciling", "unknown", "deadline_not_started", "invalid_args", "invalid_request":
 		return true
 	default:
 		return strings.HasPrefix(value, "checkout_refused:") && len(value) <= 80 && regexp.MustCompile(`^checkout_refused:[a-z0-9_.-]+$`).MatchString(value)

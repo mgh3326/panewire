@@ -102,10 +102,10 @@ for job in jobs:
         if kind in ("job.claim", "job.reclaim"):
             # 소유는 최신 claim 이 정한다(released 된 잡을 다른 레인이 다시 잡는다).
             owner = payload.get("owner_lane") if isinstance(payload.get("owner_lane"), str) else ""
-            # 역할은 누적이다: `--role` 없는 reclaim 은 기본값 worker 를 payload 에
-            # 남기므로, 덮어쓰면 재클레임 한 번에 빌더 표식이 지워진다. 디스크에
-            # 남은 legacy captain claim도 동일한 builder 급 pane으로 보호한다.
-            if payload.get("role") in ("builder", "captain"):
+            # 역할은 누적이다: `--role` 없는 reclaim 은 기본값 implementer 를 payload 에
+            # 남기므로, 덮어쓰면 재클레임 한 번에 빌더 표식이 지워진다.
+            # 남은 builder 표식은 그대로 보호한다.
+            if payload.get("role") == "builder":
                 role = "builder"
         for key in ("pane_id", "tab_id"):
             value = payload.get(key)

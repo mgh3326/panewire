@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"slices"
 	"sort"
@@ -73,7 +74,10 @@ func parseRelayDeliveryPolicy(value string) (relayDeliveryPolicy, bool) {
 }
 
 func defaultRelayCommand(ctx context.Context, args ...string) ([]byte, error) {
-	return exec.CommandContext(ctx, "herdr", args...).CombinedOutput()
+	session := relaySessionFromContext(ctx, "")
+	cmd := exec.CommandContext(ctx, herdrExecutable(), args...)
+	cmd.Env = hubSpawnEnvironment(os.Environ(), session)
+	return cmd.CombinedOutput()
 }
 
 // parseRelayAgentStatus parses the captured herdr JSON shape instead of
@@ -308,7 +312,10 @@ func (manager *relayBusyManager) observedLanePane(lane string) (string, bool) {
 	return pane, known
 }
 
-func (client *HubClient) relayRunner() relayCommandRunner {
+func (client *HubClient) relayRunnerFor(jobID, pane string) relayCommandRunner {
+	if client == nil {
+		return defaultRelayCommand
+	}
 	if client.relayCommand != nil {
 		return client.relayCommand
 	}
@@ -317,7 +324,16 @@ func (client *HubClient) relayRunner() relayCommandRunner {
 	if client.relayInject != nil {
 		return nil
 	}
-	return defaultRelayCommand
+	session := client.herdrSessionFor(jobID, pane)
+	return func(ctx context.Context, args ...string) ([]byte, error) {
+		cmd := exec.CommandContext(ctx, herdrExecutable(), args...)
+		cmd.Env = hubSpawnEnvironment(os.Environ(), session)
+		return cmd.CombinedOutput()
+	}
+}
+
+func (client *HubClient) relayRunner() relayCommandRunner {
+	return client.relayRunnerFor("", "")
 }
 
 func (client *HubClient) relayEmit(event hubClientEvent) {
@@ -344,6 +360,11 @@ func (manager *relayBusyManager) emit(kind string, payload any) {
 
 func (manager *relayBusyManager) offer(parent context.Context, message hubOutboundMessage) {
 	if message.Pane == relayCancelledPane {
+		return
+	}
+	// hk 4258: a trial lane's wake line goes to its Claude session instead of
+	// the pane; a miss falls through to the typed line below.
+	if manager.client.deliverWakeAsSessionMessage(parent, message) {
 		return
 	}
 	// Every lane-carrying inject is a fresh route observation — including
@@ -421,9 +442,8 @@ func (manager *relayBusyManager) offer(parent context.Context, message hubOutbou
 				// another prompt — but a resend disagreeing with
 				// the row's payload is a recorded mismatch, the
 				// same fail-open rule the delivered record
-				// applies. The queued row's text wins: an
-				// operator edit (relay.edit) is never overridden
-				// by a replay carrying the original payload.
+				// applies. The queued row's text wins over a replay
+				// carrying a different payload.
 				if mode != relayDedupeOff && existing.Text != message.Text {
 					manager.dedupeMismatch.Add(1)
 					manager.journalDedupe(parent, "mismatch", message)
@@ -442,7 +462,7 @@ func (manager *relayBusyManager) offer(parent context.Context, message hubOutbou
 		manager.deliver(parent, []relayHeld{{Pane: message.Pane, Lane: message.Lane, EventID: message.EventID, JobID: message.JobID, Text: message.Text, HeldSince: manager.client.nowUTC(), DeliverPolicy: policy.Name, RecvSeq: message.RecvSeq}}, false)
 		return
 	}
-	runner := manager.client.relayRunner()
+	runner := manager.client.relayRunnerFor(message.JobID, message.Pane)
 	if runner == nil {
 		// Fixture-only clients without the explicit command seam are fail-open.
 		manager.deliver(parent, []relayHeld{{Pane: message.Pane, Lane: message.Lane, EventID: message.EventID, JobID: message.JobID, Text: message.Text, HeldSince: manager.client.nowUTC(), DeliverPolicy: policy.Name, RecvSeq: message.RecvSeq}}, false)
@@ -563,7 +583,20 @@ func (manager *relayBusyManager) retryOrDropWithin(item relayHeld, maxAttempts i
 // inject runs one relay inject and returns its three-way result. The legacy
 // bool seam maps to delivered/retryable only.
 func (manager *relayBusyManager) inject(ctx context.Context, group []relayHeld, text string) relayInjectResult {
+	if len(group) == 0 {
+		return relayInjectResult{Outcome: relayInjectRetryable}
+	}
 	pane := group[0].Pane
+	if pane == relayCancelledPane {
+		for _, item := range group {
+			manager.expireHeldLease(ctx, item, "cancelled_pane", "")
+		}
+		return relayInjectResult{Outcome: relayInjectRetryable}
+	}
+	if _, ok := relaySessionFrom(ctx); !ok && manager.client != nil {
+		session := manager.client.herdrSessionFor(group[0].JobID, pane)
+		ctx = withRelaySession(ctx, session)
+	}
 	if inject := manager.client.relayInject; inject != nil {
 		if inject(ctx, pane, text) {
 			return relayInjectResult{Outcome: relayInjectDelivered}
@@ -692,7 +725,7 @@ func (manager *relayBusyManager) heldDeadlineLocked(item relayHeld) time.Time {
 }
 
 func (manager *relayBusyManager) waitForPane(ctx context.Context, pane string, waitFor time.Duration, directiveHeld bool) {
-	runner := manager.client.relayRunner()
+	runner := manager.client.relayRunnerFor("", pane)
 	if runner == nil {
 		return
 	}
@@ -969,7 +1002,7 @@ func (manager *relayBusyManager) filterDeliverableHeld(parent context.Context, i
 	var occupant relayOccupant
 	occupantKnown, unverifiable := false, false
 	paneWorkingUnprovable := false
-	runner := manager.client.relayRunner()
+	runner := manager.client.relayRunnerFor(survivors[0].JobID, pane)
 	if runner == nil {
 		unverifiable = true
 	} else {
@@ -1085,7 +1118,7 @@ func (manager *relayBusyManager) deliverReleased(parent context.Context, pane st
 // paneIdleOrDone reads pane's status between two one-row injects. Anything but
 // idle or done, an unreadable pane included, stops the run.
 func (manager *relayBusyManager) paneIdleOrDone(parent context.Context, pane string) bool {
-	runner := manager.client.relayRunner()
+	runner := manager.client.relayRunnerFor("", pane)
 	if runner == nil {
 		return false
 	}
@@ -1179,6 +1212,10 @@ func (manager *relayBusyManager) deliver(parent context.Context, items []relayHe
 	if len(items) == 0 || items[0].Pane == relayCancelledPane {
 		return
 	}
+	// A stop waits for the injection that is typing into the pane, so the
+	// delivered record and the hub's acknowledgement are not left half written.
+	endWork, _ := manager.client.beginWork(false)
+	defer endWork()
 	sort.SliceStable(items, func(i, j int) bool { return items[i].RecvSeq < items[j].RecvSeq })
 	now := manager.client.nowUTC()
 	for _, group := range relayBatchGroups(items, expired, now) {
@@ -1199,7 +1236,14 @@ func (manager *relayBusyManager) deliver(parent context.Context, items []relayHe
 		}
 		group = live
 		text := relayBatchText(group, expired, now)
+		session := ""
+		if manager.client != nil {
+			session = manager.client.herdrSessionFor(group[0].JobID, group[0].Pane)
+		}
 		ctx, cancel := context.WithTimeout(parent, manager.client.relayInjectTimeout())
+		if session != "" {
+			ctx = withRelaySession(ctx, session)
+		}
 		// hk 3517: a row released into a pane proven stale-working is typed
 		// once. Its proof starts from the stale screen, and an unproven send is
 		// never typed again: the pane may already hold the row.
@@ -1218,6 +1262,9 @@ func (manager *relayBusyManager) deliver(parent context.Context, items []relayHe
 			// right away. The row's nonce is unchanged, and the text already
 			// tells the reader a repeat is not a reason to re-run it.
 			retryContext, retryCancel := context.WithTimeout(parent, manager.client.relayInjectTimeout())
+			if session != "" {
+				retryContext = withRelaySession(retryContext, session)
+			}
 			result = manager.inject(retryContext, group, text)
 			retryCancel()
 		}
@@ -1363,69 +1410,6 @@ func relayRetriesOnce(result relayInjectResult) bool {
 		return strings.HasPrefix(result.Evidence, "postsend:") && strings.HasSuffix(result.Evidence, ":none")
 	}
 	return false
-}
-
-func (manager *relayBusyManager) edit(ctx context.Context, eventID int64, text string) bool {
-	if text == "" || eventID < 1 {
-		return false
-	}
-	store := manager.client.relayStore()
-	if store == nil {
-		return false
-	}
-	manager.mu.Lock()
-	defer manager.mu.Unlock()
-	changed, err := store.UpdateRelayHeldText(ctx, eventID, text)
-	if !changed || err != nil {
-		return false
-	}
-	for pane, items := range manager.held {
-		for i := range items {
-			if items[i].EventID == eventID {
-				items[i].Text, items[i].Edited = text, true
-				manager.held[pane] = items
-			}
-		}
-	}
-	return true
-}
-
-func (manager *relayBusyManager) cancel(ctx context.Context, eventID int64) bool {
-	if eventID < 1 {
-		return false
-	}
-	store := manager.client.relayStore()
-	if store == nil {
-		return false
-	}
-	manager.mu.Lock()
-	deleted, err := store.DeleteRelayHeld(ctx, eventID)
-	if !deleted || err != nil {
-		manager.mu.Unlock()
-		return false
-	}
-	var panes []string
-	for pane, items := range manager.held {
-		removed := false
-		filtered := items[:0]
-		for _, item := range items {
-			if item.EventID != eventID {
-				filtered = append(filtered, item)
-			} else {
-				removed = true
-			}
-		}
-		manager.held[pane] = filtered
-		if removed {
-			panes = append(panes, pane)
-		}
-	}
-	manager.mu.Unlock()
-	for _, pane := range panes {
-		manager.arm(ctx, pane)
-	}
-	manager.emit("relay.cancelled", relayCancelledPayload{OriginalEventID: eventID})
-	return true
 }
 
 func (manager *relayBusyManager) restore(ctx context.Context) {

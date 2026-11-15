@@ -1,7 +1,6 @@
 package panewire
 
 import (
-	"context"
 	"encoding/json"
 	"maps"
 	"regexp"
@@ -23,7 +22,7 @@ func validHubActiveJob(job HubActiveJob) bool {
 // normalizeHubActiveJobMetadata rejects invalid optional console metadata
 // without discarding an otherwise valid active job heartbeat.
 func normalizeHubActiveJobMetadata(job *HubActiveJob) {
-	if !hubAgentLabelPattern.MatchString(job.OwnerLane) {
+	if !validLaneReference(job.OwnerLane) {
 		job.OwnerLane = ""
 	}
 	if job.Pane == "" || len(job.Pane) > 128 {
@@ -32,8 +31,11 @@ func normalizeHubActiveJobMetadata(job *HubActiveJob) {
 	if job.Tier != "T0" && job.Tier != "T1" && job.Tier != "T2" && job.Tier != "T3" {
 		job.Tier = ""
 	}
-	if job.Role != "worker" && job.Role != "captain" {
+	if job.Role != "implementer" {
 		job.Role = ""
+	}
+	if !fleetStateProfilePattern.MatchString(job.Profile) {
+		job.Profile = ""
 	}
 	if job.StartedAt != "" {
 		if _, err := time.Parse(time.RFC3339, job.StartedAt); err != nil {
@@ -119,8 +121,8 @@ func decodeHubJobCompletionPayload(payload []byte) (hubJobEventPayload, bool) {
 	return event, valid
 }
 
-// decodeHubJobEscalationPayload is the flat record contract written by the retired spawner
-// and captains. It deliberately reuses completion metadata and adds a compact
+// decodeHubJobEscalationPayload is the flat record contract written by the retired spawner.
+// It deliberately reuses completion metadata and adds a compact
 // operator-readable reason; it is not a command channel.
 func decodeHubJobEscalationPayloadDetailed(payload []byte) (hubJobEventPayload, []string, bool) {
 	var fields map[string]json.RawMessage
@@ -171,7 +173,7 @@ func decodeHubLaneEventPayload(payload []byte) (hubJobEventPayload, bool) {
 	if !decodeDeliveryClass(fields, &event) || !decodeNotifyType(fields, &event) {
 		return hubJobEventPayload{}, false
 	}
-	if json.Unmarshal(fields["owner_lane"], &event.OwnerLane) != nil || json.Unmarshal(fields["event_id"], &event.EventID) != nil || json.Unmarshal(fields["text"], &event.Text) != nil || !hubAgentLabelPattern.MatchString(event.OwnerLane) || !validLaneEventID(event.EventID) || !validLaneEventText(event.Text) || len(event.Text) > laneEventTextLimitSink {
+	if json.Unmarshal(fields["owner_lane"], &event.OwnerLane) != nil || json.Unmarshal(fields["event_id"], &event.EventID) != nil || json.Unmarshal(fields["text"], &event.Text) != nil || !validLaneReference(event.OwnerLane) || !validLaneEventID(event.EventID) || !validLaneEventText(event.Text) || len(event.Text) > laneEventTextLimitSink {
 		return hubJobEventPayload{}, false
 	}
 	if raw, present := fields["epoch"]; present && (json.Unmarshal(raw, &event.Epoch) != nil || event.Epoch == 0) {
@@ -241,6 +243,7 @@ func validRelayFinalText(value string) bool {
 
 func (h *HubServer) observeActiveJobs(machineID string, active []HubActiveJob, received time.Time) {
 	seen := make(map[string]struct{}, len(active))
+	var claimed []claimedPlacement
 	h.mu.Lock()
 	record := h.nodes[machineID]
 	if record == nil {
@@ -249,9 +252,17 @@ func (h *HubServer) observeActiveJobs(machineID string, active []HubActiveJob, r
 	}
 	previous := record.activeJobs
 	record.activeJobs = make(map[string]HubActiveJob, len(active))
+	record.activeReported = true
 	for _, job := range active {
 		seen[job.JobID] = struct{}{}
 		record.activeJobs[job.JobID] = job
+		// The claim confirms the placement count; it does not add to it. Only
+		// the decided host's claim does: a presence-only report from another
+		// node must not un-weigh the host the job is bound for.
+		if held, counted := h.placementCounts[job.JobID]; counted && held.machine == machineID {
+			delete(h.placementCounts, job.JobID)
+			claimed = append(claimed, claimedPlacement{job: job.JobID, held: held})
+		}
 		current := h.jobs[job.JobID]
 		if current == nil {
 			// Epoch 1 is issued by the hub for a first-seen job. A node cannot
@@ -281,6 +292,14 @@ func (h *HubServer) observeActiveJobs(machineID string, active []HubActiveJob, r
 	if !maps.Equal(previous, record.activeJobs) {
 		h.placementCache = placementCache{}
 	}
+	// A job that left the set freed a pool slot and a host slot.
+	slotFreed := false
+	for id := range previous {
+		if _, still := record.activeJobs[id]; !still {
+			slotFreed = true
+			break
+		}
+	}
 	// A job absent after the node has reconnected is a local terminal-file
 	// observation. Inspect the durable-in-process job view rather than just the
 	// replaced websocket record, because connect deliberately starts a fresh
@@ -295,6 +314,10 @@ func (h *HubServer) observeActiveJobs(machineID string, active []HubActiveJob, r
 		}
 	}
 	h.mu.Unlock()
+	if slotFreed {
+		h.noteSpawnWake(spawnParkPoolCap, spawnParkHostFull)
+	}
+	h.markPlacementClaims(claimed, h.now().UTC())
 	h.tryPendingRevocations(machineID)
 }
 
@@ -406,7 +429,7 @@ func (h *HubServer) lateRegisterJobCompletion(machineID string, completion hubJo
 		return false
 	}
 	ownerLane := completion.OwnerLane
-	if !validReportRelayLaneName(ownerLane) {
+	if !validLaneReference(ownerLane) {
 		ownerLane = ""
 	}
 	h.jobs[completion.JobID] = &hubJobRecord{
@@ -601,16 +624,4 @@ func (h *HubServer) queueJobEventLocked(kind string, payload hubJobEventPayload)
 	}
 	h.recordUIEventWithJobLocked("job", strings.TrimPrefix(kind, "job."), node, payload.JobID, h.now().UTC())
 	go h.broadcast(hubEvent{MachineID: node, Kind: kind, Payload: encoded, Received: h.now().UTC()})
-	if kind != "job.orphaned" {
-		return
-	}
-	if notifier, ok := h.notifier.(interface {
-		SendJob(context.Context, string) error
-	}); ok {
-		text := "job " + strings.TrimPrefix(kind, "job.") + " id=" + payload.JobID
-		if node != "" {
-			text += " node=" + node
-		}
-		go func() { _ = notifier.SendJob(context.Background(), text) }()
-	}
 }

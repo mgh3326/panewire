@@ -17,9 +17,11 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/mgh3326/handoffkeep/client"
+	"github.com/mgh3326/panewire/internal/quota/shared"
 )
 
 // HostView is one machine's connectivity and load as reported by the hub's
@@ -40,10 +42,14 @@ type HostView struct {
 	Source  string
 	// Decided marks the host the hub's placement named, after its all_loaded
 	// and hysteresis rules; DecisionReason is why ("" for the policy-order
-	// winner, "challenger", "all_loaded"). Ranking prefers it within a bucket,
+	// winner, "challenger", "below_free_floor", "all_loaded"). Ranking prefers it within a bucket,
 	// so a rival has to beat the winner by the hub's margin, not by a point.
 	Decided        bool
 	DecisionReason string
+	// SlotFull marks a host the hub reported slot-full and left out of its
+	// candidates: absent from the list, it is still not a place to spawn, and
+	// is not the same as a host the hub did not report (see plan).
+	SlotFull bool
 	// Extra is what only the shadow comparison reads (placement_shadow.go);
 	// no live decision looks at it.
 	Extra HostExtra
@@ -71,6 +77,14 @@ type SharedAccount struct {
 	State *StateUse
 }
 
+// windows are the account reading's measured windows, nil without a reading.
+func (a SharedAccount) windows() viewWindows {
+	if a.Quota == nil {
+		return nil
+	}
+	return a.Quota.Windows
+}
+
 // PlacementSource supplies the external reads a placement decision needs:
 // the hub's host list, pacelever's host-presence records and the shared quota
 // cache. A read error degrades the corresponding inputs to "unknown".
@@ -87,8 +101,9 @@ type WakeRequest struct {
 	Reason      string
 }
 
-// Waker wakes an asleep host. The in-flight `panewire node wake` command is
-// the production implementation; tests substitute a fake.
+// Waker wakes an asleep host. No production implementation remains (the
+// `panewire node wake` command was removed); tests substitute a fake, and
+// an unset Wake reports "no waker configured".
 type Waker interface {
 	Wake(ctx context.Context, host string, req WakeRequest) error
 }
@@ -222,6 +237,10 @@ type placeCandidate struct {
 	decided  bool
 	decision string
 	over     bool
+	// unusable is the hub's verdict that the host is not a place to spawn
+	// (throttled, at its job cap, unknown metrics): the free floor does not let
+	// it displace a usable host.
+	unusable bool
 	outcome  string
 	// preflight is the remote-spawn preflight of a candidate the placement
 	// refused; it names why the host was not usable.
@@ -252,10 +271,27 @@ type placePlan struct {
 	presenceErr bool
 }
 
+// placeTry is the seat one candidate is tried with and the pool it draws from:
+// the seat the job was placed with, or the alternate the same host admitted
+// after a launch-proof failure. A try never outlives its candidate.
+type placeTry struct {
+	spawn Spawn
+	pool  string
+	// from is the profile this try replaced on the same host. The record and
+	// the task comment name the fallback it proves when this try passes
+	// admission.
+	from string
+}
+
+// candResult is one candidate's spawn outcome.
 type candResult struct {
 	ok          bool
 	stop        error
 	unreachable bool
+	// undecided marks a stop after which the node may still finish the
+	// spawn (a lost or pending hub answer); the placement verdict is not
+	// this error.
+	undecided bool
 	// quotaRefused marks a candidate the quota gate refused before any SSH.
 	quotaRefused bool
 	rc           int
@@ -290,6 +326,12 @@ func (a *App) sharedFreshTTL(pool string) time.Duration {
 	return a.placementTTL("fresh_ttl_s", 300)
 }
 
+// SharedFreshTTL is the freshness window this App's config applies to one
+// pool's shared quota reading (sharedFreshTTL). A consumer that labels a
+// stored reading as fresh or stale uses this so its label cannot disagree with
+// the spawn gate on the same config.
+func (a *App) SharedFreshTTL(pool string) time.Duration { return a.sharedFreshTTL(pool) }
+
 // accountPool is the pool part of an account key ("claude:<fp>" -> "claude").
 func accountPool(key string) string {
 	pool, _, _ := strings.Cut(key, ":")
@@ -299,6 +341,9 @@ func accountPool(key string) string {
 func (a *App) placementTTL(key string, def int64) time.Duration {
 	if n := integer(a.Config.Quota, key, 0); n > 0 {
 		return time.Duration(n) * time.Second
+	}
+	if key == "fresh_ttl_s" && def == 300 {
+		return shared.OtherFreshTTL
 	}
 	return time.Duration(def) * time.Second
 }
@@ -352,6 +397,17 @@ func (a *App) hostViews(ctx context.Context, cwd string) (map[string]HostView, [
 	return m, nil
 }
 
+// reasonHasToken reports that the hub's comma-joined reason list carries token
+// exactly. A substring match would let one token answer for another.
+func reasonHasToken(reason, token string) bool {
+	for _, tok := range strings.Split(reason, ",") {
+		if tok == token {
+			return true
+		}
+	}
+	return false
+}
+
 // neededAccounts resolves which shared account keys a quota pool needs:
 // explicitly configured fingerprints, or the keys presence records carry for
 // the pool.
@@ -377,6 +433,73 @@ func neededAccounts(quota map[string]any, pool string, presence []PresenceRecord
 // hostAccount selects the most recent fresh presence for this host and pool.
 // Equal-time conflicting keys are ambiguous; an older login must never replace
 // the current account merely because its quota happens to be available.
+// multiAccountPools are the pools whose host may hold several accounts at once:
+// commandcode, whose omp lists every Command Code account it holds
+// (docs/quota.md §Native measurement: commandcode). Every other pool has one
+// account per host, the newest.
+var multiAccountPools = []string{"commandcode"}
+
+// multiAccountWindow is how old a presence record of a multi-account pool may be
+// and still name an account the host holds. A live node announces each account at
+// least every ten minutes, so an account omp no longer lists, or a host that
+// removed its last account, ages out of placement within this window instead of
+// staying "held" for the presence TTL while another host keeps the account's
+// shared reading current. A host asleep for longer is bound again by its first
+// announcement after it wakes.
+const multiAccountWindow = 30 * time.Minute
+
+// hostAccounts is every account key host currently holds in pool, newest first.
+// A pool outside multiAccountPools has at most one: hostAccount's.
+func hostAccounts(presence []PresenceRecord, pool, host string, now time.Time, ttl time.Duration) []string {
+	if !slices.Contains(multiAccountPools, pool) {
+		if key := hostAccount(presence, pool, host, now, ttl); key != "" {
+			return []string{key}
+		}
+		return nil
+	}
+	var records []PresenceRecord
+	for _, rec := range presence {
+		fp, ok := strings.CutPrefix(rec.AccountKey, pool+":")
+		age := now.Sub(rec.LastSeen)
+		if rec.HostID != host || !ok || !accountFP.MatchString(fp) || age < -time.Minute || age > min(ttl, multiAccountWindow) {
+			continue
+		}
+		records = append(records, rec)
+	}
+	slices.SortFunc(records, func(a, b PresenceRecord) int {
+		if c := b.LastSeen.Compare(a.LastSeen); c != 0 {
+			return c
+		}
+		return strings.Compare(a.AccountKey, b.AccountKey)
+	})
+	var keys []string
+	for _, rec := range records {
+		if !slices.Contains(keys, rec.AccountKey) {
+			keys = append(keys, rec.AccountKey)
+		}
+	}
+	return keys
+}
+
+// hostAccountFor is hostAccount for a caller that may have chosen an account:
+// want when host holds it. A multi-account pool with no usable choice takes the
+// host's first account (newest announcement, then key order), so two accounts
+// announced in the same instant never make the host unusable; every other pool
+// keeps hostAccount's rule, which refuses a tie.
+func hostAccountFor(presence []PresenceRecord, pool, host string, now time.Time, ttl time.Duration, want string) string {
+	if !slices.Contains(multiAccountPools, pool) {
+		return hostAccount(presence, pool, host, now, ttl)
+	}
+	keys := hostAccounts(presence, pool, host, now, ttl)
+	if want != "" && slices.Contains(keys, want) {
+		return want
+	}
+	if len(keys) > 0 {
+		return keys[0]
+	}
+	return ""
+}
+
 func hostAccount(presence []PresenceRecord, pool, host string, now time.Time, ttl time.Duration) string {
 	var newest time.Time
 	key := ""
@@ -399,7 +522,9 @@ func hostAccount(presence []PresenceRecord, pool, host string, now time.Time, tt
 	return key
 }
 
-func (a *App) remoteAccount(ctx context.Context, pool, host string, cfg map[string]any) (string, SharedAccount) {
+// remoteAccount is the account host holds in pool and its stored reading: want
+// when the caller has chosen one the host holds, else the host's newest.
+func (a *App) remoteAccount(ctx context.Context, pool, host string, cfg map[string]any, want string) (string, SharedAccount) {
 	if a.Source == nil || pool == "" {
 		return "", SharedAccount{}
 	}
@@ -407,7 +532,7 @@ func (a *App) remoteAccount(ctx context.Context, pool, host string, cfg map[stri
 	if err != nil {
 		return "", SharedAccount{}
 	}
-	key := hostAccount(presence, pool, firstNonempty(str(cfg, "presence_id"), host), a.Now(), a.placementTTL("presence_ttl_s", 86400))
+	key := hostAccountFor(presence, pool, firstNonempty(str(cfg, "presence_id"), host), a.Now(), a.placementTTL("presence_ttl_s", 86400), want)
 	if key == "" {
 		return "", SharedAccount{}
 	}
@@ -507,6 +632,12 @@ func (a *App) plan(ctx context.Context, s Spawn, pool string, waited time.Durati
 		local.score = hv.Score
 		local.signals = hv.Signals
 		local.source = hv.Source
+		local.unusable = !viewUsable(hv, false)
+		if local.excluded == "" && reasonHasToken(hv.Reason, "lanes_full") {
+			// The machine owns its whole lane row cap: a pane placed here could
+			// not register a lane and comes up LANE_UNREGISTERED (hk 4658).
+			local.excluded = "lanes_full"
+		}
 	}
 	maxRatio, hasGuard := number(a.Config.Local, "max_load_ratio")
 	if local.load != nil && hasGuard && *local.load >= maxRatio {
@@ -541,10 +672,19 @@ func (a *App) plan(ctx context.Context, s Spawn, pool string, waited time.Durati
 	for i, name := range a.remoteHostNames() {
 		h := a.Config.Hosts[name]
 		c := placeCandidate{name: name, cfg: h, order: i + 1, tags: hostCaps(h), wakeable: str(h, "wake") == "panewire"}
+		if a.fleetLog != nil && a.fleetLog.slotFull[name] || hub[name].SlotFull {
+			// The hub left the host out because its task slots are full.
+			// Unlisted does not mean unknown here: never fall back to
+			// proving it by spawning.
+			c.excluded = "task_slots_full"
+		}
 		if hv, reported := hub[name]; reported {
 			switch {
+			case c.excluded != "":
 			case strings.Contains(hv.Reason, "not_accepting"):
 				c.excluded = "not_accepting"
+			case reasonHasToken(hv.Reason, "lanes_full"):
+				c.excluded = "lanes_full"
 			case !hv.Connected:
 			default:
 				c.awake = true
@@ -554,6 +694,7 @@ func (a *App) plan(ctx context.Context, s Spawn, pool string, waited time.Durati
 			c.signals = hv.Signals
 			c.source = hv.Source
 			c.decided, c.decision = hv.Decided, hv.DecisionReason
+			c.unusable = !viewUsable(hv, false)
 		} else {
 			c.awake = !c.wakeable || hub == nil
 		}
@@ -576,14 +717,14 @@ func (a *App) plan(ctx context.Context, s Spawn, pool string, waited time.Durati
 	for i := range enum {
 		c := &enum[i]
 		notReady := view.drop(c.name, c.cfg, kind)
-		if c.excluded == "" && s.AccountKey != "" && hostAccount(presence, pool, firstNonempty(str(c.cfg, "presence_id"), c.name), now, presTTL) != s.AccountKey {
+		if c.excluded == "" && s.AccountKey != "" && hostAccountFor(presence, pool, firstNonempty(str(c.cfg, "presence_id"), c.name), now, presTTL, s.AccountKey) != s.AccountKey {
 			c.excluded = "different_account"
 		}
 		if c.excluded == "" && slices.Contains(excluded, c.name) {
 			c.excluded = "excluded_host"
 		}
 		c.missing = missingCaps(c.cfg, required)
-		if needCap != "" && !boolean(c.cfg, needCap, false) {
+		if needCap != "" && !capability(view.states, c.name, c.cfg, needCap) {
 			c.missingCap = needCap
 		}
 		c.roleRefusal = roleRefusal(c.cfg, s.Role, s.TaskGrade)
@@ -611,21 +752,74 @@ func (a *App) plan(ctx context.Context, s Spawn, pool string, waited time.Durati
 		}
 	}
 	p.candidates = enum
+	sortPlaceCandidates(p.ordered, threshold, s.SelHost)
+	return p, nil
+}
+
+// freshReadGeneration starts a new generation of the hub reads a decision
+// ranks on: the fleet snapshot, success or failure, is read again, so nothing
+// taken before the decision's gate (selection, an earlier decision) stands in
+// for this decision's own read.
+func (a *App) freshReadGeneration() {
+	if a.fleetLog != nil {
+		a.fleetLog.fetchedAt, a.fleetLog.snapshot, a.fleetLog.err = time.Time{}, nil, nil
+	}
+}
+
+// carryTried keeps, on the new plan, what the attempts on tried hosts proved
+// about them, as the old plan recorded it: the outcome, the quota judgment,
+// the preflight and the reading the attempt was made on. The rest of the new
+// plan is this decision's own read.
+func (np *placePlan) carryTried(old *placePlan, tried map[string]bool) {
+	for i := range np.candidates {
+		c := &np.candidates[i]
+		if !tried[c.name] {
+			continue
+		}
+		prev := old.candidate(c.name)
+		if prev == nil {
+			continue
+		}
+		c.outcome, c.judgment, c.preflight = prev.outcome, prev.judgment, prev.preflight
+		c.score, c.signals, c.load, c.source = prev.score, prev.signals, prev.load, prev.source
+		c.decided, c.decision, c.over, c.unusable = prev.decided, prev.decision, prev.over, prev.unusable
+	}
+	np.repo, np.wake = old.repo, old.wake
+}
+
+// sortPlaceCandidates orders awake candidates: the free floor, load bucket, the host-first
+// selection, login evidence, the hub's decision, then score (or load when a
+// candidate has no score). plan sorts with it, and a refusal re-sorts the
+// candidates still to try on fresh hub scores.
+func sortPlaceCandidates(ordered []*placeCandidate, threshold float64, selHost string) {
 	// One metric for the whole list: mixing score and load per pair would make
 	// the comparator intransitive when only some hosts carry a hub score.
-	byScore := len(p.ordered) > 0
-	for _, c := range p.ordered {
+	byScore := len(ordered) > 0
+	for _, c := range ordered {
 		if c.score == nil {
 			byScore = false
 		}
 	}
-	slices.SortStableFunc(p.ordered, func(x, y *placeCandidate) int {
+	side := func(c *placeCandidate) floorSide {
+		below, value := floorKey(c.signals, c.score)
+		return floorSide{awake: true, below: below, usable: !c.unusable, value: value}
+	}
+	sides := make([]floorSide, len(ordered))
+	for i, c := range ordered {
+		sides[i] = side(c)
+	}
+	floor := floorContext(sides)
+	slices.SortStableFunc(ordered, func(x, y *placeCandidate) int {
+		// The free floor is eligibility and runs before the load bucket.
+		if c := floorOrder(side(x), side(y), floor); c != 0 {
+			return c
+		}
 		if bx, by := placeBucket(*x, threshold), placeBucket(*y, threshold); bx != by {
 			return bx - by
 		}
 		// Host-first selection already chose this machine for the account;
 		// the load bucket still wins so a pressured host stays a last resort.
-		if px, py := x.name == s.SelHost, y.name == s.SelHost; px != py {
+		if px, py := x.name == selHost, y.name == selHost; px != py {
 			if px {
 				return -1
 			}
@@ -655,7 +849,6 @@ func (a *App) plan(ctx context.Context, s Spawn, pool string, waited time.Durati
 		}
 		return x.order - y.order
 	})
-	return p, nil
 }
 
 // loginRank orders login evidence: positive evidence and "no account needed"
@@ -1124,7 +1317,7 @@ func (a *App) spawnRemote(ctx context.Context, s Spawn, brief string, c *placeCa
 		if e != nil {
 			return candResult{stop: e}
 		}
-		fmt.Fprintf(a.Out, "dry-run host=%s profile=%s role=%s job=%s\n%s\n", c.name, s.Profile, s.Role, s.Job, payload)
+		a.dryRunLine(c.name, s, payload)
 		return candResult{ok: true}
 	}
 	if plan.repo != nil {
@@ -1215,7 +1408,11 @@ func (a *App) spawnRemote(ctx context.Context, s Spawn, brief string, c *placeCa
 }
 
 func (a *App) place(ctx context.Context, s Spawn, brief string) (handled bool, rec map[string]any, err error) {
-	defer func() { a.placementEvent(s, rec, err) }()
+	defer func() {
+		if !errors.Is(err, ErrHubPlacementBound) && !errors.Is(err, ErrHubPlacementDeferred) {
+			a.placementEvent(s, rec, err)
+		}
+	}()
 	if s.Host != "auto" {
 		return a.placeForced(ctx, s, brief)
 	}
@@ -1246,6 +1443,27 @@ func (a *App) placeAuto(ctx context.Context, s Spawn, brief string) (bool, map[s
 	if e := a.requestRefusal(ctx, s); e != nil {
 		return true, nil, e
 	}
+	// One decision at a time through read-rank-count: the next decision must
+	// see the job this one counts (hk 4448). The gate is held from the host
+	// read to PlacementTry, never through a wake or a launch, and taken again
+	// before each later candidate is ranked. release is safe to call twice.
+	release := func() {}
+	takeGate := func() error {
+		release()
+		if a.PlacementGate == nil || s.DryRun {
+			return nil
+		}
+		gateRelease, e := a.PlacementGate(ctx)
+		if e != nil {
+			return fail(exitPlacement, "placement decision gate: %v", e)
+		}
+		release = sync.OnceFunc(gateRelease)
+		return nil
+	}
+	if e := takeGate(); e != nil {
+		return true, nil, e
+	}
+	defer func() { release() }()
 	waited := taskWaited(task, a.Now())
 	pool := a.quotaPool(ctx, s)
 	s.TaskGrade = s.Grade
@@ -1255,12 +1473,38 @@ func (a *App) placeAuto(ctx context.Context, s Spawn, brief string) (bool, map[s
 	if topRoutingRole(s.RoutingRole) {
 		s.TaskGrade = ""
 	}
-	p, e := a.plan(ctx, s, pool, waited)
-	if e != nil {
-		return true, nil, e
+	// Every decision builds its plan from reads taken inside the gate: the
+	// first, each fallback after a refusal, and the one after a wake. The new
+	// plan replaces the old; only what the attempts proved about the hosts
+	// already tried is carried over (carryTried).
+	var p *placePlan
+	tried := map[string]bool{}
+	var preEnv *preflightEnv
+	replan := func() error {
+		a.freshReadGeneration()
+		if a.PlacementGate != nil && !s.DryRun {
+			// Host-first selection named SelHost before the gate, on reads
+			// other decisions have since counted jobs against; the account it
+			// chose still limits the hosts, and the host is ranked on the
+			// scores this decision reads.
+			s.SelHost = ""
+		}
+		np, e := a.plan(ctx, s, pool, waited)
+		if e != nil {
+			return e
+		}
+		if p != nil {
+			np.carryTried(p, tried)
+		}
+		p, preEnv = np, nil
+		if s.placement != nil {
+			s.placement.plan = p
+		}
+		a.emitPlacementTrace(s, "")
+		return nil
 	}
-	if s.placement != nil {
-		s.placement.plan = p
+	if e := replan(); e != nil {
+		return true, nil, e
 	}
 	var repo *repoResolution
 	repoDone := false
@@ -1274,7 +1518,9 @@ func (a *App) placeAuto(ctx context.Context, s Spawn, brief string) (bool, map[s
 		}
 		return repo
 	}
-	spawn := func(c *placeCandidate) (res candResult) {
+	var fallbacks []map[string]any
+	refreshPending := false
+	spawnOne := func(c *placeCandidate, try placeTry) (res candResult) {
 		defer func() {
 			if res.stop != nil && res.note == "" {
 				res.note = exitReason(exitCode(res.stop))
@@ -1284,28 +1530,113 @@ func (a *App) placeAuto(ctx context.Context, s Spawn, brief string) (bool, map[s
 					res.note = "launch_failed"
 				}
 				s.placement.started = false
-				s.placement.execution = placementExecution{}
+				s.placement.execution = PlacementExecution{}
 			}
 		}()
-		qr, ok := a.quotaRequest(s)
+		if a.PlacementTry != nil && !s.DryRun {
+			a.PlacementTry(c.name)
+		}
+		release()
+		qr, ok := a.quotaRequest(try.spawn)
 		if !ok {
 			return candResult{rc: exitConfig, note: "quota_request_unavailable"}
 		}
-		key, acc := a.remoteAccount(ctx, pool, c.name, c.cfg)
-		j, err := a.judgeHost(ctx, qr, pool, c.name, false, key, acc)
+		if s.DryRun {
+			if err := a.checkDryRunAdmission(ctx, try.spawn, c.name, c.cfg); err != nil {
+				return candResult{stop: err}
+			}
+		}
+		key, acc := a.remoteAccount(ctx, try.pool, c.name, c.cfg, try.spawn.AccountKey)
+		if try.spawn.AccountKey != "" && key != try.spawn.AccountKey {
+			// The host stopped holding the selected account since the plan:
+			// admission and the delegated spawn must judge the same one.
+			return candResult{rc: exitAuthUnavailable, note: "different_account", quotaRefused: true}
+		}
+		j, err := a.judgeHost(ctx, qr, try.pool, c.name, false, key, acc)
 		c.judgment = &j
 		if err != nil {
+			if errors.Is(err, ErrQuotaRefreshPending) {
+				refreshPending = true
+			}
 			if j.Reason == hubDown {
 				return candResult{rc: exitCode(err), note: hubDown}
 			}
 			return candResult{rc: exitCode(err), note: hostGateNote(j, err), quotaRefused: true}
 		}
-		return a.spawnRemote(ctx, s, brief, c, resolveRepo(), false)
+		if try.from != "" {
+			fallbacks = append(fallbacks, map[string]any{"from_profile": try.from, "reason": "harness_version", "rc": 70, "to_profile": try.spawn.Profile, "host": c.name})
+			if try.spawn.Sel == nil {
+				try.spawn.Sel = map[string]any{}
+			}
+			try.spawn.Sel["launch_fallbacks"] = fallbacks
+			if err := hkCommentTask(ctx, s.Task, fmt.Sprintf("Launch fallback: from-profile=%s rc=70 reason=harness_version to-profile=%s host=%s", try.from, try.spawn.Profile, c.name)); err != nil {
+				a.warn("launch fallback task comment failed: %v", err)
+			}
+		}
+		a.emitPlacementTrace(try.spawn, c.name)
+		return a.spawnRemote(ctx, try.spawn, brief, c, resolveRepo(), false)
 	}
-	emit := func(chosen string) map[string]any {
-		a.stampSelection(&s, chosen)
+	// spawn tries one candidate. Its first try is the seat the job was placed
+	// with; a launch-proof failure lets the same host admit an alternate
+	// harness, and that alternate is tried on this host only
+	// (docs/hub-spawn-operations.md, "A job.spawn the node cannot accept"). The
+	// next candidate starts again from the job's seat, so a fallback can
+	// neither outlive its host nor land a seat Spawn never resolves (hk 4335).
+	spawn := func(c *placeCandidate) (candResult, placeTry) {
+		try := placeTry{spawn: s, pool: pool}
+		for {
+			res := spawnOne(c, try)
+			if res.note != "hub_launch_proof_failed" {
+				return res, try
+			}
+			if !s.autoSelected || s.Delegated {
+				return res, try
+			}
+			previous := try.spawn.Profile
+			seat, ok := a.Policy.Profiles[previous]
+			if !ok {
+				return res, try
+			}
+			// Record the failed kind once, and still look for another kind on
+			// this host when an earlier host already recorded it: the alternate
+			// is chosen per host, so a kind that failed elsewhere must not stop
+			// this host from offering one whose harness may be healthy here.
+			if !slices.Contains(s.failedHarnesses, seat.Kind) {
+				s.failedHarnesses = append(s.failedHarnesses, seat.Kind)
+			}
+			candidate := try.spawn
+			candidate.Host, candidate.Effort = c.name, s.requestedEffort
+			// The selection must exclude the kind just recorded. try.spawn was
+			// copied before the append, so carry the list over explicitly: the
+			// alternate is a different harness kind, and a second seat of the
+			// failed kind would only repeat the failure.
+			candidate.failedHarnesses = s.failedHarnesses
+			sel, err := a.selectProfile(ctx, candidate)
+			if err != nil || sel == nil || sel.chosen == nil || sel.chosen.seatName == previous {
+				return res, try
+			}
+			next := try.spawn
+			next.Profile, next.AccountKey, next.RoutingRole, next.SelHost, next.route = sel.chosen.seatName, sel.chosen.accountKey, sel.req.route.role, sel.chosen.host, sel.req.route
+			next.Effort = firstNonempty(sel.chosen.row.Effort, s.requestedEffort)
+			if next.E6Arm != "" && !ValidE6Arm(next.E6Arm, sel.chosen.seat.Canon) {
+				next.E6Arm = ""
+			}
+			next.Sel = sel.record()
+			try = placeTry{spawn: next, pool: a.quotaPool(ctx, next), from: previous}
+		}
+	}
+	emit := func(chosen string, try placeTry) map[string]any {
+		a.stampSelection(&try.spawn, chosen)
 		rec := p.record(chosen)
-		a.attachSelection(rec, s)
+		// The record names the seat this run used: the plan's, unless a
+		// launch-proof fallback replaced it on the chosen host (hk 4335).
+		rec["profile"] = try.spawn.Profile
+		if try.pool == "" {
+			delete(rec, "pool")
+		} else {
+			rec["pool"] = try.pool
+		}
+		a.attachSelection(rec, try.spawn)
 		if !s.DryRun {
 			if e := a.event(ctx, s.Job, "job.placement", rec); e != nil {
 				a.warn("placement decision record failed: %v", e)
@@ -1319,7 +1650,6 @@ func (a *App) placeAuto(ctx context.Context, s Spawn, brief string) (bool, map[s
 	// A refused remote candidate gets its preflight, so the placement record
 	// says which of the known remote-spawn conditions the host fails. The
 	// hub and presence reads come from the plan.
-	var preEnv *preflightEnv
 	// A host the quota gate refused was never contacted over SSH, and the
 	// preflight keeps it that way: it reads the hub and hk only.
 	explain := func(c *placeCandidate, res candResult) {
@@ -1346,7 +1676,29 @@ func (a *App) placeAuto(ctx context.Context, s Spawn, brief string) (bool, map[s
 		}
 		return true
 	}
-	for _, c := range p.ordered {
+	for first := true; ; first = false {
+		if !first {
+			// A refusal moves on. The next candidate comes from a new plan
+			// read under the gate, so the fallback sees the jobs other
+			// decisions counted and every host's current eligibility.
+			if e := takeGate(); e != nil {
+				return true, nil, e
+			}
+			if e := replan(); e != nil {
+				return true, nil, e
+			}
+		}
+		var c *placeCandidate
+		for _, candidate := range p.ordered {
+			if !tried[candidate.name] {
+				c = candidate
+				break
+			}
+		}
+		if c == nil {
+			break
+		}
+		tried[c.name] = true
 		if c.local {
 			// An over-threshold local is a last resort: when the job has
 			// waited long enough and every awake candidate is saturated the
@@ -1366,10 +1718,10 @@ func (a *App) placeAuto(ctx context.Context, s Spawn, brief string) (bool, map[s
 			a.attachSelection(rec, s)
 			return false, rec, nil
 		}
-		res := spawn(c)
+		res, try := spawn(c)
 		c.outcome = res.note
 		if res.ok {
-			return true, emit(c.name), nil
+			return true, emit(c.name, try), nil
 		}
 		if res.stop != nil {
 			return true, nil, res.stop
@@ -1379,8 +1731,14 @@ func (a *App) placeAuto(ctx context.Context, s Spawn, brief string) (bool, map[s
 			unreachable = append(unreachable, c.name)
 		}
 	}
+	if refreshPending {
+		return true, nil, ErrQuotaRefreshPending
+	}
 	targets, reasons := a.wakeTargets(s, p, unreachable)
 	lastNote := ""
+	// A wake waits for a node for up to wake_wait; no other decision waits
+	// behind it.
+	release()
 	for _, w := range targets {
 		c := p.candidate(w)
 		if c == nil {
@@ -1410,10 +1768,32 @@ func (a *App) placeAuto(ctx context.Context, s Spawn, brief string) (bool, map[s
 			continue
 		}
 		p.wake["ok"] = true
-		res := spawn(c)
+		// The woken host is an input to a new decision, not a foregone one:
+		// read again under the gate and count it only if it is still a place
+		// this job may go.
+		if e := takeGate(); e != nil {
+			return true, nil, e
+		}
+		woke := p.wake
+		delete(tried, w)
+		if e := replan(); e != nil {
+			return true, nil, e
+		}
+		p.wake = woke
+		c = p.candidate(w)
+		if c == nil || !slices.Contains(p.ordered, c) {
+			release()
+			lastNote = "wake target no longer eligible"
+			if c != nil && c.outcome != "" {
+				lastNote = "wake target " + c.outcome
+			}
+			continue
+		}
+		tried[w] = true
+		res, try := spawn(c)
 		c.outcome = res.note
 		if res.ok {
-			return true, emit(w), nil
+			return true, emit(w, try), nil
 		}
 		if res.stop != nil {
 			return true, nil, res.stop
@@ -1453,11 +1833,21 @@ func (a *App) placeForced(ctx context.Context, s Spawn, brief string) (bool, map
 	if !ok {
 		return true, nil, fail(exitConfig, "placement selected unconfigured host %s", s.Host)
 	}
-	if seat, ok := a.Policy.Profiles[s.Profile]; ok && seat.Capability != "standard" && !boolean(h, seat.Capability, false) {
+	if seat, ok := a.Policy.Profiles[s.Profile]; ok && seat.Capability != "standard" && !capability(a.readinessStates(ctx), s.Host, h, seat.Capability) {
 		return true, nil, fail(exitConfig, "host %s lacks capability %s", s.Host, seat.Capability)
 	}
-	if _, _, e := a.taskPrecheck(ctx, s); e != nil {
+	task, _, e := a.taskPrecheck(ctx, s)
+	if e != nil {
 		return true, nil, e
+	}
+	s.TaskGrade = s.Grade
+	if s.TaskGrade == "" {
+		if m := taskMarker.FindStringSubmatch(task.Title); m != nil {
+			s.TaskGrade = strings.ToUpper(m[1])
+		}
+	}
+	if topRoutingRole(s.RoutingRole) {
+		s.TaskGrade = ""
 	}
 	emit := func() {
 		if s.DryRun {
@@ -1468,6 +1858,24 @@ func (a *App) placeForced(ctx context.Context, s Spawn, brief string) (bool, map
 		}
 	}
 	c := placeCandidate{name: s.Host, cfg: h, wakeable: str(h, "wake") == "panewire", awake: true, eligible: true}
+	// The chosen row is fixed from the start; emitting now leaves a trace even
+	// for refusals that end the request before the spawn attempt below.
+	a.emitPlacementTrace(s, s.Host)
+	// A pinned host is decided too; later auto decisions must see its job.
+	// The count goes in through the gate, so it never lands between another
+	// decision's read and its own count.
+	if a.PlacementTry != nil && !s.DryRun {
+		release := func() {}
+		if a.PlacementGate != nil {
+			gateRelease, e := a.PlacementGate(ctx)
+			if e != nil {
+				return true, nil, fail(exitPlacement, "placement decision gate: %v", e)
+			}
+			release = gateRelease
+		}
+		a.PlacementTry(s.Host)
+		release()
+	}
 	qr, ok := a.quotaRequest(s)
 	if !ok {
 		return true, nil, fail(exitConfig, "quota_request_unavailable")
@@ -1483,7 +1891,12 @@ func (a *App) placeForced(ctx context.Context, s Spawn, brief string) (bool, map
 		return true, nil, fail(code, "quota pool for %s@%s unresolved: %v", s.Profile, qr.Effort, e)
 	}
 	spawn := func() candResult {
-		key, acc := a.remoteAccount(ctx, pool, c.name, c.cfg)
+		if s.DryRun {
+			if err := a.checkDryRunAdmission(ctx, s, c.name, c.cfg); err != nil {
+				return candResult{stop: err}
+			}
+		}
+		key, acc := a.remoteAccount(ctx, pool, c.name, c.cfg, s.AccountKey)
 		if s.AccountKey != "" && key != s.AccountKey {
 			return candResult{stop: fail(exitAuthUnavailable, "AUTH_UNAVAILABLE: target no longer holds the selected account")}
 		}
@@ -1492,6 +1905,7 @@ func (a *App) placeForced(ctx context.Context, s Spawn, brief string) (bool, map
 		if err != nil {
 			return candResult{stop: err}
 		}
+		a.emitPlacementTrace(s, c.name)
 		return a.spawnRemote(ctx, s, brief, &c, a.localRepo(ctx, s.CWD), true)
 	}
 	res := spawn()
@@ -1558,7 +1972,7 @@ func (a *App) quotaRequest(s Spawn) (QuotaRequest, bool) {
 	if topRoutingRole(s.RoutingRole) {
 		role = s.RoutingRole
 	}
-	return QuotaRequest{Profile: seat.Canon, GateProfile: seat.gateName(), Effort: effort, Role: role, OperatorRequest: s.OperatorRequest, RequestedBy: s.RequestedBy, Purpose: s.Purpose, AccountKey: s.AccountKey, E6Arm: a.e6Arm(s.E6Arm)}, true
+	return QuotaRequest{Profile: seat.Canon, GateProfile: seat.gateName(), Effort: effort, Role: role, OperatorRequest: s.OperatorRequest, RequestedBy: gateRequestedBy(s), Purpose: s.Purpose, AccountKey: s.AccountKey, E6Arm: a.e6Arm(s.E6Arm, s.e6ArmLocked), E6ArmLocked: s.e6ArmLocked}, true
 }
 
 func (a *App) quotaPool(ctx context.Context, s Spawn) string {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math"
 	"slices"
 	"strconv"
@@ -44,6 +45,10 @@ type QuotaRequest struct {
 	// requires one. pacelever reads it from its own environment, so Launch and
 	// Gate pass it explicitly instead of relying on this process having it.
 	E6Arm string
+	// E6ArmLocked marks a request whose marker is already authoritative (a
+	// hub submission or a node-delivered spawn): the process environment
+	// never fills an empty E6Arm.
+	E6ArmLocked bool
 }
 
 // CatalogRow is one bench catalog rung: profile@effort with its operator-set
@@ -78,21 +83,24 @@ type CatalogRow struct {
 // stay admission gates only. ResetHours is that window's time to reset.
 // Both are nil when the longest window cannot be paced.
 //
-// LongProjected is the highest projection among windows of a day or more and
+// RankProjected is the longest window projection. WorstLongProjected is the
+// highest projection among windows of a day or more, and
 // ShortUsed the highest used share among sub-daily windows; a waste-risk pool
 // is excluded on those (a sub-daily window only when exhausted) instead of on
 // Projected, which also carries the sub-daily windows' pace.
 type PoolView struct {
-	Status        string
-	Stale         bool
-	Class         string
-	Waste         *bool
-	Blocking      *float64
-	Projected     *float64
-	Urgency       *float64
-	ResetHours    *float64
-	LongProjected *float64
-	ShortUsed     *float64
+	windowObserved     bool
+	Status             string
+	Stale              bool
+	Class              string
+	Waste              *bool
+	Blocking           *float64
+	Projected          *float64
+	Urgency            *float64
+	ResetHours         *float64
+	RankProjected      *float64
+	WorstLongProjected *float64
+	ShortUsed          *float64
 	// Credit is a prepaid credit pool's hand-entered balance, nil when the
 	// manual store records none.
 	Credit *CreditBalance
@@ -105,8 +113,7 @@ type PoolView struct {
 	Free *shared.FreeBucket
 	// Groups is the view of each metering group of a reading that has only
 	// group-scoped windows (agy), by group name. Each group view ranks on that
-	// group's longest window even when it is sub-daily, since the group has no
-	// longer one (hk 3415): gemini's 5h window paces and can be wasted. The
+	// group's longest window of a day or more. The
 	// fields above then carry the strictest group's view whole, so a rung that
 	// maps to no group is blocked and paced on the same group. A rung that maps
 	// to a group ranks on its own group's view instead (forRung).
@@ -115,6 +122,45 @@ type PoolView struct {
 	// the strictest group's name on the account view of a group-only reading.
 	// Empty for an account-scoped reading and for a pool view built elsewhere.
 	Group string
+	// Shortest is the view's shortest window, the one a job's expected hours
+	// must fit inside (headroom key, select.go); nil when no window is known.
+	Shortest *windowRoom
+	// Windows are the windows the view was ranked on, as measured; the plan
+	// shows them for an account (plan.go).
+	Windows []ViewWindow
+}
+
+// viewWindows is a reading's windows.
+type viewWindows []ViewWindow
+
+// rows is the windows as the plan's JSON rows.
+func (w viewWindows) rows() []map[string]any {
+	out := make([]map[string]any, 0, len(w))
+	for _, window := range w {
+		row := map[string]any{"window": window.Window, "used_pct": window.UsedPct}
+		if window.ResetsAt != "" {
+			row["resets_at"] = window.ResetsAt
+		}
+		out = append(out, row)
+	}
+	return out
+}
+
+// text is the windows as "5h=12.0% 7d=73.1%".
+func (w viewWindows) text() string {
+	parts := make([]string, 0, len(w))
+	for _, window := range w {
+		parts = append(parts, fmt.Sprintf("%s=%.1f%%", window.Window, window.UsedPct))
+	}
+	return strings.Join(parts, " ")
+}
+
+// ViewWindow is one measured window of an account view: its label, used share
+// and reset ("" when the reading has none).
+type ViewWindow struct {
+	Window   string
+	UsedPct  float64
+	ResetsAt string
 }
 
 // forRung is the view a catalog rung ranks and is blocked on. A rung that maps
@@ -175,6 +221,7 @@ type requestGate interface {
 type CLIQuota struct {
 	Runner Runner
 	Binary string
+	Now    func() time.Time
 	// CreditTotalUSD is each prepaid credit pool's fixed grant total in
 	// dollars, from `[quota].credit_total_usd`. A shared manual entry records
 	// only its used percentage, so credit_expiry.go derives the dollar balance
@@ -250,6 +297,12 @@ func gateResult(x Result, r QuotaRequest) (string, error) {
 			}
 			if outcome == outcomeNoRoleCandidate {
 				return "", &gateRefusal{cause: fail(exitSeatRefused, "%s", roleRestrictedReason(reason)), outcome: outcome, code: code}
+			}
+			if outcome == outcomeQuotaUnknown && code != "" && code != escalationGate {
+				// The request, the catalog or policy decided this refusal;
+				// no reading did, so it is not unknown quota. The escalation
+				// redirect is the one coded refusal a reading decided.
+				outcome = outcomePolicyUnavailable
 			}
 			return "", &gateRefusal{cause: fail(x.Code, "quota gate: %s", reason), outcome: outcome, code: code}
 		}
@@ -519,11 +572,29 @@ func (a *App) heldAccountKeys(ctx context.Context, pools []string) map[string][]
 		return held
 	}
 	id := firstNonempty(str(a.Config.Local, "presence_id"), a.machine())
+	now := a.Now()
+	// The presence read has no order of its own. The most recently announced
+	// account comes first, then the key, so the account a gate judges first
+	// (and names in a refusal) does not depend on how the read was ordered.
+	records = slices.Clone(records)
+	slices.SortStableFunc(records, func(x, y PresenceRecord) int {
+		if c := y.LastSeen.Compare(x.LastSeen); c != 0 {
+			return c
+		}
+		return strings.Compare(x.AccountKey, y.AccountKey)
+	})
 	for _, rec := range records {
 		pool := accountPool(rec.AccountKey)
-		if rec.HostID == id && slices.Contains(pools, pool) && !slices.Contains(held[pool], rec.AccountKey) {
-			held[pool] = append(held[pool], rec.AccountKey)
+		if rec.HostID != id || !slices.Contains(pools, pool) || slices.Contains(held[pool], rec.AccountKey) {
+			continue
 		}
+		// An account of a multi-account pool is held only while its host keeps
+		// announcing it (multiAccountWindow); the pinned account and every other
+		// pool keep the unbounded record.
+		if slices.Contains(multiAccountPools, pool) && (now.Sub(rec.LastSeen) > multiAccountWindow || rec.LastSeen.After(now.Add(time.Minute))) {
+			continue
+		}
+		held[pool] = append(held[pool], rec.AccountKey)
 	}
 	return held
 }
@@ -570,6 +641,14 @@ func (a *App) measureTarget(ctx context.Context, host, pool string) error {
 	return checkQuotaPlain(r, "quota refresh")
 }
 
+func (a *App) scheduleQuotaRefresh(host, pool string) {
+	seconds := integer(a.Config.Quota, "measure_timeout_s", 60)
+	if seconds <= 0 || seconds > 60 {
+		seconds = 60
+	}
+	a.ScheduleQuotaRefresh(host, pool, time.Duration(seconds)*time.Second)
+}
+
 func (a *App) judgeHost(ctx context.Context, r QuotaRequest, pool, host string, local bool, key string, acc SharedAccount) (quotaJudgment, error) {
 	j := quotaJudgment{Host: host, AccountKey: r.AccountKey, Source: "local", Outcome: "unknown", ExitCode: 4}
 	policy, err := a.poolPolicy()
@@ -603,9 +682,21 @@ func (a *App) judgeHost(ctx context.Context, r QuotaRequest, pool, host string, 
 				a.quotaObservationEvent(host, pool, observed, acc)
 			}
 		}()
+		if (j.Reason == "stale" || j.Reason == "not_observed") && !a.planOnly && a.ScheduleQuotaRefresh != nil && a.nativeQuotaPool(pool) {
+			a.scheduleQuotaRefresh(host, pool)
+			return j, ErrQuotaRefreshPending
+		}
 		// A stale or missing observation of an account this host does not hold
 		// is never refreshed by the gate, so measure it on the target first.
 		if (j.Reason == "stale" || j.Reason == "not_observed") && a.Source != nil && !slices.Contains(a.localAccountKeys(ctx, pool), key) {
+			if a.planOnly {
+				// A dry run measures nothing: a refresh writes presence, lease and
+				// observation to the shared quota store. The spawn measures this
+				// account, so the plan may differ from it for this host.
+				a.wouldMeasureLine(host, pool)
+				j.Reason = "would_measure"
+				return j, &quotaHostRefusal{fail(exitEvictionUnconfirmed, "would measure target account (host %s, pool %s) before a spawn", host, pool), j.Reason}
+			}
 			if err := a.measureTarget(ctx, host, pool); err != nil {
 				j.Measured, j.Reason = "failed", "measure_failed"
 				if exitCode(err) == exitPlacement && str(a.Config.Hosts[host], "via") == "hub" {
@@ -633,7 +724,12 @@ func (a *App) judgeHost(ctx context.Context, r QuotaRequest, pool, host string, 
 		}
 		r.AccountKey = key
 	}
-	return a.judgeGate(ctx, r, pool, j)
+	judgment, err := a.judgeGate(ctx, r, pool, j)
+	if err != nil && !local && !a.planOnly && key != "" && a.ScheduleQuotaRefresh != nil && a.nativeQuotaPool(pool) && gateOutcome(err) == outcomeQuotaUnknown {
+		a.scheduleQuotaRefresh(host, pool)
+		return judgment, ErrQuotaRefreshPending
+	}
+	return judgment, err
 }
 
 // creditPoolStatus checks policy metadata, not a credit balance. A successful
@@ -689,22 +785,27 @@ func (a *App) judgeGate(ctx context.Context, r QuotaRequest, pool string, j quot
 // rules (one-hour TTL, one-day stale maximum). A stale catalog is refused:
 // grades and models must come from fresh evidence. No pacelever process runs.
 func (q CLIQuota) Catalog(ctx context.Context) ([]CatalogRow, error) {
+	data, e := q.CatalogDetails(ctx)
+	if e != nil {
+		return nil, e
+	}
+	return catalogDataRows(data), nil
+}
+
+// CatalogDetails returns the rows and decode warnings used by planning.
+func (q CLIQuota) CatalogDetails(ctx context.Context) (CatalogData, error) {
 	client, e := NewCatalogClient(CatalogClientConfig{})
 	if e != nil {
-		return nil, fail(exitConfig, "%v", e)
+		return CatalogData{}, fail(exitConfig, "%v", e)
 	}
 	data, e := client.Read(ctx, false)
 	if e != nil {
-		return nil, fail(exitConfig, "%v", e)
+		return CatalogData{}, fail(exitConfig, "%v", e)
 	}
 	if data.Info.Stale {
-		return nil, fail(exitConfig, "bench catalog is stale")
+		return CatalogData{}, fail(exitConfig, "bench catalog is stale")
 	}
-	rows := make([]CatalogRow, len(data.Rows))
-	for i, entry := range data.Rows {
-		rows[i] = entry.row()
-	}
-	return rows, nil
+	return data, nil
 }
 
 func (q CLIQuota) Launch(ctx context.Context, r QuotaRequest) (Launch, error) {
@@ -733,7 +834,7 @@ func quotaE6Env(arm string) []string {
 	if arm == "" {
 		return nil
 	}
-	return []string{"PACELEVER_E6_ARM=" + arm}
+	return []string{"PANEWIRE_E6_ARM=" + arm}
 }
 
 // Pools reads the quota CLI's status document and reduces it to
@@ -826,10 +927,13 @@ func (q CLIQuota) Pools(ctx context.Context) (map[string]PoolView, error) {
 					v.Blocking = b.UsedPct
 				}
 				w, werr := windowDuration(b.Window)
+				if werr == nil {
+					v.windowObserved = true
+				}
 				ranking := werr == nil && w >= 24*time.Hour
 				if ranking && w > longestW {
 					longestW = w
-					v.Urgency, v.ResetHours = nil, nil
+					v.Urgency, v.ResetHours, v.RankProjected = nil, nil, nil
 				}
 				if werr == nil && !ranking && b.UsedPct != nil && (v.ShortUsed == nil || *b.UsedPct > *v.ShortUsed) {
 					v.ShortUsed = b.UsedPct
@@ -838,8 +942,11 @@ func (q CLIQuota) Pools(ctx context.Context) (map[string]PoolView, error) {
 					if v.Projected == nil || *x > *v.Projected {
 						v.Projected = x
 					}
-					if ranking && (v.LongProjected == nil || *x > *v.LongProjected) {
-						v.LongProjected = x
+					if ranking && (v.WorstLongProjected == nil || *x > *v.WorstLongProjected) {
+						v.WorstLongProjected = x
+					}
+					if ranking && w == longestW && (v.RankProjected == nil || *x > *v.RankProjected) {
+						v.RankProjected = x
 					}
 					if ranking && w == longestW {
 						if reset, e := time.Parse(time.RFC3339Nano, b.ResetsAt); e == nil {
@@ -877,7 +984,8 @@ func (q CLIQuota) Pools(ctx context.Context) (map[string]PoolView, error) {
 
 // projectAtReset is pacelever's Pace expressed as a percentage: the used
 // share divided by the elapsed share of the window. A bucket that is past its
-// reset, less than 5% into its window, or unreadable has no projection. Unlike
+// reset or unreadable has no projection. A long window less than 5% elapsed
+// projects its used share; a sub-daily one has no projection yet. Unlike
 // Pace, an over-consumed reading above 100% still projects, so the pool is
 // excluded rather than treated as unpaceable.
 func projectAtReset(used *float64, window, resetsAt string, now time.Time) *float64 {
@@ -894,8 +1002,15 @@ func projectAtReset(used *float64, window, resetsAt string, now time.Time) *floa
 	}
 	left := reset.Sub(now)
 	fraction := 1 - float64(left)/float64(w)
-	if left <= 0 || fraction < 0.05 || fraction > 1 {
+	if left <= 0 || fraction > 1 {
 		return nil
+	}
+	if fraction < 0.05 {
+		if w < 24*time.Hour {
+			return nil
+		}
+		x := *used
+		return &x
 	}
 	x := *used / fraction
 	return &x

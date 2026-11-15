@@ -34,9 +34,13 @@ var (
 )
 
 // hkJobs is the production JobStore over the shared handoffkeep HTTP client.
-type hkJobs struct{ q *hkQuota }
+// now stamps each claim's client time (hk claimed_at).
+type hkJobs struct {
+	q   *hkQuota
+	now func() time.Time
+}
 
-func newHKJobs(q *hkQuota) JobStore { return &hkJobs{q: q} }
+func newHKJobs(q *hkQuota, now func() time.Time) JobStore { return &hkJobs{q: q, now: now} }
 
 func jobError(e error) error {
 	var be *BackendError
@@ -52,11 +56,17 @@ func jobError(e error) error {
 }
 
 func (j *hkJobs) Claim(ctx context.Context, jobID, taskID, host string) error {
-	task, e := strconv.ParseInt(taskID, 10, 64)
-	if e != nil {
-		return fmt.Errorf("job record claim needs a numeric task id")
+	// A task-less job claims with a null task_id (hk docs/jobs.md: claims may
+	// omit task_id or send null). A non-empty task must be numeric.
+	body := map[string]any{"job_id": jobID, "task_id": nil, "host": host, "at": j.now().UTC()}
+	if taskID != "" {
+		task, e := strconv.ParseInt(taskID, 10, 64)
+		if e != nil {
+			return fmt.Errorf("job record claim needs a numeric task id")
+		}
+		body["task_id"] = task
 	}
-	return jobError(j.q.request(ctx, http.MethodPost, "/v1/jobs", map[string]any{"job_id": jobID, "task_id": task, "host": host}, nil))
+	return jobError(j.q.request(ctx, http.MethodPost, "/v1/jobs", body, nil))
 }
 func (j *hkJobs) Put(ctx context.Context, jobID string, fields map[string]any) error {
 	return jobError(j.q.request(ctx, http.MethodPut, "/v1/jobs/"+url.PathEscape(jobID), fields, nil))
@@ -80,7 +90,7 @@ func (a *App) jobStore() (JobStore, error) {
 	if e != nil {
 		return nil, e
 	}
-	a.JobStore = newHKJobs(c)
+	a.JobStore = newHKJobs(c, a.Now)
 	return a.JobStore, nil
 }
 
@@ -92,7 +102,7 @@ func NewJobStore(baseURL, token, cfID, cfSecret string) (JobStore, error) {
 	if err != nil {
 		return nil, err
 	}
-	return newHKJobs(client), nil
+	return newHKJobs(client, time.Now), nil
 }
 
 // newNodeHKClient validates an explicit handoffkeep endpoint and credential
@@ -230,7 +240,7 @@ func (a *App) markSpawnRetryable(ctx context.Context, id string) {
 // the pane exists, so waiters stop on it instead of reading a claim that
 // never runs. Best effort: a failure leaves job.record_failed.
 func (a *App) abandonJobRecord(ctx context.Context, id string) {
-	if e := a.putJobRecord(ctx, id, map[string]any{"state": "lost"}); e != nil {
+	if e := a.putJobRecord(ctx, id, map[string]any{"state": "lost", "at": a.Now().UTC()}); e != nil {
 		a.jobRecordFailed(ctx, id, "abandon", e)
 	}
 }
@@ -258,6 +268,7 @@ func (a *App) jobRecordFailed(ctx context.Context, id, op string, e error) {
 func (a *App) spawnedJobRecord(ctx context.Context, s Spawn, seat Seat, launch Launch, pane, pool, owner string) {
 	rec := map[string]any{
 		"state":      "spawned",
+		"at":         a.Now().UTC(),
 		"role":       s.Role,
 		"label":      s.Label,
 		"family":     seat.Family,
@@ -409,13 +420,13 @@ func (a *App) markSpawnUncertain(ctx context.Context, id string) {
 // behind a failed spawn is verifiably gone, so the job no longer holds its
 // task and role.
 func (a *App) MarkJobLost(ctx context.Context, id string) error {
-	return a.putJobRecord(ctx, id, map[string]any{"state": "lost"})
+	return a.putJobRecord(ctx, id, map[string]any{"state": "lost", "at": a.Now().UTC()})
 }
 
 // MarkJobLostBecause is MarkJobLost with an hk end_reason; an empty one writes
 // none.
 func (a *App) MarkJobLostBecause(ctx context.Context, id, endReason string) error {
-	record := map[string]any{"state": "lost"}
+	record := map[string]any{"state": "lost", "at": a.Now().UTC()}
 	if endReason != "" {
 		record["end_reason"] = endReason
 	}

@@ -161,6 +161,46 @@ func TestHostsDiagnosticIsSorted(t *testing.T) {
 	}
 }
 
+func TestHostsDiagnosticOmitsCapacity(t *testing.T) {
+	a := testApp(t)
+	a.Config.Hosts = map[string]map[string]any{
+		"host-a": {"via": "ssh", "capacity": 6},
+		"host-b": {"via": "hub"},
+	}
+	out := &bytes.Buffer{}
+	a.Out = out
+	if err := a.diagnostics(t.Context(), "hosts", nil); err != nil {
+		t.Fatal(err)
+	}
+	got := out.String()
+	if strings.Contains(got, "capacity") {
+		t.Fatalf("hosts output must omit capacity: %q", got)
+	}
+	for _, want := range []string{"host=host-a via=ssh", "host=host-b via=hub"} {
+		if !strings.Contains(got, want+"\n") {
+			t.Errorf("hosts output missing exact host line %q in %q", want, got)
+		}
+	}
+}
+
+func TestHostsDiagnosticAcceptsCapacityConfig(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "hosts.toml")
+	if err := os.WriteFile(path, []byte("[hosts.host-a]\nvia = \"ssh\"\ncapacity = 4\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig rejected legacy capacity key: %v", err)
+	}
+	a := testApp(t)
+	a.Config = cfg
+	a.ConfigPath = path
+	a.Out = &bytes.Buffer{}
+	if err := a.diagnostics(t.Context(), "hosts", nil); err != nil {
+		t.Fatalf("hosts failed with legacy capacity key: %v", err)
+	}
+}
+
 func TestConfigValidationReportsFirstSortedError(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "hosts.toml")
 	toml := "[hosts.zz]\nvia = \"bad\"\n[hosts.aa]\nvia = \"bad\"\n[hosts.mm]\nvia = \"bad\"\n"

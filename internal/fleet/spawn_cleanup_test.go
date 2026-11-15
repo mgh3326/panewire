@@ -163,7 +163,7 @@ func TestFailedSpawnCleanupRemovesTheRegisteredLaneOnlyWhenThePaneCloses(t *test
 			}}
 			s := Spawn{Job: "job-a", Label: "job", CWD: "/work/project"}
 			if test.laneKnown {
-				s.registeredLane = &Job{HubLane: "job", Machine: "host-a", Pane: "pane-1", Role: "worker"}
+				s.registeredLane = &Job{HubLane: "job", Machine: "host-a", Pane: "pane-1", Role: "implementer"}
 			}
 			err := a.closeFailedSpawn(t.Context(), s, "pane-1", "codex")
 			if closed != test.wantClosed || (err == nil) != test.wantClosed {

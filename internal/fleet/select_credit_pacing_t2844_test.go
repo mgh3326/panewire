@@ -14,12 +14,12 @@ import (
 func TestCreditPacingRanksPacedPoolBehindCredit(t *testing.T) {
 	month := 30 * 24 * time.Hour
 	// claude's week projects to 120% at reset; its 5h window is not exhausted.
-	paced := PoolView{Status: "ok", Class: "spend", Blocking: ptrF(60), Projected: ptrF(120), LongProjected: ptrF(120), ShortUsed: ptrF(40)}
+	paced := PoolView{Status: "ok", Class: "spend", Blocking: ptrF(60), Projected: ptrF(120), RankProjected: ptrF(120), ShortUsed: ptrF(40)}
 	// claude's week projects to 90%: it leaves quota unused at reset.
-	unused := PoolView{Status: "ok", Class: "spend", Blocking: ptrF(60), Projected: ptrF(90), LongProjected: ptrF(90), ShortUsed: ptrF(40)}
+	unused := PoolView{Status: "ok", Class: "spend", Blocking: ptrF(60), Projected: ptrF(90), RankProjected: ptrF(90), ShortUsed: ptrF(40)}
 	// The 5h window paces to 450% but the week projects to 60%: sub-daily
 	// windows never pace a pool.
-	fastShort := PoolView{Status: "ok", Class: "spend", Blocking: ptrF(30), Projected: ptrF(450), LongProjected: ptrF(60), ShortUsed: ptrF(90)}
+	fastShort := PoolView{Status: "ok", Class: "spend", Blocking: ptrF(30), Projected: ptrF(450), RankProjected: ptrF(60), ShortUsed: ptrF(90)}
 	noFree := map[string]string{"sonnet": "claude", "omp-opus": "anthropic-api"}
 	cases := []struct {
 		name         string
@@ -32,7 +32,7 @@ func TestCreditPacingRanksPacedPoolBehindCredit(t *testing.T) {
 	}{
 		{"paced pool, credit balance recorded → credit first", balance(80, month), paced, noFree, "omp-opus", true, true},
 		{"paced pool, no credit balance recorded → credit still ranks in the free band", noBalance, paced, noFree, "omp-opus", true, false},
-		{"paced pool, credit balance zero → credit still ranks in the free band", balance(0, month), paced, noFree, "omp-opus", true, false},
+		{"paced pool, credit balance zero → credit excluded", balance(0, month), paced, noFree, "sonnet", true, false},
 		{"paced pool, credit gate refuses → the paced pool is next", balance(80, month), paced, map[string]string{"sonnet": "claude"}, "sonnet", true, true},
 		{"pool leaves quota unused without urgency → credit first", balance(80, month), unused, noFree, "omp-opus", false, false},
 		{"fast 5h window, week leaves quota → not paced", balance(80, month), fastShort, noFree, "omp-opus", false, false},
@@ -74,8 +74,8 @@ func TestCreditPacingRanksPacedPoolBehindCredit(t *testing.T) {
 // A window already used up still excludes a pool, paced or not.
 func TestCreditPacingExhaustedWindowStillExcludes(t *testing.T) {
 	for name, claude := range map[string]PoolView{
-		"5h used up":   {Status: "ok", Class: "spend", Blocking: ptrF(100), Projected: ptrF(120), LongProjected: ptrF(80), ShortUsed: ptrF(100)},
-		"week used up": {Status: "ok", Class: "spend", Blocking: ptrF(100), Projected: ptrF(100), LongProjected: ptrF(100)},
+		"5h used up":   {Status: "ok", Class: "spend", Blocking: ptrF(100), Projected: ptrF(120), RankProjected: ptrF(80), ShortUsed: ptrF(100)},
+		"week used up": {Status: "ok", Class: "spend", Blocking: ptrF(100), Projected: ptrF(100), RankProjected: ptrF(100)},
 	} {
 		t.Run(name, func(t *testing.T) {
 			a, s := creditFixture(t, noBalance, claude, "", map[string]string{"sonnet": "claude", "omp-opus": "anthropic-api"})

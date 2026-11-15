@@ -142,7 +142,6 @@ func TestFleetQuotaAgyNativeNeverRunsPacelever(t *testing.T) {
 	source := agyTestSource(client.spawnConfigPath, agyLoginFiles(agyToken), api, agyFPForTest, true)
 	client.nativeQuota = map[string]*nativeQuotaSource{"agy": source}
 	pacelever := &paceleverRunnerFake{pool: "agy"}
-	client.nodePacelever = pacelever.run
 	warned := newWarnLog(client)
 
 	sent := map[string]fleetQuotaSent{}
@@ -236,7 +235,6 @@ func TestFleetQuotaAgyLinuxSecretServiceLogin(t *testing.T) {
 		return `{"token":{"access_token":"` + secret + `"}}`, nil
 	}
 	client.nativeQuota = map[string]*nativeQuotaSource{"agy": source}
-	client.nodePacelever = (&paceleverRunnerFake{pool: "agy"}).run
 	warned := newWarnLog(client)
 
 	client.refreshFleetQuota(t.Context(), "agy", map[string]fleetQuotaSent{})
@@ -278,7 +276,6 @@ func TestFleetQuotaAgyNativeWithoutAMeasurableAccountDoesNotMeasure(t *testing.T
 			client.spawnConfigPath = claudeStore(t, hk.server.URL)
 			api := newAgyAPI()
 			client.nativeQuota = map[string]*nativeQuotaSource{"agy": agyTestSource(client.spawnConfigPath, agyLoginFiles(agyToken), api, c.fp, c.measurable)}
-			client.nodePacelever = (&paceleverRunnerFake{pool: "agy"}).run
 			warned := newWarnLog(client)
 			client.nativeQuota["agy"].Warn = client.warnMessage
 
@@ -321,7 +318,6 @@ func TestFleetQuotaAgyNativePublishesPresenceWhenMeasurementFails(t *testing.T) 
 	api := newAgyAPI()
 	api.replies["/v1internal:retrieveUserQuotaSummary"] = `{"groups":[]}`
 	client.nativeQuota = map[string]*nativeQuotaSource{"agy": agyTestSource(client.spawnConfigPath, agyLoginFiles(agyToken), api, agyFPForTest, true)}
-	client.nodePacelever = (&paceleverRunnerFake{pool: "agy"}).run
 	warned := newWarnLog(client)
 
 	client.refreshFleetQuota(t.Context(), "agy", map[string]fleetQuotaSent{})
@@ -348,7 +344,6 @@ func TestNodeQuotaRefreshAgyWithoutAnAccountFails(t *testing.T) {
 	api := newAgyAPI()
 	client := &HubClient{spawnConfigPath: "/nonexistent"}
 	client.nativeQuota = map[string]*nativeQuotaSource{"agy": agyTestSource("/nonexistent", agyLoginFiles(agyToken), api, "", false)}
-	client.nodePacelever = (&paceleverRunnerFake{pool: "agy"}).run
 	if _, code := nodeRun(t, client, nodeCommandQuotaRefresh, map[string]any{"pool": "agy"}); code != "refresh_failed" {
 		t.Fatalf("code=%q", code)
 	}
@@ -357,9 +352,9 @@ func TestNodeQuotaRefreshAgyWithoutAnAccountFails(t *testing.T) {
 	}
 }
 
-// Shared flow: a reading is current for 300 s — four minutes later it is
-// reused, six minutes later measured again — and it is published under the
-// configured account key with the lease released.
+// Shared flow refreshes a reading with a two-minute margin before its
+// 300-second reader TTL, publishing under the configured account key with the
+// lease released.
 func TestAgySharedReadingFreshnessAndPublish(t *testing.T) {
 	hk := newClaudeHK(t)
 	api := newAgyAPI()
@@ -370,7 +365,7 @@ func TestAgySharedReadingFreshnessAndPublish(t *testing.T) {
 	for _, step := range []struct {
 		after     time.Duration
 		published int
-	}{{0, 1}, {4 * time.Minute, 1}, {6 * time.Minute, 2}} {
+	}{{0, 1}, {3 * time.Minute, 1}, {4 * time.Minute, 2}} {
 		now = claudeTestNow.Add(step.after)
 		reading, err := source.Refresh(t.Context())
 		if err != nil {

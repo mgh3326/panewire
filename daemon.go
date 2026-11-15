@@ -12,7 +12,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 
@@ -32,7 +31,6 @@ type Config struct {
 	QuotaStopAct                               bool
 	Logging                                    LoggingConfig
 	Hub                                        HubDaemonConfig
-	IdleShutdown                               IdleShutdownConfig
 	StallDetect                                StallDetectConfig
 	Store                                      *Store
 	SchemaCommand                              []string
@@ -51,17 +49,20 @@ type Daemon struct {
 	idleWake     *idleWakeManager
 	stall        *stallDetectManager
 	paneMeta     *paneMetadataPublisher
-	idleShutdown *idleShutdownManager
 	caps         GuardResult
 	eventDone    chan struct{}
 	idleDone     chan struct{}
 	hubDone      chan struct{}
 	stallDone    chan struct{}
 	paneMetaDone chan struct{}
-	shutdownDone chan struct{}
 	resub        chan struct{}
 	subscribed   map[string]bool
-	mu           sync.Mutex
+	// lifecycleResubMin and lifecycleSnapshotWait are the debounce floors for
+	// lifecycle-triggered stream cycles and idle-wake snapshots. Zero selects
+	// the defaults; tests shrink them.
+	lifecycleResubMin     time.Duration
+	lifecycleSnapshotWait time.Duration
+	mu                    sync.Mutex
 }
 
 func NewDaemon(cfg Config) *Daemon {
@@ -93,7 +94,7 @@ func (d *Daemon) Start(ctx context.Context) error {
 	d.setCapabilities(guard)
 	_ = d.RecordSchemaGuard(ctx, guard, "startup")
 	if guard.Events && d.cfg.HerdrSocket != "" {
-		if c, err := NewHerdrClient(d.cfg.HerdrSocket); err == nil {
+		if c, err := newHerdrClient(d.cfg.HerdrSocket, d.cfg.Logger); err == nil {
 			d.setHerdrClient(c)
 		} else {
 			d.cfg.Logger.Warn("herdr unavailable", "error", err)
@@ -117,6 +118,17 @@ func (d *Daemon) Start(ctx context.Context) error {
 			manager.quota, err = newQuotaStopManager(d.store, idleRoot, d.cfg.QuotaStopAct, d.cfg.Logger)
 			if err != nil {
 				return err
+			}
+			manager.quota.session = func(job, pane string) string {
+				if session := nodeJobHerdrSessionByPaneFromRoot(idleRoot, pane); session != "" {
+					return session
+				}
+				return d.cfg.Hub.Client.herdrSessionFor(job, pane)
+			}
+			// A wait decision shows on the pane as panewire_quota; a herdr that
+			// cannot report metadata leaves panes unmarked (quota_stop_pane_token.go).
+			if d.capabilities().PaneMetadata {
+				manager.quota.show = manager.quota.reportQuotaWait
 			}
 			manager.quota.enqueue = manager.enqueue
 			d.idleWake = manager
@@ -219,14 +231,6 @@ func (d *Daemon) Start(ctx context.Context) error {
 			defer close(d.hubDone)
 			d.cfg.Hub.Client.Run(runCtx)
 		}()
-		// Report-only and off unless PANEWIRE_SESSION_REAP_REPORT_INTERVAL
-		// is set: starting it is a new schedule that needs operator approval.
-		// It runs on runCtx so Stop ends it with the other loops.
-		reapRoot := d.cfg.Hub.Client.jobsInboxRoot
-		if reapRoot == "" {
-			reapRoot = d.cfg.InboxRoot
-		}
-		startSessionReapReporter(runCtx, d.cfg.Hub.Client, d.cfg.HerdrSocket, reapRoot, d.cfg.Logger)
 	}
 	if d.stall != nil {
 		d.stallDone = make(chan struct{})
@@ -242,95 +246,7 @@ func (d *Daemon) Start(ctx context.Context) error {
 			d.paneMeta.Run(runCtx)
 		}()
 	}
-	if d.cfg.IdleShutdown.Enabled && d.cfg.Hub.Client != nil {
-		shutdownRoot := d.cfg.Hub.Client.jobsInboxRoot
-		if shutdownRoot == "" {
-			shutdownRoot = d.cfg.InboxRoot
-		}
-		if shutdownRoot == "" {
-			shutdownRoot = emitInboxRoot("")
-		}
-		panesAlive := hubPanesAliveHook(d.cfg.HerdrSocket)
-		manager := newIdleShutdownManager(d.cfg.IdleShutdown, shutdownRoot, idleShutdownDeps{
-			machineID: d.cfg.Hub.Client.machineID,
-			sessions:  hubSessionSnapshotAllHook(d.cfg.HerdrSocket),
-			jobLeases: func(ctx context.Context) ([]HubActiveJob, error) {
-				return idleShutdownJobLeases(shutdownRoot, panesAlive, ctx)
-			},
-			enqueue: d.cfg.Hub.Client.EnqueueRelayEvent,
-		}, d.cfg.Logger)
-		d.idleShutdown = manager
-		d.shutdownDone = make(chan struct{})
-		go func() {
-			defer close(d.shutdownDone)
-			manager.Run(runCtx)
-		}()
-	}
 	return nil
-}
-
-// idleShutdownJobLeases treats the node's jobs/<id>/events tree as the
-// Job lease record: claim and spawn events are written under
-// the shared inbox root by the emit path, which is exactly the tree
-// scanHubActiveJobsWithPanes reads. A jobs tree that exists but cannot be
-// listed is a blocker, never a clearance; a tree that does not exist simply
-// holds no leases. The same rule is applied one level deeper: a job directory
-// whose events cannot be listed, read, or parsed has unknown lease state and
-// counts as an active lease rather than powering off under work that cannot
-// be seen.
-func idleShutdownJobLeases(root string, panesAlive panesAliveFunc, ctx context.Context) ([]HubActiveJob, error) {
-	if root == "" {
-		return nil, errors.New("inbox root unset")
-	}
-	jobsDir := filepath.Join(root, "jobs")
-	if _, err := os.Stat(jobsDir); err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, err
-	}
-	entries, err := os.ReadDir(jobsDir)
-	if err != nil {
-		return nil, err
-	}
-	for _, entry := range entries {
-		if !entry.IsDir() || !hubJobIDPattern.MatchString(entry.Name()) {
-			continue
-		}
-		if !idleShutdownJobEventsLegible(filepath.Join(jobsDir, entry.Name(), "events")) {
-			return []HubActiveJob{{JobID: entry.Name()}}, nil
-		}
-	}
-	return scanHubActiveJobsWithPanes(ctx, root, panesAlive), nil
-}
-
-// idleShutdownJobEventsLegible applies the readability rules
-// scanHubJobEventDetails uses, but returns a verdict instead of silently
-// dropping the job: an unreadable directory or file, an oversized record, or
-// unparseable JSON all mean the lease state is unknown. A missing events
-// directory (or job directory) holds no lease at all (hk 3685).
-func idleShutdownJobEventsLegible(eventsDir string) bool {
-	entries, err := os.ReadDir(eventsDir)
-	if errors.Is(err, os.ErrNotExist) {
-		return true
-	}
-	if err != nil {
-		return false
-	}
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
-			continue
-		}
-		contents, err := os.ReadFile(filepath.Join(eventsDir, entry.Name()))
-		if err != nil || len(contents) > 16<<10 {
-			return false
-		}
-		var event hubInboxEvent
-		if json.Unmarshal(contents, &event) != nil {
-			return false
-		}
-	}
-	return true
 }
 
 // hubPanesAliveHook dials herdr per scan the way wait.agent and prompt do: the
@@ -365,23 +281,6 @@ func hubSessionSnapshotHook(socket string) func(context.Context) ([]HerdrAgentSt
 		}
 		defer client.Close()
 		return client.AgentStates(ctx)
-	}
-}
-
-// hubSessionSnapshotAllHook is the same short-lived client shape wired to
-// AgentStatesAll: the idle-shutdown probe must see panes herdr lists even
-// when this build cannot classify their status, so nothing is dropped.
-func hubSessionSnapshotAllHook(socket string) func(context.Context) ([]HerdrAgentState, error) {
-	if socket == "" {
-		return nil
-	}
-	return func(ctx context.Context) ([]HerdrAgentState, error) {
-		client, err := NewHerdrClient(socket)
-		if err != nil {
-			return nil, err
-		}
-		defer client.Close()
-		return client.AgentStatesAll(ctx)
 	}
 }
 
@@ -443,7 +342,7 @@ func (d *Daemon) eventLoop(ctx context.Context) {
 		}
 		client := d.herdrClient()
 		if client == nil {
-			connected, err := NewHerdrClient(d.cfg.HerdrSocket)
+			connected, err := newHerdrClient(d.cfg.HerdrSocket, d.cfg.Logger)
 			if err != nil {
 				if !waitDaemonRetry(ctx) {
 					return
@@ -476,6 +375,11 @@ func (d *Daemon) eventLoop(ctx context.Context) {
 			d.idleWake.Tick(ctx, time.Now().UTC())
 		}
 		streamOpen := true
+		streamCycleAt := time.Now()
+		var resubTimer *time.Timer
+		var resubDue <-chan time.Time
+		var snapTimer *time.Timer
+		var snapDue <-chan time.Time
 		for streamOpen {
 			select {
 			case <-ctx.Done():
@@ -500,6 +404,30 @@ func (d *Daemon) eventLoop(ctx context.Context) {
 				if d.stall != nil && (ev.Kind == "pane.output_matched" || ev.Kind == "pane_output_changed") {
 					d.stall.Wake(ev.PaneID)
 				}
+				// Lifecycle events keep the covered set honest and can pull a
+				// stream cycle forward: pane_created is recorded only because
+				// herdr detects the agent a moment later, and only
+				// pane_agent_detected proves one exists to subscribe to.
+				switch {
+				case isPaneDepartureEvent(ev.Kind):
+					d.dropSubscribedPane(ev.PaneID)
+				case isAgentDetectedEvent(ev.Kind) && agentDetectionArrival(ev) && ev.PaneID != "" && !d.subscribedPane(ev.PaneID):
+					// A pane outside the covered set just gained an agent:
+					// cycle the stream so Subscribe's fresh agent.list adds its
+					// per-pane subscriptions. Triggers inside the minimum
+					// interval coalesce into one deferred cycle at the
+					// interval's end — never dropped, never thundering.
+					if wait := streamCycleAt.Add(d.lifecycleResubInterval()).Sub(time.Now()); wait <= 0 {
+						streamOpen = false
+					} else if resubDue == nil {
+						resubTimer = time.NewTimer(wait)
+						resubDue = resubTimer.C
+					}
+				}
+				if isPaneLifecycleEvent(ev.Kind) && d.idleWake != nil && snapDue == nil {
+					snapTimer = time.NewTimer(d.lifecycleSnapshotDelay())
+					snapDue = snapTimer.C
+				}
 			case at := <-settle:
 				d.idleWake.Tick(ctx, at.UTC())
 			case <-poll:
@@ -509,7 +437,20 @@ func (d *Daemon) eventLoop(ctx context.Context) {
 				// Cycling the stream re-runs Subscribe against the fresh
 				// agent.list, which is also the reconnect coverage proof.
 				streamOpen = false
+			case <-resubDue:
+				resubDue = nil
+				streamOpen = false
+			case <-snapDue:
+				snapDue = nil
+				snapTimer.Stop()
+				d.observeIdleWakeSnapshot(ctx, client)
 			}
+		}
+		if resubTimer != nil {
+			resubTimer.Stop()
+		}
+		if snapTimer != nil {
+			snapTimer.Stop()
 		}
 		d.clearHerdrClient(client)
 		if !waitDaemonRetry(ctx) {
@@ -615,6 +556,55 @@ func (d *Daemon) subscribedSet() (map[string]bool, time.Time) {
 	return set, time.Now().UTC()
 }
 
+func (d *Daemon) subscribedPane(paneID string) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.subscribed[paneID]
+}
+
+// dropSubscribedPane removes a pane the stream no longer has reason to watch —
+// herdr reported it closed or exited — without touching the stream itself.
+func (d *Daemon) dropSubscribedPane(paneID string) {
+	if paneID == "" {
+		return
+	}
+	d.mu.Lock()
+	if d.subscribed != nil {
+		delete(d.subscribed, paneID)
+	}
+	d.mu.Unlock()
+}
+
+const (
+	defaultLifecycleResubMinInterval = 2 * time.Second
+	defaultLifecycleSnapshotWait     = 200 * time.Millisecond
+)
+
+func (d *Daemon) lifecycleResubInterval() time.Duration {
+	if d.lifecycleResubMin > 0 {
+		return d.lifecycleResubMin
+	}
+	return defaultLifecycleResubMinInterval
+}
+
+func (d *Daemon) lifecycleSnapshotDelay() time.Duration {
+	if d.lifecycleSnapshotWait > 0 {
+		return d.lifecycleSnapshotWait
+	}
+	return defaultLifecycleSnapshotWait
+}
+
+// agentDetectionArrival reports whether pane_agent_detected names a live,
+// unreleased agent — the only lifecycle event that proves a new pane needs
+// per-pane subscriptions. A null agent or released flag is a departure.
+func agentDetectionArrival(ev HerdrEvent) bool {
+	if ev.Released {
+		return false
+	}
+	agent := bytes.TrimSpace(ev.Agent)
+	return len(agent) > 0 && !bytes.Equal(agent, []byte("null"))
+}
+
 func (d *Daemon) idleWakeRetryLoop(ctx context.Context) {
 	d.idleWake.RetrySettled(ctx, time.Now().UTC())
 	ticker := time.NewTicker(time.Second)
@@ -642,7 +632,8 @@ func (d *Daemon) observeIdleWakeSnapshot(ctx context.Context, client *HerdrClien
 }
 func knownHerdrEvent(kind string) bool {
 	switch kind {
-	case "pane.agent_status_changed", "pane.output_matched", "pane.scroll_changed", "pane_output_changed", "pane_agent_status_changed", "pane_scroll_changed":
+	case "pane.agent_status_changed", "pane.output_matched", "pane.scroll_changed", "pane_output_changed", "pane_agent_status_changed", "pane_scroll_changed",
+		"pane.created", "pane_created", "pane.closed", "pane_closed", "pane.exited", "pane_exited", "pane.agent_detected", "pane_agent_detected":
 		return true
 	}
 	return false
@@ -748,7 +739,7 @@ func (d *Daemon) handle(ctx context.Context, c net.Conn) {
 			}
 		case "emit":
 			err = d.emitRelayEvent(req)
-		case "inbox":
+		case daemonop.InboxOp:
 			result, err = d.handleInbox(callCtx, req.Inbox)
 		case "jobs.own":
 			result, err = d.handleOwnJobs(callCtx, req.OwnJobs)
@@ -795,6 +786,12 @@ func errorString(err error) string {
 	return err.Error()
 }
 func (d *Daemon) Stop() error {
+	// The node finishes what is in flight, for a bounded time, before its
+	// loops are cancelled: a launch, an injection and a result upload cut off
+	// here would otherwise wait for the hub's deadline.
+	if d.cfg.Hub.Client != nil {
+		d.cfg.Hub.Client.Drain(context.Background())
+	}
 	if d.cancel != nil {
 		d.cancel()
 	}
@@ -824,10 +821,6 @@ func (d *Daemon) Stop() error {
 	if d.paneMetaDone != nil {
 		<-d.paneMetaDone
 		d.paneMetaDone = nil
-	}
-	if d.shutdownDone != nil {
-		<-d.shutdownDone
-		d.shutdownDone = nil
 	}
 	if d.listener != nil {
 		_ = d.listener.Close()
@@ -911,12 +904,12 @@ func (d *Daemon) emitRelayEvent(req localRequest) error {
 		return &codedError{ExitUsage, fmt.Errorf("invalid emit request")}
 	}
 	if req.Kind == "lane.event" {
-		if !hubAgentLabelPattern.MatchString(req.OwnerLane) || !validLaneEventID(req.EventID) || !validLaneEventText(req.Text) || len(req.Text) > laneEventTextLimitSink {
+		if !LaneNamePattern.MatchString(req.OwnerLane) || !validLaneEventID(req.EventID) || !validLaneEventText(req.Text) || len(req.Text) > laneEventTextLimitSink {
 			return &codedError{ExitUsage, fmt.Errorf("invalid emit request")}
 		}
 	} else if !hubJobIDPattern.MatchString(req.JobID) || req.ReportPath == "" {
 		return &codedError{ExitUsage, fmt.Errorf("invalid emit request")}
-	} else if relayTerminalSignalKinds[req.Kind] && (req.Reason == "" || !validReportRelayLaneName(req.OwnerLane)) {
+	} else if relayTerminalSignalKinds[req.Kind] && (req.Reason == "" || !validLaneReference(req.OwnerLane)) {
 		// Same rule as emitJobRecord: a terminal signal that cannot state why
 		// or name its owner lane is refused before it enters the outbox.
 		return &codedError{ExitUsage, fmt.Errorf("invalid emit request")}

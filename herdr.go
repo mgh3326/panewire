@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"sync"
 	"time"
@@ -15,6 +16,7 @@ import (
 // sole long-lived stream and therefore gets its own connection.
 type HerdrClient struct {
 	path    string
+	logger  *slog.Logger
 	mu      sync.Mutex
 	seq     int
 	subConn net.Conn
@@ -22,12 +24,23 @@ type HerdrClient struct {
 }
 
 func NewHerdrClient(path string) (*HerdrClient, error) {
+	return newHerdrClient(path, nil)
+}
+
+func newHerdrClient(path string, logger *slog.Logger) (*HerdrClient, error) {
 	conn, err := net.DialTimeout("unix", path, 2*time.Second)
 	if err != nil {
 		return nil, err
 	}
 	_ = conn.Close()
-	return &HerdrClient{path: path, closed: make(chan struct{})}, nil
+	return &HerdrClient{path: path, closed: make(chan struct{}), logger: logger}, nil
+}
+
+func (c *HerdrClient) log() *slog.Logger {
+	if c.logger != nil {
+		return c.logger
+	}
+	return slog.Default()
 }
 
 // The stall detector only ever holds the read-only projection — the compiler
@@ -131,19 +144,10 @@ func (c *HerdrClient) PanesAlive(ctx context.Context) (map[string]bool, error) {
 // optional display context; pane, status, revision, and herdr's independent
 // state-change sequence remain usable.
 func (c *HerdrClient) AgentStates(ctx context.Context) ([]HerdrAgentState, error) {
-	return c.agentStates(ctx, false)
+	return c.agentStates(ctx)
 }
 
-// AgentStatesAll is the fail-closed sibling for decisions that cannot afford
-// an invisible pane — the idle-shutdown probe, where a pane herdr lists but
-// this build cannot classify must still block poweroff. Entries whose pane id
-// or status fails validation are kept with Status "unknown" instead of being
-// dropped; callers that only admit positively-idle panes then block on them.
-func (c *HerdrClient) AgentStatesAll(ctx context.Context) ([]HerdrAgentState, error) {
-	return c.agentStates(ctx, true)
-}
-
-func (c *HerdrClient) agentStates(ctx context.Context, keepUnknown bool) ([]HerdrAgentState, error) {
+func (c *HerdrClient) agentStates(ctx context.Context) ([]HerdrAgentState, error) {
 	snapshot, err := c.Call(ctx, "agent.list", map[string]any{})
 	if err != nil {
 		return nil, err
@@ -163,17 +167,11 @@ func (c *HerdrClient) agentStates(ctx context.Context, keepUnknown bool) ([]Herd
 			pane.Label = displayLabel
 		}
 		if !validIdleWakePane(pane.PaneID) {
-			if keepUnknown {
-				states = append(states, HerdrAgentState{Status: "unknown", Authoritative: true})
-			}
 			continue
 		}
 		status := pane.Status
 		if !validObservedAgentStatus(status) {
-			if !keepUnknown {
-				continue
-			}
-			status = "unknown"
+			continue
 		}
 		states = append(states, HerdrAgentState{PaneID: pane.PaneID, WorkspaceID: pane.WorkspaceID, Label: pane.Label, AgentName: pane.Name, DisplayLabel: displayLabel, Harness: pane.Harness, Status: status, Revision: pane.Revision, SourceStateChangeSeq: pane.StateChangeSeq, InteractiveReady: pane.InteractiveReady, Authoritative: true})
 	}
@@ -186,6 +184,22 @@ type HerdrEvent struct {
 	Revision                         int64
 	Raw                              json.RawMessage
 	UnknownFields                    json.RawMessage
+	// Agent is pane_agent_detected's agent member verbatim — empty when the
+	// key is absent, "null" when herdr reports no agent — and Released is the
+	// same event's released flag. Both stay zero for every other kind.
+	Agent    json.RawMessage
+	Released bool
+}
+
+// Global pane lifecycle subscriptions ride the same events.subscribe request
+// as the per-pane set, so a pane spawned after the stream opened is seen in
+// seconds instead of at the next coverage scan. Subscription types are
+// dotted; the events they produce arrive underscored.
+var herdrLifecycleSubscriptions = []any{
+	map[string]any{"type": "pane.created"},
+	map[string]any{"type": "pane.closed"},
+	map[string]any{"type": "pane.exited"},
+	map[string]any{"type": "pane.agent_detected"},
 }
 
 // Subscribe also returns the pane set the request covered. Callers that need
@@ -204,18 +218,36 @@ func (c *HerdrClient) Subscribe(ctx context.Context) (<-chan HerdrEvent, []strin
 	if json.Unmarshal(snapshot, &listed) != nil {
 		return nil, nil, fmt.Errorf("invalid herdr agent list")
 	}
-	subs := make([]any, 0, len(listed.Agents)*3)
+	perPane := make([]any, 0, len(listed.Agents)*3)
 	panes := make([]string, 0, len(listed.Agents))
 	for _, a := range listed.Agents {
 		if a.PaneID == "" {
 			continue
 		}
 		panes = append(panes, a.PaneID)
-		subs = append(subs, map[string]any{"type": "pane.agent_status_changed", "pane_id": a.PaneID}, map[string]any{"type": "pane.output_matched", "pane_id": a.PaneID, "source": "recent_unwrapped", "match": map[string]any{"type": "regex", "value": ".*"}, "strip_ansi": true}, map[string]any{"type": "pane.scroll_changed", "pane_id": a.PaneID})
+		perPane = append(perPane, map[string]any{"type": "pane.agent_status_changed", "pane_id": a.PaneID}, map[string]any{"type": "pane.output_matched", "pane_id": a.PaneID, "source": "recent_unwrapped", "match": map[string]any{"type": "regex", "value": ".*"}, "strip_ansi": true}, map[string]any{"type": "pane.scroll_changed", "pane_id": a.PaneID})
 	}
+	subs := make([]any, 0, len(perPane)+len(herdrLifecycleSubscriptions))
+	subs = append(subs, herdrLifecycleSubscriptions...)
+	subs = append(subs, perPane...)
+	events, err := c.openEventStream(ctx, subs)
+	if err != nil {
+		// A herdr that predates the global lifecycle types rejects the mixed
+		// request; retry once on a new connection with the per-pane set only,
+		// which is exactly the coverage the base contract already proved.
+		c.log().Warn("herdr lifecycle subscriptions rejected; subscribing per-pane only", "error", err)
+		events, err = c.openEventStream(ctx, perPane)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+	return events, panes, nil
+}
+
+func (c *HerdrClient) openEventStream(ctx context.Context, subs []any) (<-chan HerdrEvent, error) {
 	conn, err := net.DialTimeout("unix", c.path, 2*time.Second)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	if d, ok := ctx.Deadline(); ok {
 		_ = conn.SetDeadline(d)
@@ -223,12 +255,12 @@ func (c *HerdrClient) Subscribe(ctx context.Context) (<-chan HerdrEvent, []strin
 	id := c.nextID()
 	if err := writeRequest(conn, id, "events.subscribe", map[string]any{"subscriptions": subs}); err != nil {
 		conn.Close()
-		return nil, nil, err
+		return nil, err
 	}
 	reader := bufio.NewReader(conn)
 	if _, err := readResponse(ctx, reader, id); err != nil {
 		conn.Close()
-		return nil, nil, err
+		return nil, err
 	}
 	c.mu.Lock()
 	c.subConn = conn
@@ -253,7 +285,7 @@ func (c *HerdrClient) Subscribe(ctx context.Context) (<-chan HerdrEvent, []strin
 			}
 		}
 	}()
-	return out, panes, nil
+	return out, nil
 }
 
 // AgentDetails returns the full agent.list identity rows — cwd and harness
@@ -334,7 +366,10 @@ func decodeHerdrEvent(line []byte) (HerdrEvent, bool) {
 		e.AgentStatus = d.AgentStatus
 	}
 	var object map[string]json.RawMessage
-	if json.Unmarshal(env.Event, &object) != nil {
+	payload := env.Data
+	if json.Unmarshal(env.Event, &object) == nil {
+		payload = env.Event
+	} else {
 		_ = json.Unmarshal(env.Data, &object)
 	}
 	known := map[string]bool{
@@ -342,6 +377,7 @@ func decodeHerdrEvent(line []byte) (HerdrEvent, bool) {
 		"agent": true, "display_agent": true, "title": true, "state_labels": true, "scroll": true,
 		"matched_line": true, "read": true, "truncated": true, "format": true, "tab_id": true, "text": true,
 		"source": true, "offset_from_bottom": true, "max_offset_from_bottom": true, "viewport_rows": true,
+		"pane": true, "final_status": true, "released": true,
 	}
 	unknown := map[string]json.RawMessage{}
 	for k, v := range object {
@@ -350,6 +386,51 @@ func decodeHerdrEvent(line []byte) (HerdrEvent, bool) {
 		}
 	}
 	uj, _ := json.Marshal(unknown)
-	return HerdrEvent{Kind: kind, PaneID: e.PaneID, WorkspaceID: e.WorkspaceID, AgentStatus: e.AgentStatus, Revision: e.Revision, Raw: append(json.RawMessage(nil), line...), UnknownFields: uj}, true
+	ev := HerdrEvent{Kind: kind, PaneID: e.PaneID, WorkspaceID: e.WorkspaceID, AgentStatus: e.AgentStatus, Revision: e.Revision, Raw: append(json.RawMessage(nil), line...), UnknownFields: uj}
+	if isPaneCreatedEvent(kind) || isAgentDetectedEvent(kind) {
+		var data struct {
+			Pane *struct {
+				PaneID      string `json:"pane_id"`
+				WorkspaceID string `json:"workspace_id"`
+			} `json:"pane"`
+			Agent    json.RawMessage `json:"agent"`
+			Released bool            `json:"released"`
+		}
+		// payload is whichever member carried the event's fields — the
+		// object-valued form keeps them under "event", the string form
+		// under "data" — so lifecycle extraction sees both shapes.
+		if json.Unmarshal(payload, &data) == nil {
+			// pane_created nests identity under data.pane; the lifecycle
+			// payloads carry no agent_status, so the event's status fields
+			// stay empty and cannot leak into status-change consumers.
+			if isPaneCreatedEvent(kind) && data.Pane != nil {
+				if ev.PaneID == "" {
+					ev.PaneID = data.Pane.PaneID
+				}
+				if ev.WorkspaceID == "" {
+					ev.WorkspaceID = data.Pane.WorkspaceID
+				}
+			}
+			if isAgentDetectedEvent(kind) {
+				ev.Agent = data.Agent
+				ev.Released = data.Released
+			}
+		}
+	}
+	return ev, true
 }
 func DecodeHerdrEvent(line []byte) (HerdrEvent, bool) { return decodeHerdrEvent(line) }
+
+// The four global pane lifecycle kinds arrive on the stream in herdr's
+// underscored wire form; the dotted subscription form is accepted too so a
+// kind rename on either side still classifies.
+func isPaneCreatedEvent(kind string) bool { return kind == "pane.created" || kind == "pane_created" }
+func isPaneDepartureEvent(kind string) bool {
+	return kind == "pane.closed" || kind == "pane_closed" || kind == "pane.exited" || kind == "pane_exited"
+}
+func isAgentDetectedEvent(kind string) bool {
+	return kind == "pane.agent_detected" || kind == "pane_agent_detected"
+}
+func isPaneLifecycleEvent(kind string) bool {
+	return isPaneCreatedEvent(kind) || isPaneDepartureEvent(kind) || isAgentDetectedEvent(kind)
+}

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // hkJobUpdateContract answers PUT /v1/jobs/{job} by the rule handoffkeep's
@@ -42,7 +43,7 @@ func hkJobUpdateContract(t *testing.T) (*hkJobs, func() []string) {
 		_, _ = w.Write([]byte(`{}`))
 	}))
 	t.Cleanup(server.Close)
-	return &hkJobs{q: &hkQuota{base: server.URL, token: "fixture", client: server.Client()}}, func() []string {
+	return &hkJobs{q: &hkQuota{base: server.URL, token: "fixture", client: server.Client()}, now: time.Now}, func() []string {
 		mu.Lock()
 		defer mu.Unlock()
 		return append([]string(nil), bodies...)
