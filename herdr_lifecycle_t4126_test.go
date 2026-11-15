@@ -30,6 +30,10 @@ type lifecycleFakeHerdr struct {
 	reject   int
 	streams  []net.Conn
 	methods  []string
+	// beforeAck is written to the next accepted stream before its
+	// subscription_started reply, the order herdr produces when it fans an
+	// event out as the subscription is being acknowledged.
+	beforeAck []any
 }
 
 func newLifecycleFakeHerdr(t *testing.T, agents []map[string]any) *lifecycleFakeHerdr {
@@ -109,15 +113,20 @@ func (f *lifecycleFakeHerdr) handleSubscribe(c net.Conn, id string, params json.
 	f.mu.Lock()
 	f.subs = append(f.subs, body.Subscriptions)
 	reject := f.reject > 0
+	var beforeAck []any
 	if reject {
 		f.reject--
 	} else {
 		f.streams = append(f.streams, c)
+		beforeAck, f.beforeAck = f.beforeAck, nil
 	}
 	f.mu.Unlock()
 	if reject {
 		f.writeLine(c, map[string]any{"id": id, "error": map[string]any{"code": "invalid_params", "message": "unknown subscription type"}})
 		return
+	}
+	for _, v := range beforeAck {
+		f.writeLine(c, v)
 	}
 	f.respond(c, id, map[string]any{"type": "subscription_started"})
 }
@@ -153,6 +162,12 @@ func (f *lifecycleFakeHerdr) setAgents(agents []map[string]any) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.agents = agents
+}
+
+func (f *lifecycleFakeHerdr) setBeforeAck(events ...any) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.beforeAck = events
 }
 
 func (f *lifecycleFakeHerdr) subscribeParams() [][]map[string]any {
@@ -419,6 +434,42 @@ func TestHerdrLifecycleSubscribeCarriesGlobalTypes(t *testing.T) {
 			t.Fatalf("subscriptions=%v, want the four globals only", subs)
 		}
 	})
+}
+
+// herdr fans an accepted subscription's events out on the same connection as
+// the acknowledgement, so an event can reach the client before it has matched
+// the reply. That event is the stream's first delivery, not handshake noise.
+func TestHerdrSubscribeKeepsEventsThatRaceTheReply(t *testing.T) {
+	fake := newLifecycleFakeHerdr(t, []map[string]any{lifecycleAgent("p1")})
+	fake.setBeforeAck(paneCreatedEnvelope("p2"))
+	client, err := newHerdrClient(fake.path, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	events, _, err := client.Subscribe(context.Background())
+	if err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+	next := func(failure string) HerdrEvent {
+		t.Helper()
+		select {
+		case ev := <-events:
+			return ev
+		case <-time.After(2 * time.Second):
+			t.Fatal(failure)
+			return HerdrEvent{}
+		}
+	}
+	if ev := next("the pane_created pushed before the subscribe reply was dropped in the handshake"); !isPaneCreatedEvent(ev.Kind) || ev.PaneID != "p2" {
+		t.Fatalf("first streamed event=%+v, want pane_created for p2", ev)
+	}
+	// The handshake-kept lines are delivered ahead of the live read loop, which
+	// must still carry what herdr pushes after the acknowledgement.
+	fake.push(paneCreatedEnvelope("p3"))
+	if ev := next("the live read loop stopped after the handshake-kept event"); !isPaneCreatedEvent(ev.Kind) || ev.PaneID != "p3" {
+		t.Fatalf("second streamed event=%+v, want pane_created for p3", ev)
+	}
 }
 
 // (b) An error reply to the globals is followed by one per-pane-only
