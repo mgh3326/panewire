@@ -403,6 +403,12 @@ When the line is sent:
   hk's project and state filters, page by page; an answer that does not echo
   the project filter counts as an error, never as backlog. The line goes out
   on the drain and at most once per `relay.drain_wake_interval` (default 1h).
+  The in-work count is the larger of the heartbeat's active jobs and the hk
+  tasks of the project in state `developing` or `reviewing` that do not await
+  an operator decision (hk 4631: the heartbeat drops live jobs, so it can read
+  zero while hk shows claimed work). The line stays owed while that count is
+  above the threshold. The count trusts hk's task states: a row left in
+  `developing` or `reviewing` holds the line until hk closes it.
   A lane first seen idle gets no line. The owed line and the last send are
   kept in the inbox store (`drain_wake_lanes`), so a hub restart keeps a line
   still owed. A line stays owed until the writer confirms it was written; a
