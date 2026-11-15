@@ -80,13 +80,46 @@ func hkErrText(err error) string { return "handoffkeep: " + err.Error() }
 // have.
 var errHKNotFound = errors.New("not_found")
 
+// errHKTaskID is a task id that cannot name a task; it is permanent for the
+// request that carries it (TaskReadPermanent).
+var errHKTaskID = errors.New("task id must be positive")
+
 // hkTaskID parses a task id as the hk CLI did.
 func hkTaskID(task string) (int64, error) {
 	id, err := strconv.ParseInt(task, 10, 64)
 	if err != nil || id < 1 {
-		return 0, errors.New("task id must be positive")
+		return 0, errHKTaskID
 	}
 	return id, nil
+}
+
+// TaskReadPermanent reports whether a failed task read will not change on a
+// retry for as long as the request stands: the task is gone, or the id names
+// no task. Any other error is an hk outage or an unreadable answer, which a
+// later read may answer.
+func TaskReadPermanent(err error) bool {
+	return errors.Is(err, errHKNotFound) || errors.Is(err, errHKTaskID)
+}
+
+// TaskReadOutage reports whether a failed task read is the hk service itself
+// failing — unreachable, refusing the credential, answering 5xx, rate-limited,
+// or timing the call out — so every later read fails the same way until hk
+// answers. A refusal hk names for one task (a 4xx code, a 403 ACL included)
+// and a 2xx answer that cannot be read (errHKUnreadable) are about that row,
+// not the service.
+func TaskReadOutage(err error) bool {
+	if err == nil || TaskReadPermanent(err) || errors.Is(err, errHKUnreadable) {
+		return false
+	}
+	var he *client.HTTPError
+	if errors.As(err, &he) {
+		switch {
+		case he.Status >= 500, he.Status == http.StatusTooManyRequests, he.Status == http.StatusRequestTimeout, he.Status == http.StatusUnauthorized:
+			return true
+		}
+		return false
+	}
+	return true
 }
 
 // hkTaskIDIs reports whether an answered task is the requested one. The id
@@ -258,6 +291,18 @@ func hkGetTask(ctx context.Context, task string) (client.Task, error) {
 		}
 		return t, err
 	})
+}
+
+// ReadTaskPriority reads one task's hk priority. The spawn queue's parked
+// notice reads it once per parking stretch, because hk's batched states route
+// does not carry a priority (hk 4662). A task hk does not have is
+// errHKNotFound.
+func ReadTaskPriority(ctx context.Context, task string) (int, error) {
+	t, err := hkGetTask(ctx, task)
+	if err != nil {
+		return 0, err
+	}
+	return t.Priority, nil
 }
 
 // hkTaskProject is the task's project, "" when it has none.

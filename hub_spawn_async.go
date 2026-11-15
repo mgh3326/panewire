@@ -401,6 +401,9 @@ func (h *HubServer) runSpawnCoordinator(parent context.Context) {
 			// Start conditions are checked first so a row released in this
 			// tick is scheduled by the scan below rather than the next one.
 			h.checkWaitingSpawns(ctx)
+			// A request parked too long tells its owner once (hk 4662); the
+			// pass is rate-limited, so most ticks skip it.
+			h.checkParkedSpawnNotices(ctx)
 			// Work claimed during a scan may move later in the ordering. Do not
 			// schedule the same row twice in one pass, even if it reappears.
 			seen := map[string]bool{}

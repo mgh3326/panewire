@@ -106,6 +106,20 @@ type hubSpawnTask struct {
 	ParkReason     string
 	NextCheck      time.Time
 	FailedAttempts int
+	// ParkSince is when the request's current wait began, kept across its
+	// re-parks and binds and restarted by a new attempt; ParkPriority is its
+	// bound task's hk priority read for that wait (-1: not read yet). The
+	// durable owner-notice marker (hk 4662) is ParkJudgedReason — the park
+	// reason set the pass last judged — and ParkNoticeAt, when the owner was
+	// told, so a restart never repeats a notice and never loses one.
+	ParkSince        time.Time
+	ParkPriority     int
+	ParkNoticeAt     time.Time
+	ParkJudgedReason string
+	// ParkPriorityFailures counts the passes that could not read the task for
+	// this wait, so a row hk will not answer for leaves the candidate page
+	// instead of blocking it forever.
+	ParkPriorityFailures int
 	// ClaimResult is the node refusal that proved an hk job claim on
 	// ClaimedHost (hk 4661): written once, never by a later pre-claim
 	// refusal or not-started attestation. A request with one ends with it.
@@ -140,8 +154,9 @@ func (s *laneInboxStore) ensureSpawnTasks() error {
 	}
 	// Stores from before hk 4460 lack the placement columns (postgres: the
 	// 0008 migration). A restart restores counts from these two columns, and
-	// refresh_waits arrived with hk 4600 (postgres: 0011).
-	for _, column := range []string{`placed_ms BIGINT NOT NULL DEFAULT 0`, `claimed_ms BIGINT NOT NULL DEFAULT 0`, `exclusions TEXT NOT NULL DEFAULT '[]'`, `claimed_host TEXT NOT NULL DEFAULT ''`, `refresh_waits TEXT NOT NULL DEFAULT '[]'`, `expires_ms BIGINT NOT NULL DEFAULT 0`, `conditions_met_ms BIGINT NOT NULL DEFAULT 0`, `condition_result TEXT NOT NULL DEFAULT ''`, `park_reason TEXT NOT NULL DEFAULT ''`, `next_check_ms BIGINT NOT NULL DEFAULT 0`, `failed_attempts INTEGER NOT NULL DEFAULT 0`, `claim_result TEXT NOT NULL DEFAULT ''`} {
+	// refresh_waits arrived with hk 4600 (postgres: 0011). The four parked
+	// notice columns are hk 4662's (postgres: 0019).
+	for _, column := range []string{`placed_ms BIGINT NOT NULL DEFAULT 0`, `claimed_ms BIGINT NOT NULL DEFAULT 0`, `exclusions TEXT NOT NULL DEFAULT '[]'`, `claimed_host TEXT NOT NULL DEFAULT ''`, `refresh_waits TEXT NOT NULL DEFAULT '[]'`, `expires_ms BIGINT NOT NULL DEFAULT 0`, `conditions_met_ms BIGINT NOT NULL DEFAULT 0`, `condition_result TEXT NOT NULL DEFAULT ''`, `park_reason TEXT NOT NULL DEFAULT ''`, `next_check_ms BIGINT NOT NULL DEFAULT 0`, `failed_attempts INTEGER NOT NULL DEFAULT 0`, `claim_result TEXT NOT NULL DEFAULT ''`, `park_since_ms BIGINT NOT NULL DEFAULT 0`, `park_priority INTEGER NOT NULL DEFAULT -1`, `park_notice_ms BIGINT NOT NULL DEFAULT 0`, `park_judged_reason TEXT NOT NULL DEFAULT ''`, `park_priority_failures INTEGER NOT NULL DEFAULT 0`} {
 		if _, err := s.db.ExecContext(ctx, `ALTER TABLE spawn_operations ADD COLUMN `+column); err != nil {
 			if err := ignoreDuplicateColumn(err); err != nil {
 				return err
@@ -490,11 +505,18 @@ func queueSpawnNotifications(ctx context.Context, s *laneInboxStore, tx *sql.Tx,
 
 func scanSpawnTask(row interface{ Scan(...any) error }) (hubSpawnTask, error) {
 	var task hubSpawnTask
-	var payload, result, node, exclusions, refreshWaits, conditionResult, claimResult string
-	var created, deadline, lastRun, placed, expires, conditionsMet, nextCheck int64
-	err := row.Scan(&task.Job, &task.Owner, &payload, &task.Status, &created, &deadline, &node, &result, &task.Attempt, &lastRun, &placed, &exclusions, &task.ClaimedHost, &refreshWaits, &expires, &conditionsMet, &conditionResult, &task.ParkReason, &nextCheck, &task.FailedAttempts, &claimResult)
+	var payload, result, node, exclusions, refreshWaits, conditionResult, claimResult, parkJudgedReason string
+	var created, deadline, lastRun, placed, expires, conditionsMet, nextCheck, parkSince, parkNoticeAt int64
+	err := row.Scan(&task.Job, &task.Owner, &payload, &task.Status, &created, &deadline, &node, &result, &task.Attempt, &lastRun, &placed, &exclusions, &task.ClaimedHost, &refreshWaits, &expires, &conditionsMet, &conditionResult, &task.ParkReason, &nextCheck, &task.FailedAttempts, &claimResult, &parkSince, &task.ParkPriority, &parkNoticeAt, &parkJudgedReason, &task.ParkPriorityFailures)
 	if err != nil {
 		return task, err
+	}
+	task.ParkJudgedReason = parkJudgedReason
+	if parkSince > 0 {
+		task.ParkSince = time.UnixMilli(parkSince)
+	}
+	if parkNoticeAt > 0 {
+		task.ParkNoticeAt = time.UnixMilli(parkNoticeAt)
 	}
 	stored := task.Status
 	task.Status = spawnLogicalStatus(stored)
@@ -592,7 +614,7 @@ func (s *laneInboxStore) unbindRefusedSpawn(parent context.Context, task hubSpaw
 	}
 	ctx, done := s.op(parent)
 	defer done()
-	result, err := s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET node_id=NULL,node_payload='',status='accepted',exclusions=?,failed_attempts=failed_attempts+1,park_reason=?,next_check_ms=?,claimed_host=CASE WHEN ?='' THEN claimed_host ELSE ? END,result=CASE WHEN ?='' THEN result ELSE ? END,claim_result=CASE WHEN claim_result='' THEN ? ELSE claim_result END WHERE request_id=? AND attempt=? AND node_id=? AND status=? AND (claimed_host='' OR ?='' OR claimed_host=?)`), string(raw), parkReason, retryAt, claimedHost, claimedHost, claimedResult, claimedResult, claimProof, task.Request.RequestID, task.Attempt, task.Node.RequestID, spawnStoredStatus(task.Status, task.Node), claimedHost, claimedHost)
+	result, err := s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET node_id=NULL,node_payload='',status='accepted',exclusions=?,failed_attempts=failed_attempts+1,park_reason=?,next_check_ms=?,park_since_ms=CASE WHEN park_since_ms=0 AND ?<>'' THEN CAST(? AS BIGINT) ELSE park_since_ms END,park_priority=CASE WHEN park_since_ms=0 THEN -1 ELSE park_priority END,park_priority_failures=CASE WHEN park_since_ms=0 THEN 0 ELSE park_priority_failures END,claimed_host=CASE WHEN ?='' THEN claimed_host ELSE ? END,result=CASE WHEN ?='' THEN result ELSE ? END,claim_result=CASE WHEN claim_result='' THEN ? ELSE claim_result END WHERE request_id=? AND attempt=? AND node_id=? AND status=? AND (claimed_host='' OR ?='' OR claimed_host=?)`), string(raw), parkReason, retryAt, parkReason, now.UnixMilli(), claimedHost, claimedHost, claimedResult, claimedResult, claimProof, task.Request.RequestID, task.Attempt, task.Node.RequestID, spawnStoredStatus(task.Status, task.Node), claimedHost, claimedHost)
 	if err != nil {
 		return hubSpawnTask{}, err
 	}
@@ -620,7 +642,7 @@ func (s *laneInboxStore) unbindSpawn(parent context.Context, id string, attempt 
 	return s.spawnTask(parent, id)
 }
 
-const spawnTaskColumns = `job,owner,payload,status,created_ms,deadline_ms,node_payload,result,attempt,last_run_ms,placed_ms,exclusions,claimed_host,refresh_waits,expires_ms,conditions_met_ms,condition_result,park_reason,next_check_ms,failed_attempts,claim_result`
+const spawnTaskColumns = `job,owner,payload,status,created_ms,deadline_ms,node_payload,result,attempt,last_run_ms,placed_ms,exclusions,claimed_host,refresh_waits,expires_ms,conditions_met_ms,condition_result,park_reason,next_check_ms,failed_attempts,claim_result,park_since_ms,park_priority,park_notice_ms,park_judged_reason,park_priority_failures`
 
 func (s *laneInboxStore) spawnTask(parent context.Context, id string) (hubSpawnTask, error) {
 	ctx, done := s.op(parent)
@@ -807,7 +829,7 @@ func (s *laneInboxStore) resumeCleanedSpawn(parent context.Context, task hubSpaw
 	// A deliberate repeat asks for the request again, so its time limit
 	// starts over with the new attempt.
 	expires := now.Add(fleet.SpawnExpiresFor(spawn.Role, task.Request.ExpiresSeconds))
-	result, err = tx.ExecContext(ctx, s.q(`UPDATE spawn_operations SET status='accepted',deadline_ms=?,expires_ms=?,node_id=NULL,node_payload='',attempt=attempt+1,trace_recorded=0,last_run_ms=0,exclusions='[]',claimed_host=?,refresh_waits='[]' WHERE request_id=? AND status='retryable' AND attempt=?`), spawnAttemptDeadline(now, task.Request.DeadlineSeconds, expires).UnixMilli(), expires.UnixMilli(), spawnPinnedHost(task), task.Request.RequestID, task.Attempt)
+	result, err = tx.ExecContext(ctx, s.q(`UPDATE spawn_operations SET status='accepted',deadline_ms=?,expires_ms=?,node_id=NULL,node_payload='',attempt=attempt+1,trace_recorded=0,last_run_ms=0,exclusions='[]',claimed_host=?,refresh_waits='[]',park_since_ms=0,park_priority=-1,park_priority_failures=0 WHERE request_id=? AND status='retryable' AND attempt=?`), spawnAttemptDeadline(now, task.Request.DeadlineSeconds, expires).UnixMilli(), expires.UnixMilli(), spawnPinnedHost(task), task.Request.RequestID, task.Attempt)
 	if err != nil {
 		return task, err
 	}

@@ -456,6 +456,21 @@ No host installation or service management is performed by spawn.
 | `load_threshold` | `1.0` | load5/ncpu value above which a host takes no new job while anything else qualifies. |
 | `wake_after_s` | `600` | How long the task must have waited before saturated awake hosts justify waking a sleeper. |
 
+The hub's spawn-queue numbers are `placement.json` keys too, not
+`hosts.toml`:
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `spawn_backoff_seconds` | `30` | Base of a request's re-placement back-off (`base × 2^(n-1)`, spread ±20 %). |
+| `spawn_backoff_max_seconds` | `600` | Cap of that back-off, re-applied after the spread. |
+| `spawn_wake_batch` | `8` | How many parked requests one timer tick wakes on an event. |
+| `spawn_park_notice_seconds` | `1800` | How long a request's wait must last while it is parked before an urgent request (its `--urgency` flag, else hk priority 1 or 2) tells its owner lane once, with the reason, since when, the next check and what would unpark it. A P3 wait is never told. |
+
+Every value is unmeasured; 0 or absent keeps the default. See
+[hub-spawn-operations.md](hub-spawn-operations.md#parked-notice) for the
+notice's one-per-reason rule, its durable marker and how a hub restart treats
+it.
+
 `[placement.shadow]` and `[placement.capability.<class>]` tune the placement
 shadow comparison, which records how other rankings would have ordered the
 hosts and never changes a placement. Every key is optional; see

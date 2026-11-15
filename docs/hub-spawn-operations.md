@@ -222,8 +222,8 @@ quota refusal.
 ## Parked
 
 hk 4661; design hk design/2026-11-13/hub-owned-spawn-queue §2 (`parked`),
-§3 rules 3 and 4, §9a. The owner notice for a long-parked request (hk 4662)
-and start conditions (hk 4736) are later parts.
+§3 rules 3 and 4, §9a. Start conditions are [above](#start-conditions); the
+owner notice for a long-parked request is [Parked notice](#parked-notice).
 
 **Parked, not ended.** When placement finds no candidate for a request that
 has a limit (`expires_ms>0`), the request is parked instead of ending
@@ -302,9 +302,67 @@ that request, and for no other request. Only a client's deliberate replay of
 an ended `retryable` request starts them over. Exclusions have no `until` in
 this part.
 
-The three numbers are `placement.json` keys (0 or absent: the defaults,
-unmeasured, design §9a): `{"spawn_backoff_seconds": 30,
-"spawn_backoff_max_seconds": 600, "spawn_wake_batch": 8}`.
+The numbers are `placement.json` keys (0 or absent: the defaults, unmeasured,
+design §9a and §9b Q2): `{"spawn_backoff_seconds": 30,
+"spawn_backoff_max_seconds": 600, "spawn_wake_batch": 8,
+"spawn_park_notice_seconds": 1800}`.
+
+### Parked notice
+
+hk 4662; design §6 (notices to the owner lane) and §9b Q2. A sweep of the
+parked requests tells an urgent request's owner once when its wait (below)
+reaches `spawn_park_notice_seconds` (1800 = 30 min by default), as one `info`
+line:
+
+`[panewire] SPAWN_PARKED <job> request=<id> reason=quota parked_since=… next_check_at=… unpark=…`
+
+`unpark` is the wake of every reason in the stored set (the table above).
+Urgency is the request's own decision, exactly as placement read it at submit:
+an `--urgency` flag the submitter passed wins (`urgent` tells, `normal` stays
+quiet), and only a request without one asks its bound hk task's priority
+(`park_priority`, read once per wait; 1 or 2 is urgent). A request with no
+task and no flag is not urgent, and one with no owner lane is never told.
+
+The sweep (`checkParkedSpawnNotices`, `hub_spawn_park_notice.go`) runs on the
+coordinator's tick, 60 s apart, and examines at most 64 candidate rows from a
+keyset cursor, earliest wait first. Its progress never depends on a row's
+outcome: the cursor moves past every row it examines, whatever happens, so no
+row — a P3 backlog, a task hk answers badly for, a rejected notice — can hold
+the page. A row leaves the candidate set when it is judged: the durable
+`park_judged_reason` names the reason set it was judged under, told or not. The
+cursor wraps at the end of a sweep; it lives in hub memory, so a restart starts
+the sweep at the head, which only repeats a sweep.
+
+A row whose task priority cannot be read is handled by what failed:
+
+| Read outcome | Effect |
+|---|---|
+| the task is gone, or the request names no task | reads as 0 (never urgent) and is judged |
+| a 4xx refusal for this task, or a 2xx answer that cannot be parsed | `park_priority_failures` counts the sweep; after 3 the task reads as 0 and the row is judged |
+| hk unreachable, 5xx, 429/408, 401 (an outage) | the row stays unjudged and the sweep stops after 2 such reads; the cursor resumes after them |
+
+A notice hk refuses to persist for good judges the row as not told and the
+sweep goes on; a transport failure, a 5xx, or a retryable 4xx (401, 403, 408,
+425, 429 — the inbox batch's own permanent set) leaves it unjudged, and a later
+sweep resends the same event.
+
+The notice is at most one per reason set for the request's life: nothing
+repeats while the request stays parked for the reason the notice named, a park
+that names other blockers may send one more, and a later attempt that parks
+again for an already-judged reason stays quiet. The judgement is durable —
+`park_judged_reason` (the reason set last judged, told or not) and
+`park_notice_ms` (when the owner was told; `0019_spawn_park_notice.sql`) — so a
+restart neither repeats nor loses a notice: a row parked before the restart is
+told by the hub that starts after it. The event id also names the wait start
+and the reason set (`spawn-park:<request>:<park_since_ms>:<reason>`), so a
+resend of the same notice is the same durable handoffkeep event.
+
+`park_since_ms` is the request's wait: it starts at its first park, survives
+every re-park and a bind a node then refuses (so the wait that is counted is
+the whole one), and starts over with a new attempt — the expiry replay and a
+deliberate replay of a retryable request both reset it, the priority read and
+its failure count, keeping the judgement. A notice is recorded only after
+handoffkeep took the durable row (or refused it for good).
 
 ### Rolling back past parking
 
@@ -317,6 +375,13 @@ places it at once, without back-off or wake batch, and its GET shows
 a stale `park_reason` that a newer hub ignores (a bound row never reads
 parked) and clears at its next bind. `TestOlderHubPlacesParkedRowsAsAccepted_t4661`
 runs those predicates against a parked row.
+
+`0019_spawn_park_notice.sql` adds only `park_since_ms`, `park_priority` (-1),
+`park_notice_ms`, `park_judged_reason` (0 and `''`) and
+`park_priority_failures` (0); an older hub neither
+reads nor writes them either, so a rollback loses no queue state. A newer hub
+reads a stored judgement as already judged for that reason set, so it repeats
+nothing, and it re-reads a priority only while `park_priority` is still -1.
 
 **Roll back only with an empty spawn queue, and keep it empty.** The
 pre-parking hub's time limit (part 3, #587) ignores `claimed_host`,
