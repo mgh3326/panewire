@@ -800,9 +800,15 @@ only when the report is published and is the completing one), read back when
 the answer is ambiguous or the record is already terminal, retried at most twice
 more with the same payload within a 30 s budget. The single spawned repair PUT is
 also read back after an ambiguous reply but never repeated. Step 3 is the late
-write hk accepts once on a terminal record (hk 4354): `200` is pinned, `409`
-means the record already names another report. A `409` is an outcome, logged
-(`report pin kept`) and receipted as `held`, never an error. Step 4 writes
+write hk accepts once on a terminal record (hk 4354), so a same-id retry whose
+record ended before the upload landed still attaches the report. It reads the
+record first: a record with no report takes the pair write once, a record
+already naming these bytes is a no-op with no write, and a record naming
+another report is refused — that pin can never become this report's, so `done`
+keeps the local file, logs `report pin kept` and exits 75. A `409` from the
+write itself (another writer pinned between the read and the write) is the same
+refusal. A refusal is receipted as `held`, so a rerun repeats it without
+another write. Step 4 writes
 `job.completed` and the relay once per `S`, carrying the exact document key when
 step 1 had succeeded by then, and comments on the job's hk task.
 
@@ -854,7 +860,9 @@ An interactive `done` that completed but left the report out of hk, or its pin
 unwritten, prints its `OK` line and exits 1 with `completed; report not in hk;
 rerun the same command` (or `report not pinned in hk`). That is reporting only:
 the job completed, and the same command run again finishes the missing step.
-The watcher warns and carries on. `escalate` is not part
+The one pin failure a rerun cannot fix is a record that already names another
+report: `done` exits 75 with `completed; hk record names another report; local
+report kept`. The watcher warns and carries on. `escalate` is not part
 of this: it uploads under `reports/<job>/<file name>` and writes
 `{state:"escalated", report_doc, report_sha256}`; the watcher writes
 `{state:"lost"}` after two missing-pane observations, or when a reviewer pane is
