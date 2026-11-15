@@ -327,8 +327,8 @@ func TestDonePinConflictIsRefused(t *testing.T) {
 		t.Fatalf("record=%v, want the held pin", rec)
 	}
 	pinReceipts := r.events(eventReportPinned)
-	if len(pinReceipts) != 1 || str(pinReceipts[0], "outcome") != "held" {
-		t.Fatalf("pin receipts=%v, want one held", pinReceipts)
+	if len(pinReceipts) != 1 || str(pinReceipts[0], "outcome") != "held" || str(pinReceipts[0], "document") != r.key("answer\n") {
+		t.Fatalf("pin receipts=%v, want one held naming this report's document", pinReceipts)
 	}
 	if _, e := os.Stat(r.path); e != nil {
 		t.Fatalf("report stat error=%v, want the local report kept", e)
@@ -365,8 +365,8 @@ func TestDoneLatePinRefusalKeepsTheReport(t *testing.T) {
 		t.Fatalf("record=%v, want no pin", rec)
 	}
 	pinReceipts := r.events(eventReportPinned)
-	if len(pinReceipts) != 1 || str(pinReceipts[0], "outcome") != "held" {
-		t.Fatalf("pin receipts=%v, want one held", pinReceipts)
+	if len(pinReceipts) != 1 || str(pinReceipts[0], "outcome") != "held" || str(pinReceipts[0], "document") != r.key("answer\n") {
+		t.Fatalf("pin receipts=%v, want one held naming this report's document", pinReceipts)
 	}
 	if _, e := os.Stat(r.path); e != nil {
 		t.Fatalf("report stat error=%v, want the local report kept", e)
