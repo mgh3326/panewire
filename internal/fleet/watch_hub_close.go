@@ -595,16 +595,20 @@ func (a *App) settleHubClose(ctx context.Context, id string, listed func(ctx con
 			return cancel("orphaned")
 		}
 		return HubClosePending, nil
-	case !op.Final():
+	case !op.Final() && !(ended && op.State == CloseOpClosing):
 		// Still registered or closing: the hub repeats the request until it
-		// is final (docs/node-commands.md).
+		// is final (docs/node-commands.md). An operation left closing (a
+		// node crash mid-close) after an independent end will get no
+		// repeat; it may have closed the pane, so it settles below as
+		// unknown does, once the pane inventory shows the pane absent (#593
+		// od-4a876257a3).
 		return HubClosePending, nil
 	case op.Attempt != in.Attempt:
 		return cancel("stale")
 	}
 	switch op.State {
 	case CloseOpClosed:
-	case CloseOpGone, CloseOpUnknown:
+	case CloseOpGone, CloseOpUnknown, CloseOpClosing:
 		// gone came from the node's agent list, and unknown may not have
 		// closed anything: both wait for the pane inventory to show the
 		// pane absent.

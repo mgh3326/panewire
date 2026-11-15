@@ -270,3 +270,31 @@ func TestWatcherExitsAfterASettledClose_t4632(t *testing.T) {
 		t.Fatalf("job.lost %v, want only the settlement's", lost)
 	}
 }
+
+// #593 od-4a876257a3: a node crash left the operation closing, then a revoke
+// ended the attempt. No hub repeat will come; the daemon settles it once the
+// pane inventory shows the pane absent, and waits while it is listed.
+func TestSettlementRecoversAClosingOpAfterAnIndependentEnd_t4632(t *testing.T) {
+	a, h := hubCloseFixture(t)
+	in := liveIntent(t, a)
+	recordHubClose(t, a, in)
+	writeJobCloseOp(t, a, CloseOp{RequestID: in.RequestID, Attempt: in.Attempt, State: CloseOpClosing})
+	if e := a.event(context.Background(), "j", "job.revoked", map[string]any{}); e != nil {
+		t.Fatal(e)
+	}
+	listed := true
+	settle := HubCloseSettlement{App: a, PaneListed: func(context.Context, string, string) (bool, error) { return listed, nil }}
+	if st, e := settle.Settle(context.Background(), "j"); e != nil || st != HubClosePending {
+		t.Fatalf("settle with the pane listed = %v, %v; want pending", st, e)
+	}
+	listed = false
+	if st, e := settle.Settle(context.Background(), "j"); e != nil || st != HubCloseSettled {
+		t.Fatalf("settle with the pane gone = %v, %v; want settled", st, e)
+	}
+	if rec := h.record(t, "j"); str(rec, "state") != "lost" || str(rec, "end_reason") != hubCloseReason {
+		t.Fatalf("hk = %v", rec)
+	}
+	if st, _ := ledgerState(t, a, "j"); st != "released" {
+		t.Fatalf("quota %s, want released", st)
+	}
+}
