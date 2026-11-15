@@ -1,6 +1,9 @@
 package panewire
 
-import "strings"
+import (
+	"context"
+	"strings"
+)
 
 // A lane.event names the pane that emitted it (hk 3434), so the hub can tell a
 // worker's own progress note from a design session's or the desk's on the same
@@ -25,6 +28,39 @@ func laneEventSenderPane(job hubScannedRelayEvent) string {
 		return ""
 	}
 	return boundLaneEventPaneID(job.PaneID)
+}
+
+// laneEventsKnown reports whether this connection's hub feature state is
+// known: the hub has answered (a pong) or its hub.features arrived. The hub
+// queues its features at connect, before it answers, so a pong after the
+// features proves the gate (hub.go handleAgent). Until then a lane.event is
+// held, because relayWire would cut it for a hub that may take it whole.
+func (peer *hubClientConnection) laneEventsKnown(acked bool) bool {
+	return acked || peer.featuresKnown.Load()
+}
+
+// splitRelayBurst divides a burst into the events to write now and the
+// lane.event records to hold until the hub's feature state is known.
+func splitRelayBurst(events []hubClientEvent, laneKnown bool) (write, held []hubClientEvent) {
+	if laneKnown {
+		return events, nil
+	}
+	for _, event := range events {
+		if event.Kind == "lane.event" {
+			held = append(held, event)
+			continue
+		}
+		write = append(write, event)
+	}
+	return write, held
+}
+
+// writeRelayBurst writes the relay events scanned for this connection. Held
+// lane.event records are released, so the next burst rescans them.
+func (client *HubClient) writeRelayBurst(ctx context.Context, peer *hubClientConnection, laneKnown bool) error {
+	write, held := splitRelayBurst(client.jobCompletionEvents(), laneKnown)
+	client.releaseRelayEvents(held...)
+	return client.writeRelayEvents(write, peer.relayWriter(ctx))
 }
 
 // relayWire is a relay event's wire form on this connection. The sender pane

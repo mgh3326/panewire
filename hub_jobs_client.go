@@ -195,7 +195,8 @@ type hubScannedRelayEvent struct {
 	EventTime time.Time
 	Text      string
 	Truncated bool
-	// Sink is a lane.event its producer named a sink (emit --sink).
+	// Sink selects the sink wire bound: a sink event, or a file or request
+	// without the ceiling marker (hk 4835).
 	Sink bool
 }
 
@@ -428,7 +429,7 @@ type hubInboxEvent struct {
 	EventID        string `json:"event_id"`
 	Text           string `json:"text"`
 	Truncated      bool   `json:"truncated"`
-	Sink           bool   `json:"sink,omitempty"`
+	Ceiling        bool   `json:"ceiling,omitempty"`
 	Payload        struct {
 		Late           bool   `json:"late,omitempty"`
 		AgentLabel     string `json:"agent_label"`

@@ -345,7 +345,7 @@ func executeInbox(client inboxHTTPClient, stdout, stderr io.Writer, req inboxReq
 		if item.SupersededAt > 0 {
 			fmt.Fprintf(stdout, "superseded by #%d\n", item.SupersededBy)
 		}
-		fmt.Fprintln(stdout, relayTextForKind(item.Kind, item.Event))
+		fmt.Fprintln(stdout, inboxItemPrintText(item.Kind, item.Event))
 	case "ack":
 		var result struct {
 			Acked int64 `json:"acked"`
@@ -420,7 +420,7 @@ func runInboxWait(client inboxHTTPClient, stdout, stderr io.Writer, lane string,
 		if item.SupersededAt > 0 {
 			fmt.Fprintf(stdout, "superseded by #%d\n", item.SupersededBy)
 		}
-		fmt.Fprintln(stdout, relayTextForKind(item.Kind, item.Event))
+		fmt.Fprintln(stdout, inboxItemPrintText(item.Kind, item.Event))
 		return ExitOK
 	}
 }

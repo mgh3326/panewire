@@ -248,15 +248,8 @@ func TestNodePaneCaptureDocOnlyForAHubThatAdvertisedIt(t *testing.T) {
 }
 
 func TestHubFeaturesAdvertisePaneCaptureDoc(t *testing.T) {
-	agent := &hubAgent{features: make(chan hubFeaturesEvent, 1)}
-	agent.queueFeatures()
-	select {
-	case event := <-agent.features:
-		if !slices.Contains(event.Features, "pane_capture_doc") {
-			t.Fatalf("hub.features=%v, want pane_capture_doc", event.Features)
-		}
-	default:
-		t.Fatal("hub queued no hub.features")
+	if event := hubFeaturesFrame(); !slices.Contains(event.Features, "pane_capture_doc") {
+		t.Fatalf("hub.features=%v, want pane_capture_doc", event.Features)
 	}
 }
 

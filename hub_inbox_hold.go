@@ -170,6 +170,11 @@ func (h *HubServer) prepareHeldBatch(b laneInboxBatch) (laneInboxBatch, error) {
 // The relay row holds a small stable reference, while the inbox retains the
 // actual injection. Use it on first delivery and every replay path.
 func (h *HubServer) inboxRelayDirective(kind string, e hubJobEventPayload, route reportRelayRoute, id int64) hubRelayInjectEvent {
+	if kind == "lane.event" {
+		// A replayed event is rebuilt from its record and lost the inbox row id
+		// receiveInbox set; the typed head must still name the row (lane_event_long.go).
+		e = h.withLaneInboxID(e)
+	}
 	d := relayInjectDirective(kind, e, route, id)
 	d.Text = h.appendInboxSummary(kind, e, h.receivingLane(kind, e), d.Text)
 	if h.inbox == nil || kind != "lane.event" || !strings.HasPrefix(e.EventID, "held-") {

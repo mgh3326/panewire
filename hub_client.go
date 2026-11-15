@@ -662,6 +662,9 @@ type hubClientConnection struct {
 	// acceptsLaneEventLong is the same for hubFeatureLaneEventLong
 	// (lane_event_long.go).
 	acceptsLaneEventLong atomic.Bool
+	// featuresKnown is set once this connection's hub.features arrived. Until
+	// then, or until the hub answers, a lane.event is held (laneEventsKnown).
+	featuresKnown atomic.Bool
 	// acceptsPaneCaptureDoc is the same for hubFeaturePaneCaptureDoc
 	// (node_command.go).
 	acceptsPaneCaptureDoc atomic.Bool
@@ -2064,7 +2067,7 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 	if err := peer.write(ctx, hubClientWireEvent(client.heartbeatEvent(ctx))); err != nil {
 		return nil, err
 	}
-	if err := client.writeRelayEvents(client.jobCompletionEvents(), peer.relayWriter(ctx)); err != nil {
+	if err := client.writeRelayBurst(ctx, peer, false); err != nil {
 		return nil, err
 	}
 	readErrors := make(chan error, 1)
@@ -2155,6 +2158,7 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 				peer.acceptsReadiness.Store(slices.Contains(message.Features, hubFeatureReadiness))
 				peer.acceptsLaneEventPane.Store(slices.Contains(message.Features, hubFeatureLaneEventPane))
 				peer.acceptsLaneEventLong.Store(slices.Contains(message.Features, hubFeatureLaneEventLong))
+				peer.featuresKnown.Store(true)
 				peer.acceptsPaneCaptureDoc.Store(slices.Contains(message.Features, hubFeaturePaneCaptureDoc))
 				peer.acceptsHostActivity.Store(slices.Contains(message.Features, hubFeatureHostActivity))
 				peer.acceptsCheckoutPull.Store(slices.Contains(message.Features, hubFeatureCheckoutPull))
@@ -2185,7 +2189,19 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 	serveDone := make(chan struct{})
 	defer close(serveDone)
 	preferenceProbing := false
+	// heldLane are lane.event records taken from client.events before the hub's
+	// feature state was known; they are written once it is (laneEventsKnown).
+	var heldLane []hubClientEvent
+	defer func() { client.releaseRelayEvents(heldLane...) }()
 	for {
+		for len(heldLane) > 0 && peer.laneEventsKnown(acked) {
+			event := heldLane[0]
+			if err := peer.write(ctx, peer.relayWire(event)); err != nil {
+				return nil, err
+			}
+			client.commitRelaySent(event)
+			heldLane = heldLane[1:]
+		}
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
@@ -2195,6 +2211,11 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 			// Any pong proves the hub registered this node; stop waiting.
 			acked = true
 			helloAck.Stop()
+			// The hub answered after its features (it queues them at connect), so
+			// the lane.event records the handshake held are written now.
+			if err := client.writeRelayBurst(ctx, peer, peer.laneEventsKnown(acked)); err != nil {
+				return nil, err
+			}
 			if helloRetried && !capsResent {
 				// The pong may answer the first hello, merely late: the
 				// capability-free hello then replaced a capable record. Send
@@ -2209,7 +2230,7 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 				if err := peer.write(ctx, hubClientWireEvent(client.heartbeatEvent(ctx))); err != nil {
 					return nil, err
 				}
-				if err := client.writeRelayEvents(client.jobCompletionEvents(), peer.relayWriter(ctx)); err != nil {
+				if err := client.writeRelayBurst(ctx, peer, peer.laneEventsKnown(acked)); err != nil {
 					return nil, err
 				}
 			}
@@ -2235,11 +2256,15 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 			if err := peer.write(ctx, hubClientWireEvent(client.heartbeatEvent(ctx))); err != nil {
 				return nil, err
 			}
-			if err := client.writeRelayEvents(client.jobCompletionEvents(), peer.relayWriter(ctx)); err != nil {
+			if err := client.writeRelayBurst(ctx, peer, peer.laneEventsKnown(acked)); err != nil {
 				return nil, err
 			}
 			helloAck.Reset(client.helloAckTimeoutOrDefault())
 		case event := <-client.events:
+			if event.Kind == "lane.event" && !peer.laneEventsKnown(acked) {
+				heldLane = append(heldLane, event)
+				continue
+			}
 			if err := peer.write(ctx, peer.relayWire(event)); err != nil {
 				client.releaseRelayEvents(event)
 				return nil, err
@@ -2252,7 +2277,7 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 			if err := peer.write(ctx, hubClientWireEvent(client.heartbeatEvent(ctx))); err != nil {
 				return nil, err
 			}
-			if err := client.writeRelayEvents(client.jobCompletionEvents(), peer.relayWriter(ctx)); err != nil {
+			if err := client.writeRelayBurst(ctx, peer, peer.laneEventsKnown(acked)); err != nil {
 				return nil, err
 			}
 		case result := <-preferenceResults:

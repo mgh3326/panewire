@@ -25,6 +25,10 @@ heartbeat budget (`hubMaxMessageBytes`, 32 KiB) is unchanged.
   Longer text is refused with `emit: --text is N bytes; the lane.event ceiling is 16384`.
 - With `--sink`, text is cut to 8192 bytes at emit, as before. A sink lane types
   nothing, so its record is the cut text.
+- A non-sink file carries `"ceiling": true`. A file without the marker predates
+  this change, and the node treats its text as sink-bounded when it cuts for an
+  older hub. Its text was never longer than the sink bound, so nothing is cut that
+  an older hub would have accepted.
 
 ## Hub
 
@@ -51,6 +55,13 @@ A node connection whose hub did not advertise it sends the cut form instead:
 text over the typed limit (or over 8192 for a sink event) is cut with
 `[truncated]`, and the payload carries `truncated: true`
 (`laneEventPayloadForOldHub`, applied in `relayWire`).
+
+A node decides this only once its hub has answered. Until then it holds every
+`lane.event` (`splitRelayBurst`, `heldLane` in the session loop) and writes it
+after the first pong. The hub queues `hub.features` at connect, before it answers,
+so a pong proves the feature state is known. Without this hold, a long event sent
+before the features arrived would reach an upgraded hub already cut, and its inbox
+row would lack the tail. Job events are not held.
 
 Consequences:
 

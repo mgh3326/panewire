@@ -168,7 +168,7 @@ func newestLaneEventFromPane(dir, pane string, since time.Time) (laneQuestion, e
 	var newest laneQuestion
 	for _, entry := range entries {
 		info, err := entry.Info()
-		if err != nil || !info.Mode().IsRegular() || filepath.Ext(entry.Name()) != ".json" || info.Size() > laneEventMaxBytes {
+		if err != nil || !info.Mode().IsRegular() || filepath.Ext(entry.Name()) != ".json" || info.Size() > LaneEventMaxBytes {
 			continue
 		}
 		if !since.IsZero() && info.ModTime().Before(since.Truncate(time.Second)) {

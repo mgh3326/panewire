@@ -289,6 +289,12 @@ func (h *HubServer) relayLaneEventContext(ctx context.Context, event hubJobEvent
 		h.broadcastRelayRejected(event, "text_too_long")
 		return relayLaneEventResult{RejectedTooLong: true}
 	}
+	if !ingress && sinkRoute && len(event.Text) > laneEventTextLimitSink {
+		// A sink route records text and types none. A node's longer text is cut
+		// to the sink bound before the inbox row is written, so the row and the
+		// relay record agree. The producer's event file keeps the whole text.
+		event.Text, event.Truncated = truncateLaneEventTextAtLimit(event.Text, laneEventTextLimitSink)
+	}
 	if result, handled := h.receiveInbox("lane.event", &event, sender, hubAgentMachineID(sender), false, ctx); handled {
 		return result
 	}
@@ -342,11 +348,6 @@ func (h *HubServer) relayLaneEventContext(ctx context.Context, event hubJobEvent
 		h.forgetRelayEvent(key)
 		h.broadcastRelayRejected(event, "text_too_long")
 		return relayLaneEventResult{RejectedTooLong: true}
-	}
-	if !ingress && route.Sink && len(event.Text) > laneEventTextLimitSink {
-		// A sink route records text and types none. A node's longer text is cut
-		// to the sink bound here, not refused: the producer's event file keeps it whole.
-		event.Text, event.Truncated = truncateLaneEventTextAtLimit(event.Text, laneEventTextLimitSink)
 	}
 	persistRoute := route
 	if ingress {

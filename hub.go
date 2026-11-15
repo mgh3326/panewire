@@ -256,8 +256,7 @@ type hubAgent struct {
 	failovers   chan hubFailoverEvent
 	revocations chan hubJobRevokedEvent
 	assignments chan hubJobAssignedEvent
-	// features carries hub.features; featuresSent stops it after the first.
-	features     chan hubFeaturesEvent
+	// featuresSent stops hub.features after the first (queueFeatures).
 	featuresSent atomic.Bool
 	relays       chan hubRelayInjectEvent
 	persisted    chan hubRelayPersistedEvent
@@ -1292,11 +1291,10 @@ func (h *HubServer) handleAgent(writer http.ResponseWriter, request *http.Reques
 	}
 	connection.SetReadLimit(max(hubMaxMessageBytes, laneEventFrameMax))
 	agentContext, agentCancel := context.WithCancel(request.Context())
-	agent := &hubAgent{conn: connection, lifetime: agentContext, machineID: machineID, credential: hubRequestBearerToken(request), failovers: make(chan hubFailoverEvent, 64), revocations: make(chan hubJobRevokedEvent, 64), assignments: make(chan hubJobAssignedEvent, 64), features: make(chan hubFeaturesEvent, 1), relays: make(chan hubRelayInjectEvent, 64), persisted: make(chan hubRelayPersistedEvent, 64), idleRoutes: make(chan hubIdleWakeRouteEvent, 64)}
+	agent := &hubAgent{conn: connection, lifetime: agentContext, machineID: machineID, credential: hubRequestBearerToken(request), failovers: make(chan hubFailoverEvent, 64), revocations: make(chan hubJobRevokedEvent, 64), assignments: make(chan hubJobAssignedEvent, 64), relays: make(chan hubRelayInjectEvent, 64), persisted: make(chan hubRelayPersistedEvent, 64), idleRoutes: make(chan hubIdleWakeRouteEvent, 64)}
 	defer connection.CloseNow()
 	defer agentCancel()
 	go agent.writeFailovers(agentContext)
-	go agent.writeFeatures(agentContext)
 	go agent.writeRevocations(agentContext)
 	go agent.writeAssignments(agentContext)
 	go agent.writeRelays(agentContext)
@@ -1386,6 +1384,9 @@ func (h *HubServer) handleAgentMessageContext(ctx context.Context, machineID, re
 			return
 		}
 		if message.Type == "ping" {
+			// hub.features is written before the pong, so a node that sees the
+			// pong already knows the hub's feature state (laneEventsKnown).
+			agent.queueFeatures()
 			_ = agent.writeJSON(hubOutbound{Type: "pong"})
 		}
 	case "applied":
@@ -2643,19 +2644,6 @@ func (agent *hubAgent) writeAssignments(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case event := <-agent.assignments:
-			if err := agent.writeJSON(event); err != nil {
-				return
-			}
-		}
-	}
-}
-
-func (agent *hubAgent) writeFeatures(ctx context.Context) {
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case event := <-agent.features:
 			if err := agent.writeJSON(event); err != nil {
 				return
 			}

@@ -1,6 +1,7 @@
 package panewire
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
 )
@@ -41,6 +42,33 @@ func laneEventRelayText(event hubJobEventPayload) string {
 	return prefix + utf8PrefixWithin(event.Text, budget) + " " + tail
 }
 
+// withLaneInboxID returns e naming the lane inbox row that holds it whole. The
+// live path sets inboxID in receiveInbox; a replay builds the event from its
+// handoffkeep record, which has no row id, so the row is looked up by the
+// event's relay key (the same key receiveInbox stored it under). Text that fits
+// the typed line needs no pointer and is left alone.
+func (h *HubServer) withLaneInboxID(e hubJobEventPayload) hubJobEventPayload {
+	if e.inboxID != 0 || h.inbox == nil || len(e.Text) <= laneEventTextLimit {
+		return e
+	}
+	if id, err := h.inbox.store.rowIDForKey(relayEventDedupeKey("lane.event", e)); err == nil {
+		e.inboxID = id
+	}
+	return e
+}
+
+// rowIDForKey is the lane_inbox row stored under a relay key, or 0 when none.
+func (s *laneInboxStore) rowIDForKey(key string) (int64, error) {
+	ctx, done := s.op(s.life)
+	defer done()
+	var id int64
+	err := s.db.QueryRowContext(ctx, s.q(`SELECT id FROM lane_inbox WHERE event_key=?`), s.storedKey(key)).Scan(&id)
+	if err == sql.ErrNoRows {
+		return 0, nil
+	}
+	return id, err
+}
+
 // laneEventPayloadForOldHub is the lane.event payload a node sends to a hub
 // that did not advertise hubFeatureLaneEventLong. Text over the bound that hub
 // accepts is cut to it and marked truncated. Nothing is refused and no retry
@@ -67,4 +95,19 @@ func laneEventPayloadForOldHub(payload []byte, sink bool) []byte {
 		return payload
 	}
 	return raw
+}
+
+// laneEventReadText is what `panewire inbox read` and `inbox wait` print for a
+// lane.event: the whole stored text. The typed head is for a pane line only; the
+// pointer names this command, so it must not print the head again.
+func laneEventReadText(event hubJobEventPayload) string {
+	return "(같은 내용이 두 번 보이면 재실행 금지) [event] " + event.OwnerLane + " :: " + event.Text
+}
+
+// inboxItemPrintText is the text `inbox read` and `inbox wait` print for an item.
+func inboxItemPrintText(kind string, event hubJobEventPayload) string {
+	if kind == "lane.event" {
+		return laneEventReadText(event)
+	}
+	return relayTextForKind(kind, event)
 }

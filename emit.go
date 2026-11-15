@@ -112,6 +112,10 @@ type emitRecord struct {
 	// Sink marks a lane.event emitted with --sink: its text is cut to the sink
 	// bound at emit, and the node keeps that bound on the wire (relayWire).
 	Sink bool `json:"sink,omitempty"`
+	// Ceiling marks a non-sink lane.event whose text is kept whole up to the
+	// ceiling (hk 4835). A file without it predates that change, so its text was
+	// cut to the sink bound or the typed line at emit and the node treats it as sink-bounded.
+	Ceiling bool `json:"ceiling,omitempty"`
 }
 
 func runEmitCLI(args []string, stdout, stderr io.Writer, cfg CLIConfig) int {
@@ -214,7 +218,7 @@ func runEmitCLI(args []string, stdout, stderr io.Writer, cfg CLIConfig) int {
 		if paneID == "" {
 			paneID = os.Getenv("HERDR_PANE_ID")
 		}
-		record := emitRecord{DeliveryClass: *deliver, NotifyType: *notifyType, Type: *kind, Cause: *cause, PR: *pr, Head: *head, Epoch: *epoch, CreatedAt: time.Now().UTC().Format(time.RFC3339), OwnerLane: *lane, Label: *label, Host: *host, PaneID: paneID, EventID: *eventID, Text: finalText, Truncated: truncated, Sink: *sink}
+		record := emitRecord{DeliveryClass: *deliver, NotifyType: *notifyType, Type: *kind, Cause: *cause, PR: *pr, Head: *head, Epoch: *epoch, CreatedAt: time.Now().UTC().Format(time.RFC3339), OwnerLane: *lane, Label: *label, Host: *host, PaneID: paneID, EventID: *eventID, Text: finalText, Truncated: truncated, Sink: *sink, Ceiling: !*sink}
 		if record.Epoch == 0 {
 			record.Epoch = 1
 		}
@@ -691,7 +695,7 @@ func pushEmitRecord(socket string, record emitRecord, inboxRoot string, timeout 
 		DeliveryClass: record.DeliveryClass, Late: record.Late, NotifyType: record.NotifyType, Cause: record.Cause, Op: "emit", Kind: record.Type, JobID: record.JobID, Epoch: record.Epoch, OwnerLane: record.OwnerLane,
 		Label: record.Label, Host: record.Host, PaneID: record.PaneID, ReportPath: record.ReportPath,
 		ReportLastLine: record.ReportLastLine, Reason: record.Reason, Question: record.Question,
-		PR: record.PR, Head: record.Head, AgentLabel: record.AgentLabel, EventID: record.EventID, Text: record.Text, Truncated: record.Truncated, Sink: record.Sink, InboxRoot: inboxRoot, TimeoutMS: timeout.Milliseconds(),
+		PR: record.PR, Head: record.Head, AgentLabel: record.AgentLabel, EventID: record.EventID, Text: record.Text, Truncated: record.Truncated, Ceiling: record.Ceiling, InboxRoot: inboxRoot, TimeoutMS: timeout.Milliseconds(),
 	}
 	body, _ := json.Marshal(request)
 	if _, err := fmt.Fprintf(connection, "%s\n", body); err != nil {
