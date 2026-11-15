@@ -719,7 +719,7 @@ func TestClaimedRetryTimeoutKeepsNodeRefusal_t4661(t *testing.T) {
 // a host still renews and gives up as unstarted.
 func TestReplayPinIsNoClaim_t4661(t *testing.T) {
 	for name, result := range map[string]string{
-		"checkout busy": `{"rc":75,"stage":"checkout","reason":"checkout_refused:busy","node_result":true,"retryable":true}`,
+		"checkout busy":  `{"rc":75,"stage":"checkout","reason":"checkout_refused:busy","node_result":true,"retryable":true}`,
 		"unsent timeout": `{"rc":124,"stage":"landing","reason":"timeout","host":"desktop","retryable":true}`,
 	} {
 		t.Run(name, func(t *testing.T) {
