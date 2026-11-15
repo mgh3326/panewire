@@ -36,8 +36,12 @@ func TestSpawnCheckoutSpecValidation(t *testing.T) {
 		{"ref is a tag", append(slices.Clone(base), "--checkout-origin", "https://git.invalid/org/repo-a.git", "--checkout-commit", hubHead, "--checkout-ref", "refs/tags/v1"), "pull/<n>/head or refs/heads/<branch>"},
 		{"ref is a bare branch", append(slices.Clone(base), "--checkout-origin", "https://git.invalid/org/repo-a.git", "--checkout-commit", hubHead, "--checkout-ref", "main"), "pull/<n>/head or refs/heads/<branch>"},
 		{"origin carries a credential", append(slices.Clone(base), "--checkout-origin", "https://user:pw@git.invalid/org/repo-a.git", "--checkout-commit", hubHead, "--checkout-ref", "pull/7/head"), "naming owner/repo"},
+		{"ssh origin carries a password", append(slices.Clone(base), "--checkout-origin", "ssh://deploy:secret@git.invalid/org/repo-a", "--checkout-commit", hubHead, "--checkout-ref", "pull/7/head"), "naming owner/repo"},
+		{"https origin carries a bare user", append(slices.Clone(base), "--checkout-origin", "https://user@git.invalid/org/repo-a.git", "--checkout-commit", hubHead, "--checkout-ref", "pull/7/head"), "naming owner/repo"},
 		{"origin names no owner", append(slices.Clone(base), "--checkout-origin", "https://git.invalid/repo-a.git", "--checkout-commit", hubHead, "--checkout-ref", "pull/7/head"), "naming owner/repo"},
 		{"origin is a local path", append(slices.Clone(base), "--checkout-origin", "/work/fleet/repo-a", "--checkout-commit", hubHead, "--checkout-ref", "pull/7/head"), "naming owner/repo"},
+		{"origin is a drive letter", append(slices.Clone(base), "--checkout-origin", "C:owner/repo", "--checkout-commit", hubHead, "--checkout-ref", "pull/7/head"), "naming owner/repo"},
+		{"origin is plain http", append(slices.Clone(base), "--checkout-origin", "http://git.invalid/org/repo-a", "--checkout-commit", hubHead, "--checkout-ref", "pull/7/head"), "naming owner/repo"},
 		{"valid spec", valid, ""},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -54,13 +58,15 @@ func TestSpawnCheckoutSpecValidation(t *testing.T) {
 		})
 	}
 
-	// Every remote form the docs name is accepted, and the spec carries the
-	// userinfo-free https form the -c path uploads, which the node clones.
+	// Every accepted form keeps the endpoint it names or becomes the https form
+	// the -c path uploads, and the spec carries exactly that origin.
 	for _, test := range []struct{ name, origin, want string }{
 		{"https", "https://git.invalid/org/repo-a.git", "https://git.invalid/org/repo-a.git"},
 		{"scp with user", "git@git.invalid:org/repo-a.git", "https://git.invalid/org/repo-a.git"},
 		{"scp without user", "git.invalid:org/repo-a", "https://git.invalid/org/repo-a"},
-		{"ssh", "ssh://git@git.invalid/org/repo-a", "https://git.invalid/org/repo-a"},
+		{"ssh with user", "ssh://git@git.invalid/org/repo-a", "ssh://git.invalid/org/repo-a"},
+		{"ssh with port", "ssh://git.invalid:2222/org/repo-a", "ssh://git.invalid:2222/org/repo-a"},
+		{"git with port", "git://git.invalid:9418/org/repo-a", "git://git.invalid:9418/org/repo-a"},
 	} {
 		spec, name, err := Spawn{Job: "job-a", CheckoutOrigin: test.origin, CheckoutCommit: hubHead, CheckoutRef: "pull/7/head"}.checkoutSpec()
 		if err != nil || name != "repo-a" || !reflect.DeepEqual(spec, &HubCheckout{Origin: test.want, Mode: "detached", Sha: hubHead, Fetch: "pull/7/head", Dir: "job-a-checkout"}) {
