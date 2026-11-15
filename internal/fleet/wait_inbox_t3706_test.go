@@ -165,3 +165,50 @@ func TestWaitDaemonWithoutHubClientFallsBack(t *testing.T) {
 		t.Fatalf("warnings=%d: %q", n, errs)
 	}
 }
+
+// A session with its own lane credential reads through that credential, the way
+// lane registration does: the daemon's node identity may not serve its lane, so
+// its answer is not this wait's answer. The hub read must name the session's
+// lane credential file, not the configured hub token file.
+func TestWaitWithOwnLaneCredentialSkipsTheDaemon(t *testing.T) {
+	a, s, f := waitInboxFixture(t)
+	a.HerdrSession = "fleet"
+	laneEnv := filepath.Join(t.TempDir(), "lane.env")
+	hubEnv := filepath.Join(t.TempDir(), "absent.env")
+	a.Config.Hub = map[string]any{
+		"hub_url":                  "https://hub.invalid",
+		"hub_token_env":            hubEnv,
+		"session_lanes_token_envs": map[string]any{"fleet": laneEnv},
+	}
+	f.Do = func(c Command) Result {
+		args := strings.Join(c.Args, " ")
+		if !strings.HasPrefix(args, "inbox list") {
+			return Result{}
+		}
+		if !strings.Contains(args, "--hub-token-env "+laneEnv) {
+			t.Fatalf("the hub read must name the session's lane credential: %s", args)
+		}
+		if strings.Contains(args, "--hub-token-env "+hubEnv) {
+			t.Fatalf("the hub read used the configured hub token, not the session's: %s", args)
+		}
+		return Result{Out: `[{"kind":"lane.event","event":{"job_id":"j","text":"[j] READY | https://pr.invalid/1 | /jobs/j/report.md"}}]`}
+	}
+	stub := newLaneDaemonStub(t, func(map[string]any) string {
+		return `{"ok":false,"code":6,"error":"inbox: hub returned HTTP 403"}`
+	})
+	t.Setenv("PANEWIRE_SOCKET", stub.path)
+	if e := a.waitJob(context.Background(), s); e != nil {
+		t.Fatalf("the session's own connection must end the wait: %v (err=%q)", e, waitErrText(a))
+	}
+	if out := waitOut(a); !strings.Contains(out, "outcome=ready") {
+		t.Fatalf("out=%q", out)
+	}
+	select {
+	case request := <-stub.requests:
+		t.Fatalf("a session with its own lane credential asked the daemon: %v", request)
+	default:
+	}
+	if errs := waitErrText(a); errs != "" {
+		t.Fatalf("the own-credential route is not a fallback and must not warn: %q", errs)
+	}
+}

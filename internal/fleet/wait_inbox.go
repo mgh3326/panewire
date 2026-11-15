@@ -31,10 +31,15 @@ const (
 // waitInbox reads the owner lane's inbox as `panewire inbox list --lane L
 // --json` reports it, through the local node daemon first (hk 3706): the
 // daemon holds the node credential, so a design session without the hub token
-// still reads its lane. The hub route needs the credential this host's config
-// names, so it is only used when the daemon is absent. Either way the wait
-// warns at most once.
+// still reads its lane. A session that carries its own lane credential keeps
+// that credential, as lane registration does (laneDaemonServes): the node
+// identity is not substitutable for it. The hub route needs the credential this
+// host's config names, so it is also the fallback when the daemon is absent.
+// Either way the wait warns at most once.
 func (a *App) waitInbox(ctx context.Context, lane string, route *waitInboxRoute, warned *bool) Result {
+	if *route == waitInboxViaDaemon && !a.laneDaemonServes() {
+		*route = waitInboxViaHub
+	}
 	if *route == waitInboxViaDaemon {
 		if r, answered := a.inboxThroughDaemon(ctx, lane); answered {
 			if r.Code != 0 && !*warned {
@@ -64,11 +69,23 @@ func (a *App) waitInbox(ctx context.Context, lane string, route *waitInboxRoute,
 	return r
 }
 
-// inboxThroughHub runs `inbox list` with the connection this host's config
-// names. It is the route a wait had before hk 3706.
+// inboxThroughHub runs `inbox list` with the connection this session reads
+// with: its own lane credential when it carries one, else the operator/hub
+// connection this host's config names, the route the wait had before hk 3706.
 func (a *App) inboxThroughHub(ctx context.Context, lane string) Result {
-	args := append([]string{"inbox", "list", "--lane", lane, "--json"}, a.controlHubArgs(true)...)
+	args := append([]string{"inbox", "list", "--lane", lane, "--json"}, a.inboxHubArgs()...)
 	return a.call(ctx, "panewire", args...)
+}
+
+// inboxHubArgs names the credential the hub route passes. A session with its
+// own lane credential reads with that credential (laneHubArgs, as lane
+// registration does); every other session keeps the configured operator/hub
+// connection.
+func (a *App) inboxHubArgs() []string {
+	if !a.laneDaemonServes() {
+		return a.laneHubArgs("worker")
+	}
+	return a.controlHubArgs(true)
 }
 
 // inboxThroughDaemon runs one `inbox list --json` through the local node
