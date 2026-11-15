@@ -618,12 +618,12 @@ default.
 | `shadow.claim_share` | `0.5` | Share of its own `free * power` (0..1, below 1) that one claim in the spawn bridge removes from a host in the `claim` arm (hk 4841). Every host loses the same fraction per claim, whatever its power. |
 | `capability.light.<host>`, `capability.heavy.<host>` | none | The host's capability for light and heavy work, in the unit of the hub's `power`. A host with no entry keeps its `power`. |
 
-**Rollout and rollback of `shadow.free_floor` and `shadow.bridge_cost`.** A
-binary from before hk 4465 validates `[placement.shadow]` strictly and refuses
-these two keys as unknown, and the fleet commands and the spawn app do not
-start on a config it refuses. Set either key in `hosts.toml` only once every
-binary that reads that file has the release that knows them, and delete both
-keys before rolling a host back. The retired `shadow.all_loaded_below` and
+**Rollout and rollback of `shadow.free_floor`, `shadow.bridge_cost` and `shadow.claim_share`.** A
+binary from before hk 4465 (`free_floor`, `bridge_cost`) or hk 4841 (`claim_share`) validates `[placement.shadow]` strictly and refuses
+these keys as unknown, and the fleet commands and the spawn app do not
+start on a config it refuses. Set any of these keys in `hosts.toml` only once every
+binary that reads that file has the release that knows them, and delete all
+of them before rolling a host back. The retired `shadow.all_loaded_below` and
 `shadow.claim_cost` load on both sides. The same ordering holds for the hub's
 `placement.json` keys of the same names
 ([Constants](placement.md#constants)).
