@@ -516,10 +516,14 @@ lacks the recorded pane, and lists no pane named like the holder's agent label
 hk job `lost` and releases the slot. A present pane, an unreadable pane list, an
 unreachable node or no recorded pane keeps the slot and the 409 body as before.
 A failed operation that recorded no pane id, whose label is no longer listed,
-frees its slot even when its node answers `ledger_missing` (its job dir or
-`events/` is gone, hk 3685, hk 4673); hk keeps its `claimed` record, because the
-node still never writes `lost` over a record it cannot check. A node that
-refuses `job.mark_lost` for any other reason, because its local ledger holds a
+frees its slot when its node answers `job.mark_lost` with `no-live-attempt`: the
+job dir or `events/` is gone (hk 3685), and the node's own spawn journal and
+active-job list name no live attempt of the job under any label, so a claim
+renewed under another label cannot be running (hk 4799). hk keeps its `claimed`
+record, because the node still never writes `lost` over a record it cannot
+check. A node that answers the bare `ledger_missing`, or whose journal or jobs
+directory it cannot read, keeps the slot: a missing ledger alone cannot rule out
+a newer attempt. A node that refuses `job.mark_lost` for any other reason, because its local ledger holds a
 completion or a newer claim, or because herdr still lists the pane, keeps the
 slot too; the hub logs `branch=mark_lost_refused` with the node's reason. A slot whose `release` write
 itself fails logs `branch=release_write_failed`. When the holder

@@ -28,8 +28,13 @@ const (
 	nodeJobMarkLostCompleted    = "completed"
 	nodeJobMarkLostNewerClaim   = "newer-claim"
 	// nodeJobMarkLostLedgerMissing: the job dir or its events/ is gone, so the
-	// local ledger cannot prove the attempt is not completed (hk 3685).
+	// local ledger cannot prove the attempt is not completed (hk 3685), and
+	// the node cannot yet rule out a live attempt of the same job.
 	nodeJobMarkLostLedgerMissing = "ledger_missing"
+	// nodeJobMarkLostNoLiveAttempt: the ledger is gone, and this node's spawn
+	// journal and active-job list name no live attempt of the job under any
+	// label, so no attempt of it is running (hk 4799). Nothing is written.
+	nodeJobMarkLostNoLiveAttempt = "no-live-attempt"
 
 	// The refusals of the reviewer_result_posted end (hk 4684,
 	// node_job_mark_lost_result_posted.go).
@@ -85,6 +90,7 @@ func validNodeJobMarkLostResult(result nodeJobMarkLostResult) bool {
 	switch result.Outcome {
 	case nodeJobMarkLostLost, nodeJobMarkLostPaneListed, nodeJobMarkLostLabelListed,
 		nodeJobMarkLostPanesUnknown, nodeJobMarkLostCompleted, nodeJobMarkLostNewerClaim, nodeJobMarkLostLedgerMissing,
+		nodeJobMarkLostNoLiveAttempt,
 		nodeJobMarkLostResultMissing, nodeJobMarkLostResultSettling, nodeJobMarkLostQuotaStopped, nodeJobMarkLostNotReviewer,
 		nodeJobMarkLostPaneWorking, nodeJobMarkLostBusy:
 		return true
@@ -258,7 +264,13 @@ func (client *HubClient) nodeJobMarkLost(ctx context.Context, args nodeJobMarkLo
 		return nil, "jobs_root_unset"
 	}
 	if errors.Is(err, os.ErrNotExist) {
-		// Ledger unknown, not "not completed": refuse, write nothing (hk 3685).
+		// Ledger unknown, not "not completed": the node writes nothing (hk
+		// 3685). It can still prove, from its own records, that no attempt of
+		// the job is live under any label; only that proof releases the
+		// caller's reservation (hk 4799).
+		if client.nodeJobNoLiveAttempt(ctx, args.Job) {
+			return nodeJobMarkLostResult{Outcome: nodeJobMarkLostNoLiveAttempt}, ""
+		}
 		return nodeJobMarkLostResult{Outcome: nodeJobMarkLostLedgerMissing}, ""
 	}
 	if err != nil {
@@ -318,6 +330,51 @@ func (client *HubClient) openNodeJobLedger(job, pane, label string) (nodeJobLedg
 	}
 	defer root.Close()
 	return readNodeJobLedger(root, pane, label)
+}
+
+// nodeJobNoLiveAttempt reports whether this node's own records prove that no
+// attempt of job is live, under any label. Two records are read: the spawn
+// journal, whose executing rows name the job each in-flight spawn will run,
+// and the active-job list, which the node scans from its job ledgers. A job
+// claimed again under another label is caught by one or the other. Either
+// record being unreadable is no proof, and the caller keeps the record (hk
+// 4799).
+func (client *HubClient) nodeJobNoLiveAttempt(ctx context.Context, job string) bool {
+	if client.jobsInboxRoot == "" {
+		return false
+	}
+	journal, err := client.acquireSpawnJournal()
+	if err != nil {
+		return false
+	}
+	defer client.releaseSpawnJournal()
+	rows, err := journal.executing(ctx)
+	if err != nil {
+		return false
+	}
+	// A nil pane source keeps every listed job: the release path has its own
+	// pane proof, and this one must never drop a job on an unknown pane.
+	active, err := scanActiveJobsForLimit(ctx, client.jobsInboxRoot, nil, 0)
+	if err != nil {
+		return false
+	}
+	return !jobAttemptLive(job, rows, active)
+}
+
+// jobAttemptLive reports whether the journal's executing rows or the
+// active-job list name job, under any label.
+func jobAttemptLive(job string, rows []executingSpawn, active []HubActiveJob) bool {
+	for _, row := range rows {
+		if row.Job == job {
+			return true
+		}
+	}
+	for _, listed := range active {
+		if listed.JobID == job {
+			return true
+		}
+	}
+	return false
 }
 
 // nodeJobStoreForCommand is the node's own hk client: spawn.json

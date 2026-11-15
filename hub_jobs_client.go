@@ -108,8 +108,17 @@ func scanHubActiveJobsWithPanes(ctx context.Context, inboxRoot string, panesAliv
 }
 
 func scanHubActiveJobsForLimit(ctx context.Context, inboxRoot string, panesAlive panesAliveFunc, limit int) []HubActiveJob {
+	active, _ := scanActiveJobsForLimit(ctx, inboxRoot, panesAlive, limit)
+	return active
+}
+
+// scanActiveJobsForLimit is scanHubActiveJobsForLimit with the scan's error
+// kept, for a caller that proves something from the list: an unreadable jobs
+// directory must not read as an empty one (job.mark_lost's no-attempt proof,
+// hk 4799). A nil panesAlive keeps every job, since pane liveness is unknown.
+func scanActiveJobsForLimit(ctx context.Context, inboxRoot string, panesAlive panesAliveFunc, limit int) ([]HubActiveJob, error) {
 	if inboxRoot == "" {
-		return nil
+		return nil, nil
 	}
 	now := time.Now()
 	activeCutoff, staleCutoff := now.Add(-hubJobActiveMaxAge()), now.Add(-hubJobStaleAge())
@@ -121,7 +130,7 @@ func scanHubActiveJobsForLimit(ctx context.Context, inboxRoot string, panesAlive
 		return true
 	})
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	// Filtering precedes the cap: stale entries must not consume the 32 slots
 	// that the still-live jobs need.
@@ -137,7 +146,7 @@ func scanHubActiveJobsForLimit(ctx context.Context, inboxRoot string, panesAlive
 		active = append(active, scanned.job)
 	}
 	sort.Slice(active, func(i, j int) bool { return active[i].JobID < active[j].JobID })
-	return active
+	return active, nil
 }
 
 // scanHubCompletedJobs is intentionally separate from the active-set scan:
