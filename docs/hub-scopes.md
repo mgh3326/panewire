@@ -46,6 +46,7 @@ lane with `{"all":true}`, including items intended for other agents.
 | `inbox.ack:<lane>` or `inbox.ack:*` | `POST /v1/inbox/ack` with `?lane=<lane>` |
 | `inbox.ack_state` | `GET /v1/inbox/ack-state?event_id=…` (see [Ack state](#ack-state)); no lane, no resource |
 | `state.read` | `GET /v1/state` ([fleet-state.md](fleet-state.md)) |
+| `consult` | `POST /v1/consults` and `GET /v1/consults/{id}` ([consult-on-request.md](consult-on-request.md)); a node credential needs no scope for these routes |
 
 The hub's ticker issues `pane.sweep` (see [pane-sweep.md](pane-sweep.md#hub-ordered-sweep)) the same way: the endpoint refuses it for every caller, so no scope grants it.
 

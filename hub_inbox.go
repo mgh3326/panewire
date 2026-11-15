@@ -93,6 +93,10 @@ func newHubInbox(policyPath, storePath, databaseURL string) (*hubInbox, error) {
 		store.close()
 		return nil, err
 	}
+	if err = store.ensureConsults(); err != nil {
+		store.close()
+		return nil, err
+	}
 	deferredDir := filepath.Dir(storePath)
 	if storePath == "" {
 		deferredDir = filepath.Dir(defaultHubInboxPath())
