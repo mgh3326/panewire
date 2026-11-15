@@ -890,3 +890,37 @@ func TestNodeTimeoutRenewalKeepsTheHost_t4661(t *testing.T) {
 		t.Fatalf("renewal after a node timeout: status=%s attempt=%d host=%q", got.Status, got.Attempt, got.ClaimedHost)
 	}
 }
+
+// No pin from evidence that precedes the claim: a hub timeout of an unsent
+// attempt, or a node timeout at placement, renews unpinned and is given up at
+// the limit; a saved post-claim node timeout an older hub left without
+// claimed_host is held.
+func TestPreClaimTimeoutsPinNothing_t4661(t *testing.T) {
+	hubTimeout := hubSpawnOutcome{RC: 124, Stage: "landing", Reason: "timeout", Host: "desktop", Retryable: true}
+	nodePlacement := hubSpawnOutcome{RC: 124, Stage: "placement", Reason: "timeout", Host: "desktop", Retryable: true, NodeResult: true}
+	for name, outcome := range map[string]hubSpawnOutcome{"hub unsent": hubTimeout, "node placement": nodePlacement} {
+		if spawnReplayPinsHost(outcome) || spawnHoldsClaim(hubSpawnTask{Outcome: outcome}) || spawnNodeTimeout(outcome) {
+			t.Fatalf("%s timeout pins or holds a claim", name)
+		}
+	}
+	legacy := hubSpawnOutcome{RC: 124, Stage: "landing", Reason: "timeout", Host: "desktop", Retryable: true, NodeResult: true}
+	if !spawnHoldsClaim(hubSpawnTask{Outcome: legacy}) {
+		t.Fatal("an older hub's saved post-claim node timeout is not held")
+	}
+	// Two unsent attempts in a row stay unpinned and keep renewing.
+	h := asyncSpawnHub(t)
+	clock := expiryClock(h, expiryNow())
+	task := claimParkRequest(t, h, 280, *clock)
+	for attempt := 1; attempt <= 3; attempt++ {
+		bound, err := h.inbox.store.bindSpawn(t.Context(), task.Request.RequestID, task.Attempt, boundaryTestNode(task, 467700+attempt, "desktop"), clock.UTC())
+		if err != nil {
+			t.Fatal(err)
+		}
+		*clock = bound.Deadline
+		h.executeSpawnTask(t.Context(), bound)
+		task = parkedTask(t, h, task.Request.RequestID)
+		if task.Status != "accepted" || task.Attempt != attempt+1 || task.ClaimedHost != "" {
+			t.Fatalf("after unsent attempt %d: status=%s attempt=%d pin=%q", attempt, task.Status, task.Attempt, task.ClaimedHost)
+		}
+	}
+}

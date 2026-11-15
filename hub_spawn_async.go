@@ -1003,6 +1003,11 @@ func spawnReplayPinsHost(outcome hubSpawnOutcome) bool {
 	if spawnOutcomeNotStarted(outcome) {
 		return false
 	}
+	// A timeout the hub wrote for an unsent attempt, or a node timeout before
+	// the claim stage, made no claim: it pins nothing (hk 4661).
+	if code, _, _ := strings.Cut(outcome.Reason, ": "); code == "timeout" && (!outcome.NodeResult || spawnStageBeforeJobClaim(outcome.Stage)) {
+		return false
+	}
 	return !spawnRefusalMovesOn(outcome.Reason, outcome.Stage)
 }
 

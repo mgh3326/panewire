@@ -268,8 +268,11 @@ claim is kept in `claim_result`: written with the result that proves it
 the not-started evidence of [Time limit](#time-limit), and never a
 pre-claim refusal or a not-started attestation) and never replaced. A request holds a claim when it has a `claimed_host` pin or a
 `claim_result`: a pin cannot always tell a claim from a replay pin, so when
-in doubt the claim is kept. A node's cleaned-up timeout may come after the job
-claim: it still renews the attempt, but pinned to that host (so the claim is
+in doubt the claim is kept. A saved result that would pin a replay (a post-claim node
+result, including one an older hub saved without `claimed_host`) holds too.
+A hub timeout of an unsent attempt and a node timeout at a stage before the
+claim pin nothing. A node's cleaned-up timeout from the claim stage on may
+come after the job claim: it still renews the attempt, but pinned to that host (so the claim is
 held from then on), and at the limit it ends `retryable` with its own result,
 never `given_up`.
 A request

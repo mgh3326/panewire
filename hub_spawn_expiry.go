@@ -147,8 +147,11 @@ func (s *laneInboxStore) releaseEndedSpawn(ctx context.Context, tx *sql.Tx, task
 // a claim from a replay pin (and an older hub may have written the row), so
 // it is held: when in doubt the claim is kept, and the request is never
 // renewed or given up as unstarted while hk may hold the job.
+//
+// A saved result that pins a replay holds too: an older hub may have saved a
+// post-claim node timeout or refusal without writing claimed_host.
 func spawnHoldsClaim(task hubSpawnTask) bool {
-	return task.ClaimedHost != "" || task.ClaimResult != nil
+	return task.ClaimedHost != "" || task.ClaimResult != nil || spawnReplayPinsHost(task.Outcome)
 }
 
 // spawnSavedClaimRefusal is the refusal a held claim ends with.
@@ -163,5 +166,5 @@ func spawnSavedClaimRefusal(task hubSpawnTask) hubSpawnOutcome {
 // claim, so the next attempt stays on that host.
 func spawnNodeTimeout(outcome hubSpawnOutcome) bool {
 	code, _, _ := strings.Cut(outcome.Reason, ": ")
-	return outcome.NodeResult && code == "timeout"
+	return outcome.NodeResult && code == "timeout" && !spawnStageBeforeJobClaim(outcome.Stage)
 }
