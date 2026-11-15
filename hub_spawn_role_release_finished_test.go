@@ -90,7 +90,7 @@ func TestRoleReleaseAfterSucceededSpawn(t *testing.T) {
 			t.Fatalf("hub wrote hk: %v", jobs.writes())
 		}
 		assertRoleHeldBy(t, hub, held.Request.RequestID)
-		assertHeldLine(t, sink, "release_write_failed", "spawned", "absent", "mark_lost_failed")
+		assertHeldLine(t, sink, "mark_lost_refused", "spawned", "absent", "mark_lost_failed")
 	})
 	t.Run("pane present keeps the hold", func(t *testing.T) {
 		hub, server, jobs, held := roleHolderHub(t, succeeded, "spawned", "succeeded")

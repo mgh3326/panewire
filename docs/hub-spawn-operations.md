@@ -276,18 +276,27 @@ Inherited children do not take the parent's direct task/role slot. Completed
 job IDs remain tombstones; a new direct task/role attempt requires evidence that
 the prior landed job completed or was lost.
 
-The reservation key is `<task>:<role>`, or `<task>:reviewer:p<N>` for a reviewer
-spawned with `--review-pass N` (N is 1..9; reviewer only; any other role, 0 or 10
-is a usage refusal). One helper builds it (`fleet.Spawn.RoleKey`), and the claim,
-resume, owner lookup, release, reclaim and retryable-holder supersede paths all
-use it, so the p1 and p2 reviewers of one task hold at once while a second p1 is
-refused with the same 409 as any held slot. panewire reads the pass only from
-the flag, never from a label. A reviewer without the flag keeps `<task>:reviewer`,
-and stored keys without a pass need no migration. The held-reservation log line
-prints the key as `role_key`. An implementer holds `<task>:implementer`; a hold written under an older role name is not matched by it. A consult
-seat (`--role consult`) bound by `--task` takes no task/role slot at all
-(`fleet.Spawn.HoldsTaskRole` is false for it), so a consult pair shares one task
-(hk 4568); it works beside the claimant and never takes its exclusive claim.
+The reservation key is `<task>:<role>`. One helper builds it
+(`fleet.Spawn.RoleKey`), and the claim, resume, owner lookup, release, reclaim
+and retryable-holder supersede paths all use it. An implementer holds
+`<task>:implementer`; a hold written under an older role name is not matched by
+it. A consult seat (`--role consult`) bound by `--task` takes no task/role slot
+at all (`fleet.Spawn.HoldsTaskRole` is false for it), so a consult pair shares
+one task (hk 4568); it works beside the claimant and never takes its exclusive
+claim.
+
+A reviewer (`--role reviewer`) holds no task/role reservation either (hk 4737):
+two submissions for the same task and review pass place side by side, and a
+replay of one request id is still matched by that request id. `--review-pass N`
+(N is 1..9; reviewer only; any other role, 0 or 10 is a usage refusal) is still
+accepted and recorded on the operation, and `fleet.Spawn.RoleKey` still renders
+`<task>:reviewer:p<N>`, but no reviewer slot is stored, so a reviewer never
+answers `task_role_claimed` (exit 74). A hub upgrading from a build that stored
+reviewer keys clears them once at startup: a data-only, idempotent pass that
+runs with no request in flight, so no table or column changes. A rolled-back
+older hub reads the cleared rows as no slot held; the older behaviour then
+returns for reviewers the old binary spawns, and no row is left broken. The
+held-reservation log line prints the key as `role_key`.
 
 A prior operation in `failed` whose hk job is still `claimed` (pane cleanup
 unverified) is checked on a colliding submission: the hub asks the operation's
@@ -322,47 +331,13 @@ with exit 74. A held (task, role) slot answers the error `task_role_claimed`,
 which also names `task` and `role`; a refused job id still answers
 `job_already_claimed` (hk 2944).
 
-A **reviewer** holder whose pane is present is also released when its spawn
-`succeeded` or `failed`, and every one of these holds (hk 3315). Implementers
-and consults are never released this way, because an idle implementer may be waiting on an
-ESC answer.
-
-- the new submission is for the same (task, role, review pass) key, not a replay
-  of the holder's request;
-- the pane is listed under the holder's pane id and agent label, with status
-  `idle`, `done` or `blocked` (never `working`; any other status keeps the hold);
-- the spawn's deadline passed more than the grace ago (the same 10 minute
-  `UnworkedLandingGrace`; the node's agent list carries no time of the last
-  state change);
-- `pane.capture` saves the screen, then `pane.close` closes the pane (it
-  re-reads the pane and refuses one that changed or whose composer is not
-  provably empty).
-
-The hub then has the holder's node mark the hk job `lost`, with `end_reason`
-`reviewer_pane_finished` or `reviewer_pane_stuck` (the branch), and logs one
-INFO line `hub closed a finished reviewer pane` with `branch`
-`reviewer_pane_finished` (succeeded) or `reviewer_pane_stuck` (failed) and
-`source` `submission`. An unreachable node or an unreadable check keeps the
-hold; a close whose `job.mark_lost` write failed leaves the pane gone and the
-record live, which the next submission's absent-pane check finishes.
-
-A reviewer that asked a question is idle too, so every close carries the
-job id and the node rules out an open question from its own lane-event records
-at the moment of the close (docs/node-commands.md, `pane.close`); a question the
-watcher has not copied yet cannot be raced, and the pane is kept with
-`question-open`.
-
-A reviewer that posts its result and stops without running `done` is ended on
-the hub's own schedule too (hk 4684); see
+A reviewer is never released through a submission (hk 4737). It holds no slot
+for a colliding request to displace, so the hub never closes a reviewer's pane
+on that path. Closing a finished reviewer's pane belongs to the node's ended-job
+sweep (hk 4693), and ending a reviewer job that posted its result is the hub's
+own pass (hk 4684); see
 [Ending a reviewer job that posted a result](#ending-a-reviewer-job-that-posted-a-result).
-
-When only that grace keeps a reviewer holder (the pane is present, its status is
-closable and its hk job is `claimed` or `spawned`), the `task_role_claimed` 409
-also carries `retry_after_s`, an integer of at least 1: the seconds until the
-spawn's deadline plus the grace. The response sets the same value in an HTTP
-`Retry-After` header, and the CLI appends ` retry_after_s=<n>` after the
-`(held by ...)` part of its exit 74 message. Every other hold has neither,
-because nothing time-based will free it.
+Neither depends on a colliding submission.
 
 A prior operation in `succeeded` whose hk job is still `claimed` or `spawned`
 (a job revoked and reaped by an older binary, or one that ended without writing
@@ -371,9 +346,14 @@ lacks the recorded pane, and lists no pane named like the holder's agent label
 (herdr renumbers a pane moved across workspaces), has the holder's node mark the
 hk job `lost` and releases the slot. A present pane, an unreadable pane list, an
 unreachable node or no recorded pane keeps the slot and the 409 body as before.
-A node that refuses `job.mark_lost`, because its local ledger holds a completion
-or a newer claim or because herdr still lists the pane, keeps the slot too; the
-hub logs `branch=release_write_failed` with the node's reason. When the holder
+A failed operation that recorded no pane id, whose label is no longer listed,
+frees its slot even when its node answers `ledger_missing` (its job dir or
+`events/` is gone, hk 3685, hk 4673); hk keeps its `claimed` record, because the
+node still never writes `lost` over a record it cannot check. A node that
+refuses `job.mark_lost` for any other reason, because its local ledger holds a
+completion or a newer claim, or because herdr still lists the pane, keeps the
+slot too; the hub logs `branch=mark_lost_refused` with the node's reason. A slot whose `release` write
+itself fails logs `branch=release_write_failed`. When the holder
 ran on the hub's own host the hub writes the record itself, and hk never
 rewrites a terminal record, so a holder that completes during the probe keeps
 its completed record: the refused `lost` write is followed by a re-read, and a

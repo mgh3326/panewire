@@ -35,6 +35,11 @@ import (
 // report through `panewire done`, which needs the job directory on the node
 // and belongs to the job itself or to mergewake's reap.
 
+// reviewerRole is the --role value of a review seat. A reviewer holds no
+// task/role reservation (hk 4737); the name still keys the spawn args and the
+// node's reviewer end proof.
+const reviewerRole = "reviewer"
+
 // reviewerEndInterval is how often the hub looks for a reviewer job that posted
 // its result and was never ended.
 const reviewerEndInterval = 5 * time.Minute
