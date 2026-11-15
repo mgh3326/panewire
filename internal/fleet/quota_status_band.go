@@ -38,16 +38,6 @@ func StatusPoolClass(pool string, now time.Time) (string, error) {
 // that gives no tier.
 func StatusBand(policy PoolPolicy, pool, class string, stale bool, windows []StatusWindow, now time.Time) string {
 	row := CatalogRow{Pool: pool}
-	// A pool-level reading names no model. Free is a property of the pool's
-	// free rungs, so judge the free set by a model it names; without this a
-	// pool whose free set is model-scoped (devin's SWE-2 rungs) could never
-	// read free.
-	for _, free := range policy.Free {
-		if free.Pool == pool && len(free.Models) > 0 {
-			row.ModelID = free.Models[0]
-			break
-		}
-	}
 	switch {
 	case policy.isFree(row):
 		return "free"

@@ -211,13 +211,29 @@ func TestFleetStatusBandFollowsPlacement(t *testing.T) {
 	now, _ := time.Parse(time.RFC3339, fleetStatusTestNow)
 	hub := fleetStatusTestHub(t, now, io.Discard)
 	config := filepath.Join(t.TempDir(), "config.toml")
-	if err := os.WriteFile(config, []byte("[pools.claude]\nclass = \"exclude\"\n"), 0600); err != nil {
+	if err := os.WriteFile(config, []byte("[pools.claude]\nclass = \"exclude\"\n[pools.devin]\nclass = \"exclude\"\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PANEWIRE_CONFIG", config)
 	rows := hub.fleetStatusQuota(now, nil)
 	if len(rows) != 1 || rows[0].Band != "excluded" {
 		t.Fatalf("rows = %+v, want the excluded claude band", rows)
+	}
+
+	// A model-scoped free set does not outrank the admission class: an
+	// excluded devin reading is excluded even with an available free bucket.
+	freeKey := "devin:0000000000000001"
+	hub.stateStore().publish(FleetStateMessage{
+		Host: "node-a", Kind: fleetStateKindQuota, Key: freeKey,
+		MeasuredAt: now, ReceivedAt: now,
+		Quota: &FleetStateQuota{AccountKey: freeKey, Pool: "devin", Free: &FleetStateFree{State: "available"}, Buckets: []FleetStateBucket{
+			{Window: "5h", UsedPct: new(float64(10)), ResetsAt: now.Add(3 * time.Hour).Format(time.RFC3339), Scope: "account"},
+		}},
+	}, 0)
+	for _, row := range hub.fleetStatusQuota(now, nil) {
+		if row.Account == freeKey && row.Band != "excluded" {
+			t.Fatalf("excluded devin band = %q, want excluded", row.Band)
+		}
 	}
 
 	// A second account whose only window already reset is not a usable
@@ -249,6 +265,42 @@ func TestFleetStatusFreshTTLUsesFleetConfig(t *testing.T) {
 	rows := hub.fleetStatusQuota(now, app)
 	if len(rows) != 1 || rows[0].FreshTTLS != 700 {
 		t.Fatalf("rows = %+v, want fresh_ttl_s 700 from the fleet config", rows)
+	}
+}
+
+// The free band comes from the reading's own free bucket, not from a
+// model-scoped policy set: an available tier is free, an exhausted one
+// (placement's free_limit) is not, and a stale reading is unknown.
+func TestFleetStatusFreeBandFromReading(t *testing.T) {
+	now, _ := time.Parse(time.RFC3339, fleetStatusTestNow)
+	hub := fleetStatusTestHub(t, now, io.Discard)
+	publishFree := func(key string, state string, measured time.Time) {
+		free := &FleetStateFree{State: state}
+		if state == "exhausted" {
+			reset := now.Add(time.Hour)
+			free.ResetsAt = &reset
+		}
+		hub.stateStore().publish(FleetStateMessage{
+			Host: "node-a", Kind: fleetStateKindQuota, Key: key,
+			MeasuredAt: measured, ReceivedAt: measured,
+			Quota: &FleetStateQuota{AccountKey: key, Pool: "devin", Free: free, Buckets: []FleetStateBucket{
+				{Window: "5h", UsedPct: new(float64(10)), ResetsAt: now.Add(3 * time.Hour).Format(time.RFC3339), Scope: "account"},
+			}},
+		}, 0)
+	}
+	available, exhausted, stale := "devin:0000000000000002", "devin:0000000000000003", "devin:0000000000000004"
+	publishFree(available, "available", now)
+	publishFree(exhausted, "exhausted", now)
+	publishFree(stale, "available", now.Add(-2*time.Hour))
+	rows := hub.fleetStatusQuota(now, nil)
+	want := map[string]string{available: "free", stale: "unknown"}
+	for _, row := range rows {
+		if expect, ok := want[row.Account]; ok && row.Band != expect {
+			t.Errorf("%s band = %q, want %q", row.Account, row.Band, expect)
+		}
+		if row.Account == exhausted && row.Band == "free" {
+			t.Errorf("exhausted free tier band = free, want not free")
+		}
 	}
 }
 

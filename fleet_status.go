@@ -267,6 +267,14 @@ func (h *HubServer) fleetStatusQuota(now time.Time, app *fleet.App) []fleetStatu
 		entry.Band = fleetStatusBandUnknown
 		if class, ok := classOf(quota.Pool); policyErr == nil && ok {
 			entry.Band = fleet.StatusBand(policy, quota.Pool, class, !entry.Fresh, windows, now)
+			// StatusBand judges a pool-level reading with no model, so it
+			// cannot see a model-scoped free set (devin's SWE-2 rungs). The
+			// reading's own free bucket can: an available free tier is the
+			// free band, while an exhausted one (placement's free_limit),
+			// an excluded pool or a stale reading keeps StatusBand's answer.
+			if quota.Free != nil && quota.Free.State == "available" && entry.Band != "excluded" && entry.Band != "unknown" {
+				entry.Band = "free"
+			}
 		}
 		out = append(out, entry)
 	}
@@ -303,9 +311,26 @@ func (h *HubServer) fleetStatusPlansNow(ctx context.Context, app *fleet.App) []f
 		return fleetStatusUnavailablePlans()
 	}
 	h.bindPlacement(app, planOnlyTransport{})
+	// directSpawnState refreshes load: a network fetch that takes the
+	// placement lock and publishes new state. A snapshot is read-only, so the
+	// plan reads the hub's stored values unchanged.
+	app.State = fleetStatusState{h}
 	planCtx, cancel := context.WithTimeout(ctx, fleetStatusPlanTimeout)
 	defer cancel()
 	return fleetStatusPlanRows(app.PlanStatusGrades(planCtx, fleet.StatusPlanGrades))
+}
+
+// fleetStatusState answers the fleet snapshot a plan reads with the hub's
+// stored state only, without refreshing or republishing load.
+type fleetStatusState struct{ h *HubServer }
+
+func (s fleetStatusState) Snapshot(context.Context) (fleet.FleetSnapshot, error) {
+	raw, err := json.Marshal(s.h.fleetSnapshot(s.h.now()))
+	var snapshot fleet.FleetSnapshot
+	if err == nil {
+		err = json.Unmarshal(raw, &snapshot)
+	}
+	return snapshot, err
 }
 
 func fleetStatusPlanRows(plans []fleet.StatusPlan) []fleetStatusPlan {

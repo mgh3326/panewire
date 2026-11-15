@@ -63,16 +63,17 @@ still published, with `fresh: false`.
 ## Band and tier
 
 `band` and the plan's `tier` are the pool-order selection bands
-(`internal/fleet/pool-order.json`): `free` for a pool with a free set, `credit`
-for a credit pool, `excluded` for a pool the operator's admission policy
-excludes, `waste` when the reading's longest window is projected below the
-policy's waste threshold, else `ranked`. The hub computes them with
-`fleet.StatusBand` — the same function `panewire quota status` uses — over the
-reading's windows and the pool's admission class, so an invalid, group-scoped
-or stale reading cannot be labeled more usable than placement would judge it.
-`unknown` means the reading gives no tier (stale, invalid, preserved by the
-admission policy, or a band that could not be read). A stale reading keeps its
-row but reports `fresh: false`.
+(`internal/fleet/pool-order.json`): `free`, `credit`, `waste`, `ranked`, or
+`excluded` for a pool the operator's admission policy excludes. The hub starts
+from `fleet.StatusBand` — the function `panewire quota status` uses — over the
+reading's windows, the pool's admission class and the freshness verdict, so an
+invalid, group-scoped or stale reading cannot be labeled more usable than
+placement would judge it. A model-scoped free set (devin's SWE-2 rungs) is not
+visible to that pool-level call, so an available `free_bucket` on the reading
+lifts the band to `free` after the class and stale checks; an exhausted free
+tier (placement's `free_limit`), an excluded pool or a stale reading keeps the
+`StatusBand` answer. `unknown` means the reading gives no tier (stale, invalid,
+preserved by the admission policy, or a band that could not be read).
 
 ## Plan
 
