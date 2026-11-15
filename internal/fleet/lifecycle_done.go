@@ -3,6 +3,7 @@ package fleet
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -27,6 +28,11 @@ type doneInput struct {
 	// step that failed and carries on.
 	watcher bool
 	late    bool
+	// recovered: the report file is gone because `done` deleted it after the
+	// pin (hk 3685), and digest is the one the completion that announced it
+	// named. body is empty, so the step never publishes again; only the
+	// receipts decide what remains.
+	recovered bool
 }
 
 // settledReceipt is a job.record_settled receipt: the hk record is terminal
@@ -109,6 +115,40 @@ func (r doneReceipts) pinSettled(digest string) bool {
 	return false
 }
 
+// holds reports whether the hk record names this report: the settling write
+// carried the pin, or a pin write answered "pinned". A "held" pin names
+// another report and is not this one's.
+func (r doneReceipts) holds(digest string) bool {
+	if digest == "" {
+		return false
+	}
+	if r.pins[digest] == "pinned" {
+		return true
+	}
+	for _, s := range r.settled {
+		if s.sha == digest && s.pinned {
+			return true
+		}
+	}
+	return false
+}
+
+// completedReportDigest is the sha256 of the bytes the newest job.completed
+// announcing report carried. A report file the fleet deleted after the pin
+// (hk 3685) is named by that receipt, so a rerun of `done` still knows the
+// bytes hk holds.
+func completedReportDigest(j Job, report string) (string, bool) {
+	digest := ""
+	for _, ev := range j.Events {
+		if ev.Kind == "job.completed" && str(ev.Payload, "report") == report {
+			if sha := str(ev.Payload, "report_sha256"); sha != "" {
+				digest = sha
+			}
+		}
+	}
+	return digest, digest != ""
+}
+
 // resultDigest is the sha256 of the result's canonical JSON, "" for none.
 func resultDigest(result json.RawMessage) string {
 	if result == nil {
@@ -148,7 +188,7 @@ func (a *App) doneReport(ctx context.Context, j Job, in doneInput) error {
 	var ran []string
 
 	doc := receipts.published[in.digest]
-	if doc == "" {
+	if doc == "" && !in.recovered {
 		key, e := a.publishReport(ctx, j, in.report, in.body, in.digest)
 		if e != nil {
 			a.warn("report upload failed; local report retained")
@@ -206,6 +246,7 @@ func (a *App) doneReport(ctx context.Context, j Job, in doneInput) error {
 	}
 
 	pinPending := false
+	pinned := doc != "" && receipts.holds(in.digest)
 	if doc != "" && len(receipts.settled) > 0 && receipts.completing(in.digest) == in.digest && !receipts.pinSettled(in.digest) {
 		outcome, e := a.pinReport(ctx, id, doc, in.digest)
 		if outcome == "" {
@@ -215,6 +256,7 @@ func (a *App) doneReport(ctx context.Context, j Job, in doneInput) error {
 			return e
 		} else {
 			ran = append(ran, "pinned")
+			pinned = outcome == "pinned"
 		}
 	}
 
@@ -238,10 +280,16 @@ func (a *App) doneReport(ctx context.Context, j Job, in doneInput) error {
 	if e := a.releaseQuota(ctx, j); e != nil {
 		return e
 	}
+	line := fmt.Sprintf("OK job=%s report=%s duplicate=yes%s", id, in.report, repaired(ran))
 	if slices.Contains(ran, "notified") {
-		fmt.Fprintf(a.Out, "OK job=%s report=%s kind=job.completed%s\n", id, in.report, relay)
-	} else {
-		fmt.Fprintf(a.Out, "OK job=%s report=%s duplicate=yes%s\n", id, in.report, repaired(ran))
+		line = fmt.Sprintf("OK job=%s report=%s kind=job.completed%s", id, in.report, relay)
+	}
+	fmt.Fprintln(a.Out, line)
+	// hk holds this report's bytes and the record names them: the local file
+	// only duplicates them (hk 3685 item 2). The marker keeps job.done's
+	// answer for the job whose report this deletes.
+	if pinned && a.removePinnedReport(in) {
+		a.markJobDone(id, in.digest, line)
 	}
 	if !in.watcher {
 		switch {
@@ -252,6 +300,37 @@ func (a *App) doneReport(ctx context.Context, j Job, in doneInput) error {
 		}
 	}
 	return nil
+}
+
+// removePinnedReport deletes the local report whose bytes hk holds under the
+// record's pin, leaving only the pinned copy. A path outside the jobs tree
+// stays: `done --report` accepts one, and deleting outside the fleet's own
+// tree is not this step's to do. A file whose bytes changed after the
+// completion stays too: they are no longer the ones the record names. Every
+// refusal warns and none fails `done`; a report whose upload never landed keeps
+// its file for the [reap] net (hk 3685 item 3).
+func (a *App) removePinnedReport(in doneInput) bool {
+	path := filepath.Clean(in.report)
+	if !within(a.Jobs, path) {
+		a.warn("report kept: %s is outside the jobs root", in.report)
+		return false
+	}
+	body, e := os.ReadFile(path)
+	switch {
+	case errors.Is(e, os.ErrNotExist):
+		return false
+	case e != nil:
+		a.warn("report delete skipped: %v", e)
+		return false
+	case reportDigest(body) != in.digest:
+		a.warn("report kept: %s changed after the completion", in.report)
+		return false
+	}
+	if e := os.Remove(path); e != nil {
+		a.warn("report delete failed: %v", e)
+		return false
+	}
+	return true
 }
 
 // pinReport is the late write of report_doc and report_sha256 on a terminal
@@ -281,9 +360,11 @@ func repaired(ran []string) string {
 }
 
 // relayReport emits the completion to the parent lane's inbox: the report
-// path and its last line, with the document key when the report is in hk. It
-// returns " relay=file-only" when the emit failed and the durable arbiter
-// event alone carries it.
+// path and its last line, with the document key when the report is in hk. A
+// completion names the report by that hk key in place of the local path,
+// which the fleet deletes once the record pins it (hk 3685). It returns
+// " relay=file-only" when the emit failed and the durable arbiter event alone
+// carries it.
 func (a *App) relayReport(ctx context.Context, j Job, eventKind, report, question string, body []byte, doc string, late bool) string {
 	owner := j.Owner
 	if j.Parent != "" && (eventKind == "job.escalate" || j.Role == "builder") {
@@ -294,7 +375,13 @@ func (a *App) relayReport(ctx context.Context, j Job, eventKind, report, questio
 		last = lines[len(lines)-1]
 	}
 	if doc != "" {
-		last += " doc:" + doc
+		if eventKind == "job.completed" {
+			// The hk key replaces the path the desk used to see, so the doc:
+			// suffix would name it a second time.
+			report = doc
+		} else {
+			last += " doc:" + doc
+		}
 	}
 	argsEmit := []string{"emit", "--kind", eventKind, "--job", j.ID, "--owner-lane", owner, "--epoch", "1", "--label", j.Label, "--host", a.machine(), "--pane", j.Pane, "--inbox-root", filepath.Dir(a.Jobs)}
 	if late {

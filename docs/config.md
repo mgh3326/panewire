@@ -822,6 +822,20 @@ that still hash to the announced sha256 — a report whose file changed waits,
 since only a new `done` announces those bytes — and it never pins what no
 completion named ([pane-sweep.md](pane-sweep.md#report-republish)).
 
+Once the record names the report (step 3 `pinned`, or the settling write carried
+it), `done` deletes the local report file: hk holds the bytes, and the file is
+only a second copy (hk 3685). It also records the result line in
+`<jobs>/<job>/.node-job-done`, the marker a node's `job.done` answers from. The
+file stays when the upload failed or the pin is still pending; that copy is what
+the republish sweep and the `[reap]` net work from. A path outside the jobs root
+stays too. Readers answer from the record after the delete: `job.result` reports
+the report present with the completion's sha256 (the byte count and last line
+were local facts), `job.done` answers `already-done` from the marker, the stall
+detector records the hk document, and the `[report]` relay text ends at the hk
+key instead of the deleted path. A rerun of the same `done` after the delete
+takes the sha256 from the completion that announced the path, so the file is
+never needed again.
+
 Publication and the pin never block completion. The only blocker is the rule
 for a strict `--result`: hk takes a `result` only in the spawned-to-completed
 write, never later, so the record must be confirmed holding it. For CLI `done

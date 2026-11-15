@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 	"unicode"
 
 	"github.com/mgh3326/panewire/internal/fleet"
@@ -39,7 +40,7 @@ const (
 	nodeJobAlreadyDone        = "already-done"
 	nodeJobReportInvalid      = "report-invalid"
 	nodeJobDoneMaxLine        = 1 << 10
-	nodeJobDoneMarker         = ".node-job-done"
+	nodeJobDoneMarker         = fleet.JobDoneMarker
 	nodeJobReportFile         = "report.md"
 	nodeLifecycleDuplicateTag = " duplicate=yes"
 )
@@ -320,6 +321,16 @@ func (client *HubClient) nodeJobDone(ctx context.Context, args nodeJobDoneArgs) 
 		return JobDoneResult{Outcome: nodeJobReportInvalid}, ""
 	}
 	if info, err := job.Lstat(name); err != nil || !info.Mode().IsRegular() {
+		// The fleet deletes a report once hk holds it and the record pins it
+		// (hk 3685): the done marker is then the job's own record of that
+		// completion, and job.done answers from it instead of rerunning done
+		// for a file that no longer exists. A report that is present but not a
+		// regular file, or one that cannot be read, stays invalid.
+		if name == nodeJobReportFile && errors.Is(err, os.ErrNotExist) {
+			if line, ok := readNodeJobDoneMarker(job, ""); ok {
+				return JobDoneResult{Outcome: nodeJobAlreadyDone, Line: line}, ""
+			}
+		}
 		return JobDoneResult{Outcome: nodeJobReportInvalid}, ""
 	}
 	report, err := job.ReadFile(name)
@@ -352,9 +363,13 @@ func (client *HubClient) nodeJobDone(ctx context.Context, args nodeJobDoneArgs) 
 // readNodeJobDoneMarker answers the recorded result line when this report's
 // digest is the one last completed. The digest is the key, as in panewire's own
 // duplicate check, because a released job id can be claimed again: a marker
-// that only said "done" would swallow the later round's completion.
+// that only said "done" would swallow the later round's completion. An empty
+// digest asks about a report file that is gone (the fleet deleted it after the
+// pin, hk 3685): the marker's line is the answer while no claim, spawn or
+// reprompt landed after it.
 func readNodeJobDoneMarker(job *os.Root, digest string) (string, bool) {
-	if info, err := job.Lstat(nodeJobDoneMarker); err != nil || !info.Mode().IsRegular() {
+	info, err := job.Lstat(nodeJobDoneMarker)
+	if err != nil || !info.Mode().IsRegular() {
 		return "", false
 	}
 	contents, err := job.ReadFile(nodeJobDoneMarker)
@@ -362,10 +377,52 @@ func readNodeJobDoneMarker(job *os.Root, digest string) (string, bool) {
 		return "", false
 	}
 	recorded, line, _ := strings.Cut(string(contents), "\n")
-	if recorded != digest {
+	if digest != "" {
+		if recorded != digest {
+			return "", false
+		}
+	} else if !nodeJobDoneMarkerCurrent(job, info.ModTime()) {
 		return "", false
 	}
 	return nodeJobDoneLine([]byte(line)), true
+}
+
+// nodeJobDoneMarkerCurrent reports whether no claim, spawn or reprompt landed
+// after the marker was written at. One that did starts a new round of the job
+// id, whose report the marker says nothing about.
+func nodeJobDoneMarkerCurrent(job *os.Root, at time.Time) bool {
+	events, err := job.OpenRoot("events")
+	if errors.Is(err, os.ErrNotExist) {
+		return true
+	}
+	if err != nil {
+		return false
+	}
+	defer events.Close()
+	dir, err := events.Open(".")
+	if err != nil {
+		return false
+	}
+	defer dir.Close()
+	entries, err := dir.ReadDir(-1)
+	if err != nil {
+		return false
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		sep := strings.IndexByte(name, '-')
+		if sep < 0 || !strings.HasSuffix(name, ".json") {
+			continue
+		}
+		switch strings.TrimSuffix(name[sep+1:], ".json") {
+		case "job.claim", "job.claimed", "job.spawned", "job.reprompted":
+			info, err := entry.Info()
+			if err != nil || info.ModTime().After(at) {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // nodeJobDoneLine is the last non-blank line of panewire's output, bounded.
