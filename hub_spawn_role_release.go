@@ -132,12 +132,16 @@ func (h *HubServer) releaseFailedSpawnRole(ctx context.Context, app *fleet.App, 
 		return false, heldProbe{reason: "hk_state_not_claimable"}
 	}
 	released, markReason := h.markLostAndRelease(ctx, app, holder, heldAgentName(holder, record), roleKey)
-	if !released && markReason == nodeJobMarkLostLedgerMissing && holder.Outcome.Pane == "" {
-		// hk 4673: a failed holder that recorded no pane, whose pane is
-		// absent and whose node has no ledger left (job dir or events/ gone),
-		// frees its reservation. hk is left as it is: the node still never
-		// writes lost over a record it cannot check (hk 3685), so the hk job
-		// stays claimed. Reviewer reservations are the subject of hk 4737.
+	if !released && markReason == nodeJobMarkLostNoLiveAttempt && holder.Outcome.Pane == "" {
+		// hk 4799: a failed holder that recorded no pane, whose pane is
+		// absent, frees its reservation only when its node proved from its own
+		// spawn journal and active-job list that no attempt of the job is live
+		// under any label. hk is left as it is: the node still never writes
+		// lost over a record it cannot check (hk 3685), so the hk job stays
+		// claimed. A ledger the node cannot read, or a live attempt it cannot
+		// rule out, keeps the hold (hk 4673's bare ledger_missing release let
+		// a newer claim under another label through). Reviewer reservations
+		// are the subject of hk 4737.
 		if h.inbox.store.releaseCompletedSpawnRole(ctx, holder.Request.RequestID, roleKey) == nil {
 			return true, probe
 		}

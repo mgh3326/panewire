@@ -68,6 +68,18 @@ func openNodeSpawnJournal(root string) (*nodeSpawnJournal, error) {
 			return nil, err
 		}
 	}
+	// strict marks a row whose job_id and label came from the strict
+	// flag/value pairs. A row an older build wrote is 0: its identity may name
+	// a forged --purpose value, so the takeover proof holds while any such row
+	// is still executing (hk 4799).
+	var strictPresent int
+	if err = db.QueryRowContext(ctx, `SELECT count(*) FROM pragma_table_info('spawn_inbox') WHERE name='strict'`).Scan(&strictPresent); err == nil && strictPresent == 0 {
+		_, err = db.ExecContext(ctx, `ALTER TABLE spawn_inbox ADD COLUMN strict INTEGER NOT NULL DEFAULT 0`)
+	}
+	if err != nil {
+		db.Close()
+		return nil, err
+	}
 	return &nodeSpawnJournal{db}, nil
 }
 func spawnFingerprint(message hubOutboundMessage) string {
@@ -84,7 +96,12 @@ func spawnFingerprint(message hubOutboundMessage) string {
 }
 
 func (j *nodeSpawnJournal) claim(ctx context.Context, message hubOutboundMessage) (bool, *hubSpawnResult, error) {
-	result, err := j.db.ExecContext(ctx, `INSERT INTO spawn_inbox(request_id,fingerprint,status,job_id,label) VALUES(?,?,'executing',?,?) ON CONFLICT DO NOTHING`, message.RequestID, spawnFingerprint(message), hubSpawnArg(message.Args, "--job"), hubSpawnArg(message.Args, "-l"))
+	// The journal's identity columns are read back by the takeover proof and
+	// by restart settlement, so they take the strict flag/value pairs: a
+	// --purpose value is free text sent before --job, and the lax scan would
+	// record its value as this row's job (hk 4799).
+	job, label := hubSpawnFlagArg(message.Args, "--job"), hubSpawnFlagArg(message.Args, "-l")
+	result, err := j.db.ExecContext(ctx, `INSERT INTO spawn_inbox(request_id,fingerprint,status,job_id,label,strict) VALUES(?,?,'executing',?,?,1) ON CONFLICT DO NOTHING`, message.RequestID, spawnFingerprint(message), job, label)
 	if err != nil {
 		return false, nil, err
 	}
@@ -103,7 +120,7 @@ func (j *nodeSpawnJournal) refuseUnstarted(ctx context.Context, message hubOutbo
 	if err != nil {
 		return false, err
 	}
-	inserted, err := j.db.ExecContext(ctx, `INSERT INTO spawn_inbox(request_id,fingerprint,status,result,job_id,label) VALUES(?,?,'completed',?,?,?) ON CONFLICT DO NOTHING`, message.RequestID, spawnFingerprint(message), string(raw), hubSpawnArg(message.Args, "--job"), hubSpawnArg(message.Args, "-l"))
+	inserted, err := j.db.ExecContext(ctx, `INSERT INTO spawn_inbox(request_id,fingerprint,status,result,job_id,label,strict) VALUES(?,?,'completed',?,?,?,1) ON CONFLICT DO NOTHING`, message.RequestID, spawnFingerprint(message), string(raw), hubSpawnFlagArg(message.Args, "--job"), hubSpawnFlagArg(message.Args, "-l"))
 	if err != nil {
 		return false, err
 	}
@@ -143,11 +160,16 @@ func (j *nodeSpawnJournal) complete(ctx context.Context, result hubSpawnResult) 
 	return err
 }
 
-// executingSpawn is a journal row no completion has been written for.
-type executingSpawn struct{ RequestID, Job, Label string }
+// executingSpawn is a journal row no completion has been written for. Strict
+// is false for a row an older build wrote, whose identity may be a forged
+// --purpose value (hk 4799).
+type executingSpawn struct {
+	RequestID, Job, Label string
+	Strict                bool
+}
 
 func (j *nodeSpawnJournal) executing(ctx context.Context) ([]executingSpawn, error) {
-	rows, err := j.db.QueryContext(ctx, `SELECT request_id,job_id,label FROM spawn_inbox WHERE status='executing' ORDER BY rowid`)
+	rows, err := j.db.QueryContext(ctx, `SELECT request_id,job_id,label,strict FROM spawn_inbox WHERE status='executing' ORDER BY rowid`)
 	if err != nil {
 		return nil, err
 	}
@@ -155,9 +177,11 @@ func (j *nodeSpawnJournal) executing(ctx context.Context) ([]executingSpawn, err
 	var out []executingSpawn
 	for rows.Next() {
 		var row executingSpawn
-		if err = rows.Scan(&row.RequestID, &row.Job, &row.Label); err != nil {
+		var strict int
+		if err = rows.Scan(&row.RequestID, &row.Job, &row.Label, &strict); err != nil {
 			return nil, err
 		}
+		row.Strict = strict != 0
 		out = append(out, row)
 	}
 	return out, rows.Err()

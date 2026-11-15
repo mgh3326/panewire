@@ -541,7 +541,8 @@ that already ended is not given a second event.
 | `panes-unknown` | `herdr pane list` failed, so a pane check proves nothing. |
 | `completed` | the local ledger holds a `job.completed` event; nothing is written. |
 | `newer-claim` | the local ledger holds a `job.reclaim` event; nothing is written. |
-| `ledger_missing` | the job dir or its `events/` is gone, so the ledger cannot prove the attempt; nothing is written. |
+| `ledger_missing` | the job dir or its `events/` is gone, and the node cannot prove that no attempt of the job is live; nothing is written. |
+| `no-live-attempt` | the job dir or its `events/` is gone, and the node's spawn journal and active-job list name no live attempt of the job under any label; nothing is written. |
 | `result-missing` | `reviewer_result_posted` only: the job directory holds no findings object and no report; nothing is written. |
 | `result-settling` | `reviewer_result_posted` only: a result file changed less than 10 minutes ago or while the node read it; nothing is written. |
 | `pane-working` | `reviewer_result_posted` only: the job's pane is `working`; nothing is written. |
@@ -551,7 +552,21 @@ that already ended is not given a second event.
 
 A missing job dir or `events/` is a ledger that is unknown, not an empty one, so
 it answers `ledger_missing` and the node never writes `lost` over a record it
-cannot check. A failed ledger read or handoffkeep write answers
+cannot check. It does not free the caller either: a job id can be claimed again
+under another label, and a bare missing ledger cannot rule that attempt out. The
+node reads its own spawn journal and active-job list instead, and answers
+`no-live-attempt` only when both are readable and neither names the job under
+any label — an executing journal row is a spawn this node is starting, and an
+active entry is a job whose ledger exists again. Only that proof lets the hub
+free a failed no-pane holder's reservation (hk 4799, then
+[hub-spawn-operations.md](hub-spawn-operations.md#acceptance-and-identity)). A
+journal or jobs directory the node cannot read is no proof, so the record and
+the reservation stay. A spawn journal row written before the strict identity
+existed names no job the node can trust; while one is still executing the node
+answers `ledger_missing` too, until restart settlement completes it (hk 4799).
+The `reviewer_result_posted` end keeps answering
+`ledger_missing` for a missing ledger: it ends a reviewer's job, which holds no
+reservation (hk 4737). A failed ledger read or handoffkeep write answers
 `mark_lost_failed`; a node without a jobs root answers `jobs_root_unset`.
 
 ### `job.reap`
