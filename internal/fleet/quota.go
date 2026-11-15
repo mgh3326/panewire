@@ -573,6 +573,16 @@ func (a *App) heldAccountKeys(ctx context.Context, pools []string) map[string][]
 	}
 	id := firstNonempty(str(a.Config.Local, "presence_id"), a.machine())
 	now := a.Now()
+	// The presence read has no order of its own. The most recently announced
+	// account comes first, then the key, so the account a gate judges first
+	// (and names in a refusal) does not depend on how the read was ordered.
+	records = slices.Clone(records)
+	slices.SortStableFunc(records, func(x, y PresenceRecord) int {
+		if c := y.LastSeen.Compare(x.LastSeen); c != 0 {
+			return c
+		}
+		return strings.Compare(x.AccountKey, y.AccountKey)
+	})
 	for _, rec := range records {
 		pool := accountPool(rec.AccountKey)
 		if rec.HostID != id || !slices.Contains(pools, pool) || slices.Contains(held[pool], rec.AccountKey) {
