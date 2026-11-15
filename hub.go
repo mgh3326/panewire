@@ -867,6 +867,7 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 	hub.prepareInbox()
 	if hub.inbox != nil {
 		hub.inbox.store.spawnRetryDelay = hub.spawnRetryDelay
+		hub.inbox.store.spawnFrozen = hub.spawnRollbackDrain
 	}
 	if err := hub.restorePlacementCounts(); err != nil {
 		hub.closeCancel()

@@ -39,6 +39,8 @@ type laneInboxStore struct {
 	// spawnRetryDelay is the hub's re-placement back-off after a request's
 	// n-th failed attempt (hub_spawn_park.go); nil retries at once.
 	spawnRetryDelay func(failures int) time.Duration
+	// spawnFrozen refuses every new spawn row (--spawn-rollback-drain).
+	spawnFrozen bool
 }
 
 type laneInboxItem struct {

@@ -112,6 +112,12 @@ func (h *HubServer) handleConsultRequest(w http.ResponseWriter, r *http.Request)
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "durable_store_required", "fix": "configure the hub inbox database before accepting consults"})
 		return
 	}
+	// Refused before any intent is stored, so no queued consult outlives the
+	// drain for an older hub to recover.
+	if h.spawnRollbackDrain {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "spawn_rollback_drain", "fix": "the hub is draining its spawn queue for a rollback; ask again after it restarts without --spawn-rollback-drain"})
+		return
+	}
 	var request hubConsultRequest
 	if !decodeHubJSON(w, r, hubSpawnMaxBodyBytes, &request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_request", "reason": "request body is invalid"})

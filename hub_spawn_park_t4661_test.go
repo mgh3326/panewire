@@ -958,6 +958,7 @@ func TestLegacyClaimPersistsBeforeOverwrite_t4661(t *testing.T) {
 func TestSpawnRollbackDrainFreezesProducers_t4661(t *testing.T) {
 	h := asyncSpawnHub(t)
 	h.spawnRollbackDrain = true
+	h.inbox.store.spawnFrozen = true
 	request := durableSpawnRequest()
 	raw, _ := json.Marshal(request)
 	r := httptest.NewRequest(http.MethodPost, "/v1/spawns", bytes.NewReader(raw))
@@ -977,5 +978,23 @@ func TestSpawnRollbackDrainFreezesProducers_t4661(t *testing.T) {
 	}
 	if err := h.claimConsultSpawn(t.Context(), fleet.ConsultPlan{}, "owner"); !errors.Is(err, errSpawnRollbackDrain) {
 		t.Fatalf("a consult spawn under rollback drain: %v", err)
+	}
+	// Every producer goes through the store's claim, which refuses too.
+	other, job := parkRequest(300)
+	if _, _, err := h.inbox.store.claimSpawn(t.Context(), other, job, "parent", time.Now()); !errors.Is(err, errSpawnRollbackDrain) {
+		t.Fatalf("a direct claim under rollback drain: %v", err)
+	}
+	for _, path := range []string{"/v1/consults", "/v1/jobs/escalate-author"} {
+		r := httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{}`))
+		r.Header.Set("Authorization", "Bearer "+t14OperatorToken)
+		w := httptest.NewRecorder()
+		h.Handler().ServeHTTP(w, r)
+		if w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), "spawn_rollback_drain") {
+			t.Fatalf("%s under rollback drain: %d %s", path, w.Code, w.Body)
+		}
+	}
+	var consults int
+	if err := h.inbox.store.db.QueryRow(`SELECT count(*) FROM consult_requests`).Scan(&consults); err != nil || consults != 0 {
+		t.Fatalf("a refused consult stored %d intents, err=%v", consults, err)
 	}
 }

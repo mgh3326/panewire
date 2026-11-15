@@ -328,32 +328,37 @@ whole queue, with every producer frozen:
 
 1. Restart the newer hub with `--spawn-rollback-drain`. The hub keeps
    running and its coordinator keeps placing, parking, waking and expiring
-   queued requests. But nothing creates a new one:
-   - `POST /v1/spawns` answers 503 `spawn_rollback_drain`;
+   queued requests. But no new spawn row can be created
+   (`claimSpawnReplacing` refuses every producer):
+   - `POST /v1/spawns`, `POST /v1/consults` and
+     `POST /v1/jobs/escalate-author` answer 503 `spawn_rollback_drain`, the
+     consult before it stores any intent;
    - a quota-stop hand-off starts no successor;
    - a consult creates, recovers or respawns no spawn (the consult fails).
 
-   Do not SIGTERM-drain yet: that stops the coordinator, and a parked row
-   would never settle.
-2. Wait until no row is nonterminal, any status included (`*_grant`
-   variants too):
+   Staged ladder steps already queued still settle. Do not SIGTERM-drain
+   yet: that stops the coordinator, and a parked row would never settle.
+2. Wait until no spawn row is nonterminal, any status included (`*_grant`
+   variants too), and no consult is open:
 
    ```sql
    SELECT request_id, job, status, claimed_host, expires_ms FROM spawn_operations
    WHERE status NOT IN ('succeeded','failed','retryable','given_up','refused','cancelled');
+   SELECT id, state FROM consult_requests WHERE state IN ('queued','running');
    ```
 
    Each row must land, end, or be cancelled. Do not raise limits to get
    past this step.
-3. Also wait for producers that still own live work. Running consults must
-   answer or fail (no `consult_requests` row in state `queued` or `running`). A `succeeded` job
-   that is still running can trigger a quota hand-off on the older hub, so
-   wait for those jobs to finish, or accept that their hand-off runs under
-   part 3's rule.
-4. Only then stop the newer hub ([hub-drain.md](hub-drain.md)), re-run the
-   query (it must still return nothing), and start the older hub. Keep
-   external submissions stopped for as long as it runs. Roll forward before
-   reopening them.
+3. Wait for every spawned job that is still running to finish. On the older
+   hub, a running job's quota-stop would start a successor under part 3's
+   claim-unaware expiry, and that hub has no flag to stop it.
+4. Stop the newer hub ([hub-drain.md](hub-drain.md)) and re-run both queries
+   from step 2: they must still return nothing. Remove
+   `--spawn-rollback-drain` from the service command (the older binary
+   rejects the unknown flag and would restart-loop), reload the service
+   configuration, then start the older hub. Keep spawn submissions,
+   consults and author escalations stopped for as long as it runs, and roll
+   forward before reopening them.
 
 ### Rolling back past the time limit
 

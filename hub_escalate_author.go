@@ -79,6 +79,11 @@ func (h *HubServer) handleEscalateAuthor(w http.ResponseWriter, r *http.Request)
 		hubUnauthorized(w)
 		return
 	}
+	// No new ladder stage under a rollback drain; staged ones still settle.
+	if h.spawnRollbackDrain {
+		writeJSON(w, http.StatusServiceUnavailable, hubEscalateAuthorResult{Code: "spawn_rollback_drain", Reason: "the hub is draining its spawn queue for a rollback"})
+		return
+	}
 	var request hubEscalateAuthorRequest
 	if !decodeHubJSON(w, r, hubSpawnMaxBodyBytes, &request) {
 		writeJSON(w, http.StatusBadRequest, hubEscalateAuthorResult{Code: "invalid_request", Reason: "request body is invalid"})
