@@ -561,6 +561,10 @@ func TestNodeSpawnSerializesCaseAliasedJobIDs_t4578(t *testing.T) {
 			t.Fatalf("spawn failed: %+v", result)
 		}
 	}
+	// A legacy request without --job takes its job id from -l.
+	if !spawnOverlapConflicts(spawnOverlapKey("dir-1", []string{"-l", "review-a"}), spawnOverlapKey("dir-2", []string{"-l", "review-b", "--job", "Review-A"})) {
+		t.Fatal("a job id defaulted from -l was not in the overlap key")
+	}
 	if !spawnOverlapConflicts(spawnOverlapKey("dir-1", first.Args), spawnOverlapKey("dir-2", second.Args)) || spawnOverlapConflicts(spawnOverlapKey("dir-1", []string{"--job", "a"}), spawnOverlapKey("dir-2", []string{"--job", "b"})) {
 		t.Fatal("overlap key conflict rule is wrong")
 	}

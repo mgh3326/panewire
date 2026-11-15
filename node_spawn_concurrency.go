@@ -134,7 +134,13 @@ func (client *HubClient) spawnAdmissionKey(message hubOutboundMessage) string {
 // joined by NUL; a key conflicts with another that shares any part.
 func spawnOverlapKey(dir string, args []string) string {
 	key := "dir:" + strings.ToLower(filepath.Clean(dir))
-	if job := hubSpawnFlagArg(args, "--job"); job != "" {
+	// The effective job id, derived as the launcher does (fleet parseSpawn):
+	// --job, else the -l label.
+	job := hubSpawnFlagArg(args, "--job")
+	if job == "" {
+		job = hubSpawnFlagArg(args, "-l")
+	}
+	if job != "" {
 		key += "\x00job:" + strings.ToLower(job)
 	}
 	return key
