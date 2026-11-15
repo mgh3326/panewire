@@ -147,6 +147,16 @@ type HubServerConfig struct {
 	PaneSweepInterval time.Duration
 	// PaneSweepAge is how long a job must have ended before its pane is closed.
 	PaneSweepAge time.Duration
+	// FleetStatusInterval is how often the hub writes the fleet status
+	// snapshot to hk (docs/fleet-status.md). Zero keeps it off, so a config
+	// built for a test never writes; a negative value is invalid.
+	FleetStatusInterval time.Duration
+	// FleetStatusPublish replaces the hk document write in tests; nil writes
+	// with fleet.PutHKDocument under the hub's hk credential.
+	FleetStatusPublish func(context.Context, string) error
+	// FleetStatusPlans replaces the per-grade plan in tests; nil runs the
+	// hub's own fleet App as a read-only dry run.
+	FleetStatusPlans func(context.Context) []fleet.StatusPlan
 	// handoffkeep is the durable relay-event store. It is package-private so the
 	// hub's public configuration keeps no credential-bearing field.
 	handoffkeep *handoffkeepRelayClient
@@ -662,6 +672,12 @@ type HubServer struct {
 	// keeps at most one load publication in flight (docs/fleet-state.md).
 	fleetState     *fleetStateStore
 	fleetStateOnce sync.Once
+	// fleetStatusInterval is how often the fleet status snapshot is written;
+	// zero disables it. fleetStatusPublish and fleetStatusPlanFn are the
+	// test seams for the hk write and the per-grade plan (fleet_status.go).
+	fleetStatusInterval time.Duration
+	fleetStatusPublish  func(context.Context, string) error
+	fleetStatusPlanFn   func(context.Context) []fleet.StatusPlan
 	// launchBackoffs counts consecutive launch failures per (machine, kind),
 	// guarded by mu (hub_readiness.go).
 	launchBackoffs map[launchKey]*launchBackoff
@@ -784,6 +800,9 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 	if config.LanesNodeRowCap < 0 {
 		return nil, errors.New("hub lanes node row cap is invalid")
 	}
+	if config.FleetStatusInterval < 0 {
+		return nil, errors.New("hub fleet status interval is invalid")
+	}
 	if config.LanesNodeRowCap == 0 {
 		config.LanesNodeRowCap = defaultLanesNodeRowCap
 	}
@@ -857,6 +876,9 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 	}
 	hub.auth.Store(&authSet)
 	hub.fleetState = newFleetStateStore()
+	hub.fleetStatusInterval = config.FleetStatusInterval
+	hub.fleetStatusPublish = config.FleetStatusPublish
+	hub.fleetStatusPlanFn = config.FleetStatusPlans
 	hub.quietTimings = defaultDesignQuietTimings()
 	if hub.inbox != nil {
 		cleared, err := hub.inbox.store.clearReviewerReservations()
@@ -2519,6 +2541,7 @@ func (h *HubServer) RunMaintenance(ctx context.Context) {
 	go h.runPaneSweep(ctx)
 	go h.runReviewerEnd(ctx)
 	go h.runPoolTriggers(ctx)
+	go h.runFleetStatus(ctx)
 	h.startSpawnCoordinator(ctx)
 	h.startConsultCoordinator(ctx)
 	// Startup replay runs once, before the first keepalive tick: whatever

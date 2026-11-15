@@ -6,6 +6,7 @@ import (
 	_ "embed"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math"
 	"os"
 	"slices"
@@ -201,6 +202,23 @@ func (a *App) poolPolicy() (PoolPolicy, error) {
 		a.warn("credit_final_days is deprecated and has no effect")
 	}
 	return p, err
+}
+
+// StatusPoolPolicy is the pool order a status reader uses: the one this App's
+// operator config applies ([local].pool_policy, then PANEWIRE_POOL_POLICY,
+// then built-in), the same one selection uses.
+func (a *App) StatusPoolPolicy() (PoolPolicy, error) { return a.poolPolicy() }
+
+// StatusPoolPolicy is the pool order the operator config applies without an
+// App: [local].pool_policy, then PANEWIRE_POOL_POLICY, then the built-in order.
+// `quota status` and the fleet status snapshot use it so a band is not
+// computed under a different tier order from a spawn.
+func StatusPoolPolicy() (PoolPolicy, error) {
+	c, err := LoadConfig(configPath(io.Discard))
+	if err != nil {
+		return PoolPolicy{}, err
+	}
+	return LoadPoolPolicy(str(c.Local, "pool_policy"))
 }
 
 // selCand is one profile/rung/account choice. Static refusals have no account.
