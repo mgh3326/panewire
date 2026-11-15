@@ -521,13 +521,40 @@ func (c *hubHTTP) WaitSpawn(ctx context.Context, id string, opts SpawnWaitOption
 	}
 	failures := 0
 	var told spawnWaitNotices
+	// last is the latest request state read; the bound's exit names it.
+	lastKind, lastStatus := spawnActive, ""
+	expired := func() error {
+		if deadline.IsZero() || time.Now().Before(deadline) {
+			return nil
+		}
+		if lastKind == spawnParked {
+			return fail(exitWaitParked, "spawn request %s is still parked after the wait timeout; it stays queued on the hub (operation %s)", id, id)
+		}
+		return fail(exitWaitTimeout, "wait timeout for spawn request %s in state %s; it stays on the hub (operation %s)", id, firstNonempty(lastStatus, "unknown"), id)
+	}
 	for {
-		status, raw, err := c.doIdempotent(ctx, http.MethodGet, "/v1/spawns/"+id, nil, 5*time.Second)
+		// The bound covers the read, its retries, the failure sleeps and the
+		// poll sleep alike: a read starts only inside it and ends at it.
+		if err := expired(); err != nil {
+			return SpawnAttempt{}, err
+		}
+		readCtx, cancel := ctx, context.CancelFunc(func() {})
+		if !deadline.IsZero() {
+			readCtx, cancel = context.WithDeadline(ctx, deadline)
+		}
+		status, raw, err := c.doIdempotent(readCtx, http.MethodGet, "/v1/spawns/"+id, nil, 5*time.Second)
+		cancel()
+		if ctx.Err() != nil {
+			return SpawnAttempt{}, ctx.Err()
+		}
 		if err != nil || status >= http.StatusInternalServerError {
+			if e := expired(); e != nil {
+				return SpawnAttempt{}, e
+			}
 			if failures++; failures > spawnStatusFailureLimit {
 				return SpawnAttempt{}, fail(exitStateConflict, "spawn status unavailable; inspect operation %s and retry its saved request without choosing a new host", id)
 			}
-			if err = sleepContext(ctx, poll); err != nil {
+			if err = c.sleepWithin(ctx, poll, deadline); err != nil {
 				return SpawnAttempt{}, err
 			}
 			continue
@@ -562,21 +589,20 @@ func (c *hubHTTP) WaitSpawn(ctx context.Context, id string, opts SpawnWaitOption
 		case spawnUnknown:
 			told.unknown(opts.Notice, result.Status)
 		}
-		wait := poll
-		if !deadline.IsZero() {
-			left := time.Until(deadline)
-			if left <= 0 {
-				if kind == spawnParked {
-					return attempt, fail(exitWaitParked, "spawn request %s is still parked after the wait timeout; it stays queued on the hub (operation %s)", id, id)
-				}
-				return attempt, fail(exitWaitTimeout, "wait timeout for spawn request %s in state %s; it stays on the hub (operation %s)", id, firstNonempty(result.Status, "unknown"), id)
-			}
-			wait = min(wait, left)
-		}
-		if err = sleepContext(ctx, wait); err != nil {
+		lastKind, lastStatus = kind, result.Status
+		if err = c.sleepWithin(ctx, poll, deadline); err != nil {
 			return attempt, err
 		}
 	}
+}
+
+// sleepWithin sleeps d, or until deadline when that comes first (a zero
+// deadline is none). Only the caller's own context ends it with an error.
+func (c *hubHTTP) sleepWithin(ctx context.Context, d time.Duration, deadline time.Time) error {
+	if !deadline.IsZero() {
+		d = min(d, max(time.Until(deadline), 0))
+	}
+	return sleepContext(ctx, d)
 }
 
 // spawnRefusalRC is the exit code of a refused request: the hub's refusal

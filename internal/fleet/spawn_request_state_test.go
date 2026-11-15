@@ -3,7 +3,11 @@ package fleet
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -143,5 +147,54 @@ func TestSpawnNeverLanded(t *testing.T) {
 		if got := spawnNeverLanded(state); got != want {
 			t.Errorf("spawnNeverLanded(%q)=%v want %v", state, got, want)
 		}
+	}
+}
+
+// The wait bound also covers the status read, its retries and the failure
+// sleeps: a hub outage cannot hold a short --wait-timeout open (production
+// retry policy, so an unbounded read would run for a minute), and a request
+// that answers "landed" only after the bound is not treated as success.
+func TestWaitSpawnBoundCoversReadsAndOutages(t *testing.T) {
+	serve := func(t *testing.T, handler http.HandlerFunc) hubHTTP {
+		t.Helper()
+		server := httptest.NewServer(handler)
+		t.Cleanup(server.Close)
+		return hubHTTP{base: server.URL, token: "fixture", client: server.Client(), statusPoll: time.Millisecond}
+	}
+	bound := SpawnWaitOptions{Timeout: 300 * time.Millisecond}
+	for name, test := range map[string]struct {
+		handler http.HandlerFunc
+		code    int
+	}{
+		"outage from the start": {func(w http.ResponseWriter, r *http.Request) { http.Error(w, "down", 503) }, exitWaitTimeout},
+		"parked then outage": {func() http.HandlerFunc {
+			var reads atomic.Int32
+			return func(w http.ResponseWriter, r *http.Request) {
+				if reads.Add(1) == 1 {
+					json.NewEncoder(w).Encode(map[string]any{"status": "parked", "reason": "quota"})
+					return
+				}
+				http.Error(w, "down", 503)
+			}
+		}(), exitWaitParked},
+		"landed only after the bound": {func(w http.ResponseWriter, r *http.Request) {
+			select {
+			case <-time.After(2 * time.Second):
+			case <-r.Context().Done():
+			}
+			json.NewEncoder(w).Encode(map[string]any{"status": "landed"})
+		}, exitWaitTimeout},
+	} {
+		t.Run(name, func(t *testing.T) {
+			c := serve(t, test.handler)
+			start := time.Now()
+			_, err := c.WaitSpawn(t.Context(), statusTestOperation, bound)
+			if ErrorCode(err) != test.code {
+				t.Fatalf("code=%d err=%v, want %d", ErrorCode(err), err, test.code)
+			}
+			if took := time.Since(start); took > 2*time.Second {
+				t.Fatalf("wait ran %v past a %v bound", took, bound.Timeout)
+			}
+		})
 	}
 }
