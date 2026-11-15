@@ -1,6 +1,7 @@
 package fleet
 
 import (
+	"fmt"
 	"go/ast"
 	"go/token"
 	"os"
@@ -9,9 +10,11 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mgh3326/panewire/internal/arbiter"
 	"github.com/mgh3326/panewire/internal/hkcred"
+	"github.com/mgh3326/panewire/internal/teststate"
 )
 
 // hermeticEnvPrefixes and hermeticEnvNames cover every environment variable
@@ -35,6 +38,13 @@ func hermeticEnv(name string) bool {
 // state under it, and tests that need the real home read it here.
 var testLaunchHome string
 
+// The prefixes of the temp dirs TestMain hands a test run. They are swept, not
+// just removed, because a killed test binary leaves them behind (hk 4733).
+const (
+	testCachePrefix = "panewire-test-cache-"
+	testHomePrefix  = "panewire-test-home-"
+)
+
 func TestMain(m *testing.M) {
 	// The launch home is captured before HOME moves: it is the operator's
 	// real home, which no test may open ledger state under (hk 4685).
@@ -42,14 +52,23 @@ func TestMain(m *testing.M) {
 	if testLaunchHome == "" {
 		testLaunchHome = os.Getenv("HOME")
 	}
+	// The go toolchain keeps the launch environment's caches, so a test that
+	// runs go stays warm and offline. Pin them before HOME and XDG_CACHE_HOME
+	// move: on Linux GOCACHE derives from XDG_CACHE_HOME, and a go command run
+	// after the move would build into the temp cache dir instead (hk 4733).
+	teststate.PinGoToolchainEnv()
 	for _, kv := range os.Environ() {
 		if name, _, _ := strings.Cut(kv, "="); hermeticEnv(name) {
 			os.Unsetenv(name)
 		}
 	}
+	// A test binary killed before its cleanup leaves these behind.
+	if _, err := teststate.SweepStale(os.TempDir(), time.Now(), teststate.StaleAfter, testCachePrefix, testHomePrefix); err != nil {
+		fmt.Fprintf(os.Stderr, "fleet: sweeping stale test dirs: %v\n", err)
+	}
 	// The bench catalog cache is written under XDG_CACHE_HOME; keep tests out
 	// of the developer's real cache.
-	cache, err := os.MkdirTemp("", "panewire-test-cache-")
+	cache, err := os.MkdirTemp("", testCachePrefix)
 	if err != nil {
 		panic(err)
 	}
@@ -61,7 +80,7 @@ func TestMain(m *testing.M) {
 	// trust() would prefer it unset: a temp value still fails trust()'s
 	// canonical check, and it keeps ledger() off the real state.db for Apps
 	// built with the launch home.
-	home, err := os.MkdirTemp("", "panewire-test-home-")
+	home, err := os.MkdirTemp("", testHomePrefix)
 	if err != nil {
 		panic(err)
 	}
@@ -76,8 +95,11 @@ func TestMain(m *testing.M) {
 	// or clears it under a temporary HOME.
 	os.Setenv(hkcred.PathEnv, filepath.Join(cache, "no-hk-svc.env"))
 	code := m.Run()
-	os.RemoveAll(cache)
-	os.RemoveAll(home)
+	for _, path := range []string{cache, home} {
+		if err := teststate.RemoveAll(path); err != nil {
+			fmt.Fprintf(os.Stderr, "fleet: removing %s: %v\n", path, err)
+		}
+	}
 	os.Exit(code)
 }
 
