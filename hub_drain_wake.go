@@ -161,6 +161,20 @@ func (h *HubServer) drainWakeLaneStep(ctx context.Context, lane string, state *d
 		state.pending, state.inflight = false, 0
 		return
 	}
+	// hk 4631: the heartbeat drops live jobs (its 32-entry cap, its idle
+	// retirement), so it can read zero while hk still shows claimed work. The
+	// in-work count is the larger of the two; the line stays owed while it is
+	// above the threshold. hk's developing and reviewing states are trusted as
+	// in work, so a stale row there holds the line until it is closed in hk.
+	hkInWork, err := h.drainWakeInWork(ctx, drainWakeProject(lane))
+	if err != nil {
+		h.logger.Warn("drain wake skipped: hk in-work unavailable; retrying on the next sweep", "lane", lane, "error", err)
+		return
+	}
+	inFlight = max(inFlight, hkInWork)
+	if inFlight > threshold {
+		return
+	}
 	// The owed state and the queue time are saved before the line is queued, so
 	// a restart after the writer sends it keeps the interval. A failed save keeps
 	// the line owed and queues nothing; the next sweep tries again.
@@ -257,12 +271,27 @@ func (s *laneInboxStore) saveDrainWake(ctx context.Context, lane string, state *
 // the queued work; unstarted is hk's open pre-start state. hk has no "ready".
 var drainWakeOpenStates = []string{"backlog", "unstarted"}
 
+// drainWakeInWorkStates are the hk task states that count as work in flight for
+// a project (hk 4631): a task a job has claimed is developing or reviewing.
+var drainWakeInWorkStates = []string{"developing", "reviewing"}
+
 // drainWakeBacklog counts hk tasks for project in each open state, leaving out
 // the ones awaiting an operator decision. hk filters project and state server
 // side; the awaiting check happens here.
 func (h *HubServer) drainWakeBacklog(ctx context.Context, project string) (int, error) {
+	return h.drainWakeCount(ctx, project, drainWakeOpenStates)
+}
+
+// drainWakeInWork counts hk tasks for project in each in-work state, leaving out
+// the ones awaiting an operator decision, as drainWakeBacklog does.
+func (h *HubServer) drainWakeInWork(ctx context.Context, project string) (int, error) {
+	return h.drainWakeCount(ctx, project, drainWakeInWorkStates)
+}
+
+// drainWakeCount sums drainWakeStateCount over states.
+func (h *HubServer) drainWakeCount(ctx context.Context, project string, states []string) (int, error) {
 	total := 0
-	for _, state := range drainWakeOpenStates {
+	for _, state := range states {
 		count, err := h.drainWakeStateCount(ctx, project, state)
 		if err != nil {
 			return 0, err
