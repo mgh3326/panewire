@@ -89,7 +89,7 @@ type nodeCloseOpStatusResult struct {
 }
 
 func validNodePaneCloseOpArgs(args nodePaneCloseOpArgs) bool {
-	return fleet.ValidCloseOpID(args.RequestID) && fleet.ValidJobID(args.Job) && validNodeAttemptToken(args.Attempt) && nodeCommandPaneIDPattern.MatchString(args.PaneID) && validNodeJobName(args.Name) && nodePaneClosableStatus[args.AgentStatus] && validNodeCommandPath(args.Cwd) && validNodeEndReason(args.EndReason) && args.EndReason != ""
+	return fleet.ValidCloseOpID(args.RequestID) && fleet.ValidJobID(args.Job) && validNodeAttemptToken(args.Attempt) && nodeCommandPaneIDPattern.MatchString(args.PaneID) && validNodePaneName(args.Name) && nodePaneClosableStatus[args.AgentStatus] && validNodeCommandPath(args.Cwd) && validNodeEndReason(args.EndReason) && args.EndReason != ""
 }
 
 // validNodeAttemptToken bounds an attempt token: a ledger event file name.

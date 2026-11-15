@@ -96,7 +96,11 @@ func (c *jobCLI) close(args []string) int {
 	if err != nil {
 		return c.exit(err)
 	}
-	jobDir := jobJobsRoot() + "/" + options.job
+	jobsRoot := jobJobsRoot()
+	if err := legacyJobDirCaseRefusal("close", jobsRoot, options.job); err != nil {
+		return c.exit(err)
+	}
+	jobDir := jobsRoot + "/" + options.job
 	eventsDir := jobDir + "/events"
 	if info, err := os.Stat(eventsDir); err != nil || !info.IsDir() {
 		if errors.Is(err, os.ErrNotExist) {

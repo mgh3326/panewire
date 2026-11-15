@@ -852,6 +852,14 @@ CLI accepts any ASCII single path component instead: the retired spawner minted
 ids such as `jw+odd` outside the relay shape and the frozen golden pins that
 they still complete, but non-ASCII and separators are refused.
 
+Pane and agent names are not ids: the node commands keep the older pane-name
+rule, so punctuation the hub label grammar admits (`:`, for one) stays accepted
+by pane close, capture and read. The legacy CLI also compares its spelling with
+the real jobs-root entry, and refuses `done Build`, `escalate Build`,
+`joined Build` and `close Build` when `build` exists: on a case-insensitive
+volume the wrong spelling resolves to `build`'s directory, and the record would
+be appended to another job's events.
+
 After the brief lands, panewire merges `{state:"spawned", role, label, family,
 profile, model, harness, effort, pool, owner_lane, parent_lane, parent_job,
 pane_id, worktree:{origin, branch|null, head}}` — the allowlisted fields only

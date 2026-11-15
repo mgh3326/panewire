@@ -195,6 +195,19 @@ func validNodeJobName(name string) bool {
 	return hubJobIDPattern.MatchString(name)
 }
 
+// validNodePaneName is the pane/agent name rule; validNodeJobName is the job
+// id and directory rule. A pane name is not a path component, so the
+// punctuation hubAgentLabelPattern admits (":", for one) stays accepted, and
+// the pre-4824 shape is kept for names the hub never minted: non-empty, at most
+// 128 bytes, no control byte, no path separator or space, no leading '-' or
+// '.', no "..".
+func validNodePaneName(name string) bool {
+	if name == "" || len(name) > 128 || name[0] == '-' || name[0] == '.' {
+		return false
+	}
+	return !hasControlByte(name) && !strings.ContainsAny(name, "/\\ ") && !strings.Contains(name, "..")
+}
+
 func validNodeCommandPath(path string) bool {
 	return path != "" && len(path) <= nodeCommandMaxPathBytes && filepath.IsAbs(path) && !strings.ContainsAny(path, "\r\n\x00")
 }
@@ -315,7 +328,7 @@ func parseNodeCommandArgs(op string, raw json.RawMessage) (any, bool) {
 		return args, decodeNodeCommandStrict(raw, &args)
 	case nodeCommandPaneClose:
 		var args nodePaneCloseArgs
-		valid := decodeNodeCommandStrict(raw, &args) && nodeCommandPaneIDPattern.MatchString(args.PaneID) && validNodeJobName(args.Name) && nodePaneClosableStatus[args.AgentStatus] && validNodeCommandPath(args.Cwd) && (args.QuestionJob == "" || validNodeJobName(args.QuestionJob))
+		valid := decodeNodeCommandStrict(raw, &args) && nodeCommandPaneIDPattern.MatchString(args.PaneID) && validNodePaneName(args.Name) && nodePaneClosableStatus[args.AgentStatus] && validNodeCommandPath(args.Cwd) && (args.QuestionJob == "" || validNodeJobName(args.QuestionJob))
 		return args, valid
 	case nodeCommandPaneCloseOp:
 		var args nodePaneCloseOpArgs
@@ -331,11 +344,11 @@ func parseNodeCommandArgs(op string, raw json.RawMessage) (any, bool) {
 		return args, true
 	case nodeCommandPaneCapture:
 		var args nodePaneCaptureArgs
-		valid := decodeNodeCommandStrict(raw, &args) && nodeCommandPaneIDPattern.MatchString(args.PaneID) && validNodeJobName(args.Name) && validNodeCommandPath(args.Cwd) && args.MergedAfter >= 0
+		valid := decodeNodeCommandStrict(raw, &args) && nodeCommandPaneIDPattern.MatchString(args.PaneID) && validNodePaneName(args.Name) && validNodeCommandPath(args.Cwd) && args.MergedAfter >= 0
 		return args, valid
 	case nodeCommandPaneRead:
 		var args nodePaneReadArgs
-		valid := decodeNodeCommandStrict(raw, &args) && nodeCommandPaneIDPattern.MatchString(args.PaneID) && validNodeJobName(args.Name) && validNodeCommandPath(args.Cwd) && args.TailLines >= 0 && args.TailLines <= nodePaneReadMaxTailLines
+		valid := decodeNodeCommandStrict(raw, &args) && nodeCommandPaneIDPattern.MatchString(args.PaneID) && validNodePaneName(args.Name) && validNodeCommandPath(args.Cwd) && args.TailLines >= 0 && args.TailLines <= nodePaneReadMaxTailLines
 		return args, valid
 	case nodeCommandJobResult:
 		var args nodeJobResultArgs
