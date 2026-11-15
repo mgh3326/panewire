@@ -50,6 +50,15 @@ func claimParkRequest(t *testing.T, h *HubServer, n int, now time.Time) hubSpawn
 	return task
 }
 
+func parkNow(t *testing.T, h *HubServer, task hubSpawnTask, reason string) bool {
+	t.Helper()
+	parked, err := h.parkSpawnTask(t.Context(), task, reason, "", h.spawnWakeGen.Load())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return parked
+}
+
 func parkedTask(t *testing.T, h *HubServer, id string) hubSpawnTask {
 	t.Helper()
 	task, err := h.inbox.store.spawnTask(t.Context(), id)
@@ -88,6 +97,12 @@ func TestSpawnParkReasonNamesNoCandidateRefusals_t4661(t *testing.T) {
 		{81, "no placement candidate accepted spawn; no local fallback", spawnParkHostFull},
 		{81, "node desktop did not connect after wake", spawnParkNodeDisconnected},
 		{81, "every candidate harness is in launch_backoff", spawnParkLaunchBackoff},
+		// Hub placement never spawns locally: rc 80 after every remote tried.
+		{80, "local spawns are disabled on this host; no remote candidate completed (tried: desktop task_slots_full)", spawnParkHostFull},
+		{80, "local spawns are disabled on this host; no remote candidate completed (tried: desktop disconnected)", spawnParkNodeDisconnected},
+		{80, "local spawns are disabled on this host; no remote candidate completed (tried: desktop checkout_refused:dirty)", spawnParkNoEligibleHost},
+		// An escalation goes to the parent lane, never a silent park.
+		{87, "role_exhausted_escalate: QUOTA_EXHAUSTED: every eligible worker account (a) is measured exhausted; ask the parent lane", ""},
 		// Refusals no wait can fix still end the request.
 		{2, "invalid_args: unknown flag --frob", ""},
 		{81, "branch wk/x is not on origin; push it first", ""},
@@ -138,7 +153,7 @@ func TestNoCandidateParksWithReasonAndNextCheck_t4661(t *testing.T) {
 	clock := expiryClock(h, expiryNow())
 	h.spawnRand = func() float64 { return 0 } // the lowest spread: 24 s
 	task := claimParkRequest(t, h, 1, *clock)
-	if !h.parkSpawnTask(t.Context(), task, spawnParkPoolCap, "every eligible candidate is in a pool at its concurrency cap") {
+	if !parkNow(t, h, task, spawnParkPoolCap) {
 		t.Fatal("park was not stored")
 	}
 	saved := parkedTask(t, h, task.Request.RequestID)
@@ -173,7 +188,7 @@ func TestNoCandidateParksWithReasonAndNextCheck_t4661(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	h.parkSpawnTask(t.Context(), near, spawnParkQuota, "")
+	parkNow(t, h, near, spawnParkQuota)
 	if got := parkedTask(t, h, near.Request.RequestID); !got.NextCheck.Equal(got.Expires) {
 		t.Fatalf("next check %v passes the limit %v", got.NextCheck, got.Expires)
 	}
@@ -189,12 +204,12 @@ func TestEventWakesParkedInBatchesOfEight_t4661(t *testing.T) {
 	var poolCapped, quota []string
 	for n := range 20 {
 		task := claimParkRequest(t, h, 10+n, *clock)
-		h.parkSpawnTask(t.Context(), task, spawnParkPoolCap, "")
+		parkNow(t, h, task, spawnParkPoolCap)
 		poolCapped = append(poolCapped, task.Request.RequestID)
 	}
 	for n := range 3 {
 		task := claimParkRequest(t, h, 40+n, *clock)
-		h.parkSpawnTask(t.Context(), task, spawnParkQuota, "")
+		parkNow(t, h, task, spawnParkQuota)
 		quota = append(quota, task.Request.RequestID)
 	}
 	due := func(ids []string) int {
@@ -312,7 +327,7 @@ func TestFailedAttemptBacksOffAndGrows_t4661(t *testing.T) {
 	}
 	backoffUntil := task.NextCheck
 	h.spawnRand = func() float64 { return 0 }
-	h.parkSpawnTask(t.Context(), task, spawnParkNoEligibleHost, "")
+	parkNow(t, h, task, spawnParkNoEligibleHost)
 	if got := parkedTask(t, h, task.Request.RequestID); got.ParkReason != spawnParkLaunchBackoff || !got.NextCheck.Equal(backoffUntil) {
 		t.Fatalf("a later park shortened the back-off: %q %v, want %v", got.ParkReason, got.NextCheck, backoffUntil)
 	}
@@ -372,7 +387,7 @@ func TestParkedRequestGivenUpAtItsLimit_t4661(t *testing.T) {
 		t.Fatal(err)
 	}
 	*clock = clock.Add(290 * time.Second)
-	h.parkSpawnTask(t.Context(), task, spawnParkQuota, "")
+	parkNow(t, h, task, spawnParkQuota)
 	parked := parkedTask(t, h, task.Request.RequestID)
 	if !parked.NextCheck.Equal(parked.Expires) {
 		t.Fatalf("next check %v, want the limit %v", parked.NextCheck, parked.Expires)
@@ -442,5 +457,66 @@ func TestOlderHubPlacesParkedRowsAsAccepted_t4661(t *testing.T) {
 	// Its bind CAS (status='accepted' AND node_id IS NULL) also matches.
 	if err := h.inbox.store.db.QueryRow(`SELECT count(*) FROM spawn_operations WHERE request_id=? AND status='accepted' AND node_id IS NULL`, task.Request.RequestID).Scan(&n); err != nil || n != 1 {
 		t.Fatalf("older bind CAS matches %d parked rows, err=%v", n, err)
+	}
+}
+
+// A full wake batch leaves its reasons for the next timer tick without
+// kicking the coordinator, so one event cannot drain the backlog at once.
+func TestFullWakeBatchWaitsForTheNextTick_t4661(t *testing.T) {
+	h := asyncSpawnHub(t)
+	expiryClock(h, expiryNow())
+	for n := range 9 {
+		parkNow(t, h, claimParkRequest(t, h, 120+n, h.now()), spawnParkPoolCap)
+	}
+	h.noteSpawnWake(spawnParkPoolCap)
+	<-h.spawnKick
+	h.wakeParkedSpawns(t.Context())
+	select {
+	case <-h.spawnKick:
+		t.Fatal("a full batch kicked the coordinator again")
+	default:
+	}
+	h.spawnWakeMu.Lock()
+	kept := h.spawnWakes[spawnParkPoolCap]
+	h.spawnWakeMu.Unlock()
+	if !kept {
+		t.Fatal("a full batch dropped its reason")
+	}
+}
+
+// An event noted while placement ran is noted again once the park lands:
+// the wake it raced found no parked row.
+func TestWakeDuringPlacementIsKeptForThePark_t4661(t *testing.T) {
+	h := asyncSpawnHub(t)
+	task := claimParkRequest(t, h, 140, time.Now())
+	before := h.spawnWakeGen.Load()
+	h.noteSpawnWake(spawnParkHostFull)
+	h.wakeParkedSpawns(t.Context()) // drained before the park
+	if parked, err := h.parkSpawnTask(t.Context(), task, spawnParkHostFull, "", before); err != nil || !parked {
+		t.Fatal(parked, err)
+	}
+	h.wakeParkedSpawns(t.Context())
+	if got := parkedTask(t, h, task.Request.RequestID); got.NextCheck.After(h.now()) {
+		t.Fatalf("the raced wake was lost: next check %v", got.NextCheck)
+	}
+}
+
+// A row with no limit (written before expires_ms) keeps the legacy
+// contract: a next-host refusal never parks it past its deadline.
+func TestLegacyRowWithoutLimitIsNotBackedOff_t4661(t *testing.T) {
+	h := asyncSpawnHub(t)
+	task := claimParkRequest(t, h, 150, time.Now())
+	if _, err := h.inbox.store.db.Exec(`UPDATE spawn_operations SET expires_ms=0 WHERE request_id=?`, task.Request.RequestID); err != nil {
+		t.Fatal(err)
+	}
+	task = parkedTask(t, h, task.Request.RequestID)
+	bound, err := h.inbox.store.bindSpawn(t.Context(), task.Request.RequestID, task.Attempt, boundaryTestNode(task, 467100, "machine-a"), time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	bound = sentSpawnFixture(t, h.inbox.store, bound)
+	got, err := h.inbox.store.unbindRefusedSpawn(t.Context(), bound, hubSpawnExclusion{Machine: "machine-a", Reason: "cwd_unmapped", RC: 2}, nil, time.Now())
+	if err != nil || got.ParkReason != "" || !got.NextCheck.IsZero() {
+		t.Fatalf("legacy row parked: %q %v %v", got.ParkReason, got.NextCheck, err)
 	}
 }

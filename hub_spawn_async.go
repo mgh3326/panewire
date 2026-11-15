@@ -655,6 +655,7 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 			request.Args = append(request.Args, "--override-reason", "verified-cleanup-retry")
 		}
 	}
+	wakeGen := h.spawnWakeGen.Load()
 	err = app.ExecuteSubmission(ctx, request)
 	if transport.bound {
 		return
@@ -687,7 +688,13 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 	// No candidate can take it now: a request with a limit is parked, not
 	// ended, and is placed again on an event or its next check (hk 4661).
 	if err != nil && ctx.Err() == nil && !claimedAnswer && !task.Expires.IsZero() {
-		if reason := spawnParkReason(fleet.ErrorCode(err), err.Error()); reason != "" && h.parkSpawnTask(parent, task, reason, spawnRefusalLine(err.Error())) {
+		if reason := spawnParkReason(fleet.ErrorCode(err), err.Error()); reason != "" {
+			// A recognised no-candidate refusal never ends the request: a
+			// failed or ambiguous park write leaves it accepted for the next
+			// pass to park again.
+			if _, parkErr := h.parkSpawnTask(parent, task, reason, spawnRefusalLine(err.Error()), wakeGen); parkErr != nil {
+				h.logger.Warn("hub spawn park not stored; retried next pass", "request_id", task.Request.RequestID, "reason", reason, "error", parkErr)
+			}
 			h.releasePlacementCount(task.Job)
 			return
 		}

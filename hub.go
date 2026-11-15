@@ -442,9 +442,11 @@ type HubServer struct {
 	// spawnWakes are the park reasons an event named since the coordinator's
 	// last wake (hub_spawn_park.go); spawnRand draws the back-off spread
 	// (nil: math/rand).
-	spawnWakeMu    sync.Mutex
-	spawnWakes     map[string]bool
-	spawnRand      func() float64
+	spawnWakeMu sync.Mutex
+	spawnWakes  map[string]bool
+	spawnRand   func() float64
+	// spawnWakeGen counts noted wakes, so a park can tell one raced it.
+	spawnWakeGen   atomic.Uint64
 	spawnWorkers   sync.WaitGroup
 	placementKick  chan struct{}
 	placementAsync atomic.Bool

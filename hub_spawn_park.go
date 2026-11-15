@@ -102,11 +102,27 @@ func (h *HubServer) spawnParkRecheck() time.Duration {
 // that is not about capacity and ends the request as before.
 func spawnParkReason(rc int, text string) string {
 	switch {
+	// An escalation asks the parent lane to act: it ends the request and
+	// notifies, never a silent park.
+	case rc == 87 || strings.Contains(text, "role_exhausted_escalate"):
+		return ""
+	// Hub placement never spawns locally: every remote candidate tried and
+	// none completed. The tried notes name why.
+	case rc == 80 && strings.Contains(text, "no remote candidate completed"):
+		switch {
+		case strings.Contains(text, "task_slots_full") || strings.Contains(text, "active_jobs>=max") || strings.Contains(text, "lanes_full"):
+			return spawnParkHostFull
+		case strings.Contains(text, "disconnected"):
+			return spawnParkNodeDisconnected
+		case strings.Contains(text, "quota"):
+			return spawnParkQuota
+		}
+		return spawnParkNoEligibleHost
 	case strings.Contains(text, "launch_backoff"):
 		return spawnParkLaunchBackoff
 	case strings.Contains(text, "concurrency cap"):
 		return spawnParkPoolCap
-	case rc == 86 || rc == 87 || rc == 89 || strings.Contains(text, "quota_unconfirmed") || strings.Contains(text, "QUOTA_") || strings.Contains(text, "quota_exhausted"):
+	case rc == 86 || rc == 89 || strings.Contains(text, "quota_unconfirmed") || strings.Contains(text, "QUOTA_") || strings.Contains(text, "quota_exhausted"):
 		return spawnParkQuota
 	case strings.Contains(text, "did not connect") || strings.Contains(text, "hub_node_unavailable") || strings.Contains(text, "not connected"):
 		return spawnParkNodeDisconnected
@@ -134,16 +150,23 @@ func spawnParked(task hubSpawnTask, now time.Time) bool {
 }
 
 // parkSpawnTask parks an attempt whose placement found no candidate. It
-// reports false when the row moved on meanwhile.
-func (h *HubServer) parkSpawnTask(ctx context.Context, task hubSpawnTask, reason, detail string) bool {
+// reports false when the row moved on meanwhile, and the store error when
+// the write failed or its result is unknown: the row is then still accepted
+// and a later pass parks it again. wakeGen is the wake generation read
+// before placement began: an event noted since then may have been drained
+// before this park landed, so it is noted again for the next tick.
+func (h *HubServer) parkSpawnTask(ctx context.Context, task hubSpawnTask, reason, detail string, wakeGen uint64) (bool, error) {
 	now := h.now().UTC()
 	next := spawnParkUntil(task, now.Add(h.spawnParkRecheck()))
 	parked, err := h.inbox.store.parkSpawn(ctx, task.Request.RequestID, task.Attempt, reason, next)
 	if err != nil || !parked {
-		return false
+		return false, err
+	}
+	if h.spawnWakeGen.Load() != wakeGen {
+		h.noteSpawnWake(reason)
 	}
 	h.logger.Info("hub spawn parked", "request_id", task.Request.RequestID, "job", task.Job, "reason", reason, "next_check_at", next.Format(time.RFC3339), "refusal", utf8PrefixWithin(detail, 256))
-	return true
+	return true, nil
 }
 
 // noteSpawnWake records an event that may let parked requests with these
@@ -157,13 +180,15 @@ func (h *HubServer) noteSpawnWake(reasons ...string) {
 		h.spawnWakes[reason] = true
 	}
 	h.spawnWakeMu.Unlock()
+	h.spawnWakeGen.Add(1)
 	h.kickSpawnPlacement()
 }
 
 // wakeParkedSpawns is one tick's wake: it moves the next check of at most
 // one wake batch of parked requests, whose reasons an event named, to now.
-// When the batch was full the reasons stay noted for the next tick, so a
-// flood of parked requests wakes in batches rather than at once.
+// When the batch was full (or the store failed) the reasons stay noted for
+// the next timer tick, with no kick, so a flood of parked requests wakes one
+// batch per tick rather than at once.
 func (h *HubServer) wakeParkedSpawns(ctx context.Context) {
 	h.spawnWakeMu.Lock()
 	reasons := make([]string, 0, len(h.spawnWakes))
@@ -188,7 +213,6 @@ func (h *HubServer) wakeParkedSpawns(ctx context.Context) {
 			h.spawnWakes[reason] = true
 		}
 		h.spawnWakeMu.Unlock()
-		h.kickSpawnPlacement()
 	}
 }
 
@@ -226,9 +250,10 @@ func (s *laneInboxStore) wakeParkedSpawns(parent context.Context, reasons []stri
 }
 
 // spawnRetryAt is when a request whose failures-th attempt just failed may
-// be placed again; zero without a back-off (a store no hub configured).
+// be placed again; zero without a back-off (a store no hub configured, or a
+// row with no limit, which keeps the legacy deadline contract).
 func (s *laneInboxStore) spawnRetryAt(task hubSpawnTask, failures int, now time.Time) time.Time {
-	if s.spawnRetryDelay == nil {
+	if s.spawnRetryDelay == nil || task.Expires.IsZero() {
 		return time.Time{}
 	}
 	return spawnParkUntil(task, now.Add(s.spawnRetryDelay(failures)))
