@@ -615,6 +615,7 @@ default.
 | `shadow.swap_in_half_per_s` | `5000` | Swap-ins per second (pages) that halve the swap term. |
 | `shadow.load_knee`, `shadow.load_cap` | `0.75`, `4` | Load per core below the knee costs nothing; a higher reading stops costing more at the cap. |
 | `shadow.jobs_half`, `shadow.bridge_cost` | `8`, `10` | Live job count that halves the jobs term; points one claim in the spawn bridge costs a power-100 host (a host of capability `c` pays `bridge_cost * 100 / c`). `shadow.claim_cost` is retired: it still loads and is ignored. |
+| `shadow.claim_share` | `0.5` | Share of its own `free * power` (0..1, below 1) that one claim in the spawn bridge removes from a host in the `claim` arm (hk 4841). Every host loses the same fraction per claim, whatever its power. |
 | `capability.light.<host>`, `capability.heavy.<host>` | none | The host's capability for light and heavy work, in the unit of the hub's `power`. A host with no entry keeps its `power`. |
 
 **Rollout and rollback of `shadow.free_floor` and `shadow.bridge_cost`.** A

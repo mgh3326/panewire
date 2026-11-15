@@ -36,6 +36,7 @@ const (
 
 	shadowArmFixed    = "fixed"
 	shadowArmMeasured = "measured"
+	shadowArmClaim    = "claim"
 
 	shadowAgree       = "agree"
 	shadowOrderDiffer = "order_differs"
@@ -124,6 +125,9 @@ type shadowPolicy struct {
 	// The mem, swap, load and jobs terms: the hub's score constants, with the
 	// swap half point in pages per second.
 	memFloor, memSpan, swapInHalf, loadKnee, loadCap, jobsHalf, bridgeCost float64
+	// claimShare is the share of its own free*power that each claim in the
+	// bridge window removes from a host (the claim arm, shadowClaimed).
+	claimShare float64
 	// capability maps work class -> host -> capability.
 	capability map[string]map[string]float64
 }
@@ -142,6 +146,10 @@ const (
 	shadowDefaultJobsHalf       = 8.0
 	shadowDefaultBridgeCost     = 10.0
 	shadowDefaultPower          = 100.0
+	// shadowDefaultClaimShare is the share of a host's own free*power one claim
+	// in the bridge window removes (claim arm, placement.md "Shadow comparison").
+	// It is the one place this default lives.
+	shadowDefaultClaimShare = 0.5
 )
 
 func (a *App) shadowPolicy() shadowPolicy {
@@ -169,6 +177,7 @@ func (a *App) shadowPolicy() shadowPolicy {
 		loadCap:             num("load_cap", shadowDefaultLoadCap),
 		jobsHalf:            num("jobs_half", shadowDefaultJobsHalf),
 		bridgeCost:          num("bridge_cost", shadowDefaultBridgeCost),
+		claimShare:          num("claim_share", shadowDefaultClaimShare),
 		capability:          map[string]map[string]float64{},
 	}
 	caps, _ := a.Config.Placement["capability"].(map[string]any)
@@ -213,6 +222,10 @@ func validShadowPolicy(placement map[string]any) error {
 			case "free_floor":
 				if n > 1 {
 					return fail(exitConfig, "placement.shadow.free_floor must be at most 1")
+				}
+			case "claim_share":
+				if n >= 1 {
+					return fail(exitConfig, "placement.shadow.claim_share must be below 1")
 				}
 			case "hysteresis":
 				if n < 1 {
@@ -546,18 +559,60 @@ func shadowFixed(hosts []selHost, req shadowReq, pol shadowPolicy) ([]selHost, s
 			h.below, h.floorValue = floorKey(sig, h.score)
 		}
 	}
-	shadowDecide(out, req, pol, func(h selHost) (float64, float64, bool) {
-		if h.view == nil || h.view.Signals.Terms == nil {
-			return 0, 0, false
-		}
-		t := h.view.Signals.Terms
-		power := shadowDefaultPower
-		if h.view.Signals.Power != nil && *h.view.Signals.Power > 0 {
-			power = *h.view.Signals.Power
-		}
-		return t.CPU * t.Mem * t.IO * t.Load * t.Jobs, power, true
-	}, false)
+	shadowDecide(out, req, pol, fixedFree, false)
 	return out, measure
+}
+
+// fixedFree is a host's free fraction (all five hub terms, the cpu term
+// included) and the power that scales it. known is false for a host that sent
+// no terms.
+func fixedFree(h selHost) (free, power float64, known bool) {
+	if h.view == nil || h.view.Signals.Terms == nil {
+		return 0, 0, false
+	}
+	t := h.view.Signals.Terms
+	power = shadowDefaultPower
+	if h.view.Signals.Power != nil && *h.view.Signals.Power > 0 {
+		power = *h.view.Signals.Power
+	}
+	return t.CPU * t.Mem * t.IO * t.Load * t.Jobs, power, true
+}
+
+// claimScore is the claim arm's score for one host: its free*power, the live
+// score before the bridge term, times (1 - claim_share) for each claim in the
+// bridge window. A claim removes the same share of the host's own headroom
+// whatever the host's power; the live charge, bridge_cost*100/power, is an
+// absolute number of points, and on power 12 one claim (83) is seven times the
+// host's whole free*power. A host with no terms keeps the score it had.
+func (pol shadowPolicy) claimScore(h selHost) *float64 {
+	free, power, known := fixedFree(h)
+	if !known {
+		return h.score
+	}
+	bridged := 0
+	if h.view.Signals.BridgedJobs != nil {
+		bridged = *h.view.Signals.BridgedJobs
+	}
+	score := free * power * math.Pow(1-pol.claimShare, float64(max(bridged, 0)))
+	return &score
+}
+
+// shadowClaimed is the fixed arm with the claim term replaced: each host takes
+// claimScore, and the hub's decision rules (free floor, hysteresis, all-loaded)
+// are applied again to those scores. Nothing else differs from the fixed arm,
+// so its first host differs from live only through the claim term. It works on
+// the copies shadowFixed returns: the live hosts are not touched.
+func shadowClaimed(hosts []selHost, req shadowReq, pol shadowPolicy) []selHost {
+	out, _ := shadowFixed(hosts, req, pol)
+	for i := range out {
+		h := &out[i]
+		if _, _, known := fixedFree(*h); known {
+			h.score = pol.claimScore(*h)
+			h.floorValue = *h.score
+		}
+	}
+	shadowDecide(out, req, pol, fixedFree, true)
+	return out
 }
 
 // shadowMeasured is fixed plus the memory signal, the capability map and the
@@ -713,6 +768,7 @@ func (a *App) recordPlacementShadow(s Spawn, role string, tags []string, hosts, 
 			return out
 		}},
 		{shadowArmMeasured, func() []selHost { return shadowMeasured(hosts, req, pol) }},
+		{shadowArmClaim, func() []selHost { return shadowClaimed(hosts, req, pol) }},
 	}
 	outcome, all := shadowAgree, map[string]bool{}
 	for _, arm := range arms {
@@ -743,7 +799,7 @@ func (a *App) recordPlacementShadow(s Spawn, role string, tags []string, hosts, 
 	if len(liveRank) == 0 && len(sh.Inputs) == 0 {
 		return nil
 	}
-	detail := fmt.Sprintf("work_class=%s role=%s fixed=%s measured=%s", req.class, role, sh.Arms[shadowArmFixed].Outcome, sh.Arms[shadowArmMeasured].Outcome)
+	detail := fmt.Sprintf("work_class=%s role=%s fixed=%s measured=%s claim=%s", req.class, role, sh.Arms[shadowArmFixed].Outcome, sh.Arms[shadowArmMeasured].Outcome, sh.Arms[shadowArmClaim].Outcome)
 	return &shadowRecord{job: s.Job, reason: req.class, outcome: outcome, detail: detail, sh: sh}
 }
 
