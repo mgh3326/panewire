@@ -512,9 +512,12 @@ func hubPlacementRecord(task hubSpawnTask, tr fleet.PlacementTrace, attempt int)
 			Model:      o.Model,
 			Pool:       firstNonEmptyString(o.Pool, tr.Pool),
 			AccountKey: firstNonEmptyString(o.AccountKey, tr.AccountKey),
-			Role:       firstNonEmptyString(o.Role, tr.Role),
-			Family:     tr.Family,
-			Repo:       tr.Repo,
+			// The outcome carries the spawn role (implementer, reviewer,
+			// consult); hk stores the work class. The trace role is already
+			// one, and the mapping is idempotent on it.
+			Role:   fleet.PlacementWorkClass(firstNonEmptyString(o.Role, tr.Role), ""),
+			Family: tr.Family,
+			Repo:   tr.Repo,
 		},
 	}
 	if rec.Outcome != "" {

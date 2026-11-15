@@ -41,7 +41,7 @@ func RunCLI(args []string, cfg CLIConfig) int {
 	}
 	if len(args) == 1 && (args[0] == "-h" || args[0] == "--help") {
 		fmt.Fprintln(os.Stdout, "Usage: panewire COMMAND [arguments]")
-		fmt.Fprintln(os.Stdout, "Commands: spawn, work, reap, done, escalate, escalate-author, consult, hosts, profiles, find, plan, resolve, preflight, daemon, hub, hub-status, hub-emit, place, node, prompt, deliveries, jobs, lanes, fleet-census, relay, emit, claude-socket, inbox, job, pr, wait, version, quota, catalog, reps, manual")
+		fmt.Fprintln(os.Stdout, "Commands: spawn, work, reap, done, escalate, escalate-author, consult, hosts, profiles, find, plan, resolve, preflight, daemon, hub, hub-status, hub-emit, place, placement-requeue, node, prompt, deliveries, jobs, lanes, fleet-census, relay, emit, claude-socket, inbox, job, pr, wait, version, quota, catalog, reps, manual")
 		fmt.Fprintln(os.Stdout)
 		fmt.Fprintln(os.Stdout, lanesUsage)
 		return ExitOK
@@ -63,6 +63,9 @@ func RunCLI(args []string, cfg CLIConfig) int {
 	}
 	if args[0] == "place" {
 		return runPlaceCLI(args[1:], os.Stdout, os.Stderr, hubCLIDeps{})
+	}
+	if args[0] == "placement-requeue" {
+		return runPlacementRequeueCLI(args[1:], os.Stdout, os.Stderr)
 	}
 	if args[0] == "node" {
 		return runNodeCLI(args[1:], os.Stdout, os.Stderr, hubCLIDeps{})

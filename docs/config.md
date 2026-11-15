@@ -1791,7 +1791,11 @@ reasons. Missing signals stay absent. Forced placements can have an empty
 candidate list. The server derives `decided_on` from the node token's host grant.
 
 Execution metadata includes `family`, the admitted `model`, `role` (`worker`, `review`, or `consult`), `profile`, `pool`, `pane_id`, the repository
-name, and an opaque `account_key`. Account fingerprints remain fingerprints.
+name, and an opaque `account_key`. The `role` is hk's work class, not the spawn
+role: every producer maps the role it holds through `fleet.PlacementWorkClass`,
+so `implementer` records as `worker`, `reviewer` (and the `judge` routing role)
+as `review`, and `consult` as `consult`. hk accepts only that set and rejects a
+record that names another role. Account fingerprints remain fingerprints.
 Other account aliases become hashes. Briefs, local paths, login identities,
 credentials, and terminal output do not enter the record. Mergewake passes the
 owning task with `--task` and `--role reviewer`; the producer records that task
@@ -1879,7 +1883,20 @@ or by rebuilding the record from the snapshot and the operation's outcome.
 Nothing needs a manual replay. Quarantined records are the exception: their
 snapshots are sealed and they are never retried. The file in
 `placements-rejected/` keeps the record, and its `.reason` sidecar keeps hk's
-answer.
+answer. An operator replays the quarantine with one command:
+
+```sh
+panewire placement-requeue            # panewire's own state directory
+panewire placement-requeue --state-dir DIR
+```
+
+It re-posts every record under `placements-rejected/` with its role mapped to
+hk's work class and with the record written exactly as this release posts one,
+using the ambient handoffkeep credential and `[quota]` URL. A record hk takes,
+or already holds (a 409 no-op), leaves the quarantine with its sidecar; a
+record hk refuses again, or cannot be posted because hk is unavailable, stays
+there for the next run and the command exits non-zero. The hub never runs it.
+
 Records first enter owner-only JSON files under
 `$XDG_STATE_HOME/panewire/placements` (default
 `~/.local/state/panewire/placements`). Each subsequent panewire invocation retries

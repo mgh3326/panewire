@@ -55,7 +55,7 @@ func placementServer(t *testing.T, a *App) *placementHK {
 		}
 		var candidates []map[string]json.RawMessage
 		_ = json.Unmarshal(wire["candidates"], &candidates)
-		allowed = strings.Fields("host outcome reason score signal_age_s cpu_busy_short cpu_busy_5m mem_available swap_in_mbps power_source bridged_jobs active_jobs tasks task_slots power")
+		allowed = strings.Fields("host outcome reason score signal_age_s cpu_busy_short cpu_busy_5m mem_available swap_in_mbps power_source bridged_jobs active_jobs tasks task_slots power live_jobs load1_per_core terms")
 		for _, candidate := range candidates {
 			for key := range candidate {
 				if !slices.Contains(allowed, key) {

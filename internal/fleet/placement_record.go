@@ -42,7 +42,9 @@ type PlacementSignals struct {
 	Terms        *PlacementTerms `json:"terms,omitempty"`
 	// BelowFreeFloor is the hub's verdict that the host's free fraction is
 	// under its free floor; ranking puts such a host after every host that is
-	// not (host_fit.go, floorOrder).
+	// not (host_fit.go, floorOrder). It rides the hub's placement answer, not
+	// the hk record: hk has no such field and decodes a record with unknown
+	// fields rejected.
 	BelowFreeFloor bool `json:"below_free_floor,omitempty"`
 }
 
@@ -64,6 +66,17 @@ type PlacementCandidateRecord struct {
 	Reason  string   `json:"reason"`
 	Score   *float64 `json:"score,omitempty"`
 	PlacementSignals
+}
+
+// MarshalJSON writes the candidate as hk's record contract defines it: the
+// embedded signals minus the free-floor verdict, which belongs to the hub's
+// ranking answer only. hk decodes a posted record with unknown fields rejected
+// (internal/api/api.go decodeLimited), so a candidate under the floor carried
+// that verdict all the way into a refusal of the whole record.
+func (c PlacementCandidateRecord) MarshalJSON() ([]byte, error) {
+	type record PlacementCandidateRecord
+	c.BelowFreeFloor = false
+	return json.Marshal(record(c))
 }
 
 // PlacementExecution is emitted by the executing panewire in its OK receipt.
@@ -168,18 +181,34 @@ type pendingPlacement struct {
 	ResolveJob bool            `json:"resolve_job,omitempty"`
 }
 
-// placementRole is the hk placement record's role: review, consult or worker
-// (the work class), not a spawn role.
-func placementRole(s Spawn) string {
-	role := firstNonempty(s.RoutingRole, s.Role)
+// PlacementWorkClass maps a spawn role, and the routing role that may refine
+// it, to the work class hk's placement record carries: review, consult or
+// worker. hk accepts no other value (internal/store/placements.go,
+// checkPlacement), so every producer of a record maps through here — the
+// node's own spool and the hub's outbox, which builds its record from the
+// node's outcome and so sees the spawn role. A work class maps to itself: the
+// hub's trace already holds one, and a replay remaps a stored record.
+func PlacementWorkClass(role, routingRole string) string {
+	routed := firstNonempty(routingRole, role)
 	switch {
-	case s.Role == "reviewer" || role == "reviewer" || role == "judge":
+	case reviewWork(role) || reviewWork(routed):
 		return "review"
-	case role == "consult":
+	case routed == "consult":
 		return "consult"
 	default:
 		return "worker"
 	}
+}
+
+// reviewWork reports whether role names review work: the spawn role
+// (reviewer), the routing role that refines it (judge), or the work class
+// itself (review).
+func reviewWork(role string) bool {
+	return role == "reviewer" || role == "review" || role == "judge"
+}
+
+func placementRole(s Spawn) string {
+	return PlacementWorkClass(s.Role, s.RoutingRole)
 }
 
 func placementAccount(key string) string {
@@ -796,11 +825,10 @@ func (a *App) deliverPlacementFile(ctx context.Context, only string) (result Pla
 			if atomicFile(filepath.Join(rejectedDir, ent.Name()+".reason"), note, 0600) != nil {
 				a.warn("placement rejection reason could not be saved")
 			}
-			if be.Reason != "" {
-				a.warn("placement record %s rejected: hk HTTP %d %s: %s", ent.Name(), be.Status, be.Code, be.Reason)
-			} else {
-				a.warn("placement record %s rejected: hk HTTP %d %s", ent.Name(), be.Status, be.Code)
-			}
+			// hk's reason names the failing field (hk 197) and is already
+			// bounded by backendReason; placementStallReason omits it when hk
+			// sent none, as a strict-decode refusal does.
+			a.warn("placement record %s rejected: %s", ent.Name(), placementStallReason(be))
 			continue
 		}
 		if e != nil && !conflict {
@@ -808,8 +836,8 @@ func (a *App) deliverPlacementFile(ctx context.Context, only string) (result Pla
 			// Name hk's answer (status and error code, never the body) so a
 			// refusal such as a token scope can be told from an outage.
 			if errors.As(e, &be) {
-				a.warn("placement delivery failed: hk HTTP %d %s; records remain spooled", be.Status, be.Code)
 				result.Reason = placementStallReason(be)
+				a.warn("placement delivery failed: %s; records remain spooled", result.Reason)
 			} else if ctx.Err() != nil {
 				a.warn("placement delivery failed: hk unreachable; records remain spooled")
 				result.Reason = "delivery_budget_exhausted"
