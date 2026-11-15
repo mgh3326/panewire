@@ -212,3 +212,36 @@ func TestWaitWithOwnLaneCredentialSkipsTheDaemon(t *testing.T) {
 		t.Fatalf("the own-credential route is not a fallback and must not warn: %q", errs)
 	}
 }
+
+// session_lanes_token_envs holds credential-file paths, and a leading ~ is the
+// config convention (docs/config.md writes them that way). The read hands the
+// path to a CLI that opens it as given, so the wait must expand it first;
+// otherwise every poll fails on "inbox: invalid token env".
+func TestWaitOwnLaneCredentialExpandsHomePath(t *testing.T) {
+	a, s, f := waitInboxFixture(t)
+	a.HerdrSession = "fleet"
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	want := filepath.Join(home, "lane.env")
+	a.Config.Hub = map[string]any{
+		"hub_url":                  "https://hub.invalid",
+		"hub_token_env":            filepath.Join(t.TempDir(), "absent.env"),
+		"session_lanes_token_envs": map[string]any{"fleet": "~/lane.env"},
+	}
+	f.Do = func(c Command) Result {
+		args := strings.Join(c.Args, " ")
+		if !strings.HasPrefix(args, "inbox list") {
+			return Result{}
+		}
+		if !strings.Contains(args, "--hub-token-env "+want) {
+			t.Fatalf("the hub read must expand the session's credential path: %s", args)
+		}
+		return Result{Out: `[{"kind":"lane.event","event":{"job_id":"j","text":"[j] READY | https://pr.invalid/1 | /jobs/j/report.md"}}]`}
+	}
+	if e := a.waitJob(context.Background(), s); e != nil {
+		t.Fatalf("the session's own connection must end the wait: %v (err=%q)", e, waitErrText(a))
+	}
+	if out := waitOut(a); !strings.Contains(out, "outcome=ready") {
+		t.Fatalf("out=%q", out)
+	}
+}

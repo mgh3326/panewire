@@ -1011,7 +1011,6 @@ func (a *App) registerLane(ctx context.Context, req lanePutRequest) (laneRegistr
 		if arg != "--hub-token-env" || i+1 == len(args) {
 			continue
 		}
-		args[i+1] = expand(args[i+1])
 		env, e := readEnvFile(args[i+1])
 		if id := env["HUB_MACHINE_ID"]; e == nil && id != "" && id != "operator" && id != req.Machine {
 			return laneRegistration{}, fail(exitConfig, "LANE_SESSION_MACHINE_MISMATCH: session=%s route=%s credential_machine=%s; configure hub.session_machine_ids and hub.session_lanes_token_envs together", a.herdrSession(), req.Machine, id)
