@@ -322,15 +322,18 @@ type selPlan struct {
 	creditMissing []string
 }
 type selReq struct {
-	grade            string
-	lane             string
-	t                string
-	role             string
-	tags             []string
-	effort           string
-	allowEscalation  bool
-	authorFamily     string
-	excludeFamilies  []string
+	grade           string
+	lane            string
+	t               string
+	role            string
+	tags            []string
+	effort          string
+	allowEscalation bool
+	authorFamily    string
+	excludeFamilies []string
+	// excludeProfiles drops candidates by seat profile. A consult respawn
+	// names the profile that failed so the next eligible seat is chosen.
+	excludeProfiles  []string
 	urgency          string
 	urgencySource    string
 	excludeHarnesses []string
@@ -452,6 +455,8 @@ func (a *App) seatFor(row CatalogRow, req selReq) (string, *Seat, string) {
 			reason = "seat_rung"
 		} else {
 			switch {
+			case slices.Contains(req.excludeProfiles, name) || slices.Contains(req.excludeProfiles, seat.Canon):
+				reason = "profile_excluded"
 			case slices.Contains(req.excludeFamilies, seat.Family):
 				reason = "family_excluded"
 			case req.route.top() && req.authorFamily != "" && seat.Family == req.authorFamily:
