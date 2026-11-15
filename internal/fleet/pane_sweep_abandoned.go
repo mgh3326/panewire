@@ -98,12 +98,18 @@ func (s *TaskPaneSweeper) endAbandonedReviews(ctx context.Context, a *App, jobs 
 }
 
 // abandonedEnd is the end_reason the node writes for a live reviewer or consult
-// job, or "" while the job still works. A pane is gone only when both herdr
-// lists lost it; a live pane is ended only after the request's time limit plus
-// reviewerNoResultGrace with no result on disk. The open-question guard runs
-// under the operation lock, just before the writes (endAbandonedJob).
+// job, or "" while the job still works. A posted result always keeps the job
+// for the hub's posted-result end, whether or not its pane is still listed: a
+// finished review must never be recorded as a loss. A pane is gone only when
+// both herdr lists lost it; a live pane is ended only after the request's time
+// limit plus reviewerNoResultGrace. The open-question guard runs under the
+// operation lock, just before the writes (endAbandonedJob).
 func (s *TaskPaneSweeper) abandonedEnd(ctx context.Context, a *App, j Job, agents []Agent, panes *paneSweepPaneRows, now time.Time) string {
 	if _, stopped := announcedQuotaStop(j); stopped {
+		return ""
+	}
+	posted, known := paneSweepJobResult(a, j.ID)
+	if !known || posted {
 		return ""
 	}
 	if paneSessionProof(j, agents) == "pane_unlisted" {
@@ -111,10 +117,6 @@ func (s *TaskPaneSweeper) abandonedEnd(ctx context.Context, a *App, j Job, agent
 		if err == nil && !listed {
 			return SweepPaneGone
 		}
-	}
-	posted, known := paneSweepJobResult(a, j.ID)
-	if !known || posted {
-		return ""
 	}
 	limit, known := paneSweepRequestLimit(j)
 	if !known || now.Sub(limit) < reviewerNoResultGrace {
@@ -195,11 +197,10 @@ func (s *TaskPaneSweeper) endAbandonedJob(ctx context.Context, a *App, j Job, re
 		return "", errJobAlreadyEnded
 	}
 	// A result written while the pass waited for the lock is the job finishing
-	// its work: the hub's posted-result end owns it, not this timeout.
-	if reason == ReviewerNoResultTimeout {
-		if posted, known := paneSweepJobResult(a, latest.ID); !known || posted {
-			return "", errJobAlreadyEnded
-		}
+	// its work: a posted job keeps the hub's posted-result end, never this
+	// rule's loss — for a gone pane as much as for the timeout.
+	if posted, known := paneSweepJobResult(a, latest.ID); !known || posted {
+		return "", errJobAlreadyEnded
 	}
 	if exists {
 		if err := store.Put(ctx, j.ID, map[string]any{"state": "lost", "at": now.UTC(), "end_reason": reason}); err != nil {

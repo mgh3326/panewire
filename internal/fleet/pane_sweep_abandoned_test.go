@@ -83,19 +83,32 @@ func TestPaneSweepEndsAReviewerWhosePaneIsGone(t *testing.T) {
 	}
 }
 
-// A pane both lists lost ends the job as pane_gone whatever it left behind:
-// the hub's posted-result end only applies while the record is still live.
-func TestPaneSweepEndsAReviewerWhoseGonePaneHadAPostedResult(t *testing.T) {
-	f := newPaneSweepFixture(t)
-	pane := f.job("r", "reviewer", "")
-	f.writeJobFile("r", "report.md", "# findings\n")
-	delete(f.status, pane)
-	f.at(1)
-	if got := endReasons(t, f.a, "r"); len(got) != 1 || got[0] != SweepPaneGone {
-		t.Fatalf("job.lost reasons = %v", got)
-	}
-	if f.reaped("r") == nil {
-		t.Fatal("the job whose pane vanished was not reaped")
+// A job that posted its result keeps the hub's posted-result end even when its
+// pane is gone: a finished review is never recorded as a loss, so the pane-gone
+// rule only applies to a job with no result on disk.
+func TestPaneSweepLeavesAFinishedJobWhosePaneIsGone(t *testing.T) {
+	for _, role := range []string{"reviewer", "consult"} {
+		for name, file := range map[string][2]string{
+			"findings": {"findings.json", `{"findings":[]}`},
+			"report":   {"report.md", "# findings\n"},
+		} {
+			t.Run(role+"/"+name, func(t *testing.T) {
+				f := newPaneSweepFixture(t)
+				pane := f.job("j", role, "")
+				f.writeJobFile("j", file[0], file[1])
+				delete(f.status, pane)
+				f.at(1)
+				if got := endReasons(t, f.a, "j"); len(got) != 0 {
+					t.Fatalf("a finished job's pane loss was recorded: %v", got)
+				}
+				if state := str(f.store.record(t, "j"), "state"); state != "spawned" {
+					t.Fatalf("hk record was ended: %v", f.store.record(t, "j"))
+				}
+				if f.reaped("j") != nil {
+					t.Fatal("a finished job was reaped as gone")
+				}
+			})
+		}
 	}
 }
 
