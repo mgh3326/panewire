@@ -30,6 +30,9 @@ type Spawn struct {
 	requestedLocal                                                                                                                                                                         bool
 	CWD, Profile, Prompt, Workspace, Label, T, Job, Owner, Effort, Role, Lane, Parent, Task, ParentJob, Host, Report, ExecutionLane, OperatorRequest, RequestedBy, Purpose, ReportRelative string
 	OverrideReason, Containment, WaitTimeout, Urgency                                                                                                                                      string
+	// Expires is --expires: the request's time limit (hk 4660). It travels as
+	// Submission.ExpiresSeconds, never in the node's args.
+	Expires string `json:"-"`
 	// ReviewPass is the explicit review pass ("1".."9") of a reviewer spawn. It
 	// only widens the hub reservation key (RoleKey); panewire never parses it out
 	// of a label.
@@ -179,7 +182,7 @@ func parseSpawnIgnoring(args, ignored []string) (Spawn, error) {
 	for _, p := range []struct {
 		k string
 		v *string
-	}{{"c", &s.CWD}, {"m", &s.Profile}, {"profile", &s.Profile}, {"p", &s.Prompt}, {"w", &s.Workspace}, {"l", &s.Label}, {"t", &s.T}, {"job", &s.Job}, {"owner", &s.Owner}, {"effort", &s.Effort}, {"role", &s.Role}, {"lane", &s.Lane}, {"parent", &s.Parent}, {"task", &s.Task}, {"parent-job", &s.ParentJob}, {"host", &s.Host}, {"report", &s.Report}, {"L", &s.ExecutionLane}, {"operator-request", &s.OperatorRequest}, {"requested-by", &s.RequestedBy}, {"purpose", &s.Purpose}, {"report-relative", &s.ReportRelative}, {"tags", &s.Tags}, {"exclude-host", &s.ExcludeHosts}, {"exclude-pool", &s.ExcludePools}, {"override-reason", &s.OverrideReason}, {"containment", &s.Containment}, {"wait-timeout", &s.WaitTimeout}, {"urgency", &s.Urgency}, {"author-family", &s.AuthorFamily}, {"builder-job", &s.BuilderJob}, {"e6-arm", &s.E6Arm}} {
+	}{{"c", &s.CWD}, {"m", &s.Profile}, {"profile", &s.Profile}, {"p", &s.Prompt}, {"w", &s.Workspace}, {"l", &s.Label}, {"t", &s.T}, {"job", &s.Job}, {"owner", &s.Owner}, {"effort", &s.Effort}, {"role", &s.Role}, {"lane", &s.Lane}, {"parent", &s.Parent}, {"task", &s.Task}, {"parent-job", &s.ParentJob}, {"host", &s.Host}, {"report", &s.Report}, {"L", &s.ExecutionLane}, {"operator-request", &s.OperatorRequest}, {"requested-by", &s.RequestedBy}, {"purpose", &s.Purpose}, {"report-relative", &s.ReportRelative}, {"tags", &s.Tags}, {"exclude-host", &s.ExcludeHosts}, {"exclude-pool", &s.ExcludePools}, {"override-reason", &s.OverrideReason}, {"containment", &s.Containment}, {"wait-timeout", &s.WaitTimeout}, {"expires", &s.Expires}, {"urgency", &s.Urgency}, {"author-family", &s.AuthorFamily}, {"builder-job", &s.BuilderJob}, {"e6-arm", &s.E6Arm}} {
 		f.StringVar(p.v, p.k, *p.v, "")
 	}
 	f.StringVar(&s.Grade, "grade", "", "task grade (implementer or consult)")
@@ -213,6 +216,11 @@ func parseSpawnIgnoring(args, ignored []string) (Spawn, error) {
 	}
 	if _, err := ParseStartConditions(s.After, s.Task); err != nil {
 		return s, fail(exitUsage, "%v", err)
+	}
+	if flagPassed(f, "expires") {
+		if _, err := parseSpawnExpires(s.Expires); err != nil {
+			return s, fail(exitUsage, "%v", err)
+		}
 	}
 	if s.Job == "" {
 		s.Job = s.Label

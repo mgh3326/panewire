@@ -74,9 +74,13 @@ refresh behavior. See [Quota service boundary](placement.md#quota-service-bounda
 `GET /v1/spawns/<request>` returns `status`. Every client (`spawn --wait`, the
 job-directory TTL pass) knows the design's state set
 (hk design/2026-11-13/hub-owned-spawn-queue §2) before the hub emits any of it
-(hk 4659). The hub still emits only `accepted`, `dispatching`, `reconciling`,
-`succeeded`, `failed`, `retryable` and `deadline_exceeded`;
-`TestHubSpawnExternalStatesUnchanged` keeps that set.
+(hk 4659). The hub emits `accepted`, `dispatching`, `reconciling`, `succeeded`,
+`failed`, `retryable` and `deadline_exceeded`, and since hk 4660 `given_up`
+too ([Time limit](#time-limit)); `waiting`, `pending`, `parked`, `launching`,
+`landed`, `refused` and `cancelled` stay unemitted until their parts.
+`TestHubSpawnExternalStatesUnchanged` keeps that set, and every state in it
+is one the clients know. An answer also carries `expires_at` (RFC 3339,
+the request's time limit) for a request that has one.
 
 | State | `spawn --wait` |
 |---|---|
@@ -84,7 +88,7 @@ job-directory TTL pass) knows the design's state set
 | `parked` | keeps waiting and prints `wait request=<id> state=parked reason=<r> next_check_at=<t>` on stderr when either changes. The client reads `reason` and `next_check_at` from the top level of the answer (`result.reason` as a fallback) and tolerates their absence. |
 | `succeeded`, `landed` | the request phase ends; the job-completion wait follows |
 | `failed`, `retryable`, `refused` | exits with the hub's recorded `result.rc` (81 when none) |
-| `cancelled`, `given_up` | exits 84; nothing was spawned |
+| `cancelled`, `given_up` | exits 84; nothing was spawned. The message names the state, the hub's reason and `expires_at`. |
 | `deadline_exceeded` | exits 75, ownership unresolved |
 | any other name | keeps waiting and prints `unknown state <x>: still waiting` once on stderr; never success, never failure |
 
@@ -95,6 +99,83 @@ queued on the hub either way. The bound uses the wall clock.
 
 A submitter-side job directory the hub never held a record for may be removed
 once its request is `failed`, `refused`, `given_up` or `cancelled`.
+
+## Time limit
+
+hk 4660; design hk design/2026-11-13/hub-owned-spawn-queue §3 rule 2.
+Start conditions through the queue (design §4) are not part of this change;
+see [Start conditions](#start-conditions).
+
+Every accepted request has `expires_at` (`spawn_operations.expires_ms`,
+reported as `expires_at` by `GET /v1/spawns/<request>` and in the 202 answer).
+It is set at acceptance: 6 h for an implementer, 1 h for a reviewer or consult,
+or `panewire spawn --expires DUR` (a whole-second Go duration such as `90m`,
+from 1 minute to 24 h; the request carries `expires_seconds`). A hub that does
+not advertise `spawn_expires_v1` in `GET /v1/spawns/features` makes the CLI
+refuse `--expires` rather than drop it. A deliberate replay of a `retryable`
+request starts its limit again. These are constants in this part
+(`internal/fleet/spawn_expiry.go`), not hub config.
+
+The 600 s landing wait (`deadline_seconds`) is now one attempt's bound, or the
+limit when that comes first. A staged author-replacement successor
+(`activateStagedSpawn`) is capped the same way; one activated at or past the
+limit is given up unsent on its first pass. When the wait ends an attempt whose
+start is *proven absent* (the hub never sent it, or the node attested
+`deadline_not_started` or the start proof fenced it after the attempt's
+deadline), the request is not over:
+
+| Attempt ends, start proven absent | Result |
+|---|---|
+| before `expires_at` | the same row, reservation and request id start attempt N+1 as `accepted`, with a fresh wait of 600 s (at most to `expires_at`). No notice. The ended attempt's placement record is sealed first, as a client's replay does. |
+| at or after `expires_at` | `given_up`: terminal, reason `expired: expires_at <t> passed after <n> attempt(s)`, rc 84, stage `queue`. One `SPAWN_FAILED` for the owner (and the submitting lane); the job id and task/role reservation are freed as for `retryable`. |
+
+A request whose start is **not** proven absent (`dispatching`, `reconciling`,
+`deadline_exceeded`) is never given up, before or after `expires_at`: the limit
+does not apply while the node may have started it. Part 1's proof
+([Start proof](#start-proof)) or the node's own answer settles it, and only
+then does the table above apply. A row with no limit (`expires_ms=0`, written
+before the column or by an older hub) keeps the previous behaviour: its timeout
+ends it `retryable`. A not-started answer inside the attempt's deadline is a
+refusal and ends as before (next host, or `retryable`). The hand-over takes
+the placement-trace lock a client's replay takes; if the trace cannot be
+restored (a held legacy conflict) the end of the attempt is not recorded: the
+request stays as it is with its reservation, and a later pass settles it once
+the trace can be restored.
+
+### Start conditions
+
+`--after` requests are still refused (`400 start_conditions_unsupported`; the
+features answer does not list `start_conditions_v1`), and a conditioned row an
+older hub left keeps the guard it had (not replayed while its condition is
+unmet and its deadline is live). Moving them into the queue as `waiting` needs
+one batched hk observation of the named tasks and their blockers with a
+completeness contract (design §4); the hk client pinned here offers only
+single-task reads, so that part follows the hk API. A per-task polling
+scheduler built in this change drew four rounds of blocking findings and was
+removed (consult `consult-pw4660-root-cause-3`).
+
+### Rolling back past the time limit
+
+The migration is additive: `0015_spawn_expires.sql` adds `expires_ms`
+(SQLite: `ALTER TABLE` at start) with default 0, which an older hub neither
+reads nor writes. Rows that hold `given_up` are a new value of `status`. An
+older hub (checked against the code of e00bb952) lists it in no status query:
+
+| Older-hub query | What it does with a `given_up` row |
+|---|---|
+| Coordinator replay, `status IN ('accepted','bound','dispatching','reconciling', …_grant)` | ignored |
+| Stale-deadline replay, `status IN ('deadline_exceeded', …_grant)` | ignored |
+| Outcome write, `status IN ('accepted','bound','dispatching','reconciling','deadline_exceeded', …_grant)` | matches no row: never mis-terminal |
+| Placement recovery and live view (`bound`, `dispatching`, `reconciling`, `succeeded`, `accepted`) | not listed: no pool slot or placement count |
+| Role release, `status IN ('succeeded','failed')` | not applied; the reservation was already freed |
+| `GET /v1/spawns/<request>` | passes `status` through (`given_up`); a `spawn --wait` from before hk 4659 (#584) does not know the state and exits with the state-conflict code ("unknown spawn state; inspect operation"), never as success; the request is over on the hub. Upgrade clients before the hub, as #584 was ordered |
+
+So a rollback strands nothing: `given_up` rows are terminal and ignored. One
+thing differs from a newer hub, and it is safe (nothing starts twice): a
+request that was renewed to attempt N has the older hub's single deadline
+again, so its next timeout ends it `retryable` or `deadline_exceeded` rather
+than starting another attempt. `TestOlderHubQueriesIgnoreGivenUpRows_t4660`
+runs the predicates above against a `given_up` row.
 
 ## Acceptance and identity
 
@@ -482,7 +563,8 @@ as the conservative pending status `dispatching`.
 | `deadline_exceeded` | Deadline observed; ownership retained, not terminal failure. |
 | `succeeded` | Node landing receipt and fresh exact-pane identity verified. A landing the node refused rc 70 as "pane identity or status is unconfirmed" also settles here when a pane with the job's name and cwd is still present; the hub re-checks it once and launches nothing (hk 4534). |
 | `failed` | Definite refusal, including an existing job claim; never permission to reuse a live job. |
-| `retryable` | Node attested cleanup, or admission stopped before dispatch, and a replay can succeed once the operator's fix is done; reservations released. |
+| `retryable` | Node attested cleanup, or admission stopped before dispatch, and a replay can succeed once the operator's fix is done; reservations released. An unstarted attempt's *timeout* no longer ends here for a request that has a limit: see [Time limit](#time-limit). |
+| `given_up` | The request's `expires_at` passed with no attempt that could have started; terminal, reservation freed. |
 
 Before downgrading the hub to a version that does not understand `bound`, stop
 the hub and ensure it cannot send or modify operations. Back up the durable
@@ -516,14 +598,14 @@ sent merely because a deadline expired.
 | Failure | Recovery contract | Test / explicit non-goal |
 | --- | --- | --- |
 | Hub restart after reservation | Reopen the same operation; no second acceptance/host claim. | `TestSpawnReservationSurvivesRestartAndReplaysLostResponse`, `TestLaneInboxStoreSpawnDurabilityContract` (SQLite and CI Postgres). |
-| Deadline before dispatch | An unbound or unsent bound request cannot have launched; release its reservation without waiting for a node slot and allow the same key/job to retry. | `TestAsyncSpawnUndispatchedTimeoutReleasesReservation`, `TestQueuedBoundDeadlineExpiresWithNodeSlotBusy_t4581`. |
+| Deadline before dispatch | An unbound or unsent bound request cannot have launched. Its landing wait ends the attempt without waiting for a node slot: a request with a limit starts the next attempt under the same reservation, or is `given_up` at its limit ([Time limit](#time-limit)); a row with no limit ends `retryable` and releases its reservation as before. | `TestAsyncSpawnUndispatchedTimeoutStartsNextAttempt`, `TestQueuedBoundDeadlineExpiresWithNodeSlotBusy_t4581`, `TestUnstartedRequestGivenUpAtItsLimit_t4660`, `TestRequestWithoutExpiryKeepsRetryableTimeout_t4660`. |
 | Containment or disconnect before send | Unbind unsent rows even when another request occupies the node slot; on a failed store write keep the original binding for recovery. | `TestContainmentUnbindsQueuedRowsDespiteStoreFailure_t4581`, `TestDisconnectUnbindsOnlyUnsentRowsWhenWriterIsStuck_t4581`. |
 | Eligible refusal before a host-bound job claim | Atomically record the exclusion and unbind; recovery continues placement with the same logical attempt. | `TestRefusalExclusionSurvivesStoreRestartAndResetsOnRetry_t4581`, `TestRefusalWakesRealPlacementOnAnotherNode_t4581`. |
 | Cleanup-confirmed harness refusal after a host-bound job claim | Atomically pin the claimed host, record the failed harness and unbind; restart or later attempts cannot move the job to another host. Without cleanup proof, keep the original result. | `TestClaimedHarnessRetrySurvivesHubRestart_t4581`, `TestClaimedHostStaysPinnedWhenAlternativesRunOut_t4581`, `TestClaimedHarnessRefusalKeepsBindingOnStoreFailure_t4581`, `TestRefusalAfterJobClaimDoesNotMoveToNextHost_t4614`. |
 | Node disconnect or uncertain send | Retain node UUID/host; replay its journal on reconnect. | `TestSpawnUnknownRetainsOwnershipAndLateResultCommitsOutbox`, `TestAsyncSpawnLateResultReconcilesAgainstSameNode`. |
 | Duplicate accept / lost HTTP response | Identical key/body replays; changed body conflicts; CLI receipt preserves key. | Reservation test and `TestSubmissionReceiptReusesKeyAfterLostHTTPResponse`. |
 | Timeout followed by late pane | Retain ownership; reconcile receipt with exact node identity; never close working/unknown. | Late-result test and `TestFailedSpawnCleanupRequiresExactIdlePane`. |
-| Timeout, and the node never started the request | Settle `retryable` with `deadline_not_started` (see [A request the node never started](#a-request-the-node-never-started)); an executing, restarted or silent node keeps ownership. | `TestLateNotStartedAnswerSettlesRequest_t4379`, `TestTimeoutWithoutNodeRowSettlesAsNotStarted_t4379`, `TestTimeoutKeepsOwnershipWithoutNotStartedProof_t4379`. |
+| Timeout, and the node never started the request | Settle with `deadline_not_started` (see [A request the node never started](#a-request-the-node-never-started)): a request with a limit starts its next attempt, or is `given_up` past the limit; a row with no limit ends `retryable`. An executing, restarted or silent node keeps ownership, and is never given up (`TestReconcilingRequestIsNeverGivenUp_t4660`). | `TestLateNotStartedAnswerSettlesRequest_t4379`, `TestTimeoutWithoutNodeRowSettlesAsNotStarted_t4379`, `TestTimeoutKeepsOwnershipWithoutNotStartedProof_t4379`. |
 | Node restart while executing | Never rerun the spawn. The restarted node settles the executing row from herdr and the job's local spawn record: the recorded pane alive as an agent completes it with the job's receipt (the hub still verifies the pane before accepting it), a pane in neither the agent nor the pane list completes it `lost` with a reason, and anything unproven (a pane only in the pane list, a label match without a record, herdr unreadable) leaves it executing and answers `unknown`. Past the deadline, `unknown` with no pane bearing the job label finishes the request `failed` (`orphaned_after_restart`) and releases its reservation; a labelled pane keeps it for the operator. The node's stop first waits (30 s) for a launch, injection or result upload in flight. See [node restart](runbooks/node-restart.md). | `TestSpawnSettle*`, `TestStopDrain*`, `TestNodeSpawnJournalRestartDedupAndLostResultReplay`, `TestNodeSpawnReplayAnswersUnknownAfterRestart`, `TestStrandedSpawnUnknownWithoutPaneFailsAndReleases`, `TestStrandedSpawnStaysPendingWithoutProof`. |
 | Lost event or lost ACK | Commit state and outbox atomically; retry with a stable event id and actual job id. | `TestSpawnOutboxFailureRollsBackResult`, `TestAsyncSpawnLostEventRetriesWithStableJobIdentity`. |
 | Process pressure / shutdown | Bounded execution and persisted pending work. | `TestAsyncSpawnWorkersBoundedAndIndependentOfHTTP`, `TestAsyncSpawnOutlivesSubmittingHTTPContext`; HTTP-independent execution lifetime is owned by maintenance/shutdown, never the POST context. |
@@ -830,7 +912,7 @@ reconciliation event.
 `SPAWN_FAILED` names the job, request, exit status, stage, `replay=yes|no`
 (whether replaying the saved request can help), reason and fix. It has
 notify type `automation-failed`, so it interrupts a lane that digests its reports.
-A `failed` or `retryable` spawn is also sent to the submitting lane when that
+A `failed`, `retryable` or `given_up` spawn is also sent to the submitting lane when that
 differs from the owner: `--requested-by`, else `--parent`. The owner's event id
 stays `<request_id>:<attempt>:<status>`; the submitting lane's is the same id
 with `:<lane>` appended.

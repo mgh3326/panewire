@@ -172,21 +172,19 @@ func TestSpawnBoundTimeoutCleanupAttestationContract(t *testing.T) {
 					if err != nil {
 						t.Fatal(err)
 					}
-					want := "deadline_exceeded"
+					// The node's cleanup proof ends the attempt, not the request
+					// (hk 4660): the request starts attempt 2 under the same
+					// reservation. Without the proof it keeps its ownership.
+					want, attempt := "deadline_exceeded", 1
 					if attested {
-						want = "retryable"
+						want, attempt = "accepted", 2
 					}
-					if task.Status != want || task.Outcome.Retryable != attested {
+					if task.Status != want || task.Attempt != attempt || task.Outcome.Retryable != attested {
 						t.Fatalf("ownership status: %+v", task)
 					}
 					req.RequestID = t14RequestID(997)
-					_, fresh, err := s.claimSpawn(t.Context(), req, "test-job", "parent", now)
-					if attested {
-						if err != nil || !fresh {
-							t.Fatalf("verified cleanup blocked retry: %v", err)
-						}
-					} else if !errors.Is(err, errSpawnClaimed) {
-						t.Fatalf("unproven timeout freed ownership: %v", err)
+					if _, _, err := s.claimSpawn(t.Context(), req, "test-job", "parent", now); !errors.Is(err, errSpawnClaimed) {
+						t.Fatalf("a request still queued or unproven freed its ownership: %v", err)
 					}
 				})
 			}

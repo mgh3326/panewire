@@ -600,6 +600,7 @@ type HubServer struct {
 	nodeCommandWait    time.Duration // fixture seam; zero is hubNodeCommandWait.
 	checkoutPullWait   time.Duration // fixture seam; zero is hubCheckoutPullWait.
 	nodeAgentsWait     time.Duration // fixture seam; zero is hubNodeAgentsWait.
+
 	// laneStallMu is TryLock'd so at most one lane-stall observation runs and
 	// is held for the run's whole life: once Close has taken it and set
 	// laneStallClosing, no new run can start and any in-flight one is already

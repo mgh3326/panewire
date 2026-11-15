@@ -70,6 +70,10 @@ type hubSpawnTask struct {
 	Request            fleet.Submission
 	Job, Owner, Status string
 	Created, Deadline  time.Time
+	// Expires is the request's time limit (hk 4660): past it, a request whose
+	// start is not unproven ends given_up. Zero on a row from before the
+	// column: such a row is never given up.
+	Expires time.Time
 	// LastRun is when a coordinator worker last took the request (zero: never).
 	LastRun time.Time
 	// Placed is when the request was bound to its node, the decision the
@@ -117,7 +121,7 @@ func (s *laneInboxStore) ensureSpawnTasks() error {
 	// Stores from before hk 4460 lack the placement columns (postgres: the
 	// 0008 migration). A restart restores counts from these two columns, and
 	// refresh_waits arrived with hk 4600 (postgres: 0011).
-	for _, column := range []string{`placed_ms BIGINT NOT NULL DEFAULT 0`, `claimed_ms BIGINT NOT NULL DEFAULT 0`, `exclusions TEXT NOT NULL DEFAULT '[]'`, `claimed_host TEXT NOT NULL DEFAULT ''`, `refresh_waits TEXT NOT NULL DEFAULT '[]'`} {
+	for _, column := range []string{`placed_ms BIGINT NOT NULL DEFAULT 0`, `claimed_ms BIGINT NOT NULL DEFAULT 0`, `exclusions TEXT NOT NULL DEFAULT '[]'`, `claimed_host TEXT NOT NULL DEFAULT ''`, `refresh_waits TEXT NOT NULL DEFAULT '[]'`, `expires_ms BIGINT NOT NULL DEFAULT 0`} {
 		if _, err := s.db.ExecContext(ctx, `ALTER TABLE spawn_operations ADD COLUMN `+column); err != nil {
 			if err := ignoreDuplicateColumn(err); err != nil {
 				return err
@@ -202,21 +206,26 @@ func (s *laneInboxStore) claimSpawnReplacing(parent context.Context, request fle
 		}
 		return hubSpawnTask{}, false, errSpawnClaimed
 	}
-	deadline := now.Add(time.Duration(request.DeadlineSeconds) * time.Second)
-	_, err = tx.ExecContext(ctx, s.q(`INSERT INTO spawn_operations(request_id,job,owner,fingerprint,payload,status,created_ms,deadline_ms) VALUES(?,?,?,?,?,?,?,?)`), request.RequestID, job, owner, fingerprint, string(raw), status, now.UnixMilli(), deadline.UnixMilli())
+	expires := now.Add(fleet.SpawnExpiresFor(spawn.Role, request.ExpiresSeconds))
+	deadline := spawnAttemptDeadline(now, request.DeadlineSeconds, expires)
+	_, err = tx.ExecContext(ctx, s.q(`INSERT INTO spawn_operations(request_id,job,owner,fingerprint,payload,status,created_ms,deadline_ms,expires_ms) VALUES(?,?,?,?,?,?,?,?,?)`), request.RequestID, job, owner, fingerprint, string(raw), status, now.UnixMilli(), deadline.UnixMilli(), expires.UnixMilli())
 	if err != nil {
 		return hubSpawnTask{}, false, err
 	}
 	if err = tx.Commit(); err != nil {
 		return hubSpawnTask{}, false, err
 	}
-	return hubSpawnTask{Request: request, Job: job, Owner: owner, Status: status, Created: now, Deadline: deadline, Attempt: 1}, true, nil
+	return hubSpawnTask{Request: request, Job: job, Owner: owner, Status: status, Created: now, Deadline: deadline, Expires: expires, Attempt: 1}, true, nil
 }
 
 func (s *laneInboxStore) activateStagedSpawn(parent context.Context, id string, now time.Time, deadlineSeconds int) error {
 	ctx, done := s.op(parent)
 	defer done()
-	result, err := s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET status='accepted', deadline_ms=? WHERE request_id=? AND status='staged'`), now.Add(time.Duration(deadlineSeconds)*time.Second).UnixMilli(), id)
+	// The landing wait never outlasts the request's limit: a successor
+	// activated at or past it has a deadline already passed, and the first
+	// pass gives it up unsent instead of placing it (hk 4660).
+	deadline := now.Add(time.Duration(deadlineSeconds) * time.Second).UnixMilli()
+	result, err := s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET status='accepted', deadline_ms=CASE WHEN expires_ms>0 AND expires_ms<? THEN expires_ms ELSE ? END WHERE request_id=? AND status='staged'`), deadline, deadline, id)
 	if err != nil {
 		return err
 	}
@@ -377,6 +386,11 @@ func (s *laneInboxStore) completeSpawn(parent context.Context, task hubSpawnTask
 	if n == 0 {
 		return false, nil
 	}
+	if status == "retryable" && spawnAttemptEndedUnstarted(task, outcome, now) {
+		// An attempt that ended with the start provably absent no longer ends
+		// the request: it goes back to pending, or is given up at its limit.
+		return s.endUnstartedAttempt(ctx, tx, task, outcome, now)
+	}
 	if status == "retryable" {
 		if _, err = tx.ExecContext(ctx, s.q(`DELETE FROM spawn_reservations WHERE job=? AND request_id=?`), task.Job, task.Request.RequestID); err != nil {
 			return false, err
@@ -393,29 +407,38 @@ func (s *laneInboxStore) completeSpawn(parent context.Context, task hubSpawnTask
 	if status == "reconciling" {
 		return true, tx.Commit()
 	}
+	if err = queueSpawnNotifications(ctx, s, tx, task, status, string(raw), now); err != nil {
+		return false, err
+	}
+	return true, tx.Commit()
+}
+
+// queueSpawnNotifications writes the outbox rows an outcome owes: one for the
+// owner lane, and for a refusal or an unstarted end one for the submitting
+// lane too.
+func queueSpawnNotifications(ctx context.Context, s *laneInboxStore, tx *sql.Tx, task hubSpawnTask, status, raw string, now time.Time) error {
 	eventID := fmt.Sprintf("%s:%d:%s", task.Request.RequestID, task.Attempt, status)
 	// The owner keeps the bare event id. A failed or retryable spawn also tells
 	// the submitting lane, whose only other sign of it was ACCEPTED.
 	lanes := []struct{ id, lane string }{{eventID, task.Owner}}
-	if status == "failed" || status == "retryable" {
+	if status == "failed" || status == "retryable" || status == "given_up" {
 		if lane := spawnSubmitterLane(task.Request.Args); lane != "" && lane != task.Owner {
 			lanes = append(lanes, struct{ id, lane string }{eventID + ":" + lane, lane})
 		}
 	}
 	for _, n := range lanes {
-		_, err = tx.ExecContext(ctx, s.q(`INSERT INTO spawn_notifications(event_id,request_id,job,owner,result,created_ms) VALUES(?,?,?,?,?,?) ON CONFLICT DO NOTHING`), n.id, task.Request.RequestID, task.Job, n.lane, string(raw), now.UnixMilli())
-		if err != nil {
-			return false, err
+		if _, err := tx.ExecContext(ctx, s.q(`INSERT INTO spawn_notifications(event_id,request_id,job,owner,result,created_ms) VALUES(?,?,?,?,?,?) ON CONFLICT DO NOTHING`), n.id, task.Request.RequestID, task.Job, n.lane, raw, now.UnixMilli()); err != nil {
+			return err
 		}
 	}
-	return true, tx.Commit()
+	return nil
 }
 
 func scanSpawnTask(row interface{ Scan(...any) error }) (hubSpawnTask, error) {
 	var task hubSpawnTask
 	var payload, result, node, exclusions, refreshWaits string
-	var created, deadline, lastRun, placed int64
-	err := row.Scan(&task.Job, &task.Owner, &payload, &task.Status, &created, &deadline, &node, &result, &task.Attempt, &lastRun, &placed, &exclusions, &task.ClaimedHost, &refreshWaits)
+	var created, deadline, lastRun, placed, expires int64
+	err := row.Scan(&task.Job, &task.Owner, &payload, &task.Status, &created, &deadline, &node, &result, &task.Attempt, &lastRun, &placed, &exclusions, &task.ClaimedHost, &refreshWaits, &expires)
 	if err != nil {
 		return task, err
 	}
@@ -428,6 +451,9 @@ func scanSpawnTask(row interface{ Scan(...any) error }) (hubSpawnTask, error) {
 	}
 	if placed > 0 {
 		task.Placed = time.UnixMilli(placed)
+	}
+	if expires > 0 {
+		task.Expires = time.UnixMilli(expires)
 	}
 	if err = json.Unmarshal([]byte(payload), &task.Request); err != nil {
 		return task, err
@@ -504,7 +530,7 @@ func (s *laneInboxStore) unbindSpawn(parent context.Context, id string, attempt 
 	return s.spawnTask(parent, id)
 }
 
-const spawnTaskColumns = `job,owner,payload,status,created_ms,deadline_ms,node_payload,result,attempt,last_run_ms,placed_ms,exclusions,claimed_host,refresh_waits`
+const spawnTaskColumns = `job,owner,payload,status,created_ms,deadline_ms,node_payload,result,attempt,last_run_ms,placed_ms,exclusions,claimed_host,refresh_waits,expires_ms`
 
 func (s *laneInboxStore) spawnTask(parent context.Context, id string) (hubSpawnTask, error) {
 	ctx, done := s.op(parent)
@@ -710,7 +736,10 @@ func (s *laneInboxStore) resumeCleanedSpawn(parent context.Context, task hubSpaw
 	if n != 1 {
 		return task, errSpawnClaimed
 	}
-	result, err = tx.ExecContext(ctx, s.q(`UPDATE spawn_operations SET status='accepted',deadline_ms=?,node_id=NULL,node_payload='',attempt=attempt+1,trace_recorded=0,last_run_ms=0,exclusions='[]',claimed_host=?,refresh_waits='[]' WHERE request_id=? AND status='retryable' AND attempt=?`), now.Add(time.Duration(task.Request.DeadlineSeconds)*time.Second).UnixMilli(), spawnPinnedHost(task), task.Request.RequestID, task.Attempt)
+	// A deliberate repeat asks for the request again, so its time limit
+	// starts over with the new attempt.
+	expires := now.Add(fleet.SpawnExpiresFor(spawn.Role, task.Request.ExpiresSeconds))
+	result, err = tx.ExecContext(ctx, s.q(`UPDATE spawn_operations SET status='accepted',deadline_ms=?,expires_ms=?,node_id=NULL,node_payload='',attempt=attempt+1,trace_recorded=0,last_run_ms=0,exclusions='[]',claimed_host=?,refresh_waits='[]' WHERE request_id=? AND status='retryable' AND attempt=?`), spawnAttemptDeadline(now, task.Request.DeadlineSeconds, expires).UnixMilli(), expires.UnixMilli(), spawnPinnedHost(task), task.Request.RequestID, task.Attempt)
 	if err != nil {
 		return task, err
 	}
