@@ -126,11 +126,12 @@ func runNativeQuotaStatus(ctx context.Context, jsonOutput bool, out, errOut io.W
 		writeQuotaStatusJSON(out, generatedAt.Format(time.RFC3339Nano), statusHost)
 		return ExitOK
 	}
-	// The band reads the pool policy the same way selection does: the default
-	// order, or PANEWIRE_POOL_POLICY, and each pool's admission class. A policy
-	// that does not load is a refusal, not a table with guessed bands. Only the
-	// text table reads them; `--json` is the machine contract and needs neither.
-	policy, err := fleet.LoadPoolPolicy("")
+	// The band reads the pool policy the same way selection does: the operator
+	// config's [local].pool_policy, then PANEWIRE_POOL_POLICY, then the default
+	// order, plus each pool's admission class. A policy that does not load is a
+	// refusal, not a table with guessed bands. Only the text table reads them;
+	// `--json` is the machine contract and needs neither.
+	policy, err := fleet.StatusPoolPolicy()
 	if err != nil {
 		fmt.Fprintf(errOut, "quota status: pool policy: %v\n", err)
 		return ExitInternal

@@ -36,6 +36,11 @@ func fleetStatusTestHub(t *testing.T, now time.Time, logs io.Writer) *HubServer 
 	// The golden band comes from the built-in pool order; a developer's policy
 	// path must not change it.
 	t.Setenv("PANEWIRE_POOL_POLICY", "")
+	config := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(config, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PANEWIRE_CONFIG", config)
 	hub, err := NewHubServer(HubServerConfig{
 		Tokens:          map[string]string{"operator": "operator-token", "node-a": "node-a-token", "node-b": "node-b-token"},
 		ReportRelayPath: r20LanesFile(t, `{"lanes":{"lane-a1":{"machine":"node-a","pane":"w1:p1"},"lane-a2":{"machine":"node-a","pane":"w1:p2"},"lane-b1":{"machine":"node-b","pane":"w2:p1"}}}`),
@@ -59,6 +64,10 @@ func fleetStatusTestHub(t *testing.T, now time.Time, logs io.Writer) *HubServer 
 			{Window: "7d", UsedPct: new(float64(12)), ResetsAt: now.Add(4 * 24 * time.Hour).Format(time.RFC3339), Scope: "account"},
 		}},
 	}, time.Minute)
+	hub.stateStore().publish(FleetStateMessage{
+		Host: "node-a", Kind: fleetStateKindPublisher, ReceivedAt: now,
+		Publisher: &FleetStatePublisher{Connected: true, LastSeen: now},
+	}, 0)
 	hub.fleetStatusPlanFn = func(context.Context) []fleet.StatusPlan {
 		return []fleet.StatusPlan{
 			{Grade: "C", T: "T1", Seat: "omp-dsflash41", Host: "node-a", Pool: "commandcode", AccountKey: "commandcode:747042b3498054b9", Tier: "ranked", Outcome: "ADMITTED"},
@@ -111,7 +120,7 @@ func TestFleetStatusDocumentCarriesNoSecrets(t *testing.T) {
 	want := map[string]map[string]bool{
 		"":       {"v": true, "at": true, "hosts": true, "quota": true, "plan": true},
 		"host":   {"host": true, "connected": true, "version": true, "accepting": true, "lanes_used": true, "lanes_cap": true},
-		"quota":  {"host": true, "pool": true, "account": true, "windows": true, "measured_at": true, "age_s": true, "fresh_ttl_s": true, "fresh": true, "band": true},
+		"quota":  {"host": true, "pool": true, "account": true, "windows": true, "measured_at": true, "age_s": true, "fresh_ttl_s": true, "fresh": true, "free_state": true},
 		"window": {"window": true, "used_pct": true, "resets_at": true},
 		"plan":   {"grade": true, "t": true, "seat": true, "host": true, "pool": true, "account": true, "tier": true, "outcome": true},
 	}
@@ -203,104 +212,60 @@ func TestFleetStatusDocumentBounded(t *testing.T) {
 	}
 }
 
-// A pool the operator's admission policy excludes must read excluded, not
-// ranked or free; the band is the class placement refuses it under. A reading
-// the gate would reject (an already-reset or out-of-range window) reads
-// unknown, never more usable than placement.
-func TestFleetStatusBandFollowsPlacement(t *testing.T) {
+// A quota row is measured facts, not a selection band: one account can be free
+// for its free rungs and ranked for its paid rungs at once. The free tier is
+// normalized as placement judges it; the plan row carries the selector's band.
+func TestFleetStatusQuotaFreeStateNormalized(t *testing.T) {
 	now, _ := time.Parse(time.RFC3339, fleetStatusTestNow)
 	hub := fleetStatusTestHub(t, now, io.Discard)
-	config := filepath.Join(t.TempDir(), "config.toml")
-	if err := os.WriteFile(config, []byte("[pools.claude]\nclass = \"exclude\"\n[pools.devin]\nclass = \"exclude\"\n"), 0600); err != nil {
-		t.Fatal(err)
+	publish := func(key, state string, reset *time.Time) {
+		hub.stateStore().publish(FleetStateMessage{
+			Host: "node-a", Kind: fleetStateKindQuota, Key: key,
+			MeasuredAt: now, ReceivedAt: now,
+			Quota: &FleetStateQuota{AccountKey: key, Pool: "devin", Free: &FleetStateFree{State: state, ResetsAt: reset}, Buckets: []FleetStateBucket{
+				{Window: "5h", UsedPct: new(float64(10)), ResetsAt: now.Add(3 * time.Hour).Format(time.RFC3339), Scope: "account"},
+			}},
+		}, 0)
 	}
-	t.Setenv("PANEWIRE_CONFIG", config)
-	rows := hub.fleetStatusQuota(now, nil)
-	if len(rows) != 1 || rows[0].Band != "excluded" {
-		t.Fatalf("rows = %+v, want the excluded claude band", rows)
-	}
-
-	// A model-scoped free set does not outrank the admission class: an
-	// excluded devin reading is excluded even with an available free bucket.
-	freeKey := "devin:0000000000000001"
-	hub.stateStore().publish(FleetStateMessage{
-		Host: "node-a", Kind: fleetStateKindQuota, Key: freeKey,
-		MeasuredAt: now, ReceivedAt: now,
-		Quota: &FleetStateQuota{AccountKey: freeKey, Pool: "devin", Free: &FleetStateFree{State: "available"}, Buckets: []FleetStateBucket{
-			{Window: "5h", UsedPct: new(float64(10)), ResetsAt: now.Add(3 * time.Hour).Format(time.RFC3339), Scope: "account"},
-		}},
-	}, 0)
-	for _, row := range hub.fleetStatusQuota(now, nil) {
-		if row.Account == freeKey && row.Band != "excluded" {
-			t.Fatalf("excluded devin band = %q, want excluded", row.Band)
-		}
-	}
-
-	// A second account whose only window already reset is not a usable
-	// reading: the gate refuses it, so the band is unknown.
-	resetKey := "commandcode:00000000000000ff"
-	hub.stateStore().publish(FleetStateMessage{
-		Host: "node-a", Kind: fleetStateKindQuota, Key: resetKey,
-		MeasuredAt: now, ReceivedAt: now,
-		Quota: &FleetStateQuota{AccountKey: resetKey, Pool: "commandcode", Buckets: []FleetStateBucket{
-			{Window: "5h", UsedPct: new(float64(10)), ResetsAt: now.Add(-time.Hour).Format(time.RFC3339), Scope: "account"},
-		}},
-	}, 0)
-	rows = hub.fleetStatusQuota(now, nil)
-	for _, row := range rows {
-		if row.Account == resetKey && row.Band != "unknown" {
-			t.Fatalf("already-reset reading band = %q, want unknown", row.Band)
+	future, past := now.Add(time.Hour), now.Add(-time.Hour)
+	available, exhausted, expired, malformed := "devin:0000000000000002", "devin:0000000000000003", "devin:0000000000000004", "devin:0000000000000005"
+	publish(available, "available", nil)
+	publish(exhausted, "exhausted", &future)
+	publish(expired, "exhausted", &past)
+	publish(malformed, "", nil)
+	want := map[string]string{available: "available", exhausted: "exhausted", expired: "available", malformed: "unknown"}
+	for _, row := range hub.fleetStatusQuota(now, nil, nil) {
+		if expect, ok := want[row.Account]; ok && row.FreeState != expect {
+			t.Errorf("%s free_state = %q, want %q", row.Account, row.FreeState, expect)
 		}
 	}
 }
 
-// The freshness window is the fleet config's, the same one the spawn gate
-// uses; an operator override must not leave a stale reading marked fresh.
-func TestFleetStatusFreshTTLUsesFleetConfig(t *testing.T) {
+// Fresh is the spawn gate's whole rule: the pool's configured window and a
+// live publisher. A dead publisher makes the same reading stale.
+func TestFleetStatusFreshUsesPublisherAndTTL(t *testing.T) {
 	now, _ := time.Parse(time.RFC3339, fleetStatusTestNow)
 	hub := fleetStatusTestHub(t, now, io.Discard)
 	app := &fleet.App{Config: fleet.Config{Quota: map[string]any{
 		"pool_fresh_ttl_s": map[string]any{"claude": int64(700)},
 	}}}
-	rows := hub.fleetStatusQuota(now, app)
-	if len(rows) != 1 || rows[0].FreshTTLS != 700 {
-		t.Fatalf("rows = %+v, want fresh_ttl_s 700 from the fleet config", rows)
+	snap, err := (fleetStatusState{hub}).Snapshot(context.Background())
+	if err != nil {
+		t.Fatal(err)
 	}
-}
-
-// The free band comes from the reading's own free bucket, not from a
-// model-scoped policy set: an available tier is free, an exhausted one
-// (placement's free_limit) is not, and a stale reading is unknown.
-func TestFleetStatusFreeBandFromReading(t *testing.T) {
-	now, _ := time.Parse(time.RFC3339, fleetStatusTestNow)
-	hub := fleetStatusTestHub(t, now, io.Discard)
-	publishFree := func(key string, state string, measured time.Time) {
-		free := &FleetStateFree{State: state}
-		if state == "exhausted" {
-			reset := now.Add(time.Hour)
-			free.ResetsAt = &reset
-		}
-		hub.stateStore().publish(FleetStateMessage{
-			Host: "node-a", Kind: fleetStateKindQuota, Key: key,
-			MeasuredAt: measured, ReceivedAt: measured,
-			Quota: &FleetStateQuota{AccountKey: key, Pool: "devin", Free: free, Buckets: []FleetStateBucket{
-				{Window: "5h", UsedPct: new(float64(10)), ResetsAt: now.Add(3 * time.Hour).Format(time.RFC3339), Scope: "account"},
-			}},
-		}, 0)
+	rows := hub.fleetStatusQuota(now, app, &snap)
+	if len(rows) != 1 || rows[0].FreshTTLS != 700 || !rows[0].Fresh {
+		t.Fatalf("rows = %+v, want fresh, fresh_ttl_s 700, live publisher", rows)
 	}
-	available, exhausted, stale := "devin:0000000000000002", "devin:0000000000000003", "devin:0000000000000004"
-	publishFree(available, "available", now)
-	publishFree(exhausted, "exhausted", now)
-	publishFree(stale, "available", now.Add(-2*time.Hour))
-	rows := hub.fleetStatusQuota(now, nil)
-	want := map[string]string{available: "free", stale: "unknown"}
-	for _, row := range rows {
-		if expect, ok := want[row.Account]; ok && row.Band != expect {
-			t.Errorf("%s band = %q, want %q", row.Account, row.Band, expect)
-		}
-		if row.Account == exhausted && row.Band == "free" {
-			t.Errorf("exhausted free tier band = free, want not free")
-		}
+	hub.stateStore().publish(FleetStateMessage{
+		Host: "node-a", Kind: fleetStateKindPublisher, ReceivedAt: now,
+		Publisher: &FleetStatePublisher{Connected: false, LastSeen: now},
+	}, 0)
+	if snap, err = (fleetStatusState{hub}).Snapshot(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if rows = hub.fleetStatusQuota(now, app, &snap); len(rows) != 1 || rows[0].Fresh {
+		t.Fatalf("rows = %+v, want stale with a dead publisher", rows)
 	}
 }
 

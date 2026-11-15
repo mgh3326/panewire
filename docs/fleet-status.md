@@ -29,7 +29,7 @@ identical.
     {"host":"node-a","pool":"claude","account":"claude:0123456789abcdef",
      "windows":[{"window":"5h","used_pct":41,"resets_at":"2026-11-15T15:00:00Z"}],
      "measured_at":"2026-11-15T11:58:00Z","age_s":120,"fresh_ttl_s":900,
-     "fresh":true,"band":"waste"}
+     "fresh":true}
   ],
   "plan": [
     {"grade":"C","t":"T1","seat":"omp-dsflash41","host":"node-a","pool":"commandcode",
@@ -41,7 +41,7 @@ identical.
 | Section | Fields |
 |---|---|
 | `hosts` | one row per known host: a node record (a retained disconnected record included) and any machine that owns a lane row. `connected` is the hub's live presence, `version` the node's hello version, `accepting` the effective acceptance, and `lanes_used`/`lanes_cap` the lane rows the host owns against `--lanes-node-row-cap`. |
-| `quota` | one row per `(host, account)` reading the hub holds: `pool`, `account` (the shared cache's `<pool>:<16-hex>` fingerprint), `windows` (`window`, `used_pct`, `resets_at`), the reading's `measured_at`, its `age_s`, the applied `fresh_ttl_s` and `fresh`, and `band`. |
+| `quota` | one row per `(host, account)` reading the hub holds: `pool`, `account` (the shared cache's `<pool>:<16-hex>` fingerprint), `windows` (`window`, `used_pct`, `resets_at`), the reading's `measured_at`, its `age_s`, the applied `fresh_ttl_s` and `fresh`, and `free_state` (that pool's free tier after `shared.NormalizeFree`, when the reading has one). Rows are measured facts, not a selection band. |
 | `plan` | one row per grade, `C`, `B`, `A`, `A+`, `S`, weakest first. `t` names the task scale the plan assumed (`T1`; grade and scale are separate inputs). `outcome` is the selection code (`ADMITTED`, `NO_ELIGIBLE_HOST`, `QUOTA_UNKNOWN`, …); a row without an admitted seat may omit `seat`, `host`, `pool`, `account` and `tier`. |
 
 `at` is when the hub assembled the document. `measured_at` is when the quota
@@ -60,20 +60,28 @@ defaults (`claude` 900 s, every other pool 300 s). `fresh_ttl_s` travels with
 the row so the page says how stale is stale. A reading that fails the rule is
 still published, with `fresh: false`.
 
-## Band and tier
+## Free state and the plan's band
 
-`band` and the plan's `tier` are the pool-order selection bands
-(`internal/fleet/pool-order.json`): `free`, `credit`, `waste`, `ranked`, or
-`excluded` for a pool the operator's admission policy excludes. The hub starts
-from `fleet.StatusBand` — the function `panewire quota status` uses — over the
-reading's windows, the pool's admission class and the freshness verdict, so an
-invalid, group-scoped or stale reading cannot be labeled more usable than
-placement would judge it. A model-scoped free set (devin's SWE-2 rungs) is not
-visible to that pool-level call, so an available `free_bucket` on the reading
-lifts the band to `free` after the class and stale checks; an exhausted free
-tier (placement's `free_limit`), an excluded pool or a stale reading keeps the
-`StatusBand` answer. `unknown` means the reading gives no tier (stale, invalid,
-preserved by the admission policy, or a band that could not be read).
+A quota row carries no `band`. One stored reading has no single band: the same
+devin account is `free` for its SWE-2 rungs and `ranked`, `waste` or refused
+for its paid rungs at once, because selection gives a tier to a catalog rung,
+not to a reading. Computing a per-reading band outside the selector is what
+kept producing findings (class, group reduction, gate order, validity,
+model-scoped free, `NormalizeFree`, `[local].pool_policy`), so the field is
+cut.
+
+`free_state` is the one band input a reading owns: `shared.NormalizeFree`
+over the reading's `free_bucket`, so an exhausted bucket whose reset has
+passed shows `available` and a malformed one `unknown`. Placement's
+`free_limit` refusal applies to the same normalized state.
+
+The selection-true band is the plan: each row's `tier`, `pool`, `account`,
+`seat` and `outcome` come from the real selector (`selectFor`) over the hub's
+own fleet App, its `[local].pool_policy`, admission classes, `NormalizeFree`,
+publisher liveness and clock. A console that wants a band reads the plan row
+for the grade it cares about, and the quota rows as its evidence. A
+per-account band for every rung is a follow-up inside `fleet`, not a second
+implementation here.
 
 ## Plan
 

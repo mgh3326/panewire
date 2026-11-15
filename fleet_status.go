@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/mgh3326/panewire/internal/fleet"
+	"github.com/mgh3326/panewire/internal/quota/shared"
 )
 
 // The fleet status snapshot: the hub writes one hk document every few minutes
@@ -45,8 +46,6 @@ const (
 	// the 900 s window a spawn's gate applies.
 	fleetStatusDefaultFresh = 300 * time.Second
 	fleetStatusClaudeFresh  = 900 * time.Second
-
-	fleetStatusBandUnknown = "unknown"
 )
 
 var errFleetStatusTooLarge = errors.New("fleet status snapshot exceeds its byte cap")
@@ -83,7 +82,7 @@ type fleetStatusQuota struct {
 	AgeS       int64               `json:"age_s"`
 	FreshTTLS  int64               `json:"fresh_ttl_s"`
 	Fresh      bool                `json:"fresh"`
-	Band       string              `json:"band"`
+	FreeState  string              `json:"free_state,omitempty"`
 }
 
 type fleetStatusPlan struct {
@@ -147,11 +146,17 @@ func (h *HubServer) fleetStatusWrite(ctx context.Context, body string) error {
 func (h *HubServer) fleetStatusDocument(ctx context.Context, now time.Time) fleetStatusDoc {
 	routes := loadReportRelayRoutes(h.reportRelayPath)
 	app := h.fleetStatusApp()
+	var snap *fleet.FleetSnapshot
+	if app != nil {
+		if stored, err := (fleetStatusState{h}).Snapshot(ctx); err == nil {
+			snap = &stored
+		}
+	}
 	doc := fleetStatusDoc{
 		V:     fleetStatusVersion,
 		At:    now,
 		Hosts: h.fleetStatusHosts(routes),
-		Quota: h.fleetStatusQuota(now, app),
+		Quota: h.fleetStatusQuota(now, app, snap),
 		Plan:  h.fleetStatusPlansNow(ctx, app),
 	}
 	return doc
@@ -207,27 +212,10 @@ func (h *HubServer) fleetStatusHosts(routes map[string]reportRelayRoute) []fleet
 
 // fleetStatusQuota lists one row per (host, account) reading the hub holds,
 // oldest reading of the same account last replaced in the state store. Rows
-// sort by host then account so the document is stable across cycles.
-func (h *HubServer) fleetStatusQuota(now time.Time, app *fleet.App) []fleetStatusQuota {
-	policy, policyErr := fleet.LoadPoolPolicy("")
-	// One admission class per pool per cycle: the class is what placement
-	// judges the pool under, so the band cannot disagree with a spawn.
-	classes := make(map[string]struct {
-		class string
-		ok    bool
-	})
-	classOf := func(pool string) (string, bool) {
-		if cached, seen := classes[pool]; seen {
-			return cached.class, cached.ok
-		}
-		class, err := fleet.StatusPoolClass(pool, now)
-		cached := struct {
-			class string
-			ok    bool
-		}{class: class, ok: err == nil}
-		classes[pool] = cached
-		return cached.class, cached.ok
-	}
+// are measured facts: a reading has no single selection band (one account can
+// be free for its free rungs and ranked for its paid rungs at once), so the
+// trusted band is the plan row, which the selector produces.
+func (h *HubServer) fleetStatusQuota(now time.Time, app *fleet.App, snap *fleet.FleetSnapshot) []fleetStatusQuota {
 	out := make([]fleetStatusQuota, 0)
 	for _, message := range h.stateStore().snapshot(now).States {
 		if message.Kind != fleetStateKindQuota || message.Quota == nil {
@@ -241,12 +229,7 @@ func (h *HubServer) fleetStatusQuota(now time.Time, app *fleet.App) []fleetStatu
 			MeasuredAt: message.MeasuredAt.UTC(),
 			Windows:    make([]fleetStatusWindow, 0, len(quota.Buckets)),
 		}
-		windows := make([]fleet.StatusWindow, 0, len(quota.Buckets))
 		for i, bucket := range quota.Buckets {
-			// StatusBand reads scopes and groups from these windows, the same
-			// reduction `quota status` ranks, so a group-only reading and an
-			// invalid one cannot disagree with placement.
-			windows = append(windows, fleet.StatusWindow{Window: bucket.Window, UsedPct: bucket.UsedPct, ResetsAt: bucket.ResetsAt, Scope: bucket.Scope, Model: bucket.Model})
 			if i >= fleetStatusMaxWindows {
 				continue
 			}
@@ -264,16 +247,16 @@ func (h *HubServer) fleetStatusQuota(now time.Time, app *fleet.App) []fleetStatu
 		entry.AgeS = int64(age / time.Second)
 		entry.FreshTTLS = int64(ttl / time.Second)
 		entry.Fresh = age >= -time.Minute && age <= ttl
-		entry.Band = fleetStatusBandUnknown
-		if class, ok := classOf(quota.Pool); policyErr == nil && ok {
-			entry.Band = fleet.StatusBand(policy, quota.Pool, class, !entry.Fresh, windows, now)
-			// StatusBand judges a pool-level reading with no model, so it
-			// cannot see a model-scoped free set (devin's SWE-2 rungs). The
-			// reading's own free bucket can: an available free tier is the
-			// free band, while an exhausted one (placement's free_limit),
-			// an excluded pool or a stale reading keeps StatusBand's answer.
-			if quota.Free != nil && quota.Free.State == "available" && entry.Band != "excluded" && entry.Band != "unknown" {
-				entry.Band = "free"
+		if app != nil && snap != nil {
+			entry.Fresh = fleetStatusReadingFresh(app, snap, message, quota.Pool, now)
+		}
+		if quota.Free != nil {
+			// The free tier as placement judges it: an exhausted bucket whose
+			// reset has passed is available again, and a malformed one is
+			// unknown (shared.NormalizeFree).
+			entry.FreeState = "unknown"
+			if free, ok := shared.NormalizeFree(&shared.FreeBucket{State: quota.Free.State, ResetsAt: quota.Free.ResetsAt}, now); ok && free != nil {
+				entry.FreeState = free.State
 			}
 		}
 		out = append(out, entry)
@@ -288,6 +271,18 @@ func (h *HubServer) fleetStatusQuota(now time.Time, app *fleet.App) []fleetStatu
 		out = out[:fleetStatusMaxQuota]
 	}
 	return out
+}
+
+// fleetStatusReadingFresh is the spawn gate's freshness rule for one stored
+// reading: its host's publisher is alive and its age is within the pool's
+// window, exactly as fleet.hubSharedAccount judges a reading.
+func fleetStatusReadingFresh(app *fleet.App, snap *fleet.FleetSnapshot, message FleetStateMessage, pool string, now time.Time) bool {
+	for _, stored := range snap.States {
+		if stored.Kind == fleetStateKindQuota && stored.Host == message.Host && stored.Key == message.Key {
+			return app.ReadingFresh(snap, stored, pool, now)
+		}
+	}
+	return false
 }
 
 // fleetStatusFreshTTL is the shared-quota freshness window for pool, matching
