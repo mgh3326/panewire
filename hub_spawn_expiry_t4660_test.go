@@ -2,7 +2,6 @@ package panewire
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -11,17 +10,16 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/mgh3326/panewire/internal/fleet"
 )
 
-// hk 4660: a request's time limit (expires_at), its states waiting and
-// given_up, and start conditions through the queue. The design is hk
-// design/2026-11-13/hub-owned-spawn-queue §2 to §4; docs/hub-spawn-operations.md
-// (#time-limit-and-start-conditions) records the behaviour and the rollback.
+// hk 4660: a request's time limit (expires_at) and its state given_up. The
+// design is hk design/2026-11-13/hub-owned-spawn-queue §2 and §3 rule 2;
+// docs/hub-spawn-operations.md (#time-limit) records the behaviour and the
+// rollback. Start conditions through the queue are a later part.
 
 // expiryClock gives the hub a clock the test moves.
 func expiryClock(h *HubServer, start time.Time) *time.Time {
@@ -339,289 +337,19 @@ func TestTimeoutRenewalPreservesDeferredPlacementTrace_t4660(t *testing.T) {
 	}
 }
 
-// ---- start conditions through the queue ----
-
-type startConditionHK struct {
-	state atomic.Value
-	reads atomic.Int32
-}
-
-// startConditionServer serves hk tasks 9000 (the state set on the returned
-// value) and 9001 (always merged); a task in dropped serves "dropped".
-func startConditionServer(t *testing.T, state string) *startConditionHK {
-	t.Helper()
-	hk := &startConditionHK{}
-	hk.state.Store(state)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		hk.reads.Add(1)
-		switch r.URL.Path {
-		case "/v1/tasks/9000":
-			_, _ = w.Write([]byte(`{"id":9000,"state":"` + hk.state.Load().(string) + `","relations":[]}`))
-		case "/v1/tasks/9001":
-			_, _ = w.Write([]byte(`{"id":9001,"state":"merged","relations":[]}`))
-		default:
-			w.WriteHeader(http.StatusNotFound)
-		}
-	}))
-	t.Cleanup(server.Close)
-	t.Setenv("HANDOFFKEEP_URL", server.URL)
-	t.Setenv("HANDOFFKEEP_TOKEN_SVC_PANEWIRE", "start-condition-test")
-	return hk
-}
-
-func waitingRequest(n int, conditions ...fleet.StartCondition) fleet.Submission {
+// What an older hub does with a given_up row (docs/hub-spawn-operations.md,
+// "Rolling back past the time limit"): the status queries it ran list no
+// given_up, so it never replays, sweeps, completes or releases such a row. The
+// predicates are copied from the code of the commit before this part
+// (e00bb952).
+func TestOlderHubQueriesIgnoreGivenUpRows_t4660(t *testing.T) {
+	h := asyncSpawnHub(t)
 	request := durableSpawnRequest()
-	request.RequestID = t14RequestID(4600 + n)
-	request.Args = replaceSpawnArg(append([]string(nil), request.Args...), "--task", strconv.Itoa(5000+n))
-	request.Args = replaceSpawnArg(request.Args, "--job", "wait-job")
-	request.Args = replaceSpawnArg(request.Args, "-l", "wait-job")
-	request.StartConditions = conditions
-	return request
-}
-
-func TestStartConditionKeepsRequestWaitingThenReleasesIt_t4660(t *testing.T) {
-	hk := startConditionServer(t, "ready")
-	h := asyncSpawnHub(t)
-	clock := expiryClock(h, expiryNow())
-	h.startConditionPoll = time.Minute
-	request := waitingRequest(1, fleet.StartCondition{Kind: "task", TaskID: "9000", State: "merged"})
-	task, fresh, err := h.inbox.store.claimSpawn(t.Context(), request, "wait-job", "parent", *clock)
-	if err != nil || !fresh || task.Status != "waiting" {
-		t.Fatalf("claim: %+v fresh=%v err=%v; want waiting", task, fresh, err)
-	}
-	h.checkWaitingSpawns(t.Context())
-	// Still waiting: not scheduled, no placement app, and the status API says why.
-	if page, _, err := h.inbox.store.pendingSpawnPage(t.Context(), spawnScanPosition{}); err != nil || len(page) != 0 {
-		t.Fatalf("a waiting request reached the placement queue: %+v %v", page, err)
-	}
-	server := httptest.NewServer(h.Handler())
-	defer server.Close()
-	status, _, body := t14HTTP(t, http.MethodGet, server.URL+"/v1/spawns/"+request.RequestID, t14OperatorToken, nil)
-	var view struct {
-		Status         string `json:"status"`
-		ExpiresAt      string `json:"expires_at"`
-		StartCondition struct {
-			Status  string   `json:"status"`
-			Reasons []string `json:"reasons"`
-		} `json:"start_condition"`
-	}
-	if status != http.StatusOK || json.Unmarshal(body, &view) != nil || view.Status != "waiting" || view.ExpiresAt == "" || view.StartCondition.Status != "waiting" || len(view.StartCondition.Reasons) != 1 || view.StartCondition.Reasons[0] != "task:9000=merged" {
-		t.Fatalf("status read %d %s", status, body)
-	}
-	read := hk.reads.Load()
-	if read == 0 {
-		t.Fatal("hk was not read for the waiting request")
-	}
-	// Inside the poll interval hk is not read again, even once the task merged.
-	hk.state.Store("merged")
-	*clock = clock.Add(30 * time.Second)
-	h.checkWaitingSpawns(t.Context())
-	if hk.reads.Load() != read {
-		t.Fatal("hk was read again inside the poll interval")
-	}
-	if saved, _ := h.inbox.store.spawnTask(t.Context(), request.RequestID); saved.Status != "waiting" {
-		t.Fatalf("released from a stale reading: %s", saved.Status)
-	}
-	*clock = clock.Add(31 * time.Second)
-	h.checkWaitingSpawns(t.Context())
-	saved, err := h.inbox.store.spawnTask(t.Context(), request.RequestID)
-	if err != nil || saved.Status != "accepted" || !saved.Deadline.Equal(clock.Add(600*time.Second)) || saved.Attempt != 1 {
-		t.Fatalf("after the condition held: %+v %v; want pending with a fresh landing wait", saved, err)
-	}
-	if page, _, err := h.inbox.store.pendingSpawnPage(t.Context(), spawnScanPosition{}); err != nil || len(page) != 1 || page[0].Request.RequestID != request.RequestID {
-		t.Fatalf("a released request is not in the placement queue: %+v %v", page, err)
-	}
-	// A released request is not judged again: no start_condition in its status.
-	_, _, body = t14HTTP(t, http.MethodGet, server.URL+"/v1/spawns/"+request.RequestID, t14OperatorToken, nil)
-	if strings.Contains(string(body), "start_condition") || !strings.Contains(string(body), `"status":"accepted"`) {
-		t.Fatalf("released status read: %s", body)
-	}
-}
-
-func TestTimeConditionReleasesWithoutReadingHK_t4660(t *testing.T) {
-	hk := startConditionServer(t, "merged")
-	h := asyncSpawnHub(t)
-	clock := expiryClock(h, expiryNow())
-	at := clock.Add(30 * time.Minute)
-	request := waitingRequest(2, fleet.StartCondition{Kind: "time", At: at})
-	if task, _, err := h.inbox.store.claimSpawn(t.Context(), request, "wait-job", "parent", *clock); err != nil || task.Status != "waiting" {
-		t.Fatalf("claim: %+v %v", task, err)
-	}
-	*clock = at.Add(-time.Second)
-	h.checkWaitingSpawns(t.Context())
-	if saved, _ := h.inbox.store.spawnTask(t.Context(), request.RequestID); saved.Status != "waiting" {
-		t.Fatalf("released early: %s", saved.Status)
-	}
-	*clock = at
-	h.checkWaitingSpawns(t.Context())
-	if saved, _ := h.inbox.store.spawnTask(t.Context(), request.RequestID); saved.Status != "accepted" {
-		t.Fatalf("not released at its time: %s", saved.Status)
-	}
-	if hk.reads.Load() != 0 {
-		t.Fatalf("a time condition read hk %d times", hk.reads.Load())
-	}
-}
-
-// Several --after are ANDed: the time can hold while the task does not.
-func TestStartConditionsAreAnded_t4660(t *testing.T) {
-	startConditionServer(t, "ready")
-	h := asyncSpawnHub(t)
-	clock := expiryClock(h, expiryNow())
-	request := waitingRequest(3, fleet.StartCondition{Kind: "time", At: clock.Add(time.Minute)}, fleet.StartCondition{Kind: "task", TaskID: "9000", State: "merged"})
-	if _, _, err := h.inbox.store.claimSpawn(t.Context(), request, "wait-job", "parent", *clock); err != nil {
+	if _, _, err := h.inbox.store.claimSpawn(t.Context(), request, "test-job", "parent", expiryNow()); err != nil {
 		t.Fatal(err)
 	}
-	*clock = clock.Add(2 * time.Minute)
-	h.checkWaitingSpawns(t.Context())
-	if saved, _ := h.inbox.store.spawnTask(t.Context(), request.RequestID); saved.Status != "waiting" {
-		t.Fatalf("the time alone released an ANDed request: %s", saved.Status)
-	}
-	if result := h.waitingStartCondition(request.RequestID); result == nil || len(result.Reasons) != 1 || result.Reasons[0] != "task:9000=merged" {
-		t.Fatalf("waiting for %+v, want only the task", result)
-	}
-}
-
-// A request that waits on a task hk dropped can never start: cancelled, with
-// that reason, one notice and its reservation freed.
-func TestStartConditionOnDroppedTaskCancels_t4660(t *testing.T) {
-	startConditionServer(t, "dropped")
-	h := asyncSpawnHub(t)
-	clock := expiryClock(h, expiryNow())
-	request := waitingRequest(4, fleet.StartCondition{Kind: "task", TaskID: "9000", State: "merged"})
-	if _, _, err := h.inbox.store.claimSpawn(t.Context(), request, "wait-job", "parent", *clock); err != nil {
+	if _, err := h.inbox.store.db.Exec(`UPDATE spawn_operations SET status='given_up' WHERE request_id=?`, request.RequestID); err != nil {
 		t.Fatal(err)
-	}
-	h.checkWaitingSpawns(t.Context())
-	saved, err := h.inbox.store.spawnTask(t.Context(), request.RequestID)
-	if err != nil || saved.Status != "cancelled" || !strings.Contains(saved.Outcome.Reason, "task:9000=dropped") || saved.Outcome.RC != 84 {
-		t.Fatalf("%+v %v; want cancelled naming the dropped task", saved, err)
-	}
-	if held, _ := h.inbox.store.spawnJobReserved(t.Context(), "wait-job"); held {
-		t.Fatal("a cancelled request kept its reservation")
-	}
-	var notices int
-	if err := h.inbox.store.db.QueryRow(`SELECT count(*) FROM spawn_notifications WHERE request_id=?`, request.RequestID).Scan(&notices); err != nil || notices != 1 {
-		t.Fatalf("notices=%d %v", notices, err)
-	}
-}
-
-func TestWaitingRequestGivenUpAtItsLimit_t4660(t *testing.T) {
-	startConditionServer(t, "ready")
-	h := asyncSpawnHub(t)
-	clock := expiryClock(h, expiryNow())
-	request := waitingRequest(5, fleet.StartCondition{Kind: "task", TaskID: "9000", State: "merged"})
-	request.ExpiresSeconds = 3600
-	if _, _, err := h.inbox.store.claimSpawn(t.Context(), request, "wait-job", "parent", *clock); err != nil {
-		t.Fatal(err)
-	}
-	*clock = clock.Add(3599 * time.Second)
-	h.checkWaitingSpawns(t.Context())
-	if saved, _ := h.inbox.store.spawnTask(t.Context(), request.RequestID); saved.Status != "waiting" {
-		t.Fatalf("given up before its limit: %s", saved.Status)
-	}
-	*clock = clock.Add(time.Second)
-	h.checkWaitingSpawns(t.Context())
-	saved, err := h.inbox.store.spawnTask(t.Context(), request.RequestID)
-	if err != nil || saved.Status != "given_up" || !strings.HasPrefix(saved.Outcome.Reason, "expired") {
-		t.Fatalf("%+v %v; want given_up", saved, err)
-	}
-	if held, _ := h.inbox.store.spawnJobReserved(t.Context(), "wait-job"); held {
-		t.Fatal("a given_up request kept its reservation")
-	}
-}
-
-// A restart keeps the limit and the waiting state (both are columns of the
-// row), and the new hub judges the request on its next pass.
-func TestRestartKeepsExpiryAndWaitingState_t4660(t *testing.T) {
-	hk := startConditionServer(t, "ready")
-	path := filepath.Join(t.TempDir(), "inbox.sqlite3")
-	t.Setenv(crashReportDSNEnv, "")
-	open := func() *HubServer {
-		h, err := NewHubServer(HubServerConfig{Tokens: map[string]string{"operator": t14OperatorToken}, InboxStorePath: path})
-		if err != nil {
-			t.Fatal(err)
-		}
-		return h
-	}
-	first := open()
-	now := expiryNow()
-	request := waitingRequest(6, fleet.StartCondition{Kind: "task", TaskID: "9000", State: "merged"})
-	request.ExpiresSeconds = 7200
-	claimed, _, err := first.inbox.store.claimSpawn(t.Context(), request, "wait-job", "parent", now)
-	if err != nil || claimed.Status != "waiting" {
-		t.Fatalf("claim: %+v %v", claimed, err)
-	}
-	if err := first.Close(); err != nil {
-		t.Fatal(err)
-	}
-	second := open()
-	t.Cleanup(func() { second.Close() })
-	expiryClock(second, now.Add(time.Hour))
-	saved, err := second.inbox.store.spawnTask(t.Context(), request.RequestID)
-	if err != nil || saved.Status != "waiting" || !saved.Expires.Equal(now.Add(2*time.Hour)) {
-		t.Fatalf("after the restart: %+v %v; want waiting with expires_at %v", saved, err, now.Add(2*time.Hour))
-	}
-	second.checkWaitingSpawns(t.Context())
-	if saved, _ := second.inbox.store.spawnTask(t.Context(), request.RequestID); saved.Status != "waiting" {
-		t.Fatalf("released with the condition unmet: %s", saved.Status)
-	}
-	hk.state.Store("merged")
-	expiryClock(second, now.Add(2*time.Hour))
-	// Past the limit at the same pass: the limit wins, as it does for any request.
-	second.checkWaitingSpawns(t.Context())
-	if saved, _ := second.inbox.store.spawnTask(t.Context(), request.RequestID); saved.Status != "given_up" {
-		t.Fatalf("after the limit: %s; want given_up", saved.Status)
-	}
-}
-
-// A conditioned row an older hub left in accepted (never placed) goes back to
-// waiting on start; placed and unconditioned rows are untouched.
-func TestLegacyConditionedRowsWaitAgain_t4660(t *testing.T) {
-	h := asyncSpawnHub(t)
-	now := expiryNow()
-	conditioned := waitingRequest(7, fleet.StartCondition{Kind: "task", TaskID: "9000", State: "merged"})
-	if _, _, err := h.inbox.store.claimSpawn(t.Context(), conditioned, "wait-job", "parent", now); err != nil {
-		t.Fatal(err)
-	}
-	plain := durableSpawnRequest()
-	if _, _, err := h.inbox.store.claimSpawn(t.Context(), plain, "test-job", "parent", now); err != nil {
-		t.Fatal(err)
-	}
-	// The older hub's claim had no waiting state.
-	if _, err := h.inbox.store.db.Exec(`UPDATE spawn_operations SET status='accepted',expires_ms=0 WHERE request_id=?`, conditioned.RequestID); err != nil {
-		t.Fatal(err)
-	}
-	if err := h.inbox.store.parkLegacyConditionedSpawns(t.Context()); err != nil {
-		t.Fatal(err)
-	}
-	for id, want := range map[string]string{conditioned.RequestID: "waiting", plain.RequestID: "accepted"} {
-		if saved, err := h.inbox.store.spawnTask(t.Context(), id); err != nil || saved.Status != want {
-			t.Fatalf("%s: %+v %v; want %s", id, saved, err, want)
-		}
-	}
-}
-
-// What an older hub does with the new rows (docs/hub-spawn-operations.md,
-// "Rolling back past the time limit"): the status queries it ran at v0.0.4xx
-// list none of waiting, given_up or cancelled, so it never replays, sweeps,
-// completes or releases them. The predicates are copied from the code of the
-// commit before this part (e00bb952).
-func TestOlderHubQueriesIgnoreWaitingAndGivenUpRows_t4660(t *testing.T) {
-	h := asyncSpawnHub(t)
-	now := expiryNow()
-	rows := map[string]string{}
-	for i, status := range []string{"waiting", "given_up", "cancelled"} {
-		request := waitingRequest(10+i, fleet.StartCondition{Kind: "task", TaskID: "9000", State: "merged"})
-		request.Args = replaceSpawnArg(append([]string(nil), request.Args...), "--job", "old-"+status)
-		request.Args = replaceSpawnArg(request.Args, "-l", "old-"+status)
-		if _, _, err := h.inbox.store.claimSpawn(t.Context(), request, "old-"+status, "parent", now); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := h.inbox.store.db.Exec(`UPDATE spawn_operations SET status=? WHERE request_id=?`, status, request.RequestID); err != nil {
-			t.Fatal(err)
-		}
-		rows[status] = request.RequestID
 	}
 	for name, where := range map[string]string{
 		"coordinator replay":           `status IN ('accepted','bound','dispatching','reconciling','bound_grant','dispatching_grant','reconciling_grant')`,
@@ -635,47 +363,65 @@ func TestOlderHubQueriesIgnoreWaitingAndGivenUpRows_t4660(t *testing.T) {
 	} {
 		var n int
 		if err := h.inbox.store.db.QueryRow(`SELECT count(*) FROM spawn_operations WHERE ` + where).Scan(&n); err != nil || n != 0 {
-			t.Errorf("older-hub query %q matches %d new rows, err=%v", name, n, err)
+			t.Errorf("older-hub query %q matches %d given_up rows, err=%v", name, n, err)
 		}
 	}
-	// The row keeps its job reservation in a waiting row and frees it in the
-	// ended ones; an older hub's GET passes the status through unchanged.
+	// An older hub's GET passes the status through unchanged.
 	server := httptest.NewServer(h.Handler())
 	defer server.Close()
-	for status, id := range rows {
-		code, _, body := t14HTTP(t, http.MethodGet, server.URL+"/v1/spawns/"+id, t14OperatorToken, nil)
-		if code != http.StatusOK || !strings.Contains(string(body), `"status":"`+status+`"`) {
-			t.Errorf("%s: %d %s", status, code, body)
-		}
+	if code, _, body := t14HTTP(t, http.MethodGet, server.URL+"/v1/spawns/"+request.RequestID, t14OperatorToken, nil); code != http.StatusOK || !strings.Contains(string(body), `"status":"given_up"`) {
+		t.Errorf("status read %d %s", code, body)
 	}
 }
 
-// Waiting requests are in no placement query, so any number of them leaves
-// the runnable page to the requests that can run (this replaces the old
-// separate page for conditioned rows).
-func TestWaitingRequestsDoNotStarveRunnableSpawn_t4660(t *testing.T) {
+// A staged successor (hub-internal author replacement) inherits the request's
+// limit and is activated later: activation never lifts its landing wait past
+// the limit, and one activated at or past it is given up unsent (hk 4660).
+func TestStagedActivationRespectsTheLimit_t4660(t *testing.T) {
 	h := asyncSpawnHub(t)
-	now := expiryNow()
-	for i := range 40 {
-		request := waitingRequest(100+i, fleet.StartCondition{Kind: "task", TaskID: "9000", State: "merged"})
-		job := "waiting-" + strconv.Itoa(i)
-		request.Args = replaceSpawnArg(append([]string(nil), request.Args...), "--job", job)
-		request.Args = replaceSpawnArg(request.Args, "-l", job)
-		if _, _, err := h.inbox.store.claimSpawn(t.Context(), request, job, "parent", now.Add(time.Duration(i)*time.Millisecond)); err != nil {
+	clock := expiryClock(h, expiryNow())
+	placed := false
+	h.spawnNewApp = func(io.Writer, io.Writer) (*fleet.App, error) {
+		placed = true
+		return nil, errors.New("must not be placed")
+	}
+	stage := func(n int, expires int) hubSpawnTask {
+		request := durableSpawnRequest()
+		request.RequestID = t14RequestID(4700 + n)
+		request.ExpiresSeconds = expires
+		request.Args = replaceSpawnArg(append([]string(nil), request.Args...), "--task", strconv.Itoa(4700+n))
+		request.Args = replaceSpawnArg(request.Args, "--job", "staged-"+strconv.Itoa(n))
+		request.Args = replaceSpawnArg(request.Args, "-l", "staged-"+strconv.Itoa(n))
+		task, _, err := h.inbox.store.claimSpawnReplacing(t.Context(), request, "staged-"+strconv.Itoa(n), "parent", *clock, "", "", "staged")
+		if err != nil {
 			t.Fatal(err)
 		}
+		return task
 	}
-	runnable := durableSpawnRequest()
-	if _, _, err := h.inbox.store.claimSpawn(t.Context(), runnable, "test-job", "parent", now.Add(time.Second)); err != nil {
+	// Activated inside the limit: the 150 s wait is capped at expires_at.
+	task := stage(1, 120)
+	*clock = clock.Add(10 * time.Second)
+	if err := h.inbox.store.activateStagedSpawn(t.Context(), task.Request.RequestID, *clock, 150); err != nil {
 		t.Fatal(err)
 	}
-	page, _, err := h.inbox.store.pendingSpawnPage(t.Context(), spawnScanPosition{})
-	if err != nil || len(page) != 1 || page[0].Request.RequestID != runnable.RequestID {
-		t.Fatalf("runnable page has %d rows, %v; waiting rows must not consume its slots", len(page), err)
+	saved, err := h.inbox.store.spawnTask(t.Context(), task.Request.RequestID)
+	if err != nil || saved.Status != "accepted" || !saved.Deadline.Equal(saved.Expires) {
+		t.Fatalf("activation lifted the deadline past the limit: %+v %v", saved, err)
 	}
-	waiting, err := h.inbox.store.waitingSpawns(t.Context(), spawnScanPosition{}, spawnWaitingScanLimit)
-	if err != nil || len(waiting) != 40 {
-		t.Fatalf("waiting pass has %d rows, %v; want 40", len(waiting), err)
+	// Activated past the limit: given up on the first pass, never placed.
+	late := stage(2, 60)
+	*clock = clock.Add(2 * time.Minute)
+	if err := h.inbox.store.activateStagedSpawn(t.Context(), late.Request.RequestID, *clock, 150); err != nil {
+		t.Fatal(err)
+	}
+	saved, err = h.inbox.store.spawnTask(t.Context(), late.Request.RequestID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.executeSpawnTask(t.Context(), saved)
+	saved, err = h.inbox.store.spawnTask(t.Context(), late.Request.RequestID)
+	if err != nil || saved.Status != "given_up" || placed {
+		t.Fatalf("an expired staged request was not given up unsent: %+v placed=%v err=%v", saved, placed, err)
 	}
 }
 
@@ -766,233 +512,4 @@ func TestHeldPlacementTraceKeepsRequestPending_t4660(t *testing.T) {
 	}
 }
 
-// Rows an older hub left that carry a start condition (no limit) are never
-// placed while their condition is unmet: unplaced ones wait for the park, and
-// placed ones keep the old bound-row guard.
-func TestLegacyConditionedRowsAreNeverStartedEarly_t4660(t *testing.T) {
-	startConditionServer(t, "ready")
-	h := asyncSpawnHub(t)
-	created := false
-	h.spawnNewApp = func(io.Writer, io.Writer) (*fleet.App, error) {
-		created = true
-		return nil, errors.New("must not be reached")
-	}
-	now := time.Now()
-	legacy := func(n int, bind bool) hubSpawnTask {
-		t.Helper()
-		request := waitingRequest(200+n, fleet.StartCondition{Kind: "task", TaskID: "9000", State: "merged"})
-		task, _, err := h.inbox.store.claimSpawn(t.Context(), request, "wait-job-"+strconv.Itoa(n), "parent", now)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := h.inbox.store.db.Exec(`UPDATE spawn_operations SET status='accepted',expires_ms=0 WHERE request_id=?`, request.RequestID); err != nil {
-			t.Fatal(err)
-		}
-		if bind {
-			if task, err = h.inbox.store.bindSpawn(t.Context(), request.RequestID, 1, boundTestNode(task), now.UTC()); err != nil {
-				t.Fatal(err)
-			}
-			task = sentSpawnFixture(t, h.inbox.store, task)
-		} else if task, err = h.inbox.store.spawnTask(t.Context(), request.RequestID); err != nil {
-			t.Fatal(err)
-		}
-		return task
-	}
-	unplaced, sentRow := legacy(1, false), legacy(2, true)
-	// The startup park failed (or has not run): the unplaced row is not placed.
-	h.executeSpawnTask(t.Context(), unplaced)
-	h.executeSpawnTask(t.Context(), sentRow)
-	if created {
-		t.Fatal("a legacy conditioned row reached placement or replay with its condition unmet")
-	}
-	for _, task := range []hubSpawnTask{unplaced, sentRow} {
-		if saved, _ := h.inbox.store.spawnTask(t.Context(), task.Request.RequestID); saved.Status == "failed" || saved.Attempt != 1 {
-			t.Fatalf("%s was disturbed: %+v", task.Job, saved)
-		}
-	}
-	// The waiting loop parks the unplaced row (retrying until it succeeds).
-	if _, err := h.inbox.store.db.Exec(`CREATE TRIGGER fail_park BEFORE UPDATE ON spawn_operations BEGIN SELECT RAISE(FAIL, 'injected park failure'); END`); err != nil {
-		t.Fatal(err)
-	}
-	ctx, cancel := context.WithCancel(t.Context())
-	done := make(chan struct{})
-	go func() { h.runWaitingSpawns(ctx); close(done) }()
-	time.Sleep(50 * time.Millisecond) // proves nothing more happens while the park keeps failing
-	if saved, _ := h.inbox.store.spawnTask(t.Context(), unplaced.Request.RequestID); saved.Status != "accepted" {
-		t.Fatalf("parked through a failing write: %s", saved.Status)
-	}
-	if _, err := h.inbox.store.db.Exec(`DROP TRIGGER fail_park`); err != nil {
-		t.Fatal(err)
-	}
-	eventually(t, 6*time.Second, "the unplaced legacy row to be parked", func() bool {
-		saved, err := h.inbox.store.spawnTask(t.Context(), unplaced.Request.RequestID)
-		return err == nil && saved.Status == "waiting"
-	})
-	cancel()
-	<-done
-	// Once released, a legacy row gets a limit and is an ordinary request.
-	waiting, _ := h.inbox.store.spawnTask(t.Context(), unplaced.Request.RequestID)
-	if released, err := h.inbox.store.releaseWaitingSpawn(t.Context(), waiting, now.UTC()); err != nil || !released {
-		t.Fatalf("release: %v %v", released, err)
-	}
-	if saved, _ := h.inbox.store.spawnTask(t.Context(), unplaced.Request.RequestID); saved.Status != "accepted" || saved.Expires.IsZero() {
-		t.Fatalf("a released legacy row has no limit: %+v", saved)
-	}
-}
-
-// Passes continue from a cursor: with more waiting rows than one pass reads,
-// a later row whose time has come is still released, and a later row past its
-// limit is still given up, while older rows keep waiting.
-func TestWaitingScanReachesRowsPastThePageLimit_t4660(t *testing.T) {
-	h := asyncSpawnHub(t)
-	clock := expiryClock(h, expiryNow())
-	far := clock.Add(48 * time.Hour)
-	total := spawnWaitingScanLimit*2 + 30
-	var ready, expiring []string
-	for i := 0; i < total; i++ {
-		request := waitingRequest(300+i, fleet.StartCondition{Kind: "time", At: far})
-		request.Args = replaceSpawnArg(append([]string(nil), request.Args...), "--job", "scan-"+strconv.Itoa(i))
-		request.Args = replaceSpawnArg(request.Args, "-l", "scan-"+strconv.Itoa(i))
-		switch {
-		case i == total-1:
-			request.StartConditions = []fleet.StartCondition{{Kind: "time", At: clock.Add(time.Minute)}}
-			ready = append(ready, request.RequestID)
-		case i == total-2:
-			request.ExpiresSeconds = 120
-			expiring = append(expiring, request.RequestID)
-		}
-		if _, _, err := h.inbox.store.claimSpawn(t.Context(), request, "scan-"+strconv.Itoa(i), "parent", clock.Add(time.Duration(i)*time.Millisecond)); err != nil {
-			t.Fatal(err)
-		}
-	}
-	*clock = clock.Add(5 * time.Minute)
-	for pass := 0; pass < 4; pass++ {
-		h.checkWaitingSpawns(t.Context())
-	}
-	if saved, _ := h.inbox.store.spawnTask(t.Context(), ready[0]); saved.Status != "accepted" {
-		t.Fatalf("the last waiting row was never judged: %s", saved.Status)
-	}
-	if saved, _ := h.inbox.store.spawnTask(t.Context(), expiring[0]); saved.Status != "given_up" {
-		t.Fatalf("the last waiting row's limit was never judged: %s", saved.Status)
-	}
-	if saved, _ := h.inbox.store.spawnTask(t.Context(), t14RequestID(4600+300)); saved.Status != "waiting" {
-		t.Fatalf("the oldest row left waiting early: %s", saved.Status)
-	}
-}
-
-// An hk that answers nothing for one task does not keep the others unread:
-// each id is tried at most once per poll interval, answered or not.
-func TestUnreachableTaskDoesNotStarveOtherConditions_t4660(t *testing.T) {
-	hk := startConditionServer(t, "merged")
-	h := asyncSpawnHub(t)
-	clock := expiryClock(h, expiryNow())
-	h.startConditionPoll = time.Minute
-	// Task 9002 is unknown to the server (404); 9000 answers merged.
-	missing := waitingRequest(400, fleet.StartCondition{Kind: "task", TaskID: "9002", State: "merged"})
-	ok := waitingRequest(401, fleet.StartCondition{Kind: "task", TaskID: "9000", State: "merged"})
-	for _, request := range []fleet.Submission{missing, ok} {
-		job := "job-" + request.RequestID[len(request.RequestID)-4:]
-		request.Args = replaceSpawnArg(append([]string(nil), request.Args...), "--job", job)
-		request.Args = replaceSpawnArg(request.Args, "-l", job)
-		if _, _, err := h.inbox.store.claimSpawn(t.Context(), request, job, "parent", *clock); err != nil {
-			t.Fatal(err)
-		}
-	}
-	h.checkWaitingSpawns(t.Context())
-	if saved, _ := h.inbox.store.spawnTask(t.Context(), ok.RequestID); saved.Status != "accepted" {
-		t.Fatalf("the readable condition was not released: %s", saved.Status)
-	}
-	reads := hk.reads.Load()
-	h.checkWaitingSpawns(t.Context())
-	*clock = clock.Add(10 * time.Second)
-	h.checkWaitingSpawns(t.Context())
-	if hk.reads.Load() != reads {
-		t.Fatalf("an unanswered task was re-read inside the poll interval: %d -> %d", reads, hk.reads.Load())
-	}
-	if result := h.waitingStartCondition(missing.RequestID); result == nil || result.Reasons[0] != "hk_unavailable" {
-		t.Fatalf("an unread task must fail closed: %+v", result)
-	}
-}
-
 // ---- review round 2 (mergewake findings on head ae38439) ----
-
-// A request that waits on several tasks, some of which never answer, still
-// reads the healthy one: a pass reads only the tasks due, so the ones a
-// cut-off pass never reached come first on the next.
-func TestAndedConditionsReadProgressAcrossPasses_t4660(t *testing.T) {
-	var healthyReads atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		id := strings.TrimPrefix(r.URL.Path, "/v1/tasks/")
-		if id == "9015" {
-			healthyReads.Add(1)
-			_, _ = w.Write([]byte(`{"id":9015,"state":"merged","relations":[]}`))
-			return
-		}
-		<-r.Context().Done() // never answers; the read's own bound ends it
-	}))
-	t.Cleanup(server.Close)
-	t.Setenv("HANDOFFKEEP_URL", server.URL)
-	t.Setenv("HANDOFFKEEP_TOKEN_SVC_PANEWIRE", "start-condition-test")
-	h := asyncSpawnHub(t)
-	clock := expiryClock(h, expiryNow()) // frozen: no poll interval elapses
-	h.startConditionPoll = time.Hour
-	h.startConditionReadBound = 30 * time.Millisecond
-	h.startConditionBudget = 100 * time.Millisecond
-	var conditions []fleet.StartCondition
-	for id := 9010; id <= 9015; id++ {
-		conditions = append(conditions, fleet.StartCondition{Kind: "task", TaskID: strconv.Itoa(id), State: "merged"})
-	}
-	request := waitingRequest(500, conditions...)
-	if _, _, err := h.inbox.store.claimSpawn(t.Context(), request, "wait-job", "parent", *clock); err != nil {
-		t.Fatal(err)
-	}
-	for pass := 0; pass < 4 && healthyReads.Load() == 0; pass++ {
-		h.checkWaitingSpawns(t.Context())
-	}
-	if healthyReads.Load() == 0 {
-		t.Fatal("the healthy task was never read: the unanswering ones took every pass")
-	}
-	h.startConditionMu.Lock()
-	_, haveHealthy := h.startConditionTasks["9015"]
-	h.startConditionMu.Unlock()
-	if !haveHealthy {
-		t.Fatal("the healthy task's answer was not kept")
-	}
-	// Every task is tried once per interval, not again while it is fresh.
-	tried := healthyReads.Load()
-	h.checkWaitingSpawns(t.Context())
-	h.checkWaitingSpawns(t.Context())
-	if healthyReads.Load() != tried {
-		t.Fatalf("a fresh task was read again: %d -> %d", tried, healthyReads.Load())
-	}
-}
-
-// The limit wins over an answer that arrives after it passed: the hk reads
-// take time, so the decision is judged with the time after them.
-func TestLimitPassingDuringReadsWins_t4660(t *testing.T) {
-	for _, state := range []string{"dropped", "merged"} {
-		t.Run(state, func(t *testing.T) {
-			h := asyncSpawnHub(t)
-			clock := expiryClock(h, expiryNow())
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				*clock = clock.Add(2 * time.Hour) // the read takes this long
-				w.Header().Set("Content-Type", "application/json")
-				_, _ = w.Write([]byte(`{"id":9000,"state":"` + state + `","relations":[]}`))
-			}))
-			t.Cleanup(server.Close)
-			t.Setenv("HANDOFFKEEP_URL", server.URL)
-			t.Setenv("HANDOFFKEEP_TOKEN_SVC_PANEWIRE", "start-condition-test")
-			request := waitingRequest(510, fleet.StartCondition{Kind: "task", TaskID: "9000", State: "merged"})
-			request.ExpiresSeconds = 3600
-			if _, _, err := h.inbox.store.claimSpawn(t.Context(), request, "wait-job", "parent", *clock); err != nil {
-				t.Fatal(err)
-			}
-			h.checkWaitingSpawns(t.Context())
-			saved, err := h.inbox.store.spawnTask(t.Context(), request.RequestID)
-			if err != nil || saved.Status != "given_up" {
-				t.Fatalf("%s answer after the limit: %+v %v; want given_up", state, saved, err)
-			}
-		})
-	}
-}

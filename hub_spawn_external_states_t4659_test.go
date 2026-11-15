@@ -9,16 +9,15 @@ import (
 
 // hk 4659: the clients learn the design's request states (waiting, pending,
 // parked, launching, landed, refused, given_up, cancelled) before any hub
-// emits them. hk 4660 is the first part to emit any: waiting, given_up and
-// cancelled (a request whose start condition can never hold). The rest stay
+// emits them. hk 4660 is the first part to emit one: given_up. The rest stay
 // unemitted until their parts, and every state the hub emits is one the
 // clients know.
 func TestHubSpawnExternalStatesUnchanged(t *testing.T) {
-	want := []string{"accepted", "cancelled", "deadline_exceeded", "dispatching", "failed", "given_up", "reconciling", "retryable", "succeeded", "waiting"}
+	want := []string{"accepted", "deadline_exceeded", "dispatching", "failed", "given_up", "reconciling", "retryable", "succeeded"}
 	// Every status a spawn_operations row can hold today, each also in its
 	// grant-required stored form (hub_spawn_grant.go). A read maps the stored
 	// value back (spawnLogicalStatus) and the API shows spawnPublicStatus.
-	stored := []string{"accepted", "bound", "dispatching", "reconciling", "deadline_exceeded", "succeeded", "failed", "retryable", "waiting", "given_up", "cancelled"}
+	stored := []string{"accepted", "bound", "dispatching", "reconciling", "deadline_exceeded", "succeeded", "failed", "retryable", "given_up"}
 	for _, status := range slices.Clone(stored) {
 		stored = append(stored, spawnStoredStatus(status, &hubSpawnRequest{GrantRequired: true}))
 	}

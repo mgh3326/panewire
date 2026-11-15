@@ -199,21 +199,13 @@ func TestWaitSpawnBoundCoversReadsAndOutages(t *testing.T) {
 	}
 }
 
-// hk 4660: a waiting request says once what it waits for and when its time
-// limit ends; a given_up request names its reason and expiry in the error.
-func TestWaitSpawnWaitingAndGivenUpShowExpiry(t *testing.T) {
+// hk 4660: a given_up request names its reason and expiry in the error.
+func TestWaitSpawnGivenUpShowsExpiry(t *testing.T) {
 	c, _ := spawnStatusSequence(t,
-		map[string]any{"status": "waiting", "expires_at": "2026-11-15T16:00:00Z", "start_condition": map[string]any{"status": "waiting", "reasons": []string{"task:9000=merged"}}},
-		map[string]any{"status": "waiting", "expires_at": "2026-11-15T16:00:00Z", "start_condition": map[string]any{"status": "waiting", "reasons": []string{"task:9000=merged"}}},
 		map[string]any{"status": "given_up", "expires_at": "2026-11-15T16:00:00Z", "result": map[string]any{"reason": "expires_at passed"}})
-	var notice bytes.Buffer
-	_, err := c.WaitSpawn(t.Context(), statusTestOperation, SpawnWaitOptions{Notice: &notice})
+	_, err := c.WaitSpawn(t.Context(), statusTestOperation, SpawnWaitOptions{})
 	if ErrorCode(err) != exitWaitLost || !strings.Contains(err.Error(), "given_up") || !strings.Contains(err.Error(), "expires_at=2026-11-15T16:00:00Z") || !strings.Contains(err.Error(), "expires_at passed") {
 		t.Fatalf("code=%d err=%v", ErrorCode(err), err)
-	}
-	want := "wait request=" + statusTestOperation + " state=waiting expires_at=2026-11-15T16:00:00Z waiting_for=task:9000=merged\n"
-	if notice.String() != want {
-		t.Fatalf("notice=%q want exactly once %q", notice.String(), want)
 	}
 }
 

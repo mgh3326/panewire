@@ -35,9 +35,10 @@ func (h *HubServer) handleSpawnFeatures(w http.ResponseWriter, r *http.Request) 
 		hubUnauthorized(w)
 		return
 	}
-	// start_conditions_v1: --after conditions queue the request as waiting.
-	// spawn_expires_v1: the request carries expires_seconds (hk 4660).
-	writeJSON(w, http.StatusOK, map[string][]string{"features": {"start_conditions_v1", "spawn_expires_v1"}})
+	// spawn_expires_v1: the request carries expires_seconds (hk 4660). Start
+	// conditions are deliberately not advertised until the queue owns their
+	// lifecycle on a batched hk observation (hk 4660 follow-up).
+	writeJSON(w, http.StatusOK, map[string][]string{"features": {"spawn_expires_v1"}})
 }
 
 // decodeSpawnRequest authenticates and validates a spawn request for the submit
@@ -67,6 +68,10 @@ func (h *HubServer) decodeSpawnRequest(w http.ResponseWriter, r *http.Request) (
 	}
 	if err != nil || !validHubSpawnRequestID(request.RequestID) || !hubSpawnMachinePattern.MatchString(request.OriginMachine) {
 		writeJSON(w, 400, map[string]string{"error": "invalid_request", "fix": "rebuild the request with panewire spawn"})
+		return fleet.Submission{}, fleet.Spawn{}, false
+	}
+	if len(request.StartConditions) != 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "start_conditions_unsupported", "reason": "queue_core_required", "fix": "start conditions are not enabled on this hub; upgrade after queue-core support is deployed"})
 		return fleet.Submission{}, fleet.Spawn{}, false
 	}
 	// The node applies this same rule to the args it receives; refusing here
@@ -260,10 +265,10 @@ func (h *HubServer) handleSpawnOperation(w http.ResponseWriter, r *http.Request)
 		writeJSON(w, 503, map[string]string{"error": "store_unavailable"})
 		return
 	}
-	// A waiting request reports what the last check found (hub_spawn_expiry.go).
 	var startCondition *fleet.StartConditionResult
-	if task.Status == "waiting" {
-		startCondition = h.waitingStartCondition(task.Request.RequestID)
+	if len(task.Request.StartConditions) != 0 && spawnPending(task.Status) {
+		result := evaluateHubStartCondition(r.Context(), h, task.Request.StartConditions)
+		startCondition = &result
 	}
 	// Never expose the persisted brief, argv or submitting paths through status
 	// reads. A reason's refusal text may name a path on the executing node.
@@ -275,6 +280,14 @@ func (h *HubServer) handleSpawnOperation(w http.ResponseWriter, r *http.Request)
 		Result         hubSpawnOutcome             `json:"result"`
 		StartCondition *fleet.StartConditionResult `json:"start_condition,omitempty"`
 	}{task.Job, task.Request.RequestID, spawnPublicStatus(task.Status), spawnExpiresAt(task), task.Outcome, startCondition})
+}
+
+func evaluateHubStartCondition(ctx context.Context, h *HubServer, conditions []fleet.StartCondition) fleet.StartConditionResult {
+	snapshots, err := fleet.ReadStartConditionTasks(ctx, conditions)
+	if err != nil {
+		return fleet.StartConditionResult{Status: "waiting", Reasons: []string{"hk_unavailable"}}
+	}
+	return fleet.EvaluateStartConditions(conditions, snapshots, h.now().UTC())
 }
 
 // hubSpawnWorkerCount bounds placement work. Node I/O runs in a separate slot
@@ -289,8 +302,6 @@ func (h *HubServer) runSpawnCoordinator(parent context.Context) {
 	defer cancel()
 	stop := context.AfterFunc(h.closeCtx, cancel)
 	defer stop()
-	// Rows from before the waiting state that carry a start condition wait.
-	_ = h.inbox.store.parkLegacyConditionedSpawns(ctx)
 	work := make(chan hubSpawnTask, hubSpawnWorkerCount)
 	var mu sync.Mutex
 	active := map[string]bool{}
@@ -408,7 +419,8 @@ func (h *HubServer) runSpawnCoordinator(parent context.Context) {
 			// Deadline-exceeded replays retain their existing bounded backoff.
 			now := h.now().UTC()
 			ordinary, _ := h.inbox.store.pendingSpawns(ctx, now)
-			for _, task := range ordinary {
+			conditioned, _ := h.inbox.store.pendingStartConditionSpawns(ctx, now)
+			for _, task := range append(ordinary, conditioned...) {
 				if task.Status == "deadline_exceeded" {
 					schedule(task)
 				}
@@ -455,11 +467,12 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 			h.finishSpawnOutcome(task, hubSpawnOutcome{RC: 1, Stage: "launch", Reason: "unknown"})
 		}
 	}()
-	if len(task.Request.StartConditions) != 0 && task.Expires.IsZero() {
-		// A row an older hub left (it has no limit; this hub queues every
-		// conditioned request as waiting and gives it one when released).
+	if len(task.Request.StartConditions) != 0 {
 		if task.Node == nil {
-			// Not yet parked as waiting (runWaitingSpawns retries the park).
+			h.finishSpawnOutcome(task, hubSpawnOutcome{
+				RC: 78, Stage: "placement", Reason: "start_conditions_unsupported",
+				Fix: "start conditions are disabled until queue-core support is deployed; submit again after the hub advertises start_conditions_v1",
+			})
 			return
 		}
 		if h.now().Before(task.Deadline) && evaluateHubStartCondition(parent, h, task.Request.StartConditions).Status != "met" {
@@ -1522,10 +1535,9 @@ func (h *HubServer) startSpawnCoordinator(ctx context.Context) {
 	}
 	h.spawnCoordinatorOnce.Do(func() {
 		h.placementAsync.Store(true)
-		h.spawnWorkers.Add(4)
+		h.spawnWorkers.Add(3)
 		go func() { defer h.spawnWorkers.Done(); h.runSpawnCoordinator(ctx) }()
 		go func() { defer h.spawnWorkers.Done(); h.runQuotaReconcile(ctx) }()
-		go func() { defer h.spawnWorkers.Done(); h.runWaitingSpawns(ctx) }()
 		go func() {
 			defer h.spawnWorkers.Done()
 			defer h.placementAsync.Store(false)

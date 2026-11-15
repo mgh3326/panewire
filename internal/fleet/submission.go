@@ -588,11 +588,8 @@ func (c *hubHTTP) WaitSpawn(ctx context.Context, id string, opts SpawnWaitOption
 			NextCheckAt string `json:"next_check_at"`
 			// ExpiresAt is the request's time limit (hk 4660); the hub
 			// reports it on every state.
-			ExpiresAt      string `json:"expires_at"`
-			StartCondition struct {
-				Reasons []string `json:"reasons"`
-			} `json:"start_condition"`
-			Result struct {
+			ExpiresAt string `json:"expires_at"`
+			Result    struct {
 				SpawnAttempt
 				RC     int    `json:"rc"`
 				Reason string `json:"reason"`
@@ -616,10 +613,6 @@ func (c *hubHTTP) WaitSpawn(ctx context.Context, id string, opts SpawnWaitOption
 			return attempt, fail(exitWaitLost, "spawn request %s before it landed %s: %s%s (operation %s)", result.Status, attempt, firstNonempty(result.Reason, result.Result.Reason, "no reason recorded"), limit, id)
 		case spawnUnresolved:
 			return attempt, fail(exitStateConflict, "spawn ownership is unresolved %s; inspect operation %s and its executing node before any retry", attempt, id)
-		case spawnActive:
-			if result.Status == "waiting" {
-				told.waiting(opts.Notice, id, result.ExpiresAt, result.StartCondition.Reasons)
-			}
 		case spawnParked:
 			told.parked(opts.Notice, id, firstNonempty(result.Reason, result.Result.Reason), result.NextCheckAt)
 		case spawnUnknown:

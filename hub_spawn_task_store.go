@@ -206,10 +206,6 @@ func (s *laneInboxStore) claimSpawnReplacing(parent context.Context, request fle
 		}
 		return hubSpawnTask{}, false, errSpawnClaimed
 	}
-	// A request with a start condition is queued behind it (hk 4660).
-	if status == "accepted" && len(request.StartConditions) != 0 {
-		status = "waiting"
-	}
 	expires := now.Add(fleet.SpawnExpiresFor(spawn.Role, request.ExpiresSeconds))
 	deadline := spawnAttemptDeadline(now, request.DeadlineSeconds, expires)
 	_, err = tx.ExecContext(ctx, s.q(`INSERT INTO spawn_operations(request_id,job,owner,fingerprint,payload,status,created_ms,deadline_ms,expires_ms) VALUES(?,?,?,?,?,?,?,?,?)`), request.RequestID, job, owner, fingerprint, string(raw), status, now.UnixMilli(), deadline.UnixMilli(), expires.UnixMilli())
@@ -225,7 +221,11 @@ func (s *laneInboxStore) claimSpawnReplacing(parent context.Context, request fle
 func (s *laneInboxStore) activateStagedSpawn(parent context.Context, id string, now time.Time, deadlineSeconds int) error {
 	ctx, done := s.op(parent)
 	defer done()
-	result, err := s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET status='accepted', deadline_ms=? WHERE request_id=? AND status='staged'`), now.Add(time.Duration(deadlineSeconds)*time.Second).UnixMilli(), id)
+	// The landing wait never outlasts the request's limit: a successor
+	// activated at or past it has a deadline already passed, and the first
+	// pass gives it up unsent instead of placing it (hk 4660).
+	deadline := now.Add(time.Duration(deadlineSeconds) * time.Second).UnixMilli()
+	result, err := s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET status='accepted', deadline_ms=CASE WHEN expires_ms>0 AND expires_ms<? THEN expires_ms ELSE ? END WHERE request_id=? AND status='staged'`), deadline, deadline, id)
 	if err != nil {
 		return err
 	}
@@ -421,7 +421,7 @@ func queueSpawnNotifications(ctx context.Context, s *laneInboxStore, tx *sql.Tx,
 	// The owner keeps the bare event id. A failed or retryable spawn also tells
 	// the submitting lane, whose only other sign of it was ACCEPTED.
 	lanes := []struct{ id, lane string }{{eventID, task.Owner}}
-	if status == "failed" || status == "retryable" || spawnEndedUnstarted(status) {
+	if status == "failed" || status == "retryable" || status == "given_up" {
 		if lane := spawnSubmitterLane(task.Request.Args); lane != "" && lane != task.Owner {
 			lanes = append(lanes, struct{ id, lane string }{eventID + ":" + lane, lane})
 		}
@@ -604,17 +604,40 @@ func (s *laneInboxStore) boundSpawnsSince(parent context.Context, since time.Tim
 	return tasks, rows.Err()
 }
 
-// pendingSpawns returns a bounded number of due stale rows: the fresh
-// runnable page is pendingSpawnPage. A request behind a start condition is
-// waiting, in neither (hub_spawn_expiry.go).
+// pendingSpawns returns the fresh runnable page and a bounded number of due
+// stale rows. Conditioned rows use a separate page so they cannot displace fresh
+// runnable work.
 func (s *laneInboxStore) pendingSpawns(parent context.Context, now time.Time) ([]hubSpawnTask, error) {
 	ctx, done := s.op(parent)
 	defer done()
-	tasks, err := s.queryPendingSpawns(ctx, `status IN ('accepted','bound','dispatching','reconciling','bound_grant','dispatching_grant','reconciling_grant') ORDER BY last_run_ms,created_ms LIMIT 32`)
+	tasks, err := s.queryPendingSpawns(ctx, `status IN ('accepted','bound','dispatching','reconciling','bound_grant','dispatching_grant','reconciling_grant') AND payload NOT LIKE '%"start_conditions":%' ORDER BY last_run_ms,created_ms LIMIT 32`)
 	if err != nil {
 		return nil, err
 	}
-	stale, err := s.queryPendingSpawns(ctx, `status IN ('deadline_exceeded','deadline_exceeded_grant') ORDER BY last_run_ms,created_ms LIMIT 256`)
+	stale, err := s.queryPendingSpawns(ctx, `status IN ('deadline_exceeded','deadline_exceeded_grant') AND payload NOT LIKE '%"start_conditions":%' ORDER BY last_run_ms,created_ms LIMIT 256`)
+	if err != nil {
+		return nil, err
+	}
+	due := 0
+	for _, task := range stale {
+		if due < spawnStaleBatch && spawnStaleProbeDue(task, now) {
+			tasks = append(tasks, task)
+			due++
+		}
+	}
+	return tasks, nil
+}
+
+// pendingStartConditionSpawns gives legacy conditioned rows their own bounded
+// fresh page and due-stale pass, separate from ordinary runnable spawns.
+func (s *laneInboxStore) pendingStartConditionSpawns(parent context.Context, now time.Time) ([]hubSpawnTask, error) {
+	ctx, done := s.op(parent)
+	defer done()
+	tasks, err := s.queryPendingSpawns(ctx, `status IN ('accepted','bound','dispatching','reconciling','bound_grant','dispatching_grant','reconciling_grant') AND payload LIKE '%"start_conditions":%' ORDER BY last_run_ms,created_ms LIMIT 32`)
+	if err != nil {
+		return nil, err
+	}
+	stale, err := s.queryPendingSpawns(ctx, `status IN ('deadline_exceeded','deadline_exceeded_grant') AND payload LIKE '%"start_conditions":%' ORDER BY last_run_ms,created_ms LIMIT 256`)
 	if err != nil {
 		return nil, err
 	}
