@@ -172,6 +172,19 @@ func TestHostAccountsListsEveryCommandcodeAccountButOneAccountForOtherPools(t *t
 	if got := hostAccountFor(presence, "commandcode", "mac", now, 24*time.Hour, "commandcode:ffffffffffffffff"); got != ccKeyA {
 		t.Fatalf("a chosen account the host does not hold falls back to the newest, got %s", got)
 	}
+	// Two accounts announced in the same instant: a multi-account pool still has
+	// a deterministic first account (key order) for a launch that chose none,
+	// while a single-account pool keeps refusing the tie.
+	tied := []PresenceRecord{
+		{HostID: "mac", AccountKey: ccKeyB, LastSeen: now}, {HostID: "mac", AccountKey: ccKeyA, LastSeen: now},
+		{HostID: "mac", AccountKey: claudeKey, LastSeen: now}, {HostID: "mac", AccountKey: other, LastSeen: now},
+	}
+	if got := hostAccountFor(tied, "commandcode", "mac", now, 24*time.Hour, ""); got != ccKeyA {
+		t.Fatalf("tied commandcode accounts with no choice: got %q, want %s", got, ccKeyA)
+	}
+	if got := hostAccountFor(tied, "claude", "mac", now, 24*time.Hour, ""); got != "" {
+		t.Fatalf("a tied single-account pool must stay unresolved, got %q", got)
+	}
 	if got := hostAccountFor(presence, "claude", "mac", now, 24*time.Hour, other); got != claudeKey {
 		t.Fatalf("a single-account pool keeps the newest account, got %s", got)
 	}

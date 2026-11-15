@@ -151,7 +151,8 @@ harness가 omp이고, omp는 자기 login(여러 계정일 수 있음)으로 쓰
   않습니다. `commandcode:balance`는 무시합니다. 크레딧이 떨어진 계정은 pane에서 실패하며 그것을
   받아들입니다 (decision 289). `commandcode_required_window_missing:30d` 규칙
   (decision/2026-11-06/commandcode-30d-required-in-panewire-gate)은 이 pool에서 폐기되었습니다.
-  gate가 요구하는 window는 `5h`와 `7d`뿐입니다.
+  gate가 요구하는 window는 `5h`와 `7d`뿐이고, 둘 중 하나가 없는 reading은
+  `commandcode_required_window_missing:<window>`로 unmeasurable입니다.
 - **Freshness.** omp는 report를 약 5분(±25%) cache하고 `fetchedAt`에 가져온 시각을
   적습니다. panewire는 `fetchedAt`을 reading의 `measured_at`으로 게시하므로 reading의 나이는
   omp가 값을 가져온 때부터 셉니다. **받아들이는 최대 나이는 3분**(`MaxReportAge`, shared flow가
@@ -160,8 +161,8 @@ harness가 omp이고, omp는 자기 login(여러 계정일 수 있음)으로 쓰
   계정은 **unknown**이라 빠지고(다른 계정은 유지), 모든 계정이 그러면 `probe_error`("omp usage
   report is stale")입니다. 미래의 `fetchedAt`(1분 초과)도 unknown입니다.
 - **Fail closed.** 아는 shape가 아니면(JSON이 아님, `reports` 없음, `fetchedAt` 또는
-  `limits` 없음, `scope.accountId` 없음 또는 계정 불일치, 알려진 window의 길이가 다름, 같은
-  계정이 두 번 나옴) `parse_error`("unsupported omp usage output")이고, pool은 이 호스트에서
+  `limits` 없음, `scope.accountId` 없음 또는 계정 불일치, 알려진 window의 길이가 다르거나 amount를
+  읽을 수 없음(다른 window가 멀쩡해도 부분 reading은 게시하지 않습니다), 같은 계정이 두 번 나옴) `parse_error`("unsupported omp usage output")이고, pool은 이 호스트에서
   admit되지 않습니다. 이유는 같은 이유가 계속되는 동안 **한 번만** 로그에 남깁니다(omp 출력은
   로그에도 오류에도 들어가지 않으며 고정 문장입니다). "omp 없음" 또는 "Command Code 계정
   없음"은 `credentials`(이 호스트에 login 없음)이며 오류가 아니므로 로그하지 않습니다. 윈도우가
@@ -175,8 +176,10 @@ harness가 omp이고, omp는 자기 login(여러 계정일 수 있음)으로 쓰
     `[quota].measurable_accounts` 항목이 그대로 유효). 계정은 fp 순으로 정렬합니다.
   - **Shared store flow** as for codex, per account: 계정마다 lease(120 s)와 게시, presence
     announce가 따로입니다. reading은 300 s 동안 fresh이고 3분이 지나면 refresh 대상입니다. 노드는
-    마지막 읽기에서 본 계정 목록을 기억하므로, 모든 계정의 shared reading이 fresh이면 `omp usage`
-    를 부르지 않습니다. 한 계정의 실패는 다른 계정을 가리지 않습니다: refresh는 reading이 하나도
+    omp가 목록에 올린 계정(inventory)을 기억하고, 이 목록이 3분(`MaxReportAge`)보다 오래되면 다른
+    host가 shared reading을 fresh로 유지하고 있어도 `omp usage`를 다시 읽습니다: 목록에서 빠진
+    계정은 더는 갱신·announce되지 않고, 새 계정은 바로 발견됩니다. inventory가 3분 안이고 모든
+    계정의 shared reading이 fresh이면 `omp usage`를 부르지 않습니다. 한 계정의 실패는 다른 계정을 가리지 않습니다: refresh는 reading이 하나도
     없을 때만 실패합니다. omp가 더는 목록에 올리지 않는 계정은 갱신되지 않고 stale로 떨어집니다.
   - **Selection.** host의 presence record 중 가장 최근 것에서 30분 안에 announce된 모든
     `commandcode:` key가 그 host의 계정입니다(`hostAccounts`); 다른 pool은 지금처럼 가장 최근 key

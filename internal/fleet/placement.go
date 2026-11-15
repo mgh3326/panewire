@@ -463,13 +463,23 @@ func hostAccounts(presence []PresenceRecord, pool, host string, now time.Time, t
 	return keys
 }
 
-// hostAccountFor is hostAccount for a caller that has already chosen an account:
-// want when host holds it (a multi-account pool), else the host's own account.
+// hostAccountFor is hostAccount for a caller that may have chosen an account:
+// want when host holds it. A multi-account pool with no usable choice takes the
+// host's first account (newest announcement, then key order), so two accounts
+// announced in the same instant never make the host unusable; every other pool
+// keeps hostAccount's rule, which refuses a tie.
 func hostAccountFor(presence []PresenceRecord, pool, host string, now time.Time, ttl time.Duration, want string) string {
-	if want != "" && slices.Contains(hostAccounts(presence, pool, host, now, ttl), want) {
+	if !slices.Contains(multiAccountPools, pool) {
+		return hostAccount(presence, pool, host, now, ttl)
+	}
+	keys := hostAccounts(presence, pool, host, now, ttl)
+	if want != "" && slices.Contains(keys, want) {
 		return want
 	}
-	return hostAccount(presence, pool, host, now, ttl)
+	if len(keys) > 0 {
+		return keys[0]
+	}
+	return ""
 }
 
 func hostAccount(presence []PresenceRecord, pool, host string, now time.Time, ttl time.Duration) string {
@@ -1520,6 +1530,11 @@ func (a *App) placeAuto(ctx context.Context, s Spawn, brief string) (bool, map[s
 			}
 		}
 		key, acc := a.remoteAccount(ctx, pool, c.name, c.cfg, s.AccountKey)
+		if s.AccountKey != "" && key != s.AccountKey {
+			// The host stopped holding the selected account since the plan:
+			// admission and the delegated spawn must judge the same one.
+			return candResult{rc: exitAuthUnavailable, note: "different_account", quotaRefused: true}
+		}
 		j, err := a.judgeHost(ctx, qr, pool, c.name, false, key, acc)
 		c.judgment = &j
 		if err != nil {

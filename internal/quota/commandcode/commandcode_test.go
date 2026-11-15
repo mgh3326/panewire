@@ -195,6 +195,28 @@ func TestUnknownShapeFailsClosed(t *testing.T) {
 	}
 }
 
+// A recognized window whose amount cannot be read is an unknown shape, not a
+// partial reading: an exhausted week with a changed amount beside a valid 5h
+// must not publish a 5h-only account.
+func TestUnreadableRecognizedWindowFailsClosed(t *testing.T) {
+	window := func(id, duration, amount string) string {
+		return fmt.Sprintf(`{"id":"commandcode:%s","scope":{"accountId":"user_fixture_a"},"window":{"durationMs":%s,"resetsAt":1794927278537},"amount":%s,"status":"ok"}`, id, duration, amount)
+	}
+	five := window("5h", "18000000", `{"used":0.27,"limit":14,"usedFraction":0.019}`)
+	for name, week := range map[string]string{
+		"amount fields renamed": window("7d", "604800000", `{"spent":35,"cap":35}`),
+		"amount as strings":     window("7d", "604800000", `{"used":"35","limit":"35"}`),
+		"zero limit":            window("7d", "604800000", `{"used":1,"limit":0}`),
+		"negative fraction":     window("7d", "604800000", `{"usedFraction":-1}`),
+	} {
+		doc := fmt.Sprintf(`{"reports":[{"provider":"commandcode","fetchedAt":%d,"limits":[%s,%s]}]}`, fetchedA.UnixMilli(), five, week)
+		o := &omp{replies: [][]byte{[]byte(doc)}}
+		if accounts, err := Measure(t.Context(), config(o, fetchedA)); quota.KindOf(err) != quota.ErrKindParse {
+			t.Errorf("%s: accounts %v err %v, want parse_error and no partial reading", name, accounts, err)
+		}
+	}
+}
+
 func TestErrorsCarryNothingOfOmpsOutput(t *testing.T) {
 	secret := "sk-must-not-leak"
 	for name, o := range map[string]*omp{

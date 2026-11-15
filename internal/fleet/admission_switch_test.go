@@ -409,8 +409,8 @@ func TestCommandcodeNeedsItsFiveHourAndWeeklyWindowsAndNothingMonthly(t *testing
 	} {
 		in.Readings = map[string]admissionReading{"commandcode": {Buckets: windows}}
 		d := in.admit(request)
-		if d.OK && len(d.Missing) == 0 {
-			t.Fatalf("a commandcode reading without %s must not admit cleanly: %+v", missing, d)
+		if d.OK || d.Exit != gateUnmeasurable || d.Reason != "commandcode_required_window_missing:"+missing {
+			t.Fatalf("a commandcode reading without %s must be unmeasurable: %+v", missing, d)
 		}
 	}
 	// The exhausted weekly window still refuses; a 30d window is not needed and

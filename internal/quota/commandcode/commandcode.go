@@ -267,9 +267,9 @@ func parse(out []byte) ([]Account, error) {
 }
 
 // parseReport reads one account's limits: the 5-hour and weekly windows. The
-// credit balance and any other limit are not read. An account whose every
-// window is unusable (a pay-as-you-go account has only a balance) comes back
-// with no bucket; the caller leaves it out.
+// credit balance and any other limit are not read. A pay-as-you-go account has
+// only a balance, no window at all: it comes back with no bucket and the caller
+// leaves it out. A window that is present but unreadable is errShape.
 func parseReport(limits []ompLimit) (Account, error) {
 	var account Account
 	id := ""
@@ -306,8 +306,10 @@ func parseReport(limits []ompLimit) (Account, error) {
 		seen[window] = true
 		pct, ok := usedPct(limit)
 		if !ok {
-			// A malformed value never reads as an unused window.
-			continue
+			// A recognized window whose amount cannot be read is an output this
+			// package does not know: never a partial reading that would hide
+			// the window (an exhausted week beside a valid 5h).
+			return Account{}, errShape
 		}
 		bucket := quota.Bucket{Window: window, UsedPct: pct, Scope: quota.Scope{Kind: quota.ScopeAccount}}
 		if limit.Window.ResetsAt != nil {

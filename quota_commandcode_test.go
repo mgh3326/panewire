@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -166,6 +167,21 @@ func (s *accountStore) observation(t *testing.T, key string) (observation struct
 	return observation
 }
 
+// restamp makes every stored reading current as of at, as another host's refresh does.
+func (s *accountStore) restamp(t *testing.T, at time.Time) {
+	t.Helper()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for key, raw := range s.latest {
+		var o map[string]any
+		if err := json.Unmarshal(raw, &o); err != nil {
+			t.Fatal(err)
+		}
+		o["measured_at"] = at
+		s.latest[key], _ = json.Marshal(o)
+	}
+}
+
 func (s *accountStore) held(host string) []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -309,6 +325,40 @@ func TestCommandcodeAccountOmpNoLongerHoldsDoesNotHideTheOther(t *testing.T) {
 	readings, _, err := source.RefreshAccounts(t.Context())
 	if err != nil || len(readings) != 1 || readings[0].Key != commandcodeKeyA {
 		t.Fatalf("readings %+v err=%v, want only account A", readings, err)
+	}
+}
+
+// The account inventory is read from omp at least every MaxReportAge even when
+// another host keeps the shared readings current: a removed account is no longer
+// refreshed or announced, and a new one is found.
+func TestCommandcodeInventoryIsReadEvenWhileSharedReadingsAreCurrent(t *testing.T) {
+	store := newAccountStore(t)
+	omp := &ompFake{output: commandcodeFixture(t, "omp_usage_two_accounts.json")}
+	now := commandcodeFetched.Add(90 * time.Second)
+	source := commandcodeTestSourceAt(claudeStore(t, store.server.URL), omp, &now)
+	if _, _, err := source.RefreshAccounts(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	// Four minutes on, another host has re-stamped both shared readings as
+	// current, and omp now holds account A and a new account C, not B.
+	now = commandcodeFetched.Add(5 * time.Minute)
+	store.restamp(t, now.Add(-time.Second))
+	moved := bytes.ReplaceAll(omp.output, []byte("user_fixture_b"), []byte("user_fixture_c"))
+	moved = bytes.ReplaceAll(moved, []byte("1794696766070"), []byte(strconv.FormatInt(now.Add(-time.Second).UnixMilli(), 10)))
+	moved = bytes.ReplaceAll(moved, []byte("1794696736070"), []byte(strconv.FormatInt(now.Add(-2*time.Second).UnixMilli(), 10)))
+	omp.output = moved
+	before := omp.readCount()
+	readings, _, err := source.RefreshAccounts(t.Context())
+	if err != nil || omp.readCount() == before {
+		t.Fatalf("err=%v reads %d->%d: the inventory must be read again", err, before, omp.readCount())
+	}
+	var keys []string
+	for _, r := range readings {
+		keys = append(keys, r.Key)
+	}
+	keyC := "commandcode:" + commandcode.Fingerprint("user_fixture_c")
+	if len(keys) != 2 || keys[0] != commandcodeKeyA && keys[1] != commandcodeKeyA || keys[0] != keyC && keys[1] != keyC {
+		t.Fatalf("keys %v, want account A and the new account C, not B", keys)
 	}
 }
 

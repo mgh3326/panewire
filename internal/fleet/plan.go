@@ -207,6 +207,10 @@ func (a *App) planHosts(ctx context.Context, s Spawn, grade string) (*placePlan,
 			continue
 		}
 		key, acc := a.remoteAccount(ctx, pool, c.name, c.cfg, s.AccountKey)
+		if s.AccountKey != "" && key != s.AccountKey {
+			c.outcome = "different_account"
+			continue
+		}
 		j, err := a.judgeHost(ctx, qr, pool, c.name, false, key, acc)
 		c.judgment = &j
 		if err != nil {

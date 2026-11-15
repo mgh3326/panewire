@@ -433,14 +433,16 @@ func requiredWindows(pool, plan string, manual bool) []string {
 }
 
 // missingWindowRefusal names the refusal for required windows a reading
-// lacks, or "" when the pool admits without them. codex's low plans refuse on
-// any missing window.
+// lacks, or "" when the pool admits without them. codex's low plans and
+// commandcode refuse on any missing window (commandcode needs its 5h and 7d).
 func missingWindowRefusal(pool, plan string, missing []string) string {
 	switch {
 	case len(missing) == 0:
 		return ""
 	case pool == "codex" && slices.Contains([]string{"plus", "prolite", "free"}, plan):
 		return "codex_required_window_missing:" + strings.Join(missing, ",")
+	case pool == "commandcode":
+		return "commandcode_required_window_missing:" + strings.Join(missing, ",")
 	}
 	return ""
 }

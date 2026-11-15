@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/mgh3326/panewire/internal/fleet"
 	"github.com/mgh3326/panewire/internal/quota"
@@ -20,13 +21,26 @@ import (
 // `commandcode:<fp>`.
 
 // commandcodeState is what the pool remembers between refreshes: the account
-// fingerprints omp listed at its last good read, so a refresh whose shared
-// readings are all current asks omp nothing, and the failure reasons already
-// logged.
+// fingerprints omp listed at its last good read and when, and the failure
+// reasons already logged. The list is the host's inventory of accounts only while
+// it is younger than commandcode.MaxReportAge; an older one is read again before
+// any account is refreshed or announced, whatever the shared readings say.
 type commandcodeState struct {
-	mu     sync.Mutex
-	known  []string
-	warned map[string]bool
+	mu      sync.Mutex
+	known   []string
+	knownAt time.Time
+	warned  map[string]bool
+}
+
+// inventory is the accounts omp listed, or nil when that read is older than
+// MaxReportAge (or there was none): the caller must list again.
+func (st *commandcodeState) inventory(now time.Time) []string {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.knownAt.IsZero() || now.Sub(st.knownAt) > commandcode.MaxReportAge || now.Before(st.knownAt) {
+		return nil
+	}
+	return slices.Clone(st.known)
 }
 
 func (st *commandcodeState) knownFPs() []string {
@@ -48,7 +62,7 @@ func (s *nativeQuotaSource) measureCommandcode(ctx context.Context) ([]commandco
 	defer st.mu.Unlock()
 	if err != nil {
 		if quota.KindOf(err) == quota.ErrKindCredentials {
-			st.known = nil
+			st.known, st.knownAt = nil, time.Time{}
 		}
 		if s.Warn != nil && ctx.Err() == nil && quota.KindOf(err) != quota.ErrKindCredentials && !st.warned[err.Error()] {
 			if st.warned == nil {
@@ -60,6 +74,7 @@ func (s *nativeQuotaSource) measureCommandcode(ctx context.Context) ([]commandco
 		return nil, err
 	}
 	clear(st.warned)
+	st.knownAt = s.now()
 	st.known = st.known[:0]
 	for _, account := range accounts {
 		st.known = append(st.known, account.FP)
@@ -119,7 +134,10 @@ func (s *nativeQuotaSource) refreshCommandcode(ctx context.Context) ([]shared.Re
 		}
 		return accounts, listErr
 	}
-	fps := s.commandcodeState.knownFPs()
+	// The inventory is read from omp at least every MaxReportAge, independent of
+	// how current the shared readings are: another host keeping them current must
+	// not let a removed account stay announced or hide a new one.
+	fps := s.commandcodeState.inventory(s.now())
 	if len(fps) == 0 {
 		found, err := list(ctx)
 		if err != nil {
