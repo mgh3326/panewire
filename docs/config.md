@@ -517,9 +517,15 @@ suppresses the examination for the current attempt. Each examination records
 bounded, redacted screen and herdr state excerpts in hk. A recognised quota stop uses
 the role's quota-stop path; otherwise the owner receives one blocked event
 with the last screen lines. A later return to work starts a new interval.
-The net uses the existing active-job window (`PANEWIRE_JOB_ACTIVE_MAX_AGE`,
-default `72h`); older jobs are excluded. Checking older jobs against hk is
-tracked in hk 4836.
+A job whose claim is older than the active-job window
+(`PANEWIRE_JOB_ACTIVE_MAX_AGE`, default `72h`) is examined only after hk
+confirms it is still the job on that pane: the hk job record is not terminal,
+its task (if any) is developing or reviewing, and the record and the pane's
+live harness session match the job's own `job.spawned` receipt. A mismatch, an
+unreadable hk, or a job whose receipt records no usable harness session leaves
+the pane unexamined, with one warning per job, so a stale local journal on a
+reused pane is never revived. hk job reads are capped per scan pass and a
+verdict is cached per job for the examination interval.
 
 Automatic selection measures an account the same way with or without
 `--host NAME` or `--exclude-host`: a stale shared reading is refreshed on any

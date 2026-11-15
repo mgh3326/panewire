@@ -94,6 +94,18 @@ func (a *App) jobStore() (JobStore, error) {
 	return a.JobStore, nil
 }
 
+// ReadJobRecord reads one hk job record over the shared svc-panewire
+// credential. It is the node daemon's read path for a record whose local
+// journal is older than the active window: stall safety asks hk whether such a
+// job still runs before it examines the pane (hk 4836).
+func ReadJobRecord(ctx context.Context, job string) (map[string]any, error) {
+	store, err := (&App{Now: time.Now}).jobStore()
+	if err != nil {
+		return nil, err
+	}
+	return store.Get(ctx, job)
+}
+
 // NewJobStore returns the hk /v1/jobs client for an explicit handoffkeep
 // endpoint and bearer credential. It is how a node writes a job record with its
 // own credential (spawn.json handoffkeep_env) rather than the hub's.
