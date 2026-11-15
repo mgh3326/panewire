@@ -65,6 +65,9 @@ func newQuotaStopManager(s *Store, root string, act bool, logger *slog.Logger) (
 	if _, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS quota_blocked_wakes (event_id TEXT PRIMARY KEY, pane_id TEXT NOT NULL, workspace_id TEXT NOT NULL, label TEXT NOT NULL, state_change_seq INTEGER NOT NULL, changed_at INTEGER NOT NULL, due_at INTEGER NOT NULL, processed INTEGER NOT NULL DEFAULT 0)`); err != nil {
 		return nil, err
 	}
+	if _, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS quota_stall_wakes (event_id TEXT PRIMARY KEY, pane_id TEXT NOT NULL, state_change_seq INTEGER NOT NULL)`); err != nil {
+		return nil, err
+	}
 	if !storeHasColumn(s.db, "quota_stop_decisions", "action_retry") {
 		if _, err := s.db.Exec(`ALTER TABLE quota_stop_decisions ADD COLUMN action_retry INTEGER NOT NULL DEFAULT 0`); err != nil {
 			return nil, err
@@ -804,7 +807,7 @@ func (q *quotaStopManager) tick(ctx context.Context, now time.Time, advanceSettl
 			continue
 		}
 		q.store.mu.Lock()
-		result, e := q.store.db.ExecContext(ctx, `UPDATE quota_stop_decisions SET attempted=1 WHERE event_id=? AND attempted=0 AND NOT EXISTS (SELECT 1 FROM quota_stop_decisions d WHERE d.job=? AND d.attempted=1) AND EXISTS (SELECT 1 FROM idle_wake_candidates c JOIN idle_wake_panes p ON p.pane_id=c.pane_id AND p.state_change_seq=c.state_change_seq WHERE c.event_id=? AND p.agent_status IN ('idle','done'))`, r.id, r.job, r.id)
+		result, e := q.store.db.ExecContext(ctx, `UPDATE quota_stop_decisions SET attempted=1 WHERE event_id=? AND attempted=0 AND NOT EXISTS (SELECT 1 FROM quota_stop_decisions d WHERE d.job=? AND d.attempted=1) AND (EXISTS (SELECT 1 FROM idle_wake_candidates c JOIN idle_wake_panes p ON p.pane_id=c.pane_id AND p.state_change_seq=c.state_change_seq WHERE c.event_id=? AND p.agent_status IN ('idle','done')) OR EXISTS (SELECT 1 FROM quota_stall_wakes c JOIN idle_wake_panes p ON p.pane_id=c.pane_id AND p.state_change_seq=c.state_change_seq WHERE c.event_id=? AND p.agent_status IN ('idle','done')))`, r.id, r.job, r.id, r.id)
 		q.store.mu.Unlock()
 		if e != nil {
 			q.backoffAction(ctx, r.id, now)

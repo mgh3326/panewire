@@ -510,6 +510,17 @@ restated here. `docs/quota-stop.md` has the mechanics.
 The owner gets one info lane event for either action. `--quota-stop-act` still
 gates every other role.
 
+The node also examines an active job after its pane has stayed outside the
+working state for `--stall-safety-limit` (default `30m`). A foreground
+command other than the agent or shell resets that interval. A READY or ESC
+suppresses the examination for the current attempt. Each examination records
+bounded, redacted screen and herdr state excerpts in hk. A recognised quota stop uses
+the role's quota-stop path; otherwise the owner receives one blocked event
+with the last screen lines. A later return to work starts a new interval.
+The net uses the existing active-job window (`PANEWIRE_JOB_ACTIVE_MAX_AGE`,
+default `72h`); older jobs are excluded. Checking older jobs against hk is
+tracked in hk 4836.
+
 Automatic selection measures an account the same way with or without
 `--host NAME` or `--exclude-host`: a stale shared reading is refreshed on any
 holder of that account, the local machine first, and a host those flags keep

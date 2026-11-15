@@ -3,6 +3,7 @@ package fleet
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"slices"
 	"time"
@@ -320,6 +321,33 @@ func AnnounceQuotaStop(ctx context.Context, jobs, job, pane string, stop quotast
 // announceStartWatch starts the job's re-armed watcher; tests replace it.
 var announceStartWatch = func(a *App, job string) error { return a.startWatchMode(job, true) }
 
+// RecordReviewerQuotaIntent hands a safety-net observation to the reviewer's
+// existing durable close and watcher reconciliation path.
+func RecordReviewerQuotaIntent(ctx context.Context, jobs, job, pane, session string, stop quotastop.Stop) error {
+	home, _ := os.UserHomeDir()
+	a := &App{Jobs: jobs, Home: home, Now: time.Now, Runner: ExecRunner{}, HerdrSession: session}
+	j, err := a.job(job)
+	if err != nil {
+		return err
+	}
+	if j.Terminal || j.Reaped {
+		return nil
+	}
+	if j.Pane != pane || j.QuotaRole() != "reviewer" {
+		return fmt.Errorf("reviewer pane changed")
+	}
+	if err := a.recordQuotaIntent(ctx, j, stop); err != nil {
+		if errors.Is(err, errQuotaStopSuperseded) {
+			return nil
+		}
+		return err
+	}
+	if !a.watchActive(job) {
+		return announceStartWatch(a, job)
+	}
+	return nil
+}
+
 // announcedQuotaStop returns the quota stop a job.lost of this attempt
 // announced, if the job's newest end is one.
 func announcedQuotaStop(j Job) (quotastop.Stop, bool) {
@@ -506,6 +534,11 @@ func (a *App) recordQuotaIntent(ctx context.Context, j Job, stop quotastop.Stop)
 		return err
 	}
 	defer unlock()
+	if fresh, err := a.job(j.ID); err == nil {
+		if _, exists := pendingQuotaIntent(fresh); exists {
+			return nil
+		}
+	}
 	if ended, _ := a.endedByResultPosted(ctx, j.ID, false); ended {
 		return errQuotaStopSuperseded
 	}

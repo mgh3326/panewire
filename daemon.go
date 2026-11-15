@@ -28,6 +28,7 @@ type Config struct {
 	SocketPath, HerdrSocket, DBPath, InboxRoot string
 	StorePromptBody                            bool
 	IdleWakeSettle                             time.Duration
+	StallSafetyLimit                           time.Duration
 	QuotaStopAct                               bool
 	Logging                                    LoggingConfig
 	Hub                                        HubDaemonConfig
@@ -41,22 +42,24 @@ type LoggingConfig struct {
 	StorePromptBody bool
 }
 type Daemon struct {
-	cfg          Config
-	store        *Store
-	listener     net.Listener
-	cancel       context.CancelFunc
-	herdr        *HerdrClient
-	idleWake     *idleWakeManager
-	stall        *stallDetectManager
-	paneMeta     *paneMetadataPublisher
-	caps         GuardResult
-	eventDone    chan struct{}
-	idleDone     chan struct{}
-	hubDone      chan struct{}
-	stallDone    chan struct{}
-	paneMetaDone chan struct{}
-	resub        chan struct{}
-	subscribed   map[string]bool
+	cfg             Config
+	store           *Store
+	listener        net.Listener
+	cancel          context.CancelFunc
+	herdr           *HerdrClient
+	idleWake        *idleWakeManager
+	stall           *stallDetectManager
+	stallSafety     *stallSafetyManager
+	paneMeta        *paneMetadataPublisher
+	caps            GuardResult
+	eventDone       chan struct{}
+	idleDone        chan struct{}
+	hubDone         chan struct{}
+	stallDone       chan struct{}
+	stallSafetyDone chan struct{}
+	paneMetaDone    chan struct{}
+	resub           chan struct{}
+	subscribed      map[string]bool
 	// lifecycleResubMin and lifecycleSnapshotWait are the debounce floors for
 	// lifecycle-triggered stream cycles and idle-wake snapshots. Zero selects
 	// the defaults; tests shrink them.
@@ -132,6 +135,9 @@ func (d *Daemon) Start(ctx context.Context) error {
 			}
 			manager.quota.enqueue = manager.enqueue
 			d.idleWake = manager
+			if err := d.initStallSafety(); err != nil {
+				return err
+			}
 			d.cfg.Hub.Client.SetIdleWakeManager(manager)
 		}
 	}
@@ -237,6 +243,13 @@ func (d *Daemon) Start(ctx context.Context) error {
 		go func() {
 			defer close(d.stallDone)
 			d.stall.Run(runCtx)
+		}()
+	}
+	if d.stallSafety != nil {
+		d.stallSafetyDone = make(chan struct{})
+		go func() {
+			defer close(d.stallSafetyDone)
+			d.runStallSafety(runCtx)
 		}()
 	}
 	if d.paneMeta != nil {
@@ -397,6 +410,12 @@ func (d *Daemon) eventLoop(ctx context.Context) {
 				if d.idleWake != nil && ev.AgentStatus != "" && (ev.Kind == "pane.agent_status_changed" || ev.Kind == "pane_agent_status_changed") {
 					if err := d.idleWake.Observe(ctx, HerdrAgentState{PaneID: ev.PaneID, WorkspaceID: ev.WorkspaceID, Status: ev.AgentStatus, Revision: ev.Revision}, time.Now().UTC()); err != nil {
 						d.cfg.Logger.Warn("idle-wake observation rejected")
+					} else if ev.AgentStatus == "working" && d.stallSafety != nil {
+						if _, status, err := d.stallSafety.sequence(ctx, ev.PaneID); err == nil && status == "working" {
+							if err := d.stallSafety.state.markWorking(ctx, ev.PaneID); err != nil {
+								d.cfg.Logger.Warn("stall safety working state was not recorded", "error", err)
+							}
+						}
 					}
 				}
 				// output_matched is a wake signal only: the payload carries no
@@ -817,6 +836,10 @@ func (d *Daemon) Stop() error {
 	if d.stallDone != nil {
 		<-d.stallDone
 		d.stallDone = nil
+	}
+	if d.stallSafetyDone != nil {
+		<-d.stallSafetyDone
+		d.stallSafetyDone = nil
 	}
 	if d.paneMetaDone != nil {
 		<-d.paneMetaDone

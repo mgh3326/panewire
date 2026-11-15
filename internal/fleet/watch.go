@@ -604,6 +604,29 @@ func (a *App) workerSignalledEnd(j Job) bool {
 // or after since. Lane events carry no job id, so the pane that `panewire emit`
 // stamps is what ties an event to a job. An unreadable record is not a signal.
 func (a *App) paneEmittedMarker(pane string, since time.Time) bool {
+	return a.paneEmittedMatching(pane, since, laneTerminalMarker)
+}
+
+// StallAttemptState identifies the current attempt and reports its completion
+// or escalation using the watcher's lane-event rules.
+func (a *App) StallAttemptState(job string) (string, bool, error) {
+	j, err := a.job(job)
+	if err != nil {
+		return "", false, err
+	}
+	var since time.Time
+	var attempt string
+	for _, ev := range j.Events {
+		switch ev.Kind {
+		case "job.spawned", "job.reclaim", "job.reprompted", "job.decision_resumed":
+			since = ev.when
+			attempt = ev.name
+		}
+	}
+	return attempt, workerEscalated(j) || a.paneEmittedMatching(j.Pane, since, laneTerminalMarker) || a.paneEmittedMatching(j.Pane, since, laneDecisionMarker), nil
+}
+
+func (a *App) paneEmittedMatching(pane string, since time.Time, marker *regexp.Regexp) bool {
 	if pane == "" {
 		return false
 	}
@@ -628,7 +651,7 @@ func (a *App) paneEmittedMarker(pane string, since time.Time) bool {
 			Pane string `json:"pane_id"`
 			Text string `json:"text"`
 		}
-		if json.Unmarshal(body, &record) == nil && record.Kind == "lane.event" && record.Pane == pane && laneTerminalMarker.MatchString(record.Text) {
+		if json.Unmarshal(body, &record) == nil && record.Kind == "lane.event" && record.Pane == pane && marker.MatchString(record.Text) {
 			return true
 		}
 	}
