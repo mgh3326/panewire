@@ -531,7 +531,6 @@ func (s *TaskPaneSweeper) pass(ctx context.Context, a *App, ownerAge time.Durati
 		s.info("task pane sweep kept every pane", "reason", "herdr-unreadable")
 		return nil, nil
 	}
-	s.reportStalePanes(s.stalePanes(candidates, agents, now))
 	// The node ends its own reviewer and consult jobs that never ran `done`
 	// before their panes are judged (hk 4747). Such a job is not one of this
 	// pass's candidates — it is still live until the end above.
@@ -671,6 +670,14 @@ func (s *TaskPaneSweeper) pass(ctx context.Context, a *App, ownerAge time.Durati
 			swept = append(swept, closed_)
 		}
 	}
+	// The count is what the host still holds after this pass's closes: a pane
+	// closed here is not a pane the host is collecting, and reporting it would
+	// raise the hub's alarm over a pane that is already gone (hk 4904).
+	closedPanes := make(map[string]bool, len(swept))
+	for _, pane := range swept {
+		closedPanes[pane.Pane] = true
+	}
+	s.reportStalePanes(s.stalePanes(candidates, agents, now, closedPanes))
 	return swept, nil
 }
 
@@ -949,12 +956,22 @@ func paneOwnershipProof(j Job, agents []Agent) string {
 			}
 			return ""
 		}
-		if !paneSweepMatches(j, ag) || !slices.Contains(paneSweepIdleStatus, ag.Status) {
+		if !paneReapProof(j, ag) {
 			return "session_unrecorded"
 		}
 		return ""
 	}
 	return "pane_unlisted"
+}
+
+// paneReapProof reports that herdr's row proves the pane by the facts
+// `panewire reap` uses: the job's exact name, the job's tab, and a status that
+// is not working. It is stricter than paneSweepMatches, which accepts a
+// nameless row that sits in the job's worktree: with no recorded session the
+// name is the only identity the close has, and an unnamed shell in that
+// worktree is not the job's agent.
+func paneReapProof(j Job, ag Agent) bool {
+	return ag.Name == j.Label && (j.Tab == "" || ag.Tab == j.Tab) && slices.Contains(paneSweepIdleStatus, ag.Status)
 }
 
 // paneRecordedSession is the harness session id the job's newest spawn
@@ -1201,15 +1218,19 @@ const paneSweepMetricFile = "panewire_panes.prom"
 // environment sets this publishes the same body there at mode 0644.
 const paneSweepTextfileDirEnv = "FLEET_TEXTFILE_DIR"
 
-// stalePanes counts the panes this node still holds for jobs that ended at
-// least paneSweepStaleAge ago: the pass's own candidates — so a job the sweep
-// never closes is never counted, and the count can reach zero — whose pane
-// herdr lists under the job's name and shows not working. It is the number the
-// hub alarms on (hk 4904): a host collecting finished panes.
-func (s *TaskPaneSweeper) stalePanes(candidates []Job, agents []Agent, now time.Time) int {
+// stalePanes counts the panes this node still holds for jobs whose own record
+// ended at least paneSweepStaleAge ago: the pass's own candidates — so a job
+// the sweep never closes is never counted, and the count can reach zero — that
+// no row of this pass closed (closedPanes) and whose pane herdr lists under the
+// job's name and shows not working. The job's own end is paneSweepClosed, the
+// pass's end predicate: a terminal job that does not close it (a loss with no
+// quota hand-over, a job.joined) is judged by its live task and may be kept
+// legitimately, which must not latch the alarm. It is the number the hub alarms
+// on (hk 4904): a host collecting finished panes.
+func (s *TaskPaneSweeper) stalePanes(candidates []Job, agents []Agent, now time.Time, closedPanes map[string]bool) int {
 	count := 0
 	for _, j := range candidates {
-		if !j.Terminal || j.At.IsZero() || now.Sub(j.At) < paneSweepStaleAge {
+		if !paneSweepClosed(j) || j.At.IsZero() || now.Sub(j.At) < paneSweepStaleAge || closedPanes[j.Pane] {
 			continue
 		}
 		if s.idle(j, agents) {

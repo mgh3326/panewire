@@ -90,17 +90,22 @@ func TestEndedSweepClosesAPaneWhoseScreenHkRefuses(t *testing.T) {
 
 // A pass whose job ended more than a day ago and whose pane herdr still lists
 // not working reports the count the node sends the hub (hk 4904): the host is
-// collecting finished panes. A pane open inside its day is not stale.
+// collecting finished panes. The count is what the pass leaves open, and it
+// only covers jobs the pass's own end predicate closes.
 func TestEndedSweepReportsItsStaleOpenPanes(t *testing.T) {
+	// The pane is due and the pass closes it: nothing is left to report.
 	f := newPaneSweepFixture(t)
 	var reported []int
 	f.sweeper.EndedOpen = func(open int) { reported = append(reported, open) }
 	pane := f.job("r", "reviewer", "")
 	f.status[pane] = "done"
 	putEvent(t, f.a, "r", "job.completed", map[string]any{})
-	f.endedSweep(61, time.Hour)
+	f.endedSweep(1441, time.Hour)
+	if len(f.closed()) != 1 {
+		t.Fatalf("the due pane did not close: %v info=%v", f.closed(), f.info)
+	}
 	if len(reported) != 1 || reported[0] != 0 {
-		t.Fatalf("a pane open inside its day was reported stale: %v", reported)
+		t.Fatalf("a pane the pass closed was reported stale: %v", reported)
 	}
 
 	// hk away keeps the pane (its screen cannot be saved), so a day after the
@@ -115,5 +120,60 @@ func TestEndedSweepReportsItsStaleOpenPanes(t *testing.T) {
 	g.endedSweep(1441, time.Hour)
 	if len(stale) != 1 || stale[0] != 1 {
 		t.Fatalf("a pane open a day after its end was not reported stale: %v info=%v", stale, g.info)
+	}
+
+	// A terminal record the pass's end predicate rejects — an implementer loss
+	// with no quota hand-over — is judged by its live task and kept on purpose.
+	// It is not a stale pane, however long its pane stays.
+	h := newPaneSweepFixture(t)
+	var waiting []int
+	h.sweeper.EndedOpen = func(open int) { waiting = append(waiting, open) }
+	wp := h.job("w", "implementer", "42")
+	h.status[wp] = "done"
+	putEvent(t, h.a, "w", "job.lost", map[string]any{})
+	h.tasks["42"] = "developing"
+	h.endedSweep(1441, time.Hour)
+	if len(waiting) != 1 || waiting[0] != 0 {
+		t.Fatalf("a job the sweep does not end was reported stale: %v info=%v", waiting, h.info)
+	}
+}
+
+// hk answering an error about the moment — here a 500 — may succeed on the next
+// pass, so it keeps the pane; only the secret guard's refusal is permanent.
+func TestEndedSweepKeepsAPaneWhenHkFailsTheScreenUpload(t *testing.T) {
+	f := newPaneSweepFixture(t)
+	f.job("r", "reviewer", "")
+	putEvent(t, f.a, "r", "job.completed", map[string]any{})
+	f.hk.Handle(func(request hkRequest) (int, string, bool) {
+		if request.Method == http.MethodPut && strings.HasPrefix(request.Path, "/v1/documents/") {
+			return http.StatusInternalServerError, `{"error":"internal_error"}`, true
+		}
+		return 0, "", false
+	})
+	if closes := f.endedSweep(61, time.Hour); len(closes) != 0 || len(f.closed()) != 0 {
+		t.Fatalf("a transient hk failure closed the pane: %+v closed=%v", closes, f.closed())
+	}
+	if !f.infoHas("task pane kept", "job=r", "reason=screen_save_failed") {
+		t.Fatalf("info lines = %q", f.info)
+	}
+}
+
+// With no recorded session the row's name is the only identity the close has: an
+// unnamed pane that sits in the job's worktree is not the job's agent, so the
+// fallback refuses it, as panewire reap does.
+func TestEndedSweepKeepsANamelessPaneInTheJobsWorktree(t *testing.T) {
+	f := newPaneSweepFixture(t)
+	cwd := t.TempDir()
+	pane := f.job("r", "reviewer", "", map[string]any{
+		"cwd":             cwd,
+		"harness_session": map[string]any{"kind": "cmd", "id": "unknown", "source": "unavailable"},
+	})
+	f.names[pane], f.cwds[pane] = "", cwd
+	putEvent(t, f.a, "r", "job.completed", map[string]any{})
+	if closes := f.endedSweep(61, time.Hour); len(closes) != 0 || len(f.closed()) != 0 {
+		t.Fatalf("a nameless pane in the job's worktree was closed: %+v closed=%v", closes, f.closed())
+	}
+	if !f.infoHas("task pane kept", "job=r", "reason=session_unrecorded") {
+		t.Fatalf("info lines = %q", f.info)
 	}
 }

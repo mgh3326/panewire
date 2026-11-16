@@ -40,32 +40,41 @@ func UploadPaneScreen(ctx context.Context, job, task string, screen []byte) (str
 	return key, nil
 }
 
+// paneScreenSecretCode is hk's secret guard refusal. It is the one refusal that
+// is a property of these bytes; every other hk error code is a property of the
+// moment (a 5xx, a rejected credential, a Cloudflare login redirect), and the
+// same PUT can succeed on a later pass.
+const paneScreenSecretCode = "secret_like_content"
+
 // paneScreenUploadError names why an upload failed without hk's endpoint, the
 // credential file's path or the screen's text: hk's error code when hk
-// refused it (secret_like_content for a guard refusal), else unconfigured, or
-// unreachable for a transport failure or an answer hk's client could not
-// read.
+// answered with an error, else unconfigured, or unreachable for a transport
+// failure or an answer hk's client could not read. Only the secret guard's
+// refusal is typed as permanent (paneScreenRefusal); every other code reads
+// "hk refused the screen document" and keeps the caller's retry.
 func paneScreenUploadError(err error) error {
 	var unconfigured *hkcred.UnconfiguredError
 	switch code := client.ErrorCode(err); {
-	case code != "":
+	case code == paneScreenSecretCode:
 		return paneScreenRefusal{code: code}
+	case code != "":
+		return fmt.Errorf("hk refused the screen document: %s", code)
 	case errors.As(err, &unconfigured):
 		return errors.New("hk is not configured on this node")
 	}
 	return errors.New("hk unreachable or its answer unreadable")
 }
 
-// paneScreenRefusal is hk refusing this document: the same bytes fail on every
-// pass, so a caller must not wait for a later one to succeed.
+// paneScreenRefusal is hk refusing this document for its bytes: the same PUT
+// fails on every pass, so a caller must not wait for a later one to succeed.
 type paneScreenRefusal struct{ code string }
 
 func (r paneScreenRefusal) Error() string { return "hk refused the screen document: " + r.code }
 
 // paneScreenRefused reports that hk refused the screen document itself — its
-// secret guard, a body it cannot store — rather than being unconfigured or
-// away. A refusal is permanent for these bytes: the sweep keeps the screen
-// locally and closes the pane (hk 4904).
+// secret guard — rather than being unconfigured, away, or answering an error
+// about the moment. A refusal is permanent for these bytes: the sweep keeps
+// the screen locally and closes the pane (hk 4904).
 func paneScreenRefused(err error) bool {
 	var refusal paneScreenRefusal
 	return errors.As(err, &refusal)
