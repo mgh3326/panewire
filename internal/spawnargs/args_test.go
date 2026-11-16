@@ -88,3 +88,32 @@ func TestGradeSSSpawnArgs(t *testing.T) {
 		}
 	}
 }
+
+// The planned consult's stamp travels as base64url JSON: operator-only,
+// bounded and charset-checked before the node sees the spawn (hk 4875).
+func TestConsultStampArgRule(t *testing.T) {
+	stamp := "eyJhc2tlcl9mYW1pbHkiOiJhbnRocm9waWMiLCJhc2tlcl9ncmFkZSI6IkEiLCJmYWxsYmFjayI6IiIsImZsb29yIjoiQSsiLCJncmFkZV9zb3VyY2UiOiJmbGFnIiwidXNlZF9mbG9vciI6IkErIn0"
+	for name, tc := range map[string]struct {
+		args     []string
+		operator bool
+		want     string
+	}{
+		"accepted":       {[]string{"--role", "consult", "-m", "codex-sol", "--consult-stamp", stamp}, true, ""},
+		"needs operator": {[]string{"--role", "implementer", "--consult-stamp", "eyJh_"}, false, "--consult-stamp is not a flag the node accepts"},
+		"shape":          {[]string{"--role", "consult", "--consult-stamp", "eyJh\"b"}, true, "--consult-stamp value must be base64url of the stamp object"},
+		"too long":       {[]string{"--role", "consult", "--consult-stamp", strings.Repeat("a", 321)}, true, "--consult-stamp value is longer than 320 bytes"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got := Refusal(tc.args, tc.operator)
+			if tc.want == "" {
+				if got != "" {
+					t.Fatalf("Refusal(%q)=%q, want acceptance", tc.args, got)
+				}
+				return
+			}
+			if !strings.Contains(got, tc.want) {
+				t.Fatalf("Refusal(%q)=%q, want it to name %q", tc.args, got, tc.want)
+			}
+		})
+	}
+}

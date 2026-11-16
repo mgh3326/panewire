@@ -1132,6 +1132,11 @@ func (t *directSpawnTransport) Spawn(ctx context.Context, req fleet.HubSpawnRequ
 	if oldNode {
 		return fleet.HubSpawnReply{}, &fleet.HubError{Kind: "hub_spawn_capability_required"}
 	}
+	// The planned consult's stamp is an extra: a node that predates it refuses
+	// the unknown flag and drops the whole spawn, so it goes without (hk 4875).
+	if record == nil || !record.capabilities[hubCapabilityConsultStamp] {
+		req.Args = withoutSpawnFlag(req.Args, fleet.ConsultStampArg)
+	}
 	raw, err := json.Marshal(req)
 	if err != nil {
 		return fleet.HubSpawnReply{}, err
@@ -1337,6 +1342,13 @@ func (t *directSpawnTransport) dispatch(ctx context.Context, node hubSpawnReques
 	// The request's absolute expiry goes only to a node that reads it (hk
 	// 4747): an older node's strict frame decoder refuses the unknown field.
 	expiresMS := spawnExpiryField(record.capabilities, current.Expires)
+	// The binding was filtered for the node's capability when it was made, but a
+	// node may reconnect with a build that no longer accepts the stamp before the
+	// first send. Its argument rule would drop an unknown flag whole, so the send
+	// applies the same filter again (hk 4875).
+	if !record.capabilities[hubCapabilityConsultStamp] {
+		node.Args = withoutSpawnFlag(node.Args, fleet.ConsultStampArg)
+	}
 	entry := &hubSpawnRecord{request: node, status: "pending", created: h.now(), waiter: make(chan hubSpawnResult, 1)}
 	h.spawnRecords[node.RequestID] = entry
 	h.mu.Unlock()

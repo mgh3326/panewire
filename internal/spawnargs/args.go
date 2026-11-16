@@ -35,6 +35,8 @@ var (
 	gradePattern         = regexp.MustCompile(`^(` + strings.Join(quotedGrades(), `|`) + `)$`)
 	docKeyPattern        = regexp.MustCompile(`^[A-Za-z0-9._/-]+$`)
 	jobIDPattern         = regexp.MustCompile(`^[A-Za-z0-9._-]{1,128}$`)
+	// consultStampPattern is a base64url object: the planned consult's stamp.
+	consultStampPattern = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
 )
 
 func quotedGrades() []string {
@@ -52,7 +54,7 @@ func gradeDescription() string {
 
 var baseFlags = []string{"-m", "-w", "-l", "--t", "--effort", "--e6-arm", "--job", "--owner", "--report", "--report-relative", "--role", "--lane", "--parent", "-L", "--task", "--parent-job", "--tags", "--urgency", "--author-family", "--builder-job", "--review-pass"}
 
-var operatorFlags = []string{"-c", "-p", "--host", "--exclude-host", "--exclude-pool", "--grade", "--override-reason", "--containment", "--operator-request", "--requested-by", "--purpose"}
+var operatorFlags = []string{"-c", "-p", "--host", "--exclude-host", "--exclude-pool", "--grade", "--override-reason", "--containment", "--operator-request", "--requested-by", "--purpose", "--consult-stamp"}
 
 var operatorBooleans = []string{"--keep", "--job-dup-ok", "--task-hk-bypass", "--allow-escalation"}
 
@@ -105,6 +107,11 @@ func valueRefusal(flag, value string, operator bool) string {
 	if path {
 		maxBytes = MaxPathBytes
 	}
+	// The planned consult's stamp is a base64url JSON object: longer than an
+	// ordinary name, and a charset of its own (hk 4875).
+	if operator && flag == "--consult-stamp" {
+		maxBytes = 320
+	}
 	if len(value) > maxBytes {
 		return fmt.Sprintf("%s value is longer than %d bytes", flag, maxBytes)
 	}
@@ -133,6 +140,10 @@ func valueRefusal(flag, value string, operator bool) string {
 	case "--exclude-host", "--exclude-pool":
 		if !excludedHostsPattern.MatchString(value) {
 			return fmt.Sprintf("%s value must be comma-separated values of %s", flag, valueCharset)
+		}
+	case "--consult-stamp":
+		if !consultStampPattern.MatchString(value) {
+			return "--consult-stamp value must be base64url of the stamp object"
 		}
 	default:
 		if !ValuePattern.MatchString(value) {

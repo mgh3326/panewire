@@ -250,6 +250,12 @@ func ladderNoCandidate(err error) bool {
 // SeatChoice is one resolved seat: the profile and effort to pin.
 type SeatChoice struct {
 	Profile, Effort, Pool, Family, ModelID, Grade, Seat string
+	// Consult is the consult stamp the selection wrote for this seat: the
+	// asker's grade and family, the grade source, the floor asked and used, and
+	// the fallback taken. Empty for a non-consult routing role. A planner pins
+	// the seat, so it carries this stamp to the job's selection record instead
+	// of selecting again there (hk 4875).
+	Consult map[string]any
 }
 
 func (c SeatChoice) pick() LadderPick {
@@ -316,7 +322,11 @@ func (a *App) pickSeat(ctx context.Context, routingRole, grade, gradeSource, lan
 	if effort == "" {
 		effort = c.seat.Effort
 	}
-	return SeatChoice{Profile: c.seat.Canon, Effort: effort, Pool: c.row.Pool, Family: c.seat.Family, ModelID: c.row.ModelID, Grade: c.row.Grade, Seat: c.seatName}, nil
+	consult := map[string]any(nil)
+	if sel.req.route.role == "consult" {
+		consult = sel.consultStamp()
+	}
+	return SeatChoice{Profile: c.seat.Canon, Effort: effort, Pool: c.row.Pool, Family: c.seat.Family, ModelID: c.row.ModelID, Grade: c.row.Grade, Seat: c.seatName, Consult: consult}, nil
 }
 
 // TaskMarker reads a task's (grade X, Tn) title marker over handoffkeep.
