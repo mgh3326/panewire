@@ -75,3 +75,60 @@ func TestHubCloseWatchersReadyFailsClosedOnAScanError_t4652(t *testing.T) {
 		t.Fatalf("ready=%v err=%v, want not ready with an error", got, err)
 	}
 }
+
+// #572 r4575956172, r4575962305: a launcher that can start a watcher later
+// must carry this binary's launcher token; an older one never writes it.
+func TestHubCloseWatchersReadyChecksLaunchers_t4632(t *testing.T) {
+	jobs := t.TempDir()
+	if e := os.MkdirAll(filepath.Join(jobs, launcherCapsDir), 0o700); e != nil {
+		t.Fatal(e)
+	}
+	if e := os.WriteFile(filepath.Join(jobs, launcherCapsDir, "606"), []byte(LauncherCapsToken+"\n"), 0o600); e != nil {
+		t.Fatal(e)
+	}
+	for name, test := range map[string]struct {
+		ps   string
+		want bool
+	}{
+		"aware launcher":          {"  606 /usr/local/bin/panewire spawn -p b\n", true},
+		"older spawn":             {"  707 /old/panewire spawn -p b\n", false},
+		"older work":              {"  708 panewire work 12\n", false},
+		"older remote stdin":      {"  709 panewire _spawn-stdin\n", false},
+		"non-launcher subcommand": {"  710 /old/panewire emit --kind x\n", true},
+		"spawn word elsewhere":    {"  711 vim spawn notes\n", true},
+	} {
+		got, err := HubCloseWatchersReady(context.Background(), jobs, listing(test.ps))
+		if err != nil || got != test.want {
+			t.Errorf("%s: ready=%v err=%v, want %v", name, got, err, test.want)
+		}
+	}
+}
+
+// A launcher of this binary writes its token while it runs and removes it.
+func TestLauncherRecordsItsCapabilityToken_t4632(t *testing.T) {
+	a := &App{Jobs: t.TempDir()}
+	path := filepath.Join(a.Jobs, launcherCapsDir, strconv.Itoa(os.Getpid()))
+	remove := a.recordLauncherCaps()
+	if b, e := os.ReadFile(path); e != nil || string(b) != LauncherCapsToken+"\n" {
+		t.Fatalf("token %q, %v", b, e)
+	}
+	remove()
+	if _, e := os.Stat(path); !os.IsNotExist(e) {
+		t.Fatalf("token left: %v", e)
+	}
+}
+
+// The barrier is not ready without its record, even with no older process.
+func TestCloseOpsReadyNeedsTheBarrier_t4632(t *testing.T) {
+	jobs := t.TempDir()
+	clean := listing("  1 /sbin/init\n")
+	if CloseOpsReady(context.Background(), jobs, clean) {
+		t.Fatal("ready without the barrier record")
+	}
+	if e := EnableCloseOps(context.Background(), jobs, listing("  9 /old/panewire _watch "+filepath.Base(t.TempDir())+"\n"), time.Now()); e != nil {
+		t.Fatalf("a watcher of another root blocked the barrier: %v", e)
+	}
+	if !CloseOpsReady(context.Background(), jobs, clean) {
+		t.Fatal("not ready after the barrier")
+	}
+}

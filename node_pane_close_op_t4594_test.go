@@ -55,17 +55,19 @@ func closeOpNode(t *testing.T, inbox string, fake *nodeFakeHerdr) *HubClient {
 // reaches the developer's arbiter state or starts a process. The end lock is
 // the real one.
 type fakeHubClose struct {
-	watcher fleet.HubCloseWatcher
-	intents []fleet.HubCloseIntent
-	cancels []string
-	settled []string
-	state   fleet.HubCloseState
-	record  func(job string, in fleet.HubCloseIntent) error
+	watcher  fleet.HubCloseWatcher
+	notReady bool
+	intents  []fleet.HubCloseIntent
+	cancels  []string
+	settled  []string
+	state    fleet.HubCloseState
+	record   func(job string, in fleet.HubCloseIntent) error
 }
 
 func (f *fakeHubClose) LockEnd(ctx context.Context, dir string) (func(), error) {
 	return fleet.LockJobEndContext(ctx, dir)
 }
+func (f *fakeHubClose) CloseOpsReady(context.Context) bool { return !f.notReady }
 func (f *fakeHubClose) Watcher(string) (fleet.HubCloseWatcher, error) {
 	return f.watcher, nil
 }
@@ -897,9 +899,9 @@ func TestCloseOpReleaseFencesAnUnregisteredRequest_t4652(t *testing.T) {
 	}
 }
 
-// No hello advertises close_ops_v1: no hub may issue a close op to any node
-// until the activation prerequisite (an owned launch boundary) lands.
-func TestNoHelloAdvertisesCloseOps_t4652(t *testing.T) {
+// close_ops_v1 is not one of the capabilities every hello carries: it is
+// added only while the node is ready (node_close_ops_t4632_test.go).
+func TestBaseHelloOmitsCloseOps_t4652(t *testing.T) {
 	if slices.Contains(hubSpawnCapabilities, hubCapabilityCloseOps) {
 		t.Fatalf("hello capabilities %v advertise %s", hubSpawnCapabilities, hubCapabilityCloseOps)
 	}

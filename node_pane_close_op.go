@@ -6,16 +6,44 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"time"
 
 	"github.com/mgh3326/panewire/internal/fleet"
 )
 
-// hubCapabilityCloseOps names the close operations in hello. It is not
-// advertised (hk 4652): enabling it, with the migration barrier that no
-// old-binary panewire process is left on the host
-// (fleet.HubCloseWatchersReady is its live-watcher half), is hk 4761.
+// hubCapabilityCloseOps names the close operations in hello. A node
+// advertises it only while fleet.CloseOpsReady holds (hk 4632): the migration
+// barrier `panewire node close-ops enable` was recorded under the jobs root,
+// and no older-binary watcher or launcher runs. The node re-checks on every
+// hello and while connected, and registers again when the answer changes
+// (closeOpsRecheckInterval).
 const hubCapabilityCloseOps = "close_ops_v1"
+
+// closeOpsRecheckInterval paces the connected node's re-check of close-op
+// readiness (a process listing); a change sends a fresh hello.
+const closeOpsRecheckInterval = 30 * time.Second
+
+// closeOpsReady reports whether this node may advertise and admit close ops
+// now. A node without a jobs root (and no fixture ledger) never may.
+func (client *HubClient) closeOpsReady(ctx context.Context) bool {
+	if client.nodeHubClose == nil && client.jobsInboxRoot == "" {
+		return false
+	}
+	return client.hubCloseLedger().CloseOpsReady(ctx)
+}
+
+// spawnHelloCapabilities is hubSpawnCapabilities plus close_ops_v1 when the
+// node is ready for it, read fresh; it records what it decided so the
+// connected re-check can tell a change.
+func (client *HubClient) spawnHelloCapabilities(ctx context.Context) []string {
+	ready := client.closeOpsReady(ctx)
+	client.closeOpsAdvertised.Store(ready)
+	if !ready {
+		return hubSpawnCapabilities
+	}
+	return append(slices.Clone(hubSpawnCapabilities), hubCapabilityCloseOps)
+}
 
 // Close operations (hk 4594; docs/node-commands.md, "Close operations") are
 // pane.close with a hub-chosen request id and a durable journal in the job's
@@ -383,7 +411,7 @@ func (client *HubClient) bindCloseOpLocked(ctx context.Context, job *os.Root, jo
 	case resuming:
 		// A resumed operation closes only while no older-binary watcher,
 		// which would not defer, runs for the job.
-		if code := client.admitHubCloseWatcher(args.Job, jobDir); code != "" {
+		if code := client.admitHubCloseWatcher(ctx, jobDir); code != "" {
 			return op, nil, "", code
 		}
 		return op, &target, "", ""
@@ -399,7 +427,7 @@ func (client *HubClient) bindCloseOpLocked(ctx context.Context, job *os.Root, jo
 	}
 	// A watcher of an older binary would not defer to the intent. No
 	// watcher at all is fine: the node itself settles the close.
-	if code := client.admitHubCloseWatcher(args.Job, jobDir); code != "" {
+	if code := client.admitHubCloseWatcher(ctx, jobDir); code != "" {
 		return op, nil, "", code
 	}
 	// The intent precedes the registration: a crash between the two leaves
@@ -424,6 +452,9 @@ type nodeHubCloseLedger interface {
 	// holds the node's acting lock past its own deadline.
 	LockEnd(ctx context.Context, jobDir string) (func(), error)
 	Watcher(jobDir string) (fleet.HubCloseWatcher, error)
+	// CloseOpsReady is the node-wide precondition: the migration barrier
+	// was recorded and no older watcher or launcher runs (fleet.CloseOpsReady).
+	CloseOpsReady(ctx context.Context) bool
 	RecordIntent(ctx context.Context, job string, in fleet.HubCloseIntent) error
 	// CancelIntent closes the intent of a request the hub released before
 	// the node registered it.
@@ -443,6 +474,10 @@ type nodeFleetHubClose struct {
 func (l nodeFleetHubClose) LockEnd(ctx context.Context, jobDir string) (func(), error) {
 	return fleet.LockJobEndContext(ctx, jobDir)
 }
+func (l nodeFleetHubClose) CloseOpsReady(ctx context.Context) bool {
+	return fleet.CloseOpsReady(ctx, l.jobs, nil)
+}
+
 func (l nodeFleetHubClose) Watcher(jobDir string) (fleet.HubCloseWatcher, error) {
 	return fleet.ProbeHubCloseWatcher(jobDir)
 }
@@ -482,11 +517,15 @@ func (client *HubClient) hubCloseLedger() nodeHubCloseLedger {
 	return nodeFleetHubClose{jobs: filepath.Join(client.jobsInboxRoot, "jobs"), client: client}
 }
 
-// admitHubCloseWatcher refuses a close while the job's watcher is one that
-// does not defer: it holds the watch lock but not the hub-close lock. The
-// node-wide precondition is close_ops_v1 itself, which is not advertised
-// until hk 4761's migration barrier.
-func (client *HubClient) admitHubCloseWatcher(_ string, jobDir string) string {
+// admitHubCloseWatcher refuses a close while the node is not ready for
+// close ops (close_ops_not_ready: the barrier is not recorded, or an older
+// watcher or launcher started since the hello), or while the job's watcher
+// is one that does not defer: it holds the watch lock but not the hub-close
+// lock. Both are "not closed, retry later".
+func (client *HubClient) admitHubCloseWatcher(ctx context.Context, jobDir string) string {
+	if !client.closeOpsReady(ctx) {
+		return "close_ops_not_ready"
+	}
 	watcher, err := client.hubCloseLedger().Watcher(jobDir)
 	switch {
 	case err != nil:
